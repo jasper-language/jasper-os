@@ -1,0 +1,37 @@
+# jasper-os cargo configuration (verified by scripts/accept.sh)
+#
+# Target triple: x86_64-unknown-none
+#
+# We deliberately do NOT set `[build] target = "x86_64-unknown-none"` globally:
+# doing so would force the host-side `xtask` binary (which must run on
+# aarch64-apple-darwin) to also be built for x86_64-unknown-none and fail.
+# Instead the kernel is built with an explicit `--target x86_64-unknown-none`
+# (as in the original kernel spec).
+#
+# CARGO_TARGET_DIR is intentionally NOT set here. Per spec §3 it is exported by
+# rust/scripts/env.sh so all artifacts stay on the external disk. (scripts/ was
+# not part of this round's file list.)
+
+# NOTE (M1.1): the M1.0 draft had `[unstable] build-std = ["core", ...]` here.
+# That made cargo rebuild `core` for the *host* as well, which produced
+#   E0152: duplicate lang item in crate `core` (which `serde_core` depends on)
+# when building the host-side `xtask`. It is also unnecessary: the
+# `x86_64-unknown-none` target ships a precompiled `core`, and the verified
+# early prototype built its kernel with no build-std at all. So it is removed.
+# (bootloader 0.11's BIOS stage uses -Zbuild-std internally, driven by its own
+# build script; that does not depend on this workspace setting. `rust-src`
+# stays a toolchain component for that reason.)
+
+# NOTE (M1.1): the M1.0 draft passed `-C link-arg=-Tkernel/linker.ld` here.
+# On the bootloader 0.11.17 route that made QEMU die in the 4th stage with
+#   ERROR: panicked at bootloader-x86_64-common-0.11.17/src/lib.rs:209:
+#   no entry point: "map_to failed"
+# because kernel/linker.ld pins the load address at 0x100000000000, which
+# conflicts with the bootloader's own virtual_address_offset. The verified
+# early prototype used NO custom linker script. The link-arg is therefore removed;
+# the old custom linker script has been deleted.
+#
+# [target.x86_64-unknown-none]
+# rustflags = [
+#     "-C", "link-arg=-Tkernel/linker.ld",
+# ]

@@ -1,0 +1,18 @@
+# kernel-core —— jasper-os 的「纯机制」库（M1.5）。
+#
+# 职责：对象/权限/句柄表、等待、异步 ring 形状的 I/O、地址空间记账、模块装配、
+# 陷入分发、结构化追踪、自旋锁。只含类型与逻辑，不碰任何硬件。
+# 为什么单独成 crate：`no_std` 且无 ISA 依赖 ⇒ 可以在宿主上 `cargo test -p kernel-core`，
+# 机制的正确性用单元测试锁死；内核（kernel/）只负责把它接到真实硬件上运行。
+# 刻意零依赖：机制层不应被第三方 crate 的 feature/版本牵着走。
+[package]
+name = "kernel-core"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+name = "kernel_core"
+path = "src/lib.rs"
+
+[dependencies]

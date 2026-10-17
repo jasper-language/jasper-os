@@ -1,0 +1,6 @@
+target/
+images/
+evidence/
+.idea/
+*.iml
+.DS_Store

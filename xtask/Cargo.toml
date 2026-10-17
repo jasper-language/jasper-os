@@ -1,0 +1,12 @@
+# xtask (host-side image builder; mirrors the verified early prototype).
+# Package/binary name is `xtask` so the acceptance commands
+# `cargo build -p xtask` and `./target/release/xtask` work verbatim
+# (the M1.0 draft had named it `jasper-xtask`).
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+bootloader = "0.11.17"

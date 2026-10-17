@@ -1,0 +1,6 @@
+# jasper-os kernel toolchain (nightly; verified by scripts/accept.sh)
+# Mirrors the verified early prototype toolchain.
+[toolchain]
+channel = "nightly"
+targets = ["x86_64-unknown-none"]
+components = ["llvm-tools-preview", "rust-src"]

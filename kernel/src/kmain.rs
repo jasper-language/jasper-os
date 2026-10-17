@@ -1,0 +1,77 @@
+//! 架构无关的内核主流程：引导适配层（`main.rs`）完成平台入口后调用 [`start`]。
+//!
+//! 只通过 `arch::*` 使用硬件；换 ISA 时本文件不改。
+//! 当前流程即 M1.1–M1.5 的验收序列：横幅 → 异常验证 → 时钟中断 → 协作式调度 → 抢占式调度 →
+//! 机制演练（kernel-core）→ 物理页帧分配（M2.1）→ 退出。
+
+use crate::arch::{self, ExitStatus};
+use crate::boot::BootSpec;
+use crate::{clock, irq, kprintln, mech_demo, mm, sched, user_demo};
+
+/// 内核版本（横幅中输出）。
+pub const VERSION: &str = "0.0.1";
+/// 定时器频率。
+const TIMER_HZ: u32 = 100;
+/// M1.2 验收要求至少看到的 tick 数（留余量）。
+const BOOT_TICKS: u64 = 25;
+/// 等 tick 的兜底次数：定时器没配好时必须报错退出，而不是永远睡下去。
+const MAX_WAITS: u64 = 20_000_000;
+
+/// 内核主流程（永不返回）。`boot` 是引导适配层转换好的交接信息。
+pub fn start(boot: &'static BootSpec) -> ! {
+    arch::console_init();
+    kprintln!("[JSR-BOOT] jasper-os rust kernel {} {}", VERSION, arch::NAME);
+    arch::early_init();
+
+    // 证明异常处理已接通。
+    arch::debug_breakpoint();
+
+    // M1.2：中断控制器 + 定时器，开中断后等到足够多的 tick。
+    arch::irq_init(TIMER_HZ);
+    arch::irq_enable();
+    let mut waits: u64 = 0;
+    while clock::ticks() < BOOT_TICKS {
+        arch::wait_for_interrupt();
+        irq::poll_and_handle();
+        waits += 1;
+        if waits > MAX_WAITS {
+            kprintln!("[JSR-TICK-TIMEOUT] n={}", clock::ticks());
+            arch::exit_emulator(ExitStatus::Failure);
+        }
+    }
+    // 收尾关中断，保证随后的协作式演示输出可复现。
+    arch::irq_disable();
+
+    // M1.3：协作式调度（关中断）。
+    sched::demo::run();
+
+    // M1.4：定时器抢占（需要开中断才能收到定时器中断）。
+    arch::irq_enable();
+    sched::demo::run_preemptive();
+    arch::irq_disable();
+
+    // M1.5：以内核任务演练 kernel-core 的全部机制（任务内自行开关中断）。
+    mech_demo::run();
+    if mech_demo::failed() > 0 {
+        kprintln!("[JSR-EXIT] failure mech_failed={}", mech_demo::failed());
+        arch::exit_emulator(ExitStatus::Failure);
+    }
+
+    // M2.1：物理页帧分配（真实内存图 + 真实读写校验）。
+    mm::demo::run(boot);
+    // M2.2：架构无关映射 API（x86_64 由 4 级页表实现）。
+    mm::demo::run_map(boot);
+    // M2.3：内核堆（Box/Vec/String 可用，按需增长）。
+    mm::demo::run_heap();
+    // M2.4：独立地址空间（同一虚拟地址、不同物理帧，真实切换）。
+    mm::demo::run_space();
+    // M3.1：真实进入 Ring 3；用户态异常只终止该任务。
+    user_demo::run();
+    if mm::demo::failed() > 0 || user_demo::failed() > 0 {
+        kprintln!("[JSR-EXIT] failure mm_failed={} user_failed={}", mm::demo::failed(), user_demo::failed());
+        arch::exit_emulator(ExitStatus::Failure);
+    }
+
+    kprintln!("[JSR-EXIT] success");
+    arch::exit_emulator(ExitStatus::Success)
+}

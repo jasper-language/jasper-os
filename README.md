@@ -1,0 +1,99 @@
+# jasper-os
+
+Jasper 生态的**操作系统侧项目**：一个用 Rust 实现、在 QEMU 中真实启动的模块化宏内核。
+
+## 一句话
+
+> **Rust 负责内核与底层基础设施，Jasper 负责其上的绝大多数系统服务与应用。**
+> Jasper 不依赖 jasper-os 才能运行；jasper-os 是 Jasper 生态的原生执行平台之一。
+
+---
+
+## 设计原则
+
+1. **Core 只提供机制，不提供策略。** 任务与调度、陷入与中断、对象 / 句柄 / 权限（capability）、
+   等待与通知、异步 I/O 的提交与完成、地址空间、模块管理、观测性属于 Core；调度策略等可替换。
+2. **Core 不引入 Unix / Linux / Windows 语义。** 没有 `fd`、`fork`、`errno`、`VFS`、`epoll`；
+   这些属于兼容层。资源一律经 **Handle + Rights** 访问。
+3. **多指令集。** x86_64 是先行验证平台；一切指令集相关代码都在 `kernel/src/arch/<isa>/`，
+   经 `arch::Platform` 契约接入，Core 中不出现任何 ISA 专有代码（由验收脚本机械检查）。
+4. **异步只有「提交 → 完成」一种形态。** 不提供就绪式（readiness）接口；每个被接受的请求恰好产生一个终态完成。
+5. **系统接口可被机器读懂。** 对外标识符采用 `system.<领域>.<对象>.<动作>` 分层命名，
+   每个接口带结构化元数据（版本、所需权限、副作用、中文显示名）；错误是带规范名的枚举而非整数错误码。
+6. **UTF-8 与原生中文。** 内核文本接口按 UTF-8 处理，串口可直接输出中文。
+7. **真实启动才算完成。** 每个里程碑都以 QEMU 中的真实运行与串口输出为验收依据，不以「编译通过」或宿主模拟代替。
+
+---
+
+## 当前状态
+
+以下均已在 QEMU（x86_64）中真实启动验证，可用 `scripts/accept.sh` 一键复现：
+
+| 里程碑 | 内容 | 状态 |
+|---|---|---|
+| M1.0–M1.2 | 工作区、真实启动、GDT/IDT/PIC/PIT、真实时钟中断 | ✅ |
+| M1.3 | 静态内核栈 + 真实上下文切换（协作式） | ✅ |
+| M1.4 | 定时器驱动的抢占式轮转 | ✅ |
+| M1.4b | 指令集分层（`arch::Platform` 契约） | ✅ |
+| M1.5 | `kernel-core`：宿主可测的纯机制库（对象/句柄世代、等待、异步 ring、模块、陷入分发、追踪等） | ✅ |
+| M1.6 | 一键验收 + 证据归档 | ✅ |
+| M2.1 | 物理页帧分配器 | ✅ |
+| M2.2 | 架构无关的页映射接口（x86_64 以 4 级页表实现） | ✅ |
+| M2.3 | 内核堆（`alloc` 可用，按需增长） | ✅ |
+| M2.4 | 独立地址空间（真实切换，隔离与回收） | ✅ |
+| M3.1 | 进入用户态（Ring 3）+ 用户态故障隔离 | ✅ |
+| M3.2 | 系统调用入口 + 稳定 ID 登记表 + 统一权限检查 | ⬜ |
+| M3.3 | 用户指针安全 | ⬜ |
+| M3.4 | 进程 / 线程对象 | ⬜ |
+| M4.x | 对象生命周期、跨进程句柄、用户态异步 ring、IPC 与取消语义 | ⬜ |
+| M5.1 | 装载并运行最小非特权程序（ELF），完整隔离与资源回收 | ⬜ |
+
+M5.1 通过即达成「独立 Rust 内核」阶段目标。未列为 ✅ 的能力**尚未实现**。
+
+---
+
+## 仓库结构
+
+```
+jasper-os/
+  Cargo.toml            # workspace：kernel-core + kernel + xtask
+  rust-toolchain.toml   # nightly + x86_64-unknown-none
+  kernel-core/          # 纯机制库：no_std、零依赖、可在宿主上 cargo test
+  kernel/               # 内核二进制
+    src/
+      arch/             # 指令集接缝：Platform 契约 + x86_64 实现
+      sched/            # 调度：机制 / 策略（Strategy）/ 栈池 / 观察者
+      mm/               # 内存：页帧、映射、内核堆、地址空间
+      kmain.rs          # 架构无关的内核主流程
+      main.rs           # 引导适配层（bootloader → 中立的交接信息）
+  xtask/                # 宿主侧：生成可引导磁盘镜像
+  scripts/accept.sh     # 一键验收：构建 → QEMU 真实启动 → 逐里程碑判定
+  docs/rust-kernel.md   # 中文说明：结构、分层、构建与验收
+```
+
+---
+
+## 构建与验收
+
+需要 nightly 工具链（含 `rust-src`、`llvm-tools-preview`，由 `rust-toolchain.toml` 自动选择）与 `qemu-system-x86_64`：
+
+```bash
+bash scripts/accept.sh
+```
+
+脚本会运行 `kernel-core` 的宿主单元测试、构建内核与可引导镜像、在 QEMU 中真实启动一次，
+按各里程碑判据检查串口输出并打印 PASS/FAIL 表；证据归档到 `evidence/accept-<时间戳>/`。
+
+---
+
+## 与 Jasper 语言的关系
+
+Jasper 是 GC-only 的主要开发语言；Rust 是底层基础设施的实现语言。
+Jasper 只经语言无关、版本化的系统接口使用内核能力，不依赖 Rust 的内部类型。
+模块交付格式 `.jaso` 由 Jasper 语言项目定义。
+
+---
+
+## 许可证
+
+**Apache License 2.0**，见 [LICENSE](LICENSE)。

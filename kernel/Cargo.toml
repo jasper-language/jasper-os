@@ -1,0 +1,23 @@
+# jasper-kernel —— 内核二进制：把 kernel-core 的纯机制接到真实硬件（经 arch::Platform）。
+# 依赖版本取自前期已验证的原型。
+[package]
+name = "jasper-kernel"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+kernel-core = { path = "../kernel-core" }
+bootloader_api = "0.11.17"
+x86_64 = "0.15.5"
+spin = "0.12.3"
+pic8259 = "0.11.0"
+# uart_16550 = "0.8.1"   # optional; serial is hand-rolled COM1 port I/O (spec §5)
+
+[lib]
+name = "jasper_kernel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jasper-kernel"
+path = "src/main.rs"

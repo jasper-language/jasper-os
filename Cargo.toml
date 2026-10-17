@@ -1,0 +1,15 @@
+# jasper-os workspace
+#
+# 成员：
+#   kernel-core —— 纯机制库（no_std，宿主可测：`cargo test -p kernel-core`）
+#   kernel      —— 内核二进制（no_std，接真实硬件，经 arch::Platform 适配各 ISA）
+#   xtask       —— 宿主工具：生成可引导镜像
+[workspace]
+resolver = "2"
+members = ["kernel-core", "kernel", "xtask"]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
