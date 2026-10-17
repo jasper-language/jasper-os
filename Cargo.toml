@@ -6,7 +6,7 @@
 #   xtask       —— 宿主工具：生成可引导镜像
 [workspace]
 resolver = "2"
-members = ["kernel-core", "kernel", "xtask"]
+members = ["kernel-core", "kernel", "xtask", "user/hello"]
 
 [profile.dev]
 panic = "abort"

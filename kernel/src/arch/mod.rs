@@ -42,6 +42,21 @@ pub enum UserProbe {
     ReadAddress,
     /// 标记 `[8]=0x7e57` 后执行特权指令（应被终止，后续标记 `[16]` 不得出现）。
     Privileged,
+    /// 系统调用冒烟：`[0]`=time.now 结果，`[8]`=未登记 ID 的返回值，`[16]`=未授权调用的返回值，
+    /// `[24]`/`[32]`=调用前后应保留的寄存器值，最后以退出码 42 调用 task.exit（之后的指令不得执行）。
+    SyscallSmoke,
+    /// 用户指针：依次以 6 种指针调用 console.write，返回值写到 `[0..48)`，然后 task.exit(0)。
+    /// 数据页 `0xF8` 处是合法文本长度、`0x100` 起是合法 UTF-8 文本、`0x200` 起是非法 UTF-8；参数 = 一个内核地址。
+    UserPointers,
+    /// 进程与线程：主线程经 task.spawn 在同一进程创建工作线程（参数 = 工作线程栈顶），
+    /// 两者经共享数据页协作；主线程随后两次关闭线程句柄并以退出码 7 退出。
+    /// 数据页：`[0]` 句柄、`[8]` 工作线程标记、`[16]` 完成标志、`[24]` 主线程标记、`[32]`/`[40]` 两次关闭的返回值。
+    ProcessThreads,
+    /// 句柄权限：经 task.spawn 取得线程句柄 h（WAIT|CONTROL|DUPLICATE|TRANSFER），依次：
+    /// `[0]`=h，`[8]`=duplicate(h, WAIT|DUPLICATE)，`[16]`=duplicate(h2, WAIT|TRANSFER)（提权，应被拒），
+    /// `[24]`=restrict(h2, WAIT)，`[32]`=duplicate(h2, WAIT)（已无 DUPLICATE，应被拒），
+    /// `[40]`=restrict(h2, WAIT|CONTROL)（经 restrict 提权，应被拒）；随后关闭句柄并 task.exit(0)。
+    HandleRights,
 }
 
 /// 仿真器 / 测试退出状态。
@@ -75,10 +90,14 @@ pub trait Platform {
     /// 架构名（横幅与诊断输出用），如 `"x86_64"`。
     const NAME: &'static str;
 
+    /// 本架构可执行文件的 ELF `e_machine` 值（装载器据此拒绝其他架构的程序）。
+    const ELF_MACHINE: u16;
+
     /// 初始化早期控制台。之后即可打印（最先调用）。
     fn console_init();
 
-    /// 早期初始化：描述符表 / 异常向量。之后即可安全捕获异常。
+    /// 早期初始化：描述符表 / 异常向量 / 系统调用入口。之后即可安全捕获异常，
+    /// 用户态发起的系统调用一律交给 `crate::syscall::on_syscall`。
     fn early_init();
 
     /// 中断初始化：中断控制器与周期定时器（`timer_hz` 为目标频率）。不打开中断。
@@ -181,6 +200,8 @@ pub trait Platform {
 
 /// 当前架构名，见 [`Platform::NAME`]。
 pub const NAME: &str = <Current as Platform>::NAME;
+/// 当前架构的 ELF 机器类型，见 [`Platform::ELF_MACHINE`]。
+pub const ELF_MACHINE: u16 = <Current as Platform>::ELF_MACHINE;
 /// 当前架构的空任务上下文，见 [`Platform::EMPTY_CONTEXT`]。
 pub const EMPTY_CONTEXT: TaskContext = <Current as Platform>::EMPTY_CONTEXT;
 

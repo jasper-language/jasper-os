@@ -1,0 +1,16 @@
+# user-hello —— 最小的 jasper-os 用户程序（M5.1-pre）：独立的静态 ELF，
+# 只经系统调用与内核交互；调用号在构建期从 abi/system-ids.txt 生成，不手写编号。
+[package]
+name = "user-hello"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "user-hello"
+path = "src/main.rs"
+test = false
+bench = false
+
+[build-dependencies]
+kernel-core = { path = "../../kernel-core" }

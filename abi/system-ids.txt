@@ -1,0 +1,28 @@
+# =============================================================================
+# jasper-os 系统接口登记表（唯一真源）
+#
+# 规则：
+#   * 数字 ID 由人显式分配；只能追加，已发布的 ID 永不删除、改号、改名、改种类
+#     （已发布 = 出现在 system-ids.lock 中；构建期机械检查，违反即构建失败）
+#   * 操作（op）ID 从 1 起；错误码（error）ID 从 4097 起，系统调用以 -(ID) 返回错误
+#   * 名字遵守 system.<领域>.<对象>.<动作> 命名约定（构建期 lint）
+#   * 每个登记的操作都必须在内核里有真实实现，否则内核启动自检失败
+#
+# 列：ID  种类  名字  版本  副作用  中文显示名（不含空白）
+# =============================================================================
+1	op	system.task.exit	1	irreversible	任务·退出
+2	op	system.task.yield	1	none	任务·让出处理器
+3	op	system.time.now	1	read	时间·读取当前时刻
+4	op	system.console.write	1	write	控制台·写入文本
+5	op	system.task.spawn	1	write	任务·在本进程创建线程
+6	op	system.handle.close	1	write	句柄·关闭
+7	op	system.handle.duplicate	1	write	句柄·复制（只可降权）
+8	op	system.handle.restrict	1	write	句柄·降低权限
+4097	error	system.error.unsupported	1	none	不支持的接口
+4098	error	system.error.rights_denied	1	none	权限不足
+4099	error	system.error.invalid_argument	1	none	参数非法
+4100	error	system.memory.error.invalid_address	1	none	地址非法
+4101	error	system.handle.error.invalid	1	none	句柄无效
+4102	error	system.handle.error.rights_denied	1	none	句柄权限不足
+4103	error	system.handle.error.table_full	1	none	句柄表已满
+4104	error	system.handle.error.not_transferable	1	none	对象不可传递

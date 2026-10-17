@@ -67,6 +67,18 @@ pub fn start(boot: &'static BootSpec) -> ! {
     mm::demo::run_space();
     // M3.1：真实进入 Ring 3；用户态异常只终止该任务。
     user_demo::run();
+    // M3.2：系统调用入口 + 稳定 ID 登记表 + 统一权限检查。
+    user_demo::run_syscall();
+    // M3.3：用户指针安全（校验 + 经物理映射复制）。
+    user_demo::run_user_pointers();
+    // M3.4：进程 / 线程对象（同一进程两个线程、句柄、退出与回收）。
+    user_demo::run_process();
+    // M5.1-pre：从 ELF 文件装载并运行用户程序。
+    user_demo::run_elf();
+    // M4.1：对象生命周期（外部所有权 / 内部引用 / 清理过程级联）。
+    user_demo::run_lifecycle();
+    // M4.2：Handle/Rights（duplicate/restrict 只降权；跨进程原子转移）。
+    user_demo::run_handles();
     if mm::demo::failed() > 0 || user_demo::failed() > 0 {
         kprintln!("[JSR-EXIT] failure mm_failed={} user_failed={}", mm::demo::failed(), user_demo::failed());
         arch::exit_emulator(ExitStatus::Failure);

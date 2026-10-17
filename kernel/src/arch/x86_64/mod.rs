@@ -11,6 +11,7 @@
 //! * `paging`  —— 4 级页表实现的 `PageMapper`
 //! * `space`   —— 地址空间（PML4）的创建、CR3 切换与销毁
 //! * `user`    —— `iretq` 进入 Ring 3 与用户态探针机器码
+//! * `syscall` —— `syscall`/`sysretq` 入口：MSR 设置、换栈、寄存器帧、返回前 RIP 规范性检查
 //!
 //! 与 Core 的唯一回调方向：定时器中断入口调用 `crate::irq::on_hardware_irq`（见 `idt.rs`）。
 
@@ -21,6 +22,7 @@ mod idt;
 mod pic;
 mod pit;
 mod space;
+mod syscall;
 mod port;
 mod uart;
 mod user;
@@ -39,6 +41,9 @@ impl Platform for X86_64 {
 
     const NAME: &'static str = "x86_64";
 
+    /// EM_X86_64。
+    const ELF_MACHINE: u16 = 62;
+
     const USER_WINDOW: (u64, u64) = space::USER_WINDOW;
 
     fn console_init() {
@@ -50,6 +55,7 @@ impl Platform for X86_64 {
         crate::console::write_str("[JSR-GDT] ok\n");
         idt::init();
         crate::console::write_str("[JSR-IDT] ok\n");
+        syscall::init();
     }
 
     fn irq_init(timer_hz: u32) {
@@ -158,7 +164,8 @@ impl Platform for X86_64 {
     }
 
     fn set_kernel_stack(top: u64) {
-        gdt::set_kernel_stack(top)
+        gdt::set_kernel_stack(top);
+        syscall::set_kernel_stack(top);
     }
 
     unsafe fn enter_user(entry: u64, stack: u64, arg0: u64, arg1: u64) -> ! {

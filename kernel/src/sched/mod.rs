@@ -153,6 +153,21 @@ pub fn set_current_space(space: Option<cpu::SpaceRoot>) {
     });
 }
 
+/// 授予当前任务一组可发起的系统调用（进入用户态之前由任务创建方设置）。
+pub fn set_current_syscalls(set: crate::syscall::SyscallSet) {
+    cpu::without_irq(|| with_mut(|s| s.set_current_syscalls(set)));
+}
+
+/// 当前任务的地址空间（`None` = 内核空间）。
+pub fn current_space() -> Option<cpu::SpaceRoot> {
+    with(|s| s.current_space())
+}
+
+/// 当前任务可发起的系统调用集合。
+pub fn current_syscalls() -> crate::syscall::SyscallSet {
+    with(|s| s.current_syscalls())
+}
+
 /// 结束当前任务（永不返回）：标记退出并切走。可在中断上下文调用（用户态异常的终止路径）。
 pub fn exit_current(cause: &'static str) -> ! {
     with_mut(|s| s.mark_current_exited());

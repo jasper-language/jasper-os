@@ -61,7 +61,8 @@ pub fn on_user_fault(fault: UserFault) -> ! {
         fault.ip,
         fault.addr
     );
-    sched::exit_current("fault")
+    // 经进程层统一出口：故障终止的线程以退出码 -1 计入所属进程。
+    crate::proc::thread_exit(-1, "fault")
 }
 
 /// 最近一次用户态故障。

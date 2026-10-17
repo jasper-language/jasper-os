@@ -1,0 +1,84 @@
+//! 构建脚本：读取系统接口登记表，校验后生成「名字 ↔ 稳定 ID」查表代码。
+//! Build script: validates the system-interface registry and generates the name/ID table.
+//!
+//! 只读取与校验，绝不分配或重排编号（编号由人写在 `abi/system-ids.txt` 里）。
+//! 以下任一情况都会让构建失败：
+//! * 登记表格式错误、ID 重复、名字重复、名字违反命名约定（`kernel_core::abi::validate`）
+//! * 已冻结（`abi/system-ids.lock`）的条目被删除、改号、改名或改种类（`kernel_core::abi::check_frozen`）
+//!
+//! 另外构建内嵌的用户程序（`user/hello`），产物以 `include_bytes!` 装进内核镜像。
+
+use std::fmt::Write as _;
+use std::path::PathBuf;
+
+fn main() {
+    let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("..");
+    let reg_path = root.join("abi/system-ids.txt");
+    let lock_path = root.join("abi/system-ids.lock");
+    println!("cargo:rerun-if-changed={}", reg_path.display());
+    println!("cargo:rerun-if-changed={}", lock_path.display());
+
+    let reg = std::fs::read_to_string(&reg_path).expect("读取 abi/system-ids.txt 失败");
+    let lock = std::fs::read_to_string(&lock_path).expect("读取 abi/system-ids.lock 失败");
+
+    let mut out = String::new();
+    let mut entries = String::new();
+    out.push_str("// 由 kernel/build.rs 依据 abi/system-ids.txt 生成，请勿手改。\n");
+    out.push_str("// Generated from abi/system-ids.txt by kernel/build.rs. Do not edit.\n\n");
+    let result = kernel_core::abi::validate(&reg, |r| {
+        let const_name = r.name.to_ascii_uppercase().replace('.', "_");
+        let _ = writeln!(out, "/// `{}`（{}）。\npub const {}: u32 = {};", r.name, r.display_zh, const_name, r.id);
+        let kind = if r.kind == "op" { "AbiKind::Op" } else { "AbiKind::Error" };
+        let effects = match r.effects {
+            "none" => "Effects::None",
+            "read" => "Effects::Read",
+            "write" => "Effects::Write",
+            _ => "Effects::Irreversible",
+        };
+        let _ = writeln!(
+            entries,
+            "    AbiEntry {{ id: {}, kind: {}, name: \"{}\", version: {}, effects: {}, display_zh: \"{}\" }},",
+            r.id, kind, r.name, r.version, effects, r.display_zh
+        );
+    });
+    match result {
+        Ok(_) => {}
+        Err(e) => panic!("abi/system-ids.txt 校验失败：{:?}", e),
+    }
+    if let Err(e) = kernel_core::abi::check_frozen(&reg, &lock) {
+        panic!("已冻结的系统接口被破坏（abi/system-ids.lock）：{:?}", e);
+    }
+    out.push_str("\n/// 全部登记条目（按登记表顺序）。\npub static ENTRIES: &[AbiEntry] = &[\n");
+    out.push_str(&entries);
+    out.push_str("];\n");
+
+    let dest = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("abi_generated.rs");
+    std::fs::write(dest, out).expect("写入生成代码失败");
+
+    build_user_programs(&root);
+}
+
+/// 构建内嵌的用户程序（M5.1-pre）：用独立的 target 目录调用 cargo，避免与外层构建争用同一目录的锁；
+/// 产物路径经 `JSR_USER_HELLO` 环境变量交给内核源码 `include_bytes!`。
+/// Builds the embedded user programs with a separate target dir and exposes their paths to the kernel.
+fn build_user_programs(root: &std::path::Path) {
+    for f in ["user/hello/src/main.rs", "user/hello/Cargo.toml", "user/hello/link.ld", "user/hello/build.rs"] {
+        println!("cargo:rerun-if-changed={}", root.join(f).display());
+    }
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let target_dir = out_dir.join("user-target");
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let status = std::process::Command::new(cargo)
+        .current_dir(root)
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_TARGET_DIR")
+        .args(["build", "--release", "--target", "x86_64-unknown-none", "-p", "user-hello", "--target-dir"])
+        .arg(&target_dir)
+        .status()
+        .expect("无法启动 cargo 构建用户程序");
+    assert!(status.success(), "用户程序 user-hello 构建失败");
+    let elf = target_dir.join("x86_64-unknown-none/release/user-hello");
+    assert!(elf.exists(), "找不到用户程序产物 {}", elf.display());
+    println!("cargo:rustc-env=JSR_USER_HELLO={}", elf.display());
+}

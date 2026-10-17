@@ -207,7 +207,72 @@ check_m31() {   # Ring 3：真实 CPL=3；读内核地址在该地址缺页且�
   fi
 }
 
-check_m10; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31
+check_m32() {   # 系统调用：登记表自检、未登记被拒、未授权被拒、寄存器保留、task.exit 正常退出、页帧回收
+  if has '^\[JSR-SYSCALL\] self_check ops=[0-9]+ handlers=all' \
+     && has 'deny name=system\.task\.yield id=2 .*ret=system\.error\.rights_denied' \
+     && has 'reject id=65535 .*ret=system\.error\.unsupported' \
+     && has 'probe now=[0-9]+ unregistered=-4097 denied=-4098 preserved=true exit_code=42 stopped_after_exit=true' \
+     && has '^\[JSR-SYSCALL\] calls=4 reclaimed=true checks=[0-9]+ failed=0'; then
+    record M3.2 PASS "syscall 真实陷入；未登记/未授权被拒；寄存器保留；task.exit(42) 正常退出；页帧回收"
+  else
+    record M3.2 FAIL "缺少 JSR-SYSCALL 关键标记或 failed≠0"
+  fi
+}
+
+check_m33() {   # 用户指针：合法文本写出；内核地址/未映射/跨页/超长/非法 UTF-8 全部被拒；正常退出；页帧回收
+  if has '^\[JSR-USERTEXT\] task=user-ptr bytes=[0-9]+ text=' \
+     && has 'valid=[1-9][0-9]* kernel_addr=-4100 unmapped=-4100 crossing=-4100 too_long=-4099 bad_utf8=-4099 exit_ok=true' \
+     && has '^\[JSR-UPTR\] reclaimed=true checks=[0-9]+ failed=0'; then
+    record M3.3 PASS "用户指针 6 类用例全部正确，内核不直接解引用用户地址，页帧回收"
+  else
+    record M3.3 FAIL "缺少 JSR-UPTR 关键标记或 failed≠0"
+  fi
+}
+
+check_m34() {   # 进程/线程：同进程双线程共享内存、句柄关闭两次（第二次失败）、退出码 7、回收后页帧回到基线
+  if has 'event=system\.process\.exited id=0x[0-9a-f]+ name=demo-proc code=7 threads=2' \
+     && has 'threads shared_memory=true handle=0x[0-9a-f]+ close_first=0 close_again=-4101' \
+     && has 'reaped threads=2 frames=4 code=7 .*reclaimed=true' && has '^\[JSR-PROC\] checks=[0-9]+ failed=0'; then
+    record M3.4 PASS "进程 + 双线程共享地址空间，线程句柄与关闭语义，退出码 7，回收后页帧回到基线"
+  else
+    record M3.4 FAIL "缺少 JSR-PROC 关键标记或 failed≠0"
+  fi
+}
+
+check_m51pre() { # ELF 装载（M5.1 前置部分）：截断被拒；按段装载、从入口运行、BSS 清零、正常退出、回收
+  if has 'elf bytes=[0-9]+ truncated=system\.elf\.error\.truncated entry=0x[0-9a-f]+' \
+     && has '^\[JSR-USERTEXT\] task=user-hello bytes=[0-9]+ text=你好，来自 ELF 装载的用户程序' \
+     && has '^\[JSR-USERTEXT\] task=user-hello bytes=13 text=bss_zero=true' \
+     && has 'event=system\.process\.exited id=0x[0-9a-f]+ name=user-hello code=0' \
+     && has '^\[JSR-PROG\] exit=Some\(Exited \{ code: 0 \}\) frames=[0-9]+ reclaimed=true checks=[0-9]+ failed=0'; then
+    record M5.1p PASS "ELF 静态可执行文件按段装载并从入口运行，BSS 清零，正常退出，回收（M5.1 前置）"
+  else
+    record M5.1p FAIL "缺少 JSR-PROG / user-hello 关键标记或 failed≠0"
+  fi
+}
+
+check_m41() {   # 对象生命周期：关句柄 ⇒ closing 不销毁；重复关闭被拒；线程退出后由线程表保活；reap 只入队；级联迭代清理；回到基线
+  if has 'handle closed: became_unowned=true dead=false counts=Ok\(\(0, 2, Closing\)\) double_close=system\.object\.error\.underflow reacquire=system\.object\.error\.invalid' \
+     && has 'thread exited: task counts=Ok\(\(0, 1, Closing\)\)' \
+     && has 'cascade: after_reap_pending=1 round1=1 pending=1 round2=1 pending=0 objects_live=([0-9]+)/\1 destroyed\+=2 reclaimed=true' \
+     && has '^\[JSR-LIFE\] checks=[0-9]+ failed=0'; then
+    record M4.1 PASS "外部所有权/内部引用分离；closing 不销毁；重复关闭被拒；清理队列级联迭代；对象与页帧回到基线"
+  else
+    record M4.1 FAIL "缺少 JSR-LIFE 关键标记或 failed≠0"
+  fi
+}
+
+check_m42() {   # Handle/Rights：复制只降权、提权被拒；跨进程原子转移（移动/无权/非叶子/表满）；回到基线
+  if has 'user dup=true escalate_dup=-4102 restrict=0 dup_without_right=-4102 escalate_restrict=-4102' \
+     && has 'transfer moved=true sender_invalid=true owners_after=Some\(1\) no_transfer_right=rights_denied non_leaf=not_transferable receiver_full=table_full' \
+     && has '^\[JSR-HANDLE\] objects_live=([0-9]+)/\1 pending=0 reclaimed=true checks=[0-9]+ failed=0'; then
+    record M4.2 PASS "duplicate/restrict 只降权；跨进程原子转移四类用例正确；失败时发送方句柄保留；回到基线"
+  else
+    record M4.2 FAIL "缺少 JSR-HANDLE 关键标记或 failed≠0"
+  fi
+}
+
+check_m10; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

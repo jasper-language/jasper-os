@@ -26,6 +26,8 @@ pub struct Task {
     pub context: crate::arch::TaskContext,
     pub entry: Option<fn()>,
     pub space: Option<crate::arch::SpaceRoot>,
+    /// 该任务可以发起的系统调用集合（统一权限检查的依据；内核任务为空集）。
+    pub syscalls: crate::syscall::SyscallSet,
 }
 
 impl Task {
@@ -37,6 +39,7 @@ impl Task {
             context: crate::arch::EMPTY_CONTEXT,
             entry: None,
             space: None,
+            syscalls: crate::syscall::SyscallSet::EMPTY,
         }
     }
 }

@@ -3,8 +3,11 @@
 //! # 职责
 //! 提供与硬件、ISA、引导方式全部无关的内核机制：
 //! * [`meta`]   —— 接口元数据（名字、版本、所需 Rights、副作用、稳定性、中文显示名）
+//! * [`objtable`] —— 内核对象表：外部所有权与内部引用分开计数、带世代标识、迭代式清理队列（M4.1）
 //! * [`object`] —— 对象标识、[`object::Rights`] 位掩码、带世代计数的句柄表、对象管理器
 //! * [`wait`]   —— 可等待对象（事件、定时器）与等待集合；时间源抽象为 trait
+//! * [`abi`]    —— 系统接口登记表：显式稳定 ID 的解析、命名校验与冻结检查（M3.2，构建期使用）
+//! * [`elf`]    —— ELF64 静态可执行文件解析与校验（M5.1-pre，机器类型由调用者给出）
 //! * [`frame`]  —— 物理页帧分配（与引导协议无关的内存图 + 位图分配器，M2.1）
 //! * [`paging`] —— 架构无关的页映射契约（虚拟页、中立权限位、PageMapper，M2.2）
 //! * [`heap`]   —— 堆分配算法（按地址排序空闲链表 + 首次适配 + 合并，M2.3）
@@ -28,6 +31,8 @@
 //! 本 crate 内的 Rust 模块名只是代码组织，不是接口。
 #![cfg_attr(not(test), no_std)]
 
+pub mod abi;
+pub mod elf;
 pub mod frame;
 pub mod heap;
 pub mod io;
@@ -36,6 +41,7 @@ pub mod meta;
 pub mod paging;
 pub mod module;
 pub mod object;
+pub mod objtable;
 pub mod sync;
 pub mod trace;
 pub mod trap;

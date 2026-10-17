@@ -1,0 +1,17 @@
+# 已发布（冻结）的系统接口：由 scripts/abi-freeze.sh 维护，只追加不修改。构建期检查登记表必须包含这里的每一条（ID/种类/名字一致）。
+1	op	system.task.exit	1	irreversible	任务·退出
+2	op	system.task.yield	1	none	任务·让出处理器
+3	op	system.time.now	1	read	时间·读取当前时刻
+4097	error	system.error.unsupported	1	none	不支持的接口
+4098	error	system.error.rights_denied	1	none	权限不足
+4099	error	system.error.invalid_argument	1	none	参数非法
+4	op	system.console.write	1	write	控制台·写入文本
+4100	error	system.memory.error.invalid_address	1	none	地址非法
+5	op	system.task.spawn	1	write	任务·在本进程创建线程
+6	op	system.handle.close	1	write	句柄·关闭
+4101	error	system.handle.error.invalid	1	none	句柄无效
+7	op	system.handle.duplicate	1	write	句柄·复制（只可降权）
+8	op	system.handle.restrict	1	write	句柄·降低权限
+4102	error	system.handle.error.rights_denied	1	none	句柄权限不足
+4103	error	system.handle.error.table_full	1	none	句柄表已满
+4104	error	system.handle.error.not_transferable	1	none	对象不可传递

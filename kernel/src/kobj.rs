@@ -1,0 +1,107 @@
+//! 内核全局对象表（M4.1）：Process 与 Task 对象的生命周期记账与清理过程。
+//! Kernel-wide object table: lifetime accounting and the cleanup pass for Process and Task objects.
+//!
+//! # 依据（M4.0 规范 v0.6）
+//! * 句柄 = **外部所有权**；在飞请求、线程执行上下文、进程线程表 = **内部引用**（第 1、2 节）
+//! * 两者都归零 ⇒ 对象只进入清理队列；销毁动作由 [`run_cleanup`] 在**不持对象表锁、非中断上下文**中执行（第 6.2 节）
+//! * 销毁动作可以释放其他对象（例如 Process 销毁时释放线程表对 Task 的引用），被释放者入队，下一轮处理——迭代而非递归
+//!
+//! # 锁
+//! 对象表锁在全局锁顺序中位于「进程句柄表锁」一层（M4.0 §3.4），持锁期间只做计数与查表，以及调用方明确的页表/帧操作
+//! （页帧、映射锁在顺序中更靠后）。销毁动作在释放对象表锁之后执行。
+
+use alloc::boxed::Box;
+
+use kernel_core::objtable::{ObjError, ObjId, ObjectTable, Released};
+
+use crate::proc::Process;
+use crate::sync::IrqSpinLock;
+use crate::task::TaskId;
+
+/// 系统内核对象总数上限（M4.0 §7 配额，开发 Profile）。
+pub const MAX_OBJECTS: usize = 1024;
+
+/// 线程对象（句柄可见）。对所属进程只有**弱回指**（带世代的对象标识，M4.0 §2.3）。
+#[derive(Debug, Clone, Copy)]
+pub struct TaskObj {
+    /// 调度器中的任务标识。
+    pub task: TaskId,
+    /// 所属进程（弱回指，不计引用）。
+    pub process: ObjId,
+}
+
+/// 内核对象。
+pub enum KObject {
+    /// 进程（地址空间、句柄表、帧所有权……）。
+    Process(Box<Process>),
+    /// 线程。
+    Task(TaskObj),
+    /// 事件（叶子对象：不持有句柄、不强引用其他对象）。
+    Event {
+        /// 是否已触发。
+        signaled: bool,
+    },
+}
+
+impl KObject {
+    /// 类型名（日志用）。
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            KObject::Process(_) => "Process",
+            KObject::Task(_) => "Task",
+            KObject::Event { .. } => "Event",
+        }
+    }
+}
+
+static TABLE: IrqSpinLock<ObjectTable<KObject, MAX_OBJECTS>> = IrqSpinLock::new(ObjectTable::new());
+
+/// 在对象表锁内执行 `f`（只做计数、查表与有界的页表操作；不得在其中执行销毁动作）。
+pub fn with<R>(f: impl FnOnce(&mut ObjectTable<KObject, MAX_OBJECTS>) -> R) -> R {
+    f(&mut TABLE.lock())
+}
+
+/// 放入新对象。
+pub fn insert(obj: KObject, owners: u32, internal: u32) -> Result<ObjId, ObjError> {
+    with(|t| t.insert(obj, owners, internal))
+}
+
+/// 释放一个外部所有权。
+pub fn release_owner(id: ObjId) -> Result<Released, ObjError> {
+    with(|t| t.release_owner(id))
+}
+
+/// 增加一个外部所有权。
+pub fn acquire_owner(id: ObjId) -> Result<(), ObjError> {
+    with(|t| t.acquire_owner(id))
+}
+
+/// 释放一个内部引用。
+pub fn release_internal(id: ObjId) -> Result<Released, ObjError> {
+    with(|t| t.release_internal(id))
+}
+
+/// 对象表统计：(仍在表中的对象数, 清理队列长度, 累计销毁数)。
+pub fn stats() -> (usize, usize, u64) {
+    with(|t| (t.live(), t.pending(), t.destroyed()))
+}
+
+/// 清理过程：最多销毁 `limit` 个死亡对象，返回实际处理数。
+///
+/// 每次只在锁内取出一个死亡对象，**释放锁后**执行它的销毁动作（可能很重：销毁地址空间、归还帧、
+/// 释放它持有的其他对象的引用）。被级联释放的对象入队，由本轮剩余预算或下一轮处理。
+pub fn run_cleanup(limit: usize) -> usize {
+    let mut n = 0;
+    while n < limit {
+        let Some((id, obj)) = with(|t| t.take_dead()) else {
+            break;
+        };
+        crate::kprintln!("[JSR-LIFE] cleanup destroy type={} id={:#x}", obj.type_name(), id.raw());
+        match obj {
+            KObject::Process(p) => crate::proc::destroy(p),
+            KObject::Task(_) | KObject::Event { .. } => {}
+        }
+        n += 1;
+    }
+    n
+}

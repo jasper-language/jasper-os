@@ -35,16 +35,24 @@ impl Rights {
     pub const WAIT: Rights = Rights(1 << 3);
     /// 控制对象生命周期与属性（发信号、销毁、改保护）。
     pub const CONTROL: Rights = Rights(1 << 4);
+    /// 允许复制该句柄（`system.handle.duplicate`）。M4.0 规范 v0.6 §3.1。
+    pub const DUPLICATE: Rights = Rights(1 << 5);
+    /// 允许把该句柄经 Channel 传给其他进程。M4.0 规范 v0.6 §3.1。
+    pub const TRANSFER: Rights = Rights(1 << 6);
     /// 全部已定义的权限。
-    pub const ALL: Rights = Rights(0b1_1111);
+    ///
+    /// ABI 说明：各位的数值一经发布永不改变，新权限只能占用新的位。
+    pub const ALL: Rights = Rights(0b111_1111);
 
     /// 位名表（按位序），用于格式化输出。
-    const NAMES: [(Rights, &'static str); 5] = [
+    const NAMES: [(Rights, &'static str); 7] = [
         (Rights::READ, "READ"),
         (Rights::WRITE, "WRITE"),
         (Rights::EXECUTE, "EXECUTE"),
         (Rights::WAIT, "WAIT"),
         (Rights::CONTROL, "CONTROL"),
+        (Rights::DUPLICATE, "DUPLICATE"),
+        (Rights::TRANSFER, "TRANSFER"),
     ];
 
     /// 由原始位构造；未定义的位被丢弃（不允许凭空造出未知权限）。
@@ -154,13 +162,22 @@ pub enum ObjectType {
     Ring,
     /// 地址空间（`system.memory` 领域）。
     AddressSpace,
-    /// IPC 通道（`system.channel` 领域，M3.4 实现）。
+    /// IPC 通道（`system.channel` 领域）。
     Channel,
     /// 线程/执行流（`system.task` 领域）。
     Task,
+    /// 进程：地址空间 + 资源容器 + 生命周期（`system.process` 领域）。
+    Process,
 }
 
 impl ObjectType {
+    /// v1 是否允许经 Channel 传递（M4.0 规范 v0.6 §2.1）：只有「叶子对象」——自身不持有句柄、
+    /// 也不强引用非叶子对象——可以传递。Channel 端点、Ring、Process、AddressSpace 在 v1 不可传递
+    /// （阶段性限制，放宽前须证明仍保持强引用图无环）。
+    pub const fn is_transferable_v1(self) -> bool {
+        matches!(self, ObjectType::Event | ObjectType::Timer | ObjectType::Task)
+    }
+
     /// 类型名（输出与元数据用）。
     pub const fn type_name(self) -> &'static str {
         match self {
@@ -170,6 +187,7 @@ impl ObjectType {
             ObjectType::AddressSpace => "AddressSpace",
             ObjectType::Channel => "Channel",
             ObjectType::Task => "Task",
+            ObjectType::Process => "Process",
         }
     }
 }
@@ -351,6 +369,46 @@ impl<V, const N: usize> HandleTable<V, N> {
         }
     }
 
+    /// 原地降低句柄权限（`system.handle.restrict` 的实现）：新权限必须是原权限的子集（只减不增），
+    /// 否则 [`HandleError::RightsDenied`]。与下方「复制并降权」的 `restrict` 不同，本函数不产生新句柄。
+    pub fn reduce_rights(&mut self, h: HandleId, rights: Rights) -> Result<(), HandleError> {
+        self.slot(h)?;
+        let index = h.index().ok_or(HandleError::Invalid)?;
+        let (_, current) = self.slots[index].entry.as_mut().ok_or(HandleError::Invalid)?;
+        if !current.contains(rights) {
+            return Err(HandleError::RightsDenied);
+        }
+        *current = rights;
+        Ok(())
+    }
+
+    /// 还能放入多少个句柄（空闲且未退役的槽位数）。
+    pub fn free_slots(&self) -> usize {
+        self.slots.iter().filter(|s| s.entry.is_none() && !s.retired).count()
+    }
+
+    /// 关闭全部句柄，对每个取回的值调用 `f`（进程退出时关闭整张句柄表用）。返回关闭的数量。
+    pub fn close_all(&mut self, mut f: impl FnMut(V)) -> usize {
+        let mut n = 0;
+        for slot in self.slots.iter_mut() {
+            if let Some((value, _)) = slot.entry.take() {
+                match slot.generation.checked_add(1) {
+                    Some(g) => slot.generation = g,
+                    None => slot.retired = true,
+                }
+                self.live -= 1;
+                n += 1;
+                f(value);
+            }
+        }
+        n
+    }
+
+    /// 当前有效句柄数。
+    pub fn live_handles(&self) -> usize {
+        self.live
+    }
+
     /// 关闭句柄并取回值。之后该句柄值永远无效。
     pub fn remove(&mut self, h: HandleId) -> Result<V, HandleError> {
         self.slot(h)?;
@@ -410,7 +468,7 @@ mod tests {
     fn rights_display() {
         assert_eq!(format!("{}", Rights::WAIT.union(Rights::CONTROL)), "WAIT|CONTROL");
         assert_eq!(format!("{}", Rights::NONE), "NONE");
-        assert_eq!(format!("{}", Rights::ALL), "READ|WRITE|EXECUTE|WAIT|CONTROL");
+        assert_eq!(format!("{}", Rights::ALL), "READ|WRITE|EXECUTE|WAIT|CONTROL|DUPLICATE|TRANSFER", "M4.0 v0.6 新增 DUPLICATE、TRANSFER");
     }
 
     #[test]
@@ -482,5 +540,23 @@ mod tests {
             t.remove(h).unwrap();
         }
         assert_eq!(t.put(0, Rights::NONE), Err(HandleError::TableFull), "世代耗尽的槽位不再复用");
+    }
+
+    #[test]
+    fn duplicate_transfer_bits_restrict_and_leaf_rule() {
+        let all = Rights::ALL;
+        assert!(all.contains(Rights::DUPLICATE) && all.contains(Rights::TRANSFER));
+        assert_eq!(Rights::from_bits_truncate(0xFFFF), Rights::ALL, "未定义的位被丢弃");
+        let r = Rights::WAIT.union(Rights::DUPLICATE);
+        assert_eq!(format!("{}", r), "WAIT|DUPLICATE");
+        let mut t: HandleTable<u32, 2> = HandleTable::new();
+        let h = t.put(1, r).unwrap();
+        assert_eq!(t.reduce_rights(h, Rights::WAIT.union(Rights::TRANSFER)), Err(HandleError::RightsDenied), "不能经 restrict 提权");
+        t.reduce_rights(h, Rights::WAIT).unwrap();
+        assert_eq!(t.get(h).unwrap().1, Rights::WAIT);
+        assert_eq!(t.free_slots(), 1);
+        assert!(ObjectType::Task.is_transferable_v1() && ObjectType::Event.is_transferable_v1());
+        assert!(!ObjectType::Channel.is_transferable_v1() && !ObjectType::Process.is_transferable_v1());
+        assert!(!ObjectType::Ring.is_transferable_v1() && !ObjectType::AddressSpace.is_transferable_v1());
     }
 }

@@ -1,0 +1,595 @@
+//! 进程与线程对象（M3.4 引入，M4.1 接入对象表；架构无关）。
+//! Process and thread objects, managed through the kernel object table.
+//!
+//! # 模型
+//! * **进程** = 地址空间（[`VmSpace`]）+ 句柄表 + 它拥有的物理帧 + 线程表 + 退出码 + 可用系统调用集合。资源归进程所有。
+//! * **线程** = 调度器里的一个任务 + 对象表中的一个 Task 对象（句柄可见），记着所属进程（带世代的弱回指）。
+//!
+//! # 引用关系（M4.0 规范 v0.6 第 1、2 节）
+//! | 持有者 | 对象 | 种类 |
+//! |---|---|---|
+//! | 创建者（内核或父进程） | Process | 外部所有权（[`reap`] 时释放） |
+//! | 进程句柄表中的句柄 | 所指对象 | 外部所有权（关闭句柄或进程退出时释放） |
+//! | 线程执行上下文 | 自己的 Task、所属 Process | 内部引用（线程停止时释放） |
+//! | 进程线程表 | 其中的 Task | 内部引用（进程销毁时释放） |
+//!
+//! # 生命周期
+//! 创建 → 运行 → **exited**（最后一个线程停止：确定退出码、关闭整张句柄表）→ 创建者 [`reap`]（释放其所有权）→
+//! 全部强引用归零后由清理过程 [`crate::kobj::run_cleanup`] 调用 [`destroy`]：销毁地址空间、归还帧、释放线程表引用（级联）。
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
+use kernel_core::frame::{PhysFrame, FRAME_SIZE};
+use kernel_core::object::{HandleError, HandleId, HandleTable, ObjectId, ObjectRef, ObjectType, Rights};
+use kernel_core::objtable::ObjId;
+use kernel_core::paging::{MapError, MapFlags, VirtPage};
+
+use crate::kobj::{self, KObject, TaskObj};
+use crate::mm::space::{in_private_window, VmSpace};
+use crate::mm::{frame, phys_to_virt};
+use crate::sync::IrqSpinLock;
+use crate::syscall::SyscallSet;
+use crate::task::TaskId;
+use crate::{arch, kprintln, sched};
+
+/// 每个进程句柄表的容量。
+pub const HANDLES_PER_PROCESS: usize = 64;
+
+/// 进程状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcState {
+    /// 至少有一个线程存活。
+    Running,
+    /// 最后一个线程已停止。
+    Exited {
+        /// 退出码（最后停止的线程给出；故障终止记为 -1）。
+        code: i64,
+    },
+}
+
+/// 进程对象（存放在内核对象表中）。
+pub struct Process {
+    name: &'static str,
+    space: VmSpace,
+    handles: HandleTable<ObjectRef, HANDLES_PER_PROCESS>,
+    /// 进程拥有的数据帧（销毁时归还）。
+    frames: Vec<PhysFrame>,
+    /// 线程表：每项持有对应 Task 对象的一个内部引用。
+    threads: Vec<ObjId>,
+    syscalls: SyscallSet,
+    threads_live: u32,
+    threads_total: u32,
+    state: ProcState,
+}
+
+/// 线程的启动参数（线程首次被调度时读取）。
+#[derive(Clone, Copy)]
+struct ThreadStart {
+    task: TaskId,
+    entry: u64,
+    stack: u64,
+    arg0: u64,
+    arg1: u64,
+}
+
+/// 运行中线程的身份：任务 → (所属进程, 自己的 Task 对象)。
+#[derive(Clone, Copy)]
+struct Member {
+    task: TaskId,
+    process: ObjId,
+    task_obj: ObjId,
+}
+
+struct Registry {
+    starts: Vec<ThreadStart>,
+    members: Vec<Member>,
+}
+
+static REG: IrqSpinLock<Registry> = IrqSpinLock::new(Registry { starts: Vec::new(), members: Vec::new() });
+/// 线程任务 ID 分配（与其它演示任务的 ID 区分开）。
+static TASK_IDS: kernel_core::object::IdAllocator = kernel_core::object::IdAllocator::new();
+
+/// 进程操作错误。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcError {
+    /// 进程不存在、已死亡或已销毁。
+    NoSuchProcess,
+    /// 进程已退出，不能再创建线程。
+    Exited,
+    /// 地址不在私有窗口或映射失败。
+    Map(MapError),
+    /// 没有空闲物理帧。
+    OutOfFrames,
+    /// 调度器槽位已满或对象表已满。
+    NoTaskSlot,
+    /// 句柄错误。
+    Handle(HandleError),
+    /// 对象在 v1 不可经 IPC 传递（非叶子对象，M4.0 规范 v0.6 §2.1）。
+    NotTransferable,
+}
+
+/// 回收时返回的退出信息。
+#[derive(Debug, Clone, Copy)]
+pub struct ExitInfo {
+    /// 退出码。
+    pub code: i64,
+    /// 生命周期内创建过的线程数。
+    pub threads: u32,
+    /// 进程拥有的数据帧数（销毁时归还）。
+    pub frames: usize,
+}
+
+/// 新建进程（还没有线程）。调用者获得一份外部所有权，最终须经 [`reap`] 释放。
+pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcError> {
+    let space = VmSpace::new().map_err(ProcError::Map)?;
+    let p = Box::new(Process {
+        name,
+        space,
+        handles: HandleTable::new(),
+        frames: Vec::new(),
+        threads: Vec::new(),
+        syscalls,
+        threads_live: 0,
+        threads_total: 0,
+        state: ProcState::Running,
+    });
+    let id = kobj::insert(KObject::Process(p), 1, 0).map_err(|_| ProcError::NoTaskSlot)?;
+    kprintln!("[JSR-PROC] event=system.process.created id={:#x} name={}", id.raw(), name);
+    Ok(id)
+}
+
+/// 在对象表锁内对进程执行 `f`。
+fn with_proc<R>(id: ObjId, f: impl FnOnce(&mut Process) -> Result<R, ProcError>) -> Result<R, ProcError> {
+    kobj::with(|t| match t.get_mut(id) {
+        Ok(KObject::Process(p)) => f(p),
+        _ => Err(ProcError::NoSuchProcess),
+    })
+}
+
+/// 为进程分配一个清零的帧并映射到 `va`（帧归进程所有）。
+pub fn map_new(id: ObjId, va: u64, flags: MapFlags) -> Result<PhysFrame, ProcError> {
+    let f = frame::allocate().map_err(|_| ProcError::OutOfFrames)?;
+    if let Some(p) = phys_to_virt(f.start()) {
+        // SAFETY：刚分出的帧，经全物理内存映射清零。
+        unsafe { core::ptr::write_bytes(p, 0, FRAME_SIZE as usize) };
+    }
+    let r = with_proc(id, |p| {
+        p.space.map(VirtPage::containing(va), f, flags).map_err(ProcError::Map)?;
+        p.frames.push(f);
+        Ok(f)
+    });
+    if r.is_err() {
+        let _ = frame::deallocate(f);
+    }
+    r
+}
+
+/// 向进程内存写入字节（经页表查询 + 物理映射；目标必须已映射）。用于装载代码与初始数据。
+pub fn write(id: ObjId, va: u64, bytes: &[u8]) -> Result<(), ProcError> {
+    with_proc(id, |p| {
+        let mut done = 0usize;
+        while done < bytes.len() {
+            let cur = va + done as u64;
+            let off = cur % FRAME_SIZE;
+            let n = ((FRAME_SIZE - off) as usize).min(bytes.len() - done);
+            let (f, _) = p.space.translate(VirtPage::containing(cur)).ok_or(ProcError::Map(MapError::NotMapped))?;
+            let k = phys_to_virt(f.start() + off).ok_or(ProcError::Map(MapError::InvalidAddress))?;
+            // SAFETY：目标帧属于该进程且已映射；n 不越过页尾。
+            unsafe { core::ptr::copy_nonoverlapping(bytes[done..].as_ptr(), k, n) };
+            done += n;
+        }
+        Ok(())
+    })
+}
+
+/// 装载 ELF 失败的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadError {
+    /// 文件本身不合法（见 `kernel_core::elf::ElfError`）。
+    Elf(kernel_core::elf::ElfError),
+    /// 某个段不在用户私有窗口内。
+    OutsideWindow,
+    /// 映射或复制失败。
+    Proc(ProcError),
+}
+
+impl LoadError {
+    /// 规范错误名。
+    pub fn name(self) -> &'static str {
+        match self {
+            LoadError::Elf(e) => e.name(),
+            LoadError::OutsideWindow => "system.memory.error.invalid_address",
+            LoadError::Proc(_) => "system.memory.error.out_of_frames",
+        }
+    }
+}
+
+/// 把 ELF64 静态可执行文件装进进程，返回入口地址（按段权限映射，先清零再复制，BSS 天然为零）。
+pub fn load_elf(id: ObjId, image: &[u8]) -> Result<u64, LoadError> {
+    let elf = kernel_core::elf::parse(image, arch::ELF_MACHINE).map_err(LoadError::Elf)?;
+    for seg in elf.segments() {
+        if !in_private_window(seg.vaddr) || !in_private_window(seg.vaddr + seg.memsz - 1) {
+            return Err(LoadError::OutsideWindow);
+        }
+    }
+    for seg in elf.segments() {
+        let mut flags = MapFlags::USER;
+        if seg.flags.write {
+            flags = flags | MapFlags::WRITE;
+        }
+        if seg.flags.execute {
+            flags = flags | MapFlags::EXECUTE;
+        }
+        let lo = seg.vaddr - seg.vaddr % FRAME_SIZE;
+        let hi = (seg.vaddr + seg.memsz).div_ceil(FRAME_SIZE) * FRAME_SIZE;
+        let mut va = lo;
+        while va < hi {
+            map_new(id, va, flags).map_err(LoadError::Proc)?;
+            va += FRAME_SIZE;
+        }
+        write(id, seg.vaddr, seg.file_bytes(image)).map_err(LoadError::Proc)?;
+    }
+    Ok(elf.entry)
+}
+
+/// 读进程内存中的一个 64 位字（诊断与验收用）。
+pub fn read_u64(id: ObjId, va: u64) -> Option<u64> {
+    with_proc(id, |p| {
+        let (f, _) = p.space.translate(VirtPage::containing(va)).ok_or(ProcError::Map(MapError::NotMapped))?;
+        let k = phys_to_virt(f.start() + va % FRAME_SIZE).ok_or(ProcError::Map(MapError::InvalidAddress))?;
+        // SAFETY：已映射的进程帧，调用者保证 8 字节对齐。
+        Ok(unsafe { (k as *const u64).read_volatile() })
+    })
+    .ok()
+}
+
+/// 线程首次运行的入口：取出启动参数 → 切到进程空间与调用集合 → 进入用户态。
+fn thread_entry() {
+    let (me, _) = sched::current();
+    let (start, member) = {
+        let reg = REG.lock();
+        (
+            reg.starts.iter().find(|s| s.task == me).copied(),
+            reg.members.iter().find(|m| m.task == me).copied(),
+        )
+    };
+    let (Some(s), Some(m)) = (start, member) else {
+        return;
+    };
+    let Ok((root, syscalls)) = with_proc(m.process, |p| Ok((p.space.root(), p.syscalls))) else {
+        return;
+    };
+    sched::set_current_space(Some(root));
+    sched::set_current_syscalls(syscalls);
+    // SAFETY：entry/stack 已校验位于私有窗口，代码与栈页由创建方映射；内核栈顶由调度器设置。
+    unsafe { arch::enter_user(s.entry, s.stack, s.arg0, s.arg1) }
+}
+
+/// 在进程中创建线程（入口与栈顶必须位于私有窗口内）。返回调度任务标识与 Task 对象标识。
+///
+/// Task 对象初始持有 2 个内部引用：线程执行上下文、进程线程表；执行上下文另持有 Process 的 1 个内部引用。
+pub fn spawn_thread(
+    id: ObjId,
+    name: &'static str,
+    entry: u64,
+    stack: u64,
+    arg0: u64,
+    arg1: u64,
+) -> Result<(TaskId, ObjId), ProcError> {
+    if !in_private_window(entry) || !in_private_window(stack - 1) {
+        return Err(ProcError::Map(MapError::InvalidAddress));
+    }
+    with_proc(id, |p| if p.state == ProcState::Running { Ok(()) } else { Err(ProcError::Exited) })?;
+    let task = TaskId(1000 + TASK_IDS.allocate());
+    let task_obj = kobj::insert(KObject::Task(TaskObj { task, process: id }), 0, 2).map_err(|_| ProcError::NoTaskSlot)?;
+    {
+        let mut reg = REG.lock();
+        reg.starts.push(ThreadStart { task, entry, stack, arg0, arg1 });
+        reg.members.push(Member { task, process: id, task_obj });
+    }
+    // 先完成全部记账（执行上下文 → Process、线程表 → Task），再交给调度器：
+    // 否则新线程可能在记账完成前就运行并退出。
+    let accounted = kobj::with(|t| {
+        t.acquire_internal(id).map_err(|_| ProcError::NoSuchProcess)?;
+        match t.get_mut(id) {
+            Ok(KObject::Process(p)) => {
+                p.threads_live += 1;
+                p.threads_total += 1;
+                p.threads.push(task_obj);
+                Ok(())
+            }
+            _ => Err(ProcError::NoSuchProcess),
+        }
+    });
+    let rollback = |reason: ProcError, accounted: bool| {
+        {
+            let mut reg = REG.lock();
+            reg.starts.retain(|s| s.task != task);
+            reg.members.retain(|m| m.task != task);
+        }
+        kobj::with(|t| {
+            if accounted {
+                if let Ok(KObject::Process(p)) = t.get_mut(id) {
+                    p.threads_live -= 1;
+                    p.threads_total -= 1;
+                    p.threads.retain(|x| *x != task_obj);
+                }
+                let _ = t.release_internal(id);
+            }
+            let _ = t.release_internal(task_obj);
+            let _ = t.release_internal(task_obj);
+        });
+        reason
+    };
+    if let Err(e) = accounted {
+        return Err(rollback(e, false));
+    }
+    if sched::spawn(task, name, thread_entry).is_err() {
+        return Err(rollback(ProcError::NoTaskSlot, true));
+    }
+    kprintln!(
+        "[JSR-PROC] event=system.task.spawned process={:#x} task={} task_obj={:#x} name={}",
+        id.raw(),
+        task.0,
+        task_obj.raw(),
+        name
+    );
+    Ok((task, task_obj))
+}
+
+/// 当前任务所属的进程（内核任务为 `None`）。
+pub fn current_process() -> Option<ObjId> {
+    let (me, _) = sched::current();
+    REG.lock().members.iter().find(|m| m.task == me).map(|m| m.process)
+}
+
+/// 在当前进程的句柄表中放入一个指向 Task 对象的句柄（同时增加该对象的一个外部所有权）。
+pub fn put_task_handle(task_obj: ObjId, rights: Rights) -> Result<HandleId, ProcError> {
+    let pid = current_process().ok_or(ProcError::NoSuchProcess)?;
+    kobj::with(|t| {
+        t.acquire_owner(task_obj).map_err(|_| ProcError::Handle(HandleError::Invalid))?;
+        let r = match t.get_mut(pid) {
+            Ok(KObject::Process(p)) => p
+                .handles
+                .put(ObjectRef { id: ObjectId(task_obj.raw()), ty: ObjectType::Task }, rights)
+                .map_err(ProcError::Handle),
+            _ => Err(ProcError::NoSuchProcess),
+        };
+        if r.is_err() {
+            let _ = t.release_owner(task_obj);
+        }
+        r
+    })
+}
+
+/// 把一个已存在的对象发放给进程：增加一份外部所有权并放进其句柄表（全有或全无）。
+pub fn grant(pid: ObjId, obj: ObjId, ty: ObjectType, rights: Rights) -> Result<HandleId, ProcError> {
+    kobj::with(|t| {
+        t.acquire_owner(obj).map_err(|_| ProcError::Handle(HandleError::Invalid))?;
+        let r = match t.get_mut(pid) {
+            Ok(KObject::Process(p)) => p.handles.put(ObjectRef { id: ObjectId(obj.raw()), ty }, rights).map_err(ProcError::Handle),
+            _ => Err(ProcError::NoSuchProcess),
+        };
+        if r.is_err() {
+            let _ = t.release_owner(obj);
+        }
+        r
+    })
+}
+
+/// 新建一个对象并直接发放给进程（对象的唯一外部所有权就是这个句柄）。
+pub fn grant_new(pid: ObjId, obj: KObject, ty: ObjectType, rights: Rights) -> Result<HandleId, ProcError> {
+    let id = kobj::insert(obj, 1, 0).map_err(|_| ProcError::NoTaskSlot)?;
+    kobj::with(|t| {
+        let r = match t.get_mut(pid) {
+            Ok(KObject::Process(p)) => p.handles.put(ObjectRef { id: ObjectId(id.raw()), ty }, rights).map_err(ProcError::Handle),
+            _ => Err(ProcError::NoSuchProcess),
+        };
+        if r.is_err() {
+            let _ = t.release_owner(id); // 对象随即死亡入队，由清理过程销毁
+        }
+        r
+    })
+}
+
+/// 进程 `pid` 中句柄 `h` 的（对象, 权限）；无效返回 `None`（诊断与验收用）。
+pub fn handle_info(pid: ObjId, h: HandleId) -> Option<(ObjectRef, Rights)> {
+    with_proc(pid, |p| p.handles.get(h).map(|(r, rights)| (*r, rights)).map_err(ProcError::Handle)).ok()
+}
+
+/// 进程 `pid` 的句柄表还能容纳的句柄数。
+pub fn free_handle_slots(pid: ObjId) -> usize {
+    with_proc(pid, |p| Ok(p.handles.free_slots())).unwrap_or(0)
+}
+
+/// 复制当前进程中的句柄，新句柄权限为 `rights`：原句柄须带 `DUPLICATE`，且 `rights` ⊆ 原权限（只可降权）。
+/// 新句柄是同一对象的又一份外部所有权。
+pub fn duplicate_current(h: HandleId, rights: Rights) -> Result<HandleId, ProcError> {
+    let pid = current_process().ok_or(ProcError::NoSuchProcess)?;
+    kobj::with(|t| {
+        let (r, have) = match t.get(pid) {
+            Ok(KObject::Process(p)) => p.handles.get(h).map(|(r, x)| (*r, x)).map_err(ProcError::Handle)?,
+            _ => return Err(ProcError::NoSuchProcess),
+        };
+        if !have.contains(Rights::DUPLICATE) || !have.contains(rights) {
+            return Err(ProcError::Handle(HandleError::RightsDenied));
+        }
+        let obj = ObjId::from_raw(r.id.0).ok_or(ProcError::Handle(HandleError::Invalid))?;
+        t.acquire_owner(obj).map_err(|_| ProcError::Handle(HandleError::Invalid))?;
+        let put = match t.get_mut(pid) {
+            Ok(KObject::Process(p)) => p.handles.put(r, rights).map_err(ProcError::Handle),
+            _ => Err(ProcError::NoSuchProcess),
+        };
+        if put.is_err() {
+            let _ = t.release_owner(obj);
+        }
+        put
+    })
+}
+
+/// 原地降低当前进程中句柄的权限（只减不增）。
+pub fn restrict_current(h: HandleId, rights: Rights) -> Result<(), ProcError> {
+    let pid = current_process().ok_or(ProcError::NoSuchProcess)?;
+    with_proc(pid, |p| p.handles.reduce_rights(h, rights).map_err(ProcError::Handle))
+}
+
+/// **原子**地把进程 `from` 的句柄 `h` 移到进程 `to`（M4.0 规范 v0.6 §3.2 的转移原语；M4.4 的 send/recv 建立在它之上）。
+///
+/// 在同一把对象表锁内：先检查（句柄有效、带 `TRANSFER`、对象是 v1 叶子、接收方句柄表有空位），
+/// 全部通过后才「从 from 移出 → 放进 to」。检查之后不存在可失败的步骤，因此失败时发送方句柄表原样不变；
+/// 成功时外部所有权总数不变（从 from 的句柄转为 to 的句柄），发送方旧句柄值永久失效。
+pub fn transfer(from: ObjId, h: HandleId, to: ObjId) -> Result<HandleId, ProcError> {
+    kobj::with(|t| {
+        let (r, rights) = match t.get(from) {
+            Ok(KObject::Process(p)) => p.handles.get(h).map(|(r, x)| (*r, x)).map_err(ProcError::Handle)?,
+            _ => return Err(ProcError::NoSuchProcess),
+        };
+        if !rights.contains(Rights::TRANSFER) {
+            return Err(ProcError::Handle(HandleError::RightsDenied));
+        }
+        if !r.ty.is_transferable_v1() {
+            return Err(ProcError::NotTransferable);
+        }
+        match t.get(to) {
+            Ok(KObject::Process(p)) if p.handles.free_slots() > 0 => {}
+            Ok(KObject::Process(_)) => return Err(ProcError::Handle(HandleError::TableFull)),
+            _ => return Err(ProcError::NoSuchProcess),
+        }
+        // —— 提交：以下步骤在检查通过后不会失败 ——
+        if let Ok(KObject::Process(p)) = t.get_mut(from) {
+            p.handles.remove(h).map_err(ProcError::Handle)?;
+        }
+        match t.get_mut(to) {
+            Ok(KObject::Process(p)) => p.handles.put(r, rights).map_err(ProcError::Handle),
+            _ => Err(ProcError::NoSuchProcess),
+        }
+    })
+}
+
+/// 让一个没有线程的进程进入 exited（关闭其句柄表）；有线程存活时不做任何事并返回 `false`。
+pub fn exit_idle(pid: ObjId, code: i64) -> bool {
+    kobj::with(|t| {
+        let mut closed: Vec<ObjectRef> = Vec::new();
+        let ok = match t.get_mut(pid) {
+            Ok(KObject::Process(p)) if p.threads_live == 0 && p.state == ProcState::Running => {
+                p.state = ProcState::Exited { code };
+                p.handles.close_all(|r| closed.push(r));
+                true
+            }
+            _ => false,
+        };
+        for r in closed {
+            if let Some(id) = ObjId::from_raw(r.id.0) {
+                let _ = t.release_owner(id);
+            }
+        }
+        ok
+    })
+}
+
+/// 关闭当前进程中的一个句柄：移出句柄表并释放它持有的那份外部所有权（INV-01：不等于销毁对象）。
+pub fn close_handle(h: HandleId) -> Result<(), ProcError> {
+    let pid = current_process().ok_or(ProcError::NoSuchProcess)?;
+    kobj::with(|t| {
+        let obj = match t.get_mut(pid) {
+            Ok(KObject::Process(p)) => p.handles.remove(h).map_err(ProcError::Handle)?,
+            _ => return Err(ProcError::NoSuchProcess),
+        };
+        if let Some(id) = ObjId::from_raw(obj.id.0) {
+            let _ = t.release_owner(id);
+        }
+        Ok(())
+    })
+}
+
+/// 线程退出（正常退出或故障终止的唯一出口；永不返回）：进程记账、释放执行上下文的内部引用后结束任务。
+///
+/// 最后一个线程停止 ⇒ 进程进入 exited：确定退出码并**关闭整张句柄表**（释放各句柄的外部所有权）。
+/// 这里只做计数与入队；任何销毁动作都留给清理过程（这条路径可能处在中断上下文）。
+pub fn thread_exit(code: i64, cause: &'static str) -> ! {
+    let (me, _) = sched::current();
+    let member = {
+        let mut reg = REG.lock();
+        let m = reg.members.iter().find(|m| m.task == me).copied();
+        reg.starts.retain(|s| s.task != me);
+        reg.members.retain(|m| m.task != me);
+        m
+    };
+    if let Some(m) = member {
+        let exited = kobj::with(|t| {
+            let mut out = None;
+            let mut closed: Vec<ObjectRef> = Vec::new();
+            if let Ok(KObject::Process(p)) = t.get_mut(m.process) {
+                p.threads_live = p.threads_live.saturating_sub(1);
+                if p.threads_live == 0 {
+                    p.state = ProcState::Exited { code };
+                    let n = p.handles.close_all(|r| closed.push(r));
+                    out = Some((p.name, p.threads_total, n));
+                }
+            }
+            for r in closed {
+                if let Some(id) = ObjId::from_raw(r.id.0) {
+                    let _ = t.release_owner(id);
+                }
+            }
+            let _ = t.release_internal(m.task_obj); // 执行上下文 → Task
+            let _ = t.release_internal(m.process); // 执行上下文 → Process
+            out
+        });
+        if let Some((name, threads, handles)) = exited {
+            kprintln!(
+                "[JSR-PROC] event=system.process.exited id={:#x} name={} code={} threads={} handles_closed={}",
+                m.process.raw(),
+                name,
+                code,
+                threads,
+                handles
+            );
+        }
+    }
+    sched::exit_current(cause)
+}
+
+/// 进程状态（已死亡或已销毁返回 `None`）。
+pub fn state(id: ObjId) -> Option<ProcState> {
+    with_proc(id, |p| Ok(p.state)).ok()
+}
+
+/// 创建者回收已退出的进程：读取退出信息并**释放创建者持有的外部所有权**。未退出返回 `None`。
+///
+/// 进程对象在全部强引用释放后才被清理过程销毁（[`destroy`]）；调用者需要立即回收资源时调用 `kobj::run_cleanup`。
+pub fn reap(id: ObjId) -> Option<ExitInfo> {
+    let info = kobj::with(|t| {
+        let info = match t.get(id) {
+            Ok(KObject::Process(p)) => match p.state {
+                ProcState::Exited { code } => ExitInfo { code, threads: p.threads_total, frames: p.frames.len() },
+                ProcState::Running => return None,
+            },
+            _ => return None,
+        };
+        t.release_owner(id).ok()?;
+        Some(info)
+    })?;
+    kprintln!(
+        "[JSR-PROC] event=system.process.reaped id={:#x} frames={} threads={} code={}",
+        id.raw(),
+        info.frames,
+        info.threads,
+        info.code
+    );
+    Some(info)
+}
+
+/// 进程对象的销毁动作（只由清理过程调用，不持对象表锁）：销毁地址空间、归还帧、释放线程表引用（级联）。
+pub fn destroy(p: Box<Process>) {
+    let Process { space, frames, threads, handles, .. } = *p;
+    drop(handles); // exited 时已关闭；这里只是释放结构本身
+    drop(space); // 先销毁地址空间（回收私有页表帧），再归还数据帧
+    for f in frames {
+        let _ = frame::deallocate(f);
+    }
+    for t in threads {
+        let _ = kobj::release_internal(t); // 线程表 → Task；可能使 Task 死亡并入队（下一轮清理）
+    }
+}

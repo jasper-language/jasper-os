@@ -149,6 +149,23 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         }
     }
 
+    /// 设置当前任务可发起的系统调用集合。
+    pub fn set_current_syscalls(&mut self, set: crate::syscall::SyscallSet) {
+        if let Some(t) = self.tasks[self.current].as_mut() {
+            t.syscalls = set;
+        }
+    }
+
+    /// 当前任务的地址空间（`None` = 内核空间）。
+    pub fn current_space(&self) -> Option<crate::arch::SpaceRoot> {
+        self.tasks[self.current].as_ref().and_then(|t| t.space)
+    }
+
+    /// 当前任务可发起的系统调用集合。
+    pub fn current_syscalls(&self) -> crate::syscall::SyscallSet {
+        self.tasks[self.current].as_ref().map(|t| t.syscalls).unwrap_or(crate::syscall::SyscallSet::EMPTY)
+    }
+
     /// 把当前任务标记为已退出（槽位在它被切走之后才可被 `spawn` 复用）。
     pub fn mark_current_exited(&mut self) {
         if let Some(t) = self.tasks[self.current].as_mut() {
