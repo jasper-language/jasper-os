@@ -320,6 +320,13 @@ impl<const C: usize, const N: usize> AsyncRing<C, N> {
         self.blocks.iter().position(|b| b.is_none()).ok_or(SubmitError::QuotaExceeded)
     }
 
+    /// 请求的裁决状态：`None` = 不存在（或已销毁）；`Some(None)` = 在飞且尚未裁决；`Some(Some(t))` = 已裁决为 `t`。
+    /// 后端在执行**不可撤销的副作用之前**用它确认请求仍未被取消（与取消在同一把锁内，因此二者以先到者为准）。
+    /// Decision state of a live request: not found / undecided / decided.
+    pub fn decision(&self, id: u64) -> Option<Option<Terminal>> {
+        self.slot_of(id).and_then(|i| self.blocks[i].as_ref()).map(|b| b.decided)
+    }
+
     /// 后端开始执行请求（Queued → Running）。此后在 Q 之前，后端可能访问请求引用的对象与内存。
     pub fn start(&mut self, id: u64, exec: Exec) -> Result<(), ProgressError> {
         let i = self.slot_of(id).ok_or(ProgressError::NoSuchRequest)?;
@@ -651,6 +658,19 @@ mod tests {
         assert_eq!(reclaimed, 4, "每个请求的上下文恰好回收一次");
         let s = r.stats();
         assert_eq!((s.accepted, s.published, s.dropped, s.destroyed), (4, 1, 4, 4));
+    }
+
+    #[test]
+    fn decision_reports_undecided_then_terminal() {
+        let mut r = R::new(4).unwrap();
+        let a = r.submit(buf_sub(1)).unwrap();
+        assert_eq!(r.decision(a), Some(None));
+        r.start(a, Exec::Abortable).unwrap();
+        r.cancel(a).unwrap();
+        assert_eq!(r.decision(a), Some(Some(Terminal::Cancelled)), "已裁决、尚未静止：控制块仍在");
+        r.quiesce(a).unwrap();
+        assert_eq!(r.decision(a), None, "销毁后查不到");
+        assert_eq!(r.decision(999), None);
     }
 
     #[test]

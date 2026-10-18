@@ -313,7 +313,7 @@ check_m43() {   # 用户态异步环：用户程序端到端（ID 单调、cq_fu
      && has 'text=ring: handle dup_with_transfer=-4102 dup_without_transfer_ok=true' \
      && has 'text=ring: closed_with_pending=true enter_after_close=-4101 cancel_after_close=-4101' \
      && has 'text=ring: all checks passed' \
-     && has '\[JSR-RING\] user exit=Some\(Exited \{ code: 0 \}\) quota_after=Some\(RingQuota \{ rings: 0, in_flight: 0 \}\)' \
+     && has '\[JSR-RING\] user exit=Some\(Exited \{ code: 0 \}\) quota_after=Some\(ResourceQuota \{ rings: 0, in_flight: 0, endpoints: 0 \}\)' \
      && has 'buffer cancel=Ok\(0\) hidden_before_quiesce=true cancel_again=Ok\(-4106\) visible_after_quiesce=true' \
      && has 'closing before=Some\(\(2, 3\)\) after_in_flight=Some\(2\) dropped_ready=true submit_after_exit=Some\(-[0-9]+\) quota=Some\(3\)->Some\(2\)' \
      && has 'closing abortable_quiesced=true nonabortable_finished=true ring_destroyed_after_last_request=true quota_returned=true' \
@@ -323,6 +323,29 @@ check_m43() {   # 用户态异步环：用户程序端到端（ID 单调、cq_fu
     record M4.3 PASS "用户态 ring 提交→完成；cq_full 原子失败；信用耗尽可同步取消；信用消费时归还；取消结果表与窗口；closing 各类收尾；配额；回到基线"
   else
     record M4.3 FAIL "缺少 JSR-RING / user-ring 关键标记或 failed≠0"
+  fi
+}
+
+check_m44() {   # IPC Channel：用户程序（单进程语义 + 跨进程往返）+ 内核侧（取消映射 / 共享缓冲区 / 延迟后端 / 叶子回收 / 句柄表满）
+  if has 'text=ipc: roundtrip bytes=[0-9]+ text_ok=true' \
+     && has 'text=ipc: buffer_too_small=-4114 needed=100 retained_then_received=true' \
+     && has 'text=ipc: handle moved=true received=true no_transfer_right=-4102 ring_handle=-4102 kept_on_failure=true' \
+     && has 'text=ipc: two_phase copy_fail=-4100 handle_untouched=true' \
+     && has 'text=ipc: queue capacity=64 full=-4113 handle_kept=true drained=64' \
+     && has 'text=ipc: cancel_then_send cancelled=true message_kept=true deliver_then_cancel=-4106' \
+     && has 'text=ipc: own_close_cancels_recv=true send_to_closed_peer=-4112' \
+     && has 'text=ipc: peer_close pending_recv=-4112 later_recv=-4112' \
+     && has 'text=ipc: all checks passed' \
+     && has 'cross_process ping=Some\(Exited \{ code: 0 \}\) pong=Some\(Exited \{ code: 0 \}\)' \
+     && has 'unmap_during_recv frame_held=true delivered=true out_len=Some\(15\) frame_returned_after=true' \
+     && has 'shared_buffer held_after_first=true returned_after_both=true' \
+     && has 'delayed_backend hidden_and_pinned=true visible_and_returned_after_quiesce=true' \
+     && has 'leaf_in_queue_released_on_receiver_exit=true sender_handle_moved=true' \
+     && has 'receiver_table_full result_table_full=true message_kept=true' \
+     && has '^\[JSR-IPC\] objects_live=([0-9]+)/\1 pending=0 pinned=\(0, 0\) reclaimed=true checks=[0-9]+ failed=0'; then
+    record M4.4 PASS "send/recv 经 ring；两阶段 send；原子交付（缓冲区/句柄表不足消息保留）；取消竞争；关闭语义；跨进程句柄往返；页帧固定；回到基线"
+  else
+    record M4.4 FAIL "缺少 JSR-IPC / user-ipc 关键标记或 failed≠0"
   fi
 }
 
@@ -341,7 +364,7 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_fix
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_fix
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

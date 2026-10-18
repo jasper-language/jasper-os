@@ -37,3 +37,9 @@
 4109	error	system.async.error.cq_full	1	none	完成信用耗尽
 4110	error	system.async.error.id_exhausted	1	none	请求 ID 已用尽
 4111	error	system.error.quota_exceeded	1	none	超出配额
+13	op	system.channel.create	1	write	通道·创建一对端点
+14	op	system.channel.send	1	write	通道·发送消息
+15	op	system.channel.recv	1	write	通道·接收消息
+4112	error	system.channel.error.peer_closed	1	none	对端已关闭
+4113	error	system.channel.error.queue_full	1	none	消息队列已满
+4114	error	system.channel.error.buffer_too_small	1	none	接收缓冲区不足

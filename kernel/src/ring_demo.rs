@@ -26,7 +26,7 @@ use kernel_core::ring_abi::Sqe;
 
 use crate::kobj;
 use crate::mm::frame;
-use crate::proc::{self, ProcError, ProcState, RingQuota};
+use crate::proc::{self, ProcError, ProcState, ResourceQuota};
 use crate::ring::{self, MAX_IN_FLIGHT_PER_PROCESS, MAX_RINGS_PER_PROCESS};
 use crate::syscall::{err, table as abi, SyscallSet};
 use crate::{arch, kprintln, sched};
@@ -111,7 +111,7 @@ fn user_program() {
     check(st == Some(ProcState::Exited { code: 0 }), "user-ring 未以退出码 0 结束（退出码 = 失败步骤）");
     kobj::run_cleanup(usize::MAX); // 关闭句柄后 Ring 已入清理队列：销毁并归还配额
     let quota = proc::ring_quota(pid);
-    check(quota == Some(RingQuota { rings: 0, in_flight: 0 }), "user-ring 退出后 Ring 配额未归还");
+    check(quota == Some(ResourceQuota { rings: 0, in_flight: 0, endpoints: 0 }), "user-ring 退出后 Ring 配额未归还");
     kprintln!("[JSR-RING] user exit={:?} quota_after={:?}", st, quota);
     proc::reap(pid);
     kobj::run_cleanup(usize::MAX);
@@ -132,7 +132,7 @@ fn closing_and_buffer() {
         return;
     };
     // 访问缓冲区的可中止请求：取消后，完成要等后端静止才可见
-    let buf = ring::submit_manual(pid, h, 1, Some(Exec::Abortable), true);
+    let buf = ring::submit_manual(pid, h, 1, Some(Exec::Abortable), Some((0, 0)));
     let first = buf.map(|id| ring::cancel_for(pid, h, id));
     let v1 = ring::view(rid);
     let again = buf.map(|id| ring::cancel_for(pid, h, id));
@@ -150,9 +150,9 @@ fn closing_and_buffer() {
     );
 
     // closing：排队中 / 可中止 / 不可中止 / 已发布未消费
-    let queued = ring::submit_manual(pid, h, 2, None, false);
-    let abortable = ring::submit_manual(pid, h, 3, Some(Exec::Abortable), false);
-    let nonab = ring::submit_manual(pid, h, 4, Some(Exec::NonAbortable), false);
+    let queued = ring::submit_manual(pid, h, 2, None, None);
+    let abortable = ring::submit_manual(pid, h, 3, Some(Exec::Abortable), None);
+    let nonab = ring::submit_manual(pid, h, 4, Some(Exec::NonAbortable), None);
     let now = ring::submit_for(pid, h, &Sqe { op: abi::SYSTEM_TIME_NOW, flags: 0, user_tag: 5, arg0: 0, arg1: 0 });
     check(queued.is_ok() && abortable.is_ok() && nonab.is_ok() && now.is_ok(), "closing 用例提交失败");
     let before = ring::view(rid);
@@ -163,7 +163,7 @@ fn closing_and_buffer() {
     // 进程已退出：提交原子失败，配额不变
     let late = ring::submit_for(pid, h, &Sqe { op: abi::SYSTEM_TIME_NOW, flags: 0, user_tag: 6, arg0: 0, arg1: 0 });
     let quota_mid = proc::ring_quota(pid);
-    let late_ok = late.is_err() && quota_mid == Some(RingQuota { rings: 1, in_flight: 2 });
+    let late_ok = late.is_err() && quota_mid == Some(ResourceQuota { rings: 1, in_flight: 2, endpoints: 0 });
     let (live_mid, _, _) = kobj::stats();
     // 收尾：可中止的报告静止；不可中止的自然结束 ⇒ 最后一个控制块销毁 ⇒ Ring 死亡入清理队列
     let q1 = abortable.map(|id| ring::manual_quiesce(rid, id)).unwrap_or(false);
@@ -173,7 +173,7 @@ fn closing_and_buffer() {
     kobj::run_cleanup(usize::MAX);
     let (live_end, pending_end, _) = kobj::stats();
     let quota_end = proc::ring_quota(pid);
-    let drained = q1 && f1 && still == Some(1) && gone_before_cleanup && live_end + 1 == live_mid && pending_end == 0 && quota_end == Some(RingQuota::default());
+    let drained = q1 && f1 && still == Some(1) && gone_before_cleanup && live_end + 1 == live_mid && pending_end == 0 && quota_end == Some(ResourceQuota::default());
     check(closing_ok, "closing 后状态不正确");
     check(late_ok, "进程退出后的提交未原子失败或配额被改动");
     check(drained, "closing 收尾或 Ring 销毁不正确");
@@ -191,7 +191,7 @@ fn closing_and_buffer() {
         q1,
         f1,
         gone_before_cleanup && live_end + 1 == live_mid,
-        quota_end == Some(RingQuota::default())
+        quota_end == Some(ResourceQuota::default())
     );
     proc::reap(pid);
     kobj::run_cleanup(usize::MAX);
@@ -231,24 +231,24 @@ fn quotas() {
     let mut accepted = 0u32;
     for h in handles.iter().take(4).flatten() {
         for _ in 0..64 {
-            if ring::submit_manual(pid, *h, 0, None, false).is_ok() {
+            if ring::submit_manual(pid, *h, 0, None, None).is_ok() {
                 accepted += 1;
             }
         }
     }
     let before = proc::ring_quota(pid);
-    let over = handles[4].map(|h| ring::submit_manual(pid, h, 0, None, false));
+    let over = handles[4].map(|h| ring::submit_manual(pid, h, 0, None, None));
     let after = proc::ring_quota(pid);
     let inflight_ok = accepted == MAX_IN_FLIGHT_PER_PROCESS
         && over == Some(Err(err(abi::SYSTEM_ERROR_QUOTA_EXCEEDED)))
         && before == after
-        && after == Some(RingQuota { rings: MAX_RINGS_PER_PROCESS, in_flight: MAX_IN_FLIGHT_PER_PROCESS });
+        && after == Some(ResourceQuota { rings: MAX_RINGS_PER_PROCESS, in_flight: MAX_IN_FLIGHT_PER_PROCESS, endpoints: 0 });
     check(rings_ok, "Ring 数配额不正确");
     check(inflight_ok, "在飞请求配额不正确或超额时改动了记账");
     // 进程退出 ⇒ 全部 Ring closing ⇒ 排队请求全部取消销毁 ⇒ Ring 销毁 ⇒ 配额归还
     check(proc::exit_idle(pid, 0), "无线程进程未能退出");
     kobj::run_cleanup(usize::MAX);
-    let returned = proc::ring_quota(pid) == Some(RingQuota::default());
+    let returned = proc::ring_quota(pid) == Some(ResourceQuota::default());
     check(returned, "进程退出后配额未归还");
     kprintln!(
         "[JSR-RING] quota rings={} ninth={:?} in_flight={} over={:?} unchanged_on_reject={} returned={}",

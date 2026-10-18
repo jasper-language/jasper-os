@@ -62,7 +62,17 @@
 - Ring 进程私有（句柄不带 TRANSFER）；外部所有权归零或进程退出 ⇒ closing：拒绝新提交、取消可取消的请求、丢弃未消费的完成，
   不可中止的请求继续到自然结束；有未销毁的请求时 Ring 自身保活，最后一个请求销毁后才被清理
 - 配额（开发默认值）：完成队列容量 ≤ 64、每进程 Ring ≤ 8、每进程在飞请求 ≤ 256；超额原子失败
-- 目前可经 ring 提交的操作：`system.time.now`、`system.time.wait`（可取消）；IPC 操作随 Channel 加入
+- 目前可经 ring 提交的操作：`system.time.now`、`system.time.wait`（可取消）、`system.channel.send`、`system.channel.recv`（可取消）
+
+### IPC Channel（`kernel/src/ipc.rs`）
+- `system.channel.create` 建立一对端点；端点 v1 不可传递，进程间通道由创建方分别放入双方句柄表
+- **send 两阶段**：先复制消息体与句柄值（可失败，不动句柄表），再在一把锁内复核并一次性「移出句柄 → 放进消息 → 入队」；
+  队列满 `queue_full`、对端已关闭 `peer_closed`，均不移出任何句柄。只有叶子对象、且句柄带 TRANSFER 才能随消息移动
+- **recv**：提交时固定接收缓冲区、句柄数组与输出字段所在的页帧，之后只经这些帧写入；交付全有或全无——
+  缓冲区不足（`buffer_too_small`，返回所需大小）或接收方句柄表放不下（`table_full`）时消息留在队列
+- 取消与交付由同一把锁裁决：先取消 ⇒ 消息不被消费；先交付 ⇒ 取消得到 `already_completed`
+- 本端点关闭 ⇒ 其上等待的 recv 以 `cancelled` 结束、队列中的消息被销毁（其中句柄的所有权随之释放）；对端关闭 ⇒ send 与 recv 得到 `peer_closed`
+- 页帧固定：请求进行中用户取消映射缓冲区，帧在请求结束后才归还；多个请求共用一个缓冲区时各自计数
 
 ---
 
@@ -88,4 +98,4 @@ bash scripts/accept.sh
 
 ## 四、下一步
 
-IPC Channel（send/recv 经 ring，取消与交付的原子性）→ 完整的非特权程序隔离与资源回收验收。每一步都以 QEMU 真实运行为验收依据。
+完整的非特权程序隔离与资源回收验收（M5.1）→ 内核漏洞挖掘、Rust 库打包为 `.jaso` 模块、参数化调优 → AArch64 / RISC-V64 / RISC-V32 移植。每一步都以 QEMU 真实运行为验收依据。

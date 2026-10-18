@@ -27,6 +27,8 @@ pub mod clock;
 pub mod fix_demo;
 pub mod console;
 pub mod fault;
+pub mod ipc;
+pub mod ipc_demo;
 pub mod irq;
 pub mod kmain;
 pub mod kobj;

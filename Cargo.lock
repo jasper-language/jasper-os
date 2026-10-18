@@ -499,6 +499,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "user-ipc"
+version = "0.1.0"
+dependencies = [
+ "kernel-core",
+]
+
+[[package]]
 name = "user-ring"
 version = "0.1.0"
 dependencies = [

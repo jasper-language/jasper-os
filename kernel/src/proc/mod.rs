@@ -58,21 +58,23 @@ pub struct Process {
     /// 线程表：每项持有对应 Task 对象的一个内部引用。
     threads: Vec<ObjId>,
     syscalls: SyscallSet,
-    /// 异步环配额记账。
-    ring_quota: RingQuota,
+    /// 资源配额记账（Ring、在飞请求、Channel 端点）。
+    ring_quota: ResourceQuota,
     threads_live: u32,
     threads_total: u32,
     state: ProcState,
 }
 
-/// 进程的异步环配额记账（开发默认值见 `crate::ring` 中的常量）。
-/// Per-process ring quota accounting.
+/// 进程的资源配额记账（开发默认值见 `crate::ring`、`crate::ipc` 中的常量）。
+/// Per-process resource quota accounting.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RingQuota {
+pub struct ResourceQuota {
     /// 尚未销毁的 Ring 数。
     pub rings: u32,
     /// 跨所有 Ring、尚未销毁（X）的请求控制块数。
     pub in_flight: u32,
+    /// 尚未销毁的 Channel 端点数。
+    pub endpoints: u32,
 }
 
 /// 线程的启动参数（线程首次被调度时读取）。
@@ -142,7 +144,7 @@ pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcErr
         frames: Vec::new(),
         threads: Vec::new(),
         syscalls,
-        ring_quota: RingQuota::default(),
+        ring_quota: ResourceQuota::default(),
         threads_live: 0,
         threads_total: 0,
         state: ProcState::Running,
@@ -176,6 +178,54 @@ pub fn map_new(id: ObjId, va: u64, flags: MapFlags) -> Result<PhysFrame, ProcErr
         let _ = frame::deallocate(f);
     }
     r
+}
+
+/// 取消进程中一页的映射并放弃该页的数据帧（仍被在飞请求固定时，帧延后到最后一次解除固定才归还）。
+/// Unmaps one page of a process; its frame is returned now or, if pinned, after the last unpin.
+pub fn unmap_page(id: ObjId, va: u64) -> Result<(), ProcError> {
+    let f = with_proc(id, |p| {
+        let f = p.space.unmap(VirtPage::containing(va)).map_err(ProcError::Map)?;
+        p.frames.retain(|x| *x != f);
+        Ok(f)
+    })?;
+    crate::mm::pin::release(f);
+    Ok(())
+}
+
+/// 在锁内固定进程 `pid` 的用户区间 `[va, va+len)`：区间须位于私有窗口、每页已映射且带用户权限（`write` 时还须可写）。
+/// 返回的范围此后只经物理映射访问；任一页不满足 ⇒ 不固定任何帧。
+/// Pins a user range of `pid` (all-or-nothing).
+pub(crate) fn pin_user_in(
+    t: &mut kobj::Table,
+    pid: ObjId,
+    va: u64,
+    len: usize,
+    write: bool,
+) -> Result<crate::mm::pin::PinnedRange, ProcError> {
+    let bad = ProcError::Map(MapError::InvalidAddress);
+    let p = match t.get(pid) {
+        Ok(KObject::Process(p)) => p,
+        _ => return Err(ProcError::NoSuchProcess),
+    };
+    let mut segs = Vec::new();
+    if len > 0 {
+        let end = va.checked_add(len as u64).ok_or(bad)?;
+        if !in_private_window(va) || !in_private_window(end - 1) {
+            return Err(bad);
+        }
+        let mut cur = va;
+        while cur < end {
+            let off = cur % FRAME_SIZE;
+            let n = (FRAME_SIZE - off).min(end - cur);
+            let (f, flags) = p.space.translate(VirtPage::containing(cur)).ok_or(bad)?;
+            if !flags.contains(MapFlags::USER) || (write && !flags.contains(MapFlags::WRITE)) {
+                return Err(bad);
+            }
+            segs.push((f, off as u32, n as u32));
+            cur += n;
+        }
+    }
+    Ok(crate::mm::pin::PinnedRange::new(segs))
 }
 
 /// 向进程内存写入字节（经页表查询 + 物理映射；目标必须已映射）。用于装载代码与初始数据。
@@ -468,8 +518,32 @@ pub(crate) fn resolve_in(t: &mut kobj::Table, pid: ObjId, h: HandleId, ty: Objec
     ObjId::from_raw(r.id.0).ok_or(ProcError::Handle(HandleError::Invalid))
 }
 
+/// 在锁内读取进程 `pid` 的句柄 `h`（对象引用与权限）。进程须仍在运行。
+pub(crate) fn handle_in(t: &mut kobj::Table, pid: ObjId, h: HandleId) -> Result<(ObjectRef, Rights), ProcError> {
+    let p = receiver(t, pid)?;
+    p.handles.get(h).map(|(r, x)| (*r, x)).map_err(ProcError::Handle)
+}
+
+/// 在锁内从进程 `pid` 的句柄表移出句柄 `h`，返回其对象标识；**不释放**它持有的外部所有权
+/// （所有权随句柄转给调用者，例如放进消息）。
+pub(crate) fn take_handle_in(t: &mut kobj::Table, pid: ObjId, h: HandleId) -> Result<ObjId, ProcError> {
+    let p = receiver(t, pid)?;
+    let r = p.handles.remove(h).map_err(ProcError::Handle)?;
+    ObjId::from_raw(r.id.0).ok_or(ProcError::Handle(HandleError::Invalid))
+}
+
+/// 在锁内把一份已持有的外部所有权作为新句柄放进进程 `pid` 的句柄表（不再增加计数）。
+pub(crate) fn put_handle_in(t: &mut kobj::Table, pid: ObjId, r: ObjectRef, rights: Rights) -> Result<HandleId, ProcError> {
+    receiver(t, pid)?.handles.put(r, rights).map_err(ProcError::Handle)
+}
+
+/// 在锁内查询进程 `pid` 句柄表的空位数（进程不在运行时为 0）。
+pub(crate) fn free_slots_in(t: &mut kobj::Table, pid: ObjId) -> usize {
+    receiver(t, pid).map(|p| p.handles.free_slots()).unwrap_or(0)
+}
+
 /// 在锁内取进程的异步环配额记账（进程已退出也可取，用于收尾时归还；进程已销毁返回 `None`）。
-pub(crate) fn ring_quota_in(t: &mut kobj::Table, pid: ObjId) -> Option<&mut RingQuota> {
+pub(crate) fn ring_quota_in(t: &mut kobj::Table, pid: ObjId) -> Option<&mut ResourceQuota> {
     match t.get_mut(pid) {
         Ok(KObject::Process(p)) => Some(&mut p.ring_quota),
         _ => None,
@@ -482,7 +556,7 @@ pub(crate) fn syscalls_in(t: &mut kobj::Table, pid: ObjId) -> Result<SyscallSet,
 }
 
 /// 进程的异步环配额记账（诊断与验收用）。
-pub fn ring_quota(pid: ObjId) -> Option<RingQuota> {
+pub fn ring_quota(pid: ObjId) -> Option<ResourceQuota> {
     kobj::with(|t| ring_quota_in(t, pid).copied())
 }
 
@@ -706,7 +780,7 @@ pub fn destroy(p: Box<Process>) {
     drop(handles);
     drop(space); // 先销毁地址空间（回收私有页表帧），再归还数据帧
     for f in frames {
-        let _ = frame::deallocate(f);
+        crate::mm::pin::release(f); // 仍被在飞请求固定的帧延后到最后一次解除固定时归还
     }
     for t in threads {
         let _ = kobj::release_internal(t); // 线程表 → Task；可能使 Task 死亡并入队（下一轮清理）

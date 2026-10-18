@@ -106,6 +106,9 @@ fn has_handler(id: u32) -> bool {
             | SYSTEM_ASYNC_RING_ENTER
             | SYSTEM_ASYNC_CANCEL
             | SYSTEM_TIME_WAIT
+            | SYSTEM_CHANNEL_CREATE
+            | SYSTEM_CHANNEL_SEND
+            | SYSTEM_CHANNEL_RECV
     )
 }
 
@@ -264,6 +267,9 @@ fn execute(e: &AbiEntry, a: &SyscallArgs, task_id: u64) -> i64 {
         SYSTEM_ASYNC_RING_ENTER => crate::ring::sys_enter(a.args[0], a.args[1]),
         SYSTEM_ASYNC_CANCEL => crate::ring::sys_cancel(a.args[0], a.args[1]),
         SYSTEM_TIME_WAIT => time_wait(a.args[0]),
+        SYSTEM_CHANNEL_CREATE => crate::ipc::sys_create(a.args[0]),
+        SYSTEM_CHANNEL_SEND => crate::ipc::sys_send(a.args[0], a.args[1]),
+        SYSTEM_CHANNEL_RECV => crate::ipc::sys_recv(a.args[0], a.args[1]),
         _ => err(SYSTEM_ERROR_UNSUPPORTED),
     }
 }

@@ -49,7 +49,7 @@ Jasper 生态的**操作系统侧项目**：一个用 Rust 实现、在 QEMU 中
 | M4.1 | 对象生命周期：外部所有权与内部引用分离、清理队列迭代级联 | ✅ |
 | M4.2 | Handle/Rights：只可降权的复制与限权、跨进程原子转移 | ✅ |
 | M4.3 | 用户态异步 ring（提交 → 完成；完成信用；取消；closing；配额） | ✅ |
-| M4.4 | IPC Channel（send/recv 经 ring）与取消、交付的原子性 | ⬜ |
+| M4.4 | IPC Channel（send/recv 经 ring）与取消、交付的原子性；接收缓冲区页帧固定 | ✅ |
 | ISA-0 | 多指令集准备：`kernel-core` 在 x86_64 / AArch64 / RISC-V64 / RISC-V32 上编译，单元测试在 64 位与 32 位上运行 | ✅ |
 | ISA-1–3 | 内核移植到 AArch64、RISC-V64、RISC-V32 并在各自的 QEMU 上复跑全部验收 | ⬜ |
 | M5.1 | 装载并运行最小非特权程序（ELF），完整隔离与资源回收 | 🟡 ELF 装载与运行已完成，完整回收验收待 M4 |
@@ -78,6 +78,7 @@ jasper-os/
       main.rs           # 引导适配层（bootloader → 中立的交接信息）
   user/hello/           # 最小用户程序（独立静态 ELF，调用号取自登记表）
   user/ring/            # 异步环的用户态验收程序（独立静态 ELF）
+  user/ipc/             # IPC Channel 的用户态验收程序（单进程语义 + 跨进程往返）
   xtask/                # 宿主侧：生成可引导磁盘镜像
   scripts/accept.sh     # 一键验收：构建 → QEMU 真实启动 → 逐里程碑判定
   docs/rust-kernel.md   # 中文说明：结构、分层、构建与验收

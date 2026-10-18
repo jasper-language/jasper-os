@@ -7,9 +7,9 @@
 //! * 销毁动作可以释放其他对象（例如 Process 销毁时释放线程表对 Task 的引用），被释放者入队，下一轮处理——迭代而非递归
 //!
 //! # 已实现的对象种类
-//! 目前只有 Process、Task、Ring 与（演练用的）Event。规范中的叶子对象「共享内存（Memory）」**尚未实现**；
+//! 目前只有 Process、Task、Ring、Channel 端点与（演练用的）Event。规范中的叶子对象「共享内存（Memory）」**尚未实现**；
 //! 地址空间属于进程内部，不作为可经句柄传递的对象，也不代替共享内存对象。
-//! Implemented kinds: Process, Task, Ring, Event. The shared-memory leaf object is not implemented yet.
+//! Implemented kinds: Process, Task, Ring, Channel endpoint, Event. The shared-memory leaf object is not implemented yet.
 //!
 //! # 锁
 //! 对象表锁在全局锁顺序中位于「进程句柄表锁」一层（M4.0 §3.4），持锁期间只做计数与查表，以及调用方明确的页表/帧操作
@@ -51,6 +51,8 @@ pub enum KObject {
     },
     /// 异步环（进程私有；句柄不带 TRANSFER）。
     Ring(Box<crate::ring::RingObj>),
+    /// Channel 端点（v1 不可传递；句柄不带 TRANSFER）。
+    Endpoint(Box<crate::ipc::Endpoint>),
 }
 
 impl KObject {
@@ -61,6 +63,7 @@ impl KObject {
             KObject::Task(_) => "Task",
             KObject::Event { .. } => "Event",
             KObject::Ring(_) => "Ring",
+            KObject::Endpoint(_) => "Endpoint",
         }
     }
 }
@@ -78,15 +81,22 @@ pub fn insert(obj: KObject, owners: u32, internal: u32) -> Result<ObjId, ObjErro
 }
 
 /// 在对象表锁内释放一个外部所有权，并执行该类型的 **closing 动作**（有效外部所有权归零、对象尚未死亡时）：
-/// 目前只有 Ring 有 closing 动作（拒绝新提交、取消可取消的请求、丢弃未消费的完成记录）。
+/// 有 closing 动作的类型：Ring（拒绝新提交、取消可取消的请求、丢弃未消费的完成记录）、
+/// Channel 端点（销毁队列中的消息、取消在其上等待的接收、通知对端）。
 /// 所有释放外部所有权的路径（关闭句柄、进程退出关闭句柄表、回滚）都必须经由这里，closing 才不会被漏掉。
 /// Releases one external ownership and runs the type's closing action when it becomes unowned.
+///
+/// closing 动作在**释放最后一份外部所有权之前**执行：没有内部引用的对象在释放的同一刻就会死亡并离开对象表，
+/// 之后再执行就找不到它了（队列里的消息因此泄漏、对端也收不到关闭通知）。
 pub fn release_owner_in(t: &mut Table, id: ObjId) -> Result<Released, ObjError> {
-    let r = t.release_owner(id)?;
-    if r.became_unowned && !r.dead && matches!(t.get(id), Ok(KObject::Ring(_))) {
-        crate::ring::close_in(t, id);
+    if matches!(t.counts(id), Ok((1, _, _))) {
+        match t.get(id) {
+            Ok(KObject::Ring(_)) => crate::ring::close_in(t, id),
+            Ok(KObject::Endpoint(_)) => crate::ipc::close_in(t, id),
+            _ => {}
+        }
     }
-    Ok(r)
+    t.release_owner(id)
 }
 
 /// 释放一个外部所有权（见 [`release_owner_in`]）。
@@ -123,6 +133,7 @@ pub fn run_cleanup(limit: usize) -> usize {
         match obj {
             KObject::Process(p) => crate::proc::destroy(p),
             KObject::Ring(r) => crate::ring::destroy(r),
+            KObject::Endpoint(e) => crate::ipc::destroy(e),
             KObject::Task(_) | KObject::Event { .. } => {}
         }
         n += 1;

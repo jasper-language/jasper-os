@@ -6,6 +6,7 @@
 //! * [`Sqe`]（32 字节）：一条提交——操作编号、用户标签、两个参数
 //! * [`Cqe`]（32 字节）：一条完成——请求 ID、用户标签、操作编号、结果（≥0 为操作结果，<0 为 `-(错误 ID)`）
 //! * [`EnterArgs`]（56 字节）：一次 `system.async.ring.enter` 的输入与输出
+//! * [`MsgDesc`]（32 字节）：`system.channel.send` / `system.channel.recv` 的消息描述（消息体缓冲区、句柄数组、输出字段）
 //!
 //! # 为什么按字节编解码
 //! 内核从不把用户内存直接当作 Rust 结构体引用：先经用户指针安全层复制到内核缓冲区，再用这里的
@@ -21,6 +22,8 @@ pub const SQE_SIZE: usize = 32;
 pub const CQE_SIZE: usize = 32;
 /// `enter` 参数块的字节数。
 pub const ENTER_ARGS_SIZE: usize = 56;
+/// 消息描述的字节数。
+pub const MSG_DESC_SIZE: usize = 32;
 
 /// 提交记录（Submission Queue Entry）。
 /// Submission entry.
@@ -83,7 +86,60 @@ pub struct EnterArgs {
     pub first_error: i64,
 }
 
+/// 消息描述：send 时描述要发送的消息体与要转移的句柄；recv 时描述接收缓冲区，并由内核写回输出字段。
+/// Message descriptor used by `system.channel.send` / `system.channel.recv`.
+///
+/// * send：`data_ptr`/`data_len` 是消息体；`handles_ptr` 指向 `handles_cap` 个 `u32` 句柄值（全部随消息移动）
+/// * recv：`data_ptr`/`data_len` 是接收缓冲区容量；`handles_ptr`/`handles_cap` 是接收句柄值的数组容量；
+///   完成时内核写回 `out_data_len`（实际字节数；缓冲区不足时为**所需**字节数）与 `out_handles`（收到的句柄数）
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MsgDesc {
+    /// 消息体（send）或接收缓冲区（recv）的用户地址。
+    pub data_ptr: u64,
+    /// 句柄值数组的用户地址（元素为 `u32`）。
+    pub handles_ptr: u64,
+    /// 消息体长度（send）或接收缓冲区容量（recv）。
+    pub data_len: u32,
+    /// 句柄数（send）或句柄数组容量（recv）。
+    pub handles_cap: u32,
+    /// 输出（recv）：消息体字节数；缓冲区不足时为所需字节数。
+    pub out_data_len: u32,
+    /// 输出（recv）：收到的句柄数。
+    pub out_handles: u32,
+}
+
+impl MsgDesc {
+    /// 从 32 字节解码。
+    pub fn decode(b: &[u8; MSG_DESC_SIZE]) -> Self {
+        MsgDesc {
+            data_ptr: u64_at(b, 0),
+            handles_ptr: u64_at(b, 8),
+            data_len: u32_at(b, 16),
+            handles_cap: u32_at(b, 20),
+            out_data_len: u32_at(b, 24),
+            out_handles: u32_at(b, 28),
+        }
+    }
+
+    /// 编码为 32 字节。
+    pub fn encode(&self) -> [u8; MSG_DESC_SIZE] {
+        let mut b = [0u8; MSG_DESC_SIZE];
+        b[0..8].copy_from_slice(&self.data_ptr.to_le_bytes());
+        b[8..16].copy_from_slice(&self.handles_ptr.to_le_bytes());
+        b[16..20].copy_from_slice(&self.data_len.to_le_bytes());
+        b[20..24].copy_from_slice(&self.handles_cap.to_le_bytes());
+        b[24..28].copy_from_slice(&self.out_data_len.to_le_bytes());
+        b[28..32].copy_from_slice(&self.out_handles.to_le_bytes());
+        b
+    }
+
+    /// 输出字段（`out_data_len`、`out_handles`）在描述中的字节偏移与长度。
+    pub const OUTPUT_RANGE: (usize, usize) = (24, 8);
+}
+
 const _: () = assert!(core::mem::size_of::<Sqe>() == SQE_SIZE);
+const _: () = assert!(core::mem::size_of::<MsgDesc>() == MSG_DESC_SIZE);
 const _: () = assert!(core::mem::size_of::<Cqe>() == CQE_SIZE);
 const _: () = assert!(core::mem::size_of::<EnterArgs>() == ENTER_ARGS_SIZE);
 
@@ -194,6 +250,11 @@ mod tests {
         assert_eq!(raw, &s.encode()[..]);
         let raw = unsafe { core::slice::from_raw_parts(&e as *const EnterArgs as *const u8, ENTER_ARGS_SIZE) };
         assert_eq!(raw, &e.encode()[..]);
+        let m = MsgDesc { data_ptr: 1, handles_ptr: 2, data_len: 3, handles_cap: 4, out_data_len: 5, out_handles: 6 };
+        assert_eq!(MsgDesc::decode(&m.encode()), m);
+        // SAFETY：MsgDesc 为 repr(C)、无填充。
+        let raw_m = unsafe { core::slice::from_raw_parts(&m as *const MsgDesc as *const u8, MSG_DESC_SIZE) };
+        assert_eq!(raw_m, &m.encode()[..]);
         let (off, len) = EnterArgs::OUTPUT_RANGE;
         assert_eq!(&e.encode()[off..off + len], &raw[off..off + len]);
     }

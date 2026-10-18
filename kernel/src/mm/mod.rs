@@ -13,6 +13,7 @@ pub mod demo;
 pub mod frame;
 pub mod heap;
 pub mod map;
+pub mod pin;
 pub mod space;
 pub mod user;
 

@@ -13,9 +13,12 @@
 //! |---|---|---|---|
 //! | `system.time.now` | `Backend::Now` | 否（瞬时） | 提交即执行完毕，结果为当前时钟 tick |
 //! | `system.time.wait` | `Backend::Wait` | 是 | 到达截止 tick 后自然结束（结果 0）；可被取消 |
-//! | （内核自检） | `Backend::Manual` | 由调用者指定 | 进展完全由内核调用者报告，用于验证不可中止请求的收尾 |
+//! | `system.channel.send` | 提交时执行 | 否（瞬时） | 两阶段发送，提交时即裁决终态（见 `crate::ipc`） |
+//! | `system.channel.recv` | `Backend::Recv` | 是 | 缓冲区在提交时固定；消息到达时原子交付；可被取消 |
+//! | （内核自检） | `Backend::Manual` | 由调用者指定 | 进展完全由内核调用者报告，可固定一段用户内存，用于验证收尾与固定 |
 //!
-//! 这些后端都不访问用户缓冲区；访问缓冲区的请求（需固定页帧、遵守「静止后才发布」）随 IPC 引入。
+//! 访问用户缓冲区的请求（recv、带固定的人工后端）遵守「后端静止之后才发布完成」；它们持有的资源
+//! （固定的页帧、对端点的内部引用）随后端一起在请求结束时释放（`retire_in`）。
 //!
 //! # 保活与收尾
 //! * 只要还有尚未销毁的请求控制块，Ring 就持有**自身的一个内部引用**——请求的收尾不依赖用户句柄：
@@ -34,9 +37,11 @@ use alloc::vec::Vec;
 use kernel_core::async_ring::{AsyncRing, CancelError, Cancelled, Exec, SubmitError, Submission, Terminal};
 use kernel_core::object::{HandleId, ObjectType, Rights};
 use kernel_core::objtable::ObjId;
-use kernel_core::ring_abi::{Cqe, EnterArgs, Sqe, CQE_SIZE, ENTER_ARGS_SIZE, SQE_SIZE};
+use kernel_core::ring_abi::{Cqe, EnterArgs, MsgDesc, Sqe, CQE_SIZE, ENTER_ARGS_SIZE, SQE_SIZE};
 
+use crate::ipc::{self, Delivery, RecvTarget};
 use crate::kobj::{self, KObject, Table};
+use crate::mm::pin::PinnedRange;
 use crate::mm::user::{copy_from_user, copy_to_user, UserPtrError};
 use crate::proc::{self, ProcError};
 use crate::syscall::table::*;
@@ -58,20 +63,48 @@ pub const RING_RIGHTS: Rights = Rights::WRITE.union(Rights::WAIT).union(Rights::
 
 type StateMachine = AsyncRing<CQ_CAPACITY, BLOCKS_PER_RING>;
 
-/// 请求的执行后端。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 正在执行的请求的后端状态（瞬时完成的操作不进入这里）。
 enum Backend {
-    /// 读当前时刻（瞬时、不可中止）。
-    Now,
     /// 等到时钟到达 `deadline`（可中止）。
     Wait {
         /// 截止 tick。
         deadline: u64,
     },
-    /// 内核自检用：进展由调用者报告。
+    /// 接收消息（可中止）：持有端点的内部引用与固定的缓冲区。
+    Recv(Box<RecvTarget>),
+    /// 内核自检用：进展由调用者报告；可固定一段用户内存。
     Manual {
-        /// 是否模拟访问用户缓冲区（完成须等静止后发布）。
-        uses_buffer: bool,
+        /// 固定的用户内存（模拟访问缓冲区的请求）。
+        pins: Option<PinnedRange>,
+    },
+}
+
+/// 一次提交要做的工作（提交时的可信快照；用户内存已在此之前复制或固定）。
+pub(crate) enum Work {
+    /// `system.time.now`。
+    Now,
+    /// `system.time.wait`：等待 `ticks` 个 tick。
+    Wait {
+        /// 等待时长。
+        ticks: u64,
+    },
+    /// `system.channel.send`：阶段 A 已完成（消息体与句柄值已复制）。
+    Send {
+        /// 发送所用的端点句柄。
+        endpoint: HandleId,
+        /// 消息体。
+        body: Vec<u8>,
+        /// 要随消息移动的句柄值。
+        handles: Vec<u32>,
+    },
+    /// `system.channel.recv`：目标已建立（缓冲区已固定、端点内部引用已取得）。
+    Recv(Box<RecvTarget>),
+    /// 内核自检：人工后端；`start = None` 停留在排队状态。
+    Manual {
+        /// 开始执行时的可中止性。
+        start: Option<Exec>,
+        /// 固定的用户内存。
+        pins: Option<PinnedRange>,
     },
 }
 
@@ -81,7 +114,7 @@ pub struct RingObj {
     owner: ObjId,
     sm: StateMachine,
     /// 正在执行的请求及其后端（请求静止后移除）。
-    running: [Option<(u64, Backend)>; BLOCKS_PER_RING],
+    running: Vec<(u64, Backend)>,
     /// 是否持有「自身的内部引用」（有未销毁的控制块时持有）。
     pinned: bool,
 }
@@ -115,25 +148,21 @@ impl RingObj {
         }
     }
 
-    fn set_running(&mut self, id: u64, b: Backend) {
-        if let Some(slot) = self.running.iter_mut().find(|s| s.is_none()) {
-            *slot = Some((id, b));
-        }
-    }
-
     fn take_running(&mut self, id: u64) -> Option<Backend> {
-        let slot = self.running.iter_mut().find(|s| matches!(s, Some((rid, _)) if *rid == id))?;
-        slot.take().map(|(_, b)| b)
+        let i = self.running.iter().position(|(rid, _)| *rid == id)?;
+        Some(self.running.swap_remove(i).1)
     }
 
     /// 推进到期的等待后端：截止 tick 已到 ⇒ 自然结束并静止。
     fn poll(&mut self, now: u64) {
-        for i in 0..BLOCKS_PER_RING {
-            if let Some((id, Backend::Wait { deadline })) = self.running[i] {
-                if now >= deadline {
-                    self.running[i] = None;
+        let mut i = 0;
+        while i < self.running.len() {
+            match self.running[i] {
+                (id, Backend::Wait { deadline }) if now >= deadline => {
+                    self.running.swap_remove(i);
                     let _ = self.sm.finish(id, 0);
                 }
+                _ => i += 1,
             }
         }
     }
@@ -143,6 +172,15 @@ fn ring_mut(t: &mut Table, id: ObjId) -> Option<&mut RingObj> {
     match t.get_mut(id) {
         Ok(KObject::Ring(r)) => Some(r),
         _ => None,
+    }
+}
+
+/// 释放一个已结束请求的后端资源（锁内）：recv 撤销等待登记并释放端点引用；固定随之解除。
+fn retire_in(t: &mut Table, ring: ObjId, req: u64, b: Backend) {
+    match b {
+        Backend::Recv(target) => ipc::release_target_in(t, *target, Some((ring, req))),
+        Backend::Manual { pins } => drop(pins),
+        Backend::Wait { .. } => {}
     }
 }
 
@@ -181,23 +219,68 @@ fn settle_in(t: &mut Table, id: ObjId) {
     }
 }
 
+/// 中止一个已被裁决为取消的执行中请求（锁内）：可立即停止的后端（等待、接收）释放资源并静止；
+/// 人工后端放回原处，由调用者报告静止。
+fn abort_in(t: &mut Table, ring: ObjId, req: u64) {
+    let Some(r) = ring_mut(t, ring) else { return };
+    match r.take_running(req) {
+        Some(Backend::Manual { pins }) => r.running.push((req, Backend::Manual { pins })),
+        Some(b) => {
+            retire_in(t, ring, req, b);
+            if let Some(r) = ring_mut(t, ring) {
+                let _ = r.sm.quiesce(req);
+            }
+        }
+        None => {}
+    }
+}
+
 /// closing 动作（外部所有权归零时由对象表调用）：拒绝新提交、丢弃未消费的完成记录、
-/// 排队中与可中止的请求裁决为取消；等待后端可立即停止，因此直接静止；不可中止的请求继续执行到自然结束。
+/// 排队中与可中止的请求裁决为取消；可立即停止的后端直接静止；不可中止的请求继续执行到自然结束。
 pub fn close_in(t: &mut Table, id: ObjId) {
     let Some(r) = ring_mut(t, id) else { return };
     let mut aborted: Vec<u64> = Vec::new();
     r.sm.close(|_, req| aborted.push(req));
     for req in aborted {
-        match r.take_running(req) {
-            Some(Backend::Wait { .. }) => {
-                let _ = r.sm.quiesce(req);
+        abort_in(t, id, req);
+    }
+    let n = ring_mut(t, id).map(|r| r.sm.in_flight()).unwrap_or(0);
+    crate::kprintln!("[JSR-RING] event=system.async.ring.closing ring={:#x} in_flight={}", id.raw(), n);
+    settle_in(t, id);
+}
+
+/// 内核强制取消一个请求（锁内；例如它等待的端点被关闭）：未裁决 ⇒ 裁决为取消并中止后端。
+pub(crate) fn kernel_cancel_in(t: &mut Table, ring: ObjId, req: u64) {
+    let Some(r) = ring_mut(t, ring) else { return };
+    if let Ok(Cancelled::AbortBackend { .. }) = r.sm.cancel(req) {
+        abort_in(t, ring, req);
+    }
+    settle_in(t, ring);
+}
+
+/// 端点上有消息到达或对端关闭时，为一个等待者尝试交付（锁内）。返回 `false` = 仍需等待（未改变任何状态）。
+pub(crate) fn deliver_waiter_in(t: &mut Table, ring: ObjId, req: u64) -> bool {
+    let Some(r) = ring_mut(t, ring) else { return true };
+    if r.sm.decision(req) != Some(None) {
+        return true; // 已被取消或已结束：陈旧登记，丢弃
+    }
+    let Some(Backend::Recv(target)) = r.take_running(req) else { return true };
+    match ipc::try_deliver_in(t, &target) {
+        Delivery::Empty => {
+            if let Some(r) = ring_mut(t, ring) {
+                r.running.push((req, Backend::Recv(target)));
             }
-            Some(b) => r.set_running(req, b), // 人工后端：由调用者报告静止
-            None => {}
+            false
+        }
+        Delivery::Done(v) => {
+            if let Some(r) = ring_mut(t, ring) {
+                let _ = r.sm.finish(req, v);
+            }
+            retire_in(t, ring, req, Backend::Recv(target));
+            settle_in(t, ring);
+            true
         }
     }
-    crate::kprintln!("[JSR-RING] event=system.async.ring.closing ring={:#x} in_flight={}", id.raw(), r.sm.in_flight());
-    settle_in(t, id);
 }
 
 /// 销毁动作（清理过程调用，不持对象表锁）：归还所属进程的 Ring 配额。
@@ -214,7 +297,8 @@ fn perr(e: ProcError) -> i64 {
     crate::syscall::proc_err(e)
 }
 
-fn user_err(e: UserPtrError) -> i64 {
+/// 用户指针错误 → 返回值。
+pub(crate) fn user_err(e: UserPtrError) -> i64 {
     match e {
         UserPtrError::TooLong => err(SYSTEM_ERROR_INVALID_ARGUMENT),
         UserPtrError::InvalidAddress | UserPtrError::NotUserTask => err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS),
@@ -255,7 +339,7 @@ pub fn create_for(pid: ObjId, capacity: u64) -> Result<HandleId, i64> {
         return Err(err(SYSTEM_ERROR_INVALID_ARGUMENT));
     }
     let sm = StateMachine::new(capacity as usize).ok_or(err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
-    let obj = KObject::Ring(Box::new(RingObj { owner: pid, sm, running: [None; BLOCKS_PER_RING], pinned: false }));
+    let obj = KObject::Ring(Box::new(RingObj { owner: pid, sm, running: Vec::new(), pinned: false }));
     kobj::with(|t| {
         proc::syscalls_in(t, pid).map_err(perr)?;
         if proc::ring_quota_in(t, pid).map(|q| q.rings).unwrap_or(u32::MAX) >= MAX_RINGS_PER_PROCESS {
@@ -283,57 +367,88 @@ pub fn sys_create(capacity: u64) -> i64 {
 
 // ———————————————————————— 提交 ————————————————————————
 
-/// 把一条提交记录映射到后端：检查标志、操作是否可经 ring 提交、调用者是否被授予该操作、参数。
-fn backend_for(sqe: &Sqe, allowed: SyscallSet) -> Result<Backend, i64> {
+/// 检查一条提交记录的标志、操作是否可经 ring 提交、调用者是否被授予该操作。
+fn check_sqe(sqe: &Sqe, allowed: SyscallSet) -> Result<(), i64> {
     if sqe.flags != 0 {
         return Err(err(SYSTEM_ERROR_INVALID_ARGUMENT));
     }
-    let b = match sqe.op {
-        SYSTEM_TIME_NOW => Backend::Now,
-        SYSTEM_TIME_WAIT => Backend::Wait {
-            deadline: sched::timer_ticks().checked_add(sqe.arg0).ok_or(err(SYSTEM_ERROR_INVALID_ARGUMENT))?,
-        },
-        _ => return Err(err(SYSTEM_ERROR_UNSUPPORTED)),
-    };
+    if !matches!(sqe.op, SYSTEM_TIME_NOW | SYSTEM_TIME_WAIT | SYSTEM_CHANNEL_SEND | SYSTEM_CHANNEL_RECV) {
+        return Err(err(SYSTEM_ERROR_UNSUPPORTED));
+    }
     if !allowed.contains(sqe.op as u64) {
         return Err(err(SYSTEM_ERROR_RIGHTS_DENIED));
     }
-    Ok(b)
+    Ok(())
 }
 
 /// 在锁内提交一个请求（INV-11：检查、配额预留、信用预留原子成功或原子失败）并启动其后端。
-/// `manual_start` 只对人工后端有意义：`None` = 停留在排队状态，`Some(exec)` = 以给定可中止性开始执行。
-fn submit_in(
-    t: &mut Table,
-    pid: ObjId,
-    ring: ObjId,
-    op: u32,
-    user_tag: u64,
-    backend: Backend,
-    manual_start: Option<Exec>,
-) -> Result<u64, i64> {
-    let quota = proc::ring_quota_in(t, pid).map(|q| q.in_flight).ok_or(err(SYSTEM_ERROR_RIGHTS_DENIED))?;
+/// 提交被拒时，工作已持有的资源（recv 的固定与端点引用）全部释放。
+fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, work: Work) -> Result<u64, i64> {
+    let reject = |t: &mut Table, work: Work, e: i64| {
+        if let Work::Recv(target) = work {
+            ipc::release_target_in(t, *target, None);
+        }
+        Err(e)
+    };
+    let quota = match proc::ring_quota_in(t, pid) {
+        Some(q) => q.in_flight,
+        None => return reject(t, work, err(SYSTEM_ERROR_RIGHTS_DENIED)),
+    };
     if quota >= MAX_IN_FLIGHT_PER_PROCESS {
-        return Err(err(SYSTEM_ERROR_QUOTA_EXCEEDED));
+        return reject(t, work, err(SYSTEM_ERROR_QUOTA_EXCEEDED));
     }
-    let r = ring_mut(t, ring).ok_or(err(SYSTEM_HANDLE_ERROR_INVALID))?;
-    let uses_buffer = matches!(backend, Backend::Manual { uses_buffer: true });
-    let id = r.sm.submit(Submission { op, user_tag, context: 0, uses_buffer }).map_err(submit_err)?;
+    let deadline = match work {
+        Work::Wait { ticks } => match sched::timer_ticks().checked_add(ticks) {
+            Some(d) => d,
+            None => return reject(t, work, err(SYSTEM_ERROR_INVALID_ARGUMENT)),
+        },
+        _ => 0,
+    };
+    let uses_buffer = matches!(work, Work::Recv(_) | Work::Manual { pins: Some(_), .. });
+    let Some(r) = ring_mut(t, ring) else { return reject(t, work, err(SYSTEM_HANDLE_ERROR_INVALID)) };
+    let id = match r.sm.submit(Submission { op, user_tag, context: 0, uses_buffer }) {
+        Ok(id) => id,
+        Err(e) => return reject(t, work, submit_err(e)),
+    };
     // 以下步骤不会失败：控制块已建立，信用已预留
-    match backend {
-        Backend::Now => {
+    match work {
+        Work::Now => {
             let _ = r.sm.start(id, Exec::NonAbortable);
             let _ = r.sm.finish(id, sched::timer_ticks() as i64);
         }
-        Backend::Wait { .. } => {
+        Work::Wait { .. } => {
             let _ = r.sm.start(id, Exec::Abortable);
-            r.set_running(id, backend);
+            r.running.push((id, Backend::Wait { deadline }));
         }
-        Backend::Manual { .. } => {
-            if let Some(exec) = manual_start {
-                let _ = r.sm.start(id, exec);
-                r.set_running(id, backend);
+        Work::Send { endpoint, body, handles } => {
+            let _ = r.sm.start(id, Exec::NonAbortable);
+            let v = ipc::send_in(t, pid, endpoint, body, &handles);
+            if let Some(r) = ring_mut(t, ring) {
+                let _ = r.sm.finish(id, v);
             }
+        }
+        Work::Recv(target) => {
+            let _ = r.sm.start(id, Exec::Abortable);
+            match ipc::try_deliver_in(t, &target) {
+                Delivery::Empty => {
+                    ipc::add_waiter_in(t, &target, ring, id);
+                    if let Some(r) = ring_mut(t, ring) {
+                        r.running.push((id, Backend::Recv(target)));
+                    }
+                }
+                Delivery::Done(v) => {
+                    if let Some(r) = ring_mut(t, ring) {
+                        let _ = r.sm.finish(id, v);
+                    }
+                    retire_in(t, ring, id, Backend::Recv(target));
+                }
+            }
+        }
+        Work::Manual { start, pins } => {
+            if let Some(exec) = start {
+                let _ = r.sm.start(id, exec);
+            }
+            r.running.push((id, Backend::Manual { pins }));
         }
     }
     if let Some(q) = proc::ring_quota_in(t, pid) {
@@ -343,31 +458,64 @@ fn submit_in(
     Ok(id)
 }
 
-/// 以进程 `pid` 的身份经句柄 `h` 提交一条记录（与 `enter` 的单条提交路径相同）。
-pub fn submit_for(pid: ObjId, h: HandleId, sqe: &Sqe) -> Result<u64, i64> {
+/// 以进程 `pid` 的身份经 Ring 句柄 `h` 提交一项工作（内核侧入口；用户态入口见 [`sys_enter`]）。
+pub(crate) fn submit_work_for(pid: ObjId, h: HandleId, op: u32, user_tag: u64, work: Work) -> Result<u64, i64> {
     kobj::with(|t| {
-        let allowed = proc::syscalls_in(t, pid).map_err(perr)?;
-        let ring = proc::resolve_in(t, pid, h, ObjectType::Ring, Rights::WRITE).map_err(perr)?;
-        let backend = backend_for(sqe, allowed)?;
-        submit_in(t, pid, ring, sqe.op, sqe.user_tag, backend, None)
+        let ring = match proc::resolve_in(t, pid, h, ObjectType::Ring, Rights::WRITE) {
+            Ok(r) => r,
+            Err(e) => {
+                if let Work::Recv(target) = work {
+                    ipc::release_target_in(t, *target, None);
+                }
+                return Err(perr(e));
+            }
+        };
+        submit_in(t, pid, ring, op, user_tag, work)
     })
 }
 
+/// 以进程 `pid` 的身份经句柄 `h` 提交一条 `system.time.*` 记录（内核自检用；与 `enter` 的单条提交路径相同）。
+pub fn submit_for(pid: ObjId, h: HandleId, sqe: &Sqe) -> Result<u64, i64> {
+    let allowed = kobj::with(|t| proc::syscalls_in(t, pid)).map_err(perr)?;
+    check_sqe(sqe, allowed)?;
+    let work = match sqe.op {
+        SYSTEM_TIME_NOW => Work::Now,
+        SYSTEM_TIME_WAIT => Work::Wait { ticks: sqe.arg0 },
+        _ => return Err(err(SYSTEM_ERROR_UNSUPPORTED)),
+    };
+    submit_work_for(pid, h, sqe.op, sqe.user_tag, work)
+}
+
+/// 内核自检：以进程 `pid` 的身份经 Ring `h` 提交 recv（`desc` 是已写入进程内存 `desc_ptr` 处的描述）。
+pub fn submit_recv_for(pid: ObjId, h: HandleId, endpoint: HandleId, desc_ptr: u64, desc: &MsgDesc) -> Result<u64, i64> {
+    let target = kobj::with(|t| ipc::prepare_recv_in(t, pid, endpoint, desc_ptr, desc))?;
+    submit_work_for(pid, h, SYSTEM_CHANNEL_RECV, 0, Work::Recv(Box::new(target)))
+}
+
+/// 内核自检：以进程 `pid` 的身份经 Ring `h` 提交 send（消息体与句柄值由内核给出，相当于阶段 A 已完成）。
+pub fn submit_send_for(pid: ObjId, h: HandleId, endpoint: HandleId, body: Vec<u8>, handles: Vec<u32>) -> Result<u64, i64> {
+    submit_work_for(pid, h, SYSTEM_CHANNEL_SEND, 0, Work::Send { endpoint, body, handles })
+}
+
 /// 内核自检：提交一个人工后端请求；`start = None` 时请求停留在排队状态，否则以给定可中止性开始执行。
-/// `uses_buffer = true` 模拟访问用户缓冲区的请求：它的完成只在后端静止之后才发布。
-pub fn submit_manual(pid: ObjId, h: HandleId, user_tag: u64, start: Option<Exec>, uses_buffer: bool) -> Result<u64, i64> {
-    kobj::with(|t| {
-        let ring = proc::resolve_in(t, pid, h, ObjectType::Ring, Rights::WRITE).map_err(perr)?;
-        submit_in(t, pid, ring, 0, user_tag, Backend::Manual { uses_buffer }, start)
-    })
+/// `pin = Some((va, len))` 时固定进程的一段内存，模拟访问用户缓冲区的请求（完成须等后端静止才发布）。
+pub fn submit_manual(pid: ObjId, h: HandleId, user_tag: u64, start: Option<Exec>, pin: Option<(u64, usize)>) -> Result<u64, i64> {
+    let pins = match pin {
+        Some((va, len)) => Some(kobj::with(|t| proc::pin_user_in(t, pid, va, len, true)).map_err(perr)?),
+        None => None,
+    };
+    submit_work_for(pid, h, 0, user_tag, Work::Manual { start, pins })
 }
 
 /// 内核自检：人工后端自然结束（结果 `value`）。
 pub fn manual_finish(ring: ObjId, req: u64, value: i64) -> bool {
     kobj::with(|t| {
         let Some(r) = ring_mut(t, ring) else { return false };
-        r.take_running(req);
+        let b = r.take_running(req);
         let ok = r.sm.finish(req, value).is_ok();
+        if let Some(b) = b {
+            retire_in(t, ring, req, b);
+        }
         settle_in(t, ring);
         ok
     })
@@ -377,8 +525,11 @@ pub fn manual_finish(ring: ObjId, req: u64, value: i64) -> bool {
 pub fn manual_quiesce(ring: ObjId, req: u64) -> bool {
     kobj::with(|t| {
         let Some(r) = ring_mut(t, ring) else { return false };
-        r.take_running(req);
+        let b = r.take_running(req);
         let ok = r.sm.quiesce(req).is_ok();
+        if let Some(b) = b {
+            retire_in(t, ring, req, b);
+        }
         settle_in(t, ring);
         ok
     })
@@ -398,14 +549,7 @@ pub fn cancel_for(pid: ObjId, h: HandleId, req: u64) -> i64 {
         let ret = match r.sm.cancel(req) {
             Ok(Cancelled::NotStarted) => 0,
             Ok(Cancelled::AbortBackend { .. }) => {
-                // 等待后端可立即停止 ⇒ 直接静止；人工后端由调用者报告静止
-                match r.take_running(req) {
-                    Some(Backend::Wait { .. }) => {
-                        let _ = r.sm.quiesce(req);
-                    }
-                    Some(b) => r.set_running(req, b),
-                    None => {}
-                }
+                abort_in(t, ring, req);
                 0
             }
             Err(e) => cancel_err(e),
@@ -424,6 +568,24 @@ pub fn sys_cancel(h: u64, req: u64) -> i64 {
 }
 
 // ———————————————————————— enter ————————————————————————
+
+/// 为一条用户提交记录准备工作：send 完成阶段 A（复制消息体与句柄值）；recv 复制描述并固定缓冲区。
+fn prepare_user_work(pid: ObjId, sqe: &Sqe, allowed: SyscallSet) -> Result<Work, i64> {
+    check_sqe(sqe, allowed)?;
+    Ok(match sqe.op {
+        SYSTEM_TIME_NOW => Work::Now,
+        SYSTEM_TIME_WAIT => Work::Wait { ticks: sqe.arg0 },
+        SYSTEM_CHANNEL_SEND => {
+            let (body, handles) = ipc::copy_send_args(sqe.arg1)?;
+            Work::Send { endpoint: HandleId::from_raw(sqe.arg0 as u32), body, handles }
+        }
+        _ => {
+            let d = ipc::copy_desc(sqe.arg1)?;
+            let target = kobj::with(|t| ipc::prepare_recv_in(t, pid, HandleId::from_raw(sqe.arg0 as u32), sqe.arg1, &d))?;
+            Work::Recv(Box::new(target))
+        }
+    })
+}
 
 /// `system.async.ring.enter(ring, args)`：按顺序提交 `sq_count` 条记录（遇到第一条被拒即停止并记下其错误；
 /// 被接受者的请求 ID 写回 `id_ptr` 数组）→
@@ -459,34 +621,32 @@ pub fn sys_enter(h: u64, args_ptr: u64) -> i64 {
             return user_err(e);
         }
     }
+    let allowed = match kobj::with(|t| proc::syscalls_in(t, pid)) {
+        Ok(a) => a,
+        Err(e) => return perr(e),
+    };
+    if let Err(e) = kobj::with(|t| proc::resolve_in(t, pid, h, ObjectType::Ring, Rights::WRITE.union(Rights::WAIT))) {
+        return perr(e);
+    }
 
-    // 1. 提交（可信快照：之后只使用内核里的副本）
+    // 1. 提交：逐条准备（复制 / 固定，可失败）后在锁内提交；遇到第一条被拒即停止
     let mut submitted = 0u32;
     let mut first_error = 0i64;
-    let resolved = kobj::with(|t| {
-        let allowed = proc::syscalls_in(t, pid).map_err(perr)?;
-        let ring = proc::resolve_in(t, pid, h, ObjectType::Ring, Rights::WRITE.union(Rights::WAIT)).map_err(perr)?;
-        for chunk in sq.chunks_exact(SQE_SIZE) {
-            let mut b = [0u8; SQE_SIZE];
-            b.copy_from_slice(chunk);
-            let sqe = Sqe::decode(&b);
-            let r = backend_for(&sqe, allowed).and_then(|be| submit_in(t, pid, ring, sqe.op, sqe.user_tag, be, None));
-            match r {
-                Ok(id) => {
-                    ids[submitted as usize * 8..submitted as usize * 8 + 8].copy_from_slice(&id.to_le_bytes());
-                    submitted += 1;
-                }
-                Err(e) => {
-                    first_error = e;
-                    break;
-                }
+    for chunk in sq.chunks_exact(SQE_SIZE) {
+        let mut b = [0u8; SQE_SIZE];
+        b.copy_from_slice(chunk);
+        let sqe = Sqe::decode(&b);
+        let r = prepare_user_work(pid, &sqe, allowed).and_then(|w| submit_work_for(pid, h, sqe.op, sqe.user_tag, w));
+        match r {
+            Ok(id) => {
+                ids[submitted as usize * 8..submitted as usize * 8 + 8].copy_from_slice(&id.to_le_bytes());
+                submitted += 1;
+            }
+            Err(e) => {
+                first_error = e;
+                break;
             }
         }
-        settle_in(t, ring);
-        Ok::<ObjId, i64>(ring)
-    });
-    if let Err(e) = resolved {
-        return e;
     }
     if args.id_ptr != 0 && submitted > 0 {
         if let Err(e) = copy_to_user(args.id_ptr, &ids[..submitted as usize * 8], SQ_BATCH * 8) {
@@ -537,6 +697,19 @@ pub fn sys_enter(h: u64, args_ptr: u64) -> i64 {
 }
 
 // ———————————————————————— 诊断 ————————————————————————
+
+/// 内核自检：从 Ring 收取至多 `max` 条完成记录 `(请求 ID, 结果)` 并归还信用（与用户收取相同的消费路径）。
+pub fn reap_kernel(ring: ObjId, max: usize) -> Vec<(u64, i64)> {
+    kobj::with(|t| {
+        settle_in(t, ring);
+        let Some(r) = ring_mut(t, ring) else { return Vec::new() };
+        let n = max.min(r.sm.ready());
+        let out: Vec<(u64, i64)> = (0..n).filter_map(|i| r.sm.peek(i)).map(|c| (c.request_id, result_of(c.terminal))).collect();
+        r.sm.consume(n);
+        settle_in(t, ring);
+        out
+    })
+}
 
 /// 进程 `pid` 的句柄 `h` 所指的 Ring（诊断与自检用）。
 pub fn ring_of(pid: ObjId, h: HandleId) -> Option<ObjId> {

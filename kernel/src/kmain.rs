@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{clock, fix_demo, irq, kprintln, mech_demo, ring_demo, mm, sched, user_demo};
+use crate::{clock, fix_demo, ipc_demo, irq, kprintln, mech_demo, ring_demo, mm, sched, user_demo};
 
 /// 内核版本（横幅中输出）。
 pub const VERSION: &str = "0.0.1";
@@ -83,13 +83,17 @@ pub fn start(boot: &'static BootSpec) -> ! {
     fix_demo::run();
     // M4.3：用户态异步环（提交 → 完成；完成信用；取消；closing；配额）。
     ring_demo::run();
-    if mm::demo::failed() > 0 || user_demo::failed() > 0 || fix_demo::failed() > 0 || ring_demo::failed() > 0 {
+    // M4.4：IPC Channel（send/recv 经 ring；两阶段 send；原子交付；取消竞争；页帧固定）。
+    ipc_demo::run();
+    let fails = [mm::demo::failed(), user_demo::failed(), fix_demo::failed(), ring_demo::failed(), ipc_demo::failed()];
+    if fails.iter().any(|&f| f > 0) {
         kprintln!(
-            "[JSR-EXIT] failure mm_failed={} user_failed={} fix_failed={} ring_failed={}",
-            mm::demo::failed(),
-            user_demo::failed(),
-            fix_demo::failed(),
-            ring_demo::failed()
+            "[JSR-EXIT] failure mm_failed={} user_failed={} fix_failed={} ring_failed={} ipc_failed={}",
+            fails[0],
+            fails[1],
+            fails[2],
+            fails[3],
+            fails[4]
         );
         arch::exit_emulator(ExitStatus::Failure);
     }
