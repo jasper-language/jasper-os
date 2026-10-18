@@ -761,6 +761,7 @@ version = "0.1.0"
 dependencies = [
  "jaso",
  "jasper-rt",
+ "kernel-core",
 ]
 
 [[package]]
@@ -769,6 +770,7 @@ version = "0.1.0"
 dependencies = [
  "crc",
  "jasper-rt",
+ "kernel-core",
  "miniz_oxide",
  "sha2",
  "smoltcp",
@@ -780,6 +782,7 @@ version = "0.1.0"
 dependencies = [
  "jaso",
  "jasper-rt",
+ "kernel-core",
 ]
 
 [[package]]
@@ -801,6 +804,7 @@ name = "user-rtdemo"
 version = "0.1.0"
 dependencies = [
  "jasper-rt",
+ "kernel-core",
 ]
 
 [[package]]
@@ -808,6 +812,7 @@ name = "user-schedtest"
 version = "0.1.0"
 dependencies = [
  "jasper-rt",
+ "kernel-core",
 ]
 
 [[package]]

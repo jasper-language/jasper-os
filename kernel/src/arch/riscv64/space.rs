@@ -23,6 +23,8 @@ pub const USER_FIRST: usize = 32;
 pub const USER_LAST: usize = 64;
 /// 私有窗口对应的虚拟地址区间 `[start, end)`（32 GiB）。
 pub const USER_WINDOW: (u64, u64) = ((USER_FIRST as u64) << 30, (USER_LAST as u64) << 30);
+// 用户态运行时与用户程序的链接地址按同一数值布局：两边必须一致。
+const _: () = assert!(USER_WINDOW.0 == kernel_core::user_layout::WINDOW_BASE_RISCV64);
 /// 内核共享部分的第一个顶级下标（含）。
 pub const KERNEL_FIRST: usize = 128;
 /// 内核共享部分的最后一个顶级下标（不含）= 低半区的顶级表项数。

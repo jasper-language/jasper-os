@@ -24,6 +24,7 @@
 //! * [`sched`]  —— 调度策略：QoS 四档 + 用量衰减 + 各档最低份额 + 唤醒延迟直方图（宿主可模拟测试）
 //! * [`trace`]  —— 无堆环形缓冲、ID 分配器、结构化事件追踪器
 //! * [`sync`]   —— 自旋锁
+//! * [`user_layout`] —— 各指令集的用户私有窗口起点与用户程序装载地址（内核、运行时与构建脚本共用）
 //!
 //! # 边界（为什么这样分）
 //! * 只依赖 `core`：`#![no_std]`，测试时才链接 `std`（`cfg_attr(not(test), no_std)`），
@@ -60,6 +61,7 @@ pub mod objtable;
 pub mod sync;
 pub mod trace;
 pub mod trap;
+pub mod user_layout;
 pub mod wait;
 
 #[cfg(test)]

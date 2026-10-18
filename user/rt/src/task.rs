@@ -128,6 +128,18 @@ core::arch::global_asm!(
     main = sym thread_main,
 );
 
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(
+    ".pushsection .text.jsr_rt_thread_entry,\"ax\"",
+    ".global jsr_rt_thread_entry",
+    "jsr_rt_thread_entry:",
+    "    andi sp, sp, -16",
+    "    call {main}",
+    "    unimp",
+    ".popsection",
+    main = sym thread_main,
+);
+
 extern "C" {
     fn jsr_rt_thread_entry();
 }

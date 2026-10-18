@@ -33,6 +33,9 @@ const RETURN_42: [u8; 6] = [0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3];
 /// 一个遵守 C 调用约定、返回 42 的函数的机器码（AArch64：`mov w0, #42; ret`，小端序）。
 #[cfg(target_arch = "aarch64")]
 const RETURN_42: [u8; 8] = [0x40, 0x05, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6];
+/// 一个遵守 C 调用约定、返回 42 的函数的机器码（RISC-V：`addi a0, zero, 42; jalr zero, 0(ra)`，小端序）。
+#[cfg(target_arch = "riscv64")]
+const RETURN_42: [u8; 8] = [0x13, 0x05, 0xA0, 0x02, 0x67, 0x80, 0x00, 0x00];
 
 fn main(role: u64, _arg: u64) -> i32 {
     match role {

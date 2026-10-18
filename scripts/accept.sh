@@ -128,13 +128,13 @@ if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ]; then
     -serial stdio -display none -monitor none -no-reboot > "$SERIAL_A64" 2>&1
   QRC_A64=$?
 fi
-# RISC-V64（ISA-2）：同一内核以软浮点目标 riscv64imac 构建（本阶段不内嵌用户程序），由 QEMU virt 默认的 OpenSBI
+# RISC-V64（ISA-2）：同一内核以软浮点目标 riscv64imac 构建（内嵌的用户程序与模块同样以 riscv64imac 构建），由 QEMU virt 默认的 OpenSBI
 # 以监管态装载 ELF 启动；退出经仿真器测试设备（成功 33、失败 35，与 x86_64 一致）。缺少 qemu-system-riscv64 时如实记为失败。
 QEMU_RV64="$(command -v qemu-system-riscv64 || true)"
 SERIAL_RV64="$OUT/serial-riscv64.log"
 RV64_ELF="$ROOT/target/riscv64imac-unknown-none-elf/release/jasper-kernel"
 QRC_RV64=-1
-run cargo build --release --target riscv64imac-unknown-none-elf -p jasper-kernel --no-default-features "${KFEAT[@]}" > "$OUT/build-riscv64.log" 2>&1
+run cargo build --release --target riscv64imac-unknown-none-elf -p jasper-kernel "${KFEAT[@]}" > "$OUT/build-riscv64.log" 2>&1
 RV64_BUILD_RC=$?
 if [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ]; then
   echo "== QEMU 真实启动（RISC-V64）=="
@@ -407,7 +407,7 @@ check_m44() {   # IPC Channel：用户程序（单进程语义 + 跨进程往返
 }
 
 check_m51() {   # 最小非特权程序：特权级 3；读内核内存只杀该进程；特权/无效指令；坏指针被拒；多线程终止 + 父进程等待；内核内阻塞时终止；回到基线
-  if has '^\[JSR-USERTEXT\] task=prog-hello bytes=[0-9]+ text=prog: hello (cpl=3|el=0)' \
+  if has '^\[JSR-USERTEXT\] task=prog-hello bytes=[0-9]+ text=prog: hello (cpl=3|el=0|mode=0)' \
      && has '^\[JSR-PROG\] exit=0 ring3=true' \
      && has 'case=kernel_read exit=Some\(-1\) bystander_exit=Some\(0\) only_offender_killed=true reclaimed=true' \
      && has 'case=privileged_instruction exit=Some\(-1\) expect=-1 reclaimed=true' \
@@ -691,6 +691,24 @@ check_isa2a() { # RISC-V64 移植第一阶段：与 AArch64 第一阶段同一�
   fi
 }
 
+check_isa2b() { # RISC-V64 移植第二阶段：内嵌用户程序（独立 Rust 程序、ring / IPC、jasper-rt、.jaso 装载执行）的全部检查在 RISC-V64 上逐项重跑
+  if ! rv64_ready; then
+    record ISA2b FAIL "RISC-V64 构建 rc=$RV64_BUILD_RC 或缺少 qemu-system-riscv64 / 串口日志（见 build-riscv64.log）"
+    return
+  fi
+  rv64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_j1 check_j2 check_j3 check_j4 \
+             check_sched1 check_sched3 check_t1 check_t2
+  local progs
+  progs=$(grep -cE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_RV64" || true)
+  if [ "$RV64_BAD" -eq 0 ] && ! grep -q '^\[JSR-STAGE\] user_programs=absent' "$SERIAL_RV64" \
+     && grep -qE '^\[JSR-USERTEXT\] task=prog-hello bytes=[0-9]+ text=prog: hello mode=0' "$SERIAL_RV64" \
+     && grep -q '^\[JSR-EXIT\] success' "$SERIAL_RV64" && [ "$QRC_RV64" -eq 33 ]; then
+    record ISA2b PASS "RISC-V64（QEMU=$QRC_RV64）：内嵌用户程序以 riscv64imac 构建、链接在 Sv39 私有窗口内，$RV64_N 项用户态检查全部通过（ELF/生命周期/异步环/IPC/非特权程序/jasper-rt/Rust 库/.jaso 装载与库模块/QoS/过载防护/配置/基准），创建进程 $progs 次"
+  else
+    record ISA2b FAIL "RISC-V64：$RV64_N 项中 $RV64_BAD 项失败、未内嵌用户程序或未成功退出（见 serial-riscv64.log）"
+  fi
+}
+
 check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉取请求时运行本脚本全量 + 宿主与跨指令集单元测试；工具链钉到具体日期；判据不在工作流里另写
   local wf="$ROOT/.github/workflows/ci.yml" miss=""
   if [ ! -s "$wf" ]; then record CI-1 FAIL "缺少 .github/workflows/ci.yml"; return; fi
@@ -712,7 +730,7 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

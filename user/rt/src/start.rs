@@ -38,6 +38,19 @@ core::arch::global_asm!(
     start = sym rt_start,
 );
 
+// RISC-V：参数已在 a0/a1；sp 必须 16 字节对齐。
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(
+    ".pushsection .text._start,\"ax\"",
+    ".global _start",
+    "_start:",
+    "    andi sp, sp, -16",
+    "    call {start}",
+    "    unimp",
+    ".popsection",
+    start = sym rt_start,
+);
+
 extern "C" {
     /// 由 [`crate::entry!`] 生成。
     fn __jsr_main(a: u64, b: u64) -> i32;
@@ -89,6 +102,24 @@ unsafe fn switch_stack(a: u64, b: u64) -> ! {
         main = sym run_main,
         in("x0") a,
         in("x1") b,
+        options(noreturn)
+    )
+}
+
+/// 切到主线程栈并调用 `run_main(a, b)`（不返回）。
+///
+/// # Safety
+/// [`sys::MAIN_STACK_TOP`] 之下的主线程栈必须已映射为可写且只归主线程使用。
+#[cfg(target_arch = "riscv64")]
+unsafe fn switch_stack(a: u64, b: u64) -> ! {
+    core::arch::asm!(
+        "mv sp, {top}",
+        "call {main}",
+        "unimp",
+        top = in(reg) sys::MAIN_STACK_TOP,
+        main = sym run_main,
+        in("a0") a,
+        in("a1") b,
         options(noreturn)
     )
 }

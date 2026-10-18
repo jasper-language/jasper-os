@@ -18,3 +18,6 @@ sha2 = { version = "=0.11.1", default-features = false }
 crc = { version = "=3.4.0", default-features = false }
 miniz_oxide = { version = "=0.9.1", default-features = false, features = ["with-alloc"] }
 smoltcp = { version = "=0.14.0", default-features = false, features = ["alloc", "medium-ip", "proto-ipv4", "socket-tcp"] }
+
+[build-dependencies]
+kernel-core = { path = "../../kernel-core" }

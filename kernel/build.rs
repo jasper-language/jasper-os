@@ -129,13 +129,14 @@ fn build_user_programs(root: &std::path::Path) {
     }
 }
 
-/// 用户程序的目标三元组：与内核相同的指令集。AArch64 用软浮点目标——内核不保存浮点 / SIMD 寄存器，
-/// 并让用户态的任何浮点 / SIMD 访问陷入。
+/// 用户程序的目标三元组：与内核相同的指令集。AArch64 与 RISC-V64 用软浮点目标——内核不保存浮点 / SIMD 寄存器，
+/// 并让用户态的任何浮点 / SIMD 访问陷入（RISC-V：sstatus.FS 保持关闭）。
 /// The user-program target triple (same ISA as the kernel).
 fn user_triple() -> &'static str {
     match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("x86_64") => "x86_64-unknown-none",
         Ok("aarch64") => "aarch64-unknown-none-softfloat",
+        Ok("riscv64") => "riscv64imac-unknown-none-elf",
         other => panic!("内嵌用户程序尚不支持该指令集：{:?}", other),
     }
 }

@@ -14,3 +14,6 @@ bench = false
 
 [dependencies]
 jasper-rt = { path = "../rt" }
+
+[build-dependencies]
+kernel-core = { path = "../../kernel-core" }

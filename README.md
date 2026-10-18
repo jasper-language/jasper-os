@@ -55,7 +55,7 @@ Jasper 生态的**操作系统侧项目**：一个用 Rust 实现、在 QEMU 中
 | ISA-1b | AArch64 用户态生态与 x86_64 等价：独立 Rust 用户程序、用户态 ring / IPC、`jasper-rt`、`.jaso` 模块（软浮点、位置无关）实际装载执行；可执行映射前同步指令缓存；全部 29 项 QEMU 验收在 `qemu-system-aarch64` 上逐项复跑通过 | ✅ |
 | CI-1 | 公开仓库自动化验证：GitHub Actions 在每次推送 / 拉取请求上跑宿主测试（含 32 位、AArch64、RISC-V64 单元测试）与 `scripts/accept.sh` 全量（x86_64 + AArch64 QEMU）；main 上检查为绿，故意注入失败的临时分支检查变红（验证后已删除） | ✅ |
 | ISA-2a | RISC-V64 移植第一阶段（QEMU `virt` + OpenSBI）：设备树驱动的启动、Sv39 早期页表与独立地址空间、陷入入口、SBI 定时器、PLIC（真实挂起 → 认领 → 完成自检）、NS16550A、调度与抢占、用户态与 `ecall` 系统调用；内核侧验收 16 项在 `qemu-system-riscv64` 上逐项通过 | ✅ |
-| ISA-2b | RISC-V64 用户态生态与 x86_64 等价：独立 Rust 用户程序、用户态 ring / IPC、`jasper-rt`、`.jaso` 实际装载执行 | ⬜ |
+| ISA-2b | RISC-V64 用户态生态与 x86_64 等价：独立 Rust 用户程序、用户态 ring / IPC、`jasper-rt`、`.jaso` 模块（riscv64imac 软浮点、位置无关）实际装载执行；用户程序装载地址按指令集取私有窗口（Sv39 为 `0x8_0040_0000`），运行时布局整体落在 32 GiB 窗口内；全部 29 项 QEMU 验收在 `qemu-system-riscv64` 上逐项复跑通过 | ✅ |
 | ISA-3 | RISC-V32 移植；在 QEMU 上复跑全部验收 | ⬜ |
 | M5.1 | 装载并运行最小非特权程序（ELF）：Ring 3 运行；读内核内存 / 特权指令 / 无效指令只终止该进程；坏系统调用指针被拒；多线程进程终止（含内核内阻塞的线程）与父进程等待；页帧 / 对象全部回收 | ✅ |
 | J-1 | 用户态最小运行时 `jasper-rt`（`no_std` + `alloc`）：程序入口与 panic 处理、按需增长的堆（新增 `system.memory.map` / `unmap`）、线程、Channel、异步环；用它写成的普通 Rust 程序在 Ring 3 通过成功与失败路径检查 | ✅ |

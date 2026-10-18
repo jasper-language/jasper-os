@@ -24,6 +24,8 @@ pub const USER_FIRST: usize = 32;
 pub const USER_LAST: usize = 64;
 /// 私有窗口对应的虚拟地址区间 `[start, end)`。
 pub const USER_WINDOW: (u64, u64) = ((USER_FIRST as u64) << 39, (USER_LAST as u64) << 39);
+// 用户态运行时与用户程序的链接地址按同一数值布局：两边必须一致。
+const _: () = assert!(USER_WINDOW.0 == kernel_core::user_layout::WINDOW_BASE_X86_64);
 
 /// 地址空间根：PML4 所在物理帧（不透明地交给 Core）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,9 +1,9 @@
-/* user-hello 的链接脚本：固定装载到用户私有窗口内（0x1000_0040_0000 起）。
+/* user-hello 的链接脚本：固定装载到用户私有窗口内（窗口起点 + 4 MiB；地址按指令集由构建脚本以 JSR_IMAGE_BASE 给出）。
  * 代码、只读数据、可写数据各自按页对齐，装载器据段权限分别映射（代码可执行只读、数据可写不可执行）。 */
 ENTRY(_start)
 SECTIONS
 {
-  . = 0x100000400000;
+  . = JSR_IMAGE_BASE;
   .text   : { *(.text._start) *(.text .text.*) }
   . = ALIGN(4096);
   .rodata : { *(.rodata .rodata.*) }

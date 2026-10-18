@@ -73,6 +73,24 @@ unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
     ret
 }
 
+/// 发起系统调用（RISC-V：a7=ID，a0/a1/a2=参数，`ecall`；返回值在 a0，其余寄存器由内核保留）。
+///
+/// # Safety
+/// 参数必须符合该调用的约定（指针须指向本进程内存）。
+#[cfg(target_arch = "riscv64")]
+unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
+    let ret: i64;
+    asm!(
+        "ecall",
+        in("a7") id,
+        inlateout("a0") a as i64 => ret,
+        in("a1") b,
+        in("a2") c,
+        options(nostack)
+    );
+    ret
+}
+
 fn sys(id: u64, a: u64, b: u64) -> i64 {
     // SAFETY：调用者传入的指针都指向本进程内存。
     unsafe { syscall3(id, a, b, 0) }

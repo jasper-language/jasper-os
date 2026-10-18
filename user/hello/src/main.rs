@@ -55,6 +55,23 @@ unsafe fn syscall2(id: u64, a: u64, b: u64) -> i64 {
     ret
 }
 
+/// 发起系统调用（RISC-V：a7=ID，a0/a1=参数，`ecall`；返回值在 a0，其余寄存器由内核保留）。
+///
+/// # Safety
+/// 参数必须符合该调用的约定（指针须指向本进程内存）。
+#[cfg(target_arch = "riscv64")]
+unsafe fn syscall2(id: u64, a: u64, b: u64) -> i64 {
+    let ret: i64;
+    asm!(
+        "ecall",
+        in("a7") id,
+        inlateout("a0") a as i64 => ret,
+        in("a1") b,
+        options(nostack)
+    );
+    ret
+}
+
 /// 输出一段 UTF-8 文本，返回内核写入的字节数（负数为错误码）。
 fn write(text: &str) -> i64 {
     // SAFETY：text 位于本进程的只读数据或栈上。

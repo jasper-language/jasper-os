@@ -46,3 +46,7 @@ rustflags = ["--cfg", "sha2_backend=\"soft\""]
 # AArch64 用户程序与模块用软浮点目标（同样不使用浮点 / SIMD 寄存器）；sha2 在该目标上也只走纯软件后端。
 [target.aarch64-unknown-none-softfloat]
 rustflags = ["--cfg", "sha2_backend=\"soft\""]
+
+# RISC-V64 用户程序与模块同样用不带浮点扩展的目标（riscv64imac）；sha2 也只走纯软件后端。
+[target.riscv64imac-unknown-none-elf]
+rustflags = ["--cfg", "sha2_backend=\"soft\""]

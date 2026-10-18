@@ -67,6 +67,24 @@ unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
     ret
 }
 
+/// 发起系统调用（RISC-V：a7=ID，a0/a1/a2=参数，`ecall`；返回值在 a0，其余寄存器由内核保留）。
+///
+/// # Safety
+/// 参数必须符合该调用的约定（指针须指向本进程内存）。
+#[cfg(target_arch = "riscv64")]
+unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
+    let ret: i64;
+    asm!(
+        "ecall",
+        in("a7") id,
+        inlateout("a0") a as i64 => ret,
+        in("a1") b,
+        in("a2") c,
+        options(nostack)
+    );
+    ret
+}
+
 fn sys(id: u64, a: u64, b: u64) -> i64 {
     // SAFETY：调用者传入的指针都指向本进程内存（role 4 故意传入内核地址，由内核拒绝）。
     unsafe { syscall3(id, a, b, 0) }
@@ -189,6 +207,16 @@ fn privilege() -> (&'static str, u16, bool) {
     ("el", 0, true)
 }
 
+/// 当前特权级的名字与取值，以及它是否为非特权级。
+///
+/// RISC-V：用户态读不到当前特权级（访问任何监管态 CSR 都是非法指令，见 role 2 的同类验证），与 AArch64 相同，
+/// 以结构性事实为证：本程序的输出只能经 `ecall` 送出，内核只把来自用户态的 `ecall` 当作系统调用分发。
+/// 问候文本出现在控制台上即证明运行在用户态（U = 0）。
+#[cfg(target_arch = "riscv64")]
+fn privilege() -> (&'static str, u16, bool) {
+    ("mode", 0, true)
+}
+
 /// 提交并收取；返回（参数块的输出，第一条被接受提交的请求 ID）。
 fn enter(ring: i64, sq: &[Sqe], cq: &mut [Cqe], wait_min: u32) -> (EnterArgs, u64) {
     let mut ids_out = [0u64; 4];
@@ -228,11 +256,14 @@ pub extern "C" fn _start(role: u64, arg: u64) -> ! {
         2 => {
             say!("executing privileged instruction");
             // SAFETY：故意执行特权指令，预期在此处被终止。
-            // x86_64：hlt（#GP）；AArch64：改写中断屏蔽位（SCTLR_EL1.UMA = 0 ⇒ EL0 执行即陷入）
+            // x86_64：hlt（#GP）；AArch64：改写中断屏蔽位（SCTLR_EL1.UMA = 0 ⇒ EL0 执行即陷入）；
+            // RISC-V：置位监管态中断使能（用户态访问监管态 CSR ⇒ 非法指令）
             #[cfg(target_arch = "x86_64")]
             unsafe { asm!("hlt", options(nomem, nostack)) };
             #[cfg(target_arch = "aarch64")]
             unsafe { asm!("msr daifset, #2", options(nomem, nostack)) };
+            #[cfg(target_arch = "riscv64")]
+            unsafe { asm!("csrsi sstatus, 2", options(nomem, nostack)) };
             say!("LEAK privileged instruction executed");
             exit(3)
         }
@@ -243,6 +274,8 @@ pub extern "C" fn _start(role: u64, arg: u64) -> ! {
             unsafe { asm!("ud2", options(nomem, nostack)) };
             #[cfg(target_arch = "aarch64")]
             unsafe { asm!("udf #0", options(nomem, nostack)) };
+            #[cfg(target_arch = "riscv64")]
+            unsafe { asm!("unimp", options(nomem, nostack)) };
             exit(3)
         }
         4 => {

@@ -259,13 +259,13 @@ pub fn from_elf(elf: &[u8], manifest: &str, arch: Arch, stage: Stage) -> Result<
 
 /// 指令集 → 裸机目标三元组。
 ///
-/// AArch64 用软浮点目标：内核不在上下文切换时保存浮点 / SIMD 寄存器，并让它们的任何访问陷入，
+/// AArch64 与 RISC-V 用软浮点目标：内核不在上下文切换时保存浮点 / SIMD 寄存器，并让它们的任何访问陷入，
 /// 模块因此不得生成使用这些寄存器的代码（与内嵌用户程序、内核本身一致）。
 pub fn target_triple(a: Arch) -> &'static str {
     match a {
         Arch::X86_64 => "x86_64-unknown-none",
         Arch::Aarch64 => "aarch64-unknown-none-softfloat",
-        Arch::Riscv64 => "riscv64gc-unknown-none-elf",
+        Arch::Riscv64 => "riscv64imac-unknown-none-elf",
         Arch::Riscv32 => "riscv32imac-unknown-none-elf",
     }
 }
@@ -333,6 +333,8 @@ mod pack_target_tests {
         // AArch64 必须是软浮点目标；只有非 x86_64 需要额外的位置无关参数
         assert_eq!(target_triple(Arch::Aarch64), "aarch64-unknown-none-softfloat");
         assert_eq!(target_triple(Arch::X86_64), "x86_64-unknown-none");
+        // RISC-V 同样不得用带浮点扩展（F/D）的目标
+        assert_eq!(target_triple(Arch::Riscv64), "riscv64imac-unknown-none-elf");
         assert_eq!(pic_rustflags(Arch::X86_64), None);
         for a in [Arch::Aarch64, Arch::Riscv64, Arch::Riscv32] {
             let f = pic_rustflags(a).unwrap();
