@@ -1,0 +1,112 @@
+# =============================================================================
+# ci.yml —— 公开仓库的自动化验证（每次推送与拉取请求）
+# Automated verification of the public repository on every push and pull request.
+#
+# 职责：在托管运行器上从干净检出重做本地一键验收所做的全部事情，结果作为提交的状态检查公开可见。
+#   1. host  ：工作区宿主测试（kernel-core、jaso 格式与打包），以及 kernel-core 在 32 位（i686）与
+#              AArch64 / RISC-V64（经 qemu-user）上的单元测试——尽早给出信号
+#   2. accept：scripts/accept.sh 全量：裸机构建、x86_64 与 AArch64 两次 QEMU 真实启动、逐里程碑判定；
+#              证据目录作为构件上传，失败时也上传，便于对照原始串口日志
+# 边界：只调用仓库内的脚本，判据全部在 scripts/accept.sh 里，本文件不复制、不放宽任何判据；
+#       工具链钉到与本地验收相同的 nightly 日期，避免上游每日变化让结果不可复现。
+# 为什么只在公开仓库运行：私有镜像不消耗托管运行器时长，也不产生重复的检查结果。
+# =============================================================================
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 与本地验收相同的工具链（rustc 1.101.0-nightly 5d8fec066 2026-10-16）；升级时与本地一起改。
+  # Same pinned nightly as local acceptance; bump both together.
+  RUST_NIGHTLY: nightly-2026-10-17
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  host:
+    name: host tests (64/32-bit, AArch64, RISC-V64)
+    if: github.repository == 'jasper-language/jasper-os'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 qemu-user（跨指令集运行单元测试） / install qemu-user
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-user
+      - name: 工具链 / toolchain
+        run: |
+          rustup toolchain install "$RUST_NIGHTLY" --profile minimal --component rust-src,llvm-tools-preview \
+            --target x86_64-unknown-none,aarch64-unknown-none,aarch64-unknown-none-softfloat,riscv64gc-unknown-none-elf,riscv32imac-unknown-none-elf,i686-unknown-linux-musl,aarch64-unknown-linux-musl,riscv64gc-unknown-linux-musl
+          echo "RUSTUP_TOOLCHAIN=$RUST_NIGHTLY" >> "$GITHUB_ENV"
+      - run: rustc -Vv && cargo -V
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: host-${{ env.RUST_NIGHTLY }}-${{ hashFiles('Cargo.lock') }}
+      - name: kernel-core 宿主测试（64 位） / kernel-core host tests
+        run: cargo test -p kernel-core
+      - name: jaso 格式与打包测试 / jaso tests
+        run: cargo test -p jaso --features pack
+      - name: kernel-core 单元测试（32 位 i686、AArch64、RISC-V64） / cross-ISA unit tests
+        run: |
+          set -e
+          for pair in i686-unknown-linux-musl: aarch64-unknown-linux-musl:qemu-aarch64 riscv64gc-unknown-linux-musl:qemu-riscv64; do
+            t="${pair%%:*}"; q="${pair#*:}"
+            var="CARGO_TARGET_$(echo "$t" | tr 'a-z-' 'A-Z_')"
+            echo "== $t ${q:-(native)} =="
+            env "${var}_LINKER=rust-lld" ${q:+"${var}_RUNNER=$q"} \
+              RUSTFLAGS="-C link-self-contained=yes -C target-feature=+crt-static" \
+              CARGO_TARGET_DIR=target/isa-test cargo test -p kernel-core --target "$t"
+          done
+
+  accept:
+    name: accept (x86_64 + AArch64 QEMU)
+    if: github.repository == 'jasper-language/jasper-os'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 QEMU / install QEMU
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 qemu-system-arm qemu-user
+          qemu-system-x86_64 --version | head -1
+          qemu-system-aarch64 --version | head -1
+      - name: 工具链 / toolchain
+        run: |
+          rustup toolchain install "$RUST_NIGHTLY" --profile minimal --component rust-src,llvm-tools-preview \
+            --target x86_64-unknown-none,aarch64-unknown-none,aarch64-unknown-none-softfloat,riscv64gc-unknown-none-elf,riscv32imac-unknown-none-elf,i686-unknown-linux-musl,aarch64-unknown-linux-musl,riscv64gc-unknown-linux-musl
+          echo "RUSTUP_TOOLCHAIN=$RUST_NIGHTLY" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: accept-${{ env.RUST_NIGHTLY }}-${{ hashFiles('Cargo.lock') }}
+      - name: 一键验收 / scripts/accept.sh
+        env:
+          # 托管运行器只有少量核且没有硬件虚拟化：用全部核，QEMU 时限放宽（判据本身不变）。
+          JASPER_QEMU_TIMEOUT: "600"
+        run: JASPER_CORES="0-$(( $(nproc) - 1 ))" bash scripts/accept.sh
+      - name: 上传证据 / upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: accept-evidence
+          path: evidence/
+          retention-days: 30

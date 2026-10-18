@@ -16,6 +16,7 @@
 # 用法：  bash scripts/accept.sh            （默认：机器最后 4 个逻辑核，最低 CPU 与 I/O 优先级）
 #         JASPER_CORES=8-11 bash scripts/accept.sh
 #         JASPER_PROFILE=compact bash scripts/accept.sh   （内核配置档：standard（默认）| compact）
+#         JASPER_QEMU_TIMEOUT=300 bash scripts/accept.sh  （单次 QEMU 启动的时限，秒；默认 90。较慢的托管运行器上放宽）
 # 为什么默认用最后几个核：前几个核（尤其 CPU 0）通常承担显卡、硬盘等设备中断与按核的内核后台工作；
 # 把它们压满会让桌面失去响应。构建与 QEMU 一律以 nice 19 / ionice 空闲级运行，桌面需要时随时让出。
 # 退出码：0 = 全部 PASS；1 = 至少一项 FAIL；2 = 环境缺失（无 cargo / qemu）
@@ -27,6 +28,8 @@ NCPU="$(nproc --all 2>/dev/null || echo 4)"
 if [ "$NCPU" -ge 8 ]; then DEFAULT_CORES="$((NCPU - 4))-$((NCPU - 1))"; else DEFAULT_CORES="0-$((NCPU > 1 ? NCPU - 2 : 0))"; fi
 CORES="${JASPER_CORES:-$DEFAULT_CORES}"
 PROFILE="${JASPER_PROFILE:-standard}"
+QEMU_TIMEOUT="${JASPER_QEMU_TIMEOUT:-90}"
+case "$QEMU_TIMEOUT" in ''|0|*[!0-9]*) echo "✗ JASPER_QEMU_TIMEOUT 必须是正整数秒：$QEMU_TIMEOUT"; exit 2 ;; esac
 case "$PROFILE" in
   standard) KFEAT=() ;;
   compact)  KFEAT=(--features profile-compact) ;;
@@ -105,7 +108,7 @@ done
 QRC=-1
 if [ "$BUILD_RC" -eq 0 ]; then
   echo "== QEMU 真实启动 =="
-  run timeout 90 "$QEMU" -drive format=raw,file="$IMG" \
+  run timeout "$QEMU_TIMEOUT" "$QEMU" -drive format=raw,file="$IMG" \
     -serial stdio -display none -monitor none -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL" 2>&1
   QRC=$?
@@ -120,7 +123,7 @@ run cargo build --release --target aarch64-unknown-none-softfloat -p jasper-kern
 A64_BUILD_RC=$?
 if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ]; then
   echo "== QEMU 真实启动（AArch64）=="
-  run timeout 90 "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -kernel "$A64_ELF" -semihosting \
+  run timeout "$QEMU_TIMEOUT" "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -kernel "$A64_ELF" -semihosting \
     -serial stdio -display none -monitor none -no-reboot > "$SERIAL_A64" 2>&1
   QRC_A64=$?
 fi
@@ -640,7 +643,27 @@ check_isa1b() { # AArch64 移植第二阶段：内嵌用户程序（独立 Rust 
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b
+check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉取请求时运行本脚本全量 + 宿主与跨指令集单元测试；工具链钉到具体日期；判据不在工作流里另写
+  local wf="$ROOT/.github/workflows/ci.yml" miss=""
+  if [ ! -s "$wf" ]; then record CI-1 FAIL "缺少 .github/workflows/ci.yml"; return; fi
+  grep -qE '^  push:' "$wf"                                   || miss="$miss 推送触发"
+  grep -qE '^  pull_request:' "$wf"                           || miss="$miss 拉取请求触发"
+  grep -qE 'run: .*bash scripts/accept\.sh' "$wf"             || miss="$miss 运行accept.sh"
+  grep -qE 'qemu-system-x86' "$wf" && grep -qE 'qemu-system-arm' "$wf" || miss="$miss 两种QEMU"
+  grep -qE 'cargo test -p kernel-core --target' "$wf" && grep -q 'i686-unknown-linux-musl' "$wf" || miss="$miss 32位单元测试"
+  grep -qE 'cargo test -p jaso --features pack' "$wf"         || miss="$miss jaso测试"
+  grep -qE '^  RUST_NIGHTLY: nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$' "$wf" || miss="$miss 工具链钉日期"
+  grep -qE 'upload-artifact' "$wf"                            || miss="$miss 上传证据"
+  # 工作流不得自带判据或放宽结果：不允许忽略失败的写法
+  grep -qE 'continue-on-error: *true|\|\| *true' "$wf"         && miss="$miss （出现忽略失败的写法）"
+  if [ -z "$miss" ]; then
+    record CI-1 PASS "工作流：推送/拉取请求触发；宿主 + 32 位/AArch64/RISC-V64 单元测试；accept.sh 全量（x86_64 + AArch64 QEMU）；工具链 $(grep -oE 'nightly-[0-9-]+' "$wf" | head -1)；证据上传"
+  else
+    record CI-1 FAIL "工作流缺少：$miss"
+  fi
+}
+
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {
