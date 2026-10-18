@@ -16,7 +16,9 @@
 //! * 错误是带规范名的枚举（`system.handle.error.*`），不是整数 errno。
 
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
+
+use crate::sync::Atomic64;
 
 /// 句柄上的权限位掩码。
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -126,7 +128,7 @@ impl fmt::Debug for Rights {
 /// Monotonic, never-reused ID allocator; returns `None` once exhausted instead of wrapping.
 pub struct IdAllocator {
     /// 下一个要分配的 ID；0 = 已用尽。
-    next: AtomicU64,
+    next: Atomic64,
 }
 
 /// ID 已用尽（`system.object.error.ids_exhausted` 语义；调用方据此拒绝创建）。
@@ -137,13 +139,13 @@ pub struct IdExhausted;
 impl IdAllocator {
     /// 新建，从 1 开始分配。
     pub const fn new() -> Self {
-        IdAllocator { next: AtomicU64::new(1) }
+        IdAllocator { next: Atomic64::new(1) }
     }
 
     /// 新建，从 `first` 开始分配（用于演练耗尽路径；`first == 0` 视为已用尽）。
     /// Start at `first` (exercises exhaustion; `0` means already exhausted).
     pub const fn starting_at(first: u64) -> Self {
-        IdAllocator { next: AtomicU64::new(first) }
+        IdAllocator { next: Atomic64::new(first) }
     }
 
     /// 取下一个 ID；已用尽时返回 `None`，且之后永远返回 `None`。

@@ -161,7 +161,8 @@ pub fn parse(image: &[u8], machine: u16) -> Result<ElfImage, ElfError> {
         return Err(ElfError::WrongMachine);
     }
     let entry = u64_at(image, 24)?;
-    let phoff = u64_at(image, 32)? as usize;
+    // 不用 `as usize`：32 位目标上会截断（例如 0x1_0000_0040 变成 0x40，指向错误的位置）
+    let phoff = usize::try_from(u64_at(image, 32)?).map_err(|_| ElfError::Truncated)?;
     let phentsize = u16_at(image, 54)? as usize;
     let phnum = u16_at(image, 56)? as usize;
     if phentsize != 56 {

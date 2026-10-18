@@ -58,6 +58,30 @@ run cargo build --release --target x86_64-unknown-none -p jasper-kernel >> "$OUT
   && run "$ROOT/target/release/xtask" "$ROOT/target/x86_64-unknown-none/release/jasper-kernel" "$IMG" >> "$OUT/build.log" 2>&1
 BUILD_RC=$?
 
+# 多指令集：kernel-core 在全部目标指令集上编译；单元测试在 64 位与 32 位上运行；
+# 装有 qemu-user 时再在 AArch64 / RISC-V64 上运行（用 musl 目标 + 自带的 rust-lld 链接，不依赖交叉 C 工具链）。
+ISA_BUILD_FAIL=""
+for t in x86_64-unknown-none aarch64-unknown-none riscv64gc-unknown-none-elf riscv32imac-unknown-none-elf; do
+  run cargo build --release --target "$t" -p kernel-core >> "$OUT/isa-build.log" 2>&1 || ISA_BUILD_FAIL="$ISA_BUILD_FAIL $t"
+done
+# isa_test <rust 目标> <可选 qemu-user 运行器>：运行 kernel-core 单元测试，输出写到 isa-test-<目标>.log
+isa_test() {
+  local t="$1" runner="${2:-}" var
+  var="CARGO_TARGET_$(echo "$t" | tr 'a-z-' 'A-Z_')"
+  run env "${var}_LINKER=rust-lld" ${runner:+"${var}_RUNNER=$runner"} RUSTFLAGS="-C link-self-contained=yes -C target-feature=+crt-static" \
+    CARGO_TARGET_DIR="$ROOT/target/isa-test" cargo test -p kernel-core --target "$t" > "$OUT/isa-test-$t.log" 2>&1
+}
+ISA_TESTS_RAN=""; ISA_TESTS_FAIL=""; ISA_TESTS_SKIPPED=""
+if isa_test i686-unknown-linux-musl; then ISA_TESTS_RAN="$ISA_TESTS_RAN 32位"; else ISA_TESTS_FAIL="$ISA_TESTS_FAIL 32位"; fi
+for pair in "aarch64-unknown-linux-musl:qemu-aarch64:AArch64" "riscv64gc-unknown-linux-musl:qemu-riscv64:RISC-V64"; do
+  IFS=: read -r t q label <<< "$pair"
+  if command -v "$q" >/dev/null && rustup target list --installed 2>/dev/null | grep -qx "$t"; then
+    if isa_test "$t" "$q"; then ISA_TESTS_RAN="$ISA_TESTS_RAN $label"; else ISA_TESTS_FAIL="$ISA_TESTS_FAIL $label"; fi
+  else
+    ISA_TESTS_SKIPPED="$ISA_TESTS_SKIPPED $label"
+  fi
+done
+
 QRC=-1
 if [ "$BUILD_RC" -eq 0 ]; then
   echo "== QEMU 真实启动 =="
@@ -76,6 +100,14 @@ check_m10() {   # 骨架：kernel-core 宿主测试 + 裸机编译
     record M1.0 PASS "kernel-core 宿主测试 $passed；裸机目标编译 ✓"
   else
     record M1.0 FAIL "cargo test rc=$TEST_RC，裸机编译 rc=$CORE_RC（见 cargo-test.log / build.log）"
+  fi
+}
+
+check_isa() {   # 多指令集：kernel-core 四个目标指令集编译 + 单元测试在多个指令集 / 字长上运行（未运行的如实列出）
+  if [ -z "$ISA_BUILD_FAIL" ] && [ -z "$ISA_TESTS_FAIL" ] && [ -n "$ISA_TESTS_RAN" ]; then
+    record ISA PASS "kernel-core 编译：x86_64/AArch64/RISC-V64/RISC-V32 ✓；单元测试运行：x86_64${ISA_TESTS_RAN}${ISA_TESTS_SKIPPED:+；未运行（缺 qemu-user 或目标）：$ISA_TESTS_SKIPPED}"
+  else
+    record ISA FAIL "编译失败：${ISA_BUILD_FAIL:-无}；测试失败：${ISA_TESTS_FAIL:-无}（见 isa-build.log / isa-test-*.log）"
   fi
 }
 
@@ -309,7 +341,7 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
-check_m10; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_fix
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_fix
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

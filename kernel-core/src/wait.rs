@@ -16,7 +16,9 @@
 //!   ring 的「等完成」将建立在本模块之上。
 //! * 唤醒判定先于超时判定：同一轮里既触发又到期时返回 `Signaled`，避免丢失已发生的信号。
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use crate::sync::Atomic64;
 
 /// 单调时间源（单位：tick，由提供者定义）。
 pub trait TimeSource {
@@ -66,13 +68,13 @@ impl Waitable for Event {
 
 /// 一次性定时器：到达截止时刻即触发。截止时刻 0 表示未设定。
 pub struct Timer {
-    deadline: AtomicU64,
+    deadline: Atomic64,
 }
 
 impl Timer {
     /// 新建（未设定）。
     pub const fn new() -> Self {
-        Timer { deadline: AtomicU64::new(0) }
+        Timer { deadline: Atomic64::new(0) }
     }
 
     /// 设定绝对截止时刻（必须 > 0）。

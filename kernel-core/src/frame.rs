@@ -158,6 +158,7 @@ impl<'a> BitmapFrameAllocator<'a> {
                     ignored += 1;
                     continue;
                 }
+                // n < capacity = bits.len() * 64 ⇒ 下标必在 usize 与位图范围内
                 bits[(n / 64) as usize] &= !(1u64 << (n % 64));
             }
         }
@@ -176,10 +177,17 @@ impl<'a> BitmapFrameAllocator<'a> {
         self.ignored
     }
 
+    /// 帧号在位图中的字下标；超出位图（或在 32 位目标上超出 `usize` 表示范围）返回 `None`。
+    /// 不用 `as usize`：32 位目标上截断会把一个很大的帧号映射到错误的位上。
+    /// Bitmap word index of frame `n`, without truncating casts.
+    fn word_index(&self, n: u64) -> Option<usize> {
+        usize::try_from(n / 64).ok().filter(|&i| i < self.bits.len())
+    }
+
     /// 该帧当前是否已分配（或不可用）。
     pub fn is_used(&self, frame: PhysFrame) -> bool {
         let n = frame.number();
-        match self.bits.get((n / 64) as usize) {
+        match self.word_index(n).map(|i| self.bits[i]) {
             Some(w) => w & (1u64 << (n % 64)) != 0,
             None => true,
         }
@@ -222,14 +230,14 @@ impl FrameAllocator for BitmapFrameAllocator<'_> {
         if frame.start() % FRAME_SIZE != 0 {
             return Err(FrameError::Misaligned);
         }
-        if !self.is_usable(frame) || (frame.number() / 64) as usize >= self.bits.len() {
+        let n = frame.number();
+        let Some(i) = self.word_index(n).filter(|_| self.is_usable(frame)) else {
             return Err(FrameError::NotUsable);
-        }
+        };
         if !self.is_used(frame) {
             return Err(FrameError::DoubleFree);
         }
-        let n = frame.number();
-        self.bits[(n / 64) as usize] &= !(1u64 << (n % 64));
+        self.bits[i] &= !(1u64 << (n % 64));
         self.free += 1;
         Ok(())
     }

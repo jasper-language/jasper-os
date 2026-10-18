@@ -1,7 +1,9 @@
-//! 同步原语：自旋锁。
+//! 同步原语：自旋锁与可移植的 64 位原子单元。
 //!
 //! # 职责
-//! [`SpinLock<T>`]：`AtomicBool` + `UnsafeCell` 的互斥锁，RAII 守卫解锁。
+//! * [`SpinLock<T>`]：`AtomicBool` + `UnsafeCell` 的互斥锁，RAII 守卫解锁。
+//! * [`Atomic64`]：64 位原子单元。有 64 位原子指令的目标（x86_64、AArch64、RISC-V64）直接用硬件原子；
+//!   没有的目标（RISC-V32 等）用 [`LockedU64`]（自旋锁模拟）。两种实现接口相同，调用者不需要分情况。
 //!
 //! # 边界（为什么关中断版本不在这里）
 //! 「加锁时关中断」需要读写 CPU 中断标志，是 ISA 相关操作；本 crate 不碰硬件。
@@ -80,9 +82,91 @@ impl<T> Drop for SpinLockGuard<'_, T> {
     }
 }
 
+/// 以自旋锁模拟的 64 位原子单元（用于没有 64 位原子指令的目标；任何目标上都可编译，便于宿主测试）。
+///
+/// **约束**：模拟依赖一把锁，因此同一个实例**不得在中断处理程序与被它中断的代码之间共享**——
+/// 否则中断处理程序会在单 CPU 上自锁。在这类目标上，内核须用关中断的锁保护这样的共享，或改用单写者计数。
+/// Spin-lock emulated 64-bit atomic for targets without native 64-bit atomics.
+pub struct LockedU64 {
+    v: SpinLock<u64>,
+}
+
+impl LockedU64 {
+    /// 新建。
+    pub const fn new(v: u64) -> Self {
+        LockedU64 { v: SpinLock::new(v) }
+    }
+    /// 读取。
+    pub fn load(&self, _o: Ordering) -> u64 {
+        *self.v.lock()
+    }
+    /// 写入。
+    pub fn store(&self, x: u64, _o: Ordering) {
+        *self.v.lock() = x;
+    }
+    /// 加上 `x`（回绕），返回旧值。
+    pub fn fetch_add(&self, x: u64, _o: Ordering) -> u64 {
+        let mut g = self.v.lock();
+        let old = *g;
+        *g = old.wrapping_add(x);
+        old
+    }
+    /// 若当前值为 `cur` 则写入 `new`；返回 `Ok(旧值)` 或 `Err(实际值)`。
+    pub fn compare_exchange(&self, cur: u64, new: u64, _s: Ordering, _f: Ordering) -> Result<u64, u64> {
+        let mut g = self.v.lock();
+        if *g == cur {
+            *g = new;
+            Ok(cur)
+        } else {
+            Err(*g)
+        }
+    }
+    /// 同 [`compare_exchange`](Self::compare_exchange)（模拟实现不会伪失败）。
+    pub fn compare_exchange_weak(&self, cur: u64, new: u64, s: Ordering, f: Ordering) -> Result<u64, u64> {
+        self.compare_exchange(cur, new, s, f)
+    }
+}
+
+/// 本目标使用的 64 位原子单元（见模块文档）。
+#[cfg(target_has_atomic = "64")]
+pub type Atomic64 = core::sync::atomic::AtomicU64;
+/// 本目标使用的 64 位原子单元（见模块文档；本目标没有 64 位原子指令，以自旋锁模拟）。
+#[cfg(not(target_has_atomic = "64"))]
+pub type Atomic64 = LockedU64;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locked_u64_matches_native_semantics() {
+        let a = LockedU64::new(u64::MAX - 1);
+        assert_eq!(a.fetch_add(1, Ordering::Relaxed), u64::MAX - 1);
+        assert_eq!(a.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(a.fetch_add(1, Ordering::Relaxed), u64::MAX, "与原生一样回绕");
+        assert_eq!(a.load(Ordering::Relaxed), 0);
+        assert_eq!(a.compare_exchange(1, 5, Ordering::AcqRel, Ordering::Relaxed), Err(0));
+        assert_eq!(a.compare_exchange_weak(0, 5, Ordering::AcqRel, Ordering::Relaxed), Ok(0));
+        a.store(9, Ordering::Relaxed);
+        assert_eq!(a.load(Ordering::Relaxed), 9);
+        // 多线程下 fetch_add 不丢更新
+        use std::sync::Arc;
+        let c = Arc::new(LockedU64::new(0));
+        let hs: Vec<_> = (0..4)
+            .map(|_| {
+                let c = c.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..10_000 {
+                        c.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+        assert_eq!(c.load(Ordering::Relaxed), 40_000);
+    }
 
     #[test]
     fn guard_unlocks_on_drop() {

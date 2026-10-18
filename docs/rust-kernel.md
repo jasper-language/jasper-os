@@ -79,6 +79,9 @@ bash scripts/accept.sh
 3. QEMU 真实启动，`isa-debug-exit` 退出码 33 表示成功
 4. 按串口标记逐里程碑判定：`[JSR-BOOT]` `[JSR-TICK]` `[JSR-SCHED]` `[JSR-OBJ]` `[JSR-FRAME]` `[JSR-MAP]` `[JSR-HEAP]` `[JSR-AS]` `[JSR-USER]` 等
 
+另有 `ISA` 一行：`kernel-core` 在 x86_64 / AArch64 / RISC-V64 / RISC-V32 四个裸机目标上编译；单元测试在 x86_64 与 32 位（i686-musl）上运行，
+装有 `qemu-user` 时再在 AArch64 / RISC-V64 上运行（musl 目标 + 自带 `rust-lld` 静态链接）；未运行的会在结果中如实列出。
+
 默认把编译与 QEMU 限制在 4 个核（`taskset -c 0-3`），可用环境变量 `JASPER_CORES` 覆盖。
 
 ---
