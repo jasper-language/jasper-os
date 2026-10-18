@@ -13,14 +13,18 @@
 #   * 只有真实 QEMU 输出才算数：日志由 QEMU stdout 重定向得到，脚本从不生成或改写日志
 #   * 仅使用仓库内相对路径，可在任何检出位置运行
 #
-# 用法：  bash scripts/accept.sh            （默认 4 核：taskset -c 0-3）
-#         JASPER_CORES=0-7 bash scripts/accept.sh
+# 用法：  bash scripts/accept.sh            （默认：机器最后 4 个逻辑核，最低 CPU 与 I/O 优先级）
+#         JASPER_CORES=8-11 bash scripts/accept.sh
+# 为什么默认用最后几个核：前几个核（尤其 CPU 0）通常承担显卡、硬盘等设备中断与按核的内核后台工作；
+# 把它们压满会让桌面失去响应。构建与 QEMU 一律以 nice 19 / ionice 空闲级运行，桌面需要时随时让出。
 # 退出码：0 = 全部 PASS；1 = 至少一项 FAIL；2 = 环境缺失（无 cargo / qemu）
 # =============================================================================
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CORES="${JASPER_CORES:-0-3}"
+NCPU="$(nproc --all 2>/dev/null || echo 4)"
+if [ "$NCPU" -ge 8 ]; then DEFAULT_CORES="$((NCPU - 4))-$((NCPU - 1))"; else DEFAULT_CORES="0-$((NCPU > 1 ? NCPU - 2 : 0))"; fi
+CORES="${JASPER_CORES:-$DEFAULT_CORES}"
 TS="$(date '+%Y%m%d-%H%M%S')"
 OUT="$ROOT/evidence/accept-$TS"
 IMG="$ROOT/images/jasper-kernel.img"
@@ -33,8 +37,14 @@ cd "$ROOT" || { echo "✗ 无法进入仓库根目录"; exit 2; }
 command -v cargo >/dev/null || { echo "✗ 找不到 cargo"; exit 2; }
 [ -n "$QEMU" ] || { echo "✗ 找不到 qemu-system-x86_64"; exit 2; }
 
-# 在限定核上运行（taskset 不存在时直接运行）。
-run() { if command -v taskset >/dev/null; then taskset -c "$CORES" "$@"; else "$@"; fi; }
+# 在限定核上、以最低 CPU / I/O 优先级运行（工具不存在时跳过相应限制）。
+run() {
+  local pre=()
+  command -v nice >/dev/null && pre+=(nice -n 19)
+  command -v ionice >/dev/null && pre+=(ionice -c3)
+  command -v taskset >/dev/null && pre+=(taskset -c "$CORES")
+  "${pre[@]}" "$@"
+}
 
 # ---- 结果表 ----------------------------------------------------------------
 declare -a ROWS=()
