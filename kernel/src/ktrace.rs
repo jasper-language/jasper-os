@@ -13,7 +13,7 @@ use kernel_core::trace::{Tag, TraceSink, Tracer};
 use crate::sync::IrqSpinLock;
 
 /// 追踪缓冲容量（条）。
-pub const CAPACITY: usize = 32;
+pub const CAPACITY: usize = crate::config::ACTIVE.diag.trace_capacity;
 
 static TRACER: IrqSpinLock<Tracer<CAPACITY>> = IrqSpinLock::new(Tracer::new());
 

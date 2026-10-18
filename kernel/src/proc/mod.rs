@@ -34,7 +34,7 @@ use crate::task::TaskId;
 use crate::{arch, kprintln, sched};
 
 /// 每个进程句柄表的容量。
-pub const HANDLES_PER_PROCESS: usize = 64;
+pub const HANDLES_PER_PROCESS: usize = crate::config::ACTIVE.objects.handles_per_process;
 
 /// 进程状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,9 +218,9 @@ pub fn unmap_page(id: ObjId, va: u64) -> Result<(), ProcError> {
 
 /// 每个进程最多拥有的数据帧数（ELF 段、栈与匿名映射合计）。
 /// Upper bound on data frames owned by one process (image, stacks and anonymous mappings together).
-pub const MAX_PROCESS_FRAMES: usize = 8192;
+pub const MAX_PROCESS_FRAMES: usize = crate::config::ACTIVE.memory.max_process_frames;
 /// 单次 `system.memory.map` / `unmap` 最多涉及的页数。
-pub const MAX_MAP_PAGES: u64 = 1024;
+pub const MAX_MAP_PAGES: u64 = crate::config::ACTIVE.memory.max_map_pages;
 
 /// 匿名映射 / 取消映射的失败原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

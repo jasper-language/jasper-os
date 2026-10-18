@@ -36,23 +36,24 @@ use kernel_core::ring_abi::MsgDesc;
 use crate::kobj::{self, KObject, Table};
 use crate::mm::pin::PinnedRange;
 use crate::proc::{self, ProcError};
+use crate::config;
 use crate::syscall::err;
 use crate::syscall::table::*;
 
-/// 每进程端点数上限（开发默认值）。
-pub const MAX_ENDPOINTS_PER_PROCESS: u32 = 64;
-/// 单条消息的消息体上限。
-pub const MAX_MSG_BYTES: usize = 64 * 1024;
+/// 每进程端点数上限（取自配置档）。
+pub const MAX_ENDPOINTS_PER_PROCESS: u32 = config::ACTIVE.ipc.max_endpoints_per_process;
+/// 单条消息的消息体上限（用户态契约，不随配置档变化）。
+pub const MAX_MSG_BYTES: usize = kernel_core::config::bounds::MSG_BYTES;
 /// 单条消息可携带的句柄数上限。
 pub const MAX_MSG_HANDLES: usize = 8;
 /// 每个端点接收队列的消息数上限。
 pub const MAX_QUEUE_MSGS: usize = 64;
 /// 每个端点接收队列的总字节上限。
-pub const MAX_QUEUE_BYTES: usize = 1024 * 1024;
+pub const MAX_QUEUE_BYTES: usize = config::ACTIVE.ipc.max_queue_bytes;
 /// 每进程发出、仍在队列中的消息体总字节上限（防止单个进程耗尽内核堆）。
-pub const MAX_PROCESS_IPC_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_PROCESS_IPC_BYTES: usize = config::ACTIVE.ipc.max_process_bytes;
 /// 全系统仍在队列中的消息体总字节上限（多个进程合计也不能耗尽内核堆）。
-pub const MAX_TOTAL_IPC_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_TOTAL_IPC_BYTES: usize = config::ACTIVE.ipc.max_total_bytes;
 
 /// 全系统仍在队列中的消息体总字节数（只在对象表锁内修改）。
 static QUEUED_TOTAL: AtomicUsize = AtomicUsize::new(0);

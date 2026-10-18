@@ -23,7 +23,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use crate::proc::ProcState;
 use crate::rt_demo::{baseline, rt_calls, run_program};
-use crate::sched::policy::{Qos, QosParams};
+use crate::sched::policy::Qos;
 use crate::sched::scheduler::{QosError, SpawnError};
 use crate::syscall::{table as abi, SyscallSet};
 use crate::task::TaskId;
@@ -48,8 +48,8 @@ pub fn failed() -> u32 {
 /// 过载响应性验收程序 `user/schedtest` 的 ELF 镜像（构建期由 `kernel/build.rs` 产出并嵌入）。
 static USER_SCHEDTEST: &[u8] = include_bytes!(env!("JSR_USER_SCHEDTEST"));
 
-/// 用例 2 同时存在的内核任务数。
-const MANY: u64 = 40;
+/// 用例 2 同时存在的内核任务数：槽位上限的 5/8（默认档 40），远多于静态栈数，又给其它演练留出槽位。
+const MANY: u64 = (sched::MAX_TASKS * 5 / 8) as u64;
 /// 用例 5 的睡眠次数。
 const RECOVERY_ROUNDS: u32 = 20;
 /// 本演练的内核任务号起点（与其它演练的任务号不重叠）。
@@ -62,7 +62,7 @@ pub fn run() {
     rules();
     many_tasks();
     overload("qos", 0, 1);
-    overload("same_class", 1, QosParams::DEFAULT.quantum[Qos::UserInitiated.index()] as u64 + 1);
+    overload("same_class", 1, crate::config::ACTIVE.sched.qos.quantum[Qos::UserInitiated.index()] as u64 + 1);
     recovery();
     let end = baseline();
     check(end == start, "演练结束后资源未回到起点");

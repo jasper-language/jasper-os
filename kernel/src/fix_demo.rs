@@ -167,6 +167,10 @@ fn teardown(start: u64, end: u64) {
     }
 }
 
+/// 堆回滚演练每次扩容的字节数：至少 16 页（让注入的第 5 次分配、第 3 次映射失败一定落在扩容中途），
+/// 且不小于配置档的堆增长步长（扩容至少按步长进行）。
+const DRILL_GROW: u64 = if heap::GROW_STEP > 16 * FRAME_SIZE { heap::GROW_STEP } else { 16 * FRAME_SIZE };
+
 /// 2. 内核堆扩容中途失败的回滚。使用独立的演练堆与紧邻真实堆的演练窗口，不影响全局分配器。
 fn heap_rollback() {
     let start = heap::HEAP_START + heap::HEAP_MAX;
@@ -181,15 +185,15 @@ fn heap_rollback() {
     let base = frame::free_frames();
 
     let mut env = FaultyGrow { allocs: 0, maps: 0, fail_alloc: 5, fail_map: 0 };
-    let r1 = heap::grow_in(&mut h, &mut end, window_end, heap::GROW_STEP, &mut env);
+    let r1 = heap::grow_in(&mut h, &mut end, window_end, DRILL_GROW, &mut env);
     let after1 = (end == start, h.total_bytes() == 0, frame::free_frames() == base, map::translate(VirtPage::containing(start)).is_none());
     let mut env = FaultyGrow { allocs: 0, maps: 0, fail_alloc: 0, fail_map: 3 };
-    let r2 = heap::grow_in(&mut h, &mut end, window_end, heap::GROW_STEP, &mut env);
+    let r2 = heap::grow_in(&mut h, &mut end, window_end, DRILL_GROW, &mut env);
     let after2 = (end == start, h.total_bytes() == 0, frame::free_frames() == base, map::translate(VirtPage::containing(start)).is_none());
     let overflow = heap::grow_in(&mut h, &mut end, window_end, u64::MAX, &mut KernelGrowEnv);
     let beyond = heap::grow_in(&mut h, &mut end, window_end, 2 * 1024 * 1024, &mut KernelGrowEnv);
-    let ok = heap::grow_in(&mut h, &mut end, window_end, heap::GROW_STEP, &mut KernelGrowEnv);
-    let grown = ok == Ok(heap::GROW_STEP) && end == start + heap::GROW_STEP && h.total_bytes() as u64 == heap::GROW_STEP;
+    let ok = heap::grow_in(&mut h, &mut end, window_end, DRILL_GROW, &mut KernelGrowEnv);
+    let grown = ok == Ok(DRILL_GROW) && end == start + DRILL_GROW && h.total_bytes() as u64 == DRILL_GROW;
     // SAFETY：演练堆管理的区间刚映射为可写、只由本函数使用；释放的指针正是刚分配的那块。
     let p = unsafe { h.allocate(64, 8) };
     let usable = !p.is_null();

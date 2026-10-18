@@ -23,9 +23,9 @@ use crate::sync::IrqSpinLock;
 /// 堆虚拟区间起点（低半区，与映射演练地址、内核镜像、物理内存映射均不重叠）。
 pub const HEAP_START: u64 = 0x0000_4444_4444_0000;
 /// 堆虚拟区间上限（只是预留，实际按需映射）。
-pub const HEAP_MAX: u64 = 64 * 1024 * 1024;
+pub const HEAP_MAX: u64 = crate::config::ACTIVE.memory.heap_max;
 /// 每次至少增长的字节数。
-pub const GROW_STEP: u64 = 64 * 1024;
+pub const GROW_STEP: u64 = crate::config::ACTIVE.memory.heap_grow_step;
 
 /// 堆状态：算法本体 + 已映射到的位置。
 struct HeapState {

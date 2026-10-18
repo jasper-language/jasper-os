@@ -19,7 +19,7 @@ pub enum IrqLine {
 }
 
 /// 延迟处理队列容量。
-const QUEUE_LEN: usize = 64;
+const QUEUE_LEN: usize = crate::config::ACTIVE.diag.irq_queue_len;
 
 /// 固定容量环形队列（无堆）。满时丢弃新项并计数，绝不阻塞中断上下文。
 struct PendingQueue {

@@ -321,7 +321,16 @@ fn receiver_table_full() {
     kobj::run_cleanup(usize::MAX);
 }
 
-/// 6：每进程排队字节配额。向 5 个端点各发 1 MiB（16 条 × 64 KiB）：前 4 MiB 成功，之后 quota_exceeded。
+/// 字节配额用例中每个端点排队的满长消息条数：恰好填满单个端点的字节配额（且不超过消息条数上限）。
+const PER_ENDPOINT: usize = {
+    let n = ipc::MAX_QUEUE_BYTES / ipc::MAX_MSG_BYTES;
+    if n < ipc::MAX_QUEUE_MSGS { n } else { ipc::MAX_QUEUE_MSGS }
+};
+/// 字节配额用例使用的端点数：比填满每进程配额所需的多一个，多出的那个端点上的发送全部应被拒。
+const QUOTA_ENDPOINTS: usize = ipc::MAX_PROCESS_IPC_BYTES / (PER_ENDPOINT * ipc::MAX_MSG_BYTES) + 1;
+
+/// 6：每进程排队字节配额。向若干端点各发满一个端点的配额（默认档 5 个端点 × 16 条 × 64 KiB）：
+/// 前「每进程配额」那么多字节成功，之后 quota_exceeded。
 fn byte_quota() {
     let (live0, _, _) = kobj::stats();
     let calls = SyscallSet::of(&[abi::SYSTEM_CHANNEL_SEND]);
@@ -335,9 +344,9 @@ fn byte_quota() {
     };
     let total0 = ipc::queued_total();
     let (mut ok, mut over, mut other) = (0u32, 0u32, 0u32);
-    for _ in 0..5 {
+    for _ in 0..QUOTA_ENDPOINTS {
         let Ok((hs, _)) = ipc::create_pair(s, r) else { continue };
-        for _ in 0..16 {
+        for _ in 0..PER_ENDPOINT {
             let req = ring::submit_send_for(s, rh, hs, vec![0x42u8; ipc::MAX_MSG_BYTES], vec![]);
             let res = ring::ring_of(s, rh).map(|x| ring::reap_kernel(x, 4)).unwrap_or_default();
             match (req, res.first()) {
@@ -348,7 +357,7 @@ fn byte_quota() {
         }
     }
     let charged = proc::ring_quota(s).map(|q| q.ipc_bytes as usize);
-    let quota_ok = ok as usize * ipc::MAX_MSG_BYTES == ipc::MAX_PROCESS_IPC_BYTES && over == 16 && other == 0
+    let quota_ok = ok as usize * ipc::MAX_MSG_BYTES == ipc::MAX_PROCESS_IPC_BYTES && over as usize == PER_ENDPOINT && other == 0
         && charged == Some(ipc::MAX_PROCESS_IPC_BYTES);
     check(quota_ok, "字节配额：到上限后 send 应以 quota_exceeded 失败");
     // 接收方退出：其端点关闭，队列中的消息被销毁，发送方的配额与全系统计数归还

@@ -14,12 +14,12 @@ pub use kernel_core::sched::{inherit, qos_change_allowed, Choice, ClassMask, Lat
 /// 内核采用的调度策略：QoS 分级（四档严格优先 + 档内用量衰减 + 各档最低份额 + 后台限速）。
 pub type KernelPolicy = QosPolicy;
 
-/// 构造内核策略（`const`，用于静态初始化）。参数取默认配置档。
+/// 构造内核策略（`const`，用于静态初始化）。参数取生效配置档。
 pub const fn kernel_policy() -> KernelPolicy {
-    QosPolicy::new(QosParams::DEFAULT)
+    QosPolicy::new(crate::config::ACTIVE.sched.qos)
 }
 
-/// 看门狗阈值（tick）：连续占用处理器这么久而不主动让出的任务被记录（100 Hz 下为 0.5 秒）。
-pub const WATCHDOG_THRESHOLD: u32 = 50;
-/// CPU 组的默认桶容量（tick）：允许的短突发长度。
-pub const CPU_BURST_TICKS: u32 = 4;
+/// 看门狗阈值（tick，取自配置档）：连续占用处理器这么久而不主动让出的任务被记录（两个配置档下均约 0.5 秒）。
+pub const WATCHDOG_THRESHOLD: u32 = crate::config::ACTIVE.sched.watchdog_ticks;
+/// CPU 组的默认桶容量（tick，取自配置档）：允许的短突发长度。
+pub const CPU_BURST_TICKS: u32 = crate::config::ACTIVE.sched.cpu_burst_ticks;

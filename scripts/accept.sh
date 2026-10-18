@@ -15,6 +15,7 @@
 #
 # 用法：  bash scripts/accept.sh            （默认：机器最后 4 个逻辑核，最低 CPU 与 I/O 优先级）
 #         JASPER_CORES=8-11 bash scripts/accept.sh
+#         JASPER_PROFILE=compact bash scripts/accept.sh   （内核配置档：standard（默认）| compact）
 # 为什么默认用最后几个核：前几个核（尤其 CPU 0）通常承担显卡、硬盘等设备中断与按核的内核后台工作；
 # 把它们压满会让桌面失去响应。构建与 QEMU 一律以 nice 19 / ionice 空闲级运行，桌面需要时随时让出。
 # 退出码：0 = 全部 PASS；1 = 至少一项 FAIL；2 = 环境缺失（无 cargo / qemu）
@@ -25,6 +26,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NCPU="$(nproc --all 2>/dev/null || echo 4)"
 if [ "$NCPU" -ge 8 ]; then DEFAULT_CORES="$((NCPU - 4))-$((NCPU - 1))"; else DEFAULT_CORES="0-$((NCPU > 1 ? NCPU - 2 : 0))"; fi
 CORES="${JASPER_CORES:-$DEFAULT_CORES}"
+PROFILE="${JASPER_PROFILE:-standard}"
+case "$PROFILE" in
+  standard) KFEAT=() ;;
+  compact)  KFEAT=(--features profile-compact) ;;
+  *) echo "✗ 未知配置档：$PROFILE（可选 standard / compact）"; exit 2 ;;
+esac
 TS="$(date '+%Y%m%d-%H%M%S')"
 OUT="$ROOT/evidence/accept-$TS"
 IMG="$ROOT/images/jasper-kernel.img"
@@ -58,13 +65,15 @@ record() {
 has() { grep -qE "$1" "$SERIAL" 2>/dev/null; }
 # count <正则>：串口日志里出现的行数
 count() { grep -cE "$1" "$SERIAL" 2>/dev/null || true; }
+# cfg <参数名>：本次启动在串口上输出的生效参数值（与配置档相关的判据据此计算期望值；缺失时为 0）
+cfg() { local v; v="$(grep -aoE "^\[JSR-CONFIG\] $1=[0-9]+" "$SERIAL" 2>/dev/null | head -1 | grep -oE '[0-9]+$')"; echo "${v:-0}"; }
 
 # ---- 阶段 A：构建、测试、启动（产出证据）------------------------------------
-echo "== 构建与测试（核：$CORES）=="
+echo "== 构建与测试（核：$CORES，配置档：$PROFILE）=="
 run cargo test -p kernel-core > "$OUT/cargo-test.log" 2>&1;                                   TEST_RC=$?
 run cargo test -p jaso --features pack > "$OUT/jaso-test.log" 2>&1;                           JASO_RC=$?
 run cargo build --release --target x86_64-unknown-none -p kernel-core > "$OUT/build.log" 2>&1; CORE_RC=$?
-run cargo build --release --target x86_64-unknown-none -p jasper-kernel >> "$OUT/build.log" 2>&1 \
+run cargo build --release --target x86_64-unknown-none -p jasper-kernel "${KFEAT[@]}" >> "$OUT/build.log" 2>&1 \
   && run cargo build --release -p xtask >> "$OUT/build.log" 2>&1 \
   && run "$ROOT/target/release/xtask" "$ROOT/target/x86_64-unknown-none/release/jasper-kernel" "$IMG" >> "$OUT/build.log" 2>&1
 BUILD_RC=$?
@@ -329,7 +338,7 @@ check_m43() {   # 用户态异步环：用户程序端到端（ID 单调、cq_fu
      && has 'closing before=Some\(\(2, 3\)\) after_in_flight=Some\(2\) dropped_ready=true submit_after_exit=Some\(-[0-9]+\) quota=Some\(3\)->Some\(2\)' \
      && has 'closing abortable_quiesced=true nonabortable_finished=true ring_destroyed_after_last_request=true quota_returned=true' \
      && has 'transfer result=Ok\(Err\(Handle\(RightsDenied\)\)\)' \
-     && has 'quota rings=8 ninth=Some\(-4111\) in_flight=256 over=Some\(-4111\) unchanged_on_reject=true returned=true' \
+     && has "quota rings=$(cfg max_rings_per_process) ninth=Some\\(-4111\\) in_flight=$(cfg max_in_flight_per_process) over=Some\\(-4111\\) unchanged_on_reject=true returned=true" \
      && has '^\[JSR-RING\] objects_live=([0-9]+)/\1 pending=0 reclaimed=true checks=[0-9]+ failed=0'; then
     record M4.3 PASS "用户态 ring 提交→完成；cq_full 原子失败；信用耗尽可同步取消；信用消费时归还；取消结果表与窗口；closing 各类收尾；配额；回到基线"
   else
@@ -338,6 +347,10 @@ check_m43() {   # 用户态异步环：用户程序端到端（ID 单调、cq_fu
 }
 
 check_m44() {   # IPC Channel：用户程序（单进程语义 + 跨进程往返）+ 内核侧（取消映射 / 共享缓冲区 / 延迟后端 / 叶子回收 / 句柄表满）
+  # 字节配额用例的期望值随配置档：满长消息 64 KiB；每端点条数 = 端点字节配额 / 64 KiB（不超过 64 条）
+  local pb per acc
+  pb="$(cfg ipc_max_process_bytes)"; per=$(( $(cfg ipc_max_queue_bytes) / 65536 )); [ "$per" -gt 64 ] && per=64
+  acc=$(( pb / 65536 ))
   if has 'text=ipc: roundtrip bytes=[0-9]+ text_ok=true' \
      && has 'text=ipc: buffer_too_small=-4114 needed=100 retained_then_received=true' \
      && has 'text=ipc: handle moved=true received=true no_transfer_right=-4102 ring_handle=-4102 kept_on_failure=true' \
@@ -353,7 +366,7 @@ check_m44() {   # IPC Channel：用户程序（单进程语义 + 跨进程往返
      && has 'delayed_backend hidden_and_pinned=true visible_and_returned_after_quiesce=true' \
      && has 'leaf_in_queue_released_on_receiver_exit=true sender_handle_moved=true' \
      && has 'receiver_table_full result_table_full=true message_kept=true' \
-     && has 'byte_quota accepted=64 rejected=16 charged=Some\(4194304\) returned=true' \
+     && has "byte_quota accepted=$acc rejected=$per charged=Some\\($pb\\) returned=true" \
      && has '^\[JSR-IPC\] objects_live=([0-9]+)/\1 pending=0 pinned=\(0, 0\) reclaimed=true checks=[0-9]+ failed=0'; then
     record M4.4 PASS "send/recv 经 ring；两阶段 send；原子交付（缓冲区/句柄表不足消息保留）；取消竞争；关闭语义；跨进程句柄往返；页帧固定；回到基线"
   else
@@ -448,9 +461,12 @@ check_j4() {    # 库作为 .jaso 模块：sha2 / crc / deflate / net 同时装�
 }
 
 check_sched1() { # 调度策略 + QoS：档位规则（拒绝且不变、继承、上限）；动态任务数；过载下用户发起档唤醒延迟有上界、后台有进展；压力撤销后立即恢复；回到基线
+  # 动态任务数用例的期望值随配置档：同时存活 = 槽位上限的 5/8，填满时的填充任务 = 槽位上限 - 1
+  local mt many
+  mt="$(cfg max_tasks)"; many=$(( mt * 5 / 8 ))
   if has 'policy=qos preemption=default_on' \
      && has '\[JSR-QOS\] case=rules boot_refused=true steps=7/7 raise_refused_unchanged=true inherit=true ceiling=true reclaimed=true' \
-     && has '\[JSR-QOS\] case=many capacity=64 spawned=40 done=40 peak_live=40 full_refused=true fillers=63 reclaimed=true' \
+     && has "\\[JSR-QOS\\] case=many capacity=$mt spawned=$many done=$many peak_live=$many full_refused=true fillers=$((mt - 1)) reclaimed=true" \
      && has 'text=schedtest: mode=qos qos_rules invalid_refused=true raise_refused=true same_ok=true' \
      && has 'text=schedtest: mode=qos busy_ticks=[0-9]+ background_progressed=true' \
      && has 'text=schedtest: mode=qos joined=4 all_progressed=true' \
@@ -459,7 +475,7 @@ check_sched1() { # 调度策略 + QoS：档位规则（拒绝且不变、继承�
      && has '\[JSR-QOS\] case=overload mode=same_class exit=Some\(0\) samples=[1-9][0-9]* .* bounded=true .*reclaimed=true' \
      && has '\[JSR-QOS\] case=recovery rounds=20 samples=20 max=0 immediate=true reclaimed=true' \
      && has '^\[JSR-QOS\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0'; then
-    record SCHED1 PASS "QoS 四档：降档/不变允许、升档被拒且档位不变、继承与上限；64 槽位、40 任务并发；4 个吃满 CPU 线程下用户发起档唤醒延迟有上界、后台有进展；压力撤销后延迟 0；回到基线"
+    record SCHED1 PASS "QoS 四档：降档/不变允许、升档被拒且档位不变、继承与上限；${mt} 槽位、${many} 任务并发；4 个吃满 CPU 线程下用户发起档唤醒延迟有上界、后台有进展；压力撤销后延迟 0；回到基线"
   else
     record SCHED1 FAIL "缺少 JSR-QOS 关键标记、延迟超界或 failed≠0"
   fi
@@ -495,6 +511,22 @@ check_sched3() { # 过载防护：每进程 CPU 上限（令牌桶上界内、�
   fi
 }
 
+check_t1() {    # 内核参数化：配置档宿主测试；启动时输出所选配置档、校验通过、逐项参数齐全；参数真实生效（调度时间片与定时器频率）
+  local n listed hz q1 want_hz
+  n="$(grep -oE '^\[JSR-CONFIG\] profile='"$PROFILE"' valid=ok params=[0-9]+' "$SERIAL" 2>/dev/null | grep -oE '[0-9]+$' | head -1)"
+  listed="$(count '^\[JSR-CONFIG\] [a-z_0-9.]+=[0-9]+\s*$')"
+  hz="$(cfg timer_hz)"; q1="$(cfg 'quantum\.1')"
+  case "$PROFILE" in standard) want_hz=100 ;; compact) want_hz=250 ;; esac
+  if grep -qE 'config::tests::invalid_parameters_are_rejected_by_name \.\.\. ok' "$OUT/cargo-test.log" \
+     && grep -qE 'config::tests::both_profiles_valid \.\.\. ok' "$OUT/cargo-test.log" \
+     && [ -n "$n" ] && [ "$listed" = "$n" ] && [ "$hz" = "$want_hz" ] \
+     && has "preemptive demo done tick_switches=[0-9]+ quantum_ticks=$q1 "; then
+    record T-1 PASS "配置档 $PROFILE：校验通过、$n 项参数逐项输出；timer_hz=$hz、时间片 $q1 tick 在运行中生效；非法参数宿主测试被拒"
+  else
+    record T-1 FAIL "配置档 $PROFILE：缺少 JSR-CONFIG 标记、参数项数不符（$listed/${n:-?}）、频率或时间片未生效，或宿主测试未通过"
+  fi
+}
+
 check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出接收方、堆扩容、内核空间预分配、只读翻译、ID 用尽、线程创建）
   if has 'exited_receiver grant=Some\(Exited\) grant_new=Some\(Exited\) transfer=Some\(Exited\) objects_unchanged=true sender_kept=true reaped_receiver=Some\(NoSuchProcess\)' \
      && has 'heap fail_alloc=Some\(OutOfFrames\) rolled_back=true fail_map=Some\(MapFailed\) rolled_back=true overflow=Some\(LimitReached\) regrow=true reclaimed=true' \
@@ -510,12 +542,13 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_fix
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_fix
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {
   echo "jasper-os 一键验收  $TS"
   echo "提交：$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$(git -C "$ROOT" diff --quiet 2>/dev/null || echo '（工作区有未提交改动）')"
+  echo "配置档：$PROFILE"
   echo "QEMU 退出码：$QRC"
   echo
   printf '%-6s %-4s %s\n' "里程碑" "结果" "说明"

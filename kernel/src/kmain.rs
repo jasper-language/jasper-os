@@ -6,14 +6,14 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{clock, fix_demo, ipc_demo, irq, kprintln, mech_demo, mm, overload_demo, pi_demo, prog_demo, qos_demo, ring_demo, rt_demo, sched, user_demo};
+use crate::{clock, config, fix_demo, ipc_demo, irq, kprintln, mech_demo, mm, overload_demo, pi_demo, prog_demo, qos_demo, ring_demo, rt_demo, sched, user_demo};
 
 /// 内核版本（横幅中输出）。
 pub const VERSION: &str = "0.0.1";
-/// 定时器频率。
-const TIMER_HZ: u32 = 100;
-/// M1.2 验收要求至少看到的 tick 数（留余量）。
-const BOOT_TICKS: u64 = 25;
+/// 定时器频率（取自配置档）。
+const TIMER_HZ: u32 = config::ACTIVE.clock.timer_hz;
+/// 启动自检至少等到的 tick 数（取自配置档）。
+const BOOT_TICKS: u64 = config::ACTIVE.clock.boot_ticks;
 /// 等 tick 的兜底次数：定时器没配好时必须报错退出，而不是永远睡下去。
 const MAX_WAITS: u64 = 20_000_000;
 
@@ -21,6 +21,7 @@ const MAX_WAITS: u64 = 20_000_000;
 pub fn start(boot: &'static BootSpec) -> ! {
     arch::console_init();
     kprintln!("[JSR-BOOT] jasper-os rust kernel {} {}", VERSION, arch::NAME);
+    config::report();
     arch::early_init();
 
     // 证明异常处理已接通。

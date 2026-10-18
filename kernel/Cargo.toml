@@ -14,6 +14,10 @@ spin = "0.12.3"
 pic8259 = "0.11.0"
 # uart_16550 = "0.8.1"   # optional; serial is hand-rolled COM1 port I/O (spec §5)
 
+[features]
+# 构建期配置档：默认 standard；启用本特性得到 compact（参数见 kernel-core 的 config 模块）。
+profile-compact = []
+
 [build-dependencies]
 # 构建期复用 kernel-core 的登记表解析与校验（宿主上编译，零依赖）。
 kernel-core = { path = "../kernel-core" }

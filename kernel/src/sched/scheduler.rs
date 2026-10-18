@@ -156,7 +156,7 @@ struct CpuGroup {
 }
 
 /// 看门狗报告日志容量。
-pub const WATCHDOG_LOG: usize = 16;
+pub const WATCHDOG_LOG: usize = crate::config::ACTIVE.sched.watchdog_log;
 
 /// 调度机制本体。`N` 为槽位总数（含引导线程）。
 pub struct Scheduler<P: SchedPolicy, const N: usize> {

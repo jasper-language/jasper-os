@@ -23,8 +23,8 @@ use crate::proc::Process;
 use crate::sync::IrqSpinLock;
 use crate::task::TaskId;
 
-/// 系统内核对象总数上限（M4.0 §7 配额，开发 Profile）。
-pub const MAX_OBJECTS: usize = 1024;
+/// 系统内核对象总数上限（取自配置档）。
+pub const MAX_OBJECTS: usize = crate::config::ACTIVE.objects.max_objects;
 
 /// 线程对象（句柄可见）。对所属进程只有**弱回指**（带世代的对象标识，M4.0 §2.3）。
 #[derive(Debug, Clone, Copy)]

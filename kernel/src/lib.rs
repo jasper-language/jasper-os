@@ -24,6 +24,7 @@ extern crate alloc;
 pub mod arch;
 pub mod boot;
 pub mod clock;
+pub mod config;
 pub mod fix_demo;
 pub mod console;
 pub mod exit_state;

@@ -36,7 +36,7 @@ use scheduler::{BlockError, Cause, CpuGroupId, GroupError, QosError, Scheduler, 
 
 /// 槽位总数上限（含槽位 0 的引导线程）。前 [`stack::STATIC_STACKS`] 个槽位在内核堆初始化前即可用，
 /// 其余在 [`reserve_stacks`] 之后可用。
-pub const MAX_TASKS: usize = 64;
+pub const MAX_TASKS: usize = crate::config::ACTIVE.sched.max_tasks;
 
 /// 内核唯一的调度器实例。
 ///

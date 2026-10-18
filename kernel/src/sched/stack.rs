@@ -16,10 +16,10 @@ use core::ptr::{addr_of_mut, null_mut};
 
 use crate::arch::TaskContext;
 
-/// 单个任务内核栈大小。64 KiB：系统调用路径上会临时构造较大的内核对象（例如异步环约 12 KiB），
+/// 单个任务内核栈大小（取自配置档，默认 64 KiB）：系统调用路径上会临时构造较大的内核对象（例如异步环约 12 KiB），
 /// 在移入堆之前可能先位于栈上。
 /// Per-task kernel stack size (large kernel objects may be built on the stack before moving to the heap).
-pub const STACK_SIZE: usize = 64 * 1024;
+pub const STACK_SIZE: usize = crate::config::ACTIVE.sched.kernel_stack_bytes;
 
 /// 静态栈个数（含槽位 0：引导线程不使用池里的栈，但槽位编号与栈一一对应，留空更简单）。
 pub const STATIC_STACKS: usize = 4;

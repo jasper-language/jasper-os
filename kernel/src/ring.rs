@@ -47,17 +47,18 @@ use crate::proc::{self, ProcError};
 use crate::syscall::table::*;
 use crate::syscall::{err, SyscallSet};
 use crate::sched;
+use crate::config;
 
-/// 完成队列容量 C 的上限（开发默认值；创建时可指定 1..=C）。
-pub const CQ_CAPACITY: usize = 64;
+/// 完成队列容量 C 的上限（取自配置档；创建时可指定 1..=C）。
+pub const CQ_CAPACITY: usize = config::ACTIVE.ring.cq_capacity;
 /// 每个 Ring 的请求控制块容量。
-pub const BLOCKS_PER_RING: usize = 64;
+pub const BLOCKS_PER_RING: usize = config::ACTIVE.ring.blocks_per_ring;
 /// 单次 `enter` 最多带入的提交数。
-pub const SQ_BATCH: usize = 64;
+pub const SQ_BATCH: usize = config::ACTIVE.ring.sq_batch;
 /// 每进程 Ring 数上限。
-pub const MAX_RINGS_PER_PROCESS: u32 = 8;
+pub const MAX_RINGS_PER_PROCESS: u32 = config::ACTIVE.ring.max_rings_per_process;
 /// 每进程跨所有 Ring 的在飞请求（尚未销毁的控制块）上限。
-pub const MAX_IN_FLIGHT_PER_PROCESS: u32 = 256;
+pub const MAX_IN_FLIGHT_PER_PROCESS: u32 = config::ACTIVE.ring.max_in_flight_per_process;
 /// Ring 句柄的权限：提交（WRITE）、收取（WAIT）、取消（CONTROL）、进程内复制（DUPLICATE）；**永不带 TRANSFER**。
 pub const RING_RIGHTS: Rights = Rights::WRITE.union(Rights::WAIT).union(Rights::CONTROL).union(Rights::DUPLICATE);
 
