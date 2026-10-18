@@ -287,6 +287,23 @@ fn program(name: &'static str, image: &[u8], role: u64, expect: i64) {
 /// 主线程栈布局与其它演练相同；`calls` 是授予该进程的系统调用集合。
 /// Loads, runs to completion and reaps an embedded user program.
 pub(crate) fn run_program(name: &'static str, image: &[u8], role: u64, calls: SyscallSet) -> Option<(Option<ProcState>, Option<i64>)> {
+    let (pid, started) = start_program(name, image, role, calls, |_| Ok(()))?;
+    if started {
+        sched::run();
+    }
+    finish_program(pid, started)
+}
+
+/// 创建进程、装载程序、映射主线程栈，执行 `configure`（例如设置 CPU 上限），最后创建主线程（尚未运行）。
+/// 返回 (进程, 是否成功启动)；进程创建本身失败时返回 `None`。启动失败的进程同样须经 [`finish_program`] 回收。
+/// Creates and prepares a process; `configure` runs before the main thread is spawned.
+pub(crate) fn start_program(
+    name: &'static str,
+    image: &[u8],
+    role: u64,
+    calls: SyscallSet,
+    configure: impl FnOnce(ObjId) -> Result<(), ProcError>,
+) -> Option<(ObjId, bool)> {
     let pid = proc::create(name, calls).ok()?;
     let base = arch::USER_WINDOW.0;
     let started = (|| {
@@ -294,11 +311,18 @@ pub(crate) fn run_program(name: &'static str, image: &[u8], role: u64, calls: Sy
         for i in 1..=STACK_PAGES {
             proc::map_new(pid, base + STACK_TOP_OFF - i * FRAME_SIZE, MapFlags::USER | MapFlags::WRITE)?;
         }
+        configure(pid)?;
         proc::spawn_thread(pid, name, entry, base + STACK_TOP_OFF, role, 0)
     })()
     .is_ok();
-    if started {
-        sched::run();
+    Some((pid, started))
+}
+
+/// 读取进程状态并回收（[`start_program`] 的另一半）；返回 (回收前的进程状态, 退出码)，未成功启动时返回 `None`。
+pub(crate) fn finish_program(pid: ObjId, started: bool) -> Option<(Option<ProcState>, Option<i64>)> {
+    if !started {
+        // 没有线程的进程不会自己进入 exited：先让它退出，才能回收
+        proc::exit_idle(pid, -1);
     }
     let st = proc::state(pid);
     let code = reap(pid);

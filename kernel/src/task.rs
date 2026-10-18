@@ -3,7 +3,7 @@
 //! 调度属性（[`SchedEntity`]：有效 QoS 档位、近期用量……）由策略读写；睡眠与唤醒延迟记账、
 //! 自身档位与等待关系（优先级继承）由调度机制维护。
 
-use crate::sched::policy::{Qos, SchedEntity};
+use crate::sched::policy::{Qos, RunStreak, SchedEntity};
 
 /// 不透明的任务标识。
 /// Opaque task identifier.
@@ -58,6 +58,10 @@ pub struct Task {
     pub wake_at: Option<u64>,
     /// 被唤醒的 tick（尚未运行）；被选中时据此记录唤醒延迟。
     pub woken_at: Option<u64>,
+    /// 所属 CPU 组的槽位（受该组的 CPU 上限约束；`None` = 不受限）。
+    pub cpu_group: Option<usize>,
+    /// 自上次主动放弃处理器以来连续占用的 tick（看门狗依据）。
+    pub streak: RunStreak,
 }
 
 impl Task {
@@ -79,6 +83,8 @@ impl Task {
             qos_ceiling: None,
             wake_at: None,
             woken_at: None,
+            cpu_group: None,
+            streak: RunStreak::new(),
         }
     }
 }

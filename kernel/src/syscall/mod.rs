@@ -283,6 +283,7 @@ fn mem_err(e: proc::MemError) -> i64 {
         proc::MemError::AlreadyMapped => err(SYSTEM_MEMORY_ERROR_ALREADY_MAPPED),
         proc::MemError::Quota => err(SYSTEM_ERROR_QUOTA_EXCEEDED),
         proc::MemError::OutOfMemory => err(SYSTEM_MEMORY_ERROR_OUT_OF_MEMORY),
+        proc::MemError::Pressure => err(SYSTEM_MEMORY_ERROR_OUT_OF_MEMORY),
         proc::MemError::NoSuchProcess => err(SYSTEM_ERROR_RIGHTS_DENIED),
     }
 }

@@ -6,6 +6,10 @@
 //! * 把「切换发生了」通知给观察者（Observer 模式，函数指针，零分配），
 //!   调度器本身因此不依赖串口/日志模块
 //! * 记录每档的唤醒延迟（从被唤醒到被选中运行的 tick 数），供过载下的响应性验收
+//! * 维护 CPU 组（通常一组 = 一个进程的全部线程）：每组一份 CPU 上限令牌桶（`kernel_core::sched::limit`），
+//!   被限速组的成员不参与选择，直到令牌回正——失控进程被限速而不是拖垮整机；借出档位的持有者豁免
+//! * 看门狗：每个任务记录自上次**主动**放弃处理器以来连续占用的 tick，越过阈值即写入定长报告日志
+//!   （`kernel_core::sched::watchdog`）；只记录，不处置
 //! * 维护等待关系（谁在等谁：等锁、等任务退出）并据此重算有效档位（优先级继承，决策见
 //!   `kernel_core::sched::inherit`）；策略只看有效档位，因此继承不改动选择与抢占逻辑
 //! * **不直接执行**栈切换：`prepare_switch` 只返回新旧上下文的裸指针，
@@ -17,7 +21,10 @@
 use crate::arch::TaskContext;
 use crate::task::{Task, TaskId, TaskState};
 
-use super::policy::{inherit, qos_change_allowed, ClassMask, LatencyHistogram, Preempt, Qos, SchedPolicy, QOS_CLASSES};
+use super::policy::{
+    inherit, qos_change_allowed, ClassMask, CpuLimit, CpuLimitStats, LatencyHistogram, LimitError, Preempt, Qos, SchedPolicy, Watchdog, WatchdogLog,
+    WatchdogReport, QOS_CLASSES,
+};
 use super::stack::{ReserveError, StackPool};
 
 /// 引导线程所在槽位。
@@ -56,6 +63,13 @@ impl Cause {
     pub const BLOCK: &'static str = "block";
     /// 任务退出。
     pub const EXIT: &'static str = "exit";
+    /// 所在 CPU 组用完了上限，被限速换下。
+    pub const THROTTLE: &'static str = "throttle";
+
+    /// 该原因是否表示任务**主动**放弃处理器（看门狗据此清零连续占用）。
+    pub fn voluntary(cause: &str) -> bool {
+        cause == Cause::YIELD || cause == Cause::SLEEP || cause == Cause::BLOCK || cause == Cause::EXIT
+    }
 
     /// 策略的抢占原因 → 切换原因名。
     pub const fn of(p: Preempt) -> &'static str {
@@ -87,6 +101,8 @@ pub type SwitchObserver = fn(&SwitchEvent);
 pub enum SpawnError {
     /// 没有带栈的空闲工作槽位。
     NoFreeSlot,
+    /// 指定的 CPU 组无效。
+    BadGroup,
 }
 
 /// 修改 QoS 档位失败的原因。
@@ -110,6 +126,38 @@ pub enum BlockError {
     Refused(inherit::EdgeError),
 }
 
+/// CPU 组标识：槽位 + 世代（组被释放、槽位复用后旧标识失效，不会误指新组）。
+/// CPU group identifier (slot + generation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuGroupId {
+    slot: usize,
+    gen: u32,
+}
+
+/// CPU 组操作失败的原因。失败时调度器状态不变。
+/// Why a CPU-group operation was refused; the scheduler is left unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupError {
+    /// 组表已满。
+    NoFreeGroup,
+    /// 标识无效（组已释放或从未存在）。
+    Stale,
+    /// 上限或桶容量不合法。
+    Limit(LimitError),
+    /// 任务不存在、已退出或是引导线程。
+    NoTask,
+}
+
+/// 一个 CPU 组：上限记账 + 引用数（持有者 1 份 + 每个未退出的成员 1 份；归零即释放槽位）。
+struct CpuGroup {
+    gen: u32,
+    limit: CpuLimit,
+    refs: u32,
+}
+
+/// 看门狗报告日志容量。
+pub const WATCHDOG_LOG: usize = 16;
+
 /// 调度机制本体。`N` 为槽位总数（含引导线程）。
 pub struct Scheduler<P: SchedPolicy, const N: usize> {
     tasks: [Option<Task>; N],
@@ -129,6 +177,13 @@ pub struct Scheduler<P: SchedPolicy, const N: usize> {
     inherit: bool,
     /// 等待序号（同档等待者先来先得）。
     wait_seq: u64,
+    /// CPU 组表（组数不会超过任务槽位数：每组至少要有一个持有者）。
+    groups: [Option<CpuGroup>; N],
+    /// 各组槽位的下一个世代号。
+    group_gen: [u32; N],
+    /// 看门狗判定器与报告日志。
+    watchdog: Watchdog,
+    watchdog_log: WatchdogLog<WATCHDOG_LOG>,
 }
 
 impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
@@ -151,6 +206,10 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
             latency: [const { LatencyHistogram::new() }; QOS_CLASSES],
             inherit: true,
             wait_seq: 0,
+            groups: [const { None }; N],
+            group_gen: [0; N],
+            watchdog: Watchdog::new(super::policy::WATCHDOG_THRESHOLD),
+            watchdog_log: WatchdogLog::new(),
         }
     }
 
@@ -192,6 +251,24 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         entry: fn(),
         trampoline: extern "C" fn() -> !,
     ) -> Result<usize, SpawnError> {
+        self.spawn_in(id, name, entry, trampoline, None)
+    }
+
+    /// 同 [`Scheduler::spawn`]，但可指定新任务加入的 CPU 组（`None` = 与创建者同组，引导线程创建的任务不属于任何组）。
+    /// 指定的组无效时拒绝，状态不变。
+    /// Spawns into an explicit CPU group (or the creator's group when `None`).
+    pub fn spawn_in(
+        &mut self,
+        id: TaskId,
+        name: &'static str,
+        entry: fn(),
+        trampoline: extern "C" fn() -> !,
+        group: Option<CpuGroupId>,
+    ) -> Result<usize, SpawnError> {
+        let explicit = match group {
+            Some(g) => Some(self.group_slot(g).ok_or(SpawnError::BadGroup)?),
+            None => None,
+        };
         // 空槽位或「已退出且不是当前任务」的槽位都可复用：
         // 已退出任务一旦被切走，就再也不会在它的栈上执行，栈与 TCB 可以安全覆盖。
         let current = self.current;
@@ -211,6 +288,15 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
                 task.sched = super::policy::SchedEntity::new(creator.base_qos);
                 task.base_qos = creator.base_qos;
                 task.qos_ceiling = creator.qos_ceiling;
+                task.cpu_group = creator.cpu_group;
+            }
+        }
+        if explicit.is_some() {
+            task.cpu_group = explicit;
+        }
+        if let Some(g) = task.cpu_group {
+            if let Some(grp) = self.groups[g].as_mut() {
+                grp.refs += 1;
             }
         }
         // SAFETY：该槽位有栈且为空，没有任何任务在这块栈上运行。
@@ -306,9 +392,14 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
     /// 正在等它的任务（等它退出、或等它持有的锁）全部被唤醒，借给它的档位随之归还。
     pub fn mark_current_exited(&mut self) {
         let cur = self.current;
+        let mut left = None;
         if let Some(t) = self.tasks[cur].as_mut() {
             t.state = TaskState::Exited;
             t.waits_for = None;
+            left = t.cpu_group.take();
+        }
+        if let Some(g) = left {
+            self.unref_group(g);
         }
         for i in 0..N {
             if matches!(self.tasks[i].as_ref(), Some(t) if t.waits_for == Some(cur)) {
@@ -447,6 +538,10 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         if had_edge {
             self.resolve_inheritance();
         }
+        // 被限速组的成员醒来也不抢占：令牌回正之前它本来就不会被选中。
+        if !self.tasks[i].as_ref().is_some_and(|t| self.eligible(t)) {
+            return false;
+        }
         let woken = self.tasks[i].as_ref().map(|t| t.sched.qos).unwrap_or(Qos::Background);
         let current = if self.current == BOOT_SLOT { None } else { self.tasks[self.current].as_ref().map(|t| t.sched.qos) };
         self.policy.wake_preempts(woken, current)
@@ -476,7 +571,7 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         let mut m = ClassMask::EMPTY;
         for (i, t) in self.tasks.iter().enumerate().skip(1) {
             if let Some(t) = t {
-                if i != self.current && t.state == TaskState::Runnable {
+                if i != self.current && t.state == TaskState::Runnable && self.eligible(t) {
                     m.insert(t.sched.qos);
                 }
             }
@@ -499,6 +594,8 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         };
         self.policy.on_tick(running, waiting);
         self.slice_used = self.slice_used.saturating_add(1);
+        self.charge_groups(cur);
+        self.charge_watchdog(cur, now);
 
         let mut cause = None;
         for i in 1..N {
@@ -506,6 +603,9 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
             if due && self.make_runnable(i) {
                 cause = Some(Cause::WAKE);
             }
+        }
+        if cause.is_none() && self.tasks[cur].as_ref().is_some_and(|t| cur != BOOT_SLOT && t.state == TaskState::Running && !self.eligible(t)) {
+            cause = Some(Cause::THROTTLE);
         }
         if cause.is_none() {
             let cur_entity = match self.tasks[cur].as_ref() {
@@ -539,12 +639,19 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
             _ => false,
         };
         let yielding = cause == Cause::YIELD;
+        if Cause::voluntary(cause) {
+            let wd = self.watchdog;
+            if let Some(t) = self.tasks[prev].as_mut() {
+                wd.yielded(&mut t.streak);
+            }
+        }
 
         let choice = {
             let tasks = &self.tasks;
+            let groups = &self.groups;
             let runnable = |skip_prev: bool| {
                 tasks.iter().enumerate().skip(1).filter_map(move |(i, t)| match t {
-                    Some(t) if t.state == TaskState::Runnable && !(skip_prev && i == prev) => Some((i, &t.sched)),
+                    Some(t) if t.state == TaskState::Runnable && !(skip_prev && i == prev) && eligible_in(groups, t) => Some((i, &t.sched)),
                     _ => None,
                 })
             };
@@ -607,6 +714,151 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         Some(SwitchPlan { old, new, next_stack_top, next_space })
     }
 
+    // -----------------------------------------------------------------------
+    // CPU 组（每组一份上限令牌桶）
+    // -----------------------------------------------------------------------
+
+    /// 任务现在能否被选中：不属于任何组、组未被限速、或正持有借来的档位（优先级继承豁免限速，
+    /// 否则被限速的持有者会把等它的高档任务一起拖住）。
+    fn eligible(&self, t: &Task) -> bool {
+        eligible_in(&self.groups, t)
+    }
+
+    /// 有效组标识对应的槽位。
+    fn group_slot(&self, g: CpuGroupId) -> Option<usize> {
+        match self.groups.get(g.slot) {
+            Some(Some(grp)) if grp.gen == g.gen => Some(g.slot),
+            _ => None,
+        }
+    }
+
+    /// 组引用减一，归零时释放槽位。
+    fn unref_group(&mut self, slot: usize) {
+        if let Some(grp) = self.groups[slot].as_mut() {
+            grp.refs = grp.refs.saturating_sub(1);
+            if grp.refs == 0 {
+                self.groups[slot] = None;
+            }
+        }
+    }
+
+    /// 新建 CPU 组（上限千分比、桶容量 tick），调用者持有一份引用，用完以 [`Scheduler::release_group`] 归还。
+    /// Creates a CPU group; the caller holds one reference.
+    pub fn create_group(&mut self, limit_permille: u32, burst_ticks: u32) -> Result<CpuGroupId, GroupError> {
+        let limit = CpuLimit::new(limit_permille, burst_ticks).map_err(GroupError::Limit)?;
+        let slot = self.groups.iter().position(|g| g.is_none()).ok_or(GroupError::NoFreeGroup)?;
+        let gen = self.group_gen[slot];
+        self.group_gen[slot] = gen.wrapping_add(1);
+        self.groups[slot] = Some(CpuGroup { gen, limit, refs: 1 });
+        Ok(CpuGroupId { slot, gen })
+    }
+
+    /// 归还持有者的引用；成员全部退出后组即释放（标识随之失效）。
+    pub fn release_group(&mut self, g: CpuGroupId) -> Result<(), GroupError> {
+        let slot = self.group_slot(g).ok_or(GroupError::Stale)?;
+        self.unref_group(slot);
+        Ok(())
+    }
+
+    /// 修改组的上限；非法值被拒且原上限不变。
+    pub fn set_group_limit(&mut self, g: CpuGroupId, limit_permille: u32) -> Result<(), GroupError> {
+        let slot = self.group_slot(g).ok_or(GroupError::Stale)?;
+        let grp = self.groups[slot].as_mut().ok_or(GroupError::Stale)?;
+        grp.limit.set_limit(limit_permille).map_err(GroupError::Limit)
+    }
+
+    /// 组的记账快照。
+    pub fn group_stats(&self, g: CpuGroupId) -> Option<CpuLimitStats> {
+        let slot = self.group_slot(g)?;
+        self.groups[slot].as_ref().map(|grp| grp.limit.stats())
+    }
+
+    /// 仍存在的组数（诊断：组全部释放后应回到 0）。
+    pub fn live_groups(&self) -> usize {
+        self.groups.iter().flatten().count()
+    }
+
+    /// 把已存在的任务 `id` 移入组 `g`（`None` = 移出所有组）。任务或组无效时拒绝，状态不变。
+    pub fn assign_group(&mut self, id: TaskId, g: Option<CpuGroupId>) -> Result<(), GroupError> {
+        let new = match g {
+            Some(g) => Some(self.group_slot(g).ok_or(GroupError::Stale)?),
+            None => None,
+        };
+        let i = self.live_slot(id).filter(|&i| i != BOOT_SLOT).ok_or(GroupError::NoTask)?;
+        let old = self.tasks[i].as_ref().and_then(|t| t.cpu_group);
+        if old == new {
+            return Ok(());
+        }
+        if let Some(n) = new {
+            if let Some(grp) = self.groups[n].as_mut() {
+                grp.refs += 1;
+            }
+        }
+        if let Some(t) = self.tasks[i].as_mut() {
+            t.cpu_group = new;
+        }
+        if let Some(o) = old {
+            self.unref_group(o);
+        }
+        Ok(())
+    }
+
+    /// 每个 tick：给刚运行完这个 tick 的任务所在组扣费，全部组补充令牌并统计被限速的 tick。
+    fn charge_groups(&mut self, cur: usize) {
+        let ran_group = match self.tasks[cur].as_ref() {
+            Some(t) if cur != BOOT_SLOT && t.state == TaskState::Running => t.cpu_group,
+            _ => None,
+        };
+        let mut wants = [false; N];
+        for t in self.tasks.iter().skip(1).flatten() {
+            if let (Some(g), TaskState::Runnable | TaskState::Running) = (t.cpu_group, t.state) {
+                wants[g] = true;
+            }
+        }
+        for (slot, grp) in self.groups.iter_mut().enumerate() {
+            if let Some(grp) = grp.as_mut() {
+                grp.limit.on_tick(ran_group == Some(slot), wants[slot]);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 看门狗
+    // -----------------------------------------------------------------------
+
+    /// 每个 tick：给正在运行的工作任务记一笔连续占用，越过阈值时写一条报告。
+    fn charge_watchdog(&mut self, cur: usize, now: u64) {
+        if cur == BOOT_SLOT {
+            return;
+        }
+        let wd = self.watchdog;
+        let Some(t) = self.tasks[cur].as_mut().filter(|t| t.state == TaskState::Running) else { return };
+        if let Some(streak) = wd.charge(&mut t.streak) {
+            let r = WatchdogReport { task: t.id.0, name: t.name, streak, at: now };
+            self.watchdog_log.push(r);
+        }
+    }
+
+    /// 看门狗报告日志（副本）。
+    pub fn watchdog_log(&self) -> WatchdogLog<WATCHDOG_LOG> {
+        self.watchdog_log
+    }
+
+    /// 清空看门狗报告日志（每个测量场景开始前调用）。
+    pub fn clear_watchdog(&mut self) {
+        self.watchdog_log.clear();
+    }
+
+    /// 看门狗阈值（tick）。
+    pub fn watchdog_threshold(&self) -> u32 {
+        self.watchdog.threshold()
+    }
+
+    /// 修改看门狗阈值（tick，0 视为 1），返回旧值；已在进行的连续占用按新阈值继续判定。
+    pub fn set_watchdog_threshold(&mut self, ticks: u32) -> u32 {
+        core::mem::replace(&mut self.watchdog, Watchdog::new(ticks)).threshold()
+    }
+
     /// 某档的唤醒延迟直方图。
     pub fn latency(&self, q: Qos) -> LatencyHistogram {
         self.latency[q.index()]
@@ -620,5 +872,13 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
     /// 任务 `id` 累计运行的 tick 数（不存在时 `None`）。
     pub fn cpu_ticks(&self, id: TaskId) -> Option<u64> {
         self.tasks.iter().flatten().find(|t| t.id == id).map(|t| t.sched.cpu_ticks)
+    }
+}
+
+/// 任务 `t` 能否被选中（见 [`Scheduler::eligible`]）；独立成函数以便在借用任务表时同时借用组表。
+fn eligible_in<const N: usize>(groups: &[Option<CpuGroup>; N], t: &Task) -> bool {
+    match t.cpu_group {
+        None => true,
+        Some(g) => t.sched.qos != t.base_qos || groups[g].as_ref().is_none_or(|grp| grp.limit.eligible()),
     }
 }

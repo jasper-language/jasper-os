@@ -7,6 +7,8 @@
 //!
 //! 约定：槽位 0 是引导线程（空闲时的落脚点），**不交给策略选择**；策略只在工作任务中挑选。
 
+pub use kernel_core::sched::limit::{CpuLimit, CpuLimitStats, LimitError};
+pub use kernel_core::sched::watchdog::{RunStreak, Watchdog, WatchdogLog, WatchdogReport};
 pub use kernel_core::sched::{inherit, qos_change_allowed, Choice, ClassMask, LatencyHistogram, Preempt, Qos, QosParams, QosPolicy, SchedEntity, SchedPolicy, QOS_CLASSES};
 
 /// 内核采用的调度策略：QoS 分级（四档严格优先 + 档内用量衰减 + 各档最低份额 + 后台限速）。
@@ -16,3 +18,8 @@ pub type KernelPolicy = QosPolicy;
 pub const fn kernel_policy() -> KernelPolicy {
     QosPolicy::new(QosParams::DEFAULT)
 }
+
+/// 看门狗阈值（tick）：连续占用处理器这么久而不主动让出的任务被记录（100 Hz 下为 0.5 秒）。
+pub const WATCHDOG_THRESHOLD: u32 = 50;
+/// CPU 组的默认桶容量（tick）：允许的短突发长度。
+pub const CPU_BURST_TICKS: u32 = 4;

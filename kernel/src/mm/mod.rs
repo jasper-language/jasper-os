@@ -5,6 +5,7 @@
 //! * `heap`  —— 内核堆与 `#[global_allocator]`（M2.3）：页帧 + 映射之上按需增长
 //! * `space` —— 独立虚拟地址空间对象 `VmSpace`（M2.4）：私有窗口 + 共享内核部分，真实切换
 //! * `user`  —— 用户指针安全（M3.3）：系统调用参数中用户地址的校验与经物理映射的复制
+//! * `pressure` —— 内存压力分级与按服务质量档位的准入（拒绝低档请求而不是换页）
 //! * `demo`  —— 里程碑演练（与机制分离，可整体删除）
 //! * 本文件  —— 物理地址 ↔ 内核可访问虚拟地址的换算（经引导器提供的「全物理内存映射」偏移）
 //!
@@ -14,6 +15,7 @@ pub mod frame;
 pub mod heap;
 pub mod map;
 pub mod pin;
+pub mod pressure;
 pub mod space;
 pub mod user;
 

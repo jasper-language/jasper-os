@@ -234,10 +234,14 @@ fn exit_and_wait() {
     };
     let h = proc::grant(parent, child, ObjectType::Process, Rights::WAIT);
     let adopted = proc::adopt(parent, child).is_ok();
+    // 两个进程都就绪之后才允许运行：抢占开启时，先创建的子进程可能在父进程创建之前就被时钟切入并跑完，
+    // 父进程的「取消一个在等的 wait」就无从发生。
+    let prev_preemption = sched::set_preemption(false);
     let started = match h {
         Ok(h) => start(child, "prog-child", 5, 0) && start(parent, "prog-parent", 6, h.raw() as u64),
         Err(_) => false,
     };
+    sched::set_preemption(prev_preemption);
     check(h.is_ok() && adopted && started, "父子进程准备失败");
     if started {
         sched::run();

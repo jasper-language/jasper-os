@@ -31,8 +31,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::arch::{self as cpu, switch_context};
 use crate::task::TaskId;
 
-use policy::{kernel_policy, KernelPolicy, LatencyHistogram, Qos};
-use scheduler::{BlockError, Cause, QosError, Scheduler, SpawnError, SwitchObserver};
+use policy::{kernel_policy, CpuLimitStats, KernelPolicy, LatencyHistogram, Qos, WatchdogLog};
+use scheduler::{BlockError, Cause, CpuGroupId, GroupError, QosError, Scheduler, SpawnError, SwitchObserver, WATCHDOG_LOG};
 
 /// 槽位总数上限（含槽位 0 的引导线程）。前 [`stack::STATIC_STACKS`] 个槽位在内核堆初始化前即可用，
 /// 其余在 [`reserve_stacks`] 之后可用。
@@ -96,6 +96,62 @@ pub fn capacity() -> usize {
 /// 新建内核任务（继承当前工作任务的 QoS 档位与上限）。
 pub fn spawn(id: TaskId, name: &'static str, entry: fn()) -> Result<usize, SpawnError> {
     with_mut(|s| s.spawn(id, name, entry, task_trampoline))
+}
+
+/// 新建内核任务并放入 CPU 组 `group`（受该组上限约束）。组无效时拒绝。
+pub fn spawn_in(id: TaskId, name: &'static str, entry: fn(), group: CpuGroupId) -> Result<usize, SpawnError> {
+    with_mut(|s| s.spawn_in(id, name, entry, task_trampoline, Some(group)))
+}
+
+/// 新建 CPU 组（上限千分比，桶容量取默认值）；调用者持有一份引用，用完以 [`release_cpu_group`] 归还。
+/// Creates a CPU group with the default burst.
+pub fn create_cpu_group(limit_permille: u32) -> Result<CpuGroupId, GroupError> {
+    with_mut(|s| s.create_group(limit_permille, policy::CPU_BURST_TICKS))
+}
+
+/// 归还 CPU 组的持有者引用（成员全部退出后组释放）。
+pub fn release_cpu_group(g: CpuGroupId) -> Result<(), GroupError> {
+    with_mut(|s| s.release_group(g))
+}
+
+/// 修改 CPU 组的上限（千分比）；非法值被拒且原上限不变。
+pub fn set_cpu_group_limit(g: CpuGroupId, limit_permille: u32) -> Result<(), GroupError> {
+    with_mut(|s| s.set_group_limit(g, limit_permille))
+}
+
+/// CPU 组的记账快照（组已释放时 `None`）。
+pub fn cpu_group_stats(g: CpuGroupId) -> Option<CpuLimitStats> {
+    with(|s| s.group_stats(g))
+}
+
+/// 把已存在的任务移入 CPU 组（`None` = 移出）。
+pub fn assign_cpu_group(id: TaskId, g: Option<CpuGroupId>) -> Result<(), GroupError> {
+    with_mut(|s| s.assign_group(id, g))
+}
+
+/// 仍存在的 CPU 组数。
+pub fn live_cpu_groups() -> usize {
+    with(|s| s.live_groups())
+}
+
+/// 看门狗报告日志（副本）。
+pub fn watchdog_log() -> WatchdogLog<WATCHDOG_LOG> {
+    with(|s| s.watchdog_log())
+}
+
+/// 清空看门狗报告日志。
+pub fn clear_watchdog() {
+    with_mut(|s| s.clear_watchdog());
+}
+
+/// 看门狗阈值（tick）。
+pub fn watchdog_threshold() -> u32 {
+    with(|s| s.watchdog_threshold())
+}
+
+/// 修改看门狗阈值（tick），返回旧值（演练结束时用它恢复）。
+pub fn set_watchdog_threshold(ticks: u32) -> u32 {
+    with_mut(|s| s.set_watchdog_threshold(ticks))
 }
 
 /// 主动让出 CPU。

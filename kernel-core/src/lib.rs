@@ -43,6 +43,7 @@ pub mod io;
 pub mod memory;
 pub mod meta;
 pub mod paging;
+pub mod pressure;
 pub mod ring_abi;
 pub mod sched;
 pub mod module;

@@ -32,8 +32,14 @@
 //! # 优先级继承
 //! 等待关系（谁在等谁）与「有效档位 = 自身档位与全部直接/间接等待者档位中的最高者」的计算见 [`inherit`]；
 //! 策略只看实体的有效档位，因此继承不需要改动选择与抢占逻辑。
+//!
+//! # 过载防护
+//! * [`limit`]：每组（通常是一个进程）一份 CPU 上限令牌桶，被限速组的成员不参与选择
+//! * [`watchdog`]：记录长时间不主动让出处理器的任务（只记录，不处置）
 
 pub mod inherit;
+pub mod limit;
+pub mod watchdog;
 
 /// 服务质量档位（数值越小越优先）。登记表外的数值经 [`Qos::from_raw`] 拒绝。
 /// Quality-of-service class (lower value = higher priority).

@@ -8,6 +8,8 @@
 //! |---|---|---|
 //! | 0 `qos` | 自己降到「后台」 | 主线程（用户发起）醒来即抢占，迟到 0 tick；之后主线程自己吃满 CPU 时后台线程仍有进展（最低份额） |
 //! | 1 `same_class` | 保持「用户发起」（与主线程同档，对照组） | 同档不抢占：迟到不超过一个时间片 |
+//! | 2 `runaway` | 全部线程（含主线程）吃满 CPU [`RUNAWAY_TICKS`] 个 tick、从不睡眠 | 模拟失控进程：由内核侧按进程 CPU 上限限速，本程序只需按时结束 |
+//! | 3 `pressure` | —（单线程，降到后台档后申请匿名内存） | 内存紧张时被拒（内存不足错误），且区间内没有留下任何映射 |
 //!
 //! 两种模式都检查档位规则：未定义的档位数值被拒、没有上限时不能升档、降档后不能升回；
 //! 吃满线程退出后再测 [`RECOVERY_ROUNDS`] 轮，确认压力撤销后迟到量立即回到 0（允许一次跨 tick 的读数误差）。
@@ -22,7 +24,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use jasper_rt::task::{self, Qos};
-use jasper_rt::{entry, println, time, Error};
+use jasper_rt::{entry, mem, println, sys, time, Error};
 
 entry!(main);
 
@@ -38,6 +40,11 @@ const BUSY_TICKS: u64 = 150;
 const SPIN_PER_CHECK: u32 = 200_000;
 /// 压力撤销后的复测轮数。
 const RECOVERY_ROUNDS: u64 = 10;
+/// role 2：失控阶段的时长（tick，按墙上时间计；受 CPU 上限限速时实际运行的 tick 少得多）。
+const RUNAWAY_TICKS: u64 = 300;
+/// role 3：申请的匿名页数与位置（私有窗口内、与运行时堆和线程栈不重叠的区域）。
+const PRESSURE_PAGES: u64 = 4;
+const PRESSURE_BASE: u64 = sys::WINDOW_BASE + 0x3_8000_0000;
 /// 迟到量直方图桶数（0..=14 各一桶，≥15 合并）。
 const BUCKETS: usize = 16;
 
@@ -99,8 +106,15 @@ impl Lateness {
 fn main(role: u64, _arg: u64) -> i32 {
     let mut s = Steps(0);
     let background = role == 0;
-    let mode = if background { "qos" } else { "same_class" };
-    match run(&mut s, background, mode) {
+    let (mode, r) = match role {
+        2 => ("runaway", runaway(&mut s)),
+        3 => ("pressure", pressure(&mut s)),
+        _ => {
+            let mode = if background { "qos" } else { "same_class" };
+            (mode, run(&mut s, background, mode))
+        }
+    };
+    match r {
         Ok(()) => {
             println!("schedtest: mode={} ok checks={}", mode, s.0);
             0
@@ -216,5 +230,47 @@ fn run(s: &mut Steps, background: bool, mode: &str) -> Result<(), u32> {
     }
     s.check(after.percentile(500) == 0 && after.max <= 1)?;
     println!("schedtest: mode={} recovery rounds={} late_p50={} late_max={}", mode, RECOVERY_ROUNDS, after.percentile(500), after.max);
+    Ok(())
+}
+
+/// role 2：失控进程——[`HOGS`] 个线程加主线程一起吃满 CPU，到期后收拢退出。
+fn runaway(s: &mut Steps) -> Result<(), u32> {
+    let mut hogs = Vec::new();
+    for i in 0..HOGS {
+        let h = task::spawn(move || hog(i, false));
+        s.check(h.is_ok())?;
+        if let Ok(h) = h {
+            hogs.push(h);
+        }
+    }
+    let end = time::now() + RUNAWAY_TICKS;
+    let mut spins = 0u64;
+    while time::now() < end {
+        // 每读一次时刻先空转一阵（读时刻是系统调用，会产生诊断输出）
+        for _ in 0..SPIN_PER_CHECK {
+            core::hint::spin_loop();
+        }
+        spins += 1;
+    }
+    STOP.store(true, Ordering::Relaxed);
+    let mut codes_ok = true;
+    for h in hogs {
+        codes_ok &= h.join() == Ok(0);
+    }
+    s.check(codes_ok)?;
+    let all_progressed = PROGRESS.iter().all(|p| p.load(Ordering::Relaxed) > 0);
+    s.check(all_progressed && spins > 0)?;
+    println!("schedtest: mode=runaway threads={} wall_ticks={} all_progressed={}", HOGS + 1, RUNAWAY_TICKS, all_progressed);
+    Ok(())
+}
+
+/// role 3：内存紧张时后台档的匿名内存申请被拒（内存不足），且没有留下半份映射。
+fn pressure(s: &mut Steps) -> Result<(), u32> {
+    s.check(task::set_qos(Qos::Background).is_ok())?;
+    let r = mem::map(PRESSURE_BASE, PRESSURE_PAGES, mem::WRITE);
+    s.check(r == Err(Error::MEMORY_OUT_OF_MEMORY))?;
+    // 被拒的申请不留任何映射：取消映射同一区间必须报「地址无效」
+    s.check(mem::unmap(PRESSURE_BASE, PRESSURE_PAGES) == Err(Error::MEMORY_INVALID_ADDRESS))?;
+    println!("schedtest: mode=pressure qos=background map_refused=true nothing_mapped=true");
     Ok(())
 }

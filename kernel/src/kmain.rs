@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{clock, fix_demo, ipc_demo, irq, kprintln, mech_demo, mm, pi_demo, prog_demo, qos_demo, ring_demo, rt_demo, sched, user_demo};
+use crate::{clock, fix_demo, ipc_demo, irq, kprintln, mech_demo, mm, overload_demo, pi_demo, prog_demo, qos_demo, ring_demo, rt_demo, sched, user_demo};
 
 /// 内核版本（横幅中输出）。
 pub const VERSION: &str = "0.0.1";
@@ -110,6 +110,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
     qos_demo::run();
     // SCHED-2：优先级继承（三任务反转有界、传递继承、拒绝路径、持有者退出、压力撤销后恢复）。
     pi_demo::run();
+    // SCHED-3：过载防护（每进程 CPU 上限、看门狗、内存压力分级准入、压力撤销后回到基线）。
+    overload_demo::run();
     let fails = [
         mm::demo::failed(),
         user_demo::failed(),
@@ -120,10 +122,11 @@ pub fn start(boot: &'static BootSpec) -> ! {
         rt_demo::failed(),
         qos_demo::failed(),
         pi_demo::failed(),
+        overload_demo::failed(),
     ];
     if fails.iter().any(|&f| f > 0) {
         kprintln!(
-            "[JSR-EXIT] failure mm_failed={} user_failed={} fix_failed={} ring_failed={} ipc_failed={} prog_failed={} rt_failed={} qos_failed={} pi_failed={}",
+            "[JSR-EXIT] failure mm_failed={} user_failed={} fix_failed={} ring_failed={} ipc_failed={} prog_failed={} rt_failed={} qos_failed={} pi_failed={} overload_failed={}",
             fails[0],
             fails[1],
             fails[2],
@@ -132,7 +135,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
             fails[5],
             fails[6],
             fails[7],
-            fails[8]
+            fails[8],
+            fails[9]
         );
         arch::exit_emulator(ExitStatus::Failure);
     }

@@ -43,6 +43,7 @@ pub mod ring;
 pub mod ring_demo;
 pub mod rt_demo;
 pub mod qos_demo;
+pub mod overload_demo;
 pub mod pi_demo;
 pub mod sched;
 pub mod sync;

@@ -480,6 +480,21 @@ check_sched2() { # 优先级继承：三任务反转（锁 / 等退出）有界�
   fi
 }
 
+check_sched3() { # 过载防护：每进程 CPU 上限（令牌桶上界内、确有限速、旁观任务拿回处理器；不限速对照）；失控进程 + 内存紧张下交互档延迟有上界；看门狗；内存压力分级准入（被拒无改动）；压力撤销后回到基线
+  if has '\[JSR-OVL\] case=rules invalid_refused=true invalid_change_unchanged=true stale_group_refused=true exited_refused=true groups=0 reclaimed=true' \
+     && has 'text=schedtest: mode=runaway threads=5 wall_ticks=300 all_progressed=true' \
+     && has '\[JSR-OVL\] case=runaway mode=limited limit=250 pressure=low exit=Some\(0\) window=[0-9]+ used=[0-9]+ bound=[0-9]+ within=true throttled_ticks=[1-9][0-9]* throttle_events=[1-9][0-9]* bystander_share=([5-9][0-9][0-9]|1000)‰ interactive_samples=[1-9][0-9]* p99=[01] max=[01] latency_bound=1 bounded=true watchdog_runaway=[1-9][0-9]* watchdog_bystander=true watchdog_interactive=false groups=0 reclaimed=true' \
+     && has '\[JSR-OVL\] case=runaway mode=unlimited limit=1000 pressure=low exit=Some\(0\) .* within=true throttled_ticks=0 throttle_events=0 bystander_share=[1-4]?[0-9]?[0-9]‰ .* bounded=true .*watchdog_interactive=false groups=0 reclaimed=true' \
+     && has 'text=schedtest: mode=pressure qos=background map_refused=true nothing_mapped=true' \
+     && has '\[JSR-OVL\] case=memory order=I/U/T/B normal=normal:1111 low=low:1100 critical=critical:1000 reserve=critical:0000 restored=normal:1111 refused_untouched=true user_background_refused=true .*worst=critical reclaimed=true' \
+     && has '\[JSR-OVL\] case=recovery rounds=20 samples=20 max=0 immediate=true watchdog_new=0 level=normal groups=0 reclaimed=true' \
+     && has '^\[JSR-OVL\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 groups=0 level=normal reclaimed=true checks=[0-9]+ failed=0'; then
+    record SCHED3 PASS "过载防护：失控进程（5 线程吃满）按 25% 上限限速且用量在令牌桶上界内，同档旁观任务拿到 ≥50% 处理器（不限速对照 <50%）；失控进程 + 内存紧张下交互档唤醒延迟 ≤1 tick；看门狗记录失控线程、不记录交互任务；内存紧张/危急/保留线按档位拒绝且无改动；压力撤销后延迟 0、回到基线"
+  else
+    record SCHED3 FAIL "缺少 JSR-OVL 关键标记、上限/延迟超界或 failed≠0"
+  fi
+}
+
 check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出接收方、堆扩容、内核空间预分配、只读翻译、ID 用尽、线程创建）
   if has 'exited_receiver grant=Some\(Exited\) grant_new=Some\(Exited\) transfer=Some\(Exited\) objects_unchanged=true sender_kept=true reaped_receiver=Some\(NoSuchProcess\)' \
      && has 'heap fail_alloc=Some\(OutOfFrames\) rolled_back=true fail_map=Some\(MapFailed\) rolled_back=true overflow=Some\(LimitReached\) regrow=true reclaimed=true' \
@@ -495,7 +510,7 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_fix
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_fix
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

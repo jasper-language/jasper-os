@@ -73,6 +73,8 @@ pub struct Process {
     threads_live: u32,
     threads_total: u32,
     state: ProcState,
+    /// CPU 组（设置过 CPU 上限时有值；进程的全部线程受同一份上限约束，进程销毁时归还）。
+    cpu_group: Option<sched::scheduler::CpuGroupId>,
 }
 
 /// 进程的资源配额记账（开发默认值见 `crate::ring`、`crate::ipc` 中的常量）。
@@ -163,6 +165,7 @@ pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcErr
         threads_live: 0,
         threads_total: 0,
         state: ProcState::Running,
+        cpu_group: None,
     });
     let id = match kobj::insert(KObject::Process(p), 1, 0) {
         Ok(id) => id,
@@ -230,6 +233,8 @@ pub enum MemError {
     NotMapped,
     /// 超出进程的帧配额。
     Quota,
+    /// 内存压力下按请求者的服务质量档位拒绝（低档先被拒，保证高档与内核仍有内存可用）。
+    Pressure,
     /// 物理帧或页表帧不足。
     OutOfMemory,
     /// 进程不存在或已退出。
@@ -262,6 +267,8 @@ pub fn map_anon(pid: ObjId, va: u64, pages: u64, writable: bool) -> Result<(), M
     if owned + n > MAX_PROCESS_FRAMES {
         return Err(MemError::Quota);
     }
+    // 内存压力准入：在分配任何帧之前判定，被拒时不留任何改动。
+    crate::mm::pressure::admit(sched::current_effective_qos(), n).map_err(|_| MemError::Pressure)?;
     let mut fresh: Vec<PhysFrame> = Vec::new();
     if fresh.try_reserve_exact(n).is_err() {
         return Err(MemError::OutOfMemory);
@@ -619,8 +626,18 @@ pub fn spawn_thread(
     if let Err(e) = accounted {
         return Err(rollback(e, false));
     }
-    if sched::spawn(task, name, thread_entry).is_err() {
+    // 新线程与进程的其它线程同属一个 CPU 组。交给调度器之后再核对一次：设置上限与创建线程并发时，
+    // 两边总有一边把新线程放进组里。
+    let group = with_proc(id, |p| Ok(p.cpu_group)).ok().flatten();
+    let spawned = match group {
+        Some(g) => sched::spawn_in(task, name, thread_entry, g),
+        None => sched::spawn(task, name, thread_entry),
+    };
+    if spawned.is_err() {
         return Err(rollback(ProcError::NoTaskSlot, true));
+    }
+    if let Some(g) = with_proc(id, |p| Ok(p.cpu_group)).ok().flatten() {
+        let _ = sched::assign_cpu_group(task, Some(g));
     }
     kprintln!(
         "[JSR-PROC] event=system.task.spawned process={:#x} task={} task_obj={:#x} name={}",
@@ -630,6 +647,52 @@ pub fn spawn_thread(
         name
     );
     Ok((task, task_obj))
+}
+
+/// 设置 CPU 上限失败的原因。失败时进程与调度器状态不变。
+/// Why setting a process CPU limit was refused; nothing is changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuLimitError {
+    /// 进程不存在或已不在运行。
+    NoSuchProcess,
+    /// 上限不在 `1..=1000` 千分比之内，或 CPU 组表已满。
+    Refused(sched::scheduler::GroupError),
+}
+
+/// 设置进程 `pid` 的 CPU 上限（千分比，1000 = 不限）：进程的全部线程（现有的与以后创建的）合计
+/// 在任意时间窗内最多运行约这个比例的 tick，超出即被限速——失控的进程拖不垮整机。
+/// 由进程的创建方（管理者）调用；可重复调用以修改上限。
+/// Sets the CPU limit of process `pid` (permille of the processor, shared by all its threads).
+pub fn set_cpu_limit(pid: ObjId, limit_permille: u32) -> Result<(), CpuLimitError> {
+    let existing = with_proc(pid, |p| if p.state == ProcState::Running { Ok(p.cpu_group) } else { Err(ProcError::Exited) })
+        .map_err(|_| CpuLimitError::NoSuchProcess)?;
+    if let Some(g) = existing {
+        return sched::set_cpu_group_limit(g, limit_permille).map_err(CpuLimitError::Refused);
+    }
+    let g = sched::create_cpu_group(limit_permille).map_err(CpuLimitError::Refused)?;
+    let stored = with_proc(pid, |p| {
+        if p.state == ProcState::Running && p.cpu_group.is_none() {
+            p.cpu_group = Some(g);
+            Ok(())
+        } else {
+            Err(ProcError::Exited)
+        }
+    });
+    if stored.is_err() {
+        let _ = sched::release_cpu_group(g); // 回滚：组从未有成员，随之释放
+        return Err(CpuLimitError::NoSuchProcess);
+    }
+    let tasks: Vec<TaskId> = REG.lock().members.iter().filter(|m| m.process == pid).map(|m| m.task).collect();
+    for t in tasks {
+        let _ = sched::assign_cpu_group(t, Some(g)); // 已退出的线程无需加入
+    }
+    Ok(())
+}
+
+/// 进程 `pid` 的 CPU 记账（设置过上限时有值；进程销毁后 `None`）。
+pub fn cpu_stats(pid: ObjId) -> Option<sched::policy::CpuLimitStats> {
+    let g = with_proc(pid, |p| Ok(p.cpu_group)).ok().flatten()?;
+    sched::cpu_group_stats(g)
 }
 
 /// 当前任务所属的进程（内核任务为 `None`）。
@@ -1143,7 +1206,10 @@ pub fn reap(id: ObjId) -> Option<ExitInfo> {
 /// 正常路径上句柄表在 exited 时已被关闭；这里**不依赖该假设**：仍有残余句柄则逐个释放其外部所有权，
 /// 并输出诊断标记（出现即说明某条路径漏了检查）。
 pub fn destroy(p: Box<Process>) {
-    let Process { space, frames, threads, mut handles, name, exit_state, children, .. } = *p;
+    let Process { space, frames, threads, mut handles, name, exit_state, children, cpu_group, .. } = *p;
+    if let Some(g) = cpu_group {
+        let _ = sched::release_cpu_group(g); // 持有者引用；线程早已全部退出，组随之释放
+    }
     let mut residual: Vec<ObjectRef> = Vec::new();
     let n = handles.close_all(|r| residual.push(r));
     if n > 0 {

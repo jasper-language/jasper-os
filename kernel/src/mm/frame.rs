@@ -73,3 +73,8 @@ pub fn deallocate(frame: PhysFrame) -> Result<(), FrameError> {
 pub fn free_frames() -> usize {
     ALLOCATOR.get().map(|a| a.lock().free_frames()).unwrap_or(0)
 }
+
+/// 可分配帧总数（内存压力按它的比例判级）。
+pub fn usable_frames() -> usize {
+    ALLOCATOR.get().map(|a| a.lock().usable_frames()).unwrap_or(0)
+}
