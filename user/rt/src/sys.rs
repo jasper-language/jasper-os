@@ -53,6 +53,12 @@ pub const STACK_STRIDE: u64 = 0x4_0000;
 pub const STACK_PAGES: u64 = 16;
 /// 线程栈槽位数。
 pub const STACK_SLOTS: u32 = 64;
+/// 模块区间：私有窗口起点 + 32 GiB 起，每个槽位 [`MODULE_STRIDE`] 字节（= `.jaso` 映像大小上限）。
+pub const MODULES_BASE: u64 = WINDOW_BASE + 0x8_0000_0000;
+/// 模块槽位间距（64 MiB）。
+pub const MODULE_STRIDE: u64 = 64 << 20;
+/// 模块槽位数。
+pub const MODULE_SLOTS: u32 = 32;
 /// 页大小。
 pub const PAGE: u64 = 4096;
 

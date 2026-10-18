@@ -1,0 +1,16 @@
+# jaso-demo —— 第一个 `.jaso` 模块：位置无关的静态映像，导出 C 调用约定的函数；
+# 只经装载器传入的宿主接口表（jaso::HostV0）使用宿主能力，不按名字导入任何符号。
+[package]
+name = "jaso-demo"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "jaso-demo"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+jaso = { path = "../../jaso" }

@@ -1,0 +1,19 @@
+# user-jasodemo —— `.jaso` 装载器的验收程序：内嵌构建期打包好的模块文件（及其各种不合格变体），
+# 经 jasper-rt 的装载器装入、调用导出、卸载，并检查每一种拒绝。
+[package]
+name = "user-jasodemo"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "user-jasodemo"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+jasper-rt = { path = "../rt" }
+
+[build-dependencies]
+jaso = { path = "../../jaso", features = ["pack"] }

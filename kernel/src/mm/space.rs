@@ -109,6 +109,14 @@ impl VmSpace {
         self.mapper.unmap(page)
     }
 
+    /// 修改私有窗口内一页的权限（不改变其指向的帧）。窗口外返回 [`MapError::InvalidAddress`]。
+    pub fn protect(&mut self, page: VirtPage, flags: MapFlags) -> Result<(), MapError> {
+        if !in_private_window(page.start()) {
+            return Err(MapError::InvalidAddress);
+        }
+        self.mapper.protect(page, flags)
+    }
+
     /// 查询映射（窗口内外都可查询）。
     pub fn translate(&self, page: VirtPage) -> Option<(PhysFrame, MapFlags)> {
         self.mapper.translate(page)

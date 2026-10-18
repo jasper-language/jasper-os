@@ -13,6 +13,7 @@
 //! | [`mem`] | 匿名页映射与取消映射 |
 //! | [`channel`] | Channel 端点：收发消息与句柄 |
 //! | [`ring`] | 异步环：提交 → 完成、取消 |
+//! | [`module`] | `.jaso` 模块装载器：校验 → 装入 → 重定位 → 设权限 → 初始化；卸载 |
 //!
 //! # 约定
 //! * 所有系统调用失败都以 [`Error`]（登记表中的错误 ID）返回，不吞错误
@@ -28,6 +29,7 @@ pub mod handle;
 pub mod heap;
 pub mod io;
 pub mod mem;
+pub mod module;
 pub mod ring;
 mod start;
 pub mod sync;

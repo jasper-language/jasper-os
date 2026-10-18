@@ -10,6 +10,7 @@
 //! 3. **role 1**：`panic!` ⇒ 运行时输出信息，以 101 终止进程
 //! 4. **role 2**：线程栈溢出触到保护区 ⇒ 页故障终止整个进程（退出码 -1）
 //! 5. **`user/libcheck`**：现有 Rust 库（sha2、crc、miniz_oxide、smoltcp）在运行时之上通过已知答案测试，以 0 退出
+//! 6. **`user/jasodemo`**：`.jaso` 模块装入、调用导出、两个实例、卸载、各类拒绝，以 0 退出
 //!
 //! 每个用例结束后检查空闲页帧、存活对象、清理队列、固定帧都回到用例前的基线。
 
@@ -45,6 +46,8 @@ pub fn failed() -> u32 {
 static USER_RTDEMO: &[u8] = include_bytes!(env!("JSR_USER_RTDEMO"));
 /// 库可移植性验收程序 `user/libcheck` 的 ELF 镜像。
 static USER_LIBCHECK: &[u8] = include_bytes!(env!("JSR_USER_LIBCHECK"));
+/// `.jaso` 装载器验收程序 `user/jasodemo` 的 ELF 镜像（内嵌构建期打包的模块）。
+static USER_JASODEMO: &[u8] = include_bytes!(env!("JSR_USER_JASODEMO"));
 
 /// 主线程栈顶相对私有窗口起点的偏移与页数（与其它演练相同的布局）。
 const STACK_TOP_OFF: u64 = 0xC0_0000;
@@ -74,6 +77,7 @@ fn rt_calls() -> SyscallSet {
         abi::SYSTEM_CHANNEL_RECV,
         abi::SYSTEM_MEMORY_MAP,
         abi::SYSTEM_MEMORY_UNMAP,
+        abi::SYSTEM_MEMORY_PROTECT,
     ])
 }
 
@@ -106,6 +110,7 @@ pub fn run() {
     program("rt-panic", USER_RTDEMO, 1, 101);
     program("rt-overflow", USER_RTDEMO, 2, FAULT_CODE);
     program("libcheck", USER_LIBCHECK, 0, 0);
+    program("jasodemo", USER_JASODEMO, 0, 0);
     let end = baseline();
     check(end == start, "演练结束后资源未回到起点");
     sched::set_preemption(false);
@@ -184,6 +189,29 @@ fn memory_kernel_side() {
         && proc::page_flags(pid, base + 16 * page)
             .is_some_and(|f| f.contains(MapFlags::USER) && !f.contains(MapFlags::WRITE) && !f.contains(MapFlags::EXECUTE));
     check(ro_ok, "只读匿名映射不可写");
+
+    // 改权限：只读 → 可执行（W^X：同时可写可执行被拒）；区间含空洞 ⇒ 什么也不改
+    let rx = proc::protect_range(pid, base, 2, false, true);
+    let rx_flags = proc::page_flags(pid, base + page)
+        .is_some_and(|f| f.contains(MapFlags::USER) && f.contains(MapFlags::EXECUTE) && !f.contains(MapFlags::WRITE));
+    let wx = proc::protect_range(pid, base, 1, true, true);
+    let gap = proc::protect_range(pid, base + 2 * page, 3, false, false); // 第 3、4 页已映射，第 5 页没有
+    let gap_kept = proc::page_flags(pid, base + 2 * page).is_some_and(|f| f.contains(MapFlags::WRITE));
+    let back = proc::protect_range(pid, base, 2, true, false);
+    let rw_again = proc::page_flags(pid, base).is_some_and(|f| f.contains(MapFlags::WRITE) && !f.contains(MapFlags::EXECUTE));
+    check(
+        rx.is_ok() && rx_flags && wx == Err(MemError::InvalidRange) && gap == Err(MemError::NotMapped) && gap_kept && back.is_ok() && rw_again,
+        "改权限：W^X、全有或全无",
+    );
+    kprintln!(
+        "[JSR-RT] protect rx={:?} rx_flags={} wx={:?} gap={:?} gap_kept={} back_to_rw={}",
+        rx,
+        rx_flags,
+        wx,
+        gap,
+        gap_kept,
+        back.is_ok() && rw_again
+    );
 
     // 帧配额：每次 1024 页直到被拒；被拒那次不消耗帧
     let qbase = w + 0x4_0000_0000;

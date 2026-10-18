@@ -1,0 +1,19 @@
+# jaso —— `.jaso` 模块格式（v0，Native-only，实验性、未冻结）：解析与校验（no_std）、构建（alloc）、从 ELF 打包（std）。
+# 装载器（用户态）与宿主打包工具共用这一份定义。
+[package]
+name = "jaso"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+alloc = []
+pack = ["alloc", "std"]
+std = []
+
+[dependencies]
+sha2 = { version = "=0.11.1", default-features = false }

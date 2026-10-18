@@ -128,6 +128,7 @@ fn has_handler(id: u32) -> bool {
             | SYSTEM_PROCESS_WAIT
             | SYSTEM_MEMORY_MAP
             | SYSTEM_MEMORY_UNMAP
+            | SYSTEM_MEMORY_PROTECT
     )
 }
 
@@ -250,8 +251,10 @@ fn process_exit(code: u64) -> i64 {
     proc::thread_exit(code as i64, "process.exit")
 }
 
-/// `system.memory.map` 的标志位：映射为可写。其余位必须为 0（匿名页永不可执行）。
+/// `system.memory.map` / `protect` 的标志位：可写。
 pub const MAP_WRITE: u64 = 1 << 0;
+/// `system.memory.protect` 的标志位：可执行（不能与 [`MAP_WRITE`] 同时出现；`map` 不接受此位）。
+pub const MAP_EXEC: u64 = 1 << 1;
 
 fn mem_err(e: proc::MemError) -> i64 {
     match e {
@@ -282,6 +285,20 @@ fn memory_map(va: u64, pages: u64, flags: u64) -> i64 {
 fn memory_unmap(va: u64, pages: u64) -> i64 {
     let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
     match proc::unmap_range(pid, va, pages) {
+        Ok(()) => 0,
+        Err(e) => mem_err(e),
+    }
+}
+
+/// `system.memory.protect(va, pages, flags)`：修改调用者进程中 `[va, va + pages 页)` 的权限，成功返回 0。
+/// `flags` 只能含 [`MAP_WRITE`] 或 [`MAP_EXEC`] 之一（或都不含 = 只读）；两者同时出现 ⇒ `invalid_argument`（W^X）。
+/// 全有或全无；区间内有未映射的页 ⇒ `invalid_address`，什么也不改。
+fn memory_protect(va: u64, pages: u64, flags: u64) -> i64 {
+    if flags & !(MAP_WRITE | MAP_EXEC) != 0 || flags == MAP_WRITE | MAP_EXEC {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    }
+    let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
+    match proc::protect_range(pid, va, pages, flags & MAP_WRITE != 0, flags & MAP_EXEC != 0) {
         Ok(()) => 0,
         Err(e) => mem_err(e),
     }
@@ -352,6 +369,7 @@ fn execute(e: &AbiEntry, a: &SyscallArgs, task_id: u64) -> i64 {
         SYSTEM_PROCESS_WAIT => crate::ring::sys_wait(a.args[0], kernel_core::object::ObjectType::Process),
         SYSTEM_MEMORY_MAP => memory_map(a.args[0], a.args[1], a.args[2]),
         SYSTEM_MEMORY_UNMAP => memory_unmap(a.args[0], a.args[1]),
+        SYSTEM_MEMORY_PROTECT => memory_protect(a.args[0], a.args[1], a.args[2]),
         _ => err(SYSTEM_ERROR_UNSUPPORTED),
     }
 }

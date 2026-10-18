@@ -52,6 +52,7 @@ count() { grep -cE "$1" "$SERIAL" 2>/dev/null || true; }
 # ---- 阶段 A：构建、测试、启动（产出证据）------------------------------------
 echo "== 构建与测试（核：$CORES）=="
 run cargo test -p kernel-core > "$OUT/cargo-test.log" 2>&1;                                   TEST_RC=$?
+run cargo test -p jaso --features pack > "$OUT/jaso-test.log" 2>&1;                           JASO_RC=$?
 run cargo build --release --target x86_64-unknown-none -p kernel-core > "$OUT/build.log" 2>&1; CORE_RC=$?
 run cargo build --release --target x86_64-unknown-none -p jasper-kernel >> "$OUT/build.log" 2>&1 \
   && run cargo build --release -p xtask >> "$OUT/build.log" 2>&1 \
@@ -405,6 +406,22 @@ check_j2() {    # 现有 Rust 库的可移植性：sha2 / crc / miniz_oxide / sm
   fi
 }
 
+check_j3() {    # 最小 .jaso：格式宿主测试；memory.protect（W^X、全有或全无）；装入 → 重定位 → 设权限 → 初始化 → 调用；两个实例；卸载；各类拒绝；回到基线
+  if [ "${JASO_RC:-1}" -eq 0 ] && grep -qE '^test result: ok\. [0-9]+ passed; 0 failed' "$OUT/jaso-test.log" \
+     && has 'protect rx=Ok\(\(\)\) rx_flags=true wx=Err\(InvalidRange\) gap=Err\(NotMapped\) gap_kept=true back_to_rw=true' \
+     && has 'text=jaso-demo: init ok' \
+     && has 'text=jasodemo: loaded name=jaso-demo base=0x[0-9a-f]+ pages=[0-9]+ sum_ok=true relocated_greeting=true counter=2 host_alloc=1/1' \
+     && has 'text=jasodemo: two_instances bases=0x[0-9a-f]+,0x[0-9a-f]+ independent_data=true' \
+     && has 'text=jasodemo: unload unmapped=true slot_reused=true fresh_state=true' \
+     && has 'text=jasodemo: rejected tamper=Some\(Format\(DigestMismatch\)\) truncated=Some\(Format\(LengthMismatch\)\) arch=Some\(WrongArch\(Aarch64\)\) stage=Some\(WrongStage\(Boot\)\) caps=Some\(MissingCapability\("system\.console\.write"\)\) host=Some\(HostRequired\) init=Some\(MissingInit\)' \
+     && has 'text=jasodemo: ok checks=[0-9]+' \
+     && has 'case=jasodemo exit=Some\(0\) expect=0 reclaimed=true'; then
+    record J-3 PASS "格式宿主测试 $(grep -oE '[0-9]+ passed' "$OUT/jaso-test.log" | head -1)；W^X 改权限；.jaso 装入/重定位/设权限/初始化/调用导出、两实例数据独立、卸载后映射消失；篡改/截断/指令集/阶段/能力/宿主表/初始化入口均被拒；回到基线"
+  else
+    record J-3 FAIL "jaso 宿主测试 rc=${JASO_RC:-?}，或缺少 jasodemo / protect 关键标记"
+  fi
+}
+
 check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出接收方、堆扩容、内核空间预分配、只读翻译、ID 用尽、线程创建）
   if has 'exited_receiver grant=Some\(Exited\) grant_new=Some\(Exited\) transfer=Some\(Exited\) objects_unchanged=true sender_kept=true reaped_receiver=Some\(NoSuchProcess\)' \
      && has 'heap fail_alloc=Some\(OutOfFrames\) rolled_back=true fail_map=Some\(MapFailed\) rolled_back=true overflow=Some\(LimitReached\) regrow=true reclaimed=true' \
@@ -420,7 +437,7 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_fix
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_fix
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

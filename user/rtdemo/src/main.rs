@@ -127,6 +127,18 @@ fn memory_cases(s: &mut Steps) -> Result<(), u32> {
     s.check(mem::map(base + 8 * page, 1025, mem::WRITE) == Err(Error::MEMORY_INVALID_ADDRESS))?;
     s.check(mem::map(base + 8 * page, u64::MAX / page, mem::WRITE) == Err(Error::MEMORY_INVALID_ADDRESS))?;
 
+    // 改权限：写入一段机器码（x86_64：mov eax, 42; ret），改为可执行后调用；W^X 与空洞被拒
+    let code = base + 2 * page;
+    // SAFETY：code 页在上面映射为可写，且只在这里使用。
+    unsafe { core::ptr::copy_nonoverlapping([0xB8u8, 0x2A, 0x00, 0x00, 0x00, 0xC3].as_ptr(), code as *mut u8, 6) };
+    s.check(mem::protect(code, 1, mem::WRITE | mem::EXEC) == Err(Error::INVALID_ARGUMENT))?;
+    s.check(mem::protect(code, 3, mem::EXEC) == Err(Error::MEMORY_INVALID_ADDRESS))?; // 第 3 页之后没有映射
+    s.check(mem::protect(code, 1, mem::EXEC).is_ok())?;
+    // SAFETY：code 页现在是只读可执行，内容是一个完整的、遵守调用约定的函数。
+    let f: extern "C" fn() -> u32 = unsafe { core::mem::transmute(code as usize) };
+    s.check(f() == 42)?;
+    s.check(mem::protect(code, 1, mem::WRITE).is_ok())?;
+
     // 取消映射：区间含未映射页 ⇒ 什么也不改（原数据仍在）
     s.check(mem::unmap(base, 5) == Err(Error::MEMORY_INVALID_ADDRESS))?;
     s.check(words[0] == 0x6a73_7072)?;

@@ -358,6 +358,41 @@ pub fn unmap_range(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
     Ok(())
 }
 
+/// 修改进程 `pid` 中 `[va, va + pages 页)` 的访问权限：`writable` 与 `executable` 不能同时为真（W^X）。
+///
+/// **全有或全无**：区间内任一页未映射 ⇒ 什么也不改，返回 [`MemError::NotMapped`]。
+/// 帧与记账不变；只改权限位。可执行权限只能经本接口获得（`map_anon` 映射的页永不可执行）。
+/// Changes access rights of a mapped range (W^X enforced), all-or-nothing.
+pub fn protect_range(pid: ObjId, va: u64, pages: u64, writable: bool, executable: bool) -> Result<(), MemError> {
+    if writable && executable {
+        return Err(MemError::InvalidRange);
+    }
+    checked_range(va, pages)?;
+    let mut flags = MapFlags::USER;
+    if writable {
+        flags = flags.union(MapFlags::WRITE);
+    }
+    if executable {
+        flags = flags.union(MapFlags::EXECUTE);
+    }
+    kobj::with(|t| {
+        let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
+        if p.state != ProcState::Running {
+            return Err(MemError::NoSuchProcess);
+        }
+        for i in 0..pages {
+            if p.space.translate(VirtPage::containing(va + i * FRAME_SIZE)).is_none() {
+                return Err(MemError::NotMapped);
+            }
+        }
+        for i in 0..pages {
+            // 上面已确认每页都有 4 KiB 映射；单 CPU 上锁内无人能在其间改动这张页表。
+            p.space.protect(VirtPage::containing(va + i * FRAME_SIZE), flags).map_err(|_| MemError::InvalidRange)?;
+        }
+        Ok(())
+    })
+}
+
 /// 进程中 `va` 所在页的映射标志（未映射为 `None`；诊断与验收用）。
 pub fn page_flags(pid: ObjId, va: u64) -> Option<MapFlags> {
     with_proc(pid, |p| Ok(p.space.translate(VirtPage::containing(va)).map(|(_, f)| f))).ok().flatten()

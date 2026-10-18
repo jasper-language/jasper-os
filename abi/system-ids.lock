@@ -39,3 +39,4 @@
 20	op	system.memory.unmap	1	write	内存·取消映射
 4115	error	system.memory.error.already_mapped	1	none	地址已有映射
 4116	error	system.memory.error.out_of_memory	1	none	物理内存不足
+21	op	system.memory.protect	1	write	内存·修改访问权限

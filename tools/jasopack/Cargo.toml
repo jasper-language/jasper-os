@@ -1,0 +1,13 @@
+# jasopack —— 宿主侧 `.jaso` 工具：把位置无关的 ELF 打包为 `.jaso`，或检查一个 `.jaso` 文件。
+[package]
+name = "jasopack"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "jasopack"
+path = "src/main.rs"
+
+[dependencies]
+jaso = { path = "../../jaso", features = ["pack"] }

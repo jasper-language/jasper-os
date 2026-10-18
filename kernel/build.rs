@@ -59,28 +59,32 @@ fn main() {
 }
 
 /// 构建内嵌的用户程序：用独立的 target 目录调用 cargo，避免与外层构建争用同一目录的锁；
-/// 产物路径经环境变量（`JSR_USER_HELLO`、`JSR_USER_RING`、`JSR_USER_IPC`、`JSR_USER_PROG`、`JSR_USER_RTDEMO`、`JSR_USER_LIBCHECK`）交给内核源码 `include_bytes!`。
+/// 产物路径经环境变量（`JSR_USER_HELLO`、`JSR_USER_RING`、`JSR_USER_IPC`、`JSR_USER_PROG`、`JSR_USER_RTDEMO`、`JSR_USER_LIBCHECK`、`JSR_USER_JASODEMO`）交给内核源码 `include_bytes!`。
 /// Builds the embedded user programs with a separate target dir and exposes their paths to the kernel.
 fn build_user_programs(root: &std::path::Path) {
-    const PROGRAMS: [(&str, &str, &str); 6] = [
+    const PROGRAMS: [(&str, &str, &str); 7] = [
         ("user/hello", "user-hello", "JSR_USER_HELLO"),
         ("user/ring", "user-ring", "JSR_USER_RING"),
         ("user/ipc", "user-ipc", "JSR_USER_IPC"),
         ("user/prog", "user-prog", "JSR_USER_PROG"),
         ("user/rtdemo", "user-rtdemo", "JSR_USER_RTDEMO"),
         ("user/libcheck", "user-libcheck", "JSR_USER_LIBCHECK"),
+        ("user/jasodemo", "user-jasodemo", "JSR_USER_JASODEMO"),
     ];
     for (dir, _, _) in PROGRAMS {
         for f in ["src/main.rs", "Cargo.toml", "link.ld", "build.rs"] {
             println!("cargo:rerun-if-changed={}", root.join(dir).join(f).display());
         }
     }
-    // 用户态运行时（库）的源文件：任何一个变化都要重建依赖它的程序
-    println!("cargo:rerun-if-changed={}", root.join("user/rt/Cargo.toml").display());
-    println!("cargo:rerun-if-changed={}", root.join("user/rt/build.rs").display());
-    if let Ok(dir) = std::fs::read_dir(root.join("user/rt/src")) {
-        for f in dir.flatten() {
-            println!("cargo:rerun-if-changed={}", f.path().display());
+    // 用户程序依赖的库（运行时、`.jaso` 格式）与内嵌的模块：任何一个源文件变化都要重建
+    for lib in ["user/rt", "jaso", "modules/demo"] {
+        for f in ["Cargo.toml", "build.rs", "jaso.manifest"] {
+            println!("cargo:rerun-if-changed={}", root.join(lib).join(f).display());
+        }
+        if let Ok(dir) = std::fs::read_dir(root.join(lib).join("src")) {
+            for f in dir.flatten() {
+                println!("cargo:rerun-if-changed={}", f.path().display());
+            }
         }
     }
     // 用户程序共享 kernel-core 的记录布局：它变化时也要重建
