@@ -2,6 +2,7 @@
 core.name = jaso-deflate
 core.version = 0.1.0
 core.abi = c.v0
+core.publisher = jasper.dev
 core.host = jaso.host.v0
 core.requires = system.console.write
 core.description = 基于 miniz_oxide 0.9.1 的 zlib 压缩与解压

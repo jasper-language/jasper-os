@@ -2,6 +2,7 @@
 core.name = jaso-sha2
 core.version = 0.1.0
 core.abi = c.v0
+core.publisher = jasper.dev
 core.host = jaso.host.v0
 core.requires = system.console.write
 core.description = 基于 sha2 0.11.1 的 SHA-256 / SHA-512（纯软件后端）

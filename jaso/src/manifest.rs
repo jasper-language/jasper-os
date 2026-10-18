@@ -13,6 +13,7 @@
 //! | `core.requires` | 否 | 所需能力（逗号分隔，可出现多行）；能力名：小写字母、数字、`.`、`_` |
 //! | `core.exports` | 否 | 导出的函数名（逗号分隔，可出现多行）；导出表必须与它一一对应 |
 //! | `core.description` | 否 | 说明文字 |
+//! | `core.publisher` | 否 | 发布者名（小写字母、数字、`.`、`_`、`-`，1–64 字节）；签名模块必须声明，装载器按它查受信发布者表 |
 //!
 //! **核心段通用、扩展各占命名空间**：`core.` 之外的键必须形如 `<命名空间>.<键>`（如 `web.route`），
 //! 本解析器保留它们供各自的框架读取，自己不解释；`core.` 下出现未知键则拒绝（核心字段只随格式版本增加）。
@@ -63,6 +64,9 @@ pub struct Manifest<'a> {
     pub host: Option<&'a str>,
     /// 说明。
     pub description: Option<&'a str>,
+    /// 发布者名（签名模块必须声明）。
+    /// Declared publisher name.
+    pub publisher: Option<&'a str>,
 }
 
 fn name_ok(s: &str, extra: &[u8], max: usize) -> bool {
@@ -100,12 +104,12 @@ fn entries(text: &str) -> impl Iterator<Item = (u32, Option<(&str, &str)>)> {
 impl<'a> Manifest<'a> {
     /// 空清单（只作解析前的占位，不是合法清单）。
     pub const fn empty() -> Manifest<'static> {
-        Manifest { text: "", name: "", version: (0, 0, 0), abi: "", host: None, description: None }
+        Manifest { text: "", name: "", version: (0, 0, 0), abi: "", host: None, description: None, publisher: None }
     }
 
     /// 解析并校验。
     pub fn parse(text: &'a str) -> Result<Manifest<'a>, ManifestError> {
-        let (mut name, mut version, mut abi, mut host, mut description) = (None, None, None, None, None);
+        let (mut name, mut version, mut abi, mut host, mut description, mut publisher) = (None, None, None, None, None, None);
         let (mut requires, mut exports) = (0usize, 0usize);
         for (n, kv) in entries(text) {
             let (k, v) = kv.ok_or(ManifestError::BadLine(n))?;
@@ -142,6 +146,12 @@ impl<'a> Manifest<'a> {
                     }
                 }
                 "core.description" => set(&mut description)?,
+                "core.publisher" => {
+                    set(&mut publisher)?;
+                    if !name_ok(v, b"._-", 64) {
+                        return Err(ManifestError::BadValue(n));
+                    }
+                }
                 "core.requires" => {
                     for cap in v.split(',').map(str::trim) {
                         if !name_ok(cap, b"._", 64) {
@@ -181,6 +191,7 @@ impl<'a> Manifest<'a> {
             abi: abi.ok_or(ManifestError::Missing("core.abi"))?,
             host,
             description,
+            publisher,
         })
     }
 

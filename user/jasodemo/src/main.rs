@@ -7,6 +7,9 @@
 //! 3. 同一模块装入两个实例：基址不同、可写数据各自独立
 //! 4. 卸载：映射消失、槽位可复用、重新装入后状态从头开始
 //! 5. 拒绝：篡改任一字节、截断、指令集不符、装载阶段不符、能力未授予、缺宿主接口表、缺初始化入口
+//! 6. 来源（发布者签名）：签名模块按受信发布者装入；未签名、篡改后重算完整性摘要（签名失效）、换发布者、
+//!    他人重签、他人重签并改称自己、发布者不在表中——全部在映射之前被拒且不留映射；
+//!    开发模式放行未签名模块并留下审计事件，但坏签名照样被拒
 #![no_std]
 #![no_main]
 
@@ -16,7 +19,10 @@ use alloc::alloc::{alloc, dealloc, Layout};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use jasper_rt::module::{Grant, HostV0, LoadError, Module};
+use jasper_rt::module::{
+    unsigned_admitted, Grant, HostV0, LoadError, Module, Publisher, TrustError, TrustMode, TrustPolicy, DEVELOPMENT_NAMESPACE,
+    DEVELOPMENT_PUBLISHER,
+};
 use jasper_rt::{entry, io, mem, println, Error};
 
 entry!(main);
@@ -26,6 +32,21 @@ static DEMO_OTHER_ARCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-o
 static DEMO_BOOT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-boot.jaso"));
 static DEMO_NOINIT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-noinit.jaso"));
 static DEMO_MORECAPS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-morecaps.jaso"));
+static DEMO_UNSIGNED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-unsigned.jaso"));
+static DEMO_OTHERPUB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-otherpub.jaso"));
+static DEMO_RESIGNED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-resigned.jaso"));
+static DEMO_CLAIMED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-claimed.jaso"));
+
+/// 另一个受信发布者（验收用）：命名空间 `other-`，管不到 `jaso-demo`。
+const OTHER_PUBLISHER: Publisher<'static> =
+    Publisher { name: "jasper.other", namespace: "other-", key: *include_bytes!(concat!(env!("OUT_DIR"), "/trust-other.key")) };
+/// 开发用发布者。
+const DEV_PUBLISHER: Publisher<'static> =
+    Publisher { name: DEVELOPMENT_PUBLISHER, namespace: DEVELOPMENT_NAMESPACE, key: *include_bytes!(concat!(env!("OUT_DIR"), "/trust-dev.key")) };
+/// 受信发布者表：开发用发布者 + 另一个发布者。
+static PUBLISHERS: [Publisher<'static>; 2] = [DEV_PUBLISHER, OTHER_PUBLISHER];
+/// 只有另一个发布者的表（开发用发布者不受信）。
+static OTHER_ONLY: [Publisher<'static>; 1] = [OTHER_PUBLISHER];
 
 static ALLOCS: AtomicU32 = AtomicU32::new(0);
 static FREES: AtomicU32 = AtomicU32::new(0);
@@ -68,8 +89,8 @@ static HOST: HostV0 = HostV0 {
 
 const CAPS: &[&str] = &["system.console.write"];
 
-fn grant() -> Grant<'static> {
-    Grant { capabilities: CAPS, host: Some(&HOST) }
+fn grant<'a>(trust: &'a TrustPolicy<'a>) -> Grant<'a> {
+    Grant { capabilities: CAPS, host: Some(&HOST), trust }
 }
 
 struct Steps(u32);
@@ -119,8 +140,10 @@ fn counter(m: &Module) -> u64 {
 }
 
 fn run(s: &mut Steps) -> Result<(), u32> {
+    let trust = TrustPolicy::new(&PUBLISHERS, TrustMode::Enforce).map_err(|_| 99u32)?;
+    let t = &trust;
     // 1. 装入并调用
-    let m = Module::load(DEMO, grant()).map_err(|_| 100 + s.0)?;
+    let m = Module::load(DEMO, grant(t)).map_err(|_| 100 + s.0)?;
     s.check(m.name() == "jaso-demo" && m.version() == (0, 1, 0))?;
     let data: Vec<u8> = (0..1000u32).map(|i| (i % 256) as u8).collect();
     // SAFETY：签名与模块中的 demo_sum 一致；data 可读。
@@ -146,7 +169,7 @@ fn run(s: &mut Steps) -> Result<(), u32> {
     println!("jasodemo: loaded name={} base={:#x} pages={} sum_ok=true relocated_greeting=true counter=2 host_alloc=1/1", m.name(), m.base(), m.pages());
 
     // 3. 第二个实例：基址不同、数据独立
-    let m2 = Module::load(DEMO, grant()).map_err(|_| 100 + s.0)?;
+    let m2 = Module::load(DEMO, grant(t)).map_err(|_| 100 + s.0)?;
     s.check(m2.base() != m.base())?;
     s.check(counter(&m2) == 1 && counter(&m) == 3)?;
     println!("jasodemo: two_instances bases={:#x},{:#x} independent_data=true", m.base(), m2.base());
@@ -156,7 +179,7 @@ fn run(s: &mut Steps) -> Result<(), u32> {
     drop(m);
     s.check(mem::unmap(base, 1) == Err(Error::MEMORY_INVALID_ADDRESS))?;
     s.check(mem::map(base, pages, mem::WRITE).is_ok() && mem::unmap(base, pages).is_ok())?; // 区间确已空出
-    let m3 = Module::load(DEMO, grant()).map_err(|_| 100 + s.0)?;
+    let m3 = Module::load(DEMO, grant(t)).map_err(|_| 100 + s.0)?;
     s.check(m3.base() == base && counter(&m3) == 1)?;
     drop(m2);
     drop(m3);
@@ -166,29 +189,94 @@ fn run(s: &mut Steps) -> Result<(), u32> {
     let mut tampered = DEMO.to_vec();
     let mid = tampered.len() / 2;
     tampered[mid] ^= 0x01;
-    let r_tamper = Module::load(&tampered, grant()).err();
+    let r_tamper = Module::load(&tampered, grant(t)).err();
     s.check(r_tamper == Some(LoadError::Format(jaso_err::DigestMismatch)))?;
-    let r_trunc = Module::load(&DEMO[..DEMO.len() - 1], grant()).err();
+    let r_trunc = Module::load(&DEMO[..DEMO.len() - 1], grant(t)).err();
     s.check(r_trunc == Some(LoadError::Format(jaso_err::LengthMismatch)))?;
-    let r_arch = Module::load(DEMO_OTHER_ARCH, grant()).err();
+    let r_arch = Module::load(DEMO_OTHER_ARCH, grant(t)).err();
     s.check(matches!(r_arch, Some(LoadError::WrongArch(_))))?;
-    let r_stage = Module::load(DEMO_BOOT, grant()).err();
+    let r_stage = Module::load(DEMO_BOOT, grant(t)).err();
     s.check(matches!(r_stage, Some(LoadError::WrongStage(_))))?;
-    let r_caps = Module::load(DEMO, Grant { capabilities: &[], host: Some(&HOST) }).err();
+    let r_caps = Module::load(DEMO, Grant { capabilities: &[], host: Some(&HOST), trust: t }).err();
     s.check(matches!(&r_caps, Some(LoadError::MissingCapability(c)) if c == "system.console.write"))?;
-    let r_more = Module::load(DEMO_MORECAPS, grant()).err();
+    let r_more = Module::load(DEMO_MORECAPS, grant(t)).err();
     s.check(matches!(&r_more, Some(LoadError::MissingCapability(c)) if c == "system.channel.send"))?;
-    s.check(Module::load(DEMO_MORECAPS, Grant { capabilities: &["system.console.write", "system.channel.send"], host: Some(&HOST) }).is_ok())?;
-    let r_host = Module::load(DEMO, Grant { capabilities: CAPS, host: None }).err();
+    s.check(Module::load(DEMO_MORECAPS, Grant { capabilities: &["system.console.write", "system.channel.send"], host: Some(&HOST), trust: t }).is_ok())?;
+    let r_host = Module::load(DEMO, Grant { capabilities: CAPS, host: None, trust: t }).err();
     s.check(r_host == Some(LoadError::HostRequired))?;
-    let r_init = Module::load(DEMO_NOINIT, grant()).err();
+    let r_init = Module::load(DEMO_NOINIT, grant(t)).err();
     s.check(r_init == Some(LoadError::MissingInit))?;
     // 所有被拒的装载都没有留下映射：全部槽位空闲，第一个槽位可再次装入
-    let again = Module::load(DEMO, grant()).map_err(|_| 100 + s.0)?;
+    let again = Module::load(DEMO, grant(t)).map_err(|_| 100 + s.0)?;
     s.check(again.base() == base)?;
     println!(
         "jasodemo: rejected tamper={:?} truncated={:?} arch={:?} stage={:?} caps={:?} host={:?} init={:?}",
         r_tamper, r_trunc, r_arch, r_stage, r_caps, r_host, r_init
+    );
+    drop(again);
+    signatures(s, t, base)
+}
+
+/// 篡改代码段的一个字节并重算完整性摘要：文件结构与完整性都合格，只有签名失效。
+fn code_tampered() -> Option<Vec<u8>> {
+    let img = jaso::Image::parse(DEMO).ok()?;
+    let code = img.segments().find(|seg| seg.flags & jaso::FLAG_X != 0)?;
+    let at = code.data.as_ptr() as usize - DEMO.as_ptr() as usize + code.data.len() / 2;
+    let mut t = DEMO.to_vec();
+    t[at] ^= 0x01;
+    let d = jaso::digest_of(&t);
+    t[jaso::DIGEST_OFFSET..jaso::DIGEST_OFFSET + 32].copy_from_slice(&d);
+    Some(t)
+}
+
+/// 6. 来源（发布者签名）；`base` 是第一个槽位的基址（此时全部槽位空闲）。
+fn signatures(s: &mut Steps, t: &TrustPolicy<'_>, base: u64) -> Result<(), u32> {
+    // 签名模块：按受信发布者装入
+    let m = Module::load(DEMO, grant(t)).map_err(|_| 100 + s.0)?;
+    s.check(m.publisher() == Some(DEVELOPMENT_PUBLISHER) && m.base() == base && counter(&m) == 1)?;
+    drop(m);
+    // 各类拒绝（强制模式）
+    let untrusted = |e: TrustError| Some(LoadError::Untrusted(e));
+    let r_unsigned = Module::load(DEMO_UNSIGNED, grant(t)).err();
+    s.check(r_unsigned == untrusted(TrustError::Unsigned))?;
+    let tampered = code_tampered().ok_or(100 + s.0)?;
+    let r_badsig = Module::load(&tampered, grant(t)).err();
+    s.check(r_badsig == untrusted(TrustError::BadSignature))?;
+    let r_otherpub = Module::load(DEMO_OTHERPUB, grant(t)).err();
+    s.check(r_otherpub == untrusted(TrustError::KeyMismatch))?;
+    let r_resigned = Module::load(DEMO_RESIGNED, grant(t)).err();
+    s.check(r_resigned == untrusted(TrustError::KeyMismatch))?;
+    let r_claimed = Module::load(DEMO_CLAIMED, grant(t)).err();
+    s.check(r_claimed == untrusted(TrustError::OutOfNamespace))?;
+    let other_only = TrustPolicy::new(&OTHER_ONLY, TrustMode::Enforce).map_err(|_| 100 + s.0)?;
+    let r_unknown = Module::load(DEMO, grant(&other_only)).err();
+    s.check(r_unknown == untrusted(TrustError::UnknownPublisher))?;
+    // 被拒的装载都发生在映射之前：第一个槽位仍未映射，也没有产生任何审计放行
+    s.check(mem::unmap(base, 1) == Err(Error::MEMORY_INVALID_ADDRESS) && unsigned_admitted() == 0)?;
+    println!(
+        "jasodemo: signature rejected unsigned={:?} badsig={:?} otherpub={:?} resigned={:?} claimed={:?} unknown={:?} no_residue=true",
+        r_unsigned, r_badsig, r_otherpub, r_resigned, r_claimed, r_unknown
+    );
+
+    // 开发模式：未签名模块放行且被审计；签名模块仍按发布者认定；坏签名照样被拒
+    let dev = TrustPolicy::new(&PUBLISHERS, TrustMode::Development).map_err(|_| 100 + s.0)?;
+    let u = Module::load(DEMO_UNSIGNED, grant(&dev)).map_err(|_| 100 + s.0)?;
+    s.check(u.publisher().is_none() && unsigned_admitted() == 1 && counter(&u) == 1)?;
+    drop(u);
+    let signed = Module::load(DEMO, grant(&dev)).map_err(|_| 100 + s.0)?;
+    s.check(signed.publisher() == Some(DEVELOPMENT_PUBLISHER) && unsigned_admitted() == 1)?;
+    drop(signed);
+    let r_dev_badsig = Module::load(&tampered, grant(&dev)).err();
+    s.check(r_dev_badsig == untrusted(TrustError::BadSignature))?;
+    let r_dev_resigned = Module::load(DEMO_RESIGNED, grant(&dev)).err();
+    s.check(r_dev_resigned == untrusted(TrustError::KeyMismatch) && unsigned_admitted() == 1)?;
+    s.check(mem::unmap(base, 1) == Err(Error::MEMORY_INVALID_ADDRESS))?;
+    println!(
+        "jasodemo: trust dev_mode unsigned_loaded=true audited={} signed_publisher={} badsig={:?} resigned={:?} no_residue=true",
+        unsigned_admitted(),
+        DEVELOPMENT_PUBLISHER,
+        r_dev_badsig,
+        r_dev_resigned
     );
     Ok(())
 }

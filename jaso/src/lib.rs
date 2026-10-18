@@ -30,10 +30,16 @@
 //!   按指令集的指针宽度分两种：64 位指令集 `kind = 1`（在 `offset` 处写入 8 字节的 `装入基址 + addend`），
 //!   32 位指令集（RISC-V32）`kind = 2`（写入 4 字节）；种类必须与文件的指令集一致。
 //!   `offset` 按写入宽度对齐，且必须落在不可执行的段内
+//! * **Signature**（至多一个）：发布者签名，固定 [`SIGNATURE_SIZE`] 字节：
+//!   `scheme u32`（1 = Ed25519）· 保留 u32 · `publisher_key[32]` · `signature[64]`；
+//!   必须是文件的**最后** [`SIGNATURE_SIZE`] 字节，且不与段目录及任何其它段重叠。
+//!   签名覆盖的内容见 [`signed_digest_of`]：除 digest 字段与 64 字节签名值之外的整个文件（发布者公钥也在内），
+//!   签名的消息是 [`SIGNATURE_DOMAIN`] ‖ 该摘要。是否信任某个签名由 [`trust`] 中的策略决定，解析器只校验格式
 //!
 //! # 校验的原则
 //! 解析器不信任任何字段：所有偏移与长度都做检查式运算，任何越界、重叠、未知取值都拒绝，**从不 panic**
-//! （宿主测试里有对随机变异输入的覆盖）。完整性校验只证明「文件未被改动」，不证明来源；来源认证（签名）另行设计。
+//! （宿主测试里有对随机变异输入的覆盖）。完整性校验只证明「文件未被改动」，不证明来源；
+//! 来源由签名段 + [`trust::TrustPolicy`]（受信发布者表）证明，装载器必须在映射任何内容之前完成这一步。
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
@@ -45,6 +51,7 @@ pub mod build;
 pub mod manifest;
 #[cfg(feature = "pack")]
 pub mod pack;
+pub mod trust;
 
 pub use manifest::{Manifest, ManifestError};
 
@@ -74,6 +81,18 @@ pub const MAX_SECTIONS: u32 = 64;
 pub const MAX_EXPORTS: u32 = 1024;
 /// 导出名长度上限。
 pub const MAX_NAME: u32 = 128;
+/// 签名段长度：scheme(4) + 保留(4) + 发布者公钥(32) + 签名值(64)。
+/// Size of the signature section.
+pub const SIGNATURE_SIZE: usize = 104;
+/// 签名段内签名值的偏移（相对段起点）。
+/// Offset of the signature value inside the signature section.
+pub const SIGNATURE_VALUE_OFFSET: usize = 40;
+/// 签名算法：Ed25519（RFC 8032，严格验签）。
+/// Signature scheme: Ed25519.
+pub const SIG_ED25519: u32 = 1;
+/// 签名消息的域分隔前缀：防止同一把密钥在别的协议里签过的消息被当作模块签名。
+/// Domain-separation prefix of the signed message.
+pub const SIGNATURE_DOMAIN: &[u8] = b"jaso.signature.v0\0";
 
 /// 种类：Native（原生代码）。
 pub const KIND_NATIVE: u16 = 1;
@@ -215,6 +234,8 @@ pub enum SectionKind {
     Exports = 3,
     /// 重定位表。
     Relocs = 4,
+    /// 发布者签名。
+    Signature = 5,
 }
 
 impl SectionKind {
@@ -224,6 +245,7 @@ impl SectionKind {
             2 => Some(SectionKind::Segment),
             3 => Some(SectionKind::Exports),
             4 => Some(SectionKind::Relocs),
+            5 => Some(SectionKind::Signature),
             _ => None,
         }
     }
@@ -278,6 +300,9 @@ pub enum JasoError {
     BadReloc,
     /// 重定位目标越界、未对齐或落在可执行段内。
     RelocOutOfRange,
+    /// 签名段格式非法（长度、算法、保留字段，或不在文件末尾、与其它内容重叠）。
+    /// Malformed signature section.
+    BadSignatureSection,
     /// 清单错误。
     Manifest(ManifestError),
 }
@@ -305,6 +330,46 @@ pub fn digest_of(bytes: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(h.finalize().as_slice());
     out
+}
+
+/// 计算签名覆盖内容的 SHA-256：digest 字段与签名值（`sig_offset` 为签名段起点）都按全零计算。
+/// 发布者公钥与签名算法字段仍在覆盖范围内，换公钥必然使签名失效。
+/// `bytes` 至少要有头部那么长，签名段须完整落在 `bytes` 内。
+/// SHA-256 over everything except the integrity digest and the signature value.
+pub fn signed_digest_of(bytes: &[u8], sig_offset: usize) -> [u8; 32] {
+    let value = sig_offset + SIGNATURE_VALUE_OFFSET;
+    let mut h = Sha256::new();
+    h.update(&bytes[..DIGEST_OFFSET]);
+    h.update([0u8; 32]);
+    h.update(&bytes[DIGEST_OFFSET + 32..value]);
+    h.update([0u8; 64]);
+    h.update(&bytes[value + 64..]);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(h.finalize().as_slice());
+    out
+}
+
+/// 由签名覆盖摘要得到被签名的消息：[`SIGNATURE_DOMAIN`] ‖ 摘要。
+/// The message that is actually signed.
+pub fn signed_message(digest: &[u8; 32]) -> [u8; SIGNATURE_DOMAIN.len() + 32] {
+    let mut m = [0u8; SIGNATURE_DOMAIN.len() + 32];
+    m[..SIGNATURE_DOMAIN.len()].copy_from_slice(SIGNATURE_DOMAIN);
+    m[SIGNATURE_DOMAIN.len()..].copy_from_slice(digest);
+    m
+}
+
+/// 签名段的内容（格式已校验；是否可信由 [`trust::TrustPolicy`] 判断）。
+/// The parsed signature section (format-checked only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignatureSection {
+    /// 签名算法（v0 只有 [`SIG_ED25519`]）。
+    pub scheme: u32,
+    /// 签名者声称的发布者公钥。
+    pub publisher_key: [u8; 32],
+    /// 签名值。
+    pub signature: [u8; 64],
+    /// 签名段在文件中的偏移。
+    pub file_offset: u32,
 }
 
 /// 段目录项。
@@ -379,6 +444,7 @@ pub struct Image<'a> {
     dir_offset: u32,
     exports: Option<Dir>,
     relocs: Option<Dir>,
+    signature: Option<Dir>,
 }
 
 fn is_symbol(s: &str) -> bool {
@@ -441,6 +507,7 @@ impl<'a> Image<'a> {
             dir_offset,
             exports: None,
             relocs: None,
+            signature: None,
         };
         let mut manifest: Option<Dir> = None;
         let mut segments = 0u32;
@@ -458,6 +525,7 @@ impl<'a> Image<'a> {
                 SectionKind::Manifest => &mut manifest,
                 SectionKind::Exports => &mut img.exports,
                 SectionKind::Relocs => &mut img.relocs,
+                SectionKind::Signature => &mut img.signature,
                 SectionKind::Segment => {
                     img.check_segment(&d)?;
                     segments += 1;
@@ -490,6 +558,7 @@ impl<'a> Image<'a> {
         img.check_exports()?;
         img.check_declared_exports()?;
         img.check_relocs()?;
+        img.check_signature()?;
         Ok(img)
     }
 
@@ -623,6 +692,48 @@ impl<'a> Image<'a> {
         Ok(())
     }
 
+    /// 签名段：恰好 [`SIGNATURE_SIZE`] 字节、算法已知、保留为 0，位于文件末尾，
+    /// 段目录与其它所有段都在它之前结束（签名值不与任何被签名的内容共用字节）。
+    fn check_signature(&self) -> Result<(), JasoError> {
+        let Some(d) = self.signature else { return Ok(()) };
+        let b = self.section_bytes(&d);
+        if b.len() != SIGNATURE_SIZE || d.file_offset as usize + SIGNATURE_SIZE != self.bytes.len() {
+            return Err(JasoError::BadSignatureSection);
+        }
+        if u32_at(b, 0) != SIG_ED25519 || u32_at(b, 4) != 0 {
+            return Err(JasoError::BadSignatureSection);
+        }
+        let dir_end = self.dir_offset as usize + self.section_count as usize * SECTION_SIZE;
+        if dir_end > d.file_offset as usize {
+            return Err(JasoError::BadSignatureSection);
+        }
+        for i in 0..self.section_count {
+            let o = self.dir(i);
+            if o.kind != SectionKind::Signature as u32 && o.file_size > 0 && o.file_offset + o.file_size > d.file_offset {
+                return Err(JasoError::BadSignatureSection);
+            }
+        }
+        Ok(())
+    }
+
+    /// 签名段（没有签名时为 `None`）。
+    /// The signature section, if the file is signed.
+    pub fn signature(&self) -> Option<SignatureSection> {
+        let d = self.signature?;
+        let b = self.section_bytes(&d);
+        let mut publisher_key = [0u8; 32];
+        publisher_key.copy_from_slice(&b[8..40]);
+        let mut signature = [0u8; 64];
+        signature.copy_from_slice(&b[SIGNATURE_VALUE_OFFSET..SIGNATURE_VALUE_OFFSET + 64]);
+        Some(SignatureSection { scheme: u32_at(b, 0), publisher_key, signature, file_offset: d.file_offset })
+    }
+
+    /// 签名覆盖内容的摘要（没有签名时为 `None`），见 [`signed_digest_of`]。
+    /// Digest of the signed content, if the file is signed.
+    pub fn signed_digest(&self) -> Option<[u8; 32]> {
+        self.signature.map(|d| signed_digest_of(self.bytes, d.file_offset as usize))
+    }
+
     /// 全部映像段。
     pub fn segments(&self) -> impl Iterator<Item = Segment<'a>> + '_ {
         (0..self.section_count).map(|i| self.dir(i)).filter(|d| d.kind == SectionKind::Segment as u32).map(|d| self.segment_of(&d))
@@ -685,3 +796,5 @@ pub const ABI_C_V0: &str = "c.v0";
 
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, feature = "sign"))]
+mod trust_tests;

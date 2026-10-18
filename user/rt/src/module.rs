@@ -3,12 +3,16 @@
 //!
 //! # 装载步骤（任何一步失败都撤销此前的全部改动）
 //! 1. **校验文件**：[`jaso::Image::parse`]（结构 + SHA-256 完整性）
-//! 2. **检查适用性**：指令集与本程序一致；装载阶段为 `runtime`；调用约定为 `c.v0`
-//! 3. **检查能力**：清单里的每项能力都必须在调用者给出的授权 [`Grant::capabilities`] 中——清单是请求，授权由调用者决定
-//! 4. **检查宿主接口**：清单要求 `jaso.host.v0` 时，调用者必须提供宿主接口表，模块必须导出 `jaso_init`
-//! 5. **装入**：在模块区间取一个槽位，映射整个映像（可写），复制各段，应用重定位
-//! 6. **设权限**：映像先整体改为只读，再按段设为只读 / 读写 / 读执行（W^X，由内核强制）
-//! 7. **初始化**：调用 `jaso_init(宿主接口表)`，返回非 0 即视为失败
+//! 2. **验证来源**：[`TrustPolicy::verify`]——签名必须出自调用者给出的受信发布者表中声明的发布者，
+//!    且模块名在其命名空间内；这一步在取槽位、映射任何内容之前完成，失败不留任何痕迹。
+//!    开发模式放行未签名模块时，装载器输出一条结构化审计事件（`JSR-AUDIT event=jaso.trust.unsigned_accepted ...`），
+//!    调用者无法绕过
+//! 3. **检查适用性**：指令集与本程序一致；装载阶段为 `runtime`；调用约定为 `c.v0`
+//! 4. **检查能力**：清单里的每项能力都必须在调用者给出的授权 [`Grant::capabilities`] 中——清单是请求，授权由调用者决定
+//! 5. **检查宿主接口**：清单要求 `jaso.host.v0` 时，调用者必须提供宿主接口表，模块必须导出 `jaso_init`
+//! 6. **装入**：在模块区间取一个槽位，映射整个映像（可写），复制各段，应用重定位
+//! 7. **设权限**：映像先整体改为只读，再按段设为只读 / 读写 / 读执行（W^X，由内核强制）
+//! 8. **初始化**：调用 `jaso_init(宿主接口表)`，返回非 0 即视为失败
 //!
 //! # 卸载
 //! [`Module`] 离开作用域即取消整个映像的映射并归还槽位。经 [`Module::function`] 取得的函数指针
@@ -20,6 +24,9 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+pub use jaso::trust::{
+    PolicyError, Provenance, Publisher, TrustError, TrustMode, TrustPolicy, DEVELOPMENT_NAMESPACE, DEVELOPMENT_PUBLISHER,
+};
 pub use jaso::{HostV0, JasoError};
 use jaso::{Arch, Image, Stage, ABI_C_V0, FLAG_W, FLAG_X, HOST_V0, INIT_SYMBOL, PAGE};
 
@@ -60,6 +67,9 @@ pub struct Grant<'a> {
     pub capabilities: &'a [&'a str],
     /// 宿主接口表（模块声明需要时必须提供；须比 [`Module`] 活得久，通常是 `static`）。
     pub host: Option<&'static HostV0>,
+    /// 信任策略：受信发布者表 + 模式（强制 / 开发）。
+    /// Trust policy: trusted publishers plus mode.
+    pub trust: &'a TrustPolicy<'a>,
 }
 
 /// 装载失败的原因。
@@ -67,6 +77,9 @@ pub struct Grant<'a> {
 pub enum LoadError {
     /// 文件未通过格式或完整性校验。
     Format(JasoError),
+    /// 来源不可信（未签名、签名无效、发布者未知或不符、模块名越出命名空间）。
+    /// The module's origin is not trusted.
+    Untrusted(TrustError),
     /// 指令集与本程序不符。
     WrongArch(Arch),
     /// 装载阶段不是 `runtime`（启动期 / 构建期模块不能由运行时装载器装入）。
@@ -87,6 +100,26 @@ pub enum LoadError {
     NoSlot,
     /// 映射或改权限失败。
     Memory(Error),
+}
+
+/// 开发模式下放行未签名模块的次数（审计计数，只增不减）。
+static UNSIGNED_ADMITTED: AtomicU32 = AtomicU32::new(0);
+
+/// 本进程至今在开发模式下放行的未签名模块数。
+/// Number of unsigned modules admitted in development mode by this process.
+pub fn unsigned_admitted() -> u32 {
+    UNSIGNED_ADMITTED.load(Ordering::Relaxed)
+}
+
+/// 记录一次未签名放行：计数 + 结构化审计事件（模块名、版本、完整性摘要前 8 字节）。
+fn audit_unsigned(img: &Image<'_>) {
+    let n = UNSIGNED_ADMITTED.fetch_add(1, Ordering::Relaxed) + 1;
+    let m = &img.manifest;
+    let d = &img.digest;
+    crate::println!(
+        "JSR-AUDIT event=jaso.trust.unsigned_accepted mode=development module={} version={}.{}.{} digest={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} count={}",
+        m.name, m.version.0, m.version.1, m.version.2, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], n
+    );
 }
 
 /// 已占用的模块槽位（位图）。
@@ -131,6 +164,7 @@ pub struct Module {
     slot: u32,
     name: String,
     version: (u32, u32, u32),
+    publisher: Option<String>,
     exports: Vec<(String, u64)>,
 }
 
@@ -151,6 +185,7 @@ impl Module {
     /// 校验并装载一个 `.jaso` 文件（见模块文档的步骤）。
     pub fn load(bytes: &[u8], grant: Grant<'_>) -> Result<Module, LoadError> {
         let img = Image::parse(bytes).map_err(LoadError::Format)?;
+        let provenance = grant.trust.verify(&img).map_err(LoadError::Untrusted)?;
         if Some(img.arch) != Arch::current() {
             return Err(LoadError::WrongArch(img.arch));
         }
@@ -174,6 +209,14 @@ impl Module {
             }
         };
 
+        // 其余检查全部通过之后才审计放行：被拒的模块不产生「已接受」事件
+        let publisher = match provenance {
+            Provenance::Signed { publisher } => Some(publisher.to_string()),
+            Provenance::UnsignedDevelopment => {
+                audit_unsigned(&img);
+                None
+            }
+        };
         let slot = take_slot().ok_or(LoadError::NoSlot)?;
         let base = sys::MODULES_BASE + slot as u64 * sys::MODULE_STRIDE;
         let pages = (img.image_size / PAGE) as u64;
@@ -183,6 +226,7 @@ impl Module {
             slot,
             name: m.name.to_string(),
             version: m.version,
+            publisher,
             exports: img.exports().map(|e| (e.name.to_string(), base + e.value as u64)).collect(),
         };
         // 映射整个映像；中途失败时 `module` 被丢弃，Drop 只取消已映射的部分（pages 逐块累加）
@@ -242,6 +286,12 @@ impl Module {
     /// 模块版本。
     pub fn version(&self) -> (u32, u32, u32) {
         self.version
+    }
+
+    /// 签名发布者（取自受信表）；开发模式下放行的未签名模块为 `None`。
+    /// The signing publisher, or `None` for an unsigned module admitted in development mode.
+    pub fn publisher(&self) -> Option<&str> {
+        self.publisher.as_deref()
     }
 
     /// 装入基址。

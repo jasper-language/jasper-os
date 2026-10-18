@@ -2,6 +2,7 @@
 core.name = jaso-demo
 core.version = 0.1.0
 core.abi = c.v0
+core.publisher = jasper.dev
 core.host = jaso.host.v0
 core.requires = system.console.write
 core.description = 第一个 .jaso 模块：验证装载、重定位、权限、宿主接口表与卸载

@@ -12,8 +12,13 @@ path = "src/lib.rs"
 [features]
 default = []
 alloc = []
-pack = ["alloc", "std"]
+pack = ["alloc", "std", "sign"]
+# 签名（只在宿主打包侧需要；装载器只做验签，不带这一特性）
+sign = ["alloc"]
 std = []
 
 [dependencies]
 sha2 = { version = "=0.11.1", default-features = false }
+# 发布者签名（Ed25519）：BSD-3-Clause；no_std、无 alloc 也可验签、不需要线程 / TLS / 运行时；
+# 关闭默认特性（不带预计算表与随机数生成），后端经工作区配置强制为纯软件（serial），不使用 SIMD 寄存器。
+ed25519-dalek = { version = "=3.0.0", default-features = false }

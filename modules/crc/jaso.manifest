@@ -2,6 +2,7 @@
 core.name = jaso-crc
 core.version = 0.1.0
 core.abi = c.v0
+core.publisher = jasper.dev
 core.host = jaso.host.v0
 core.requires = system.console.write
 core.description = 基于 crc 3.4.0 的 CRC-16 / CRC-32 / CRC-32C / CRC-64

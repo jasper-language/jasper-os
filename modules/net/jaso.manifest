@@ -2,6 +2,7 @@
 core.name = jaso-net
 core.version = 0.1.0
 core.abi = c.v0
+core.publisher = jasper.dev
 core.host = jaso.host.v0
 core.requires = system.console.write
 core.description = 基于 smoltcp 0.14.0 的环回 TCP 回送

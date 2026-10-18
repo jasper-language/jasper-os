@@ -418,6 +418,28 @@ fn build_std_args(a: Arch) -> &'static [&'static str] {
     }
 }
 
+/// 开发用发布者（[`crate::trust::DEVELOPMENT_PUBLISHER`]）的签名密钥：种子由公开的固定字符串派生，**任何人都能用它签名**，
+/// 只适合开发与验收；正式发布须使用私有密钥，并把对应公钥写进装载方的受信发布者表。
+/// The development signing key. Its seed is public: development and testing only.
+pub fn development_signer() -> crate::build::Signer {
+    signer_from_phrase(b"jasper-os development publisher seed v0")
+}
+
+/// 以 SHA-256(`phrase`) 为种子建立签名密钥：只用于种子可以公开的场合（开发、验收）。
+/// Builds a signer seeded with SHA-256 of a public phrase (development/testing only).
+pub fn signer_from_phrase(phrase: &[u8]) -> crate::build::Signer {
+    use sha2::{Digest, Sha256};
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(Sha256::digest(phrase).as_slice());
+    crate::build::Signer::from_seed(&seed)
+}
+
+/// 对一个已打包的 `.jaso` 重新签名：保留清单、各段、导出与重定位，替换（或新增）签名段。
+/// Re-signs a packed `.jaso` file with `signer`.
+pub fn sign(bytes: &[u8], signer: &crate::build::Signer) -> Result<Vec<u8>, JasoError> {
+    Builder::from_image(&crate::Image::parse(bytes)?).finish_signed(signer)
+}
+
 /// 构建工作区 `workspace` 中的模块 crate `package`（目录 `dir`，含 `jaso.manifest`），并打包为运行时装载的 `.jaso`。
 ///
 /// 用独立的 `target_dir` 调用 cargo（供其它 crate 的构建脚本使用时，避免与外层构建争用同一目录的锁）。

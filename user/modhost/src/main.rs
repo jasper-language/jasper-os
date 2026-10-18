@@ -17,7 +17,7 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use jasper_rt::module::{Grant, Module, STD_HOST};
+use jasper_rt::module::{Grant, Module, Publisher, TrustMode, TrustPolicy, DEVELOPMENT_NAMESPACE, DEVELOPMENT_PUBLISHER, STD_HOST};
 use jasper_rt::{entry, mem, println, Error};
 
 entry!(main);
@@ -26,6 +26,12 @@ static SHA2: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sha2.jaso"));
 static CRC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crc.jaso"));
 static DEFLATE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/deflate.jaso"));
 static NET: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/net.jaso"));
+/// 受信发布者表：只信任构建期为这些模块签名的开发用发布者。
+static PUBLISHERS: [Publisher<'static>; 1] = [Publisher {
+    name: DEVELOPMENT_PUBLISHER,
+    namespace: DEVELOPMENT_NAMESPACE,
+    key: *include_bytes!(concat!(env!("OUT_DIR"), "/trust-dev.key")),
+}];
 
 type HashFn = unsafe extern "C" fn(*const u8, usize, *mut u8) -> i32;
 type Crc32Fn = unsafe extern "C" fn(*const u8, usize) -> u32;
@@ -133,9 +139,13 @@ fn main(_: u64, _: u64) -> i32 {
 }
 
 fn run(s: &mut Steps) -> Result<(), u32> {
-    let grant = Grant { capabilities: &["system.console.write"], host: Some(&STD_HOST) };
+    let trust = TrustPolicy::new(&PUBLISHERS, TrustMode::Enforce).map_err(|_| 99u32)?;
+    let grant = Grant { capabilities: &["system.console.write"], host: Some(&STD_HOST), trust: &trust };
     let load = |b: &[u8], s: &Steps| Module::load(b, grant).map_err(|_| 100 + s.0);
     let libs = Libs { sha2: load(SHA2, s)?, crc: load(CRC, s)?, deflate: load(DEFLATE, s)?, net: load(NET, s)? };
+    let signed = [&libs.sha2, &libs.crc, &libs.deflate, &libs.net].iter().filter(|m| m.publisher() == Some(DEVELOPMENT_PUBLISHER)).count();
+    s.check(signed == 4)?;
+    println!("modhost: trusted publisher={} signed={}/4 mode=enforce", DEVELOPMENT_PUBLISHER, signed);
     println!(
         "modhost: loaded sha2={}B crc={}B deflate={}B net={}B pages={}+{}+{}+{}",
         SHA2.len(),

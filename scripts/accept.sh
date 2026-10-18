@@ -509,6 +509,29 @@ check_j3() {    # 最小 .jaso：格式宿主测试；memory.protect（W^X、全
   fi
 }
 
+check_j5() {    # .jaso 发布者签名：签名段 + 受信发布者表，映射前验签；未签名 / 篡改后重算摘要 / 换发布者 / 他人重签 / 越出命名空间 / 未知发布者
+                # 均被拒且不留映射；开发模式放行未签名模块并输出审计事件，坏签名照样被拒；Ed25519 走纯软件后端
+  local soft
+  soft=$(grep -c 'curve25519_dalek_backend=\\"serial\\"' "$ROOT/.cargo/config.toml" || true)
+  if [ "${JASO_RC:-1}" -eq 0 ] && [ "$soft" -ge 4 ] \
+     && grep -q 'rfc8032_test_1 ... ok' "$OUT/jaso-test.log" \
+     && grep -q 'tampered_bytes_rejected ... ok' "$OUT/jaso-test.log" \
+     && grep -q 'replaced_signature_rejected ... ok' "$OUT/jaso-test.log" \
+     && grep -q 'swapped_publisher_rejected ... ok' "$OUT/jaso-test.log" \
+     && grep -q 'resigning_someone_elses_module_rejected ... ok' "$OUT/jaso-test.log" \
+     && grep -q 'random_tampering_never_accepted ... ok' "$OUT/jaso-test.log" \
+     && has 'text=jasodemo: signature rejected unsigned=Some\(Untrusted\(Unsigned\)\) badsig=Some\(Untrusted\(BadSignature\)\) otherpub=Some\(Untrusted\(KeyMismatch\)\) resigned=Some\(Untrusted\(KeyMismatch\)\) claimed=Some\(Untrusted\(OutOfNamespace\)\) unknown=Some\(Untrusted\(UnknownPublisher\)\) no_residue=true' \
+     && has 'text=JSR-AUDIT event=jaso\.trust\.unsigned_accepted mode=development module=jaso-demo version=0\.1\.0 digest=[0-9a-f]{16} count=1' \
+     && has 'text=jasodemo: trust dev_mode unsigned_loaded=true audited=1 signed_publisher=jasper\.dev badsig=Some\(Untrusted\(BadSignature\)\) resigned=Some\(Untrusted\(KeyMismatch\)\) no_residue=true' \
+     && has 'text=modhost: trusted publisher=jasper\.dev signed=4/4 mode=enforce' \
+     && has 'text=jasodemo: ok checks=[0-9]+' \
+     && has 'case=jasodemo exit=Some\(0\) expect=0 reclaimed=true'; then
+    record J-5 PASS "Ed25519 发布者签名（纯软件后端，RFC 8032 已知答案）+ 受信发布者表（命名空间）；映射前验签：未签名/篡改后重算摘要/换发布者/他人重签/改称自己越出命名空间/未知发布者均被拒且无残留映射；开发模式放行未签名并审计，坏签名仍拒；库模块 4/4 签名装入"
+  else
+    record J-5 FAIL "jaso 宿主测试 rc=${JASO_RC:-?}、纯软件后端配置 $soft/4，或缺少 jasodemo 签名 / 审计 / modhost 签名标记"
+  fi
+}
+
 check_j4() {    # 库作为 .jaso 模块：sha2 / crc / deflate / net 同时装入，已知答案与 J-2 一致；模块串联；全部卸载；回到基线
   if has 'text=modhost: loaded sha2=[0-9]+B crc=[0-9]+B deflate=[0-9]+B net=[0-9]+B' \
      && has 'text=modhost: module=jaso-sha2 vectors=5 ok=true' \
@@ -692,7 +715,7 @@ check_isa1b() { # AArch64 移植第二阶段：内嵌用户程序（独立 Rust 
     record ISA1b FAIL "AArch64 构建 rc=$A64_BUILD_RC 或缺少 qemu-system-aarch64 / 串口日志（见 build-aarch64.log）"
     return
   fi
-  a64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 \
+  a64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 \
             check_sched1 check_sched3 check_t1 check_t2
   local progs
   progs=$(grep -cE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_A64" || true)
@@ -728,7 +751,7 @@ check_isa2b() { # RISC-V64 移植第二阶段：内嵌用户程序（独立 Rust
     record ISA2b FAIL "RISC-V64 构建 rc=$RV64_BUILD_RC 或缺少 qemu-system-riscv64 / 串口日志（见 build-riscv64.log）"
     return
   fi
-  rv64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 \
+  rv64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 \
              check_sched1 check_sched3 check_t1 check_t2
   local progs
   progs=$(grep -cE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_RV64" || true)
@@ -780,7 +803,7 @@ check_isa3b() { # RISC-V32 移植第二阶段：内嵌用户程序（ELF32 装�
     record ISA3b FAIL "RISC-V32 构建 rc=$RV32_BUILD_RC 或缺少 qemu-system-riscv32 / 串口日志（见 build-riscv32.log）"
     return
   fi
-  rv32_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 \
+  rv32_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 \
              check_sched1 check_sched3 check_t1 check_t2
   local progs
   progs=$(grep -caE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_RV32" || true)
@@ -815,7 +838,7 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {
