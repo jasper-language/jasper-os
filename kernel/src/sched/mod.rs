@@ -116,6 +116,19 @@ pub fn yield_with_cause(cause: &'static str) {
     cpu::irq_restore(was_enabled);
 }
 
+/// 等待外部进展（例如时钟前进）的一次让步：先把处理器让给其他就绪任务；回来后**开中断休眠到下一个中断**，
+/// 再恢复调用前的中断状态。
+///
+/// 用于系统调用里的阻塞等待（系统调用分发期间默认关中断）：若只是循环 `yield_now`，在没有其他就绪任务时
+/// 时钟中断永远进不来，等待永不结束。入口的用户栈暂存位只在切栈前使用，此后开中断是安全的。
+/// One step of a blocking wait: yield, then sleep until the next interrupt with interrupts enabled.
+pub fn pause() {
+    yield_now();
+    let was_enabled = cpu::irq_save_disable();
+    cpu::wait_for_interrupt();
+    cpu::irq_restore(was_enabled);
+}
+
 /// 当前任务的 id 与名字。
 pub fn current() -> (TaskId, &'static str) {
     with(|s| s.current())

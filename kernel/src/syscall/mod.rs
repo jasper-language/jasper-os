@@ -102,6 +102,10 @@ fn has_handler(id: u32) -> bool {
             | SYSTEM_HANDLE_CLOSE
             | SYSTEM_HANDLE_DUPLICATE
             | SYSTEM_HANDLE_RESTRICT
+            | SYSTEM_ASYNC_RING_CREATE
+            | SYSTEM_ASYNC_RING_ENTER
+            | SYSTEM_ASYNC_CANCEL
+            | SYSTEM_TIME_WAIT
     )
 }
 
@@ -176,7 +180,7 @@ fn console_write(ptr: u64, len: u64) -> i64 {
 }
 
 /// 进程层错误 → 系统调用错误码。
-fn proc_err(e: ProcError) -> i64 {
+pub(crate) fn proc_err(e: ProcError) -> i64 {
     match e {
         ProcError::Handle(HandleError::Invalid) => err(SYSTEM_HANDLE_ERROR_INVALID),
         ProcError::Handle(HandleError::RightsDenied) => err(SYSTEM_HANDLE_ERROR_RIGHTS_DENIED),
@@ -205,6 +209,18 @@ fn task_spawn(entry: u64, stack: u64, arg: u64) -> i64 {
         },
         Err(e) => proc_err(e),
     }
+}
+
+/// `system.time.wait(ticks)` 的同步形式：让出处理器直到时钟前进 `ticks` 个 tick，返回 0。
+/// 同一操作也可经异步环提交（可被取消）；同步形式没有取消路径。
+fn time_wait(ticks: u64) -> i64 {
+    let Some(deadline) = sched::timer_ticks().checked_add(ticks) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    while sched::timer_ticks() < deadline {
+        sched::pause();
+    }
+    0
 }
 
 /// 按 ID 分派到真实实现。
@@ -244,6 +260,10 @@ fn execute(e: &AbiEntry, a: &SyscallArgs, task_id: u64) -> i64 {
             }
         }
         // 登记了却没有实现的操作在启动自检时就会被拦下，运行到这里说明自检被绕过。
+        SYSTEM_ASYNC_RING_CREATE => crate::ring::sys_create(a.args[0]),
+        SYSTEM_ASYNC_RING_ENTER => crate::ring::sys_enter(a.args[0], a.args[1]),
+        SYSTEM_ASYNC_CANCEL => crate::ring::sys_cancel(a.args[0], a.args[1]),
+        SYSTEM_TIME_WAIT => time_wait(a.args[0]),
         _ => err(SYSTEM_ERROR_UNSUPPORTED),
     }
 }

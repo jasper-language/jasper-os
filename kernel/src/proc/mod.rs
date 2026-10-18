@@ -58,9 +58,21 @@ pub struct Process {
     /// 线程表：每项持有对应 Task 对象的一个内部引用。
     threads: Vec<ObjId>,
     syscalls: SyscallSet,
+    /// 异步环配额记账。
+    ring_quota: RingQuota,
     threads_live: u32,
     threads_total: u32,
     state: ProcState,
+}
+
+/// 进程的异步环配额记账（开发默认值见 `crate::ring` 中的常量）。
+/// Per-process ring quota accounting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RingQuota {
+    /// 尚未销毁的 Ring 数。
+    pub rings: u32,
+    /// 跨所有 Ring、尚未销毁（X）的请求控制块数。
+    pub in_flight: u32,
 }
 
 /// 线程的启动参数（线程首次被调度时读取）。
@@ -130,6 +142,7 @@ pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcErr
         frames: Vec::new(),
         threads: Vec::new(),
         syscalls,
+        ring_quota: RingQuota::default(),
         threads_live: 0,
         threads_total: 0,
         state: ProcState::Running,
@@ -361,10 +374,7 @@ pub fn current_process() -> Option<ObjId> {
 /// 将不再有任何路径释放（泄漏）。因此所有「向进程放入句柄」的入口都必须先经此检查，
 /// 并且检查与放入发生在同一把对象表锁内（之间不存在进程退出的时间窗）。
 /// Returns the process only if it may still receive handles (exists and is Running).
-fn receiver<'a>(
-    t: &'a mut kernel_core::objtable::ObjectTable<KObject, { kobj::MAX_OBJECTS }>,
-    pid: ObjId,
-) -> Result<&'a mut Process, ProcError> {
+fn receiver<'a>(t: &'a mut kobj::Table, pid: ObjId) -> Result<&'a mut Process, ProcError> {
     match t.get_mut(pid) {
         Ok(KObject::Process(p)) if p.state == ProcState::Running => Ok(p),
         Ok(KObject::Process(_)) => Err(ProcError::Exited),
@@ -384,7 +394,7 @@ pub fn put_task_handle(task_obj: ObjId, rights: Rights) -> Result<HandleId, Proc
                 .map_err(ProcError::Handle)
         });
         if r.is_err() {
-            let _ = t.release_owner(task_obj);
+            let _ = kobj::release_owner_in(t, task_obj);
         }
         r
     })
@@ -403,7 +413,7 @@ pub fn grant(pid: ObjId, obj: ObjId, ty: ObjectType, rights: Rights) -> Result<H
         let r = receiver(t, pid)
             .and_then(|p| p.handles.put(ObjectRef { id: ObjectId(obj.raw()), ty }, rights).map_err(ProcError::Handle));
         if r.is_err() {
-            let _ = t.release_owner(obj);
+            let _ = kobj::release_owner_in(t, obj);
         }
         r
     })
@@ -415,18 +425,65 @@ pub fn grant(pid: ObjId, obj: ObjId, ty: ObjectType, rights: Rights) -> Result<H
 /// 因此失败路径上不存在需要回收的新对象。
 /// Creates an object and hands it to `pid` atomically; on failure no object is created.
 pub fn grant_new(pid: ObjId, obj: KObject, ty: ObjectType, rights: Rights) -> Result<HandleId, ProcError> {
-    kobj::with(|t| {
-        if receiver(t, pid)?.handles.free_slots() == 0 {
-            return Err(ProcError::Handle(HandleError::TableFull));
+    kobj::with(|t| grant_new_in(t, pid, obj, ty, rights).map(|(h, _)| h))
+}
+
+/// [`grant_new`] 的锁内版本：调用者已持有对象表锁（可与自己的配额检查合成一个原子步骤）。
+/// 返回（新句柄, 新对象标识）。
+/// In-lock variant of [`grant_new`]; returns the handle and the new object's id.
+pub(crate) fn grant_new_in(
+    t: &mut kobj::Table,
+    pid: ObjId,
+    obj: KObject,
+    ty: ObjectType,
+    rights: Rights,
+) -> Result<(HandleId, ObjId), ProcError> {
+    if receiver(t, pid)?.handles.free_slots() == 0 {
+        return Err(ProcError::Handle(HandleError::TableFull));
+    }
+    let id = t.insert(obj, 1, 0).map_err(|_| ProcError::NoTaskSlot)?;
+    let r = receiver(t, pid)
+        .and_then(|p| p.handles.put(ObjectRef { id: ObjectId(id.raw()), ty }, rights).map_err(ProcError::Handle));
+    match r {
+        Ok(h) => Ok((h, id)),
+        Err(e) => {
+            let _ = kobj::release_owner_in(t, id); // 防御：对象随即死亡入队，由清理过程销毁
+            Err(e)
         }
-        let id = t.insert(obj, 1, 0).map_err(|_| ProcError::NoTaskSlot)?;
-        let r = receiver(t, pid)
-            .and_then(|p| p.handles.put(ObjectRef { id: ObjectId(id.raw()), ty }, rights).map_err(ProcError::Handle));
-        if r.is_err() {
-            let _ = t.release_owner(id); // 防御：对象随即死亡入队，由清理过程销毁
-        }
-        r
-    })
+    }
+}
+
+/// 在锁内把进程 `pid` 的句柄 `h` 解析为对象标识：类型须为 `ty`，且句柄权限须包含 `need`。
+/// 进程须仍在运行（已退出的进程句柄表已关闭）。
+/// Resolves a handle of `pid` to an object id, checking its type and rights.
+pub(crate) fn resolve_in(t: &mut kobj::Table, pid: ObjId, h: HandleId, ty: ObjectType, need: Rights) -> Result<ObjId, ProcError> {
+    let p = receiver(t, pid)?;
+    let (r, have) = p.handles.get(h).map_err(ProcError::Handle)?;
+    if r.ty != ty {
+        return Err(ProcError::Handle(HandleError::Invalid));
+    }
+    if !have.contains(need) {
+        return Err(ProcError::Handle(HandleError::RightsDenied));
+    }
+    ObjId::from_raw(r.id.0).ok_or(ProcError::Handle(HandleError::Invalid))
+}
+
+/// 在锁内取进程的异步环配额记账（进程已退出也可取，用于收尾时归还；进程已销毁返回 `None`）。
+pub(crate) fn ring_quota_in(t: &mut kobj::Table, pid: ObjId) -> Option<&mut RingQuota> {
+    match t.get_mut(pid) {
+        Ok(KObject::Process(p)) => Some(&mut p.ring_quota),
+        _ => None,
+    }
+}
+
+/// 在锁内取进程可用的系统调用集合（进程须仍在运行）。
+pub(crate) fn syscalls_in(t: &mut kobj::Table, pid: ObjId) -> Result<SyscallSet, ProcError> {
+    receiver(t, pid).map(|p| p.syscalls)
+}
+
+/// 进程的异步环配额记账（诊断与验收用）。
+pub fn ring_quota(pid: ObjId) -> Option<RingQuota> {
+    kobj::with(|t| ring_quota_in(t, pid).copied())
 }
 
 /// 进程 `pid` 中句柄 `h` 的（对象, 权限）；无效返回 `None`（诊断与验收用）。
@@ -456,7 +513,7 @@ pub fn duplicate_current(h: HandleId, rights: Rights) -> Result<HandleId, ProcEr
         t.acquire_owner(obj).map_err(|_| ProcError::Handle(HandleError::Invalid))?;
         let put = receiver(t, pid).and_then(|p| p.handles.put(r, rights).map_err(ProcError::Handle));
         if put.is_err() {
-            let _ = t.release_owner(obj);
+            let _ = kobj::release_owner_in(t, obj);
         }
         put
     })
@@ -530,7 +587,7 @@ pub fn exit_idle(pid: ObjId, code: i64) -> bool {
         };
         for r in closed {
             if let Some(id) = ObjId::from_raw(r.id.0) {
-                let _ = t.release_owner(id);
+                let _ = kobj::release_owner_in(t, id);
             }
         }
         ok
@@ -546,7 +603,7 @@ pub fn close_handle(h: HandleId) -> Result<(), ProcError> {
             _ => return Err(ProcError::NoSuchProcess),
         };
         if let Some(id) = ObjId::from_raw(obj.id.0) {
-            let _ = t.release_owner(id);
+            let _ = kobj::release_owner_in(t, id);
         }
         Ok(())
     })
@@ -579,7 +636,7 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
             }
             for r in closed {
                 if let Some(id) = ObjId::from_raw(r.id.0) {
-                    let _ = t.release_owner(id);
+                    let _ = kobj::release_owner_in(t, id);
                 }
             }
             let _ = t.release_internal(m.task_obj); // 执行上下文 → Task
@@ -617,7 +674,7 @@ pub fn reap(id: ObjId) -> Option<ExitInfo> {
             },
             _ => return None,
         };
-        t.release_owner(id).ok()?;
+        kobj::release_owner_in(t, id).ok()?;
         Some(info)
     })?;
     kprintln!(

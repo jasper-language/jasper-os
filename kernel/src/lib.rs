@@ -35,6 +35,8 @@ pub mod ktrace;
 pub mod mech_demo;
 pub mod panic;
 pub mod proc;
+pub mod ring;
+pub mod ring_demo;
 pub mod sched;
 pub mod sync;
 pub mod syscall;

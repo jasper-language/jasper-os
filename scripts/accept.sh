@@ -272,6 +272,28 @@ check_m42() {   # Handle/Rights：复制只降权、提权被拒；跨进程原�
   fi
 }
 
+check_m43() {   # 用户态异步环：用户程序端到端（ID 单调、cq_full、同步取消、信用归还、取消结果、窗口淘汰、等待、不可转移、关闭）+ 内核侧 closing/缓冲区/配额
+  if has 'text=ring: ids monotonic=true same_tag_matched=true' \
+     && has 'text=ring: cq_full submitted=0 error=-4109' \
+     && has 'text=ring: sync_cancel_without_credit=true published_holds_credit=true credit_returned_on_consume=true rejected_ids_consumed=false' \
+     && has 'text=ring: cancel again=-4106 in_window=-4106 evicted=-4107 never=-4107' \
+     && has 'text=ring: wait cancelled=true natural_completion=true' \
+     && has 'text=ring: handle dup_with_transfer=-4102 dup_without_transfer_ok=true' \
+     && has 'text=ring: closed_with_pending=true enter_after_close=-4101 cancel_after_close=-4101' \
+     && has 'text=ring: all checks passed' \
+     && has '\[JSR-RING\] user exit=Some\(Exited \{ code: 0 \}\) quota_after=Some\(RingQuota \{ rings: 0, in_flight: 0 \}\)' \
+     && has 'buffer cancel=Ok\(0\) hidden_before_quiesce=true cancel_again=Ok\(-4106\) visible_after_quiesce=true' \
+     && has 'closing before=Some\(\(2, 3\)\) after_in_flight=Some\(2\) dropped_ready=true submit_after_exit=Some\(-[0-9]+\) quota=Some\(3\)->Some\(2\)' \
+     && has 'closing abortable_quiesced=true nonabortable_finished=true ring_destroyed_after_last_request=true quota_returned=true' \
+     && has 'transfer result=Ok\(Err\(Handle\(RightsDenied\)\)\)' \
+     && has 'quota rings=8 ninth=Some\(-4111\) in_flight=256 over=Some\(-4111\) unchanged_on_reject=true returned=true' \
+     && has '^\[JSR-RING\] objects_live=([0-9]+)/\1 pending=0 reclaimed=true checks=[0-9]+ failed=0'; then
+    record M4.3 PASS "用户态 ring 提交→完成；cq_full 原子失败；信用耗尽可同步取消；信用消费时归还；取消结果表与窗口；closing 各类收尾；配额；回到基线"
+  else
+    record M4.3 FAIL "缺少 JSR-RING / user-ring 关键标记或 failed≠0"
+  fi
+}
+
 check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出接收方、堆扩容、内核空间预分配、只读翻译、ID 用尽、线程创建）
   if has 'exited_receiver grant=Some\(Exited\) grant_new=Some\(Exited\) transfer=Some\(Exited\) objects_unchanged=true sender_kept=true reaped_receiver=Some\(NoSuchProcess\)' \
      && has 'heap fail_alloc=Some\(OutOfFrames\) rolled_back=true fail_map=Some\(MapFailed\) rolled_back=true overflow=Some\(LimitReached\) regrow=true reclaimed=true' \
@@ -287,7 +309,7 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
-check_m10; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_fix
+check_m10; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_fix
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

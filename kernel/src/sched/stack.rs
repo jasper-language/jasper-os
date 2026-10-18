@@ -9,8 +9,10 @@ use core::ptr::addr_of_mut;
 
 use crate::arch::TaskContext;
 
-/// 单个任务内核栈大小。
-pub const STACK_SIZE: usize = 16 * 1024;
+/// 单个任务内核栈大小。64 KiB：系统调用路径上会临时构造较大的内核对象（例如异步环约 12 KiB），
+/// 在移入堆之前可能先位于栈上；栈池只有 `MAX_TASKS` 个槽位，总开销固定。
+/// Per-task kernel stack size (large kernel objects may be built on the stack before moving to the heap).
+pub const STACK_SIZE: usize = 64 * 1024;
 
 /// 16 字节对齐的栈内存块（SysV ABI 要求）。
 #[repr(C, align(16))]

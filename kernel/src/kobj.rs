@@ -7,9 +7,9 @@
 //! * 销毁动作可以释放其他对象（例如 Process 销毁时释放线程表对 Task 的引用），被释放者入队，下一轮处理——迭代而非递归
 //!
 //! # 已实现的对象种类
-//! 目前只有 Process、Task 与（演练用的）Event。规范中的叶子对象「共享内存（Memory）」**尚未实现**；
+//! 目前只有 Process、Task、Ring 与（演练用的）Event。规范中的叶子对象「共享内存（Memory）」**尚未实现**；
 //! 地址空间属于进程内部，不作为可经句柄传递的对象，也不代替共享内存对象。
-//! Implemented kinds: Process, Task, Event. The shared-memory leaf object is not implemented yet.
+//! Implemented kinds: Process, Task, Ring, Event. The shared-memory leaf object is not implemented yet.
 //!
 //! # 锁
 //! 对象表锁在全局锁顺序中位于「进程句柄表锁」一层（M4.0 §3.4），持锁期间只做计数与查表，以及调用方明确的页表/帧操作
@@ -35,6 +35,9 @@ pub struct TaskObj {
     pub process: ObjId,
 }
 
+/// 内核对象表的具体类型（供需要在同一把锁内操作多个对象的模块使用）。
+pub type Table = ObjectTable<KObject, MAX_OBJECTS>;
+
 /// 内核对象。
 pub enum KObject {
     /// 进程（地址空间、句柄表、帧所有权……）。
@@ -46,6 +49,8 @@ pub enum KObject {
         /// 是否已触发。
         signaled: bool,
     },
+    /// 异步环（进程私有；句柄不带 TRANSFER）。
+    Ring(Box<crate::ring::RingObj>),
 }
 
 impl KObject {
@@ -55,6 +60,7 @@ impl KObject {
             KObject::Process(_) => "Process",
             KObject::Task(_) => "Task",
             KObject::Event { .. } => "Event",
+            KObject::Ring(_) => "Ring",
         }
     }
 }
@@ -71,9 +77,21 @@ pub fn insert(obj: KObject, owners: u32, internal: u32) -> Result<ObjId, ObjErro
     with(|t| t.insert(obj, owners, internal))
 }
 
-/// 释放一个外部所有权。
+/// 在对象表锁内释放一个外部所有权，并执行该类型的 **closing 动作**（有效外部所有权归零、对象尚未死亡时）：
+/// 目前只有 Ring 有 closing 动作（拒绝新提交、取消可取消的请求、丢弃未消费的完成记录）。
+/// 所有释放外部所有权的路径（关闭句柄、进程退出关闭句柄表、回滚）都必须经由这里，closing 才不会被漏掉。
+/// Releases one external ownership and runs the type's closing action when it becomes unowned.
+pub fn release_owner_in(t: &mut Table, id: ObjId) -> Result<Released, ObjError> {
+    let r = t.release_owner(id)?;
+    if r.became_unowned && !r.dead && matches!(t.get(id), Ok(KObject::Ring(_))) {
+        crate::ring::close_in(t, id);
+    }
+    Ok(r)
+}
+
+/// 释放一个外部所有权（见 [`release_owner_in`]）。
 pub fn release_owner(id: ObjId) -> Result<Released, ObjError> {
-    with(|t| t.release_owner(id))
+    with(|t| release_owner_in(t, id))
 }
 
 /// 增加一个外部所有权。
@@ -104,6 +122,7 @@ pub fn run_cleanup(limit: usize) -> usize {
         crate::kprintln!("[JSR-LIFE] cleanup destroy type={} id={:#x}", obj.type_name(), id.raw());
         match obj {
             KObject::Process(p) => crate::proc::destroy(p),
+            KObject::Ring(r) => crate::ring::destroy(r),
             KObject::Task(_) | KObject::Event { .. } => {}
         }
         n += 1;

@@ -15,3 +15,14 @@
 4102	error	system.handle.error.rights_denied	1	none	句柄权限不足
 4103	error	system.handle.error.table_full	1	none	句柄表已满
 4104	error	system.handle.error.not_transferable	1	none	对象不可传递
+9	op	system.async.ring.create	1	write	异步环·创建
+10	op	system.async.ring.enter	1	write	异步环·提交并收取完成
+11	op	system.async.cancel	1	write	异步·同步取消请求
+12	op	system.time.wait	1	none	时间·等待指定时长
+4105	error	system.async.error.cancelled	1	none	请求已取消
+4106	error	system.async.error.already_completed	1	none	请求已完成
+4107	error	system.async.error.not_found	1	none	请求不存在
+4108	error	system.async.error.in_progress	1	none	请求执行中不可取消
+4109	error	system.async.error.cq_full	1	none	完成信用耗尽
+4110	error	system.async.error.id_exhausted	1	none	请求 ID 已用尽
+4111	error	system.error.quota_exceeded	1	none	超出配额

@@ -12,6 +12,8 @@
 //! * [`paging`] —— 架构无关的页映射契约（虚拟页、中立权限位、PageMapper，M2.2）
 //! * [`heap`]   —— 堆分配算法（按地址排序空闲链表 + 首次适配 + 合并，M2.3）
 //! * [`io`]     —— 异步 I/O 的**唯一**形态：提交 → 完成（ring）；后端可替换
+//! * [`async_ring`] —— 异步环的请求状态机：请求 ID、完成信用、终态裁决与事件依赖、取消、历史窗口、closing
+//! * [`ring_abi`] —— 异步环的用户态二进制布局（提交记录、完成记录、enter 参数块）
 //! * [`memory`] —— 虚拟内存区域与地址空间记账（真实页表在内核的 `arch/` 与后续 M2.x）
 //! * [`module`] —— 编译期模块描述符 + 依赖检查 + 顺序装载/逆序卸载
 //! * [`trap`]   —— 陷入帧与「名字 → 处理函数」的系统调用分发表
@@ -32,6 +34,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod abi;
+pub mod async_ring;
 pub mod elf;
 pub mod frame;
 pub mod heap;
@@ -39,6 +42,7 @@ pub mod io;
 pub mod memory;
 pub mod meta;
 pub mod paging;
+pub mod ring_abi;
 pub mod module;
 pub mod object;
 pub mod objtable;

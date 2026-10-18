@@ -58,27 +58,35 @@ fn main() {
     build_user_programs(&root);
 }
 
-/// 构建内嵌的用户程序（M5.1-pre）：用独立的 target 目录调用 cargo，避免与外层构建争用同一目录的锁；
-/// 产物路径经 `JSR_USER_HELLO` 环境变量交给内核源码 `include_bytes!`。
+/// 构建内嵌的用户程序：用独立的 target 目录调用 cargo，避免与外层构建争用同一目录的锁；
+/// 产物路径经环境变量（`JSR_USER_HELLO`、`JSR_USER_RING`）交给内核源码 `include_bytes!`。
 /// Builds the embedded user programs with a separate target dir and exposes their paths to the kernel.
 fn build_user_programs(root: &std::path::Path) {
-    for f in ["user/hello/src/main.rs", "user/hello/Cargo.toml", "user/hello/link.ld", "user/hello/build.rs"] {
-        println!("cargo:rerun-if-changed={}", root.join(f).display());
+    const PROGRAMS: [(&str, &str, &str); 2] = [("user/hello", "user-hello", "JSR_USER_HELLO"), ("user/ring", "user-ring", "JSR_USER_RING")];
+    for (dir, _, _) in PROGRAMS {
+        for f in ["src/main.rs", "Cargo.toml", "link.ld", "build.rs"] {
+            println!("cargo:rerun-if-changed={}", root.join(dir).join(f).display());
+        }
     }
+    // 用户程序共享 kernel-core 的记录布局：它变化时也要重建
+    println!("cargo:rerun-if-changed={}", root.join("kernel-core/src/ring_abi.rs").display());
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let target_dir = out_dir.join("user-target");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let status = std::process::Command::new(cargo)
-        .current_dir(root)
+    let mut cmd = std::process::Command::new(cargo);
+    cmd.current_dir(root)
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_TARGET_DIR")
-        .args(["build", "--release", "--target", "x86_64-unknown-none", "-p", "user-hello", "--target-dir"])
-        .arg(&target_dir)
-        .status()
-        .expect("无法启动 cargo 构建用户程序");
-    assert!(status.success(), "用户程序 user-hello 构建失败");
-    let elf = target_dir.join("x86_64-unknown-none/release/user-hello");
-    assert!(elf.exists(), "找不到用户程序产物 {}", elf.display());
-    println!("cargo:rustc-env=JSR_USER_HELLO={}", elf.display());
+        .args(["build", "--release", "--target", "x86_64-unknown-none"]);
+    for (_, pkg, _) in PROGRAMS {
+        cmd.args(["-p", pkg]);
+    }
+    let status = cmd.arg("--target-dir").arg(&target_dir).status().expect("无法启动 cargo 构建用户程序");
+    assert!(status.success(), "用户程序构建失败");
+    for (_, pkg, env) in PROGRAMS {
+        let elf = target_dir.join("x86_64-unknown-none/release").join(pkg);
+        assert!(elf.exists(), "找不到用户程序产物 {}", elf.display());
+        println!("cargo:rustc-env={}={}", env, elf.display());
+    }
 }
