@@ -28,6 +28,12 @@
 //! # QoS 变更规则（能力约束）
 //! 任务可以把自己的档位**降低**或保持不变；**提升**需要创建方授予的「QoS 上限」能力，且不能超过该上限。
 //! 判定是纯函数 [`qos_change_allowed`]，由系统调用层调用。
+//!
+//! # 优先级继承
+//! 等待关系（谁在等谁）与「有效档位 = 自身档位与全部直接/间接等待者档位中的最高者」的计算见 [`inherit`]；
+//! 策略只看实体的有效档位，因此继承不需要改动选择与抢占逻辑。
+
+pub mod inherit;
 
 /// 服务质量档位（数值越小越优先）。登记表外的数值经 [`Qos::from_raw`] 拒绝。
 /// Quality-of-service class (lower value = higher priority).
@@ -80,6 +86,16 @@ impl Qos {
     /// `self` 是否严格比 `other` 优先。
     pub const fn above(self, other: Qos) -> bool {
         (self as u8) < (other as u8)
+    }
+
+    /// 两档中较优先的一档（优先级继承取「等待者与持有者中较高者」）。
+    /// The higher-priority of two classes.
+    pub const fn higher(self, other: Qos) -> Qos {
+        if other.above(self) {
+            other
+        } else {
+            self
+        }
     }
 }
 

@@ -4,6 +4,7 @@
 //! * `policy`    —— 调度策略的选择点（Strategy）：策略本体是 `kernel_core::sched` 的纯决策
 //! * `stack`     —— 内核栈池：静态栈 + 堆就绪后一次性预留的堆栈
 //! * `scheduler` —— 调度机制：任务表、状态迁移、睡眠与唤醒、时钟记账、切换准备、事件通知（Observer）
+//! * `turnstile` —— 会阻塞的内核锁 [`KMutex`]（等待者把档位借给持有者，放锁时直接交接）
 //! * `demo`      —— 里程碑演示任务（与机制分离，可整体删除）
 //! * 本文件      —— 唯一的全局实例 + 对外 API（spawn / yield / sleep / run …），
 //!   以及唯一调用 `switch_context` 的地方
@@ -20,6 +21,9 @@ pub mod demo;
 pub mod policy;
 pub mod scheduler;
 pub mod stack;
+pub mod turnstile;
+
+pub use turnstile::{KMutex, KMutexGuard};
 
 use core::ptr::{addr_of, addr_of_mut};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -28,7 +32,7 @@ use crate::arch::{self as cpu, switch_context};
 use crate::task::TaskId;
 
 use policy::{kernel_policy, KernelPolicy, LatencyHistogram, Qos};
-use scheduler::{Cause, QosError, Scheduler, SpawnError, SwitchObserver};
+use scheduler::{BlockError, Cause, QosError, Scheduler, SpawnError, SwitchObserver};
 
 /// 槽位总数上限（含槽位 0 的引导线程）。前 [`stack::STATIC_STACKS`] 个槽位在内核堆初始化前即可用，
 /// 其余在 [`reserve_stacks`] 之后可用。
@@ -151,6 +155,60 @@ pub fn sleep_until(deadline: u64) {
 /// One step of a blocking wait: sleep until the next tick.
 pub fn pause() {
     sleep_until(timer_ticks() + 1);
+}
+
+/// 「等任务退出」这一等待对象的标识（锁以自身地址为标识，地址按字对齐，不会与它重合）。
+const JOIN_KEY: u64 = 1;
+
+/// 阻塞到任务 `id` 退出；等待期间把当前任务的有效档位借给它（等一个低档任务做完时不被中档任务挡住）。
+///
+/// `id` 不存在或已退出时立即返回 `Ok`。等自己、或与对方互相等待（成环）时返回错误，状态不变。
+/// 在引导线程上调用时不阻塞：让出并休眠到下一个中断，直到目标退出。
+/// Blocks until task `id` exits, lending the caller's effective class to it meanwhile.
+pub fn join(id: TaskId) -> Result<(), BlockError> {
+    loop {
+        let was_enabled = cpu::irq_save_disable();
+        let step = with_mut(|s| {
+            if !s.is_live(id) {
+                Ok(None)
+            } else if s.on_boot() {
+                Ok(Some(false))
+            } else {
+                s.block_on(id, JOIN_KEY).map(|_| Some(true))
+            }
+        });
+        match step {
+            Ok(Some(true)) => yield_with_cause(Cause::BLOCK),
+            Ok(Some(false)) => {
+                yield_now();
+                cpu::wait_for_interrupt();
+            }
+            Ok(None) => {
+                cpu::irq_restore(was_enabled);
+                return Ok(());
+            }
+            Err(e) => {
+                cpu::irq_restore(was_enabled);
+                return Err(e);
+            }
+        }
+        cpu::irq_restore(was_enabled);
+    }
+}
+
+/// 任务 `id` 的有效档位（含等待者借来的档位）；不存在、已退出或是引导线程时 `None`。
+pub fn effective_qos(id: TaskId) -> Option<Qos> {
+    with(|s| s.effective_qos(id))
+}
+
+/// 当前任务的有效档位（含借来的档位；引导线程为 `None`）。
+pub fn current_effective_qos() -> Option<Qos> {
+    with(|s| s.effective_qos(s.current().0))
+}
+
+/// 打开/关闭优先级继承，返回之前的设置（默认开启；关闭只用于对照测量，结束后用返回值恢复）。
+pub fn set_inheritance(enabled: bool) -> bool {
+    with_mut(|s| s.set_inheritance(enabled))
 }
 
 /// 唤醒睡眠中的任务 `id`（不在睡眠时无动作）。被唤醒者档位更高且抢占开启时，在下一个 tick 之前

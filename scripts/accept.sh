@@ -465,6 +465,21 @@ check_sched1() { # 调度策略 + QoS：档位规则（拒绝且不变、继承�
   fi
 }
 
+check_sched2() { # 优先级继承：三任务反转（锁 / 等退出）有界、关闭继承对照可见反转、传递继承、拒绝路径无残留、持有者退出可接管、压力撤销后恢复、回到基线
+  if has '\[JSR-PI\] case=inversion wait_on=lock inherit=true hogs=3 hog_ticks=120 work=4 wait=[0-6] bound=6 bounded=true holder_peak=interactive holder_after=background hog_progress=true lock_free=true reclaimed=true' \
+     && has '\[JSR-PI\] case=inversion wait_on=lock inherit=false .* bounded=false holder_peak=background .*reclaimed=true' \
+     && has '\[JSR-PI\] case=inversion wait_on=exit inherit=true hogs=3 hog_ticks=120 work=4 wait=[0-6] bound=6 bounded=true holder_peak=interactive holder_after=background hog_progress=true .*reclaimed=true' \
+     && has '\[JSR-PI\] case=chain low_seen=interactive mid_with_a=interactive low_after=background mid_after=utility high_got=true transitive=true restored=true locks_free=true reclaimed=true' \
+     && has '\[JSR-PI\] case=refusals steps=7/7 recursive_refused=true self_join_refused=true cycle_refused=true unchanged=true waiter_completed=true locks_free=true reclaimed=true' \
+     && has '\[JSR-PI\] case=orphan waiter_took_over=true lock_free=true reclaimed=true' \
+     && has '\[JSR-PI\] case=recovery rounds=20 samples=20 max=0 immediate=true reclaimed=true' \
+     && has '^\[JSR-PI\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0'; then
+    record SCHED2 PASS "优先级继承：3 个吃满 CPU 的中档任务下，交互档等后台档持有的锁 / 等其退出 ≤6 tick（关闭继承对照 >6）；传递继承与归还；递归/成环/自等被拒且无残留；持有者退出可接管；压力撤销后延迟 0；回到基线"
+  else
+    record SCHED2 FAIL "缺少 JSR-PI 关键标记、等待超界或 failed≠0"
+  fi
+}
+
 check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出接收方、堆扩容、内核空间预分配、只读翻译、ID 用尽、线程创建）
   if has 'exited_receiver grant=Some\(Exited\) grant_new=Some\(Exited\) transfer=Some\(Exited\) objects_unchanged=true sender_kept=true reaped_receiver=Some\(NoSuchProcess\)' \
      && has 'heap fail_alloc=Some\(OutOfFrames\) rolled_back=true fail_map=Some\(MapFailed\) rolled_back=true overflow=Some\(LimitReached\) regrow=true reclaimed=true' \
@@ -480,7 +495,7 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_fix
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_fix
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

@@ -7,7 +7,7 @@
 //!
 //! 约定：槽位 0 是引导线程（空闲时的落脚点），**不交给策略选择**；策略只在工作任务中挑选。
 
-pub use kernel_core::sched::{qos_change_allowed, Choice, ClassMask, LatencyHistogram, Preempt, Qos, QosParams, QosPolicy, SchedEntity, SchedPolicy, QOS_CLASSES};
+pub use kernel_core::sched::{inherit, qos_change_allowed, Choice, ClassMask, LatencyHistogram, Preempt, Qos, QosParams, QosPolicy, SchedEntity, SchedPolicy, QOS_CLASSES};
 
 /// 内核采用的调度策略：QoS 分级（四档严格优先 + 档内用量衰减 + 各档最低份额 + 后台限速）。
 pub type KernelPolicy = QosPolicy;

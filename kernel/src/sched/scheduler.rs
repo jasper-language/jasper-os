@@ -6,6 +6,8 @@
 //! * 把「切换发生了」通知给观察者（Observer 模式，函数指针，零分配），
 //!   调度器本身因此不依赖串口/日志模块
 //! * 记录每档的唤醒延迟（从被唤醒到被选中运行的 tick 数），供过载下的响应性验收
+//! * 维护等待关系（谁在等谁：等锁、等任务退出）并据此重算有效档位（优先级继承，决策见
+//!   `kernel_core::sched::inherit`）；策略只看有效档位，因此继承不改动选择与抢占逻辑
 //! * **不直接执行**栈切换：`prepare_switch` 只返回新旧上下文的裸指针，
 //!   由门面层（`mod.rs`）在放掉所有借用之后调用 `switch_context`。
 //!   这样 `&mut Scheduler` 永远不会跨越一次栈切换存活（另一个任务会再次借用它）。
@@ -15,7 +17,7 @@
 use crate::arch::TaskContext;
 use crate::task::{Task, TaskId, TaskState};
 
-use super::policy::{qos_change_allowed, ClassMask, LatencyHistogram, Preempt, Qos, SchedPolicy, QOS_CLASSES};
+use super::policy::{inherit, qos_change_allowed, ClassMask, LatencyHistogram, Preempt, Qos, SchedPolicy, QOS_CLASSES};
 use super::stack::{ReserveError, StackPool};
 
 /// 引导线程所在槽位。
@@ -50,6 +52,8 @@ impl Cause {
     pub const WAKE: &'static str = "wake";
     /// 任务进入睡眠。
     pub const SLEEP: &'static str = "sleep";
+    /// 任务阻塞在等待关系上（等锁、等任务退出）。
+    pub const BLOCK: &'static str = "block";
     /// 任务退出。
     pub const EXIT: &'static str = "exit";
 
@@ -94,6 +98,18 @@ pub enum QosError {
     NotAWorker,
 }
 
+/// 建立等待关系（等锁、等任务退出）失败的原因。失败时调度器状态不变。
+/// Why blocking on an owner was refused; the scheduler is left unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockError {
+    /// 当前任务是引导线程（它是空闲时的落脚点，不能阻塞）。
+    NotAWorker,
+    /// 持有者不存在或已退出。
+    NoOwner,
+    /// 等待图拒绝：自等、成环（死锁）或等待链过长。
+    Refused(inherit::EdgeError),
+}
+
 /// 调度机制本体。`N` 为槽位总数（含引导线程）。
 pub struct Scheduler<P: SchedPolicy, const N: usize> {
     tasks: [Option<Task>; N],
@@ -109,6 +125,10 @@ pub struct Scheduler<P: SchedPolicy, const N: usize> {
     slice_quantum: u32,
     /// 每档的唤醒延迟直方图。
     latency: [LatencyHistogram; QOS_CLASSES],
+    /// 是否沿等待关系传播档位（默认开启；关闭只用于对照测量）。
+    inherit: bool,
+    /// 等待序号（同档等待者先来先得）。
+    wait_seq: u64,
 }
 
 impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
@@ -129,6 +149,8 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
             slice_used: 0,
             slice_quantum: 1,
             latency: [const { LatencyHistogram::new() }; QOS_CLASSES],
+            inherit: true,
+            wait_seq: 0,
         }
     }
 
@@ -159,7 +181,8 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
 
     /// 新建任务：占用一个有栈的空工作槽位，伪造首次切入帧使其从 `trampoline` 开始执行。
     ///
-    /// 新任务**继承创建者**（当前工作任务）的 QoS 档位与上限——线程不能靠创建新线程绕过降档；
+    /// 新任务**继承创建者**（当前工作任务）的自身 QoS 档位与上限——线程不能靠创建新线程绕过降档，
+    /// 也不能把临时借来的档位传给新任务；
     /// 引导线程创建的任务取默认档位（用户发起）、没有上限。
     /// `trampoline` 由门面层提供：它读取当前任务的 `entry` 并执行，返回后负责退出。
     pub fn spawn(
@@ -185,7 +208,8 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         task.entry = Some(entry);
         if current != BOOT_SLOT {
             if let Some(creator) = self.tasks[current].as_ref() {
-                task.sched = super::policy::SchedEntity::new(creator.sched.qos);
+                task.sched = super::policy::SchedEntity::new(creator.base_qos);
+                task.base_qos = creator.base_qos;
                 task.qos_ceiling = creator.qos_ceiling;
             }
         }
@@ -242,12 +266,17 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         self.tasks[self.current].as_ref().map(|t| t.syscalls).unwrap_or(crate::syscall::SyscallSet::EMPTY)
     }
 
-    /// 当前任务的 QoS 档位（引导线程为 `None`）。
+    /// 当前任务的自身 QoS 档位（不含借来的档位；引导线程为 `None`）。
     pub fn current_qos(&self) -> Option<Qos> {
         if self.current == BOOT_SLOT {
             return None;
         }
-        self.tasks[self.current].as_ref().map(|t| t.sched.qos)
+        self.tasks[self.current].as_ref().map(|t| t.base_qos)
+    }
+
+    /// 任务 `id` 的有效档位（含借来的档位；不存在、已退出或是引导线程时 `None`）。
+    pub fn effective_qos(&self, id: TaskId) -> Option<Qos> {
+        self.live_slot(id).filter(|&i| i != BOOT_SLOT).and_then(|i| self.tasks[i].as_ref()).map(|t| t.sched.qos)
     }
 
     /// 修改当前任务的 QoS 档位：降低或不变总是允许；提升须在上限之内（判定见 `qos_change_allowed`）。
@@ -257,10 +286,12 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
             return Err(QosError::NotAWorker);
         }
         let t = self.tasks[self.current].as_mut().ok_or(QosError::NotAWorker)?;
-        if !qos_change_allowed(t.sched.qos, q, t.qos_ceiling) {
+        if !qos_change_allowed(t.base_qos, q, t.qos_ceiling) {
             return Err(QosError::RaiseDenied);
         }
-        t.sched.qos = q;
+        t.base_qos = q;
+        // 有效档位仍要算上等待者借来的档位（降档不会让正在等它的高档任务失去保障）。
+        self.resolve_inheritance();
         Ok(())
     }
 
@@ -272,9 +303,115 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
     }
 
     /// 把当前任务标记为已退出（槽位在它被切走之后才可被 `spawn` 复用）。
+    /// 正在等它的任务（等它退出、或等它持有的锁）全部被唤醒，借给它的档位随之归还。
     pub fn mark_current_exited(&mut self) {
-        if let Some(t) = self.tasks[self.current].as_mut() {
+        let cur = self.current;
+        if let Some(t) = self.tasks[cur].as_mut() {
             t.state = TaskState::Exited;
+            t.waits_for = None;
+        }
+        for i in 0..N {
+            if matches!(self.tasks[i].as_ref(), Some(t) if t.waits_for == Some(cur)) {
+                self.make_runnable(i);
+            }
+        }
+        self.resolve_inheritance();
+    }
+
+    /// 任务 `id` 所在槽位（只找尚未退出的任务；引导线程也算）。
+    fn live_slot(&self, id: TaskId) -> Option<usize> {
+        (0..N).find(|&i| matches!(self.tasks[i].as_ref(), Some(t) if t.id == id && t.state != TaskState::Exited))
+    }
+
+    /// 任务 `id` 是否存在且尚未退出。
+    pub fn is_live(&self, id: TaskId) -> bool {
+        self.live_slot(id).is_some()
+    }
+
+    /// 打开/关闭优先级继承，返回之前的设置（只供对照测量；关闭后立即按自身档位重算）。
+    pub fn set_inheritance(&mut self, enabled: bool) -> bool {
+        let prev = core::mem::replace(&mut self.inherit, enabled);
+        self.resolve_inheritance();
+        prev
+    }
+
+    /// 按当前等待图重算全部任务的有效档位（整体重算，借出与归还不会残留）。
+    fn resolve_inheritance(&mut self) {
+        let mut base = [None; N];
+        let mut waits = [None; N];
+        for (i, t) in self.tasks.iter().enumerate().skip(1) {
+            if let Some(t) = t {
+                if t.state != TaskState::Exited {
+                    base[i] = Some(t.base_qos);
+                    waits[i] = t.waits_for;
+                }
+            }
+        }
+        let mut eff = [None; N];
+        inherit::resolve(&base, &waits, self.inherit, &mut eff);
+        for (t, q) in self.tasks.iter_mut().zip(eff) {
+            if let (Some(t), Some(q)) = (t.as_mut(), q) {
+                t.sched.qos = q;
+            }
+        }
+    }
+
+    /// 让当前工作任务阻塞，直到持有者 `owner` 把它唤醒（交出锁或退出）；期间把有效档位借给持有者。
+    ///
+    /// `key` 标识等待的对象（同一持有者可能被不同对象上的任务等待）。成功后调用者必须立即让出
+    /// （`prepare_switch(Cause::BLOCK)`）；失败时不改动任何状态。
+    pub fn block_on(&mut self, owner: TaskId, key: u64) -> Result<(), BlockError> {
+        let cur = self.current;
+        if cur == BOOT_SLOT {
+            return Err(BlockError::NotAWorker);
+        }
+        let owner_slot = self.live_slot(owner).ok_or(BlockError::NoOwner)?;
+        let mut waits = [None; N];
+        for (w, t) in waits.iter_mut().zip(self.tasks.iter()) {
+            *w = t.as_ref().and_then(|t| t.waits_for);
+        }
+        inherit::check_edge(&waits, cur, owner_slot).map_err(BlockError::Refused)?;
+        self.wait_seq += 1;
+        let seq = self.wait_seq;
+        let t = self.tasks[cur].as_mut().ok_or(BlockError::NotAWorker)?;
+        t.state = TaskState::Blocked;
+        t.wake_at = None;
+        t.waits_for = Some(owner_slot);
+        t.wait_key = key;
+        t.wait_seq = seq;
+        self.resolve_inheritance();
+        Ok(())
+    }
+
+    /// 当前任务交出 `key` 标识的对象：在等它的任务中选出交接对象（有效档位最高、同档先来先得）并唤醒，
+    /// 其余等待者改为等交接对象（档位随之借给新持有者）；当前任务借来的档位归还。返回交接对象。
+    pub fn hand_off(&mut self, key: u64) -> Option<TaskId> {
+        let cur = self.current;
+        let waiting_on = |t: &Task| t.state == TaskState::Blocked && t.waits_for == Some(cur) && t.wait_key == key;
+        let successor = inherit::pick_successor(
+            self.tasks.iter().enumerate().filter_map(|(i, t)| t.as_ref().filter(|t| waiting_on(t)).map(|t| (i, t.sched.qos, t.wait_seq))),
+        );
+        let Some(next) = successor else {
+            self.resolve_inheritance();
+            return None;
+        };
+        for (i, t) in self.tasks.iter_mut().enumerate() {
+            if let Some(t) = t.as_mut().filter(|t| i != next && waiting_on(t)) {
+                t.waits_for = Some(next);
+            }
+        }
+        self.make_runnable(next);
+        self.resolve_inheritance();
+        self.tasks[next].as_ref().map(|t| t.id)
+    }
+
+    /// 是否有可运行任务的有效档位高于当前任务（引导线程上：是否有任何可运行任务）。
+    /// 交出锁、归还借来的档位之后据此决定是否立即让出。
+    pub fn outranked(&self) -> bool {
+        let Some(top) = self.waiting().highest() else { return false };
+        match self.tasks[self.current].as_ref() {
+            Some(t) if self.current != BOOT_SLOT => top.above(t.sched.qos),
+            _ => true,
         }
     }
 
@@ -304,9 +441,15 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         t.state = TaskState::Runnable;
         t.wake_at = None;
         t.woken_at = Some(now);
+        // 被任何途径唤醒都解除等待关系（例如所属进程开始终止）；醒来者自己重新检查等待条件。
+        let had_edge = t.waits_for.take().is_some();
         self.policy.woken(&mut t.sched);
-        let woken = t.sched.qos;
-        self.policy.wake_preempts(woken, self.current_qos())
+        if had_edge {
+            self.resolve_inheritance();
+        }
+        let woken = self.tasks[i].as_ref().map(|t| t.sched.qos).unwrap_or(Qos::Background);
+        let current = if self.current == BOOT_SLOT { None } else { self.tasks[self.current].as_ref().map(|t| t.sched.qos) };
+        self.policy.wake_preempts(woken, current)
     }
 
     /// 显式唤醒 `id`（例如所属进程开始终止时，让睡眠中的线程尽快观察到）。

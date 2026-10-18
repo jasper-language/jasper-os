@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{clock, fix_demo, ipc_demo, irq, kprintln, mech_demo, mm, prog_demo, qos_demo, ring_demo, rt_demo, sched, user_demo};
+use crate::{clock, fix_demo, ipc_demo, irq, kprintln, mech_demo, mm, pi_demo, prog_demo, qos_demo, ring_demo, rt_demo, sched, user_demo};
 
 /// 内核版本（横幅中输出）。
 pub const VERSION: &str = "0.0.1";
@@ -108,6 +108,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
     rt_demo::run();
     // SCHED-1：服务质量分级调度（档位规则、动态任务数、过载下的唤醒延迟、压力撤销后恢复）。
     qos_demo::run();
+    // SCHED-2：优先级继承（三任务反转有界、传递继承、拒绝路径、持有者退出、压力撤销后恢复）。
+    pi_demo::run();
     let fails = [
         mm::demo::failed(),
         user_demo::failed(),
@@ -117,10 +119,11 @@ pub fn start(boot: &'static BootSpec) -> ! {
         prog_demo::failed(),
         rt_demo::failed(),
         qos_demo::failed(),
+        pi_demo::failed(),
     ];
     if fails.iter().any(|&f| f > 0) {
         kprintln!(
-            "[JSR-EXIT] failure mm_failed={} user_failed={} fix_failed={} ring_failed={} ipc_failed={} prog_failed={} rt_failed={} qos_failed={}",
+            "[JSR-EXIT] failure mm_failed={} user_failed={} fix_failed={} ring_failed={} ipc_failed={} prog_failed={} rt_failed={} qos_failed={} pi_failed={}",
             fails[0],
             fails[1],
             fails[2],
@@ -128,7 +131,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
             fails[4],
             fails[5],
             fails[6],
-            fails[7]
+            fails[7],
+            fails[8]
         );
         arch::exit_emulator(ExitStatus::Failure);
     }
