@@ -26,6 +26,33 @@ use jaso::{Arch, Image, Stage, ABI_C_V0, FLAG_W, FLAG_X, HOST_V0, INIT_SYMBOL, P
 use crate::error::Error;
 use crate::{mem, sys};
 
+extern "C" fn std_log(ptr: *const u8, len: usize) {
+    // SAFETY：模块按约定传入一段有效的文本。
+    let b = unsafe { core::slice::from_raw_parts(ptr, len) };
+    if let Ok(s) = core::str::from_utf8(b) {
+        let _ = crate::io::write_str(s);
+    }
+}
+
+extern "C" fn std_alloc(size: usize, align: usize) -> *mut u8 {
+    match core::alloc::Layout::from_size_align(size.max(1), align) {
+        // SAFETY：布局合法且大小非零。
+        Ok(l) => unsafe { alloc::alloc::alloc(l) },
+        Err(_) => core::ptr::null_mut(),
+    }
+}
+
+extern "C" fn std_dealloc(ptr: *mut u8, size: usize, align: usize) {
+    if let Ok(l) = core::alloc::Layout::from_size_align(size.max(1), align) {
+        // SAFETY：模块按约定以分配时的参数归还。
+        unsafe { alloc::alloc::dealloc(ptr, l) }
+    }
+}
+
+/// 运行时提供的标准宿主接口表：输出到控制台（按行），分配走本进程的全局分配器。
+pub static STD_HOST: HostV0 =
+    HostV0 { version: 0, size: core::mem::size_of::<HostV0>() as u32, log: std_log, alloc: std_alloc, dealloc: std_dealloc };
+
 /// 调用者给模块的授权。
 #[derive(Clone, Copy)]
 pub struct Grant<'a> {

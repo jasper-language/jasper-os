@@ -56,6 +56,7 @@ Jasper 生态的**操作系统侧项目**：一个用 Rust 实现、在 QEMU 中
 | J-1 | 用户态最小运行时 `jasper-rt`（`no_std` + `alloc`）：程序入口与 panic 处理、按需增长的堆（新增 `system.memory.map` / `unmap`）、线程、Channel、异步环；用它写成的普通 Rust 程序在 Ring 3 通过成功与失败路径检查 | ✅ |
 | J-2 | 现有 Rust 库的可移植性：sha2、crc、miniz_oxide、smoltcp（环回 TCP）在用户态通过已知答案测试；形成可移植性清单 | ✅ |
 | J-3 | 最小 `.jaso`（Native-only，格式 v0 实验性）：清单 + 段目录 + SHA-256 完整性、宿主打包工具、用户态装载器（重定位、W^X 权限、宿主接口表、卸载）；篡改 / 指令集 / 装载阶段 / 能力不符均被拒 | ✅ |
+| J-4 | 现有 Rust 库作为 `.jaso` 模块运行：sha2、crc、deflate（miniz_oxide）、net（smoltcp）同时装入，已知答案与直接链接一致，模块之间可串联 | ✅ |
 
 M5.1 已通过：「独立 Rust 内核」阶段目标在 x86_64（QEMU）上达成。未列为 ✅ 的能力**尚未实现**。
 
@@ -89,6 +90,9 @@ jasper-os/
   user/jasodemo/        # .jaso 装载器的验收程序
   jaso/                 # .jaso 模块格式：解析与校验（no_std）、构建、从 ELF 打包
   modules/demo/         # 第一个 .jaso 模块
+  modules/support/      # 模块公共支撑（初始化、经宿主接口表的分配器、panic 处理）
+  modules/{sha2,crc,deflate,net}/  # 现有 Rust 库的 .jaso 模块封装
+  user/modhost/         # 装载四个库模块并检查的验收程序
   tools/jasopack/       # 宿主侧工具：打包 / 检查 .jaso
   xtask/                # 宿主侧：生成可引导磁盘镜像
   scripts/accept.sh     # 一键验收：构建 → QEMU 真实启动 → 逐里程碑判定

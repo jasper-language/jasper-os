@@ -38,30 +38,19 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=--no-pie");
     println!("cargo:rustc-link-arg-bins=-static");
 
-    // 用独立的 target 目录构建模块，避免与外层构建争用同一目录的锁
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let target_dir = out.join("module-target");
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let status = std::process::Command::new(cargo)
-        .current_dir(&root)
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_TARGET_DIR")
-        .args(["build", "--release", "--target", "x86_64-unknown-none", "-p", "jaso-demo", "--target-dir"])
-        .arg(&target_dir)
-        .status()
-        .expect("无法启动 cargo 构建模块");
-    assert!(status.success(), "模块构建失败");
-    let elf = std::fs::read(target_dir.join("x86_64-unknown-none/release/jaso-demo")).expect("找不到模块产物");
     let manifest = std::fs::read_to_string(root.join("modules/demo/jaso.manifest")).expect("读取模块清单失败");
-
-    let good = jaso::pack::from_elf(&elf, &manifest, Arch::X86_64, Stage::Runtime).expect("打包失败");
+    let good = jaso::pack::build_module(&root, "jaso-demo", &root.join("modules/demo"), &out.join("module-target"), Arch::X86_64)
+        .unwrap_or_else(|e| panic!("{}", e));
     let img = Image::parse(&good).expect("打包结果未通过校验");
     let write = |name: &str, bytes: &[u8]| std::fs::write(Path::new(&out).join(name), bytes).expect("写入失败");
     write("demo.jaso", &good);
     write("demo-aarch64.jaso", &rebuild(&img, Arch::Aarch64, Stage::Runtime, &manifest, None));
     write("demo-boot.jaso", &rebuild(&img, Arch::X86_64, Stage::Boot, &manifest, None));
-    write("demo-noinit.jaso", &rebuild(&img, Arch::X86_64, Stage::Runtime, &manifest, Some("jaso_init")));
+    // 去掉 jaso_init：导出表与清单的 core.exports 必须一致，所以清单里也一并去掉
+    let noinit = manifest.replace("core.exports = jaso_init, ", "core.exports = ");
+    assert_ne!(noinit, manifest, "清单中找不到 jaso_init 的导出声明");
+    write("demo-noinit.jaso", &rebuild(&img, Arch::X86_64, Stage::Runtime, &noinit, Some("jaso_init")));
     let more = format!("{}core.requires = system.channel.send\n", manifest);
     write("demo-morecaps.jaso", &rebuild(&img, Arch::X86_64, Stage::Runtime, &more, None));
 }

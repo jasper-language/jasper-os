@@ -1,0 +1,16 @@
+# jaso-crc —— 把 crc 打包为 `.jaso` 模块：导出 C 调用约定的 CRC-32 / CRC-32C / CRC-16 / CRC-64。
+[package]
+name = "jaso-crc"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "jaso-crc"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+jaso-module = { path = "../support" }
+crc = { version = "=3.4.0", default-features = false }

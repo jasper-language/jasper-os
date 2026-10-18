@@ -24,7 +24,8 @@
 //! * **Segment**（至少一个）：装入映像的一段；`vaddr` 页对齐，`mem_size ≥ file_size`（多出部分清零），
 //!   `flags` = R(1) | W(2) | X(4)，必须可读，**不得同时可写可执行**；各段占用的页互不重叠
 //! * **Exports**（至多一个）：`count u32` + `count × {name_offset u32, name_len u32, value u32, kind u32}` + 名字字节；
-//!   `value` 是映像内偏移；`kind = 1`（C 调用约定的函数）时必须落在可执行段内
+//!   `value` 是映像内偏移；`kind = 1`（C 调用约定的函数）时必须落在可执行段内；
+//!   导出表必须与清单 `core.exports` 一一对应（导出是声明出来的，不是链接器附带的）
 //! * **Relocs**（至多一个）：`count u32` + `count × {offset u32, kind u32, addend u64}`；v0 只有 `kind = 1`：
 //!   在 `offset` 处写入 `装入基址 + addend`（8 字节）。`offset` 必须落在不可执行的段内
 //!
@@ -246,6 +247,8 @@ pub enum JasoError {
     BadExports,
     /// 导出的值不在映像内或函数不在可执行段内。
     ExportOutOfRange,
+    /// 导出表与清单 `core.exports` 不一一对应（多出、缺少或清单内重名）。
+    ExportsMismatch,
     /// 重定位表格式非法或种类未知。
     BadReloc,
     /// 重定位目标越界、未对齐或落在可执行段内。
@@ -354,7 +357,7 @@ pub struct Image<'a> {
 }
 
 fn is_symbol(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b'$')
+    manifest::symbol_ok(s)
 }
 
 impl<'a> Image<'a> {
@@ -460,6 +463,7 @@ impl<'a> Image<'a> {
         let text = core::str::from_utf8(img.section_bytes(&manifest)).map_err(|_| JasoError::Manifest(ManifestError::NotUtf8))?;
         img.manifest = Manifest::parse(text).map_err(JasoError::Manifest)?;
         img.check_exports()?;
+        img.check_declared_exports()?;
         img.check_relocs()?;
         Ok(img)
     }
@@ -539,6 +543,22 @@ impl<'a> Image<'a> {
                     return Err(JasoError::BadExports);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// 导出表与清单声明一一对应：每个声明都在表中、表中每项都被声明、声明内不重名（表内重名已由 check_exports 排除）。
+    fn check_declared_exports(&self) -> Result<(), JasoError> {
+        let declared = self.manifest.exports();
+        let mut n = 0usize;
+        for (i, name) in declared.enumerate() {
+            if self.manifest.exports().take(i).any(|p| p == name) || self.export(name).is_none() {
+                return Err(JasoError::ExportsMismatch);
+            }
+            n += 1;
+        }
+        if n != self.exports().count() {
+            return Err(JasoError::ExportsMismatch);
         }
         Ok(())
     }

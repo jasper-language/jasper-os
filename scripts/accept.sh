@@ -422,6 +422,21 @@ check_j3() {    # 最小 .jaso：格式宿主测试；memory.protect（W^X、全
   fi
 }
 
+check_j4() {    # 库作为 .jaso 模块：sha2 / crc / deflate / net 同时装入，已知答案与 J-2 一致；模块串联；全部卸载；回到基线
+  if has 'text=modhost: loaded sha2=[0-9]+B crc=[0-9]+B deflate=[0-9]+B net=[0-9]+B' \
+     && has 'text=modhost: module=jaso-sha2 vectors=5 ok=true' \
+     && has 'text=modhost: module=jaso-crc algorithms=4 ok=true' \
+     && has 'text=modhost: module=jaso-deflate in=[0-9]+ packed=[0-9]+ roundtrip=true corrupt_rejected=true' \
+     && has 'text=modhost: module=jaso-net tcp_loopback bytes=32768 echoed=true rounds=[1-9][0-9]*' \
+     && has 'text=modhost: pipeline deflate->net->sha2->deflate->crc ok=true' \
+     && has 'text=modhost: unloaded modules=4' \
+     && has 'case=modhost exit=Some\(0\) expect=0 reclaimed=true'; then
+    record J-4 PASS "sha2/crc/deflate/net 打包为 .jaso 同时装入，已知答案与直接链接（J-2）一致；deflate→net→sha2→deflate→crc 串联；全部卸载；回到基线"
+  else
+    record J-4 FAIL "缺少 modhost 关键标记或退出码≠0"
+  fi
+}
+
 check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出接收方、堆扩容、内核空间预分配、只读翻译、ID 用尽、线程创建）
   if has 'exited_receiver grant=Some\(Exited\) grant_new=Some\(Exited\) transfer=Some\(Exited\) objects_unchanged=true sender_kept=true reaped_receiver=Some\(NoSuchProcess\)' \
      && has 'heap fail_alloc=Some\(OutOfFrames\) rolled_back=true fail_map=Some\(MapFailed\) rolled_back=true overflow=Some\(LimitReached\) regrow=true reclaimed=true' \
@@ -437,7 +452,7 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_fix
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_fix
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

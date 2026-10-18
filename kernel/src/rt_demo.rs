@@ -11,6 +11,7 @@
 //! 4. **role 2**：线程栈溢出触到保护区 ⇒ 页故障终止整个进程（退出码 -1）
 //! 5. **`user/libcheck`**：现有 Rust 库（sha2、crc、miniz_oxide、smoltcp）在运行时之上通过已知答案测试，以 0 退出
 //! 6. **`user/jasodemo`**：`.jaso` 模块装入、调用导出、两个实例、卸载、各类拒绝，以 0 退出
+//! 7. **`user/modhost`**：sha2 / crc / deflate / net 作为 `.jaso` 模块装入，已知答案检查与模块串联，以 0 退出
 //!
 //! 每个用例结束后检查空闲页帧、存活对象、清理队列、固定帧都回到用例前的基线。
 
@@ -48,6 +49,8 @@ static USER_RTDEMO: &[u8] = include_bytes!(env!("JSR_USER_RTDEMO"));
 static USER_LIBCHECK: &[u8] = include_bytes!(env!("JSR_USER_LIBCHECK"));
 /// `.jaso` 装载器验收程序 `user/jasodemo` 的 ELF 镜像（内嵌构建期打包的模块）。
 static USER_JASODEMO: &[u8] = include_bytes!(env!("JSR_USER_JASODEMO"));
+/// 库模块验收程序 `user/modhost` 的 ELF 镜像（内嵌构建期打包的四个库模块）。
+static USER_MODHOST: &[u8] = include_bytes!(env!("JSR_USER_MODHOST"));
 
 /// 主线程栈顶相对私有窗口起点的偏移与页数（与其它演练相同的布局）。
 const STACK_TOP_OFF: u64 = 0xC0_0000;
@@ -111,6 +114,7 @@ pub fn run() {
     program("rt-overflow", USER_RTDEMO, 2, FAULT_CODE);
     program("libcheck", USER_LIBCHECK, 0, 0);
     program("jasodemo", USER_JASODEMO, 0, 0);
+    program("modhost", USER_MODHOST, 0, 0);
     let end = baseline();
     check(end == start, "演练结束后资源未回到起点");
     sched::set_preemption(false);

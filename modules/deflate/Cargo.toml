@@ -1,0 +1,16 @@
+# jaso-deflate —— 把 miniz_oxide 打包为 `.jaso` 模块：导出 C 调用约定的 zlib 压缩 / 解压与原始 DEFLATE 解压。
+[package]
+name = "jaso-deflate"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "jaso-deflate"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+jaso-module = { path = "../support" }
+miniz_oxide = { version = "=0.9.1", default-features = false, features = ["with-alloc"] }

@@ -9,7 +9,7 @@ use crate::build::{Builder, SegmentIn};
 use crate::*;
 
 const MANIFEST: &str = "# 测试模块\ncore.name = demo.mod\ncore.version = 1.2.3\ncore.abi = c.v0\ncore.host = jaso.host.v0\n\
-core.requires = system.console.write, system.memory.map\ncore.requires = system.time.now\nweb.route = /x\n";
+core.requires = system.console.write, system.memory.map\ncore.requires = system.time.now\nweb.route = /x\ncore.exports = f_one, f_two\n";
 
 fn sample() -> Builder {
     Builder {
@@ -129,6 +129,22 @@ fn section_rejections() {
 }
 
 #[test]
+fn exports_must_match_manifest() {
+    let mut b = sample();
+    b.exports.pop(); // 清单声明了 f_two，表中没有
+    assert_eq!(b.finish().unwrap_err(), JasoError::ExportsMismatch);
+    let mut b = sample();
+    b.exports.push((b"f_three".to_vec(), PAGE + 16)); // 表中多出未声明的
+    assert_eq!(b.finish().unwrap_err(), JasoError::ExportsMismatch);
+    let mut b = sample();
+    b.manifest = MANIFEST.replace("core.exports = f_one, f_two", "core.exports = f_one, f_one").into_bytes();
+    assert_eq!(b.finish().unwrap_err(), JasoError::ExportsMismatch); // 清单内重名
+    let img_bytes = sample().finish().unwrap();
+    let img = Image::parse(&img_bytes).unwrap();
+    assert_eq!(img.manifest.exports().collect::<Vec<_>>(), ["f_one", "f_two"]);
+}
+
+#[test]
 fn export_and_reloc_rejections() {
     let mut b = sample();
     b.exports.push((b"f_one".to_vec(), PAGE));
@@ -136,6 +152,7 @@ fn export_and_reloc_rejections() {
     let mut b = sample();
     b.exports[0].0 = b"bad name".to_vec();
     assert_eq!(b.finish().unwrap_err(), JasoError::BadExports);
+    assert_eq!(Manifest::parse("core.exports = bad name\n").unwrap_err(), ManifestError::BadValue(1));
     let mut b = sample();
     b.exports[0].1 = 0; // 只读段，不是可执行段
     assert_eq!(b.finish().unwrap_err(), JasoError::ExportOutOfRange);

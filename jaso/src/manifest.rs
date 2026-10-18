@@ -11,6 +11,7 @@
 //! | `core.abi` | 是 | 导出函数的调用约定与版本，如 `c.v0` |
 //! | `core.host` | 否 | 需要的宿主接口表，如 `jaso.host.v0` |
 //! | `core.requires` | 否 | 所需能力（逗号分隔，可出现多行）；能力名：小写字母、数字、`.`、`_` |
+//! | `core.exports` | 否 | 导出的函数名（逗号分隔，可出现多行）；导出表必须与它一一对应 |
 //! | `core.description` | 否 | 说明文字 |
 //!
 //! **核心段通用、扩展各占命名空间**：`core.` 之外的键必须形如 `<命名空间>.<键>`（如 `web.route`），
@@ -34,10 +35,19 @@ pub enum ManifestError {
     BadValue(u32),
     /// 能力数超限。
     TooManyRequires,
+    /// 导出名数超限。
+    TooManyExports,
 }
 
 /// 单个清单的能力数上限。
 pub const MAX_REQUIRES: usize = 32;
+/// 单个清单的导出名数上限。
+pub const MAX_EXPORT_NAMES: usize = 256;
+
+/// 导出名：字母、数字、`_`、`.`、`$`，1–128 字节（与导出表的要求一致）。
+pub(crate) fn symbol_ok(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 128 && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b'$')
+}
 
 /// 校验通过的清单（借用清单文本）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,7 +106,7 @@ impl<'a> Manifest<'a> {
     /// 解析并校验。
     pub fn parse(text: &'a str) -> Result<Manifest<'a>, ManifestError> {
         let (mut name, mut version, mut abi, mut host, mut description) = (None, None, None, None, None);
-        let mut requires = 0usize;
+        let (mut requires, mut exports) = (0usize, 0usize);
         for (n, kv) in entries(text) {
             let (k, v) = kv.ok_or(ManifestError::BadLine(n))?;
             let set = |slot: &mut Option<&'a str>| {
@@ -143,6 +153,17 @@ impl<'a> Manifest<'a> {
                         return Err(ManifestError::TooManyRequires);
                     }
                 }
+                "core.exports" => {
+                    for sym in v.split(',').map(str::trim) {
+                        if !symbol_ok(sym) {
+                            return Err(ManifestError::BadValue(n));
+                        }
+                        exports += 1;
+                    }
+                    if exports > MAX_EXPORT_NAMES {
+                        return Err(ManifestError::TooManyExports);
+                    }
+                }
                 k if k.starts_with("core.") => return Err(ManifestError::BadKey(n)),
                 k => {
                     // 扩展键：<命名空间>.<键>，各段非空
@@ -168,6 +189,14 @@ impl<'a> Manifest<'a> {
         entries(self.text)
             .filter_map(|(_, kv)| kv)
             .filter(|(k, _)| *k == "core.requires")
+            .flat_map(|(_, v)| v.split(',').map(str::trim))
+    }
+
+    /// 声明的导出名（按出现顺序）。
+    pub fn exports(&self) -> impl Iterator<Item = &'a str> {
+        entries(self.text)
+            .filter_map(|(_, kv)| kv)
+            .filter(|(k, _)| *k == "core.exports")
             .flat_map(|(_, v)| v.split(',').map(str::trim))
     }
 

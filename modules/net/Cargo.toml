@@ -1,0 +1,16 @@
+# jaso-net —— 把 smoltcp 打包为 `.jaso` 模块：在模块内的环回设备上建立 TCP 连接并回送数据（C 调用约定）。
+[package]
+name = "jaso-net"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "jaso-net"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+jaso-module = { path = "../support" }
+smoltcp = { version = "=0.14.0", default-features = false, features = ["alloc", "medium-ip", "proto-ipv4", "socket-tcp"] }

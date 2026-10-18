@@ -7,7 +7,8 @@
 //! * 动态重定位只允许「基址 + 加数」一种（x86_64 `R_X86_64_RELATIVE`、AArch64 `R_AARCH64_RELATIVE`、
 //!   RISC-V `R_RISCV_RELATIVE`）；出现其它种类、`DT_REL`、PLT 重定位或 `DT_NEEDED` 即拒绝——
 //!   模块不按名字导入任何外部符号，宿主能力只经 [`crate::HostV0`] 表提供
-//! * 导出 = 动态符号表中已定义的全局函数；动态符号表里有未定义的符号即拒绝
+//! * 导出 = 清单 `core.exports` 声明的名字，每个都必须是动态符号表中已定义的全局函数（链接器顺带导出的其它符号一律不收）；
+//!   动态符号表里有未定义的符号即拒绝
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -28,6 +29,10 @@ pub enum PackError {
     UnsupportedDynamic(u64),
     /// 动态符号表中有未定义的符号。
     UndefinedSymbol(String),
+    /// 清单声明的导出不是映像中已定义的全局函数。
+    MissingExport(String),
+    /// 清单本身不合法。
+    Manifest(crate::ManifestError),
     /// 两个可装入段共用了同一页。
     SegmentsSharePage,
     /// 生成的文件没有通过格式校验。
@@ -208,8 +213,9 @@ pub fn from_elf(elf: &[u8], manifest: &str, arch: Arch, stage: Stage) -> Result<
         }
     }
 
-    // 导出：动态符号表中已定义的全局函数；有未定义符号即拒绝
-    let mut exports = Vec::new();
+    // 导出：清单声明的名字，逐个在动态符号表中找已定义的全局函数；有未定义符号即拒绝
+    let declared = crate::Manifest::parse(manifest).map_err(PackError::Manifest)?;
+    let mut defined: Vec<(Vec<u8>, u32)> = Vec::new();
     for i in 0..shnum {
         let o = shoff + i * shentsize;
         if u32_(elf, o + 4)? != SHT_DYNSYM {
@@ -237,12 +243,57 @@ pub fn from_elf(elf: &[u8], manifest: &str, arch: Arch, stage: Stage) -> Result<
             let (bind, ty) = (info >> 4, info & 0xF);
             if (bind == 1 || bind == 2) && ty == 2 {
                 let v = u32::try_from(value).map_err(|_| PackError::BadElf("符号地址超出 32 位"))?;
-                exports.push((sym.as_bytes().to_vec(), v));
+                defined.push((sym.as_bytes().to_vec(), v));
             }
         }
     }
-    exports.sort();
+    let mut exports = Vec::new();
+    for name in declared.exports() {
+        let hit = defined.iter().find(|(n, _)| n == name.as_bytes()).ok_or_else(|| PackError::MissingExport(name.into()))?;
+        exports.push(hit.clone());
+    }
 
     let b = Builder { arch, stage, manifest: manifest.as_bytes().to_vec(), segments, exports, relocs };
     b.finish().map_err(PackError::Format)
+}
+
+/// 指令集 → 裸机目标三元组。
+pub fn target_triple(a: Arch) -> &'static str {
+    match a {
+        Arch::X86_64 => "x86_64-unknown-none",
+        Arch::Aarch64 => "aarch64-unknown-none",
+        Arch::Riscv64 => "riscv64gc-unknown-none-elf",
+        Arch::Riscv32 => "riscv32imac-unknown-none-elf",
+    }
+}
+
+/// 构建工作区 `workspace` 中的模块 crate `package`（目录 `dir`，含 `jaso.manifest`），并打包为运行时装载的 `.jaso`。
+///
+/// 用独立的 `target_dir` 调用 cargo（供其它 crate 的构建脚本使用时，避免与外层构建争用同一目录的锁）。
+/// 失败时返回可读的原因。
+pub fn build_module(
+    workspace: &std::path::Path,
+    package: &str,
+    dir: &std::path::Path,
+    target_dir: &std::path::Path,
+    arch: Arch,
+) -> Result<Vec<u8>, String> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let triple = target_triple(arch);
+    let status = std::process::Command::new(cargo)
+        .current_dir(workspace)
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_TARGET_DIR")
+        .args(["build", "--release", "--target", triple, "-p", package, "--target-dir"])
+        .arg(target_dir)
+        .status()
+        .map_err(|e| alloc::format!("无法启动 cargo：{}", e))?;
+    if !status.success() {
+        return Err(alloc::format!("模块 {} 构建失败", package));
+    }
+    let elf_path = target_dir.join(triple).join("release").join(package);
+    let elf = std::fs::read(&elf_path).map_err(|e| alloc::format!("读取 {} 失败：{}", elf_path.display(), e))?;
+    let manifest = std::fs::read_to_string(dir.join("jaso.manifest")).map_err(|e| alloc::format!("读取清单失败：{}", e))?;
+    from_elf(&elf, &manifest, arch, Stage::Runtime).map_err(|e| alloc::format!("打包 {} 失败：{:?}", package, e))
 }

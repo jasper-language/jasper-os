@@ -1,0 +1,16 @@
+# jaso-sha2 —— 把 sha2 打包为 `.jaso` 模块：导出 C 调用约定的 SHA-256 / SHA-512。
+[package]
+name = "jaso-sha2"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "jaso-sha2"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+jaso-module = { path = "../support" }
+sha2 = { version = "=0.11.1", default-features = false }

@@ -1,0 +1,8 @@
+# jaso-sha2 的清单（打包时写入 .jaso）
+core.name = jaso-sha2
+core.version = 0.1.0
+core.abi = c.v0
+core.host = jaso.host.v0
+core.requires = system.console.write
+core.description = 基于 sha2 0.11.1 的 SHA-256 / SHA-512（纯软件后端）
+core.exports = jaso_init, sha256, sha512

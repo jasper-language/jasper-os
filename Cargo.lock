@@ -313,10 +313,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "jaso-crc"
+version = "0.1.0"
+dependencies = [
+ "crc",
+ "jaso-module",
+]
+
+[[package]]
+name = "jaso-deflate"
+version = "0.1.0"
+dependencies = [
+ "jaso-module",
+ "miniz_oxide",
+]
+
+[[package]]
 name = "jaso-demo"
 version = "0.1.0"
 dependencies = [
  "jaso",
+]
+
+[[package]]
+name = "jaso-module"
+version = "0.1.0"
+dependencies = [
+ "jaso",
+]
+
+[[package]]
+name = "jaso-net"
+version = "0.1.0"
+dependencies = [
+ "jaso-module",
+ "smoltcp",
+]
+
+[[package]]
+name = "jaso-sha2"
+version = "0.1.0"
+dependencies = [
+ "jaso-module",
+ "sha2",
 ]
 
 [[package]]
@@ -725,6 +764,14 @@ dependencies = [
  "miniz_oxide",
  "sha2",
  "smoltcp",
+]
+
+[[package]]
+name = "user-modhost"
+version = "0.1.0"
+dependencies = [
+ "jaso",
+ "jasper-rt",
 ]
 
 [[package]]

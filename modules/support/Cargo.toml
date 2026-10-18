@@ -1,0 +1,15 @@
+# jaso-module —— `.jaso` 模块的公共支撑：`jaso_init`（保存宿主接口表）、经宿主接口表的全局分配器、panic 处理、日志。
+# 模块 crate 依赖它之后只需编写自己的 C 调用约定导出函数。
+[package]
+name = "jaso-module"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+test = false
+bench = false
+
+[dependencies]
+jaso = { path = "../../jaso" }

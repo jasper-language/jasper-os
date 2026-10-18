@@ -1,0 +1,8 @@
+# jaso-deflate 的清单（打包时写入 .jaso）
+core.name = jaso-deflate
+core.version = 0.1.0
+core.abi = c.v0
+core.host = jaso.host.v0
+core.requires = system.console.write
+core.description = 基于 miniz_oxide 0.9.1 的 zlib 压缩与解压
+core.exports = jaso_init, zlib_compress, zlib_decompress, inflate_raw, buffer_free

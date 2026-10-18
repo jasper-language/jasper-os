@@ -1,0 +1,19 @@
+# user-modhost —— 把 J-2 验证过的 Rust 库作为 `.jaso` 模块装载运行：内嵌构建期打包的 sha2 / crc / deflate / net 模块，
+# 经 jasper-rt 的装载器装入后，用与 user/libcheck 相同的已知答案检查各导出，并让多个模块串联工作。
+[package]
+name = "user-modhost"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "user-modhost"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+jasper-rt = { path = "../rt" }
+
+[build-dependencies]
+jaso = { path = "../../jaso", features = ["pack"] }

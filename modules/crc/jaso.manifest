@@ -1,0 +1,8 @@
+# jaso-crc 的清单（打包时写入 .jaso）
+core.name = jaso-crc
+core.version = 0.1.0
+core.abi = c.v0
+core.host = jaso.host.v0
+core.requires = system.console.write
+core.description = 基于 crc 3.4.0 的 CRC-16 / CRC-32 / CRC-32C / CRC-64
+core.exports = jaso_init, crc32_iso_hdlc, crc32_iscsi, crc16_ibm_sdlc, crc64_ecma_182
