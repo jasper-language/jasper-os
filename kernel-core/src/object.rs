@@ -120,9 +120,19 @@ impl fmt::Debug for Rights {
 /// 单调递增、永不复用的 ID 分配器（原子操作，可在中断上下文使用）。
 ///
 /// 从 1 开始，0 保留为「无」。对象 ID、追踪事件序号、异步请求号都用它。
+/// 可分配的 ID 为 `1..=u64::MAX`；用尽后 [`allocate`](Self::allocate) 永远返回 `None`——
+/// **绝不回绕**（回绕会让新对象与旧对象同号，破坏「永不复用」）。
+/// 内部用比较交换循环推进：内部计数 0 表示「已用尽」，因此用尽状态也是原子可见的。
+/// Monotonic, never-reused ID allocator; returns `None` once exhausted instead of wrapping.
 pub struct IdAllocator {
+    /// 下一个要分配的 ID；0 = 已用尽。
     next: AtomicU64,
 }
+
+/// ID 已用尽（`system.object.error.ids_exhausted` 语义；调用方据此拒绝创建）。
+/// The ID space is exhausted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdExhausted;
 
 impl IdAllocator {
     /// 新建，从 1 开始分配。
@@ -130,14 +140,40 @@ impl IdAllocator {
         IdAllocator { next: AtomicU64::new(1) }
     }
 
-    /// 取下一个 ID。
-    pub fn allocate(&self) -> u64 {
-        self.next.fetch_add(1, Ordering::Relaxed)
+    /// 新建，从 `first` 开始分配（用于演练耗尽路径；`first == 0` 视为已用尽）。
+    /// Start at `first` (exercises exhaustion; `0` means already exhausted).
+    pub const fn starting_at(first: u64) -> Self {
+        IdAllocator { next: AtomicU64::new(first) }
     }
 
-    /// 已分配的个数。
+    /// 取下一个 ID；已用尽时返回 `None`，且之后永远返回 `None`。
+    /// Next ID, or `None` once `u64::MAX` has been handed out.
+    pub fn allocate(&self) -> Option<u64> {
+        let mut cur = self.next.load(Ordering::Relaxed);
+        loop {
+            if cur == 0 {
+                return None;
+            }
+            // u64::MAX 发出后下一个值回到 0 = 「已用尽」哨兵
+            let new = cur.wrapping_add(1);
+            match self.next.compare_exchange_weak(cur, new, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return Some(cur),
+                Err(seen) => cur = seen,
+            }
+        }
+    }
+
+    /// 是否已用尽。
+    pub fn exhausted(&self) -> bool {
+        self.next.load(Ordering::Relaxed) == 0
+    }
+
+    /// 已分配的个数（从 1 起算；用尽时为 `u64::MAX`）。
     pub fn allocated(&self) -> u64 {
-        self.next.load(Ordering::Relaxed) - 1
+        match self.next.load(Ordering::Relaxed) {
+            0 => u64::MAX,
+            n => n - 1,
+        }
     }
 }
 
@@ -171,9 +207,16 @@ pub enum ObjectType {
 }
 
 impl ObjectType {
-    /// v1 是否允许经 Channel 传递（M4.0 规范 v0.6 §2.1）：只有「叶子对象」——自身不持有句柄、
+    /// v1 是否允许经 Channel 传递：只有「叶子对象」——自身不持有句柄、
     /// 也不强引用非叶子对象——可以传递。Channel 端点、Ring、Process、AddressSpace 在 v1 不可传递
     /// （阶段性限制，放宽前须证明仍保持强引用图无环）。
+    ///
+    /// **范围说明**：设计约束中的叶子对象还包括「共享内存（Memory）对象」，但该对象类型**尚未实现**
+    /// （本枚举里没有它）。[`ObjectType::AddressSpace`] 是整套地址翻译、属于进程内部的非叶子资源，
+    /// **不是**共享内存对象，因此不可传递，也不得用它代替共享内存。共享内存对象实现时会作为新的
+    /// 叶子类型加入本函数，不改变其余类型的判定。
+    /// Whether v1 IPC may transfer this type (leaf objects only). The shared-memory leaf object is not
+    /// implemented yet; `AddressSpace` is not a substitute for it and stays non-transferable.
     pub const fn is_transferable_v1(self) -> bool {
         matches!(self, ObjectType::Event | ObjectType::Timer | ObjectType::Task)
     }
@@ -233,9 +276,9 @@ impl ObjectManager {
         ObjectManager { ids: IdAllocator::new() }
     }
 
-    /// 登记一个新对象，返回它的引用。
-    pub fn create(&self, ty: ObjectType) -> ObjectRef {
-        ObjectRef { id: ObjectId(self.ids.allocate()), ty }
+    /// 登记一个新对象，返回它的引用；ID 用尽时拒绝（不回绕复用旧 ID）。
+    pub fn create(&self, ty: ObjectType) -> Result<ObjectRef, IdExhausted> {
+        Ok(ObjectRef { id: ObjectId(self.ids.allocate().ok_or(IdExhausted)?), ty })
     }
 
     /// 迄今创建的对象数。
@@ -474,16 +517,59 @@ mod tests {
     #[test]
     fn id_allocator_is_monotonic_and_starts_at_one() {
         let ids = IdAllocator::new();
-        assert_eq!(ids.allocate(), 1);
-        assert_eq!(ids.allocate(), 2);
+        assert_eq!(ids.allocate(), Some(1));
+        assert_eq!(ids.allocate(), Some(2));
         assert_eq!(ids.allocated(), 2);
+        assert!(!ids.exhausted());
+    }
+
+    #[test]
+    fn id_allocator_fails_on_exhaustion_without_wrapping() {
+        let ids = IdAllocator::starting_at(u64::MAX - 1);
+        assert_eq!(ids.allocate(), Some(u64::MAX - 1));
+        assert_eq!(ids.allocate(), Some(u64::MAX), "最后一个可用 ID");
+        assert_eq!(ids.allocate(), None, "用尽后拒绝");
+        assert_eq!(ids.allocate(), None, "用尽状态保持，绝不回绕到 0/1");
+        assert!(ids.exhausted());
+        assert_eq!(ids.allocated(), u64::MAX);
+        let om = ObjectManager { ids: IdAllocator::starting_at(u64::MAX) };
+        assert!(om.create(ObjectType::Event).is_ok());
+        assert_eq!(om.create(ObjectType::Event), Err(IdExhausted));
+    }
+
+    #[test]
+    fn id_allocator_is_unique_under_contention() {
+        extern crate std;
+        use std::sync::Arc;
+        use std::vec::Vec;
+        // 从接近上限处开始，多线程争抢：发出的 ID 互不相同，且总数恰为剩余量
+        let ids = Arc::new(IdAllocator::starting_at(u64::MAX - 999));
+        let hs: Vec<_> = (0..4)
+            .map(|_| {
+                let ids = ids.clone();
+                std::thread::spawn(move || {
+                    let mut got = Vec::new();
+                    while let Some(v) = ids.allocate() {
+                        got.push(v);
+                    }
+                    got
+                })
+            })
+            .collect();
+        let mut all: Vec<u64> = hs.into_iter().flat_map(|h| h.join().unwrap()).collect();
+        all.sort_unstable();
+        let n = all.len();
+        all.dedup();
+        assert_eq!(n, 1000);
+        assert_eq!(all.len(), 1000, "无重复 ID");
+        assert_eq!(all[0], u64::MAX - 999);
     }
 
     #[test]
     fn object_manager_never_reuses_ids() {
         let om = ObjectManager::new();
-        let a = om.create(ObjectType::Event);
-        let b = om.create(ObjectType::Event);
+        let a = om.create(ObjectType::Event).unwrap();
+        let b = om.create(ObjectType::Event).unwrap();
         assert_ne!(a.id(), b.id());
         assert_eq!(a.type_name(), "Event");
         assert_eq!(om.created(), 2);

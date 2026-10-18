@@ -272,7 +272,22 @@ check_m42() {   # Handle/Rights：复制只降权、提权被拒；跨进程原�
   fi
 }
 
-check_m10; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42
+check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出接收方、堆扩容、内核空间预分配、只读翻译、ID 用尽、线程创建）
+  if has 'exited_receiver grant=Some\(Exited\) grant_new=Some\(Exited\) transfer=Some\(Exited\) objects_unchanged=true sender_kept=true reaped_receiver=Some\(NoSuchProcess\)' \
+     && has 'heap fail_alloc=Some\(OutOfFrames\) rolled_back=true fail_map=Some\(MapFailed\) rolled_back=true overflow=Some\(LimitReached\) regrow=true reclaimed=true' \
+     && has 'kernel_space ready=true used=256 fail=Some\(OutOfFrames\) untouched=true frames_returned=true ok=Some\(256\) reclaimed=true refuse_when_unready=true' \
+     && has 'translate same_as_mapper=true unmapped_none=true kernel_not_user=true reclaimed=true' \
+     && has 'ids last=Some\(18446744073709551615\) after_exhausted=None again=None no_wrap=true' \
+     && has 'spawn zero_stack=Some\(Map\(InvalidAddress\)\) objects_full=Some\(NoTaskSlot\) restored=true sched_full=Some\(NoTaskSlot\) \(fillers [1-9][0-9]*\) restored=true retry_exit=Some\(Exited \{ code: 42 \}\)' \
+     && has '^\[JSR-FIX\] objects_live=([0-9]+)/\1 pending=0 checks=[0-9]+ failed=0' \
+     && ! has 'warning residual_handles'; then
+    record FIX PASS "失败路径全部回滚到基线；回滚后可再次成功；无残余句柄告警"
+  else
+    record FIX FAIL "缺少 JSR-FIX 关键标记、failed≠0 或出现残余句柄告警"
+  fi
+}
+
+check_m10; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_fix
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

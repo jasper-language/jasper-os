@@ -196,18 +196,19 @@ impl<const N: usize> Tracer<N> {
         self.sink = Some(sink);
     }
 
-    /// 记录一条事件，返回其序号。
-    pub fn emit(&mut self, name: &'static str, tags: &[Tag]) -> u64 {
+    /// 记录一条事件，返回其序号；序号用尽时丢弃该事件并返回 `None`（不回绕、不复用序号）。
+    pub fn emit(&mut self, name: &'static str, tags: &[Tag]) -> Option<u64> {
+        let seq = self.seq.allocate()?;
         let mut slot = [None; MAX_TAGS];
         for (dst, src) in slot.iter_mut().zip(tags) {
             *dst = Some(*src);
         }
-        let ev = TraceEvent { seq: self.seq.allocate(), name, tags: slot, truncated: tags.len() > MAX_TAGS };
+        let ev = TraceEvent { seq, name, tags: slot, truncated: tags.len() > MAX_TAGS };
         if let Some(sink) = self.sink {
             sink(&ev);
         }
         self.events.push_overwrite(ev);
-        ev.seq
+        Some(ev.seq)
     }
 
     /// 缓冲中当前保留的事件数（≤ N）。
@@ -286,7 +287,7 @@ mod tests {
         t.emit("system.module.loaded", &[Tag::str("module", "a")]);
         t.emit("system.module.loaded", &[Tag::str("module", "b")]);
         let s = t.emit("system.module.unloaded", &[Tag::str("module", "b"), Tag::u64("n", 1)]);
-        assert_eq!(s, 3);
+        assert_eq!(s, Some(3));
         assert_eq!(t.len(), 2);
         assert_eq!(t.total(), 3);
         let last = t.iter().last().unwrap();

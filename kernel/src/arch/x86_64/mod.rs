@@ -148,6 +148,14 @@ impl Platform for X86_64 {
         paging::X86Mapper::for_root(root.0, phys_offset)
     }
 
+    unsafe fn translate_in(
+        root: Self::SpaceRoot,
+        phys_offset: u64,
+        va: u64,
+    ) -> Option<(kernel_core::frame::PhysFrame, kernel_core::paging::MapFlags)> {
+        paging::translate_raw(root.0, phys_offset, va)
+    }
+
     unsafe fn switch_space(root: Self::SpaceRoot) {
         space::switch(root)
     }
@@ -157,10 +165,19 @@ impl Platform for X86_64 {
     }
 
     unsafe fn prepare_kernel_space(
+        root: Self::SpaceRoot,
         phys_offset: u64,
         frames: &mut dyn kernel_core::frame::FrameAllocator,
     ) -> Result<usize, kernel_core::paging::MapError> {
-        space::prealloc_kernel_half(phys_offset, frames)
+        space::prealloc_kernel_half(root, phys_offset, frames)
+    }
+
+    unsafe fn empty_space_root(frame: kernel_core::frame::PhysFrame, phys_offset: u64) -> Self::SpaceRoot {
+        space::empty_root(frame, phys_offset)
+    }
+
+    unsafe fn kernel_part_used(root: Self::SpaceRoot, phys_offset: u64) -> usize {
+        space::kernel_half_used(root, phys_offset)
     }
 
     fn set_kernel_stack(top: u64) {

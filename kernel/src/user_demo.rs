@@ -69,41 +69,86 @@ fn user_task() {
     unsafe { arch::enter_user(job.entry, job.stack, job.arg0, job.arg1) }
 }
 
-/// 一个探针的资源：地址空间 + 三个数据帧。
+/// 一组由调用者独占的数据帧（RAII）：丢弃时全部归还，因此任何中途失败都不会泄漏。
+/// Exclusively owned data frames, returned to the frame service on drop.
+struct OwnedFrames<const N: usize> {
+    frames: [Option<PhysFrame>; N],
+}
+
+impl<const N: usize> OwnedFrames<N> {
+    /// 逐个分配 `N` 帧并清零；任一失败 ⇒ 已分配的帧随返回的 `None` 一并被丢弃（归还）。
+    fn allocate_zeroed() -> Option<Self> {
+        let mut set = OwnedFrames { frames: [None; N] };
+        for slot in set.frames.iter_mut() {
+            let f = frame::allocate().ok()?;
+            *slot = Some(f);
+            // SAFETY：帧刚分出、尚未映射给任何人；经全物理内存映射清零。
+            unsafe { core::ptr::write_bytes(phys_to_virt(f.start())?, 0, FRAME_SIZE as usize) };
+        }
+        Some(set)
+    }
+
+    /// 第 `i` 帧（分配成功后总是存在）。
+    fn get(&self, i: usize) -> Option<PhysFrame> {
+        self.frames.get(i).copied().flatten()
+    }
+
+    /// 归还全部帧，返回是否全部归还成功（之后再丢弃不会重复归还）。
+    fn release(&mut self) -> bool {
+        let mut ok = true;
+        for slot in self.frames.iter_mut() {
+            if let Some(f) = slot.take() {
+                ok &= frame::deallocate(f).is_ok();
+            }
+        }
+        ok
+    }
+}
+
+impl<const N: usize> Drop for OwnedFrames<N> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// 一个探针的资源：地址空间 + 三个数据帧（代码、数据、栈）。
+/// 字段按声明顺序丢弃：先销毁地址空间（不再有映射指向数据帧），再归还数据帧。
 struct Probe {
     space: VmSpace,
-    frames: [PhysFrame; 3],
+    frames: OwnedFrames<3>,
 }
 
 /// 为探针建立地址空间并装入机器码；`prefill` 中的 (偏移, 字节) 预先写进数据页。
+/// 任一步失败都返回 `None`，已建立的地址空间与已分配的帧由 RAII 全部回收。
 fn build(probe: UserProbe, prefill: &[(usize, &[u8])]) -> Option<Probe> {
     let base = arch::USER_WINDOW.0;
-    let mut space = VmSpace::new().ok()?;
-    let code = frame::allocate().ok()?;
-    let data = frame::allocate().ok()?;
-    let stack = frame::allocate().ok()?;
+    let frames = OwnedFrames::<3>::allocate_zeroed()?;
+    let mut p = Probe { space: VmSpace::new().ok()?, frames };
+    let (code, data, stack) = (p.frames.get(0)?, p.frames.get(1)?, p.frames.get(2)?);
     let bytes = arch::user_probe(probe);
-    // SAFETY：三帧刚分出、尚未映射给任何人；经全物理内存映射写入。
+    if bytes.len() > FRAME_SIZE as usize {
+        return None;
+    }
+    // SAFETY：三帧由本探针独占、尚未映射；经全物理内存映射写入，长度已检查不越过页尾。
     unsafe {
-        for f in [code, data, stack] {
-            core::ptr::write_bytes(phys_to_virt(f.start())?, 0, FRAME_SIZE as usize);
-        }
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), phys_to_virt(code.start())?, bytes.len());
         for (off, data_bytes) in prefill {
-            if off + data_bytes.len() <= FRAME_SIZE as usize {
-                core::ptr::copy_nonoverlapping(data_bytes.as_ptr(), phys_to_virt(data.start())?.add(*off), data_bytes.len());
+            let end = off.checked_add(data_bytes.len())?;
+            if end > FRAME_SIZE as usize {
+                return None;
             }
+            core::ptr::copy_nonoverlapping(data_bytes.as_ptr(), phys_to_virt(data.start())?.add(*off), data_bytes.len());
         }
     }
-    space.map(VirtPage::containing(base + CODE_OFF), code, MapFlags::USER | MapFlags::EXECUTE).ok()?;
-    space.map(VirtPage::containing(base + DATA_OFF), data, MapFlags::USER | MapFlags::WRITE).ok()?;
-    space.map(VirtPage::containing(base + STACK_OFF - FRAME_SIZE), stack, MapFlags::USER | MapFlags::WRITE).ok()?;
-    Some(Probe { space, frames: [code, data, stack] })
+    p.space.map(VirtPage::containing(base + CODE_OFF), code, MapFlags::USER | MapFlags::EXECUTE).ok()?;
+    p.space.map(VirtPage::containing(base + DATA_OFF), data, MapFlags::USER | MapFlags::WRITE).ok()?;
+    p.space.map(VirtPage::containing(base + STACK_OFF - FRAME_SIZE), stack, MapFlags::USER | MapFlags::WRITE).ok()?;
+    Some(p)
 }
 
 /// 读数据页第 `i` 个 64 位字（经全物理内存映射，不依赖用户映射）。
 fn data_word(p: &Probe, i: usize) -> u64 {
-    match phys_to_virt(p.frames[1].start()) {
+    match p.frames.get(1).and_then(|f| phys_to_virt(f.start())) {
         // SAFETY：数据帧仍由本探针持有，8 字节对齐。
         Some(v) => unsafe { (v as *const u64).add(i).read_volatile() },
         None => u64::MAX,
@@ -148,6 +193,8 @@ fn run_probe_with(
     let faults_before = fault::count();
     let exits_before = syscall::exit_count();
     if sched::spawn(TaskId(30), name, user_task).is_err() {
+        // 失败回滚：撤销待运行的作业；返回时 `p` 被丢弃，地址空间与数据帧随之回收
+        *JOB.lock() = None;
         check(false, "无法创建用户任务");
         return None;
     }
@@ -160,11 +207,9 @@ fn run_probe_with(
         *w = data_word(&p, i);
     }
     let last = fault::last();
-    let frames = p.frames;
-    drop(p.space); // 销毁地址空间（私有页表帧回收）
-    for f in frames {
-        check(frame::deallocate(f).is_ok(), "探针数据帧归还失败");
-    }
+    let Probe { space, mut frames } = p;
+    drop(space); // 先销毁地址空间（私有页表帧回收），再归还数据帧
+    check(frames.release(), "探针数据帧归还失败");
     Some(Outcome { words, last_fault: last, faults, exits })
 }
 

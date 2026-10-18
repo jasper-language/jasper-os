@@ -209,7 +209,9 @@ impl LoadError {
 pub fn load_elf(id: ObjId, image: &[u8]) -> Result<u64, LoadError> {
     let elf = kernel_core::elf::parse(image, arch::ELF_MACHINE).map_err(LoadError::Elf)?;
     for seg in elf.segments() {
-        if !in_private_window(seg.vaddr) || !in_private_window(seg.vaddr + seg.memsz - 1) {
+        // 解析器保证 memsz > 0 且页区间可表示；这里仍用检查式算术，任何溢出都按「窗口外」拒绝
+        let (lo, hi) = seg.page_range().ok_or(LoadError::OutsideWindow)?;
+        if !in_private_window(lo) || !in_private_window(hi - 1) {
             return Err(LoadError::OutsideWindow);
         }
     }
@@ -221,8 +223,7 @@ pub fn load_elf(id: ObjId, image: &[u8]) -> Result<u64, LoadError> {
         if seg.flags.execute {
             flags = flags | MapFlags::EXECUTE;
         }
-        let lo = seg.vaddr - seg.vaddr % FRAME_SIZE;
-        let hi = (seg.vaddr + seg.memsz).div_ceil(FRAME_SIZE) * FRAME_SIZE;
+        let (lo, hi) = seg.page_range().ok_or(LoadError::OutsideWindow)?;
         let mut va = lo;
         while va < hi {
             map_new(id, va, flags).map_err(LoadError::Proc)?;
@@ -277,11 +278,18 @@ pub fn spawn_thread(
     arg0: u64,
     arg1: u64,
 ) -> Result<(TaskId, ObjId), ProcError> {
-    if !in_private_window(entry) || !in_private_window(stack - 1) {
+    // 栈顶为 0 时 `stack - 1` 会下溢：用检查式算术，失败按非法地址拒绝
+    let stack_last = stack.checked_sub(1).ok_or(ProcError::Map(MapError::InvalidAddress))?;
+    if !in_private_window(entry) || !in_private_window(stack_last) {
         return Err(ProcError::Map(MapError::InvalidAddress));
     }
     with_proc(id, |p| if p.state == ProcState::Running { Ok(()) } else { Err(ProcError::Exited) })?;
-    let task = TaskId(1000 + TASK_IDS.allocate());
+    // 任务号用尽 ⇒ 拒绝（不回绕复用旧任务号）；此时尚未创建任何资源，无需回滚
+    let task = TASK_IDS
+        .allocate()
+        .and_then(|n| n.checked_add(1000))
+        .map(TaskId)
+        .ok_or(ProcError::NoTaskSlot)?;
     let task_obj = kobj::insert(KObject::Task(TaskObj { task, process: id }), 0, 2).map_err(|_| ProcError::NoTaskSlot)?;
     {
         let mut reg = REG.lock();
@@ -290,17 +298,20 @@ pub fn spawn_thread(
     }
     // 先完成全部记账（执行上下文 → Process、线程表 → Task），再交给调度器：
     // 否则新线程可能在记账完成前就运行并退出。
+    // 先确认进程仍在运行，再取内部引用：两步在同一次对象表访问内完成，失败时不留下半份记账
     let accounted = kobj::with(|t| {
-        t.acquire_internal(id).map_err(|_| ProcError::NoSuchProcess)?;
         match t.get_mut(id) {
-            Ok(KObject::Process(p)) => {
-                p.threads_live += 1;
-                p.threads_total += 1;
-                p.threads.push(task_obj);
-                Ok(())
-            }
-            _ => Err(ProcError::NoSuchProcess),
+            Ok(KObject::Process(p)) if p.state == ProcState::Running => {}
+            Ok(KObject::Process(_)) => return Err(ProcError::Exited),
+            _ => return Err(ProcError::NoSuchProcess),
         }
+        t.acquire_internal(id).map_err(|_| ProcError::NoSuchProcess)?;
+        if let Ok(KObject::Process(p)) = t.get_mut(id) {
+            p.threads_live += 1;
+            p.threads_total += 1;
+            p.threads.push(task_obj);
+        }
+        Ok(())
     });
     let rollback = |reason: ProcError, accounted: bool| {
         {
@@ -344,18 +355,34 @@ pub fn current_process() -> Option<ObjId> {
     REG.lock().members.iter().find(|m| m.task == me).map(|m| m.process)
 }
 
+/// 取得一个**允许接收新句柄**的进程（存在且处于 Running）。
+///
+/// 进程进入 exited 时已经关闭并释放了整张句柄表；之后若再放入句柄，这些句柄持有的外部所有权
+/// 将不再有任何路径释放（泄漏）。因此所有「向进程放入句柄」的入口都必须先经此检查，
+/// 并且检查与放入发生在同一把对象表锁内（之间不存在进程退出的时间窗）。
+/// Returns the process only if it may still receive handles (exists and is Running).
+fn receiver<'a>(
+    t: &'a mut kernel_core::objtable::ObjectTable<KObject, { kobj::MAX_OBJECTS }>,
+    pid: ObjId,
+) -> Result<&'a mut Process, ProcError> {
+    match t.get_mut(pid) {
+        Ok(KObject::Process(p)) if p.state == ProcState::Running => Ok(p),
+        Ok(KObject::Process(_)) => Err(ProcError::Exited),
+        _ => Err(ProcError::NoSuchProcess),
+    }
+}
+
 /// 在当前进程的句柄表中放入一个指向 Task 对象的句柄（同时增加该对象的一个外部所有权）。
 pub fn put_task_handle(task_obj: ObjId, rights: Rights) -> Result<HandleId, ProcError> {
     let pid = current_process().ok_or(ProcError::NoSuchProcess)?;
     kobj::with(|t| {
+        receiver(t, pid)?; // 先确认可接收，再取所有权（失败路径无需回滚）
         t.acquire_owner(task_obj).map_err(|_| ProcError::Handle(HandleError::Invalid))?;
-        let r = match t.get_mut(pid) {
-            Ok(KObject::Process(p)) => p
-                .handles
+        let r = receiver(t, pid).and_then(|p| {
+            p.handles
                 .put(ObjectRef { id: ObjectId(task_obj.raw()), ty: ObjectType::Task }, rights)
-                .map_err(ProcError::Handle),
-            _ => Err(ProcError::NoSuchProcess),
-        };
+                .map_err(ProcError::Handle)
+        });
         if r.is_err() {
             let _ = t.release_owner(task_obj);
         }
@@ -364,13 +391,17 @@ pub fn put_task_handle(task_obj: ObjId, rights: Rights) -> Result<HandleId, Proc
 }
 
 /// 把一个已存在的对象发放给进程：增加一份外部所有权并放进其句柄表（全有或全无）。
+/// 接收进程已退出 ⇒ [`ProcError::Exited`]，对象引用计数不变。
 pub fn grant(pid: ObjId, obj: ObjId, ty: ObjectType, rights: Rights) -> Result<HandleId, ProcError> {
     kobj::with(|t| {
+        let room = receiver(t, pid)?.handles.free_slots();
+        if room == 0 {
+            return Err(ProcError::Handle(HandleError::TableFull));
+        }
         t.acquire_owner(obj).map_err(|_| ProcError::Handle(HandleError::Invalid))?;
-        let r = match t.get_mut(pid) {
-            Ok(KObject::Process(p)) => p.handles.put(ObjectRef { id: ObjectId(obj.raw()), ty }, rights).map_err(ProcError::Handle),
-            _ => Err(ProcError::NoSuchProcess),
-        };
+        // 已确认可接收且有空位：以下 put 不会失败；仍保留回滚以防御未来的修改。
+        let r = receiver(t, pid)
+            .and_then(|p| p.handles.put(ObjectRef { id: ObjectId(obj.raw()), ty }, rights).map_err(ProcError::Handle));
         if r.is_err() {
             let _ = t.release_owner(obj);
         }
@@ -379,15 +410,20 @@ pub fn grant(pid: ObjId, obj: ObjId, ty: ObjectType, rights: Rights) -> Result<H
 }
 
 /// 新建一个对象并直接发放给进程（对象的唯一外部所有权就是这个句柄）。
+///
+/// 「检查接收方 → 建对象 → 放句柄」在同一把锁内完成：接收方已退出或句柄表已满时**根本不创建对象**，
+/// 因此失败路径上不存在需要回收的新对象。
+/// Creates an object and hands it to `pid` atomically; on failure no object is created.
 pub fn grant_new(pid: ObjId, obj: KObject, ty: ObjectType, rights: Rights) -> Result<HandleId, ProcError> {
-    let id = kobj::insert(obj, 1, 0).map_err(|_| ProcError::NoTaskSlot)?;
     kobj::with(|t| {
-        let r = match t.get_mut(pid) {
-            Ok(KObject::Process(p)) => p.handles.put(ObjectRef { id: ObjectId(id.raw()), ty }, rights).map_err(ProcError::Handle),
-            _ => Err(ProcError::NoSuchProcess),
-        };
+        if receiver(t, pid)?.handles.free_slots() == 0 {
+            return Err(ProcError::Handle(HandleError::TableFull));
+        }
+        let id = t.insert(obj, 1, 0).map_err(|_| ProcError::NoTaskSlot)?;
+        let r = receiver(t, pid)
+            .and_then(|p| p.handles.put(ObjectRef { id: ObjectId(id.raw()), ty }, rights).map_err(ProcError::Handle));
         if r.is_err() {
-            let _ = t.release_owner(id); // 对象随即死亡入队，由清理过程销毁
+            let _ = t.release_owner(id); // 防御：对象随即死亡入队，由清理过程销毁
         }
         r
     })
@@ -416,11 +452,9 @@ pub fn duplicate_current(h: HandleId, rights: Rights) -> Result<HandleId, ProcEr
             return Err(ProcError::Handle(HandleError::RightsDenied));
         }
         let obj = ObjId::from_raw(r.id.0).ok_or(ProcError::Handle(HandleError::Invalid))?;
+        receiver(t, pid)?;
         t.acquire_owner(obj).map_err(|_| ProcError::Handle(HandleError::Invalid))?;
-        let put = match t.get_mut(pid) {
-            Ok(KObject::Process(p)) => p.handles.put(r, rights).map_err(ProcError::Handle),
-            _ => Err(ProcError::NoSuchProcess),
-        };
+        let put = receiver(t, pid).and_then(|p| p.handles.put(r, rights).map_err(ProcError::Handle));
         if put.is_err() {
             let _ = t.release_owner(obj);
         }
@@ -451,10 +485,9 @@ pub fn transfer(from: ObjId, h: HandleId, to: ObjId) -> Result<HandleId, ProcErr
         if !r.ty.is_transferable_v1() {
             return Err(ProcError::NotTransferable);
         }
-        match t.get(to) {
-            Ok(KObject::Process(p)) if p.handles.free_slots() > 0 => {}
-            Ok(KObject::Process(_)) => return Err(ProcError::Handle(HandleError::TableFull)),
-            _ => return Err(ProcError::NoSuchProcess),
+        // 接收方必须仍可接收句柄（Running），且句柄表有空位
+        if receiver(t, to)?.handles.free_slots() == 0 {
+            return Err(ProcError::Handle(HandleError::TableFull));
         }
         // —— 提交：以下步骤在检查通过后不会失败 ——
         if let Ok(KObject::Process(p)) = t.get_mut(from) {
@@ -465,6 +498,22 @@ pub fn transfer(from: ObjId, h: HandleId, to: ObjId) -> Result<HandleId, ProcErr
             _ => Err(ProcError::NoSuchProcess),
         }
     })
+}
+
+/// 进程的线程计数 `(存活, 累计创建)`（诊断与回滚验收用）。
+/// Live and total thread counts of a process (diagnostics).
+pub fn thread_counts(pid: ObjId) -> Option<(u32, u32)> {
+    kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => Some((p.threads_live, p.threads_total)),
+        _ => None,
+    })
+}
+
+/// 线程登记表中的条目数 `(待启动, 运行身份)`（诊断与回滚验收用）。
+/// Number of entries in the thread registry (diagnostics).
+pub fn registry_len() -> (usize, usize) {
+    let reg = REG.lock();
+    (reg.starts.len(), reg.members.len())
 }
 
 /// 让一个没有线程的进程进入 exited（关闭其句柄表）；有线程存活时不做任何事并返回 `false`。
@@ -582,9 +631,22 @@ pub fn reap(id: ObjId) -> Option<ExitInfo> {
 }
 
 /// 进程对象的销毁动作（只由清理过程调用，不持对象表锁）：销毁地址空间、归还帧、释放线程表引用（级联）。
+///
+/// 正常路径上句柄表在 exited 时已被关闭；这里**不依赖该假设**：仍有残余句柄则逐个释放其外部所有权，
+/// 并输出诊断标记（出现即说明某条路径漏了检查）。
 pub fn destroy(p: Box<Process>) {
-    let Process { space, frames, threads, handles, .. } = *p;
-    drop(handles); // exited 时已关闭；这里只是释放结构本身
+    let Process { space, frames, threads, mut handles, name, .. } = *p;
+    let mut residual: Vec<ObjectRef> = Vec::new();
+    let n = handles.close_all(|r| residual.push(r));
+    if n > 0 {
+        kprintln!("[JSR-LIFE] warning residual_handles={} process={}", n, name);
+    }
+    for r in residual {
+        if let Some(id) = ObjId::from_raw(r.id.0) {
+            let _ = kobj::release_owner(id);
+        }
+    }
+    drop(handles);
     drop(space); // 先销毁地址空间（回收私有页表帧），再归还数据帧
     for f in frames {
         let _ = frame::deallocate(f);

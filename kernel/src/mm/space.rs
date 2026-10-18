@@ -21,23 +21,43 @@ use super::map::GlobalFrames;
 use crate::arch;
 use crate::boot;
 
-/// 启动时的内核地址空间根（切回内核空间用）。
-static KERNEL_ROOT: Once<arch::SpaceRoot> = Once::new();
+/// 启动时的内核地址空间根与内核共享部分的准备结果。
+/// 根总会被记录（切回内核空间需要它）；准备失败时结果为 `Err`，此后一律拒绝创建新空间。
+struct KernelSpace {
+    root: arch::SpaceRoot,
+    ready: Result<usize, MapError>,
+}
+
+static KERNEL: Once<KernelSpace> = Once::new();
 
 /// 记录内核地址空间根并预分配内核共享部分的顶级表项（在创建任何其他空间之前调用；只生效一次）。
-pub fn init() {
-    KERNEL_ROOT.call_once(|| {
-        if let Some(offset) = boot::get().and_then(|b| b.phys_offset) {
-            // SAFETY：此时尚未创建其他地址空间，且当前就是内核空间。
-            let _ = unsafe { arch::prepare_kernel_space(offset, &mut GlobalFrames) };
-        }
-        arch::current_space()
-    });
+///
+/// 预分配失败**不会被忽略**：结果被记录下来，[`VmSpace::new`] 据此拒绝创建地址空间——
+/// 否则之后新增的内核映射可能对部分空间不可见。返回准备结果（重复调用返回首次的结果）。
+/// Initialise the kernel space once; a preparation failure is recorded and makes every later `VmSpace::new` fail.
+pub fn init() -> Result<usize, MapError> {
+    KERNEL
+        .call_once(|| {
+            let root = arch::current_space();
+            let ready = match boot::get().and_then(|b| b.phys_offset) {
+                // SAFETY：此时尚未创建其他地址空间，且当前就是内核空间。
+                Some(offset) => unsafe { arch::prepare_kernel_space(root, offset, &mut GlobalFrames) },
+                None => Err(MapError::NotMapped),
+            };
+            KernelSpace { root, ready }
+        })
+        .ready
+}
+
+/// 内核空间是否已就绪；未就绪时给出原因（供创建前检查，也便于单独演练拒绝路径）。
+/// Whether a recorded preparation result allows creating address spaces.
+pub fn ready_from(result: Result<usize, MapError>) -> Result<(), MapError> {
+    result.map(|_| ())
 }
 
 /// 切回内核地址空间。
 pub fn activate_kernel() {
-    if let Some(&root) = KERNEL_ROOT.get() {
+    if let Some(&KernelSpace { root, .. }) = KERNEL.get() {
         // SAFETY：内核空间是启动时的活动空间，包含全部内核映射。
         unsafe { arch::switch_space(root) };
     }
@@ -59,7 +79,7 @@ impl VmSpace {
     /// 新建地址空间。
     pub fn new() -> Result<Self, MapError> {
         let phys_offset = boot::get().and_then(|b| b.phys_offset).ok_or(MapError::NotMapped)?;
-        init();
+        ready_from(init())?;
         // SAFETY：offset 来自引导器；新空间的映射器只用于私有窗口（见 `map` 的检查），不与内核映射器别名修改共享表。
         unsafe {
             let root = arch::create_space(phys_offset, &mut GlobalFrames)?;

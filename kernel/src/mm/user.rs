@@ -13,7 +13,7 @@
 //! SMP 时需改为在地址空间锁内完成「校验 + 复制」。
 
 use kernel_core::frame::FRAME_SIZE;
-use kernel_core::paging::{MapFlags, PageMapper, VirtPage};
+use kernel_core::paging::MapFlags;
 
 use super::{phys_to_virt, space};
 use crate::{arch, boot, sched};
@@ -45,13 +45,14 @@ fn for_each_chunk(
     }
     let root = sched::current_space().ok_or(UserPtrError::NotUserTask)?;
     let offset = boot::get().and_then(|b| b.phys_offset).ok_or(UserPtrError::InvalidAddress)?;
-    // SAFETY：只用于只读查询（translate），不修改页表；调用发生在关中断的系统调用路径上。
-    let mapper = unsafe { arch::space_mapper(root, offset) };
+    // 只读查询：经架构层按值读取表项，不为该空间另建可变映射器（不与 `VmSpace` 的映射器形成可变别名）。
+    // SAFETY：root 来自当前任务、仍然有效；系统调用路径关中断、单 CPU，查询期间页表不被修改。
+    let lookup = |va: u64| unsafe { arch::translate_in(root, offset, va) };
 
     // 第一遍：完整校验，不复制任何字节（要么全部成功，要么什么都不做）
     let mut va = addr - addr % FRAME_SIZE;
     while va < end {
-        match mapper.translate(VirtPage::containing(va)) {
+        match lookup(va - va % FRAME_SIZE) {
             Some((_, flags)) if flags.contains(MapFlags::USER) && flags.contains(need) => {}
             _ => return Err(UserPtrError::InvalidAddress),
         }
@@ -63,7 +64,7 @@ fn for_each_chunk(
     while cur < end {
         let page_off = cur % FRAME_SIZE;
         let chunk = ((FRAME_SIZE - page_off) as usize).min(len - done);
-        let (frame, _) = mapper.translate(VirtPage::containing(cur)).ok_or(UserPtrError::InvalidAddress)?;
+        let (frame, _) = lookup(cur - page_off).ok_or(UserPtrError::InvalidAddress)?;
         let kptr = phys_to_virt(frame.start() + page_off).ok_or(UserPtrError::InvalidAddress)?;
         f(kptr, chunk, done);
         done += chunk;

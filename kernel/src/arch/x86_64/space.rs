@@ -61,23 +61,70 @@ pub unsafe fn create(phys_offset: u64, frames: &mut dyn FrameAllocator) -> Resul
     Ok(SpaceRoot(f.start()))
 }
 
-/// 预分配内核半区（PML4 下标 256..512）的全部顶级表项，使之后在高半区新增的内核映射
-/// 自动对所有地址空间可见（共享的是下级 PDPT）。消除模块文档所述的「新顶级下标不同步」问题。
+/// 把一个物理帧清零并当作「空的顶级表」使用（自检用：在不触碰活动空间的前提下演练预分配的失败路径）。
+/// Zero `frame` and treat it as an empty top-level table (self-test scratch root).
 ///
 /// # Safety
-/// 必须在创建任何其他地址空间之前、于内核空间中调用一次。
-pub unsafe fn prealloc_kernel_half(phys_offset: u64, frames: &mut dyn FrameAllocator) -> Result<usize, MapError> {
-    let cur = table_at(phys_offset, current().0);
-    let mut n = 0;
+/// `frame` 必须是调用者独占、未被任何页表引用的帧；`phys_offset` 为全物理内存映射偏移。
+pub unsafe fn empty_root(frame: PhysFrame, phys_offset: u64) -> SpaceRoot {
+    table_at(phys_offset, frame.start()).zero();
+    SpaceRoot(frame.start())
+}
+
+/// 预分配 `root` 的内核半区（PML4 下标 256..512）全部顶级表项，使之后在高半区新增的内核映射
+/// 自动对所有地址空间可见（共享的是下级 PDPT）。消除模块文档所述的「新顶级下标不同步」问题。
+///
+/// **全有或全无**：先为所有空表项分配并清零下级表帧（暂存在本地数组里），任一分配失败 ⇒
+/// 归还本次已分配的全部帧并返回错误，`root` 一项都不改；全部成功后才一次性安装。返回新安装的表项数。
+/// All-or-nothing: frames are collected first; on any failure they are all freed and `root` is untouched.
+///
+/// # Safety
+/// `root` 必须是有效的顶级表；若为内核空间，必须在创建任何其他地址空间之前调用。
+pub unsafe fn prealloc_kernel_half(
+    root: SpaceRoot,
+    phys_offset: u64,
+    frames: &mut dyn FrameAllocator,
+) -> Result<usize, MapError> {
+    let pml4 = table_at(phys_offset, root.0);
+    // 第一阶段：只分配，不安装（256 个槽位足够覆盖整个高半区）
+    let mut staged: [Option<PhysFrame>; 256] = [None; 256];
     for i in 256..512 {
-        if cur[i].is_unused() {
-            let f = frames.allocate().map_err(|_| MapError::OutOfFrames)?;
-            table_at(phys_offset, f.start()).zero();
-            cur[i].set_addr(PhysAddr::new(f.start()), PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
+        if !pml4[i].is_unused() {
+            continue;
+        }
+        match frames.allocate() {
+            Ok(f) => {
+                table_at(phys_offset, f.start()).zero();
+                staged[i - 256] = Some(f);
+            }
+            Err(_) => {
+                // 回滚：归还本次分配的全部帧，顶级表保持原样
+                for f in staged.iter().flatten() {
+                    let _ = frames.deallocate(*f);
+                }
+                return Err(MapError::OutOfFrames);
+            }
+        }
+    }
+    // 第二阶段：一次性安装（不会再失败）
+    let mut n = 0;
+    for (k, f) in staged.iter().enumerate() {
+        if let Some(f) = f {
+            pml4[256 + k].set_addr(PhysAddr::new(f.start()), PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
             n += 1;
         }
     }
     Ok(n)
+}
+
+/// 统计 `root` 内核半区里已使用的顶级表项数（自检用）。
+/// Count used top-level entries in the kernel half of `root` (self-test).
+///
+/// # Safety
+/// `root` 必须是有效的顶级表。
+pub unsafe fn kernel_half_used(root: SpaceRoot, phys_offset: u64) -> usize {
+    let pml4 = table_at(phys_offset, root.0);
+    (256..512).filter(|&i| !pml4[i].is_unused()).count()
 }
 
 /// 切换到 `root`（写 CR3，隐式刷新非全局 TLB 项）。

@@ -129,6 +129,8 @@ pub enum RingError {
     Busy,
     /// 请求号不存在或已执行完毕（不能再取消）。
     NotFound,
+    /// 请求号已用尽（不回绕复用旧请求号）。
+    IdsExhausted,
 }
 
 impl RingError {
@@ -137,6 +139,7 @@ impl RingError {
         match self {
             RingError::Busy => "system.async.error.busy",
             RingError::NotFound => "system.async.error.not_found",
+            RingError::IdsExhausted => "system.async.error.ids_exhausted",
         }
     }
 }
@@ -207,7 +210,7 @@ impl<'buf, B: IoBackend, const SQ: usize, const CQ: usize> Ring<'buf, B, SQ, CQ>
         if self.sq.is_full() || self.sq.len() + self.cq.len() >= CQ {
             return Err(RingError::Busy);
         }
-        let id = self.ids.allocate();
+        let id = self.ids.allocate().ok_or(RingError::IdsExhausted)?;
         self.sq.push(Pending { id, req }).map_err(|_| RingError::Busy)?;
         Ok(id)
     }

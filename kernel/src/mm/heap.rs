@@ -13,7 +13,7 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 
-use kernel_core::frame::FRAME_SIZE;
+use kernel_core::frame::{PhysFrame, FRAME_SIZE};
 use kernel_core::heap::LinkedListHeap;
 use kernel_core::paging::{MapFlags, VirtPage};
 
@@ -40,7 +40,7 @@ static HEAP: IrqSpinLock<HeapState> =
 /// 增长失败的原因（诊断用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrowError {
-    /// 超出预留的虚拟区间。
+    /// 超出预留的虚拟区间，或容量计算溢出。
     LimitReached,
     /// 没有空闲物理帧。
     OutOfFrames,
@@ -48,27 +48,96 @@ pub enum GrowError {
     MapFailed,
 }
 
-/// 至少增长 `bytes` 字节（向上取整到页与 [`GROW_STEP`]）。调用者已持有堆锁。
-fn grow(state: &mut HeapState, bytes: u64) -> Result<(), GrowError> {
-    let want = bytes.max(GROW_STEP).div_ceil(FRAME_SIZE) * FRAME_SIZE;
-    let start = state.mapped_end;
-    if start + want > HEAP_START + HEAP_MAX {
+/// 扩容所需的页帧与映射操作（Strategy）：真实路径用全局页帧服务 + 内核映射；
+/// 验收用例可包一层，在第 k 页注入分配或映射失败，以验证回滚。
+/// Frame and mapping operations used while growing; tests wrap it to inject failures.
+pub trait GrowEnv {
+    /// 分配一个物理帧。
+    fn alloc(&mut self) -> Result<PhysFrame, GrowError>;
+    /// 把 `page` 映射到 `frame`（内核可写）。
+    fn map(&mut self, page: VirtPage, frame: PhysFrame) -> Result<(), GrowError>;
+    /// 取消映射并返回原帧。
+    fn unmap(&mut self, page: VirtPage) -> Option<PhysFrame>;
+    /// 归还物理帧。
+    fn free(&mut self, frame: PhysFrame);
+}
+
+/// 真实环境：全局页帧服务 + 内核地址空间映射。
+pub struct KernelGrowEnv;
+
+impl GrowEnv for KernelGrowEnv {
+    fn alloc(&mut self) -> Result<PhysFrame, GrowError> {
+        frame::allocate().map_err(|_| GrowError::OutOfFrames)
+    }
+    fn map(&mut self, page: VirtPage, f: PhysFrame) -> Result<(), GrowError> {
+        map::map(page, f, MapFlags::WRITE | MapFlags::GLOBAL).map_err(|_| GrowError::MapFailed)
+    }
+    fn unmap(&mut self, page: VirtPage) -> Option<PhysFrame> {
+        map::unmap(page).ok()
+    }
+    fn free(&mut self, f: PhysFrame) {
+        let _ = frame::deallocate(f);
+    }
+}
+
+/// 事务式扩容：在 `[*mapped_end, window_end)` 内至少增长 `bytes` 字节（向上取整到页与 [`GROW_STEP`]）。
+///
+/// 资源所有权：本次映射的页在**全部成功之前**归本函数所有（记在 `done` 计数里）；
+/// 任一页分配或映射失败 ⇒ 按相反顺序取消映射、归还帧，`*mapped_end` 与 `heap` 都保持调用前的样子。
+/// 全部成功后才一次性推进 `*mapped_end` 并把整段交给 `heap`——不存在「已映射但无人管理」的页。
+/// 所有容量与地址计算都用检查式算术，溢出视为 [`GrowError::LimitReached`]。
+/// Transactional growth: either the whole range is mapped and handed to the heap, or nothing changes.
+pub fn grow_in(
+    heap: &mut LinkedListHeap,
+    mapped_end: &mut u64,
+    window_end: u64,
+    bytes: u64,
+    env: &mut dyn GrowEnv,
+) -> Result<u64, GrowError> {
+    let want = bytes.max(GROW_STEP).checked_next_multiple_of(FRAME_SIZE).ok_or(GrowError::LimitReached)?;
+    let start = *mapped_end;
+    let end = start.checked_add(want).ok_or(GrowError::LimitReached)?;
+    if end > window_end {
         return Err(GrowError::LimitReached);
     }
     let mut va = start;
-    while va < start + want {
-        let f = frame::allocate().map_err(|_| GrowError::OutOfFrames)?;
+    let mut failure = None;
+    while va < end {
         let page = VirtPage::containing(va);
-        if map::map(page, f, MapFlags::WRITE | MapFlags::GLOBAL).is_err() {
-            let _ = frame::deallocate(f);
-            return Err(GrowError::MapFailed);
+        match env.alloc() {
+            Ok(f) => {
+                if let Err(e) = env.map(page, f) {
+                    env.free(f);
+                    failure = Some(e);
+                    break;
+                }
+            }
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
         }
         va += FRAME_SIZE;
-        state.mapped_end = va;
     }
-    // SAFETY：[start, mapped_end) 刚映射为可写、仅由堆使用，且与已有区间首尾相接（会被合并）。
-    unsafe { state.heap.extend(start as usize, (state.mapped_end - start) as usize) };
-    Ok(())
+    if let Some(e) = failure {
+        // 回滚：逆序取消本次已映射的页并归还其帧（中间页表帧保留在页表结构中，供后续复用）
+        while va > start {
+            va -= FRAME_SIZE;
+            if let Some(f) = env.unmap(VirtPage::containing(va)) {
+                env.free(f);
+            }
+        }
+        return Err(e);
+    }
+    *mapped_end = end;
+    // SAFETY：[start, end) 刚映射为可写、仅由堆使用，且与已有区间首尾相接（会被合并）。
+    unsafe { heap.extend(start as usize, (end - start) as usize) };
+    Ok(want)
+}
+
+/// 至少增长 `bytes` 字节（调用者已持有堆锁）。
+fn grow(state: &mut HeapState, bytes: u64) -> Result<(), GrowError> {
+    grow_in(&mut state.heap, &mut state.mapped_end, HEAP_START + HEAP_MAX, bytes, &mut KernelGrowEnv).map(|_| ())
 }
 
 /// 初始化堆：映射首批页。需在页帧与映射服务就绪之后调用。

@@ -53,7 +53,10 @@ impl Checker {
 fn exercise_objects(c: &Checker) {
     let om = ObjectManager::new();
     let mut table: HandleTable<ObjectRef, 8> = HandleTable::new();
-    let ev = om.create(ObjectType::Event);
+    let Ok(ev) = om.create(ObjectType::Event) else {
+        c.check(false, "object: 对象 ID 用尽");
+        return;
+    };
     let rights = Rights::WAIT.union(Rights::CONTROL);
     let Ok(h) = table.put(ev, rights) else {
         return c.check(false, "object: put");
@@ -80,7 +83,11 @@ fn exercise_objects(c: &Checker) {
 
     // 关闭后复用：槽位被新对象占用，旧句柄值必须无效。
     c.check(table.remove(h).is_ok(), "object: remove");
-    let reused = table.put(om.create(ObjectType::Timer), Rights::WAIT);
+    let Ok(timer) = om.create(ObjectType::Timer) else {
+        c.check(false, "object: 对象 ID 用尽");
+        return;
+    };
+    let reused = table.put(timer, Rights::WAIT);
     let stale = table.get(h).map(|_| ());
     c.check(stale == Err(HandleError::Invalid), "object: 关闭后复用被拒");
     c.check(reused.is_ok_and(|n| n != h), "object: 新句柄值不同于旧值");

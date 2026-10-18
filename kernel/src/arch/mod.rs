@@ -162,6 +162,18 @@ pub trait Platform {
     /// 同 [`Platform::active_mapper`]；`root` 必须有效。
     unsafe fn space_mapper(root: Self::SpaceRoot, phys_offset: u64) -> Self::Mapper;
 
+    /// 只读查询任意地址空间（不必是活动的）中 `va` 所在页的映射与**有效**权限。
+    /// 实现不得为该空间构造可修改页表的映射器或可变引用（避免与其属主形成可变别名）。
+    /// Read-only translation in any space; must not alias the owner's mutable mapper.
+    ///
+    /// # Safety
+    /// `root` 必须有效，调用期间其页表不被并发修改。
+    unsafe fn translate_in(
+        root: Self::SpaceRoot,
+        phys_offset: u64,
+        va: u64,
+    ) -> Option<(kernel_core::frame::PhysFrame, kernel_core::paging::MapFlags)>;
+
     /// 切换到 `root`。
     ///
     /// # Safety
@@ -174,14 +186,31 @@ pub trait Platform {
     /// `root` 不能是活动空间，且此后不得再使用。
     unsafe fn destroy_space(root: Self::SpaceRoot, phys_offset: u64, frames: &mut dyn kernel_core::frame::FrameAllocator);
 
-    /// 预分配内核共享部分的全部顶级表项，使之后新增的内核映射对所有地址空间可见。
+    /// 预分配 `root` 中内核共享部分的全部顶级表项，使之后新增的内核映射对所有地址空间可见。
+    /// 必须**全有或全无**：失败时 `root` 不被修改，本次分配的帧全部归还。返回新安装的表项数。
+    /// Pre-populate the shared kernel part of `root`; all-or-nothing.
     ///
     /// # Safety
-    /// 在创建任何其他地址空间之前、于内核空间中调用一次。
+    /// `root` 必须是有效的顶级表；对内核空间须在创建任何其他地址空间之前调用一次。
     unsafe fn prepare_kernel_space(
+        root: Self::SpaceRoot,
         phys_offset: u64,
         frames: &mut dyn kernel_core::frame::FrameAllocator,
     ) -> Result<usize, kernel_core::paging::MapError>;
+
+    /// 把一个独占的物理帧清零并当作空的顶级表（自检用的临时根，不会被激活）。
+    /// Zero an exclusively owned frame and use it as an empty top-level table (self-test scratch root).
+    ///
+    /// # Safety
+    /// `frame` 必须由调用者独占且未被任何页表引用。
+    unsafe fn empty_space_root(frame: kernel_core::frame::PhysFrame, phys_offset: u64) -> Self::SpaceRoot;
+
+    /// `root` 内核共享部分已使用的顶级表项数（自检用）。
+    /// Number of used top-level entries in the shared kernel part of `root`.
+    ///
+    /// # Safety
+    /// `root` 必须是有效的顶级表。
+    unsafe fn kernel_part_used(root: Self::SpaceRoot, phys_offset: u64) -> usize;
 
     /// 设置「从用户态进入内核时使用的内核栈顶」（调度器在每次切换任务时调用）。
     fn set_kernel_stack(top: u64);
@@ -304,6 +333,17 @@ pub unsafe fn create_space(
 pub unsafe fn space_mapper(root: SpaceRoot, phys_offset: u64) -> Mapper {
     Current::space_mapper(root, phys_offset)
 }
+/// 见 [`Platform::translate_in`]。
+///
+/// # Safety
+/// 同 [`Platform::translate_in`]。
+pub unsafe fn translate_in(
+    root: SpaceRoot,
+    phys_offset: u64,
+    va: u64,
+) -> Option<(kernel_core::frame::PhysFrame, kernel_core::paging::MapFlags)> {
+    Current::translate_in(root, phys_offset, va)
+}
 /// 见 [`Platform::switch_space`]。
 ///
 /// # Safety
@@ -323,10 +363,25 @@ pub unsafe fn destroy_space(root: SpaceRoot, phys_offset: u64, frames: &mut dyn 
 /// # Safety
 /// 同 [`Platform::prepare_kernel_space`]。
 pub unsafe fn prepare_kernel_space(
+    root: SpaceRoot,
     phys_offset: u64,
     frames: &mut dyn kernel_core::frame::FrameAllocator,
 ) -> Result<usize, kernel_core::paging::MapError> {
-    Current::prepare_kernel_space(phys_offset, frames)
+    Current::prepare_kernel_space(root, phys_offset, frames)
+}
+/// 见 [`Platform::empty_space_root`]。
+///
+/// # Safety
+/// 同 [`Platform::empty_space_root`]。
+pub unsafe fn empty_space_root(frame: kernel_core::frame::PhysFrame, phys_offset: u64) -> SpaceRoot {
+    Current::empty_space_root(frame, phys_offset)
+}
+/// 见 [`Platform::kernel_part_used`]。
+///
+/// # Safety
+/// 同 [`Platform::kernel_part_used`]。
+pub unsafe fn kernel_part_used(root: SpaceRoot, phys_offset: u64) -> usize {
+    Current::kernel_part_used(root, phys_offset)
 }
 /// 见 [`Platform::set_kernel_stack`]。
 pub fn set_kernel_stack(top: u64) {

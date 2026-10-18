@@ -147,3 +147,54 @@ impl PageMapper for X86Mapper {
         Ok(())
     }
 }
+
+/// 只读地查询任意地址空间中 `va` 的 4 KiB 映射：沿 4 级表**按值读取**表项（裸指针 `read_volatile`），
+/// 不构造任何 `&mut PageTable`，因此不会与该空间的属主（`VmSpace` 内的映射器）形成可变别名。
+///
+/// 有效权限按硬件规则合成：「用户可访问」「可写」须每一级都允许；任一级禁止执行即不可执行。
+/// 遇到未映射或大页（本内核不使用大页映射用户内存）返回 `None`。
+/// Read-only page walk by value through raw pointers; never creates `&mut PageTable`.
+///
+/// # Safety
+/// `pml4_phys` 必须是有效的顶级表；`phys_offset` 为全物理内存映射偏移；调用期间该空间的页表不被并发修改。
+pub unsafe fn translate_raw(pml4_phys: u64, phys_offset: u64, va: u64) -> Option<(PhysFrame, MapFlags)> {
+    let va = VirtAddr::try_new(va).ok()?;
+    let idx = [
+        u64::from(va.p4_index()),
+        u64::from(va.p3_index()),
+        u64::from(va.p2_index()),
+        u64::from(va.p1_index()),
+    ];
+    let mut table = pml4_phys;
+    let mut user = true;
+    let mut write = true;
+    let mut nx = false;
+    let mut leaf = PageTableFlags::empty();
+    for (level, &i) in idx.iter().enumerate() {
+        let entry_ptr = (phys_offset + table + i * 8) as *const u64;
+        let raw = core::ptr::read_volatile(entry_ptr);
+        let flags = PageTableFlags::from_bits_truncate(raw);
+        if !flags.contains(PageTableFlags::PRESENT) {
+            return None;
+        }
+        if level < 3 && flags.contains(PageTableFlags::HUGE_PAGE) {
+            return None;
+        }
+        user &= flags.contains(PageTableFlags::USER_ACCESSIBLE);
+        write &= flags.contains(PageTableFlags::WRITABLE);
+        nx |= flags.contains(PageTableFlags::NO_EXECUTE);
+        table = raw & 0x000f_ffff_ffff_f000;
+        leaf = flags;
+    }
+    let mut eff = leaf & !(PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE);
+    if user {
+        eff |= PageTableFlags::USER_ACCESSIBLE;
+    }
+    if write {
+        eff |= PageTableFlags::WRITABLE;
+    }
+    if nx {
+        eff |= PageTableFlags::NO_EXECUTE;
+    }
+    Some((PhysFrame::from_start(table)?, from_x86(eff)))
+}

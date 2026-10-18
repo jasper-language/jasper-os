@@ -58,6 +58,16 @@ impl Segment {
     pub fn file_bytes<'a>(&self, image: &'a [u8]) -> &'a [u8] {
         &image[self.offset as usize..(self.offset + self.filesz) as usize]
     }
+
+    /// 段按页粒度覆盖的虚拟区间 `[lo, hi)`（向下/向上取整到 [`PAGE`]）。
+    /// 全程检查式算术：末端向上取整溢出（段贴近地址空间顶端）时返回 `None`。
+    /// [`parse`] 只接受此值为 `Some` 的段，所以经 [`parse`] 得到的段调用它总是成功。
+    /// Page-granular range `[lo, hi)` with checked arithmetic; `None` on overflow.
+    pub fn page_range(&self) -> Option<(u64, u64)> {
+        let lo = self.vaddr - self.vaddr % PAGE;
+        let hi = self.vaddr.checked_add(self.memsz)?.checked_next_multiple_of(PAGE)?;
+        Some((lo, hi))
+    }
 }
 
 /// 解析结果。
@@ -193,12 +203,11 @@ pub fn parse(image: &[u8], machine: u16) -> Result<ElfImage, ElfError> {
             filesz,
             flags: SegFlags { read: pflags & 4 != 0, write: pflags & 2 != 0, execute: pflags & 1 != 0 },
         };
-        // 按页粒度检查重叠（装载按页映射，同页两段也算冲突）
-        let lo = seg.vaddr - seg.vaddr % PAGE;
-        let hi = (seg.vaddr + seg.memsz).div_ceil(PAGE) * PAGE;
+        // 按页粒度检查重叠（装载按页映射，同页两段也算冲突）；页区间计算溢出 ⇒ 段非法
+        let (lo, hi) = seg.page_range().ok_or(ElfError::BadSegment)?;
         for other in out.segments() {
-            let olo = other.vaddr - other.vaddr % PAGE;
-            let ohi = (other.vaddr + other.memsz).div_ceil(PAGE) * PAGE;
+            // 已接受的段都通过了同样的检查，page_range 不会失败
+            let (olo, ohi) = other.page_range().ok_or(ElfError::BadSegment)?;
             if lo < ohi && olo < hi {
                 return Err(ElfError::Overlap);
             }
@@ -285,5 +294,30 @@ mod tests {
         let entry_in_data = build(&[(PT_LOAD, 0x1000, CODE, 0x100, 0x100, 6)], CODE);
         assert_eq!(parse(&entry_in_data, X86_64).unwrap_err(), ElfError::BadEntry, "入口不在可执行段");
         assert_eq!(ElfError::Dynamic.name(), "system.elf.error.dynamic");
+    }
+
+    #[test]
+    fn rejects_segments_near_address_space_top() {
+        // vaddr + memsz 本身就溢出
+        let wrap = build(&[(PT_LOAD, 0x1000, u64::MAX - 0xfff, 0x10, 0x2000, 5)], u64::MAX - 0xfff);
+        assert_eq!(parse(&wrap, X86_64).unwrap_err(), ElfError::BadSegment, "vaddr+memsz 溢出");
+        // vaddr + memsz 不溢出，但向上取整到页时溢出（末端落在最后一页中间）
+        let round = build(&[(PT_LOAD, 0x1000, u64::MAX - 0xfff, 0x10, 0x800, 5)], u64::MAX - 0xfff);
+        assert_eq!(parse(&round, X86_64).unwrap_err(), ElfError::BadSegment, "页取整溢出");
+        // 恰好结束于最后一个完整页之前：可以表示，应被接受
+        let top = u64::MAX - 0x1fff; // 倒数第二页起点
+        let edge = build(&[(PT_LOAD, 0x1000, top, 0x10, 0x1000, 5)], top);
+        let e = parse(&edge, X86_64).expect("贴近顶端但可表示的段");
+        assert_eq!(e.segments().next().unwrap().page_range(), Some((top, top + 0x1000)));
+    }
+
+    #[test]
+    fn page_range_is_checked() {
+        let f = SegFlags { read: true, write: false, execute: false };
+        let s = |vaddr, memsz| Segment { vaddr, memsz, offset: 0, filesz: 0, flags: f };
+        assert_eq!(s(0x1234, 0x10).page_range(), Some((0x1000, 0x2000)));
+        assert_eq!(s(0x1000, 0x1000).page_range(), Some((0x1000, 0x2000)));
+        assert_eq!(s(u64::MAX - 0xfff, 0x800).page_range(), None);
+        assert_eq!(s(u64::MAX, 1).page_range(), None);
     }
 }

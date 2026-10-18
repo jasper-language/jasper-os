@@ -17,8 +17,8 @@ pub const CAPACITY: usize = 32;
 
 static TRACER: IrqSpinLock<Tracer<CAPACITY>> = IrqSpinLock::new(Tracer::new());
 
-/// 记录一条结构化事件，返回序号。
-pub fn emit(name: &'static str, tags: &[Tag]) -> u64 {
+/// 记录一条结构化事件，返回序号（序号用尽时丢弃事件并返回 `None`）。
+pub fn emit(name: &'static str, tags: &[Tag]) -> Option<u64> {
     TRACER.lock().emit(name, tags)
 }
 

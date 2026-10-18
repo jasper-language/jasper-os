@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{clock, irq, kprintln, mech_demo, mm, sched, user_demo};
+use crate::{clock, fix_demo, irq, kprintln, mech_demo, mm, sched, user_demo};
 
 /// 内核版本（横幅中输出）。
 pub const VERSION: &str = "0.0.1";
@@ -79,8 +79,15 @@ pub fn start(boot: &'static BootSpec) -> ! {
     user_demo::run_lifecycle();
     // M4.2：Handle/Rights（duplicate/restrict 只降权；跨进程原子转移）。
     user_demo::run_handles();
-    if mm::demo::failed() > 0 || user_demo::failed() > 0 {
-        kprintln!("[JSR-EXIT] failure mm_failed={} user_failed={}", mm::demo::failed(), user_demo::failed());
+    // 基础设施修复的回归演练：失败路径与回滚。
+    fix_demo::run();
+    if mm::demo::failed() > 0 || user_demo::failed() > 0 || fix_demo::failed() > 0 {
+        kprintln!(
+            "[JSR-EXIT] failure mm_failed={} user_failed={} fix_failed={}",
+            mm::demo::failed(),
+            user_demo::failed(),
+            fix_demo::failed()
+        );
         arch::exit_emulator(ExitStatus::Failure);
     }
 

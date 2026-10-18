@@ -242,7 +242,11 @@ pub fn run_heap() {
 /// 运行 M2.4 演练：两个地址空间在**同一虚拟地址**映射不同物理帧，真实切换后读到各自的图样；
 /// 内核堆对象在两边都可见（共享）；该地址在内核空间不可见（私有）；销毁后页表帧全部回收。
 pub fn run_space() {
-    space::init();
+    if let Err(e) = space::init() {
+        check(false, "内核空间准备失败");
+        kprintln!("[JSR-SPACE] kernel space not ready: {:?}", e);
+        return;
+    }
     let va = arch::USER_WINDOW.0 + 0x1000_0000;
     let page = VirtPage::containing(va);
     let shared = Box::new(0x5348_4152_4544_u64); // 内核堆对象：两个空间都应能读到
