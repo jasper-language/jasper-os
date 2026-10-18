@@ -27,6 +27,13 @@ use jasper_rt::{entry, heap, mem, println, sys, task, time, Error, Handle, Right
 
 entry!(main);
 
+/// 一个遵守 C 调用约定、返回 42 的函数的机器码（x86_64：`mov eax, 42; ret`）。
+#[cfg(target_arch = "x86_64")]
+const RETURN_42: [u8; 6] = [0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3];
+/// 一个遵守 C 调用约定、返回 42 的函数的机器码（AArch64：`mov w0, #42; ret`，小端序）。
+#[cfg(target_arch = "aarch64")]
+const RETURN_42: [u8; 8] = [0x40, 0x05, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6];
+
 fn main(role: u64, _arg: u64) -> i32 {
     match role {
         0 => match all() {
@@ -127,10 +134,10 @@ fn memory_cases(s: &mut Steps) -> Result<(), u32> {
     s.check(mem::map(base + 8 * page, 1025, mem::WRITE) == Err(Error::MEMORY_INVALID_ADDRESS))?;
     s.check(mem::map(base + 8 * page, u64::MAX / page, mem::WRITE) == Err(Error::MEMORY_INVALID_ADDRESS))?;
 
-    // 改权限：写入一段机器码（x86_64：mov eax, 42; ret），改为可执行后调用；W^X 与空洞被拒
+    // 改权限：写入一段返回 42 的机器码（见 RETURN_42），改为可执行后调用；W^X 与空洞被拒
     let code = base + 2 * page;
     // SAFETY：code 页在上面映射为可写，且只在这里使用。
-    unsafe { core::ptr::copy_nonoverlapping([0xB8u8, 0x2A, 0x00, 0x00, 0x00, 0xC3].as_ptr(), code as *mut u8, 6) };
+    unsafe { core::ptr::copy_nonoverlapping(RETURN_42.as_ptr(), code as *mut u8, RETURN_42.len()) };
     s.check(mem::protect(code, 1, mem::WRITE | mem::EXEC) == Err(Error::INVALID_ARGUMENT))?;
     s.check(mem::protect(code, 3, mem::EXEC) == Err(Error::MEMORY_INVALID_ADDRESS))?; // 第 3 页之后没有映射
     s.check(mem::protect(code, 1, mem::EXEC).is_ok())?;

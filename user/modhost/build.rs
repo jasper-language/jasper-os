@@ -4,8 +4,6 @@
 
 use std::path::PathBuf;
 
-use jaso::Arch;
-
 const MODULES: [(&str, &str); 4] = [("jaso-sha2", "sha2"), ("jaso-crc", "crc"), ("jaso-deflate", "deflate"), ("jaso-net", "net")];
 
 fn main() {
@@ -20,13 +18,14 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=-static");
 
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let arch = jaso::pack::build_target_arch().unwrap_or_else(|e| panic!("{}", e));
     for (package, sub) in MODULES {
         let mdir = root.join("modules").join(sub);
         for f in ["src/main.rs", "Cargo.toml", "build.rs", "jaso.manifest"] {
             println!("cargo:rerun-if-changed={}", mdir.join(f).display());
         }
         // 各模块共用一个独立的 target 目录（依次构建，不并发）
-        let bytes = jaso::pack::build_module(&root, package, &mdir, &out.join("module-target"), Arch::X86_64).unwrap_or_else(|e| panic!("{}", e));
+        let bytes = jaso::pack::build_module(&root, package, &mdir, &out.join("module-target"), arch).unwrap_or_else(|e| panic!("{}", e));
         std::fs::write(out.join(format!("{}.jaso", sub)), bytes).expect("写入失败");
     }
 }

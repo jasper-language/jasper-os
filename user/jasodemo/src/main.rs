@@ -22,7 +22,7 @@ use jasper_rt::{entry, io, mem, println, Error};
 entry!(main);
 
 static DEMO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo.jaso"));
-static DEMO_AARCH64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-aarch64.jaso"));
+static DEMO_OTHER_ARCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-otherarch.jaso"));
 static DEMO_BOOT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-boot.jaso"));
 static DEMO_NOINIT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-noinit.jaso"));
 static DEMO_MORECAPS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-morecaps.jaso"));
@@ -170,7 +170,7 @@ fn run(s: &mut Steps) -> Result<(), u32> {
     s.check(r_tamper == Some(LoadError::Format(jaso_err::DigestMismatch)))?;
     let r_trunc = Module::load(&DEMO[..DEMO.len() - 1], grant()).err();
     s.check(r_trunc == Some(LoadError::Format(jaso_err::LengthMismatch)))?;
-    let r_arch = Module::load(DEMO_AARCH64, grant()).err();
+    let r_arch = Module::load(DEMO_OTHER_ARCH, grant()).err();
     s.check(matches!(r_arch, Some(LoadError::WrongArch(_))))?;
     let r_stage = Module::load(DEMO_BOOT, grant()).err();
     s.check(matches!(r_stage, Some(LoadError::WrongStage(_))))?;

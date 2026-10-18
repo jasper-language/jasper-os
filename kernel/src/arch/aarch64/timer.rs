@@ -26,13 +26,19 @@ pub fn interrupt() -> Option<u32> {
     }
 }
 
+/// CNTKCTL_EL1.EL0VCTEN：EL0 读 `cntvct_el0` 不陷入。
+const CNTKCTL_EL0VCTEN: u64 = 1 << 1;
+
 /// 以 `hz` 的频率开始产生周期中断（中断是否送达由 GIC 与 PSTATE 决定）。
 pub fn init(hz: u32) {
     let freq = read_sysreg!("cntfrq_el0");
     let interval = (freq / u64::from(hz.max(1))).max(1);
     INTERVAL.store(interval, Ordering::Relaxed);
     // SAFETY：只配置本处理器的虚拟定时器：先装倒计时值，再使能且不屏蔽其中断输出。
+    // CNTKCTL_EL1 只置 EL0VCTEN：用户态可读虚拟计数器（与 x86_64 用户态可读时间戳计数器对等），
+    // 但不能访问任何定时器的控制与比较寄存器，也不能读物理计数器。
     unsafe {
+        write_sysreg!("cntkctl_el1", CNTKCTL_EL0VCTEN);
         write_sysreg!("cntv_tval_el0", interval);
         write_sysreg!("cntv_ctl_el0", 1u64);
     }

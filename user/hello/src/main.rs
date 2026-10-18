@@ -23,6 +23,7 @@ static mut ZEROED: [u8; 8192] = [0; 8192];
 ///
 /// # Safety
 /// 参数必须符合该调用的约定（指针须指向本进程内存）。
+#[cfg(target_arch = "x86_64")]
 unsafe fn syscall2(id: u64, a: u64, b: u64) -> i64 {
     let ret: i64;
     asm!(
@@ -32,6 +33,23 @@ unsafe fn syscall2(id: u64, a: u64, b: u64) -> i64 {
         in("rsi") b,
         lateout("rcx") _,
         lateout("r11") _,
+        options(nostack)
+    );
+    ret
+}
+
+/// 发起系统调用（AArch64：x8=ID，x0/x1=参数，`svc #0`；返回值在 x0，其余寄存器由内核保留）。
+///
+/// # Safety
+/// 参数必须符合该调用的约定（指针须指向本进程内存）。
+#[cfg(target_arch = "aarch64")]
+unsafe fn syscall2(id: u64, a: u64, b: u64) -> i64 {
+    let ret: i64;
+    asm!(
+        "svc #0",
+        in("x8") id,
+        inlateout("x0") a as i64 => ret,
+        in("x1") b,
         options(nostack)
     );
     ret

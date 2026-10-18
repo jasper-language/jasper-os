@@ -42,3 +42,7 @@
 # Backend selection for user-space dependencies: no SIMD state is saved yet, so force pure-software paths.
 [target.x86_64-unknown-none]
 rustflags = ["--cfg", "sha2_backend=\"soft\""]
+
+# AArch64 用户程序与模块用软浮点目标（同样不使用浮点 / SIMD 寄存器）；sha2 在该目标上也只走纯软件后端。
+[target.aarch64-unknown-none-softfloat]
+rustflags = ["--cfg", "sha2_backend=\"soft\""]

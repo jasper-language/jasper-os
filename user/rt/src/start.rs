@@ -12,6 +12,7 @@ use core::panic::PanicInfo;
 
 use crate::{mem, sys, task};
 
+#[cfg(target_arch = "x86_64")]
 core::arch::global_asm!(
     ".pushsection .text._start,\"ax\"",
     ".global _start",
@@ -19,6 +20,20 @@ core::arch::global_asm!(
     "    and rsp, -16",
     "    call {start}",
     "    ud2",
+    ".popsection",
+    start = sym rt_start,
+);
+
+// AArch64：参数已在 x0/x1；sp 必须 16 字节对齐（页对齐的栈顶天然满足，这里仍显式对齐）。
+#[cfg(target_arch = "aarch64")]
+core::arch::global_asm!(
+    ".pushsection .text._start,\"ax\"",
+    ".global _start",
+    "_start:",
+    "    mov x9, sp",
+    "    and sp, x9, #-16",
+    "    bl {start}",
+    "    udf #0",
     ".popsection",
     start = sym rt_start,
 );
@@ -39,18 +54,43 @@ extern "C" fn rt_start(a: u64, b: u64) -> ! {
     }
     // SAFETY：[base, MAIN_STACK_TOP) 刚映射为可写、只归主线程使用；栈顶 16 字节对齐，call 之后满足调用约定。
     // 旧栈此后不再使用（run_main 不返回）。
-    unsafe {
-        core::arch::asm!(
-            "mov rsp, {top}",
-            "call {main}",
-            "ud2",
-            top = in(reg) sys::MAIN_STACK_TOP,
-            main = sym run_main,
-            in("rdi") a,
-            in("rsi") b,
-            options(noreturn)
-        )
-    }
+    unsafe { switch_stack(a, b) }
+}
+
+/// 切到主线程栈并调用 `run_main(a, b)`（不返回）。
+///
+/// # Safety
+/// [`sys::MAIN_STACK_TOP`] 之下的主线程栈必须已映射为可写且只归主线程使用。
+#[cfg(target_arch = "x86_64")]
+unsafe fn switch_stack(a: u64, b: u64) -> ! {
+    core::arch::asm!(
+        "mov rsp, {top}",
+        "call {main}",
+        "ud2",
+        top = in(reg) sys::MAIN_STACK_TOP,
+        main = sym run_main,
+        in("rdi") a,
+        in("rsi") b,
+        options(noreturn)
+    )
+}
+
+/// 切到主线程栈并调用 `run_main(a, b)`（不返回）。
+///
+/// # Safety
+/// [`sys::MAIN_STACK_TOP`] 之下的主线程栈必须已映射为可写且只归主线程使用。
+#[cfg(target_arch = "aarch64")]
+unsafe fn switch_stack(a: u64, b: u64) -> ! {
+    core::arch::asm!(
+        "mov sp, {top}",
+        "bl {main}",
+        "udf #0",
+        top = in(reg) sys::MAIN_STACK_TOP,
+        main = sym run_main,
+        in("x0") a,
+        in("x1") b,
+        options(noreturn)
+    )
 }
 
 extern "C" fn run_main(a: u64, b: u64) -> ! {

@@ -3,7 +3,7 @@
 //!
 //! | role | 行为 | 预期 |
 //! |---|---|---|
-//! | 0 | 读当前代码段选择子证明运行在特权级 3，输出问候后正常退出 | 退出码 0 |
+//! | 0 | 证明运行在非特权级（x86_64 读代码段选择子 = 3；AArch64 见 `privilege`），输出问候后正常退出 | 退出码 0 |
 //! | 1 | 读内核地址 `arg` | 该进程被终止（故障），内核继续运行 |
 //! | 2 | 执行特权指令 | 该进程被终止 |
 //! | 3 | 执行无效指令（用户态异常） | 该进程被终止 |
@@ -33,6 +33,7 @@ const INVALID_ADDRESS: i64 = -(ids::SYSTEM_MEMORY_ERROR_INVALID_ADDRESS as i64);
 ///
 /// # Safety
 /// 参数必须符合该调用的约定。
+#[cfg(target_arch = "x86_64")]
 unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
     let ret: i64;
     asm!(
@@ -43,6 +44,24 @@ unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
         in("rdx") c,
         lateout("rcx") _,
         lateout("r11") _,
+        options(nostack)
+    );
+    ret
+}
+
+/// 发起系统调用（AArch64：x8=ID，x0/x1/x2=参数，`svc #0`；返回值在 x0，其余寄存器由内核保留）。
+///
+/// # Safety
+/// 参数必须符合该调用的约定（指针须指向本进程内存）。
+#[cfg(target_arch = "aarch64")]
+unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
+    let ret: i64;
+    asm!(
+        "svc #0",
+        in("x8") id,
+        inlateout("x0") a as i64 => ret,
+        in("x1") b,
+            in("x2") c,
         options(nostack)
     );
     ret
@@ -149,12 +168,25 @@ fn spawn_blocker(slot: usize, arg: u64) -> i64 {
     unsafe { syscall3(ids::SYSTEM_TASK_SPAWN, blocker as usize as u64, top, arg) }
 }
 
-/// 当前特权级（代码段选择子的低两位）。
-fn cpl() -> u16 {
+/// 当前特权级的名字与取值，以及它是否为非特权级。
+///
+/// x86_64：代码段选择子的低两位（3 = 用户态）。
+#[cfg(target_arch = "x86_64")]
+fn privilege() -> (&'static str, u16, bool) {
     let cs: u16;
     // SAFETY：只读段寄存器。
     unsafe { asm!("mov {0:x}, cs", out(reg) cs, options(nomem, nostack, preserves_flags)) };
-    cs & 3
+    ("cpl", cs & 3, cs & 3 == 3)
+}
+
+/// 当前特权级的名字与取值，以及它是否为非特权级。
+///
+/// AArch64：EL0 读不到 `CurrentEL`（读它本身就是无效指令，见 role 2/3 的同类验证），因此这里不读寄存器，
+/// 而以结构性事实为证：本程序的输出只能经 `svc` 送出，内核只把来自 EL0 的 `svc` 当作系统调用分发
+/// （EL1 发出的 `svc` 走当前特权级的向量并被当作致命错误）。问候文本出现在控制台上即证明运行在 EL0。
+#[cfg(target_arch = "aarch64")]
+fn privilege() -> (&'static str, u16, bool) {
+    ("el", 0, true)
 }
 
 /// 提交并收取；返回（参数块的输出，第一条被接受提交的请求 ID）。
@@ -182,9 +214,9 @@ fn enter(ring: i64, sq: &[Sqe], cq: &mut [Cqe], wait_min: u32) -> (EnterArgs, u6
 pub extern "C" fn _start(role: u64, arg: u64) -> ! {
     match role {
         0 => {
-            let level = cpl();
-            say!("hello cpl={}", level);
-            exit(if level == 3 { 0 } else { 2 })
+            let (name, level, user) = privilege();
+            say!("hello {}={}", name, level);
+            exit(if user { 0 } else { 2 })
         }
         1 => {
             say!("reading kernel address");
@@ -196,14 +228,21 @@ pub extern "C" fn _start(role: u64, arg: u64) -> ! {
         2 => {
             say!("executing privileged instruction");
             // SAFETY：故意执行特权指令，预期在此处被终止。
+            // x86_64：hlt（#GP）；AArch64：改写中断屏蔽位（SCTLR_EL1.UMA = 0 ⇒ EL0 执行即陷入）
+            #[cfg(target_arch = "x86_64")]
             unsafe { asm!("hlt", options(nomem, nostack)) };
+            #[cfg(target_arch = "aarch64")]
+            unsafe { asm!("msr daifset, #2", options(nomem, nostack)) };
             say!("LEAK privileged instruction executed");
             exit(3)
         }
         3 => {
             say!("executing invalid instruction");
             // SAFETY：故意触发无效指令异常，预期在此处被终止。
+            #[cfg(target_arch = "x86_64")]
             unsafe { asm!("ud2", options(nomem, nostack)) };
+            #[cfg(target_arch = "aarch64")]
+            unsafe { asm!("udf #0", options(nomem, nostack)) };
             exit(3)
         }
         4 => {

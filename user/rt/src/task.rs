@@ -102,7 +102,8 @@ fn stack_of(slot: u32) -> (u64, u64) {
 
 type Job = Box<dyn FnOnce() -> u64 + Send + 'static>;
 
-// 线程入口：内核以 (参数, 0) 进入，此时栈顶按页对齐；先对齐到 16 字节再 call，满足 SysV 调用约定。
+// 线程入口：内核以 (参数, 0) 进入，此时栈顶按页对齐；先对齐到 16 字节再调用，满足各指令集的调用约定。
+#[cfg(target_arch = "x86_64")]
 core::arch::global_asm!(
     ".pushsection .text.jsr_rt_thread_entry,\"ax\"",
     ".global jsr_rt_thread_entry",
@@ -110,6 +111,19 @@ core::arch::global_asm!(
     "    and rsp, -16",
     "    call {main}",
     "    ud2",
+    ".popsection",
+    main = sym thread_main,
+);
+
+#[cfg(target_arch = "aarch64")]
+core::arch::global_asm!(
+    ".pushsection .text.jsr_rt_thread_entry,\"ax\"",
+    ".global jsr_rt_thread_entry",
+    "jsr_rt_thread_entry:",
+    "    mov x9, sp",
+    "    and sp, x9, #-16",
+    "    bl {main}",
+    "    udf #0",
     ".popsection",
     main = sym thread_main,
 );

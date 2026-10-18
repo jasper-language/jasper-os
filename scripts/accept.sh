@@ -116,7 +116,7 @@ QEMU_A64="$(command -v qemu-system-aarch64 || true)"
 SERIAL_A64="$OUT/serial-aarch64.log"
 A64_ELF="$ROOT/target/aarch64-unknown-none-softfloat/release/jasper-kernel"
 QRC_A64=-1
-run cargo build --release --target aarch64-unknown-none-softfloat -p jasper-kernel --no-default-features "${KFEAT[@]}" > "$OUT/build-aarch64.log" 2>&1
+run cargo build --release --target aarch64-unknown-none-softfloat -p jasper-kernel "${KFEAT[@]}" > "$OUT/build-aarch64.log" 2>&1
 A64_BUILD_RC=$?
 if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ]; then
   echo "== QEMU 真实启动（AArch64）=="
@@ -389,7 +389,7 @@ check_m44() {   # IPC Channel：用户程序（单进程语义 + 跨进程往返
 }
 
 check_m51() {   # 最小非特权程序：特权级 3；读内核内存只杀该进程；特权/无效指令；坏指针被拒；多线程终止 + 父进程等待；内核内阻塞时终止；回到基线
-  if has '^\[JSR-USERTEXT\] task=prog-hello bytes=[0-9]+ text=prog: hello cpl=3' \
+  if has '^\[JSR-USERTEXT\] task=prog-hello bytes=[0-9]+ text=prog: hello (cpl=3|el=0)' \
      && has '^\[JSR-PROG\] exit=0 ring3=true' \
      && has 'case=kernel_read exit=Some\(-1\) bystander_exit=Some\(0\) only_offender_killed=true reclaimed=true' \
      && has 'case=privileged_instruction exit=Some\(-1\) expect=-1 reclaimed=true' \
@@ -450,7 +450,7 @@ check_j3() {    # 最小 .jaso：格式宿主测试；memory.protect（W^X、全
      && has 'text=jasodemo: loaded name=jaso-demo base=0x[0-9a-f]+ pages=[0-9]+ sum_ok=true relocated_greeting=true counter=2 host_alloc=1/1' \
      && has 'text=jasodemo: two_instances bases=0x[0-9a-f]+,0x[0-9a-f]+ independent_data=true' \
      && has 'text=jasodemo: unload unmapped=true slot_reused=true fresh_state=true' \
-     && has 'text=jasodemo: rejected tamper=Some\(Format\(DigestMismatch\)\) truncated=Some\(Format\(LengthMismatch\)\) arch=Some\(WrongArch\(Aarch64\)\) stage=Some\(WrongStage\(Boot\)\) caps=Some\(MissingCapability\("system\.console\.write"\)\) host=Some\(HostRequired\) init=Some\(MissingInit\)' \
+     && has 'text=jasodemo: rejected tamper=Some\(Format\(DigestMismatch\)\) truncated=Some\(Format\(LengthMismatch\)\) arch=Some\(WrongArch\((Aarch64|X86_64)\)\) stage=Some\(WrongStage\(Boot\)\) caps=Some\(MissingCapability\("system\.console\.write"\)\) host=Some\(HostRequired\) init=Some\(MissingInit\)' \
      && has 'text=jasodemo: ok checks=[0-9]+' \
      && has 'case=jasodemo exit=Some\(0\) expect=0 reclaimed=true'; then
     record J-3 PASS "格式宿主测试 $(grep -oE '[0-9]+ passed' "$OUT/jaso-test.log" | head -1)；W^X 改权限；.jaso 装入/重定位/设权限/初始化/调用导出、两实例数据独立、卸载后映射消失；篡改/截断/指令集/阶段/能力/宿主表/初始化入口均被拒；回到基线"
@@ -594,30 +594,53 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
-check_isa1a() { # AArch64 移植第一阶段：同一组内核侧检查在 qemu-system-aarch64 的串口日志上逐项重跑（行名带 A64/ 前缀）
-  local saved_serial="$SERIAL" saved_qrc="$QRC" before=${#ROWS[@]} i bad=0 n
-  if [ "$A64_BUILD_RC" -ne 0 ] || [ -z "$QEMU_A64" ] || [ ! -s "$SERIAL_A64" ]; then
-    record ISA1a FAIL "AArch64 构建 rc=$A64_BUILD_RC 或缺少 qemu-system-aarch64 / 串口日志（见 build-aarch64.log）"
-    return
-  fi
+# a64_rerun <检查函数…>：在 AArch64 串口日志上逐项重跑给定检查（行名带 A64/ 前缀）；输出「行数 失败数」。
+a64_rerun() {
+  local saved_serial="$SERIAL" saved_qrc="$QRC" before=${#ROWS[@]} i bad=0 c
   SERIAL="$SERIAL_A64"; QRC="$QRC_A64"; REC_PREFIX="A64/"; KPART=128
-  check_m11; check_m12; check_m13; check_m14; check_m15; check_m21; check_m22; check_m23; check_m24
-  check_m31; check_m32; check_m33; check_m34; check_m42; check_fix; check_sched2
+  for c in "$@"; do "$c"; done
   SERIAL="$saved_serial"; QRC="$saved_qrc"; REC_PREFIX=""; unset KPART
-  n=$(( ${#ROWS[@]} - before ))
   for (( i = before; i < ${#ROWS[@]}; i++ )); do
     [[ "${ROWS[$i]}" == *" PASS "* ]] || bad=$((bad + 1))
   done
-  if [ "$bad" -eq 0 ] && grep -qE '^\[JSR-BOOT\] jasper-os rust kernel [0-9.]+ aarch64' "$SERIAL_A64" \
-     && grep -q '^\[JSR-VEC\] ok' "$SERIAL_A64" \
-     && grep -q '^\[JSR-STAGE\] user_programs=absent ' "$SERIAL_A64"; then
-    record ISA1a PASS "AArch64（QEMU virt，QEMU=$QRC_A64）：$n 项内核侧检查全部通过（启动/异常/时钟/调度/抢占/机制/页帧/映射/堆/地址空间/EL0/系统调用/用户指针/进程/句柄/回滚/优先级继承）；内嵌用户程序的演练待下一阶段"
+  A64_N=$(( ${#ROWS[@]} - before )); A64_BAD=$bad
+}
+
+a64_ready() { [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ] && [ -s "$SERIAL_A64" ]; }
+
+check_isa1a() { # AArch64 移植第一阶段：内核侧检查在 qemu-system-aarch64 的串口日志上逐项重跑（行名带 A64/ 前缀）
+  if ! a64_ready; then
+    record ISA1a FAIL "AArch64 构建 rc=$A64_BUILD_RC 或缺少 qemu-system-aarch64 / 串口日志（见 build-aarch64.log）"
+    return
+  fi
+  a64_rerun check_m11 check_m12 check_m13 check_m14 check_m15 check_m21 check_m22 check_m23 check_m24 \
+            check_m31 check_m32 check_m33 check_m34 check_m42 check_fix check_sched2
+  if [ "$A64_BAD" -eq 0 ] && grep -qE '^\[JSR-BOOT\] jasper-os rust kernel [0-9.]+ aarch64' "$SERIAL_A64" \
+     && grep -q '^\[JSR-VEC\] ok' "$SERIAL_A64"; then
+    record ISA1a PASS "AArch64（QEMU virt，QEMU=$QRC_A64）：$A64_N 项内核侧检查全部通过（启动/异常/时钟/调度/抢占/机制/页帧/映射/堆/地址空间/EL0/系统调用/用户指针/进程/句柄/回滚/优先级继承）"
   else
-    record ISA1a FAIL "AArch64：$n 项中 $bad 项失败，或缺少横幅 / 向量表 / 阶段标记（见 serial-aarch64.log）"
+    record ISA1a FAIL "AArch64：$A64_N 项中 $A64_BAD 项失败，或缺少横幅 / 向量表标记（见 serial-aarch64.log）"
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a
+check_isa1b() { # AArch64 移植第二阶段：内嵌用户程序（独立 Rust 程序、ring / IPC、jasper-rt、.jaso 装载执行）的全部检查在 AArch64 上逐项重跑
+  if ! a64_ready; then
+    record ISA1b FAIL "AArch64 构建 rc=$A64_BUILD_RC 或缺少 qemu-system-aarch64 / 串口日志（见 build-aarch64.log）"
+    return
+  fi
+  a64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_j1 check_j2 check_j3 check_j4 \
+            check_sched1 check_sched3 check_t1 check_t2
+  local progs
+  progs=$(grep -cE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_A64" || true)
+  if [ "$A64_BAD" -eq 0 ] && ! grep -q '^\[JSR-STAGE\] user_programs=absent' "$SERIAL_A64" \
+     && grep -q '^\[JSR-EXIT\] success' "$SERIAL_A64" && [ "$QRC_A64" -eq 33 ]; then
+    record ISA1b PASS "AArch64（QEMU=$QRC_A64）：内嵌用户程序以 AArch64 构建，$A64_N 项用户态检查全部通过（ELF/生命周期/异步环/IPC/非特权程序/jasper-rt/Rust 库/.jaso 装载与库模块/QoS/过载防护/配置/基准），创建进程 $progs 次"
+  else
+    record ISA1b FAIL "AArch64：$A64_N 项中 $A64_BAD 项失败、未内嵌用户程序或未成功退出（见 serial-aarch64.log）"
+  fi
+}
+
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

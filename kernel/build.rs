@@ -6,7 +6,7 @@
 //! * 登记表格式错误、ID 重复、名字重复、名字违反命名约定（`kernel_core::abi::validate`）
 //! * 已冻结（`abi/system-ids.lock`）的条目被删除、改号、改名或改种类（`kernel_core::abi::check_frozen`）
 //!
-//! 另外（特性 `user-programs` 开启时）构建内嵌的用户程序（目前只有 x86_64 版本），产物以 `include_bytes!` 装进内核镜像；
+//! 另外（特性 `user-programs` 开启时）以内核的目标指令集构建内嵌的用户程序，产物以 `include_bytes!` 装进内核镜像；
 //! 目标为 AArch64 时为内核二进制指定链接脚本（没有引导器，装载地址与段布局由脚本固定）。
 
 use std::fmt::Write as _;
@@ -104,21 +104,33 @@ fn build_user_programs(root: &std::path::Path) {
     println!("cargo:rerun-if-changed={}", root.join("kernel-core/src/bench.rs").display());
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let target_dir = out_dir.join("user-target");
+    let triple = user_triple();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let mut cmd = std::process::Command::new(cargo);
     cmd.current_dir(root)
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_TARGET_DIR")
-        .args(["build", "--release", "--target", "x86_64-unknown-none"]);
+        .args(["build", "--release", "--target", triple]);
     for (_, pkg, _) in PROGRAMS {
         cmd.args(["-p", pkg]);
     }
     let status = cmd.arg("--target-dir").arg(&target_dir).status().expect("无法启动 cargo 构建用户程序");
     assert!(status.success(), "用户程序构建失败");
     for (_, pkg, env) in PROGRAMS {
-        let elf = target_dir.join("x86_64-unknown-none/release").join(pkg);
+        let elf = target_dir.join(triple).join("release").join(pkg);
         assert!(elf.exists(), "找不到用户程序产物 {}", elf.display());
         println!("cargo:rustc-env={}={}", env, elf.display());
+    }
+}
+
+/// 用户程序的目标三元组：与内核相同的指令集。AArch64 用软浮点目标——内核不保存浮点 / SIMD 寄存器，
+/// 并让用户态的任何浮点 / SIMD 访问陷入。
+/// The user-program target triple (same ISA as the kernel).
+fn user_triple() -> &'static str {
+    match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("x86_64") => "x86_64-unknown-none",
+        Ok("aarch64") => "aarch64-unknown-none-softfloat",
+        other => panic!("内嵌用户程序尚不支持该指令集：{:?}", other),
     }
 }

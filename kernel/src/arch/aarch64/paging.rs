@@ -172,10 +172,19 @@ impl A64Mapper {
     fn table(&self) -> A64Table {
         PageTable::new(self.root, self.tables)
     }
+
+    /// 可执行映射生效前同步该帧的指令缓存：内核经全物理内存映射写入的代码（ELF 段、复制的机器码、
+    /// 用户程序改为可执行的页）必须先对取指可见，AArch64 不保证数据写入与取指自动一致。
+    fn sync_if_executable(&self, frame: PhysFrame, flags: MapFlags) {
+        if flags.contains(MapFlags::EXECUTE) {
+            cpu::sync_icache(self.tables.offset + frame.start(), kernel_core::frame::FRAME_SIZE);
+        }
+    }
 }
 
 impl PageMapper for A64Mapper {
     fn map(&mut self, page: VirtPage, frame: PhysFrame, flags: MapFlags, frames: &mut dyn FrameAllocator) -> Result<(), MapError> {
+        self.sync_if_executable(frame, flags);
         self.table().map(page.start(), frame, flags, frames)?;
         // 无效 → 有效不需要作废 TLB，只需让表写入对遍历可见
         cpu::table_write_barrier();
@@ -193,6 +202,9 @@ impl PageMapper for A64Mapper {
     }
 
     fn protect(&mut self, page: VirtPage, flags: MapFlags) -> Result<(), MapError> {
+        if let Some((frame, _)) = self.table().translate(page.start()) {
+            self.sync_if_executable(frame, flags);
+        }
         self.table().protect(page.start(), flags)?;
         cpu::tlb_flush_page(page.start());
         Ok(())

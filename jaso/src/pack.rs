@@ -258,12 +258,36 @@ pub fn from_elf(elf: &[u8], manifest: &str, arch: Arch, stage: Stage) -> Result<
 }
 
 /// 指令集 → 裸机目标三元组。
+///
+/// AArch64 用软浮点目标：内核不在上下文切换时保存浮点 / SIMD 寄存器，并让它们的任何访问陷入，
+/// 模块因此不得生成使用这些寄存器的代码（与内嵌用户程序、内核本身一致）。
 pub fn target_triple(a: Arch) -> &'static str {
     match a {
         Arch::X86_64 => "x86_64-unknown-none",
-        Arch::Aarch64 => "aarch64-unknown-none",
+        Arch::Aarch64 => "aarch64-unknown-none-softfloat",
         Arch::Riscv64 => "riscv64gc-unknown-none-elf",
         Arch::Riscv32 => "riscv32imac-unknown-none-elf",
+    }
+}
+
+/// 构建脚本所针对的指令集（读 cargo 传给构建脚本的 `CARGO_CFG_TARGET_ARCH`）；不在支持之列或不在构建脚本中时返回原因。
+/// The ISA a build script is building for.
+pub fn build_target_arch() -> Result<Arch, String> {
+    let name = std::env::var("CARGO_CFG_TARGET_ARCH").map_err(|_| String::from("不在构建脚本中：缺少 CARGO_CFG_TARGET_ARCH"))?;
+    Arch::from_name(&name).ok_or_else(|| alloc::format!("不支持的指令集：{}", name))
+}
+
+/// 位置无关映像所需的额外编译参数。
+///
+/// x86_64 裸机目标默认就是位置无关的，不需要额外参数。AArch64 / RISC-V 裸机目标默认是静态重定位模型：
+/// * `-Crelocation-model=pic`：本工作区编译的代码按位置无关生成；
+/// * `-znotext`：工具链预编译的 `core` / `alloc` 不是位置无关的，其只读数据里有绝对地址；允许链接器把它们
+///   变成「基址 + 加数」重定位留在只读段里。这与格式的约定一致：装载器在设置最终段权限之前完成重定位，
+///   而 `.jaso` 校验拒绝任何落在可执行段内的重定位（代码里若出现绝对地址，打包即失败）。
+fn pic_rustflags(a: Arch) -> Option<&'static str> {
+    match a {
+        Arch::X86_64 => None,
+        Arch::Aarch64 | Arch::Riscv64 | Arch::Riscv32 => Some("\"-Crelocation-model=pic\", \"-Clink-arg=-znotext\""),
     }
 }
 
@@ -280,11 +304,13 @@ pub fn build_module(
 ) -> Result<Vec<u8>, String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let triple = target_triple(arch);
-    let status = std::process::Command::new(cargo)
-        .current_dir(workspace)
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_TARGET_DIR")
+    let mut cmd = std::process::Command::new(cargo);
+    cmd.current_dir(workspace).env_remove("CARGO_ENCODED_RUSTFLAGS").env_remove("RUSTFLAGS").env_remove("CARGO_TARGET_DIR");
+    if let Some(flags) = pic_rustflags(arch) {
+        // 以 `--config` 追加，不覆盖工作区配置里为该目标写的其它编译参数
+        cmd.arg("--config").arg(alloc::format!("target.{}.rustflags=[{}]", triple, flags));
+    }
+    let status = cmd
         .args(["build", "--release", "--target", triple, "-p", package, "--target-dir"])
         .arg(target_dir)
         .status()
@@ -296,4 +322,32 @@ pub fn build_module(
     let elf = std::fs::read(&elf_path).map_err(|e| alloc::format!("读取 {} 失败：{}", elf_path.display(), e))?;
     let manifest = std::fs::read_to_string(dir.join("jaso.manifest")).map_err(|e| alloc::format!("读取清单失败：{}", e))?;
     from_elf(&elf, &manifest, arch, Stage::Runtime).map_err(|e| alloc::format!("打包 {} 失败：{:?}", package, e))
+}
+
+#[cfg(test)]
+mod pack_target_tests {
+    use super::*;
+
+    #[test]
+    fn triples_and_pic_flags_per_arch() {
+        // AArch64 必须是软浮点目标；只有非 x86_64 需要额外的位置无关参数
+        assert_eq!(target_triple(Arch::Aarch64), "aarch64-unknown-none-softfloat");
+        assert_eq!(target_triple(Arch::X86_64), "x86_64-unknown-none");
+        assert_eq!(pic_rustflags(Arch::X86_64), None);
+        for a in [Arch::Aarch64, Arch::Riscv64, Arch::Riscv32] {
+            let f = pic_rustflags(a).unwrap();
+            assert!(f.contains("relocation-model=pic") && f.contains("-znotext"), "{:?}", a);
+        }
+    }
+
+    #[test]
+    fn build_target_arch_reads_cargo_cfg_and_rejects_unknown() {
+        // 本测试是唯一读写该变量的测试，顺序执行三种情形
+        std::env::set_var("CARGO_CFG_TARGET_ARCH", "aarch64");
+        assert_eq!(build_target_arch(), Ok(Arch::Aarch64));
+        std::env::set_var("CARGO_CFG_TARGET_ARCH", "mips");
+        assert!(build_target_arch().unwrap_err().contains("mips"));
+        std::env::remove_var("CARGO_CFG_TARGET_ARCH");
+        assert!(build_target_arch().is_err());
+    }
 }

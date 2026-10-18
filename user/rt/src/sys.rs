@@ -38,8 +38,44 @@ mod imp {
     pub const WINDOW_BASE: u64 = 0x1000_0000_0000;
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-compile_error!("jasper-rt 目前只实现了 x86_64 的系统调用与地址布局；其它指令集随内核移植加入");
+#[cfg(target_arch = "aarch64")]
+mod imp {
+    use core::arch::asm;
+
+    /// 发起系统调用（AArch64：x8 = 调用号，x0/x1/x2 = 参数，`svc #0`；返回值在 x0，其余寄存器由内核保留）。
+    ///
+    /// # Safety
+    /// 参数必须符合该调用的约定：作为指针传入的值须指向本进程内、在调用期间有效的内存。
+    #[inline]
+    pub unsafe fn call3(id: u64, a: u64, b: u64, c: u64) -> i64 {
+        let ret: i64;
+        asm!(
+            "svc #0",
+            in("x8") id,
+            inlateout("x0") a as i64 => ret,
+            in("x1") b,
+            in("x2") c,
+            options(nostack)
+        );
+        ret
+    }
+
+    /// 读取周期计数器（AArch64：虚拟计数器 `cntvct_el0`，内核允许用户态读取）。单调递增，频率固定，
+    /// 单位须由调用者自行校准。
+    #[inline]
+    pub fn cycles() -> u64 {
+        let v: u64;
+        // SAFETY：读虚拟计数器没有副作用；isb 保证读取不被提前到之前的指令之前。
+        unsafe { asm!("isb", "mrs {}, cntvct_el0", out(reg) v, options(nomem, nostack, preserves_flags)) };
+        v
+    }
+
+    /// 本进程私有窗口的起点（AArch64：TTBR0 顶级表项 32 起，与 x86_64 相同的 `0x1000_0000_0000`）。
+    pub const WINDOW_BASE: u64 = 0x1000_0000_0000;
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!("jasper-rt 目前只实现了 x86_64 与 AArch64 的系统调用与地址布局；其它指令集随内核移植加入");
 
 pub use imp::{call3, cycles, WINDOW_BASE};
 

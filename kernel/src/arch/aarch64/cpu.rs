@@ -81,3 +81,21 @@ pub fn tlb_flush_all() {
     // SAFETY：只作废 TLB 缓存项。
     unsafe { core::arch::asm!("dsb ishst", "tlbi vmalle1", "dsb ish", "isb", options(nostack, preserves_flags)) };
 }
+
+/// 让 `[va, va + len)` 中刚写入的指令对取指可见：逐缓存行把数据缓存清到统一点（`dc cvau`），
+/// 再作废全部指令缓存（广播到内部共享域）。`va` 可以是该内存的任意别名（例如全物理内存映射）：
+/// 数据缓存按物理地址维护，指令缓存整体作废，因此与用户态看到的虚拟地址无关。
+/// Makes freshly written instructions in `[va, va + len)` visible to instruction fetch.
+#[inline]
+pub fn sync_icache(va: u64, len: u64) {
+    // CTR_EL0.DminLine（位 19:16）= log2(数据缓存最小行的字数)
+    let line = 4u64 << ((read_sysreg!("ctr_el0") >> 16) & 0xf);
+    let mut p = va & !(line - 1);
+    while p < va + len {
+        // SAFETY：只把缓存行写回统一点，不改变内存内容。
+        unsafe { core::arch::asm!("dc cvau, {}", in(reg) p, options(nostack, preserves_flags)) };
+        p += line;
+    }
+    // SAFETY：屏障与指令缓存作废没有副作用（之后取指重新从统一点读取）。
+    unsafe { core::arch::asm!("dsb ish", "ic ialluis", "dsb ish", "isb", options(nostack, preserves_flags)) };
+}
