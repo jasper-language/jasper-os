@@ -35,10 +35,16 @@ static PENDING: Mutex<PendingQueue> =
 /// 中断上下文入口：由 arch 中断处理程序在 **EOI 之后**调用。
 ///
 /// 先入队再通知调度器：调度器可能在这里切走当前任务，入队必须在那之前完成。
-pub fn on_hardware_irq(line: IrqLine) {
+///
+/// `from_user`：中断是否打断了用户态代码。是 ⇒ 这里也是一个调度点：所属进程已在 exiting 时，
+/// 被打断的线程就地停止（与用户态故障一样，从中断上下文经线程退出路径结束，不再返回用户态）。
+pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
     enqueue(line);
     if line == IrqLine::Timer {
         sched::on_timer_interrupt();
+    }
+    if from_user && crate::proc::current_exiting() {
+        crate::proc::thread_exit(0, "killed");
     }
 }
 

@@ -123,6 +123,9 @@ fn has_handler(id: u32) -> bool {
             | SYSTEM_CHANNEL_CREATE
             | SYSTEM_CHANNEL_SEND
             | SYSTEM_CHANNEL_RECV
+            | SYSTEM_PROCESS_EXIT
+            | SYSTEM_TASK_WAIT
+            | SYSTEM_PROCESS_WAIT
     )
 }
 
@@ -149,6 +152,10 @@ fn error_name(ret: i64) -> &'static str {
 /// 系统调用入口（arch 调用；可能不返回——`system.task.exit` 会结束当前任务）。
 pub fn on_syscall(a: &SyscallArgs) -> i64 {
     CALLS.fetch_add(1, Ordering::Relaxed);
+    // 调度点：所属进程已在 exiting ⇒ 本线程不再执行任何系统调用，直接停止
+    if proc::current_exiting() {
+        proc::thread_exit(0, "killed");
+    }
     let (task_id, task_name) = sched::current();
     let Some(e) = op(a.id) else {
         let ret = err(SYSTEM_ERROR_UNSUPPORTED);
@@ -163,6 +170,10 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
     kprintln!("[JSR-SYSCALL] enter name={} id={} task={} effects={}", e.name, e.id, task_name, e.effects.as_str());
     let ret = execute(e, a, task_id.0);
     kprintln!("[JSR-SYSCALL] exit name={} id={} ret={} status={}", e.name, e.id, ret, error_name(ret));
+    // 出口调度点：调用期间所属进程进入了 exiting（例如阻塞等待被终止打断）⇒ 不再返回用户态
+    if proc::current_exiting() {
+        proc::thread_exit(0, "killed");
+    }
     ret
 }
 
@@ -228,6 +239,15 @@ fn task_spawn(entry: u64, stack: u64, arg: u64) -> i64 {
     }
 }
 
+/// `system.process.exit(code)`：发起本进程终止（exiting），然后结束调用线程（不返回）。
+/// 其余线程在各自的下一个调度点停止；最后一个线程停止时进程进入 exited，退出码为 `code`。
+fn process_exit(code: u64) -> i64 {
+    if let Some(pid) = proc::current_process() {
+        proc::begin_exit(pid, code as i64);
+    }
+    proc::thread_exit(code as i64, "process.exit")
+}
+
 /// `system.time.wait(ticks)` 的同步形式：让出处理器直到时钟前进 `ticks` 个 tick，返回 0。
 /// 同一操作也可经异步环提交（可被取消）；同步形式没有取消路径。
 fn time_wait(ticks: u64) -> i64 {
@@ -235,7 +255,9 @@ fn time_wait(ticks: u64) -> i64 {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     };
     while sched::timer_ticks() < deadline {
-        sched::pause();
+        if proc::block_step().is_err() {
+            return err(SYSTEM_ASYNC_ERROR_CANCELLED);
+        }
     }
     0
 }
@@ -286,6 +308,9 @@ fn execute(e: &AbiEntry, a: &SyscallArgs, task_id: u64) -> i64 {
         SYSTEM_CHANNEL_CREATE => crate::ipc::sys_create(a.args[0]),
         SYSTEM_CHANNEL_SEND => crate::ipc::sys_send(a.args[0], a.args[1]),
         SYSTEM_CHANNEL_RECV => crate::ipc::sys_recv(a.args[0], a.args[1]),
+        SYSTEM_PROCESS_EXIT => process_exit(a.args[0]),
+        SYSTEM_TASK_WAIT => crate::ring::sys_wait(a.args[0], kernel_core::object::ObjectType::Task),
+        SYSTEM_PROCESS_WAIT => crate::ring::sys_wait(a.args[0], kernel_core::object::ObjectType::Process),
         _ => err(SYSTEM_ERROR_UNSUPPORTED),
     }
 }

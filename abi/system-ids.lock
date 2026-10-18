@@ -32,3 +32,6 @@
 4112	error	system.channel.error.peer_closed	1	none	对端已关闭
 4113	error	system.channel.error.queue_full	1	none	消息队列已满
 4114	error	system.channel.error.buffer_too_small	1	none	接收缓冲区不足
+16	op	system.process.exit	1	irreversible	进程·退出（终止全部线程）
+17	op	system.task.wait	1	read	任务·等待退出
+18	op	system.process.wait	1	read	进程·等待退出

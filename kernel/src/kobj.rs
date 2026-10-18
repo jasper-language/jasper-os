@@ -33,6 +33,8 @@ pub struct TaskObj {
     pub task: TaskId,
     /// 所属进程（弱回指，不计引用）。
     pub process: ObjId,
+    /// 本线程的退出状态（持有一个内部引用）。
+    pub exit_state: ObjId,
 }
 
 /// 内核对象表的具体类型（供需要在同一把锁内操作多个对象的模块使用）。
@@ -53,6 +55,8 @@ pub enum KObject {
     Ring(Box<crate::ring::RingObj>),
     /// Channel 端点（v1 不可传递；句柄不带 TRANSFER）。
     Endpoint(Box<crate::ipc::Endpoint>),
+    /// 退出状态（强引用图最底层，无强引用出边）。
+    ExitState(crate::exit_state::ExitState),
 }
 
 impl KObject {
@@ -64,6 +68,7 @@ impl KObject {
             KObject::Event { .. } => "Event",
             KObject::Ring(_) => "Ring",
             KObject::Endpoint(_) => "Endpoint",
+            KObject::ExitState(_) => "ExitState",
         }
     }
 }
@@ -134,7 +139,10 @@ pub fn run_cleanup(limit: usize) -> usize {
             KObject::Process(p) => crate::proc::destroy(p),
             KObject::Ring(r) => crate::ring::destroy(r),
             KObject::Endpoint(e) => crate::ipc::destroy(e),
-            KObject::Task(_) | KObject::Event { .. } => {}
+            KObject::Task(task) => {
+                let _ = release_internal(task.exit_state); // 线程 → 退出状态
+            }
+            KObject::Event { .. } | KObject::ExitState(_) => {}
         }
         n += 1;
     }

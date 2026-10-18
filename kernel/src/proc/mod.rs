@@ -41,6 +41,12 @@ pub const HANDLES_PER_PROCESS: usize = 64;
 pub enum ProcState {
     /// 至少有一个线程存活。
     Running,
+    /// 已发起终止（`system.process.exit` 或故障）：句柄表与子进程表已关闭，之后的提交原子失败；
+    /// 其余线程在下一个调度点（系统调用入口、从用户态被时钟中断时）停止。退出码已确定。
+    Exiting {
+        /// 退出码。
+        code: i64,
+    },
     /// 最后一个线程已停止。
     Exited {
         /// 退出码（最后停止的线程给出；故障终止记为 -1）。
@@ -60,6 +66,10 @@ pub struct Process {
     syscalls: SyscallSet,
     /// 资源配额记账（Ring、在飞请求、Channel 端点）。
     ring_quota: ResourceQuota,
+    /// 本进程的退出状态（持有一个内部引用）。
+    exit_state: ObjId,
+    /// 子进程表：每项持有子进程的一个内部引用（父 → 子单向）；本进程退出时释放。
+    children: Vec<ObjId>,
     threads_live: u32,
     threads_total: u32,
     state: ProcState,
@@ -139,6 +149,7 @@ pub struct ExitInfo {
 /// 新建进程（还没有线程）。调用者获得一份外部所有权，最终须经 [`reap`] 释放。
 pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcError> {
     let space = VmSpace::new().map_err(ProcError::Map)?;
+    let exit_state = kobj::with(crate::exit_state::create_in).ok_or(ProcError::NoTaskSlot)?;
     let p = Box::new(Process {
         name,
         space,
@@ -147,11 +158,19 @@ pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcErr
         threads: Vec::new(),
         syscalls,
         ring_quota: ResourceQuota::default(),
+        exit_state,
+        children: Vec::new(),
         threads_live: 0,
         threads_total: 0,
         state: ProcState::Running,
     });
-    let id = kobj::insert(KObject::Process(p), 1, 0).map_err(|_| ProcError::NoTaskSlot)?;
+    let id = match kobj::insert(KObject::Process(p), 1, 0) {
+        Ok(id) => id,
+        Err(_) => {
+            let _ = kobj::release_internal(exit_state); // 回滚：退出状态随之死亡
+            return Err(ProcError::NoTaskSlot);
+        }
+    };
     kprintln!("[JSR-PROC] event=system.process.created id={:#x} name={}", id.raw(), name);
     Ok(id)
 }
@@ -355,7 +374,16 @@ pub fn spawn_thread(
         .and_then(|n| n.checked_add(1000))
         .map(TaskId)
         .ok_or(ProcError::NoTaskSlot)?;
-    let task_obj = kobj::insert(KObject::Task(TaskObj { task, process: id }), 0, 2).map_err(|_| ProcError::NoTaskSlot)?;
+    let task_obj = kobj::with(|t| {
+        let es = crate::exit_state::create_in(t).ok_or(ProcError::NoTaskSlot)?;
+        match t.insert(KObject::Task(TaskObj { task, process: id, exit_state: es }), 0, 2) {
+            Ok(obj) => Ok(obj),
+            Err(_) => {
+                let _ = t.release_internal(es); // 回滚：退出状态随之死亡
+                Err(ProcError::NoTaskSlot)
+            }
+        }
+    })?;
     {
         let mut reg = REG.lock();
         reg.starts.push(ThreadStart { task, entry, stack, arg0, arg1 });
@@ -652,22 +680,140 @@ pub fn registry_len() -> (usize, usize) {
 /// 让一个没有线程的进程进入 exited（关闭其句柄表）；有线程存活时不做任何事并返回 `false`。
 pub fn exit_idle(pid: ObjId, code: i64) -> bool {
     kobj::with(|t| {
-        let mut closed: Vec<ObjectRef> = Vec::new();
-        let ok = match t.get_mut(pid) {
-            Ok(KObject::Process(p)) if p.threads_live == 0 && p.state == ProcState::Running => {
-                p.state = ProcState::Exited { code };
-                p.handles.close_all(|r| closed.push(r));
-                true
-            }
-            _ => false,
-        };
-        for r in closed {
-            if let Some(id) = ObjId::from_raw(r.id.0) {
-                let _ = kobj::release_owner_in(t, id);
-            }
+        let ok = matches!(t.get(pid), Ok(KObject::Process(p)) if p.threads_live == 0 && p.state == ProcState::Running);
+        if ok {
+            release_resources_in(t, pid);
+            finish_exit_in(t, pid, code);
         }
         ok
     })
+}
+
+/// 关闭进程的句柄表并释放其子进程表（exiting 或 exited 时；只做一次，之后两表为空）。返回关闭的句柄数。
+fn release_resources_in(t: &mut kobj::Table, pid: ObjId) -> usize {
+    let mut closed: Vec<ObjectRef> = Vec::new();
+    let mut children = Vec::new();
+    let n = match t.get_mut(pid) {
+        Ok(KObject::Process(p)) => {
+            children = core::mem::take(&mut p.children);
+            p.handles.close_all(|r| closed.push(r))
+        }
+        _ => 0,
+    };
+    for r in closed {
+        if let Some(id) = ObjId::from_raw(r.id.0) {
+            let _ = kobj::release_owner_in(t, id);
+        }
+    }
+    for c in children {
+        let _ = t.release_internal(c);
+    }
+    n
+}
+
+/// 进入 exited：确定退出码、写入退出状态并通知等待者（wait 在此刻完成，而不是 exiting 时）。
+fn finish_exit_in(t: &mut kobj::Table, pid: ObjId, code: i64) {
+    let es = match t.get_mut(pid) {
+        Ok(KObject::Process(p)) => {
+            p.state = ProcState::Exited { code };
+            p.exit_state
+        }
+        _ => return,
+    };
+    crate::exit_state::notify_in(t, es, code);
+}
+
+/// 发起进程终止（exiting）：确定退出码，关闭句柄表与子进程表（其后的提交原子失败）；
+/// 其余线程在各自的下一个调度点停止，最后一个线程停止时进入 exited。没有线程的进程直接进入 exited。
+/// 进程不在运行（已在退出）时返回 `false`。
+/// Begins process termination (exiting phase).
+pub fn begin_exit(pid: ObjId, code: i64) -> bool {
+    kobj::with(|t| {
+        let idle = match t.get_mut(pid) {
+            Ok(KObject::Process(p)) if p.state == ProcState::Running => {
+                p.state = ProcState::Exiting { code };
+                p.threads_live == 0
+            }
+            _ => return false,
+        };
+        let n = release_resources_in(t, pid);
+        kprintln!("[JSR-PROC] event=system.process.exiting id={:#x} code={} handles_closed={}", pid.raw(), code, n);
+        if idle {
+            finish_exit_in(t, pid, code);
+        }
+        true
+    })
+}
+
+/// 当前线程所属进程是否处于 exiting（调度点据此停止该线程）。
+pub fn current_exiting() -> bool {
+    let Some(pid) = current_process() else { return false };
+    kobj::with(|t| matches!(t.get(pid), Ok(KObject::Process(p)) if matches!(p.state, ProcState::Exiting { .. })))
+}
+
+/// 阻塞等待被进程终止打断（[`block_step`] 的错误）。
+/// The blocking wait was interrupted because the owning process is exiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Interrupted;
+
+/// 系统调用内阻塞等待的一步：让出处理器并休眠到下一个中断，醒来后检查所属进程是否已在 exiting。
+///
+/// 为什么需要它：线程停在内核里等待时不会经过「系统调用入口 / 从用户态被中断」这两个调度点，
+/// 若等待循环只检查自己的完成条件，`process.exit` 或故障终止就无法让它停止，进程停留在 exiting、资源不回收。
+/// 返回 [`Interrupted`] 时，调用者须**先释放本次等待持有的全部资源**（内部引用、固定、等待登记），
+/// 再以错误返回；系统调用出口会随后经线程退出路径停止该线程（返回值不会到达用户态）。
+/// One step of an in-kernel blocking wait that also observes process termination.
+pub fn block_step() -> Result<(), Interrupted> {
+    sched::pause();
+    if current_exiting() {
+        Err(Interrupted)
+    } else {
+        Ok(())
+    }
+}
+
+/// 父进程收养子进程：子进程表取得子进程的一个内部引用（父 → 子单向）。父进程须仍在运行。
+pub fn adopt(parent: ObjId, child: ObjId) -> Result<(), ProcError> {
+    kobj::with(|t| {
+        receiver(t, parent)?;
+        t.acquire_internal(child).map_err(|_| ProcError::NoSuchProcess)?;
+        if let Ok(KObject::Process(p)) = t.get_mut(parent) {
+            p.children.push(child);
+        }
+        Ok(())
+    })
+}
+
+/// 父进程从子进程表释放一个子进程（例如回收它之后）。不在表中返回 `false`。
+pub fn release_child(parent: ObjId, child: ObjId) -> bool {
+    kobj::with(|t| {
+        let found = match t.get_mut(parent) {
+            Ok(KObject::Process(p)) => match p.children.iter().position(|c| *c == child) {
+                Some(i) => {
+                    p.children.swap_remove(i);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        };
+        if found {
+            let _ = t.release_internal(child);
+        }
+        found
+    })
+}
+
+/// 进程句柄 / 线程句柄所指对象的退出状态（锁内）：句柄须带 WAIT。取得退出状态的一个内部引用后返回。
+pub(crate) fn acquire_exit_state_in(t: &mut kobj::Table, pid: ObjId, h: HandleId, ty: ObjectType) -> Result<ObjId, ProcError> {
+    let obj = resolve_in(t, pid, h, ty, Rights::WAIT)?;
+    let es = match t.get(obj) {
+        Ok(KObject::Process(p)) => p.exit_state,
+        Ok(KObject::Task(task)) => task.exit_state,
+        _ => return Err(ProcError::Handle(HandleError::Invalid)),
+    };
+    t.acquire_internal(es).map_err(|_| ProcError::Handle(HandleError::Invalid))?;
+    Ok(es)
 }
 
 /// 关闭当前进程中的一个句柄：移出句柄表并释放它持有的那份外部所有权（INV-01：不等于销毁对象）。
@@ -700,26 +846,34 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
     };
     if let Some(m) = member {
         let exited = kobj::with(|t| {
-            let mut out = None;
-            let mut closed: Vec<ObjectRef> = Vec::new();
-            if let Ok(KObject::Process(p)) = t.get_mut(m.process) {
-                p.threads_live = p.threads_live.saturating_sub(1);
-                if p.threads_live == 0 {
-                    p.state = ProcState::Exited { code };
-                    let n = p.handles.close_all(|r| closed.push(r));
-                    out = Some((p.name, p.threads_total, n));
-                }
+            // 线程自己的退出状态：写入本线程的退出码
+            if let Ok(KObject::Task(task)) = t.get(m.task_obj) {
+                let es = task.exit_state;
+                crate::exit_state::notify_in(t, es, code);
             }
-            for r in closed {
-                if let Some(id) = ObjId::from_raw(r.id.0) {
-                    let _ = kobj::release_owner_in(t, id);
+            let mut out = None;
+            let last = match t.get_mut(m.process) {
+                Ok(KObject::Process(p)) => {
+                    p.threads_live = p.threads_live.saturating_sub(1);
+                    // exiting 中的进程以发起终止时确定的退出码结束
+                    let final_code = match p.state {
+                        ProcState::Exiting { code: c } => c,
+                        _ => code,
+                    };
+                    (p.threads_live == 0).then_some((final_code, p.name, p.threads_total))
                 }
+                _ => None,
+            };
+            if let Some((final_code, name, threads)) = last {
+                let n = release_resources_in(t, m.process);
+                finish_exit_in(t, m.process, final_code);
+                out = Some((name, threads, n, final_code));
             }
             let _ = t.release_internal(m.task_obj); // 执行上下文 → Task
             let _ = t.release_internal(m.process); // 执行上下文 → Process
             out
         });
-        if let Some((name, threads, handles)) = exited {
+        if let Some((name, threads, handles, code)) = exited {
             kprintln!(
                 "[JSR-PROC] event=system.process.exited id={:#x} name={} code={} threads={} handles_closed={}",
                 m.process.raw(),
@@ -746,7 +900,7 @@ pub fn reap(id: ObjId) -> Option<ExitInfo> {
         let info = match t.get(id) {
             Ok(KObject::Process(p)) => match p.state {
                 ProcState::Exited { code } => ExitInfo { code, threads: p.threads_total, frames: p.frames.len() },
-                ProcState::Running => return None,
+                ProcState::Running | ProcState::Exiting { .. } => return None,
             },
             _ => return None,
         };
@@ -768,7 +922,7 @@ pub fn reap(id: ObjId) -> Option<ExitInfo> {
 /// 正常路径上句柄表在 exited 时已被关闭；这里**不依赖该假设**：仍有残余句柄则逐个释放其外部所有权，
 /// 并输出诊断标记（出现即说明某条路径漏了检查）。
 pub fn destroy(p: Box<Process>) {
-    let Process { space, frames, threads, mut handles, name, .. } = *p;
+    let Process { space, frames, threads, mut handles, name, exit_state, children, .. } = *p;
     let mut residual: Vec<ObjectRef> = Vec::new();
     let n = handles.close_all(|r| residual.push(r));
     if n > 0 {
@@ -787,4 +941,8 @@ pub fn destroy(p: Box<Process>) {
     for t in threads {
         let _ = kobj::release_internal(t); // 线程表 → Task；可能使 Task 死亡并入队（下一轮清理）
     }
+    for c in children {
+        let _ = kobj::release_internal(c); // 防御：子进程表正常应已在退出时释放
+    }
+    let _ = kobj::release_internal(exit_state); // 进程 → 退出状态（在飞 wait 仍可持有它）
 }

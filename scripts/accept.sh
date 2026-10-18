@@ -286,7 +286,7 @@ check_m51pre() { # ELF 装载（M5.1 前置部分）：截断被拒；按段装�
 check_m41() {   # 对象生命周期：关句柄 ⇒ closing 不销毁；重复关闭被拒；线程退出后由线程表保活；reap 只入队；级联迭代清理；回到基线
   if has 'handle closed: became_unowned=true dead=false counts=Ok\(\(0, 2, Closing\)\) double_close=system\.object\.error\.underflow reacquire=system\.object\.error\.invalid' \
      && has 'thread exited: task counts=Ok\(\(0, 1, Closing\)\)' \
-     && has 'cascade: after_reap_pending=1 round1=1 pending=1 round2=1 pending=0 objects_live=([0-9]+)/\1 destroyed\+=2 reclaimed=true' \
+     && has 'cascade: after_reap_pending=1 round1=1 pending=2 round2=3 pending=0 objects_live=([0-9]+)/\1 destroyed\+=4 reclaimed=true' \
      && has '^\[JSR-LIFE\] checks=[0-9]+ failed=0'; then
     record M4.1 PASS "外部所有权/内部引用分离；closing 不销毁；重复关闭被拒；清理队列级联迭代；对象与页帧回到基线"
   else
@@ -350,6 +350,28 @@ check_m44() {   # IPC Channel：用户程序（单进程语义 + 跨进程往返
   fi
 }
 
+check_m51() {   # 最小非特权程序：特权级 3；读内核内存只杀该进程；特权/无效指令；坏指针被拒；多线程终止 + 父进程等待；内核内阻塞时终止；回到基线
+  if has '^\[JSR-USERTEXT\] task=prog-hello bytes=[0-9]+ text=prog: hello cpl=3' \
+     && has '^\[JSR-PROG\] exit=0 ring3=true' \
+     && has 'case=kernel_read exit=Some\(-1\) bystander_exit=Some\(0\) only_offender_killed=true reclaimed=true' \
+     && has 'case=privileged_instruction exit=Some\(-1\) expect=-1 reclaimed=true' \
+     && has 'case=invalid_instruction exit=Some\(-1\) expect=-1 reclaimed=true' \
+     && has 'text=prog: bad_pointer result=-4100' \
+     && has 'case=bad_syscall_pointer exit=Some\(0\) expect=0 reclaimed=true' \
+     && has 'text=prog: parent submitted=2 cancel=0 handle_closed=0 cancelled_wait=true exit_code=9' \
+     && has 'case=process_exit child_exit=Some\(9\) child_threads=Some\(\(0, 2\)\) parent_exit=Some\(0\) reclaimed=true' \
+     && has 'case=blocked_time_wait exit=Some\(7\) expect=7 reclaimed=true' \
+     && has 'case=blocked_recv exit=Some\(7\) expect=7 reclaimed=true' \
+     && has 'case=blocked_ring_enter exit=Some\(7\) expect=7 reclaimed=true' \
+     && has 'case=blocked_task_wait exit=Some\(7\) expect=7 reclaimed=true' \
+     && has '^\[JSR-PROG\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 pending=0 pinned=\(0, 0\) reclaimed=true kernel_alive=true checks=[0-9]+ failed=0' \
+     && ! has 'LEAK'; then
+    record M5.1 PASS "Ring 3 运行并以 0 退出；读内核内存/特权指令/无效指令只终止该进程；坏系统调用指针被拒；多线程进程终止与父进程等待；内核内阻塞时终止；页帧/对象/固定回到基线"
+  else
+    record M5.1 FAIL "缺少 JSR-PROG / user-prog 关键标记、出现 LEAK 或 failed≠0"
+  fi
+}
+
 check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出接收方、堆扩容、内核空间预分配、只读翻译、ID 用尽、线程创建）
   if has 'exited_receiver grant=Some\(Exited\) grant_new=Some\(Exited\) transfer=Some\(Exited\) objects_unchanged=true sender_kept=true reaped_receiver=Some\(NoSuchProcess\)' \
      && has 'heap fail_alloc=Some\(OutOfFrames\) rolled_back=true fail_map=Some\(MapFailed\) rolled_back=true overflow=Some\(LimitReached\) regrow=true reclaimed=true' \
@@ -365,7 +387,7 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_fix
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_fix
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

@@ -86,8 +86,8 @@ extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) {
 ///
 /// 顺序不可颠倒：Core 可能在这里直接抢占、切到别的任务；EOI 若放在后面，
 /// 在切回本任务之前 PIC 不会再投递 IRQ0，整个系统的时钟就停了。
-extern "x86-interrupt" fn timer_interrupt_handler(_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn timer_interrupt_handler(frame: InterruptStackFrame) {
     // SAFETY：当前正在处理的正是定时器向量。
     unsafe { pic::end_of_interrupt(pic::TIMER_VECTOR) };
-    irq::on_hardware_irq(IrqLine::Timer);
+    irq::on_hardware_irq(IrqLine::Timer, from_user(&frame));
 }

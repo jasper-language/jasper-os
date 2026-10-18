@@ -61,7 +61,11 @@ pub fn on_user_fault(fault: UserFault) -> ! {
         fault.ip,
         fault.addr
     );
-    // 经进程层统一出口：故障终止的线程以退出码 -1 计入所属进程。
+    // 用户态故障终止**整个进程**（只杀该进程，内核与其他进程不受影响）：先发起进程终止（退出码 -1，
+    // 其余线程在下一个调度点停止），再经线程退出路径结束本线程。不属于任何进程的探针任务只结束自己。
+    if let Some(pid) = crate::proc::current_process() {
+        crate::proc::begin_exit(pid, -1);
+    }
     crate::proc::thread_exit(-1, "fault")
 }
 

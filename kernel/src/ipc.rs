@@ -472,7 +472,13 @@ pub fn sys_recv(h: u64, desc_ptr: u64) -> i64 {
                 kobj::with(|t| release_target_in(t, target, None));
                 return v;
             }
-            Delivery::Empty => crate::sched::pause(),
+            Delivery::Empty => {
+                // 进程终止打断等待：先撤销目标（解除固定、释放端点引用）再返回
+                if proc::block_step().is_err() {
+                    kobj::with(|t| release_target_in(t, target, None));
+                    return err(SYSTEM_ASYNC_ERROR_CANCELLED);
+                }
+            }
         }
     }
 }

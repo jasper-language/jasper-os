@@ -103,4 +103,4 @@ bash scripts/accept.sh
 
 ## 四、下一步
 
-完整的非特权程序隔离与资源回收验收（M5.1）→ 内核漏洞挖掘、Rust 库打包为 `.jaso` 模块、参数化调优 → AArch64 / RISC-V64 / RISC-V32 移植。每一步都以 QEMU 真实运行为验收依据。
+内核漏洞挖掘（第一轮已完成，待做 QEMU 内系统调用模糊测试）、Rust 库打包为 `.jaso` 模块、参数化调优 → AArch64 / RISC-V64 / RISC-V32 移植。每一步都以 QEMU 真实运行为验收依据。

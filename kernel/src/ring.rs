@@ -77,6 +77,11 @@ enum Backend {
         /// 固定的用户内存（模拟访问缓冲区的请求）。
         pins: Option<PinnedRange>,
     },
+    /// 等待进程 / 线程退出（可中止）：持有目标退出状态的一个内部引用。
+    ExitWait {
+        /// 目标的退出状态。
+        es: ObjId,
+    },
 }
 
 /// 一次提交要做的工作（提交时的可信快照；用户内存已在此之前复制或固定）。
@@ -99,6 +104,11 @@ pub(crate) enum Work {
     },
     /// `system.channel.recv`：目标已建立（缓冲区已固定、端点内部引用已取得）。
     Recv(Box<RecvTarget>),
+    /// `system.task.wait` / `system.process.wait`：已取得目标退出状态的内部引用。
+    ExitWait {
+        /// 目标的退出状态。
+        es: ObjId,
+    },
     /// 内核自检：人工后端；`start = None` 停留在排队状态。
     Manual {
         /// 开始执行时的可中止性。
@@ -180,6 +190,10 @@ fn retire_in(t: &mut Table, ring: ObjId, req: u64, b: Backend) {
     match b {
         Backend::Recv(target) => ipc::release_target_in(t, *target, Some((ring, req))),
         Backend::Manual { pins } => drop(pins),
+        Backend::ExitWait { es } => {
+            crate::exit_state::remove_waiter_in(t, es, (ring, req));
+            let _ = t.release_internal(es);
+        }
         Backend::Wait { .. } => {}
     }
 }
@@ -372,7 +386,10 @@ fn check_sqe(sqe: &Sqe, allowed: SyscallSet) -> Result<(), i64> {
     if sqe.flags != 0 {
         return Err(err(SYSTEM_ERROR_INVALID_ARGUMENT));
     }
-    if !matches!(sqe.op, SYSTEM_TIME_NOW | SYSTEM_TIME_WAIT | SYSTEM_CHANNEL_SEND | SYSTEM_CHANNEL_RECV) {
+    if !matches!(
+        sqe.op,
+        SYSTEM_TIME_NOW | SYSTEM_TIME_WAIT | SYSTEM_CHANNEL_SEND | SYSTEM_CHANNEL_RECV | SYSTEM_TASK_WAIT | SYSTEM_PROCESS_WAIT
+    ) {
         return Err(err(SYSTEM_ERROR_UNSUPPORTED));
     }
     if !allowed.contains(sqe.op as u64) {
@@ -385,9 +402,7 @@ fn check_sqe(sqe: &Sqe, allowed: SyscallSet) -> Result<(), i64> {
 /// 提交被拒时，工作已持有的资源（recv 的固定与端点引用）全部释放。
 fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, work: Work) -> Result<u64, i64> {
     let reject = |t: &mut Table, work: Work, e: i64| {
-        if let Work::Recv(target) = work {
-            ipc::release_target_in(t, *target, None);
-        }
+        release_work_in(t, work);
         Err(e)
     };
     let quota = match proc::ring_quota_in(t, pid) {
@@ -444,6 +459,24 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
                 }
             }
         }
+        Work::ExitWait { es } => {
+            let _ = r.sm.start(id, Exec::Abortable);
+            match crate::exit_state::code_in(t, es) {
+                Some(code) => {
+                    // 目标已退出：立即完成（INV-13）
+                    if let Some(r) = ring_mut(t, ring) {
+                        let _ = r.sm.finish(id, crate::exit_state::report(code));
+                    }
+                    retire_in(t, ring, id, Backend::ExitWait { es });
+                }
+                None => {
+                    crate::exit_state::add_waiter_in(t, es, (ring, id));
+                    if let Some(r) = ring_mut(t, ring) {
+                        r.running.push((id, Backend::ExitWait { es }));
+                    }
+                }
+            }
+        }
         Work::Manual { start, pins } => {
             if let Some(exec) = start {
                 let _ = r.sm.start(id, exec);
@@ -458,15 +491,36 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
     Ok(id)
 }
 
+/// 释放一项未被接受的工作已持有的资源（锁内）。
+fn release_work_in(t: &mut Table, work: Work) {
+    match work {
+        Work::Recv(target) => ipc::release_target_in(t, *target, None),
+        Work::ExitWait { es } => {
+            let _ = t.release_internal(es);
+        }
+        _ => {}
+    }
+}
+
+/// 目标退出时为一个 wait 请求完成（锁内；由退出状态的通知调用）。请求已被取消或已结束则什么也不做。
+pub(crate) fn complete_exit_waiter_in(t: &mut Table, ring: ObjId, req: u64, value: i64) {
+    let Some(r) = ring_mut(t, ring) else { return };
+    if r.sm.decision(req) != Some(None) {
+        return;
+    }
+    let Some(b) = r.take_running(req) else { return };
+    let _ = r.sm.finish(req, value);
+    retire_in(t, ring, req, b);
+    settle_in(t, ring);
+}
+
 /// 以进程 `pid` 的身份经 Ring 句柄 `h` 提交一项工作（内核侧入口；用户态入口见 [`sys_enter`]）。
 pub(crate) fn submit_work_for(pid: ObjId, h: HandleId, op: u32, user_tag: u64, work: Work) -> Result<u64, i64> {
     kobj::with(|t| {
         let ring = match proc::resolve_in(t, pid, h, ObjectType::Ring, Rights::WRITE) {
             Ok(r) => r,
             Err(e) => {
-                if let Work::Recv(target) = work {
-                    ipc::release_target_in(t, *target, None);
-                }
+                release_work_in(t, work);
                 return Err(perr(e));
             }
         };
@@ -490,6 +544,37 @@ pub fn submit_for(pid: ObjId, h: HandleId, sqe: &Sqe) -> Result<u64, i64> {
 pub fn submit_recv_for(pid: ObjId, h: HandleId, endpoint: HandleId, desc_ptr: u64, desc: &MsgDesc) -> Result<u64, i64> {
     let target = kobj::with(|t| ipc::prepare_recv_in(t, pid, endpoint, desc_ptr, desc))?;
     submit_work_for(pid, h, SYSTEM_CHANNEL_RECV, 0, Work::Recv(Box::new(target)))
+}
+
+/// 以进程 `pid` 的身份经 Ring `h` 提交对 `target`（进程或线程句柄，须带 WAIT）的 wait。
+pub fn submit_wait_for(pid: ObjId, h: HandleId, target: HandleId, ty: ObjectType) -> Result<u64, i64> {
+    let es = kobj::with(|t| proc::acquire_exit_state_in(t, pid, target, ty)).map_err(perr)?;
+    let op = if ty == ObjectType::Task { SYSTEM_TASK_WAIT } else { SYSTEM_PROCESS_WAIT };
+    submit_work_for(pid, h, op, 0, Work::ExitWait { es })
+}
+
+/// `system.task.wait(h)` / `system.process.wait(h)` 的同步形式：阻塞到目标退出，返回退出码（32 位无符号）。
+pub fn sys_wait(h: u64, ty: ObjectType) -> i64 {
+    let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
+    let es = match kobj::with(|t| proc::acquire_exit_state_in(t, pid, HandleId::from_raw(h as u32), ty)) {
+        Ok(es) => es,
+        Err(e) => return perr(e),
+    };
+    loop {
+        if let Some(code) = kobj::with(|t| crate::exit_state::code_in(t, es)) {
+            kobj::with(|t| {
+                let _ = t.release_internal(es);
+            });
+            return crate::exit_state::report(code);
+        }
+        // 进程终止打断等待：先释放对退出状态的引用再返回
+        if proc::block_step().is_err() {
+            kobj::with(|t| {
+                let _ = t.release_internal(es);
+            });
+            return err(SYSTEM_ASYNC_ERROR_CANCELLED);
+        }
+    }
 }
 
 /// 内核自检：以进程 `pid` 的身份经 Ring `h` 提交 send（消息体与句柄值由内核给出，相当于阶段 A 已完成）。
@@ -579,6 +664,11 @@ fn prepare_user_work(pid: ObjId, sqe: &Sqe, allowed: SyscallSet) -> Result<Work,
             let (body, handles) = ipc::copy_send_args(sqe.arg1)?;
             Work::Send { endpoint: crate::syscall::handle_arg(sqe.arg0), body, handles }
         }
+        SYSTEM_TASK_WAIT | SYSTEM_PROCESS_WAIT => {
+            let ty = if sqe.op == SYSTEM_TASK_WAIT { ObjectType::Task } else { ObjectType::Process };
+            let es = kobj::with(|t| proc::acquire_exit_state_in(t, pid, HandleId::from_raw(sqe.arg0 as u32), ty)).map_err(perr)?;
+            Work::ExitWait { es }
+        }
         _ => {
             let d = ipc::copy_desc(sqe.arg1)?;
             let target = kobj::with(|t| ipc::prepare_recv_in(t, pid, crate::syscall::handle_arg(sqe.arg0), sqe.arg1, &d))?;
@@ -662,7 +752,12 @@ pub fn sys_enter(h: u64, args_ptr: u64) -> i64 {
             ring_mut(t, ring).map(|r| r.view())
         });
         match state {
-            Some(v) if v.ready < args.wait_min as usize && v.reserved > 0 && !v.closing => sched::pause(),
+            Some(v) if v.ready < args.wait_min as usize && v.reserved > 0 && !v.closing => {
+                // 进程终止打断等待：本循环不持有资源，直接返回（Ring 随句柄表关闭进入 closing）
+                if proc::block_step().is_err() {
+                    return err(SYSTEM_ASYNC_ERROR_CANCELLED);
+                }
+            }
             _ => break,
         }
     }

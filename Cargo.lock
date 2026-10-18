@@ -506,6 +506,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "user-prog"
+version = "0.1.0"
+dependencies = [
+ "kernel-core",
+]
+
+[[package]]
 name = "user-ring"
 version = "0.1.0"
 dependencies = [
