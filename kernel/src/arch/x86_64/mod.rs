@@ -192,4 +192,12 @@ impl Platform for X86_64 {
     fn user_probe(probe: UserProbe) -> &'static [u8] {
         user::probe(probe)
     }
+
+    #[inline(always)]
+    fn cycle_counter() -> u64 {
+        // 时间戳计数器（TSC）：单调递增；不是序列化指令，单次读数可能有几十个周期的乱序误差，
+        // 基准取大量样本的中位数，这点误差可以忽略。
+        // SAFETY：rdtsc 在内核态总是可用，没有副作用。
+        unsafe { core::arch::x86_64::_rdtsc() }
+    }
 }

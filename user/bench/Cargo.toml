@@ -1,0 +1,17 @@
+# user-bench —— 用户态基准程序：系统调用往返、异步环提交→完成、Channel 消息往返（统计口径与内核侧共用 kernel-core 的 bench 模块）。
+# 入口参数 arg = 内核校准得到的每秒周期数（用于把周期换算为纳秒）。
+[package]
+name = "user-bench"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "user-bench"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+jasper-rt = { path = "../rt" }
+kernel-core = { path = "../../kernel-core" }

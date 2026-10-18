@@ -287,7 +287,13 @@ fn program(name: &'static str, image: &[u8], role: u64, expect: i64) {
 /// 主线程栈布局与其它演练相同；`calls` 是授予该进程的系统调用集合。
 /// Loads, runs to completion and reaps an embedded user program.
 pub(crate) fn run_program(name: &'static str, image: &[u8], role: u64, calls: SyscallSet) -> Option<(Option<ProcState>, Option<i64>)> {
-    let (pid, started) = start_program(name, image, role, calls, |_| Ok(()))?;
+    run_program_arg(name, image, role, 0, calls)
+}
+
+/// 同 [`run_program`]，并把 `arg` 作为主线程的第二个入口参数。
+/// Same as [`run_program`], passing `arg` as the main thread's second entry argument.
+pub(crate) fn run_program_arg(name: &'static str, image: &[u8], role: u64, arg: u64, calls: SyscallSet) -> Option<(Option<ProcState>, Option<i64>)> {
+    let (pid, started) = start_program_arg(name, image, role, arg, calls, |_| Ok(()))?;
     if started {
         sched::run();
     }
@@ -304,6 +310,18 @@ pub(crate) fn start_program(
     calls: SyscallSet,
     configure: impl FnOnce(ObjId) -> Result<(), ProcError>,
 ) -> Option<(ObjId, bool)> {
+    start_program_arg(name, image, role, 0, calls, configure)
+}
+
+/// 同 [`start_program`]，并把 `arg` 作为主线程的第二个入口参数。
+fn start_program_arg(
+    name: &'static str,
+    image: &[u8],
+    role: u64,
+    arg: u64,
+    calls: SyscallSet,
+    configure: impl FnOnce(ObjId) -> Result<(), ProcError>,
+) -> Option<(ObjId, bool)> {
     let pid = proc::create(name, calls).ok()?;
     let base = arch::USER_WINDOW.0;
     let started = (|| {
@@ -312,7 +330,7 @@ pub(crate) fn start_program(
             proc::map_new(pid, base + STACK_TOP_OFF - i * FRAME_SIZE, MapFlags::USER | MapFlags::WRITE)?;
         }
         configure(pid)?;
-        proc::spawn_thread(pid, name, entry, base + STACK_TOP_OFF, role, 0)
+        proc::spawn_thread(pid, name, entry, base + STACK_TOP_OFF, role, arg)
     })()
     .is_ok();
     Some((pid, started))

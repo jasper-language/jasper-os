@@ -27,6 +27,13 @@ mod imp {
         ret
     }
 
+    /// 读取周期计数器（x86_64：时间戳计数器，用户态可读）。单调递增，单位须由调用者自行校准。
+    #[inline]
+    pub fn cycles() -> u64 {
+        // SAFETY：rdtsc 没有副作用；内核不禁止用户态读取它。
+        unsafe { core::arch::x86_64::_rdtsc() }
+    }
+
     /// 本进程私有窗口的起点（x86_64：顶级页表项 32 起，即 `0x1000_0000_0000`）。
     pub const WINDOW_BASE: u64 = 0x1000_0000_0000;
 }
@@ -34,7 +41,7 @@ mod imp {
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!("jasper-rt 目前只实现了 x86_64 的系统调用与地址布局；其它指令集随内核移植加入");
 
-pub use imp::{call3, WINDOW_BASE};
+pub use imp::{call3, cycles, WINDOW_BASE};
 
 /// 堆区间：私有窗口起点 + 4 GiB 起，最多 256 MiB（实际可用量受进程帧配额限制）。
 pub const HEAP_BASE: u64 = WINDOW_BASE + 0x1_0000_0000;

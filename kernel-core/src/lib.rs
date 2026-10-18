@@ -2,6 +2,7 @@
 //!
 //! # 职责
 //! 提供与硬件、ISA、引导方式全部无关的内核机制：
+//! * [`bench`]  —— 基准测量的统计（最近秩百分位）、周期计数器校准与按预算的参数取值规则
 //! * [`config`] —— 内核可调参数与构建期配置档（校验 + 逐项列出）
 //! * [`meta`]   —— 接口元数据（名字、版本、所需 Rights、副作用、稳定性、中文显示名）
 //! * [`objtable`] —— 内核对象表：外部所有权与内部引用分开计数、带世代标识、迭代式清理队列（M4.1）
@@ -36,6 +37,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod abi;
+pub mod bench;
 pub mod async_ring;
 pub mod config;
 pub mod elf;

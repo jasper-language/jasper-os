@@ -223,6 +223,10 @@ pub trait Platform {
 
     /// 取某个用户态探针程序的机器码。
     fn user_probe(probe: UserProbe) -> &'static [u8];
+
+    /// 读取单调递增的周期计数器（基准测量用）。单位由平台决定，调用者须以定时器 tick 校准后才能换算成时间。
+    /// Read a monotonically increasing cycle counter; calibrate against timer ticks before converting to time.
+    fn cycle_counter() -> u64;
 }
 
 // ---- Core 使用的薄包装（避免各处 `use Platform` 与冗长的 `<Current as Platform>::`）----
@@ -397,6 +401,11 @@ pub unsafe fn enter_user(entry: u64, stack: u64, arg0: u64, arg1: u64) -> ! {
 /// 见 [`Platform::user_probe`]。
 pub fn user_probe(probe: UserProbe) -> &'static [u8] {
     Current::user_probe(probe)
+}
+/// 见 [`Platform::cycle_counter`]。
+#[inline(always)]
+pub fn cycles() -> u64 {
+    Current::cycle_counter()
 }
 /// 见 [`Platform::exit_emulator`]。
 pub fn exit_emulator(status: ExitStatus) -> ! {

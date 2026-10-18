@@ -527,6 +527,44 @@ check_t1() {    # 内核参数化：配置档宿主测试；启动时输出所�
   fi
 }
 
+check_t2() {    # 基准：宿主统计/取值测试；周期计数器校准；时钟中断/切换/页帧/堆/系统调用/异步环/IPC 各项样本齐全；失败路径被拒无改动；生效参数在开销预算内；回到基线
+  local hz names ok=1 i q gate
+  hz="$(cfg timer_hz)"
+  for t in summary_uses_nearest_rank_and_keeps_buffer full_buffer_rejects_without_changing_samples calibration_converts_and_rejects_zero_inputs \
+           overhead_is_ppm_and_saturates select_picks_bound_by_direction select_reports_none_and_out_of_limit_current select_rejects_invalid_inputs_without_partial_result; do
+    grep -qE "bench::tests::$t \.\.\. ok" "$OUT/cargo-test.log" || ok=0
+  done
+  for names in kernel.timer_irq sched.context_switch frame.alloc frame.free heap.alloc_free_64 heap.alloc_free_4096; do
+    has "^\[JSR-BENCH\] name=$names iters=[1-9][0-9]* min=[0-9]+ p50=[0-9]+ p99=[0-9]+ max=[0-9]+ mean=[0-9]+ unit=cycles p50_ns=[0-9]+ p99_ns=[0-9]+" || ok=0
+  done
+  for names in syscall.roundtrip ring.submit_complete ipc.roundtrip; do
+    has "text=bench: name=$names iters=200 min=[0-9]+ p50=[1-9][0-9]* p99=[0-9]+ max=[0-9]+ mean=[0-9]+ unit=cycles p50_ns=[0-9]+" || ok=0
+  done
+  # 默认档的生效值必须在预算内（gated=true）；其它档只要求测量结论齐全（gated=false，不判成败）
+  case "$PROFILE" in standard) gate='within_limit=true gated=true' ;; *) gate='within_limit=(true|false) gated=false' ;; esac
+  for i in 0 1 2 3; do
+    q="$(cfg "quantum\.$i")"
+    has "^\[JSR-BENCH\] tune param=quantum\.$i current=$q current_ppm=[0-9]+ limit_ppm=10000 $gate prefer=smallest bound=(Some\([0-9]+\)|None)" || ok=0
+  done
+  if [ "$ok" = 1 ] \
+     && has "^\[JSR-BENCH\] calibrate ticks=20 cycles=[1-9][0-9]* cycles_per_tick=[1-9][0-9]* cycles_per_second=[1-9][0-9]* timer_hz=$hz" \
+     && has '^\[JSR-BENCH\] probe span_p50=[0-9]+ span_max=[0-9]+ samples=20 ticks=20 matched=true' \
+     && has '^\[JSR-BENCH\] case=frame_refusal double_free_refused=true free_unchanged=true reclaimed=true' \
+     && has '^\[JSR-BENCH\] case=heap_refusal refused=true heap_unchanged=true reclaimed=true' \
+     && has 'text=bench: user case=ring_refusal refused=true no_completion=true' \
+     && has 'text=bench: user case=ipc_refusal refused=true message_kept=true' \
+     && has 'text=bench: user ok checks=[0-9]+' \
+     && has '^\[JSR-BENCH\] case=user exit=Some\(0\) reclaimed=true' \
+     && has "^\[JSR-BENCH\] tune param=timer_hz current=$hz current_ppm=[0-9]+ limit_ppm=10000 $gate prefer=largest bound=(Some\([0-9]+\)|None)" \
+     && has '^\[JSR-BENCH\] case=tune_refusal invalid_candidate_refused=true' \
+     && has '^\[JSR-BENCH\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0' \
+     && ! has '^\[JSR-BENCH-FAIL\]'; then
+    record T-2 PASS "9 项基准样本齐全（内核 6 + 用户态 3）；时钟中断样本与 tick 一一对应；失败路径被拒无改动；配置档 $PROFILE 的取值结论齐全（默认档 timer_hz 与各档时间片须在 1% 开销预算内）；回到基线"
+  else
+    record T-2 FAIL "缺少 JSR-BENCH 标记、样本不全、失败路径未被拒、生效参数超出预算、宿主测试未通过或未回到基线"
+  fi
+}
+
 check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出接收方、堆扩容、内核空间预分配、只读翻译、ID 用尽、线程创建）
   if has 'exited_receiver grant=Some\(Exited\) grant_new=Some\(Exited\) transfer=Some\(Exited\) objects_unchanged=true sender_kept=true reaped_receiver=Some\(NoSuchProcess\)' \
      && has 'heap fail_alloc=Some\(OutOfFrames\) rolled_back=true fail_map=Some\(MapFailed\) rolled_back=true overflow=Some\(LimitReached\) regrow=true reclaimed=true' \
@@ -542,7 +580,7 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_fix
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {
