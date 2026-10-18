@@ -9,6 +9,7 @@
 //!    异步环（取消、等待线程）、错误名——程序自己逐步检查，以 0 退出
 //! 3. **role 1**：`panic!` ⇒ 运行时输出信息，以 101 终止进程
 //! 4. **role 2**：线程栈溢出触到保护区 ⇒ 页故障终止整个进程（退出码 -1）
+//! 5. **`user/libcheck`**：现有 Rust 库（sha2、crc、miniz_oxide、smoltcp）在运行时之上通过已知答案测试，以 0 退出
 //!
 //! 每个用例结束后检查空闲页帧、存活对象、清理队列、固定帧都回到用例前的基线。
 
@@ -42,6 +43,8 @@ pub fn failed() -> u32 {
 
 /// 运行时验收程序 `user/rtdemo` 的 ELF 镜像（构建期由 `kernel/build.rs` 产出并嵌入）。
 static USER_RTDEMO: &[u8] = include_bytes!(env!("JSR_USER_RTDEMO"));
+/// 库可移植性验收程序 `user/libcheck` 的 ELF 镜像。
+static USER_LIBCHECK: &[u8] = include_bytes!(env!("JSR_USER_LIBCHECK"));
 
 /// 主线程栈顶相对私有窗口起点的偏移与页数（与其它演练相同的布局）。
 const STACK_TOP_OFF: u64 = 0xC0_0000;
@@ -99,9 +102,10 @@ pub fn run() {
     sched::set_preemption(true);
     let start = baseline();
     memory_kernel_side();
-    program("rt-main", 0, 0);
-    program("rt-panic", 1, 101);
-    program("rt-overflow", 2, FAULT_CODE);
+    program("rt-main", USER_RTDEMO, 0, 0);
+    program("rt-panic", USER_RTDEMO, 1, 101);
+    program("rt-overflow", USER_RTDEMO, 2, FAULT_CODE);
+    program("libcheck", USER_LIBCHECK, 0, 0);
     let end = baseline();
     check(end == start, "演练结束后资源未回到起点");
     sched::set_preemption(false);
@@ -226,8 +230,8 @@ fn memory_kernel_side() {
     kprintln!("[JSR-RT] memory exited_refused={:?} reclaimed={}", after_exit, after == before);
 }
 
-/// 装载 `user/rtdemo` 并以 `role` 运行到结束，检查退出码与回到基线。
-fn program(name: &'static str, role: u64, expect: i64) {
+/// 装载用户程序 `image` 并以 `role` 运行到结束，检查退出码与回到基线。
+fn program(name: &'static str, image: &[u8], role: u64, expect: i64) {
     let before = baseline();
     let Ok(pid) = proc::create(name, rt_calls()) else {
         check(false, "进程创建失败");
@@ -235,14 +239,14 @@ fn program(name: &'static str, role: u64, expect: i64) {
     };
     let base = arch::USER_WINDOW.0;
     let started = (|| {
-        let entry = proc::load_elf(pid, USER_RTDEMO).map_err(|_| ProcError::Map(MapError::InvalidAddress))?;
+        let entry = proc::load_elf(pid, image).map_err(|_| ProcError::Map(MapError::InvalidAddress))?;
         for i in 1..=STACK_PAGES {
             proc::map_new(pid, base + STACK_TOP_OFF - i * FRAME_SIZE, MapFlags::USER | MapFlags::WRITE)?;
         }
         proc::spawn_thread(pid, name, entry, base + STACK_TOP_OFF, role, 0)
     })()
     .is_ok();
-    check(started, "rtdemo 装载失败");
+    check(started, "用户程序装载失败");
     if started {
         sched::run();
     }

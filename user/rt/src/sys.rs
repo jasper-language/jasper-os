@@ -40,6 +40,11 @@ pub use imp::{call3, WINDOW_BASE};
 pub const HEAP_BASE: u64 = WINDOW_BASE + 0x1_0000_0000;
 /// 堆区间的长度上限。
 pub const HEAP_LIMIT: u64 = 256 << 20;
+/// 主线程栈：私有窗口起点 + 6 GiB 处为栈顶，向下映射 [`MAIN_STACK_PAGES`] 页，其下未映射（保护区）。
+/// 运行时启动时切换到这里，不依赖创建者给的初始栈有多大。
+pub const MAIN_STACK_TOP: u64 = WINDOW_BASE + 0x1_8000_0000;
+/// 主线程栈的页数（256 KiB）。
+pub const MAIN_STACK_PAGES: u64 = 64;
 /// 线程栈区间：私有窗口起点 + 8 GiB 起，每个槽位 [`STACK_STRIDE`] 字节，只映射顶部 [`STACK_PAGES`] 页（其下为未映射的保护区）。
 pub const STACKS_BASE: u64 = WINDOW_BASE + 0x2_0000_0000;
 /// 线程栈槽位间距。

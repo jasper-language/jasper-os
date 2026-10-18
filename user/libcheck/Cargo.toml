@@ -1,0 +1,20 @@
+# user-libcheck —— 现有 Rust 库的可移植性验收程序：在 jasper-rt 之上运行各库的已知答案测试。
+# 依赖一律锁定确切版本、关闭默认特性，只开启 no_std 下需要的特性（见 src/main.rs 的可移植性清单）。
+[package]
+name = "user-libcheck"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "user-libcheck"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+jasper-rt = { path = "../rt" }
+sha2 = { version = "=0.11.1", default-features = false }
+crc = { version = "=3.4.0", default-features = false }
+miniz_oxide = { version = "=0.9.1", default-features = false, features = ["with-alloc"] }
+smoltcp = { version = "=0.14.0", default-features = false, features = ["alloc", "medium-ip", "proto-ipv4", "socket-tcp"] }

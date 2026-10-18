@@ -59,15 +59,16 @@ fn main() {
 }
 
 /// 构建内嵌的用户程序：用独立的 target 目录调用 cargo，避免与外层构建争用同一目录的锁；
-/// 产物路径经环境变量（`JSR_USER_HELLO`、`JSR_USER_RING`、`JSR_USER_IPC`、`JSR_USER_PROG`、`JSR_USER_RTDEMO`）交给内核源码 `include_bytes!`。
+/// 产物路径经环境变量（`JSR_USER_HELLO`、`JSR_USER_RING`、`JSR_USER_IPC`、`JSR_USER_PROG`、`JSR_USER_RTDEMO`、`JSR_USER_LIBCHECK`）交给内核源码 `include_bytes!`。
 /// Builds the embedded user programs with a separate target dir and exposes their paths to the kernel.
 fn build_user_programs(root: &std::path::Path) {
-    const PROGRAMS: [(&str, &str, &str); 5] = [
+    const PROGRAMS: [(&str, &str, &str); 6] = [
         ("user/hello", "user-hello", "JSR_USER_HELLO"),
         ("user/ring", "user-ring", "JSR_USER_RING"),
         ("user/ipc", "user-ipc", "JSR_USER_IPC"),
         ("user/prog", "user-prog", "JSR_USER_PROG"),
         ("user/rtdemo", "user-rtdemo", "JSR_USER_RTDEMO"),
+        ("user/libcheck", "user-libcheck", "JSR_USER_LIBCHECK"),
     ];
     for (dir, _, _) in PROGRAMS {
         for f in ["src/main.rs", "Cargo.toml", "link.ld", "build.rs"] {

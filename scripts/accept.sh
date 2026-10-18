@@ -392,6 +392,19 @@ check_j1() {    # 用户态运行时：匿名内存系统调用（全有或全�
   fi
 }
 
+check_j2() {    # 现有 Rust 库的可移植性：sha2 / crc / miniz_oxide / smoltcp 在 jasper-rt 之上通过已知答案测试；回到基线
+  if has 'text=libcheck: lib=sha2 version=[0-9.]+ backend=soft vectors=5 ok=true' \
+     && has 'text=libcheck: lib=crc version=[0-9.]+ algorithms=4 ok=true' \
+     && has 'text=libcheck: lib=miniz_oxide version=[0-9.]+ in=[0-9]+ packed=[0-9]+ roundtrip=true corrupt_rejected=true' \
+     && has 'text=libcheck: lib=smoltcp version=[0-9.]+ tcp_loopback bytes=32768 echoed=32768 sha256_match=true .*peer_close_seen=true' \
+     && has 'text=libcheck: ok checks=[0-9]+' \
+     && has 'case=libcheck exit=Some\(0\) expect=0 reclaimed=true'; then
+    record J-2 PASS "sha2（FIPS 向量，纯软件后端）、crc（4 种算法校验值）、miniz_oxide（存储块/zlib 向量、往返、损坏被拒）、smoltcp（环回 TCP 32 KiB 回送、SHA-256 一致、有序关闭）在用户态通过；回到基线"
+  else
+    record J-2 FAIL "缺少 libcheck 关键标记或退出码≠0"
+  fi
+}
+
 check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出接收方、堆扩容、内核空间预分配、只读翻译、ID 用尽、线程创建）
   if has 'exited_receiver grant=Some\(Exited\) grant_new=Some\(Exited\) transfer=Some\(Exited\) objects_unchanged=true sender_kept=true reaped_receiver=Some\(NoSuchProcess\)' \
      && has 'heap fail_alloc=Some\(OutOfFrames\) rolled_back=true fail_map=Some\(MapFailed\) rolled_back=true overflow=Some\(LimitReached\) regrow=true reclaimed=true' \
@@ -407,7 +420,7 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_fix
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_fix
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

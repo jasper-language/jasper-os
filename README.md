@@ -54,6 +54,7 @@ Jasper 生态的**操作系统侧项目**：一个用 Rust 实现、在 QEMU 中
 | ISA-1–3 | 内核移植到 AArch64、RISC-V64、RISC-V32 并在各自的 QEMU 上复跑全部验收 | ⬜ |
 | M5.1 | 装载并运行最小非特权程序（ELF）：Ring 3 运行；读内核内存 / 特权指令 / 无效指令只终止该进程；坏系统调用指针被拒；多线程进程终止（含内核内阻塞的线程）与父进程等待；页帧 / 对象全部回收 | ✅ |
 | J-1 | 用户态最小运行时 `jasper-rt`（`no_std` + `alloc`）：程序入口与 panic 处理、按需增长的堆（新增 `system.memory.map` / `unmap`）、线程、Channel、异步环；用它写成的普通 Rust 程序在 Ring 3 通过成功与失败路径检查 | ✅ |
+| J-2 | 现有 Rust 库的可移植性：sha2、crc、miniz_oxide、smoltcp（环回 TCP）在用户态通过已知答案测试；形成可移植性清单 | ✅ |
 
 M5.1 已通过：「独立 Rust 内核」阶段目标在 x86_64（QEMU）上达成。未列为 ✅ 的能力**尚未实现**。
 
@@ -83,6 +84,7 @@ jasper-os/
   user/prog/            # 最小非特权程序的验收程序（隔离、故障、进程终止与等待）
   user/rt/              # 用户态运行时 jasper-rt（入口、堆、线程、Channel、异步环）
   user/rtdemo/          # 用 jasper-rt 写成的验收程序
+  user/libcheck/        # 现有 Rust 库（sha2 / crc / miniz_oxide / smoltcp）的已知答案测试
   xtask/                # 宿主侧：生成可引导磁盘镜像
   scripts/accept.sh     # 一键验收：构建 → QEMU 真实启动 → 逐里程碑判定
   docs/rust-kernel.md   # 中文说明：结构、分层、构建与验收

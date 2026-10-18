@@ -35,3 +35,10 @@
 # rustflags = [
 #     "-C", "link-arg=-Tkernel/linker.ld",
 # ]
+
+# 用户态依赖的后端选择（J-2）：内核目前不在上下文切换时保存 SIMD / 浮点寄存器，用户程序因此只能走纯软件路径。
+# sha2 在 x86_64 上会按 CPU 能力在运行时选择 SHA-NI（SSE）实现——在这里强制使用纯软件后端；
+# 其它依赖若有同类开关也在此处统一关闭。该 cfg 只被相应的库读取，不影响内核本身。
+# Backend selection for user-space dependencies: no SIMD state is saved yet, so force pure-software paths.
+[target.x86_64-unknown-none]
+rustflags = ["--cfg", "sha2_backend=\"soft\""]
