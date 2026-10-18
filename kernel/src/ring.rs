@@ -556,7 +556,7 @@ pub fn submit_wait_for(pid: ObjId, h: HandleId, target: HandleId, ty: ObjectType
 /// `system.task.wait(h)` / `system.process.wait(h)` 的同步形式：阻塞到目标退出，返回退出码（32 位无符号）。
 pub fn sys_wait(h: u64, ty: ObjectType) -> i64 {
     let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
-    let es = match kobj::with(|t| proc::acquire_exit_state_in(t, pid, HandleId::from_raw(h as u32), ty)) {
+    let es = match kobj::with(|t| proc::acquire_exit_state_in(t, pid, crate::syscall::handle_arg(h), ty)) {
         Ok(es) => es,
         Err(e) => return perr(e),
     };
@@ -666,7 +666,7 @@ fn prepare_user_work(pid: ObjId, sqe: &Sqe, allowed: SyscallSet) -> Result<Work,
         }
         SYSTEM_TASK_WAIT | SYSTEM_PROCESS_WAIT => {
             let ty = if sqe.op == SYSTEM_TASK_WAIT { ObjectType::Task } else { ObjectType::Process };
-            let es = kobj::with(|t| proc::acquire_exit_state_in(t, pid, HandleId::from_raw(sqe.arg0 as u32), ty)).map_err(perr)?;
+            let es = kobj::with(|t| proc::acquire_exit_state_in(t, pid, crate::syscall::handle_arg(sqe.arg0), ty)).map_err(perr)?;
             Work::ExitWait { es }
         }
         _ => {

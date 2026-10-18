@@ -7,7 +7,8 @@
 //! 安全的 [`Op`] 只包含不引用用户内存的操作。引用用户缓冲区的操作（Channel 收发）用 [`Ring::submit_raw`]：
 //! 调用者须保证缓冲区在请求完成（并被收取）之前一直有效。
 
-use kernel_core::ring_abi::{Cqe, EnterArgs, Sqe, ENTER_ARGS_SIZE};
+pub use kernel_core::ring_abi::{Cqe, Sqe};
+use kernel_core::ring_abi::{EnterArgs, ENTER_ARGS_SIZE};
 
 use crate::error::{check, Error, Result};
 use crate::handle::Handle;

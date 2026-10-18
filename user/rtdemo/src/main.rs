@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 use alloc::{format, vec};
 
 use jasper_rt::channel;
-use jasper_rt::ring::{Completion, Op, Ring};
+use jasper_rt::ring::{Completion, Op, Ring, Sqe};
 use jasper_rt::{entry, heap, mem, println, sys, task, time, Error, Handle, Rights};
 
 entry!(main);
@@ -266,6 +266,12 @@ fn ring_cases(s: &mut Steps) -> Result<(), u32> {
     let w = ring.submit(3, Op::WaitTask(t.handle())).map_err(|_| 3000 + s.0)?;
     let n = ring.reap(&mut out, 1).map_err(|_| 3000 + s.0)?;
     s.check(n == 1 && out[0].request_id == w && out[0].outcome() == Ok(55))?;
+    // 句柄参数超出 32 位：一律视为无效句柄，不截断成低 32 位所指的那个线程（同步与经 ring 两条路径）
+    let alias = t.handle().raw() as u64 | 1 << 32;
+    s.check(jasper_rt::error::check(sys::call(jasper_rt::ids::SYSTEM_TASK_WAIT, alias, 0, 0)) == Err(Error::HANDLE_INVALID))?;
+    let sqe = Sqe { op: jasper_rt::ids::SYSTEM_TASK_WAIT as u32, flags: 0, user_tag: 5, arg0: alias, arg1: 0 };
+    // SAFETY：该操作不引用用户内存。
+    s.check(unsafe { ring.submit_raw(sqe) } == Err(Error::HANDLE_INVALID))?;
     s.check(t.join() == Ok(55))?;
 
     // 被拒的提交：句柄不指向线程 ⇒ 不产生请求，错误随提交返回
