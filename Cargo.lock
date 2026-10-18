@@ -800,6 +800,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "user-robust"
+version = "0.1.0"
+dependencies = [
+ "kernel-core",
+]
+
+[[package]]
 name = "user-rtdemo"
 version = "0.1.0"
 dependencies = [

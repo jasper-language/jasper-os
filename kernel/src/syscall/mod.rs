@@ -14,7 +14,7 @@
 
 pub mod table;
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use alloc::vec;
 
@@ -110,6 +110,21 @@ pub fn call_count() -> u32 {
     CALLS.load(Ordering::Relaxed)
 }
 
+/// 是否逐次输出系统调用的进入 / 返回 / 拒绝事件行（默认输出）。
+static TRACE: AtomicBool = AtomicBool::new(true);
+
+/// 打开或关闭逐次系统调用事件行，返回原设置。
+/// 健壮性测试一次运行数万次调用，逐次打印会淹没串口并拖慢运行；关闭期间调用照常计数（[`call_count`]），
+/// 分发、权限检查与执行完全不变——只省略日志。由内核侧的测试驱动在运行前后成对调用。
+/// Enables or disables per-call trace lines; returns the previous setting.
+pub fn set_trace(on: bool) -> bool {
+    TRACE.swap(on, Ordering::Relaxed)
+}
+
+fn tracing() -> bool {
+    TRACE.load(Ordering::Relaxed)
+}
+
 /// 是否为该操作 ID 提供了真实处理函数（与 [`execute`] 的分派表一一对应）。
 fn has_handler(id: u32) -> bool {
     matches!(
@@ -169,17 +184,26 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
     let (task_id, task_name) = sched::current();
     let Some(e) = op(a.id) else {
         let ret = err(SYSTEM_ERROR_UNSUPPORTED);
-        kprintln!("[JSR-SYSCALL] reject id={} task={} ret={}", a.id, task_name, error_name(ret));
+        if tracing() {
+            kprintln!("[JSR-SYSCALL] reject id={} task={} ret={}", a.id, task_name, error_name(ret));
+        }
         return ret;
     };
     if !sched::current_syscalls().contains(a.id) {
         let ret = err(SYSTEM_ERROR_RIGHTS_DENIED);
-        kprintln!("[JSR-SYSCALL] deny name={} id={} task={} ret={}", e.name, e.id, task_name, error_name(ret));
+        if tracing() {
+            kprintln!("[JSR-SYSCALL] deny name={} id={} task={} ret={}", e.name, e.id, task_name, error_name(ret));
+        }
         return ret;
     }
-    kprintln!("[JSR-SYSCALL] enter name={} id={} task={} effects={}", e.name, e.id, task_name, e.effects.as_str());
+    let trace = tracing();
+    if trace {
+        kprintln!("[JSR-SYSCALL] enter name={} id={} task={} effects={}", e.name, e.id, task_name, e.effects.as_str());
+    }
     let ret = execute(e, a, task_id.0);
-    kprintln!("[JSR-SYSCALL] exit name={} id={} ret={} status={}", e.name, e.id, ret, error_name(ret));
+    if trace {
+        kprintln!("[JSR-SYSCALL] exit name={} id={} ret={} status={}", e.name, e.id, ret, error_name(ret));
+    }
     // 出口调度点：调用期间所属进程进入了 exiting（例如阻塞等待被终止打断）⇒ 不再返回用户态
     if proc::current_exiting() {
         proc::thread_exit(0, "killed");

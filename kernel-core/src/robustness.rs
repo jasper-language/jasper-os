@@ -10,43 +10,12 @@
 use std::collections::{HashMap, HashSet};
 use std::vec::Vec;
 
+use crate::argcase::Prng as Rng;
 use crate::async_ring::{AsyncRing, Cancelled, Exec, Submission, Terminal};
 use crate::elf::{self, PAGE};
 use crate::object::{HandleError, HandleTable, Rights};
 use crate::objtable::{ObjError, ObjectTable};
 use crate::ring_abi::{Cqe, EnterArgs, MsgDesc, Sqe};
-
-/// xorshift64* 伪随机数发生器（确定性、可复现）。
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Rng(seed.max(1))
-    }
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-    fn below(&mut self, n: u64) -> u64 {
-        self.next() % n.max(1)
-    }
-    fn chance(&mut self, percent: u64) -> bool {
-        self.below(100) < percent
-    }
-    /// 偏向边界值的 64 位数（溢出类缺陷多出现在这些值附近）。
-    fn edgy(&mut self) -> u64 {
-        const EDGES: [u64; 10] = [0, 1, 0xfff, 0x1000, 0x1001, u64::MAX, u64::MAX - 0xfff, u64::MAX - 0x1000, 1 << 63, u32::MAX as u64];
-        if self.chance(50) {
-            EDGES[self.below(EDGES.len() as u64) as usize]
-        } else {
-            self.next()
-        }
-    }
-}
 
 // ———————————————————————— ELF ————————————————————————
 
@@ -94,11 +63,11 @@ fn elf_parser_survives_mutations_and_keeps_invariants() {
                 // 覆盖一个结构字段为（偏向边界的）随机值
                 let f = fields[rng.below(fields.len() as u64) as usize];
                 let width = if f == 56 || f == 54 { 2 } else { 8 };
-                let v = rng.edgy().to_le_bytes();
+                let v = rng.boundary_biased().to_le_bytes();
                 img[f..f + width].copy_from_slice(&v[..width]);
             } else {
                 let i = rng.below(0x100) as usize;
-                img[i] = rng.next() as u8;
+                img[i] = rng.next_u64() as u8;
             }
         }
         if rng.chance(10) {
@@ -155,7 +124,7 @@ fn ring_records_roundtrip_any_bytes() {
     for _ in 0..20_000 {
         let mut b = [0u8; 56];
         for x in b.iter_mut() {
-            *x = rng.next() as u8;
+            *x = rng.next_u64() as u8;
         }
         let s: [u8; 32] = b[..32].try_into().unwrap();
         assert_eq!(Sqe::decode(&s).encode(), s);
@@ -191,7 +160,7 @@ fn async_ring_random_operations_keep_invariants() {
         let mut closing = false;
         for step in 0..3_000 {
             let ids: Vec<u64> = model.iter().filter(|(_, m)| **m != Model::Decided).map(|(id, _)| *id).collect();
-            let pick = |rng: &mut Rng| if ids.is_empty() { rng.next() % 50 } else { ids[rng.below(ids.len() as u64) as usize] };
+            let pick = |rng: &mut Rng| if ids.is_empty() { rng.next_u64() % 50 } else { ids[rng.below(ids.len() as u64) as usize] };
             match rng.below(9) {
                 0 | 1 => {
                     let buf = rng.chance(30);

@@ -1,0 +1,19 @@
+# user-robust —— S-1 系统调用健壮性回归程序：固定种子的有界参数组合，只经系统调用与内核交互。
+# 独立的静态 ELF；调用号在构建期从 abi/system-ids.txt 生成，记录布局取自 kernel-core。
+[package]
+name = "user-robust"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "user-robust"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+kernel-core = { path = "../../kernel-core" }
+
+[build-dependencies]
+kernel-core = { path = "../../kernel-core" }

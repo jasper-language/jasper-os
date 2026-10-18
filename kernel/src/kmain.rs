@@ -8,7 +8,7 @@ use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
 use crate::{clock, config, fix_demo, irq, kprint, kprintln, mech_demo, mm, pi_demo, sched, user_demo};
 #[cfg(feature = "user-programs")]
-use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, rt_demo};
+use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo};
 
 /// 内核版本（横幅中输出）。
 pub const VERSION: &str = "0.0.1";
@@ -111,6 +111,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ipc_demo::run();
         // M5.1：最小非特权程序（特权级 3、隔离、用户异常、坏指针、进程终止与等待、完全回收）。
         prog_demo::run();
+        // S-1：系统调用健壮性回归（真实用户态、固定种子、有界调用、资源回到基线）。
+        robust_demo::run();
         // J-1：用户态运行时（匿名内存系统调用；用运行时写成的普通 Rust 程序：堆、线程、Channel、异步环）。
         rt_demo::run();
         // SCHED-1：服务质量分级调度（档位规则、动态任务数、过载下的唤醒延迟、压力撤销后恢复）。
@@ -136,6 +138,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("ipc", ipc_demo::failed()),
         #[cfg(feature = "user-programs")]
         ("prog", prog_demo::failed()),
+        #[cfg(feature = "user-programs")]
+        ("robust", robust_demo::failed()),
         #[cfg(feature = "user-programs")]
         ("rt", rt_demo::failed()),
         #[cfg(feature = "user-programs")]

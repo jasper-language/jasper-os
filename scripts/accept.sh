@@ -428,6 +428,17 @@ check_m51() {   # 最小非特权程序：特权级 3；读内核内存只杀该
   fi
 }
 
+check_s1() {    # S-1：真实用户态的系统调用健壮性回归（固定种子、2 万次有界探测）；返回约定、计数与资源回收
+  if has 'text=robust: done calls=20000 checks=[0-9]+ failed=0 seed=0x[0-9a-f]+' \
+     && has '^\[JSR-ROBUST\] summary calls=[0-9]+ min_calls=20000 exit=Some\(0\) free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 pending=0 pinned=\(0, 0\) reclaimed=true checks=[0-9]+ failed=0' \
+     && ! has '^\[JSR-ROBUST-FAIL\]' \
+     && ! has 'robust: FAIL '; then
+    record S-1 PASS "用户态固定种子 2 万次有界系统调用探测：非法调用号/超 32 位句柄/坏指针/未映射区间/非法权限位均按登记错误返回；真实 map→写→unmap 循环可用；进程以 0 退出；页帧/对象/固定帧回到基线"
+  else
+    record S-1 FAIL "缺少 JSR-ROBUST 汇总、调用次数不足、出现失败行或资源未回到基线"
+  fi
+}
+
 check_j1() {    # 用户态运行时：匿名内存系统调用（全有或全无、配额、权限）；用运行时写成的 Rust 程序（堆/线程/Channel/ring）以 0 退出；panic 与栈溢出只终止该进程；回到基线
   if has 'memory map=Ok\(\(\)\) zeroed=true user_rw_nx=true overlap=Err\(AlreadyMapped\) partial=Err\(AlreadyMapped\) untouched=true' \
      && has 'memory hole=Err\(NotMapped\) bad_ranges_refused=true readonly=true quota_chunks=[1-9][0-9]* refused=Some\(Quota\) no_charge=true' \
@@ -660,7 +671,7 @@ check_isa1b() { # AArch64 移植第二阶段：内嵌用户程序（独立 Rust 
     record ISA1b FAIL "AArch64 构建 rc=$A64_BUILD_RC 或缺少 qemu-system-aarch64 / 串口日志（见 build-aarch64.log）"
     return
   fi
-  a64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_j1 check_j2 check_j3 check_j4 \
+  a64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 \
             check_sched1 check_sched3 check_t1 check_t2
   local progs
   progs=$(grep -cE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_A64" || true)
@@ -696,7 +707,7 @@ check_isa2b() { # RISC-V64 移植第二阶段：内嵌用户程序（独立 Rust
     record ISA2b FAIL "RISC-V64 构建 rc=$RV64_BUILD_RC 或缺少 qemu-system-riscv64 / 串口日志（见 build-riscv64.log）"
     return
   fi
-  rv64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_j1 check_j2 check_j3 check_j4 \
+  rv64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 \
              check_sched1 check_sched3 check_t1 check_t2
   local progs
   progs=$(grep -cE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_RV64" || true)
@@ -730,7 +741,7 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

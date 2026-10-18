@@ -46,6 +46,8 @@ pub mod proc;
 pub mod prog_demo;
 pub mod ring;
 #[cfg(feature = "user-programs")]
+pub mod robust_demo;
+#[cfg(feature = "user-programs")]
 pub mod ring_demo;
 #[cfg(feature = "user-programs")]
 pub mod rt_demo;
