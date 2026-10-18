@@ -45,7 +45,7 @@ pub enum ObjError {
     Invalid,
     /// 释放了一个计数已经为 0 的引用（调用方记账错误）。
     Underflow,
-    /// 表已满（配额：系统内核对象总数）。
+    /// 表已满（配额：系统内核对象总数），或某个引用计数已到上限（拒绝而不是回绕）。
     Full,
 }
 
@@ -119,8 +119,10 @@ impl<T, const N: usize> ObjectTable<T, N> {
 
     /// 放入新对象，初始持有 `owners` 个外部所有权与 `internal` 个内部引用（两者之和须 ≥ 1）。
     pub fn insert(&mut self, value: T, owners: u32, internal: u32) -> Result<ObjId, ObjError> {
-        if owners + internal == 0 {
-            return Err(ObjError::Underflow);
+        match owners.checked_add(internal) {
+            None => return Err(ObjError::Full),
+            Some(0) => return Err(ObjError::Underflow),
+            Some(_) => {}
         }
         let (index, slot) = self
             .slots
@@ -172,13 +174,15 @@ impl<T, const N: usize> ObjectTable<T, N> {
         if e.state != Lifecycle::Live {
             return Err(ObjError::Invalid);
         }
-        e.owners += 1;
+        // 检查式加法：计数回绕到 0 会让仍在使用的对象被提前销毁（释放后使用），因此到上限即拒绝
+        e.owners = e.owners.checked_add(1).ok_or(ObjError::Full)?;
         Ok(())
     }
 
-    /// 增加一个内部引用（closing 的对象也可以，例如清理期间仍需访问）。
+    /// 增加一个内部引用（closing 的对象也可以，例如清理期间仍需访问）。计数到上限即拒绝（不回绕）。
     pub fn acquire_internal(&mut self, id: ObjId) -> Result<(), ObjError> {
-        self.entry_mut(id)?.internal += 1;
+        let e = self.entry_mut(id)?;
+        e.internal = e.internal.checked_add(1).ok_or(ObjError::Full)?;
         Ok(())
     }
 
@@ -371,5 +375,16 @@ mod tests {
         t.insert(Obj::Leaf(1), 1, 0).unwrap();
         t.insert(Obj::Leaf(2), 1, 0).unwrap();
         assert_eq!(t.insert(Obj::Leaf(3), 1, 0), Err(ObjError::Full));
+    }
+
+    #[test]
+    fn reference_counts_refuse_to_wrap() {
+        let mut t: ObjectTable<u8, 2> = ObjectTable::new();
+        assert_eq!(t.insert(1, u32::MAX, 1), Err(ObjError::Full), "初始计数之和溢出被拒");
+        let id = t.insert(1, u32::MAX, 0).unwrap();
+        assert_eq!(t.acquire_owner(id), Err(ObjError::Full), "外部所有权到上限被拒，而不是回绕到 0");
+        let id2 = t.insert(2, 0, u32::MAX).unwrap();
+        assert_eq!(t.acquire_internal(id2), Err(ObjError::Full));
+        assert_eq!(t.counts(id2).map(|c| (c.0, c.1)), Ok((0, u32::MAX)), "被拒后计数不变");
     }
 }

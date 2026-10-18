@@ -23,6 +23,8 @@
 //! 请求状态、端点队列、接收方句柄表都在对象表锁内一次完成（单 CPU；锁顺序见对象表模块），
 //! 因此「取消与交付」由先取得锁者裁决：交付先 ⇒ 取消得到 `already_completed`；取消先 ⇒ 交付看到已裁决而不触碰消息。
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -47,6 +49,14 @@ pub const MAX_MSG_HANDLES: usize = 8;
 pub const MAX_QUEUE_MSGS: usize = 64;
 /// 每个端点接收队列的总字节上限。
 pub const MAX_QUEUE_BYTES: usize = 1024 * 1024;
+/// 每进程发出、仍在队列中的消息体总字节上限（防止单个进程耗尽内核堆）。
+pub const MAX_PROCESS_IPC_BYTES: usize = 4 * 1024 * 1024;
+/// 全系统仍在队列中的消息体总字节上限（多个进程合计也不能耗尽内核堆）。
+pub const MAX_TOTAL_IPC_BYTES: usize = 16 * 1024 * 1024;
+
+/// 全系统仍在队列中的消息体总字节数（只在对象表锁内修改）。
+static QUEUED_TOTAL: AtomicUsize = AtomicUsize::new(0);
+
 /// 端点句柄的权限：接收（READ）、发送（WRITE）、等待（WAIT）、控制（CONTROL）、进程内复制（DUPLICATE）；**v1 不带 TRANSFER**。
 pub const ENDPOINT_RIGHTS: Rights =
     Rights::READ.union(Rights::WRITE).union(Rights::WAIT).union(Rights::CONTROL).union(Rights::DUPLICATE);
@@ -55,6 +65,8 @@ pub const ENDPOINT_RIGHTS: Rights =
 struct Message {
     body: Vec<u8>,
     handles: Vec<(ObjectRef, Rights)>,
+    /// 发送方进程（弱回指：消息体字节记在它的配额上，出队或销毁时归还）。
+    sender: ObjId,
 }
 
 /// Channel 的一个端点。
@@ -87,8 +99,23 @@ fn is_closed(t: &mut Table, id: Option<ObjId>) -> bool {
     }
 }
 
-/// 释放一条消息持有的全部外部所有权（消息被销毁时）。
+/// 归还一条消息占用的字节配额（出队交付或销毁时）。
+fn uncharge(t: &mut Table, m: &Message) {
+    let n = m.body.len();
+    QUEUED_TOTAL.fetch_sub(n, Ordering::Relaxed);
+    if let Some(q) = proc::ring_quota_in(t, m.sender) {
+        q.ipc_bytes = q.ipc_bytes.saturating_sub(n as u32);
+    }
+}
+
+/// 全系统仍在队列中的消息体总字节数（诊断与验收用）。
+pub fn queued_total() -> usize {
+    QUEUED_TOTAL.load(Ordering::Relaxed)
+}
+
+/// 释放一条消息持有的全部外部所有权并归还其字节配额（消息被销毁时）。
 fn drop_message(t: &mut Table, m: Message) {
+    uncharge(t, &m);
     for (r, _) in m.handles {
         if let Some(id) = ObjId::from_raw(r.id.0) {
             let _ = kobj::release_owner_in(t, id);
@@ -191,6 +218,11 @@ pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, han
         Some(p) if p.queue.len() < MAX_QUEUE_MSGS && p.queued_bytes + body.len() <= MAX_QUEUE_BYTES => {}
         _ => return err(SYSTEM_CHANNEL_ERROR_QUEUE_FULL),
     }
+    // 字节配额：发送方进程与全系统各有上限（超额原子失败，不入队、不动句柄）
+    let mine = proc::ring_quota_in(t, pid).map(|q| q.ipc_bytes as usize).unwrap_or(usize::MAX);
+    if mine + body.len() > MAX_PROCESS_IPC_BYTES || QUEUED_TOTAL.load(Ordering::Relaxed) + body.len() > MAX_TOTAL_IPC_BYTES {
+        return err(SYSTEM_ERROR_QUOTA_EXCEEDED);
+    }
     // 复核每个要移动的句柄：有效、带 TRANSFER、叶子对象、互不相同、不是本次发送所用的端点
     let mut ids: Vec<HandleId> = Vec::with_capacity(handle_vals.len());
     for &v in handle_vals {
@@ -220,9 +252,13 @@ pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, han
         }
     }
     let n = body.len();
+    if let Some(q) = proc::ring_quota_in(t, pid) {
+        q.ipc_bytes += n as u32;
+    }
+    QUEUED_TOTAL.fetch_add(n, Ordering::Relaxed);
     if let Some(p) = ep_mut(t, peer) {
         p.queued_bytes += n;
-        p.queue.push_back(Message { body, handles });
+        p.queue.push_back(Message { body, handles, sender: pid });
     }
     wake_in(t, peer);
     n as i64
@@ -328,6 +364,7 @@ pub(crate) fn try_deliver_in(t: &mut Table, target: &RecvTarget) -> Delivery {
     let Some(e) = ep_mut(t, ep) else { return Delivery::Empty };
     let Some(m) = e.queue.pop_front() else { return Delivery::Empty };
     e.queued_bytes -= n;
+    uncharge(t, &m);
     target.data.write_at(0, &m.body);
     let mut vals = Vec::with_capacity(nh);
     for (r, rights) in m.handles {
@@ -412,7 +449,7 @@ pub(crate) fn copy_desc(desc_ptr: u64) -> Result<MsgDesc, i64> {
 pub fn sys_send(h: u64, desc_ptr: u64) -> i64 {
     let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
     match copy_send_args(desc_ptr) {
-        Ok((body, vals)) => kobj::with(|t| send_in(t, pid, HandleId::from_raw(h as u32), body, &vals)),
+        Ok((body, vals)) => kobj::with(|t| send_in(t, pid, crate::syscall::handle_arg(h), body, &vals)),
         Err(e) => e,
     }
 }
@@ -425,7 +462,7 @@ pub fn sys_recv(h: u64, desc_ptr: u64) -> i64 {
         Ok(d) => d,
         Err(e) => return e,
     };
-    let target = match kobj::with(|t| prepare_recv_in(t, pid, HandleId::from_raw(h as u32), desc_ptr, &d)) {
+    let target = match kobj::with(|t| prepare_recv_in(t, pid, crate::syscall::handle_arg(h), desc_ptr, &d)) {
         Ok(x) => x,
         Err(e) => return e,
     };

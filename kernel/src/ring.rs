@@ -564,7 +564,7 @@ pub fn sys_cancel(h: u64, req: u64) -> i64 {
     let Some(pid) = proc::current_process() else {
         return err(SYSTEM_ERROR_RIGHTS_DENIED);
     };
-    cancel_for(pid, HandleId::from_raw(h as u32), req)
+    cancel_for(pid, crate::syscall::handle_arg(h), req)
 }
 
 // ———————————————————————— enter ————————————————————————
@@ -577,11 +577,11 @@ fn prepare_user_work(pid: ObjId, sqe: &Sqe, allowed: SyscallSet) -> Result<Work,
         SYSTEM_TIME_WAIT => Work::Wait { ticks: sqe.arg0 },
         SYSTEM_CHANNEL_SEND => {
             let (body, handles) = ipc::copy_send_args(sqe.arg1)?;
-            Work::Send { endpoint: HandleId::from_raw(sqe.arg0 as u32), body, handles }
+            Work::Send { endpoint: crate::syscall::handle_arg(sqe.arg0), body, handles }
         }
         _ => {
             let d = ipc::copy_desc(sqe.arg1)?;
-            let target = kobj::with(|t| ipc::prepare_recv_in(t, pid, HandleId::from_raw(sqe.arg0 as u32), sqe.arg1, &d))?;
+            let target = kobj::with(|t| ipc::prepare_recv_in(t, pid, crate::syscall::handle_arg(sqe.arg0), sqe.arg1, &d))?;
             Work::Recv(Box::new(target))
         }
     })
@@ -596,7 +596,7 @@ pub fn sys_enter(h: u64, args_ptr: u64) -> i64 {
     let Some(pid) = proc::current_process() else {
         return err(SYSTEM_ERROR_RIGHTS_DENIED);
     };
-    let h = HandleId::from_raw(h as u32);
+    let h = crate::syscall::handle_arg(h);
     let mut raw = [0u8; ENTER_ARGS_SIZE];
     if let Err(e) = copy_from_user(&mut raw, args_ptr, ENTER_ARGS_SIZE) {
         return user_err(e);

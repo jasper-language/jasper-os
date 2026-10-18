@@ -12,6 +12,8 @@
 //! 3. **延迟后端**：取消一个后端尚未静止的、访问缓冲区的请求 ⇒ 静止前完成不可见、帧固定；静止后完成可见、帧归还
 //! 4. **消息携带叶子、接收方退出**：队列中的消息被销毁，叶子对象的所有权释放（对象被回收）
 //! 5. **接收方句柄表满**：recv 以 `table_full` 结束，消息留在队列，接收方句柄表不变
+//! 6. **字节配额**：一个进程排队的消息体总量到上限后 send 以 `quota_exceeded` 失败（不入队），
+//!    接收方退出后配额全部归还——单个进程无法用消息耗尽内核堆
 //!
 //! 最后对象数、清理队列、空闲帧、固定帧全部回到基线。
 
@@ -89,6 +91,8 @@ fn start(pid: ObjId, name: &'static str, role: u64, endpoint: u64) -> bool {
 
 /// 运行全部演练。
 pub fn run() {
+    // 字节配额用例会让内核堆增长约 4 MiB（堆只增不缩），因此放在取页帧基线之前；它自己检查对象回到基线
+    byte_quota();
     let free0 = frame::free_frames();
     let (live0, _, _) = kobj::stats();
     user_semantics();
@@ -315,4 +319,47 @@ fn receiver_table_full() {
     proc::reap(r);
     proc::reap(s);
     kobj::run_cleanup(usize::MAX);
+}
+
+/// 6：每进程排队字节配额。向 5 个端点各发 1 MiB（16 条 × 64 KiB）：前 4 MiB 成功，之后 quota_exceeded。
+fn byte_quota() {
+    let (live0, _, _) = kobj::stats();
+    let calls = SyscallSet::of(&[abi::SYSTEM_CHANNEL_SEND]);
+    let (Ok(s), Ok(r)) = (proc::create("ipc-flood", calls), proc::create("ipc-sink", calls)) else {
+        check(false, "进程创建失败");
+        return;
+    };
+    let Ok(rh) = ring::create_for(s, 64) else {
+        check(false, "Ring 创建失败");
+        return;
+    };
+    let total0 = ipc::queued_total();
+    let (mut ok, mut over, mut other) = (0u32, 0u32, 0u32);
+    for _ in 0..5 {
+        let Ok((hs, _)) = ipc::create_pair(s, r) else { continue };
+        for _ in 0..16 {
+            let req = ring::submit_send_for(s, rh, hs, vec![0x42u8; ipc::MAX_MSG_BYTES], vec![]);
+            let res = ring::ring_of(s, rh).map(|x| ring::reap_kernel(x, 4)).unwrap_or_default();
+            match (req, res.first()) {
+                (Ok(_), Some((_, v))) if *v == ipc::MAX_MSG_BYTES as i64 => ok += 1,
+                (Ok(_), Some((_, v))) if *v == err(abi::SYSTEM_ERROR_QUOTA_EXCEEDED) => over += 1,
+                _ => other += 1,
+            }
+        }
+    }
+    let charged = proc::ring_quota(s).map(|q| q.ipc_bytes as usize);
+    let quota_ok = ok as usize * ipc::MAX_MSG_BYTES == ipc::MAX_PROCESS_IPC_BYTES && over == 16 && other == 0
+        && charged == Some(ipc::MAX_PROCESS_IPC_BYTES);
+    check(quota_ok, "字节配额：到上限后 send 应以 quota_exceeded 失败");
+    // 接收方退出：其端点关闭，队列中的消息被销毁，发送方的配额与全系统计数归还
+    check(proc::exit_idle(r, 0), "接收方未能退出");
+    let returned = proc::ring_quota(s).map(|q| q.ipc_bytes) == Some(0) && ipc::queued_total() == total0;
+    check(returned, "接收方退出后字节配额未归还");
+    kprintln!("[JSR-IPC] byte_quota accepted={} rejected={} charged={:?} returned={}", ok, over, charged, returned);
+    check(proc::exit_idle(s, 0), "发送方未能退出");
+    proc::reap(s);
+    proc::reap(r);
+    kobj::run_cleanup(usize::MAX);
+    let (live1, pending1, _) = kobj::stats();
+    check(live1 == live0 && pending1 == 0, "字节配额用例后对象未回到基线");
 }

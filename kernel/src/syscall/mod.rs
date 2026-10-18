@@ -38,6 +38,20 @@ pub struct SyscallArgs {
     pub args: [u64; 6],
 }
 
+/// 把用户传入的 64 位寄存器值解释为句柄：超出 32 位的值一律视为空句柄（永远无效），
+/// 不截断——否则 `0x1_0000_0005` 会被当成句柄 5，同一个句柄出现多种写法。
+/// Interprets a 64-bit register as a handle value without truncation.
+pub(crate) fn handle_arg(v: u64) -> HandleId {
+    u32::try_from(v).map(HandleId::from_raw).unwrap_or(HandleId::NULL)
+}
+
+/// 把用户传入的权限位解释为 [`Rights`]：含未定义的位（或超出 32 位）⇒ `None`（调用方报参数非法），不静默丢弃。
+pub(crate) fn rights_arg(v: u64) -> Option<Rights> {
+    let bits = u32::try_from(v).ok()?;
+    let r = Rights::from_bits_truncate(bits);
+    (r.bits() == bits).then_some(r)
+}
+
 /// 把错误码 ID 编码成系统调用返回值。
 pub const fn err(id: u32) -> i64 {
     -(id as i64)
@@ -246,18 +260,20 @@ fn execute(e: &AbiEntry, a: &SyscallArgs, task_id: u64) -> i64 {
         SYSTEM_TIME_NOW => sched::timer_ticks() as i64,
         SYSTEM_CONSOLE_WRITE => console_write(a.args[0], a.args[1]),
         SYSTEM_TASK_SPAWN => task_spawn(a.args[0], a.args[1], a.args[2]),
-        SYSTEM_HANDLE_CLOSE => match proc::close_handle(HandleId::from_raw(a.args[0] as u32)) {
+        SYSTEM_HANDLE_CLOSE => match proc::close_handle(handle_arg(a.args[0])) {
             Ok(()) => 0,
             Err(e) => proc_err(e),
         },
         SYSTEM_HANDLE_DUPLICATE => {
-            match proc::duplicate_current(HandleId::from_raw(a.args[0] as u32), Rights::from_bits_truncate(a.args[1] as u32)) {
+            let Some(rights) = rights_arg(a.args[1]) else { return err(SYSTEM_ERROR_INVALID_ARGUMENT) };
+            match proc::duplicate_current(handle_arg(a.args[0]), rights) {
                 Ok(h) => h.raw() as i64,
                 Err(e) => proc_err(e),
             }
         }
         SYSTEM_HANDLE_RESTRICT => {
-            match proc::restrict_current(HandleId::from_raw(a.args[0] as u32), Rights::from_bits_truncate(a.args[1] as u32)) {
+            let Some(rights) = rights_arg(a.args[1]) else { return err(SYSTEM_ERROR_INVALID_ARGUMENT) };
+            match proc::restrict_current(handle_arg(a.args[0]), rights) {
                 Ok(()) => 0,
                 Err(e) => proc_err(e),
             }

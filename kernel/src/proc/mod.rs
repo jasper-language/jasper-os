@@ -75,6 +75,8 @@ pub struct ResourceQuota {
     pub in_flight: u32,
     /// 尚未销毁的 Channel 端点数。
     pub endpoints: u32,
+    /// 本进程发出、仍在接收队列中的消息体总字节数。
+    pub ipc_bytes: u32,
 }
 
 /// 线程的启动参数（线程首次被调度时读取）。

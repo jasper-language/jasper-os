@@ -50,3 +50,6 @@ pub mod sync;
 pub mod trace;
 pub mod trap;
 pub mod wait;
+
+#[cfg(test)]
+mod robustness;

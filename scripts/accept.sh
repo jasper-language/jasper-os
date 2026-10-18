@@ -313,7 +313,7 @@ check_m43() {   # 用户态异步环：用户程序端到端（ID 单调、cq_fu
      && has 'text=ring: handle dup_with_transfer=-4102 dup_without_transfer_ok=true' \
      && has 'text=ring: closed_with_pending=true enter_after_close=-4101 cancel_after_close=-4101' \
      && has 'text=ring: all checks passed' \
-     && has '\[JSR-RING\] user exit=Some\(Exited \{ code: 0 \}\) quota_after=Some\(ResourceQuota \{ rings: 0, in_flight: 0, endpoints: 0 \}\)' \
+     && has '\[JSR-RING\] user exit=Some\(Exited \{ code: 0 \}\) quota_after=Some\(ResourceQuota \{ rings: 0, in_flight: 0, endpoints: 0, ipc_bytes: 0 \}\)' \
      && has 'buffer cancel=Ok\(0\) hidden_before_quiesce=true cancel_again=Ok\(-4106\) visible_after_quiesce=true' \
      && has 'closing before=Some\(\(2, 3\)\) after_in_flight=Some\(2\) dropped_ready=true submit_after_exit=Some\(-[0-9]+\) quota=Some\(3\)->Some\(2\)' \
      && has 'closing abortable_quiesced=true nonabortable_finished=true ring_destroyed_after_last_request=true quota_returned=true' \
@@ -342,6 +342,7 @@ check_m44() {   # IPC Channel：用户程序（单进程语义 + 跨进程往返
      && has 'delayed_backend hidden_and_pinned=true visible_and_returned_after_quiesce=true' \
      && has 'leaf_in_queue_released_on_receiver_exit=true sender_handle_moved=true' \
      && has 'receiver_table_full result_table_full=true message_kept=true' \
+     && has 'byte_quota accepted=64 rejected=16 charged=Some\(4194304\) returned=true' \
      && has '^\[JSR-IPC\] objects_live=([0-9]+)/\1 pending=0 pinned=\(0, 0\) reclaimed=true checks=[0-9]+ failed=0'; then
     record M4.4 PASS "send/recv 经 ring；两阶段 send；原子交付（缓冲区/句柄表不足消息保留）；取消竞争；关闭语义；跨进程句柄往返；页帧固定；回到基线"
   else
