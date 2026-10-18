@@ -24,6 +24,12 @@
 # =============================================================================
 set -u
 
+# 串口日志一律按文本匹配：部分固件版本（如 QEMU 8.2 自带的 OpenSBI v1.3）会在启动横幅里输出 NUL 字节，
+# GNU grep 遇到它会把整个日志当作二进制文件，只回「Binary file matches」而不输出匹配行，导致数值提取为空。
+# 这里只改变匹配方式，不改动原始串口日志（证据保持原样）。
+# Treat serial logs as text: some firmware emits NUL bytes that make grep treat the log as binary.
+grep() { command grep -a "$@"; }
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NCPU="$(nproc --all 2>/dev/null || echo 4)"
 if [ "$NCPU" -ge 8 ]; then DEFAULT_CORES="$((NCPU - 4))-$((NCPU - 1))"; else DEFAULT_CORES="0-$((NCPU > 1 ? NCPU - 2 : 0))"; fi
