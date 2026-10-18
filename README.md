@@ -51,7 +51,8 @@ Jasper 生态的**操作系统侧项目**：一个用 Rust 实现、在 QEMU 中
 | M4.3 | 用户态异步 ring（提交 → 完成；完成信用；取消；closing；配额） | ✅ |
 | M4.4 | IPC Channel（send/recv 经 ring）与取消、交付的原子性；接收缓冲区页帧固定 | ✅ |
 | ISA-0 | 多指令集准备：`kernel-core` 在 x86_64 / AArch64 / RISC-V64 / RISC-V32 上编译，单元测试在 64 位与 32 位上运行 | ✅ |
-| ISA-1–3 | 内核移植到 AArch64、RISC-V64、RISC-V32 并在各自的 QEMU 上复跑全部验收 | ⬜ |
+| ISA-1a | AArch64 移植第一阶段（QEMU `virt`）：设备树驱动的启动（EL2→EL1）、早期页表与 MMU、PL011、GICv2、通用定时器、异常向量、调度与抢占、4 级页表与独立地址空间、EL0 与 `svc` 系统调用；内核侧验收（启动 / 异常 / 时钟 / 调度 / 机制 / 内存 / 用户态探针 / 系统调用 / 进程 / 句柄 / 回滚 / 优先级继承）在 `qemu-system-aarch64` 上逐项通过 | ✅ |
+| ISA-1b–3 | AArch64 上的用户程序与运行时；RISC-V64、RISC-V32 移植；各自在 QEMU 上复跑全部验收 | ⬜ |
 | M5.1 | 装载并运行最小非特权程序（ELF）：Ring 3 运行；读内核内存 / 特权指令 / 无效指令只终止该进程；坏系统调用指针被拒；多线程进程终止（含内核内阻塞的线程）与父进程等待；页帧 / 对象全部回收 | ✅ |
 | J-1 | 用户态最小运行时 `jasper-rt`（`no_std` + `alloc`）：程序入口与 panic 处理、按需增长的堆（新增 `system.memory.map` / `unmap`）、线程、Channel、异步环；用它写成的普通 Rust 程序在 Ring 3 通过成功与失败路径检查 | ✅ |
 | J-2 | 现有 Rust 库的可移植性：sha2、crc、miniz_oxide、smoltcp（环回 TCP）在用户态通过已知答案测试；形成可移植性清单 | ✅ |

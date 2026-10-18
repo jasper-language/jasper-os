@@ -31,7 +31,8 @@ use kernel_core::pressure::PressureLevel;
 
 use crate::mm::{frame, pressure};
 use crate::proc::{self, CpuLimitError, MemError, ProcState};
-use crate::rt_demo::{baseline, finish_program, rt_calls, start_program};
+use crate::baseline::baseline;
+use crate::rt_demo::{finish_program, rt_calls, start_program};
 use crate::sched::policy::{CpuLimit, Qos, CPU_BURST_TICKS};
 use crate::sched::scheduler::{GroupError, SpawnError};
 use crate::syscall::{table as abi, SyscallSet};

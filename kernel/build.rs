@@ -6,7 +6,8 @@
 //! * 登记表格式错误、ID 重复、名字重复、名字违反命名约定（`kernel_core::abi::validate`）
 //! * 已冻结（`abi/system-ids.lock`）的条目被删除、改号、改名或改种类（`kernel_core::abi::check_frozen`）
 //!
-//! 另外构建内嵌的用户程序（`user/hello`），产物以 `include_bytes!` 装进内核镜像。
+//! 另外（特性 `user-programs` 开启时）构建内嵌的用户程序（目前只有 x86_64 版本），产物以 `include_bytes!` 装进内核镜像；
+//! 目标为 AArch64 时为内核二进制指定链接脚本（没有引导器，装载地址与段布局由脚本固定）。
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -55,7 +56,15 @@ fn main() {
     let dest = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("abi_generated.rs");
     std::fs::write(dest, out).expect("写入生成代码失败");
 
-    build_user_programs(&root);
+    if std::env::var_os("CARGO_FEATURE_USER_PROGRAMS").is_some() {
+        build_user_programs(&root);
+    }
+    // AArch64 没有引导器，内核 ELF 由固件或仿真器直接装载：用本仓库的链接脚本固定装载地址与段布局。
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64") {
+        let script = root.join("kernel/link-aarch64.ld");
+        println!("cargo:rerun-if-changed={}", script.display());
+        println!("cargo:rustc-link-arg-bins=-T{}", script.display());
+    }
 }
 
 /// 构建内嵌的用户程序：用独立的 target 目录调用 cargo，避免与外层构建争用同一目录的锁；

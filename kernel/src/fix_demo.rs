@@ -281,9 +281,9 @@ fn kernel_space_prepare() {
     let refused = space::ready_from(Err(MapError::OutOfFrames));
     let fresh = VmSpace::new().is_ok();
 
-    check(real_ready.is_ok() && real_used == 256, "内核空间准备结果不正确");
+    check(real_ready.is_ok() && real_used == arch::KERNEL_PART_ENTRIES, "内核空间准备结果不正确");
     check(r_fail == Err(MapError::OutOfFrames) && untouched && returned, "预分配失败后顶级表被改动或帧未归还");
-    check(r_ok == Ok(256) && filled == 256, "预分配成功路径不完整");
+    check(r_ok == Ok(arch::KERNEL_PART_ENTRIES) && filled == arch::KERNEL_PART_ENTRIES, "预分配成功路径不完整");
     check(back, "预分配演练后页帧未回到基线");
     check(refused == Err(MapError::OutOfFrames) && fresh, "准备失败状态未拒绝，或正常状态下创建地址空间失败");
     kprintln!(

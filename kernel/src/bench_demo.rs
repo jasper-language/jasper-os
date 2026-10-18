@@ -34,7 +34,8 @@ use kernel_core::sync::SpinLock;
 
 use crate::mm::{frame, heap};
 use crate::proc::ProcState;
-use crate::rt_demo::{baseline, rt_calls, run_program_arg};
+use crate::baseline::baseline;
+use crate::rt_demo::{rt_calls, run_program_arg};
 use crate::task::TaskId;
 use crate::{arch, config, kprintln, sched};
 

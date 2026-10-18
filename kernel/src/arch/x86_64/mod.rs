@@ -46,6 +46,9 @@ impl Platform for X86_64 {
 
     const USER_WINDOW: (u64, u64) = space::USER_WINDOW;
 
+    /// 高半区：PML4 下标 256..512。
+    const KERNEL_PART_ENTRIES: usize = 256;
+
     fn console_init() {
         uart::init();
     }

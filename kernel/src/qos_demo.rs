@@ -22,7 +22,8 @@
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use crate::proc::ProcState;
-use crate::rt_demo::{baseline, rt_calls, run_program};
+use crate::baseline::baseline;
+use crate::rt_demo::{rt_calls, run_program};
 use crate::sched::policy::Qos;
 use crate::sched::scheduler::{QosError, SpawnError};
 use crate::syscall::{table as abi, SyscallSet};

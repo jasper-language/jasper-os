@@ -14,6 +14,7 @@
 //! * `mm`       —— 内存管理：物理页帧分配（M2.1），后续页表与内核堆
 //! * `kmain`    —— 架构无关的内核主流程；`main.rs` 只是引导适配层
 //! * `panic`    —— 全二进制唯一的 `#[panic_handler]`
+//! * `*_demo`   —— 验收演练；运行内嵌用户程序的演练只在特性 `user-programs` 开启时编译
 //!
 //! Core（除 `arch/` 外的一切）不得出现 ISA 专有代码，由 `verify-m1.4b.sh` 机械检查。
 #![no_std]
@@ -22,6 +23,7 @@
 extern crate alloc;
 
 pub mod arch;
+pub mod baseline;
 pub mod boot;
 pub mod clock;
 pub mod config;
@@ -30,6 +32,7 @@ pub mod console;
 pub mod exit_state;
 pub mod fault;
 pub mod ipc;
+#[cfg(feature = "user-programs")]
 pub mod ipc_demo;
 pub mod irq;
 pub mod kmain;
@@ -39,12 +42,18 @@ pub mod ktrace;
 pub mod mech_demo;
 pub mod panic;
 pub mod proc;
+#[cfg(feature = "user-programs")]
 pub mod prog_demo;
 pub mod ring;
+#[cfg(feature = "user-programs")]
 pub mod ring_demo;
+#[cfg(feature = "user-programs")]
 pub mod rt_demo;
+#[cfg(feature = "user-programs")]
 pub mod qos_demo;
+#[cfg(feature = "user-programs")]
 pub mod overload_demo;
+#[cfg(feature = "user-programs")]
 pub mod bench_demo;
 pub mod pi_demo;
 pub mod sched;

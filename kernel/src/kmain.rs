@@ -6,7 +6,9 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{bench_demo, clock, config, fix_demo, ipc_demo, irq, kprintln, mech_demo, mm, overload_demo, pi_demo, prog_demo, qos_demo, ring_demo, rt_demo, sched, user_demo};
+use crate::{clock, config, fix_demo, irq, kprint, kprintln, mech_demo, mm, pi_demo, sched, user_demo};
+#[cfg(feature = "user-programs")]
+use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, rt_demo};
 
 /// 内核版本（横幅中输出）。
 pub const VERSION: &str = "0.0.1";
@@ -92,60 +94,70 @@ pub fn start(boot: &'static BootSpec) -> ! {
     // M3.4：进程 / 线程对象（同一进程两个线程、句柄、退出与回收）。
     user_demo::run_process();
     // M5.1-pre：从 ELF 文件装载并运行用户程序。
+    #[cfg(feature = "user-programs")]
     user_demo::run_elf();
     // M4.1：对象生命周期（外部所有权 / 内部引用 / 清理过程级联）。
+    #[cfg(feature = "user-programs")]
     user_demo::run_lifecycle();
     // M4.2：Handle/Rights（duplicate/restrict 只降权；跨进程原子转移）。
     user_demo::run_handles();
     // 基础设施修复的回归演练：失败路径与回滚。
     fix_demo::run();
-    // M4.3：用户态异步环（提交 → 完成；完成信用；取消；closing；配额）。
-    ring_demo::run();
-    // M4.4：IPC Channel（send/recv 经 ring；两阶段 send；原子交付；取消竞争；页帧固定）。
-    ipc_demo::run();
-    // M5.1：最小非特权程序（特权级 3、隔离、用户异常、坏指针、进程终止与等待、完全回收）。
-    prog_demo::run();
-    // J-1：用户态运行时（匿名内存系统调用；用运行时写成的普通 Rust 程序：堆、线程、Channel、异步环）。
-    rt_demo::run();
-    // SCHED-1：服务质量分级调度（档位规则、动态任务数、过载下的唤醒延迟、压力撤销后恢复）。
-    qos_demo::run();
+    #[cfg(feature = "user-programs")]
+    {
+        // M4.3：用户态异步环（提交 → 完成；完成信用；取消；closing；配额）。
+        ring_demo::run();
+        // M4.4：IPC Channel（send/recv 经 ring；两阶段 send；原子交付；取消竞争；页帧固定）。
+        ipc_demo::run();
+        // M5.1：最小非特权程序（特权级 3、隔离、用户异常、坏指针、进程终止与等待、完全回收）。
+        prog_demo::run();
+        // J-1：用户态运行时（匿名内存系统调用；用运行时写成的普通 Rust 程序：堆、线程、Channel、异步环）。
+        rt_demo::run();
+        // SCHED-1：服务质量分级调度（档位规则、动态任务数、过载下的唤醒延迟、压力撤销后恢复）。
+        qos_demo::run();
+    }
     // SCHED-2：优先级继承（三任务反转有界、传递继承、拒绝路径、持有者退出、压力撤销后恢复）。
     pi_demo::run();
-    // SCHED-3：过载防护（每进程 CPU 上限、看门狗、内存压力分级准入、压力撤销后回到基线）。
-    overload_demo::run();
-    // T-2：基准（时钟中断、上下文切换、页帧、堆、系统调用、异步环、IPC 往返）与按预算评估参数取值。
-    bench_demo::run();
-    let fails = [
-        mm::demo::failed(),
-        user_demo::failed(),
-        fix_demo::failed(),
-        ring_demo::failed(),
-        ipc_demo::failed(),
-        prog_demo::failed(),
-        rt_demo::failed(),
-        qos_demo::failed(),
-        pi_demo::failed(),
-        overload_demo::failed(),
-        bench_demo::failed(),
+    #[cfg(feature = "user-programs")]
+    {
+        // SCHED-3：过载防护（每进程 CPU 上限、看门狗、内存压力分级准入、压力撤销后回到基线）。
+        overload_demo::run();
+        // T-2：基准（时钟中断、上下文切换、页帧、堆、系统调用、异步环、IPC 往返）与按预算评估参数取值。
+        bench_demo::run();
+    }
+    // 各演练的断言失败数（顺序即输出顺序）；未编译的演练不出现。
+    let fails: &[(&str, u32)] = &[
+        ("mm", mm::demo::failed()),
+        ("user", user_demo::failed()),
+        ("fix", fix_demo::failed()),
+        #[cfg(feature = "user-programs")]
+        ("ring", ring_demo::failed()),
+        #[cfg(feature = "user-programs")]
+        ("ipc", ipc_demo::failed()),
+        #[cfg(feature = "user-programs")]
+        ("prog", prog_demo::failed()),
+        #[cfg(feature = "user-programs")]
+        ("rt", rt_demo::failed()),
+        #[cfg(feature = "user-programs")]
+        ("qos", qos_demo::failed()),
+        ("pi", pi_demo::failed()),
+        #[cfg(feature = "user-programs")]
+        ("overload", overload_demo::failed()),
+        #[cfg(feature = "user-programs")]
+        ("bench", bench_demo::failed()),
     ];
-    if fails.iter().any(|&f| f > 0) {
-        kprintln!(
-            "[JSR-EXIT] failure mm_failed={} user_failed={} fix_failed={} ring_failed={} ipc_failed={} prog_failed={} rt_failed={} qos_failed={} pi_failed={} overload_failed={} bench_failed={}",
-            fails[0],
-            fails[1],
-            fails[2],
-            fails[3],
-            fails[4],
-            fails[5],
-            fails[6],
-            fails[7],
-            fails[8],
-            fails[9],
-            fails[10]
-        );
+    if fails.iter().any(|&(_, f)| f > 0) {
+        kprint!("[JSR-EXIT] failure");
+        for (name, f) in fails {
+            kprint!(" {}_failed={}", name, f);
+        }
+        kprintln!();
         arch::exit_emulator(ExitStatus::Failure);
     }
-
+    // 未内嵌用户程序时如实说明：依赖用户程序的演练没有运行。
+    if !cfg!(feature = "user-programs") {
+        kprintln!("[JSR-STAGE] user_programs=absent skipped=elf,lifecycle,ring,ipc,prog,rt,qos,overload,bench");
+    }
     kprintln!("[JSR-EXIT] success");
     arch::exit_emulator(ExitStatus::Success)
 }

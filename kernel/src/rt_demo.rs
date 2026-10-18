@@ -21,8 +21,9 @@ use kernel_core::frame::FRAME_SIZE;
 use kernel_core::objtable::ObjId;
 use kernel_core::paging::{MapError, MapFlags};
 
+use crate::baseline::baseline;
 use crate::kobj;
-use crate::mm::{frame, pin};
+use crate::mm::frame;
 use crate::proc::{self, MemError, ProcError, ProcState, MAX_PROCESS_FRAMES};
 use crate::syscall::{table as abi, SyscallSet};
 use crate::{arch, kprintln, sched};
@@ -83,26 +84,6 @@ pub(crate) fn rt_calls() -> SyscallSet {
         abi::SYSTEM_MEMORY_UNMAP,
         abi::SYSTEM_MEMORY_PROTECT,
     ])
-}
-
-/// 资源基线：用例前后比较，判定没有泄漏。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Baseline {
-    /// 空闲页帧数。
-    pub(crate) free_frames: usize,
-    /// 存活内核对象数。
-    pub(crate) objects: usize,
-    /// 清理队列中待处理的对象数。
-    pub(crate) pending: usize,
-    /// 固定帧统计。
-    pub(crate) pins: (usize, usize),
-}
-
-/// 先跑完清理过程，再读取资源基线。
-pub(crate) fn baseline() -> Baseline {
-    kobj::run_cleanup(usize::MAX);
-    let (objects, pending, _) = kobj::stats();
-    Baseline { free_frames: frame::free_frames(), objects, pending, pins: pin::stats() }
 }
 
 fn reap(pid: ObjId) -> Option<i64> {

@@ -12,6 +12,8 @@
 //! * [`elf`]    —— ELF64 静态可执行文件解析与校验（M5.1-pre，机器类型由调用者给出）
 //! * [`frame`]  —— 物理页帧分配（与引导协议无关的内存图 + 位图分配器，M2.1）
 //! * [`paging`] —— 架构无关的页映射契约（虚拟页、中立权限位、PageMapper，M2.2）
+//! * [`pagetable`] —— 多级基数页表的通用遍历（表项位格式与表内存访问由各 ISA 注入）
+//! * [`fdt`]    —— 扁平设备树的只读解析（内存图、设备寄存器地址；固件输入按不可信处理）
 //! * [`heap`]   —— 堆分配算法（按地址排序空闲链表 + 首次适配 + 合并，M2.3）
 //! * [`io`]     —— 异步 I/O 的**唯一**形态：提交 → 完成（ring）；后端可替换
 //! * [`async_ring`] —— 异步环的请求状态机：请求 ID、完成信用、终态裁决与事件依赖、取消、历史窗口、closing
@@ -41,12 +43,14 @@ pub mod bench;
 pub mod async_ring;
 pub mod config;
 pub mod elf;
+pub mod fdt;
 pub mod frame;
 pub mod heap;
 pub mod io;
 pub mod memory;
 pub mod meta;
 pub mod paging;
+pub mod pagetable;
 pub mod pressure;
 pub mod ring_abi;
 pub mod sched;

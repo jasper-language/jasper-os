@@ -429,6 +429,7 @@ pub fn run_process() {
 }
 
 /// 内嵌的用户程序 `user-hello`（由 `kernel/build.rs` 构建的独立静态 ELF）。
+#[cfg(feature = "user-programs")]
 static USER_HELLO: &[u8] = include_bytes!(env!("JSR_USER_HELLO"));
 
 /// 运行 M5.1-pre 演练：从 ELF 文件装载并运行用户程序。
@@ -438,6 +439,7 @@ static USER_HELLO: &[u8] = include_bytes!(env!("JSR_USER_HELLO"));
 /// 3. 程序经 `system.console.write` 输出中文问候与 BSS 检查结果，经 `system.task.exit(0)` 退出
 ///    （BSS 未清零时程序以退出码 3 退出，验收即失败）
 /// 4. 进程回收后空闲帧回到基线
+#[cfg(feature = "user-programs")]
 pub fn run_elf() {
     use crate::proc::{self, ProcState};
     let free_before = frame::free_frames();
@@ -488,6 +490,7 @@ pub fn run_elf() {
 /// 5. reap 释放创建者所有权 ⇒ Process 死亡**只入清理队列**，不就地销毁
 /// 6. 清理过程每轮 1 个：销毁 Process 时释放线程表引用 ⇒ Task 死亡入队（级联、迭代、不递归）；下一轮销毁 Task
 /// 7. 对象数、清理队列、空闲帧全部回到基线
+#[cfg(feature = "user-programs")]
 pub fn run_lifecycle() {
     use crate::kobj;
     use crate::proc::{self, ProcState};

@@ -165,6 +165,8 @@ bash scripts/accept.sh
 
 另有 `ISA` 一行：`kernel-core` 在 x86_64 / AArch64 / RISC-V64 / RISC-V32 四个裸机目标上编译；单元测试在 x86_64 与 32 位（i686-musl）上运行，
 装有 `qemu-user` 时再在 AArch64 / RISC-V64 上运行（musl 目标 + 自带 `rust-lld` 静态链接）；未运行的会在结果中如实列出。
+另有 `ISA1a` 一行：内核以 `aarch64-unknown-none-softfloat` 构建（不内嵌用户程序），在 `qemu-system-aarch64 -M virt` 上直接装载 ELF 启动，
+同一组内核侧检查在该串口日志上以 `A64/` 前缀逐项重跑。
 
 内核配置档：可调参数（时钟频率、时间片、任务槽位、堆、内存压力、对象与句柄容量、异步环与 IPC 配额等）集中在
 `kernel-core/src/config.rs`，编译期校验；默认 `standard`，`JASPER_PROFILE=compact bash scripts/accept.sh` 以 `compact` 档构建并验收

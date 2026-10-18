@@ -58,7 +58,7 @@ declare -a ROWS=()
 FAILED=0
 # record <里程碑> <PASS|FAIL> <说明>
 record() {
-  ROWS+=("$(printf '%-6s %-4s %s' "$1" "$2" "$3")")
+  ROWS+=("$(printf '%-6s %-4s %s' "${REC_PREFIX:-}$1" "$2" "$3")")
   [ "$2" = "PASS" ] || FAILED=1
 }
 # has <正则>：串口日志里是否出现
@@ -109,6 +109,20 @@ if [ "$BUILD_RC" -eq 0 ]; then
     -serial stdio -display none -monitor none -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL" 2>&1
   QRC=$?
+fi
+# AArch64（ISA-1）：同一内核以软浮点目标构建（不内嵌用户程序），在 QEMU virt 上直接装载 ELF 启动；
+# 退出经半主机（成功 33、失败 35，与 x86_64 一致）。缺少 qemu-system-aarch64 时如实记为失败。
+QEMU_A64="$(command -v qemu-system-aarch64 || true)"
+SERIAL_A64="$OUT/serial-aarch64.log"
+A64_ELF="$ROOT/target/aarch64-unknown-none-softfloat/release/jasper-kernel"
+QRC_A64=-1
+run cargo build --release --target aarch64-unknown-none-softfloat -p jasper-kernel --no-default-features "${KFEAT[@]}" > "$OUT/build-aarch64.log" 2>&1
+A64_BUILD_RC=$?
+if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ]; then
+  echo "== QEMU 真实启动（AArch64）=="
+  run timeout 90 "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -kernel "$A64_ELF" -semihosting \
+    -serial stdio -display none -monitor none -no-reboot > "$SERIAL_A64" 2>&1
+  QRC_A64=$?
 fi
 
 # ---- 阶段 B：逐里程碑检查 ----------------------------------------------------
@@ -568,7 +582,7 @@ check_t2() {    # 基准：宿主统计/取值测试；周期计数器校准；�
 check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出接收方、堆扩容、内核空间预分配、只读翻译、ID 用尽、线程创建）
   if has 'exited_receiver grant=Some\(Exited\) grant_new=Some\(Exited\) transfer=Some\(Exited\) objects_unchanged=true sender_kept=true reaped_receiver=Some\(NoSuchProcess\)' \
      && has 'heap fail_alloc=Some\(OutOfFrames\) rolled_back=true fail_map=Some\(MapFailed\) rolled_back=true overflow=Some\(LimitReached\) regrow=true reclaimed=true' \
-     && has 'kernel_space ready=true used=256 fail=Some\(OutOfFrames\) untouched=true frames_returned=true ok=Some\(256\) reclaimed=true refuse_when_unready=true' \
+     && has "kernel_space ready=true used=${KPART:-256} fail=Some\\(OutOfFrames\\) untouched=true frames_returned=true ok=Some\\(${KPART:-256}\\) reclaimed=true refuse_when_unready=true" \
      && has 'translate same_as_mapper=true unmapped_none=true kernel_not_user=true reclaimed=true' \
      && has 'ids last=Some\(18446744073709551615\) after_exhausted=None again=None no_wrap=true' \
      && has 'spawn zero_stack=Some\(Map\(InvalidAddress\)\) objects_full=Some\(NoTaskSlot\) restored=true sched_full=Some\(NoTaskSlot\) \(fillers [1-9][0-9]*\) restored=true retry_exit=Some\(Exited \{ code: 42 \}\)' \
@@ -580,20 +594,43 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix
+check_isa1a() { # AArch64 移植第一阶段：同一组内核侧检查在 qemu-system-aarch64 的串口日志上逐项重跑（行名带 A64/ 前缀）
+  local saved_serial="$SERIAL" saved_qrc="$QRC" before=${#ROWS[@]} i bad=0 n
+  if [ "$A64_BUILD_RC" -ne 0 ] || [ -z "$QEMU_A64" ] || [ ! -s "$SERIAL_A64" ]; then
+    record ISA1a FAIL "AArch64 构建 rc=$A64_BUILD_RC 或缺少 qemu-system-aarch64 / 串口日志（见 build-aarch64.log）"
+    return
+  fi
+  SERIAL="$SERIAL_A64"; QRC="$QRC_A64"; REC_PREFIX="A64/"; KPART=128
+  check_m11; check_m12; check_m13; check_m14; check_m15; check_m21; check_m22; check_m23; check_m24
+  check_m31; check_m32; check_m33; check_m34; check_m42; check_fix; check_sched2
+  SERIAL="$saved_serial"; QRC="$saved_qrc"; REC_PREFIX=""; unset KPART
+  n=$(( ${#ROWS[@]} - before ))
+  for (( i = before; i < ${#ROWS[@]}; i++ )); do
+    [[ "${ROWS[$i]}" == *" PASS "* ]] || bad=$((bad + 1))
+  done
+  if [ "$bad" -eq 0 ] && grep -qE '^\[JSR-BOOT\] jasper-os rust kernel [0-9.]+ aarch64' "$SERIAL_A64" \
+     && grep -q '^\[JSR-VEC\] ok' "$SERIAL_A64" \
+     && grep -q '^\[JSR-STAGE\] user_programs=absent ' "$SERIAL_A64"; then
+    record ISA1a PASS "AArch64（QEMU virt，QEMU=$QRC_A64）：$n 项内核侧检查全部通过（启动/异常/时钟/调度/抢占/机制/页帧/映射/堆/地址空间/EL0/系统调用/用户指针/进程/句柄/回滚/优先级继承）；内嵌用户程序的演练待下一阶段"
+  else
+    record ISA1a FAIL "AArch64：$n 项中 $bad 项失败，或缺少横幅 / 向量表 / 阶段标记（见 serial-aarch64.log）"
+  fi
+}
+
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {
   echo "jasper-os 一键验收  $TS"
   echo "提交：$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$(git -C "$ROOT" diff --quiet 2>/dev/null || echo '（工作区有未提交改动）')"
   echo "配置档：$PROFILE"
-  echo "QEMU 退出码：$QRC"
+  echo "QEMU 退出码：$QRC（AArch64：$QRC_A64）"
   echo
   printf '%-6s %-4s %s\n' "里程碑" "结果" "说明"
   printf '%s\n' "${ROWS[@]}"
 } | tee "$OUT/summary.txt"
 
-for f in cargo-test.log build.log serial.log summary.txt; do
+for f in cargo-test.log build.log serial.log serial-aarch64.log summary.txt; do
   [ -s "$OUT/$f" ] || { echo "✗ 证据文件为空或缺失：$f"; FAILED=1; }
 done
 echo

@@ -17,10 +17,15 @@
 
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
+#[cfg(target_arch = "aarch64")]
+pub mod aarch64;
 
 /// 当前编译目标的平台实现。
 #[cfg(target_arch = "x86_64")]
 pub use self::x86_64::X86_64 as Current;
+/// 当前编译目标的平台实现。
+#[cfg(target_arch = "aarch64")]
+pub use self::aarch64::Aarch64 as Current;
 
 /// 当前平台的任务上下文类型（切换时需要保存的寄存器集合）。
 pub type TaskContext = <Current as Platform>::TaskContext;
@@ -30,6 +35,8 @@ pub type Mapper = <Current as Platform>::Mapper;
 pub type SpaceRoot = <Current as Platform>::SpaceRoot;
 /// 每个地址空间私有的虚拟窗口，见 [`Platform::USER_WINDOW`]。
 pub const USER_WINDOW: (u64, u64) = <Current as Platform>::USER_WINDOW;
+/// 内核共享部分的顶级表项数，见 [`Platform::KERNEL_PART_ENTRIES`]。
+pub const KERNEL_PART_ENTRIES: usize = <Current as Platform>::KERNEL_PART_ENTRIES;
 
 /// 用户态探针程序（M3.1 验收用的最小用户代码；每个 ISA 各自提供机器码）。
 ///
@@ -83,6 +90,10 @@ pub trait Platform {
 
     /// 每个地址空间私有的虚拟窗口 `[start, end)`；窗口外的映射在所有空间共享（内核部分）。
     const USER_WINDOW: (u64, u64);
+
+    /// 内核共享部分（[`Platform::prepare_kernel_space`] 预分配的范围）的顶级表项数。
+    /// Number of top-level entries in the shared kernel part.
+    const KERNEL_PART_ENTRIES: usize;
 
     /// 空上下文（`const`，供静态任务表初始化）。
     const EMPTY_CONTEXT: Self::TaskContext;
