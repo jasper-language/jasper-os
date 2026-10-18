@@ -46,3 +46,7 @@
 16	op	system.process.exit	1	irreversible	进程·退出（终止全部线程）
 17	op	system.task.wait	1	read	任务·等待退出
 18	op	system.process.wait	1	read	进程·等待退出
+19	op	system.memory.map	1	write	内存·映射匿名页
+20	op	system.memory.unmap	1	write	内存·取消映射
+4115	error	system.memory.error.already_mapped	1	none	地址已有映射
+4116	error	system.memory.error.out_of_memory	1	none	物理内存不足

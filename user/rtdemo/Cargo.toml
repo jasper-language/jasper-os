@@ -1,0 +1,16 @@
+# user-rtdemo —— 用户态运行时（jasper-rt）的验收程序：普通 Rust 代码（alloc 集合、格式化、闭包、线程、Channel、异步环），
+# 只经运行时与内核交互；入口参数 role 选择用例组（见 src/main.rs 的文档表）。
+[package]
+name = "user-rtdemo"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "user-rtdemo"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+jasper-rt = { path = "../rt" }

@@ -372,6 +372,26 @@ check_m51() {   # 最小非特权程序：特权级 3；读内核内存只杀该
   fi
 }
 
+check_j1() {    # 用户态运行时：匿名内存系统调用（全有或全无、配额、权限）；用运行时写成的 Rust 程序（堆/线程/Channel/ring）以 0 退出；panic 与栈溢出只终止该进程；回到基线
+  if has 'memory map=Ok\(\(\)\) zeroed=true user_rw_nx=true overlap=Err\(AlreadyMapped\) partial=Err\(AlreadyMapped\) untouched=true' \
+     && has 'memory hole=Err\(NotMapped\) bad_ranges_refused=true readonly=true quota_chunks=[1-9][0-9]* refused=Some\(Quota\) no_charge=true' \
+     && has 'memory exited_refused=Err\(NoSuchProcess\) reclaimed=true' \
+     && has 'text=rtdemo: heap after_free total=([0-9]+) free=\1 blocks=1' \
+     && has 'text=rtdemo: channel roundtrips=4 handle_returned=true' \
+     && has 'text=rtdemo: ring cancelled_ok=true wait_task=55' \
+     && has 'text=rtdemo: ok checks=[0-9]+' \
+     && has 'case=rt-main exit=Some\(0\) expect=0 reclaimed=true' \
+     && has 'task=rt-panic bytes=[0-9]+ text=panic: panicked at ' \
+     && has 'case=rt-panic exit=Some\(101\) expect=101 reclaimed=true' \
+     && has 'case=rt-overflow exit=Some\(-1\) expect=-1 reclaimed=true' \
+     && has '^\[JSR-RT\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 pending=0 pinned=\(0, 0\) reclaimed=true checks=[0-9]+ failed=0' \
+     && ! has 'JSR-RT-FAIL'; then
+    record J-1 PASS "匿名内存 map/unmap 全有或全无、配额与权限；运行时程序（堆增长与回收、线程、Channel 字节+句柄往返、ring 取消与等待）以 0 退出；panic=101、栈溢出只终止该进程；回到基线"
+  else
+    record J-1 FAIL "缺少 JSR-RT / rtdemo 关键标记或 failed≠0"
+  fi
+}
+
 check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出接收方、堆扩容、内核空间预分配、只读翻译、ID 用尽、线程创建）
   if has 'exited_receiver grant=Some\(Exited\) grant_new=Some\(Exited\) transfer=Some\(Exited\) objects_unchanged=true sender_kept=true reaped_receiver=Some\(NoSuchProcess\)' \
      && has 'heap fail_alloc=Some\(OutOfFrames\) rolled_back=true fail_map=Some\(MapFailed\) rolled_back=true overflow=Some\(LimitReached\) regrow=true reclaimed=true' \
@@ -387,7 +407,7 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_fix
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_fix
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

@@ -1,0 +1,19 @@
+# jasper-rt —— jasper-os 用户态最小运行时（no_std + alloc）：只经 system.* 系统调用与内核交互。
+# 提供程序入口与 panic 处理、按需增长的堆、控制台输出、句柄、线程、时间、匿名内存、Channel 与异步环的封装。
+# 调用号与错误名在构建期从 abi/system-ids.txt 生成；记录布局与内核共用 kernel-core 的 ring_abi。
+[package]
+name = "jasper-rt"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+test = false
+bench = false
+
+[dependencies]
+kernel-core = { path = "../../kernel-core" }
+
+[build-dependencies]
+kernel-core = { path = "../../kernel-core" }

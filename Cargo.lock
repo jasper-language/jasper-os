@@ -215,6 +215,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "jasper-rt"
+version = "0.1.0"
+dependencies = [
+ "kernel-core",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -517,6 +524,13 @@ name = "user-ring"
 version = "0.1.0"
 dependencies = [
  "kernel-core",
+]
+
+[[package]]
+name = "user-rtdemo"
+version = "0.1.0"
+dependencies = [
+ "jasper-rt",
 ]
 
 [[package]]

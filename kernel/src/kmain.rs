@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{clock, fix_demo, ipc_demo, irq, kprintln, mech_demo, mm, prog_demo, ring_demo, sched, user_demo};
+use crate::{clock, fix_demo, ipc_demo, irq, kprintln, mech_demo, mm, prog_demo, ring_demo, rt_demo, sched, user_demo};
 
 /// 内核版本（横幅中输出）。
 pub const VERSION: &str = "0.0.1";
@@ -87,16 +87,27 @@ pub fn start(boot: &'static BootSpec) -> ! {
     ipc_demo::run();
     // M5.1：最小非特权程序（特权级 3、隔离、用户异常、坏指针、进程终止与等待、完全回收）。
     prog_demo::run();
-    let fails = [mm::demo::failed(), user_demo::failed(), fix_demo::failed(), ring_demo::failed(), ipc_demo::failed(), prog_demo::failed()];
+    // J-1：用户态运行时（匿名内存系统调用；用运行时写成的普通 Rust 程序：堆、线程、Channel、异步环）。
+    rt_demo::run();
+    let fails = [
+        mm::demo::failed(),
+        user_demo::failed(),
+        fix_demo::failed(),
+        ring_demo::failed(),
+        ipc_demo::failed(),
+        prog_demo::failed(),
+        rt_demo::failed(),
+    ];
     if fails.iter().any(|&f| f > 0) {
         kprintln!(
-            "[JSR-EXIT] failure mm_failed={} user_failed={} fix_failed={} ring_failed={} ipc_failed={} prog_failed={}",
+            "[JSR-EXIT] failure mm_failed={} user_failed={} fix_failed={} ring_failed={} ipc_failed={} prog_failed={} rt_failed={}",
             fails[0],
             fails[1],
             fails[2],
             fails[3],
             fails[4],
-            fails[5]
+            fails[5],
+            fails[6]
         );
         arch::exit_emulator(ExitStatus::Failure);
     }

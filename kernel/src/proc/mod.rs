@@ -213,6 +213,161 @@ pub fn unmap_page(id: ObjId, va: u64) -> Result<(), ProcError> {
     Ok(())
 }
 
+/// 每个进程最多拥有的数据帧数（ELF 段、栈与匿名映射合计）。
+/// Upper bound on data frames owned by one process (image, stacks and anonymous mappings together).
+pub const MAX_PROCESS_FRAMES: usize = 8192;
+/// 单次 `system.memory.map` / `unmap` 最多涉及的页数。
+pub const MAX_MAP_PAGES: u64 = 1024;
+
+/// 匿名映射 / 取消映射的失败原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemError {
+    /// 起点未按页对齐、页数为 0 或超限、区间越出私有窗口。
+    InvalidRange,
+    /// 区间内已有映射（映射时）。
+    AlreadyMapped,
+    /// 区间内有未映射的页（取消映射时）。
+    NotMapped,
+    /// 超出进程的帧配额。
+    Quota,
+    /// 物理帧或页表帧不足。
+    OutOfMemory,
+    /// 进程不存在或已退出。
+    NoSuchProcess,
+}
+
+/// 检查 `[va, va + pages × 页)` 是否是私有窗口内、按页对齐、页数在限额内的区间。
+fn checked_range(va: u64, pages: u64) -> Result<(), MemError> {
+    if va % FRAME_SIZE != 0 || pages == 0 || pages > MAX_MAP_PAGES {
+        return Err(MemError::InvalidRange);
+    }
+    let end = pages.checked_mul(FRAME_SIZE).and_then(|len| va.checked_add(len)).ok_or(MemError::InvalidRange)?;
+    if !in_private_window(va) || end > arch::USER_WINDOW.1 {
+        return Err(MemError::InvalidRange);
+    }
+    Ok(())
+}
+
+/// 在进程 `pid` 的 `[va, va + pages 页)` 映射清零的匿名页（`writable` 决定可写；匿名页永不可执行）。
+///
+/// **全有或全无**：先在锁外分配并清零全部数据帧，再在锁内复核配额、确认区间内无映射、逐页建立映射；
+/// 任何一步失败都撤销已建立的映射并归还全部数据帧，进程地址空间与帧记账保持调用前的样子
+/// （建页表时新分配的中间页表帧归地址空间所有，随地址空间销毁回收）。
+/// Maps zeroed anonymous pages, all-or-nothing.
+pub fn map_anon(pid: ObjId, va: u64, pages: u64, writable: bool) -> Result<(), MemError> {
+    checked_range(va, pages)?;
+    let n = pages as usize;
+    // 先按当前记账粗查配额，避免为必然失败的请求分配并清零大量帧（锁内仍会复核）。
+    let owned = with_proc(pid, |p| Ok(p.frames.len())).map_err(|_| MemError::NoSuchProcess)?;
+    if owned + n > MAX_PROCESS_FRAMES {
+        return Err(MemError::Quota);
+    }
+    let mut fresh: Vec<PhysFrame> = Vec::new();
+    if fresh.try_reserve_exact(n).is_err() {
+        return Err(MemError::OutOfMemory);
+    }
+    for _ in 0..n {
+        match frame::allocate() {
+            Ok(f) => {
+                if let Some(p) = phys_to_virt(f.start()) {
+                    // SAFETY：刚分出的帧，经全物理内存映射清零。
+                    unsafe { core::ptr::write_bytes(p, 0, FRAME_SIZE as usize) };
+                }
+                fresh.push(f);
+            }
+            Err(_) => {
+                for f in fresh {
+                    let _ = frame::deallocate(f);
+                }
+                return Err(MemError::OutOfMemory);
+            }
+        }
+    }
+    let flags = if writable { MapFlags::USER.union(MapFlags::WRITE) } else { MapFlags::USER };
+    let r = kobj::with(|t| {
+        let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
+        if p.state != ProcState::Running {
+            return Err(MemError::NoSuchProcess);
+        }
+        if p.frames.len() + n > MAX_PROCESS_FRAMES {
+            return Err(MemError::Quota);
+        }
+        if p.frames.try_reserve(n).is_err() {
+            return Err(MemError::OutOfMemory);
+        }
+        for i in 0..pages {
+            if p.space.translate(VirtPage::containing(va + i * FRAME_SIZE)).is_some() {
+                return Err(MemError::AlreadyMapped);
+            }
+        }
+        for (i, f) in fresh.iter().enumerate() {
+            let page = VirtPage::containing(va + i as u64 * FRAME_SIZE);
+            if let Err(e) = p.space.map(page, *f, flags) {
+                for j in 0..i {
+                    let _ = p.space.unmap(VirtPage::containing(va + j as u64 * FRAME_SIZE));
+                }
+                return Err(match e {
+                    MapError::AlreadyMapped => MemError::AlreadyMapped,
+                    MapError::OutOfFrames => MemError::OutOfMemory,
+                    _ => MemError::InvalidRange,
+                });
+            }
+        }
+        p.frames.extend_from_slice(&fresh);
+        Ok(())
+    });
+    if r.is_err() {
+        for f in fresh {
+            let _ = frame::deallocate(f);
+        }
+    }
+    r
+}
+
+/// 取消进程 `pid` 中 `[va, va + pages 页)` 的映射并放弃这些页的数据帧。
+///
+/// **全有或全无**：区间内任一页未映射 ⇒ 什么也不做，返回 [`MemError::NotMapped`]。
+/// 仍被在飞请求固定的帧延后到最后一次解除固定时归还（与 [`unmap_page`] 相同）。
+/// Unmaps a range of pages, all-or-nothing.
+pub fn unmap_range(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
+    checked_range(va, pages)?;
+    let mut gone: Vec<PhysFrame> = Vec::new();
+    if gone.try_reserve_exact(pages as usize).is_err() {
+        return Err(MemError::OutOfMemory);
+    }
+    kobj::with(|t| {
+        let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
+        for i in 0..pages {
+            if p.space.translate(VirtPage::containing(va + i * FRAME_SIZE)).is_none() {
+                return Err(MemError::NotMapped);
+            }
+        }
+        for i in 0..pages {
+            // 上面已确认每页都有映射；单 CPU 上锁内无人能在其间改动这张页表。
+            if let Ok(f) = p.space.unmap(VirtPage::containing(va + i * FRAME_SIZE)) {
+                gone.push(f);
+            }
+        }
+        gone.sort_unstable_by_key(|f| f.start());
+        p.frames.retain(|f| gone.binary_search_by_key(&f.start(), |g| g.start()).is_err());
+        Ok(())
+    })?;
+    for f in gone {
+        crate::mm::pin::release(f);
+    }
+    Ok(())
+}
+
+/// 进程中 `va` 所在页的映射标志（未映射为 `None`；诊断与验收用）。
+pub fn page_flags(pid: ObjId, va: u64) -> Option<MapFlags> {
+    with_proc(pid, |p| Ok(p.space.translate(VirtPage::containing(va)).map(|(_, f)| f))).ok().flatten()
+}
+
+/// 进程当前拥有的数据帧数（诊断与验收用）。
+pub fn frame_count(pid: ObjId) -> Option<usize> {
+    with_proc(pid, |p| Ok(p.frames.len())).ok()
+}
+
 /// 在锁内固定进程 `pid` 的用户区间 `[va, va+len)`：区间须位于私有窗口、每页已映射且带用户权限（`write` 时还须可写）。
 /// 返回的范围此后只经物理映射访问；任一页不满足 ⇒ 不固定任何帧。
 /// Pins a user range of `pid` (all-or-nothing).

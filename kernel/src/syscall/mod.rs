@@ -126,6 +126,8 @@ fn has_handler(id: u32) -> bool {
             | SYSTEM_PROCESS_EXIT
             | SYSTEM_TASK_WAIT
             | SYSTEM_PROCESS_WAIT
+            | SYSTEM_MEMORY_MAP
+            | SYSTEM_MEMORY_UNMAP
     )
 }
 
@@ -248,6 +250,43 @@ fn process_exit(code: u64) -> i64 {
     proc::thread_exit(code as i64, "process.exit")
 }
 
+/// `system.memory.map` 的标志位：映射为可写。其余位必须为 0（匿名页永不可执行）。
+pub const MAP_WRITE: u64 = 1 << 0;
+
+fn mem_err(e: proc::MemError) -> i64 {
+    match e {
+        proc::MemError::InvalidRange => err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS),
+        proc::MemError::NotMapped => err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS),
+        proc::MemError::AlreadyMapped => err(SYSTEM_MEMORY_ERROR_ALREADY_MAPPED),
+        proc::MemError::Quota => err(SYSTEM_ERROR_QUOTA_EXCEEDED),
+        proc::MemError::OutOfMemory => err(SYSTEM_MEMORY_ERROR_OUT_OF_MEMORY),
+        proc::MemError::NoSuchProcess => err(SYSTEM_ERROR_RIGHTS_DENIED),
+    }
+}
+
+/// `system.memory.map(va, pages, flags)`：在调用者进程的私有窗口内、从 `va` 起映射 `pages` 个清零的匿名页，成功返回 0。
+/// 全有或全无；区间内已有映射 ⇒ `already_mapped`；超出进程帧配额 ⇒ `quota_exceeded`。
+fn memory_map(va: u64, pages: u64, flags: u64) -> i64 {
+    if flags & !MAP_WRITE != 0 {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    }
+    let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
+    match proc::map_anon(pid, va, pages, flags & MAP_WRITE != 0) {
+        Ok(()) => 0,
+        Err(e) => mem_err(e),
+    }
+}
+
+/// `system.memory.unmap(va, pages)`：取消调用者进程中 `[va, va + pages 页)` 的映射，成功返回 0。
+/// 全有或全无；区间内有未映射的页 ⇒ `invalid_address`，什么也不改。
+fn memory_unmap(va: u64, pages: u64) -> i64 {
+    let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
+    match proc::unmap_range(pid, va, pages) {
+        Ok(()) => 0,
+        Err(e) => mem_err(e),
+    }
+}
+
 /// `system.time.wait(ticks)` 的同步形式：让出处理器直到时钟前进 `ticks` 个 tick，返回 0。
 /// 同一操作也可经异步环提交（可被取消）；同步形式没有取消路径。
 fn time_wait(ticks: u64) -> i64 {
@@ -311,6 +350,8 @@ fn execute(e: &AbiEntry, a: &SyscallArgs, task_id: u64) -> i64 {
         SYSTEM_PROCESS_EXIT => process_exit(a.args[0]),
         SYSTEM_TASK_WAIT => crate::ring::sys_wait(a.args[0], kernel_core::object::ObjectType::Task),
         SYSTEM_PROCESS_WAIT => crate::ring::sys_wait(a.args[0], kernel_core::object::ObjectType::Process),
+        SYSTEM_MEMORY_MAP => memory_map(a.args[0], a.args[1], a.args[2]),
+        SYSTEM_MEMORY_UNMAP => memory_unmap(a.args[0], a.args[1]),
         _ => err(SYSTEM_ERROR_UNSUPPORTED),
     }
 }
