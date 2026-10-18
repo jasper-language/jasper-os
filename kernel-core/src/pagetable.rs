@@ -6,8 +6,9 @@
 //!   页表所在物理内存的**访问方式**由 [`TableMemory`] 给出（内核经全物理内存映射，宿主测试用内存模拟）。
 //! * 不做 TLB 维护：修改成功后由调用者（各 ISA 的映射器）按本 ISA 的规则刷新。
 //! * 只处理 4 KiB 叶子页；遇到非叶级的大页块一律报 [`MapError::HugePage`]，不拆分、不改动它。
-//! * 每张表 4 KiB、512 个 8 字节表项（AArch64 4 KiB 粒度、RISC-V Sv39/Sv48 均如此）；
-//!   顶级表可以只用前一部分表项（由可用虚拟地址位数决定）。
+//! * 每张表 4 KiB。表项宽度与每级下标位数由位格式给出：默认 512 个 8 字节表项（AArch64 4 KiB 粒度、
+//!   RISC-V Sv39/Sv48），也可以是 1024 个 4 字节表项（RISC-V Sv32）；顶级表可以只用前一部分表项（由可用虚拟地址位数决定）。
+//!   表项在接口上一律以 `u64` 传递，4 字节表项由 [`TableMemory`] 的实现负责截断与零扩展。
 //!
 //! # 失败语义
 //! 所有修改操作都是「全有或全无」：[`PageTable::map`] 中途分配下级表失败时，本次新建的下级表全部摘除并归还；
@@ -19,12 +20,17 @@ use core::ops::Range;
 use crate::frame::{FrameAllocator, PhysFrame, FRAME_SIZE};
 use crate::paging::{MapError, MapFlags};
 
-/// 每张表的表项数。
-pub const ENTRIES: usize = 512;
-/// 每级下标的位数。
-const INDEX_BITS: u32 = 9;
+/// 一张表的字节数（各级相同）。
+/// Size of one page table in bytes.
+pub const TABLE_BYTES: usize = 4096;
 /// 支持的最大级数（含顶级）。
 pub const MAX_LEVELS: usize = 5;
+
+/// 每张表的表项数：表大小除以表项宽度。
+/// Number of entries in one table for the given entry width.
+pub const fn entries_per_table(entry_bytes: usize) -> usize {
+    TABLE_BYTES / entry_bytes
+}
 
 /// 表项位格式（每个 ISA 一个实现）。级别编号：0 = 顶级，`LEVELS - 1` = 叶级。
 /// Entry bit format of one ISA; level 0 is the top level.
@@ -33,6 +39,12 @@ pub trait EntryFormat {
     const LEVELS: usize;
     /// 可用虚拟地址位数：只接受 `[0, 2^VA_BITS)` 内的地址。
     const VA_BITS: u32;
+    /// 每级下标的位数（默认 9；Sv32 为 10）。
+    /// Index bits per level.
+    const INDEX_BITS: u32 = 9;
+    /// 表项宽度（字节；默认 8；Sv32 为 4）。必须与 `TABLE_BYTES / 2^INDEX_BITS` 一致。
+    /// Entry width in bytes.
+    const ENTRY_BYTES: usize = 8;
     /// 表项是否有效。
     fn is_valid(raw: u64) -> bool;
     /// 非叶级的**有效**表项是否指向下级表（否则是大页块）。
@@ -50,9 +62,12 @@ pub trait EntryFormat {
 /// 页表所在物理内存的访问方式。实现者保证：遍历器给出的 `table` 都是有效的 4 KiB 表的物理地址时，读写安全。
 /// Access to the physical memory holding page tables.
 pub trait TableMemory {
-    /// 读表 `table` 的第 `index` 项。
+    /// 表项宽度（字节）：遍历器在编译期检查它与位格式的 [`EntryFormat::ENTRY_BYTES`] 一致。
+    /// Entry width in bytes; checked against the format at compile time.
+    const ENTRY_BYTES: usize;
+    /// 读表 `table` 的第 `index` 项（4 字节表项零扩展）。
     fn read(&self, table: u64, index: usize) -> u64;
-    /// 写表 `table` 的第 `index` 项。
+    /// 写表 `table` 的第 `index` 项（4 字节表项只写低 32 位；遍历器保证高位为 0）。
     fn write(&mut self, table: u64, index: usize, raw: u64);
     /// 把整张表清零。
     fn zero(&mut self, table: u64);
@@ -69,11 +84,19 @@ pub struct PageTable<F, M> {
 impl<F: EntryFormat, M: TableMemory> PageTable<F, M> {
     /// 顶级表实际使用的表项数。
     /// Number of usable entries in the top-level table.
-    pub const TOP_ENTRIES: usize = 1 << (F::VA_BITS - 12 - INDEX_BITS * (F::LEVELS as u32 - 1));
+    pub const TOP_ENTRIES: usize = 1 << (F::VA_BITS - 12 - F::INDEX_BITS * (F::LEVELS as u32 - 1));
+    /// 每张表的表项数。
+    /// Number of entries in every table.
+    pub const ENTRIES: usize = 1 << F::INDEX_BITS;
 
     /// 建立遍历器。`root` 必须是一张有效的顶级表（或清零的空表）。
     /// Create a walker over the tree at `root`.
     pub fn new(root: u64, mem: M) -> Self {
+        const {
+            assert!(F::ENTRY_BYTES == M::ENTRY_BYTES, "位格式与页表内存的表项宽度不一致");
+            assert!(entries_per_table(F::ENTRY_BYTES) == 1 << F::INDEX_BITS, "表项宽度与下标位数不匹配");
+            assert!(F::LEVELS >= 1 && F::LEVELS <= MAX_LEVELS);
+        }
         PageTable { root, mem, _format: PhantomData }
     }
 
@@ -84,8 +107,8 @@ impl<F: EntryFormat, M: TableMemory> PageTable<F, M> {
 
     /// `va` 在第 `level` 级表中的下标。
     fn index(va: u64, level: usize) -> usize {
-        let shift = 12 + INDEX_BITS * (F::LEVELS - 1 - level) as u32;
-        ((va >> shift) as usize) & (ENTRIES - 1)
+        let shift = 12 + F::INDEX_BITS * (F::LEVELS - 1 - level) as u32;
+        ((va >> shift) as usize) & (Self::ENTRIES - 1)
     }
 
     /// 校验虚拟地址：4 KiB 对齐且在 `[0, 2^VA_BITS)` 内。
@@ -214,18 +237,18 @@ impl<F: EntryFormat, M: TableMemory> PageTable<F, M> {
         if top.end > Self::TOP_ENTRIES {
             return Err(MapError::InvalidAddress);
         }
-        // 第一阶段：只分配。链表：每帧第 0 项存下一帧的地址（0 = 链尾；帧 0 永不分配，不会混淆）
+        // 第一阶段：只分配。链表：每帧开头存下一帧的地址（0 = 链尾；帧 0 永不分配，不会混淆）
         let need = top.len() - self.used_top(top.clone());
         let mut head = 0u64;
         for _ in 0..need {
             match frames.allocate() {
                 Ok(f) => {
-                    self.mem.write(f.start(), 0, head);
+                    self.write_link(f.start(), head);
                     head = f.start();
                 }
                 Err(_) => {
                     while head != 0 {
-                        let next = self.mem.read(head, 0);
+                        let next = self.read_link(head);
                         let _ = frames.deallocate(PhysFrame::from_number(head / FRAME_SIZE));
                         head = next;
                     }
@@ -240,12 +263,32 @@ impl<F: EntryFormat, M: TableMemory> PageTable<F, M> {
                 continue;
             }
             let f = head;
-            head = self.mem.read(f, 0);
+            head = self.read_link(f);
             self.mem.zero(f);
             self.mem.write(self.root, i, F::table_entry(f));
             installed += 1;
         }
         Ok(installed)
+    }
+
+    /// 在空闲帧 `table` 开头记下链表的下一帧地址：8 字节表项占第 0 项；4 字节表项按低 / 高 32 位占第 0、1 项
+    /// （物理地址可超过 32 位，例如 Sv32 的 34 位物理地址）。
+    fn write_link(&mut self, table: u64, next: u64) {
+        if F::ENTRY_BYTES >= 8 {
+            self.mem.write(table, 0, next);
+        } else {
+            self.mem.write(table, 0, next & 0xffff_ffff);
+            self.mem.write(table, 1, next >> 32);
+        }
+    }
+
+    /// 读出 [`Self::write_link`] 记下的下一帧地址。
+    fn read_link(&self, table: u64) -> u64 {
+        if F::ENTRY_BYTES >= 8 {
+            self.mem.read(table, 0)
+        } else {
+            self.mem.read(table, 0) | (self.mem.read(table, 1) << 32)
+        }
     }
 
     /// 从另一张顶级表 `src_root` 复制下标区间 `top` 之外的全部顶级表项（共享同一批下级表）。
@@ -278,7 +321,7 @@ impl<F: EntryFormat, M: TableMemory> PageTable<F, M> {
     fn free_subtree(&mut self, table: u64, level: usize, frames: &mut dyn FrameAllocator) -> usize {
         let mut freed = 0;
         if level < F::LEVELS - 1 {
-            for i in 0..ENTRIES {
+            for i in 0..Self::ENTRIES {
                 let e = self.mem.read(table, i);
                 if F::is_valid(e) && F::is_table(e) {
                     freed += self.free_subtree(F::output_address(e), level + 1, frames);
@@ -368,18 +411,20 @@ mod tests {
         }
     }
 
-    /// 模拟物理内存：按帧地址存放的表。
+    /// 模拟物理内存：按帧地址存放的表；`W` 为表项宽度（字节），4 字节表项写入超出 32 位的值即测试失败。
     #[derive(Default)]
-    struct Mem(HashMap<u64, Box<[u64; ENTRIES]>>);
-    impl TableMemory for &mut Mem {
+    struct Mem<const W: usize>(HashMap<u64, Vec<u64>>);
+    impl<const W: usize> TableMemory for &mut Mem<W> {
+        const ENTRY_BYTES: usize = W;
         fn read(&self, t: u64, i: usize) -> u64 {
             self.0.get(&t).map(|x| x[i]).unwrap_or(0)
         }
         fn write(&mut self, t: u64, i: usize, raw: u64) {
-            self.0.entry(t).or_insert_with(|| Box::new([0; ENTRIES]))[i] = raw;
+            assert!(W >= 8 || raw >> 32 == 0, "4 字节表项写入了超出 32 位的值 {raw:#x}");
+            self.0.entry(t).or_insert_with(|| vec![0; entries_per_table(W)])[i] = raw;
         }
         fn zero(&mut self, t: u64) {
-            self.0.insert(t, Box::new([0; ENTRIES]));
+            self.0.insert(t, vec![0; entries_per_table(W)]);
         }
     }
 
@@ -391,7 +436,10 @@ mod tests {
     }
     impl Frames {
         fn new(limit: usize) -> Self {
-            Frames { next: 0x10_0000, limit, live: BTreeSet::new() }
+            Self::starting_at(0x10_1000, limit)
+        }
+        fn starting_at(first: u64, limit: usize) -> Self {
+            Frames { next: first - FRAME_SIZE, limit, live: BTreeSet::new() }
         }
     }
     impl FrameAllocator for Frames {
@@ -418,7 +466,7 @@ mod tests {
         }
     }
 
-    type Pt<'a> = PageTable<TestFormat, &'a mut Mem>;
+    type Pt<'a> = PageTable<TestFormat, &'a mut Mem<8>>;
     const ROOT: u64 = 0x1000;
     const DATA: u64 = 0x9000_0000;
 
@@ -541,7 +589,7 @@ mod tests {
         assert_eq!(kernel.translate(0x1000_0000_0000), None, "窗口内的私有映射不外泄");
     }
 
-    type Pt3<'a> = PageTable<ThreeLevel, &'a mut Mem>;
+    type Pt3<'a> = PageTable<ThreeLevel, &'a mut Mem<8>>;
 
     #[test]
     fn three_level_layout_maps_and_rejects() {
@@ -588,5 +636,85 @@ mod tests {
         space.adopt_top_except(ROOT, 32..64);
         assert_eq!(space.mem.read(0x2000, 64), gigapage, "窗口外的顶级叶子被原样共享");
         assert_eq!(space.used_top(32..64), 0, "私有窗口为空");
+    }
+
+    /// 2 级、32 位、每级 10 位下标、4 字节表项（RISC-V Sv32 的形状）：物理页号放在位 10 起（同 Sv32），
+    /// 因此 32 位表项能表示 34 位物理地址；其余位与 [`TestFormat`] 相同。
+    struct TwoLevel32;
+    impl EntryFormat for TwoLevel32 {
+        const LEVELS: usize = 2;
+        const VA_BITS: u32 = 32;
+        const INDEX_BITS: u32 = 10;
+        const ENTRY_BYTES: usize = 4;
+        fn is_valid(raw: u64) -> bool {
+            TestFormat::is_valid(raw)
+        }
+        fn is_table(raw: u64) -> bool {
+            TestFormat::is_table(raw)
+        }
+        fn table_entry(p: u64) -> u64 {
+            ((p >> 12) << 10) | 3
+        }
+        fn leaf_entry(p: u64, f: MapFlags) -> u64 {
+            TestFormat::leaf_entry(0, f) | ((p >> 12) << 10)
+        }
+        fn output_address(raw: u64) -> u64 {
+            ((raw & 0xffff_ffff) >> 10) << 12
+        }
+        fn leaf_flags(raw: u64) -> MapFlags {
+            TestFormat::leaf_flags(raw & 0x3ff)
+        }
+    }
+
+    type Pt2<'a> = PageTable<TwoLevel32, &'a mut Mem<4>>;
+
+    #[test]
+    fn two_level_32bit_layout_maps_high_physical_frames() {
+        assert_eq!(Pt2::TOP_ENTRIES, 1024, "32 位 2 级 ⇒ 顶级 1024 项（每项 4 MiB）");
+        assert_eq!(Pt2::ENTRIES, 1024);
+        let mut mem = Mem::<4>::default();
+        // 页表帧与数据帧都在 4 GiB 之上（34 位物理地址）
+        let mut frames = Frames::starting_at(0x3_0000_0000, 16);
+        let mut pt = Pt2::new(ROOT, &mut mem);
+        let f = PhysFrame::from_start(0x3_8765_4000).unwrap();
+        let va = 0x0040_0000u64 + 0x5000; // 私有窗口（顶级 1..256）内
+        pt.map(va, f, MapFlags::WRITE | MapFlags::USER, &mut frames).unwrap();
+        assert_eq!(frames.live.len(), 1, "2 级只新建 1 张下级表");
+        assert_eq!(pt.translate(va + 0x123), Some((f, MapFlags::WRITE | MapFlags::USER)), "34 位物理地址原样往返");
+        assert_eq!(pt.used_top(1..256), 1);
+        // 失败路径：超出 32 位、未对齐、重复映射 —— 拒绝且不分配、不改动
+        assert_eq!(pt.map(1 << 32, f, MapFlags::WRITE, &mut frames), Err(MapError::InvalidAddress));
+        assert_eq!(pt.map(va + 2, f, MapFlags::WRITE, &mut frames), Err(MapError::InvalidAddress));
+        assert_eq!(pt.map(va, f, MapFlags::WRITE, &mut frames), Err(MapError::AlreadyMapped));
+        assert_eq!(pt.translate(u64::MAX - 0xfff), None);
+        assert_eq!(frames.live.len(), 1);
+        assert_eq!(pt.used_top(0..1024), 1);
+        assert_eq!(pt.unmap(va), Ok(f));
+        assert_eq!(pt.free_tables(1..256, &mut frames), 1);
+        assert!(frames.live.is_empty(), "下级表全部回收");
+    }
+
+    #[test]
+    fn two_level_32bit_prealloc_links_frames_above_4gib() {
+        let mut mem = Mem::<4>::default();
+        let mut pt = Pt2::new(ROOT, &mut mem);
+        // 帧跨越 4 GiB 边界：链表指针必须完整保存 34 位地址
+        let mut short = Frames::starting_at(0xffff_e000, 127);
+        assert_eq!(pt.prealloc_top(576..704, &mut short), Err(MapError::OutOfFrames));
+        assert!(short.live.is_empty(), "失败时帧全部归还（含 4 GiB 之上的帧）");
+        assert_eq!(pt.used_top(0..1024), 0, "顶级表未被改动");
+        let mut enough = Frames::starting_at(0xffff_e000, 1000);
+        assert_eq!(pt.prealloc_top(576..704, &mut enough), Ok(128));
+        assert_eq!(pt.used_top(576..704), 128);
+        let mut tables: Vec<u64> = (576..704).map(|i| TwoLevel32::output_address(pt.mem.read(ROOT, i))).collect();
+        tables.sort();
+        tables.dedup();
+        assert_eq!(tables.len(), 128, "每项一张不同的下级表");
+        assert!(tables.iter().any(|&t| t >= 1 << 32), "部分下级表位于 4 GiB 之上");
+        assert!(tables.iter().all(|&t| enough.live.contains(&t)), "安装的都是本次分配的帧");
+        for &t in &tables {
+            assert_eq!((pt.mem.read(t, 0), pt.mem.read(t, 1)), (0, 0), "链表指针不残留");
+        }
+        assert_eq!(pt.prealloc_top(0..1025, &mut enough), Err(MapError::InvalidAddress));
     }
 }

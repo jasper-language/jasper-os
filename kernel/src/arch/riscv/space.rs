@@ -15,22 +15,15 @@ use kernel_core::pagetable::PageTable;
 
 use super::cpu::{self, read_csr, write_csr};
 use super::mmu;
-use super::paging::{PhysTables, Sv39Table};
+use super::mode::{KERNEL_FIRST, KERNEL_LAST, TOP_SHIFT, USER_FIRST, USER_LAST};
+use super::paging::{PhysTables, RvTable};
 
-/// 私有窗口的第一个顶级下标（含）：`0x8_0000_0000`。
-pub const USER_FIRST: usize = 32;
-/// 私有窗口的最后一个顶级下标（不含）：`0x10_0000_0000`。
-pub const USER_LAST: usize = 64;
-/// 私有窗口对应的虚拟地址区间 `[start, end)`（32 GiB）。
-pub const USER_WINDOW: (u64, u64) = ((USER_FIRST as u64) << 30, (USER_LAST as u64) << 30);
-// 用户态运行时与用户程序的链接地址按同一数值布局：两边必须一致。
-const _: () = assert!(USER_WINDOW.0 == kernel_core::user_layout::WINDOW_BASE_RISCV64);
-/// 内核共享部分的第一个顶级下标（含）。
-pub const KERNEL_FIRST: usize = 128;
-/// 内核共享部分的最后一个顶级下标（不含）= 低半区的顶级表项数。
-pub const KERNEL_LAST: usize = Sv39Table::TOP_ENTRIES;
+/// 私有窗口对应的虚拟地址区间 `[start, end)`（Sv39：32 GiB；Sv32：约 1 GiB）。
+pub const USER_WINDOW: (u64, u64) = ((USER_FIRST as u64) << TOP_SHIFT, (USER_LAST as u64) << TOP_SHIFT);
+// 内核共享部分必须位于顶级表的可用范围内。
+const _: () = assert!(KERNEL_FIRST < KERNEL_LAST && KERNEL_LAST <= RvTable::TOP_ENTRIES);
 /// satp 中的物理页号字段。
-const SATP_PPN_MASK: u64 = (1 << 44) - 1;
+const SATP_PPN_MASK: u64 = (1 << super::mode::SATP_PPN_BITS) - 1;
 
 /// 地址空间根：顶级表所在物理帧（不透明地交给 Core）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +33,7 @@ pub struct SpaceRoot(pub u64);
 ///
 /// # Safety
 /// `root` 必须是有效的顶级表；`phys_offset` 为全物理内存映射偏移。
-unsafe fn table(root: u64, phys_offset: u64) -> Sv39Table {
+unsafe fn table(root: u64, phys_offset: u64) -> RvTable {
     PageTable::new(root, PhysTables::new(phys_offset))
 }
 
@@ -66,8 +59,8 @@ pub unsafe fn create(phys_offset: u64, frames: &mut dyn FrameAllocator) -> Resul
 }
 
 /// 把帧清零并返回以它为根的遍历器。
-unsafe fn empty_table(frame: PhysFrame, phys_offset: u64) -> Sv39Table {
-    core::ptr::write_bytes((phys_offset + frame.start()) as *mut u8, 0, FRAME_SIZE as usize);
+unsafe fn empty_table(frame: PhysFrame, phys_offset: u64) -> RvTable {
+    core::ptr::write_bytes((phys_offset + frame.start()) as usize as *mut u8, 0, FRAME_SIZE as usize);
     table(frame.start(), phys_offset)
 }
 

@@ -1,12 +1,13 @@
 //! RISC-V 引导适配层：内核入口 `_start`、早期页表与地址转换、设备树 → [`BootSpec`]、进入内核主流程。
-//! RISC-V boot adapter: `_start`, early Sv39, device tree to `BootSpec`, then the kernel main flow.
+//! RISC-V boot adapter (RV32 / RV64): `_start`, early paging, device tree to `BootSpec`, then the kernel main flow.
 //!
 //! RISC-V 上没有 x86 那样的引导器：机器态固件（QEMU 默认的 OpenSBI）把内核 ELF 放到链接地址，
 //! 以监管态、地址转换关闭的状态从 `_start` 进入，`a0` = 处理器编号（hart id），`a1` = 设备树物理地址。本文件负责：
 //! 1. 只让第一个到达的处理器继续（其余停在 `wfi`）；关中断、清零 BSS、设置启动栈；
-//! 2. 建早期页表并启用 Sv39（见 `mmu.rs`）；
+//! 2. 建早期页表并启用地址转换（RV64 为 Sv39、RV32 为 Sv32，见 `mmu.rs` 与 `mode`）；
 //! 3. 解析设备树：内存图、串口、中断控制器（及本处理器监管态的上下文编号）、计数器频率、仿真器测试设备；
-//! 4. 把内存图转换成与引导协议无关的 [`BootSpec`]（内核映像、设备树、固件保留区标为保留），交给 `kmain::start`。
+//! 4. 把内存图转换成与引导协议无关的 [`BootSpec`]（内核映像、设备树、固件保留区、线性映射覆盖不到的内存标为保留），
+//!    交给 `kmain::start`。
 
 use core::arch::global_asm;
 
@@ -52,14 +53,14 @@ _start:
     lla t1, __bss_end
 1:
     bgeu t0, t1, 2f
-    sd zero, 0(t0)
-    addi t0, t0, 8
+    sw zero, 0(t0)
+    addi t0, t0, 4
     j 1b
 2:
     lla sp, JSR_BOOT_STACK
     li t0, {stack}
     add sp, sp, t0
-    call jsr_riscv64_boot
+    call jsr_riscv_boot
 3:
     wfi
     j 3b
@@ -69,16 +70,22 @@ _start:
     stack = const BOOT_STACK_BYTES,
 );
 
+/// 物理区间 `[start, end)` 是否完整位于线性映射可访问的范围内（`[0, mapped_end)` 去掉空洞 [`mmu::PHYS_HOLE`]）。
+fn linear_mapped(start: u64, end: u64, mapped_end: u64) -> bool {
+    let (hole_start, hole_end) = mmu::PHYS_HOLE;
+    end <= mapped_end && (end <= hole_start || start >= hole_end)
+}
+
 /// 在地址转换已启用后，按物理地址取设备树：头部魔数正确且整棵树都在已映射的范围内才接受。
 fn find_fdt(candidate: u64, mapped_end: u64) -> Option<(u64, Fdt<'static>)> {
-    if candidate == 0 || candidate % 8 != 0 || candidate.checked_add(8)? > mapped_end {
+    if candidate == 0 || candidate % 8 != 0 || !linear_mapped(candidate, candidate.checked_add(8)?, mapped_end) {
         return None;
     }
-    let va = mmu::PHYS_OFFSET + candidate;
-    // SAFETY：`candidate` 在全物理内存映射覆盖的范围内，8 字节对齐。
+    let va = (mmu::PHYS_OFFSET + candidate) as usize;
+    // SAFETY：`candidate` 在线性映射覆盖的范围内，8 字节对齐。
     let head: [u8; 8] = unsafe { (va as *const [u8; 8]).read() };
     let size = fdt::total_size(&head)?;
-    if candidate.checked_add(size as u64)? > mapped_end {
+    if !linear_mapped(candidate, candidate.checked_add(size as u64)?, mapped_end) {
         return None;
     }
     // SAFETY：整棵树在已映射范围内；固件交出后不再改动它，且内核把这段内存标为保留。
@@ -164,8 +171,9 @@ fn for_each_reserved_node(fdt: &Fdt<'_>, mut f: impl FnMut(u64, u64)) {
 
 /// 汇编入口之后的第一段 Rust 代码（地址转换关闭、启动栈、单执行流）。
 #[no_mangle]
-extern "C" fn jsr_riscv64_boot(hart: u64, dtb: u64) -> ! {
-    // SAFETY：此刻地址转换关闭且只有本执行流；建表只做对齐的 64 位写。
+extern "C" fn jsr_riscv_boot(hart: usize, dtb: usize) -> ! {
+    let (hart, dtb) = (hart as u64, dtb as u64);
+    // SAFETY：此刻地址转换关闭且只有本执行流；建表只做按表项宽度对齐的写。
     unsafe {
         if !mmu::build_boot_tables() {
             testdev::exit(EXIT_FAILURE);
@@ -201,9 +209,13 @@ extern "C" fn jsr_riscv64_boot(hart: u64, dtb: u64) -> ! {
     for_each_reserved_node(&fdt, |addr, size| {
         spec.push_region(PhysRegion { start: addr, end: addr.saturating_add(size), kind: RegionKind::Reserved });
     });
-    // 超出全物理内存映射范围的内存不能交给分配器（内核无法访问它们）
+    // 线性映射覆盖不到的内存（上限之外、空洞之内）不能交给分配器（内核无法访问它们）
     if ram_end > covered {
         spec.push_region(PhysRegion { start: covered, end: ram_end, kind: RegionKind::Reserved });
+    }
+    let (hole_start, hole_end) = mmu::PHYS_HOLE;
+    if hole_end > hole_start {
+        spec.push_region(PhysRegion { start: hole_start, end: hole_end, kind: RegionKind::Reserved });
     }
     if walked.is_err() || ram_end == 0 {
         uart::init();

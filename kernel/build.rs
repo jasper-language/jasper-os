@@ -63,6 +63,7 @@ fn main() {
     let script = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("aarch64") => Some("kernel/link-aarch64.ld"),
         Ok("riscv64") => Some("kernel/link-riscv64.ld"),
+        Ok("riscv32") => Some("kernel/link-riscv32.ld"),
         _ => None,
     };
     if let Some(script) = script {

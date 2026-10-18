@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{clock, config, fix_demo, irq, kprint, kprintln, mech_demo, mm, pi_demo, sched, user_demo};
+use crate::{clock, config, counter_demo, fix_demo, irq, kprint, kprintln, mech_demo, mm, pi_demo, sched, user_demo};
 #[cfg(feature = "user-programs")]
 use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo};
 
@@ -52,6 +52,13 @@ pub fn start(boot: &'static BootSpec) -> ! {
     arch::irq_enable();
     sched::demo::run_preemptive();
     arch::irq_disable();
+
+    // 64 位计数单元：宽值与「与定时器中断共享」（32 位目标上没有 64 位原子指令，这里证明实现不会在中断中自锁）。
+    counter_demo::run();
+    if counter_demo::failed() > 0 {
+        kprintln!("[JSR-EXIT] failure counter64_failed={}", counter_demo::failed());
+        arch::exit_emulator(ExitStatus::Failure);
+    }
 
     // M1.5：以内核任务演练 kernel-core 的全部机制（任务内自行开关中断）。
     mech_demo::run();

@@ -56,7 +56,8 @@ Jasper 生态的**操作系统侧项目**：一个用 Rust 实现、在 QEMU 中
 | CI-1 | 公开仓库自动化验证：GitHub Actions 在每次推送 / 拉取请求上跑宿主测试（含 32 位、AArch64、RISC-V64 单元测试）与 `scripts/accept.sh` 全量（x86_64 + AArch64 QEMU）；main 上检查为绿，故意注入失败的临时分支检查变红（验证后已删除） | ✅ |
 | ISA-2a | RISC-V64 移植第一阶段（QEMU `virt` + OpenSBI）：设备树驱动的启动、Sv39 早期页表与独立地址空间、陷入入口、SBI 定时器、PLIC（真实挂起 → 认领 → 完成自检）、NS16550A、调度与抢占、用户态与 `ecall` 系统调用；内核侧验收 16 项在 `qemu-system-riscv64` 上逐项通过 | ✅ |
 | ISA-2b | RISC-V64 用户态生态与 x86_64 等价：独立 Rust 用户程序、用户态 ring / IPC、`jasper-rt`、`.jaso` 模块（riscv64imac 软浮点、位置无关）实际装载执行；用户程序装载地址按指令集取私有窗口（Sv39 为 `0x8_0040_0000`），运行时布局整体落在 32 GiB 窗口内；全部 29 项 QEMU 验收在 `qemu-system-riscv64` 上逐项复跑通过 | ✅ |
-| ISA-3 | RISC-V32 移植；在 QEMU 上复跑全部验收 | ⬜ |
+| ISA-3a | RISC-V32 移植第一阶段（QEMU `virt` + 32 位 OpenSBI）：RISC-V 平台代码由 RV32 / RV64 共用（寄存器宽度专有部分单独成文件，陷入 / 切换 / 探针汇编按宽度参数化）；Sv32 两级页表与 34 位物理地址、设备区与内存两段线性映射、`time` 计数器高低两半的无锁一致读取、系统调用 64 位返回值经 `a0`/`a1`；没有 64 位原子指令时以「关中断 + 每实例自旋锁」实现中断安全的 64 位计数（与定时器中断共享时不自锁）；内核侧验收 16 项在 `qemu-system-riscv32` 上逐项通过 | ✅ |
+| ISA-3b | RISC-V32 用户态生态：ELF32 装载、32 位用户 ABI、用户程序 / `jasper-rt` / `.jaso` 以 riscv32 构建并在 QEMU 上复跑 | ⬜ |
 | M5.1 | 装载并运行最小非特权程序（ELF）：Ring 3 运行；读内核内存 / 特权指令 / 无效指令只终止该进程；坏系统调用指针被拒；多线程进程终止（含内核内阻塞的线程）与父进程等待；页帧 / 对象全部回收 | ✅ |
 | J-1 | 用户态最小运行时 `jasper-rt`（`no_std` + `alloc`）：程序入口与 panic 处理、按需增长的堆（新增 `system.memory.map` / `unmap`）、线程、Channel、异步环；用它写成的普通 Rust 程序在 Ring 3 通过成功与失败路径检查 | ✅ |
 | J-2 | 现有 Rust 库的可移植性：sha2、crc、miniz_oxide、smoltcp（环回 TCP）在用户态通过已知答案测试；形成可移植性清单 | ✅ |

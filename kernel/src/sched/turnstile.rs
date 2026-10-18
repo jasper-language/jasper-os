@@ -19,7 +19,9 @@
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
+
+use crate::sync::IrqU64;
 
 use super::scheduler::{BlockError, Cause};
 use crate::arch as cpu;
@@ -32,7 +34,7 @@ const FREE: u64 = u64::MAX;
 /// Blocking kernel mutex with priority inheritance and direct hand-off.
 pub struct KMutex<T> {
     /// 持有者的任务号（[`FREE`] = 空闲）。只在关中断状态下读写（单 CPU）。
-    owner: AtomicU64,
+    owner: IrqU64,
     data: UnsafeCell<T>,
 }
 
@@ -44,7 +46,7 @@ unsafe impl<T: Send> Send for KMutex<T> {}
 impl<T> KMutex<T> {
     /// 新建（空闲）。
     pub const fn new(data: T) -> Self {
-        KMutex { owner: AtomicU64::new(FREE), data: UnsafeCell::new(data) }
+        KMutex { owner: IrqU64::new(FREE), data: UnsafeCell::new(data) }
     }
 
     /// 等待对象的标识：锁自身的地址（按字对齐，不会与「等任务退出」的标识重合）。

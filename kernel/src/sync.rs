@@ -4,6 +4,9 @@
 //! * 重新导出 [`kernel_core::sync::SpinLock`]（纯机制，宿主已测）
 //! * [`IrqSpinLock`]：加锁前保存并关闭中断，解锁后恢复——中断处理程序与任务共享的数据
 //!   必须用它，否则单 CPU 上任务持锁时来一个中断去抢同一把锁就会永远自旋
+//! * [`IrqU64`]：中断处理程序与任务可共享的 64 位计数单元——有 64 位原子指令的目标上是硬件原子，
+//!   没有的目标（RISC-V32）上是「关中断 + 自旋锁」（`kernel_core::sync::IrqSafeU64`，屏蔽策略为 [`ArchIrqMask`]）。
+//!   内核中凡是 64 位的共享计数一律用它，不直接用 `AtomicU64`（后者在 32 位目标上不存在）
 //!
 //! # 边界
 //! 中断开关只经 `arch::irq_save_disable` / `arch::irq_restore`（Platform 契约），本文件不含 ISA 代码。
@@ -12,6 +15,25 @@ use core::ops::{Deref, DerefMut};
 
 use crate::arch;
 pub use kernel_core::sync::{SpinLock, SpinLockGuard};
+
+/// 经平台契约关 / 开本处理器中断的屏蔽策略。
+/// Interrupt-mask strategy backed by the platform contract.
+pub struct ArchIrqMask;
+
+impl kernel_core::sync::IrqMask for ArchIrqMask {
+    #[inline(always)]
+    fn save_disable() -> bool {
+        arch::irq_save_disable()
+    }
+    #[inline(always)]
+    fn restore(was_enabled: bool) {
+        arch::irq_restore(was_enabled)
+    }
+}
+
+/// 中断安全的 64 位计数单元（见模块文档）。
+/// Interrupt-safe 64-bit counter cell.
+pub type IrqU64 = kernel_core::sync::IrqSafeU64<ArchIrqMask>;
 
 /// 关中断自旋锁。
 pub struct IrqSpinLock<T> {

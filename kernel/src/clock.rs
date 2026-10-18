@@ -3,12 +3,13 @@
 //! 与调度器的 `timer_ticks()` 区别：那个在中断上下文里递增（用于时间片与忙等），
 //! 这里在 `irq::poll_and_handle` 里递增，只统计「被主循环处理过」的 tick，用于 M1.2 验收。
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 
+use crate::sync::IrqU64;
 use crate::kprintln;
 
 /// 已处理的 tick 数。
-static TICKS: AtomicU64 = AtomicU64::new(0);
+static TICKS: IrqU64 = IrqU64::new(0);
 
 /// 已处理的 tick 数。
 pub fn ticks() -> u64 {

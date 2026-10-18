@@ -1,10 +1,15 @@
-//! RISC-V 64 位平台实现：把 [`Platform`] 契约落到 RV64（监管态 + SBI 固件，QEMU `virt` 机型）上。
-//! RISC-V 64-bit implementation of the `Platform` contract (S-mode on SBI firmware, QEMU `virt`).
+//! RISC-V 平台实现（RV64 与 RV32 共用）：把 [`Platform`] 契约落到监管态 + SBI 固件（QEMU `virt` 机型）上。
+//! RISC-V implementation of the `Platform` contract for RV64 and RV32 (S-mode on SBI firmware, QEMU `virt`).
+//!
+//! 两种寄存器宽度只在 `mode` 上不同：RV64 选 `rv64.rs`（Sv39），RV32 选 `rv32.rs`（Sv32）——地址布局、页表形状、
+//! 早期建表、寄存器宽度的汇编宏与系统调用返回约定都在那里；其余模块对两者一视同仁（寄存器值用 `usize`，
+//! 交给 Core 时零扩展为 `u64`）。
 //!
 //! 子模块各管一类硬件，彼此只经本文件编排（`trap` 调用 `plic` / `timer` 处理中断是唯一的横向依赖）：
+//! * `mode`    —— 寄存器宽度专有部分（见上）
 //! * `boot`    —— 入口 `_start`、BSS、设备树 → `BootSpec`，然后进入内核主流程
-//! * `mmu`     —— 早期页表（内核映像恒等映射 + 全物理内存映射）与 Sv39 启用
-//! * `paging`  —— Sv39 页表项位格式 + 通用遍历器实现的 `PageMapper`
+//! * `mmu`     —— 早期页表（内核映像恒等映射 + 线性物理内存映射）与地址转换启用
+//! * `paging`  —— 页表项位格式 + 通用遍历器实现的 `PageMapper`
 //! * `space`   —— 地址空间（顶级表）的创建、satp 切换与销毁
 //! * `trap`    —— 陷入入口与分发（断点、系统调用、用户故障、定时器与外部中断）
 //! * `plic`    —— 平台级中断控制器
@@ -18,7 +23,15 @@
 //!
 //! 与 Core 的回调方向：中断入口调用 `crate::irq::on_hardware_irq`，系统调用入口调用 `crate::syscall::on_syscall`，
 //! 用户故障调用 `crate::fault::on_user_fault`（均在 `trap.rs`）；引导适配层调用 `crate::kmain::start`。
-//! 内核以软浮点目标（`riscv64imac`）构建并关闭浮点单元：内核与用户程序都不使用浮点寄存器，切换时无需保存。
+//! 内核以不带浮点扩展的目标（`riscv64imac` / `riscv32imac`）构建并关闭浮点单元：内核与用户程序都不使用浮点寄存器，
+//! 切换时无需保存。
+
+#[cfg(target_arch = "riscv64")]
+#[path = "rv64.rs"]
+mod mode;
+#[cfg(target_arch = "riscv32")]
+#[path = "rv32.rs"]
+mod mode;
 
 mod boot;
 mod context;
@@ -36,38 +49,35 @@ mod user;
 
 use super::{ExitStatus, Platform, UserProbe};
 
-/// RISC-V 64 位平台（零大小类型，仅作为 trait 实现的载体）。
-pub struct Riscv64;
+/// RISC-V 平台（零大小类型，仅作为 trait 实现的载体）。
+pub struct Riscv;
 
 /// 测试设备退出码：与 x86_64 上 QEMU 调试退出设备产生的退出码一致（成功 33、失败 35）。
 const EXIT_SUCCESS_CODE: u16 = 33;
 const EXIT_FAILURE_CODE: u16 = 35;
 
-impl Platform for Riscv64 {
+impl Platform for Riscv {
     type TaskContext = context::TaskContext;
-    type Mapper = paging::Sv39Mapper;
+    type Mapper = paging::RvMapper;
     type SpaceRoot = space::SpaceRoot;
 
     const EMPTY_CONTEXT: Self::TaskContext = context::TaskContext::empty();
 
-    const NAME: &'static str = "riscv64";
+    const NAME: &'static str = mode::NAME;
 
-    /// EM_RISCV。
+    /// EM_RISCV（RV32 与 RV64 相同，以 ELF 类别区分）。
     const ELF_MACHINE: u16 = 243;
 
     const USER_WINDOW: (u64, u64) = space::USER_WINDOW;
 
-    /// 顶级下标 128..256。
-    const KERNEL_PART_ENTRIES: usize = space::KERNEL_LAST - space::KERNEL_FIRST;
+    /// Sv39：顶级下标 128..256；Sv32：576..704。
+    const KERNEL_PART_ENTRIES: usize = mode::KERNEL_LAST - mode::KERNEL_FIRST;
 
-    /// 内核共享部分顶级第 136 项内（与 x86_64 / AArch64 的堆位于同一下标的顶级表项）。
-    const KERNEL_HEAP_BASE: u64 = 0x22_2222_0000;
+    const KERNEL_HEAP_BASE: u64 = mode::KERNEL_HEAP_BASE;
 
-    /// 内核共享部分的第一个顶级表项（第 128 项）的起点。
-    const KERNEL_PROBE_VA: u64 = 0x20_0000_0000;
+    const KERNEL_PROBE_VA: u64 = mode::KERNEL_PROBE_VA;
 
-    /// Sv39 低半区之外。
-    const INVALID_VA: u64 = 0x40_0000_0000;
+    const INVALID_VA: u64 = mode::INVALID_VA;
 
     fn console_init() {
         uart::init();
@@ -170,7 +180,7 @@ impl Platform for Riscv64 {
     }
 
     unsafe fn active_mapper(phys_offset: u64) -> Self::Mapper {
-        paging::Sv39Mapper::for_root(space::current().0, phys_offset)
+        paging::RvMapper::for_root(space::current().0, phys_offset)
     }
 
     fn current_space() -> Self::SpaceRoot {
@@ -185,7 +195,7 @@ impl Platform for Riscv64 {
     }
 
     unsafe fn space_mapper(root: Self::SpaceRoot, phys_offset: u64) -> Self::Mapper {
-        paging::Sv39Mapper::for_root(root.0, phys_offset)
+        paging::RvMapper::for_root(root.0, phys_offset)
     }
 
     unsafe fn translate_in(

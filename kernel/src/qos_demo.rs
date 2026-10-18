@@ -19,8 +19,9 @@
 //!
 //! 每个用例结束后检查空闲页帧、存活对象、清理队列、固定帧回到用例前的基线。
 
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
+use crate::sync::IrqU64;
 use crate::proc::ProcState;
 use crate::baseline::baseline;
 use crate::rt_demo::{rt_calls, run_program};
@@ -161,9 +162,9 @@ fn rules() {
 // ---------------------------------------------------------------------------
 
 /// 已完成的任务数与此刻存活的峰值。
-static MANY_DONE: AtomicU64 = AtomicU64::new(0);
-static MANY_LIVE: AtomicU64 = AtomicU64::new(0);
-static MANY_PEAK: AtomicU64 = AtomicU64::new(0);
+static MANY_DONE: IrqU64 = IrqU64::new(0);
+static MANY_LIVE: IrqU64 = IrqU64::new(0);
+static MANY_PEAK: IrqU64 = IrqU64::new(0);
 
 fn many_task() {
     let live = MANY_LIVE.fetch_add(1, Ordering::Relaxed) + 1;

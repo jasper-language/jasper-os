@@ -148,6 +148,21 @@ if [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ]; then
     -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV64" 2>&1
   QRC_RV64=$?
 fi
+# RISC-V32（ISA-3）：同一内核以 riscv32imac 构建（Sv32 页表、32 位寄存器）。32 位用户程序与运行时尚未移植，
+# 因此不内嵌用户程序（--no-default-features），只运行内核任务与探针机器码的演练；由 QEMU virt 默认的 32 位 OpenSBI
+# 以监管态装载 ELF 启动，退出经仿真器测试设备（成功 33、失败 35）。缺少 qemu-system-riscv32 时如实记为失败。
+QEMU_RV32="$(command -v qemu-system-riscv32 || true)"
+SERIAL_RV32="$OUT/serial-riscv32.log"
+RV32_ELF="$ROOT/target/riscv32imac-unknown-none-elf/release/jasper-kernel"
+QRC_RV32=-1
+run cargo build --release --target riscv32imac-unknown-none-elf -p jasper-kernel --no-default-features "${KFEAT[@]}" > "$OUT/build-riscv32.log" 2>&1
+RV32_BUILD_RC=$?
+if [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ]; then
+  echo "== QEMU 真实启动（RISC-V32）=="
+  run timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M -kernel "$RV32_ELF" \
+    -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV32" 2>&1
+  QRC_RV32=$?
+fi
 
 # ---- 阶段 B：逐里程碑检查 ----------------------------------------------------
 
@@ -726,6 +741,40 @@ check_isa2b() { # RISC-V64 移植第二阶段：内嵌用户程序（独立 Rust
   fi
 }
 
+# rv32_rerun <检查函数…>：在 RISC-V32 串口日志上逐项重跑给定检查（行名带 RV32/ 前缀）；结果放在 RV32_N / RV32_BAD。
+rv32_rerun() {
+  port_rerun "$SERIAL_RV32" "$QRC_RV32" "RV32/" 128 "$@"
+  RV32_N=$PORT_N; RV32_BAD=$PORT_BAD
+}
+
+rv32_ready() { [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ] && [ -s "$SERIAL_RV32" ]; }
+
+check_isa3a() { # RISC-V32 移植第一阶段：同一组内核侧检查在 qemu-system-riscv32 的串口日志上逐项重跑（行名带 RV32/ 前缀），
+                # 并要求 64 位计数单元在没有 64 位原子指令的目标上以「关中断 + 自旋锁」实现、与定时器中断共享时不自锁
+  if ! rv32_ready; then
+    record ISA3a FAIL "RISC-V32 构建 rc=$RV32_BUILD_RC 或缺少 qemu-system-riscv32 / 串口日志（见 build-riscv32.log）"
+    return
+  fi
+  rv32_rerun check_m11 check_m12 check_m13 check_m14 check_m15 check_m21 check_m22 check_m23 check_m24 \
+             check_m31 check_m32 check_m33 check_m34 check_m42 check_fix check_sched2
+  local reads
+  reads=$(grep -aoE '^\[JSR-COUNTER64\] case=isr_shared reads=[0-9]+' "$SERIAL_RV32" | grep -oE '[0-9]+$' || true)
+  if [ "$RV32_BAD" -eq 0 ] && grep -qaE '^\[JSR-BOOT\] jasper-os rust kernel [0-9.]+ riscv32' "$SERIAL_RV32" \
+     && grep -qa '^\[JSR-VEC\] ok' "$SERIAL_RV32" \
+     && grep -qaE '^\[JSR-PLIC\] ok source=([0-9]+) claimed=\1 completed=true drained=true' "$SERIAL_RV32" \
+     && grep -qaE '^\[JSR-COUNTER64\] case=wide impl=irq_locked crossed_2_32=true ok=[0-9]+ failed=0' "$SERIAL_RV32" \
+     && grep -qaE '^\[JSR-COUNTER64\] case=isr_shared reads=[0-9]+ ticks=[0-9]+ ticks_monotonic=true cycles_monotonic=true completed=true' "$SERIAL_RV32" \
+     && grep -qaE '^\[JSR-COUNTER64\] summary impl=irq_locked checks=[0-9]+ failed=0' "$SERIAL_RV32" \
+     && grep -qaE '^\[JSR-COUNTER64\] summary impl=native checks=[0-9]+ failed=0' "$SERIAL" \
+     && grep -qaE '^\[JSR-COUNTER64\] summary impl=native checks=[0-9]+ failed=0' "$SERIAL_RV64" \
+     && grep -qa '^\[JSR-STAGE\] user_programs=absent' "$SERIAL_RV32" \
+     && grep -qa '^\[JSR-EXIT\] success' "$SERIAL_RV32" && [ "$QRC_RV32" -eq 33 ]; then
+    record ISA3a PASS "RISC-V32（QEMU virt + OpenSBI，Sv32，QEMU=$QRC_RV32）：$RV32_N 项内核侧检查全部通过（启动/陷入/SBI 时钟/PLIC/调度/抢占/机制/页帧/映射/堆/地址空间/用户态/ecall 与 a0:a1 返回/用户指针/进程/句柄/回滚/优先级继承）；64 位计数：关中断+自旋锁实现，跨 2^32 正确，与定时器中断共享读取 $reads 次无自锁；x86_64 / RISC-V64 为原生原子"
+  else
+    record ISA3a FAIL "RISC-V32：$RV32_N 项中 $RV32_BAD 项失败，或缺少横幅 / 陷入入口 / PLIC / 64 位计数标记、未成功退出（见 serial-riscv32.log）"
+  fi
+}
+
 check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉取请求时运行本脚本全量 + 宿主与跨指令集单元测试；工具链钉到具体日期；判据不在工作流里另写
   local wf="$ROOT/.github/workflows/ci.yml" miss=""
   if [ ! -s "$wf" ]; then record CI-1 FAIL "缺少 .github/workflows/ci.yml"; return; fi
@@ -747,20 +796,20 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {
   echo "jasper-os 一键验收  $TS"
   echo "提交：$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$(git -C "$ROOT" diff --quiet 2>/dev/null || echo '（工作区有未提交改动）')"
   echo "配置档：$PROFILE"
-  echo "QEMU 退出码：$QRC（AArch64：$QRC_A64，RISC-V64：$QRC_RV64）"
+  echo "QEMU 退出码：$QRC（AArch64：$QRC_A64，RISC-V64：$QRC_RV64，RISC-V32：$QRC_RV32）"
   echo
   printf '%-6s %-4s %s\n' "里程碑" "结果" "说明"
   printf '%s\n' "${ROWS[@]}"
 } | tee "$OUT/summary.txt"
 
-for f in cargo-test.log build.log serial.log serial-aarch64.log serial-riscv64.log summary.txt; do
+for f in cargo-test.log build.log serial.log serial-aarch64.log serial-riscv64.log serial-riscv32.log summary.txt; do
   [ -s "$OUT/$f" ] || { echo "✗ 证据文件为空或缺失：$f"; FAILED=1; }
 done
 echo

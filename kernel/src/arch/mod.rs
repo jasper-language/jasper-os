@@ -19,9 +19,9 @@
 pub mod x86_64;
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
-#[cfg(target_arch = "riscv64")]
-pub mod riscv64;
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+#[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
+pub mod riscv;
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64", target_arch = "riscv32"))]
 pub mod phys_tables;
 
 /// 当前编译目标的平台实现。
@@ -31,8 +31,8 @@ pub use self::x86_64::X86_64 as Current;
 #[cfg(target_arch = "aarch64")]
 pub use self::aarch64::Aarch64 as Current;
 /// 当前编译目标的平台实现。
-#[cfg(target_arch = "riscv64")]
-pub use self::riscv64::Riscv64 as Current;
+#[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
+pub use self::riscv::Riscv as Current;
 
 /// 当前平台的任务上下文类型（切换时需要保存的寄存器集合）。
 pub type TaskContext = <Current as Platform>::TaskContext;

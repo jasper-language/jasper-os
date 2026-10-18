@@ -23,7 +23,9 @@
 //! 每个用例结束后检查空闲页帧、存活对象、清理队列、固定帧回到用例前的基线。
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+
+use crate::sync::IrqU64;
 
 use kernel_core::frame::PhysFrame;
 use kernel_core::objtable::ObjId;
@@ -234,7 +236,7 @@ fn filler() {}
 // ---------------------------------------------------------------------------
 
 /// 旁观任务（同档、吃满 CPU）在其窗口内拿到的 tick 数。
-static BYSTANDER_CPU: AtomicU64 = AtomicU64::new(0);
+static BYSTANDER_CPU: IrqU64 = IrqU64::new(0);
 /// 交互任务完成的睡眠轮数。
 static PROBE_DONE: AtomicU32 = AtomicU32::new(0);
 /// 交互任务成功升到交互档。
@@ -369,7 +371,7 @@ fn runaway(mode: &'static str, limit: u32) -> u64 {
 // ---------------------------------------------------------------------------
 
 /// 探测进程（没有线程，只用来承载匿名映射）。
-static PROBE_PID: AtomicU64 = AtomicU64::new(0);
+static PROBE_PID: IrqU64 = IrqU64::new(0);
 /// 探测结果：位 i = 档位 i 的申请被准入。
 static ADMITTED: AtomicU8 = AtomicU8::new(0);
 /// 探测结果：全部被拒的申请都没有改动空闲帧与进程帧记账、且报的是压力拒绝。

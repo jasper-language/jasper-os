@@ -52,6 +52,6 @@ SECTIONS
     }
 }
 
-/* 早期页表只为内核映像准备了 32 MiB 的 4 KiB 页表（见 arch/riscv64/mmu.rs 的 IMAGE_L2_TABLES）。 */
+/* 早期页表只为内核映像准备了 16 张末级表（32 MiB）。 */
 ASSERT(__kernel_end - __kernel_start <= 32 * 1024 * 1024, "kernel image larger than the early identity map")
 ASSERT(__kernel_start % (2 * 1024 * 1024) == 0, "kernel must start on a 2 MiB boundary")

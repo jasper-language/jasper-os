@@ -8,27 +8,31 @@
 //! 其余通用寄存器全部为 0：内核寄存器里的值不会泄漏给用户程序。这是单向的：回到内核只能经陷入。
 //!
 //! # 系统调用约定（RISC-V）
-//! `a7` = 操作 ID，参数依次为 `a0`–`a5`，`ecall` 陷入；返回值在 `a0`（非负 = 成功值，负数 = `-(错误码 ID)`）；
+//! `a7` = 操作 ID，参数依次为 `a0`–`a5`（与 XLEN 同宽，零扩展为 64 位），`ecall` 陷入；
+//! 返回值为 64 位（非负 = 成功值，负数 = `-(错误码 ID)`）：RV64 在 `a0`，RV32 在 `a0`（低 32 位）+ `a1`（高 32 位）；
 //! 其余寄存器全部保留。
 //!
 //! # 探针程序
 //! 用汇编器生成机器码放在内核只读数据里，运行时**复制**到用户页再执行，因此只用与位置无关的指令
 //! （跳转与取地址全部相对 pc，且关闭链接器松弛）。约定：`a0` = 用户数据页地址，`a1` = 参数。
 //! 系统调用编号与权限位以 `const` 操作数取自生成的登记表常量，探针里不出现手写编号。
+//! 数据页的结果槽一律 8 字节：探针经 `mode` 的汇编宏 `SD64`（零扩展存值）与 `SRET`（存 64 位返回值）写入，
+//! 内核按 64 位读出，因此同一份探针源码在 RV32 与 RV64 上得到相同的结果布局。
 
 use core::arch::{asm, global_asm};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::cpu::{self, read_csr};
-use super::trap::{FRAME_BYTES, SEPC_OFF, SSTATUS_OFF};
+use super::mode::{xlen_asm_begin, xlen_asm_end};
+use super::trap::{FRAME_BYTES, SEPC_OFF, SSTATUS_OFF, WB};
 use crate::arch::UserProbe;
 
 /// 当前任务的内核栈顶（调度器每次切换任务时经 `set_kernel_stack` 更新）。
-static KERNEL_STACK_TOP: AtomicU64 = AtomicU64::new(0);
+static KERNEL_STACK_TOP: AtomicUsize = AtomicUsize::new(0);
 
 /// 记录当前任务的内核栈顶。
 pub fn set_kernel_stack(top: u64) {
-    KERNEL_STACK_TOP.store(top, Ordering::Relaxed);
+    KERNEL_STACK_TOP.store(top as usize, Ordering::Relaxed);
 }
 
 /// 进入用户态时的 sstatus：清 SPP（回到用户态）、SIE、SUM、FS，置 SPIE（回到用户态后开中断）。
@@ -45,33 +49,36 @@ fn user_sstatus() -> u64 {
 pub unsafe fn enter(entry: u64, stack: u64, arg0: u64, arg1: u64) -> ! {
     let top = KERNEL_STACK_TOP.load(Ordering::Relaxed);
     assert!(top != 0 && top % 16 == 0, "进入用户态前未设置内核栈顶");
-    let sstatus = user_sstatus();
+    let sstatus = user_sstatus() as usize;
     asm!(
+        xlen_asm_begin!(),
         "csrci sstatus, {sie}",
         "mv sp, a5",
         "addi sp, sp, -{frame}",
         "mv t0, sp",
         "li t1, {words}",
         "1:",
-        "sd zero, 0(t0)",
-        "addi t0, t0, 8",
+        "SX zero, 0, t0",
+        "addi t0, t0, {wb}",
         "addi t1, t1, -1",
         "bnez t1, 1b",
-        "sd a0, 80(sp)",
-        "sd a1, 88(sp)",
-        "sd a2, 16(sp)",
-        "sd a3, {sepc}(sp)",
-        "sd a4, {sstatus}(sp)",
+        "SX a0, 10*{wb}, sp",
+        "SX a1, 11*{wb}, sp",
+        "SX a2, 2*{wb}, sp",
+        "SX a3, {sepc}, sp",
+        "SX a4, {sstatus}, sp",
+        xlen_asm_end!(),
         "j jsr_trap_return",
         sie = const cpu::SSTATUS_SIE,
         frame = const FRAME_BYTES,
-        words = const FRAME_BYTES / 8,
+        words = const FRAME_BYTES / WB,
+        wb = const WB,
         sepc = const SEPC_OFF,
         sstatus = const SSTATUS_OFF,
-        in("a0") arg0,
-        in("a1") arg1,
-        in("a2") stack,
-        in("a3") entry,
+        in("a0") arg0 as usize,
+        in("a1") arg1 as usize,
+        in("a2") stack as usize,
+        in("a3") entry as usize,
         in("a4") sstatus,
         in("a5") top,
         options(noreturn)
@@ -80,6 +87,7 @@ pub unsafe fn enter(entry: u64, stack: u64, arg0: u64, arg1: u64) -> ! {
 
 // 探针机器码（只读数据，不在内核态执行）。`.2byte 0` 是规定的非法指令（全零编码）。
 global_asm!(
+    xlen_asm_begin!(),
     r#"
     .section .rodata.jsr_user_probes, "a"
     .option push
@@ -92,11 +100,11 @@ global_asm!(
     .global jsr_probe_cpl_end
 jsr_probe_cpl_start:
     li t0, 3
-    sd t0, 0(a0)
+    SD64 t0, 0, a0
     li t0, 0x55aa
-    sd t0, 8(a0)
+    SD64 t0, 8, a0
     csrr t0, sstatus
-    sd t0, 0(a0)
+    SD64 t0, 0, a0
     .2byte 0
 jsr_probe_cpl_end:
 
@@ -104,10 +112,10 @@ jsr_probe_cpl_end:
     .global jsr_probe_read_start
     .global jsr_probe_read_end
 jsr_probe_read_start:
-    ld t0, 0(a1)
-    sd t0, 0(a0)
+    LX t0, 0, a1
+    SD64 t0, 0, a0
     li t0, 0x1eaf
-    sd t0, 8(a0)
+    SD64 t0, 8, a0
     .2byte 0
 jsr_probe_read_end:
 
@@ -117,10 +125,10 @@ jsr_probe_read_end:
     .global jsr_probe_priv_end
 jsr_probe_priv_start:
     li t0, 0x7e57
-    sd t0, 8(a0)
+    SD64 t0, 8, a0
     wfi
     li t0, 0xbad
-    sd t0, 16(a0)
+    SD64 t0, 16, a0
     .2byte 0
 jsr_probe_priv_end:
 
@@ -132,20 +140,20 @@ jsr_probe_sys_start:
     mv s2, a0
     li a7, {now}
     ecall
-    sd a0, 0(s2)
+    SRET 0, s2
     li a7, 0xffff
     ecall
-    sd a0, 8(s2)
+    SRET 8, s2
     li a7, {yield_}
     ecall
-    sd a0, 16(s2)
-    sd s1, 24(s2)
-    sd s2, 32(s2)
+    SRET 16, s2
+    SD64 s1, 24, s2
+    SD64 s2, 32, s2
     li a0, 42
     li a7, {exit}
     ecall
     li t0, 0xbad
-    sd t0, 40(s2)
+    SD64 t0, 40, s2
     .2byte 0
 jsr_probe_sys_end:
 
@@ -157,31 +165,31 @@ jsr_probe_ptr_start:
     mv s3, a1
     li a7, {write}
     addi a0, s2, 0x100
-    ld a1, 0xf8(s2)
+    LX a1, 0xf8, s2
     ecall
-    sd a0, 0(s2)
+    SRET 0, s2
     mv a0, s3
     li a1, 8
     ecall
-    sd a0, 8(s2)
+    SRET 8, s2
     li t0, 0x100000
     add a0, s2, t0
     li a1, 8
     ecall
-    sd a0, 16(s2)
+    SRET 16, s2
     li t0, 0xffc
     add a0, s2, t0
     li a1, 16
     ecall
-    sd a0, 24(s2)
+    SRET 24, s2
     addi a0, s2, 0x100
     li a1, 0x10000
     ecall
-    sd a0, 32(s2)
+    SRET 32, s2
     addi a0, s2, 0x200
     li a1, 2
     ecall
-    sd a0, 40(s2)
+    SRET 40, s2
     li a0, 0
     li a7, {exit}
     ecall
@@ -199,11 +207,11 @@ jsr_probe_proc_start:
     mv a2, s2
     li a7, {spawn}
     ecall
-    sd a0, 0(s2)
+    SRET 0, s2
     mv s4, a0
     li s5, 10000
 1:
-    ld t0, 16(s2)
+    LX t0, 16, s2
     li t1, 1
     beq t0, t1, 2f
     li a7, {yield_}
@@ -212,14 +220,14 @@ jsr_probe_proc_start:
     bnez s5, 1b
 2:
     li t0, 0x4d41494e
-    sd t0, 24(s2)
+    SD64 t0, 24, s2
     mv a0, s4
     li a7, {close}
     ecall
-    sd a0, 32(s2)
+    SRET 32, s2
     mv a0, s4
     ecall
-    sd a0, 40(s2)
+    SRET 40, s2
     li a0, 7
     li a7, {exit}
     ecall
@@ -227,9 +235,9 @@ jsr_probe_proc_start:
     .balign 4
 jsr_rv_proc_worker:
     li t0, 0x574f524b
-    sd t0, 8(a0)
+    SD64 t0, 8, a0
     li t0, 1
-    sd t0, 16(a0)
+    SD64 t0, 16, a0
     li a0, 0
     li a7, {exit}
     ecall
@@ -247,34 +255,34 @@ jsr_probe_rights_start:
     mv a2, s2
     li a7, {spawn}
     ecall
-    sd a0, 0(s2)
+    SRET 0, s2
     mv s4, a0
     mv a0, s4
     li a1, {r_wait_dup}
     li a7, {dup}
     ecall
-    sd a0, 8(s2)
+    SRET 8, s2
     mv s5, a0
     mv a0, s5
     li a1, {r_wait_tr}
     li a7, {dup}
     ecall
-    sd a0, 16(s2)
+    SRET 16, s2
     mv a0, s5
     li a1, {r_wait}
     li a7, {restrict}
     ecall
-    sd a0, 24(s2)
+    SRET 24, s2
     mv a0, s5
     li a1, {r_wait}
     li a7, {dup}
     ecall
-    sd a0, 32(s2)
+    SRET 32, s2
     mv a0, s5
     li a1, {r_wait_ctl}
     li a7, {restrict}
     ecall
-    sd a0, 40(s2)
+    SRET 40, s2
     mv a0, s5
     li a7, {close}
     ecall
@@ -294,6 +302,7 @@ jsr_probe_rights_end:
     .option pop
     .previous
     "#,
+    xlen_asm_end!(),
     now = const crate::syscall::table::SYSTEM_TIME_NOW,
     yield_ = const crate::syscall::table::SYSTEM_TASK_YIELD,
     exit = const crate::syscall::table::SYSTEM_TASK_EXIT,

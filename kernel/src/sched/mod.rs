@@ -26,8 +26,9 @@ pub mod turnstile;
 pub use turnstile::{KMutex, KMutexGuard};
 
 use core::ptr::{addr_of, addr_of_mut};
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::sync::IrqU64;
 use crate::arch::{self as cpu, switch_context};
 use crate::task::TaskId;
 
@@ -62,7 +63,7 @@ static KERNEL_SPACE: spin::Once<cpu::SpaceRoot> = spin::Once::new();
 /// 是否允许定时器抢占（默认开启，见模块文档）。
 static PREEMPTION: AtomicBool = AtomicBool::new(true);
 /// 调度器看到的定时器 tick 总数（在中断上下文中递增，任务可据此做基于时间的等待）。
-static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
+static TIMER_TICKS: IrqU64 = IrqU64::new(0);
 
 /// 新任务的公共入口：执行任务体，返回后标记退出并让出 CPU（永不返回）。
 extern "C" fn task_trampoline() -> ! {

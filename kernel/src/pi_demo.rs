@@ -19,8 +19,9 @@
 //!
 //! 每个用例结束后检查锁空闲、资源回到用例前的基线。
 
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
+use crate::sync::IrqU64;
 use crate::baseline::baseline;
 use crate::sched::policy::inherit::EdgeError;
 use crate::sched::policy::Qos;
@@ -141,16 +142,16 @@ enum Wait {
 }
 
 static INV_MODE: AtomicU8 = AtomicU8::new(0);
-static INV_HOLDING: AtomicU64 = AtomicU64::new(0);
-static INV_HOGGING: AtomicU64 = AtomicU64::new(0);
-static INV_HOG_CPU: AtomicU64 = AtomicU64::new(0);
-static INV_WAIT: AtomicU64 = AtomicU64::new(u64::MAX);
+static INV_HOLDING: IrqU64 = IrqU64::new(0);
+static INV_HOGGING: IrqU64 = IrqU64::new(0);
+static INV_HOG_CPU: IrqU64 = IrqU64::new(0);
+static INV_WAIT: IrqU64 = IrqU64::new(u64::MAX);
 static INV_WAIT_OK: AtomicU8 = AtomicU8::new(0);
 static INV_L_PEAK: AtomicU8 = AtomicU8::new(NONE_QOS);
 static INV_L_AFTER: AtomicU8 = AtomicU8::new(NONE_QOS);
 static INV_H_READY: AtomicU8 = AtomicU8::new(0);
 /// 本轮低档任务的任务号（等退出模式下高档任务等它）。
-static INV_L_ID: AtomicU64 = AtomicU64::new(0);
+static INV_L_ID: IrqU64 = IrqU64::new(0);
 
 fn inv_low() {
     let _ = sched::set_current_qos(Qos::Background);

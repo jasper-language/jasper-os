@@ -4,32 +4,33 @@
 //! 只实现本内核用到的三项：探测扩展是否存在（基础扩展）、设置下一次定时器中断（TIME 扩展）、
 //! 以「系统故障」为原因关机（系统复位扩展；仅在找不到仿真器测试设备时作为退出的后备路径）。
 //! 调用约定：`a7` = 扩展号，`a6` = 功能号，参数在 `a0`–`a5`；返回 `a0` = 错误码、`a1` = 值。
+//! 寄存器与 XLEN 同宽：RV32 上 64 位的定时器截止时刻按规范拆成 `a0`（低 32 位）与 `a1`（高 32 位）。
 
 /// 基础扩展。
-const EID_BASE: u64 = 0x10;
+const EID_BASE: usize = 0x10;
 /// 基础扩展：探测扩展。
-const FID_PROBE_EXTENSION: u64 = 3;
+const FID_PROBE_EXTENSION: usize = 3;
 /// TIME 扩展（"TIME"）。
-pub const EID_TIME: u64 = 0x5449_4d45;
+pub const EID_TIME: usize = 0x5449_4d45;
 /// TIME 扩展：设置定时器。
-const FID_SET_TIMER: u64 = 0;
+const FID_SET_TIMER: usize = 0;
 /// 系统复位扩展（"SRST"）。
-const EID_SRST: u64 = 0x5352_5354;
+const EID_SRST: usize = 0x5352_5354;
 /// 系统复位扩展：复位。
-const FID_SYSTEM_RESET: u64 = 0;
+const FID_SYSTEM_RESET: usize = 0;
 /// 复位类型：关机。
-const RESET_SHUTDOWN: u64 = 0;
+const RESET_SHUTDOWN: usize = 0;
 /// 复位原因：系统故障。
-const REASON_SYSTEM_FAILURE: u64 = 1;
+const REASON_SYSTEM_FAILURE: usize = 1;
 
 /// 一次 SBI 调用的结果。
 struct SbiRet {
-    error: i64,
-    value: u64,
+    error: isize,
+    value: usize,
 }
 
-fn call(eid: u64, fid: u64, arg0: u64, arg1: u64) -> SbiRet {
-    let (error, value): (i64, u64);
+fn call(eid: usize, fid: usize, arg0: usize, arg1: usize) -> SbiRet {
+    let (error, value): (isize, usize);
     // SAFETY：按 SBI 调用约定陷入固件；固件只修改 a0/a1 作为返回值。
     unsafe {
         core::arch::asm!(
@@ -45,14 +46,17 @@ fn call(eid: u64, fid: u64, arg0: u64, arg1: u64) -> SbiRet {
 }
 
 /// 固件是否实现了扩展 `eid`。
-pub fn has_extension(eid: u64) -> bool {
+pub fn has_extension(eid: usize) -> bool {
     let r = call(EID_BASE, FID_PROBE_EXTENSION, eid, 0);
     r.error == 0 && r.value != 0
 }
 
 /// 让固件在 `time` 计数器到达 `deadline` 时触发监管态定时器中断；同时撤下当前挂起的定时器中断。
 pub fn set_timer(deadline: u64) {
-    let _ = call(EID_TIME, FID_SET_TIMER, deadline, 0);
+    #[cfg(target_arch = "riscv64")]
+    let _ = call(EID_TIME, FID_SET_TIMER, deadline as usize, 0);
+    #[cfg(target_arch = "riscv32")]
+    let _ = call(EID_TIME, FID_SET_TIMER, deadline as u32 as usize, (deadline >> 32) as usize);
 }
 
 /// 请求固件以「系统故障」为原因关机。固件不支持时返回（调用者随后停机）。

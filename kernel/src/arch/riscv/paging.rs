@@ -1,8 +1,10 @@
-//! RISC-V Sv39 页映射：3 级、4 KiB 页、只使用 39 位虚拟地址的低半区，实现 Core 的 [`PageMapper`] 契约。
-//! RISC-V Sv39 page mapping (3 levels, 4 KiB pages, low half of the 39-bit VA) implementing `PageMapper`.
+//! RISC-V 页映射（Sv39 / Sv32）：4 KiB 页，实现 Core 的 [`PageMapper`] 契约。
+//! RISC-V page mapping (Sv39 on RV64, Sv32 on RV32) implementing `PageMapper`.
 //!
 //! 遍历算法用 `kernel_core::pagetable`、页表内存经共享的 [`PhysTables`] 访问（均与 AArch64 共用）；
-//! 本文件只给出**页表项位格式**（[`Sv39Format`]）与修改后的地址转换缓存维护。
+//! 本文件只给出**页表项位格式**（[`RvFormat`]）与修改后的地址转换缓存维护。
+//! Sv39 与 Sv32 的权限位完全相同，只差级数、每级下标位数、表项宽度与物理页号位数——这些取自 `mode`
+//! （`rv64.rs` / `rv32.rs`），因此两种寄存器宽度共用同一个格式与映射器。
 //!
 //! 中立权限 → 页表项：
 //! * 一律置 `R`（RISC-V 不允许「可写不可读」）；`WRITE` ⇒ `W`；`EXECUTE` ⇒ `X`；
@@ -18,7 +20,7 @@ use kernel_core::pagetable::{EntryFormat, PageTable};
 
 pub use crate::arch::phys_tables::PhysTables;
 
-use super::cpu;
+use super::{cpu, mode};
 
 /// 页表项位。
 pub mod pte {
@@ -38,8 +40,8 @@ pub mod pte {
     pub const A: u64 = 1 << 6;
     /// 已写。
     pub const D: u64 = 1 << 7;
-    /// 物理页号字段（位 10..54）。
-    pub const PPN_MASK: u64 = ((1 << 44) - 1) << 10;
+    /// 物理页号字段（位 10 起；Sv39 为 44 位，Sv32 为 22 位）。
+    pub const PPN_MASK: u64 = ((1 << super::mode::PPN_BITS) - 1) << 10;
 
     /// 由物理地址得到页表项中的物理页号字段。
     pub const fn ppn(phys: u64) -> u64 {
@@ -52,16 +54,15 @@ pub mod pte {
     }
 }
 
-/// 本内核使用的虚拟地址位数：Sv39 的低半区 `[0, 2^38)`（高半区要求高位符号扩展，本内核不使用）。
-pub const VA_BITS: u32 = 38;
+/// RISC-V 页表项格式（形状取自当前模式）。
+/// RISC-V page-table entry format (shape from the current mode).
+pub struct RvFormat;
 
-/// Sv39 页表项格式。
-/// Sv39 page-table entry format.
-pub struct Sv39Format;
-
-impl EntryFormat for Sv39Format {
-    const LEVELS: usize = 3;
-    const VA_BITS: u32 = VA_BITS;
+impl EntryFormat for RvFormat {
+    const LEVELS: usize = mode::LEVELS;
+    const VA_BITS: u32 = mode::VA_BITS;
+    const INDEX_BITS: u32 = mode::INDEX_BITS;
+    const ENTRY_BYTES: usize = mode::ENTRY_BYTES;
 
     fn is_valid(raw: u64) -> bool {
         raw & pte::V != 0
@@ -114,25 +115,28 @@ impl EntryFormat for Sv39Format {
     }
 }
 
-/// 一棵 Sv39 页表的遍历器。
-pub type Sv39Table = PageTable<Sv39Format, PhysTables>;
+/// 本模式的页表内存访问（表项宽度取自模式）。
+pub type RvTables = PhysTables<{ mode::ENTRY_BYTES }>;
+
+/// 一棵页表的遍历器。
+pub type RvTable = PageTable<RvFormat, RvTables>;
 
 /// 某个地址空间（顶级表 = satp 所指的表）的映射器。
-pub struct Sv39Mapper {
+pub struct RvMapper {
     root: u64,
-    tables: PhysTables,
+    tables: RvTables,
 }
 
-impl Sv39Mapper {
+impl RvMapper {
     /// 为顶级表 `root` 建立映射器。
     ///
     /// # Safety
     /// `root` 必须是有效的顶级表；`phys_offset` 为全物理内存映射偏移；同一顶级表同时只能有一个映射器修改它。
     pub unsafe fn for_root(root: u64, phys_offset: u64) -> Self {
-        Sv39Mapper { root, tables: PhysTables::new(phys_offset) }
+        RvMapper { root, tables: PhysTables::new(phys_offset) }
     }
 
-    fn table(&self) -> Sv39Table {
+    fn table(&self) -> RvTable {
         PageTable::new(self.root, self.tables)
     }
 
@@ -144,7 +148,7 @@ impl Sv39Mapper {
     }
 }
 
-impl PageMapper for Sv39Mapper {
+impl PageMapper for RvMapper {
     fn map(&mut self, page: VirtPage, frame: PhysFrame, flags: MapFlags, frames: &mut dyn FrameAllocator) -> Result<(), MapError> {
         Self::sync_if_executable(flags);
         self.table().map(page.start(), frame, flags, frames)?;

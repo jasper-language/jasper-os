@@ -41,7 +41,7 @@ mod bios {
     }
 }
 
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64", target_arch = "riscv32"))]
 mod direct {
     // 链接内核库（其中有 `#[panic_handler]` 与入口代码）。
     use jasper_kernel as _;

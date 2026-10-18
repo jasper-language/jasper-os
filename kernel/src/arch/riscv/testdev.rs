@@ -4,7 +4,7 @@
 //! 写入 `(退出码 << 16) | 0x3333` 即让 QEMU 以该退出码结束。设备树里没有该设备时（例如真机），
 //! 退回到经 SBI 以「系统故障」关机，再不行就停机——无论哪种都不会继续执行。
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{cpu, sbi};
 
@@ -12,11 +12,11 @@ use super::{cpu, sbi};
 const FINISHER_FAIL: u32 = 0x3333;
 
 /// 寄存器的虚拟地址（0 = 设备树里没有该设备）。
-static BASE: AtomicU64 = AtomicU64::new(0);
+static BASE: AtomicUsize = AtomicUsize::new(0);
 
 /// 设置寄存器的虚拟地址（引导适配层解析设备树后调用）。
 pub fn set_base(va: u64) {
-    BASE.store(va, Ordering::Relaxed);
+    BASE.store(va as usize, Ordering::Relaxed);
 }
 
 /// 以 `code` 结束仿真（不返回）。

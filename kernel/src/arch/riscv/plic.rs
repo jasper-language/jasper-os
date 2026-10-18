@@ -5,53 +5,53 @@
 //! 由 PLIC 节点的 `interrupts-extended` 与本处理器中断控制器的 phandle 解析得到，不按机型写死。
 //! 单处理器：只为启动处理器的监管态上下文使能中断源。中断源编号只在本目录内出现；Core 只看到逻辑中断线。
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use super::{cpu, uart};
 
 /// 每个中断源的优先级寄存器（4 字节 / 源）。
-const PRIORITY: u64 = 0x0000;
+const PRIORITY: usize = 0x0000;
 /// 各上下文的使能位图起点与步长。
-const ENABLE: u64 = 0x2000;
-const ENABLE_STRIDE: u64 = 0x80;
+const ENABLE: usize = 0x2000;
+const ENABLE_STRIDE: usize = 0x80;
 /// 各上下文的阈值 / 认领寄存器起点与步长。
-const CONTEXT: u64 = 0x20_0000;
-const CONTEXT_STRIDE: u64 = 0x1000;
+const CONTEXT: usize = 0x20_0000;
+const CONTEXT_STRIDE: usize = 0x1000;
 /// 上下文内：阈值、认领 / 完成。
-const THRESHOLD: u64 = 0;
-const CLAIM: u64 = 4;
+const THRESHOLD: usize = 0;
+const CLAIM: usize = 4;
 /// 自检时等待中断挂起的最多轮数（设备在写使能寄存器后立刻挂起中断，正常只需一轮）。
 const SELF_TEST_SPINS: u32 = 100_000;
 
 /// 寄存器块的虚拟地址（0 = 未知）。
-static BASE: AtomicU64 = AtomicU64::new(0);
-/// 启动处理器监管态的上下文编号（`u64::MAX` = 未知）。
-static CONTEXT_ID: AtomicU64 = AtomicU64::new(u64::MAX);
+static BASE: AtomicUsize = AtomicUsize::new(0);
+/// 启动处理器监管态的上下文编号（`u32::MAX` = 未知）。
+static CONTEXT_ID: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// 设置寄存器块的虚拟地址与上下文编号（引导适配层解析设备树后调用）。
 pub fn set_base(va: u64, context: u32) {
-    BASE.store(va, Ordering::Relaxed);
-    CONTEXT_ID.store(u64::from(context), Ordering::Relaxed);
+    BASE.store(va as usize, Ordering::Relaxed);
+    CONTEXT_ID.store(context, Ordering::Relaxed);
 }
 
-fn reg(off: u64) -> *mut u32 {
+fn reg(off: usize) -> *mut u32 {
     (BASE.load(Ordering::Relaxed) + off) as *mut u32
 }
 
-fn context_reg(off: u64) -> *mut u32 {
-    reg(CONTEXT + CONTEXT_ID.load(Ordering::Relaxed) * CONTEXT_STRIDE + off)
+fn context_reg(off: usize) -> *mut u32 {
+    reg(CONTEXT + CONTEXT_ID.load(Ordering::Relaxed) as usize * CONTEXT_STRIDE + off)
 }
 
 /// 设置中断源的优先级（0 = 永不送达）。
 fn set_priority(source: u32, prio: u32) {
     // SAFETY：基地址来自设备树；优先级寄存器按源编号排列。
-    unsafe { reg(PRIORITY + u64::from(source) * 4).write_volatile(prio) };
+    unsafe { reg(PRIORITY + source as usize * 4).write_volatile(prio) };
 }
 
 /// 为本上下文使能 / 关闭一个中断源。
 fn set_enabled(source: u32, on: bool) {
-    let ctx = CONTEXT_ID.load(Ordering::Relaxed);
-    let word = reg(ENABLE + ctx * ENABLE_STRIDE + u64::from(source / 32) * 4);
+    let ctx = CONTEXT_ID.load(Ordering::Relaxed) as usize;
+    let word = reg(ENABLE + ctx * ENABLE_STRIDE + (source / 32) as usize * 4);
     let bit = 1u32 << (source % 32);
     // SAFETY：读改写本上下文的使能位图中的一个字。
     unsafe {
@@ -86,7 +86,7 @@ pub struct SelfTest {
 /// 自检后关闭串口中断，打开监管态外部中断。基地址、上下文或串口中断号未知时返回 `None`，什么都不改。
 pub fn init() -> Option<SelfTest> {
     let source = uart::interrupt()?;
-    if BASE.load(Ordering::Relaxed) == 0 || CONTEXT_ID.load(Ordering::Relaxed) == u64::MAX {
+    if BASE.load(Ordering::Relaxed) == 0 || CONTEXT_ID.load(Ordering::Relaxed) == u32::MAX {
         return None;
     }
     // SAFETY：阈值寄存器属于本上下文；0 表示放行所有优先级 > 0 的源。

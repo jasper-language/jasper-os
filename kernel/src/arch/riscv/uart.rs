@@ -5,18 +5,18 @@
 //! 波特率沿用固件已设置的值。只负责「把一个字节送出去」，以及中断控制器自检所需的「发送保持寄存器空」中断开关；
 //! 格式化、换行转换与中断临界区由 Core 的 `console` 负责。
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 /// 发送保持寄存器（写）。
-const THR: u64 = 0;
+const THR: usize = 0;
 /// 中断使能寄存器。
-const IER: u64 = 1;
+const IER: usize = 1;
 /// FIFO 控制寄存器（写）。
-const FCR: u64 = 2;
+const FCR: usize = 2;
 /// 线路控制寄存器。
-const LCR: u64 = 3;
+const LCR: usize = 3;
 /// 线路状态寄存器。
-const LSR: u64 = 5;
+const LSR: usize = 5;
 /// LSR：发送保持寄存器空。
 const LSR_THRE: u8 = 1 << 5;
 /// IER：发送保持寄存器空中断。
@@ -27,25 +27,25 @@ const LCR_8N1: u8 = 0x03;
 const FCR_ENABLE_CLEAR: u8 = 0x07;
 
 /// 寄存器块的虚拟地址（0 = 尚未从设备树得到）。
-static BASE: AtomicU64 = AtomicU64::new(0);
+static BASE: AtomicUsize = AtomicUsize::new(0);
 /// 设备树给出的中断号（0 = 未知）。
-static IRQ: AtomicU64 = AtomicU64::new(0);
+static IRQ: AtomicU32 = AtomicU32::new(0);
 
 /// 设置寄存器块的虚拟地址与中断号（引导适配层解析设备树后调用）。
 pub fn set_base(va: u64, irq: u32) {
-    BASE.store(va, Ordering::Relaxed);
-    IRQ.store(u64::from(irq), Ordering::Relaxed);
+    BASE.store(va as usize, Ordering::Relaxed);
+    IRQ.store(irq, Ordering::Relaxed);
 }
 
 /// 设备树给出的中断号。
 pub fn interrupt() -> Option<u32> {
     match IRQ.load(Ordering::Relaxed) {
         0 => None,
-        n => Some(n as u32),
+        n => Some(n),
     }
 }
 
-fn reg(off: u64) -> Option<*mut u8> {
+fn reg(off: usize) -> Option<*mut u8> {
     match BASE.load(Ordering::Relaxed) {
         0 => None,
         b => Some((b + off) as *mut u8),

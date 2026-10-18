@@ -4,6 +4,10 @@
 //! * [`SpinLock<T>`]：`AtomicBool` + `UnsafeCell` 的互斥锁，RAII 守卫解锁。
 //! * [`Atomic64`]：64 位原子单元。有 64 位原子指令的目标（x86_64、AArch64、RISC-V64）直接用硬件原子；
 //!   没有的目标（RISC-V32 等）用 [`LockedU64`]（自旋锁模拟）。两种实现接口相同，调用者不需要分情况。
+//! * [`IrqSafeU64`]：**中断处理程序与任务之间可共享**的 64 位单元（时钟 tick 等由中断递增的计数）。
+//!   有 64 位原子指令时同样直接用硬件原子；没有时用 [`IrqLockedU64`]：先经 [`IrqMask`] 关本处理器的中断、
+//!   再取自旋锁——持锁期间本处理器不会被中断，中断处理程序就不会在同一处理器上自锁；其他处理器只需等一个极短的临界区，
+//!   因此多核下同样正确（没有全局串行的大锁，每个计数各自一把锁）。
 //!
 //! # 边界（为什么关中断版本不在这里）
 //! 「加锁时关中断」需要读写 CPU 中断标志，是 ISA 相关操作；本 crate 不碰硬件。
@@ -127,6 +131,103 @@ impl LockedU64 {
     }
 }
 
+/// 中断屏蔽策略：关闭本处理器的中断并返回之前是否开着、按返回值恢复。由内核按指令集提供（本 crate 不碰硬件）。
+/// Strategy for masking interrupts on the current processor (provided by the kernel per ISA).
+pub trait IrqMask {
+    /// 关中断，返回之前是否开着。
+    fn save_disable() -> bool;
+    /// 按 [`IrqMask::save_disable`] 的返回值恢复。
+    fn restore(was_enabled: bool);
+}
+
+/// 「关中断 + 自旋锁」实现的 64 位单元：中断处理程序与任务可以共享（见模块文档）。任何目标上都可编译，便于宿主测试。
+/// 64-bit cell guarded by interrupt masking plus a spin lock; safe to share with interrupt handlers.
+pub struct IrqLockedU64<M: IrqMask> {
+    cell: SpinLock<u64>,
+    _mask: core::marker::PhantomData<fn() -> M>,
+}
+
+impl<M: IrqMask> IrqLockedU64<M> {
+    /// 新建。
+    pub const fn new(v: u64) -> Self {
+        IrqLockedU64 { cell: SpinLock::new(v), _mask: core::marker::PhantomData }
+    }
+    /// 关中断、持锁执行 `f`，然后先解锁再恢复中断（顺序保证中断不会在解锁前进来抢同一把锁）。
+    fn with<R>(&self, f: impl FnOnce(&mut u64) -> R) -> R {
+        let was = M::save_disable();
+        let r = {
+            let mut g = self.cell.lock();
+            f(&mut g)
+        };
+        M::restore(was);
+        r
+    }
+    /// 读取。
+    pub fn load(&self, _o: Ordering) -> u64 {
+        self.with(|v| *v)
+    }
+    /// 写入。
+    pub fn store(&self, x: u64, _o: Ordering) {
+        self.with(|v| *v = x)
+    }
+    /// 加上 `x`（回绕），返回旧值。
+    pub fn fetch_add(&self, x: u64, _o: Ordering) -> u64 {
+        self.with(|v| core::mem::replace(v, v.wrapping_add(x)))
+    }
+    /// 减去 `x`（回绕），返回旧值。
+    pub fn fetch_sub(&self, x: u64, _o: Ordering) -> u64 {
+        self.with(|v| core::mem::replace(v, v.wrapping_sub(x)))
+    }
+    /// 取当前值与 `x` 的较大者写入，返回旧值。
+    pub fn fetch_max(&self, x: u64, _o: Ordering) -> u64 {
+        self.with(|v| core::mem::replace(v, (*v).max(x)))
+    }
+}
+
+/// 中断安全的 64 位单元（见模块文档）：有 64 位原子指令时为硬件原子，否则为 [`IrqLockedU64`]。
+/// Interrupt-safe 64-bit cell: native atomics where available, otherwise [`IrqLockedU64`].
+#[cfg(target_has_atomic = "64")]
+pub type IrqSafeU64<M> = NativeU64<M>;
+/// 中断安全的 64 位单元（见模块文档；本目标没有 64 位原子指令，以「关中断 + 自旋锁」实现）。
+#[cfg(not(target_has_atomic = "64"))]
+pub type IrqSafeU64<M> = IrqLockedU64<M>;
+
+/// 硬件 64 位原子的薄包装：与 [`IrqLockedU64`] 接口相同（屏蔽策略参数只为统一类型，不使用）。
+/// Thin wrapper over a native 64-bit atomic with the same interface as [`IrqLockedU64`].
+#[cfg(target_has_atomic = "64")]
+pub struct NativeU64<M: IrqMask> {
+    v: core::sync::atomic::AtomicU64,
+    _mask: core::marker::PhantomData<fn() -> M>,
+}
+
+#[cfg(target_has_atomic = "64")]
+impl<M: IrqMask> NativeU64<M> {
+    /// 新建。
+    pub const fn new(v: u64) -> Self {
+        NativeU64 { v: core::sync::atomic::AtomicU64::new(v), _mask: core::marker::PhantomData }
+    }
+    /// 读取。
+    pub fn load(&self, o: Ordering) -> u64 {
+        self.v.load(o)
+    }
+    /// 写入。
+    pub fn store(&self, x: u64, o: Ordering) {
+        self.v.store(x, o)
+    }
+    /// 加上 `x`（回绕），返回旧值。
+    pub fn fetch_add(&self, x: u64, o: Ordering) -> u64 {
+        self.v.fetch_add(x, o)
+    }
+    /// 减去 `x`（回绕），返回旧值。
+    pub fn fetch_sub(&self, x: u64, o: Ordering) -> u64 {
+        self.v.fetch_sub(x, o)
+    }
+    /// 取当前值与 `x` 的较大者写入，返回旧值。
+    pub fn fetch_max(&self, x: u64, o: Ordering) -> u64 {
+        self.v.fetch_max(x, o)
+    }
+}
+
 /// 本目标使用的 64 位原子单元（见模块文档）。
 #[cfg(target_has_atomic = "64")]
 pub type Atomic64 = core::sync::atomic::AtomicU64;
@@ -166,6 +267,80 @@ mod tests {
             h.join().unwrap();
         }
         assert_eq!(c.load(Ordering::Relaxed), 40_000);
+    }
+
+    use std::cell::Cell;
+
+    std::thread_local! {
+        /// 模拟的「本处理器中断开关」（每个测试线程一份）。
+        static IRQ_ON: Cell<bool> = const { Cell::new(true) };
+    }
+
+    /// 测试用屏蔽策略：记录开关状态。
+    struct MockMask;
+    impl IrqMask for MockMask {
+        fn save_disable() -> bool {
+            IRQ_ON.with(|c| c.replace(false))
+        }
+        fn restore(was: bool) {
+            IRQ_ON.with(|c| c.set(was));
+        }
+    }
+
+    #[test]
+    fn irq_locked_u64_masks_and_restores() {
+        let c: IrqLockedU64<MockMask> = IrqLockedU64::new(u64::MAX);
+        assert!(IRQ_ON.with(|x| x.get()));
+        // 临界区内中断关闭；结束后恢复为进入前的状态（开）
+        let inside = c.with(|_| IRQ_ON.with(|x| x.get()));
+        assert!(!inside, "持锁期间中断必须关闭");
+        assert!(IRQ_ON.with(|x| x.get()), "结束后恢复为开");
+        // 进入前已关（例如在中断处理程序里）⇒ 结束后仍关，不得被误开
+        IRQ_ON.with(|x| x.set(false));
+        assert_eq!(c.fetch_add(1, Ordering::Relaxed), u64::MAX);
+        assert!(!IRQ_ON.with(|x| x.get()), "进入前关着 ⇒ 结束后仍关着");
+        IRQ_ON.with(|x| x.set(true));
+        // 与原生原子相同的语义：回绕、fetch_sub、fetch_max（较小值不改动）
+        assert_eq!(c.load(Ordering::Relaxed), 0, "与原生一样回绕");
+        assert_eq!(c.fetch_sub(1, Ordering::Relaxed), 0);
+        assert_eq!(c.load(Ordering::Relaxed), u64::MAX);
+        c.store(10, Ordering::Relaxed);
+        assert_eq!(c.fetch_max(3, Ordering::Relaxed), 10);
+        assert_eq!(c.load(Ordering::Relaxed), 10, "较小值不改动");
+        assert_eq!(c.fetch_max(1 << 40, Ordering::Relaxed), 10);
+        assert_eq!(c.load(Ordering::Relaxed), 1 << 40, "超过 32 位的值完整保存");
+        assert!(!c.cell.is_locked(), "每次操作后锁都已释放");
+    }
+
+    #[test]
+    fn irq_locked_u64_no_lost_updates_across_threads() {
+        use std::sync::Arc;
+        let c: Arc<IrqLockedU64<MockMask>> = Arc::new(IrqLockedU64::new(0));
+        let hs: Vec<_> = (0..4)
+            .map(|_| {
+                let c = c.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..10_000 {
+                        c.fetch_add(1, Ordering::Relaxed);
+                    }
+                    IRQ_ON.with(|x| x.get())
+                })
+            })
+            .collect();
+        for h in hs {
+            assert!(h.join().unwrap(), "每个线程结束时中断状态已恢复");
+        }
+        assert_eq!(c.load(Ordering::Relaxed), 40_000);
+    }
+
+    #[test]
+    fn native_u64_matches_locked_semantics() {
+        let n: IrqSafeU64<MockMask> = IrqSafeU64::new(u64::MAX);
+        assert_eq!(n.fetch_add(1, Ordering::Relaxed), u64::MAX);
+        assert_eq!(n.fetch_sub(1, Ordering::Relaxed), 0);
+        assert_eq!(n.fetch_max(5, Ordering::Relaxed), u64::MAX);
+        n.store(7, Ordering::Relaxed);
+        assert_eq!(n.load(Ordering::Relaxed), 7);
     }
 
     #[test]

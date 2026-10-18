@@ -29,6 +29,7 @@ pub mod clock;
 pub mod config;
 pub mod fix_demo;
 pub mod console;
+pub mod counter_demo;
 pub mod exit_state;
 pub mod fault;
 pub mod ipc;

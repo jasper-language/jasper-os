@@ -5,8 +5,9 @@
 //!
 //! 串口标记格式由规格 §M1.3/§M1.4 固定，验收脚本 `verify-m1.3.sh` / `verify-m1.4.sh` 按它 grep。
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 
+use crate::sync::IrqU64;
 use crate::console;
 use crate::task::TaskId;
 
@@ -56,7 +57,7 @@ pub fn run() {
 const PREEMPT_STEPS: u32 = 8;
 
 /// 由定时器抢占触发的切换次数（观察者统计）。
-static TICK_SWITCHES: AtomicU64 = AtomicU64::new(0);
+static TICK_SWITCHES: IrqU64 = IrqU64::new(0);
 
 /// 抢占演示的切换观察者：打印并统计 `cause=tick` 的切换。
 fn log_and_count_switch(e: &SwitchEvent) {
