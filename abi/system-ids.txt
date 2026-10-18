@@ -51,3 +51,4 @@
 4115	error	system.memory.error.already_mapped	1	none	地址已有映射
 4116	error	system.memory.error.out_of_memory	1	none	物理内存不足
 21	op	system.memory.protect	1	write	内存·修改访问权限
+22	op	system.task.qos.set	1	write	任务·设置服务质量等级

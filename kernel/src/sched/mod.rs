@@ -1,16 +1,20 @@
 //! 调度子系统门面（Facade 模式）。
 //!
 //! 结构（高内聚、低耦合）：
-//! * `policy`    —— 调度策略（Strategy）：只决定「下一个是谁」
-//! * `stack`     —— 静态内核栈池：只负责栈内存与首次切入帧
-//! * `scheduler` —— 调度机制：任务表、状态迁移、切换准备、事件通知（Observer）
+//! * `policy`    —— 调度策略的选择点（Strategy）：策略本体是 `kernel_core::sched` 的纯决策
+//! * `stack`     —— 内核栈池：静态栈 + 堆就绪后一次性预留的堆栈
+//! * `scheduler` —— 调度机制：任务表、状态迁移、睡眠与唤醒、时钟记账、切换准备、事件通知（Observer）
 //! * `demo`      —— 里程碑演示任务（与机制分离，可整体删除）
-//! * 本文件      —— 唯一的全局实例 + 对外 API（spawn / yield / run …），
+//! * 本文件      —— 唯一的全局实例 + 对外 API（spawn / yield / sleep / run …），
 //!   以及唯一调用 `switch_context` 的地方
 //!
-//! 前置条件：单 CPU。协作式（M1.3）与抢占式（M1.4）共用同一切换路径：
-//! 抢占时由定时器中断在 EOI 之后调用 [`on_timer_interrupt`]，时间片（由策略给出）用完即
-//! `yield_with_cause("tick")`。所有切换都在关中断临界区内完成。
+//! 前置条件：单 CPU。协作式让出、时间片抢占、唤醒抢占共用同一切换路径：
+//! 定时器中断在 EOI 之后调用 [`on_timer_interrupt`]，由机制层记账并询问策略，需要时就地切换。
+//! 所有对调度器状态的访问与全部切换都在关中断临界区内完成（时钟中断也会修改调度器状态）。
+//!
+//! # 抢占默认开启
+//! 时间片抢占默认开启：吃满 CPU 的任务不能靠「不让出」独占处理器。需要可复现交错顺序的演练
+//! （协作式调度演示）在演练期间临时关闭，结束后用 [`set_preemption`] 的返回值恢复。
 
 pub mod demo;
 pub mod policy;
@@ -18,49 +22,48 @@ pub mod scheduler;
 pub mod stack;
 
 use core::ptr::{addr_of, addr_of_mut};
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::arch::{self as cpu, switch_context};
 use crate::task::TaskId;
 
-use policy::RoundRobin;
-use scheduler::{Scheduler, SpawnError, SwitchObserver};
+use policy::{kernel_policy, KernelPolicy, LatencyHistogram, Qos};
+use scheduler::{Cause, QosError, Scheduler, SpawnError, SwitchObserver};
 
-/// 槽位总数（含槽位 0 的引导线程）。
-pub const MAX_TASKS: usize = 4;
+/// 槽位总数上限（含槽位 0 的引导线程）。前 [`stack::STATIC_STACKS`] 个槽位在内核堆初始化前即可用，
+/// 其余在 [`reserve_stacks`] 之后可用。
+pub const MAX_TASKS: usize = 64;
 
 /// 内核唯一的调度器实例。
 ///
-/// 单 CPU、无抢占期间只会被当前执行流访问；所有访问都经下面的 `with`/`with_mut`，
-/// 且借用不跨越栈切换。SMP 时需改为每 CPU 实例 + 锁（接口保持不变）。
-static mut KERNEL_SCHED: Scheduler<RoundRobin, MAX_TASKS> = Scheduler::new(RoundRobin);
+/// 单 CPU；所有访问都经下面的 `with`/`with_mut`（关中断执行），且借用不跨越栈切换。
+/// SMP 时需改为每 CPU 实例 + 锁（接口保持不变）。
+static mut KERNEL_SCHED: Scheduler<KernelPolicy, MAX_TASKS> = Scheduler::new(kernel_policy());
 
-/// 以共享借用访问全局调度器。
-fn with<R>(f: impl FnOnce(&Scheduler<RoundRobin, MAX_TASKS>) -> R) -> R {
-    // SAFETY：单 CPU、关中断（或协作式）前提下没有并发访问；借用在闭包内结束。
-    unsafe { f(&*addr_of!(KERNEL_SCHED)) }
+/// 以共享借用访问全局调度器（关中断执行：时钟中断也会修改调度器状态）。
+fn with<R>(f: impl FnOnce(&Scheduler<KernelPolicy, MAX_TASKS>) -> R) -> R {
+    // SAFETY：单 CPU、关中断前提下没有并发访问；借用在闭包内结束。
+    cpu::without_irq(|| unsafe { f(&*addr_of!(KERNEL_SCHED)) })
 }
 
-/// 以独占借用访问全局调度器。
-fn with_mut<R>(f: impl FnOnce(&mut Scheduler<RoundRobin, MAX_TASKS>) -> R) -> R {
+/// 以独占借用访问全局调度器（关中断执行）。
+fn with_mut<R>(f: impl FnOnce(&mut Scheduler<KernelPolicy, MAX_TASKS>) -> R) -> R {
     // SAFETY：同上；调用者不得在闭包内触发栈切换。
-    unsafe { f(&mut *addr_of_mut!(KERNEL_SCHED)) }
+    cpu::without_irq(|| unsafe { f(&mut *addr_of_mut!(KERNEL_SCHED)) })
 }
 
 /// 启动时的内核地址空间（第一次切换时记录；`space = None` 的任务都运行在它上面）。
 static KERNEL_SPACE: spin::Once<cpu::SpaceRoot> = spin::Once::new();
 
-/// 是否允许定时器抢占（默认关闭；协作式阶段与关键初始化期间保持关闭）。
-static PREEMPTION: AtomicBool = AtomicBool::new(false);
-/// 当前任务在本时间片内已经历的 tick 数。
-static SLICE_TICKS: AtomicU32 = AtomicU32::new(0);
+/// 是否允许定时器抢占（默认开启，见模块文档）。
+static PREEMPTION: AtomicBool = AtomicBool::new(true);
 /// 调度器看到的定时器 tick 总数（在中断上下文中递增，任务可据此做基于时间的等待）。
 static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// 新任务的公共入口：执行任务体，返回后标记退出并让出 CPU（永不返回）。
 extern "C" fn task_trampoline() -> ! {
     // 新任务可能是在定时器中断里被首次切入的：那时 CPU 处于关中断状态，
-    // 而这条路径不会经过 iretq 恢复标志位 ⇒ 抢占开启时必须在这里显式开中断，
+    // 而这条路径不会经过中断返回来恢复标志位 ⇒ 抢占开启时必须在这里显式开中断，
     // 否则该任务将永远无法再被抢占。
     if PREEMPTION.load(Ordering::Relaxed) {
         cpu::irq_enable();
@@ -68,10 +71,7 @@ extern "C" fn task_trampoline() -> ! {
     if let Some(entry) = with(|s| s.current_entry()) {
         entry();
     }
-    with_mut(|s| s.mark_current_exited());
-    yield_with_cause("exit");
-    // 已退出的任务不会再被策略选中；走到这里说明调度器状态被破坏。
-    panic!("exited task was resumed");
+    exit_current(Cause::EXIT);
 }
 
 /// 安装切换观察者（例如串口日志）。
@@ -79,14 +79,24 @@ pub fn set_observer(observer: SwitchObserver) {
     with_mut(|s| s.set_observer(observer));
 }
 
-/// 新建内核任务。
+/// 堆就绪后为其余槽位预留内核栈（只调用一次；幂等）。返回可用槽位总数（含引导线程槽位）。
+pub fn reserve_stacks() -> Result<usize, stack::ReserveError> {
+    with_mut(|s| s.reserve_stacks())
+}
+
+/// 可用槽位总数（含引导线程槽位）。
+pub fn capacity() -> usize {
+    with(|s| s.capacity())
+}
+
+/// 新建内核任务（继承当前工作任务的 QoS 档位与上限）。
 pub fn spawn(id: TaskId, name: &'static str, entry: fn()) -> Result<usize, SpawnError> {
     with_mut(|s| s.spawn(id, name, entry, task_trampoline))
 }
 
-/// 主动让出 CPU（协作式）。
+/// 主动让出 CPU。
 pub fn yield_now() {
-    yield_with_cause("yield");
+    yield_with_cause(Cause::YIELD);
 }
 
 /// 带原因的让出：准备切换后在**没有任何借用**的情况下执行真正的栈切换。
@@ -96,9 +106,10 @@ pub fn yield_now() {
 /// 每个任务的中断标志随它的栈一起保存/恢复，互不影响。
 pub fn yield_with_cause(cause: &'static str) {
     let was_enabled = cpu::irq_save_disable();
-    SLICE_TICKS.store(0, Ordering::Relaxed);
     let kernel_space = *KERNEL_SPACE.call_once(cpu::current_space);
-    if let Some(plan) = with_mut(|s| s.prepare_switch(cause)) {
+    // SAFETY：已关中断；借用在本语句内结束，不跨越下面的栈切换。
+    let plan = unsafe { (*addr_of_mut!(KERNEL_SCHED)).prepare_switch(cause) };
+    if let Some(plan) = plan {
         // 下一个任务若从用户态被中断，CPU 要切到它自己的内核栈。
         if let Some(top) = plan.next_stack_top {
             cpu::set_kernel_stack(top);
@@ -110,23 +121,44 @@ pub fn yield_with_cause(cause: &'static str) {
             unsafe { cpu::switch_space(target) };
         }
         // SAFETY：old/new 指向全局调度器内的任务上下文，在切换期间保持有效；
-        // new.rsp 要么由 StackPool 伪造，要么由上一次 switch_context 保存。
+        // new 要么由栈池伪造，要么由上一次 switch_context 保存。
         unsafe { switch_context(plan.old, plan.new) };
     }
     cpu::irq_restore(was_enabled);
 }
 
-/// 等待外部进展（例如时钟前进）的一次让步：先把处理器让给其他就绪任务；回来后**开中断休眠到下一个中断**，
-/// 再恢复调用前的中断状态。
-///
-/// 用于系统调用里的阻塞等待（系统调用分发期间默认关中断）：若只是循环 `yield_now`，在没有其他就绪任务时
-/// 时钟中断永远进不来，等待永不结束。入口的用户栈暂存位只在切栈前使用，此后开中断是安全的。
-/// One step of a blocking wait: yield, then sleep until the next interrupt with interrupts enabled.
-pub fn pause() {
-    yield_now();
+/// 让当前工作任务睡眠到时刻 `deadline`（tick），期间不占用处理器；到期由时钟中断唤醒。
+/// 已到期时立即返回。所属进程开始终止时会被 [`wake`] 提前唤醒——调用者醒来后须自行检查等待条件。
+/// 在引导线程上调用时退化为「先让出、再休眠到下一个中断」（引导线程是空闲时的落脚点，不能睡眠）。
+/// Sleeps the current worker until `deadline` (ticks) without consuming CPU.
+pub fn sleep_until(deadline: u64) {
     let was_enabled = cpu::irq_save_disable();
-    cpu::wait_for_interrupt();
+    if timer_ticks() < deadline {
+        if with_mut(|s| s.block_current(Some(deadline))) {
+            yield_with_cause(Cause::SLEEP);
+        } else {
+            yield_now();
+            cpu::wait_for_interrupt();
+        }
+    }
     cpu::irq_restore(was_enabled);
+}
+
+/// 等待外部进展的一步：睡到下一个 tick（期间处理器交给其他任务，包括低档任务）。
+///
+/// 用于系统调用里的阻塞等待（等完成、等消息、等退出）：这类等待的条件不由时钟决定，
+/// 每个 tick 醒来检查一次。与「循环让出」不同，睡眠中的任务不可运行，低档任务因此能拿到处理器。
+/// One step of a blocking wait: sleep until the next tick.
+pub fn pause() {
+    sleep_until(timer_ticks() + 1);
+}
+
+/// 唤醒睡眠中的任务 `id`（不在睡眠时无动作）。被唤醒者档位更高且抢占开启时，在下一个 tick 之前
+/// 不会主动切换——调用者通常处在系统调用或内核路径中，由出口处的调度点或下一个 tick 完成切换。
+pub fn wake(id: TaskId) {
+    with_mut(|s| {
+        s.wake(id);
+    });
 }
 
 /// 当前任务的 id 与名字。
@@ -144,14 +176,26 @@ pub fn policy_name() -> &'static str {
     with(|s| s.policy_name())
 }
 
-/// 当前策略的时间片（tick 数）。
+/// 默认档位的时间片（tick 数）。
 pub fn quantum_ticks() -> u32 {
-    with(|s| s.quantum_ticks())
+    with(|s| s.default_quantum())
 }
 
 /// 从引导线程启动调度：运行到所有工作任务退出后返回。
+///
+/// 引导线程是空闲时的落脚点：工作任务全部睡眠时，它开中断休眠到下一个中断；
+/// 抢占开启时由时钟中断直接切到被唤醒的任务，关闭时由这里的循环让出。
 pub fn run() {
     yield_now();
+    while with(|s| s.live_workers()) > 0 {
+        if with(|s| s.has_runnable_worker()) {
+            yield_now();
+        } else {
+            let was_enabled = cpu::irq_save_disable();
+            cpu::wait_for_interrupt();
+            cpu::irq_restore(was_enabled);
+        }
+    }
 }
 
 /// 让当前任务运行在 `space` 上（`None` = 内核空间），并立即切换过去。
@@ -168,7 +212,7 @@ pub fn set_current_space(space: Option<cpu::SpaceRoot>) {
 
 /// 授予当前任务一组可发起的系统调用（进入用户态之前由任务创建方设置）。
 pub fn set_current_syscalls(set: crate::syscall::SyscallSet) {
-    cpu::without_irq(|| with_mut(|s| s.set_current_syscalls(set)));
+    with_mut(|s| s.set_current_syscalls(set));
 }
 
 /// 当前任务的地址空间（`None` = 内核空间）。
@@ -181,17 +225,52 @@ pub fn current_syscalls() -> crate::syscall::SyscallSet {
     with(|s| s.current_syscalls())
 }
 
+/// 当前任务的 QoS 档位（引导线程为 `None`）。
+pub fn current_qos() -> Option<Qos> {
+    with(|s| s.current_qos())
+}
+
+/// 修改当前任务的 QoS 档位（只能降低或不变；提升须在创建方授予的上限之内）。
+/// 降档后若有更高档任务在等，立即让出。
+pub fn set_current_qos(q: Qos) -> Result<(), QosError> {
+    with_mut(|s| s.set_current_qos(q))?;
+    if with(|s| s.has_runnable_worker()) {
+        yield_with_cause(Cause::PREEMPT);
+    }
+    Ok(())
+}
+
+/// 授予当前任务 QoS 上限（创建方在任务进入用户态之前调用；`None` = 只能降不能升）。
+pub fn set_current_qos_ceiling(ceiling: Option<Qos>) {
+    with_mut(|s| s.set_current_qos_ceiling(ceiling));
+}
+
+/// 某档的唤醒延迟直方图（从被唤醒到被选中运行，单位 tick）。
+pub fn latency(q: Qos) -> LatencyHistogram {
+    with(|s| s.latency(q))
+}
+
+/// 清空全部唤醒延迟直方图。
+pub fn reset_latency() {
+    with_mut(|s| s.reset_latency());
+}
+
+/// 任务 `id` 累计运行的 tick 数。
+pub fn cpu_ticks(id: TaskId) -> Option<u64> {
+    with(|s| s.cpu_ticks(id))
+}
+
 /// 结束当前任务（永不返回）：标记退出并切走。可在中断上下文调用（用户态异常的终止路径）。
 pub fn exit_current(cause: &'static str) -> ! {
     with_mut(|s| s.mark_current_exited());
     yield_with_cause(cause);
+    // 已退出的任务不会再被策略选中；走到这里说明调度器状态被破坏。
     panic!("exited task was resumed");
 }
 
-/// 打开/关闭定时器抢占。
-pub fn set_preemption(enabled: bool) {
-    SLICE_TICKS.store(0, Ordering::Relaxed);
-    PREEMPTION.store(enabled, Ordering::Relaxed);
+/// 打开/关闭定时器抢占，返回之前的设置（演练结束时用它恢复）。
+pub fn set_preemption(enabled: bool) -> bool {
+    PREEMPTION.swap(enabled, Ordering::Relaxed)
 }
 
 /// 调度器看到的定时器 tick 总数。
@@ -211,16 +290,13 @@ impl kernel_core::wait::TimeSource for TickClock {
 
 /// 定时器中断入口（**在中断上下文中调用，且必须在向中断控制器发送 EOI 之后**）。
 ///
-/// 时间片用完且抢占开启时，就在中断上下文里直接切换：被切走任务的中断帧留在它自己的栈上，
-/// 将来切回时从这里返回、经 `iretq` 恢复它被打断的位置与中断标志。
+/// 每个 tick：记账、唤醒到期的睡眠任务、询问策略是否抢占；需要时就在中断上下文里直接切换：
+/// 被切走任务的中断帧留在它自己的栈上，将来切回时从这里返回、经中断返回恢复它被打断的位置与中断标志。
 /// EOI 必须先发，否则在切回本任务之前中断控制器不会再投递定时器中断。
 pub fn on_timer_interrupt() {
-    TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
-    if !PREEMPTION.load(Ordering::Relaxed) {
-        return;
-    }
-    let used = SLICE_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
-    if used >= with(|s| s.quantum_ticks()) {
-        yield_with_cause("tick");
+    let now = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    let preemption = PREEMPTION.load(Ordering::Relaxed);
+    if let Some(cause) = with_mut(|s| s.tick(now, preemption)) {
+        yield_with_cause(cause);
     }
 }

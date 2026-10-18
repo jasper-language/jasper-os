@@ -35,6 +35,34 @@ pub fn yield_now() {
     sys::call(ids::SYSTEM_TASK_YIELD, 0, 0, 0);
 }
 
+/// 服务质量档位（数值越小越优先）：调度器按档位严格优先，档内按近期 CPU 用量轮转，每档有最低份额。
+/// Quality-of-service class of a thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum Qos {
+    /// 交互：直接响应用户操作。
+    Interactive = 0,
+    /// 用户发起：用户在等结果的工作（新线程的默认档位）。
+    UserInitiated = 1,
+    /// 工具：用户知道在进行、不急等结果的工作。
+    Utility = 2,
+    /// 后台：用户看不见的维护工作；有更高档工作时只拿最低份额。
+    Background = 3,
+}
+
+/// 设置调用线程的服务质量档位（`system.task.qos.set`）。
+///
+/// 降低或不变总是成功；提升需要创建方授予的上限，否则返回 [`Error::RIGHTS_DENIED`]——
+/// 线程降档之后不能自己升回去。新线程继承创建者当时的档位。
+pub fn set_qos(q: Qos) -> Result<()> {
+    set_qos_raw(q as u64)
+}
+
+/// 以原始数值设置档位（未定义的数值返回 [`Error::INVALID_ARGUMENT`]；供健壮性检查使用）。
+pub fn set_qos_raw(v: u64) -> Result<()> {
+    check(sys::call(ids::SYSTEM_TASK_QOS_SET, v, 0, 0)).map(|_| ())
+}
+
 /// 同步等待句柄所指的线程退出，返回其退出码（按 32 位无符号值报告）。
 pub fn wait_task(h: &Handle) -> Result<u64> {
     check(sys::call(ids::SYSTEM_TASK_WAIT, h.raw() as u64, 0, 0))

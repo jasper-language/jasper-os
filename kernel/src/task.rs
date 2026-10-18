@@ -1,18 +1,25 @@
-//! 任务模型 —— M1.3：真 TCB（上下文 + 入口），栈与切换见 `sched.rs` / `context.rs`。
+//! 任务模型：任务控制块（上下文 + 入口 + 地址空间 + 调度属性）。栈与切换见 `sched/`。
 //!
-//! 对应 Java 原型的 `Task`/`TaskId`/`TaskState`；比原型多一个 `Running` 态。
+//! 调度属性（[`SchedEntity`]：QoS 档位、近期用量……）由策略读写；睡眠与唤醒延迟记账由调度机制维护。
 
-/// Opaque task identifier (newtype over the prototype's integer id).
+use crate::sched::policy::{Qos, SchedEntity};
+
+/// 不透明的任务标识。
+/// Opaque task identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TaskId(pub u64);
 
-/// Runnable states. `Running` is tracked even though the Java prototype only
-/// had 3 states (spec notes this as a prototype simplification).
+/// 任务状态。
+/// Task states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
+    /// 可运行，等待被选中。
     Runnable,
+    /// 正在处理器上运行（任一时刻恰有一个）。
     Running,
+    /// 睡眠：等到 `Task::wake_at` 指定的 tick（或被显式唤醒）才重新可运行。
     Blocked,
+    /// 已退出：槽位在它被切走之后可复用。
     Exited,
 }
 
@@ -20,17 +27,32 @@ pub enum TaskState {
 /// `entry` 是任务入口（槽位 0 的引导线程没有入口），`space` 是任务运行时应处于的地址空间
 /// （`None` = 内核地址空间；调度器在切换任务时据此切换地址空间）。
 pub struct Task {
+    /// 任务标识。
     pub id: TaskId,
+    /// 任务名（诊断输出）。
     pub name: &'static str,
+    /// 当前状态。
     pub state: TaskState,
+    /// 切走时保存的上下文。
     pub context: crate::arch::TaskContext,
+    /// 入口函数（引导线程为 `None`）。
     pub entry: Option<fn()>,
+    /// 运行时所在地址空间（`None` = 内核地址空间）。
     pub space: Option<crate::arch::SpaceRoot>,
     /// 该任务可以发起的系统调用集合（统一权限检查的依据；内核任务为空集）。
     pub syscalls: crate::syscall::SyscallSet,
+    /// 调度属性（QoS 档位、近期用量、累计运行 tick）。
+    pub sched: SchedEntity,
+    /// QoS 上限：创建方授予的「可提升到的最高档位」（`None` = 只能降不能升）。
+    pub qos_ceiling: Option<Qos>,
+    /// 睡眠到的 tick（`state == Blocked` 时有效；`None` = 只能被显式唤醒）。
+    pub wake_at: Option<u64>,
+    /// 被唤醒的 tick（尚未运行）；被选中时据此记录唤醒延迟。
+    pub woken_at: Option<u64>,
 }
 
 impl Task {
+    /// 新任务：可运行、默认档位「用户发起」、没有 QoS 上限。
     pub const fn new(id: TaskId, name: &'static str) -> Self {
         Task {
             id,
@@ -40,6 +62,10 @@ impl Task {
             entry: None,
             space: None,
             syscalls: crate::syscall::SyscallSet::EMPTY,
+            sched: SchedEntity::new(Qos::UserInitiated),
+            qos_ceiling: None,
+            wake_at: None,
+            woken_at: None,
         }
     }
 }

@@ -42,6 +42,7 @@ pub mod prog_demo;
 pub mod ring;
 pub mod ring_demo;
 pub mod rt_demo;
+pub mod qos_demo;
 pub mod sched;
 pub mod sync;
 pub mod syscall;

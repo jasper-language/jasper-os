@@ -17,6 +17,7 @@
 //! * [`memory`] —— 虚拟内存区域与地址空间记账（真实页表在内核的 `arch/` 与后续 M2.x）
 //! * [`module`] —— 编译期模块描述符 + 依赖检查 + 顺序装载/逆序卸载
 //! * [`trap`]   —— 陷入帧与「名字 → 处理函数」的系统调用分发表
+//! * [`sched`]  —— 调度策略：QoS 四档 + 用量衰减 + 各档最低份额 + 唤醒延迟直方图（宿主可模拟测试）
 //! * [`trace`]  —— 无堆环形缓冲、ID 分配器、结构化事件追踪器
 //! * [`sync`]   —— 自旋锁
 //!
@@ -43,6 +44,7 @@ pub mod memory;
 pub mod meta;
 pub mod paging;
 pub mod ring_abi;
+pub mod sched;
 pub mod module;
 pub mod object;
 pub mod objtable;

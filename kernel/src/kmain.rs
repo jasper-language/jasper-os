@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{clock, fix_demo, ipc_demo, irq, kprintln, mech_demo, mm, prog_demo, ring_demo, rt_demo, sched, user_demo};
+use crate::{clock, fix_demo, ipc_demo, irq, kprintln, mech_demo, mm, prog_demo, qos_demo, ring_demo, rt_demo, sched, user_demo};
 
 /// 内核版本（横幅中输出）。
 pub const VERSION: &str = "0.0.1";
@@ -63,6 +63,23 @@ pub fn start(boot: &'static BootSpec) -> ! {
     mm::demo::run_map(boot);
     // M2.3：内核堆（Box/Vec/String 可用，按需增长）。
     mm::demo::run_heap();
+    // 堆就绪：为其余调度槽位预留内核栈（此后并发任务数不再受静态栈数量限制）。
+    // 预留之后把堆的空闲余量补回预留前的值（见 `heap::ensure_free`）。
+    let (_, heap_slack, _, _) = mm::heap::stats();
+    let reserved = sched::reserve_stacks();
+    if mm::heap::ensure_free(heap_slack).is_err() {
+        kprintln!("[JSR-SCHED] capacity heap_slack_restore_failed want={}", heap_slack);
+    }
+    match reserved {
+        Ok(n) => kprintln!(
+            "[JSR-SCHED] capacity slots={} static_stacks={} max={} policy={} preemption=default_on",
+            n,
+            sched::stack::STATIC_STACKS,
+            sched::MAX_TASKS,
+            sched::policy_name()
+        ),
+        Err(e) => kprintln!("[JSR-SCHED] capacity reserve_failed available={}", e.available),
+    }
     // M2.4：独立地址空间（同一虚拟地址、不同物理帧，真实切换）。
     mm::demo::run_space();
     // M3.1：真实进入 Ring 3；用户态异常只终止该任务。
@@ -89,6 +106,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
     prog_demo::run();
     // J-1：用户态运行时（匿名内存系统调用；用运行时写成的普通 Rust 程序：堆、线程、Channel、异步环）。
     rt_demo::run();
+    // SCHED-1：服务质量分级调度（档位规则、动态任务数、过载下的唤醒延迟、压力撤销后恢复）。
+    qos_demo::run();
     let fails = [
         mm::demo::failed(),
         user_demo::failed(),
@@ -97,17 +116,19 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ipc_demo::failed(),
         prog_demo::failed(),
         rt_demo::failed(),
+        qos_demo::failed(),
     ];
     if fails.iter().any(|&f| f > 0) {
         kprintln!(
-            "[JSR-EXIT] failure mm_failed={} user_failed={} fix_failed={} ring_failed={} ipc_failed={} prog_failed={} rt_failed={}",
+            "[JSR-EXIT] failure mm_failed={} user_failed={} fix_failed={} ring_failed={} ipc_failed={} prog_failed={} rt_failed={} qos_failed={}",
             fails[0],
             fails[1],
             fails[2],
             fails[3],
             fails[4],
             fails[5],
-            fails[6]
+            fails[6],
+            fails[7]
         );
         arch::exit_emulator(ExitStatus::Failure);
     }

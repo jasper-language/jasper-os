@@ -916,8 +916,26 @@ fn finish_exit_in(t: &mut kobj::Table, pid: ObjId, code: i64) {
 /// 发起进程终止（exiting）：确定退出码，关闭句柄表与子进程表（其后的提交原子失败）；
 /// 其余线程在各自的下一个调度点停止，最后一个线程停止时进入 exited。没有线程的进程直接进入 exited。
 /// 进程不在运行（已在退出）时返回 `false`。
+/// 开始终止后唤醒该进程所有在睡的线程：长时间的定时等待（`time.wait`）也要尽快观察到 exiting。
 /// Begins process termination (exiting phase).
 pub fn begin_exit(pid: ObjId, code: i64) -> bool {
+    let started = begin_exit_in_table(pid, code);
+    if started {
+        wake_threads(pid);
+    }
+    started
+}
+
+/// 唤醒进程 `pid` 的全部睡眠线程（不在睡眠的线程不受影响）。调度器不持锁，可在登记表锁内调用。
+fn wake_threads(pid: ObjId) {
+    let reg = REG.lock();
+    for m in reg.members.iter().filter(|m| m.process == pid) {
+        sched::wake(m.task);
+    }
+}
+
+/// [`begin_exit`] 的对象表部分：状态迁移、关闭句柄表、无线程时直接进入 exited。
+fn begin_exit_in_table(pid: ObjId, code: i64) -> bool {
     kobj::with(|t| {
         let idle = match t.get_mut(pid) {
             Ok(KObject::Process(p)) if p.state == ProcState::Running => {
@@ -955,6 +973,19 @@ pub struct Interrupted;
 /// One step of an in-kernel blocking wait that also observes process termination.
 pub fn block_step() -> Result<(), Interrupted> {
     sched::pause();
+    if current_exiting() {
+        Err(Interrupted)
+    } else {
+        Ok(())
+    }
+}
+
+/// 系统调用内的定时等待：睡眠到时刻 `deadline`（tick，期间不占用处理器），醒来后检查所属进程是否已在 exiting。
+/// 进程开始终止时睡眠线程会被提前唤醒，因此长时间的等待也能及时以 [`Interrupted`] 返回。
+/// 返回 `Ok(())` 只表示醒来且进程仍在运行，调用者须自行确认时刻已到（可能被提前唤醒）。
+/// A timed in-kernel wait that also observes process termination.
+pub fn block_until(deadline: u64) -> Result<(), Interrupted> {
+    sched::sleep_until(deadline);
     if current_exiting() {
         Err(Interrupted)
     } else {

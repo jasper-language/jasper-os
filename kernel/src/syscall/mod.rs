@@ -19,6 +19,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use alloc::vec;
 
 use kernel_core::object::{HandleError, HandleId, Rights};
+use kernel_core::sched::Qos;
 
 use crate::mm::user::{copy_from_user, UserPtrError};
 use crate::proc::{self, ProcError};
@@ -78,6 +79,11 @@ impl SyscallSet {
         SyscallSet(m)
     }
 
+    /// 两个集合的并集。
+    pub const fn union(self, other: SyscallSet) -> SyscallSet {
+        SyscallSet(self.0 | other.0)
+    }
+
     /// 是否包含某个 ID。
     pub const fn contains(self, id: u64) -> bool {
         id < 64 && self.0 & (1 << id) != 0
@@ -129,6 +135,7 @@ fn has_handler(id: u32) -> bool {
             | SYSTEM_MEMORY_MAP
             | SYSTEM_MEMORY_UNMAP
             | SYSTEM_MEMORY_PROTECT
+            | SYSTEM_TASK_QOS_SET
     )
 }
 
@@ -242,6 +249,19 @@ fn task_spawn(entry: u64, stack: u64, arg: u64) -> i64 {
     }
 }
 
+/// `system.task.qos.set(qos)`：修改调用线程的服务质量档位（0 = 交互、1 = 用户发起、2 = 工具、3 = 后台），成功返回 0。
+/// 降低或不变总是允许；提升需要创建方授予的上限且不超过上限，否则 `rights_denied`（线程不能自升档位）。
+/// 未定义的档位数值 ⇒ `invalid_argument`（不截断、不就近取值）。
+fn task_qos_set(raw: u64) -> i64 {
+    let Some(q) = Qos::from_raw(raw) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    match sched::set_current_qos(q) {
+        Ok(()) => 0,
+        Err(_) => err(SYSTEM_ERROR_RIGHTS_DENIED),
+    }
+}
+
 /// `system.process.exit(code)`：发起本进程终止（exiting），然后结束调用线程（不返回）。
 /// 其余线程在各自的下一个调度点停止；最后一个线程停止时进程进入 exited，退出码为 `code`。
 fn process_exit(code: u64) -> i64 {
@@ -304,14 +324,14 @@ fn memory_protect(va: u64, pages: u64, flags: u64) -> i64 {
     }
 }
 
-/// `system.time.wait(ticks)` 的同步形式：让出处理器直到时钟前进 `ticks` 个 tick，返回 0。
-/// 同一操作也可经异步环提交（可被取消）；同步形式没有取消路径。
+/// `system.time.wait(ticks)` 的同步形式：睡眠直到时钟前进 `ticks` 个 tick（期间不占用处理器），返回 0。
+/// 同一操作也可经异步环提交（可被取消）；同步形式没有取消路径，但所属进程终止时以 cancelled 提前返回。
 fn time_wait(ticks: u64) -> i64 {
     let Some(deadline) = sched::timer_ticks().checked_add(ticks) else {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     };
     while sched::timer_ticks() < deadline {
-        if proc::block_step().is_err() {
+        if proc::block_until(deadline).is_err() {
             return err(SYSTEM_ASYNC_ERROR_CANCELLED);
         }
     }
@@ -370,6 +390,7 @@ fn execute(e: &AbiEntry, a: &SyscallArgs, task_id: u64) -> i64 {
         SYSTEM_MEMORY_MAP => memory_map(a.args[0], a.args[1], a.args[2]),
         SYSTEM_MEMORY_UNMAP => memory_unmap(a.args[0], a.args[1]),
         SYSTEM_MEMORY_PROTECT => memory_protect(a.args[0], a.args[1], a.args[2]),
+        SYSTEM_TASK_QOS_SET => task_qos_set(a.args[0]),
         _ => err(SYSTEM_ERROR_UNSUPPORTED),
     }
 }

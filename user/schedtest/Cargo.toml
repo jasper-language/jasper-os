@@ -1,0 +1,16 @@
+# user-schedtest —— 过载下的响应性验收程序：吃满 CPU 的线程 + 周期性测量线程，验证服务质量分级调度的唤醒延迟与防饿死。
+# 入口参数 role 选择模式（见 src/main.rs 的文档表）。
+[package]
+name = "user-schedtest"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "user-schedtest"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+jasper-rt = { path = "../rt" }

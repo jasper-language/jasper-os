@@ -447,6 +447,24 @@ check_j4() {    # 库作为 .jaso 模块：sha2 / crc / deflate / net 同时装�
   fi
 }
 
+check_sched1() { # 调度策略 + QoS：档位规则（拒绝且不变、继承、上限）；动态任务数；过载下用户发起档唤醒延迟有上界、后台有进展；压力撤销后立即恢复；回到基线
+  if has 'policy=qos preemption=default_on' \
+     && has '\[JSR-QOS\] case=rules boot_refused=true steps=7/7 raise_refused_unchanged=true inherit=true ceiling=true reclaimed=true' \
+     && has '\[JSR-QOS\] case=many capacity=64 spawned=40 done=40 peak_live=40 full_refused=true fillers=63 reclaimed=true' \
+     && has 'text=schedtest: mode=qos qos_rules invalid_refused=true raise_refused=true same_ok=true' \
+     && has 'text=schedtest: mode=qos busy_ticks=[0-9]+ background_progressed=true' \
+     && has 'text=schedtest: mode=qos joined=4 all_progressed=true' \
+     && has 'text=schedtest: mode=same_class joined=4 all_progressed=true' \
+     && has '\[JSR-QOS\] case=overload mode=qos exit=Some\(0\) samples=[1-9][0-9]* p50=0 p99=[01] max=[01] bound=1 bounded=true .*reclaimed=true' \
+     && has '\[JSR-QOS\] case=overload mode=same_class exit=Some\(0\) samples=[1-9][0-9]* .* bounded=true .*reclaimed=true' \
+     && has '\[JSR-QOS\] case=recovery rounds=20 samples=20 max=0 immediate=true reclaimed=true' \
+     && has '^\[JSR-QOS\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0'; then
+    record SCHED1 PASS "QoS 四档：降档/不变允许、升档被拒且档位不变、继承与上限；64 槽位、40 任务并发；4 个吃满 CPU 线程下用户发起档唤醒延迟有上界、后台有进展；压力撤销后延迟 0；回到基线"
+  else
+    record SCHED1 FAIL "缺少 JSR-QOS 关键标记、延迟超界或 failed≠0"
+  fi
+}
+
 check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出接收方、堆扩容、内核空间预分配、只读翻译、ID 用尽、线程创建）
   if has 'exited_receiver grant=Some\(Exited\) grant_new=Some\(Exited\) transfer=Some\(Exited\) objects_unchanged=true sender_kept=true reaped_receiver=Some\(NoSuchProcess\)' \
      && has 'heap fail_alloc=Some\(OutOfFrames\) rolled_back=true fail_map=Some\(MapFailed\) rolled_back=true overflow=Some\(LimitReached\) regrow=true reclaimed=true' \
@@ -462,7 +480,7 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_fix
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_fix
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

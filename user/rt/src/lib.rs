@@ -8,7 +8,7 @@
 //! | [`heap`] | 全局分配器：在私有窗口的固定区间上经 `system.memory.map` 按需增长 |
 //! | [`io`] | `print!` / `println!`（`system.console.write`） |
 //! | [`handle`] | 句柄 RAII（离开作用域即关闭）、复制与降权 |
-//! | [`task`] | 线程（`spawn` / `join`）、让出、线程与进程退出、等待 |
+//! | [`task`] | 线程（`spawn` / `join`）、让出、服务质量档位、线程与进程退出、等待 |
 //! | [`time`] | 读取时刻、同步等待 |
 //! | [`mem`] | 匿名页映射与取消映射 |
 //! | [`channel`] | Channel 端点：收发消息与句柄 |

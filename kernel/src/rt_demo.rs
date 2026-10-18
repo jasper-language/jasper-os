@@ -59,7 +59,8 @@ const STACK_PAGES: u64 = 4;
 const FAULT_CODE: i64 = -1;
 
 /// 运行时用到的系统调用。
-fn rt_calls() -> SyscallSet {
+/// 运行时（jasper-rt）写成的程序所需的系统调用集合（其它演练在此基础上追加）。
+pub(crate) fn rt_calls() -> SyscallSet {
     SyscallSet::of(&[
         abi::SYSTEM_CONSOLE_WRITE,
         abi::SYSTEM_TASK_EXIT,
@@ -84,15 +85,21 @@ fn rt_calls() -> SyscallSet {
     ])
 }
 
+/// 资源基线：用例前后比较，判定没有泄漏。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Baseline {
-    free_frames: usize,
-    objects: usize,
-    pending: usize,
-    pins: (usize, usize),
+pub(crate) struct Baseline {
+    /// 空闲页帧数。
+    pub(crate) free_frames: usize,
+    /// 存活内核对象数。
+    pub(crate) objects: usize,
+    /// 清理队列中待处理的对象数。
+    pub(crate) pending: usize,
+    /// 固定帧统计。
+    pub(crate) pins: (usize, usize),
 }
 
-fn baseline() -> Baseline {
+/// 先跑完清理过程，再读取资源基线。
+pub(crate) fn baseline() -> Baseline {
     kobj::run_cleanup(usize::MAX);
     let (objects, pending, _) = kobj::stats();
     Baseline { free_frames: frame::free_frames(), objects, pending, pins: pin::stats() }
@@ -106,7 +113,7 @@ fn reap(pid: ObjId) -> Option<i64> {
 
 /// 运行全部用例。演练期间开启时间片抢占（与 M5.1 演练相同：用户线程可被时钟中断换下）。
 pub fn run() {
-    sched::set_preemption(true);
+    let prev_preemption = sched::set_preemption(true);
     let start = baseline();
     memory_kernel_side();
     program("rt-main", USER_RTDEMO, 0, 0);
@@ -117,7 +124,7 @@ pub fn run() {
     program("modhost", USER_MODHOST, 0, 0);
     let end = baseline();
     check(end == start, "演练结束后资源未回到起点");
-    sched::set_preemption(false);
+    sched::set_preemption(prev_preemption);
     kprintln!(
         "[JSR-RT] summary free_frames={}/{} objects={}/{} pending={} pinned={:?} reclaimed={} checks={} failed={}",
         end.free_frames,
@@ -265,10 +272,22 @@ fn memory_kernel_side() {
 /// 装载用户程序 `image` 并以 `role` 运行到结束，检查退出码与回到基线。
 fn program(name: &'static str, image: &[u8], role: u64, expect: i64) {
     let before = baseline();
-    let Ok(pid) = proc::create(name, rt_calls()) else {
-        check(false, "进程创建失败");
+    let Some((st, code)) = run_program(name, image, role, rt_calls()) else {
+        check(false, "用户程序装载失败");
         return;
     };
+    let after = baseline();
+    check(st == Some(ProcState::Exited { code: expect }) && code == Some(expect), name);
+    check(after == before, "用例结束后资源未回到基线");
+    kprintln!("[JSR-RT] case={} exit={:?} expect={} reclaimed={}", name, code, expect, after == before);
+}
+
+/// 装载并运行一个内嵌的用户程序到结束，然后回收进程。
+/// 返回 (回收前的进程状态, 退出码)；进程创建或装载失败时返回 `None`（已创建的进程同样被回收）。
+/// 主线程栈布局与其它演练相同；`calls` 是授予该进程的系统调用集合。
+/// Loads, runs to completion and reaps an embedded user program.
+pub(crate) fn run_program(name: &'static str, image: &[u8], role: u64, calls: SyscallSet) -> Option<(Option<ProcState>, Option<i64>)> {
+    let pid = proc::create(name, calls).ok()?;
     let base = arch::USER_WINDOW.0;
     let started = (|| {
         let entry = proc::load_elf(pid, image).map_err(|_| ProcError::Map(MapError::InvalidAddress))?;
@@ -278,14 +297,10 @@ fn program(name: &'static str, image: &[u8], role: u64, expect: i64) {
         proc::spawn_thread(pid, name, entry, base + STACK_TOP_OFF, role, 0)
     })()
     .is_ok();
-    check(started, "用户程序装载失败");
     if started {
         sched::run();
     }
     let st = proc::state(pid);
     let code = reap(pid);
-    let after = baseline();
-    check(st == Some(ProcState::Exited { code: expect }) && code == Some(expect), name);
-    check(after == before, "用例结束后资源未回到基线");
-    kprintln!("[JSR-RT] case={} exit={:?} expect={} reclaimed={}", name, code, expect, after == before);
+    started.then_some((st, code))
 }

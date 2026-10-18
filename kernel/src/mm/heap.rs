@@ -149,6 +149,20 @@ pub fn init() -> Result<(), GrowError> {
     Ok(())
 }
 
+/// 保证堆里至少有 `bytes` 字节空闲（不足时一次增长补齐）。
+///
+/// 用途：启动期一次性的大块常驻分配（例如调度器的内核栈）会吃掉堆里原有的空闲余量；
+/// 之后若某个演练的小分配触发增长，增长出来的页帧不会再还给页帧分配器，该演练的「页帧回到基线」就会失败。
+/// 常驻分配之后调用本函数把余量补回原值，后续行为与没有这次分配时一致。
+pub fn ensure_free(bytes: usize) -> Result<(), GrowError> {
+    let mut s = HEAP.lock();
+    let free = s.heap.free_bytes();
+    if free < bytes {
+        grow(&mut s, (bytes - free) as u64)?;
+    }
+    Ok(())
+}
+
 /// 堆统计：(总字节, 空闲字节, 空闲块数, 已映射字节)。
 pub fn stats() -> (usize, usize, usize, u64) {
     let s = HEAP.lock();

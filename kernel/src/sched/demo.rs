@@ -33,7 +33,10 @@ fn demo_task() {
 }
 
 /// 运行演示：创建 A/B/C 三个任务，轮转到全部退出后回到引导线程。
+///
+/// 协作式演示要求可复现的交错顺序：演示期间关闭时间片抢占，结束后恢复。
 pub fn run() {
+    let prev_preemption = super::set_preemption(false);
     super::set_observer(log_switch);
     for (id, name) in [(1, "A"), (2, "B"), (3, "C")] {
         if super::spawn(TaskId(id), name, demo_task).is_err() {
@@ -41,6 +44,7 @@ pub fn run() {
         }
     }
     super::run();
+    super::set_preemption(prev_preemption);
     console::_print(format_args!(
         "[JSR-SCHED] all tasks exited switches={} policy={}\n",
         super::switch_count(),
@@ -85,9 +89,9 @@ pub fn run_preemptive() {
             console::_print(format_args!("[JSR-SCHED] spawn failed name={}\n", name));
         }
     }
-    super::set_preemption(true);
+    let prev_preemption = super::set_preemption(true);
     super::run();
-    super::set_preemption(false);
+    super::set_preemption(prev_preemption);
     console::_print(format_args!(
         "[JSR-SCHED] preemptive demo done tick_switches={} quantum_ticks={} policy={}\n",
         TICK_SWITCHES.load(Ordering::Relaxed),

@@ -146,11 +146,11 @@ fn single(label: &str, name: &'static str, role: u64, arg: u64, expect: i64) -> 
 /// 运行全部用例。
 ///
 /// 整个演练期间开启时间片抢占：用例 6 的空转线程从不主动让出处理器，只有时钟中断能把它换下——
-/// 这正是「从用户态被中断」这一调度点要证明的情形。演练结束后恢复关闭，后续流程保持可复现。
+/// 这正是「从用户态被中断」这一调度点要证明的情形。演练结束后恢复之前的设置。
 pub fn run() {
-    sched::set_preemption(true);
+    let prev_preemption = sched::set_preemption(true);
     run_cases();
-    sched::set_preemption(false);
+    sched::set_preemption(prev_preemption);
 }
 
 fn run_cases() {
