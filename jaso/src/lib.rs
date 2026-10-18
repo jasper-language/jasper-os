@@ -26,8 +26,10 @@
 //! * **Exports**（至多一个）：`count u32` + `count × {name_offset u32, name_len u32, value u32, kind u32}` + 名字字节；
 //!   `value` 是映像内偏移；`kind = 1`（C 调用约定的函数）时必须落在可执行段内；
 //!   导出表必须与清单 `core.exports` 一一对应（导出是声明出来的，不是链接器附带的）
-//! * **Relocs**（至多一个）：`count u32` + `count × {offset u32, kind u32, addend u64}`；v0 只有 `kind = 1`：
-//!   在 `offset` 处写入 `装入基址 + addend`（8 字节）。`offset` 必须落在不可执行的段内
+//! * **Relocs**（至多一个）：`count u32` + `count × {offset u32, kind u32, addend u64}`；v0 只有「基址 + 加数」一类，
+//!   按指令集的指针宽度分两种：64 位指令集 `kind = 1`（在 `offset` 处写入 8 字节的 `装入基址 + addend`），
+//!   32 位指令集（RISC-V32）`kind = 2`（写入 4 字节）；种类必须与文件的指令集一致。
+//!   `offset` 按写入宽度对齐，且必须落在不可执行的段内
 //!
 //! # 校验的原则
 //! 解析器不信任任何字段：所有偏移与长度都做检查式运算，任何越界、重叠、未知取值都拒绝，**从不 panic**
@@ -83,8 +85,12 @@ pub const FLAG_W: u32 = 2;
 pub const FLAG_X: u32 = 4;
 /// 导出种类：C 调用约定的函数。
 pub const EXPORT_FUNC: u32 = 1;
-/// 重定位种类：写入「基址 + addend」（8 字节）。
+/// 重定位种类：写入「基址 + addend」（8 字节，64 位指令集）。
+/// Relocation kind: write `base + addend` as 8 bytes (64-bit ISAs).
 pub const RELOC_RELATIVE64: u32 = 1;
+/// 重定位种类：写入「基址 + addend」（4 字节，32 位指令集；装入基址与结果都在 32 位地址空间内）。
+/// Relocation kind: write `base + addend` as 4 bytes (32-bit ISAs).
+pub const RELOC_RELATIVE32: u32 = 2;
 
 /// 目标指令集。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +130,25 @@ impl Arch {
     /// 由名字解析。
     pub fn from_name(s: &str) -> Option<Arch> {
         [Arch::X86_64, Arch::Aarch64, Arch::Riscv64, Arch::Riscv32].into_iter().find(|a| a.name() == s)
+    }
+
+    /// 该指令集的指针宽度（字节）：RISC-V32 为 4，其余为 8。
+    /// Pointer width of the ISA in bytes.
+    pub const fn pointer_bytes(self) -> u32 {
+        match self {
+            Arch::Riscv32 => 4,
+            Arch::X86_64 | Arch::Aarch64 | Arch::Riscv64 => 8,
+        }
+    }
+
+    /// 该指令集唯一允许的重定位种类（按指针宽度：[`RELOC_RELATIVE32`] 或 [`RELOC_RELATIVE64`]）。
+    /// The only relocation kind allowed for this ISA.
+    pub const fn relative_reloc(self) -> u32 {
+        if self.pointer_bytes() == 4 {
+            RELOC_RELATIVE32
+        } else {
+            RELOC_RELATIVE64
+        }
     }
 
     /// 本程序编译所针对的指令集（不在上述四种之内时为 `None`）。
@@ -330,7 +355,7 @@ pub struct Export<'a> {
 pub struct Reloc {
     /// 写入位置（映像内偏移）。
     pub offset: u32,
-    /// 种类（v0 只有 [`RELOC_RELATIVE64`]）。
+    /// 种类（[`RELOC_RELATIVE64`] 或 [`RELOC_RELATIVE32`]，与文件的指令集一致）。
     pub kind: u32,
     /// 加数（映像内偏移）。
     pub addend: u64,
@@ -586,11 +611,12 @@ impl<'a> Image<'a> {
         if count.checked_mul(RELOC_SIZE).and_then(|n| n.checked_add(4)) != Some(b.len()) {
             return Err(JasoError::BadReloc);
         }
+        let width = self.arch.pointer_bytes();
         for r in self.relocs() {
-            if r.kind != RELOC_RELATIVE64 {
+            if r.kind != self.arch.relative_reloc() {
                 return Err(JasoError::BadReloc);
             }
-            if r.offset % 8 != 0 || r.addend >= self.image_size as u64 || !self.in_segment(r.offset as u64, 8, |f| f & FLAG_X == 0) {
+            if r.offset % width != 0 || r.addend >= self.image_size as u64 || !self.in_segment(r.offset as u64, width as u64, |f| f & FLAG_X == 0) {
                 return Err(JasoError::RelocOutOfRange);
             }
         }

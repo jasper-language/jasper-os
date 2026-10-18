@@ -14,7 +14,7 @@ extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use jaso_module as _;
 use smoltcp::iface::{Config, Interface, SocketSet};
@@ -28,7 +28,7 @@ const MAX_LEN: usize = 1 << 20;
 /// 轮询轮数上限。
 const MAX_ROUNDS: u64 = 1_000_000;
 
-static ROUNDS: AtomicU64 = AtomicU64::new(0);
+static ROUNDS: AtomicU32 = AtomicU32::new(0);
 
 /// 环回 TCP 回送。
 ///
@@ -93,7 +93,7 @@ pub unsafe extern "C" fn tcp_loopback_echo(input: *const u8, len: usize, out: *m
             _ => Duration::from_millis(1),
         };
     }
-    ROUNDS.store(rounds, Ordering::Relaxed);
+    ROUNDS.store(rounds as u32, Ordering::Relaxed); // rounds ≤ MAX_ROUNDS，32 位放得下
     if got == len {
         got as i64
     } else {
@@ -104,5 +104,5 @@ pub unsafe extern "C" fn tcp_loopback_echo(input: *const u8, len: usize, out: *m
 /// 上一次回送的轮询轮数。
 #[no_mangle]
 pub extern "C" fn last_rounds() -> u64 {
-    ROUNDS.load(Ordering::Relaxed)
+    ROUNDS.load(Ordering::Relaxed) as u64
 }

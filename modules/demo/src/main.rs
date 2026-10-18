@@ -15,14 +15,14 @@
 #![no_std]
 #![no_main]
 
-use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
 use jaso::HostV0;
 
 /// 装载器传入的宿主接口表（`jaso_init` 之后有效，生命期与模块相同）。
 static HOST: AtomicPtr<HostV0> = AtomicPtr::new(core::ptr::null_mut());
 /// 调用计数（可写数据段）。
-static COUNTER: AtomicU64 = AtomicU64::new(0);
+static COUNTER: AtomicU32 = AtomicU32::new(0);
 /// 只读的字符串表：每一项都是指针，装入后须经重定位指向本实例的映像。
 static GREETINGS: [&str; 3] = ["你好，来自 .jaso 模块", "hello from a .jaso module", "jaso-demo 0.1.0"];
 
@@ -74,7 +74,7 @@ pub unsafe extern "C" fn demo_greeting(i: usize, out: *mut u8, cap: usize) -> us
 /// 计数加一并返回新值。
 #[no_mangle]
 pub extern "C" fn demo_counter() -> u64 {
-    COUNTER.fetch_add(1, Ordering::Relaxed) + 1
+    (COUNTER.fetch_add(1, Ordering::Relaxed) + 1) as u64
 }
 
 /// 经宿主分配 `n` 字节，按 `i % 251` 填充后求和并释放；宿主不可用或分配失败返回 `u64::MAX`。

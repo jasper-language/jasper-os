@@ -91,6 +91,28 @@ unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
     ret
 }
 
+/// 发起系统调用（RISC-V32 的 32 位用户 ABI：a7=ID；每个 64 位参数拆成两半，低半依次在 a0/a1/a2、
+/// 高半依次在 a3/a4/a5；`ecall`；返回值低半在 a0、高半在 a1，其余寄存器由内核保留）。
+///
+/// # Safety
+/// 参数必须符合该调用的约定（指针须指向本进程内存）。
+#[cfg(target_arch = "riscv32")]
+unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
+    let (lo, hi): (u32, u32);
+    asm!(
+        "ecall",
+        in("a7") id as u32,
+        inlateout("a0") a as u32 => lo,
+        inlateout("a1") b as u32 => hi,
+        in("a2") c as u32,
+        in("a3") (a >> 32) as u32,
+        in("a4") (b >> 32) as u32,
+        in("a5") (c >> 32) as u32,
+        options(nostack)
+    );
+    ((hi as u64) << 32 | lo as u64) as i64
+}
+
 fn sys(id: u64, a: u64, b: u64) -> i64 {
     // SAFETY：调用者传入的指针都指向本进程内存。
     unsafe { syscall3(id, a, b, 0) }
@@ -384,10 +406,11 @@ fn pong(ep: i64) -> ! {
     exit(0)
 }
 
-/// 程序入口（链接脚本把它放在代码段最前面）。
+/// 程序入口（链接脚本把它放在代码段最前面）。内核把两个参数各放进一个寄存器，因此按寄存器宽度（`usize`）接收。
 #[no_mangle]
 #[link_section = ".text._start"]
-pub extern "C" fn _start(role: u64, endpoint: u64) -> ! {
+pub extern "C" fn _start(role: usize, endpoint: usize) -> ! {
+    let endpoint = endpoint as u64;
     match role {
         0 => semantics(),
         1 => ping(endpoint as i64),

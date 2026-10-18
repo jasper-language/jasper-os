@@ -21,7 +21,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use jasper_rt::task::{self, Qos};
 use jasper_rt::{entry, mem, println, sys, time, Error};
@@ -44,18 +44,20 @@ const RECOVERY_ROUNDS: u64 = 10;
 const RUNAWAY_TICKS: u64 = 300;
 /// role 3：申请的匿名页数与位置（私有窗口内、与运行时堆和线程栈不重叠的区域）。
 const PRESSURE_PAGES: u64 = 4;
-const PRESSURE_BASE: u64 = sys::WINDOW_BASE + 0x3_8000_0000;
+/// 放在映像之后、堆之前的空隙里（窗口起点 + 48 MiB），各指令集的私有窗口都容得下。
+const PRESSURE_BASE: u64 = sys::WINDOW_BASE + (48 << 20);
+const _: () = assert!(PRESSURE_BASE + PRESSURE_PAGES * sys::PAGE <= sys::HEAP_BASE);
 /// 迟到量直方图桶数（0..=14 各一桶，≥15 合并）。
 const BUCKETS: usize = 16;
 
 /// 通知吃满线程结束。
 static STOP: AtomicBool = AtomicBool::new(false);
 /// 已就绪（档位已设置好）的吃满线程数。
-static READY: AtomicU64 = AtomicU64::new(0);
+static READY: AtomicUsize = AtomicUsize::new(0);
 /// 每个吃满线程的进展计数。
-static PROGRESS: [AtomicU64; HOGS] = [const { AtomicU64::new(0) }; HOGS];
+static PROGRESS: [AtomicUsize; HOGS] = [const { AtomicUsize::new(0) }; HOGS];
 /// 吃满线程内的档位检查失败计数（线程内不能直接退出进程，汇总给主线程）。
-static HOG_ERRORS: AtomicU64 = AtomicU64::new(0);
+static HOG_ERRORS: AtomicUsize = AtomicUsize::new(0);
 
 /// 检查计数器：失败时以步骤编号退出。
 struct Steps(u32);
@@ -146,7 +148,7 @@ fn hog(i: usize, background: bool) -> u64 {
 }
 
 fn total_progress() -> u64 {
-    PROGRESS.iter().map(|p| p.load(Ordering::Relaxed)).sum()
+    PROGRESS.iter().map(|p| p.load(Ordering::Relaxed) as u64).sum()
 }
 
 fn run(s: &mut Steps, background: bool, mode: &str) -> Result<(), u32> {
@@ -167,7 +169,7 @@ fn run(s: &mut Steps, background: bool, mode: &str) -> Result<(), u32> {
     }
     // 用睡眠（而不是让出）等吃满线程就绪：让出不会把处理器交给更低档的线程，
     // 降到后台档的线程只能在主线程睡眠时（或靠最低份额）运行。
-    while READY.load(Ordering::Acquire) < HOGS as u64 {
+    while READY.load(Ordering::Acquire) < HOGS {
         s.check(time::sleep(1).is_ok())?;
     }
     s.check(HOG_ERRORS.load(Ordering::Relaxed) == 0)?;

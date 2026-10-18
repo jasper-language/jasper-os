@@ -507,7 +507,11 @@ pub fn run_lifecycle() {
     let entry = proc::load_elf(pid, USER_HELLO).unwrap_or(0);
     let stack_ok = proc::map_new(pid, base + STACK_OFF - FRAME_SIZE, MapFlags::USER | MapFlags::WRITE).is_ok();
     check(entry != 0 && stack_ok, "装载失败");
+    // 下面的计数检查要求线程在 `sched::run()` 之前不运行：期间关闭定时器抢占，否则一次抢占就会让线程提前跑完、
+    // 内部引用先行减少，检查因时序而偶发失败
+    let prev_preemption = sched::set_preemption(false);
     let Ok((_, tobj)) = proc::spawn_thread(pid, "life-thread", entry, base + STACK_OFF, 0, 0) else {
+        sched::set_preemption(prev_preemption);
         check(false, "线程创建失败");
         return;
     };
@@ -531,6 +535,7 @@ pub fn run_lifecycle() {
         reacquire.err().map(|e| e.name()).unwrap_or("ok")
     );
 
+    sched::set_preemption(prev_preemption);
     sched::run(); // 线程运行 user-hello 并退出
     let c3 = kobj::with(|t| t.counts(tobj));
     check(c3 == Ok((0, 1, Lifecycle::Closing)), "线程退出后应只剩线程表的内部引用");

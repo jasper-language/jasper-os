@@ -205,8 +205,12 @@ fn memory_kernel_side() {
         back.is_ok() && rw_again
     );
 
-    // 帧配额：每次 1024 页直到被拒；被拒那次不消耗帧
-    let qbase = w + 0x4_0000_0000;
+    // 帧配额：每次 1024 页直到被拒；被拒那次不消耗帧。区间放在窗口起点 + 256 MiB（最多 17 × 4 MiB），
+    // 与上面 + 768 MiB 处的区间不相交，并落在各指令集中最小的私有窗口之内
+    const QUOTA_OFF: u64 = 0x1000_0000;
+    const _: () = assert!(QUOTA_OFF + 17 * 1024 * 4096 <= 0x3000_0000);
+    const _: () = assert!(QUOTA_OFF + 17 * 1024 * 4096 <= kernel_core::user_layout::MIN_WINDOW_SIZE);
+    let qbase = w + QUOTA_OFF;
     let mut n = 0u64;
     let refused = loop {
         match proc::map_anon(pid, qbase + n * 1024 * page, 1024, true) {

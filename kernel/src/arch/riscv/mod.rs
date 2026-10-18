@@ -67,6 +67,7 @@ impl Platform for Riscv {
 
     /// EM_RISCV（RV32 与 RV64 相同，以 ELF 类别区分）。
     const ELF_MACHINE: u16 = 243;
+    const ELF_CLASS: kernel_core::elf::ElfClass = mode::ELF_CLASS;
 
     const USER_WINDOW: (u64, u64) = space::USER_WINDOW;
 

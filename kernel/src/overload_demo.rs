@@ -382,7 +382,10 @@ const PROBE_PAGES: u64 = 4;
 /// 内核探测任务：取得交互档上限后从高到低依次以四个档位申请匿名页；准入的申请立即取消映射。
 fn memory_probe() {
     let Some(pid) = ObjId::from_raw(PROBE_PID.load(Ordering::Relaxed)) else { return };
-    let va = arch::USER_WINDOW.0 + 0x4_0000_0000;
+    // 窗口起点 + 256 MiB：落在各指令集中最小的私有窗口之内
+    const PROBE_OFF: u64 = 0x1000_0000;
+    const _: () = assert!(PROBE_OFF + PROBE_PAGES * 4096 <= kernel_core::user_layout::MIN_WINDOW_SIZE);
+    let va = arch::USER_WINDOW.0 + PROBE_OFF;
     sched::set_current_qos_ceiling(Some(Qos::Interactive));
     let mut admitted = 0u8;
     let mut clean = true;

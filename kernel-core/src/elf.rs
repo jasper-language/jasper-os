@@ -1,9 +1,11 @@
-//! ELF64 可执行文件解析（M5.1-pre）：只做解析与校验，不分配内存、不碰硬件。
-//! ELF64 executable parsing: validation only, no allocation, no hardware access.
+//! ELF 可执行文件解析：只做解析与校验，不分配内存、不碰硬件。
+//! ELF32/ELF64 executable parsing: validation only, no allocation, no hardware access.
 //!
 //! # 接受什么
-//! * 64 位、小端、`ET_EXEC`（静态链接、固定地址的可执行文件）
-//! * 机器类型由调用者给出（每个 ISA 一个值，如 x86_64 = 62），本模块不写死任何架构
+//! * 小端、`ET_EXEC`（静态链接、固定地址的可执行文件）
+//! * 机器类型与类别（[`ElfClass`]：32 位或 64 位）由调用者给出（每个 ISA 一组值，如 x86_64 = 62 / ELF64、
+//!   RISC-V32 = 243 / ELF32），本模块不写死任何架构。两种类别只是字段宽度与位置不同，由内部的布局表描述，
+//!   校验逻辑共用一份；ELF32 的段还必须整体落在 32 位地址空间内
 //! * 只处理 `PT_LOAD` 段；`PT_INTERP`（需要动态链接器）与 `PT_DYNAMIC` 一律拒绝——
 //!   当前不支持动态链接，宁可明确拒绝也不加载一个跑不起来的程序
 //!
@@ -21,6 +23,91 @@
 pub const PAGE: u64 = 4096;
 /// 最多接受的装载段数。
 pub const MAX_SEGMENTS: usize = 16;
+
+/// ELF 类别（文件头第 4 字节）：决定地址字段的宽度与各结构的布局。
+/// ELF class: selects the width of address fields and the structure layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElfClass {
+    /// 32 位（`ELFCLASS32`）：地址 4 字节，地址空间 4 GiB。
+    Elf32,
+    /// 64 位（`ELFCLASS64`）。
+    Elf64,
+}
+
+/// 一种类别的字段布局（偏移以字节计）。
+struct Layout {
+    /// 文件头中 `EI_CLASS` 的取值。
+    ident: u8,
+    /// 地址字段宽度（4 或 8）。
+    word: usize,
+    /// 文件头的最小长度。
+    header: usize,
+    /// 文件头：e_entry、e_phoff、e_phentsize（其后为 e_phnum）。
+    entry: usize,
+    phoff: usize,
+    phentsize: usize,
+    /// 程序头大小与其中 p_flags、p_offset、p_vaddr、p_filesz、p_memsz 的偏移。
+    phent: usize,
+    p_flags: usize,
+    p_offset: usize,
+    p_vaddr: usize,
+    p_filesz: usize,
+    p_memsz: usize,
+    /// 地址空间上限（不含；ELF64 不另设上限）。
+    limit: Option<u64>,
+}
+
+const ELF32: Layout = Layout {
+    ident: 1,
+    word: 4,
+    header: 52,
+    entry: 24,
+    phoff: 28,
+    phentsize: 42,
+    phent: 32,
+    p_flags: 24,
+    p_offset: 4,
+    p_vaddr: 8,
+    p_filesz: 16,
+    p_memsz: 20,
+    limit: Some(1 << 32),
+};
+
+const ELF64: Layout = Layout {
+    ident: 2,
+    word: 8,
+    header: 64,
+    entry: 24,
+    phoff: 32,
+    phentsize: 54,
+    phent: 56,
+    p_flags: 4,
+    p_offset: 8,
+    p_vaddr: 16,
+    p_filesz: 32,
+    p_memsz: 40,
+    limit: None,
+};
+
+impl ElfClass {
+    fn layout(self) -> &'static Layout {
+        match self {
+            ElfClass::Elf32 => &ELF32,
+            ElfClass::Elf64 => &ELF64,
+        }
+    }
+}
+
+impl Layout {
+    /// 读一个地址宽度的字段（零扩展为 u64）。
+    fn word_at(&self, b: &[u8], off: usize) -> Result<u64, ElfError> {
+        if self.word == 4 {
+            u32_at(b, off).map(u64::from)
+        } else {
+            u64_at(b, off)
+        }
+    }
+}
 
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
@@ -96,7 +183,7 @@ impl ElfImage {
 pub enum ElfError {
     /// 文件太短或某个结构越过文件末尾。
     Truncated,
-    /// 不是 ELF，或不是 64 位小端版本 1。
+    /// 不是 ELF，或类别与调用者要求的不符，或不是小端版本 1。
     BadHeader,
     /// 不是静态可执行文件（ET_EXEC）。
     NotExecutable,
@@ -146,12 +233,15 @@ fn u64_at(b: &[u8], off: usize) -> Result<u64, ElfError> {
     Ok(u64::from_le_bytes(a))
 }
 
-/// 解析并校验一个 ELF64 静态可执行文件。`machine` 为目标架构的 `e_machine` 值。
-pub fn parse(image: &[u8], machine: u16) -> Result<ElfImage, ElfError> {
-    if image.len() < 64 {
+/// 解析并校验一个 ELF 静态可执行文件。`machine` 为目标架构的 `e_machine` 值，`class` 为其类别；
+/// 类别不符（例如 64 位内核收到 ELF32）按文件头错误拒绝。
+/// Parses and validates a static ELF executable of the given machine and class.
+pub fn parse(image: &[u8], machine: u16, class: ElfClass) -> Result<ElfImage, ElfError> {
+    let lay = class.layout();
+    if image.len() < lay.header {
         return Err(ElfError::Truncated);
     }
-    if &image[0..4] != b"\x7fELF" || image[4] != 2 || image[5] != 1 || image[6] != 1 {
+    if &image[0..4] != b"\x7fELF" || image[4] != lay.ident || image[5] != 1 || image[6] != 1 {
         return Err(ElfError::BadHeader);
     }
     if u16_at(image, 16)? != ET_EXEC {
@@ -160,33 +250,33 @@ pub fn parse(image: &[u8], machine: u16) -> Result<ElfImage, ElfError> {
     if u16_at(image, 18)? != machine {
         return Err(ElfError::WrongMachine);
     }
-    let entry = u64_at(image, 24)?;
+    let entry = lay.word_at(image, lay.entry)?;
     // 不用 `as usize`：32 位目标上会截断（例如 0x1_0000_0040 变成 0x40，指向错误的位置）
-    let phoff = usize::try_from(u64_at(image, 32)?).map_err(|_| ElfError::Truncated)?;
-    let phentsize = u16_at(image, 54)? as usize;
-    let phnum = u16_at(image, 56)? as usize;
-    if phentsize != 56 {
+    let phoff = usize::try_from(lay.word_at(image, lay.phoff)?).map_err(|_| ElfError::Truncated)?;
+    let phentsize = u16_at(image, lay.phentsize)? as usize;
+    let phnum = u16_at(image, lay.phentsize + 2)? as usize;
+    if phentsize != lay.phent {
         return Err(ElfError::BadHeader);
     }
-    let table_end = phnum.checked_mul(56).and_then(|n| n.checked_add(phoff)).ok_or(ElfError::Truncated)?;
+    let table_end = phnum.checked_mul(lay.phent).and_then(|n| n.checked_add(phoff)).ok_or(ElfError::Truncated)?;
     if table_end > image.len() {
         return Err(ElfError::Truncated);
     }
 
     let mut out = ElfImage { entry, segs: [None; MAX_SEGMENTS], count: 0 };
     for i in 0..phnum {
-        let ph = phoff + i * 56;
+        let ph = phoff + i * lay.phent;
         let ty = u32_at(image, ph)?;
         match ty {
             PT_INTERP | PT_DYNAMIC => return Err(ElfError::Dynamic),
             PT_LOAD => {}
             _ => continue,
         }
-        let pflags = u32_at(image, ph + 4)?;
-        let offset = u64_at(image, ph + 8)?;
-        let vaddr = u64_at(image, ph + 16)?;
-        let filesz = u64_at(image, ph + 32)?;
-        let memsz = u64_at(image, ph + 40)?;
+        let pflags = u32_at(image, ph + lay.p_flags)?;
+        let offset = lay.word_at(image, ph + lay.p_offset)?;
+        let vaddr = lay.word_at(image, ph + lay.p_vaddr)?;
+        let filesz = lay.word_at(image, ph + lay.p_filesz)?;
+        let memsz = lay.word_at(image, ph + lay.p_memsz)?;
         if memsz == 0 {
             continue;
         }
@@ -204,8 +294,11 @@ pub fn parse(image: &[u8], machine: u16) -> Result<ElfImage, ElfError> {
             filesz,
             flags: SegFlags { read: pflags & 4 != 0, write: pflags & 2 != 0, execute: pflags & 1 != 0 },
         };
-        // 按页粒度检查重叠（装载按页映射，同页两段也算冲突）；页区间计算溢出 ⇒ 段非法
+        // 按页粒度检查重叠（装载按页映射，同页两段也算冲突）；页区间计算溢出、或越出该类别的地址空间 ⇒ 段非法
         let (lo, hi) = seg.page_range().ok_or(ElfError::BadSegment)?;
+        if lay.limit.is_some_and(|top| hi > top) {
+            return Err(ElfError::BadSegment);
+        }
         for other in out.segments() {
             // 已接受的段都通过了同样的检查，page_range 不会失败
             let (olo, ohi) = other.page_range().ok_or(ElfError::BadSegment)?;
@@ -261,7 +354,7 @@ mod tests {
     #[test]
     fn parses_code_and_bss_segments() {
         let img = build(&[(PT_LOAD, 0x1000, CODE, 0x100, 0x100, 5), (PT_LOAD, 0x2000, CODE + 0x1000, 0x10, 0x3000, 6)], CODE + 8);
-        let e = parse(&img, X86_64).unwrap();
+        let e = parse(&img, X86_64, ElfClass::Elf64).unwrap();
         assert_eq!(e.entry, CODE + 8);
         assert_eq!(e.segment_count(), 2);
         let segs: Vec<_> = e.segments().copied().collect();
@@ -274,26 +367,26 @@ mod tests {
     #[test]
     fn rejects_malformed_images() {
         let ok = build(&[(PT_LOAD, 0x1000, CODE, 0x100, 0x100, 5)], CODE);
-        assert_eq!(parse(&ok[..40], X86_64).unwrap_err(), ElfError::Truncated);
+        assert_eq!(parse(&ok[..40], X86_64, ElfClass::Elf64).unwrap_err(), ElfError::Truncated);
         let mut bad = ok.clone();
         bad[0] = 0;
-        assert_eq!(parse(&bad, X86_64).unwrap_err(), ElfError::BadHeader);
+        assert_eq!(parse(&bad, X86_64, ElfClass::Elf64).unwrap_err(), ElfError::BadHeader);
         let mut dyn_exe = ok.clone();
         dyn_exe[16] = 3; // ET_DYN
-        assert_eq!(parse(&dyn_exe, X86_64).unwrap_err(), ElfError::NotExecutable);
-        assert_eq!(parse(&ok, 183).unwrap_err(), ElfError::WrongMachine, "aarch64 目标拒绝 x86_64 镜像");
+        assert_eq!(parse(&dyn_exe, X86_64, ElfClass::Elf64).unwrap_err(), ElfError::NotExecutable);
+        assert_eq!(parse(&ok, 183, ElfClass::Elf64).unwrap_err(), ElfError::WrongMachine, "aarch64 目标拒绝 x86_64 镜像");
         let interp = build(&[(PT_INTERP, 0x1000, 0, 0x10, 0x10, 4), (PT_LOAD, 0x1000, CODE, 0x100, 0x100, 5)], CODE);
-        assert_eq!(parse(&interp, X86_64).unwrap_err(), ElfError::Dynamic);
+        assert_eq!(parse(&interp, X86_64, ElfClass::Elf64).unwrap_err(), ElfError::Dynamic);
         let big = build(&[(PT_LOAD, 0x1000, CODE, 0x200, 0x100, 5)], CODE);
-        assert_eq!(parse(&big, X86_64).unwrap_err(), ElfError::BadSegment, "filesz > memsz");
+        assert_eq!(parse(&big, X86_64, ElfClass::Elf64).unwrap_err(), ElfError::BadSegment, "filesz > memsz");
         let past_end = build(&[(PT_LOAD, 0x2f00, CODE + 0xf00, 0x200, 0x200, 5)], CODE + 0xf00);
-        assert_eq!(parse(&past_end, X86_64).unwrap_err(), ElfError::BadSegment, "文件数据越界");
+        assert_eq!(parse(&past_end, X86_64, ElfClass::Elf64).unwrap_err(), ElfError::BadSegment, "文件数据越界");
         let misaligned = build(&[(PT_LOAD, 0x1010, CODE, 0x10, 0x10, 5)], CODE);
-        assert_eq!(parse(&misaligned, X86_64).unwrap_err(), ElfError::BadSegment, "vaddr/offset 模页不一致");
+        assert_eq!(parse(&misaligned, X86_64, ElfClass::Elf64).unwrap_err(), ElfError::BadSegment, "vaddr/offset 模页不一致");
         let overlap = build(&[(PT_LOAD, 0x1000, CODE, 0x100, 0x100, 5), (PT_LOAD, 0x1000, CODE + 0x80, 0x10, 0x10, 6)], CODE);
-        assert!(matches!(parse(&overlap, X86_64), Err(ElfError::BadSegment) | Err(ElfError::Overlap)));
+        assert!(matches!(parse(&overlap, X86_64, ElfClass::Elf64), Err(ElfError::BadSegment) | Err(ElfError::Overlap)));
         let entry_in_data = build(&[(PT_LOAD, 0x1000, CODE, 0x100, 0x100, 6)], CODE);
-        assert_eq!(parse(&entry_in_data, X86_64).unwrap_err(), ElfError::BadEntry, "入口不在可执行段");
+        assert_eq!(parse(&entry_in_data, X86_64, ElfClass::Elf64).unwrap_err(), ElfError::BadEntry, "入口不在可执行段");
         assert_eq!(ElfError::Dynamic.name(), "system.elf.error.dynamic");
     }
 
@@ -301,14 +394,14 @@ mod tests {
     fn rejects_segments_near_address_space_top() {
         // vaddr + memsz 本身就溢出
         let wrap = build(&[(PT_LOAD, 0x1000, u64::MAX - 0xfff, 0x10, 0x2000, 5)], u64::MAX - 0xfff);
-        assert_eq!(parse(&wrap, X86_64).unwrap_err(), ElfError::BadSegment, "vaddr+memsz 溢出");
+        assert_eq!(parse(&wrap, X86_64, ElfClass::Elf64).unwrap_err(), ElfError::BadSegment, "vaddr+memsz 溢出");
         // vaddr + memsz 不溢出，但向上取整到页时溢出（末端落在最后一页中间）
         let round = build(&[(PT_LOAD, 0x1000, u64::MAX - 0xfff, 0x10, 0x800, 5)], u64::MAX - 0xfff);
-        assert_eq!(parse(&round, X86_64).unwrap_err(), ElfError::BadSegment, "页取整溢出");
+        assert_eq!(parse(&round, X86_64, ElfClass::Elf64).unwrap_err(), ElfError::BadSegment, "页取整溢出");
         // 恰好结束于最后一个完整页之前：可以表示，应被接受
         let top = u64::MAX - 0x1fff; // 倒数第二页起点
         let edge = build(&[(PT_LOAD, 0x1000, top, 0x10, 0x1000, 5)], top);
-        let e = parse(&edge, X86_64).expect("贴近顶端但可表示的段");
+        let e = parse(&edge, X86_64, ElfClass::Elf64).expect("贴近顶端但可表示的段");
         assert_eq!(e.segments().next().unwrap().page_range(), Some((top, top + 0x1000)));
     }
 
@@ -320,5 +413,74 @@ mod tests {
         assert_eq!(s(0x1000, 0x1000).page_range(), Some((0x1000, 0x2000)));
         assert_eq!(s(u64::MAX - 0xfff, 0x800).page_range(), None);
         assert_eq!(s(u64::MAX, 1).page_range(), None);
+    }
+
+    const RISCV: u16 = 243;
+
+    /// 构造一个最小 ELF32（RISC-V）：段描述同 [`build`]，地址字段为 4 字节。
+    fn build32(segs: &[(u32, u32, u32, u32, u32, u32)], entry: u32) -> Vec<u8> {
+        let phoff = 52usize;
+        let mut b = vec![0u8; 0x3000];
+        b[0..4].copy_from_slice(b"\x7fELF");
+        (b[4], b[5], b[6]) = (1, 1, 1);
+        b[16..18].copy_from_slice(&ET_EXEC.to_le_bytes());
+        b[18..20].copy_from_slice(&RISCV.to_le_bytes());
+        b[24..28].copy_from_slice(&entry.to_le_bytes());
+        b[28..32].copy_from_slice(&(phoff as u32).to_le_bytes());
+        b[42..44].copy_from_slice(&32u16.to_le_bytes());
+        b[44..46].copy_from_slice(&(segs.len() as u16).to_le_bytes());
+        for (i, &(ty, off, va, fsz, msz, fl)) in segs.iter().enumerate() {
+            let p = phoff + i * 32;
+            for (at, v) in [(0, ty), (4, off), (8, va), (12, va), (16, fsz), (20, msz), (24, fl)] {
+                b[p + at..p + at + 4].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        b
+    }
+
+    const CODE32: u32 = 0x0080_0000;
+
+    #[test]
+    fn parses_elf32_segments() {
+        let img = build32(&[(PT_LOAD, 0x1000, CODE32, 0x100, 0x100, 5), (PT_LOAD, 0x2000, CODE32 + 0x1000, 0x10, 0x3000, 6)], CODE32 + 8);
+        let e = parse(&img, RISCV, ElfClass::Elf32).unwrap();
+        assert_eq!(e.entry, (CODE32 + 8) as u64);
+        assert_eq!(e.segment_count(), 2);
+        let segs: Vec<_> = e.segments().copied().collect();
+        assert_eq!((segs[0].vaddr, segs[0].filesz, segs[0].offset), (CODE32 as u64, 0x100, 0x1000));
+        assert!(segs[0].flags.execute && !segs[0].flags.write);
+        assert_eq!((segs[1].memsz, segs[1].flags.write), (0x3000, true));
+        assert_eq!(segs[0].file_bytes(&img).len(), 0x100);
+    }
+
+    #[test]
+    fn rejects_class_mismatch_and_elf32_specific_faults() {
+        let ok32 = build32(&[(PT_LOAD, 0x1000, CODE32, 0x100, 0x100, 5)], CODE32);
+        let ok64 = build(&[(PT_LOAD, 0x1000, CODE, 0x100, 0x100, 5)], CODE);
+        // 类别必须与调用者要求的一致（64 位内核不装 ELF32，32 位内核不装 ELF64）
+        assert_eq!(parse(&ok32, RISCV, ElfClass::Elf64).unwrap_err(), ElfError::BadHeader);
+        assert_eq!(parse(&ok64, X86_64, ElfClass::Elf32).unwrap_err(), ElfError::BadHeader);
+        // 文件头比 ELF32 文件头还短
+        assert_eq!(parse(&ok32[..51], RISCV, ElfClass::Elf32).unwrap_err(), ElfError::Truncated);
+        // 程序头表项大小按 ELF64 填写
+        let mut bad = ok32.clone();
+        bad[42..44].copy_from_slice(&56u16.to_le_bytes());
+        assert_eq!(parse(&bad, RISCV, ElfClass::Elf32).unwrap_err(), ElfError::BadHeader);
+        // 程序头表越过文件末尾
+        let mut bad = ok32.clone();
+        bad[28..32].copy_from_slice(&0x2ff0u32.to_le_bytes());
+        assert_eq!(parse(&bad, RISCV, ElfClass::Elf32).unwrap_err(), ElfError::Truncated);
+        // 段末端越过 4 GiB（32 位地址空间之外）
+        let wrap = build32(&[(PT_LOAD, 0x1000, 0xFFFF_F000, 0x100, 0x2000, 5)], 0xFFFF_F000);
+        assert_eq!(parse(&wrap, RISCV, ElfClass::Elf32).unwrap_err(), ElfError::BadSegment);
+        // 恰好止于 4 GiB 的段可以接受
+        let edge = build32(&[(PT_LOAD, 0x1000, 0xFFFF_F000, 0x100, 0x1000, 5)], 0xFFFF_F000);
+        assert!(parse(&edge, RISCV, ElfClass::Elf32).is_ok());
+        // 机器类型、入口与重叠检查对 ELF32 同样生效
+        assert_eq!(parse(&ok32, X86_64, ElfClass::Elf32).unwrap_err(), ElfError::WrongMachine);
+        let data_entry = build32(&[(PT_LOAD, 0x1000, CODE32, 0x100, 0x100, 6)], CODE32);
+        assert_eq!(parse(&data_entry, RISCV, ElfClass::Elf32).unwrap_err(), ElfError::BadEntry);
+        let overlap = build32(&[(PT_LOAD, 0x1000, CODE32, 0x100, 0x100, 5), (PT_LOAD, 0x2000, CODE32, 0x10, 0x10, 6)], CODE32);
+        assert_eq!(parse(&overlap, RISCV, ElfClass::Elf32).unwrap_err(), ElfError::Overlap);
     }
 }

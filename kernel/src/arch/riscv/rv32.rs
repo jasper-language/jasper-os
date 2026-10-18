@@ -23,9 +23,13 @@
 use core::ptr::addr_of_mut;
 
 use super::paging::pte;
+use crate::syscall::SyscallArgs;
 
 /// 架构名（横幅与诊断输出用）。
 pub const NAME: &str = "riscv32";
+
+/// 用户程序的 ELF 类别（32 位用户 ABI）。
+pub const ELF_CLASS: kernel_core::elf::ElfClass = kernel_core::elf::ElfClass::Elf32;
 
 /// 页表级数。
 pub const LEVELS: usize = 2;
@@ -92,6 +96,8 @@ const _: () = assert!(((RAM_FIRST as u64) << TOP_SHIFT) == RAM_PHYS + PHYS_OFFSE
 const _: () = assert!(PHYS_HOLE.1 == RAM_PHYS && PHYS_HOLE.0 == (LINEAR_ENTRIES as u64) << TOP_SHIFT);
 const _: () = assert!(KERNEL_PROBE_VA == (KERNEL_FIRST as u64) << TOP_SHIFT);
 const _: () = assert!((KERNEL_HEAP_BASE >> TOP_SHIFT) as usize == KERNEL_FIRST + 8);
+const _: () = assert!((USER_FIRST as u64) << TOP_SHIFT == kernel_core::user_layout::WINDOW_BASE_RISCV32);
+const _: () = assert!((USER_LAST as u64) << TOP_SHIFT == kernel_core::user_layout::WINDOW_END_RISCV32);
 
 /// 一张 4 KiB 对齐的 Sv32 页表。
 #[repr(C, align(4096))]
@@ -169,6 +175,17 @@ pub fn cover_phys(_end: u64) -> u64 {
 pub fn set_syscall_return(x: &mut [usize; 32], value: i64) {
     x[10] = value as u32 as usize;
     x[11] = ((value as u64) >> 32) as usize;
+}
+
+/// 从用户寄存器取出系统调用的操作 ID 与参数（32 位用户 ABI 的 64 位参数约定）：
+/// `a7` = ID；最多 3 个 64 位参数，低 32 位依次在 `a0`–`a2`（与 RV64 的参数位置相同），高 32 位依次在 `a3`–`a5`。
+/// 因此只用到低半的调用（指针、长度、句柄）与 RV64 写法一致，而时长、请求标识等需要完整 64 位的参数也不会被截断；
+/// 用户态必须显式给出高半（不需要时为 0），否则残留的高半会让参数变成另一个值并被 Core 按原值校验。
+/// Collect the syscall id and arguments: up to three 64-bit arguments, low halves in `a0`–`a2`,
+/// high halves in `a3`–`a5`.
+pub fn syscall_args(x: &[usize; 32]) -> SyscallArgs {
+    let pair = |lo: usize, hi: usize| (x[lo] as u32 as u64) | ((x[hi] as u32 as u64) << 32);
+    SyscallArgs { id: x[17] as u32 as u64, args: [pair(10, 13), pair(11, 14), pair(12, 15), 0, 0, 0] }
 }
 
 /// 本文件内汇编使用的寄存器宽度宏（在每段汇编开头展开、结尾以 [`xlen_asm_end`] 撤销，各段自成一体）：

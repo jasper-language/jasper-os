@@ -85,6 +85,28 @@ unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
     ret
 }
 
+/// 发起系统调用（RISC-V32 的 32 位用户 ABI：a7=ID；每个 64 位参数拆成两半，低半依次在 a0/a1/a2、
+/// 高半依次在 a3/a4/a5；`ecall`；返回值低半在 a0、高半在 a1，其余寄存器由内核保留）。
+///
+/// # Safety
+/// 参数必须符合该调用的约定（指针须指向本进程内存）。
+#[cfg(target_arch = "riscv32")]
+unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
+    let (lo, hi): (u32, u32);
+    asm!(
+        "ecall",
+        in("a7") id as u32,
+        inlateout("a0") a as u32 => lo,
+        inlateout("a1") b as u32 => hi,
+        in("a2") c as u32,
+        in("a3") (a >> 32) as u32,
+        in("a4") (b >> 32) as u32,
+        in("a5") (c >> 32) as u32,
+        options(nostack)
+    );
+    ((hi as u64) << 32 | lo as u64) as i64
+}
+
 fn sys(id: u64, a: u64, b: u64) -> i64 {
     // SAFETY：调用者传入的指针都指向本进程内存（role 4 故意传入内核地址，由内核拒绝）。
     unsafe { syscall3(id, a, b, 0) }
@@ -212,7 +234,7 @@ fn privilege() -> (&'static str, u16, bool) {
 /// RISC-V：用户态读不到当前特权级（访问任何监管态 CSR 都是非法指令，见 role 2 的同类验证），与 AArch64 相同，
 /// 以结构性事实为证：本程序的输出只能经 `ecall` 送出，内核只把来自用户态的 `ecall` 当作系统调用分发。
 /// 问候文本出现在控制台上即证明运行在用户态（U = 0）。
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
 fn privilege() -> (&'static str, u16, bool) {
     ("mode", 0, true)
 }
@@ -236,10 +258,12 @@ fn enter(ring: i64, sq: &[Sqe], cq: &mut [Cqe], wait_min: u32) -> (EnterArgs, u6
     (a, ids_out[0])
 }
 
-/// 程序入口（链接脚本把它放在代码段最前面）。
+/// 程序入口（链接脚本把它放在代码段最前面）。内核把两个参数各放进一个寄存器，因此按寄存器宽度（`usize`）
+/// 接收——32 位指令集上 `u64` 参数会按调用约定占两个寄存器，与内核给出的位置不符。
 #[no_mangle]
 #[link_section = ".text._start"]
-pub extern "C" fn _start(role: u64, arg: u64) -> ! {
+pub extern "C" fn _start(role: usize, arg: usize) -> ! {
+    let (role, arg) = (role as u64, arg as u64);
     match role {
         0 => {
             let (name, level, user) = privilege();
@@ -262,7 +286,7 @@ pub extern "C" fn _start(role: u64, arg: u64) -> ! {
             unsafe { asm!("hlt", options(nomem, nostack)) };
             #[cfg(target_arch = "aarch64")]
             unsafe { asm!("msr daifset, #2", options(nomem, nostack)) };
-            #[cfg(target_arch = "riscv64")]
+            #[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
             unsafe { asm!("csrsi sstatus, 2", options(nomem, nostack)) };
             say!("LEAK privileged instruction executed");
             exit(3)
@@ -274,7 +298,7 @@ pub extern "C" fn _start(role: u64, arg: u64) -> ! {
             unsafe { asm!("ud2", options(nomem, nostack)) };
             #[cfg(target_arch = "aarch64")]
             unsafe { asm!("udf #0", options(nomem, nostack)) };
-            #[cfg(target_arch = "riscv64")]
+            #[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
             unsafe { asm!("unimp", options(nomem, nostack)) };
             exit(3)
         }

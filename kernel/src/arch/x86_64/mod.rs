@@ -43,6 +43,7 @@ impl Platform for X86_64 {
 
     /// EM_X86_64。
     const ELF_MACHINE: u16 = 62;
+    const ELF_CLASS: kernel_core::elf::ElfClass = kernel_core::elf::ElfClass::Elf64;
 
     const USER_WINDOW: (u64, u64) = space::USER_WINDOW;
 

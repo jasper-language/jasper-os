@@ -197,10 +197,18 @@ impl Module {
             // SAFETY：[base + vaddr, + data.len()) 在刚映射的可写映像内（解析器已证明段在映像大小之内）。
             unsafe { core::ptr::copy_nonoverlapping(s.data.as_ptr(), (base + s.vaddr as u64) as *mut u8, s.data.len()) };
         }
-        // 重定位：在 offset 处写入 base + addend（解析器已证明 8 字节对齐、在映像内、不在可执行段）
+        // 重定位：在 offset 处写入 base + addend，宽度按种类（解析器已证明种类与指令集一致、按宽度对齐、
+        // 在映像内、不在可执行段；32 位指令集上 base + addend 落在映像内，必然可用 4 字节表示）
         for r in img.relocs() {
-            // SAFETY：同上；写入位置 8 字节对齐。
-            unsafe { ((base + r.offset as u64) as *mut u64).write(base + r.addend) };
+            let at = base + r.offset as u64;
+            let value = base + r.addend;
+            if r.kind == jaso::RELOC_RELATIVE32 {
+                // SAFETY：同上；写入位置 4 字节对齐。
+                unsafe { (at as usize as *mut u32).write(value as u32) };
+            } else {
+                // SAFETY：同上；写入位置 8 字节对齐。
+                unsafe { (at as usize as *mut u64).write(value) };
+            }
         }
         // 设权限：整体只读，再按段设置
         chunked(base, pages, |va, n| mem::protect(va, n, 0)).map_err(LoadError::Memory)?;

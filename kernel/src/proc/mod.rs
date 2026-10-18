@@ -488,7 +488,7 @@ impl LoadError {
 
 /// 把 ELF64 静态可执行文件装进进程，返回入口地址（按段权限映射，先清零再复制，BSS 天然为零）。
 pub fn load_elf(id: ObjId, image: &[u8]) -> Result<u64, LoadError> {
-    let elf = kernel_core::elf::parse(image, arch::ELF_MACHINE).map_err(LoadError::Elf)?;
+    let elf = kernel_core::elf::parse(image, arch::ELF_MACHINE, arch::ELF_CLASS).map_err(LoadError::Elf)?;
     for seg in elf.segments() {
         // 解析器保证 memsz > 0 且页区间可表示；这里仍用检查式算术，任何溢出都按「窗口外」拒绝
         let (lo, hi) = seg.page_range().ok_or(LoadError::OutsideWindow)?;

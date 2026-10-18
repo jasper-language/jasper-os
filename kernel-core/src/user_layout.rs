@@ -23,9 +23,15 @@ pub const WINDOW_BASE_AARCH64: u64 = 32 << 39;
 /// RISC-V64（Sv39）私有窗口起点（顶级表项 32 起，每项 1 GiB）。
 /// Start of the RISC-V64 (Sv39) private window.
 pub const WINDOW_BASE_RISCV64: u64 = 32 << 30;
-/// 各指令集中最小的私有窗口长度（Sv39：32 个顶级表项 = 32 GiB）；用户态运行时的布局必须整体落在其中。
+/// RISC-V32（Sv32）私有窗口起点（顶级表项 1 起，每项 4 MiB；窗口止于 `0x4000_0000`）。
+/// Start of the RISC-V32 (Sv32) private window.
+pub const WINDOW_BASE_RISCV32: u64 = 1 << 22;
+/// RISC-V32（Sv32）私有窗口终点（不含）：顶级表项 256，其上为内核的线性映射。
+/// End (exclusive) of the RISC-V32 private window.
+pub const WINDOW_END_RISCV32: u64 = 256 << 22;
+/// 各指令集中最小的私有窗口长度（Sv32：255 个 4 MiB 顶级表项 = 1020 MiB）；用户态运行时的布局必须整体落在其中。
 /// The smallest private-window size over all ISAs; the runtime layout must fit inside it.
-pub const MIN_WINDOW_SIZE: u64 = 32 << 30;
+pub const MIN_WINDOW_SIZE: u64 = WINDOW_END_RISCV32 - WINDOW_BASE_RISCV32;
 /// 用户程序的装载地址相对窗口起点的偏移（4 MiB：窗口最低处留空，空指针附近的访问一律缺页）。
 /// Offset of the user-program load address from the window start.
 pub const IMAGE_OFFSET: u64 = 0x40_0000;
@@ -37,6 +43,7 @@ pub fn window_base(target_arch: &str) -> Option<u64> {
         "x86_64" => Some(WINDOW_BASE_X86_64),
         "aarch64" => Some(WINDOW_BASE_AARCH64),
         "riscv64" => Some(WINDOW_BASE_RISCV64),
+        "riscv32" => Some(WINDOW_BASE_RISCV32),
         _ => None,
     }
 }
@@ -56,18 +63,26 @@ mod tests {
         assert_eq!(image_base("x86_64"), Some(0x1000_0040_0000));
         assert_eq!(image_base("aarch64"), Some(0x1000_0040_0000));
         assert_eq!(image_base("riscv64"), Some(0x8_0040_0000));
+        assert_eq!(image_base("riscv32"), Some(0x0080_0000));
         assert_eq!(image_base("mips"), None);
         assert_eq!(window_base(""), None);
-        assert_eq!(window_base("riscv32"), None);
+        assert_eq!(window_base("RISCV32"), None);
     }
 
     #[test]
     fn every_window_holds_at_least_the_minimum_size() {
-        // 窗口终点 = 起点 + 32 个顶级表项；最小窗口（Sv39）恰为 MIN_WINDOW_SIZE
-        for (base, entry_bits) in [(WINDOW_BASE_X86_64, 39), (WINDOW_BASE_AARCH64, 39), (WINDOW_BASE_RISCV64, 30)] {
-            let size = (64u64 << entry_bits) - base;
+        // 64 位指令集：窗口终点 = 顶级表项 64；Sv32：顶级表项 256。最小窗口（Sv32）恰为 MIN_WINDOW_SIZE
+        let windows = [
+            (WINDOW_BASE_X86_64, 64u64 << 39),
+            (WINDOW_BASE_AARCH64, 64 << 39),
+            (WINDOW_BASE_RISCV64, 64 << 30),
+            (WINDOW_BASE_RISCV32, WINDOW_END_RISCV32),
+        ];
+        for (base, end) in windows {
+            let size = end - base;
             assert!(size >= MIN_WINDOW_SIZE);
             assert!(IMAGE_OFFSET < size);
         }
+        assert_eq!(windows.iter().map(|(b, e)| e - b).min(), Some(MIN_WINDOW_SIZE));
     }
 }

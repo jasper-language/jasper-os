@@ -141,6 +141,7 @@ fn user_triple() -> &'static str {
         Ok("x86_64") => "x86_64-unknown-none",
         Ok("aarch64") => "aarch64-unknown-none-softfloat",
         Ok("riscv64") => "riscv64imac-unknown-none-elf",
+        Ok("riscv32") => "riscv32imac-unknown-none-elf",
         other => panic!("内嵌用户程序尚不支持该指令集：{:?}", other),
     }
 }

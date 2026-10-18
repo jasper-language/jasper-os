@@ -21,9 +21,13 @@ use core::ptr::addr_of_mut;
 
 use super::cpu;
 use super::paging::pte;
+use crate::syscall::SyscallArgs;
 
 /// 架构名（横幅与诊断输出用）。
 pub const NAME: &str = "riscv64";
+
+/// 用户程序的 ELF 类别。
+pub const ELF_CLASS: kernel_core::elf::ElfClass = kernel_core::elf::ElfClass::Elf64;
 
 /// 页表级数。
 pub const LEVELS: usize = 3;
@@ -168,6 +172,13 @@ pub fn cover_phys(end: u64) -> u64 {
 /// Write a syscall result back: RV64 returns it in `a0` alone.
 pub fn set_syscall_return(x: &mut [usize; 32], value: i64) {
     x[10] = value as usize;
+}
+
+/// 从用户寄存器取出系统调用的操作 ID 与参数：RV64 的寄存器本身就是 64 位，`a7` = ID，`a0`–`a5` = 6 个参数。
+/// Collect the syscall id and arguments: on RV64 every register already holds a full 64-bit value.
+pub fn syscall_args(x: &[usize; 32]) -> SyscallArgs {
+    let r = |i: usize| x[i] as u64;
+    SyscallArgs { id: r(17), args: [r(10), r(11), r(12), r(13), r(14), r(15)] }
 }
 
 /// 本文件内汇编使用的寄存器宽度宏（在每段汇编开头展开、结尾以 [`xlen_asm_end`] 撤销，各段自成一体）：

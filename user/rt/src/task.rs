@@ -8,7 +8,7 @@
 //! 等于让线程脱离——它的栈留到进程退出时由内核回收。
 
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::error::{check, Error, Result};
 use crate::handle::Handle;
@@ -74,7 +74,7 @@ pub fn wait_process(h: &Handle) -> Result<u64> {
 }
 
 /// 已占用的栈槽位（位图）。
-static SLOTS: AtomicU64 = AtomicU64::new(0);
+static SLOTS: AtomicU32 = AtomicU32::new(0);
 
 fn take_slot() -> Option<u32> {
     let mut cur = SLOTS.load(Ordering::Relaxed);
@@ -91,7 +91,7 @@ fn take_slot() -> Option<u32> {
 }
 
 fn put_slot(slot: u32) {
-    SLOTS.fetch_and(!(1u64 << slot), Ordering::AcqRel);
+    SLOTS.fetch_and(!(1u32 << slot), Ordering::AcqRel);
 }
 
 /// 槽位 `slot` 的栈：返回 (映射起点, 栈顶)。
@@ -103,6 +103,7 @@ fn stack_of(slot: u32) -> (u64, u64) {
 type Job = Box<dyn FnOnce() -> u64 + Send + 'static>;
 
 // 线程入口：内核以 (参数, 0) 进入，此时栈顶按页对齐；先对齐到 16 字节再调用，满足各指令集的调用约定。
+// RISC-V32 上 `thread_main` 的 64 位参数按调用约定占 a0（低）:a1（高），内核给的正是 (参数, 0)，无需改写。
 #[cfg(target_arch = "x86_64")]
 core::arch::global_asm!(
     ".pushsection .text.jsr_rt_thread_entry,\"ax\"",
@@ -128,7 +129,7 @@ core::arch::global_asm!(
     main = sym thread_main,
 );
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
 core::arch::global_asm!(
     ".pushsection .text.jsr_rt_thread_entry,\"ax\"",
     ".global jsr_rt_thread_entry",

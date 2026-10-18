@@ -48,21 +48,41 @@ fn valid_elf() -> Vec<u8> {
     b
 }
 
-#[test]
-fn elf_parser_survives_mutations_and_keeps_invariants() {
-    let base = valid_elf();
-    assert!(elf::parse(&base, X86_64).is_ok(), "基准镜像应合法");
-    let fields: [usize; 12] = [24, 32, 64 + 8, 64 + 16, 64 + 32, 64 + 40, 120 + 8, 120 + 16, 120 + 32, 120 + 40, 56, 54];
-    let mut rng = Rng::new(0x5EED_E1F0);
+/// 一个合法的两段 ELF32 静态可执行文件（RISC-V32，装载在 32 位用户窗口内）。
+fn valid_elf32() -> Vec<u8> {
+    let mut b = vec![0u8; 0x3000];
+    b[0..4].copy_from_slice(b"\x7fELF");
+    (b[4], b[5], b[6]) = (1, 1, 1);
+    b[16..18].copy_from_slice(&2u16.to_le_bytes());
+    b[18..20].copy_from_slice(&RISCV.to_le_bytes());
+    b[24..28].copy_from_slice(&0x0080_0010u32.to_le_bytes());
+    b[28..32].copy_from_slice(&52u32.to_le_bytes());
+    b[42..44].copy_from_slice(&32u16.to_le_bytes());
+    b[44..46].copy_from_slice(&2u16.to_le_bytes());
+    for (i, (off, va, fsz, msz, fl)) in [(0x1000u32, 0x0080_0000u32, 0x100u32, 0x100u32, 5u32), (0x2000, 0x0080_1000, 0x10, 0x3000, 6)].into_iter().enumerate() {
+        let p = 52 + i * 32;
+        for (at, v) in [(0, 1u32), (4, off), (8, va), (16, fsz), (20, msz), (24, fl)] {
+            b[p + at..p + at + 4].copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    b
+}
+
+const RISCV: u16 = 243;
+
+/// 对合法镜像 `base` 做 `iters` 轮随机变异（覆盖 `fields` 中的结构字段 = (偏移, 宽度)，或改写前 256 字节中的任意字节，
+/// 偶尔截断），每个被接受的结果都检查不变量；`limit` 为该类别的地址空间上限（ELF32 为 4 GiB）。
+fn fuzz_elf(base: &[u8], machine: u16, class: elf::ElfClass, fields: &[(usize, usize)], seed: u64, iters: u32, limit: Option<u64>) {
+    assert!(elf::parse(base, machine, class).is_ok(), "基准镜像应合法");
+    let mut rng = Rng::new(seed);
     let mut accepted = 0;
-    for iter in 0..60_000u32 {
-        let mut img = base.clone();
+    for iter in 0..iters {
+        let mut img = base.to_vec();
         let edits = 1 + rng.below(4);
         for _ in 0..edits {
             if rng.chance(60) {
                 // 覆盖一个结构字段为（偏向边界的）随机值
-                let f = fields[rng.below(fields.len() as u64) as usize];
-                let width = if f == 56 || f == 54 { 2 } else { 8 };
+                let (f, width) = fields[rng.below(fields.len() as u64) as usize];
                 let v = rng.boundary_biased().to_le_bytes();
                 img[f..f + width].copy_from_slice(&v[..width]);
             } else {
@@ -74,7 +94,7 @@ fn elf_parser_survives_mutations_and_keeps_invariants() {
             let n = rng.below(img.len() as u64) as usize;
             img.truncate(n);
         }
-        let Ok(e) = elf::parse(&img, X86_64) else { continue };
+        let Ok(e) = elf::parse(&img, machine, class) else { continue };
         accepted += 1;
         let segs: Vec<_> = e.segments().copied().collect();
         assert!(!segs.is_empty(), "iter {iter}: 接受的镜像至少有一个装载段");
@@ -84,6 +104,7 @@ fn elf_parser_survives_mutations_and_keeps_invariants() {
             assert_eq!(s.vaddr % PAGE, s.offset % PAGE, "iter {iter}: vaddr/offset 模页一致");
             let (lo, hi) = s.page_range().expect("接受的段页区间可表示");
             assert!(lo < hi, "iter {iter}");
+            assert!(limit.is_none_or(|top| hi <= top), "iter {iter}: 段落在该类别的地址空间内");
             let _ = s.file_bytes(&img); // 不得越界
         }
         for (i, a) in segs.iter().enumerate() {
@@ -99,6 +120,19 @@ fn elf_parser_survives_mutations_and_keeps_invariants() {
         );
     }
     assert!(accepted > 100, "变异中应仍有一部分合法镜像（验证测试本身有效）：{accepted}");
+}
+
+#[test]
+fn elf_parser_survives_mutations_and_keeps_invariants() {
+    let fields = [24, 32, 64 + 8, 64 + 16, 64 + 32, 64 + 40, 120 + 8, 120 + 16, 120 + 32, 120 + 40, 56, 54].map(|f| (f, if f == 56 || f == 54 { 2 } else { 8 }));
+    fuzz_elf(&valid_elf(), X86_64, elf::ElfClass::Elf64, &fields, 0x5EED_E1F0, 60_000, None);
+}
+
+#[test]
+fn elf32_parser_survives_mutations_and_keeps_invariants() {
+    // ELF32 的入口、程序头偏移、两个程序头的 offset/vaddr/filesz/memsz（4 字节）与表项大小/个数（2 字节）
+    let fields = [24, 28, 52 + 4, 52 + 8, 52 + 16, 52 + 20, 84 + 4, 84 + 8, 84 + 16, 84 + 20, 42, 44].map(|f| (f, if f == 42 || f == 44 { 2 } else { 4 }));
+    fuzz_elf(&valid_elf32(), RISCV, elf::ElfClass::Elf32, &fields, 0x5EED_E132, 40_000, Some(1 << 32));
 }
 
 // ———————————————————————— 系统接口登记表 ————————————————————————

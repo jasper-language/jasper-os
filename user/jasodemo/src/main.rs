@@ -14,7 +14,7 @@ extern crate alloc;
 
 use alloc::alloc::{alloc, dealloc, Layout};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use jasper_rt::module::{Grant, HostV0, LoadError, Module};
 use jasper_rt::{entry, io, mem, println, Error};
@@ -27,8 +27,8 @@ static DEMO_BOOT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-boot.ja
 static DEMO_NOINIT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-noinit.jaso"));
 static DEMO_MORECAPS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-morecaps.jaso"));
 
-static ALLOCS: AtomicU64 = AtomicU64::new(0);
-static FREES: AtomicU64 = AtomicU64::new(0);
+static ALLOCS: AtomicU32 = AtomicU32::new(0);
+static FREES: AtomicU32 = AtomicU32::new(0);
 
 extern "C" fn host_log(ptr: *const u8, len: usize) {
     // SAFETY：模块按约定传入一段有效的 UTF-8 文本。

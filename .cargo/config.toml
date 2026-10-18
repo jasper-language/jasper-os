@@ -50,3 +50,7 @@ rustflags = ["--cfg", "sha2_backend=\"soft\""]
 # RISC-V64 用户程序与模块同样用不带浮点扩展的目标（riscv64imac）；sha2 也只走纯软件后端。
 [target.riscv64imac-unknown-none-elf]
 rustflags = ["--cfg", "sha2_backend=\"soft\""]
+
+# RISC-V32 用户程序与模块同样用不带浮点扩展的目标（riscv32imac）；sha2 也只走纯软件后端。
+[target.riscv32imac-unknown-none-elf]
+rustflags = ["--cfg", "sha2_backend=\"soft\""]

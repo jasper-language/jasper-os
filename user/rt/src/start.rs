@@ -51,6 +51,23 @@ core::arch::global_asm!(
     start = sym rt_start,
 );
 
+// RISC-V32：内核把两个参数放在 a0/a1（各 32 位），而 `rt_start(a: u64, b: u64)` 按调用约定占 a0:a1 与 a2:a3
+// ⇒ 先把第二个参数挪到 a2，两个高半清零。
+#[cfg(target_arch = "riscv32")]
+core::arch::global_asm!(
+    ".pushsection .text._start,\"ax\"",
+    ".global _start",
+    "_start:",
+    "    andi sp, sp, -16",
+    "    mv a2, a1",
+    "    li a1, 0",
+    "    li a3, 0",
+    "    call {start}",
+    "    unimp",
+    ".popsection",
+    start = sym rt_start,
+);
+
 extern "C" {
     /// 由 [`crate::entry!`] 生成。
     fn __jsr_main(a: u64, b: u64) -> i32;
@@ -120,6 +137,26 @@ unsafe fn switch_stack(a: u64, b: u64) -> ! {
         main = sym run_main,
         in("a0") a,
         in("a1") b,
+        options(noreturn)
+    )
+}
+
+/// 切到主线程栈并调用 `run_main(a, b)`（不返回）。RISC-V32：两个 64 位参数各占一对寄存器（a0:a1、a2:a3）。
+///
+/// # Safety
+/// [`sys::MAIN_STACK_TOP`] 之下的主线程栈必须已映射为可写且只归主线程使用。
+#[cfg(target_arch = "riscv32")]
+unsafe fn switch_stack(a: u64, b: u64) -> ! {
+    core::arch::asm!(
+        "mv sp, {top}",
+        "call {main}",
+        "unimp",
+        top = in(reg) sys::MAIN_STACK_TOP as u32,
+        main = sym run_main,
+        in("a0") a as u32,
+        in("a1") (a >> 32) as u32,
+        in("a2") b as u32,
+        in("a3") (b >> 32) as u32,
         options(noreturn)
     )
 }

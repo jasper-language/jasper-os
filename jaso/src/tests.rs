@@ -171,7 +171,7 @@ fn export_and_reloc_rejections() {
     let mut b = sample();
     b.relocs[0].0 = 5 * PAGE - 4; // 写入越出映像末端
     assert_eq!(b.finish().unwrap_err(), JasoError::RelocOutOfRange);
-    // 重定位种类不是 RELATIVE64
+    // 重定位种类与文件的指令集不符（x86_64 文件里出现 32 位重定位）
     let good = sample().finish().unwrap();
     let img = Image::parse(&good).unwrap();
     let reloc_dir = HEADER_SIZE + 5 * SECTION_SIZE;
@@ -262,4 +262,31 @@ fn random_mutations_never_panic() {
     }
     // 绝大多数变异应被拒绝；接受的必是与原文件等价的少数情形
     assert!(accepted < 2000, "accepted={}", accepted);
+}
+
+#[test]
+fn reloc_width_follows_arch() {
+    // RISC-V32：重定位为 4 字节，按 4 字节对齐即可；x86_64 的同一位置（未按 8 字节对齐）被拒绝
+    let mut b = sample();
+    b.arch = Arch::Riscv32;
+    b.relocs = vec![(2 * PAGE + 4, 0x10)];
+    let ok = b.finish().unwrap();
+    let img = Image::parse(&ok).unwrap();
+    assert_eq!(img.relocs().next().map(|r| r.kind), Some(RELOC_RELATIVE32));
+    assert_eq!((Arch::Riscv32.pointer_bytes(), Arch::Riscv64.pointer_bytes()), (4, 8));
+    let mut b = sample();
+    b.relocs = vec![(2 * PAGE + 4, 0x10)];
+    assert_eq!(b.finish().unwrap_err(), JasoError::RelocOutOfRange);
+    // RISC-V32 文件里出现 64 位重定位：拒绝
+    let reloc_dir = HEADER_SIZE + 5 * SECTION_SIZE;
+    let off = u32::from_le_bytes(ok[reloc_dir + 8..reloc_dir + 12].try_into().unwrap()) as usize;
+    let mut bad = ok.clone();
+    bad[off + 4 + 4] = RELOC_RELATIVE64 as u8;
+    digest_fix(&mut bad);
+    assert_eq!(Image::parse(&bad).unwrap_err(), JasoError::BadReloc);
+    // 写入末端越出映像（4 字节宽度下的边界）
+    let mut b = sample();
+    b.arch = Arch::Riscv32;
+    b.relocs = vec![(5 * PAGE - 2, 0x10)];
+    assert_eq!(b.finish().unwrap_err(), JasoError::RelocOutOfRange);
 }

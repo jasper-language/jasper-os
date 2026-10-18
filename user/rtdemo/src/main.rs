@@ -34,7 +34,7 @@ const RETURN_42: [u8; 6] = [0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3];
 #[cfg(target_arch = "aarch64")]
 const RETURN_42: [u8; 8] = [0x40, 0x05, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6];
 /// 一个遵守 C 调用约定、返回 42 的函数的机器码（RISC-V：`addi a0, zero, 42; jalr zero, 0(ra)`，小端序）。
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
 const RETURN_42: [u8; 8] = [0x13, 0x05, 0xA0, 0x02, 0x67, 0x80, 0x00, 0x00];
 
 fn main(role: u64, _arg: u64) -> i32 {
@@ -115,7 +115,9 @@ fn heap_cases(s: &mut Steps) -> Result<(), u32> {
 
 /// 匿名内存：映射 / 读写 / 各类拒绝（全有或全无）/ 取消映射 / 帧配额。
 fn memory_cases(s: &mut Steps) -> Result<(), u32> {
-    let base = sys::WINDOW_BASE + 0x3_0000_0000;
+    // 测试区间放在运行时布局的空隙里：映像之后、堆之前（窗口起点 + 48 MiB）；配额区间在模块区间之上（见下）
+    let base = sys::WINDOW_BASE + (48 << 20);
+    const _: () = assert!(sys::WINDOW_BASE + (48 << 20) + 16 * sys::PAGE <= sys::HEAP_BASE);
     let page = sys::PAGE;
     s.check(mem::map(base, 4, mem::WRITE).is_ok())?;
     // SAFETY：[base, base + 4 页) 刚映射为可写的清零页，只在本函数内使用。
@@ -156,7 +158,12 @@ fn memory_cases(s: &mut Steps) -> Result<(), u32> {
     s.check(mem::unmap(base, 1) == Err(Error::MEMORY_INVALID_ADDRESS))?; // 重复取消映射
 
     // 帧配额：每次 1024 页（4 MiB）直到被拒；被拒的那次不留下任何映射；随后全部取消映射
-    let quota_base = sys::WINDOW_BASE + 0x4_0000_0000;
+    // 模块区间末端到最小窗口末端之间（RISC-V32 上约 124 MiB），足够放下配额（默认 8192 帧 = 8 块）再多一块
+    let quota_base = sys::MODULES_BASE + sys::MODULE_SLOTS as u64 * sys::MODULE_STRIDE;
+    const _: () = assert!(
+        sys::MODULES_BASE + sys::MODULE_SLOTS as u64 * sys::MODULE_STRIDE + 16 * 1024 * sys::PAGE
+            <= sys::LAYOUT_END
+    );
     let chunk = 1024u64;
     let mut mapped = 0u64;
     let refused = loop {
@@ -164,7 +171,7 @@ fn memory_cases(s: &mut Steps) -> Result<(), u32> {
             Ok(()) => mapped += 1,
             Err(e) => break e,
         }
-        if mapped > 64 {
+        if mapped > 15 {
             break Error(0);
         }
     };

@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use crate::{
     digest_of, Arch, Image, JasoError, SectionKind, Stage, DIGEST_OFFSET, EXPORT_FUNC, EXPORT_SIZE, FORMAT_VERSION, HEADER_SIZE,
-    KIND_NATIVE, MAGIC, PAGE, RELOC_RELATIVE64, RELOC_SIZE, SECTION_SIZE,
+    KIND_NATIVE, MAGIC, PAGE, RELOC_SIZE, SECTION_SIZE,
 };
 
 /// 构建输入中的一个映像段。
@@ -83,7 +83,7 @@ impl Builder {
             put_u32(&mut t, self.relocs.len() as u32);
             for (offset, addend) in &self.relocs {
                 put_u32(&mut t, *offset);
-                put_u32(&mut t, RELOC_RELATIVE64);
+                put_u32(&mut t, self.arch.relative_reloc());
                 put_u64(&mut t, *addend);
             }
             bodies.push((SectionKind::Relocs as u32, 0, 0, 0, t));

@@ -19,7 +19,7 @@
 
 use core::arch::asm;
 use core::fmt::Write as _;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::argcase::{AddressPlan, Prng, Span};
 use kernel_core::ring_abi::{EnterArgs, MsgDesc};
@@ -43,6 +43,8 @@ const WINDOW_BASE: u64 = kernel_core::user_layout::WINDOW_BASE_X86_64;
 const WINDOW_BASE: u64 = kernel_core::user_layout::WINDOW_BASE_AARCH64;
 #[cfg(target_arch = "riscv64")]
 const WINDOW_BASE: u64 = kernel_core::user_layout::WINDOW_BASE_RISCV64;
+#[cfg(target_arch = "riscv32")]
+const WINDOW_BASE: u64 = kernel_core::user_layout::WINDOW_BASE_RISCV32;
 
 /// 本程序固定装载地址（窗口起点 + 4 MiB）。
 const IMAGE_BASE: u64 = WINDOW_BASE + kernel_core::user_layout::IMAGE_OFFSET;
@@ -66,11 +68,11 @@ const HOLE: u64 = TARGETS[1].start;
 static BAD_UTF8: [u8; 8] = [0xff; 8];
 
 /// 累计检查数（每检查一个返回值加一）。
-static CHECKS: AtomicU64 = AtomicU64::new(0);
+static CHECKS: AtomicU32 = AtomicU32::new(0);
 /// 失败数。
-static FAILED: AtomicU64 = AtomicU64::new(0);
+static FAILED: AtomicU32 = AtomicU32::new(0);
 /// 已打印的失败详情数（避免一次错误刷屏）。
-static PRINTED: AtomicU64 = AtomicU64::new(0);
+static PRINTED: AtomicU32 = AtomicU32::new(0);
 
 const ERR_UNSUPPORTED: i64 = -(ids::SYSTEM_ERROR_UNSUPPORTED as i64);
 const ERR_RIGHTS_DENIED: i64 = -(ids::SYSTEM_ERROR_RIGHTS_DENIED as i64);
@@ -132,6 +134,28 @@ unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
         options(nostack)
     );
     ret
+}
+
+/// 发起系统调用（RISC-V32 的 32 位用户 ABI：a7=ID；每个 64 位参数拆成两半，低半依次在 a0/a1/a2、
+/// 高半依次在 a3/a4/a5；`ecall`；返回值低半在 a0、高半在 a1，其余寄存器由内核保留）。
+///
+/// # Safety
+/// 参数必须符合该调用的约定（指针须指向本进程内存）。
+#[cfg(target_arch = "riscv32")]
+unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
+    let (lo, hi): (u32, u32);
+    asm!(
+        "ecall",
+        in("a7") id as u32,
+        inlateout("a0") a as u32 => lo,
+        inlateout("a1") b as u32 => hi,
+        in("a2") c as u32,
+        in("a3") (a >> 32) as u32,
+        in("a4") (b >> 32) as u32,
+        in("a5") (c >> 32) as u32,
+        options(nostack)
+    );
+    ((hi as u64) << 32 | lo as u64) as i64
 }
 
 /// 发起一次系统调用；参数可以是整数、明确的用户内存地址或窗口外地址。
@@ -355,8 +379,8 @@ pub extern "C" fn _start() -> ! {
     }
     map_cycles(&plan);
 
-    let checks = CHECKS.load(Ordering::Relaxed);
-    let failed = FAILED.load(Ordering::Relaxed);
+    let checks = CHECKS.load(Ordering::Relaxed) as u64;
+    let failed = FAILED.load(Ordering::Relaxed) as u64;
     say!("done calls={} checks={} failed={} seed={:#x}", TOTAL_CALLS, checks, failed, SEED);
     exit(if failed == 0 && checks >= TOTAL_CALLS { 0 } else { 1 });
 }

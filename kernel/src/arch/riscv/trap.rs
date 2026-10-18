@@ -12,7 +12,7 @@
 //! 来源以 sstatus.SPP 判定，而不是以用户 sp 是否为 0 判定（用户可以把 sp 置成任意值）。
 //!
 //! # 与 Core 的边界
-//! 陷入原因编号（scause）与中断源编号只在这里出现；交给 Core 的是中立的 [`UserFault`]、[`SyscallArgs`]
+//! 陷入原因编号（scause）与中断源编号只在这里出现；交给 Core 的是中立的 [`UserFault`]、[`SyscallArgs`](crate::syscall::SyscallArgs)
 //! 与逻辑中断线 [`IrqLine`]。
 
 use core::arch::global_asm;
@@ -23,7 +23,7 @@ use super::{plic, timer};
 use crate::console;
 use crate::fault::{self, UserFault, UserFaultKind};
 use crate::irq::{self, IrqLine};
-use crate::syscall::{self, SyscallArgs};
+use crate::syscall;
 
 /// 陷入时保存的寄存器帧（布局必须与下方汇编一致：36 个寄存器宽度的槽，RV64 288 字节、RV32 144 字节，16 字节对齐）。
 #[repr(C)]
@@ -242,9 +242,8 @@ fn handle_user_exception(frame: &mut TrapFrame, cause: u64) {
     if cause == EXC_ECALL_U {
         // ecall 固定 4 字节：先越过它，Core 在处理中切换任务或终止任务都不影响返回地址
         frame.sepc += 4;
-        // 参数寄存器与 XLEN 同宽，零扩展为 Core 的 64 位参数
-        let x = frame.x.map(|r| r as u64);
-        let args = SyscallArgs { id: x[17], args: [x[10], x[11], x[12], x[13], x[14], x[15]] };
+        // 参数按各寄存器宽度的约定组合为 Core 的 64 位参数（RV32：低半 a0–a2、高半 a3–a5）
+        let args = mode::syscall_args(&frame.x);
         mode::set_syscall_return(&mut frame.x, syscall::on_syscall(&args));
         return;
     }

@@ -130,6 +130,10 @@ pub trait Platform {
     /// 本架构可执行文件的 ELF `e_machine` 值（装载器据此拒绝其他架构的程序）。
     const ELF_MACHINE: u16;
 
+    /// 本架构用户程序的 ELF 类别（32 位或 64 位，随用户态地址宽度而定；装载器拒绝另一种类别）。
+    /// ELF class of this ISA's user programs.
+    const ELF_CLASS: kernel_core::elf::ElfClass;
+
     /// 初始化早期控制台。之后即可打印（最先调用）。
     fn console_init();
 
@@ -272,6 +276,8 @@ pub trait Platform {
 pub const NAME: &str = <Current as Platform>::NAME;
 /// 当前架构的 ELF 机器类型，见 [`Platform::ELF_MACHINE`]。
 pub const ELF_MACHINE: u16 = <Current as Platform>::ELF_MACHINE;
+/// 当前架构用户程序的 ELF 类别，见 [`Platform::ELF_CLASS`]。
+pub const ELF_CLASS: kernel_core::elf::ElfClass = <Current as Platform>::ELF_CLASS;
 /// 当前架构的空任务上下文，见 [`Platform::EMPTY_CONTEXT`]。
 pub const EMPTY_CONTEXT: TaskContext = <Current as Platform>::EMPTY_CONTEXT;
 
