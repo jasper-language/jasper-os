@@ -4,7 +4,8 @@
 #
 # 做什么：
 #   1. 宿主单元测试（kernel-core）与裸机目标编译
-#   2. 构建内核与可引导镜像，在 QEMU 中**真实启动一次**，保存原始串口日志
+#   2. 构建内核与可引导镜像，在 QEMU 中**真实启动一次**，保存原始串口日志；
+#      同一内核再以 AArch64 与 RISC-V64 构建，各在对应的 QEMU 中真实启动一次
 #   3. 按各里程碑的判据逐项检查同一份串口日志，打印 PASS/FAIL 表
 #   4. 全部证据（构建日志、测试日志、串口日志、汇总表）归档到 evidence/accept-<时间戳>/
 #
@@ -126,6 +127,20 @@ if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ]; then
   run timeout "$QEMU_TIMEOUT" "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -kernel "$A64_ELF" -semihosting \
     -serial stdio -display none -monitor none -no-reboot > "$SERIAL_A64" 2>&1
   QRC_A64=$?
+fi
+# RISC-V64（ISA-2）：同一内核以软浮点目标 riscv64imac 构建（本阶段不内嵌用户程序），由 QEMU virt 默认的 OpenSBI
+# 以监管态装载 ELF 启动；退出经仿真器测试设备（成功 33、失败 35，与 x86_64 一致）。缺少 qemu-system-riscv64 时如实记为失败。
+QEMU_RV64="$(command -v qemu-system-riscv64 || true)"
+SERIAL_RV64="$OUT/serial-riscv64.log"
+RV64_ELF="$ROOT/target/riscv64imac-unknown-none-elf/release/jasper-kernel"
+QRC_RV64=-1
+run cargo build --release --target riscv64imac-unknown-none-elf -p jasper-kernel --no-default-features "${KFEAT[@]}" > "$OUT/build-riscv64.log" 2>&1
+RV64_BUILD_RC=$?
+if [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ]; then
+  echo "== QEMU 真实启动（RISC-V64）=="
+  run timeout "$QEMU_TIMEOUT" "$QEMU_RV64" -M virt -m 256M -kernel "$RV64_ELF" \
+    -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV64" 2>&1
+  QRC_RV64=$?
 fi
 
 # ---- 阶段 B：逐里程碑检查 ----------------------------------------------------
@@ -597,16 +612,30 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
-# a64_rerun <检查函数…>：在 AArch64 串口日志上逐项重跑给定检查（行名带 A64/ 前缀）；输出「行数 失败数」。
-a64_rerun() {
+# port_rerun <串口日志> <QEMU 退出码> <行名前缀> <内核共享部分表项数> <检查函数…>：在另一指令集的串口日志上逐项重跑
+# 给定检查（行名带前缀）；结果放在 PORT_N（行数）与 PORT_BAD（失败数）。
+port_rerun() {
+  local serial="$1" qrc="$2" prefix="$3" kpart="$4"; shift 4
   local saved_serial="$SERIAL" saved_qrc="$QRC" before=${#ROWS[@]} i bad=0 c
-  SERIAL="$SERIAL_A64"; QRC="$QRC_A64"; REC_PREFIX="A64/"; KPART=128
+  SERIAL="$serial"; QRC="$qrc"; REC_PREFIX="$prefix"; KPART="$kpart"
   for c in "$@"; do "$c"; done
   SERIAL="$saved_serial"; QRC="$saved_qrc"; REC_PREFIX=""; unset KPART
   for (( i = before; i < ${#ROWS[@]}; i++ )); do
     [[ "${ROWS[$i]}" == *" PASS "* ]] || bad=$((bad + 1))
   done
-  A64_N=$(( ${#ROWS[@]} - before )); A64_BAD=$bad
+  PORT_N=$(( ${#ROWS[@]} - before )); PORT_BAD=$bad
+}
+
+# a64_rerun <检查函数…>：在 AArch64 串口日志上逐项重跑给定检查（行名带 A64/ 前缀）；结果放在 A64_N / A64_BAD。
+a64_rerun() {
+  port_rerun "$SERIAL_A64" "$QRC_A64" "A64/" 128 "$@"
+  A64_N=$PORT_N; A64_BAD=$PORT_BAD
+}
+
+# rv64_rerun <检查函数…>：在 RISC-V64 串口日志上逐项重跑给定检查（行名带 RV64/ 前缀）；结果放在 RV64_N / RV64_BAD。
+rv64_rerun() {
+  port_rerun "$SERIAL_RV64" "$QRC_RV64" "RV64/" 128 "$@"
+  RV64_N=$PORT_N; RV64_BAD=$PORT_BAD
 }
 
 a64_ready() { [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ] && [ -s "$SERIAL_A64" ]; }
@@ -643,13 +672,33 @@ check_isa1b() { # AArch64 移植第二阶段：内嵌用户程序（独立 Rust 
   fi
 }
 
+rv64_ready() { [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ] && [ -s "$SERIAL_RV64" ]; }
+
+check_isa2a() { # RISC-V64 移植第一阶段：与 AArch64 第一阶段同一组内核侧检查在 qemu-system-riscv64 的串口日志上逐项重跑（行名带 RV64/ 前缀）
+  if ! rv64_ready; then
+    record ISA2a FAIL "RISC-V64 构建 rc=$RV64_BUILD_RC 或缺少 qemu-system-riscv64 / 串口日志（见 build-riscv64.log）"
+    return
+  fi
+  rv64_rerun check_m11 check_m12 check_m13 check_m14 check_m15 check_m21 check_m22 check_m23 check_m24 \
+             check_m31 check_m32 check_m33 check_m34 check_m42 check_fix check_sched2
+  if [ "$RV64_BAD" -eq 0 ] && grep -qE '^\[JSR-BOOT\] jasper-os rust kernel [0-9.]+ riscv64' "$SERIAL_RV64" \
+     && grep -q '^\[JSR-VEC\] ok' "$SERIAL_RV64" \
+     && grep -qE '^\[JSR-PLIC\] ok source=([0-9]+) claimed=\1 completed=true drained=true' "$SERIAL_RV64" \
+     && grep -q '^\[JSR-EXIT\] success' "$SERIAL_RV64" && [ "$QRC_RV64" -eq 33 ]; then
+    record ISA2a PASS "RISC-V64（QEMU virt + OpenSBI，Sv39，QEMU=$QRC_RV64）：$RV64_N 项内核侧检查全部通过（启动/陷入/SBI 时钟/PLIC 认领完成/调度/抢占/机制/页帧/映射/堆/地址空间/用户态/ecall/用户指针/进程/句柄/回滚/优先级继承）"
+  else
+    record ISA2a FAIL "RISC-V64：$RV64_N 项中 $RV64_BAD 项失败，或缺少横幅 / 陷入入口 / PLIC 自检标记、未成功退出（见 serial-riscv64.log）"
+  fi
+}
+
 check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉取请求时运行本脚本全量 + 宿主与跨指令集单元测试；工具链钉到具体日期；判据不在工作流里另写
   local wf="$ROOT/.github/workflows/ci.yml" miss=""
   if [ ! -s "$wf" ]; then record CI-1 FAIL "缺少 .github/workflows/ci.yml"; return; fi
   grep -qE '^  push:' "$wf"                                   || miss="$miss 推送触发"
   grep -qE '^  pull_request:' "$wf"                           || miss="$miss 拉取请求触发"
   grep -qE 'run: .*bash scripts/accept\.sh' "$wf"             || miss="$miss 运行accept.sh"
-  grep -qE 'qemu-system-x86' "$wf" && grep -qE 'qemu-system-arm' "$wf" || miss="$miss 两种QEMU"
+  grep -qE 'qemu-system-x86' "$wf" && grep -qE 'qemu-system-arm' "$wf" && grep -qE 'qemu-system-misc' "$wf" || miss="$miss 三种QEMU"
+  grep -qE 'riscv64imac-unknown-none-elf' "$wf"               || miss="$miss RISC-V64内核目标"
   grep -qE 'cargo test -p kernel-core --target' "$wf" && grep -q 'i686-unknown-linux-musl' "$wf" || miss="$miss 32位单元测试"
   grep -qE 'cargo test -p jaso --features pack' "$wf"         || miss="$miss jaso测试"
   grep -qE '^  RUST_NIGHTLY: nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$' "$wf" || miss="$miss 工具链钉日期"
@@ -657,26 +706,26 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
   # 工作流不得自带判据或放宽结果：不允许忽略失败的写法
   grep -qE 'continue-on-error: *true|\|\| *true' "$wf"         && miss="$miss （出现忽略失败的写法）"
   if [ -z "$miss" ]; then
-    record CI-1 PASS "工作流：推送/拉取请求触发；宿主 + 32 位/AArch64/RISC-V64 单元测试；accept.sh 全量（x86_64 + AArch64 QEMU）；工具链 $(grep -oE 'nightly-[0-9-]+' "$wf" | head -1)；证据上传"
+    record CI-1 PASS "工作流：推送/拉取请求触发；宿主 + 32 位/AArch64/RISC-V64 单元测试；accept.sh 全量（x86_64 + AArch64 + RISC-V64 QEMU）；工具链 $(grep -oE 'nightly-[0-9-]+' "$wf" | head -1)；证据上传"
   else
     record CI-1 FAIL "工作流缺少：$miss"
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_j1; check_j2; check_j3; check_j4; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {
   echo "jasper-os 一键验收  $TS"
   echo "提交：$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$(git -C "$ROOT" diff --quiet 2>/dev/null || echo '（工作区有未提交改动）')"
   echo "配置档：$PROFILE"
-  echo "QEMU 退出码：$QRC（AArch64：$QRC_A64）"
+  echo "QEMU 退出码：$QRC（AArch64：$QRC_A64，RISC-V64：$QRC_RV64）"
   echo
   printf '%-6s %-4s %s\n' "里程碑" "结果" "说明"
   printf '%s\n' "${ROWS[@]}"
 } | tee "$OUT/summary.txt"
 
-for f in cargo-test.log build.log serial.log serial-aarch64.log summary.txt; do
+for f in cargo-test.log build.log serial.log serial-aarch64.log serial-riscv64.log summary.txt; do
   [ -s "$OUT/$f" ] || { echo "✗ 证据文件为空或缺失：$f"; FAILED=1; }
 done
 echo

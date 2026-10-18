@@ -167,6 +167,8 @@ bash scripts/accept.sh
 装有 `qemu-user` 时再在 AArch64 / RISC-V64 上运行（musl 目标 + 自带 `rust-lld` 静态链接）；未运行的会在结果中如实列出。
 另有 `ISA1a` 一行：内核以 `aarch64-unknown-none-softfloat` 构建（不内嵌用户程序），在 `qemu-system-aarch64 -M virt` 上直接装载 ELF 启动，
 同一组内核侧检查在该串口日志上以 `A64/` 前缀逐项重跑。
+另有 `ISA2a` 一行：内核以软浮点目标 `riscv64imac-unknown-none-elf` 构建（本阶段不内嵌用户程序），由 `qemu-system-riscv64 -M virt`
+默认的 OpenSBI 以监管态装载 ELF 启动，经仿真器测试设备退出（成功 33）；同一组内核侧检查以 `RV64/` 前缀逐项重跑，并要求 PLIC 自检通过。
 
 内核配置档：可调参数（时钟频率、时间片、任务槽位、堆、内存压力、对象与句柄容量、异步环与 IPC 配额等）集中在
 `kernel-core/src/config.rs`，编译期校验；默认 `standard`，`JASPER_PROFILE=compact bash scripts/accept.sh` 以 `compact` 档构建并验收
@@ -179,4 +181,4 @@ bash scripts/accept.sh
 
 ## 四、下一步
 
-用户态运行时（J-1）、现有库的可移植性验证（J-2）、最小 `.jaso`（J-3）、库作为 `.jaso` 模块运行（J-4）已完成。内核参数化（T-1）、基准与调优（T-2）已完成。AArch64 移植第一阶段（内核侧）已完成。接下来：AArch64 用户程序与运行时（与 x86_64 功能等价）→ 公开持续集成 → RISC-V64 / RISC-V32 移植 → `.jaso` 发布者签名 → 不可信模块隔离运行 → 多核。每一步都以 QEMU 真实运行为验收依据。
+用户态运行时（J-1）、现有库的可移植性验证（J-2）、最小 `.jaso`（J-3）、库作为 `.jaso` 模块运行（J-4）已完成。内核参数化（T-1）、基准与调优（T-2）已完成。AArch64 移植（内核侧与用户态生态）、公开持续集成、RISC-V64 移植第一阶段（内核侧）已完成。接下来：RISC-V64 用户程序与运行时（与 x86_64 功能等价）→ RISC-V32 移植 → `.jaso` 发布者签名 → 不可信模块隔离运行 → 多核。每一步都以 QEMU 真实运行为验收依据。

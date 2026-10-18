@@ -49,6 +49,15 @@ impl Platform for X86_64 {
     /// 高半区：PML4 下标 256..512。
     const KERNEL_PART_ENTRIES: usize = 256;
 
+    /// 低半区 PML4 第 136 项内（私有窗口之外；堆在创建任何用户地址空间之前建立，因而被所有空间共享）。
+    const KERNEL_HEAP_BASE: u64 = 0x0000_4444_4444_0000;
+
+    /// 低半区 PML4 第 128 项的起点（私有窗口之外，平时不映射）。
+    const KERNEL_PROBE_VA: u64 = 0x0000_4000_0000_0000;
+
+    /// 第一个非规范地址（48 位低半区之上）。
+    const INVALID_VA: u64 = 0x0000_8000_0000_0000;
+
     fn console_init() {
         uart::init();
     }

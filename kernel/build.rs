@@ -7,7 +7,7 @@
 //! * 已冻结（`abi/system-ids.lock`）的条目被删除、改号、改名或改种类（`kernel_core::abi::check_frozen`）
 //!
 //! 另外（特性 `user-programs` 开启时）以内核的目标指令集构建内嵌的用户程序，产物以 `include_bytes!` 装进内核镜像；
-//! 目标为 AArch64 时为内核二进制指定链接脚本（没有引导器，装载地址与段布局由脚本固定）。
+//! 目标为 AArch64 或 RISC-V 时为内核二进制指定链接脚本（没有引导器，装载地址与段布局由脚本固定）。
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -59,9 +59,14 @@ fn main() {
     if std::env::var_os("CARGO_FEATURE_USER_PROGRAMS").is_some() {
         build_user_programs(&root);
     }
-    // AArch64 没有引导器，内核 ELF 由固件或仿真器直接装载：用本仓库的链接脚本固定装载地址与段布局。
-    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64") {
-        let script = root.join("kernel/link-aarch64.ld");
+    // AArch64 / RISC-V 没有引导器，内核 ELF 由固件或仿真器直接装载：用本仓库的链接脚本固定装载地址与段布局。
+    let script = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") => Some("kernel/link-aarch64.ld"),
+        Ok("riscv64") => Some("kernel/link-riscv64.ld"),
+        _ => None,
+    };
+    if let Some(script) = script {
+        let script = root.join(script);
         println!("cargo:rerun-if-changed={}", script.display());
         println!("cargo:rustc-link-arg-bins=-T{}", script.display());
     }

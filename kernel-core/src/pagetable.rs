@@ -343,6 +343,31 @@ mod tests {
         }
     }
 
+    /// 3 级、38 位（RISC-V Sv39 低半区的形状）：位格式与 [`TestFormat`] 相同，只改级数与地址位数。
+    struct ThreeLevel;
+    impl EntryFormat for ThreeLevel {
+        const LEVELS: usize = 3;
+        const VA_BITS: u32 = 38;
+        fn is_valid(raw: u64) -> bool {
+            TestFormat::is_valid(raw)
+        }
+        fn is_table(raw: u64) -> bool {
+            TestFormat::is_table(raw)
+        }
+        fn table_entry(p: u64) -> u64 {
+            TestFormat::table_entry(p)
+        }
+        fn leaf_entry(p: u64, f: MapFlags) -> u64 {
+            TestFormat::leaf_entry(p, f)
+        }
+        fn output_address(raw: u64) -> u64 {
+            TestFormat::output_address(raw)
+        }
+        fn leaf_flags(raw: u64) -> MapFlags {
+            TestFormat::leaf_flags(raw)
+        }
+    }
+
     /// 模拟物理内存：按帧地址存放的表。
     #[derive(Default)]
     struct Mem(HashMap<u64, Box<[u64; ENTRIES]>>);
@@ -514,5 +539,54 @@ mod tests {
         space.map(0x1000_0000_0000, f, MapFlags::USER, &mut frames).unwrap();
         let kernel = Pt::new(ROOT, &mut mem);
         assert_eq!(kernel.translate(0x1000_0000_0000), None, "窗口内的私有映射不外泄");
+    }
+
+    type Pt3<'a> = PageTable<ThreeLevel, &'a mut Mem>;
+
+    #[test]
+    fn three_level_layout_maps_and_rejects() {
+        assert_eq!(Pt3::TOP_ENTRIES, 256, "38 位 3 级 ⇒ 顶级 256 项（每项 1 GiB）");
+        let mut mem = Mem::default();
+        let mut frames = Frames::new(16);
+        let mut pt = Pt3::new(ROOT, &mut mem);
+        let f = PhysFrame::from_start(DATA).unwrap();
+        let va = (32u64 << 30) + 0x1000_0000; // 私有窗口（顶级 32..64）内
+        pt.map(va, f, MapFlags::WRITE | MapFlags::USER, &mut frames).unwrap();
+        assert_eq!(frames.live.len(), 2, "3 级只新建 2 张下级表");
+        assert_eq!(pt.translate(va), Some((f, MapFlags::WRITE | MapFlags::USER)));
+        assert_eq!(pt.used_top(32..64), 1);
+        // 失败路径：超出 38 位、未对齐 —— 拒绝且不分配、不改动
+        assert_eq!(pt.map(1 << 38, f, MapFlags::WRITE, &mut frames), Err(MapError::InvalidAddress));
+        assert_eq!(pt.map(va + 1, f, MapFlags::WRITE, &mut frames), Err(MapError::InvalidAddress));
+        assert_eq!(frames.live.len(), 2);
+        assert_eq!(pt.used_top(0..256), 1);
+        assert_eq!(pt.unmap(va), Ok(f));
+        assert_eq!(pt.free_tables(32..64, &mut frames), 2);
+        assert!(frames.live.is_empty(), "下级表全部回收");
+    }
+
+    #[test]
+    fn top_level_leaf_is_shared_but_never_split() {
+        // 顶级第 64 项是 1 GiB 的叶子（全物理内存映射的形状）：遍历器只报告 HugePage，不改动它；复制时原样共享
+        let mut mem = Mem::default();
+        let mut frames = Frames::new(16);
+        let gigapage = 0x4000_0000 | 1;
+        {
+            let mut kernel = Pt3::new(ROOT, &mut mem);
+            kernel.mem.write(ROOT, 64, gigapage);
+            let va = 64u64 << 30;
+            let f = PhysFrame::from_start(DATA).unwrap();
+            assert_eq!(kernel.map(va, f, MapFlags::WRITE, &mut frames), Err(MapError::HugePage));
+            assert_eq!(kernel.unmap(va), Err(MapError::HugePage));
+            assert_eq!(kernel.protect(va, MapFlags::READ_ONLY), Err(MapError::HugePage));
+            assert!(frames.live.is_empty());
+            assert_eq!(kernel.mem.read(ROOT, 64), gigapage, "大页未被改动");
+            assert_eq!(kernel.used_top(64..128), 1);
+        }
+        let mut space = Pt3::new(0x2000, &mut mem);
+        space.mem.zero(0x2000);
+        space.adopt_top_except(ROOT, 32..64);
+        assert_eq!(space.mem.read(0x2000, 64), gigapage, "窗口外的顶级叶子被原样共享");
+        assert_eq!(space.used_top(32..64), 0, "私有窗口为空");
     }
 }

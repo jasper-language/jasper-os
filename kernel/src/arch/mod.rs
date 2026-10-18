@@ -19,6 +19,10 @@
 pub mod x86_64;
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
+#[cfg(target_arch = "riscv64")]
+pub mod riscv64;
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+pub mod phys_tables;
 
 /// 当前编译目标的平台实现。
 #[cfg(target_arch = "x86_64")]
@@ -26,6 +30,9 @@ pub use self::x86_64::X86_64 as Current;
 /// 当前编译目标的平台实现。
 #[cfg(target_arch = "aarch64")]
 pub use self::aarch64::Aarch64 as Current;
+/// 当前编译目标的平台实现。
+#[cfg(target_arch = "riscv64")]
+pub use self::riscv64::Riscv64 as Current;
 
 /// 当前平台的任务上下文类型（切换时需要保存的寄存器集合）。
 pub type TaskContext = <Current as Platform>::TaskContext;
@@ -37,6 +44,12 @@ pub type SpaceRoot = <Current as Platform>::SpaceRoot;
 pub const USER_WINDOW: (u64, u64) = <Current as Platform>::USER_WINDOW;
 /// 内核共享部分的顶级表项数，见 [`Platform::KERNEL_PART_ENTRIES`]。
 pub const KERNEL_PART_ENTRIES: usize = <Current as Platform>::KERNEL_PART_ENTRIES;
+/// 内核堆虚拟区起点，见 [`Platform::KERNEL_HEAP_BASE`]。
+pub const KERNEL_HEAP_BASE: u64 = <Current as Platform>::KERNEL_HEAP_BASE;
+/// 私有窗口之外的演练地址，见 [`Platform::KERNEL_PROBE_VA`]。
+pub const KERNEL_PROBE_VA: u64 = <Current as Platform>::KERNEL_PROBE_VA;
+/// 超出可用虚拟地址范围的地址，见 [`Platform::INVALID_VA`]。
+pub const INVALID_VA: u64 = <Current as Platform>::INVALID_VA;
 
 /// 用户态探针程序（M3.1 验收用的最小用户代码；每个 ISA 各自提供机器码）。
 ///
@@ -94,6 +107,19 @@ pub trait Platform {
     /// 内核共享部分（[`Platform::prepare_kernel_space`] 预分配的范围）的顶级表项数。
     /// Number of top-level entries in the shared kernel part.
     const KERNEL_PART_ENTRIES: usize;
+
+    /// 内核堆虚拟区的起点（页对齐，位于私有窗口之外、所有地址空间共享的内核区域，且其后至少留出堆上限大小的空间）。
+    /// 各 ISA 可用的虚拟地址位数不同（如 RISC-V Sv39 的低半区只有 256 GiB），因此由平台给出。
+    /// Start of the kernel heap's virtual range, outside the private window.
+    const KERNEL_HEAP_BASE: u64;
+
+    /// 私有窗口之外一个平时不映射的页地址（映射演练与「私有窗口外」负向用例用），与堆区不重叠。
+    /// An otherwise unused page address outside the private window (mapping self-tests).
+    const KERNEL_PROBE_VA: u64;
+
+    /// 超出本平台可用虚拟地址范围的地址：任何映射请求都必须以「无效地址」被拒绝。
+    /// An address beyond the usable virtual range; every map request for it must be rejected.
+    const INVALID_VA: u64;
 
     /// 空上下文（`const`，供静态任务表初始化）。
     const EMPTY_CONTEXT: Self::TaskContext;

@@ -130,8 +130,8 @@ pub fn run(boot: &'static BootSpec) {
     );
 }
 
-/// M2.2 演练用的虚拟地址：低半区、远离内核镜像（0x100_0000_0000）与引导器的物理内存映射。
-const PROBE_VA: u64 = 0x0000_4000_0000_0000;
+/// M2.2 演练用的虚拟地址：由平台给出的内核共享部分中平时不映射的页，远离内核镜像、堆与物理内存映射。
+const PROBE_VA: u64 = arch::KERNEL_PROBE_VA;
 
 /// 运行 M2.2 演练：映射 → 经虚拟地址写、经物理映射读回 → 改只读 → 取消映射 → 错误路径。
 pub fn run_map(boot: &'static BootSpec) {
@@ -178,7 +178,7 @@ pub fn run_map(boot: &'static BootSpec) {
     // 错误路径
     let again = map::map(page, f, MapFlags::WRITE);
     check(again == Err(MapError::AlreadyMapped), "重复映射未被拒绝");
-    let bad = map::map(VirtPage::containing(0x0000_8000_0000_0000), f, MapFlags::WRITE);
+    let bad = map::map(VirtPage::containing(arch::INVALID_VA), f, MapFlags::WRITE);
     check(bad == Err(MapError::InvalidAddress), "非规范地址未被拒绝");
     kprintln!(
         "[JSR-MAP] errors double_map={} invalid_addr={}",
@@ -274,7 +274,7 @@ pub fn run_space() {
         check(a.root() != b.root(), "两个空间的根相同");
         check(a.map(page, fa, MapFlags::READ_ONLY).is_ok(), "空间 A 映射失败");
         check(b.map(page, fb, MapFlags::READ_ONLY).is_ok(), "空间 B 映射失败");
-        let outside = a.map(VirtPage::containing(0x0000_4000_0000_0000), fa, MapFlags::READ_ONLY);
+        let outside = a.map(VirtPage::containing(arch::KERNEL_PROBE_VA), fa, MapFlags::READ_ONLY);
         check(outside == Err(MapError::InvalidAddress), "私有窗口外的映射未被拒绝");
         kprintln!(
             "[JSR-AS] created a={:?} b={:?} va={:#x} window={:#x}..{:#x} outside_window={}",

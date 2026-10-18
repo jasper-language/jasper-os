@@ -1,7 +1,7 @@
 //! 引导适配层（按目标指令集二选一）：
 //! * x86_64：`bootloader` 0.11（BIOS 镜像）的内核入口——声明引导器配置（要求把全部物理内存线性映射进内核地址空间），
 //!   接住引导器入口约定，把 `bootloader_api::BootInfo` 转成与引导协议无关的 `BootSpec`，再交给 `jasper_kernel::kmain::start`；
-//! * AArch64：没有引导器，入口 `_start` 与设备树解析在库的 `arch/aarch64/boot.rs` 中；本文件只保证该入口被链接进二进制。
+//! * AArch64 / RISC-V：没有引导器，入口 `_start` 与设备树解析在库的 `arch/<isa>/boot.rs` 中；本文件只保证该入口被链接进二进制。
 //!
 //! 换引导方式或换 ISA 时，只替换本文件（以及 `arch/<isa>/`）；内核主流程不改。
 //! `#[panic_handler]` 在库 crate 的 `panic.rs` 中，保证最终二进制里只有一个。
@@ -41,7 +41,7 @@ mod bios {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 mod direct {
     // 链接内核库（其中有 `#[panic_handler]` 与入口代码）。
     use jasper_kernel as _;

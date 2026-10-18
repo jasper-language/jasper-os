@@ -1,8 +1,8 @@
 //! AArch64 页映射：4 KiB 粒度、4 级、47 位虚拟地址的阶段 1 转换表，实现 Core 的 [`PageMapper`] 契约。
 //! AArch64 page mapping (4 KiB granule, 4 levels, 47-bit VA) implementing the Core `PageMapper`.
 //!
-//! 遍历算法用 `kernel_core::pagetable`（与 RISC-V 共享）；本文件只给出**描述符位格式**（[`A64Format`]）、
-//! 「经全物理内存映射访问页表」（[`PhysTables`]）与修改后的 TLB 维护。
+//! 遍历算法用 `kernel_core::pagetable`、页表内存经共享的 [`PhysTables`] 访问（均与 RISC-V 共用）；本文件只给出**描述符位格式**（[`A64Format`]）
+//! 与修改后的 TLB 维护。
 //!
 //! 中立权限 → 描述符：
 //! * `USER` ⇒ AP[1]=1（EL0 可访问）且 nG=1（随地址空间切换失效）；
@@ -12,7 +12,9 @@
 
 use kernel_core::frame::{FrameAllocator, PhysFrame};
 use kernel_core::paging::{MapError, MapFlags, PageMapper, VirtPage};
-use kernel_core::pagetable::{EntryFormat, PageTable, TableMemory, ENTRIES};
+use kernel_core::pagetable::{EntryFormat, PageTable};
+
+pub use crate::arch::phys_tables::PhysTables;
 
 use super::cpu;
 
@@ -111,46 +113,6 @@ impl EntryFormat for A64Format {
     }
 }
 
-/// 经全物理内存映射读写页表。
-/// Page-table memory reached through the linear physical map.
-#[derive(Clone, Copy)]
-pub struct PhysTables {
-    offset: u64,
-}
-
-impl PhysTables {
-    /// `offset` 为全物理内存映射偏移。
-    ///
-    /// # Safety
-    /// 之后交给遍历器的表地址都必须是有效页表所在的物理帧。
-    pub unsafe fn new(offset: u64) -> Self {
-        PhysTables { offset }
-    }
-
-    fn slot(&self, table: u64, index: usize) -> *mut u64 {
-        debug_assert!(index < ENTRIES);
-        (self.offset + table + index as u64 * 8) as *mut u64
-    }
-}
-
-impl TableMemory for PhysTables {
-    fn read(&self, table: u64, index: usize) -> u64 {
-        // SAFETY：构造者保证 `table` 是有效页表；下标由遍历器限制在 512 以内。
-        unsafe { self.slot(table, index).read_volatile() }
-    }
-
-    fn write(&mut self, table: u64, index: usize, raw: u64) {
-        // SAFETY：同上。
-        unsafe { self.slot(table, index).write_volatile(raw) }
-    }
-
-    fn zero(&mut self, table: u64) {
-        for i in 0..ENTRIES {
-            self.write(table, i, 0);
-        }
-    }
-}
-
 /// 一棵 AArch64 页表的遍历器。
 pub type A64Table = PageTable<A64Format, PhysTables>;
 
@@ -177,7 +139,7 @@ impl A64Mapper {
     /// 用户程序改为可执行的页）必须先对取指可见，AArch64 不保证数据写入与取指自动一致。
     fn sync_if_executable(&self, frame: PhysFrame, flags: MapFlags) {
         if flags.contains(MapFlags::EXECUTE) {
-            cpu::sync_icache(self.tables.offset + frame.start(), kernel_core::frame::FRAME_SIZE);
+            cpu::sync_icache(self.tables.offset() + frame.start(), kernel_core::frame::FRAME_SIZE);
         }
     }
 }
