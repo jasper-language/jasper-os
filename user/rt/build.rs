@@ -12,9 +12,13 @@ fn main() {
 
     let mut ids = String::from("// 由 user/rt/build.rs 依据 abi/system-ids.txt 生成，请勿手改。\n");
     let mut consts = String::from("// 由 user/rt/build.rs 依据 abi/system-ids.txt 生成，请勿手改。\nimpl Error {\n");
+    let mut ops = String::from("/// 全部操作：(规范名, ID)。\npub const OPS: &[(&str, u64)] = &[\n");
     let mut names = String::from("/// 错误 ID → 规范名（未登记返回 `None`）。\npub(crate) fn error_name(id: u64) -> Option<&'static str> {\n    match id {\n");
     kernel_core::abi::validate(&reg, |r| {
         let _ = writeln!(ids, "pub const {}: u64 = {};", r.name.to_ascii_uppercase().replace('.', "_"), r.id);
+        if r.kind == "op" {
+            let _ = writeln!(ops, "    (\"{}\", {}),", r.name, r.id);
+        }
         if r.kind == "error" {
             // 常量名去掉根与 `error` 段：system.handle.error.invalid → HANDLE_INVALID，system.error.unsupported → UNSUPPORTED
             let short: Vec<&str> = r.name.split('.').skip(1).filter(|s| *s != "error").collect();
@@ -31,6 +35,8 @@ fn main() {
     })
     .expect("登记表校验失败");
     consts.push_str("}\n");
+    ops.push_str("];\n");
+    ids.push_str(&ops);
     names.push_str("        _ => None,\n    }\n}\n");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     std::fs::write(out.join("ids.rs"), ids).unwrap();

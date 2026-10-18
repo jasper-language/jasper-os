@@ -41,14 +41,14 @@ pub fn current() -> SpaceRoot {
     SpaceRoot(Cr3::read().0.start_address().as_u64())
 }
 
-/// 新建地址空间：分配并清零一张 PML4，复制私有窗口之外的全部顶级表项。
+/// 新建地址空间：分配并清零一张 PML4，从模板空间 `template` 复制私有窗口之外的全部顶级表项。
 ///
-/// 当前空间若在私有窗口里已有映射则拒绝（否则这些映射会被所有空间意外共享）。
+/// 模板若在私有窗口里已有映射则拒绝（否则这些映射会被所有空间意外共享）。
 ///
 /// # Safety
-/// `phys_offset` 必须是全物理内存映射偏移。
-pub unsafe fn create(phys_offset: u64, frames: &mut dyn FrameAllocator) -> Result<SpaceRoot, MapError> {
-    let cur = table_at(phys_offset, current().0);
+/// `phys_offset` 必须是全物理内存映射偏移；`template` 是有效的 PML4。
+pub unsafe fn create(template: SpaceRoot, phys_offset: u64, frames: &mut dyn FrameAllocator) -> Result<SpaceRoot, MapError> {
+    let cur = table_at(phys_offset, template.0);
     if (USER_FIRST..USER_LAST).any(|i| !cur[i].is_unused()) {
         return Err(MapError::InvalidAddress);
     }

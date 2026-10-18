@@ -13,7 +13,9 @@
 //! | [`mem`] | 匿名页映射与取消映射 |
 //! | [`channel`] | Channel 端点：收发消息与句柄 |
 //! | [`ring`] | 异步环：提交 → 完成、取消 |
-//! | [`module`] | `.jaso` 模块装载器：校验 → 装入 → 重定位 → 设权限 → 初始化；卸载 |
+//! | [`module`] | `.jaso` 模块装载器：校验 → 判定放置 → 装入 → 重定位 → 设权限 → 初始化；静默判定后卸载 |
+//! | [`process`] | 子进程：从内存中的 ELF 映像创建，只授予调用者权力的子集 |
+//! | [`isolate`] | 隔离模块：不可信模块在独立子进程中运行，只经通道交换字节 |
 //!
 //! # 约定
 //! * 所有系统调用失败都以 [`Error`]（登记表中的错误 ID）返回，不吞错误
@@ -28,8 +30,10 @@ pub mod error;
 pub mod handle;
 pub mod heap;
 pub mod io;
+pub mod isolate;
 pub mod mem;
 pub mod module;
+pub mod process;
 pub mod ring;
 mod start;
 pub mod sync;

@@ -1,0 +1,9 @@
+# jaso-probe 的清单（打包时写入 .jaso）
+core.name = jaso-probe
+core.version = 0.1.0
+core.abi = c.v0
+core.publisher = jasper.dev
+core.host = jaso.host.v0
+core.requires = system.console.write, system.task.wait, system.handle.duplicate
+core.description = 隔离边界探测：求和、阻塞回调、原始系统调用、地址读写、死循环、句柄绑定
+core.exports = jaso_init, jaso_bind, probe_sum, probe_wait, probe_syscall, probe_bound, probe_poke, probe_spin

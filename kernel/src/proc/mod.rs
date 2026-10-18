@@ -33,6 +33,8 @@ use crate::syscall::SyscallSet;
 use crate::task::TaskId;
 use crate::{arch, kprintln, sched};
 
+pub mod spawn;
+
 /// 每个进程句柄表的容量。
 pub const HANDLES_PER_PROCESS: usize = crate::config::ACTIVE.objects.handles_per_process;
 
@@ -75,6 +77,12 @@ pub struct Process {
     state: ProcState,
     /// CPU 组（设置过 CPU 上限时有值；进程的全部线程受同一份上限约束，进程销毁时归还）。
     cpu_group: Option<sched::scheduler::CpuGroupId>,
+    /// 由用户进程经 `system.process.spawn` 创建：最后一份外部所有权（父进程中的句柄）释放时若仍在运行即被终止。
+    kill_on_release: bool,
+    /// 创建它的父进程（弱回指，仅用于父进程释放句柄时归还其子进程配额；归还后清空）。
+    spawned_by: Option<ObjId>,
+    /// 本进程经 `system.process.spawn` 创建、仍持有其句柄的子进程数（配额见 `spawn_abi::MAX_CHILDREN`）。
+    spawned_live: u32,
 }
 
 /// 进程的资源配额记账（开发默认值见 `crate::ring`、`crate::ipc` 中的常量）。
@@ -166,6 +174,9 @@ pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcErr
         threads_total: 0,
         state: ProcState::Running,
         cpu_group: None,
+        kill_on_release: false,
+        spawned_by: None,
+        spawned_live: 0,
     });
     let id = match kobj::insert(KObject::Process(p), 1, 0) {
         Ok(id) => id,

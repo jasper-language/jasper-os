@@ -189,10 +189,11 @@ impl Platform for Riscv {
     }
 
     unsafe fn create_space(
+        template: Self::SpaceRoot,
         phys_offset: u64,
         frames: &mut dyn kernel_core::frame::FrameAllocator,
     ) -> Result<Self::SpaceRoot, kernel_core::paging::MapError> {
-        space::create(phys_offset, frames)
+        space::create(template, phys_offset, frames)
     }
 
     unsafe fn space_mapper(root: Self::SpaceRoot, phys_offset: u64) -> Self::Mapper {

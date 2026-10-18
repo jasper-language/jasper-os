@@ -1,0 +1,20 @@
+# user-isohost —— 隔离模块与进程内模块卸载的验收程序：内嵌构建期打包并签名的探测模块（modules/probe）与容器程序（user/modbox），
+# 验证隔离运行的模块越权被拒、崩溃不影响宿主、占满处理器时宿主仍有响应，以及进程内模块卸载的静默判定与放置规则。
+[package]
+name = "user-isohost"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "user-isohost"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+jasper-rt = { path = "../rt" }
+
+[build-dependencies]
+kernel-core = { path = "../../kernel-core" }
+jaso = { path = "../../jaso", features = ["pack"] }

@@ -10,14 +10,24 @@
 //! 3. **检查适用性**：指令集与本程序一致；装载阶段为 `runtime`；调用约定为 `c.v0`
 //! 4. **检查能力**：清单里的每项能力都必须在调用者给出的授权 [`Grant::capabilities`] 中——清单是请求，授权由调用者决定
 //! 5. **检查宿主接口**：清单要求 `jaso.host.v0` 时，调用者必须提供宿主接口表，模块必须导出 `jaso_init`
-//! 6. **装入**：在模块区间取一个槽位，映射整个映像（可写），复制各段，应用重定位
-//! 7. **设权限**：映像先整体改为只读，再按段设为只读 / 读写 / 读执行（W^X，由内核强制）
-//! 8. **初始化**：调用 `jaso_init(宿主接口表)`，返回非 0 即视为失败
+//! 6. **判定放置**：进程内模块与宿主共享全部权限，只给可信模块——[`Grant::origin`] 为自动获取
+//!    （[`Origin::Acquired`]）的模块一律拒绝（不论策略如何），其余由 [`Grant::placement`] 判定；
+//!    要求隔离的模块经 [`crate::isolate`] 在独立进程中运行
+//! 7. **装入**：在模块区间取一个槽位，映射整个映像（可写），复制各段，应用重定位
+//! 8. **设权限**：映像先整体改为只读，再按段设为只读 / 读写 / 读执行（W^X，由内核强制）
+//! 9. **初始化**：调用 `jaso_init(宿主接口表)`，返回非 0 即视为失败
 //!
-//! # 卸载
-//! [`Module`] 离开作用域即取消整个映像的映射并归还槽位。经 [`Module::function`] 取得的函数指针
-//! 借用了 `Module`，在安全代码里不可能在卸载之后调用。
-//! 尚未实现：卸载前的静默判定（是否还有线程正在模块代码里执行）——v0 由调用者保证。
+//! 第 1–5 步由 [`admit`] 完成（不改动任何状态），进程内装入与隔离运行共用。
+//!
+//! # 卸载与静默判定
+//! 经 [`Module::function`] 取得的 [`Function`] 在存续期间是模块的一次**活动**（计数）；活动期间
+//! 线程可能正在模块代码里执行（包括模块回调宿主、在宿主代码里阻塞的情形）。
+//! * [`Module::unload`]：没有活动 ⇒ 取消映射并归还槽位；仍有活动 ⇒ 拒绝（[`UnloadError::Busy`]），模块原样可用。
+//!   「判定无活动」与「标记已卸载」是同一个原子操作，之后不可能再开始新的活动（`function` 返回 `None`）
+//! * [`Module`] 离开作用域时若尚未卸载，**等待**活动归零后再卸载
+//!
+//! 边界：静默判定只覆盖经 [`Function`] 发起的调用；[`Module::symbol`] 给出的裸地址不受保护，
+//! 从 [`Function::get`] 取出、在 `Function` 被丢弃之后仍被调用的指针同样不受保护。
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -27,6 +37,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 pub use jaso::trust::{
     PolicyError, Provenance, Publisher, TrustError, TrustMode, TrustPolicy, DEVELOPMENT_NAMESPACE, DEVELOPMENT_PUBLISHER,
 };
+pub use jaso::placement::{AlwaysIsolated, InProcessPublishers, Origin, Placement, PlacementPolicy, Standard};
 pub use jaso::{HostV0, JasoError};
 use jaso::{Arch, Image, Stage, ABI_C_V0, FLAG_W, FLAG_X, HOST_V0, INIT_SYMBOL, PAGE};
 
@@ -70,6 +81,12 @@ pub struct Grant<'a> {
     /// 信任策略：受信发布者表 + 模式（强制 / 开发）。
     /// Trust policy: trusted publishers plus mode.
     pub trust: &'a TrustPolicy<'a>,
+    /// 模块字节的来源（由取得字节的一方声明）；自动获取的模块只能隔离运行。
+    /// Where the bytes came from; acquired modules can only run isolated.
+    pub origin: Origin,
+    /// 放置策略：决定可信的本地模块能否进程内运行（通常是 `&Standard`）。
+    /// Placement strategy.
+    pub placement: &'a dyn PlacementPolicy,
 }
 
 /// 装载失败的原因。
@@ -100,6 +117,22 @@ pub enum LoadError {
     NoSlot,
     /// 映射或改权限失败。
     Memory(Error),
+    /// 放置判定要求隔离运行（例如自动获取的模块）：不得装入本进程。
+    /// The module must run isolated; it was not mapped into this process.
+    IsolationRequired,
+}
+
+/// 卸载被拒的原因。
+/// Why an unload was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnloadError {
+    /// 仍有活动（可能有线程正在模块代码中执行）：模块未卸载，仍然可用。
+    Busy {
+        /// 拒绝时的活动数。
+        active: u32,
+    },
+    /// 已经卸载过。
+    AlreadyUnloaded,
 }
 
 /// 开发模式下放行未签名模块的次数（审计计数，只增不减）。
@@ -112,7 +145,7 @@ pub fn unsigned_admitted() -> u32 {
 }
 
 /// 记录一次未签名放行：计数 + 结构化审计事件（模块名、版本、完整性摘要前 8 字节）。
-fn audit_unsigned(img: &Image<'_>) {
+pub(crate) fn audit_unsigned(img: &Image<'_>) {
     let n = UNSIGNED_ADMITTED.fetch_add(1, Ordering::Relaxed) + 1;
     let m = &img.manifest;
     let d = &img.digest;
@@ -161,6 +194,8 @@ fn chunked(va: u64, pages: u64, mut f: impl FnMut(u64, u64) -> crate::Result<()>
 pub struct Module {
     base: u64,
     pages: u64,
+    /// 活动计数（低 31 位）+ 已卸载标记（[`UNLOADED`]）。
+    state: AtomicU32,
     slot: u32,
     name: String,
     version: (u32, u32, u32),
@@ -168,47 +203,91 @@ pub struct Module {
     exports: Vec<(String, u64)>,
 }
 
-/// 借用模块的函数指针：模块卸载之前一直有效。
+/// 借用模块的函数指针。存续期间是模块的一次活动：模块在此期间不会被卸载。
+/// A function pointer borrowed from a module; while it lives the module cannot be unloaded.
 pub struct Function<'m, F> {
     f: F,
-    _module: PhantomData<&'m Module>,
+    module: &'m Module,
+    _f: PhantomData<F>,
 }
 
 impl<F: Copy> Function<'_, F> {
-    /// 取出函数指针（调用它须遵守模块对该函数的约定）。
+    /// 取出函数指针（调用它须遵守模块对该函数的约定）。只在本 `Function` 存续期间受静默判定保护。
+    /// The raw pointer; protected only while this `Function` is alive.
     pub fn get(&self) -> F {
         self.f
     }
 }
 
-impl Module {
-    /// 校验并装载一个 `.jaso` 文件（见模块文档的步骤）。
-    pub fn load(bytes: &[u8], grant: Grant<'_>) -> Result<Module, LoadError> {
-        let img = Image::parse(bytes).map_err(LoadError::Format)?;
-        let provenance = grant.trust.verify(&img).map_err(LoadError::Untrusted)?;
-        if Some(img.arch) != Arch::current() {
-            return Err(LoadError::WrongArch(img.arch));
+impl<F> Drop for Function<'_, F> {
+    fn drop(&mut self) {
+        self.module.state.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// 通过了第 1–5 步、尚未改动任何状态的模块（进程内装入与隔离运行共用）。
+/// A module that passed the stateless checks; nothing has been changed yet.
+pub struct Admitted<'b, 'p> {
+    /// 解析后的映像。
+    pub image: Image<'b>,
+    /// 验签结果。
+    pub provenance: Provenance<'p>,
+    init: Option<(&'static HostV0, u32)>,
+}
+
+/// 第 1–5 步：校验文件、验证来源、检查适用性、能力与宿主接口。不改动任何状态，也不输出审计事件。
+/// Runs the stateless admission checks shared by in-process and isolated loading.
+pub fn admit<'b, 'p>(bytes: &'b [u8], grant: &Grant<'p>) -> Result<Admitted<'b, 'p>, LoadError> {
+    let img = Image::parse(bytes).map_err(LoadError::Format)?;
+    let provenance = grant.trust.verify(&img).map_err(LoadError::Untrusted)?;
+    if Some(img.arch) != Arch::current() {
+        return Err(LoadError::WrongArch(img.arch));
+    }
+    if img.stage != Stage::Runtime {
+        return Err(LoadError::WrongStage(img.stage));
+    }
+    let m = img.manifest;
+    if m.abi != ABI_C_V0 {
+        return Err(LoadError::UnsupportedAbi(m.abi.to_string()));
+    }
+    if let Some(cap) = m.requires().find(|c| !grant.capabilities.contains(c)) {
+        return Err(LoadError::MissingCapability(cap.to_string()));
+    }
+    let init = match m.host {
+        None => None,
+        Some(h) if h != HOST_V0 => return Err(LoadError::UnsupportedHost(h.to_string())),
+        Some(_) => {
+            let host = grant.host.ok_or(LoadError::HostRequired)?;
+            let e = img.export(INIT_SYMBOL).ok_or(LoadError::MissingInit)?;
+            Some((host, e.value))
         }
-        if img.stage != Stage::Runtime {
-            return Err(LoadError::WrongStage(img.stage));
+    };
+    Ok(Admitted { image: img, provenance, init })
+}
+
+/// 装入的位置：宿主进程（须经放置判定），或运行时自己的隔离进程（它本身就是隔离边界）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Site {
+    Host,
+    Container,
+}
+
+/// 活动计数中表示「已卸载」的位。
+const UNLOADED: u32 = 1 << 31;
+
+impl Module {
+    /// 校验并装载一个 `.jaso` 文件到本进程（见模块文档的步骤）。
+    /// Verifies and loads a module into this process.
+    pub fn load(bytes: &[u8], grant: Grant<'_>) -> Result<Module, LoadError> {
+        Module::load_at(bytes, grant, Site::Host)
+    }
+
+    pub(crate) fn load_at(bytes: &[u8], grant: Grant<'_>, site: Site) -> Result<Module, LoadError> {
+        let Admitted { image: img, provenance, init } = admit(bytes, &grant)?;
+        if site == Site::Host && jaso::placement::decide(grant.placement, grant.origin, &provenance) != Placement::InProcess {
+            return Err(LoadError::IsolationRequired);
         }
         let m = img.manifest;
-        if m.abi != ABI_C_V0 {
-            return Err(LoadError::UnsupportedAbi(m.abi.to_string()));
-        }
-        if let Some(cap) = m.requires().find(|c| !grant.capabilities.contains(c)) {
-            return Err(LoadError::MissingCapability(cap.to_string()));
-        }
-        let init = match m.host {
-            None => None,
-            Some(h) if h != HOST_V0 => return Err(LoadError::UnsupportedHost(h.to_string())),
-            Some(_) => {
-                let host = grant.host.ok_or(LoadError::HostRequired)?;
-                let e = img.export(INIT_SYMBOL).ok_or(LoadError::MissingInit)?;
-                Some((host, e.value))
-            }
-        };
-
         // 其余检查全部通过之后才审计放行：被拒的模块不产生「已接受」事件
         let publisher = match provenance {
             Provenance::Signed { publisher } => Some(publisher.to_string()),
@@ -223,6 +302,7 @@ impl Module {
         let mut module = Module {
             base,
             pages: 0,
+            state: AtomicU32::new(0),
             slot,
             name: m.name.to_string(),
             version: m.version,
@@ -304,7 +384,51 @@ impl Module {
         self.pages
     }
 
-    /// 导出符号的地址（找不到为 `None`）。
+    /// 当前活动数（诊断用）。
+    /// Number of live activations.
+    pub fn active(&self) -> u32 {
+        self.state.load(Ordering::Acquire) & !UNLOADED
+    }
+
+    /// 是否已卸载。
+    /// Whether the module has been unloaded.
+    pub fn is_unloaded(&self) -> bool {
+        self.state.load(Ordering::Acquire) & UNLOADED != 0
+    }
+
+    /// 开始一次活动；已卸载返回 `false`。
+    fn enter(&self) -> bool {
+        let mut s = self.state.load(Ordering::Acquire);
+        loop {
+            if s & UNLOADED != 0 {
+                return false;
+            }
+            match self.state.compare_exchange_weak(s, s + 1, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return true,
+                Err(now) => s = now,
+            }
+        }
+    }
+
+    /// 静默判定后卸载：没有活动 ⇒ 取消映射、归还槽位；仍有活动 ⇒ [`UnloadError::Busy`]，模块不变、仍可用。
+    /// Unloads the module only if no activation is live.
+    pub fn unload(&self) -> Result<(), UnloadError> {
+        match self.state.compare_exchange(0, UNLOADED, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => {
+                self.unmap();
+                Ok(())
+            }
+            Err(s) if s & UNLOADED != 0 => Err(UnloadError::AlreadyUnloaded),
+            Err(s) => Err(UnloadError::Busy { active: s }),
+        }
+    }
+
+    fn unmap(&self) {
+        let _ = chunked(self.base, self.pages, |va, n| mem::unmap(va, n));
+        put_slot(self.slot);
+    }
+
+    /// 导出符号的地址（找不到为 `None`）。裸地址不受静默判定保护。
     pub fn symbol(&self, name: &str) -> Option<u64> {
         self.exports.iter().find(|(n, _)| n == name).map(|(_, a)| *a)
     }
@@ -313,18 +437,27 @@ impl Module {
     ///
     /// # Safety
     /// `F` 必须是与模块中该函数真实签名一致的 `extern "C" fn` 指针类型。
+    /// 模块已卸载、找不到该导出或 `F` 不是指针大小时返回 `None`。成功时开始一次活动（随 `Function` 丢弃结束）。
     pub unsafe fn function<F: Copy>(&self, name: &str) -> Option<Function<'_, F>> {
         if core::mem::size_of::<F>() != core::mem::size_of::<usize>() {
             return None;
         }
         let a = self.symbol(name)? as usize;
-        Some(Function { f: core::mem::transmute_copy(&a), _module: PhantomData })
+        if !self.enter() {
+            return None;
+        }
+        Some(Function { f: core::mem::transmute_copy(&a), module: self, _f: PhantomData })
     }
 }
 
 impl Drop for Module {
+    /// 尚未卸载 ⇒ 等待活动归零（让出处理器）后卸载。
     fn drop(&mut self) {
-        let _ = chunked(self.base, self.pages, |va, n| mem::unmap(va, n));
-        put_slot(self.slot);
+        loop {
+            match self.unload() {
+                Ok(()) | Err(UnloadError::AlreadyUnloaded) => return,
+                Err(UnloadError::Busy { .. }) => crate::task::yield_now(),
+            }
+        }
     }
 }

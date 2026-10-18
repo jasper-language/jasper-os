@@ -12,6 +12,8 @@
 //! 5. **`user/libcheck`**：现有 Rust 库（sha2、crc、miniz_oxide、smoltcp）在运行时之上通过已知答案测试，以 0 退出
 //! 6. **`user/jasodemo`**：`.jaso` 模块装入、调用导出、两个实例、卸载、各类拒绝，以 0 退出
 //! 7. **`user/modhost`**：sha2 / crc / deflate / net 作为 `.jaso` 模块装入，已知答案检查与模块串联，以 0 退出
+//! 8. **`user/isohost`**（另授予 `system.process.spawn` 与 `system.process.wait`）：隔离模块的权限边界、崩溃隔离、CPU 压力下的响应，
+//!    放置规则与进程内卸载的静默判定，以 0 退出
 //!
 //! 每个用例结束后检查空闲页帧、存活对象、清理队列、固定帧都回到用例前的基线。
 
@@ -52,6 +54,8 @@ static USER_LIBCHECK: &[u8] = include_bytes!(env!("JSR_USER_LIBCHECK"));
 static USER_JASODEMO: &[u8] = include_bytes!(env!("JSR_USER_JASODEMO"));
 /// 库模块验收程序 `user/modhost` 的 ELF 镜像（内嵌构建期打包的四个库模块）。
 static USER_MODHOST: &[u8] = include_bytes!(env!("JSR_USER_MODHOST"));
+/// 隔离模块验收程序 `user/isohost` 的 ELF 镜像（内嵌探测模块与容器程序）。
+static USER_ISOHOST: &[u8] = include_bytes!(env!("JSR_USER_ISOHOST"));
 
 /// 主线程栈顶相对私有窗口起点的偏移与页数（与其它演练相同的布局）。
 const STACK_TOP_OFF: u64 = 0xC0_0000;
@@ -103,6 +107,7 @@ pub fn run() {
     program("libcheck", USER_LIBCHECK, 0, 0);
     program("jasodemo", USER_JASODEMO, 0, 0);
     program("modhost", USER_MODHOST, 0, 0);
+    program_with("isohost", USER_ISOHOST, 0, 0, rt_calls().union(SyscallSet::of(&[abi::SYSTEM_PROCESS_SPAWN, abi::SYSTEM_PROCESS_WAIT])));
     let end = baseline();
     check(end == start, "演练结束后资源未回到起点");
     sched::set_preemption(prev_preemption);
@@ -256,8 +261,14 @@ fn memory_kernel_side() {
 
 /// 装载用户程序 `image` 并以 `role` 运行到结束，检查退出码与回到基线。
 fn program(name: &'static str, image: &[u8], role: u64, expect: i64) {
+    program_with(name, image, role, expect, rt_calls());
+}
+
+/// 同 [`program`]，授予指定的系统调用集合。
+/// Same as [`program`] with an explicit system-call set.
+fn program_with(name: &'static str, image: &[u8], role: u64, expect: i64, calls: SyscallSet) {
     let before = baseline();
-    let Some((st, code)) = run_program(name, image, role, rt_calls()) else {
+    let Some((st, code)) = run_program(name, image, role, calls) else {
         check(false, "用户程序装载失败");
         return;
     };

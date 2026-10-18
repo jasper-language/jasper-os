@@ -151,6 +151,7 @@ fn has_handler(id: u32) -> bool {
             | SYSTEM_MEMORY_UNMAP
             | SYSTEM_MEMORY_PROTECT
             | SYSTEM_TASK_QOS_SET
+            | SYSTEM_PROCESS_SPAWN
     )
 }
 
@@ -416,6 +417,7 @@ fn execute(e: &AbiEntry, a: &SyscallArgs, task_id: u64) -> i64 {
         SYSTEM_MEMORY_UNMAP => memory_unmap(a.args[0], a.args[1]),
         SYSTEM_MEMORY_PROTECT => memory_protect(a.args[0], a.args[1], a.args[2]),
         SYSTEM_TASK_QOS_SET => task_qos_set(a.args[0]),
+        SYSTEM_PROCESS_SPAWN => crate::proc::spawn::sys_spawn(a.args[0]),
         _ => err(SYSTEM_ERROR_UNSUPPORTED),
     }
 }

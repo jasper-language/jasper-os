@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use jasper_rt::module::{
-    unsigned_admitted, Grant, HostV0, LoadError, Module, Publisher, TrustError, TrustMode, TrustPolicy, DEVELOPMENT_NAMESPACE,
+    unsigned_admitted, Grant, HostV0, LoadError, Module, Origin, Publisher, Standard, TrustError, TrustMode, TrustPolicy, DEVELOPMENT_NAMESPACE,
     DEVELOPMENT_PUBLISHER,
 };
 use jasper_rt::{entry, io, mem, println, Error};
@@ -90,7 +90,7 @@ static HOST: HostV0 = HostV0 {
 const CAPS: &[&str] = &["system.console.write"];
 
 fn grant<'a>(trust: &'a TrustPolicy<'a>) -> Grant<'a> {
-    Grant { capabilities: CAPS, host: Some(&HOST), trust }
+    Grant { capabilities: CAPS, host: Some(&HOST), trust, origin: Origin::Local, placement: &Standard }
 }
 
 struct Steps(u32);
@@ -197,12 +197,12 @@ fn run(s: &mut Steps) -> Result<(), u32> {
     s.check(matches!(r_arch, Some(LoadError::WrongArch(_))))?;
     let r_stage = Module::load(DEMO_BOOT, grant(t)).err();
     s.check(matches!(r_stage, Some(LoadError::WrongStage(_))))?;
-    let r_caps = Module::load(DEMO, Grant { capabilities: &[], host: Some(&HOST), trust: t }).err();
+    let r_caps = Module::load(DEMO, Grant { capabilities: &[], host: Some(&HOST), trust: t, origin: Origin::Local, placement: &Standard }).err();
     s.check(matches!(&r_caps, Some(LoadError::MissingCapability(c)) if c == "system.console.write"))?;
     let r_more = Module::load(DEMO_MORECAPS, grant(t)).err();
     s.check(matches!(&r_more, Some(LoadError::MissingCapability(c)) if c == "system.channel.send"))?;
-    s.check(Module::load(DEMO_MORECAPS, Grant { capabilities: &["system.console.write", "system.channel.send"], host: Some(&HOST), trust: t }).is_ok())?;
-    let r_host = Module::load(DEMO, Grant { capabilities: CAPS, host: None, trust: t }).err();
+    s.check(Module::load(DEMO_MORECAPS, Grant { capabilities: &["system.console.write", "system.channel.send"], host: Some(&HOST), trust: t, origin: Origin::Local, placement: &Standard }).is_ok())?;
+    let r_host = Module::load(DEMO, Grant { capabilities: CAPS, host: None, trust: t, origin: Origin::Local, placement: &Standard }).err();
     s.check(r_host == Some(LoadError::HostRequired))?;
     let r_init = Module::load(DEMO_NOINIT, grant(t)).err();
     s.check(r_init == Some(LoadError::MissingInit))?;

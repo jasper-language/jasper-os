@@ -405,6 +405,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "jaso-probe"
+version = "0.1.0"
+dependencies = [
+ "jaso-module",
+]
+
+[[package]]
 name = "jaso-sha2"
 version = "0.1.0"
 dependencies = [
@@ -837,6 +844,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "user-isohost"
+version = "0.1.0"
+dependencies = [
+ "jaso",
+ "jasper-rt",
+ "kernel-core",
+]
+
+[[package]]
 name = "user-jasodemo"
 version = "0.1.0"
 dependencies = [
@@ -855,6 +871,14 @@ dependencies = [
  "miniz_oxide",
  "sha2",
  "smoltcp",
+]
+
+[[package]]
+name = "user-modbox"
+version = "0.1.0"
+dependencies = [
+ "jasper-rt",
+ "kernel-core",
 ]
 
 [[package]]

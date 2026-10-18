@@ -1,0 +1,16 @@
+# jaso-probe —— 隔离边界的探测模块：以字节调用约定导出求和、阻塞回调、原始系统调用、任意地址读写与死循环，
+# 用来验证「隔离运行的模块越权被拒、崩溃不影响宿主、占满处理器时宿主仍有响应」以及进程内卸载的静默判定。
+[package]
+name = "jaso-probe"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "jaso-probe"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+jaso-module = { path = "../support" }

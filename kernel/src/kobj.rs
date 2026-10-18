@@ -87,7 +87,8 @@ pub fn insert(obj: KObject, owners: u32, internal: u32) -> Result<ObjId, ObjErro
 
 /// 在对象表锁内释放一个外部所有权，并执行该类型的 **closing 动作**（有效外部所有权归零、对象尚未死亡时）：
 /// 有 closing 动作的类型：Ring（拒绝新提交、取消可取消的请求、丢弃未消费的完成记录）、
-/// Channel 端点（销毁队列中的消息、取消在其上等待的接收、通知对端）。
+/// Channel 端点（销毁队列中的消息、取消在其上等待的接收、通知对端）、
+/// 由用户进程创建的子进程（仍在运行则终止）。
 /// 所有释放外部所有权的路径（关闭句柄、进程退出关闭句柄表、回滚）都必须经由这里，closing 才不会被漏掉。
 /// Releases one external ownership and runs the type's closing action when it becomes unowned.
 ///
@@ -98,6 +99,7 @@ pub fn release_owner_in(t: &mut Table, id: ObjId) -> Result<Released, ObjError> 
         match t.get(id) {
             Ok(KObject::Ring(_)) => crate::ring::close_in(t, id),
             Ok(KObject::Endpoint(_)) => crate::ipc::close_in(t, id),
+            Ok(KObject::Process(_)) => crate::proc::spawn::close_in(t, id),
             _ => {}
         }
     }

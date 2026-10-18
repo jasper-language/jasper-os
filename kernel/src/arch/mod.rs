@@ -188,11 +188,16 @@ pub trait Platform {
     /// 当前活动的地址空间。
     fn current_space() -> Self::SpaceRoot;
 
-    /// 新建地址空间：私有窗口为空，窗口外共享当前空间的映射。
+    /// 新建地址空间：私有窗口为空，窗口外共享模板空间 `template`（内核地址空间）的映射。
+    ///
+    /// 模板显式给出而不取「当前空间」：创建可能发生在用户进程的系统调用里（当前空间是该进程的），
+    /// 那时当前空间的私有窗口并不为空。
+    /// Creates an address space whose non-private part is shared with `template` (the kernel space).
     ///
     /// # Safety
-    /// `phys_offset` 必须是全物理内存映射偏移。
+    /// `phys_offset` 必须是全物理内存映射偏移；`template` 必须是有效的地址空间根，且私有窗口为空。
     unsafe fn create_space(
+        template: Self::SpaceRoot,
         phys_offset: u64,
         frames: &mut dyn kernel_core::frame::FrameAllocator,
     ) -> Result<Self::SpaceRoot, kernel_core::paging::MapError>;
@@ -368,10 +373,11 @@ pub fn current_space() -> SpaceRoot {
 /// # Safety
 /// 同 [`Platform::create_space`]。
 pub unsafe fn create_space(
+    template: SpaceRoot,
     phys_offset: u64,
     frames: &mut dyn kernel_core::frame::FrameAllocator,
 ) -> Result<SpaceRoot, kernel_core::paging::MapError> {
-    Current::create_space(phys_offset, frames)
+    Current::create_space(template, phys_offset, frames)
 }
 /// 见 [`Platform::space_mapper`]。
 ///

@@ -80,9 +80,11 @@ impl VmSpace {
     pub fn new() -> Result<Self, MapError> {
         let phys_offset = boot::get().and_then(|b| b.phys_offset).ok_or(MapError::NotMapped)?;
         ready_from(init())?;
-        // SAFETY：offset 来自引导器；新空间的映射器只用于私有窗口（见 `map` 的检查），不与内核映射器别名修改共享表。
+        // 以内核地址空间为模板（而非当前空间：在用户进程的系统调用里创建时，当前空间是该进程的）
+        let template = KERNEL.get().map(|k| k.root).ok_or(MapError::NotMapped)?;
+        // SAFETY：offset 来自引导器；模板是启动时记录的内核空间根；新空间的映射器只用于私有窗口（见 `map` 的检查），不与内核映射器别名修改共享表。
         unsafe {
-            let root = arch::create_space(phys_offset, &mut GlobalFrames)?;
+            let root = arch::create_space(template, phys_offset, &mut GlobalFrames)?;
             let mapper = arch::space_mapper(root, phys_offset);
             Ok(VmSpace { root, mapper, phys_offset })
         }

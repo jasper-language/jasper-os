@@ -547,6 +547,37 @@ check_j4() {    # 库作为 .jaso 模块：sha2 / crc / deflate / net 同时装�
   fi
 }
 
+check_j6() {    # 可信进程内模块与不可信隔离模块分开：隔离模块在独立进程中运行，只有清单声明且授权的调用与句柄；越权被拒、崩溃不影响宿主；
+                # 吃满 CPU 的隔离模块不拖垮宿主、撤销后立即恢复；自动获取的模块只能隔离；进程内卸载的静默判定；子进程配额与回收
+  local t
+  t=0
+  for n in spawn_desc_roundtrip_and_outputs spawn_check_accepts_subset spawn_check_rejects_each_rule spawn_check_subset_exhaustive_small; do
+    grep -q "$n ... ok" "$OUT/cargo-test.log" && t=$((t + 1))
+  done
+  for n in acquired_is_always_isolated standard_policy_places_local_in_process publisher_policy_isolates_unlisted_and_unsigned \
+           wire_roundtrip_all_messages wire_rejects_malformed_input wire_random_bytes_never_panic; do
+    grep -q "$n ... ok" "$OUT/jaso-test.log" && t=$((t + 1))
+  done
+  if [ "${TEST_RC:-1}" -eq 0 ] && [ "${JASO_RC:-1}" -eq 0 ] && [ "$t" -eq 10 ] \
+     && has 'text=isohost: spawn escalation_denied=true bad_image_rejected=true child_exit=0 quota=8 quota_exceeded_rejected=true churn=24 ok=true' \
+     && has 'text=isohost: admission undeclared_handle_rejected=true missing_capability_rejected=true' \
+     && has 'text=isohost: rights granted_call_ok=true denied=channel\.create,process\.spawn,time\.wait foreign_handle=invalid host_handle_intact=true' \
+     && has 'text=isohost: address_space outcome=(own_memory|faulted) host_data_intact=true' \
+     && has 'text=isohost: crash code=-1 host_alive=true respawn_ok=true' \
+     && has 'text=isohost: cpu_pressure hogs=2 rounds=20 idle_max_ticks=[0-9]+ loaded_max_ticks=[0-4] bound=4 recovered_max_ticks=[01] recovered=true' \
+     && has 'text=isohost: placement acquired_in_process=rejected acquired_isolated=ok local_in_process=ok' \
+     && has 'text=isohost: quiescence busy_refused=true active_at_refusal=1 usable_while_busy=true unloaded_after_exit=true' \
+     && has 'text=isohost: ok checks=[0-9]+' \
+     && has '^\[JSR-USER\] event=system\.task\.faulted task=spawned .*kind=page_fault .*action=terminated' \
+     && has '^\[JSR-PROC\] event=system\.process\.killed id=0x[0-9a-f]+ cause=last_handle_released code=-2' \
+     && has 'case=isohost exit=Some\(0\) expect=0 reclaimed=true' \
+     && ! has 'text=isohost: FAIL'; then
+    record J-6 PASS "宿主测试 $t/10（创建参数块/调用子集、放置规则、隔离协议）；隔离模块在独立进程运行：越权调用 rights_denied、宿主句柄值无效、写不到宿主数据、崩溃只终止隔离进程；2 个吃满 CPU 的隔离模块下往返延迟 ≤4 tick、丢弃后立即恢复；自动获取的模块进程内装载被拒；线程停在模块内时卸载被拒且模块可用；子进程配额与回收；回到基线"
+  else
+    record J-6 FAIL "宿主测试 $t/10（rc=${TEST_RC:-?}/${JASO_RC:-?}），或缺少 isohost 关键标记 / 故障终止 / 释放即终止标记"
+  fi
+}
+
 check_sched1() { # 调度策略 + QoS：档位规则（拒绝且不变、继承、上限）；动态任务数；过载下用户发起档唤醒延迟有上界、后台有进展；压力撤销后立即恢复；回到基线
   # 动态任务数用例的期望值随配置档：同时存活 = 槽位上限的 5/8，填满时的填充任务 = 槽位上限 - 1
   local mt many
@@ -715,7 +746,7 @@ check_isa1b() { # AArch64 移植第二阶段：内嵌用户程序（独立 Rust 
     record ISA1b FAIL "AArch64 构建 rc=$A64_BUILD_RC 或缺少 qemu-system-aarch64 / 串口日志（见 build-aarch64.log）"
     return
   fi
-  a64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 \
+  a64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 check_j6 \
             check_sched1 check_sched3 check_t1 check_t2
   local progs
   progs=$(grep -cE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_A64" || true)
@@ -751,7 +782,7 @@ check_isa2b() { # RISC-V64 移植第二阶段：内嵌用户程序（独立 Rust
     record ISA2b FAIL "RISC-V64 构建 rc=$RV64_BUILD_RC 或缺少 qemu-system-riscv64 / 串口日志（见 build-riscv64.log）"
     return
   fi
-  rv64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 \
+  rv64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 check_j6 \
              check_sched1 check_sched3 check_t1 check_t2
   local progs
   progs=$(grep -cE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_RV64" || true)
@@ -803,7 +834,7 @@ check_isa3b() { # RISC-V32 移植第二阶段：内嵌用户程序（ELF32 装�
     record ISA3b FAIL "RISC-V32 构建 rc=$RV32_BUILD_RC 或缺少 qemu-system-riscv32 / 串口日志（见 build-riscv32.log）"
     return
   fi
-  rv32_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 \
+  rv32_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 check_j6 \
              check_sched1 check_sched3 check_t1 check_t2
   local progs
   progs=$(grep -caE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_RV32" || true)
@@ -838,7 +869,7 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

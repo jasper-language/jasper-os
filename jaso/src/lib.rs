@@ -51,7 +51,9 @@ pub mod build;
 pub mod manifest;
 #[cfg(feature = "pack")]
 pub mod pack;
+pub mod placement;
 pub mod trust;
+pub mod wire;
 
 pub use manifest::{Manifest, ManifestError};
 

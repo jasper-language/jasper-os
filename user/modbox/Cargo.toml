@@ -1,0 +1,19 @@
+# user-modbox —— 隔离模块的容器程序：入口直接进入运行时的服务循环（jasper-rt 的 isolate::serve），
+# 在独立进程里重新校验、装入并调用宿主送来的 `.jaso` 模块。宿主程序在构建期把它嵌入，运行时经 system.process.spawn 创建。
+[package]
+name = "user-modbox"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "user-modbox"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+jasper-rt = { path = "../rt" }
+
+[build-dependencies]
+kernel-core = { path = "../../kernel-core" }

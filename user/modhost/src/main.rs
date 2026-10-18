@@ -17,7 +17,7 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use jasper_rt::module::{Grant, Module, Publisher, TrustMode, TrustPolicy, DEVELOPMENT_NAMESPACE, DEVELOPMENT_PUBLISHER, STD_HOST};
+use jasper_rt::module::{Grant, Module, Origin, Standard, Publisher, TrustMode, TrustPolicy, DEVELOPMENT_NAMESPACE, DEVELOPMENT_PUBLISHER, STD_HOST};
 use jasper_rt::{entry, mem, println, Error};
 
 entry!(main);
@@ -104,14 +104,17 @@ impl Libs {
 
     fn compress(&self, data: &[u8], level: u32) -> Result<Vec<u8>, i32> {
         // SAFETY：签名与模块导出一致。
-        let f = unsafe { self.deflate.function::<CompressFn>("zlib_compress") }.ok_or(-100)?.get();
+        // 取得的 Function 保持到函数结束：调用期间模块不会被卸载
+        let func = unsafe { self.deflate.function::<CompressFn>("zlib_compress") }.ok_or(-100)?;
+        let f = func.get();
         // SAFETY：data 可读；输出指针可写。
         self.deflate_call(|p, n| unsafe { f(data.as_ptr(), data.len(), level, p, n) })
     }
 
     fn inflate(&self, name: &str, data: &[u8]) -> Result<Vec<u8>, i32> {
         // SAFETY：签名与模块导出一致（zlib_decompress / inflate_raw 同型）。
-        let f = unsafe { self.deflate.function::<InflateFn>(name) }.ok_or(-100)?.get();
+        let func = unsafe { self.deflate.function::<InflateFn>(name) }.ok_or(-100)?;
+        let f = func.get();
         // SAFETY：data 可读；输出指针可写。
         self.deflate_call(|p, n| unsafe { f(data.as_ptr(), data.len(), p, n) })
     }
@@ -140,7 +143,7 @@ fn main(_: u64, _: u64) -> i32 {
 
 fn run(s: &mut Steps) -> Result<(), u32> {
     let trust = TrustPolicy::new(&PUBLISHERS, TrustMode::Enforce).map_err(|_| 99u32)?;
-    let grant = Grant { capabilities: &["system.console.write"], host: Some(&STD_HOST), trust: &trust };
+    let grant = Grant { capabilities: &["system.console.write"], host: Some(&STD_HOST), trust: &trust, origin: Origin::Local, placement: &Standard };
     let load = |b: &[u8], s: &Steps| Module::load(b, grant).map_err(|_| 100 + s.0);
     let libs = Libs { sha2: load(SHA2, s)?, crc: load(CRC, s)?, deflate: load(DEFLATE, s)?, net: load(NET, s)? };
     let signed = [&libs.sha2, &libs.crc, &libs.deflate, &libs.net].iter().filter(|m| m.publisher() == Some(DEVELOPMENT_PUBLISHER)).count();

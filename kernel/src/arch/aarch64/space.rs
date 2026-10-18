@@ -46,13 +46,13 @@ pub fn current() -> SpaceRoot {
     SpaceRoot(read_sysreg!("ttbr0_el1") & desc::ADDR_MASK)
 }
 
-/// 新建地址空间：分配并清零一张顶级表，复制私有窗口之外的全部顶级表项。
-/// 当前空间若在私有窗口里已有映射则拒绝（否则这些映射会被所有空间意外共享）。
+/// 新建地址空间：分配并清零一张顶级表，从模板空间 `template` 复制私有窗口之外的全部顶级表项。
+/// 模板若在私有窗口里已有映射则拒绝（否则这些映射会被所有空间意外共享）。
 ///
 /// # Safety
-/// `phys_offset` 必须是全物理内存映射偏移。
-pub unsafe fn create(phys_offset: u64, frames: &mut dyn FrameAllocator) -> Result<SpaceRoot, MapError> {
-    let cur = current().0;
+/// `phys_offset` 必须是全物理内存映射偏移；`template` 是有效的顶级表。
+pub unsafe fn create(template: SpaceRoot, phys_offset: u64, frames: &mut dyn FrameAllocator) -> Result<SpaceRoot, MapError> {
+    let cur = template.0;
     if table(cur, phys_offset).used_top(USER_FIRST..USER_LAST) != 0 {
         return Err(MapError::InvalidAddress);
     }

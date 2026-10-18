@@ -57,6 +57,7 @@ pub mod pagetable;
 pub mod pressure;
 pub mod ring_abi;
 pub mod sched;
+pub mod spawn_abi;
 pub mod module;
 pub mod object;
 pub mod objtable;
