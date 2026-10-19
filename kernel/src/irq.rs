@@ -50,7 +50,10 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
             sched::on_timer_interrupt();
         }
         // 每核事件只更新本处理器的每核数据，不进全局延迟队列（那是引导处理器主循环的队列）
-        IrqLine::LocalTimer => crate::smp::on_local_tick(),
+        IrqLine::LocalTimer => {
+            crate::smp::on_local_tick();
+            sched::on_local_timer();
+        }
         IrqLine::Ipi(kind) => crate::smp::on_ipi(kind),
     }
     if from_user && crate::proc::current_exiting() {

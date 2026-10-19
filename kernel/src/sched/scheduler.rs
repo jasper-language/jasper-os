@@ -16,19 +16,56 @@
 //!   由门面层（`mod.rs`）在放掉所有借用之后调用 `switch_context`。
 //!   这样 `&mut Scheduler` 永远不会跨越一次栈切换存活（另一个任务会再次借用它）。
 //!
-//! 可复用性：`Scheduler<P, N>` 不含任何全局状态，可在多实例场景中直接构造。
+//! * **多处理器**：每个处理器各有当前任务、时间片记账与一份策略实例（欠账、衰减纪元按核独立）；
+//!   每个任务属于一个处理器的运行队列（`Task::home`），处理器只从自己的队列选任务。放置、空闲窃取与
+//!   周期均衡的决定委托给 `kernel_core::sched::balance`（Strategy），亲和集合是硬约束。
+//!   被选中的任务带 `on_cpu` 标记，直到换下它的切换保存完上下文（[`Scheduler::finish_switch`]）才清除，
+//!   因此另一个处理器不会恢复一份尚未保存完的上下文。需要别的处理器立即重新调度时记入待发请求，
+//!   由门面层放锁后发出核间中断。
+//!
+//! 可复用性：`Scheduler<P, N>` 不含任何全局状态，可在多实例场景中直接构造；处理器下标经平台的
+//! `cpu_index` 取得（本文件不含指令集代码）。
 
 use crate::arch::TaskContext;
 use crate::task::{Task, TaskId, TaskState};
 
+use kernel_core::smp::{CpuSet, MAX_CPUS};
+
 use super::policy::{
-    inherit, qos_change_allowed, ClassMask, CpuLimit, CpuLimitStats, LatencyHistogram, LimitError, Preempt, Qos, SchedPolicy, Watchdog, WatchdogLog,
-    WatchdogReport, QOS_CLASSES,
+    inherit, qos_change_allowed, BalanceParams, Balancer, Candidate, ClassMask, CoreLoad, CpuLimit, CpuLimitStats, LatencyHistogram, LimitError,
+    Preempt, Qos, Refusal, SchedPolicy, Watchdog, WatchdogLog, WatchdogReport, QOS_CLASSES,
 };
 use super::stack::{ReserveError, StackPool};
 
-/// 引导线程所在槽位。
+/// 引导线程所在槽位（引导处理器的空闲落脚点）。
 pub const BOOT_SLOT: usize = 0;
+/// 其他处理器运行空闲执行流时的「当前槽位」取值（与每核数据的约定一致）。
+/// Current-slot value of a secondary processor running its idle flow.
+pub const IDLE: usize = crate::smp::percpu::IDLE_SLOT;
+
+/// 槽位是否为工作任务（不是引导线程、也不是空闲执行流）。
+const fn is_worker(slot: usize) -> bool {
+    slot != BOOT_SLOT && slot != IDLE
+}
+
+/// 执行本代码的处理器下标（平台保证小于 `MAX_CPUS`；越界属平台缺陷，按引导处理器处理而不越界访问）。
+fn this_cpu() -> usize {
+    let c = crate::arch::cpu_index();
+    if c < MAX_CPUS {
+        c
+    } else {
+        0
+    }
+}
+
+/// 处理器 `c` 没有工作可做时的落脚点：引导处理器回到引导线程，其他处理器回到各自的空闲执行流。
+const fn idle_slot(c: usize) -> usize {
+    if c == 0 {
+        BOOT_SLOT
+    } else {
+        IDLE
+    }
+}
 
 /// 一次切换的描述（交给观察者）。
 #[derive(Debug, Clone, Copy)]
@@ -65,6 +102,10 @@ impl Cause {
     pub const EXIT: &'static str = "exit";
     /// 所在 CPU 组用完了上限，被限速换下。
     pub const THROTTLE: &'static str = "throttle";
+    /// 空闲处理器从其他处理器的队列窃取任务。
+    pub const STEAL: &'static str = "steal";
+    /// 正在运行的任务被移出本处理器（亲和集合不再包含本处理器）。
+    pub const MIGRATE: &'static str = "migrate";
 
     /// 该原因是否表示任务**主动**放弃处理器（看门狗据此清零连续占用）。
     pub fn voluntary(cause: &str) -> bool {
@@ -105,6 +146,38 @@ pub enum SpawnError {
     NoFreeSlot,
     /// 指定的 CPU 组无效。
     BadGroup,
+    /// 亲和集合里没有在线处理器。
+    BadAffinity,
+}
+
+/// 修改亲和集合失败的原因。失败时调度器状态不变。
+/// Why an affinity change was refused; the scheduler is left unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AffinityError {
+    /// 集合里没有在线处理器（含空集）。
+    NoOnlineCpu,
+    /// 任务不存在、已退出或是引导线程。
+    NoTask,
+}
+
+/// 一个处理器的调度统计（负载均衡验收用）。
+/// Per-processor scheduling statistics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CpuStats {
+    /// 运行工作任务的本地 tick 数。
+    pub busy_ticks: u64,
+    /// 空闲（引导线程或空闲执行流）的本地 tick 数。
+    pub idle_ticks: u64,
+    /// 当前「空闲但有本可运行的任务在等」的连续 tick 数。
+    pub idle_waiting: u32,
+    /// 上一项的历史最大值（硬指标：某核队列非空时其他核空闲的时长上界）。
+    pub max_idle_waiting: u32,
+    /// 空闲窃取成功的次数。
+    pub steals: u32,
+    /// 周期均衡拉来任务的次数。
+    pub pulls: u32,
+    /// 周期均衡因缓存仍热而拒绝的次数。
+    pub pull_hot: u32,
 }
 
 /// 修改 QoS 档位失败的原因。
@@ -164,15 +237,31 @@ pub const WATCHDOG_LOG: usize = crate::config::ACTIVE.sched.watchdog_log;
 pub struct Scheduler<P: SchedPolicy, const N: usize> {
     tasks: [Option<Task>; N],
     stacks: StackPool<N>,
-    policy: P,
-    current: usize,
+    /// 每个处理器的运行队列各持一份策略实例。
+    policy: [P; MAX_CPUS],
+    /// 每个处理器的当前槽位（引导处理器起初为引导线程，其他处理器为空闲执行流）。
+    current: [usize; MAX_CPUS],
+    /// 其他处理器空闲执行流被切走时保存上下文的位置。
+    idle_ctx: [TaskContext; MAX_CPUS],
+    /// 每个处理器上一次切换换下的槽位（切换完成后由 [`Scheduler::finish_switch`] 清除其 `on_cpu`）。
+    switching_from: [Option<usize>; MAX_CPUS],
+    /// 参与调度的处理器（引导处理器总在其中；其他处理器进入空闲执行流时加入）。
+    online: CpuSet,
+    /// 放置 / 窃取 / 周期均衡的决定者。
+    balancer: Balancer,
+    /// 待发的重新调度请求（门面层放锁后对这些处理器发核间中断）。
+    kicks: CpuSet,
+    /// 每个处理器的调度统计。
+    cpu_stats: [CpuStats; MAX_CPUS],
+    /// 每个处理器的本地 tick 计数（周期均衡的检查点）。
+    local_ticks: [u64; MAX_CPUS],
     switches: u64,
     observer: Option<SwitchObserver>,
     /// 调度器看到的当前时刻（tick；由 [`Scheduler::tick`] 推进）。
     now: u64,
-    /// 当前时间片已用的 tick 数与长度。
-    slice_used: u32,
-    slice_quantum: u32,
+    /// 每个处理器当前时间片已用的 tick 数与长度。
+    slice_used: [u32; MAX_CPUS],
+    slice_quantum: [u32; MAX_CPUS],
     /// 每档的唤醒延迟直方图。
     latency: [LatencyHistogram; QOS_CLASSES],
     /// 是否沿等待关系传播档位（默认开启；关闭只用于对照测量）。
@@ -188,23 +277,32 @@ pub struct Scheduler<P: SchedPolicy, const N: usize> {
     watchdog_log: WatchdogLog<WATCHDOG_LOG>,
 }
 
-impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
-    /// 构造调度器；槽位 0 预置为正在运行的引导线程。
+impl<P: SchedPolicy + Copy, const N: usize> Scheduler<P, N> {
+    /// 构造调度器；槽位 0 预置为正在引导处理器上运行的引导线程，其他处理器起初在空闲执行流上。
     pub const fn new(policy: P) -> Self {
         let mut tasks = [const { None }; N];
         let mut boot = Task::new(TaskId(0), "boot");
         boot.state = TaskState::Running;
         tasks[BOOT_SLOT] = Some(boot);
+        let mut current = [IDLE; MAX_CPUS];
+        current[0] = BOOT_SLOT;
         Scheduler {
             tasks,
             stacks: StackPool::new(),
-            policy,
-            current: BOOT_SLOT,
+            policy: [policy; MAX_CPUS],
+            current,
+            idle_ctx: [const { crate::arch::EMPTY_CONTEXT }; MAX_CPUS],
+            switching_from: [None; MAX_CPUS],
+            online: CpuSet::first(1),
+            balancer: Balancer::new(BalanceParams::DEFAULT),
+            kicks: CpuSet::EMPTY,
+            cpu_stats: [CpuStats { busy_ticks: 0, idle_ticks: 0, idle_waiting: 0, max_idle_waiting: 0, steals: 0, pulls: 0, pull_hot: 0 }; MAX_CPUS],
+            local_ticks: [0; MAX_CPUS],
             switches: 0,
             observer: None,
             now: 0,
-            slice_used: 0,
-            slice_quantum: 1,
+            slice_used: [0; MAX_CPUS],
+            slice_quantum: [1; MAX_CPUS],
             latency: [const { LatencyHistogram::new() }; QOS_CLASSES],
             inherit: true,
             wait_seq: 0,
@@ -222,12 +320,27 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
 
     /// 当前策略名。
     pub fn policy_name(&self) -> &'static str {
-        self.policy.name()
+        self.policy[0].name()
     }
 
     /// 默认档位的时间片（tick 数）。
     pub fn default_quantum(&self) -> u32 {
-        self.policy.default_quantum()
+        self.policy[0].default_quantum()
+    }
+
+    /// 本处理器的当前槽位。
+    fn cur(&self) -> usize {
+        self.current[this_cpu()]
+    }
+
+    /// 槽位上的任务（越界或空槽位为 `None`；空闲执行流的取值越界，因此也是 `None`）。
+    fn task(&self, slot: usize) -> Option<&Task> {
+        self.tasks.get(slot).and_then(|t| t.as_ref())
+    }
+
+    /// 槽位上的任务（可变）。
+    fn task_mut(&mut self, slot: usize) -> Option<&mut Task> {
+        self.tasks.get_mut(slot).and_then(|t| t.as_mut())
     }
 
     /// 堆就绪后为其余槽位分配内核栈；返回可用槽位总数（含引导线程槽位）。
@@ -267,32 +380,52 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         trampoline: extern "C" fn() -> !,
         group: Option<CpuGroupId>,
     ) -> Result<usize, SpawnError> {
+        self.spawn_on(id, name, entry, trampoline, group, None)
+    }
+
+    /// 同 [`Scheduler::spawn_in`]，并可指定亲和集合（`None` = 继承创建者；引导线程创建的任务只在引导处理器上运行）。
+    /// 新任务按负载放进某个允许的处理器的运行队列；组无效、集合里没有在线处理器、没有空槽位时拒绝，状态不变。
+    /// Spawns with an explicit affinity set (or the creator's when `None`).
+    pub fn spawn_on(
+        &mut self,
+        id: TaskId,
+        name: &'static str,
+        entry: fn(),
+        trampoline: extern "C" fn() -> !,
+        group: Option<CpuGroupId>,
+        affinity: Option<CpuSet>,
+    ) -> Result<usize, SpawnError> {
         let explicit = match group {
             Some(g) => Some(self.group_slot(g).ok_or(SpawnError::BadGroup)?),
             None => None,
         };
-        // 空槽位或「已退出且不是当前任务」的槽位都可复用：
-        // 已退出任务一旦被切走，就再也不会在它的栈上执行，栈与 TCB 可以安全覆盖。
-        let current = self.current;
+        let current = self.cur();
+        let creator = if is_worker(current) { self.task(current) } else { None };
+        let affinity = affinity.unwrap_or(creator.map(|c| c.affinity).unwrap_or(CpuSet::first(1)));
+        let base = creator.map(|c| c.base_qos).unwrap_or(Qos::UserInitiated);
+        let loads = self.loads();
+        let home = self.balancer.place(affinity, None, base, None, self.now, &loads).map_err(|_| SpawnError::BadAffinity)?;
+        // 空槽位或「已退出且已被完全换下」的槽位都可复用：
+        // 已退出任务一旦被切走（`on_cpu` 清除），就再也不会在它的栈上执行，栈与 TCB 可以安全覆盖。
         let slot = (1..N)
             .find(|&i| {
                 self.stacks.has_stack(i)
                     && match self.tasks[i].as_ref() {
                         None => true,
-                        Some(t) => t.state == TaskState::Exited && i != current,
+                        Some(t) => t.state == TaskState::Exited && t.on_cpu.is_none() && i != current,
                     }
             })
             .ok_or(SpawnError::NoFreeSlot)?;
         let mut task = Task::new(id, name);
         task.entry = Some(entry);
-        if current != BOOT_SLOT {
-            if let Some(creator) = self.tasks[current].as_ref() {
-                task.sched = super::policy::SchedEntity::new(creator.base_qos);
-                task.base_qos = creator.base_qos;
-                task.qos_ceiling = creator.qos_ceiling;
-                task.cpu_group = creator.cpu_group;
-            }
+        if let Some(creator) = creator {
+            task.sched = super::policy::SchedEntity::new(creator.base_qos);
+            task.base_qos = creator.base_qos;
+            task.qos_ceiling = creator.qos_ceiling;
+            task.cpu_group = creator.cpu_group;
         }
+        task.affinity = affinity;
+        task.home = home;
         if explicit.is_some() {
             task.cpu_group = explicit;
         }
@@ -304,25 +437,27 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         // SAFETY：该槽位有栈且为空，没有任何任务在这块栈上运行。
         task.context = unsafe { self.stacks.prepare_initial_frame(slot, trampoline) };
         self.tasks[slot] = Some(task);
+        if home != this_cpu() && loads[home].idle() {
+            self.kicks.insert(home);
+        }
         Ok(slot)
     }
 
     /// 当前运行任务的入口函数（trampoline 使用）。
     pub fn current_entry(&self) -> Option<fn()> {
-        self.tasks[self.current].as_ref().and_then(|t| t.entry)
+        self.task(self.cur()).and_then(|t| t.entry)
     }
 
     /// 当前运行任务的 id 与名字。
     pub fn current(&self) -> (TaskId, &'static str) {
-        self.tasks[self.current]
-            .as_ref()
+        self.task(self.cur())
             .map(|t| (t.id, t.name))
             .unwrap_or((TaskId(u64::MAX), "?"))
     }
 
     /// 当前是否在引导线程上运行。
     pub fn on_boot(&self) -> bool {
-        self.current == BOOT_SLOT
+        !is_worker(self.cur())
     }
 
     /// 累计切换次数。
@@ -332,34 +467,34 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
 
     /// 设置当前任务的地址空间（`None` = 内核空间）。之后每次切回该任务都会切到这个空间。
     pub fn set_current_space(&mut self, space: Option<crate::arch::SpaceRoot>) {
-        if let Some(t) = self.tasks[self.current].as_mut() {
+        if let Some(t) = self.task_mut(self.cur()) {
             t.space = space;
         }
     }
 
     /// 设置当前任务可发起的系统调用集合。
     pub fn set_current_syscalls(&mut self, set: crate::syscall::SyscallSet) {
-        if let Some(t) = self.tasks[self.current].as_mut() {
+        if let Some(t) = self.task_mut(self.cur()) {
             t.syscalls = set;
         }
     }
 
     /// 当前任务的地址空间（`None` = 内核空间）。
     pub fn current_space(&self) -> Option<crate::arch::SpaceRoot> {
-        self.tasks[self.current].as_ref().and_then(|t| t.space)
+        self.task(self.cur()).and_then(|t| t.space)
     }
 
     /// 当前任务可发起的系统调用集合。
     pub fn current_syscalls(&self) -> crate::syscall::SyscallSet {
-        self.tasks[self.current].as_ref().map(|t| t.syscalls).unwrap_or(crate::syscall::SyscallSet::EMPTY)
+        self.task(self.cur()).map(|t| t.syscalls).unwrap_or(crate::syscall::SyscallSet::EMPTY)
     }
 
     /// 当前任务的自身 QoS 档位（不含借来的档位；引导线程为 `None`）。
     pub fn current_qos(&self) -> Option<Qos> {
-        if self.current == BOOT_SLOT {
+        if !is_worker(self.cur()) {
             return None;
         }
-        self.tasks[self.current].as_ref().map(|t| t.base_qos)
+        self.task(self.cur()).map(|t| t.base_qos)
     }
 
     /// 任务 `id` 的有效档位（含借来的档位；不存在、已退出或是引导线程时 `None`）。
@@ -370,10 +505,10 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
     /// 修改当前任务的 QoS 档位：降低或不变总是允许；提升须在上限之内（判定见 `qos_change_allowed`）。
     /// 成功后立即生效于下一次调度决策（降档后若有更高档任务在等，下一个 tick 就会被抢占）。
     pub fn set_current_qos(&mut self, q: Qos) -> Result<(), QosError> {
-        if self.current == BOOT_SLOT {
+        if !is_worker(self.cur()) {
             return Err(QosError::NotAWorker);
         }
-        let t = self.tasks[self.current].as_mut().ok_or(QosError::NotAWorker)?;
+        let t = self.task_mut(self.cur()).ok_or(QosError::NotAWorker)?;
         if !qos_change_allowed(t.base_qos, q, t.qos_ceiling) {
             return Err(QosError::RaiseDenied);
         }
@@ -385,7 +520,7 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
 
     /// 授予当前任务 QoS 上限（内核内的创建方在任务进入用户态之前调用；`None` = 收回）。
     pub fn set_current_qos_ceiling(&mut self, ceiling: Option<Qos>) {
-        if let Some(t) = self.tasks[self.current].as_mut() {
+        if let Some(t) = self.task_mut(self.cur()) {
             t.qos_ceiling = ceiling;
         }
     }
@@ -393,9 +528,9 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
     /// 把当前任务标记为已退出（槽位在它被切走之后才可被 `spawn` 复用）。
     /// 正在等它的任务（等它退出、或等它持有的锁）全部被唤醒，借给它的档位随之归还。
     pub fn mark_current_exited(&mut self) {
-        let cur = self.current;
+        let cur = self.cur();
         let mut left = None;
-        if let Some(t) = self.tasks[cur].as_mut() {
+        if let Some(t) = self.task_mut(cur) {
             t.state = TaskState::Exited;
             t.waits_for = None;
             left = t.cpu_group.take();
@@ -454,8 +589,8 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
     /// `key` 标识等待的对象（同一持有者可能被不同对象上的任务等待）。成功后调用者必须立即让出
     /// （`prepare_switch(Cause::BLOCK)`）；失败时不改动任何状态。
     pub fn block_on(&mut self, owner: TaskId, key: u64) -> Result<(), BlockError> {
-        let cur = self.current;
-        if cur == BOOT_SLOT {
+        let cur = self.cur();
+        if !is_worker(cur) {
             return Err(BlockError::NotAWorker);
         }
         let owner_slot = self.live_slot(owner).ok_or(BlockError::NoOwner)?;
@@ -479,7 +614,7 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
     /// 当前任务交出 `key` 标识的对象：在等它的任务中选出交接对象（有效档位最高、同档先来先得）并唤醒，
     /// 其余等待者改为等交接对象（档位随之借给新持有者）；当前任务借来的档位归还。返回交接对象。
     pub fn hand_off(&mut self, key: u64) -> Option<TaskId> {
-        let cur = self.current;
+        let cur = self.cur();
         let waiting_on = |t: &Task| t.state == TaskState::Blocked && t.waits_for == Some(cur) && t.wait_key == key;
         let successor = inherit::pick_successor(
             self.tasks.iter().enumerate().filter_map(|(i, t)| t.as_ref().filter(|t| waiting_on(t)).map(|t| (i, t.sched.qos, t.wait_seq))),
@@ -501,9 +636,9 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
     /// 是否有可运行任务的有效档位高于当前任务（引导线程上：是否有任何可运行任务）。
     /// 交出锁、归还借来的档位之后据此决定是否立即让出。
     pub fn outranked(&self) -> bool {
-        let Some(top) = self.waiting().highest() else { return false };
-        match self.tasks[self.current].as_ref() {
-            Some(t) if self.current != BOOT_SLOT => top.above(t.sched.qos),
+        let Some(top) = self.waiting(this_cpu()).highest() else { return false };
+        match self.task(self.cur()) {
+            Some(t) if is_worker(self.cur()) => top.above(t.sched.qos),
             _ => true,
         }
     }
@@ -511,10 +646,10 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
     /// 让当前工作任务睡眠到 `wake_at`（`None` = 只能被 [`Scheduler::wake`] 唤醒）。
     /// 调用者随后必须立即让出（`prepare_switch`）。引导线程不能睡眠（返回 `false`，状态不变）。
     pub fn block_current(&mut self, wake_at: Option<u64>) -> bool {
-        if self.current == BOOT_SLOT {
+        if !is_worker(self.cur()) {
             return false;
         }
-        match self.tasks[self.current].as_mut() {
+        match self.task_mut(self.cur()) {
             Some(t) => {
                 t.state = TaskState::Blocked;
                 t.wake_at = wake_at;
@@ -524,10 +659,12 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         }
     }
 
-    /// 槽位 `i` 的睡眠任务变为可运行（记下唤醒时刻，通知策略）。返回是否应立即抢占当前任务。
+    /// 槽位 `i` 的睡眠任务变为可运行（记下唤醒时刻，通知策略，按负载选运行队列）。
+    /// 返回是否应立即抢占**本处理器**的当前任务；放到别的处理器且应抢占那里时记入待发的重新调度请求。
     fn make_runnable(&mut self, i: usize) -> bool {
         let now = self.now;
-        let Some(t) = self.tasks[i].as_mut() else { return false };
+        // 直接借字段（而不是经 task_mut）：下面同时要借本处理器的策略实例
+        let Some(t) = self.tasks.get_mut(i).and_then(|t| t.as_mut()) else { return false };
         if t.state != TaskState::Blocked {
             return false;
         }
@@ -536,17 +673,41 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         t.woken_at = Some(now);
         // 被任何途径唤醒都解除等待关系（例如所属进程开始终止）；醒来者自己重新检查等待条件。
         let had_edge = t.waits_for.take().is_some();
-        self.policy.woken(&mut t.sched);
+        let home = t.home.min(MAX_CPUS - 1);
+        self.policy[home].woken(&mut t.sched);
         if had_edge {
             self.resolve_inheritance();
         }
+        self.replace(i);
         // 被限速组的成员醒来也不抢占：令牌回正之前它本来就不会被选中。
-        if !self.tasks[i].as_ref().is_some_and(|t| self.eligible(t)) {
-            return false;
+        let Some(t) = self.task(i).filter(|t| self.eligible(t)) else { return false };
+        let (woken, home) = (t.sched.qos, t.home);
+        let target = self.current[home];
+        let running = if is_worker(target) { self.task(target).map(|t| t.sched.qos) } else { None };
+        let preempts = self.policy[home].wake_preempts(woken, running);
+        if home == this_cpu() {
+            return preempts;
         }
-        let woken = self.tasks[i].as_ref().map(|t| t.sched.qos).unwrap_or(Qos::Background);
-        let current = if self.current == BOOT_SLOT { None } else { self.tasks[self.current].as_ref().map(|t| t.sched.qos) };
-        self.policy.wake_preempts(woken, current)
+        if preempts {
+            self.kicks.insert(home);
+        }
+        false
+    }
+
+    /// 为可运行且未被任何处理器占用的任务 `i` 重新选运行队列（亲和集合内按负载与迁移代价）。
+    fn replace(&mut self, i: usize) {
+        let Some(t) = self.task(i) else { return };
+        if t.on_cpu.is_some() {
+            // 还在被换下：等切换完成后由目标处理器的下一次检查（或窃取）接手，仍按原队列记
+            return;
+        }
+        let (affinity, prev, qos, last_ran) = (t.affinity, t.home, t.sched.qos, t.last_ran);
+        let loads = self.loads();
+        if let Ok(home) = self.balancer.place(affinity, Some(prev), qos, last_ran, self.now, &loads) {
+            if let Some(t) = self.task_mut(i) {
+                t.home = home;
+            }
+        }
     }
 
     /// 显式唤醒 `id`（例如所属进程开始终止时，让睡眠中的线程尽快观察到）。
@@ -563,17 +724,18 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         self.tasks[1..].iter().flatten().filter(|t| t.state != TaskState::Exited).count()
     }
 
-    /// 是否有可运行的工作任务（不含当前任务）。
+    /// 本处理器是否有可运行的工作任务可接（本队列中不含当前任务的，或可以从别的队列窃取的）。
     pub fn has_runnable_worker(&self) -> bool {
-        self.waiting() != ClassMask::EMPTY
+        let c = this_cpu();
+        self.waiting(c) != ClassMask::EMPTY || (!is_worker(self.current[c]) && self.stealable(c))
     }
 
-    /// 除当前任务之外、还有可运行工作任务的档位集合。
-    fn waiting(&self) -> ClassMask {
+    /// 处理器 `c` 的队列里、除它的当前任务之外还有可运行任务的档位集合。
+    fn waiting(&self, c: usize) -> ClassMask {
         let mut m = ClassMask::EMPTY;
         for (i, t) in self.tasks.iter().enumerate().skip(1) {
             if let Some(t) = t {
-                if i != self.current && t.state == TaskState::Runnable && self.eligible(t) {
+                if i != self.current[c] && t.home == c && t.on_cpu.is_none() && t.state == TaskState::Runnable && self.eligible(t) {
                     m.insert(t.sched.qos);
                 }
             }
@@ -581,23 +743,116 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         m
     }
 
-    /// 时钟 tick（在中断上下文、关中断状态下调用）：推进时刻 → 给刚运行完这个 tick 的任务记账 →
-    /// 唤醒到期的睡眠任务 → 判断是否抢占。
+    /// 是否有别的队列里的任务可以被处理器 `c` 窃取（可运行、未被占用、未被限速、亲和集合含 `c`）。
+    fn stealable(&self, c: usize) -> bool {
+        self.online.contains(c) && self.candidates().any(|k| k.home != c && k.affinity.contains(c))
+    }
+
+    /// 可以被搬动的任务：可运行、未被任何处理器占用、未被限速。
+    fn candidates(&self) -> impl Iterator<Item = Candidate> + Clone + '_ {
+        self.tasks.iter().enumerate().skip(1).filter_map(move |(i, t)| match t {
+            Some(t) if t.state == TaskState::Runnable && t.on_cpu.is_none() && self.eligible(t) => {
+                Some(Candidate { slot: i, home: t.home, affinity: t.affinity, qos: t.sched.qos, last_ran: t.last_ran })
+            }
+            _ => None,
+        })
+    }
+
+    /// 各处理器的负载快照。
+    fn loads(&self) -> [CoreLoad; MAX_CPUS] {
+        let mut l = [CoreLoad::OFFLINE; MAX_CPUS];
+        for (c, load) in l.iter_mut().enumerate() {
+            if self.online.contains(c) {
+                let cur = self.current[c];
+                load.online = true;
+                load.running = if is_worker(cur) { self.task(cur).filter(|t| t.state == TaskState::Running).map(|t| t.sched.qos) } else { None };
+            }
+        }
+        for k in self.candidates() {
+            if let Some(load) = l.get_mut(k.home) {
+                load.queued += 1;
+            }
+        }
+        l
+    }
+
+    /// 处理器 `c` 参与调度（进入空闲执行流之前调用；重复调用无副作用）。
+    /// Mark processor `c` as taking part in scheduling.
+    pub fn cpu_online(&mut self, c: usize) {
+        if c < MAX_CPUS {
+            self.online.insert(c);
+        }
+    }
+
+    /// 参与调度的处理器集合。
+    pub fn online(&self) -> CpuSet {
+        self.online
+    }
+
+    /// 取走待发的重新调度请求（门面层放锁后对这些处理器发核间中断）。
+    pub fn take_kicks(&mut self) -> CpuSet {
+        core::mem::replace(&mut self.kicks, CpuSet::EMPTY)
+    }
+
+    /// 修改任务 `id` 的亲和集合。集合里没有在线处理器、任务无效时拒绝，状态不变。
+    /// 任务所在队列不在新集合内时：可运行的立即改放；正在别处运行的由那个处理器在下一个检查点换下
+    /// （记入重新调度请求），之后由新队列接手。返回任务现在是否仍可留在本处理器上运行。
+    /// Change the affinity set of task `id`.
+    pub fn set_affinity(&mut self, id: TaskId, set: CpuSet) -> Result<bool, AffinityError> {
+        if (0..MAX_CPUS).all(|c| !(set.contains(c) && self.online.contains(c))) {
+            return Err(AffinityError::NoOnlineCpu);
+        }
+        let i = self.live_slot(id).filter(|&i| i != BOOT_SLOT).ok_or(AffinityError::NoTask)?;
+        let me = this_cpu();
+        let (home, on_cpu) = {
+            let t = self.task_mut(i).ok_or(AffinityError::NoTask)?;
+            t.affinity = set;
+            (t.home, t.on_cpu)
+        };
+        if set.contains(home) && self.online.contains(home) {
+            return Ok(home == me || on_cpu != Some(me));
+        }
+        let loads = self.loads();
+        let (qos, last_ran) = self.task(i).map(|t| (t.sched.qos, t.last_ran)).unwrap_or((Qos::Background, None));
+        let new_home = self.balancer.place(set, None, qos, last_ran, self.now, &loads).map_err(|_| AffinityError::NoOnlineCpu)?;
+        if let Some(t) = self.task_mut(i) {
+            t.home = new_home;
+        }
+        if let Some(c) = on_cpu.filter(|&c| c != me) {
+            self.kicks.insert(c);
+        }
+        if new_home != me && loads[new_home].idle() {
+            self.kicks.insert(new_home);
+        }
+        Ok(on_cpu != Some(me))
+    }
+
+    /// 任务 `id` 曾经运行过的处理器集合（不存在时 `None`）。
+    pub fn ran_on(&self, id: TaskId) -> Option<CpuSet> {
+        self.tasks.iter().flatten().find(|t| t.id == id).map(|t| t.ran_on)
+    }
+
+    /// 处理器 `c` 的调度统计。
+    pub fn cpu_stats(&self, c: usize) -> CpuStats {
+        self.cpu_stats.get(c).copied().unwrap_or_default()
+    }
+
+    /// 清零全部处理器的调度统计（每个测量场景开始前调用）。
+    pub fn reset_cpu_stats(&mut self) {
+        self.cpu_stats = [CpuStats::default(); MAX_CPUS];
+    }
+
+    /// 全局时钟 tick（在引导处理器的中断上下文、关中断状态下调用）：推进时刻 → 给刚运行完这个 tick 的任务记账 →
+    /// 唤醒到期的睡眠任务（可能放到别的处理器并记入重新调度请求）→ 判断本处理器是否抢占。
     ///
     /// 返回需要切换时的原因（[`Cause`] 中的名字）；`preemption = false` 时只记账与唤醒、从不要求切换
     /// （被唤醒的任务等当前任务主动让出）。
     pub fn tick(&mut self, now: u64, preemption: bool) -> Option<&'static str> {
         self.now = now;
-        let waiting = self.waiting();
-        let cur = self.current;
-        let running = match self.tasks[cur].as_mut() {
-            Some(t) if cur != BOOT_SLOT && t.state == TaskState::Running => Some(&mut t.sched),
-            _ => None,
-        };
-        self.policy.on_tick(running, waiting);
-        self.slice_used = self.slice_used.saturating_add(1);
+        let c = this_cpu();
+        let cur = self.current[c];
+        self.account(c);
         self.charge_groups(cur);
-        self.charge_watchdog(cur, now);
 
         let mut cause = None;
         for i in 1..N {
@@ -606,16 +861,7 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
                 cause = Some(Cause::WAKE);
             }
         }
-        if cause.is_none() && self.tasks[cur].as_ref().is_some_and(|t| cur != BOOT_SLOT && t.state == TaskState::Running && !self.eligible(t)) {
-            cause = Some(Cause::THROTTLE);
-        }
-        if cause.is_none() {
-            let cur_entity = match self.tasks[cur].as_ref() {
-                Some(t) if cur != BOOT_SLOT && t.state == TaskState::Running => Some(&t.sched),
-                _ => None,
-            };
-            cause = self.policy.should_preempt(cur_entity, self.slice_used, self.slice_quantum, self.waiting()).map(Cause::of);
-        }
+        let cause = cause.or_else(|| self.decide(c));
         if preemption {
             cause
         } else {
@@ -623,28 +869,133 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         }
     }
 
+    /// 其他处理器的本地时钟 tick（在该处理器的中断上下文、关中断状态下调用）：给本处理器正在运行的任务
+    /// 记账（CPU 组只扣费，补充由全局 tick 做）、到检查点时做周期均衡，然后判断是否切换。
+    /// Local tick of a secondary processor.
+    pub fn local_tick(&mut self, preemption: bool) -> Option<&'static str> {
+        let c = this_cpu();
+        let cur = self.current[c];
+        self.account(c);
+        let group = match self.task(cur) {
+            Some(t) if is_worker(cur) && t.state == TaskState::Running => t.cpu_group,
+            _ => None,
+        };
+        if let Some(grp) = group.and_then(|g| self.groups[g].as_mut()) {
+            grp.limit.charge();
+        }
+        let cause = self.decide(c);
+        if preemption {
+            cause
+        } else {
+            None
+        }
+    }
+
+    /// 本处理器现在是否应切换（收到重新调度请求时调用；不记账）。
+    /// Whether this processor should switch now (on a reschedule request).
+    pub fn resched_check(&self) -> Option<&'static str> {
+        self.decide(this_cpu())
+    }
+
+    /// 处理器 `c` 的每 tick 记账：策略记账、时间片、看门狗、统计、周期均衡。
+    fn account(&mut self, c: usize) {
+        let cur = self.current[c];
+        let waiting = self.waiting(c);
+        let worker = is_worker(cur) && self.task(cur).is_some_and(|t| t.state == TaskState::Running);
+        let running = if worker { self.tasks[cur].as_mut().map(|t| &mut t.sched) } else { None };
+        self.policy[c].on_tick(running, waiting);
+        self.slice_used[c] = self.slice_used[c].saturating_add(1);
+        self.local_ticks[c] += 1;
+        let now = self.now;
+        self.charge_watchdog(cur, now);
+        let waiting_work = !worker && (waiting != ClassMask::EMPTY || self.stealable(c));
+        let st = &mut self.cpu_stats[c];
+        if worker {
+            st.busy_ticks += 1;
+        } else {
+            st.idle_ticks += 1;
+        }
+        if waiting_work {
+            st.idle_waiting += 1;
+            st.max_idle_waiting = st.max_idle_waiting.max(st.idle_waiting);
+        } else {
+            st.idle_waiting = 0;
+        }
+        if worker && self.balancer.due(self.local_ticks[c]) {
+            let loads = self.loads();
+            match self.balancer.pull(c, now, &loads, self.candidates()) {
+                Ok(slot) => {
+                    if let Some(t) = self.task_mut(slot) {
+                        t.home = c;
+                    }
+                    self.cpu_stats[c].pulls += 1;
+                }
+                Err(Refusal::AllHot) => self.cpu_stats[c].pull_hot += 1,
+                Err(_) => {}
+            }
+        }
+    }
+
+    /// 处理器 `c` 现在是否应切换及原因：当前任务已不属于本处理器 → 迁移；被限速 → 限速；
+    /// 否则询问本处理器的策略；空闲且本队列无事可做但可以窃取 → 窃取。
+    fn decide(&self, c: usize) -> Option<&'static str> {
+        let cur = self.current[c];
+        let cur_task = self.task(cur).filter(|t| is_worker(cur) && t.state == TaskState::Running);
+        if let Some(t) = cur_task {
+            if t.home != c {
+                return Some(Cause::MIGRATE);
+            }
+            if !self.eligible(t) {
+                return Some(Cause::THROTTLE);
+            }
+        }
+        let p = self.policy[c].should_preempt(cur_task.map(|t| &t.sched), self.slice_used[c], self.slice_quantum[c], self.waiting(c));
+        if let Some(p) = p {
+            return Some(Cause::of(p));
+        }
+        if cur_task.is_none() && self.stealable(c) {
+            return Some(Cause::STEAL);
+        }
+        None
+    }
+
     /// 准备一次切换：更新状态、选出下一个任务、记账、通知观察者。
     ///
     /// `cause == Cause::YIELD`（主动让出）时先在**其他**任务中选：选出的不低于自己的档位（或是最低份额补给）
     /// 才切换，否则继续运行自己——让出不应把处理器交给更低档的任务，也不应因为自己用量少就选回自己。
-    /// 其他原因让策略在全部可运行任务（含自己）中选。没有可运行的工作任务时选择引导线程。
+    /// 其他原因让策略在全部可运行任务（含自己）中选。只在本处理器的队列中选；队列里什么都没有时先尝试
+    /// 从别的队列窃取一个，仍没有则回到本处理器的空闲落脚点。
     ///
-    /// 返回 `Some(plan)` 表示调用者必须**立即**执行 `switch_context(plan.old, plan.new)`；
-    /// 返回 `None` 表示无需切换（下一个就是自己）。
+    /// 返回 `Some(plan)` 表示调用者必须**立即**执行 `switch_context(plan.old, plan.new)`，
+    /// 切换回来（或新任务开始执行）后调用 [`Scheduler::finish_switch`]；返回 `None` 表示无需切换（下一个就是自己）。
     pub fn prepare_switch(&mut self, cause: &'static str) -> Option<SwitchPlan> {
-        let prev = self.current;
-        let prev_runnable = match self.tasks[prev].as_mut() {
+        let c = this_cpu();
+        let prev = self.current[c];
+        let now = self.now;
+        let prev_runnable = match self.task_mut(prev) {
             Some(t) if t.state == TaskState::Running => {
                 t.state = TaskState::Runnable;
-                prev != BOOT_SLOT
+                t.last_ran = Some(now);
+                is_worker(prev)
             }
             _ => false,
         };
         let yielding = cause == Cause::YIELD;
         if Cause::voluntary(cause) {
             let wd = self.watchdog;
-            if let Some(t) = self.tasks[prev].as_mut() {
+            if let Some(t) = self.task_mut(prev) {
                 wd.yielded(&mut t.streak);
+            }
+        }
+        // 本队列（含刚换下、仍属于本处理器的自己）空了：空闲之前先窃取
+        let own_empty = self.waiting(c) == ClassMask::EMPTY && !(prev_runnable && self.task(prev).is_some_and(|t| t.home == c && self.eligible(t)));
+        if own_empty && self.online.contains(c) {
+            let loads = self.loads();
+            if let Ok(slot) = self.balancer.steal(c, now, &loads, self.candidates()) {
+                if let Some(t) = self.task_mut(slot) {
+                    t.home = c;
+                }
+                self.cpu_stats[c].steals += 1;
             }
         }
 
@@ -653,46 +1004,64 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
             let groups = &self.groups;
             let runnable = |skip_prev: bool| {
                 tasks.iter().enumerate().skip(1).filter_map(move |(i, t)| match t {
-                    Some(t) if t.state == TaskState::Runnable && !(skip_prev && i == prev) && eligible_in(groups, t) => Some((i, &t.sched)),
+                    Some(t)
+                        if t.state == TaskState::Runnable
+                            && t.home == c
+                            && (t.on_cpu.is_none() || i == prev)
+                            && !(skip_prev && i == prev)
+                            && eligible_in(groups, t) =>
+                    {
+                        Some((i, &t.sched))
+                    }
                     _ => None,
                 })
             };
+            let policy = &self.policy[c];
             let mut it = runnable(yielding);
-            let mut c = self.policy.choose(&mut it);
+            let mut ch = policy.choose(&mut it);
             if yielding && prev_runnable {
                 let prev_qos = tasks[prev].as_ref().map(|t| t.sched.qos);
                 let worse = |slot: usize| match (tasks[slot].as_ref(), prev_qos) {
                     (Some(t), Some(pq)) => pq.above(t.sched.qos),
                     _ => false,
                 };
-                if c.is_none_or(|ch| !ch.rescued && worse(ch.slot)) {
+                if ch.is_none_or(|x| !x.rescued && worse(x.slot)) {
                     let mut only_prev = runnable(false).filter(|(i, _)| *i == prev);
-                    c = self.policy.choose(&mut only_prev);
+                    ch = policy.choose(&mut only_prev);
                 }
             }
-            c
+            ch
         };
 
         let next = match choice {
-            Some(c) => {
-                self.slice_quantum = c.quantum.max(1);
-                c.slot
+            Some(ch) => {
+                self.slice_quantum[c] = ch.quantum.max(1);
+                ch.slot
             }
             None => {
-                self.slice_quantum = 1;
-                BOOT_SLOT
+                self.slice_quantum[c] = 1;
+                idle_slot(c)
             }
         };
-        self.slice_used = 0;
-        let now = self.now;
-        if let Some(t) = self.tasks[next].as_mut() {
+        self.slice_used[c] = 0;
+        let mut latency = None;
+        if let Some(t) = self.task_mut(next) {
             t.state = TaskState::Running;
-            if next != BOOT_SLOT {
-                self.policy.dispatched(&mut t.sched);
+            if is_worker(next) {
+                t.on_cpu = Some(c);
+                t.ran_on.insert(c);
                 if let Some(w) = t.woken_at.take() {
-                    self.latency[t.sched.qos.index()].record(now.saturating_sub(w));
+                    latency = Some((t.sched.qos, now.saturating_sub(w)));
                 }
             }
+        }
+        if is_worker(next) {
+            if let Some(t) = self.tasks[next].as_mut() {
+                self.policy[c].dispatched(&mut t.sched);
+            }
+        }
+        if let Some((q, d)) = latency {
+            self.latency[q.index()].record(d);
         }
         if next == prev {
             return None;
@@ -701,19 +1070,47 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         self.switches += 1;
         if let Some(observer) = self.observer {
             observer(&SwitchEvent {
-                from: self.tasks[prev].as_ref().map(|t| t.name).unwrap_or("?"),
-                to: self.tasks[next].as_ref().map(|t| t.name).unwrap_or("?"),
+                from: self.task(prev).map(|t| t.name).unwrap_or("idle"),
+                to: self.task(next).map(|t| t.name).unwrap_or("idle"),
                 seq: self.switches,
                 cause,
             });
         }
-        self.current = next;
+        self.current[c] = next;
+        self.switching_from[c] = Some(prev);
 
-        let next_space = self.tasks[next].as_ref().and_then(|t| t.space);
-        let next_stack_top = if next == BOOT_SLOT { None } else { Some(self.stacks.top(next)) };
-        let old: *mut TaskContext = &mut self.tasks[prev].as_mut()?.context;
-        let new: *const TaskContext = &self.tasks[next].as_ref()?.context;
+        let next_space = self.task(next).and_then(|t| t.space);
+        let next_stack_top = if is_worker(next) { Some(self.stacks.top(next)) } else { None };
+        let old: *mut TaskContext = match self.tasks.get_mut(prev).and_then(|t| t.as_mut()) {
+            Some(t) => &mut t.context,
+            None => &mut self.idle_ctx[c],
+        };
+        let new: *const TaskContext = match self.task(next) {
+            Some(t) => &t.context,
+            None => &self.idle_ctx[c],
+        };
         Some(SwitchPlan { old, new, next_stack_top, next_space, next_slot: next })
+    }
+
+    /// 切换完成（在被切入的执行流上、关中断时调用）：本处理器上一次换下的任务已保存好上下文，
+    /// 清除它的 `on_cpu`，此后其他处理器才可以选中它、它的槽位（若已退出）才可以复用。
+    /// Complete a switch: the previous task's context is saved, release it.
+    pub fn finish_switch(&mut self) {
+        let c = this_cpu();
+        if let Some(p) = self.switching_from[c].take() {
+            if let Some(t) = self.task_mut(p).filter(|_| is_worker(p)) {
+                if t.on_cpu == Some(c) {
+                    t.on_cpu = None;
+                }
+            }
+            // 换下的任务若仍可运行但已不属于本处理器（迁移、亲和变更），叫醒它的新处理器接手
+            if let Some(t) = self.task(p).filter(|t| is_worker(p) && t.state == TaskState::Runnable && t.home != c) {
+                let home = t.home;
+                if self.online.contains(home) {
+                    self.kicks.insert(home);
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -807,8 +1204,8 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
 
     /// 每个 tick：给刚运行完这个 tick 的任务所在组扣费，全部组补充令牌并统计被限速的 tick。
     fn charge_groups(&mut self, cur: usize) {
-        let ran_group = match self.tasks[cur].as_ref() {
-            Some(t) if cur != BOOT_SLOT && t.state == TaskState::Running => t.cpu_group,
+        let ran_group = match self.task(cur) {
+            Some(t) if is_worker(cur) && t.state == TaskState::Running => t.cpu_group,
             _ => None,
         };
         let mut wants = [false; N];
@@ -830,11 +1227,11 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
 
     /// 每个 tick：给正在运行的工作任务记一笔连续占用，越过阈值时写一条报告。
     fn charge_watchdog(&mut self, cur: usize, now: u64) {
-        if cur == BOOT_SLOT {
+        if !is_worker(cur) {
             return;
         }
         let wd = self.watchdog;
-        let Some(t) = self.tasks[cur].as_mut().filter(|t| t.state == TaskState::Running) else { return };
+        let Some(t) = self.tasks.get_mut(cur).and_then(|t| t.as_mut()).filter(|t| t.state == TaskState::Running) else { return };
         if let Some(streak) = wd.charge(&mut t.streak) {
             let r = WatchdogReport { task: t.id.0, name: t.name, streak, at: now };
             self.watchdog_log.push(r);

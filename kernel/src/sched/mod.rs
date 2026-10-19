@@ -9,9 +9,19 @@
 //! * 本文件      —— 唯一的全局实例 + 对外 API（spawn / yield / sleep / run …），
 //!   以及唯一调用 `switch_context` 的地方
 //!
-//! 调度器状态由一把登记了级别的锁保护，任何处理器都可访问；目前只有引导处理器运行任务，
-//! 其他处理器运行各自的空闲执行流。协作式让出、时间片抢占、唤醒抢占共用同一切换路径：
-//! 定时器中断在 EOI 之后调用 [`on_timer_interrupt`]，由机制层记账并询问策略，需要时就地切换。
+//! 调度器状态由一把登记了级别的锁保护，任何处理器都可访问。每个处理器有自己的运行队列与当前任务，
+//! 其他处理器在空闲执行流上等任务（[`idle_loop`]），被唤醒、被窃取或被均衡过来的任务在那里接手。
+//! 协作式让出、时间片抢占、唤醒抢占共用同一切换路径：引导处理器的全局定时器中断在 EOI 之后调用
+//! [`on_timer_interrupt`]（推进时刻、唤醒到期任务），其他处理器的本地定时器调用 [`on_local_timer`]，
+//! 由机制层记账并询问本处理器的策略，需要时就地切换。
+//!
+//! 跨核协作：机制层只记下「哪些处理器需要重新调度」，本文件在放锁之后才对它们发核间中断
+//! （持锁发中断会让对方一醒来就撞上同一把锁）。核间中断只置标志：空闲处理器醒来即取任务，
+//! 忙碌处理器在下一个本地 tick 做决定（延迟至多一个 tick），因此中断处理程序里从不切换栈——
+//! 同一中断入口里排在后面的击落请求不会被一次切换延后。
+//!
+//! 切换完成协议：新的执行流一开始执行（切换返回处、新任务入口）就调用机制层的 `finish_switch`，
+//! 换下的任务此后才能被其他处理器选中——在那之前它的上下文可能还没保存完。
 //! 所有对调度器状态的访问都在持锁、关中断的临界区内完成，全部切换在关中断下进行（时钟中断也会修改调度器状态）。
 //!
 //! # 抢占默认开启
@@ -32,7 +42,10 @@ use crate::sync::{IrqSpinLock, IrqU64};
 use crate::arch::{self as cpu, switch_context};
 use crate::task::TaskId;
 
+use kernel_core::smp::CpuSet;
+
 use policy::{kernel_policy, CpuLimitStats, KernelPolicy, LatencyHistogram, Qos, WatchdogLog};
+pub use scheduler::{AffinityError, CpuStats};
 use scheduler::{BlockError, Cause, CpuGroupId, GroupError, QosError, Scheduler, SpawnError, SwitchObserver, WATCHDOG_LOG};
 
 /// 槽位总数上限（含槽位 0 的引导线程）。前 [`stack::STATIC_STACKS`] 个槽位在内核堆初始化前即可用，
@@ -43,7 +56,6 @@ pub const MAX_TASKS: usize = crate::config::ACTIVE.sched.max_tasks;
 ///
 /// 所有访问都经下面的 `with`/`with_mut`（持锁、关中断执行），借用与锁都不跨越栈切换：
 /// 切换路径先在锁内算出切换计划、放锁，再执行栈切换。
-/// 每核运行队列与跨核取任务属于后续的负载均衡；届时只替换本实例的内部结构，接口保持不变。
 static KERNEL_SCHED: IrqSpinLock<Scheduler<KernelPolicy, MAX_TASKS>> =
     IrqSpinLock::ranked(crate::lockorder::SCHED, Scheduler::new(kernel_policy()));
 
@@ -53,8 +65,28 @@ fn with<R>(f: impl FnOnce(&Scheduler<KernelPolicy, MAX_TASKS>) -> R) -> R {
 }
 
 /// 以独占借用访问调度器（持锁、关中断执行）；调用者不得在闭包内触发栈切换。
+/// 闭包期间记下的重新调度请求在放锁之后发出。
 fn with_mut<R>(f: impl FnOnce(&mut Scheduler<KernelPolicy, MAX_TASKS>) -> R) -> R {
-    f(&mut KERNEL_SCHED.lock())
+    let (r, kicks) = {
+        let mut s = KERNEL_SCHED.lock();
+        let r = f(&mut s);
+        (r, s.take_kicks())
+    };
+    send_kicks(kicks);
+    r
+}
+
+/// 对需要重新调度的其他处理器发核间中断（不持任何锁时调用；目标不在线时忽略——它上线后自己会查队列）。
+fn send_kicks(kicks: CpuSet) {
+    let me = cpu::cpu_index();
+    for c in kicks.iter().filter(|&c| c != me) {
+        let _ = crate::smp::reschedule(c);
+    }
+}
+
+/// 切换完成：在新执行流的开头（关中断时）调用，释放刚换下的任务并发出由此产生的重新调度请求。
+fn finish_switch() {
+    with_mut(|s| s.finish_switch());
 }
 
 /// 调度器锁遇到占用的次数（多处理器同时访问调度器时增长）。
@@ -73,10 +105,13 @@ static TIMER_TICKS: IrqU64 = IrqU64::new(0);
 
 /// 新任务的公共入口：执行任务体，返回后标记退出并让出 CPU（永不返回）。
 extern "C" fn task_trampoline() -> ! {
+    // 先完成切换（仍在关中断下）：换下的那个任务从此才可被其他处理器选中
+    finish_switch();
     // 新任务可能是在定时器中断里被首次切入的：那时 CPU 处于关中断状态，
     // 而这条路径不会经过中断返回来恢复标志位 ⇒ 抢占开启时必须在这里显式开中断，
-    // 否则该任务将永远无法再被抢占。
-    if PREEMPTION.load(Ordering::Relaxed) {
+    // 否则该任务将永远无法再被抢占。其他处理器上一律开中断：协作式演练只在引导处理器上进行，
+    // 而其他处理器关着中断运行任务会收不到本地时钟与核间中断（该核从此不再参与调度）。
+    if PREEMPTION.load(Ordering::Relaxed) || cpu::cpu_index() != 0 {
         cpu::irq_enable();
     }
     if let Some(entry) = with(|s| s.current_entry()) {
@@ -103,6 +138,73 @@ pub fn capacity() -> usize {
 /// 新建内核任务（继承当前工作任务的 QoS 档位与上限）。
 pub fn spawn(id: TaskId, name: &'static str, entry: fn()) -> Result<usize, SpawnError> {
     with_mut(|s| s.spawn(id, name, entry, task_trampoline))
+}
+
+/// 新建内核任务并指定亲和集合（允许运行的处理器）；任务按负载放进其中某个处理器的运行队列。
+/// 集合里没有在线处理器时拒绝（[`SpawnError::BadAffinity`]），状态不变。`group` 同 [`spawn_in`]。
+/// Spawns a kernel task with an explicit affinity set.
+pub fn spawn_on(id: TaskId, name: &'static str, entry: fn(), group: Option<CpuGroupId>, affinity: CpuSet) -> Result<usize, SpawnError> {
+    with_mut(|s| s.spawn_on(id, name, entry, task_trampoline, group, Some(affinity)))
+}
+
+/// 修改任务 `id` 的亲和集合（立即生效：正在别处运行的会被那个处理器在下一个 tick 换下并迁移）。
+/// 集合里没有在线处理器、任务无效时拒绝，状态不变。
+/// Changes the affinity set of task `id`.
+pub fn set_affinity(id: TaskId, set: CpuSet) -> Result<(), AffinityError> {
+    let stay = with_mut(|s| s.set_affinity(id, set))?;
+    if !stay {
+        // 修改的正是当前任务、且本处理器已不在集合内：立即换下
+        yield_with_cause(Cause::MIGRATE);
+    }
+    Ok(())
+}
+
+/// 任务 `id` 曾经运行过的处理器集合。
+/// Processors task `id` has run on.
+pub fn ran_on(id: TaskId) -> Option<CpuSet> {
+    with(|s| s.ran_on(id))
+}
+
+/// 尚未退出的工作任务数（不含引导线程）。
+/// Number of live worker tasks.
+pub fn live_workers() -> usize {
+    with(|s| s.live_workers())
+}
+
+/// 参与调度的处理器集合。
+/// Processors taking part in scheduling.
+pub fn online_cpus() -> CpuSet {
+    with(|s| s.online())
+}
+
+/// 处理器 `c` 的调度统计（忙 / 闲 tick、空闲等待上界、窃取与均衡次数）。
+/// Scheduling statistics of processor `c`.
+pub fn cpu_stats(c: usize) -> CpuStats {
+    with(|s| s.cpu_stats(c))
+}
+
+/// 清零全部处理器的调度统计（测量场景开始前调用）。
+/// Reset all per-processor scheduling statistics.
+pub fn reset_cpu_stats() {
+    with_mut(|s| s.reset_cpu_stats());
+}
+
+/// 其他处理器的空闲执行流（由多处理器子系统在处理器报到后调用，永不返回）：加入调度，
+/// 之后反复「关中断检查本处理器是否有事可做 → 有则切过去 → 没有则开中断休眠到下一个中断」。
+/// 检查与休眠之间不会漏掉唤醒：休眠指令与开中断是原子组合。
+/// Idle flow of a secondary processor.
+pub fn idle_loop(c: usize) -> ! {
+    with_mut(|s| s.cpu_online(c));
+    loop {
+        let was_enabled = cpu::irq_save_disable();
+        crate::smp::percpu::this().take_resched();
+        match with(|s| s.resched_check()) {
+            Some(cause) => yield_with_cause(cause),
+            None => cpu::wait_for_interrupt(),
+        }
+        cpu::irq_restore(was_enabled);
+        crate::smp::percpu::this().count_idle_wakeup();
+    }
 }
 
 /// 新建内核任务并放入 CPU 组 `group`（受该组上限约束）。组无效时拒绝。
@@ -174,8 +276,13 @@ pub fn yield_now() {
 pub fn yield_with_cause(cause: &'static str) {
     let was_enabled = cpu::irq_save_disable();
     let kernel_space = *KERNEL_SPACE.call_once(cpu::current_space);
-    // 锁与借用都在本语句内结束，不跨越下面的栈切换（中断仍关着）。
-    let plan = KERNEL_SCHED.lock().prepare_switch(cause);
+    // 锁与借用都在本块内结束，不跨越下面的栈切换（中断仍关着）。
+    let (plan, kicks) = {
+        let mut s = KERNEL_SCHED.lock();
+        let plan = s.prepare_switch(cause);
+        (plan, s.take_kicks())
+    };
+    send_kicks(kicks);
     if let Some(plan) = plan {
         // 下一个任务若从用户态被中断，CPU 要切到它自己的内核栈。
         if let Some(top) = plan.next_stack_top {
@@ -191,6 +298,8 @@ pub fn yield_with_cause(cause: &'static str) {
         // SAFETY：old/new 指向全局调度器内的任务上下文，在切换期间保持有效；
         // new 要么由栈池伪造，要么由上一次 switch_context 保存。
         unsafe { switch_context(plan.old, plan.new) };
+        // 回到了本执行流（可能在另一个处理器上）：完成那一次把我们切回来的切换
+        finish_switch();
     }
     cpu::irq_restore(was_enabled);
 }
@@ -420,5 +529,18 @@ pub fn on_timer_interrupt() {
     let preemption = PREEMPTION.load(Ordering::Relaxed);
     if let Some(cause) = with_mut(|s| s.tick(now, preemption)) {
         yield_with_cause(cause);
+    }
+}
+
+/// 其他处理器的本地定时器中断入口（中断上下文，EOI 之后）：给本处理器正在运行的任务记账、
+/// 到检查点做周期均衡，需要时就地切换。空闲执行流被打断时不在这里切换（中断返回后空闲循环自己取任务）。
+/// Local timer entry of a secondary processor.
+pub fn on_local_timer() {
+    let preemption = PREEMPTION.load(Ordering::Relaxed);
+    let idle = crate::smp::percpu::this().current() == crate::smp::percpu::IDLE_SLOT;
+    if let Some(cause) = with_mut(|s| s.local_tick(preemption)) {
+        if !idle {
+            yield_with_cause(cause);
+        }
     }
 }

@@ -931,6 +931,47 @@ check_smp1c() { # 多处理器第三阶段（去全局串行点）：全局锁�
   fi
 }
 
+smp2_verdict() {
+  local s2f="$1" s2rc="$2" s2name="$3" s2case
+  for s2case in spread steal overload; do
+    grep -qaE "^\[JSR-SMP2\] cores case=$s2case cpus=4 .* all_busy=true" "$s2f" || S2_MISS="$S2_MISS $s2name:$s2case各核都忙"
+  done
+  grep -qaE '^\[JSR-SMP2\] case=refusals empty_set=refused offline_only=refused no_task=refused boot_thread=refused unchanged=true' "$s2f" || S2_MISS="$S2_MISS $s2name:拒绝路径"
+  grep -qaE '^\[JSR-SMP2\] case=spread cpus=4 tasks=4 window=[0-9]+ cores_covered=true min_task_cpu=[0-9]+ all_busy=true' "$s2f" || S2_MISS="$S2_MISS $s2name:铺满"
+  grep -qaE '^\[JSR-SMP2\] case=steal cpus=4 tasks=8 queued_on=cpu0 steals=([3-9]|[1-9][0-9]+) cores_covered=true all_busy=true' "$s2f" || S2_MISS="$S2_MISS $s2name:窃取"
+  grep -qaE '^\[JSR-SMP2\] case=overload cpus=4 hogs=8 window=[0-9]+ interactive_rounds=20 samples=20 latency_max=[0-2] bound=2 bounded=true min_hog_cpu=[0-9]+ all_busy=true' "$s2f" || S2_MISS="$S2_MISS $s2name:过载交互延迟"
+  grep -qaE '^\[JSR-SMP2\] case=recovery cpus=4 rounds=20 samples=20 max=0 immediate=true .* reclaimed=true' "$s2f" || S2_MISS="$S2_MISS $s2name:恢复"
+  grep -qaE '^\[JSR-SMP2\] case=affinity pinned_cpu=3 seen_pinned=0x8 refused_unchanged=true moved_to=1 seen_moved=0x2 self_to=2 self_after=2 seen_self=0x4 ok=true' "$s2f" || S2_MISS="$S2_MISS $s2name:亲和迁移"
+  grep -qaE '^\[JSR-SMP2\] case=inherit cpus=4 hogs=8 work=4 wait=[0-6] bound=6 bounded=true holder_peak=interactive lock_free=true' "$s2f" || S2_MISS="$S2_MISS $s2name:跨核继承"
+  grep -qaE '^\[JSR-SMP2\] case=limit cpus=4 members=4 limit_permille=250 window=160 used=[0-9]+ bound=[0-9]+ within=true floor=[0-9]+ throttle_events=[1-9][0-9]* cores_used=[2-4]' "$s2f" || S2_MISS="$S2_MISS $s2name:跨核上限"
+  grep -qaE '^\[JSR-SMP2-FAIL\]|^\[JSR-LOCK-ORDER\]|^\[JSR-PANIC\]' "$s2f" && S2_MISS="$S2_MISS $s2name:出现失败断言/锁顺序违反/panic"
+  grep -qaE '^\[JSR-SMP2\] summary cpus=4 free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=43 failed=0' "$s2f" && grep -qa '^\[JSR-EXIT\] success' "$s2f" && [ "$s2rc" -eq 33 ] \
+    || S2_MISS="$S2_MISS $s2name:汇总/退出"
+}
+
+check_smp2() { # 每核运行队列 + 负载均衡：N 核 N 任务各核都忙、空闲窃取有界、全部核过载时交互延迟有上界、压力撤销后立即恢复、
+               # 亲和集合与迁移、跨核优先级继承与 CPU 上限、拒绝路径无残留；四个指令集的 4 处理器日志全部通过，单处理器如实跳过
+  if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || [ ! -s "$SERIAL_RV32_SMP4" ]; then
+    record SMP-2 FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）"
+    return
+  fi
+  S2_MISS=""
+  smp2_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64
+  smp2_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64
+  smp2_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64
+  smp2_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
+  local s2single
+  for s2single in "$SERIAL" "$SERIAL_A64" "$SERIAL_RV64" "$SERIAL_RV32"; do
+    grep -qa '^\[JSR-SMP2\] single cpus=1 balance=skipped' "$s2single" \
+      && grep -qaE '^\[JSR-SMP2\] summary cpus=1 .* failed=0' "$s2single" || S2_MISS="$S2_MISS 单处理器($(basename "$s2single"))"
+  done
+  if [ -z "$S2_MISS" ]; then
+    record SMP-2 PASS "x86_64 / AArch64 / RISC-V64 / RISC-V32 -smp 4（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）：每核运行队列；4 核 4 任务与 8 任务过载时各核忙碌 ≥85%、「本核空闲而别处有任务在等」≤2 tick；8 个任务全排在引导处理器队列时其他核窃取 ≥3 次；全部核过载时交互唤醒延迟 ≤2 tick（x86_64 实测 $(grep -aoE 'case=overload .*latency_max=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')）、压力撤销后 20 次唤醒延迟全为 0；亲和钉核 / 他人改 / 自己改均只在允许的核运行，非法集合被拒且不变；跨核优先级继承等待 ≤ 工作量 + 2；一组成员分散 4 核时整组用量不超过上限的界；资源回到基线；单处理器如实跳过"
+  else
+    record SMP-2 FAIL "缺少/不符：$S2_MISS"
+  fi
+}
+
 a64_ready() { [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ] && [ -s "$SERIAL_A64" ]; }
 
 check_isa1a() { # AArch64 移植第一阶段：内核侧检查在 qemu-system-aarch64 的串口日志上逐项重跑（行名带 A64/ 前缀）
@@ -1076,7 +1117,7 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

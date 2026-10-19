@@ -3,6 +3,8 @@
 //! 调度属性（[`SchedEntity`]：有效 QoS 档位、近期用量……）由策略读写；睡眠与唤醒延迟记账、
 //! 自身档位与等待关系（优先级继承）由调度机制维护。
 
+use kernel_core::smp::CpuSet;
+
 use crate::sched::policy::{Qos, RunStreak, SchedEntity};
 
 /// 不透明的任务标识。
@@ -16,7 +18,7 @@ pub struct TaskId(pub u64);
 pub enum TaskState {
     /// 可运行，等待被选中。
     Runnable,
-    /// 正在处理器上运行（任一时刻恰有一个）。
+    /// 正在某个处理器上运行（每个处理器任一时刻至多一个）。
     Running,
     /// 睡眠：等到 `Task::wake_at` 指定的 tick（或被显式唤醒）才重新可运行。
     Blocked,
@@ -62,10 +64,21 @@ pub struct Task {
     pub cpu_group: Option<usize>,
     /// 自上次主动放弃处理器以来连续占用的 tick（看门狗依据）。
     pub streak: RunStreak,
+    /// 所在运行队列的处理器下标（只会被该处理器选中；负载均衡改写它即完成迁移）。
+    pub home: usize,
+    /// 亲和集合：允许运行的处理器（硬约束；`home` 总在其中）。
+    pub affinity: CpuSet,
+    /// 上次被换下的时刻（tick；迁移代价据此判断缓存是否仍热）。
+    pub last_ran: Option<u64>,
+    /// 正占用它的处理器：被选中时置位，换下它的那次切换**完成保存之后**才清除；
+    /// 置位期间其他处理器不得选中它（否则会恢复一份尚未保存完的上下文），槽位也不得复用。
+    pub on_cpu: Option<usize>,
+    /// 曾经运行过它的处理器集合（诊断：亲和与迁移的验收依据）。
+    pub ran_on: CpuSet,
 }
 
 impl Task {
-    /// 新任务：可运行、默认档位「用户发起」、没有 QoS 上限。
+    /// 新任务：可运行、默认档位「用户发起」、没有 QoS 上限、亲和集合只含引导处理器（创建方可放宽）。
     pub const fn new(id: TaskId, name: &'static str) -> Self {
         Task {
             id,
@@ -85,6 +98,11 @@ impl Task {
             woken_at: None,
             cpu_group: None,
             streak: RunStreak::new(),
+            home: 0,
+            affinity: CpuSet::first(1),
+            last_ran: None,
+            on_cpu: None,
+            ran_on: CpuSet::EMPTY,
         }
     }
 }

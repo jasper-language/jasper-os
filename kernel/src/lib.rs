@@ -60,6 +60,7 @@ pub mod qos_demo;
 pub mod overload_demo;
 #[cfg(feature = "user-programs")]
 pub mod bench_demo;
+pub mod balance_demo;
 pub mod pi_demo;
 pub mod sched;
 pub mod smp;

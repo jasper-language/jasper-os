@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{clock, config, counter_demo, fix_demo, irq, kprint, kprintln, mech_demo, mm, pi_demo, sched, smp, user_demo};
+use crate::{balance_demo, clock, config, counter_demo, fix_demo, irq, kprint, kprintln, mech_demo, mm, pi_demo, sched, smp, user_demo};
 #[cfg(feature = "user-programs")]
 use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo};
 
@@ -133,6 +133,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
     }
     // SCHED-2：优先级继承（三任务反转有界、传递继承、拒绝路径、持有者退出、压力撤销后恢复）。
     pi_demo::run();
+    // SMP-2：每核运行队列与负载均衡（各核都忙、窃取、过载下交互延迟有上界、恢复、亲和与迁移、跨核继承与上限）。
+    balance_demo::run();
     #[cfg(feature = "user-programs")]
     {
         // SCHED-3：过载防护（每进程 CPU 上限、看门狗、内存压力分级准入、压力撤销后回到基线）。
@@ -144,6 +146,7 @@ pub fn start(boot: &'static BootSpec) -> ! {
     let fails: &[(&str, u32)] = &[
         ("mm", mm::demo::failed()),
         ("smp", smp::demo::failed()),
+        ("balance", balance_demo::failed()),
         ("user", user_demo::failed()),
         ("fix", fix_demo::failed()),
         #[cfg(feature = "user-programs")]

@@ -7,6 +7,7 @@
 //!
 //! 约定：槽位 0 是引导线程（空闲时的落脚点），**不交给策略选择**；策略只在工作任务中挑选。
 
+pub use kernel_core::sched::balance::{BalanceParams, Balancer, Candidate, CoreLoad, PlaceError, Refusal};
 pub use kernel_core::sched::limit::{CpuLimit, CpuLimitStats, LimitError};
 pub use kernel_core::sched::watchdog::{RunStreak, Watchdog, WatchdogLog, WatchdogReport};
 pub use kernel_core::sched::{inherit, qos_change_allowed, Choice, ClassMask, LatencyHistogram, Preempt, Qos, QosParams, QosPolicy, SchedEntity, SchedPolicy, QOS_CLASSES};

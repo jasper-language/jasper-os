@@ -111,13 +111,20 @@ impl CpuLimit {
         self.limit_permille >= UNLIMITED || self.tokens > 0
     }
 
+    /// 只扣费不补充：多处理器下其他处理器的本地 tick 由本组成员运行时调用（补充只在全局时钟 tick 上做一次，
+    /// 因此 N 个处理器同时运行本组成员时消耗按 N 倍计，上限对整组生效而不是对每个处理器各自生效）。
+    /// Charge one tick without refilling (another processor ran a member).
+    pub fn charge(&mut self) {
+        self.used_ticks += 1;
+        self.tokens -= TICK_COST;
+    }
+
     /// 每个时钟 tick 调用一次：`ran` = 刚过去的这个 tick 是否由本组成员运行；
     /// `wants` = 本组是否还有成员可运行（用于统计被限速的 tick）。先扣费、再补充令牌。
     /// Per-tick accounting: charge the tick just run, then refill.
     pub fn on_tick(&mut self, ran: bool, wants: bool) {
         if ran {
-            self.used_ticks += 1;
-            self.tokens -= TICK_COST;
+            self.charge();
         }
         let cap = self.burst_ticks as i32 * TICK_COST;
         self.tokens = (self.tokens + self.limit_permille as i32).min(cap);
@@ -240,5 +247,28 @@ mod tests {
             used += r as u64;
         }
         assert!(used <= l.bound(1000));
+    }
+
+    #[test]
+    fn multi_core_charges_respect_one_group_limit() {
+        // 4 个处理器同时运行本组成员：每个全局 tick 引导处理器 on_tick + 其他 3 个处理器各 charge 一次，
+        // 只有可选中时才运行；整组用量不超过单组上限给出的界（最后一个可选中 tick 至多超出 N−1 = 3）
+        let mut l = CpuLimit::new(500, 4).unwrap();
+        let window = 400u64;
+        let mut used = 0u64;
+        for _ in 0..window {
+            let run = l.eligible();
+            if run {
+                for _ in 0..3 {
+                    l.charge();
+                }
+                used += 4;
+            }
+            l.on_tick(run, true);
+        }
+        assert!(used <= l.bound(window) + 3, "多核用量 {used} 超过上限界 {}", l.bound(window));
+        assert!(used >= window / 2 - 8, "上限内应能用满约一半：{used}");
+        assert_eq!(l.stats().used_ticks, used);
+        assert!(l.stats().throttle_events > 0, "多核下同样会被限速");
     }
 }

@@ -36,7 +36,11 @@
 //! # 过载防护
 //! * [`limit`]：每组（通常是一个进程）一份 CPU 上限令牌桶，被限速组的成员不参与选择
 //! * [`watchdog`]：记录长时间不主动让出处理器的任务（只记录，不处置）
+//!
+//! # 多核
+//! * [`balance`]：负载均衡的纯决策（放置、空闲窃取、周期均衡；亲和集合是硬约束，迁移代价按缓存冷热近似）
 
+pub mod balance;
 pub mod inherit;
 pub mod limit;
 pub mod watchdog;
@@ -248,7 +252,8 @@ pub trait SchedPolicy {
     fn default_quantum(&self) -> u32;
 }
 
-/// QoS 分级策略（见模块文档）。
+/// QoS 分级策略（见模块文档）。可复制：多处理器下每个处理器的运行队列各持一份（欠账与衰减纪元按核独立）。
+#[derive(Debug, Clone, Copy)]
 pub struct QosPolicy {
     params: QosParams,
     /// 各档欠账（千分之一 tick）。
