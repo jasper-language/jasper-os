@@ -1,13 +1,15 @@
 //! AArch64 平台实现：把 [`Platform`] 契约落到 ARMv8-A（QEMU `virt` 机型）上。
 //! AArch64 implementation of the `Platform` contract (ARMv8-A, QEMU `virt`).
 //!
-//! 子模块各管一类硬件，彼此只经本文件编排（`vectors` 调用 `gic` / `timer` 处理中断是唯一的横向依赖）：
+//! 子模块各管一类硬件，彼此只经本文件编排（`vectors` 调用 `gic` / `devirq` / `timer` 处理中断、
+//! `devirq` 经 `gic` 配置共享外设中断是仅有的横向依赖）：
 //! * `boot`     —— 入口 `_start`、EL2→EL1、BSS、设备树 → `BootSpec`，然后进入内核主流程
 //! * `mmu`      —— 早期页表（内核映像恒等映射 + 全物理内存映射）与 MMU 启用
 //! * `paging`   —— 描述符位格式 + 通用遍历器实现的 `PageMapper`
 //! * `space`    —— 地址空间（顶级表）的创建、TTBR0 切换与销毁
 //! * `vectors`  —— 异常向量表与陷入分发（断点、系统调用、用户故障、IRQ）
 //! * `gic`      —— GICv2 中断控制器
+//! * `devirq`   —— 可路由的设备中断线（串口、实时时钟的共享外设中断）：路由、屏蔽与持续自触发
 //! * `timer`    —— 通用定时器（虚拟定时器）
 //! * `uart`     —— PL011 串口（控制台）
 //! * `context`  —— 任务上下文与 `switch_context` 汇编
@@ -22,6 +24,7 @@
 mod boot;
 mod context;
 mod cpu;
+mod devirq;
 mod gic;
 mod mmu;
 mod paging;
@@ -84,6 +87,7 @@ impl Platform for Aarch64 {
             crate::console::write_str("[JSR-IRQ] interrupt controller or timer interrupt unavailable\n");
             Self::exit_emulator(ExitStatus::Failure);
         }
+        devirq::configure();
         timer::init(timer_hz);
     }
 
@@ -250,6 +254,30 @@ impl Platform for Aarch64 {
 
     fn tlb_flush_local(va: u64, pages: u64) {
         smp::tlb_flush_local(va, pages)
+    }
+
+    fn device_irq_count() -> usize {
+        devirq::count()
+    }
+
+    fn device_irq_name(line: usize) -> &'static str {
+        devirq::name(line)
+    }
+
+    fn device_irq_route(line: usize, cpu: usize) -> Result<(), kernel_core::irq::IrqError> {
+        devirq::route(line, cpu)
+    }
+
+    fn device_irq_set_masked(line: usize, masked: bool) {
+        devirq::set_masked(line, masked)
+    }
+
+    fn device_irq_ack(line: usize) {
+        devirq::ack(line)
+    }
+
+    fn device_irq_self_trigger(line: usize, on: bool) -> Result<(), kernel_core::irq::IrqError> {
+        devirq::self_trigger(line, on)
     }
 
     #[inline(always)]

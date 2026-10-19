@@ -5,14 +5,16 @@
 //! 早期建表、寄存器宽度的汇编宏与系统调用返回约定都在那里；其余模块对两者一视同仁（寄存器值用 `usize`，
 //! 交给 Core 时零扩展为 `u64`）。
 //!
-//! 子模块各管一类硬件，彼此只经本文件编排（`trap` 调用 `plic` / `timer` / `smp` 处理中断是唯一的横向依赖）：
+//! 子模块各管一类硬件，彼此只经本文件编排（`trap` 调用 `plic` / `devirq` / `timer` / `smp` 处理中断、
+//! `smp` 在其他处理器上初始化 `plic` 上下文并登记给 `devirq` 是仅有的横向依赖）：
 //! * `mode`    —— 寄存器宽度专有部分（见上）
 //! * `boot`    —— 入口 `_start`、BSS、设备树 → `BootSpec`，然后进入内核主流程
 //! * `mmu`     —— 早期页表（内核映像恒等映射 + 线性物理内存映射）与地址转换启用
 //! * `paging`  —— 页表项位格式 + 通用遍历器实现的 `PageMapper`
 //! * `space`   —— 地址空间（顶级表）的创建、satp 切换与销毁
 //! * `trap`    —— 陷入入口与分发（断点、系统调用、用户故障、定时器与外部中断）
-//! * `plic`    —— 平台级中断控制器
+//! * `plic`    —— 平台级中断控制器（每个处理器一个监管态上下文）
+//! * `devirq`  —— 可路由的设备中断线（串口、实时时钟）：路由、屏蔽、设备侧确认与持续自触发
 //! * `timer`   —— 经 SBI 的监管态定时器与 `time` 计数器
 //! * `sbi`     —— 对机器态固件的调用
 //! * `smp`     —— 多处理器：设备树处理器发现、SBI HSM 唤醒、其他处理器入口、逻辑下标（`tp`）与核间中断
@@ -37,6 +39,7 @@ mod mode;
 mod boot;
 mod context;
 mod cpu;
+mod devirq;
 mod mmu;
 mod paging;
 mod plic;
@@ -97,10 +100,13 @@ impl Platform for Riscv {
             Self::exit_emulator(ExitStatus::Failure);
         }
         match plic::init() {
-            Some(t) if t.claimed == t.source && t.drained => crate::console::_print(format_args!(
-                "[JSR-PLIC] ok source={} claimed={} completed=true drained={}\n",
-                t.source, t.claimed, t.drained
-            )),
+            Some(t) if t.claimed == t.source && t.drained => {
+                crate::console::_print(format_args!(
+                    "[JSR-PLIC] ok source={} claimed={} completed=true drained={}\n",
+                    t.source, t.claimed, t.drained
+                ));
+                devirq::configure();
+            }
             Some(t) => {
                 crate::console::_print(format_args!(
                     "[JSR-PLIC] self-test failed source={} claimed={} drained={}\n",
@@ -279,6 +285,30 @@ impl Platform for Riscv {
         for i in 0..pages {
             cpu::tlb_flush_page(va.wrapping_add(i * 4096));
         }
+    }
+
+    fn device_irq_count() -> usize {
+        devirq::count()
+    }
+
+    fn device_irq_name(line: usize) -> &'static str {
+        devirq::name(line)
+    }
+
+    fn device_irq_route(line: usize, cpu: usize) -> Result<(), kernel_core::irq::IrqError> {
+        devirq::route(line, cpu)
+    }
+
+    fn device_irq_set_masked(line: usize, masked: bool) {
+        devirq::set_masked(line, masked)
+    }
+
+    fn device_irq_ack(line: usize) {
+        devirq::ack(line)
+    }
+
+    fn device_irq_self_trigger(line: usize, on: bool) -> Result<(), kernel_core::irq::IrqError> {
+        devirq::self_trigger(line, on)
     }
 
     #[inline(always)]

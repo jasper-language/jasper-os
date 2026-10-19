@@ -4,8 +4,8 @@
 //! # 职责与边界
 //! * 只解析，不分配：物理内存经调用者注入的 [`PhysRead`] 读取（内核经全物理内存映射实现，宿主测试用内存数组）。
 //! * 固件表是**不可信输入**：校验签名与校验和，长度设上限，条目长度为 0 或越界即报错，绝不越界或死循环。
-//! * 只覆盖处理器枚举：本地中断控制器条目（含 x2 扩展形式）与本地中断控制器地址覆盖条目；
-//!   不解析 AML、不处理其他表。
+//! * 只覆盖处理器与中断路由枚举：本地中断控制器条目（含 x2 扩展形式）、本地中断控制器地址覆盖条目、
+//!   I/O 中断控制器条目与 ISA 中断源覆盖条目；不解析 AML、不处理其他表。
 //!
 //! # 为什么放在 kernel-core
 //! 表格式与指令集无关（x86_64 与部分 AArch64 服务器都用 ACPI），放在这里可以在宿主上用构造的表测试。
@@ -57,14 +57,80 @@ impl AcpiError {
     }
 }
 
-/// MADT 中与处理器启动相关的信息。
-/// Processor information from the MADT.
+/// 记录的 I/O 中断控制器上限（超出的只计数）。
+pub const MAX_IO_CONTROLLERS: usize = 4;
+/// 记录的 ISA 中断源覆盖条目上限（ISA 中断只有 16 条）。
+pub const MAX_ISA_OVERRIDES: usize = 16;
+
+/// 一个 I/O 中断控制器。
+/// One I/O interrupt controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IoController {
+    /// 硬件标识。
+    pub id: u8,
+    /// 寄存器物理地址。
+    pub address: u64,
+    /// 第一条输入线对应的全局中断号。
+    pub gsi_base: u32,
+}
+
+/// ISA 中断的路由：全局中断号与电气特性。
+/// Route of an ISA interrupt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IsaRoute {
+    /// 全局中断号。
+    pub gsi: u32,
+    /// 低电平有效（否则高电平有效）。
+    pub active_low: bool,
+    /// 电平触发（否则边沿触发）。
+    pub level: bool,
+}
+
+/// MADT 中与处理器启动、中断路由相关的信息。
+/// Processor and interrupt-routing information from the MADT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Madt {
     /// 本地中断控制器寄存器的物理地址（已应用覆盖条目）。
     pub local_controller: u64,
     /// 已启用处理器的硬件标识（引导处理器排在下标 0）。
     pub topology: Topology,
+    io: [IoController; MAX_IO_CONTROLLERS],
+    io_count: usize,
+    /// (ISA 中断号, 路由)。
+    overrides: [(u8, IsaRoute); MAX_ISA_OVERRIDES],
+    override_count: usize,
+    /// 超出上限而未记录的 I/O 中断控制器与覆盖条目数。
+    pub dropped_routing: usize,
+}
+
+impl Madt {
+    /// 已记录的 I/O 中断控制器。
+    /// Recorded I/O interrupt controllers.
+    pub fn io_controllers(&self) -> &[IoController] {
+        &self.io[..self.io_count]
+    }
+
+    /// 负责全局中断号 `gsi` 的 I/O 中断控制器及其输入线号（取 `gsi_base` 不超过 `gsi` 的最大者；
+    /// 每个控制器的输入线数要读寄存器才知道，由调用者校验）。
+    /// Controller responsible for `gsi`, with the pin number on it.
+    pub fn controller_for(&self, gsi: u32) -> Option<(IoController, u32)> {
+        self.io_controllers().iter().filter(|c| c.gsi_base <= gsi).max_by_key(|c| c.gsi_base).map(|c| (*c, gsi - c.gsi_base))
+    }
+
+    /// ISA 中断 `irq` 的路由：有覆盖条目时按条目，否则恒等映射、高电平有效、边沿触发。
+    /// Route of ISA interrupt `irq`.
+    pub fn isa_route(&self, irq: u8) -> IsaRoute {
+        self.overrides[..self.override_count]
+            .iter()
+            .find(|(src, _)| *src == irq)
+            .map(|(_, r)| *r)
+            .unwrap_or(IsaRoute { gsi: irq as u32, active_low: false, level: false })
+    }
+}
+
+/// 覆盖条目的标志：极性（位 0–1）与触发方式（位 2–3）；00 = 遵从总线规定（ISA：高电平有效、边沿触发）。
+fn isa_route_from(gsi: u32, flags: u16) -> IsaRoute {
+    IsaRoute { gsi, active_low: flags & 0b11 == 0b11, level: (flags >> 2) & 0b11 == 0b11 }
 }
 
 fn read_u8(m: &dyn PhysRead, at: u64) -> Result<u8, AcpiError> {
@@ -174,6 +240,9 @@ pub fn parse_madt(m: &dyn PhysRead, rsdp: u64, boot_hw_id: u32) -> Result<Madt, 
     }
     let mut local_controller = read_u32(m, madt + 36)? as u64;
     let mut topology = Topology::boot_only(boot_hw_id);
+    let mut io = [IoController::default(); MAX_IO_CONTROLLERS];
+    let mut overrides = [(0u8, IsaRoute { gsi: 0, active_low: false, level: false }); MAX_ISA_OVERRIDES];
+    let (mut io_count, mut override_count, mut dropped_routing) = (0usize, 0usize, 0usize);
     let mut off = MADT_ENTRIES_OFFSET;
     while off < len {
         if len - off < 2 {
@@ -191,6 +260,31 @@ pub fn parse_madt(m: &dyn PhysRead, rsdp: u64, boot_hw_id: u32) -> Result<Madt, 
                 let id = read_u8(m, at + 3)? as u32;
                 add_cpu(&mut topology, id, read_u32(m, at + 4)?);
             }
+            // I/O 中断控制器：标识(1) 保留(1) 地址(4) 全局中断号起点(4)
+            (1, 12..) => {
+                let c = IoController { id: read_u8(m, at + 2)?, address: read_u32(m, at + 4)? as u64, gsi_base: read_u32(m, at + 8)? };
+                if io_count < MAX_IO_CONTROLLERS {
+                    io[io_count] = c;
+                    io_count += 1;
+                } else {
+                    dropped_routing += 1;
+                }
+            }
+            // ISA 中断源覆盖：总线(1) 源(1) 全局中断号(4) 标志(2)
+            (2, 10..) => {
+                let mut f = [0u8; 2];
+                if !m.read(at + 8, &mut f) {
+                    return Err(AcpiError::Unreadable);
+                }
+                let route = isa_route_from(read_u32(m, at + 4)?, u16::from_le_bytes(f));
+                let src = read_u8(m, at + 3)?;
+                if override_count < MAX_ISA_OVERRIDES {
+                    overrides[override_count] = (src, route);
+                    override_count += 1;
+                } else {
+                    dropped_routing += 1;
+                }
+            }
             // 本地中断控制器地址覆盖：保留(2) 地址(8)
             (5, 12..) => local_controller = read_u64(m, at + 4)?,
             // x2 扩展本地中断控制器：保留(2) 硬件标识(4) 标志(4) UID(4)
@@ -198,12 +292,12 @@ pub fn parse_madt(m: &dyn PhysRead, rsdp: u64, boot_hw_id: u32) -> Result<Madt, 
                 let id = read_u32(m, at + 4)?;
                 add_cpu(&mut topology, id, read_u32(m, at + 8)?);
             }
-            (0 | 5 | 9, _) => return Err(AcpiError::BadLength),
+            (0 | 1 | 2 | 5 | 9, _) => return Err(AcpiError::BadLength),
             _ => {}
         }
         off += elen;
     }
-    Ok(Madt { local_controller, topology })
+    Ok(Madt { local_controller, topology, io, io_count, overrides, override_count, dropped_routing })
 }
 
 /// 标志位 0 = 已启用；未启用的（含仅「可上线」的热插拔位）只计数。
@@ -354,6 +448,50 @@ mod tests {
         assert_eq!(parse_madt(&m, 0x100, 0), Err(AcpiError::BadLength));
         let m = image(0, &[vec![0, 4, 1, 1]]); // 长度对该类型过短
         assert_eq!(parse_madt(&m, 0x100, 0), Err(AcpiError::BadLength));
+    }
+
+    fn ioapic(id: u8, addr: u32, gsi_base: u32) -> Vec<u8> {
+        let mut e = vec![1, 12, id, 0];
+        e.extend_from_slice(&addr.to_le_bytes());
+        e.extend_from_slice(&gsi_base.to_le_bytes());
+        e
+    }
+
+    fn iso(src: u8, gsi: u32, flags: u16) -> Vec<u8> {
+        let mut e = vec![2, 10, 0, src];
+        e.extend_from_slice(&gsi.to_le_bytes());
+        e.extend_from_slice(&flags.to_le_bytes());
+        e
+    }
+
+    #[test]
+    fn io_controllers_and_isa_overrides() {
+        let m = image(2, &[lapic(0, 1), ioapic(1, 0xFEC0_0000, 0), ioapic(2, 0xFEC1_0000, 24), iso(0, 2, 0), iso(9, 9, 0b1111)]);
+        let madt = parse_madt(&m, 0x100, 0).unwrap();
+        assert_eq!(madt.io_controllers().len(), 2);
+        assert_eq!(madt.isa_route(0), IsaRoute { gsi: 2, active_low: false, level: false });
+        assert_eq!(madt.isa_route(9), IsaRoute { gsi: 9, active_low: true, level: true });
+        // 没有覆盖条目：恒等映射、ISA 默认电气特性
+        assert_eq!(madt.isa_route(4), IsaRoute { gsi: 4, active_low: false, level: false });
+        let (c, pin) = madt.controller_for(8).unwrap();
+        assert_eq!((c.address, pin), (0xFEC0_0000, 8));
+        let (c, pin) = madt.controller_for(30).unwrap();
+        assert_eq!((c.id, pin), (2, 6));
+        assert_eq!(madt.dropped_routing, 0);
+    }
+
+    #[test]
+    fn routing_entries_short_rejected_and_absent_controller_reported() {
+        let m = image(0, &[lapic(0, 1), vec![1, 8, 0, 0, 0, 0, 0, 0]]);
+        assert_eq!(parse_madt(&m, 0x100, 0), Err(AcpiError::BadLength));
+        let m = image(0, &[lapic(0, 1), vec![2, 6, 0, 0, 0, 0]]);
+        assert_eq!(parse_madt(&m, 0x100, 0), Err(AcpiError::BadLength));
+        let madt = parse_madt(&image(0, &[lapic(0, 1)]), 0x100, 0).unwrap();
+        assert!(madt.io_controllers().is_empty());
+        assert_eq!(madt.controller_for(4), None);
+        let many: Vec<Vec<u8>> = (0..6u8).map(|i| ioapic(i, 0xFEC0_0000 + i as u32 * 0x1000, i as u32 * 24)).collect();
+        let madt = parse_madt(&image(0, &many), 0x100, 0).unwrap();
+        assert_eq!((madt.io_controllers().len(), madt.dropped_routing), (MAX_IO_CONTROLLERS, 2));
     }
 
     #[test]

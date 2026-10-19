@@ -172,6 +172,12 @@ impl CpuSet {
         self
     }
 
+    /// 交集。
+    /// Intersection of two sets.
+    pub const fn intersect(self, other: CpuSet) -> CpuSet {
+        CpuSet(self.0 & other.0)
+    }
+
     /// 原始位（诊断输出用）。
     /// Raw bits.
     pub const fn bits(self) -> u32 {

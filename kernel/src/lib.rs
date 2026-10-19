@@ -37,6 +37,7 @@ pub mod ipc;
 #[cfg(feature = "user-programs")]
 pub mod ipc_demo;
 pub mod irq;
+pub mod irq_demo;
 pub mod kmain;
 pub mod kobj;
 pub mod mm;
@@ -63,6 +64,7 @@ pub mod bench_demo;
 pub mod balance_demo;
 pub mod pi_demo;
 pub mod sched;
+pub mod shard;
 pub mod smp;
 pub mod sync;
 pub mod syscall;

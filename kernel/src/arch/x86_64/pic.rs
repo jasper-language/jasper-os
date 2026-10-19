@@ -16,10 +16,19 @@ pub const TIMER_VECTOR: u8 = PIC_1_OFFSET;
 /// 级联的两片 PIC。
 static PICS: Mutex<ChainedPics> = Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
 
-/// 初始化并重映射 PIC。
+/// 主片屏蔽字：只放行 IRQ0（定时器）与 IRQ2（级联）。其余设备中断经 I/O APIC 投递，在 8259 上一律屏蔽。
+const MASTER_MASK: u8 = !0b0000_0101;
+/// 从片全部屏蔽。
+const SLAVE_MASK: u8 = 0xFF;
+
+/// 初始化并重映射 PIC，只放行定时器。
 pub fn init() {
-    // SAFETY：偏移量不与 CPU 异常向量（0–31）重叠。
-    unsafe { PICS.lock().initialize() };
+    // SAFETY：偏移量不与 CPU 异常向量（0–31）重叠；屏蔽字只影响 8259 自身的输入线。
+    unsafe {
+        let mut pics = PICS.lock();
+        pics.initialize();
+        pics.write_masks(MASTER_MASK, SLAVE_MASK);
+    }
 }
 
 /// 向 PIC 发送中断结束（EOI）。

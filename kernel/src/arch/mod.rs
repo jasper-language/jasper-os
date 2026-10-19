@@ -338,6 +338,36 @@ pub trait Platform {
     /// 作废本处理器上 `[va, va + pages × 4 KiB)` 的 TLB 项（所有地址空间）。
     /// Invalidate local TLB entries for the given page range.
     fn tlb_flush_local(va: u64, pages: u64);
+
+    // ---- 设备中断 ----
+    // 设备中断线是平台给出的下标 0..device_irq_count()；它与具体中断号 / 输入线的对应只在平台内部。
+    // 平台的中断入口对设备中断调用 `crate::irq::on_device_irq(line)`，**在 EOI / 完成之前**，且不在其中切换任务。
+
+    /// 平台已发现并接好的可路由设备中断线数（未初始化或没有时为 0）。
+    /// Number of routable device interrupt lines.
+    fn device_irq_count() -> usize;
+
+    /// 设备中断线的规范名（诊断输出用）。
+    /// Canonical name of a device line.
+    fn device_irq_name(line: usize) -> &'static str;
+
+    /// 把设备中断线路由到逻辑下标为 `cpu` 的处理器（只改中断控制器的目标，不改屏蔽状态）。
+    /// 线号不存在返回 `NoLine`；目标处理器不可寻址返回 `RouteFailed`，此时硬件不变。
+    /// Route a device line to processor `cpu`.
+    fn device_irq_route(line: usize, cpu: usize) -> Result<(), kernel_core::irq::IrqError>;
+
+    /// 在中断控制器上屏蔽 / 解除屏蔽。解除时重新检查设备：屏蔽期间未送达的中断条件必须重新触发，不得丢失。
+    /// 线号不存在时什么都不做。
+    /// Mask or unmask a device line at the interrupt controller.
+    fn device_irq_set_masked(line: usize, masked: bool);
+
+    /// 设备侧确认（由 Core 在处理窗口内调用）：清除设备的中断条件；持续自触发打开时立即重新触发下一次。
+    /// Acknowledge the interrupt condition at the device.
+    fn device_irq_ack(line: usize);
+
+    /// 打开 / 关闭设备的持续自触发：设备在每次确认之后立即再次请求中断（中断风暴演练与自检用）。
+    /// Turn a device's continuous self-trigger on or off.
+    fn device_irq_self_trigger(line: usize, on: bool) -> Result<(), kernel_core::irq::IrqError>;
 }
 
 // ---- Core 使用的薄包装（避免各处 `use Platform` 与冗长的 `<Current as Platform>::`）----
@@ -558,4 +588,29 @@ pub fn send_ipi(cpu: usize, kind: kernel_core::smp::IpiKind) -> Result<(), kerne
 /// 见 [`Platform::tlb_flush_local`]。
 pub fn tlb_flush_local(va: u64, pages: u64) {
     Current::tlb_flush_local(va, pages)
+}
+
+/// 见 [`Platform::device_irq_count`]。
+pub fn device_irq_count() -> usize {
+    Current::device_irq_count()
+}
+/// 见 [`Platform::device_irq_name`]。
+pub fn device_irq_name(line: usize) -> &'static str {
+    Current::device_irq_name(line)
+}
+/// 见 [`Platform::device_irq_route`]。
+pub fn device_irq_route(line: usize, cpu: usize) -> Result<(), kernel_core::irq::IrqError> {
+    Current::device_irq_route(line, cpu)
+}
+/// 见 [`Platform::device_irq_set_masked`]。
+pub fn device_irq_set_masked(line: usize, masked: bool) {
+    Current::device_irq_set_masked(line, masked)
+}
+/// 见 [`Platform::device_irq_ack`]。
+pub fn device_irq_ack(line: usize) {
+    Current::device_irq_ack(line)
+}
+/// 见 [`Platform::device_irq_self_trigger`]。
+pub fn device_irq_self_trigger(line: usize, on: bool) -> Result<(), kernel_core::irq::IrqError> {
+    Current::device_irq_self_trigger(line, on)
 }

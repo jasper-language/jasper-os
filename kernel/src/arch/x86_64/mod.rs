@@ -23,6 +23,7 @@ mod context;
 mod paging;
 mod gdt;
 mod idt;
+mod ioapic;
 mod pic;
 mod pit;
 mod space;
@@ -240,6 +241,30 @@ impl Platform for X86_64 {
 
     fn tlb_flush_local(va: u64, pages: u64) {
         smp::tlb_flush_local(va, pages)
+    }
+
+    fn device_irq_count() -> usize {
+        ioapic::count()
+    }
+
+    fn device_irq_name(line: usize) -> &'static str {
+        ioapic::name(line)
+    }
+
+    fn device_irq_route(line: usize, cpu: usize) -> Result<(), kernel_core::irq::IrqError> {
+        ioapic::route(line, cpu)
+    }
+
+    fn device_irq_set_masked(line: usize, masked: bool) {
+        ioapic::set_masked(line, masked)
+    }
+
+    fn device_irq_ack(line: usize) {
+        ioapic::ack(line)
+    }
+
+    fn device_irq_self_trigger(line: usize, on: bool) -> Result<(), kernel_core::irq::IrqError> {
+        ioapic::self_trigger(line, on)
     }
 
     #[inline(always)]

@@ -182,6 +182,11 @@ impl<M: IrqMask> IrqLockedU64<M> {
     pub fn fetch_max(&self, x: u64, _o: Ordering) -> u64 {
         self.with(|v| core::mem::replace(v, (*v).max(x)))
     }
+    /// 写入 `x`，返回旧值（取走并清零窗口计数一类用途）。
+    /// Store `x` and return the previous value.
+    pub fn swap(&self, x: u64, _o: Ordering) -> u64 {
+        self.with(|v| core::mem::replace(v, x))
+    }
 }
 
 /// 中断安全的 64 位单元（见模块文档）：有 64 位原子指令时为硬件原子，否则为 [`IrqLockedU64`]。
@@ -225,6 +230,11 @@ impl<M: IrqMask> NativeU64<M> {
     /// 取当前值与 `x` 的较大者写入，返回旧值。
     pub fn fetch_max(&self, x: u64, o: Ordering) -> u64 {
         self.v.fetch_max(x, o)
+    }
+    /// 写入 `x`，返回旧值。
+    /// Store `x` and return the previous value.
+    pub fn swap(&self, x: u64, o: Ordering) -> u64 {
+        self.v.swap(x, o)
     }
 }
 
@@ -341,6 +351,12 @@ mod tests {
         assert_eq!(n.fetch_max(5, Ordering::Relaxed), u64::MAX);
         n.store(7, Ordering::Relaxed);
         assert_eq!(n.load(Ordering::Relaxed), 7);
+        assert_eq!(n.swap(0, Ordering::Relaxed), 7);
+        assert_eq!(n.load(Ordering::Relaxed), 0);
+        // 无 64 位原子目标上的实现：语义相同
+        let l: IrqLockedU64<MockMask> = IrqLockedU64::new(9);
+        assert_eq!(l.swap(3, Ordering::Relaxed), 9);
+        assert_eq!(l.load(Ordering::Relaxed), 3);
     }
 
     #[test]

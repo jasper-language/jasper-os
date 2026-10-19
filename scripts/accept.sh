@@ -972,6 +972,46 @@ check_smp2() { # 每核运行队列 + 负载均衡：N 核 N 任务各核都忙�
   fi
 }
 
+smp3_verdict() {
+  local s3f="$1" s3rc="$2" s3name="$3"
+  grep -qaE '^\[JSR-SMP3\] case=irq_refusals no_line=refused bad_quota=refused empty_set=refused offline_only=refused unrouted_enable=refused disabled_trigger=refused unchanged=true' "$s3f" || S3_MISS="$S3_MISS $s3name:中断拒绝路径"
+  grep -qaE '^\[JSR-SMP3\] case=shard_refusals unconfigured=refused bad_count=refused no_cpu_shard=refused full=refused kept_order=true reconfigure_busy=refused unchanged=true' "$s3f" || S3_MISS="$S3_MISS $s3name:分片拒绝路径"
+  grep -qaE '^\[JSR-SMP3\] case=route cpus=4 lines=2 delivered_exact=4/4 handler_calls_match=true disabled_after=true' "$s3f" || S3_MISS="$S3_MISS $s3name:按亲和送达"
+  grep -qaE '^\[JSR-SMP3\] case=balance lines=2 keep_moves=0 keep_cpus=0x1 spread_moves=[1-9][0-9]* spread_cpus=0x[0-9a-f]+ distinct=true spread_after=[0-9]+ bound=16 in_time=true' "$s3f" || S3_MISS="$S3_MISS $s3name:亲和均衡"
+  grep -qaE '^\[JSR-SMP3\] case=storm cpus=4 lines=2 hogs=8 window=120 interactive_rounds=20 samples=20 latency_max=[0-2] bound=2 bounded=true all_busy=true irq_handled=[1-9][0-9]* cores_hit=[2-4] spread=true throttles=[1-9][0-9]* worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=true min_hog_cpu=[0-9]+' "$s3f" || S3_MISS="$S3_MISS $s3name:风暴下交互延迟/预算/分散"
+  grep -qaE '^\[JSR-SMP3\] case=recovery cpus=4 rounds=20 samples=20 max=0 immediate=true irq_after_disable=0 quiet=true reclaimed=true' "$s3f" || S3_MISS="$S3_MISS $s3name:风暴撤销后恢复"
+  grep -qaE '^\[JSR-SMP3\] case=service cpus=4 flows=128 requests=512 makespan_one=[0-9]+ makespan_many=[0-9]+ speedup_permille=[0-9]+ faster=true imbalance_permille=([0-9]|[1-9][0-9]|[1-2][0-9][0-9]|3[0-4][0-9]|350) bound=350 cores_used=4 least_busy=[0-9]+ in_order=true done=true reclaimed=true' "$s3f" || S3_MISS="$S3_MISS $s3name:分片服务各核均衡"
+  grep -qaE '^\[JSR-SMP3-FAIL\]|^\[JSR-LOCK-ORDER\]|^\[JSR-PANIC\]' "$s3f" && S3_MISS="$S3_MISS $s3name:出现失败断言/锁顺序违反/panic"
+  grep -qaE '^\[JSR-SMP3\] summary cpus=4 device_lines=2 free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=39 failed=0' "$s3f" && grep -qa '^\[JSR-EXIT\] success' "$s3f" && [ "$s3rc" -eq 33 ] \
+    || S3_MISS="$S3_MISS $s3name:汇总/退出"
+}
+
+check_smp3() { # 中断与服务的多核化：设备中断按亲和送达、均衡策略分散中断线、风暴下每核预算节流（交互延迟有上界、无单核被中断吃满）、
+               # 风暴撤销后立即恢复、分片服务各核并行且均衡、拒绝路径无残留；四个指令集的 4 处理器日志全部通过，单处理器如实跳过
+  if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || [ ! -s "$SERIAL_RV32_SMP4" ]; then
+    record SMP-3 FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）"
+    return
+  fi
+  S3_MISS=""
+  smp3_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64
+  smp3_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64
+  smp3_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64
+  smp3_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
+  local s3single
+  for s3single in "$SERIAL" "$SERIAL_A64" "$SERIAL_RV64" "$SERIAL_RV32"; do
+    grep -qa '^\[JSR-SMP3\] single cpus=1 spread=skipped' "$s3single" \
+      && grep -qaE '^\[JSR-SMP3\] summary cpus=1 .* failed=0' "$s3single" || S3_MISS="$S3_MISS 单处理器($(basename "$s3single"))"
+  done
+  if [ -z "$S3_MISS" ]; then
+    local lat sp
+    lat=$(grep -aoE 'case=storm .*latency_max=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')
+    sp=$(grep -aoE 'case=service .*speedup_permille=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')
+    record SMP-3 PASS "x86_64（I/O APIC）/ AArch64（GICv2 共享外设中断）/ RISC-V64 / RISC-V32（PLIC 每核上下文）-smp 4（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）：两条设备中断线依次钉到 4 个核，只在该核处理 4/4；两条线都在 0 号核时对照策略不搬、均衡策略两个周期内分到不同的核；两条线持续风暴 + 8 个吃满处理器的任务时交互唤醒延迟 ≤2 tick（x86_64 实测 $lat）、各核都忙、每核中断次数与时间不超过预算的界、风暴分散到多个核；撤销后无中断、延迟全为 0；分片服务 128 个流 512 个请求 4 分片比 1 分片快（x86_64 ${sp}‰）、不均衡度 ≤350‰、流内有序；拒绝路径无残留；单处理器如实跳过"
+  else
+    record SMP-3 FAIL "缺少/不符：$S3_MISS"
+  fi
+}
+
 a64_ready() { [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ] && [ -s "$SERIAL_A64" ]; }
 
 check_isa1a() { # AArch64 移植第一阶段：内核侧检查在 qemu-system-aarch64 的串口日志上逐项重跑（行名带 A64/ 前缀）
@@ -1117,7 +1157,7 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

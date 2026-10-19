@@ -177,7 +177,10 @@ pub fn init_boot(boot: &BootSpec) -> CpuDiscovery {
     apic::calibrate_timer();
     let (topology, source) = match boot.acpi_rsdp {
         Some(rsdp) => match acpi::parse_madt(&PhysWindow(offset), rsdp, boot_id) {
-            Ok(m) => (m.topology, "acpi.madt"),
+            Ok(m) => {
+                super::ioapic::configure(&m, offset, boot_id);
+                (m.topology, "acpi.madt")
+            }
             Err(e) => (Topology::boot_only(boot_id), e.name()),
         },
         None => (Topology::boot_only(boot_id), "boot_only"),
@@ -244,6 +247,11 @@ extern "C" fn ap_entry(index: u64) -> ! {
     apic::enable_local(false);
     apic::start_periodic(AP_TIMER_HZ.load(Ordering::Relaxed));
     crate::smp::secondary_main(index)
+}
+
+/// 逻辑下标 `cpu` 的 APIC 标识（未登记时为 `None`）。
+pub fn hw_id_of(cpu: usize) -> Option<u32> {
+    HW_ID.get(cpu).map(|h| h.load(Ordering::Relaxed)).filter(|&h| h != u32::MAX)
 }
 
 /// 当前处理器的逻辑下标（APIC 未就绪或标识未登记时为 0）。

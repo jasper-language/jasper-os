@@ -1,7 +1,7 @@
 //! IDT：x86 异常处理与硬件中断入口。
 //!
 //! 已接：断点（#BP，用于证明 IDT 生效）、双重错误（独立 IST 栈）、缺页、定时器（IRQ0）、
-//! 本地 APIC 的本地定时器与三类核间中断、伪中断。
+//! 本地 APIC 的本地定时器与三类核间中断、伪中断、经 I/O APIC 的两条设备中断（串口、实时时钟）。
 //! 处理程序使用 `extern "x86-interrupt"` ABI（nightly `abi_x86_interrupt`），
 //! 由编译器负责保存/恢复全部寄存器并以 `iretq` 返回。
 //!
@@ -13,7 +13,7 @@ use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, Pag
 
 use kernel_core::smp::IpiKind;
 
-use super::{apic, gdt, pic};
+use super::{apic, gdt, ioapic, pic};
 use crate::console;
 use crate::fault::{self, UserFault, UserFaultKind};
 use crate::irq::{self, IrqLine};
@@ -41,6 +41,8 @@ pub fn init() {
         idt[apic::IPI_SHOOTDOWN_VECTOR].set_handler_fn(ipi_shootdown_handler);
         idt[apic::IPI_CALL_VECTOR].set_handler_fn(ipi_call_handler);
         idt[apic::SPURIOUS_VECTOR].set_handler_fn(spurious_handler);
+        idt[ioapic::SERIAL_VECTOR].set_handler_fn(serial_irq_handler);
+        idt[ioapic::RTC_VECTOR].set_handler_fn(rtc_irq_handler);
         idt
     });
     idt.load();
@@ -129,6 +131,18 @@ extern "x86-interrupt" fn ipi_shootdown_handler(frame: InterruptStackFrame) {
 extern "x86-interrupt" fn ipi_call_handler(frame: InterruptStackFrame) {
     apic::eoi();
     irq::on_hardware_irq(IrqLine::Ipi(IpiKind::Call), from_user(&frame));
+}
+
+/// 串口设备中断（经 I/O APIC，可在任意处理器上到达）：Core 先处理，再 EOI（边沿触发，EOI 只发给本地 APIC）。
+extern "x86-interrupt" fn serial_irq_handler(_frame: InterruptStackFrame) {
+    irq::on_device_irq(ioapic::LINE_SERIAL);
+    apic::eoi();
+}
+
+/// 实时时钟设备中断：同上。
+extern "x86-interrupt" fn rtc_irq_handler(_frame: InterruptStackFrame) {
+    irq::on_device_irq(ioapic::LINE_RTC);
+    apic::eoi();
 }
 
 /// 伪中断：按规范不发 EOI，直接返回。

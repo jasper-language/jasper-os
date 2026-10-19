@@ -3,7 +3,8 @@
 //!
 //! # 规则
 //! * 持有级别 r 的锁时，只能再获取级别 **大于** r 的锁；同级锁不可重入。
-//! * 级别越小越外层：进程登记表 → 对象表 → 固定帧 → 调度器 → 诊断记录 → 内存压力 → 内核堆 → 页帧 → 跟踪 → 控制台。
+//! * 级别越小越外层：进程登记表 → 对象表 → 固定帧 → 调度器 → 诊断记录 → 内存压力 → 内核堆 → 页帧 →
+//!   中断路由 → 中断预算 → 跟踪 → 服务分片 → 控制台。
 //! * 新增全局锁必须在此登记并放在它实际嵌套位置上；登记表在编译期校验（严格递增、名称唯一）。
 //!
 //! # 边界
@@ -43,9 +44,18 @@ pub const MEMORY_HEAP: LockClass = LockClass::new(15, "system.memory.heap");
 /// 物理页帧分配器。
 /// Physical frame allocator.
 pub const MEMORY_FRAME: LockClass = LockClass::new(17, "system.memory.frame");
+/// 设备中断路由表（亲和、目标处理器、均衡策略）。
+/// Device-interrupt routing table.
+pub const IRQ_ROUTING: LockClass = LockClass::new(18, "system.irq.routing");
+/// 每核设备中断预算。
+/// Per-processor device-interrupt quota.
+pub const IRQ_QUOTA: LockClass = LockClass::new(19, "system.irq.quota");
 /// 内核跟踪缓冲。
 /// Kernel trace buffer.
 pub const TRACE: LockClass = LockClass::new(20, "system.trace");
+/// 系统服务的分片队列（每个分片一把，同级，彼此从不嵌套）。
+/// Shard queues of sharded system services.
+pub const SERVICE_SHARD: LockClass = LockClass::new(22, "system.service.shard");
 /// 控制台输出（最内层：持有它时不再获取任何锁）。
 /// Console output (innermost).
 pub const CONSOLE: LockClass = LockClass::new(24, "system.console");
@@ -62,7 +72,10 @@ pub const REGISTRY: &[LockClass] = &[
     MEMORY_PRESSURE,
     MEMORY_HEAP,
     MEMORY_FRAME,
+    IRQ_ROUTING,
+    IRQ_QUOTA,
     TRACE,
+    SERVICE_SHARD,
     CONSOLE,
 ];
 

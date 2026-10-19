@@ -15,7 +15,7 @@ use core::arch::global_asm;
 use kernel_core::fdt::{self, Fdt};
 use kernel_core::frame::{PhysRegion, RegionKind};
 
-use super::{gic, mmu, semihost, smp, timer, uart};
+use super::{devirq, gic, mmu, semihost, smp, timer, uart};
 use crate::boot::{self, BootSpec};
 
 /// 启动栈大小。
@@ -109,6 +109,13 @@ fn configure_devices(fdt: &Fdt<'_>) -> Result<(), &'static str> {
     let uart_node = fdt.find_compatible("arm,pl011").ok().flatten().ok_or("arm,pl011")?;
     let (uart_pa, _) = uart_node.reg(0).ok_or("arm,pl011 reg")?;
     uart::set_base(mmu::PHYS_OFFSET + uart_pa);
+    // 设备中断线：interrupts = (类型, 编号, 标志)，类型 0 = 共享外设中断，中断号 = 编号 + 32
+    let spi = |n: &kernel_core::fdt::Node<'_>| match (n.cell("interrupts", 0), n.cell("interrupts", 1)) {
+        (Some(0), Some(num)) => Some(num + gic::SPI_BASE),
+        _ => None,
+    };
+    let rtc = fdt.find_compatible("arm,pl031").ok().flatten();
+    devirq::set_ids(spi(&uart_node), rtc.as_ref().and_then(spi));
 
     let gic_node = match fdt.find_compatible("arm,cortex-a15-gic").ok().flatten() {
         Some(n) => n,

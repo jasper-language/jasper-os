@@ -13,6 +13,8 @@ const THR: usize = 0;
 const IER: usize = 1;
 /// FIFO 控制寄存器（写）。
 const FCR: usize = 2;
+/// 中断标识寄存器（读，与 FCR 同一偏移）。
+const IIR: usize = 2;
 /// 线路控制寄存器。
 const LCR: usize = 3;
 /// 线路状态寄存器。
@@ -70,6 +72,14 @@ pub fn set_tx_interrupt(on: bool) {
     if let Some(ier) = reg(IER) {
         // SAFETY：只写中断使能寄存器；接收中断始终保持关闭。
         unsafe { ier.write_volatile(if on { IER_THRE } else { 0 }) };
+    }
+}
+
+/// 读中断标识寄存器（清除「发送保持寄存器空」中断条件）。基地址未知时什么都不做。
+pub fn read_iir() {
+    if let Some(iir) = reg(IIR) {
+        // SAFETY：读 IIR 只影响串口的中断状态。
+        unsafe { iir.read_volatile() };
     }
 }
 

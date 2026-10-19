@@ -28,7 +28,7 @@ use spin::Once;
 
 use super::mode::{xlen_asm_begin, xlen_asm_end};
 use super::trap::WB;
-use super::{cpu, mmu, sbi as fw, space, timer, trap};
+use super::{cpu, devirq, mmu, plic, sbi as fw, space, timer, trap};
 use crate::arch::{CpuDiscovery, CpuStart};
 use crate::irq::{self, IrqLine};
 
@@ -157,7 +157,16 @@ extern "C" fn jsr_rv_secondary_main(index: usize) -> ! {
     trap::init();
     cpu::enable_sources(cpu::SIE_SSIE);
     timer::init(AP_TIMER_HZ.load(Ordering::Relaxed));
+    // 本处理器的外部中断上下文：阈值、监管态外部中断；之后设备中断线才能路由到这里
+    if plic::init_cpu() {
+        devirq::mark_ready(index);
+    }
     crate::smp::secondary_main(index)
+}
+
+/// 逻辑下标 `index` 的 hart 号（设备树拓扑中没有时为 `None`）。
+pub fn hart_of(index: usize) -> Option<u32> {
+    FIRMWARE.get().and_then(|(t, _)| t.ids().get(index).copied())
 }
 
 /// 当前处理器的逻辑下标（`tp`；引导处理器在入口处置 0）。

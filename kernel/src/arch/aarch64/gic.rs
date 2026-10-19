@@ -3,7 +3,8 @@
 //!
 //! 寄存器基地址来自设备树（`arm,cortex-a15-gic` / `arm,gic-400` 的 `reg` 第 0、1 项）。
 //! 每个处理器只使能自己的私有中断（PPI，编号 < 32）与用作核间中断的软件生成中断（SGI 0–2）；
-//! 共享外设中断（SPI）留给以后的设备驱动。分发器的全局开关只由引导处理器打开一次，
+//! 共享外设中断（SPI）由设备中断线按需配置：目标处理器（目标寄存器的接口位）、使能、置 / 清挂起。
+//! 分发器的全局开关只由引导处理器打开一次，
 //! 私有中断与软件生成中断的使能、优先级寄存器以及 CPU 接口都是按处理器分组（banked）的，各处理器自己初始化。
 //! 中断号只在本目录内出现；Core 只看到逻辑中断线。
 
@@ -13,6 +14,13 @@ use kernel_core::smp::{IpiKind, MAX_CPUS};
 
 /// 分发器：控制寄存器。
 const GICD_CTLR: u64 = 0x000;
+/// 分发器：类型寄存器（低 5 位 = 中断号上限 / 32 − 1）。
+const GICD_TYPER: u64 = 0x004;
+/// 分发器：挂起置位 / 清除寄存器组。
+const GICD_ISPENDR: u64 = 0x200;
+const GICD_ICPENDR: u64 = 0x280;
+/// 第一个共享外设中断号。
+pub const SPI_BASE: u32 = 32;
 /// 分发器：使能置位寄存器组。
 const GICD_ISENABLER: u64 = 0x100;
 /// 分发器：使能清除寄存器组。
@@ -180,4 +188,74 @@ pub fn interrupt_id(iar: u32) -> u32 {
 pub fn end(iar: u32) {
     // SAFETY：`iar` 来自 [`acknowledge`]；写 EOIR 是 GIC 规定的结束方式。
     unsafe { w32(CPU.load(Ordering::Relaxed), GICC_EOIR, iar) }
+}
+
+// ---- 共享外设中断（设备中断线用）----
+
+/// 中断号 `id` 是否是本分发器实现了的共享外设中断。
+pub fn spi_supported(id: u32) -> bool {
+    let d = DIST.load(Ordering::Relaxed);
+    if d == 0 || id < SPI_BASE || id >= 1020 {
+        return false;
+    }
+    // SAFETY：只读分发器类型寄存器。
+    let lines = ((unsafe { r32(d, GICD_TYPER) } & 0x1f) + 1) * 32;
+    id < lines
+}
+
+/// 中断号 `id` 在按位寄存器组中的 (字偏移, 位)。
+fn bit_of(id: u32) -> (u64, u32) {
+    (u64::from(id / 32) * 4, 1 << (id % 32))
+}
+
+/// 配置一个共享外设中断：关闭、清挂起、设优先级、目标为引导处理器。不支持时返回 `false`，不写寄存器。
+pub fn spi_configure(id: u32) -> bool {
+    if !spi_supported(id) {
+        return false;
+    }
+    let d = DIST.load(Ordering::Relaxed);
+    let (word, bit) = bit_of(id);
+    let target = INTERFACE[0].load(Ordering::Acquire);
+    // SAFETY：`id` 是已实现的共享外设中断；写 1 清除 / 置位只影响该中断，优先级与目标寄存器按字节访问。
+    unsafe {
+        w32(d, GICD_ICENABLER + word, bit);
+        w32(d, GICD_ICPENDR + word, bit);
+        ((d + GICD_IPRIORITYR + u64::from(id)) as *mut u8).write_volatile(PRIORITY);
+        ((d + GICD_ITARGETSR + u64::from(id)) as *mut u8).write_volatile(target);
+    }
+    true
+}
+
+/// 把共享外设中断 `id` 的目标改为逻辑下标 `index` 的处理器；目标未登记接口位时返回 `false`，不写寄存器。
+pub fn spi_set_target(id: u32, index: usize) -> bool {
+    let bit = INTERFACE.get(index).map(|b| b.load(Ordering::Acquire)).unwrap_or(0);
+    if bit == 0 || !spi_supported(id) {
+        return false;
+    }
+    let d = DIST.load(Ordering::Relaxed);
+    // SAFETY：目标寄存器按字节访问，只改这一个中断的目标。
+    unsafe { ((d + GICD_ITARGETSR + u64::from(id)) as *mut u8).write_volatile(bit) };
+    true
+}
+
+/// 使能 / 关闭共享外设中断 `id`（关闭期间挂起状态保留）。
+pub fn spi_set_enabled(id: u32, on: bool) {
+    if !spi_supported(id) {
+        return;
+    }
+    let d = DIST.load(Ordering::Relaxed);
+    let (word, bit) = bit_of(id);
+    // SAFETY：写 1 置位 / 清除只影响该中断的使能位。
+    unsafe { w32(d, if on { GICD_ISENABLER } else { GICD_ICENABLER } + word, bit) };
+}
+
+/// 置位 / 清除共享外设中断 `id` 的挂起状态（置位 = 由分发器产生一次该中断请求）。
+pub fn spi_set_pending(id: u32, pending: bool) {
+    if !spi_supported(id) {
+        return;
+    }
+    let d = DIST.load(Ordering::Relaxed);
+    let (word, bit) = bit_of(id);
+    // SAFETY：写 1 置位 / 清除只影响该中断的挂起位。
+    unsafe { w32(d, if pending { GICD_ISPENDR } else { GICD_ICPENDR } + word, bit) };
 }

@@ -14,7 +14,7 @@ use core::arch::global_asm;
 use kernel_core::fdt::{self, Fdt, Node};
 use kernel_core::frame::{PhysRegion, RegionKind};
 
-use super::{mmu, plic, smp, testdev, timer, uart};
+use super::{devirq, mmu, plic, smp, testdev, timer, uart};
 use crate::boot::{self, BootSpec};
 
 /// 启动栈大小。
@@ -94,8 +94,8 @@ fn find_fdt(candidate: u64, mapped_end: u64) -> Option<(u64, Fdt<'static>)> {
     Some((candidate, Fdt::parse(blob).ok()?))
 }
 
-/// 从设备树中与启动处理器有关的部分取出：计数器频率（`/cpus` 的 `timebase-frequency`）
-/// 与本处理器本地中断控制器的 phandle（`cpu@<hart>` 下的 `riscv,cpu-intc`）。
+/// 从设备树中与某个处理器有关的部分取出：计数器频率（`/cpus` 的 `timebase-frequency`）
+/// 与该处理器本地中断控制器的 phandle（`cpu@<hart>` 下的 `riscv,cpu-intc`）。
 fn boot_cpu_info(fdt: &Fdt<'_>, hart: u64) -> (Option<u32>, Option<u32>) {
     let (mut freq, mut intc) = (None, None);
     let mut in_boot_cpu = false;
@@ -148,6 +148,20 @@ fn configure_devices(fdt: &Fdt<'_>, hart: u64) -> Result<(), &'static str> {
 
     // 处理器拓扑（只记录，启动其他处理器在内核主流程里经 Platform 契约进行）
     smp::configure(fdt, hart as u32);
+    // 其他处理器的监管态上下文（找不到的处理器不能作为设备中断的目标）
+    for index in 1..kernel_core::smp::MAX_CPUS {
+        let Some(h) = smp::hart_of(index) else { break };
+        if let Some(ctx) = boot_cpu_info(fdt, h as u64).1.and_then(|intc| plic_context(&plic_node, intc)) {
+            plic::set_cpu_context(index, ctx);
+        }
+    }
+
+    // 实时时钟是可选的设备中断源（没有时只有串口一条设备中断线）
+    if let Some(n) = fdt.find_compatible("google,goldfish-rtc").ok().flatten() {
+        if let (Some((pa, _)), Some(irq)) = (n.reg(0), n.cell("interrupts", 0)) {
+            devirq::set_rtc(mmu::PHYS_OFFSET + pa, irq);
+        }
+    }
 
     // 测试设备是可选的（真机上没有）：缺少时退出走 SBI 关机
     if let Some((pa, _)) = fdt.find_compatible("sifive,test0").ok().flatten().and_then(|n| n.reg(0)) {

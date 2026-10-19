@@ -25,7 +25,7 @@ use core::arch::global_asm;
 
 use super::cpu::{self, read_csr};
 use super::mode::{self, xlen_asm_begin, xlen_asm_end};
-use super::{plic, smp, timer};
+use super::{devirq, plic, smp, timer};
 use crate::console;
 use crate::fault::{self, UserFault, UserFaultKind};
 use crate::irq::{self, IrqLine};
@@ -231,15 +231,23 @@ unsafe fn instruction_len(pc: usize) -> usize {
     }
 }
 
-/// 处理外部中断：逐个认领 → 完成；本内核尚未为任何设备驱动登记外部中断，出现即报告。
+/// 处理外部中断：逐个认领 → 设备中断线交给 Core（完成之前）→ 完成；不属于任何设备中断线的源出现即报告。
 fn handle_external() {
     loop {
         let source = plic::claim();
         if source == 0 {
             return;
         }
-        plic::complete(source);
-        console::_print(format_args!("[JSR-IRQ] unexpected external interrupt source={}\n", source));
+        match devirq::line_of_source(source) {
+            Some(line) => {
+                crate::irq::on_device_irq(line);
+                plic::complete(source);
+            }
+            None => {
+                plic::complete(source);
+                console::_print(format_args!("[JSR-IRQ] unexpected external interrupt source={}\n", source));
+            }
+        }
     }
 }
 
