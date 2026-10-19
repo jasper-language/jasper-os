@@ -9,9 +9,10 @@
 //! * 本文件      —— 唯一的全局实例 + 对外 API（spawn / yield / sleep / run …），
 //!   以及唯一调用 `switch_context` 的地方
 //!
-//! 前置条件：单 CPU。协作式让出、时间片抢占、唤醒抢占共用同一切换路径：
+//! 调度器状态由一把登记了级别的锁保护，任何处理器都可访问；目前只有引导处理器运行任务，
+//! 其他处理器运行各自的空闲执行流。协作式让出、时间片抢占、唤醒抢占共用同一切换路径：
 //! 定时器中断在 EOI 之后调用 [`on_timer_interrupt`]，由机制层记账并询问策略，需要时就地切换。
-//! 所有对调度器状态的访问与全部切换都在关中断临界区内完成（时钟中断也会修改调度器状态）。
+//! 所有对调度器状态的访问都在持锁、关中断的临界区内完成，全部切换在关中断下进行（时钟中断也会修改调度器状态）。
 //!
 //! # 抢占默认开启
 //! 时间片抢占默认开启：吃满 CPU 的任务不能靠「不让出」独占处理器。需要可复现交错顺序的演练
@@ -25,10 +26,9 @@ pub mod turnstile;
 
 pub use turnstile::{KMutex, KMutexGuard};
 
-use core::ptr::{addr_of, addr_of_mut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::sync::IrqU64;
+use crate::sync::{IrqSpinLock, IrqU64};
 use crate::arch::{self as cpu, switch_context};
 use crate::task::TaskId;
 
@@ -39,22 +39,28 @@ use scheduler::{BlockError, Cause, CpuGroupId, GroupError, QosError, Scheduler, 
 /// 其余在 [`reserve_stacks`] 之后可用。
 pub const MAX_TASKS: usize = crate::config::ACTIVE.sched.max_tasks;
 
-/// 内核唯一的调度器实例。
+/// 内核调度器实例，由登记了级别的关中断自旋锁保护（多处理器下任何处理器都可安全访问）。
 ///
-/// 单 CPU；所有访问都经下面的 `with`/`with_mut`（关中断执行），且借用不跨越栈切换。
-/// SMP 时需改为每 CPU 实例 + 锁（接口保持不变）。
-static mut KERNEL_SCHED: Scheduler<KernelPolicy, MAX_TASKS> = Scheduler::new(kernel_policy());
+/// 所有访问都经下面的 `with`/`with_mut`（持锁、关中断执行），借用与锁都不跨越栈切换：
+/// 切换路径先在锁内算出切换计划、放锁，再执行栈切换。
+/// 每核运行队列与跨核取任务属于后续的负载均衡；届时只替换本实例的内部结构，接口保持不变。
+static KERNEL_SCHED: IrqSpinLock<Scheduler<KernelPolicy, MAX_TASKS>> =
+    IrqSpinLock::ranked(crate::lockorder::SCHED, Scheduler::new(kernel_policy()));
 
-/// 以共享借用访问全局调度器（关中断执行：时钟中断也会修改调度器状态）。
+/// 以共享借用访问调度器（持锁、关中断执行：时钟中断与其他处理器也会访问调度器状态）。
 fn with<R>(f: impl FnOnce(&Scheduler<KernelPolicy, MAX_TASKS>) -> R) -> R {
-    // SAFETY：单 CPU、关中断前提下没有并发访问；借用在闭包内结束。
-    cpu::without_irq(|| unsafe { f(&*addr_of!(KERNEL_SCHED)) })
+    f(&KERNEL_SCHED.lock())
 }
 
-/// 以独占借用访问全局调度器（关中断执行）。
+/// 以独占借用访问调度器（持锁、关中断执行）；调用者不得在闭包内触发栈切换。
 fn with_mut<R>(f: impl FnOnce(&mut Scheduler<KernelPolicy, MAX_TASKS>) -> R) -> R {
-    // SAFETY：同上；调用者不得在闭包内触发栈切换。
-    cpu::without_irq(|| unsafe { f(&mut *addr_of_mut!(KERNEL_SCHED)) })
+    f(&mut KERNEL_SCHED.lock())
+}
+
+/// 调度器锁遇到占用的次数（多处理器同时访问调度器时增长）。
+/// Contended acquisitions of the scheduler lock.
+pub fn lock_contended() -> u32 {
+    KERNEL_SCHED.contended()
 }
 
 /// 启动时的内核地址空间（第一次切换时记录；`space = None` 的任务都运行在它上面）。
@@ -168,8 +174,8 @@ pub fn yield_now() {
 pub fn yield_with_cause(cause: &'static str) {
     let was_enabled = cpu::irq_save_disable();
     let kernel_space = *KERNEL_SPACE.call_once(cpu::current_space);
-    // SAFETY：已关中断；借用在本语句内结束，不跨越下面的栈切换。
-    let plan = unsafe { (*addr_of_mut!(KERNEL_SCHED)).prepare_switch(cause) };
+    // 锁与借用都在本语句内结束，不跨越下面的栈切换（中断仍关着）。
+    let plan = KERNEL_SCHED.lock().prepare_switch(cause);
     if let Some(plan) = plan {
         // 下一个任务若从用户态被中断，CPU 要切到它自己的内核栈。
         if let Some(top) = plan.next_stack_top {

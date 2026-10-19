@@ -41,6 +41,7 @@ pub mod kmain;
 pub mod kobj;
 pub mod mm;
 pub mod ktrace;
+pub mod lockorder;
 pub mod mech_demo;
 pub mod panic;
 pub mod proc;

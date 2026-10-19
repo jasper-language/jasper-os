@@ -3,7 +3,7 @@
 //!
 //! # 职责
 //! 记录每个处理器的启动状态、硬件标识、当前任务槽位、本地时钟 tick、各类核间中断的接收计数、
-//! 「需要重新调度」标志、空闲循环醒来次数，以及发给它的跨核调用格。
+//! 「需要重新调度」标志、空闲循环醒来次数、发给它的跨核调用格，以及它当前持有的全局锁级别（锁顺序检查）。
 //!
 //! # 边界与原因
 //! 字段全部是原子量或叶子锁，跨核读取无需额外加锁；写入方各有约定（状态机由发起方与本处理器
@@ -11,6 +11,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
+use kernel_core::lockorder::HeldRanks;
 use kernel_core::smp::{CallSlot, CpuStateCell, IpiKind, MAX_CPUS};
 
 use crate::arch;
@@ -33,6 +34,8 @@ pub struct PerCpu {
     idle_wakeups: AtomicU32,
     /// 发给本处理器的跨核调用。
     pub call: CallSlot,
+    /// 本处理器当前持有的全局锁级别（加锁顺序检查用；只由本处理器在关中断时修改）。
+    held: HeldRanks,
 }
 
 impl PerCpu {
@@ -46,6 +49,7 @@ impl PerCpu {
             resched_pending: AtomicBool::new(false),
             idle_wakeups: AtomicU32::new(0),
             call: CallSlot::new(),
+            held: HeldRanks::new(),
         }
     }
 
@@ -119,6 +123,12 @@ impl PerCpu {
     /// Times the idle loop woke up.
     pub fn idle_wakeups(&self) -> u32 {
         self.idle_wakeups.load(Ordering::Relaxed)
+    }
+
+    /// 本处理器当前持有的全局锁级别集合。
+    /// Lock ranks currently held on this processor.
+    pub fn held_locks(&self) -> &HeldRanks {
+        &self.held
     }
 
     /// 记一次空闲循环醒来。

@@ -49,6 +49,10 @@ pub struct StackPool<const N: usize> {
     heap: [*mut Stack; N],
 }
 
+// SAFETY：堆栈指针指向本池独占拥有、永不释放的堆内存；栈池随调度器一起由锁保护，
+// 移交到其他处理器访问不会产生共享可变别名。
+unsafe impl<const N: usize> Send for StackPool<N> {}
+
 impl<const N: usize> StackPool<N> {
     /// 构造栈池：只有静态栈可用（`const`，可放进 `static`）。
     pub const fn new() -> Self {

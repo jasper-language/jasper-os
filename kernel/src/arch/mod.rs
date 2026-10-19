@@ -284,8 +284,12 @@ pub trait Platform {
     /// `root` 必须是有效的顶级表。
     unsafe fn kernel_part_used(root: Self::SpaceRoot, phys_offset: u64) -> usize;
 
-    /// 设置「从用户态进入内核时使用的内核栈顶」（调度器在每次切换任务时调用）。
+    /// 设置**本处理器**「从用户态进入内核时使用的内核栈顶」（调度器在每次切换任务时调用；每核一份，互不覆盖）。
     fn set_kernel_stack(top: u64);
+
+    /// 本处理器当前登记的内核栈顶（从入口实际读取的位置读出；未设置时为 0）。
+    /// Kernel stack top currently registered for the executing processor.
+    fn kernel_stack() -> u64;
 
     /// 进入用户态执行（永不返回；回到内核只能经中断、异常或系统调用）。
     ///
@@ -500,6 +504,10 @@ pub unsafe fn kernel_part_used(root: SpaceRoot, phys_offset: u64) -> usize {
 /// 见 [`Platform::set_kernel_stack`]。
 pub fn set_kernel_stack(top: u64) {
     Current::set_kernel_stack(top)
+}
+/// 见 [`Platform::kernel_stack`]。
+pub fn kernel_stack() -> u64 {
+    Current::kernel_stack()
 }
 /// 见 [`Platform::enter_user`]。
 ///

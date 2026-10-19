@@ -240,7 +240,7 @@ extern "C" fn ap_entry(index: u64) -> ! {
         crate::arch::halt_forever();
     }
     idt::load();
-    syscall::init();
+    syscall::init(index);
     apic::enable_local(false);
     apic::start_periodic(AP_TIMER_HZ.load(Ordering::Relaxed));
     crate::smp::secondary_main(index)

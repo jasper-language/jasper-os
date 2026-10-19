@@ -73,7 +73,7 @@ impl KObject {
     }
 }
 
-static TABLE: IrqSpinLock<ObjectTable<KObject, MAX_OBJECTS>> = IrqSpinLock::new(ObjectTable::new());
+static TABLE: IrqSpinLock<ObjectTable<KObject, MAX_OBJECTS>> = IrqSpinLock::ranked(crate::lockorder::OBJECT_TABLE, ObjectTable::new());
 
 /// 在对象表锁内执行 `f`（只做计数、查表与有界的页表操作；不得在其中执行销毁动作）。
 pub fn with<R>(f: impl FnOnce(&mut ObjectTable<KObject, MAX_OBJECTS>) -> R) -> R {

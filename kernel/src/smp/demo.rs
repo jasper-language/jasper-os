@@ -15,7 +15,8 @@ use crate::{arch, kprintln, mm};
 static FAILED: AtomicU32 = AtomicU32::new(0);
 static CHECKS: AtomicU32 = AtomicU32::new(0);
 
-fn check(ok: bool, what: &str) {
+/// 记一项断言（失败时打印原因）；同目录的其他演练共用计数。
+pub(super) fn check(ok: bool, what: &str) {
     CHECKS.fetch_add(1, Ordering::Relaxed);
     if !ok {
         FAILED.fetch_add(1, Ordering::Relaxed);
@@ -94,6 +95,7 @@ pub fn run(report: StartReport) {
     } else {
         kprintln!("[JSR-SMP] single cpus=1 secondary=none");
     }
+    super::shared_demo::run(report.online);
     let me = percpu::this();
     check(arch::cpu_index() == 0 && me.current() == 0, "引导处理器的每核数据与当前任务不符");
     kprintln!(

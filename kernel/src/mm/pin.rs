@@ -29,7 +29,7 @@ struct Pin {
     orphaned: bool,
 }
 
-static PINS: IrqSpinLock<Vec<Pin>> = IrqSpinLock::new(Vec::new());
+static PINS: IrqSpinLock<Vec<Pin>> = IrqSpinLock::ranked(crate::lockorder::MEMORY_PINS, Vec::new());
 
 /// 固定一个帧（计数 +1）。
 pub fn pin(f: PhysFrame) {

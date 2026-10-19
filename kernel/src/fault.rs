@@ -43,7 +43,7 @@ pub struct UserFault {
 }
 
 /// 最近一次用户态故障与累计次数。
-static LAST: IrqSpinLock<(Option<UserFault>, u32)> = IrqSpinLock::new((None, 0));
+static LAST: IrqSpinLock<(Option<UserFault>, u32)> = IrqSpinLock::ranked(crate::lockorder::FAULT_LAST, (None, 0));
 
 /// 用户态异常入口（arch 调用；永不返回）。
 pub fn on_user_fault(fault: UserFault) -> ! {

@@ -53,6 +53,7 @@ pub mod fdt;
 pub mod frame;
 pub mod heap;
 pub mod io;
+pub mod lockorder;
 pub mod memory;
 pub mod meta;
 pub mod paging;

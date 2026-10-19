@@ -73,7 +73,7 @@ impl Platform for X86_64 {
         crate::console::write_str("[JSR-GDT] ok\n");
         idt::init();
         crate::console::write_str("[JSR-IDT] ok\n");
-        syscall::init();
+        syscall::init(0);
     }
 
     fn irq_init(timer_hz: u32) {
@@ -202,6 +202,10 @@ impl Platform for X86_64 {
     fn set_kernel_stack(top: u64) {
         gdt::set_kernel_stack(top);
         syscall::set_kernel_stack(top);
+    }
+
+    fn kernel_stack() -> u64 {
+        syscall::kernel_stack()
     }
 
     unsafe fn enter_user(entry: u64, stack: u64, arg0: u64, arg1: u64) -> ! {

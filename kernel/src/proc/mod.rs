@@ -122,7 +122,7 @@ struct Registry {
     members: Vec<Member>,
 }
 
-static REG: IrqSpinLock<Registry> = IrqSpinLock::new(Registry { starts: Vec::new(), members: Vec::new() });
+static REG: IrqSpinLock<Registry> = IrqSpinLock::ranked(crate::lockorder::PROC_REGISTRY, Registry { starts: Vec::new(), members: Vec::new() });
 /// 线程任务 ID 分配（与其它演示任务的 ID 区分开）。
 static TASK_IDS: kernel_core::object::IdAllocator = kernel_core::object::IdAllocator::new();
 

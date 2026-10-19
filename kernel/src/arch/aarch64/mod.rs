@@ -210,6 +210,10 @@ impl Platform for Aarch64 {
         user::set_kernel_stack(top);
     }
 
+    fn kernel_stack() -> u64 {
+        user::kernel_stack()
+    }
+
     unsafe fn enter_user(entry: u64, stack: u64, arg0: u64, arg1: u64) -> ! {
         user::enter(entry, stack, arg0, arg1)
     }

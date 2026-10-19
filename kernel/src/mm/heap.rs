@@ -35,7 +35,7 @@ struct HeapState {
 }
 
 static HEAP: IrqSpinLock<HeapState> =
-    IrqSpinLock::new(HeapState { heap: LinkedListHeap::empty(), mapped_end: HEAP_START });
+    IrqSpinLock::ranked(crate::lockorder::MEMORY_HEAP, HeapState { heap: LinkedListHeap::empty(), mapped_end: HEAP_START });
 
 /// 增长失败的原因（诊断用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

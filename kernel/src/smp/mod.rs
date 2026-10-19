@@ -3,12 +3,13 @@
 //!
 //! # 结构
 //! * `percpu` —— 每核数据（状态、当前任务、本地时钟、核间中断计数、跨核调用格）
-//! * `demo`   —— 里程碑演练（与机制分离，可整体删除）
+//! * `demo` / `shared_demo` —— 里程碑演练（与机制分离，可整体删除）
 //! * 本文件   —— 启动流程、核间中断的 Core 侧处理、跨核调用与 TLB 击落的发起方逻辑
 //!
 //! 协议本体（状态机、击落公告板、调用格）在 `kernel_core::smp`，宿主已测；硬件动作全部经 `arch::*`。
 //!
 //! # 锁顺序登记
+//! 子系统级全局锁登记在 `crate::lockorder` 的一条链上，加锁时按每核持有集合检查顺序。
 //! 本子系统的锁全部是叶子锁，持有期间不获取任何其他锁，也不触发调度：
 //! * 击落公告板锁 —— 持锁期间只执行本地 TLB 作废（无锁）；
 //! * 每核跨核调用格锁 —— 被调函数在锁外执行；
@@ -20,6 +21,7 @@
 
 pub mod demo;
 pub mod percpu;
+pub mod shared_demo;
 
 use alloc::vec;
 use kernel_core::frame::PhysFrame;
@@ -225,12 +227,27 @@ pub fn reschedule(cpu: usize) -> Result<(), SmpError> {
 /// `f` 必须短小、不阻塞、不获取可能被调用者持有的锁。
 /// Run `f(arg)` on processor `cpu` and return its result.
 pub fn call_on(cpu: usize, f: CallFn, arg: u64) -> Result<u64, SmpError> {
+    post_call(cpu, f, arg)?;
+    collect_call(cpu)
+}
+
+/// 向处理器 `cpu` 投递 `f(arg)` 并发出核间中断后立即返回（不等结果）；之后必须以 [`collect_call`] 取回。
+/// 用于让多个处理器**同时**执行；约束同 [`call_on`]。失败时不留投递。
+/// Post `f(arg)` to processor `cpu` without waiting.
+pub fn post_call(cpu: usize, f: CallFn, arg: u64) -> Result<(), SmpError> {
     let pc = check_target(cpu)?;
     pc.call.post(f, arg)?;
     if let Err(e) = arch::send_ipi(cpu, IpiKind::Call) {
         pc.call.abandon();
         return Err(e);
     }
+    Ok(())
+}
+
+/// 等待并取回此前经 [`post_call`] 投递给 `cpu` 的结果；超时则撤销投递。
+/// Wait for and collect the result of a posted call.
+pub fn collect_call(cpu: usize) -> Result<u64, SmpError> {
+    let pc = check_target(cpu)?;
     let mut result = None;
     if wait_until(|| {
         result = pc.call.collect();

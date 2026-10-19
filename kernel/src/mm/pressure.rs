@@ -17,7 +17,7 @@ struct State {
     stats: PressureStats,
 }
 
-static STATE: IrqSpinLock<State> = IrqSpinLock::new(State { params: crate::config::ACTIVE.memory.pressure, stats: PressureStats::new() });
+static STATE: IrqSpinLock<State> = IrqSpinLock::ranked(crate::lockorder::MEMORY_PRESSURE, State { params: crate::config::ACTIVE.memory.pressure, stats: PressureStats::new() });
 
 /// 为 `requester`（有效档位；`None` = 内核内部）申请 `frames` 个帧做准入判定，并记入统计。
 /// 成功返回分配后的级别。

@@ -44,7 +44,7 @@ pub fn init(boot: &'static BootSpec) -> FrameStats {
     ALLOCATOR.call_once(|| {
         // SAFETY：`Once` 保证这段只执行一次，BITMAP 的唯一可变借用交给分配器、此后不再被直接访问。
         let bits: &'static mut [u64] = unsafe { &mut *addr_of_mut!(BITMAP) };
-        IrqSpinLock::new(BitmapFrameAllocator::new(bits, boot.regions()))
+        IrqSpinLock::ranked(crate::lockorder::MEMORY_FRAME, BitmapFrameAllocator::new(bits, boot.regions()))
     });
     stats(boot.regions().len())
 }

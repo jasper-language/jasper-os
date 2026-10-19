@@ -885,6 +885,52 @@ check_smp1b_rv() { # 多处理器第二阶段（RISC-V64 与 RISC-V32）：设�
   fi
 }
 
+# smp1c_verdict <4 处理器日志> <QEMU 退出码> <名称>：一份日志上的 SMP-1c 断言；缺失项追加到 SC_MISS
+smp1c_verdict() {
+  local scf="$1" scrc="$2" scname="$3" sccpu scbad scgood
+  grep -qaE '^\[JSR-SMPC\] registry locks=[0-9]+ valid=true' "$scf" || SC_MISS="$SC_MISS $scname:登记表"
+  [ "$(grep -caE '^\[JSR-SMPC\] rank +[0-9]+ system\.[a-z_.]+.?$' "$scf")" -ge 11 ] || SC_MISS="$SC_MISS $scname:登记链"
+  grep -qa '^\[JSR-SMPC\] order ascending=ok reverse=system\.lock\.error\.out_of_order recursive=system\.lock\.error\.out_of_order unchanged=true held_back=true' "$scf" \
+    || SC_MISS="$SC_MISS $scname:顺序检查"
+  grep -qa '^\[JSR-SMPC\] held per_cpu independent=3/3' "$scf" || SC_MISS="$SC_MISS $scname:每核持有集合"
+  # 控制台：4 个处理器各 16 行、格式完整（任何跨核交错都会破坏行格式）
+  scgood=$(grep -caE '^\[JSR-SMPC\] burst cpu=[0-3] seq=(0[0-9]|1[0-5]) abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKL end.?$' "$scf")
+  scbad=$(grep -a 'burst cpu=' "$scf" | grep -cavE '^\[JSR-SMPC\] burst cpu=[0-3] seq=(0[0-9]|1[0-5]) abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKL end.?$')
+  [ "$scgood" -eq 64 ] && [ "$scbad" -eq 0 ] || SC_MISS="$SC_MISS $scname:整行输出($scgood/64,坏行$scbad)"
+  for sccpu in 0 1 2 3; do
+    [ "$(grep -caE "^\[JSR-SMPC\] burst cpu=$sccpu seq=" "$scf")" -eq 16 ] || SC_MISS="$SC_MISS $scname:cpu$sccpu行数"
+  done
+  grep -qaE '^\[JSR-SMPC\] console burst cpus=4 lines_per_cpu=16 total=64 contended=[0-9]+' "$scf" || SC_MISS="$SC_MISS $scname:并发输出"
+  grep -qaE '^\[JSR-SMPC\] sched concurrent readers=3/3 rounds=2000 consistent=true restored=true contended=[0-9]+' "$scf" || SC_MISS="$SC_MISS $scname:调度器锁"
+  grep -qa '^\[JSR-SMPC\] kstack per_cpu set=3/3 kept=3/3 bsp_unchanged=true restored=3/3' "$scf" || SC_MISS="$SC_MISS $scname:每核内核栈"
+  grep -qaE '^\[JSR-LOCK-ORDER\]|^\[JSR-PANIC\]' "$scf" && SC_MISS="$SC_MISS $scname:出现锁顺序违反或panic"
+  grep -qaE '^\[JSR-SMP\] summary cpus=4 online=4 checks=[0-9]+ failed=0' "$scf" && grep -qa '^\[JSR-EXIT\] success' "$scf" && [ "$scrc" -eq 33 ] \
+    || SC_MISS="$SC_MISS $scname:汇总/退出"
+}
+
+check_smp1c() { # 多处理器第三阶段（去全局串行点）：全局锁登记在一条级别链上并按每核持有集合检查顺序（逆序 / 重入被拒且无残留）；
+                # 调度器改为登记了级别的锁；控制台跨核整行输出；系统调用入口暂存位与内核栈登记每核一份；四个指令集的 4 处理器日志全部通过
+  if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || [ ! -s "$SERIAL_RV32_SMP4" ]; then
+    record SMP-1c FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）"
+    return
+  fi
+  SC_MISS=""
+  smp1c_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64
+  smp1c_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64
+  smp1c_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64
+  smp1c_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
+  local scsingle
+  for scsingle in "$SERIAL" "$SERIAL_A64" "$SERIAL_RV64" "$SERIAL_RV32"; do
+    grep -qa '^\[JSR-SMPC\] single cpus=1 cross_cpu=skipped' "$scsingle" \
+      && grep -qa '^\[JSR-SMPC\] order ascending=ok reverse=system\.lock\.error\.out_of_order' "$scsingle" || SC_MISS="$SC_MISS 单处理器($(basename "$scsingle"))"
+  done
+  if [ -z "$SC_MISS" ]; then
+    record SMP-1c PASS "x86_64 / AArch64 / RISC-V64 / RISC-V32 -smp 4（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）：$(grep -caE '^\[JSR-SMPC\] rank ' "$SERIAL_SMP4") 把全局锁登记成一条级别链，逆序 / 重入被拒且持有集合与中断状态不变，持有集合每核独立 3/3；4 核同时各打印 16 行共 64 行无一交错；其他 3 核各 2000 次读调度器与引导处理器改写并发、状态一致、无死锁；内核栈登记（x86_64 经每核 KERNEL_GS_BASE 入口块）每核独立 3/3；无锁顺序违反；单处理器如实跳过跨核部分"
+  else
+    record SMP-1c FAIL "缺少/不符：$SC_MISS"
+  fi
+}
+
 a64_ready() { [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ] && [ -s "$SERIAL_A64" ]; }
 
 check_isa1a() { # AArch64 移植第一阶段：内核侧检查在 qemu-system-aarch64 的串口日志上逐项重跑（行名带 A64/ 前缀）
@@ -1030,7 +1076,7 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

@@ -91,7 +91,7 @@ impl SyscallSet {
 }
 
 /// 最近一次 `system.task.exit` 的 (任务 ID, 退出码) 与累计次数。
-static LAST_EXIT: IrqSpinLock<(Option<(u64, i64)>, u32)> = IrqSpinLock::new((None, 0));
+static LAST_EXIT: IrqSpinLock<(Option<(u64, i64)>, u32)> = IrqSpinLock::ranked(crate::lockorder::SYSCALL_LAST_EXIT, (None, 0));
 /// 累计系统调用次数（诊断）。
 static CALLS: AtomicU32 = AtomicU32::new(0);
 

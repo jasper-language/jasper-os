@@ -19,13 +19,24 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::vectors::FRAME_BYTES;
 use crate::arch::UserProbe;
+use kernel_core::smp::MAX_CPUS;
 
-/// 当前任务的内核栈顶（调度器每次切换任务时经 `set_kernel_stack` 更新）。
-static KERNEL_STACK_TOP: AtomicU64 = AtomicU64::new(0);
+/// 每个处理器当前任务的内核栈顶（下标 = 逻辑下标；调度器每次切换任务时经 `set_kernel_stack` 更新本核一项）。
+static KERNEL_STACK_TOP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
-/// 记录当前任务的内核栈顶。
+/// 本处理器的内核栈顶记录。
+fn this_cpu_top() -> &'static AtomicU64 {
+    &KERNEL_STACK_TOP[super::smp::cpu_index().min(MAX_CPUS - 1)]
+}
+
+/// 记录本处理器当前任务的内核栈顶。
 pub fn set_kernel_stack(top: u64) {
-    KERNEL_STACK_TOP.store(top, Ordering::Relaxed);
+    this_cpu_top().store(top, Ordering::Relaxed);
+}
+
+/// 本处理器登记的内核栈顶。
+pub fn kernel_stack() -> u64 {
+    this_cpu_top().load(Ordering::Relaxed) as u64
 }
 
 /// 进入用户态（永不返回）。
@@ -34,7 +45,7 @@ pub fn set_kernel_stack(top: u64) {
 /// 当前地址空间里 `entry` 必须映射为用户可执行、`stack` 之下必须映射为用户可写；
 /// 当前任务的内核栈顶必须已经设置（调度器在切入任务时完成）。
 pub unsafe fn enter(entry: u64, stack: u64, arg0: u64, arg1: u64) -> ! {
-    let top = KERNEL_STACK_TOP.load(Ordering::Relaxed);
+    let top = this_cpu_top().load(Ordering::Relaxed);
     assert!(top != 0 && top % 16 == 0, "进入用户态前未设置内核栈顶");
     asm!(
         "mov sp, x4",

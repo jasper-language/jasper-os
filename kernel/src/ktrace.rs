@@ -15,7 +15,7 @@ use crate::sync::IrqSpinLock;
 /// 追踪缓冲容量（条）。
 pub const CAPACITY: usize = crate::config::ACTIVE.diag.trace_capacity;
 
-static TRACER: IrqSpinLock<Tracer<CAPACITY>> = IrqSpinLock::new(Tracer::new());
+static TRACER: IrqSpinLock<Tracer<CAPACITY>> = IrqSpinLock::ranked(crate::lockorder::TRACE, Tracer::new());
 
 /// 记录一条结构化事件，返回序号（序号用尽时丢弃事件并返回 `None`）。
 pub fn emit(name: &'static str, tags: &[Tag]) -> Option<u64> {
