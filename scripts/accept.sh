@@ -875,7 +875,7 @@ check_smp1b_a64() { # 多处理器第二阶段（AArch64）：设备树发现 4 
   port_rerun "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" "A64SMP4/" 128 \
     check_m11 check_m12 check_m13 check_m14 check_m15 check_m21 check_m22 check_m23 check_m24 check_m31 check_m32 check_m33 check_m34 \
     check_m42 check_fix check_sched2 check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 \
-    check_j5 check_j6 check_sched1 check_sched3 check_t1 check_t2
+    check_j5 check_j6 check_pol2 check_sched1 check_sched3 check_t1 check_t2
   local n=$PORT_N bad=$PORT_BAD miss="" f="$SERIAL_A64_SMP4" c
   grep -qE '^\[JSR-SMP\] start present=4 online=4 failed=0 source=fdt\.cpus ' "$f" || miss="$miss 启动"
   for c in 0 1 2 3; do grep -qE "^\[JSR-SMP\] cpu index=$c hw=$c state=online" "$f" || miss="$miss cpu$c"; done
@@ -912,7 +912,7 @@ rv_smp4_verdict() {
   port_rerun "$rvlog" "$rvqrc" "$rvprefix" 128 \
     check_m11 check_m12 check_m13 check_m14 check_m15 check_m21 check_m22 check_m23 check_m24 check_m31 check_m32 check_m33 check_m34 \
     check_m42 check_fix check_sched2 check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 \
-    check_j5 check_j6 check_sched1 check_sched3 check_t1 check_t2
+    check_j5 check_j6 check_pol2 check_sched1 check_sched3 check_t1 check_t2
   grep -qaE '^\[JSR-SMP\] start present=4 online=4 failed=0 source=fdt\.cpus ' "$rvlog" || RV_SMP_MISS="$RV_SMP_MISS 启动"
   rvhws=$(grep -aoE '^\[JSR-SMP\] cpu index=[0-3] hw=[0-3] state=online' "$rvlog" | grep -oE 'hw=[0-3]' | sort -u | wc -l)
   [ "$rvhws" -eq 4 ] || RV_SMP_MISS="$RV_SMP_MISS hart号($rvhws)"
@@ -1126,7 +1126,7 @@ check_isa1b() { # AArch64 移植第二阶段：内嵌用户程序（独立 Rust 
     return
   fi
   a64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 check_j6 \
-            check_sched1 check_sched3 check_t1 check_t2
+            check_pol2 check_sched1 check_sched3 check_t1 check_t2
   local progs
   progs=$(grep -cE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_A64" || true)
   if [ "$A64_BAD" -eq 0 ] && ! grep -q '^\[JSR-STAGE\] user_programs=absent' "$SERIAL_A64" \
@@ -1162,7 +1162,7 @@ check_isa2b() { # RISC-V64 移植第二阶段：内嵌用户程序（独立 Rust
     return
   fi
   rv64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 check_j6 \
-             check_sched1 check_sched3 check_t1 check_t2
+             check_pol2 check_sched1 check_sched3 check_t1 check_t2
   local progs
   progs=$(grep -cE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_RV64" || true)
   if [ "$RV64_BAD" -eq 0 ] && ! grep -q '^\[JSR-STAGE\] user_programs=absent' "$SERIAL_RV64" \
@@ -1218,7 +1218,7 @@ check_isa3b() { # RISC-V32 移植第二阶段：内嵌用户程序（ELF32 装�
     return
   fi
   rv32_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 check_j6 \
-             check_sched1 check_sched3 check_t1 check_t2
+             check_pol2 check_sched1 check_sched3 check_t1 check_t2
   local progs
   progs=$(grep -caE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_RV32" || true)
   if [ "$RV32_BAD" -eq 0 ] && ! grep -qa '^\[JSR-STAGE\] user_programs=absent' "$SERIAL_RV32" \
@@ -1228,6 +1228,26 @@ check_isa3b() { # RISC-V32 移植第二阶段：内嵌用户程序（ELF32 装�
     record ISA3b PASS "RISC-V32（QEMU=$QRC_RV32）：内嵌用户程序以 riscv32imac 构建为 ELF32、链接在 Sv32 私有窗口内（0x0080_0000），64 位参数按低半 a0–a2 / 高半 a3–a5 传递，$RV32_N 项用户态检查全部通过（ELF/生命周期/异步环/IPC/非特权程序/jasper-rt/Rust 库/.jaso 装载（4 字节重定位）与库模块/QoS/过载防护/配置/基准），创建进程 $progs 次"
   else
     record ISA3b FAIL "RISC-V32：$RV32_N 项中 $RV32_BAD 项失败、未内嵌用户程序或未成功退出（见 serial-riscv32.log）"
+  fi
+}
+
+check_pol2() {  # POL-2：系统 Profile——启动期校验、两份内建 Profile 的服务面真实不同、
+                # 四类非法 Profile 各自给出结构化拒绝原因、结构化描述可渲染
+  if has '\[JSR-PROFILE\] active name=headless valid=true params=(standard|compact) modules=6 services=10 capabilities=6 guarantees=2' \
+     && has '\[JSR-PROFILE\] table idx=1 name=headless-min valid=true modules=4 services=8' \
+     && has '\[JSR-PROFILE\] gate profile=headless op=system\.async\.ring\.create allowed=true' \
+     && has '\[JSR-PROFILE\] gate profile=headless-min op=system\.async\.ring\.create allowed=false' \
+     && has '\[JSR-PROFILE\] gate profile=headless-min op=system\.time\.now allowed=true' \
+     && has '\[JSR-PROFILE\] reject case=missing-capability code=missing_capability subject=memory\.virtual' \
+     && has '\[JSR-PROFILE\] reject case=capability-conflict code=capability_conflict subject=kernel\.core' \
+     && has '\[JSR-PROFILE\] reject case=params-too-small code=unsatisfiable_tasks' \
+     && has '\[JSR-PROFILE\] reject case=hot-load-not-allowed code=hot_load_not_allowed' \
+     && has '\[JSR-PROFILE\] render idx=0 bytes=[0-9]+ head=profile=headless' \
+     && has '\[JSR-PROFILE\] render idx=1 bytes=[0-9]+ head=profile=headless-min' \
+     && has '\[JSR-PROFILE\] summary profiles=2 rejects=4 gates=3 renders=2 checks=14 failed=0'; then
+    record POL2 PASS "启动期校验通过：headless（6 模块 / 10 服务 / 6 能力）与 headless-min（4 模块 / 8 服务）服务面真实不同（异步环在精简档被门拒绝）；缺依赖 / 能力冲突 / 参数下限不可满足 / 未授权热加载四类各自给出结构化拒绝码；结构化描述可渲染；14 项断言 0 失败"
+  else
+    record POL2 FAIL "缺少 [JSR-PROFILE] 关键标记、结构化拒绝不全、两份 Profile 服务面相同或 failed≠0"
   fi
 }
 
@@ -1254,11 +1274,11 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 
 if [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1
+  check_pol1; check_pol2
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1
+  check_pol1; check_pol2
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------

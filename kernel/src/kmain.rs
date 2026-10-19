@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{balance_demo, clock, irq_demo, config, counter_demo, fix_demo, irq, kprint, kprintln, mech_demo, mm, pi_demo, sched, smp, user_demo};
+use crate::{balance_demo, clock, irq_demo, config, counter_demo, fix_demo, irq, kprint, kprintln, mech_demo, mm, pi_demo, profile, profile_demo, sched, smp, user_demo};
 #[cfg(feature = "user-programs")]
 use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo};
 
@@ -94,6 +94,14 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ),
         Err(e) => kprintln!("[JSR-SCHED] capacity reserve_failed available={}", e.available),
     }
+    // POL-2：系统 Profile（模块面 + 参数档）在堆就绪后立刻校验；不合法就拒绝启动，
+    // 因为后面的服务判定、配额与调度类别都以这份声明为前提。
+    let profile_failed = profile::boot_report();
+    if profile_failed > 0 {
+        kprintln!("[JSR-EXIT] failure profile_failed={}", profile_failed);
+        arch::exit_emulator(ExitStatus::Failure);
+    }
+    profile_demo::run();
     // M2.4：独立地址空间（同一虚拟地址、不同物理帧，真实切换）。
     mm::demo::run_space();
     // SMP-1：启动其他处理器（每核数据、各自计时、核间中断、跨核调用、TLB 击落）。
@@ -159,6 +167,7 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("irq", irq_demo::failed()),
         ("user", user_demo::failed()),
         ("fix", fix_demo::failed()),
+        ("profile", profile_demo::failed()),
         #[cfg(feature = "user-programs")]
         ("ring", ring_demo::failed()),
         #[cfg(feature = "user-programs")]

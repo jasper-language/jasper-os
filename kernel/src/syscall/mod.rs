@@ -21,13 +21,16 @@ use alloc::vec;
 use kernel_core::object::{HandleError, HandleId, Rights};
 use kernel_core::sched::Qos;
 
-use crate::mm::user::{copy_from_user, UserPtrError};
+use crate::mm::user::{copy_from_user, copy_to_user, UserPtrError};
 use crate::proc::{self, ProcError};
 use crate::sync::IrqSpinLock;
-use crate::{kprintln, sched};
+use crate::{kprintln, profile, sched};
 
 /// `system.console.write` 单次最多写入的字节数。
 pub const CONSOLE_WRITE_MAX: usize = 4096;
+
+/// `system.profile.get` 单次最多写入的字节数（结构化描述足够小，超过即视为调用错误）。
+pub const PROFILE_TEXT_MAX: usize = 2048;
 use table::*;
 
 /// 一次系统调用的输入（与 ISA 无关）。
@@ -152,6 +155,8 @@ fn has_handler(id: u32) -> bool {
             | SYSTEM_MEMORY_PROTECT
             | SYSTEM_TASK_QOS_SET
             | SYSTEM_PROCESS_SPAWN
+            | SYSTEM_PROFILE_LIST
+            | SYSTEM_PROFILE_GET
     )
 }
 
@@ -418,6 +423,36 @@ fn execute(e: &AbiEntry, a: &SyscallArgs, task_id: u64) -> i64 {
         SYSTEM_MEMORY_PROTECT => memory_protect(a.args[0], a.args[1], a.args[2]),
         SYSTEM_TASK_QOS_SET => task_qos_set(a.args[0]),
         SYSTEM_PROCESS_SPAWN => crate::proc::spawn::sys_spawn(a.args[0]),
+        // 系统调用只能返回标量：`list` 返回内建 Profile 的数量，具体描述用 `get` 按下标取。
+        SYSTEM_PROFILE_LIST => profile::count() as i64,
+        SYSTEM_PROFILE_GET => profile_get(a.args[0], a.args[1], a.args[2]),
         _ => err(SYSTEM_ERROR_UNSUPPORTED),
     }
+}
+
+/// `system.profile.get(index, buf, cap)`：把第 `index` 个内建 Profile 的键=值描述写入用户缓冲区。
+///
+/// 失败模式：
+/// * 缓冲区为空或超过 [`PROFILE_TEXT_MAX`] ⇒ `invalid_argument`；
+/// * 下标越界、Profile 自身不合法或描述装不下用户缓冲区 ⇒ `profile.error.buffer_too_small`
+///   （调用方据此扩大缓冲区或换下标，不需要解析自然语言）。
+/// English: write the structured description of one profile into a user buffer.
+fn profile_get(index: u64, ptr: u64, cap: u64) -> i64 {
+    let Ok(capacity) = usize::try_from(cap) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    if capacity == 0 || capacity > PROFILE_TEXT_MAX {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    }
+    let mut buf = [0u8; PROFILE_TEXT_MAX];
+    let Some(len) = profile::render(index as usize, &mut buf) else {
+        return err(SYSTEM_PROFILE_ERROR_BUFFER_TOO_SMALL);
+    };
+    if len > capacity {
+        return err(SYSTEM_PROFILE_ERROR_BUFFER_TOO_SMALL);
+    }
+    if let Err(e) = copy_to_user(ptr, &buf[..len], PROFILE_TEXT_MAX) {
+        return user_ptr_err(e);
+    }
+    len as i64
 }

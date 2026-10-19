@@ -40,3 +40,8 @@
 4115	error	system.memory.error.already_mapped	1	none	地址已有映射
 4116	error	system.memory.error.out_of_memory	1	none	物理内存不足
 21	op	system.memory.protect	1	write	内存·修改访问权限
+22	op	system.task.qos.set	1	write	任务·设置服务质量等级
+23	op	system.process.spawn	1	write	进程·创建子进程（映像 + 调用子集 + 引导通道）
+24	op	system.profile.list	1	read	配置档·列举（返回数量）
+25	op	system.profile.get	1	read	配置档·读取结构化描述
+4117	error	system.profile.error.buffer_too_small	1	none	配置档·缓冲区过小

@@ -57,6 +57,7 @@ pub mod irq;
 pub mod lockorder;
 pub mod memory;
 pub mod meta;
+pub mod profile;
 pub mod paging;
 pub mod pagetable;
 pub mod pressure;

@@ -46,6 +46,8 @@ pub mod lockorder;
 pub mod mech_demo;
 pub mod panic;
 pub mod proc;
+pub mod profile;
+pub mod profile_demo;
 #[cfg(feature = "user-programs")]
 pub mod prog_demo;
 pub mod ring;
