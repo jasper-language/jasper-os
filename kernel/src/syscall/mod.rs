@@ -206,7 +206,10 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
     if trace {
         kprintln!("[JSR-SYSCALL] enter name={} id={} task={} effects={}", e.name, e.id, task_name, e.effects.as_str());
     }
+    // WCET 证据：只测真正执行的时间，不含查表与权限检查（那两项是常数级）。
+    let started = crate::arch::cycles();
     let ret = execute(e, a, task_id.0);
+    crate::wcet::record_syscall(crate::arch::cycles().wrapping_sub(started));
     if trace {
         kprintln!("[JSR-SYSCALL] exit name={} id={} ret={} status={}", e.name, e.id, ret, error_name(ret));
     }

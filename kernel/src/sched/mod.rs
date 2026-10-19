@@ -67,11 +67,14 @@ fn with<R>(f: impl FnOnce(&Scheduler<KernelPolicy, MAX_TASKS>) -> R) -> R {
 /// 以独占借用访问调度器（持锁、关中断执行）；调用者不得在闭包内触发栈切换。
 /// 闭包期间记下的重新调度请求在放锁之后发出。
 fn with_mut<R>(f: impl FnOnce(&mut Scheduler<KernelPolicy, MAX_TASKS>) -> R) -> R {
+    let started = crate::arch::cycles();
     let (r, kicks) = {
         let mut s = KERNEL_SCHED.lock();
         let r = f(&mut s);
         (r, s.take_kicks())
     };
+    // WCET 证据：调度器锁的持有时间（含回调内的全部工作）。
+    crate::wcet::record_lock(crate::arch::cycles().wrapping_sub(started));
     send_kicks(kicks);
     r
 }
@@ -308,6 +311,17 @@ pub fn yield_with_cause(cause: &'static str) {
 /// 已到期时立即返回。所属进程开始终止时会被 [`wake`] 提前唤醒——调用者醒来后须自行检查等待条件。
 /// 在引导线程上调用时退化为「先让出、再休眠到下一个中断」（引导线程是空闲时的落脚点，不能睡眠）。
 /// Sleeps the current worker until `deadline` (ticks) without consuming CPU.
+/// 设置任务的实时预算与周期（抢占式节流的入口）。
+pub fn set_rt(id: crate::task::TaskId, quota: u32, period: u32) -> bool {
+    let now = timer_ticks();
+    with_mut(|s| s.set_rt(id, quota, period, now))
+}
+
+/// 累计因预算/资格不可运行而被换下的次数。
+pub fn throttle_count() -> u32 {
+    scheduler::throttle_count()
+}
+
 pub fn sleep_until(deadline: u64) {
     let was_enabled = cpu::irq_save_disable();
     if timer_ticks() < deadline {

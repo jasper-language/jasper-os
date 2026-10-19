@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{balance_demo, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, mech_demo, mm, pi_demo, profile, profile_demo, sched, smp, user_demo};
+use crate::{balance_demo, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, mech_demo, mm, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, wcet};
 #[cfg(feature = "user-programs")]
 use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo};
 
@@ -104,6 +104,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
     profile_demo::run();
     // POL-3：批处理作业（依赖 / 优先级 / 取消 / 终态 / 满载下交互性）。
     job_demo::run();
+    // POL-4：实时准入与预算（协作式节流；抢占式执行待接入）。
+    rtclass_demo::run();
     // M2.4：独立地址空间（同一虚拟地址、不同物理帧，真实切换）。
     mm::demo::run_space();
     // SMP-1：启动其他处理器（每核数据、各自计时、核间中断、跨核调用、TLB 击落）。
@@ -161,6 +163,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
         // T-2：基准（时钟中断、上下文切换、页帧、堆、系统调用、异步环、IPC 往返）与按预算评估参数取值。
         bench_demo::run();
     }
+    // WCET 证据：关键路径的最大实测值（系统调用周期、交互唤醒 tick）。
+    wcet::report();
     // 各演练的断言失败数（顺序即输出顺序）；未编译的演练不出现。
     let fails: &[(&str, u32)] = &[
         ("mm", mm::demo::failed()),
@@ -171,6 +175,7 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("fix", fix_demo::failed()),
         ("profile", profile_demo::failed()),
         ("job", job_demo::failed()),
+        ("rtclass", rtclass_demo::failed()),
         #[cfg(feature = "user-programs")]
         ("ring", ring_demo::failed()),
         #[cfg(feature = "user-programs")]

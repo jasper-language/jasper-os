@@ -400,11 +400,17 @@ pub fn console_write_byte(byte: u8) {
 /// 见 [`Platform::irq_save_disable`]。
 #[inline(always)]
 pub fn irq_save_disable() -> bool {
-    Current::irq_save_disable()
+    let was = Current::irq_save_disable();
+    // WCET 证据：关中断窗口从这一刻开始计时（嵌套由 wcet 内部的深度计数处理）。
+    crate::wcet::irq_off_enter();
+    was
 }
 /// 见 [`Platform::irq_restore`]。
 #[inline(always)]
 pub fn irq_restore(was_enabled: bool) {
+    // 与 `irq_save_disable` 严格配对：无论之前是否已关中断都要结算，
+    // 否则嵌套深度会只增不减（上次实现就是这样导致样本数恒为 0）。
+    crate::wcet::irq_off_exit();
     Current::irq_restore(was_enabled)
 }
 /// 见 [`Platform::irq_enable`]。

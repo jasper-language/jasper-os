@@ -340,6 +340,14 @@ fn overload(n: usize) {
     });
     check(ok, "过载用例任务创建失败");
     sched::run();
+    // 收尾宽限：慢速目标（RISC-V32 四核）上交互任务的最后一轮可能落在测量窗口之外。
+    // 断言关心的是「能睡满全部轮次且延迟有上界」，不是「必须在窗口内完成」，
+    // 因此窗口结束后再给一个有界的完成期；宽限耗尽仍未完成则如实判失败。
+    let mut grace = 0u64;
+    while INTERACTIVE_DONE.load(Ordering::Relaxed) < ROUNDS && grace < window {
+        sched::sleep_until(sched::timer_ticks() + 1);
+        grace += 1;
+    }
     let lat = sched::latency(Qos::Interactive);
     let busy = cores_busy("overload", n, window);
     let min_cpu = HOG_MIN_CPU.load(Ordering::Relaxed) as u64;

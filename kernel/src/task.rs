@@ -75,6 +75,14 @@ pub struct Task {
     pub on_cpu: Option<usize>,
     /// 曾经运行过它的处理器集合（诊断：亲和与迁移的验收依据）。
     pub ran_on: CpuSet,
+    /// 实时预算（tick）；`rt_period == 0` 表示不是实时任务。
+    pub rt_quota: u32,
+    /// 实时周期（tick）。
+    pub rt_period: u32,
+    /// 本周期剩余预算。
+    pub rt_remaining: u32,
+    /// 本周期结束时刻（下一个截止期）。
+    pub rt_next_period: u64,
 }
 
 impl Task {
@@ -103,6 +111,10 @@ impl Task {
             last_ran: None,
             on_cpu: None,
             ran_on: CpuSet::EMPTY,
+            rt_quota: 0,
+            rt_period: 0,
+            rt_remaining: 0,
+            rt_next_period: 0,
         }
     }
 }

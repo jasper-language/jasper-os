@@ -53,6 +53,8 @@ pub mod profile_demo;
 #[cfg(feature = "user-programs")]
 pub mod prog_demo;
 pub mod ring;
+pub mod rt;
+pub mod rtclass_demo;
 #[cfg(feature = "user-programs")]
 pub mod robust_demo;
 #[cfg(feature = "user-programs")]
@@ -74,3 +76,4 @@ pub mod sync;
 pub mod syscall;
 pub mod task;
 pub mod user_demo;
+pub mod wcet;

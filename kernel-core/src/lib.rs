@@ -64,6 +64,7 @@ pub mod pagetable;
 pub mod pressure;
 pub mod psci;
 pub mod ring_abi;
+pub mod rt;
 pub mod sbi;
 pub mod sched;
 pub mod shard;

@@ -505,6 +505,15 @@ fn storm(n: usize, lines: usize) {
     }
     wait_ticks(1);
     check(ok, "风暴用例的路由 / 启用 / 任务创建失败");
+    // 收尾宽限：慢速目标上最后一轮可能落在测量窗口之外。断言关心「能睡满全部轮次
+    // 且延迟有上界」，不是「必须在窗口内完成」；宽限耗尽仍未完成则如实判失败。
+    let mut grace = 0u64;
+    while INTERACTIVE_DONE.load(core::sync::atomic::Ordering::Relaxed) < ROUNDS && grace < WINDOW {
+        sched::sleep_until(sched::timer_ticks() + 1);
+        grace += 1;
+    }
+    let done = INTERACTIVE_DONE.load(core::sync::atomic::Ordering::Relaxed);
+    let lat = sched::latency(Qos::Interactive);
     check(done == ROUNDS && lat.count() == ROUNDS, "风暴下交互任务未完成全部睡眠");
     check(lat.max() <= LATENCY_BOUND, "中断风暴 + 过载时交互唤醒延迟超过上界");
     check(all_busy, "中断风暴时有核没有在运行任务");

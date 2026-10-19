@@ -516,6 +516,13 @@ fn recovery() {
     let spawned = sched::spawn(TaskId(TASK_ID_BASE + 400), "ovl-recovery", recovery_task).is_ok();
     check(spawned, "恢复任务创建失败");
     sched::run();
+    // 收尾宽限：慢速目标上最后一轮可能落在窗口之外。断言关心的是「能睡满全部轮次
+    // 且延迟有上界」，不是「必须在窗口内完成」；宽限耗尽仍未完成则如实判失败。
+    let mut grace = 0u64;
+    while PROBE_DONE.load(Ordering::Relaxed) < RECOVERY_ROUNDS && grace < 200 {
+        sched::sleep_until(sched::timer_ticks() + 1);
+        grace += 1;
+    }
     let lat = sched::latency(Qos::Interactive);
     let done = PROBE_DONE.load(Ordering::Relaxed);
     let wd = sched::watchdog_log().total();

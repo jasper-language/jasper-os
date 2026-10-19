@@ -140,6 +140,14 @@ pub struct SwitchPlan {
     pub next_slot: usize,
 }
 
+/// 因预算/资格不可运行而被换下的次数（诊断用）。
+static THROTTLES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// 累计的节流换下次数。
+pub fn throttle_count() -> u32 {
+    THROTTLES.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// 切换观察者：在真正换栈之前被调用。
 pub type SwitchObserver = fn(&SwitchEvent);
 
@@ -944,6 +952,7 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
         let cur = self.current[c];
         self.account(c);
         self.charge_groups(cur);
+        self.charge_rt(cur, now);
 
         let mut cause = None;
         for i in 1..N {
@@ -958,6 +967,38 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
         } else {
             None
         }
+    }
+
+    /// 实时预算记账与周期补充（POL-4）。
+    fn charge_rt(&mut self, cur: usize, now: u64) {
+        if let Some(t) = self.tasks.get_mut(cur).and_then(|t| t.as_mut()) {
+            if t.state == TaskState::Running && t.rt_period != 0 && t.rt_remaining > 0 {
+                t.rt_remaining = t.rt_remaining.saturating_sub(1);
+            }
+        }
+        for slot in 1..N {
+            if let Some(t) = self.tasks.get_mut(slot).and_then(|t| t.as_mut()) {
+                if t.rt_period != 0 {
+                    while now >= t.rt_next_period {
+                        t.rt_remaining = t.rt_quota;
+                        t.rt_next_period += t.rt_period as u64;
+                    }
+                }
+            }
+        }
+    }
+
+    /// 设置任务的实时预算/周期（准入已由 kernel-core 判定）。
+    pub fn set_rt(&mut self, id: TaskId, quota: u32, period: u32, now: u64) -> bool {
+        let Some(slot) = self.live_slot(id) else { return false };
+        if let Some(t) = self.tasks.get_mut(slot).and_then(|t| t.as_mut()) {
+            t.rt_quota = quota;
+            t.rt_period = period;
+            t.rt_remaining = quota;
+            t.rt_next_period = now + period as u64;
+            return true;
+        }
+        false
     }
 
     /// 其他处理器的本地时钟 tick（在该处理器的中断上下文、关中断状态下调用）：给本处理器正在运行的任务
@@ -1045,6 +1086,7 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
                 return Some(Cause::MIGRATE);
             }
             if !self.eligible(t) {
+                THROTTLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 return Some(Cause::THROTTLE);
             }
         }
@@ -1390,6 +1432,10 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
 
 /// 任务 `t` 能否被选中（见 [`Scheduler::eligible`]）；独立成函数以便在借用任务表时同时借用组表。
 fn eligible_in<const N: usize>(groups: &[Option<CpuGroup>; N], t: &Task) -> bool {
+    // 实时预算：耗尽且未到下一周期 ⇒ 不可运行；任务仍留在队列，由选择器跳过。
+    if t.rt_period != 0 && t.rt_remaining == 0 && crate::sched::timer_ticks() < t.rt_next_period {
+        return false;
+    }
     match t.cpu_group {
         None => true,
         Some(g) => t.sched.qos != t.base_qos || groups[g].as_ref().is_none_or(|grp| grp.limit.eligible()),
