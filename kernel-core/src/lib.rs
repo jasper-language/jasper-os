@@ -60,6 +60,7 @@ pub mod pagetable;
 pub mod pressure;
 pub mod psci;
 pub mod ring_abi;
+pub mod sbi;
 pub mod sched;
 pub mod smp;
 pub mod spawn_abi;

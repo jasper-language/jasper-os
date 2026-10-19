@@ -35,6 +35,8 @@ pub const SSTATUS_FS: u64 = 3 << 13;
 /// sstatus.SUM：允许监管态访问用户页。本内核始终保持为 0。
 pub const SSTATUS_SUM: u64 = 1 << 18;
 
+/// sie.SSIE / sip.SSIP：监管态软件中断（核间中断）的使能位与挂起位。
+pub const SIE_SSIE: u64 = 1 << 1;
 /// sie.STIE：监管态定时器中断使能。
 pub const SIE_STIE: u64 = 1 << 5;
 /// sie.SEIE：监管态外部中断使能。
@@ -64,6 +66,21 @@ pub fn irq_unmask() {
 pub fn enable_sources(bits: u64) {
     // SAFETY：只置位本处理器的监管态中断使能寄存器。
     unsafe { core::arch::asm!("csrs sie, {}", in(reg) bits as usize, options(nostack, preserves_flags)) };
+}
+
+/// 撤下本处理器挂起的监管态软件中断（sip.SSIP；监管态可写，固件置位后需由内核清除）。
+pub fn clear_soft_pending() {
+    // SAFETY：只清除本处理器的软件中断挂起位。
+    unsafe { core::arch::asm!("csrc sip, {}", in(reg) SIE_SSIE as usize, options(nostack, preserves_flags)) };
+}
+
+/// 本处理器的逻辑下标（内核态下 `tp` 恒为它，见陷入入口的说明）。
+#[inline(always)]
+pub fn tp() -> usize {
+    let v: usize;
+    // SAFETY：只读通用寄存器 tp。
+    unsafe { core::arch::asm!("mv {}, tp", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
 }
 
 /// 页表写入后作废本处理器上 `va` 所在页的地址转换缓存（全部地址空间）。

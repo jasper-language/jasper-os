@@ -5,7 +5,7 @@
 //! 早期建表、寄存器宽度的汇编宏与系统调用返回约定都在那里；其余模块对两者一视同仁（寄存器值用 `usize`，
 //! 交给 Core 时零扩展为 `u64`）。
 //!
-//! 子模块各管一类硬件，彼此只经本文件编排（`trap` 调用 `plic` / `timer` 处理中断是唯一的横向依赖）：
+//! 子模块各管一类硬件，彼此只经本文件编排（`trap` 调用 `plic` / `timer` / `smp` 处理中断是唯一的横向依赖）：
 //! * `mode`    —— 寄存器宽度专有部分（见上）
 //! * `boot`    —— 入口 `_start`、BSS、设备树 → `BootSpec`，然后进入内核主流程
 //! * `mmu`     —— 早期页表（内核映像恒等映射 + 线性物理内存映射）与地址转换启用
@@ -15,6 +15,7 @@
 //! * `plic`    —— 平台级中断控制器
 //! * `timer`   —— 经 SBI 的监管态定时器与 `time` 计数器
 //! * `sbi`     —— 对机器态固件的调用
+//! * `smp`     —— 多处理器：设备树处理器发现、SBI HSM 唤醒、其他处理器入口、逻辑下标（`tp`）与核间中断
 //! * `uart`    —— NS16550A 串口（控制台）
 //! * `context` —— 任务上下文与 `switch_context` 汇编
 //! * `user`    —— 进入用户态与用户态探针机器码
@@ -40,6 +41,7 @@ mod mmu;
 mod paging;
 mod plic;
 mod sbi;
+mod smp;
 mod space;
 mod testdev;
 mod timer;
@@ -245,33 +247,28 @@ impl Platform for Riscv {
     }
 
     // ---- 多处理器 ----
-    // 本平台目前只运行引导处理器：拓扑只含它，启动与核间中断对其他下标一律报告「不存在」；
-    // 其他处理器的启动方式（SBI HSM hart_start + 软件中断）在后续阶段接入，接口不变。
+    // 拓扑来自设备树处理器节点，唤醒经 SBI HSM hart_start，核间中断是经 SBI IPI 触发的监管态软件中断（见 `smp.rs`）。
 
     const CPU_START_FRAME_LIMIT: Option<u64> = None;
 
     fn cpu_init_boot(_boot: &crate::boot::BootSpec) -> super::CpuDiscovery {
-        super::CpuDiscovery { topology: kernel_core::smp::Topology::boot_only(boot::BOOT_HART.load(core::sync::atomic::Ordering::Relaxed)), source: "boot_only" }
+        smp::init_boot(boot::BOOT_HART.load(core::sync::atomic::Ordering::Relaxed))
     }
 
     unsafe fn cpu_start(
-        _start: &super::CpuStart<Self::SpaceRoot>,
+        start: &super::CpuStart<Self::SpaceRoot>,
         _frame: Option<kernel_core::frame::PhysFrame>,
     ) -> Result<(), kernel_core::smp::SmpError> {
-        Err(kernel_core::smp::SmpError::NoSuchCpu)
+        smp::start(start)
     }
 
     #[inline(always)]
     fn cpu_index() -> usize {
-        0
+        smp::cpu_index()
     }
 
-    fn send_ipi(cpu: usize, _kind: kernel_core::smp::IpiKind) -> Result<(), kernel_core::smp::SmpError> {
-        if cpu == 0 {
-            Err(kernel_core::smp::SmpError::SelfTarget)
-        } else {
-            Err(kernel_core::smp::SmpError::NoSuchCpu)
-        }
+    fn send_ipi(cpu: usize, kind: kernel_core::smp::IpiKind) -> Result<(), kernel_core::smp::SmpError> {
+        smp::send_ipi(cpu, kind)
     }
 
     fn tlb_flush_local(va: u64, pages: u64) {

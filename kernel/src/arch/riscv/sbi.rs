@@ -1,8 +1,9 @@
 //! 监管态二进制接口（SBI）调用：内核经 `ecall` 请求固件（如 OpenSBI）提供的机器态服务。
 //! Supervisor Binary Interface calls to the machine-mode firmware.
 //!
-//! 只实现本内核用到的三项：探测扩展是否存在（基础扩展）、设置下一次定时器中断（TIME 扩展）、
-//! 以「系统故障」为原因关机（系统复位扩展；仅在找不到仿真器测试设备时作为退出的后备路径）。
+//! 只实现本内核用到的几项：探测扩展是否存在（基础扩展）、设置下一次定时器中断（TIME 扩展）、
+//! 以「系统故障」为原因关机（系统复位扩展；仅在找不到仿真器测试设备时作为退出的后备路径）、
+//! 启动与查询处理器（HSM 扩展）、发送核间中断（IPI 扩展）。HSM / IPI 的编号与返回值解读在 `kernel_core::sbi`。
 //! 调用约定：`a7` = 扩展号，`a6` = 功能号，参数在 `a0`–`a5`；返回 `a0` = 错误码、`a1` = 值。
 //! 寄存器与 XLEN 同宽：RV32 上 64 位的定时器截止时刻按规范拆成 `a0`（低 32 位）与 `a1`（高 32 位）。
 
@@ -30,6 +31,10 @@ struct SbiRet {
 }
 
 fn call(eid: usize, fid: usize, arg0: usize, arg1: usize) -> SbiRet {
+    call3(eid, fid, arg0, arg1, 0)
+}
+
+fn call3(eid: usize, fid: usize, arg0: usize, arg1: usize, arg2: usize) -> SbiRet {
     let (error, value): (isize, usize);
     // SAFETY：按 SBI 调用约定陷入固件；固件只修改 a0/a1 作为返回值。
     unsafe {
@@ -37,6 +42,7 @@ fn call(eid: usize, fid: usize, arg0: usize, arg1: usize) -> SbiRet {
             "ecall",
             inlateout("a0") arg0 => error,
             inlateout("a1") arg1 => value,
+            in("a2") arg2,
             in("a6") fid,
             in("a7") eid,
             options(nostack)
@@ -64,4 +70,26 @@ pub fn shutdown_failure() {
     if has_extension(EID_SRST) {
         let _ = call(EID_SRST, FID_SYSTEM_RESET, RESET_SHUTDOWN, REASON_SYSTEM_FAILURE);
     }
+}
+
+/// 请求固件从 `entry`（物理地址，地址转换关闭、监管态）启动处理器 `hart`，入口处 `a0` = hart 号、`a1` = `opaque`。
+/// 返回固件的原始错误码（按有符号数解释）。
+pub fn hart_start(hart: usize, entry: usize, opaque: usize) -> i64 {
+    call3(kernel_core::sbi::EID_HSM, kernel_core::sbi::FID_HART_START, hart, entry, opaque).error as i64
+}
+
+/// 查询处理器 `hart` 的状态：成功返回原始状态值，失败返回原始错误码。
+pub fn hart_status(hart: usize) -> Result<u64, i64> {
+    let r = call(kernel_core::sbi::EID_HSM, kernel_core::sbi::FID_HART_GET_STATUS, hart, 0);
+    if r.error == 0 {
+        Ok(r.value as u64)
+    } else {
+        Err(r.error as i64)
+    }
+}
+
+/// 向处理器 `hart` 发送监管态软件中断，返回固件的原始错误码。
+pub fn send_ipi(hart: usize) -> i64 {
+    let (mask, base) = kernel_core::sbi::single_hart_mask(hart);
+    call(kernel_core::sbi::EID_IPI, kernel_core::sbi::FID_SEND_IPI, mask, base).error as i64
 }

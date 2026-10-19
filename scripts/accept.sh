@@ -182,6 +182,21 @@ if [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ]; then
     -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV32" 2>&1
   QRC_RV32=$?
 fi
+# 多处理器（SMP-1b-RV）：同一 RISC-V64 / RISC-V32 内核各以 4 个处理器再真实启动一次（设备树处理器节点 + SBI HSM 唤醒 + SBI IPI 软件中断）。
+SERIAL_RV64_SMP4="$OUT/serial-riscv64-smp4.log"; QRC_RV64_SMP4=-1
+if [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ]; then
+  echo "== QEMU 真实启动（RISC-V64，4 个处理器）=="
+  run timeout "$QEMU_TIMEOUT" "$QEMU_RV64" -M virt -m 256M -smp 4 -kernel "$RV64_ELF" \
+    -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV64_SMP4" 2>&1
+  QRC_RV64_SMP4=$?
+fi
+SERIAL_RV32_SMP4="$OUT/serial-riscv32-smp4.log"; QRC_RV32_SMP4=-1
+if [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ]; then
+  echo "== QEMU 真实启动（RISC-V32，4 个处理器）=="
+  run timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M -smp 4 -kernel "$RV32_ELF" \
+    -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV32_SMP4" 2>&1
+  QRC_RV32_SMP4=$?
+fi
 
 # ---- 阶段 B：逐里程碑检查 ----------------------------------------------------
 
@@ -818,6 +833,58 @@ check_smp1b_a64() { # 多处理器第二阶段（AArch64）：设备树发现 4 
   fi
 }
 
+# rv_smp4_verdict <日志> <QEMU 退出码> <前缀>：在 RISC-V 4 处理器日志上逐项重跑全部 RISC-V 检查，并核对多处理器标记；
+# 缺项写入 RV_SMP_MISS，复跑结果放在 PORT_N / PORT_BAD。引导处理器由固件选定（不一定是 hart 0），只要求 4 个 hart 号互不相同且都在 0–3。
+rv_smp4_verdict() {
+  local rvlog="$1" rvqrc="$2" rvprefix="$3" rvc rvhws
+  RV_SMP_MISS=""
+  port_rerun "$rvlog" "$rvqrc" "$rvprefix" 128 \
+    check_m11 check_m12 check_m13 check_m14 check_m15 check_m21 check_m22 check_m23 check_m24 check_m31 check_m32 check_m33 check_m34 \
+    check_m42 check_fix check_sched2 check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 \
+    check_j5 check_j6 check_sched1 check_sched3 check_t1 check_t2
+  grep -qaE '^\[JSR-SMP\] start present=4 online=4 failed=0 source=fdt\.cpus ' "$rvlog" || RV_SMP_MISS="$RV_SMP_MISS 启动"
+  rvhws=$(grep -aoE '^\[JSR-SMP\] cpu index=[0-3] hw=[0-3] state=online' "$rvlog" | grep -oE 'hw=[0-3]' | sort -u | wc -l)
+  [ "$rvhws" -eq 4 ] || RV_SMP_MISS="$RV_SMP_MISS hart号($rvhws)"
+  for rvc in 1 2 3; do
+    grep -qaE "^\[JSR-SMP\] clock cpu=$rvc ticks_before=[0-9]+ ticks_after=[0-9]+ advanced=([1-9][0-9]+)" "$rvlog" || RV_SMP_MISS="$RV_SMP_MISS 时钟$rvc"
+  done
+  grep -qa '^\[JSR-SMP\] clock independent bsp_frozen=1 others_advanced=true' "$rvlog" || RV_SMP_MISS="$RV_SMP_MISS 各自计时"
+  grep -qa '^\[JSR-SMP\] ipi reschedule delivered=3/3' "$rvlog"                 || RV_SMP_MISS="$RV_SMP_MISS 重新调度"
+  grep -qa '^\[JSR-SMP\] call ran_on_target=3/3 current=idle' "$rvlog"          || RV_SMP_MISS="$RV_SMP_MISS 跨核调用"
+  grep -qaE '^\[JSR-SMP\] tlb va=0x[0-9a-f]+ before=A:3/3 stale_without_shootdown=[0-3]/3 after_shootdown=B:3/3 local=B:true acks=[3-9][0-9]* frames_back=true' "$rvlog" \
+                                                                              || RV_SMP_MISS="$RV_SMP_MISS TLB击落"
+  grep -qaE '^\[JSR-SMP\] refuse no_such_cpu=system\.cpu\.error\.no_such_cpu self=system\.cpu\.error\.self_target call_no_such=system\.cpu\.error\.no_such_cpu call_self=system\.cpu\.error\.self_target bad_range=system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range' "$rvlog" \
+                                                                              || RV_SMP_MISS="$RV_SMP_MISS 拒绝路径"
+  grep -qaE '^\[JSR-SMP\] summary cpus=4 online=4 checks=[0-9]+ failed=0' "$rvlog" || RV_SMP_MISS="$RV_SMP_MISS 汇总"
+  grep -qa '^\[JSR-EXIT\] success' "$rvlog" && [ "$rvqrc" -eq 33 ]                || RV_SMP_MISS="$RV_SMP_MISS 退出"
+}
+
+check_smp1b_rv() { # 多处理器第二阶段（RISC-V64 与 RISC-V32）：设备树发现 4 个处理器、SBI HSM hart_start 全部报到、各核本地定时器各自计时、
+                    # SBI IPI 软件中断（重新调度 / 跨核调用 / TLB 击落）、拒绝路径；全部 RISC-V 串口检查在两份 4 处理器日志上逐项重跑
+                    # （行名带 RV64SMP4/、RV32SMP4/ 前缀）；单处理器启动如实报告只有引导处理器
+  if [ "$RV64_BUILD_RC" -ne 0 ] || [ "$RV32_BUILD_RC" -ne 0 ] || [ ! -s "$SERIAL_RV64_SMP4" ] || [ ! -s "$SERIAL_RV32_SMP4" ]; then
+    record SMP-1b-RV FAIL "RISC-V 4 处理器启动没有串口日志（构建 rc=$RV64_BUILD_RC/$RV32_BUILD_RC，QEMU=$QRC_RV64_SMP4/$QRC_RV32_SMP4）"
+    return
+  fi
+  local rvmiss="" rvn=0 rvbad=0 rvf boot64 boot32
+  rv_smp4_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" "RV64SMP4/"; rvn=$((rvn + PORT_N)); rvbad=$((rvbad + PORT_BAD))
+  [ -z "$RV_SMP_MISS" ] || rvmiss="$rvmiss RV64:[$RV_SMP_MISS ]"
+  rv_smp4_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" "RV32SMP4/"; rvn=$((rvn + PORT_N)); rvbad=$((rvbad + PORT_BAD))
+  [ -z "$RV_SMP_MISS" ] || rvmiss="$rvmiss RV32:[$RV_SMP_MISS ]"
+  for rvf in "$SERIAL_RV64" "$SERIAL_RV32"; do
+    grep -qaE '^\[JSR-SMP\] start present=1 online=1 failed=0 source=boot_only ' "$rvf" \
+      && grep -qa '^\[JSR-SMP\] single cpus=1 secondary=none' "$rvf" \
+      && grep -qaE '^\[JSR-SMP\] summary cpus=1 online=1 checks=[0-9]+ failed=0' "$rvf" || rvmiss="$rvmiss 单处理器($(basename "$rvf"))"
+  done
+  boot64=$(grep -aoE '^\[JSR-SMP\] cpu index=0 hw=[0-9]+' "$SERIAL_RV64_SMP4" | grep -oE '[0-9]+$')
+  boot32=$(grep -aoE '^\[JSR-SMP\] cpu index=0 hw=[0-9]+' "$SERIAL_RV32_SMP4" | grep -oE '[0-9]+$')
+  if [ -z "$rvmiss" ] && [ "$rvbad" -eq 0 ]; then
+    record SMP-1b-RV PASS "RISC-V64 / RISC-V32 -smp 4（QEMU=$QRC_RV64_SMP4/$QRC_RV32_SMP4）：设备树处理器节点发现 4 个处理器（引导 hart 由固件选定：$boot64 / $boot32）、SBI HSM hart_start 全部报到；各核本地定时器各自计时（引导处理器关中断时其他核照走）；SBI IPI 软件中断 + 每核信箱：重新调度 / 跨核调用 3/3；击落后 3/3 读到新映射、页帧回到基线；拒绝路径无中断无残留；$rvn 项 RISC-V 检查在两份 4 处理器日志上全部复跑通过；单处理器启动如实报告只有引导处理器"
+  else
+    record SMP-1b-RV FAIL "缺少/不符：$rvmiss；4 处理器复跑 $rvn 项中 $rvbad 项失败（见 serial-riscv64-smp4.log / serial-riscv32-smp4.log）"
+  fi
+}
+
 a64_ready() { [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ] && [ -s "$SERIAL_A64" ]; }
 
 check_isa1a() { # AArch64 移植第一阶段：内核侧检查在 qemu-system-aarch64 的串口日志上逐项重跑（行名带 A64/ 前缀）
@@ -963,7 +1030,7 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

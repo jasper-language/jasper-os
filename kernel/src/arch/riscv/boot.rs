@@ -3,9 +3,9 @@
 //!
 //! RISC-V 上没有 x86 那样的引导器：机器态固件（QEMU 默认的 OpenSBI）把内核 ELF 放到链接地址，
 //! 以监管态、地址转换关闭的状态从 `_start` 进入，`a0` = 处理器编号（hart id），`a1` = 设备树物理地址。本文件负责：
-//! 1. 只让第一个到达的处理器继续（其余停在 `wfi`）；关中断、清零 BSS、设置启动栈；
+//! 1. 只让第一个到达的处理器继续（其余停在 `wfi`）；`tp`（逻辑下标）置 0、关中断、清零 BSS、设置启动栈；
 //! 2. 建早期页表并启用地址转换（RV64 为 Sv39、RV32 为 Sv32，见 `mmu.rs` 与 `mode`）；
-//! 3. 解析设备树：内存图、串口、中断控制器（及本处理器监管态的上下文编号）、计数器频率、仿真器测试设备；
+//! 3. 解析设备树：内存图、串口、中断控制器（及本处理器监管态的上下文编号）、计数器频率、处理器拓扑、仿真器测试设备；
 //! 4. 把内存图转换成与引导协议无关的 [`BootSpec`]（内核映像、设备树、固件保留区、线性映射覆盖不到的内存标为保留），
 //!    交给 `kmain::start`。
 
@@ -14,7 +14,7 @@ use core::arch::global_asm;
 use kernel_core::fdt::{self, Fdt, Node};
 use kernel_core::frame::{PhysRegion, RegionKind};
 
-use super::{mmu, plic, testdev, timer, uart};
+use super::{mmu, plic, smp, testdev, timer, uart};
 use crate::boot::{self, BootSpec};
 
 /// 启动栈大小。
@@ -43,6 +43,7 @@ global_asm!(
     .option norelax
     .global _start
 _start:
+    mv tp, zero
     csrw sie, zero
     csrci sstatus, 2
     lla t0, JSR_BOOT_CLAIM
@@ -144,6 +145,9 @@ fn configure_devices(fdt: &Fdt<'_>, hart: u64) -> Result<(), &'static str> {
     let (plic_pa, _) = plic_node.reg(0).ok_or("plic reg")?;
     let context = plic_context(&plic_node, intc).ok_or("plic context of the boot hart")?;
     plic::set_base(mmu::PHYS_OFFSET + plic_pa, context);
+
+    // 处理器拓扑（只记录，启动其他处理器在内核主流程里经 Platform 契约进行）
+    smp::configure(fdt, hart as u32);
 
     // 测试设备是可选的（真机上没有）：缺少时退出走 SBI 关机
     if let Some((pa, _)) = fdt.find_compatible("sifive,test0").ok().flatten().and_then(|n| n.reg(0)) {

@@ -51,6 +51,20 @@ pub unsafe fn build_boot_tables() -> bool {
     mode::build_boot_tables(start, end, |page| kernel_page(page, text_end, rodata_end))
 }
 
+/// 设置本处理器的监管态状态位：关中断、关闭浮点单元、禁止监管态访问用户页（SUM = 0）、用户态只可读 `time` 计数器。
+/// 每个处理器启动时调用一次（引导处理器在 [`enable`] 里，其他处理器在其启动入口里）。
+///
+/// # Safety
+/// 只改本处理器的 sstatus 与 scounteren；调用者保证此后不再依赖浮点单元或监管态访问用户页。
+pub unsafe fn configure_hart() {
+    core::arch::asm!(
+        "csrc sstatus, {bits}",
+        bits = in(reg) (cpu::SSTATUS_FS | cpu::SSTATUS_SUM | cpu::SSTATUS_SIE) as usize,
+        options(nostack, preserves_flags)
+    );
+    write_csr!("scounteren", 1u64 << 1);
+}
+
 /// 装入早期页表并启用地址转换；返回后代码与栈继续在恒等映射下运行。
 /// 同时：关闭浮点单元（内核与用户程序都不得使用浮点寄存器）、禁止监管态访问用户页（SUM = 0）、
 /// 用户态只可读 `time` 计数器。
@@ -58,12 +72,7 @@ pub unsafe fn build_boot_tables() -> bool {
 /// # Safety
 /// 必须在 [`build_boot_tables`] 成功之后、从恒等映射覆盖的代码与栈上调用一次。
 pub unsafe fn enable() {
-    core::arch::asm!(
-        "csrc sstatus, {bits}",
-        bits = in(reg) (cpu::SSTATUS_FS | cpu::SSTATUS_SUM | cpu::SSTATUS_SIE) as usize,
-        options(nostack, preserves_flags)
-    );
-    write_csr!("scounteren", 1u64 << 1);
+    configure_hart();
     cpu::tlb_flush_all();
     write_csr!("satp", satp_for(root_phys()));
     cpu::tlb_flush_all();

@@ -9,6 +9,12 @@
 //! 入口在栈上压完整寄存器帧（x1–x31、sepc、sstatus，见 [`TrapFrame`]；槽宽 = XLEN，RV32 与 RV64 共用同一段汇编），并把 sscratch 清零（此后在内核里）；
 //! 返回路径 `jsr_trap_return` 若要回到用户态，就把 sscratch 重新置为「弹出本帧之后的栈顶」= 本任务的内核栈顶。
 //! 帧保存在各任务自己的内核栈上，因此处理过程中切换任务（抢占、阻塞的系统调用）是安全的。
+//!
+//! # 每核下标（`tp`）
+//! 内核态下 `tp` 恒为本处理器的逻辑下标（引导处理器在入口置 0，其他处理器在启动入口按启动块设置；内核不使用线程局部存储）。
+//! 用户程序可以任意改写 `tp`，因此：回到用户态时把内核 `tp` 记进本帧的 `kernel_tp` 槽、再恢复用户的 `tp`；
+//! 下一次从用户态陷入时，新帧恰好压在同一位置（sscratch = 同一个内核栈顶），先把用户 `tp` 存进帧、再从该槽取回内核 `tp`。
+//! 回到监管态时不恢复 `tp`：被打断的内核代码继续使用当前处理器的下标。
 //! 来源以 sstatus.SPP 判定，而不是以用户 sp 是否为 0 判定（用户可以把 sp 置成任意值）。
 //!
 //! # 与 Core 的边界
@@ -19,7 +25,7 @@ use core::arch::global_asm;
 
 use super::cpu::{self, read_csr};
 use super::mode::{self, xlen_asm_begin, xlen_asm_end};
-use super::{plic, timer};
+use super::{plic, smp, timer};
 use crate::console;
 use crate::fault::{self, UserFault, UserFaultKind};
 use crate::irq::{self, IrqLine};
@@ -34,8 +40,10 @@ pub struct TrapFrame {
     pub sepc: usize,
     /// 陷入时的状态寄存器（含 SPP / SPIE，返回时原样恢复）。
     pub sstatus: usize,
+    /// 回到用户态时记下的内核 `tp`（本处理器的逻辑下标）；下一次从用户态陷入时由此恢复（见模块文档）。
+    pub kernel_tp: usize,
     /// 填充到 16 字节的整数倍（栈指针在陷入期间保持 16 字节对齐）。
-    _pad: [usize; 2],
+    _pad: usize,
 }
 
 /// 一个寄存器槽的字节数（XLEN / 8）。
@@ -46,10 +54,13 @@ const _: () = assert!(FRAME_BYTES == 36 * WB && FRAME_BYTES % 16 == 0);
 /// 帧内 sepc 与 sstatus 的偏移（汇编使用）。
 pub const SEPC_OFF: usize = 32 * WB;
 pub const SSTATUS_OFF: usize = 33 * WB;
+/// 帧内内核 `tp` 槽的偏移（汇编使用）。
+pub const KTP_OFF: usize = 34 * WB;
 
 /// scause 最高位（XLEN - 1）：中断。
 const CAUSE_INTERRUPT: u64 = 1 << (usize::BITS - 1);
-/// 中断原因：监管态定时器、监管态外部中断。
+/// 中断原因：监管态软件中断（核间中断）、监管态定时器、监管态外部中断。
+const IRQ_S_SOFT: u64 = 1;
 const IRQ_S_TIMER: u64 = 5;
 const IRQ_S_EXTERNAL: u64 = 9;
 /// 异常原因。
@@ -114,6 +125,9 @@ jsr_trap_entry:
     addi t0, sp, {frame}
 2:
     SX t0, 2*{wb}, sp
+    bnez t2, 4f
+    LX tp, {ktp}, sp
+4:
     csrr t2, sepc
     SX t2, {sepc}, sp
     SX t1, {sstatus}, sp
@@ -131,10 +145,11 @@ jsr_trap_return:
     bnez t0, 3f
     addi t1, sp, {frame}
     csrw sscratch, t1
+    SX tp, {ktp}, sp
+    LX x4, 4*{wb}, sp
 3:
     LX x1, 1*{wb}, sp
     LX x3, 3*{wb}, sp
-    LX x4, 4*{wb}, sp
     LX x5, 5*{wb}, sp
     LX x6, 6*{wb}, sp
     LX x7, 7*{wb}, sp
@@ -171,6 +186,7 @@ jsr_trap_return:
     wb = const WB,
     sepc = const SEPC_OFF,
     sstatus = const SSTATUS_OFF,
+    ktp = const KTP_OFF,
     spp = const cpu::SSTATUS_SPP,
     sie = const cpu::SSTATUS_SIE,
 );
@@ -266,8 +282,11 @@ extern "C" fn jsr_riscv_trap(frame: &mut TrapFrame) {
         match cause & !CAUSE_INTERRUPT {
             IRQ_S_TIMER => {
                 timer::rearm();
-                irq::on_hardware_irq(IrqLine::Timer, from_user);
+                // 定时器是每个处理器私有的：在引导处理器上驱动全局时钟与时间片，在其他处理器上只是本地时钟
+                let line = if smp::cpu_index() == 0 { IrqLine::Timer } else { IrqLine::LocalTimer };
+                irq::on_hardware_irq(line, from_user);
             }
+            IRQ_S_SOFT => smp::on_soft_interrupt(from_user),
             IRQ_S_EXTERNAL => handle_external(),
             _ => fatal("unexpected interrupt", frame),
         }

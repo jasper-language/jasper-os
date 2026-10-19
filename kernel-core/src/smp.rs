@@ -522,6 +522,53 @@ impl Default for CallSlot {
     }
 }
 
+/// 核间中断信箱：平台只有一条核间中断线（如 RISC-V 监管态软件中断）时，用它区分种类。
+/// 发送方先 [`IpiMailbox::post`] 置位再触发中断；接收方先撤下中断挂起位再 [`IpiMailbox::take`]——
+/// 两步之间到达的新请求会再次触发中断，因此不会丢失；同一种类在被取走前重复投递只计一次（中断语义本就可合并）。
+/// IPI mailbox for platforms with a single inter-processor interrupt line.
+pub struct IpiMailbox(AtomicU8);
+
+impl IpiMailbox {
+    /// 新建（无待处理种类）。
+    /// New empty mailbox.
+    pub const fn new() -> Self {
+        IpiMailbox(AtomicU8::new(0))
+    }
+
+    /// 投递一种请求；返回投递前该种类是否已待处理（已待处理时调用者可不再触发中断）。
+    /// Post a kind; returns whether it was already pending.
+    pub fn post(&self, kind: IpiKind) -> bool {
+        let bit = 1u8 << kind.index();
+        self.0.fetch_or(bit, Ordering::AcqRel) & bit != 0
+    }
+
+    /// 一次取走全部待处理种类（按 [`IpiKind::ALL`] 的顺序交给 `f`），返回取走的种类数。
+    /// Take every pending kind, in [`IpiKind::ALL`] order.
+    pub fn take(&self, mut f: impl FnMut(IpiKind)) -> usize {
+        let bits = self.0.swap(0, Ordering::AcqRel);
+        let mut n = 0;
+        for k in IpiKind::ALL {
+            if bits & (1u8 << k.index()) != 0 {
+                f(k);
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// 是否没有待处理的种类。
+    /// Whether nothing is pending.
+    pub fn is_empty(&self) -> bool {
+        self.0.load(Ordering::Acquire) == 0
+    }
+}
+
+impl Default for IpiMailbox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,5 +775,56 @@ mod tests {
         }
         assert_eq!(SmpError::Busy.name(), "system.cpu.error.busy");
         assert_eq!(CpuState::Online.name(), "online");
+    }
+
+    #[test]
+    fn mailbox_merges_and_takes_in_order() {
+        let m = IpiMailbox::new();
+        assert!(m.is_empty());
+        assert_eq!(m.take(|_| panic!("空信箱不应交出种类")), 0);
+        assert!(!m.post(IpiKind::Call));
+        assert!(!m.post(IpiKind::Reschedule));
+        assert!(m.post(IpiKind::Call), "同一种类重复投递只计一次");
+        let mut got = std::vec::Vec::new();
+        assert_eq!(m.take(|k| got.push(k)), 2);
+        assert_eq!(got, [IpiKind::Reschedule, IpiKind::Call]);
+        assert!(m.is_empty(), "取走后信箱为空");
+        assert_eq!(m.take(|_| panic!("已取空")), 0);
+    }
+
+    #[test]
+    fn mailbox_concurrent_posts_never_lost() {
+        let m = Arc::new(IpiMailbox::new());
+        let seen = Arc::new([AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)]);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (m2, seen2, stop2) = (m.clone(), seen.clone(), stop.clone());
+        let rx = std::thread::spawn(move || loop {
+            let done = stop2.load(Ordering::Acquire);
+            m2.take(|k| {
+                seen2[k.index()].fetch_add(1, Ordering::Relaxed);
+            });
+            if done {
+                break;
+            }
+            std::hint::spin_loop();
+        });
+        let mut posted = [0u32; 3];
+        for i in 0..3000usize {
+            let k = IpiKind::ALL[i % 3];
+            if !m.post(k) {
+                posted[k.index()] += 1;
+            }
+        }
+        stop.store(true, Ordering::Release);
+        rx.join().unwrap();
+        m.take(|k| {
+            seen[k.index()].fetch_add(1, Ordering::Relaxed);
+        });
+        for k in IpiKind::ALL {
+            // 每次「投递前不在待处理」的投递恰好对应一次被取走
+            assert_eq!(seen[k.index()].load(Ordering::Relaxed), posted[k.index()], "{:?}", k);
+            assert!(posted[k.index()] >= 1);
+        }
+        assert!(m.is_empty());
     }
 }
