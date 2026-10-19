@@ -786,7 +786,7 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
      && has "kernel_space ready=true used=${KPART:-256} fail=Some\\(OutOfFrames\\) untouched=true frames_returned=true ok=Some\\(${KPART:-256}\\) reclaimed=true refuse_when_unready=true" \
      && has 'translate same_as_mapper=true unmapped_none=true kernel_not_user=true reclaimed=true' \
      && has 'ids last=Some\(18446744073709551615\) after_exhausted=None again=None no_wrap=true' \
-     && has 'spawn zero_stack=Some\(Map\(InvalidAddress\)\) objects_full=Some\(NoTaskSlot\) restored=true sched_full=Some\(NoTaskSlot\) \(fillers [1-9][0-9]*\) restored=true retry_exit=Some\(Exited \{ code: 42 \}\)' \
+     && has 'spawn zero_stack=Some\(Map\(InvalidAddress\)\) objects_full=Some\(NoTaskSlot\) restored=true sched_full=Some\(NoTaskSlot\) \(fillers [1-9][0-9]* filler_err=Some\([A-Za-z]+\)\) restored=true retry_exit=Some\(Exited \{ code: 42 \}\)' \
      && has '^\[JSR-FIX\] objects_live=([0-9]+)/\1 pending=0 checks=[0-9]+ failed=0' \
      && ! has 'warning residual_handles'; then
     record FIX PASS "失败路径全部回滚到基线；回滚后可再次成功；无残余句柄告警"
