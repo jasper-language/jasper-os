@@ -37,6 +37,7 @@ mod bios {
             spec.push_region(PhysRegion { start: r.start, end: r.end, kind });
         }
         spec.phys_offset = info.physical_memory_offset.into_option();
+        spec.acpi_rsdp = info.rsdp_addr.into_option();
         jasper_kernel::kmain::start(boot::install(spec))
     }
 }

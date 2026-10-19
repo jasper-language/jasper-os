@@ -169,10 +169,14 @@ fn for_each_reserved_node(fdt: &Fdt<'_>, mut f: impl FnMut(u64, u64)) {
     });
 }
 
+/// 引导处理器的 hart 编号（处理器拓扑的下标 0）。
+pub static BOOT_HART: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 /// 汇编入口之后的第一段 Rust 代码（地址转换关闭、启动栈、单执行流）。
 #[no_mangle]
 extern "C" fn jsr_riscv_boot(hart: usize, dtb: usize) -> ! {
     let (hart, dtb) = (hart as u64, dtb as u64);
+    BOOT_HART.store(hart as u32, core::sync::atomic::Ordering::Relaxed);
     // SAFETY：此刻地址转换关闭且只有本执行流；建表只做按表项宽度对齐的写。
     unsafe {
         if !mmu::build_boot_tables() {

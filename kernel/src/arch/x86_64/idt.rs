@@ -1,6 +1,7 @@
 //! IDT：x86 异常处理与硬件中断入口。
 //!
-//! 已接：断点（#BP，用于证明 IDT 生效）、双重错误（独立 IST 栈）、缺页、定时器（IRQ0）。
+//! 已接：断点（#BP，用于证明 IDT 生效）、双重错误（独立 IST 栈）、缺页、定时器（IRQ0）、
+//! 本地 APIC 的本地定时器与三类核间中断、伪中断。
 //! 处理程序使用 `extern "x86-interrupt"` ABI（nightly `abi_x86_interrupt`），
 //! 由编译器负责保存/恢复全部寄存器并以 `iretq` 返回。
 //!
@@ -10,7 +11,9 @@
 use spin::Once;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
-use super::{gdt, pic};
+use kernel_core::smp::IpiKind;
+
+use super::{apic, gdt, pic};
 use crate::console;
 use crate::fault::{self, UserFault, UserFaultKind};
 use crate::irq::{self, IrqLine};
@@ -33,9 +36,21 @@ pub fn init() {
         idt.general_protection_fault.set_handler_fn(general_protection_handler);
         idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
         idt[pic::TIMER_VECTOR].set_handler_fn(timer_interrupt_handler);
+        idt[apic::LOCAL_TIMER_VECTOR].set_handler_fn(local_timer_handler);
+        idt[apic::IPI_RESCHEDULE_VECTOR].set_handler_fn(ipi_reschedule_handler);
+        idt[apic::IPI_SHOOTDOWN_VECTOR].set_handler_fn(ipi_shootdown_handler);
+        idt[apic::IPI_CALL_VECTOR].set_handler_fn(ipi_call_handler);
+        idt[apic::SPURIOUS_VECTOR].set_handler_fn(spurious_handler);
         idt
     });
     idt.load();
+}
+
+/// 在其他处理器上加载同一张 IDT（所有处理器共享，表本身只读）。
+pub fn load() {
+    if let Some(idt) = IDT.get() {
+        idt.load();
+    }
 }
 
 /// 断点异常：打印验证标记后返回（`int3` 是陷阱类异常，返回到下一条指令）。
@@ -91,3 +106,30 @@ extern "x86-interrupt" fn timer_interrupt_handler(frame: InterruptStackFrame) {
     unsafe { pic::end_of_interrupt(pic::TIMER_VECTOR) };
     irq::on_hardware_irq(IrqLine::Timer, from_user(&frame));
 }
+
+/// 本地 APIC 定时器（每个处理器各自计时）：先 EOI，再交给 Core。
+extern "x86-interrupt" fn local_timer_handler(frame: InterruptStackFrame) {
+    apic::eoi();
+    irq::on_hardware_irq(IrqLine::LocalTimer, from_user(&frame));
+}
+
+/// 「重新调度」核间中断。
+extern "x86-interrupt" fn ipi_reschedule_handler(frame: InterruptStackFrame) {
+    apic::eoi();
+    irq::on_hardware_irq(IrqLine::Ipi(IpiKind::Reschedule), from_user(&frame));
+}
+
+/// 「TLB 击落」核间中断。
+extern "x86-interrupt" fn ipi_shootdown_handler(frame: InterruptStackFrame) {
+    apic::eoi();
+    irq::on_hardware_irq(IrqLine::Ipi(IpiKind::TlbShootdown), from_user(&frame));
+}
+
+/// 「跨核调用」核间中断。
+extern "x86-interrupt" fn ipi_call_handler(frame: InterruptStackFrame) {
+    apic::eoi();
+    irq::on_hardware_irq(IrqLine::Ipi(IpiKind::Call), from_user(&frame));
+}
+
+/// 伪中断：按规范不发 EOI，直接返回。
+extern "x86-interrupt" fn spurious_handler(_frame: InterruptStackFrame) {}

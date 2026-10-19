@@ -25,6 +25,8 @@
 //! * [`argcase`] —— 系统调用参数用例生成：确定性伪随机数、边界值、避开受保护区间的地址规划（健壮性测试共用）
 //! * [`trace`]  —— 无堆环形缓冲、ID 分配器、结构化事件追踪器
 //! * [`sync`]   —— 自旋锁
+//! * [`smp`]    —— 多处理器：处理器集合与拓扑、启动状态机、核间中断种类、TLB 击落与跨核调用协议
+//! * [`acpi`]   —— ACPI 表只读解析（处理器枚举：RSDP → RSDT/XSDT → MADT；固件输入按不可信处理）
 //! * [`user_layout`] —— 各指令集的用户私有窗口起点与用户程序装载地址（内核、运行时与构建脚本共用）
 //!
 //! # 边界（为什么这样分）
@@ -41,6 +43,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod abi;
+pub mod acpi;
 pub mod argcase;
 pub mod bench;
 pub mod async_ring;
@@ -57,6 +60,7 @@ pub mod pagetable;
 pub mod pressure;
 pub mod ring_abi;
 pub mod sched;
+pub mod smp;
 pub mod spawn_abi;
 pub mod module;
 pub mod object;

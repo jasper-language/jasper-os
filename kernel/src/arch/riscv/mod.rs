@@ -244,6 +244,42 @@ impl Platform for Riscv {
         user::probe(probe)
     }
 
+    // ---- 多处理器 ----
+    // 本平台目前只运行引导处理器：拓扑只含它，启动与核间中断对其他下标一律报告「不存在」；
+    // 其他处理器的启动方式（SBI HSM hart_start + 软件中断）在后续阶段接入，接口不变。
+
+    const CPU_START_FRAME_LIMIT: Option<u64> = None;
+
+    fn cpu_init_boot(_boot: &crate::boot::BootSpec) -> super::CpuDiscovery {
+        super::CpuDiscovery { topology: kernel_core::smp::Topology::boot_only(boot::BOOT_HART.load(core::sync::atomic::Ordering::Relaxed)), source: "boot_only" }
+    }
+
+    unsafe fn cpu_start(
+        _start: &super::CpuStart<Self::SpaceRoot>,
+        _frame: Option<kernel_core::frame::PhysFrame>,
+    ) -> Result<(), kernel_core::smp::SmpError> {
+        Err(kernel_core::smp::SmpError::NoSuchCpu)
+    }
+
+    #[inline(always)]
+    fn cpu_index() -> usize {
+        0
+    }
+
+    fn send_ipi(cpu: usize, _kind: kernel_core::smp::IpiKind) -> Result<(), kernel_core::smp::SmpError> {
+        if cpu == 0 {
+            Err(kernel_core::smp::SmpError::SelfTarget)
+        } else {
+            Err(kernel_core::smp::SmpError::NoSuchCpu)
+        }
+    }
+
+    fn tlb_flush_local(va: u64, pages: u64) {
+        for i in 0..pages {
+            cpu::tlb_flush_page(va.wrapping_add(i * 4096));
+        }
+    }
+
     #[inline(always)]
     fn cycle_counter() -> u64 {
         // `time` 计数器：单调递增、频率固定（见设备树 timebase-frequency），分辨率低于处理器周期；基准以 tick 校准后使用。

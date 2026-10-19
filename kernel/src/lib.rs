@@ -4,6 +4,7 @@
 //! * `arch`     —— 唯一的 ISA 接缝（`Platform` 契约 + `arch/<isa>/` 实现）
 //! * `console` `irq` `clock` —— 架构无关的基础设施（输出、中断分发、时钟）
 //! * `task` `sched` —— 任务与调度（机制 + 可替换策略）
+//! * `smp`      —— 多处理器：启动其他处理器、每核数据、核间中断、跨核调用、TLB 击落
 //! * `sync`     —— 关中断自旋锁（`kernel-core` 自旋锁 + arch 中断开关）
 //! * `ktrace`   —— 全局结构化事件追踪器（`kernel-core::trace` 的内核实例）
 //! * `mech_demo`—— M1.5：在真机上逐一演练 `kernel-core` 的机制（与机制分离，可整体删除）
@@ -60,6 +61,7 @@ pub mod overload_demo;
 pub mod bench_demo;
 pub mod pi_demo;
 pub mod sched;
+pub mod smp;
 pub mod sync;
 pub mod syscall;
 pub mod task;

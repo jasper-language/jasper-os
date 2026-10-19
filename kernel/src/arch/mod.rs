@@ -79,6 +79,32 @@ pub enum UserProbe {
     HandleRights,
 }
 
+/// 处理器启动命令：Core 准备好资源，平台执行硬件启动序列。
+/// Processor start command prepared by the Core and executed by the platform.
+#[derive(Debug, Clone, Copy)]
+pub struct CpuStart<S> {
+    /// 逻辑下标（引导处理器为 0）。
+    pub index: usize,
+    /// 硬件标识。
+    pub hw_id: u32,
+    /// 该处理器空闲执行流的栈顶（Core 分配，16 字节对齐）。
+    pub stack_top: u64,
+    /// 启动后使用的地址空间（内核空间）。
+    pub space: S,
+    /// 本地定时器频率。
+    pub timer_hz: u32,
+}
+
+/// 处理器发现结果。
+/// Result of processor discovery.
+#[derive(Debug, Clone, Copy)]
+pub struct CpuDiscovery {
+    /// 逻辑下标 ↔ 硬件标识（引导处理器在下标 0）。
+    pub topology: kernel_core::smp::Topology,
+    /// 信息来源或失败原因的规范名（例如固件表名、解析错误名）。
+    pub source: &'static str,
+}
+
 /// 仿真器 / 测试退出状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitStatus {
@@ -273,6 +299,41 @@ pub trait Platform {
     /// 读取单调递增的周期计数器（基准测量用）。单位由平台决定，调用者须以定时器 tick 校准后才能换算成时间。
     /// Read a monotonically increasing cycle counter; calibrate against timer ticks before converting to time.
     fn cycle_counter() -> u64;
+
+    // ---- 多处理器 ----
+
+    /// 启动其他处理器需要的低端启动帧上限：`Some(limit)` 表示需要一个起始地址低于 `limit` 的物理帧，
+    /// 启动期间由 Core 在内核空间中以「虚拟地址 = 物理地址」映射为可写可执行；`None` 表示不需要。
+    /// Upper bound of the low start-up frame the platform needs, if any.
+    const CPU_START_FRAME_LIMIT: Option<u64>;
+
+    /// 在引导处理器上初始化核间中断控制器并发现全部处理器（只调用一次）。
+    /// Initialise the boot processor's IPI controller and discover all processors.
+    fn cpu_init_boot(boot: &crate::boot::BootSpec) -> CpuDiscovery;
+
+    /// 启动一个处理器：它完成本处理器的平台初始化后调用 `crate::smp::secondary_main(index)`。
+    /// 返回时启动命令已发出；是否报到由 Core 等待判定。
+    ///
+    /// # Safety
+    /// `start.stack_top` 必须是专属于该处理器的有效栈；`frame` 满足 [`Platform::CPU_START_FRAME_LIMIT`]
+    /// 并已按其要求映射；同一时刻只启动一个处理器。
+    /// Start one processor.
+    unsafe fn cpu_start(
+        start: &CpuStart<Self::SpaceRoot>,
+        frame: Option<kernel_core::frame::PhysFrame>,
+    ) -> Result<(), kernel_core::smp::SmpError>;
+
+    /// 当前处理器的逻辑下标（多处理器未初始化时为 0）。
+    /// Logical index of the executing processor.
+    fn cpu_index() -> usize;
+
+    /// 向逻辑下标为 `cpu` 的处理器发送核间中断。
+    /// Send an inter-processor interrupt to processor `cpu`.
+    fn send_ipi(cpu: usize, kind: kernel_core::smp::IpiKind) -> Result<(), kernel_core::smp::SmpError>;
+
+    /// 作废本处理器上 `[va, va + pages × 4 KiB)` 的 TLB 项（所有地址空间）。
+    /// Invalidate local TLB entries for the given page range.
+    fn tlb_flush_local(va: u64, pages: u64);
 }
 
 // ---- Core 使用的薄包装（避免各处 `use Platform` 与冗长的 `<Current as Platform>::`）----
@@ -459,4 +520,34 @@ pub fn cycles() -> u64 {
 /// 见 [`Platform::exit_emulator`]。
 pub fn exit_emulator(status: ExitStatus) -> ! {
     Current::exit_emulator(status)
+}
+
+/// 见 [`Platform::CPU_START_FRAME_LIMIT`]。
+pub const CPU_START_FRAME_LIMIT: Option<u64> = <Current as Platform>::CPU_START_FRAME_LIMIT;
+/// 见 [`Platform::cpu_init_boot`]。
+pub fn cpu_init_boot(boot: &crate::boot::BootSpec) -> CpuDiscovery {
+    Current::cpu_init_boot(boot)
+}
+/// 见 [`Platform::cpu_start`]。
+///
+/// # Safety
+/// 同 [`Platform::cpu_start`]。
+pub unsafe fn cpu_start(
+    start: &CpuStart<SpaceRoot>,
+    frame: Option<kernel_core::frame::PhysFrame>,
+) -> Result<(), kernel_core::smp::SmpError> {
+    Current::cpu_start(start, frame)
+}
+/// 见 [`Platform::cpu_index`]。
+#[inline(always)]
+pub fn cpu_index() -> usize {
+    Current::cpu_index()
+}
+/// 见 [`Platform::send_ipi`]。
+pub fn send_ipi(cpu: usize, kind: kernel_core::smp::IpiKind) -> Result<(), kernel_core::smp::SmpError> {
+    Current::send_ipi(cpu, kind)
+}
+/// 见 [`Platform::tlb_flush_local`]。
+pub fn tlb_flush_local(va: u64, pages: u64) {
+    Current::tlb_flush_local(va, pages)
 }

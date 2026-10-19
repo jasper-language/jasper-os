@@ -64,6 +64,12 @@ pub fn allocate() -> Result<PhysFrame, FrameError> {
     ALLOCATOR.get().ok_or(FrameError::OutOfFrames)?.lock().allocate()
 }
 
+/// 分配一个起始地址低于 `limit` 的物理页帧（硬件只能寻址低端内存时使用）；没有则失败且不改动。
+/// Allocate a frame below `limit`.
+pub fn allocate_below(limit: u64) -> Result<PhysFrame, FrameError> {
+    ALLOCATOR.get().ok_or(FrameError::OutOfFrames)?.lock().allocate_below(limit)
+}
+
 /// 释放一个物理页帧。
 pub fn deallocate(frame: PhysFrame) -> Result<(), FrameError> {
     ALLOCATOR.get().ok_or(FrameError::NotUsable)?.lock().deallocate(frame)

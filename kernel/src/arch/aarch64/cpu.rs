@@ -99,3 +99,11 @@ pub fn sync_icache(va: u64, len: u64) {
     // SAFETY：屏障与指令缓存作废没有副作用（之后取指重新从统一点读取）。
     unsafe { core::arch::asm!("dsb ish", "ic ialluis", "dsb ish", "isb", options(nostack, preserves_flags)) };
 }
+
+/// 本处理器的亲和性标识（MPIDR_EL1 的 Aff0–Aff2，作为处理器拓扑中的硬件标识）。
+pub fn boot_affinity() -> u32 {
+    let v: u64;
+    // SAFETY：只读系统寄存器，无副作用。
+    unsafe { core::arch::asm!("mrs {}, mpidr_el1", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    (v & 0x00FF_FFFF) as u32
+}

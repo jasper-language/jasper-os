@@ -12,9 +12,13 @@
 //! * `space`   —— 地址空间（PML4）的创建、CR3 切换与销毁
 //! * `user`    —— `iretq` 进入 Ring 3 与用户态探针机器码
 //! * `syscall` —— `syscall`/`sysretq` 入口：MSR 设置、换栈、寄存器帧、返回前 RIP 规范性检查
+//! * `apic`    —— 本地 APIC：核间中断、本地定时器（以 PIT 校准）、EOI
+//! * `smp`     —— 多处理器：MADT 发现、实模式启动代码、INIT/启动序列、其他处理器入口
 //!
-//! 与 Core 的唯一回调方向：定时器中断入口调用 `crate::irq::on_hardware_irq`（见 `idt.rs`）。
+//! 与 Core 的回调方向：中断入口调用 `crate::irq::on_hardware_irq`（见 `idt.rs`）；
+//! 其他处理器完成平台初始化后调用 `crate::smp::secondary_main`（见 `smp.rs`）。
 
+mod apic;
 mod context;
 mod paging;
 mod gdt;
@@ -24,6 +28,7 @@ mod pit;
 mod space;
 mod syscall;
 mod port;
+mod smp;
 mod uart;
 mod user;
 
@@ -205,6 +210,32 @@ impl Platform for X86_64 {
 
     fn user_probe(probe: UserProbe) -> &'static [u8] {
         user::probe(probe)
+    }
+
+    const CPU_START_FRAME_LIMIT: Option<u64> = Some(smp::START_FRAME_LIMIT);
+
+    fn cpu_init_boot(boot: &crate::boot::BootSpec) -> super::CpuDiscovery {
+        smp::init_boot(boot)
+    }
+
+    unsafe fn cpu_start(
+        start: &super::CpuStart<Self::SpaceRoot>,
+        frame: Option<kernel_core::frame::PhysFrame>,
+    ) -> Result<(), kernel_core::smp::SmpError> {
+        smp::start(start, frame)
+    }
+
+    #[inline(always)]
+    fn cpu_index() -> usize {
+        smp::cpu_index()
+    }
+
+    fn send_ipi(cpu: usize, kind: kernel_core::smp::IpiKind) -> Result<(), kernel_core::smp::SmpError> {
+        smp::send_ipi(cpu, kind)
+    }
+
+    fn tlb_flush_local(va: u64, pages: u64) {
+        smp::tlb_flush_local(va, pages)
     }
 
     #[inline(always)]

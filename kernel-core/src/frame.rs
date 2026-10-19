@@ -193,6 +193,24 @@ impl<'a> BitmapFrameAllocator<'a> {
         }
     }
 
+    /// 分配一个起始地址低于 `limit` 的空闲帧（从低地址找起）；没有则返回错误且位图不变。
+    ///
+    /// 用于硬件只能寻址低端物理内存的场合（例如处理器启动代码必须位于 1 MiB 以下）。
+    /// Allocate a free frame whose start address is below `limit`; on failure nothing changes.
+    pub fn allocate_below(&mut self, limit: u64) -> Result<PhysFrame, FrameError> {
+        let last = limit / FRAME_SIZE;
+        for n in 1..last {
+            let Some(i) = self.word_index(n) else { break };
+            let bit = 1u64 << (n % 64);
+            if self.bits[i] & bit == 0 {
+                self.bits[i] |= bit;
+                self.free -= 1;
+                return Ok(PhysFrame::from_number(n));
+            }
+        }
+        Err(FrameError::OutOfFrames)
+    }
+
     /// 帧是否落在某个可用区域内且不在任何保留区域内（释放合法性检查）。
     fn is_usable(&self, frame: PhysFrame) -> bool {
         let n = frame.number();
@@ -297,6 +315,25 @@ mod tests {
         }
         assert_eq!(a.allocate(), Err(FrameError::OutOfFrames));
         assert_eq!(a.free_frames(), 0);
+    }
+
+    #[test]
+    fn allocate_below_limit_succeeds_or_refuses_without_change() {
+        let mut bits = [0u64; 64];
+        let r = regions();
+        let mut a = BitmapFrameAllocator::new(&mut bits, &r);
+        let before = a.free_frames();
+        // 低于 1 MiB 的第一个可用帧：帧 0 永不分配
+        let f = a.allocate_below(MIB).expect("低端有可用帧");
+        assert!(f.start() < MIB && f.number() != 0);
+        assert!(a.is_used(f));
+        assert_eq!(a.free_frames(), before - 1);
+        // 极限低于第一个可用帧 ⇒ 拒绝，空闲数不变
+        let free = a.free_frames();
+        assert_eq!(a.allocate_below(FRAME_SIZE), Err(FrameError::OutOfFrames));
+        assert_eq!(a.free_frames(), free);
+        a.deallocate(f).unwrap();
+        assert_eq!(a.free_frames(), before);
     }
 
     #[test]

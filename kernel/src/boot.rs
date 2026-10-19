@@ -20,12 +20,14 @@ pub struct BootSpec {
     pub dropped_regions: usize,
     /// 「物理地址 + 偏移 = 内核可访问的虚拟地址」中的偏移；引导器未映射全部物理内存时为 `None`。
     pub phys_offset: Option<u64>,
+    /// 固件 ACPI 根指针（RSDP）的物理地址；引导器未提供时为 `None`（处理器发现退回只用引导处理器）。
+    pub acpi_rsdp: Option<u64>,
 }
 
 impl BootSpec {
     /// 空的交接信息。
     pub const fn new() -> Self {
-        BootSpec { regions: [PhysRegion::EMPTY; MAX_REGIONS], region_count: 0, dropped_regions: 0, phys_offset: None }
+        BootSpec { regions: [PhysRegion::EMPTY; MAX_REGIONS], region_count: 0, dropped_regions: 0, phys_offset: None, acpi_rsdp: None }
     }
 
     /// 追加一个区域；满了则计数丢弃。

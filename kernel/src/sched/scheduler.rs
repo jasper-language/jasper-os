@@ -91,6 +91,8 @@ pub struct SwitchPlan {
     pub next_stack_top: Option<u64>,
     /// 下一个任务的地址空间（`None` = 内核地址空间）。
     pub next_space: Option<crate::arch::SpaceRoot>,
+    /// 下一个任务的槽位（记入本处理器的每核数据）。
+    pub next_slot: usize,
 }
 
 /// 切换观察者：在真正换栈之前被调用。
@@ -711,7 +713,7 @@ impl<P: SchedPolicy, const N: usize> Scheduler<P, N> {
         let next_stack_top = if next == BOOT_SLOT { None } else { Some(self.stacks.top(next)) };
         let old: *mut TaskContext = &mut self.tasks[prev].as_mut()?.context;
         let new: *const TaskContext = &self.tasks[next].as_ref()?.context;
-        Some(SwitchPlan { old, new, next_stack_top, next_space })
+        Some(SwitchPlan { old, new, next_stack_top, next_space, next_slot: next })
     }
 
     // -----------------------------------------------------------------------

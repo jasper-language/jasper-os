@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{clock, config, counter_demo, fix_demo, irq, kprint, kprintln, mech_demo, mm, pi_demo, sched, user_demo};
+use crate::{clock, config, counter_demo, fix_demo, irq, kprint, kprintln, mech_demo, mm, pi_demo, sched, smp, user_demo};
 #[cfg(feature = "user-programs")]
 use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo};
 
@@ -69,6 +69,10 @@ pub fn start(boot: &'static BootSpec) -> ! {
 
     // M2.1：物理页帧分配（真实内存图 + 真实读写校验）。
     mm::demo::run(boot);
+    // 多处理器：趁低端内存尚未被占用时预留平台需要的启动帧（平台不需要时什么也不做）。
+    if !smp::reserve_start_frame() {
+        kprintln!("[JSR-SMP] start_frame unavailable");
+    }
     // M2.2：架构无关映射 API（x86_64 由 4 级页表实现）。
     mm::demo::run_map(boot);
     // M2.3：内核堆（Box/Vec/String 可用，按需增长）。
@@ -92,6 +96,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
     }
     // M2.4：独立地址空间（同一虚拟地址、不同物理帧，真实切换）。
     mm::demo::run_space();
+    // SMP-1：启动其他处理器（每核数据、各自计时、核间中断、跨核调用、TLB 击落）。
+    smp::demo::run(smp::start_secondaries(TIMER_HZ));
     // M3.1：真实进入 Ring 3；用户态异常只终止该任务。
     user_demo::run();
     // M3.2：系统调用入口 + 稳定 ID 登记表 + 统一权限检查。
@@ -137,6 +143,7 @@ pub fn start(boot: &'static BootSpec) -> ! {
     // 各演练的断言失败数（顺序即输出顺序）；未编译的演练不出现。
     let fails: &[(&str, u32)] = &[
         ("mm", mm::demo::failed()),
+        ("smp", smp::demo::failed()),
         ("user", user_demo::failed()),
         ("fix", fix_demo::failed()),
         #[cfg(feature = "user-programs")]

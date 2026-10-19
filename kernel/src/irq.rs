@@ -16,6 +16,10 @@ use crate::{arch, clock, sched};
 pub enum IrqLine {
     /// 周期定时器（驱动时钟与时间片）。
     Timer,
+    /// 本处理器的本地定时器（每个处理器各自计时）。
+    LocalTimer,
+    /// 核间中断。
+    Ipi(kernel_core::smp::IpiKind),
 }
 
 /// 延迟处理队列容量。
@@ -39,9 +43,15 @@ static PENDING: Mutex<PendingQueue> =
 /// `from_user`：中断是否打断了用户态代码。是 ⇒ 这里也是一个调度点：所属进程已在 exiting 时，
 /// 被打断的线程就地停止（与用户态故障一样，从中断上下文经线程退出路径结束，不再返回用户态）。
 pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
-    enqueue(line);
-    if line == IrqLine::Timer {
-        sched::on_timer_interrupt();
+    match line {
+        IrqLine::Timer => {
+            crate::smp::on_local_tick();
+            enqueue(line);
+            sched::on_timer_interrupt();
+        }
+        // 每核事件只更新本处理器的每核数据，不进全局延迟队列（那是引导处理器主循环的队列）
+        IrqLine::LocalTimer => crate::smp::on_local_tick(),
+        IrqLine::Ipi(kind) => crate::smp::on_ipi(kind),
     }
     if from_user && crate::proc::current_exiting() {
         crate::proc::thread_exit(0, "killed");
@@ -94,5 +104,6 @@ pub fn dropped_count() -> usize {
 fn handle(line: IrqLine) {
     match line {
         IrqLine::Timer => clock::on_tick(),
+        IrqLine::LocalTimer | IrqLine::Ipi(_) => {}
     }
 }

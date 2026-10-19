@@ -120,6 +120,16 @@ if [ "$BUILD_RC" -eq 0 ]; then
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL" 2>&1
   QRC=$?
 fi
+# 多处理器（SMP-1）：同一镜像以 4 个处理器再真实启动一次（其余参数不变）；上面的单处理器启动同时验证「只有引导处理器」的路径。
+SERIAL_SMP4="$OUT/serial-smp4.log"
+QRC_SMP4=-1
+if [ "$BUILD_RC" -eq 0 ]; then
+  echo "== QEMU 真实启动（x86_64，4 个处理器）=="
+  run timeout "$QEMU_TIMEOUT" "$QEMU" -drive format=raw,file="$IMG" -smp 4 \
+    -serial stdio -display none -monitor none -no-reboot \
+    -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL_SMP4" 2>&1
+  QRC_SMP4=$?
+fi
 # AArch64（ISA-1）：同一内核以软浮点目标构建（不内嵌用户程序），在 QEMU virt 上直接装载 ELF 启动；
 # 退出经半主机（成功 33、失败 35，与 x86_64 一致）。缺少 qemu-system-aarch64 时如实记为失败。
 QEMU_A64="$(command -v qemu-system-aarch64 || true)"
@@ -724,6 +734,43 @@ rv64_rerun() {
   RV64_N=$PORT_N; RV64_BAD=$PORT_BAD
 }
 
+check_smp1a() { # 多处理器第一阶段（x86_64）：4 个处理器全部报到、各自计时、核间中断、跨核调用、TLB 击落、拒绝路径；
+                 # 全部 x86_64 串口检查在 4 处理器日志上逐项重跑（行名带 SMP4/ 前缀）；单处理器启动如实报告只有引导处理器
+  if [ "$BUILD_RC" -ne 0 ] || [ ! -s "$SERIAL_SMP4" ]; then
+    record SMP-1a FAIL "4 处理器启动没有串口日志（构建 rc=$BUILD_RC，QEMU=$QRC_SMP4）"
+    return
+  fi
+  port_rerun "$SERIAL_SMP4" "$QRC_SMP4" "SMP4/" 256 \
+    check_m11 check_m12 check_m13 check_m14 check_m15 check_m21 check_m22 check_m23 check_m24 check_m31 check_m32 check_m33 \
+    check_m34 check_m51pre check_m41 check_m42 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 \
+    check_j5 check_j6 check_sched1 check_sched2 check_sched3 check_t1 check_t2 check_fix
+  local n=$PORT_N bad=$PORT_BAD miss="" f="$SERIAL_SMP4" c
+  grep -qE '^\[JSR-SMP\] start present=4 online=4 failed=0 source=acpi\.madt ' "$f" || miss="$miss 启动"
+  for c in 0 1 2 3; do grep -qE "^\[JSR-SMP\] cpu index=$c hw=[0-9]+ state=online" "$f" || miss="$miss cpu$c"; done
+  for c in 1 2 3; do
+    grep -qE "^\[JSR-SMP\] clock cpu=$c ticks_before=[0-9]+ ticks_after=[0-9]+ advanced=([1-9][0-9]+)" "$f" || miss="$miss 时钟$c"
+  done
+  grep -q '^\[JSR-SMP\] clock independent bsp_frozen=1 others_advanced=true' "$f" || miss="$miss 各自计时"
+  grep -q '^\[JSR-SMP\] ipi reschedule delivered=3/3' "$f"                 || miss="$miss 重新调度"
+  grep -q '^\[JSR-SMP\] call ran_on_target=3/3 current=idle' "$f"          || miss="$miss 跨核调用"
+  grep -qE '^\[JSR-SMP\] tlb va=0x[0-9a-f]+ before=A:3/3 stale_without_shootdown=[0-3]/3 after_shootdown=B:3/3 local=B:true acks=[3-9][0-9]* frames_back=true' "$f" \
+                                                                             || miss="$miss TLB击落"
+  grep -qE '^\[JSR-SMP\] refuse no_such_cpu=system\.cpu\.error\.no_such_cpu self=system\.cpu\.error\.self_target call_no_such=system\.cpu\.error\.no_such_cpu call_self=system\.cpu\.error\.self_target bad_range=system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range' "$f" \
+                                                                             || miss="$miss 拒绝路径"
+  grep -qE '^\[JSR-SMP\] summary cpus=4 online=4 checks=[0-9]+ failed=0' "$f" || miss="$miss 汇总"
+  grep -q '^\[JSR-EXIT\] success' "$f" && [ "$QRC_SMP4" -eq 33 ]           || miss="$miss 退出"
+  # 单处理器启动：只有引导处理器，拒绝路径同样成立
+  grep -qE '^\[JSR-SMP\] start present=1 online=1 failed=0 ' "$SERIAL" && grep -q '^\[JSR-SMP\] single cpus=1 secondary=none' "$SERIAL" \
+    && grep -qE '^\[JSR-SMP\] summary cpus=1 online=1 checks=[0-9]+ failed=0' "$SERIAL" || miss="$miss 单处理器"
+  local stale
+  stale=$(grep -oE 'stale_without_shootdown=[0-3]/3' "$f" | head -1 | cut -d= -f2)
+  if [ -z "$miss" ] && [ "$bad" -eq 0 ]; then
+    record SMP-1a PASS "x86_64 -smp 4（QEMU=$QRC_SMP4）：MADT 发现 4 个处理器全部报到；各核本地定时器各自计时（引导处理器关中断时其他核照走）；重新调度 / 跨核调用核间中断 3/3；改映射后仅本地作废时 $stale 个处理器读到旧映射，击落后 3/3 读到新映射、页帧回到基线；拒绝路径无中断无残留；$n 项 x86_64 检查在 4 处理器下全部复跑通过；单处理器启动如实报告只有引导处理器"
+  else
+    record SMP-1a FAIL "缺少/不符：$miss；4 处理器复跑 $n 项中 $bad 项失败（见 serial-smp4.log）"
+  fi
+}
+
 a64_ready() { [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ] && [ -s "$SERIAL_A64" ]; }
 
 check_isa1a() { # AArch64 移植第一阶段：内核侧检查在 qemu-system-aarch64 的串口日志上逐项重跑（行名带 A64/ 前缀）
@@ -869,20 +916,20 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {
   echo "jasper-os 一键验收  $TS"
   echo "提交：$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$(git -C "$ROOT" diff --quiet 2>/dev/null || echo '（工作区有未提交改动）')"
   echo "配置档：$PROFILE"
-  echo "QEMU 退出码：$QRC（AArch64：$QRC_A64，RISC-V64：$QRC_RV64，RISC-V32：$QRC_RV32）"
+  echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4，AArch64：$QRC_A64，RISC-V64：$QRC_RV64，RISC-V32：$QRC_RV32）"
   echo
   printf '%-6s %-4s %s\n' "里程碑" "结果" "说明"
   printf '%s\n' "${ROWS[@]}"
 } | tee "$OUT/summary.txt"
 
-for f in cargo-test.log build.log serial.log serial-aarch64.log serial-riscv64.log serial-riscv32.log summary.txt; do
+for f in cargo-test.log build.log serial.log serial-smp4.log serial-aarch64.log serial-riscv64.log serial-riscv32.log summary.txt; do
   [ -s "$OUT/$f" ] || { echo "✗ 证据文件为空或缺失：$f"; FAILED=1; }
 done
 echo
