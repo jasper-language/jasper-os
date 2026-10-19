@@ -181,6 +181,7 @@ fn fatal(what: &str, frame: &TrapFrame) -> ! {
 ///
 /// 先结束中断再交给 Core（与 x86_64 相同的顺序）：Core 可能在这里直接切到别的任务，
 /// 结束放在后面的话，切回本任务之前 GIC 不会再送来同优先级的中断，时钟就停了。
+/// 虚拟定时器是每个处理器私有的同一个中断号：在引导处理器上它驱动全局时钟与时间片，在其他处理器上只是本地时钟。
 fn handle_irq(from_user: bool) {
     let iar = gic::acknowledge();
     let id = gic::interrupt_id(iar);
@@ -190,7 +191,11 @@ fn handle_irq(from_user: bool) {
     if Some(id) == timer::interrupt() {
         timer::rearm();
         gic::end(iar);
-        irq::on_hardware_irq(IrqLine::Timer, from_user);
+        let line = if super::smp::cpu_index() == 0 { IrqLine::Timer } else { IrqLine::LocalTimer };
+        irq::on_hardware_irq(line, from_user);
+    } else if let Some(kind) = gic::ipi_kind(id) {
+        gic::end(iar);
+        irq::on_hardware_irq(IrqLine::Ipi(kind), from_user);
     } else {
         gic::end(iar);
         console::_print(format_args!("[JSR-IRQ] unexpected interrupt id={}\n", id));

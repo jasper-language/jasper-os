@@ -58,6 +58,7 @@ pub mod meta;
 pub mod paging;
 pub mod pagetable;
 pub mod pressure;
+pub mod psci;
 pub mod ring_abi;
 pub mod sched;
 pub mod smp;

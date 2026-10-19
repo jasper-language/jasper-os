@@ -14,6 +14,7 @@
 //! * `user`     —— 进入 EL0 与用户态探针机器码
 //! * `semihost` —— 半主机退出（仿真器退出码）
 //! * `cpu`      —— 系统寄存器、中断屏蔽位、屏障的最小封装
+//! * `smp`      —— 多处理器：设备树处理器发现、PSCI 唤醒、其他处理器入口、逻辑下标与核间中断
 //!
 //! 与 Core 的回调方向：中断入口调用 `crate::irq::on_hardware_irq`，系统调用入口调用 `crate::syscall::on_syscall`，
 //! 用户故障调用 `crate::fault::on_user_fault`（均在 `vectors.rs`）；引导适配层调用 `crate::kmain::start`。
@@ -25,6 +26,7 @@ mod gic;
 mod mmu;
 mod paging;
 mod semihost;
+mod smp;
 mod space;
 mod timer;
 mod uart;
@@ -217,39 +219,33 @@ impl Platform for Aarch64 {
     }
 
     // ---- 多处理器 ----
-    // 本平台目前只运行引导处理器：拓扑只含它，启动与核间中断对其他下标一律报告「不存在」；
-    // 其他处理器的启动方式（PSCI CPU_ON + GIC 软件生成中断）在后续阶段接入，接口不变。
+    // 拓扑来自设备树处理器节点，唤醒经 PSCI CPU_ON，核间中断是 GIC 软件生成中断（见 `smp.rs`）。
+    // 入口代码在恒等映射的内核映像内，不需要低端启动帧。
 
     const CPU_START_FRAME_LIMIT: Option<u64> = None;
 
     fn cpu_init_boot(_boot: &crate::boot::BootSpec) -> super::CpuDiscovery {
-        super::CpuDiscovery { topology: kernel_core::smp::Topology::boot_only(cpu::boot_affinity()), source: "boot_only" }
+        smp::init_boot()
     }
 
     unsafe fn cpu_start(
-        _start: &super::CpuStart<Self::SpaceRoot>,
+        start: &super::CpuStart<Self::SpaceRoot>,
         _frame: Option<kernel_core::frame::PhysFrame>,
     ) -> Result<(), kernel_core::smp::SmpError> {
-        Err(kernel_core::smp::SmpError::NoSuchCpu)
+        smp::start(start)
     }
 
     #[inline(always)]
     fn cpu_index() -> usize {
-        0
+        smp::cpu_index()
     }
 
-    fn send_ipi(cpu: usize, _kind: kernel_core::smp::IpiKind) -> Result<(), kernel_core::smp::SmpError> {
-        if cpu == 0 {
-            Err(kernel_core::smp::SmpError::SelfTarget)
-        } else {
-            Err(kernel_core::smp::SmpError::NoSuchCpu)
-        }
+    fn send_ipi(cpu: usize, kind: kernel_core::smp::IpiKind) -> Result<(), kernel_core::smp::SmpError> {
+        smp::send_ipi(cpu, kind)
     }
 
     fn tlb_flush_local(va: u64, pages: u64) {
-        for i in 0..pages {
-            cpu::tlb_flush_page(va.wrapping_add(i * 4096));
-        }
+        smp::tlb_flush_local(va, pages)
     }
 
     #[inline(always)]

@@ -144,6 +144,15 @@ if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ]; then
     -serial stdio -display none -monitor none -no-reboot > "$SERIAL_A64" 2>&1
   QRC_A64=$?
 fi
+# 多处理器（SMP-1b-A64）：同一 AArch64 内核以 4 个处理器再真实启动一次（设备树处理器节点 + PSCI 唤醒 + GIC 软件生成中断）。
+SERIAL_A64_SMP4="$OUT/serial-aarch64-smp4.log"
+QRC_A64_SMP4=-1
+if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ]; then
+  echo "== QEMU 真实启动（AArch64，4 个处理器）=="
+  run timeout "$QEMU_TIMEOUT" "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -smp 4 -kernel "$A64_ELF" -semihosting \
+    -serial stdio -display none -monitor none -no-reboot > "$SERIAL_A64_SMP4" 2>&1
+  QRC_A64_SMP4=$?
+fi
 # RISC-V64（ISA-2）：同一内核以软浮点目标 riscv64imac 构建（内嵌的用户程序与模块同样以 riscv64imac 构建），由 QEMU virt 默认的 OpenSBI
 # 以监管态装载 ELF 启动；退出经仿真器测试设备（成功 33、失败 35，与 x86_64 一致）。缺少 qemu-system-riscv64 时如实记为失败。
 QEMU_RV64="$(command -v qemu-system-riscv64 || true)"
@@ -771,6 +780,44 @@ check_smp1a() { # 多处理器第一阶段（x86_64）：4 个处理器全部报
   fi
 }
 
+check_smp1b_a64() { # 多处理器第二阶段（AArch64）：设备树发现 4 个处理器、PSCI CPU_ON 全部报到、各核虚拟定时器各自计时、
+                     # GIC 软件生成中断（重新调度 / 跨核调用 / TLB 击落）、拒绝路径；全部 AArch64 串口检查在 4 处理器日志上逐项重跑（行名带 A64SMP4/ 前缀）
+  if [ "$A64_BUILD_RC" -ne 0 ] || [ ! -s "$SERIAL_A64_SMP4" ]; then
+    record SMP-1b-A64 FAIL "AArch64 4 处理器启动没有串口日志（构建 rc=$A64_BUILD_RC，QEMU=$QRC_A64_SMP4）"
+    return
+  fi
+  port_rerun "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" "A64SMP4/" 128 \
+    check_m11 check_m12 check_m13 check_m14 check_m15 check_m21 check_m22 check_m23 check_m24 check_m31 check_m32 check_m33 check_m34 \
+    check_m42 check_fix check_sched2 check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 \
+    check_j5 check_j6 check_sched1 check_sched3 check_t1 check_t2
+  local n=$PORT_N bad=$PORT_BAD miss="" f="$SERIAL_A64_SMP4" c
+  grep -qE '^\[JSR-SMP\] start present=4 online=4 failed=0 source=fdt\.cpus ' "$f" || miss="$miss 启动"
+  for c in 0 1 2 3; do grep -qE "^\[JSR-SMP\] cpu index=$c hw=$c state=online" "$f" || miss="$miss cpu$c"; done
+  for c in 1 2 3; do
+    grep -qE "^\[JSR-SMP\] clock cpu=$c ticks_before=[0-9]+ ticks_after=[0-9]+ advanced=([1-9][0-9]+)" "$f" || miss="$miss 时钟$c"
+  done
+  grep -q '^\[JSR-SMP\] clock independent bsp_frozen=1 others_advanced=true' "$f" || miss="$miss 各自计时"
+  grep -q '^\[JSR-SMP\] ipi reschedule delivered=3/3' "$f"                 || miss="$miss 重新调度"
+  grep -q '^\[JSR-SMP\] call ran_on_target=3/3 current=idle' "$f"          || miss="$miss 跨核调用"
+  grep -qE '^\[JSR-SMP\] tlb va=0x[0-9a-f]+ before=A:3/3 stale_without_shootdown=[0-3]/3 after_shootdown=B:3/3 local=B:true acks=[3-9][0-9]* frames_back=true' "$f" \
+                                                                             || miss="$miss TLB击落"
+  grep -qE '^\[JSR-SMP\] refuse no_such_cpu=system\.cpu\.error\.no_such_cpu self=system\.cpu\.error\.self_target call_no_such=system\.cpu\.error\.no_such_cpu call_self=system\.cpu\.error\.self_target bad_range=system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range' "$f" \
+                                                                             || miss="$miss 拒绝路径"
+  grep -qE '^\[JSR-SMP\] summary cpus=4 online=4 checks=[0-9]+ failed=0' "$f" || miss="$miss 汇总"
+  grep -q '^\[JSR-EXIT\] success' "$f" && [ "$QRC_A64_SMP4" -eq 33 ]       || miss="$miss 退出"
+  # 单处理器 AArch64 启动：设备树只有引导处理器，如实报告并只演练拒绝路径
+  grep -qE '^\[JSR-SMP\] start present=1 online=1 failed=0 source=boot_only ' "$SERIAL_A64" \
+    && grep -q '^\[JSR-SMP\] single cpus=1 secondary=none' "$SERIAL_A64" \
+    && grep -qE '^\[JSR-SMP\] summary cpus=1 online=1 checks=[0-9]+ failed=0' "$SERIAL_A64" || miss="$miss 单处理器"
+  local stale
+  stale=$(grep -oE 'stale_without_shootdown=[0-3]/3' "$f" | head -1 | cut -d= -f2)
+  if [ -z "$miss" ] && [ "$bad" -eq 0 ]; then
+    record SMP-1b-A64 PASS "AArch64 -smp 4（QEMU=$QRC_A64_SMP4）：设备树处理器节点发现 4 个处理器、PSCI CPU_ON 全部报到；各核虚拟定时器各自计时（引导处理器关中断时其他核照走）；GIC 软件生成中断：重新调度 / 跨核调用 3/3；改映射后仅本地作废时 $stale 个处理器读到旧映射，击落后 3/3 读到新映射、页帧回到基线；拒绝路径无中断无残留；$n 项 AArch64 检查在 4 处理器下全部复跑通过；单处理器启动如实报告只有引导处理器"
+  else
+    record SMP-1b-A64 FAIL "缺少/不符：$miss；4 处理器复跑 $n 项中 $bad 项失败（见 serial-aarch64-smp4.log）"
+  fi
+}
+
 a64_ready() { [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ] && [ -s "$SERIAL_A64" ]; }
 
 check_isa1a() { # AArch64 移植第一阶段：内核侧检查在 qemu-system-aarch64 的串口日志上逐项重跑（行名带 A64/ 前缀）
@@ -916,20 +963,20 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a
+check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {
   echo "jasper-os 一键验收  $TS"
   echo "提交：$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$(git -C "$ROOT" diff --quiet 2>/dev/null || echo '（工作区有未提交改动）')"
   echo "配置档：$PROFILE"
-  echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4，AArch64：$QRC_A64，RISC-V64：$QRC_RV64，RISC-V32：$QRC_RV32）"
+  echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4，AArch64：$QRC_A64，AArch64 4 处理器：$QRC_A64_SMP4，RISC-V64：$QRC_RV64，RISC-V32：$QRC_RV32）"
   echo
   printf '%-6s %-4s %s\n' "里程碑" "结果" "说明"
   printf '%s\n' "${ROWS[@]}"
 } | tee "$OUT/summary.txt"
 
-for f in cargo-test.log build.log serial.log serial-smp4.log serial-aarch64.log serial-riscv64.log serial-riscv32.log summary.txt; do
+for f in cargo-test.log build.log serial.log serial-smp4.log serial-aarch64.log serial-aarch64-smp4.log serial-riscv64.log serial-riscv32.log summary.txt; do
   [ -s "$OUT/$f" ] || { echo "✗ 证据文件为空或缺失：$f"; FAILED=1; }
 done
 echo

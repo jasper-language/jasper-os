@@ -5,10 +5,12 @@
 //! * 只解析，不分配：所有结果都是对原始字节的借用或按值返回的数字，`no_std`、无堆可用。
 //! * 设备树来自固件，是**不可信输入**：每次读取都做边界检查，结构错误返回带规范名的错误，绝不越界或死循环。
 //! * 只覆盖内核启动需要的子集：头部校验、内存保留块、节点遍历（含 `#address-cells` / `#size-cells` 继承）、
-//!   属性查找、`compatible` 匹配、`reg` 解码。不做路径解析、phandle 跟踪或覆盖层（overlay）。
+//!   属性查找、`compatible` 匹配、`reg` 解码、处理器节点枚举。不做路径解析、phandle 跟踪或覆盖层（overlay）。
 //!
 //! # 为什么放在 kernel-core
 //! 格式本身与指令集无关（AArch64 与 RISC-V 的 QEMU `virt` 都用它），放在这里可以在宿主上用构造的 DTB 测试。
+
+use crate::smp::Topology;
 
 /// 设备树头部的魔数（大端）。
 pub const MAGIC: u32 = 0xd00d_feed;
@@ -257,6 +259,46 @@ impl<'a> Fdt<'a> {
             true
         })
     }
+    /// 枚举全部 `device_type = "cpu"` 的节点，得到处理器拓扑（引导处理器在下标 0）。
+    /// 每个节点 `reg` 的第一个地址是硬件标识（AArch64 为亲和性值、RISC-V 为 hart 号），经 `hw_id_of` 换算；
+    /// 换算失败（标识超出平台能表示的范围）计入 `dropped`，`status` 存在且不是 `okay` / `ok` 的计入 `disabled`。
+    /// 结构非法时返回错误，不返回部分结果。
+    /// Enumerate CPU nodes into a topology; the boot processor stays at index 0.
+    pub fn cpu_topology(&self, boot_hw_id: u32, hw_id_of: impl Fn(u64) -> Option<u32>) -> Result<FdtCpus, FdtError> {
+        let mut topology = Topology::boot_only(boot_hw_id);
+        let mut boot_listed = false;
+        let mut listed = 0usize;
+        self.walk(|n| {
+            if n.property("device_type").map(trim_nul) != Some(b"cpu".as_slice()) {
+                return true;
+            }
+            listed += 1;
+            let enabled = match n.property("status").map(trim_nul) {
+                None => true,
+                Some(v) => v == b"okay" || v == b"ok",
+            };
+            match n.reg(0).and_then(|(addr, _)| hw_id_of(addr)) {
+                None => topology.dropped += 1,
+                Some(_) if !enabled => topology.disabled += 1,
+                Some(id) if id == boot_hw_id => boot_listed = true,
+                Some(id) => topology.push(id),
+            }
+            true
+        })?;
+        Ok(FdtCpus { topology, boot_listed, listed })
+    }
+}
+
+/// 设备树处理器节点的枚举结果。
+/// Result of enumerating the CPU nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FdtCpus {
+    /// 逻辑下标 ↔ 硬件标识（引导处理器在下标 0；其余按文档顺序）。
+    pub topology: Topology,
+    /// 引导处理器本身是否出现在设备树中（不出现说明设备树与本机不符，调用者应只用引导处理器）。
+    pub boot_listed: bool,
+    /// `device_type = "cpu"` 的节点总数（含被停用与被丢弃的）。
+    pub listed: usize,
 }
 
 /// 去掉字符串属性末尾的 NUL。
@@ -293,6 +335,14 @@ impl<'a> Node<'a> {
             }
         }
         None
+    }
+
+    /// 字符串属性的第一个字符串（去掉 NUL；不是合法 UTF-8 时为 `None`）。
+    /// First string of a string property.
+    pub fn string(&self, name: &str) -> Option<&'a str> {
+        let v = self.property(name)?;
+        let first = v.split(|&b| b == 0).next()?;
+        core::str::from_utf8(first).ok()
     }
 
     /// `compatible`（以 NUL 分隔的字符串列表）是否含有 `compat`。
@@ -545,5 +595,64 @@ mod tests {
         let uart = fdt.find_compatible("arm,pl011").unwrap().unwrap();
         assert_eq!(uart.cell("reg", 4), None, "越过属性末尾");
         assert_eq!(uart.reg(usize::MAX), None, "下标溢出不越界");
+    }
+
+    /// QEMU `virt` 形状的处理器节点：一单元地址、零单元长度、带 cpu-map（其子节点没有 device_type）。
+    fn cpus_tree(boot_first: bool, extra: &[(u32, Option<&[u8]>)]) -> Vec<u8> {
+        let mut b = Builder::new();
+        b.begin("").cells("#address-cells", &[2]).cells("#size-cells", &[2]);
+        b.begin("psci").prop("compatible", b"arm,psci-1.0\0arm,psci-0.2\0").prop("method", b"hvc\0").end();
+        b.begin("cpus").cells("#address-cells", &[1]).cells("#size-cells", &[0]);
+        b.begin("cpu-map").begin("socket0").begin("core0").cells("cpu", &[0x8004]).end().end().end();
+        if boot_first {
+            b.begin("cpu@0").prop("device_type", b"cpu\0").cells("reg", &[0]).end();
+        }
+        for (id, status) in extra {
+            b.begin("cpu").prop("device_type", b"cpu\0").cells("reg", &[*id]);
+            if let Some(st) = status {
+                b.prop("status", st);
+            }
+            b.end();
+        }
+        b.end();
+        b.end();
+        b.finish(&[])
+    }
+
+    #[test]
+    fn cpu_nodes_build_topology_boot_first() {
+        // 引导处理器不在文档首位（硬件标识 2）：仍排在下标 0，其余按文档顺序
+        let blob = cpus_tree(true, &[(1, None), (2, Some(b"okay\0")), (3, Some(b"disabled\0"))]);
+        let fdt = Fdt::parse(&blob).unwrap();
+        let cpus = fdt.cpu_topology(2, |r| u32::try_from(r).ok()).unwrap();
+        assert!(cpus.boot_listed);
+        assert_eq!(cpus.listed, 4);
+        assert_eq!(cpus.topology.ids(), &[2, 0, 1]);
+        assert_eq!((cpus.topology.disabled, cpus.topology.dropped), (1, 0));
+        let psci = fdt.find_compatible("arm,psci-0.2").unwrap().unwrap();
+        assert_eq!(psci.string("method"), Some("hvc"));
+        assert_eq!(psci.string("nothing"), None);
+    }
+
+    #[test]
+    fn cpu_nodes_rejections_counted_not_lost() {
+        // 换算失败（标识超出平台范围）计入 dropped；引导处理器不在树中如实报告；超出容量计入 dropped
+        let many: Vec<(u32, Option<&[u8]>)> = (1..=20).map(|i| (i, None)).collect();
+        let blob = cpus_tree(false, &many);
+        let fdt = Fdt::parse(&blob).unwrap();
+        let cpus = fdt.cpu_topology(0, |r| if r < 18 { Some(r as u32) } else { None }).unwrap();
+        assert!(!cpus.boot_listed, "引导处理器 0 不在树中");
+        assert_eq!(cpus.topology.count(), crate::smp::MAX_CPUS);
+        // 18..=20 换算失败 3 个；1..=17 中只有 15 个装得下（下标 0 是引导处理器），溢出 2 个
+        assert_eq!(cpus.topology.dropped, 3 + 2);
+        // 结构损坏：返回错误而不是部分结果
+        let mut bad = blob.clone();
+        let so = u32::from_be_bytes(bad[8..12].try_into().unwrap()) as usize;
+        bad[so + 3] = 0x7f;
+        assert!(Fdt::parse(&bad).unwrap().cpu_topology(0, |r| Some(r as u32)).is_err());
+        // 没有任何处理器节点：只有引导处理器
+        let none = virt_like();
+        let c = Fdt::parse(&none).unwrap().cpu_topology(7, |r| Some(r as u32)).unwrap();
+        assert_eq!((c.topology.ids(), c.boot_listed, c.listed), (&[7u32][..], false, 0));
     }
 }

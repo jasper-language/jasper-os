@@ -3,7 +3,7 @@
 //!
 //! AArch64 没有 x86 那样的引导器：固件 / 仿真器（QEMU `-kernel`）按 ELF 程序头把内核放到链接地址，
 //! 从 `_start` 开始执行，MMU 关闭。本文件负责：
-//! 1. 只让 0 号处理器继续（其余停在 `wfe`）；若在 EL2 进入则降到 EL1；清零 BSS、设置启动栈；
+//! 1. 只让 0 号处理器继续（其余停在 `wfe`，之后经 PSCI 从各自的入口启动）、逻辑下标寄存器置 0；若在 EL2 进入则降到 EL1；清零 BSS、设置启动栈；
 //! 2. 建早期页表并打开 MMU（见 `mmu.rs`）；
 //! 3. 找到设备树（`x0` 给出的地址，或 QEMU `virt` 约定的内存起点），读出内存图、串口、中断控制器与定时器中断号；
 //! 4. 把内存图转换成与引导协议无关的 [`BootSpec`]（内核映像、设备树、固件保留区标为保留），交给 `kmain::start`。
@@ -15,7 +15,7 @@ use core::arch::global_asm;
 use kernel_core::fdt::{self, Fdt};
 use kernel_core::frame::{PhysRegion, RegionKind};
 
-use super::{gic, mmu, semihost, timer, uart};
+use super::{gic, mmu, semihost, smp, timer, uart};
 use crate::boot::{self, BootSpec};
 
 /// 启动栈大小。
@@ -41,6 +41,7 @@ _start:
     mrs x9, mpidr_el1
     and x9, x9, #0xff
     cbnz x9, 8f
+    msr tpidr_el1, xzr
     mov x19, x0
     mrs x9, CurrentEL
     lsr x9, x9, #2
@@ -121,6 +122,8 @@ fn configure_devices(fdt: &Fdt<'_>) -> Result<(), &'static str> {
     let timer_node = fdt.find_compatible("arm,armv8-timer").ok().flatten().ok_or("arm,armv8-timer")?;
     let ppi = timer_node.cell("interrupts", 7).ok_or("arm,armv8-timer interrupts")?;
     timer::set_interrupt(ppi + 16);
+    // 处理器拓扑与 PSCI 调用途径（缺失时只用引导处理器，不算启动失败）
+    smp::configure(fdt);
     Ok(())
 }
 
