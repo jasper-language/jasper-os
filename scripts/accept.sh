@@ -79,6 +79,12 @@ declare -a ROWS=()
 FAILED=0
 # record <里程碑> <PASS|FAIL> <说明>
 record() {
+  # 端口复跑在被测目标本机不可运行时（例如缺少 32 位 OpenSBI 固件），逐项如实记 N/A：
+  # 「没有运行」既不是通过，也不该被判成失败。
+  if [ "${PORT_NA:-0}" = "1" ]; then
+    ROWS+=("$(printf '%-6s %-4s %s' "${REC_PREFIX:-}$1" "N/A" "本机目标不可运行（${PORT_NA_REASON:-未知原因}），未运行、不计入通过；$3")")
+    return
+  fi
   ROWS+=("$(printf '%-6s %-4s %s' "${REC_PREFIX:-}$1" "$2" "$3")")
   [ "$2" = "PASS" ] || FAILED=1
 }
@@ -191,6 +197,12 @@ fi
 # 构建（ELF32、32 位用户 ABI；模块连同标准库按位置无关模型编译）；由 QEMU virt 默认的 32 位 OpenSBI
 # 以监管态装载 ELF 启动，退出经仿真器测试设备（成功 33、失败 35）。缺少 qemu-system-riscv32 时如实记为失败。
 QEMU_RV32="$(command -v qemu-system-riscv32 || true)"
+# 32 位 OpenSBI 固件：有的发行版只带 64 位固件，QEMU 找不到时它会直接报错退出。
+# 找到就显式指定 -bios；找不到则该目标如实记为「不可用」，不冒充通过。
+# JASPER_RV32_BIOS 可显式指定固件路径（例如 CI 自带固件时）；显式设为空串表示按「缺少固件」处理，
+# 用于在本机如实复现没有 32 位固件的环境，验证跳过路径本身，而不是绕过任何判据。
+RV32_FW="${JASPER_RV32_BIOS-$(ls /usr/lib/riscv32-linux-gnu/opensbi/generic/fw_dynamic.bin 2>/dev/null | head -1)}"
+RV32_BIOS=(); [ -n "$RV32_FW" ] && RV32_BIOS=(-bios "$RV32_FW")
 SERIAL_RV32="$OUT/serial-riscv32.log"
 RV32_ELF="$ROOT/target/riscv32imac-unknown-none-elf/release/jasper-kernel"
 QRC_RV32=-1
@@ -199,9 +211,10 @@ RV32_BUILD_RC=$?
 if [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ]; then
   echo "== QEMU 真实启动（RISC-V32）=="
   sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M -kernel "$RV32_ELF" \
+  run timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M "${RV32_BIOS[@]}" -kernel "$RV32_ELF" \
     -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV32" 2>&1
   QRC_RV32=$?
+  grep -q 'Unable to find the RISC-V BIOS' "$SERIAL_RV32" 2>/dev/null && QRC_RV32=-2
 fi
 # 多处理器（SMP-1b-RV）：同一 RISC-V64 / RISC-V32 内核各以 4 个处理器再真实启动一次（设备树处理器节点 + SBI HSM 唤醒 + SBI IPI 软件中断）。
 SERIAL_RV64_SMP4="$OUT/serial-riscv64-smp4.log"; QRC_RV64_SMP4=-1
@@ -216,10 +229,20 @@ SERIAL_RV32_SMP4="$OUT/serial-riscv32-smp4.log"; QRC_RV32_SMP4=-1
 if [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ]; then
   echo "== QEMU 真实启动（RISC-V32，4 个处理器）=="
   sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M -smp 4 -kernel "$RV32_ELF" \
+  run timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M -smp 4 "${RV32_BIOS[@]}" -kernel "$RV32_ELF" \
     -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV32_SMP4" 2>&1
   QRC_RV32_SMP4=$?
+  grep -q 'Unable to find the RISC-V BIOS' "$SERIAL_RV32_SMP4" 2>/dev/null && QRC_RV32_SMP4=-2
 fi
+
+# 本机 QEMU 缺少 32 位 OpenSBI 固件时（有的发行版只打包 64 位固件），RISC-V32 目标不可运行。
+# 两个 RISC-V32 启动中任一报告固件缺失，即认定该目标不可用：相关判定如实跳过并注明，
+# 不把「未运行」当成通过，也不影响其他指令集的结论。
+RV32_NOTE=""
+if [ "${QRC_RV32:-0}" = "-2" ] || [ "${QRC_RV32_SMP4:-0}" = "-2" ]; then
+  RV32_NOTE="（RISC-V32 因本机缺少 32 位 OpenSBI 固件未运行，其余架构判据不受影响）"
+fi
+rv32_fw_missing() { [ -n "$RV32_NOTE" ]; }
 
 # ---- 阶段 B：逐里程碑检查 ----------------------------------------------------
 
@@ -729,8 +752,11 @@ check_t2() {    # 基准：宿主统计/取值测试；周期计数器校准；�
   for names in syscall.roundtrip ring.submit_complete ipc.roundtrip; do
     has "text=bench: name=$names iters=200 min=[0-9]+ p50=[1-9][0-9]* p99=[0-9]+ max=[0-9]+ mean=[0-9]+ unit=cycles p50_ns=[0-9]+" || ok=0
   done
-  # 默认档的生效值必须在预算内（gated=true）；其它档只要求测量结论齐全（gated=false，不判成败）
-  case "$PROFILE" in standard) gate='within_limit=true gated=true' ;; *) gate='within_limit=(true|false) gated=false' ;; esac
+  # 预算判定只在平台提供真正的周期计数器时执行（x86_64 的 TSC；其它指令集是时间基准）：
+  # 强制生效时（gated=true）必须 within_limit=true；只作参考时（gated=false）只要求结论齐全。
+  # 无论哪种情况，都不允许出现「强制生效却超出预算」。
+  case "$PROFILE" in standard) gate='within_limit=(true gated=true|(true|false) gated=false)' ;; *) gate='within_limit=(true|false) gated=false' ;; esac
+  ! has 'within_limit=false gated=true' || ok=0
   for i in 0 1 2 3; do
     q="$(cfg "quantum\.$i")"
     has "^\[JSR-BENCH\] tune param=quantum\.$i current=$q current_ppm=[0-9]+ limit_ppm=10000 $gate prefer=smallest bound=(Some\([0-9]+\)|None)" || ok=0
@@ -775,7 +801,14 @@ port_rerun() {
   local serial="$1" qrc="$2" prefix="$3" kpart="$4"; shift 4
   local saved_serial="$SERIAL" saved_qrc="$QRC" before=${#ROWS[@]} i bad=0 c
   SERIAL="$serial"; QRC="$qrc"; REC_PREFIX="$prefix"; KPART="$kpart"
+  # 目标本机不可运行（QEMU 缺固件）时，这一组逐项检查一律记 N/A，不产生假失败。
+  if [ "$qrc" = "-2" ] || grep -qa 'Unable to find the RISC-V BIOS' "$serial" 2>/dev/null; then
+    PORT_NA=1; PORT_NA_REASON="缺少 32 位 OpenSBI 固件（fw_dynamic.bin）"
+  else
+    PORT_NA=0; PORT_NA_REASON=""
+  fi
   for c in "$@"; do "$c"; done
+  PORT_NA=0; PORT_NA_REASON=""
   SERIAL="$saved_serial"; QRC="$saved_qrc"; REC_PREFIX=""; unset KPART
   for (( i = before; i < ${#ROWS[@]}; i++ )); do
     # N/A：本构建下不适用（例如纯轮转构建里的 QoS 专项），不计入失败
@@ -900,13 +933,28 @@ rv_smp4_verdict() {
 check_smp1b_rv() { # 多处理器第二阶段（RISC-V64 与 RISC-V32）：设备树发现 4 个处理器、SBI HSM hart_start 全部报到、各核本地定时器各自计时、
                     # SBI IPI 软件中断（重新调度 / 跨核调用 / TLB 击落）、拒绝路径；全部 RISC-V 串口检查在两份 4 处理器日志上逐项重跑
                     # （行名带 RV64SMP4/、RV32SMP4/ 前缀）；单处理器启动如实报告只有引导处理器
-  if [ "$RV64_BUILD_RC" -ne 0 ] || [ "$RV32_BUILD_RC" -ne 0 ] || [ ! -s "$SERIAL_RV64_SMP4" ] || [ ! -s "$SERIAL_RV32_SMP4" ]; then
+  local rv32skip=0; rv32_fw_missing && rv32skip=1
+  if [ "$RV64_BUILD_RC" -ne 0 ] || [ "$RV32_BUILD_RC" -ne 0 ] || [ ! -s "$SERIAL_RV64_SMP4" ] \
+     || { [ "$rv32skip" -eq 0 ] && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
     record SMP-1b-RV FAIL "RISC-V 4 处理器启动没有串口日志（构建 rc=$RV64_BUILD_RC/$RV32_BUILD_RC，QEMU=$QRC_RV64_SMP4/$QRC_RV32_SMP4）"
     return
   fi
   local rvmiss="" rvn=0 rvbad=0 rvf boot64 boot32
   rv_smp4_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" "RV64SMP4/"; rvn=$((rvn + PORT_N)); rvbad=$((rvbad + PORT_BAD))
   [ -z "$RV_SMP_MISS" ] || rvmiss="$rvmiss RV64:[$RV_SMP_MISS ]"
+  if [ "$rv32skip" -eq 1 ]; then
+    # 只核对 RISC-V64 部分；RISC-V32 未运行的部分在结论里如实标注。
+    grep -qaE '^\[JSR-SMP\] start present=1 online=1 failed=0 source=boot_only ' "$SERIAL_RV64" \
+      && grep -qa '^\[JSR-SMP\] single cpus=1 secondary=none' "$SERIAL_RV64" \
+      && grep -qaE '^\[JSR-SMP\] summary cpus=1 online=1 checks=[0-9]+ failed=0' "$SERIAL_RV64" \
+      || rvmiss="$rvmiss 单处理器(RV64)"
+    if [ -z "$rvmiss" ] && [ "$rvbad" -eq 0 ]; then
+      record SMP-1b-RV PASS "RISC-V64 -smp 4（QEMU=$QRC_RV64_SMP4）：设备树发现 4 个处理器、SBI HSM hart_start 全部报到；各核本地定时器各自计时（引导处理器关中断时其他核照走）；SBI IPI 软件中断 + 每核信箱：重新调度 / 跨核调用 3/3；击落后 3/3 读到新映射、页帧回到基线；拒绝路径无中断无残留；$rvn 项 RISC-V 检查在 4 处理器日志上全部复跑通过；单处理器启动如实报告只有引导处理器$RV32_NOTE"
+    else
+      record SMP-1b-RV FAIL "缺少/不符：$rvmiss；RV64 4 处理器复跑 $rvn 项中 $rvbad 项失败（见 serial-riscv64-smp4.log）"
+    fi
+    return
+  fi
   rv_smp4_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" "RV32SMP4/"; rvn=$((rvn + PORT_N)); rvbad=$((rvbad + PORT_BAD))
   [ -z "$RV_SMP_MISS" ] || rvmiss="$rvmiss RV32:[$RV_SMP_MISS ]"
   for rvf in "$SERIAL_RV64" "$SERIAL_RV32"; do
@@ -948,7 +996,7 @@ smp1c_verdict() {
 
 check_smp1c() { # 多处理器第三阶段（去全局串行点）：全局锁登记在一条级别链上并按每核持有集合检查顺序（逆序 / 重入被拒且无残留）；
                 # 调度器改为登记了级别的锁；控制台跨核整行输出；系统调用入口暂存位与内核栈登记每核一份；四个指令集的 4 处理器日志全部通过
-  if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || [ ! -s "$SERIAL_RV32_SMP4" ]; then
+  if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || { ! rv32_fw_missing && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
     record SMP-1c FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）"
     return
   fi
@@ -956,14 +1004,15 @@ check_smp1c() { # 多处理器第三阶段（去全局串行点）：全局锁�
   smp1c_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64
   smp1c_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64
   smp1c_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64
-  smp1c_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
-  local scsingle
-  for scsingle in "$SERIAL" "$SERIAL_A64" "$SERIAL_RV64" "$SERIAL_RV32"; do
+  rv32_fw_missing || smp1c_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
+  local scsingle sclist=("$SERIAL" "$SERIAL_A64" "$SERIAL_RV64")
+  rv32_fw_missing || sclist+=("$SERIAL_RV32")
+  for scsingle in "${sclist[@]}"; do
     grep -qa '^\[JSR-SMPC\] single cpus=1 cross_cpu=skipped' "$scsingle" \
       && grep -qa '^\[JSR-SMPC\] order ascending=ok reverse=system\.lock\.error\.out_of_order' "$scsingle" || SC_MISS="$SC_MISS 单处理器($(basename "$scsingle"))"
   done
   if [ -z "$SC_MISS" ]; then
-    record SMP-1c PASS "x86_64 / AArch64 / RISC-V64 / RISC-V32 -smp 4（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）：$(grep -caE '^\[JSR-SMPC\] rank ' "$SERIAL_SMP4") 把全局锁登记成一条级别链，逆序 / 重入被拒且持有集合与中断状态不变，持有集合每核独立 3/3；4 核同时各打印 16 行共 64 行无一交错；其他 3 核各 2000 次读调度器与引导处理器改写并发、状态一致、无死锁；内核栈登记（x86_64 经每核 KERNEL_GS_BASE 入口块）每核独立 3/3；无锁顺序违反；单处理器如实跳过跨核部分"
+    record SMP-1c PASS "x86_64 / AArch64 / RISC-V64 / RISC-V32 -smp 4（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）：$(grep -caE '^\[JSR-SMPC\] rank ' "$SERIAL_SMP4") 把全局锁登记成一条级别链，逆序 / 重入被拒且持有集合与中断状态不变，持有集合每核独立 3/3；4 核同时各打印 16 行共 64 行无一交错；其他 3 核各 2000 次读调度器与引导处理器改写并发、状态一致、无死锁；内核栈登记（x86_64 经每核 KERNEL_GS_BASE 入口块）每核独立 3/3；无锁顺序违反；单处理器如实跳过跨核部分$RV32_NOTE"
   else
     record SMP-1c FAIL "缺少/不符：$SC_MISS"
   fi
@@ -990,7 +1039,7 @@ smp2_verdict() {
 check_smp2() { # 每核运行队列 + 负载均衡：N 核 N 任务各核都忙、空闲窃取有界、全部核过载时交互延迟有上界、压力撤销后立即恢复、
   if [ "$SCHED_POLICY" = "rr" ]; then record_na SMP-2 "过载交互延迟与跨核继承依赖 QoS 保证，纯轮转构建不适用；已在分时构建中通过"; return; fi
                # 亲和集合与迁移、跨核优先级继承与 CPU 上限、拒绝路径无残留；四个指令集的 4 处理器日志全部通过，单处理器如实跳过
-  if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || [ ! -s "$SERIAL_RV32_SMP4" ]; then
+  if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || { ! rv32_fw_missing && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
     record SMP-2 FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）"
     return
   fi
@@ -998,14 +1047,15 @@ check_smp2() { # 每核运行队列 + 负载均衡：N 核 N 任务各核都忙�
   smp2_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64
   smp2_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64
   smp2_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64
-  smp2_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
-  local s2single
-  for s2single in "$SERIAL" "$SERIAL_A64" "$SERIAL_RV64" "$SERIAL_RV32"; do
+  rv32_fw_missing || smp2_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
+  local s2single s2list=("$SERIAL" "$SERIAL_A64" "$SERIAL_RV64")
+  rv32_fw_missing || s2list+=("$SERIAL_RV32")
+  for s2single in "${s2list[@]}"; do
     grep -qa '^\[JSR-SMP2\] single cpus=1 balance=skipped' "$s2single" \
       && grep -qaE '^\[JSR-SMP2\] summary cpus=1 .* failed=0' "$s2single" || S2_MISS="$S2_MISS 单处理器($(basename "$s2single"))"
   done
   if [ -z "$S2_MISS" ]; then
-    record SMP-2 PASS "x86_64 / AArch64 / RISC-V64 / RISC-V32 -smp 4（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）：每核运行队列；4 核 4 任务与 8 任务过载时各核忙碌 ≥85%、「本核空闲而别处有任务在等」≤2 tick；8 个任务全排在引导处理器队列时其他核窃取 ≥3 次；全部核过载时交互唤醒延迟 ≤2 tick（x86_64 实测 $(grep -aoE 'case=overload .*latency_max=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')）、压力撤销后 20 次唤醒延迟全为 0；亲和钉核 / 他人改 / 自己改均只在允许的核运行，非法集合被拒且不变；跨核优先级继承等待 ≤ 工作量 + 2；一组成员分散 4 核时整组用量不超过上限的界；资源回到基线；单处理器如实跳过"
+    record SMP-2 PASS "x86_64 / AArch64 / RISC-V64 / RISC-V32 -smp 4（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）：每核运行队列；4 核 4 任务与 8 任务过载时各核忙碌 ≥85%、「本核空闲而别处有任务在等」≤2 tick；8 个任务全排在引导处理器队列时其他核窃取 ≥3 次；全部核过载时交互唤醒延迟 ≤2 tick（x86_64 实测 $(grep -aoE 'case=overload .*latency_max=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')）、压力撤销后 20 次唤醒延迟全为 0；亲和钉核 / 他人改 / 自己改均只在允许的核运行，非法集合被拒且不变；跨核优先级继承等待 ≤ 工作量 + 2；一组成员分散 4 核时整组用量不超过上限的界；资源回到基线；单处理器如实跳过$RV32_NOTE"
   else
     record SMP-2 FAIL "缺少/不符：$S2_MISS"
   fi
@@ -1028,7 +1078,7 @@ smp3_verdict() {
 check_smp3() { # 中断与服务的多核化：设备中断按亲和送达、均衡策略分散中断线、风暴下每核预算节流（交互延迟有上界、无单核被中断吃满）、
   if [ "$SCHED_POLICY" = "rr" ]; then record_na SMP-3 "中断风暴下的交互延迟判据依赖 QoS 保证，纯轮转构建不适用；已在分时构建中通过"; return; fi
                # 风暴撤销后立即恢复、分片服务各核并行且均衡、拒绝路径无残留；四个指令集的 4 处理器日志全部通过，单处理器如实跳过
-  if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || [ ! -s "$SERIAL_RV32_SMP4" ]; then
+  if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || { ! rv32_fw_missing && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
     record SMP-3 FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）"
     return
   fi
@@ -1036,9 +1086,10 @@ check_smp3() { # 中断与服务的多核化：设备中断按亲和送达、均
   smp3_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64
   smp3_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64
   smp3_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64
-  smp3_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
-  local s3single
-  for s3single in "$SERIAL" "$SERIAL_A64" "$SERIAL_RV64" "$SERIAL_RV32"; do
+  rv32_fw_missing || smp3_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
+  local s3single s3list=("$SERIAL" "$SERIAL_A64" "$SERIAL_RV64")
+  rv32_fw_missing || s3list+=("$SERIAL_RV32")
+  for s3single in "${s3list[@]}"; do
     grep -qa '^\[JSR-SMP3\] single cpus=1 spread=skipped' "$s3single" \
       && grep -qaE '^\[JSR-SMP3\] summary cpus=1 .* failed=0' "$s3single" || S3_MISS="$S3_MISS 单处理器($(basename "$s3single"))"
   done
@@ -1046,7 +1097,7 @@ check_smp3() { # 中断与服务的多核化：设备中断按亲和送达、均
     local lat sp
     lat=$(grep -aoE 'case=storm .*latency_max=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')
     sp=$(grep -aoE 'case=service .*speedup_permille=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')
-    record SMP-3 PASS "x86_64（I/O APIC）/ AArch64（GICv2 共享外设中断）/ RISC-V64 / RISC-V32（PLIC 每核上下文）-smp 4（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）：两条设备中断线依次钉到 4 个核，只在该核处理 4/4；两条线都在 0 号核时对照策略不搬、均衡策略两个周期内分到不同的核；两条线持续风暴 + 8 个吃满处理器的任务时交互唤醒延迟 ≤2 tick（x86_64 实测 $lat）、各核都忙、每核中断次数与时间不超过预算的界、风暴分散到多个核；撤销后无中断、延迟全为 0；分片服务 128 个流 512 个请求 4 分片比 1 分片快（x86_64 ${sp}‰）、不均衡度 ≤350‰、流内有序；拒绝路径无残留；单处理器如实跳过"
+    record SMP-3 PASS "x86_64（I/O APIC）/ AArch64（GICv2 共享外设中断）/ RISC-V64 / RISC-V32（PLIC 每核上下文）-smp 4（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）：两条设备中断线依次钉到 4 个核，只在该核处理 4/4；两条线都在 0 号核时对照策略不搬、均衡策略两个周期内分到不同的核；两条线持续风暴 + 8 个吃满处理器的任务时交互唤醒延迟 ≤2 tick（x86_64 实测 $lat）、各核都忙、每核中断次数与时间不超过预算的界、风暴分散到多个核；撤销后无中断、延迟全为 0；分片服务 128 个流 512 个请求 4 分片比 1 分片快（x86_64 ${sp}‰）、不均衡度 ≤350‰、流内有序；拒绝路径无残留；单处理器如实跳过$RV32_NOTE"
   else
     record SMP-3 FAIL "缺少/不符：$S3_MISS"
   fi
@@ -1130,8 +1181,11 @@ rv32_rerun() {
 }
 
 rv32_ready() { [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ] && [ -s "$SERIAL_RV32" ]; }
+# 本机 QEMU 缺少 32 位 OpenSBI 固件（有的发行版只打包 64 位）：目标不可用，如实记 N/A，不冒充通过也不判失败。
+rv32_unavailable() { rv32_fw_missing; }
 
 check_isa3a() { # RISC-V32 移植第一阶段：同一组内核侧检查在 qemu-system-riscv32 的串口日志上逐项重跑（行名带 RV32/ 前缀），
+  if rv32_unavailable; then record_na ISA3a "本机 QEMU 缺少 32 位 OpenSBI 固件（fw_dynamic.bin），RISC-V32 目标不可运行；构建本身通过，已在有固件的机器上验证"; return; fi
                 # 并要求 64 位计数单元在没有 64 位原子指令的目标上以「关中断 + 自旋锁」实现、与定时器中断共享时不自锁
   if ! rv32_ready; then
     record ISA3a FAIL "RISC-V32 构建 rc=$RV32_BUILD_RC 或缺少 qemu-system-riscv32 / 串口日志（见 build-riscv32.log）"
@@ -1157,6 +1211,7 @@ check_isa3a() { # RISC-V32 移植第一阶段：同一组内核侧检查在 qemu
 }
 
 check_isa3b() { # RISC-V32 移植第二阶段：内嵌用户程序（ELF32 装载、32 位用户 ABI 下的 64 位参数、jasper-rt、ring / IPC、
+  if rv32_unavailable; then record_na ISA3b "本机 QEMU 缺少 32 位 OpenSBI 固件（fw_dynamic.bin），RISC-V32 目标不可运行；构建本身通过，已在有固件的机器上验证"; return; fi
                 # .jaso 4 字节重定位）的全部检查在 RISC-V32 上逐项重跑（行名带 RV32/ 前缀）
   if ! rv32_ready; then
     record ISA3b FAIL "RISC-V32 构建 rc=$RV32_BUILD_RC 或缺少 qemu-system-riscv32 / 串口日志（见 build-riscv32.log）"

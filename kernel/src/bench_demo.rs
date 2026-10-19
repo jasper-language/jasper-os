@@ -379,7 +379,10 @@ fn user_program(cal: &Calibration) {
 
 /// 本次构建是否为默认配置档：只有默认档的生效值以开销预算判定成败。
 fn gated() -> bool {
-    config::ACTIVE.name == kernel_core::config::KernelConfig::STANDARD.name
+    // 只有 x86_64 的 TSC 是真正的周期计数器；其他指令集（AArch64 虚拟计数器、RISC-V rdtime）
+    // 是时间基准，用它算出的「每 tick 周期数」与宿主快慢强相关，因此那里的预算判定只作参考、
+    // 不作为失败条件（真实硬件上的预算验证属于真机测量）。
+    cfg!(target_arch = "x86_64") && config::ACTIVE.name == kernel_core::config::KernelConfig::STANDARD.name
 }
 
 fn print_decision(d: &Decision, prefer: &str) {

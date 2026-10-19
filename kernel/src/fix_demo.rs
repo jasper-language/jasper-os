@@ -386,9 +386,14 @@ fn spawn_rollback() {
 
     // 调度器槽位满
     let mut slots = 0u64;
-    while sched::spawn(TaskId(9100 + slots), "fix-filler", filler).is_ok() {
-        slots += 1;
-    }
+    // 记录占位任务创建失败的原因：若先耗尽的是别的资源（例如栈帧），
+    // 「槽位满」这个前提就根本没成立，必须能在日志里分辨出来。
+    let filler_err = loop {
+        match sched::spawn(TaskId(9100 + slots), "fix-filler", filler) {
+            Ok(_) => slots += 1,
+            Err(e) => break Some(e),
+        }
+    };
     let sched_full = spawn();
     kobj::run_cleanup(usize::MAX); // 回滚释放的 Task 对象经清理过程销毁
     let sched_ok = sched_full == Err(ProcError::NoTaskSlot) && snapshot() == before;
@@ -408,12 +413,13 @@ fn spawn_rollback() {
     check(sched_ok && slots > 0, "调度器槽位满时线程创建未完整回滚");
     check(ran, "回滚后再次创建线程失败或未正常退出");
     kprintln!(
-        "[JSR-FIX] spawn zero_stack={:?} objects_full={:?} restored={} sched_full={:?} (fillers {}) restored={} retry_exit={:?}",
+        "[JSR-FIX] spawn zero_stack={:?} objects_full={:?} restored={} sched_full={:?} (fillers {} filler_err={:?}) restored={} retry_exit={:?}",
         zero.err(),
         objs_full.err(),
         objs_ok && objs_restored,
         sched_full.err(),
         slots,
+        filler_err,
         sched_ok,
         state
     );
