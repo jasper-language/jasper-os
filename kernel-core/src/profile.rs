@@ -469,6 +469,16 @@ pub const HEADLESS_MODULES: &[ModuleDecl] = &[
         min_objects: 128,
     },
     ModuleDecl {
+        name: "job",
+        provides: &["sched.batch"],
+        requires: &["kernel.core", "sched.qos"],
+        services: &["system.job"],
+        hot_load: false,
+        sched_class: SchedClass::Batch,
+        min_tasks: 8,
+        min_objects: 32,
+    },
+    ModuleDecl {
         name: "async",
         provides: &["async.ring"],
         requires: &["kernel.core", "memory.virtual"],

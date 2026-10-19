@@ -37,6 +37,8 @@ pub mod ipc;
 #[cfg(feature = "user-programs")]
 pub mod ipc_demo;
 pub mod irq;
+pub mod job;
+pub mod job_demo;
 pub mod irq_demo;
 pub mod kmain;
 pub mod kobj;

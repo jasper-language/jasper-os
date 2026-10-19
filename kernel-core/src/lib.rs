@@ -54,6 +54,7 @@ pub mod frame;
 pub mod heap;
 pub mod io;
 pub mod irq;
+pub mod job;
 pub mod lockorder;
 pub mod memory;
 pub mod meta;

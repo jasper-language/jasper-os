@@ -1233,7 +1233,7 @@ check_isa3b() { # RISC-V32 移植第二阶段：内嵌用户程序（ELF32 装�
 
 check_pol2() {  # POL-2：系统 Profile——启动期校验、两份内建 Profile 的服务面真实不同、
                 # 四类非法 Profile 各自给出结构化拒绝原因、结构化描述可渲染
-  if has '\[JSR-PROFILE\] active name=headless valid=true params=(standard|compact) modules=6 services=10 capabilities=6 guarantees=2' \
+  if has '\[JSR-PROFILE\] active name=headless valid=true params=(standard|compact) modules=7 services=11 capabilities=7 guarantees=2' \
      && has '\[JSR-PROFILE\] table idx=1 name=headless-min valid=true modules=4 services=8' \
      && has '\[JSR-PROFILE\] gate profile=headless op=system\.async\.ring\.create allowed=true' \
      && has '\[JSR-PROFILE\] gate profile=headless-min op=system\.async\.ring\.create allowed=false' \
@@ -1248,6 +1248,16 @@ check_pol2() {  # POL-2：系统 Profile——启动期校验、两份内建 Pro
     record POL2 PASS "启动期校验通过：headless（6 模块 / 10 服务 / 6 能力）与 headless-min（4 模块 / 8 服务）服务面真实不同（异步环在精简档被门拒绝）；缺依赖 / 能力冲突 / 参数下限不可满足 / 未授权热加载四类各自给出结构化拒绝码；结构化描述可渲染；14 项断言 0 失败"
   else
     record POL2 FAIL "缺少 [JSR-PROFILE] 关键标记、结构化拒绝不全、两份 Profile 服务面相同或 failed≠0"
+  fi
+}
+
+check_pol3() {  # POL-3：批处理作业——依赖/优先级/终态/取消/满载交互性/Profile 归属
+  if has '\[JSR-JOB\] summary jobs=5 completed=2 failed=1 cancelled=2 checks=26 failed_checks=0' \
+     && has '\[JSR-JOB\] overload done=20 rounds=20 hog_cpus=[1-9]' \
+     && has '\[JSR-JOB\] profile headless=true headless-min=false'; then
+    record POL3 PASS "作业队列：依赖门控与优先级选择、失败依赖不解除等待、成功/失败终态、取消等待中与运行中作业、活动任务回到 0；批处理档满载时交互任务 20/20 轮全部唤醒；作业服务只属于 headless（精简档没有 system.job）；26 项断言 0 失败"
+  else
+    record POL3 FAIL "缺少 [JSR-JOB] 关键标记、终态/取消统计不符或 failed_checks≠0"
   fi
 }
 
@@ -1274,11 +1284,11 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 
 if [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2
+  check_pol1; check_pol2; check_pol3
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2
+  check_pol1; check_pol2; check_pol3
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------

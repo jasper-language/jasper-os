@@ -14,7 +14,7 @@
 //! # 边界
 //! 与 `user_demo` 相同：是机制的「客户」，删掉本文件与 `kmain` 中的一行调用不影响机制本身。不含 ISA 代码。
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -345,7 +345,16 @@ fn id_exhaustion() {
 }
 
 /// 调度器占位任务：什么都不做，直接结束。
-fn filler() {}
+// 占位任务：必须**保持存活**直到演练显式放行。
+// 若它直接返回，SMP 下会被其他处理器取走并跑完，从而在「槽位已满」的判定之前
+// 腾出槽位——这正是 AArch64 上该用例偶发失败的原因（目标线程反而创建成功）。
+static FILLER_STOP: AtomicBool = AtomicBool::new(false);
+
+fn filler() {
+    while !FILLER_STOP.load(Ordering::Relaxed) {
+        sched::pause();
+    }
+}
 
 /// 6. 线程创建失败回滚：栈顶为 0、对象表满、调度器槽位满；之后再次创建成功并正常退出。
 fn spawn_rollback() {
@@ -385,6 +394,7 @@ fn spawn_rollback() {
     let objs_restored = snapshot() == before;
 
     // 调度器槽位满
+    FILLER_STOP.store(false, Ordering::Relaxed);
     let mut slots = 0u64;
     // 记录占位任务创建失败的原因：若先耗尽的是别的资源（例如栈帧），
     // 「槽位满」这个前提就根本没成立，必须能在日志里分辨出来。
@@ -397,7 +407,8 @@ fn spawn_rollback() {
     let sched_full = spawn();
     kobj::run_cleanup(usize::MAX); // 回滚释放的 Task 对象经清理过程销毁
     let sched_ok = sched_full == Err(ProcError::NoTaskSlot) && snapshot() == before;
-    sched::run(); // 占位任务全部结束，槽位腾空
+    FILLER_STOP.store(true, Ordering::Relaxed);
+    sched::run(); // 放行后占位任务全部结束，槽位腾空
     kobj::run_cleanup(usize::MAX);
 
     // 回滚之后再次创建成功，线程正常运行并退出
