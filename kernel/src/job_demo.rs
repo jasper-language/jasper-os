@@ -153,6 +153,16 @@ pub fn run() {
     let min = kernel_core::profile::resolve(&kernel_core::profile::HEADLESS_MIN).ok();
     let allowed_full = full.is_some_and(|r| r.allows_op("system.job.submit"));
     let allowed_min = min.is_some_and(|r| r.allows_op("system.job.submit"));
+    // 单模式 Profile：没有 `sched.batch` 时批处理接口整体不存在。
+    let batch_full = kernel_core::profile::resolve(&kernel_core::profile::HEADLESS)
+        .map(|r| r.has_capability("sched.batch"))
+        .unwrap_or(false);
+    let batch_min = kernel_core::profile::resolve(&kernel_core::profile::HEADLESS_MIN)
+        .map(|r| r.has_capability("sched.batch"))
+        .unwrap_or(false);
+    kprintln!("[JSR-JOB] capability batch headless={} headless-min={}", batch_full, batch_min);
+    check(batch_full && !batch_min, "批处理能力应只在 headless 中声明");
+
     kprintln!(
         "[JSR-JOB] profile headless={} headless-min={}",
         allowed_full,

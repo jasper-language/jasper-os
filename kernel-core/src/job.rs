@@ -85,6 +85,8 @@ pub enum JobError {
     NotCancellable,
     /// 作业不在运行状态。
     NotRunning,
+    /// 当前 Profile 没有声明批处理能力。
+    NotPermitted,
 }
 
 impl JobError {
@@ -98,6 +100,7 @@ impl JobError {
             JobError::DependencyNotMet => "dependency_not_met",
             JobError::NotCancellable => "not_cancellable",
             JobError::NotRunning => "not_running",
+            JobError::NotPermitted => "not_permitted",
         }
     }
 }

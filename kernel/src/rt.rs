@@ -14,6 +14,10 @@ static SET: IrqSpinLock<RtSet> = IrqSpinLock::new(RtSet::new(DEFAULT_UTILISATION
 
 /// 准入一个实时任务。
 pub fn admit(id: u32, quota: u32, period: u32, now: u64) -> Result<(), RtError> {
+    // Profile 没有声明 `sched.realtime` 时，实时接口整体不存在（不是"降级为准入失败"）。
+    if !crate::profile::has_capability("sched.realtime") {
+        return Err(RtError::NotPermitted);
+    }
     SET.lock().admit(id, quota, period, now)
 }
 

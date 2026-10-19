@@ -250,6 +250,12 @@ impl ResolvedProfile {
         &self.services[..self.service_count]
     }
 
+    /// 判定本 Profile 是否提供某项能力（例如 `sched.realtime`）。
+    /// English: true when the profile provides the capability.
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.capabilities().contains(&capability)
+    }
+
     /// 判定某个系统接口是否属于本 Profile 暴露的服务。
     ///
     /// 规则：接口名以某个服务前缀开头，且前缀之后紧跟 `.` 或结束——
@@ -450,7 +456,7 @@ pub const HEADLESS_MODULES: &[ModuleDecl] = &[
     },
     ModuleDecl {
         name: "sched",
-        provides: &["sched.qos"],
+        provides: &["sched.qos", "sched.arbiter"],
         requires: &["kernel.core"],
         services: &[],
         hot_load: false,
@@ -467,6 +473,16 @@ pub const HEADLESS_MODULES: &[ModuleDecl] = &[
         sched_class: SchedClass::Interactive,
         min_tasks: 0,
         min_objects: 128,
+    },
+    ModuleDecl {
+        name: "realtime",
+        provides: &["sched.realtime"],
+        requires: &["kernel.core"],
+        services: &[],
+        hot_load: false,
+        sched_class: SchedClass::Realtime,
+        min_tasks: 8,
+        min_objects: 0,
     },
     ModuleDecl {
         name: "job",

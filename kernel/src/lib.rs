@@ -23,6 +23,7 @@
 
 extern crate alloc;
 
+pub mod arbiter_demo;
 pub mod arch;
 pub mod baseline;
 pub mod boot;

@@ -322,6 +322,11 @@ pub fn throttle_count() -> u32 {
     scheduler::throttle_count()
 }
 
+/// 打开/关闭类别仲裁（POL-5）；默认关闭，行为与接入前一致。
+pub fn set_arbiter(on: bool) -> bool {
+    with_mut(|s| s.set_arbiter(on))
+}
+
 pub fn sleep_until(deadline: u64) {
     let was_enabled = cpu::irq_save_disable();
     if timer_ticks() < deadline {

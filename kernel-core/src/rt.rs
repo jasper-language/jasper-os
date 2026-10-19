@@ -34,6 +34,8 @@ pub enum RtError {
     OverUtilised,
     /// 任务不存在。
     Unknown,
+    /// 当前 Profile 没有声明实时能力。
+    NotPermitted,
 }
 
 impl RtError {
@@ -45,6 +47,7 @@ impl RtError {
             RtError::Full => "full",
             RtError::OverUtilised => "over_utilised",
             RtError::Unknown => "unknown",
+            RtError::NotPermitted => "not_permitted",
         }
     }
 }

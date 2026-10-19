@@ -53,6 +53,11 @@ pub fn resolved() -> Option<ResolvedProfile> {
     profile::resolve(&ACTIVE).ok()
 }
 
+/// 当前 Profile 是否提供某项能力（例如 `sched.realtime`）。
+pub fn has_capability(capability: &str) -> bool {
+    resolved().is_some_and(|r| r.has_capability(capability))
+}
+
 /// 启动期校验：逐个解析内建表，再解析生效 Profile。
 ///
 /// 返回失败条目数（0 = 通过）。任何一条不合法都意味着「声明的模块面自相矛盾」，

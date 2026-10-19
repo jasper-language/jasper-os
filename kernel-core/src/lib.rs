@@ -45,6 +45,7 @@
 pub mod abi;
 pub mod acpi;
 pub mod argcase;
+pub mod arbiter;
 pub mod bench;
 pub mod async_ring;
 pub mod config;

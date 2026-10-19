@@ -314,6 +314,12 @@ pub struct Scheduler<P: SchedPolicy, const N: usize> {
     /// 看门狗判定器与报告日志。
     watchdog: Watchdog,
     watchdog_log: WatchdogLog<WATCHDOG_LOG>,
+    /// 类别仲裁器（POL-5）：决定本 tick 归哪一类；关闭时行为与接入前完全一致。
+    arbiter: kernel_core::arbiter::Arbiter,
+    /// 每个处理器的类别用量窗口（按 tick 记账）。
+    arb_windows: [kernel_core::arbiter::Window; MAX_CPUS],
+    /// 是否启用类别仲裁（由演练显式打开，默认关闭）。
+    arbiter_on: bool,
 }
 
 impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
@@ -351,7 +357,57 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
             group_gen: [0; N],
             watchdog: Watchdog::new(super::policy::WATCHDOG_THRESHOLD),
             watchdog_log: WatchdogLog::new(),
+            arbiter: kernel_core::arbiter::Arbiter::new(kernel_core::arbiter::ArbiterParams::DEFAULT),
+            arb_windows: [kernel_core::arbiter::Window { ticks: 0, realtime: 0, interactive: 0, batch: 0 }; MAX_CPUS],
+            arbiter_on: false,
         }
+    }
+
+    /// 打开/关闭类别仲裁（返回之前的设置）。
+    pub fn set_arbiter(&mut self, on: bool) -> bool {
+        let prev = self.arbiter_on;
+        self.arbiter_on = on;
+        prev
+    }
+
+    /// 类别仲裁：选出本 tick 应运行的类别；该类没有候选时返回 `None`（不过滤）。
+    fn pick_arb_class(&mut self, c: usize, prev: usize) -> Option<kernel_core::arbiter::Class> {
+        use kernel_core::arbiter::{Class, Demand};
+        if !self.arbiter_on {
+            return None;
+        }
+        let mut demand = Demand::default();
+        for (i, t) in self.tasks.iter().enumerate().skip(1) {
+            let Some(t) = t else { continue };
+            if i == prev || t.state != TaskState::Runnable || t.home != c || t.on_cpu.is_some() {
+                continue;
+            }
+            if !self.eligible(t) {
+                continue;
+            }
+            match arb_class(t) {
+                Class::RealTime => demand.realtime = true,
+                Class::Interactive => demand.interactive = true,
+                Class::Batch => demand.batch = true,
+            }
+        }
+        let chosen = self.arbiter.pick(demand, &self.arb_windows[c])?;
+        // 只有该类确实有候选时才过滤，否则退回不按类别过滤（避免选出空集）。
+        let has = self.tasks.iter().enumerate().skip(1).any(|(i, t)| {
+            t.as_ref().is_some_and(|t| {
+                i != prev
+                    && t.state == TaskState::Runnable
+                    && t.home == c
+                    && t.on_cpu.is_none()
+                    && self.eligible(t)
+                    && arb_class(t) == chosen
+            })
+        });
+        if !has {
+            return None;
+        }
+        self.arb_windows[c].charge(chosen);
+        Some(chosen)
     }
 
     /// 安装切换观察者（覆盖旧的）。
@@ -1154,6 +1210,8 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
             }
         }
 
+        // 类别仲裁在借用 tasks 之前完成（它会修改仲裁器状态）。
+        let wanted = self.pick_arb_class(c, prev);
         let choice = {
             let tasks = &self.tasks;
             let groups = &self.groups;
@@ -1164,6 +1222,7 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
                             && t.home == c
                             && (t.on_cpu.is_none() || i == prev)
                             && !(skip_prev && i == prev)
+                            && wanted.is_none_or(|cl| arb_class(t) == cl)
                             && eligible_in(groups, t) =>
                     {
                         Some((i, &t.sched))
@@ -1431,6 +1490,19 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
 }
 
 /// 任务 `t` 能否被选中（见 [`Scheduler::eligible`]）；独立成函数以便在借用任务表时同时借用组表。
+/// 任务所属的仲裁类别：实时任务（有周期）优先归实时类；其余按 QoS 档位归并。
+/// English: map a task to its arbitration class.
+fn arb_class(t: &Task) -> kernel_core::arbiter::Class {
+    use kernel_core::arbiter::Class;
+    if t.rt_period != 0 {
+        return Class::RealTime;
+    }
+    match t.sched.qos {
+        Qos::Interactive | Qos::UserInitiated => Class::Interactive,
+        Qos::Utility | Qos::Background => Class::Batch,
+    }
+}
+
 fn eligible_in<const N: usize>(groups: &[Option<CpuGroup>; N], t: &Task) -> bool {
     // 实时预算：耗尽且未到下一周期 ⇒ 不可运行；任务仍留在队列，由选择器跳过。
     if t.rt_period != 0 && t.rt_remaining == 0 && crate::sched::timer_ticks() < t.rt_next_period {

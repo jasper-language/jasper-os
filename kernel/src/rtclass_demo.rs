@@ -148,6 +148,17 @@ pub fn run() {
         task.map(|t| t.throttles).unwrap_or(0)
     );
 
+    // 4b) 单模式 Profile：没有 `sched.realtime` 时实时接口整体不存在。
+    let full_rt = kernel_core::profile::resolve(&kernel_core::profile::HEADLESS)
+        .map(|r| r.has_capability("sched.realtime"))
+        .unwrap_or(false);
+    let min_rt = kernel_core::profile::resolve(&kernel_core::profile::HEADLESS_MIN)
+        .map(|r| r.has_capability("sched.realtime"))
+        .unwrap_or(false);
+    kprintln!("[JSR-RTCLASS] profile realtime headless={} headless-min={}", full_rt, min_rt);
+    check(full_rt, "headless 应声明实时能力");
+    check(!min_rt, "headless-min 不该声明实时能力");
+
     // 5) 收尾：释放额度，供后续演练复用。
     let _ = rt::release(10);
     let _ = rt::release(11);

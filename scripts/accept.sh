@@ -1233,7 +1233,7 @@ check_isa3b() { # RISC-V32 移植第二阶段：内嵌用户程序（ELF32 装�
 
 check_pol2() {  # POL-2：系统 Profile——启动期校验、两份内建 Profile 的服务面真实不同、
                 # 四类非法 Profile 各自给出结构化拒绝原因、结构化描述可渲染
-  if has '\[JSR-PROFILE\] active name=headless valid=true params=(standard|compact) modules=7 services=11 capabilities=7 guarantees=2' \
+  if has '\[JSR-PROFILE\] active name=headless valid=true params=(standard|compact) modules=8 services=11 capabilities=9 guarantees=2' \
      && has '\[JSR-PROFILE\] table idx=1 name=headless-min valid=true modules=4 services=8' \
      && has '\[JSR-PROFILE\] gate profile=headless op=system\.async\.ring\.create allowed=true' \
      && has '\[JSR-PROFILE\] gate profile=headless-min op=system\.async\.ring\.create allowed=false' \
@@ -1252,7 +1252,7 @@ check_pol2() {  # POL-2：系统 Profile——启动期校验、两份内建 Pro
 }
 
 check_pol3() {  # POL-3：批处理作业——依赖/优先级/终态/取消/满载交互性/Profile 归属
-  if has '\[JSR-JOB\] summary jobs=5 completed=2 failed=1 cancelled=2 checks=26 failed_checks=0' \
+  if has '\[JSR-JOB\] summary jobs=5 completed=2 failed=1 cancelled=2 checks=27 failed_checks=0' \
      && has '\[JSR-JOB\] overload done=20 rounds=20 hog_cpus=[1-9]' \
      && has '\[JSR-JOB\] profile headless=true headless-min=false'; then
     record POL3 PASS "作业队列：依赖门控与优先级选择、失败依赖不解除等待、成功/失败终态、取消等待中与运行中作业、活动任务回到 0；批处理档满载时交互任务 20/20 轮全部唤醒；作业服务只属于 headless（精简档没有 system.job）；26 项断言 0 失败"

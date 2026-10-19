@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{balance_demo, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, mech_demo, mm, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, wcet};
+use crate::{arbiter_demo, balance_demo, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, mech_demo, mm, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, wcet};
 #[cfg(feature = "user-programs")]
 use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo};
 
@@ -102,6 +102,10 @@ pub fn start(boot: &'static BootSpec) -> ! {
         arch::exit_emulator(ExitStatus::Failure);
     }
     profile_demo::run();
+    // POL-5：多模式 B（统一仲裁）由 Profile 决定；没有 `sched.arbiter` 时保持单模式 A。
+    let multi_mode = profile::has_capability("sched.arbiter");
+    sched::set_arbiter(multi_mode);
+    kprintln!("[JSR-SCHED] mode={}", if multi_mode { "multi" } else { "single" });
     // POL-3：批处理作业（依赖 / 优先级 / 取消 / 终态 / 满载下交互性）。
     job_demo::run();
     // POL-4：实时准入与预算（协作式节流；抢占式执行待接入）。
@@ -110,6 +114,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
     mm::demo::run_space();
     // SMP-1：启动其他处理器（每核数据、各自计时、核间中断、跨核调用、TLB 击落）。
     smp::demo::run(smp::start_secondaries(TIMER_HZ));
+    // POL-5：三类线程同核争用 + 多核下各类各占一个核（放在 SMP 启动之后）。
+    arbiter_demo::run();
     // M3.1：真实进入 Ring 3；用户态异常只终止该任务。
     user_demo::run();
     // M3.2：系统调用入口 + 稳定 ID 登记表 + 统一权限检查。
@@ -176,6 +182,7 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("profile", profile_demo::failed()),
         ("job", job_demo::failed()),
         ("rtclass", rtclass_demo::failed()),
+        ("arbiter", arbiter_demo::failed()),
         #[cfg(feature = "user-programs")]
         ("ring", ring_demo::failed()),
         #[cfg(feature = "user-programs")]
