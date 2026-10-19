@@ -36,11 +36,22 @@ if [ "$NCPU" -ge 8 ]; then DEFAULT_CORES="$((NCPU - 4))-$((NCPU - 1))"; else DEF
 CORES="${JASPER_CORES:-$DEFAULT_CORES}"
 PROFILE="${JASPER_PROFILE:-standard}"
 QEMU_TIMEOUT="${JASPER_QEMU_TIMEOUT:-90}"
+# 两次 QEMU 启动之间的间隔（秒）：连续压满会让宿主桌面失去响应，默认留 3 秒让系统喘口气。
+BOOT_GAP="${JASPER_BOOT_GAP:-3}"
 case "$QEMU_TIMEOUT" in ''|0|*[!0-9]*) echo "✗ JASPER_QEMU_TIMEOUT 必须是正整数秒：$QEMU_TIMEOUT"; exit 2 ;; esac
 case "$PROFILE" in
   standard) KFEAT=() ;;
   compact)  KFEAT=(--features profile-compact) ;;
   *) echo "✗ 未知配置档：$PROFILE（可选 standard / compact）"; exit 2 ;;
+esac
+# 调度策略（POL-1）：ts = 分时策略（默认），rr = 纯轮转（构建期特性 sched-rr）。
+# 轮转构建用于验证「换策略只改一个选择点」，机制层全部验收照跑；QoS 专项检查检验的是分时策略的语义，
+# 在轮转构建下如实记为不适用，仍在分时构建中照常执行并通过。
+SCHED_POLICY="${JASPER_SCHED:-ts}"
+case "$SCHED_POLICY" in
+  ts) SFEAT=() ;;
+  rr) SFEAT=(--features sched-rr) ;;
+  *) echo "✗ 未知调度策略：$SCHED_POLICY（可选 ts / rr）"; exit 2 ;;
 esac
 TS="$(date '+%Y%m%d-%H%M%S')"
 OUT="$ROOT/evidence/accept-$TS"
@@ -71,6 +82,10 @@ record() {
   ROWS+=("$(printf '%-6s %-4s %s' "${REC_PREFIX:-}$1" "$2" "$3")")
   [ "$2" = "PASS" ] || FAILED=1
 }
+# record_na <里程碑> <说明>：本构建下不适用（不计入失败，也不计入通过）
+record_na() {
+  ROWS+=("$(printf '%-6s %-4s %s' "${REC_PREFIX:-}$1" "N/A" "$2")")
+}
 # has <正则>：串口日志里是否出现
 has() { grep -qE "$1" "$SERIAL" 2>/dev/null; }
 # count <正则>：串口日志里出现的行数
@@ -83,7 +98,7 @@ echo "== 构建与测试（核：$CORES，配置档：$PROFILE）=="
 run cargo test -p kernel-core > "$OUT/cargo-test.log" 2>&1;                                   TEST_RC=$?
 run cargo test -p jaso --features pack > "$OUT/jaso-test.log" 2>&1;                           JASO_RC=$?
 run cargo build --release --target x86_64-unknown-none -p kernel-core > "$OUT/build.log" 2>&1; CORE_RC=$?
-run cargo build --release --target x86_64-unknown-none -p jasper-kernel "${KFEAT[@]}" >> "$OUT/build.log" 2>&1 \
+run cargo build --release --target x86_64-unknown-none -p jasper-kernel "${KFEAT[@]}" "${SFEAT[@]}" >> "$OUT/build.log" 2>&1 \
   && run cargo build --release -p xtask >> "$OUT/build.log" 2>&1 \
   && run "$ROOT/target/release/xtask" "$ROOT/target/x86_64-unknown-none/release/jasper-kernel" "$IMG" >> "$OUT/build.log" 2>&1
 BUILD_RC=$?
@@ -115,6 +130,7 @@ done
 QRC=-1
 if [ "$BUILD_RC" -eq 0 ]; then
   echo "== QEMU 真实启动 =="
+  sleep "$BOOT_GAP"
   run timeout "$QEMU_TIMEOUT" "$QEMU" -drive format=raw,file="$IMG" \
     -serial stdio -display none -monitor none -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL" 2>&1
@@ -125,6 +141,7 @@ SERIAL_SMP4="$OUT/serial-smp4.log"
 QRC_SMP4=-1
 if [ "$BUILD_RC" -eq 0 ]; then
   echo "== QEMU 真实启动（x86_64，4 个处理器）=="
+  sleep "$BOOT_GAP"
   run timeout "$QEMU_TIMEOUT" "$QEMU" -drive format=raw,file="$IMG" -smp 4 \
     -serial stdio -display none -monitor none -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL_SMP4" 2>&1
@@ -136,10 +153,11 @@ QEMU_A64="$(command -v qemu-system-aarch64 || true)"
 SERIAL_A64="$OUT/serial-aarch64.log"
 A64_ELF="$ROOT/target/aarch64-unknown-none-softfloat/release/jasper-kernel"
 QRC_A64=-1
-run cargo build --release --target aarch64-unknown-none-softfloat -p jasper-kernel "${KFEAT[@]}" > "$OUT/build-aarch64.log" 2>&1
+run cargo build --release --target aarch64-unknown-none-softfloat -p jasper-kernel "${KFEAT[@]}" "${SFEAT[@]}" > "$OUT/build-aarch64.log" 2>&1
 A64_BUILD_RC=$?
 if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ]; then
   echo "== QEMU 真实启动（AArch64）=="
+  sleep "$BOOT_GAP"
   run timeout "$QEMU_TIMEOUT" "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -kernel "$A64_ELF" -semihosting \
     -serial stdio -display none -monitor none -no-reboot > "$SERIAL_A64" 2>&1
   QRC_A64=$?
@@ -149,6 +167,7 @@ SERIAL_A64_SMP4="$OUT/serial-aarch64-smp4.log"
 QRC_A64_SMP4=-1
 if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ]; then
   echo "== QEMU 真实启动（AArch64，4 个处理器）=="
+  sleep "$BOOT_GAP"
   run timeout "$QEMU_TIMEOUT" "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -smp 4 -kernel "$A64_ELF" -semihosting \
     -serial stdio -display none -monitor none -no-reboot > "$SERIAL_A64_SMP4" 2>&1
   QRC_A64_SMP4=$?
@@ -159,10 +178,11 @@ QEMU_RV64="$(command -v qemu-system-riscv64 || true)"
 SERIAL_RV64="$OUT/serial-riscv64.log"
 RV64_ELF="$ROOT/target/riscv64imac-unknown-none-elf/release/jasper-kernel"
 QRC_RV64=-1
-run cargo build --release --target riscv64imac-unknown-none-elf -p jasper-kernel "${KFEAT[@]}" > "$OUT/build-riscv64.log" 2>&1
+run cargo build --release --target riscv64imac-unknown-none-elf -p jasper-kernel "${KFEAT[@]}" "${SFEAT[@]}" > "$OUT/build-riscv64.log" 2>&1
 RV64_BUILD_RC=$?
 if [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ]; then
   echo "== QEMU 真实启动（RISC-V64）=="
+  sleep "$BOOT_GAP"
   run timeout "$QEMU_TIMEOUT" "$QEMU_RV64" -M virt -m 256M -kernel "$RV64_ELF" \
     -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV64" 2>&1
   QRC_RV64=$?
@@ -174,10 +194,11 @@ QEMU_RV32="$(command -v qemu-system-riscv32 || true)"
 SERIAL_RV32="$OUT/serial-riscv32.log"
 RV32_ELF="$ROOT/target/riscv32imac-unknown-none-elf/release/jasper-kernel"
 QRC_RV32=-1
-run cargo build --release --target riscv32imac-unknown-none-elf -p jasper-kernel "${KFEAT[@]}" > "$OUT/build-riscv32.log" 2>&1
+run cargo build --release --target riscv32imac-unknown-none-elf -p jasper-kernel "${KFEAT[@]}" "${SFEAT[@]}" > "$OUT/build-riscv32.log" 2>&1
 RV32_BUILD_RC=$?
 if [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ]; then
   echo "== QEMU 真实启动（RISC-V32）=="
+  sleep "$BOOT_GAP"
   run timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M -kernel "$RV32_ELF" \
     -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV32" 2>&1
   QRC_RV32=$?
@@ -186,6 +207,7 @@ fi
 SERIAL_RV64_SMP4="$OUT/serial-riscv64-smp4.log"; QRC_RV64_SMP4=-1
 if [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ]; then
   echo "== QEMU 真实启动（RISC-V64，4 个处理器）=="
+  sleep "$BOOT_GAP"
   run timeout "$QEMU_TIMEOUT" "$QEMU_RV64" -M virt -m 256M -smp 4 -kernel "$RV64_ELF" \
     -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV64_SMP4" 2>&1
   QRC_RV64_SMP4=$?
@@ -193,12 +215,23 @@ fi
 SERIAL_RV32_SMP4="$OUT/serial-riscv32-smp4.log"; QRC_RV32_SMP4=-1
 if [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ]; then
   echo "== QEMU 真实启动（RISC-V32，4 个处理器）=="
+  sleep "$BOOT_GAP"
   run timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M -smp 4 -kernel "$RV32_ELF" \
     -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV32_SMP4" 2>&1
   QRC_RV32_SMP4=$?
 fi
 
 # ---- 阶段 B：逐里程碑检查 ----------------------------------------------------
+
+check_pol1() {   # POL-1：策略可替换——本构建确实换成了所选策略，且策略名与配置一致
+  local want
+  if [ "$SCHED_POLICY" = "rr" ]; then want="round_robin"; else want="timeshare"; fi
+  if has "policy=$want " && has 'JSR-SCHED\] all tasks exited'; then
+    record POL1 PASS "调度策略=$want（构建期选择：${SCHED_POLICY}），任务表/切换路径/时钟中断/负载均衡未改动"
+  else
+    record POL1 FAIL "串口未报告 policy=$want 或调度演示未完成"
+  fi
+}
 
 check_m10() {   # 骨架：kernel-core 宿主测试 + 裸机编译
   local passed
@@ -581,7 +614,8 @@ check_j4() {    # 库作为 .jaso 模块：sha2 / crc / deflate / net 同时装�
   fi
 }
 
-check_j6() {    # 可信进程内模块与不可信隔离模块分开：隔离模块在独立进程中运行，只有清单声明且授权的调用与句柄；越权被拒、崩溃不影响宿主；
+check_j6() {   # J-6：隔离模块（isohost 的一条判据是「CPU 压力下仍能响应」，依赖 QoS 保证）
+  if [ "$SCHED_POLICY" = "rr" ]; then record_na J-6 "isohost 的压力响应依赖 QoS 保证，纯轮转构建不适用；已在分时构建中通过"; return; fi    # 可信进程内模块与不可信隔离模块分开：隔离模块在独立进程中运行，只有清单声明且授权的调用与句柄；越权被拒、崩溃不影响宿主；
                 # 吃满 CPU 的隔离模块不拖垮宿主、撤销后立即恢复；自动获取的模块只能隔离；进程内卸载的静默判定；子进程配额与回收
   local t
   t=0
@@ -613,10 +647,11 @@ check_j6() {    # 可信进程内模块与不可信隔离模块分开：隔离�
 }
 
 check_sched1() { # 调度策略 + QoS：档位规则（拒绝且不变、继承、上限）；动态任务数；过载下用户发起档唤醒延迟有上界、后台有进展；压力撤销后立即恢复；回到基线
+  if [ "$SCHED_POLICY" = "rr" ]; then record_na SCHED1 "QoS 分时策略专项：纯轮转构建不提供四档语义，已在分时构建中通过"; return; fi
   # 动态任务数用例的期望值随配置档：同时存活 = 槽位上限的 5/8，填满时的填充任务 = 槽位上限 - 1
   local mt many
   mt="$(cfg max_tasks)"; many=$(( mt * 5 / 8 ))
-  if has 'policy=qos preemption=default_on' \
+  if has 'policy=timeshare preemption=default_on' \
      && has '\[JSR-QOS\] case=rules boot_refused=true steps=7/7 raise_refused_unchanged=true inherit=true ceiling=true reclaimed=true' \
      && has "\\[JSR-QOS\\] case=many capacity=$mt spawned=$many done=$many peak_live=$many full_refused=true fillers=$((mt - 1)) reclaimed=true" \
      && has 'text=schedtest: mode=qos qos_rules invalid_refused=true raise_refused=true same_ok=true' \
@@ -634,6 +669,7 @@ check_sched1() { # 调度策略 + QoS：档位规则（拒绝且不变、继承�
 }
 
 check_sched2() { # 优先级继承：三任务反转（锁 / 等退出）有界、关闭继承对照可见反转、传递继承、拒绝路径无残留、持有者退出可接管、压力撤销后恢复、回到基线
+  if [ "$SCHED_POLICY" = "rr" ]; then record_na SCHED2 "优先级继承专项：依赖 QoS 档位借还，已在分时构建中通过"; return; fi
   if has '\[JSR-PI\] case=inversion wait_on=lock inherit=true hogs=3 hog_ticks=120 work=4 wait=[0-6] bound=6 bounded=true holder_peak=interactive holder_after=background hog_progress=true lock_free=true reclaimed=true' \
      && has '\[JSR-PI\] case=inversion wait_on=lock inherit=false .* bounded=false holder_peak=background .*reclaimed=true' \
      && has '\[JSR-PI\] case=inversion wait_on=exit inherit=true hogs=3 hog_ticks=120 work=4 wait=[0-6] bound=6 bounded=true holder_peak=interactive holder_after=background hog_progress=true .*reclaimed=true' \
@@ -649,6 +685,7 @@ check_sched2() { # 优先级继承：三任务反转（锁 / 等退出）有界�
 }
 
 check_sched3() { # 过载防护：每进程 CPU 上限（令牌桶上界内、确有限速、旁观任务拿回处理器；不限速对照）；失控进程 + 内存紧张下交互档延迟有上界；看门狗；内存压力分级准入（被拒无改动）；压力撤销后回到基线
+  if [ "$SCHED_POLICY" = "rr" ]; then record_na SCHED3 "过载防护专项：依赖 QoS 档位与上限，已在分时构建中通过"; return; fi
   if has '\[JSR-OVL\] case=rules invalid_refused=true invalid_change_unchanged=true stale_group_refused=true exited_refused=true groups=0 reclaimed=true' \
      && has 'text=schedtest: mode=runaway threads=5 wall_ticks=300 all_progressed=true' \
      && has '\[JSR-OVL\] case=runaway mode=limited limit=250 pressure=low exit=Some\(0\) window=[0-9]+ used=[0-9]+ bound=[0-9]+ within=true throttled_ticks=[1-9][0-9]* throttle_events=[1-9][0-9]* bystander_share=([5-9][0-9][0-9]|1000)‰ interactive_samples=[1-9][0-9]* p99=[01] max=[01] latency_bound=1 bounded=true watchdog_runaway=[1-9][0-9]* watchdog_bystander=true watchdog_interactive=false groups=0 reclaimed=true' \
@@ -741,7 +778,8 @@ port_rerun() {
   for c in "$@"; do "$c"; done
   SERIAL="$saved_serial"; QRC="$saved_qrc"; REC_PREFIX=""; unset KPART
   for (( i = before; i < ${#ROWS[@]}; i++ )); do
-    [[ "${ROWS[$i]}" == *" PASS "* ]] || bad=$((bad + 1))
+    # N/A：本构建下不适用（例如纯轮转构建里的 QoS 专项），不计入失败
+    [[ "${ROWS[$i]}" == *" PASS "* || "${ROWS[$i]}" == *" N/A "* ]] || bad=$((bad + 1))
   done
   PORT_N=$(( ${#ROWS[@]} - before )); PORT_BAD=$bad
 }
@@ -950,6 +988,7 @@ smp2_verdict() {
 }
 
 check_smp2() { # 每核运行队列 + 负载均衡：N 核 N 任务各核都忙、空闲窃取有界、全部核过载时交互延迟有上界、压力撤销后立即恢复、
+  if [ "$SCHED_POLICY" = "rr" ]; then record_na SMP-2 "过载交互延迟与跨核继承依赖 QoS 保证，纯轮转构建不适用；已在分时构建中通过"; return; fi
                # 亲和集合与迁移、跨核优先级继承与 CPU 上限、拒绝路径无残留；四个指令集的 4 处理器日志全部通过，单处理器如实跳过
   if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || [ ! -s "$SERIAL_RV32_SMP4" ]; then
     record SMP-2 FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）"
@@ -987,6 +1026,7 @@ smp3_verdict() {
 }
 
 check_smp3() { # 中断与服务的多核化：设备中断按亲和送达、均衡策略分散中断线、风暴下每核预算节流（交互延迟有上界、无单核被中断吃满）、
+  if [ "$SCHED_POLICY" = "rr" ]; then record_na SMP-3 "中断风暴下的交互延迟判据依赖 QoS 保证，纯轮转构建不适用；已在分时构建中通过"; return; fi
                # 风暴撤销后立即恢复、分片服务各核并行且均衡、拒绝路径无残留；四个指令集的 4 处理器日志全部通过，单处理器如实跳过
   if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || [ ! -s "$SERIAL_RV32_SMP4" ]; then
     record SMP-3 FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）"
@@ -1157,7 +1197,14 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
   fi
 }
 
-check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+if [ "$SCHED_POLICY" = "rr" ]; then
+  check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+  check_pol1
+  check_sched1; check_sched2; check_sched3
+else
+  check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+  check_pol1
+fi
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {

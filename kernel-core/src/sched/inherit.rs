@@ -111,7 +111,7 @@ pub fn pick_successor(candidates: impl Iterator<Item = (usize, Qos, u64)>) -> Op
 
 #[cfg(test)]
 mod tests {
-    use super::super::{ClassMask, QosParams, QosPolicy, SchedEntity, SchedPolicy};
+    use super::super::{ClassMask, Enqueue, QosParams, SchedEntity, SchedPolicy, TimeSharePolicy, TimeShareState};
     use super::*;
     use Qos::*;
 
@@ -198,21 +198,21 @@ mod tests {
         const WORK: u32 = 4; // L 临界区剩余的 CPU tick
         const H_START: u64 = 2; // H 在此刻来要锁
         const HOG_END: u64 = 150; // M 吃满 CPU 到此刻
-        let mut policy = QosPolicy::new(QosParams::DEFAULT);
+        let mut policy = TimeSharePolicy::new(QosParams::DEFAULT);
         let base = [Some(Background), Some(Utility), Some(Interactive)];
-        let mut e = [SchedEntity::new(Background), SchedEntity::new(Utility), SchedEntity::new(Interactive)];
+        let mut e = [Background, Utility, Interactive].map(|q| SchedEntity::new(q, TimeShareState::INITIAL));
         let mut runnable = [true, true, false];
         let mut waits_for: [Option<usize>; 3] = [None; 3];
         let mut left = WORK;
         let (mut cur, mut used, mut quantum): (Option<usize>, u32, u32) = (None, 0, 1);
-        let apply = |e: &mut [SchedEntity; 3], w: &[Option<usize>; 3]| {
+        let apply = |e: &mut [SchedEntity<TimeShareState>; 3], w: &[Option<usize>; 3]| {
             let mut eff = [None; 3];
             resolve(&base, w, enabled, &mut eff);
             for (x, q) in e.iter_mut().zip(eff) {
                 x.qos = q.unwrap_or(x.qos);
             }
         };
-        let waiting = |e: &[SchedEntity; 3], r: &[bool; 3], cur: Option<usize>| {
+        let waiting = |e: &[SchedEntity<TimeShareState>; 3], r: &[bool; 3], cur: Option<usize>| {
             let mut m = ClassMask::EMPTY;
             for i in 0..3 {
                 if r[i] && Some(i) != cur {
@@ -252,7 +252,7 @@ mod tests {
                     runnable[L] = false;
                     waits_for[H] = None;
                     runnable[H] = true;
-                    policy.woken(&mut e[H]);
+                    policy.enqueue(&mut e[H], Enqueue::Wake);
                     apply(&mut e, &waits_for);
                     assert_eq!(e[L].qos, Background);
                 }

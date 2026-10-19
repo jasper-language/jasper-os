@@ -407,6 +407,18 @@ pub fn policy_name() -> &'static str {
     with(|s| s.policy_name())
 }
 
+/// 当前策略所属的调度类别。
+/// Scheduling class of the built-in policy.
+pub fn policy_class() -> policy::SchedClass {
+    <KernelPolicy as policy::SchedPolicy>::CLASS
+}
+
+/// 核对任务表与各运行队列（入队计数、成员关系、被拒绝的钩子调用）。
+/// Cross-check the task table against the per-CPU run queues.
+pub fn queue_audit() -> scheduler::QueueAudit {
+    with(|s| s.queue_audit())
+}
+
 /// 默认档位的时间片（tick 数）。
 pub fn quantum_ticks() -> u32 {
     with(|s| s.default_quantum())

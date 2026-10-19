@@ -20,6 +20,8 @@ pic8259 = "0.11.0"
 default = ["user-programs"]
 # 构建期配置档：默认 standard；启用本特性得到 compact（参数见 kernel-core 的 config 模块）。
 profile-compact = []
+# 构建期调度策略：默认分时策略；启用本特性改用纯轮转（不分级、固定时间片）。
+sched-rr = []
 # 内嵌用户程序（以本内核的目标指令集构建）并运行依赖它们的验收演练；关闭时只运行内核任务与探针机器码的演练。
 user-programs = []
 

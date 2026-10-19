@@ -1,11 +1,11 @@
 //! 任务模型：任务控制块（上下文 + 入口 + 地址空间 + 调度属性）。栈与切换见 `sched/`。
 //!
-//! 调度属性（[`SchedEntity`]：有效 QoS 档位、近期用量……）由策略读写；睡眠与唤醒延迟记账、
+//! 调度属性（[`SchedEntity`]：有效 QoS 档位、所在运行队列与策略私有状态）经每核运行队列由策略读写；睡眠与唤醒延迟记账、
 //! 自身档位与等待关系（优先级继承）由调度机制维护。
 
 use kernel_core::smp::CpuSet;
 
-use crate::sched::policy::{Qos, RunStreak, SchedEntity};
+use crate::sched::policy::{new_entity, Qos, RunStreak, SchedEntity};
 
 /// 不透明的任务标识。
 /// Opaque task identifier.
@@ -88,7 +88,7 @@ impl Task {
             entry: None,
             space: None,
             syscalls: crate::syscall::SyscallSet::EMPTY,
-            sched: SchedEntity::new(Qos::UserInitiated),
+            sched: new_entity(Qos::UserInitiated),
             base_qos: Qos::UserInitiated,
             waits_for: None,
             wait_key: 0,

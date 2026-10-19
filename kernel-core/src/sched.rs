@@ -41,9 +41,16 @@
 //! * [`balance`]：负载均衡的纯决策（放置、空闲窃取、周期均衡；亲和集合是硬约束，迁移代价按缓存冷热近似）
 
 pub mod balance;
+pub mod class;
 pub mod inherit;
 pub mod limit;
+pub mod queue;
+pub mod rr;
+pub mod timeshare;
 pub mod watchdog;
+
+pub use rr::{RoundRobin, RrState};
+pub use timeshare::{TimeSharePolicy, TimeShareState};
 
 /// 服务质量档位（数值越小越优先）。登记表外的数值经 [`Qos::from_raw`] 拒绝。
 /// Quality-of-service class (lower value = higher priority).
@@ -173,30 +180,36 @@ impl QosParams {
 
 /// 一个 tick 的份额单位（千分比的分母）。
 pub const TICK_UNITS: u32 = 1000;
-/// 运行一个 tick 记入的用量。
-const USAGE_PER_TICK: u32 = 1024;
 
-/// 每个可调度实体（线程）的调度属性。由内核任务表持有，策略读写。
+/// 每个可调度实体（线程）的调度属性：Core 统一持有的部分（有效档位、累计运行量、所在运行队列）
+/// 加上策略私有的部分 `S`（由所选策略定义，例如分时策略的近期用量、轮转策略的排队号）。
+/// 由内核任务表持有；`queue` 只由 [`queue::CoreQueue`] 维护，策略与内核其余部分不能改写。
+/// Per-thread scheduling attributes: core-owned fields plus policy-private state `S`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SchedEntity {
-    /// 当前档位。
+pub struct SchedEntity<S> {
+    /// 当前有效档位（含借来的档位）。机制用它做继承、放置与延迟统计；策略可以据此分级，也可以忽略。
     pub qos: Qos,
-    /// 近期用量（截至 `epoch` 时的值）。
-    usage: u32,
-    /// `usage` 对应的衰减纪元。
-    epoch: u64,
-    /// 最近一次被选中运行时的决策序号（档内用量相同时选最久没运行的）。
-    last_seq: u64,
-    /// 被唤醒后还没有运行过（档内排在最前，见模块文档「档内唤醒优先」）。
-    woken: bool,
-    /// 累计运行的 tick 数（诊断与验收：后台任务是否有进展）。
+    /// 累计运行的 tick 数（诊断与验收：后台任务是否有进展）。由每核队列逐 tick 记账，策略不改。
     pub cpu_ticks: u64,
+    /// 所在运行队列（处理器下标）；`None` = 不在任何队列（新建尚未入队、睡眠、已退出）。
+    queue: Option<u8>,
+    /// 策略私有状态。
+    pub state: S,
 }
 
-impl SchedEntity {
-    /// 新实体：近期用量为 0，从未运行。
-    pub const fn new(qos: Qos) -> Self {
-        SchedEntity { qos, usage: 0, epoch: 0, last_seq: 0, woken: false, cpu_ticks: 0 }
+impl<S> SchedEntity<S> {
+    /// 新实体：不在任何队列，从未运行；`state` 为策略给出的初始私有状态。
+    pub const fn new(qos: Qos, state: S) -> Self {
+        SchedEntity { qos, cpu_ticks: 0, queue: None, state }
+    }
+
+    /// 所在运行队列（处理器下标）；不在队列时 `None`。
+    /// Run queue (processor index) this entity is on, if any.
+    pub const fn queue(&self) -> Option<usize> {
+        match self.queue {
+            Some(q) => Some(q as usize),
+            None => None,
+        }
     }
 }
 
@@ -216,185 +229,104 @@ pub struct Choice {
 pub enum Preempt {
     /// 时间片用完。
     Quantum,
-    /// 有更高档的任务可运行（含刚被唤醒的）。
+    /// 有更高档的任务可运行（含刚被唤醒的；当前处理器空闲时也用这个原因）。
     Higher,
     /// 某个低档欠账满一个 tick，需要补给。
     Owed,
 }
 
-/// 调度策略接口（Strategy 模式）：内核调度机制对它泛型化，换策略不改切换代码。
-/// Scheduling-policy interface: the mechanism is generic over it.
-pub trait SchedPolicy {
+/// 实体进入运行队列的原因（入队钩子的参数）。
+/// Why an entity joins a run queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Enqueue {
+    /// 新建任务第一次入队。
+    Spawn,
+    /// 从睡眠或等待中被唤醒。
+    Wake,
+}
+
+/// 实体离开运行队列的原因（出队钩子的参数）。
+/// Why an entity leaves a run queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dequeue {
+    /// 进入睡眠或等待。
+    Block,
+    /// 退出。
+    Exit,
+}
+
+/// 正在运行的实体被换下、但仍可运行时的原因（让出钩子的参数）。
+/// Why a running entity is switched out while staying runnable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Requeue {
+    /// 主动让出。
+    Yield,
+    /// 被策略抢占（时间片用完、更高档、欠账补给）或被机制换下（迁移、重新调度请求）。
+    Preempted,
+}
+
+/// 调度策略接口（Strategy 模式）。Core 的每核运行队列机制（[`queue::CoreQueue`]）对它泛型化：
+/// 换策略不改任务表、切换路径、时钟中断与负载均衡。接口不含任何指令集概念。
+///
+/// 钩子覆盖实体在一个运行队列上的完整生命周期：入队 → （选择 → 派发 → 逐 tick 记账 → 抢占判断 →
+/// 让出 / 被抢占 / 预算耗尽）* → 出队；跨队列迁移由迁入钩子处理。钩子只在 [`queue::CoreQueue`]
+/// 校验过成员关系之后调用，策略不需要自己防御重复入队或出队。
+///
+/// 多类别仲裁的扩展点：每个策略声明自己的调度类别 [`SchedPolicy::CLASS`]，
+/// 由 [`class::Arbiter`] 决定多个类别同时有可运行实体时先服务哪一类。
+/// Scheduling-policy interface; the per-CPU run-queue mechanism is generic over it.
+pub trait SchedPolicy: Copy {
+    /// 策略私有的每实体状态。
+    type State: Copy + core::fmt::Debug + PartialEq;
+    /// 新实体的初始私有状态（`const`：任务表可静态初始化）。
+    const INITIAL: Self::State;
+    /// 本策略所属的调度类别。
+    const CLASS: class::SchedClass;
+
     /// 策略名（诊断输出）。
     fn name(&self) -> &'static str;
 
-    /// 从候选（可运行的工作实体）中选出下一个。没有候选时返回 `None`（机制切回空闲/引导线程）。
-    fn choose(&self, candidates: &mut dyn Iterator<Item = (usize, &SchedEntity)>) -> Option<Choice>;
+    /// 入队钩子：实体加入本队列（新建或被唤醒）。
+    fn enqueue(&mut self, e: &mut SchedEntity<Self::State>, why: Enqueue);
 
-    /// 实体被选中、即将运行：记录决策序号（档内轮转依据）。
-    fn dispatched(&mut self, e: &mut SchedEntity);
+    /// 出队钩子：实体离开本队列（睡眠或退出）。
+    fn dequeue(&mut self, e: &mut SchedEntity<Self::State>, why: Dequeue);
 
-    /// 实体从阻塞（睡眠）变为可运行：策略可据此调整它在档内的位置。
-    fn woken(&mut self, e: &mut SchedEntity);
+    /// 让出钩子：正在运行的实体被换下但仍可运行（主动让出或被抢占）。
+    fn requeue(&mut self, e: &mut SchedEntity<Self::State>, why: Requeue);
 
-    /// 每个时钟 tick 调用一次：给正在运行的实体记账（`None` = 空闲），给在等的档位累积份额。
-    /// `waiting` 是除正在运行者之外、还有可运行任务的档位集合。
-    fn on_tick(&mut self, running: Option<&mut SchedEntity>, waiting: ClassMask);
+    /// 预算钩子：实体所在组的处理器预算耗尽、被换下（预算回正之前机制不会再选它）。
+    fn throttled(&mut self, e: &mut SchedEntity<Self::State>);
+
+    /// 迁入钩子：实体从 `from`（源处理器的策略实例）迁到本队列；策略据此把私有状态换算到本实例的基准。
+    fn migrate_in(&mut self, from: &Self, e: &mut SchedEntity<Self::State>);
+
+    /// 从候选（本队列中可运行的实体）中选出下一个。没有候选时返回 `None`（机制切回空闲执行流）。
+    fn choose(&self, candidates: &mut dyn Iterator<Item = (usize, &SchedEntity<Self::State>)>) -> Option<Choice>;
+
+    /// 派发钩子：实体被选中、即将运行。
+    fn dispatched(&mut self, e: &mut SchedEntity<Self::State>);
+
+    /// 时钟钩子：每个 tick 调用一次，给正在运行的实体记账（`None` = 空闲）。
+    /// `waiting` 是除正在运行者之外、还有可运行实体的档位集合。
+    /// 默认不做任何事：只适用于没有随时间变化的状态的策略（例如纯轮转）。
+    fn on_tick(&mut self, running: Option<&mut SchedEntity<Self::State>>, waiting: ClassMask) {
+        let _ = (running, waiting);
+    }
 
     /// 每个 tick 记账之后判断是否要抢占当前实体。
-    /// `current = None` 表示空闲（引导线程在等）：此时只要有任何可运行任务就抢占。
-    fn should_preempt(&self, current: Option<&SchedEntity>, used: u32, quantum: u32, waiting: ClassMask) -> Option<Preempt>;
+    /// `current = None` 表示空闲：此时只要有任何可运行实体就应抢占。
+    fn should_preempt(&self, current: Option<&SchedEntity<Self::State>>, used: u32, quantum: u32, waiting: ClassMask) -> Option<Preempt>;
 
     /// 实体被唤醒时是否立即抢占当前实体（`None` = 空闲）。
     fn wake_preempts(&self, woken: Qos, current: Option<Qos>) -> bool;
 
+    /// 本策略是否认为档位 `a` 严格优先于档位 `b`（机制据此决定让出与交还锁之后是否换人）。
+    /// 不分级的策略总是返回 `false`。
+    fn outranks(&self, a: Qos, b: Qos) -> bool;
+
     /// 默认档位（用户发起）的时间片（tick；诊断输出用）。
     fn default_quantum(&self) -> u32;
-}
-
-/// QoS 分级策略（见模块文档）。可复制：多处理器下每个处理器的运行队列各持一份（欠账与衰减纪元按核独立）。
-#[derive(Debug, Clone, Copy)]
-pub struct QosPolicy {
-    params: QosParams,
-    /// 各档欠账（千分之一 tick）。
-    owed: [u32; QOS_CLASSES],
-    /// 已记账的 tick 数（衰减纪元 = ticks / decay_period）。
-    ticks: u64,
-    /// 决策序号。
-    seq: u64,
-}
-
-impl QosPolicy {
-    /// 以给定参数构造（`const`，可放进 `static`）。
-    pub const fn new(params: QosParams) -> Self {
-        QosPolicy { params, owed: [0; QOS_CLASSES], ticks: 0, seq: 0 }
-    }
-
-    /// 生效参数。
-    pub const fn params(&self) -> &QosParams {
-        &self.params
-    }
-
-    /// 当前衰减纪元。
-    fn epoch(&self) -> u64 {
-        self.ticks / self.params.decay_period.max(1) as u64
-    }
-
-    /// 实体在当前纪元的有效用量：每经过一个纪元减半（惰性计算，不改实体）。
-    pub fn effective_usage(&self, e: &SchedEntity) -> u32 {
-        let elapsed = self.epoch().saturating_sub(e.epoch);
-        if elapsed >= 32 {
-            0
-        } else {
-            e.usage >> elapsed
-        }
-    }
-
-    /// 某档当前欠账（千分之一 tick；诊断与测试用）。
-    pub fn owed(&self, q: Qos) -> u32 {
-        self.owed[q.index()]
-    }
-
-    /// 欠账满一个 tick、且不是最高可运行档的最高档位。
-    fn owed_class(&self, runnable: ClassMask) -> Option<Qos> {
-        let top = runnable.highest()?;
-        Qos::ALL.into_iter().find(|&q| top.above(q) && runnable.contains(q) && self.owed[q.index()] >= TICK_UNITS)
-    }
-}
-
-impl SchedPolicy for QosPolicy {
-    fn name(&self) -> &'static str {
-        "qos"
-    }
-
-    fn choose(&self, candidates: &mut dyn Iterator<Item = (usize, &SchedEntity)>) -> Option<Choice> {
-        // 一次遍历：记下每档的最佳候选（刚被唤醒的优先，其次有效用量最少，再次最久没运行）。
-        // 比较键相同则保留先遇到的（槽位序）——结果只取决于输入，便于确定性测试。
-        let mut best: [Option<(usize, (bool, u32, u64))>; QOS_CLASSES] = [None; QOS_CLASSES];
-        let mut runnable = ClassMask::EMPTY;
-        for (slot, e) in candidates {
-            runnable.insert(e.qos);
-            let key = (!e.woken, self.effective_usage(e), e.last_seq);
-            let b = &mut best[e.qos.index()];
-            let better = match b {
-                None => true,
-                Some((_, k)) => key < *k,
-            };
-            if better {
-                *b = Some((slot, key));
-            }
-        }
-        // 先补给欠账的低档（一个 tick），否则按严格优先选最高档。
-        let (class, rescued) = match self.owed_class(runnable) {
-            Some(q) => (q, true),
-            None => (runnable.highest()?, false),
-        };
-        let (slot, _) = best[class.index()]?;
-        let quantum = if rescued { 1 } else { self.params.quantum[class.index()].max(1) };
-        Some(Choice { slot, quantum, rescued })
-    }
-
-    fn dispatched(&mut self, e: &mut SchedEntity) {
-        self.seq += 1;
-        e.last_seq = self.seq;
-        e.woken = false;
-    }
-
-    fn woken(&mut self, e: &mut SchedEntity) {
-        e.woken = true;
-    }
-
-    fn on_tick(&mut self, running: Option<&mut SchedEntity>, waiting: ClassMask) {
-        self.ticks += 1;
-        let epoch = self.epoch();
-        let ran = running.map(|e| {
-            // 先把用量衰减到当前纪元，再记入这个 tick。
-            e.usage = self.effective_usage(e).saturating_add(USAGE_PER_TICK);
-            e.epoch = epoch;
-            e.cpu_ticks += 1;
-            e.qos
-        });
-        for q in Qos::ALL {
-            let o = &mut self.owed[q.index()];
-            if Some(q) == ran {
-                *o = o.saturating_sub(TICK_UNITS);
-            } else if waiting.contains(q) {
-                *o = (*o + self.params.min_share_permille[q.index()]).min(self.params.owed_cap);
-            }
-        }
-    }
-
-    fn should_preempt(&self, current: Option<&SchedEntity>, used: u32, quantum: u32, waiting: ClassMask) -> Option<Preempt> {
-        let Some(cur) = current else {
-            return waiting.highest().map(|_| Preempt::Higher);
-        };
-        let mut all = waiting;
-        all.insert(cur.qos);
-        if waiting.highest().is_some_and(|top| top.above(cur.qos)) {
-            return Some(Preempt::Higher);
-        }
-        if self.owed_class(all).is_some_and(|q| q != cur.qos) {
-            return Some(Preempt::Owed);
-        }
-        // 时间片用完：只有还有别的可运行任务时才值得切换（否则选回自己，徒增开销）。
-        if used >= quantum && waiting != ClassMask::EMPTY {
-            return Some(Preempt::Quantum);
-        }
-        None
-    }
-
-    fn default_quantum(&self) -> u32 {
-        self.params.quantum[Qos::UserInitiated.index()]
-    }
-
-    fn wake_preempts(&self, woken: Qos, current: Option<Qos>) -> bool {
-        match current {
-            None => true,
-            // 后台限速：后台任务被唤醒时只抢占空闲。
-            Some(_) if woken == Qos::Background => false,
-            Some(c) => woken.above(c),
-        }
-    }
 }
 
 /// 唤醒延迟直方图（单位 tick；无堆、定长）：桶 i 统计延迟恰为 i 的次数，最后一桶收容更大的值。

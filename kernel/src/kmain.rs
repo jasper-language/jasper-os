@@ -129,17 +129,24 @@ pub fn start(boot: &'static BootSpec) -> ! {
         // J-1：用户态运行时（匿名内存系统调用；用运行时写成的普通 Rust 程序：堆、线程、Channel、异步环）。
         rt_demo::run();
         // SCHED-1：服务质量分级调度（档位规则、动态任务数、过载下的唤醒延迟、压力撤销后恢复）。
+        // 纯轮转策略不提供分级语义，其构建跳过这些依赖 QoS 保证的演练（分时构建照常执行）。
+        #[cfg(not(feature = "sched-rr"))]
         qos_demo::run();
     }
     // SCHED-2：优先级继承（三任务反转有界、传递继承、拒绝路径、持有者退出、压力撤销后恢复）。
+    #[cfg(not(feature = "sched-rr"))]
     pi_demo::run();
     // SMP-2：每核运行队列与负载均衡（各核都忙、窃取、过载下交互延迟有上界、恢复、亲和与迁移、跨核继承与上限）。
+    // 其中的延迟与继承判据依赖 QoS 保证，纯轮转构建跳过（分时构建照常执行）。
+    #[cfg(not(feature = "sched-rr"))]
     balance_demo::run();
     // SMP-3：中断与服务的多核化（送达、均衡、风暴预算下交互延迟有上界、恢复、分片服务各核均衡）。
+    #[cfg(not(feature = "sched-rr"))]
     irq_demo::run();
     #[cfg(feature = "user-programs")]
     {
         // SCHED-3：过载防护（每进程 CPU 上限、看门狗、内存压力分级准入、压力撤销后回到基线）。
+        #[cfg(not(feature = "sched-rr"))]
         overload_demo::run();
         // T-2：基准（时钟中断、上下文切换、页帧、堆、系统调用、异步环、IPC 往返）与按预算评估参数取值。
         bench_demo::run();

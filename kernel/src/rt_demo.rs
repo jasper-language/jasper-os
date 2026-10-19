@@ -55,6 +55,7 @@ static USER_JASODEMO: &[u8] = include_bytes!(env!("JSR_USER_JASODEMO"));
 /// 库模块验收程序 `user/modhost` 的 ELF 镜像（内嵌构建期打包的四个库模块）。
 static USER_MODHOST: &[u8] = include_bytes!(env!("JSR_USER_MODHOST"));
 /// 隔离模块验收程序 `user/isohost` 的 ELF 镜像（内嵌探测模块与容器程序）。
+#[cfg(not(feature = "sched-rr"))]
 static USER_ISOHOST: &[u8] = include_bytes!(env!("JSR_USER_ISOHOST"));
 
 /// 主线程栈顶相对私有窗口起点的偏移与页数（与其它演练相同的布局）。
@@ -107,6 +108,8 @@ pub fn run() {
     program("libcheck", USER_LIBCHECK, 0, 0);
     program("jasodemo", USER_JASODEMO, 0, 0);
     program("modhost", USER_MODHOST, 0, 0);
+    // isohost 的一条判据是「CPU 压力下仍能响应」，依赖 QoS 保证；纯轮转构建跳过该程序。
+    #[cfg(not(feature = "sched-rr"))]
     program_with("isohost", USER_ISOHOST, 0, 0, rt_calls().union(SyscallSet::of(&[abi::SYSTEM_PROCESS_SPAWN, abi::SYSTEM_PROCESS_WAIT])));
     let end = baseline();
     check(end == start, "演练结束后资源未回到起点");
