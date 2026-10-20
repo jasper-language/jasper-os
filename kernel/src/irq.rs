@@ -65,10 +65,6 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
             device::on_balance_tick();
             enqueue(line);
             sched::on_timer_interrupt();
-            // 一次性定时器必须在这里重新武装，否则只会触发一次就停。
-            if crate::arch::timer_oneshot_active() {
-                crate::arch::timer_set_next(crate::config::ACTIVE.policy.idle_tick_divisor);
-            }
         }
         // 每核事件只更新本处理器的每核数据，不进全局延迟队列（那是引导处理器主循环的队列）
         IrqLine::LocalTimer => {
@@ -404,6 +400,14 @@ pub mod device {
                 arch::device_irq_set_masked(line, false);
             }
         }
+    }
+
+    /// 本处理器是否还需要周期 tick 来补充设备中断预算（本 tick 处理过设备中断或有被节流的线）。
+    /// 空闲停表前查询：是 ⇒ 保持周期 tick，否则风暴下的补充与解除屏蔽会被推迟到停表结束。
+    /// Whether this CPU's device quota still needs the periodic tick.
+    pub fn cpu_needs_tick() -> bool {
+        let cpu = arch::cpu_index().min(MAX_CPUS - 1);
+        QUOTAS[cpu].lock().needs_tick()
     }
 
     /// 引导处理器的 tick：每 [`BALANCE_PERIOD`] 个 tick 按窗口负载运行一次均衡策略。

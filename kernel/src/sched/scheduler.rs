@@ -44,6 +44,7 @@ use crate::task::{Task, TaskId, TaskState};
 
 use kernel_core::object::{advance_generation, GENERATION_RETIRED};
 use kernel_core::smp::{CpuSet, MAX_CPUS};
+use kernel_core::tickless::{plan_with, StopBoard, TickPlan};
 
 use super::policy::{
     inherit, migrate, new_entity, qos_change_allowed, BalanceParams, Balancer, Candidate, ClassMask, CoreLoad, CoreQueue, CpuLimit, CpuLimitStats,
@@ -397,6 +398,40 @@ pub struct Scheduler<P: SchedPolicy> {
     arb_windows: [kernel_core::arbiter::Window; MAX_CPUS],
     /// 是否启用类别仲裁（由演练显式打开，默认关闭）。
     arbiter_on: bool,
+    /// 空闲停表的登记（计时处理器 = 引导处理器，永不停表）。
+    nohz: StopBoard,
+    /// 空闲停表时本地 tick 的最大间隔（tick；< 2 = 关闭停表，空闲处理器保持周期 tick）。
+    nohz_divisor: u32,
+    /// 计时处理器为停表处理器发出的重新调度请求次数（停表期间出现可接的工作）。
+    nohz_kicks: u64,
+}
+
+/// 空闲执行流下一步该做什么（[`Scheduler::idle_enter`] 的结果）。
+/// What an idle processor should do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleStep {
+    /// 有事可做：以该原因切换。
+    Run(&'static str),
+    /// 保持周期 tick 休眠到下一个中断。
+    Sleep,
+    /// 已登记停表：把本地定时器推迟到这么多个 tick 之后再休眠；醒来后必须调用 [`Scheduler::idle_exit`]。
+    Stop(u32),
+}
+
+/// 空闲停表的统计快照。
+/// Snapshot of tickless-idle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NohzStats {
+    /// 停表时的最大间隔（< 2 = 关闭）。
+    pub divisor: u32,
+    /// 当前停表的处理器。
+    pub stopped: CpuSet,
+    /// 累计停表次数。
+    pub stops: u64,
+    /// 累计重新开表次数。
+    pub restarts: u64,
+    /// 计时处理器为停表处理器发出的重新调度请求次数。
+    pub kicks: u64,
 }
 
 impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
@@ -447,6 +482,9 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             watchdog_log: WatchdogLog::new(),
             arbiter: kernel_core::arbiter::Arbiter::new(kernel_core::arbiter::ArbiterParams::DEFAULT),
             arb_windows: [kernel_core::arbiter::Window { ticks: 0, realtime: 0, interactive: 0, batch: 0 }; MAX_CPUS],
+            nohz: StopBoard::new(0),
+            nohz_divisor: 0,
+            nohz_kicks: 0,
             arbiter_on: false,
         }
     }
@@ -1193,6 +1231,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             }
             self.next_wake = next;
         }
+        self.kick_stopped();
         let cause = cause.or_else(|| self.decide(c));
         if preemption {
             cause
@@ -1260,6 +1299,80 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             cause
         } else {
             None
+        }
+    }
+
+    /// 设置空闲停表的最大间隔（tick；< 2 关闭），返回之前的设置。关闭后已停表的处理器在下一次醒来时恢复周期 tick。
+    /// Configure tickless idle (`divisor` < 2 disables it); returns the previous setting.
+    pub fn set_idle_tick(&mut self, divisor: u32) -> u32 {
+        core::mem::replace(&mut self.nohz_divisor, divisor)
+    }
+
+    /// 空闲停表的统计快照。
+    /// Snapshot of tickless-idle statistics.
+    pub fn nohz_stats(&self) -> NohzStats {
+        let (stops, restarts) = self.nohz.counts();
+        NohzStats { divisor: self.nohz_divisor, stopped: self.nohz.stopped(), stops, restarts, kicks: self.nohz_kicks }
+    }
+
+    /// 处理器 `c` 的空闲执行流（关中断）问下一步：有事可做 ⇒ 切换；否则在允许时登记停表。
+    ///
+    /// 停表的前提：已启用、不是计时处理器、本处理器没有按 tick 推进的工作（`needs_tick`，例如设备中断预算）。
+    /// 判断与登记在同一次持锁内完成：之后才出现的工作由计时处理器的 tick 发现并叫醒它（见 `kick_stopped`）。
+    /// Decide what idle processor `c` does next, registering a tick stop when allowed.
+    pub fn idle_enter(&mut self, c: usize, needs_tick: bool) -> IdleStep {
+        if let Some(cause) = self.decide(c) {
+            return IdleStep::Run(cause);
+        }
+        match plan_with(self.now, None, self.nohz_divisor, needs_tick) {
+            TickPlan::Periodic => IdleStep::Sleep,
+            TickPlan::OneShot(n) => match self.nohz.stop(c, self.now, self.local_ticks[c]) {
+                Ok(()) => IdleStep::Stop(n),
+                Err(_) => IdleStep::Sleep,
+            },
+        }
+    }
+
+    /// 处理器 `c` 结束停表（醒来后、或平台不支持推迟时调用）：把停表期间本地 tick 没有记到的时长补记为空闲。
+    /// 返回它是否确实停过表（调用者据此恢复周期定时器）；没停表时什么都不改。
+    /// End a tick stop of processor `c`, accounting the idle time the local tick missed.
+    pub fn idle_exit(&mut self, c: usize) -> bool {
+        match self.nohz.restart(c, self.now, self.local_ticks[c]) {
+            Some(missed) => {
+                self.cpu_stats[c].idle_ticks += missed;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 计时处理器的每个 tick：停表的处理器若有可接的工作（本队列有可运行任务、或可以窃取），记一次重新调度请求。
+    ///
+    /// 一次遍历全部候选任务（与可运行任务数成正比），每个候选最多叫醒一个停表处理器（优先它的归属处理器），
+    /// 不会为一个任务叫醒一群处理器。被叫醒之前停表处理器看不到 tick，「空闲而有工作在等」由这里代为记账，
+    /// 因此 [`CpuStats::max_idle_waiting`] 在停表时仍然如实。
+    fn kick_stopped(&mut self) {
+        let mut left = self.nohz.stopped().intersect(self.online);
+        if left.is_empty() {
+            return;
+        }
+        let mut wake = CpuSet::EMPTY;
+        for k in self.candidates() {
+            if left.is_empty() {
+                break;
+            }
+            let pick = if left.contains(k.home) { Some(k.home) } else { k.affinity.intersect(left).iter().next() };
+            if let Some(c) = pick {
+                left.remove(c);
+                wake.insert(c);
+            }
+        }
+        for c in wake.iter() {
+            self.kicks.insert(c);
+            self.nohz_kicks += 1;
+            let st = &mut self.cpu_stats[c];
+            st.idle_waiting += 1;
+            st.max_idle_waiting = st.max_idle_waiting.max(st.idle_waiting);
         }
     }
 

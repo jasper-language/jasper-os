@@ -122,6 +122,14 @@ impl Platform for Riscv {
         timer::init(timer_hz);
     }
 
+    fn timer_stretch(ticks: u32) -> bool {
+        timer::stretch(ticks)
+    }
+
+    fn timer_resume() {
+        timer::rearm();
+    }
+
     fn console_write_byte(byte: u8) {
         uart::write_byte(byte);
     }

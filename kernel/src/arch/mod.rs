@@ -170,19 +170,19 @@ pub trait Platform {
     /// 中断初始化：中断控制器与周期定时器（`timer_hz` 为目标频率）。不打开中断。
     fn irq_init(timer_hz: u32);
 
-    /// 把下一次定时器中断推迟到 `ticks_ahead` 个 tick 之后（一次性定时器）。
+    /// 空闲停表：把**本处理器**的下一次本地定时器中断推迟到 `ticks` 个周期之后（`ticks` ≥ 2）。
     ///
-    /// 只有硬件支持一次性定时器时才返回 `true`；默认实现返回 `false`（不支持），
-    /// 调用方据此把「tickless」如实降级为「周期 tick」，而不是假装省电。
-    /// English: schedule a one-shot tick; default implementation reports unsupported.
-    fn timer_set_next(_ticks_ahead: u32) -> bool {
+    /// 只在非计时处理器的空闲执行流里、关中断且紧接着休眠时调用；之后无论被什么中断唤醒，
+    /// 调用者都必须先调用 [`Platform::timer_resume`] 恢复每周期一次。返回 `false` 表示平台不支持
+    /// （本地定时器未就绪），此时定时器保持原样，调用者如实退回周期 tick。默认实现不支持。
+    /// English: stretch this CPU's next local tick to `ticks` periods (idle only).
+    fn timer_stretch(_ticks: u32) -> bool {
         false
     }
 
-    /// 当前是否处于一次性定时器模式（需要在每次 tick 后重新武装）。
-    fn timer_oneshot_active() -> bool {
-        false
-    }
+    /// 恢复本处理器每周期一次的本地定时器中断（停表结束；没有停表时调用也无害）。
+    /// English: restore this CPU's periodic local tick.
+    fn timer_resume() {}
 
     /// 向控制台输出一个字节（阻塞直到设备可写）。调用者负责中断临界区。
     fn console_write_byte(byte: u8);
@@ -403,17 +403,17 @@ pub fn console_init() {
 pub fn early_init() {
     Current::early_init()
 }
+/// 见 [`Platform::timer_stretch`]。
+pub fn timer_stretch(ticks: u32) -> bool {
+    Current::timer_stretch(ticks)
+}
+
+/// 见 [`Platform::timer_resume`]。
+pub fn timer_resume() {
+    Current::timer_resume()
+}
+
 /// 见 [`Platform::irq_init`]。
-/// 一次性定时器能力：把下一次 tick 推迟 `ticks_ahead` 个周期；不支持时返回 false。
-pub fn timer_set_next(ticks_ahead: u32) -> bool {
-    Current::timer_set_next(ticks_ahead)
-}
-
-/// 是否处于一次性定时器模式。
-pub fn timer_oneshot_active() -> bool {
-    Current::timer_oneshot_active()
-}
-
 pub fn irq_init(timer_hz: u32) {
     Current::irq_init(timer_hz)
 }

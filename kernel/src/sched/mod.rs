@@ -46,9 +46,9 @@ use crate::task::TaskId;
 use kernel_core::smp::CpuSet;
 
 use policy::{kernel_policy, CpuLimitStats, KernelPolicy, LatencyHistogram, Qos, WatchdogLog};
-pub use scheduler::{AffinityError, CpuStats, ScanStats};
+pub use scheduler::{AffinityError, CpuStats, NohzStats, ScanStats};
 pub use scheduler::GrowError;
-use scheduler::{BlockError, Cause, CpuGroupId, GroupError, QosError, Scheduler, SpawnError, SwitchObserver, WATCHDOG_LOG};
+use scheduler::{BlockError, Cause, CpuGroupId, GroupError, IdleStep, QosError, Scheduler, SpawnError, SwitchObserver, WATCHDOG_LOG};
 
 /// 内核调度器实例，由登记了级别的关中断自旋锁保护（多处理器下任何处理器都可安全访问）。
 ///
@@ -225,19 +225,61 @@ pub fn reset_cpu_stats() {
 /// 其他处理器的空闲执行流（由多处理器子系统在处理器报到后调用，永不返回）：加入调度，
 /// 之后反复「关中断检查本处理器是否有事可做 → 有则切过去 → 没有则开中断休眠到下一个中断」。
 /// 检查与休眠之间不会漏掉唤醒：休眠指令与开中断是原子组合。
-/// Idle flow of a secondary processor.
+///
+/// 空闲停表：机制层允许时（[`Scheduler::idle_enter`] 返回 `Stop`），休眠前把本地定时器推迟若干 tick；
+/// 无论被什么中断唤醒（核间中断、设备中断、推迟后的那次 tick），醒来第一件事就是结束停表并恢复周期 tick，
+/// 因此本处理器一旦有事可做，记账与预算补充立刻回到每 tick 一次。平台不支持推迟时如实退回周期 tick。
+/// Idle flow of a secondary processor, with tickless idle.
 pub fn idle_loop(c: usize) -> ! {
     with_mut(|s| s.cpu_online(c));
     loop {
         let was_enabled = cpu::irq_save_disable();
         crate::smp::percpu::this().take_resched();
-        match with(|s| s.resched_check()) {
-            Some(cause) => yield_with_cause(cause),
-            None => cpu::wait_for_interrupt(),
+        let needs_tick = crate::irq::device::cpu_needs_tick();
+        match with_mut(|s| s.idle_enter(c, needs_tick)) {
+            IdleStep::Run(cause) => yield_with_cause(cause),
+            IdleStep::Sleep => cpu::wait_for_interrupt(),
+            IdleStep::Stop(ticks) => {
+                if cpu::timer_stretch(ticks) {
+                    cpu::wait_for_interrupt();
+                    // 先在机制层结束停表（补记空闲时长），再恢复每 tick 一次
+                    with_mut(|s| s.idle_exit(c));
+                    cpu::timer_resume();
+                } else {
+                    // 平台不支持推迟：撤销登记，按周期 tick 休眠
+                    with_mut(|s| s.idle_exit(c));
+                    cpu::wait_for_interrupt();
+                }
+            }
         }
         cpu::irq_restore(was_enabled);
         crate::smp::percpu::this().count_idle_wakeup();
     }
+}
+
+/// 按当前配置档设置空闲停表：功耗策略为 tickless 时以配置的空闲倍率停表，否则保持周期 tick。
+/// 返回生效的倍率（< 2 表示未启用）。
+/// Apply the profile's power policy to tickless idle; returns the active divisor.
+pub fn configure_idle_tick() -> u32 {
+    let policy = crate::config::ACTIVE.policy;
+    let divisor = match policy.power {
+        kernel_core::config::PowerPolicy::Tickless => policy.idle_tick_divisor,
+        kernel_core::config::PowerPolicy::Periodic => 0,
+    };
+    with_mut(|s| s.set_idle_tick(divisor));
+    divisor
+}
+
+/// 设置空闲停表的最大间隔（< 2 关闭），返回之前的设置（演练对照测量用，结束时以返回值恢复）。
+/// Set the tickless-idle divisor; returns the previous one.
+pub fn set_idle_tick(divisor: u32) -> u32 {
+    with_mut(|s| s.set_idle_tick(divisor))
+}
+
+/// 空闲停表的统计快照。
+/// Snapshot of tickless-idle statistics.
+pub fn nohz_stats() -> NohzStats {
+    with(|s| s.nohz_stats())
 }
 
 /// 新建内核任务并放入 CPU 组 `group`（受该组上限约束）。组无效时拒绝。

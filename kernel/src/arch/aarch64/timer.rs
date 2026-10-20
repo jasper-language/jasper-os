@@ -52,6 +52,21 @@ pub fn rearm() {
     super::cpu::isb();
 }
 
+/// 空闲停表：本处理器的下一次定时器中断推迟到 `ticks` 个周期之后（尚未初始化时返回 `false`）。
+/// 倒计时值是 32 位有符号数，超出时截到上限。
+/// English: stretch this CPU's next timer interrupt to `ticks` periods.
+pub fn stretch(ticks: u32) -> bool {
+    let interval = INTERVAL.load(Ordering::Relaxed);
+    if interval == 0 {
+        return false;
+    }
+    let count = interval.saturating_mul(u64::from(ticks.max(1))).min(i32::MAX as u64);
+    // SAFETY：只写本处理器虚拟定时器的倒计时值。
+    unsafe { write_sysreg!("cntv_tval_el0", count) };
+    super::cpu::isb();
+    true
+}
+
 /// 读虚拟计数器（单调递增；频率见 `cntfrq_el0`）。
 #[inline(always)]
 pub fn counter() -> u64 {

@@ -62,10 +62,8 @@ const CALIBRATE_MS: u32 = 10;
 static BASE: AtomicU64 = AtomicU64::new(0);
 /// 校准结果：本地定时器每毫秒的计数（分频 16 之后）。
 static COUNTS_PER_MS: AtomicU32 = AtomicU32::new(0);
-/// 每个 tick 的计数（start_periodic 时算好，一次性定时器复用）。
+/// 每个 tick 的计数（start_periodic 时算好，空闲停表与恢复复用）。
 static COUNTS_PER_TICK: AtomicU32 = AtomicU32::new(0);
-/// 是否已切到一次性模式（需要每次 tick 重新武装）。
-static ONESHOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 fn read(reg: u64) -> u32 {
     // SAFETY：BASE 指向本地 APIC 寄存器窗口（调用前已初始化），寄存器 32 位对齐。
@@ -174,27 +172,33 @@ pub fn calibrate_timer() -> u32 {
     per_ms
 }
 
-/// 武装一次性定时器：`ticks` 个 tick 之后触发一次（0 = 不触发）。
+/// 空闲停表：把本处理器的本地定时器改为一次性模式，`ticks` 个周期之后触发一次。
 ///
-/// 返回 false 表示尚未校准（还没调用过 [`start_periodic`]），调用方应退回周期模式。
-/// English: arm the LAPIC timer in one-shot mode for `ticks` ticks.
+/// 只对本地定时器正在周期运行的处理器生效（模式寄存器是每核的）：未校准、定时器被屏蔽
+/// （引导处理器用 PIT 计时，本地定时器不运行）时返回 `false`，定时器保持原样。
+/// English: switch this CPU's running LAPIC timer to one-shot, firing after `ticks` periods.
 pub fn arm_oneshot(ticks: u32) -> bool {
     let per_tick = COUNTS_PER_TICK.load(Ordering::Relaxed);
-    if per_tick == 0 {
+    if per_tick == 0 || read(REG_LVT_TIMER) & LVT_MASKED != 0 {
         return false;
     }
     let count = per_tick.saturating_mul(ticks.max(1));
-    write(REG_TIMER_DIVIDE, DIVIDE_BY_16);
-    // 模式位清零 = 一次性；中断向量保持不变。
+    // 模式位清零 = 一次性；中断向量保持不变。先改模式再写初值：写初值即开始倒计时。
     write(REG_LVT_TIMER, LOCAL_TIMER_VECTOR as u32);
     write(REG_TIMER_INIT, count);
-    ONESHOT.store(true, Ordering::Relaxed);
     true
 }
 
-/// 是否处于一次性模式。
-pub fn oneshot_active() -> bool {
-    ONESHOT.load(Ordering::Relaxed)
+/// 停表结束：本处理器的本地定时器若处于一次性模式，恢复为每周期一次；已是周期模式或未运行时不动。
+/// English: restore the periodic LAPIC timer after an idle stretch.
+pub fn resume_periodic() {
+    let per_tick = COUNTS_PER_TICK.load(Ordering::Relaxed);
+    let lvt = read(REG_LVT_TIMER);
+    if per_tick == 0 || lvt & (LVT_MASKED | LVT_PERIODIC) != 0 {
+        return;
+    }
+    write(REG_LVT_TIMER, LOCAL_TIMER_VECTOR as u32 | LVT_PERIODIC);
+    write(REG_TIMER_INIT, per_tick);
 }
 
 /// 让本处理器的本地定时器以 `hz` 周期中断（使用校准结果）；未校准时返回 `false`。
@@ -205,7 +209,6 @@ pub fn start_periodic(hz: u32) -> bool {
     }
     let count = (per_ms as u64 * 1000 / hz as u64).clamp(1, u32::MAX as u64) as u32;
     write(REG_TIMER_DIVIDE, DIVIDE_BY_16);
-    ONESHOT.store(false, Ordering::Relaxed);
     COUNTS_PER_TICK.store(count, Ordering::Relaxed);
     write(REG_LVT_TIMER, LOCAL_TIMER_VECTOR as u32 | LVT_PERIODIC);
     write(REG_TIMER_INIT, count);

@@ -180,18 +180,10 @@ pub fn run() {
     );
     check(std_tasks > min_tasks && std_objects > min_objects, "两种配置档的配额上限应不同");
 
-    // tickless 的真前提：硬件是否提供一次性定时器。不支持就如实降级，不能假装省电。
-    let oneshot = crate::arch::timer_set_next(0) || crate::arch::timer_set_next(0);
+    // 功耗策略：配置档声明的空闲倍率（实际停表由空闲执行流在每个非计时处理器上执行，
+    // 平台不支持推迟本地定时器时如实退回周期 tick；生效情况见空闲停表演练）。
     let policy = kernel_core::profile::HEADLESS.config.policy;
-    kprintln!(
-        "[JSR-PROFILE] tickless power={} oneshot_supported={} idle_divisor={}",
-        policy.power.as_str(),
-        oneshot,
-        policy.idle_tick_divisor
-    );
-    if !oneshot {
-        kprintln!("[JSR-PROFILE] tickless degraded=periodic reason=no_oneshot_timer");
-    }
+    kprintln!("[JSR-PROFILE] tickless power={} idle_divisor={}", policy.power.as_str(), policy.idle_tick_divisor);
 
     // 组份额策略：两种配置档的默认 CPU 组份额不同，且可用默认值直接建组。
     let std_share = kernel_core::profile::HEADLESS.config.policy.group_share_permille;

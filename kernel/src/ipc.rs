@@ -39,6 +39,7 @@ use crate::proc::{self, ProcError};
 use crate::config;
 use crate::syscall::err;
 use crate::syscall::table::*;
+use crate::task::TaskId;
 
 /// 每进程端点数上限（取自配置档）。
 pub const MAX_ENDPOINTS_PER_PROCESS: u32 = config::ACTIVE.ipc.max_endpoints_per_process;
@@ -83,6 +84,9 @@ pub struct Endpoint {
     closed: bool,
     /// 在本端点上等待的 recv 请求 (Ring, 请求 ID)——非拥有式登记。
     waiters: VecDeque<(ObjId, u64)>,
+    /// 在本端点上同步阻塞接收（`system.channel.recv` 同步形式）的任务——非拥有式登记。
+    /// 消息到达或端点关闭时立即唤醒它们，而不是让它们等到下一个 tick 才发现（见 [`sys_recv`]）。
+    sleepers: Vec<TaskId>,
 }
 
 fn ep_mut(t: &mut Table, id: ObjId) -> Option<&mut Endpoint> {
@@ -137,7 +141,7 @@ pub fn create_pair(pa: ObjId, pb: ObjId) -> Result<(HandleId, HandleId), i64> {
                 return Err(err(SYSTEM_ERROR_QUOTA_EXCEEDED));
             }
         }
-        let new = |owner| KObject::Endpoint(Box::new(Endpoint { owner, peer: None, queue: VecDeque::new(), queued_bytes: 0, closed: false, waiters: VecDeque::new() }));
+        let new = |owner| KObject::Endpoint(Box::new(Endpoint { owner, peer: None, queue: VecDeque::new(), queued_bytes: 0, closed: false, waiters: VecDeque::new(), sleepers: Vec::new() }));
         let (ha, a) = proc::grant_new_in(t, pa, new(pa), ObjectType::Channel, ENDPOINT_RIGHTS).map_err(proc_err)?;
         let (hb, b) = match proc::grant_new_in(t, pb, new(pb), ObjectType::Channel, ENDPOINT_RIGHTS) {
             Ok(x) => x,
@@ -179,8 +183,10 @@ pub fn close_in(t: &mut Table, id: ObjId) {
     for (ring, req) in waiters {
         crate::ring::kernel_cancel_in(t, ring, req);
     }
+    wake_sleepers_in(t, id);
     if let Some(p) = peer {
         wake_in(t, p);
+        wake_sleepers_in(t, p);
     }
     crate::kprintln!("[JSR-IPC] event=system.channel.closing endpoint={:#x} dropped_messages={}", id.raw(), dropped);
 }
@@ -262,7 +268,37 @@ pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, han
         p.queue.push_back(Message { body, handles, sender: pid });
     }
     wake_in(t, peer);
+    wake_sleepers_in(t, peer);
     n as i64
+}
+
+/// 唤醒在端点 `id` 上同步阻塞接收的任务（消息到达或关闭时调用，锁内）。
+///
+/// 对象表锁（级别 4）之内取调度器锁（级别 8）符合锁顺序。被唤醒的任务回到 [`sys_recv`] 的循环里重新尝试交付；
+/// 没取到（例如另一个接收者先取走）就重新登记再睡，因此这里多唤醒一次只是多一次尝试，不影响正确性。
+/// Wake tasks blocked in synchronous recv on endpoint `id`.
+fn wake_sleepers_in(t: &mut Table, id: ObjId) {
+    let Some(e) = ep_mut(t, id) else { return };
+    if e.sleepers.is_empty() {
+        return;
+    }
+    for task in core::mem::take(&mut e.sleepers) {
+        crate::sched::wake(task);
+    }
+}
+
+/// 登记（`on`）或撤销任务 `task` 在端点 `id` 上的同步等待（锁内；重复登记只保留一项）。
+/// Register or withdraw a synchronous recv sleeper on endpoint `id`.
+fn set_sleeper_in(t: &mut Table, id: ObjId, task: TaskId, on: bool) {
+    let Some(e) = ep_mut(t, id) else { return };
+    let at = e.sleepers.iter().position(|x| *x == task);
+    match (on, at) {
+        (true, None) => e.sleepers.push(task),
+        (false, Some(i)) => {
+            e.sleepers.swap_remove(i);
+        }
+        _ => {}
+    }
 }
 
 /// 让端点上的等待者依次尝试取消息（消息到达或对端关闭时调用）。
@@ -464,7 +500,13 @@ pub fn sys_send(h: u64, desc_ptr: u64) -> i64 {
 }
 
 /// `system.channel.recv(endpoint, desc)` 的同步形式：阻塞直到交付、对端关闭或本端点关闭。
-/// 与经 ring 提交时一样先固定缓冲区，交付规则完全相同；等待期间让出处理器并休眠到下一个中断。
+/// 与经 ring 提交时一样先固定缓冲区，交付规则完全相同。
+///
+/// 等待：发现队列为空时，在**同一次持锁内**把当前任务登记为端点的同步等待者，然后休眠到下一个 tick；
+/// 消息到达（[`send_in`]）或端点关闭（[`close_in`]）会立即唤醒它，所以一次往返不必等时钟——
+/// 若只按 tick 轮询，收发双方各自对齐到 tick 边界，往返延迟会在 1 与 2 个 tick 之间随相位跳动。
+/// 休眠到下一个 tick 仍然保留作为兜底：唤醒丢失（登记之后、睡下之前就被唤醒）最多让这一次多等一个 tick。
+/// 退出前撤销登记，端点里不会留下指向已离开任务的项。
 pub fn sys_recv(h: u64, desc_ptr: u64) -> i64 {
     let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
     let d = match copy_desc(desc_ptr) {
@@ -475,16 +517,30 @@ pub fn sys_recv(h: u64, desc_ptr: u64) -> i64 {
         Ok(x) => x,
         Err(e) => return e,
     };
+    let me = crate::sched::current().0;
     loop {
-        match kobj::with(|t| try_deliver_in(t, &target)) {
+        let d = kobj::with(|t| {
+            let d = try_deliver_in(t, &target);
+            if matches!(d, Delivery::Empty) {
+                set_sleeper_in(t, target.endpoint, me, true);
+            }
+            d
+        });
+        match d {
             Delivery::Done(v) => {
-                kobj::with(|t| release_target_in(t, target, None));
+                kobj::with(|t| {
+                    set_sleeper_in(t, target.endpoint, me, false);
+                    release_target_in(t, target, None);
+                });
                 return v;
             }
             Delivery::Empty => {
-                // 进程终止打断等待：先撤销目标（解除固定、释放端点引用）再返回
+                // 进程终止打断等待：先撤销登记与目标（解除固定、释放端点引用）再返回
                 if proc::block_step().is_err() {
-                    kobj::with(|t| release_target_in(t, target, None));
+                    kobj::with(|t| {
+                        set_sleeper_in(t, target.endpoint, me, false);
+                        release_target_in(t, target, None);
+                    });
                     return err(SYSTEM_ASYNC_ERROR_CANCELLED);
                 }
             }

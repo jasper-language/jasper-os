@@ -1380,6 +1380,34 @@ check_harden1c() { # 长期运行与并发正确性①：用户指针复制与�
   fi
 }
 
+check_harden1e() { # 空闲停表（tickless idle）：同样长的全空闲窗口里非计时处理器的本地 tick 至少减半、确实停过表、
+                   # 计时处理器永不停表、停表期间的空闲时长补记进调度统计；停表处理器上的唤醒延迟有上界；
+                   # 其后的 SMP-3 中断演练（风暴、分散、预算）在停表开启下全部通过（由 check_smp3 判定）
+  local miss="" f name
+  local idle='^\[JSR-NOHZ\] case=idle cpus=[2-9][0-9]* window=[0-9]+ divisor=[2-9][0-9]* periodic_ticks=[0-9]+ nohz_ticks=[0-9]+ reduced=true stops=[1-9][0-9]* timekeeper_stopped=false accounted_min=[0-9]+ covered=true reclaimed=true'
+  local wake='^\[JSR-NOHZ\] case=wake cpu=1 rounds=10 sleep=[0-9]+ samples=10 max=[0-2] bound=2 bounded=true stops=[1-9][0-9]* kicks=[0-9]+ reclaimed=true'
+  local pairs=("$SERIAL_SMP4:x86_64×4" "$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4")
+  rv32_ready && ! rv32_fw_missing && pairs+=("$SERIAL_RV32_SMP4:RV32×4")
+  for pair in "${pairs[@]}"; do
+    f="${pair%%:*}"; name="${pair##*:}"
+    grep -qaE "$idle" "$f" 2>/dev/null || miss="$miss $name:空闲tick下降"
+    grep -qaE "$wake" "$f" 2>/dev/null || miss="$miss $name:唤醒延迟"
+    grep -qaE '^\[JSR-NOHZ\] checks=[0-9]+ failed=0' "$f" 2>/dev/null || miss="$miss $name:汇总"
+    grep -qa '^\[JSR-NOHZ-FAIL\]' "$f" 2>/dev/null && miss="$miss $name:失败断言"
+  done
+  grep -qaE '^\[JSR-NOHZ\] single cpus=1 skipped' "$SERIAL" 2>/dev/null || miss="$miss x86_64单核:如实跳过"
+  for t in tickless::tests::stop_and_restart_report_unaccounted_idle tickless::tests::refusals_leave_the_board_unchanged irq::tests::stretched_tick_does_not_inflate_the_quota; do
+    grep -qaE "^test $t \.\.\. ok$" "$OUT/cargo-test.log" 2>/dev/null || miss="$miss 宿主:$t"
+  done
+  if [ -z "$miss" ]; then
+    local r
+    r=$(grep -aE "$idle" "$SERIAL_SMP4" | head -1 | sed -E 's/.* periodic_ticks=([0-9]+) nohz_ticks=([0-9]+).*/\1→\2/')
+    record HARDEN1E PASS "空闲停表：全空闲窗口里非计时处理器本地 tick ${r}（x86_64×4），计时处理器永不停表，停表期间空闲时长补记；停表处理器上唤醒延迟 ≤2 tick；其后 SMP-3 风暴 / 分散 / 预算在停表开启下通过（四个指令集，含 4 处理器）$RV32_NOTE"
+  else
+    record HARDEN1E FAIL "缺少：$miss"
+  fi
+}
+
 check_harden1d() { # 调度规模化：选择路径只遍历本处理器的运行列表（与任务表容量无关），到期唤醒按最早时刻跳过扫描；
                    # 同规模下复核响应性底线（过载交互延迟有上界、压力撤销后立即恢复、各核都忙）；测量调度器锁与对象表锁的争用
   local miss="" f name lockline
@@ -1441,11 +1469,11 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 
 if [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------

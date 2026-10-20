@@ -94,6 +94,13 @@ pub enum Charge {
     Exhausted,
 }
 
+/// 判定「被拉长的 tick」的门槛：间隔超过平滑 tick 长度的 3/2 即视为停表或补发，不计入长度测量。
+/// Threshold (3/2 of the smoothed length) above which an interval is treated as a stretched tick.
+pub const STRETCH_NUM: u64 = 3;
+/// 见 [`STRETCH_NUM`]。
+/// Denominator of the stretched-tick threshold.
+pub const STRETCH_DEN: u64 = 2;
+
 /// 一个处理器的设备中断预算（只由所属处理器在关中断状态下修改）。
 /// Device-interrupt quota of one processor.
 #[derive(Debug, Clone, Copy)]
@@ -103,15 +110,14 @@ pub struct CoreQuota {
     last_tick: u64,
     /// 平滑后的 tick 长度（周期计数；0 = 尚未测得，只按次数限制）。
     tick_cycles: u64,
-    /// 基准 tick 长度（第一个测得的 tick）：次数上限按「当前 / 基准」放大，
-    /// 这样 tick 被拉长（空闲合并）时，每秒允许的中断次数不会跟着变少。
-    base_cycles: u64,
     used_cycles: u64,
     used_count: u32,
     /// 因预算而被节流的中断线集合。
     throttled: u32,
     /// 累计节流次数。
     throttle_events: u32,
+    /// 被判为拉长、未计入长度测量的 tick 数。
+    stretched: u32,
     /// 累计处理次数与周期计数。
     handled: u64,
     cycles_total: u64,
@@ -125,11 +131,11 @@ impl CoreQuota {
             params,
             last_tick: 0,
             tick_cycles: 0,
-            base_cycles: 0,
             used_cycles: 0,
             used_count: 0,
             throttled: 0,
             throttle_events: 0,
+            stretched: 0,
             handled: 0,
             cycles_total: 0,
         }
@@ -148,23 +154,10 @@ impl CoreQuota {
         self.params
     }
 
-    /// 本 tick 的中断次数上限：按 tick 相对基准的长度等比放大。
-    ///
-    /// 为什么需要：次数上限原本是"每 tick 多少次"，一旦空闲合并把 tick 拉长，
-    /// 同一 tick 内的中断自然变多，固定上限会把正常负载判成超预算。
-    /// English: scale the per-tick interrupt count limit with the tick length.
+    /// 本 tick 的中断次数上限。
+    /// Interrupt count limit of the current tick.
     pub const fn count_limit(&self) -> u32 {
-        if self.base_cycles == 0 || self.tick_cycles == 0 {
-            return self.params.max_per_tick;
-        }
-        let scale = self.tick_cycles / self.base_cycles;
-        let scale = if scale == 0 { 1 } else { scale };
-        let limit = self.params.max_per_tick as u64 * scale;
-        if limit > u32::MAX as u64 {
-            u32::MAX
-        } else {
-            limit as u32
-        }
+        self.params.max_per_tick
     }
 
     /// 本 tick 可用的周期计数上限（tick 长度尚未测得时为 `None`）。
@@ -181,6 +174,19 @@ impl CoreQuota {
     /// Smoothed tick length in cycles.
     pub const fn tick_cycles(&self) -> u64 {
         self.tick_cycles
+    }
+
+    /// 本处理器是否还需要周期 tick：本 tick 处理过设备中断（预算窗口正在消耗）或有被节流的线
+    /// （只有下一个 tick 才会解除屏蔽）。是 ⇒ 不得空闲停表，否则风暴下的补充与解除屏蔽会被推迟。
+    /// Whether this CPU still needs its periodic tick for quota refill.
+    pub const fn needs_tick(&self) -> bool {
+        self.used_count != 0 || self.throttled != 0
+    }
+
+    /// 被判为拉长、未计入长度测量的 tick 数。
+    /// Number of stretched ticks excluded from the length estimate.
+    pub const fn stretched_ticks(&self) -> u32 {
+        self.stretched
     }
 
     /// 记一次设备中断处理（`cycles` 为处理耗时）。超出时间或次数上限 ⇒ 节流这条线并返回 [`Charge::Exhausted`]。
@@ -206,14 +212,18 @@ impl CoreQuota {
 
     /// 本处理器的 tick：测 tick 长度（取四分之三旧值 + 四分之一新值）、补充预算，
     /// 返回需要解除屏蔽的中断线集合（之后节流集合为空）。
-    /// Refill on a tick; returns the lines to unmask.
+    ///
+    /// 超过平滑值 3/2 的间隔（见 [`STRETCH_NUM`]）不计入长度：那是空闲停表或长时间关中断后的补发 tick，
+    /// 不是 tick 本身变长了；计入会把之后每个 tick 的时间预算成倍放大，风暴时就会超出预算。
+    /// Refill on a tick; returns the lines to unmask. Stretched intervals do not feed the estimate.
     pub fn on_tick(&mut self, now: u64) -> u32 {
         if self.last_tick != 0 && now > self.last_tick {
             let delta = now - self.last_tick;
-            self.tick_cycles = if self.tick_cycles == 0 { delta } else { (self.tick_cycles * 3 + delta) / 4 };
-            if self.base_cycles == 0 {
-                // 第一个 tick 作为基准；之后 tick 被拉长，次数上限按比例放大。
-                self.base_cycles = self.tick_cycles;
+            let stretched = self.tick_cycles != 0 && delta.saturating_mul(STRETCH_DEN) > self.tick_cycles.saturating_mul(STRETCH_NUM);
+            if stretched {
+                self.stretched = self.stretched.saturating_add(1);
+            } else {
+                self.tick_cycles = if self.tick_cycles == 0 { delta } else { (self.tick_cycles * 3 + delta) / 4 };
             }
         }
         self.last_tick = now;
@@ -423,25 +433,29 @@ mod tests {
     }
 
     #[test]
-    fn count_limit_scales_with_tick_length() {
+    fn stretched_tick_does_not_inflate_the_quota() {
         let p = QuotaParams { permille: 250, max_per_tick: 10 };
         let mut q = CoreQuota::new(p);
-        // 先建立基准：两次相隔 1000 周期的 tick（第一次只记录起点）。
         q.on_tick(1000);
         q.on_tick(2000);
+        assert_eq!(q.limit_cycles(), Some(250));
+        assert!(!q.needs_tick(), "没有处理过中断的空闲窗口可以停表");
+        // 空闲停表：一个间隔是平常的 4 倍。预算不随之放大，被节流的线照常交还。
+        q.charge(2, 300);
+        assert_eq!(q.throttled(), 1 << 2);
+        assert!(q.needs_tick(), "有被节流的线时必须保持周期 tick");
+        assert_eq!(q.on_tick(6000), 1 << 2);
+        assert_eq!(q.tick_cycles(), 1000);
+        assert_eq!(q.limit_cycles(), Some(250));
         assert_eq!(q.count_limit(), 10);
-        // tick 被拉长到 4 倍（空闲合并）：EWMA 需要几个 tick 收敛，之后次数上限按比例放大。
-        let mut now = 2000;
-        for _ in 0..12 {
-            now += 5000;
-            q.on_tick(now);
-        }
-        assert!(q.count_limit() >= 35, "拉长后次数上限应显著放大：{}", q.count_limit());
-        // tick 变短时不缩小到 0。
-        let mut r = CoreQuota::new(p);
-        r.on_tick(1000);
-        r.on_tick(1100);
-        assert!(r.count_limit() >= 1);
+        assert_eq!(q.stretched_ticks(), 1);
+        assert!(!q.needs_tick(), "补充之后窗口清零");
+        q.charge(40, 1);
+        assert!(q.needs_tick(), "窗口内处理过中断（即便线号越界未节流）也要保持周期 tick");
+        // 恢复周期 tick 之后照常测量
+        q.on_tick(7100);
+        assert_eq!(q.tick_cycles(), (3000 + 1100) / 4);
+        assert_eq!(q.stretched_ticks(), 1);
     }
 
     #[test]
@@ -450,8 +464,9 @@ mod tests {
         b.on_tick(1000);
         b.on_tick(2000);
         assert_eq!(b.tick_cycles(), 1000);
-        b.on_tick(4000);
-        assert_eq!(b.tick_cycles(), (3000 + 2000) / 4);
+        // 1.4 倍：仍在门槛内，计入平滑
+        b.on_tick(3400);
+        assert_eq!(b.tick_cycles(), (3000 + 1400) / 4);
         let before = b.tick_cycles();
         b.on_tick(3000);
         assert_eq!(b.tick_cycles(), before);

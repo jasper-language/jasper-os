@@ -36,6 +36,17 @@ pub fn rearm() {
     sbi::set_timer(cpu::read_time() + u64::from(INTERVAL.load(Ordering::Relaxed)));
 }
 
+/// 空闲停表：本处理器的下一次定时器中断推迟到 `ticks` 个周期之后（尚未初始化时返回 `false`）。
+/// English: stretch this hart's next timer interrupt to `ticks` periods.
+pub fn stretch(ticks: u32) -> bool {
+    let interval = INTERVAL.load(Ordering::Relaxed);
+    if interval == 0 {
+        return false;
+    }
+    sbi::set_timer(cpu::read_time() + u64::from(interval) * u64::from(ticks.max(1)));
+    true
+}
+
 /// 读 `time` 计数器。
 #[inline(always)]
 pub fn counter() -> u64 {

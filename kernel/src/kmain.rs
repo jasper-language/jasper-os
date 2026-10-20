@@ -9,7 +9,7 @@ use crate::boot::BootSpec;
 use crate::{appid_demo, arbiter_demo, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, mech_demo, mm, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, wcet};
 #[cfg(feature = "user-programs")]
 use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo, uptr_demo, longrun_demo};
-use crate::scale_demo;
+use crate::{nohz_demo, scale_demo};
 
 /// 内核版本（横幅中输出）。
 pub const VERSION: &str = "0.0.1";
@@ -113,6 +113,10 @@ pub fn start(boot: &'static BootSpec) -> ! {
     mm::demo::run_space();
     // SMP-1：启动其他处理器（每核数据、各自计时、核间中断、跨核调用、TLB 击落）。
     smp::demo::run(smp::start_secondaries(TIMER_HZ));
+    // HARDEN-1E：按配置档的功耗策略启用空闲停表（在各核独立计时的演练之后；此后全部演练都在停表开启下运行）。
+    let idle_divisor = sched::configure_idle_tick();
+    kprintln!("[JSR-NOHZ] configured power={} divisor={} cpus={}", config::ACTIVE.policy.power.as_str(), idle_divisor, sched::online_cpus().len());
+    nohz_demo::run();
     // POL-5：三类线程同核争用 + 多核下各类各占一个核（放在 SMP 启动之后）。
     arbiter_demo::run();
     // M3.1：真实进入 Ring 3；用户态异常只终止该任务。
@@ -186,6 +190,7 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("balance", balance_demo::failed()),
         ("irq", irq_demo::failed()),
         ("scale", scale_demo::failed()),
+        ("nohz", nohz_demo::failed()),
         ("user", user_demo::failed()),
         ("fix", fix_demo::failed()),
         ("profile", profile_demo::failed()),
