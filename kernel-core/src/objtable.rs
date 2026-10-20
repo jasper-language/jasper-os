@@ -13,6 +13,14 @@
 //!
 //! # 标识
 //! [`ObjId`] = 槽位下标 + 世代：槽位复用时世代加一，旧标识必然失效；世代耗尽的槽位永久退役，标识永不复用。
+//!
+//! # 容量（启动期决定）
+//! 本 crate 不使用堆：表本身不分配内存，存储（槽位与清理队列两个切片）由内核在**启动期**按配置容量
+//! 从堆上分配后经 [`ObjectTable::install`] 一次性交给表，此后容量不变。安装之前表的容量为 0，
+//! 任何插入都返回 [`ObjError::Full`]（安全失败，而不是越界）。
+//! Storage is supplied once at boot (`install`), so the capacity is a boot-time setting, not a const generic.
+
+pub use crate::capacity::InstallError;
 
 /// 对象标识（槽位下标 + 世代，打包为 64 位跨边界传递）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -87,34 +95,78 @@ struct Entry<T> {
     state: Lifecycle,
 }
 
-struct Slot<T> {
+/// 对象表的一个槽位（内部状态不公开；调用者只用 [`Slot::VACANT`] 准备存储）。
+/// One slot of the object table (opaque; callers only use [`Slot::VACANT`] to prepare storage).
+pub struct Slot<T> {
     generation: u32,
     retired: bool,
     entry: Option<Entry<T>>,
 }
 
-/// 固定容量的对象表（不使用堆，容量 `N`）。清理队列与表同容量，因此永不溢出。
-pub struct ObjectTable<T, const N: usize> {
-    slots: [Slot<T>; N],
+impl<T> Slot<T> {
+    /// 空槽位：世代 0、未退役、无对象。启动期准备存储时用它填满切片。
+    pub const VACANT: Slot<T> = Slot { generation: 0, retired: false, entry: None };
+
+    fn is_vacant(&self) -> bool {
+        self.generation == 0 && !self.retired && self.entry.is_none()
+    }
+}
+
+/// 对象表：容量在启动期由 [`ObjectTable::install`] 决定。清理队列与表同容量，因此永不溢出。
+/// Object table whose capacity is fixed at boot by [`ObjectTable::install`].
+pub struct ObjectTable<T: 'static> {
+    slots: &'static mut [Slot<T>],
     /// 清理队列（环形，存死亡对象的下标）。
-    pending: [u32; N],
+    pending: &'static mut [u32],
     head: usize,
     len: usize,
     live: usize,
     destroyed: u64,
 }
 
-impl<T, const N: usize> ObjectTable<T, N> {
-    /// 空表。
-    pub const fn new() -> Self {
-        ObjectTable {
-            slots: [const { Slot { generation: 0, retired: false, entry: None } }; N],
-            pending: [0; N],
-            head: 0,
-            len: 0,
-            live: 0,
-            destroyed: 0,
+impl<T: 'static> ObjectTable<T> {
+    /// 尚未安装存储的空表（容量 0）。可以放进 `static`，启动期再 [`install`](Self::install)。
+    pub const fn empty() -> Self {
+        ObjectTable { slots: &mut [], pending: &mut [], head: 0, len: 0, live: 0, destroyed: 0 }
+    }
+
+    /// 安装存储（只能一次）：`slots` 必须全部是 [`Slot::VACANT`]，`pending` 与它等长。
+    /// 被拒时返回原因并且表保持为空（调用者据此拒绝启动）。
+    /// Install the boot-time storage (once). On refusal the table stays empty.
+    pub fn install(&mut self, slots: &'static mut [Slot<T>], pending: &'static mut [u32]) -> Result<usize, InstallError> {
+        if !self.slots.is_empty() {
+            return Err(InstallError::AlreadyInstalled);
         }
+        if slots.is_empty() {
+            return Err(InstallError::Empty);
+        }
+        if slots.len() != pending.len() {
+            return Err(InstallError::LengthMismatch);
+        }
+        if slots.len() > MAX_CAPACITY {
+            return Err(InstallError::TooLarge);
+        }
+        if !slots.iter().all(Slot::is_vacant) {
+            return Err(InstallError::NotVacant);
+        }
+        self.slots = slots;
+        self.pending = pending;
+        Ok(self.slots.len())
+    }
+
+    /// 容量（安装之前为 0）。
+    pub fn capacity(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// 宿主测试用：从测试堆上泄漏出一份容量为 `n` 的存储并安装。
+    #[cfg(test)]
+    pub(crate) fn for_test(n: usize) -> Self {
+        let mut t = Self::empty();
+        let slots: &'static mut [Slot<T>] = Box::leak((0..n).map(|_| Slot::VACANT).collect::<Vec<_>>().into_boxed_slice());
+        let pending: &'static mut [u32] = Box::leak(vec![0u32; n].into_boxed_slice());
+        t.install(slots, pending).expect("测试存储应可安装");
+        t
     }
 
     /// 放入新对象，初始持有 `owners` 个外部所有权与 `internal` 个内部引用（两者之和须 ≥ 1）。
@@ -220,7 +272,7 @@ impl<T, const N: usize> ObjectTable<T, N> {
         };
         if e.owners == 0 && e.internal == 0 && e.state != Lifecycle::Dead {
             e.state = Lifecycle::Dead;
-            let tail = (self.head + self.len) % N;
+            let tail = (self.head + self.len) % self.pending.len();
             self.pending[tail] = id.index;
             self.len += 1;
             return true;
@@ -234,7 +286,7 @@ impl<T, const N: usize> ObjectTable<T, N> {
             return None;
         }
         let index = self.pending[self.head];
-        self.head = (self.head + 1) % N;
+        self.head = (self.head + 1) % self.pending.len();
         self.len -= 1;
         let slot = &mut self.slots[index as usize];
         let generation = slot.generation;
@@ -264,18 +316,21 @@ impl<T, const N: usize> ObjectTable<T, N> {
     }
 }
 
-impl<T, const N: usize> Default for ObjectTable<T, N> {
+impl<T: 'static> Default for ObjectTable<T> {
     fn default() -> Self {
-        Self::new()
+        Self::empty()
     }
 }
 
+/// 容量上限：下标存成 `u32`，标识里存「下标 + 1」，所以最多 `u32::MAX` 个槽位。
+pub const MAX_CAPACITY: usize = u32::MAX as usize;
+
 /// 清理过程：最多处理 `limit` 个死亡对象。`destroy` 收到对象值后执行销毁动作，可以经传入的表释放其他对象
 /// 的引用（级联）；被级联释放的对象只会入队，在本轮剩余预算或下一轮被处理——迭代、不递归。返回本轮处理数。
-pub fn drain<T, const N: usize>(
-    table: &mut ObjectTable<T, N>,
+pub fn drain<T: 'static>(
+    table: &mut ObjectTable<T>,
     limit: usize,
-    mut destroy: impl FnMut(&mut ObjectTable<T, N>, ObjId, T),
+    mut destroy: impl FnMut(&mut ObjectTable<T>, ObjId, T),
 ) -> usize {
     let mut n = 0;
     while n < limit {
@@ -301,7 +356,7 @@ mod tests {
 
     #[test]
     fn closing_handle_does_not_destroy_while_internal_refs_remain() {
-        let mut t: ObjectTable<Obj, 8> = ObjectTable::new();
+        let mut t: ObjectTable<Obj> = ObjectTable::for_test(8);
         let id = t.insert(Obj::Leaf(1), 1, 1).unwrap(); // 一个句柄 + 一个在飞请求
         let r = t.release_owner(id).unwrap();
         assert_eq!(r, Released { became_unowned: true, dead: false }, "句柄关闭 ⇒ closing，但未死亡（INV-01）");
@@ -319,7 +374,7 @@ mod tests {
 
     #[test]
     fn double_release_and_stale_ids_are_rejected() {
-        let mut t: ObjectTable<Obj, 4> = ObjectTable::new();
+        let mut t: ObjectTable<Obj> = ObjectTable::for_test(4);
         let id = t.insert(Obj::Leaf(7), 1, 0).unwrap();
         assert!(t.release_owner(id).unwrap().dead);
         assert_eq!(t.release_owner(id), Err(ObjError::Invalid), "重复关闭");
@@ -337,7 +392,7 @@ mod tests {
 
     #[test]
     fn cascade_cleanup_is_iterative_and_reentrant() {
-        let mut t: ObjectTable<Obj, 8> = ObjectTable::new();
+        let mut t: ObjectTable<Obj> = ObjectTable::for_test(8);
         // 链：H1 → H2 → leaf（每个容器持有下一个的内部引用）
         let leaf = t.insert(Obj::Leaf(3), 0, 1).unwrap();
         let h2 = t.insert(Obj::Holder(leaf), 0, 1).unwrap();
@@ -360,7 +415,7 @@ mod tests {
 
     #[test]
     fn object_created_without_owner_can_still_gain_its_first_owner() {
-        let mut t: ObjectTable<Obj, 4> = ObjectTable::new();
+        let mut t: ObjectTable<Obj> = ObjectTable::for_test(4);
         let id = t.insert(Obj::Leaf(5), 0, 2).unwrap(); // 新线程对象：只有内部引用
         assert_eq!(t.counts(id).unwrap(), (0, 2, Lifecycle::Live), "新对象不是 closing");
         t.acquire_owner(id).unwrap(); // 发放第一个句柄
@@ -371,7 +426,7 @@ mod tests {
 
     #[test]
     fn table_full_is_reported() {
-        let mut t: ObjectTable<Obj, 2> = ObjectTable::new();
+        let mut t: ObjectTable<Obj> = ObjectTable::for_test(2);
         t.insert(Obj::Leaf(1), 1, 0).unwrap();
         t.insert(Obj::Leaf(2), 1, 0).unwrap();
         assert_eq!(t.insert(Obj::Leaf(3), 1, 0), Err(ObjError::Full));
@@ -379,12 +434,59 @@ mod tests {
 
     #[test]
     fn reference_counts_refuse_to_wrap() {
-        let mut t: ObjectTable<u8, 2> = ObjectTable::new();
+        let mut t: ObjectTable<u8> = ObjectTable::for_test(2);
         assert_eq!(t.insert(1, u32::MAX, 1), Err(ObjError::Full), "初始计数之和溢出被拒");
         let id = t.insert(1, u32::MAX, 0).unwrap();
         assert_eq!(t.acquire_owner(id), Err(ObjError::Full), "外部所有权到上限被拒，而不是回绕到 0");
         let id2 = t.insert(2, 0, u32::MAX).unwrap();
         assert_eq!(t.acquire_internal(id2), Err(ObjError::Full));
         assert_eq!(t.counts(id2).map(|c| (c.0, c.1)), Ok((0, u32::MAX)), "被拒后计数不变");
+    }
+
+    #[test]
+    fn empty_table_refuses_inserts_until_storage_is_installed() {
+        let mut t: ObjectTable<u8> = ObjectTable::empty();
+        assert_eq!(t.capacity(), 0);
+        assert_eq!(t.insert(1, 1, 0), Err(ObjError::Full), "未安装存储 ⇒ 安全失败而不是越界");
+        assert_eq!(t.take_dead(), None);
+    }
+
+    #[test]
+    fn install_rejects_bad_storage_and_leaves_table_unchanged() {
+        fn leak_slots(n: usize) -> &'static mut [Slot<u8>] {
+            Box::leak((0..n).map(|_| Slot::VACANT).collect::<Vec<_>>().into_boxed_slice())
+        }
+        fn leak_pending(n: usize) -> &'static mut [u32] {
+            Box::leak(vec![0u32; n].into_boxed_slice())
+        }
+        let mut t: ObjectTable<u8> = ObjectTable::empty();
+        assert_eq!(t.install(leak_slots(0), leak_pending(0)), Err(InstallError::Empty));
+        assert_eq!(t.install(leak_slots(4), leak_pending(3)), Err(InstallError::LengthMismatch));
+        let dirty = leak_slots(2);
+        dirty[1].generation = 5;
+        assert_eq!(t.install(dirty, leak_pending(2)), Err(InstallError::NotVacant));
+        assert_eq!(t.capacity(), 0, "被拒后表保持为空");
+        assert_eq!(t.install(leak_slots(3), leak_pending(3)), Ok(3));
+        assert_eq!(t.install(leak_slots(3), leak_pending(3)), Err(InstallError::AlreadyInstalled), "容量只能决定一次");
+        assert_eq!(t.capacity(), 3);
+    }
+
+    #[test]
+    fn large_boot_capacity_works_end_to_end() {
+        // 容量远大于编译期旧上限（1024）。插入目前是线性找空槽（装满为 O(n²)），去掉它属于 HARDEN-1D，
+        // 因此这里取 8192 控制测试时长，而不是以此衡量规模化性能。
+        let n = 8192;
+        let mut t: ObjectTable<u32> = ObjectTable::for_test(n);
+        let ids: Vec<_> = (0..n as u32).map(|i| t.insert(i, 1, 0).unwrap()).collect();
+        assert_eq!(t.insert(0, 1, 0), Err(ObjError::Full), "装满后安全失败");
+        for id in &ids {
+            assert!(t.release_owner(*id).unwrap().dead);
+        }
+        assert_eq!(t.pending(), n, "清理队列与表同容量，装满也不溢出");
+        let mut gone = 0;
+        while t.take_dead().is_some() {
+            gone += 1;
+        }
+        assert_eq!((gone, t.live(), t.pending()), (n, 0, 0));
     }
 }

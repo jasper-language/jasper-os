@@ -41,8 +41,10 @@ pub struct ClockParams {
 pub struct SchedParams {
     /// QoS 策略参数（各档时间片、最低份额、用量衰减周期、欠账上限）。
     pub qos: QosParams,
-    /// 任务槽位总数上限（含引导线程）。
+    /// 任务槽位总数（含引导线程）：启动期容量的默认值，可被启动容量记录覆盖（见 [`crate::capacity`]）。
     pub max_tasks: usize,
+    /// 实时任务在册表的容量：启动期容量的默认值，可被启动容量记录覆盖。
+    pub max_rt: usize,
     /// 单个任务内核栈的字节数。
     pub kernel_stack_bytes: usize,
     /// 看门狗阈值（tick）：连续占用处理器这么久而不让出的任务被记录。
@@ -75,7 +77,7 @@ pub struct MemoryParams {
 /// Object and handle parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObjectParams {
-    /// 全系统内核对象总数上限。
+    /// 全系统内核对象总数：启动期容量的默认值，可被启动容量记录覆盖（见 [`crate::capacity`]）。
     pub max_objects: usize,
     /// 每个进程句柄表的容量。
     pub handles_per_process: usize,
@@ -215,8 +217,17 @@ pub mod bounds {
     pub const MAX_TIMER_HZ: u32 = 1000;
     /// 任务槽位下限：引导线程 + 至少一个工作任务 + 静态栈覆盖的槽位。
     pub const MIN_TASKS: usize = 8;
-    /// 任务槽位上限：调度机制按槽位线性扫描，更大的规模未经验证。
-    pub const MAX_TASKS: usize = 128;
+    /// 任务槽位上限：已在 256 槽位下跑通全部验收；调度机制仍按槽位线性扫描（HARDEN-1D 处理），
+    /// 更大的规模未经验证。
+    pub const MAX_TASKS: usize = 256;
+    /// 内核对象表容量下限：引导期演练与基础服务需要的对象数。
+    pub const MIN_OBJECTS: usize = 64;
+    /// 内核对象表容量上限：已在该规模下验证；对象插入目前线性找空槽（HARDEN-1D 处理）。
+    pub const MAX_OBJECTS: usize = 65536;
+    /// 实时任务在册表容量下限。
+    pub const MIN_RT: usize = 1;
+    /// 实时任务在册表容量上限（每个实时任务还要占一个任务槽位）。
+    pub const MAX_RT: usize = 64;
     /// 内核栈下限（字节）：系统调用路径会在栈上临时构造较大的内核对象。
     pub const MIN_KERNEL_STACK: usize = 32 * 1024;
     /// 单条消息体上限（字节，用户态契约）：每端点队列字节配额不得小于它。
@@ -232,6 +243,7 @@ impl KernelConfig {
         sched: SchedParams {
             qos: QosParams::DEFAULT,
             max_tasks: 64,
+            max_rt: 8,
             kernel_stack_bytes: 64 * 1024,
             watchdog_ticks: 50,
             watchdog_log: 16,
@@ -272,6 +284,7 @@ impl KernelConfig {
         sched: SchedParams {
             qos: QosParams { quantum: [1, 1, 2, 2], ..QosParams::DEFAULT },
             max_tasks: 32,
+            max_rt: 8,
             kernel_stack_bytes: 64 * 1024,
             watchdog_ticks: 125,
             watchdog_log: 8,
@@ -341,6 +354,7 @@ impl KernelConfig {
         }
         require!(s.qos.decay_period >= 1, "decay_period");
         require!(s.max_tasks >= bounds::MIN_TASKS && s.max_tasks <= bounds::MAX_TASKS, "max_tasks");
+        require!(s.max_rt >= bounds::MIN_RT && s.max_rt <= bounds::MAX_RT && s.max_rt < s.max_tasks, "max_rt");
         require!(
             s.kernel_stack_bytes >= bounds::MIN_KERNEL_STACK && s.kernel_stack_bytes as u64 % PAGE == 0,
             "kernel_stack_bytes"
@@ -366,6 +380,7 @@ impl KernelConfig {
 
         let o = &self.objects;
         require!(o.handles_per_process >= 1 && o.max_objects >= o.handles_per_process, "max_objects");
+        require!(o.max_objects >= bounds::MIN_OBJECTS && o.max_objects <= bounds::MAX_OBJECTS, "max_objects");
 
         let r = &self.ring;
         require!(r.cq_capacity >= 1 && r.blocks_per_ring >= r.cq_capacity, "blocks_per_ring");
@@ -399,6 +414,7 @@ impl KernelConfig {
         }
         f("decay_period", self.sched.qos.decay_period as u64);
         f("max_tasks", self.sched.max_tasks as u64);
+        f("max_rt", self.sched.max_rt as u64);
         f("kernel_stack_bytes", self.sched.kernel_stack_bytes as u64);
         f("watchdog_ticks", self.sched.watchdog_ticks as u64);
         f("watchdog_log", self.sched.watchdog_log as u64);
@@ -423,6 +439,12 @@ impl KernelConfig {
         f("ipc_max_total_bytes", self.ipc.max_total_bytes as u64);
         f("trace_capacity", self.diag.trace_capacity as u64);
         f("irq_queue_len", self.diag.irq_queue_len as u64);
+    }
+
+    /// 启动期容量的默认值（启动容量记录未覆盖时使用，见 [`crate::capacity`]）。
+    /// Default boot-time capacities taken from this profile.
+    pub const fn boot_capacity(&self) -> crate::capacity::BootCapacity {
+        crate::capacity::BootCapacity { objects: self.objects.max_objects, tasks: self.sched.max_tasks, rt: self.sched.max_rt }
     }
 
     /// 时间换算：`ms` 毫秒对应的 tick 数（向上取整，至少 1）。
@@ -532,7 +554,10 @@ mod tests {
         rejects("min_share_permille", |c| c.sched.qos.min_share_permille[1] = 1001);
         rejects("decay_period", |c| c.sched.qos.decay_period = 0);
         rejects("max_tasks", |c| c.sched.max_tasks = 4);
-        rejects("max_tasks", |c| c.sched.max_tasks = 129);
+        rejects("max_tasks", |c| c.sched.max_tasks = bounds::MAX_TASKS + 1);
+        rejects("max_rt", |c| c.sched.max_rt = 0);
+        rejects("max_rt", |c| c.sched.max_rt = bounds::MAX_RT + 1);
+        rejects("max_objects", |c| c.objects.max_objects = bounds::MAX_OBJECTS + 1);
         rejects("kernel_stack_bytes", |c| c.sched.kernel_stack_bytes = 16 * 1024);
         rejects("kernel_stack_bytes", |c| c.sched.kernel_stack_bytes = 64 * 1024 + 8);
         rejects("watchdog_ticks", |c| c.sched.watchdog_ticks = 4);

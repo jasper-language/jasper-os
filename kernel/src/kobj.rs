@@ -14,17 +14,17 @@
 //! # 锁
 //! 对象表锁在全局锁顺序中位于「进程句柄表锁」一层（M4.0 §3.4），持锁期间只做计数与查表，以及调用方明确的页表/帧操作
 //! （页帧、映射锁在顺序中更靠后）。销毁动作在释放对象表锁之后执行。
+//!
+//! # 容量
+//! 容量在启动期决定（[`install`]，由 `bootcap` 在堆就绪后调用），不是编译期常量；安装之前任何插入都安全失败。
 
 use alloc::boxed::Box;
 
-use kernel_core::objtable::{ObjError, ObjId, ObjectTable, Released};
+use kernel_core::objtable::{InstallError, ObjError, ObjId, ObjectTable, Released, Slot};
 
 use crate::proc::Process;
 use crate::sync::IrqSpinLock;
 use crate::task::TaskId;
-
-/// 系统内核对象总数上限（取自配置档）。
-pub const MAX_OBJECTS: usize = crate::config::ACTIVE.objects.max_objects;
 
 /// 线程对象（句柄可见）。对所属进程只有**弱回指**（带世代的对象标识，M4.0 §2.3）。
 #[derive(Debug, Clone, Copy)]
@@ -38,7 +38,7 @@ pub struct TaskObj {
 }
 
 /// 内核对象表的具体类型（供需要在同一把锁内操作多个对象的模块使用）。
-pub type Table = ObjectTable<KObject, MAX_OBJECTS>;
+pub type Table = ObjectTable<KObject>;
 
 /// 内核对象。
 pub enum KObject {
@@ -73,10 +73,28 @@ impl KObject {
     }
 }
 
-static TABLE: IrqSpinLock<ObjectTable<KObject, MAX_OBJECTS>> = IrqSpinLock::ranked(crate::lockorder::OBJECT_TABLE, ObjectTable::new());
+static TABLE: IrqSpinLock<Table> = IrqSpinLock::ranked(crate::lockorder::OBJECT_TABLE, ObjectTable::empty());
+
+/// 每个对象槽位占用的字节数（槽位 + 清理队列项），供启动期容量的内存预算使用。
+pub const BYTES_PER_OBJECT: usize = core::mem::size_of::<Slot<KObject>>() + core::mem::size_of::<u32>();
+
+/// 启动期安装对象表存储（容量 `capacity`，只能一次）。存储从内核堆分配后常驻。
+///
+/// 分配失败返回 `Err(None)`；表拒绝安装返回 `Err(Some(原因))`。两种情况下表都保持为空，调用者拒绝启动。
+/// Install the object-table storage at boot (once).
+pub fn install(capacity: usize) -> Result<usize, Option<InstallError>> {
+    let slots = crate::bootcap::try_leak(capacity, || Slot::VACANT).ok_or(None)?;
+    let pending = crate::bootcap::try_leak(capacity, || 0u32).ok_or(None)?;
+    with(|t| t.install(slots, pending)).map_err(Some)
+}
+
+/// 对象表容量（安装之前为 0）。
+pub fn capacity() -> usize {
+    with(|t| t.capacity())
+}
 
 /// 在对象表锁内执行 `f`（只做计数、查表与有界的页表操作；不得在其中执行销毁动作）。
-pub fn with<R>(f: impl FnOnce(&mut ObjectTable<KObject, MAX_OBJECTS>) -> R) -> R {
+pub fn with<R>(f: impl FnOnce(&mut Table) -> R) -> R {
     f(&mut TABLE.lock())
 }
 

@@ -11,11 +11,11 @@
 //! 所以在创建之前拒绝，比事后补救诚实得多。
 //!
 //! # 边界
-//! * 定长数组，不使用堆分配（本 crate 会被极小的用户态程序链接）；
+//! * 不使用堆分配：在册表的存储由内核在**启动期**按配置容量分配后经 [`RtSet::install`] 交进来，
+//!   安装之前容量为 0，准入一律返回 [`RtError::Full`]；
 //! * 只做预算记账与准入，不做实际抢占（由调度器的 RT 类接入）。
 
-/// 同时在册的实时任务上限。
-pub const MAX_RT: usize = 8;
+pub use crate::capacity::InstallError;
 
 /// 默认准入上限：总利用率不得超过 90%（留出中断与内核开销）。
 pub const DEFAULT_UTILISATION_PERMILLE: u32 = 900;
@@ -80,18 +80,47 @@ pub struct RtTask {
     pub throttles: u32,
 }
 
-/// 定长实时任务表。
-/// Fixed-capacity real-time task table.
-#[derive(Debug, Clone, Copy)]
+/// 实时任务在册表（容量在启动期由 [`RtSet::install`] 决定）。
+/// Real-time task table whose capacity is fixed at boot.
+#[derive(Debug)]
 pub struct RtSet {
-    tasks: [Option<RtTask>; MAX_RT],
+    tasks: &'static mut [Option<RtTask>],
     limit_permille: u32,
 }
 
 impl RtSet {
-    /// 用给定上限构造空表。
+    /// 用给定准入上限构造尚未安装存储的空表（容量 0）。
     pub const fn new(limit_permille: u32) -> Self {
-        Self { tasks: [None; MAX_RT], limit_permille }
+        Self { tasks: &mut [], limit_permille }
+    }
+
+    /// 安装在册表存储（只能一次；必须全部为空）。被拒时表保持为空。
+    /// Install the boot-time storage (once; all entries must be empty).
+    pub fn install(&mut self, storage: &'static mut [Option<RtTask>]) -> Result<usize, InstallError> {
+        if !self.tasks.is_empty() {
+            return Err(InstallError::AlreadyInstalled);
+        }
+        if storage.is_empty() {
+            return Err(InstallError::Empty);
+        }
+        if storage.iter().any(Option::is_some) {
+            return Err(InstallError::NotVacant);
+        }
+        self.tasks = storage;
+        Ok(self.tasks.len())
+    }
+
+    /// 容量（安装之前为 0）。
+    pub fn capacity(&self) -> usize {
+        self.tasks.len()
+    }
+
+    /// 宿主测试用：泄漏一份容量为 `n` 的存储并安装。
+    #[cfg(test)]
+    pub(crate) fn for_test(limit_permille: u32, n: usize) -> Self {
+        let mut set = Self::new(limit_permille);
+        set.install(Box::leak(vec![None; n].into_boxed_slice())).expect("测试存储应可安装");
+        set
     }
 
     /// 准入上限（千分比）。

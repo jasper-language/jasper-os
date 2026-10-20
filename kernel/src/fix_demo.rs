@@ -350,9 +350,16 @@ fn id_exhaustion() {
 // 腾出槽位——这正是 AArch64 上该用例偶发失败的原因（目标线程反而创建成功）。
 static FILLER_STOP: AtomicBool = AtomicBool::new(false);
 
+/// 占位任务每次睡眠的 tick 数（被显式唤醒时提前醒来）。
+///
+/// 为什么不每个 tick 醒一次：占位任务的个数等于启动期任务槽位数（可达数百），每个 tick 全部醒一遍
+/// 会让切换次数随容量线性增长，在最慢的模拟平台上拖过验收时限。改为长睡 + 放行时逐个唤醒；
+/// 「检查标志之后、入睡之前」被唤醒的竞态由睡眠上限兜底（最多多等这么多 tick，不会卡死）。
+const FILLER_NAP: u64 = 50;
+
 fn filler() {
     while !FILLER_STOP.load(Ordering::Relaxed) {
-        sched::pause();
+        sched::sleep_until(sched::timer_ticks() + FILLER_NAP);
     }
 }
 
@@ -408,6 +415,9 @@ fn spawn_rollback() {
     kobj::run_cleanup(usize::MAX); // 回滚释放的 Task 对象经清理过程销毁
     let sched_ok = sched_full == Err(ProcError::NoTaskSlot) && snapshot() == before;
     FILLER_STOP.store(true, Ordering::Relaxed);
+    for i in 0..slots {
+        sched::wake(TaskId(9100 + i));
+    }
     sched::run(); // 放行后占位任务全部结束，槽位腾空
     kobj::run_cleanup(usize::MAX);
 

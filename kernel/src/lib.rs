@@ -28,6 +28,7 @@ pub mod arbiter_demo;
 pub mod arch;
 pub mod baseline;
 pub mod boot;
+pub mod bootcap;
 pub mod clock;
 pub mod config;
 pub mod fix_demo;

@@ -6,11 +6,12 @@
 //! # 两类栈（为什么这样分）
 //! * **静态栈**（前 [`STATIC_STACKS`] 个槽位）：放在 `.bss`，由引导器清零并映射。
 //!   内核堆初始化之前的调度演练（协作式 / 抢占式 / 机制演练）只能用它们。
-//! * **堆栈**（其余槽位）：堆就绪后由 [`StackPool::reserve`] 一次性从内核堆分配，之后**只复用、不释放**。
+//! * **堆栈**（其余槽位）：堆就绪后由 [`StackPool::reserve`] 按启动期容量一次性从内核堆分配，之后**只复用、不释放**。
 //!   一次性分配而不是按需分配：各演练以「空闲页帧数回到基线」判定没有泄漏，
 //!   若某次创建任务时才让堆增长，增长出来的页帧不会再还给页帧分配器，基线就会漂移。
 //!   代价是启动时固定占用 `(槽位数 - 静态栈数) × STACK_SIZE` 字节，换来任务数不再受静态栈数量限制。
 
+use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::ptr::{addr_of_mut, null_mut};
 
@@ -42,30 +43,36 @@ pub struct ReserveError {
     pub available: usize,
 }
 
-/// 槽位数为 `N` 的栈池：前 [`STATIC_STACKS`] 个是静态栈，其余由 [`StackPool::reserve`] 从堆上分配。
-pub struct StackPool<const N: usize> {
+/// 栈池：前 [`STATIC_STACKS`] 个槽位是静态栈，其余由 [`StackPool::reserve`] 按启动期容量从堆上分配。
+pub struct StackPool {
     statics: [Stack; STATIC_STACKS],
-    /// 槽位 → 堆栈起点（空指针 = 尚未分配；静态槽位恒为空指针）。
-    heap: [*mut Stack; N],
+    /// 槽位 → 堆栈起点（空指针 = 尚未分配；静态槽位恒为空指针）。长度 = 已预留到的槽位数。
+    heap: Vec<*mut Stack>,
 }
 
 // SAFETY：堆栈指针指向本池独占拥有、永不释放的堆内存；栈池随调度器一起由锁保护，
 // 移交到其他处理器访问不会产生共享可变别名。
-unsafe impl<const N: usize> Send for StackPool<N> {}
+unsafe impl Send for StackPool {}
 
-impl<const N: usize> StackPool<N> {
+impl StackPool {
     /// 构造栈池：只有静态栈可用（`const`，可放进 `static`）。
     pub const fn new() -> Self {
-        StackPool { statics: [const { Stack::zeroed() }; STATIC_STACKS], heap: [null_mut(); N] }
+        StackPool { statics: [const { Stack::zeroed() }; STATIC_STACKS], heap: Vec::new() }
     }
 
-    /// 堆就绪后为其余槽位分配栈（幂等：已分配的槽位跳过）。返回可用槽位总数。
+    /// 堆就绪后为 `slots` 个槽位中的非静态槽位分配栈（幂等：已分配的槽位跳过；只增不减）。返回可用槽位总数。
     ///
     /// 用 `alloc_zeroed` 直接在堆上得到清零的栈：`Box::new(Stack::zeroed())` 会先在当前栈上
     /// 构造一个 64 KiB 的临时值，而当前栈本身也只有 64 KiB。
-    pub fn reserve(&mut self) -> Result<usize, ReserveError> {
+    pub fn reserve(&mut self, slots: usize) -> Result<usize, ReserveError> {
+        if slots > self.heap.len() {
+            if self.heap.try_reserve_exact(slots - self.heap.len()).is_err() {
+                return Err(ReserveError { available: self.available() });
+            }
+            self.heap.resize(slots, null_mut());
+        }
         let layout = Layout::new::<Stack>();
-        for slot in STATIC_STACKS..N {
+        for slot in STATIC_STACKS..slots {
             if !self.heap[slot].is_null() {
                 continue;
             }
@@ -81,12 +88,12 @@ impl<const N: usize> StackPool<N> {
 
     /// `slot` 是否有栈可用。
     pub fn has_stack(&self, slot: usize) -> bool {
-        slot < STATIC_STACKS.min(N) || (slot < N && !self.heap[slot].is_null())
+        slot < STATIC_STACKS || self.heap.get(slot).is_some_and(|p| !p.is_null())
     }
 
     /// 有栈可用的槽位总数。
     pub fn available(&self) -> usize {
-        (0..N).filter(|&s| self.has_stack(s)).count()
+        (0..self.heap.len().max(STATIC_STACKS)).filter(|&s| self.has_stack(s)).count()
     }
 
     /// `slot` 的栈底（最低地址）。调用者保证 [`StackPool::has_stack`]。

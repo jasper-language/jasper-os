@@ -19,7 +19,7 @@
 //!
 //! 每个用例结束后检查空闲页帧、存活对象、清理队列、固定帧回到用例前的基线。
 
-use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use crate::sync::IrqU64;
 use crate::proc::ProcState;
@@ -51,7 +51,7 @@ pub fn failed() -> u32 {
 static USER_SCHEDTEST: &[u8] = include_bytes!(env!("JSR_USER_SCHEDTEST"));
 
 /// 用例 2 同时存在的内核任务数：槽位上限的 5/8（默认档 40），远多于静态栈数，又给其它演练留出槽位。
-const MANY: u64 = (sched::MAX_TASKS * 5 / 8) as u64;
+const MANY: u64 = (crate::config::ACTIVE.sched.max_tasks * 5 / 8) as u64;
 /// 用例 5 的睡眠次数。
 const RECOVERY_ROUNDS: u32 = 20;
 /// 本演练的内核任务号起点（与其它演练的任务号不重叠）。
@@ -176,12 +176,28 @@ fn many_task() {
     MANY_DONE.fetch_add(1, Ordering::Relaxed);
 }
 
-fn filler() {}
+/// 放行占位任务的标志（「槽位满」检查完成后置位）。
+static FILLER_RELEASE: AtomicBool = AtomicBool::new(false);
+/// 占位任务每次睡眠的 tick 数（放行时被显式唤醒，提前醒来）。
+const FILLER_NAP: u64 = 50;
+
+/// 占位任务：一直占住槽位，直到被放行。
+///
+/// 为什么不能是空函数：多核下占位任务会在别的核上立即运行并退出，引导线程还没填满就有槽位被腾空，
+/// 「槽位满时创建被拒」的前提就不成立（大容量配置下尤其明显：填满所需时间随槽位数增长）。
+/// 长睡 + 放行时逐个唤醒；「检查标志之后、入睡之前」被唤醒的竞态由睡眠上限兜底。
+fn filler() {
+    while !FILLER_RELEASE.load(Ordering::Relaxed) {
+        sched::sleep_until(sched::timer_ticks() + FILLER_NAP);
+    }
+}
+
+fn overflow() {}
 
 fn many_tasks() {
     let before = baseline();
     let capacity = sched::capacity();
-    check(capacity == sched::MAX_TASKS, "堆栈预留后可用槽位应等于上限");
+    check(capacity == sched::slots(), "堆栈预留后可用槽位应等于启动期容量");
     let mut spawned = 0u64;
     for i in 0..MANY {
         if sched::spawn(TaskId(TASK_ID_BASE + 100 + i), "qos-many", many_task).is_ok() {
@@ -197,12 +213,17 @@ fn many_tasks() {
     check(peak == MANY, "并发任务未同时存活");
 
     // 槽位满：再创建被拒；占位任务结束后槽位腾空
+    FILLER_RELEASE.store(false, Ordering::Relaxed);
     let mut fillers = 0u64;
     while sched::spawn(TaskId(TASK_ID_BASE + 200 + fillers), "qos-filler", filler).is_ok() {
         fillers += 1;
     }
-    let full = sched::spawn(TaskId(TASK_ID_BASE + 199), "qos-over", filler);
+    let full = sched::spawn(TaskId(TASK_ID_BASE + 199), "qos-over", overflow);
     check(full == Err(SpawnError::NoFreeSlot) && fillers as usize == capacity - 1, "槽位满时创建应被拒");
+    FILLER_RELEASE.store(true, Ordering::Relaxed);
+    for i in 0..fillers {
+        sched::wake(TaskId(TASK_ID_BASE + 200 + i));
+    }
     sched::run();
     let after = baseline();
     check(after == before, "动态任务数用例后资源未回到基线");

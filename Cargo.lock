@@ -1031,6 +1031,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "bootloader",
+ "kernel-core",
 ]
 
 [[package]]

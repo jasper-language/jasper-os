@@ -31,6 +31,7 @@
 pub mod demo;
 pub mod policy;
 pub mod scheduler;
+pub mod slots;
 pub mod stack;
 pub mod turnstile;
 
@@ -46,27 +47,24 @@ use kernel_core::smp::CpuSet;
 
 use policy::{kernel_policy, CpuLimitStats, KernelPolicy, LatencyHistogram, Qos, WatchdogLog};
 pub use scheduler::{AffinityError, CpuStats};
+pub use scheduler::GrowError;
 use scheduler::{BlockError, Cause, CpuGroupId, GroupError, QosError, Scheduler, SpawnError, SwitchObserver, WATCHDOG_LOG};
-
-/// 槽位总数上限（含槽位 0 的引导线程）。前 [`stack::STATIC_STACKS`] 个槽位在内核堆初始化前即可用，
-/// 其余在 [`reserve_stacks`] 之后可用。
-pub const MAX_TASKS: usize = crate::config::ACTIVE.sched.max_tasks;
 
 /// 内核调度器实例，由登记了级别的关中断自旋锁保护（多处理器下任何处理器都可安全访问）。
 ///
 /// 所有访问都经下面的 `with`/`with_mut`（持锁、关中断执行），借用与锁都不跨越栈切换：
 /// 切换路径先在锁内算出切换计划、放锁，再执行栈切换。
-static KERNEL_SCHED: IrqSpinLock<Scheduler<KernelPolicy, MAX_TASKS>> =
+static KERNEL_SCHED: IrqSpinLock<Scheduler<KernelPolicy>> =
     IrqSpinLock::ranked(crate::lockorder::SCHED, Scheduler::new(kernel_policy()));
 
 /// 以共享借用访问调度器（持锁、关中断执行：时钟中断与其他处理器也会访问调度器状态）。
-fn with<R>(f: impl FnOnce(&Scheduler<KernelPolicy, MAX_TASKS>) -> R) -> R {
+fn with<R>(f: impl FnOnce(&Scheduler<KernelPolicy>) -> R) -> R {
     f(&KERNEL_SCHED.lock())
 }
 
 /// 以独占借用访问调度器（持锁、关中断执行）；调用者不得在闭包内触发栈切换。
 /// 闭包期间记下的重新调度请求在放锁之后发出。
-fn with_mut<R>(f: impl FnOnce(&mut Scheduler<KernelPolicy, MAX_TASKS>) -> R) -> R {
+fn with_mut<R>(f: impl FnOnce(&mut Scheduler<KernelPolicy>) -> R) -> R {
     let started = crate::arch::cycles();
     let (r, kicks) = {
         let mut s = KERNEL_SCHED.lock();
@@ -128,10 +126,20 @@ pub fn set_observer(observer: SwitchObserver) {
     with_mut(|s| s.set_observer(observer));
 }
 
-/// 堆就绪后为其余槽位预留内核栈（只调用一次；幂等）。返回可用槽位总数（含引导线程槽位）。
-pub fn reserve_stacks() -> Result<usize, stack::ReserveError> {
-    with_mut(|s| s.reserve_stacks())
+/// 启动期扩容：任务槽位扩到 `slots`（启动期容量），并为新增槽位预留内核栈。
+/// 只在堆就绪后、其他处理器上线前调用一次；返回有栈可用的槽位总数（含引导线程槽位）。
+/// 前 [`stack::STATIC_STACKS`] 个槽位在内核堆初始化之前即可用。
+pub fn grow(slots: usize) -> Result<usize, GrowError> {
+    with_mut(|s| s.grow(slots))
 }
+
+/// 任务表的槽位总数（启动期扩容之前为内联槽位数）。
+pub fn slots() -> usize {
+    with(|s| s.slots())
+}
+
+/// 每个任务槽位在启动期占用的字节数（任务表与调度暂存各一项 + 内核栈），供启动期容量的内存预算使用。
+pub const BYTES_PER_TASK: usize = scheduler::BYTES_PER_SLOT + stack::STACK_SIZE;
 
 /// 可用槽位总数（含引导线程槽位）。
 pub fn capacity() -> usize {

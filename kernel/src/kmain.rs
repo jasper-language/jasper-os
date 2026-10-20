@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{appid_demo, arbiter_demo, balance_demo, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, mech_demo, mm, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, wcet};
+use crate::{appid_demo, arbiter_demo, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, mech_demo, mm, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, wcet};
 #[cfg(feature = "user-programs")]
 use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo};
 
@@ -77,23 +77,21 @@ pub fn start(boot: &'static BootSpec) -> ! {
     mm::demo::run_map(boot);
     // M2.3：内核堆（Box/Vec/String 可用，按需增长）。
     mm::demo::run_heap();
-    // 堆就绪：为其余调度槽位预留内核栈（此后并发任务数不再受静态栈数量限制）。
-    // 预留之后把堆的空闲余量补回预留前的值（见 `heap::ensure_free`）。
+    // 堆就绪：按启动期容量安装对象表、实时表，并把任务表扩到启动期容量（含内核栈；HARDEN-1B）。
+    // 容量越界、放不进内存或记录损坏都会在这里拒绝启动。
+    // 之后把堆的空闲余量补回安装前的值（见 `heap::ensure_free`）。
     let (_, heap_slack, _, _) = mm::heap::stats();
-    let reserved = sched::reserve_stacks();
+    let cap = bootcap::apply();
     if mm::heap::ensure_free(heap_slack).is_err() {
         kprintln!("[JSR-SCHED] capacity heap_slack_restore_failed want={}", heap_slack);
     }
-    match reserved {
-        Ok(n) => kprintln!(
-            "[JSR-SCHED] capacity slots={} static_stacks={} max={} policy={} preemption=default_on",
-            n,
-            sched::stack::STATIC_STACKS,
-            sched::MAX_TASKS,
-            sched::policy_name()
-        ),
-        Err(e) => kprintln!("[JSR-SCHED] capacity reserve_failed available={}", e.available),
-    }
+    kprintln!(
+        "[JSR-SCHED] capacity slots={} static_stacks={} max={} policy={} preemption=default_on",
+        sched::capacity(),
+        sched::stack::STATIC_STACKS,
+        cap.tasks,
+        sched::policy_name()
+    );
     // POL-2：系统 Profile（模块面 + 参数档）在堆就绪后立刻校验；不合法就拒绝启动，
     // 因为后面的服务判定、配额与调度类别都以这份声明为前提。
     let profile_failed = profile::boot_report();

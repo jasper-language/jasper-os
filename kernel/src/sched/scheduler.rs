@@ -26,8 +26,12 @@
 //!   因此另一个处理器不会恢复一份尚未保存完的上下文。需要别的处理器立即重新调度时记入待发请求，
 //!   由门面层放锁后发出核间中断。
 //!
-//! 可复用性：`Scheduler<P, N>` 不含任何全局状态，可在多实例场景中直接构造；处理器下标经平台的
+//! 可复用性：`Scheduler<P>` 不含任何全局状态，可在多实例场景中直接构造；处理器下标经平台的
 //! `cpu_index` 取得（本文件不含指令集代码）。
+//!
+//! * **容量（启动期决定）**：任务槽位数不是编译期常量。堆就绪之前只有 [`INLINE_SLOTS`] 个内联槽位
+//!   （与静态内核栈数相同）；堆就绪后 [`Scheduler::grow`] 在启动期一次性扩到启动容量记录给出的槽位数，
+//!   槽位下标不变。扩容只允许在「只有引导线程在运行、只有引导处理器在线、没有切换在途」时进行，否则拒绝。
 
 use crate::arch::TaskContext;
 use crate::task::{Task, TaskId, TaskState};
@@ -39,7 +43,35 @@ use super::policy::{
     Dequeue, Enqueue, EntityState, LatencyHistogram, LimitError, Preempt, Qos, QueueError, Refusal, Requeue, SchedPolicy, Watchdog, WatchdogLog,
     WatchdogReport, QOS_CLASSES,
 };
-use super::stack::{ReserveError, StackPool};
+use super::slots::BootSlots;
+use super::stack::{ReserveError, StackPool, STATIC_STACKS};
+
+/// 堆就绪之前的内联槽位数（与静态内核栈数一致：那时只有这些槽位有栈）。
+pub const INLINE_SLOTS: usize = STATIC_STACKS;
+
+/// 每个槽位在各张随容量增长的表里占用的字节数（任务表、组表、组世代、调度暂存、栈指针表；不含栈本身）。
+pub const BYTES_PER_SLOT: usize = core::mem::size_of::<Option<Task>>()
+    + core::mem::size_of::<Option<CpuGroup>>()
+    + core::mem::size_of::<u32>()
+    + 2 * core::mem::size_of::<Option<Qos>>()
+    + core::mem::size_of::<Option<usize>>()
+    + core::mem::size_of::<bool>()
+    + core::mem::size_of::<*mut super::stack::Stack>();
+
+/// 启动期扩容被拒绝的原因（被拒时调度器保持原样）。
+/// Why the boot-time grow was refused (the scheduler is left unchanged).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrowError {
+    /// 不是静止状态：还有引导线程之外的任务在运行、其他处理器已上线或有切换在途。
+    NotQuiescent,
+    /// 目标容量小于当前容量或小于内联槽位数（容量只增不减）。
+    Shrink,
+    /// 内核堆不足（任务表 / 调度暂存 / 内核栈）。`available` 是失败时可用的槽位数。
+    OutOfMemory {
+        /// 失败时有栈可用的槽位数。
+        available: usize,
+    },
+}
 
 /// 引导线程所在槽位（引导处理器的空闲落脚点）。
 pub const BOOT_SLOT: usize = 0;
@@ -269,10 +301,10 @@ fn dequeue_from<P: SchedPolicy>(queues: &mut [CoreQueue<P>], e: &mut kernel_core
 /// 看门狗报告日志容量。
 pub const WATCHDOG_LOG: usize = crate::config::ACTIVE.sched.watchdog_log;
 
-/// 调度机制本体。`N` 为槽位总数（含引导线程）。
-pub struct Scheduler<P: SchedPolicy, const N: usize> {
-    tasks: [Option<Task>; N],
-    stacks: StackPool<N>,
+/// 调度机制本体。槽位总数（含引导线程）在启动期决定，见 [`Scheduler::grow`]。
+pub struct Scheduler<P: SchedPolicy> {
+    tasks: BootSlots<Option<Task>, INLINE_SLOTS>,
+    stacks: StackPool,
     /// 每个处理器的运行队列（各持一份策略实例；成员关系与入队计数由它维护）。
     queues: [CoreQueue<P>; MAX_CPUS],
     /// 被运行队列拒绝的钩子调用次数（成员关系不符；正常运行时恒为 0）与最近一次的原因。
@@ -308,9 +340,15 @@ pub struct Scheduler<P: SchedPolicy, const N: usize> {
     /// 等待序号（同档等待者先来先得）。
     wait_seq: u64,
     /// CPU 组表（组数不会超过任务槽位数：每组至少要有一个持有者）。
-    groups: [Option<CpuGroup>; N],
+    groups: BootSlots<Option<CpuGroup>, INLINE_SLOTS>,
     /// 各组槽位的下一个世代号。
-    group_gen: [u32; N],
+    group_gen: BootSlots<u32, INLINE_SLOTS>,
+    /// 优先级继承重算用的暂存（与任务表同容量；预先分配，持锁路径上不分配内存）。
+    scratch_base: BootSlots<Option<Qos>, INLINE_SLOTS>,
+    scratch_eff: BootSlots<Option<Qos>, INLINE_SLOTS>,
+    scratch_waits: BootSlots<Option<usize>, INLINE_SLOTS>,
+    /// CPU 组「本 tick 有可运行成员」的暂存（与组表同容量）。
+    scratch_wants: BootSlots<bool, INLINE_SLOTS>,
     /// 看门狗判定器与报告日志。
     watchdog: Watchdog,
     watchdog_log: WatchdogLog<WATCHDOG_LOG>,
@@ -322,17 +360,18 @@ pub struct Scheduler<P: SchedPolicy, const N: usize> {
     arbiter_on: bool,
 }
 
-impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
+impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 构造调度器；槽位 0 预置为正在引导处理器上运行的引导线程，其他处理器起初在空闲执行流上。
+    /// 起初只有 [`INLINE_SLOTS`] 个槽位，堆就绪后经 [`Scheduler::grow`] 扩到启动期容量。
     pub const fn new(policy: P) -> Self {
-        let mut tasks = [const { None }; N];
+        let mut tasks = [const { None }; INLINE_SLOTS];
         let mut boot = Task::new(TaskId(0), "boot");
         boot.state = TaskState::Running;
         tasks[BOOT_SLOT] = Some(boot);
         let mut current = [IDLE; MAX_CPUS];
         current[0] = BOOT_SLOT;
         Scheduler {
-            tasks,
+            tasks: BootSlots::Inline(tasks),
             stacks: StackPool::new(),
             queues: CoreQueue::array(policy),
             hook_errors: 0,
@@ -353,8 +392,12 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
             latency: [const { LatencyHistogram::new() }; QOS_CLASSES],
             inherit: true,
             wait_seq: 0,
-            groups: [const { None }; N],
-            group_gen: [0; N],
+            groups: BootSlots::Inline([const { None }; INLINE_SLOTS]),
+            group_gen: BootSlots::Inline([0; INLINE_SLOTS]),
+            scratch_base: BootSlots::Inline([None; INLINE_SLOTS]),
+            scratch_eff: BootSlots::Inline([None; INLINE_SLOTS]),
+            scratch_waits: BootSlots::Inline([None; INLINE_SLOTS]),
+            scratch_wants: BootSlots::Inline([false; INLINE_SLOTS]),
             watchdog: Watchdog::new(super::policy::WATCHDOG_THRESHOLD),
             watchdog_log: WatchdogLog::new(),
             arbiter: kernel_core::arbiter::Arbiter::new(kernel_core::arbiter::ArbiterParams::DEFAULT),
@@ -440,14 +483,52 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
         self.tasks.get_mut(slot).and_then(|t| t.as_mut())
     }
 
-    /// 堆就绪后为其余槽位分配内核栈；返回可用槽位总数（含引导线程槽位）。
-    pub fn reserve_stacks(&mut self) -> Result<usize, ReserveError> {
-        self.stacks.reserve()
+    /// 启动期扩容：把任务表（及组表、调度暂存）扩到 `slots` 个槽位，并为新增槽位分配内核栈。
+    /// 返回有栈可用的槽位总数。
+    ///
+    /// 只能在静止状态下调用（只有引导线程在运行、只有引导处理器在线、没有切换在途）：
+    /// 扩容会搬动任务记录，而切换路径会在锁外使用指向任务记录里上下文的指针。
+    /// 表的扩容是全有或全无：任一存储分配失败，所有表都保持原样。
+    /// Boot-time grow to `slots` task slots (all-or-nothing for the tables).
+    pub fn grow(&mut self, slots: usize) -> Result<usize, GrowError> {
+        if slots < self.tasks.len() || slots < INLINE_SLOTS {
+            return Err(GrowError::Shrink);
+        }
+        let quiescent = self.online.len() == 1
+            && self.current[0] == BOOT_SLOT
+            && self.switching_from.iter().all(Option::is_none)
+            && self.tasks.iter().enumerate().all(|(i, t)| {
+                i == BOOT_SLOT || t.as_ref().is_none_or(|t| t.state == TaskState::Exited && t.on_cpu.is_none())
+            });
+        if !quiescent {
+            return Err(GrowError::NotQuiescent);
+        }
+        let oom = |s: &Self| GrowError::OutOfMemory { available: s.stacks.available() };
+        let tasks = self.tasks.prepare(slots, || None).ok_or_else(|| oom(self))?;
+        let groups = self.groups.prepare(slots, || None).ok_or_else(|| oom(self))?;
+        let group_gen = self.group_gen.prepare(slots, || 0).ok_or_else(|| oom(self))?;
+        let base = self.scratch_base.prepare(slots, || None).ok_or_else(|| oom(self))?;
+        let eff = self.scratch_eff.prepare(slots, || None).ok_or_else(|| oom(self))?;
+        let waits = self.scratch_waits.prepare(slots, || None).ok_or_else(|| oom(self))?;
+        let wants = self.scratch_wants.prepare(slots, || false).ok_or_else(|| oom(self))?;
+        self.tasks.commit(tasks);
+        self.groups.commit(groups);
+        self.group_gen.commit(group_gen);
+        self.scratch_base.commit(base);
+        self.scratch_eff.commit(eff);
+        self.scratch_waits.commit(waits);
+        self.scratch_wants.commit(wants);
+        self.stacks.reserve(slots).map_err(|ReserveError { available }| GrowError::OutOfMemory { available })
     }
 
-    /// 可用槽位总数（含引导线程槽位）。
+    /// 有栈可用的槽位总数（含引导线程槽位）。
     pub fn capacity(&self) -> usize {
         self.stacks.available()
+    }
+
+    /// 任务表的槽位总数（含尚未分到栈的槽位；启动期扩容之前为 [`INLINE_SLOTS`]）。
+    pub fn slots(&self) -> usize {
+        self.tasks.len()
     }
 
     /// 新建任务：占用一个有栈的空工作槽位，伪造首次切入帧使其从 `trampoline` 开始执行。
@@ -504,7 +585,7 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
         let home = self.balancer.place(affinity, None, base, None, self.now, &loads).map_err(|_| SpawnError::BadAffinity)?;
         // 空槽位或「已退出且已被完全换下」的槽位都可复用：
         // 已退出任务一旦被切走（`on_cpu` 清除），就再也不会在它的栈上执行，栈与 TCB 可以安全覆盖。
-        let slot = (1..N)
+        let slot = (1..self.tasks.len())
             .find(|&i| {
                 self.stacks.has_stack(i)
                     && match self.tasks[i].as_ref() {
@@ -643,7 +724,7 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
         if let Some(g) = left {
             self.unref_group(g);
         }
-        for i in 0..N {
+        for i in 0..self.tasks.len() {
             if matches!(self.tasks[i].as_ref(), Some(t) if t.waits_for == Some(cur)) {
                 self.make_runnable(i);
             }
@@ -653,7 +734,7 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
 
     /// 任务 `id` 所在槽位（只找尚未退出的任务；引导线程也算）。
     fn live_slot(&self, id: TaskId) -> Option<usize> {
-        (0..N).find(|&i| matches!(self.tasks[i].as_ref(), Some(t) if t.id == id && t.state != TaskState::Exited))
+        (0..self.tasks.len()).find(|&i| matches!(self.tasks[i].as_ref(), Some(t) if t.id == id && t.state != TaskState::Exited))
     }
 
     /// 任务 `id` 是否存在且尚未退出。
@@ -670,8 +751,11 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
 
     /// 按当前等待图重算全部任务的有效档位（整体重算，借出与归还不会残留）。
     fn resolve_inheritance(&mut self) {
-        let mut base = [None; N];
-        let mut waits = [None; N];
+        // 暂存与任务表同容量、预先分配（持锁路径上不分配内存，也不在栈上开与容量成比例的数组）。
+        let (base, waits, eff) = (&mut self.scratch_base, &mut self.scratch_waits, &mut self.scratch_eff);
+        base.fill(None);
+        waits.fill(None);
+        eff.fill(None);
         for (i, t) in self.tasks.iter().enumerate().skip(1) {
             if let Some(t) = t {
                 if t.state != TaskState::Exited {
@@ -680,11 +764,10 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
                 }
             }
         }
-        let mut eff = [None; N];
-        inherit::resolve(&base, &waits, self.inherit, &mut eff);
-        for (t, q) in self.tasks.iter_mut().zip(eff) {
+        inherit::resolve(base, waits, self.inherit, eff);
+        for (t, q) in self.tasks.iter_mut().zip(eff.iter()) {
             if let (Some(t), Some(q)) = (t.as_mut(), q) {
-                t.sched.qos = q;
+                t.sched.qos = *q;
             }
         }
     }
@@ -699,11 +782,11 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
             return Err(BlockError::NotAWorker);
         }
         let owner_slot = self.live_slot(owner).ok_or(BlockError::NoOwner)?;
-        let mut waits = [None; N];
+        let waits = &mut self.scratch_waits;
         for (w, t) in waits.iter_mut().zip(self.tasks.iter()) {
             *w = t.as_ref().and_then(|t| t.waits_for);
         }
-        inherit::check_edge(&waits, cur, owner_slot).map_err(BlockError::Refused)?;
+        inherit::check_edge(waits, cur, owner_slot).map_err(BlockError::Refused)?;
         self.wait_seq += 1;
         let seq = self.wait_seq;
         let t = self.tasks[cur].as_mut().ok_or(BlockError::NotAWorker)?;
@@ -870,7 +953,7 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
     /// 显式唤醒 `id`（例如所属进程开始终止时，让睡眠中的线程尽快观察到）。
     /// 返回是否应立即抢占当前任务；任务不存在或不在睡眠时返回 `false`。
     pub fn wake(&mut self, id: TaskId) -> bool {
-        match (1..N).find(|&i| matches!(self.tasks[i].as_ref(), Some(t) if t.id == id)) {
+        match (1..self.tasks.len()).find(|&i| matches!(self.tasks[i].as_ref(), Some(t) if t.id == id)) {
             Some(i) => self.make_runnable(i),
             None => false,
         }
@@ -1011,7 +1094,7 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
         self.charge_rt(cur, now);
 
         let mut cause = None;
-        for i in 1..N {
+        for i in 1..self.tasks.len() {
             let due = matches!(self.tasks[i].as_ref(), Some(t) if t.state == TaskState::Blocked && t.wake_at.is_some_and(|w| w <= now));
             if due && self.make_runnable(i) {
                 cause = Some(Cause::WAKE);
@@ -1032,7 +1115,7 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
                 t.rt_remaining = t.rt_remaining.saturating_sub(1);
             }
         }
-        for slot in 1..N {
+        for slot in 1..self.tasks.len() {
             if let Some(t) = self.tasks.get_mut(slot).and_then(|t| t.as_mut()) {
                 if t.rt_period != 0 {
                     while now >= t.rt_next_period {
@@ -1423,7 +1506,8 @@ impl<P: SchedPolicy<State = EntityState>, const N: usize> Scheduler<P, N> {
             Some(t) if is_worker(cur) && t.state == TaskState::Running => t.cpu_group,
             _ => None,
         };
-        let mut wants = [false; N];
+        let wants = &mut self.scratch_wants;
+        wants.fill(false);
         for t in self.tasks.iter().skip(1).flatten() {
             if let (Some(g), TaskState::Runnable | TaskState::Running) = (t.cpu_group, t.state) {
                 wants[g] = true;
@@ -1503,7 +1587,7 @@ fn arb_class(t: &Task) -> kernel_core::arbiter::Class {
     }
 }
 
-fn eligible_in<const N: usize>(groups: &[Option<CpuGroup>; N], t: &Task) -> bool {
+fn eligible_in(groups: &[Option<CpuGroup>], t: &Task) -> bool {
     // 实时预算：耗尽且未到下一周期 ⇒ 不可运行；任务仍留在队列，由选择器跳过。
     if t.rt_period != 0 && t.rt_remaining == 0 && crate::sched::timer_ticks() < t.rt_next_period {
         return false;

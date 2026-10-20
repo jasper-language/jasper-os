@@ -304,7 +304,7 @@ fn async_ring_random_operations_keep_invariants() {
 #[test]
 fn object_table_matches_reference_model() {
     let mut rng = Rng::new(0x0B7E);
-    let mut t: ObjectTable<u32, 16> = ObjectTable::new();
+    let mut t: ObjectTable<u32> = ObjectTable::for_test(16);
     // 模型：id → (owners, internal, closing)；closing 只在外部所有权从有降到零时置位（新建对象即使没有所有者也是 Live）；
     // dead 记录已死亡的标识（之后必须永远无效）
     let mut model: HashMap<u64, (u32, u32, bool)> = HashMap::new();

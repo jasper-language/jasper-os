@@ -527,14 +527,24 @@ fn affinity(n: usize) {
 // ---------------------------------------------------------------------------
 
 static PI_HOLDING: AtomicU8 = AtomicU8::new(0);
+/// 交互档等待者已经到场、即将要锁（持锁者看到它之后才开始计算自己的工作量，保证一定发生争用）。
+static PI_WANT: AtomicU8 = AtomicU8::new(0);
 static PI_WAIT: IrqU64 = IrqU64::new(u64::MAX);
 static PI_HOLDER_PEAK: AtomicU8 = AtomicU8::new(0xFF);
 
-/// 后台档持锁者：拿锁后还需 [`WORK`] 个 tick 的处理器时间；记下自己出现过的最高有效档位。
+/// 后台档持锁者：拿锁后等交互档等待者到场，然后还需 [`WORK`] 个 tick 的处理器时间；记下自己出现过的最高有效档位。
+///
+/// 为什么要等到场：若持锁者在等待者来要锁之前就做完工作，锁已空闲、根本不发生继承，
+/// 用例测到的就不是「继承把等待压在上界内」（历史上约 3% 的运行因此误判）。
+/// 等待设截止时间：等待者没来（例如创建失败）时持锁者照常结束，由「等待超界 / 没借到档位」的断言报告失败。
 fn pi_low() {
     let _ = sched::set_current_qos(Qos::Background);
     let Ok(mut g) = LOCK.lock() else { return };
     PI_HOLDING.store(1, Ordering::Relaxed);
+    let deadline = sched::timer_ticks() + 4 * WINDOW;
+    while PI_WANT.load(Ordering::Relaxed) == 0 && sched::timer_ticks() < deadline {
+        core::hint::spin_loop();
+    }
     let start = my_cpu();
     let mut best = sched::current_effective_qos();
     while my_cpu() < start + WORK {
@@ -558,6 +568,7 @@ fn pi_high() {
     }
     sched::sleep_until(sched::timer_ticks() + 2);
     let t0 = sched::timer_ticks();
+    PI_WANT.store(1, Ordering::Relaxed);
     if let Ok(mut g) = LOCK.lock() {
         *g += 1;
         PI_WAIT.store(sched::timer_ticks() - t0, Ordering::Relaxed);
@@ -568,6 +579,7 @@ fn inherit(n: usize) {
     let before = baseline();
     let all = CpuSet::first(n);
     PI_HOLDING.store(0, Ordering::Relaxed);
+    PI_WANT.store(0, Ordering::Relaxed);
     PI_WAIT.store(u64::MAX, Ordering::Relaxed);
     PI_HOLDER_PEAK.store(0xFF, Ordering::Relaxed);
     let window = 2 * WINDOW;
@@ -582,7 +594,15 @@ fn inherit(n: usize) {
     check(ok, "继承用例任务创建失败");
     sched::run();
     let wait = PI_WAIT.load(Ordering::Relaxed);
-    let bound = WORK + 2;
+    // 上界推导：从等待者到场（举旗）开始计时，到它拿到锁为止。每次交接受 tick 粒度限制，各最多差 1 个 tick：
+    //   ① 等待者举旗后走到真正阻塞在锁上之前可能被抢占一次（≤1）；
+    //   ② 继承生效、持锁者被提升并抢到处理器（≤1）；
+    //   ③ 持锁者的工作量按整 tick 计数，开头不完整的那个 tick 不计入（≤1）；
+    //   ④ 持锁者做完全部工作（WORK）；
+    //   ⑤ 放锁直接交接后，等待者被唤醒并上核（≤1）。
+    // 合计 WORK + 4。作为参照：单核继承用例（SCHED-2）关闭继承时等待在 100 tick 以上，
+    // 这个上界与「没有继承」的量级相差一个数量级以上。
+    let bound = WORK + 4;
     let peak = Qos::from_raw(PI_HOLDER_PEAK.load(Ordering::Relaxed) as u64);
     check(wait <= bound, "跨核继承时高档任务的等待超过上界");
     check(peak == Some(Qos::Interactive), "持有者应借到交互档");

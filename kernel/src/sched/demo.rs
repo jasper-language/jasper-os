@@ -84,6 +84,9 @@ fn busy_task() {
 ///
 /// 前置条件：PIC/PIT 已初始化；调用时中断已开启（否则定时器中断无法投递）。
 pub fn run_preemptive() {
+    // 起始标记：验收从这里开始统计 tick 切换。若从 P 的第一步开始数，P 可能在打印第一步之前
+    // 就被同一个 tick 抢占，开头的几次切换会被漏数（取决于引导线程让出时落在 tick 周期的哪个相位）。
+    console::_print(format_args!("[JSR-SCHED] preemptive demo start\n"));
     super::set_observer(log_and_count_switch);
     for (id, name) in [(11, "P"), (12, "Q"), (13, "R")] {
         if super::spawn(TaskId(id), name, busy_task).is_err() {

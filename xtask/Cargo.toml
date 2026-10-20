@@ -10,3 +10,5 @@ license = "Apache-2.0"
 
 [dependencies]
 bootloader = "0.11.17"
+# 启动容量记录的格式只在 kernel-core 里定义一次（bootcap 子命令复用它）。
+kernel-core = { path = "../kernel-core" }
