@@ -412,12 +412,24 @@ pub fn sleep_until(deadline: u64) {
     cpu::irq_restore(was_enabled);
 }
 
-/// 从现在起睡 `ticks` 个 tick：截止时刻在关中断之后才计算，本处理器的中断不会插进「取时刻」与「睡下」之间
-/// 让截止时刻在睡下之前就已过去（中断风暴下「睡一个 tick」因此总是真的睡下）。
-/// Sleep for `ticks` ticks, with the deadline computed after interrupts are masked.
+/// 从现在起睡 `ticks` 个 tick（`ticks` ≥ 1 时总是真的睡下，并在第 `ticks` 个全局 tick 被唤醒）。
+///
+/// 截止时刻在**调度器锁内**按调度器的时刻计算，并在同一次持锁内睡下：全局时钟由计时处理器在同一把锁内推进，
+/// 因此「取时刻」与「睡下」之间不可能插进一个 tick。只关本处理器的中断不够——多处理器下计时处理器随时可能推进时钟，
+/// 截止时刻在睡下之前就已过去会让这次睡眠变成空操作（RISC-V32 × 4 在较慢的宿主上实测出现）。
+/// 不在工作任务上（引导线程）时退回「让出并休眠到下一个中断」。
+/// Sleep for `ticks` ticks; the deadline is taken and the task blocked in one scheduler critical section.
 pub fn sleep_ticks(ticks: u64) {
+    if ticks == 0 {
+        return;
+    }
     let was_enabled = cpu::irq_save_disable();
-    sleep_masked(timer_ticks() + ticks);
+    if with_mut(|s| s.block_current_for(ticks)) {
+        yield_with_cause(Cause::SLEEP);
+    } else {
+        yield_now();
+        cpu::wait_for_interrupt();
+    }
     cpu::irq_restore(was_enabled);
 }
 

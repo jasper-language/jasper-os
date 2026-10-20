@@ -936,6 +936,14 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         }
     }
 
+    /// 当前任务从调度器此刻起睡 `ticks` 个 tick（截止时刻 = 调度器时刻 + `ticks`，与阻塞在同一次持锁内完成）。
+    /// 返回是否已阻塞（当前不是工作任务时为 `false`，状态不变）。
+    /// Block the current task until `ticks` ticks after the scheduler's current time.
+    pub fn block_current_for(&mut self, ticks: u64) -> bool {
+        let deadline = self.now.saturating_add(ticks.max(1));
+        self.block_current(Some(deadline))
+    }
+
     /// 槽位 `i` 的睡眠任务变为可运行（记下唤醒时刻，按负载选运行队列，入队并通知策略）。
     /// 返回是否应立即抢占**本处理器**的当前任务；放到别的处理器且应抢占那里时记入待发的重新调度请求。
     fn make_runnable(&mut self, i: usize) -> bool {
