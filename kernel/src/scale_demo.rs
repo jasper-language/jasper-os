@@ -1,0 +1,362 @@
+//! 调度规模化的验收演练：大量睡眠任务存在时，选择路径只遍历本处理器的运行列表；
+//! 每 tick 的到期唤醒扫描只在最早到期时刻到达时发生；测量调度器锁与对象表锁的争用；
+//! 并在同样的规模下复核两条响应性底线（过载时交互延迟有上界、压力撤销后立即恢复；各核都忙）。
+//! Acceptance drill for scheduler scaling: run-list-only selection, deadline-cached wake scans,
+//! lock contention measurement, plus the responsiveness floor under the same scale.
+//!
+//! # 为什么要有这个演练
+//! 选择路径若按任务表容量线性扫描，任务数一多每次切换的代价就随容量增长，且这段代价全在调度器锁内，
+//! 会放大锁争用。宿主测试已证明运行列表本身正确；这里证明接上之后，在真实多处理器上：
+//! 睡眠任务不进入选择遍历、遍历量与可运行任务数相当、到期唤醒扫描不再每 tick 发生，且行为与之前一致。
+//!
+//! # 用例
+//! 1. **拒绝路径**：空亲和集合的创建被拒，运行列表与运行队列仍一致，资源不变。
+//! 2. **规模**：`S` 个睡到窗口之后的任务 + `2N` 个吃满处理器的任务：单次选择遍历量 ≤ `2N + 1`
+//!    （远小于睡眠任务数与槽位数），窗口内到期唤醒扫描 ≤ 1 次，各核都忙、空闲等待有界。
+//! 3. **过载 + 交互**：同样规模下再加 1 个交互档任务：唤醒延迟 ≤ [`LATENCY_BOUND`]，各核都忙。
+//! 4. **恢复**：压力撤销后交互任务的唤醒延迟都是 0。
+//! 5. **锁争用测量**：`N` 个任务在各核上反复让出并读对象表统计：记录调度器锁与对象表锁的
+//!    加锁次数、遇到占用次数、自旋次数与单次最多自旋次数（测量项，只断言计数自洽）。
+//!
+//! 每个用例结束后检查资源回到用例前的基线、运行列表与运行队列一致。
+
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use kernel_core::smp::CpuSet;
+
+use crate::baseline::baseline;
+use crate::sched::policy::Qos;
+use crate::sched::scheduler::SpawnError;
+use crate::sync::{IrqU64, LockStats};
+use crate::task::TaskId;
+use crate::{kobj, kprintln, sched};
+
+static CHECKS: AtomicU32 = AtomicU32::new(0);
+static FAILED: AtomicU32 = AtomicU32::new(0);
+
+fn check(ok: bool, what: &str) {
+    CHECKS.fetch_add(1, Ordering::Relaxed);
+    if !ok {
+        FAILED.fetch_add(1, Ordering::Relaxed);
+        kprintln!("[JSR-SCALE-FAIL] {}", what);
+    }
+}
+
+/// 失败断言数。
+/// Number of failed assertions.
+pub fn failed() -> u32 {
+    FAILED.load(Ordering::Relaxed)
+}
+
+/// 本演练的内核任务号起点（与其它演练不重叠）。
+const TASK_ID_BASE: u64 = 10_000;
+/// 规模用例的目标任务总数（睡眠任务 + 吃满处理器的任务 + 交互任务；受启动容量限制）。
+const TARGET_TASKS: usize = 64;
+/// 吃满处理器的窗口（tick）。
+const WINDOW: u64 = 60;
+/// 每个核在窗口内至少忙碌的千分比。
+const BUSY_PERMILLE: u64 = 850;
+/// 「本核空闲而别处有可运行任务在等」的连续时长上界（tick）。
+const IDLE_BOUND: u32 = 2;
+/// 过载时交互档任务的唤醒延迟上界（tick）。
+const LATENCY_BOUND: u64 = 2;
+/// 交互任务的睡眠次数。
+const ROUNDS: u32 = 20;
+/// 锁争用测量中每个任务的让出次数。
+const CHURN_ROUNDS: u32 = 2000;
+
+/// 吃满处理器的任务的截止时刻。
+static HOG_END: IrqU64 = IrqU64::new(0);
+/// 睡眠任务的唤醒时刻。
+static SLEEP_END: IrqU64 = IrqU64::new(0);
+/// 已进入睡眠的睡眠任务数。
+static ASLEEP: AtomicU32 = AtomicU32::new(0);
+/// 交互任务完成的睡眠次数。
+static INTERACTIVE_DONE: AtomicU32 = AtomicU32::new(0);
+
+/// 睡到 [`SLEEP_END`]（期间不可运行，不应出现在任何选择遍历里）。
+fn sleeper() {
+    ASLEEP.fetch_add(1, Ordering::Relaxed);
+    sched::sleep_until(SLEEP_END.load(Ordering::Relaxed));
+}
+
+/// 工具档、吃满处理器直到 [`HOG_END`]。
+fn hog() {
+    let _ = sched::set_current_qos(Qos::Utility);
+    while sched::timer_ticks() < HOG_END.load(Ordering::Relaxed) {
+        core::hint::spin_loop();
+    }
+}
+
+/// 交互档：反复睡 1 tick，共 [`ROUNDS`] 次。
+fn interactive() {
+    sched::set_current_qos_ceiling(Some(Qos::Interactive));
+    if sched::set_current_qos(Qos::Interactive).is_err() {
+        return;
+    }
+    for _ in 0..ROUNDS {
+        sched::sleep_ticks(1);
+        INTERACTIVE_DONE.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// 锁争用测量：反复让出（取调度器锁）并读对象表统计（取对象表锁）。
+fn churn() {
+    for _ in 0..CHURN_ROUNDS {
+        sched::yield_now();
+        let _ = kobj::stats();
+    }
+}
+
+/// 在关闭抢占的情况下执行 `f`（批量创建任务期间引导线程不被抢走处理器），之后恢复。
+fn quiet<R>(f: impl FnOnce() -> R) -> R {
+    let prev = sched::set_preemption(false);
+    let r = f();
+    sched::set_preemption(prev);
+    r
+}
+
+/// 运行列表与运行队列一致、没有被拒绝的钩子调用。
+fn lists_consistent() -> bool {
+    let a = sched::queue_audit();
+    a.list_mismatch == 0 && a.misplaced == 0 && a.count_mismatch == 0 && a.hook_errors == 0
+}
+
+/// 各核在本场景中是否都忙、空闲等待有界。
+fn cores_busy(n: usize, window: u64) -> (bool, u64, u32) {
+    let (mut all, mut least, mut worst) = (true, u64::MAX, 0u32);
+    for c in 0..n {
+        let st = sched::cpu_stats(c);
+        all &= st.busy_ticks * 1000 >= window * BUSY_PERMILLE && st.max_idle_waiting <= IDLE_BOUND;
+        least = least.min(st.busy_ticks);
+        worst = worst.max(st.max_idle_waiting);
+    }
+    (all, least, worst)
+}
+
+/// 睡眠任务数：凑满 [`TARGET_TASKS`]，但给吃满处理器的任务、交互任务与其他演练的余量留出槽位。
+fn sleeper_count(n: usize) -> usize {
+    let free = sched::capacity().saturating_sub(1 + sched::live_workers());
+    let others = 2 * n + 1;
+    TARGET_TASKS.saturating_sub(others).min(free.saturating_sub(others + 2))
+}
+
+/// 创建 `count` 个睡眠任务并等它们全部进入睡眠（睡到 `until`）。返回是否全部创建成功。
+fn spawn_sleepers(base: u64, count: usize, until: u64, all: CpuSet) -> bool {
+    ASLEEP.store(0, Ordering::Relaxed);
+    SLEEP_END.store(until, Ordering::Relaxed);
+    let ok = quiet(|| (0..count).all(|i| sched::spawn_on(TaskId(base + i as u64), "scale-sleep", sleeper, None, all).is_ok()));
+    // 让它们运行到睡下（引导线程睡一会儿，把处理器交给它们）
+    let give_up = sched::timer_ticks() + 20;
+    while (ASLEEP.load(Ordering::Relaxed) as usize) < count && sched::timer_ticks() < give_up {
+        sched::sleep_until(sched::timer_ticks() + 1);
+    }
+    // 计数先于真正睡下：再等一个 tick，确保最后一个也已离开运行列表
+    sched::sleep_until(sched::timer_ticks() + 1);
+    ok && ASLEEP.load(Ordering::Relaxed) as usize == count
+}
+
+/// 运行全部用例；演练期间保持抢占开启，结束时恢复进入前的设置。
+pub fn run() {
+    let prev_preemption = sched::set_preemption(true);
+    let start = baseline();
+    let n = sched::online_cpus().len();
+    refusals();
+    scale(n);
+    overload(n);
+    recovery(n);
+    contention(n);
+    let end = baseline();
+    check(end == start, "演练结束后资源未回到起点");
+    check(lists_consistent(), "演练结束后运行列表与运行队列不一致");
+    sched::set_preemption(prev_preemption);
+    kprintln!(
+        "[JSR-SCALE] summary cpus={} slots={} free_frames={}/{} objects={}/{} reclaimed={} checks={} failed={}",
+        n,
+        sched::slots(),
+        end.free_frames,
+        start.free_frames,
+        end.objects,
+        start.objects,
+        end == start,
+        CHECKS.load(Ordering::Relaxed),
+        failed()
+    );
+}
+
+/// 空亲和集合的创建被拒：任务数、运行列表、资源都不变。
+fn refusals() {
+    let before = baseline();
+    let live = sched::live_workers();
+    let queued = sched::queue_audit().queued;
+    let r = sched::spawn_on(TaskId(TASK_ID_BASE), "scale-bad", hog, None, CpuSet::EMPTY);
+    let refused = matches!(r, Err(SpawnError::BadAffinity));
+    let unchanged = sched::live_workers() == live && sched::queue_audit().queued == queued && lists_consistent() && baseline() == before;
+    check(refused, "空亲和集合应被拒绝");
+    check(unchanged, "被拒绝后运行列表、任务或资源有改动");
+    kprintln!("[JSR-SCALE] case=refusals empty_set={} unchanged={}", if refused { "refused" } else { "accepted" }, unchanged);
+}
+
+/// 睡眠任务 + 2N 个吃满处理器的任务：选择遍历量与可运行任务数相当，到期唤醒扫描不再每 tick 发生。
+fn scale(n: usize) {
+    let before = baseline();
+    let all = CpuSet::first(n);
+    let sleepers = sleeper_count(n);
+    let hogs = 2 * n;
+    let t0 = sched::timer_ticks();
+    let slept = spawn_sleepers(TASK_ID_BASE + 100, sleepers, t0 + WINDOW + 30, all);
+    check(slept, "睡眠任务创建失败或没有全部睡下");
+    let ok = quiet(|| {
+        sched::reset_cpu_stats();
+        sched::reset_scan_stats();
+        HOG_END.store(sched::timer_ticks() + WINDOW, Ordering::Relaxed);
+        (0..hogs).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 10 + i as u64), "scale-hog", hog, None, all).is_ok())
+    });
+    check(ok, "吃满处理器的任务创建失败");
+    // 窗口内只等吃满处理器的任务结束（睡眠任务在窗口之后才醒）
+    while sched::timer_ticks() < HOG_END.load(Ordering::Relaxed) {
+        sched::sleep_until(HOG_END.load(Ordering::Relaxed));
+    }
+    let scan = sched::scan_stats();
+    let (busy, least, worst) = cores_busy(n, WINDOW);
+    let consistent = lists_consistent();
+    sched::run();
+    let bound = (hogs + 1) as u32;
+    let visit_ok = scan.max_visited <= bound;
+    let scan_ok = scan.wake_scans <= 1 && scan.ticks >= WINDOW;
+    // 睡眠任务必须明显多于可运行任务，否则「遍历量 ≤ 可运行任务数」说明不了睡眠任务被排除在外
+    check(sleepers > bound as usize, "规模用例睡眠任务数不足");
+    check(visit_ok, "单次选择遍历量超过可运行任务数（遍历了睡眠任务）");
+    check(scan_ok, "窗口内到期唤醒扫描次数超过 1（没有按最早到期时刻跳过）");
+    check(busy, "规模用例中有核空闲或空闲等待超过上界");
+    check(consistent, "规模用例中运行列表与运行队列不一致");
+    check(baseline() == before, "规模用例后资源未回到基线");
+    let avg_x100 = if scan.picks == 0 { 0 } else { scan.visited * 100 / scan.picks };
+    kprintln!(
+        "[JSR-SCALE] case=scale cpus={} slots={} sleepers={} hogs={} picks={} max_visited={} avg_visited_x100={} bound={} wake_scans={} ticks={} least_busy={} worst_idle_waiting={} all_busy={} lists_ok={} ok={}",
+        n,
+        sched::slots(),
+        sleepers,
+        hogs,
+        scan.picks,
+        scan.max_visited,
+        avg_x100,
+        bound,
+        scan.wake_scans,
+        scan.ticks,
+        least,
+        worst,
+        busy,
+        consistent,
+        visit_ok && scan_ok && busy && consistent
+    );
+}
+
+/// 同样规模（睡眠任务 + 2N 个吃满处理器的任务）下加 1 个交互档任务：唤醒延迟有上界，各核都忙。
+fn overload(n: usize) {
+    let before = baseline();
+    let all = CpuSet::first(n);
+    let sleepers = sleeper_count(n);
+    let hogs = 2 * n;
+    let window = 2 * WINDOW;
+    let t0 = sched::timer_ticks();
+    let slept = spawn_sleepers(TASK_ID_BASE + 300, sleepers, t0 + window + 30, all);
+    check(slept, "睡眠任务创建失败或没有全部睡下");
+    let ok = quiet(|| {
+        sched::reset_cpu_stats();
+        sched::reset_latency();
+        INTERACTIVE_DONE.store(0, Ordering::Relaxed);
+        HOG_END.store(sched::timer_ticks() + window, Ordering::Relaxed);
+        let mut ok = (0..hogs).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 40 + i as u64), "scale-load", hog, None, all).is_ok());
+        ok &= sched::spawn_on(TaskId(TASK_ID_BASE + 39), "scale-ui", interactive, None, all).is_ok();
+        ok
+    });
+    check(ok, "过载用例任务创建失败");
+    while sched::timer_ticks() < HOG_END.load(Ordering::Relaxed) {
+        sched::sleep_until(HOG_END.load(Ordering::Relaxed));
+    }
+    let (busy, least, worst) = cores_busy(n, window);
+    sched::run();
+    let lat = sched::latency(Qos::Interactive);
+    let done = INTERACTIVE_DONE.load(Ordering::Relaxed);
+    check(done == ROUNDS && lat.count() == ROUNDS, "交互任务未完成全部睡眠");
+    check(lat.max() <= LATENCY_BOUND, "过载时交互唤醒延迟超过上界");
+    check(busy, "过载时有核空闲或空闲等待超过上界");
+    check(baseline() == before, "过载用例后资源未回到基线");
+    kprintln!(
+        "[JSR-SCALE] case=overload cpus={} sleepers={} hogs={} window={} interactive_rounds={} samples={} latency_max={} bound={} bounded={} least_busy={} worst_idle_waiting={} all_busy={}",
+        n,
+        sleepers,
+        hogs,
+        window,
+        done,
+        lat.count(),
+        lat.max(),
+        LATENCY_BOUND,
+        lat.max() <= LATENCY_BOUND,
+        least,
+        worst,
+        busy
+    );
+}
+
+/// 压力撤销后：交互任务连续睡眠，唤醒延迟都是 0。
+fn recovery(n: usize) {
+    let before = baseline();
+    sched::reset_latency();
+    INTERACTIVE_DONE.store(0, Ordering::Relaxed);
+    let ok = quiet(|| sched::spawn_on(TaskId(TASK_ID_BASE + 60), "scale-ui", interactive, None, CpuSet::first(n)).is_ok());
+    check(ok, "恢复任务创建失败");
+    sched::run();
+    let lat = sched::latency(Qos::Interactive);
+    let done = INTERACTIVE_DONE.load(Ordering::Relaxed);
+    check(done == ROUNDS && lat.count() == ROUNDS, "恢复任务未完成全部睡眠");
+    check(lat.max() == 0, "压力撤销后唤醒延迟应为 0");
+    check(baseline() == before, "恢复用例后资源未回到基线");
+    kprintln!(
+        "[JSR-SCALE] case=recovery cpus={} rounds={} samples={} max={} immediate={} reclaimed={}",
+        n,
+        done,
+        lat.count(),
+        lat.max(),
+        lat.max() == 0,
+        baseline() == before
+    );
+}
+
+/// 输出一把锁的测量值，返回计数是否自洽（加锁次数 > 0，遇到占用次数不超过加锁次数）。
+fn report_lock(name: &str, cpus: usize, s: LockStats) -> bool {
+    let sane = s.acquired > 0 && s.contended <= s.acquired && (s.contended > 0 || s.spins == 0);
+    let permille = if s.acquired == 0 { 0 } else { (s.contended as u64 * 1000 / s.acquired as u64) as u32 };
+    kprintln!(
+        "[JSR-SCALE] lock name={} cpus={} acquired={} contended={} contended_permille={} spins={} max_spins={} sane={}",
+        name,
+        cpus,
+        s.acquired,
+        s.contended,
+        permille,
+        s.spins,
+        s.max_spins,
+        sane
+    );
+    sane
+}
+
+/// 锁争用测量：N 个任务（各核一个）反复让出并读对象表统计。
+fn contention(n: usize) {
+    let before = baseline();
+    let all = CpuSet::first(n);
+    let ok = quiet(|| {
+        sched::reset_lock_stats();
+        kobj::reset_lock_stats();
+        (0..n).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 80 + i as u64), "scale-churn", churn, None, all).is_ok())
+    });
+    check(ok, "锁争用测量任务创建失败");
+    sched::run();
+    let s = sched::lock_stats();
+    let o = kobj::lock_stats();
+    let sane = report_lock("sched", n, s) & report_lock("objtable", n, o);
+    check(sane, "锁争用计数不自洽");
+    check(baseline() == before, "锁争用测量后资源未回到基线");
+    kprintln!("[JSR-SCALE] case=contention cpus={} tasks={} rounds={} measured={}", n, n, CHURN_ROUNDS, sane);
+}

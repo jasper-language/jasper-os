@@ -6,6 +6,8 @@
 //!   必须用它，否则单 CPU 上任务持锁时来一个中断去抢同一把锁就会永远自旋
 //! * 全局锁以 [`IrqSpinLock::ranked`] 新建并在 `crate::lockorder` 登记级别：加锁时按本处理器的持有集合检查顺序，
 //!   违反顺序即停机（多处理器下逆序加锁会死锁，宁可第一次运行就暴露）；局部锁用 [`IrqSpinLock::new`]，不参与顺序
+//! * 每把 [`IrqSpinLock`] 自带争用计数（加锁次数、遇到占用的次数、等待时的自旋次数与单次最多自旋次数），
+//!   供验收测量关键路径锁的争用；计数只用 32 位原子（所有目标都有），回绕不影响正确性
 //! * [`IrqU64`]：中断处理程序与任务可共享的 64 位计数单元——有 64 位原子指令的目标上是硬件原子，
 //!   没有的目标（RISC-V32）上是「关中断 + 自旋锁」（`kernel_core::sync::IrqSafeU64`，屏蔽策略为 [`ArchIrqMask`]）。
 //!   内核中凡是 64 位的共享计数一律用它，不直接用 `AtomicU64`（后者在 32 位目标上不存在）
@@ -45,20 +47,44 @@ pub type IrqU64 = kernel_core::sync::IrqSafeU64<ArchIrqMask>;
 pub struct IrqSpinLock<T> {
     inner: SpinLock<T>,
     class: Option<LockClass>,
+    acquired: AtomicU32,
     contended: AtomicU32,
+    spins: AtomicU32,
+    max_spins: AtomicU32,
+}
+
+/// 一把锁的争用测量值（自上次清零以来）。
+/// Contention counters of one lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LockStats {
+    /// 加锁次数。
+    pub acquired: u32,
+    /// 加锁时遇到占用（需要等待）的次数。
+    pub contended: u32,
+    /// 等待期间的累计自旋次数。
+    pub spins: u32,
+    /// 单次加锁最多的自旋次数。
+    pub max_spins: u32,
 }
 
 impl<T> IrqSpinLock<T> {
     /// 新建不登记顺序的局部锁（未加锁）。持有期间不得获取其他锁。
     /// Create an unranked, local lock.
     pub const fn new(data: T) -> Self {
-        IrqSpinLock { inner: SpinLock::new(data), class: None, contended: AtomicU32::new(0) }
+        IrqSpinLock { inner: SpinLock::new(data), class: None, acquired: AtomicU32::new(0), contended: AtomicU32::new(0), spins: AtomicU32::new(0), max_spins: AtomicU32::new(0) }
     }
 
     /// 新建登记了级别的全局锁（未加锁）；级别见 [`crate::lockorder`]。
     /// Create a lock ranked by `class`.
     pub const fn ranked(class: LockClass, data: T) -> Self {
-        IrqSpinLock { inner: SpinLock::new(data), class: Some(class), contended: AtomicU32::new(0) }
+        IrqSpinLock {
+            inner: SpinLock::new(data),
+            class: Some(class),
+            acquired: AtomicU32::new(0),
+            contended: AtomicU32::new(0),
+            spins: AtomicU32::new(0),
+            max_spins: AtomicU32::new(0),
+        }
     }
 
     /// 关中断并加锁；守卫析构时先解锁、再恢复进入前的中断状态。
@@ -75,9 +101,23 @@ impl<T> IrqSpinLock<T> {
             Some(g) => g,
             None => {
                 self.contended.fetch_add(1, Ordering::Relaxed);
-                self.inner.lock()
+                // 先只读等待（不反复写缓存行），看到空闲再尝试；记下自旋次数
+                let mut n: u32 = 0;
+                let g = loop {
+                    while self.inner.is_locked() {
+                        n = n.wrapping_add(1);
+                        core::hint::spin_loop();
+                    }
+                    if let Some(g) = self.inner.try_lock() {
+                        break g;
+                    }
+                };
+                self.spins.fetch_add(n, Ordering::Relaxed);
+                self.max_spins.fetch_max(n, Ordering::Relaxed);
+                g
             }
         };
+        self.acquired.fetch_add(1, Ordering::Relaxed);
         IrqSpinLockGuard { guard: Some(guard), rank: self.class.map(|c| c.rank), was_enabled }
     }
 
@@ -103,6 +143,25 @@ impl<T> IrqSpinLock<T> {
     /// Number of contended acquisitions.
     pub fn contended(&self) -> u32 {
         self.contended.load(Ordering::Relaxed)
+    }
+
+    /// 争用测量值（加锁次数、遇到占用次数、自旋次数、单次最多自旋次数）。
+    /// Contention counters.
+    pub fn stats(&self) -> LockStats {
+        LockStats {
+            acquired: self.acquired.load(Ordering::Relaxed),
+            contended: self.contended.load(Ordering::Relaxed),
+            spins: self.spins.load(Ordering::Relaxed),
+            max_spins: self.max_spins.load(Ordering::Relaxed),
+        }
+    }
+
+    /// 清零争用测量值（测量窗口开始时调用）。
+    /// Reset the contention counters.
+    pub fn reset_stats(&self) {
+        for c in [&self.acquired, &self.contended, &self.spins, &self.max_spins] {
+            c.store(0, Ordering::Relaxed);
+        }
     }
 
     /// 登记的锁类别（局部锁为 `None`）。

@@ -9,6 +9,7 @@ use crate::boot::BootSpec;
 use crate::{appid_demo, arbiter_demo, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, mech_demo, mm, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, wcet};
 #[cfg(feature = "user-programs")]
 use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo, uptr_demo, longrun_demo};
+use crate::scale_demo;
 
 /// 内核版本（横幅中输出）。
 pub const VERSION: &str = "0.0.1";
@@ -163,6 +164,9 @@ pub fn start(boot: &'static BootSpec) -> ! {
     // SMP-3：中断与服务的多核化（送达、均衡、风暴预算下交互延迟有上界、恢复、分片服务各核均衡）。
     #[cfg(not(feature = "sched-rr"))]
     irq_demo::run();
+    // HARDEN-1D：调度规模化（选择只遍历本核运行列表、到期唤醒按最早时刻跳过、锁争用测量、同规模下的响应性底线）。
+    #[cfg(not(feature = "sched-rr"))]
+    scale_demo::run();
     #[cfg(feature = "user-programs")]
     {
         // SCHED-3：过载防护（每进程 CPU 上限、看门狗、内存压力分级准入、压力撤销后回到基线）。
@@ -181,6 +185,7 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("smp", smp::demo::failed()),
         ("balance", balance_demo::failed()),
         ("irq", irq_demo::failed()),
+        ("scale", scale_demo::failed()),
         ("user", user_demo::failed()),
         ("fix", fix_demo::failed()),
         ("profile", profile_demo::failed()),

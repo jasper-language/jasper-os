@@ -75,6 +75,17 @@ impl KObject {
 
 static TABLE: IrqSpinLock<Table> = IrqSpinLock::ranked(crate::lockorder::OBJECT_TABLE, ObjectTable::empty());
 
+/// 对象表锁的争用测量值。
+/// Contention counters of the object table lock.
+pub fn lock_stats() -> crate::sync::LockStats {
+    TABLE.stats()
+}
+
+/// 清零对象表锁的争用测量值。
+pub fn reset_lock_stats() {
+    TABLE.reset_stats();
+}
+
 /// 每个对象槽位占用的字节数（槽位 + 清理队列项），供启动期容量的内存预算使用。
 pub const BYTES_PER_OBJECT: usize = core::mem::size_of::<Slot<KObject>>() + core::mem::size_of::<u32>();
 

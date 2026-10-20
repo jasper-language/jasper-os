@@ -46,10 +46,12 @@ pub mod inherit;
 pub mod limit;
 pub mod queue;
 pub mod rr;
+pub mod runlist;
 pub mod timeshare;
 pub mod watchdog;
 
 pub use rr::{RoundRobin, RrState};
+pub use runlist::{Link, RunListError, RunLists};
 pub use timeshare::{TimeSharePolicy, TimeShareState};
 
 /// 服务质量档位（数值越小越优先）。登记表外的数值经 [`Qos::from_raw`] 拒绝。

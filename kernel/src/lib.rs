@@ -68,6 +68,7 @@ pub mod rt_demo;
 pub mod uptr_demo;
 #[cfg(feature = "user-programs")]
 pub mod longrun_demo;
+pub mod scale_demo;
 #[cfg(feature = "user-programs")]
 pub mod qos_demo;
 #[cfg(feature = "user-programs")]

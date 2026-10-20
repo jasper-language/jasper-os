@@ -1380,6 +1380,44 @@ check_harden1c() { # 长期运行与并发正确性①：用户指针复制与�
   fi
 }
 
+check_harden1d() { # 调度规模化：选择路径只遍历本处理器的运行列表（与任务表容量无关），到期唤醒按最早时刻跳过扫描；
+                   # 同规模下复核响应性底线（过载交互延迟有上界、压力撤销后立即恢复、各核都忙）；测量调度器锁与对象表锁的争用
+  local miss="" f name lockline
+  local scale='^\[JSR-SCALE\] case=scale cpus=[0-9]+ slots=[0-9]+ sleepers=[0-9]+ hogs=[0-9]+ picks=[1-9][0-9]* max_visited=[0-9]+ avg_visited_x100=[0-9]+ bound=[0-9]+ wake_scans=[01] ticks=[0-9]+ least_busy=[0-9]+ worst_idle_waiting=[0-2] all_busy=true lists_ok=true ok=true'
+  local over='^\[JSR-SCALE\] case=overload cpus=[0-9]+ sleepers=[0-9]+ hogs=[0-9]+ window=[0-9]+ interactive_rounds=20 samples=20 latency_max=[0-2] bound=2 bounded=true least_busy=[0-9]+ worst_idle_waiting=[0-2] all_busy=true'
+  local rec='^\[JSR-SCALE\] case=recovery cpus=[0-9]+ rounds=20 samples=20 max=0 immediate=true reclaimed=true'
+  local sum='^\[JSR-SCALE\] summary cpus=[0-9]+ slots=[0-9]+ free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0'
+  local pairs=("$SERIAL:x86_64" "$SERIAL_SMP4:x86_64×4" "$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4")
+  rv32_ready && ! rv32_fw_missing && pairs+=("$SERIAL_RV32_SMP4:RV32×4")
+  for pair in "${pairs[@]}"; do
+    f="${pair%%:*}"; name="${pair##*:}"
+    # 单次选择遍历量不超过可运行任务数（bound = 2N + 1），且睡眠任务数多于它
+    lockline=$(grep -aE "$scale" "$f" 2>/dev/null | head -1)
+    if [ -z "$lockline" ]; then
+      miss="$miss $name:规模"
+    else
+      local mv bd sl
+      mv=$(sed -E 's/.* max_visited=([0-9]+).*/\1/' <<<"$lockline"); bd=$(sed -E 's/.* bound=([0-9]+).*/\1/' <<<"$lockline"); sl=$(sed -E 's/.* sleepers=([0-9]+).*/\1/' <<<"$lockline")
+      [ "$mv" -le "$bd" ] && [ "$sl" -gt "$bd" ] || miss="$miss $name:遍历量($mv/$bd/$sl)"
+    fi
+    grep -qaE "$over" "$f" 2>/dev/null || miss="$miss $name:过载交互延迟"
+    grep -qaE "$rec" "$f" 2>/dev/null || miss="$miss $name:恢复"
+    [ "$(grep -caE '^\[JSR-SCALE\] lock name=(sched|objtable) cpus=[0-9]+ acquired=[1-9][0-9]* contended=[0-9]+ contended_permille=[0-9]+ spins=[0-9]+ max_spins=[0-9]+ sane=true' "$f" 2>/dev/null)" = 2 ] || miss="$miss $name:锁争用测量"
+    grep -qaE "$sum" "$f" 2>/dev/null || miss="$miss $name:汇总"
+    grep -qa '^\[JSR-SCALE-FAIL\]' "$f" 2>/dev/null && miss="$miss $name:失败断言"
+  done
+  grep -qa '^\[JSR-SCALE\] case=refusals empty_set=refused unchanged=true' "$SERIAL_SMP4" 2>/dev/null || miss="$miss 拒绝路径"
+  grep -qaE '^test sched::runlist::tests::[a-z_]+ \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null || miss="$miss 宿主运行列表测试"
+  if [ -z "$miss" ]; then
+    local sl4 ol4
+    sl4=$(grep -aE '^\[JSR-SCALE\] lock name=sched ' "$SERIAL_SMP4" | sed -E 's/.* contended_permille=([0-9]+).*max_spins=([0-9]+).*/\1‰ 最多自旋 \2/')
+    ol4=$(grep -aE '^\[JSR-SCALE\] lock name=objtable ' "$SERIAL_SMP4" | sed -E 's/.* contended_permille=([0-9]+).*max_spins=([0-9]+).*/\1‰ 最多自旋 \2/')
+    record HARDEN1D PASS "选择只遍历本核运行列表：$(grep -aE "$scale" "$SERIAL_SMP4" | sed -E 's/.* slots=([0-9]+) sleepers=([0-9]+).* max_visited=([0-9]+).* wake_scans=([01]) ticks=([0-9]+).*/槽位 \1、睡眠任务 \2 时单次最多遍历 \3 项，\5 tick 内到期唤醒扫描 \4 次/')（x86_64×4）；同规模过载交互延迟 ≤2、恢复即时、各核都忙；锁争用（x86_64×4 让出风暴）：调度器锁 $sl4、对象表锁 $ol4；运行列表与运行队列一致、资源回到基线（四个指令集，含 4 处理器）$RV32_NOTE"
+  else
+    record HARDEN1D FAIL "缺少：$miss"
+  fi
+}
+
 check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉取请求时运行本脚本全量 + 宿主与跨指令集单元测试；工具链钉到具体日期；判据不在工作流里另写
   local wf="$ROOT/.github/workflows/ci.yml" miss=""
   if [ ! -s "$wf" ]; then record CI-1 FAIL "缺少 .github/workflows/ci.yml"; return; fi
@@ -1407,7 +1445,7 @@ if [ "$SCHED_POLICY" = "rr" ]; then
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------

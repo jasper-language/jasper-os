@@ -32,6 +32,12 @@
 //! * **容量（启动期决定）**：任务槽位数不是编译期常量。堆就绪之前只有 [`INLINE_SLOTS`] 个内联槽位
 //!   （与静态内核栈数相同）；堆就绪后 [`Scheduler::grow`] 在启动期一次性扩到启动容量记录给出的槽位数，
 //!   槽位下标不变。扩容只允许在「只有引导线程在运行、只有引导处理器在线、没有切换在途」时进行，否则拒绝。
+//!
+//! * **规模化（选择路径不扫全表）**：每个运行队列的成员另按槽位号串成侵入式链表
+//!   （`kernel_core::sched::runlist`），每次成员关系改变后由 [`Scheduler::relist`] 同步。
+//!   选择、等待档位、类别仲裁、窃取 / 均衡候选、CPU 组的「有可运行成员」都只遍历这些链表，
+//!   代价与可运行任务数成正比，与任务表容量无关；链表按槽位号有序，策略「同键取先者」的结果不变。
+//!   每 tick 的到期唤醒与实时预算补充只在最早到期时刻到达时才扫描（缓存最早时刻）。
 
 use crate::arch::TaskContext;
 use crate::task::{Task, TaskId, TaskState};
@@ -45,6 +51,7 @@ use super::policy::{
     WatchdogReport, QOS_CLASSES,
 };
 use super::slots::BootSlots;
+use kernel_core::sched::{Link, RunLists};
 use super::stack::{ReserveError, StackPool, STATIC_STACKS};
 
 /// 堆就绪之前的内联槽位数（与静态内核栈数一致：那时只有这些槽位有栈）。
@@ -57,6 +64,7 @@ pub const BYTES_PER_SLOT: usize = core::mem::size_of::<Option<Task>>()
     + 2 * core::mem::size_of::<Option<Qos>>()
     + core::mem::size_of::<Option<usize>>()
     + core::mem::size_of::<bool>()
+    + core::mem::size_of::<Link>()
     + core::mem::size_of::<*mut super::stack::Stack>();
 
 /// 启动期扩容被拒绝的原因（被拒时调度器保持原样）。
@@ -289,6 +297,25 @@ pub struct QueueAudit {
     pub hook_errors: u32,
     /// 最近一次被拒绝的原因。
     pub last_hook_error: Option<QueueError>,
+    /// 运行列表与运行队列不一致的处数（列表长度与入队计数不符的队列数 + 列表成员关系与实体队列字段不符的任务数）。
+    pub list_mismatch: u32,
+}
+
+/// 选择路径的遍历量统计：每次选择只遍历本处理器的运行列表，这里记下遍历长度，
+/// 供验收核对「遍历量与可运行任务数相当、与任务表容量无关」。
+/// Selection-path scan statistics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScanStats {
+    /// 选择次数（`prepare_switch` 调用数）。
+    pub picks: u64,
+    /// 累计遍历的列表项数。
+    pub visited: u64,
+    /// 单次选择遍历的最多项数。
+    pub max_visited: u32,
+    /// 统计期间实际执行的到期唤醒扫描次数（最早到期时刻到达时才扫描）。
+    pub wake_scans: u64,
+    /// 统计期间的全局 tick 数（对照：没有最早时刻缓存时每个 tick 都要扫描一次）。
+    pub ticks: u64,
 }
 
 /// 实体从它所在的队列出队（睡眠或退出）；不在任何队列时拒绝。
@@ -308,6 +335,17 @@ pub struct Scheduler<P: SchedPolicy> {
     stacks: StackPool,
     /// 每个处理器的运行队列（各持一份策略实例；成员关系与入队计数由它维护）。
     queues: [CoreQueue<P>; MAX_CPUS],
+    /// 每个运行队列的成员链表（表头与长度；链接在 `links` 里，与任务表同容量）。
+    runs: RunLists<MAX_CPUS>,
+    links: BootSlots<Link, INLINE_SLOTS>,
+    /// 同步运行列表时被拒绝的次数（正常运行时恒为 0）。
+    list_errors: u32,
+    /// 睡眠任务中最早的定时唤醒时刻（`u64::MAX` = 没有；可能偏早，不会偏晚）。
+    next_wake: u64,
+    /// 实时任务中最早的预算补充时刻（`u64::MAX` = 没有；可能偏早，不会偏晚）。
+    next_rt: u64,
+    /// 选择路径的遍历量统计。
+    scan: ScanStats,
     /// 被运行队列拒绝的钩子调用次数（成员关系不符；正常运行时恒为 0）与最近一次的原因。
     hook_errors: u32,
     last_hook_error: Option<QueueError>,
@@ -375,6 +413,12 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             tasks: BootSlots::Inline(tasks),
             stacks: StackPool::new(),
             queues: CoreQueue::array(policy),
+            runs: RunLists::new(),
+            links: BootSlots::Inline([Link::EMPTY; INLINE_SLOTS]),
+            list_errors: 0,
+            next_wake: u64::MAX,
+            next_rt: u64::MAX,
+            scan: ScanStats { picks: 0, visited: 0, max_visited: 0, wake_scans: 0, ticks: 0 },
             hook_errors: 0,
             last_hook_error: None,
             current,
@@ -421,8 +465,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             return None;
         }
         let mut demand = Demand::default();
-        for (i, t) in self.tasks.iter().enumerate().skip(1) {
-            let Some(t) = t else { continue };
+        for (i, t) in self.listed(c) {
             if i == prev || t.state != TaskState::Runnable || t.home != c || t.on_cpu.is_some() {
                 continue;
             }
@@ -437,15 +480,8 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         }
         let chosen = self.arbiter.pick(demand, &self.arb_windows[c])?;
         // 只有该类确实有候选时才过滤，否则退回不按类别过滤（避免选出空集）。
-        let has = self.tasks.iter().enumerate().skip(1).any(|(i, t)| {
-            t.as_ref().is_some_and(|t| {
-                i != prev
-                    && t.state == TaskState::Runnable
-                    && t.home == c
-                    && t.on_cpu.is_none()
-                    && self.eligible(t)
-                    && arb_class(t) == chosen
-            })
+        let has = self.listed(c).any(|(i, t)| {
+            i != prev && t.state == TaskState::Runnable && t.home == c && t.on_cpu.is_none() && self.eligible(t) && arb_class(t) == chosen
         });
         if !has {
             return None;
@@ -512,6 +548,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         let eff = self.scratch_eff.prepare(slots, || None).ok_or_else(|| oom(self))?;
         let waits = self.scratch_waits.prepare(slots, || None).ok_or_else(|| oom(self))?;
         let wants = self.scratch_wants.prepare(slots, || false).ok_or_else(|| oom(self))?;
+        let links = self.links.prepare(slots, || Link::EMPTY).ok_or_else(|| oom(self))?;
         self.tasks.commit(tasks);
         self.groups.commit(groups);
         self.group_gen.commit(group_gen);
@@ -519,6 +556,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         self.scratch_eff.commit(eff);
         self.scratch_waits.commit(waits);
         self.scratch_wants.commit(wants);
+        self.links.commit(links);
         self.stacks.reserve(slots).map_err(|ReserveError { available }| GrowError::OutOfMemory { available })
     }
 
@@ -620,6 +658,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             let r = self.queues[home].enqueue(&mut t.sched, Enqueue::Spawn);
             self.note(r);
         }
+        self.relist(slot);
         if home != this_cpu() && loads[home].idle() {
             self.kicks.insert(home);
         }
@@ -722,6 +761,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
                 self.note(r);
             }
         }
+        self.relist(cur);
         if let Some(g) = left {
             self.unref_group(g);
         }
@@ -798,6 +838,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         t.wait_key = key;
         t.wait_seq = seq;
         self.note(r);
+        self.relist(cur);
         self.resolve_inheritance();
         Ok(())
     }
@@ -847,6 +888,10 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
                 t.wake_at = wake_at;
                 let r = dequeue_from(&mut self.queues, &mut t.sched, Dequeue::Block);
                 self.note(r);
+                if let Some(w) = wake_at {
+                    self.next_wake = self.next_wake.min(w);
+                }
+                self.relist(cur);
                 true
             }
             None => false,
@@ -876,6 +921,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             let r = self.queues[home].enqueue(&mut t.sched, Enqueue::Wake);
             self.note(r);
         }
+        self.relist(i);
         // 被限速组的成员醒来也不抢占：令牌回正之前它本来就不会被选中。
         let Some(t) = self.task(i).filter(|t| self.eligible(t)) else { return false };
         let (woken, home) = (t.sched.qos, t.home);
@@ -915,6 +961,31 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         };
         t.home = home;
         self.note(r);
+        self.relist(i);
+    }
+
+    /// 让槽位 `i` 的运行列表成员关系与它的实体队列字段一致（每次运行队列成员关系改变后调用）。
+    fn relist(&mut self, i: usize) {
+        let want = self.tasks.get(i).and_then(|t| t.as_ref()).and_then(|t| t.sched.queue());
+        if self.runs.place(&mut self.links, i, want).is_err() {
+            self.list_errors = self.list_errors.saturating_add(1);
+        }
+    }
+
+    /// 处理器 `c` 运行列表上的任务（按槽位号升序；含运行中的任务）。
+    fn listed(&self, c: usize) -> impl Iterator<Item = (usize, &Task)> + Clone + '_ {
+        self.runs.iter(&self.links, c).filter_map(move |i| self.tasks.get(i).and_then(|t| t.as_ref()).map(|t| (i, t)))
+    }
+
+    /// 选择路径遍历量统计。
+    /// Selection-path scan statistics.
+    pub fn scan_stats(&self) -> ScanStats {
+        self.scan
+    }
+
+    /// 清零选择路径遍历量统计。
+    pub fn reset_scan_stats(&mut self) {
+        self.scan = ScanStats::default();
     }
 
     /// 记下一次被运行队列拒绝的钩子调用（成员关系不符说明机制漏调或多调了钩子；只计数，不改状态）。
@@ -942,13 +1013,22 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         }
         let mut queued = 0;
         let mut count_mismatch = 0;
-        for (q, e) in self.queues.iter().zip(expect) {
+        let mut list_mismatch = self.list_errors;
+        for (c, (q, e)) in self.queues.iter().zip(expect).enumerate() {
             queued += q.queued();
             if q.queued() != e {
                 count_mismatch += 1;
             }
+            if self.runs.len(c) != q.queued() as usize {
+                list_mismatch += 1;
+            }
         }
-        QueueAudit { queued, misplaced, count_mismatch, hook_errors: self.hook_errors, last_hook_error: self.last_hook_error }
+        for (t, l) in self.tasks.iter().zip(self.links.iter()) {
+            if t.as_ref().and_then(|t| t.sched.queue()) != l.queue() {
+                list_mismatch += 1;
+            }
+        }
+        QueueAudit { queued, misplaced, count_mismatch, hook_errors: self.hook_errors, last_hook_error: self.last_hook_error, list_mismatch }
     }
 
     /// 显式唤醒 `id`（例如所属进程开始终止时，让睡眠中的线程尽快观察到）。
@@ -974,11 +1054,9 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 处理器 `c` 的队列里、除它的当前任务之外还有可运行任务的档位集合。
     fn waiting(&self, c: usize) -> ClassMask {
         let mut m = ClassMask::EMPTY;
-        for (i, t) in self.tasks.iter().enumerate().skip(1) {
-            if let Some(t) = t {
-                if i != self.current[c] && t.home == c && t.on_cpu.is_none() && t.state == TaskState::Runnable && self.eligible(t) {
-                    m.insert(t.sched.qos);
-                }
+        for (i, t) in self.listed(c) {
+            if i != self.current[c] && t.home == c && t.on_cpu.is_none() && t.state == TaskState::Runnable && self.eligible(t) {
+                m.insert(t.sched.qos);
             }
         }
         m
@@ -989,13 +1067,11 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         self.online.contains(c) && self.candidates().any(|k| k.home != c && k.affinity.contains(c))
     }
 
-    /// 可以被搬动的任务：可运行、未被任何处理器占用、未被限速。
+    /// 可以被搬动的任务：可运行、未被任何处理器占用、未被限速（只遍历各运行列表：可运行任务一定在列表上）。
     fn candidates(&self) -> impl Iterator<Item = Candidate> + Clone + '_ {
-        self.tasks.iter().enumerate().skip(1).filter_map(move |(i, t)| match t {
-            Some(t) if t.state == TaskState::Runnable && t.on_cpu.is_none() && self.eligible(t) => {
-                Some(Candidate { slot: i, home: t.home, affinity: t.affinity, qos: t.sched.qos, last_ran: t.last_ran })
-            }
-            _ => None,
+        (0..MAX_CPUS).flat_map(move |q| self.listed(q)).filter_map(move |(i, t)| {
+            (t.state == TaskState::Runnable && t.on_cpu.is_none() && self.eligible(t))
+                .then_some(Candidate { slot: i, home: t.home, affinity: t.affinity, qos: t.sched.qos, last_ran: t.last_ran })
         })
     }
 
@@ -1095,11 +1171,27 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         self.charge_rt(cur, now);
 
         let mut cause = None;
-        for i in 1..self.tasks.len() {
-            let due = matches!(self.tasks[i].as_ref(), Some(t) if t.state == TaskState::Blocked && t.wake_at.is_some_and(|w| w <= now));
-            if due && self.make_runnable(i) {
-                cause = Some(Cause::WAKE);
+        self.scan.ticks += 1;
+        if now >= self.next_wake {
+            // 最早到期时刻已到：扫描一次，唤醒全部到期者，并重算剩余睡眠者中最早的时刻
+            self.scan.wake_scans += 1;
+            let mut next = u64::MAX;
+            for i in 1..self.tasks.len() {
+                let wake_at = match self.tasks[i].as_ref() {
+                    Some(t) if t.state == TaskState::Blocked => t.wake_at,
+                    _ => None,
+                };
+                match wake_at {
+                    Some(w) if w <= now => {
+                        if self.make_runnable(i) {
+                            cause = Some(Cause::WAKE);
+                        }
+                    }
+                    Some(w) => next = next.min(w),
+                    None => {}
+                }
             }
+            self.next_wake = next;
         }
         let cause = cause.or_else(|| self.decide(c));
         if preemption {
@@ -1116,6 +1208,11 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
                 t.rt_remaining = t.rt_remaining.saturating_sub(1);
             }
         }
+        if now < self.next_rt {
+            return;
+        }
+        // 最早补充时刻已到：补充全部到期的实时任务，并重算最早的下一次补充时刻
+        let mut next = u64::MAX;
         for slot in 1..self.tasks.len() {
             if let Some(t) = self.tasks.get_mut(slot).and_then(|t| t.as_mut()) {
                 if t.rt_period != 0 {
@@ -1123,9 +1220,11 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
                         t.rt_remaining = t.rt_quota;
                         t.rt_next_period += t.rt_period as u64;
                     }
+                    next = next.min(t.rt_next_period);
                 }
             }
         }
+        self.next_rt = next;
     }
 
     /// 设置任务的实时预算/周期（准入已由 kernel-core 判定）。
@@ -1136,6 +1235,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             t.rt_period = period;
             t.rt_remaining = quota;
             t.rt_next_period = now + period as u64;
+            self.next_rt = self.next_rt.min(t.rt_next_period);
             return true;
         }
         false
@@ -1296,11 +1396,17 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
 
         // 类别仲裁在借用 tasks 之前完成（它会修改仲裁器状态）。
         let wanted = self.pick_arb_class(c, prev);
+        // 只遍历本处理器的运行列表（与任务表容量无关）；记下遍历长度供验收核对
+        let visited = self.runs.len(c) as u32;
+        self.scan.picks += 1;
+        self.scan.visited += visited as u64;
+        self.scan.max_visited = self.scan.max_visited.max(visited);
         let choice = {
             let tasks = &self.tasks;
             let groups = &self.groups;
+            let (runs, links) = (&self.runs, &self.links);
             let runnable = |skip_prev: bool| {
-                tasks.iter().enumerate().skip(1).filter_map(move |(i, t)| match t {
+                runs.iter(links, c).filter_map(move |i| match tasks[i].as_ref() {
                     Some(t)
                         if t.state == TaskState::Runnable
                             && t.home == c
@@ -1512,9 +1618,14 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         };
         let wants = &mut self.scratch_wants;
         wants.fill(false);
-        for t in self.tasks.iter().skip(1).flatten() {
-            if let (Some(g), TaskState::Runnable | TaskState::Running) = (t.cpu_group, t.state) {
-                wants[g] = true;
+        // 可运行或运行中的任务一定在某个运行列表上：只遍历列表
+        for q in 0..MAX_CPUS {
+            for i in self.runs.iter(&self.links, q) {
+                if let Some(t) = self.tasks.get(i).and_then(|t| t.as_ref()) {
+                    if let (Some(g), TaskState::Runnable | TaskState::Running) = (t.cpu_group, t.state) {
+                        wants[g] = true;
+                    }
+                }
             }
         }
         for (slot, grp) in self.groups.iter_mut().enumerate() {

@@ -46,7 +46,7 @@ use crate::task::TaskId;
 use kernel_core::smp::CpuSet;
 
 use policy::{kernel_policy, CpuLimitStats, KernelPolicy, LatencyHistogram, Qos, WatchdogLog};
-pub use scheduler::{AffinityError, CpuStats};
+pub use scheduler::{AffinityError, CpuStats, ScanStats};
 pub use scheduler::GrowError;
 use scheduler::{BlockError, Cause, CpuGroupId, GroupError, QosError, Scheduler, SpawnError, SwitchObserver, WATCHDOG_LOG};
 
@@ -94,6 +94,28 @@ fn finish_switch() {
 /// Contended acquisitions of the scheduler lock.
 pub fn lock_contended() -> u32 {
     KERNEL_SCHED.contended()
+}
+
+/// 调度器锁的争用测量值。
+/// Contention counters of the scheduler lock.
+pub fn lock_stats() -> crate::sync::LockStats {
+    KERNEL_SCHED.stats()
+}
+
+/// 清零调度器锁的争用测量值。
+pub fn reset_lock_stats() {
+    KERNEL_SCHED.reset_stats();
+}
+
+/// 选择路径的遍历量统计（见 [`scheduler::ScanStats`]）。
+/// Selection-path scan statistics.
+pub fn scan_stats() -> scheduler::ScanStats {
+    with(|s| s.scan_stats())
+}
+
+/// 清零选择路径的遍历量统计。
+pub fn reset_scan_stats() {
+    with_mut(|s| s.reset_scan_stats());
 }
 
 /// 启动时的内核地址空间（第一次切换时记录；`space = None` 的任务都运行在它上面）。
@@ -340,8 +362,25 @@ pub fn set_arbiter(on: bool) -> bool {
     with_mut(|s| s.set_arbiter(on))
 }
 
+/// 睡到 tick `deadline`（已过则立即返回）。
+/// Sleep until tick `deadline` (returns at once if it has passed).
 pub fn sleep_until(deadline: u64) {
     let was_enabled = cpu::irq_save_disable();
+    sleep_masked(deadline);
+    cpu::irq_restore(was_enabled);
+}
+
+/// 从现在起睡 `ticks` 个 tick：截止时刻在关中断之后才计算，本处理器的中断不会插进「取时刻」与「睡下」之间
+/// 让截止时刻在睡下之前就已过去（中断风暴下「睡一个 tick」因此总是真的睡下）。
+/// Sleep for `ticks` ticks, with the deadline computed after interrupts are masked.
+pub fn sleep_ticks(ticks: u64) {
+    let was_enabled = cpu::irq_save_disable();
+    sleep_masked(timer_ticks() + ticks);
+    cpu::irq_restore(was_enabled);
+}
+
+/// 关中断状态下睡到 `deadline`（调用者负责关 / 恢复中断）。
+fn sleep_masked(deadline: u64) {
     if timer_ticks() < deadline {
         if with_mut(|s| s.block_current(Some(deadline))) {
             yield_with_cause(Cause::SLEEP);
@@ -350,7 +389,6 @@ pub fn sleep_until(deadline: u64) {
             cpu::wait_for_interrupt();
         }
     }
-    cpu::irq_restore(was_enabled);
 }
 
 /// 等待外部进展的一步：睡到下一个 tick（期间处理器交给其他任务，包括低档任务）。
