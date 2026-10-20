@@ -24,6 +24,8 @@ fn main() {
 
     let mut out = String::new();
     let mut entries = String::new();
+    // (ID, 规范名, 中文显示名, 英文显示名)：只收集错误码，稍后按 ID 排序生成渲染表。
+    let mut error_texts: Vec<(u32, &str, &str, &str)> = Vec::new();
     out.push_str("// 由 kernel/build.rs 依据 abi/system-ids.txt 生成，请勿手改。\n");
     out.push_str("// Generated from abi/system-ids.txt by kernel/build.rs. Do not edit.\n\n");
     let result = kernel_core::abi::validate(&reg, |r| {
@@ -38,12 +40,21 @@ fn main() {
         };
         let _ = writeln!(
             entries,
-            "    AbiEntry {{ id: {}, kind: {}, name: \"{}\", version: {}, effects: {}, display_zh: \"{}\" }},",
-            r.id, kind, r.name, r.version, effects, r.display_zh
+            "    AbiEntry {{ id: {}, kind: {}, name: \"{}\", version: {}, effects: {}, display_zh: \"{}\", display_en: \"{}\" }},",
+            r.id, kind, r.name, r.version, effects, r.display_zh, r.display_en
         );
+        if r.kind == "error" {
+            error_texts.push((r.id, r.name, r.display_zh, r.display_en));
+        }
     });
     match result {
         Ok(_) => {}
+        Err(kernel_core::abi::AbiError::MissingDisplayEn { line }) => {
+            panic!("abi/system-ids.txt 第 {} 行缺少英文显示名", line)
+        }
+        Err(kernel_core::abi::AbiError::BadDisplayEn { line, reason }) => {
+            panic!("abi/system-ids.txt 第 {} 行的英文显示名不合法：{}", line, reason)
+        }
         Err(e) => panic!("abi/system-ids.txt 校验失败：{:?}", e),
     }
     if let Err(e) = kernel_core::abi::check_frozen(&reg, &lock) {
@@ -51,6 +62,18 @@ fn main() {
     }
     out.push_str("\n/// 全部登记条目（按登记表顺序）。\npub static ENTRIES: &[AbiEntry] = &[\n");
     out.push_str(&entries);
+    out.push_str("];\n");
+
+    // 错误渲染表：生成器排序（登记表本身按发布顺序追加，ID 并不保证单调），渲染时才能二分查找。
+    error_texts.sort_by_key(|e| e.0);
+    out.push_str("\n/// 错误码 → 人类可读文本（只含 `error` 种类，按 ID 升序）。\npub static ERROR_TEXTS: &[kernel_core::l10n::ErrorText] = &[\n");
+    for (id, name, zh, en) in &error_texts {
+        let _ = writeln!(
+            out,
+            "    kernel_core::l10n::ErrorText {{ id: {}, name: \"{}\", zh: \"{}\", en: \"{}\" }},",
+            id, name, zh, en
+        );
+    }
     out.push_str("];\n");
 
     let dest = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("abi_generated.rs");

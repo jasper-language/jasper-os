@@ -10,6 +10,7 @@
 //! * [`object`] —— 对象标识、[`object::Rights`] 位掩码、带世代计数的句柄表、对象管理器
 //! * [`wait`]   —— 可等待对象（事件、定时器）与等待集合；时间源抽象为 trait
 //! * [`abi`]    —— 系统接口登记表：显式稳定 ID 的解析、命名校验与冻结检查（M3.2，构建期使用）
+//! * [`l10n`]   —— 错误文本的本地化渲染：按错误码 ID 二分查找中文 / 英文文本，无状态、无分配
 //! * [`elf`]    —— ELF64 静态可执行文件解析与校验（M5.1-pre，机器类型由调用者给出）
 //! * [`frame`]  —— 物理页帧分配（与引导协议无关的内存图 + 位图分配器，M2.1）
 //! * [`paging`] —— 架构无关的页映射契约（虚拟页、中立权限位、PageMapper，M2.2）
@@ -58,6 +59,7 @@ pub mod heap;
 pub mod io;
 pub mod irq;
 pub mod job;
+pub mod l10n;
 pub mod lockorder;
 pub mod memory;
 pub mod meta;

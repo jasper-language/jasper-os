@@ -45,6 +45,7 @@ pub mod job_demo;
 pub mod irq_demo;
 pub mod kmain;
 pub mod kobj;
+pub mod l10n_demo;
 pub mod mm;
 pub mod ktrace;
 pub mod lockorder;

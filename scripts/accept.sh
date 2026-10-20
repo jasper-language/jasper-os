@@ -1445,6 +1445,40 @@ check_drv0() {  # DRV-0：通道消息的发送方应用身份章——已绑定
   fi
 }
 
+check_l10n1() { # L10N-1：接口登记表英文显示名列（构建期中英齐全）+ 由登记表生成的错误渲染表——
+                 # 错误表条数与登记表一致、按 ID 有序、中英齐全；同一错误码中英分别渲染且与登记表逐字一致；
+                 # 非错误返回值与未登记错误码被拒；每个操作条目都有英文名。检查 x86_64 单核与 x86_64 / AArch64 / RISC-V64 4 处理器。
+  local miss="" f name n nerr nop en4098 en4101
+  nerr=$(awk -F'\t' '!/^[[:space:]]*#/ && NF>=6 && $2=="error"{n++} END{print n+0}' "$ROOT/abi/system-ids.txt")
+  nop=$(awk -F'\t' '!/^[[:space:]]*#/ && NF>=6 && $2=="op"{n++} END{print n+0}' "$ROOT/abi/system-ids.txt")
+  en4098=$(awk -F'\t' '$1=="4098"{for(i=7;i<=NF;i++) printf "%s%s", (i>7?"\t":""), $i}' "$ROOT/abi/system-ids.txt" | sed 's/^ *//;s/ *$//')
+  en4101=$(awk -F'\t' '$1=="4101"{for(i=7;i<=NF;i++) printf "%s%s", (i>7?"\t":""), $i}' "$ROOT/abi/system-ids.txt" | sed 's/^ *//;s/ *$//')
+  local table="[JSR-L10N] table errors=$nerr sorted=true complete=true"
+  local r4098="[JSR-L10N] render code=4098 zh=权限不足 en=$en4098 ok=true"
+  local r4101="[JSR-L10N] render code=4101 zh=句柄无效 en=$en4101 ok=true"
+  local ops="[JSR-L10N] ops named=$nop all_en=true"
+  local sum='^\[JSR-L10N\] summary checks=[0-9]+ failed=0'
+  local pairs=("$SERIAL:x86_64单核" "$SERIAL_SMP4:x86_64×4" "$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4")
+  for pair in "${pairs[@]}"; do
+    f="${pair%%:*}"; name="${pair##*:}"
+    grep -qaF "$table" "$f" 2>/dev/null || miss="$miss $name:错误表"
+    grep -qaF "$r4098" "$f" 2>/dev/null || miss="$miss $name:权限不足中英渲染"
+    grep -qaF "$r4101" "$f" 2>/dev/null || miss="$miss $name:句柄无效中英渲染"
+    grep -qaF '[JSR-L10N] reject case=not_error ret=0 ok=true' "$f" 2>/dev/null || miss="$miss $name:非错误被拒"
+    grep -qaF '[JSR-L10N] reject case=unknown id=4095 ok=true' "$f" 2>/dev/null || miss="$miss $name:未知码被拒"
+    grep -qaF "$ops" "$f" 2>/dev/null || miss="$miss $name:操作条目英文名"
+    n=$(grep -aoE "$sum" "$f" 2>/dev/null | head -1 | sed -E 's/.*checks=([0-9]+).*/\1/')
+    if [ -z "$n" ]; then miss="$miss $name:汇总"; elif [ "$n" -lt 10 ]; then miss="$miss $name:断言数($n<10)"; fi
+    grep -qa '^\[JSR-L10N-FAIL\]' "$f" 2>/dev/null && miss="$miss $name:失败断言"
+  done
+  if [ -z "$miss" ]; then
+    n=$(grep -aoE "$sum" "$SERIAL_SMP4" | head -1 | sed -E 's/.*checks=([0-9]+).*/\1/')
+    record L10N1 PASS "登记表全部 $((nerr+nop)) 条接口中英显示名齐全；构建期生成的错误渲染表含 $nerr 条错误、按 ID 有序，中英渲染与登记表逐字一致；非错误与未登记错误码被拒；x86_64 单核与 x86_64/AArch64/RISC-V64 4 处理器均复验（x86_64×4 checks=$n）"
+  else
+    record L10N1 FAIL "缺少：$miss"
+  fi
+}
+
 check_harden1d() { # 调度规模化：选择路径只遍历本处理器的运行列表（与任务表容量无关），到期唤醒按最早时刻跳过扫描；
                    # 同规模下复核响应性底线（过载交互延迟有上界、压力撤销后立即恢复、各核都忙）；测量调度器锁与对象表锁的争用
   local miss="" f name lockline
@@ -1506,11 +1540,11 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 
 if [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_l10n1
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------

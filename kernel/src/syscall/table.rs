@@ -29,6 +29,8 @@ pub struct AbiEntry {
     pub effects: Effects,
     /// 中文显示名。
     pub display_zh: &'static str,
+    /// 英文显示名（登记表必填；构建期生成的错误渲染表也取这一列）。English display name.
+    pub display_en: &'static str,
 }
 
 include!(concat!(env!("OUT_DIR"), "/abi_generated.rs"));

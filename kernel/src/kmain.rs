@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{appid_demo, arbiter_demo, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, mech_demo, mm, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, wcet};
+use crate::{appid_demo, arbiter_demo, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, l10n_demo, mech_demo, mm, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, wcet};
 #[cfg(feature = "user-programs")]
 use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo, uptr_demo, longrun_demo};
 use crate::{nohz_demo, scale_demo};
@@ -181,6 +181,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
     }
     // DRV-0：应用身份的写入与不可变性（放在最后，避免占用早期演练依赖的对象编号）。
     appid_demo::run();
+    // L10N-1：登记表中英显示名齐全，且据此生成的错误渲染表可用（中英渲染、非错误与未知码被拒）。
+    l10n_demo::run();
     // WCET 证据：关键路径的最大实测值（系统调用周期、交互唤醒 tick）。
     wcet::report();
     // 各演练的断言失败数（顺序即输出顺序）；未编译的演练不出现。
@@ -198,6 +200,7 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("rtclass", rtclass_demo::failed()),
         ("arbiter", arbiter_demo::failed()),
         ("appid", appid_demo::failed()),
+        ("l10n", l10n_demo::failed()),
         #[cfg(feature = "user-programs")]
         ("ring", ring_demo::failed()),
         #[cfg(feature = "user-programs")]

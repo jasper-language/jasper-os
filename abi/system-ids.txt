@@ -8,51 +8,53 @@
 #   * 名字遵守 system.<领域>.<对象>.<动作> 命名约定（构建期 lint）
 #   * 每个登记的操作都必须在内核里有真实实现，否则内核启动自检失败
 #
-# 列：ID  种类  名字  版本  副作用  中文显示名（不含空白）
+# 列（制表符分隔）：ID  种类  名字  版本  副作用  中文显示名  英文显示名
+#   * 中文显示名与英文显示名都必填；英文显示名是第 6 个制表符之后的整行剩余部分（首尾无空白）
+#   * 英文显示名只含可打印 ASCII（0x20–0x7E），内部可含单个空格，不含连续空格与 #
 # =============================================================================
-1	op	system.task.exit	1	irreversible	任务·退出
-2	op	system.task.yield	1	none	任务·让出处理器
-3	op	system.time.now	1	read	时间·读取当前时刻
-4	op	system.console.write	1	write	控制台·写入文本
-5	op	system.task.spawn	1	write	任务·在本进程创建线程
-6	op	system.handle.close	1	write	句柄·关闭
-7	op	system.handle.duplicate	1	write	句柄·复制（只可降权）
-8	op	system.handle.restrict	1	write	句柄·降低权限
-4097	error	system.error.unsupported	1	none	不支持的接口
-4098	error	system.error.rights_denied	1	none	权限不足
-4099	error	system.error.invalid_argument	1	none	参数非法
-4100	error	system.memory.error.invalid_address	1	none	地址非法
-4101	error	system.handle.error.invalid	1	none	句柄无效
-4102	error	system.handle.error.rights_denied	1	none	句柄权限不足
-4103	error	system.handle.error.table_full	1	none	句柄表已满
-4104	error	system.handle.error.not_transferable	1	none	对象不可传递
-9	op	system.async.ring.create	1	write	异步环·创建
-10	op	system.async.ring.enter	1	write	异步环·提交并收取完成
-11	op	system.async.cancel	1	write	异步·同步取消请求
-12	op	system.time.wait	1	none	时间·等待指定时长
-4105	error	system.async.error.cancelled	1	none	请求已取消
-4106	error	system.async.error.already_completed	1	none	请求已完成
-4107	error	system.async.error.not_found	1	none	请求不存在
-4108	error	system.async.error.in_progress	1	none	请求执行中不可取消
-4109	error	system.async.error.cq_full	1	none	完成信用耗尽
-4110	error	system.async.error.id_exhausted	1	none	请求 ID 已用尽
-4111	error	system.error.quota_exceeded	1	none	超出配额
-13	op	system.channel.create	1	write	通道·创建一对端点
-14	op	system.channel.send	1	write	通道·发送消息
-15	op	system.channel.recv	1	write	通道·接收消息
-4112	error	system.channel.error.peer_closed	1	none	对端已关闭
-4113	error	system.channel.error.queue_full	1	none	消息队列已满
-4114	error	system.channel.error.buffer_too_small	1	none	接收缓冲区不足
-16	op	system.process.exit	1	irreversible	进程·退出（终止全部线程）
-17	op	system.task.wait	1	read	任务·等待退出
-18	op	system.process.wait	1	read	进程·等待退出
-19	op	system.memory.map	1	write	内存·映射匿名页
-20	op	system.memory.unmap	1	write	内存·取消映射
-4115	error	system.memory.error.already_mapped	1	none	地址已有映射
-4116	error	system.memory.error.out_of_memory	1	none	物理内存不足
-21	op	system.memory.protect	1	write	内存·修改访问权限
-22	op	system.task.qos.set	1	write	任务·设置服务质量等级
-23	op	system.process.spawn	1	write	进程·创建子进程（映像 + 调用子集 + 引导通道）
-24	op	system.profile.list	1	read	配置档·列举（返回数量）
-25	op	system.profile.get	1	read	配置档·读取结构化描述
-4117	error	system.profile.error.buffer_too_small	1	none	配置档·缓冲区过小
+1	op	system.task.exit	1	irreversible	任务·退出	Exit task
+2	op	system.task.yield	1	none	任务·让出处理器	Yield task
+3	op	system.time.now	1	read	时间·读取当前时刻	Current time
+4	op	system.console.write	1	write	控制台·写入文本	Write console text
+5	op	system.task.spawn	1	write	任务·在本进程创建线程	Spawn thread
+6	op	system.handle.close	1	write	句柄·关闭	Close handle
+7	op	system.handle.duplicate	1	write	句柄·复制（只可降权）	Duplicate handle
+8	op	system.handle.restrict	1	write	句柄·降低权限	Restrict handle rights
+4097	error	system.error.unsupported	1	none	不支持的接口	Unsupported interface
+4098	error	system.error.rights_denied	1	none	权限不足	Permission denied
+4099	error	system.error.invalid_argument	1	none	参数非法	Invalid argument
+4100	error	system.memory.error.invalid_address	1	none	地址非法	Invalid address
+4101	error	system.handle.error.invalid	1	none	句柄无效	Invalid handle
+4102	error	system.handle.error.rights_denied	1	none	句柄权限不足	Insufficient handle rights
+4103	error	system.handle.error.table_full	1	none	句柄表已满	Handle table full
+4104	error	system.handle.error.not_transferable	1	none	对象不可传递	Object not transferable
+9	op	system.async.ring.create	1	write	异步环·创建	Create async ring
+10	op	system.async.ring.enter	1	write	异步环·提交并收取完成	Enter async ring
+11	op	system.async.cancel	1	write	异步·同步取消请求	Cancel async request
+12	op	system.time.wait	1	none	时间·等待指定时长	Wait for duration
+4105	error	system.async.error.cancelled	1	none	请求已取消	Request cancelled
+4106	error	system.async.error.already_completed	1	none	请求已完成	Already completed
+4107	error	system.async.error.not_found	1	none	请求不存在	Request not found
+4108	error	system.async.error.in_progress	1	none	请求执行中不可取消	Request in progress
+4109	error	system.async.error.cq_full	1	none	完成信用耗尽	Completion queue full
+4110	error	system.async.error.id_exhausted	1	none	请求 ID 已用尽	Request IDs exhausted
+4111	error	system.error.quota_exceeded	1	none	超出配额	Quota exceeded
+13	op	system.channel.create	1	write	通道·创建一对端点	Create channel pair
+14	op	system.channel.send	1	write	通道·发送消息	Send message
+15	op	system.channel.recv	1	write	通道·接收消息	Receive message
+4112	error	system.channel.error.peer_closed	1	none	对端已关闭	Peer closed
+4113	error	system.channel.error.queue_full	1	none	消息队列已满	Message queue full
+4114	error	system.channel.error.buffer_too_small	1	none	接收缓冲区不足	Receive buffer too small
+16	op	system.process.exit	1	irreversible	进程·退出（终止全部线程）	Exit process
+17	op	system.task.wait	1	read	任务·等待退出	Wait for task exit
+18	op	system.process.wait	1	read	进程·等待退出	Wait for process exit
+19	op	system.memory.map	1	write	内存·映射匿名页	Map anonymous pages
+20	op	system.memory.unmap	1	write	内存·取消映射	Unmap pages
+4115	error	system.memory.error.already_mapped	1	none	地址已有映射	Already mapped
+4116	error	system.memory.error.out_of_memory	1	none	物理内存不足	Out of memory
+21	op	system.memory.protect	1	write	内存·修改访问权限	Change access rights
+22	op	system.task.qos.set	1	write	任务·设置服务质量等级	Set task QoS
+23	op	system.process.spawn	1	write	进程·创建子进程（映像 + 调用子集 + 引导通道）	Spawn child process
+24	op	system.profile.list	1	read	配置档·列举（返回数量）	List profiles
+25	op	system.profile.get	1	read	配置档·读取结构化描述	Get profile
+4117	error	system.profile.error.buffer_too_small	1	none	配置档·缓冲区过小	Profile buffer too small

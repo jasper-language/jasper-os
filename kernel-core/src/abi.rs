@@ -9,10 +9,15 @@
 //! 内核的 `build.rs` 在构建期调用这里的函数：校验不过就**构建失败**；这些规则本身用宿主单元测试锁死。
 //! 生成器**只读取与校验**，从不按名字排序、哈希或自动分配编号——新增接口只能由人追加新 ID。
 //!
-//! # 行格式（制表符或空白分隔，`#` 开头为注释）
-//! `ID 种类 名字 版本 副作用 中文显示名`，例如：
-//! `3 op system.time.now 1 read 时间·读取当前时刻`
+//! # 行格式（登记表用制表符分隔，`#` 开头为注释）
+//! `ID 种类 名字 版本 副作用 中文显示名 英文显示名`，例如：
+//! `3	op	system.time.now	1	read	时间·读取当前时刻	Current time`
 //! 种类：`op`（可调用）/ `error`（错误码，系统调用以 `-(ID)` 返回）。
+//! 中文显示名内部可以含空格；英文显示名是第 6 个字段之后的**整行剩余部分**（首尾修剪），
+//! 因此内部可以含单个空格。旧格式的 6 列行仍可解析（英文显示名为空串），只用于兼容锁文件。
+//!
+//! 中文与英文显示名在登记表中必须同时存在；英文名只允许可打印 ASCII，以便错误文本在任何输出设备上稳定呈现。
+//! Display names exist in both Chinese and English; English names are restricted to printable ASCII.
 
 /// 一条登记记录（借用原始文本，无分配）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +34,8 @@ pub struct AbiLine<'a> {
     pub effects: &'a str,
     /// 中文显示名。
     pub display_zh: &'a str,
+    /// 英文显示名（登记表必填；锁文件旧行缺省为空串）。English display name.
+    pub display_en: &'a str,
 }
 
 /// 登记表错误（带行号，供构建期诊断）。
@@ -44,6 +51,10 @@ pub enum AbiError {
     BadName { line: usize, reason: &'static str },
     /// 种类或副作用取值非法。
     BadField { line: usize, reason: &'static str },
+    /// 登记表行缺少英文显示名（锁文件旧行不受此约束）。
+    MissingDisplayEn { line: usize },
+    /// 英文显示名违反格式规则。
+    BadDisplayEn { line: usize, reason: &'static str },
     /// 已冻结（已发布）的条目被删除。
     FrozenRemoved { id: u32 },
     /// 已冻结的条目被改号、改名或改种类。
@@ -139,21 +150,82 @@ mod heapless_split {
     }
 }
 
+/// 英文显示名的格式规则；合法返回 `None`，否则返回给构建期的原因。
+///
+/// 规则：非空；只含可打印 ASCII（0x20–0x7E）；首尾无空白；不含连续两个空格；不含 `#`。
+/// Format rules for the English display name.
+fn display_en_problem(s: &str) -> Option<&'static str> {
+    if !s.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+        return Some("英文显示名只能含可打印 ASCII（0x20–0x7E）");
+    }
+    if s.trim() != s {
+        return Some("英文显示名首尾不得有空白");
+    }
+    if s.contains("  ") {
+        return Some("英文显示名不得含连续空格");
+    }
+    if s.contains('#') {
+        return Some("英文显示名不得含 #");
+    }
+    None
+}
+
+/// 把一行切成前 6 个字段与可选的剩余部分（英文显示名）。
+///
+/// 登记表按制表符分隔：第 6 个制表符之后的整行剩余部分就是英文显示名（中文名因此可以含空格）。
+/// 旧格式（少于 6 个制表符）退回按空白切分，剩余部分为空——锁文件的 6 列旧行走这条路径。
+/// Splits a registry line into six fields plus the optional English display name.
+fn split_fields(line: &str) -> Option<([&str; 6], Option<&str>)> {
+    if line.bytes().filter(|&b| b == b'\t').count() >= 5 {
+        let mut it = line.splitn(7, '\t');
+        let f0 = it.next()?;
+        let f1 = it.next()?;
+        let f2 = it.next()?;
+        let f3 = it.next()?;
+        let f4 = it.next()?;
+        let f5 = it.next()?;
+        Some(([f0, f1, f2, f3, f4, f5], it.next()))
+    } else {
+        let mut it = line.split_whitespace();
+        let f0 = it.next()?;
+        let f1 = it.next()?;
+        let f2 = it.next()?;
+        let f3 = it.next()?;
+        let f4 = it.next()?;
+        let f5 = it.next()?;
+        Some(([f0, f1, f2, f3, f4, f5], None))
+    }
+}
+
 /// 解析一行；注释与空行返回 `Ok(None)`。
+///
+/// 英文显示名缺失时返回空串（只有锁文件旧行允许缺失；登记表的强制检查在 [`validate`] 中）。
 pub fn parse_line(line_no: usize, raw: &str) -> Result<Option<AbiLine<'_>>, AbiError> {
+    let trailing_blank = raw.len() != raw.trim_end().len();
     let line = raw.trim();
     if line.is_empty() || line.starts_with('#') {
         return Ok(None);
     }
-    let mut it = line.split_whitespace();
-    let mut next = || it.next().ok_or(AbiError::Malformed { line: line_no });
-    let id: u32 = next()?.parse().map_err(|_| AbiError::Malformed { line: line_no })?;
-    let kind = next()?;
-    let name = next()?;
-    let version: u16 = next()?.parse().map_err(|_| AbiError::Malformed { line: line_no })?;
-    let effects = next()?;
-    let display_zh = next()?;
-    Ok(Some(AbiLine { id, kind, name, version, effects, display_zh }))
+    let (fields, rest) = split_fields(line).ok_or(AbiError::Malformed { line: line_no })?;
+    let malformed = || AbiError::Malformed { line: line_no };
+    let id: u32 = fields[0].trim().parse().map_err(|_| malformed())?;
+    let kind = fields[1].trim();
+    let name = fields[2].trim();
+    let version: u16 = fields[3].trim().parse().map_err(|_| malformed())?;
+    let effects = fields[4].trim();
+    let display_zh = fields[5].trim();
+    let display_en = match rest {
+        None => "",
+        Some(raw_rest) => {
+            let trimmed = raw_rest.trim();
+            // `raw.trim()` 已经吃掉行尾空白，因此行尾空白要从原始行单独判断。
+            if raw_rest != trimmed || trailing_blank {
+                return Err(AbiError::BadDisplayEn { line: line_no, reason: "英文显示名首尾不得有空白" });
+            }
+            trimmed
+        }
+    };
+    Ok(Some(AbiLine { id, kind, name, version, effects, display_zh, display_en }))
 }
 
 /// 校验整张登记表；成功时返回条目数。`visit` 依次收到每条合法记录（构建期用来生成代码）。
@@ -177,6 +249,13 @@ pub fn validate<'a>(text: &'a str, mut visit: impl FnMut(&AbiLine<'a>)) -> Resul
             return Err(AbiError::BadField { line: line_no, reason: "版本须 ≥ 1" });
         }
         lint_name(rec.name, rec.kind).map_err(|reason| AbiError::BadName { line: line_no, reason })?;
+        // 登记表强制中英齐全：英文显示名是构建期生成错误渲染表的必需列。
+        if rec.display_en.is_empty() {
+            return Err(AbiError::MissingDisplayEn { line: line_no });
+        }
+        if let Some(reason) = display_en_problem(rec.display_en) {
+            return Err(AbiError::BadDisplayEn { line: line_no, reason });
+        }
         // 与之前所有记录比较唯一性（登记表规模很小，O(n²) 足够且无需分配）
         for (j, prev_raw) in text.lines().enumerate().take(i) {
             if let Ok(Some(p)) = parse_line(j + 1, prev_raw) {
@@ -227,39 +306,87 @@ pub fn check_frozen(registry: &str, lock: &str) -> Result<usize, AbiError> {
 mod tests {
     use super::*;
 
-    const REG: &str = "# 注释\n1 op system.task.exit 1 irreversible 任务·退出\n3 op system.time.now 1 read 时间·当前时刻\n4097 error system.error.unsupported 1 none 不支持\n";
+    const REG: &str = "# 注释\n\
+1\top\tsystem.task.exit\t1\tirreversible\t任务·退出\tExit task\n\
+3\top\tsystem.time.now\t1\tread\t时间·当前时刻\tCurrent time\n\
+4097\terror\tsystem.error.unsupported\t1\tnone\t不支持的接口\tUnsupported interface\n";
 
     #[test]
     fn valid_registry_passes_and_visits_in_order() {
         let mut ids = [0u32; 3];
+        let mut en = [""; 3];
         let mut k = 0;
         let n = validate(REG, |r| {
             ids[k] = r.id;
+            en[k] = r.display_en;
             k += 1;
         })
         .unwrap();
         assert_eq!(n, 3);
         assert_eq!(ids, [1, 3, 4097]);
+        assert_eq!(en, ["Exit task", "Current time", "Unsupported interface"]);
+    }
+
+    #[test]
+    fn display_en_keeps_inner_spaces_and_chinese_keeps_its_spaces() {
+        // 英文名内部的单个空格被完整保留；中文名内部也可以含空格（制表符分隔，不会被切成两个字段）。
+        let reg = "23\top\tsystem.process.spawn\t1\twrite\t进程·创建子进程（映像 + 调用子集）\tSpawn child process\n";
+        let mut seen = None;
+        validate(reg, |r| seen = Some((r.display_zh, r.display_en))).unwrap();
+        assert_eq!(seen, Some(("进程·创建子进程（映像 + 调用子集）", "Spawn child process")));
+    }
+
+    #[test]
+    fn missing_or_malformed_display_en_is_rejected() {
+        assert_eq!(
+            validate("1\top\tsystem.task.exit\t1\tirreversible\t任务·退出\n", |_| {}),
+            Err(AbiError::MissingDisplayEn { line: 1 }),
+            "登记表缺英文名"
+        );
+        let bad = [
+            ("1\top\tsystem.task.exit\t1\tirreversible\t任务·退出\tExit 任务\n", "非 ASCII"),
+            ("1\top\tsystem.task.exit\t1\tirreversible\t任务·退出\t Exit task\n", "首部空白"),
+            ("1\top\tsystem.task.exit\t1\tirreversible\t任务·退出\tExit task \n", "尾部空白"),
+            ("1\top\tsystem.task.exit\t1\tirreversible\t任务·退出\tExit  task\n", "连续空格"),
+            ("1\top\tsystem.task.exit\t1\tirreversible\t任务·退出\tExit #task\n", "含 #"),
+        ];
+        for (line, what) in bad {
+            assert!(
+                matches!(validate(line, |_| {}), Err(AbiError::BadDisplayEn { line: 1, .. })),
+                "{what} 应被拒绝"
+            );
+        }
     }
 
     #[test]
     fn rejects_duplicates_and_bad_names() {
-        let dup_id = "1 op system.task.exit 1 irreversible a\n1 op system.task.yield 1 none b\n";
+        let dup_id = "1\top\tsystem.task.exit\t1\tirreversible\ta\tExit task\n\
+1\top\tsystem.task.yield\t1\tnone\tb\tYield task\n";
         assert_eq!(validate(dup_id, |_| {}), Err(AbiError::DuplicateId { line: 2, id: 1 }));
-        let dup_name = "1 op system.task.exit 1 irreversible a\n2 op system.task.exit 1 none b\n";
+        let dup_name = "1\top\tsystem.task.exit\t1\tirreversible\ta\tExit task\n\
+2\top\tsystem.task.exit\t1\tnone\tb\tExit task\n";
         assert_eq!(validate(dup_name, |_| {}), Err(AbiError::DuplicateName { line: 2 }));
-        assert!(matches!(validate("5 op system.task.go 1 none x\n", |_| {}), Err(AbiError::BadName { .. })), "非受控动词");
-        assert!(matches!(validate("5 op system.x86.read 1 none x\n", |_| {}), Err(AbiError::BadName { .. })), "架构名");
-        assert!(matches!(validate("5 op system.fd.close 1 none x\n", |_| {}), Err(AbiError::BadName { .. })), "历史概念");
-        assert!(matches!(validate("5 op System.task.exit 1 none x\n", |_| {}), Err(AbiError::BadName { .. })), "大写");
-        assert!(matches!(validate("5 error system.task.oops 1 none x\n", |_| {}), Err(AbiError::BadName { .. })), "错误名缺 error 段");
-        assert!(matches!(validate("5 op system.time.now 1 fast x\n", |_| {}), Err(AbiError::BadField { .. })), "副作用");
+        assert!(matches!(validate("5\top\tsystem.task.go\t1\tnone\tx\tGo\n", |_| {}), Err(AbiError::BadName { .. })), "非受控动词");
+        assert!(matches!(validate("5\top\tsystem.x86.read\t1\tnone\tx\tRead\n", |_| {}), Err(AbiError::BadName { .. })), "架构名");
+        assert!(matches!(validate("5\top\tsystem.fd.close\t1\tnone\tx\tClose\n", |_| {}), Err(AbiError::BadName { .. })), "历史概念");
+        assert!(matches!(validate("5\top\tSystem.task.exit\t1\tnone\tx\tExit task\n", |_| {}), Err(AbiError::BadName { .. })), "大写");
+        assert!(
+            matches!(validate("5\terror\tsystem.task.oops\t1\tnone\tx\tOops\n", |_| {}), Err(AbiError::BadName { .. })),
+            "错误名缺 error 段"
+        );
+        assert!(
+            matches!(validate("5\top\tsystem.time.now\t1\tfast\tx\tNow\n", |_| {}), Err(AbiError::BadField { .. })),
+            "副作用"
+        );
         assert!(lint_name("compat.posix.fd.close", "op").is_ok(), "compat 根允许历史概念");
     }
 
     #[test]
     fn frozen_entries_cannot_be_removed_renumbered_or_renamed() {
+        // 锁文件仍是 6 列（空格或制表符分隔均可），没有英文显示名也必须通过解析与冻结检查。
         let lock = "1 op system.task.exit 1 irreversible 任务·退出\n3 op system.time.now 1 read 时间\n";
+        let locked = parse_line(1, "1 op system.task.exit 1 irreversible 任务·退出\n").unwrap().unwrap();
+        assert_eq!(locked.display_en, "", "锁文件旧行的英文显示名为空");
         assert_eq!(check_frozen(REG, lock), Ok(2), "新增 4097 不影响冻结检查");
         let removed = "3 op system.time.now 1 read x\n";
         assert_eq!(check_frozen(removed, lock), Err(AbiError::FrozenRemoved { id: 1 }));
