@@ -1184,8 +1184,16 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
                 crate::exit_state::notify_in(t, es, code);
             }
             let mut out = None;
+            // 已退出的线程离开进程的线程表，并释放线程表持有的那份内部引用：否则长期运行、反复开线程的进程
+            // 会让每个已退出线程的 Task 与退出状态一直占着对象表，直到整个进程退出（HARDEN-1C 的长期运行用例
+            // 约 510 轮复现：每轮泄漏 2 个对象，1024 槽的对象表被占满）。线程对象此后的去留只取决于还有没有句柄。
+            let mut left_table = false;
             let last = match t.get_mut(m.process) {
                 Ok(KObject::Process(p)) => {
+                    if let Some(i) = p.threads.iter().position(|x| *x == m.task_obj) {
+                        p.threads.swap_remove(i);
+                        left_table = true;
+                    }
                     p.threads_live = p.threads_live.saturating_sub(1);
                     // exiting 中的进程以发起终止时确定的退出码结束
                     let final_code = match p.state {
@@ -1200,6 +1208,9 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
                 let n = release_resources_in(t, m.process);
                 finish_exit_in(t, m.process, final_code);
                 out = Some((name, threads, n, final_code));
+            }
+            if left_table {
+                let _ = t.release_internal(m.task_obj); // 线程表 → Task
             }
             let _ = t.release_internal(m.task_obj); // 执行上下文 → Task
             let _ = t.release_internal(m.process); // 执行上下文 → Process

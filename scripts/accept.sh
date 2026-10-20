@@ -500,8 +500,8 @@ check_m51pre() { # ELF 装载（M5.1 前置部分）：截断被拒；按段装�
 
 check_m41() {   # 对象生命周期：关句柄 ⇒ closing 不销毁；重复关闭被拒；线程退出后由线程表保活；reap 只入队；级联迭代清理；回到基线
   if has 'handle closed: became_unowned=true dead=false counts=Ok\(\(0, 2, Closing\)\) double_close=system\.object\.error\.underflow reacquire=system\.object\.error\.invalid' \
-     && has 'thread exited: task counts=Ok\(\(0, 1, Closing\)\)' \
-     && has 'cascade: after_reap_pending=1 round1=1 pending=2 round2=3 pending=0 objects_live=([0-9]+)/\1 destroyed\+=4 reclaimed=true' \
+     && has 'thread exited: task counts=Err\(Invalid\)' \
+     && has 'cascade: after_reap_pending=2 round1=1 pending=2 round2=3 pending=0 objects_live=([0-9]+)/\1 destroyed\+=4 reclaimed=true' \
      && has '^\[JSR-LIFE\] checks=[0-9]+ failed=0'; then
     record M4.1 PASS "外部所有权/内部引用分离；closing 不销毁；重复关闭被拒；清理队列级联迭代；对象与页帧回到基线"
   else
@@ -1357,6 +1357,29 @@ check_harden1b() { # 容量启动期化：对象表 / 任务表 / 实时表的�
   fi
 }
 
+check_harden1c() { # 长期运行与并发正确性①：用户指针复制与并发取消映射——内核在对象表锁内校验并固定帧后再复制，
+                   # 另一核取消映射只会让帧成为「孤儿」、延后归还；自然窗口与撑大窗口两轮都不读写别的进程的内存
+  local miss="" f name
+  local nat='^\[JSR-UPTR-SMP\] mode=natural raced=[0-9]+ stale=0 attack_exit=Some\(0\) victim_exit=Some\(0\) free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 pending=0 pinned=\(0, 0\) reclaimed=true checks=[0-9]+ failed=0'
+  local wide='^\[JSR-UPTR-SMP\] mode=wide raced=[1-9][0-9]* stale=0 attack_exit=Some\(0\) victim_exit=Some\(0\) free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 pending=0 pinned=\(0, 0\) reclaimed=true checks=[0-9]+ failed=0'
+  for pair in "$SERIAL:x86_64" "$SERIAL_SMP4:x86_64×4" "$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4"; do
+    f="${pair%%:*}"; name="${pair##*:}"
+    grep -qaE "$nat" "$f" 2>/dev/null || miss="$miss $name:自然窗口"
+    grep -qaE "$wide" "$f" 2>/dev/null || miss="$miss $name:撑大窗口"
+    grep -qa '^\[JSR-UPTR-SMP-FAIL\]' "$f" 2>/dev/null && miss="$miss $name:失败断言"
+    grep -qaE '^\[JSR-LONGRUN\] exit=Some\(0\) free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 pending=0 pinned=\(0, 0\) retired=([0-9]+)/\3 capacity=[0-9]+ reclaimed=true checks=[0-9]+ failed=0' "$f" 2>/dev/null || miss="$miss $name:长期运行"
+  done
+  if rv32_ready && ! rv32_fw_missing; then
+    grep -qaE "$wide" "$SERIAL_RV32_SMP4" 2>/dev/null || miss="$miss RV32×4:撑大窗口"
+  fi
+  grep -qaE '^test .* \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null || miss="$miss 宿主测试"
+  if [ -z "$miss" ]; then
+    record HARDEN1C PASS "长期运行 1500 轮回到基线、对象槽位无退役；用户指针并发：攻击方翻页 + 内核读写同一页、受害方核对图案；自然窗口与撑大窗口（窗口内让出一个 tick）两轮都无跨进程读写，撑大窗口确实发生了固定期间被取消映射；资源回到基线（四个指令集，含 4 处理器）$RV32_NOTE"
+  else
+    record HARDEN1C FAIL "缺少：$miss"
+  fi
+}
+
 check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉取请求时运行本脚本全量 + 宿主与跨指令集单元测试；工具链钉到具体日期；判据不在工作流里另写
   local wf="$ROOT/.github/workflows/ci.yml" miss=""
   if [ ! -s "$wf" ]; then record CI-1 FAIL "缺少 .github/workflows/ci.yml"; return; fi
@@ -1380,11 +1403,11 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 
 if [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------

@@ -47,7 +47,7 @@ pub fn failed() -> u32 {
 }
 
 /// 运行时验收程序 `user/rtdemo` 的 ELF 镜像（构建期由 `kernel/build.rs` 产出并嵌入）。
-static USER_RTDEMO: &[u8] = include_bytes!(env!("JSR_USER_RTDEMO"));
+pub(crate) static USER_RTDEMO: &[u8] = include_bytes!(env!("JSR_USER_RTDEMO"));
 /// 库可移植性验收程序 `user/libcheck` 的 ELF 镜像。
 static USER_LIBCHECK: &[u8] = include_bytes!(env!("JSR_USER_LIBCHECK"));
 /// `.jaso` 装载器验收程序 `user/jasodemo` 的 ELF 镜像（内嵌构建期打包的模块）。
@@ -313,7 +313,7 @@ pub(crate) fn start_program(
 }
 
 /// 同 [`start_program`]，并把 `arg` 作为主线程的第二个入口参数。
-fn start_program_arg(
+pub(crate) fn start_program_arg(
     name: &'static str,
     image: &[u8],
     role: u64,

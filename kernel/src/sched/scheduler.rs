@@ -36,6 +36,7 @@
 use crate::arch::TaskContext;
 use crate::task::{Task, TaskId, TaskState};
 
+use kernel_core::object::{advance_generation, GENERATION_RETIRED};
 use kernel_core::smp::{CpuSet, MAX_CPUS};
 
 use super::policy::{
@@ -1443,9 +1444,12 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// Creates a CPU group; the caller holds one reference.
     pub fn create_group(&mut self, limit_permille: u32, burst_ticks: u32) -> Result<CpuGroupId, GroupError> {
         let limit = CpuLimit::new(limit_permille, burst_ticks).map_err(GroupError::Limit)?;
-        let slot = self.groups.iter().position(|g| g.is_none()).ok_or(GroupError::NoFreeGroup)?;
+        // 代次用尽的槽位永久退役，不回绕（否则旧的组标识会在槽位复用后「复活」，指向新组）
+        let slot = (0..self.groups.len())
+            .find(|&i| self.groups[i].is_none() && self.group_gen[i] != GENERATION_RETIRED)
+            .ok_or(GroupError::NoFreeGroup)?;
         let gen = self.group_gen[slot];
-        self.group_gen[slot] = gen.wrapping_add(1);
+        self.group_gen[slot] = advance_generation(gen);
         self.groups[slot] = Some(CpuGroup { gen, limit, refs: 1 });
         Ok(CpuGroupId { slot, gen })
     }

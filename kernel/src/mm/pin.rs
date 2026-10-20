@@ -31,6 +31,12 @@ struct Pin {
 
 static PINS: IrqSpinLock<Vec<Pin>> = IrqSpinLock::ranked(crate::lockorder::MEMORY_PINS, Vec::new());
 
+/// 累计：所有者放弃时帧仍被固定（因而延后归还）的次数。验收用它证明「固定期间确实发生了取消映射」，
+/// 也就是并发竞态真的出现过、并且被固定挡住了。
+/// Cumulative count of frames released by their owner while still pinned.
+///（32 位目标没有 64 位原子指令，用内核的关中断 64 位计数器。）
+static ORPHANED_TOTAL: crate::sync::IrqU64 = crate::sync::IrqU64::new(0);
+
 /// 固定一个帧（计数 +1）。
 pub fn pin(f: PhysFrame) {
     let mut pins = PINS.lock();
@@ -62,12 +68,20 @@ pub fn unpin(f: PhysFrame) -> bool {
 pub fn release(f: PhysFrame) {
     let mut pins = PINS.lock();
     match pins.iter_mut().find(|p| p.frame == f) {
-        Some(p) => p.orphaned = true,
+        Some(p) => {
+            p.orphaned = true;
+            ORPHANED_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
         None => {
             drop(pins);
             let _ = frame::deallocate(f);
         }
     }
+}
+
+/// 累计「所有者放弃时帧仍被固定」的次数（见 [`ORPHANED_TOTAL`]）。
+pub fn orphaned_total() -> u64 {
+    ORPHANED_TOTAL.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// `(被固定的帧数, 其中所有者已放弃、等待最后解除固定的帧数)`（诊断与验收用）。
@@ -104,6 +118,33 @@ impl PinnedRange {
         self.len == 0
     }
 
+    /// 从偏移 `at` 起读出 `out.len()` 字节到 `out`；越界返回 `false` 且不读任何字节。
+    /// Read `out.len()` bytes starting at `at`; out of range ⇒ `false`, nothing read.
+    pub fn read_at(&self, at: usize, out: &mut [u8]) -> bool {
+        match at.checked_add(out.len()) {
+            Some(end) if end <= self.len => {}
+            _ => return false,
+        }
+        let mut pos = 0usize; // 当前段在整个范围中的起点
+        let mut done = 0usize;
+        for &(f, off, n) in &self.segs {
+            let n = n as usize;
+            let seg_end = pos + n;
+            let want_start = at + done;
+            if done < out.len() && want_start < seg_end && want_start >= pos {
+                let in_seg = want_start - pos;
+                let k = (n - in_seg).min(out.len() - done);
+                // 没有物理内存映射时如实失败，不跳过这一段却报告成功
+                let Some(p) = super::phys_to_virt(f.start() + off as u64 + in_seg as u64) else { return false };
+                // SAFETY：帧被本范围固定，[off+in_seg, off+in_seg+k) 位于帧内且属于该用户缓冲区。
+                unsafe { core::ptr::copy_nonoverlapping(p as *const u8, out[done..].as_mut_ptr(), k) };
+                done += k;
+            }
+            pos = seg_end;
+        }
+        done == out.len()
+    }
+
     /// 从偏移 `at` 起写入 `bytes`；越界返回 `false` 且不写任何字节。
     pub fn write_at(&self, at: usize, bytes: &[u8]) -> bool {
         match at.checked_add(bytes.len()) {
@@ -119,10 +160,10 @@ impl PinnedRange {
             if done < bytes.len() && want_start < seg_end && want_start >= pos {
                 let in_seg = want_start - pos;
                 let k = (n - in_seg).min(bytes.len() - done);
-                if let Some(p) = super::phys_to_virt(f.start() + off as u64 + in_seg as u64) {
-                    // SAFETY：帧被本范围固定，[off+in_seg, off+in_seg+k) 位于帧内且属于该用户缓冲区。
-                    unsafe { core::ptr::copy_nonoverlapping(bytes[done..].as_ptr(), p, k) };
-                }
+                // 没有物理内存映射时如实失败，不跳过这一段却报告成功
+                let Some(p) = super::phys_to_virt(f.start() + off as u64 + in_seg as u64) else { return false };
+                // SAFETY：帧被本范围固定，[off+in_seg, off+in_seg+k) 位于帧内且属于该用户缓冲区。
+                unsafe { core::ptr::copy_nonoverlapping(bytes[done..].as_ptr(), p, k) };
                 done += k;
             }
             pos = seg_end;

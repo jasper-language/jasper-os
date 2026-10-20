@@ -180,6 +180,11 @@ fn error_name(ret: i64) -> &'static str {
     entry((-ret) as u32).map(|e| e.name).unwrap_or("system.error.unknown")
 }
 
+/// 每次系统调用返回前最多销毁的死亡对象数（见 [`on_syscall`] 的出口清理点）。
+const CLEANUP_PER_CALL: usize = 16;
+/// 创建对象前先回收死亡对象的调用（进程创建在 `spawn_child` 里自带回收）。
+const RECLAIM_BEFORE: [u32; 3] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, SYSTEM_CHANNEL_CREATE];
+
 /// 系统调用入口（arch 调用；可能不返回——`system.task.exit` 会结束当前任务）。
 pub fn on_syscall(a: &SyscallArgs) -> i64 {
     CALLS.fetch_add(1, Ordering::Relaxed);
@@ -207,11 +212,27 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
         kprintln!("[JSR-SYSCALL] enter name={} id={} task={} effects={}", e.name, e.id, task_name, e.effects.as_str());
     }
     // WCET 证据：只测真正执行的时间，不含查表与权限检查（那两项是常数级）。
+    // 创建对象的调用先回收一轮：死亡对象占着的槽位与配额在新对象申请之前归还，
+    // 否则（例如线程句柄先关闭、线程随后才退出——死亡发生在任何系统调用之外）它们会一直堆着直到耗尽
+    if RECLAIM_BEFORE.contains(&e.id) {
+        crate::kobj::run_cleanup(CLEANUP_PER_CALL);
+    }
+    let enqueued_before = crate::kobj::enqueued_total();
     let started = crate::arch::cycles();
     let ret = execute(e, a, task_id.0);
     crate::wcet::record_syscall(crate::arch::cycles().wrapping_sub(started));
     if trace {
         kprintln!("[JSR-SYSCALL] exit name={} id={} ret={} status={}", e.name, e.id, ret, error_name(ret));
+    }
+    // 出口清理点：本次调用让对象死亡（关闭句柄、进程退出……）时，由它自己付清理的代价。死亡对象只进入清理队列；
+    // 若没有任何路径执行清理过程，长期运行的进程会把死亡对象一直堆在队列里——配额不归还、槽位不释放，
+    // 直到耗尽（HARDEN-1C 的长期运行用例第 9 轮即复现：每进程 8 个环的配额被已关闭的环占满）。
+    // 只在「本次调用期间有对象死亡」时清理：别处造成的死亡（例如其他处理器上被终止进程的销毁）不记到
+    // 无关任务的延迟里，它们由造成者或下一次创建对象的调用回收。
+    // 这里不持对象表锁、不在中断上下文（满足清理过程的执行约束），每次最多处理 CLEANUP_PER_CALL 个，
+    // 单次系统调用的额外延迟因此有界；余下的由后续调用继续处理。
+    if crate::kobj::enqueued_total() != enqueued_before {
+        crate::kobj::run_cleanup(CLEANUP_PER_CALL);
     }
     // 出口调度点：调用期间所属进程进入了 exiting（例如阻塞等待被终止打断）⇒ 不再返回用户态
     if proc::current_exiting() {

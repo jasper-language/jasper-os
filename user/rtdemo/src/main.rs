@@ -8,6 +8,9 @@
 //! | 0 | 全部功能用例（堆、匿名内存、线程、Channel、异步环、错误名），逐步检查 | 0（失败时为步骤编号） |
 //! | 1 | `panic!`：运行时输出信息后终止进程 | 101 |
 //! | 2 | 线程栈溢出：触到栈下方的未映射保护区 ⇒ 页故障终止整个进程 | 故障终止 |
+//! | 3 | 用户指针并发（攻击方）：一个线程反复取消映射 / 重新映射同一页，主线程同时让内核读写该页；`arg = 1` 为「撑大窗口」模式 | 0（失败时为 1） |
+//! | 5 | 长期运行：同一组资源（通道收发、异步环、线程、匿名内存）创建、使用、关闭循环 [`LONGRUN_CYCLES`] 轮，每轮都检查 | 0（失败时为轮次 + 1） |
+//! | 4 | 用户指针并发（受害方）：反复申请新页、填图案、核对图案，检查有没有被别的进程的内核复制写坏；`arg = 1` 为「撑大窗口」模式 | 0（失败时为 1） |
 //!
 //! 每一步都检查成功路径**和**对应的失败路径（错误必须是登记表中的那个错误，而且失败不留下任何改动）。
 #![no_std]
@@ -37,7 +40,7 @@ const RETURN_42: [u8; 8] = [0x40, 0x05, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6];
 #[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
 const RETURN_42: [u8; 8] = [0x13, 0x05, 0xA0, 0x02, 0x67, 0x80, 0x00, 0x00];
 
-fn main(role: u64, _arg: u64) -> i32 {
+fn main(role: u64, arg: u64) -> i32 {
     match role {
         0 => match all() {
             Ok(n) => {
@@ -51,6 +54,9 @@ fn main(role: u64, _arg: u64) -> i32 {
         },
         1 => panic!("演示 panic：运行时应输出本信息并以 101 结束进程"),
         2 => stack_overflow(),
+        3 => uptr_attacker(arg == 1),
+        4 => uptr_victim(arg == 1),
+        5 => longrun(),
         _ => 99,
     }
 }
@@ -339,4 +345,181 @@ fn stack_overflow() -> i32 {
         }
         Err(_) => 97,
     }
+}
+
+// ---------------------------------------------------------------------------
+// role 3 / 4：用户指针复制与并发取消映射（HARDEN-1C）
+// ---------------------------------------------------------------------------
+//
+// 攻击方：「翻页」线程对页 X 反复 unmap → map（每次映射都是一块新的物理帧），主线程同时反复让内核
+// 写 X（`system.profile.get`，走 copy_to_user）与读 X（`system.process.spawn`，走 copy_from_user；
+// X 里是全零的参数块，内核必然拒绝，不会真的创建子进程）。
+// 受害方：另一个进程同时反复申请新页、填入与轮次相关的图案、稍等后逐字节核对。
+// 若内核在「校验」与「复制」之间不持有对映射的保证，被取消映射的帧可能已分给受害方，内核的复制就会写坏它。
+
+/// 攻击方反复翻转映射的页。
+const UPTR_PAGE: u64 = sys::WINDOW_BASE + 0x0300_0000;
+/// 翻页次数（自然窗口 / 撑大窗口）。
+const UPTR_FLIPS: u64 = 3000;
+const UPTR_FLIPS_WIDE: u64 = 100;
+/// 受害方的页区间与轮数。
+const VICTIM_BASE: u64 = sys::WINDOW_BASE + 0x0400_0000;
+const VICTIM_PAGES: u64 = 8;
+const VICTIM_ROUNDS: u64 = 600;
+const VICTIM_ROUNDS_WIDE: u64 = 100;
+
+static UPTR_STOP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// `wide`：撑大窗口模式——内核在校验与复制之间自旋（由内核演练开启），
+/// 翻页线程让页保持映射一个 tick、取消映射后再空出一个 tick，让攻击方的调用能进入窗口、被归还的帧能先分给受害方。
+fn uptr_attacker(wide: bool) -> i32 {
+    use core::sync::atomic::Ordering;
+    let target = if wide { UPTR_FLIPS_WIDE } else { UPTR_FLIPS };
+    if mem::map(UPTR_PAGE, 1, mem::WRITE).is_err() {
+        println!("uptr: FAIL initial map");
+        return 1;
+    }
+    let flipper = match task::spawn(move || {
+        let mut flips = 0u64;
+        for _ in 0..target {
+            // 撑大窗口：页先保持映射一个 tick（让攻击方的调用通过校验、进入撑大的窗口），
+            // 再取消映射并空出一个 tick（让被归还的帧有机会先分给受害方），然后重新映射。
+            if wide {
+                let _ = time::sleep(1);
+            }
+            if mem::unmap(UPTR_PAGE, 1).is_err() {
+                break;
+            }
+            if wide {
+                let _ = time::sleep(1);
+            }
+            if mem::map(UPTR_PAGE, 1, mem::WRITE).is_err() {
+                break;
+            }
+            flips += 1;
+        }
+        UPTR_STOP.store(true, Ordering::Release);
+        flips
+    }) {
+        Ok(t) => t,
+        Err(_) => {
+            println!("uptr: FAIL spawn flipper");
+            return 1;
+        }
+    };
+    let (mut writes_ok, mut writes_refused, mut reads_refused, mut reads_rejected, mut bad) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    while !UPTR_STOP.load(Ordering::Acquire) {
+        // SAFETY：缓冲区是本进程的页 X（可能正被另一个线程取消映射——这正是要验证的场景），内核自行校验。
+        let w = jasper_rt::error::check(unsafe { sys::call3(jasper_rt::ids::SYSTEM_PROFILE_GET, 0, UPTR_PAGE, 2048) });
+        match w {
+            Ok(_) => writes_ok += 1,
+            Err(e) if e == Error::MEMORY_INVALID_ADDRESS => writes_refused += 1,
+            Err(_) => bad += 1,
+        }
+        // SAFETY：同上；X 里是全零或 Profile 文本，不构成合法的创建参数块。
+        let r = jasper_rt::error::check(unsafe { sys::call3(jasper_rt::ids::SYSTEM_PROCESS_SPAWN, UPTR_PAGE, 0, 0) });
+        match r {
+            Ok(_) => bad += 1, // 竟然创建成功：参数块不可能合法
+            Err(e) if e == Error::MEMORY_INVALID_ADDRESS => reads_refused += 1,
+            Err(_) => reads_rejected += 1,
+        }
+    }
+    let flips = flipper.join().unwrap_or(0);
+    let _ = mem::unmap(UPTR_PAGE, 1);
+    println!(
+        "uptr: done mode={} flips={} writes_ok={} writes_refused={} reads_refused={} reads_rejected={} bad={}",
+        if wide { "wide" } else { "natural" },
+        flips, writes_ok, writes_refused, reads_refused, reads_rejected, bad
+    );
+    if bad == 0 && flips == target && writes_ok + writes_refused > 0 {
+        0
+    } else {
+        1
+    }
+}
+
+/// `wide`：撑大窗口模式——填好图案后睡 3 个 tick 再核对，让「内核写进已归还的帧」有机会落在核对之前。
+fn uptr_victim(wide: bool) -> i32 {
+    let mut corrupt = 0u64;
+    let mut rounds = 0u64;
+    let total = if wide { VICTIM_ROUNDS_WIDE } else { VICTIM_ROUNDS };
+    for round in 0..total {
+        if mem::map(VICTIM_BASE, VICTIM_PAGES, mem::WRITE).is_err() {
+            println!("uptr-victim: FAIL map round={}", round);
+            return 1;
+        }
+        let len = (VICTIM_PAGES * mem_page()) as usize;
+        let pat = |i: usize| (round as usize).wrapping_mul(131).wrapping_add(i) as u8 ^ 0xA5;
+        // SAFETY：[VICTIM_BASE, +len) 刚由本进程映射为可写。
+        let buf = unsafe { core::slice::from_raw_parts_mut(VICTIM_BASE as *mut u8, len) };
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = pat(i);
+        }
+        if wide {
+            let _ = time::sleep(3);
+        } else {
+            task::yield_now();
+        }
+        if buf.iter().enumerate().any(|(i, b)| *b != pat(i)) {
+            corrupt += 1;
+        }
+        if mem::unmap(VICTIM_BASE, VICTIM_PAGES).is_err() {
+            println!("uptr-victim: FAIL unmap round={}", round);
+            return 1;
+        }
+        rounds += 1;
+    }
+    println!("uptr-victim: done mode={} rounds={} corrupt={}", if wide { "wide" } else { "natural" }, rounds, corrupt);
+    if corrupt == 0 {
+        0
+    } else {
+        1
+    }
+}
+
+fn mem_page() -> u64 {
+    sys::PAGE
+}
+
+// ---------------------------------------------------------------------------
+// role 5：长期运行（HARDEN-1C ③）
+// ---------------------------------------------------------------------------
+
+/// 长期运行的轮数：每轮都完整创建、使用并关闭一组资源，槽位被反复复用。
+const LONGRUN_CYCLES: u64 = 1500;
+/// 长期运行使用的匿名内存页。
+const LONGRUN_PAGE: u64 = sys::WINDOW_BASE + 0x0500_0000;
+
+/// 每轮：通道对收发一条消息、建一个异步环、开一个线程并等它退出、映射一页写入后取消映射，然后全部关闭。
+/// 任何一步失败都立即以「轮次 + 1」退出——资源耗尽或泄漏会在某一轮表现为创建失败。
+fn longrun() -> i32 {
+    for cycle in 0..LONGRUN_CYCLES {
+        let fail = (cycle + 1) as i32;
+        let Ok((a, b)) = channel::pair() else { return fail };
+        if a.send(&cycle.to_le_bytes()).is_err() {
+            return fail;
+        }
+        let mut buf = [0u8; 8];
+        match b.recv(&mut buf) {
+            Ok(r) if r.len == 8 && u64::from_le_bytes(buf) == cycle => {}
+            _ => return fail,
+        }
+        drop((a, b));
+        let Ok(ring) = Ring::create(4) else { return fail };
+        drop(ring);
+        match task::spawn(move || cycle % 7).map(|t| t.join()) {
+            Ok(Ok(v)) if v == cycle % 7 => {}
+            _ => return fail,
+        }
+        if mem::map(LONGRUN_PAGE, 1, mem::WRITE).is_err() {
+            return fail;
+        }
+        // SAFETY：刚映射的可写页。
+        unsafe { core::ptr::write_volatile(LONGRUN_PAGE as *mut u64, cycle) };
+        if mem::unmap(LONGRUN_PAGE, 1).is_err() {
+            return fail;
+        }
+    }
+    println!("longrun: done cycles={}", LONGRUN_CYCLES);
+    0
 }

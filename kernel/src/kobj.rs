@@ -93,6 +93,11 @@ pub fn capacity() -> usize {
     with(|t| t.capacity())
 }
 
+/// 因世代用尽而永久退役的对象槽位数（长期运行审计用）。
+pub fn retired_slots() -> usize {
+    with(|t| t.retired_slots())
+}
+
 /// 在对象表锁内执行 `f`（只做计数、查表与有界的页表操作；不得在其中执行销毁动作）。
 pub fn with<R>(f: impl FnOnce(&mut Table) -> R) -> R {
     f(&mut TABLE.lock())
@@ -139,9 +144,20 @@ pub fn release_internal(id: ObjId) -> Result<Released, ObjError> {
     with(|t| t.release_internal(id))
 }
 
+/// 清理队列长度（死亡、等待清理过程销毁的对象数）。
+pub fn pending() -> usize {
+    with(|t| t.pending())
+}
+
 /// 对象表统计：(仍在表中的对象数, 清理队列长度, 累计销毁数)。
 pub fn stats() -> (usize, usize, u64) {
     with(|t| (t.live(), t.pending(), t.destroyed()))
+}
+
+/// 累计进入过清理队列的对象数（已销毁 + 仍在队列中），单调不减。
+/// 前后两次读数不同 ⇒ 期间有对象死亡。
+pub fn enqueued_total() -> u64 {
+    with(|t| t.destroyed() + t.pending() as u64)
 }
 
 /// 清理过程：最多销毁 `limit` 个死亡对象，返回实际处理数。

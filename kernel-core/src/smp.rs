@@ -382,6 +382,8 @@ impl ShootdownBoard {
             return Err(SmpError::Busy);
         }
         let generation = st.next_generation;
+        // 这里的代号是「本次击落」的序号，不是长期持有的引用：同一时刻只允许一个请求在途（否则 Busy），
+        // 等待者只等自己那一次。回绕需要在一个等待者等待期间连续发生 2^32 次击落，结构上不可能，故允许回绕（跳过 0）。
         st.next_generation = generation.wrapping_add(1).max(1);
         if !targets.is_empty() {
             st.request = Some(Shootdown { start, pages, pending: targets, generation });

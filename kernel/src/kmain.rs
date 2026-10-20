@@ -8,7 +8,7 @@ use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
 use crate::{appid_demo, arbiter_demo, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, mech_demo, mm, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, wcet};
 #[cfg(feature = "user-programs")]
-use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo};
+use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo, uptr_demo, longrun_demo};
 
 /// 内核版本（横幅中输出）。
 pub const VERSION: &str = "0.0.1";
@@ -144,6 +144,10 @@ pub fn start(boot: &'static BootSpec) -> ! {
         robust_demo::run();
         // J-1：用户态运行时（匿名内存系统调用；用运行时写成的普通 Rust 程序：堆、线程、Channel、异步环）。
         rt_demo::run();
+        // HARDEN-1C：用户指针复制与并发取消映射（多核下不得读写已回收、已分给别的进程的帧）。
+        uptr_demo::run();
+        // HARDEN-1C ③：长期运行（同一组资源反复创建 / 使用 / 关闭 1500 轮后回到基线、容量不塌陷）。
+        longrun_demo::run();
         // SCHED-1：服务质量分级调度（档位规则、动态任务数、过载下的唤醒延迟、压力撤销后恢复）。
         // 纯轮转策略不提供分级语义，其构建跳过这些依赖 QoS 保证的演练（分时构建照常执行）。
         #[cfg(not(feature = "sched-rr"))]
@@ -194,6 +198,10 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("robust", robust_demo::failed()),
         #[cfg(feature = "user-programs")]
         ("rt", rt_demo::failed()),
+        #[cfg(feature = "user-programs")]
+        ("uptr", uptr_demo::failed()),
+        #[cfg(feature = "user-programs")]
+        ("longrun", longrun_demo::failed()),
         #[cfg(feature = "user-programs")]
         ("qos", qos_demo::failed()),
         ("pi", pi_demo::failed()),

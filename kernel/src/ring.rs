@@ -776,8 +776,10 @@ pub fn sys_enter(h: u64, args_ptr: u64) -> i64 {
                 let cqe = Cqe { request_id: c.request_id, user_tag: c.user_tag, op: c.op, reserved: 0, result: result_of(c.terminal) };
                 out[i * CQE_SIZE..(i + 1) * CQE_SIZE].copy_from_slice(&cqe.encode());
             }
-            copy_to_user(args.cq_ptr, &out, CQ_CAPACITY * CQE_SIZE).map_err(user_err)?;
-            r.sm.consume(n);
+            // 已在对象表锁内：用持锁版本（复制成功才消费完成记录，二者必须在同一把锁里）。
+            // 先结束对环的借用再复制，复制成功后重新取环消费——三步都在这一把锁内，期间完成记录不会变化。
+            crate::mm::user::copy_to_user_in(t, pid, args.cq_ptr, &out, CQ_CAPACITY * CQE_SIZE).map_err(user_err)?;
+            ring_mut(t, ring).ok_or(err(SYSTEM_HANDLE_ERROR_INVALID))?.sm.consume(n);
             reaped = n as u32;
         }
         settle_in(t, ring);

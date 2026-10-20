@@ -538,21 +538,22 @@ pub fn run_lifecycle() {
     sched::set_preemption(prev_preemption);
     sched::run(); // 线程运行 user-hello 并退出
     let c3 = kobj::with(|t| t.counts(tobj));
-    check(c3 == Ok((0, 1, Lifecycle::Closing)), "线程退出后应只剩线程表的内部引用");
+    // 退出的线程离开线程表并释放那份内部引用；句柄早已关闭，Task 无人持有即死亡入队（不再拖到进程回收）
+    check(c3 == Err(ObjError::Invalid), "线程退出且无句柄后 Task 应已死亡入队");
     check(proc::state(pid) == Some(ProcState::Exited { code: 0 }), "进程应已退出");
     kprintln!("[JSR-LIFE] thread exited: task counts={:?} process_state={:?}", c3, proc::state(pid));
 
     let info = proc::reap(pid);
     let (_, pending1, _) = kobj::stats();
-    check(info.is_some() && pending1 == 1, "reap 后应只有 Process 在清理队列中");
+    check(info.is_some() && pending1 == 2, "reap 后清理队列应为 Task 与 Process");
     let first = kobj::run_cleanup(1);
     let (_, pending2, _) = kobj::stats();
-    // 销毁 Process 释放线程表（Task 死亡）与自己的退出状态（死亡）：两者只入队，不在本轮递归销毁
-    check(first == 1 && pending2 == 2, "销毁 Process 应级联使 Task 与其退出状态入队（而不是递归销毁）");
+    // 先销毁 Task：它释放线程退出状态，后者只入队，不在本轮递归销毁
+    check(first == 1 && pending2 == 2, "销毁 Task 应级联使其退出状态入队（而不是递归销毁）");
     let second = kobj::run_cleanup(8);
     let (live3, pending3, destroyed3) = kobj::stats();
-    // 第二轮：Task（再级联释放其退出状态）、进程退出状态、线程退出状态，共 3 个，队列清空
-    check(second == 3 && pending3 == 0, "第二轮应销毁 Task 与两个退出状态且清空队列");
+    // 第二轮：Process（再级联释放其退出状态）、线程退出状态、进程退出状态，共 3 个，队列清空
+    check(second == 3 && pending3 == 0, "第二轮应销毁 Process 与两个退出状态且清空队列");
     check(live3 == live0 && destroyed3 == destroyed0 + 4, "对象数未回到基线");
     let reclaimed = frame::free_frames() == free_before;
     check(reclaimed, "页帧未回到基线");

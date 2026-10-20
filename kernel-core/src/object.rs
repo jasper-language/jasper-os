@@ -528,6 +528,22 @@ impl<V, const N: usize> Default for HandleTable<V, N> {
     }
 }
 
+/// 带代次的槽位里「代次用尽、永久退役」的标记值。
+/// Sentinel generation of a slot that is permanently retired.
+pub const GENERATION_RETIRED: u32 = u32::MAX;
+
+/// 槽位释放后的下一个代次：只增不回绕；再增就会撞上 [`GENERATION_RETIRED`] 时返回它，槽位从此退役。
+/// 凡是「标识 = 槽位 + 代次」、并且标识会被长期持有的地方（句柄、CPU 组……）都用它推进代次——
+/// 回绕会让旧标识在槽位复用后「复活」，指向一个毫不相干的新对象。
+/// Next generation for a slot (never wraps; returns [`GENERATION_RETIRED`] when exhausted).
+pub const fn advance_generation(g: u32) -> u32 {
+    if g >= GENERATION_RETIRED - 1 {
+        GENERATION_RETIRED
+    } else {
+        g + 1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -692,5 +708,13 @@ mod tests {
         assert!(ObjectType::Task.is_transferable_v1() && ObjectType::Event.is_transferable_v1());
         assert!(!ObjectType::Channel.is_transferable_v1() && !ObjectType::Process.is_transferable_v1());
         assert!(!ObjectType::Ring.is_transferable_v1() && !ObjectType::AddressSpace.is_transferable_v1());
+    }
+
+    #[test]
+    fn generations_advance_and_retire_instead_of_wrapping() {
+        assert_eq!(advance_generation(0), 1);
+        assert_eq!(advance_generation(GENERATION_RETIRED - 2), GENERATION_RETIRED - 1);
+        assert_eq!(advance_generation(GENERATION_RETIRED - 1), GENERATION_RETIRED, "用尽即退役，不回到 0");
+        assert_eq!(advance_generation(GENERATION_RETIRED), GENERATION_RETIRED, "退役后保持退役");
     }
 }

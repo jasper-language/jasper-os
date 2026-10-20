@@ -9,7 +9,8 @@
 #              证据目录作为构件上传，失败时也上传，便于对照原始串口日志
 # 边界：只调用仓库内的脚本，判据全部在 scripts/accept.sh 里，本文件不复制、不放宽任何判据；
 #       工具链钉到与本地验收相同的 nightly 日期，避免上游每日变化让结果不可复现。
-# 为什么只在公开仓库运行：私有镜像不消耗托管运行器时长，也不产生重复的检查结果。
+# 运行范围：公开仓库的每次推送与拉取请求；开发仓库只在 verify/* 分支运行（用于开发机暂时不能本地跑 QEMU 时），
+# 其余分支不运行，避免重复消耗托管运行器时长与产生重复的检查结果。
 # =============================================================================
 name: ci
 
@@ -35,7 +36,8 @@ env:
 jobs:
   host:
     name: host tests (64/32-bit, AArch64, RISC-V64)
-    if: github.repository == 'jasper-language/jasper-os'
+    # 公开仓库的每次推送；以及开发仓库中 verify/* 分支（开发机上暂停本地 QEMU 期间，用托管运行器做验收）
+    if: github.repository == 'jasper-language/jasper-os' || startsWith(github.ref, 'refs/heads/verify/')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -75,7 +77,8 @@ jobs:
 
   accept:
     name: accept (x86_64 + AArch64 + RISC-V64 QEMU)
-    if: github.repository == 'jasper-language/jasper-os'
+    # 公开仓库的每次推送；以及开发仓库中 verify/* 分支（开发机上暂停本地 QEMU 期间，用托管运行器做验收）
+    if: github.repository == 'jasper-language/jasper-os' || startsWith(github.ref, 'refs/heads/verify/')
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:

@@ -65,6 +65,10 @@ pub mod ring_demo;
 #[cfg(feature = "user-programs")]
 pub mod rt_demo;
 #[cfg(feature = "user-programs")]
+pub mod uptr_demo;
+#[cfg(feature = "user-programs")]
+pub mod longrun_demo;
+#[cfg(feature = "user-programs")]
 pub mod qos_demo;
 #[cfg(feature = "user-programs")]
 pub mod overload_demo;

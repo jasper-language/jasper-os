@@ -159,6 +159,12 @@ impl<T: 'static> ObjectTable<T> {
         self.slots.len()
     }
 
+    /// 因世代用尽而永久退役的槽位数（长期运行审计用：它增长意味着可用容量在下降）。
+    /// Slots permanently retired because their generation was exhausted.
+    pub fn retired_slots(&self) -> usize {
+        self.slots.iter().filter(|s| s.retired).count()
+    }
+
     /// 宿主测试用：从测试堆上泄漏出一份容量为 `n` 的存储并安装。
     #[cfg(test)]
     pub(crate) fn for_test(n: usize) -> Self {
