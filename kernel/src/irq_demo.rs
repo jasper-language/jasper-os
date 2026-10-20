@@ -718,7 +718,10 @@ fn service(n: usize) {
     let in_order = OUT_OF_ORDER.load(Ordering::Relaxed) == 0;
     // 每个核至少在完成时间的一半里都在处理（分片量最少的核先处理完）
     let cores_busy = many.cpus_used == n && many.least_busy * 2 >= many.makespan;
-    let faster = speedup >= n as u64 * 500;
+    // 判据是「N 分片确实并行推进」，不是「必须接近线性加速」：宿主核数少于 vCPU 时
+    // （例如 2 核跑 4 vCPU 的 QEMU），加速比会明显低于线性，但串行化仍只有约 1000‰。
+    // 因此取 1.4× 作为下限——既能区分「并行」与「串行」，又不对受限宿主提不切实际的要求。
+    let faster = speedup >= n as u64 * 350;
     check(done_one && done_many, "分片服务没有处理完全部请求");
     check(in_order, "分片服务出现流内乱序");
     check(imbalance <= IMBALANCE_BOUND, "各分片处理量不均衡度超过上界");

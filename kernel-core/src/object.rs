@@ -295,34 +295,56 @@ impl Default for ObjectManager {
     }
 }
 
+/// 句柄原始值的唯一事实来源。
+///
+/// 所有出现句柄值的地方（`HandleId`、IPC 记录、`SpawnDesc` 输出、用户侧数组）都必须引用它，
+/// 不允许各写各的整数宽度。位宽是**编译期**决定：它进入系统调用寄存器约定与共享内存布局，
+/// 运行时可变会让同一二进制在不同配置下互不兼容。
+/// English: single source of truth for the raw handle width (compile-time).
+pub type HandleRaw = u64;
+
+/// 句柄低位用于索引的位数。
+pub const HANDLE_INDEX_BITS: u32 = 32;
+/// 句柄高位用于代次的位数。
+pub const HANDLE_GEN_BITS: u32 = 32;
+
+const HANDLE_INDEX_MASK: HandleRaw = (1 << HANDLE_INDEX_BITS) - 1;
+
+/// 一个句柄值在内存与线格式里占用的字节数（由位宽别名推导，调用点不得写死 4 或 8）。
+/// Byte width of one handle value on the wire and in memory.
+pub const HANDLE_BYTES: usize = core::mem::size_of::<HandleRaw>();
+
+/// 代次可表示的最大值；达到它之后槽位永久退役。
+const MAX_GENERATION: u32 = if HANDLE_GEN_BITS >= 32 { u32::MAX } else { (1u32 << HANDLE_GEN_BITS) - 1 };
+
 /// 句柄值（不透明）。用户态只看到 [`HandleId::raw`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct HandleId(u32);
+pub struct HandleId(HandleRaw);
 
 impl HandleId {
     /// 空句柄（永远无效）。
     pub const NULL: HandleId = HandleId(0);
 
-    fn encode(index: usize, generation: u16) -> HandleId {
-        HandleId(((generation as u32) << 16) | (index as u32 + 1))
+    fn encode(index: usize, generation: u32) -> HandleId {
+        HandleId(((generation as HandleRaw) << HANDLE_INDEX_BITS) | (index as HandleRaw + 1))
     }
 
     fn index(self) -> Option<usize> {
-        let low = (self.0 & 0xFFFF) as usize;
-        low.checked_sub(1)
+        let low = self.0 & HANDLE_INDEX_MASK;
+        usize::try_from(low.checked_sub(1)?).ok()
     }
 
-    fn generation(self) -> u16 {
-        (self.0 >> 16) as u16
+    fn generation(self) -> u32 {
+        (self.0 >> HANDLE_INDEX_BITS) as u32
     }
 
     /// 原始值（跨陷入边界传递用）。
-    pub const fn raw(self) -> u32 {
+    pub const fn raw(self) -> HandleRaw {
         self.0
     }
 
     /// 由原始值还原（不做校验，校验发生在查表时）。
-    pub const fn from_raw(raw: u32) -> HandleId {
+    pub const fn from_raw(raw: HandleRaw) -> HandleId {
         HandleId(raw)
     }
 }
@@ -352,7 +374,7 @@ impl HandleError {
 /// 句柄表的一个槽位。
 struct Slot<V> {
     /// 当前世代：槽位每被释放一次加一。
-    generation: u16,
+    generation: u32,
     /// 世代耗尽后永久退役，不再分配。
     retired: bool,
     /// 占用时的值与权限。
@@ -437,9 +459,12 @@ impl<V, const N: usize> HandleTable<V, N> {
         let mut n = 0;
         for slot in self.slots.iter_mut() {
             if let Some((value, _)) = slot.entry.take() {
-                match slot.generation.checked_add(1) {
-                    Some(g) => slot.generation = g,
-                    None => slot.retired = true,
+                // 代次达到「可表示的最大值」时退役：位宽是索引+代次之和，
+                // 超过这个值再编码就会截断并让旧句柄重新有效。
+                if slot.generation >= MAX_GENERATION {
+                    slot.retired = true;
+                } else {
+                    slot.generation += 1;
                 }
                 self.live -= 1;
                 n += 1;
@@ -455,14 +480,23 @@ impl<V, const N: usize> HandleTable<V, N> {
     }
 
     /// 关闭句柄并取回值。之后该句柄值永远无效。
+    /// 仅测试使用：把某个槽位的代次直接设为 `gen`（用于验证代次耗尽语义）。
+    #[cfg(test)]
+    pub fn force_generation_for_test(&mut self, index: usize, gen: u32) {
+        if let Some(slot) = self.slots.get_mut(index) {
+            slot.generation = gen;
+        }
+    }
+
     pub fn remove(&mut self, h: HandleId) -> Result<V, HandleError> {
         self.slot(h)?;
         let index = h.index().ok_or(HandleError::Invalid)?;
         let slot = &mut self.slots[index];
         let (value, _) = slot.entry.take().ok_or(HandleError::Invalid)?;
-        match slot.generation.checked_add(1) {
-            Some(g) => slot.generation = g,
-            None => slot.retired = true,
+        if slot.generation >= MAX_GENERATION {
+            slot.retired = true;
+        } else {
+            slot.generation += 1;
         }
         self.live -= 1;
         Ok(value)
@@ -621,12 +655,24 @@ mod tests {
     }
 
     #[test]
+    fn handle_width_matches_declared_bits() {
+        // 「不硬编码」的守卫：索引位 + 代次位必须恰好填满原始值的宽度。
+        assert_eq!(
+            HANDLE_INDEX_BITS + HANDLE_GEN_BITS,
+            (core::mem::size_of::<HandleRaw>() * 8) as u32,
+            "句柄位宽常量与 HandleRaw 的实际宽度不一致"
+        );
+        assert_eq!(HANDLE_BYTES, core::mem::size_of::<HandleRaw>(), "线格式元素宽度必须随句柄宽度推导");
+    }
+
+    #[test]
     fn slot_retires_when_generation_exhausted() {
         let mut t: HandleTable<u8, 1> = HandleTable::new();
-        for _ in 0..=u16::MAX as u32 {
-            let h = t.put(0, Rights::NONE).unwrap();
-            t.remove(h).unwrap();
-        }
+        // 逐次递增跑不完；直接把槽位摆到「可表示的最大代次」再放进/取出一次。
+        let max_gen = MAX_GENERATION;
+        t.force_generation_for_test(0, max_gen);
+        let h = t.put(0, Rights::NONE).unwrap();
+        t.remove(h).unwrap();
         assert_eq!(t.put(0, Rights::NONE), Err(HandleError::TableFull), "世代耗尽的槽位不再复用");
     }
 

@@ -67,6 +67,8 @@ pub struct MemoryParams {
     pub max_process_frames: usize,
     /// 单次映射 / 取消映射最多涉及的页数。
     pub max_map_pages: u64,
+    /// 页帧位图的字数（每字 64 帧；16K 字 ≈ 4 GiB，256K 字 ≈ 64 GiB）。
+    pub frame_bitmap_words: usize,
 }
 
 /// 对象与句柄参数。
@@ -119,6 +121,59 @@ pub struct DiagParams {
     pub irq_queue_len: usize,
 }
 
+/// 内存治理策略。
+/// Memory management strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryPolicy {
+    /// 压力感知：按缺页延迟与换入换出频率分级。
+    PressureAware,
+    /// 固定阈值：只看水位线，简单但容易抖动。
+    FixedThreshold,
+}
+
+impl MemoryPolicy {
+    /// 稳定文本名。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            MemoryPolicy::PressureAware => "pressure-aware",
+            MemoryPolicy::FixedThreshold => "fixed-threshold",
+        }
+    }
+}
+
+/// 功耗策略。
+/// Power management strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerPolicy {
+    /// 空闲时拉长 tick 间隔（等价于浅层 tickless）。
+    Tickless,
+    /// 固定周期 tick。
+    Periodic,
+}
+
+impl PowerPolicy {
+    /// 稳定文本名。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            PowerPolicy::Tickless => "tickless",
+            PowerPolicy::Periodic => "periodic",
+        }
+    }
+}
+
+/// 策略选择（POL-6）：内存与功耗各自可替换。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyParams {
+    /// 内存治理策略。
+    pub memory: MemoryPolicy,
+    /// 功耗策略。
+    pub power: PowerPolicy,
+    /// 空闲时 tick 间隔的倍率（Tickless 下 ≥2；Periodic 下必须为 1）。
+    pub idle_tick_divisor: u32,
+    /// 新建 CPU 组的默认份额（千分比）：未显式指定时使用。
+    pub group_share_permille: u32,
+}
+
 /// 一个完整的内核配置档。
 /// A complete kernel configuration profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +194,8 @@ pub struct KernelConfig {
     pub ipc: IpcParams,
     /// 诊断。
     pub diag: DiagParams,
+    /// 策略选择。
+    pub policy: PolicyParams,
 }
 
 /// 配置不合法：`field` 是违反约束的参数名（与 [`KernelConfig::for_each_field`] 的名字一致）。
@@ -186,6 +243,8 @@ impl KernelConfig {
             pressure: PressureParams::DEFAULT,
             max_process_frames: 8192,
             max_map_pages: 1024,
+            // 256K 字 × 64 帧 × 4 KiB = 64 GiB 物理内存（.bss 占 2 MiB）。
+            frame_bitmap_words: 256 * 1024,
         },
         objects: ObjectParams { max_objects: 1024, handles_per_process: 64 },
         ring: RingParams {
@@ -202,6 +261,7 @@ impl KernelConfig {
             max_total_bytes: 16 * 1024 * 1024,
         },
         diag: DiagParams { trace_capacity: 32, irq_queue_len: 64 },
+        policy: PolicyParams { memory: MemoryPolicy::PressureAware, power: PowerPolicy::Tickless, idle_tick_divisor: 4, group_share_permille: 250 },
     };
 
     /// 紧凑配置档：250 Hz、时间片减半（交互档 1 tick），看门狗阈值按相同的墙钟时间（0.5 秒）换算；
@@ -223,6 +283,8 @@ impl KernelConfig {
             pressure: PressureParams { low_permille: 100, critical_permille: 40, reserve_frames: 128 },
             max_process_frames: 8192,
             max_map_pages: 1024,
+            // 紧凑档只覆盖 4 GiB，把 .bss 压回 128 KiB。
+            frame_bitmap_words: 16 * 1024,
         },
         objects: ObjectParams { max_objects: 512, handles_per_process: 64 },
         ring: RingParams {
@@ -239,11 +301,22 @@ impl KernelConfig {
             max_total_bytes: 8 * 1024 * 1024,
         },
         diag: DiagParams { trace_capacity: 16, irq_queue_len: 32 },
+        policy: PolicyParams { memory: MemoryPolicy::FixedThreshold, power: PowerPolicy::Periodic, idle_tick_divisor: 1, group_share_permille: 500 },
     };
 
     /// 检查参数之间的约束；通过返回 `Ok(())`，否则返回第一个违反约束的参数名。`const`：内核在编译期调用。
     /// Check all parameter constraints (usable in `const` context).
     pub const fn validate(&self) -> Result<(), ConfigError> {
+        // 策略与空闲倍率必须自洽：tickless 需要拉长间隔，periodic 必须保持 1。
+        match (self.policy.power, self.policy.idle_tick_divisor) {
+            (PowerPolicy::Tickless, d) if d >= 2 => {}
+            (PowerPolicy::Periodic, 1) => {}
+            _ => return Err(ConfigError { field: "policy.idle_tick_divisor" }),
+        }
+        // 组份额必须在 (0, 1000] 内，否则组永远得不到处理器或永远独占。
+        if self.policy.group_share_permille == 0 || self.policy.group_share_permille > 1000 {
+            return Err(ConfigError { field: "policy.group_share_permille" });
+        }
         macro_rules! require {
             ($cond:expr, $field:literal) => {
                 if !$cond {
@@ -408,6 +481,18 @@ mod tests {
         assert_eq!(c.ms_to_ticks(10), 1);
         assert_eq!(c.ms_to_ticks(11), 2);
         assert_eq!(KernelConfig::COMPACT.ms_to_ticks(10), 3); // 250 Hz：2.5 tick 向上取整
+    }
+
+    #[test]
+    #[test]
+    fn policy_must_match_idle_divisor() {
+        let mut bad = KernelConfig::STANDARD;
+        bad.policy.idle_tick_divisor = 1; // tickless 却要求每 tick 都唤醒
+        assert!(bad.validate().is_err(), "tickless 与 divisor=1 必须被拒");
+        let mut ok = KernelConfig::COMPACT;
+        ok.policy.power = crate::config::PowerPolicy::Tickless;
+        ok.policy.idle_tick_divisor = 2;
+        assert!(ok.validate().is_ok(), "periodic→tickless 且倍率≥2 应通过");
     }
 
     #[test]

@@ -23,7 +23,7 @@ use crate::sync::SpinLock;
 
 /// 内核支持的逻辑处理器数上限（[`CpuSet`] 的位宽）。
 /// Maximum number of logical processors.
-pub const MAX_CPUS: usize = 16;
+pub const MAX_CPUS: usize = 32;
 
 /// 一次击落允许的最大页数（超过时调用者应改为整体作废）。
 /// Maximum pages in a single shootdown request.
@@ -597,6 +597,13 @@ mod tests {
     }
 
     #[test]
+    fn cpu_set_covers_all_slots() {
+        // HARDEN-1：CPU 容量不得超过位图宽度，否则 CpuSet 会静默截断。
+        assert!(MAX_CPUS <= 32, "CpuSet 是 u32 位图，MAX_CPUS 不能超过 32");
+        assert_eq!(CpuSet::first(MAX_CPUS).len(), MAX_CPUS);
+    }
+
+    #[test]
     fn topology_boot_first_dedup_and_overflow_counted() {
         let mut t = Topology::boot_only(7);
         t.push(7); // 重复：忽略
@@ -606,11 +613,12 @@ mod tests {
         assert_eq!(t.index_of(2), Some(2));
         assert_eq!(t.hw_id(0), Some(7));
         assert_eq!(t.hw_id(3), None);
-        for i in 100..120 {
+        // 推到容量之上 5 条：丢弃数应当恰好是 5，与 MAX_CPUS 的具体取值无关。
+        for i in 100..(100 + (MAX_CPUS as u32 + 2)) {
             t.push(i);
         }
         assert_eq!(t.count(), MAX_CPUS);
-        assert_eq!(t.dropped, 3 + 20 - MAX_CPUS);
+        assert_eq!(t.dropped, 5);
     }
 
     #[test]

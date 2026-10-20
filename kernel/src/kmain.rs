@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{arbiter_demo, balance_demo, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, mech_demo, mm, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, wcet};
+use crate::{appid_demo, arbiter_demo, balance_demo, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, mech_demo, mm, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, wcet};
 #[cfg(feature = "user-programs")]
 use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo};
 
@@ -169,6 +169,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
         // T-2：基准（时钟中断、上下文切换、页帧、堆、系统调用、异步环、IPC 往返）与按预算评估参数取值。
         bench_demo::run();
     }
+    // DRV-0：应用身份的写入与不可变性（放在最后，避免占用早期演练依赖的对象编号）。
+    appid_demo::run();
     // WCET 证据：关键路径的最大实测值（系统调用周期、交互唤醒 tick）。
     wcet::report();
     // 各演练的断言失败数（顺序即输出顺序）；未编译的演练不出现。
@@ -183,6 +185,7 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("job", job_demo::failed()),
         ("rtclass", rtclass_demo::failed()),
         ("arbiter", arbiter_demo::failed()),
+        ("appid", appid_demo::failed()),
         #[cfg(feature = "user-programs")]
         ("ring", ring_demo::failed()),
         #[cfg(feature = "user-programs")]

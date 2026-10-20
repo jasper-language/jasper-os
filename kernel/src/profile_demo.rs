@@ -169,6 +169,45 @@ pub fn run() {
         check(full.services().len() > min.services().len(), "两份 Profile 的服务数应不同");
     }
 
+    // 配额策略：两种配置档的每进程上限必须真的不同（standard 更大）。
+    let std_tasks = kernel_core::profile::HEADLESS.config.sched.max_tasks;
+    let min_tasks = kernel_core::profile::HEADLESS_MIN.config.sched.max_tasks;
+    let std_objects = kernel_core::profile::HEADLESS.config.objects.max_objects;
+    let min_objects = kernel_core::profile::HEADLESS_MIN.config.objects.max_objects;
+    kprintln!(
+        "[JSR-PROFILE] quota-diff standard_tasks={} compact_tasks={} standard_objects={} compact_objects={}",
+        std_tasks, min_tasks, std_objects, min_objects
+    );
+    check(std_tasks > min_tasks && std_objects > min_objects, "两种配置档的配额上限应不同");
+
+    // tickless 的真前提：硬件是否提供一次性定时器。不支持就如实降级，不能假装省电。
+    let oneshot = crate::arch::timer_set_next(0) || crate::arch::timer_set_next(0);
+    let policy = kernel_core::profile::HEADLESS.config.policy;
+    kprintln!(
+        "[JSR-PROFILE] tickless power={} oneshot_supported={} idle_divisor={}",
+        policy.power.as_str(),
+        oneshot,
+        policy.idle_tick_divisor
+    );
+    if !oneshot {
+        kprintln!("[JSR-PROFILE] tickless degraded=periodic reason=no_oneshot_timer");
+    }
+
+    // 组份额策略：两种配置档的默认 CPU 组份额不同，且可用默认值直接建组。
+    let std_share = kernel_core::profile::HEADLESS.config.policy.group_share_permille;
+    let min_share = kernel_core::profile::HEADLESS_MIN.config.policy.group_share_permille;
+    let current_share = kernel_core::config::KernelConfig::STANDARD.policy.group_share_permille;
+    kprintln!(
+        "[JSR-PROFILE] group-share standard={} compact={} current={}",
+        std_share, min_share, current_share
+    );
+    check(std_share != min_share, "两种配置档的默认组份额应不同");
+
+    // 热加载开关：内建 Profile 都不允许热加载，因此任何声明 hot_load 的模块都会被拒。
+    let hot = kernel_core::profile::HEADLESS.hot_load || kernel_core::profile::HEADLESS_MIN.hot_load;
+    kprintln!("[JSR-PROFILE] hot_load enabled={}", hot);
+    check(!hot, "内建 Profile 不应开启热加载（尚无加载器）");
+
     // 四类非法样例。
     reject_case("missing-capability", BAD_MISSING, ProfileErrorCode::MissingCapability);
     reject_case("capability-conflict", BAD_CONFLICT, ProfileErrorCode::CapabilityConflict);

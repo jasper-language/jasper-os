@@ -103,6 +103,9 @@ pub struct CoreQuota {
     last_tick: u64,
     /// 平滑后的 tick 长度（周期计数；0 = 尚未测得，只按次数限制）。
     tick_cycles: u64,
+    /// 基准 tick 长度（第一个测得的 tick）：次数上限按「当前 / 基准」放大，
+    /// 这样 tick 被拉长（空闲合并）时，每秒允许的中断次数不会跟着变少。
+    base_cycles: u64,
     used_cycles: u64,
     used_count: u32,
     /// 因预算而被节流的中断线集合。
@@ -122,6 +125,7 @@ impl CoreQuota {
             params,
             last_tick: 0,
             tick_cycles: 0,
+            base_cycles: 0,
             used_cycles: 0,
             used_count: 0,
             throttled: 0,
@@ -142,6 +146,25 @@ impl CoreQuota {
     /// Current parameters.
     pub const fn params(&self) -> QuotaParams {
         self.params
+    }
+
+    /// 本 tick 的中断次数上限：按 tick 相对基准的长度等比放大。
+    ///
+    /// 为什么需要：次数上限原本是"每 tick 多少次"，一旦空闲合并把 tick 拉长，
+    /// 同一 tick 内的中断自然变多，固定上限会把正常负载判成超预算。
+    /// English: scale the per-tick interrupt count limit with the tick length.
+    pub const fn count_limit(&self) -> u32 {
+        if self.base_cycles == 0 || self.tick_cycles == 0 {
+            return self.params.max_per_tick;
+        }
+        let scale = self.tick_cycles / self.base_cycles;
+        let scale = if scale == 0 { 1 } else { scale };
+        let limit = self.params.max_per_tick as u64 * scale;
+        if limit > u32::MAX as u64 {
+            u32::MAX
+        } else {
+            limit as u32
+        }
     }
 
     /// 本 tick 可用的周期计数上限（tick 长度尚未测得时为 `None`）。
@@ -169,7 +192,7 @@ impl CoreQuota {
         self.handled += 1;
         self.cycles_total = self.cycles_total.saturating_add(cycles);
         let over_time = self.limit_cycles().is_some_and(|l| self.used_cycles >= l);
-        let over_count = self.used_count >= self.params.max_per_tick;
+        let over_count = self.used_count >= self.count_limit();
         if (over_time || over_count) && line < MAX_LINES {
             if self.throttled & (1 << line) == 0 {
                 self.throttle_events += 1;
@@ -188,6 +211,10 @@ impl CoreQuota {
         if self.last_tick != 0 && now > self.last_tick {
             let delta = now - self.last_tick;
             self.tick_cycles = if self.tick_cycles == 0 { delta } else { (self.tick_cycles * 3 + delta) / 4 };
+            if self.base_cycles == 0 {
+                // 第一个 tick 作为基准；之后 tick 被拉长，次数上限按比例放大。
+                self.base_cycles = self.tick_cycles;
+            }
         }
         self.last_tick = now;
         self.used_cycles = 0;
@@ -393,6 +420,28 @@ mod tests {
         // 补充：交还节流集合，预算清零
         assert_eq!(b.on_tick(12_000), 1 << 5);
         assert_eq!(b.charge(5, 10), Charge::Within);
+    }
+
+    #[test]
+    fn count_limit_scales_with_tick_length() {
+        let p = QuotaParams { permille: 250, max_per_tick: 10 };
+        let mut q = CoreQuota::new(p);
+        // 先建立基准：两次相隔 1000 周期的 tick（第一次只记录起点）。
+        q.on_tick(1000);
+        q.on_tick(2000);
+        assert_eq!(q.count_limit(), 10);
+        // tick 被拉长到 4 倍（空闲合并）：EWMA 需要几个 tick 收敛，之后次数上限按比例放大。
+        let mut now = 2000;
+        for _ in 0..12 {
+            now += 5000;
+            q.on_tick(now);
+        }
+        assert!(q.count_limit() >= 35, "拉长后次数上限应显著放大：{}", q.count_limit());
+        // tick 变短时不缩小到 0。
+        let mut r = CoreQuota::new(p);
+        r.on_tick(1000);
+        r.on_tick(1100);
+        assert!(r.count_limit() >= 1);
     }
 
     #[test]

@@ -163,7 +163,9 @@ fn ring_records_roundtrip_any_bytes() {
         let s: [u8; 32] = b[..32].try_into().unwrap();
         assert_eq!(Sqe::decode(&s).encode(), s);
         assert_eq!(Cqe::decode(&s).encode(), s);
-        assert_eq!(MsgDesc::decode(&s).encode(), s);
+        // MsgDesc 现在是 40 字节（多出内核盖章的发送方字段）。
+        let md: [u8; 40] = b[..40].try_into().unwrap();
+        assert_eq!(MsgDesc::decode(&md).encode(), md);
         assert_eq!(EnterArgs::decode(&b).encode(), b);
     }
 }
@@ -389,10 +391,10 @@ fn object_table_matches_reference_model() {
 fn handle_table_never_resolves_stale_handles() {
     let mut rng = Rng::new(0x4A11);
     let mut t: HandleTable<u64, 4> = HandleTable::new();
-    let mut live: HashMap<u32, u64> = HashMap::new();
-    let mut stale: HashSet<u32> = HashSet::new();
+    let mut live: HashMap<u64, u64> = HashMap::new();
+    let mut stale: HashSet<u64> = HashSet::new();
     let mut next = 0u64;
-    // 足够多的轮次，让槽位世代耗尽并退役（16 位世代 × 4 个槽位）
+    // 足够多的轮次覆盖反复分配释放；断言重点是「旧句柄永不复活」，与代次是否耗尽无关
     for step in 0..400_000u64 {
         if rng.chance(55) {
             next += 1;

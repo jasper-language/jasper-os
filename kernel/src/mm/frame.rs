@@ -18,7 +18,8 @@ use crate::boot::BootSpec;
 use crate::sync::IrqSpinLock;
 
 /// 位图字数：16384 × 64 帧 × 4 KiB = 4 GiB 物理地址空间（位图本身占 128 KiB）。
-pub const BITMAP_WORDS: usize = 16 * 1024;
+/// 位图字数随配置档变化：standard 覆盖 64 GiB，compact 覆盖 4 GiB。
+pub const BITMAP_WORDS: usize = crate::config::ACTIVE.memory.frame_bitmap_words;
 
 /// 位图存储（`.bss`，由引导器清零映射）。只在 [`init`] 中被借出一次。
 static mut BITMAP: [u64; BITMAP_WORDS] = [0; BITMAP_WORDS];

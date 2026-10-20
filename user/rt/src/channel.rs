@@ -32,8 +32,8 @@ pub struct Received {
 
 /// 新建一对相连的端点。
 pub fn pair() -> Result<(Channel, Channel)> {
-    let mut out = [0u32; 2];
-    // SAFETY：out 是本函数栈上 8 字节的可写缓冲。
+    let mut out = [0u64; 2];
+    // SAFETY：out 是本函数栈上 16 字节的可写缓冲。
     check(unsafe { sys::call3(ids::SYSTEM_CHANNEL_CREATE, out.as_mut_ptr() as u64, 0, 0) })?;
     // SAFETY：内核刚放入本进程句柄表的两个新句柄。
     Ok(unsafe { (Channel(Handle::from_raw(out[0])), Channel(Handle::from_raw(out[1]))) })
@@ -62,7 +62,7 @@ impl Channel {
 
     /// 发送字节与句柄。成功时句柄随消息转移给接收方；失败时原样交还（连同错误）。
     pub fn send_with(&self, data: &[u8], handles: Vec<Handle>) -> core::result::Result<(), (Error, Vec<Handle>)> {
-        let raw: Vec<u32> = handles.iter().map(Handle::raw).collect();
+        let raw: Vec<u64> = handles.iter().map(Handle::raw).collect();
         match self.send_raw(data, &raw) {
             Ok(()) => {
                 for h in handles {
@@ -74,7 +74,7 @@ impl Channel {
         }
     }
 
-    fn send_raw(&self, data: &[u8], handles: &[u32]) -> Result<()> {
+    fn send_raw(&self, data: &[u8], handles: &[u64]) -> Result<()> {
         if data.len() > MAX_BYTES || handles.len() > MAX_HANDLES {
             return Err(Error::INVALID_ARGUMENT);
         }
@@ -85,6 +85,8 @@ impl Channel {
             handles_cap: handles.len() as u32,
             out_data_len: 0,
             out_handles: 0,
+            out_sender: 0,
+            reserved: 0,
         };
         let b = desc.encode();
         // SAFETY：描述、消息体、句柄数组都在调用期间有效；内核在返回前复制完毕。
@@ -116,7 +118,7 @@ impl Channel {
 
     /// 接收一次；失败时附带内核报告的消息字节数（仅缓冲区不足时有意义）。
     fn recv_into(&self, buf: &mut [u8]) -> core::result::Result<(Received, usize), (Error, usize)> {
-        let mut hs = [0u32; MAX_HANDLES];
+        let mut hs = [0u64; MAX_HANDLES];
         let desc = MsgDesc {
             data_ptr: buf.as_mut_ptr() as u64,
             handles_ptr: hs.as_mut_ptr() as u64,
@@ -124,6 +126,8 @@ impl Channel {
             handles_cap: MAX_HANDLES as u32,
             out_data_len: 0,
             out_handles: 0,
+            out_sender: 0,
+            reserved: 0,
         };
         let mut b: [u8; MSG_DESC_SIZE] = desc.encode();
         // SAFETY：描述、缓冲区、句柄数组都在调用期间有效（同步 recv 在返回前完成交付）。

@@ -170,6 +170,20 @@ pub trait Platform {
     /// 中断初始化：中断控制器与周期定时器（`timer_hz` 为目标频率）。不打开中断。
     fn irq_init(timer_hz: u32);
 
+    /// 把下一次定时器中断推迟到 `ticks_ahead` 个 tick 之后（一次性定时器）。
+    ///
+    /// 只有硬件支持一次性定时器时才返回 `true`；默认实现返回 `false`（不支持），
+    /// 调用方据此把「tickless」如实降级为「周期 tick」，而不是假装省电。
+    /// English: schedule a one-shot tick; default implementation reports unsupported.
+    fn timer_set_next(_ticks_ahead: u32) -> bool {
+        false
+    }
+
+    /// 当前是否处于一次性定时器模式（需要在每次 tick 后重新武装）。
+    fn timer_oneshot_active() -> bool {
+        false
+    }
+
     /// 向控制台输出一个字节（阻塞直到设备可写）。调用者负责中断临界区。
     fn console_write_byte(byte: u8);
 
@@ -390,6 +404,16 @@ pub fn early_init() {
     Current::early_init()
 }
 /// 见 [`Platform::irq_init`]。
+/// 一次性定时器能力：把下一次 tick 推迟 `ticks_ahead` 个周期；不支持时返回 false。
+pub fn timer_set_next(ticks_ahead: u32) -> bool {
+    Current::timer_set_next(ticks_ahead)
+}
+
+/// 是否处于一次性定时器模式。
+pub fn timer_oneshot_active() -> bool {
+    Current::timer_oneshot_active()
+}
+
 pub fn irq_init(timer_hz: u32) {
     Current::irq_init(timer_hz)
 }

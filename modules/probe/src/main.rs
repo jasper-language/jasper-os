@@ -18,12 +18,13 @@
 #![no_std]
 #![no_main]
 
-use core::sync::atomic::{AtomicU32, Ordering};
-
 use jaso_module::log;
 
 /// 已绑定的句柄值（0 = 未绑定）。
-static BOUND: AtomicU32 = AtomicU32::new(0);
+///
+/// 句柄是 64 位的逻辑值，但并非每个目标都提供 64 位原子操作；绑定只发生在装载阶段、
+/// 由单线程完成，之后只读，因此用普通静态变量配合易失访问即可。
+static mut BOUND: u64 = 0;
 
 /// 原始系统调用（与运行时相同的寄存器约定；返回值非负 = 成功值，负数 = `-(错误 ID)`）。
 #[cfg(target_arch = "x86_64")]
@@ -79,12 +80,13 @@ unsafe fn put8(out: *mut u8, cap: usize, v: u64) -> isize {
 /// # Safety
 /// `name` 可读 `len` 字节。
 #[no_mangle]
-pub unsafe extern "C" fn jaso_bind(name: *const u8, len: usize, handle: u32) -> i32 {
+pub unsafe extern "C" fn jaso_bind(name: *const u8, len: usize, handle: u64) -> i32 {
     let n = core::slice::from_raw_parts(name, len);
     if n != b"system.task.wait" || handle == 0 {
         return 1;
     }
-    BOUND.store(handle, Ordering::Relaxed);
+    // SAFETY：绑定只在装载阶段由单线程写入一次，之后只读。
+    unsafe { core::ptr::addr_of_mut!(BOUND).write_volatile(handle) };
     0
 }
 
@@ -127,7 +129,8 @@ pub unsafe extern "C" fn probe_syscall(input: *const u8, len: usize, out: *mut u
 /// 输出可写 `cap` 字节。
 #[no_mangle]
 pub unsafe extern "C" fn probe_bound(_input: *const u8, _len: usize, out: *mut u8, cap: usize) -> isize {
-    match BOUND.load(Ordering::Relaxed) {
+    // SAFETY：只读上面写入的句柄值。
+    match unsafe { core::ptr::addr_of!(BOUND).read_volatile() } {
         0 => -1,
         h => put8(out, cap, h as u64),
     }

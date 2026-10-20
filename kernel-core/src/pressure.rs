@@ -99,8 +99,40 @@ impl PressureParams {
         Ok(PressureParams { low_permille, critical_permille, reserve_frames })
     }
 
-    /// 空闲 `free` 帧（共 `total` 帧可分配）时的压力级别。`total = 0` 视为危急。
-    /// Pressure level for `free` of `total` usable frames.
+    /// 按指定内存策略计算压力级别。
+    ///
+    /// 两种策略的差别是可观测的：`PressureAware` 用低/危急两条水位线分级，
+    /// `FixedThreshold` 只看一条水位线（低于 `low_permille` 一律危急），
+    /// 因此同样空闲帧数下两者可能给出不同结论——这正是"策略可替换"的验收点。
+    /// English: compute the level under the given memory policy.
+    pub const fn level_with(&self, policy: crate::config::MemoryPolicy, free: usize, total: usize) -> PressureLevel {
+        use crate::config::MemoryPolicy;
+        if total == 0 {
+            return PressureLevel::Critical;
+        }
+        let f = free as u128 * 1000;
+        match policy {
+            MemoryPolicy::PressureAware => {
+                if f < self.critical_permille as u128 * total as u128 {
+                    PressureLevel::Critical
+                } else if f < self.low_permille as u128 * total as u128 {
+                    PressureLevel::Low
+                } else {
+                    PressureLevel::Normal
+                }
+            }
+            MemoryPolicy::FixedThreshold => {
+                if f < self.low_permille as u128 * total as u128 {
+                    PressureLevel::Critical
+                } else {
+                    PressureLevel::Normal
+                }
+            }
+        }
+    }
+
+    /// 空闲 `free` 帧（共 `total` 帧可分配）时的压力级别（压力感知策略）。`total = 0` 视为危急。
+    /// Pressure level for `free` of `total` usable frames (pressure-aware).
     pub const fn level(&self, free: usize, total: usize) -> PressureLevel {
         if total == 0 {
             return PressureLevel::Critical;
@@ -116,15 +148,21 @@ impl PressureParams {
         }
     }
 
+    /// 准入判定（压力感知策略）。
+    /// Admission under the pressure-aware policy.
+    pub const fn admit(&self, requester: Option<Qos>, frames: usize, free: usize, total: usize) -> Result<PressureLevel, Refusal> {
+        self.admit_with(crate::config::MemoryPolicy::PressureAware, requester, frames, free, total)
+    }
+
     /// 准入判定：`requester` 为请求者的有效档位（`None` = 不属于任何任务的内核内部请求）。
     /// 成功返回分配后的级别。
     /// Admission decision; returns the level after the allocation on success.
-    pub const fn admit(&self, requester: Option<Qos>, frames: usize, free: usize, total: usize) -> Result<PressureLevel, Refusal> {
+    pub const fn admit_with(&self, policy: crate::config::MemoryPolicy, requester: Option<Qos>, frames: usize, free: usize, total: usize) -> Result<PressureLevel, Refusal> {
         if frames > free {
             return Err(Refusal::Exhausted);
         }
         let after = free - frames;
-        let level = self.level(after, total);
+        let level = self.level_with(policy, after, total);
         match requester {
             None => Ok(level),
             Some(q) => {
@@ -235,6 +273,27 @@ mod tests {
         assert_eq!(P.admit(None, 10, 260, total), Ok(PressureLevel::Critical));
         assert_eq!(P.admit(None, 11, 10, total), Err(Refusal::Exhausted));
         assert_eq!(P.admit(Some(Qos::Interactive), 11, 10, total), Err(Refusal::Exhausted));
+    }
+
+    #[test]
+    fn policies_differ_at_the_low_watermark() {
+        use crate::config::MemoryPolicy;
+        let p = PressureParams::DEFAULT;
+        // 空闲 100‰：压力感知给出 Low，固定阈值直接判危急。
+        let aware = p.level_with(MemoryPolicy::PressureAware, 100, 1000);
+        let fixed = p.level_with(MemoryPolicy::FixedThreshold, 100, 1000);
+        assert_eq!(aware, PressureLevel::Low);
+        assert_eq!(fixed, PressureLevel::Critical);
+        assert_ne!(aware, fixed, "两种策略必须在同一水位下给出不同结论");
+        // 充足与耗尽时两者一致，避免策略差异扩散到不该变的地方。
+        assert_eq!(
+            p.level_with(MemoryPolicy::PressureAware, 900, 1000),
+            p.level_with(MemoryPolicy::FixedThreshold, 900, 1000)
+        );
+        assert_eq!(
+            p.level_with(MemoryPolicy::PressureAware, 0, 1000),
+            p.level_with(MemoryPolicy::FixedThreshold, 0, 1000)
+        );
     }
 
     #[test]

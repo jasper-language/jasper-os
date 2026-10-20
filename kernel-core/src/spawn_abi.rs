@@ -11,7 +11,7 @@
 //! 为什么单独成文件：用户程序按同一份布局构造参数块，规则可在宿主上穷举测试。
 
 /// 参数块字节数。
-pub const SPAWN_DESC_SIZE: usize = 48;
+pub const SPAWN_DESC_SIZE: usize = 56;
 /// 子进程映像（ELF）的字节数上限：内核要把它复制进内核缓冲区，必须有界。
 /// Upper bound on the child image size.
 pub const MAX_IMAGE_BYTES: u64 = 2 * 1024 * 1024;
@@ -44,9 +44,9 @@ pub struct SpawnDesc {
     /// 保留，必须为 0。
     pub flags: u32,
     /// 输出：父进程中的子进程句柄。
-    pub out_process: u32,
+    pub out_process: u64,
     /// 输出：父进程中的引导通道端点句柄。
-    pub out_channel: u32,
+    pub out_channel: u64,
 }
 
 /// 参数块被拒的原因（每一项都对应一个稳定的错误码，由内核映射）。
@@ -88,12 +88,12 @@ impl SpawnDesc {
             arg: u64_at(b, 24),
             cpu_limit_permille: u32_at(b, 32),
             flags: u32_at(b, 36),
-            out_process: u32_at(b, 40),
-            out_channel: u32_at(b, 44),
+            out_process: u64_at(b, 40),
+            out_channel: u64_at(b, 48),
         }
     }
 
-    /// 编码为 48 字节。
+    /// 编码为 56 字节。
     /// Encodes to bytes.
     pub fn encode(&self) -> [u8; SPAWN_DESC_SIZE] {
         let mut b = [0u8; SPAWN_DESC_SIZE];
@@ -103,14 +103,14 @@ impl SpawnDesc {
         b[24..32].copy_from_slice(&self.arg.to_le_bytes());
         b[32..36].copy_from_slice(&self.cpu_limit_permille.to_le_bytes());
         b[36..40].copy_from_slice(&self.flags.to_le_bytes());
-        b[40..44].copy_from_slice(&self.out_process.to_le_bytes());
-        b[44..48].copy_from_slice(&self.out_channel.to_le_bytes());
+        b[40..48].copy_from_slice(&self.out_process.to_le_bytes());
+        b[48..56].copy_from_slice(&self.out_channel.to_le_bytes());
         b
     }
 
     /// 只修改输出字段后的编码（内核写回用：其余字段保持调用者给的值）。
     /// Encoding with the output fields set.
-    pub fn with_outputs(mut self, process: u32, channel: u32) -> [u8; SPAWN_DESC_SIZE] {
+    pub fn with_outputs(mut self, process: u64, channel: u64) -> [u8; SPAWN_DESC_SIZE] {
         self.out_process = process;
         self.out_channel = channel;
         self.encode()

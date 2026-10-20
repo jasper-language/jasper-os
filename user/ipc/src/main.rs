@@ -196,11 +196,11 @@ fn recv_sqe(ep: i64, d: &MsgDesc, tag: u64) -> Sqe {
     Sqe { op: ids::SYSTEM_CHANNEL_RECV as u32, flags: 0, user_tag: tag, arg0: ep as u64, arg1: d as *const MsgDesc as u64 }
 }
 
-fn msg(data: &[u8], handles: &[u32]) -> MsgDesc {
+fn msg(data: &[u8], handles: &[u64]) -> MsgDesc {
     MsgDesc { data_ptr: data.as_ptr() as u64, handles_ptr: handles.as_ptr() as u64, data_len: data.len() as u32, handles_cap: handles.len() as u32, ..MsgDesc::default() }
 }
 
-fn rbuf(data: &mut [u8], handles: &mut [u32]) -> MsgDesc {
+fn rbuf(data: &mut [u8], handles: &mut [u64]) -> MsgDesc {
     MsgDesc { data_ptr: data.as_mut_ptr() as u64, handles_ptr: handles.as_mut_ptr() as u64, data_len: data.len() as u32, handles_cap: handles.len() as u32, ..MsgDesc::default() }
 }
 
@@ -239,7 +239,7 @@ fn spawn_worker() -> i64 {
 /// 单进程语义验证。
 fn semantics() -> ! {
     // 1. 创建端点与 Ring
-    let mut pair = [0u32; 2];
+    let mut pair = [0u64; 2];
     check(sys(ids::SYSTEM_CHANNEL_CREATE, pair.as_mut_ptr() as u64, 0) == 0, 1);
     let (a, b) = (pair[0] as i64, pair[1] as i64);
     let ring = sys(ids::SYSTEM_ASYNC_RING_CREATE, 16, 0);
@@ -251,7 +251,7 @@ fn semantics() -> ! {
     let r = enter(ring, &[send_sqe(a, &d, 1)], 4, 1);
     check(r.args.submitted == 1 && r.args.reaped == 1 && r.cqes[0].result == text.len() as i64, 2);
     let mut buf = [0u8; 64];
-    let mut hs = [0u32; 2];
+    let mut hs = [0u64; 2];
     let rd = rbuf(&mut buf, &mut hs);
     let r = enter(ring, &[recv_sqe(b, &rd, 2)], 4, 1);
     let got = r.args.reaped == 1 && r.cqes[0].result == text.len() as i64 && &buf[..text.len()] == text;
@@ -276,10 +276,10 @@ fn semantics() -> ! {
     // 4. 句柄随消息移动；无 TRANSFER / 非叶子被拒且不移动
     let t = spawn_worker();
     check(t > 0, 4);
-    let tv = [t as u32];
+    let tv = [t as u64];
     check(send_now(a, &msg(b"handle", &tv)) == 6, 4);
     let moved_away = close(t) == HANDLE_INVALID;
-    let mut hb = [0u32; 2];
+    let mut hb = [0u64; 2];
     let mut hd = rbuf(&mut buf, &mut hb);
     let n = recv_now(b, &mut hd);
     let received = n == 6 && hd.out_handles == 1 && hb[0] != 0;
@@ -287,15 +287,15 @@ fn semantics() -> ! {
     check(moved_away && received && usable, 4);
     let t2 = spawn_worker();
     let t2_wait = sys(ids::SYSTEM_HANDLE_DUPLICATE, t2 as u64, WAIT);
-    let no_right = send_now(a, &msg(b"x", &[t2_wait as u32]));
-    let non_leaf = send_now(a, &msg(b"x", &[ring as u32]));
+    let no_right = send_now(a, &msg(b"x", &[t2_wait as u64]));
+    let non_leaf = send_now(a, &msg(b"x", &[ring as u64]));
     let kept = close(t2_wait) == 0 && close(t2) == 0 && enter(ring, &[], 0, 0).args.first_error == 0;
     check(no_right == HANDLE_RIGHTS_DENIED && non_leaf == HANDLE_RIGHTS_DENIED && kept, 4);
     say!("handle moved={} received={} no_transfer_right={} ring_handle={} kept_on_failure={}", moved_away, received, no_right, non_leaf, kept);
 
     // 5. 两阶段 send：复制失败（消息体指向内核地址）⇒ 不入队、句柄不动
     let t3 = spawn_worker();
-    let t3_vals = [t3 as u32];
+    let t3_vals = [t3 as u64];
     let bad = MsgDesc { data_ptr: 0xFFFF_8000_0000_0000, handles_ptr: t3_vals.as_ptr() as u64, data_len: 8, handles_cap: 1, ..MsgDesc::default() };
     let bad_send = send_now(a, &bad);
     let t3_kept = sys(ids::SYSTEM_HANDLE_DUPLICATE, t3 as u64, WAIT);
@@ -311,7 +311,7 @@ fn semantics() -> ! {
         }
     }
     let t4 = spawn_worker();
-    let full = send_now(a, &msg(b"q", &[t4 as u32]));
+    let full = send_now(a, &msg(b"q", &[t4 as u64]));
     let t4_kept = close(t4) == 0;
     let mut drained = 0;
     for _ in 0..sent {
@@ -345,7 +345,7 @@ fn semantics() -> ! {
     say!("cancel_then_send cancelled={} message_kept={} deliver_then_cancel={}", cancelled, kept_msg, c2);
 
     // 8. 本端点关闭 ⇒ 其上在飞的 recv 以 cancelled 结束
-    let mut pair2 = [0u32; 2];
+    let mut pair2 = [0u64; 2];
     check(sys(ids::SYSTEM_CHANNEL_CREATE, pair2.as_mut_ptr() as u64, 0) == 0, 8);
     let (c, dd2) = (pair2[0] as i64, pair2[1] as i64);
     let mut ebuf = [0u8; 8];
@@ -379,10 +379,10 @@ fn ping(ep: i64) -> ! {
     let ring = sys(ids::SYSTEM_ASYNC_RING_CREATE, 4, 0);
     let t = spawn_worker();
     check(ring > 0 && t > 0, 21);
-    let r = enter(ring, &[send_sqe(ep, &msg(b"ping", &[t as u32]), 1)], 4, 1);
+    let r = enter(ring, &[send_sqe(ep, &msg(b"ping", &[t as u64]), 1)], 4, 1);
     check(r.cqes[0].result == 4 && close(t) == HANDLE_INVALID, 22);
     let mut buf = [0u8; 16];
-    let mut hs = [0u32; 1];
+    let mut hs = [0u64; 1];
     let d = rbuf(&mut buf, &mut hs);
     let r = enter(ring, &[recv_sqe(ep, &d, 2)], 4, 1);
     let back = r.cqes[0].result == 4 && &buf[..4] == b"pong" && hs[0] != 0;
@@ -396,7 +396,7 @@ fn pong(ep: i64) -> ! {
     let ring = sys(ids::SYSTEM_ASYNC_RING_CREATE, 4, 0);
     check(ring > 0, 31);
     let mut buf = [0u8; 16];
-    let mut hs = [0u32; 1];
+    let mut hs = [0u64; 1];
     let d = rbuf(&mut buf, &mut hs);
     let r = enter(ring, &[recv_sqe(ep, &d, 1)], 4, 1);
     check(r.cqes[0].result == 4 && &buf[..4] == b"ping" && hs[0] != 0, 32);

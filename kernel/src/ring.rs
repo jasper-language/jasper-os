@@ -101,7 +101,7 @@ pub(crate) enum Work {
         /// 消息体。
         body: Vec<u8>,
         /// 要随消息移动的句柄值。
-        handles: Vec<u32>,
+        handles: Vec<u64>,
     },
     /// `system.channel.recv`：目标已建立（缓冲区已固定、端点内部引用已取得）。
     Recv(Box<RecvTarget>),
@@ -579,7 +579,7 @@ pub fn sys_wait(h: u64, ty: ObjectType) -> i64 {
 }
 
 /// 内核自检：以进程 `pid` 的身份经 Ring `h` 提交 send（消息体与句柄值由内核给出，相当于阶段 A 已完成）。
-pub fn submit_send_for(pid: ObjId, h: HandleId, endpoint: HandleId, body: Vec<u8>, handles: Vec<u32>) -> Result<u64, i64> {
+pub fn submit_send_for(pid: ObjId, h: HandleId, endpoint: HandleId, body: Vec<u8>, handles: Vec<u64>) -> Result<u64, i64> {
     submit_work_for(pid, h, SYSTEM_CHANNEL_SEND, 0, Work::Send { endpoint, body, handles })
 }
 

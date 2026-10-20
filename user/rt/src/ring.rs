@@ -79,7 +79,7 @@ impl Ring {
     pub fn create(capacity: u32) -> Result<Ring> {
         let raw = check(sys::call(ids::SYSTEM_ASYNC_RING_CREATE, capacity as u64, 0, 0))?;
         // SAFETY：内核刚放入本进程句柄表的新句柄。
-        Ok(Ring(unsafe { Handle::from_raw(raw as u32) }))
+        Ok(Ring(unsafe { Handle::from_raw(raw) }))
     }
 
     /// Ring 句柄。

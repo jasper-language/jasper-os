@@ -65,6 +65,10 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
             device::on_balance_tick();
             enqueue(line);
             sched::on_timer_interrupt();
+            // 一次性定时器必须在这里重新武装，否则只会触发一次就停。
+            if crate::arch::timer_oneshot_active() {
+                crate::arch::timer_set_next(crate::config::ACTIVE.policy.idle_tick_divisor);
+            }
         }
         // 每核事件只更新本处理器的每核数据，不进全局延迟队列（那是引导处理器主循环的队列）
         IrqLine::LocalTimer => {

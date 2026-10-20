@@ -129,13 +129,16 @@ pub fn render(index: usize, out: &mut [u8]) -> Option<usize> {
     let mut sink = Sink { buf: out, len: 0, overflow: false };
     let _ = write!(
         sink,
-        "profile={}\ndisplay_zh={}\ndisplay_en={}\nactive={}\nparams={}\nmodules={}\n",
+        "profile={}\ndisplay_zh={}\ndisplay_en={}\nactive={}\nparams={}\nmodules={}\nmemory_policy={}\npower_policy={}\nhot_load={}\n",
         declared.name,
         declared.display_zh,
         declared.display_en,
         u8::from(index == active_index()),
         declared.config.name,
-        declared.modules.len()
+        declared.modules.len(),
+        declared.config.policy.memory.as_str(),
+        declared.config.policy.power.as_str(),
+        u8::from(declared.hot_load)
     );
     let _ = write!(sink, "services=");
     write_join(&mut sink, resolved.services());

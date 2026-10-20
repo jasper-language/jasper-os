@@ -193,7 +193,7 @@ where
     match check(ret) {
         Ok(raw) => Ok(JoinHandle {
             // SAFETY：内核刚放入本进程句柄表的新句柄。
-            handle: unsafe { Handle::from_raw(raw as u32) },
+            handle: unsafe { Handle::from_raw(raw) },
             slot,
         }),
         Err(e) => {

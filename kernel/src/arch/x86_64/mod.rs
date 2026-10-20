@@ -77,6 +77,14 @@ impl Platform for X86_64 {
         syscall::init(0);
     }
 
+    fn timer_set_next(ticks_ahead: u32) -> bool {
+        apic::arm_oneshot(ticks_ahead)
+    }
+
+    fn timer_oneshot_active() -> bool {
+        apic::oneshot_active()
+    }
+
     fn irq_init(timer_hz: u32) {
         pic::init();
         pit::init(timer_hz);

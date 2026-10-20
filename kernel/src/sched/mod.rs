@@ -217,6 +217,11 @@ pub fn spawn_in(id: TaskId, name: &'static str, entry: fn(), group: CpuGroupId) 
 
 /// 新建 CPU 组（上限千分比，桶容量取默认值）；调用者持有一份引用，用完以 [`release_cpu_group`] 归还。
 /// Creates a CPU group with the default burst.
+/// 用当前 Profile 的默认份额创建 CPU 组（份额来自配置档，不写死在调用点）。
+pub fn create_cpu_group_default() -> Result<CpuGroupId, GroupError> {
+    create_cpu_group(crate::config::ACTIVE.policy.group_share_permille)
+}
+
 pub fn create_cpu_group(limit_permille: u32) -> Result<CpuGroupId, GroupError> {
     with_mut(|s| s.create_group(limit_permille, policy::CPU_BURST_TICKS))
 }

@@ -39,7 +39,7 @@ pub type BytesFn = unsafe extern "C" fn(*const u8, usize, *mut u8, usize) -> isi
 /// 绑定句柄的可选导出名：`jaso_bind(能力名指针, 长度, 句柄值) -> 0 成功`。模块要接收句柄就必须导出它。
 pub const BIND_SYMBOL: &str = "jaso_bind";
 /// [`BIND_SYMBOL`] 的签名。
-pub type BindFn = unsafe extern "C" fn(*const u8, usize, u32) -> i32;
+pub type BindFn = unsafe extern "C" fn(*const u8, usize, u64) -> i32;
 
 /// 转交给隔离进程的信任参数。
 /// Trust parameters forwarded to the isolated process.

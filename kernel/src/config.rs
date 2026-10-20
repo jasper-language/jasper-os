@@ -32,4 +32,15 @@ pub fn report() {
     ACTIVE.for_each_field(|name, value| {
         kprint!("[JSR-CONFIG] {}={}\n", name, value);
     });
+    // 容量概览（HARDEN-1）：把"实验期定下的容量"显式打印出来，便于逐轮审计与对比。
+    kprintln!(
+        "[JSR-CAP] cpus={} tasks={} objects={} handles={} frames={} rings={} endpoints={}",
+        kernel_core::smp::MAX_CPUS,
+        ACTIVE.sched.max_tasks,
+        ACTIVE.objects.max_objects,
+        ACTIVE.objects.handles_per_process,
+        ACTIVE.memory.max_process_frames,
+        ACTIVE.ring.max_rings_per_process,
+        ACTIVE.ipc.max_endpoints_per_process
+    );
 }

@@ -46,7 +46,7 @@ pub struct SyscallArgs {
 /// 不截断——否则 `0x1_0000_0005` 会被当成句柄 5，同一个句柄出现多种写法。
 /// Interprets a 64-bit register as a handle value without truncation.
 pub(crate) fn handle_arg(v: u64) -> HandleId {
-    u32::try_from(v).map(HandleId::from_raw).unwrap_or(HandleId::NULL)
+    HandleId::from_raw(v)
 }
 
 /// 把用户传入的权限位解释为 [`Rights`]：含未定义的位（或超出 32 位）⇒ `None`（调用方报参数非法），不静默丢弃。
@@ -257,7 +257,7 @@ pub(crate) fn proc_err(e: ProcError) -> i64 {
         ProcError::Handle(HandleError::RightsDenied) => err(SYSTEM_HANDLE_ERROR_RIGHTS_DENIED),
         ProcError::Handle(HandleError::TableFull) => err(SYSTEM_HANDLE_ERROR_TABLE_FULL),
         ProcError::NotTransferable => err(SYSTEM_HANDLE_ERROR_NOT_TRANSFERABLE),
-        ProcError::NoSuchProcess | ProcError::Exited => err(SYSTEM_ERROR_RIGHTS_DENIED),
+        ProcError::NoSuchProcess | ProcError::Exited | ProcError::BadApp => err(SYSTEM_ERROR_RIGHTS_DENIED),
         ProcError::Map(_) => err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS),
         ProcError::OutOfFrames | ProcError::NoTaskSlot => err(SYSTEM_ERROR_INVALID_ARGUMENT),
     }

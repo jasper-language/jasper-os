@@ -75,6 +75,7 @@ pub mod module;
 pub mod object;
 pub mod objtable;
 pub mod sync;
+pub mod tickless;
 pub mod trace;
 pub mod trap;
 pub mod user_layout;

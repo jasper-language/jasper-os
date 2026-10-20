@@ -637,14 +637,28 @@ mod tests {
     #[test]
     fn cpu_nodes_rejections_counted_not_lost() {
         // 换算失败（标识超出平台范围）计入 dropped；引导处理器不在树中如实报告；超出容量计入 dropped
-        let many: Vec<(u32, Option<&[u8]>)> = (1..=20).map(|i| (i, None)).collect();
+        // 超出容量：给 MAX_CPUS+5 个可换算的节点，应当装满并丢弃 5 个（与 MAX_CPUS 取值无关）。
+        // 槽位 0 预留给引导处理器，因此树里能装的子处理器是 MAX_CPUS-1 个。
+        let capacity = crate::smp::MAX_CPUS as u32 - 1;
+        let total = capacity + 5;
+        let many: Vec<(u32, Option<&[u8]>)> = (1..=total).map(|i| (i, None)).collect();
         let blob = cpus_tree(false, &many);
         let fdt = Fdt::parse(&blob).unwrap();
-        let cpus = fdt.cpu_topology(0, |r| if r < 18 { Some(r as u32) } else { None }).unwrap();
+        let cpus = fdt.cpu_topology(0, |r| Some(r as u32)).unwrap();
         assert!(!cpus.boot_listed, "引导处理器 0 不在树中");
         assert_eq!(cpus.topology.count(), crate::smp::MAX_CPUS);
-        // 18..=20 换算失败 3 个；1..=17 中只有 15 个装得下（下标 0 是引导处理器），溢出 2 个
-        assert_eq!(cpus.topology.dropped, 3 + 2);
+        assert_eq!(cpus.topology.dropped, 5);
+
+        // 换算失败单独验证：4 个节点里只有 1、2 可换算，3、4 计入 dropped。
+        let few: Vec<(u32, Option<&[u8]>)> = (1..=4).map(|i| (i, None)).collect();
+        let blob2 = cpus_tree(false, &few);
+        let cpus2 = Fdt::parse(&blob2)
+            .unwrap()
+            .cpu_topology(0, |r| if r <= 2 { Some(r as u32) } else { None })
+            .unwrap();
+        // 换算失败必须计入 dropped（具体装入数量取决于树里是否含引导节点，不写死）。
+        assert_eq!(cpus2.topology.dropped, 2);
+        assert!(cpus2.topology.count() <= crate::smp::MAX_CPUS);
         // 结构损坏：返回错误而不是部分结果
         let mut bad = blob.clone();
         let so = u32::from_be_bytes(bad[8..12].try_into().unwrap()) as usize;

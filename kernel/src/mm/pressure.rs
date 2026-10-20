@@ -26,7 +26,8 @@ pub fn admit(requester: Option<Qos>, frames: usize) -> Result<PressureLevel, Ref
     let free = frame::free_frames();
     let total = frame::usable_frames();
     let mut st = STATE.lock();
-    let r = st.params.admit(requester, frames, free, total);
+    // 准入使用当前 Profile 声明的内存策略（standard 压力感知 / compact 固定阈值）。
+    let r = st.params.admit_with(crate::config::ACTIVE.policy.memory, requester, frames, free, total);
     st.stats.record(requester, r);
     r
 }
@@ -34,7 +35,10 @@ pub fn admit(requester: Option<Qos>, frames: usize) -> Result<PressureLevel, Ref
 /// 当前压力级别。
 pub fn level() -> PressureLevel {
     let (free, total) = (frame::free_frames(), frame::usable_frames());
-    STATE.lock().params.level(free, total)
+    STATE
+        .lock()
+        .params
+        .level_with(crate::config::ACTIVE.policy.memory, free, total)
 }
 
 /// 生效参数。

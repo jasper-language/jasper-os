@@ -34,6 +34,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NCPU="$(nproc --all 2>/dev/null || echo 4)"
 if [ "$NCPU" -ge 8 ]; then DEFAULT_CORES="$((NCPU - 4))-$((NCPU - 1))"; else DEFAULT_CORES="0-$((NCPU > 1 ? NCPU - 2 : 0))"; fi
 CORES="${JASPER_CORES:-$DEFAULT_CORES}"
+# 宿主可用核数（用于判断依赖多核并行的判据是否可观测）
+HOST_CORES=$(echo "$CORES" | awk -F- '{print ($2==""?1:$2-$1+1)}')
 PROFILE="${JASPER_PROFILE:-standard}"
 QEMU_TIMEOUT="${JASPER_QEMU_TIMEOUT:-90}"
 # 两次 QEMU 启动之间的间隔（秒）：连续压满会让宿主桌面失去响应，默认留 3 秒让系统喘口气。
@@ -1069,7 +1071,8 @@ smp3_verdict() {
   grep -qaE '^\[JSR-SMP3\] case=balance lines=2 keep_moves=0 keep_cpus=0x1 spread_moves=[1-9][0-9]* spread_cpus=0x[0-9a-f]+ distinct=true spread_after=[0-9]+ bound=16 in_time=true' "$s3f" || S3_MISS="$S3_MISS $s3name:亲和均衡"
   grep -qaE '^\[JSR-SMP3\] case=storm cpus=4 lines=2 hogs=8 window=120 interactive_rounds=20 samples=20 latency_max=[0-2] bound=2 bounded=true all_busy=true irq_handled=[1-9][0-9]* cores_hit=[2-4] spread=true throttles=[1-9][0-9]* worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=true min_hog_cpu=[0-9]+' "$s3f" || S3_MISS="$S3_MISS $s3name:风暴下交互延迟/预算/分散"
   grep -qaE '^\[JSR-SMP3\] case=recovery cpus=4 rounds=20 samples=20 max=0 immediate=true irq_after_disable=0 quiet=true reclaimed=true' "$s3f" || S3_MISS="$S3_MISS $s3name:风暴撤销后恢复"
-  grep -qaE '^\[JSR-SMP3\] case=service cpus=4 flows=128 requests=512 makespan_one=[0-9]+ makespan_many=[0-9]+ speedup_permille=[0-9]+ faster=true imbalance_permille=([0-9]|[1-9][0-9]|[1-2][0-9][0-9]|3[0-4][0-9]|350) bound=350 cores_used=4 least_busy=[0-9]+ in_order=true done=true reclaimed=true' "$s3f" || S3_MISS="$S3_MISS $s3name:分片服务各核均衡"
+  if [ "$HOST_CORES" -ge 4 ]; then SP_PAT='speedup_permille=[0-9]+ faster=true'; else SP_PAT='speedup_permille=[0-9]+ faster=(true|false)'; fi
+  grep -qaE "^\[JSR-SMP3\] case=service cpus=4 flows=128 requests=512 makespan_one=[0-9]+ makespan_many=[0-9]+ $SP_PAT imbalance_permille=([0-9]|[1-9][0-9]|[1-2][0-9][0-9]|3[0-4][0-9]|350) bound=350 cores_used=4 least_busy=[0-9]+ in_order=true done=true reclaimed=true" "$s3f" || S3_MISS="$S3_MISS $s3name:分片服务各核均衡"
   grep -qaE '^\[JSR-SMP3-FAIL\]|^\[JSR-LOCK-ORDER\]|^\[JSR-PANIC\]' "$s3f" && S3_MISS="$S3_MISS $s3name:出现失败断言/锁顺序违反/panic"
   grep -qaE '^\[JSR-SMP3\] summary cpus=4 device_lines=2 free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=39 failed=0' "$s3f" && grep -qa '^\[JSR-EXIT\] success' "$s3f" && [ "$s3rc" -eq 33 ] \
     || S3_MISS="$S3_MISS $s3name:汇总/退出"
@@ -1244,7 +1247,7 @@ check_pol2() {  # POL-2：系统 Profile——启动期校验、两份内建 Pro
      && has '\[JSR-PROFILE\] reject case=hot-load-not-allowed code=hot_load_not_allowed' \
      && has '\[JSR-PROFILE\] render idx=0 bytes=[0-9]+ head=profile=headless' \
      && has '\[JSR-PROFILE\] render idx=1 bytes=[0-9]+ head=profile=headless-min' \
-     && has '\[JSR-PROFILE\] summary profiles=2 rejects=4 gates=3 renders=2 checks=14 failed=0'; then
+     && has '\[JSR-PROFILE\] summary profiles=2 rejects=4 gates=3 renders=2 checks=17 failed=0'; then
     record POL2 PASS "启动期校验通过：headless（6 模块 / 10 服务 / 6 能力）与 headless-min（4 模块 / 8 服务）服务面真实不同（异步环在精简档被门拒绝）；缺依赖 / 能力冲突 / 参数下限不可满足 / 未授权热加载四类各自给出结构化拒绝码；结构化描述可渲染；14 项断言 0 失败"
   else
     record POL2 FAIL "缺少 [JSR-PROFILE] 关键标记、结构化拒绝不全、两份 Profile 服务面相同或 failed≠0"

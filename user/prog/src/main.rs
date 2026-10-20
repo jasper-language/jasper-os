@@ -166,7 +166,7 @@ const FOREVER: u64 = 1_000_000_000;
 
 /// 同步 recv 用的接收缓冲区与描述（端点永远收不到消息）。
 static mut RECV_BUF: [u8; 64] = [0; 64];
-static mut RECV_DESC: MsgDesc = MsgDesc { data_ptr: 0, handles_ptr: 0, data_len: 0, handles_cap: 0, out_data_len: 0, out_handles: 0 };
+static mut RECV_DESC: MsgDesc = MsgDesc { data_ptr: 0, handles_ptr: 0, data_len: 0, handles_cap: 0, out_data_len: 0, out_handles: 0, out_sender: 0, reserved: 0 };
 
 /// 停在内核等待里的线程：`arg` 的低 8 位选择等待方式，高位是附带的句柄（端点或线程句柄）。
 /// 正常情况下这些调用都不会返回——进程终止时内核打断等待并停止本线程。返回则说明打断失败，以 `exit(5)` 标记。
@@ -320,7 +320,7 @@ pub extern "C" fn _start(role: usize, arg: usize) -> ! {
         7 => {
             let spawned = match arg {
                 1 => {
-                    let mut pair = [0u32; 2];
+                    let mut pair = [0u64; 2];
                     let r = sys(ids::SYSTEM_CHANNEL_CREATE, pair.as_mut_ptr() as u64, 0);
                     r == 0 && spawn_blocker(0, 1 | (pair[1] as u64) << 8) > 0
                 }

@@ -29,7 +29,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use kernel_core::object::{HandleId, ObjectRef, ObjectType, Rights};
+use kernel_core::object::{HandleId, HandleRaw, ObjectRef, ObjectType, Rights, HANDLE_BYTES};
 use kernel_core::objtable::ObjId;
 use kernel_core::ring_abi::MsgDesc;
 
@@ -202,7 +202,7 @@ fn proc_err(e: ProcError) -> i64 {
 
 /// send 的阶段 B（锁内，唯一转移点）：复核后一次性移动句柄并入队。阶段 A（复制消息体与句柄值）由调用者完成。
 /// 返回值即 send 的终态：成功为消息体字节数，失败为 `-(错误 ID)`，失败时句柄表与队列均无变化。
-pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, handle_vals: &[u32]) -> i64 {
+pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, handle_vals: &[u64]) -> i64 {
     if body.len() > MAX_MSG_BYTES || handle_vals.len() > MAX_MSG_HANDLES {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     }
@@ -310,7 +310,7 @@ pub(crate) fn prepare_recv_in(t: &mut Table, pid: ObjId, h: HandleId, desc_ptr: 
     let (off, len) = MsgDesc::OUTPUT_RANGE;
     let out = proc::pin_user_in(t, pid, desc_ptr.checked_add(off as u64).ok_or(err(SYSTEM_ERROR_INVALID_ARGUMENT))?, len, true).map_err(proc_err)?;
     let data = proc::pin_user_in(t, pid, d.data_ptr, d.data_len as usize, true).map_err(proc_err)?;
-    let handles = proc::pin_user_in(t, pid, d.handles_ptr, d.handles_cap as usize * 4, true).map_err(proc_err)?;
+    let handles = proc::pin_user_in(t, pid, d.handles_ptr, d.handles_cap as usize * HANDLE_BYTES, true).map_err(proc_err)?;
     t.acquire_internal(ep).map_err(|_| err(SYSTEM_HANDLE_ERROR_INVALID))?;
     Ok(RecvTarget { endpoint: ep, receiver: pid, data, handles, handles_cap: d.handles_cap as usize, out })
 }
@@ -333,10 +333,12 @@ pub(crate) fn add_waiter_in(t: &mut Table, target: &RecvTarget, ring: ObjId, req
 }
 
 /// 写 recv 描述的输出字段（经固定的帧）。
-fn write_out(target: &RecvTarget, data_len: usize, nhandles: usize) {
-    let mut b = [0u8; 8];
+fn write_out(target: &RecvTarget, data_len: usize, nhandles: usize, sender: u32) {
+    // DRV-0：发送方身份由内核在此写入。用户态只能读，无法影响发送时的 `sender` 字段。
+    let mut b = [0u8; 12];
     b[0..4].copy_from_slice(&(data_len as u32).to_le_bytes());
     b[4..8].copy_from_slice(&(nhandles as u32).to_le_bytes());
+    b[8..12].copy_from_slice(&sender.to_le_bytes());
     target.out.write_at(0, &b);
 }
 
@@ -352,13 +354,15 @@ pub(crate) fn try_deliver_in(t: &mut Table, target: &RecvTarget) -> Delivery {
         return if is_closed(t, peer) { Delivery::Done(err(SYSTEM_CHANNEL_ERROR_PEER_CLOSED)) } else { Delivery::Empty };
     };
     let (n, nh) = (m.body.len(), m.handles.len());
+    // 先把身份取出来，避免与后面可变借用 `t` 冲突。
+    let sender = m.sender.raw() as u32;
     // —— 检查（任一不满足：消息留在队列，接收方无变化）——
     if n > target.data.len() || nh > target.handles_cap {
-        write_out(target, n, nh);
+        write_out(target, n, nh, sender);
         return Delivery::Done(err(SYSTEM_CHANNEL_ERROR_BUFFER_TOO_SMALL));
     }
     if proc::free_slots_in(t, target.receiver) < nh {
-        write_out(target, n, nh);
+        write_out(target, n, nh, sender);
         return Delivery::Done(err(SYSTEM_HANDLE_ERROR_TABLE_FULL));
     }
     // —— 执行（不再有可失败的步骤）——
@@ -380,9 +384,9 @@ pub(crate) fn try_deliver_in(t: &mut Table, target: &RecvTarget) -> Delivery {
         }
     }
     for (i, v) in vals.iter().enumerate() {
-        target.handles.write_at(i * 4, &v.to_le_bytes());
+        target.handles.write_at(i * HANDLE_BYTES, &v.to_le_bytes());
     }
-    write_out(target, n, vals.len());
+    write_out(target, n, vals.len(), sender);
     Delivery::Done(n as i64)
 }
 
@@ -404,19 +408,20 @@ pub fn queued(pid: ObjId, h: HandleId) -> Option<usize> {
 
 // ———————————————————————— 系统调用 ————————————————————————
 
-/// `system.channel.create(out_ptr)`：在当前进程建立一对端点，把两个句柄值（`u32`）写到 `out_ptr`。返回 0。
+/// `system.channel.create(out_ptr)`：在当前进程建立一对端点，把两个句柄值（各 `HANDLE_BYTES` 字节）写到 `out_ptr`。返回 0。
 pub fn sys_create(out_ptr: u64) -> i64 {
     let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
+    let span = 2 * HANDLE_BYTES;
+    let mut v = [0u8; 2 * HANDLE_BYTES];
     // 先确认输出位置可写：创建之后不会出现「对象建了却交不回句柄」
-    if let Err(e) = crate::mm::user::copy_to_user(out_ptr, &[0u8; 8], 8) {
+    if let Err(e) = crate::mm::user::copy_to_user(out_ptr, &v, span) {
         return crate::ring::user_err(e);
     }
     match create_pair(pid, pid) {
         Ok((a, b)) => {
-            let mut v = [0u8; 8];
-            v[0..4].copy_from_slice(&a.raw().to_le_bytes());
-            v[4..8].copy_from_slice(&b.raw().to_le_bytes());
-            match crate::mm::user::copy_to_user(out_ptr, &v, 8) {
+            v[..HANDLE_BYTES].copy_from_slice(&a.raw().to_le_bytes());
+            v[HANDLE_BYTES..].copy_from_slice(&b.raw().to_le_bytes());
+            match crate::mm::user::copy_to_user(out_ptr, &v, span) {
                 Ok(()) => 0,
                 Err(e) => crate::ring::user_err(e),
             }
@@ -426,16 +431,19 @@ pub fn sys_create(out_ptr: u64) -> i64 {
 }
 
 /// 阶段 A：从当前进程复制消息描述、消息体与句柄值（可失败，不动任何句柄）。
-pub(crate) fn copy_send_args(desc_ptr: u64) -> Result<(Vec<u8>, Vec<u32>), i64> {
+pub(crate) fn copy_send_args(desc_ptr: u64) -> Result<(Vec<u8>, Vec<u64>), i64> {
     let d = copy_desc(desc_ptr)?;
     if d.data_len as usize > MAX_MSG_BYTES || d.handles_cap as usize > MAX_MSG_HANDLES {
         return Err(err(SYSTEM_ERROR_INVALID_ARGUMENT));
     }
     let mut body = alloc::vec![0u8; d.data_len as usize];
     crate::mm::user::copy_from_user(&mut body, d.data_ptr, MAX_MSG_BYTES).map_err(crate::ring::user_err)?;
-    let mut raw = alloc::vec![0u8; d.handles_cap as usize * 4];
-    crate::mm::user::copy_from_user(&mut raw, d.handles_ptr, MAX_MSG_HANDLES * 4).map_err(crate::ring::user_err)?;
-    let vals = raw.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let mut raw = alloc::vec![0u8; d.handles_cap as usize * HANDLE_BYTES];
+    crate::mm::user::copy_from_user(&mut raw, d.handles_ptr, MAX_MSG_HANDLES * HANDLE_BYTES).map_err(crate::ring::user_err)?;
+    let vals = raw
+        .chunks_exact(HANDLE_BYTES)
+        .map(|c| HandleRaw::from_le_bytes(c.try_into().expect("句柄元素宽度由 HANDLE_BYTES 保证")))
+        .collect();
     Ok((body, vals))
 }
 

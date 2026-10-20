@@ -83,6 +83,12 @@ pub struct Process {
     spawned_by: Option<ObjId>,
     /// 本进程经 `system.process.spawn` 创建、仍持有其句柄的子进程数（配额见 `spawn_abi::MAX_CHILDREN`）。
     spawned_live: u32,
+    /// 应用身份（装载时由内核写入，进程不可改；0 = 尚未绑定）。
+    ///
+    /// 为什么放在进程而不是句柄：身份是"这个进程代表哪个应用"的事实，
+    /// 与谁持有它的句柄无关；子进程继承父进程的身份，不能自行更改。
+    /// English: application identity, written once by the kernel at load time.
+    app: u32,
 }
 
 /// 进程的资源配额记账（开发默认值见 `crate::ring`、`crate::ipc` 中的常量）。
@@ -131,6 +137,8 @@ static TASK_IDS: kernel_core::object::IdAllocator = kernel_core::object::IdAlloc
 pub enum ProcError {
     /// 进程不存在、已死亡或已销毁。
     NoSuchProcess,
+    /// 应用身份非法（为 0）或已经绑定过。
+    BadApp,
     /// 进程已退出，不能再创建线程。
     Exited,
     /// 地址不在私有窗口或映射失败。
@@ -157,6 +165,34 @@ pub struct ExitInfo {
 }
 
 /// 新建进程（还没有线程）。调用者获得一份外部所有权，最终须经 [`reap`] 释放。
+/// 在装载时绑定应用身份；已绑定过则拒绝（身份一经写入不可更改）。
+///
+/// 只有内核侧的装载路径可以调用；用户态没有对应系统调用，因此"应用自报身份"不成立。
+/// English: bind the app identity once at load time; a second bind is refused.
+pub fn set_app(pid: ObjId, app: u32) -> Result<(), ProcError> {
+    if app == 0 {
+        return Err(ProcError::BadApp);
+    }
+    crate::kobj::with(|t| match t.get_mut(pid) {
+        Ok(crate::kobj::KObject::Process(p)) => {
+            if p.app != 0 {
+                return Err(ProcError::BadApp);
+            }
+            p.app = app;
+            Ok(())
+        }
+        _ => Err(ProcError::NoSuchProcess),
+    })
+}
+
+/// 读取进程的应用身份（0 表示尚未绑定）。
+pub fn app(pid: ObjId) -> Option<u32> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(crate::kobj::KObject::Process(p)) => Some(p.app),
+        _ => None,
+    })
+}
+
 pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcError> {
     let space = VmSpace::new().map_err(ProcError::Map)?;
     let exit_state = kobj::with(crate::exit_state::create_in).ok_or(ProcError::NoTaskSlot)?;
@@ -177,6 +213,7 @@ pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcErr
         kill_on_release: false,
         spawned_by: None,
         spawned_live: 0,
+        app: 0,
     });
     let id = match kobj::insert(KObject::Process(p), 1, 0) {
         Ok(id) => id,

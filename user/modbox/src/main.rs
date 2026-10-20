@@ -14,6 +14,6 @@ entry!(main);
 
 fn main(channel: u64, _: u64) -> i32 {
     // SAFETY：内核创建本进程时放入的引导通道端点，尚无人拥有。
-    let ch = Channel::from_handle(unsafe { Handle::from_raw(channel as u32) });
+    let ch = Channel::from_handle(unsafe { Handle::from_raw(channel) });
     isolate::serve(ch)
 }
