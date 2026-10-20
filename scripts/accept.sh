@@ -1408,6 +1408,43 @@ check_harden1e() { # 空闲停表（tickless idle）：同样长的全空闲窗�
   fi
 }
 
+check_drv0() {  # DRV-0：通道消息的发送方应用身份章——已绑定 / 伪造被覆盖 / 未绑定 / 二次绑定被拒 / 发送后退出 / 缓冲区不足
+                # 六种情形逐一断言；接收方读到的是内核在发送时定格的真实身份；演练结束对象、页帧与固定回到基线。
+                # 检查 x86_64 单处理器与 x86_64 / AArch64 / RISC-V64 4 处理器（RV32 就绪时一并）；宿主测试覆盖编解码与输出区间。
+  local miss="" f name n
+  local bound='^\[JSR-APPID\] stamp case=bound app=0x5157 out_sender_app=0x5157 pid_match=true ok=true'
+  local forged='^\[JSR-APPID\] stamp case=forged prefilled=0xdead out_sender_app=0x5157 ok=true'
+  local unbound='^\[JSR-APPID\] stamp case=unbound out_sender_app=0x0 ok=true'
+  local rebind='^\[JSR-APPID\] stamp case=rebind_refused app=0x5157 ok=true'
+  local after='^\[JSR-APPID\] stamp case=after_exit app=0x7001 out_sender_app=0x7001 ok=true'
+  local small='^\[JSR-APPID\] stamp case=too_small app=0x5157 out_sender_app=0x5157 kept=true ok=true'
+  local sum='^\[JSR-APPID\] summary pid=0x[0-9a-f]+ app=0x5157 checks=[0-9]+ failed=0'
+  local pairs=("$SERIAL:x86_64单核" "$SERIAL_SMP4:x86_64×4" "$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4")
+  rv32_ready && ! rv32_fw_missing && pairs+=("$SERIAL_RV32_SMP4:RV32×4")
+  for pair in "${pairs[@]}"; do
+    f="${pair%%:*}"; name="${pair##*:}"
+    grep -qaE "$bound" "$f" 2>/dev/null || miss="$miss $name:已绑定"
+    grep -qaE "$forged" "$f" 2>/dev/null || miss="$miss $name:伪造被覆盖"
+    grep -qaE "$unbound" "$f" 2>/dev/null || miss="$miss $name:未绑定"
+    grep -qaE "$rebind" "$f" 2>/dev/null || miss="$miss $name:二次绑定被拒"
+    grep -qaE "$after" "$f" 2>/dev/null || miss="$miss $name:发送后退出"
+    grep -qaE "$small" "$f" 2>/dev/null || miss="$miss $name:缓冲区不足"
+    grep -qaE '^\[JSR-APPID\] stamp reclaimed=true' "$f" 2>/dev/null || miss="$miss $name:对象回收"
+    n=$(grep -aoE "$sum" "$f" 2>/dev/null | head -1 | sed -E 's/.*checks=([0-9]+).*/\1/')
+    if [ -z "$n" ]; then miss="$miss $name:汇总"; elif [ "$n" -lt 20 ]; then miss="$miss $name:断言数($n<20)"; fi
+    grep -qa '^\[JSR-APPID-FAIL\]' "$f" 2>/dev/null && miss="$miss $name:失败断言"
+  done
+  for t in ring_abi::tests::records_roundtrip_and_match_repr_c_layout ring_abi::tests::msg_desc_sender_app_roundtrip_and_output_range; do
+    grep -qaE "^test $t \.\.\. ok$" "$OUT/cargo-test.log" 2>/dev/null || miss="$miss 宿主:$t"
+  done
+  if [ -z "$miss" ]; then
+    n=$(grep -aoE "$sum" "$SERIAL_SMP4" | head -1 | sed -E 's/.*checks=([0-9]+).*/\1/')
+    record DRV0 PASS "通道消息的发送方应用身份章由内核在发送时定格：已绑定/未绑定、伪造被覆盖、二次绑定被拒、发送方退出后仍保留、缓冲区不足时已盖章且消息保留；x86_64 单核与 x86_64/AArch64/RISC-V64 4 处理器均复验（x86_64×4 checks=$n），对象/页帧/固定回到基线$RV32_NOTE"
+  else
+    record DRV0 FAIL "缺少：$miss"
+  fi
+}
+
 check_harden1d() { # 调度规模化：选择路径只遍历本处理器的运行列表（与任务表容量无关），到期唤醒按最早时刻跳过扫描；
                    # 同规模下复核响应性底线（过载交互延迟有上界、压力撤销后立即恢复、各核都忙）；测量调度器锁与对象表锁的争用
   local miss="" f name lockline
@@ -1469,11 +1506,11 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 
 if [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------

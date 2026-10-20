@@ -28,6 +28,11 @@ pub struct Received {
     pub len: usize,
     /// 随消息到达的句柄（已进入本进程句柄表）。
     pub handles: Vec<Handle>,
+    /// 发送方的应用身份（内核在发送时盖章；0 = 发送方未绑定身份）。
+    ///
+    /// 只读事实：发送方无法伪造；发送方之后退出也不改变这条消息上的章。
+    /// English: application identity stamped by the kernel at send time.
+    pub sender_app: u32,
 }
 
 /// 新建一对相连的端点。
@@ -86,7 +91,7 @@ impl Channel {
             out_data_len: 0,
             out_handles: 0,
             out_sender: 0,
-            reserved: 0,
+            out_sender_app: 0,
         };
         let b = desc.encode();
         // SAFETY：描述、消息体、句柄数组都在调用期间有效；内核在返回前复制完毕。
@@ -127,7 +132,7 @@ impl Channel {
             out_data_len: 0,
             out_handles: 0,
             out_sender: 0,
-            reserved: 0,
+            out_sender_app: 0,
         };
         let mut b: [u8; MSG_DESC_SIZE] = desc.encode();
         // SAFETY：描述、缓冲区、句柄数组都在调用期间有效（同步 recv 在返回前完成交付）。
@@ -138,7 +143,7 @@ impl Channel {
                 let n = (out.out_handles as usize).min(MAX_HANDLES);
                 // SAFETY：这些句柄由内核随消息放入本进程句柄表，尚无人拥有。
                 let handles = hs[..n].iter().map(|&h| unsafe { Handle::from_raw(h) }).collect();
-                Ok((Received { len: out.out_data_len as usize, handles }, out.out_data_len as usize))
+                Ok((Received { len: out.out_data_len as usize, handles, sender_app: out.out_sender_app }, out.out_data_len as usize))
             }
             Err(e) => Err((e, out.out_data_len as usize)),
         }

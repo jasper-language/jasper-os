@@ -69,6 +69,8 @@ struct Message {
     handles: Vec<(ObjectRef, Rights)>,
     /// 发送方进程（弱回指：消息体字节记在它的配额上，出队或销毁时归还）。
     sender: ObjId,
+    /// 发送时定格的发送方应用身份（0 = 发送时未绑定）；接收方据此判断来源，发送方无法伪造。
+    sender_app: u32,
 }
 
 /// Channel 的一个端点。
@@ -263,9 +265,11 @@ pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, han
         q.ipc_bytes += n as u32;
     }
     QUEUED_TOTAL.fetch_add(n, Ordering::Relaxed);
+    // 身份在入队时定格：读取与入队都在本函数已持有的同一把表锁内，发送方此后退出/被回收也不改变这个值。
+    let sender_app = proc::app_in(t, pid).unwrap_or(0);
     if let Some(p) = ep_mut(t, peer) {
         p.queued_bytes += n;
-        p.queue.push_back(Message { body, handles, sender: pid });
+        p.queue.push_back(Message { body, handles, sender: pid, sender_app });
     }
     wake_in(t, peer);
     wake_sleepers_in(t, peer);
@@ -368,13 +372,14 @@ pub(crate) fn add_waiter_in(t: &mut Table, target: &RecvTarget, ring: ObjId, req
     }
 }
 
-/// 写 recv 描述的输出字段（经固定的帧）。
-fn write_out(target: &RecvTarget, data_len: usize, nhandles: usize, sender: u32) {
-    // DRV-0：发送方身份由内核在此写入。用户态只能读，无法影响发送时的 `sender` 字段。
-    let mut b = [0u8; 12];
+/// 写 recv 描述的输出字段（经固定的帧）：消息体字节数、句柄数、发送方进程标识、发送方应用身份。
+fn write_out(target: &RecvTarget, data_len: usize, nhandles: usize, sender: u32, sender_app: u32) {
+    // DRV-0：发送方身份由内核在此写入。用户态只能读，无法影响发送时保存的 `sender` / `sender_app`。
+    let mut b = [0u8; 16];
     b[0..4].copy_from_slice(&(data_len as u32).to_le_bytes());
     b[4..8].copy_from_slice(&(nhandles as u32).to_le_bytes());
     b[8..12].copy_from_slice(&sender.to_le_bytes());
+    b[12..16].copy_from_slice(&sender_app.to_le_bytes());
     target.out.write_at(0, &b);
 }
 
@@ -392,13 +397,14 @@ pub(crate) fn try_deliver_in(t: &mut Table, target: &RecvTarget) -> Delivery {
     let (n, nh) = (m.body.len(), m.handles.len());
     // 先把身份取出来，避免与后面可变借用 `t` 冲突。
     let sender = m.sender.raw() as u32;
+    let sender_app = m.sender_app;
     // —— 检查（任一不满足：消息留在队列，接收方无变化）——
     if n > target.data.len() || nh > target.handles_cap {
-        write_out(target, n, nh, sender);
+        write_out(target, n, nh, sender, sender_app);
         return Delivery::Done(err(SYSTEM_CHANNEL_ERROR_BUFFER_TOO_SMALL));
     }
     if proc::free_slots_in(t, target.receiver) < nh {
-        write_out(target, n, nh, sender);
+        write_out(target, n, nh, sender, sender_app);
         return Delivery::Done(err(SYSTEM_HANDLE_ERROR_TABLE_FULL));
     }
     // —— 执行（不再有可失败的步骤）——
@@ -422,7 +428,7 @@ pub(crate) fn try_deliver_in(t: &mut Table, target: &RecvTarget) -> Delivery {
     for (i, v) in vals.iter().enumerate() {
         target.handles.write_at(i * HANDLE_BYTES, &v.to_le_bytes());
     }
-    write_out(target, n, vals.len(), sender);
+    write_out(target, n, vals.len(), sender, sender_app);
     Delivery::Done(n as i64)
 }
 

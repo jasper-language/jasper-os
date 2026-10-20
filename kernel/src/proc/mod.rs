@@ -193,6 +193,18 @@ pub fn app(pid: ObjId) -> Option<u32> {
     })
 }
 
+/// 锁内版本：调用者已持有对象表锁时读取进程 `pid` 的应用身份（0 = 未绑定；进程不存在为 `None`）。
+///
+/// 为什么需要它：发送方身份必须在消息入队的同一把表锁内读取，否则发送方可能在读取与入队之间退出，
+/// 接收方看到的就是"另一个时刻"的身份。这里不新增锁、不新增全局状态。
+/// In-lock variant of [`app`]; used to stamp the sender identity atomically at enqueue time.
+pub(crate) fn app_in(t: &mut kobj::Table, pid: ObjId) -> Option<u32> {
+    match t.get(pid) {
+        Ok(KObject::Process(p)) => Some(p.app),
+        _ => None,
+    }
+}
+
 pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcError> {
     let space = VmSpace::new().map_err(ProcError::Map)?;
     let exit_state = kobj::with(crate::exit_state::create_in).ok_or(ProcError::NoTaskSlot)?;

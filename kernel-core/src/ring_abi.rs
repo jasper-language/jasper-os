@@ -6,7 +6,7 @@
 //! * [`Sqe`]（32 字节）：一条提交——操作编号、用户标签、两个参数
 //! * [`Cqe`]（32 字节）：一条完成——请求 ID、用户标签、操作编号、结果（≥0 为操作结果，<0 为 `-(错误 ID)`）
 //! * [`EnterArgs`]（56 字节）：一次 `system.async.ring.enter` 的输入与输出
-//! * [`MsgDesc`]（32 字节）：`system.channel.send` / `system.channel.recv` 的消息描述（消息体缓冲区、句柄数组、输出字段）
+//! * [`MsgDesc`]（40 字节）：`system.channel.send` / `system.channel.recv` 的消息描述（消息体缓冲区、句柄数组、输出字段）
 //!
 //! # 为什么按字节编解码
 //! 内核从不把用户内存直接当作 Rust 结构体引用：先经用户指针安全层复制到内核缓冲区，再用这里的
@@ -91,7 +91,8 @@ pub struct EnterArgs {
 ///
 /// * send：`data_ptr`/`data_len` 是消息体；`handles_ptr` 指向 `handles_cap` 个 `u64` 句柄值（全部随消息移动）
 /// * recv：`data_ptr`/`data_len` 是接收缓冲区容量；`handles_ptr`/`handles_cap` 是接收句柄值的数组容量；
-///   完成时内核写回 `out_data_len`（实际字节数；缓冲区不足时为**所需**字节数）与 `out_handles`（收到的句柄数）
+///   完成时内核写回 `out_data_len`（实际字节数；缓冲区不足时为**所需**字节数）、`out_handles`（收到的句柄数）、
+///   `out_sender`（发送方进程标识低 32 位）与 `out_sender_app`（发送方的应用身份）
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MsgDesc {
@@ -113,8 +114,13 @@ pub struct MsgDesc {
     /// 因此接收方可以据此判断消息来源，而发送方无法伪造。
     /// English: sender identity stamped by the kernel; read-only for user space.
     pub out_sender: u32,
-    /// 保留（对齐到 40 字节）。
-    pub reserved: u32,
+    /// 输出（recv）：发送方的应用身份（`u32`；0 = 发送方未绑定身份）。
+    ///
+    /// 内核在**发送时**取发送方进程的应用身份并随消息保存，接收时写入这里；发送方之后退出、被回收
+    /// 或尝试改写身份都不影响这条消息上的章。用户态写入的值一律被内核覆盖，因此这个字段是
+    /// "事实"而不是"声明"：接收方可以据此拒绝匿名来源，发送方无法伪造。
+    /// English: application identity stamped by the kernel at send time; user writes are overwritten.
+    pub out_sender_app: u32,
 }
 
 impl MsgDesc {
@@ -128,7 +134,7 @@ impl MsgDesc {
             out_data_len: u32_at(b, 24),
             out_handles: u32_at(b, 28),
             out_sender: u32_at(b, 32),
-            reserved: u32_at(b, 36),
+            out_sender_app: u32_at(b, 36),
         }
     }
 
@@ -142,12 +148,12 @@ impl MsgDesc {
         b[24..28].copy_from_slice(&self.out_data_len.to_le_bytes());
         b[28..32].copy_from_slice(&self.out_handles.to_le_bytes());
         b[32..36].copy_from_slice(&self.out_sender.to_le_bytes());
-        b[36..40].copy_from_slice(&self.reserved.to_le_bytes());
+        b[36..40].copy_from_slice(&self.out_sender_app.to_le_bytes());
         b
     }
 
-    /// 输出字段（`out_data_len`、`out_handles`）在描述中的字节偏移与长度。
-    pub const OUTPUT_RANGE: (usize, usize) = (24, 12);
+    /// 输出字段（`out_data_len`、`out_handles`、`out_sender`、`out_sender_app`）在描述中的字节偏移与长度。
+    pub const OUTPUT_RANGE: (usize, usize) = (24, 16);
 }
 
 const _: () = assert!(core::mem::size_of::<Sqe>() == SQE_SIZE);
@@ -262,12 +268,40 @@ mod tests {
         assert_eq!(raw, &s.encode()[..]);
         let raw = unsafe { core::slice::from_raw_parts(&e as *const EnterArgs as *const u8, ENTER_ARGS_SIZE) };
         assert_eq!(raw, &e.encode()[..]);
-        let m = MsgDesc { data_ptr: 1, handles_ptr: 2, data_len: 3, handles_cap: 4, out_data_len: 5, out_handles: 6, out_sender: 7, reserved: 0 };
+        let m = MsgDesc { data_ptr: 1, handles_ptr: 2, data_len: 3, handles_cap: 4, out_data_len: 5, out_handles: 6, out_sender: 7, out_sender_app: 0x5157 };
         assert_eq!(MsgDesc::decode(&m.encode()), m);
+        assert_eq!(m.out_sender_app, 0x5157);
         // SAFETY：MsgDesc 为 repr(C)、无填充。
         let raw_m = unsafe { core::slice::from_raw_parts(&m as *const MsgDesc as *const u8, MSG_DESC_SIZE) };
         assert_eq!(raw_m, &m.encode()[..]);
         let (off, len) = EnterArgs::OUTPUT_RANGE;
         assert_eq!(&e.encode()[off..off + len], &raw[off..off + len]);
+        // 输出区间必须覆盖 out_sender（偏移 32）与 out_sender_app（偏移 36），且总长仍为 40
+        let (off, len) = MsgDesc::OUTPUT_RANGE;
+        assert_eq!((off, len), (24, 16));
+        assert_eq!(&m.encode()[off..off + len], &[5, 0, 0, 0, 6, 0, 0, 0, 7, 0, 0, 0, 0x57, 0x51, 0, 0]);
+    }
+
+    #[test]
+    fn msg_desc_sender_app_roundtrip_and_output_range() {
+        let m = MsgDesc {
+            data_ptr: 0x1122_3344_5566_7788,
+            handles_ptr: 0x99aa_bbcc_ddee_ff00,
+            data_len: 17,
+            handles_cap: 3,
+            out_data_len: 29,
+            out_handles: 2,
+            out_sender: 0x0102_0304,
+            out_sender_app: 0x5157,
+        };
+        let b = m.encode();
+        assert_eq!(MsgDesc::decode(&b), m);
+        assert_eq!(MSG_DESC_SIZE, 40);
+        // 输出区间覆盖两个身份字段：out_sender 在 32..36，out_sender_app 在 36..40。
+        let (off, len) = MsgDesc::OUTPUT_RANGE;
+        assert_eq!((off, len), (24, 16));
+        assert_eq!(&b[off..off + 8], &[29, 0, 0, 0, 2, 0, 0, 0]);
+        assert_eq!(&b[off + 8..off + 12], &0x0102_0304u32.to_le_bytes());
+        assert_eq!(&b[off + 12..off + 16], &0x5157u32.to_le_bytes());
     }
 }
