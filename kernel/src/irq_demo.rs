@@ -580,15 +580,19 @@ fn recovery(n: usize, lines: usize) {
 // ---------------------------------------------------------------------------
 
 /// 流的个数与每个流的请求数。
-const FLOWS: u64 = 128;
-const PER_FLOW: u64 = 4;
-/// 每个请求的工作量 = 一个 tick 的工作量的几分之一。
-const WORK_DIVISOR: u64 = 2;
+/// 流按哈希落到分片，每片分到的流数有统计波动：流越少波动越大。512 个流在 2–8 个分片下
+/// 不均衡度都明显低于上界；128 个流在 8 个分片时每片只有约 16 个流，波动本身就会超过上界。
+const FLOWS: u64 = 512;
+const PER_FLOW: u64 = 2;
+/// 每个分片队列的容量：1 分片轮次要容纳全部请求。
+const SHARD_CAP: usize = (FLOWS * PER_FLOW) as usize;
+/// 每个请求的工作量 = 一个 tick 的工作量的几分之一（请求数加倍时工作量减半，总耗时不变）。
+const WORK_DIVISOR: u64 = 4;
 /// 各分片处理量的不均衡度上界（千分比）。
 const IMBALANCE_BOUND: u32 = 350;
 
 /// 演练用的分片服务队列：请求 = 流号 << 32 | 流内序号。
-static SERVICE: ShardedQueues<u64, MAX_CPUS, 512> = ShardedQueues::new();
+static SERVICE: ShardedQueues<u64, MAX_CPUS, SHARD_CAP> = ShardedQueues::new();
 /// 每个流最后处理的序号 + 1（流只进一个分片，只由一个工作线程写）。
 static NEXT_SEQ: [AtomicU32; FLOWS as usize] = [const { AtomicU32::new(0) }; FLOWS as usize];
 /// 流内乱序的次数。

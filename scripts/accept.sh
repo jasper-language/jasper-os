@@ -5,8 +5,9 @@
 # 做什么：
 #   1. 宿主单元测试（kernel-core）与裸机目标编译
 #   2. 构建内核与可引导镜像，在 QEMU 中**真实启动一次**，保存原始串口日志；
-#      默认只验 x86_64（JASPER_ARCHES=x86_64）；JASPER_ARCHES=all 时同一内核再以 AArch64 /
-#      RISC-V64 / RISC-V32 构建，各在对应的 QEMU 中真实启动一次
+#      默认只验 x86_64（JASPER_ARCHES=x86_64）；x86_64 依次以单处理器、4 处理器、8 处理器真实启动
+#      （严格顺序，不并行；串口日志分别为 serial.log / serial-smp4.log / serial-smp8.log）；
+#      JASPER_ARCHES=all 时同一内核再以 AArch64 / RISC-V64 / RISC-V32 构建，各在对应的 QEMU 中真实启动一次
 #   3. 按各里程碑的判据逐项检查同一份串口日志，打印 PASS/FAIL 表
 #   4. 全部证据（构建日志、测试日志、串口日志、汇总表）归档到 evidence/accept-<时间戳>/
 #
@@ -197,6 +198,18 @@ if [ "$BUILD_RC" -eq 0 ]; then
     -serial stdio -display none -monitor none -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL_SMP4" 2>&1
   QRC_SMP4=$?
+fi
+# 多处理器（SMP-1）：同一镜像再以 8 个处理器真实启动一次。8 处理器启动排在 4 处理器之后、q35 之前，
+# 严格顺序执行（QEMU 一次只开一个），避免计时类检查互相抢核；退出码判定与 4 处理器相同。
+SERIAL_SMP8="$OUT/serial-smp8.log"
+QRC_SMP8=-1
+if [ "$BUILD_RC" -eq 0 ]; then
+  echo "== QEMU 真实启动（x86_64，8 个处理器）=="
+  sleep "$BOOT_GAP"
+  run timeout "$QEMU_TIMEOUT" "$QEMU" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 8 \
+    -serial stdio -display none -monitor none -no-reboot \
+    -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL_SMP8" 2>&1
+  QRC_SMP8=$?
 fi
 # DRV-1B：q35 机型的 4 处理器启动。q35 提供 ACPI MCFG，配置空间必须走 ECAM（不可缓存 MMIO），
 # 与上面 pc 机型的传统端口机制形成对照；同一组 virtio 设备仍须全部枚举到。
@@ -953,41 +966,62 @@ rv64_rerun() {
   RV64_N=$PORT_N; RV64_BAD=$PORT_BAD
 }
 
-check_smp1a() { # 多处理器第一阶段（x86_64）：4 个处理器全部报到、各自计时、核间中断、跨核调用、TLB 击落、拒绝路径；
+# cpu_alt <处理器数>：0..N-1 的正则分支，用于核对「每核各一行/各一份」的输出。
+# 处理器数随 -smp 取值变化，正则不能写死 4。
+cpu_alt() {
+  local i out=""
+  for (( i = 0; i < $1; i++ )); do out+="${out:+|}${i}"; done
+  printf '%s' "$out"
+}
+
+check_smp1a() { # 多处理器第一阶段（x86_64）：4 与 8 个处理器都全部报到、各自计时、核间中断、跨核调用、TLB 击落、拒绝路径；
                  # 全部 x86_64 串口检查在 4 处理器日志上逐项重跑（行名带 SMP4/ 前缀）；单处理器启动如实报告只有引导处理器
-  if [ "$BUILD_RC" -ne 0 ] || [ ! -s "$SERIAL_SMP4" ]; then
-    record SMP-1a FAIL "4 处理器启动没有串口日志（构建 rc=$BUILD_RC，QEMU=$QRC_SMP4）"
+  if [ "$BUILD_RC" -ne 0 ] || [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_SMP8" ]; then
+    record SMP-1a FAIL "4 / 8 处理器启动没有串口日志（构建 rc=$BUILD_RC，QEMU=$QRC_SMP4/$QRC_SMP8）"
     return
   fi
   port_rerun "$SERIAL_SMP4" "$QRC_SMP4" "SMP4/" 256 \
     check_m11 check_m12 check_m13 check_m14 check_m15 check_m21 check_m22 check_m23 check_m24 check_m31 check_m32 check_m33 \
     check_m34 check_m51pre check_m41 check_m42 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 \
     check_j5 check_j6 check_sched1 check_sched2 check_sched3 check_t1 check_t2 check_fix
-  local n=$PORT_N bad=$PORT_BAD miss="" f="$SERIAL_SMP4" c
-  grep -qE '^\[JSR-SMP\] start present=4 online=4 failed=0 source=acpi\.madt ' "$f" || miss="$miss 启动"
-  for c in 0 1 2 3; do grep -qE "^\[JSR-SMP\] cpu index=$c hw=[0-9]+ state=online" "$f" || miss="$miss cpu$c"; done
-  for c in 1 2 3; do
-    grep -qE "^\[JSR-SMP\] clock cpu=$c ticks_before=[0-9]+ ticks_after=[0-9]+ advanced=([1-9][0-9]+)" "$f" || miss="$miss 时钟$c"
-  done
-  grep -q '^\[JSR-SMP\] clock independent bsp_frozen=1 others_advanced=true' "$f" || miss="$miss 各自计时"
-  grep -q '^\[JSR-SMP\] ipi reschedule delivered=3/3' "$f"                 || miss="$miss 重新调度"
-  grep -q '^\[JSR-SMP\] call ran_on_target=3/3 current=idle' "$f"          || miss="$miss 跨核调用"
-  grep -qE '^\[JSR-SMP\] tlb va=0x[0-9a-f]+ before=A:3/3 stale_without_shootdown=[0-3]/3 after_shootdown=B:3/3 local=B:true acks=[3-9][0-9]* frames_back=true' "$f" \
-                                                                             || miss="$miss TLB击落"
-  grep -qE '^\[JSR-SMP\] refuse no_such_cpu=system\.cpu\.error\.no_such_cpu self=system\.cpu\.error\.self_target call_no_such=system\.cpu\.error\.no_such_cpu call_self=system\.cpu\.error\.self_target bad_range=system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range' "$f" \
-                                                                             || miss="$miss 拒绝路径"
-  grep -qE '^\[JSR-SMP\] summary cpus=4 online=4 checks=[0-9]+ failed=0' "$f" || miss="$miss 汇总"
-  grep -q '^\[JSR-EXIT\] success' "$f" && [ "$QRC_SMP4" -eq 33 ]           || miss="$miss 退出"
+  local n=$PORT_N bad=$PORT_BAD miss=""
+  smp1a_verdict "$SERIAL_SMP4" "$QRC_SMP4" "x86_64×4" 4; miss="$miss$SMP1A_MISS"
+  smp1a_verdict "$SERIAL_SMP8" "$QRC_SMP8" "x86_64×8" 8; miss="$miss$SMP1A_MISS"
   # 单处理器启动：只有引导处理器，拒绝路径同样成立
   grep -qE '^\[JSR-SMP\] start present=1 online=1 failed=0 ' "$SERIAL" && grep -q '^\[JSR-SMP\] single cpus=1 secondary=none' "$SERIAL" \
     && grep -qE '^\[JSR-SMP\] summary cpus=1 online=1 checks=[0-9]+ failed=0' "$SERIAL" || miss="$miss 单处理器"
-  local stale
-  stale=$(grep -oE 'stale_without_shootdown=[0-3]/3' "$f" | head -1 | cut -d= -f2)
+  local stale4 stale8
+  stale4=$(grep -oE 'stale_without_shootdown=[0-9]+/3' "$SERIAL_SMP4" | head -1 | cut -d= -f2)
+  stale8=$(grep -oE 'stale_without_shootdown=[0-9]+/7' "$SERIAL_SMP8" | head -1 | cut -d= -f2)
   if [ -z "$miss" ] && [ "$bad" -eq 0 ]; then
-    record SMP-1a PASS "x86_64 -smp 4（QEMU=$QRC_SMP4）：MADT 发现 4 个处理器全部报到；各核本地定时器各自计时（引导处理器关中断时其他核照走）；重新调度 / 跨核调用核间中断 3/3；改映射后仅本地作废时 $stale 个处理器读到旧映射，击落后 3/3 读到新映射、页帧回到基线；拒绝路径无中断无残留；$n 项 x86_64 检查在 4 处理器下全部复跑通过；单处理器启动如实报告只有引导处理器"
+    record SMP-1a PASS "x86_64 -smp 4（QEMU=$QRC_SMP4）与 -smp 8（QEMU=$QRC_SMP8）：MADT 分别发现 4 / 8 个处理器全部报到；各核本地定时器各自计时（引导处理器关中断时其他核照走）；重新调度 / 跨核调用核间中断 4 核 3/3、8 核 7/7；改映射后仅本地作废时 4 核 $stale4 个、8 核 $stale8 个处理器读到旧映射，击落后分别 3/3、7/7 读到新映射、页帧回到基线；拒绝路径无中断无残留；$n 项 x86_64 检查在 4 处理器下全部复跑通过；单处理器 / 4 处理器 / 8 处理器均已覆盖；单处理器启动如实报告只有引导处理器"
   else
-    record SMP-1a FAIL "缺少/不符：$miss；4 处理器复跑 $n 项中 $bad 项失败（见 serial-smp4.log）"
+    record SMP-1a FAIL "缺少/不符：$miss；4 处理器复跑 $n 项中 $bad 项失败（见 serial-smp4.log / serial-smp8.log）"
   fi
+}
+
+# smp1a_verdict <日志> <QEMU 退出码> <名称> <处理器数>：一份日志上的 SMP-1a 断言；每核输出与核间中断分母按实际处理器数计算。
+# 缺失项放入 SMP1A_MISS（调用方自行拼接），判据本身（全部报到、各自计时、击落后全部读到新映射等）不随核数放宽。
+smp1a_verdict() {
+  local f="$1" qrc="$2" name="$3" n="$4" ap miss="" c
+  ap=$((n - 1))
+  grep -qE "^\[JSR-SMP\] start present=$n online=$n failed=0 source=acpi\.madt " "$f" || miss="$miss $name:启动"
+  for (( c = 0; c < n; c++ )); do
+    grep -qE "^\[JSR-SMP\] cpu index=$c hw=[0-9]+ state=online" "$f" || miss="$miss $name:cpu$c"
+  done
+  for (( c = 1; c < n; c++ )); do
+    grep -qE "^\[JSR-SMP\] clock cpu=$c ticks_before=[0-9]+ ticks_after=[0-9]+ advanced=([1-9][0-9]+)" "$f" || miss="$miss $name:时钟$c"
+  done
+  grep -q '^\[JSR-SMP\] clock independent bsp_frozen=1 others_advanced=true' "$f" || miss="$miss $name:各自计时"
+  grep -qE "^\[JSR-SMP\] ipi reschedule delivered=$ap/$ap" "$f"                 || miss="$miss $name:重新调度"
+  grep -qE "^\[JSR-SMP\] call ran_on_target=$ap/$ap current=idle" "$f"          || miss="$miss $name:跨核调用"
+  grep -qE "^\[JSR-SMP\] tlb va=0x[0-9a-f]+ before=A:$ap/$ap stale_without_shootdown=[0-$ap]/$ap after_shootdown=B:$ap/$ap local=B:true acks=([$ap-9]|[1-9][0-9]+) frames_back=true" "$f" \
+                                                                                || miss="$miss $name:TLB击落"
+  grep -qE '^\[JSR-SMP\] refuse no_such_cpu=system\.cpu\.error\.no_such_cpu self=system\.cpu\.error\.self_target call_no_such=system\.cpu\.error\.no_such_cpu call_self=system\.cpu\.error\.self_target bad_range=system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range' "$f" \
+                                                                                || miss="$miss $name:拒绝路径"
+  grep -qE "^\[JSR-SMP\] summary cpus=$n online=$n checks=[0-9]+ failed=0" "$f" || miss="$miss $name:汇总"
+  grep -q '^\[JSR-EXIT\] success' "$f" && [ "$qrc" -eq 33 ]                     || miss="$miss $name:退出"
+  SMP1A_MISS="$miss"
 }
 
 check_smp1b_a64() { # 多处理器第二阶段（AArch64）：设备树发现 4 个处理器、PSCI CPU_ON 全部报到、各核虚拟定时器各自计时、
@@ -1097,52 +1131,55 @@ check_smp1b_rv() { # 多处理器第二阶段（RISC-V64 与 RISC-V32）：设�
   fi
 }
 
-# smp1c_verdict <4 处理器日志> <QEMU 退出码> <名称>：一份日志上的 SMP-1c 断言；缺失项追加到 SC_MISS
+# smp1c_verdict <处理器日志> <QEMU 退出码> <名称> <处理器数>：一份日志上的 SMP-1c 断言；并发输出的核数、每核行数、
+# 每核持有集合与内核栈登记的分母都按实际处理器数计算，缺失项追加到 SC_MISS。
 smp1c_verdict() {
-  local scf="$1" scrc="$2" scname="$3" sccpu scbad scgood
+  local scf="$1" scrc="$2" scname="$3" scn="$4" sccpu sctotal scap scgood scbad cpupat
+  scap=$((scn - 1)); sctotal=$((scn * 16)); cpupat=$(cpu_alt "$scn")
   grep -qaE '^\[JSR-SMPC\] registry locks=[0-9]+ valid=true' "$scf" || SC_MISS="$SC_MISS $scname:登记表"
   [ "$(grep -caE '^\[JSR-SMPC\] rank +[0-9]+ system\.[a-z_.]+.?$' "$scf")" -ge 11 ] || SC_MISS="$SC_MISS $scname:登记链"
   grep -qa '^\[JSR-SMPC\] order ascending=ok reverse=system\.lock\.error\.out_of_order recursive=system\.lock\.error\.out_of_order unchanged=true held_back=true' "$scf" \
     || SC_MISS="$SC_MISS $scname:顺序检查"
-  grep -qa '^\[JSR-SMPC\] held per_cpu independent=3/3' "$scf" || SC_MISS="$SC_MISS $scname:每核持有集合"
-  # 控制台：4 个处理器各 16 行、格式完整（任何跨核交错都会破坏行格式）
-  scgood=$(grep -caE '^\[JSR-SMPC\] burst cpu=[0-3] seq=(0[0-9]|1[0-5]) abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKL end.?$' "$scf")
-  scbad=$(grep -a 'burst cpu=' "$scf" | grep -cavE '^\[JSR-SMPC\] burst cpu=[0-3] seq=(0[0-9]|1[0-5]) abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKL end.?$')
-  [ "$scgood" -eq 64 ] && [ "$scbad" -eq 0 ] || SC_MISS="$SC_MISS $scname:整行输出($scgood/64,坏行$scbad)"
-  for sccpu in 0 1 2 3; do
+  grep -qaE "^\[JSR-SMPC\] held per_cpu independent=$scap/$scap" "$scf" || SC_MISS="$SC_MISS $scname:每核持有集合"
+  # 控制台：N 个处理器各 16 行、格式完整（任何跨核交错都会破坏行格式）
+  scgood=$(grep -caE "^\[JSR-SMPC\] burst cpu=($cpupat) seq=(0[0-9]|1[0-5]) abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKL end.?$" "$scf")
+  scbad=$(grep -a 'burst cpu=' "$scf" | grep -cavE "^\[JSR-SMPC\] burst cpu=($cpupat) seq=(0[0-9]|1[0-5]) abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKL end.?$")
+  [ "$scgood" -eq "$sctotal" ] && [ "$scbad" -eq 0 ] || SC_MISS="$SC_MISS $scname:整行输出($scgood/$sctotal,坏行$scbad)"
+  for (( sccpu = 0; sccpu < scn; sccpu++ )); do
     [ "$(grep -caE "^\[JSR-SMPC\] burst cpu=$sccpu seq=" "$scf")" -eq 16 ] || SC_MISS="$SC_MISS $scname:cpu$sccpu行数"
   done
-  grep -qaE '^\[JSR-SMPC\] console burst cpus=4 lines_per_cpu=16 total=64 contended=[0-9]+' "$scf" || SC_MISS="$SC_MISS $scname:并发输出"
-  grep -qaE '^\[JSR-SMPC\] sched concurrent readers=3/3 rounds=2000 consistent=true restored=true contended=[0-9]+' "$scf" || SC_MISS="$SC_MISS $scname:调度器锁"
-  grep -qa '^\[JSR-SMPC\] kstack per_cpu set=3/3 kept=3/3 bsp_unchanged=true restored=3/3' "$scf" || SC_MISS="$SC_MISS $scname:每核内核栈"
+  grep -qaE "^\[JSR-SMPC\] console burst cpus=$scn lines_per_cpu=16 total=$sctotal contended=[0-9]+" "$scf" || SC_MISS="$SC_MISS $scname:并发输出"
+  grep -qaE "^\[JSR-SMPC\] sched concurrent readers=$scap/$scap rounds=2000 consistent=true restored=true contended=[0-9]+" "$scf" || SC_MISS="$SC_MISS $scname:调度器锁"
+  grep -qaE "^\[JSR-SMPC\] kstack per_cpu set=$scap/$scap kept=$scap/$scap bsp_unchanged=true restored=$scap/$scap" "$scf" || SC_MISS="$SC_MISS $scname:每核内核栈"
   grep -qaE '^\[JSR-LOCK-ORDER\]|^\[JSR-PANIC\]' "$scf" && SC_MISS="$SC_MISS $scname:出现锁顺序违反或panic"
-  grep -qaE '^\[JSR-SMP\] summary cpus=4 online=4 checks=[0-9]+ failed=0' "$scf" && grep -qa '^\[JSR-EXIT\] success' "$scf" && [ "$scrc" -eq 33 ] \
+  grep -qaE "^\[JSR-SMP\] summary cpus=$scn online=$scn checks=[0-9]+ failed=0" "$scf" && grep -qa '^\[JSR-EXIT\] success' "$scf" && [ "$scrc" -eq 33 ] \
     || SC_MISS="$SC_MISS $scname:汇总/退出"
 }
 
 check_smp1c() { # 多处理器第三阶段（去全局串行点）：全局锁登记在一条级别链上并按每核持有集合检查顺序（逆序 / 重入被拒且无残留）；
                 # 调度器改为登记了级别的锁；控制台跨核整行输出；系统调用入口暂存位与内核栈登记每核一份；
-                # JASPER_ARCHES=all 时四个指令集的 4 处理器日志全部通过；默认只验 x86_64（单处理器与 4 处理器）
+                # JASPER_ARCHES=all 时四个指令集的 4 处理器日志全部通过；默认只验 x86_64（单处理器 / 4 处理器 / 8 处理器）
   local sc_qrcs="$QRC_SMP4"
   if [ "$ARCH_ALL" -eq 0 ]; then
-    if [ ! -s "$SERIAL_SMP4" ]; then
-      record SMP-1c FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4）"
+    if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_SMP8" ]; then
+      record SMP-1c FAIL "缺少 4 / 8 处理器串口日志（QEMU=$QRC_SMP4/$QRC_SMP8）"
       return
     fi
   else
-    sc_qrcs="$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4"
-    if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || { ! rv32_fw_missing && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
-      record SMP-1c FAIL "缺少 4 处理器串口日志（QEMU=$sc_qrcs）"
+    sc_qrcs="$QRC_SMP4/$QRC_SMP8/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4"
+    if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_SMP8" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || { ! rv32_fw_missing && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
+      record SMP-1c FAIL "缺少 4 / 8 处理器串口日志（QEMU=$sc_qrcs）"
       return
     fi
   fi
   SC_MISS=""
   local scsingle sclist=("$SERIAL")
-  smp1c_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64
+  smp1c_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64×4 4
+  smp1c_verdict "$SERIAL_SMP8" "$QRC_SMP8" x86_64×8 8
   if [ "$ARCH_ALL" -eq 1 ]; then
-    smp1c_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64
-    smp1c_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64
-    rv32_fw_missing || smp1c_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
+    smp1c_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64 4
+    smp1c_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64 4
+    rv32_fw_missing || smp1c_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32 4
     sclist=("$SERIAL" "$SERIAL_A64" "$SERIAL_RV64")
     rv32_fw_missing || sclist+=("$SERIAL_RV32")
   fi
@@ -1151,54 +1188,60 @@ check_smp1c() { # 多处理器第三阶段（去全局串行点）：全局锁�
       && grep -qa '^\[JSR-SMPC\] order ascending=ok reverse=system\.lock\.error\.out_of_order' "$scsingle" || SC_MISS="$SC_MISS 单处理器($(basename "$scsingle"))"
   done
   if [ -z "$SC_MISS" ]; then
-    record SMP-1c PASS "$ARCH_DESC -smp 4（QEMU=$sc_qrcs）：$(grep -caE '^\[JSR-SMPC\] rank ' "$SERIAL_SMP4") 把全局锁登记成一条级别链，逆序 / 重入被拒且持有集合与中断状态不变，持有集合每核独立 3/3；4 核同时各打印 16 行共 64 行无一交错；其他 3 核各 2000 次读调度器与引导处理器改写并发、状态一致、无死锁；内核栈登记（x86_64 经每核 KERNEL_GS_BASE 入口块）每核独立 3/3；无锁顺序违反；单处理器如实跳过跨核部分$RV32_NOTE"
+    record SMP-1c PASS "$ARCH_DESC -smp 4（QEMU=$QRC_SMP4）与 -smp 8（QEMU=$QRC_SMP8）：$(grep -caE '^\[JSR-SMPC\] rank ' "$SERIAL_SMP4") 把全局锁登记成一条级别链，逆序 / 重入被拒且持有集合与中断状态不变，持有集合每核独立（4 核 3/3、8 核 7/7）；4 核同时各打印 16 行共 64 行、8 核同时各打印 16 行共 128 行，均无一交错；其他核各 2000 次读调度器与引导处理器改写并发、状态一致、无死锁；内核栈登记（x86_64 经每核 KERNEL_GS_BASE 入口块）每核独立（4 核 3/3、8 核 7/7）；无锁顺序违反；单处理器 / 4 处理器 / 8 处理器均已覆盖，单处理器如实跳过跨核部分$RV32_NOTE"
   else
     record SMP-1c FAIL "缺少/不符：$SC_MISS"
   fi
 }
 
+# smp2_verdict <日志> <QEMU 退出码> <名称> <处理器数>：每核运行队列与负载均衡断言；任务数（N / 2N）、
+# 窃取下界（N−1）、上限用例覆盖核数都按实际处理器数计算，判据本身不放宽。
 smp2_verdict() {
-  local s2f="$1" s2rc="$2" s2name="$3" s2case
+  local s2f="$1" s2rc="$2" s2name="$3" s2n="$4" s2case s2ap s2hogs
+  s2ap=$((s2n - 1)); s2hogs=$((2 * s2n))
   for s2case in spread steal overload; do
-    grep -qaE "^\[JSR-SMP2\] cores case=$s2case cpus=4 .* all_busy=true" "$s2f" || S2_MISS="$S2_MISS $s2name:$s2case各核都忙"
+    grep -qaE "^\[JSR-SMP2\] cores case=$s2case cpus=$s2n .* all_busy=true" "$s2f" || S2_MISS="$S2_MISS $s2name:$s2case各核都忙"
   done
   grep -qaE '^\[JSR-SMP2\] case=refusals empty_set=refused offline_only=refused no_task=refused boot_thread=refused unchanged=true' "$s2f" || S2_MISS="$S2_MISS $s2name:拒绝路径"
-  grep -qaE '^\[JSR-SMP2\] case=spread cpus=4 tasks=4 window=[0-9]+ cores_covered=true min_task_cpu=[0-9]+ all_busy=true' "$s2f" || S2_MISS="$S2_MISS $s2name:铺满"
-  grep -qaE '^\[JSR-SMP2\] case=steal cpus=4 tasks=8 queued_on=cpu0 steals=([3-9]|[1-9][0-9]+) cores_covered=true all_busy=true' "$s2f" || S2_MISS="$S2_MISS $s2name:窃取"
-  grep -qaE '^\[JSR-SMP2\] case=overload cpus=4 hogs=8 window=[0-9]+ interactive_rounds=20 samples=20 latency_max=[0-2] bound=2 bounded=true min_hog_cpu=[0-9]+ all_busy=true' "$s2f" || S2_MISS="$S2_MISS $s2name:过载交互延迟"
-  grep -qaE '^\[JSR-SMP2\] case=recovery cpus=4 rounds=20 samples=20 max=0 immediate=true .* reclaimed=true' "$s2f" || S2_MISS="$S2_MISS $s2name:恢复"
-  grep -qaE '^\[JSR-SMP2\] case=affinity pinned_cpu=3 seen_pinned=0x8 refused_unchanged=true moved_to=1 seen_moved=0x2 self_to=2 self_after=2 seen_self=0x4 ok=true' "$s2f" || S2_MISS="$S2_MISS $s2name:亲和迁移"
-  grep -qaE '^\[JSR-SMP2\] case=inherit cpus=4 hogs=8 work=4 wait=[0-8] bound=8 bounded=true holder_peak=interactive lock_free=true' "$s2f" || S2_MISS="$S2_MISS $s2name:跨核继承"
-  grep -qaE '^\[JSR-SMP2\] case=limit cpus=4 members=4 limit_permille=250 window=160 used=[0-9]+ bound=[0-9]+ within=true floor=[0-9]+ throttle_events=[1-9][0-9]* cores_used=[2-4]' "$s2f" || S2_MISS="$S2_MISS $s2name:跨核上限"
+  grep -qaE "^\[JSR-SMP2\] case=spread cpus=$s2n tasks=$s2n window=[0-9]+ cores_covered=true min_task_cpu=[0-9]+ all_busy=true" "$s2f" || S2_MISS="$S2_MISS $s2name:铺满"
+  grep -qaE "^\[JSR-SMP2\] case=steal cpus=$s2n tasks=$s2hogs queued_on=cpu0 steals=([$s2ap-9]|[1-9][0-9]+) cores_covered=true all_busy=true" "$s2f" || S2_MISS="$S2_MISS $s2name:窃取"
+  grep -qaE "^\[JSR-SMP2\] case=overload cpus=$s2n hogs=$s2hogs window=[0-9]+ interactive_rounds=20 samples=20 latency_max=[0-2] bound=2 bounded=true min_hog_cpu=[0-9]+ all_busy=true" "$s2f" || S2_MISS="$S2_MISS $s2name:过载交互延迟"
+  grep -qaE "^\[JSR-SMP2\] case=recovery cpus=$s2n rounds=20 samples=20 max=0 immediate=true .* reclaimed=true" "$s2f" || S2_MISS="$S2_MISS $s2name:恢复"
+  local s2pin s2seen
+  s2pin=$((s2n - 1)); s2seen=$(printf '0x%x' $((1 << s2pin)))
+  grep -qaE "^\[JSR-SMP2\] case=affinity pinned_cpu=$s2pin seen_pinned=$s2seen refused_unchanged=true moved_to=1 seen_moved=0x2 self_to=2 self_after=2 seen_self=0x4 ok=true" "$s2f" || S2_MISS="$S2_MISS $s2name:亲和迁移"
+  grep -qaE "^\[JSR-SMP2\] case=inherit cpus=$s2n hogs=$s2hogs work=4 wait=[0-8] bound=8 bounded=true holder_peak=interactive lock_free=true" "$s2f" || S2_MISS="$S2_MISS $s2name:跨核继承"
+  grep -qaE "^\[JSR-SMP2\] case=limit cpus=$s2n members=$s2n limit_permille=250 window=160 used=[0-9]+ bound=[0-9]+ within=true floor=[0-9]+ throttle_events=[1-9][0-9]* cores_used=[2-$s2n]" "$s2f" || S2_MISS="$S2_MISS $s2name:跨核上限"
   grep -qaE '^\[JSR-SMP2-FAIL\]|^\[JSR-LOCK-ORDER\]|^\[JSR-PANIC\]' "$s2f" && S2_MISS="$S2_MISS $s2name:出现失败断言/锁顺序违反/panic"
-  grep -qaE '^\[JSR-SMP2\] summary cpus=4 free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=43 failed=0' "$s2f" && grep -qa '^\[JSR-EXIT\] success' "$s2f" && [ "$s2rc" -eq 33 ] \
+  grep -qaE "^\[JSR-SMP2\] summary cpus=$s2n free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=43 failed=0" "$s2f" && grep -qa '^\[JSR-EXIT\] success' "$s2f" && [ "$s2rc" -eq 33 ] \
     || S2_MISS="$S2_MISS $s2name:汇总/退出"
 }
 
 check_smp2() { # 每核运行队列 + 负载均衡：N 核 N 任务各核都忙、空闲窃取有界、全部核过载时交互延迟有上界、压力撤销后立即恢复、
   if [ "$SCHED_POLICY" = "rr" ]; then record_na SMP-2 "过载交互延迟与跨核继承依赖 QoS 保证，纯轮转构建不适用；已在分时构建中通过"; return; fi
                # 亲和集合与迁移、跨核优先级继承与 CPU 上限、拒绝路径无残留；JASPER_ARCHES=all 时四个指令集的 4 处理器日志全部通过，
-               # 默认只验 x86_64（单处理器与 4 处理器），单处理器如实跳过
+               # 默认只验 x86_64（单处理器 / 4 处理器 / 8 处理器），单处理器如实跳过
   local s2_qrcs="$QRC_SMP4"
   if [ "$ARCH_ALL" -eq 0 ]; then
-    if [ ! -s "$SERIAL_SMP4" ]; then
-      record SMP-2 FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4）"
+    if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_SMP8" ]; then
+      record SMP-2 FAIL "缺少 4 / 8 处理器串口日志（QEMU=$QRC_SMP4/$QRC_SMP8）"
       return
     fi
   else
-    s2_qrcs="$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4"
-    if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || { ! rv32_fw_missing && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
-      record SMP-2 FAIL "缺少 4 处理器串口日志（QEMU=$s2_qrcs）"
+    s2_qrcs="$QRC_SMP4/$QRC_SMP8/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4"
+    if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_SMP8" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || { ! rv32_fw_missing && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
+      record SMP-2 FAIL "缺少 4 / 8 处理器串口日志（QEMU=$s2_qrcs）"
       return
     fi
   fi
   S2_MISS=""
   local s2single s2list=("$SERIAL")
-  smp2_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64
+  smp2_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64×4 4
+  smp2_verdict "$SERIAL_SMP8" "$QRC_SMP8" x86_64×8 8
   if [ "$ARCH_ALL" -eq 1 ]; then
-    smp2_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64
-    smp2_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64
-    rv32_fw_missing || smp2_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
+    smp2_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64 4
+    smp2_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64 4
+    rv32_fw_missing || smp2_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32 4
     s2list=("$SERIAL" "$SERIAL_A64" "$SERIAL_RV64")
     rv32_fw_missing || s2list+=("$SERIAL_RV32")
   fi
@@ -1207,58 +1250,62 @@ check_smp2() { # 每核运行队列 + 负载均衡：N 核 N 任务各核都忙�
       && grep -qaE '^\[JSR-SMP2\] summary cpus=1 .* failed=0' "$s2single" || S2_MISS="$S2_MISS 单处理器($(basename "$s2single"))"
   done
   if [ -z "$S2_MISS" ]; then
-    record SMP-2 PASS "$ARCH_DESC -smp 4（QEMU=$s2_qrcs）：每核运行队列；4 核 4 任务与 8 任务过载时各核忙碌 ≥85%、「本核空闲而别处有任务在等」≤2 tick；8 个任务全排在引导处理器队列时其他核窃取 ≥3 次；全部核过载时交互唤醒延迟 ≤2 tick（x86_64 实测 $(grep -aoE 'case=overload .*latency_max=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')）、压力撤销后 20 次唤醒延迟全为 0；亲和钉核 / 他人改 / 自己改均只在允许的核运行，非法集合被拒且不变；跨核优先级继承等待 ≤ 工作量 + 2；一组成员分散 4 核时整组用量不超过上限的界；资源回到基线；单处理器如实跳过$RV32_NOTE"
+    record SMP-2 PASS "$ARCH_DESC -smp 4（QEMU=$QRC_SMP4）与 -smp 8（QEMU=$QRC_SMP8）：每核运行队列；4 核 4 任务 / 8 核 8 任务与 4 核 8 任务 / 8 核 16 任务过载时各核忙碌 ≥85%、「本核空闲而别处有任务在等」≤2 tick；2N 个任务全排在引导处理器队列时其他核窃取 ≥N−1 次；全部核过载时交互唤醒延迟 ≤2 tick（4 核实测 $(grep -aoE 'case=overload .*latency_max=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')、8 核实测 $(grep -aoE 'case=overload .*latency_max=[0-9]+' "$SERIAL_SMP8" | grep -oE '[0-9]+$')）；压力撤销后 20 次唤醒延迟全为 0；亲和钉核 / 他人改 / 自己改均只在允许的核运行，非法集合被拒且不变；跨核优先级继承等待 ≤ 工作量 + 2；一组成员分散到 4 / 8 核时整组用量不超过上限的界；资源回到基线；单处理器 / 4 处理器 / 8 处理器均已覆盖，单处理器如实跳过$RV32_NOTE"
   else
     record SMP-2 FAIL "缺少/不符：$S2_MISS"
   fi
 }
 
+# smp3_verdict <日志> <QEMU 退出码> <名称> <处理器数>：中断亲和 / 均衡 / 风暴预算 / 恢复 / 分片服务断言；
+# 送达核数、2N 个吃满处理器的任务、分散核数、服务分片数都按实际处理器数计算，判据本身不放宽。
 smp3_verdict() {
-  local s3f="$1" s3rc="$2" s3name="$3"
+  local s3f="$1" s3rc="$2" s3name="$3" s3n="$4" s3hogs
+  s3hogs=$((2 * s3n))
   grep -qaE '^\[JSR-SMP3\] case=irq_refusals no_line=refused bad_quota=refused empty_set=refused offline_only=refused unrouted_enable=refused disabled_trigger=refused unchanged=true' "$s3f" || S3_MISS="$S3_MISS $s3name:中断拒绝路径"
   grep -qaE '^\[JSR-SMP3\] case=shard_refusals unconfigured=refused bad_count=refused no_cpu_shard=refused full=refused kept_order=true reconfigure_busy=refused unchanged=true' "$s3f" || S3_MISS="$S3_MISS $s3name:分片拒绝路径"
-  grep -qaE '^\[JSR-SMP3\] case=route cpus=4 lines=2 delivered_exact=4/4 handler_calls_match=true disabled_after=true' "$s3f" || S3_MISS="$S3_MISS $s3name:按亲和送达"
+  grep -qaE "^\[JSR-SMP3\] case=route cpus=$s3n lines=2 delivered_exact=$s3n/$s3n handler_calls_match=true disabled_after=true" "$s3f" || S3_MISS="$S3_MISS $s3name:按亲和送达"
   grep -qaE '^\[JSR-SMP3\] case=balance lines=2 keep_moves=0 keep_cpus=0x1 spread_moves=[1-9][0-9]* spread_cpus=0x[0-9a-f]+ distinct=true spread_after=[0-9]+ bound=16 in_time=true' "$s3f" || S3_MISS="$S3_MISS $s3name:亲和均衡"
-  grep -qaE '^\[JSR-SMP3\] case=storm cpus=4 lines=2 hogs=8 window=120 interactive_rounds=20 samples=20 latency_max=[0-2] bound=2 bounded=true all_busy=true irq_handled=[1-9][0-9]* cores_hit=[2-4] spread=true throttles=[1-9][0-9]* worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=true min_hog_cpu=[0-9]+' "$s3f" || S3_MISS="$S3_MISS $s3name:风暴下交互延迟/预算/分散"
-  grep -qaE '^\[JSR-SMP3\] case=recovery cpus=4 rounds=20 samples=20 max=0 immediate=true irq_after_disable=0 quiet=true reclaimed=true' "$s3f" || S3_MISS="$S3_MISS $s3name:风暴撤销后恢复"
+  grep -qaE "^\[JSR-SMP3\] case=storm cpus=$s3n lines=2 hogs=$s3hogs window=120 interactive_rounds=20 samples=20 latency_max=[0-2] bound=2 bounded=true all_busy=true irq_handled=[1-9][0-9]* cores_hit=[2-$s3n] spread=true throttles=[1-9][0-9]* worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=true min_hog_cpu=[0-9]+" "$s3f" || S3_MISS="$S3_MISS $s3name:风暴下交互延迟/预算/分散"
+  grep -qaE "^\[JSR-SMP3\] case=recovery cpus=$s3n rounds=20 samples=20 max=0 immediate=true irq_after_disable=0 quiet=true reclaimed=true" "$s3f" || S3_MISS="$S3_MISS $s3name:风暴撤销后恢复"
   if [ "$HOST_CORES" -ge 4 ]; then SP_PAT='speedup_permille=[0-9]+ faster=true'; else SP_PAT='speedup_permille=[0-9]+ faster=(true|false)'; fi
-  grep -qaE "^\[JSR-SMP3\] case=service cpus=4 flows=128 requests=512 makespan_one=[0-9]+ makespan_many=[0-9]+ $SP_PAT imbalance_permille=([0-9]|[1-9][0-9]|[1-2][0-9][0-9]|3[0-4][0-9]|350) bound=350 cores_used=4 least_busy=[0-9]+ in_order=true done=true reclaimed=true" "$s3f" || S3_MISS="$S3_MISS $s3name:分片服务各核均衡"
-  # 宿主有 ≥4 个核时，4 分片的加速比必须 ≥ 2.0×（内核侧的 faster 只要求 1.4×，那是为不足 4 核的宿主留的下限）。
+  grep -qaE "^\[JSR-SMP3\] case=service cpus=$s3n flows=512 requests=1024 makespan_one=[0-9]+ makespan_many=[0-9]+ $SP_PAT imbalance_permille=([0-9]|[1-9][0-9]|[1-2][0-9][0-9]|3[0-4][0-9]|350) bound=350 cores_used=$s3n least_busy=[0-9]+ in_order=true done=true reclaimed=true" "$s3f" || S3_MISS="$S3_MISS $s3name:分片服务各核均衡"
+  # 宿主有 ≥4 个核时，多分片的加速比必须 ≥ 2.0×（内核侧的 faster 只要求 1.4×，那是为不足 4 核的宿主留的下限）。
   # 「不能一核跑满、多核围观」是硬指标：核数够时不放宽。
   if [ "$HOST_CORES" -ge 4 ]; then
-    local sp; sp="$(grep -aoE '^\[JSR-SMP3\] case=service .*speedup_permille=[0-9]+' "$s3f" | head -1 | grep -oE '[0-9]+$')"
+    local sp; sp="$(grep -aoE "^\[JSR-SMP3\] case=service .*speedup_permille=[0-9]+" "$s3f" | head -1 | grep -oE '[0-9]+$')"
     [ "${sp:-0}" -ge 2000 ] || S3_MISS="$S3_MISS $s3name:分片加速比${sp:-?}‰<2000‰"
   fi
   grep -qaE '^\[JSR-SMP3-FAIL\]|^\[JSR-LOCK-ORDER\]|^\[JSR-PANIC\]' "$s3f" && S3_MISS="$S3_MISS $s3name:出现失败断言/锁顺序违反/panic"
-  grep -qaE '^\[JSR-SMP3\] summary cpus=4 device_lines=2 free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=39 failed=0' "$s3f" && grep -qa '^\[JSR-EXIT\] success' "$s3f" && [ "$s3rc" -eq 33 ] \
+  grep -qaE "^\[JSR-SMP3\] summary cpus=$s3n device_lines=2 free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=39 failed=0" "$s3f" && grep -qa '^\[JSR-EXIT\] success' "$s3f" && [ "$s3rc" -eq 33 ] \
     || S3_MISS="$S3_MISS $s3name:汇总/退出"
 }
 
 check_smp3() { # 中断与服务的多核化：设备中断按亲和送达、均衡策略分散中断线、风暴下每核预算节流（交互延迟有上界、无单核被中断吃满）、
   if [ "$SCHED_POLICY" = "rr" ]; then record_na SMP-3 "中断风暴下的交互延迟判据依赖 QoS 保证，纯轮转构建不适用；已在分时构建中通过"; return; fi
                # 风暴撤销后立即恢复、分片服务各核并行且均衡、拒绝路径无残留；JASPER_ARCHES=all 时四个指令集的 4 处理器日志全部通过，
-               # 默认只验 x86_64（单处理器与 4 处理器），单处理器如实跳过
+               # 默认只验 x86_64（单处理器 / 4 处理器 / 8 处理器），单处理器如实跳过
   local s3_qrcs="$QRC_SMP4" s3_archdesc="x86_64（I/O APIC）"
   if [ "$ARCH_ALL" -eq 0 ]; then
-    if [ ! -s "$SERIAL_SMP4" ]; then
-      record SMP-3 FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4）"
+    if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_SMP8" ]; then
+      record SMP-3 FAIL "缺少 4 / 8 处理器串口日志（QEMU=$QRC_SMP4/$QRC_SMP8）"
       return
     fi
   else
-    s3_qrcs="$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4"
+    s3_qrcs="$QRC_SMP4/$QRC_SMP8/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4"
     s3_archdesc="x86_64（I/O APIC）/ AArch64（GICv2 共享外设中断）/ RISC-V64 / RISC-V32（PLIC 每核上下文）"
-    if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || { ! rv32_fw_missing && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
-      record SMP-3 FAIL "缺少 4 处理器串口日志（QEMU=$s3_qrcs）"
+    if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_SMP8" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || { ! rv32_fw_missing && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
+      record SMP-3 FAIL "缺少 4 / 8 处理器串口日志（QEMU=$s3_qrcs）"
       return
     fi
   fi
   S3_MISS=""
   local s3single s3list=("$SERIAL")
-  smp3_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64
+  smp3_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64×4 4
+  smp3_verdict "$SERIAL_SMP8" "$QRC_SMP8" x86_64×8 8
   if [ "$ARCH_ALL" -eq 1 ]; then
-    smp3_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64
-    smp3_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64
-    rv32_fw_missing || smp3_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
+    smp3_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64 4
+    smp3_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64 4
+    rv32_fw_missing || smp3_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32 4
     s3list=("$SERIAL" "$SERIAL_A64" "$SERIAL_RV64")
     rv32_fw_missing || s3list+=("$SERIAL_RV32")
   fi
@@ -1267,10 +1314,12 @@ check_smp3() { # 中断与服务的多核化：设备中断按亲和送达、均
       && grep -qaE '^\[JSR-SMP3\] summary cpus=1 .* failed=0' "$s3single" || S3_MISS="$S3_MISS 单处理器($(basename "$s3single"))"
   done
   if [ -z "$S3_MISS" ]; then
-    local lat sp
-    lat=$(grep -aoE 'case=storm .*latency_max=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')
-    sp=$(grep -aoE 'case=service .*speedup_permille=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')
-    record SMP-3 PASS "$s3_archdesc -smp 4（QEMU=$s3_qrcs）：两条设备中断线依次钉到 4 个核，只在该核处理 4/4；两条线都在 0 号核时对照策略不搬、均衡策略两个周期内分到不同的核；两条线持续风暴 + 8 个吃满处理器的任务时交互唤醒延迟 ≤2 tick（x86_64 实测 $lat）、各核都忙、每核中断次数与时间不超过预算的界、风暴分散到多个核；撤销后无中断、延迟全为 0；分片服务 128 个流 512 个请求 4 分片比 1 分片快（x86_64 ${sp}‰）、不均衡度 ≤350‰、流内有序；拒绝路径无残留；单处理器如实跳过$RV32_NOTE"
+    local lat4 lat8 sp4 sp8
+    lat4=$(grep -aoE 'case=storm .*latency_max=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')
+    lat8=$(grep -aoE 'case=storm .*latency_max=[0-9]+' "$SERIAL_SMP8" | grep -oE '[0-9]+$')
+    sp4=$(grep -aoE 'case=service .*speedup_permille=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')
+    sp8=$(grep -aoE 'case=service .*speedup_permille=[0-9]+' "$SERIAL_SMP8" | grep -oE '[0-9]+$')
+    record SMP-3 PASS "$s3_archdesc -smp 4（QEMU=$QRC_SMP4）与 -smp 8（QEMU=$QRC_SMP8）：两条设备中断线依次钉到 4 / 8 个核，只在该核处理 4/4、8/8；两条线都在 0 号核时对照策略不搬、均衡策略两个周期内分到不同的核；两条线持续风暴 + 2N 个吃满处理器的任务时交互唤醒延迟 ≤2 tick（4 核实测 $lat4、8 核实测 $lat8）、各核都忙、每核中断次数与时间不超过预算的界、风暴分散到多个核；撤销后无中断、延迟全为 0；分片服务 128 个流 512 个请求，4 / 8 分片分别比 1 分片快（4 核 ${sp4}‰、8 核 ${sp8}‰）、不均衡度 ≤350‰、流内有序；拒绝路径无残留；单处理器 / 4 处理器 / 8 处理器均已覆盖，单处理器如实跳过$RV32_NOTE"
   else
     record SMP-3 FAIL "缺少/不符：$S3_MISS"
   fi
@@ -1487,7 +1536,7 @@ check_harden1c() { # 长期运行与并发正确性①：用户指针复制与�
   local miss="" f name
   local nat='^\[JSR-UPTR-SMP\] mode=natural raced=[0-9]+ stale=0 attack_exit=Some\(0\) victim_exit=Some\(0\) free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 pending=0 pinned=\(0, 0\) reclaimed=true checks=[0-9]+ failed=0'
   local wide='^\[JSR-UPTR-SMP\] mode=wide raced=[1-9][0-9]* stale=0 attack_exit=Some\(0\) victim_exit=Some\(0\) free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 pending=0 pinned=\(0, 0\) reclaimed=true checks=[0-9]+ failed=0'
-  local pairs=("$SERIAL:x86_64" "$SERIAL_SMP4:x86_64×4")
+  local pairs=("$SERIAL:x86_64" "$SERIAL_SMP4:x86_64×4" "$SERIAL_SMP8:x86_64×8")
   [ "$ARCH_ALL" -eq 1 ] && pairs+=("$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4")
   for pair in "${pairs[@]}"; do
     f="${pair%%:*}"; name="${pair##*:}"
@@ -1501,7 +1550,7 @@ check_harden1c() { # 长期运行与并发正确性①：用户指针复制与�
   fi
   grep -qaE '^test .* \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null || miss="$miss 宿主测试"
   if [ -z "$miss" ]; then
-    record HARDEN1C PASS "长期运行 1500 轮回到基线、对象槽位无退役；用户指针并发：攻击方翻页 + 内核读写同一页、受害方核对图案；自然窗口与撑大窗口（窗口内让出一个 tick）两轮都无跨进程读写，撑大窗口确实发生了固定期间被取消映射；资源回到基线（$ARCH_SCOPE，含 4 处理器）$RV32_NOTE"
+    record HARDEN1C PASS "长期运行 1500 轮回到基线、对象槽位无退役；用户指针并发：攻击方翻页 + 内核读写同一页、受害方核对图案；自然窗口与撑大窗口（窗口内让出一个 tick）两轮都无跨进程读写，撑大窗口确实发生了固定期间被取消映射；资源回到基线（$ARCH_SCOPE，覆盖单处理器 / 4 处理器 / 8 处理器）$RV32_NOTE"
   else
     record HARDEN1C FAIL "缺少：$miss"
   fi
@@ -1513,7 +1562,7 @@ check_harden1e() { # 空闲停表（tickless idle）：同样长的全空闲窗�
   local miss="" f name
   local idle='^\[JSR-NOHZ\] case=idle cpus=[2-9][0-9]* window=[0-9]+ divisor=[2-9][0-9]* periodic_ticks=[0-9]+ nohz_ticks=[0-9]+ reduced=true stops=[1-9][0-9]* timekeeper_stopped=false accounted_min=[0-9]+ covered=true reclaimed=true'
   local wake='^\[JSR-NOHZ\] case=wake cpu=1 rounds=10 sleep=[0-9]+ samples=10 max=[0-2] bound=2 bounded=true stops=[1-9][0-9]* kicks=[0-9]+ reclaimed=true'
-  local pairs=("$SERIAL_SMP4:x86_64×4")
+  local pairs=("$SERIAL_SMP4:x86_64×4" "$SERIAL_SMP8:x86_64×8")
   if [ "$ARCH_ALL" -eq 1 ]; then
     pairs+=("$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4")
     rv32_ready && ! rv32_fw_missing && pairs+=("$SERIAL_RV32_SMP4:RV32×4")
@@ -1530,9 +1579,10 @@ check_harden1e() { # 空闲停表（tickless idle）：同样长的全空闲窗�
     grep -qaE "^test $t \.\.\. ok$" "$OUT/cargo-test.log" 2>/dev/null || miss="$miss 宿主:$t"
   done
   if [ -z "$miss" ]; then
-    local r
-    r=$(grep -aE "$idle" "$SERIAL_SMP4" | head -1 | sed -E 's/.* periodic_ticks=([0-9]+) nohz_ticks=([0-9]+).*/\1→\2/')
-    record HARDEN1E PASS "空闲停表：全空闲窗口里非计时处理器本地 tick ${r}（x86_64×4），计时处理器永不停表，停表期间空闲时长补记；停表处理器上唤醒延迟 ≤2 tick；其后 SMP-3 风暴 / 分散 / 预算在停表开启下通过（$ARCH_SCOPE，含 4 处理器）$RV32_NOTE"
+    local r4 r8
+    r4=$(grep -aE "$idle" "$SERIAL_SMP4" | head -1 | sed -E 's/.* periodic_ticks=([0-9]+) nohz_ticks=([0-9]+).*/\1→\2/')
+    r8=$(grep -aE "$idle" "$SERIAL_SMP8" | head -1 | sed -E 's/.* periodic_ticks=([0-9]+) nohz_ticks=([0-9]+).*/\1→\2/')
+    record HARDEN1E PASS "空闲停表：全空闲窗口里非计时处理器本地 tick 4 核 ${r4}、8 核 ${r8}，计时处理器永不停表，停表期间空闲时长补记；停表处理器上唤醒延迟 ≤2 tick；其后 SMP-3 风暴 / 分散 / 预算在停表开启下通过（$ARCH_SCOPE，覆盖单处理器 / 4 处理器 / 8 处理器）$RV32_NOTE"
   else
     record HARDEN1E FAIL "缺少：$miss"
   fi
@@ -1768,7 +1818,7 @@ check_harden1d() { # 调度规模化：选择路径只遍历本处理器的运�
   local over='^\[JSR-SCALE\] case=overload cpus=[0-9]+ sleepers=[0-9]+ hogs=[0-9]+ window=[0-9]+ interactive_rounds=20 samples=20 latency_max=[0-2] bound=2 bounded=true least_busy=[0-9]+ worst_idle_waiting=[0-2] all_busy=true'
   local rec='^\[JSR-SCALE\] case=recovery cpus=[0-9]+ rounds=20 samples=20 max=0 immediate=true reclaimed=true'
   local sum='^\[JSR-SCALE\] summary cpus=[0-9]+ slots=[0-9]+ free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0'
-  local pairs=("$SERIAL:x86_64" "$SERIAL_SMP4:x86_64×4")
+  local pairs=("$SERIAL:x86_64" "$SERIAL_SMP4:x86_64×4" "$SERIAL_SMP8:x86_64×8")
   if [ "$ARCH_ALL" -eq 1 ]; then
     pairs+=("$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4")
     rv32_ready && ! rv32_fw_missing && pairs+=("$SERIAL_RV32_SMP4:RV32×4")
@@ -1793,10 +1843,14 @@ check_harden1d() { # 调度规模化：选择路径只遍历本处理器的运�
   grep -qa '^\[JSR-SCALE\] case=refusals empty_set=refused unchanged=true' "$SERIAL_SMP4" 2>/dev/null || miss="$miss 拒绝路径"
   grep -qaE '^test sched::runlist::tests::[a-z_]+ \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null || miss="$miss 宿主运行列表测试"
   if [ -z "$miss" ]; then
-    local sl4 ol4
+    local sl4 ol4 sl8 ol8 s4 s8
     sl4=$(grep -aE '^\[JSR-SCALE\] lock name=sched ' "$SERIAL_SMP4" | sed -E 's/.* contended_permille=([0-9]+).*max_spins=([0-9]+).*/\1‰ 最多自旋 \2/')
     ol4=$(grep -aE '^\[JSR-SCALE\] lock name=objtable ' "$SERIAL_SMP4" | sed -E 's/.* contended_permille=([0-9]+).*max_spins=([0-9]+).*/\1‰ 最多自旋 \2/')
-    record HARDEN1D PASS "选择只遍历本核运行列表：$(grep -aE "$scale" "$SERIAL_SMP4" | sed -E 's/.* slots=([0-9]+) sleepers=([0-9]+).* max_visited=([0-9]+).* wake_scans=([01]) ticks=([0-9]+).*/槽位 \1、睡眠任务 \2 时单次最多遍历 \3 项，\5 tick 内到期唤醒扫描 \4 次/')（x86_64×4）；同规模过载交互延迟 ≤2、恢复即时、各核都忙；锁争用（x86_64×4 让出风暴）：调度器锁 $sl4、对象表锁 $ol4；运行列表与运行队列一致、资源回到基线（$ARCH_SCOPE，含 4 处理器）$RV32_NOTE"
+    sl8=$(grep -aE '^\[JSR-SCALE\] lock name=sched ' "$SERIAL_SMP8" | sed -E 's/.* contended_permille=([0-9]+).*max_spins=([0-9]+).*/\1‰ 最多自旋 \2/')
+    ol8=$(grep -aE '^\[JSR-SCALE\] lock name=objtable ' "$SERIAL_SMP8" | sed -E 's/.* contended_permille=([0-9]+).*max_spins=([0-9]+).*/\1‰ 最多自旋 \2/')
+    s4=$(grep -aE "$scale" "$SERIAL_SMP4" | sed -E 's/.* slots=([0-9]+) sleepers=([0-9]+).* max_visited=([0-9]+) avg_visited_x100=([0-9]+).* bound=([0-9]+) wake_scans=([01]) ticks=([0-9]+).*/槽位 \1、睡眠任务 \2 时单次最多遍历 \3 项（界 \5），\7 tick 内到期唤醒扫描 \6 次/')
+    s8=$(grep -aE "$scale" "$SERIAL_SMP8" | sed -E 's/.* slots=([0-9]+) sleepers=([0-9]+).* max_visited=([0-9]+) avg_visited_x100=([0-9]+).* bound=([0-9]+) wake_scans=([01]) ticks=([0-9]+).*/槽位 \1、睡眠任务 \2 时单次最多遍历 \3 项（界 \5），\7 tick 内到期唤醒扫描 \6 次/')
+    record HARDEN1D PASS "选择只遍历本核运行列表：4 核 $s4；8 核 $s8；同规模过载交互延迟 ≤2、恢复即时、各核都忙；锁争用（让出风暴）：调度器锁 4 核 $sl4、8 核 $sl8，对象表锁 4 核 $ol4、8 核 $ol8；运行列表与运行队列一致、资源回到基线（$ARCH_SCOPE，覆盖单处理器 / 4 处理器 / 8 处理器）$RV32_NOTE"
   else
     record HARDEN1D FAIL "缺少：$miss"
   fi
@@ -1838,17 +1892,17 @@ fi
   echo "提交：$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$(git -C "$ROOT" diff --quiet 2>/dev/null || echo '（工作区有未提交改动）')"
   echo "配置档：$PROFILE"
   if [ "$ARCH_ALL" -eq 1 ]; then
-    echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4，AArch64：$QRC_A64，AArch64 4 处理器：$QRC_A64_SMP4，RISC-V64：$QRC_RV64，RISC-V32：$QRC_RV32）"
+    echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4，8 处理器：$QRC_SMP8，AArch64：$QRC_A64，AArch64 4 处理器：$QRC_A64_SMP4，RISC-V64：$QRC_RV64，RISC-V32：$QRC_RV32）"
   else
     echo "架构范围：x86_64（AArch64 / RISC-V64 / RISC-V32 冻结，按 N/A 记录）"
-    echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4，q35 ECAM：$QRC_Q35）"
+    echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4，8 处理器：$QRC_SMP8，q35 ECAM：$QRC_Q35）"
   fi
   echo
   printf '%-6s %-4s %s\n' "里程碑" "结果" "说明"
   printf '%s\n' "${ROWS[@]}"
 } | tee "$OUT/summary.txt"
 
-EVIDENCE_FILES=(cargo-test.log build.log serial.log serial-smp4.log serial-q35.log summary.txt)
+EVIDENCE_FILES=(cargo-test.log build.log serial.log serial-smp4.log serial-smp8.log serial-q35.log summary.txt)
 if [ "$ARCH_ALL" -eq 1 ]; then
   EVIDENCE_FILES+=(serial-aarch64.log serial-aarch64-smp4.log serial-riscv64.log serial-riscv32.log)
 fi
