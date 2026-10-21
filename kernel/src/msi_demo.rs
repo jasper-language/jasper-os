@@ -17,6 +17,7 @@ use alloc::format;
 use core::fmt;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use kernel_core::interrupt::arrivals_since;
 use kernel_core::msi::{MsiError, Vector, VectorPool};
 use kernel_core::pci::Bdf;
 use kernel_core::smp::{CpuSet, MAX_CPUS};
@@ -168,7 +169,7 @@ fn exercise(pool: &VectorPool, online: CpuSet) -> usize {
             check(false, &format!("向处理器 {} 投递 MSI 失败：{}", cpu, e.name()));
             continue;
         }
-        let arrived = wait_until(|| irq::msi_count(cpu, vector) > before[cpu]);
+        let arrived = wait_until(|| arrivals_since(before[cpu], irq::msi_count(cpu, vector)) > 0);
         settle();
 
         let mut only_target = true;
@@ -244,10 +245,10 @@ fn rebind_check(pool: &VectorPool, online: CpuSet, vectors: &mut [Option<u8>; MA
         check(false, &format!("释放后投递 MSI 失败：{}", e.name()));
         return;
     }
-    let arrived = wait_until(|| irq::msi_count(victim, vector) > before_count);
+    let arrived = wait_until(|| arrivals_since(before_count, irq::msi_count(victim, vector)) > 0);
     settle();
     check(arrived, "释放后的向量没有被接收");
-    check(irq::msi_count(victim, vector) == before_count + 1, "释放后的向量收到不止一次");
+    check(arrivals_since(before_count, irq::msi_count(victim, vector)) == 1, "释放后的向量收到不止一次");
     check(irq::msi_spurious(victim) == before_spurious + 1, "伪 MSI 计数没有加一");
     check(HANDLED.load(Ordering::Relaxed) == before_handled, "旧处理函数仍被调用");
 
@@ -261,7 +262,7 @@ fn rebind_check(pool: &VectorPool, online: CpuSet, vectors: &mut [Option<u8>; MA
                 check(false, &format!("改绑后投递 MSI 失败：{}", e.name()));
                 return;
             }
-            let arrived = wait_until(|| irq::msi_count(victim, again.get()) > count);
+            let arrived = wait_until(|| arrivals_since(count, irq::msi_count(victim, again.get())) > 0);
             settle();
             check(arrived, "改绑后的向量没有被接收");
             check(REBOUND.load(Ordering::Relaxed) == before_rebound + 1, "新处理函数没有被调用");

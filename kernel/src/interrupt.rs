@@ -35,7 +35,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use kernel_core::interrupt::{InterruptLine, Submitted, WaitError};
+use kernel_core::interrupt::{arrivals_since, InterruptLine, Submitted, WaitError};
 use kernel_core::msi::{MsiError, Vector, VectorPool};
 use kernel_core::object::{HandleId, ObjectType, Rights};
 use kernel_core::objtable::ObjId;
@@ -400,7 +400,7 @@ fn unbind_hw(bdf: Bdf, entry: u16) -> bool {
 
 /// 把中断对象 `id` 的新到达并入状态机（锁内）；有等待者就以交付次数完成它并推进其 Ring。
 ///
-/// 分发器计数小于已记读数只可能是计数被清零：此时把当前读数整体视为新到达。
+/// 分发器计数只单调回绕、不清零（已绑定槽位不参与统计清零），新到达数按模 2³² 差计算，跨越回绕也不丢失。
 /// Folds new arrivals of `id` into its state machine, completing the parked waiter if any.
 pub(crate) fn sync_in(t: &mut Table, id: ObjId) {
     let Some(o) = obj_mut(t, id) else { return };
@@ -408,7 +408,7 @@ pub(crate) fn sync_in(t: &mut Table, id: ObjId) {
         return;
     }
     let now = irq::msi_count(o.cpu, o.vector);
-    let delta = if now >= o.seen { now - o.seen } else { now };
+    let delta = arrivals_since(o.seen, now);
     o.seen = now;
     if let Some(((ring, req), n)) = o.line.arrive(delta) {
         DELIVERIES.fetch_add(1, Ordering::Relaxed);

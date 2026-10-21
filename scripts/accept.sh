@@ -91,6 +91,16 @@ cd "$ROOT" || { echo "✗ 无法进入仓库根目录"; exit 2; }
 command -v cargo >/dev/null || { echo "✗ 找不到 cargo"; exit 2; }
 [ -n "$QEMU" ] || { echo "✗ 找不到 qemu-system-x86_64"; exit 2; }
 
+# x86_64 加速方式（用户 2026-10-21 为与主流系统做性能对比开启构建虚拟机嵌套虚拟化）：
+# 默认 TCG：2026-10-21 实测 VirtualBox 嵌套 KVM 不稳定（-smp 8 时整台构建虚拟机挂死；单核可启动但 isohost 第 25 步失败、60 秒未跑完），
+# 在查清前 KVM 只作实验：JASPER_ACCEL=kvm 或 auto（/dev/kvm 可读写时用 KVM）。
+ACCEL="${JASPER_ACCEL:-tcg}"
+if [ "$ACCEL" = auto ]; then
+  if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then ACCEL=kvm; else ACCEL=tcg; fi
+fi
+ACCEL_ARGS=(-accel "$ACCEL")
+echo "x86_64 加速方式：$ACCEL"
+
 # 在限定核上、以最低 CPU / I/O 优先级运行（工具不存在时跳过相应限制）。
 run() {
   local pre=()
@@ -183,7 +193,7 @@ VIRTIO_ARGS=(-device virtio-rng-pci -device virtio-net-pci,netdev=n0 -netdev use
 if [ "$BUILD_RC" -eq 0 ]; then
   echo "== QEMU 真实启动 =="
   sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" \
+  run timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" \
     -serial stdio -display none -monitor none -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL" 2>&1
   QRC=$?
@@ -194,7 +204,7 @@ QRC_SMP4=-1
 if [ "$BUILD_RC" -eq 0 ]; then
   echo "== QEMU 真实启动（x86_64，4 个处理器）=="
   sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4 \
+  run timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4 \
     -serial stdio -display none -monitor none -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL_SMP4" 2>&1
   QRC_SMP4=$?
@@ -206,7 +216,7 @@ QRC_SMP8=-1
 if [ "$BUILD_RC" -eq 0 ]; then
   echo "== QEMU 真实启动（x86_64，8 个处理器）=="
   sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 8 \
+  run timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 8 \
     -serial stdio -display none -monitor none -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL_SMP8" 2>&1
   QRC_SMP8=$?
@@ -218,7 +228,7 @@ QRC_Q35=-1
 if [ "$BUILD_RC" -eq 0 ]; then
   echo "== QEMU 真实启动（x86_64 q35，4 个处理器，ECAM）=="
   sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU" -M q35 -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4 \
+  run timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -M q35 -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4 \
     -serial stdio -display none -monitor none -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL_Q35" 2>&1
   QRC_Q35=$?
@@ -345,7 +355,7 @@ caprej_x86() {
   local elf="$CAPREJ/x86-$name.elf" img="$CAPREJ/x86-$name.img"
   if run "$ROOT/target/release/xtask" bootcap "$ROOT/target/x86_64-unknown-none/release/jasper-kernel" "$elf" "$@" >> "$OUT/build.log" 2>&1 \
      && run "$ROOT/target/release/xtask" "$elf" "$img" >> "$OUT/build.log" 2>&1; then
-    run timeout "$QEMU_TIMEOUT" "$QEMU" -drive format=raw,file="$img" -serial stdio -display none -monitor none -no-reboot \
+    run timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$img" -serial stdio -display none -monitor none -no-reboot \
       -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$CAPREJ/serial-x86-$name.log" 2>&1
     echo $? > "$CAPREJ/rc-x86-$name"
   else
@@ -1895,6 +1905,27 @@ check_drv2c1() { # DRV-2C-1：设备中断对象 + ring 投递——用户程序
   fi
 }
 
+check_krn0_wrap() { # KRN-0 ③：中断到达计数跨 u32 回绕——分发器计数单调回绕不清零，读者按模 2³² 差求新到达数。
+                     # 检查 x86_64 单核与 ×4 串口日志中的启动自检（同一递增函数 + 同一求差函数），宿主 arrivals_ 用例 ≥ 4。
+  local miss="" f name pair na
+  local pairs=("$SERIAL:x86_64单核" "$SERIAL_SMP4:x86_64×4")
+  for pair in "${pairs[@]}"; do
+    IFS=: read -r f name <<< "$pair"
+    if [ ! -s "$f" ]; then miss="$miss $name:缺日志"; continue; fi
+    grep -qaE '^\[JSR-KRN0\] case=irq_count_wrap start=4294967292 arrivals=6 delta=6 ok=true' "$f" || miss="$miss $name:回绕用例"
+    grep -qaE '^\[JSR-KRN0\] case=irq_count_same delta=0 ok=true' "$f" || miss="$miss $name:相等用例"
+    grep -qaE '^\[JSR-KRN0\] summary irq_count failed=0' "$f" || miss="$miss $name:汇总"
+    grep -qa '^\[JSR-KRN0-FAIL\]' "$f" && miss="$miss $name:失败断言"
+  done
+  na=$(grep -caE '^test interrupt::tests::arrivals_[a-z0-9_]+ \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null)
+  [ "${na:-0}" -ge 4 ] || miss="$miss 宿主:arrivals_用例(${na:-0}/4)"
+  if [ -z "$miss" ]; then
+    record KRN0WRAP PASS "中断到达计数跨 u32 回绕：从 4294967292 起经真实递增函数记 6 次，模差求得 6，读数不变得 0（单核与 4 核）；已绑定槽位计数不被清零；宿主 arrivals_ 用例 $na 个（$ARCH_SCOPE）"
+  else
+    record KRN0WRAP FAIL "缺少/不符：$miss"
+  fi
+}
+
 check_drv2c2() { # DRV-2C-2：MSI / MSI-X 中断预算 + 真实设备中断风暴——virtio-rng 完成中断在中断上下文立即重投描述符，
                   # 每核预算（与传统线共用）用完即屏蔽表项、下一 tick 解除并重新送达。检查 x86_64 单核、×4、×8、q35×4 四份串口日志：
                   # 交互延迟 ≤ 2、各核都忙、目标核有进展、占比在预算内、节流与重新送达 ≥ 1、用户收到的到达数 = 设备完成数；
@@ -2044,11 +2075,11 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 
 if [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_l10n1
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------

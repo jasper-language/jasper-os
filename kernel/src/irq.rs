@@ -258,7 +258,7 @@ pub fn on_msi(vector: u8) {
         MSI_SPURIOUS[cpu].fetch_add(1, Ordering::Relaxed);
         return;
     }
-    MSI_COUNTS[cpu][vector as usize].fetch_add(1, Ordering::Release);
+    count_arrival(&MSI_COUNTS[cpu][vector as usize]);
     let h = MSI_HANDLERS[cpu][vector as usize].load(Ordering::Acquire);
     if h == 0 {
         MSI_SPURIOUS[cpu].fetch_add(1, Ordering::Relaxed);
@@ -269,6 +269,12 @@ pub fn on_msi(vector: u8) {
     let handler: MsiHandler = unsafe { core::mem::transmute::<usize, MsiHandler>(h) };
     handler();
     device::charge_msi(cpu, vector, arch::cycles().wrapping_sub(t0));
+}
+
+/// 记一次到达：计数器按模 2³² 回绕递增（读者用模差求增量）。启动自检经同一函数验证回绕。
+/// Count one arrival on a wrapping counter; shared with the boot-time wrap self-check.
+pub(crate) fn count_arrival(c: &AtomicU32) {
+    c.fetch_add(1, Ordering::Release);
 }
 
 /// 处理器 `cpu` 在 `vector` 上收到的 MSI 次数。
@@ -286,12 +292,17 @@ pub fn msi_spurious(cpu: usize) -> u32 {
     MSI_SPURIOUS.get(cpu).map(|c| c.load(Ordering::Relaxed)).unwrap_or(0)
 }
 
-/// 清零 MSI 计数与伪 MSI 计数（处理函数登记保持不变）。
-/// Reset MSI counters, keeping handler bindings.
+/// 清零伪 MSI 计数，以及**没有登记处理函数**的槽位的 MSI 计数。
+///
+/// 已绑定槽位的计数保持单调：中断对象与演练按「上次读数 → 本次读数」的模差求新到达数，
+/// 计数一旦被清零，差值就会把不存在的到达算进去（或把真实到达丢掉）。
+/// Reset spurious counts and the counts of unbound slots; bound slots stay monotonic for their readers.
 pub fn reset_msi_stats() {
-    for row in MSI_COUNTS.iter() {
-        for count in row.iter() {
-            count.store(0, Ordering::Relaxed);
+    for (handlers, counts) in MSI_HANDLERS.iter().zip(MSI_COUNTS.iter()) {
+        for (h, count) in handlers.iter().zip(counts.iter()) {
+            if h.load(Ordering::Acquire) == 0 {
+                count.store(0, Ordering::Relaxed);
+            }
         }
     }
     for count in MSI_SPURIOUS.iter() {

@@ -165,9 +165,47 @@ impl<T: Copy + PartialEq> InterruptLine<T> {
     }
 }
 
+/// 两次读取同一个单调递增（模 2³² 回绕）的到达计数器之间新到达的次数。
+///
+/// 计数器是 `u32`，长期运行后会从 `u32::MAX` 回绕到 0；按模 2³² 求差即可跨越回绕得到正确增量。
+/// 前提：两次读取之间的到达次数小于 2³²（读者在每次到达或等待时都会同步读数，远小于此界）。
+/// 计数器因此只能单调回绕、不能被清零，否则差值没有意义。
+/// Arrivals between two readings of a wrapping `u32` counter (modular difference; assumes fewer than 2^32 in between).
+pub fn arrivals_since(seen: u32, now: u32) -> u32 {
+    now.wrapping_sub(seen)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arrivals_plain_increment() {
+        assert_eq!(arrivals_since(10, 17), 7);
+    }
+
+    #[test]
+    fn arrivals_equal_readings_are_zero() {
+        assert_eq!(arrivals_since(5, 5), 0);
+        assert_eq!(arrivals_since(u32::MAX, u32::MAX), 0);
+    }
+
+    #[test]
+    fn arrivals_across_wrap() {
+        let seen = u32::MAX - 3;
+        let mut now = seen;
+        for _ in 0..6 {
+            now = now.wrapping_add(1);
+        }
+        assert_eq!(now, 2);
+        assert_eq!(arrivals_since(seen, now), 6);
+    }
+
+    #[test]
+    fn arrivals_exactly_at_boundary() {
+        assert_eq!(arrivals_since(u32::MAX, 0), 1);
+        assert_eq!(arrivals_since(0, u32::MAX), u32::MAX);
+    }
 
     type Line = InterruptLine<u64>;
 

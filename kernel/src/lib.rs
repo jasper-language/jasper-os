@@ -52,6 +52,7 @@ pub mod irqring_demo;
 #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
 pub mod irqstorm_demo;
 pub mod kmain;
+pub mod krn0_demo;
 pub mod kobj;
 pub mod l10n_demo;
 pub mod mm;
