@@ -39,6 +39,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NCPU="$(nproc --all 2>/dev/null || echo 4)"
 if [ "$NCPU" -ge 8 ]; then DEFAULT_CORES="$((NCPU - 4))-$((NCPU - 1))"; else DEFAULT_CORES="0-$((NCPU > 1 ? NCPU - 2 : 0))"; fi
 CORES="${JASPER_CORES:-$DEFAULT_CORES}"
+# 验收层（用户 2026-10-21「分层验收」）：full（默认）= 全量；spot = 定点——只做 x86_64 单处理器启动，
+# 只运行 JASPER_CHECKS 列出的检查（检查名去掉 check_ 前缀，空格分隔），4 / 8 处理器与 q35 启动、容量拒绝启动不跑。
+# 定点通过打印「accept: SPOT PASS」，不等于全量通过；合入 main 或里程碑完成前必须跑全量。
+ACCEPT_MODE="${JASPER_ACCEPT:-full}"
+SPOT=0; [ "$ACCEPT_MODE" = spot ] && SPOT=1
+# 宿主 kernel-core 测试来源：vm（默认，就地运行）| pda（读 .pda/cargo-test.log——由 spot-accept.sh 在 PDA 真 ARM 上跑出的原始输出）
+HOST_TESTS="${JASPER_HOST_TESTS:-vm}"
+SPOT_SKIPPED=""
 # 宿主可用核数（用于判断依赖多核并行的判据是否可观测）
 HOST_CORES=$(echo "$CORES" | awk -F- '{print ($2==""?1:$2-$1+1)}')
 PROFILE="${JASPER_PROFILE:-standard}"
@@ -110,6 +118,29 @@ run() {
   "${pre[@]}" "$@"
 }
 
+# 计时保真（2026-10-21）：VirtualBox 下停机的 vCPU 本地定时器严重迟到，且只有**全部** vCPU 都不停机时才准确
+# （只保 QEMU 所用的 2 个核仍失准：cycles_per_tick 286M，正常约 36M）。JASPER_KEEP_AWAKE=1 时，只在 QEMU 运行期间、
+# 在本机每个核上各挂一个 SCHED_IDLE 空转进程（不与 QEMU 争 CPU，只阻止 vCPU 停机），QEMU 退出即撤掉。
+KEEP_PIDS=()
+keep_awake_on() {
+  [ "${JASPER_KEEP_AWAKE:-0}" = 1 ] || return 0
+  local c
+  for c in $(seq 0 $(($(nproc) - 1))); do taskset -c "$c" chrt -i 0 sh -c 'while :; do :; done' & KEEP_PIDS+=($!); done
+}
+keep_awake_off() {
+  [ "${#KEEP_PIDS[@]}" -gt 0 ] || return 0
+  kill "${KEEP_PIDS[@]}" 2>/dev/null; wait "${KEEP_PIDS[@]}" 2>/dev/null; KEEP_PIDS=()
+}
+trap keep_awake_off EXIT
+# qrun：QEMU 启动专用的 run（前后开关空转进程）
+qrun() { keep_awake_on; run "$@"; local rc=$?; keep_awake_off; return $rc; }
+# 定点模式下被有意跳过的启动日志：缺失时记为「未运行（定点）」而不是失败
+spot_skip() {
+  [ "$SPOT" -eq 1 ] || return 1
+  case "$1" in "$SERIAL_SMP4"|"$SERIAL_SMP8"|"$SERIAL_Q35") SPOT_SKIPPED="$SPOT_SKIPPED $2"; return 0;; esac
+  return 1
+}
+
 # ---- 结果表 ----------------------------------------------------------------
 declare -a ROWS=()
 FAILED=0
@@ -142,7 +173,13 @@ bootcap_patch() { [ -z "${JASPER_BOOTCAP:-}" ] && return 0; run "$ROOT/target/re
 
 # ---- 阶段 A：构建、测试、启动（产出证据）------------------------------------
 echo "== 构建与测试（核：$CORES，配置档：$PROFILE）=="
-run cargo test -p kernel-core > "$OUT/cargo-test.log" 2>&1;                                   TEST_RC=$?
+if [ "$HOST_TESTS" = pda ] && [ -s "$ROOT/.pda/cargo-test.log" ]; then
+  cp "$ROOT/.pda/cargo-test.log" "$OUT/cargo-test.log"
+  if grep -qE '^test result: ok\. [0-9]+ passed; 0 failed' "$OUT/cargo-test.log"; then TEST_RC=0; else TEST_RC=1; fi
+  echo "宿主 kernel-core 测试：采用 PDA（真 ARM）结果，rc=$TEST_RC"
+else
+  run cargo test -p kernel-core > "$OUT/cargo-test.log" 2>&1;                                 TEST_RC=$?
+fi
 run cargo test -p jaso --features pack > "$OUT/jaso-test.log" 2>&1;                           JASO_RC=$?
 run cargo build --release --target x86_64-unknown-none -p kernel-core > "$OUT/build.log" 2>&1; CORE_RC=$?
 run cargo build --release --target x86_64-unknown-none -p jasper-kernel "${KFEAT[@]}" "${SFEAT[@]}" >> "$OUT/build.log" 2>&1 \
@@ -167,7 +204,7 @@ isa_test() {
     CARGO_TARGET_DIR="$ROOT/target/isa-test" cargo test -p kernel-core --target "$t" > "$OUT/isa-test-$t.log" 2>&1
 }
 ISA_TESTS_RAN=""; ISA_TESTS_FAIL=""; ISA_TESTS_SKIPPED=""
-if isa_test i686-unknown-linux-musl; then ISA_TESTS_RAN="$ISA_TESTS_RAN 32位"; else ISA_TESTS_FAIL="$ISA_TESTS_FAIL 32位"; fi
+if [ "$SPOT" -eq 1 ]; then ISA_TESTS_SKIPPED="定点模式"; elif isa_test i686-unknown-linux-musl; then ISA_TESTS_RAN="$ISA_TESTS_RAN 32位"; else ISA_TESTS_FAIL="$ISA_TESTS_FAIL 32位"; fi
 if [ "$ARCH_ALL" -eq 1 ]; then
   for pair in "aarch64-unknown-linux-musl:qemu-aarch64:AArch64" "riscv64gc-unknown-linux-musl:qemu-riscv64:RISC-V64"; do
     IFS=: read -r t q label <<< "$pair"
@@ -193,7 +230,7 @@ VIRTIO_ARGS=(-device virtio-rng-pci -device virtio-net-pci,netdev=n0 -netdev use
 if [ "$BUILD_RC" -eq 0 ]; then
   echo "== QEMU 真实启动 =="
   sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" \
+  qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" \
     -serial stdio -display none -monitor none -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL" 2>&1
   QRC=$?
@@ -201,10 +238,10 @@ fi
 # 多处理器（SMP-1）：同一镜像以 4 个处理器再真实启动一次（其余参数不变）；上面的单处理器启动同时验证「只有引导处理器」的路径。
 SERIAL_SMP4="$OUT/serial-smp4.log"
 QRC_SMP4=-1
-if [ "$BUILD_RC" -eq 0 ]; then
+if [ "$BUILD_RC" -eq 0 ] && [ "$SPOT" -eq 0 ]; then
   echo "== QEMU 真实启动（x86_64，4 个处理器）=="
   sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4 \
+  qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4 \
     -serial stdio -display none -monitor none -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL_SMP4" 2>&1
   QRC_SMP4=$?
@@ -213,10 +250,10 @@ fi
 # 严格顺序执行（QEMU 一次只开一个），避免计时类检查互相抢核；退出码判定与 4 处理器相同。
 SERIAL_SMP8="$OUT/serial-smp8.log"
 QRC_SMP8=-1
-if [ "$BUILD_RC" -eq 0 ]; then
+if [ "$BUILD_RC" -eq 0 ] && [ "$SPOT" -eq 0 ]; then
   echo "== QEMU 真实启动（x86_64，8 个处理器）=="
   sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 8 \
+  qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 8 \
     -serial stdio -display none -monitor none -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL_SMP8" 2>&1
   QRC_SMP8=$?
@@ -225,10 +262,10 @@ fi
 # 与上面 pc 机型的传统端口机制形成对照；同一组 virtio 设备仍须全部枚举到。
 SERIAL_Q35="$OUT/serial-q35.log"
 QRC_Q35=-1
-if [ "$BUILD_RC" -eq 0 ]; then
+if [ "$BUILD_RC" -eq 0 ] && [ "$SPOT" -eq 0 ]; then
   echo "== QEMU 真实启动（x86_64 q35，4 个处理器，ECAM）=="
   sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -M q35 -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4 \
+  qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -M q35 -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4 \
     -serial stdio -display none -monitor none -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL_Q35" 2>&1
   QRC_Q35=$?
@@ -251,7 +288,7 @@ if [ "$ARCH_ALL" -eq 1 ]; then
   if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ]; then
     echo "== QEMU 真实启动（AArch64）=="
     sleep "$BOOT_GAP"
-    run timeout "$QEMU_TIMEOUT" "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -kernel "$A64_ELF" -semihosting \
+    qrun timeout "$QEMU_TIMEOUT" "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -kernel "$A64_ELF" -semihosting \
       -serial stdio -display none -monitor none -no-reboot > "$SERIAL_A64" 2>&1
     QRC_A64=$?
   fi
@@ -259,7 +296,7 @@ if [ "$ARCH_ALL" -eq 1 ]; then
   if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ]; then
     echo "== QEMU 真实启动（AArch64，4 个处理器）=="
     sleep "$BOOT_GAP"
-    run timeout "$QEMU_TIMEOUT" "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -smp 4 -kernel "$A64_ELF" -semihosting \
+    qrun timeout "$QEMU_TIMEOUT" "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -smp 4 -kernel "$A64_ELF" -semihosting \
       -serial stdio -display none -monitor none -no-reboot > "$SERIAL_A64_SMP4" 2>&1
     QRC_A64_SMP4=$?
   fi
@@ -281,7 +318,7 @@ if [ "$ARCH_ALL" -eq 1 ]; then
   if [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ]; then
     echo "== QEMU 真实启动（RISC-V64）=="
     sleep "$BOOT_GAP"
-    run timeout "$QEMU_TIMEOUT" "$QEMU_RV64" -M virt -m 256M -kernel "$RV64_ELF" \
+    qrun timeout "$QEMU_TIMEOUT" "$QEMU_RV64" -M virt -m 256M -kernel "$RV64_ELF" \
       -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV64" 2>&1
     QRC_RV64=$?
   fi
@@ -289,7 +326,7 @@ if [ "$ARCH_ALL" -eq 1 ]; then
   if [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ]; then
     echo "== QEMU 真实启动（RISC-V64，4 个处理器）=="
     sleep "$BOOT_GAP"
-    run timeout "$QEMU_TIMEOUT" "$QEMU_RV64" -M virt -m 256M -smp 4 -kernel "$RV64_ELF" \
+    qrun timeout "$QEMU_TIMEOUT" "$QEMU_RV64" -M virt -m 256M -smp 4 -kernel "$RV64_ELF" \
       -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV64_SMP4" 2>&1
     QRC_RV64_SMP4=$?
   fi
@@ -320,7 +357,7 @@ if [ "$ARCH_ALL" -eq 1 ]; then
   if [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ]; then
     echo "== QEMU 真实启动（RISC-V32）=="
     sleep "$BOOT_GAP"
-    run timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M "${RV32_BIOS[@]}" -kernel "$RV32_ELF" \
+    qrun timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M "${RV32_BIOS[@]}" -kernel "$RV32_ELF" \
       -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV32" 2>&1
     QRC_RV32=$?
     grep -q 'Unable to find the RISC-V BIOS' "$SERIAL_RV32" 2>/dev/null && QRC_RV32=-2
@@ -328,7 +365,7 @@ if [ "$ARCH_ALL" -eq 1 ]; then
   if [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ]; then
     echo "== QEMU 真实启动（RISC-V32，4 个处理器）=="
     sleep "$BOOT_GAP"
-    run timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M -smp 4 "${RV32_BIOS[@]}" -kernel "$RV32_ELF" \
+    qrun timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M -smp 4 "${RV32_BIOS[@]}" -kernel "$RV32_ELF" \
       -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV32_SMP4" 2>&1
     QRC_RV32_SMP4=$?
     grep -q 'Unable to find the RISC-V BIOS' "$SERIAL_RV32_SMP4" 2>/dev/null && QRC_RV32_SMP4=-2
@@ -355,7 +392,7 @@ caprej_x86() {
   local elf="$CAPREJ/x86-$name.elf" img="$CAPREJ/x86-$name.img"
   if run "$ROOT/target/release/xtask" bootcap "$ROOT/target/x86_64-unknown-none/release/jasper-kernel" "$elf" "$@" >> "$OUT/build.log" 2>&1 \
      && run "$ROOT/target/release/xtask" "$elf" "$img" >> "$OUT/build.log" 2>&1; then
-    run timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$img" -serial stdio -display none -monitor none -no-reboot \
+    qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$img" -serial stdio -display none -monitor none -no-reboot \
       -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$CAPREJ/serial-x86-$name.log" 2>&1
     echo $? > "$CAPREJ/rc-x86-$name"
   else
@@ -368,13 +405,13 @@ caprej_elf() {
   local elf="$CAPREJ/$label-oor.elf" args=() a
   if run "$ROOT/target/release/xtask" bootcap "$src" "$elf" tasks=4096 >> "$OUT/build.log" 2>&1; then
     for a in "$@"; do args+=("${a//@ELF@/$elf}"); done
-    run timeout "$QEMU_TIMEOUT" "${args[@]}" -serial stdio -display none -monitor none -no-reboot > "$CAPREJ/serial-$label-oor.log" 2>&1
+    qrun timeout "$QEMU_TIMEOUT" "${args[@]}" -serial stdio -display none -monitor none -no-reboot > "$CAPREJ/serial-$label-oor.log" 2>&1
     echo $? > "$CAPREJ/rc-$label-oor"
   else
     echo build > "$CAPREJ/rc-$label-oor"
   fi
 }
-if [ "$BUILD_RC" -eq 0 ]; then
+if [ "$BUILD_RC" -eq 0 ] && [ "$SPOT" -eq 0 ]; then
   echo "== 启动期容量拒绝路径（HARDEN-1B）=="
   caprej_x86 oor tasks=4096
   caprej_x86 inconsistent tasks=16 rt=16
@@ -1682,7 +1719,7 @@ check_drv1c() { # DRV-1C：设备内核对象与 system.device.list / open / get
   local pairs=("$SERIAL:x86_64单核" "$SERIAL_SMP4:x86_64×4" "$SERIAL_Q35:q35×4")
   for pair in "${pairs[@]}"; do
     f="${pair%%:*}"; name="${pair##*:}"
-    if [ ! -s "$f" ]; then miss="$miss $name:缺日志"; continue; fi
+    if [ ! -s "$f" ]; then spot_skip "$f" "$name" || miss="$miss $name:缺日志"; continue; fi
     grep -qaE "${u} case=list_need need=[1-9][0-9]* ok=true" "$f" 2>/dev/null || miss="$miss $name:所需长度"
     grep -qaE "${u} case=list_short need=[1-9][0-9]* got=[1-9][0-9]* unchanged=true ok=true" "$f" 2>/dev/null || miss="$miss $name:短缓冲区"
     grep -qaE "${u} case=list_all records=[1-9][0-9]* bytes=[1-9][0-9]* ok=true" "$f" 2>/dev/null || miss="$miss $name:完整列表"
@@ -1732,7 +1769,7 @@ check_drv1d() { # DRV-1D：设备寄存器窗口映射与 virtio 设备识别—
   local pairs=("$SERIAL:x86_64单核" "$SERIAL_SMP4:x86_64×4" "$SERIAL_Q35:q35×4")
   for pair in "${pairs[@]}"; do
     f="${pair%%:*}"; name="${pair##*:}"
-    if [ ! -s "$f" ]; then miss="$miss $name:缺日志"; continue; fi
+    if [ ! -s "$f" ]; then spot_skip "$f" "$name" || miss="$miss $name:缺日志"; continue; fi
     grep -qaE "${u} case=find_net bdf=0x[0-9a-f]{6} ok=true" "$f" || miss="$miss $name:找到 virtio-net"
     grep -qaE "${u} case=open_map bdf=0x[0-9a-f]{6} handle=[1-9][0-9]* ok=true" "$f" || miss="$miss $name:打开"
     grep -qaE "${u} case=desc bytes=168 bars=[1-9][0-9]* ok=true" "$f" || miss="$miss $name:完整描述"
@@ -1794,7 +1831,7 @@ check_drv2a() { # DRV-2A：MSI / MSI-X 能力解析 + 每核 MSI 向量池——
   local pairs=("$SERIAL:x86_64单核:1" "$SERIAL_SMP4:x86_64×4:4" "$SERIAL_SMP8:x86_64×8:8" "$SERIAL_Q35:q35×4:4")
   for pair in "${pairs[@]}"; do
     IFS=: read -r f name c <<< "$pair"
-    if [ ! -s "$f" ]; then miss="$miss $name:缺日志"; continue; fi
+    if [ ! -s "$f" ]; then spot_skip "$f" "$name" || miss="$miss $name:缺日志"; continue; fi
     s=$(grep -aoE "^\[JSR-MSI\] summary cpus=$c vectors_per_cpu=[0-9]+ delivered=$c/$c msix_functions=[0-9]+ checks=[0-9]+ failed=0" "$f" | head -1)
     if [ -z "$s" ]; then
       miss="$miss $name:汇总(cpus=$c)"
@@ -1835,7 +1872,7 @@ check_drv2b() { # DRV-2B：物理连续页帧分配 + virtio 队列改用——�
   local pairs=("$SERIAL:x86_64单核:1" "$SERIAL_SMP4:x86_64×4:4" "$SERIAL_SMP8:x86_64×8:8" "$SERIAL_Q35:q35×4:4")
   for pair in "${pairs[@]}"; do
     IFS=: read -r f name c <<< "$pair"
-    if [ ! -s "$f" ]; then miss="$miss $name:缺日志"; continue; fi
+    if [ ! -s "$f" ]; then spot_skip "$f" "$name" || miss="$miss $name:缺日志"; continue; fi
     s=$(grep -aoE "^\[JSR-MSIX\] summary cpus=$c delivered=[0-9]+/[0-9]+ retargets=[0-9]+ masked_pending=ok checks=[0-9]+ failed=0 frames_back=true" "$f" | head -1)
     if [ -z "$s" ]; then
       miss="$miss $name:汇总(cpus=$c)"
@@ -1876,7 +1913,7 @@ check_drv2c1() { # DRV-2C-1：设备中断对象 + ring 投递——用户程序
   local pairs=("$SERIAL:x86_64单核:1" "$SERIAL_SMP4:x86_64×4:4" "$SERIAL_SMP8:x86_64×8:8" "$SERIAL_Q35:q35×4:4")
   for pair in "${pairs[@]}"; do
     IFS=: read -r f name c <<< "$pair"
-    if [ ! -s "$f" ]; then miss="$miss $name:缺日志"; continue; fi
+    if [ ! -s "$f" ]; then spot_skip "$f" "$name" || miss="$miss $name:缺日志"; continue; fi
     s=$(grep -aoE "^\[JSR-IRQRING\] summary cpus=$c rounds=[0-9]+ delivered=[0-9]+/[0-9]+ rejects=[0-9]+/[0-9]+ cancel=ok close_cancels_wait=ok vectors_back=true frames_back=true failed=0" "$f" | head -1)
     if [ -z "$s" ]; then
       miss="$miss $name:汇总(cpus=$c)"
@@ -1911,7 +1948,7 @@ check_krn0_wrap() { # KRN-0 ③：中断到达计数跨 u32 回绕——分发�
   local pairs=("$SERIAL:x86_64单核" "$SERIAL_SMP4:x86_64×4")
   for pair in "${pairs[@]}"; do
     IFS=: read -r f name <<< "$pair"
-    if [ ! -s "$f" ]; then miss="$miss $name:缺日志"; continue; fi
+    if [ ! -s "$f" ]; then spot_skip "$f" "$name" || miss="$miss $name:缺日志"; continue; fi
     grep -qaE '^\[JSR-KRN0\] case=irq_count_wrap start=4294967292 arrivals=6 delta=6 ok=true' "$f" || miss="$miss $name:回绕用例"
     grep -qaE '^\[JSR-KRN0\] case=irq_count_same delta=0 ok=true' "$f" || miss="$miss $name:相等用例"
     grep -qaE '^\[JSR-KRN0\] summary irq_count failed=0' "$f" || miss="$miss $name:汇总"
@@ -1926,6 +1963,32 @@ check_krn0_wrap() { # KRN-0 ③：中断到达计数跨 u32 回绕——分发�
   fi
 }
 
+check_krn0_dma() { # KRN-0 ②：virtio 复位失败时的 DMA 静默化与队列页隔离——复位超时先关总线主控并读回确认，
+                   # 读回为「已关」才归还队列页；读回仍开或读不到则隔离队列页（永不归还）。检查 x86_64 单核与
+                   # ×4 串口日志的四个用例行与汇总行，宿主 dma_quiesce 用例 ≥ 4、bus_master_enabled 用例 ≥ 2。
+  local miss="" f name pair nq nb
+  local pairs=("$SERIAL:x86_64单核" "$SERIAL_SMP4:x86_64×4")
+  for pair in "${pairs[@]}"; do
+    IFS=: read -r f name <<< "$pair"
+    if [ ! -s "$f" ]; then spot_skip "$f" "$name" || miss="$miss $name:缺日志"; continue; fi
+    grep -qaE '^\[JSR-KRN0\] case=dma_reset_ok verdict=released frames_back=true ok=true' "$f" || miss="$miss $name:复位成功释放"
+    grep -qaE '^\[JSR-KRN0\] case=dma_reset_timeout_bm_off verdict=bus_master_off readback=off frames_back=true ok=true' "$f" || miss="$miss $name:关总线主控后读回"
+    grep -qaE '^\[JSR-KRN0\] case=dma_reset_timeout_untrusted verdict=quarantine held=4 ok=true' "$f" || miss="$miss $name:不可信隔离"
+    grep -qaE '^\[JSR-KRN0\] case=dma_rounds rounds=64 quarantined=[1-9][0-9]* conserved=true ok=true' "$f" || miss="$miss $name:多轮守恒"
+    grep -qaE '^\[JSR-KRN0\] summary dma_teardown failed=0' "$f" || miss="$miss $name:汇总"
+    grep -qa '^\[JSR-KRN0-FAIL\]' "$f" && miss="$miss $name:失败断言"
+  done
+  nq=$(grep -caE '^test dma_quiesce::tests::quiesce_[a-z0-9_]+ \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null)
+  [ "${nq:-0}" -ge 4 ] || miss="$miss 宿主:quiesce用例(${nq:-0}/4)"
+  nb=$(grep -caE '^test pci::tests::bus_master_enabled[a-z0-9_]* \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null)
+  [ "${nb:-0}" -ge 2 ] || miss="$miss 宿主:bus_master_enabled用例(${nb:-0}/2)"
+  if [ -z "$miss" ]; then
+    record KRN0DMA PASS "DMA 静默化：复位成功即归还队列页；复位超时先关总线主控、读回确认为「已关」后归还；注入读回「仍开」则隔离 4 页且永不归还，空闲帧等量减少；64 轮交替三场景后隔离数只来自不可信轮次、页帧与隔离计数守恒，且每轮开始时的真实复位都成功（x86_64 单核与 4 处理器）；宿主 quiesce_ 用例 $nq 个、bus_master_enabled 用例 $nb 个（$ARCH_SCOPE）"
+  else
+    record KRN0DMA FAIL "缺少/不符：$miss"
+  fi
+}
+
 check_drv2c2() { # DRV-2C-2：MSI / MSI-X 中断预算 + 真实设备中断风暴——virtio-rng 完成中断在中断上下文立即重投描述符，
                   # 每核预算（与传统线共用）用完即屏蔽表项、下一 tick 解除并重新送达。检查 x86_64 单核、×4、×8、q35×4 四份串口日志：
                   # 交互延迟 ≤ 2、各核都忙、目标核有进展、占比在预算内、节流与重新送达 ≥ 1、用户收到的到达数 = 设备完成数；
@@ -1934,7 +1997,7 @@ check_drv2c2() { # DRV-2C-2：MSI / MSI-X 中断预算 + 真实设备中断风�
   local pairs=("$SERIAL:x86_64单核:1" "$SERIAL_SMP4:x86_64×4:4" "$SERIAL_SMP8:x86_64×8:8" "$SERIAL_Q35:q35×4:4")
   for pair in "${pairs[@]}"; do
     IFS=: read -r f name c <<< "$pair"
-    if [ ! -s "$f" ]; then miss="$miss $name:缺日志"; continue; fi
+    if [ ! -s "$f" ]; then spot_skip "$f" "$name" || miss="$miss $name:缺日志"; continue; fi
     if grep -qaE '^\[JSR-IRQSTORM\] skipped reason=no_virtio_rng ok=true' "$f"; then
       [ "$c" -eq 1 ] || miss="$miss $name:未挂设备"
       continue
@@ -2073,13 +2136,17 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
   fi
 }
 
-if [ "$SCHED_POLICY" = "rr" ]; then
+if [ "$SPOT" -eq 1 ]; then
+  for c in ${JASPER_CHECKS:-m11}; do
+    if declare -F "check_$c" >/dev/null; then "check_$c"; else record "$c" FAIL "定点验收：没有名为 check_$c 的检查"; fi
+  done
+elif [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_l10n1
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------
@@ -2087,6 +2154,12 @@ fi
   echo "jasper-os 一键验收  $TS"
   echo "提交：$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$(git -C "$ROOT" diff --quiet 2>/dev/null || echo '（工作区有未提交改动）')"
   echo "配置档：$PROFILE"
+  if [ "$SPOT" -eq 1 ]; then
+    echo "验收层：定点（x86_64 单处理器；检查：${JASPER_CHECKS:-m11}；宿主测试：$HOST_TESTS）——不代表全量通过"
+    [ -n "$SPOT_SKIPPED" ] && echo "定点未运行的日志：$(echo $SPOT_SKIPPED | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+  else
+    echo "验收层：全量"
+  fi
   if [ "$ARCH_ALL" -eq 1 ]; then
     echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4，8 处理器：$QRC_SMP8，AArch64：$QRC_A64，AArch64 4 处理器：$QRC_A64_SMP4，RISC-V64：$QRC_RV64，RISC-V32：$QRC_RV32）"
   else
@@ -2098,7 +2171,11 @@ fi
   printf '%s\n' "${ROWS[@]}"
 } | tee "$OUT/summary.txt"
 
-EVIDENCE_FILES=(cargo-test.log build.log serial.log serial-smp4.log serial-smp8.log serial-q35.log summary.txt)
+if [ "$SPOT" -eq 1 ]; then
+  EVIDENCE_FILES=(cargo-test.log build.log serial.log summary.txt)
+else
+  EVIDENCE_FILES=(cargo-test.log build.log serial.log serial-smp4.log serial-smp8.log serial-q35.log summary.txt)
+fi
 if [ "$ARCH_ALL" -eq 1 ]; then
   EVIDENCE_FILES+=(serial-aarch64.log serial-aarch64-smp4.log serial-riscv64.log serial-riscv32.log)
 fi
@@ -2107,4 +2184,6 @@ for f in "${EVIDENCE_FILES[@]}"; do
 done
 echo
 echo "证据目录：$OUT"
-if [ "$FAILED" -eq 0 ]; then echo "accept: ALL PASS"; exit 0; else echo "accept: FAIL"; exit 1; fi
+if [ "$FAILED" -ne 0 ]; then echo "accept: FAIL"; exit 1; fi
+if [ "$SPOT" -eq 1 ]; then echo "accept: SPOT PASS（定点，不代表全量通过）"; else echo "accept: ALL PASS"; fi
+exit 0

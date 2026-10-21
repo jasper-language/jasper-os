@@ -18,6 +18,7 @@
 //! 每次送达输出 `[JSR-MSIX] dev … ok=true`，最后输出 `[JSR-MSIX] summary …`；
 //! 断言失败输出 `[JSR-MSIX-FAIL] <原因>`，失败数进入 kmain 的失败列表。
 
+use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::msi::{Vector, VectorPool};
@@ -107,11 +108,12 @@ struct Outcome {
     masked_pending: bool,
 }
 
-/// 设备演练句柄：字段按「设备 → MSI-X → 队列」顺序丢弃，丢弃前先复位设备。
+/// 设备演练句柄：丢弃时先关 MSI-X，再把队列交给统一静默化路径（复位失败时隔离而不是归还队列页）。
 struct Rig {
     virtio: VirtioPci,
     msix: MsixDevice,
-    queue: Queue,
+    /// 队列用 `ManuallyDrop` 包住：丢弃时先取出来交给 [`virtio::quiesce`] 决定归还还是隔离。
+    queue: ManuallyDrop<Queue>,
     notify_off: u16,
     /// 演练前总线主控位是否已打开；丢弃时恢复。
     bus_master_was_on: bool,
@@ -131,7 +133,7 @@ impl Rig {
         // MSI-X 消息与队列 DMA 都是设备发起的内存写：DRIVER_OK 之前必须打开总线主控。
         let bus_master_was_on = pci::set_bus_master(virtio.bdf(), true).map_err(|e| e.name())?;
         virtio.add_status(virtio::STATUS_DRIVER_OK);
-        Ok(Rig { virtio, msix, queue, notify_off, bus_master_was_on })
+        Ok(Rig { virtio, msix, queue: ManuallyDrop::new(queue), notify_off, bus_master_was_on })
     }
 
     /// 设备地址。
@@ -142,13 +144,12 @@ impl Rig {
 
 impl Drop for Rig {
     fn drop(&mut self) {
-        // 先让设备停止使用队列，再关闭 MSI-X 与总线主控；随后字段按声明顺序取消映射并归还队列页。
-        let _ = self.virtio.reset();
+        // 先关闭 MSI-X（设备不再发消息），再把队列交给统一静默化路径：
+        // 真实复位；复位超时就关总线主控并读回确认；读回不可信时隔离队列页而不是归还。
         let _ = self.msix.disable();
-        // 设备已停止使用队列，此时才收回总线主控（恢复演练前状态），队列页随后归还。
-        if !self.bus_master_was_on {
-            let _ = pci::set_bus_master(self.virtio.bdf(), false);
-        }
+        // SAFETY：队列只在本函数里取走一次，取走后本结构不再使用该字段。
+        let queue = unsafe { ManuallyDrop::take(&mut self.queue) };
+        let _ = virtio::quiesce(&self.virtio, queue, !self.bus_master_was_on);
     }
 }
 

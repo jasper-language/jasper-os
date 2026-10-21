@@ -156,6 +156,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
     crate::irqstorm_demo::run();
     // KRN-0：中断到达计数跨 u32 回绕仍按模差正确计数。
     crate::krn0_demo::run();
+    // KRN-0②：virtio 复位失败时关总线主控并读回确认，仍不可信则隔离队列页（真实设备演练）。
+    crate::krn0_demo::run_dma();
     // 基础设施修复的回归演练：失败路径与回滚。
     fix_demo::run();
     #[cfg(feature = "user-programs")]

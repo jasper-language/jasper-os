@@ -16,6 +16,7 @@
 //! 输出 `[JSR-IRQRING] round=…`、`[JSR-IRQRING] summary …`；失败输出 `[JSR-IRQRING-FAIL] <原因>` 并计入失败数。
 //! 没有 virtio-rng 时输出 `skipped` 行并视为成功。
 
+use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use kernel_core::frame::FRAME_SIZE;
@@ -86,11 +87,12 @@ pub fn failed() -> u32 {
     FAILED.load(Ordering::Relaxed)
 }
 
-/// 内核侧持有的设备（中断风暴演练复用）：字段按「设备 → 队列」顺序丢弃，丢弃前先复位设备并恢复总线主控。
+/// 内核侧持有的设备（中断风暴演练复用）：丢弃时先复位设备，再把队列交给统一静默化路径。
 /// Kernel-held virtio-rng device used by the interrupt demos.
 pub(crate) struct Rig {
     virtio: VirtioPci,
-    pub(crate) queue: Queue,
+    /// 队列用 `ManuallyDrop` 包住：丢弃时先取出来交给 [`virtio::quiesce`] 决定归还还是隔离。
+    pub(crate) queue: ManuallyDrop<Queue>,
     notify_off: u16,
     bus_master_was_on: bool,
 }
@@ -107,7 +109,7 @@ impl Rig {
         let notify_off = virtio.setup_queue(&mut queue, QUEUE_ENTRY).map_err(|e| e.name())?;
         let bus_master_was_on = pci::set_bus_master(virtio.bdf(), true).map_err(|e| e.name())?;
         virtio.add_status(virtio::STATUS_DRIVER_OK);
-        Ok(Rig { virtio, queue, notify_off, bus_master_was_on })
+        Ok(Rig { virtio, queue: ManuallyDrop::new(queue), notify_off, bus_master_was_on })
     }
 
     /// 把 0 号描述符放回可用环并通知设备（不等待、不分配内存；中断上下文可调用）。
@@ -136,11 +138,11 @@ impl Rig {
 
 impl Drop for Rig {
     fn drop(&mut self) {
-        // 先让设备停止使用队列，再收回总线主控（恢复演练前状态）；队列页随后归还。
-        let _ = self.virtio.reset();
-        if !self.bus_master_was_on {
-            let _ = pci::set_bus_master(self.virtio.bdf(), false);
-        }
+        // 统一静默化路径：真实复位；复位超时就关总线主控并读回确认；读回不可信时隔离队列页而不是归还。
+        // 设备在这里停下，随后字段按声明顺序取消映射。
+        // SAFETY：队列只在本函数里取走一次，取走后本结构不再使用该字段。
+        let queue = unsafe { ManuallyDrop::take(&mut self.queue) };
+        let _ = virtio::quiesce(&self.virtio, queue, !self.bus_master_was_on);
     }
 }
 

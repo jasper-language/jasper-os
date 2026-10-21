@@ -949,6 +949,16 @@ pub fn set_bus_master(cfg: &mut dyn ConfigSpace, bdf: Bdf, on: bool) -> Result<b
     Ok(was_on)
 }
 
+/// 读回 `bdf` 的总线主控位当前是否打开；读不到时返回 [`PciError::Unreachable`]。
+///
+/// 复位失败后的拆除路径必须先关总线主控、再读回确认：只有读回为「已关」才允许归还队列页。
+/// 因此这里必须是真实读取，不能用「我刚写过什么」推断设备状态。
+/// Reads back whether the bus-master bit of `bdf` is currently set.
+pub fn bus_master_enabled(cfg: &mut dyn ConfigSpace, bdf: Bdf) -> Result<bool, PciError> {
+    let command = read(cfg, bdf, REG_COMMAND)?;
+    Ok(command & COMMAND_BUS_MASTER != 0)
+}
+
 fn read(cfg: &mut dyn ConfigSpace, bdf: Bdf, offset: u16) -> Result<u32, PciError> {
     cfg.read32(bdf, offset).ok_or(PciError::Unreachable)
 }
@@ -1205,6 +1215,33 @@ mod tests {
             }
         }
         assert_eq!(set_bus_master(&mut Dead, d, true), Err(PciError::Unreachable));
+    }
+
+    #[test]
+    fn bus_master_enabled_follows_command_bit() {
+        let mut m = Model::default();
+        let d = bdf(0, 3, 0);
+        m.add(d, 0x1AF4, 0x1044, 0, 0); // 命令半字 0x0007：总线主控已开
+        assert_eq!(bus_master_enabled(&mut m, d), Ok(true));
+        assert_eq!(set_bus_master(&mut m, d, false), Ok(true));
+        assert_eq!(bus_master_enabled(&mut m, d), Ok(false), "关掉之后读回应为「已关」");
+        let writes = m.writes;
+        assert_eq!(bus_master_enabled(&mut m, d), Ok(false));
+        assert_eq!(m.writes, writes, "读回不写任何寄存器");
+    }
+
+    #[test]
+    fn bus_master_enabled_reports_unreachable_without_touching_registers() {
+        struct Dead;
+        impl ConfigSpace for Dead {
+            fn read32(&mut self, _: Bdf, _: u16) -> Option<u32> {
+                None
+            }
+            fn write32(&mut self, _: Bdf, _: u16, _: u32) -> bool {
+                panic!("读回失败时不得写入");
+            }
+        }
+        assert_eq!(bus_master_enabled(&mut Dead, bdf(0, 3, 0)), Err(PciError::Unreachable));
     }
 
     fn with_caps(m: &mut Model, d: Bdf, chain: &[(u8, u8, u8)]) {

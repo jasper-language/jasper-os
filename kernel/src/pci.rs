@@ -190,6 +190,16 @@ pub fn set_bus_master(bdf: Bdf, on: bool) -> Result<bool, core_pci::PciError> {
     kernel_core::pci::set_bus_master(&mut **cfg, bdf, on)
 }
 
+/// 读回一个功能的总线主控位当前是否打开；设备表尚未建立时返回不可达。
+///
+/// 复位失败后的拆除路径用它确认设备确实已经失去发起 DMA 的能力，读回是真实读取而不是写入的镜像。
+/// Reads back whether the bus-master bit of one function is currently set.
+pub fn bus_master_enabled(bdf: Bdf) -> Result<bool, core_pci::PciError> {
+    let lock = CONFIG.get().ok_or(core_pci::PciError::Unreachable)?;
+    let mut cfg = lock.lock();
+    kernel_core::pci::bus_master_enabled(&mut **cfg, bdf)
+}
+
 /// 读取设备通知能力中的 `notify_off_multiplier`；没有通知能力或配置空间不可达时返回 `None`。
 ///
 /// 只在需要时读配置空间，不把倍率缓存进设备表（设备表在启动期建立，必须保持紧凑）。

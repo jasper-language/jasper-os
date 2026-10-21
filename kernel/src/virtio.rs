@@ -6,15 +6,17 @@
 //! * 实现设备复位、状态位推进、`VIRTIO_F_VERSION_1` 协商与回读校验。
 //! * 用从全局页帧分配器取得的四页连续物理内存建立一条队列（描述符表 / 可用环 / 已用环 / 缓冲区）。
 //! * 提交单个设备可写描述符、通知设备，并读取已用环与 ISR 状态。
+//! * 拆除队列时按复位结果与总线主控读回决定队列页是归还分配器还是永久隔离（[`quiesce`]）。
 //!
 //! # 边界
 //! * 只服务本轮的送达演练：一条队列、固定 64 字节缓冲区、单描述符请求；不实现多队列、间接描述符或事件抑制。
 //! * 不含任何指令集专有值；队列内存在全物理内存映射中访问，寄存器经 BAR 映射访问。
 //! * 不注册中断处理函数、不决定 MSI-X 向量；这些由演练层完成。
 
-use core::sync::atomic::{fence, Ordering};
+use core::sync::atomic::{fence, AtomicUsize, Ordering};
 
 use kernel_core::device::{CAP_CFG_COMMON, CAP_CFG_DEVICE, CAP_CFG_ISR, CAP_CFG_NOTIFY};
+use kernel_core::dma_quiesce::{quiesce_verdict, QuiesceVerdict, ResetOutcome};
 use kernel_core::frame::{PhysFrame, FRAME_SIZE};
 use kernel_core::pci::{Bar, Bdf};
 
@@ -71,7 +73,8 @@ const WANTED_QUEUE_SIZE: u16 = 16;
 /// 每个描述符指向的缓冲区字节数。
 pub const BUFFER_BYTES: usize = 64;
 /// 队列占用的连续物理页数：描述符表 / 可用环 / 已用环 / 缓冲区各一页。
-const QUEUE_PAGES: usize = 4;
+/// Number of contiguous physical pages one queue occupies.
+pub const QUEUE_PAGES: usize = 4;
 
 /// virtio 传输错误。
 /// virtio transport error.
@@ -481,6 +484,91 @@ impl Drop for Queue {
     fn drop(&mut self) {
         let _ = mm::frame::deallocate_contiguous(self.base, QUEUE_PAGES);
     }
+}
+
+/// 被隔离、永不归还的队列页帧总数（只增不减）。
+/// Number of quarantined queue frames that are never returned; only ever increases.
+static QUARANTINED_FRAMES: AtomicUsize = AtomicUsize::new(0);
+
+/// 当前被隔离的队列页帧总数。
+///
+/// 隔离是**有意的泄漏**：设备复位超时后可能仍在向这些页发起 DMA 写，把它们归还给分配器，
+/// 后来者就会被不可信设备的写悄悄破坏；留下不还，换来的是「已经分出去的内存不会被设备改写」。
+/// Number of quarantined queue frames; the resulting leak is deliberate.
+pub fn quarantined_frames() -> usize {
+    QUARANTINED_FRAMES.load(Ordering::Relaxed)
+}
+
+impl Queue {
+    /// 把队列页永久留在原地：不归还页帧，只把 [`QUEUE_PAGES`] 计入隔离计数。
+    ///
+    /// 调用后本队列不能再被使用；这是设备复位失败后唯一安全的处置。
+    /// Leaves the queue pages in place forever and counts them as quarantined.
+    pub(crate) fn quarantine(self) {
+        QUARANTINED_FRAMES.fetch_add(QUEUE_PAGES, Ordering::Relaxed);
+        // `forget` 跳过归还页帧的析构；此后不再使用 `self`，四页内存因此留在分配器之外。
+        core::mem::forget(self);
+    }
+}
+
+/// 拆除一条 virtio 队列：真实复位设备；复位超时就关总线主控并读回确认，再按裁决归还或隔离队列页。
+///
+/// `restore_bus_master_off` 为真表示调用前总线主控是关的（本轮使用时才被打开）：裁决为
+/// [`QuiesceVerdict::Released`] 时把总线主控恢复成关闭状态。隔离路径不恢复——设备本来就不可信。
+/// Tears down a virtio queue, releasing or quarantining its pages per the quiesce verdict.
+pub(crate) fn quiesce(
+    virtio: &VirtioPci,
+    queue: Queue,
+    restore_bus_master_off: bool,
+) -> QuiesceVerdict {
+    let bdf = virtio.bdf();
+    quiesce_with(
+        virtio,
+        queue,
+        restore_bus_master_off,
+        || {
+            // 复位只有「完成」与「超时」两种结果；其余错误码不在这个调用的返回里出现。
+            if virtio.reset().is_ok() {
+                ResetOutcome::Done
+            } else {
+                ResetOutcome::TimedOut
+            }
+        },
+        || pci::bus_master_enabled(bdf).ok(),
+    )
+}
+
+/// [`quiesce`] 的可注入版本：复位与读回经闭包传入，供启动自检演练注入「复位超时」「读回仍开」。
+///
+/// 注入只替换这两步**观测**；关总线主控与队列页的处置始终是真实动作。`readback` 只在复位超时时被调用一次。
+/// Injectable form of [`quiesce`]; only the reset and the readback are injected.
+pub(crate) fn quiesce_with(
+    virtio: &VirtioPci,
+    queue: Queue,
+    restore_bus_master_off: bool,
+    reset: impl FnOnce() -> ResetOutcome,
+    readback: impl FnOnce() -> Option<bool>,
+) -> QuiesceVerdict {
+    let outcome = reset();
+    let confirmed_off = if matches!(outcome, ResetOutcome::TimedOut) {
+        // 设备可能仍在 DMA：先关总线主控，再真实读回确认它确实关了。
+        let _ = pci::set_bus_master(virtio.bdf(), false);
+        readback()
+    } else {
+        None
+    };
+    let verdict = quiesce_verdict(outcome, confirmed_off);
+    match verdict {
+        QuiesceVerdict::Quarantine => queue.quarantine(),
+        QuiesceVerdict::ReleasedBusMasterOff => drop(queue),
+        QuiesceVerdict::Released => {
+            if restore_bus_master_off {
+                let _ = pci::set_bus_master(virtio.bdf(), false);
+            }
+            drop(queue);
+        }
+    }
+    verdict
 }
 
 /// 分配四页物理连续的帧；失败时不留下已占用的帧。
