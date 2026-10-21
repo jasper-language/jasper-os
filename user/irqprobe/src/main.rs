@@ -3,6 +3,7 @@
 //!
 //! # 入口参数
 //! `cpu_mask`：在线处理器位图；`bdf`：virtio-rng 的打包设备地址（由内核演练给出）。
+//! `bdf` 的位 40 置位时进入**风暴模式**（位 32–39 为目标处理器），见下文「风暴模式」。
 //!
 //! # 流程
 //! 1. 打开设备（带 `CONTROL` 与只读各一个句柄）、建立 Ring；先验证无控制权限、表项越界、处理器不在线三种绑定被拒。
@@ -18,6 +19,11 @@
 //! 每个断言输出 `[JSR-IRQPROBE] case=… ok=true|false`，最后输出 `[JSR-IRQPROBE] summary …`。
 //! 退出码按位交回内核演练：位 0–7 通过的拒绝数、8–15 拒绝总数、16–23 成功轮数、
 //! 位 24 取消语义成立、位 25 关闭语义成立、位 26 有断言失败。
+//!
+//! # 风暴模式
+//! 把表项 0 绑定到目标处理器，经 Ring 持续提交中断等待并累加每次交付的到达次数；同时挂一个长时间的时间等待，
+//! 它被内核取消即表示风暴结束（内核此前已确认没有未交付的到达）。随后取消仍在等待的中断等待、关闭全部句柄。
+//! 退出码：位 0–31 收到的到达总数、位 32 建立与绑定成功、位 33 有断言失败。
 #![no_std]
 #![no_main]
 
@@ -61,6 +67,17 @@ const EXIT_ROUNDS_SHIFT: u32 = 16;
 const EXIT_CANCEL_OK: u64 = 1 << 24;
 const EXIT_CLOSE_OK: u64 = 1 << 25;
 const EXIT_FAILED: u64 = 1 << 26;
+
+/// 风暴模式的参数与退出码字段（与内核演练一致）。
+const ARG_STORM: u64 = 1 << 40;
+const ARG_TARGET_SHIFT: u32 = 32;
+const ARG_BDF_MASK: u64 = 0xFFFF_FFFF;
+const STORM_SUM_MASK: u64 = 0xFFFF_FFFF;
+const STORM_SETUP_OK: u64 = 1 << 32;
+const STORM_FAILED: u64 = 1 << 33;
+/// 风暴模式中的请求标签。
+const TAG_IRQ: u64 = 500;
+const TAG_END: u64 = 501;
 
 /// 断言计数（单线程程序，只在本文件的宏与函数里修改）。
 static mut CHECKS: u32 = 0;
@@ -351,6 +368,79 @@ fn cancel_keeps_arrival(device: i64, ring: i64, cpu: u64) -> bool {
     parked && c_ok && released && immediate
 }
 
+/// 风暴模式：持续等待并累加到达次数，直到内核取消「结束」时间等待。
+fn storm(bdf: u64, target: u64) -> ! {
+    let device = open(bdf, Rights::READ.union(Rights::CONTROL));
+    let ring = ring_create(RING_CAPACITY);
+    let h = if device >= 0 { bind(device, ENTRY, target) } else { device };
+    let setup = emit!(device >= 0 && ring >= 0 && h >= 0, "case=storm_setup device={} ring={} bind={}", device, ring, h);
+    let (mut sum, mut waits, mut ok) = (0u64, 0u64, setup);
+    if setup {
+        // 首次同时提交中断等待与结束信号；之后每次交付都立即重新提交中断等待
+        let mut sq = [wait_sqe(h, TAG_IRQ), park_sqe(TAG_END)];
+        let mut n = 2;
+        let (mut irq_id, mut irq_waiting, mut ended) = (0u64, false, false);
+        while !ended {
+            let r = enter(ring, &sq[..n], if n == 0 { 1 } else { 0 });
+            if r.ret != 0 || r.args.submitted != n as u32 {
+                ok = false;
+                break;
+            }
+            if n > 0 {
+                irq_id = r.ids[0];
+                irq_waiting = true;
+            }
+            n = 0;
+            for c in r.cqes.iter().take(r.args.reaped as usize) {
+                match c.user_tag {
+                    TAG_IRQ if c.result > 0 => {
+                        sum += c.result as u64;
+                        waits += 1;
+                        irq_waiting = false;
+                    }
+                    TAG_END => {
+                        ok &= c.result == CANCELLED;
+                        ended = true;
+                    }
+                    _ => {
+                        ok = false;
+                        ended = true;
+                    }
+                }
+            }
+            if !irq_waiting && !ended {
+                sq[0] = wait_sqe(h, TAG_IRQ);
+                n = 1;
+            }
+        }
+        // 结束：取消仍在等待的中断等待（此前已无未交付的到达；若仍有，计入总数）
+        if ok && irq_waiting {
+            let c = cancel(ring, irq_id);
+            let r = enter(ring, &[], 1);
+            let last = r.cqes[0];
+            ok &= c == 0 && r.ret == 0 && r.args.reaped == 1 && last.user_tag == TAG_IRQ;
+            if last.result > 0 {
+                sum += last.result as u64;
+            } else {
+                ok &= last.result == CANCELLED;
+            }
+        }
+        emit!(ok, "case=storm_waits waits={} delivered={}", waits, sum);
+    }
+    let closed = (h < 0 || close(h) == 0) && (device < 0 || close(device) == 0) && (ring < 0 || close(ring) == 0);
+    emit!(closed, "case=storm_close_all");
+    let (checks, failed, _, _) = counters();
+    log(format_args!("[JSR-IRQPROBE] storm summary checks={} failed={} waits={} delivered={}", checks, failed, waits, sum));
+    let mut code = sum & STORM_SUM_MASK;
+    if setup {
+        code |= STORM_SETUP_OK;
+    }
+    if failed != 0 || !ok {
+        code |= STORM_FAILED;
+    }
+    exit(code)
+}
+
 fn counters() -> (u32, u32, u32, u32) {
     // SAFETY：只读取单线程写入的计数器。
     unsafe { (CHECKS, FAILED, REJECTS_OK, REJECTS_TOTAL) }
@@ -361,6 +451,10 @@ fn counters() -> (u32, u32, u32, u32) {
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start(cpu_mask: usize, bdf: usize) -> ! {
+    let arg = bdf as u64;
+    if arg & ARG_STORM != 0 {
+        storm(arg & ARG_BDF_MASK, (arg >> ARG_TARGET_SHIFT) & 0xFF);
+    }
     let mask = cpu_mask as u64;
     let first = nth_cpu(mask, 0);
     let offline = (!mask).trailing_zeros() as u64;

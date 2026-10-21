@@ -1895,6 +1895,52 @@ check_drv2c1() { # DRV-2C-1：设备中断对象 + ring 投递——用户程序
   fi
 }
 
+check_drv2c2() { # DRV-2C-2：MSI / MSI-X 中断预算 + 真实设备中断风暴——virtio-rng 完成中断在中断上下文立即重投描述符，
+                  # 每核预算（与传统线共用）用完即屏蔽表项、下一 tick 解除并重新送达。检查 x86_64 单核、×4、×8、q35×4 四份串口日志：
+                  # 交互延迟 ≤ 2、各核都忙、目标核有进展、占比在预算内、节流与重新送达 ≥ 1、用户收到的到达数 = 设备完成数；
+                  # 撤销后无中断、延迟 0、向量与页帧回到基线；拒绝路径全部被拒且 ≥ 3；宿主 MSI 预算用例 ≥ 6。
+  local miss="" f name c s r k ntest lat thr red
+  local pairs=("$SERIAL:x86_64单核:1" "$SERIAL_SMP4:x86_64×4:4" "$SERIAL_SMP8:x86_64×8:8" "$SERIAL_Q35:q35×4:4")
+  for pair in "${pairs[@]}"; do
+    IFS=: read -r f name c <<< "$pair"
+    if [ ! -s "$f" ]; then miss="$miss $name:缺日志"; continue; fi
+    if grep -qaE '^\[JSR-IRQSTORM\] skipped reason=no_virtio_rng ok=true' "$f"; then
+      [ "$c" -eq 1 ] || miss="$miss $name:未挂设备"
+      continue
+    fi
+    s=$(grep -aoE "^\[JSR-IRQSTORM\] case=storm cpus=$c .* bounded=true all_busy=true target_hog_progress=true msi_handled=[0-9]+ throttles=[0-9]+ redelivered=[0-9]+ worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=true arrivals=[0-9]+ user_delivered=[0-9]+ lossless=true" "$f" | head -1)
+    if [ -z "$s" ]; then
+      miss="$miss $name:风暴(cpus=$c)"
+    else
+      lat=$(sed -E 's/.* latency_max=([0-9]+).*/\1/' <<< "$s")
+      thr=$(sed -E 's/.* throttles=([0-9]+).*/\1/' <<< "$s")
+      red=$(sed -E 's/.* redelivered=([0-9]+).*/\1/' <<< "$s")
+      [ "$lat" -le 2 ] || miss="$miss $name:延迟($lat)"
+      [ "$thr" -ge 1 ] || miss="$miss $name:未节流"
+      [ "$red" -ge 1 ] || miss="$miss $name:未重新送达"
+    fi
+    grep -qaE '^\[JSR-IRQSTORM\] case=recover storm_after=0 latency_max=0 vectors_back=true frames_back=true' "$f" || miss="$miss $name:恢复"
+    r=$(grep -aoE "^\[JSR-IRQSTORM\] summary cpus=$c rejects=[0-9]+/[0-9]+ failed=0" "$f" | head -1)
+    if [ -z "$r" ]; then
+      miss="$miss $name:汇总"
+    else
+      k=$(sed -E 's/.* rejects=([0-9]+\/[0-9]+).*/\1/' <<< "$r")
+      [ "${k%%/*}" -eq "${k##*/}" ] && [ "${k##*/}" -ge 3 ] || miss="$miss $name:拒绝路径($k)"
+    fi
+    grep -qa '^\[JSR-IRQSTORM-FAIL\]' "$f" 2>/dev/null && miss="$miss $name:失败断言"
+  done
+  ntest=$(grep -caE '^test irq::tests::msi_[a-z0-9_]+ \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null)
+  [ "${ntest:-0}" -ge 6 ] || miss="$miss 宿主:MSI 预算测试(${ntest:-0}/6)"
+  if [ -z "$miss" ]; then
+    local d4 d8
+    d4=$(grep -aoE '^\[JSR-IRQSTORM\] case=storm cpus=4 .*' "$SERIAL_SMP4" | head -1 | sed -E 's/.* throttles=([0-9]+) redelivered=([0-9]+).* arrivals=([0-9]+).*/4 核 节流 \1 次、重新送达 \2 次、到达 \3 次无丢失/')
+    d8=$(grep -aoE '^\[JSR-IRQSTORM\] case=storm cpus=8 .*' "$SERIAL_SMP8" | head -1 | sed -E 's/.* latency_max=([0-9]+).*/8 核 交互延迟 \1 tick/')
+    record DRV2C2 PASS "MSI-X 中断预算：真实 virtio-rng 中断风暴 + 2N 个吃满任务下交互延迟 ≤ 2 tick、各核都忙、目标核有进展、占比在预算内（$d4；$d8），撤销后立即恢复，向量与页帧回到基线，宿主用例 $ntest 个（$ARCH_SCOPE）"
+  else
+    record DRV2C2 FAIL "缺少/不符：$miss"
+  fi
+}
+
 check_l10n1() { # L10N-1：接口登记表英文显示名列（构建期中英齐全）+ 由登记表生成的错误渲染表——
                  # 错误表条数与登记表一致、按 ID 有序、中英齐全；同一错误码中英分别渲染且与登记表逐字一致；
                  # 非错误返回值与未登记错误码被拒；每个操作条目都有英文名。检查 x86_64 单核与 x86_64 / AArch64 / RISC-V64 4 处理器。
@@ -1998,11 +2044,11 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 
 if [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_l10n1
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------

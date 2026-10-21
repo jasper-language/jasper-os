@@ -16,10 +16,15 @@
 //!   超出 ⇒ 这条线在中断控制器上被屏蔽，本处理器的下一个 tick 解除。中断风暴因此最多占每核固定比例，
 //!   交互任务不会被饿死；风暴撤销后下一个 tick 就完全恢复。
 //! * **处理程序**：每条线一个可替换的处理函数（Observer），在中断上下文、EOI 之前调用，不得切换任务。
+//!
+//! MSI / MSI-X（[`on_msi`]）：按 `[处理器][向量]` 分发，并在**本处理器**的同一份预算上按向量槽位记账。
+//! 超出 ⇒ 调用该槽位登记的屏蔽回调（[`MsiMaskOps`]，由绑定该向量的一方提供，例如屏蔽产生它的 MSI-X 表项），
+//! 本处理器下一个 tick 调用解除屏蔽回调；设备在屏蔽期间只置挂起位，解除后重新送达，到达不丢。
+//! Core 不知道消息表项在哪里：回调与上下文值由绑定方登记。
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use kernel_core::irq::{AffinityPolicy, QuotaParams, Charge, CoreQuota, IrqError, LineLoad, MAX_LINES};
+use kernel_core::irq::{AffinityPolicy, Charge, CoreQuota, IrqError, LineLoad, QuotaParams, Released, MAX_LINES};
 use kernel_core::msi::MsiError;
 use kernel_core::smp::{CpuSet, MAX_CPUS};
 use spin::Mutex;
@@ -162,6 +167,70 @@ static MSI_COUNTS: [[AtomicU32; MSI_SLOTS]; MAX_CPUS] =
 /// Spurious MSI count per processor.
 static MSI_SPURIOUS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
+/// MSI 槽位的屏蔽 / 解除屏蔽回调（中断上下文调用；参数为处理器、向量与登记时给出的上下文值）。
+/// Mask callback of an MSI slot: `(cpu, vector, ctx)`.
+pub type MsiMaskFn = fn(usize, u8, usize);
+
+/// 一个 MSI 槽位的预算动作：超预算时屏蔽，下一个 tick 解除屏蔽。
+/// Throttle actions of an MSI slot.
+pub struct MsiMaskOps {
+    /// 屏蔽产生该向量的消息源。
+    pub mask: MsiMaskFn,
+    /// 解除屏蔽（设备在屏蔽期间置挂起位的，解除后会重新送达）。
+    pub unmask: MsiMaskFn,
+}
+
+/// 每核每个向量登记的屏蔽动作（`&'static MsiMaskOps` 的地址；0 = 未登记）。
+static MSI_MASK_OPS: [[AtomicUsize; MSI_SLOTS]; MAX_CPUS] =
+    [const { [const { AtomicUsize::new(0) }; MSI_SLOTS] }; MAX_CPUS];
+/// 与屏蔽动作一起登记的上下文值。
+static MSI_MASK_CTX: [[AtomicUsize; MSI_SLOTS]; MAX_CPUS] =
+    [const { [const { AtomicUsize::new(0) }; MSI_SLOTS] }; MAX_CPUS];
+
+/// 为处理器 `cpu` 上的 `vector` 登记（或以 `None` 清除）预算屏蔽动作。
+///
+/// 登记要求该向量已绑定处理函数（否则 [`MsiError::NotAllocated`]）；处理器或向量越界返回错误。失败时登记表不变。
+/// 解绑处理函数之前必须先清除登记。
+/// Register or clear the throttle actions of `vector` on `cpu`.
+pub fn msi_set_mask_ops(cpu: usize, vector: u8, ops: Option<(&'static MsiMaskOps, usize)>) -> Result<(), MsiError> {
+    if cpu >= MAX_CPUS {
+        return Err(MsiError::NoSuchCpu);
+    }
+    if vector as usize >= MSI_SLOTS {
+        return Err(MsiError::OutOfRange);
+    }
+    let v = vector as usize;
+    match ops {
+        Some((ops, ctx)) => {
+            if MSI_HANDLERS[cpu][v].load(Ordering::Acquire) == 0 {
+                return Err(MsiError::NotAllocated);
+            }
+            // 先写上下文、再发布动作：读者先取动作（Acquire）再读上下文
+            MSI_MASK_CTX[cpu][v].store(ctx, Ordering::Relaxed);
+            MSI_MASK_OPS[cpu][v].store(ops as *const MsiMaskOps as usize, Ordering::Release);
+        }
+        None => MSI_MASK_OPS[cpu][v].store(0, Ordering::Release),
+    }
+    Ok(())
+}
+
+/// 槽位登记的屏蔽动作与上下文值。
+fn msi_mask_ops(cpu: usize, vector: usize) -> Option<(&'static MsiMaskOps, usize)> {
+    let p = MSI_MASK_OPS[cpu][vector].load(Ordering::Acquire);
+    if p == 0 {
+        return None;
+    }
+    // SAFETY：非零值只来自 `msi_set_mask_ops` 写入的 `&'static MsiMaskOps` 地址。
+    let ops = unsafe { &*(p as *const MsiMaskOps) };
+    Some((ops, MSI_MASK_CTX[cpu][vector].load(Ordering::Relaxed)))
+}
+
+/// 处理器 `cpu` 上的 `vector` 是否已绑定处理函数。
+/// Whether `vector` on `cpu` has a handler.
+pub fn msi_is_bound(cpu: usize, vector: u8) -> bool {
+    cpu < MAX_CPUS && (vector as usize) < MSI_SLOTS && MSI_HANDLERS[cpu][vector as usize].load(Ordering::Acquire) != 0
+}
+
 /// 在处理器 `cpu` 上为 `vector` 安装（或以 `None` 清除）处理函数。
 ///
 /// 调用者保证 `cpu` 在线；处理器下标或向量号越界时返回错误且登记表不变。
@@ -180,8 +249,9 @@ pub fn msi_bind(cpu: usize, vector: u8, handler: Option<MsiHandler>) -> Result<(
 /// MSI 中断入口：由平台在中断上下文调用（EOI 之前）。
 ///
 /// 只查**当前处理器**的登记表：绑定过就调用处理函数，未绑定就记一次伪 MSI。
+/// 处理之后在本处理器的预算上按槽位记账；超出时调用该槽位登记的屏蔽动作。
 /// 不调用设备中断线的任何旧处理函数，也不切换任务。
-/// MSI entry point: dispatch on the current processor, counting unbound vectors as spurious.
+/// MSI entry point: dispatch on the current processor, then charge the per-CPU quota.
 pub fn on_msi(vector: u8) {
     let cpu = arch::cpu_index().min(MAX_CPUS - 1);
     if vector as usize >= MSI_SLOTS {
@@ -194,9 +264,11 @@ pub fn on_msi(vector: u8) {
         MSI_SPURIOUS[cpu].fetch_add(1, Ordering::Relaxed);
         return;
     }
+    let t0 = arch::cycles();
     // SAFETY：非零值只来自 `msi_bind` 写入的 `MsiHandler` 函数指针。
     let handler: MsiHandler = unsafe { core::mem::transmute::<usize, MsiHandler>(h) };
     handler();
+    device::charge_msi(cpu, vector, arch::cycles().wrapping_sub(t0));
 }
 
 /// 处理器 `cpu` 在 `vector` 上收到的 MSI 次数。
@@ -372,6 +444,12 @@ pub mod device {
         Ok(())
     }
 
+    /// 处理器 `cpu` 的预算参数（越界为 `None`）。
+    /// Quota parameters of processor `cpu`.
+    pub fn quota_on(cpu: usize) -> Option<QuotaParams> {
+        QUOTAS.get(cpu).map(|b| b.lock().params())
+    }
+
     /// 当前预算参数（取引导处理器的那份；各处理器始终一致）。
     /// Current quota parameters.
     pub fn quota() -> QuotaParams {
@@ -398,8 +476,10 @@ pub mod device {
         pub handled: u64,
         /// 处理耗时（周期计数）。
         pub cycles: u64,
-        /// 节流次数。
+        /// 节流次数（中断线）。
         pub throttles: u32,
+        /// 节流次数（MSI 槽位）。
+        pub msi_throttles: u32,
         /// 测得的 tick 长度（周期计数）。
         pub tick_cycles: u64,
     }
@@ -411,7 +491,7 @@ pub mod device {
             Some(b) => {
                 let b = b.lock();
                 let (handled, cycles, throttles) = b.stats();
-                CpuIrqStats { handled, cycles, throttles, tick_cycles: b.tick_cycles() }
+                CpuIrqStats { handled, cycles, throttles, msi_throttles: b.msi_throttles(), tick_cycles: b.tick_cycles() }
             }
             None => CpuIrqStats::default(),
         }
@@ -473,16 +553,35 @@ pub mod device {
         }
     }
 
-    /// 每个处理器的 tick（中断上下文）：补充本处理器的预算，解除被节流且仍启用的线的屏蔽。
+    /// MSI 记账（中断上下文，处理函数之后）：超出预算 ⇒ 调用该槽位登记的屏蔽动作（未登记则只记账）。
+    /// 预算锁在调用屏蔽动作之前释放：动作可以取级别更低的锁。
+    pub(super) fn charge_msi(cpu: usize, vector: u8, cycles: u64) {
+        let verdict = QUOTAS[cpu].lock().charge_msi(vector as usize, cycles);
+        if verdict == Ok(Charge::Exhausted) {
+            if let Some((ops, ctx)) = msi_mask_ops(cpu, vector as usize) {
+                (ops.mask)(cpu, vector, ctx);
+            }
+        }
+    }
+
+    /// 每个处理器的 tick（中断上下文）：补充本处理器的预算，解除被节流且仍启用的线的屏蔽，
+    /// 并对被节流的 MSI 槽位调用其解除屏蔽动作（槽位已解除登记的跳过）。
     pub(super) fn on_cpu_tick() {
         let cpu = arch::cpu_index().min(MAX_CPUS - 1);
-        let released = QUOTAS[cpu].lock().on_tick(arch::cycles());
-        if released == 0 {
+        let Released { lines, msi } = QUOTAS[cpu].lock().on_tick(arch::cycles());
+        if !msi.is_empty() {
+            for slot in msi.iter() {
+                if let Some((ops, ctx)) = msi_mask_ops(cpu, slot) {
+                    (ops.unmask)(cpu, slot as u8, ctx);
+                }
+            }
+        }
+        if lines == 0 {
             return;
         }
         let enabled = ROUTING.lock().enabled;
         for line in 0..MAX_LINES {
-            if released & enabled & (1 << line) != 0 {
+            if lines & enabled & (1 << line) != 0 {
                 arch::device_irq_set_masked(line, false);
             }
         }

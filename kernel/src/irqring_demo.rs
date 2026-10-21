@@ -86,10 +86,11 @@ pub fn failed() -> u32 {
     FAILED.load(Ordering::Relaxed)
 }
 
-/// 内核侧持有的设备：字段按「设备 → 队列」顺序丢弃，丢弃前先复位设备并恢复总线主控。
-struct Rig {
+/// 内核侧持有的设备（中断风暴演练复用）：字段按「设备 → 队列」顺序丢弃，丢弃前先复位设备并恢复总线主控。
+/// Kernel-held virtio-rng device used by the interrupt demos.
+pub(crate) struct Rig {
     virtio: VirtioPci,
-    queue: Queue,
+    pub(crate) queue: Queue,
     notify_off: u16,
     bus_master_was_on: bool,
 }
@@ -97,7 +98,8 @@ struct Rig {
 impl Rig {
     /// 复位设备、协商 `VIRTIO_F_VERSION_1`、建立队列 0（中断走表项 0）、打开总线主控并置 DRIVER_OK。
     /// MSI-X 表项由用户程序经中断对象绑定，这里不碰。
-    fn new(device: &Device) -> Result<Rig, &'static str> {
+    /// Reset and start the device with queue 0 on MSI-X entry 0.
+    pub(crate) fn new(device: &Device) -> Result<Rig, &'static str> {
         let virtio = VirtioPci::new(device).map_err(|e| e.name())?;
         virtio.reset().map_err(|e| e.name())?;
         virtio.negotiate_version_1().map_err(|e| e.name())?;
@@ -108,10 +110,16 @@ impl Rig {
         Ok(Rig { virtio, queue, notify_off, bus_master_was_on })
     }
 
+    /// 把 0 号描述符放回可用环并通知设备（不等待、不分配内存；中断上下文可调用）。
+    /// Republish descriptor 0 and notify the device.
+    pub(crate) fn kick(&mut self) -> Result<(), &'static str> {
+        self.queue.submit(0).map_err(|e| e.name())?;
+        self.virtio.notify(self.notify_off).map_err(|e| e.name())
+    }
+
     /// 让设备消费一个请求并等它出现在已用环上；返回写入的字节数。
     fn fire(&mut self) -> Result<u32, &'static str> {
-        self.queue.submit(0).map_err(|e| e.name())?;
-        self.virtio.notify(self.notify_off).map_err(|e| e.name())?;
+        self.kick()?;
         let mut len = None;
         let used = wait_ticks(|| {
             if let Some((_, l)) = self.queue.take_used() {

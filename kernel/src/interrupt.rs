@@ -16,8 +16,14 @@
 //! 到达在下一个推进点并入中断对象：等待者所在的 Ring 每次推进（`enter` 的等待循环每个 tick 醒来一次）、
 //! 提交新的等待、或任何人查询该对象时，读取到达计数的增量交给状态机；有等待者就完成它。
 //!
+//! # 预算与风暴抑制
+//! 绑定时为 `(处理器, 向量)` 登记屏蔽动作（[`irq::MsiMaskOps`]）：分发器的每核预算用完时屏蔽该表项，
+//! 本处理器下一个 tick 解除屏蔽；设备在屏蔽期间置挂起位，解除后重新送达，到达计数因此不丢
+//! （等待者拿到的是合并后的次数）。屏蔽 / 解除屏蔽在中断上下文取绑定登记表锁并核对绑定仍然是这一次，
+//! 解绑之后迟到的动作什么也不做。
+//!
 //! # 边界
-//! * 只管理 MSI-X；不做中断预算、风暴抑制或负载均衡改向，不涉及用户态 DMA。
+//! * 只管理 MSI-X；不做负载均衡改向，不涉及用户态 DMA。
 //! * 不含任何指令集专有值：向量范围与消息组合来自 [`crate::arch`]，表项读写经 [`crate::msix`]。
 //! * 功能的 MSI-X 表映射在首次绑定时建立并常驻（映射槽位不回收，常驻避免反复占用窗口）；
 //!   最后一个表项解绑时只清除功能使能。
@@ -118,6 +124,60 @@ static DISPATCHED: AtomicU64 = AtomicU64::new(0);
 static DELIVERIES: AtomicU64 = AtomicU64::new(0);
 /// 下一个绑定序号。
 static SERIAL: AtomicU64 = AtomicU64::new(1);
+/// 因预算而屏蔽表项的次数。
+static THROTTLE_MASKS: AtomicU64 = AtomicU64::new(0);
+/// 解除屏蔽时挂起位已置（随即重新送达）的次数。
+static REDELIVERED: AtomicU64 = AtomicU64::new(0);
+
+/// 中断对象登记给分发器的预算动作。
+static MASK_OPS: irq::MsiMaskOps = irq::MsiMaskOps { mask: throttle_mask, unmask: throttle_unmask };
+
+/// 预算动作的上下文值：打包设备地址（高位）与表项下标（低 16 位）。
+fn mask_ctx(bdf: Bdf, entry: u16) -> usize {
+    ((kernel_core::device::pack_bdf(bdf) as usize) << 16) | entry as usize
+}
+
+/// 在登记表中找到 `ctx` 所指、且仍绑定在 `(cpu, vector)` 上的表项，对它执行 `f`。
+fn with_throttled_entry(cpu: usize, vector: u8, ctx: usize, f: impl FnOnce(&mut MsixDevice, u16)) {
+    let Some(bdf) = kernel_core::device::unpack_bdf((ctx >> 16) as u32) else { return };
+    let entry = (ctx & 0xFFFF) as u16;
+    let mut devices = DEVICES.lock();
+    let Some(d) = devices.iter_mut().find(|d| d.bdf == bdf) else { return };
+    if d.bound.iter().any(|b| b.entry == entry && b.cpu == cpu && b.vector == vector) {
+        f(&mut d.msix, entry);
+    }
+}
+
+/// 预算用完（中断上下文）：屏蔽产生该向量的表项。
+fn throttle_mask(cpu: usize, vector: u8, ctx: usize) {
+    with_throttled_entry(cpu, vector, ctx, |msix, entry| {
+        if msix.mask(entry).is_ok() {
+            THROTTLE_MASKS.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+}
+
+/// 下一个 tick（中断上下文）：解除屏蔽；挂起位已置的表项随即重新送达。
+fn throttle_unmask(cpu: usize, vector: u8, ctx: usize) {
+    with_throttled_entry(cpu, vector, ctx, |msix, entry| {
+        let pending = msix.pending(entry).unwrap_or(false);
+        if msix.unmask(entry).is_ok() && pending {
+            REDELIVERED.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+}
+
+/// 因预算而屏蔽表项的累计次数。
+/// Times an entry was masked because the per-CPU quota ran out.
+pub fn throttle_masks() -> u64 {
+    THROTTLE_MASKS.load(Ordering::Relaxed)
+}
+
+/// 解除屏蔽时已有挂起中断（随即重新送达）的累计次数。
+/// Times an unmasked entry had a pending message that was then redelivered.
+pub fn redelivered() -> u64 {
+    REDELIVERED.load(Ordering::Relaxed)
+}
 
 fn pool() -> Option<&'static VectorPool> {
     POOL.call_once(|| {
@@ -130,6 +190,27 @@ fn pool() -> Option<&'static VectorPool> {
 /// 分发处理函数（中断上下文）：只计数；到达次数本身由分发器按处理器与向量记录。
 fn on_arrival() {
     DISPATCHED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 记一次分发到中断对象（中断上下文可调用）。内核驱动用 [`set_driver_handler`] 换上的处理函数必须先调用它。
+/// Count one dispatch; driver handlers installed with [`set_driver_handler`] call this first.
+pub fn note_arrival() {
+    on_arrival();
+}
+
+/// 为已绑定的 `(bdf, entry)` 换上内核驱动自己的处理函数（`None` 恢复默认），返回绑定的 `(处理器, 向量)`。
+/// 内核侧驱动借此在到达时立即服务设备（例如重新投递缓冲区）；到达计数与交付规则不变。
+/// 表项未绑定返回 `SYSTEM_DEVICE_ERROR_NOT_FOUND` 的错误值，什么都不改。
+/// Install a kernel driver's handler on a bound entry.
+pub fn set_driver_handler(bdf: Bdf, entry: u16, handler: Option<irq::MsiHandler>) -> Result<(usize, u8), i64> {
+    let devices = DEVICES.lock();
+    let b = devices
+        .iter()
+        .find(|d| d.bdf == bdf)
+        .and_then(|d| d.bound.iter().find(|b| b.entry == entry))
+        .ok_or(err(SYSTEM_DEVICE_ERROR_NOT_FOUND))?;
+    irq::msi_bind(b.cpu, b.vector, Some(handler.unwrap_or(on_arrival))).map_err(|_| err(SYSTEM_ERROR_UNSUPPORTED))?;
+    Ok((b.cpu, b.vector))
 }
 
 /// 分发到中断对象的到达总数。
@@ -232,6 +313,11 @@ pub fn bind_for(pid: ObjId, device: HandleId, entry: u64, cpu: u64) -> Result<Ha
                 let _ = pool.free(cpu, vector);
                 return Err(err(SYSTEM_ERROR_UNSUPPORTED));
             }
+            if irq::msi_set_mask_ops(cpu, v, Some((&MASK_OPS, mask_ctx(bdf, entry)))).is_err() {
+                let _ = irq::msi_bind(cpu, v, None);
+                let _ = pool.free(cpu, vector);
+                return Err(err(SYSTEM_ERROR_UNSUPPORTED));
+            }
             let seen = irq::msi_count(cpu, v);
             let d = &mut devices[index];
             let programmed = d.msix.program(entry, cpu, v, true).and_then(|_| d.msix.enable());
@@ -240,6 +326,7 @@ pub fn bind_for(pid: ObjId, device: HandleId, entry: u64, cpu: u64) -> Result<Ha
                 if d.bound.is_empty() {
                     let _ = d.msix.disable();
                 }
+                let _ = irq::msi_set_mask_ops(cpu, v, None);
                 let _ = irq::msi_bind(cpu, v, None);
                 let _ = pool.free(cpu, vector);
                 return Err(msix_err(e));
@@ -290,7 +377,7 @@ pub fn bind_for(pid: ObjId, device: HandleId, entry: u64, cpu: u64) -> Result<Ha
     })
 }
 
-/// 解除 `(bdf, entry)` 的绑定（幂等；未绑定时什么也不做）：屏蔽表项 → 解除分发登记 → 归还向量；
+/// 解除 `(bdf, entry)` 的绑定（幂等；未绑定时什么也不做）：屏蔽表项 → 解除预算动作与分发登记 → 归还向量；
 /// 该功能的最后一个表项解绑时关闭功能的 MSI-X。返回是否确实解绑。
 fn unbind_hw(bdf: Bdf, entry: u16) -> bool {
     let mut devices = DEVICES.lock();
@@ -301,6 +388,7 @@ fn unbind_hw(bdf: Bdf, entry: u16) -> bool {
     if d.bound.is_empty() {
         let _ = d.msix.disable();
     }
+    let _ = irq::msi_set_mask_ops(b.cpu, b.vector, None);
     let _ = irq::msi_bind(b.cpu, b.vector, None);
     if let Some(pool) = pool() {
         let _ = pool.free(b.cpu, Vector::new(b.vector));
