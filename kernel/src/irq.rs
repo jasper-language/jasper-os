@@ -20,6 +20,7 @@
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use kernel_core::irq::{AffinityPolicy, QuotaParams, Charge, CoreQuota, IrqError, LineLoad, MAX_LINES};
+use kernel_core::msi::MsiError;
 use kernel_core::smp::{CpuSet, MAX_CPUS};
 use spin::Mutex;
 
@@ -140,6 +141,91 @@ pub fn on_device_irq(line: usize) {
     device::dispatch(line)
 }
 
+
+/// 设备 MSI 的处理函数（中断上下文；处理器与向量由登记位置确定）。
+/// MSI handler (interrupt context).
+pub type MsiHandler = fn();
+
+/// 可登记 MSI 处理函数的向量个数（与纯向量池的容量一致）。
+/// Number of MSI vector slots known to the dispatcher.
+pub const MSI_SLOTS: usize = kernel_core::msi::MAX_SLOTS;
+
+/// 每核每个向量绑定的处理函数（0 = 未绑定）。
+/// Handler bound to `[cpu][vector]`; zero means unbound.
+static MSI_HANDLERS: [[AtomicUsize; MSI_SLOTS]; MAX_CPUS] =
+    [const { [const { AtomicUsize::new(0) }; MSI_SLOTS] }; MAX_CPUS];
+/// 每核每个向量收到的 MSI 次数（无论是否绑定处理函数）。
+/// MSI arrival count per `[cpu][vector]`, bound or not.
+static MSI_COUNTS: [[AtomicU32; MSI_SLOTS]; MAX_CPUS] =
+    [const { [const { AtomicU32::new(0) }; MSI_SLOTS] }; MAX_CPUS];
+/// 每核未绑定处理函数的 MSI 次数（伪 MSI）。
+/// Spurious MSI count per processor.
+static MSI_SPURIOUS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+
+/// 在处理器 `cpu` 上为 `vector` 安装（或以 `None` 清除）处理函数。
+///
+/// 调用者保证 `cpu` 在线；处理器下标或向量号越界时返回错误且登记表不变。
+/// Install or clear the handler of `vector` on `cpu`.
+pub fn msi_bind(cpu: usize, vector: u8, handler: Option<MsiHandler>) -> Result<(), MsiError> {
+    if cpu >= MAX_CPUS {
+        return Err(MsiError::NoSuchCpu);
+    }
+    if vector as usize >= MSI_SLOTS {
+        return Err(MsiError::OutOfRange);
+    }
+    MSI_HANDLERS[cpu][vector as usize].store(handler.map(|h| h as usize).unwrap_or(0), Ordering::Release);
+    Ok(())
+}
+
+/// MSI 中断入口：由平台在中断上下文调用（EOI 之前）。
+///
+/// 只查**当前处理器**的登记表：绑定过就调用处理函数，未绑定就记一次伪 MSI。
+/// 不调用设备中断线的任何旧处理函数，也不切换任务。
+/// MSI entry point: dispatch on the current processor, counting unbound vectors as spurious.
+pub fn on_msi(vector: u8) {
+    let cpu = arch::cpu_index().min(MAX_CPUS - 1);
+    if vector as usize >= MSI_SLOTS {
+        MSI_SPURIOUS[cpu].fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    MSI_COUNTS[cpu][vector as usize].fetch_add(1, Ordering::Release);
+    let h = MSI_HANDLERS[cpu][vector as usize].load(Ordering::Acquire);
+    if h == 0 {
+        MSI_SPURIOUS[cpu].fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    // SAFETY：非零值只来自 `msi_bind` 写入的 `MsiHandler` 函数指针。
+    let handler: MsiHandler = unsafe { core::mem::transmute::<usize, MsiHandler>(h) };
+    handler();
+}
+
+/// 处理器 `cpu` 在 `vector` 上收到的 MSI 次数。
+/// MSI arrivals of `vector` on `cpu`.
+pub fn msi_count(cpu: usize, vector: u8) -> u32 {
+    if cpu >= MAX_CPUS || vector as usize >= MSI_SLOTS {
+        return 0;
+    }
+    MSI_COUNTS[cpu][vector as usize].load(Ordering::Acquire)
+}
+
+/// 处理器 `cpu` 上的伪 MSI 次数（未绑定处理函数的向量）。
+/// Spurious MSI count of `cpu`.
+pub fn msi_spurious(cpu: usize) -> u32 {
+    MSI_SPURIOUS.get(cpu).map(|c| c.load(Ordering::Relaxed)).unwrap_or(0)
+}
+
+/// 清零 MSI 计数与伪 MSI 计数（处理函数登记保持不变）。
+/// Reset MSI counters, keeping handler bindings.
+pub fn reset_msi_stats() {
+    for row in MSI_COUNTS.iter() {
+        for count in row.iter() {
+            count.store(0, Ordering::Relaxed);
+        }
+    }
+    for count in MSI_SPURIOUS.iter() {
+        count.store(0, Ordering::Relaxed);
+    }
+}
 
 /// 设备中断的路由、预算、均衡与统计。
 pub mod device {

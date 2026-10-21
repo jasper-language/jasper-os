@@ -148,6 +148,30 @@ pub struct PciAccess {
     pub buses: core::ops::RangeInclusive<u8>,
 }
 
+/// 平台可分配给设备 MSI 的向量范围（每核一份，向量号是每核私有的）。
+/// Vector range the platform makes available for device MSI, one range per processor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsiRange {
+    /// 第一个可用向量。
+    /// First usable vector.
+    pub first: u8,
+    /// 可用向量个数。
+    /// Number of usable vectors.
+    pub count: u8,
+}
+
+/// 平台组合出的一条 MSI 消息：目标处理器已经编码在地址中。
+/// One MSI message composed by the platform; the destination is encoded in the address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsiMessage {
+    /// 消息地址。
+    /// Message address.
+    pub address: u64,
+    /// 消息数据（含向量号）。
+    /// Message data (includes the vector number).
+    pub data: u32,
+}
+
 /// 仿真器 / 测试退出状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitStatus {
@@ -433,6 +457,28 @@ pub trait Platform {
     /// 打开 / 关闭设备的持续自触发：设备在每次确认之后立即再次请求中断（中断风暴演练与自检用）。
     /// Turn a device's continuous self-trigger on or off.
     fn device_irq_self_trigger(line: usize, on: bool) -> Result<(), kernel_core::irq::IrqError>;
+
+    // ---- MSI ----
+    // 向量范围、消息编码与投递方式都是平台细节；Core 只经这三个方法使用，不出现具体向量号或地址。
+
+    /// 可分配给设备的 MSI 向量范围（每核一份）；平台不支持 MSI 时返回 `None`。
+    /// MSI vector range available to devices; `None` when unsupported.
+    fn msi_vector_range() -> Option<MsiRange> {
+        None
+    }
+
+    /// 组合发往逻辑处理器 `cpu`、向量为 `vector` 的 MSI 消息；处理器不可用时返回 `None`。
+    /// Compose an MSI message for processor `cpu` and `vector`.
+    fn msi_message(_cpu: usize, _vector: u8) -> Option<MsiMessage> {
+        None
+    }
+
+    /// 自测触发：向处理器 `cpu` 的 `vector` 投递一条真实 MSI，由该处理器上的中断入口处理。
+    /// 处理器不可用或平台不支持时返回错误且不投递。
+    /// Deliver one real MSI to `cpu` for self-testing.
+    fn msi_trigger(_cpu: usize, _vector: u8) -> Result<(), kernel_core::msi::MsiError> {
+        Err(kernel_core::msi::MsiError::Unsupported)
+    }
 }
 
 // ---- Core 使用的薄包装（避免各处 `use Platform` 与冗长的 `<Current as Platform>::`）----
@@ -698,4 +744,16 @@ pub fn device_irq_ack(line: usize) {
 /// 见 [`Platform::device_irq_self_trigger`]。
 pub fn device_irq_self_trigger(line: usize, on: bool) -> Result<(), kernel_core::irq::IrqError> {
     Current::device_irq_self_trigger(line, on)
+}
+/// 见 [`Platform::msi_vector_range`]。
+pub fn msi_vector_range() -> Option<MsiRange> {
+    Current::msi_vector_range()
+}
+/// 见 [`Platform::msi_message`]。
+pub fn msi_message(cpu: usize, vector: u8) -> Option<MsiMessage> {
+    Current::msi_message(cpu, vector)
+}
+/// 见 [`Platform::msi_trigger`]。
+pub fn msi_trigger(cpu: usize, vector: u8) -> Result<(), kernel_core::msi::MsiError> {
+    Current::msi_trigger(cpu, vector)
 }

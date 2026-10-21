@@ -13,7 +13,7 @@ use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, Pag
 
 use kernel_core::smp::IpiKind;
 
-use super::{apic, gdt, ioapic, pic};
+use super::{apic, gdt, ioapic, msi, pic};
 use crate::console;
 use crate::fault::{self, UserFault, UserFaultKind};
 use crate::irq::{self, IrqLine};
@@ -43,6 +43,9 @@ pub fn init() {
         idt[apic::SPURIOUS_VECTOR].set_handler_fn(spurious_handler);
         idt[ioapic::SERIAL_VECTOR].set_handler_fn(serial_irq_handler);
         idt[ioapic::RTC_VECTOR].set_handler_fn(rtc_irq_handler);
+        for &(vector, handler) in msi::ENTRIES.iter() {
+            idt[vector].set_handler_fn(handler);
+        }
         idt
     });
     idt.load();

@@ -13,6 +13,7 @@
 //! * `user`    —— `iretq` 进入 Ring 3 与用户态探针机器码
 //! * `syscall` —— `syscall`/`sysretq` 入口：MSR 设置、换栈、寄存器帧、返回前 RIP 规范性检查
 //! * `apic`    —— 本地 APIC：核间中断、本地定时器（以 PIT 校准）、EOI
+//! * `msi`     —— 设备 MSI：向量范围、IDT 入口、消息编码与投递
 //! * `pci`     —— PCI 配置空间：传统端口机制与 ACPI MCFG ECAM（不可缓存 MMIO）
 //! * `smp`     —— 多处理器：MADT 发现、实模式启动代码、INIT/启动序列、其他处理器入口
 //!
@@ -25,6 +26,7 @@ mod paging;
 mod gdt;
 mod idt;
 mod ioapic;
+mod msi;
 mod pci;
 mod pic;
 mod pit;
@@ -279,6 +281,18 @@ impl Platform for X86_64 {
 
     fn device_irq_self_trigger(line: usize, on: bool) -> Result<(), kernel_core::irq::IrqError> {
         ioapic::self_trigger(line, on)
+    }
+
+    fn msi_vector_range() -> Option<super::MsiRange> {
+        Some(msi::range())
+    }
+
+    fn msi_message(cpu: usize, vector: u8) -> Option<super::MsiMessage> {
+        msi::message(cpu, vector)
+    }
+
+    fn msi_trigger(cpu: usize, vector: u8) -> Result<(), kernel_core::msi::MsiError> {
+        msi::trigger(cpu, vector)
     }
 
     #[inline(always)]

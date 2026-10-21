@@ -51,6 +51,7 @@ pub mod kobj;
 pub mod l10n_demo;
 pub mod mm;
 pub mod ktrace;
+pub mod msi_demo;
 pub mod lockorder;
 pub mod mech_demo;
 pub mod panic;

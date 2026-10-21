@@ -429,6 +429,301 @@ pub fn for_each_capability(
     if at == 0 { Ok(()) } else { Err(PciError::BadCapability) }
 }
 
+// ---------------------------------------------------------------------------
+// MSI / MSI-X 能力
+// ---------------------------------------------------------------------------
+
+/// MSI 能力号。
+/// MSI capability ID.
+pub const CAP_ID_MSI: u8 = 0x05;
+/// MSI-X 能力号。
+/// MSI-X capability ID.
+pub const CAP_ID_MSIX: u8 = 0x11;
+/// 一个 MSI-X 表项的字节数。
+/// Size of one MSI-X table entry in bytes.
+pub const MSIX_TABLE_ENTRY: u64 = 16;
+/// MSI-X 控制字段能表示的最大向量数（11 位字段 + 1）。
+/// Largest vector count representable by the MSI-X control field.
+pub const MSIX_MAX_ENTRIES: u16 = 2048;
+
+/// MSI / MSI-X 能力解析错误。
+/// MSI / MSI-X capability parsing error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsiConfigError {
+    /// 配置空间读取失败。
+    /// A configuration-space read failed.
+    Unreachable,
+    /// 能力链非法，或同一功能出现重复的同类能力。
+    /// The capability chain is malformed or repeats the same capability.
+    BadCapability,
+    /// BAR 指示寄存器（BIR）超出 0..=5。
+    /// The BAR indicator register is outside 0..=5.
+    BadBir,
+    /// 表或 PBA 偏移没有按 8 字节对齐。
+    /// A table or PBA offset is not 8-byte aligned.
+    MisalignedOffset,
+    /// 表或 PBA 超出所指示的 BAR。
+    /// The table or PBA extends beyond the indicated BAR.
+    BeyondBar,
+    /// 所指示的 BAR 未实现或不是内存 BAR。
+    /// The indicated BAR is absent or is not a memory BAR.
+    NotMemoryBar,
+}
+
+impl MsiConfigError {
+    /// 规范名。
+    /// Canonical name.
+    pub const fn name(self) -> &'static str {
+        match self {
+            MsiConfigError::Unreachable => "system.device.error.config_unreachable",
+            MsiConfigError::BadCapability => "system.device.error.bad_capability",
+            MsiConfigError::BadBir => "system.device.error.bad_bir",
+            MsiConfigError::MisalignedOffset => "system.device.error.misaligned_offset",
+            MsiConfigError::BeyondBar => "system.device.error.beyond_bar",
+            MsiConfigError::NotMemoryBar => "system.device.error.bar_not_memory",
+        }
+    }
+}
+
+/// MSI 能力（能力号 0x05）的只读快照。
+/// Read-only snapshot of an MSI capability (ID 0x05).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsiCapability {
+    offset: u8,
+    control: u16,
+}
+
+impl MsiCapability {
+    /// 能力结构在配置空间中的偏移。
+    /// Offset of the capability structure.
+    pub const fn offset(&self) -> u8 {
+        self.offset
+    }
+
+    /// 可请求的消息数（log2）。
+    /// Requested message count as log2.
+    pub const fn log2_vectors(&self) -> u8 {
+        (self.control & 0x7) as u8
+    }
+
+    /// 可请求的消息数（`1 << log2`）。
+    /// Requested message count.
+    pub const fn vectors(&self) -> u16 {
+        1u16 << self.log2_vectors()
+    }
+
+    /// 是否支持 64 位消息地址。
+    /// Whether a 64-bit message address is supported.
+    pub const fn address64(&self) -> bool {
+        self.control & 0x0080 != 0
+    }
+
+    /// 是否支持每向量屏蔽。
+    /// Whether per-vector masking is supported.
+    pub const fn per_vector_mask(&self) -> bool {
+        self.control & 0x0100 != 0
+    }
+}
+
+/// MSI-X 表与 PBA（待决位数组）的位置，构造函数完成全部合法性校验。
+/// Location of the MSI-X table and pending-bit array, validated at construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsixTable {
+    table_size: u16,
+    table_bir: u8,
+    table_offset: u32,
+    pba_bir: u8,
+    pba_offset: u32,
+}
+
+impl MsixTable {
+    /// 由 BIR / 偏移 / 向量数与各 BAR 的尺寸构造；非法时返回结构化错误且不产生对象。
+    ///
+    /// 拒绝：向量数为 0 或超出 11 位字段、BIR 超出 0..=5、偏移未按 8 字节对齐、
+    /// 所指示的 BAR 未实现或不是内存 BAR、表或 PBA 超出 BAR 尺寸。
+    /// Builds a validated table/PBA location from raw fields and BAR sizes.
+    pub fn new(
+        table_size: u16,
+        table_bir: u8,
+        table_offset: u32,
+        pba_bir: u8,
+        pba_offset: u32,
+        bars: &[Bar; MAX_BARS],
+    ) -> Result<MsixTable, MsiConfigError> {
+        if table_size == 0 || table_size > MSIX_MAX_ENTRIES {
+            return Err(MsiConfigError::BadCapability);
+        }
+        if table_bir > 5 || pba_bir > 5 {
+            return Err(MsiConfigError::BadBir);
+        }
+        if table_offset % 8 != 0 || pba_offset % 8 != 0 {
+            return Err(MsiConfigError::MisalignedOffset);
+        }
+        for bir in [table_bir, pba_bir] {
+            if !matches!(bars[bir as usize], Bar::Memory { .. }) {
+                return Err(MsiConfigError::NotMemoryBar);
+            }
+        }
+        let table_bytes = table_size as u64 * MSIX_TABLE_ENTRY;
+        if !bar_holds(&bars[table_bir as usize], table_offset, table_bytes) {
+            return Err(MsiConfigError::BeyondBar);
+        }
+        // PBA 每个向量一位，按 64 位向上取整，并以 8 字节为访问单位。
+        let pba_bytes = (table_size as u64).div_ceil(64) * 8;
+        if !bar_holds(&bars[pba_bir as usize], pba_offset, pba_bytes) {
+            return Err(MsiConfigError::BeyondBar);
+        }
+        Ok(MsixTable { table_size, table_bir, table_offset, pba_bir, pba_offset })
+    }
+
+    /// 向量数（表项数）。
+    /// Number of table entries (vectors).
+    pub const fn table_size(&self) -> u16 {
+        self.table_size
+    }
+
+    /// 表所在的 BAR 号。
+    /// BAR holding the table.
+    pub const fn table_bir(&self) -> u8 {
+        self.table_bir
+    }
+
+    /// 表在 BAR 内的字节偏移。
+    /// Byte offset of the table inside its BAR.
+    pub const fn table_offset(&self) -> u32 {
+        self.table_offset
+    }
+
+    /// PBA 所在的 BAR 号。
+    /// BAR holding the PBA.
+    pub const fn pba_bir(&self) -> u8 {
+        self.pba_bir
+    }
+
+    /// PBA 在 BAR 内的字节偏移。
+    /// Byte offset of the PBA inside its BAR.
+    pub const fn pba_offset(&self) -> u32 {
+        self.pba_offset
+    }
+}
+
+/// `offset` 起 `bytes` 字节的区间是否完整落在内存 BAR 内。
+/// Whether `bytes` starting at `offset` fit inside a memory BAR.
+fn bar_holds(bar: &Bar, offset: u32, bytes: u64) -> bool {
+    match *bar {
+        Bar::Memory { size, .. } => offset as u64 + bytes <= size,
+        _ => false,
+    }
+}
+
+/// MSI-X 能力（能力号 0x11）的只读快照。
+/// Read-only snapshot of an MSI-X capability (ID 0x11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsixCapability {
+    offset: u8,
+    control: u16,
+    table: MsixTable,
+}
+
+impl MsixCapability {
+    /// 能力结构在配置空间中的偏移。
+    /// Offset of the capability structure.
+    pub const fn offset(&self) -> u8 {
+        self.offset
+    }
+
+    /// 表与 PBA 的位置。
+    /// Table and PBA location.
+    pub const fn table(&self) -> MsixTable {
+        self.table
+    }
+
+    /// 全局使能位（控制字段位 15）。
+    /// Global enable bit.
+    pub const fn enabled(&self) -> bool {
+        self.control & 0x8000 != 0
+    }
+
+    /// 功能屏蔽位（控制字段位 14）。
+    /// Function mask bit.
+    pub const fn function_masked(&self) -> bool {
+        self.control & 0x4000 != 0
+    }
+}
+
+/// 在能力链中查找 `want`；没有返回 `Ok(None)`，出现两次或链非法返回错误。
+/// Finds a capability by ID; `Ok(None)` when absent.
+fn find_capability(
+    cfg: &mut dyn ConfigSpace,
+    bdf: Bdf,
+    want: u8,
+) -> Result<Option<u8>, MsiConfigError> {
+    let mut found = None;
+    let mut duplicate = false;
+    for_each_capability(cfg, bdf, |id, at| {
+        if id == want {
+            if found.is_some() {
+                duplicate = true;
+                return false;
+            }
+            found = Some(at);
+        }
+        true
+    })
+    .map_err(|e| match e {
+        PciError::Unreachable => MsiConfigError::Unreachable,
+        PciError::BadBar | PciError::BadCapability => MsiConfigError::BadCapability,
+    })?;
+    if duplicate {
+        Err(MsiConfigError::BadCapability)
+    } else {
+        Ok(found)
+    }
+}
+
+/// 解析功能的 MSI 能力；没有该能力返回 `Ok(None)`。
+///
+/// 只读配置空间，不修改设备状态。
+/// Parses the MSI capability of `bdf`; `Ok(None)` when absent.
+pub fn parse_msi(
+    cfg: &mut dyn ConfigSpace,
+    bdf: Bdf,
+) -> Result<Option<MsiCapability>, MsiConfigError> {
+    let Some(at) = find_capability(cfg, bdf, CAP_ID_MSI)? else {
+        return Ok(None);
+    };
+    let word = cfg.read32(bdf, at as u16).ok_or(MsiConfigError::Unreachable)?;
+    Ok(Some(MsiCapability { offset: at, control: (word >> 16) as u16 }))
+}
+
+/// 解析功能的 MSI-X 能力，并用调用者给出的 BAR 尺寸校验表与 PBA；没有该能力返回 `Ok(None)`。
+///
+/// 只读配置空间，既不写设备的 MSI-X 表，也不改全局使能 / 功能屏蔽位。
+/// Parses the MSI-X capability and validates table/PBA placement against the given BARs.
+pub fn parse_msix(
+    cfg: &mut dyn ConfigSpace,
+    bdf: Bdf,
+    bars: &[Bar; MAX_BARS],
+) -> Result<Option<MsixCapability>, MsiConfigError> {
+    let Some(at) = find_capability(cfg, bdf, CAP_ID_MSIX)? else {
+        return Ok(None);
+    };
+    let header = cfg.read32(bdf, at as u16).ok_or(MsiConfigError::Unreachable)?;
+    let table_word = cfg.read32(bdf, at as u16 + 4).ok_or(MsiConfigError::Unreachable)?;
+    let pba_word = cfg.read32(bdf, at as u16 + 8).ok_or(MsiConfigError::Unreachable)?;
+    let control = (header >> 16) as u16;
+    let table_size = (control & 0x07FF) + 1;
+    let table = MsixTable::new(
+        table_size,
+        (table_word & 0x7) as u8,
+        table_word & !0x7,
+        (pba_word & 0x7) as u8,
+        pba_word & !0x7,
+        bars,
+    )?;
+    Ok(Some(MsixCapability { offset: at, control, table }))
+}
+
 /// 枚举得到的一个功能。
 /// One function found by enumeration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -775,5 +1070,143 @@ mod tests {
         );
         assert_eq!(enumerate(&mut m, 0..=0, |f| f.bdf != bdf(0, 1, 0)), Ok(2), "回调返回 false 即停止");
         assert_eq!(m.writes, 0, "枚举只读");
+    }
+
+    const CAP_MSI: u8 = 0x60;
+    const CAP_MSIX: u8 = 0x80;
+
+    /// 写入一个能力头（ID / 下一项 / 控制字段）并把能力链指针指向 `at`。
+    fn cap(m: &mut Model, d: Bdf, at: u8, id: u8, next: u8, control: u16) {
+        let s = m.space.get_mut(&d).unwrap();
+        s[1] |= STATUS_CAP_LIST;
+        s[REG_CAP_PTR as usize / 4] = at as u32;
+        s[at as usize / 4] = (control as u32) << 16 | (next as u32) << 8 | id as u32;
+    }
+
+    fn memory(size: u64) -> Bar {
+        Bar::Memory { base: 0x1000, size, prefetchable: false, wide: false }
+    }
+
+    #[test]
+    fn msi_capability_decodes_64bit_masking_and_message_count() {
+        let mut m = Model::default();
+        let d = bdf(0, 1, 0);
+        m.add(d, 0x1AF4, 0x1041, 0, 0);
+        // log2 = 2（4 条消息）+ 64 位地址 + 每向量屏蔽。
+        cap(&mut m, d, CAP_MSI, CAP_ID_MSI, 0, 0x0182);
+        let c = parse_msi(&mut m, d).unwrap().unwrap();
+        assert_eq!(c.offset(), CAP_MSI);
+        assert_eq!(c.log2_vectors(), 2);
+        assert_eq!(c.vectors(), 4);
+        assert!(c.address64());
+        assert!(c.per_vector_mask());
+        let plain = bdf(0, 2, 0);
+        m.add(plain, 0x1AF4, 0x1000, 0, 0);
+        assert_eq!(parse_msi(&mut m, plain), Ok(None), "没有能力链 ⇒ 没有 MSI");
+        assert_eq!(MsiConfigError::BadBir.name(), "system.device.error.bad_bir");
+    }
+
+    #[test]
+    fn msix_capability_decodes_table_and_pba_within_bars() {
+        let mut m = Model::default();
+        let d = bdf(0, 1, 0);
+        m.add(d, 0x1AF4, 0x1041, 0, 0);
+        // 表 4 项；全局使能 + 功能屏蔽。表 0x1000、PBA 0x3000，都在 BAR 1。
+        cap(&mut m, d, CAP_MSIX, CAP_ID_MSIX, 0, 0xC003);
+        let s = m.space.get_mut(&d).unwrap();
+        s[CAP_MSIX as usize / 4 + 1] = 0x1000 | 1; // table BIR 1 / offset 0x1000
+        s[CAP_MSIX as usize / 4 + 2] = 0x3000 | 1; // pba BIR 1 / offset 0x3000
+        let mut bars = [Bar::None; MAX_BARS];
+        bars[1] = memory(0x4000);
+        let c = parse_msix(&mut m, d, &bars).unwrap().unwrap();
+        assert_eq!(c.offset(), CAP_MSIX);
+        assert!(c.enabled());
+        assert!(c.function_masked());
+        let t = c.table();
+        assert_eq!(t.table_size(), 4);
+        assert_eq!((t.table_bir(), t.pba_bir()), (1, 1));
+        assert_eq!((t.table_offset(), t.pba_offset()), (0x1000, 0x3000));
+        let plain = bdf(0, 2, 0);
+        m.add(plain, 0x1AF4, 0x1000, 0, 0);
+        assert_eq!(parse_msix(&mut m, plain, &bars), Ok(None));
+    }
+
+    #[test]
+    fn msix_rejects_bad_bir_non_memory_and_out_of_range() {
+        let mut m = Model::default();
+        let d = bdf(0, 1, 0);
+        m.add(d, 0x1AF4, 0x1041, 0, 0);
+        cap(&mut m, d, CAP_MSIX, CAP_ID_MSIX, 0, 0x0003);
+        let mut bars = [Bar::None; MAX_BARS];
+        bars[1] = memory(0x4000);
+        let s = m.space.get_mut(&d).unwrap();
+        s[CAP_MSIX as usize / 4 + 2] = 0x3000 | 1;
+        s[CAP_MSIX as usize / 4 + 1] = 0x1000 | 6; // BIR 6
+        assert_eq!(parse_msix(&mut m, d, &bars), Err(MsiConfigError::BadBir));
+        // BIR 合法但 BAR 未实现 / 是 I/O BAR。
+        let s = m.space.get_mut(&d).unwrap();
+        s[CAP_MSIX as usize / 4 + 1] = 0x1000 | 2;
+        assert_eq!(parse_msix(&mut m, d, &bars), Err(MsiConfigError::NotMemoryBar));
+        let mut io = bars;
+        io[2] = Bar::Io { base: 0x1000, size: 0x20 };
+        assert_eq!(parse_msix(&mut m, d, &io), Err(MsiConfigError::NotMemoryBar));
+        // 表本身越出 BAR（16 × 4 = 64 字节，从 0x3FF0 起到 0x4030）。
+        let mut small = [Bar::None; MAX_BARS];
+        small[2] = memory(0x4000);
+        let s = m.space.get_mut(&d).unwrap();
+        s[CAP_MSIX as usize / 4 + 2] = 0x1000 | 2;
+        s[CAP_MSIX as usize / 4 + 1] = 0x3FF0 | 2;
+        assert_eq!(parse_msix(&mut m, d, &small), Err(MsiConfigError::BeyondBar));
+        // PBA 越出 BAR。
+        let s = m.space.get_mut(&d).unwrap();
+        s[CAP_MSIX as usize / 4 + 1] = 0x1000 | 2;
+        s[CAP_MSIX as usize / 4 + 2] = 0x4000 | 2;
+        assert_eq!(parse_msix(&mut m, d, &small), Err(MsiConfigError::BeyondBar));
+    }
+
+    #[test]
+    fn msix_table_constructor_rejects_misalignment_and_duplicate_capability() {
+        let mut bars = [Bar::None; MAX_BARS];
+        bars[1] = memory(0x4000);
+        assert_eq!(
+            MsixTable::new(4, 1, 0x1001, 1, 0x2000, &bars),
+            Err(MsiConfigError::MisalignedOffset)
+        );
+        assert_eq!(
+            MsixTable::new(4, 1, 0x1000, 1, 0x2001, &bars),
+            Err(MsiConfigError::MisalignedOffset)
+        );
+        assert_eq!(MsixTable::new(0, 1, 0x1000, 1, 0x2000, &bars), Err(MsiConfigError::BadCapability));
+        let mut m = Model::default();
+        let d = bdf(0, 1, 0);
+        m.add(d, 0x1AF4, 0x1041, 0, 0);
+        // 同一功能的两个 MSI-X 能力：拒绝而不是随意取一个。
+        cap(&mut m, d, CAP_MSIX, CAP_ID_MSIX, 0x90, 0x0003);
+        let s = m.space.get_mut(&d).unwrap();
+        s[0x90 / 4] = (CAP_ID_MSIX as u32) | 0 << 8;
+        s[0x90 / 4] |= 0x0003 << 16;
+        s[CAP_MSIX as usize / 4 + 1] = 0x1000 | 1;
+        s[CAP_MSIX as usize / 4 + 2] = 0x2000 | 1;
+        assert_eq!(parse_msix(&mut m, d, &bars), Err(MsiConfigError::BadCapability));
+        assert_eq!(MsiConfigError::MisalignedOffset.name(), "system.device.error.misaligned_offset");
+        assert_eq!(MsiConfigError::BeyondBar.name(), "system.device.error.beyond_bar");
+        assert_eq!(MsiConfigError::NotMemoryBar.name(), "system.device.error.bar_not_memory");
+    }
+
+    #[test]
+    fn msi_parsing_reports_unreachable_config() {
+        struct Dead;
+        impl ConfigSpace for Dead {
+            fn read32(&mut self, _: Bdf, _: u16) -> Option<u32> {
+                None
+            }
+            fn write32(&mut self, _: Bdf, _: u16, _: u32) -> bool {
+                false
+            }
+        }
+        let bars = [Bar::None; MAX_BARS];
+        assert_eq!(parse_msi(&mut Dead, bdf(0, 0, 0)), Err(MsiConfigError::Unreachable));
+        assert_eq!(parse_msix(&mut Dead, bdf(0, 0, 0), &bars), Err(MsiConfigError::Unreachable));
+        assert_eq!(MsiConfigError::BadCapability.name(), "system.device.error.bad_capability");
     }
 }

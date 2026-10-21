@@ -14,7 +14,10 @@
 //! * 设备数量超限、枚举读取失败、BAR 编码非法都只记录并继续，由演练汇总判据决定启动是否失败。
 
 use kernel_core::device::{CapabilityRecord, CAP_ID_VENDOR};
-use kernel_core::pci::{self as core_pci, Bar, Bdf, ConfigSpace, Function, Header, MAX_BARS};
+use kernel_core::pci::{
+    self as core_pci, Bar, Bdf, ConfigSpace, Function, Header, MsiCapability, MsiConfigError,
+    MsixCapability, MAX_BARS,
+};
 use spin::Once;
 
 use crate::arch::{self, PciMechanism};
@@ -52,6 +55,18 @@ pub struct Device {
     /// 能力链遍历或能力字段读取失败（不把部分结果当成完整结果）。
     /// The chain walk or a capability-field read failed.
     pub caps_error: bool,
+    /// 解析得到的 MSI 能力（每功能至多一个；没有时为 `None`）。
+    /// Parsed MSI capability, at most one per function.
+    pub msi: Option<MsiCapability>,
+    /// 解析得到的 MSI-X 能力（每功能至多一个；没有时为 `None`）。
+    /// Parsed MSI-X capability, at most one per function.
+    pub msix: Option<MsixCapability>,
+    /// MSI 能力解析失败的结构化原因（与厂商能力分开保存）。
+    /// Structured reason when MSI parsing failed.
+    pub msi_error: Option<MsiConfigError>,
+    /// MSI-X 能力解析失败的结构化原因（与厂商能力分开保存）。
+    /// Structured reason when MSI-X parsing failed.
+    pub msix_error: Option<MsiConfigError>,
 }
 
 impl Device {
@@ -186,7 +201,32 @@ fn build(boot: &'static BootSpec) -> Table {
             kprintln!("[JSR-PCI] error restore bdf={}", format_bdf(function.bdf));
         }
         let (caps, cap_count, caps_error) = probe_capabilities(config, function.bdf);
-        let device = Device { bdf: function.bdf, header: function.header, bars, caps, cap_count, caps_error };
+        let (msi, msi_error) = match core_pci::parse_msi(config, function.bdf) {
+            Ok(cap) => (cap, None),
+            Err(e) => {
+                kprintln!("[JSR-PCI] error msi bdf={} reason={}", format_bdf(function.bdf), e.name());
+                (None, Some(e))
+            }
+        };
+        let (msix, msix_error) = match core_pci::parse_msix(config, function.bdf, &bars) {
+            Ok(cap) => (cap, None),
+            Err(e) => {
+                kprintln!("[JSR-PCI] error msix bdf={} reason={}", format_bdf(function.bdf), e.name());
+                (None, Some(e))
+            }
+        };
+        let device = Device {
+            bdf: function.bdf,
+            header: function.header,
+            bars,
+            caps,
+            cap_count,
+            caps_error,
+            msi,
+            msix,
+            msi_error,
+            msix_error,
+        };
         out.bars += device.bar_count();
         kprintln!(
             "[JSR-PCI] dev bdf={} vendor=0x{:04x} device=0x{:04x} class=0x{:06x} bars={}",

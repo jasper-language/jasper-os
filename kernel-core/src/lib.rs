@@ -18,6 +18,7 @@
 //! * [`fdt`]    —— 扁平设备树的只读解析（内存图、设备寄存器地址；固件输入按不可信处理）
 //! * [`heap`]   —— 堆分配算法（按地址排序空闲链表 + 首次适配 + 合并，M2.3）
 //! * [`io`]     —— 异步 I/O 的**唯一**形态：提交 → 完成（ring）；后端可替换
+//! * [`msi`]    —— 每核 MSI 向量池：独立位图、分配 / 释放与拒绝路径
 //! * [`async_ring`] —— 异步环的请求状态机：请求 ID、完成信用、终态裁决与事件依赖、取消、历史窗口、closing
 //! * [`ring_abi`] —— 异步环的用户态二进制布局（提交记录、完成记录、enter 参数块）
 //! * [`memory`] —— 虚拟内存区域与地址空间记账（真实页表在内核的 `arch/` 与后续 M2.x）
@@ -64,6 +65,7 @@ pub mod l10n;
 pub mod lockorder;
 pub mod memory;
 pub mod meta;
+pub mod msi;
 pub mod profile;
 pub mod paging;
 pub mod pagetable;

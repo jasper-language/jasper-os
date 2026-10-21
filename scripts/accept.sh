@@ -1776,6 +1776,48 @@ check_drv1d() { # DRV-1D：设备寄存器窗口映射与 virtio 设备识别—
   fi
 }
 
+check_drv2a() { # DRV-2A：MSI / MSI-X 能力解析 + 每核 MSI 向量池——每核独立分配 / 释放 / 耗尽 / 改绑，
+                # 真实投递后只有目标处理器收到且恰好一次、处理函数恰好调用一次；释放后的向量记为伪 MSI，
+                # 越界 / 未在线 / 重复释放 / 释放别核的向量全部被拒且位图不变；virtio 功能的 MSI-X 表 / PBA
+                # 解析成功。检查 x86_64 单核、x86_64×4、x86_64×8 与 q35(ECAM)×4；宿主侧向量池与能力解析测试全绿。
+  local miss="" f name c s k m nvec ndev nmsi npci
+  local pairs=("$SERIAL:x86_64单核:1" "$SERIAL_SMP4:x86_64×4:4" "$SERIAL_SMP8:x86_64×8:8" "$SERIAL_Q35:q35×4:4")
+  for pair in "${pairs[@]}"; do
+    IFS=: read -r f name c <<< "$pair"
+    if [ ! -s "$f" ]; then miss="$miss $name:缺日志"; continue; fi
+    s=$(grep -aoE "^\[JSR-MSI\] summary cpus=$c vectors_per_cpu=[0-9]+ delivered=$c/$c msix_functions=[0-9]+ checks=[0-9]+ failed=0" "$f" | head -1)
+    if [ -z "$s" ]; then
+      miss="$miss $name:汇总(cpus=$c)"
+    else
+      nvec=$(sed -E 's/.* vectors_per_cpu=([0-9]+).*/\1/' <<< "$s")
+      k=$(sed -E 's/.* checks=([0-9]+).*/\1/' <<< "$s")
+      m=$(sed -E 's/.* msix_functions=([0-9]+).*/\1/' <<< "$s")
+      [ "$nvec" -eq 16 ] || miss="$miss $name:每核向量数($nvec≠16)"
+      [ "$k" -ge 8 ] || miss="$miss $name:断言数($k<8)"
+      [ "$m" -ge 3 ] || miss="$miss $name:MSI-X 功能数($m<3)"
+    fi
+    grep -qa '^\[JSR-MSI-FAIL\]' "$f" 2>/dev/null && miss="$miss $name:失败断言"
+    ndev=$(grep -caE '^\[JSR-MSI\] dev bdf=[0-9a-f]{2}:[0-9a-f]{2}\.[0-7] msix table_size=[1-9][0-9]* table_bir=[0-5] pba_bir=[0-5] ok=true' "$f" 2>/dev/null)
+    [ "${ndev:-0}" -ge 3 ] || miss="$miss $name:MSI-X 表/PBA(${ndev:-0}/3)"
+    grep -qaE '^\[JSR-MSI\] dev bdf=[0-9a-f]{2}:[0-9a-f]{2}\.[0-7] (msix ok=false|msi ok=false)' "$f" 2>/dev/null \
+      && miss="$miss $name:能力解析失败"
+  done
+  nmsi=$(grep -caE '^test msi::tests::[a-z0-9_]+ \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null)
+  [ "${nmsi:-0}" -ge 7 ] || miss="$miss 宿主:向量池测试(${nmsi:-0}/7)"
+  npci=$(grep -caE '^test pci::tests::msix?_[a-z0-9_]+ \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null)
+  [ "${npci:-0}" -ge 5 ] || miss="$miss 宿主:能力解析测试(${npci:-0}/5)"
+  if [ -z "$miss" ]; then
+    local d1 d4 d8 dq
+    d1=$(grep -aoE '^\[JSR-MSI\] summary cpus=1 .*' "$SERIAL" | head -1 | sed -E 's/.* delivered=([^ ]+).*/单核投递 \1/')
+    d4=$(grep -aoE '^\[JSR-MSI\] summary cpus=4 .*' "$SERIAL_SMP4" | head -1 | sed -E 's/.* delivered=([^ ]+).*/4 核投递 \1/')
+    d8=$(grep -aoE '^\[JSR-MSI\] summary cpus=8 .*' "$SERIAL_SMP8" | head -1 | sed -E 's/.* delivered=([^ ]+).*/8 核投递 \1/')
+    dq=$(grep -aoE '^\[JSR-MSI\] summary cpus=4 .*' "$SERIAL_Q35" | head -1 | sed -E 's/.* delivered=([^ ]+).*/q35 投递 \1/')
+    record DRV2A PASS "MSI / MSI-X 能力解析（每核 16 个向量，$d1、$d4、$d8、$dq），成功投递只在目标处理器发生且恰好一次、处理函数恰好调用一次；释放后同一向量记为伪 MSI，重新分配 + 改绑后恢复；越界 / 未在线 / 重复释放 / 释放别核的向量全部被拒且位图不变，耗尽后位图不变；三个 virtio 功能的 MSI-X 表与 PBA 位置解析正确（x86_64 单核 / ×4 / ×8 / q35 ECAM×4，$ARCH_SCOPE）"
+  else
+    record DRV2A FAIL "缺少/不符：$miss"
+  fi
+}
+
 check_l10n1() { # L10N-1：接口登记表英文显示名列（构建期中英齐全）+ 由登记表生成的错误渲染表——
                  # 错误表条数与登记表一致、按 ID 有序、中英齐全；同一错误码中英分别渲染且与登记表逐字一致；
                  # 非错误返回值与未登记错误码被拒；每个操作条目都有英文名。检查 x86_64 单核与 x86_64 / AArch64 / RISC-V64 4 处理器。
@@ -1879,11 +1921,11 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 
 if [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_l10n1
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------
