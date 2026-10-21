@@ -166,6 +166,8 @@ fn has_handler(id: u32) -> bool {
             | SYSTEM_DEVICE_GET
             | SYSTEM_DEVICE_MAP
             | SYSTEM_DEVICE_CAPABILITY_LIST
+            | SYSTEM_DEVICE_INTERRUPT_CREATE
+            | SYSTEM_DEVICE_INTERRUPT_WAIT
     )
 }
 
@@ -464,6 +466,9 @@ fn execute(e: &AbiEntry, a: &SyscallArgs, task_id: u64) -> i64 {
         SYSTEM_DEVICE_GET => device_get(a.args[0], a.args[1], a.args[2]),
         SYSTEM_DEVICE_MAP => device_map(a.args[0], a.args[1], a.args[2]),
         SYSTEM_DEVICE_CAPABILITY_LIST => device_capability_list(a.args[0], a.args[1], a.args[2]),
+        SYSTEM_DEVICE_INTERRUPT_CREATE => crate::interrupt::sys_bind(a.args[0], a.args[1], a.args[2]),
+        // 等待中断只有异步形式：结果作为完成记录交付，同步调用没有可以阻塞的语义
+        SYSTEM_DEVICE_INTERRUPT_WAIT => err(SYSTEM_ASYNC_ERROR_RING_ONLY),
         _ => err(SYSTEM_ERROR_UNSUPPORTED),
     }
 }
@@ -495,11 +500,11 @@ fn profile_get(index: u64, ptr: u64, cap: u64) -> i64 {
     len as i64
 }
 
-/// 设备句柄允许的最大权限集合：读取配置 / 资源描述、映射寄存器窗口、复制与传递。
+/// 设备句柄允许的最大权限集合：读取配置 / 资源描述、映射寄存器窗口、控制（绑定中断）、复制与传递。
 /// 调用者只能申请这个集合的子集；设备访问能力本身由系统调用集合授予。
 /// Maximum rights a device handle may carry; callers may request a subset only.
 pub const DEVICE_RIGHTS: Rights =
-    Rights::READ.union(Rights::MAP).union(Rights::DUPLICATE).union(Rights::TRANSFER);
+    Rights::READ.union(Rights::MAP).union(Rights::CONTROL).union(Rights::DUPLICATE).union(Rights::TRANSFER);
 
 /// `system.device.list(filter, buf, cap)`：把匹配的启动期 PCI 功能写成定长记录。
 ///

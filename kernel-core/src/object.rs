@@ -213,6 +213,10 @@ pub enum ObjectType {
     /// 设备：启动期 PCI 设备表中的一项（`system.device` 领域）。关闭句柄不销毁设备表项。
     /// Device: one entry of the boot-time PCI table; closing a handle does not destroy it.
     Device,
+    /// 设备中断：一个 MSI-X 表项到某个处理器向量的绑定（`system.device.interrupt` 领域）。
+    /// v1 不可经消息转移：绑定归属创建它的进程，关闭即解绑。
+    /// Device interrupt: one MSI-X entry bound to a processor vector; not transferable in v1.
+    Interrupt,
 }
 
 impl ObjectType {
@@ -241,6 +245,7 @@ impl ObjectType {
             ObjectType::Task => "Task",
             ObjectType::Process => "Process",
             ObjectType::Device => "Device",
+            ObjectType::Interrupt => "Interrupt",
         }
     }
 }
@@ -717,6 +722,8 @@ mod tests {
         assert!(ObjectType::Device.is_transferable_v1(), "设备对象是叶子：关闭句柄不销毁设备表项");
         assert!(!ObjectType::Channel.is_transferable_v1() && !ObjectType::Process.is_transferable_v1());
         assert!(!ObjectType::Ring.is_transferable_v1() && !ObjectType::AddressSpace.is_transferable_v1());
+        assert!(!ObjectType::Interrupt.is_transferable_v1(), "中断绑定归属创建它的进程");
+        assert_eq!(ObjectType::Interrupt.type_name(), "Interrupt");
     }
 
     #[test]

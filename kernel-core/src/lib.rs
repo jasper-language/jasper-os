@@ -58,6 +58,7 @@ pub mod elf;
 pub mod fdt;
 pub mod frame;
 pub mod heap;
+pub mod interrupt;
 pub mod io;
 pub mod irq;
 pub mod job;

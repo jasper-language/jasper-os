@@ -69,3 +69,13 @@
 4121	error	system.device.error.bar_not_memory	1	none	设备·BAR 不是内存型	Device BAR not memory mapped
 4122	error	system.device.error.bar_invalid	1	none	设备·BAR 地址或尺寸非法	Device BAR address or size invalid
 4123	error	system.device.error.bad_capability	1	none	设备·能力链非法	Device capability chain invalid
+31	op	system.device.interrupt.create	1	write	设备·创建中断绑定（MSI-X 表项 → 处理器）	Create device interrupt binding
+32	op	system.device.interrupt.wait	1	read	设备·等待中断（只经异步环）	Wait for device interrupt
+4124	error	system.device.error.no_msix	1	none	设备·没有 MSI-X 能力	Device has no MSI-X
+4125	error	system.device.error.entry_out_of_range	1	none	设备·MSI-X 表项越界	MSI-X entry out of range
+4126	error	system.device.error.cpu_offline	1	none	设备·目标处理器不在线	Target processor offline
+4127	error	system.device.error.interrupt_slots_exhausted	1	none	设备·目标处理器的中断槽位已用尽	Interrupt slots exhausted on processor
+4128	error	system.device.error.already_bound	1	none	设备·表项已绑定	MSI-X entry already bound
+4129	error	system.device.error.interrupt_busy	1	none	设备·中断已有未完成的等待	Interrupt wait already outstanding
+4130	error	system.device.error.interrupt_closed	1	none	设备·中断已关闭	Interrupt closed
+4131	error	system.async.error.ring_only	1	none	异步·该操作只能经异步环提交	Operation must be submitted through a ring

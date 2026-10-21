@@ -23,6 +23,9 @@ pub const PROC_REGISTRY: LockClass = LockClass::new(2, "system.process.registry"
 /// 内核对象表。
 /// Kernel object table.
 pub const OBJECT_TABLE: LockClass = LockClass::new(4, "system.object.table");
+/// 设备中断绑定登记表（绑定与关闭都在对象表锁内取它）。
+/// Device-interrupt binding registry (taken inside the object table lock).
+pub const DEVICE_IRQ: LockClass = LockClass::new(5, "system.device.interrupt");
 /// 固定（pin）页帧记录。
 /// Pinned frame records.
 pub const MEMORY_PINS: LockClass = LockClass::new(6, "system.memory.pins");
@@ -65,6 +68,7 @@ pub const CONSOLE: LockClass = LockClass::new(24, "system.console");
 pub const REGISTRY: &[LockClass] = &[
     PROC_REGISTRY,
     OBJECT_TABLE,
+    DEVICE_IRQ,
     MEMORY_PINS,
     SCHED,
     FAULT_LAST,

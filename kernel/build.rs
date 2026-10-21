@@ -116,9 +116,10 @@ fn build_user_programs(root: &std::path::Path) {
         ("user/bench", "user-bench", "JSR_USER_BENCH"),
         ("user/isohost", "user-isohost", "JSR_USER_ISOHOST"),
     ];
-    // DRV-1C 的用户态演练只在 x86_64 上构建与内嵌（其它指令集冻结，不写对应代码）。
+    // DRV-1C / DRV-2C 的用户态演练只在 x86_64 上构建与内嵌（其它指令集冻结，不写对应代码）。
     if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") {
         programs.push(("user/devprobe", "user-devprobe", "JSR_USER_DEVPROBE"));
+        programs.push(("user/irqprobe", "user-irqprobe", "JSR_USER_IRQPROBE"));
     }
     for (dir, _, _) in &programs {
         for f in ["src/main.rs", "Cargo.toml", "link.ld", "build.rs"] {

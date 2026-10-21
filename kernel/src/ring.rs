@@ -15,6 +15,7 @@
 //! | `system.time.wait` | `Backend::Wait` | 是 | 到达截止 tick 后自然结束（结果 0）；可被取消 |
 //! | `system.channel.send` | 提交时执行 | 否（瞬时） | 两阶段发送，提交时即裁决终态（见 `crate::ipc`） |
 //! | `system.channel.recv` | `Backend::Recv` | 是 | 缓冲区在提交时固定；消息到达时原子交付；可被取消 |
+//! | `system.device.interrupt.wait` | `Backend::InterruptWait` | 是 | 只能经 ring 提交；已有到达即刻完成，否则等下一次到达；结果为交付的到达次数 |
 //! | （内核自检） | `Backend::Manual` | 由调用者指定 | 进展完全由内核调用者报告，可固定一段用户内存，用于验证收尾与固定 |
 //!
 //! 访问用户缓冲区的请求（recv、带固定的人工后端）遵守「后端静止之后才发布完成」；它们持有的资源
@@ -83,6 +84,11 @@ enum Backend {
         /// 目标的退出状态。
         es: ObjId,
     },
+    /// 等待设备中断（可中止）：持有中断对象的一个内部引用。
+    InterruptWait {
+        /// 中断对象。
+        irq: ObjId,
+    },
 }
 
 /// 一次提交要做的工作（提交时的可信快照；用户内存已在此之前复制或固定）。
@@ -109,6 +115,11 @@ pub(crate) enum Work {
     ExitWait {
         /// 目标的退出状态。
         es: ObjId,
+    },
+    /// `system.device.interrupt.wait`：已取得中断对象的内部引用。
+    InterruptWait {
+        /// 中断对象。
+        irq: ObjId,
     },
     /// 内核自检：人工后端；`start = None` 停留在排队状态。
     Manual {
@@ -195,6 +206,10 @@ fn retire_in(t: &mut Table, ring: ObjId, req: u64, b: Backend) {
             crate::exit_state::remove_waiter_in(t, es, (ring, req));
             let _ = t.release_internal(es);
         }
+        Backend::InterruptWait { irq } => {
+            crate::interrupt::cancel_wait_in(t, irq, (ring, req));
+            let _ = t.release_internal(irq);
+        }
         Backend::Wait { .. } => {}
     }
 }
@@ -202,6 +217,21 @@ fn retire_in(t: &mut Table, ring: ObjId, req: u64, b: Backend) {
 /// 收尾记账（每次改动状态机之后调用）：推进到期后端 → 归还已销毁控制块占用的在飞配额 →
 /// 维持「有控制块 ⇔ 持有自身内部引用」。最后一个控制块销毁且 Ring 已无外部所有者时，Ring 随之死亡并入清理队列。
 fn settle_in(t: &mut Table, id: ObjId) {
+    // 先把等待中的设备中断的新到达并入（可能完成其中的请求）；没有中断等待时不分配
+    let Some(r) = ring_mut(t, id) else { return };
+    if r.running.iter().any(|(_, b)| matches!(b, Backend::InterruptWait { .. })) {
+        let irqs: Vec<ObjId> = r
+            .running
+            .iter()
+            .filter_map(|(_, b)| match b {
+                Backend::InterruptWait { irq } => Some(*irq),
+                _ => None,
+            })
+            .collect();
+        for irq in irqs {
+            crate::interrupt::sync_in(t, irq);
+        }
+    }
     let Some(r) = ring_mut(t, id) else { return };
     r.poll(sched::timer_ticks());
     let mut reclaimed = 0u32;
@@ -389,7 +419,13 @@ fn check_sqe(sqe: &Sqe, allowed: SyscallSet) -> Result<(), i64> {
     }
     if !matches!(
         sqe.op,
-        SYSTEM_TIME_NOW | SYSTEM_TIME_WAIT | SYSTEM_CHANNEL_SEND | SYSTEM_CHANNEL_RECV | SYSTEM_TASK_WAIT | SYSTEM_PROCESS_WAIT
+        SYSTEM_TIME_NOW
+            | SYSTEM_TIME_WAIT
+            | SYSTEM_CHANNEL_SEND
+            | SYSTEM_CHANNEL_RECV
+            | SYSTEM_TASK_WAIT
+            | SYSTEM_PROCESS_WAIT
+            | SYSTEM_DEVICE_INTERRUPT_WAIT
     ) {
         return Err(err(SYSTEM_ERROR_UNSUPPORTED));
     }
@@ -420,6 +456,12 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
         },
         _ => 0,
     };
+    // 中断等待：忙或已关闭在建立控制块之前拒绝（与上面的检查同在一把锁内，提交因此原子成功或原子失败）
+    if let Work::InterruptWait { irq } = work {
+        if let Err(e) = crate::interrupt::check_wait_in(t, irq) {
+            return reject(t, work, e);
+        }
+    }
     let uses_buffer = matches!(work, Work::Recv(_) | Work::Manual { pins: Some(_), .. });
     let Some(r) = ring_mut(t, ring) else { return reject(t, work, err(SYSTEM_HANDLE_ERROR_INVALID)) };
     let id = match r.sm.submit(Submission { op, user_tag, context: 0, uses_buffer }) {
@@ -478,6 +520,23 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
                 }
             }
         }
+        Work::InterruptWait { irq } => {
+            let _ = r.sm.start(id, Exec::Abortable);
+            match crate::interrupt::submit_wait_in(t, irq, (ring, id)) {
+                Ok(None) => {
+                    if let Some(r) = ring_mut(t, ring) {
+                        r.running.push((id, Backend::InterruptWait { irq }));
+                    }
+                }
+                // 已有到达：立即完成；预检之后不会被拒，防御性地把错误作为结果
+                Ok(Some(v)) | Err(v) => {
+                    if let Some(r) = ring_mut(t, ring) {
+                        let _ = r.sm.finish(id, v);
+                    }
+                    retire_in(t, ring, id, Backend::InterruptWait { irq });
+                }
+            }
+        }
         Work::Manual { start, pins } => {
             if let Some(exec) = start {
                 let _ = r.sm.start(id, exec);
@@ -496,15 +555,15 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
 fn release_work_in(t: &mut Table, work: Work) {
     match work {
         Work::Recv(target) => ipc::release_target_in(t, *target, None),
-        Work::ExitWait { es } => {
+        Work::ExitWait { es } | Work::InterruptWait { irq: es } => {
             let _ = t.release_internal(es);
         }
         _ => {}
     }
 }
 
-/// 目标退出时为一个 wait 请求完成（锁内；由退出状态的通知调用）。请求已被取消或已结束则什么也不做。
-pub(crate) fn complete_exit_waiter_in(t: &mut Table, ring: ObjId, req: u64, value: i64) {
+/// 等待的目标到达时为一个请求完成（锁内；由退出状态的通知或中断对象的到达调用）。请求已被取消或已结束则什么也不做。
+pub(crate) fn complete_waiter_in(t: &mut Table, ring: ObjId, req: u64, value: i64) {
     let Some(r) = ring_mut(t, ring) else { return };
     if r.sm.decision(req) != Some(None) {
         return;
@@ -665,6 +724,10 @@ fn prepare_user_work(pid: ObjId, sqe: &Sqe, allowed: SyscallSet) -> Result<Work,
             let (body, handles) = ipc::copy_send_args(sqe.arg1)?;
             Work::Send { endpoint: crate::syscall::handle_arg(sqe.arg0), body, handles }
         }
+        SYSTEM_DEVICE_INTERRUPT_WAIT => {
+            let irq = kobj::with(|t| crate::interrupt::prepare_wait_in(t, pid, crate::syscall::handle_arg(sqe.arg0)))?;
+            Work::InterruptWait { irq }
+        }
         SYSTEM_TASK_WAIT | SYSTEM_PROCESS_WAIT => {
             let ty = if sqe.op == SYSTEM_TASK_WAIT { ObjectType::Task } else { ObjectType::Process };
             let es = kobj::with(|t| proc::acquire_exit_state_in(t, pid, crate::syscall::handle_arg(sqe.arg0), ty)).map_err(perr)?;
@@ -795,6 +858,29 @@ pub fn sys_enter(h: u64, args_ptr: u64) -> i64 {
 }
 
 // ———————————————————————— 诊断 ————————————————————————
+
+/// 内核自检：取消 Ring 上全部执行中的 `system.time.wait` 请求（经与用户取消相同的裁决路径），返回取消数。
+/// 用于让一个停在长时间等待上的用户线程在内核确认某个状态之后继续，而不必猜测时长。
+/// Kernel self-test: cancels every running `system.time.wait` on the ring.
+pub fn kernel_cancel_time_waits(ring: ObjId) -> usize {
+    kobj::with(|t| {
+        let Some(r) = ring_mut(t, ring) else { return 0 };
+        let waits: Vec<u64> = r.running.iter().filter(|(_, b)| matches!(b, Backend::Wait { .. })).map(|(id, _)| *id).collect();
+        for req in &waits {
+            kernel_cancel_in(t, ring, *req);
+        }
+        waits.len()
+    })
+}
+
+/// Ring 上执行中的 `system.time.wait` 请求数（Ring 已销毁返回 0）。
+/// Number of running `system.time.wait` requests on the ring.
+pub fn running_time_waits(ring: ObjId) -> usize {
+    kobj::with(|t| {
+        settle_in(t, ring);
+        ring_mut(t, ring).map(|r| r.running.iter().filter(|(_, b)| matches!(b, Backend::Wait { .. })).count()).unwrap_or(0)
+    })
+}
 
 /// 内核自检：从 Ring 收取至多 `max` 条完成记录 `(请求 ID, 结果)` 并归还信用（与用户收取相同的消费路径）。
 pub fn reap_kernel(ring: ObjId, max: usize) -> Vec<(u64, i64)> {

@@ -66,7 +66,7 @@ pub(crate) fn notify_in(t: &mut Table, id: ObjId, code: i64) {
     e.code = Some(code);
     let waiters: Vec<(ObjId, u64)> = e.waiters.drain(..).collect();
     for (ring, req) in waiters {
-        crate::ring::complete_exit_waiter_in(t, ring, req, report(code));
+        crate::ring::complete_waiter_in(t, ring, req, report(code));
     }
 }
 

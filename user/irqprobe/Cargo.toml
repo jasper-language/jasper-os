@@ -1,0 +1,20 @@
+# user-irqprobe —— DRV-2C-1 用户态演练：经设备句柄绑定 MSI-X 中断，经异步环等待中断完成，
+# 并验证无控制权限 / 表项越界 / 处理器不在线 / 重复绑定 / 同步等待 / 无等待权限 / 忙 等拒绝路径与取消、关闭语义。
+# 只经系统调用与内核交互；环记录布局取自 kernel-core 的 ring_abi 模块（与内核同一份定义）。
+[package]
+name = "user-irqprobe"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "user-irqprobe"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+kernel-core = { path = "../../kernel-core" }
+
+[build-dependencies]
+kernel-core = { path = "../../kernel-core" }

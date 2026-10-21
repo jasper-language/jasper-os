@@ -37,6 +37,7 @@ pub mod console;
 pub mod counter_demo;
 #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
 pub mod device_demo;
+pub mod interrupt;
 pub mod exit_state;
 pub mod fault;
 pub mod ipc;
@@ -46,6 +47,8 @@ pub mod irq;
 pub mod job;
 pub mod job_demo;
 pub mod irq_demo;
+#[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+pub mod irqring_demo;
 pub mod kmain;
 pub mod kobj;
 pub mod l10n_demo;

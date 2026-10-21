@@ -1858,6 +1858,43 @@ check_drv2b() { # DRV-2B：物理连续页帧分配 + virtio 队列改用——�
   fi
 }
 
+check_drv2c1() { # DRV-2C-1：设备中断对象 + ring 投递——用户程序经 system.device.interrupt.create 绑定 virtio-rng 的
+                  # MSI-X 表项，经 Ring 等待；真实中断成为恰好一条完成。检查 x86_64 单核、×4、×8、q35×4 四份串口日志：
+                  # 轮数 ≥ 处理器数（单核 2 轮）且全部送达、拒绝路径全部被拒且 ≥ 6 项、取消与关闭语义成立、
+                  # 向量与页帧回到基线、无失败断言；宿主侧中断对象状态机用例 ≥ 8。
+  local miss="" f name c s rounds d k need ntest
+  local pairs=("$SERIAL:x86_64单核:1" "$SERIAL_SMP4:x86_64×4:4" "$SERIAL_SMP8:x86_64×8:8" "$SERIAL_Q35:q35×4:4")
+  for pair in "${pairs[@]}"; do
+    IFS=: read -r f name c <<< "$pair"
+    if [ ! -s "$f" ]; then miss="$miss $name:缺日志"; continue; fi
+    s=$(grep -aoE "^\[JSR-IRQRING\] summary cpus=$c rounds=[0-9]+ delivered=[0-9]+/[0-9]+ rejects=[0-9]+/[0-9]+ cancel=ok close_cancels_wait=ok vectors_back=true frames_back=true failed=0" "$f" | head -1)
+    if [ -z "$s" ]; then
+      miss="$miss $name:汇总(cpus=$c)"
+    else
+      rounds=$(sed -E 's/.* rounds=([0-9]+).*/\1/' <<< "$s")
+      d=$(sed -E 's/.* delivered=([0-9]+\/[0-9]+).*/\1/' <<< "$s")
+      k=$(sed -E 's/.* rejects=([0-9]+\/[0-9]+).*/\1/' <<< "$s")
+      need=$c; [ "$need" -lt 2 ] && need=2
+      [ "$rounds" -ge "$need" ] || miss="$miss $name:轮数($rounds<$need)"
+      [ "${d%%/*}" -eq "${d##*/}" ] && [ "${d##*/}" -eq "$rounds" ] || miss="$miss $name:送达($d)"
+      [ "${k%%/*}" -eq "${k##*/}" ] && [ "${k##*/}" -ge 6 ] || miss="$miss $name:拒绝路径($k)"
+    fi
+    grep -qa '^\[JSR-IRQRING-FAIL\]' "$f" 2>/dev/null && miss="$miss $name:失败断言"
+  done
+  ntest=$(grep -caE '^test interrupt::tests::[a-z0-9_]+ \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null)
+  [ "${ntest:-0}" -ge 8 ] || miss="$miss 宿主:中断对象状态机测试(${ntest:-0}/8)"
+  if [ -z "$miss" ]; then
+    local d1 d4 d8 dq
+    d1=$(grep -aoE '^\[JSR-IRQRING\] summary cpus=1 .*' "$SERIAL" | head -1 | sed -E 's/.* delivered=([^ ]+).*/单核 \1/')
+    d4=$(grep -aoE '^\[JSR-IRQRING\] summary cpus=4 .*' "$SERIAL_SMP4" | head -1 | sed -E 's/.* delivered=([^ ]+).*/4 核 \1/')
+    d8=$(grep -aoE '^\[JSR-IRQRING\] summary cpus=8 .*' "$SERIAL_SMP8" | head -1 | sed -E 's/.* delivered=([^ ]+).*/8 核 \1/')
+    dq=$(grep -aoE '^\[JSR-IRQRING\] summary cpus=4 .*' "$SERIAL_Q35" | head -1 | sed -E 's/.* delivered=([^ ]+).*/q35 \1/')
+    record DRV2C1 PASS "设备中断对象：真实 virtio-rng 的 MSI-X 中断经中断对象成为用户 Ring 上恰好一条完成（$d1、$d4、$d8、$dq），拒绝路径全部被拒，取消保留已到达、关闭以已关闭终态完成等待，向量与页帧回到基线（$ARCH_SCOPE）"
+  else
+    record DRV2C1 FAIL "缺少/不符：$miss"
+  fi
+}
+
 check_l10n1() { # L10N-1：接口登记表英文显示名列（构建期中英齐全）+ 由登记表生成的错误渲染表——
                  # 错误表条数与登记表一致、按 ID 有序、中英齐全；同一错误码中英分别渲染且与登记表逐字一致；
                  # 非错误返回值与未登记错误码被拒；每个操作条目都有英文名。检查 x86_64 单核与 x86_64 / AArch64 / RISC-V64 4 处理器。
@@ -1961,11 +1998,11 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 
 if [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_l10n1
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------

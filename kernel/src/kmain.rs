@@ -148,6 +148,9 @@ pub fn start(boot: &'static BootSpec) -> ! {
     // DRV-1C：设备内核对象与 list / open / get 系统调用（设备表由 DRV-1B 在启动期建立）。
     #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
     device_demo::run();
+    // DRV-2C-1：设备中断对象——真实 virtio-rng 的 MSI-X 中断经中断对象成为用户 Ring 上的一条完成。
+    #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+    crate::irqring_demo::run();
     // 基础设施修复的回归演练：失败路径与回滚。
     fix_demo::run();
     #[cfg(feature = "user-programs")]
@@ -218,6 +221,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("msix", virtio_rng_demo::failed()),
         #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
         ("drv1c", device_demo::failed()),
+        #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+        ("drv2c1", crate::irqring_demo::failed()),
         ("l10n", l10n_demo::failed()),
         #[cfg(feature = "user-programs")]
         ("ring", ring_demo::failed()),
