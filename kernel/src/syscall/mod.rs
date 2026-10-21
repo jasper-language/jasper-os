@@ -19,8 +19,9 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use alloc::vec;
 
 use kernel_core::device as devabi;
+use kernel_core::frame::FRAME_SIZE;
 use kernel_core::object::{HandleError, HandleId, ObjectType, Rights};
-use kernel_core::pci::Bdf;
+use kernel_core::pci::{Bar, Bdf, MAX_BARS};
 use kernel_core::sched::Qos;
 
 use crate::kobj::{self, DeviceObj, KObject};
@@ -163,6 +164,8 @@ fn has_handler(id: u32) -> bool {
             | SYSTEM_DEVICE_LIST
             | SYSTEM_DEVICE_OPEN
             | SYSTEM_DEVICE_GET
+            | SYSTEM_DEVICE_MAP
+            | SYSTEM_DEVICE_CAPABILITY_LIST
     )
 }
 
@@ -459,6 +462,8 @@ fn execute(e: &AbiEntry, a: &SyscallArgs, task_id: u64) -> i64 {
         SYSTEM_DEVICE_LIST => device_list(a.args[0], a.args[1], a.args[2]),
         SYSTEM_DEVICE_OPEN => device_open(a.args[0], a.args[1]),
         SYSTEM_DEVICE_GET => device_get(a.args[0], a.args[1], a.args[2]),
+        SYSTEM_DEVICE_MAP => device_map(a.args[0], a.args[1], a.args[2]),
+        SYSTEM_DEVICE_CAPABILITY_LIST => device_capability_list(a.args[0], a.args[1], a.args[2]),
         _ => err(SYSTEM_ERROR_UNSUPPORTED),
     }
 }
@@ -602,4 +607,114 @@ fn device_get(handle: u64, ptr: u64, cap: u64) -> i64 {
         return user_ptr_err(e);
     }
     devabi::DESC_SIZE as i64
+}
+
+/// `system.device.capability.list(handle, buf, cap)`：经设备句柄列出厂商专有能力，返回需要的字节数。
+///
+/// 记录布局见 [`kernel_core::device::CapabilityRecord`]。缓冲区不足时一个字节也不写，返回所需字节数；
+/// 能力链在启动期遍历失败 ⇒ `device.error.bad_capability`（不返回不完整的能力表）。
+/// Lists vendor-specific capabilities of the device behind a handle (read-only).
+fn device_capability_list(handle: u64, ptr: u64, cap: u64) -> i64 {
+    let Ok(capacity) = usize::try_from(cap) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let resolved = kobj::with(|t| -> Result<Bdf, ProcError> {
+        let id = proc::resolve_in(t, pid, handle_arg(handle), ObjectType::Device, Rights::READ)?;
+        match t.get(id) {
+            Ok(KObject::Device(device)) => Ok(device.bdf),
+            _ => Err(ProcError::Handle(HandleError::Invalid)),
+        }
+    });
+    let bdf = match resolved {
+        Ok(bdf) => bdf,
+        Err(e) => return proc_err(e),
+    };
+    let Some(device) = crate::pci::table().find(bdf) else {
+        return err(SYSTEM_DEVICE_ERROR_NOT_FOUND);
+    };
+    if device.caps_error {
+        return err(SYSTEM_DEVICE_ERROR_BAD_CAPABILITY);
+    }
+    let required = device.cap_count * devabi::CAP_RECORD_SIZE;
+    if required > capacity {
+        return required as i64;
+    }
+    if required == 0 {
+        return 0;
+    }
+    let mut buf = vec![0u8; required];
+    for (i, record) in device.caps[..device.cap_count].iter().enumerate() {
+        let mut raw = [0u8; devabi::CAP_RECORD_SIZE];
+        record.encode(&mut raw);
+        let at = i * devabi::CAP_RECORD_SIZE;
+        buf[at..at + devabi::CAP_RECORD_SIZE].copy_from_slice(&raw);
+    }
+    if let Err(e) = copy_to_user(ptr, &buf, required) {
+        return user_ptr_err(e);
+    }
+    required as i64
+}
+
+/// `system.device.map(handle, bar_index, va)`：把一个内存型 BAR 映射进调用者进程的私有窗口，成功返回 0。
+///
+/// 句柄必须类型为 Device 且带 `MAP`；`bar_index` 必须指向已实现的内存 BAR（I/O 端口 BAR 被拒，
+/// 本步不做端口授权）。映射页固定为 `USER | WRITE | NO_CACHE` 且不可执行；同一进程内同一 BAR 只允许
+/// 一个映射（重复请求 ⇒ `memory.error.already_mapped`）。关闭创建映射的句柄或进程退出时映射被撤销，
+/// BAR 不是 RAM，因此不进入页帧分配器，也不改变帧计数。
+/// Maps one memory BAR of the device behind a handle into the caller's private window.
+fn device_map(handle: u64, bar_index: u64, va: u64) -> i64 {
+    let Ok(index) = u8::try_from(bar_index) else {
+        return err(SYSTEM_DEVICE_ERROR_BAR_OUT_OF_RANGE);
+    };
+    if index as usize >= MAX_BARS {
+        return err(SYSTEM_DEVICE_ERROR_BAR_OUT_OF_RANGE);
+    }
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let resolved = kobj::with(|t| -> Result<Bdf, ProcError> {
+        let id = proc::resolve_in(t, pid, handle_arg(handle), ObjectType::Device, Rights::MAP)?;
+        match t.get(id) {
+            Ok(KObject::Device(device)) => Ok(device.bdf),
+            _ => Err(ProcError::Handle(HandleError::Invalid)),
+        }
+    });
+    let bdf = match resolved {
+        Ok(bdf) => bdf,
+        Err(e) => return proc_err(e),
+    };
+    let Some(device) = crate::pci::table().find(bdf) else {
+        return err(SYSTEM_DEVICE_ERROR_NOT_FOUND);
+    };
+    let (phys, size) = match device.bars[index as usize] {
+        Bar::None => return err(SYSTEM_DEVICE_ERROR_BAR_OUT_OF_RANGE),
+        Bar::Io { .. } => return err(SYSTEM_DEVICE_ERROR_BAR_NOT_MEMORY),
+        Bar::Memory { base, size, .. } => (base, size),
+    };
+    if phys == 0
+        || size == 0
+        || !size.is_power_of_two()
+        || phys % FRAME_SIZE != 0
+        || size % FRAME_SIZE != 0
+        || phys.checked_add(size).is_none()
+    {
+        return err(SYSTEM_DEVICE_ERROR_BAR_INVALID);
+    }
+    match proc::map_device_bar(pid, handle_arg(handle), index, va, phys, size) {
+        Ok(()) => {
+            let pages = size / FRAME_SIZE;
+            kprintln!(
+                "[JSR-DRV1D] map bdf=0x{:06x} bar={} va=0x{:x} pages={} nocache=true exec=false",
+                devabi::pack_bdf(bdf),
+                index,
+                va,
+                pages
+            );
+            0
+        }
+        Err(e) => mem_err(e),
+    }
 }

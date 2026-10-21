@@ -13,6 +13,7 @@
 //! * 设备表建立后只读；不在运行时重新枚举，也不为设备注册中断或 DMA。
 //! * 设备数量超限、枚举读取失败、BAR 编码非法都只记录并继续，由演练汇总判据决定启动是否失败。
 
+use kernel_core::device::{CapabilityRecord, CAP_ID_VENDOR};
 use kernel_core::pci::{self as core_pci, Bar, Bdf, ConfigSpace, Function, Header, MAX_BARS};
 use spin::Once;
 
@@ -23,6 +24,9 @@ use crate::kprintln;
 /// 启动期设备表容量（QEMU 默认机型的功能数远低于此；超出只计数并报告）。
 /// Boot-time device-table capacity; excess functions are counted and reported.
 pub const MAX_DEVICES: usize = 64;
+/// 每个功能最多保留的厂商专有能力条数（virtio 1.x 通常 3–5 条）。
+/// Maximum vendor capabilities retained per function.
+pub const MAX_CAPABILITIES: usize = 16;
 /// BAR 探测前后快照覆盖的标准头字节数（16 个双字）。
 const SNAPSHOT_WORDS: usize = 16;
 
@@ -39,6 +43,15 @@ pub struct Device {
     /// 全部 BAR 槽位（未实现与 64 位 BAR 的高半槽位为 [`Bar::None`]）。
     /// Every BAR slot; unimplemented slots and 64-bit high halves are [`Bar::None`].
     pub bars: [Bar; MAX_BARS],
+    /// 厂商专有能力快照（仅 PCI 能力号 0x09；其余能力号不保留）。
+    /// Vendor-specific capability snapshots (PCI capability ID 0x09 only).
+    pub caps: [CapabilityRecord; MAX_CAPABILITIES],
+    /// 有效能力条数（`caps[..cap_count]`）。
+    /// Number of valid capability records.
+    pub cap_count: usize,
+    /// 能力链遍历或能力字段读取失败（不把部分结果当成完整结果）。
+    /// The chain walk or a capability-field read failed.
+    pub caps_error: bool,
 }
 
 impl Device {
@@ -172,7 +185,8 @@ fn build(boot: &'static BootSpec) -> Table {
             out.restored = false;
             kprintln!("[JSR-PCI] error restore bdf={}", format_bdf(function.bdf));
         }
-        let device = Device { bdf: function.bdf, header: function.header, bars };
+        let (caps, cap_count, caps_error) = probe_capabilities(config, function.bdf);
+        let device = Device { bdf: function.bdf, header: function.header, bars, caps, cap_count, caps_error };
         out.bars += device.bar_count();
         kprintln!(
             "[JSR-PCI] dev bdf={} vendor=0x{:04x} device=0x{:04x} class=0x{:06x} bars={}",
@@ -186,6 +200,62 @@ fn build(boot: &'static BootSpec) -> Table {
         out.count += 1;
     }
     out
+}
+
+/// 遍历一个功能的配置空间能力链，只保留厂商专有能力（0x09）并解析 virtio 1.x 的四个字段。
+///
+/// 能力链遍历复用 `kernel_core::pci::for_each_capability`；字段读取失败时返回 `caps_error = true`，
+/// 调用方不得把部分结果当成完整能力表。能力条数超过 [`MAX_CAPABILITIES`] 时只保留前面的条目并继续，
+/// 不改变设备是否存在这一事实。
+/// Snapshot vendor-specific capabilities of one function, reusing the DRV-1A chain walker.
+fn probe_capabilities(
+    cfg: &mut dyn ConfigSpace,
+    bdf: Bdf,
+) -> ([CapabilityRecord; MAX_CAPABILITIES], usize, bool) {
+    let mut offsets = [0u8; MAX_CAPABILITIES];
+    let mut count = 0usize;
+    let walked = core_pci::for_each_capability(cfg, bdf, |id, at| {
+        if id == CAP_ID_VENDOR && count < MAX_CAPABILITIES {
+            offsets[count] = at;
+            count += 1;
+        }
+        true
+    });
+    if walked.is_err() {
+        return ([CapabilityRecord::NONE; MAX_CAPABILITIES], 0, true);
+    }
+    let mut caps = [CapabilityRecord::NONE; MAX_CAPABILITIES];
+    let mut valid = 0usize;
+    for at in offsets.iter().take(count) {
+        let Some(header) = cfg.read32(bdf, *at as u16) else {
+            return ([CapabilityRecord::NONE; MAX_CAPABILITIES], 0, true);
+        };
+        // virtio 能力结构固定 16 字节；更短的厂商专有能力不是 virtio 能力，跳过而不猜测字段。
+        let cap_len = ((header >> 16) & 0xFF) as u8;
+        if cap_len < 16 {
+            continue;
+        }
+        let Some(fields) = cfg.read32(bdf, *at as u16 + 4) else {
+            return ([CapabilityRecord::NONE; MAX_CAPABILITIES], 0, true);
+        };
+        let Some(offset) = cfg.read32(bdf, *at as u16 + 8) else {
+            return ([CapabilityRecord::NONE; MAX_CAPABILITIES], 0, true);
+        };
+        let Some(length) = cfg.read32(bdf, *at as u16 + 12) else {
+            return ([CapabilityRecord::NONE; MAX_CAPABILITIES], 0, true);
+        };
+        caps[valid] = CapabilityRecord {
+            pci_offset: *at,
+            id: (header & 0xFF) as u8,
+            // 字节 3 是 cfg_type；字节 4 是 BAR 号，随后是 id 与保留字节。
+            cfg_type: (header >> 24) as u8,
+            bar: (fields & 0xFF) as u8,
+            bar_offset: offset,
+            length,
+        };
+        valid += 1;
+    }
+    (caps, valid, false)
 }
 
 /// 读取标准头前 64 字节；任一读失败返回 `None`（不把「读不到」当成「没变化」）。

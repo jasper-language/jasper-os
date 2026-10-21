@@ -63,6 +63,9 @@ pub struct Process {
     handles: HandleTable<ObjectRef, HANDLES_PER_PROCESS>,
     /// 进程拥有的数据帧（销毁时归还）。
     frames: Vec<PhysFrame>,
+    /// 设备 BAR 映射（不是 RAM：不进入 `frames`，也不由页帧分配器记账）。
+    /// Device BAR mappings (not RAM; never entered into `frames`).
+    device_maps: Vec<DeviceMapping>,
     /// 线程表：每项持有对应 Task 对象的一个内部引用。
     threads: Vec<ObjId>,
     syscalls: SyscallSet,
@@ -103,6 +106,25 @@ pub struct ResourceQuota {
     pub endpoints: u32,
     /// 本进程发出、仍在接收队列中的消息体总字节数。
     pub ipc_bytes: u32,
+}
+
+/// 一次成功的设备 BAR 映射：把创建它的句柄、虚拟区间与物理 BAR 起始地址记在一起。
+///
+/// 关闭该句柄时只撤销它创建的映射；进程退出时撤销全部映射。物理 BAR 不属于 RAM，
+/// 因此撤销映射时不调用页帧分配器。
+/// One device BAR mapping owned by a handle; revoked on handle close or process exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DeviceMapping {
+    /// 创建映射的句柄（含代次；关闭后同值永久无效）。
+    handle: HandleId,
+    /// 设备 BAR 号。
+    bar: u8,
+    /// 用户虚拟区间起点（页对齐）。
+    va: u64,
+    /// 页数。
+    pages: u64,
+    /// 物理 BAR 起始地址（用于识别同一 BAR 的重复映射）。
+    phys: u64,
 }
 
 /// 线程的启动参数（线程首次被调度时读取）。
@@ -213,6 +235,7 @@ pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcErr
         space,
         handles: HandleTable::new(),
         frames: Vec::new(),
+        device_maps: Vec::new(),
         threads: Vec::new(),
         syscalls,
         ring_quota: ResourceQuota::default(),
@@ -281,6 +304,9 @@ pub fn unmap_page(id: ObjId, va: u64) -> Result<(), ProcError> {
 pub const MAX_PROCESS_FRAMES: usize = crate::config::ACTIVE.memory.max_process_frames;
 /// 单次 `system.memory.map` / `unmap` 最多涉及的页数。
 pub const MAX_MAP_PAGES: u64 = crate::config::ACTIVE.memory.max_map_pages;
+/// 单个设备 BAR 映射最多涉及的页数（4 MiB；QEMU 的 virtio BAR 远小于此）。
+/// Upper bound on pages in one device BAR mapping (4 MiB).
+pub const MAX_DEVICE_MAP_PAGES: u64 = 1024;
 
 /// 匿名映射 / 取消映射的失败原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -391,6 +417,117 @@ pub fn map_anon(pid: ObjId, va: u64, pages: u64, writable: bool) -> Result<(), M
     r
 }
 
+/// 在进程 `pid` 的 `[va, va + size)` 建立设备 BAR 映射（`phys` 为 BAR 物理基址）。
+///
+/// 页属性固定为 `USER | WRITE | NO_CACHE`，且**不含 EXECUTE**；BAR 不是 RAM，映射与撤销都不经过
+/// 页帧分配器（只有建立中间页表时才可能分配页表帧，随地址空间销毁回收）。`size` 必须页对齐、
+/// 非零且不超过 [`MAX_DEVICE_MAP_PAGES`] 页。同一进程内同一物理 BAR 范围只允许一个映射（重复请求
+/// 返回 [`MemError::AlreadyMapped`]）；目标虚拟区间已有任何映射也返回同一错误。失败时撤销本次已建立
+/// 的映射，不留残留。
+/// Maps a device BAR window into `pid` with uncached, non-executable user pages (writable for drivers).
+pub fn map_device_bar(pid: ObjId, handle: HandleId, bar: u8, va: u64, phys: u64, size: u64) -> Result<(), MemError> {
+    if va % FRAME_SIZE != 0 || size == 0 || size % FRAME_SIZE != 0 || phys % FRAME_SIZE != 0 {
+        return Err(MemError::InvalidRange);
+    }
+    let pages = size / FRAME_SIZE;
+    if pages == 0 || pages > MAX_DEVICE_MAP_PAGES || phys.checked_add(size).is_none() {
+        return Err(MemError::InvalidRange);
+    }
+    let end = pages.checked_mul(FRAME_SIZE).and_then(|len| va.checked_add(len)).ok_or(MemError::InvalidRange)?;
+    if !in_private_window(va) || end > arch::USER_WINDOW.1 {
+        return Err(MemError::InvalidRange);
+    }
+    let flags = MapFlags::USER.union(MapFlags::WRITE).union(MapFlags::NO_CACHE);
+    kobj::with(|t| {
+        let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
+        if p.state != ProcState::Running {
+            return Err(MemError::NoSuchProcess);
+        }
+        for i in 0..pages {
+            if p.space.translate(VirtPage::containing(va + i * FRAME_SIZE)).is_some() {
+                return Err(MemError::AlreadyMapped);
+            }
+        }
+        if p.device_maps.iter().any(|m| m.phys == phys && m.pages == pages) {
+            return Err(MemError::AlreadyMapped);
+        }
+        if p.device_maps.try_reserve(1).is_err() {
+            return Err(MemError::OutOfMemory);
+        }
+        let mut mapped = 0u64;
+        while mapped < pages {
+            let page = VirtPage::containing(va + mapped * FRAME_SIZE);
+            let mapped_ok = match PhysFrame::from_start(phys + mapped * FRAME_SIZE) {
+                Some(frame) => p.space.map(page, frame, flags),
+                None => Err(MapError::InvalidAddress),
+            };
+            if let Err(e) = mapped_ok {
+                for undo in 0..mapped {
+                    let _ = p.space.unmap(VirtPage::containing(va + undo * FRAME_SIZE));
+                }
+                return Err(match e {
+                    MapError::AlreadyMapped => MemError::AlreadyMapped,
+                    MapError::OutOfFrames => MemError::OutOfMemory,
+                    _ => MemError::InvalidRange,
+                });
+            }
+            mapped += 1;
+        }
+        // 复核实际权限：设备窗口必须不可缓存、不可执行；否则撤销全部本次映射并拒绝。
+        let ok = (0..pages).all(|i| {
+            p.space.translate(VirtPage::containing(va + i * FRAME_SIZE)).map_or(false, |(_, f)| {
+                f.contains(MapFlags::USER) && f.contains(MapFlags::WRITE) && f.contains(MapFlags::NO_CACHE) && !f.contains(MapFlags::EXECUTE)
+            })
+        });
+        if !ok {
+            for undo in 0..pages {
+                let _ = p.space.unmap(VirtPage::containing(va + undo * FRAME_SIZE));
+            }
+            return Err(MemError::InvalidRange);
+        }
+        p.device_maps.push(DeviceMapping { handle, bar, va, pages, phys });
+        Ok(())
+    })
+}
+
+/// 撤销一条设备映射（只改页表，不归还任何数据帧）。
+/// Revokes one device mapping (page tables only; no data frames are returned).
+fn unmap_device_mapping(space: &mut VmSpace, mapping: &DeviceMapping) {
+    for i in 0..mapping.pages {
+        let _ = space.unmap(VirtPage::containing(mapping.va + i * FRAME_SIZE));
+    }
+}
+
+/// `va` 所在页是否属于设备映射（匿名映射 / 取消映射 / 改权限不得触碰设备窗口）。
+/// Whether the page containing `va` belongs to a device mapping.
+fn is_device_page(p: &Process, va: u64) -> bool {
+    let page = va - va % FRAME_SIZE;
+    p.device_maps.iter().any(|m| page >= m.va && page < m.va + m.pages * FRAME_SIZE)
+}
+
+/// 撤销进程 `pid` 中由 `handle` 创建的全部设备映射（关闭句柄时调用）。
+/// Revokes every device mapping created through `handle`.
+fn revoke_device_mappings_for_handle(p: &mut Process, handle: HandleId) {
+    let mut i = 0;
+    while i < p.device_maps.len() {
+        if p.device_maps[i].handle == handle {
+            let mapping = p.device_maps.swap_remove(i);
+            unmap_device_mapping(&mut p.space, &mapping);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// 撤销进程的全部设备映射（进程退出 / 销毁时调用）。
+/// Revokes all device mappings of a process.
+fn revoke_all_device_mappings(p: &mut Process) {
+    let maps = core::mem::take(&mut p.device_maps);
+    for mapping in &maps {
+        unmap_device_mapping(&mut p.space, mapping);
+    }
+}
+
 /// 取消进程 `pid` 中 `[va, va + pages 页)` 的映射并放弃这些页的数据帧。
 ///
 /// **全有或全无**：区间内任一页未映射 ⇒ 什么也不做，返回 [`MemError::NotMapped`]。
@@ -405,6 +542,9 @@ pub fn unmap_range(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
     kobj::with(|t| {
         let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
         for i in 0..pages {
+            if is_device_page(p, va + i * FRAME_SIZE) {
+                return Err(MemError::InvalidRange);
+            }
             if p.space.translate(VirtPage::containing(va + i * FRAME_SIZE)).is_none() {
                 return Err(MemError::NotMapped);
             }
@@ -448,6 +588,9 @@ pub fn protect_range(pid: ObjId, va: u64, pages: u64, writable: bool, executable
             return Err(MemError::NoSuchProcess);
         }
         for i in 0..pages {
+            if is_device_page(p, va + i * FRAME_SIZE) {
+                return Err(MemError::InvalidRange);
+            }
             if p.space.translate(VirtPage::containing(va + i * FRAME_SIZE)).is_none() {
                 return Err(MemError::NotMapped);
             }
@@ -468,6 +611,12 @@ pub fn page_flags(pid: ObjId, va: u64) -> Option<MapFlags> {
 /// 进程当前拥有的数据帧数（诊断与验收用）。
 pub fn frame_count(pid: ObjId) -> Option<usize> {
     with_proc(pid, |p| Ok(p.frames.len())).ok()
+}
+
+/// 进程当前持有的设备 BAR 映射数（诊断与验收用；进程已退出时应为 0）。
+/// Number of device BAR mappings currently held by a process (diagnostics / acceptance).
+pub fn device_map_count(pid: ObjId) -> Option<usize> {
+    with_proc(pid, |p| Ok(p.device_maps.len())).ok()
 }
 
 /// 在锁内固定进程 `pid` 的用户区间 `[va, va+len)`：区间须位于私有窗口、每页已映射且带用户权限（`write` 时还须可写）。
@@ -872,6 +1021,8 @@ pub(crate) fn handle_in(t: &mut kobj::Table, pid: ObjId, h: HandleId) -> Result<
 pub(crate) fn take_handle_in(t: &mut kobj::Table, pid: ObjId, h: HandleId) -> Result<ObjId, ProcError> {
     let p = receiver(t, pid)?;
     let r = p.handles.remove(h).map_err(ProcError::Handle)?;
+    // 句柄离开本进程时，它创建的设备窗口随之撤销：映射权限不得比句柄活得更久。
+    revoke_device_mappings_for_handle(p, h);
     ObjId::from_raw(r.id.0).ok_or(ProcError::Handle(HandleError::Invalid))
 }
 
@@ -966,6 +1117,8 @@ pub fn transfer(from: ObjId, h: HandleId, to: ObjId) -> Result<HandleId, ProcErr
         // —— 提交：以下步骤在检查通过后不会失败 ——
         if let Ok(KObject::Process(p)) = t.get_mut(from) {
             p.handles.remove(h).map_err(ProcError::Handle)?;
+            // 转移后发送方不再持有句柄，它经该句柄建立的设备窗口一并撤销（只改页表，不会失败）。
+            revoke_device_mappings_for_handle(p, h);
         }
         match t.get_mut(to) {
             Ok(KObject::Process(p)) => p.handles.put(r, rights).map_err(ProcError::Handle),
@@ -1009,7 +1162,10 @@ fn release_resources_in(t: &mut kobj::Table, pid: ObjId) -> usize {
     let n = match t.get_mut(pid) {
         Ok(KObject::Process(p)) => {
             children = core::mem::take(&mut p.children);
-            p.handles.close_all(|r| closed.push(r))
+            let n = p.handles.close_all(|r| closed.push(r));
+            // 进程进入退出流程后它的设备窗口一律撤销；BAR 不是 RAM，这里只改页表。
+            revoke_all_device_mappings(p);
+            n
         }
         _ => 0,
     };
@@ -1165,7 +1321,13 @@ pub fn close_handle(h: HandleId) -> Result<(), ProcError> {
     let pid = current_process().ok_or(ProcError::NoSuchProcess)?;
     kobj::with(|t| {
         let obj = match t.get_mut(pid) {
-            Ok(KObject::Process(p)) => p.handles.remove(h).map_err(ProcError::Handle)?,
+            // 先移出句柄：同一句柄的映射只在这一次关闭时撤销；重复关闭在 remove 处被拒，
+            // 因此不会误撤销后来用同一代次句柄以外的映射。
+            Ok(KObject::Process(p)) => {
+                let obj = p.handles.remove(h).map_err(ProcError::Handle)?;
+                revoke_device_mappings_for_handle(p, h);
+                obj
+            }
             _ => return Err(ProcError::NoSuchProcess),
         };
         if let Some(id) = ObjId::from_raw(obj.id.0) {
@@ -1277,9 +1439,13 @@ pub fn reap(id: ObjId) -> Option<ExitInfo> {
 /// 正常路径上句柄表在 exited 时已被关闭；这里**不依赖该假设**：仍有残余句柄则逐个释放其外部所有权，
 /// 并输出诊断标记（出现即说明某条路径漏了检查）。
 pub fn destroy(p: Box<Process>) {
-    let Process { space, frames, threads, mut handles, name, exit_state, children, cpu_group, .. } = *p;
+    let Process { mut space, frames, device_maps, threads, mut handles, name, exit_state, children, cpu_group, .. } = *p;
     if let Some(g) = cpu_group {
         let _ = sched::release_cpu_group(g); // 持有者引用；线程早已全部退出，组随之释放
+    }
+    // 防御：正常路径已在 exiting / exited 时撤销；这里再撤销一次，且不触碰页帧分配器。
+    for mapping in &device_maps {
+        unmap_device_mapping(&mut space, mapping);
     }
     let mut residual: Vec<ObjectRef> = Vec::new();
     let n = handles.close_all(|r| residual.push(r));

@@ -61,5 +61,11 @@
 26	op	system.device.list	1	read	设备·列举	List devices
 27	op	system.device.open	1	write	设备·打开	Open device
 28	op	system.device.get	1	read	设备·读取描述	Get device description
+29	op	system.device.map	1	write	设备·映射寄存器窗口	Map device registers
+30	op	system.device.capability.list	1	read	设备·列举能力	List device capabilities
 4118	error	system.device.error.not_found	1	none	设备不存在	Device not found
 4119	error	system.device.error.buffer_too_small	1	none	设备·缓冲区过小	Device buffer too small
+4120	error	system.device.error.bar_out_of_range	1	none	设备·BAR 号越界或未实现	Device BAR out of range
+4121	error	system.device.error.bar_not_memory	1	none	设备·BAR 不是内存型	Device BAR not memory mapped
+4122	error	system.device.error.bar_invalid	1	none	设备·BAR 地址或尺寸非法	Device BAR address or size invalid
+4123	error	system.device.error.bad_capability	1	none	设备·能力链非法	Device capability chain invalid

@@ -5,6 +5,10 @@
 //! * `0`：完整演练——列举设备（含缓冲区不足返回所需长度）、按类别 / vendor 过滤、打开 virtio-net、
 //!   读取完整描述；并验证非法 BDF、权限越级复制、已关闭句柄等拒绝路径。所有句柄最终关闭。
 //! * `1`：进程没有被授予任何设备系统调用——`list` / `open` 都必须返回 `rights_denied`。
+//! * `2`（DRV-1D）：打开 virtio-net，沿厂商能力链找到 `cfg_type=COMMON`，映射其 BAR 并读取
+//!   `device_feature` / `num_queues`；验证 I/O BAR、越界 BAR、无 MAP 权限、重复映射、已关闭句柄被拒；
+//!   最后故意留一个句柄退出，由内核核对进程退出后映射数归零。
+//! * `3`（DRV-1D）：进程没有被授予 `system.device.map`——映射调用必须在分发层返回 `rights_denied`。
 //!
 //! # 输出与退出码
 //! 每个断言输出一行 `[JSR-DEV] case=… ok=true|false`，最后输出 `[JSR-DEV] summary checks=N failed=M handles_live=K`。
@@ -16,9 +20,11 @@ use core::arch::asm;
 use core::fmt::{self, Write as _};
 
 use kernel_core::device::{
-    Desc, Filter, Record, BAR_KIND_NONE, DESC_SIZE, FILTER_ALL_CLASS, FILTER_ALL_VENDOR, RECORD_SIZE,
+    CapabilityRecord, Desc, Filter, Record, BAR_KIND_IO, BAR_KIND_NONE, CAP_CFG_COMMON, CAP_RECORD_SIZE, DESC_SIZE,
+    FILTER_ALL_CLASS, FILTER_ALL_VENDOR, RECORD_SIZE,
 };
 use kernel_core::object::Rights;
+use kernel_core::user_layout::WINDOW_BASE_X86_64;
 
 /// 系统调用号（构建期从登记表生成）。
 #[allow(dead_code)]
@@ -30,6 +36,12 @@ mod ids {
 static mut LIST: [u8; 2048] = [0; 2048];
 /// 完整描述缓冲区。
 static mut DESC: [u8; DESC_SIZE] = [0; DESC_SIZE];
+/// 能力记录缓冲区（16 条 × 16 字节，足够 QEMU 的 virtio 设备）。
+static mut CAPS: [u8; 256] = [0; 256];
+/// DRV-1D 的固定设备窗口虚拟地址：私有窗口起点 + 960 MiB（模块区间结束之后、最小窗口之内）。
+const MAP_VA: u64 = WINDOW_BASE_X86_64 + (960 << 20);
+/// 第二个设备窗口（重复映射与拒绝路径使用，与 [`MAP_VA`] 相距 64 KiB）。
+const MAP_VA2: u64 = MAP_VA + 0x1_0000;
 
 /// 断言总数与失败数。
 static mut CHECKS: u32 = 0;
@@ -119,6 +131,24 @@ macro_rules! emit {
     }};
 }
 
+/// DRV-1D 的断言：输出 `[JSR-DRV1D]` 行，便于验收脚本与 DRV-1C 的演练区分。
+macro_rules! emit1d {
+    ($ok:expr, $($t:tt)*) => {{
+        let ok = $ok;
+        // SAFETY：单线程程序，计数器只在这里修改。
+        unsafe {
+            CHECKS += 1;
+            if !ok {
+                FAILED += 1;
+            }
+        }
+        log(format_args!("[JSR-DRV1D] {} ok={}", format_args!($($t)*), ok));
+        if !ok {
+            log(format_args!("[JSR-DRV1D-FAIL] {}", format_args!($($t)*)));
+        }
+    }};
+}
+
 /// 以退出码结束本线程。
 fn exit(code: u64) -> ! {
     // SAFETY：task.exit 不访问用户内存。
@@ -148,6 +178,32 @@ fn get(handle: i64, buf: &mut [u8]) -> i64 {
 fn close(handle: i64) -> i64 {
     // SAFETY：参数是句柄值。
     unsafe { syscall3(ids::SYSTEM_HANDLE_CLOSE, handle as u64, 0, 0) }
+}
+
+fn capability_list(handle: i64, ptr: u64, cap: u64) -> i64 {
+    // SAFETY：ptr 指向本进程的静态缓冲区（或 0，容量为 0 时内核不写）。
+    unsafe { syscall3(ids::SYSTEM_DEVICE_CAPABILITY_LIST, handle as u64, ptr, cap) }
+}
+
+fn map_bar(handle: i64, bar: u32, va: u64) -> i64 {
+    // SAFETY：参数全是整数，内核自行校验。
+    unsafe { syscall3(ids::SYSTEM_DEVICE_MAP, handle as u64, bar as u64, va) }
+}
+
+/// 读取 MMIO 的 32 位字（设备寄存器必须用 volatile；映射页不可缓存）。
+///
+/// # Safety
+/// `addr` 必须落在已经成功映射、且属于本进程的设备窗口内。
+unsafe fn mmio_u32(addr: u64) -> u32 {
+    core::ptr::read_volatile(addr as *const u32)
+}
+
+/// 读取 MMIO 的 16 位字。
+///
+/// # Safety
+/// 同 [`mmio_u32`]。
+unsafe fn mmio_u16(addr: u64) -> u16 {
+    core::ptr::read_volatile(addr as *const u16)
 }
 
 fn duplicate(handle: i64, rights: Rights) -> i64 {
@@ -363,6 +419,263 @@ fn probe_devices() -> ! {
     exit(if failed() == 0 && live == 0 { 0 } else { 1 });
 }
 
+/// 角色 2：DRV-1D 的 BAR 映射与 virtio 1.x 通用配置读取。
+///
+/// 映射之源必须是设备表中登记的内存 BAR；I/O BAR、越界 BAR 号、无 MAP 权限、已关闭句柄都在
+/// 内核里被拒。最后故意留一个打开的句柄退出，由内核核对进程退出后映射数为 0。
+fn probe_map() -> ! {
+    let mut live: i32 = 0;
+
+    // —— 列举设备，找 virtio-net 与任意一个带 I/O BAR 的设备。——
+    // SAFETY：单线程，独占 LIST。
+    let list: &mut [u8] = unsafe { &mut *core::ptr::addr_of_mut!(LIST) };
+    let listed = list_raw(Filter::ALL.to_word(), list.as_mut_ptr() as u64, list.len() as u64);
+    let count = if listed > 0 { listed as usize / RECORD_SIZE } else { 0 };
+    let mut net_bdf = 0u32;
+    let mut io_bdf = 0u32;
+    let mut io_found = false;
+    for i in 0..count {
+        let mut raw = [0u8; RECORD_SIZE];
+        raw.copy_from_slice(&list[i * RECORD_SIZE..(i + 1) * RECORD_SIZE]);
+        let record = Record::decode(&raw);
+        if record.vendor == 0x1AF4 && record.class == 0x02 {
+            net_bdf = record.bdf;
+        }
+        if !io_found && record.first_bar_kind == BAR_KIND_IO && record.bar_count > 0 {
+            io_bdf = record.bdf;
+            io_found = true;
+        }
+    }
+    emit1d!(listed > 0 && net_bdf != 0, "case=find_net bdf=0x{:06x}", net_bdf);
+    log(format_args!("[JSR-DRV1D] case=io_candidate bdf=0x{:06x} present={}", io_bdf, io_found));
+
+    let max = Rights::READ.union(Rights::MAP).union(Rights::DUPLICATE).union(Rights::TRANSFER);
+    let handle = open(net_bdf, max);
+    if handle > 0 {
+        live += 1;
+    }
+    emit1d!(handle > 0, "case=open_map bdf=0x{:06x} handle={}", net_bdf, handle);
+    if handle <= 0 {
+        finish_map_probe(live);
+    }
+
+    // —— 读取完整描述，定位能力与 BAR 尺寸。——
+    // SAFETY：单线程，独占 DESC。
+    let desc_buf: &mut [u8] = unsafe { &mut *core::ptr::addr_of_mut!(DESC) };
+    let got = get(handle, desc_buf);
+    let mut desc_raw = [0u8; DESC_SIZE];
+    desc_raw.copy_from_slice(desc_buf);
+    let desc = Desc::decode(&desc_raw);
+    emit1d!(got == DESC_SIZE as i64 && desc.bar_count > 0, "case=desc bytes={} bars={}", got, desc.bar_count);
+
+    // —— 能力链：取厂商专有能力，找 cfg_type=1（COMMON）。——
+    let cap_need = capability_list(handle, 0, 0);
+    let cap_ok = cap_need > 0
+        && (cap_need as usize) % CAP_RECORD_SIZE == 0
+        && (cap_need as usize) <= 256;
+    emit1d!(cap_ok, "case=cap_need bytes={}", cap_need);
+    if !cap_ok {
+        let _ = close(handle);
+        finish_map_probe(live - 1);
+    }
+    // SAFETY：单线程，独占 CAPS。
+    let caps: &mut [u8] = unsafe { &mut *core::ptr::addr_of_mut!(CAPS) };
+    let caps_got = capability_list(handle, caps.as_mut_ptr() as u64, caps.len() as u64);
+    let cap_count = if caps_got > 0 { caps_got as usize / CAP_RECORD_SIZE } else { 0 };
+    let mut common = CapabilityRecord::NONE;
+    let mut common_found = false;
+    for i in 0..cap_count {
+        let mut raw = [0u8; CAP_RECORD_SIZE];
+        raw.copy_from_slice(&caps[i * CAP_RECORD_SIZE..(i + 1) * CAP_RECORD_SIZE]);
+        let cap = CapabilityRecord::decode(&raw);
+        if cap.cfg_type == CAP_CFG_COMMON {
+            common = cap;
+            common_found = true;
+            break;
+        }
+    }
+    emit1d!(
+        caps_got == cap_need && common_found && (common.bar as usize) < desc.bars.len(),
+        "case=common_cap found={} bar={} offset=0x{:x} length=0x{:x} caps={}",
+        common_found,
+        common.bar,
+        common.bar_offset,
+        common.length,
+        cap_count
+    );
+    let bar_index = common.bar as usize;
+    let bar_size = if bar_index < desc.bars.len() { desc.bars[bar_index].size } else { 0 };
+    let in_bar = common_found
+        && bar_size > 0
+        && common.bar_offset as u64 <= bar_size
+        && bar_size - common.bar_offset as u64 >= 0x18;
+    emit1d!(in_bar, "case=common_in_bar bar={} size=0x{:x} need=0x18", common.bar, bar_size);
+    if !common_found || !in_bar {
+        let _ = close(handle);
+        finish_map_probe(live - 1);
+    }
+
+    // —— 映射通用配置所在 BAR，读出 device_feature / num_queues 等字段。——
+    let mapped = map_bar(handle, common.bar as u32, MAP_VA);
+    emit1d!(mapped == 0, "case=map_common bar={} va=0x{:x} ret={}", common.bar, MAP_VA, mapped);
+    if mapped != 0 {
+        let _ = close(handle);
+        finish_map_probe(live - 1);
+    }
+    let base = MAP_VA + common.bar_offset as u64;
+    // SAFETY：映射成功、区间覆盖到 offset+0x18（上面已检查 BAR 尺寸）；页不可缓存。
+    let (select, feature_lo, queues, status, generation) = unsafe {
+        (
+            mmio_u32(base),
+            mmio_u32(base + 4),
+            mmio_u16(base + 18),
+            core::ptr::read_volatile((base + 20) as *const u8),
+            core::ptr::read_volatile((base + 21) as *const u8),
+        )
+    };
+    let feature_ok = feature_lo != 0 && feature_lo != u32::MAX;
+    let queues_ok = queues != 0 && queues != u16::MAX;
+    emit1d!(
+        feature_ok && queues_ok,
+        "case=read_features select={} device_feature=0x{:08x} num_queues={} status={} generation={}",
+        select,
+        feature_lo,
+        queues,
+        status,
+        generation
+    );
+
+    // —— 同一 BAR 重复映射：明确拒绝（第二个 VA 也不接受别名）。——
+    let repeat = map_bar(handle, common.bar as u32, MAP_VA2);
+    emit1d!(
+        repeat == -(ids::SYSTEM_MEMORY_ERROR_ALREADY_MAPPED as i64),
+        "case=reject_repeat ret={}",
+        repeat
+    );
+
+    // —— 越界 / 未实现的 BAR 号。——。
+    let oob = map_bar(handle, 6, MAP_VA2);
+    let oob2 = map_bar(handle, 255, MAP_VA2);
+    emit1d!(
+        oob == -(ids::SYSTEM_DEVICE_ERROR_BAR_OUT_OF_RANGE as i64)
+            && oob2 == -(ids::SYSTEM_DEVICE_ERROR_BAR_OUT_OF_RANGE as i64),
+        "case=reject_bar_oob six={} ff={}",
+        oob,
+        oob2
+    );
+
+    // —— 无 MAP 权限的句柄不能映射。——
+    let read_only = open(net_bdf, Rights::READ.union(Rights::DUPLICATE));
+    if read_only > 0 {
+        live += 1;
+    }
+    let no_map = if read_only > 0 { map_bar(read_only, common.bar as u32, MAP_VA2) } else { -1 };
+    emit1d!(
+        read_only > 0 && no_map == -(ids::SYSTEM_HANDLE_ERROR_RIGHTS_DENIED as i64),
+        "case=reject_no_map_right handle={} ret={}",
+        read_only,
+        no_map
+    );
+    if read_only > 0 && close(read_only) == 0 {
+        live -= 1;
+    }
+
+    // —— I/O 端口型 BAR 必须被拒（本步不做端口授权）。——
+    if io_found {
+        let ioh = open(io_bdf, Rights::READ.union(Rights::MAP));
+        if ioh > 0 {
+            live += 1;
+        }
+        let mut io_desc_raw = [0u8; DESC_SIZE];
+        let io_got = if ioh > 0 {
+            // SAFETY：单线程，独占 DESC（net 的描述已复制到 desc_raw）。
+            let buf: &mut [u8] = unsafe { &mut *core::ptr::addr_of_mut!(DESC) };
+            let n = get(ioh, buf);
+            io_desc_raw.copy_from_slice(buf);
+            n
+        } else {
+            -1
+        };
+        let io_desc = Desc::decode(&io_desc_raw);
+        let io_bar = io_desc.bars.iter().position(|bar| bar.kind == BAR_KIND_IO).map(|i| i as u32);
+        let io_ret = match (ioh > 0, io_bar, io_got) {
+            (true, Some(index), n) if n == DESC_SIZE as i64 => map_bar(ioh, index, MAP_VA2),
+            _ => -1,
+        };
+        emit1d!(
+            io_ret == -(ids::SYSTEM_DEVICE_ERROR_BAR_NOT_MEMORY as i64),
+            "case=reject_io_bar bdf=0x{:06x} bar={} ret={}",
+            io_bdf,
+            io_bar.unwrap_or(u32::MAX),
+            io_ret
+        );
+        if ioh > 0 && close(ioh) == 0 {
+            live -= 1;
+        }
+    } else {
+        log(format_args!("[JSR-DRV1D] case=reject_io_bar skipped=true reason=no-io-bar"));
+    }
+
+    // —— 关闭创建映射的句柄 ⇒ 映射撤销：新句柄可在同一 VA 重新映射。——
+    let closed = close(handle);
+    if closed == 0 {
+        live -= 1;
+    }
+    let again = open(net_bdf, Rights::READ.union(Rights::MAP));
+    if again > 0 {
+        live += 1;
+    }
+    let remap = if again > 0 { map_bar(again, common.bar as u32, MAP_VA) } else { -1 };
+    emit1d!(
+        closed == 0 && again > 0 && remap == 0,
+        "case=close_revoke close={} reopen={} remap={}",
+        closed,
+        again,
+        remap
+    );
+
+    // —— 已关闭句柄不能映射；先关掉 again，再复用它。——
+    let closed_again = close(again);
+    if closed_again == 0 {
+        live -= 1;
+    }
+    let after_close = map_bar(again, common.bar as u32, MAP_VA2);
+    emit1d!(
+        closed_again == 0 && after_close == -(ids::SYSTEM_HANDLE_ERROR_INVALID as i64),
+        "case=reject_closed close={} map={}",
+        closed_again,
+        after_close
+    );
+
+    // —— 进程退出撤销：重新映射后故意不关句柄，由内核在角色结束后核对映射数归零。——
+    let exit_handle = open(net_bdf, Rights::READ.union(Rights::MAP));
+    if exit_handle > 0 {
+        live += 1;
+    }
+    let exit_map = if exit_handle > 0 { map_bar(exit_handle, common.bar as u32, MAP_VA) } else { -1 };
+    emit1d!(exit_handle > 0 && exit_map == 0, "case=exit_revoke_armed handle={} map={}", exit_handle, exit_map);
+
+    finish_map_probe(live);
+}
+
+/// 输出 DRV-1D 汇总并按失败数退出。
+fn finish_map_probe(live: i32) -> ! {
+    log(format_args!("[JSR-DRV1D] summary checks={} failed={} handles_live={}", checks(), failed(), live));
+    exit(if failed() == 0 { 0 } else { 1 });
+}
+
+/// 角色 3：进程被授予设备列举 / 读取能力，但没有 `system.device.map`；映射调用必须在分发层被拒。
+fn probe_map_no_capability() -> ! {
+    let ret = map_bar(0, 0, MAP_VA);
+    emit1d!(
+        ret == -(ids::SYSTEM_ERROR_RIGHTS_DENIED as i64),
+        "case=reject_no_map_syscall ret={}",
+        ret
+    );
+    log(format_args!("[JSR-DRV1D] summary checks={} failed={} handles_live=0", checks(), failed()));
+    exit(if failed() == 0 { 0 } else { 1 });
+}
+
 /// 角色 1：进程没有设备访问能力；设备调用必须在分发层被拒。
 fn probe_no_capability() -> ! {
     let list_ret = list_raw(Filter::ALL.to_word(), 0, 0);
@@ -398,7 +711,10 @@ fn failed() -> u32 {
 pub extern "C" fn _start(role: usize, _arg: usize) -> ! {
     match role {
         0 => probe_devices(),
-        _ => probe_no_capability(),
+        1 => probe_no_capability(),
+        2 => probe_map(),
+        3 => probe_map_no_capability(),
+        _ => exit(100),
     }
 }
 

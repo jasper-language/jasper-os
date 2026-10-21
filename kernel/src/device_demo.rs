@@ -83,8 +83,15 @@ fn run_role(name: &'static str, role: u64, allowed: SyscallSet) -> bool {
     }
     sched::run();
     let state = proc::state(pid);
-    let ok = state == Some(ProcState::Exited { code: 0 });
+    let mut ok = state == Some(ProcState::Exited { code: 0 });
     kprintln!("[JSR-DRV1C] case=role{} exit={:?} ok={}", role, state, ok);
+    // DRV-1D：角色 2 故意留一个打开的设备句柄退出；进程退出流程必须同时撤销它的 BAR 映射。
+    if role == 2 {
+        let maps = proc::device_map_count(pid).unwrap_or(usize::MAX);
+        let revoked = maps == 0;
+        kprintln!("[JSR-DRV1D] case=exit_revoke maps={} ok={}", maps, revoked);
+        ok &= revoked;
+    }
     proc::reap(pid);
     kobj::run_cleanup(usize::MAX);
     ok
@@ -120,6 +127,33 @@ pub fn run() {
     // 角色 1：不授予任何设备系统调用，设备调用必须被分发层拒绝。
     let denied = SyscallSet::of(&[abi::SYSTEM_CONSOLE_WRITE, abi::SYSTEM_TASK_EXIT]);
     check(run_role("device-nocap", 1, denied), "无设备访问能力的拒绝演练（角色 1）未以退出码 0 结束");
+
+    // 角色 2（DRV-1D）：授予设备列举 / 打开 / 读取 / 能力列举 / 映射与关闭。
+    if has_net {
+        let mapping = SyscallSet::of(&[
+            abi::SYSTEM_CONSOLE_WRITE,
+            abi::SYSTEM_DEVICE_LIST,
+            abi::SYSTEM_DEVICE_OPEN,
+            abi::SYSTEM_DEVICE_GET,
+            abi::SYSTEM_DEVICE_CAPABILITY_LIST,
+            abi::SYSTEM_DEVICE_MAP,
+            abi::SYSTEM_HANDLE_CLOSE,
+            abi::SYSTEM_TASK_EXIT,
+        ]);
+        check(run_role("device-map", 2, mapping), "设备 BAR 映射演练（角色 2）未以退出码 0 结束");
+    } else {
+        kprintln!("[JSR-DRV1D] case=role2 skipped=true reason=no-virtio-net");
+    }
+
+    // 角色 3（DRV-1D）：设备读取可用，但没有 `system.device.map`；映射必须在分发层被拒。
+    let no_map = SyscallSet::of(&[
+        abi::SYSTEM_CONSOLE_WRITE,
+        abi::SYSTEM_DEVICE_LIST,
+        abi::SYSTEM_DEVICE_OPEN,
+        abi::SYSTEM_DEVICE_GET,
+        abi::SYSTEM_TASK_EXIT,
+    ]);
+    check(run_role("device-nomap", 3, no_map), "无映射能力的拒绝演练（角色 3）未以退出码 0 结束");
 
     kobj::run_cleanup(usize::MAX);
     let (live_after, pending_after, _) = kobj::stats();

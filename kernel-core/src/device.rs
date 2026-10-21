@@ -22,6 +22,27 @@ pub const RECORD_SIZE: usize = 32;
 /// `system.device.get` 完整描述的字节数。
 /// Size in bytes of the full description returned by `system.device.get`.
 pub const DESC_SIZE: usize = 24 + MAX_BARS * 24;
+/// `system.device.capability.list` 一条能力记录的字节数。
+/// Size in bytes of one capability record returned by `system.device.capability.list`.
+pub const CAP_RECORD_SIZE: usize = 16;
+/// PCI 厂商专有能力号（virtio 的现代能力都使用它）。
+/// PCI vendor-specific capability ID (used by all modern virtio capabilities).
+pub const CAP_ID_VENDOR: u8 = 0x09;
+/// virtio 能力类型：通用配置（common configuration）。
+/// Virtio capability type: common configuration.
+pub const CAP_CFG_COMMON: u8 = 1;
+/// virtio 能力类型：通知配置（notify configuration）。
+/// Virtio capability type: notification configuration.
+pub const CAP_CFG_NOTIFY: u8 = 2;
+/// virtio 能力类型：中断状态（ISR）。
+/// Virtio capability type: ISR status.
+pub const CAP_CFG_ISR: u8 = 3;
+/// virtio 能力类型：设备专用配置（device-specific configuration）。
+/// Virtio capability type: device-specific configuration.
+pub const CAP_CFG_DEVICE: u8 = 4;
+/// virtio 能力类型：PCI 公共配置（PCI common configuration）。
+/// Virtio capability type: PCI common configuration.
+pub const CAP_CFG_PCI: u8 = 5;
 /// 列表过滤字中「不限制厂商」的值。
 /// Wildcard vendor value in the list filter word.
 pub const FILTER_ALL_VENDOR: u16 = 0xFFFF;
@@ -255,6 +276,65 @@ impl BarEntry {
 
     fn decode(src: &[u8], off: usize) -> BarEntry {
         BarEntry { kind: src[off], flags: src[off + 1], base: get_u64(src, off + 8), size: get_u64(src, off + 16) }
+    }
+}
+
+/// `system.device.capability.list` 返回的一条 PCI 能力记录。
+///
+/// 只导出厂商专有能力（[`CAP_ID_VENDOR`]）；virtio 1.x 用其中的 [`cfg_type`](Self::cfg_type)、
+/// [`bar`](Self::bar)、[`bar_offset`](Self::bar_offset) 与 [`length`](Self::length) 定位通用配置等窗口。
+/// One PCI capability record exposed to user space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityRecord {
+    /// 能力结构在配置空间中的偏移（0x40–0xFF，4 字节对齐）。
+    /// Offset of the capability structure in configuration space.
+    pub pci_offset: u8,
+    /// PCI 能力号（这里总是 [`CAP_ID_VENDOR`]）。
+    /// PCI capability ID (always [`CAP_ID_VENDOR`] here).
+    pub id: u8,
+    /// 厂商定义的配置类型（virtio：1 通用、2 通知、3 ISR、4 设备专用、5 PCI 公共）。
+    /// Vendor-defined configuration type (virtio: 1 common, 2 notify, 3 ISR, 4 device, 5 PCI).
+    pub cfg_type: u8,
+    /// 能力指向的 BAR 编号（0–5）。
+    /// BAR index the capability points at (0-5).
+    pub bar: u8,
+    /// 能力结构在 BAR 内的字节偏移。
+    /// Byte offset of the structure inside the BAR.
+    pub bar_offset: u32,
+    /// 结构字节数（可能为 0，表示使用该类型的规范长度）。
+    /// Structure length in bytes (0 means the canonical length for this type).
+    pub length: u32,
+}
+
+impl CapabilityRecord {
+    /// 未初始化的记录（数组初始化用）。
+    /// An empty record used for array initialisation.
+    pub const NONE: CapabilityRecord =
+        CapabilityRecord { pci_offset: 0, id: 0, cfg_type: 0, bar: 0, bar_offset: 0, length: 0 };
+
+    /// 写入 [`CAP_RECORD_SIZE`] 字节缓冲区（小端序）。
+    /// Encodes into a [`CAP_RECORD_SIZE`]-byte little-endian buffer.
+    pub fn encode(&self, out: &mut [u8; CAP_RECORD_SIZE]) {
+        out[0] = self.pci_offset;
+        out[1] = self.id;
+        out[2] = self.cfg_type;
+        out[3] = self.bar;
+        put_u32(out, 4, self.bar_offset);
+        put_u32(out, 8, self.length);
+        put_u32(out, 12, 0);
+    }
+
+    /// 从 [`CAP_RECORD_SIZE`] 字节缓冲区解码（小端序）。
+    /// Decodes from a [`CAP_RECORD_SIZE`]-byte little-endian buffer.
+    pub fn decode(src: &[u8; CAP_RECORD_SIZE]) -> CapabilityRecord {
+        CapabilityRecord {
+            pci_offset: src[0],
+            id: src[1],
+            cfg_type: src[2],
+            bar: src[3],
+            bar_offset: get_u32(src, 4),
+            length: get_u32(src, 8),
+        }
     }
 }
 
@@ -516,6 +596,24 @@ mod tests {
         desc.encode(&mut raw);
         assert_eq!(Desc::decode(&raw), desc);
         assert_eq!(raw[20..24], [0; 4], "保留区为 0");
+    }
+
+    #[test]
+    fn capability_record_roundtrip_and_constants() {
+        let cap = CapabilityRecord {
+            pci_offset: 0x60,
+            id: CAP_ID_VENDOR,
+            cfg_type: CAP_CFG_COMMON,
+            bar: 4,
+            bar_offset: 0x1000,
+            length: 0x40,
+        };
+        let mut raw = [0u8; CAP_RECORD_SIZE];
+        cap.encode(&mut raw);
+        assert_eq!(CapabilityRecord::decode(&raw), cap);
+        assert_eq!(raw[12..16], [0; 4], "保留区为 0");
+        assert_eq!((CAP_CFG_COMMON, CAP_CFG_NOTIFY, CAP_CFG_ISR, CAP_CFG_DEVICE, CAP_CFG_PCI), (1, 2, 3, 4, 5));
+        assert_eq!(CapabilityRecord::NONE, CapabilityRecord { pci_offset: 0, id: 0, cfg_type: 0, bar: 0, bar_offset: 0, length: 0 });
     }
 
     #[test]

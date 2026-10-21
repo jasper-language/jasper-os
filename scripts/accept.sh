@@ -1661,6 +1661,71 @@ check_drv1c() { # DRV-1C：设备内核对象与 system.device.list / open / get
   fi
 }
 
+check_drv1d() { # DRV-1D：设备寄存器窗口映射与 virtio 设备识别——用户态打开 virtio-net，沿厂商能力链找到
+                # COMMON 能力，映射其内存 BAR 并用 volatile 读取 device_feature / num_queues；I/O BAR、越界 BAR、
+                # 无 MAP 权限、重复映射、已关闭句柄全部被拒；关闭创建映射的句柄即撤销映射，进程退出撤销全部映射，
+                # 且 BAR 映射不进入页帧记账。检查 x86_64 单处理器、x86_64×4 与 q35(ECAM)×4。
+  local miss="" f name n feat queues
+  local u='^\[JSR-USERTEXT\] task=(device-map|device-nomap) bytes=[0-9]+ text=\[JSR-DRV1D\]'
+  local uf='^\[JSR-USERTEXT\] task=(device-map|device-nomap) bytes=[0-9]+ text=\[JSR-DRV1D-FAIL\]'
+  local kmap='^\[JSR-DRV1D\] map bdf=0x[0-9a-f]{6} bar=[0-5] va=0x[0-9a-f]+ pages=[1-9][0-9]* nocache=true exec=false'
+  local pairs=("$SERIAL:x86_64单核" "$SERIAL_SMP4:x86_64×4" "$SERIAL_Q35:q35×4")
+  for pair in "${pairs[@]}"; do
+    f="${pair%%:*}"; name="${pair##*:}"
+    if [ ! -s "$f" ]; then miss="$miss $name:缺日志"; continue; fi
+    grep -qaE "${u} case=find_net bdf=0x[0-9a-f]{6} ok=true" "$f" || miss="$miss $name:找到 virtio-net"
+    grep -qaE "${u} case=open_map bdf=0x[0-9a-f]{6} handle=[1-9][0-9]* ok=true" "$f" || miss="$miss $name:打开"
+    grep -qaE "${u} case=desc bytes=168 bars=[1-9][0-9]* ok=true" "$f" || miss="$miss $name:完整描述"
+    grep -qaE "${u} case=cap_need bytes=[1-9][0-9]* ok=true" "$f" || miss="$miss $name:能力长度"
+    grep -qaE "${u} case=common_cap found=true bar=[0-5] offset=0x[0-9a-f]+ length=0x[0-9a-f]+ caps=[1-9][0-9]* ok=true" "$f" \
+      || miss="$miss $name:COMMON 能力"
+    grep -qaE "${u} case=common_in_bar bar=[0-5] size=0x[0-9a-f]+ need=0x18 ok=true" "$f" || miss="$miss $name:COMMON 落在 BAR 内"
+    n=$(grep -acE "$kmap" "$f" 2>/dev/null)
+    [ "${n:-0}" -ge 3 ] || miss="$miss $name:内核映射记录(${n:-0}/3)"
+    grep -qaE "${u} case=map_common bar=[0-5] va=0x[0-9a-f]+ ret=0 ok=true" "$f" || miss="$miss $name:映射 COMMON"
+    feat=$(grep -aoE "${u} case=read_features .*device_feature=0x[0-9a-f]+" "$f" | head -1 | grep -oE 'device_feature=0x[0-9a-f]+$' | cut -d= -f2)
+    queues=$(grep -aoE "${u} case=read_features .*num_queues=[0-9]+" "$f" | head -1 | grep -oE 'num_queues=[0-9]+$' | cut -d= -f2)
+    if [ -z "$feat" ] || [ "$feat" = "0x00000000" ] || [ "$feat" = "0xffffffff" ]; then
+      miss="$miss $name:device_feature(${feat:-缺})"
+    fi
+    if [ -z "$queues" ] || [ "$queues" -eq 0 ] || [ "$queues" -eq 65535 ]; then
+      miss="$miss $name:num_queues(${queues:-缺})"
+    fi
+    grep -qaE "${u} case=read_features .* status=[0-9]+ generation=[0-9]+ ok=true" "$f" || miss="$miss $name:MMIO 读取"
+    grep -qaE "${u} case=reject_repeat ret=-4115 ok=true" "$f" || miss="$miss $name:重复映射被拒"
+    grep -qaE "${u} case=reject_bar_oob six=-4120 ff=-4120 ok=true" "$f" || miss="$miss $name:越界 BAR 被拒"
+    grep -qaE "${u} case=reject_no_map_right handle=[1-9][0-9]* ret=-4102 ok=true" "$f" || miss="$miss $name:无 MAP 权限被拒"
+    if grep -qaE "${u} case=reject_io_bar bdf=0x[0-9a-f]{6} bar=[0-5] ret=-4121 ok=true" "$f"; then :;
+    elif grep -qaE "${u} case=reject_io_bar skipped=true reason=no-io-bar" "$f"; then
+      echo "  （$name：该机型没有 I/O BAR，跳过 I/O 拒绝用例）"
+    else
+      miss="$miss $name:I/O BAR 被拒"
+    fi
+    grep -qaE "${u} case=close_revoke close=0 reopen=[1-9][0-9]* remap=0 ok=true" "$f" || miss="$miss $name:关闭撤销后可重映"
+    grep -qaE "${u} case=reject_closed close=0 map=-4101 ok=true" "$f" || miss="$miss $name:已关闭句柄被拒"
+    grep -qaE "${u} case=exit_revoke_armed handle=[1-9][0-9]* map=0 ok=true" "$f" || miss="$miss $name:退出前布防"
+    grep -qaE "${u} summary checks=[0-9]+ failed=0 handles_live=1" "$f" || miss="$miss $name:角色2汇总"
+    grep -qaE '^\[JSR-DRV1C\] case=role2 exit=Some\(Exited \{ code: 0 \}\) ok=true' "$f" || miss="$miss $name:角色2退出"
+    grep -qaE '^\[JSR-DRV1D\] case=exit_revoke maps=0 ok=true' "$f" || miss="$miss $name:进程退出撤销映射"
+    grep -qaE "${u} case=reject_no_map_syscall ret=-4098 ok=true" "$f" || miss="$miss $name:无 map 系统调用被拒"
+    grep -qaE "${u} summary checks=[0-9]+ failed=0 handles_live=0" "$f" || miss="$miss $name:角色3汇总"
+    grep -qaE '^\[JSR-DRV1C\] case=role3 exit=Some\(Exited \{ code: 0 \}\) ok=true' "$f" || miss="$miss $name:角色3退出"
+    grep -qaE "$uf" "$f" && miss="$miss $name:用户失败断言"
+    grep -qa '^\[JSR-DRV1D-FAIL\]' "$f" && miss="$miss $name:内核失败断言"
+    grep -qaE '^\[JSR-DRV1C\] summary objects=([0-9]+)/\1 .*frames=([0-9]+)/\2 checks=[0-9]+ failed=0' "$f" \
+      || miss="$miss $name:资源回到基线"
+  done
+  grep -qaE '^test device::tests::capability_record_roundtrip_and_constants \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null \
+    || miss="$miss 宿主:能力记录编解码测试"
+  if [ -z "$miss" ]; then
+    feat=$(grep -aoE "${u} case=read_features .*" "$SERIAL_SMP4" | head -1 | sed -E 's/.*device_feature=(0x[0-9a-f]+).*/\1/')
+    queues=$(grep -aoE "${u} case=read_features .*" "$SERIAL_SMP4" | head -1 | sed -E 's/.*num_queues=([0-9]+).*/\1/')
+    record DRV1D PASS "system.device.map 只映射设备表中登记的内存 BAR：用户态打开 virtio-net，沿厂商能力链找到 COMMON 能力并映射其 BAR，volatile 读出 device_feature=$feat、num_queues=$queues；映射页不可缓存且不可执行，BAR 不进入页帧记账；I/O BAR / 越界 BAR / 无 MAP 权限 / 重复映射 / 已关闭句柄全部被拒；关闭句柄即撤销映射（可在同一虚拟地址重映），进程退出后映射数归零；无 map 系统调用的进程在分发层被拒（x86_64 单核、x86_64×4、q35 ECAM×4）"
+  else
+    record DRV1D FAIL "缺少/不符：$miss"
+  fi
+}
+
 check_l10n1() { # L10N-1：接口登记表英文显示名列（构建期中英齐全）+ 由登记表生成的错误渲染表——
                  # 错误表条数与登记表一致、按 ID 有序、中英齐全；同一错误码中英分别渲染且与登记表逐字一致；
                  # 非错误返回值与未登记错误码被拒；每个操作条目都有英文名。检查 x86_64 单核与 x86_64 / AArch64 / RISC-V64 4 处理器。
@@ -1760,11 +1825,11 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 
 if [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_l10n1
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------
