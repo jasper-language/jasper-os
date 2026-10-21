@@ -10,6 +10,7 @@ use core::sync::atomic::Ordering;
 use crate::sync::IrqU64;
 use crate::console;
 use crate::task::TaskId;
+use kernel_core::smp::CpuSet;
 
 use super::scheduler::SwitchEvent;
 
@@ -88,8 +89,12 @@ pub fn run_preemptive() {
     // 就被同一个 tick 抢占，开头的几次切换会被漏数（取决于引导线程让出时落在 tick 周期的哪个相位）。
     console::_print(format_args!("[JSR-SCHED] preemptive demo start\n"));
     super::set_observer(log_and_count_switch);
+    // 三个任务钉在执行演练的处理器上：本演练验证的是「单个处理器上只靠时间片轮转」。
+    // 多处理器时若允许分散，各任务可能独占一个处理器而无需被抢占，tick 切换数随负载均衡的时机浮动。
+    let mut here = CpuSet::EMPTY;
+    here.insert(crate::arch::cpu_index());
     for (id, name) in [(11, "P"), (12, "Q"), (13, "R")] {
-        if super::spawn(TaskId(id), name, busy_task).is_err() {
+        if super::spawn_on(TaskId(id), name, busy_task, None, here).is_err() {
             console::_print(format_args!("[JSR-SCHED] spawn failed name={}\n", name));
         }
     }
