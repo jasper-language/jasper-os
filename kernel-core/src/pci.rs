@@ -41,6 +41,8 @@ const REG_CAP_PTR: u16 = 0x34;
 const REG_INTERRUPT: u16 = 0x3C;
 /// 命令寄存器：I/O 译码（位 0）与内存译码（位 1）。
 const COMMAND_DECODE: u32 = 0b11;
+/// 命令寄存器位 2：总线主控（允许功能发起 DMA 与 MSI / MSI-X 消息写）。
+const COMMAND_BUS_MASTER: u32 = 1 << 2;
 /// 状态寄存器（命令所在双字的高半字）位 4：存在能力链。
 const STATUS_CAP_LIST: u32 = 1 << (16 + 4);
 /// 能力结构只能位于标准头之后。
@@ -113,7 +115,10 @@ impl Bdf {
 ///
 /// `offset` 总是 4 字节对齐；实现对不可达的地址返回 `None` / `false`，不得 panic。
 /// 32-bit configuration-space accessor supplied by the platform or a host model.
-pub trait ConfigSpace {
+///
+/// `Send` 是必要的：启动期枚举结束后，内核会保留唯一后端供后续设备配置写入使用。
+/// `Send` is required because the kernel keeps the single backend after boot-time enumeration.
+pub trait ConfigSpace: Send {
     /// 读 `bdf` 功能在 `offset` 处的双字。
     /// Reads the dword at `offset` of function `bdf`.
     fn read32(&mut self, bdf: Bdf, offset: u16) -> Option<u32>;
@@ -446,6 +451,128 @@ pub const MSIX_TABLE_ENTRY: u64 = 16;
 /// Largest vector count representable by the MSI-X control field.
 pub const MSIX_MAX_ENTRIES: u16 = 2048;
 
+/// MSI-X 控制字段的全局使能位（位 15）。
+/// Global-enable bit of the MSI-X control field.
+pub const MSIX_CONTROL_ENABLE: u16 = 0x8000;
+/// MSI-X 控制字段的功能屏蔽位（位 14）。
+/// Function-mask bit of the MSI-X control field.
+pub const MSIX_CONTROL_FUNCTION_MASK: u16 = 0x4000;
+/// MSI-X 表项向量控制字段的屏蔽位（位 0）。
+/// Per-vector mask bit of an MSI-X table entry.
+pub const MSIX_ENTRY_MASK_BIT: u32 = 1;
+/// MSI-X 表项中消息地址低半部分的字下标。
+/// Word index of the low half of the message address.
+pub const MSIX_ENTRY_ADDR_LOW: usize = 0;
+/// MSI-X 表项中消息地址高半部分的字下标。
+/// Word index of the high half of the message address.
+pub const MSIX_ENTRY_ADDR_HIGH: usize = 1;
+/// MSI-X 表项中消息数据的字下标。
+/// Word index of the message data.
+pub const MSIX_ENTRY_DATA: usize = 2;
+/// MSI-X 表项中向量控制字段的字下标。
+/// Word index of the vector control field.
+pub const MSIX_ENTRY_CONTROL: usize = 3;
+
+/// 一个 MSI-X 表项（四个 32 位字，按小端序位于表内）。
+///
+/// 表项布局与屏蔽位由本类型解释；写入设备由调用者完成。
+/// One MSI-X table entry; the layout and mask bit are interpreted here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsixEntry {
+    words: [u32; 4],
+}
+
+impl MsixEntry {
+    /// 由四个原始字构造（不做消息合法性判断）。
+    /// Builds an entry from four raw words.
+    pub const fn from_words(words: [u32; 4]) -> MsixEntry {
+        MsixEntry { words }
+    }
+
+    /// 四个原始字（小端序）。
+    /// The four raw words in little-endian order.
+    pub const fn words(self) -> [u32; 4] {
+        self.words
+    }
+
+    /// 组合出的 64 位消息地址。
+    /// The composed 64-bit message address.
+    pub const fn address(self) -> u64 {
+        self.words[MSIX_ENTRY_ADDR_LOW] as u64 | (self.words[MSIX_ENTRY_ADDR_HIGH] as u64) << 32
+    }
+
+    /// 消息数据。
+    /// Message data.
+    pub const fn data(self) -> u32 {
+        self.words[MSIX_ENTRY_DATA]
+    }
+
+    /// 该项是否被屏蔽（向量控制位 0）。
+    /// Whether the entry is masked.
+    pub const fn masked(self) -> bool {
+        self.words[MSIX_ENTRY_CONTROL] & MSIX_ENTRY_MASK_BIT != 0
+    }
+
+    /// 设置消息地址与数据；地址未按 4 字节对齐时返回 `None` 且不产生新表项。
+    /// Replaces the message; `None` when the address is not 4-byte aligned.
+    pub const fn with_message(self, address: u64, data: u32) -> Option<MsixEntry> {
+        if address & 0x3 != 0 {
+            return None;
+        }
+        let mut words = self.words;
+        words[MSIX_ENTRY_ADDR_LOW] = address as u32;
+        words[MSIX_ENTRY_ADDR_HIGH] = (address >> 32) as u32;
+        words[MSIX_ENTRY_DATA] = data;
+        Some(MsixEntry { words })
+    }
+
+    /// 设置或清除屏蔽位，消息字段保持不变。
+    /// Sets or clears the mask bit, keeping the message unchanged.
+    pub const fn with_mask(self, masked: bool) -> MsixEntry {
+        let mut words = self.words;
+        if masked {
+            words[MSIX_ENTRY_CONTROL] |= MSIX_ENTRY_MASK_BIT;
+        } else {
+            words[MSIX_ENTRY_CONTROL] &= !MSIX_ENTRY_MASK_BIT;
+        }
+        MsixEntry { words }
+    }
+}
+
+/// 置位 MSI-X 控制字段的全局使能位。
+/// Sets the global-enable bit.
+pub const fn msix_control_enable(control: u16) -> u16 {
+    control | MSIX_CONTROL_ENABLE
+}
+
+/// 清除 MSI-X 控制字段的全局使能位。
+/// Clears the global-enable bit.
+pub const fn msix_control_disable(control: u16) -> u16 {
+    control & !MSIX_CONTROL_ENABLE
+}
+
+/// 置位或清除 MSI-X 控制字段的功能屏蔽位。
+/// Sets or clears the function-mask bit.
+pub const fn msix_control_set_function_masked(control: u16, masked: bool) -> u16 {
+    if masked {
+        control | MSIX_CONTROL_FUNCTION_MASK
+    } else {
+        control & !MSIX_CONTROL_FUNCTION_MASK
+    }
+}
+
+/// MSI-X 控制字段是否已全局使能。
+/// Whether the global-enable bit is set.
+pub const fn msix_control_enabled(control: u16) -> bool {
+    control & MSIX_CONTROL_ENABLE != 0
+}
+
+/// MSI-X 控制字段的功能屏蔽位是否已置位。
+/// Whether the function-mask bit is set.
+pub const fn msix_control_function_masked(control: u16) -> bool {
+    control & MSIX_CONTROL_FUNCTION_MASK != 0
+}
+
 /// MSI / MSI-X 能力解析错误。
 /// MSI / MSI-X capability parsing error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -605,6 +732,42 @@ impl MsixTable {
     pub const fn pba_offset(&self) -> u32 {
         self.pba_offset
     }
+
+    /// 表项 `index` 在表内的字节偏移；下标越界返回 `None`。
+    /// Byte offset of table entry `index`, or `None` when out of range.
+    pub const fn entry_offset(&self, index: u16) -> Option<u64> {
+        if index >= self.table_size {
+            return None;
+        }
+        Some(self.table_offset as u64 + index as u64 * MSIX_TABLE_ENTRY)
+    }
+
+    /// PBA 占用的字节数（每个向量一位，按 64 位向上取整）。
+    /// PBA length in bytes.
+    pub const fn pba_bytes(&self) -> u64 {
+        (self.table_size as u64).div_ceil(64) * 8
+    }
+
+    /// 表项 `index` 对应的 PBA 字偏移；下标越界返回 `None`。
+    /// Byte offset of the PBA word for `index`, or `None` when out of range.
+    pub const fn pba_word_offset(&self, index: u16) -> Option<u64> {
+        if index >= self.table_size {
+            return None;
+        }
+        Some(self.pba_offset as u64 + (index as u64 / 64) * 8)
+    }
+}
+
+/// 从已读出的 PBA 字中取表项 `entry` 的待决位。
+///
+/// 表项下标越界或 PBA 字不足时返回 `None`，不猜测。
+/// Reads the pending bit of `entry` from the given PBA words.
+pub fn msix_pba_pending(pba: &[u64], table_size: u16, entry: u16) -> Option<bool> {
+    if entry >= table_size {
+        return None;
+    }
+    let word = *pba.get((entry / 64) as usize)?;
+    Some(word & (1u64 << (entry % 64)) != 0)
 }
 
 /// `offset` 起 `bytes` 字节的区间是否完整落在内存 BAR 内。
@@ -768,6 +931,22 @@ pub fn enumerate(
         }
     }
     Ok(found)
+}
+
+/// 打开或关闭 `bdf` 的总线主控位，返回修改前该位是否已打开。
+///
+/// MSI / MSI-X 消息本身是设备发起的内存写，未打开总线主控时会被静默丢弃，驱动必须显式打开。
+/// 只改命令半字的这一位，状态半字写 0（写 1 清除的错误位不会被误清）；
+/// 读或写不可达时返回 [`PciError::Unreachable`]，读失败时不写任何寄存器。
+/// Sets or clears the bus-master bit of `bdf`, returning whether it was set before.
+pub fn set_bus_master(cfg: &mut dyn ConfigSpace, bdf: Bdf, on: bool) -> Result<bool, PciError> {
+    let command = read(cfg, bdf, REG_COMMAND)? & 0xFFFF;
+    let was_on = command & COMMAND_BUS_MASTER != 0;
+    let next = if on { command | COMMAND_BUS_MASTER } else { command & !COMMAND_BUS_MASTER };
+    if next != command {
+        write(cfg, bdf, REG_COMMAND, next)?;
+    }
+    Ok(was_on)
 }
 
 fn read(cfg: &mut dyn ConfigSpace, bdf: Bdf, offset: u16) -> Result<u32, PciError> {
@@ -988,6 +1167,46 @@ mod tests {
         assert_eq!(m.writes, 0);
     }
 
+    #[test]
+    fn bus_master_toggles_only_its_bit_and_keeps_status() {
+        let mut m = Model::default();
+        let d = bdf(0, 3, 0);
+        m.add(d, 0x1AF4, 0x1044, 0, 0);
+        // 状态半字置一个写 1 清除的错误位（位 29，收到主控中止）。
+        m.space.get_mut(&d).unwrap()[1] = (1 << 29) | 0x0103;
+        assert_eq!(set_bus_master(&mut m, d, true), Ok(false));
+        assert_eq!(m.space[&d][1], (1 << 29) | 0x0107, "只置总线主控位，状态位保留");
+        let writes = m.writes;
+        assert_eq!(set_bus_master(&mut m, d, true), Ok(true));
+        assert_eq!(m.writes, writes, "已打开时不再写寄存器");
+        assert_eq!(set_bus_master(&mut m, d, false), Ok(true));
+        assert_eq!(m.space[&d][1], (1 << 29) | 0x0103);
+    }
+
+    #[test]
+    fn bus_master_refused_or_unreachable_changes_nothing() {
+        let mut m = Model::default();
+        let d = bdf(0, 3, 0);
+        m.add(d, 0x1AF4, 0x1044, 0, 0);
+        m.space.get_mut(&d).unwrap()[1] = 0x0003;
+        m.refuse_writes.push(d);
+        let before = m.space[&d];
+        assert_eq!(set_bus_master(&mut m, d, true), Err(PciError::Unreachable));
+        assert_eq!(m.space[&d], before);
+        assert_eq!(m.writes, 0);
+        // 超出配置空间的功能：读不可达，不发生任何写。
+        struct Dead;
+        impl ConfigSpace for Dead {
+            fn read32(&mut self, _: Bdf, _: u16) -> Option<u32> {
+                None
+            }
+            fn write32(&mut self, _: Bdf, _: u16, _: u32) -> bool {
+                panic!("读失败后不得写入");
+            }
+        }
+        assert_eq!(set_bus_master(&mut Dead, d, true), Err(PciError::Unreachable));
+    }
+
     fn with_caps(m: &mut Model, d: Bdf, chain: &[(u8, u8, u8)]) {
         let s = m.space.get_mut(&d).unwrap();
         s[1] |= STATUS_CAP_LIST;
@@ -1191,6 +1410,87 @@ mod tests {
         assert_eq!(MsiConfigError::MisalignedOffset.name(), "system.device.error.misaligned_offset");
         assert_eq!(MsiConfigError::BeyondBar.name(), "system.device.error.beyond_bar");
         assert_eq!(MsiConfigError::NotMemoryBar.name(), "system.device.error.bar_not_memory");
+    }
+
+    #[test]
+    fn msix_entry_layout_address_data_and_mask() {
+        let raw = MsixEntry::from_words([0x1122_3344, 0x5566_7788, 0x42, 0]);
+        assert_eq!(raw.address(), 0x5566_7788_1122_3344);
+        assert_eq!(raw.data(), 0x42);
+        assert!(!raw.masked());
+
+        let masked = raw.with_mask(true);
+        assert!(masked.masked());
+        assert_eq!(masked.address(), raw.address(), "屏蔽不改变消息地址");
+        assert_eq!(masked.words()[MSIX_ENTRY_ADDR_LOW], 0x1122_3344);
+        assert!(!masked.with_mask(false).masked());
+
+        let message = MsixEntry::from_words([0, 0, 0, MSIX_ENTRY_MASK_BIT])
+            .with_message(0xFEE0_0000, 0x60)
+            .unwrap();
+        assert_eq!(message.address(), 0xFEE0_0000);
+        assert_eq!(message.data(), 0x60);
+        assert!(message.masked(), "换消息不改变屏蔽状态");
+        assert_eq!(
+            MsixEntry::from_words([0; 4]).with_message(0xFEE0_0001, 0x60),
+            None,
+            "地址未按 4 字节对齐"
+        );
+    }
+
+    #[test]
+    fn msix_control_bits_are_set_and_cleared_explicitly() {
+        let v = msix_control_enable(0);
+        assert_eq!(v, MSIX_CONTROL_ENABLE);
+        assert!(msix_control_enabled(v));
+        assert!(!msix_control_function_masked(v));
+
+        let masked = msix_control_set_function_masked(v, true);
+        assert_eq!(masked, MSIX_CONTROL_ENABLE | MSIX_CONTROL_FUNCTION_MASK);
+        assert!(msix_control_enabled(masked));
+        assert!(msix_control_function_masked(masked));
+
+        let unmasked = msix_control_set_function_masked(masked, false);
+        assert_eq!(unmasked, MSIX_CONTROL_ENABLE);
+        assert!(!msix_control_enabled(msix_control_disable(masked)));
+        assert!(
+            msix_control_function_masked(msix_control_disable(masked)),
+            "关闭全局使能不改变功能屏蔽位"
+        );
+    }
+
+    #[test]
+    fn msix_table_entry_and_pba_offsets_reject_out_of_range() {
+        let mut bars = [Bar::None; MAX_BARS];
+        bars[1] = memory(0x4000);
+        let t = MsixTable::new(4, 1, 0x1000, 1, 0x2000, &bars).unwrap();
+        assert_eq!(t.entry_offset(0), Some(0x1000));
+        assert_eq!(t.entry_offset(3), Some(0x1000 + 3 * MSIX_TABLE_ENTRY));
+        assert_eq!(t.entry_offset(4), None, "表项下标越界");
+        assert_eq!(t.pba_bytes(), 8);
+        assert_eq!(t.pba_word_offset(0), Some(0x2000));
+        assert_eq!(t.pba_word_offset(3), Some(0x2000));
+        assert_eq!(t.pba_word_offset(4), None, "PBA 表项下标越界");
+
+        let mut wide = [Bar::None; MAX_BARS];
+        wide[2] = memory(0x8000);
+        let w = MsixTable::new(128, 2, 0x1000, 2, 0x4000, &wide).unwrap();
+        assert_eq!(w.pba_bytes(), 16);
+        assert_eq!(w.pba_word_offset(63), Some(0x4000));
+        assert_eq!(w.pba_word_offset(64), Some(0x4008), "第二组 64 个向量");
+        assert_eq!(w.pba_word_offset(127), Some(0x4008));
+        assert_eq!(w.pba_word_offset(128), None);
+    }
+
+    #[test]
+    fn msix_pba_pending_reads_the_right_bit_and_rejects_bad_input() {
+        let pba = [0b1000u64, 1u64];
+        assert_eq!(msix_pba_pending(&pba, 4, 3), Some(true));
+        assert_eq!(msix_pba_pending(&pba, 4, 2), Some(false));
+        assert_eq!(msix_pba_pending(&pba, 4, 4), None, "表项下标越界");
+        assert_eq!(msix_pba_pending(&pba, 128, 64), Some(true), "第二组 64 位");
+        assert_eq!(msix_pba_pending(&pba, 128, 65), Some(false));
+        assert_eq!(msix_pba_pending(&pba[..1], 128, 64), None, "PBA 字不足");
     }
 
     #[test]

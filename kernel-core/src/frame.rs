@@ -224,6 +224,79 @@ impl<'a> BitmapFrameAllocator<'a> {
     }
 }
 
+impl BitmapFrameAllocator<'_> {
+    /// 分配 `count` 个物理相邻的空闲帧，返回首帧；失败时位图与空闲计数完全不变。
+    ///
+    /// 扫描从帧 1 开始，只接受整段都空闲的地址区间；保留区域与超出管理范围的帧在位图中
+    /// 恒为已占用，因此结果不会跨越不可用空洞。`count` 为 0 或超过当前空闲帧数时直接拒绝。
+    /// Allocates `count` physically adjacent free frames and returns the first one.
+    pub fn allocate_contiguous(&mut self, count: usize) -> Result<PhysFrame, FrameError> {
+        if count == 0 || count > self.free {
+            return Err(FrameError::OutOfFrames);
+        }
+        let capacity = self.bits.len() as u64 * 64;
+        let wanted = count as u64;
+        let mut run_start = 1u64;
+        let mut run = 0u64;
+        let mut n = 1u64;
+        while n < capacity {
+            let Some(i) = self.word_index(n) else { break };
+            let bit = 1u64 << (n % 64);
+            if self.bits[i] & bit == 0 {
+                if run == 0 {
+                    run_start = n;
+                }
+                run += 1;
+                if run == wanted {
+                    for m in run_start..run_start + wanted {
+                        // 已确认整段落在位图内且空闲，此处下标与位掩码必然有效。
+                        let w = (m / 64) as usize;
+                        self.bits[w] |= 1u64 << (m % 64);
+                    }
+                    self.free -= count;
+                    return Ok(PhysFrame::from_number(run_start));
+                }
+            } else {
+                run = 0;
+            }
+            n += 1;
+        }
+        Err(FrameError::OutOfFrames)
+    }
+
+    /// 归还 [`allocate_contiguous`](Self::allocate_contiguous) 取得的整段帧。
+    ///
+    /// 先校验整段的每一帧都可释放（在管理范围内、位于可用区域、当前已占用），全部通过后才修改位图；
+    /// 任一帧不合法即整体拒绝且不留残留改动。`count` 为 0 同样拒绝。
+    /// Releases a whole contiguous run after validating every frame.
+    pub fn deallocate_contiguous(&mut self, first: PhysFrame, count: usize) -> Result<(), FrameError> {
+        if first.start() % FRAME_SIZE != 0 {
+            return Err(FrameError::Misaligned);
+        }
+        if count == 0 {
+            return Err(FrameError::NotUsable);
+        }
+        let start = first.number();
+        let end = start.checked_add(count as u64).ok_or(FrameError::NotUsable)?;
+        for n in start..end {
+            let frame = PhysFrame::from_number(n);
+            if self.word_index(n).is_none() || !self.is_usable(frame) {
+                return Err(FrameError::NotUsable);
+            }
+            if !self.is_used(frame) {
+                return Err(FrameError::DoubleFree);
+            }
+        }
+        for n in start..end {
+            // 校验阶段已确认每一帧都可写；这里只做记账。
+            let w = (n / 64) as usize;
+            self.bits[w] &= !(1u64 << (n % 64));
+        }
+        self.free += count;
+        Ok(())
+    }
+}
+
 impl FrameAllocator for BitmapFrameAllocator<'_> {
     fn allocate(&mut self) -> Result<PhysFrame, FrameError> {
         if self.free == 0 {
@@ -377,5 +450,131 @@ mod tests {
         let a = BitmapFrameAllocator::new(&mut bits, &regs);
         assert_eq!(a.usable_frames(), 1024 - 1);
         assert_eq!(a.ignored_frames(), 1024);
+    }
+
+    #[test]
+    fn contiguous_allocation_returns_adjacent_run() {
+        let regs = regions();
+        let mut bits = [0u64; 16];
+        let mut a = BitmapFrameAllocator::new(&mut bits, &regs);
+        let before = a.free_frames();
+        let base = a.allocate_contiguous(4).expect("有足够的连续空闲帧");
+        for i in 0..4 {
+            let frame = PhysFrame::from_number(base.number() + i);
+            assert_eq!(frame.start(), base.start() + i * FRAME_SIZE);
+            assert!(a.is_used(frame), "整段帧都应标记为已占用");
+        }
+        assert_eq!(a.free_frames(), before - 4);
+        assert_eq!(base.start() % FRAME_SIZE, 0);
+    }
+
+    #[test]
+    fn contiguous_deallocation_restores_baseline() {
+        let regs = regions();
+        let mut bits = [0u64; 16];
+        let mut a = BitmapFrameAllocator::new(&mut bits, &regs);
+        let before = a.free_frames();
+        let base = a.allocate_contiguous(3).expect("有足够的连续空闲帧");
+        a.deallocate_contiguous(base, 3).expect("整段可归还");
+        assert_eq!(a.free_frames(), before);
+        for i in 0..3 {
+            assert!(!a.is_used(PhysFrame::from_number(base.number() + i)));
+        }
+        // 归还后同样的区间应能再次分配。
+        assert_eq!(a.allocate_contiguous(3), Ok(base));
+    }
+
+    #[test]
+    fn contiguous_allocation_skips_fragmented_holes() {
+        // 16 帧可用区域，帧 0 永不分配：1..16 共 15 帧。
+        let regs = [PhysRegion { start: 0, end: 16 * FRAME_SIZE, kind: RegionKind::Usable }];
+        let mut bits = [0u64; 16];
+        let mut a = BitmapFrameAllocator::new(&mut bits, &regs);
+        for _ in 0..15 {
+            a.allocate().expect("整段可分配");
+        }
+        assert_eq!(a.free_frames(), 0);
+        // 制造交替空洞：单个空闲帧无法组成两个连续帧。
+        for n in [2u64, 4, 6, 8] {
+            a.deallocate(PhysFrame::from_number(n)).unwrap();
+        }
+        let free = a.free_frames();
+        let before_bits = a.bits.to_vec();
+        assert_eq!(a.allocate_contiguous(2), Err(FrameError::OutOfFrames));
+        assert_eq!(a.free_frames(), free, "失败不得改变空闲计数");
+        assert_eq!(a.bits, before_bits.as_slice(), "失败不得改动位图");
+        // 释放一对相邻帧后，首次适配应跳过所有单帧空洞找到它们。
+        a.deallocate(PhysFrame::from_number(10)).unwrap();
+        a.deallocate(PhysFrame::from_number(11)).unwrap();
+        let base = a.allocate_contiguous(2).expect("存在相邻空洞");
+        assert_eq!(base, PhysFrame::from_number(10));
+    }
+
+    #[test]
+    fn contiguous_allocation_rejects_zero_and_oversized_without_change() {
+        let regs = regions();
+        let mut bits = [0u64; 16];
+        let mut a = BitmapFrameAllocator::new(&mut bits, &regs);
+        let free = a.free_frames();
+        let before_bits = a.bits.to_vec();
+        assert_eq!(a.allocate_contiguous(0), Err(FrameError::OutOfFrames));
+        assert_eq!(a.allocate_contiguous(free + 1), Err(FrameError::OutOfFrames));
+        assert_eq!(a.allocate_contiguous(usize::MAX), Err(FrameError::OutOfFrames));
+        assert_eq!(a.free_frames(), free);
+        assert_eq!(a.bits, before_bits.as_slice());
+    }
+
+    #[test]
+    fn contiguous_deallocation_rejects_invalid_runs_without_change() {
+        let regs = regions();
+        let mut bits = [0u64; 16];
+        let mut a = BitmapFrameAllocator::new(&mut bits, &regs);
+        let before = a.free_frames();
+        let base = a.allocate_contiguous(3).unwrap();
+        a.deallocate_contiguous(base, 3).unwrap();
+        assert_eq!(a.free_frames(), before);
+        assert_eq!(a.deallocate_contiguous(base, 3), Err(FrameError::DoubleFree));
+        assert_eq!(a.free_frames(), before);
+
+        let base = a.allocate_contiguous(2).unwrap();
+        let free = a.free_frames();
+        let before_bits = a.bits.to_vec();
+        // 第三帧仍空闲：整段校验失败，前两帧也必须保持已占用。
+        assert_eq!(a.deallocate_contiguous(base, 3), Err(FrameError::DoubleFree));
+        assert_eq!(a.free_frames(), free);
+        assert_eq!(a.bits, before_bits.as_slice());
+        assert!(a.is_used(base) && a.is_used(PhysFrame::from_number(base.number() + 1)));
+
+        assert_eq!(a.deallocate_contiguous(PhysFrame::from_number(900), 2), Err(FrameError::NotUsable));
+        assert_eq!(a.deallocate_contiguous(base, 0), Err(FrameError::NotUsable));
+        assert_eq!(a.deallocate_contiguous(PhysFrame(4097), 1), Err(FrameError::Misaligned));
+        assert_eq!(a.free_frames(), free);
+        assert_eq!(a.bits, before_bits.as_slice());
+    }
+
+    #[test]
+    fn contiguous_allocation_never_spans_reserved_hole() {
+        // 可用 0..8 帧、保留 8..12 帧、可用 12..20 帧，两段之间是不可用空洞。
+        let regs = [
+            PhysRegion { start: 0, end: 8 * FRAME_SIZE, kind: RegionKind::Usable },
+            PhysRegion { start: 8 * FRAME_SIZE, end: 12 * FRAME_SIZE, kind: RegionKind::Reserved },
+            PhysRegion { start: 12 * FRAME_SIZE, end: 20 * FRAME_SIZE, kind: RegionKind::Usable },
+        ];
+        let mut bits = [0u64; 16];
+        let mut a = BitmapFrameAllocator::new(&mut bits, &regs);
+        let free = a.free_frames();
+        let before_bits = a.bits.to_vec();
+        // 单段最多 8 帧，9 帧必然跨越空洞 ⇒ 拒绝且无改动。
+        assert_eq!(a.allocate_contiguous(9), Err(FrameError::OutOfFrames));
+        assert_eq!(a.free_frames(), free);
+        assert_eq!(a.bits, before_bits.as_slice());
+        // 第二段恰好 8 帧，应整段分自帧 12，而不是跨过保留区。
+        let base = a.allocate_contiguous(8).expect("第二段足够 8 帧");
+        assert_eq!(base, PhysFrame::from_number(12));
+        for n in 8..12 {
+            assert!(a.is_used(PhysFrame::from_number(n)));
+        }
+        // 第一段只剩 7 帧，分配 7 帧应从帧 1 开始。
+        assert_eq!(a.allocate_contiguous(7), Ok(PhysFrame::from_number(1)));
     }
 }

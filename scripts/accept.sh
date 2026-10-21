@@ -1818,6 +1818,46 @@ check_drv2a() { # DRV-2A：MSI / MSI-X 能力解析 + 每核 MSI 向量池——
   fi
 }
 
+check_drv2b() { # DRV-2B：物理连续页帧分配 + virtio 队列改用——真实 virtio-rng 设备的 MSI-X 送达、
+                # 改目标核与屏蔽；检查 x86_64 单核、×4、×8、q35×4 四份串口日志的投递数与改绑数，
+                # 要求页帧全部归还基线、无失败断言，且宿主侧连续分配用例全绿。
+  local miss="" f name c s d r k ndev ntest
+  local pairs=("$SERIAL:x86_64单核:1" "$SERIAL_SMP4:x86_64×4:4" "$SERIAL_SMP8:x86_64×8:8" "$SERIAL_Q35:q35×4:4")
+  for pair in "${pairs[@]}"; do
+    IFS=: read -r f name c <<< "$pair"
+    if [ ! -s "$f" ]; then miss="$miss $name:缺日志"; continue; fi
+    s=$(grep -aoE "^\[JSR-MSIX\] summary cpus=$c delivered=[0-9]+/[0-9]+ retargets=[0-9]+ masked_pending=ok checks=[0-9]+ failed=0 frames_back=true" "$f" | head -1)
+    if [ -z "$s" ]; then
+      miss="$miss $name:汇总(cpus=$c)"
+    else
+      d=$(sed -E 's/.* delivered=([0-9]+\/[0-9]+).*/\1/' <<< "$s")
+      r=$(sed -E 's/.* retargets=([0-9]+).*/\1/' <<< "$s")
+      k=$(sed -E 's/.* checks=([0-9]+).*/\1/' <<< "$s")
+      local dn=${d%%/*} dd=${d##*/}
+      [ "$dn" -eq "$dd" ] || miss="$miss $name:投递未全部成功($d)"
+      [ "$dn" -ge "$c" ] || miss="$miss $name:投递数($dn<$c)"
+      local need=$((c - 1)); [ "$need" -lt 1 ] && need=1
+      [ "$r" -ge "$need" ] || miss="$miss $name:改绑数($r<$need)"
+      [ "$k" -ge 3 ] || miss="$miss $name:断言数($k<3)"
+    fi
+    grep -qa '^\[JSR-MSIX-FAIL\]' "$f" 2>/dev/null && miss="$miss $name:失败断言"
+    ndev=$(grep -caE '^\[JSR-MSIX\] dev bdf=[0-9a-f]{2}:[0-9a-f]{2}\.[0-7] .*ok=true' "$f" 2>/dev/null)
+    [ "${ndev:-0}" -ge 1 ] || miss="$miss $name:virtio 设备送达(${ndev:-0}/1)"
+  done
+  ntest=$(grep -caE '^test frame::tests::contiguous_[a-z0-9_]+ \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null)
+  [ "${ntest:-0}" -ge 5 ] || miss="$miss 宿主:连续帧分配测试(${ntest:-0}/5)"
+  if [ -z "$miss" ]; then
+    local d1 d4 d8 dq
+    d1=$(grep -aoE '^\[JSR-MSIX\] summary cpus=1 .*' "$SERIAL" | head -1 | sed -E 's/.* delivered=([^ ]+).*/单核投递 \1/')
+    d4=$(grep -aoE '^\[JSR-MSIX\] summary cpus=4 .*' "$SERIAL_SMP4" | head -1 | sed -E 's/.* delivered=([^ ]+).*/4 核投递 \1/')
+    d8=$(grep -aoE '^\[JSR-MSIX\] summary cpus=8 .*' "$SERIAL_SMP8" | head -1 | sed -E 's/.* delivered=([^ ]+).*/8 核投递 \1/')
+    dq=$(grep -aoE '^\[JSR-MSIX\] summary cpus=4 .*' "$SERIAL_Q35" | head -1 | sed -E 's/.* delivered=([^ ]+).*/q35 投递 \1/')
+    record DRV2B PASS "物理连续页帧分配（一次调用取得四页且不跨空洞，失败无残留）支撑 virtio 队列，真实 MSI-X 送达、改核与屏蔽全部成功（$d1、$d4、$d8、$dq，$ARCH_SCOPE）"
+  else
+    record DRV2B FAIL "缺少/不符：$miss"
+  fi
+}
+
 check_l10n1() { # L10N-1：接口登记表英文显示名列（构建期中英齐全）+ 由登记表生成的错误渲染表——
                  # 错误表条数与登记表一致、按 ID 有序、中英齐全；同一错误码中英分别渲染且与登记表逐字一致；
                  # 非错误返回值与未登记错误码被拒；每个操作条目都有英文名。检查 x86_64 单核与 x86_64 / AArch64 / RISC-V64 4 处理器。
@@ -1921,11 +1961,11 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 
 if [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_l10n1
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------

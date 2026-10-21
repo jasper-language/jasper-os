@@ -479,6 +479,14 @@ pub trait Platform {
     fn msi_trigger(_cpu: usize, _vector: u8) -> Result<(), kernel_core::msi::MsiError> {
         Err(kernel_core::msi::MsiError::Unsupported)
     }
+
+    /// 内核用于映射设备寄存器窗口的高半区虚拟地址范围 `(起点, 字节数)`；平台不提供时返回 `None`。
+    ///
+    /// 范围必须已预留、不与其他内核虚拟区重叠，且其中的页表在启动期建立后不再需要新分配即可映射。
+    /// High-half virtual window reserved for device MMIO mappings, or `None` when unsupported.
+    fn mmio_window() -> Option<(u64, u64)> {
+        None
+    }
 }
 
 // ---- Core 使用的薄包装（避免各处 `use Platform` 与冗长的 `<Current as Platform>::`）----
@@ -756,4 +764,8 @@ pub fn msi_message(cpu: usize, vector: u8) -> Option<MsiMessage> {
 /// 见 [`Platform::msi_trigger`]。
 pub fn msi_trigger(cpu: usize, vector: u8) -> Result<(), kernel_core::msi::MsiError> {
     Current::msi_trigger(cpu, vector)
+}
+/// 见 [`Platform::mmio_window`]。
+pub fn mmio_window() -> Option<(u64, u64)> {
+    Current::mmio_window()
 }

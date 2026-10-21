@@ -71,6 +71,18 @@ pub fn allocate_below(limit: u64) -> Result<PhysFrame, FrameError> {
     ALLOCATOR.get().ok_or(FrameError::OutOfFrames)?.lock().allocate_below(limit)
 }
 
+/// 分配 `count` 个物理相邻的空闲页帧并返回首帧；失败时分配器状态不变。
+/// Allocate `count` physically contiguous free frames.
+pub fn allocate_contiguous(count: usize) -> Result<PhysFrame, FrameError> {
+    ALLOCATOR.get().ok_or(FrameError::OutOfFrames)?.lock().allocate_contiguous(count)
+}
+
+/// 归还一段物理相邻的页帧；整段校验失败时不做任何改动。
+/// Release a contiguous run of frames.
+pub fn deallocate_contiguous(first: PhysFrame, count: usize) -> Result<(), FrameError> {
+    ALLOCATOR.get().ok_or(FrameError::NotUsable)?.lock().deallocate_contiguous(first, count)
+}
+
 /// 释放一个物理页帧。
 pub fn deallocate(frame: PhysFrame) -> Result<(), FrameError> {
     ALLOCATOR.get().ok_or(FrameError::NotUsable)?.lock().deallocate(frame)

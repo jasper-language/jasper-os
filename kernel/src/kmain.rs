@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{appid_demo, arbiter_demo, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, l10n_demo, mech_demo, mm, msi_demo, pci, pci_demo, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, wcet};
+use crate::{appid_demo, arbiter_demo, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, l10n_demo, mech_demo, mm, msi_demo, pci, pci_demo, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, virtio_rng_demo, wcet};
 #[cfg(feature = "user-programs")]
 use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo, uptr_demo, longrun_demo};
 #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
@@ -121,6 +121,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
     smp::demo::run(smp::start_secondaries(TIMER_HZ));
     // DRV-2A：每核 MSI 向量池、绑定、投递与拒绝路径（放在其他处理器已报到之后）。
     msi_demo::run();
+    // DRV-2B：真实 virtio-rng 设备的 MSI-X 送达、改核、屏蔽与待决释放。
+    virtio_rng_demo::run();
     // HARDEN-1E：按配置档的功耗策略启用空闲停表（在各核独立计时的演练之后；此后全部演练都在停表开启下运行）。
     let idle_divisor = sched::configure_idle_tick();
     kprintln!("[JSR-NOHZ] configured power={} divisor={} cpus={}", config::ACTIVE.policy.power.as_str(), idle_divisor, sched::online_cpus().len());
@@ -213,6 +215,7 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("appid", appid_demo::failed()),
         ("pci", pci_demo::failed()),
         ("msi", msi_demo::failed()),
+        ("msix", virtio_rng_demo::failed()),
         #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
         ("drv1c", device_demo::failed()),
         ("l10n", l10n_demo::failed()),

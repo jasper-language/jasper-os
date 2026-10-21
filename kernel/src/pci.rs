@@ -13,7 +13,8 @@
 //! * 设备表建立后只读；不在运行时重新枚举，也不为设备注册中断或 DMA。
 //! * 设备数量超限、枚举读取失败、BAR 编码非法都只记录并继续，由演练汇总判据决定启动是否失败。
 
-use kernel_core::device::{CapabilityRecord, CAP_ID_VENDOR};
+use alloc::boxed::Box;
+use kernel_core::device::{CapabilityRecord, CAP_CFG_NOTIFY, CAP_ID_VENDOR};
 use kernel_core::pci::{
     self as core_pci, Bar, Bdf, ConfigSpace, Function, Header, MsiCapability, MsiConfigError,
     MsixCapability, MAX_BARS,
@@ -23,6 +24,7 @@ use spin::Once;
 use crate::arch::{self, PciMechanism};
 use crate::boot::BootSpec;
 use crate::kprintln;
+use crate::sync::IrqSpinLock;
 
 /// 启动期设备表容量（QEMU 默认机型的功能数远低于此；超出只计数并报告）。
 /// Boot-time device-table capacity; excess functions are counted and reported.
@@ -83,7 +85,9 @@ pub struct Table {
     /// 实际使用的访问机制。
     /// Access mechanism actually used.
     pub mechanism: PciMechanism,
-    entries: [Option<Device>; MAX_DEVICES],
+    /// 每个功能单独装箱，避免启动栈上出现整张设备表的大对象。
+    /// Each function is boxed so the boot stack never holds the whole device table.
+    entries: [Option<Box<Device>>; MAX_DEVICES],
     count: usize,
     /// 因超出容量而未记录的功能数。
     /// Functions dropped because the table was full.
@@ -108,7 +112,7 @@ impl Table {
     pub const fn empty() -> Table {
         Table {
             mechanism: PciMechanism::Unavailable,
-            entries: [None; MAX_DEVICES],
+            entries: [const { None }; MAX_DEVICES],
             count: 0,
             dropped: 0,
             bars: 0,
@@ -127,7 +131,7 @@ impl Table {
     /// 遍历已记录的功能。
     /// Iterate recorded functions.
     pub fn devices(&self) -> impl Iterator<Item = &Device> {
-        self.entries[..self.count].iter().flatten()
+        self.entries[..self.count].iter().flatten().map(|entry| &**entry)
     }
 
     /// 按 BDF 查找已记录的功能；不存在返回 `None`（不触碰硬件，只查启动期快照）。
@@ -138,12 +142,23 @@ impl Table {
 }
 
 static TABLE: Once<Table> = Once::new();
+/// 启动期枚举使用的唯一配置空间后端（枚举结束后保留，供设备初始化写 MSI-X 控制字段）。
+static CONFIG: Once<IrqSpinLock<&'static mut dyn ConfigSpace>> = Once::new();
 static EMPTY: Table = Table::empty();
 
 /// 启动期枚举一次并把结果放进只读静态表；重复调用返回第一次的结果。
 /// Enumerate once at boot; repeated calls return the same table.
 pub fn init(boot: &'static BootSpec) -> &'static Table {
-    TABLE.call_once(|| build(boot))
+    TABLE.call_once(|| {
+        let Some(access) = arch::pci_access(boot) else {
+            kprintln!("[JSR-PCI] unavailable reason=system.device.error.config_unreachable");
+            return Table::empty();
+        };
+        let arch::PciAccess { config, mechanism, buses } = access;
+        let table = build(config, mechanism, buses);
+        let _ = CONFIG.call_once(|| IrqSpinLock::new(config));
+        table
+    })
 }
 
 /// 已建立的设备表；未初始化时返回空表（机制不可用，不伪造设备）。
@@ -152,12 +167,41 @@ pub fn table() -> &'static Table {
     TABLE.get().unwrap_or(&EMPTY)
 }
 
-fn build(boot: &'static BootSpec) -> Table {
-    let Some(access) = arch::pci_access(boot) else {
-        kprintln!("[JSR-PCI] unavailable reason=system.device.error.config_unreachable");
-        return Table::empty();
-    };
-    let arch::PciAccess { config, mechanism, buses } = access;
+/// 读取一个功能的配置空间双字；设备表尚未建立时返回 `None`。
+/// Reads a configuration dword of one function, or `None` before PCI initialisation.
+pub fn read_config32(bdf: Bdf, offset: u16) -> Option<u32> {
+    CONFIG.get()?.lock().read32(bdf, offset)
+}
+
+/// 写入一个功能的配置空间双字；设备表尚未建立时返回 `false` 且不触碰硬件。
+/// Writes a configuration dword of one function.
+pub fn write_config32(bdf: Bdf, offset: u16, value: u32) -> bool {
+    match CONFIG.get() {
+        Some(lock) => lock.lock().write32(bdf, offset, value),
+        None => false,
+    }
+}
+
+/// 打开或关闭一个功能的总线主控位，返回修改前是否已打开；设备表尚未建立时返回不可达。
+/// Sets or clears the bus-master bit of one function.
+pub fn set_bus_master(bdf: Bdf, on: bool) -> Result<bool, core_pci::PciError> {
+    let lock = CONFIG.get().ok_or(core_pci::PciError::Unreachable)?;
+    let mut cfg = lock.lock();
+    kernel_core::pci::set_bus_master(&mut **cfg, bdf, on)
+}
+
+/// 读取设备通知能力中的 `notify_off_multiplier`；没有通知能力或配置空间不可达时返回 `None`。
+///
+/// 只在需要时读配置空间，不把倍率缓存进设备表（设备表在启动期建立，必须保持紧凑）。
+/// Reads the notification multiplier on demand instead of caching it in the boot-time table.
+pub fn notify_multiplier(device: &Device) -> Option<u32> {
+    let capability = device.caps[..device.cap_count]
+        .iter()
+        .find(|cap| cap.cfg_type == CAP_CFG_NOTIFY)?;
+    read_config32(device.bdf, capability.pci_offset as u16 + 16)
+}
+
+fn build(config: &mut dyn ConfigSpace, mechanism: PciMechanism, buses: core::ops::RangeInclusive<u8>) -> Table {
     let mut out = Table { mechanism, ..Table::empty() };
 
     // 穷举只读取头部；BAR 探测需要独占 `config`，所以先把功能收集到有界槽位里。
@@ -236,7 +280,7 @@ fn build(boot: &'static BootSpec) -> Table {
             class_code(&device.header),
             device.bar_count()
         );
-        out.entries[out.count] = Some(device);
+        out.entries[out.count] = Some(Box::new(device));
         out.count += 1;
     }
     out
