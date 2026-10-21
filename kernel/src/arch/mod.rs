@@ -105,6 +105,49 @@ pub struct CpuDiscovery {
     pub source: &'static str,
 }
 
+/// PCI 配置空间的访问机制（诊断输出与验收判据用）。
+/// PCI config-space access mechanism.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PciMechanism {
+    /// ACPI MCFG 给出的 ECAM 窗口（不可缓存 MMIO）。
+    /// ECAM window from ACPI MCFG (uncached MMIO).
+    Ecam,
+    /// 传统 0xCF8 / 0xCFC 端口机制。
+    /// Legacy 0xCF8/0xCFC port mechanism.
+    Port,
+    /// 平台没有提供任何访问机制（如实报告，不伪造设备）。
+    /// No access mechanism is available; no devices are fabricated.
+    Unavailable,
+}
+
+impl PciMechanism {
+    /// 稳定名（串口事件与验收脚本使用）。
+    /// Stable name used by serial events and acceptance checks.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            PciMechanism::Ecam => "ecam",
+            PciMechanism::Port => "port",
+            PciMechanism::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// 启动期取得的一次性 PCI 配置空间访问者：后端 + 可扫描的总线范围。
+///
+/// 只在启动枚举期间使用一次；`config` 由平台以 `'static` 生命周期持有，不随调用栈失效。
+/// One-shot config-space accessor plus the bus range to scan.
+pub struct PciAccess {
+    /// 32 位配置空间读写后端。
+    /// 32-bit config-space read/write backend.
+    pub config: &'static mut dyn kernel_core::pci::ConfigSpace,
+    /// 实际使用的机制。
+    /// Mechanism actually in use.
+    pub mechanism: PciMechanism,
+    /// 需要扫描的总线范围（含两端）。
+    /// Bus range to scan, inclusive on both ends.
+    pub buses: core::ops::RangeInclusive<u8>,
+}
+
 /// 仿真器 / 测试退出状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitStatus {
@@ -317,6 +360,14 @@ pub trait Platform {
     /// 读取单调递增的周期计数器（基准测量用）。单位由平台决定，调用者须以定时器 tick 校准后才能换算成时间。
     /// Read a monotonically increasing cycle counter; calibrate against timer ticks before converting to time.
     fn cycle_counter() -> u64;
+
+    /// 取得 PCI 配置空间访问者（没有 PCI 的平台返回 `None`）。
+    ///
+    /// 启动期只调用一次；后端由平台决定（x86_64：有 MCFG 时 ECAM，否则传统端口）。
+    /// English: return the PCI config-space accessor, or `None` when the platform has no PCI.
+    fn pci_access(_boot: &crate::boot::BootSpec) -> Option<PciAccess> {
+        None
+    }
 
     // ---- 多处理器 ----
 
@@ -584,6 +635,10 @@ pub fn user_probe(probe: UserProbe) -> &'static [u8] {
 #[inline(always)]
 pub fn cycles() -> u64 {
     Current::cycle_counter()
+}
+/// 见 [`Platform::pci_access`]。
+pub fn pci_access(boot: &crate::boot::BootSpec) -> Option<PciAccess> {
+    Current::pci_access(boot)
 }
 /// 见 [`Platform::exit_emulator`]。
 pub fn exit_emulator(status: ExitStatus) -> ! {

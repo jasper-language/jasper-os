@@ -149,7 +149,8 @@ fn offset_of(sym: &u8) -> usize {
 }
 
 /// 经全物理内存映射读取固件表（只读低 4 GiB，引导器保证这段已映射）。
-struct PhysWindow(u64);
+/// 同平台的 PCI / MCFG 解析共用这一实现。
+pub(crate) struct PhysWindow(pub(crate) u64);
 
 impl PhysRead for PhysWindow {
     fn read(&self, phys: u64, buf: &mut [u8]) -> bool {

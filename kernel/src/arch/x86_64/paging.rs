@@ -1,6 +1,6 @@
 //! x86_64 页映射：用 4 级页表（PML4 → PDPT → PD → PT）实现 Core 的 [`PageMapper`] 契约。
 //!
-//! 职责：把中立的 [`MapFlags`] 翻译成 x86 表项位（PRESENT/WRITABLE/USER_ACCESSIBLE/GLOBAL/NO_EXECUTE），
+//! 职责：把中立的 [`MapFlags`] 翻译成 x86 表项位（PRESENT/WRITABLE/USER_ACCESSIBLE/GLOBAL/NO_CACHE/NO_EXECUTE），
 //! 并在修改后刷新对应 TLB 项。页表本身通过「全物理内存映射偏移」访问（引导器已建立该映射）。
 //!
 //! 只有本文件知道 PML4、CR3、PTE 位、`invlpg`；Core 只看到 [`PageMapper`]。
@@ -53,6 +53,9 @@ fn to_x86(flags: MapFlags) -> PageTableFlags {
     if flags.contains(MapFlags::GLOBAL) {
         f |= PageTableFlags::GLOBAL;
     }
+    if flags.contains(MapFlags::NO_CACHE) {
+        f |= PageTableFlags::NO_CACHE;
+    }
     if !flags.contains(MapFlags::EXECUTE) {
         f |= PageTableFlags::NO_EXECUTE;
     }
@@ -70,6 +73,9 @@ fn from_x86(f: PageTableFlags) -> MapFlags {
     }
     if f.contains(PageTableFlags::GLOBAL) {
         m = m | MapFlags::GLOBAL;
+    }
+    if f.contains(PageTableFlags::NO_CACHE) {
+        m = m | MapFlags::NO_CACHE;
     }
     if !f.contains(PageTableFlags::NO_EXECUTE) {
         m = m | MapFlags::EXECUTE;

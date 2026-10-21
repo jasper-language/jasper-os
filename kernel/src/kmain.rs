@@ -6,7 +6,7 @@
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use crate::{appid_demo, arbiter_demo, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, l10n_demo, mech_demo, mm, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, wcet};
+use crate::{appid_demo, arbiter_demo, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, l10n_demo, mech_demo, mm, pci, pci_demo, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, wcet};
 #[cfg(feature = "user-programs")]
 use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo, uptr_demo, longrun_demo};
 use crate::{nohz_demo, scale_demo};
@@ -86,6 +86,10 @@ pub fn start(boot: &'static BootSpec) -> ! {
     if mm::heap::ensure_free(heap_slack).is_err() {
         kprintln!("[JSR-SCHED] capacity heap_slack_restore_failed want={}", heap_slack);
     }
+    // DRV-1B：启动期取得 PCI 配置空间访问者（ECAM 或传统端口），穷举总线并建立只读设备表。
+    // 依赖内核映射服务与堆（ECAM 窗口映射、后端对象），因此放在 M2.2 / M2.3 之后。
+    pci::init(boot);
+    pci_demo::run();
     kprintln!(
         "[JSR-SCHED] capacity slots={} static_stacks={} max={} policy={} preemption=default_on",
         sched::capacity(),
@@ -200,6 +204,7 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("rtclass", rtclass_demo::failed()),
         ("arbiter", arbiter_demo::failed()),
         ("appid", appid_demo::failed()),
+        ("pci", pci_demo::failed()),
         ("l10n", l10n_demo::failed()),
         #[cfg(feature = "user-programs")]
         ("ring", ring_demo::failed()),

@@ -169,10 +169,20 @@ if [ "$ARCH_ALL" -eq 1 ]; then
 fi
 
 QRC=-1
+# DRV-1B：加挂三个 virtio 设备（熵源 / 网络 / 块），并为块设备生成一个临时空白镜像。
+# PCI 枚举在两种机制下都必须找到厂商 0x1af4、设备号在 virtio 范围内的三个功能。
+BLANK="$OUT/virtio-blank.img"
+if command -v truncate >/dev/null; then
+  truncate -s 1M "$BLANK"
+else
+  dd if=/dev/zero of="$BLANK" bs=1M count=1 status=none
+fi
+VIRTIO_ARGS=(-device virtio-rng-pci -device virtio-net-pci,netdev=n0 -netdev user,id=n0 \
+  -device virtio-blk-pci,drive=d1 -drive if=none,id=d1,file="$BLANK",format=raw)
 if [ "$BUILD_RC" -eq 0 ]; then
   echo "== QEMU 真实启动 =="
   sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU" -drive format=raw,file="$IMG" \
+  run timeout "$QEMU_TIMEOUT" "$QEMU" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" \
     -serial stdio -display none -monitor none -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL" 2>&1
   QRC=$?
@@ -183,10 +193,22 @@ QRC_SMP4=-1
 if [ "$BUILD_RC" -eq 0 ]; then
   echo "== QEMU 真实启动（x86_64，4 个处理器）=="
   sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU" -drive format=raw,file="$IMG" -smp 4 \
+  run timeout "$QEMU_TIMEOUT" "$QEMU" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4 \
     -serial stdio -display none -monitor none -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL_SMP4" 2>&1
   QRC_SMP4=$?
+fi
+# DRV-1B：q35 机型的 4 处理器启动。q35 提供 ACPI MCFG，配置空间必须走 ECAM（不可缓存 MMIO），
+# 与上面 pc 机型的传统端口机制形成对照；同一组 virtio 设备仍须全部枚举到。
+SERIAL_Q35="$OUT/serial-q35.log"
+QRC_Q35=-1
+if [ "$BUILD_RC" -eq 0 ]; then
+  echo "== QEMU 真实启动（x86_64 q35，4 个处理器，ECAM）=="
+  sleep "$BOOT_GAP"
+  run timeout "$QEMU_TIMEOUT" "$QEMU" -M q35 -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4 \
+    -serial stdio -display none -monitor none -no-reboot \
+    -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL_Q35" 2>&1
+  QRC_Q35=$?
 fi
 # AArch64（ISA-1）：同一内核以软浮点目标构建（不内嵌用户程序），在 QEMU virt 上直接装载 ELF 启动；
 # 退出经半主机（成功 33、失败 35，与 x86_64 一致）。缺少 qemu-system-aarch64 时如实记为失败。
@@ -1556,6 +1578,38 @@ check_drv0() {  # DRV-0：通道消息的发送方应用身份章——已绑定
   fi
 }
 
+check_drv1b() { # DRV-1B：PCI 配置空间两种机制——pc 机型走传统端口、q35 机型走 ACPI MCFG 的 ECAM；
+                # 两种机制都穷举总线 / 设备 / 功能，都枚举到 accept.sh 加挂的三个 virtio 设备（厂商 0x1af4），
+                # 且宿主桥 / ISA 桥、非法 BDF 拒绝、BAR 探测后寄存器恢复全部通过，summary failed=0。
+  local miss="" f name n
+  if [ ! -s "$SERIAL_Q35" ]; then
+    record DRV1B FAIL "缺少 q35 串口日志（QEMU=$QRC_Q35，见 serial-q35.log）"
+    return
+  fi
+  grep -qaE '^\[JSR-PCI\] summary mechanism=port functions=[1-9][0-9]* bars=[1-9][0-9]* checks=[1-9][0-9]* failed=0' "$SERIAL" \
+    || miss="$miss pc:端口机制汇总"
+  grep -qaE '^\[JSR-PCI\] summary mechanism=ecam functions=[1-9][0-9]* bars=[1-9][0-9]* checks=[1-9][0-9]* failed=0' "$SERIAL_Q35" \
+    || miss="$miss q35:ECAM 机制汇总"
+  [ "$QRC_Q35" -eq 33 ] && grep -qa '^\[JSR-EXIT\] success' "$SERIAL_Q35" || miss="$miss q35:启动/退出"
+  for pair in "$SERIAL:pc" "$SERIAL_Q35:q35"; do
+    f="${pair%%:*}"; name="${pair##*:}"
+    n=$(grep -caE '^\[JSR-PCI\] dev bdf=[0-9a-f]{2}:[0-9a-f]{2}\.[0-7] vendor=0x1af4 device=0x10[0-7][0-9a-f] class=0x[0-9a-f]{6} bars=[0-9]+' "$f" 2>/dev/null)
+    [ "${n:-0}" -ge 3 ] || miss="$miss $name:virtio设备(${n:-0}/3)"
+    grep -qaE '^\[JSR-PCI\] demo host_bridge=true isa_bridge=true virtio=3 invalid_bdf=true bars_restored=true' "$f" 2>/dev/null \
+      || miss="$miss $name:演练断言"
+    grep -qa '^\[JSR-PCI-FAIL\]' "$f" 2>/dev/null && miss="$miss $name:失败断言"
+    grep -qaE '^\[JSR-PCI\] summary .* failed=[1-9]' "$f" 2>/dev/null && miss="$miss $name:汇总失败"
+  done
+  if [ -z "$miss" ]; then
+    local pf eb
+    pf=$(grep -aoE '^\[JSR-PCI\] summary mechanism=port functions=[0-9]+ bars=[0-9]+ checks=[0-9]+' "$SERIAL" | head -1 | sed -E 's/^\[JSR-PCI\] summary mechanism=port functions=([0-9]+) bars=([0-9]+) checks=([0-9]+)/功能 \1、BAR \2、断言 \3/')
+    eb=$(grep -aoE '^\[JSR-PCI\] summary mechanism=ecam functions=[0-9]+ bars=[0-9]+ checks=[0-9]+' "$SERIAL_Q35" | head -1 | sed -E 's/^\[JSR-PCI\] summary mechanism=ecam functions=([0-9]+) bars=([0-9]+) checks=([0-9]+)/功能 \1、BAR \2、断言 \3/')
+    record DRV1B PASS "pc 机型 mechanism=port（$pf），q35 机型 mechanism=ecam（$eb）；两种机制都枚举到三个 virtio 设备（0x1af4），找到宿主桥与 ISA 桥，非法 BDF 被拒，BAR 探测后标准头恢复原状，summary failed=0"
+  else
+    record DRV1B FAIL "缺少/不符：$miss"
+  fi
+}
+
 check_l10n1() { # L10N-1：接口登记表英文显示名列（构建期中英齐全）+ 由登记表生成的错误渲染表——
                  # 错误表条数与登记表一致、按 ID 有序、中英齐全；同一错误码中英分别渲染且与登记表逐字一致；
                  # 非错误返回值与未登记错误码被拒；每个操作条目都有英文名。检查 x86_64 单核与 x86_64 / AArch64 / RISC-V64 4 处理器。
@@ -1655,11 +1709,11 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 
 if [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_l10n1
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------
@@ -1671,14 +1725,14 @@ fi
     echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4，AArch64：$QRC_A64，AArch64 4 处理器：$QRC_A64_SMP4，RISC-V64：$QRC_RV64，RISC-V32：$QRC_RV32）"
   else
     echo "架构范围：x86_64（AArch64 / RISC-V64 / RISC-V32 冻结，按 N/A 记录）"
-    echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4）"
+    echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4，q35 ECAM：$QRC_Q35）"
   fi
   echo
   printf '%-6s %-4s %s\n' "里程碑" "结果" "说明"
   printf '%s\n' "${ROWS[@]}"
 } | tee "$OUT/summary.txt"
 
-EVIDENCE_FILES=(cargo-test.log build.log serial.log serial-smp4.log summary.txt)
+EVIDENCE_FILES=(cargo-test.log build.log serial.log serial-smp4.log serial-q35.log summary.txt)
 if [ "$ARCH_ALL" -eq 1 ]; then
   EVIDENCE_FILES+=(serial-aarch64.log serial-aarch64-smp4.log serial-riscv64.log serial-riscv32.log)
 fi

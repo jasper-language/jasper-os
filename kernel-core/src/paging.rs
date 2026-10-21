@@ -2,7 +2,7 @@
 //!
 //! # 职责
 //! * [`VirtPage`]：4 KiB 对齐的虚拟页
-//! * [`MapFlags`]：**中立**的映射权限位（读/写/执行/用户可访问/全局）——不出现任何 ISA 的 PTE 位
+//! * [`MapFlags`]：**中立**的映射权限位（读/写/执行/用户可访问/全局/不可缓存）——不出现任何 ISA 的 PTE 位
 //! * [`PageMapper`]：映射、取消映射、查询、改权限的契约（Strategy：每个 ISA 一个实现）
 //! * [`MapError`]：带规范名的错误（`system.memory.error.*`）
 //!
@@ -56,6 +56,9 @@ impl MapFlags {
     pub const USER: MapFlags = MapFlags(1 << 2);
     /// 全局（切换地址空间时不必刷新，用于内核共享半区）。
     pub const GLOBAL: MapFlags = MapFlags(1 << 3);
+    /// 不可缓存（MMIO 窗口必须使用，避免 CPU 缓存与设备寄存器语义冲突）。
+    /// Uncached mapping, required for MMIO windows.
+    pub const NO_CACHE: MapFlags = MapFlags(1 << 4);
 
     /// 并集。
     pub const fn union(self, other: MapFlags) -> MapFlags {

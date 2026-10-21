@@ -28,3 +28,14 @@ pub unsafe fn inb(port: u16) -> u8 {
 pub unsafe fn outl(port: u16, val: u32) {
     core::arch::asm!("out dx, eax", in("dx") port, in("eax") val, options(nomem, nostack, preserves_flags));
 }
+
+/// 从端口读一个 32 位值。
+///
+/// # Safety
+/// 读某些端口有副作用（如读取后清除状态、触发设备动作）。
+#[inline(always)]
+pub unsafe fn inl(port: u16) -> u32 {
+    let v: u32;
+    core::arch::asm!("in eax, dx", in("dx") port, out("eax") v, options(nomem, nostack, preserves_flags));
+    v
+}

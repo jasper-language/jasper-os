@@ -13,6 +13,7 @@
 //! * `user`    —— `iretq` 进入 Ring 3 与用户态探针机器码
 //! * `syscall` —— `syscall`/`sysretq` 入口：MSR 设置、换栈、寄存器帧、返回前 RIP 规范性检查
 //! * `apic`    —— 本地 APIC：核间中断、本地定时器（以 PIT 校准）、EOI
+//! * `pci`     —— PCI 配置空间：传统端口机制与 ACPI MCFG ECAM（不可缓存 MMIO）
 //! * `smp`     —— 多处理器：MADT 发现、实模式启动代码、INIT/启动序列、其他处理器入口
 //!
 //! 与 Core 的回调方向：中断入口调用 `crate::irq::on_hardware_irq`（见 `idt.rs`）；
@@ -24,6 +25,7 @@ mod paging;
 mod gdt;
 mod idt;
 mod ioapic;
+mod pci;
 mod pic;
 mod pit;
 mod space;
@@ -33,7 +35,7 @@ mod smp;
 mod uart;
 mod user;
 
-use super::{ExitStatus, Platform, UserProbe};
+use super::{ExitStatus, PciAccess, Platform, UserProbe};
 
 /// x86_64 平台（零大小类型，仅作为 trait 实现的载体）。
 pub struct X86_64;
@@ -229,6 +231,10 @@ impl Platform for X86_64 {
 
     fn cpu_init_boot(boot: &crate::boot::BootSpec) -> super::CpuDiscovery {
         smp::init_boot(boot)
+    }
+
+    fn pci_access(boot: &crate::boot::BootSpec) -> Option<PciAccess> {
+        pci::access(boot)
     }
 
     unsafe fn cpu_start(
