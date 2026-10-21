@@ -18,9 +18,12 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use alloc::vec;
 
-use kernel_core::object::{HandleError, HandleId, Rights};
+use kernel_core::device as devabi;
+use kernel_core::object::{HandleError, HandleId, ObjectType, Rights};
+use kernel_core::pci::Bdf;
 use kernel_core::sched::Qos;
 
+use crate::kobj::{self, DeviceObj, KObject};
 use crate::mm::user::{copy_from_user, copy_to_user, UserPtrError};
 use crate::proc::{self, ProcError};
 use crate::sync::IrqSpinLock;
@@ -157,6 +160,9 @@ fn has_handler(id: u32) -> bool {
             | SYSTEM_PROCESS_SPAWN
             | SYSTEM_PROFILE_LIST
             | SYSTEM_PROFILE_GET
+            | SYSTEM_DEVICE_LIST
+            | SYSTEM_DEVICE_OPEN
+            | SYSTEM_DEVICE_GET
     )
 }
 
@@ -450,6 +456,9 @@ fn execute(e: &AbiEntry, a: &SyscallArgs, task_id: u64) -> i64 {
         // 系统调用只能返回标量：`list` 返回内建 Profile 的数量，具体描述用 `get` 按下标取。
         SYSTEM_PROFILE_LIST => profile::count() as i64,
         SYSTEM_PROFILE_GET => profile_get(a.args[0], a.args[1], a.args[2]),
+        SYSTEM_DEVICE_LIST => device_list(a.args[0], a.args[1], a.args[2]),
+        SYSTEM_DEVICE_OPEN => device_open(a.args[0], a.args[1]),
+        SYSTEM_DEVICE_GET => device_get(a.args[0], a.args[1], a.args[2]),
         _ => err(SYSTEM_ERROR_UNSUPPORTED),
     }
 }
@@ -479,4 +488,118 @@ fn profile_get(index: u64, ptr: u64, cap: u64) -> i64 {
         return user_ptr_err(e);
     }
     len as i64
+}
+
+/// 设备句柄允许的最大权限集合：读取配置 / 资源描述、映射寄存器窗口、复制与传递。
+/// 调用者只能申请这个集合的子集；设备访问能力本身由系统调用集合授予。
+/// Maximum rights a device handle may carry; callers may request a subset only.
+pub const DEVICE_RIGHTS: Rights =
+    Rights::READ.union(Rights::MAP).union(Rights::DUPLICATE).union(Rights::TRANSFER);
+
+/// `system.device.list(filter, buf, cap)`：把匹配的启动期 PCI 功能写成定长记录。
+///
+/// 返回**需要**的字节数。`cap` 足够时全部记录写入用户缓冲区；不足时一个字节也不写，返回值大于 `cap`，
+/// 调用者据此扩大缓冲区后重试。过滤字的布局见 [`kernel_core::device::Filter`]。
+/// Lists matching devices; returns the required byte count and copies only when the buffer is large enough.
+fn device_list(filter: u64, ptr: u64, cap: u64) -> i64 {
+    let Ok(word) = u32::try_from(filter) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let Some(filter) = devabi::Filter::from_word(word) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let Ok(capacity) = usize::try_from(cap) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let matching = crate::pci::table().devices().filter(|device| filter.matches(&device.header)).count();
+    let required = matching * devabi::RECORD_SIZE;
+    if required > capacity {
+        return required as i64;
+    }
+    let mut buf = vec![0u8; required];
+    let mut at = 0usize;
+    for device in crate::pci::table().devices() {
+        if !filter.matches(&device.header) {
+            continue;
+        }
+        let record = devabi::Record::from_parts(device.bdf, &device.header, &device.bars);
+        let mut raw = [0u8; devabi::RECORD_SIZE];
+        record.encode(&mut raw);
+        buf[at..at + devabi::RECORD_SIZE].copy_from_slice(&raw);
+        at += devabi::RECORD_SIZE;
+    }
+    if required > 0 {
+        if let Err(e) = copy_to_user(ptr, &buf, required) {
+            return user_ptr_err(e);
+        }
+    }
+    required as i64
+}
+
+/// `system.device.open(bdf, rights)`：按 BDF 打开已枚举的设备，返回设备句柄。
+///
+/// 失败路径：BDF 编码非法 ⇒ `invalid_argument`；设备不在启动期设备表中 ⇒ `device.error.not_found`；
+/// 申请空权限、未定义权限或超出 [`DEVICE_RIGHTS`] ⇒ `rights_denied`；句柄表满 ⇒ `handle.error.table_full`。
+/// Opens an enumerated device by BDF and returns a handle carrying a subset of [`DEVICE_RIGHTS`].
+fn device_open(bdf: u64, rights: u64) -> i64 {
+    let Ok(raw) = u32::try_from(bdf) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let Some(bdf) = devabi::unpack_bdf(raw) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let Some(rights) = rights_arg(rights) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    if rights.is_empty() || !DEVICE_RIGHTS.contains(rights) {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    }
+    if crate::pci::table().find(bdf).is_none() {
+        return err(SYSTEM_DEVICE_ERROR_NOT_FOUND);
+    }
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    match proc::grant_new(pid, KObject::Device(DeviceObj { bdf }), ObjectType::Device, rights) {
+        Ok(h) => h.raw() as i64,
+        Err(e) => proc_err(e),
+    }
+}
+
+/// `system.device.get(handle, buf, cap)`：经设备句柄读取完整描述，返回写入字节数。
+///
+/// 句柄必须有效、类型为 Device 且带 `READ`；缓冲区小于 [`kernel_core::device::DESC_SIZE`] ⇒
+/// `device.error.buffer_too_small`，不写任何字节。设备表项常驻，句柄关闭后描述仍可由新句柄读取。
+/// Reads the full description through a device handle.
+fn device_get(handle: u64, ptr: u64, cap: u64) -> i64 {
+    let Ok(capacity) = usize::try_from(cap) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    if capacity < devabi::DESC_SIZE {
+        return err(SYSTEM_DEVICE_ERROR_BUFFER_TOO_SMALL);
+    }
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let resolved = kobj::with(|t| -> Result<Bdf, ProcError> {
+        let id = proc::resolve_in(t, pid, handle_arg(handle), ObjectType::Device, Rights::READ)?;
+        match t.get(id) {
+            Ok(KObject::Device(device)) => Ok(device.bdf),
+            _ => Err(ProcError::Handle(HandleError::Invalid)),
+        }
+    });
+    let bdf = match resolved {
+        Ok(bdf) => bdf,
+        Err(e) => return proc_err(e),
+    };
+    let Some(device) = crate::pci::table().find(bdf) else {
+        return err(SYSTEM_DEVICE_ERROR_NOT_FOUND);
+    };
+    let desc = devabi::Desc::from_parts(device.bdf, &device.header, &device.bars);
+    let mut raw = [0u8; devabi::DESC_SIZE];
+    desc.encode(&mut raw);
+    if let Err(e) = copy_to_user(ptr, &raw, devabi::DESC_SIZE) {
+        return user_ptr_err(e);
+    }
+    devabi::DESC_SIZE as i64
 }

@@ -35,6 +35,8 @@ pub mod config;
 pub mod fix_demo;
 pub mod console;
 pub mod counter_demo;
+#[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+pub mod device_demo;
 pub mod exit_state;
 pub mod fault;
 pub mod ipc;

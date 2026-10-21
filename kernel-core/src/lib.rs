@@ -52,6 +52,7 @@ pub mod bench;
 pub mod async_ring;
 pub mod capacity;
 pub mod config;
+pub mod device;
 pub mod elf;
 pub mod fdt;
 pub mod frame;

@@ -102,7 +102,7 @@ fn main() {
 /// `JSR_USER_BENCH`、`JSR_USER_ISOHOST`）交给内核源码 `include_bytes!`。
 /// Builds the embedded user programs with a separate target dir and exposes their paths to the kernel.
 fn build_user_programs(root: &std::path::Path) {
-    const PROGRAMS: [(&str, &str, &str); 12] = [
+    let mut programs: Vec<(&str, &str, &str)> = vec![
         ("user/hello", "user-hello", "JSR_USER_HELLO"),
         ("user/ring", "user-ring", "JSR_USER_RING"),
         ("user/ipc", "user-ipc", "JSR_USER_IPC"),
@@ -116,7 +116,11 @@ fn build_user_programs(root: &std::path::Path) {
         ("user/bench", "user-bench", "JSR_USER_BENCH"),
         ("user/isohost", "user-isohost", "JSR_USER_ISOHOST"),
     ];
-    for (dir, _, _) in PROGRAMS {
+    // DRV-1C 的用户态演练只在 x86_64 上构建与内嵌（其它指令集冻结，不写对应代码）。
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") {
+        programs.push(("user/devprobe", "user-devprobe", "JSR_USER_DEVPROBE"));
+    }
+    for (dir, _, _) in &programs {
         for f in ["src/main.rs", "Cargo.toml", "link.ld", "build.rs"] {
             println!("cargo:rerun-if-changed={}", root.join(dir).join(f).display());
         }
@@ -135,6 +139,7 @@ fn build_user_programs(root: &std::path::Path) {
     // 用户程序共享 kernel-core 的记录布局：它变化时也要重建
     println!("cargo:rerun-if-changed={}", root.join("kernel-core/src/ring_abi.rs").display());
     println!("cargo:rerun-if-changed={}", root.join("kernel-core/src/bench.rs").display());
+    println!("cargo:rerun-if-changed={}", root.join("kernel-core/src/device.rs").display());
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let target_dir = out_dir.join("user-target");
     let triple = user_triple();
@@ -145,12 +150,12 @@ fn build_user_programs(root: &std::path::Path) {
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_TARGET_DIR")
         .args(["build", "--release", "--target", triple]);
-    for (_, pkg, _) in PROGRAMS {
-        cmd.args(["-p", pkg]);
+    for (_, pkg, _) in &programs {
+        cmd.args(["-p", *pkg]);
     }
     let status = cmd.arg("--target-dir").arg(&target_dir).status().expect("无法启动 cargo 构建用户程序");
     assert!(status.success(), "用户程序构建失败");
-    for (_, pkg, env) in PROGRAMS {
+    for (_, pkg, env) in &programs {
         let elf = target_dir.join(triple).join("release").join(pkg);
         assert!(elf.exists(), "找不到用户程序产物 {}", elf.display());
         println!("cargo:rustc-env={}={}", env, elf.display());

@@ -41,13 +41,16 @@ impl Rights {
     pub const DUPLICATE: Rights = Rights(1 << 5);
     /// 允许把该句柄经 Channel 传给其他进程。M4.0 规范 v0.6 §3.1。
     pub const TRANSFER: Rights = Rights(1 << 6);
+    /// 映射对象的寄存器 / 内存窗口（DRV-1C 的设备句柄使用；不含 READ 的隐式含义）。
+    /// Map the object's register window into the caller's address space.
+    pub const MAP: Rights = Rights(1 << 7);
     /// 全部已定义的权限。
     ///
     /// ABI 说明：各位的数值一经发布永不改变，新权限只能占用新的位。
-    pub const ALL: Rights = Rights(0b111_1111);
+    pub const ALL: Rights = Rights(0b1111_1111);
 
     /// 位名表（按位序），用于格式化输出。
-    const NAMES: [(Rights, &'static str); 7] = [
+    const NAMES: [(Rights, &'static str); 8] = [
         (Rights::READ, "READ"),
         (Rights::WRITE, "WRITE"),
         (Rights::EXECUTE, "EXECUTE"),
@@ -55,6 +58,7 @@ impl Rights {
         (Rights::CONTROL, "CONTROL"),
         (Rights::DUPLICATE, "DUPLICATE"),
         (Rights::TRANSFER, "TRANSFER"),
+        (Rights::MAP, "MAP"),
     ];
 
     /// 由原始位构造；未定义的位被丢弃（不允许凭空造出未知权限）。
@@ -206,6 +210,9 @@ pub enum ObjectType {
     Task,
     /// 进程：地址空间 + 资源容器 + 生命周期（`system.process` 领域）。
     Process,
+    /// 设备：启动期 PCI 设备表中的一项（`system.device` 领域）。关闭句柄不销毁设备表项。
+    /// Device: one entry of the boot-time PCI table; closing a handle does not destroy it.
+    Device,
 }
 
 impl ObjectType {
@@ -220,7 +227,7 @@ impl ObjectType {
     /// Whether v1 IPC may transfer this type (leaf objects only). The shared-memory leaf object is not
     /// implemented yet; `AddressSpace` is not a substitute for it and stays non-transferable.
     pub const fn is_transferable_v1(self) -> bool {
-        matches!(self, ObjectType::Event | ObjectType::Timer | ObjectType::Task)
+        matches!(self, ObjectType::Event | ObjectType::Timer | ObjectType::Task | ObjectType::Device)
     }
 
     /// 类型名（输出与元数据用）。
@@ -233,6 +240,7 @@ impl ObjectType {
             ObjectType::Channel => "Channel",
             ObjectType::Task => "Task",
             ObjectType::Process => "Process",
+            ObjectType::Device => "Device",
         }
     }
 }
@@ -563,7 +571,7 @@ mod tests {
     fn rights_display() {
         assert_eq!(format!("{}", Rights::WAIT.union(Rights::CONTROL)), "WAIT|CONTROL");
         assert_eq!(format!("{}", Rights::NONE), "NONE");
-        assert_eq!(format!("{}", Rights::ALL), "READ|WRITE|EXECUTE|WAIT|CONTROL|DUPLICATE|TRANSFER", "M4.0 v0.6 新增 DUPLICATE、TRANSFER");
+        assert_eq!(format!("{}", Rights::ALL), "READ|WRITE|EXECUTE|WAIT|CONTROL|DUPLICATE|TRANSFER|MAP", "M4.0 v0.6 的 DUPLICATE / TRANSFER 与 DRV-1C 的 MAP");
     }
 
     #[test]
@@ -706,6 +714,7 @@ mod tests {
         assert_eq!(t.get(h).unwrap().1, Rights::WAIT);
         assert_eq!(t.free_slots(), 1);
         assert!(ObjectType::Task.is_transferable_v1() && ObjectType::Event.is_transferable_v1());
+        assert!(ObjectType::Device.is_transferable_v1(), "设备对象是叶子：关闭句柄不销毁设备表项");
         assert!(!ObjectType::Channel.is_transferable_v1() && !ObjectType::Process.is_transferable_v1());
         assert!(!ObjectType::Ring.is_transferable_v1() && !ObjectType::AddressSpace.is_transferable_v1());
     }

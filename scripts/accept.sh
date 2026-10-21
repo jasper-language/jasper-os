@@ -1610,6 +1610,57 @@ check_drv1b() { # DRV-1B：PCI 配置空间两种机制——pc 机型走传统�
   fi
 }
 
+check_drv1c() { # DRV-1C：设备内核对象与 system.device.list / open / get——用户态列举设备、按类别 / 厂商过滤、
+                # 打开 virtio-net、读取完整描述；非法 BDF / 非法过滤字 / 无设备访问能力 / 已关闭句柄 / 权限越级复制
+                # 全部被拒；句柄全部关闭、对象数与页帧回到基线。检查 x86_64 单处理器、x86_64×4 与 q35(ECAM)×4。
+  local miss="" f name n nsum
+  # 用户程序的输出经打印系统调用转发，内核加上 "[JSR-USERTEXT] task=… text=" 前缀；匹配时把这段前缀算进来。
+  local u='^\[JSR-USERTEXT\] task=(device-probe|device-nocap) bytes=[0-9]+ text=\[JSR-DEV\]'
+  local up='^\[JSR-USERTEXT\] task=(device-probe|device-nocap) bytes=[0-9]+ text='
+  local user_sum="${u} summary checks=[0-9]+ failed=0 handles_live=0"
+  local kern_sum='^\[JSR-DRV1C\] summary objects=([0-9]+)/\1 pending=[0-9]+->0 frames=([0-9]+)/\2 checks=[0-9]+ failed=0'
+  local pairs=("$SERIAL:x86_64单核" "$SERIAL_SMP4:x86_64×4" "$SERIAL_Q35:q35×4")
+  for pair in "${pairs[@]}"; do
+    f="${pair%%:*}"; name="${pair##*:}"
+    if [ ! -s "$f" ]; then miss="$miss $name:缺日志"; continue; fi
+    grep -qaE "${u} case=list_need need=[1-9][0-9]* ok=true" "$f" 2>/dev/null || miss="$miss $name:所需长度"
+    grep -qaE "${u} case=list_short need=[1-9][0-9]* got=[1-9][0-9]* unchanged=true ok=true" "$f" 2>/dev/null || miss="$miss $name:短缓冲区"
+    grep -qaE "${u} case=list_all records=[1-9][0-9]* bytes=[1-9][0-9]* ok=true" "$f" 2>/dev/null || miss="$miss $name:完整列表"
+    grep -qaE "${u} case=filter_class class=2 bytes=[1-9][0-9]* ok=true" "$f" 2>/dev/null || miss="$miss $name:类别过滤"
+    grep -qaE "${u} case=filter_vendor vendor=0x1af4 bytes=[1-9][0-9]* ok=true" "$f" 2>/dev/null || miss="$miss $name:厂商过滤"
+    grep -qaE "${u} case=find_net bdf=0x[0-9a-f]{6} bars=[1-9][0-9]* ok=true" "$f" 2>/dev/null || miss="$miss $name:找到 virtio-net"
+    grep -qaE "${u} case=open bdf=0x[0-9a-f]{6} rights=0xe1 handle=[1-9][0-9]* ok=true" "$f" 2>/dev/null || miss="$miss $name:打开"
+    grep -qaE "${u} case=get_short ret=-4119 want=-4119 unchanged=true ok=true" "$f" 2>/dev/null || miss="$miss $name:描述缓冲区不足"
+    grep -qaE "${u} case=get_desc bdf=0x[0-9a-f]{6} vendor=0x1af4 class=0x02 bars=[1-9][0-9]* bytes=168 ok=true" "$f" 2>/dev/null || miss="$miss $name:完整描述"
+    grep -qaE "${u} case=reject_bad_bdf ret=-4099 ok=true" "$f" 2>/dev/null || miss="$miss $name:非法BDF"
+    grep -qaE "${u} case=reject_bad_filter ret=-4099 ok=true" "$f" 2>/dev/null || miss="$miss $name:非法过滤字"
+    grep -qaE "${u} case=reject_escalate ret=-4102 ok=true" "$f" 2>/dev/null || miss="$miss $name:提权复制被拒"
+    grep -qaE "${u} case=duplicate handle=[1-9][0-9]* duplicate=[1-9][0-9]* ok=true" "$f" 2>/dev/null || miss="$miss $name:降权复制"
+    grep -qaE "${u} case=reject_no_duplicate ret=-4102 ok=true" "$f" 2>/dev/null || miss="$miss $name:无DUPLICATE"
+    grep -qaE "${u} case=reject_closed close=0 get=-4101 ok=true" "$f" 2>/dev/null || miss="$miss $name:句柄已关闭"
+    grep -qaE "${u} case=reject_double_close ret=-4101 ok=true" "$f" 2>/dev/null || miss="$miss $name:重复关闭"
+    grep -qaE "${u} case=handles_closed live=0 ok=true" "$f" 2>/dev/null || miss="$miss $name:句柄全关"
+    grep -qaE "${u} case=reject_no_capability_list ret=-4098 ok=true" "$f" 2>/dev/null || miss="$miss $name:无能力list"
+    grep -qaE "${u} case=reject_no_capability_open ret=-4098 ok=true" "$f" 2>/dev/null || miss="$miss $name:无能力open"
+    nsum=$(grep -caE "$user_sum" "$f" 2>/dev/null)
+    [ "${nsum:-0}" -ge 2 ] || miss="$miss $name:用户汇总(${nsum:-0}/2)"
+    grep -qaE '^\[JSR-DRV1C\] case=role0 exit=Some\(Exited \{ code: 0 \}\) ok=true' "$f" 2>/dev/null || miss="$miss $name:角色0退出"
+    grep -qaE '^\[JSR-DRV1C\] case=role1 exit=Some\(Exited \{ code: 0 \}\) ok=true' "$f" 2>/dev/null || miss="$miss $name:角色1退出"
+    n=$(grep -aoE "$kern_sum" "$f" 2>/dev/null | head -1 | sed -E 's/.*checks=([0-9]+).*/\1/')
+    if [ -z "$n" ]; then miss="$miss $name:内核汇总"; elif [ "$n" -lt 4 ]; then miss="$miss $name:断言数($n<4)"; fi
+    grep -qaE "${up}\[JSR-DEV-FAIL\]" "$f" 2>/dev/null && miss="$miss $name:用户失败断言"
+    grep -qa '^\[JSR-DRV1C-FAIL\]' "$f" 2>/dev/null && miss="$miss $name:内核失败断言"
+  done
+  grep -qaE "^test device::tests::[a-z_]+ \.\.\. ok$" "$OUT/cargo-test.log" 2>/dev/null || miss="$miss 宿主:设备编解码测试"
+  if [ -z "$miss" ]; then
+    local nrec
+    nrec=$(grep -aoE "${u} case=list_all records=[0-9]+" "$SERIAL_SMP4" | head -1 | grep -oE '[0-9]+$')
+    record DRV1C PASS "system.device.list 按类别 / 厂商过滤（x86_64×4 列举 $nrec 个功能），缓冲区不足返回所需长度且不写残留；open 返回带 READ|MAP|DUPLICATE|TRANSFER 的 Device 句柄，get 返回 168 字节完整描述；非法 BDF / 非法过滤字 / 无设备访问能力 / 已关闭句柄 / 权限越级复制全部被拒；句柄全部关闭，对象数与页帧回到基线（x86_64 单核、x86_64×4、q35 ECAM×4）"
+  else
+    record DRV1C FAIL "缺少/不符：$miss"
+  fi
+}
+
 check_l10n1() { # L10N-1：接口登记表英文显示名列（构建期中英齐全）+ 由登记表生成的错误渲染表——
                  # 错误表条数与登记表一致、按 ID 有序、中英齐全；同一错误码中英分别渲染且与登记表逐字一致；
                  # 非错误返回值与未登记错误码被拒；每个操作条目都有英文名。检查 x86_64 单核与 x86_64 / AArch64 / RISC-V64 4 处理器。
@@ -1709,11 +1760,11 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 
 if [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_l10n1
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------

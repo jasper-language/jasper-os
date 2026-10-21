@@ -9,6 +9,8 @@ use crate::boot::BootSpec;
 use crate::{appid_demo, arbiter_demo, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, l10n_demo, mech_demo, mm, pci, pci_demo, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, wcet};
 #[cfg(feature = "user-programs")]
 use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo, uptr_demo, longrun_demo};
+#[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+use crate::device_demo;
 use crate::{nohz_demo, scale_demo};
 
 /// 内核版本（横幅中输出）。
@@ -139,6 +141,9 @@ pub fn start(boot: &'static BootSpec) -> ! {
     user_demo::run_lifecycle();
     // M4.2：Handle/Rights（duplicate/restrict 只降权；跨进程原子转移）。
     user_demo::run_handles();
+    // DRV-1C：设备内核对象与 list / open / get 系统调用（设备表由 DRV-1B 在启动期建立）。
+    #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+    device_demo::run();
     // 基础设施修复的回归演练：失败路径与回滚。
     fix_demo::run();
     #[cfg(feature = "user-programs")]
@@ -205,6 +210,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("arbiter", arbiter_demo::failed()),
         ("appid", appid_demo::failed()),
         ("pci", pci_demo::failed()),
+        #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+        ("drv1c", device_demo::failed()),
         ("l10n", l10n_demo::failed()),
         #[cfg(feature = "user-programs")]
         ("ring", ring_demo::failed()),

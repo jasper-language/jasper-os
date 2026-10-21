@@ -21,6 +21,7 @@
 use alloc::boxed::Box;
 
 use kernel_core::objtable::{InstallError, ObjError, ObjId, ObjectTable, Released, Slot};
+use kernel_core::pci::Bdf;
 
 use crate::proc::Process;
 use crate::sync::IrqSpinLock;
@@ -35,6 +36,14 @@ pub struct TaskObj {
     pub process: ObjId,
     /// 本线程的退出状态（持有一个内部引用）。
     pub exit_state: ObjId,
+}
+
+/// 设备对象（句柄可见）。只记录启动期设备表中的 BDF；设备表项本身常驻，不随句柄关闭而消失。
+/// Device object: a handle to one entry of the boot-time PCI table.
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceObj {
+    /// 设备地址。
+    pub bdf: Bdf,
 }
 
 /// 内核对象表的具体类型（供需要在同一把锁内操作多个对象的模块使用）。
@@ -57,6 +66,9 @@ pub enum KObject {
     Endpoint(Box<crate::ipc::Endpoint>),
     /// 退出状态（强引用图最底层，无强引用出边）。
     ExitState(crate::exit_state::ExitState),
+    /// 设备（叶子对象：只指向常驻的启动期设备表项，不持有句柄）。
+    /// Device (leaf object referencing a permanent boot-time PCI table entry).
+    Device(DeviceObj),
 }
 
 impl KObject {
@@ -69,6 +81,7 @@ impl KObject {
             KObject::Ring(_) => "Ring",
             KObject::Endpoint(_) => "Endpoint",
             KObject::ExitState(_) => "ExitState",
+            KObject::Device(_) => "Device",
         }
     }
 }
@@ -189,7 +202,7 @@ pub fn run_cleanup(limit: usize) -> usize {
             KObject::Task(task) => {
                 let _ = release_internal(task.exit_state); // 线程 → 退出状态
             }
-            KObject::Event { .. } | KObject::ExitState(_) => {}
+            KObject::Event { .. } | KObject::ExitState(_) | KObject::Device(_) => {}
         }
         n += 1;
     }

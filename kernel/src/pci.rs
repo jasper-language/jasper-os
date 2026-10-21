@@ -101,6 +101,12 @@ impl Table {
     pub fn devices(&self) -> impl Iterator<Item = &Device> {
         self.entries[..self.count].iter().flatten()
     }
+
+    /// 按 BDF 查找已记录的功能；不存在返回 `None`（不触碰硬件，只查启动期快照）。
+    /// Looks up a recorded function by BDF; `None` when absent.
+    pub fn find(&self, bdf: Bdf) -> Option<&Device> {
+        self.devices().find(|device| device.bdf == bdf)
+    }
 }
 
 static TABLE: Once<Table> = Once::new();

@@ -1,0 +1,20 @@
+# user-devprobe —— DRV-1C 用户态演练：列出 PCI 设备、打开 virtio-net、读取完整描述，
+# 并验证非法 BDF / 无设备访问能力 / 已关闭句柄 / 权限越级复制等拒绝路径。
+# 只经系统调用与内核交互；记录布局取自 kernel-core 的 device 模块（与内核同一份定义）。
+[package]
+name = "user-devprobe"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "user-devprobe"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+kernel-core = { path = "../../kernel-core" }
+
+[build-dependencies]
+kernel-core = { path = "../../kernel-core" }
