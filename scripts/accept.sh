@@ -5,7 +5,8 @@
 # 做什么：
 #   1. 宿主单元测试（kernel-core）与裸机目标编译
 #   2. 构建内核与可引导镜像，在 QEMU 中**真实启动一次**，保存原始串口日志；
-#      同一内核再以 AArch64 与 RISC-V64 构建，各在对应的 QEMU 中真实启动一次
+#      默认只验 x86_64（JASPER_ARCHES=x86_64）；JASPER_ARCHES=all 时同一内核再以 AArch64 /
+#      RISC-V64 / RISC-V32 构建，各在对应的 QEMU 中真实启动一次
 #   3. 按各里程碑的判据逐项检查同一份串口日志，打印 PASS/FAIL 表
 #   4. 全部证据（构建日志、测试日志、串口日志、汇总表）归档到 evidence/accept-<时间戳>/
 #
@@ -18,6 +19,9 @@
 #         JASPER_CORES=8-11 bash scripts/accept.sh
 #         JASPER_PROFILE=compact bash scripts/accept.sh   （内核配置档：standard（默认）| compact）
 #         JASPER_QEMU_TIMEOUT=300 bash scripts/accept.sh  （单次 QEMU 启动的时限，秒；默认 90。较慢的托管运行器上放宽）
+#         JASPER_ARCHES=all bash scripts/accept.sh        （架构范围：x86_64（默认）| all；默认只构建/启动 x86_64，
+#                                                         AArch64 / RISC-V64 / RISC-V32 冻结记 N/A；all 恢复四指令集全量验收）
+# 架构裁决（用户 2026-10-21）：jasper-os 暂时只针对 x86_64 开发，AArch64 / RISC-V64 / RISC-V32 冻结、「后续再补上」。
 # 为什么默认用最后几个核：前几个核（尤其 CPU 0）通常承担显卡、硬盘等设备中断与按核的内核后台工作；
 # 把它们压满会让桌面失去响应。构建与 QEMU 一律以 nice 19 / ionice 空闲级运行，桌面需要时随时让出。
 # 退出码：0 = 全部 PASS；1 = 至少一项 FAIL；2 = 环境缺失（无 cargo / qemu）
@@ -55,6 +59,25 @@ case "$SCHED_POLICY" in
   rr) SFEAT=(--features sched-rr) ;;
   *) echo "✗ 未知调度策略：$SCHED_POLICY（可选 ts / rr）"; exit 2 ;;
 esac
+# 架构范围（AN，用户 2026-10-21 裁决）：默认只构建并启动 x86_64；AArch64 / RISC-V64 / RISC-V32 冻结，
+# 相关构建、QEMU 启动与宿主交叉测试全部跳过，只依赖它们的判据如实记 N/A（不计入通过）。
+# JASPER_ARCHES=all 恢复此前的四指令集全量验收，行为与默认引入前完全一致。
+ARCHES="${JASPER_ARCHES:-x86_64}"
+case "$ARCHES" in
+  x86_64) ARCH_ALL=0 ;;
+  all)    ARCH_ALL=1 ;;
+  *) echo "✗ 未知架构范围：$ARCHES（可选 x86_64 / all）"; exit 2 ;;
+esac
+if [ "$ARCH_ALL" -eq 1 ]; then
+  ARCH_DESC="x86_64 / AArch64 / RISC-V64 / RISC-V32"
+  ARCH_SCOPE="四个指令集"
+  ARCH_X86_SMP_DESC="x86_64 单核与 x86_64/AArch64/RISC-V64 4 处理器"
+else
+  ARCH_DESC="x86_64"
+  ARCH_SCOPE="x86_64"
+  ARCH_X86_SMP_DESC="x86_64 单核与 x86_64 4 处理器"
+fi
+ARCH_NA_REASON="架构冻结（用户 2026-10-21），未运行、不计入通过"
 TS="$(date '+%Y%m%d-%H%M%S')"
 OUT="$ROOT/evidence/accept-$TS"
 IMG="$ROOT/images/jasper-kernel.img"
@@ -120,7 +143,9 @@ BUILD_RC=$?
 # 多指令集：kernel-core 在全部目标指令集上编译；单元测试在 64 位与 32 位上运行；
 # 装有 qemu-user 时再在 AArch64 / RISC-V64 上运行（用 musl 目标 + 自带的 rust-lld 链接，不依赖交叉 C 工具链）。
 ISA_BUILD_FAIL=""
-for t in x86_64-unknown-none aarch64-unknown-none riscv64gc-unknown-none-elf riscv32imac-unknown-none-elf; do
+ISA_TARGETS=(x86_64-unknown-none)
+[ "$ARCH_ALL" -eq 1 ] && ISA_TARGETS+=(aarch64-unknown-none riscv64gc-unknown-none-elf riscv32imac-unknown-none-elf)
+for t in "${ISA_TARGETS[@]}"; do
   run cargo build --release --target "$t" -p kernel-core >> "$OUT/isa-build.log" 2>&1 || ISA_BUILD_FAIL="$ISA_BUILD_FAIL $t"
 done
 # isa_test <rust 目标> <可选 qemu-user 运行器>：运行 kernel-core 单元测试，输出写到 isa-test-<目标>.log
@@ -132,14 +157,16 @@ isa_test() {
 }
 ISA_TESTS_RAN=""; ISA_TESTS_FAIL=""; ISA_TESTS_SKIPPED=""
 if isa_test i686-unknown-linux-musl; then ISA_TESTS_RAN="$ISA_TESTS_RAN 32位"; else ISA_TESTS_FAIL="$ISA_TESTS_FAIL 32位"; fi
-for pair in "aarch64-unknown-linux-musl:qemu-aarch64:AArch64" "riscv64gc-unknown-linux-musl:qemu-riscv64:RISC-V64"; do
-  IFS=: read -r t q label <<< "$pair"
-  if command -v "$q" >/dev/null && rustup target list --installed 2>/dev/null | grep -qx "$t"; then
-    if isa_test "$t" "$q"; then ISA_TESTS_RAN="$ISA_TESTS_RAN $label"; else ISA_TESTS_FAIL="$ISA_TESTS_FAIL $label"; fi
-  else
-    ISA_TESTS_SKIPPED="$ISA_TESTS_SKIPPED $label"
-  fi
-done
+if [ "$ARCH_ALL" -eq 1 ]; then
+  for pair in "aarch64-unknown-linux-musl:qemu-aarch64:AArch64" "riscv64gc-unknown-linux-musl:qemu-riscv64:RISC-V64"; do
+    IFS=: read -r t q label <<< "$pair"
+    if command -v "$q" >/dev/null && rustup target list --installed 2>/dev/null | grep -qx "$t"; then
+      if isa_test "$t" "$q"; then ISA_TESTS_RAN="$ISA_TESTS_RAN $label"; else ISA_TESTS_FAIL="$ISA_TESTS_FAIL $label"; fi
+    else
+      ISA_TESTS_SKIPPED="$ISA_TESTS_SKIPPED $label"
+    fi
+  done
+fi
 
 QRC=-1
 if [ "$BUILD_RC" -eq 0 ]; then
@@ -163,88 +190,106 @@ if [ "$BUILD_RC" -eq 0 ]; then
 fi
 # AArch64（ISA-1）：同一内核以软浮点目标构建（不内嵌用户程序），在 QEMU virt 上直接装载 ELF 启动；
 # 退出经半主机（成功 33、失败 35，与 x86_64 一致）。缺少 qemu-system-aarch64 时如实记为失败。
-QEMU_A64="$(command -v qemu-system-aarch64 || true)"
+# 架构冻结（AN）：仅在 JASPER_ARCHES=all 时构建与启动；默认 x86_64 时变量保持「未运行」初值。
+QEMU_A64=""
 SERIAL_A64="$OUT/serial-aarch64.log"
 A64_ELF="$ROOT/target/aarch64-unknown-none-softfloat/release/jasper-kernel"
 QRC_A64=-1
-run cargo build --release --target aarch64-unknown-none-softfloat -p jasper-kernel "${KFEAT[@]}" "${SFEAT[@]}" > "$OUT/build-aarch64.log" 2>&1 \
-  && bootcap_patch "$A64_ELF"
-A64_BUILD_RC=$?
-if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ]; then
-  echo "== QEMU 真实启动（AArch64）=="
-  sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -kernel "$A64_ELF" -semihosting \
-    -serial stdio -display none -monitor none -no-reboot > "$SERIAL_A64" 2>&1
-  QRC_A64=$?
-fi
-# 多处理器（SMP-1b-A64）：同一 AArch64 内核以 4 个处理器再真实启动一次（设备树处理器节点 + PSCI 唤醒 + GIC 软件生成中断）。
+A64_BUILD_RC=1
 SERIAL_A64_SMP4="$OUT/serial-aarch64-smp4.log"
 QRC_A64_SMP4=-1
-if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ]; then
-  echo "== QEMU 真实启动（AArch64，4 个处理器）=="
-  sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -smp 4 -kernel "$A64_ELF" -semihosting \
-    -serial stdio -display none -monitor none -no-reboot > "$SERIAL_A64_SMP4" 2>&1
-  QRC_A64_SMP4=$?
+if [ "$ARCH_ALL" -eq 1 ]; then
+  QEMU_A64="$(command -v qemu-system-aarch64 || true)"
+  run cargo build --release --target aarch64-unknown-none-softfloat -p jasper-kernel "${KFEAT[@]}" "${SFEAT[@]}" > "$OUT/build-aarch64.log" 2>&1 \
+    && bootcap_patch "$A64_ELF"
+  A64_BUILD_RC=$?
+  if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ]; then
+    echo "== QEMU 真实启动（AArch64）=="
+    sleep "$BOOT_GAP"
+    run timeout "$QEMU_TIMEOUT" "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -kernel "$A64_ELF" -semihosting \
+      -serial stdio -display none -monitor none -no-reboot > "$SERIAL_A64" 2>&1
+    QRC_A64=$?
+  fi
+  # 多处理器（SMP-1b-A64）：同一 AArch64 内核以 4 个处理器再真实启动一次（设备树处理器节点 + PSCI 唤醒 + GIC 软件生成中断）。
+  if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ]; then
+    echo "== QEMU 真实启动（AArch64，4 个处理器）=="
+    sleep "$BOOT_GAP"
+    run timeout "$QEMU_TIMEOUT" "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -smp 4 -kernel "$A64_ELF" -semihosting \
+      -serial stdio -display none -monitor none -no-reboot > "$SERIAL_A64_SMP4" 2>&1
+    QRC_A64_SMP4=$?
+  fi
 fi
 # RISC-V64（ISA-2）：同一内核以软浮点目标 riscv64imac 构建（内嵌的用户程序与模块同样以 riscv64imac 构建），由 QEMU virt 默认的 OpenSBI
 # 以监管态装载 ELF 启动；退出经仿真器测试设备（成功 33、失败 35，与 x86_64 一致）。缺少 qemu-system-riscv64 时如实记为失败。
-QEMU_RV64="$(command -v qemu-system-riscv64 || true)"
+# 架构冻结（AN）：仅在 JASPER_ARCHES=all 时构建与启动。
+QEMU_RV64=""
 SERIAL_RV64="$OUT/serial-riscv64.log"
 RV64_ELF="$ROOT/target/riscv64imac-unknown-none-elf/release/jasper-kernel"
 QRC_RV64=-1
-run cargo build --release --target riscv64imac-unknown-none-elf -p jasper-kernel "${KFEAT[@]}" "${SFEAT[@]}" > "$OUT/build-riscv64.log" 2>&1 \
-  && bootcap_patch "$RV64_ELF"
-RV64_BUILD_RC=$?
-if [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ]; then
-  echo "== QEMU 真实启动（RISC-V64）=="
-  sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU_RV64" -M virt -m 256M -kernel "$RV64_ELF" \
-    -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV64" 2>&1
-  QRC_RV64=$?
+RV64_BUILD_RC=1
+SERIAL_RV64_SMP4="$OUT/serial-riscv64-smp4.log"; QRC_RV64_SMP4=-1
+if [ "$ARCH_ALL" -eq 1 ]; then
+  QEMU_RV64="$(command -v qemu-system-riscv64 || true)"
+  run cargo build --release --target riscv64imac-unknown-none-elf -p jasper-kernel "${KFEAT[@]}" "${SFEAT[@]}" > "$OUT/build-riscv64.log" 2>&1 \
+    && bootcap_patch "$RV64_ELF"
+  RV64_BUILD_RC=$?
+  if [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ]; then
+    echo "== QEMU 真实启动（RISC-V64）=="
+    sleep "$BOOT_GAP"
+    run timeout "$QEMU_TIMEOUT" "$QEMU_RV64" -M virt -m 256M -kernel "$RV64_ELF" \
+      -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV64" 2>&1
+    QRC_RV64=$?
+  fi
+  # 多处理器（SMP-1b-RV）：同一 RISC-V64 内核以 4 个处理器再真实启动一次（设备树处理器节点 + SBI HSM 唤醒 + SBI IPI 软件中断）。
+  if [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ]; then
+    echo "== QEMU 真实启动（RISC-V64，4 个处理器）=="
+    sleep "$BOOT_GAP"
+    run timeout "$QEMU_TIMEOUT" "$QEMU_RV64" -M virt -m 256M -smp 4 -kernel "$RV64_ELF" \
+      -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV64_SMP4" 2>&1
+    QRC_RV64_SMP4=$?
+  fi
 fi
 # RISC-V32（ISA-3）：同一内核以 riscv32imac 构建（Sv32 页表、32 位寄存器），内嵌的用户程序与模块同样以 riscv32imac
 # 构建（ELF32、32 位用户 ABI；模块连同标准库按位置无关模型编译）；由 QEMU virt 默认的 32 位 OpenSBI
 # 以监管态装载 ELF 启动，退出经仿真器测试设备（成功 33、失败 35）。缺少 qemu-system-riscv32 时如实记为失败。
-QEMU_RV32="$(command -v qemu-system-riscv32 || true)"
-# 32 位 OpenSBI 固件：有的发行版只带 64 位固件，QEMU 找不到时它会直接报错退出。
-# 找到就显式指定 -bios；找不到则该目标如实记为「不可用」，不冒充通过。
-# JASPER_RV32_BIOS 可显式指定固件路径（例如 CI 自带固件时）；显式设为空串表示按「缺少固件」处理，
-# 用于在本机如实复现没有 32 位固件的环境，验证跳过路径本身，而不是绕过任何判据。
-RV32_FW="${JASPER_RV32_BIOS-$(ls /usr/lib/riscv32-linux-gnu/opensbi/generic/fw_dynamic.bin 2>/dev/null | head -1)}"
-RV32_BIOS=(); [ -n "$RV32_FW" ] && RV32_BIOS=(-bios "$RV32_FW")
+# 架构冻结（AN）：仅在 JASPER_ARCHES=all 时构建与启动。
+QEMU_RV32=""
+RV32_FW=""
+RV32_BIOS=()
 SERIAL_RV32="$OUT/serial-riscv32.log"
 RV32_ELF="$ROOT/target/riscv32imac-unknown-none-elf/release/jasper-kernel"
 QRC_RV32=-1
-run cargo build --release --target riscv32imac-unknown-none-elf -p jasper-kernel "${KFEAT[@]}" "${SFEAT[@]}" > "$OUT/build-riscv32.log" 2>&1 \
-  && bootcap_patch "$RV32_ELF"
-RV32_BUILD_RC=$?
-if [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ]; then
-  echo "== QEMU 真实启动（RISC-V32）=="
-  sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M "${RV32_BIOS[@]}" -kernel "$RV32_ELF" \
-    -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV32" 2>&1
-  QRC_RV32=$?
-  grep -q 'Unable to find the RISC-V BIOS' "$SERIAL_RV32" 2>/dev/null && QRC_RV32=-2
-fi
-# 多处理器（SMP-1b-RV）：同一 RISC-V64 / RISC-V32 内核各以 4 个处理器再真实启动一次（设备树处理器节点 + SBI HSM 唤醒 + SBI IPI 软件中断）。
-SERIAL_RV64_SMP4="$OUT/serial-riscv64-smp4.log"; QRC_RV64_SMP4=-1
-if [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ]; then
-  echo "== QEMU 真实启动（RISC-V64，4 个处理器）=="
-  sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU_RV64" -M virt -m 256M -smp 4 -kernel "$RV64_ELF" \
-    -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV64_SMP4" 2>&1
-  QRC_RV64_SMP4=$?
-fi
+RV32_BUILD_RC=1
 SERIAL_RV32_SMP4="$OUT/serial-riscv32-smp4.log"; QRC_RV32_SMP4=-1
-if [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ]; then
-  echo "== QEMU 真实启动（RISC-V32，4 个处理器）=="
-  sleep "$BOOT_GAP"
-  run timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M -smp 4 "${RV32_BIOS[@]}" -kernel "$RV32_ELF" \
-    -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV32_SMP4" 2>&1
-  QRC_RV32_SMP4=$?
-  grep -q 'Unable to find the RISC-V BIOS' "$SERIAL_RV32_SMP4" 2>/dev/null && QRC_RV32_SMP4=-2
+if [ "$ARCH_ALL" -eq 1 ]; then
+  QEMU_RV32="$(command -v qemu-system-riscv32 || true)"
+  # 32 位 OpenSBI 固件：有的发行版只带 64 位固件，QEMU 找不到时它会直接报错退出。
+  # 找到就显式指定 -bios；找不到则该目标如实记为「不可用」，不冒充通过。
+  # JASPER_RV32_BIOS 可显式指定固件路径（例如 CI 自带固件时）；显式设为空串表示按「缺少固件」处理，
+  # 用于在本机如实复现没有 32 位固件的环境，验证跳过路径本身，而不是绕过任何判据。
+  RV32_FW="${JASPER_RV32_BIOS-$(ls /usr/lib/riscv32-linux-gnu/opensbi/generic/fw_dynamic.bin 2>/dev/null | head -1)}"
+  RV32_BIOS=(); [ -n "$RV32_FW" ] && RV32_BIOS=(-bios "$RV32_FW")
+  run cargo build --release --target riscv32imac-unknown-none-elf -p jasper-kernel "${KFEAT[@]}" "${SFEAT[@]}" > "$OUT/build-riscv32.log" 2>&1 \
+    && bootcap_patch "$RV32_ELF"
+  RV32_BUILD_RC=$?
+  if [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ]; then
+    echo "== QEMU 真实启动（RISC-V32）=="
+    sleep "$BOOT_GAP"
+    run timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M "${RV32_BIOS[@]}" -kernel "$RV32_ELF" \
+      -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV32" 2>&1
+    QRC_RV32=$?
+    grep -q 'Unable to find the RISC-V BIOS' "$SERIAL_RV32" 2>/dev/null && QRC_RV32=-2
+  fi
+  if [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ]; then
+    echo "== QEMU 真实启动（RISC-V32，4 个处理器）=="
+    sleep "$BOOT_GAP"
+    run timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M -smp 4 "${RV32_BIOS[@]}" -kernel "$RV32_ELF" \
+      -serial stdio -display none -monitor none -no-reboot > "$SERIAL_RV32_SMP4" 2>&1
+    QRC_RV32_SMP4=$?
+    grep -q 'Unable to find the RISC-V BIOS' "$SERIAL_RV32_SMP4" 2>/dev/null && QRC_RV32_SMP4=-2
+  fi
 fi
+
 
 # 本机 QEMU 缺少 32 位 OpenSBI 固件时（有的发行版只打包 64 位固件），RISC-V32 目标不可运行。
 # 两个 RISC-V32 启动中任一报告固件缺失，即认定该目标不可用：相关判定如实跳过并注明，
@@ -289,9 +334,11 @@ if [ "$BUILD_RC" -eq 0 ]; then
   caprej_x86 oor tasks=4096
   caprej_x86 inconsistent tasks=16 rt=16
   caprej_x86 corrupt record=corrupt
-  [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ] && caprej_elf a64 "$A64_ELF" "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -kernel @ELF@ -semihosting
-  [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ] && caprej_elf rv64 "$RV64_ELF" "$QEMU_RV64" -M virt -m 256M -kernel @ELF@
-  [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ] && ! rv32_fw_missing && caprej_elf rv32 "$RV32_ELF" "$QEMU_RV32" -M virt -m 256M "${RV32_BIOS[@]}" -kernel @ELF@
+  if [ "$ARCH_ALL" -eq 1 ]; then
+    [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ] && caprej_elf a64 "$A64_ELF" "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -kernel @ELF@ -semihosting
+    [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ] && caprej_elf rv64 "$RV64_ELF" "$QEMU_RV64" -M virt -m 256M -kernel @ELF@
+    [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ] && ! rv32_fw_missing && caprej_elf rv32 "$RV32_ELF" "$QEMU_RV32" -M virt -m 256M "${RV32_BIOS[@]}" -kernel @ELF@
+  fi
 fi
 
 # ---- 阶段 B：逐里程碑检查 ----------------------------------------------------
@@ -316,9 +363,11 @@ check_m10() {   # 骨架：kernel-core 宿主测试 + 裸机编译
   fi
 }
 
-check_isa() {   # 多指令集：kernel-core 四个目标指令集编译 + 单元测试在多个指令集 / 字长上运行（未运行的如实列出）
+check_isa() {   # 多指令集：kernel-core 目标指令集编译 + 单元测试在多个指令集 / 字长上运行（未运行的如实列出；默认只验 x86_64）
+  local built
+  if [ "$ARCH_ALL" -eq 1 ]; then built="x86_64/AArch64/RISC-V64/RISC-V32"; else built="x86_64（AArch64/RISC-V64/RISC-V32 已冻结）"; fi
   if [ -z "$ISA_BUILD_FAIL" ] && [ -z "$ISA_TESTS_FAIL" ] && [ -n "$ISA_TESTS_RAN" ]; then
-    record ISA PASS "kernel-core 编译：x86_64/AArch64/RISC-V64/RISC-V32 ✓；单元测试运行：x86_64${ISA_TESTS_RAN}${ISA_TESTS_SKIPPED:+；未运行（缺 qemu-user 或目标）：$ISA_TESTS_SKIPPED}"
+    record ISA PASS "kernel-core 编译：$built ✓；单元测试运行：x86_64${ISA_TESTS_RAN}${ISA_TESTS_SKIPPED:+；未运行（缺 qemu-user 或目标）：$ISA_TESTS_SKIPPED}"
   else
     record ISA FAIL "编译失败：${ISA_BUILD_FAIL:-无}；测试失败：${ISA_TESTS_FAIL:-无}（见 isa-build.log / isa-test-*.log）"
   fi
@@ -921,6 +970,7 @@ check_smp1a() { # 多处理器第一阶段（x86_64）：4 个处理器全部报
 
 check_smp1b_a64() { # 多处理器第二阶段（AArch64）：设备树发现 4 个处理器、PSCI CPU_ON 全部报到、各核虚拟定时器各自计时、
                      # GIC 软件生成中断（重新调度 / 跨核调用 / TLB 击落）、拒绝路径；全部 AArch64 串口检查在 4 处理器日志上逐项重跑（行名带 A64SMP4/ 前缀）
+  if [ "$ARCH_ALL" -eq 0 ]; then record_na SMP-1b-A64 "$ARCH_NA_REASON"; return; fi
   if [ "$A64_BUILD_RC" -ne 0 ] || [ ! -s "$SERIAL_A64_SMP4" ]; then
     record SMP-1b-A64 FAIL "AArch64 4 处理器启动没有串口日志（构建 rc=$A64_BUILD_RC，QEMU=$QRC_A64_SMP4）"
     return
@@ -986,6 +1036,7 @@ rv_smp4_verdict() {
 check_smp1b_rv() { # 多处理器第二阶段（RISC-V64 与 RISC-V32）：设备树发现 4 个处理器、SBI HSM hart_start 全部报到、各核本地定时器各自计时、
                     # SBI IPI 软件中断（重新调度 / 跨核调用 / TLB 击落）、拒绝路径；全部 RISC-V 串口检查在两份 4 处理器日志上逐项重跑
                     # （行名带 RV64SMP4/、RV32SMP4/ 前缀）；单处理器启动如实报告只有引导处理器
+  if [ "$ARCH_ALL" -eq 0 ]; then record_na SMP-1b-RV "$ARCH_NA_REASON"; return; fi
   local rv32skip=0; rv32_fw_missing && rv32skip=1
   if [ "$RV64_BUILD_RC" -ne 0 ] || [ "$RV32_BUILD_RC" -ne 0 ] || [ ! -s "$SERIAL_RV64_SMP4" ] \
      || { [ "$rv32skip" -eq 0 ] && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
@@ -1048,24 +1099,37 @@ smp1c_verdict() {
 }
 
 check_smp1c() { # 多处理器第三阶段（去全局串行点）：全局锁登记在一条级别链上并按每核持有集合检查顺序（逆序 / 重入被拒且无残留）；
-                # 调度器改为登记了级别的锁；控制台跨核整行输出；系统调用入口暂存位与内核栈登记每核一份；四个指令集的 4 处理器日志全部通过
-  if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || { ! rv32_fw_missing && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
-    record SMP-1c FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）"
-    return
+                # 调度器改为登记了级别的锁；控制台跨核整行输出；系统调用入口暂存位与内核栈登记每核一份；
+                # JASPER_ARCHES=all 时四个指令集的 4 处理器日志全部通过；默认只验 x86_64（单处理器与 4 处理器）
+  local sc_qrcs="$QRC_SMP4"
+  if [ "$ARCH_ALL" -eq 0 ]; then
+    if [ ! -s "$SERIAL_SMP4" ]; then
+      record SMP-1c FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4）"
+      return
+    fi
+  else
+    sc_qrcs="$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4"
+    if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || { ! rv32_fw_missing && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
+      record SMP-1c FAIL "缺少 4 处理器串口日志（QEMU=$sc_qrcs）"
+      return
+    fi
   fi
   SC_MISS=""
+  local scsingle sclist=("$SERIAL")
   smp1c_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64
-  smp1c_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64
-  smp1c_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64
-  rv32_fw_missing || smp1c_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
-  local scsingle sclist=("$SERIAL" "$SERIAL_A64" "$SERIAL_RV64")
-  rv32_fw_missing || sclist+=("$SERIAL_RV32")
+  if [ "$ARCH_ALL" -eq 1 ]; then
+    smp1c_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64
+    smp1c_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64
+    rv32_fw_missing || smp1c_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
+    sclist=("$SERIAL" "$SERIAL_A64" "$SERIAL_RV64")
+    rv32_fw_missing || sclist+=("$SERIAL_RV32")
+  fi
   for scsingle in "${sclist[@]}"; do
     grep -qa '^\[JSR-SMPC\] single cpus=1 cross_cpu=skipped' "$scsingle" \
       && grep -qa '^\[JSR-SMPC\] order ascending=ok reverse=system\.lock\.error\.out_of_order' "$scsingle" || SC_MISS="$SC_MISS 单处理器($(basename "$scsingle"))"
   done
   if [ -z "$SC_MISS" ]; then
-    record SMP-1c PASS "x86_64 / AArch64 / RISC-V64 / RISC-V32 -smp 4（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）：$(grep -caE '^\[JSR-SMPC\] rank ' "$SERIAL_SMP4") 把全局锁登记成一条级别链，逆序 / 重入被拒且持有集合与中断状态不变，持有集合每核独立 3/3；4 核同时各打印 16 行共 64 行无一交错；其他 3 核各 2000 次读调度器与引导处理器改写并发、状态一致、无死锁；内核栈登记（x86_64 经每核 KERNEL_GS_BASE 入口块）每核独立 3/3；无锁顺序违反；单处理器如实跳过跨核部分$RV32_NOTE"
+    record SMP-1c PASS "$ARCH_DESC -smp 4（QEMU=$sc_qrcs）：$(grep -caE '^\[JSR-SMPC\] rank ' "$SERIAL_SMP4") 把全局锁登记成一条级别链，逆序 / 重入被拒且持有集合与中断状态不变，持有集合每核独立 3/3；4 核同时各打印 16 行共 64 行无一交错；其他 3 核各 2000 次读调度器与引导处理器改写并发、状态一致、无死锁；内核栈登记（x86_64 经每核 KERNEL_GS_BASE 入口块）每核独立 3/3；无锁顺序违反；单处理器如实跳过跨核部分$RV32_NOTE"
   else
     record SMP-1c FAIL "缺少/不符：$SC_MISS"
   fi
@@ -1091,24 +1155,37 @@ smp2_verdict() {
 
 check_smp2() { # 每核运行队列 + 负载均衡：N 核 N 任务各核都忙、空闲窃取有界、全部核过载时交互延迟有上界、压力撤销后立即恢复、
   if [ "$SCHED_POLICY" = "rr" ]; then record_na SMP-2 "过载交互延迟与跨核继承依赖 QoS 保证，纯轮转构建不适用；已在分时构建中通过"; return; fi
-               # 亲和集合与迁移、跨核优先级继承与 CPU 上限、拒绝路径无残留；四个指令集的 4 处理器日志全部通过，单处理器如实跳过
-  if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || { ! rv32_fw_missing && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
-    record SMP-2 FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）"
-    return
+               # 亲和集合与迁移、跨核优先级继承与 CPU 上限、拒绝路径无残留；JASPER_ARCHES=all 时四个指令集的 4 处理器日志全部通过，
+               # 默认只验 x86_64（单处理器与 4 处理器），单处理器如实跳过
+  local s2_qrcs="$QRC_SMP4"
+  if [ "$ARCH_ALL" -eq 0 ]; then
+    if [ ! -s "$SERIAL_SMP4" ]; then
+      record SMP-2 FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4）"
+      return
+    fi
+  else
+    s2_qrcs="$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4"
+    if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || { ! rv32_fw_missing && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
+      record SMP-2 FAIL "缺少 4 处理器串口日志（QEMU=$s2_qrcs）"
+      return
+    fi
   fi
   S2_MISS=""
+  local s2single s2list=("$SERIAL")
   smp2_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64
-  smp2_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64
-  smp2_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64
-  rv32_fw_missing || smp2_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
-  local s2single s2list=("$SERIAL" "$SERIAL_A64" "$SERIAL_RV64")
-  rv32_fw_missing || s2list+=("$SERIAL_RV32")
+  if [ "$ARCH_ALL" -eq 1 ]; then
+    smp2_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64
+    smp2_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64
+    rv32_fw_missing || smp2_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
+    s2list=("$SERIAL" "$SERIAL_A64" "$SERIAL_RV64")
+    rv32_fw_missing || s2list+=("$SERIAL_RV32")
+  fi
   for s2single in "${s2list[@]}"; do
     grep -qa '^\[JSR-SMP2\] single cpus=1 balance=skipped' "$s2single" \
       && grep -qaE '^\[JSR-SMP2\] summary cpus=1 .* failed=0' "$s2single" || S2_MISS="$S2_MISS 单处理器($(basename "$s2single"))"
   done
   if [ -z "$S2_MISS" ]; then
-    record SMP-2 PASS "x86_64 / AArch64 / RISC-V64 / RISC-V32 -smp 4（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）：每核运行队列；4 核 4 任务与 8 任务过载时各核忙碌 ≥85%、「本核空闲而别处有任务在等」≤2 tick；8 个任务全排在引导处理器队列时其他核窃取 ≥3 次；全部核过载时交互唤醒延迟 ≤2 tick（x86_64 实测 $(grep -aoE 'case=overload .*latency_max=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')）、压力撤销后 20 次唤醒延迟全为 0；亲和钉核 / 他人改 / 自己改均只在允许的核运行，非法集合被拒且不变；跨核优先级继承等待 ≤ 工作量 + 2；一组成员分散 4 核时整组用量不超过上限的界；资源回到基线；单处理器如实跳过$RV32_NOTE"
+    record SMP-2 PASS "$ARCH_DESC -smp 4（QEMU=$s2_qrcs）：每核运行队列；4 核 4 任务与 8 任务过载时各核忙碌 ≥85%、「本核空闲而别处有任务在等」≤2 tick；8 个任务全排在引导处理器队列时其他核窃取 ≥3 次；全部核过载时交互唤醒延迟 ≤2 tick（x86_64 实测 $(grep -aoE 'case=overload .*latency_max=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')）、压力撤销后 20 次唤醒延迟全为 0；亲和钉核 / 他人改 / 自己改均只在允许的核运行，非法集合被拒且不变；跨核优先级继承等待 ≤ 工作量 + 2；一组成员分散 4 核时整组用量不超过上限的界；资源回到基线；单处理器如实跳过$RV32_NOTE"
   else
     record SMP-2 FAIL "缺少/不符：$S2_MISS"
   fi
@@ -1137,18 +1214,32 @@ smp3_verdict() {
 
 check_smp3() { # 中断与服务的多核化：设备中断按亲和送达、均衡策略分散中断线、风暴下每核预算节流（交互延迟有上界、无单核被中断吃满）、
   if [ "$SCHED_POLICY" = "rr" ]; then record_na SMP-3 "中断风暴下的交互延迟判据依赖 QoS 保证，纯轮转构建不适用；已在分时构建中通过"; return; fi
-               # 风暴撤销后立即恢复、分片服务各核并行且均衡、拒绝路径无残留；四个指令集的 4 处理器日志全部通过，单处理器如实跳过
-  if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || { ! rv32_fw_missing && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
-    record SMP-3 FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）"
-    return
+               # 风暴撤销后立即恢复、分片服务各核并行且均衡、拒绝路径无残留；JASPER_ARCHES=all 时四个指令集的 4 处理器日志全部通过，
+               # 默认只验 x86_64（单处理器与 4 处理器），单处理器如实跳过
+  local s3_qrcs="$QRC_SMP4" s3_archdesc="x86_64（I/O APIC）"
+  if [ "$ARCH_ALL" -eq 0 ]; then
+    if [ ! -s "$SERIAL_SMP4" ]; then
+      record SMP-3 FAIL "缺少 4 处理器串口日志（QEMU=$QRC_SMP4）"
+      return
+    fi
+  else
+    s3_qrcs="$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4"
+    s3_archdesc="x86_64（I/O APIC）/ AArch64（GICv2 共享外设中断）/ RISC-V64 / RISC-V32（PLIC 每核上下文）"
+    if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_A64_SMP4" ] || [ ! -s "$SERIAL_RV64_SMP4" ] || { ! rv32_fw_missing && [ ! -s "$SERIAL_RV32_SMP4" ]; }; then
+      record SMP-3 FAIL "缺少 4 处理器串口日志（QEMU=$s3_qrcs）"
+      return
+    fi
   fi
   S3_MISS=""
+  local s3single s3list=("$SERIAL")
   smp3_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64
-  smp3_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64
-  smp3_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64
-  rv32_fw_missing || smp3_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
-  local s3single s3list=("$SERIAL" "$SERIAL_A64" "$SERIAL_RV64")
-  rv32_fw_missing || s3list+=("$SERIAL_RV32")
+  if [ "$ARCH_ALL" -eq 1 ]; then
+    smp3_verdict "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" AArch64
+    smp3_verdict "$SERIAL_RV64_SMP4" "$QRC_RV64_SMP4" RV64
+    rv32_fw_missing || smp3_verdict "$SERIAL_RV32_SMP4" "$QRC_RV32_SMP4" RV32
+    s3list=("$SERIAL" "$SERIAL_A64" "$SERIAL_RV64")
+    rv32_fw_missing || s3list+=("$SERIAL_RV32")
+  fi
   for s3single in "${s3list[@]}"; do
     grep -qa '^\[JSR-SMP3\] single cpus=1 spread=skipped' "$s3single" \
       && grep -qaE '^\[JSR-SMP3\] summary cpus=1 .* failed=0' "$s3single" || S3_MISS="$S3_MISS 单处理器($(basename "$s3single"))"
@@ -1157,7 +1248,7 @@ check_smp3() { # 中断与服务的多核化：设备中断按亲和送达、均
     local lat sp
     lat=$(grep -aoE 'case=storm .*latency_max=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')
     sp=$(grep -aoE 'case=service .*speedup_permille=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')
-    record SMP-3 PASS "x86_64（I/O APIC）/ AArch64（GICv2 共享外设中断）/ RISC-V64 / RISC-V32（PLIC 每核上下文）-smp 4（QEMU=$QRC_SMP4/$QRC_A64_SMP4/$QRC_RV64_SMP4/$QRC_RV32_SMP4）：两条设备中断线依次钉到 4 个核，只在该核处理 4/4；两条线都在 0 号核时对照策略不搬、均衡策略两个周期内分到不同的核；两条线持续风暴 + 8 个吃满处理器的任务时交互唤醒延迟 ≤2 tick（x86_64 实测 $lat）、各核都忙、每核中断次数与时间不超过预算的界、风暴分散到多个核；撤销后无中断、延迟全为 0；分片服务 128 个流 512 个请求 4 分片比 1 分片快（x86_64 ${sp}‰）、不均衡度 ≤350‰、流内有序；拒绝路径无残留；单处理器如实跳过$RV32_NOTE"
+    record SMP-3 PASS "$s3_archdesc -smp 4（QEMU=$s3_qrcs）：两条设备中断线依次钉到 4 个核，只在该核处理 4/4；两条线都在 0 号核时对照策略不搬、均衡策略两个周期内分到不同的核；两条线持续风暴 + 8 个吃满处理器的任务时交互唤醒延迟 ≤2 tick（x86_64 实测 $lat）、各核都忙、每核中断次数与时间不超过预算的界、风暴分散到多个核；撤销后无中断、延迟全为 0；分片服务 128 个流 512 个请求 4 分片比 1 分片快（x86_64 ${sp}‰）、不均衡度 ≤350‰、流内有序；拒绝路径无残留；单处理器如实跳过$RV32_NOTE"
   else
     record SMP-3 FAIL "缺少/不符：$S3_MISS"
   fi
@@ -1166,6 +1257,7 @@ check_smp3() { # 中断与服务的多核化：设备中断按亲和送达、均
 a64_ready() { [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ] && [ -s "$SERIAL_A64" ]; }
 
 check_isa1a() { # AArch64 移植第一阶段：内核侧检查在 qemu-system-aarch64 的串口日志上逐项重跑（行名带 A64/ 前缀）
+  if [ "$ARCH_ALL" -eq 0 ]; then record_na ISA1a "$ARCH_NA_REASON"; return; fi
   if ! a64_ready; then
     record ISA1a FAIL "AArch64 构建 rc=$A64_BUILD_RC 或缺少 qemu-system-aarch64 / 串口日志（见 build-aarch64.log）"
     return
@@ -1181,6 +1273,7 @@ check_isa1a() { # AArch64 移植第一阶段：内核侧检查在 qemu-system-aa
 }
 
 check_isa1b() { # AArch64 移植第二阶段：内嵌用户程序（独立 Rust 程序、ring / IPC、jasper-rt、.jaso 装载执行）的全部检查在 AArch64 上逐项重跑
+  if [ "$ARCH_ALL" -eq 0 ]; then record_na ISA1b "$ARCH_NA_REASON"; return; fi
   if ! a64_ready; then
     record ISA1b FAIL "AArch64 构建 rc=$A64_BUILD_RC 或缺少 qemu-system-aarch64 / 串口日志（见 build-aarch64.log）"
     return
@@ -1200,6 +1293,7 @@ check_isa1b() { # AArch64 移植第二阶段：内嵌用户程序（独立 Rust 
 rv64_ready() { [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ] && [ -s "$SERIAL_RV64" ]; }
 
 check_isa2a() { # RISC-V64 移植第一阶段：与 AArch64 第一阶段同一组内核侧检查在 qemu-system-riscv64 的串口日志上逐项重跑（行名带 RV64/ 前缀）
+  if [ "$ARCH_ALL" -eq 0 ]; then record_na ISA2a "$ARCH_NA_REASON"; return; fi
   if ! rv64_ready; then
     record ISA2a FAIL "RISC-V64 构建 rc=$RV64_BUILD_RC 或缺少 qemu-system-riscv64 / 串口日志（见 build-riscv64.log）"
     return
@@ -1217,6 +1311,7 @@ check_isa2a() { # RISC-V64 移植第一阶段：与 AArch64 第一阶段同一�
 }
 
 check_isa2b() { # RISC-V64 移植第二阶段：内嵌用户程序（独立 Rust 程序、ring / IPC、jasper-rt、.jaso 装载执行）的全部检查在 RISC-V64 上逐项重跑
+  if [ "$ARCH_ALL" -eq 0 ]; then record_na ISA2b "$ARCH_NA_REASON"; return; fi
   if ! rv64_ready; then
     record ISA2b FAIL "RISC-V64 构建 rc=$RV64_BUILD_RC 或缺少 qemu-system-riscv64 / 串口日志（见 build-riscv64.log）"
     return
@@ -1245,6 +1340,7 @@ rv32_ready() { [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ] && [ -s "$SERIA
 rv32_unavailable() { rv32_fw_missing; }
 
 check_isa3a() { # RISC-V32 移植第一阶段：同一组内核侧检查在 qemu-system-riscv32 的串口日志上逐项重跑（行名带 RV32/ 前缀），
+  if [ "$ARCH_ALL" -eq 0 ]; then record_na ISA3a "$ARCH_NA_REASON"; return; fi
   if rv32_unavailable; then record_na ISA3a "本机 QEMU 缺少 32 位 OpenSBI 固件（fw_dynamic.bin），RISC-V32 目标不可运行；构建本身通过，已在有固件的机器上验证"; return; fi
                 # 并要求 64 位计数单元在没有 64 位原子指令的目标上以「关中断 + 自旋锁」实现、与定时器中断共享时不自锁
   if ! rv32_ready; then
@@ -1271,6 +1367,7 @@ check_isa3a() { # RISC-V32 移植第一阶段：同一组内核侧检查在 qemu
 }
 
 check_isa3b() { # RISC-V32 移植第二阶段：内嵌用户程序（ELF32 装载、32 位用户 ABI 下的 64 位参数、jasper-rt、ring / IPC、
+  if [ "$ARCH_ALL" -eq 0 ]; then record_na ISA3b "$ARCH_NA_REASON"; return; fi
   if rv32_unavailable; then record_na ISA3b "本机 QEMU 缺少 32 位 OpenSBI 固件（fw_dynamic.bin），RISC-V32 目标不可运行；构建本身通过，已在有固件的机器上验证"; return; fi
                 # .jaso 4 字节重定位）的全部检查在 RISC-V32 上逐项重跑（行名带 RV32/ 前缀）
   if ! rv32_ready; then
@@ -1347,11 +1444,17 @@ check_harden1b() { # 容量启动期化：对象表 / 任务表 / 实时表的�
   caprej_ok x86-oor "$oor" || miss="$miss x86越界"
   caprej_ok x86-inconsistent '^\[JSR-CAP\] reject field=rt value=16 min=1 max=15 reason=inconsistent' || miss="$miss x86不一致"
   caprej_ok x86-corrupt '^\[JSR-CAP\] reject field=record value=0 min=0 max=0 reason=bad_version' || miss="$miss x86记录损坏"
-  a64_ready && { caprej_ok a64-oor "$oor" || miss="$miss AArch64越界"; }
-  rv64_ready && { caprej_ok rv64-oor "$oor" || miss="$miss RISC-V64越界"; }
-  if rv32_ready && ! rv32_fw_missing; then caprej_ok rv32-oor "$oor" || miss="$miss RISC-V32越界"; fi
+  if [ "$ARCH_ALL" -eq 1 ]; then
+    a64_ready && { caprej_ok a64-oor "$oor" || miss="$miss AArch64越界"; }
+    rv64_ready && { caprej_ok rv64-oor "$oor" || miss="$miss RISC-V64越界"; }
+    if rv32_ready && ! rv32_fw_missing; then caprej_ok rv32-oor "$oor" || miss="$miss RISC-V32越界"; fi
+  fi
   if [ -z "$miss" ]; then
-    record HARDEN1B PASS "启动期容量（来源 $src）：对象 $o、任务 $t（全部有栈）、实时 $r；越界 / 不一致 / 记录损坏在启动期被拒并以失败退出（x86_64 三例 + 其余指令集越界）；宿主 $n 例$RV32_NOTE"
+    if [ "$ARCH_ALL" -eq 1 ]; then
+      record HARDEN1B PASS "启动期容量（来源 $src）：对象 $o、任务 $t（全部有栈）、实时 $r；越界 / 不一致 / 记录损坏在启动期被拒并以失败退出（x86_64 三例 + 其余指令集越界）；宿主 $n 例$RV32_NOTE"
+    else
+      record HARDEN1B PASS "启动期容量（来源 $src）：对象 $o、任务 $t（全部有栈）、实时 $r；越界 / 不一致 / 记录损坏在启动期被拒并以失败退出（x86_64 三例）；宿主 $n 例"
+    fi
   else
     record HARDEN1B FAIL "缺少：$miss"
   fi
@@ -1362,19 +1465,21 @@ check_harden1c() { # 长期运行与并发正确性①：用户指针复制与�
   local miss="" f name
   local nat='^\[JSR-UPTR-SMP\] mode=natural raced=[0-9]+ stale=0 attack_exit=Some\(0\) victim_exit=Some\(0\) free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 pending=0 pinned=\(0, 0\) reclaimed=true checks=[0-9]+ failed=0'
   local wide='^\[JSR-UPTR-SMP\] mode=wide raced=[1-9][0-9]* stale=0 attack_exit=Some\(0\) victim_exit=Some\(0\) free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 pending=0 pinned=\(0, 0\) reclaimed=true checks=[0-9]+ failed=0'
-  for pair in "$SERIAL:x86_64" "$SERIAL_SMP4:x86_64×4" "$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4"; do
+  local pairs=("$SERIAL:x86_64" "$SERIAL_SMP4:x86_64×4")
+  [ "$ARCH_ALL" -eq 1 ] && pairs+=("$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4")
+  for pair in "${pairs[@]}"; do
     f="${pair%%:*}"; name="${pair##*:}"
     grep -qaE "$nat" "$f" 2>/dev/null || miss="$miss $name:自然窗口"
     grep -qaE "$wide" "$f" 2>/dev/null || miss="$miss $name:撑大窗口"
     grep -qa '^\[JSR-UPTR-SMP-FAIL\]' "$f" 2>/dev/null && miss="$miss $name:失败断言"
     grep -qaE '^\[JSR-LONGRUN\] exit=Some\(0\) free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 pending=0 pinned=\(0, 0\) retired=([0-9]+)/\3 capacity=[0-9]+ reclaimed=true checks=[0-9]+ failed=0' "$f" 2>/dev/null || miss="$miss $name:长期运行"
   done
-  if rv32_ready && ! rv32_fw_missing; then
+  if [ "$ARCH_ALL" -eq 1 ] && rv32_ready && ! rv32_fw_missing; then
     grep -qaE "$wide" "$SERIAL_RV32_SMP4" 2>/dev/null || miss="$miss RV32×4:撑大窗口"
   fi
   grep -qaE '^test .* \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null || miss="$miss 宿主测试"
   if [ -z "$miss" ]; then
-    record HARDEN1C PASS "长期运行 1500 轮回到基线、对象槽位无退役；用户指针并发：攻击方翻页 + 内核读写同一页、受害方核对图案；自然窗口与撑大窗口（窗口内让出一个 tick）两轮都无跨进程读写，撑大窗口确实发生了固定期间被取消映射；资源回到基线（四个指令集，含 4 处理器）$RV32_NOTE"
+    record HARDEN1C PASS "长期运行 1500 轮回到基线、对象槽位无退役；用户指针并发：攻击方翻页 + 内核读写同一页、受害方核对图案；自然窗口与撑大窗口（窗口内让出一个 tick）两轮都无跨进程读写，撑大窗口确实发生了固定期间被取消映射；资源回到基线（$ARCH_SCOPE，含 4 处理器）$RV32_NOTE"
   else
     record HARDEN1C FAIL "缺少：$miss"
   fi
@@ -1386,8 +1491,11 @@ check_harden1e() { # 空闲停表（tickless idle）：同样长的全空闲窗�
   local miss="" f name
   local idle='^\[JSR-NOHZ\] case=idle cpus=[2-9][0-9]* window=[0-9]+ divisor=[2-9][0-9]* periodic_ticks=[0-9]+ nohz_ticks=[0-9]+ reduced=true stops=[1-9][0-9]* timekeeper_stopped=false accounted_min=[0-9]+ covered=true reclaimed=true'
   local wake='^\[JSR-NOHZ\] case=wake cpu=1 rounds=10 sleep=[0-9]+ samples=10 max=[0-2] bound=2 bounded=true stops=[1-9][0-9]* kicks=[0-9]+ reclaimed=true'
-  local pairs=("$SERIAL_SMP4:x86_64×4" "$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4")
-  rv32_ready && ! rv32_fw_missing && pairs+=("$SERIAL_RV32_SMP4:RV32×4")
+  local pairs=("$SERIAL_SMP4:x86_64×4")
+  if [ "$ARCH_ALL" -eq 1 ]; then
+    pairs+=("$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4")
+    rv32_ready && ! rv32_fw_missing && pairs+=("$SERIAL_RV32_SMP4:RV32×4")
+  fi
   for pair in "${pairs[@]}"; do
     f="${pair%%:*}"; name="${pair##*:}"
     grep -qaE "$idle" "$f" 2>/dev/null || miss="$miss $name:空闲tick下降"
@@ -1402,7 +1510,7 @@ check_harden1e() { # 空闲停表（tickless idle）：同样长的全空闲窗�
   if [ -z "$miss" ]; then
     local r
     r=$(grep -aE "$idle" "$SERIAL_SMP4" | head -1 | sed -E 's/.* periodic_ticks=([0-9]+) nohz_ticks=([0-9]+).*/\1→\2/')
-    record HARDEN1E PASS "空闲停表：全空闲窗口里非计时处理器本地 tick ${r}（x86_64×4），计时处理器永不停表，停表期间空闲时长补记；停表处理器上唤醒延迟 ≤2 tick；其后 SMP-3 风暴 / 分散 / 预算在停表开启下通过（四个指令集，含 4 处理器）$RV32_NOTE"
+    record HARDEN1E PASS "空闲停表：全空闲窗口里非计时处理器本地 tick ${r}（x86_64×4），计时处理器永不停表，停表期间空闲时长补记；停表处理器上唤醒延迟 ≤2 tick；其后 SMP-3 风暴 / 分散 / 预算在停表开启下通过（$ARCH_SCOPE，含 4 处理器）$RV32_NOTE"
   else
     record HARDEN1E FAIL "缺少：$miss"
   fi
@@ -1419,8 +1527,11 @@ check_drv0() {  # DRV-0：通道消息的发送方应用身份章——已绑定
   local after='^\[JSR-APPID\] stamp case=after_exit app=0x7001 out_sender_app=0x7001 ok=true'
   local small='^\[JSR-APPID\] stamp case=too_small app=0x5157 out_sender_app=0x5157 kept=true ok=true'
   local sum='^\[JSR-APPID\] summary pid=0x[0-9a-f]+ app=0x5157 checks=[0-9]+ failed=0'
-  local pairs=("$SERIAL:x86_64单核" "$SERIAL_SMP4:x86_64×4" "$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4")
-  rv32_ready && ! rv32_fw_missing && pairs+=("$SERIAL_RV32_SMP4:RV32×4")
+  local pairs=("$SERIAL:x86_64单核" "$SERIAL_SMP4:x86_64×4")
+  if [ "$ARCH_ALL" -eq 1 ]; then
+    pairs+=("$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4")
+    rv32_ready && ! rv32_fw_missing && pairs+=("$SERIAL_RV32_SMP4:RV32×4")
+  fi
   for pair in "${pairs[@]}"; do
     f="${pair%%:*}"; name="${pair##*:}"
     grep -qaE "$bound" "$f" 2>/dev/null || miss="$miss $name:已绑定"
@@ -1439,7 +1550,7 @@ check_drv0() {  # DRV-0：通道消息的发送方应用身份章——已绑定
   done
   if [ -z "$miss" ]; then
     n=$(grep -aoE "$sum" "$SERIAL_SMP4" | head -1 | sed -E 's/.*checks=([0-9]+).*/\1/')
-    record DRV0 PASS "通道消息的发送方应用身份章由内核在发送时定格：已绑定/未绑定、伪造被覆盖、二次绑定被拒、发送方退出后仍保留、缓冲区不足时已盖章且消息保留；x86_64 单核与 x86_64/AArch64/RISC-V64 4 处理器均复验（x86_64×4 checks=$n），对象/页帧/固定回到基线$RV32_NOTE"
+    record DRV0 PASS "通道消息的发送方应用身份章由内核在发送时定格：已绑定/未绑定、伪造被覆盖、二次绑定被拒、发送方退出后仍保留、缓冲区不足时已盖章且消息保留；$ARCH_X86_SMP_DESC均复验（x86_64×4 checks=$n），对象/页帧/固定回到基线$RV32_NOTE"
   else
     record DRV0 FAIL "缺少：$miss"
   fi
@@ -1458,7 +1569,8 @@ check_l10n1() { # L10N-1：接口登记表英文显示名列（构建期中英�
   local r4101="[JSR-L10N] render code=4101 zh=句柄无效 en=$en4101 ok=true"
   local ops="[JSR-L10N] ops named=$nop all_en=true"
   local sum='^\[JSR-L10N\] summary checks=[0-9]+ failed=0'
-  local pairs=("$SERIAL:x86_64单核" "$SERIAL_SMP4:x86_64×4" "$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4")
+  local pairs=("$SERIAL:x86_64单核" "$SERIAL_SMP4:x86_64×4")
+  [ "$ARCH_ALL" -eq 1 ] && pairs+=("$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4")
   for pair in "${pairs[@]}"; do
     f="${pair%%:*}"; name="${pair##*:}"
     grep -qaF "$table" "$f" 2>/dev/null || miss="$miss $name:错误表"
@@ -1473,7 +1585,7 @@ check_l10n1() { # L10N-1：接口登记表英文显示名列（构建期中英�
   done
   if [ -z "$miss" ]; then
     n=$(grep -aoE "$sum" "$SERIAL_SMP4" | head -1 | sed -E 's/.*checks=([0-9]+).*/\1/')
-    record L10N1 PASS "登记表全部 $((nerr+nop)) 条接口中英显示名齐全；构建期生成的错误渲染表含 $nerr 条错误、按 ID 有序，中英渲染与登记表逐字一致；非错误与未登记错误码被拒；x86_64 单核与 x86_64/AArch64/RISC-V64 4 处理器均复验（x86_64×4 checks=$n）"
+    record L10N1 PASS "登记表全部 $((nerr+nop)) 条接口中英显示名齐全；构建期生成的错误渲染表含 $nerr 条错误、按 ID 有序，中英渲染与登记表逐字一致；非错误与未登记错误码被拒；$ARCH_X86_SMP_DESC均复验（x86_64×4 checks=$n）"
   else
     record L10N1 FAIL "缺少：$miss"
   fi
@@ -1486,8 +1598,11 @@ check_harden1d() { # 调度规模化：选择路径只遍历本处理器的运�
   local over='^\[JSR-SCALE\] case=overload cpus=[0-9]+ sleepers=[0-9]+ hogs=[0-9]+ window=[0-9]+ interactive_rounds=20 samples=20 latency_max=[0-2] bound=2 bounded=true least_busy=[0-9]+ worst_idle_waiting=[0-2] all_busy=true'
   local rec='^\[JSR-SCALE\] case=recovery cpus=[0-9]+ rounds=20 samples=20 max=0 immediate=true reclaimed=true'
   local sum='^\[JSR-SCALE\] summary cpus=[0-9]+ slots=[0-9]+ free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0'
-  local pairs=("$SERIAL:x86_64" "$SERIAL_SMP4:x86_64×4" "$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4")
-  rv32_ready && ! rv32_fw_missing && pairs+=("$SERIAL_RV32_SMP4:RV32×4")
+  local pairs=("$SERIAL:x86_64" "$SERIAL_SMP4:x86_64×4")
+  if [ "$ARCH_ALL" -eq 1 ]; then
+    pairs+=("$SERIAL_A64_SMP4:AArch64×4" "$SERIAL_RV64_SMP4:RV64×4")
+    rv32_ready && ! rv32_fw_missing && pairs+=("$SERIAL_RV32_SMP4:RV32×4")
+  fi
   for pair in "${pairs[@]}"; do
     f="${pair%%:*}"; name="${pair##*:}"
     # 单次选择遍历量不超过可运行任务数（bound = 2N + 1），且睡眠任务数多于它
@@ -1511,7 +1626,7 @@ check_harden1d() { # 调度规模化：选择路径只遍历本处理器的运�
     local sl4 ol4
     sl4=$(grep -aE '^\[JSR-SCALE\] lock name=sched ' "$SERIAL_SMP4" | sed -E 's/.* contended_permille=([0-9]+).*max_spins=([0-9]+).*/\1‰ 最多自旋 \2/')
     ol4=$(grep -aE '^\[JSR-SCALE\] lock name=objtable ' "$SERIAL_SMP4" | sed -E 's/.* contended_permille=([0-9]+).*max_spins=([0-9]+).*/\1‰ 最多自旋 \2/')
-    record HARDEN1D PASS "选择只遍历本核运行列表：$(grep -aE "$scale" "$SERIAL_SMP4" | sed -E 's/.* slots=([0-9]+) sleepers=([0-9]+).* max_visited=([0-9]+).* wake_scans=([01]) ticks=([0-9]+).*/槽位 \1、睡眠任务 \2 时单次最多遍历 \3 项，\5 tick 内到期唤醒扫描 \4 次/')（x86_64×4）；同规模过载交互延迟 ≤2、恢复即时、各核都忙；锁争用（x86_64×4 让出风暴）：调度器锁 $sl4、对象表锁 $ol4；运行列表与运行队列一致、资源回到基线（四个指令集，含 4 处理器）$RV32_NOTE"
+    record HARDEN1D PASS "选择只遍历本核运行列表：$(grep -aE "$scale" "$SERIAL_SMP4" | sed -E 's/.* slots=([0-9]+) sleepers=([0-9]+).* max_visited=([0-9]+).* wake_scans=([01]) ticks=([0-9]+).*/槽位 \1、睡眠任务 \2 时单次最多遍历 \3 项，\5 tick 内到期唤醒扫描 \4 次/')（x86_64×4）；同规模过载交互延迟 ≤2、恢复即时、各核都忙；锁争用（x86_64×4 让出风暴）：调度器锁 $sl4、对象表锁 $ol4；运行列表与运行队列一致、资源回到基线（$ARCH_SCOPE，含 4 处理器）$RV32_NOTE"
   else
     record HARDEN1D FAIL "缺少：$miss"
   fi
@@ -1552,13 +1667,22 @@ fi
   echo "jasper-os 一键验收  $TS"
   echo "提交：$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$(git -C "$ROOT" diff --quiet 2>/dev/null || echo '（工作区有未提交改动）')"
   echo "配置档：$PROFILE"
-  echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4，AArch64：$QRC_A64，AArch64 4 处理器：$QRC_A64_SMP4，RISC-V64：$QRC_RV64，RISC-V32：$QRC_RV32）"
+  if [ "$ARCH_ALL" -eq 1 ]; then
+    echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4，AArch64：$QRC_A64，AArch64 4 处理器：$QRC_A64_SMP4，RISC-V64：$QRC_RV64，RISC-V32：$QRC_RV32）"
+  else
+    echo "架构范围：x86_64（AArch64 / RISC-V64 / RISC-V32 冻结，按 N/A 记录）"
+    echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4）"
+  fi
   echo
   printf '%-6s %-4s %s\n' "里程碑" "结果" "说明"
   printf '%s\n' "${ROWS[@]}"
 } | tee "$OUT/summary.txt"
 
-for f in cargo-test.log build.log serial.log serial-smp4.log serial-aarch64.log serial-aarch64-smp4.log serial-riscv64.log serial-riscv32.log summary.txt; do
+EVIDENCE_FILES=(cargo-test.log build.log serial.log serial-smp4.log summary.txt)
+if [ "$ARCH_ALL" -eq 1 ]; then
+  EVIDENCE_FILES+=(serial-aarch64.log serial-aarch64-smp4.log serial-riscv64.log serial-riscv32.log)
+fi
+for f in "${EVIDENCE_FILES[@]}"; do
   [ -s "$OUT/$f" ] || { echo "✗ 证据文件为空或缺失：$f"; FAILED=1; }
 done
 echo
