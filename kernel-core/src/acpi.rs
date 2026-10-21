@@ -1,15 +1,16 @@
-//! ACPI 表的只读解析（处理器枚举所需的子集）：RSDP → RSDT/XSDT → MADT。
-//! Read-only ACPI parsing for processor enumeration: RSDP → RSDT/XSDT → MADT.
+//! ACPI 表的只读解析（处理器与设备发现所需的子集）：RSDP → RSDT/XSDT → MADT / MCFG。
+//! Read-only ACPI parsing for processor and device discovery: RSDP → RSDT/XSDT → MADT / MCFG.
 //!
 //! # 职责与边界
 //! * 只解析，不分配：物理内存经调用者注入的 [`PhysRead`] 读取（内核经全物理内存映射实现，宿主测试用内存数组）。
 //! * 固件表是**不可信输入**：校验签名与校验和，长度设上限，条目长度为 0 或越界即报错，绝不越界或死循环。
 //! * 只覆盖处理器与中断路由枚举：本地中断控制器条目（含 x2 扩展形式）、本地中断控制器地址覆盖条目、
-//!   I/O 中断控制器条目与 ISA 中断源覆盖条目；不解析 AML、不处理其他表。
+//!   I/O 中断控制器条目与 ISA 中断源覆盖条目；以及 MCFG 的 ECAM 窗口（PCI 配置空间位置）。不解析 AML、不处理其他表。
 //!
 //! # 为什么放在 kernel-core
 //! 表格式与指令集无关（x86_64 与部分 AArch64 服务器都用 ACPI），放在这里可以在宿主上用构造的表测试。
 
+use crate::pci::Ecam;
 use crate::smp::Topology;
 
 /// 物理内存读取能力（由调用者注入）。
@@ -41,6 +42,8 @@ pub enum AcpiError {
     BadLength,
     /// 根表中没有 MADT。
     NoMadt,
+    /// 根表中没有 MCFG（平台不提供 ECAM）。
+    NoMcfg,
 }
 
 impl AcpiError {
@@ -53,6 +56,7 @@ impl AcpiError {
             AcpiError::BadChecksum => "system.firmware.error.bad_checksum",
             AcpiError::BadLength => "system.firmware.error.bad_length",
             AcpiError::NoMadt => "system.firmware.error.no_madt",
+            AcpiError::NoMcfg => "system.firmware.error.no_mcfg",
         }
     }
 }
@@ -213,8 +217,8 @@ fn table(m: &dyn PhysRead, at: u64, signature: &[u8; 4]) -> Result<u32, AcpiErro
     Ok(len)
 }
 
-/// 在根表中找 MADT（签名 `APIC`）的地址；签名不符的条目跳过，校验失败的 MADT 报错。
-fn find_madt(m: &dyn PhysRead, root: u64, width: u64) -> Result<u64, AcpiError> {
+/// 在根表中找签名为 `want` 的表的地址；签名不符的条目跳过，找不到返回 `Ok(None)`。
+fn find_table(m: &dyn PhysRead, root: u64, width: u64, want: &[u8; 4]) -> Result<Option<u64>, AcpiError> {
     let sig: &[u8; 4] = if width == 8 { b"XSDT" } else { b"RSDT" };
     let len = table(m, root, sig)? as u64;
     let entries = (len - SDT_HEADER_LEN as u64) / width;
@@ -222,18 +226,18 @@ fn find_madt(m: &dyn PhysRead, root: u64, width: u64) -> Result<u64, AcpiError> 
         let at = root + SDT_HEADER_LEN as u64 + i * width;
         let addr = if width == 8 { read_u64(m, at)? } else { read_u32(m, at)? as u64 };
         let mut s = [0u8; 4];
-        if addr != 0 && m.read(addr, &mut s) && &s == b"APIC" {
-            return Ok(addr);
+        if addr != 0 && m.read(addr, &mut s) && &s == want {
+            return Ok(Some(addr));
         }
     }
-    Err(AcpiError::NoMadt)
+    Ok(None)
 }
 
 /// 从 RSDP 出发解析 MADT。`boot_hw_id` 是引导处理器的硬件标识（排在拓扑下标 0）。
 /// Parse the MADT starting from the RSDP at `rsdp`.
 pub fn parse_madt(m: &dyn PhysRead, rsdp: u64, boot_hw_id: u32) -> Result<Madt, AcpiError> {
     let (root, width) = root_table(m, rsdp)?;
-    let madt = find_madt(m, root, width)?;
+    let madt = find_table(m, root, width, b"APIC")?.ok_or(AcpiError::NoMadt)?;
     let len = table(m, madt, b"APIC")?;
     if len < MADT_ENTRIES_OFFSET {
         return Err(AcpiError::BadLength);
@@ -298,6 +302,66 @@ pub fn parse_madt(m: &dyn PhysRead, rsdp: u64, boot_hw_id: u32) -> Result<Madt, 
         off += elen;
     }
     Ok(Madt { local_controller, topology, io, io_count, overrides, override_count, dropped_routing })
+}
+
+/// 记录的 ECAM 窗口上限（超出的只计数）。
+pub const MAX_ECAM_WINDOWS: usize = 4;
+/// MCFG 中保留字段之后、窗口条目开始处的偏移。
+const MCFG_ENTRIES_OFFSET: u32 = 44;
+/// MCFG 每个窗口条目的长度。
+const MCFG_ENTRY_LEN: u32 = 16;
+
+/// MCFG 解析结果：平台声明的 ECAM 窗口。
+/// ECAM windows declared by the MCFG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mcfg {
+    windows: [Ecam; MAX_ECAM_WINDOWS],
+    count: usize,
+    /// 超出上限或总线范围颠倒而未记录的条目数。
+    pub dropped: usize,
+}
+
+impl Mcfg {
+    /// 已记录的窗口（按表中顺序）。
+    /// Recorded windows in table order.
+    pub fn windows(&self) -> &[Ecam] {
+        &self.windows[..self.count]
+    }
+}
+
+/// 从 RSDP 出发解析 MCFG；根表中没有 MCFG 返回 [`AcpiError::NoMcfg`]。
+/// Parse the MCFG starting from the RSDP at `rsdp`.
+pub fn parse_mcfg(m: &dyn PhysRead, rsdp: u64) -> Result<Mcfg, AcpiError> {
+    let (root, width) = root_table(m, rsdp)?;
+    let at = find_table(m, root, width, b"MCFG")?.ok_or(AcpiError::NoMcfg)?;
+    let len = table(m, at, b"MCFG")?;
+    if len < MCFG_ENTRIES_OFFSET || (len - MCFG_ENTRIES_OFFSET) % MCFG_ENTRY_LEN != 0 {
+        return Err(AcpiError::BadLength);
+    }
+    let empty = Ecam { base: 0, segment: 0, bus_start: 0, bus_end: 0 };
+    let mut out = Mcfg { windows: [empty; MAX_ECAM_WINDOWS], count: 0, dropped: 0 };
+    let mut off = MCFG_ENTRIES_OFFSET;
+    while off < len {
+        let e = at + off as u64;
+        let mut tail = [0u8; 4];
+        if !m.read(e + 8, &mut tail) {
+            return Err(AcpiError::Unreadable);
+        }
+        let window = Ecam {
+            base: read_u64(m, e)?,
+            segment: u16::from_le_bytes([tail[0], tail[1]]),
+            bus_start: tail[2],
+            bus_end: tail[3],
+        };
+        if window.is_empty() || out.count == MAX_ECAM_WINDOWS {
+            out.dropped += 1;
+        } else {
+            out.windows[out.count] = window;
+            out.count += 1;
+        }
+        off += MCFG_ENTRY_LEN;
+    }
+    Ok(out)
 }
 
 /// 标志位 0 = 已启用；未启用的（含仅「可上线」的热插拔位）只计数。
@@ -509,5 +573,67 @@ mod tests {
         let madt = parse_madt(&m, 0x100, 0).unwrap();
         assert_eq!(madt.topology.count(), crate::smp::MAX_CPUS);
         assert_eq!(madt.topology.dropped, 40 - crate::smp::MAX_CPUS);
+    }
+    /// 在 `image` 的基础上把 MCFG 放在 @0x1000，并把它加进根表（XSDT 第三项）。
+    fn image_with_mcfg(entries: &[(u64, u16, u8, u8)]) -> Mem {
+        let mut m = image(2, &[lapic(0, 1)]);
+        let mut body = vec![0u8; 8];
+        for &(base, seg, start, end) in entries {
+            body.extend_from_slice(&base.to_le_bytes());
+            body.extend_from_slice(&seg.to_le_bytes());
+            body.push(start);
+            body.push(end);
+            body.extend_from_slice(&[0u8; 4]);
+        }
+        let mcfg = sdt(b"MCFG", &body);
+        m.0[0x1000..0x1000 + mcfg.len()].copy_from_slice(&mcfg);
+        let mut root_body = Vec::new();
+        for a in [0x400u64, 0x800, 0x1000] {
+            root_body.extend_from_slice(&a.to_le_bytes());
+        }
+        let root = sdt(b"XSDT", &root_body);
+        m.0[0x200..0x200 + root.len()].copy_from_slice(&root);
+        m
+    }
+
+    #[test]
+    fn mcfg_windows_parsed() {
+        let m = image_with_mcfg(&[(0xB000_0000, 0, 0, 0xFF), (0xE000_0000, 1, 0x10, 0x1F)]);
+        let mcfg = parse_mcfg(&m, 0x100).unwrap();
+        assert_eq!(
+            mcfg.windows(),
+            &[
+                Ecam { base: 0xB000_0000, segment: 0, bus_start: 0, bus_end: 0xFF },
+                Ecam { base: 0xE000_0000, segment: 1, bus_start: 0x10, bus_end: 0x1F },
+            ]
+        );
+        assert_eq!(mcfg.dropped, 0);
+        assert!(parse_madt(&m, 0x100, 0).is_ok(), "加入 MCFG 后 MADT 仍可找到");
+    }
+
+    #[test]
+    fn mcfg_inverted_and_excess_windows_counted() {
+        let mut e: Vec<(u64, u16, u8, u8)> = vec![(0xC000_0000, 0, 9, 3)];
+        e.extend((0..5u16).map(|i| (0xD000_0000 + ((i as u64) << 28), i, 0, 0)));
+        let mcfg = parse_mcfg(&image_with_mcfg(&e), 0x100).unwrap();
+        assert_eq!(mcfg.windows().len(), MAX_ECAM_WINDOWS);
+        assert_eq!(mcfg.windows()[0].segment, 0);
+        assert_eq!(mcfg.dropped, 2, "一条总线范围颠倒 + 一条超出上限");
+    }
+
+    #[test]
+    fn mcfg_missing_or_malformed_rejected() {
+        assert_eq!(parse_mcfg(&image(2, &[lapic(0, 1)]), 0x100), Err(AcpiError::NoMcfg));
+        assert_eq!(AcpiError::NoMcfg.name(), "system.firmware.error.no_mcfg");
+        let mut ragged = image_with_mcfg(&[(0xB000_0000, 0, 0, 0xFF)]);
+        // 长度改成不是整条目，再修正校验和：长度检查必须拒绝。
+        ragged.0[0x1000 + 4..0x1000 + 8].copy_from_slice(&(36u32 + 8 + 12).to_le_bytes());
+        let mut t = ragged.0[0x1000..0x1000 + 56].to_vec();
+        fix_checksum(&mut t, 9);
+        ragged.0[0x1000..0x1000 + 56].copy_from_slice(&t);
+        assert_eq!(parse_mcfg(&ragged, 0x100), Err(AcpiError::BadLength));
+        let mut bad = image_with_mcfg(&[(0xB000_0000, 0, 0, 0xFF)]);
+        bad.0[0x1000 + 44] ^= 0x10; // 改条目不改校验和
+        assert_eq!(parse_mcfg(&bad, 0x100), Err(AcpiError::BadChecksum));
     }
 }

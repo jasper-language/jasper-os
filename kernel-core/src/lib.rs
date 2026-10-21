@@ -66,6 +66,7 @@ pub mod meta;
 pub mod profile;
 pub mod paging;
 pub mod pagetable;
+pub mod pci;
 pub mod pressure;
 pub mod psci;
 pub mod ring_abi;
