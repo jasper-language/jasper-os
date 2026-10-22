@@ -741,7 +741,7 @@ pub fn tlb_flush_all_local() {
     x86_64::flush_all_local_tlb();
     #[cfg(target_arch = "aarch64")]
     aarch64::flush_all_local_tlb();
-    #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     unsafe {
         Current::switch_space(Current::current_space());
     }
