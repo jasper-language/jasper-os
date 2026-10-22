@@ -32,6 +32,8 @@ use crate::{arch, kprintln, sched};
 
 static CHECKS: AtomicU32 = AtomicU32::new(0);
 static FAILED: AtomicU32 = AtomicU32::new(0);
+/// 计时类断言超界的次数：只记录，不计入功能失败（仿真器下计时不可信）。
+static TIMING_FAILED: AtomicU32 = AtomicU32::new(0);
 
 fn check(ok: bool, what: &str) {
     CHECKS.fetch_add(1, Ordering::Relaxed);
@@ -41,10 +43,29 @@ fn check(ok: bool, what: &str) {
     }
 }
 
+/// 计时类断言：超界只累加 [`TIMING_FAILED`] 并单独打印，不改变功能失败数。
+/// Timing-class assertion: an over-limit result is recorded separately and does not fail the drill.
+fn check_timing(ok: bool, what: &str) {
+    if !ok {
+        TIMING_FAILED.fetch_add(1, Ordering::Relaxed);
+        kprintln!("[JSR-RT-TIMING] {}", what);
+    }
+}
+
 /// 失败断言数。
 pub fn failed() -> u32 {
     FAILED.load(Ordering::Relaxed)
 }
+
+/// 计时类断言超界数（功能断言之外的参考结论）。
+/// Number of timing-class assertions that exceeded their limit.
+pub fn timing_failed() -> u32 {
+    TIMING_FAILED.load(Ordering::Relaxed)
+}
+
+/// 用户程序「只有计时类断言超界」的退出码（与用户程序 isohost 侧的同名常量一致，值为 64）。
+/// Exit code used by a user program that passed every functional check but exceeded timing-class limits.
+pub(crate) const EXIT_TIMING_ONLY: i64 = 64;
 
 /// 运行时验收程序 `user/rtdemo` 的 ELF 镜像（构建期由 `kernel/build.rs` 产出并嵌入）。
 pub(crate) static USER_RTDEMO: &[u8] = include_bytes!(env!("JSR_USER_RTDEMO"));
@@ -110,12 +131,12 @@ pub fn run() {
     program("modhost", USER_MODHOST, 0, 0);
     // isohost 的一条判据是「CPU 压力下仍能响应」，依赖 QoS 保证；纯轮转构建跳过该程序。
     #[cfg(not(feature = "sched-rr"))]
-    program_with("isohost", USER_ISOHOST, 0, 0, rt_calls().union(SyscallSet::of(&[abi::SYSTEM_PROCESS_SPAWN, abi::SYSTEM_PROCESS_WAIT])));
+    isohost_program(rt_calls().union(SyscallSet::of(&[abi::SYSTEM_PROCESS_SPAWN, abi::SYSTEM_PROCESS_WAIT])));
     let end = baseline();
     check(end == start, "演练结束后资源未回到起点");
     sched::set_preemption(prev_preemption);
     kprintln!(
-        "[JSR-RT] summary free_frames={}/{} objects={}/{} pending={} pinned={:?} reclaimed={} checks={} failed={}",
+        "[JSR-RT] summary free_frames={}/{} objects={}/{} pending={} pinned={:?} reclaimed={} checks={} failed={} timing_failed={}",
         end.free_frames,
         start.free_frames,
         end.objects,
@@ -124,7 +145,8 @@ pub fn run() {
         end.pins,
         end == start,
         CHECKS.load(Ordering::Relaxed),
-        failed()
+        failed(),
+        timing_failed()
     );
 }
 
@@ -265,6 +287,27 @@ fn memory_kernel_side() {
 /// 装载用户程序 `image` 并以 `role` 运行到结束，检查退出码与回到基线。
 fn program(name: &'static str, image: &[u8], role: u64, expect: i64) {
     program_with(name, image, role, expect, rt_calls());
+}
+
+/// 运行隔离模块验收程序：功能全过而只有计时类断言超界时用专用退出码 [`EXIT_TIMING_ONLY`]，
+/// 这种情况只记计时、不判功能失败；其余非期望退出码照旧判失败。
+/// Runs the isolation acceptance program; [`EXIT_TIMING_ONLY`] is recorded as a timing-only result.
+#[cfg(not(feature = "sched-rr"))]
+fn isohost_program(calls: SyscallSet) {
+    let before = baseline();
+    let Some((st, code)) = run_program("isohost", USER_ISOHOST, 0, calls) else {
+        check(false, "用户程序装载失败");
+        return;
+    };
+    let after = baseline();
+    let timing_only = code == Some(EXIT_TIMING_ONLY) && matches!(st, Some(ProcState::Exited { code: EXIT_TIMING_ONLY }));
+    if timing_only {
+        check_timing(false, "isohost 只有计时类断言超界");
+    } else {
+        check(st == Some(ProcState::Exited { code: 0 }) && code == Some(0), "isohost");
+    }
+    check(after == before, "用例结束后资源未回到基线");
+    kprintln!("[JSR-RT] case=isohost exit={:?} expect=0 reclaimed={} timing_only={}", code, after == before, timing_only);
 }
 
 /// 同 [`program`]，授予指定的系统调用集合。

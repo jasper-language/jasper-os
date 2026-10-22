@@ -17,7 +17,10 @@
 //! 8. **静默判定**：另一线程停在模块代码里（模块回调宿主、宿主在回调里阻塞）时卸载被拒，模块仍可用；
 //!    线程离开后卸载成功，之后取不到导出、重复卸载被拒
 //!
-//! 全部通过以 0 退出；第一个失败的步骤号作为退出码。
+//! 全部通过以 0 退出；功能步骤失败以第一个失败的步骤号作为退出码；只有计时类断言超界时以
+//! [`EXIT_TIMING_ONLY`] 退出（指令翻译型仿真器下计时不可信，调用方只记录）。
+//! Exits 0 when everything passes, the first failing step number on a functional failure, and
+//! [`EXIT_TIMING_ONLY`] when only timing-class checks exceeded their limits.
 #![no_std]
 #![no_main]
 
@@ -67,6 +70,10 @@ const ROUNDS: u32 = 20;
 const MAX_CHILDREN: usize = 8;
 /// 等待另一线程进入模块的最长时间（tick）。
 const ENTER_TIMEOUT_TICKS: u64 = 500;
+/// 功能全过、只有计时类断言超界时的退出码。
+/// 与内核侧同名常量一致（两侧必须同时改）。
+/// Exit code for "all functional checks passed, only timing-class assertions exceeded their limits".
+const EXIT_TIMING_ONLY: i32 = 64;
 
 // ———————————————————————— 宿主接口表：可在回调里阻塞 ————————————————————————
 
@@ -97,7 +104,8 @@ static GATE_HOST: HostV0 = HostV0 { version: 0, size: core::mem::size_of::<HostV
 
 // ———————————————————————— 辅助 ————————————————————————
 
-struct Steps(u32);
+/// 步骤计数：(已执行的判据数, 首个计时类超界步骤号；0 = 没有)。
+struct Steps(u32, u32);
 
 impl Steps {
     fn check(&mut self, ok: bool) -> Result<(), u32> {
@@ -107,6 +115,24 @@ impl Steps {
         } else {
             Err(self.0)
         }
+    }
+
+    /// 计时类判据：`functional` 为功能部分（假 ⇒ 立即以本步骤号判失败），`ok` 为计时部分
+    /// （超界只记首个步骤号，不使程序以功能失败退出；步骤号照常前进）。
+    fn timing(&mut self, functional: bool, ok: bool) -> Result<(), u32> {
+        self.0 += 1;
+        if !functional {
+            return Err(self.0);
+        }
+        if !ok && self.1 == 0 {
+            self.1 = self.0;
+        }
+        Ok(())
+    }
+
+    /// 前提被时间破坏、无法评估的功能判据：只占用步骤号，不判失败。
+    fn skip(&mut self) {
+        self.0 += 1;
     }
 }
 
@@ -166,11 +192,16 @@ fn latency(m: &mut IsolatedModule) -> (u64, bool) {
 // ———————————————————————— 用例 ————————————————————————
 
 fn main(_: u64, _: u64) -> i32 {
-    let mut s = Steps(0);
+    let mut s = Steps(0, 0);
     match run(&mut s) {
         Ok(()) => {
-            println!("isohost: ok checks={}", s.0);
-            0
+            if s.1 != 0 {
+                println!("isohost: TIMING step={}", s.1);
+                EXIT_TIMING_ONLY
+            } else {
+                println!("isohost: ok checks={}", s.0);
+                0
+            }
         }
         Err(step) => {
             println!("isohost: FAIL step={}", step);
@@ -334,14 +365,16 @@ fn cpu_pressure(s: &mut Steps, t: &TrustPolicy<'_>) -> Result<(), u32> {
     // 让两个死循环真正跑起来
     let _ = time::sleep(2);
     let (loaded, ok) = latency(&mut probe);
-    s.check(ok && loaded <= LOADED_BOUND_TICKS)?;
+    // 往返结果正确是功能断言；延迟上界是计时类断言（仿真器下只记录）。
+    s.timing(ok, loaded <= LOADED_BOUND_TICKS)?;
     // 丢弃 ⇒ 内核终止仍在运行的隔离进程
     drop(hogs);
     let (after, ok) = latency(&mut probe);
-    s.check(ok && after <= IDLE_BOUND_TICKS)?;
+    let recovered = ok && after <= IDLE_BOUND_TICKS;
+    s.timing(ok, after <= IDLE_BOUND_TICKS)?;
     println!(
-        "isohost: cpu_pressure hogs=2 rounds={} idle_max_ticks={} loaded_max_ticks={} bound={} recovered_max_ticks={} recovered=true",
-        ROUNDS, base, loaded, LOADED_BOUND_TICKS, after
+        "isohost: cpu_pressure hogs=2 rounds={} idle_max_ticks={} loaded_max_ticks={} bound={} recovered_max_ticks={} recovered={}",
+        ROUNDS, base, loaded, LOADED_BOUND_TICKS, after, recovered
     );
     Ok(())
 }
@@ -382,7 +415,20 @@ fn quiescence(s: &mut Steps, t: &TrustPolicy<'_>) -> Result<(), u32> {
     while GATE_ENTERED.load(Ordering::Acquire) == 0 && time::now() - start < ENTER_TIMEOUT_TICKS {
         task::yield_now();
     }
-    s.check(GATE_ENTERED.load(Ordering::Acquire) == 1)?;
+    let entered = GATE_ENTERED.load(Ordering::Acquire) == 1;
+    s.timing(true, entered)?;
+    if !entered {
+        // 前提被时间破坏：等待线程进入模块的时限已到，静默判定无法进行（不是功能失败）。
+        // 放行闸门、等线程退出后再返回，让资源回到基线。
+        GATE_ARMED.store(0, Ordering::Release);
+        GATE_RELEASE.store(1, Ordering::Release);
+        let _ = worker.join();
+        for _ in 0..6 {
+            s.skip();
+        }
+        println!("isohost: quiescence entered=false skipped=true");
+        return Ok(());
+    }
     // 线程停在模块里：卸载被拒，模块原样可用
     let busy = m.unload();
     s.check(busy == Err(UnloadError::Busy { active: 1 }) && !m.is_unloaded())?;

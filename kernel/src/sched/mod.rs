@@ -498,6 +498,12 @@ pub fn effective_qos(id: TaskId) -> Option<Qos> {
     with(|s| s.effective_qos(id))
 }
 
+/// 任务 `waiter` 此刻是否阻塞在等待 `owner`（等它持有的锁或等它退出；诊断与验收用）。
+/// Whether `waiter` is currently blocked on `owner`.
+pub fn waits_on(waiter: TaskId, owner: TaskId) -> bool {
+    with(|s| s.waits_on(waiter, owner))
+}
+
 /// 当前任务的有效档位（含借来的档位；引导线程为 `None`）。
 pub fn current_effective_qos() -> Option<Qos> {
     with(|s| s.effective_qos(s.current().0))

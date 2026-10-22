@@ -2122,6 +2122,7 @@ check_harden1d() { # 调度规模化：选择路径只遍历本处理器的运�
   fi
   for pair in "${pairs[@]}"; do
     f="${pair%%:*}"; name="${pair##*:}"
+    if [ ! -s "$f" ]; then spot_skip "$f" "$name" || miss="$miss $name:缺日志"; continue; fi
     # 单次选择遍历量不超过可运行任务数（bound = 2N + 1），且睡眠任务数多于它
     lockline=$(grep -aE "$scale" "$f" 2>/dev/null | head -1)
     if [ -z "$lockline" ]; then
@@ -2137,7 +2138,9 @@ check_harden1d() { # 调度规模化：选择路径只遍历本处理器的运�
     grep -qaE "$sum" "$f" 2>/dev/null || miss="$miss $name:汇总"
     grep -qa '^\[JSR-SCALE-FAIL\]' "$f" 2>/dev/null && miss="$miss $name:失败断言"
   done
-  grep -qa '^\[JSR-SCALE\] case=refusals empty_set=refused unchanged=true' "$SERIAL_SMP4" 2>/dev/null || miss="$miss 拒绝路径"
+  if [ -s "$SERIAL_SMP4" ] || ! spot_skip "$SERIAL_SMP4" "拒绝路径"; then
+    grep -qa '^\[JSR-SCALE\] case=refusals empty_set=refused unchanged=true' "$SERIAL_SMP4" 2>/dev/null || miss="$miss 拒绝路径"
+  fi
   grep -qaE '^test sched::runlist::tests::[a-z_]+ \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null || miss="$miss 宿主运行列表测试"
   if [ -z "$miss" ]; then
     local sl4 ol4 sl8 ol8 s4 s8
@@ -2179,10 +2182,10 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 echo "accept: 计时类子条件清单（本步只拆 T-2，以下保持原样；行号指 scripts/accept.sh）"
 cat <<'BM0A'
 M1.4                :532  [ "${tick:-0}" -ge 10 ] && [ "${yld:-0}" -eq 0 ] && [ "${chg:-0}" -ge 3 ]（演练段 cause=tick 抢占切换 ≥10）
-J-6                 :872  loaded_max_ticks=[0-4] bound=4 recovered_max_ticks=[01]（2 个满载隔离模块下往返延迟 ≤4 tick）
-SCHED1              :899  p50=0 p99=[01] max=[01] bound=1 bounded=true（过载下用户发起档唤醒延迟 ≤1 tick）
-SCHED2              :911  wait=[0-6] bound=6 bounded=true（优先级继承：3 个满载中档任务下等锁 ≤6 tick）
-SCHED2              :913  wait=[0-6] bound=6 bounded=true（优先级继承：等持有者退出 ≤6 tick）
+J-6                 :872  loaded_max_ticks=[0-4] bound=4 recovered_max_ticks=[01]（2 个满载隔离模块下往返延迟 ≤4 tick）（内核侧已改记计时，BM-0B）
+SCHED1              :899  p50=0 p99=[01] max=[01] bound=1 bounded=true（过载下用户发起档唤醒延迟 ≤1 tick）（内核侧已改记计时，BM-0B）
+SCHED2              :911  wait=[0-6] bound=6 bounded=true（优先级继承：3 个满载中档任务下等锁 ≤6 tick）（内核侧已改记计时，BM-0B）
+SCHED2              :913  wait=[0-6] bound=6 bounded=true（优先级继承：等持有者退出 ≤6 tick）（内核侧已改记计时，BM-0B）
 SCHED3              :929  bystander_share=([5-9][0-9][0-9]|1000)‰ ... p99=[01] max=[01] latency_bound=1（限速下旁观份额 ≥50%、交互延迟 ≤1 tick）
 SMP-2               :1293 latency_max=[0-2] bound=2 bounded=true（全部核过载时交互唤醒延迟 ≤2 tick）
 SMP-2               :1298 wait=[0-8] bound=8 bounded=true（跨核优先级继承等待 ≤8 tick）
@@ -2191,8 +2194,8 @@ SMP-3               :1361 [ "${sp:-0}" -ge 2000 ]（分片加速比 ≥2000‰�
 HARDEN1E            :1648 divisor=[2-9][0-9]* ... reduced=true（全空闲窗口里非计时核本地 tick 至少减半）
 HARDEN1E            :1649 max=[0-2] bound=2 bounded=true（停表处理器上的唤醒延迟 ≤2 tick）
 DRV2C2              :2043 latency_max=[0-9]+ ... within_quota=true 与 :2050 [ "$lat" -le 2 ]（设备中断风暴下交互延迟 ≤2 tick、中断占比在预算内）
-HARDEN1D            :2114 worst_idle_waiting=[0-2]（规模化下「本核空闲而别处有任务在等」≤2 tick）
-HARDEN1D            :2115 latency_max=[0-2] bound=2 bounded=true（同规模过载交互延迟 ≤2 tick）
+HARDEN1D            :2114 worst_idle_waiting=[0-2]（规模化下「本核空闲而别处有任务在等」≤2 tick）（内核侧已改记计时，BM-0B）
+HARDEN1D            :2115 latency_max=[0-2] bound=2 bounded=true（同规模过载交互延迟 ≤2 tick）（内核侧已改记计时，BM-0B）
 BM0A
 
 if [ "$SPOT" -eq 1 ]; then

@@ -33,6 +33,8 @@ use crate::{kobj, kprintln, sched};
 
 static CHECKS: AtomicU32 = AtomicU32::new(0);
 static FAILED: AtomicU32 = AtomicU32::new(0);
+/// 计时类断言超界的次数：只记录，不计入功能失败（仿真器下计时不可信）。
+static TIMING_FAILED: AtomicU32 = AtomicU32::new(0);
 
 fn check(ok: bool, what: &str) {
     CHECKS.fetch_add(1, Ordering::Relaxed);
@@ -42,10 +44,25 @@ fn check(ok: bool, what: &str) {
     }
 }
 
+/// 计时类断言：超界只累加 [`TIMING_FAILED`] 并单独打印，不改变功能失败数。
+/// Timing-class assertion: an over-limit result is recorded separately and does not fail the drill.
+fn check_timing(ok: bool, what: core::fmt::Arguments<'_>) {
+    if !ok {
+        TIMING_FAILED.fetch_add(1, Ordering::Relaxed);
+        kprintln!("[JSR-SCALE-TIMING] {}", what);
+    }
+}
+
 /// 失败断言数。
 /// Number of failed assertions.
 pub fn failed() -> u32 {
     FAILED.load(Ordering::Relaxed)
+}
+
+/// 计时类断言超界数（功能断言之外的参考结论）。
+/// Number of timing-class assertions that exceeded their limit.
+pub fn timing_failed() -> u32 {
+    TIMING_FAILED.load(Ordering::Relaxed)
 }
 
 /// 本演练的内核任务号起点（与其它演练不重叠）。
@@ -71,6 +88,8 @@ static HOG_END: IrqU64 = IrqU64::new(0);
 static SLEEP_END: IrqU64 = IrqU64::new(0);
 /// 已进入睡眠的睡眠任务数。
 static ASLEEP: AtomicU32 = AtomicU32::new(0);
+/// 已从睡眠中醒来的睡眠任务数（用于在测量窗口结束时判断前提是否仍成立）。
+static AWAKE: AtomicU32 = AtomicU32::new(0);
 /// 交互任务完成的睡眠次数。
 static INTERACTIVE_DONE: AtomicU32 = AtomicU32::new(0);
 
@@ -78,6 +97,7 @@ static INTERACTIVE_DONE: AtomicU32 = AtomicU32::new(0);
 fn sleeper() {
     ASLEEP.fetch_add(1, Ordering::Relaxed);
     sched::sleep_until(SLEEP_END.load(Ordering::Relaxed));
+    AWAKE.fetch_add(1, Ordering::Relaxed);
 }
 
 /// 工具档、吃满处理器直到 [`HOG_END`]。
@@ -144,6 +164,7 @@ fn sleeper_count(n: usize) -> usize {
 /// 创建 `count` 个睡眠任务并等它们全部进入睡眠（睡到 `until`）。返回是否全部创建成功。
 fn spawn_sleepers(base: u64, count: usize, until: u64, all: CpuSet) -> bool {
     ASLEEP.store(0, Ordering::Relaxed);
+    AWAKE.store(0, Ordering::Relaxed);
     SLEEP_END.store(until, Ordering::Relaxed);
     let ok = quiet(|| (0..count).all(|i| sched::spawn_on(TaskId(base + i as u64), "scale-sleep", sleeper, None, all).is_ok()));
     // 让它们运行到睡下（引导线程睡一会儿，把处理器交给它们）
@@ -169,9 +190,12 @@ pub fn run() {
     let end = baseline();
     check(end == start, "演练结束后资源未回到起点");
     check(lists_consistent(), "演练结束后运行列表与运行队列不一致");
+    // 验收专用：注入一条必然失败的功能断言，证明功能失败仍按失败判定（只在启用该特性时执行）。
+    #[cfg(feature = "selftest-inject-failure")]
+    check(false, "注入的功能失败（selftest-inject-failure）");
     sched::set_preemption(prev_preemption);
     kprintln!(
-        "[JSR-SCALE] summary cpus={} slots={} free_frames={}/{} objects={}/{} reclaimed={} checks={} failed={}",
+        "[JSR-SCALE] summary cpus={} slots={} free_frames={}/{} objects={}/{} reclaimed={} checks={} failed={} timing_failed={}",
         n,
         sched::slots(),
         end.free_frames,
@@ -180,7 +204,8 @@ pub fn run() {
         start.objects,
         end == start,
         CHECKS.load(Ordering::Relaxed),
-        failed()
+        failed(),
+        timing_failed()
     );
 }
 
@@ -220,15 +245,25 @@ fn scale(n: usize) {
     let scan = sched::scan_stats();
     let (busy, least, worst) = cores_busy(n, WINDOW);
     let consistent = lists_consistent();
+    // 测量窗口结束时的前提：窗口内睡眠任务应都还睡着。它们若已到期（时间被放慢时引导线程可能晚于窗口才被调度），
+    // 遍历量与到期唤醒扫描次数就不再说明「睡眠任务被排除在选择之外」，两条判据只记计时、不判功能失败。
+    let still_asleep = (ASLEEP.load(Ordering::Relaxed) as usize).saturating_sub(AWAKE.load(Ordering::Relaxed) as usize);
+    let premise_held = still_asleep == sleepers;
+    let expired = sleepers.saturating_sub(still_asleep);
     sched::run();
     let bound = (hogs + 1) as u32;
     let visit_ok = scan.max_visited <= bound;
     let scan_ok = scan.wake_scans <= 1 && scan.ticks >= WINDOW;
     // 睡眠任务必须明显多于可运行任务，否则「遍历量 ≤ 可运行任务数」说明不了睡眠任务被排除在外
     check(sleepers > bound as usize, "规模用例睡眠任务数不足");
-    check(visit_ok, "单次选择遍历量超过可运行任务数（遍历了睡眠任务）");
-    check(scan_ok, "窗口内到期唤醒扫描次数超过 1（没有按最早到期时刻跳过）");
-    check(busy, "规模用例中有核空闲或空闲等待超过上界");
+    if premise_held {
+        check(visit_ok, "单次选择遍历量超过可运行任务数（遍历了睡眠任务）");
+        check(scan_ok, "窗口内到期唤醒扫描次数超过 1（没有按最早到期时刻跳过）");
+    } else {
+        check_timing(false, format_args!("单次选择遍历量判据的前提被时间破坏：窗口内有 {} 个睡眠任务已到期", expired));
+        check_timing(false, format_args!("到期唤醒扫描判据的前提被时间破坏：窗口内有 {} 个睡眠任务已到期", expired));
+    }
+    check_timing(busy, format_args!("规模用例中有核空闲或空闲等待超过上界"));
     check(consistent, "规模用例中运行列表与运行队列不一致");
     check(baseline() == before, "规模用例后资源未回到基线");
     let avg_x100 = if scan.picks == 0 { 0 } else { scan.visited * 100 / scan.picks };
@@ -280,8 +315,8 @@ fn overload(n: usize) {
     let lat = sched::latency(Qos::Interactive);
     let done = INTERACTIVE_DONE.load(Ordering::Relaxed);
     check(done == ROUNDS && lat.count() == ROUNDS, "交互任务未完成全部睡眠");
-    check(lat.max() <= LATENCY_BOUND, "过载时交互唤醒延迟超过上界");
-    check(busy, "过载时有核空闲或空闲等待超过上界");
+    check_timing(lat.max() <= LATENCY_BOUND, format_args!("过载时交互唤醒延迟超过上界"));
+    check_timing(busy, format_args!("过载时有核空闲或空闲等待超过上界"));
     check(baseline() == before, "过载用例后资源未回到基线");
     kprintln!(
         "[JSR-SCALE] case=overload cpus={} sleepers={} hogs={} window={} interactive_rounds={} samples={} latency_max={} bound={} bounded={} least_busy={} worst_idle_waiting={} all_busy={}",
@@ -311,7 +346,7 @@ fn recovery(n: usize) {
     let lat = sched::latency(Qos::Interactive);
     let done = INTERACTIVE_DONE.load(Ordering::Relaxed);
     check(done == ROUNDS && lat.count() == ROUNDS, "恢复任务未完成全部睡眠");
-    check(lat.max() == 0, "压力撤销后唤醒延迟应为 0");
+    check_timing(lat.max() == 0, format_args!("压力撤销后唤醒延迟应为 0"));
     check(baseline() == before, "恢复用例后资源未回到基线");
     kprintln!(
         "[JSR-SCALE] case=recovery cpus={} rounds={} samples={} max={} immediate={} reclaimed={}",

@@ -821,6 +821,13 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         self.live_slot(id).is_some()
     }
 
+    /// 任务 `waiter` 此刻是否阻塞在等待 `owner`（等它持有的锁或等它退出；诊断与验收用）。
+    /// Whether `waiter` is currently blocked on `owner`.
+    pub fn waits_on(&self, waiter: TaskId, owner: TaskId) -> bool {
+        let (Some(wi), Some(oi)) = (self.live_slot(waiter), self.live_slot(owner)) else { return false };
+        matches!(self.tasks[wi].as_ref(), Some(t) if t.state == TaskState::Blocked && t.waits_for == Some(oi))
+    }
+
     /// 打开/关闭优先级继承，返回之前的设置（只供对照测量；关闭后立即按自身档位重算）。
     pub fn set_inheritance(&mut self, enabled: bool) -> bool {
         let prev = core::mem::replace(&mut self.inherit, enabled);

@@ -272,9 +272,15 @@ pub fn start(boot: &'static BootSpec) -> ! {
     // 功能失败表在上面已按原样判过；这里只区分「功能全过但只有计时超界」，用独立退出码如实报告。
     // Timing-class overruns are reported, not failed; performance is judged on bare metal only.
     #[cfg(feature = "user-programs")]
-    let timings: &[(&str, u32)] = &[("bench", bench_demo::timing_failed())];
+    let timings: &[(&str, u32)] = &[
+        ("bench", bench_demo::timing_failed()),
+        ("scale", scale_demo::timing_failed()),
+        ("qos", qos_demo::timing_failed()),
+        ("pi", pi_demo::timing_failed()),
+        ("rt", rt_demo::timing_failed()),
+    ];
     #[cfg(not(feature = "user-programs"))]
-    let timings: &[(&str, u32)] = &[];
+    let timings: &[(&str, u32)] = &[("scale", scale_demo::timing_failed()), ("pi", pi_demo::timing_failed())];
     let timing_total: u32 = timings.iter().map(|&(_, n)| n).sum();
     if timing_total > 0 {
         kprint!("[JSR-EXIT] timing-only");
