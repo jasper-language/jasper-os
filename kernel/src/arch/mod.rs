@@ -177,6 +177,12 @@ pub struct MsiMessage {
 pub enum ExitStatus {
     /// 验收成功（QEMU 退出码 33）。
     Success,
+    /// 功能自检全部通过、只有计时类断言超出预算（QEMU 退出码 37）。
+    ///
+    /// 指令翻译型仿真器的时间基准跟随宿主，QEMU 下的计时结论不能代表真机；这类超界只记录、不表示功能错误，
+    /// 因此用独立退出码与真正的失败（35）区分。性能是否达标只在裸机上判定。
+    /// All functional checks passed; only timing-class assertions exceeded their limit.
+    TimingOnly,
     /// 验收失败。
     Failure,
 }

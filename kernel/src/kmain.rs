@@ -268,6 +268,22 @@ pub fn start(boot: &'static BootSpec) -> ! {
     if !cfg!(feature = "user-programs") {
         kprintln!("[JSR-STAGE] user_programs=absent skipped=elf,lifecycle,ring,ipc,prog,rt,qos,overload,bench");
     }
+    // 计时类断言超界只记录、不阻塞：指令翻译型仿真器的时间基准跟随宿主，性能只在裸机上判定。
+    // 功能失败表在上面已按原样判过；这里只区分「功能全过但只有计时超界」，用独立退出码如实报告。
+    // Timing-class overruns are reported, not failed; performance is judged on bare metal only.
+    #[cfg(feature = "user-programs")]
+    let timings: &[(&str, u32)] = &[("bench", bench_demo::timing_failed())];
+    #[cfg(not(feature = "user-programs"))]
+    let timings: &[(&str, u32)] = &[];
+    let timing_total: u32 = timings.iter().map(|&(_, n)| n).sum();
+    if timing_total > 0 {
+        kprint!("[JSR-EXIT] timing-only");
+        for (name, n) in timings.iter().filter(|&&(_, n)| n > 0) {
+            kprint!(" {}_timing_failed={}", name, n);
+        }
+        kprintln!();
+        arch::exit_emulator(ExitStatus::TimingOnly);
+    }
     kprintln!("[JSR-EXIT] success");
     arch::exit_emulator(ExitStatus::Success)
 }

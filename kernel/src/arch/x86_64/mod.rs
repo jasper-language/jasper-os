@@ -156,9 +156,10 @@ impl Platform for X86_64 {
 
     fn exit_emulator(status: ExitStatus) -> ! {
         // QEMU `isa-debug-exit`（iobase=0xf4）：写入值 v，QEMU 以 (v << 1) | 1 退出。
-        // 0x10 → 33 = 成功；0x11 → 35 = 失败。
+        // 0x10 → 33 = 成功；0x12 → 37 = 功能全过、只有计时类断言超界；0x11 → 35 = 失败。
         let code: u32 = match status {
             ExitStatus::Success => 0x10,
+            ExitStatus::TimingOnly => 0x12,
             ExitStatus::Failure => 0x11,
         };
         // SAFETY：0xf4 是 QEMU 调试退出设备的端口；真机上无设备，写入无副作用。

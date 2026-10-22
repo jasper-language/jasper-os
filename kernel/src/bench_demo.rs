@@ -15,9 +15,11 @@
 //! * 时钟频率：每秒开销 = 中断成本 × 频率；预算内**最大**的候选即频率上界；
 //! * 各档时间片：每片开销 = 一次切换成本 / 片长；预算内**最小**的候选即片长下界。
 //!
-//! 默认配置档（standard）的生效值必须落在预算内，否则本演练判失败；其它配置档照样测量并输出结论
-//! （`gated=false`），但不据此判失败——它们是为别的目标（例如交互优先）有意用开销换响应的取舍，
-//! 且已有配置档的取值不随测量改动。边界值只作为参考输出，是否改默认值由其它约束一起决定。
+//! 默认配置档（standard）的生效值超出预算时，只作为**计时类断言**记录（`[JSR-BENCH-TIMING]`、汇总行末
+//! `timing_failed=<n>`），不使本演练判失败：指令翻译型仿真器下计时不可信，性能只在裸机上判定。
+//! 其它配置档照样测量并输出结论（`gated=false`），但不据此判失败——它们是为别的目标（例如交互优先）
+//! 有意用开销换响应的取舍，且已有配置档的取值不随测量改动。边界值只作为参考输出，是否改默认值由其它约束一起决定。
+//! 功能类断言（样本齐全、失败路径被拒、回到基线）照旧判失败，不因平台快慢而放宽。
 //!
 //! # 局限
 //! 在指令翻译型仿真器上，周期计数器与定时器都跟随宿主时间，绝对数字不代表真机，只适合同一环境下的相对比较。
@@ -41,6 +43,8 @@ use crate::{arch, config, kprintln, sched};
 
 static CHECKS: AtomicU32 = AtomicU32::new(0);
 static FAILED: AtomicU32 = AtomicU32::new(0);
+/// 计时类断言超界的次数：只记录，不计入功能失败（仿真器下计时不可信）。
+static TIMING_FAILED: AtomicU32 = AtomicU32::new(0);
 
 fn check(ok: bool, what: &str) {
     CHECKS.fetch_add(1, Ordering::Relaxed);
@@ -50,10 +54,25 @@ fn check(ok: bool, what: &str) {
     }
 }
 
+/// 计时类断言：超界只累加 [`TIMING_FAILED`] 并单独打印，不改变功能失败数。
+/// Timing-class assertion: an over-limit result is recorded separately and does not fail the drill.
+fn check_timing(ok: bool, what: &str) {
+    if !ok {
+        TIMING_FAILED.fetch_add(1, Ordering::Relaxed);
+        kprintln!("[JSR-BENCH-TIMING] {}", what);
+    }
+}
+
 /// 失败断言数。
 /// Number of failed checks.
 pub fn failed() -> u32 {
     FAILED.load(Ordering::Relaxed)
+}
+
+/// 计时类断言超界数（功能断言之外的参考结论）。
+/// Number of timing-class assertions that exceeded their limit.
+pub fn timing_failed() -> u32 {
+    TIMING_FAILED.load(Ordering::Relaxed)
 }
 
 /// 用户态基准程序 `user/bench` 的 ELF 镜像（构建期由 `kernel/build.rs` 产出并嵌入）。
@@ -101,14 +120,15 @@ pub fn run() {
     arch::irq_restore(was_enabled);
     sched::set_preemption(prev_preemption);
     kprintln!(
-        "[JSR-BENCH] summary free_frames={}/{} objects={}/{} reclaimed={} checks={} failed={}",
+        "[JSR-BENCH] summary free_frames={}/{} objects={}/{} reclaimed={} checks={} failed={} timing_failed={}",
         end.free_frames,
         start.free_frames,
         end.objects,
         start.objects,
         end == start,
         CHECKS.load(Ordering::Relaxed),
-        failed()
+        failed(),
+        timing_failed()
     );
 }
 
@@ -377,7 +397,8 @@ fn user_program(cal: &Calibration) {
 // 取值
 // ---------------------------------------------------------------------------
 
-/// 本次构建是否为默认配置档：只有默认档的生效值以开销预算判定成败。
+/// 本次构建是否为默认配置档：只有默认档的生效值做开销预算判定（计时类断言，超界只记录）。
+/// Whether this build uses the default profile; only it is judged against the overhead limit (timing-only).
 fn gated() -> bool {
     // 只有 x86_64 的 TSC 是真正的周期计数器；其他指令集（AArch64 虚拟计数器、RISC-V rdtime）
     // 是时间基准，用它算出的「每 tick 周期数」与宿主快慢强相关，因此那里的预算判定只作参考、
@@ -406,7 +427,7 @@ fn tuning(cal: &Calibration, tick_cost: u64, switch_cost: u64) {
     });
     check(hz.is_ok(), "时钟频率取值失败");
     if let Ok(d) = hz {
-        check(!gated() || d.current_within_limit(), "默认配置档的时钟频率超出开销预算");
+        check_timing(!gated() || d.current_within_limit(), "默认配置档的时钟频率超出开销预算");
         print_decision(&d, "largest");
     }
     for (i, name) in QUANTUM_NAMES.iter().enumerate() {
@@ -414,7 +435,7 @@ fn tuning(cal: &Calibration, tick_cost: u64, switch_cost: u64) {
         let d = select(name, q, &QUANTUM_CANDIDATES, LIMIT_PPM, Prefer::Smallest, |q| quantum_overhead(switch_cost, cal, q));
         check(d.is_ok(), "时间片取值失败");
         if let Ok(d) = d {
-            check(!gated() || d.current_within_limit(), "默认配置档的时间片超出开销预算");
+            check_timing(!gated() || d.current_within_limit(), "默认配置档的时间片超出开销预算");
             print_decision(&d, "smallest");
         }
     }

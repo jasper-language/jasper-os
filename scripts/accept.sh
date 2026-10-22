@@ -22,6 +22,11 @@
 #         JASPER_QEMU_TIMEOUT=300 bash scripts/accept.sh  （单次 QEMU 启动的时限，秒；默认 90。较慢的托管运行器上放宽）
 #         JASPER_ARCHES=all bash scripts/accept.sh        （架构范围：x86_64（默认）| all；默认只构建/启动 x86_64，
 #                                                         AArch64 / RISC-V64 / RISC-V32 冻结记 N/A；all 恢复四指令集全量验收）
+#         JASPER_QEMU_EXTRA='-icount shift=8' bash scripts/accept.sh
+#                                                         （原样追加到每次 x86_64 QEMU 命令行末尾；用于人为放慢，
+#                                                         复核「计时类断言只记录、不阻塞」的分层；默认空）
+# 计时分层（BM-0A）：QEMU 只判正确性，性能只在裸机判。功能自检全过、只有计时类断言超界时内核以退出码 37 退出；
+# 脚本把退出码 33 与 37 都视为启动成功（qemu_ok），并把「计时·参考」行记为 TIME（不阻塞），紧接最终结论前汇总行数。
 # 架构裁决（用户 2026-10-21）：jasper-os 暂时只针对 x86_64 开发，AArch64 / RISC-V64 / RISC-V32 冻结、「后续再补上」。
 # 为什么默认用最后几个核：前几个核（尤其 CPU 0）通常承担显卡、硬盘等设备中断与按核的内核后台工作；
 # 把它们压满会让桌面失去响应。构建与 QEMU 一律以 nice 19 / ionice 空闲级运行，桌面需要时随时让出。
@@ -108,6 +113,11 @@ if [ "$ACCEL" = auto ]; then
 fi
 ACCEL_ARGS=(-accel "$ACCEL")
 echo "x86_64 加速方式：$ACCEL"
+# 演练注入开关（BM-0A）：原样追加到每次 x86_64 QEMU 命令行末尾，便于人为放慢（例如 -icount shift=8）复核计时分层。
+# 默认空，不影响正常验收；不用于放宽任何判据，只改变仿真器速度。
+X86_EXTRA=()
+if [ -n "${JASPER_QEMU_EXTRA:-}" ]; then read -r -a X86_EXTRA <<< "$JASPER_QEMU_EXTRA"; fi
+[ "${#X86_EXTRA[@]}" -gt 0 ] && echo "x86_64 QEMU 附加参数：${X86_EXTRA[*]}"
 
 # 在限定核上、以最低 CPU / I/O 优先级运行（工具不存在时跳过相应限制）。
 run() {
@@ -159,6 +169,27 @@ record() {
 record_na() {
   ROWS+=("$(printf '%-6s %-4s %s' "${REC_PREFIX:-}$1" "N/A" "$2")")
 }
+# 计时·参考行超界计数（BM-0A）：这些行不阻塞，只在最终结论前汇总。
+TIMING_ROWS=0
+# record_timing <行名> <PASS|FAIL> <说明>：计时类判据专用。PASS 照常；FAIL 写成 TIME 并加“计时·参考”前缀，
+# 不置 FAILED、不改变任何功能判据。QEMU 的时间基准跟随宿主，性能结论只在裸机上算数。
+# Timing-class row: an over-limit result is recorded as TIME and never blocks the run.
+record_timing() {
+  if [ "${PORT_NA:-0}" = "1" ]; then
+    ROWS+=("$(printf '%-6s %-4s %s' "${REC_PREFIX:-}$1" "N/A" "本机目标不可运行（${PORT_NA_REASON:-未知原因}），未运行、不计入通过；$3")")
+    return
+  fi
+  if [ "$2" = "PASS" ]; then
+    ROWS+=("$(printf '%-6s %-4s %s' "${REC_PREFIX:-}$1" "PASS" "$3")")
+  else
+    ROWS+=("$(printf '%-6s %-4s %s' "${REC_PREFIX:-}$1" "TIME" "计时·参考（QEMU 不阻塞）：$3")")
+    TIMING_ROWS=$((TIMING_ROWS + 1))
+  fi
+}
+# qemu_ok <退出码>：启动成功 = 功能自检全过（33）或只有计时类断言超界（37）；35 仍是失败。
+qemu_ok() { [ "$1" -eq 33 ] || [ "$1" -eq 37 ]; }
+# exit_ok <日志>：本次启动以「功能全过」结束——成功（success）或只有计时类断言超界（timing-only）。
+exit_ok() { grep -qaE '^\[JSR-EXIT\] (success|timing-only)' "$1" 2>/dev/null; }
 # has <正则>：串口日志里是否出现
 has() { grep -qE "$1" "$SERIAL" 2>/dev/null; }
 # count <正则>：串口日志里出现的行数
@@ -232,7 +263,7 @@ if [ "$BUILD_RC" -eq 0 ]; then
   sleep "$BOOT_GAP"
   qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" \
     -serial stdio -display none -monitor none -no-reboot \
-    -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL" 2>&1
+    -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$SERIAL" 2>&1
   QRC=$?
 fi
 # 多处理器（SMP-1）：同一镜像以 4 个处理器再真实启动一次（其余参数不变）；上面的单处理器启动同时验证「只有引导处理器」的路径。
@@ -243,7 +274,7 @@ if [ "$BUILD_RC" -eq 0 ] && [ "$SPOT" -eq 0 ]; then
   sleep "$BOOT_GAP"
   qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4 \
     -serial stdio -display none -monitor none -no-reboot \
-    -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL_SMP4" 2>&1
+    -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$SERIAL_SMP4" 2>&1
   QRC_SMP4=$?
 fi
 # 多处理器（SMP-1）：同一镜像再以 8 个处理器真实启动一次。8 处理器启动排在 4 处理器之后、q35 之前，
@@ -255,7 +286,7 @@ if [ "$BUILD_RC" -eq 0 ] && [ "$SPOT" -eq 0 ]; then
   sleep "$BOOT_GAP"
   qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 8 \
     -serial stdio -display none -monitor none -no-reboot \
-    -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL_SMP8" 2>&1
+    -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$SERIAL_SMP8" 2>&1
   QRC_SMP8=$?
 fi
 # DRV-1B：q35 机型的 4 处理器启动。q35 提供 ACPI MCFG，配置空间必须走 ECAM（不可缓存 MMIO），
@@ -267,7 +298,7 @@ if [ "$BUILD_RC" -eq 0 ] && [ "$SPOT" -eq 0 ]; then
   sleep "$BOOT_GAP"
   qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -M q35 -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4 \
     -serial stdio -display none -monitor none -no-reboot \
-    -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$SERIAL_Q35" 2>&1
+    -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$SERIAL_Q35" 2>&1
   QRC_Q35=$?
 fi
 # AArch64（ISA-1）：同一内核以软浮点目标构建（不内嵌用户程序），在 QEMU virt 上直接装载 ELF 启动；
@@ -393,7 +424,7 @@ caprej_x86() {
   if run "$ROOT/target/release/xtask" bootcap "$ROOT/target/x86_64-unknown-none/release/jasper-kernel" "$elf" "$@" >> "$OUT/build.log" 2>&1 \
      && run "$ROOT/target/release/xtask" "$elf" "$img" >> "$OUT/build.log" 2>&1; then
     qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$img" -serial stdio -display none -monitor none -no-reboot \
-      -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$CAPREJ/serial-x86-$name.log" 2>&1
+      -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$CAPREJ/serial-x86-$name.log" 2>&1
     echo $? > "$CAPREJ/rc-x86-$name"
   else
     echo build > "$CAPREJ/rc-x86-$name"
@@ -456,10 +487,10 @@ check_isa() {   # 多指令集：kernel-core 目标指令集编译 + 单元测�
 }
 
 check_m11() {   # 真实启动 + 横幅 + 自退出
-  if [ "$QRC" -eq 33 ] && has '^\[JSR-BOOT\] jasper-os rust kernel' && has '^\[JSR-EXIT\] success'; then
-    record M1.1 PASS "QEMU=33，横幅与 [JSR-EXIT] success ✓"
+  if qemu_ok "$QRC" && has '^\[JSR-BOOT\] jasper-os rust kernel' && exit_ok "$SERIAL"; then
+    record M1.1 PASS "QEMU=$QRC（33=全过 / 37=仅计时超界），横幅与 [JSR-EXIT] success|timing-only ✓"
   else
-    record M1.1 FAIL "QEMU 退出码=$QRC（期望 33）或缺少 BOOT/EXIT 标记"
+    record M1.1 FAIL "QEMU 退出码=$QRC（期望 33 或 37）或缺少 BOOT/EXIT 标记"
   fi
 }
 
@@ -923,7 +954,8 @@ check_t1() {    # 内核参数化：配置档宿主测试；启动时输出所�
   fi
 }
 
-check_t2() {    # 基准：宿主统计/取值测试；周期计数器校准；时钟中断/切换/页帧/堆/系统调用/异步环/IPC 各项样本齐全；失败路径被拒无改动；生效参数在开销预算内；回到基线
+check_t2() {    # 基准（功能）：宿主统计/取值测试；周期计数器校准；时钟中断/切换/页帧/堆/系统调用/异步环/IPC 各项样本齐全；
+                # 失败路径被拒无改动；取值结论齐全；回到基线。是否在开销预算内由 T-2/计时 单独记录（QEMU 不阻塞）
   local hz names ok=1 i q gate
   hz="$(cfg timer_hz)"
   for t in summary_uses_nearest_rank_and_keeps_buffer full_buffer_rejects_without_changing_samples calibration_converts_and_rejects_zero_inputs \
@@ -936,11 +968,9 @@ check_t2() {    # 基准：宿主统计/取值测试；周期计数器校准；�
   for names in syscall.roundtrip ring.submit_complete ipc.roundtrip; do
     has "text=bench: name=$names iters=200 min=[0-9]+ p50=[1-9][0-9]* p99=[0-9]+ max=[0-9]+ mean=[0-9]+ unit=cycles p50_ns=[0-9]+" || ok=0
   done
-  # 预算判定只在平台提供真正的周期计数器时执行（x86_64 的 TSC；其它指令集是时间基准）：
-  # 强制生效时（gated=true）必须 within_limit=true；只作参考时（gated=false）只要求结论齐全。
-  # 无论哪种情况，都不允许出现「强制生效却超出预算」。
-  case "$PROFILE" in standard) gate='within_limit=(true gated=true|(true|false) gated=false)' ;; *) gate='within_limit=(true|false) gated=false' ;; esac
-  ! has 'within_limit=false gated=true' || ok=0
+  # 这里只要求取值结论齐全（同一次测量同时给出 within_limit 与 gated）：是否超预算属于计时类判据，
+  # 由 T-2/计时 单独记录，不在功能行里判失败。gated 的含义见基准演练：只有 x86_64 默认档的预算作数。
+  gate='within_limit=(true|false) gated=(true|false)'
   for i in 0 1 2 3; do
     q="$(cfg "quantum\.$i")"
     has "^\[JSR-BENCH\] tune param=quantum\.$i current=$q current_ppm=[0-9]+ limit_ppm=10000 $gate prefer=smallest bound=(Some\([0-9]+\)|None)" || ok=0
@@ -956,11 +986,19 @@ check_t2() {    # 基准：宿主统计/取值测试；周期计数器校准；�
      && has '^\[JSR-BENCH\] case=user exit=Some\(0\) reclaimed=true' \
      && has "^\[JSR-BENCH\] tune param=timer_hz current=$hz current_ppm=[0-9]+ limit_ppm=10000 $gate prefer=largest bound=(Some\([0-9]+\)|None)" \
      && has '^\[JSR-BENCH\] case=tune_refusal invalid_candidate_refused=true' \
-     && has '^\[JSR-BENCH\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0' \
+     && has '^\[JSR-BENCH\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0 timing_failed=[0-9]+' \
      && ! has '^\[JSR-BENCH-FAIL\]'; then
-    record T-2 PASS "9 项基准样本齐全（内核 6 + 用户态 3）；时钟中断样本与 tick 一一对应；失败路径被拒无改动；配置档 $PROFILE 的取值结论齐全（默认档 timer_hz 与各档时间片须在 1% 开销预算内）；回到基线"
+    record T-2 PASS "9 项基准样本齐全（内核 6 + 用户态 3）；时钟中断样本与 tick 一一对应；失败路径被拒无改动；配置档 $PROFILE 的取值结论齐全；回到基线"
   else
-    record T-2 FAIL "缺少 JSR-BENCH 标记、样本不全、失败路径未被拒、生效参数超出预算、宿主测试未通过或未回到基线"
+    record T-2 FAIL "缺少 JSR-BENCH 标记、样本不全、失败路径未被拒、取值结论缺失、宿主测试未通过或未回到基线"
+  fi
+  # 计时类判据（BM-0A）：只记录、不阻塞。QEMU 的时间基准跟随宿主，性能只在裸机上判定；
+  # 内核在功能自检全过、只有计时类断言超界时以退出码 37 退出，汇总行末 timing_failed=<n> 即该计数。
+  if has '^\[JSR-BENCH\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0 timing_failed=0' \
+     && ! has 'within_limit=false gated=true'; then
+    record_timing T-2/计时 PASS "串口 [JSR-BENCH] summary timing_failed=0：默认配置档 timer_hz 与各档时间片都在 1% 开销预算内"
+  else
+    record_timing T-2/计时 FAIL "内核报告计时类断言超界（timing_failed>0）或出现「强制生效却超出预算」；功能判据不受影响，性能结论以裸机为准"
   fi
 }
 
@@ -1067,7 +1105,7 @@ smp1a_verdict() {
   grep -qE '^\[JSR-SMP\] refuse no_such_cpu=system\.cpu\.error\.no_such_cpu self=system\.cpu\.error\.self_target call_no_such=system\.cpu\.error\.no_such_cpu call_self=system\.cpu\.error\.self_target bad_range=system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range' "$f" \
                                                                                 || miss="$miss $name:拒绝路径"
   grep -qE "^\[JSR-SMP\] summary cpus=$n online=$n checks=[0-9]+ failed=0" "$f" || miss="$miss $name:汇总"
-  grep -q '^\[JSR-EXIT\] success' "$f" && [ "$qrc" -eq 33 ]                     || miss="$miss $name:退出"
+  exit_ok "$f" && qemu_ok "$qrc"                     || miss="$miss $name:退出"
   SMP1A_MISS="$miss"
 }
 
@@ -1096,7 +1134,7 @@ check_smp1b_a64() { # 多处理器第二阶段（AArch64）：设备树发现 4 
   grep -qE '^\[JSR-SMP\] refuse no_such_cpu=system\.cpu\.error\.no_such_cpu self=system\.cpu\.error\.self_target call_no_such=system\.cpu\.error\.no_such_cpu call_self=system\.cpu\.error\.self_target bad_range=system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range' "$f" \
                                                                              || miss="$miss 拒绝路径"
   grep -qE '^\[JSR-SMP\] summary cpus=4 online=4 checks=[0-9]+ failed=0' "$f" || miss="$miss 汇总"
-  grep -q '^\[JSR-EXIT\] success' "$f" && [ "$QRC_A64_SMP4" -eq 33 ]       || miss="$miss 退出"
+  exit_ok "$f" && qemu_ok "$QRC_A64_SMP4"       || miss="$miss 退出"
   # 单处理器 AArch64 启动：设备树只有引导处理器，如实报告并只演练拒绝路径
   grep -qE '^\[JSR-SMP\] start present=1 online=1 failed=0 source=boot_only ' "$SERIAL_A64" \
     && grep -q '^\[JSR-SMP\] single cpus=1 secondary=none' "$SERIAL_A64" \
@@ -1133,7 +1171,7 @@ rv_smp4_verdict() {
   grep -qaE '^\[JSR-SMP\] refuse no_such_cpu=system\.cpu\.error\.no_such_cpu self=system\.cpu\.error\.self_target call_no_such=system\.cpu\.error\.no_such_cpu call_self=system\.cpu\.error\.self_target bad_range=system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range' "$rvlog" \
                                                                               || RV_SMP_MISS="$RV_SMP_MISS 拒绝路径"
   grep -qaE '^\[JSR-SMP\] summary cpus=4 online=4 checks=[0-9]+ failed=0' "$rvlog" || RV_SMP_MISS="$RV_SMP_MISS 汇总"
-  grep -qa '^\[JSR-EXIT\] success' "$rvlog" && [ "$rvqrc" -eq 33 ]                || RV_SMP_MISS="$RV_SMP_MISS 退出"
+  exit_ok "$rvlog" && qemu_ok "$rvqrc"                || RV_SMP_MISS="$RV_SMP_MISS 退出"
 }
 
 check_smp1b_rv() { # 多处理器第二阶段（RISC-V64 与 RISC-V32）：设备树发现 4 个处理器、SBI HSM hart_start 全部报到、各核本地定时器各自计时、
@@ -1199,7 +1237,7 @@ smp1c_verdict() {
   grep -qaE "^\[JSR-SMPC\] sched concurrent readers=$scap/$scap rounds=2000 consistent=true restored=true contended=[0-9]+" "$scf" || SC_MISS="$SC_MISS $scname:调度器锁"
   grep -qaE "^\[JSR-SMPC\] kstack per_cpu set=$scap/$scap kept=$scap/$scap bsp_unchanged=true restored=$scap/$scap" "$scf" || SC_MISS="$SC_MISS $scname:每核内核栈"
   grep -qaE '^\[JSR-LOCK-ORDER\]|^\[JSR-PANIC\]' "$scf" && SC_MISS="$SC_MISS $scname:出现锁顺序违反或panic"
-  grep -qaE "^\[JSR-SMP\] summary cpus=$scn online=$scn checks=[0-9]+ failed=0" "$scf" && grep -qa '^\[JSR-EXIT\] success' "$scf" && [ "$scrc" -eq 33 ] \
+  grep -qaE "^\[JSR-SMP\] summary cpus=$scn online=$scn checks=[0-9]+ failed=0" "$scf" && exit_ok "$scf" && qemu_ok "$scrc" \
     || SC_MISS="$SC_MISS $scname:汇总/退出"
 }
 
@@ -1260,7 +1298,7 @@ smp2_verdict() {
   grep -qaE "^\[JSR-SMP2\] case=inherit cpus=$s2n hogs=$s2hogs work=4 wait=[0-8] bound=8 bounded=true holder_peak=interactive lock_free=true" "$s2f" || S2_MISS="$S2_MISS $s2name:跨核继承"
   grep -qaE "^\[JSR-SMP2\] case=limit cpus=$s2n members=$s2n limit_permille=250 window=160 used=[0-9]+ bound=[0-9]+ within=true floor=[0-9]+ throttle_events=[1-9][0-9]* cores_used=[2-$s2n]" "$s2f" || S2_MISS="$S2_MISS $s2name:跨核上限"
   grep -qaE '^\[JSR-SMP2-FAIL\]|^\[JSR-LOCK-ORDER\]|^\[JSR-PANIC\]' "$s2f" && S2_MISS="$S2_MISS $s2name:出现失败断言/锁顺序违反/panic"
-  grep -qaE "^\[JSR-SMP2\] summary cpus=$s2n free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=43 failed=0" "$s2f" && grep -qa '^\[JSR-EXIT\] success' "$s2f" && [ "$s2rc" -eq 33 ] \
+  grep -qaE "^\[JSR-SMP2\] summary cpus=$s2n free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=43 failed=0" "$s2f" && exit_ok "$s2f" && qemu_ok "$s2rc" \
     || S2_MISS="$S2_MISS $s2name:汇总/退出"
 }
 
@@ -1323,7 +1361,7 @@ smp3_verdict() {
     [ "${sp:-0}" -ge 2000 ] || S3_MISS="$S3_MISS $s3name:分片加速比${sp:-?}‰<2000‰"
   fi
   grep -qaE '^\[JSR-SMP3-FAIL\]|^\[JSR-LOCK-ORDER\]|^\[JSR-PANIC\]' "$s3f" && S3_MISS="$S3_MISS $s3name:出现失败断言/锁顺序违反/panic"
-  grep -qaE "^\[JSR-SMP3\] summary cpus=$s3n device_lines=2 free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=39 failed=0" "$s3f" && grep -qa '^\[JSR-EXIT\] success' "$s3f" && [ "$s3rc" -eq 33 ] \
+  grep -qaE "^\[JSR-SMP3\] summary cpus=$s3n device_lines=2 free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=39 failed=0" "$s3f" && exit_ok "$s3f" && qemu_ok "$s3rc" \
     || S3_MISS="$S3_MISS $s3name:汇总/退出"
 }
 
@@ -1401,7 +1439,7 @@ check_isa1b() { # AArch64 移植第二阶段：内嵌用户程序（独立 Rust 
   local progs
   progs=$(grep -cE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_A64" || true)
   if [ "$A64_BAD" -eq 0 ] && ! grep -q '^\[JSR-STAGE\] user_programs=absent' "$SERIAL_A64" \
-     && grep -q '^\[JSR-EXIT\] success' "$SERIAL_A64" && [ "$QRC_A64" -eq 33 ]; then
+     && exit_ok "$SERIAL_A64" && qemu_ok "$QRC_A64"; then
     record ISA1b PASS "AArch64（QEMU=$QRC_A64）：内嵌用户程序以 AArch64 构建，$A64_N 项用户态检查全部通过（ELF/生命周期/异步环/IPC/非特权程序/jasper-rt/Rust 库/.jaso 装载与库模块/QoS/过载防护/配置/基准），创建进程 $progs 次"
   else
     record ISA1b FAIL "AArch64：$A64_N 项中 $A64_BAD 项失败、未内嵌用户程序或未成功退出（见 serial-aarch64.log）"
@@ -1421,7 +1459,7 @@ check_isa2a() { # RISC-V64 移植第一阶段：与 AArch64 第一阶段同一�
   if [ "$RV64_BAD" -eq 0 ] && grep -qE '^\[JSR-BOOT\] jasper-os rust kernel [0-9.]+ riscv64' "$SERIAL_RV64" \
      && grep -q '^\[JSR-VEC\] ok' "$SERIAL_RV64" \
      && grep -qE '^\[JSR-PLIC\] ok source=([0-9]+) claimed=\1 completed=true drained=true' "$SERIAL_RV64" \
-     && grep -q '^\[JSR-EXIT\] success' "$SERIAL_RV64" && [ "$QRC_RV64" -eq 33 ]; then
+     && exit_ok "$SERIAL_RV64" && qemu_ok "$QRC_RV64"; then
     record ISA2a PASS "RISC-V64（QEMU virt + OpenSBI，Sv39，QEMU=$QRC_RV64）：$RV64_N 项内核侧检查全部通过（启动/陷入/SBI 时钟/PLIC 认领完成/调度/抢占/机制/页帧/映射/堆/地址空间/用户态/ecall/用户指针/进程/句柄/回滚/优先级继承）"
   else
     record ISA2a FAIL "RISC-V64：$RV64_N 项中 $RV64_BAD 项失败，或缺少横幅 / 陷入入口 / PLIC 自检标记、未成功退出（见 serial-riscv64.log）"
@@ -1440,7 +1478,7 @@ check_isa2b() { # RISC-V64 移植第二阶段：内嵌用户程序（独立 Rust
   progs=$(grep -cE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_RV64" || true)
   if [ "$RV64_BAD" -eq 0 ] && ! grep -q '^\[JSR-STAGE\] user_programs=absent' "$SERIAL_RV64" \
      && grep -qE '^\[JSR-USERTEXT\] task=prog-hello bytes=[0-9]+ text=prog: hello mode=0' "$SERIAL_RV64" \
-     && grep -q '^\[JSR-EXIT\] success' "$SERIAL_RV64" && [ "$QRC_RV64" -eq 33 ]; then
+     && exit_ok "$SERIAL_RV64" && qemu_ok "$QRC_RV64"; then
     record ISA2b PASS "RISC-V64（QEMU=$QRC_RV64）：内嵌用户程序以 riscv64imac 构建、链接在 Sv39 私有窗口内，$RV64_N 项用户态检查全部通过（ELF/生命周期/异步环/IPC/非特权程序/jasper-rt/Rust 库/.jaso 装载与库模块/QoS/过载防护/配置/基准），创建进程 $progs 次"
   else
     record ISA2b FAIL "RISC-V64：$RV64_N 项中 $RV64_BAD 项失败、未内嵌用户程序或未成功退出（见 serial-riscv64.log）"
@@ -1477,7 +1515,7 @@ check_isa3a() { # RISC-V32 移植第一阶段：同一组内核侧检查在 qemu
      && grep -qaE '^\[JSR-COUNTER64\] summary impl=irq_locked checks=[0-9]+ failed=0' "$SERIAL_RV32" \
      && grep -qaE '^\[JSR-COUNTER64\] summary impl=native checks=[0-9]+ failed=0' "$SERIAL" \
      && grep -qaE '^\[JSR-COUNTER64\] summary impl=native checks=[0-9]+ failed=0' "$SERIAL_RV64" \
-     && grep -qa '^\[JSR-EXIT\] success' "$SERIAL_RV32" && [ "$QRC_RV32" -eq 33 ]; then
+     && exit_ok "$SERIAL_RV32" && qemu_ok "$QRC_RV32"; then
     record ISA3a PASS "RISC-V32（QEMU virt + OpenSBI，Sv32，QEMU=$QRC_RV32）：$RV32_N 项内核侧检查全部通过（启动/陷入/SBI 时钟/PLIC/调度/抢占/机制/页帧/映射/堆/地址空间/用户态/ecall 与 a0:a1 返回/用户指针/进程/句柄/回滚/优先级继承）；64 位计数：关中断+自旋锁实现，跨 2^32 正确，与定时器中断共享读取 $reads 次无自锁；x86_64 / RISC-V64 为原生原子"
   else
     record ISA3a FAIL "RISC-V32：$RV32_N 项中 $RV32_BAD 项失败，或缺少横幅 / 陷入入口 / PLIC / 64 位计数标记、未成功退出（见 serial-riscv32.log）"
@@ -1499,7 +1537,7 @@ check_isa3b() { # RISC-V32 移植第二阶段：内嵌用户程序（ELF32 装�
   if [ "$RV32_BAD" -eq 0 ] && ! grep -qa '^\[JSR-STAGE\] user_programs=absent' "$SERIAL_RV32" \
      && grep -qaE '^\[JSR-BOOT\] jasper-os rust kernel [0-9.]+ riscv32' "$SERIAL_RV32" \
      && grep -qaE '^\[JSR-USERTEXT\] task=prog-hello bytes=[0-9]+ text=prog: hello mode=0' "$SERIAL_RV32" \
-     && grep -qa '^\[JSR-EXIT\] success' "$SERIAL_RV32" && [ "$QRC_RV32" -eq 33 ]; then
+     && exit_ok "$SERIAL_RV32" && qemu_ok "$QRC_RV32"; then
     record ISA3b PASS "RISC-V32（QEMU=$QRC_RV32）：内嵌用户程序以 riscv32imac 构建为 ELF32、链接在 Sv32 私有窗口内（0x0080_0000），64 位参数按低半 a0–a2 / 高半 a3–a5 传递，$RV32_N 项用户态检查全部通过（ELF/生命周期/异步环/IPC/非特权程序/jasper-rt/Rust 库/.jaso 装载（4 字节重定位）与库模块/QoS/过载防护/配置/基准），创建进程 $progs 次"
   else
     record ISA3b FAIL "RISC-V32：$RV32_N 项中 $RV32_BAD 项失败、未内嵌用户程序或未成功退出（见 serial-riscv32.log）"
@@ -1687,7 +1725,7 @@ check_drv1b() { # DRV-1B：PCI 配置空间两种机制——pc 机型走传统�
     || miss="$miss pc:端口机制汇总"
   grep -qaE '^\[JSR-PCI\] summary mechanism=ecam functions=[1-9][0-9]* bars=[1-9][0-9]* checks=[1-9][0-9]* failed=0' "$SERIAL_Q35" \
     || miss="$miss q35:ECAM 机制汇总"
-  [ "$QRC_Q35" -eq 33 ] && grep -qa '^\[JSR-EXIT\] success' "$SERIAL_Q35" || miss="$miss q35:启动/退出"
+  qemu_ok "$QRC_Q35" && exit_ok "$SERIAL_Q35" || miss="$miss q35:启动/退出"
   for pair in "$SERIAL:pc" "$SERIAL_Q35:q35"; do
     f="${pair%%:*}"; name="${pair##*:}"
     n=$(grep -caE '^\[JSR-PCI\] dev bdf=[0-9a-f]{2}:[0-9a-f]{2}\.[0-7] vendor=0x1af4 device=0x10[0-7][0-9a-f] class=0x[0-9a-f]{6} bars=[0-9]+' "$f" 2>/dev/null)
@@ -2136,6 +2174,27 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
   fi
 }
 
+# BM-0A：本步只把 T-2 拆成「功能 / 计时」两行。下面这些计时类子条件仍留在各自的功能行里（本次不改），
+# 逐条列出「行名 + 本文件行号 + 判据原文」，供下一步按 record_timing 的同一机制拆分。
+echo "accept: 计时类子条件清单（本步只拆 T-2，以下保持原样；行号指 scripts/accept.sh）"
+cat <<'BM0A'
+M1.4                :532  [ "${tick:-0}" -ge 10 ] && [ "${yld:-0}" -eq 0 ] && [ "${chg:-0}" -ge 3 ]（演练段 cause=tick 抢占切换 ≥10）
+J-6                 :872  loaded_max_ticks=[0-4] bound=4 recovered_max_ticks=[01]（2 个满载隔离模块下往返延迟 ≤4 tick）
+SCHED1              :899  p50=0 p99=[01] max=[01] bound=1 bounded=true（过载下用户发起档唤醒延迟 ≤1 tick）
+SCHED2              :911  wait=[0-6] bound=6 bounded=true（优先级继承：3 个满载中档任务下等锁 ≤6 tick）
+SCHED2              :913  wait=[0-6] bound=6 bounded=true（优先级继承：等持有者退出 ≤6 tick）
+SCHED3              :929  bystander_share=([5-9][0-9][0-9]|1000)‰ ... p99=[01] max=[01] latency_bound=1（限速下旁观份额 ≥50%、交互延迟 ≤1 tick）
+SMP-2               :1293 latency_max=[0-2] bound=2 bounded=true（全部核过载时交互唤醒延迟 ≤2 tick）
+SMP-2               :1298 wait=[0-8] bound=8 bounded=true（跨核优先级继承等待 ≤8 tick）
+SMP-3               :1353 latency_max=[0-2] bound=2 ... worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=true（风暴下交互延迟 ≤2 tick、每核中断占比在预算内）
+SMP-3               :1361 [ "${sp:-0}" -ge 2000 ]（分片加速比 ≥2000‰＝2.0×，宿主 ≥4 核时）
+HARDEN1E            :1648 divisor=[2-9][0-9]* ... reduced=true（全空闲窗口里非计时核本地 tick 至少减半）
+HARDEN1E            :1649 max=[0-2] bound=2 bounded=true（停表处理器上的唤醒延迟 ≤2 tick）
+DRV2C2              :2043 latency_max=[0-9]+ ... within_quota=true 与 :2050 [ "$lat" -le 2 ]（设备中断风暴下交互延迟 ≤2 tick、中断占比在预算内）
+HARDEN1D            :2114 worst_idle_waiting=[0-2]（规模化下「本核空闲而别处有任务在等」≤2 tick）
+HARDEN1D            :2115 latency_max=[0-2] bound=2 bounded=true（同规模过载交互延迟 ≤2 tick）
+BM0A
+
 if [ "$SPOT" -eq 1 ]; then
   for c in ${JASPER_CHECKS:-m11}; do
     if declare -F "check_$c" >/dev/null; then "check_$c"; else record "$c" FAIL "定点验收：没有名为 check_$c 的检查"; fi
@@ -2184,6 +2243,8 @@ for f in "${EVIDENCE_FILES[@]}"; do
 done
 echo
 echo "证据目录：$OUT"
+# 计时·参考行只在最终结论前汇总一次：它们是记录，不是失败（QEMU 只判正确性，性能只在裸机判）。
+if [ "$TIMING_ROWS" -gt 0 ]; then echo "accept: 计时·参考 $TIMING_ROWS 行超界（不阻塞）"; fi
 if [ "$FAILED" -ne 0 ]; then echo "accept: FAIL"; exit 1; fi
 if [ "$SPOT" -eq 1 ]; then echo "accept: SPOT PASS（定点，不代表全量通过）"; else echo "accept: ALL PASS"; fi
 exit 0

@@ -57,8 +57,10 @@ use super::{ExitStatus, Platform, UserProbe};
 /// RISC-V 平台（零大小类型，仅作为 trait 实现的载体）。
 pub struct Riscv;
 
-/// 测试设备退出码：与 x86_64 上 QEMU 调试退出设备产生的退出码一致（成功 33、失败 35）。
+/// 测试设备退出码：与 x86_64 上 QEMU 调试退出设备产生的退出码一致
+/// （成功 33、功能全过且只有计时类断言超界 37、失败 35）。
 const EXIT_SUCCESS_CODE: u16 = 33;
+const EXIT_TIMING_ONLY_CODE: u16 = 37;
 const EXIT_FAILURE_CODE: u16 = 35;
 
 impl Platform for Riscv {
@@ -192,6 +194,7 @@ impl Platform for Riscv {
     fn exit_emulator(status: ExitStatus) -> ! {
         testdev::exit(match status {
             ExitStatus::Success => EXIT_SUCCESS_CODE,
+            ExitStatus::TimingOnly => EXIT_TIMING_ONLY_CODE,
             ExitStatus::Failure => EXIT_FAILURE_CODE,
         })
     }
