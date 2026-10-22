@@ -237,6 +237,12 @@ impl Platform for X86_64 {
         user::probe(probe)
     }
 
+    /// 本平台的 PCI 拓扑含 ISA 桥（传统 PC 机型）。
+    const PCI_EXPECTS_ISA_BRIDGE: bool = true;
+
+    /// x86_64 的 MSI 地址编码目标 APIC 标识，不同处理器的地址互不相同。
+    const MSI_ADDRESS_ENCODES_TARGET: bool = true;
+
     const CPU_START_FRAME_LIMIT: Option<u64> = Some(smp::START_FRAME_LIMIT);
 
     fn cpu_init_boot(boot: &crate::boot::BootSpec) -> super::CpuDiscovery {

@@ -16,7 +16,7 @@
 
 use core::arch::global_asm;
 
-use super::{cpu::read_sysreg, devirq, gic, timer};
+use super::{cpu::read_sysreg, devirq, gic, msi, timer};
 use crate::console;
 use crate::fault::{self, UserFault, UserFaultKind};
 use crate::irq::{self, IrqLine};
@@ -196,6 +196,10 @@ fn handle_irq(from_user: bool) {
     } else if let Some(kind) = gic::ipi_kind(id) {
         gic::end(iar);
         irq::on_hardware_irq(IrqLine::Ipi(kind), from_user);
+    } else if msi::owns(id) {
+        // MSI：分发器已把中断号映射到某个处理器的向量池；先结束中断再交给 Core（与定时器相同）。
+        gic::end(iar);
+        irq::on_msi(msi::vector_of(id));
     } else if let Some(line) = devirq::line_of_id(id) {
         // 设备中断：Core 在结束中断之前处理（不切换任务），之后才允许同一中断再次送达
         irq::on_device_irq(line);

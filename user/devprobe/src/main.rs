@@ -24,7 +24,10 @@ use kernel_core::device::{
     FILTER_ALL_CLASS, FILTER_ALL_VENDOR, RECORD_SIZE,
 };
 use kernel_core::object::Rights;
-use kernel_core::user_layout::WINDOW_BASE_X86_64;
+#[cfg(target_arch = "aarch64")]
+use kernel_core::user_layout::WINDOW_BASE_AARCH64 as WINDOW_BASE;
+#[cfg(target_arch = "x86_64")]
+use kernel_core::user_layout::WINDOW_BASE_X86_64 as WINDOW_BASE;
 
 /// 系统调用号（构建期从登记表生成）。
 #[allow(dead_code)]
@@ -39,7 +42,7 @@ static mut DESC: [u8; DESC_SIZE] = [0; DESC_SIZE];
 /// 能力记录缓冲区（16 条 × 16 字节，足够 QEMU 的 virtio 设备）。
 static mut CAPS: [u8; 256] = [0; 256];
 /// DRV-1D 的固定设备窗口虚拟地址：私有窗口起点 + 960 MiB（模块区间结束之后、最小窗口之内）。
-const MAP_VA: u64 = WINDOW_BASE_X86_64 + (960 << 20);
+const MAP_VA: u64 = WINDOW_BASE + (960 << 20);
 /// 第二个设备窗口（重复映射与拒绝路径使用，与 [`MAP_VA`] 相距 64 KiB）。
 const MAP_VA2: u64 = MAP_VA + 0x1_0000;
 
@@ -48,7 +51,6 @@ static mut CHECKS: u32 = 0;
 static mut FAILED: u32 = 0;
 
 /// 发起一个三参数系统调用（x86_64：rax=ID，rdi/rsi/rdx=参数，rcx/r11 被占用）。
-/// The probe is validated on x86_64 only (the other ISAs are frozen).
 ///
 /// # Safety
 /// 参数必须符合该调用的约定；作为指针传入的值须指向本进程内、在调用期间有效的内存。
@@ -68,8 +70,26 @@ unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
     ret
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-compile_error!("user-devprobe 只支持 x86_64（DRV-1C 的验收范围；其它指令集冻结）");
+/// 发起系统调用（AArch64：x8=ID，x0/x1/x2=参数，`svc #0`；返回值在 x0，其余寄存器由内核保留）。
+///
+/// # Safety
+/// 参数必须符合该调用的约定；作为指针传入的值须指向本进程内、在调用期间有效的内存。
+#[cfg(target_arch = "aarch64")]
+unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
+    let ret: i64;
+    asm!(
+        "svc #0",
+        in("x8") id,
+        inlateout("x0") a as i64 => ret,
+        in("x1") b,
+        in("x2") c,
+        options(nostack)
+    );
+    ret
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!("user-devprobe 只支持 x86_64 与 AArch64（DRV-1C 的验收范围）");
 
 /// 一行输出缓冲区。
 struct Line {

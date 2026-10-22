@@ -9,7 +9,7 @@ use crate::boot::BootSpec;
 use crate::{appid_demo, arbiter_demo, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, l10n_demo, mech_demo, mm, msi_demo, pci, pci_demo, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, virtio_rng_demo, wcet};
 #[cfg(feature = "user-programs")]
 use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo, uptr_demo, longrun_demo};
-#[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+#[cfg(feature = "user-programs")]
 use crate::device_demo;
 use crate::{nohz_demo, scale_demo};
 
@@ -148,13 +148,13 @@ pub fn start(boot: &'static BootSpec) -> ! {
     // M4.2：Handle/Rights（duplicate/restrict 只降权；跨进程原子转移）。
     user_demo::run_handles();
     // DRV-1C：设备内核对象与 list / open / get 系统调用（设备表由 DRV-1B 在启动期建立）。
-    #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+    #[cfg(feature = "user-programs")]
     device_demo::run();
     // DRV-2C-1：设备中断对象——真实 virtio-rng 的 MSI-X 中断经中断对象成为用户 Ring 上的一条完成。
-    #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+    #[cfg(feature = "user-programs")]
     crate::irqring_demo::run();
     // DRV-2C-2：真实 virtio-rng 的 MSI-X 中断风暴受每核预算约束（屏蔽 / 下一 tick 解除、到达不丢）。
-    #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+    #[cfg(feature = "user-programs")]
     crate::irqstorm_demo::run();
     // KRN-0：中断到达计数跨 u32 回绕仍按模差正确计数。
     crate::krn0_demo::run();
@@ -230,11 +230,11 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("pci", pci_demo::failed()),
         ("msi", msi_demo::failed()),
         ("msix", virtio_rng_demo::failed()),
-        #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+        #[cfg(feature = "user-programs")]
         ("drv1c", device_demo::failed()),
-        #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+        #[cfg(feature = "user-programs")]
         ("drv2c1", crate::irqring_demo::failed()),
-        #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+        #[cfg(feature = "user-programs")]
         ("drv2c2", crate::irqstorm_demo::failed()),
         ("krn0", crate::krn0_demo::failed()),
         ("l10n", l10n_demo::failed()),
@@ -284,7 +284,7 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("rt", rt_demo::timing_failed()),
         ("balance", balance_demo::timing_failed()),
         ("irq", irq_demo::timing_failed()),
-        #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+        #[cfg(feature = "user-programs")]
         ("drv2c2", crate::irqstorm_demo::timing_failed()),
     ];
     #[cfg(not(feature = "user-programs"))]

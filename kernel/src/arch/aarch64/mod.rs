@@ -27,7 +27,9 @@ mod cpu;
 mod devirq;
 mod gic;
 mod mmu;
+pub(crate) mod msi;
 mod paging;
+mod pci;
 mod semihost;
 mod smp;
 pub(crate) use smp::tlb_flush_all_local as flush_all_local_tlb;
@@ -38,6 +40,12 @@ mod user;
 mod vectors;
 
 use super::{ExitStatus, Platform, UserProbe};
+
+/// 设备寄存器窗口：内核共享部分的顶级第 192 项（`0x0000_6000_0000_0000`），2 MiB。
+/// 不与内核堆（第 136 项）、内核演练地址（第 128 项）或用户窗口（第 32–63 项）重叠；
+/// 启动期已预分配全部内核共享部分，因此窗口内的映射不再需要新页表。
+const MMIO_WINDOW_BASE: u64 = 0x0000_6000_0000_0000;
+const MMIO_WINDOW_SIZE: u64 = 2 * 1024 * 1024;
 
 /// AArch64 平台（零大小类型，仅作为 trait 实现的载体）。
 pub struct Aarch64;
@@ -236,6 +244,28 @@ impl Platform for Aarch64 {
 
     fn user_probe(probe: UserProbe) -> &'static [u8] {
         user::probe(probe)
+    }
+
+    /// 设备树有 `pci-host-ecam-generic` 时经 ECAM 访问配置空间；没有 PCI 时返回 `None`。
+    fn pci_access(boot: &crate::boot::BootSpec) -> Option<super::PciAccess> {
+        pci::access(boot)
+    }
+
+    /// GICv2m 帧报告的 SPI 范围（前 16 个）作为设备 MSI 向量。
+    fn msi_vector_range() -> Option<super::MsiRange> {
+        msi::range()
+    }
+
+    fn msi_message(cpu: usize, vector: u8) -> Option<super::MsiMessage> {
+        msi::message(cpu, vector)
+    }
+
+    fn msi_trigger(cpu: usize, vector: u8) -> Result<(), kernel_core::msi::MsiError> {
+        msi::trigger(cpu, vector)
+    }
+
+    fn mmio_window() -> Option<(u64, u64)> {
+        Some((MMIO_WINDOW_BASE, MMIO_WINDOW_SIZE))
     }
 
     // ---- 多处理器 ----

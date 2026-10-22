@@ -21,7 +21,7 @@ use kernel_core::frame::{PhysFrame, FRAME_SIZE};
 use kernel_core::pci::{Bar, Bdf};
 
 use crate::mmio::{Mapping, MmioError};
-use crate::{mm, pci, sched};
+use crate::{kprintln, mm, pci, sched};
 
 /// virtio 设备的 PCI 厂商号。
 /// PCI vendor ID of virtio devices.
@@ -170,6 +170,15 @@ impl VirtioPci {
         let isr = map_capability(device, CAP_CFG_ISR, 1)?;
         let device_config = map_capability(device, CAP_CFG_DEVICE, 4)?;
         let notify_multiplier = pci::notify_multiplier(device).ok_or(VirtioError::NoNotifyMultiplier)?;
+        for cap in &device.caps[..device.cap_count] {
+            let bar = device.bars.get(cap.bar as usize);
+            kprintln!("[JSR-VIRTIO-DBG] cap type={} bar={} off=0x{:x} len=0x{:x} barinfo={:?}", cap.cfg_type, cap.bar, cap.bar_offset, cap.length, bar);
+        }
+        kprintln!(
+            "[JSR-VIRTIO-DBG] bdf={:?} common=0x{:x}/{} notify=0x{:x}/{} isr=0x{:x}/{} dev=0x{:x}/{} mult={} caps={}",
+            device.bdf, common.va(), common.len(), notify.va(), notify.len(), isr.va(), isr.len(),
+            device_config.va(), device_config.len(), notify_multiplier, device.cap_count
+        );
         Ok(VirtioPci { bdf: device.bdf, common, notify, isr, device_config, notify_multiplier })
     }
 
@@ -240,7 +249,9 @@ impl VirtioPci {
     pub fn negotiate_version_1(&self) -> Result<(), VirtioError> {
         self.add_status(STATUS_ACKNOWLEDGE);
         self.add_status(STATUS_DRIVER);
+        let offered0 = self.device_features(0);
         let offered = self.device_features(1);
+        kprintln!("[JSR-VIRTIO-DBG] status=0x{:x} feat0=0x{:x} feat1=0x{:x}", self.status(), offered0, offered);
         if offered & VIRTIO_F_VERSION_1 == 0 {
             return Err(VirtioError::Version1Unavailable);
         }

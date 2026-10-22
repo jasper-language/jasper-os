@@ -8,7 +8,8 @@
 //! * `USER` ⇒ AP[1]=1（EL0 可访问）且 nG=1（随地址空间切换失效）；
 //! * 无 `WRITE` ⇒ AP[2]=1（只读）；
 //! * `EXECUTE` ⇒ 用户页只清 UXN、内核页只清 PXN——内核永不执行用户页，用户永不执行内核页；
-//! * 一律为普通内存（写回缓存）、内部共享、访问标志预置（不依赖硬件更新访问位）。
+//! * 带 `NO_CACHE` 的映射用设备内存属性（nGnRE），其余为普通内存（写回缓存）；内部共享、访问标志预置
+//!   （不依赖硬件更新访问位）。
 
 use kernel_core::frame::{FrameAllocator, PhysFrame};
 use kernel_core::paging::{MapError, MapFlags, PageMapper, VirtPage};
@@ -70,7 +71,8 @@ impl EntryFormat for A64Format {
     }
 
     fn leaf_entry(frame_phys: u64, flags: MapFlags) -> u64 {
-        let mut e = (frame_phys & desc::ADDR_MASK) | desc::VALID | desc::TABLE_OR_PAGE | desc::ATTR_NORMAL | desc::SH_INNER | desc::AF;
+        let attr = if flags.contains(MapFlags::NO_CACHE) { desc::ATTR_DEVICE } else { desc::ATTR_NORMAL };
+        let mut e = (frame_phys & desc::ADDR_MASK) | desc::VALID | desc::TABLE_OR_PAGE | attr | desc::SH_INNER | desc::AF;
         let user = flags.contains(MapFlags::USER);
         if user {
             e |= desc::AP_EL0;
@@ -104,6 +106,9 @@ impl EntryFormat for A64Format {
         }
         if raw & desc::NG == 0 {
             f = f | MapFlags::GLOBAL;
+        }
+        if raw & desc::ATTR_DEVICE != 0 {
+            f = f | MapFlags::NO_CACHE;
         }
         let exec = if user { raw & desc::UXN == 0 } else { raw & desc::PXN == 0 };
         if exec {

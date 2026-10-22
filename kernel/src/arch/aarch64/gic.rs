@@ -29,6 +29,8 @@ const GICD_ICENABLER: u64 = 0x180;
 const GICD_IPRIORITYR: u64 = 0x400;
 /// 分发器：目标寄存器组；第 0 组的低字节读出「本处理器的 CPU 接口位」（按处理器分组）。
 const GICD_ITARGETSR: u64 = 0x800;
+/// 分发器：配置寄存器组（每个中断 2 位；高一位 = 边沿触发）。
+const GICD_ICFGR: u64 = 0xc00;
 /// 分发器：软件生成中断寄存器（写入目标接口位与中断号即发出）。
 const GICD_SGIR: u64 = 0xf00;
 /// 用作核间中断的软件生成中断号（与 [`IpiKind`] 一一对应）。
@@ -128,14 +130,17 @@ unsafe fn init_banked(d: u64, c: u64, ppi: u32) {
 }
 
 /// 登记执行者（逻辑下标 `index`）的 CPU 接口位，供之后向它发送软件生成中断。返回登记到的接口位（0 = 不可寻址）。
-/// Record the executing processor's CPU interface bit.
+///
+/// 单处理器实现的目标寄存器读出为 0（规范允许 RAZ/WI），此时接口位就是
+/// `1 << index`：GICv2 的接口位与处理器下标一一对应，单处理器必然是位 0。
 pub fn record_interface(index: usize) -> u8 {
     let d = DIST.load(Ordering::Relaxed);
-    if d == 0 || index >= MAX_CPUS {
+    if d == 0 || index >= MAX_CPUS || index >= 8 {
         return 0;
     }
     // SAFETY：目标寄存器第 0 组按处理器分组且只读，读出的低字节就是本处理器的接口位。
-    let bit = unsafe { r32(d, GICD_ITARGETSR) } as u8;
+    let read = unsafe { r32(d, GICD_ITARGETSR) } as u8;
+    let bit = if read == 0 { 1 << index } else { read };
     INTERFACE[index].store(bit, Ordering::Release);
     bit
 }
@@ -222,6 +227,30 @@ pub fn spi_configure(id: u32) -> bool {
         w32(d, GICD_ICPENDR + word, bit);
         ((d + GICD_IPRIORITYR + u64::from(id)) as *mut u8).write_volatile(PRIORITY);
         ((d + GICD_ITARGETSR + u64::from(id)) as *mut u8).write_volatile(target);
+    }
+    true
+}
+
+/// 设置共享外设中断的触发方式：`edge = true` 为上升沿，`false` 为高电平。
+///
+/// MSI 帧只发出一个脉冲，若按电平解释会在处理器应答前就消失，因此 MSI 线必须配成边沿触发；
+/// 设备中断线保持电平语义。不支持时返回 `false`，不写寄存器。
+pub fn spi_set_edge(id: u32, edge: bool) -> bool {
+    if !spi_supported(id) {
+        return false;
+    }
+    let d = DIST.load(Ordering::Relaxed);
+    let word = GICD_ICFGR + u64::from(id / 16) * 4;
+    let shift = 2 * (id % 16) + 1;
+    // SAFETY：配置寄存器按 32 位访问；读改写只改该中断的触发位，其余中断保持原值。
+    unsafe {
+        let mut value = r32(d, word);
+        if edge {
+            value |= 1 << shift;
+        } else {
+            value &= !(1 << shift);
+        }
+        w32(d, word, value);
     }
     true
 }

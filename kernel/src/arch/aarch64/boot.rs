@@ -15,7 +15,7 @@ use core::arch::global_asm;
 use kernel_core::fdt::{self, Fdt};
 use kernel_core::frame::{PhysRegion, RegionKind};
 
-use super::{devirq, gic, mmu, semihost, smp, timer, uart};
+use super::{devirq, gic, mmu, msi, pci, semihost, smp, timer, uart};
 use crate::boot::{self, BootSpec};
 
 /// 启动栈大小。
@@ -129,6 +129,10 @@ fn configure_devices(fdt: &Fdt<'_>) -> Result<(), &'static str> {
     let timer_node = fdt.find_compatible("arm,armv8-timer").ok().flatten().ok_or("arm,armv8-timer")?;
     let ppi = timer_node.cell("interrupts", 7).ok_or("arm,armv8-timer interrupts")?;
     timer::set_interrupt(ppi + 16);
+    // PCI 配置空间（ECAM）与 MSI（GICv2m 帧）：没有对应设备树节点时保持平台不支持，
+    // 由演练按平台能力报告，不伪造设备。
+    pci::configure(fdt);
+    msi::configure(fdt);
     // 处理器拓扑与 PSCI 调用途径（缺失时只用引导处理器，不算启动失败）
     smp::configure(fdt);
     Ok(())

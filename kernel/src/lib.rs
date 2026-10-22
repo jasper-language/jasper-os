@@ -35,7 +35,7 @@ pub mod config;
 pub mod fix_demo;
 pub mod console;
 pub mod counter_demo;
-#[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+#[cfg(feature = "user-programs")]
 pub mod device_demo;
 pub mod interrupt;
 pub mod exit_state;
@@ -47,9 +47,9 @@ pub mod irq;
 pub mod job;
 pub mod job_demo;
 pub mod irq_demo;
-#[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+#[cfg(feature = "user-programs")]
 pub mod irqring_demo;
-#[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+#[cfg(feature = "user-programs")]
 pub mod irqstorm_demo;
 pub mod kmain;
 pub mod krn0_demo;
