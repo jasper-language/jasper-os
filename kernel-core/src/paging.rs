@@ -91,6 +91,8 @@ impl core::ops::BitOr for MapFlags {
 /// 映射错误（`system.memory.error.*`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapError {
+    /// 同一地址空间的一次跨核作废尚未完成，本次修改被拒绝。
+    Busy,
     /// 该虚拟页已有映射（不允许静默覆盖）。
     AlreadyMapped,
     /// 该虚拟页没有映射。
@@ -107,6 +109,7 @@ impl MapError {
     /// 规范错误名（命名约定）。
     pub const fn name(self) -> &'static str {
         match self {
+            MapError::Busy => "system.memory.error.busy",
             MapError::AlreadyMapped => "system.memory.error.already_mapped",
             MapError::NotMapped => "system.memory.error.not_mapped",
             MapError::OutOfFrames => "system.memory.error.out_of_frames",

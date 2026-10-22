@@ -119,6 +119,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
     mm::demo::run_space();
     // SMP-1：启动其他处理器（每核数据、各自计时、核间中断、跨核调用、TLB 击落）。
     smp::demo::run(smp::start_secondaries(TIMER_HZ));
+    // KRN-0①：两个钉在不同处理器的任务批量映射、读取、击落与回收。
+    crate::krn0_tlb::run(smp::online_set().len());
     // DRV-2A：每核 MSI 向量池、绑定、投递与拒绝路径（放在其他处理器已报到之后）。
     msi_demo::run();
     // DRV-2B：真实 virtio-rng 设备的 MSI-X 送达、改核、屏蔽与待决释放。
@@ -158,6 +160,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
     crate::krn0_demo::run();
     // KRN-0②：virtio 复位失败时关总线主控并读回确认，仍不可信则隔离队列页（真实设备演练）。
     crate::krn0_demo::run_dma();
+    // KRN-0④：MMIO 槽位 CAS 分配、耗尽拒绝与位图回收。
+    crate::krn0_demo::run_mmio();
     // 基础设施修复的回归演练：失败路径与回滚。
     fix_demo::run();
     #[cfg(feature = "user-programs")]
@@ -278,9 +282,18 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("qos", qos_demo::timing_failed()),
         ("pi", pi_demo::timing_failed()),
         ("rt", rt_demo::timing_failed()),
+        ("balance", balance_demo::timing_failed()),
+        ("irq", irq_demo::timing_failed()),
+        #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
+        ("drv2c2", crate::irqstorm_demo::timing_failed()),
     ];
     #[cfg(not(feature = "user-programs"))]
-    let timings: &[(&str, u32)] = &[("scale", scale_demo::timing_failed()), ("pi", pi_demo::timing_failed())];
+    let timings: &[(&str, u32)] = &[
+        ("scale", scale_demo::timing_failed()),
+        ("pi", pi_demo::timing_failed()),
+        ("balance", balance_demo::timing_failed()),
+        ("irq", irq_demo::timing_failed()),
+    ];
     let timing_total: u32 = timings.iter().map(|&(_, n)| n).sum();
     if timing_total > 0 {
         kprint!("[JSR-EXIT] timing-only");

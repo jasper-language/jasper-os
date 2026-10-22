@@ -152,6 +152,7 @@ fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
 pub fn secondary_main(index: usize) -> ! {
     let Some(me) = percpu::get(index) else { arch::halt_forever() };
     me.set_current(percpu::IDLE_SLOT);
+    me.set_space(None);
     if me.state.mark_online().is_err() {
         // 发起方已判超时：不再参与任何工作
         arch::halt_forever();
@@ -174,7 +175,7 @@ pub fn on_ipi(kind: IpiKind) {
     match kind {
         IpiKind::Reschedule => me.request_resched(),
         IpiKind::TlbShootdown => {
-            SHOOTDOWN.service(arch::cpu_index(), arch::tlb_flush_local);
+            service_shootdown(arch::cpu_index());
         }
         IpiKind::Call => {
             me.call.run();
@@ -257,21 +258,40 @@ pub fn collect_call(cpu: usize) -> Result<u64, SmpError> {
     Err(SmpError::Timeout)
 }
 
-/// 在所有在线处理器上作废 `[va, va + pages × 4 KiB)` 的 TLB 项：本处理器直接作废，其他处理器经核间中断作废并应答，
-/// 全部应答后返回。范围非法时不作任何作废；超时则撤销请求并报告。
-/// Invalidate a page range on every online processor and wait for all acknowledgements.
+/// 在所有在线处理器上作废 `[va, va + pages × 4 KiB)` 的 TLB 项。
+/// Invalidate a page range on every online processor.
 pub fn tlb_shootdown(va: u64, pages: u64) -> Result<(), SmpError> {
+    tlb_shootdown_on(online_set(), va, pages)
+}
+
+/// 在 `active` 中仍在线的处理器上作废一段映射；本处理器总在本地作废，不为它发送中断。
+///
+/// 范围超过公告板单请求上限时改为整表刷新，仍然只登记一个请求、每个目标只接收一次核间中断。
+/// 本处理器直接作废，其他目标经核间中断作废并应答；发出请求后不持锁等待，超时则撤销请求。
+/// Invalidate a mapping on the online subset of `active` and wait for every acknowledgement.
+pub fn tlb_shootdown_on(active: CpuSet, va: u64, pages: u64) -> Result<(), SmpError> {
+    if pages == 0 || va % 4096 != 0 {
+        return Err(SmpError::BadRange);
+    }
+    if pages.checked_mul(4096).and_then(|len| va.checked_add(len)).is_none() {
+        return Err(SmpError::BadRange);
+    }
     let me = arch::cpu_index();
-    let targets = online_set().without(me);
+    let targets = active.intersect(online_set()).without(me);
+    let whole = pages > kernel_core::smp::MAX_SHOOTDOWN_PAGES;
     let mut generation = None;
     // 别的处理器正在发起时：服务它发给我们的请求，直到公告板空出来
-    let posted = wait_until(|| match SHOOTDOWN.begin(targets, va, pages) {
+    let posted = wait_until(|| match if whole {
+        SHOOTDOWN.begin_all(targets)
+    } else {
+        SHOOTDOWN.begin(targets, va, pages)
+    } {
         Ok(g) => {
             generation = Some(Ok(g));
             true
         }
         Err(SmpError::Busy) => {
-            SHOOTDOWN.service(me, arch::tlb_flush_local);
+            service_shootdown(me);
             false
         }
         Err(e) => {
@@ -283,7 +303,11 @@ pub fn tlb_shootdown(va: u64, pages: u64) -> Result<(), SmpError> {
         (true, Some(r)) => r?,
         _ => return Err(SmpError::Timeout),
     };
-    arch::tlb_flush_local(va, pages);
+    if whole {
+        arch::tlb_flush_all_local();
+    } else {
+        arch::tlb_flush_local(va, pages);
+    }
     for cpu in targets.iter() {
         if let Err(e) = arch::send_ipi(cpu, IpiKind::TlbShootdown) {
             SHOOTDOWN.abandon(generation);
@@ -291,7 +315,7 @@ pub fn tlb_shootdown(va: u64, pages: u64) -> Result<(), SmpError> {
         }
     }
     if wait_until(|| {
-        SHOOTDOWN.service(me, arch::tlb_flush_local);
+        service_shootdown(me);
         SHOOTDOWN.is_complete(generation)
     }) {
         Ok(())
@@ -299,6 +323,16 @@ pub fn tlb_shootdown(va: u64, pages: u64) -> Result<(), SmpError> {
         SHOOTDOWN.abandon(generation);
         Err(SmpError::Timeout)
     }
+}
+
+fn service_shootdown(cpu: usize) {
+    SHOOTDOWN.service(cpu, |start, pages| {
+        if pages == 0 {
+            arch::tlb_flush_all_local();
+        } else {
+            arch::tlb_flush_local(start, pages);
+        }
+    });
 }
 
 /// 击落公告板是否空闲（演练检查「拒绝后无残留」用）。

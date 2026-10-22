@@ -15,6 +15,7 @@
 
 use kernel_core::frame::PhysFrame;
 use kernel_core::paging::{MapError, MapFlags, PageMapper, VirtPage};
+use kernel_core::smp::{CpuSet, CpuState};
 use spin::Once;
 
 use super::map::GlobalFrames;
@@ -60,6 +61,7 @@ pub fn activate_kernel() {
     if let Some(&KernelSpace { root, .. }) = KERNEL.get() {
         // SAFETY：内核空间是启动时的活动空间，包含全部内核映射。
         unsafe { arch::switch_space(root) };
+        crate::smp::percpu::this().set_space(None);
     }
 }
 
@@ -73,6 +75,8 @@ pub struct VmSpace {
     root: arch::SpaceRoot,
     mapper: arch::Mapper,
     phys_offset: u64,
+    /// 页表已经改变、但跨核击落尚未完成；期间拒绝同一空间的其它修改。
+    shootdown_pending: bool,
 }
 
 impl VmSpace {
@@ -86,7 +90,7 @@ impl VmSpace {
         unsafe {
             let root = arch::create_space(template, phys_offset, &mut GlobalFrames)?;
             let mapper = arch::space_mapper(root, phys_offset);
-            Ok(VmSpace { root, mapper, phys_offset })
+            Ok(VmSpace { root, mapper, phys_offset, shootdown_pending: false })
         }
     }
 
@@ -100,23 +104,99 @@ impl VmSpace {
         if !in_private_window(page.start()) {
             return Err(MapError::InvalidAddress);
         }
+        if self.shootdown_pending {
+            return Err(MapError::Busy);
+        }
+        self.map_raw(page, frame, flags)
+    }
+
+    /// 只映射页表；调用者必须在同一地址空间的变更临界区内调用。
+    /// Install one mapping while the caller owns the address-space mutation window.
+    pub(crate) fn map_raw(&mut self, page: VirtPage, frame: PhysFrame, flags: MapFlags) -> Result<(), MapError> {
+        if !in_private_window(page.start()) {
+            return Err(MapError::InvalidAddress);
+        }
         self.mapper.map(page, frame, flags, &mut GlobalFrames)
     }
 
-    /// 取消私有窗口内的映射并返回原帧。
+    /// 取消私有窗口内的一页；在返回原帧前完成本空间活跃处理器上的击落。
     pub fn unmap(&mut self, page: VirtPage) -> Result<PhysFrame, MapError> {
+        if !in_private_window(page.start()) {
+            return Err(MapError::InvalidAddress);
+        }
+        if self.shootdown_pending {
+            return Err(MapError::Busy);
+        }
+        let frame = self.unmap_raw(page)?;
+        self.shootdown_active(page.start(), 1)?;
+        Ok(frame)
+    }
+
+    /// 修改私有窗口内一页的权限；返回前完成本空间活跃处理器上的击落。
+    pub fn protect(&mut self, page: VirtPage, flags: MapFlags) -> Result<(), MapError> {
+        if !in_private_window(page.start()) {
+            return Err(MapError::InvalidAddress);
+        }
+        if self.shootdown_pending {
+            return Err(MapError::Busy);
+        }
+        self.protect_raw(page, flags)?;
+        self.shootdown_active(page.start(), 1)
+    }
+
+    /// 只修改页表、不执行击落；调用者必须在返回帧之前批量执行 [`shootdown_active`]。
+    /// Change only the page table; the caller must shoot down before releasing any frame.
+    pub(crate) fn unmap_raw(&mut self, page: VirtPage) -> Result<PhysFrame, MapError> {
         if !in_private_window(page.start()) {
             return Err(MapError::InvalidAddress);
         }
         self.mapper.unmap(page)
     }
 
-    /// 修改私有窗口内一页的权限（不改变其指向的帧）。窗口外返回 [`MapError::InvalidAddress`]。
-    pub fn protect(&mut self, page: VirtPage, flags: MapFlags) -> Result<(), MapError> {
+    /// 只修改页表权限、不执行击落。
+    /// Change only page permissions; the caller must shoot down before returning.
+    pub(crate) fn protect_raw(&mut self, page: VirtPage, flags: MapFlags) -> Result<(), MapError> {
         if !in_private_window(page.start()) {
             return Err(MapError::InvalidAddress);
         }
         self.mapper.protect(page, flags)
+    }
+
+    /// 本地址空间当前装入的在线处理器集合。
+    /// Online processors whose current user address space is this space.
+    pub fn active_cpus(&self) -> CpuSet {
+        let mut set = CpuSet::EMPTY;
+        for cpu in 0..crate::smp::cpu_count() {
+            if let Some(p) = crate::smp::percpu::get(cpu) {
+                if p.state.get() == CpuState::Online && p.space() == Some(self.root) {
+                    set.insert(cpu);
+                }
+            }
+        }
+        set
+    }
+
+    /// 对当前活跃处理器批量作废一段页表映射；过大范围在公告板层退化为整表刷新。
+    /// Invalidate a range on the active processor set; the board promotes large ranges to a whole-table flush.
+    pub(crate) fn shootdown_active(&self, va: u64, pages: u64) -> Result<(), MapError> {
+        crate::smp::tlb_shootdown_on(self.active_cpus(), va, pages).map_err(|_| MapError::Busy)
+    }
+
+    /// 标记页表修改跨越击落等待；已在等待时返回 `false`。
+    /// Start a page-table mutation that crosses a shootdown.
+    pub(crate) fn begin_shootdown(&mut self) -> bool {
+        if self.shootdown_pending {
+            false
+        } else {
+            self.shootdown_pending = true;
+            true
+        }
+    }
+
+    /// 完成击落后重新允许该地址空间的修改。
+    /// Finish a page-table mutation and permit later changes.
+    pub(crate) fn end_shootdown(&mut self) {
+        self.shootdown_pending = false;
     }
 
     /// 查询映射（窗口内外都可查询）。
@@ -128,6 +208,7 @@ impl VmSpace {
     pub fn activate(&self) {
         // SAFETY：本空间由 create_space 建立、未销毁，且共享全部内核映射。
         unsafe { arch::switch_space(self.root) };
+        crate::smp::percpu::this().set_space(Some(self.root));
     }
 
     /// 本空间当前是否为活动空间。
@@ -141,6 +222,7 @@ impl Drop for VmSpace {
         if self.is_active() {
             activate_kernel();
         }
+        crate::smp::percpu::this().set_space(None);
         // SAFETY：已确保不是活动空间；此后不再使用 root。
         unsafe { arch::destroy_space(self.root, self.phys_offset, &mut GlobalFrames) };
     }

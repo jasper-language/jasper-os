@@ -15,7 +15,7 @@ use kernel_core::lockorder::HeldRanks;
 use kernel_core::smp::{CallSlot, CpuStateCell, IpiKind, MAX_CPUS};
 
 use crate::arch;
-use crate::sync::IrqU64;
+use crate::sync::{IrqSpinLock, IrqU64};
 
 /// 「当前任务」为空闲执行流时的槽位取值。
 /// Slot value meaning "running the idle flow".
@@ -28,6 +28,7 @@ pub struct PerCpu {
     pub state: CpuStateCell,
     hw_id: AtomicU32,
     current: AtomicUsize,
+    space: IrqSpinLock<Option<arch::SpaceRoot>>,
     ticks: IrqU64,
     ipis: [AtomicU32; IpiKind::ALL.len()],
     resched_pending: AtomicBool,
@@ -44,6 +45,7 @@ impl PerCpu {
             state: CpuStateCell::new(),
             hw_id: AtomicU32::new(0),
             current: AtomicUsize::new(IDLE_SLOT),
+            space: IrqSpinLock::new(None),
             ticks: IrqU64::new(0),
             ipis: [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
             resched_pending: AtomicBool::new(false),
@@ -75,6 +77,18 @@ impl PerCpu {
     /// Record the current task slot.
     pub fn set_current(&self, slot: usize) {
         self.current.store(slot, Ordering::Relaxed);
+    }
+
+    /// 本处理器当前装入的用户地址空间；`None` 表示内核空间。
+    /// User address space currently installed on this processor.
+    pub fn space(&self) -> Option<arch::SpaceRoot> {
+        *self.space.lock()
+    }
+
+    /// 记录地址空间切换结果（由调度器在切换前后调用）。
+    /// Record the installed user address space after a switch.
+    pub fn set_space(&self, space: Option<arch::SpaceRoot>) {
+        *self.space.lock() = space;
     }
 
     /// 本处理器本地时钟的 tick 数。

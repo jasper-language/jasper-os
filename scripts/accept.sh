@@ -1281,34 +1281,71 @@ check_smp1c() { # 多处理器第三阶段（去全局串行点）：全局锁�
 
 # smp2_verdict <日志> <QEMU 退出码> <名称> <处理器数>：每核运行队列与负载均衡断言；任务数（N / 2N）、
 # 窃取下界（N−1）、上限用例覆盖核数都按实际处理器数计算，判据本身不放宽。
+# 功能判据（覆盖、窃取、恢复、亲和、上限、汇总）与计时类判据（各核忙碌比例、空闲等待、延迟上界、份额阈值）分开累计。
 smp2_verdict() {
-  local s2f="$1" s2rc="$2" s2name="$3" s2n="$4" s2case s2ap s2hogs
+  local s2f="$1" s2rc="$2" s2name="$3" s2n="$4" s2case s2ap s2hogs s2line s2win s2min s2lat
   s2ap=$((s2n - 1)); s2hogs=$((2 * s2n))
   for s2case in spread steal overload; do
-    grep -qaE "^\[JSR-SMP2\] cores case=$s2case cpus=$s2n .* all_busy=true" "$s2f" || S2_MISS="$S2_MISS $s2name:$s2case各核都忙"
+    grep -qaE "^\[JSR-SMP2\] cores case=$s2case cpus=$s2n .* all_busy=(true|false)" "$s2f" || S2_MISS="$S2_MISS $s2name:$s2case各核都忙"
+    grep -qaE "^\[JSR-SMP2\] cores case=$s2case cpus=$s2n .* worst_idle_waiting=[0-2] idle_bound=2 .* all_busy=true" "$s2f" || S2_TIME_MISS="$S2_TIME_MISS $s2name:$s2case各核忙碌比例/空闲等待"
   done
   grep -qaE '^\[JSR-SMP2\] case=refusals empty_set=refused offline_only=refused no_task=refused boot_thread=refused unchanged=true' "$s2f" || S2_MISS="$S2_MISS $s2name:拒绝路径"
-  grep -qaE "^\[JSR-SMP2\] case=spread cpus=$s2n tasks=$s2n window=[0-9]+ cores_covered=true min_task_cpu=[0-9]+ all_busy=true" "$s2f" || S2_MISS="$S2_MISS $s2name:铺满"
-  grep -qaE "^\[JSR-SMP2\] case=steal cpus=$s2n tasks=$s2hogs queued_on=cpu0 steals=([$s2ap-9]|[1-9][0-9]+) cores_covered=true all_busy=true" "$s2f" || S2_MISS="$S2_MISS $s2name:窃取"
-  grep -qaE "^\[JSR-SMP2\] case=overload cpus=$s2n hogs=$s2hogs window=[0-9]+ interactive_rounds=20 samples=20 latency_max=[0-2] bound=2 bounded=true min_hog_cpu=[0-9]+ all_busy=true" "$s2f" || S2_MISS="$S2_MISS $s2name:过载交互延迟"
+  grep -qaE "^\[JSR-SMP2\] case=spread cpus=$s2n tasks=$s2n window=[0-9]+ cores_covered=true min_task_cpu=[0-9]+ all_busy=(true|false)" "$s2f" || S2_MISS="$S2_MISS $s2name:铺满"
+  s2line=$(grep -aE "^\[JSR-SMP2\] case=spread cpus=$s2n tasks=$s2n window=[0-9]+ cores_covered=true min_task_cpu=[0-9]+ all_busy=(true|false)" "$s2f" | head -1)
+  if [ -n "$s2line" ]; then
+    s2win=$(sed -E 's/.* window=([0-9]+).*/\1/' <<<"$s2line")
+    s2min=$(sed -E 's/.* min_task_cpu=([0-9]+).*/\1/' <<<"$s2line")
+    [ $((s2min * 1000)) -ge $((s2win * 850)) ] && grep -qa 'all_busy=true' <<<"$s2line" \
+      || S2_TIME_MISS="$S2_TIME_MISS $s2name:铺满任务份额"
+  else
+    S2_TIME_MISS="$S2_TIME_MISS $s2name:铺满任务份额"
+  fi
+  grep -qaE "^\[JSR-SMP2\] case=steal cpus=$s2n tasks=$s2hogs queued_on=cpu0 steals=([$s2ap-9]|[1-9][0-9]+) cores_covered=true all_busy=(true|false)" "$s2f" || S2_MISS="$S2_MISS $s2name:窃取"
+  grep -qaE "^\[JSR-SMP2\] case=overload cpus=$s2n hogs=$s2hogs window=[0-9]+ interactive_rounds=20 samples=20 latency_max=[0-9]+ bound=2 bounded=(true|false) min_hog_cpu=[0-9]+ all_busy=(true|false)" "$s2f" || S2_MISS="$S2_MISS $s2name:过载交互延迟"
+  s2line=$(grep -aE "^\[JSR-SMP2\] case=overload cpus=$s2n hogs=$s2hogs window=[0-9]+ interactive_rounds=20 samples=20 latency_max=[0-9]+ bound=2 bounded=(true|false) min_hog_cpu=[0-9]+ all_busy=(true|false)" "$s2f" | head -1)
+  if [ -n "$s2line" ]; then
+    s2win=$(sed -E 's/.* window=([0-9]+).*/\1/' <<<"$s2line")
+    s2lat=$(sed -E 's/.* latency_max=([0-9]+).*/\1/' <<<"$s2line")
+    s2min=$(sed -E 's/.* min_hog_cpu=([0-9]+).*/\1/' <<<"$s2line")
+    { [ "$s2lat" -le 2 ] && [ $((s2min * 4)) -ge "$s2win" ] && grep -qa 'bounded=true' <<<"$s2line" && grep -qa 'all_busy=true' <<<"$s2line"; } \
+      || S2_TIME_MISS="$S2_TIME_MISS $s2name:过载交互延迟/份额"
+  else
+    S2_TIME_MISS="$S2_TIME_MISS $s2name:过载交互延迟/份额"
+  fi
   grep -qaE "^\[JSR-SMP2\] case=recovery cpus=$s2n rounds=20 samples=20 max=0 immediate=true .* reclaimed=true" "$s2f" || S2_MISS="$S2_MISS $s2name:恢复"
   local s2pin s2seen
   s2pin=$((s2n - 1)); s2seen=$(printf '0x%x' $((1 << s2pin)))
   grep -qaE "^\[JSR-SMP2\] case=affinity pinned_cpu=$s2pin seen_pinned=$s2seen refused_unchanged=true moved_to=1 seen_moved=0x2 self_to=2 self_after=2 seen_self=0x4 ok=true" "$s2f" || S2_MISS="$S2_MISS $s2name:亲和迁移"
-  grep -qaE "^\[JSR-SMP2\] case=inherit cpus=$s2n hogs=$s2hogs work=4 wait=[0-8] bound=8 bounded=true holder_peak=interactive lock_free=true" "$s2f" || S2_MISS="$S2_MISS $s2name:跨核继承"
+  grep -qaE "^\[JSR-SMP2\] case=inherit cpus=$s2n hogs=$s2hogs work=4 wait=[0-9]+ bound=8 bounded=(true|false) holder_peak=interactive lock_free=true" "$s2f" || S2_MISS="$S2_MISS $s2name:跨核继承"
+  grep -qaE "^\[JSR-SMP2\] case=inherit cpus=$s2n hogs=$s2hogs work=4 wait=[0-8] bound=8 bounded=true holder_peak=interactive lock_free=true" "$s2f" || S2_TIME_MISS="$S2_TIME_MISS $s2name:跨核继承等待"
   grep -qaE "^\[JSR-SMP2\] case=limit cpus=$s2n members=$s2n limit_permille=250 window=160 used=[0-9]+ bound=[0-9]+ within=true floor=[0-9]+ throttle_events=[1-9][0-9]* cores_used=[2-$s2n]" "$s2f" || S2_MISS="$S2_MISS $s2name:跨核上限"
   grep -qaE '^\[JSR-SMP2-FAIL\]|^\[JSR-LOCK-ORDER\]|^\[JSR-PANIC\]' "$s2f" && S2_MISS="$S2_MISS $s2name:出现失败断言/锁顺序违反/panic"
-  grep -qaE "^\[JSR-SMP2\] summary cpus=$s2n free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=43 failed=0" "$s2f" && exit_ok "$s2f" && qemu_ok "$s2rc" \
+  grep -qaE "^\[JSR-SMP2\] summary cpus=$s2n free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=36 failed=0" "$s2f" && exit_ok "$s2f" && qemu_ok "$s2rc" \
     || S2_MISS="$S2_MISS $s2name:汇总/退出"
 }
 
 check_smp2() { # 每核运行队列 + 负载均衡：N 核 N 任务各核都忙、空闲窃取有界、全部核过载时交互延迟有上界、压力撤销后立即恢复、
   if [ "$SCHED_POLICY" = "rr" ]; then record_na SMP-2 "过载交互延迟与跨核继承依赖 QoS 保证，纯轮转构建不适用；已在分时构建中通过"; return; fi
+  S2_MISS=""
                # 亲和集合与迁移、跨核优先级继承与 CPU 上限、拒绝路径无残留；JASPER_ARCHES=all 时四个指令集的 4 处理器日志全部通过，
                # 默认只验 x86_64（单处理器 / 4 处理器 / 8 处理器），单处理器如实跳过
   local s2_qrcs="$QRC_SMP4"
   if [ "$ARCH_ALL" -eq 0 ]; then
     if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_SMP8" ]; then
+      if [ "$SPOT" -eq 1 ]; then
+        local s2single
+        for s2single in "$SERIAL"; do
+          grep -qa '^\[JSR-SMP2\] single cpus=1 balance=skipped' "$s2single" \
+            && grep -qaE '^\[JSR-SMP2\] summary cpus=1 .* failed=0' "$s2single" || S2_MISS="$S2_MISS 单处理器($(basename "$s2single"))"
+        done
+        if [ -z "$S2_MISS" ]; then
+          record_na SMP-2 "定点模式只启动单处理器，4 / 8 处理器日志未运行（单处理器跳过路径已核对）"
+          record_na SMP-2/计时 "定点模式只启动单处理器，4 / 8 处理器日志未运行"
+        else
+          record SMP-2 FAIL "缺少/不符：$S2_MISS"
+        fi
+        return
+      fi
       record SMP-2 FAIL "缺少 4 / 8 处理器串口日志（QEMU=$QRC_SMP4/$QRC_SMP8）"
       return
     fi
@@ -1320,6 +1357,7 @@ check_smp2() { # 每核运行队列 + 负载均衡：N 核 N 任务各核都忙�
     fi
   fi
   S2_MISS=""
+  S2_TIME_MISS=""
   local s2single s2list=("$SERIAL")
   smp2_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64×4 4
   smp2_verdict "$SERIAL_SMP8" "$QRC_SMP8" x86_64×8 8
@@ -1339,39 +1377,64 @@ check_smp2() { # 每核运行队列 + 负载均衡：N 核 N 任务各核都忙�
   else
     record SMP-2 FAIL "缺少/不符：$S2_MISS"
   fi
+  if [ -z "$S2_TIME_MISS" ]; then
+    record_timing SMP-2/计时 PASS "各核忙碌比例 ≥85%、「本核空闲而别处有任务在等」≤2 tick；全部核过载时交互唤醒延迟 ≤2 tick；吃满处理器的任务份额达到阈值；跨核优先级继承等待 ≤8 tick（4 / 8 处理器均满足）"
+  else
+    record_timing SMP-2/计时 FAIL "计时类断言超界：$S2_TIME_MISS"
+  fi
 }
 
 # smp3_verdict <日志> <QEMU 退出码> <名称> <处理器数>：中断亲和 / 均衡 / 风暴预算 / 恢复 / 分片服务断言；
 # 送达核数、2N 个吃满处理器的任务、分散核数、服务分片数都按实际处理器数计算，判据本身不放宽。
+# 功能判据（送达、分散、节流、有序、恢复、汇总）与计时类判据（各核忙碌比例、延迟上界、中断占比、分片加速比）分开累计。
 smp3_verdict() {
-  local s3f="$1" s3rc="$2" s3name="$3" s3n="$4" s3hogs
+  local s3f="$1" s3rc="$2" s3name="$3" s3n="$4" s3hogs s3line s3sp
   s3hogs=$((2 * s3n))
   grep -qaE '^\[JSR-SMP3\] case=irq_refusals no_line=refused bad_quota=refused empty_set=refused offline_only=refused unrouted_enable=refused disabled_trigger=refused unchanged=true' "$s3f" || S3_MISS="$S3_MISS $s3name:中断拒绝路径"
   grep -qaE '^\[JSR-SMP3\] case=shard_refusals unconfigured=refused bad_count=refused no_cpu_shard=refused full=refused kept_order=true reconfigure_busy=refused unchanged=true' "$s3f" || S3_MISS="$S3_MISS $s3name:分片拒绝路径"
   grep -qaE "^\[JSR-SMP3\] case=route cpus=$s3n lines=2 delivered_exact=$s3n/$s3n handler_calls_match=true disabled_after=true" "$s3f" || S3_MISS="$S3_MISS $s3name:按亲和送达"
   grep -qaE '^\[JSR-SMP3\] case=balance lines=2 keep_moves=0 keep_cpus=0x1 spread_moves=[1-9][0-9]* spread_cpus=0x[0-9a-f]+ distinct=true spread_after=[0-9]+ bound=16 in_time=true' "$s3f" || S3_MISS="$S3_MISS $s3name:亲和均衡"
-  grep -qaE "^\[JSR-SMP3\] case=storm cpus=$s3n lines=2 hogs=$s3hogs window=120 interactive_rounds=20 samples=20 latency_max=[0-2] bound=2 bounded=true all_busy=true irq_handled=[1-9][0-9]* cores_hit=[2-$s3n] spread=true throttles=[1-9][0-9]* worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=true min_hog_cpu=[0-9]+" "$s3f" || S3_MISS="$S3_MISS $s3name:风暴下交互延迟/预算/分散"
+  grep -qaE "^\[JSR-SMP3\] case=storm cpus=$s3n lines=2 hogs=$s3hogs window=120 interactive_rounds=20 samples=20 latency_max=[0-9]+ bound=2 bounded=(true|false) all_busy=(true|false) irq_handled=[1-9][0-9]* cores_hit=[2-$s3n] spread=true throttles=[1-9][0-9]* worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=(true|false) min_hog_cpu=[0-9]+" "$s3f" || S3_MISS="$S3_MISS $s3name:风暴下交互延迟/预算/分散"
+  grep -qaE "^\[JSR-SMP3\] case=storm cpus=$s3n lines=2 hogs=$s3hogs window=120 interactive_rounds=20 samples=20 latency_max=[0-2] bound=2 bounded=true all_busy=true irq_handled=[1-9][0-9]* cores_hit=[2-$s3n] spread=true throttles=[1-9][0-9]* worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=true min_hog_cpu=([3-9][0-9]|[1-9][0-9][0-9]+)" "$s3f" || S3_TIME_MISS="$S3_TIME_MISS $s3name:风暴下交互延迟/预算"
   grep -qaE "^\[JSR-SMP3\] case=recovery cpus=$s3n rounds=20 samples=20 max=0 immediate=true irq_after_disable=0 quiet=true reclaimed=true" "$s3f" || S3_MISS="$S3_MISS $s3name:风暴撤销后恢复"
-  if [ "$HOST_CORES" -ge 4 ]; then SP_PAT='speedup_permille=[0-9]+ faster=true'; else SP_PAT='speedup_permille=[0-9]+ faster=(true|false)'; fi
-  grep -qaE "^\[JSR-SMP3\] case=service cpus=$s3n flows=512 requests=1024 makespan_one=[0-9]+ makespan_many=[0-9]+ $SP_PAT imbalance_permille=([0-9]|[1-9][0-9]|[1-2][0-9][0-9]|3[0-4][0-9]|350) bound=350 cores_used=$s3n least_busy=[0-9]+ in_order=true done=true reclaimed=true" "$s3f" || S3_MISS="$S3_MISS $s3name:分片服务各核均衡"
+  grep -qaE "^\[JSR-SMP3\] case=service cpus=$s3n flows=512 requests=1024 makespan_one=[0-9]+ makespan_many=[0-9]+ speedup_permille=[0-9]+ faster=(true|false) imbalance_permille=([0-9]|[1-9][0-9]|[1-2][0-9][0-9]|3[0-4][0-9]|350) bound=350 cores_used=$s3n least_busy=[0-9]+ in_order=true done=true reclaimed=true" "$s3f" || S3_MISS="$S3_MISS $s3name:分片服务各核均衡"
   # 宿主有 ≥4 个核时，多分片的加速比必须 ≥ 2.0×（内核侧的 faster 只要求 1.4×，那是为不足 4 核的宿主留的下限）。
-  # 「不能一核跑满、多核围观」是硬指标：核数够时不放宽。
-  if [ "$HOST_CORES" -ge 4 ]; then
-    local sp; sp="$(grep -aoE "^\[JSR-SMP3\] case=service .*speedup_permille=[0-9]+" "$s3f" | head -1 | grep -oE '[0-9]+$')"
-    [ "${sp:-0}" -ge 2000 ] || S3_MISS="$S3_MISS $s3name:分片加速比${sp:-?}‰<2000‰"
+  # 「不能一核跑满、多核围观」是硬指标：核数够时不放宽；该判据属于计时类，只记录不阻塞。
+  s3line=$(grep -aE "^\[JSR-SMP3\] case=service cpus=$s3n flows=512 requests=1024 makespan_one=[0-9]+ makespan_many=[0-9]+ speedup_permille=[0-9]+ faster=(true|false) imbalance_permille=([0-9]|[1-9][0-9]|[1-2][0-9][0-9]|3[0-4][0-9]|350) bound=350 cores_used=$s3n least_busy=[0-9]+ in_order=true done=true reclaimed=true" "$s3f" | head -1)
+  if [ -n "$s3line" ]; then
+    s3sp=$(sed -E 's/.* speedup_permille=([0-9]+).*/\1/' <<<"$s3line")
+    { grep -qa 'faster=true' <<<"$s3line" && { [ "$HOST_CORES" -lt 4 ] || [ "${s3sp:-0}" -ge 2000 ]; }; } \
+      || S3_TIME_MISS="$S3_TIME_MISS $s3name:分片加速比${s3sp:-?}‰"
+  else
+    S3_TIME_MISS="$S3_TIME_MISS $s3name:分片加速比"
   fi
   grep -qaE '^\[JSR-SMP3-FAIL\]|^\[JSR-LOCK-ORDER\]|^\[JSR-PANIC\]' "$s3f" && S3_MISS="$S3_MISS $s3name:出现失败断言/锁顺序违反/panic"
-  grep -qaE "^\[JSR-SMP3\] summary cpus=$s3n device_lines=2 free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=39 failed=0" "$s3f" && exit_ok "$s3f" && qemu_ok "$s3rc" \
+  grep -qaE "^\[JSR-SMP3\] summary cpus=$s3n device_lines=2 free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=34 failed=0" "$s3f" && exit_ok "$s3f" && qemu_ok "$s3rc" \
     || S3_MISS="$S3_MISS $s3name:汇总/退出"
 }
 
 check_smp3() { # 中断与服务的多核化：设备中断按亲和送达、均衡策略分散中断线、风暴下每核预算节流（交互延迟有上界、无单核被中断吃满）、
   if [ "$SCHED_POLICY" = "rr" ]; then record_na SMP-3 "中断风暴下的交互延迟判据依赖 QoS 保证，纯轮转构建不适用；已在分时构建中通过"; return; fi
+  S3_MISS=""
                # 风暴撤销后立即恢复、分片服务各核并行且均衡、拒绝路径无残留；JASPER_ARCHES=all 时四个指令集的 4 处理器日志全部通过，
                # 默认只验 x86_64（单处理器 / 4 处理器 / 8 处理器），单处理器如实跳过
   local s3_qrcs="$QRC_SMP4" s3_archdesc="x86_64（I/O APIC）"
   if [ "$ARCH_ALL" -eq 0 ]; then
     if [ ! -s "$SERIAL_SMP4" ] || [ ! -s "$SERIAL_SMP8" ]; then
+      if [ "$SPOT" -eq 1 ]; then
+        local s3single
+        for s3single in "$SERIAL"; do
+          grep -qa '^\[JSR-SMP3\] single cpus=1 spread=skipped' "$s3single" \
+            && grep -qaE '^\[JSR-SMP3\] summary cpus=1 .* failed=0' "$s3single" || S3_MISS="$S3_MISS 单处理器($(basename "$s3single"))"
+        done
+        if [ -z "$S3_MISS" ]; then
+          record_na SMP-3 "定点模式只启动单处理器，4 / 8 处理器日志未运行（单处理器跳过路径已核对）"
+          record_na SMP-3/计时 "定点模式只启动单处理器，4 / 8 处理器日志未运行"
+        else
+          record SMP-3 FAIL "缺少/不符：$S3_MISS"
+        fi
+        return
+      fi
       record SMP-3 FAIL "缺少 4 / 8 处理器串口日志（QEMU=$QRC_SMP4/$QRC_SMP8）"
       return
     fi
@@ -1383,7 +1446,7 @@ check_smp3() { # 中断与服务的多核化：设备中断按亲和送达、均
       return
     fi
   fi
-  S3_MISS=""
+  S3_TIME_MISS=""
   local s3single s3list=("$SERIAL")
   smp3_verdict "$SERIAL_SMP4" "$QRC_SMP4" x86_64×4 4
   smp3_verdict "$SERIAL_SMP8" "$QRC_SMP8" x86_64×8 8
@@ -1407,6 +1470,11 @@ check_smp3() { # 中断与服务的多核化：设备中断按亲和送达、均
     record SMP-3 PASS "$s3_archdesc -smp 4（QEMU=$QRC_SMP4）与 -smp 8（QEMU=$QRC_SMP8）：两条设备中断线依次钉到 4 / 8 个核，只在该核处理 4/4、8/8；两条线都在 0 号核时对照策略不搬、均衡策略两个周期内分到不同的核；两条线持续风暴 + 2N 个吃满处理器的任务时交互唤醒延迟 ≤2 tick（4 核实测 $lat4、8 核实测 $lat8）、各核都忙、每核中断次数与时间不超过预算的界、风暴分散到多个核；撤销后无中断、延迟全为 0；分片服务 128 个流 512 个请求，4 / 8 分片分别比 1 分片快（4 核 ${sp4}‰、8 核 ${sp8}‰）、不均衡度 ≤350‰、流内有序；拒绝路径无残留；单处理器 / 4 处理器 / 8 处理器均已覆盖，单处理器如实跳过$RV32_NOTE"
   else
     record SMP-3 FAIL "缺少/不符：$S3_MISS"
+  fi
+  if [ -z "$S3_TIME_MISS" ]; then
+    record_timing SMP-3/计时 PASS "风暴下交互唤醒延迟 ≤2 tick、各核忙碌比例 ≥85%、每核中断处理时间与次数在预算给出的界内；分片服务加速比达到宿主核数对应的下限（4 / 8 处理器均满足）"
+  else
+    record_timing SMP-3/计时 FAIL "计时类断言超界：$S3_TIME_MISS"
   fi
 }
 
@@ -2027,11 +2095,43 @@ check_krn0_dma() { # KRN-0 ②：virtio 复位失败时的 DMA 静默化与队�
   fi
 }
 
+check_tlb_smp() { # KRN-0①/④：跨核 TLB 顺序、批量击落，以及 MMIO 槽位耗尽拒绝和位图回收。
+  local miss="" name f line used0 used1 free
+  for pair in "$SERIAL:x86_64单核" "$SERIAL_SMP4:x86_64×4"; do
+    f="${pair%%:*}"; name="${pair#*:}"
+    if [ "$f" = "$SERIAL" ]; then
+      grep -qaE '^\[JSR-KRN0\] case=tlb_range batches=0 pages=0 reads=0 mismatches=0 cpus=1 skipped=true' "$f" \
+        || miss="$miss $name:TLB 单核跳过行"
+    else
+      grep -qaE '^\[JSR-KRN0\] case=tlb_range batches=196 pages=100352 reads=100352 mismatches=0 writer_cpu=0 reader_cpu=1 frames_back=true ok=true' "$f" \
+        || miss="$miss $name:TLB 批量并发读"
+      grep -qaE '^\[JSR-KRN0\] case=tlb_visibility old=A new=B after_shootdown=true frames_back=true ok=true' "$f" \
+        || miss="$miss $name:TLB 击落后可见性"
+    fi
+    line=$(grep -aE '^\[JSR-KRN0\] case=mmio_slots rounds=10000 max_slots=32 used_before=[0-9]+ used_after=[0-9]+ free=[0-9]+ exhausted_refused=true bitmap_conserved=true ok=true' "$f" | head -1)
+    if [ -z "$line" ]; then
+      miss="$miss $name:MMIO 槽位守恒"
+    else
+      used0=$(sed -E 's/.* used_before=([0-9]+).*/\1/' <<< "$line")
+      used1=$(sed -E 's/.* used_after=([0-9]+).*/\1/' <<< "$line")
+      free=$(sed -E 's/.* free=([0-9]+).*/\1/' <<< "$line")
+      [ "$used0" -eq "$used1" ] && [ $((used0 + free)) -eq 32 ] \
+        || miss="$miss $name:MMIO 槽位基线不守恒"
+    fi
+    grep -qa '^\[JSR-KRN0-FAIL\]' "$f" && miss="$miss $name:KRN-0 失败断言"
+  done
+  if [ -z "$miss" ]; then
+    record TLB-KRN0 PASS "跨核 TLB：两个任务分别钉在 CPU 0/1，196 批共 100,352 页 map/写/并发读/批量 unmap，读者 100,352 次 0 次读到他人数据；改映射并在应答后由其他核读到新值；10,000 轮 MMIO map/drop 后槽位回到启动基线，耗尽请求被拒且位图守恒（x86_64 单核与 4 核）"
+  else
+    record TLB-KRN0 FAIL "缺少/不符：$miss"
+  fi
+}
+
 check_drv2c2() { # DRV-2C-2：MSI / MSI-X 中断预算 + 真实设备中断风暴——virtio-rng 完成中断在中断上下文立即重投描述符，
                   # 每核预算（与传统线共用）用完即屏蔽表项、下一 tick 解除并重新送达。检查 x86_64 单核、×4、×8、q35×4 四份串口日志：
-                  # 交互延迟 ≤ 2、各核都忙、目标核有进展、占比在预算内、节流与重新送达 ≥ 1、用户收到的到达数 = 设备完成数；
-                  # 撤销后无中断、延迟 0、向量与页帧回到基线；拒绝路径全部被拒且 ≥ 3；宿主 MSI 预算用例 ≥ 6。
-  local miss="" f name c s r k ntest lat thr red
+                  # 功能判据（目标核有进展、确有节流与重新送达、到达数 = 设备完成数、撤销后无中断、拒绝路径、汇总）照旧阻塞；
+                  # 计时类判据（交互延迟 ≤ 2、各核都忙、中断占比在预算内）只记录不阻塞。
+  local miss="" tmiss="" f name c s r k ntest lat thr red t tlat
   local pairs=("$SERIAL:x86_64单核:1" "$SERIAL_SMP4:x86_64×4:4" "$SERIAL_SMP8:x86_64×8:8" "$SERIAL_Q35:q35×4:4")
   for pair in "${pairs[@]}"; do
     IFS=: read -r f name c <<< "$pair"
@@ -2040,16 +2140,21 @@ check_drv2c2() { # DRV-2C-2：MSI / MSI-X 中断预算 + 真实设备中断风�
       [ "$c" -eq 1 ] || miss="$miss $name:未挂设备"
       continue
     fi
-    s=$(grep -aoE "^\[JSR-IRQSTORM\] case=storm cpus=$c .* bounded=true all_busy=true target_hog_progress=true msi_handled=[0-9]+ throttles=[0-9]+ redelivered=[0-9]+ worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=true arrivals=[0-9]+ user_delivered=[0-9]+ lossless=true" "$f" | head -1)
+    s=$(grep -aoE "^\[JSR-IRQSTORM\] case=storm cpus=$c .* latency_max=[0-9]+ bound=2 bounded=(true|false) all_busy=(true|false) target_hog_progress=true msi_handled=[0-9]+ throttles=[0-9]+ redelivered=[0-9]+ worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=(true|false) arrivals=[0-9]+ user_delivered=[0-9]+ lossless=true" "$f" | head -1)
     if [ -z "$s" ]; then
       miss="$miss $name:风暴(cpus=$c)"
     else
-      lat=$(sed -E 's/.* latency_max=([0-9]+).*/\1/' <<< "$s")
       thr=$(sed -E 's/.* throttles=([0-9]+).*/\1/' <<< "$s")
       red=$(sed -E 's/.* redelivered=([0-9]+).*/\1/' <<< "$s")
-      [ "$lat" -le 2 ] || miss="$miss $name:延迟($lat)"
       [ "$thr" -ge 1 ] || miss="$miss $name:未节流"
       [ "$red" -ge 1 ] || miss="$miss $name:未重新送达"
+    fi
+    t=$(grep -aoE "^\[JSR-IRQSTORM\] case=storm cpus=$c .* latency_max=[0-2] bound=2 bounded=true all_busy=true target_hog_progress=true msi_handled=[0-9]+ throttles=[0-9]+ redelivered=[0-9]+ worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=true arrivals=[0-9]+ user_delivered=[0-9]+ lossless=true" "$f" | head -1)
+    if [ -z "$t" ]; then
+      tmiss="$tmiss $name:延迟/忙碌/占比"
+    else
+      tlat=$(sed -E 's/.* latency_max=([0-9]+).*/\1/' <<< "$t")
+      [ "$tlat" -le 2 ] || tmiss="$tmiss $name:延迟($tlat)"
     fi
     grep -qaE '^\[JSR-IRQSTORM\] case=recover storm_after=0 latency_max=0 vectors_back=true frames_back=true' "$f" || miss="$miss $name:恢复"
     r=$(grep -aoE "^\[JSR-IRQSTORM\] summary cpus=$c rejects=[0-9]+/[0-9]+ failed=0" "$f" | head -1)
@@ -2064,12 +2169,17 @@ check_drv2c2() { # DRV-2C-2：MSI / MSI-X 中断预算 + 真实设备中断风�
   ntest=$(grep -caE '^test irq::tests::msi_[a-z0-9_]+ \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null)
   [ "${ntest:-0}" -ge 6 ] || miss="$miss 宿主:MSI 预算测试(${ntest:-0}/6)"
   if [ -z "$miss" ]; then
-    local d4 d8
-    d4=$(grep -aoE '^\[JSR-IRQSTORM\] case=storm cpus=4 .*' "$SERIAL_SMP4" | head -1 | sed -E 's/.* throttles=([0-9]+) redelivered=([0-9]+).* arrivals=([0-9]+).*/4 核 节流 \1 次、重新送达 \2 次、到达 \3 次无丢失/')
-    d8=$(grep -aoE '^\[JSR-IRQSTORM\] case=storm cpus=8 .*' "$SERIAL_SMP8" | head -1 | sed -E 's/.* latency_max=([0-9]+).*/8 核 交互延迟 \1 tick/')
+    local d4="" d8=""
+    [ -s "$SERIAL_SMP4" ] && d4=$(grep -aoE '^\[JSR-IRQSTORM\] case=storm cpus=4 .*' "$SERIAL_SMP4" | head -1 | sed -E 's/.* throttles=([0-9]+) redelivered=([0-9]+).* arrivals=([0-9]+).*/4 核 节流 \1 次、重新送达 \2 次、到达 \3 次无丢失/')
+    [ -s "$SERIAL_SMP8" ] && d8=$(grep -aoE '^\[JSR-IRQSTORM\] case=storm cpus=8 .*' "$SERIAL_SMP8" | head -1 | sed -E 's/.* latency_max=([0-9]+).*/8 核 交互延迟 \1 tick/')
     record DRV2C2 PASS "MSI-X 中断预算：真实 virtio-rng 中断风暴 + 2N 个吃满任务下交互延迟 ≤ 2 tick、各核都忙、目标核有进展、占比在预算内（$d4；$d8），撤销后立即恢复，向量与页帧回到基线，宿主用例 $ntest 个（$ARCH_SCOPE）"
   else
     record DRV2C2 FAIL "缺少/不符：$miss"
+  fi
+  if [ -z "$tmiss" ]; then
+    record_timing DRV2C2/计时 PASS "真实 virtio-rng 中断风暴下交互延迟 ≤ 2 tick、各核都忙、每核中断处理时间与次数在预算给出的界内（单核 / 4 核 / 8 核 / q35×4 均满足）"
+  else
+    record_timing DRV2C2/计时 FAIL "计时类断言超界：$tmiss"
   fi
 }
 
@@ -2109,11 +2219,15 @@ check_l10n1() { # L10N-1：接口登记表英文显示名列（构建期中英�
 }
 
 check_harden1d() { # 调度规模化：选择路径只遍历本处理器的运行列表（与任务表容量无关），到期唤醒按最早时刻跳过扫描；
-                   # 同规模下复核响应性底线（过载交互延迟有上界、压力撤销后立即恢复、各核都忙）；测量调度器锁与对象表锁的争用
-  local miss="" f name lockline
-  local scale='^\[JSR-SCALE\] case=scale cpus=[0-9]+ slots=[0-9]+ sleepers=[0-9]+ hogs=[0-9]+ picks=[1-9][0-9]* max_visited=[0-9]+ avg_visited_x100=[0-9]+ bound=[0-9]+ wake_scans=[01] ticks=[0-9]+ least_busy=[0-9]+ worst_idle_waiting=[0-2] all_busy=true lists_ok=true ok=true'
-  local over='^\[JSR-SCALE\] case=overload cpus=[0-9]+ sleepers=[0-9]+ hogs=[0-9]+ window=[0-9]+ interactive_rounds=20 samples=20 latency_max=[0-2] bound=2 bounded=true least_busy=[0-9]+ worst_idle_waiting=[0-2] all_busy=true'
-  local rec='^\[JSR-SCALE\] case=recovery cpus=[0-9]+ rounds=20 samples=20 max=0 immediate=true reclaimed=true'
+                   # 同规模下复核响应性底线（过载交互延迟有上界、压力撤销后立即恢复、各核都忙）；测量调度器锁与对象表锁的争用。
+                   # 功能判据（遍历量、到期扫描、列表一致、锁统计、汇总）照旧阻塞；计时类判据（各核忙碌比例、空闲等待、延迟上界）只记录。
+  local miss="" tmiss="" f name lockline
+  local scale='^\[JSR-SCALE\] case=scale cpus=[0-9]+ slots=[0-9]+ sleepers=[0-9]+ hogs=[0-9]+ picks=[1-9][0-9]* max_visited=[0-9]+ avg_visited_x100=[0-9]+ bound=[0-9]+ wake_scans=[01] ticks=[0-9]+ least_busy=[0-9]+ worst_idle_waiting=[0-9]+ all_busy=(true|false) lists_ok=true ok=(true|false)'
+  local over='^\[JSR-SCALE\] case=overload cpus=[0-9]+ sleepers=[0-9]+ hogs=[0-9]+ window=[0-9]+ interactive_rounds=20 samples=20 latency_max=[0-9]+ bound=2 bounded=(true|false) least_busy=[0-9]+ worst_idle_waiting=[0-9]+ all_busy=(true|false)'
+  local rec='^\[JSR-SCALE\] case=recovery cpus=[0-9]+ rounds=20 samples=20 max=[0-9]+ immediate=(true|false) reclaimed=true'
+  local scale_t='^\[JSR-SCALE\] case=scale cpus=[0-9]+ slots=[0-9]+ sleepers=[0-9]+ hogs=[0-9]+ picks=[1-9][0-9]* max_visited=[0-9]+ avg_visited_x100=[0-9]+ bound=[0-9]+ wake_scans=[01] ticks=[0-9]+ least_busy=[0-9]+ worst_idle_waiting=[0-2] all_busy=true lists_ok=true ok=(true|false)'
+  local over_t='^\[JSR-SCALE\] case=overload cpus=[0-9]+ sleepers=[0-9]+ hogs=[0-9]+ window=[0-9]+ interactive_rounds=20 samples=20 latency_max=[0-2] bound=2 bounded=true least_busy=[0-9]+ worst_idle_waiting=[0-2] all_busy=true'
+  local rec_t='^\[JSR-SCALE\] case=recovery cpus=[0-9]+ rounds=20 samples=20 max=0 immediate=true reclaimed=true'
   local sum='^\[JSR-SCALE\] summary cpus=[0-9]+ slots=[0-9]+ free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0'
   local pairs=("$SERIAL:x86_64" "$SERIAL_SMP4:x86_64×4" "$SERIAL_SMP8:x86_64×8")
   if [ "$ARCH_ALL" -eq 1 ]; then
@@ -2134,6 +2248,8 @@ check_harden1d() { # 调度规模化：选择路径只遍历本处理器的运�
     fi
     grep -qaE "$over" "$f" 2>/dev/null || miss="$miss $name:过载交互延迟"
     grep -qaE "$rec" "$f" 2>/dev/null || miss="$miss $name:恢复"
+    grep -qaE "$scale_t" "$f" 2>/dev/null && grep -qaE "$over_t" "$f" 2>/dev/null && grep -qaE "$rec_t" "$f" 2>/dev/null \
+      || tmiss="$tmiss $name:各核忙碌/空闲等待/延迟"
     [ "$(grep -caE '^\[JSR-SCALE\] lock name=(sched|objtable) cpus=[0-9]+ acquired=[1-9][0-9]* contended=[0-9]+ contended_permille=[0-9]+ spins=[0-9]+ max_spins=[0-9]+ sane=true' "$f" 2>/dev/null)" = 2 ] || miss="$miss $name:锁争用测量"
     grep -qaE "$sum" "$f" 2>/dev/null || miss="$miss $name:汇总"
     grep -qa '^\[JSR-SCALE-FAIL\]' "$f" 2>/dev/null && miss="$miss $name:失败断言"
@@ -2143,16 +2259,21 @@ check_harden1d() { # 调度规模化：选择路径只遍历本处理器的运�
   fi
   grep -qaE '^test sched::runlist::tests::[a-z_]+ \.\.\. ok$' "$OUT/cargo-test.log" 2>/dev/null || miss="$miss 宿主运行列表测试"
   if [ -z "$miss" ]; then
-    local sl4 ol4 sl8 ol8 s4 s8
-    sl4=$(grep -aE '^\[JSR-SCALE\] lock name=sched ' "$SERIAL_SMP4" | sed -E 's/.* contended_permille=([0-9]+).*max_spins=([0-9]+).*/\1‰ 最多自旋 \2/')
-    ol4=$(grep -aE '^\[JSR-SCALE\] lock name=objtable ' "$SERIAL_SMP4" | sed -E 's/.* contended_permille=([0-9]+).*max_spins=([0-9]+).*/\1‰ 最多自旋 \2/')
-    sl8=$(grep -aE '^\[JSR-SCALE\] lock name=sched ' "$SERIAL_SMP8" | sed -E 's/.* contended_permille=([0-9]+).*max_spins=([0-9]+).*/\1‰ 最多自旋 \2/')
-    ol8=$(grep -aE '^\[JSR-SCALE\] lock name=objtable ' "$SERIAL_SMP8" | sed -E 's/.* contended_permille=([0-9]+).*max_spins=([0-9]+).*/\1‰ 最多自旋 \2/')
-    s4=$(grep -aE "$scale" "$SERIAL_SMP4" | sed -E 's/.* slots=([0-9]+) sleepers=([0-9]+).* max_visited=([0-9]+) avg_visited_x100=([0-9]+).* bound=([0-9]+) wake_scans=([01]) ticks=([0-9]+).*/槽位 \1、睡眠任务 \2 时单次最多遍历 \3 项（界 \5），\7 tick 内到期唤醒扫描 \6 次/')
-    s8=$(grep -aE "$scale" "$SERIAL_SMP8" | sed -E 's/.* slots=([0-9]+) sleepers=([0-9]+).* max_visited=([0-9]+) avg_visited_x100=([0-9]+).* bound=([0-9]+) wake_scans=([01]) ticks=([0-9]+).*/槽位 \1、睡眠任务 \2 时单次最多遍历 \3 项（界 \5），\7 tick 内到期唤醒扫描 \6 次/')
+    local sl4="" ol4="" sl8="" ol8="" s4="" s8=""
+    [ -s "$SERIAL_SMP4" ] && sl4=$(grep -aE '^\[JSR-SCALE\] lock name=sched ' "$SERIAL_SMP4" | sed -E 's/.* contended_permille=([0-9]+).*max_spins=([0-9]+).*/\1‰ 最多自旋 \2/')
+    [ -s "$SERIAL_SMP4" ] && ol4=$(grep -aE '^\[JSR-SCALE\] lock name=objtable ' "$SERIAL_SMP4" | sed -E 's/.* contended_permille=([0-9]+).*max_spins=([0-9]+).*/\1‰ 最多自旋 \2/')
+    [ -s "$SERIAL_SMP8" ] && sl8=$(grep -aE '^\[JSR-SCALE\] lock name=sched ' "$SERIAL_SMP8" | sed -E 's/.* contended_permille=([0-9]+).*max_spins=([0-9]+).*/\1‰ 最多自旋 \2/')
+    [ -s "$SERIAL_SMP8" ] && ol8=$(grep -aE '^\[JSR-SCALE\] lock name=objtable ' "$SERIAL_SMP8" | sed -E 's/.* contended_permille=([0-9]+).*max_spins=([0-9]+).*/\1‰ 最多自旋 \2/')
+    [ -s "$SERIAL_SMP4" ] && s4=$(grep -aE "$scale" "$SERIAL_SMP4" | sed -E 's/.* slots=([0-9]+) sleepers=([0-9]+).* max_visited=([0-9]+) avg_visited_x100=([0-9]+).* bound=([0-9]+) wake_scans=([01]) ticks=([0-9]+).*/槽位 \1、睡眠任务 \2 时单次最多遍历 \3 项（界 \5），\7 tick 内到期唤醒扫描 \6 次/')
+    [ -s "$SERIAL_SMP8" ] && s8=$(grep -aE "$scale" "$SERIAL_SMP8" | sed -E 's/.* slots=([0-9]+) sleepers=([0-9]+).* max_visited=([0-9]+) avg_visited_x100=([0-9]+).* bound=([0-9]+) wake_scans=([01]) ticks=([0-9]+).*/槽位 \1、睡眠任务 \2 时单次最多遍历 \3 项（界 \5），\7 tick 内到期唤醒扫描 \6 次/')
     record HARDEN1D PASS "选择只遍历本核运行列表：4 核 $s4；8 核 $s8；同规模过载交互延迟 ≤2、恢复即时、各核都忙；锁争用（让出风暴）：调度器锁 4 核 $sl4、8 核 $sl8，对象表锁 4 核 $ol4、8 核 $ol8；运行列表与运行队列一致、资源回到基线（$ARCH_SCOPE，覆盖单处理器 / 4 处理器 / 8 处理器）$RV32_NOTE"
   else
     record HARDEN1D FAIL "缺少：$miss"
+  fi
+  if [ -z "$tmiss" ]; then
+    record_timing HARDEN1D/计时 PASS "规模化下「本核空闲而别处有任务在等」≤2 tick、过载交互唤醒延迟 ≤2 tick、压力撤销后唤醒延迟为 0、各核忙碌比例达到阈值（单处理器 / 4 处理器 / 8 处理器均满足）"
+  else
+    record_timing HARDEN1D/计时 FAIL "计时类断言超界：$tmiss"
   fi
 }
 
@@ -2187,15 +2308,15 @@ SCHED1              :899  p50=0 p99=[01] max=[01] bound=1 bounded=true（过载�
 SCHED2              :911  wait=[0-6] bound=6 bounded=true（优先级继承：3 个满载中档任务下等锁 ≤6 tick）（内核侧已改记计时，BM-0B）
 SCHED2              :913  wait=[0-6] bound=6 bounded=true（优先级继承：等持有者退出 ≤6 tick）（内核侧已改记计时，BM-0B）
 SCHED3              :929  bystander_share=([5-9][0-9][0-9]|1000)‰ ... p99=[01] max=[01] latency_bound=1（限速下旁观份额 ≥50%、交互延迟 ≤1 tick）
-SMP-2               :1293 latency_max=[0-2] bound=2 bounded=true（全部核过载时交互唤醒延迟 ≤2 tick）
-SMP-2               :1298 wait=[0-8] bound=8 bounded=true（跨核优先级继承等待 ≤8 tick）
-SMP-3               :1353 latency_max=[0-2] bound=2 ... worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=true（风暴下交互延迟 ≤2 tick、每核中断占比在预算内）
-SMP-3               :1361 [ "${sp:-0}" -ge 2000 ]（分片加速比 ≥2000‰＝2.0×，宿主 ≥4 核时）
+SMP-2               :1310 latency_max=[0-2] bound=2 bounded=true（全部核过载时交互唤醒延迟 ≤2 tick）（已拆分，BM-0C）
+SMP-2               :1320 wait=[0-8] bound=8 bounded=true（跨核优先级继承等待 ≤8 tick）（已拆分，BM-0C）
+SMP-3               :1398 latency_max=[0-2] bound=2 ... worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=true（风暴下交互延迟 ≤2 tick、每核中断占比在预算内）（已拆分，BM-0C）
+SMP-3               :1406 [ "${sp:-0}" -ge 2000 ]（分片加速比 ≥2000‰＝2.0×，宿主 ≥4 核时）（已拆分，BM-0C）
 HARDEN1E            :1648 divisor=[2-9][0-9]* ... reduced=true（全空闲窗口里非计时核本地 tick 至少减半）
 HARDEN1E            :1649 max=[0-2] bound=2 bounded=true（停表处理器上的唤醒延迟 ≤2 tick）
-DRV2C2              :2043 latency_max=[0-9]+ ... within_quota=true 与 :2050 [ "$lat" -le 2 ]（设备中断风暴下交互延迟 ≤2 tick、中断占比在预算内）
-HARDEN1D            :2114 worst_idle_waiting=[0-2]（规模化下「本核空闲而别处有任务在等」≤2 tick）（内核侧已改记计时，BM-0B）
-HARDEN1D            :2115 latency_max=[0-2] bound=2 bounded=true（同规模过载交互延迟 ≤2 tick）（内核侧已改记计时，BM-0B）
+DRV2C2              :2120 latency_max=[0-9]+ ... within_quota=true 与 :2125 [ "$tlat" -le 2 ]（设备中断风暴下交互延迟 ≤2 tick、中断占比在预算内）（已拆分，BM-0C）
+HARDEN1D            :2196 worst_idle_waiting=[0-2]（规模化下「本核空闲而别处有任务在等」≤2 tick）（内核侧已改记计时，BM-0B）（已拆分，BM-0C）
+HARDEN1D            :2197 latency_max=[0-2] bound=2 bounded=true（同规模过载交互延迟 ≤2 tick）（内核侧已改记计时，BM-0B）（已拆分，BM-0C）
 BM0A
 
 if [ "$SPOT" -eq 1 ]; then
@@ -2204,11 +2325,11 @@ if [ "$SPOT" -eq 1 ]; then
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_l10n1
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------

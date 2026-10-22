@@ -1,6 +1,7 @@
 # jasper-os kernel toolchain (nightly; verified by scripts/accept.sh)
-# Mirrors the verified early prototype toolchain.
+# Pinned to the same dated nightly as CI; bump both together.
+# 与公开 CI 钉同一日期的 nightly；升级时两处一起改。
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-10-17"
 targets = ["x86_64-unknown-none", "aarch64-unknown-none", "aarch64-unknown-none-softfloat", "riscv64gc-unknown-none-elf", "riscv64imac-unknown-none-elf", "riscv32imac-unknown-none-elf"]
 components = ["llvm-tools-preview", "rust-src"]

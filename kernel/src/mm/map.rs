@@ -56,9 +56,48 @@ pub fn map(page: VirtPage, frame: PhysFrame, flags: MapFlags) -> Result<(), MapE
     with(|m| m.map(page, frame, flags, &mut GlobalFrames))
 }
 
-/// 取消映射并返回原帧（帧不归还，由调用者决定）。
+/// 取消映射、等待所有在线处理器完成击落，然后返回原帧（帧不归还，由调用者决定）。
+///
+/// 击落失败时映射已经撤销，但不返回帧；调用者不得把任何仍可能被旧 TLB 引用的帧放回分配器。
+/// Unmap, wait for the SMP shootdown, then return the frame.
 pub fn unmap(page: VirtPage) -> Result<PhysFrame, MapError> {
-    with(|m| m.unmap(page))
+    let frame = with(|m| m.unmap(page))?;
+    crate::smp::tlb_shootdown(page.start(), 1).map_err(|_| MapError::Busy)?;
+    Ok(frame)
+}
+
+/// 批量取消内核映射；所有页表修改完成后只发起一次击落。
+///
+/// 用于 MMIO 窗口等不拥有 RAM 帧的映射，因此不返回物理帧。中途失败时仍对已修改前缀执行击落，
+/// 避免留下未同步的旧缓存项。
+/// Unmap several kernel pages with one shootdown request.
+pub fn unmap_pages(page: VirtPage, pages: u64) -> Result<(), MapError> {
+    if pages == 0 || pages.checked_mul(kernel_core::frame::FRAME_SIZE).and_then(|n| page.start().checked_add(n)).is_none() {
+        return Err(MapError::InvalidAddress);
+    }
+    let changed = {
+        let m = KERNEL.get().ok_or(MapError::NotMapped)?;
+        let mut m = m.lock();
+        let mut changed = 0u64;
+        let mut failure = None;
+        while changed < pages {
+            let at = VirtPage::from_start(page.start() + changed * kernel_core::frame::FRAME_SIZE)
+                .ok_or(MapError::InvalidAddress)?;
+            if let Err(e) = m.unmap(at) {
+                failure = Some(e);
+                break;
+            }
+            changed += 1;
+        }
+        (changed, failure)
+    };
+    if changed.0 > 0 {
+        crate::smp::tlb_shootdown(page.start(), changed.0).map_err(|_| MapError::Busy)?;
+    }
+    match changed.1 {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// 查询映射。
@@ -66,7 +105,8 @@ pub fn translate(page: VirtPage) -> Option<(PhysFrame, MapFlags)> {
     KERNEL.get()?.lock().translate(page)
 }
 
-/// 修改权限。
+/// 修改内核映射权限；返回前等待所有在线处理器完成击落。
 pub fn protect(page: VirtPage, flags: MapFlags) -> Result<(), MapError> {
-    with(|m| m.protect(page, flags))
+    with(|m| m.protect(page, flags))?;
+    crate::smp::tlb_shootdown(page.start(), 1).map_err(|_| MapError::Busy)
 }

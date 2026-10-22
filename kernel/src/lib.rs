@@ -53,6 +53,7 @@ pub mod irqring_demo;
 pub mod irqstorm_demo;
 pub mod kmain;
 pub mod krn0_demo;
+pub mod krn0_tlb;
 pub mod kobj;
 pub mod l10n_demo;
 pub mod mm;

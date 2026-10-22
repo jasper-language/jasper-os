@@ -343,6 +343,7 @@ pub const MAP_EXEC: u64 = 1 << 1;
 
 fn mem_err(e: proc::MemError) -> i64 {
     match e {
+        proc::MemError::Busy => err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS),
         proc::MemError::InvalidRange => err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS),
         proc::MemError::NotMapped => err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS),
         proc::MemError::AlreadyMapped => err(SYSTEM_MEMORY_ERROR_ALREADY_MAPPED),

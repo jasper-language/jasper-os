@@ -283,3 +283,9 @@ pub fn tlb_flush_local(va: u64, pages: u64) {
     // SAFETY：同上。
     unsafe { core::arch::asm!("dsb nsh", "isb", options(nostack, preserves_flags)) };
 }
+
+/// 作废本处理器上的全部地址转换缓存。
+/// Invalidate every local address-translation entry.
+pub fn tlb_flush_all_local() {
+    super::cpu::tlb_flush_all();
+}

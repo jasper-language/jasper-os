@@ -34,6 +34,7 @@ mod space;
 mod syscall;
 mod port;
 mod smp;
+pub(crate) use smp::tlb_flush_all_local as flush_all_local_tlb;
 mod uart;
 mod user;
 

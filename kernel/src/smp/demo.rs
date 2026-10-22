@@ -115,7 +115,7 @@ fn refusals(present: usize) {
     let r4 = super::call_on(0, whoami, 0);
     let r5 = super::tlb_shootdown(TLB_VA + 1, 1);
     let r6 = super::tlb_shootdown(TLB_VA, 0);
-    let r7 = super::tlb_shootdown(TLB_VA, kernel_core::smp::MAX_SHOOTDOWN_PAGES + 1);
+    let r7 = super::tlb_shootdown(TLB_VA, u64::MAX);
     check(r1 == Err(SmpError::NoSuchCpu), "向不存在的处理器发重新调度未被拒绝");
     check(r2 == Err(SmpError::SelfTarget), "向自己发核间中断未被拒绝");
     check(r3 == Err(SmpError::NoSuchCpu), "向不存在的处理器投递调用未被拒绝");

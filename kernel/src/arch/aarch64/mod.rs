@@ -30,6 +30,7 @@ mod mmu;
 mod paging;
 mod semihost;
 mod smp;
+pub(crate) use smp::tlb_flush_all_local as flush_all_local_tlb;
 mod space;
 mod timer;
 mod uart;

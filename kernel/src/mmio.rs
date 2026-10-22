@@ -5,7 +5,7 @@
 //! * 按「BAR + BAR 内偏移 + 字节数」映射，页对齐处理、页表安装与回滚全部交给 [`crate::mm::map`]；
 //!   本文件不实现页表，也不出现任何指令集专有值。
 //! * 返回的 [`Mapping`] 把虚拟地址调整到请求的起始偏移；调用者用带偏移的 `read*` / `write*` 访问寄存器。
-//! * 槽位从平台给出的窗口内顺序分配，数量有固定上界；槽位不回收，避免并发演示时地址重用。
+//! * 槽位用位图分配，比较交换只在位空闲时推进；每个映射丢弃后归还自己的槽位。
 //!
 //! # 边界
 //! * 只映射内存 BAR；I/O 端口 BAR、越界区间、超出窗口或大于一个槽位的映射一律返回结构化错误。
@@ -61,6 +61,8 @@ impl MmioError {
 /// 一段已建立的内核 MMIO 映射；丢弃时取消映射。
 /// One established kernel MMIO mapping, unmapped on drop.
 pub struct Mapping {
+    /// 本映射独占的窗口槽位。
+    slot: u32,
     /// 请求起始偏移对应的虚拟地址。
     va: u64,
     /// 映射起始虚拟地址（页对齐）。
@@ -95,14 +97,17 @@ impl Mapping {
             return Err(MmioError::OutOfWindow);
         }
         let (window_base, window_len) = arch::mmio_window().ok_or(MmioError::Unsupported)?;
-        let slot = NEXT_SLOT.fetch_add(1, Ordering::Relaxed) as u64;
-        if slot as usize >= MAX_SLOTS {
-            return Err(MmioError::OutOfWindow);
-        }
-        let page_va = window_base
-            .checked_add(slot * SLOT_STRIDE)
-            .ok_or(MmioError::OutOfWindow)?;
+        let slot = allocate_slot()?;
+        let slot_index = slot as u64;
+        let page_va = match window_base.checked_add(slot_index * SLOT_STRIDE) {
+            Some(va) => va,
+            None => {
+                release_slot(slot);
+                return Err(MmioError::OutOfWindow);
+            }
+        };
         if page_va.checked_add(pages * FRAME_SIZE).is_none_or(|e| e > window_base + window_len) {
+            release_slot(slot);
             return Err(MmioError::OutOfWindow);
         }
 
@@ -112,18 +117,13 @@ impl Mapping {
             let page = VirtPage::from_start(page_va + mapped * FRAME_SIZE).ok_or(MmioError::OutOfWindow)?;
             let frame = PhysFrame::from_start(base + page_start + mapped * FRAME_SIZE).ok_or(MmioError::BadBar)?;
             if mm::map::map(page, frame, flags).is_err() {
-                let mut undo = 0u64;
-                while undo < mapped {
-                    if let Some(page) = VirtPage::from_start(page_va + undo * FRAME_SIZE) {
-                        let _ = mm::map::unmap(page);
-                    }
-                    undo += 1;
-                }
+                let _ = mm::map::unmap_pages(VirtPage::containing(page_va), mapped);
+                release_slot(slot as u32);
                 return Err(MmioError::MapFailed);
             }
             mapped += 1;
         }
-        Ok(Mapping { va: page_va + page_offset, page_va, pages, len: len as u64 })
+        Ok(Mapping { slot, va: page_va + page_offset, page_va, pages, len: len as u64 })
     }
 
     /// 请求起始偏移对应的虚拟地址。
@@ -201,21 +201,58 @@ impl Mapping {
 
 impl Drop for Mapping {
     fn drop(&mut self) {
-        for page in 0..self.pages {
-            if let Some(page) = VirtPage::from_start(self.page_va + page * FRAME_SIZE) {
-                let _ = mm::map::unmap(page);
+        if let Some(start) = VirtPage::from_start(self.page_va) {
+            if mm::map::unmap_pages(start, self.pages).is_ok() {
+                release_slot(self.slot);
             }
         }
     }
 }
 
-/// 下一个可用槽位（启动期一次性递增；槽位不回收）。
-static NEXT_SLOT: AtomicU32 = AtomicU32::new(0);
+/// 已分配槽位的位图；`MAX_SLOTS` 个低位有效。
+static SLOT_BITS: AtomicU32 = AtomicU32::new(0);
+
+fn slot_mask() -> u32 {
+    if MAX_SLOTS == 32 {
+        u32::MAX
+    } else {
+        (1u32 << MAX_SLOTS).wrapping_sub(1)
+    }
+}
+
+/// 先读取位图确认有空位，再用比较交换占用同一个空位；竞争失败时重新读取。
+fn allocate_slot() -> Result<u32, MmioError> {
+    let mask = slot_mask();
+    loop {
+        let used = SLOT_BITS.load(Ordering::Acquire);
+        let free = !used & mask;
+        if free == 0 {
+            return Err(MmioError::OutOfWindow);
+        }
+        let slot = free.trailing_zeros();
+        match SLOT_BITS.compare_exchange_weak(used, used | (1 << slot), Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return Ok(slot),
+            Err(_) => continue,
+        }
+    }
+}
+
+fn release_slot(slot: u32) {
+    if slot < MAX_SLOTS as u32 {
+        SLOT_BITS.fetch_and(!(1u32 << slot), Ordering::Release);
+    }
+}
 
 /// 映射槽位使用数（诊断用）。
 /// Number of mapping slots handed out.
 pub fn slots_used() -> usize {
-    NEXT_SLOT.load(Ordering::Relaxed) as usize
+    (SLOT_BITS.load(Ordering::Acquire) & slot_mask()).count_ones() as usize
+}
+
+/// 映射槽位空闲数（诊断与守恒检查用）。
+/// Number of free mapping slots.
+pub fn slots_free() -> usize {
+    MAX_SLOTS - slots_used()
 }
 
 /// 预先建立窗口所需的下级页表：映射并立即取消映射一个临时页。

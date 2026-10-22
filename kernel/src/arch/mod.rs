@@ -734,6 +734,18 @@ pub fn send_ipi(cpu: usize, kind: kernel_core::smp::IpiKind) -> Result<(), kerne
 pub fn tlb_flush_local(va: u64, pages: u64) {
     Current::tlb_flush_local(va, pages)
 }
+/// 作废本处理器上的全部 TLB 项（批量范围超过单次请求上限时使用）。
+/// Invalidate every local TLB entry.
+pub fn tlb_flush_all_local() {
+    #[cfg(target_arch = "x86_64")]
+    x86_64::flush_all_local_tlb();
+    #[cfg(target_arch = "aarch64")]
+    aarch64::flush_all_local_tlb();
+    #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+    unsafe {
+        Current::switch_space(Current::current_space());
+    }
+}
 
 /// 见 [`Platform::device_irq_count`]。
 pub fn device_irq_count() -> usize {

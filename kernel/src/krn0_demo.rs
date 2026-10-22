@@ -24,6 +24,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::dma_quiesce::{QuiesceVerdict, ResetOutcome};
 use kernel_core::interrupt::arrivals_since;
+use kernel_core::pci::Bar;
 
 use crate::virtio::{self, Queue, VirtioPci};
 use crate::{irq, kprintln, mm, mmio, pci};
@@ -44,6 +45,8 @@ const DMA_SCENARIOS: u64 = 3;
 /// DMA 拆除演练使用的队列与 MSI-X 表项（队列 0，表项 0）。
 /// Queue and MSI-X entry used by the DMA teardown case.
 const DMA_QUEUE_ENTRY: u16 = 0;
+/// MMIO 槽位分配 / 回收压力轮数。
+const MMIO_ROUNDS: u64 = 10_000;
 
 static FAILED: AtomicU32 = AtomicU32::new(0);
 /// DMA 拆除自检的断言失败次数（与回绕自检分开计数，各自的汇总行互不掺入）。
@@ -101,6 +104,12 @@ pub fn failed() -> u32 {
     FAILED.load(Ordering::Relaxed) + DMA_FAILED.load(Ordering::Relaxed)
 }
 
+/// 记录一条 TLB 回归断言，并计入 KRN-0 的统一失败数。
+/// Record one TLB regression assertion in the KRN-0 failure total.
+pub fn tlb_check(ok: bool, what: &str) {
+    check(ok, what);
+}
+
 /// 拆除裁决在串口输出里的名字。
 /// Verdict name used in the serial output.
 fn verdict_name(verdict: QuiesceVerdict) -> &'static str {
@@ -139,6 +148,83 @@ pub fn run_dma() {
     dma_reset_timeout_untrusted(&handle, baseline);
     dma_rounds(&handle, baseline, quarantined0);
     kprintln!("[JSR-KRN0] summary dma_teardown failed={}", DMA_FAILED.load(Ordering::Relaxed));
+}
+
+/// 运行 MMIO 槽位压力：先同时占满全部槽位并确认下一次映射被拒且位图不变，
+/// 再执行 10^4 轮映射 / 丢弃，核对槽位数与位图守恒。
+pub fn run_mmio() {
+    if let Err(e) = mmio::prepare_window() {
+        check(false, e.name());
+        kprintln!("[JSR-KRN0] summary mmio_slots failed={}", FAILED.load(Ordering::Relaxed));
+        return;
+    }
+    let frame = match mm::frame::allocate() {
+        Ok(f) => f,
+        Err(_) => {
+            check(false, "MMIO 槽位压力无法分配页帧");
+            kprintln!("[JSR-KRN0] summary mmio_slots failed={}", FAILED.load(Ordering::Relaxed));
+            return;
+        }
+    };
+    let bar = Bar::Memory { base: frame.start(), size: mmio::SLOT_STRIDE, prefetchable: false, wide: false };
+    let before = mmio::slots_used();
+    let free_before = mmio::slots_free();
+    let mut held = alloc::vec::Vec::new();
+    for _ in 0..free_before {
+        match mmio::Mapping::map(&bar, 0, kernel_core::frame::FRAME_SIZE as u32) {
+            Ok(m) => held.push(m),
+            Err(e) => {
+                check(false, e.name());
+                break;
+            }
+        }
+    }
+    let full = mmio::slots_used() == mmio::MAX_SLOTS && mmio::slots_free() == 0;
+    let refused = matches!(
+        mmio::Mapping::map(&bar, 0, kernel_core::frame::FRAME_SIZE as u32),
+        Err(mmio::MmioError::OutOfWindow)
+    );
+    check(full, "MMIO 槽位未全部占用");
+    check(refused, "槽位耗尽后仍分配了新槽位");
+    drop(held);
+    let emptied = mmio::slots_used() == before && mmio::slots_free() == free_before;
+    check(emptied, "MMIO 映射丢弃后槽位未全部归还");
+
+    let mut rounds_ok = true;
+    for _ in 0..MMIO_ROUNDS {
+        let mapping = match mmio::Mapping::map(&bar, 0, kernel_core::frame::FRAME_SIZE as u32) {
+            Ok(m) => m,
+            Err(_) => {
+                rounds_ok = false;
+                break;
+            }
+        };
+        if mmio::slots_used() != before + 1 {
+            rounds_ok = false;
+        }
+        drop(mapping);
+        if mmio::slots_used() != before || mmio::slots_free() != free_before {
+            rounds_ok = false;
+            break;
+        }
+    }
+    check(rounds_ok, "MMIO 映射 / 丢弃压力后槽位或位图不守恒");
+    let _ = mm::frame::deallocate(frame);
+    let after = mmio::slots_used();
+    let conserved = after == before && after + mmio::slots_free() == mmio::MAX_SLOTS;
+    check(conserved, "MMIO 槽位计数与位图未守恒");
+    kprintln!(
+        "[JSR-KRN0] case=mmio_slots rounds={} max_slots={} used_before={} used_after={} free={} exhausted_refused={} bitmap_conserved={} ok={}",
+        MMIO_ROUNDS,
+        mmio::MAX_SLOTS,
+        before,
+        after,
+        mmio::slots_free(),
+        refused,
+        conserved,
+        full && refused && emptied && rounds_ok && conserved
+    );
+    kprintln!("[JSR-KRN0] summary mmio_slots failed={}", FAILED.load(Ordering::Relaxed));
 }
 
 /// 在真实设备上建立一条可拆除的队列：真实复位（必须成功）、协商 `VIRTIO_F_VERSION_1`、

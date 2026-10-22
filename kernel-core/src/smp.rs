@@ -377,6 +377,17 @@ impl ShootdownBoard {
         if pages.checked_mul(PAGE).and_then(|len| start.checked_add(len)).is_none() {
             return Err(SmpError::BadRange);
         }
+        self.begin_request(targets, start, pages)
+    }
+
+    /// 登记一次整表刷新：目标集合为空时立即完成；有请求在途时返回 [`SmpError::Busy`]。
+    /// 服务的回调收到 `(0, 0)`，表示作废目标处理器上的全部地址转换缓存。
+    /// Post a whole-table invalidation request.
+    pub fn begin_all(&self, targets: CpuSet) -> Result<u32, SmpError> {
+        self.begin_request(targets, 0, 0)
+    }
+
+    fn begin_request(&self, targets: CpuSet, start: u64, pages: u64) -> Result<u32, SmpError> {
         let mut st = self.state.lock();
         if st.request.is_some() {
             return Err(SmpError::Busy);
@@ -732,6 +743,20 @@ mod tests {
         }
         assert_eq!(flushed.load(Ordering::Relaxed), 200 * 3);
         assert!(b.is_idle());
+    }
+
+    #[test]
+    fn whole_table_shootdown_uses_one_request_and_finishes_after_acks() {
+        let b = ShootdownBoard::new();
+        let targets = CpuSet::first(3).without(0);
+        let g = b.begin_all(targets).unwrap();
+        let mut flushed = Vec::new();
+        assert!(b.service(1, |start, pages| flushed.push((start, pages))));
+        assert!(!b.is_complete(g));
+        assert!(b.service(2, |start, pages| flushed.push((start, pages))));
+        assert!(b.is_complete(g));
+        assert_eq!(flushed, vec![(0, 0), (0, 0)]);
+        assert!(b.begin_all(CpuSet::EMPTY).is_ok());
     }
 
     fn double(x: u64) -> u64 {

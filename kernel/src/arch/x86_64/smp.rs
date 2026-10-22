@@ -296,3 +296,25 @@ pub fn tlb_flush_local(va: u64, pages: u64) {
         unsafe { core::arch::asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags)) };
     }
 }
+
+/// 作废本处理器上的全部 TLB 项，包括全局页。
+///
+/// 重写 CR3 不会清除全局项，因此在硬件启用全局页时临时清除 CR4.PGE 并恢复。
+/// Invalidate all local TLB entries, including global mappings.
+pub fn tlb_flush_all_local() {
+    let cr4_before: u64;
+    let cr4_without_pge: u64;
+    // SAFETY：仅临时改变分页控制位；中断已由调用者的击落协议屏蔽。
+    unsafe {
+        core::arch::asm!("mov {}, cr4", out(reg) cr4_before, options(nomem, nostack, preserves_flags));
+        cr4_without_pge = cr4_before & !(1 << 7);
+        if cr4_without_pge != cr4_before {
+            core::arch::asm!("mov cr4, {}", in(reg) cr4_without_pge, options(nomem, nostack, preserves_flags));
+            core::arch::asm!("mov cr4, {}", in(reg) cr4_before, options(nomem, nostack, preserves_flags));
+        } else {
+            let cr3: u64;
+            core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+            core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags));
+        }
+    }
+}

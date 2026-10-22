@@ -374,6 +374,7 @@ pub fn yield_with_cause(cause: &'static str) {
             // SAFETY：任务记录的空间由其所有者保证在任务存活期间有效；内核空间始终有效。
             unsafe { cpu::switch_space(target) };
         }
+        crate::smp::percpu::this().set_space(plan.next_space);
         crate::smp::percpu::this().set_current(plan.next_slot);
         // SAFETY：old/new 指向全局调度器内的任务上下文，在切换期间保持有效；
         // new 要么由栈池伪造，要么由上一次 switch_context 保存。
@@ -580,6 +581,7 @@ pub fn set_current_space(space: Option<cpu::SpaceRoot>) {
             // SAFETY：调用者保证 space 有效且包含内核共享映射。
             unsafe { cpu::switch_space(target) };
         }
+        crate::smp::percpu::this().set_space(space);
     });
 }
 

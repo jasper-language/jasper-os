@@ -311,6 +311,8 @@ pub const MAX_DEVICE_MAP_PAGES: u64 = 1024;
 /// 匿名映射 / 取消映射的失败原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemError {
+    /// 同一地址空间的另一次跨核页表修改尚未完成。
+    Busy,
     /// 起点未按页对齐、页数为 0 或超限、区间越出私有窗口。
     InvalidRange,
     /// 区间内已有映射（映射时）。
@@ -393,12 +395,16 @@ pub fn map_anon(pid: ObjId, va: u64, pages: u64, writable: bool) -> Result<(), M
                 return Err(MemError::AlreadyMapped);
             }
         }
+        if !p.space.begin_shootdown() {
+            return Err(MemError::Busy);
+        }
         for (i, f) in fresh.iter().enumerate() {
             let page = VirtPage::containing(va + i as u64 * FRAME_SIZE);
-            if let Err(e) = p.space.map(page, *f, flags) {
+            if let Err(e) = p.space.map_raw(page, *f, flags) {
                 for j in 0..i {
-                    let _ = p.space.unmap(VirtPage::containing(va + j as u64 * FRAME_SIZE));
+                    let _ = p.space.unmap_raw(VirtPage::containing(va + j as u64 * FRAME_SIZE));
                 }
+                p.space.end_shootdown();
                 return Err(match e {
                     MapError::AlreadyMapped => MemError::AlreadyMapped,
                     MapError::OutOfFrames => MemError::OutOfMemory,
@@ -407,6 +413,7 @@ pub fn map_anon(pid: ObjId, va: u64, pages: u64, writable: bool) -> Result<(), M
             }
         }
         p.frames.extend_from_slice(&fresh);
+        p.space.end_shootdown();
         Ok(())
     });
     if r.is_err() {
@@ -454,17 +461,21 @@ pub fn map_device_bar(pid: ObjId, handle: HandleId, bar: u8, va: u64, phys: u64,
         if p.device_maps.try_reserve(1).is_err() {
             return Err(MemError::OutOfMemory);
         }
+        if !p.space.begin_shootdown() {
+            return Err(MemError::Busy);
+        }
         let mut mapped = 0u64;
         while mapped < pages {
             let page = VirtPage::containing(va + mapped * FRAME_SIZE);
             let mapped_ok = match PhysFrame::from_start(phys + mapped * FRAME_SIZE) {
-                Some(frame) => p.space.map(page, frame, flags),
+                Some(frame) => p.space.map_raw(page, frame, flags),
                 None => Err(MapError::InvalidAddress),
             };
             if let Err(e) = mapped_ok {
                 for undo in 0..mapped {
-                    let _ = p.space.unmap(VirtPage::containing(va + undo * FRAME_SIZE));
+                    let _ = p.space.unmap_raw(VirtPage::containing(va + undo * FRAME_SIZE));
                 }
+                p.space.end_shootdown();
                 return Err(match e {
                     MapError::AlreadyMapped => MemError::AlreadyMapped,
                     MapError::OutOfFrames => MemError::OutOfMemory,
@@ -481,11 +492,13 @@ pub fn map_device_bar(pid: ObjId, handle: HandleId, bar: u8, va: u64, phys: u64,
         });
         if !ok {
             for undo in 0..pages {
-                let _ = p.space.unmap(VirtPage::containing(va + undo * FRAME_SIZE));
+                let _ = p.space.unmap_raw(VirtPage::containing(va + undo * FRAME_SIZE));
             }
+            p.space.end_shootdown();
             return Err(MemError::InvalidRange);
         }
         p.device_maps.push(DeviceMapping { handle, bar, va, pages, phys });
+        p.space.end_shootdown();
         Ok(())
     })
 }
@@ -539,7 +552,7 @@ pub fn unmap_range(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
     if gone.try_reserve_exact(pages as usize).is_err() {
         return Err(MemError::OutOfMemory);
     }
-    kobj::with(|t| {
+    let active = kobj::with(|t| {
         let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
         for i in 0..pages {
             if is_device_page(p, va + i * FRAME_SIZE) {
@@ -549,14 +562,31 @@ pub fn unmap_range(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
                 return Err(MemError::NotMapped);
             }
         }
+        if !p.space.begin_shootdown() {
+            return Err(MemError::Busy);
+        }
         for i in 0..pages {
-            // 上面已确认每页都有映射；单 CPU 上锁内无人能在其间改动这张页表。
-            if let Ok(f) = p.space.unmap(VirtPage::containing(va + i * FRAME_SIZE)) {
-                gone.push(f);
+            match p.space.unmap_raw(VirtPage::containing(va + i * FRAME_SIZE)) {
+                Ok(f) => gone.push(f),
+                Err(e) => {
+                    p.space.end_shootdown();
+                    return Err(match e {
+                        MapError::Busy => MemError::Busy,
+                        MapError::OutOfFrames => MemError::OutOfMemory,
+                        _ => MemError::InvalidRange,
+                    });
+                }
             }
         }
+        Ok(p.space.active_cpus())
+    })?;
+    // 页表修改已经完成，但帧仍记在进程名下；必须先等所有活跃处理器应答，才能归还。
+    crate::smp::tlb_shootdown_on(active, va, pages).map_err(|_| MemError::Busy)?;
+    kobj::with(|t| {
+        let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
         gone.sort_unstable_by_key(|f| f.start());
         p.frames.retain(|f| gone.binary_search_by_key(&f.start(), |g| g.start()).is_err());
+        p.space.end_shootdown();
         Ok(())
     })?;
     for f in gone {
@@ -582,7 +612,7 @@ pub fn protect_range(pid: ObjId, va: u64, pages: u64, writable: bool, executable
     if executable {
         flags = flags.union(MapFlags::EXECUTE);
     }
-    kobj::with(|t| {
+    let active = kobj::with(|t| {
         let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
         if p.state != ProcState::Running {
             return Err(MemError::NoSuchProcess);
@@ -595,10 +625,25 @@ pub fn protect_range(pid: ObjId, va: u64, pages: u64, writable: bool, executable
                 return Err(MemError::NotMapped);
             }
         }
-        for i in 0..pages {
-            // 上面已确认每页都有 4 KiB 映射；单 CPU 上锁内无人能在其间改动这张页表。
-            p.space.protect(VirtPage::containing(va + i * FRAME_SIZE), flags).map_err(|_| MemError::InvalidRange)?;
+        if !p.space.begin_shootdown() {
+            return Err(MemError::Busy);
         }
+        for i in 0..pages {
+            if let Err(e) = p.space.protect_raw(VirtPage::containing(va + i * FRAME_SIZE), flags) {
+                p.space.end_shootdown();
+                return Err(match e {
+                    MapError::Busy => MemError::Busy,
+                    MapError::OutOfFrames => MemError::OutOfMemory,
+                    _ => MemError::InvalidRange,
+                });
+            }
+        }
+        Ok(p.space.active_cpus())
+    })?;
+    crate::smp::tlb_shootdown_on(active, va, pages).map_err(|_| MemError::Busy)?;
+    kobj::with(|t| {
+        let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
+        p.space.end_shootdown();
         Ok(())
     })
 }

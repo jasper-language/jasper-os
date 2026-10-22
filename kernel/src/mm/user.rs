@@ -85,7 +85,7 @@ pub enum UserPtrError {
 fn pin_in(t: &mut kobj::Table, pid: ObjId, addr: u64, len: usize, write: bool) -> Result<PinnedRange, UserPtrError> {
     proc::pin_user_in(t, pid, addr, len, write).map_err(|e| match e {
         ProcError::NoSuchProcess => UserPtrError::NotUserTask,
-        ProcError::Map(MapError::InvalidAddress | MapError::NotMapped) => UserPtrError::InvalidAddress,
+        ProcError::Map(MapError::InvalidAddress | MapError::NotMapped | MapError::Busy) => UserPtrError::InvalidAddress,
         _ => UserPtrError::InvalidAddress,
     })
 }
