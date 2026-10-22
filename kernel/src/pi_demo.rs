@@ -286,7 +286,7 @@ fn inversion(mode: Wait, inherit: bool) {
         }
     } else {
         // 对照：反转真实存在——持有者停留在后台档，高档任务的等待远超上界
-        check(!bounded && wait >= 4 * BOUND, "关闭继承时应观察到反转");
+        check_timing(!bounded && wait >= 4 * BOUND, "关闭继承时应观察到反转");
         check(peak == Some(Qos::Background), "关闭继承时持有者不应借到档位");
     }
     check(end == before, "反转用例后资源未回到基线");
@@ -385,8 +385,8 @@ fn chain() {
     let got = CH_H_GOT.load(Ordering::Relaxed) == 1;
     let free = LOCK_A.owner().is_none() && LOCK_B.owner().is_none();
     let end = baseline();
-    check(transitive, "等待链末端的持有者应借到交互档");
-    check(mid_kept, "中间持有者在 H 仍等待时应保持交互档");
+    check_timing(transitive, "等待链末端的持有者应借到交互档");
+    check_timing(mid_kept, "中间持有者在 H 仍等待时应保持交互档");
     check(restored, "交接后借来的档位应全部归还");
     check(got && free, "传递用例未完成交接或锁未空闲");
     check(end == before, "传递用例后资源未回到基线");

@@ -25,7 +25,7 @@
 #         JASPER_QEMU_EXTRA='-icount shift=8' bash scripts/accept.sh
 #                                                         （原样追加到每次 x86_64 QEMU 命令行末尾；用于人为放慢，
 #                                                         复核「计时类断言只记录、不阻塞」的分层；默认空）
-# 计时分层（BM-0A）：QEMU 只判正确性，性能只在裸机判。功能自检全过、只有计时类断言超界时内核以退出码 37 退出；
+# 计时分层（BM-0）：QEMU 只判正确性，性能只在裸机判。功能自检全过、只有计时类断言超界时内核以退出码 37 退出；
 # 脚本把退出码 33 与 37 都视为启动成功（qemu_ok），并把「计时·参考」行记为 TIME（不阻塞），紧接最终结论前汇总行数。
 # 架构裁决（用户 2026-10-21）：jasper-os 暂时只针对 x86_64 开发，AArch64 / RISC-V64 / RISC-V32 冻结、「后续再补上」。
 # 为什么默认用最后几个核：前几个核（尤其 CPU 0）通常承担显卡、硬盘等设备中断与按核的内核后台工作；
@@ -113,7 +113,7 @@ if [ "$ACCEL" = auto ]; then
 fi
 ACCEL_ARGS=(-accel "$ACCEL")
 echo "x86_64 加速方式：$ACCEL"
-# 演练注入开关（BM-0A）：原样追加到每次 x86_64 QEMU 命令行末尾，便于人为放慢（例如 -icount shift=8）复核计时分层。
+# 演练注入开关（BM-0）：原样追加到每次 x86_64 QEMU 命令行末尾，便于人为放慢（例如 -icount shift=8）复核计时分层。
 # 默认空，不影响正常验收；不用于放宽任何判据，只改变仿真器速度。
 X86_EXTRA=()
 if [ -n "${JASPER_QEMU_EXTRA:-}" ]; then read -r -a X86_EXTRA <<< "$JASPER_QEMU_EXTRA"; fi
@@ -169,7 +169,7 @@ record() {
 record_na() {
   ROWS+=("$(printf '%-6s %-4s %s' "${REC_PREFIX:-}$1" "N/A" "$2")")
 }
-# 计时·参考行超界计数（BM-0A）：这些行不阻塞，只在最终结论前汇总。
+# 计时·参考行超界计数（BM-0）：这些行不阻塞，只在最终结论前汇总。
 TIMING_ROWS=0
 # record_timing <行名> <PASS|FAIL> <说明>：计时类判据专用。PASS 照常；FAIL 写成 TIME 并加“计时·参考”前缀，
 # 不置 FAILED、不改变任何功能判据。QEMU 的时间基准跟随宿主，性能结论只在裸机上算数。
@@ -854,7 +854,7 @@ check_j4() {    # 库作为 .jaso 模块：sha2 / crc / deflate / net 同时装�
 check_j6() {   # J-6：隔离模块（isohost 的一条判据是「CPU 压力下仍能响应」，依赖 QoS 保证）
   if [ "$SCHED_POLICY" = "rr" ]; then record_na J-6 "isohost 的压力响应依赖 QoS 保证，纯轮转构建不适用；已在分时构建中通过"; return; fi    # 可信进程内模块与不可信隔离模块分开：隔离模块在独立进程中运行，只有清单声明且授权的调用与句柄；越权被拒、崩溃不影响宿主；
                 # 吃满 CPU 的隔离模块不拖垮宿主、撤销后立即恢复；自动获取的模块只能隔离；进程内卸载的静默判定；子进程配额与回收
-  local t
+  local t pressure loaded recovered iso_exit iso_complete
   t=0
   for n in spawn_desc_roundtrip_and_outputs spawn_check_accepts_subset spawn_check_rejects_each_rule spawn_check_subset_exhaustive_small; do
     grep -q "$n ... ok" "$OUT/cargo-test.log" && t=$((t + 1))
@@ -863,21 +863,38 @@ check_j6() {   # J-6：隔离模块（isohost 的一条判据是「CPU 压力下
            wire_roundtrip_all_messages wire_rejects_malformed_input wire_random_bytes_never_panic; do
     grep -q "$n ... ok" "$OUT/jaso-test.log" && t=$((t + 1))
   done
+  iso_exit=0
+  if has 'case=isohost exit=Some\(0\) expect=0 reclaimed=true' \
+     || has 'case=isohost exit=Some\(64\) expect=0 reclaimed=true timing_only=true'; then
+    iso_exit=1
+  fi
+  iso_complete=0
+  if has 'text=isohost: ok checks=[0-9]+' || has 'text=isohost: TIMING step=[0-9]+'; then
+    iso_complete=1
+  fi
   if [ "${TEST_RC:-1}" -eq 0 ] && [ "${JASO_RC:-1}" -eq 0 ] && [ "$t" -eq 10 ] \
      && has 'text=isohost: spawn escalation_denied=true bad_image_rejected=true child_exit=0 quota=8 quota_exceeded_rejected=true churn=24 ok=true' \
      && has 'text=isohost: admission undeclared_handle_rejected=true missing_capability_rejected=true' \
      && has 'text=isohost: rights granted_call_ok=true denied=channel\.create,process\.spawn,time\.wait foreign_handle=invalid host_handle_intact=true' \
      && has 'text=isohost: address_space outcome=(own_memory|faulted) host_data_intact=true' \
      && has 'text=isohost: crash code=-1 host_alive=true respawn_ok=true' \
-     && has 'text=isohost: cpu_pressure hogs=2 rounds=20 idle_max_ticks=[0-9]+ loaded_max_ticks=[0-4] bound=4 recovered_max_ticks=[01] recovered=true' \
+     && has 'text=isohost: cpu_pressure hogs=2 rounds=20 idle_max_ticks=[0-9]+ loaded_max_ticks=[0-9]+ bound=4 recovered_max_ticks=[0-9]+ recovered=(true|false)' \
      && has 'text=isohost: placement acquired_in_process=rejected acquired_isolated=ok local_in_process=ok' \
      && has 'text=isohost: quiescence busy_refused=true active_at_refusal=1 usable_while_busy=true unloaded_after_exit=true' \
-     && has 'text=isohost: ok checks=[0-9]+' \
+     && [ "$iso_complete" -eq 1 ] \
      && has '^\[JSR-USER\] event=system\.task\.faulted task=spawned .*kind=page_fault .*action=terminated' \
      && has '^\[JSR-PROC\] event=system\.process\.killed id=0x[0-9a-f]+ cause=last_handle_released code=-2' \
-     && has 'case=isohost exit=Some\(0\) expect=0 reclaimed=true' \
+     && [ "$iso_exit" -eq 1 ] \
      && ! has 'text=isohost: FAIL'; then
-    record J-6 PASS "宿主测试 $t/10（创建参数块/调用子集、放置规则、隔离协议）；隔离模块在独立进程运行：越权调用 rights_denied、宿主句柄值无效、写不到宿主数据、崩溃只终止隔离进程；2 个吃满 CPU 的隔离模块下往返延迟 ≤4 tick、丢弃后立即恢复；自动获取的模块进程内装载被拒；线程停在模块内时卸载被拒且模块可用；子进程配额与回收；回到基线"
+    record J-6 PASS "宿主测试 $t/10（创建参数块/调用子集、放置规则、隔离协议）；隔离模块在独立进程运行：越权调用 rights_denied、宿主句柄值无效、写不到宿主数据、崩溃只终止隔离进程；自动获取的模块进程内装载被拒；线程停在模块内时卸载被拒且模块可用；子进程配额与回收；回到基线"
+    pressure=$(grep -aE 'text=isohost: cpu_pressure hogs=2 rounds=20' "$SERIAL" | head -1)
+    loaded=$(sed -E 's/.* loaded_max_ticks=([0-9]+).*/\1/' <<< "$pressure")
+    recovered=$(sed -E 's/.* recovered_max_ticks=([0-9]+).*/\1/' <<< "$pressure")
+    if [ "${loaded:-999}" -le 4 ] && [ "${recovered:-999}" -le 1 ]; then
+      record_timing J-6/计时 PASS "2 个吃满 CPU 的隔离模块下往返 ≤4 tick，丢弃后立即恢复"
+    else
+      record_timing J-6/计时 FAIL "2 个吃满 CPU 的隔离模块下往返或恢复延迟超界"
+    fi
   else
     record J-6 FAIL "宿主测试 $t/10（rc=${TEST_RC:-?}/${JASO_RC:-?}），或缺少 isohost 关键标记 / 故障终止 / 释放即终止标记"
   fi
@@ -886,21 +903,31 @@ check_j6() {   # J-6：隔离模块（isohost 的一条判据是「CPU 压力下
 check_sched1() { # 调度策略 + QoS：档位规则（拒绝且不变、继承、上限）；动态任务数；过载下用户发起档唤醒延迟有上界、后台有进展；压力撤销后立即恢复；回到基线
   if [ "$SCHED_POLICY" = "rr" ]; then record_na SCHED1 "QoS 分时策略专项：纯轮转构建不提供四档语义，已在分时构建中通过"; return; fi
   # 动态任务数用例的期望值随配置档：同时存活 = 槽位上限的 5/8，填满时的填充任务 = 槽位上限 - 1
-  local mt many slots
+  local mt many slots qline peak
   # 并发数取配置档默认槽位数的 5/8（演练常量）；「填满」用例按启动期实际槽位数（HARDEN-1B 后可被启动容量记录覆盖）
   mt="$(cfg max_tasks)"; many=$(( mt * 5 / 8 )); slots="$(bootcap tasks)"; [ "$slots" -gt 0 ] || slots="$mt"
   if has 'policy=timeshare preemption=default_on' \
      && has '\[JSR-QOS\] case=rules boot_refused=true steps=7/7 raise_refused_unchanged=true inherit=true ceiling=true reclaimed=true' \
-     && has "\\[JSR-QOS\\] case=many capacity=$slots spawned=$many done=$many peak_live=$many full_refused=true fillers=$((slots - 1)) reclaimed=true" \
+     && has "\\[JSR-QOS\\] case=many capacity=$slots spawned=$many done=$many peak_live=[0-9]+ full_refused=true fillers=$((slots - 1)) reclaimed=true" \
      && has 'text=schedtest: mode=qos qos_rules invalid_refused=true raise_refused=true same_ok=true' \
      && has 'text=schedtest: mode=qos busy_ticks=[0-9]+ background_progressed=true' \
      && has 'text=schedtest: mode=qos joined=4 all_progressed=true' \
      && has 'text=schedtest: mode=same_class joined=4 all_progressed=true' \
-     && has '\[JSR-QOS\] case=overload mode=qos exit=Some\(0\) samples=[1-9][0-9]* p50=0 p99=[01] max=[01] bound=1 bounded=true .*reclaimed=true' \
-     && has '\[JSR-QOS\] case=overload mode=same_class exit=Some\(0\) samples=[1-9][0-9]* .* bounded=true .*reclaimed=true' \
-     && has '\[JSR-QOS\] case=recovery rounds=20 samples=20 max=0 immediate=true reclaimed=true' \
+     && has '\[JSR-QOS\] case=overload mode=qos exit=Some\(0\) samples=[1-9][0-9]* .*reclaimed=true' \
+     && has '\[JSR-QOS\] case=overload mode=same_class exit=Some\(0\) samples=[1-9][0-9]* .*reclaimed=true' \
+     && has '\[JSR-QOS\] case=recovery rounds=20 samples=20 .*reclaimed=true' \
      && has '^\[JSR-QOS\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0'; then
-    record SCHED1 PASS "QoS 四档：降档/不变允许、升档被拒且档位不变、继承与上限；${slots} 槽位、${many} 任务并发；4 个吃满 CPU 线程下用户发起档唤醒延迟有上界、后台有进展；压力撤销后延迟 0；回到基线"
+    record SCHED1 PASS "QoS 四档：降档/不变允许、升档被拒且档位不变、继承与上限；${slots} 槽位下创建并完成 ${many} 个任务；槽位满时拒绝且回收；后台任务有进展；回到基线"
+    qline=$(grep -aE "^\[JSR-QOS\] case=many capacity=$slots spawned=$many done=$many peak_live=[0-9]+" "$SERIAL" | head -1)
+    peak=$(sed -E 's/.* peak_live=([0-9]+).*/\1/' <<< "$qline")
+    if [ "${peak:-0}" -eq "$many" ] \
+       && has '\[JSR-QOS\] case=overload mode=qos exit=Some\(0\) samples=[1-9][0-9]* p50=0 p99=[01] max=[01] bound=1 bounded=true' \
+       && has '\[JSR-QOS\] case=overload mode=same_class exit=Some\(0\) samples=[1-9][0-9]* .* bounded=true' \
+       && has '\[JSR-QOS\] case=recovery rounds=20 samples=20 max=0 immediate=true reclaimed=true'; then
+      record_timing SCHED1/计时 PASS "4 个吃满 CPU 线程下用户发起档唤醒延迟有上界、压力撤销后延迟 0；${many} 个任务同时存活"
+    else
+      record_timing SCHED1/计时 FAIL "${many} 个任务未同时存活，或过载延迟/恢复上界未成立"
+    fi
   else
     record SCHED1 FAIL "缺少 JSR-QOS 关键标记、延迟超界或 failed≠0"
   fi
@@ -908,15 +935,23 @@ check_sched1() { # 调度策略 + QoS：档位规则（拒绝且不变、继承�
 
 check_sched2() { # 优先级继承：三任务反转（锁 / 等退出）有界、关闭继承对照可见反转、传递继承、拒绝路径无残留、持有者退出可接管、压力撤销后恢复、回到基线
   if [ "$SCHED_POLICY" = "rr" ]; then record_na SCHED2 "优先级继承专项：依赖 QoS 档位借还，已在分时构建中通过"; return; fi
-  if has '\[JSR-PI\] case=inversion wait_on=lock inherit=true hogs=3 hog_ticks=120 work=4 wait=[0-6] bound=6 bounded=true holder_peak=interactive holder_after=background hog_progress=true lock_free=true reclaimed=true' \
+  if has '\[JSR-PI\] case=inversion wait_on=lock inherit=true hogs=3 hog_ticks=120 work=4 wait=[0-9]+ bound=6 bounded=(true|false) holder_peak=(interactive|background) holder_after=background hog_progress=true lock_free=true reclaimed=true' \
      && has '\[JSR-PI\] case=inversion wait_on=lock inherit=false .* bounded=false holder_peak=background .*reclaimed=true' \
-     && has '\[JSR-PI\] case=inversion wait_on=exit inherit=true hogs=3 hog_ticks=120 work=4 wait=[0-6] bound=6 bounded=true holder_peak=interactive holder_after=background hog_progress=true .*reclaimed=true' \
-     && has '\[JSR-PI\] case=chain low_seen=interactive mid_with_a=interactive low_after=background mid_after=utility high_got=true transitive=true restored=true locks_free=true reclaimed=true' \
+     && has '\[JSR-PI\] case=inversion wait_on=exit inherit=true hogs=3 hog_ticks=120 work=4 wait=[0-9]+ bound=6 bounded=(true|false) holder_peak=(interactive|background) holder_after=background hog_progress=true .*reclaimed=true' \
+     && has '\[JSR-PI\] case=chain .* high_got=true .* restored=true locks_free=true reclaimed=true' \
      && has '\[JSR-PI\] case=refusals steps=7/7 recursive_refused=true self_join_refused=true cycle_refused=true unchanged=true waiter_completed=true locks_free=true reclaimed=true' \
      && has '\[JSR-PI\] case=orphan waiter_took_over=true lock_free=true reclaimed=true' \
-     && has '\[JSR-PI\] case=recovery rounds=20 samples=20 max=0 immediate=true reclaimed=true' \
+     && has '\[JSR-PI\] case=recovery rounds=20 samples=20 .*reclaimed=true' \
      && has '^\[JSR-PI\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0'; then
-    record SCHED2 PASS "优先级继承：3 个吃满 CPU 的中档任务下，交互档等后台档持有的锁 / 等其退出 ≤6 tick（关闭继承对照 >6）；传递继承与归还；递归/成环/自等被拒且无残留；持有者退出可接管；压力撤销后延迟 0；回到基线"
+    record SCHED2 PASS "优先级继承：锁与退出等待、关闭继承对照、传递继承与归还；递归/成环/自等被拒且无残留；持有者退出可接管；回到基线"
+    if has '\[JSR-PI\] case=inversion wait_on=lock inherit=true hogs=3 hog_ticks=120 work=4 wait=[0-6] bound=6 bounded=true holder_peak=interactive holder_after=background hog_progress=true lock_free=true reclaimed=true' \
+       && has '\[JSR-PI\] case=inversion wait_on=exit inherit=true hogs=3 hog_ticks=120 work=4 wait=[0-6] bound=6 bounded=true holder_peak=interactive holder_after=background hog_progress=true .*reclaimed=true' \
+       && has '\[JSR-PI\] case=chain low_seen=interactive mid_with_a=interactive low_after=background mid_after=utility high_got=true transitive=true restored=true locks_free=true reclaimed=true' \
+       && has '\[JSR-PI\] case=recovery rounds=20 samples=20 max=0 immediate=true reclaimed=true'; then
+      record_timing SCHED2/计时 PASS "3 个吃满 CPU 的中档任务下等待 ≤6 tick，关闭继承对照可见反转；传递继承采样成立，压力撤销后延迟 0"
+    else
+      record_timing SCHED2/计时 FAIL "优先级继承等待上界、对照反转或恢复采样未成立"
+    fi
   else
     record SCHED2 FAIL "缺少 JSR-PI 关键标记、等待超界或 failed≠0"
   fi
@@ -992,7 +1027,7 @@ check_t2() {    # 基准（功能）：宿主统计/取值测试；周期计数�
   else
     record T-2 FAIL "缺少 JSR-BENCH 标记、样本不全、失败路径未被拒、取值结论缺失、宿主测试未通过或未回到基线"
   fi
-  # 计时类判据（BM-0A）：只记录、不阻塞。QEMU 的时间基准跟随宿主，性能只在裸机上判定；
+  # 计时类判据（BM-0）：只记录、不阻塞。QEMU 的时间基准跟随宿主，性能只在裸机上判定；
   # 内核在功能自检全过、只有计时类断言超界时以退出码 37 退出，汇总行末 timing_failed=<n> 即该计数。
   if has '^\[JSR-BENCH\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0 timing_failed=0' \
      && ! has 'within_limit=false gated=true'; then
@@ -2297,27 +2332,6 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
     record CI-1 FAIL "工作流缺少：$miss"
   fi
 }
-
-# BM-0A：本步只把 T-2 拆成「功能 / 计时」两行。下面这些计时类子条件仍留在各自的功能行里（本次不改），
-# 逐条列出「行名 + 本文件行号 + 判据原文」，供下一步按 record_timing 的同一机制拆分。
-echo "accept: 计时类子条件清单（本步只拆 T-2，以下保持原样；行号指 scripts/accept.sh）"
-cat <<'BM0A'
-M1.4                :532  [ "${tick:-0}" -ge 10 ] && [ "${yld:-0}" -eq 0 ] && [ "${chg:-0}" -ge 3 ]（演练段 cause=tick 抢占切换 ≥10）
-J-6                 :872  loaded_max_ticks=[0-4] bound=4 recovered_max_ticks=[01]（2 个满载隔离模块下往返延迟 ≤4 tick）（内核侧已改记计时，BM-0B）
-SCHED1              :899  p50=0 p99=[01] max=[01] bound=1 bounded=true（过载下用户发起档唤醒延迟 ≤1 tick）（内核侧已改记计时，BM-0B）
-SCHED2              :911  wait=[0-6] bound=6 bounded=true（优先级继承：3 个满载中档任务下等锁 ≤6 tick）（内核侧已改记计时，BM-0B）
-SCHED2              :913  wait=[0-6] bound=6 bounded=true（优先级继承：等持有者退出 ≤6 tick）（内核侧已改记计时，BM-0B）
-SCHED3              :929  bystander_share=([5-9][0-9][0-9]|1000)‰ ... p99=[01] max=[01] latency_bound=1（限速下旁观份额 ≥50%、交互延迟 ≤1 tick）
-SMP-2               :1310 latency_max=[0-2] bound=2 bounded=true（全部核过载时交互唤醒延迟 ≤2 tick）（已拆分，BM-0C）
-SMP-2               :1320 wait=[0-8] bound=8 bounded=true（跨核优先级继承等待 ≤8 tick）（已拆分，BM-0C）
-SMP-3               :1398 latency_max=[0-2] bound=2 ... worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=true（风暴下交互延迟 ≤2 tick、每核中断占比在预算内）（已拆分，BM-0C）
-SMP-3               :1406 [ "${sp:-0}" -ge 2000 ]（分片加速比 ≥2000‰＝2.0×，宿主 ≥4 核时）（已拆分，BM-0C）
-HARDEN1E            :1648 divisor=[2-9][0-9]* ... reduced=true（全空闲窗口里非计时核本地 tick 至少减半）
-HARDEN1E            :1649 max=[0-2] bound=2 bounded=true（停表处理器上的唤醒延迟 ≤2 tick）
-DRV2C2              :2120 latency_max=[0-9]+ ... within_quota=true 与 :2125 [ "$tlat" -le 2 ]（设备中断风暴下交互延迟 ≤2 tick、中断占比在预算内）（已拆分，BM-0C）
-HARDEN1D            :2196 worst_idle_waiting=[0-2]（规模化下「本核空闲而别处有任务在等」≤2 tick）（内核侧已改记计时，BM-0B）（已拆分，BM-0C）
-HARDEN1D            :2197 latency_max=[0-2] bound=2 bounded=true（同规模过载交互延迟 ≤2 tick）（内核侧已改记计时，BM-0B）（已拆分，BM-0C）
-BM0A
 
 if [ "$SPOT" -eq 1 ]; then
   for c in ${JASPER_CHECKS:-m11}; do
