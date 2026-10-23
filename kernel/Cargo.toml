@@ -15,8 +15,16 @@ spin = "0.12.3"
 bootloader_api = "0.11.17"
 x86_64 = "0.15.5"
 pic8259 = "0.11.0"
+noto-sans-mono-bitmap = { version = "0.2.0", optional = true, default-features = false, features = ["regular", "size_16", "unicode-basic-latin"] }
 
 [features]
+# Explicitly armed KRN-1 fault sites; default builds contain no hooks.
+fault-inject = []
+# S-2 fixed-seed eight-process syscall campaign (opt-in).
+s2-fuzz = ["user-programs"]
+# Explicit QEMU BM-1 profile: RTL8139 log link, IB700 watchdog and CF9 reset.
+bm1-vm = ["dep:noto-sans-mono-bitmap"]
+bm1-hang = ["bm1-vm"]
 default = ["user-programs"]
 # 构建期配置档：默认 standard；启用本特性得到 compact（参数见 kernel-core 的 config 模块）。
 profile-compact = []

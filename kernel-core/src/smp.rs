@@ -459,7 +459,8 @@ pub type CallFn = fn(u64) -> u64;
 #[derive(Clone, Copy)]
 enum Call {
     Idle,
-    Posted(CallFn, u64),
+    /// 投递时分配的唯一令牌用于区分“同一次投递”和撤销后重新投递。
+    Posted { f: CallFn, arg: u64, token: u32 },
     Done(u64),
 }
 
@@ -467,13 +468,14 @@ enum Call {
 /// One cross-CPU call slot per target processor.
 pub struct CallSlot {
     state: SpinLock<Call>,
+    next_token: core::sync::atomic::AtomicU32,
 }
 
 impl CallSlot {
     /// 新建（空闲）。
     /// New idle slot.
     pub const fn new() -> Self {
-        CallSlot { state: SpinLock::new(Call::Idle) }
+        CallSlot { state: SpinLock::new(Call::Idle), next_token: core::sync::atomic::AtomicU32::new(0) }
     }
 
     /// 投递一次调用；格子不空闲时返回 `Busy` 且不改动。
@@ -482,7 +484,8 @@ impl CallSlot {
         let mut st = self.state.lock();
         match *st {
             Call::Idle => {
-                *st = Call::Posted(f, arg);
+                let token = self.next_token.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+                *st = Call::Posted { f, arg, token };
                 Ok(())
             }
             _ => Err(SmpError::Busy),
@@ -495,15 +498,16 @@ impl CallSlot {
         let posted = {
             let st = self.state.lock();
             match *st {
-                Call::Posted(f, arg) => Some((f, arg)),
+                Call::Posted { f, arg, token } => Some((f, arg, token)),
                 _ => None,
             }
         };
-        let Some((f, arg)) = posted else { return false };
+        let Some((f, arg, token)) = posted else { return false };
         let value = f(arg);
         let mut st = self.state.lock();
-        // 发起方可能已因超时撤销：只有仍是这次投递时才写结果
-        if matches!(*st, Call::Posted(..)) {
+        // 发起方可能已因超时撤销并重新投递：只有令牌仍是同一次投递时才写结果，
+        // 否则旧结果会覆盖新调用。
+        if matches!(*st, Call::Posted { token: current, .. } if current == token) {
             *st = Call::Done(value);
         }
         true
@@ -780,6 +784,24 @@ mod tests {
         s.abandon();
         assert!(!s.run());
         assert!(s.is_idle());
+    }
+
+    static RACE_SLOT: CallSlot = CallSlot::new();
+    fn race_second(_: u64) -> u64 { 7 }
+    fn race_first(_: u64) -> u64 {
+        // Timeout plus a new post while the old call is still executing.
+        RACE_SLOT.abandon();
+        RACE_SLOT.post(race_second, 0).unwrap();
+        99
+    }
+
+    #[test]
+    fn call_slot_old_result_does_not_overwrite_reposted_call() {
+        assert!(RACE_SLOT.is_idle());
+        RACE_SLOT.post(race_first, 0).unwrap();
+        assert!(RACE_SLOT.run()); // first call reposts during execution
+        assert!(RACE_SLOT.run(), "the reposted call must still be runnable");
+        assert_eq!(RACE_SLOT.collect(), Some(7));
     }
 
     #[test]

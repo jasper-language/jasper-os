@@ -22,7 +22,7 @@ static CHECKS: AtomicU32 = AtomicU32::new(0);
 static FAILED: AtomicU32 = AtomicU32::new(0);
 
 /// 用户程序 `user/robust` 的 ELF 镜像（构建期由 `kernel/build.rs` 产出并嵌入）。
-static USER_ROBUST: &[u8] = include_bytes!(env!("JSR_USER_ROBUST"));
+pub(crate) static USER_ROBUST: &[u8] = include_bytes!(env!("JSR_USER_ROBUST"));
 
 /// 程序承诺发起的有界调用次数；内核侧据此防止「程序提前退出却仍算通过」。
 const MIN_CALLS: u64 = 20_000;
@@ -41,7 +41,7 @@ pub fn failed() -> u32 {
 }
 
 /// 授予测试进程全部已登记操作：只有拿到权限，调用才会真正进入各处理函数的参数校验路径。
-fn all_calls() -> SyscallSet {
+pub(crate) fn all_calls() -> SyscallSet {
     SyscallSet::of(&[
         abi::SYSTEM_TASK_EXIT,
         abi::SYSTEM_TASK_YIELD,

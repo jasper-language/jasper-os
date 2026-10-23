@@ -4,6 +4,8 @@
 // 用法 / Usage:
 //   xtask <kernel-elf> <out-image>
 //       由内核 ELF 生成可引导的 BIOS 磁盘镜像（x86_64）。Build a bootable BIOS disk image.
+//   xtask uefi <kernel-elf> <out-image>
+//       Build an OVMF/UEFI GPT boot image; the default command remains BIOS.
 //   xtask bootcap <in-elf> <out-elf> [objects=N] [tasks=N] [rt=N] [record=corrupt]
 //       改写内核镜像里的启动容量记录（不重新编译即可以不同容量启动）；未给出的项不覆盖。
 //       只检查语法，不检查取值范围：越界值由内核在启动期拒绝，这正是要验收的行为。
@@ -21,11 +23,17 @@ fn main() {
         }
         return;
     }
+    let uefi = args.first().map(String::as_str) == Some("uefi");
+    let args = if uefi { &args[1..] } else { &args[..] };
     let kernel = args.first().expect("kernel elf path");
     let out = args.get(1).expect("out image path");
-    bootloader::BiosBoot::new(std::path::Path::new(kernel))
-        .create_disk_image(std::path::Path::new(out))
-        .expect("create_disk_image");
+    if uefi {
+        bootloader::UefiBoot::new(std::path::Path::new(kernel))
+            .create_disk_image(std::path::Path::new(out)).expect("UEFI image");
+    } else {
+        bootloader::BiosBoot::new(std::path::Path::new(kernel))
+            .create_disk_image(std::path::Path::new(out)).expect("BIOS image");
+    }
     let sz = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
     println!("wrote {out} ({sz} bytes)");
 }

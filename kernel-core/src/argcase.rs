@@ -387,3 +387,33 @@ mod tests {
         assert!(fallbacks > 0);
     }
 }
+
+/// S-2 worker contract: at most eight independent fixed streams, 1,000,000 probes total.
+/// Worker 0 is reserved for the original S-1 entry point.
+pub const S2_MAX_WORKERS: u64 = 8;
+/// Total bounded probes across all workers. Every accepted worker count divides it evenly.
+pub const S2_TOTAL_PROBES: u64 = 1_000_000;
+/// Default worker count for a fully populated eight-processor guest.
+pub const S2_WORKERS: u64 = S2_MAX_WORKERS;
+/// Default per-worker probe count when all eight workers are used.
+pub const S2_PROBES: u64 = S2_TOTAL_PROBES / S2_WORKERS;
+
+/// Pick the worker count for the online processor count: 1/2/4/8.
+/// The chosen count always divides [`S2_TOTAL_PROBES`] evenly.
+pub const fn s2_workers(online: usize) -> u64 {
+    if online >= 8 { 8 } else if online >= 4 { 4 } else if online >= 2 { 2 } else { 1 }
+}
+
+/// Per-worker probe count for an accepted worker count.
+pub const fn s2_probes(workers: u64) -> Option<u64> {
+    if workers == 0 || workers > S2_MAX_WORKERS || S2_TOTAL_PROBES % workers != 0 {
+        None
+    } else {
+        Some(S2_TOTAL_PROBES / workers)
+    }
+}
+
+pub const fn s2_seed(worker: u64) -> Option<u64> {
+    if worker == 0 || worker > S2_MAX_WORKERS { return None; }
+    Some(0x5eed_2026_1023 ^ worker.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+}

@@ -12,11 +12,13 @@
 
 use core::arch::global_asm;
 
-use kernel_core::fdt::{self, Fdt};
+use kernel_core::fdt::{self, BootSummary, Fdt, Node, PixelFormat};
 use kernel_core::frame::{PhysRegion, RegionKind};
+use kernel_core::image_header;
+use kernel_core::psci::Conduit;
 
-use super::{devirq, gic, mmu, msi, pci, semihost, smp, timer, uart};
-use crate::boot::{self, BootSpec};
+use super::{devirq, gic, mmu, semihost, smp, timer, uart};
+use crate::boot::{self, BootSpec, FrameBufferFormat, FrameBufferInfo, PsciBoot, SerialBoot};
 
 /// 启动栈大小。
 const BOOT_STACK_BYTES: usize = 64 * 1024;
@@ -32,6 +34,29 @@ static mut JSR_BOOT_STACK: BootStack = BootStack([0; BOOT_STACK_BYTES]);
 const QEMU_VIRT_DTB: u64 = 0x4000_0000;
 /// 找不到设备树或必需设备时的退出码（与 x86_64 的失败码相同）。
 const EXIT_FAILURE: u32 = 35;
+
+// arm64 Linux Image 头。Linux 要求前两条是跳转指令；QEMU 把入口设为
+// RAM 基址 + text_offset（text_offset=0 时按 QEMU 规则落在 +2 MiB），
+// 因此 code0 必须直接跳到 `_start`。`image_size` 与链接脚本的
+// `__image_end - __image_start` 逐字节一致，启动路径会据此自校验。
+global_asm!(
+    r#"
+    .section .image_header, "ax"
+    .global __jsr_image_header
+__jsr_image_header:
+    b _start
+    .word 0
+    .quad 0
+    .quad __image_size
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .word 0x644d5241
+    .word 0
+    .previous
+    "#
+);
 
 global_asm!(
     r#"
@@ -104,43 +129,223 @@ fn find_fdt(candidate: u64, mapped_end: u64) -> Option<(u64, Fdt<'static>)> {
     Some((candidate, Fdt::parse(blob).ok()?))
 }
 
-/// 由设备树配置串口、中断控制器与定时器中断号；缺少任一必需设备返回其名字。
-fn configure_devices(fdt: &Fdt<'_>) -> Result<(), &'static str> {
-    let uart_node = fdt.find_compatible("arm,pl011").ok().flatten().ok_or("arm,pl011")?;
-    let (uart_pa, _) = uart_node.reg(0).ok_or("arm,pl011 reg")?;
-    uart::set_base(mmu::PHYS_OFFSET + uart_pa);
+/// 由已校验的设备树摘要配置串口、中断控制器与定时器；缺少任一必需设备返回其名字。
+fn configure_devices(fdt: &Fdt<'_>, summary: &BootSummary<'_>) -> Result<(), &'static str> {
+    let serial = summary.serial.ok_or("arm,pl011")?;
+    uart::set_base(mmu::PHYS_OFFSET + serial.base);
+    uart::init();
     // 设备中断线：interrupts = (类型, 编号, 标志)，类型 0 = 共享外设中断，中断号 = 编号 + 32
-    let spi = |n: &kernel_core::fdt::Node<'_>| match (n.cell("interrupts", 0), n.cell("interrupts", 1)) {
-        (Some(0), Some(num)) => Some(num + gic::SPI_BASE),
+    let spi = |n: &Node<'_>| match (n.cell("interrupts", 0), n.cell("interrupts", 1)) {
+        (Some(0), Some(num)) => num.checked_add(gic::SPI_BASE),
         _ => None,
     };
     let rtc = fdt.find_compatible("arm,pl031").ok().flatten();
-    devirq::set_ids(spi(&uart_node), rtc.as_ref().and_then(spi));
+    devirq::set_ids(serial.irq, rtc.as_ref().and_then(spi));
 
-    let gic_node = match fdt.find_compatible("arm,cortex-a15-gic").ok().flatten() {
-        Some(n) => n,
-        None => fdt.find_compatible("arm,gic-400").ok().flatten().ok_or("arm,gic-400")?,
-    };
-    let (dist, _) = gic_node.reg(0).ok_or("gic distributor reg")?;
-    let (cpu, _) = gic_node.reg(1).ok_or("gic cpu interface reg")?;
-    gic::set_bases(mmu::PHYS_OFFSET + dist, mmu::PHYS_OFFSET + cpu);
+    let gic = summary.gic.ok_or("arm,gic-v2")?;
+    if gic.v3 {
+        // 本内核当前实现 GICv2；GICv3 的 redistributor / SGI 框架尚未落地，不能假装可用。
+        return Err("arm,gic-v3 (not implemented)");
+    }
+    let cpu = gic.cpu.ok_or("gic cpu interface reg")?;
+    gic::set_bases(mmu::PHYS_OFFSET + gic.dist, mmu::PHYS_OFFSET + cpu);
 
     // 定时器节点的 interrupts：四组 (类型, 编号, 标志)，第三组为虚拟定时器；私有中断号 = 编号 + 16。
-    let timer_node = fdt.find_compatible("arm,armv8-timer").ok().flatten().ok_or("arm,armv8-timer")?;
-    let ppi = timer_node.cell("interrupts", 7).ok_or("arm,armv8-timer interrupts")?;
-    timer::set_interrupt(ppi + 16);
-    // PCI 配置空间（ECAM）与 MSI（GICv2m 帧）：没有对应设备树节点时保持平台不支持，
-    // 由演练按平台能力报告，不伪造设备。
-    pci::configure(fdt);
-    msi::configure(fdt);
+    let ppi = summary.timer_irq.ok_or("arm,armv8-timer interrupts")?;
+    timer::set_interrupt(ppi);
     // 处理器拓扑与 PSCI 调用途径（缺失时只用引导处理器，不算启动失败）
     smp::configure(fdt);
     Ok(())
 }
 
+/// 把设备树里的 bootargs 打印成一行：只显示可打印 ASCII，过长截断，控制字符替换为 `.`。
+fn print_bootargs(args: Option<&str>) {
+    match args {
+        None => crate::kprint!("none"),
+        Some(text) => {
+            crate::kprint!("\"");
+            for ch in text.chars().take(200) {
+                if ch.is_ascii_graphic() || ch == ' ' {
+                    crate::kprint!("{}", ch);
+                } else {
+                    crate::kprint!(".");
+                }
+            }
+            crate::kprint!("\"");
+        }
+    }
+}
+
+fn print_separator(first: &mut bool) {
+    if *first {
+        *first = false;
+    } else {
+        crate::kprint!(",");
+    }
+}
+
+/// 打印结构化的 `[JSR-DTB]` 摘要（启动验收与真机日志都按这些字段核对）。
+fn print_dtb_summary(
+    fdt: &Fdt<'_>,
+    summary: &BootSummary<'_>,
+    memory: &[(u64, u64)],
+    memory_count: usize,
+    memory_truncated: bool,
+) {
+    crate::kprintln!("[JSR-DTB] fdt=ok size=0x{:x}", fdt.size());
+    if memory_count == 0 {
+        crate::kprintln!("[JSR-DTB] memory=none");
+    } else {
+        for (base, size) in &memory[..memory_count] {
+            crate::kprintln!("[JSR-DTB] memory=0x{:x}+0x{:x}", base, size);
+        }
+    }
+    if memory_truncated {
+        crate::kprintln!("[JSR-DTB] memory_truncated=true");
+    }
+
+    crate::kprint!("[JSR-DTB] bootargs=");
+    print_bootargs(summary.bootargs);
+    match summary.initrd {
+        Some((start, end)) => crate::kprintln!(" initrd=0x{:x}+0x{:x}", start, end.saturating_sub(start)),
+        None => crate::kprintln!(" initrd=none"),
+    }
+
+    match summary.psci {
+        Some(psci) => match psci.cpu_on {
+            Some(cpu_on) => crate::kprintln!(
+                "[JSR-DTB] psci=compatible={} method={} cpu_on=0x{:x}",
+                psci.compatible,
+                psci.method.unwrap_or("none"),
+                cpu_on
+            ),
+            None => crate::kprintln!(
+                "[JSR-DTB] psci=compatible={} method={} cpu_on=none",
+                psci.compatible,
+                psci.method.unwrap_or("none")
+            ),
+        },
+        None => crate::kprintln!("[JSR-DTB] psci=none"),
+    }
+
+    match summary.gic {
+        Some(gic) => match gic.cpu {
+            Some(cpu) => crate::kprintln!(
+                "[JSR-DTB] gic=compatible={} kind={} dist=0x{:x} cpu=0x{:x}",
+                gic.compatible,
+                if gic.v3 { "v3" } else { "v2" },
+                gic.dist,
+                cpu
+            ),
+            None => crate::kprintln!(
+                "[JSR-DTB] gic=compatible={} kind={} dist=0x{:x} cpu=none",
+                gic.compatible,
+                if gic.v3 { "v3" } else { "v2" },
+                gic.dist
+            ),
+        },
+        None => crate::kprintln!("[JSR-DTB] gic=none"),
+    }
+
+    match summary.timer_irq {
+        Some(ppi) => crate::kprintln!("[JSR-DTB] timer=arm,armv8-timer ppi={}", ppi),
+        None => crate::kprintln!("[JSR-DTB] timer=none"),
+    }
+
+    match summary.serial {
+        Some(serial) => match serial.irq {
+            Some(irq) => crate::kprintln!(
+                "[JSR-DTB] serial=compatible={} base=0x{:x} size=0x{:x} irq={}",
+                serial.compatible,
+                serial.base,
+                serial.size,
+                irq
+            ),
+            None => crate::kprintln!(
+                "[JSR-DTB] serial=compatible={} base=0x{:x} size=0x{:x} irq=none",
+                serial.compatible,
+                serial.base,
+                serial.size
+            ),
+        },
+        None => crate::kprintln!("[JSR-DTB] serial=none"),
+    }
+
+    match summary.framebuffer {
+        Some(fb) => crate::kprintln!(
+            "[JSR-DTB] framebuffer=base=0x{:x} size=0x{:x} width={} height={} stride={} format={} fits={}",
+            fb.base,
+            fb.size,
+            fb.width,
+            fb.height,
+            fb.stride,
+            fb.format.name(),
+            fb.layout_fits()
+        ),
+        None => crate::kprintln!("[JSR-DTB] framebuffer=none"),
+    }
+
+    crate::kprint!("[JSR-DTB] missing=");
+    let mut first = true;
+    if summary.serial.is_none() {
+        print_separator(&mut first);
+        crate::kprint!("serial");
+    }
+    if summary.gic.is_none() {
+        print_separator(&mut first);
+        crate::kprint!("interrupt-controller");
+    }
+    if summary.timer_irq.is_none() {
+        print_separator(&mut first);
+        crate::kprint!("timer");
+    }
+    if summary.psci.is_none() {
+        print_separator(&mut first);
+        crate::kprint!("psci");
+    }
+    if summary.bootargs.is_none() {
+        print_separator(&mut first);
+        crate::kprint!("bootargs");
+    }
+    if summary.framebuffer.is_none() {
+        print_separator(&mut first);
+        crate::kprint!("framebuffer");
+    }
+    if first {
+        crate::kprint!("none");
+    }
+    crate::kprintln!();
+}
+
+fn framebuffer_of(fb: &kernel_core::fdt::FramebufferInfo) -> FrameBufferInfo {
+    FrameBufferInfo {
+        base: fb.base,
+        size: fb.size,
+        width: fb.width,
+        height: fb.height,
+        stride: fb.stride,
+        format: match fb.format {
+            PixelFormat::R5G6B5 => FrameBufferFormat::R5G6B5,
+            PixelFormat::A8B8G8R8 => FrameBufferFormat::A8B8G8R8,
+            PixelFormat::X8R8G8B8 => FrameBufferFormat::X8R8G8B8,
+            PixelFormat::A8R8G8B8 => FrameBufferFormat::A8R8G8B8,
+            PixelFormat::Unknown => FrameBufferFormat::Unknown,
+        },
+    }
+}
+
 /// 汇编入口之后的第一段 Rust 代码（MMU 关闭、启动栈、单执行流）。
 #[no_mangle]
 extern "C" fn jsr_aarch64_boot(dtb_hint: u64) -> ! {
+    // 头校验必须在 MMU 打开前完成：此时映像仍按恒等映射可读，且不会执行任何依赖
+    // 未校验头部字段的代码。解析是纯函数，不读头之外的字节。
+    let header_probe = {
+        let (start, end) = mmu::image_span();
+        let expected = end.saturating_sub(start);
+        // SAFETY：`__image_start` 来自链接脚本，映像头部 64 字节由引导器装入；读取范围固定。
+        let bytes = unsafe { core::slice::from_raw_parts(start as *const u8, image_header::HEADER_LEN) };
+        image_header::parse(bytes, expected)
+    };
     // SAFETY：此刻 MMU 关闭且只有本执行流；建表只做对齐的 64 位写。
     unsafe {
         if !mmu::build_boot_tables() {
@@ -152,20 +357,65 @@ extern "C" fn jsr_aarch64_boot(dtb_hint: u64) -> ! {
     let Some((dtb_pa, fdt)) = find_fdt(dtb_hint, early_end).or_else(|| find_fdt(QEMU_VIRT_DTB, early_end)) else {
         semihost::exit(EXIT_FAILURE)
     };
-    if let Err(missing) = configure_devices(&fdt) {
-        // 串口可能已就绪（缺的是别的设备）：尽量说明原因再退出
-        uart::init();
-        crate::console::_print(format_args!("[JSR-BOOT] device tree lacks {}\n", missing));
-        semihost::exit(EXIT_FAILURE);
+
+    // 先只取串口基址，让「头/树被拒绝」也能打印结构化原因；完整设备配置在摘要之后。
+    if let Ok(Some(node)) = fdt.find_compatible("arm,pl011") {
+        if let Some((base, _)) = node.reg(0) {
+            uart::set_base(mmu::PHYS_OFFSET + base);
+            uart::init();
+        }
     }
 
+    match header_probe {
+        Ok(header) => crate::kprintln!(
+            "[JSR-IMG] header=ok text_offset=0x{:x} image_size=0x{:x} flags=0x{:x}",
+            header.text_offset,
+            header.image_size,
+            header.flags
+        ),
+        Err(error) => {
+            crate::kprintln!("[JSR-IMG] reject={}", error.name());
+            semihost::exit(EXIT_FAILURE);
+        }
+    }
+
+    // 严格校验：截断、越界、重复属性/节点、非法结构都在这里被拒绝。
+    if let Err(error) = fdt.validate_strict() {
+        crate::kprintln!("[JSR-DTB] reject={}", error.name());
+        semihost::exit(EXIT_FAILURE);
+    }
+    let summary = match fdt.boot_summary() {
+        Ok(summary) => summary,
+        Err(error) => {
+            crate::kprintln!("[JSR-DTB] reject={}", error.name());
+            semihost::exit(EXIT_FAILURE);
+        }
+    };
+
+    // 内存图：同时保留前 16 段用于结构化打印，BootSpec 仍按 128 段容量记录。
     let mut spec = BootSpec::new();
     let mut ram_end = 0u64;
+    let mut memory = [(0u64, 0u64); 16];
+    let mut memory_count = 0usize;
+    let mut memory_truncated = false;
     let walked = fdt.for_each_memory(|base, size| {
         let end = base.saturating_add(size);
         ram_end = ram_end.max(end);
+        if memory_count < memory.len() {
+            memory[memory_count] = (base, size);
+            memory_count += 1;
+        } else {
+            memory_truncated = true;
+        }
         spec.push_region(PhysRegion { start: base, end, kind: RegionKind::Usable });
     });
+
+    if let Err(missing) = configure_devices(&fdt, &summary) {
+        crate::kprintln!("[JSR-BOOT] device tree lacks {}", missing);
+        semihost::exit(EXIT_FAILURE);
+    }
+    print_dtb_summary(&fdt, &summary, &memory, memory_count, memory_truncated);
+
     let covered = mmu::cover_phys(ram_end);
     // 保留：内核映像、设备树本身、设备树声明的固件保留区（分配器按「保留优先」处理重叠）
     let (img_start, img_end) = mmu::image_range();
@@ -174,15 +424,41 @@ extern "C" fn jsr_aarch64_boot(dtb_hint: u64) -> ! {
     fdt.for_each_reserved(|addr, size| {
         spec.push_region(PhysRegion { start: addr, end: addr.saturating_add(size), kind: RegionKind::Reserved });
     });
+    // initrd 与帧缓冲一旦存在就不能交给页帧分配器（用户态/显示子系统之后才接管）。
+    if let Some((start, end)) = summary.initrd {
+        spec.push_region(PhysRegion { start, end, kind: RegionKind::Reserved });
+    }
+    if let Some(fb) = summary.framebuffer {
+        if fb.size > 0 {
+            spec.push_region(PhysRegion {
+                start: fb.base,
+                end: fb.base.saturating_add(fb.size),
+                kind: RegionKind::Reserved,
+            });
+        }
+    }
     // 超出全物理内存映射范围的内存不能交给分配器（内核无法访问它们）
     if ram_end > covered {
         spec.push_region(PhysRegion { start: covered, end: ram_end, kind: RegionKind::Reserved });
     }
     if walked.is_err() || ram_end == 0 {
-        uart::init();
         crate::console::write_str("[JSR-BOOT] device tree has no usable memory\n");
         semihost::exit(EXIT_FAILURE);
     }
+
     spec.phys_offset = Some(mmu::PHYS_OFFSET);
+    spec.framebuffer = summary.framebuffer.as_ref().map(framebuffer_of);
+    spec.psci = summary.psci.and_then(|psci| {
+        psci.method
+            .and_then(Conduit::from_method)
+            .map(|conduit| PsciBoot { conduit, cpu_on: psci.cpu_on })
+    });
+    spec.serial = summary.serial.map(|serial| SerialBoot {
+        base: serial.base,
+        size: serial.size,
+        irq: serial.irq,
+    });
+    spec.bootargs = summary.bootargs;
+    spec.initrd = summary.initrd;
     crate::kmain::start(boot::install(spec))
 }

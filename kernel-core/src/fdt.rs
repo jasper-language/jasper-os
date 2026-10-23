@@ -301,6 +301,422 @@ pub struct FdtCpus {
     pub listed: usize,
 }
 
+/// 帧缓冲像素格式（PDA 只识别这些常见格式；未知格式如实记为 `Unknown`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PixelFormat {
+    /// 16 位 RGB565。
+    R5G6B5,
+    /// 32 位 ARGB（内存顺序 a8b8g8r8）。
+    A8B8G8R8,
+    /// 32 位 XRGB。
+    X8R8G8B8,
+    /// 32 位 ARGB（a8r8g8b8）。
+    A8R8G8B8,
+    /// 未识别或缺失。
+    Unknown,
+}
+
+impl PixelFormat {
+    /// 由 `format` 属性文本得到格式。
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "r5g6b5" => PixelFormat::R5G6B5,
+            "a8b8g8r8" => PixelFormat::A8B8G8R8,
+            "x8r8g8b8" => PixelFormat::X8R8G8B8,
+            "a8r8g8b8" => PixelFormat::A8R8G8B8,
+            _ => PixelFormat::Unknown,
+        }
+    }
+
+    /// 每像素字节数；未知格式为 `None`。
+    pub const fn bytes_per_pixel(self) -> Option<u32> {
+        match self {
+            PixelFormat::R5G6B5 => Some(2),
+            PixelFormat::A8B8G8R8 | PixelFormat::X8R8G8B8 | PixelFormat::A8R8G8B8 => Some(4),
+            PixelFormat::Unknown => None,
+        }
+    }
+
+    /// 稳定显示名。
+    pub const fn name(self) -> &'static str {
+        match self {
+            PixelFormat::R5G6B5 => "r5g6b5",
+            PixelFormat::A8B8G8R8 => "a8b8g8r8",
+            PixelFormat::X8R8G8B8 => "x8r8g8b8",
+            PixelFormat::A8R8G8B8 => "a8r8g8b8",
+            PixelFormat::Unknown => "unknown",
+        }
+    }
+}
+
+/// `/chosen` 里给出的帧缓冲（`simple-framebuffer` binding 的最小子集）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FramebufferInfo {
+    /// `reg` 的物理基址。
+    pub base: u64,
+    /// `reg` 的字节长度。
+    pub size: u64,
+    /// 可见宽度（像素）。
+    pub width: u32,
+    /// 可见高度（像素）。
+    pub height: u32,
+    /// 每行字节数。
+    pub stride: u32,
+    /// 像素格式。
+    pub format: PixelFormat,
+}
+
+impl FramebufferInfo {
+    /// `stride * height` 是否落在 `reg` 区间内；缺失字段返回 `false`。
+    pub fn layout_fits(&self) -> bool {
+        let Some(bytes) = (self.stride as u64).checked_mul(self.height as u64) else {
+            return false;
+        };
+        bytes <= self.size
+    }
+}
+
+/// PSCI 节点的摘要。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PsciInfo<'a> {
+    /// `compatible` 的第一个字符串。
+    pub compatible: &'a str,
+    /// `method` 文本（`hvc` / `smc` / 其他）。
+    pub method: Option<&'a str>,
+    /// `cpu_on` 功能号（设备树给出，不猜测）。
+    pub cpu_on: Option<u32>,
+}
+
+/// 中断控制器摘要。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GicInfo<'a> {
+    /// `compatible` 的第一个字符串。
+    pub compatible: &'a str,
+    /// 是否为 GICv3（本内核当前只实现 GICv2）。
+    pub v3: bool,
+    /// 分发器 `reg` 的物理基址。
+    pub dist: u64,
+    /// CPU 接口 `reg` 的物理基址（GICv3 缺失）。
+    pub cpu: Option<u64>,
+}
+
+/// 串口摘要。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SerialInfo<'a> {
+    /// `compatible` 的第一个字符串。
+    pub compatible: &'a str,
+    /// `reg` 的物理基址。
+    pub base: u64,
+    /// `reg` 的字节长度。
+    pub size: u64,
+    /// 共享外设中断号（已加 32）。
+    pub irq: Option<u32>,
+}
+
+/// 启动所需的设备树摘要（PDA-1 的节点集合）。
+///
+/// 字段全部是 `Option`：缺失就是缺失，调用者不得用默认值伪造设备。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootSummary<'a> {
+    /// `/chosen/bootargs`。
+    pub bootargs: Option<&'a str>,
+    /// `/chosen/linux,initrd-start` 与 `linux,initrd-end` 都合法时的区间 `(start, end)`。
+    pub initrd: Option<(u64, u64)>,
+    /// PSCI。
+    pub psci: Option<PsciInfo<'a>>,
+    /// 中断控制器。
+    pub gic: Option<GicInfo<'a>>,
+    /// 架构定时器的虚拟定时器 PPI 号（已加 16）。
+    pub timer_irq: Option<u32>,
+    /// 串口。
+    pub serial: Option<SerialInfo<'a>>,
+    /// 帧缓冲。
+    pub framebuffer: Option<FramebufferInfo>,
+}
+
+impl<'a> Fdt<'a> {
+    /// 严格结构校验：在 [`Fdt::walk`] 的边界检查之外，再拒绝同一节点内重复的属性名
+    /// 与同一父节点下重名的子节点（FDT 规范要求二者唯一）。
+    ///
+    /// 这是 AArch64 启动路径的入口检查；RISC-V 的既有路径保持不变，避免收紧冻结架构的行为。
+    pub fn validate_strict(&self) -> Result<(), FdtError> {
+        let mut pos = 0usize;
+        validate_node(self.structs, self.strings, &mut pos, 0)?;
+        let token = be32(self.structs, pos).ok_or(FdtError::BadStructure)?;
+        pos += 4;
+        if token != TOKEN_END {
+            return Err(FdtError::BadStructure);
+        }
+        while pos < self.structs.len() {
+            let token = be32(self.structs, pos).ok_or(FdtError::BadStructure)?;
+            pos += 4;
+            if token != TOKEN_NOP {
+                return Err(FdtError::BadStructure);
+            }
+        }
+        Ok(())
+    }
+
+    /// 按名字找第一个节点（用于 `/chosen`；调用者仍应把结果当作不可信输入）。
+    pub fn find_named(&self, name: &str) -> Result<Option<Node<'a>>, FdtError> {
+        let mut found = None;
+        self.walk(|n| {
+            if n.name == name {
+                found = Some(*n);
+                false
+            } else {
+                true
+            }
+        })?;
+        Ok(found)
+    }
+
+    /// 汇总 PDA-1 启动所需的节点。缺失项保持 `None`，不做设备伪造。
+    pub fn boot_summary(&self) -> Result<BootSummary<'a>, FdtError> {
+        let chosen = self.find_named("chosen")?;
+        let bootargs = chosen.and_then(|n| n.string("bootargs"));
+        let initrd = chosen.and_then(|n| {
+            let start = n.be_number("linux,initrd-start")?;
+            let end = n.be_number("linux,initrd-end")?;
+            (end > start).then_some((start, end))
+        });
+
+        let psci = if let Some(n) = self.find_compatible("arm,psci-1.0")? {
+            Some(psci_info(n))
+        } else if let Some(n) = self.find_compatible("arm,psci-0.2")? {
+            Some(psci_info(n))
+        } else {
+            self.find_compatible("arm,psci")?.map(psci_info)
+        };
+
+        let gic = if let Some(n) = self.find_compatible("arm,cortex-a15-gic")? {
+            Some(gic_info(n, false))
+        } else if let Some(n) = self.find_compatible("arm,gic-400")? {
+            Some(gic_info(n, false))
+        } else {
+            self.find_compatible("arm,gic-v3")?.map(|n| gic_info(n, true))
+        };
+
+        let timer_irq = self
+            .find_compatible("arm,armv8-timer")?
+            .and_then(|n| n.cell("interrupts", 7))
+            .and_then(|cell| cell.checked_add(16));
+
+        let serial = self.find_compatible("arm,pl011")?.map(|n| {
+            let (base, size) = n.reg(0).unwrap_or((0, 0));
+            let irq = match (n.cell("interrupts", 0), n.cell("interrupts", 1)) {
+                (Some(0), Some(num)) => num.checked_add(32),
+                _ => None,
+            };
+            SerialInfo {
+                compatible: n.string("compatible").unwrap_or("arm,pl011"),
+                base,
+                size,
+                irq,
+            }
+        });
+
+        let framebuffer = self.find_compatible("simple-framebuffer")?.map(|n| {
+            let (base, size) = n.reg(0).unwrap_or((0, 0));
+            FramebufferInfo {
+                base,
+                size,
+                width: n.cell("width", 0).unwrap_or(0),
+                height: n.cell("height", 0).unwrap_or(0),
+                stride: n.cell("stride", 0).unwrap_or(0),
+                format: PixelFormat::from_name(n.string("format").unwrap_or("")),
+            }
+        });
+
+        Ok(BootSummary { bootargs, initrd, psci, gic, timer_irq, serial, framebuffer })
+    }
+}
+
+fn psci_info<'a>(node: Node<'a>) -> PsciInfo<'a> {
+    PsciInfo {
+        compatible: node.string("compatible").unwrap_or("arm,psci"),
+        method: node.string("method"),
+        cpu_on: node.cell("cpu_on", 0),
+    }
+}
+
+fn gic_info<'a>(node: Node<'a>, v3: bool) -> GicInfo<'a> {
+    let (dist, _) = node.reg(0).unwrap_or((0, 0));
+    let cpu = if v3 { None } else { node.reg(1).map(|(base, _)| base) };
+    GicInfo {
+        compatible: node.string("compatible").unwrap_or(if v3 { "arm,gic-v3" } else { "arm,gic" }),
+        v3,
+        dist,
+        cpu,
+    }
+}
+
+/// 严格校验一个节点（`pos` 指向 `FDT_BEGIN_NODE`）。
+fn validate_node(
+    s: &[u8],
+    strings: &[u8],
+    pos: &mut usize,
+    depth: usize,
+) -> Result<(), FdtError> {
+    if depth > MAX_DEPTH {
+        return Err(FdtError::BadStructure);
+    }
+    if be32(s, *pos).ok_or(FdtError::BadStructure)? != TOKEN_BEGIN_NODE {
+        return Err(FdtError::BadStructure);
+    }
+    *pos += 4;
+    let name = read_name(s, pos)?;
+    if depth == 0 && !name.is_empty() {
+        return Err(FdtError::BadStructure);
+    }
+    validate_props(s, strings, pos)?;
+    validate_children(s, strings, pos, depth)
+}
+
+/// 读取 NUL 结尾并 4 字节对齐的节点名。
+fn read_name<'a>(s: &'a [u8], pos: &mut usize) -> Result<&'a str, FdtError> {
+    let rest = s.get(*pos..).ok_or(FdtError::BadStructure)?;
+    let nul = rest.iter().position(|&b| b == 0).ok_or(FdtError::BadStructure)?;
+    let name = core::str::from_utf8(&rest[..nul]).map_err(|_| FdtError::BadStructure)?;
+    *pos = align4(*pos + nul + 1).ok_or(FdtError::BadStructure)?;
+    if *pos > s.len() {
+        return Err(FdtError::BadStructure);
+    }
+    Ok(name)
+}
+
+/// 校验当前节点的属性区，并拒绝重复属性名。
+fn validate_props(s: &[u8], strings: &[u8], pos: &mut usize) -> Result<(), FdtError> {
+    let start = *pos;
+    loop {
+        let token = be32(s, *pos).ok_or(FdtError::BadStructure)?;
+        if token == TOKEN_PROP {
+            let len = be32(s, *pos + 4).ok_or(FdtError::BadStructure)? as usize;
+            let nameoff = be32(s, *pos + 8).ok_or(FdtError::BadStructure)? as usize;
+            slice_at(s, *pos + 12, len).ok_or(FdtError::BadStructure)?;
+            let name = prop_name(strings, nameoff).ok_or(FdtError::BadStructure)?;
+            if property_seen(s, strings, start, *pos, name)? {
+                return Err(FdtError::BadStructure);
+            }
+            *pos = align4(*pos + 12 + len).ok_or(FdtError::BadStructure)?;
+            if *pos > s.len() {
+                return Err(FdtError::BadStructure);
+            }
+        } else if token == TOKEN_NOP {
+            *pos += 4;
+        } else {
+            return Ok(());
+        }
+    }
+}
+
+/// 在 `[start, end)` 的属性区里查找同名属性（O(n²)，无分配，节点属性通常很少）。
+fn property_seen(
+    s: &[u8],
+    strings: &[u8],
+    mut at: usize,
+    end: usize,
+    want: &str,
+) -> Result<bool, FdtError> {
+    while at < end {
+        match be32(s, at).ok_or(FdtError::BadStructure)? {
+            TOKEN_PROP => {
+                let len = be32(s, at + 4).ok_or(FdtError::BadStructure)? as usize;
+                let nameoff = be32(s, at + 8).ok_or(FdtError::BadStructure)? as usize;
+                if prop_name(strings, nameoff).ok_or(FdtError::BadStructure)? == want {
+                    return Ok(true);
+                }
+                at = align4(at + 12 + len).ok_or(FdtError::BadStructure)?;
+            }
+            TOKEN_NOP => at += 4,
+            _ => return Err(FdtError::BadStructure),
+        }
+    }
+    Ok(false)
+}
+
+/// 校验子节点序列，并拒绝同一父节点下的重名子节点。
+fn validate_children(
+    s: &[u8],
+    strings: &[u8],
+    pos: &mut usize,
+    depth: usize,
+) -> Result<(), FdtError> {
+    let first = *pos;
+    loop {
+        match be32(s, *pos).ok_or(FdtError::BadStructure)? {
+            TOKEN_BEGIN_NODE => {
+                let child = *pos;
+                let mut scan = child + 4;
+                let name = read_name(s, &mut scan)?;
+                if sibling_seen(s, first, child, name)? {
+                    return Err(FdtError::BadStructure);
+                }
+                validate_node(s, strings, pos, depth + 1)?;
+            }
+            TOKEN_END_NODE => {
+                *pos += 4;
+                return Ok(());
+            }
+            TOKEN_NOP => *pos += 4,
+            _ => return Err(FdtError::BadStructure),
+        }
+    }
+}
+
+/// 在 `[first, end)` 的直接子节点里查找同名节点。
+fn sibling_seen(s: &[u8], mut at: usize, end: usize, want: &str) -> Result<bool, FdtError> {
+    while at < end {
+        match be32(s, at).ok_or(FdtError::BadStructure)? {
+            TOKEN_BEGIN_NODE => {
+                let mut scan = at + 4;
+                let name = read_name(s, &mut scan)?;
+                if name == want {
+                    return Ok(true);
+                }
+                skip_subtree(s, &mut at)?;
+            }
+            TOKEN_NOP => at += 4,
+            _ => return Err(FdtError::BadStructure),
+        }
+    }
+    Ok(false)
+}
+
+/// 跳过一个完整子树（`at` 指向它的 `FDT_BEGIN_NODE`）。
+fn skip_subtree(s: &[u8], at: &mut usize) -> Result<(), FdtError> {
+    let mut depth = 0usize;
+    loop {
+        let token = be32(s, *at).ok_or(FdtError::BadStructure)?;
+        *at += 4;
+        match token {
+            TOKEN_BEGIN_NODE => {
+                let _ = read_name(s, at)?;
+                depth += 1;
+                if depth > MAX_DEPTH {
+                    return Err(FdtError::BadStructure);
+                }
+            }
+            TOKEN_END_NODE => {
+                depth = depth.checked_sub(1).ok_or(FdtError::BadStructure)?;
+                if depth == 0 {
+                    return Ok(());
+                }
+            }
+            TOKEN_PROP => {
+                let len = be32(s, *at).ok_or(FdtError::BadStructure)? as usize;
+                let _nameoff = be32(s, *at + 4).ok_or(FdtError::BadStructure)?;
+                *at = align4(*at + 8 + len).ok_or(FdtError::BadStructure)?;
+                if *at > s.len() {
+                    return Err(FdtError::BadStructure);
+                }
+            }
+            TOKEN_NOP => {}
+            _ => return Err(FdtError::BadStructure),
+        }
+    }
+}
+
 /// 去掉字符串属性末尾的 NUL。
 fn trim_nul(v: &[u8]) -> &[u8] {
     v.strip_suffix(&[0]).unwrap_or(v)
@@ -381,6 +797,17 @@ impl<'a> Node<'a> {
     /// Cell `index` of a `u32`-array property.
     pub fn cell(&self, name: &str, index: usize) -> Option<u32> {
         be32(self.property(name)?, index.checked_mul(4)?)
+    }
+
+    /// 大端整数属性（4 或 8 字节）：用于 `/chosen/linux,initrd-start/end`。
+    /// Big-endian integer property of 4 or 8 bytes.
+    pub fn be_number(&self, name: &str) -> Option<u64> {
+        let value = self.property(name)?;
+        match value.len() {
+            4 => be32(value, 0).map(u64::from),
+            8 => be64(value, 0),
+            _ => None,
+        }
     }
 }
 
@@ -668,5 +1095,138 @@ mod tests {
         let none = virt_like();
         let c = Fdt::parse(&none).unwrap().cpu_topology(7, |r| Some(r as u32)).unwrap();
         assert_eq!((c.topology.ids(), c.boot_listed, c.listed), (&[7u32][..], false, 0));
+    }
+
+    /// PDA-1 形状：QEMU `virt` 的节点集合 + `/chosen` 的 bootargs / initrd + 帧缓冲。
+    fn pda_tree() -> Vec<u8> {
+        let mut b = Builder::new();
+        b.begin("").cells("#address-cells", &[2]).cells("#size-cells", &[2]);
+        b.begin("memory@40000000")
+            .prop("device_type", b"memory\0")
+            .cells("reg", &[0, 0x4000_0000, 0, 0x1000_0000])
+            .end();
+        b.begin("chosen")
+            .prop("bootargs", b"console=ttyAMA0 earlycon\0")
+            .prop("linux,initrd-start", &0x4800_0000u64.to_be_bytes())
+            .prop("linux,initrd-end", &0x4900_0000u64.to_be_bytes())
+            .end();
+        b.begin("psci")
+            .prop("compatible", b"arm,psci-1.0\0arm,psci-0.2\0")
+            .prop("method", b"hvc\0")
+            .cells("cpu_on", &[0xC400_0003])
+            .end();
+        b.begin("intc@8000000")
+            .prop("compatible", b"arm,cortex-a15-gic\0")
+            .cells("reg", &[0, 0x0800_0000, 0, 0x1_0000, 0, 0x0801_0000, 0, 0x1_0000])
+            .end();
+        b.begin("timer")
+            .prop("compatible", b"arm,armv8-timer\0")
+            .cells("interrupts", &[1, 13, 4, 1, 14, 4, 1, 11, 4, 1, 10, 4])
+            .end();
+        b.begin("pl011@9000000")
+            .prop("compatible", b"arm,pl011\0arm,primecell\0")
+            .cells("reg", &[0, 0x0900_0000, 0, 0x1000])
+            .cells("interrupts", &[0, 1, 4])
+            .end();
+        b.begin("framebuffer@50000000")
+            .prop("compatible", b"simple-framebuffer\0")
+            .cells("reg", &[0, 0x5000_0000, 0, 0x00F0_0000])
+            .cells("width", &[1080])
+            .cells("height", &[2400])
+            .cells("stride", &[4320])
+            .prop("format", b"a8b8g8r8\0")
+            .end();
+        b.end();
+        b.finish(&[])
+    }
+
+    #[test]
+    fn boot_summary_extracts_the_pda_node_set() {
+        let blob = pda_tree();
+        let fdt = Fdt::parse(&blob).unwrap();
+        fdt.validate_strict().expect("PDA 形状应通过严格校验");
+        let summary = fdt.boot_summary().unwrap();
+        assert_eq!(summary.bootargs, Some("console=ttyAMA0 earlycon"));
+        assert_eq!(summary.initrd, Some((0x4800_0000, 0x4900_0000)));
+        let psci = summary.psci.unwrap();
+        assert_eq!((psci.compatible, psci.method, psci.cpu_on), ("arm,psci-1.0", Some("hvc"), Some(0xC400_0003)));
+        let gic = summary.gic.unwrap();
+        assert_eq!((gic.v3, gic.dist, gic.cpu), (false, 0x0800_0000, Some(0x0801_0000)));
+        assert_eq!(summary.timer_irq, Some(11 + 16));
+        let serial = summary.serial.unwrap();
+        assert_eq!((serial.base, serial.size, serial.irq), (0x0900_0000, 0x1000, Some(1 + 32)));
+        let fb = summary.framebuffer.unwrap();
+        assert_eq!((fb.width, fb.height, fb.stride), (1080, 2400, 4320));
+        assert_eq!(fb.format, PixelFormat::A8B8G8R8);
+        assert!(fb.layout_fits());
+    }
+
+    #[test]
+    fn strict_validation_rejects_duplicate_properties_and_siblings() {
+        let mut b = Builder::new();
+        let duplicate_prop = b.begin("")
+            .prop("x", b"\0")
+            .prop("x", b"\0")
+            .end()
+            .finish(&[]);
+        let fdt = Fdt::parse(&duplicate_prop).unwrap();
+        assert_eq!(fdt.validate_strict(), Err(FdtError::BadStructure), "重复属性必须拒绝");
+
+        let mut b = Builder::new();
+        b.begin("");
+        b.begin("x").end();
+        b.begin("x").end();
+        b.end();
+        let duplicate_child = b.finish(&[]);
+        let fdt = Fdt::parse(&duplicate_child).unwrap();
+        assert_eq!(fdt.validate_strict(), Err(FdtError::BadStructure), "重名兄弟节点必须拒绝");
+
+        // 合法树仍然通过。
+        assert_eq!(Fdt::parse(&pda_tree()).unwrap().validate_strict(), Ok(()));
+    }
+
+    /// 固定种子的 xorshift64*：与 Image 头测试使用同一算法，失败可逐次复现。
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+    }
+
+    #[test]
+    fn fixed_seed_mutations_never_panic_and_respect_bounds() {
+        let base = pda_tree();
+        let mut rng = Rng(0x50_4441_4454_4202);
+        for round in 0..3000 {
+            let mut data = base.clone();
+            let flips = 1 + (rng.next() % 4) as usize;
+            for _ in 0..flips {
+                let offset = (rng.next() % data.len() as u64) as usize;
+                let bit = (rng.next() % 8) as u32;
+                data[offset] ^= 1 << bit;
+            }
+            // 解析器对任意字节都不得 panic；接受后必须仍满足边界不变式。
+            if let Ok(fdt) = Fdt::parse(&data) {
+                assert!(fdt.size() <= data.len(), "round={round}");
+                // 严格校验接受时，整棵树仍必须在声明的范围内；拒绝是允许的结果。
+                if fdt.validate_strict().is_ok() {
+                    let summary = fdt.boot_summary().expect("结构已通过，摘要不应失败");
+                    if let Some(fb) = summary.framebuffer {
+                        // 字段可能被变异成任意值；这里只要求布尔判定本身不 panic。
+                        let _ = fb.layout_fits();
+                    }
+                }
+            }
+        }
+        // 每个截断位置都必须被拒绝，而不是读到下一块内存。
+        for cut in 0..base.len() {
+            assert!(Fdt::parse(&base[..cut]).is_err(), "cut={cut}");
+        }
     }
 }

@@ -26,6 +26,7 @@ const PATTERN_A: u64 = 0x4B524E30_544C4241;
 const PATTERN_B: u64 = 0x4B524E30_544C4242;
 
 /// 0 = 等待写入者，1 = 本批可读，2 = 读者完成。
+static PARTICIPANTS: AtomicU32 = AtomicU32::new(0);
 static PHASE: AtomicU32 = AtomicU32::new(0);
 static BATCH: AtomicU64 = AtomicU64::new(0);
 static READS: AtomicU64 = AtomicU64::new(0);
@@ -53,6 +54,10 @@ fn write_frame(frame: kernel_core::frame::PhysFrame, value: u64) -> bool {
 
 fn writer() {
     WRITER_CPU.store(arch::cpu_index() as u32, Ordering::Release);
+    // spawn_on can schedule us before the caller creates the reader.
+    // Yield during startup so the boot task can finish creating both peers.
+    PARTICIPANTS.fetch_or(1, Ordering::Release);
+    while PARTICIPANTS.load(Ordering::Acquire) != 3 { sched::yield_now(); }
     let mut failed = false;
     for batch in 0..BATCHES {
         let pages = BATCH_PAGES.min(TOTAL_PAGES - batch * BATCH_PAGES);
@@ -110,6 +115,7 @@ fn writer() {
 
 fn reader() {
     READER_CPU.store(arch::cpu_index() as u32, Ordering::Release);
+    PARTICIPANTS.fetch_or(2, Ordering::Release);
     for _ in 0..BATCHES {
         loop {
             match PHASE.load(Ordering::Acquire) {

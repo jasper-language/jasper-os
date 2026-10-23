@@ -32,10 +32,12 @@ pub mod boot;
 pub mod bootcap;
 pub mod clock;
 pub mod config;
+#[cfg(feature = "fault-inject")]
+pub mod fault_inject;
 pub mod fix_demo;
 pub mod console;
 pub mod counter_demo;
-#[cfg(feature = "user-programs")]
+#[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
 pub mod device_demo;
 pub mod interrupt;
 pub mod exit_state;
@@ -47,9 +49,9 @@ pub mod irq;
 pub mod job;
 pub mod job_demo;
 pub mod irq_demo;
-#[cfg(feature = "user-programs")]
+#[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
 pub mod irqring_demo;
-#[cfg(feature = "user-programs")]
+#[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
 pub mod irqstorm_demo;
 pub mod kmain;
 pub mod krn0_demo;
@@ -104,3 +106,6 @@ pub mod user_demo;
 pub mod virtio;
 pub mod virtio_rng_demo;
 pub mod wcet;
+
+#[cfg(all(feature = "s2-fuzz", target_arch = "x86_64"))]
+pub mod s2;

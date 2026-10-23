@@ -11,7 +11,15 @@ ENTRY(_start)
 SECTIONS
 {
     . = 0x40200000;
+    __image_start = .;
     __kernel_start = .;
+
+    /* arm64 Linux Image 头（64 字节）：code0 跳转到 _start，后面是 text_offset /
+       image_size / flags / magic 等字段。QEMU -kernel 与真实引导器先读它，内核启动后再
+       用同一份字节做一次自校验（PDA-1）。 */
+    .image_header : {
+        KEEP(*(.image_header))
+    }
 
     .text : {
         KEEP(*(.text.boot))
@@ -41,6 +49,7 @@ SECTIONS
     }
     . = ALIGN(4096);
     __kernel_end = .;
+    __image_end = .;
 
     /DISCARD/ : {
         *(.comment)
@@ -48,6 +57,9 @@ SECTIONS
         *(.note .note.*)
     }
 }
+
+/* `Image` 头里的 image_size（供汇编数据段直接引用，避免在汇编里做符号相减）。 */
+__image_size = __image_end - __image_start;
 
 /* 早期页表只为内核映像准备了 32 MiB 的 4 KiB 页表（见 arch/aarch64/mmu.rs 的 IMAGE_L3_TABLES）。 */
 ASSERT(__kernel_end - __kernel_start <= 32 * 1024 * 1024, "kernel image larger than the early identity map")

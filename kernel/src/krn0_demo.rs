@@ -229,7 +229,7 @@ pub fn run_mmio() {
 
 /// 在真实设备上建立一条可拆除的队列：真实复位（必须成功）、协商 `VIRTIO_F_VERSION_1`、
 /// 建立队列 0、打开总线主控。任何一步失败都记一次断言失败并返回 `None`（不再继续这个场景）。
-fn dma_setup(handle: &VirtioPci) -> Option<Queue> {
+pub(crate) fn dma_setup(handle: &VirtioPci) -> Option<Queue> {
     if handle.reset().is_err() {
         dma_check(false, "拆除场景开始时的真实复位没有成功");
         return None;

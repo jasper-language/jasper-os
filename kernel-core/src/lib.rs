@@ -16,6 +16,7 @@
 //! * [`paging`] —— 架构无关的页映射契约（虚拟页、中立权限位、PageMapper，M2.2）
 //! * [`pagetable`] —— 多级基数页表的通用遍历（表项位格式与表内存访问由各 ISA 注入）
 //! * [`fdt`]    —— 扁平设备树的只读解析（内存图、设备寄存器地址；固件输入按不可信处理）
+//! * [`image_header`] —— AArch64 Linux `Image` 头的只读解析与校验（PDA-1；不可信输入）
 //! * [`heap`]   —— 堆分配算法（按地址排序空闲链表 + 首次适配 + 合并，M2.3）
 //! * [`io`]     —— 异步 I/O 的**唯一**形态：提交 → 完成（ring）；后端可替换
 //! * [`dma_quiesce`] —— virtio 拆除裁决：复位结果 + 总线主控读回 ⇒ 释放 / 关总线主控后释放 / 隔离
@@ -59,7 +60,9 @@ pub mod dma_quiesce;
 pub mod elf;
 pub mod fdt;
 pub mod frame;
+pub mod fault;
 pub mod heap;
+pub mod image_header;
 pub mod interrupt;
 pub mod io;
 pub mod irq;

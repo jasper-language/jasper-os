@@ -116,9 +116,16 @@ impl Mapping {
         while mapped < pages {
             let page = VirtPage::from_start(page_va + mapped * FRAME_SIZE).ok_or(MmioError::OutOfWindow)?;
             let frame = PhysFrame::from_start(base + page_start + mapped * FRAME_SIZE).ok_or(MmioError::BadBar)?;
-            if mm::map::map(page, frame, flags).is_err() {
-                let _ = mm::map::unmap_pages(VirtPage::containing(page_va), mapped);
-                release_slot(slot as u32);
+            #[cfg(all(feature = "s2-fuzz", target_arch = "x86_64"))]
+            let injected = crate::s2::MMIO_MAP.hit();
+            #[cfg(not(all(feature = "s2-fuzz", target_arch = "x86_64")))]
+            let injected = false;
+            if injected || mm::map::map(page, frame, flags).is_err() {
+                // An unconfirmed rollback may leave stale remote TLB
+                // entries. Quarantine the VA slot exactly as Mapping::drop does.
+                if mapped == 0 || mm::map::unmap_pages(VirtPage::containing(page_va), mapped).is_ok() {
+                    release_slot(slot);
+                }
                 return Err(MmioError::MapFailed);
             }
             mapped += 1;

@@ -62,18 +62,24 @@ fn stats(regions: usize) -> FrameStats {
 
 /// 分配一个物理页帧。未初始化时视为没有空闲帧。
 pub fn allocate() -> Result<PhysFrame, FrameError> {
+    #[cfg(feature = "fault-inject")]
+    if crate::fault_inject::FRAME.hit() { return Err(FrameError::OutOfFrames); }
     ALLOCATOR.get().ok_or(FrameError::OutOfFrames)?.lock().allocate()
 }
 
 /// 分配一个起始地址低于 `limit` 的物理页帧（硬件只能寻址低端内存时使用）；没有则失败且不改动。
 /// Allocate a frame below `limit`.
 pub fn allocate_below(limit: u64) -> Result<PhysFrame, FrameError> {
+    #[cfg(feature = "fault-inject")]
+    if crate::fault_inject::FRAME.hit() { return Err(FrameError::OutOfFrames); }
     ALLOCATOR.get().ok_or(FrameError::OutOfFrames)?.lock().allocate_below(limit)
 }
 
 /// 分配 `count` 个物理相邻的空闲页帧并返回首帧；失败时分配器状态不变。
 /// Allocate `count` physically contiguous free frames.
 pub fn allocate_contiguous(count: usize) -> Result<PhysFrame, FrameError> {
+    #[cfg(feature = "fault-inject")]
+    if crate::fault_inject::FRAME.hit() { return Err(FrameError::OutOfFrames); }
     ALLOCATOR.get().ok_or(FrameError::OutOfFrames)?.lock().allocate_contiguous(count)
 }
 

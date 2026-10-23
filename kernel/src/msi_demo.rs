@@ -189,7 +189,7 @@ fn exercise(pool: &VectorPool, online: CpuSet) -> usize {
             delivered += 1;
         }
     }
-    check(distinct_addresses(&addresses, online) || !arch::MSI_ADDRESS_ENCODES_TARGET, "不同处理器的 MSI 目标地址相同");
+    check(distinct_addresses(&addresses, online), "不同处理器的 MSI 目标地址相同");
 
     // 改绑：释放并解绑后同一向量变成伪 MSI；重新分配并绑定新处理函数后恢复投递。
     rebind_check(pool, online, &mut vectors);

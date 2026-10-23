@@ -219,6 +219,19 @@ run cargo build --release --target x86_64-unknown-none -p jasper-kernel "${KFEAT
   && run "$ROOT/target/release/xtask" "$ROOT/target/x86_64-unknown-none/release/jasper-kernel" "$IMG" >> "$OUT/build.log" 2>&1
 BUILD_RC=$?
 
+# S-2：独立镜像 + 4 个在线处理器，运行 4 个固定种子工作者共 10^6 次有界系统调用，
+# 并在同一启动中执行故障路径与击落超时隔离审计。定点模式不运行。
+SERIAL_S2="$OUT/s2/serial.log"
+QRC_S2=-1
+S2_RC=-1
+if [ "$BUILD_RC" -eq 0 ] && [ "$SPOT" -eq 0 ] && [ "$ARCH_ALL" -eq 0 ]; then
+  echo "== S-2 百万次多核系统调用与故障路径审计 =="
+  mkdir -p "$OUT/s2"
+  S2_OUT="$OUT/s2" run bash scripts/s2.sh > "$OUT/s2.log" 2>&1
+  S2_RC=$?
+  [ -s "$OUT/s2/qemu-exit.txt" ] && QRC_S2="$(cat "$OUT/s2/qemu-exit.txt")"
+fi
+
 # 多指令集：kernel-core 在全部目标指令集上编译；单元测试在 64 位与 32 位上运行；
 # 装有 qemu-user 时再在 AArch64 / RISC-V64 上运行（用 musl 目标 + 自带的 rust-lld 链接，不依赖交叉 C 工具链）。
 ISA_BUILD_FAIL=""
@@ -764,6 +777,39 @@ check_s1() {    # S-1：真实用户态的系统调用健壮性回归（固定�
   fi
 }
 
+check_s2() {    # S-2：4 个在线处理器、4 个固定种子进程共 10^6 次有界调用；故障路径与击落超时隔离
+  local f="$SERIAL_S2" workers done_cases mmio dma quar
+  if [ "$SPOT" -eq 1 ]; then
+    record_na S-2 "定点模式不运行独立 S-2 镜像"
+    return
+  fi
+  if [ "$S2_RC" -ne 0 ] || [ ! -s "$f" ]; then
+    record S-2 FAIL "S-2 独立运行失败（rc=$S2_RC，日志 $f）"
+    return
+  fi
+  if ! qemu_ok "$QRC_S2"; then
+    record S-2 FAIL "S-2 QEMU 退出码 $QRC_S2 不是 33/37"
+    return
+  fi
+  workers=$(grep -ac '^\[JSR-S2\] worker=' "$f" 2>/dev/null || true)
+  done_cases=$(grep -ac 'robust: done calls=250000 .*failed=0' "$f" 2>/dev/null || true)
+  mmio=$(grep -ac '^\[JSR-S2-MMIO\] .*passed=true' "$f" 2>/dev/null || true)
+  dma=$(grep -ac '^\[JSR-S2-DMA\] .*passed=true' "$f" 2>/dev/null || true)
+  quar=$(grep -ac '^\[JSR-S2-QUARANTINE\] total=4 intentional=true' "$f" 2>/dev/null || true)
+  if [ "$workers" -eq 4 ] && [ "$done_cases" -eq 4 ] \
+     && grep -qaE '^\[JSR-S2\] summary workers=4/4 probes=1000000 calls=[0-9]+ cpu_mask=0xf .*reclaimed=true passed=true' "$f" \
+     && grep -qa '^\[JSR-FAULT\] sites=4 .*failed=0' "$f" \
+     && [ "$mmio" -eq 1 ] && [ "$dma" -eq 1 ] && [ "$quar" -eq 1 ] \
+     && [ "$(grep -ac '^\[JSR-S2-ERROR\] case=.*passed=true' "$f")" -eq 4 ] \
+     && [ "$(grep -ac '^\[JSR-S2-ERROR\] case=[23] .*quarantine=2 reclaimed=true passed=true' "$f")" -eq 2 ] \
+     && ! grep -qaE 'panicked at|KERNEL PANIC|^\[JSR-PANIC\]' "$f" \
+     && ! grep -qa '^\[JSR-EXIT\] failure' "$f"; then
+    record S-2 PASS "4 个固定种子进程各 250000 次有界探测、共 10^6 次系统调用，4 个在线处理器均有实际调用；MMIO 回滚超时、帧/堆失败、unmap/protect 击落超时与 DMA 读回未知路径全部按预期失败或隔离，击落超时的 4 帧永久隔离且回收后基线可按隔离数解释；无 panic"
+  else
+    record S-2 FAIL "缺少 S-2 汇总/逐进程完成/故障路径行，或出现 panic/资源漂移（workers=$workers done=$done_cases mmio=$mmio dma=$dma quarantine=$quar，见 $f）"
+  fi
+}
+
 check_j1() {    # 用户态运行时：匿名内存系统调用（全有或全无、配额、权限）；用运行时写成的 Rust 程序（堆/线程/Channel/ring）以 0 退出；panic 与栈溢出只终止该进程；回到基线
   if has 'memory map=Ok\(\(\)\) zeroed=true user_rw_nx=true overlap=Err\(AlreadyMapped\) partial=Err\(AlreadyMapped\) untouched=true' \
      && has 'memory hole=Err\(NotMapped\) bad_ranges_refused=true readonly=true quota_chunks=[1-9][0-9]* refused=Some\(Quota\) no_charge=true' \
@@ -1052,6 +1098,18 @@ check_fix() {   # 基础设施修复回归：失败路径与回滚（已退出�
   fi
 }
 
+# Aggregate by the status column, never words in the explanation.
+# Only explicitly labelled timing-reference rows are nonblocking TIME.
+row_nonblocking() {
+  local label status explanation
+  read -r label status explanation <<< "$1" || return 1
+  case "$status" in
+    PASS|N/A) return 0 ;;
+    TIME) [[ "$label" == */计时 && "$explanation" == *"计时·参考"* ]] ;;
+    *) return 1 ;;
+  esac
+}
+
 # port_rerun <串口日志> <QEMU 退出码> <行名前缀> <内核共享部分表项数> <检查函数…>：在另一指令集的串口日志上逐项重跑
 # 给定检查（行名带前缀）；结果放在 PORT_N（行数）与 PORT_BAD（失败数）。
 port_rerun() {
@@ -1068,8 +1126,8 @@ port_rerun() {
   PORT_NA=0; PORT_NA_REASON=""
   SERIAL="$saved_serial"; QRC="$saved_qrc"; REC_PREFIX=""; unset KPART
   for (( i = before; i < ${#ROWS[@]}; i++ )); do
-    # N/A：本构建下不适用（例如纯轮转构建里的 QoS 专项），不计入失败
-    [[ "${ROWS[$i]}" == *" PASS "* || "${ROWS[$i]}" == *" N/A "* ]] || bad=$((bad + 1))
+    # N/A and explicitly classified timing references do not become functional failures.
+    row_nonblocking "${ROWS[$i]}" || bad=$((bad + 1))
   done
   PORT_N=$(( ${#ROWS[@]} - before )); PORT_BAD=$bad
 }
@@ -2339,11 +2397,11 @@ if [ "$SPOT" -eq 1 ]; then
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_l10n1
+  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------
@@ -2361,7 +2419,7 @@ fi
     echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4，8 处理器：$QRC_SMP8，AArch64：$QRC_A64，AArch64 4 处理器：$QRC_A64_SMP4，RISC-V64：$QRC_RV64，RISC-V32：$QRC_RV32）"
   else
     echo "架构范围：x86_64（AArch64 / RISC-V64 / RISC-V32 冻结，按 N/A 记录）"
-    echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4，8 处理器：$QRC_SMP8，q35 ECAM：$QRC_Q35）"
+    echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4，8 处理器：$QRC_SMP8，q35 ECAM：$QRC_Q35，S-2：$QRC_S2）"
   fi
   echo
   printf '%-6s %-4s %s\n' "里程碑" "结果" "说明"
@@ -2371,7 +2429,7 @@ fi
 if [ "$SPOT" -eq 1 ]; then
   EVIDENCE_FILES=(cargo-test.log build.log serial.log summary.txt)
 else
-  EVIDENCE_FILES=(cargo-test.log build.log serial.log serial-smp4.log serial-smp8.log serial-q35.log summary.txt)
+  EVIDENCE_FILES=(cargo-test.log build.log serial.log serial-smp4.log serial-smp8.log serial-q35.log summary.txt s2/serial.log s2/build.log)
 fi
 if [ "$ARCH_ALL" -eq 1 ]; then
   EVIDENCE_FILES+=(serial-aarch64.log serial-aarch64-smp4.log serial-riscv64.log serial-riscv32.log)

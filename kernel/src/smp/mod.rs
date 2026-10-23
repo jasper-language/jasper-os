@@ -314,6 +314,11 @@ pub fn tlb_shootdown_on(active: CpuSet, va: u64, pages: u64) -> Result<(), SmpEr
             return Err(e);
         }
     }
+    #[cfg(feature = "fault-inject")]
+    if crate::fault_inject::IPI_TIMEOUT.hit() {
+        SHOOTDOWN.abandon(generation);
+        return Err(SmpError::Timeout);
+    }
     if wait_until(|| {
         service_shootdown(me);
         SHOOTDOWN.is_complete(generation)

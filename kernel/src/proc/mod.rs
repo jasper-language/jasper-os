@@ -20,6 +20,8 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use kernel_core::frame::{PhysFrame, FRAME_SIZE};
 use kernel_core::object::{HandleError, HandleId, HandleTable, ObjectId, ObjectRef, ObjectType, Rights};
 use kernel_core::objtable::ObjId;
@@ -63,6 +65,9 @@ pub struct Process {
     handles: HandleTable<ObjectRef, HANDLES_PER_PROCESS>,
     /// 进程拥有的数据帧（销毁时归还）。
     frames: Vec<PhysFrame>,
+    /// 页表修改已生效但击落未确认时被永久隔离的帧：不再归还分配器，避免旧 TLB 继续引用后复用。
+    /// Frames permanently withheld from the allocator after an unconfirmed shootdown.
+    quarantined: Vec<PhysFrame>,
     /// 设备 BAR 映射（不是 RAM：不进入 `frames`，也不由页帧分配器记账）。
     /// Device BAR mappings (not RAM; never entered into `frames`).
     device_maps: Vec<DeviceMapping>,
@@ -184,6 +189,38 @@ pub struct ExitInfo {
     pub threads: u32,
     /// 进程拥有的数据帧数（销毁时归还）。
     pub frames: usize,
+    /// 击落超时后永久隔离、不再归还分配器的数据帧数。
+    pub quarantined: usize,
+}
+
+/// 累计因击落超时而永久隔离的帧数（诊断与验收用）。
+static QUARANTINED_FRAMES: AtomicU32 = AtomicU32::new(0);
+
+/// Total frames permanently quarantined after an unconfirmed shootdown.
+pub fn quarantined_frames() -> u32 {
+    QUARANTINED_FRAMES.load(Ordering::Relaxed)
+}
+
+impl Process {
+    /// Move frames from the releasable set into the permanent quarantine set.
+    /// The handles may be dropped on allocation failure: dropping a frame never returns it to the allocator.
+    fn quarantine(&mut self, mut frames: Vec<PhysFrame>) {
+        if frames.is_empty() {
+            return;
+        }
+        let n = frames.len() as u32;
+        QUARANTINED_FRAMES.fetch_add(n, Ordering::Relaxed);
+        if self.quarantined.try_reserve(frames.len()).is_ok() {
+            self.quarantined.append(&mut frames);
+        }
+    }
+
+    fn quarantine_one(&mut self, frame: PhysFrame) {
+        QUARANTINED_FRAMES.fetch_add(1, Ordering::Relaxed);
+        if self.quarantined.try_reserve(1).is_ok() {
+            self.quarantined.push(frame);
+        }
+    }
 }
 
 /// 新建进程（还没有线程）。调用者获得一份外部所有权，最终须经 [`reap`] 释放。
@@ -235,6 +272,7 @@ pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcErr
         space,
         handles: HandleTable::new(),
         frames: Vec::new(),
+        quarantined: Vec::new(),
         device_maps: Vec::new(),
         threads: Vec::new(),
         syscalls,
@@ -290,12 +328,33 @@ pub fn map_new(id: ObjId, va: u64, flags: MapFlags) -> Result<PhysFrame, ProcErr
 /// 取消进程中一页的映射并放弃该页的数据帧（仍被在飞请求固定时，帧延后到最后一次解除固定才归还）。
 /// Unmaps one page of a process; its frame is returned now or, if pinned, after the last unpin.
 pub fn unmap_page(id: ObjId, va: u64) -> Result<(), ProcError> {
-    let f = with_proc(id, |p| {
-        let f = p.space.unmap(VirtPage::containing(va)).map_err(ProcError::Map)?;
-        p.frames.retain(|x| *x != f);
-        Ok(f)
+    let frame = with_proc(id, |p| {
+        if !p.space.begin_shootdown() {
+            return Err(ProcError::Map(MapError::Busy));
+        }
+        match p.space.unmap_raw(VirtPage::containing(va)) {
+            Ok(f) => Ok(f),
+            Err(e) => {
+                p.space.end_shootdown();
+                Err(ProcError::Map(e))
+            }
+        }
     })?;
-    crate::mm::pin::release(f);
+    let active = with_proc(id, |p| Ok(p.space.active_cpus()))?;
+    if crate::smp::tlb_shootdown_on(active, va, 1).is_err() {
+        with_proc(id, |p| {
+            p.frames.retain(|x| *x != frame);
+            p.quarantine_one(frame);
+            Ok(())
+        }).ok();
+        return Err(ProcError::Map(MapError::Busy));
+    }
+    with_proc(id, |p| {
+        p.frames.retain(|x| *x != frame);
+        p.space.end_shootdown();
+        Ok(())
+    })?;
+    crate::mm::pin::release(frame);
     Ok(())
 }
 
@@ -581,7 +640,19 @@ pub fn unmap_range(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
         Ok(p.space.active_cpus())
     })?;
     // 页表修改已经完成，但帧仍记在进程名下；必须先等所有活跃处理器应答，才能归还。
-    crate::smp::tlb_shootdown_on(active, va, pages).map_err(|_| MemError::Busy)?;
+    if crate::smp::tlb_shootdown_on(active, va, pages).is_err() {
+        // 击落未确认：旧 TLB 仍可能引用这些帧。把它们从可归还集合移入永久隔离集合，
+        // 让进程销毁路径也不会把帧放回分配器。
+        kobj::with(|t| {
+            if let Ok(KObject::Process(p)) = t.get_mut(pid) {
+                gone.sort_unstable_by_key(|f| f.start());
+                p.frames.retain(|f| gone.binary_search_by_key(&f.start(), |g| g.start()).is_err());
+                p.quarantine(gone);
+            }
+            Ok::<(), MemError>(())
+        }).ok();
+        return Err(MemError::Busy);
+    }
     kobj::with(|t| {
         let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
         gone.sort_unstable_by_key(|f| f.start());
@@ -612,6 +683,10 @@ pub fn protect_range(pid: ObjId, va: u64, pages: u64, writable: bool, executable
     if executable {
         flags = flags.union(MapFlags::EXECUTE);
     }
+    let mut touched: Vec<PhysFrame> = Vec::new();
+    if touched.try_reserve_exact(pages as usize).is_err() {
+        return Err(MemError::OutOfMemory);
+    }
     let active = kobj::with(|t| {
         let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
         if p.state != ProcState::Running {
@@ -621,8 +696,9 @@ pub fn protect_range(pid: ObjId, va: u64, pages: u64, writable: bool, executable
             if is_device_page(p, va + i * FRAME_SIZE) {
                 return Err(MemError::InvalidRange);
             }
-            if p.space.translate(VirtPage::containing(va + i * FRAME_SIZE)).is_none() {
-                return Err(MemError::NotMapped);
+            match p.space.translate(VirtPage::containing(va + i * FRAME_SIZE)) {
+                Some((f, _)) => touched.push(f),
+                None => return Err(MemError::NotMapped),
             }
         }
         if !p.space.begin_shootdown() {
@@ -640,7 +716,19 @@ pub fn protect_range(pid: ObjId, va: u64, pages: u64, writable: bool, executable
         }
         Ok(p.space.active_cpus())
     })?;
-    crate::smp::tlb_shootdown_on(active, va, pages).map_err(|_| MemError::Busy)?;
+    if crate::smp::tlb_shootdown_on(active, va, pages).is_err() {
+        // 权限修改已写入页表，但旧 TLB 可能仍允许旧权限。帧不再由进程负责归还，
+        // 而是永久隔离，进程销毁时也不会回到分配器。
+        kobj::with(|t| {
+            if let Ok(KObject::Process(p)) = t.get_mut(pid) {
+                touched.sort_unstable_by_key(|f| f.start());
+                p.frames.retain(|f| touched.binary_search_by_key(&f.start(), |g| g.start()).is_err());
+                p.quarantine(touched);
+            }
+            Ok::<(), MemError>(())
+        }).ok();
+        return Err(MemError::Busy);
+    }
     kobj::with(|t| {
         let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
         p.space.end_shootdown();
@@ -1461,7 +1549,7 @@ pub fn reap(id: ObjId) -> Option<ExitInfo> {
     let info = kobj::with(|t| {
         let info = match t.get(id) {
             Ok(KObject::Process(p)) => match p.state {
-                ProcState::Exited { code } => ExitInfo { code, threads: p.threads_total, frames: p.frames.len() },
+                ProcState::Exited { code } => ExitInfo { code, threads: p.threads_total, frames: p.frames.len(), quarantined: p.quarantined.len() },
                 ProcState::Running | ProcState::Exiting { .. } => return None,
             },
             _ => return None,
@@ -1470,9 +1558,10 @@ pub fn reap(id: ObjId) -> Option<ExitInfo> {
         Some(info)
     })?;
     kprintln!(
-        "[JSR-PROC] event=system.process.reaped id={:#x} frames={} threads={} code={}",
+        "[JSR-PROC] event=system.process.reaped id={:#x} frames={} quarantined={} threads={} code={}",
         id.raw(),
         info.frames,
+        info.quarantined,
         info.threads,
         info.code
     );
@@ -1484,7 +1573,7 @@ pub fn reap(id: ObjId) -> Option<ExitInfo> {
 /// 正常路径上句柄表在 exited 时已被关闭；这里**不依赖该假设**：仍有残余句柄则逐个释放其外部所有权，
 /// 并输出诊断标记（出现即说明某条路径漏了检查）。
 pub fn destroy(p: Box<Process>) {
-    let Process { mut space, frames, device_maps, threads, mut handles, name, exit_state, children, cpu_group, .. } = *p;
+    let Process { mut space, frames, quarantined, device_maps, threads, mut handles, name, exit_state, children, cpu_group, .. } = *p;
     if let Some(g) = cpu_group {
         let _ = sched::release_cpu_group(g); // 持有者引用；线程早已全部退出，组随之释放
     }
@@ -1507,6 +1596,11 @@ pub fn destroy(p: Box<Process>) {
     for f in frames {
         crate::mm::pin::release(f); // 仍被在飞请求固定的帧延后到最后一次解除固定时归还
     }
+    if !quarantined.is_empty() {
+        // 这些帧的击落从未确认；即使页表已随地址空间销毁，也绝不放回分配器。
+        kprintln!("[JSR-LIFE] warning quarantined_frames={} process={}", quarantined.len(), name);
+    }
+    drop(quarantined);
     for t in threads {
         let _ = kobj::release_internal(t); // 线程表 → Task；可能使 Task 死亡并入队（下一轮清理）
     }

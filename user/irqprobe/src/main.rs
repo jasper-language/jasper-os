@@ -105,26 +105,8 @@ unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
     ret
 }
 
-/// 发起系统调用（AArch64：x8=ID，x0/x1/x2=参数，`svc #0`；返回值在 x0，其余寄存器由内核保留）。
-///
-/// # Safety
-/// 参数必须符合该调用的约定；作为指针传入的值须指向本进程内、在调用期间有效的内存。
-#[cfg(target_arch = "aarch64")]
-unsafe fn syscall3(id: u64, a: u64, b: u64, c: u64) -> i64 {
-    let ret: i64;
-    asm!(
-        "svc #0",
-        in("x8") id,
-        inlateout("x0") a as i64 => ret,
-        in("x1") b,
-        in("x2") c,
-        options(nostack)
-    );
-    ret
-}
-
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-compile_error!("user-irqprobe 只支持 x86_64 与 AArch64（DRV-2C 的验收范围）");
+#[cfg(not(target_arch = "x86_64"))]
+compile_error!("user-irqprobe 只支持 x86_64（DRV-2C 的验收范围；其它指令集冻结）");
 
 /// 一行输出缓冲区。
 struct Line {

@@ -41,10 +41,17 @@ static mut ID_L3: [Table; IMAGE_L3_TABLES] = [EMPTY; IMAGE_L3_TABLES];
 static mut PHYS_L1: Table = EMPTY;
 
 extern "C" {
+    static __image_start: u8;
+    static __image_end: u8;
     static __kernel_start: u8;
     static __text_end: u8;
     static __rodata_end: u8;
     static __kernel_end: u8;
+}
+
+/// 原始 `Image` 的范围 `[start, end)`（含 64 字节头；恒等映射，虚拟地址相同）。
+pub fn image_span() -> (u64, u64) {
+    (core::ptr::addr_of!(__image_start) as u64, core::ptr::addr_of!(__image_end) as u64)
 }
 
 /// 内核映像的物理地址范围 `[start, end)`（恒等映射，虚拟地址相同）。
@@ -144,43 +151,6 @@ pub fn cover_phys(end: u64) -> u64 {
     }
     cpu::table_write_barrier();
     gib as u64 * GIB
-}
-
-/// 让全物理内存映射把 `[start, end)` 覆盖的 GiB 段按设备内存映射；已映射为普通内存时返回 `false`。
-///
-/// 只用于在早期映射范围之外的设备窗口（`virt` 机型的 ECAM 位于高物理地址）。设备内存块不缓存，
-/// 与 `pci` 配置空间的访问语义一致；调用后作废本处理器的 TLB，保证新的块描述符立即可见。
-/// Map the GiB blocks covering `[start, end)` as device memory; `false` if already normal memory.
-pub fn ensure_device_region(start: u64, end: u64) -> bool {
-    if end <= start {
-        return false;
-    }
-    let first = start / GIB;
-    let last = (end - 1) / GIB;
-    if last >= 512 {
-        return false;
-    }
-    let phys_l1 = addr_of_mut!(PHYS_L1) as *mut u64;
-    let mut changed = false;
-    for g in first..=last {
-        // SAFETY：PHYS_L1 是本模块独占的早期表，经恒等映射访问。
-        let slot = unsafe { phys_l1.add(g as usize) };
-        let current = unsafe { slot.read_volatile() };
-        if current & desc::VALID != 0 {
-            if (current >> 2) & 0x7 != 1 {
-                return false;
-            }
-        } else {
-            // SAFETY：同 `cover_phys`；无效 → 有效的写入，随后统一作废 TLB。
-            unsafe { slot.write_volatile(device_block(g * GIB)) };
-            changed = true;
-        }
-    }
-    if changed {
-        cpu::table_write_barrier();
-        cpu::tlb_flush_all();
-    }
-    true
 }
 
 /// MAIR：属性 0 = 普通内存写回读写分配，属性 1 = 设备内存 nGnRE。

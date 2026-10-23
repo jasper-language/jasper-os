@@ -20,6 +20,10 @@
 //! 与 Core 的回调方向：中断入口调用 `crate::irq::on_hardware_irq`（见 `idt.rs`）；
 //! 其他处理器完成平台初始化后调用 `crate::smp::secondary_main`（见 `smp.rs`）。
 
+#[cfg(feature = "bm1-vm")]
+mod bm1;
+#[cfg(feature = "bm1-vm")]
+pub use bm1::init as bm1_init;
 mod apic;
 mod context;
 mod paging;
@@ -103,6 +107,8 @@ impl Platform for X86_64 {
 
     fn console_write_byte(byte: u8) {
         uart::write_byte(byte);
+        #[cfg(feature = "bm1-vm")]
+        bm1::write_byte(byte);
     }
 
     #[inline(always)]
@@ -156,8 +162,12 @@ impl Platform for X86_64 {
     }
 
     fn exit_emulator(status: ExitStatus) -> ! {
+        #[cfg(feature = "bm1-vm")]
+        bm1::finish(status);
         // QEMU `isa-debug-exit`（iobase=0xf4）：写入值 v，QEMU 以 (v << 1) | 1 退出。
         // 0x10 → 33 = 成功；0x12 → 37 = 功能全过、只有计时类断言超界；0x11 → 35 = 失败。
+        #[cfg(not(feature = "bm1-vm"))]
+        {
         let code: u32 = match status {
             ExitStatus::Success => 0x10,
             ExitStatus::TimingOnly => 0x12,
@@ -166,6 +176,7 @@ impl Platform for X86_64 {
         // SAFETY：0xf4 是 QEMU 调试退出设备的端口；真机上无设备，写入无副作用。
         unsafe { port::outl(0xf4, code) };
         Self::halt_forever()
+        }
     }
 
     unsafe fn active_mapper(phys_offset: u64) -> Self::Mapper {
@@ -236,12 +247,6 @@ impl Platform for X86_64 {
     fn user_probe(probe: UserProbe) -> &'static [u8] {
         user::probe(probe)
     }
-
-    /// 本平台的 PCI 拓扑含 ISA 桥（传统 PC 机型）。
-    const PCI_EXPECTS_ISA_BRIDGE: bool = true;
-
-    /// x86_64 的 MSI 地址编码目标 APIC 标识，不同处理器的地址互不相同。
-    const MSI_ADDRESS_ENCODES_TARGET: bool = true;
 
     const CPU_START_FRAME_LIMIT: Option<u64> = Some(smp::START_FRAME_LIMIT);
 

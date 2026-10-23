@@ -467,18 +467,6 @@ pub trait Platform {
     // ---- MSI ----
     // 向量范围、消息编码与投递方式都是平台细节；Core 只经这三个方法使用，不出现具体向量号或地址。
 
-    /// MSI 消息地址是否编码了目标处理器。
-    ///
-    /// 编码在地址里时（如 x86_64 的目标 APIC 标识），不同处理器的同一向量必须得到不同地址，
-    /// 可以据此核对消息组合；目标由平台内部路由决定时（如 GICv2m 的共享 MSI 帧）地址相同，
-    /// 断言改为直接核对实际送达的处理器。
-    /// Whether the MSI address encodes the destination processor.
-    const MSI_ADDRESS_ENCODES_TARGET: bool = false;
-
-    /// 平台的 PCI 拓扑是否应包含 ISA 桥（传统 PC 机型为真，纯 PCIe 机型为假）。
-    /// Whether the platform's PCI topology is expected to contain an ISA bridge.
-    const PCI_EXPECTS_ISA_BRIDGE: bool = false;
-
     /// 可分配给设备的 MSI 向量范围（每核一份）；平台不支持 MSI 时返回 `None`。
     /// MSI vector range available to devices; `None` when unsupported.
     fn msi_vector_range() -> Option<MsiRange> {
@@ -517,10 +505,6 @@ pub const ELF_MACHINE: u16 = <Current as Platform>::ELF_MACHINE;
 pub const ELF_CLASS: kernel_core::elf::ElfClass = <Current as Platform>::ELF_CLASS;
 /// 当前架构的空任务上下文，见 [`Platform::EMPTY_CONTEXT`]。
 pub const EMPTY_CONTEXT: TaskContext = <Current as Platform>::EMPTY_CONTEXT;
-/// 见 [`Platform::MSI_ADDRESS_ENCODES_TARGET`]。
-pub const MSI_ADDRESS_ENCODES_TARGET: bool = <Current as Platform>::MSI_ADDRESS_ENCODES_TARGET;
-/// 见 [`Platform::PCI_EXPECTS_ISA_BRIDGE`]。
-pub const PCI_EXPECTS_ISA_BRIDGE: bool = <Current as Platform>::PCI_EXPECTS_ISA_BRIDGE;
 
 /// 见 [`Platform::console_init`]。
 pub fn console_init() {
@@ -803,3 +787,6 @@ pub fn msi_trigger(cpu: usize, vector: u8) -> Result<(), kernel_core::msi::MsiEr
 pub fn mmio_window() -> Option<(u64, u64)> {
     Current::mmio_window()
 }
+
+#[cfg(all(target_arch = "x86_64", feature = "bm1-vm"))]
+pub use x86_64::bm1_init;

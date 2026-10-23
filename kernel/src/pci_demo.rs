@@ -16,7 +16,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::pci::{legacy_address, Bar, Bdf, Ecam};
 
-use crate::{arch, kprintln, pci};
+use crate::{kprintln, pci};
 
 /// 断言失败次数（验收要求为 0）。
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -66,9 +66,7 @@ pub fn run() {
     let host_bridge = table.devices().any(|d| d.header.class == 0x06 && d.header.subclass == 0x00);
     let isa_bridge = table.devices().any(|d| d.header.class == 0x06 && d.header.subclass == 0x01);
     check(host_bridge, "找不到宿主桥（class 0x06 / subclass 0x00）");
-    if arch::PCI_EXPECTS_ISA_BRIDGE {
-        check(isa_bridge, "找不到 ISA 桥（class 0x06 / subclass 0x01）");
-    }
+    check(isa_bridge, "找不到 ISA 桥（class 0x06 / subclass 0x01）");
 
     let mut virtio = 0u32;
     let mut virtio_ok = true;

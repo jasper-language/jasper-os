@@ -27,6 +27,8 @@ mod bios {
 
     /// 引导器入口：转换交接信息后进入内核主流程。
     fn kernel_main(info: &'static mut BootInfo) -> ! {
+        #[cfg(feature = "bm1-vm")]
+        jasper_kernel::arch::bm1_init(info.framebuffer.take());
         let mut spec = BootSpec::new();
         for r in info.memory_regions.iter() {
             // 只有 Usable 可自由使用；引导器自身的页表/数据、固件未知类型一律视为保留。

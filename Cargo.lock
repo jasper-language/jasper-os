@@ -432,6 +432,7 @@ version = "0.1.0"
 dependencies = [
  "bootloader_api",
  "kernel-core",
+ "noto-sans-mono-bitmap",
  "pic8259",
  "spin",
  "x86_64",
@@ -526,6 +527,12 @@ checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
 dependencies = [
  "adler2",
 ]
+
+[[package]]
+name = "noto-sans-mono-bitmap"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a27daf9557165efe1d09b52f97393bf6283cadb0a76fbe64a1061e15553a994a"
 
 [[package]]
 name = "once_cell"
@@ -830,6 +837,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "user-devprobe"
+version = "0.1.0"
+dependencies = [
+ "kernel-core",
+]
+
+[[package]]
 name = "user-hello"
 version = "0.1.0"
 dependencies = [
@@ -838,6 +852,13 @@ dependencies = [
 
 [[package]]
 name = "user-ipc"
+version = "0.1.0"
+dependencies = [
+ "kernel-core",
+]
+
+[[package]]
+name = "user-irqprobe"
 version = "0.1.0"
 dependencies = [
  "kernel-core",

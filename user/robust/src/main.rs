@@ -365,7 +365,20 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 /// 程序入口（链接脚本把它放在代码段最前面）。
 #[no_mangle]
 #[link_section = ".text._start"]
-pub extern "C" fn _start() -> ! {
+pub extern "C" fn _start(packed: u64) -> ! {
+    // Worker 0 preserves S-1. For S-2 the low 32 bits select the worker and the
+    // high 32 bits carry that worker's probe count; zero keeps the default share.
+    let worker = packed & 0xffff_ffff;
+    let requested = packed >> 32;
+    let (seed, total) = if worker == 0 { (SEED, TOTAL_CALLS) } else {
+        match kernel_core::argcase::s2_seed(worker) {
+            Some(seed) => {
+                let total = if requested == 0 { kernel_core::argcase::S2_PROBES } else { requested };
+                (seed, total)
+            }
+            None => exit(3),
+        }
+    };
     let plan = match AddressPlan::new(&PROTECTED, &TARGETS, PAGE) {
         Ok(p) => p,
         Err(_) => {
@@ -373,14 +386,14 @@ pub extern "C" fn _start() -> ! {
             exit(2);
         }
     };
-    let mut rng = Prng::new(SEED);
-    for _ in 0..TOTAL_CALLS {
+    let mut rng = Prng::new(seed);
+    for _ in 0..total {
         probe(&mut rng, &plan);
     }
     map_cycles(&plan);
 
     let checks = CHECKS.load(Ordering::Relaxed) as u64;
     let failed = FAILED.load(Ordering::Relaxed) as u64;
-    say!("done calls={} checks={} failed={} seed={:#x}", TOTAL_CALLS, checks, failed, SEED);
-    exit(if failed == 0 && checks >= TOTAL_CALLS { 0 } else { 1 });
+    say!("done calls={} checks={} failed={} seed={:#x}", total, checks, failed, seed);
+    exit(if failed == 0 && checks >= total { 0 } else { 1 });
 }

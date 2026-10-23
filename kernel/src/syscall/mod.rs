@@ -199,6 +199,8 @@ const RECLAIM_BEFORE: [u32; 3] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, S
 /// 系统调用入口（arch 调用；可能不返回——`system.task.exit` 会结束当前任务）。
 pub fn on_syscall(a: &SyscallArgs) -> i64 {
     CALLS.fetch_add(1, Ordering::Relaxed);
+    #[cfg(all(feature = "s2-fuzz", target_arch = "x86_64"))]
+    crate::s2::observe();
     // 调度点：所属进程已在 exiting ⇒ 本线程不再执行任何系统调用，直接停止
     if proc::current_exiting() {
         proc::thread_exit(0, "killed");
