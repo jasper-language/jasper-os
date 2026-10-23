@@ -636,6 +636,11 @@ fn contention(n: usize) {
     kprintln!("[JSR-CHURN-BARRIER] ready={}/{} done={}/{} mask={:#x} rounds={}", ready,n,done,n,mask,CHURN_ROUNDS);
     #[cfg(feature = "krn2-observe")]
     {
+        let (total, window) = sched::pi_work_stats();
+        for (scope, work) in [("boot", total), ("churn", window)] {
+            kprintln!("[JSR-PI-WORK] scope={} calls={} slot_visits={} active_visits={} steps={} max_walk={} truncated={} overflow={}",
+                scope, work.calls, work.slots, work.live, work.steps, work.max_walk, work.truncated, work.overflow);
+        }
         let [transactions, leaves, contended, spins] = sched::sync_work_stats();
         let covered = transactions > 0 && leaves as u64 == transactions as u64 * n as u64
             && contended <= leaves;

@@ -90,7 +90,7 @@ pub const BYTES_PER_SLOT: usize = core::mem::size_of::<Option<Task>>()
     + 2 * core::mem::size_of::<Option<Qos>>()
     + core::mem::size_of::<Option<usize>>()
     + core::mem::size_of::<bool>()
-    + core::mem::size_of::<Link>()
+    + 2 * core::mem::size_of::<Link>()
     + core::mem::size_of::<*mut super::stack::Stack>();
 
 /// 启动期扩容被拒绝的原因（被拒时调度器保持原样）。
@@ -309,6 +309,8 @@ struct CpuGroup {
     gen: u32,
     limit: CpuLimit,
     refs: u32,
+    // Scratch only while the global guard publishes; zero outside that call.
+    publication_credit: kernel_core::publication_credit::PublicationCredit,
 }
 
 /// 任务表与运行队列的核对结果（见 [`Scheduler::queue_audit`]）。全部为 0 表示钩子调用与状态迁移一致。
@@ -359,6 +361,10 @@ pub const WATCHDOG_LOG: usize = crate::config::ACTIVE.sched.watchdog_log;
 
 /// 调度机制本体。槽位总数（含引导线程）在启动期决定，见 [`Scheduler::grow`]。
 pub struct Scheduler<P: SchedPolicy> {
+    #[cfg(feature = "krn2-observe")]
+    pub(super) pi_total: kernel_core::pi_work::PiWork,
+    #[cfg(feature = "krn2-observe")]
+    pub(super) pi_window: kernel_core::pi_work::PiWork,
     #[cfg(feature = "krn2-observe")]
     pub(super) raw_callbacks: kernel_core::raw_timing::Samples<64>,
     #[cfg(feature = "krn2-observe")]
@@ -439,6 +445,9 @@ pub struct Scheduler<P: SchedPolicy> {
     wait_seq: u64,
     /// CPU 组表（组数不会超过任务槽位数：每组至少要有一个持有者）。
     groups: BootSlots<Option<CpuGroup>, INLINE_SLOTS>,
+    // Live groups in slot order; retain idle groups for their normal refill.
+    group_runs: RunLists<1>,
+    group_links: BootSlots<Link, INLINE_SLOTS>,
     /// 各组槽位的下一个世代号。
     group_gen: BootSlots<u32, INLINE_SLOTS>,
     /// 优先级继承重算用的暂存（与任务表同容量；预先分配，持锁路径上不分配内存）。
@@ -508,6 +517,10 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         current[0] = BOOT_SLOT;
         Scheduler {
             #[cfg(feature = "krn2-observe")]
+            pi_total: kernel_core::pi_work::PiWork::EMPTY,
+            #[cfg(feature = "krn2-observe")]
+            pi_window: kernel_core::pi_work::PiWork::EMPTY,
+            #[cfg(feature = "krn2-observe")]
             raw_callbacks: kernel_core::raw_timing::Samples::new(),
             #[cfg(feature = "krn2-observe")]
             raw_wakes: kernel_core::raw_timing::Samples::new(),
@@ -564,6 +577,8 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             inherit: true,
             wait_seq: 0,
             groups: BootSlots::Inline([const { None }; INLINE_SLOTS]),
+            group_runs: RunLists::new(),
+            group_links: BootSlots::Inline([Link::EMPTY; INLINE_SLOTS]),
             group_gen: BootSlots::Inline([0; INLINE_SLOTS]),
             scratch_base: BootSlots::Inline([None; INLINE_SLOTS]),
             scratch_eff: BootSlots::Inline([None; INLINE_SLOTS]),
@@ -680,6 +695,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         let oom = |s: &Self| GrowError::OutOfMemory { available: s.stacks.available() };
         let tasks = self.tasks.prepare(slots, || None).ok_or_else(|| oom(self))?;
         let groups = self.groups.prepare(slots, || None).ok_or_else(|| oom(self))?;
+        let group_links = self.group_links.prepare(slots, || Link::EMPTY).ok_or_else(|| oom(self))?;
         let group_gen = self.group_gen.prepare(slots, || 0).ok_or_else(|| oom(self))?;
         let base = self.scratch_base.prepare(slots, || None).ok_or_else(|| oom(self))?;
         let eff = self.scratch_eff.prepare(slots, || None).ok_or_else(|| oom(self))?;
@@ -724,6 +740,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         self.id_index = Some(index);
         self.tasks.commit(tasks);
         self.groups.commit(groups);
+        self.group_links.commit(group_links);
         self.group_gen.commit(group_gen);
         self.scratch_base.commit(base);
         self.scratch_eff.commit(eff);
@@ -965,6 +982,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     pub fn mark_current_exited(&mut self) {
         let cur = self.cur();
         let mut left = None;
+        let mut pi_graph_changed = false;
         if is_worker(cur) && self.task(cur).is_some_and(|t| t.state != TaskState::Exited) {
             let r = self.epochs[cur].history().expect("exiting task identity");
             self.epochs[cur].exit(r.token()).expect("exit live identity");
@@ -982,7 +1000,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
                 self.raw_wake_errors[2] = self.raw_wake_errors[2].saturating_add(1);
             }
             t.state = TaskState::Exited;
-            t.waits_for = None;
+            pi_graph_changed |= t.waits_for.take().is_some();
             left = t.cpu_group.take();
             if is_worker(cur) {
                 let r = dequeue_from(&mut self.queues, &mut t.sched, Dequeue::Exit);
@@ -995,10 +1013,13 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         }
         for i in 0..self.tasks.len() {
             if matches!(self.tasks[i].as_ref(), Some(t) if t.waits_for == Some(cur)) {
+                pi_graph_changed = true;
                 self.make_runnable(i);
             }
         }
-        self.resolve_inheritance();
+        // No donor edge or incoming waiter: removing this isolated node
+        // cannot alter any surviving task's effective QoS. Keep full fallback.
+        if pi_graph_changed { self.resolve_inheritance(); }
     }
 
     fn ensure_id_index(&mut self) {
@@ -1051,10 +1072,16 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     fn resolve_inheritance(&mut self) {
         // 暂存与任务表同容量、预先分配（持锁路径上不分配内存，也不在栈上开与容量成比例的数组）。
         let (base, waits, eff) = (&mut self.scratch_base, &mut self.scratch_waits, &mut self.scratch_eff);
+        #[cfg(feature = "krn2-observe")]
+        let mut outer = kernel_core::pi_work::PiWork::EMPTY;
+        #[cfg(feature = "krn2-observe")]
+        { outer.slots(base.len() as u64); outer.slots(waits.len() as u64); outer.slots(eff.len() as u64); }
         base.fill(None);
         waits.fill(None);
         eff.fill(None);
         for (i, t) in self.tasks.iter().enumerate().skip(1) {
+            #[cfg(feature = "krn2-observe")]
+            outer.slots(1);
             if let Some(t) = t {
                 if t.state != TaskState::Exited {
                     base[i] = Some(t.base_qos);
@@ -1062,12 +1089,20 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
                 }
             }
         }
+        #[cfg(not(feature = "krn2-observe"))]
         inherit::resolve(base, waits, self.inherit, eff);
+        #[cfg(feature = "krn2-observe")]
+        let measured = inherit::resolve_measured(base, waits, self.inherit, eff);
         for (t, q) in self.tasks.iter_mut().zip(eff.iter()) {
+            #[cfg(feature = "krn2-observe")]
+            outer.slots(1);
             if let (Some(t), Some(q)) = (t.as_mut(), q) {
                 t.sched.qos = *q;
             }
         }
+        #[cfg(feature = "krn2-observe")]
+        { outer.merge(measured); self.pi_total.merge(outer); self.pi_window.merge(outer); }
+
     }
 
     /// 让当前工作任务阻塞，直到持有者 `owner` 把它唤醒（交出锁或退出）；期间把有效档位借给持有者。
@@ -1407,9 +1442,11 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     // Author: chatgpt. Publish at most one AP credit, allocating a SINGLE
     // shared-group allowance across all leaves held by StateGuard. Yield's
     // limit-free predicate remains separate and unchanged.
-    pub fn tick_lease_owners(&self) -> [Option<kernel_core::task_index::Token>; MAX_CPUS] {
+    pub fn tick_lease_owners(&mut self) -> [Option<kernel_core::task_index::Token>; MAX_CPUS] {
         let mut owners = [None; MAX_CPUS];
         if self.candidates().next().is_some() { return owners; }
+        let mut touched = [None; MAX_CPUS];
+        let mut touched_len = 0;
         for c in self.online.iter() {
             if c == 0 || self.switching_from[c].is_some()
                 || self.now >= self.next_wake[c] || self.now >= self.next_rt[c]
@@ -1419,13 +1456,23 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             if t.state != TaskState::Running || t.home != c || self.decide(c).is_some()
                 || (t.rt_period != 0 && t.rt_remaining <= 1)
                 || t.sched.qos != t.base_qos { continue; }
-            if let Some(group) = t.cpu_group {
-                let Some(grp) = self.groups[group].as_ref() else { continue };
-                let granted = owners.iter().flatten().filter(|owner: &&kernel_core::task_index::Token|
-                    self.task(owner.slot).is_some_and(|peer| peer.cpu_group == Some(group))).count() as u32;
-                if grp.limit.deferred_tick_credits(MAX_CPUS as u32) <= granted { continue; }
+            let group = t.cpu_group;
+            let Some(token) = self.epochs.get(slot).and_then(SlotLifecycle::history).map(|r| r.token()) else { continue };
+            if let Some(group) = group {
+                let Some(grp) = self.groups[group].as_mut() else { continue };
+                let allowance = grp.limit.deferred_tick_credits(MAX_CPUS as u32);
+                if !grp.publication_credit.grant(allowance) { continue; }
+                if grp.publication_credit.count() == 1 {
+                    touched[touched_len] = Some(group);
+                    touched_len += 1;
+                }
             }
-            owners[c] = self.epochs.get(slot).and_then(SlotLifecycle::history).map(|r| r.token());
+            owners[c] = Some(token);
+        }
+        // At most C touched slots; no full group-table clear or hot allocation.
+        for group in touched[..touched_len].iter().flatten() {
+            self.groups[*group].as_mut().expect("publication group remains live")
+                .publication_credit.reset();
         }
         owners
     }
@@ -2123,6 +2170,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         if let Some(grp) = self.groups[slot].as_mut() {
             grp.refs = grp.refs.saturating_sub(1);
             if grp.refs == 0 {
+                self.group_runs.remove(&mut self.group_links, slot).expect("live group indexed");
                 self.groups[slot] = None;
             }
         }
@@ -2138,7 +2186,8 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             .ok_or(GroupError::NoFreeGroup)?;
         let gen = self.group_gen[slot];
         self.group_gen[slot] = advance_generation(gen);
-        self.groups[slot] = Some(CpuGroup { gen, limit, refs: 1 });
+        self.groups[slot] = Some(CpuGroup { gen, limit, refs: 1, publication_credit: kernel_core::publication_credit::PublicationCredit::new() });
+        self.group_runs.place(&mut self.group_links, slot, Some(0)).expect("new group slot unlisted");
         Ok(CpuGroupId { slot, gen })
     }
 
@@ -2164,7 +2213,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
 
     /// 仍存在的组数（诊断：组全部释放后应回到 0）。
     pub fn live_groups(&self) -> usize {
-        self.groups.iter().flatten().count()
+        self.group_runs.len(0)
     }
 
     /// 把已存在的任务 `id` 移入组 `g`（`None` = 移出所有组）。任务或组无效时拒绝，状态不变。
@@ -2199,7 +2248,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             _ => None,
         };
         let wants = &mut self.scratch_wants;
-        wants.fill(false);
+        for slot in self.group_runs.iter(&self.group_links, 0) { wants[slot] = false; }
         // 可运行或运行中的任务一定在某个运行列表上：只遍历列表
         for q in 0..MAX_CPUS {
             for i in self.runs.iter(&self.links, q) {
@@ -2210,10 +2259,9 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
                 }
             }
         }
-        for (slot, grp) in self.groups.iter_mut().enumerate() {
-            if let Some(grp) = grp.as_mut() {
-                grp.limit.on_tick(ran_group == Some(slot), wants[slot]);
-            }
+        for slot in self.group_runs.iter(&self.group_links, 0) {
+            let grp = self.groups[slot].as_mut().expect("indexed group remains live");
+            grp.limit.on_tick(ran_group == Some(slot), wants[slot]);
         }
     }
 

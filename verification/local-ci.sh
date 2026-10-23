@@ -26,6 +26,12 @@ cp "$manifest" "$run/inputs.sha256"
 rm -f "$run/PASS"
 {
     date -u +%FT%TZ
+    bash verification/run-pi-isolated-exit-tlc.sh
+    if bash verification/run-pi-isolated-exit-tlc.sh pi_isolated_exit_missing_outgoing.cfg > "$run/pi-isolated-exit-negative.log" 2>&1; then exit 1; fi
+    grep -q "Invariant Safety is violated" "$run/pi-isolated-exit-negative.log"
+    bash verification/run-group-membership-tlc.sh
+    if bash verification/run-group-membership-tlc.sh group_membership_stale.cfg > "$run/group-membership-negative.log" 2>&1; then exit 1; fi
+    grep -q "Invariant Safety is violated" "$run/group-membership-negative.log"
     bash verification/run-deadline-owner-tlc.sh
     for variant in move notify remote; do
         if bash verification/run-deadline-owner-tlc.sh "deadline_owner_${variant}.cfg" > "$run/deadline-owner-${variant}.log" 2>&1; then

@@ -243,6 +243,7 @@ pub fn reset_lock_stats() {
     {
         let mut state = lock_state();
         state.raw_callbacks = kernel_core::raw_timing::Samples::new();
+        state.pi_window = kernel_core::pi_work::PiWork::EMPTY;
         KERNEL_SCHED.reset_stats();
         for row in &SYNC_WORK { for value in row {
             value.store(0, core::sync::atomic::Ordering::Relaxed);
@@ -883,4 +884,10 @@ pub fn reset_raw_wakes() {
 pub fn raw_wake_snapshot() -> (kernel_core::raw_timing::Samples<64>, [u64; 3], usize, usize) {
     let s = lock_state();
     (s.raw_wakes, s.raw_wake_errors, s.raw_pending_at_reset, s.raw_pending_count())
+}
+
+/// Diagnostic counters are copied under the existing scheduler guard.
+#[cfg(feature = "krn2-observe")]
+pub fn pi_work_stats() -> (kernel_core::pi_work::PiWork, kernel_core::pi_work::PiWork) {
+    with(|s| (s.pi_total, s.pi_window))
 }

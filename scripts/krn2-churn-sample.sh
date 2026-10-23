@@ -47,6 +47,9 @@ for n in "$@"; do
     grep -aEq "^\[JSR-CHURN-BARRIER\] ready=$n/$n done=$n/$n mask=0x$mask rounds=2000" "$out/serial-$n.log"
     ! grep -aq '^\[JSR-EXIT\] failure' "$out/serial-$n.log"
     if [[ "${KRN2_OBSERVE:-0}" == 1 ]]; then
+        grep -aEq '^\[JSR-PI-WORK\] scope=boot calls=[1-9][0-9]* .*overflow=false' "$out/serial-$n.log"
+        grep -aEq '^\[JSR-PI-WORK\] scope=churn calls=[0-9]+ .*overflow=false' "$out/serial-$n.log"
+        grep -a '^\[JSR-PI-WORK\]' "$out/serial-$n.log"
         grep -aEq '^\[JSR-SYNC-WORK\].*covered=true' "$out/serial-$n.log"
         grep -aEq '^\[JSR-RAW-CALLBACK\] samples=[1-9][0-9]* .*valid=true' "$out/serial-$n.log"
         grep -aEq '^\[JSR-RAW-WAKE\] samples=[1-9][0-9]* .*valid=true .*endpoint=resume-hook' "$out/serial-$n.log"

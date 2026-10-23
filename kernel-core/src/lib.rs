@@ -113,3 +113,7 @@ mod fv1;
 
 // Author: chatgpt. Diagnostic raw sample storage, not a clock or proof of timing.
 pub mod raw_timing;
+
+pub mod publication_credit;
+
+pub mod pi_work;

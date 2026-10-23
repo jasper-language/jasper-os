@@ -78,18 +78,31 @@ pub fn check_edge(waits_for: &[Option<usize>], waiter: usize, owner: usize) -> R
 /// 每条链也最多走切片长度步，必定终止。
 /// Recomputes every slot's effective class from the wait graph.
 pub fn resolve(base: &[Option<Qos>], waits_for: &[Option<usize>], enabled: bool, effective: &mut [Option<Qos>]) {
+    let _ = resolve_impl::<false>(base, waits_for, enabled, effective);
+}
+
+/// Same QoS computation, with counts of the actual traversals, not time.
+pub fn resolve_measured(base: &[Option<Qos>], waits_for: &[Option<usize>], enabled: bool, effective: &mut [Option<Qos>]) -> crate::pi_work::PiWork {
+    resolve_impl::<true>(base, waits_for, enabled, effective)
+}
+fn resolve_impl<const MEASURE: bool>(base: &[Option<Qos>], waits_for: &[Option<usize>], enabled: bool, effective: &mut [Option<Qos>]) -> crate::pi_work::PiWork {
     let n = base.len().min(waits_for.len()).min(effective.len());
     effective[..n].copy_from_slice(&base[..n]);
+    let mut work = crate::pi_work::PiWork::EMPTY;
+    if MEASURE { work.calls = 1; work.slots(n as u64); }
     if !enabled {
-        return;
+        return work;
     }
     // 每个等待者把自己的档位沿链向下传：持有者的有效档位因此是全部直接、间接等待者档位的最大值。
     for (i, b) in base[..n].iter().enumerate() {
+        if MEASURE { work.slots(1); }
         let Some(q) = *b else { continue };
+        if MEASURE { work.live(); }
         let mut next = waits_for[i];
         let mut steps = 0;
         while let Some(j) = next {
             if j >= n || steps >= n {
+                if MEASURE { work.truncate(); }
                 break;
             }
             if let Some(e) = effective[j] {
@@ -97,8 +110,10 @@ pub fn resolve(base: &[Option<Qos>], waits_for: &[Option<usize>], enabled: bool,
             }
             next = waits_for[j];
             steps += 1;
+            if MEASURE { work.step(steps as u64); }
         }
     }
+    work
 }
 
 /// 从同一把锁的等待者中选出交接对象：有效档位最高者优先，同档取等待序号最小（等得最久）者。
