@@ -109,3 +109,6 @@ pub mod wcet;
 
 #[cfg(all(feature = "s2-fuzz", target_arch = "x86_64"))]
 pub mod s2;
+
+#[cfg(all(feature = "krn1-soak", target_arch = "x86_64"))]
+pub mod soak;

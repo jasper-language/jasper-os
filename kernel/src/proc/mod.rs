@@ -901,6 +901,15 @@ pub fn spawn_thread(
     arg0: u64,
     arg1: u64,
 ) -> Result<(TaskId, ObjId), ProcError> {
+    spawn_thread_affinity(id, name, entry, stack, arg0, arg1, None)
+}
+
+/// Author: chatgpt. Install affinity before publishing the runnable thread.
+/// The existing rollback path owns all resources if spawn_on rejects the set.
+pub(crate) fn spawn_thread_affinity(
+    id: ObjId, name: &'static str, entry: u64, stack: u64,
+    arg0: u64, arg1: u64, affinity: Option<kernel_core::smp::CpuSet>,
+) -> Result<(TaskId, ObjId), ProcError> {
     // 栈顶为 0 时 `stack - 1` 会下溢：用检查式算术，失败按非法地址拒绝
     let stack_last = stack.checked_sub(1).ok_or(ProcError::Map(MapError::InvalidAddress))?;
     if !in_private_window(entry) || !in_private_window(stack_last) {
@@ -971,9 +980,10 @@ pub fn spawn_thread(
     // 新线程与进程的其它线程同属一个 CPU 组。交给调度器之后再核对一次：设置上限与创建线程并发时，
     // 两边总有一边把新线程放进组里。
     let group = with_proc(id, |p| Ok(p.cpu_group)).ok().flatten();
-    let spawned = match group {
-        Some(g) => sched::spawn_in(task, name, thread_entry, g),
-        None => sched::spawn(task, name, thread_entry),
+    let spawned = match (group, affinity) {
+        (group, Some(set)) => sched::spawn_on(task, name, thread_entry, group, set),
+        (Some(g), None) => sched::spawn_in(task, name, thread_entry, g),
+        (None, None) => sched::spawn(task, name, thread_entry),
     };
     if spawned.is_err() {
         return Err(rollback(ProcError::NoTaskSlot, true));
@@ -1246,6 +1256,15 @@ pub fn transfer(from: ObjId, h: HandleId, to: ObjId) -> Result<HandleId, ProcErr
         // 接收方必须仍可接收句柄（Running），且句柄表有空位
         if receiver(t, to)?.handles.free_slots() == 0 {
             return Err(ProcError::Handle(HandleError::TableFull));
+        }
+        // chatgpt: distinct-process commit uses the Kani-checked real mechanism.
+        if from != to {
+            let (source, destination) = t.get_pair_mut(from, to).map_err(|_| ProcError::NoSuchProcess)?;
+            let (KObject::Process(source), KObject::Process(destination)) = (source, destination)
+                else { return Err(ProcError::NoSuchProcess); };
+            let moved = source.handles.transfer_to(h, &mut destination.handles).map_err(ProcError::Handle)?;
+            revoke_device_mappings_for_handle(source, h);
+            return Ok(moved);
         }
         // —— 提交：以下步骤在检查通过后不会失败 ——
         if let Ok(KObject::Process(p)) = t.get_mut(from) {

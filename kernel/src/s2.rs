@@ -38,10 +38,11 @@ fn start(worker: u64, cpu: usize, probes: u64) -> Option<(ObjId, bool)> {
             proc::map_new(pid, stack - i * 4096, MapFlags::USER | MapFlags::WRITE).ok()?;
         }
         let arg = worker | (probes << 32);
-        let (task, _) = proc::spawn_thread(pid, "s2-worker", entry, stack, arg, 0).ok()?;
+        // Author: chatgpt. Affinity must be installed before publication: a
+        // short-lived worker may otherwise finish before set_affinity runs.
         let mut set = CpuSet::EMPTY;
         set.insert(cpu);
-        sched::set_affinity(task, set).ok()?;
+        proc::spawn_thread_affinity(pid, "s2-worker", entry, stack, arg, 0, Some(set)).ok()?;
         Some(())
     })()
     .is_some();

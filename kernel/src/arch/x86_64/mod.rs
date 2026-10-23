@@ -326,3 +326,9 @@ impl Platform for X86_64 {
         unsafe { core::arch::x86_64::_rdtsc() }
     }
 }
+
+/// Poll the exclusively owned test UART between soak rounds.
+#[cfg(feature = "krn1-soak")]
+pub fn soak_stop_requested() -> bool {
+    uart::try_read_byte() == Some(b'S')
+}

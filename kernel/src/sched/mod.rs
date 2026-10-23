@@ -57,9 +57,103 @@ use scheduler::{BlockError, Cause, CpuGroupId, GroupError, IdleStep, QosError, S
 static KERNEL_SCHED: IrqSpinLock<Scheduler<KernelPolicy>> =
     IrqSpinLock::ranked(crate::lockorder::SCHED, Scheduler::new(kernel_policy()));
 
+// Author: chatgpt. Every scheduler access uses this guard, including switch
+// preparation. Drop publishes after mutation, while the global IRQ lock remains
+// held. Fast readers use the last committed snapshot until this publication;
+// they never read mutable scheduler state. Owner switches cannot overlap an
+// IRQ-masked fast call on that same CPU.
+static YIELD_GATES: [kernel_core::yield_gate::YieldGate; kernel_core::smp::MAX_CPUS] =
+    [const { kernel_core::yield_gate::YieldGate::new() }; kernel_core::smp::MAX_CPUS];
+// Lock order: global scheduler -> CPU leaves in ascending order. Fast timer
+// uses try_lock on its one leaf, drops it before any global fallback. IRQs are
+// already masked in timer context. No allocation or callbacks in the leaf path.
+static TICK_LEASES: [kernel_core::ticket::TicketLock<kernel_core::tick_lease::TickLease>; kernel_core::smp::MAX_CPUS] =
+    [const { kernel_core::ticket::TicketLock::new(kernel_core::tick_lease::TickLease::new()) }; kernel_core::smp::MAX_CPUS];
+type TickGuard = kernel_core::ticket::TicketGuard<'static, kernel_core::tick_lease::TickLease>;
+struct StateGuard(crate::sync::IrqSpinLockGuard<'static, Scheduler<KernelPolicy>>,
+    [Option<TickGuard>; kernel_core::smp::MAX_CPUS]);
+impl core::ops::Deref for StateGuard {
+    type Target = Scheduler<KernelPolicy>;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl core::ops::DerefMut for StateGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+}
+impl Drop for StateGuard {
+    fn drop(&mut self) {
+        let allow = self.0.fast_yield_cpus();
+        for (c, gate) in YIELD_GATES.iter().enumerate() { gate.publish(allow.contains(c)); }
+        let owners = self.0.tick_lease_owners();
+        for (c, leaf) in self.1.iter_mut().enumerate() {
+            if let Some(leaf) = leaf { leaf.publish(owners[c]); }
+            else { assert!(owners[c].is_none(), "new online CPU was not locked"); }
+        }
+        // Drop all leaves BEFORE the IRQ guard unlocks/restores interrupts.
+        // Field-drop order alone would restore IRQs while leaves were held.
+        for leaf in &mut self.1 { drop(leaf.take()); }
+    }
+}
+// Author: chatgpt. Diagnostic-only per-CPU counters. Updates, reset and snapshot
+// are serialized by the SAME global guard, never used to grant permissions.
+// Columns: transactions, leaf acquisitions, acquisitions with observed nonzero
+// spin waiting, spin iterations. The third is NOT a try_lock-failure count.
+// Counters wrap at u32; only bounded, non-wrapping diagnostic windows are valid.
+#[cfg(feature = "krn2-observe")]
+static SYNC_WORK: [[core::sync::atomic::AtomicU32; 4]; kernel_core::smp::MAX_CPUS] =
+    [const { [const { core::sync::atomic::AtomicU32::new(0) }; 4] }; kernel_core::smp::MAX_CPUS];
+#[cfg(feature = "krn2-observe")]
+pub fn sync_work_stats() -> [u32; 4] {
+    let _state = lock_state(); // This observation transaction is included.
+    let mut total = [0u32; 4];
+    for row in &SYNC_WORK { for (sum, value) in total.iter_mut().zip(row) {
+        *sum = sum.wrapping_add(value.load(core::sync::atomic::Ordering::Relaxed));
+    }}
+    total
+}
+fn lock_state() -> StateGuard {
+    let mut s = KERNEL_SCHED.lock();
+    let mut leaves: [Option<TickGuard>; kernel_core::smp::MAX_CPUS] = [const { None }; kernel_core::smp::MAX_CPUS];
+    // Author: chatgpt. Online membership only grows under this global lock.
+    // Include the caller BEFORE its first cpu_online registration. Other offline
+    // CPUs have never received permits; they cannot produce pending accounting.
+    let mut participants = s.online();
+    participants.insert(crate::arch::cpu_index());
+    #[cfg(feature = "krn2-observe")]
+    let mut work = [1u32, 0, 0, 0];
+    for (c, lock) in TICK_LEASES.iter().enumerate() {
+        if participants.contains(c) {
+            #[cfg(feature = "krn2-observe")]
+            {
+                let (guard, spins) = lock.lock_counted();
+                work[1] += 1;
+                work[2] += (spins != 0) as u32;
+                work[3] = work[3].wrapping_add(spins);
+                leaves[c] = Some(guard);
+            }
+            #[cfg(not(feature = "krn2-observe"))]
+            { leaves[c] = Some(lock.lock()); }
+        }
+    }
+    #[cfg(feature = "krn2-observe")]
+    for (counter, value) in SYNC_WORK[crate::arch::cpu_index()].iter().zip(work) {
+        counter.fetch_add(value, core::sync::atomic::Ordering::Relaxed);
+    }
+    // A pending voluntary yield forbids a new fast tick. Therefore a deferred
+    // tick always precedes any still-pending yield; charge first, then reset the
+    // Watchdog streak. This preserves order instead of treating resets as sums.
+    for (c, leaf) in leaves.iter_mut().enumerate() {
+        if let Some(owner) = leaf.as_mut().and_then(|leaf| leaf.drain()) { s.drain_local_tick(c, owner); }
+    }
+    for (c, gate) in YIELD_GATES.iter().enumerate() {
+        if gate.take_yielded() { s.note_fast_yield(c); }
+    }
+    s.drain_wake_mailboxes();
+    StateGuard(s, leaves)
+}
+
 /// 以共享借用访问调度器（持锁、关中断执行：时钟中断与其他处理器也会访问调度器状态）。
 fn with<R>(f: impl FnOnce(&Scheduler<KernelPolicy>) -> R) -> R {
-    f(&KERNEL_SCHED.lock())
+    f(&lock_state())
 }
 
 /// 以独占借用访问调度器（持锁、关中断执行）；调用者不得在闭包内触发栈切换。
@@ -67,11 +161,25 @@ fn with<R>(f: impl FnOnce(&Scheduler<KernelPolicy>) -> R) -> R {
 fn with_mut<R>(f: impl FnOnce(&mut Scheduler<KernelPolicy>) -> R) -> R {
     let started = crate::arch::cycles();
     let (r, kicks) = {
-        let mut s = KERNEL_SCHED.lock();
+        let mut s = lock_state();
+        #[cfg(feature = "krn2-observe")]
+        let (slot, generation) = s.raw_callback_identity();
+        #[cfg(feature = "krn2-observe")]
+        let start = kernel_core::raw_timing::Endpoint { cpu: cpu::cpu_index(), counter: cpu::cycles() };
         let r = f(&mut s);
+        #[cfg(feature = "krn2-observe")]
+        {
+            let end = kernel_core::raw_timing::Endpoint { cpu: cpu::cpu_index(), counter: cpu::cycles() };
+            // Path 1 = callback only, NOT wake latency. No wait round exists.
+            let _ = s.raw_callbacks.push(kernel_core::raw_timing::Sample {
+                path: 1, slot, generation, wait_round: 0, start, end,
+            });
+        }
         (r, s.take_kicks())
     };
-    // WCET 证据：调度器锁的持有时间（含回调内的全部工作）。
+    // Observed with_mut interval: includes global-lock waiting, leaf drain, callback,
+    // publication and guard release; excludes send_kicks. Not pure lock hold time
+    // or a proven WCET bound. Direct lock_state/with paths are not sampled here.
     crate::wcet::record_lock(crate::arch::cycles().wrapping_sub(started));
     send_kicks(kicks);
     r
@@ -87,7 +195,13 @@ fn send_kicks(kicks: CpuSet) {
 
 /// 切换完成：在新执行流的开头（关中断时）调用，释放刚换下的任务并发出由此产生的重新调度请求。
 fn finish_switch() {
-    with_mut(|s| s.finish_switch());
+    #[cfg(feature = "krn2-observe")]
+    let end = kernel_core::raw_timing::Endpoint { cpu: cpu::cpu_index(), counter: cpu::cycles() };
+    with_mut(|s| {
+        #[cfg(feature = "krn2-observe")]
+        s.note_raw_resume(end, 3); // post-switch/trampoline Rust entry hook
+        s.finish_switch();
+    });
 }
 
 /// 调度器锁遇到占用的次数（多处理器同时访问调度器时增长）。
@@ -102,8 +216,39 @@ pub fn lock_stats() -> crate::sync::LockStats {
     KERNEL_SCHED.stats()
 }
 
+// Author: chatgpt. Test-only batching invokes the unmodified production wake
+// handler while holding one scheduler transaction. No fake queue entries.
+#[cfg(feature = "fault-inject")]
+pub fn fault_wake_batch(ids: &[TaskId]) {
+    assert!(ids.len() <= scheduler::WAKE_MAILBOX_CAPACITY + 1);
+    with_mut(|s| { for &id in ids { s.wake(id); } });
+}
+#[cfg(feature = "fault-inject")]
+pub fn fault_delay_deadline_timer(c: usize, enable: bool) { with_mut(|s| s.fault_delay_deadline_timer(c, enable)); }
+#[cfg(feature = "fault-inject")]
+pub fn fault_deadline_trace(c: usize) -> Option<scheduler::DeadlineTrace> { with(|s| s.fault_deadline_trace(c)) }
+pub fn deadline_owners(id: TaskId) -> Option<(Option<usize>, Option<usize>)> { with(|s| s.deadline_owners(id)) }
+pub fn deadline_stats() -> ([u32; kernel_core::smp::MAX_CPUS], [u32; kernel_core::smp::MAX_CPUS]) { with(|s| s.deadline_stats()) }
+pub fn rt_state(id: TaskId) -> Option<(u32,u32,u64)> { with(|s| s.rt_state(id)) }
+pub fn remote_wake_stats() -> (u32, u32) { with(|s| s.remote_wake_stats()) }
+
+pub fn local_tick_bypasses() -> u32 {
+    let state = lock_state();
+    state.1.iter().flatten().fold(0u32, |n, leaf| n.wrapping_add(leaf.hits()))
+}
+
 /// 清零调度器锁的争用测量值。
 pub fn reset_lock_stats() {
+    #[cfg(feature = "krn2-observe")]
+    {
+        let mut state = lock_state();
+        state.raw_callbacks = kernel_core::raw_timing::Samples::new();
+        KERNEL_SCHED.reset_stats();
+        for row in &SYNC_WORK { for value in row {
+            value.store(0, core::sync::atomic::Ordering::Relaxed);
+        }}
+    }
+    #[cfg(not(feature = "krn2-observe"))]
     KERNEL_SCHED.reset_stats();
 }
 
@@ -343,9 +488,20 @@ pub fn set_watchdog_threshold(ticks: u32) -> u32 {
     with_mut(|s| s.set_watchdog_threshold(ticks))
 }
 
+pub fn fast_yield_count() -> u64 {
+    YIELD_GATES.iter().map(|g| g.hits() as u64).sum()
+}
+
 /// 主动让出 CPU。
 pub fn yield_now() {
+    let was_enabled = cpu::irq_save_disable();
+    let c = cpu::cpu_index();
+    if !crate::smp::percpu::this().resched_pending() && YIELD_GATES[c].try_yield() {
+        cpu::irq_restore(was_enabled);
+        return;
+    }
     yield_with_cause(Cause::YIELD);
+    cpu::irq_restore(was_enabled);
 }
 
 /// 带原因的让出：准备切换后在**没有任何借用**的情况下执行真正的栈切换。
@@ -358,7 +514,7 @@ pub fn yield_with_cause(cause: &'static str) {
     let kernel_space = *KERNEL_SPACE.call_once(cpu::current_space);
     // 锁与借用都在本块内结束，不跨越下面的栈切换（中断仍关着）。
     let (plan, kicks) = {
-        let mut s = KERNEL_SCHED.lock();
+        let mut s = lock_state();
         let plan = s.prepare_switch(cause);
         (plan, s.take_kicks())
     };
@@ -381,6 +537,12 @@ pub fn yield_with_cause(cause: &'static str) {
         unsafe { switch_context(plan.old, plan.new) };
         // 回到了本执行流（可能在另一个处理器上）：完成那一次把我们切回来的切换
         finish_switch();
+    } else {
+        #[cfg(feature = "krn2-observe")]
+        {
+            let end = kernel_core::raw_timing::Endpoint { cpu: cpu::cpu_index(), counter: cpu::cycles() };
+            with_mut(|s| s.note_raw_resume(end, 4)); // continued on the same context
+        }
     }
     cpu::irq_restore(was_enabled);
 }
@@ -669,6 +831,8 @@ impl kernel_core::wait::TimeSource for TickClock {
 /// 被切走任务的中断帧留在它自己的栈上，将来切回时从这里返回、经中断返回恢复它被打断的位置与中断标志。
 /// EOI 必须先发，否则在切回本任务之前中断控制器不会再投递定时器中断。
 pub fn on_timer_interrupt() {
+    // Full locked decision below consumes requests already published before it.
+    crate::smp::percpu::this().take_resched();
     let now = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
     let preemption = PREEMPTION.load(Ordering::Relaxed);
     if let Some(cause) = with_mut(|s| s.tick(now, preemption)) {
@@ -680,6 +844,14 @@ pub fn on_timer_interrupt() {
 /// 到检查点做周期均衡，需要时就地切换。空闲执行流被打断时不在这里切换（中断返回后空闲循环自己取任务）。
 /// Local timer entry of a secondary processor.
 pub fn on_local_timer() {
+    let requested = crate::smp::percpu::this().take_resched();
+    if !requested {
+        let accepted = {
+            let c = cpu::cpu_index();
+            TICK_LEASES[c].try_lock().is_some_and(|mut leaf| !YIELD_GATES[c].pending_yield() && leaf.try_tick())
+        }; // leaf released before any path can take the global scheduler lock
+        if accepted { return; }
+    }
     let preemption = PREEMPTION.load(Ordering::Relaxed);
     let idle = crate::smp::percpu::this().current() == crate::smp::percpu::IDLE_SLOT;
     if let Some(cause) = with_mut(|s| s.local_tick(preemption)) {
@@ -687,4 +859,28 @@ pub fn on_local_timer() {
             yield_with_cause(cause);
         }
     }
+}
+
+// Author: chatgpt. Counts real drained RT and shared-group leased ticks.
+pub fn limit_tick_stats() -> [u32; 2] { with(|s| s.limit_tick_stats()) }
+
+// Author: chatgpt. Copy under the existing scheduler guard, print after release.
+// No additional lock or scheduler decision consumes these diagnostic records.
+#[cfg(feature = "krn2-observe")]
+pub fn raw_callback_snapshot() -> kernel_core::raw_timing::Samples<64> {
+    lock_state().raw_callbacks
+}
+
+// Author: chatgpt. Storage window only; pending starts may predate this reset.
+#[cfg(feature = "krn2-observe")]
+pub fn reset_raw_wakes() {
+    let mut s = lock_state();
+    s.raw_pending_at_reset = s.raw_pending_count();
+    s.raw_wakes = kernel_core::raw_timing::Samples::new();
+    s.raw_wake_errors = [0; 3];
+}
+#[cfg(feature = "krn2-observe")]
+pub fn raw_wake_snapshot() -> (kernel_core::raw_timing::Samples<64>, [u64; 3], usize, usize) {
+    let s = lock_state();
+    (s.raw_wakes, s.raw_wake_errors, s.raw_pending_at_reset, s.raw_pending_count())
 }

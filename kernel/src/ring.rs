@@ -387,7 +387,8 @@ pub fn create_for(pid: ObjId, capacity: u64) -> Result<HandleId, i64> {
     let obj = KObject::Ring(Box::new(RingObj { owner: pid, sm, running: Vec::new(), pinned: false }));
     kobj::with(|t| {
         proc::syscalls_in(t, pid).map_err(perr)?;
-        if proc::ring_quota_in(t, pid).map(|q| q.rings).unwrap_or(u32::MAX) >= MAX_RINGS_PER_PROCESS {
+        if proc::ring_quota_in(t, pid).and_then(|q|
+            kernel_core::quota::reserve_u32(q.rings, 1, MAX_RINGS_PER_PROCESS)).is_none() {
             return Err(err(SYSTEM_ERROR_QUOTA_EXCEEDED));
         }
         let (h, id) = proc::grant_new_in(t, pid, obj, ObjectType::Ring, RING_RIGHTS).map_err(perr)?;
@@ -446,7 +447,7 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
         Some(q) => q.in_flight,
         None => return reject(t, work, err(SYSTEM_ERROR_RIGHTS_DENIED)),
     };
-    if quota >= MAX_IN_FLIGHT_PER_PROCESS {
+    if kernel_core::quota::reserve_u32(quota, 1, MAX_IN_FLIGHT_PER_PROCESS).is_none() {
         return reject(t, work, err(SYSTEM_ERROR_QUOTA_EXCEEDED));
     }
     let deadline = match work {

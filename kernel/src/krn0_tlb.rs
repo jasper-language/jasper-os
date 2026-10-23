@@ -54,8 +54,10 @@ fn write_frame(frame: kernel_core::frame::PhysFrame, value: u64) -> bool {
 
 fn writer() {
     WRITER_CPU.store(arch::cpu_index() as u32, Ordering::Release);
-    // spawn_on can schedule us before the caller creates the reader.
-    // Yield during startup so the boot task can finish creating both peers.
+    // chatgpt: spawn_on can schedule us before the caller creates the reader.
+    // The reader is published on CPU1 before this CPU0 writer is published.
+    // Yield alone cannot return a CPU0 writer to its boot creator when it is
+    // the sole runnable worker. The creation order below closes that gap.
     PARTICIPANTS.fetch_or(1, Ordering::Release);
     while PARTICIPANTS.load(Ordering::Acquire) != 3 { sched::yield_now(); }
     let mut failed = false;
@@ -182,8 +184,10 @@ pub fn run(online: usize) {
         Err(_) => false,
     };
     let free0 = mm::frame::free_frames();
-    let spawned = sched::spawn_on(TaskId(TASK_ID), "krn0-tlb-writer", writer, None, only(0)).is_ok()
-        && sched::spawn_on(TaskId(TASK_ID + 1), "krn0-tlb-reader", reader, None, only(1)).is_ok();
+    // Author: chatgpt. Publish the AP peer first: if the BSP writer preempts
+    // its creator immediately after publication, both participants now exist.
+    let spawned = sched::spawn_on(TaskId(TASK_ID + 1), "krn0-tlb-reader", reader, None, only(1)).is_ok()
+        && sched::spawn_on(TaskId(TASK_ID), "krn0-tlb-writer", writer, None, only(0)).is_ok();
     if spawned {
         sched::run();
     }

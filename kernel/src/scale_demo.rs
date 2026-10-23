@@ -121,11 +121,217 @@ fn interactive() {
 }
 
 /// 锁争用测量：反复让出（取调度器锁）并读对象表统计（取对象表锁）。
+// Author: chatgpt. Publish AP tasks before CPU0; all participants reset the
+// measurement once via the last-arrival leader, then perform the SAME workload.
+static CHURN_TARGET: AtomicU32 = AtomicU32::new(0);
+static CHURN_READY: AtomicU32 = AtomicU32::new(0);
+static CHURN_GO: AtomicU32 = AtomicU32::new(0);
+static CHURN_DONE: AtomicU32 = AtomicU32::new(0);
+static CHURN_MASK: AtomicU32 = AtomicU32::new(0);
 fn churn() {
+    let target = CHURN_TARGET.load(Ordering::Acquire);
+    CHURN_MASK.fetch_or(1u32 << crate::arch::cpu_index(), Ordering::AcqRel);
+    if CHURN_READY.fetch_add(1, Ordering::AcqRel) + 1 == target {
+        sched::reset_lock_stats();
+        kobj::reset_lock_stats();
+        CHURN_GO.store(1, Ordering::Release);
+    }
+    while CHURN_GO.load(Ordering::Acquire) == 0 { core::hint::spin_loop(); }
+    if CHURN_GO.load(Ordering::Acquire) != 1 { return; }
     for _ in 0..CHURN_ROUNDS {
         sched::yield_now();
         let _ = kobj::stats();
     }
+    CHURN_DONE.fetch_add(1, Ordering::Release);
+}
+
+// Author: chatgpt. Observe actual registered heap ownership before migration.
+static TIMED_CPU: AtomicU32 = AtomicU32::new(0);
+fn timed_remote_worker() {
+    sched::sleep_ticks(30);
+    TIMED_CPU.store(crate::arch::cpu_index() as u32 + 1, Ordering::Release);
+}
+fn deadline_owner_contract(n: usize) {
+    if n < 2 { return; }
+    let id = TaskId(0x444541444f574e);
+    let saved = baseline();
+    TIMED_CPU.store(0, Ordering::Relaxed);
+    let old_idle = sched::set_idle_tick(64);
+    let mut first = CpuSet::EMPTY; first.insert(1);
+    let target = if n > 2 { 2 } else { 1 };
+    let mut dest = CpuSet::EMPTY; dest.insert(target);
+    let spawned = quiet(|| sched::spawn_on(id, "deadline-owner", timed_remote_worker, None, first).is_ok());
+    let limit = sched::timer_ticks() + 100;
+    while sched::deadline_owners(id).and_then(|(w,_)|w).is_none() && sched::timer_ticks() < limit { sched::sleep_ticks(1); }
+    let registered = sched::deadline_owners(id).is_some_and(|(w,_)|w == Some(1));
+    let moved = sched::set_affinity(id, dest).is_ok() && sched::deadline_owners(id).is_some_and(|(w,_)|w == Some(target));
+    #[cfg(feature = "fault-inject")]
+    sched::fault_delay_deadline_timer(target, true);
+    let before = sched::deadline_stats().0[target];
+    sched::run();
+    let consumed = sched::deadline_stats().0[target].wrapping_sub(before) > 0;
+    let ran = TIMED_CPU.load(Ordering::Acquire) == target as u32 + 1;
+    #[cfg(feature = "fault-inject")]
+    {
+        let trace = sched::fault_deadline_trace(target).unwrap();
+        let ipi = trace.ipis_after.wrapping_sub(trace.ipis_before);
+        let linked = trace.stopped && trace.consumed && trace.consumer == target
+            && trace.requested_at >= trace.at && trace.consumed_at >= trace.requested_at && ipi > 0;
+        sched::fault_delay_deadline_timer(target, false);
+        check(linked, "延迟本地到期timer后必须关联停表、BSP到期通知、IPI接收和owner消费");
+        kprintln!("[JSR-DEADLINE-IPI] slot={} generation={} at={} requested={} consumed={} stopped={} ipis={} cpu={} linked={}",
+            trace.token.slot, trace.token.generation, trace.at, trace.requested_at, trace.consumed_at, trace.stopped, ipi, trace.consumer, linked);
+    }
+    sched::set_idle_tick(old_idle);
+    check(spawned && registered && moved && consumed && ran, "每核到期堆迁移后必须由目标CPU唤醒");
+    check(saved == baseline(), "每核到期唤醒演练资源不守恒");
+    kprintln!("[JSR-DEADLINE-OWNER] registered={} moved={} target={} consumed={} ran={} reclaimed={}", registered, moved, target, consumed, ran, saved == baseline());
+}
+// Author: chatgpt. Two APs share one real group and independent RT limits.
+static BUDGET_STOP: AtomicU32 = AtomicU32::new(0);
+fn limit_worker() { while BUDGET_STOP.load(Ordering::Acquire) == 0 { core::hint::spin_loop(); } }
+fn limit_tick_contract(n: usize) {
+    if n < 3 { return; }
+    let saved = baseline();
+    let before = sched::limit_tick_stats();
+    BUDGET_STOP.store(0, Ordering::Relaxed);
+    let group = sched::create_cpu_group(900).expect("limit lease group");
+    let mut configured = true;
+    for c in 1..=2 {
+        let id = TaskId(0x42554447455400 + c as u64);
+        let mut cpus = CpuSet::EMPTY; cpus.insert(c);
+        configured &= quiet(|| sched::spawn_on(id, "limit-credit", limit_worker, None, cpus).is_ok());
+        configured &= sched::assign_cpu_group(id, Some(group)).is_ok();
+        configured &= sched::set_rt(id, 4, 16);
+    }
+    // Bootstrap task cannot block; sleep_ticks(80) would merely wait for one IRQ.
+    // Measure the actual global clock instead of assuming that call slept 80 ticks.
+    let until = sched::timer_ticks() + 80;
+    while sched::timer_ticks() < until { sched::sleep_ticks(1); }
+    let after = sched::limit_tick_stats();
+    let used = sched::cpu_group_stats(group).unwrap().used_ticks;
+    BUDGET_STOP.store(1, Ordering::Release);
+    for c in 1..=2 { sched::set_rt(TaskId(0x42554447455400 + c as u64), 0, 0); }
+    sched::run();
+    let released = sched::release_cpu_group(group).is_ok();
+    let rt = after[0].wrapping_sub(before[0]);
+    let shared = after[1].wrapping_sub(before[1]);
+    check(configured && rt > 0 && shared > 0 && used >= shared as u64 && released, "预算单tick必须实际归并RT与共享组扣费");
+    check(saved == baseline(), "预算单tick演练资源不守恒");
+    kprintln!("[JSR-BUDGET-TICK] rt={} shared={} used={} configured={} reclaimed={}", rt, shared, used, configured, saved == baseline());
+}
+static RT_STOP: AtomicU32 = AtomicU32::new(0);
+fn local_rt_worker() { while RT_STOP.load(Ordering::Acquire) == 0 { core::hint::spin_loop(); } }
+fn local_rt_contract(n: usize) {
+    if n < 2 { return; }
+    let id = TaskId(0x52544c4f43414c);
+    let saved = baseline();
+    RT_STOP.store(0, Ordering::Relaxed);
+    let mut cpus = CpuSet::EMPTY; cpus.insert(1);
+    let old_refills = sched::deadline_stats().1[1];
+    let spawned = quiet(|| sched::spawn_on(id, "rt-local", local_rt_worker, None, cpus).is_ok());
+    let configured = sched::set_rt(id, 1, 4);
+    let limit = sched::timer_ticks() + 200;
+    let mut exhausted = false;
+    while sched::timer_ticks() < limit {
+        exhausted |= sched::rt_state(id).is_some_and(|(remaining,period,next)| period == 4 && remaining == 0 && sched::timer_ticks() < next);
+        if exhausted && sched::deadline_stats().1[1].wrapping_sub(old_refills) > 0 { break; }
+        sched::sleep_ticks(1);
+    }
+    let refilled = sched::deadline_stats().1[1].wrapping_sub(old_refills) > 0;
+    // Author: chatgpt. Keep the worker alive until its configuration API has
+    // completed; publishing STOP first permits exit before set_rt finds it.
+    let disabled = sched::set_rt(id, 0, 0);
+    RT_STOP.store(1, Ordering::Release);
+    sched::run();
+    check(spawned && configured && exhausted && refilled && disabled, "AP必须实际扣完预算并由本核到期堆补充");
+    check(saved == baseline(), "AP实时记账演练资源不守恒");
+    kprintln!("[JSR-RT-LOCAL] exhausted={} refilled={} disabled={} reclaimed={}", exhausted, refilled, disabled, saved == baseline());
+}
+
+#[cfg(feature = "fault-inject")]
+static FULL_AWAKE: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "fault-inject")]
+fn full_mailbox_worker() { sched::sleep_ticks(1000); FULL_AWAKE.fetch_add(1, Ordering::Release); }
+#[cfg(feature = "fault-inject")]
+fn mailbox_full_contract(n: usize) {
+    if n < 2 { return; }
+    const COUNT: usize = crate::sched::scheduler::WAKE_MAILBOX_CAPACITY + 1;
+    let ids: [TaskId; COUNT] = core::array::from_fn(|i| TaskId(0x46554c4c0000 + i as u64));
+    let saved = baseline();
+    FULL_AWAKE.store(0, Ordering::Relaxed);
+    let mut cpus = CpuSet::EMPTY; cpus.insert(1);
+    let spawned = quiet(|| ids.iter().all(|&id| sched::spawn_on(id, "mailbox-full", full_mailbox_worker, None, cpus).is_ok()));
+    let limit = sched::timer_ticks() + 100;
+    let registered = loop {
+        let all = ids.iter().all(|&id| sched::deadline_owners(id).is_some_and(|(w,_)| w == Some(1)));
+        if all || sched::timer_ticks() >= limit { break all; }
+        sched::sleep_ticks(1);
+    };
+    let before = sched::remote_wake_stats();
+    let started = sched::timer_ticks();
+    sched::fault_wake_batch(&ids);
+    sched::run();
+    let after = sched::remote_wake_stats();
+    let queued = after.0.wrapping_sub(before.0);
+    let fallback = after.1.wrapping_sub(before.1);
+    let returned = FULL_AWAKE.load(Ordering::Acquire) as usize;
+    let timely = sched::timer_ticks().saturating_sub(started) < 100;
+    check(spawned && registered && queued as usize == COUNT-1 && fallback == 1 && returned == COUNT && timely,
+        "邮箱满后同步回退且原有队列与额外唤醒全部返回，不能等待自然超时");
+    check(saved == baseline(), "满邮箱唤醒演练资源不守恒");
+    kprintln!("[JSR-WAKE-FULL] queued={} fallback={} returned={}/{} timely={} reclaimed={}", queued, fallback, returned, COUNT, timely, saved == baseline());
+}
+
+// Author: chatgpt. CPU1 blocks; BSP routes its wake through the real mailbox.
+static REMOTE_STAGE: AtomicU32 = AtomicU32::new(0);
+fn remote_sleeper() {
+    REMOTE_STAGE.store(1, Ordering::Release);
+    sched::sleep_ticks(1000);
+    REMOTE_STAGE.store(2, Ordering::Release);
+}
+fn remote_wake_contract(n: usize) {
+    if n < 2 { return; }
+    REMOTE_STAGE.store(0, Ordering::Relaxed);
+    let saved = baseline();
+    let before = sched::remote_wake_stats().0;
+    let mut cpus = CpuSet::EMPTY; cpus.insert(1);
+    let spawned = quiet(|| sched::spawn_on(TaskId(0x57414b45), "remote-sleeper", remote_sleeper, None, cpus).is_ok());
+    let deadline = sched::timer_ticks() + 100;
+    while REMOTE_STAGE.load(Ordering::Acquire) == 0 && sched::timer_ticks() < deadline { sched::sleep_ticks(1); }
+    // The stage store precedes block_current; one extra tick lets CPU1 commit
+    // the block. The generous 1000-tick sleep cannot count as an explicit wake.
+    sched::sleep_ticks(1);
+    let started = sched::timer_ticks();
+    sched::wake(TaskId(0x57414b45));
+    sched::run();
+    let routed = sched::remote_wake_stats().0.wrapping_sub(before);
+    let timely = sched::timer_ticks().saturating_sub(started) < 100;
+    let returned = REMOTE_STAGE.load(Ordering::Acquire) == 2;
+    check(spawned && routed > 0 && timely && returned, "跨核消息必须唤醒真实阻塞任务而非等超时");
+    check(saved == baseline(), "跨核唤醒演练资源不守恒");
+    kprintln!("[JSR-WAKE-MSG] routed={} timely={} returned={} reclaimed={}", routed, timely, returned, saved == baseline());
+}
+
+// Author: chatgpt. Exercise the real scheduler index, not a shadow map.
+fn identity_worker() {}
+fn identity_contracts() {
+    const ID: TaskId = TaskId(0x4b524e324944);
+    let before = baseline();
+    let (created, duplicate, unchanged) = quiet(|| {
+        let first = sched::spawn_on(ID, "index-first", identity_worker, None, CpuSet::first(1));
+        let ticks = sched::cpu_ticks(ID);
+        let duplicate = sched::spawn_on(ID, "index-duplicate", identity_worker, None, CpuSet::first(1));
+        (first.is_ok(), duplicate == Err(SpawnError::DuplicateId), sched::cpu_ticks(ID) == ticks)
+    });
+    check(created && duplicate && unchanged, "活任务标签重复必须拒绝且保持原任务");
+    sched::run();
+    check(sched::cpu_ticks(ID).is_some(), "退出后必须保留历史记账查询");
+    let reused = quiet(|| sched::spawn_on(ID, "index-reused", identity_worker, None, CpuSet::first(1)).is_ok());
+    check(reused, "已退出且换下的显式标签应可复用");
+    sched::run();
+    check(sched::cpu_ticks(ID).is_some() && baseline() == before, "标签复用后历史可查且资源守恒");
+    kprintln!("[JSR-TASK-INDEX] duplicate={} unchanged={} reused={} reclaimed={}", duplicate, unchanged, reused, baseline() == before);
 }
 
 /// 在关闭抢占的情况下执行 `f`（批量创建任务期间引导线程不被抢走处理器），之后恢复。
@@ -182,11 +388,34 @@ pub fn run() {
     let prev_preemption = sched::set_preemption(true);
     let start = baseline();
     let n = sched::online_cpus().len();
+    #[cfg(feature = "krn2-observe")]
+    sched::reset_raw_wakes();
     refusals();
+    identity_contracts();
+    remote_wake_contract(n);
+    #[cfg(feature = "fault-inject")]
+    mailbox_full_contract(n);
+    deadline_owner_contract(n);
+    local_rt_contract(n);
+    limit_tick_contract(n);
     scale(n);
     overload(n);
     recovery(n);
     contention(n);
+    #[cfg(feature = "krn2-observe")]
+    {
+        let (raw, errors, carried, pending) = sched::raw_wake_snapshot();
+        let valid = !raw.entries().is_empty() && raw.entries().iter().flatten().all(|r|
+            matches!(r.path, 3 | 4) && r.generation > 0 && r.wait_round > 0) && errors == [0; 3];
+        check(valid, "真实唤醒选择记录必须匹配槽代次和轮次");
+        kprintln!("[JSR-RAW-WAKE] samples={} dropped={} complete={} begin_refused={} finish_refused={} abandoned={} valid={} pending_at_reset={} pending_now={} endpoint=resume-hook clock=raw-unserialized",
+            raw.entries().len(), raw.dropped(), raw.complete(), errors[0],errors[1],errors[2],valid,carried,pending);
+        for r in raw.entries().iter().flatten() {
+            kprintln!("[JSR-WAKE-SAMPLE] path={} slot={} generation={} wait_round={} start_cpu={} end_cpu={} start={} end={}",
+                r.path,r.slot,r.generation,r.wait_round,r.start.cpu,r.end.cpu,r.start.counter,r.end.counter);
+        }
+    }
+    kprintln!("[JSR-SCHED-TICK] local_bypasses={}", sched::local_tick_bypasses());
     let end = baseline();
     check(end == start, "演练结束后资源未回到起点");
     check(lists_consistent(), "演练结束后运行列表与运行队列不一致");
@@ -379,17 +608,54 @@ fn report_lock(name: &str, cpus: usize, s: LockStats) -> bool {
 
 /// 锁争用测量：N 个任务（各核一个）反复让出并读对象表统计。
 fn contention(n: usize) {
+    let fast_before = sched::fast_yield_count();
     let before = baseline();
-    let all = CpuSet::first(n);
+    CHURN_TARGET.store(n as u32, Ordering::Release);
+    CHURN_READY.store(0, Ordering::Relaxed);
+    CHURN_GO.store(0, Ordering::Relaxed);
+    CHURN_DONE.store(0, Ordering::Relaxed);
+    CHURN_MASK.store(0, Ordering::Relaxed);
     let ok = quiet(|| {
-        sched::reset_lock_stats();
-        kobj::reset_lock_stats();
-        (0..n).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 80 + i as u64), "scale-churn", churn, None, all).is_ok())
+        // Pin one participant per CPU, APs first so CPU0 cannot prevent publication.
+        (1..n).chain(core::iter::once(0)).all(|i| {
+            let mut affinity = CpuSet::EMPTY; affinity.insert(i);
+            sched::spawn_on(TaskId(TASK_ID_BASE + 80 + i as u64), "scale-churn", churn, None, affinity).is_ok()
+        })
     });
     check(ok, "锁争用测量任务创建失败");
+    if !ok { CHURN_GO.store(2, Ordering::Release); }
     sched::run();
     let s = sched::lock_stats();
     let o = kobj::lock_stats();
+    kprintln!("[JSR-SCHED-FAST] cpus={} yield_bypasses={}", n, sched::fast_yield_count().wrapping_sub(fast_before));
+    let ready = CHURN_READY.load(Ordering::Acquire);
+    let done = CHURN_DONE.load(Ordering::Acquire);
+    let mask = CHURN_MASK.load(Ordering::Acquire);
+    let expected = if n == 32 { u32::MAX } else { (1u32 << n) - 1 };
+    check(ready == n as u32 && done == n as u32 && mask == expected, "争用测量必须全部核就绪并完成原轮数");
+    kprintln!("[JSR-CHURN-BARRIER] ready={}/{} done={}/{} mask={:#x} rounds={}", ready,n,done,n,mask,CHURN_ROUNDS);
+    #[cfg(feature = "krn2-observe")]
+    {
+        let [transactions, leaves, contended, spins] = sched::sync_work_stats();
+        let covered = transactions > 0 && leaves as u64 == transactions as u64 * n as u64
+            && contended <= leaves;
+        check(covered, "诊断叶获取总数必须覆盖每个在线核，不能只算全局锁");
+        kprintln!("[JSR-SYNC-WORK] transactions={} leaf_acquired={} leaf_contended={} leaf_spins={} online={} covered={}",
+            transactions, leaves, contended, spins, n, covered);
+    }
+    #[cfg(feature = "krn2-observe")]
+    {
+        let raw = sched::raw_callback_snapshot();
+        let valid = !raw.entries().is_empty() && raw.entries().iter().flatten().all(|r|
+            r.path == 1 && r.wait_round == 0 && r.start.cpu == r.end.cpu);
+        check(valid, "原始回调记录必须保留路径和同核端点");
+        kprintln!("[JSR-RAW-CALLBACK] samples={} dropped={} complete={} valid={} clock=raw-unserialized",
+            raw.entries().len(), raw.dropped(), raw.complete(), valid);
+        for r in raw.entries().iter().flatten() {
+            kprintln!("[JSR-RAW-SAMPLE] path={} slot={} generation={} wait_round={} start_cpu={} end_cpu={} start={} end={}",
+                r.path,r.slot,r.generation,r.wait_round,r.start.cpu,r.end.cpu,r.start.counter,r.end.counter);
+        }
+    }
     let sane = report_lock("sched", n, s) & report_lock("objtable", n, o);
     check(sane, "锁争用计数不自洽");
     check(baseline() == before, "锁争用测量后资源未回到基线");

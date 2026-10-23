@@ -777,8 +777,14 @@ check_s1() {    # S-1：真实用户态的系统调用健壮性回归（固定�
   fi
 }
 
-check_s2() {    # S-2：4 个在线处理器、4 个固定种子进程共 10^6 次有界调用；故障路径与击落超时隔离
+check_s2() {    # S-2: preserve both four/eight-CPU campaigns and all quarantine assertions.
   local f="$SERIAL_S2" workers done_cases mmio dma quar
+  local expected=${S2_CPUS:-8} probes mask
+  case "$expected" in
+    4) probes=250000; mask=f ;;
+    8) probes=125000; mask=ff ;;
+    *) record S-2 FAIL "S2_CPUS must be 4 or 8"; return ;;
+  esac
   if [ "$SPOT" -eq 1 ]; then
     record_na S-2 "定点模式不运行独立 S-2 镜像"
     return
@@ -792,19 +798,20 @@ check_s2() {    # S-2：4 个在线处理器、4 个固定种子进程共 10^6 �
     return
   fi
   workers=$(grep -ac '^\[JSR-S2\] worker=' "$f" 2>/dev/null || true)
-  done_cases=$(grep -ac 'robust: done calls=250000 .*failed=0' "$f" 2>/dev/null || true)
+  done_cases=$(grep -ac "robust: done calls=$probes .*failed=0" "$f" 2>/dev/null || true)
   mmio=$(grep -ac '^\[JSR-S2-MMIO\] .*passed=true' "$f" 2>/dev/null || true)
   dma=$(grep -ac '^\[JSR-S2-DMA\] .*passed=true' "$f" 2>/dev/null || true)
   quar=$(grep -ac '^\[JSR-S2-QUARANTINE\] total=4 intentional=true' "$f" 2>/dev/null || true)
-  if [ "$workers" -eq 4 ] && [ "$done_cases" -eq 4 ] \
-     && grep -qaE '^\[JSR-S2\] summary workers=4/4 probes=1000000 calls=[0-9]+ cpu_mask=0xf .*reclaimed=true passed=true' "$f" \
+  if [ "$workers" -eq "$expected" ] && [ "$done_cases" -eq "$expected" ] \
+     && grep -qaE "^\[JSR-S2\] summary workers=$expected/$expected probes=1000000 calls=[0-9]+ cpu_mask=0x$mask .*reclaimed=true passed=true" "$f" \
      && grep -qa '^\[JSR-FAULT\] sites=4 .*failed=0' "$f" \
      && [ "$mmio" -eq 1 ] && [ "$dma" -eq 1 ] && [ "$quar" -eq 1 ] \
      && [ "$(grep -ac '^\[JSR-S2-ERROR\] case=.*passed=true' "$f")" -eq 4 ] \
      && [ "$(grep -ac '^\[JSR-S2-ERROR\] case=[23] .*quarantine=2 reclaimed=true passed=true' "$f")" -eq 2 ] \
-     && ! grep -qaE 'panicked at|KERNEL PANIC|^\[JSR-PANIC\]' "$f" \
+     && grep -qa '^\[JSR-RT\] case=rt-panic exit=Some(101) expect=101 reclaimed=true' "$f" \
+     && ! { grep -aE 'panicked at|KERNEL PANIC|^\[JSR-PANIC\]' "$f" | grep -avE '^\[JSR-USERTEXT\] task=rt-panic bytes=[0-9]+ text=panic: panicked at user/rtdemo/src/main.rs:[0-9]+:[0-9]+:'; } \
      && ! grep -qa '^\[JSR-EXIT\] failure' "$f"; then
-    record S-2 PASS "4 个固定种子进程各 250000 次有界探测、共 10^6 次系统调用，4 个在线处理器均有实际调用；MMIO 回滚超时、帧/堆失败、unmap/protect 击落超时与 DMA 读回未知路径全部按预期失败或隔离，击落超时的 4 帧永久隔离且回收后基线可按隔离数解释；无 panic"
+    record S-2 PASS "${expected} 个固定种子进程各 ${probes} 次有界探测、共 10^6 次系统调用，${expected} 个在线处理器均有实际调用；MMIO 回滚超时、帧/堆失败、unmap/protect 击落超时与 DMA 读回未知路径全部按预期失败或隔离，击落超时的 4 帧永久隔离且回收后基线可按隔离数解释；无 panic"
   else
     record S-2 FAIL "缺少 S-2 汇总/逐进程完成/故障路径行，或出现 panic/资源漂移（workers=$workers done=$done_cases mmio=$mmio dma=$dma quarantine=$quar，见 $f）"
   fi

@@ -41,6 +41,10 @@
 
 use crate::arch::TaskContext;
 use crate::task::{Task, TaskId, TaskState};
+use kernel_core::deadline::{Deadline, ABSENT as NO_DEADLINE};
+use kernel_core::deadline_forest::DeadlineForest;
+use kernel_core::task_index::{TaskIndex, Node as IndexNode};
+use kernel_core::task_lifecycle::SlotLifecycle;
 
 use kernel_core::object::{advance_generation, GENERATION_RETIRED};
 use kernel_core::smp::{CpuSet, MAX_CPUS};
@@ -57,6 +61,27 @@ use super::stack::{ReserveError, StackPool, STATIC_STACKS};
 
 /// 堆就绪之前的内联槽位数（与静态内核栈数一致：那时只有这些槽位有栈）。
 pub const INLINE_SLOTS: usize = STATIC_STACKS;
+pub const WAKE_MAILBOX_CAPACITY: usize = 16;
+#[cfg(feature = "fault-inject")]
+#[derive(Clone, Copy, Debug)]
+pub struct DeadlineTrace {
+    pub token: kernel_core::task_index::Token,
+    pub at: u64,
+    pub requested_at: u64,
+    pub stopped: bool,
+    pub ipis_before: u32,
+    pub ipis_after: u32,
+    pub consumed_at: u64,
+    pub consumer: usize,
+    pub consumed: bool,
+}
+#[cfg(feature = "fault-inject")]
+impl DeadlineTrace {
+    const EMPTY: Self = Self { token: kernel_core::task_index::Token { slot: usize::MAX, generation: 0 },
+        at: 0, requested_at: 0, stopped: false, ipis_before: 0, ipis_after: 0,
+        consumed_at: 0, consumer: usize::MAX, consumed: false };
+}
+
 
 /// 每个槽位在各张随容量增长的表里占用的字节数（任务表、组表、组世代、调度暂存、栈指针表；不含栈本身）。
 pub const BYTES_PER_SLOT: usize = core::mem::size_of::<Option<Task>>()
@@ -198,6 +223,8 @@ pub type SwitchObserver = fn(&SwitchEvent);
 pub enum SpawnError {
     /// 没有带栈的空闲工作槽位。
     NoFreeSlot,
+    /// 标签仍被活任务或尚未换下的退出任务占用。
+    DuplicateId,
     /// 指定的 CPU 组无效。
     BadGroup,
     /// 亲和集合里没有在线处理器。
@@ -332,8 +359,25 @@ pub const WATCHDOG_LOG: usize = crate::config::ACTIVE.sched.watchdog_log;
 
 /// 调度机制本体。槽位总数（含引导线程）在启动期决定，见 [`Scheduler::grow`]。
 pub struct Scheduler<P: SchedPolicy> {
+    #[cfg(feature = "krn2-observe")]
+    pub(super) raw_callbacks: kernel_core::raw_timing::Samples<64>,
+    #[cfg(feature = "krn2-observe")]
+    pub(super) raw_wakes: kernel_core::raw_timing::Samples<64>,
+    #[cfg(feature = "krn2-observe")]
+    pub(super) raw_wake_errors: [u64; 3], // begin, finish, exit-with-pending
+    #[cfg(feature = "krn2-observe")]
+    pub(super) raw_pending_at_reset: usize,
     tasks: BootSlots<Option<Task>, INLINE_SLOTS>,
+    // Author: chatgpt. One canonical generation state per slot; lock serialized.
+    epochs: BootSlots<SlotLifecycle, INLINE_SLOTS>,
+    id_index: Option<TaskIndex<BootSlots<IndexNode, { 2 * INLINE_SLOTS - 1 }>>>,
     stacks: StackPool,
+    /// Successfully published, not-yet-exited workers (boot slot excluded).
+    workers: usize,
+    wake_mailboxes: [kernel_core::wake_mailbox::WakeMailbox<WAKE_MAILBOX_CAPACITY>; MAX_CPUS],
+    remote_wakes: u32,
+    wake_fallbacks: u32,
+    limit_tick_drains: [u32; 2],
     /// 每个处理器的运行队列（各持一份策略实例；成员关系与入队计数由它维护）。
     queues: [CoreQueue<P>; MAX_CPUS],
     /// 每个运行队列的成员链表（表头与长度；链接在 `links` 里，与任务表同容量）。
@@ -342,9 +386,17 @@ pub struct Scheduler<P: SchedPolicy> {
     /// 同步运行列表时被拒绝的次数（正常运行时恒为 0）。
     list_errors: u32,
     /// 睡眠任务中最早的定时唤醒时刻（`u64::MAX` = 没有；可能偏早，不会偏晚）。
-    next_wake: u64,
+    next_wake: [u64; MAX_CPUS],
+    wake_heap: DeadlineForest<MAX_CPUS>,
+    wake_entries: BootSlots<Deadline, {INLINE_SLOTS * MAX_CPUS}>,
+    wake_positions: BootSlots<usize, INLINE_SLOTS>,
+    wake_owners: BootSlots<usize, INLINE_SLOTS>,
     /// 实时任务中最早的预算补充时刻（`u64::MAX` = 没有；可能偏早，不会偏晚）。
-    next_rt: u64,
+    next_rt: [u64; MAX_CPUS],
+    rt_heap: DeadlineForest<MAX_CPUS>,
+    rt_entries: BootSlots<Deadline, {INLINE_SLOTS * MAX_CPUS}>,
+    rt_positions: BootSlots<usize, INLINE_SLOTS>,
+    rt_owners: BootSlots<usize, INLINE_SLOTS>,
     /// 选择路径的遍历量统计。
     scan: ScanStats,
     /// 被运行队列拒绝的钩子调用次数（成员关系不符；正常运行时恒为 0）与最近一次的原因。
@@ -364,6 +416,12 @@ pub struct Scheduler<P: SchedPolicy> {
     kicks: CpuSet,
     /// 每个处理器的调度统计。
     cpu_stats: [CpuStats; MAX_CPUS],
+    deadline_wakes: [u32; MAX_CPUS],
+    deadline_refills: [u32; MAX_CPUS],
+    #[cfg(feature = "fault-inject")]
+    delayed_deadline_timer: CpuSet,
+    #[cfg(feature = "fault-inject")]
+    deadline_trace: [DeadlineTrace; MAX_CPUS],
     /// 每个处理器的本地 tick 计数（周期均衡的检查点）。
     local_ticks: [u64; MAX_CPUS],
     switches: u64,
@@ -442,17 +500,44 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         let mut boot = Task::new(TaskId(0), "boot");
         boot.state = TaskState::Running;
         tasks[BOOT_SLOT] = Some(boot);
+        let mut epochs = [const { SlotLifecycle::new(0) }; INLINE_SLOTS];
+        let mut i = 0;
+        while i < INLINE_SLOTS { epochs[i] = SlotLifecycle::new(i); i += 1; }
+        epochs[BOOT_SLOT] = SlotLifecycle::initial(BOOT_SLOT, 0);
         let mut current = [IDLE; MAX_CPUS];
         current[0] = BOOT_SLOT;
         Scheduler {
+            #[cfg(feature = "krn2-observe")]
+            raw_callbacks: kernel_core::raw_timing::Samples::new(),
+            #[cfg(feature = "krn2-observe")]
+            raw_wakes: kernel_core::raw_timing::Samples::new(),
+            #[cfg(feature = "krn2-observe")]
+            raw_wake_errors: [0; 3],
+            #[cfg(feature = "krn2-observe")]
+            raw_pending_at_reset: 0,
             tasks: BootSlots::Inline(tasks),
+            epochs: BootSlots::Inline(epochs),
+            id_index: None,
             stacks: StackPool::new(),
             queues: CoreQueue::array(policy),
             runs: RunLists::new(),
             links: BootSlots::Inline([Link::EMPTY; INLINE_SLOTS]),
             list_errors: 0,
-            next_wake: u64::MAX,
-            next_rt: u64::MAX,
+            workers: 0,
+            wake_mailboxes: [const { kernel_core::wake_mailbox::WakeMailbox::new() }; MAX_CPUS],
+            remote_wakes: 0,
+            wake_fallbacks: 0,
+            limit_tick_drains: [0; 2],
+            next_wake: [u64::MAX; MAX_CPUS],
+            wake_heap: DeadlineForest::new(),
+            wake_entries: BootSlots::Inline([Deadline::EMPTY; INLINE_SLOTS * MAX_CPUS]),
+            wake_positions: BootSlots::Inline([NO_DEADLINE; INLINE_SLOTS]),
+            wake_owners: BootSlots::Inline([NO_DEADLINE; INLINE_SLOTS]),
+            next_rt: [u64::MAX; MAX_CPUS],
+            rt_heap: DeadlineForest::new(),
+            rt_entries: BootSlots::Inline([Deadline::EMPTY; INLINE_SLOTS * MAX_CPUS]),
+            rt_positions: BootSlots::Inline([NO_DEADLINE; INLINE_SLOTS]),
+            rt_owners: BootSlots::Inline([NO_DEADLINE; INLINE_SLOTS]),
             scan: ScanStats { picks: 0, visited: 0, max_visited: 0, wake_scans: 0, ticks: 0 },
             hook_errors: 0,
             last_hook_error: None,
@@ -462,6 +547,12 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             online: CpuSet::first(1),
             balancer: Balancer::new(BalanceParams::DEFAULT),
             kicks: CpuSet::EMPTY,
+            deadline_wakes: [0; MAX_CPUS],
+            deadline_refills: [0; MAX_CPUS],
+            #[cfg(feature = "fault-inject")]
+            delayed_deadline_timer: CpuSet::EMPTY,
+            #[cfg(feature = "fault-inject")]
+            deadline_trace: [DeadlineTrace::EMPTY; MAX_CPUS],
             cpu_stats: [CpuStats { busy_ticks: 0, idle_ticks: 0, idle_waiting: 0, max_idle_waiting: 0, steals: 0, pulls: 0, pull_hot: 0 }; MAX_CPUS],
             local_ticks: [0; MAX_CPUS],
             switches: 0,
@@ -543,6 +634,14 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         self.queues[0].policy().default_quantum()
     }
 
+    // Author: chatgpt. Diagnostic start identity; idle has no canonical Token.
+    #[cfg(feature = "krn2-observe")]
+    pub(super) fn raw_callback_identity(&self) -> (usize, u64) {
+        let slot = self.cur();
+        let generation = self.epochs.get(slot).and_then(|e| e.history()).map_or(0, |r| r.token().generation);
+        (slot, generation)
+    }
+
     /// 本处理器的当前槽位。
     fn cur(&self) -> usize {
         self.current[this_cpu()]
@@ -587,6 +686,42 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         let waits = self.scratch_waits.prepare(slots, || None).ok_or_else(|| oom(self))?;
         let wants = self.scratch_wants.prepare(slots, || false).ok_or_else(|| oom(self))?;
         let links = self.links.prepare(slots, || Link::EMPTY).ok_or_else(|| oom(self))?;
+        let deadline_count = slots.checked_mul(MAX_CPUS).ok_or_else(|| oom(self))?;
+        let mut wake_entries = self.wake_entries.prepare(deadline_count, || Deadline::EMPTY).ok_or_else(|| oom(self))?;
+        let mut wake_positions = self.wake_positions.prepare(slots, || NO_DEADLINE).ok_or_else(|| oom(self))?;
+        let mut rt_entries = self.rt_entries.prepare(deadline_count, || Deadline::EMPTY).ok_or_else(|| oom(self))?;
+        let mut rt_positions = self.rt_positions.prepare(slots, || NO_DEADLINE).ok_or_else(|| oom(self))?;
+        let mut wake_owners = self.wake_owners.prepare(slots, || NO_DEADLINE).ok_or_else(|| oom(self))?;
+        let mut wake_heap = DeadlineForest::<MAX_CPUS>::new();
+        // New CPU strides differ: rebuild all live nodes before any commit.
+        for c in 0..MAX_CPUS {
+            for n in 0..self.wake_heap.len(c).unwrap() {
+                let event = self.wake_entries[c*self.tasks.len()+n];
+                wake_heap.set(&mut wake_entries, &mut wake_positions, &mut wake_owners, c, event)
+                    .expect("preallocated deadline forest rebuild");
+            }
+        }
+        let mut rt_owners = self.rt_owners.prepare(slots, || NO_DEADLINE).ok_or_else(|| oom(self))?;
+        let mut rt_heap = DeadlineForest::<MAX_CPUS>::new();
+        // New CPU strides differ: rebuild all live nodes before any commit.
+        for c in 0..MAX_CPUS {
+            for n in 0..self.rt_heap.len(c).unwrap() {
+                let event = self.rt_entries[c*self.tasks.len()+n];
+                rt_heap.set(&mut rt_entries, &mut rt_positions, &mut rt_owners, c, event)
+                    .expect("preallocated deadline forest rebuild");
+            }
+        }
+        let mut pos = 0;
+        let epochs = self.epochs.prepare(slots, || { let e = SlotLifecycle::new(pos); pos += 1; e }).ok_or_else(|| oom(self))?;
+        let index_count = slots.checked_mul(2).and_then(|n| n.checked_sub(1)).ok_or_else(|| oom(self))?;
+        let storage = BootSlots::<IndexNode, {2 * INLINE_SLOTS - 1}>::Inline([IndexNode::Free(usize::MAX); 2 * INLINE_SLOTS - 1]);
+        let nodes = storage.prepare(index_count, || IndexNode::Free(usize::MAX)).ok_or_else(|| oom(self))?;
+        let mut index = TaskIndex::new(BootSlots::Heap(nodes));
+        for e in self.epochs.iter() {
+            if let Some(r) = e.history() { index.insert(r.label(), r.token()).expect("unique historical task labels"); }
+        }
+        self.epochs.commit(epochs);
+        self.id_index = Some(index);
         self.tasks.commit(tasks);
         self.groups.commit(groups);
         self.group_gen.commit(group_gen);
@@ -595,6 +730,14 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         self.scratch_waits.commit(waits);
         self.scratch_wants.commit(wants);
         self.links.commit(links);
+        self.wake_entries = BootSlots::Heap(wake_entries);
+        self.wake_positions = BootSlots::Heap(wake_positions);
+        self.wake_owners = BootSlots::Heap(wake_owners);
+        self.wake_heap = wake_heap;
+        self.rt_entries = BootSlots::Heap(rt_entries);
+        self.rt_positions = BootSlots::Heap(rt_positions);
+        self.rt_owners = BootSlots::Heap(rt_owners);
+        self.rt_heap = rt_heap;
         self.stacks.reserve(slots).map_err(|ReserveError { available }| GrowError::OutOfMemory { available })
     }
 
@@ -662,15 +805,46 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         let home = self.balancer.place(affinity, None, base, None, self.now, &loads).map_err(|_| SpawnError::BadAffinity)?;
         // 空槽位或「已退出且已被完全换下」的槽位都可复用：
         // 已退出任务一旦被切走（`on_cpu` 清除），就再也不会在它的栈上执行，栈与 TCB 可以安全覆盖。
-        let slot = (1..self.tasks.len())
-            .find(|&i| {
-                self.stacks.has_stack(i)
-                    && match self.tasks[i].as_ref() {
-                        None => true,
-                        Some(t) => t.state == TaskState::Exited && t.on_cpu.is_none() && i != current,
-                    }
+        self.ensure_id_index();
+        let previous = self.historical_slot(id);
+        if previous.is_some_and(|i| self.tasks[i].as_ref().is_some_and(|t| t.state != TaskState::Exited || t.on_cpu.is_some()) || i == current) {
+            return Err(SpawnError::DuplicateId);
+        }
+        let mut candidates = previous.into_iter().chain((1..self.tasks.len()).filter(|i| Some(*i) != previous));
+        let slot = candidates
+            .find_map(|i| {
+                let reusable = self.stacks.has_stack(i) && match self.tasks[i].as_ref() {
+                    None => true,
+                    Some(t) => t.state == TaskState::Exited && t.on_cpu.is_none() && i != current,
+                };
+                // Same-label historical slots cannot be bypassed: leaving two
+                // historical entries for one label would make lookup ambiguous.
+                if previous.is_some() && previous != Some(i) { return None; }
+                if !reusable { return None; }
+                self.epochs[i].reserve(id.0).ok().map(|r| (i, r))
             })
             .ok_or(SpawnError::NoFreeSlot)?;
+        let (slot, reservation) = slot;
+        // At most one label per slot, and 2*N-1 nodes. Preflight insertion
+        // before changing task/group/stack state; failure aborts the reservation.
+        let old = self.epochs[slot].history();
+        if old.is_none_or(|r| r.label() != id.0) {
+            // Remove the old identity first to free two nodes at full capacity.
+            // Restoring it cannot fail, since no intervening publication exists.
+            let index = self.id_index.as_mut().unwrap();
+            if let Some(r) = old { assert_eq!(index.remove(r.label()), Some(r.token())); }
+            if index.insert(id.0, reservation.token()).is_err() {
+                if let Some(r) = old { index.insert(r.label(), r.token()).expect("restore historical label"); }
+                self.epochs[slot].abort(reservation).expect("abort current reservation");
+                return Err(SpawnError::NoFreeSlot);
+            }
+        } else {
+            let index = self.id_index.as_mut().unwrap();
+            assert_eq!(index.remove(id.0), old.map(|r| r.token()));
+            index.insert(id.0, reservation.token()).expect("same label replacement capacity");
+        }
+        self.epochs[slot].publish(reservation).expect("publish current reservation");
+        let creator = if is_worker(current) { self.task(current) } else { None };
         let mut task = Task::new(id, name);
         task.entry = Some(entry);
         if let Some(creator) = creator {
@@ -692,6 +866,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         // SAFETY：该槽位有栈且为空，没有任何任务在这块栈上运行。
         task.context = unsafe { self.stacks.prepare_initial_frame(slot, trampoline) };
         self.tasks[slot] = Some(task);
+        self.workers += 1;
         if let Some(t) = self.tasks[slot].as_mut() {
             let r = self.queues[home].enqueue(&mut t.sched, Enqueue::Spawn);
             self.note(r);
@@ -790,7 +965,22 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     pub fn mark_current_exited(&mut self) {
         let cur = self.cur();
         let mut left = None;
+        if is_worker(cur) && self.task(cur).is_some_and(|t| t.state != TaskState::Exited) {
+            let r = self.epochs[cur].history().expect("exiting task identity");
+            self.epochs[cur].exit(r.token()).expect("exit live identity");
+        }
+        if let Some(r) = self.epochs.get(cur).and_then(SlotLifecycle::history) {
+            self.remove_wake_deadline(cur, r.token().generation);
+            self.remove_rt_deadline(cur, r.token().generation);
+        }
         if let Some(t) = self.tasks.get_mut(cur).and_then(|t| t.as_mut()) {
+            if is_worker(cur) && t.state != TaskState::Exited {
+                self.workers = self.workers.checked_sub(1).expect("live worker count underflow");
+            }
+            #[cfg(feature = "krn2-observe")]
+            if t.raw_wake_round.take().is_some() {
+                self.raw_wake_errors[2] = self.raw_wake_errors[2].saturating_add(1);
+            }
             t.state = TaskState::Exited;
             t.waits_for = None;
             left = t.cpu_group.take();
@@ -811,9 +1001,31 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         self.resolve_inheritance();
     }
 
+    fn ensure_id_index(&mut self) {
+        if self.id_index.is_none() {
+            let mut index = TaskIndex::new(BootSlots::Inline([IndexNode::Free(usize::MAX); 2 * INLINE_SLOTS - 1]));
+            for e in self.epochs.iter() {
+                if let Some(r) = e.history() { index.insert(r.label(), r.token()).expect("inline task label capacity"); }
+            }
+            self.id_index = Some(index);
+        }
+    }
+
+    fn historical_slot(&self, id: TaskId) -> Option<usize> {
+        let token = match self.id_index.as_ref() {
+            Some(index) => index.get(id.0)?,
+            None if id.0 == 0 => self.epochs[BOOT_SLOT].history()?.token(),
+            None => return None,
+        };
+        let e = self.epochs.get(token.slot)?;
+        let r = e.history()?;
+        if r.token() != token || r.label() != id.0 { return None; }
+        self.task(token.slot).filter(|t| t.id == id).map(|_| token.slot)
+    }
+
     /// 任务 `id` 所在槽位（只找尚未退出的任务；引导线程也算）。
     fn live_slot(&self, id: TaskId) -> Option<usize> {
-        (0..self.tasks.len()).find(|&i| matches!(self.tasks[i].as_ref(), Some(t) if t.id == id && t.state != TaskState::Exited))
+        self.historical_slot(id).filter(|&i| self.epochs[i].history().is_some_and(|r| self.epochs[i].live(r.token())))
     }
 
     /// 任务 `id` 是否存在且尚未退出。
@@ -927,15 +1139,19 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             return false;
         }
         let cur = self.cur();
+        let Some(generation) = self.epochs.get(cur).and_then(SlotLifecycle::history).map(|r| r.token().generation) else { return false };
+        if let Some(at) = wake_at {
+            let home = self.task(cur).unwrap().home;
+            self.set_wake_deadline(home, Deadline { at, slot: cur, generation });
+        } else {
+            self.remove_wake_deadline(cur, generation);
+        }
         match self.tasks.get_mut(cur).and_then(|t| t.as_mut()) {
             Some(t) => {
                 t.state = TaskState::Blocked;
                 t.wake_at = wake_at;
                 let r = dequeue_from(&mut self.queues, &mut t.sched, Dequeue::Block);
                 self.note(r);
-                if let Some(w) = wake_at {
-                    self.next_wake = self.next_wake.min(w);
-                }
                 self.relist(cur);
                 true
             }
@@ -955,9 +1171,16 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 返回是否应立即抢占**本处理器**的当前任务；放到别的处理器且应抢占那里时记入待发的重新调度请求。
     fn make_runnable(&mut self, i: usize) -> bool {
         let now = self.now;
-        let Some(t) = self.tasks.get_mut(i).and_then(|t| t.as_mut()) else { return false };
-        if t.state != TaskState::Blocked {
-            return false;
+        if !self.task(i).is_some_and(|t| t.state == TaskState::Blocked) { return false; }
+        let generation = self.epochs[i].history().expect("waking task identity").token().generation;
+        self.remove_wake_deadline(i, generation);
+        let t = self.tasks[i].as_mut().unwrap();
+        #[cfg(feature = "krn2-observe")]
+        {
+            let token = kernel_core::task_index::Token { slot: i, generation };
+            let start = kernel_core::raw_timing::Endpoint { cpu: this_cpu(), counter: crate::arch::cycles() };
+            if let Some(round) = t.raw_wake.begin(token, start) { t.raw_wake_round = Some(round); }
+            else { self.raw_wake_errors[0] = self.raw_wake_errors[0].saturating_add(1); }
         }
         t.state = TaskState::Runnable;
         t.wake_at = None;
@@ -1013,6 +1236,11 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             _ => Ok(()),
         };
         t.home = home;
+        let wake = t.wake_at;
+        let rt = (t.rt_period != 0 && t.state != TaskState::Exited).then_some(t.rt_next_period);
+        let generation = self.epochs[i].history().expect("migrating task identity").token().generation;
+        if let Some(at) = wake { self.set_wake_deadline(home, Deadline { at, slot: i, generation }); }
+        if let Some(at) = rt { self.set_rt_deadline(home, Deadline { at, slot: i, generation }); }
         self.note(r);
         self.relist(i);
     }
@@ -1087,21 +1315,149 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 显式唤醒 `id`（例如所属进程开始终止时，让睡眠中的线程尽快观察到）。
     /// 返回是否应立即抢占当前任务；任务不存在或不在睡眠时返回 `false`。
     pub fn wake(&mut self, id: TaskId) -> bool {
-        match (1..self.tasks.len()).find(|&i| matches!(self.tasks[i].as_ref(), Some(t) if t.id == id)) {
-            Some(i) => self.make_runnable(i),
+        match self.live_slot(id).filter(|&i| is_worker(i)) {
+            Some(i) => {
+                let Some(t) = self.task(i).filter(|t| t.state == TaskState::Blocked) else { return false };
+                let home = t.home;
+                if home != this_cpu() {
+                    let token = self.epochs[i].history().expect("woken task identity").token();
+                    use kernel_core::wake_mailbox::Enqueue;
+                    match self.wake_mailboxes[home].push(token) {
+                        Enqueue::Queued | Enqueue::Coalesced => {
+                            self.remote_wakes = self.remote_wakes.wrapping_add(1);
+                            self.kicks.insert(home);
+                            return false;
+                        }
+                        Enqueue::Full => self.wake_fallbacks = self.wake_fallbacks.wrapping_add(1),
+                    }
+                }
+                self.make_runnable(i)
+            }
             None => false,
         }
     }
 
+    // Author: chatgpt. Bounded serialized delivery, not a lock-free consumer.
+    // Run before any transaction mutation; revalidate generation and use actual
+    // current affinity/home in make_runnable, rather than trusting routing data.
+    pub fn drain_wake_mailboxes(&mut self) {
+        for c in 0..MAX_CPUS {
+            while let Some(token) = self.wake_mailboxes[c].pop() {
+                if self.epochs.get(token.slot).is_some_and(|e| e.live(token)) {
+                    self.make_runnable(token.slot);
+                }
+            }
+        }
+    }
+    // Author: chatgpt. Deliberately program a later local timer so the real
+    // BSP due-notification/IPI path, rather than the matching local expiry, runs.
+    #[cfg(feature = "fault-inject")]
+    pub fn fault_delay_deadline_timer(&mut self, c: usize, enable: bool) {
+        assert!(c > 0 && c < MAX_CPUS);
+        if enable { self.delayed_deadline_timer.insert(c); self.deadline_trace[c] = DeadlineTrace::EMPTY; }
+        else { self.delayed_deadline_timer.remove(c); }
+        self.kicks.insert(c);
+    }
+    #[cfg(feature = "fault-inject")]
+    pub fn fault_deadline_trace(&self, c: usize) -> Option<DeadlineTrace> { self.deadline_trace.get(c).copied() }
+    pub fn deadline_owners(&self, id: TaskId) -> Option<(Option<usize>, Option<usize>)> {
+        let i = self.historical_slot(id)?;
+        Some(((self.wake_owners[i] != NO_DEADLINE).then_some(self.wake_owners[i]),
+            (self.rt_owners[i] != NO_DEADLINE).then_some(self.rt_owners[i])))
+    }
+    pub fn deadline_stats(&self) -> ([u32; MAX_CPUS], [u32; MAX_CPUS]) { (self.deadline_wakes, self.deadline_refills) }
+    pub fn rt_state(&self, id: TaskId) -> Option<(u32,u32,u64)> {
+        let t = self.task(self.live_slot(id)?)?;
+        Some((t.rt_remaining,t.rt_period,t.rt_next_period))
+    }
+    pub fn limit_tick_stats(&self) -> [u32; 2] { self.limit_tick_drains }
+    pub fn remote_wake_stats(&self) -> (u32, u32) { (self.remote_wakes, self.wake_fallbacks) }
+
     /// 尚未退出的工作任务数（可运行 + 运行中 + 睡眠）。
     pub fn live_workers(&self) -> usize {
-        self.tasks[1..].iter().flatten().filter(|t| t.state != TaskState::Exited).count()
+        self.workers
     }
 
     /// 本处理器是否有可运行的工作任务可接（本队列中不含当前任务的，或可以从别的队列窃取的）。
     pub fn has_runnable_worker(&self) -> bool {
         let c = this_cpu();
         self.waiting(c) != ClassMask::EMPTY || (!is_worker(self.current[c]) && self.stealable(c))
+    }
+
+    /// Author: chatgpt. Conservative advisory permits, not a second scheduler.
+    /// Any waiting/stealable task disables every fast path. Complex limit or
+    /// arbitration state falls back to the original locked yield.
+    pub fn fast_yield_cpus(&self) -> CpuSet {
+        let mut allow = CpuSet::first(0);
+        // No competing candidate means empty arbitration demand. Arbiter::pick
+        // returns None without changing its aging state in that case; enabling
+        // multi-mode alone must not disable this no-op optimization.
+        if self.candidates().next().is_some() { return allow; }
+        for c in self.online.iter() {
+            if self.switching_from[c].is_some() { continue; }
+            if let Some(t) = self.task(self.current[c]).filter(|_| is_worker(self.current[c])) {
+                if t.state == TaskState::Running && t.home == c && t.cpu_group.is_none()
+                    && t.rt_period == 0 && self.decide(c).is_none() {
+                    allow.insert(c);
+                }
+            }
+        }
+        allow
+    }
+    // Author: chatgpt. Publish at most one AP credit, allocating a SINGLE
+    // shared-group allowance across all leaves held by StateGuard. Yield's
+    // limit-free predicate remains separate and unchanged.
+    pub fn tick_lease_owners(&self) -> [Option<kernel_core::task_index::Token>; MAX_CPUS] {
+        let mut owners = [None; MAX_CPUS];
+        if self.candidates().next().is_some() { return owners; }
+        for c in self.online.iter() {
+            if c == 0 || self.switching_from[c].is_some()
+                || self.now >= self.next_wake[c] || self.now >= self.next_rt[c]
+                || self.slice_used[c].saturating_add(1) >= self.slice_quantum[c] { continue; }
+            let slot = self.current[c];
+            let Some(t) = self.task(slot).filter(|_| is_worker(slot)) else { continue };
+            if t.state != TaskState::Running || t.home != c || self.decide(c).is_some()
+                || (t.rt_period != 0 && t.rt_remaining <= 1)
+                || t.sched.qos != t.base_qos { continue; }
+            if let Some(group) = t.cpu_group {
+                let Some(grp) = self.groups[group].as_ref() else { continue };
+                let granted = owners.iter().flatten().filter(|owner: &&kernel_core::task_index::Token|
+                    self.task(owner.slot).is_some_and(|peer| peer.cpu_group == Some(group))).count() as u32;
+                if grp.limit.deferred_tick_credits(MAX_CPUS as u32) <= granted { continue; }
+            }
+            owners[c] = self.epochs.get(slot).and_then(SlotLifecycle::history).map(|r| r.token());
+        }
+        owners
+    }
+    pub fn drain_local_tick(&mut self, c: usize, owner: kernel_core::task_index::Token) {
+        assert_eq!(self.current[c], owner.slot, "deferred tick changed owner before drain");
+        assert!(self.epochs[owner.slot].live(owner), "deferred tick changed generation before drain");
+        let t = self.task(owner.slot).expect("deferred tick task");
+        assert_eq!(t.state, TaskState::Running);
+        assert!(t.rt_period == 0 || t.rt_remaining > 1, "RT credit exhausted before drain");
+        let group = t.cpu_group;
+        self.account(c);
+        // Debit only: consuming/refilling another CPU's RT heap here would
+        // violate owner-local deadline processing. No deadline was due at grant.
+        let t = self.tasks[owner.slot].as_mut().unwrap();
+        if t.rt_period != 0 {
+            t.rt_remaining -= 1;
+            self.limit_tick_drains[0] = self.limit_tick_drains[0].wrapping_add(1);
+        }
+        if let Some(grp) = group.and_then(|g| self.groups[g].as_mut()) {
+            assert!(grp.limit.eligible(), "shared credit oversubscribed");
+            grp.limit.charge();
+            self.limit_tick_drains[1] = self.limit_tick_drains[1].wrapping_add(1);
+            assert!(grp.limit.eligible(), "shared credit must leave positive balance");
+        }
+    }
+    pub fn note_fast_yield(&mut self, c: usize) {
+        let wd = self.watchdog;
+        if let Some(slot) = self.current.get(c).copied() {
+            if let Some(t) = self.tasks.get_mut(slot).and_then(|t| t.as_mut()) {
+                wd.yielded(&mut t.streak);
+            }
+        }
     }
 
     /// 处理器 `c` 的队列里、除它的当前任务之外还有可运行任务的档位集合。
@@ -1149,6 +1505,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 处理器 `c` 参与调度（进入空闲执行流之前调用；重复调用无副作用）。
     /// Mark processor `c` as taking part in scheduling.
     pub fn cpu_online(&mut self, c: usize) {
+        assert_eq!(c, this_cpu(), "a CPU must register itself while its leaf is held");
         if c < MAX_CPUS {
             self.online.insert(c);
         }
@@ -1210,8 +1567,69 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         self.cpu_stats = [CpuStats::default(); MAX_CPUS];
     }
 
+    // Author: chatgpt. Per-owner roots; no task-table scan or remote drain.
+    fn refresh_wake(&mut self, c: usize) {
+        self.next_wake[c] = self.wake_heap.peek(&self.wake_entries, &self.wake_positions, &self.wake_owners, c)
+            .expect("wake forest coherence").map(|e| e.at).unwrap_or(u64::MAX);
+    }
+    fn refresh_rt(&mut self, c: usize) {
+        self.next_rt[c] = self.rt_heap.peek(&self.rt_entries, &self.rt_positions, &self.rt_owners, c)
+            .expect("RT forest coherence").map(|e| e.at).unwrap_or(u64::MAX);
+    }
+    fn set_wake_deadline(&mut self, c: usize, e: Deadline) {
+        let old = self.wake_owners[e.slot];
+        self.wake_heap.set(&mut self.wake_entries, &mut self.wake_positions, &mut self.wake_owners, c, e).expect("wake forest capacity/lifecycle");
+        self.refresh_wake(c);
+        if old != NO_DEADLINE && old != c { self.refresh_wake(old); }
+        if e.at <= self.now { self.kicks.insert(c); }
+    }
+    fn set_rt_deadline(&mut self, c: usize, e: Deadline) {
+        let old = self.rt_owners[e.slot];
+        self.rt_heap.set(&mut self.rt_entries, &mut self.rt_positions, &mut self.rt_owners, c, e).expect("RT forest capacity/lifecycle");
+        self.refresh_rt(c);
+        if old != NO_DEADLINE && old != c { self.refresh_rt(old); }
+        if e.at <= self.now { self.kicks.insert(c); }
+    }
+    fn remove_wake_deadline(&mut self, slot: usize, generation: u64) {
+        let old = self.wake_owners[slot];
+        self.wake_heap.remove(&mut self.wake_entries, &mut self.wake_positions, &mut self.wake_owners, slot, generation).expect("wake cancellation identity");
+        if old != NO_DEADLINE { self.refresh_wake(old); }
+    }
+    fn remove_rt_deadline(&mut self, slot: usize, generation: u64) {
+        let old = self.rt_owners[slot];
+        self.rt_heap.remove(&mut self.rt_entries, &mut self.rt_positions, &mut self.rt_owners, slot, generation).expect("RT cancellation identity");
+        if old != NO_DEADLINE { self.refresh_rt(old); }
+    }
+    fn wake_due(&mut self, c: usize, now: u64) -> bool {
+        if now < self.next_wake[c] { return false; }
+        self.scan.wake_scans += 1;
+        let mut preempt = false;
+        while let Some(event) = self.wake_heap.pop_due(&mut self.wake_entries, &mut self.wake_positions,
+            &mut self.wake_owners, c, now).expect("wake forest coherence") {
+            let valid = self.epochs.get(event.slot).and_then(SlotLifecycle::history)
+                .is_some_and(|r| r.token().generation == event.generation)
+                && self.task(event.slot).is_some_and(|t| t.home == c && t.state == TaskState::Blocked && t.wake_at == Some(event.at));
+            if valid {
+                #[cfg(feature = "fault-inject")]
+                {
+                    let trace = &mut self.deadline_trace[c];
+                    if trace.token.slot == event.slot && trace.token.generation == event.generation && trace.at == event.at {
+                        trace.ipis_after = crate::smp::percpu::get(c).unwrap().ipis(kernel_core::smp::IpiKind::Reschedule);
+                        trace.consumed_at = now;
+                        trace.consumer = this_cpu();
+                        trace.consumed = true;
+                    }
+                }
+                self.deadline_wakes[c] = self.deadline_wakes[c].wrapping_add(1);
+                preempt |= self.make_runnable(event.slot);
+            }
+        }
+        self.refresh_wake(c);
+        preempt
+    }
+
     /// 全局时钟 tick（在引导处理器的中断上下文、关中断状态下调用）：推进时刻 → 给刚运行完这个 tick 的任务记账 →
-    /// 唤醒到期的睡眠任务（可能放到别的处理器并记入重新调度请求）→ 判断本处理器是否抢占。
+    /// 消费本处理器到期堆、对其他处理器到期根发请求 → 判断本处理器是否抢占。
     ///
     /// 返回需要切换时的原因（[`Cause`] 中的名字）；`preemption = false` 时只记账与唤醒、从不要求切换
     /// （被唤醒的任务等当前任务主动让出）。
@@ -1223,28 +1641,22 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         self.charge_groups(cur);
         self.charge_rt(cur, now);
 
-        let mut cause = None;
         self.scan.ticks += 1;
-        if now >= self.next_wake {
-            // 最早到期时刻已到：扫描一次，唤醒全部到期者，并重算剩余睡眠者中最早的时刻
-            self.scan.wake_scans += 1;
-            let mut next = u64::MAX;
-            for i in 1..self.tasks.len() {
-                let wake_at = match self.tasks[i].as_ref() {
-                    Some(t) if t.state == TaskState::Blocked => t.wake_at,
-                    _ => None,
-                };
-                match wake_at {
-                    Some(w) if w <= now => {
-                        if self.make_runnable(i) {
-                            cause = Some(Cause::WAKE);
-                        }
+        let cause = self.wake_due(c, now).then_some(Cause::WAKE);
+        for target in self.online.iter().filter(|&target| target != c) {
+            #[cfg(feature = "fault-inject")]
+            if self.delayed_deadline_timer.contains(target) && now >= self.next_wake[target] {
+                if let Some(event) = self.wake_heap.peek(&self.wake_entries, &self.wake_positions, &self.wake_owners, target).expect("trace heap coherence") {
+                    let token = kernel_core::task_index::Token { slot: event.slot, generation: event.generation };
+                    if self.deadline_trace[target].token != token || self.deadline_trace[target].at != event.at {
+                        self.deadline_trace[target] = DeadlineTrace { token, at: event.at, requested_at: now,
+                            stopped: self.nohz.stopped().contains(target),
+                            ipis_before: crate::smp::percpu::get(target).unwrap().ipis(kernel_core::smp::IpiKind::Reschedule),
+                            ..DeadlineTrace::EMPTY };
                     }
-                    Some(w) => next = next.min(w),
-                    None => {}
                 }
             }
-            self.next_wake = next;
+            if now >= self.next_wake[target] || now >= self.next_rt[target] { self.kicks.insert(target); }
         }
         self.kick_stopped();
         let cause = cause.or_else(|| self.decide(c));
@@ -1262,46 +1674,56 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
                 t.rt_remaining = t.rt_remaining.saturating_sub(1);
             }
         }
-        if now < self.next_rt {
-            return;
+        self.refill_rt(this_cpu(), now);
+    }
+    fn refill_rt(&mut self, c: usize, now: u64) {
+        if now < self.next_rt[c] { return; }
+        while let Some(event) = self.rt_heap.pop_due(&mut self.rt_entries, &mut self.rt_positions,
+            &mut self.rt_owners, c, now).expect("RT forest coherence") {
+            let valid = self.epochs.get(event.slot).and_then(SlotLifecycle::history)
+                .is_some_and(|r| r.token().generation == event.generation);
+            let Some(t) = self.tasks.get_mut(event.slot).and_then(|t| t.as_mut()) else { continue };
+            if !valid || t.home != c || t.rt_period == 0 || t.state == TaskState::Exited || t.rt_next_period != event.at { continue; }
+            let next = kernel_core::deadline::next_period(now, t.rt_next_period, t.rt_period).expect("RT monotonic clock exhausted");
+            t.rt_remaining = t.rt_quota;
+            t.rt_next_period = next;
+            self.deadline_refills[c] = self.deadline_refills[c].wrapping_add(1);
+            self.set_rt_deadline(c, Deadline { at: next, ..event });
         }
-        // 最早补充时刻已到：补充全部到期的实时任务，并重算最早的下一次补充时刻
-        let mut next = u64::MAX;
-        for slot in 1..self.tasks.len() {
-            if let Some(t) = self.tasks.get_mut(slot).and_then(|t| t.as_mut()) {
-                if t.rt_period != 0 {
-                    while now >= t.rt_next_period {
-                        t.rt_remaining = t.rt_quota;
-                        t.rt_next_period += t.rt_period as u64;
-                    }
-                    next = next.min(t.rt_next_period);
-                }
-            }
-        }
-        self.next_rt = next;
+        self.refresh_rt(c);
     }
 
     /// 设置任务的实时预算/周期（准入已由 kernel-core 判定）。
     pub fn set_rt(&mut self, id: TaskId, quota: u32, period: u32, now: u64) -> bool {
         let Some(slot) = self.live_slot(id) else { return false };
+        let Some(next) = now.checked_add(period as u64) else { return false };
+        if period == 0 {
+            let generation = self.epochs[slot].history().unwrap().token().generation;
+            self.remove_rt_deadline(slot, generation);
+        } else {
+            let generation = self.epochs[slot].history().unwrap().token().generation;
+            let home = self.task(slot).unwrap().home;
+            self.set_rt_deadline(home, Deadline { at: next, slot, generation });
+        }
         if let Some(t) = self.tasks.get_mut(slot).and_then(|t| t.as_mut()) {
             t.rt_quota = quota;
             t.rt_period = period;
             t.rt_remaining = quota;
-            t.rt_next_period = now + period as u64;
-            self.next_rt = self.next_rt.min(t.rt_next_period);
+            t.rt_next_period = next;
             return true;
         }
         false
     }
 
     /// 其他处理器的本地时钟 tick（在该处理器的中断上下文、关中断状态下调用）：给本处理器正在运行的任务
-    /// 记账（CPU 组只扣费，补充由全局 tick 做）、到检查点时做周期均衡，然后判断是否切换。
+    /// 记账（CPU组只扣费，组补充仍由全局tick做），处理本核RT补充/到期唤醒及周期均衡，再判断切换。
     /// Local tick of a secondary processor.
     pub fn local_tick(&mut self, preemption: bool) -> Option<&'static str> {
         let c = this_cpu();
         let cur = self.current[c];
         self.account(c);
+        self.charge_rt(cur, self.now);
+        let woke = self.wake_due(c, self.now);
         let group = match self.task(cur) {
             Some(t) if is_worker(cur) && t.state == TaskState::Running => t.cpu_group,
             _ => None,
@@ -1309,12 +1731,8 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         if let Some(grp) = group.and_then(|g| self.groups[g].as_mut()) {
             grp.limit.charge();
         }
-        let cause = self.decide(c);
-        if preemption {
-            cause
-        } else {
-            None
-        }
+        let cause = self.decide(c).or(woke.then_some(Cause::WAKE));
+        if preemption { cause } else { None }
     }
 
     /// 设置空闲停表的最大间隔（tick；< 2 关闭），返回之前的设置。关闭后已停表的处理器在下一次醒来时恢复周期 tick。
@@ -1336,10 +1754,16 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 判断与登记在同一次持锁内完成：之后才出现的工作由计时处理器的 tick 发现并叫醒它（见 `kick_stopped`）。
     /// Decide what idle processor `c` does next, registering a tick stop when allowed.
     pub fn idle_enter(&mut self, c: usize, needs_tick: bool) -> IdleStep {
+        self.refill_rt(c, self.now);
+        self.wake_due(c, self.now);
         if let Some(cause) = self.decide(c) {
             return IdleStep::Run(cause);
         }
-        match plan_with(self.now, None, self.nohz_divisor, needs_tick) {
+        let at = self.next_wake[c].min(self.next_rt[c]);
+        let deadline = (at != u64::MAX).then_some(at);
+        #[cfg(feature = "fault-inject")]
+        let deadline = if self.delayed_deadline_timer.contains(c) { None } else { deadline };
+        match plan_with(self.now, deadline, self.nohz_divisor, needs_tick) {
             TickPlan::Periodic => IdleStep::Sleep,
             TickPlan::OneShot(n) => match self.nohz.stop(c, self.now, self.local_ticks[c]) {
                 Ok(()) => IdleStep::Stop(n),
@@ -1587,6 +2011,10 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
                 }
             }
         }
+        if is_worker(next) && next != prev {
+            let r = self.epochs[next].history().expect("dispatched task identity");
+            self.epochs[next].dispatch(r.token()).expect("dispatch detached live task");
+        }
         if is_worker(next) {
             if let Some(t) = self.tasks[next].as_mut() {
                 let r = self.queues[c].dispatched(&mut t.sched);
@@ -1625,6 +2053,28 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         Some(SwitchPlan { old, new, next_stack_top, next_space, next_slot: next })
     }
 
+    // Author: chatgpt. Endpoint is captured on the resumed execution flow,
+    // before acquiring this guard. IRQs remain masked, so current cannot migrate.
+    #[cfg(feature = "krn2-observe")]
+    pub(super) fn note_raw_resume(&mut self, end: kernel_core::raw_timing::Endpoint, path: u16) {
+        let slot = self.cur();
+        if !is_worker(slot) { return; }
+        let token = self.epochs.get(slot).and_then(SlotLifecycle::history).map(|r| r.token());
+        let completion = self.task_mut(slot).and_then(|t| {
+            let round = t.raw_wake_round.take()?;
+            Some(token.and_then(|token| t.raw_wake.finish(token, round, end)))
+        });
+        match completion {
+            Some(Some(mut sample)) => { sample.path = path; let _ = self.raw_wakes.push(sample); }
+            Some(None) => self.raw_wake_errors[1] = self.raw_wake_errors[1].saturating_add(1),
+            None => {}
+        }
+    }
+    #[cfg(feature = "krn2-observe")]
+    pub(super) fn raw_pending_count(&self) -> usize {
+        self.tasks.iter().flatten().filter(|t| t.raw_wake_round.is_some()).count()
+    }
+
     /// 切换完成（在被切入的执行流上、关中断时调用）：本处理器上一次换下的任务已保存好上下文，
     /// 清除它的 `on_cpu`，此后其他处理器才可以选中它、它的槽位（若已退出）才可以复用。
     /// Complete a switch: the previous task's context is saved, release it.
@@ -1635,6 +2085,10 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
                 if t.on_cpu == Some(c) {
                     t.on_cpu = None;
                 }
+            }
+            if is_worker(p) {
+                let r = self.epochs[p].history().expect("detached task identity");
+                self.epochs[p].detach(r.token()).expect("detach executing task");
             }
             // 换下的任务若仍可运行但已不属于本处理器（迁移、亲和变更），叫醒它的新处理器接手
             if let Some(t) = self.task(p).filter(|t| is_worker(p) && t.state == TaskState::Runnable && t.home != c) {
@@ -1812,7 +2266,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
 
     /// 任务 `id` 累计运行的 tick 数（不存在时 `None`）。
     pub fn cpu_ticks(&self, id: TaskId) -> Option<u64> {
-        self.tasks.iter().flatten().find(|t| t.id == id).map(|t| t.sched.cpu_ticks)
+        self.historical_slot(id).and_then(|i| self.task(i)).map(|t| t.sched.cpu_ticks)
     }
 }
 
@@ -1831,8 +2285,8 @@ fn arb_class(t: &Task) -> kernel_core::arbiter::Class {
 }
 
 fn eligible_in(groups: &[Option<CpuGroup>], t: &Task) -> bool {
-    // 实时预算：耗尽且未到下一周期 ⇒ 不可运行；任务仍留在队列，由选择器跳过。
-    if t.rt_period != 0 && t.rt_remaining == 0 && crate::sched::timer_ticks() < t.rt_next_period {
+    // 实时预算耗尽必须等归属CPU真正补充；仅时钟到下一周期不构成授权。
+    if t.rt_period != 0 && t.rt_remaining == 0 {
         return false;
     }
     match t.cpu_group {

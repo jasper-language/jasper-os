@@ -6,6 +6,7 @@
 //!   必须用它，否则单 CPU 上任务持锁时来一个中断去抢同一把锁就会永远自旋
 //! * 全局锁以 [`IrqSpinLock::ranked`] 新建并在 `crate::lockorder` 登记级别：加锁时按本处理器的持有集合检查顺序，
 //!   违反顺序即停机（多处理器下逆序加锁会死锁，宁可第一次运行就暴露）；局部锁用 [`IrqSpinLock::new`]，不参与顺序
+//! * 每把 [`IrqSpinLock`] 使用排号锁；获取次数按CPU分别记录，争用路径才更新共享自旋计数。
 //! * 每把 [`IrqSpinLock`] 自带争用计数（加锁次数、遇到占用的次数、等待时的自旋次数与单次最多自旋次数），
 //!   供验收测量关键路径锁的争用；计数只用 32 位原子（所有目标都有），回绕不影响正确性
 //! * [`IrqU64`]：中断处理程序与任务可共享的 64 位计数单元——有 64 位原子指令的目标上是硬件原子，
@@ -22,6 +23,7 @@ use kernel_core::lockorder::{HeldRanks, LockClass, LockOrderError};
 
 use crate::arch;
 pub use kernel_core::sync::{SpinLock, SpinLockGuard};
+use kernel_core::ticket::{TicketLock, TicketGuard};
 
 /// 经平台契约关 / 开本处理器中断的屏蔽策略。
 /// Interrupt-mask strategy backed by the platform contract.
@@ -45,9 +47,10 @@ pub type IrqU64 = kernel_core::sync::IrqSafeU64<ArchIrqMask>;
 /// 关中断自旋锁；全局锁以 [`IrqSpinLock::ranked`] 新建，加锁时按登记的级别检查顺序。
 /// Interrupt-disabling spin lock, optionally ranked in the global lock order.
 pub struct IrqSpinLock<T> {
-    inner: SpinLock<T>,
+    inner: TicketLock<T>,
     class: Option<LockClass>,
-    acquired: AtomicU32,
+    // Author: chatgpt. Count acquisitions on this CPU, without a shared RMW word.
+    acquired: [AtomicU32; kernel_core::smp::MAX_CPUS],
     contended: AtomicU32,
     spins: AtomicU32,
     max_spins: AtomicU32,
@@ -71,16 +74,16 @@ impl<T> IrqSpinLock<T> {
     /// 新建不登记顺序的局部锁（未加锁）。持有期间不得获取其他锁。
     /// Create an unranked, local lock.
     pub const fn new(data: T) -> Self {
-        IrqSpinLock { inner: SpinLock::new(data), class: None, acquired: AtomicU32::new(0), contended: AtomicU32::new(0), spins: AtomicU32::new(0), max_spins: AtomicU32::new(0) }
+        IrqSpinLock { inner: TicketLock::new(data), class: None, acquired: [const { AtomicU32::new(0) }; kernel_core::smp::MAX_CPUS], contended: AtomicU32::new(0), spins: AtomicU32::new(0), max_spins: AtomicU32::new(0) }
     }
 
     /// 新建登记了级别的全局锁（未加锁）；级别见 [`crate::lockorder`]。
     /// Create a lock ranked by `class`.
     pub const fn ranked(class: LockClass, data: T) -> Self {
         IrqSpinLock {
-            inner: SpinLock::new(data),
+            inner: TicketLock::new(data),
             class: Some(class),
-            acquired: AtomicU32::new(0),
+            acquired: [const { AtomicU32::new(0) }; kernel_core::smp::MAX_CPUS],
             contended: AtomicU32::new(0),
             spins: AtomicU32::new(0),
             max_spins: AtomicU32::new(0),
@@ -101,24 +104,16 @@ impl<T> IrqSpinLock<T> {
             Some(g) => g,
             None => {
                 self.contended.fetch_add(1, Ordering::Relaxed);
-                // 先只读等待（不反复写缓存行），看到空闲再尝试；记下自旋次数
-                let mut n: u32 = 0;
-                let g = loop {
-                    while self.inner.is_locked() {
-                        n = n.wrapping_add(1);
-                        core::hint::spin_loop();
-                    }
-                    if let Some(g) = self.inner.try_lock() {
-                        break g;
-                    }
-                };
+                // Allocate exactly one FIFO ticket; do not repeatedly race for
+                // a free lock and bypass already queued processors. Author: chatgpt.
+                let (g, n) = self.inner.lock_counted();
                 self.spins.fetch_add(n, Ordering::Relaxed);
                 self.max_spins.fetch_max(n, Ordering::Relaxed);
                 g
             }
         };
-        self.acquired.fetch_add(1, Ordering::Relaxed);
-        IrqSpinLockGuard { guard: Some(guard), rank: self.class.map(|c| c.rank), was_enabled }
+        self.acquired[arch::cpu_index()].fetch_add(1, Ordering::Relaxed);
+        IrqSpinLockGuard { guard: Some(guard), rank: self.class.map(|c| c.rank), was_enabled, _cpu_local: core::marker::PhantomData }
     }
 
     /// 先检查加锁顺序再加锁：顺序不合法时返回错误，不加锁、不改动持有集合、中断状态不变。
@@ -135,7 +130,7 @@ impl<T> IrqSpinLock<T> {
 
     /// 绕过顺序登记的尝试加锁：只给停机前的紧急输出使用（那时不能再因顺序问题停机）。
     /// Try-lock bypassing rank accounting; for emergency output only.
-    pub fn try_lock_bypass(&self) -> Option<SpinLockGuard<'_, T>> {
+    pub fn try_lock_bypass(&self) -> Option<TicketGuard<'_, T>> {
         self.inner.try_lock()
     }
 
@@ -149,7 +144,7 @@ impl<T> IrqSpinLock<T> {
     /// Contention counters.
     pub fn stats(&self) -> LockStats {
         LockStats {
-            acquired: self.acquired.load(Ordering::Relaxed),
+            acquired: self.acquired.iter().fold(0u32, |sum, c| sum.wrapping_add(c.load(Ordering::Relaxed))),
             contended: self.contended.load(Ordering::Relaxed),
             spins: self.spins.load(Ordering::Relaxed),
             max_spins: self.max_spins.load(Ordering::Relaxed),
@@ -159,7 +154,7 @@ impl<T> IrqSpinLock<T> {
     /// 清零争用测量值（测量窗口开始时调用）。
     /// Reset the contention counters.
     pub fn reset_stats(&self) {
-        for c in [&self.acquired, &self.contended, &self.spins, &self.max_spins] {
+        for c in self.acquired.iter().chain([&self.contended, &self.spins, &self.max_spins]) {
             c.store(0, Ordering::Relaxed);
         }
     }
@@ -197,9 +192,11 @@ fn order_violation(class: LockClass, e: LockOrderError) -> ! {
 /// [`IrqSpinLock`] 的守卫。
 pub struct IrqSpinLockGuard<'a, T> {
     /// `Option` 只为在 `drop` 里先于恢复中断释放锁。
-    guard: Option<SpinLockGuard<'a, T>>,
+    guard: Option<TicketGuard<'a, T>>,
     rank: Option<u8>,
     was_enabled: bool,
+    // A CPU-local IRQ state/rank guard must never move to a different CPU.
+    _cpu_local: core::marker::PhantomData<*mut ()>,
 }
 
 impl<T> Deref for IrqSpinLockGuard<'_, T> {

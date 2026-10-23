@@ -111,6 +111,18 @@ impl CpuLimit {
         self.limit_permille >= UNLIMITED || self.tokens > 0
     }
 
+    /// Author: chatgpt. Maximum one-tick reservations from this shared balance.
+    /// The caller must allocate this ONE total across CPUs while serialized,
+    /// drain all used reservations before mutation, and charge each used credit.
+    /// This query neither reserves nor charges. Leaving a positive balance after
+    /// every granted tick avoids authorizing a tick that exhausts eligibility.
+    /// Unlimited groups still require normal usage accounting.
+    pub const fn deferred_tick_credits(&self, requested: u32) -> u32 {
+        if self.limit_permille >= UNLIMITED { return requested; }
+        let available = if self.tokens > 0 { ((self.tokens - 1) / TICK_COST) as u32 } else { 0 };
+        if requested < available { requested } else { available }
+    }
+
     /// 只扣费不补充：多处理器下其他处理器的本地 tick 由本组成员运行时调用（补充只在全局时钟 tick 上做一次，
     /// 因此 N 个处理器同时运行本组成员时消耗按 N 倍计，上限对整组生效而不是对每个处理器各自生效）。
     /// Charge one tick without refilling (another processor ran a member).
@@ -270,5 +282,51 @@ mod tests {
         assert!(used >= window / 2 - 8, "上限内应能用满约一半：{used}");
         assert_eq!(l.stats().used_ticks, used);
         assert!(l.stats().throttle_events > 0, "多核下同样会被限速");
+    }
+}
+
+// Author: chatgpt. Contract of the shared publication allowance, not a
+// concurrent reservation implementation or scheduler integration proof.
+#[cfg(test)]
+mod deferred_credit_tests {
+    use super::*;
+    #[test]
+    fn shared_credits_preserve_eligibility_and_do_not_change_accounting() {
+        for limit in [1, 250, 999] {
+            for burst in 1..=MAX_BURST_TICKS {
+                let mut balance = CpuLimit::new(limit, burst).unwrap();
+                for _ in 0..(burst + 3) {
+                    for requested in [0, 1, 2, 8, 32, u32::MAX] {
+                        let before = balance;
+                        let credits = balance.deferred_tick_credits(requested);
+                        assert_eq!(balance, before);
+                        assert!(credits <= requested);
+                        let mut charged = balance;
+                        for _ in 0..credits { charged.charge(); }
+                        if credits > 0 { assert!(charged.eligible()); }
+                        assert_eq!(charged.stats().used_ticks, before.stats().used_ticks + credits as u64);
+                        if credits < requested && before.eligible() {
+                            charged.charge();
+                            assert!(!charged.eligible());
+                        }
+                    }
+                    balance.charge();
+                }
+            }
+        }
+    }
+    #[test]
+    fn unlimited_and_reconfiguration_use_the_current_balance() {
+        let mut balance = CpuLimit::new(UNLIMITED, 1).unwrap();
+        balance.charge();
+        balance.charge();
+        assert_eq!(balance.deferred_tick_credits(32), 32);
+        balance.set_limit(250).unwrap();
+        assert_eq!(balance.deferred_tick_credits(32), 0);
+        for _ in 0..9 { balance.on_tick(false, true); }
+        assert_eq!(balance.deferred_tick_credits(32), 0);
+        for _ in 0..4 { balance.on_tick(false, true); }
+        // Burst one caps at exactly one tick: no positive remainder is possible.
+        assert_eq!(balance.deferred_tick_credits(32), 0);
     }
 }

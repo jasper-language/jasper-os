@@ -226,6 +226,21 @@ impl<T: 'static> ObjectTable<T> {
         self.entry(id).map(|e| (e.owners, e.internal, e.state))
     }
 
+    /// Borrow two distinct live object values without aliasing. Author: chatgpt.
+    /// Validation is read-only; on error no object or reference count changes.
+    pub fn get_pair_mut(&mut self, a: ObjId, b: ObjId) -> Result<(&mut T, &mut T), ObjError> {
+        if a.index == b.index { return Err(ObjError::Invalid); }
+        self.entry(a)?;
+        self.entry(b)?;
+        let (low, high, reversed) = if a.index < b.index {
+            (a.index as usize, b.index as usize, false)
+        } else { (b.index as usize, a.index as usize, true) };
+        let (left, right) = self.slots.split_at_mut(high);
+        let x = &mut left[low].entry.as_mut().expect("validated low entry").value;
+        let y = &mut right[0].entry.as_mut().expect("validated high entry").value;
+        if reversed { Ok((y, x)) } else { Ok((x, y)) }
+    }
+
     /// 增加一个外部所有权。closing 的对象不能再获得所有者（它已无人可再使用）。
     pub fn acquire_owner(&mut self, id: ObjId) -> Result<(), ObjError> {
         let e = self.entry_mut(id)?;
@@ -495,4 +510,115 @@ mod tests {
         }
         assert_eq!((gone, t.live(), t.pending()), (n, 0, 0));
     }
+}
+
+#[cfg(kani)]
+mod fv1_objects {
+    extern crate std;
+    use super::*;
+    use self::std::boxed::Box;
+    fn table() -> ObjectTable<u8> {
+        let mut t = ObjectTable::empty();
+        t.install(Box::leak(Box::new([Slot::VACANT])),
+            Box::leak(Box::new([0]))).unwrap();
+        t
+    }
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn object_generation_and_internal_reference_lifetime() {
+        let mut t = table();
+        let generation: u32 = kani::any();
+        t.slots[0].generation = generation;
+        let old = t.insert(7, 1, 1).unwrap();
+        assert!(!t.release_owner(old).unwrap().dead);
+        assert_eq!(t.acquire_owner(old), Err(ObjError::Invalid));
+        assert_eq!(t.get(old), Ok(&7));
+        assert!(t.release_internal(old).unwrap().dead);
+        assert_eq!(t.get(old), Err(ObjError::Invalid));
+        assert_eq!(t.pending(), 1);
+        assert_eq!(t.take_dead(), Some((old, 7)));
+        assert_eq!(t.take_dead(), None);
+        if generation == u32::MAX {
+            assert_eq!(t.retired_slots(), 1);
+            assert_eq!(t.insert(8, 1, 0), Err(ObjError::Full));
+        } else {
+            let new = t.insert(8, 1, 0).unwrap();
+            assert_ne!(old, new);
+            assert_eq!(t.get(old), Err(ObjError::Invalid));
+        }
+    }
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn object_reference_increment_rejects_overflow_atomically() {
+        let mut t = table();
+        let owners: u32 = kani::any();
+        if owners == 0 {
+            assert_eq!(t.insert(7, owners, 0), Err(ObjError::Underflow));
+            assert_eq!(t.live(), 0);
+            return;
+        }
+        let id = t.insert(7, owners, 0).unwrap();
+        let result = t.acquire_owner(id);
+        if owners == u32::MAX {
+            assert_eq!(result, Err(ObjError::Full));
+            assert_eq!(t.counts(id).unwrap().0, owners);
+        } else {
+            assert!(result.is_ok());
+            assert_eq!(t.counts(id).unwrap().0, owners + 1);
+            t.release_owner(id).unwrap();
+            assert_eq!(t.counts(id).unwrap().0, owners);
+        }
+        assert_eq!(t.pending(), 0);
+    }
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn two_object_borrows_are_distinct_and_validate_indices() {
+        let mut t = ObjectTable::empty();
+        t.install(Box::leak(Box::new([Slot::VACANT, Slot::VACANT])),
+            Box::leak(Box::new([0, 0]))).unwrap();
+        let first = t.insert(7u8, 1, 0).unwrap();
+        let second = t.insert(9u8, 1, 0).unwrap();
+        let raw: u64 = kani::any();
+        if let Some(candidate) = ObjId::from_raw(raw) {
+            if candidate == second {
+                let (a, b) = t.get_pair_mut(first, candidate).unwrap();
+                *a = 11; *b = 13;
+                assert_eq!(t.get(first), Ok(&11));
+                assert_eq!(t.get(second), Ok(&13));
+            } else {
+                assert!(t.get_pair_mut(first, candidate).is_err());
+                assert_eq!(t.get(first), Ok(&7));
+                assert_eq!(t.get(second), Ok(&9));
+            }
+        }
+        let (b, a) = t.get_pair_mut(second, first).unwrap();
+        *a = 17; *b = 19;
+        assert_eq!(t.get(first), Ok(&17));
+        assert_eq!(t.get(second), Ok(&19));
+        assert_eq!(t.counts(first).unwrap(), (1, 0, Lifecycle::Live));
+    }
+
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn internal_reference_increment_rejects_overflow_atomically() {
+        let mut t = table();
+        let internal: u32 = kani::any();
+        if internal == 0 {
+            assert_eq!(t.insert(7, 0, internal), Err(ObjError::Underflow));
+            return;
+        }
+        let id = t.insert(7, 0, internal).unwrap();
+        let result = t.acquire_internal(id);
+        if internal == u32::MAX {
+            assert_eq!(result, Err(ObjError::Full));
+        } else {
+            assert!(result.is_ok());
+            assert_eq!(t.counts(id).unwrap().1, internal + 1);
+            t.release_internal(id).unwrap();
+        }
+        assert_eq!(t.counts(id).unwrap().1, internal);
+        assert_eq!(t.release_owner(id), Err(ObjError::Underflow));
+        assert_eq!(t.pending(), 0);
+    }
+
 }

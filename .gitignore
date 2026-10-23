@@ -1,6 +1,7 @@
 target/
 images/
 evidence/
+__pycache__/
 .idea/
 *.iml
 .DS_Store

@@ -121,7 +121,7 @@ impl Mapping {
             #[cfg(not(all(feature = "s2-fuzz", target_arch = "x86_64")))]
             let injected = false;
             if injected || mm::map::map(page, frame, flags).is_err() {
-                // An unconfirmed rollback may leave stale remote TLB
+                // chatgpt: an unconfirmed rollback may leave stale remote TLB
                 // entries. Quarantine the VA slot exactly as Mapping::drop does.
                 if mapped == 0 || mm::map::unmap_pages(VirtPage::containing(page_va), mapped).is_ok() {
                     release_slot(slot);

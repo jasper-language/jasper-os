@@ -56,8 +56,17 @@ pub mod async_ring;
 pub mod capacity;
 pub mod config;
 pub mod device;
+pub mod deadline;
+pub mod deadline_forest;
+pub mod yield_gate;
 pub mod dma_quiesce;
 pub mod elf;
+pub mod environment;
+pub mod ticket;
+pub mod task_index;
+pub mod task_lifecycle;
+pub mod tick_lease;
+pub mod wake_mailbox;
 pub mod fdt;
 pub mod frame;
 pub mod fault;
@@ -79,6 +88,7 @@ pub mod pci;
 pub mod pressure;
 pub mod psci;
 pub mod ring_abi;
+pub mod quota;
 pub mod rt;
 pub mod sbi;
 pub mod sched;
@@ -97,3 +107,9 @@ pub mod wait;
 
 #[cfg(test)]
 mod robustness;
+
+#[cfg(kani)]
+mod fv1;
+
+// Author: chatgpt. Diagnostic raw sample storage, not a clock or proof of timing.
+pub mod raw_timing;

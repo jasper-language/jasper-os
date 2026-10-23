@@ -1,4 +1,4 @@
-//! Explicitly armed, one-shot fault countdown.
+//! Explicitly armed, one-shot fault countdown. Author: chatgpt.
 //! A seed chooses the failing invocation; concurrent callers have no fixed order.
 //! Arming/disarming must occur while the tested workload is quiescent.
 use core::sync::atomic::{AtomicUsize, Ordering};

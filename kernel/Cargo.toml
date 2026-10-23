@@ -18,10 +18,14 @@ pic8259 = "0.11.0"
 noto-sans-mono-bitmap = { version = "0.2.0", optional = true, default-features = false, features = ["regular", "size_16", "unicode-basic-latin"] }
 
 [features]
+# Author: chatgpt. Optional diagnostic counters; absent from default builds.
+krn2-observe = []
 # Explicitly armed KRN-1 fault sites; default builds contain no hooks.
 fault-inject = []
 # S-2 fixed-seed eight-process syscall campaign (opt-in).
 s2-fuzz = ["user-programs"]
+# Independent opt-in long-run guest; not enabled by default or acceptance.
+krn1-soak = ["user-programs"]
 # Explicit QEMU BM-1 profile: RTL8139 log link, IB700 watchdog and CF9 reset.
 bm1-vm = ["dep:noto-sans-mono-bitmap"]
 bm1-hang = ["bm1-vm"]

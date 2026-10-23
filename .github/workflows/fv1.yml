@@ -1,0 +1,58 @@
+# Author: chatgpt. Rerun real-code proofs on every relevant source/config change.
+name: fv1
+on:
+  push:
+    paths:
+      - 'kernel-core/**'
+      - 'kernel/src/proc/mod.rs'
+      - 'kernel/src/ring.rs'
+      - 'kernel/src/ipc.rs'
+      - 'verification/FV1.toml'
+      - 'verification/run-kani.sh'
+      - 'verification/check-fv1.py'
+      - 'verification/ring_fv1*'
+      - 'verification/run-ring-fv1-tlc.sh'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
+      - '.github/workflows/fv1.yml'
+  pull_request:
+    paths:
+      - 'kernel-core/**'
+      - 'kernel/src/proc/mod.rs'
+      - 'kernel/src/ring.rs'
+      - 'kernel/src/ipc.rs'
+      - 'verification/FV1.toml'
+      - 'verification/run-kani.sh'
+      - 'verification/check-fv1.py'
+      - 'verification/ring_fv1*'
+      - 'verification/run-ring-fv1-tlc.sh'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
+      - '.github/workflows/fv1.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: fv1-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  prove:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Kani verifier
+        run: |
+          cargo install --locked kani-verifier --version 0.68.0
+          cargo kani setup
+      - name: Model check Ring progress under explicit fairness
+        run: mkdir -p evidence/fv1 && bash verification/run-ring-fv1-tlc.sh > evidence/fv1/ring-tlc.log 2>&1
+      - name: Verify real mechanism contracts and assumption surface
+        run: bash verification/run-kani.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fv1-${{ github.sha }}
+          path: evidence/fv1/

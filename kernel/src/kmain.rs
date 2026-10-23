@@ -278,6 +278,11 @@ pub fn start(boot: &'static BootSpec) -> ! {
         kprintln!("[JSR-EXIT] failure s2_failed=1");
         arch::exit_emulator(ExitStatus::Failure);
     }
+    #[cfg(all(feature = "krn1-soak", target_arch = "x86_64"))]
+    if !crate::soak::run() {
+        kprintln!("[JSR-EXIT] failure soak_failed=1");
+        arch::exit_emulator(ExitStatus::Failure);
+    }
     // 未内嵌用户程序时如实说明：依赖用户程序的演练没有运行。
     if !cfg!(feature = "user-programs") {
         kprintln!("[JSR-STAGE] user_programs=absent skipped=elf,lifecycle,ring,ipc,prog,rt,qos,overload,bench");

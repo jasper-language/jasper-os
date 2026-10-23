@@ -51,7 +51,7 @@ impl<T> SpinLock<T> {
         self.locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .ok()
-            .map(|_| SpinLockGuard { lock: self })
+            .map(|_| SpinLockGuard { lock: self, _borrow: core::marker::PhantomData })
     }
 
     /// 是否已被占用（仅供诊断，结果可能立刻过时）。
@@ -61,8 +61,15 @@ impl<T> SpinLock<T> {
 }
 
 /// 锁守卫：存活期间独占访问数据，析构时解锁。
+/// Author: chatgpt. A guard may not share a !Sync payload across threads.
+/// ```compile_fail
+/// use kernel_core::sync::SpinLockGuard;
+/// fn require_sync<T: Sync>() {}
+/// require_sync::<SpinLockGuard<'static, core::cell::Cell<u8>>>();
+/// ```
 pub struct SpinLockGuard<'a, T> {
     lock: &'a SpinLock<T>,
+    _borrow: core::marker::PhantomData<&'a mut T>,
 }
 
 impl<T> Deref for SpinLockGuard<'_, T> {

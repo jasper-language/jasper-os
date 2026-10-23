@@ -149,7 +149,9 @@ fn interactive() {
         return;
     }
     for _ in 0..ROUNDS {
-        sched::sleep_until(sched::timer_ticks() + 1);
+        // Author: chatgpt. Register a real one-tick sleep atomically; computing
+        // an absolute deadline before taking the scheduler lock can expire.
+        sched::sleep_ticks(1);
         INTERACTIVE_DONE.fetch_add(1, Ordering::Relaxed);
     }
 }

@@ -1,4 +1,4 @@
-//! Reproducibility and concurrent single-fire contract.
+//! Author: chatgpt. Reproducibility and concurrent single-fire contract.
 use kernel_core::fault::FaultPoint;
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 #[test]

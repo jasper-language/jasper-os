@@ -424,6 +424,20 @@ impl<V, const N: usize> HandleTable<V, N> {
         Ok(HandleId::encode(index, slot.generation))
     }
 
+    /// Atomically move one handle between distinct tables at the API boundary.
+    /// Author: chatgpt. Caller must serialize both tables; no callback occurs
+    /// between destination insertion and source removal. Errors leave both intact.
+    pub fn transfer_to<const M: usize>(&mut self, h: HandleId, to: &mut HandleTable<V, M>)
+        -> Result<HandleId, HandleError> where V: Copy
+    {
+        let (value, rights) = self.get(h)?;
+        if !rights.contains(Rights::TRANSFER) { return Err(HandleError::RightsDenied); }
+        // Destination insertion can fail; do it before touching the source.
+        let moved = to.put(*value, rights)?;
+        self.remove(h).expect("exclusive validated source handle cannot disappear");
+        Ok(moved)
+    }
+
     /// 查找句柄对应的槽位；世代不匹配视为无效。
     fn slot(&self, h: HandleId) -> Result<&Slot<V>, HandleError> {
         let slot = h.index().and_then(|i| self.slots.get(i)).ok_or(HandleError::Invalid)?;
@@ -732,5 +746,29 @@ mod tests {
         assert_eq!(advance_generation(GENERATION_RETIRED - 2), GENERATION_RETIRED - 1);
         assert_eq!(advance_generation(GENERATION_RETIRED - 1), GENERATION_RETIRED, "用尽即退役，不回到 0");
         assert_eq!(advance_generation(GENERATION_RETIRED), GENERATION_RETIRED, "退役后保持退役");
+    }
+}
+
+#[cfg(kani)]
+mod fv1_generation {
+    use super::*;
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn handle_generation_does_not_wrap_or_resurrect() {
+        let mut table = HandleTable::<u8, 1>::new();
+        // A vacant reusable slot at an arbitrary generation; all other state
+        // is constructor-valid. This includes the final non-retired generation.
+        let generation: u32 = kani::any();
+        table.slots[0].generation = generation;
+        let old = table.put(7, Rights::READ).unwrap();
+        assert_eq!(table.remove(old), Ok(7));
+        assert_eq!(table.get(old), Err(HandleError::Invalid));
+        if generation == MAX_GENERATION {
+            assert_eq!(table.put(8, Rights::READ), Err(HandleError::TableFull));
+        } else {
+            let new = table.put(8, Rights::READ).unwrap();
+            assert_ne!(old, new);
+            assert_eq!(table.get(old), Err(HandleError::Invalid));
+        }
     }
 }

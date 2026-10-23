@@ -32,3 +32,12 @@ pub fn write_byte(byte: u8) {
         outb(COM1, byte);
     }
 }
+
+/// Nonblocking receive for the explicit soak profile's owned COM1 stream.
+#[cfg(feature = "krn1-soak")]
+pub fn try_read_byte() -> Option<u8> {
+    // SAFETY: the soak profile exclusively owns UART input; read data only if ready.
+    unsafe {
+        if inb(COM1 + 5) & 1 == 0 { None } else { Some(inb(COM1)) }
+    }
+}

@@ -139,7 +139,7 @@ pub fn create_pair(pa: ObjId, pb: ObjId) -> Result<(HandleId, HandleId), i64> {
         for (pid, need) in [(pa, if pa == pb { 2 } else { 1 }), (pb, if pa == pb { 2 } else { 1 })] {
             proc::syscalls_in(t, pid).map_err(proc_err)?;
             let q = proc::ring_quota_in(t, pid).ok_or(err(SYSTEM_ERROR_RIGHTS_DENIED))?;
-            if q.endpoints + need > MAX_ENDPOINTS_PER_PROCESS {
+            if kernel_core::quota::reserve_u32(q.endpoints, need, MAX_ENDPOINTS_PER_PROCESS).is_none() {
                 return Err(err(SYSTEM_ERROR_QUOTA_EXCEEDED));
             }
         }
@@ -229,7 +229,8 @@ pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, han
     }
     // 字节配额：发送方进程与全系统各有上限（超额原子失败，不入队、不动句柄）
     let mine = proc::ring_quota_in(t, pid).map(|q| q.ipc_bytes as usize).unwrap_or(usize::MAX);
-    if mine + body.len() > MAX_PROCESS_IPC_BYTES || QUEUED_TOTAL.load(Ordering::Relaxed) + body.len() > MAX_TOTAL_IPC_BYTES {
+    if kernel_core::quota::reserve_usize(mine, body.len(), MAX_PROCESS_IPC_BYTES).is_none()
+        || kernel_core::quota::reserve_usize(QUEUED_TOTAL.load(Ordering::Relaxed), body.len(), MAX_TOTAL_IPC_BYTES).is_none() {
         return err(SYSTEM_ERROR_QUOTA_EXCEEDED);
     }
     // 复核每个要移动的句柄：有效、带 TRANSFER、叶子对象、互不相同、不是本次发送所用的端点

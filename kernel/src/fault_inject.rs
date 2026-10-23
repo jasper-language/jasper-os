@@ -1,4 +1,4 @@
-//! Test-only fault sites, disabled unless explicitly armed.
+//! Test-only fault sites, disabled unless explicitly armed. Author: chatgpt.
 pub use kernel_core::fault::FaultPoint;
 pub static FRAME: FaultPoint = FaultPoint::new();
 pub static HEAP: FaultPoint = FaultPoint::new();
