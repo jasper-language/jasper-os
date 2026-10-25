@@ -37,3 +37,5 @@ evidence/a64-q66-*/
 /evidence/shm1/
 /verification/toolbox/fuzz/corpus/
 /verification/toolbox/fuzz/artifacts/
+
+/evidence/
