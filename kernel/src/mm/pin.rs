@@ -1,31 +1,21 @@
-//! 物理页固定（INV-05）：异步请求在后端不再访问之前，阻止其缓冲区所在的物理帧被释放或复用。
-//! Physical frame pinning: keeps frames used by in-flight requests from being freed or reused.
-//!
-//! # 模型
-//! * 每个被固定的帧有一个**固定计数**：每个使用它的请求 +1，请求销毁（X）时 −1。
-//!   同一缓冲区被多个请求使用时计数叠加——单个请求结束只减自己的一份。
-//! * 帧的**所有者**（进程的数据帧表）放弃它时调用 [`release`]：未被固定 ⇒ 立即归还；
-//!   仍被固定 ⇒ 记为「孤儿」，等最后一次 [`unpin`] 时才真正归还。因此用户在请求进行中取消映射缓冲区，
-//!   映射消失，帧却不会在请求结束前被复用。
-//!
-//! # 边界
-//! 只管物理帧的生命周期；设备映射（IOMMU）与托管对象固定是另外两个层次，不在这里，也不与这里合并计数。
-//!
-//! # 锁
-//! 一把关中断自旋锁，位于全局锁顺序的最底层（页帧 / 映射一层）；持锁期间只调用页帧服务。
+//! User buffer page references (INV-05 / SHM-1). Author: chatgpt.
+//! Every RAM segment retains an Arc<Memory Page>; only the final Page drop may return its frame.
+//! Virtual unmap/creator exit cannot revoke an already accepted buffer's physical reference.
+//! Physical counts below are diagnostic: they preserve the existing "unmapped while pinned" witness.
+//! Device BAR segments are borrowed non-RAM addresses and are never returned to the RAM allocator.
+//! Pin construction reserves all diagnostic metadata before publication; failure leaves no pin counts.
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 
 use kernel_core::frame::PhysFrame;
 
-use super::frame;
 use crate::sync::IrqSpinLock;
 
 /// 一个被固定的帧。
 struct Pin {
     frame: PhysFrame,
-    count: u32,
-    /// 所有者已放弃：最后一次解除固定时归还给页帧服务。
+    count: usize,
+    /// A private mapping was removed while pinned; RAM Page references control actual reclamation.
     orphaned: bool,
 }
 
@@ -37,45 +27,20 @@ static PINS: IrqSpinLock<Vec<Pin>> = IrqSpinLock::ranked(crate::lockorder::MEMOR
 ///（32 位目标没有 64 位原子指令，用内核的关中断 64 位计数器。）
 static ORPHANED_TOTAL: crate::sync::IrqU64 = crate::sync::IrqU64::new(0);
 
-/// 固定一个帧（计数 +1）。
-pub fn pin(f: PhysFrame) {
-    let mut pins = PINS.lock();
-    match pins.iter_mut().find(|p| p.frame == f) {
-        Some(p) => p.count += 1,
-        None => pins.push(Pin { frame: f, count: 1, orphaned: false }),
-    }
+/// Diagnostic removal only: Page references are the sole owners of RAM allocations.
+fn unpin(f: PhysFrame) {
+    let mut pins=PINS.lock();
+    let Some(i)=pins.iter().position(|p|p.frame==f) else { return; };
+    pins[i].count-=1;
+    if pins[i].count==0 { pins.swap_remove(i); }
 }
 
-/// 解除一次固定（计数 −1）。计数归零且所有者已放弃 ⇒ 归还帧。返回帧是否因此被归还。
-pub fn unpin(f: PhysFrame) -> bool {
-    let mut pins = PINS.lock();
-    let Some(i) = pins.iter().position(|p| p.frame == f) else {
-        return false;
-    };
-    pins[i].count -= 1;
-    if pins[i].count > 0 {
-        return false;
-    }
-    let p = pins.swap_remove(i);
-    if p.orphaned {
-        let _ = frame::deallocate(p.frame);
-        return true;
-    }
-    false
-}
-
-/// 所有者放弃一个帧：未被固定 ⇒ 立即归还；仍被固定 ⇒ 延后到最后一次解除固定时归还。
-pub fn release(f: PhysFrame) {
-    let mut pins = PINS.lock();
-    match pins.iter_mut().find(|p| p.frame == f) {
-        Some(p) => {
-            p.orphaned = true;
-            ORPHANED_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        }
-        None => {
-            drop(pins);
-            let _ = frame::deallocate(f);
-        }
+/// Records the existing "unmapped while pinned" observation without transferring frame ownership.
+/// A managed Page reference, not this diagnostic counter, prevents physical reuse.
+pub fn mapping_released(f: PhysFrame) {
+    let mut pins=PINS.lock();
+    if let Some(p)=pins.iter_mut().find(|p| p.frame==f) {
+        if !p.orphaned { p.orphaned=true; ORPHANED_TOTAL.fetch_add(1,core::sync::atomic::Ordering::Relaxed); }
     }
 }
 
@@ -96,16 +61,26 @@ pub fn stats() -> (usize, usize) {
 pub struct PinnedRange {
     segs: Vec<(PhysFrame, u32, u32)>,
     len: usize,
+    /// Every RAM segment retains its canonical Memory page, including anonymous/image/stack pages.
+    _page_refs: Vec<Option<Arc<super::memory_object::Page>>>,
+    _charge: super::memory_quota::Charge,
 }
 
 impl PinnedRange {
     /// 由已校验的段建立并逐帧固定（段由调用者从进程页表查得）。
-    pub fn new(segs: Vec<(PhysFrame, u32, u32)>) -> Self {
-        for (f, _, _) in &segs {
-            pin(*f);
+    pub fn new(segs: Vec<(PhysFrame, u32, u32)>, page_refs: Vec<Option<Arc<super::memory_object::Page>>>, charge: super::memory_quota::Charge) -> Option<Self> {
+        assert!(segs.len()==page_refs.len(),"pin segments and backing references differ");
+        let mut pins=PINS.lock();
+        if pins.try_reserve(segs.len()).is_err() { drop(pins); return None; }
+        for (f,_,_) in &segs {
+            match pins.iter_mut().find(|p|p.frame==*f) {
+                Some(p)=>p.count=p.count.checked_add(1).expect("physical pin diagnostic count overflow"),
+                None=>pins.push(Pin {frame:*f,count:1,orphaned:false}),
+            }
         }
+        drop(pins);
         let len = segs.iter().map(|s| s.2 as usize).sum();
-        PinnedRange { segs, len }
+        Some(PinnedRange { segs, len, _page_refs: page_refs, _charge: charge })
     }
 
     /// 总字节数。
@@ -178,4 +153,12 @@ impl Drop for PinnedRange {
             unpin(*f);
         }
     }
+}
+
+/// Opt-in fault fixture: ensure the next non-empty diagnostic registry needs allocation.
+#[cfg(feature="shm1-verify")]
+pub fn reset_empty_diagnostics() {
+    let mut pins=PINS.lock();
+    assert!(pins.is_empty(),"cannot reset live pin observations");
+    *pins=Vec::new();
 }

@@ -75,6 +75,10 @@ fn race_window() {
 pub enum UserPtrError {
     /// 长度超过上限（`system.error.invalid_argument`）。
     TooLong,
+    /// Fixed-page reference quota refused; no frames were pinned.
+    Quota,
+    /// Unable to reserve metadata for an otherwise valid pinned range.
+    OutOfMemory,
     /// 地址溢出、不在私有窗口、未映射或权限不足（`system.memory.error.invalid_address`）。
     InvalidAddress,
     /// 当前任务不是用户任务（不属于任何进程）。
@@ -84,6 +88,8 @@ pub enum UserPtrError {
 /// 在对象表锁 `t` 内校验并固定进程 `pid` 的 `[addr, addr+len)`（`write` 时要求可写）。
 fn pin_in(t: &mut kobj::Table, pid: ObjId, addr: u64, len: usize, write: bool) -> Result<PinnedRange, UserPtrError> {
     proc::pin_user_in(t, pid, addr, len, write).map_err(|e| match e {
+        ProcError::OutOfFrames => UserPtrError::OutOfMemory,
+        ProcError::MemoryQuota => UserPtrError::Quota,
         ProcError::NoSuchProcess => UserPtrError::NotUserTask,
         ProcError::Map(MapError::InvalidAddress | MapError::NotMapped | MapError::Busy) => UserPtrError::InvalidAddress,
         _ => UserPtrError::InvalidAddress,
@@ -99,7 +105,12 @@ enum Target {
 }
 
 /// 会改动地址空间映射或产生共享地址空间的执行流的操作：不属于进程的任务若允许其中任何一个，就不能走直接路径。
-const MUTATING: [u32; 5] = [
+const MUTATING: [u32; 10] = [
+    abi::SYSTEM_EVENT_SOURCE_CREATE,
+    abi::SYSTEM_EVENT_SUBSCRIPTION_CREATE,
+    abi::SYSTEM_MEMORY_OBJECT_CREATE,
+    abi::SYSTEM_MEMORY_OBJECT_MAP,
+    abi::SYSTEM_MEMORY_OBJECT_UNMAP,
     abi::SYSTEM_MEMORY_MAP,
     abi::SYSTEM_MEMORY_UNMAP,
     abi::SYSTEM_MEMORY_PROTECT,

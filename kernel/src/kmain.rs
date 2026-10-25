@@ -111,6 +111,49 @@ pub fn start(boot: &'static BootSpec) -> ! {
     let multi_mode = profile::has_capability("sched.arbiter");
     sched::set_arbiter(multi_mode);
     kprintln!("[JSR-SCHED] mode={}", if multi_mode { "multi" } else { "single" });
+    #[cfg(feature="limit-window-verify")]
+    {
+        mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
+        crate::balance_demo::run_limit_diagnostic();
+        arch::exit_emulator(if crate::balance_demo::failed()==0 {ExitStatus::Success} else {ExitStatus::Failure});
+    }
+    #[cfg(feature="evt2-broadcast-verify")]
+    {
+        mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
+        crate::subscription_broadcast_demo::run();
+        arch::exit_emulator(ExitStatus::Success);
+    }
+    #[cfg(feature="evt2-verify")]
+    {
+        mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
+        crate::subscription_demo::run();
+        arch::exit_emulator(ExitStatus::Success);
+    }
+    #[cfg(feature="s3-nohz-verify")]
+    {
+        mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
+        nohz_demo::run();
+        kprintln!("[JSR-NOHZ-DIAGNOSTIC] failed={}",nohz_demo::failed());
+        arch::exit_emulator(if nohz_demo::failed()==0 { ExitStatus::Success } else { ExitStatus::Failure });
+    }
+    #[cfg(feature = "shm1-verify")]
+    {
+        mm::demo::run_space();
+        smp::demo::run(smp::start_secondaries(TIMER_HZ));
+        let failed=crate::shm_demo::run();
+        arch::exit_emulator(if failed == 0 { ExitStatus::Success } else { ExitStatus::Failure });
+    }
+    #[cfg(feature = "evt1-verify")]
+    {
+        // 独立机制guest只初始化地址空间与SMP；原完整验收仍走默认主流程。
+        mm::demo::run_space();
+        smp::demo::run(smp::start_secondaries(TIMER_HZ));
+        let divisor = sched::configure_idle_tick();
+        kprintln!("[JSR-EVT1-NOHZ] divisor={}", divisor);
+        let failed = crate::evt1_demo::run();
+        kprintln!("[JSR-EVT1-EXIT] failed={}", failed);
+        arch::exit_emulator(if failed == 0 { ExitStatus::Success } else { ExitStatus::Failure });
+    }
     // POL-3：批处理作业（依赖 / 优先级 / 取消 / 终态 / 满载下交互性）。
     job_demo::run();
     // POL-4：实时准入与预算（协作式节流；抢占式执行待接入）。

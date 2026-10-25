@@ -622,3 +622,21 @@ mod fv1_objects {
     }
 
 }
+
+#[cfg(test)]
+mod subscription_publisher_contract {
+ use super::*;
+ #[test]
+ fn publisher_anchor_keeps_source_regrantable_until_publisher_finishes() {
+  let mut table=ObjectTable::for_test(2);
+  let broken=table.insert(1u8,0,1).unwrap();
+  table.acquire_owner(broken).unwrap();table.release_owner(broken).unwrap();
+  assert_eq!(table.acquire_owner(broken),Err(ObjError::Invalid));
+  table.release_internal(broken).unwrap();table.take_dead().unwrap();
+  let source=table.insert(2u8,1,0).unwrap();
+  for _ in 0..32 {table.acquire_owner(source).unwrap();let released=table.release_owner(source).unwrap();assert!(!released.became_unowned);assert!(!released.dead);}
+  table.acquire_internal(source).unwrap();let released=table.release_owner(source).unwrap();assert!(released.became_unowned);assert!(!released.dead);
+  assert_eq!(table.acquire_owner(source),Err(ObjError::Invalid));
+  assert!(table.release_internal(source).unwrap().dead);
+ }
+}

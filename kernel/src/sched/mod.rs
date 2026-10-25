@@ -44,6 +44,7 @@ use crate::arch::{self as cpu, switch_context};
 use crate::task::TaskId;
 
 use kernel_core::smp::CpuSet;
+use kernel_core::sync_origin::Origin;
 
 use policy::{kernel_policy, CpuLimitStats, KernelPolicy, LatencyHistogram, Qos, WatchdogLog};
 pub use scheduler::{AffinityError, CpuStats, NohzStats, ScanStats};
@@ -110,8 +111,12 @@ pub fn sync_work_stats() -> [u32; 4] {
     }}
     total
 }
-fn lock_state() -> StateGuard {
+// Direct diagnostic/reset/snapshot transactions are explicitly attributed.
+fn lock_state() -> StateGuard { lock_state_from(Origin::Diagnostic) }
+fn lock_state_from(_origin: Origin) -> StateGuard {
     let mut s = KERNEL_SCHED.lock();
+    #[cfg(feature = "krn2-observe")]
+    { s.origin_total.record(_origin); s.origin_window.record(_origin); }
     let mut leaves: [Option<TickGuard>; kernel_core::smp::MAX_CPUS] = [const { None }; kernel_core::smp::MAX_CPUS];
     // Author: chatgpt. Online membership only grows under this global lock.
     // Include the caller BEFORE its first cpu_online registration. Other offline
@@ -153,15 +158,18 @@ fn lock_state() -> StateGuard {
 
 /// 以共享借用访问调度器（持锁、关中断执行：时钟中断与其他处理器也会访问调度器状态）。
 fn with<R>(f: impl FnOnce(&Scheduler<KernelPolicy>) -> R) -> R {
-    f(&lock_state())
+    f(&lock_state_from(Origin::Read))
 }
 
 /// 以独占借用访问调度器（持锁、关中断执行）；调用者不得在闭包内触发栈切换。
 /// 闭包期间记下的重新调度请求在放锁之后发出。
 fn with_mut<R>(f: impl FnOnce(&mut Scheduler<KernelPolicy>) -> R) -> R {
+    with_mut_from(Origin::Mutation, f)
+}
+fn with_mut_from<R>(origin: Origin, f: impl FnOnce(&mut Scheduler<KernelPolicy>) -> R) -> R {
     let started = crate::arch::cycles();
     let (r, kicks) = {
-        let mut s = lock_state();
+        let mut s = lock_state_from(origin);
         #[cfg(feature = "krn2-observe")]
         let (slot, generation) = s.raw_callback_identity();
         #[cfg(feature = "krn2-observe")]
@@ -244,6 +252,7 @@ pub fn reset_lock_stats() {
         let mut state = lock_state();
         state.raw_callbacks = kernel_core::raw_timing::Samples::new();
         state.pi_window = kernel_core::pi_work::PiWork::EMPTY;
+        state.origin_window.clear();
         KERNEL_SCHED.reset_stats();
         for row in &SYNC_WORK { for value in row {
             value.store(0, core::sync::atomic::Ordering::Relaxed);
@@ -515,7 +524,7 @@ pub fn yield_with_cause(cause: &'static str) {
     let kernel_space = *KERNEL_SPACE.call_once(cpu::current_space);
     // 锁与借用都在本块内结束，不跨越下面的栈切换（中断仍关着）。
     let (plan, kicks) = {
-        let mut s = lock_state();
+        let mut s = lock_state_from(Origin::Switch);
         let plan = s.prepare_switch(cause);
         (plan, s.take_kicks())
     };
@@ -686,6 +695,15 @@ pub fn wake(id: TaskId) {
     });
 }
 
+/// Author: chatgpt。仅供对象锁内事件登记；返回后须先释放对象锁再yield。
+pub fn enroll_event_wait(deadline: Option<u64>) -> Result<Option<kernel_core::event_wait::Key>, ()> {
+    with_mut(|s| s.enroll_event_wait(deadline))
+}
+/// 事件通知携带完整凭据；不匹配时不产生TaskId-only后备唤醒。
+pub fn wake_event_wait(key: kernel_core::event_wait::Key) {
+    with_mut(|s| { s.wake_event_wait(key); });
+}
+
 /// 当前任务的 id 与名字。
 pub fn current() -> (TaskId, &'static str) {
     with(|s| s.current())
@@ -836,7 +854,7 @@ pub fn on_timer_interrupt() {
     crate::smp::percpu::this().take_resched();
     let now = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
     let preemption = PREEMPTION.load(Ordering::Relaxed);
-    if let Some(cause) = with_mut(|s| s.tick(now, preemption)) {
+    if let Some(cause) = with_mut_from(Origin::BspTick, |s| s.tick(now, preemption)) {
         yield_with_cause(cause);
     }
 }
@@ -855,7 +873,7 @@ pub fn on_local_timer() {
     }
     let preemption = PREEMPTION.load(Ordering::Relaxed);
     let idle = crate::smp::percpu::this().current() == crate::smp::percpu::IDLE_SLOT;
-    if let Some(cause) = with_mut(|s| s.local_tick(preemption)) {
+    if let Some(cause) = with_mut_from(Origin::ApFallback, |s| s.local_tick(preemption)) {
         if !idle {
             yield_with_cause(cause);
         }
@@ -891,3 +909,22 @@ pub fn raw_wake_snapshot() -> (kernel_core::raw_timing::Samples<64>, [u64; 3], u
 pub fn pi_work_stats() -> (kernel_core::pi_work::PiWork, kernel_core::pi_work::PiWork) {
     with(|s| (s.pi_total, s.pi_window))
 }
+
+// Author: chatgpt. Snapshot counts and aggregate in one existing global guard.
+// This diagnostic transaction is included; reset itself is cleared from window.
+#[cfg(feature = "krn2-observe")]
+pub fn global_origin_stats() -> (kernel_core::sync_origin::Counts, kernel_core::sync_origin::Counts, u64) {
+    let s = lock_state();
+    let aggregate = SYNC_WORK.iter().map(|row| row[0].load(core::sync::atomic::Ordering::Relaxed) as u64).sum();
+    (s.origin_total, s.origin_window, aggregate)
+}
+
+#[cfg(feature="s3-nohz-verify")]
+pub fn nohz_accounting(c:usize)->(u64,u64,u64,u64,bool) { with(|s|s.nohz_accounting(c)) }
+
+/// Reference-clock residency, distinct from local timer interrupt counters.
+pub fn cpu_residency(c:usize)->kernel_core::cpu_time::Totals { with(|s|s.cpu_residency(c)) }
+
+/// Diagnostic observation only; does not alter admission or charging.
+pub fn limit_window_arm(g:CpuGroupId,window:u64)->u64 { with_mut(|s|s.limit_window_arm(g,window)) }
+pub fn limit_window_finish()->Option<(u64,u64,u64,u64,u64,u64,u64)> { with_mut(|s|s.limit_window_finish()) }

@@ -653,11 +653,19 @@ fn limit(n: usize) {
     };
     let all = CpuSet::first(n);
     let ok = quiet(|| {
-        arm_hogs(LIMIT_WINDOW);
+        HOG_MIN_CPU.store(u32::MAX, Ordering::Relaxed);
+        HOG_CPUS.store(0, Ordering::Relaxed);
+        HOG_END.store(sched::limit_window_arm(g,LIMIT_WINDOW), Ordering::Relaxed);
         (0..n as u64).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 90 + i), "smp2-capped", hog, Some(g), all).is_ok())
     });
     check(ok, "上限用例任务创建失败");
     sched::run();
+    let (start,deadline,at,used_start,used_cutoff,end,total)=sched::limit_window_finish().expect("deadline snapshot captured");
+    assert_eq!(at,deadline,"fixed window observation must not be delayed");
+    let window_used=used_cutoff.checked_sub(used_start).expect("monotonic window usage");
+    let lifetime_used=total.checked_sub(used_start).expect("monotonic lifetime usage");
+    let tail=total.checked_sub(used_cutoff).expect("monotonic tail usage");
+    kprintln!("[JSR-BUDGET-CUTOFF] boundary=pre_bsp_charge_after_pending_drain start={} deadline={} observed={} used_start={} used_cutoff={} window_delta={} lifetime={} tail_delta={} end={}",start,deadline,at,used_start,used_cutoff,window_used,lifetime_used,tail,end);
     let st = sched::cpu_group_stats(g);
     let _ = sched::release_cpu_group(g);
     let Some(st) = st else {
@@ -668,8 +676,12 @@ fn limit(n: usize) {
     let bound = (LIMIT_WINDOW * LIMIT_PERMILLE as u64).div_ceil(1000) + st.burst_ticks as u64 + 1 + (n as u64 - 1);
     let floor = LIMIT_WINDOW * LIMIT_PERMILLE as u64 / 1000 / 2;
     let spread = HOG_CPUS.load(Ordering::Relaxed).count_ones() as usize;
-    check(st.used_ticks <= bound, "多核下整组用量超过上限的界");
-    check(st.used_ticks >= floor, "上限之内的份额没有用上");
+    check(window_used <= bound, "多核下固定窗口整组用量超过上限的界");
+    let lifetime_bound=((end-start)*LIMIT_PERMILLE as u64).div_ceil(1000)+st.burst_ticks as u64+1+(n as u64-1);
+    check(lifetime_used<=lifetime_bound,"完整生命周期用量超过实际区间上界");
+    check(window_used+tail==lifetime_used,"窗口与尾段计费不守恒");
+    kprintln!("[JSR-BUDGET-LIFETIME] elapsed={} used={} bound={} tail={} within={}",end-start,lifetime_used,lifetime_bound,tail,lifetime_used<=lifetime_bound);
+    check(window_used >= floor, "上限之内的份额没有用上");
     check(st.throttle_events > 0, "多核下应同样被限速");
     check(spread > 1, "组成员应分散在多个核上运行");
     check(baseline() == before && sched::live_cpu_groups() == groups, "上限用例后资源或 CPU 组未回到基线");
@@ -679,11 +691,22 @@ fn limit(n: usize) {
         n,
         LIMIT_PERMILLE,
         LIMIT_WINDOW,
-        st.used_ticks,
+        window_used,
         bound,
-        st.used_ticks <= bound,
+        window_used <= bound,
         floor,
         st.throttle_events,
         spread
     );
+}
+
+/// Isolated diagnostic: unchanged production limit drill and assertions.
+#[cfg(feature="limit-window-verify")]
+pub fn run_limit_diagnostic() {
+    let old=sched::set_preemption(true);
+    let n=sched::online_cpus().len();
+    assert_eq!(n,8);
+    limit(n);
+    sched::set_preemption(old);
+    kprintln!("[JSR-BUDGET-DIAG] cpus={} failed={}", n, failed());
 }

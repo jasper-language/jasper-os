@@ -8,6 +8,11 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REG="$ROOT/abi/system-ids.txt"; LOCK="$ROOT/abi/system-ids.lock"
+# ABI-R read-only shape gate; never append IDs in this mode.
+if [[ "${1:-}" == --check-reservations ]]; then
+  python3 "$ROOT/verification/check-abi-reservations.py"
+  exit
+fi
 added=0
 while IFS= read -r line; do
   case "$line" in ''|\#*) continue;; esac

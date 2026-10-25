@@ -46,8 +46,8 @@ pub struct SyscallArgs {
     pub args: [u64; 6],
 }
 
-/// 把用户传入的 64 位寄存器值解释为句柄：超出 32 位的值一律视为空句柄（永远无效），
-/// 不截断——否则 `0x1_0000_0005` 会被当成句柄 5，同一个句柄出现多种写法。
+/// 把完整HandleRaw寄存器值解释为不透明句柄（含索引与代次），不截断。
+/// 有效性由规范句柄表校验，布局以kernel_core::object为唯一事实来源。
 /// Interprets a 64-bit register as a handle value without truncation.
 pub(crate) fn handle_arg(v: u64) -> HandleId {
     HandleId::from_raw(v)
@@ -146,14 +146,28 @@ fn has_handler(id: u32) -> bool {
             | SYSTEM_HANDLE_RESTRICT
             | SYSTEM_ASYNC_RING_CREATE
             | SYSTEM_ASYNC_RING_ENTER
+            | SYSTEM_ASYNC_RING_DEADLINE_ENTER
             | SYSTEM_ASYNC_CANCEL
             | SYSTEM_TIME_WAIT
             | SYSTEM_CHANNEL_CREATE
             | SYSTEM_CHANNEL_SEND
+            | SYSTEM_EVENT_SOURCE_CREATE
+            | SYSTEM_EVENT_SUBSCRIPTION_CREATE
+            | SYSTEM_EVENT_SUBSCRIPTION_WAIT
             | SYSTEM_CHANNEL_RECV
             | SYSTEM_PROCESS_EXIT
             | SYSTEM_TASK_WAIT
             | SYSTEM_PROCESS_WAIT
+            | SYSTEM_MEMORY_BUFFER_CREATE
+            | SYSTEM_MEMORY_BUFFER_DESTROY
+            | SYSTEM_EXECUTION_RESTRICTED_CREATE
+            | SYSTEM_TASK_INTERRUPT_SEND
+            | SYSTEM_MEMORY_DMA_MAP
+            | SYSTEM_IO_SEGMENT_SUBMIT
+            | SYSTEM_TASK_SYSCALLS_SET
+            | SYSTEM_MEMORY_OBJECT_CREATE
+            | SYSTEM_MEMORY_OBJECT_MAP
+            | SYSTEM_MEMORY_OBJECT_UNMAP
             | SYSTEM_MEMORY_MAP
             | SYSTEM_MEMORY_UNMAP
             | SYSTEM_MEMORY_PROTECT
@@ -194,7 +208,7 @@ fn error_name(ret: i64) -> &'static str {
 /// 每次系统调用返回前最多销毁的死亡对象数（见 [`on_syscall`] 的出口清理点）。
 const CLEANUP_PER_CALL: usize = 16;
 /// 创建对象前先回收死亡对象的调用（进程创建在 `spawn_child` 里自带回收）。
-const RECLAIM_BEFORE: [u32; 3] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, SYSTEM_CHANNEL_CREATE];
+const RECLAIM_BEFORE: [u32; 6] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, SYSTEM_CHANNEL_CREATE, SYSTEM_MEMORY_OBJECT_CREATE,SYSTEM_EVENT_SOURCE_CREATE,SYSTEM_EVENT_SUBSCRIPTION_CREATE];
 
 /// 系统调用入口（arch 调用；可能不返回——`system.task.exit` 会结束当前任务）。
 pub fn on_syscall(a: &SyscallArgs) -> i64 {
@@ -247,6 +261,7 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
     if crate::kobj::enqueued_total() != enqueued_before {
         crate::kobj::run_cleanup(CLEANUP_PER_CALL);
     }
+    crate::mm::pressure::sync_events();
     // 出口调度点：调用期间所属进程进入了 exiting（例如阻塞等待被终止打断）⇒ 不再返回用户态
     if proc::current_exiting() {
         proc::thread_exit(0, "killed");
@@ -257,6 +272,8 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
 /// 用户指针错误 → 系统调用错误码。
 fn user_ptr_err(e: UserPtrError) -> i64 {
     match e {
+        UserPtrError::OutOfMemory => err(SYSTEM_MEMORY_ERROR_OUT_OF_MEMORY),
+        UserPtrError::Quota => err(SYSTEM_ERROR_QUOTA_EXCEEDED),
         UserPtrError::TooLong => err(SYSTEM_ERROR_INVALID_ARGUMENT),
         UserPtrError::InvalidAddress | UserPtrError::NotUserTask => err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS),
     }
@@ -290,6 +307,7 @@ pub(crate) fn proc_err(e: ProcError) -> i64 {
         ProcError::Handle(HandleError::Invalid) => err(SYSTEM_HANDLE_ERROR_INVALID),
         ProcError::Handle(HandleError::RightsDenied) => err(SYSTEM_HANDLE_ERROR_RIGHTS_DENIED),
         ProcError::Handle(HandleError::TableFull) => err(SYSTEM_HANDLE_ERROR_TABLE_FULL),
+        ProcError::MemoryQuota => err(SYSTEM_ERROR_QUOTA_EXCEEDED),
         ProcError::NotTransferable => err(SYSTEM_HANDLE_ERROR_NOT_TRANSFERABLE),
         ProcError::NoSuchProcess | ProcError::Exited | ProcError::BadApp => err(SYSTEM_ERROR_RIGHTS_DENIED),
         ProcError::Map(_) => err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS),
@@ -307,7 +325,7 @@ fn task_spawn(entry: u64, stack: u64, arg: u64) -> i64 {
         // 线程对象是叶子：句柄带 DUPLICATE 与 TRANSFER，持有者可以复制或（经 Channel）传递它。
         Ok((_, task_obj)) => match proc::put_task_handle(
             task_obj,
-            Rights::WAIT.union(Rights::CONTROL).union(Rights::DUPLICATE).union(Rights::TRANSFER),
+            Rights::WAIT.union(Rights::CONTROL).union(Rights::DUPLICATE).union(Rights::TRANSFER).union(Rights::SUBSCRIBE),
         ) {
             Ok(h) => h.raw() as i64,
             Err(e) => proc_err(e),
@@ -345,6 +363,8 @@ pub const MAP_EXEC: u64 = 1 << 1;
 
 fn mem_err(e: proc::MemError) -> i64 {
     match e {
+        proc::MemError::InvalidHandle => err(SYSTEM_HANDLE_ERROR_INVALID),
+        proc::MemError::RightsDenied => err(SYSTEM_HANDLE_ERROR_RIGHTS_DENIED),
         proc::MemError::Busy => err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS),
         proc::MemError::InvalidRange => err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS),
         proc::MemError::NotMapped => err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS),
@@ -448,14 +468,23 @@ fn execute(e: &AbiEntry, a: &SyscallArgs, task_id: u64) -> i64 {
         // 登记了却没有实现的操作在启动自检时就会被拦下，运行到这里说明自检被绕过。
         SYSTEM_ASYNC_RING_CREATE => crate::ring::sys_create(a.args[0]),
         SYSTEM_ASYNC_RING_ENTER => crate::ring::sys_enter(a.args[0], a.args[1]),
+        SYSTEM_ASYNC_RING_DEADLINE_ENTER => crate::ring::sys_enter_until(a.args[0], a.args[1]),
         SYSTEM_ASYNC_CANCEL => crate::ring::sys_cancel(a.args[0], a.args[1]),
         SYSTEM_TIME_WAIT => time_wait(a.args[0]),
         SYSTEM_CHANNEL_CREATE => crate::ipc::sys_create(a.args[0]),
         SYSTEM_CHANNEL_SEND => crate::ipc::sys_send(a.args[0], a.args[1]),
+        SYSTEM_EVENT_SOURCE_CREATE => crate::subscription::sys_source(a.args[0]),
+        SYSTEM_EVENT_SUBSCRIPTION_CREATE => crate::subscription::sys_subscribe(a.args[0],a.args[1]),
+        SYSTEM_EVENT_SUBSCRIPTION_WAIT => err(SYSTEM_ERROR_UNSUPPORTED),
         SYSTEM_CHANNEL_RECV => crate::ipc::sys_recv(a.args[0], a.args[1]),
         SYSTEM_PROCESS_EXIT => process_exit(a.args[0]),
         SYSTEM_TASK_WAIT => crate::ring::sys_wait(a.args[0], kernel_core::object::ObjectType::Task),
         SYSTEM_PROCESS_WAIT => crate::ring::sys_wait(a.args[0], kernel_core::object::ObjectType::Process),
+        // ABI-R reserved: no pointer access, allocation, authority change or hardware operation.
+        SYSTEM_MEMORY_BUFFER_CREATE | SYSTEM_MEMORY_BUFFER_DESTROY | SYSTEM_EXECUTION_RESTRICTED_CREATE | SYSTEM_TASK_INTERRUPT_SEND | SYSTEM_MEMORY_DMA_MAP | SYSTEM_IO_SEGMENT_SUBMIT | SYSTEM_TASK_SYSCALLS_SET => err(SYSTEM_ERROR_UNSUPPORTED),
+        SYSTEM_MEMORY_OBJECT_CREATE => memory_object_create(a.args[0]),
+        SYSTEM_MEMORY_OBJECT_MAP => memory_object_map(a.args[0],a.args[1]),
+        SYSTEM_MEMORY_OBJECT_UNMAP => memory_object_unmap(a.args[0],a.args[1]),
         SYSTEM_MEMORY_MAP => memory_map(a.args[0], a.args[1], a.args[2]),
         SYSTEM_MEMORY_UNMAP => memory_unmap(a.args[0], a.args[1]),
         SYSTEM_MEMORY_PROTECT => memory_protect(a.args[0], a.args[1], a.args[2]),
@@ -725,4 +754,25 @@ fn device_map(handle: u64, bar_index: u64, va: u64) -> i64 {
         }
         Err(e) => mem_err(e),
     }
+}
+
+/// SHM-1: create zeroed backing; creator allocation quota follows pages, not transferable handles.
+fn memory_object_create(pages:u64) -> i64 {
+    let Some(pid)=proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
+    if pages==0 { return err(SYSTEM_ERROR_INVALID_ARGUMENT); }
+    match proc::create_memory(pid,pages) { Ok(h)=>h.raw() as i64, Err(ProcError::OutOfFrames)=>err(SYSTEM_MEMORY_ERROR_OUT_OF_MEMORY), Err(e)=>proc_err(e) }
+}
+/// New versioned descriptor; never reads beyond its fixed 40 bytes or reuses old map flags.
+fn memory_object_map(raw:u64,ptr:u64) -> i64 {
+    let Some(pid)=proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
+    let mut bytes=[0u8;kernel_core::memory_abi::MAP_ARGS_BYTES];
+    if let Err(e)=copy_from_user(&mut bytes,ptr,kernel_core::memory_abi::MAP_ARGS_BYTES) { return user_ptr_err(e); }
+    let Some(args)=kernel_core::memory_abi::MapArgs::decode(&bytes) else { return err(SYSTEM_ERROR_INVALID_ARGUMENT) };
+    match proc::map_memory(pid,handle_arg(raw),args.address,args.offset_pages,args.pages,
+        args.flags & kernel_core::memory_abi::WRITE != 0) { Ok(())=>0, Err(e)=>mem_err(e) }
+}
+/// Removes only caller-owned SHM views. Does not invalidate other processes' mappings.
+fn memory_object_unmap(address:u64,pages:u64) -> i64 {
+    let Some(pid)=proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
+    match proc::unmap_memory(pid,address,pages) { Ok(())=>0, Err(e)=>mem_err(e) }
 }

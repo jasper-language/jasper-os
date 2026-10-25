@@ -70,6 +70,7 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
             device::on_cpu_tick();
             device::on_balance_tick();
             enqueue(line);
+            crate::mm::pressure::sync_events();
             sched::on_timer_interrupt();
         }
         // 每核事件只更新本处理器的每核数据，不进全局延迟队列（那是引导处理器主循环的队列）
@@ -269,6 +270,8 @@ pub fn on_msi(vector: u8) {
     let handler: MsiHandler = unsafe { core::mem::transmute::<usize, MsiHandler>(h) };
     handler();
     device::charge_msi(cpu, vector, arch::cycles().wrapping_sub(t0));
+    // Author: chatgpt。驱动与预算锁均已退出，再交付待处理对象通知；不切换任务。
+    crate::interrupt::service_msi(cpu, vector);
 }
 
 /// 记一次到达：计数器按模 2³² 回绕递增（读者用模差求增量）。启动自检经同一函数验证回绕。

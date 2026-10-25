@@ -18,8 +18,16 @@ pic8259 = "0.11.0"
 noto-sans-mono-bitmap = { version = "0.2.0", optional = true, default-features = false, features = ["regular", "size_16", "unicode-basic-latin"] }
 
 [features]
+limit-window-verify = []
+# Diagnostic-only nohz ledger and isolated guest; default unchanged.
+s3-nohz-verify = []
+evt2-verify = ["user-programs"]
+evt2-broadcast-verify = []
+shm1-verify = ["user-programs", "fault-inject"]
 # Author: chatgpt. Optional diagnostic counters; absent from default builds.
 krn2-observe = []
+# Author: chatgpt. Dedicated event-wait mechanism guest, not enabled in production.
+evt1-verify = ["kernel-core/evt1-capacity"]
 # Explicitly armed KRN-1 fault sites; default builds contain no hooks.
 fault-inject = []
 # S-2 fixed-seed eight-process syscall campaign (opt-in).

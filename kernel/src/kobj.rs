@@ -7,9 +7,9 @@
 //! * 销毁动作可以释放其他对象（例如 Process 销毁时释放线程表对 Task 的引用），被释放者入队，下一轮处理——迭代而非递归
 //!
 //! # 已实现的对象种类
-//! 目前只有 Process、Task、Ring、Channel 端点与（演练用的）Event。规范中的叶子对象「共享内存（Memory）」**尚未实现**；
+//! 包括 Process、Task、Ring、Channel、设备资源与页存储叶子Memory（SHM-1正在接入映射与ABI）；
 //! 地址空间属于进程内部，不作为可经句柄传递的对象，也不代替共享内存对象。
-//! Implemented kinds: Process, Task, Ring, Channel endpoint, Event. The shared-memory leaf object is not implemented yet.
+//! Memory is a page-storage leaf; its user mapping and ABI integration is in progress.
 //!
 //! # 锁
 //! 对象表锁在全局锁顺序中位于「进程句柄表锁」一层（M4.0 §3.4），持锁期间只做计数与查表，以及调用方明确的页表/帧操作
@@ -51,8 +51,12 @@ pub type Table = ObjectTable<KObject>;
 
 /// 内核对象。
 pub enum KObject {
+    EventSource(Box<crate::subscription::Source>),
+    Subscription(Box<crate::subscription::Subscription>),
     /// 进程（地址空间、句柄表、帧所有权……）。
     Process(Box<Process>),
+    /// Shared RAM backing leaf; mappings and pins retain page references independently.
+    Memory(crate::mm::memory_object::MemoryObject),
     /// 线程。
     Task(TaskObj),
     /// 事件（叶子对象：不持有句柄、不强引用其他对象）。
@@ -79,6 +83,9 @@ impl KObject {
     pub fn type_name(&self) -> &'static str {
         match self {
             KObject::Process(_) => "Process",
+            KObject::Memory(_) => "Memory",
+            KObject::EventSource(_) => "EventSource",
+            KObject::Subscription(_) => "Subscription",
             KObject::Task(_) => "Task",
             KObject::Event { .. } => "Event",
             KObject::Ring(_) => "Ring",
@@ -149,6 +156,7 @@ pub fn insert(obj: KObject, owners: u32, internal: u32) -> Result<ObjId, ObjErro
 pub fn release_owner_in(t: &mut Table, id: ObjId) -> Result<Released, ObjError> {
     if matches!(t.counts(id), Ok((1, _, _))) {
         match t.get(id) {
+            Ok(KObject::EventSource(_)) | Ok(KObject::Subscription(_)) => crate::subscription::close_in(t,id),
             Ok(KObject::Ring(_)) => crate::ring::close_in(t, id),
             Ok(KObject::Endpoint(_)) => crate::ipc::close_in(t, id),
             Ok(KObject::Process(_)) => crate::proc::spawn::close_in(t, id),
@@ -203,13 +211,14 @@ pub fn run_cleanup(limit: usize) -> usize {
         crate::kprintln!("[JSR-LIFE] cleanup destroy type={} id={:#x}", obj.type_name(), id.raw());
         match obj {
             KObject::Process(p) => crate::proc::destroy(p),
+            KObject::ExitState(e) => crate::exit_state::destroy(e),
             KObject::Ring(r) => crate::ring::destroy(r),
             KObject::Endpoint(e) => crate::ipc::destroy(e),
             KObject::Task(task) => {
                 let _ = release_internal(task.exit_state); // 线程 → 退出状态
             }
             // 中断对象的硬件解绑在 closing 动作里已经完成，销毁时无事可做。
-            KObject::Event { .. } | KObject::ExitState(_) | KObject::Device(_) | KObject::Interrupt(_) => {}
+            KObject::EventSource(_) | KObject::Subscription(_) | KObject::Memory(_) | KObject::Event { .. } | KObject::Device(_) | KObject::Interrupt(_) => {}
         }
         n += 1;
     }

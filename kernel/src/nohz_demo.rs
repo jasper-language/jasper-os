@@ -104,6 +104,11 @@ fn idle_window(n: usize, divisor: u32, id: u64) -> (u64, u64) {
     let ok = quiet(|| sched::spawn_on(TaskId(id), "nohz-window", window_sleeper, None, CpuSet::first(1)).is_ok());
     check(ok, "窗口任务创建失败");
     sched::run();
+    #[cfg(feature="s3-nohz-verify")]
+    for c in 1..n {
+        let (global,local,missed,total,stopped)=sched::nohz_accounting(c);
+        kprintln!("[JSR-NOHZ-LEDGER] divisor={} cpu={} global={} local={} missed={} total={} reconciled={} stopped={}",divisor,c,global,local,missed,total,local.checked_add(missed)==Some(total),stopped);
+    }
     (secondary_ticks(n) - ticks0, sched::nohz_stats().stops - stops0)
 }
 
@@ -118,7 +123,12 @@ fn idle_reduction(n: usize, divisor: u32) {
     let mut least = u64::MAX;
     for c in 1..n {
         let st = sched::cpu_stats(c);
-        let total = st.busy_ticks + st.idle_ticks;
+        let legacy=st.busy_ticks+st.idle_ticks;
+        let reference=sched::cpu_residency(c);
+        let total=reference.busy+reference.idle;
+        // The 120-tick requirement is unchanged; compare durations in its reference clock.
+        // Retain the old mixed-clock count visibly rather than silently rewriting it.
+        kprintln!("[JSR-NOHZ-RESIDENCY] cpu={} legacy_irq_plus_credit={} reference_busy={} reference_idle={} reference_total={}",c,legacy,reference.busy,reference.idle,total);
         least = least.min(total);
         covered &= total + u64::from(divisor) + 2 >= WINDOW;
     }

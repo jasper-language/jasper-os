@@ -48,7 +48,8 @@ pub fn params() -> PressureParams {
 
 /// 替换参数（构建期配置档或管理者调用）；返回旧参数。参数已由 `PressureParams::new` 校验。
 pub fn set_params(p: PressureParams) -> PressureParams {
-    core::mem::replace(&mut STATE.lock().params, p)
+    let old=core::mem::replace(&mut STATE.lock().params, p);
+    note_frame_change();old
 }
 
 /// 统计快照。
@@ -59,4 +60,40 @@ pub fn stats() -> PressureStats {
 /// 清零统计（每个测量场景开始前调用）。
 pub fn reset_stats() {
     STATE.lock().stats = PressureStats::new();
+}
+
+// One bounded global publisher, lazy initialized; independent of creating Process.
+// Frame/pressure locks only set a dirty bit. Object delivery runs after those locks.
+use core::sync::atomic::{AtomicBool,AtomicU64,Ordering};
+use kernel_core::objtable::ObjId;
+static EVENT_SOURCE:AtomicU64=AtomicU64::new(0);
+static EVENT_DIRTY:AtomicBool=AtomicBool::new(false);
+static EVENT_EXHAUSTED:AtomicBool=AtomicBool::new(false);
+fn event_value()->u64 {match level() {PressureLevel::Normal=>0,PressureLevel::Low=>1,PressureLevel::Critical=>2}}
+pub(crate) fn note_frame_change() {
+ if EVENT_SOURCE.load(Ordering::Acquire)!=0 {EVENT_DIRTY.store(true,Ordering::Release);}
+}
+pub(crate) fn source_in(t:&mut crate::kobj::Table)->Result<ObjId,crate::subscription::Error> {
+ if EVENT_EXHAUSTED.load(Ordering::Acquire) {return Err(crate::subscription::Error::Exhausted);}
+ if let Some(id)=ObjId::from_raw(EVENT_SOURCE.load(Ordering::Acquire)) {sync_in(t,id);return Ok(id);}
+ let id=crate::subscription::create_publisher_in(t,kernel_core::subscription::Snapshot {version:0,value:event_value()})?;
+ crate::subscription::policies_in(t,id,2); // State source; not an additive count.
+ EVENT_SOURCE.store(id.raw(),Ordering::Release);EVENT_DIRTY.store(true,Ordering::Release);Ok(id)
+}
+fn sync_in(t:&mut crate::kobj::Table,id:ObjId) {
+ EVENT_DIRTY.swap(false,Ordering::AcqRel);
+ let value=event_value();
+ if crate::subscription::snapshot_in(t,id).is_some_and(|s|s.value!=value) {
+  if crate::subscription::publish_in(t,id,value).is_err() {
+   EVENT_EXHAUSTED.store(true,Ordering::Release);EVENT_SOURCE.store(0,Ordering::Release);
+   crate::subscription::finish_publisher_in(t,id);
+  }
+ }
+}
+/// Called without locks at syscall exit and the BSP timer dispatch boundary.
+/// State coalescing samples the latest pressure; no event or wake for unchanged state.
+pub(crate) fn sync_events() {
+ let Some(id)=ObjId::from_raw(EVENT_SOURCE.load(Ordering::Acquire)) else {return};
+ if !EVENT_DIRTY.load(Ordering::Acquire) {return;}
+ crate::kobj::with(|t|sync_in(t,id));
 }

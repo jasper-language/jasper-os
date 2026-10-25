@@ -641,6 +641,16 @@ fn contention(n: usize) {
             kprintln!("[JSR-PI-WORK] scope={} calls={} slot_visits={} active_visits={} steps={} max_walk={} truncated={} overflow={}",
                 scope, work.calls, work.slots, work.live, work.steps, work.max_walk, work.truncated, work.overflow);
         }
+        let (origins, window, aggregate) = sched::global_origin_stats();
+        for (scope, counts) in [("boot", origins), ("churn", window)] {
+            let sum = counts.by_origin.iter().try_fold(0u64, |n, value| n.checked_add(*value));
+            let reconciled = !counts.overflow && sum == Some(counts.total)
+                && (scope != "churn" || counts.total == aggregate);
+            let [read, mutation, switch, bsp, ap, diagnostic] = counts.by_origin;
+            kprintln!("[JSR-GLOBAL-ORIGIN] scope={} total={} read={} mutation={} switch={} bsp_tick={} ap_fallback={} diagnostic={} aggregate_window={} overflow={} reconciled={}",
+                scope, counts.total, read, mutation, switch, bsp, ap, diagnostic, aggregate, counts.overflow, reconciled);
+            check(reconciled, "全局事务来源必须与同锁窗口总数对账");
+        }
         let [transactions, leaves, contended, spins] = sched::sync_work_stats();
         let covered = transactions > 0 && leaves as u64 == transactions as u64 * n as u64
             && contended <= leaves;

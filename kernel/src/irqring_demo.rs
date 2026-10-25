@@ -225,6 +225,15 @@ fn drive_round(rig: &mut Rig, bdf: Bdf, round: u32, last_serial: u64) -> Option<
         check(false, "用户程序没有建立带等待的中断绑定");
         return None;
     };
+    #[cfg(feature="evt2-verify")]
+    let observer={
+        use kernel_core::{object::{ObjectType,Rights},subscription::Policy};
+        let pid=proc::create("evt2-irq-observer",SyscallSet::EMPTY).unwrap();
+        let source=kobj::with(|t|interrupt::source_in(t,id)).unwrap();
+        let cap=proc::grant(pid,source,ObjectType::EventSource,Rights::SUBSCRIBE).unwrap();
+        let (sub,snapshot)=crate::subscription::subscribe(pid,cap,Policy::Count).unwrap();assert_eq!(snapshot.value,0);
+        (pid,sub)
+    };
     let before_count = irq::msi_count(v.cpu, v.vector);
     let before_dispatched = interrupt::dispatched();
     let before_deliveries = interrupt::deliveries();
@@ -244,6 +253,13 @@ fn drive_round(rig: &mut Rig, bdf: Bdf, round: u32, last_serial: u64) -> Option<
     let dispatched_ok = interrupt::dispatched() - before_dispatched == 1;
     let spurious_ok = spurious_snapshot() == before_spurious;
     let used_ok = matches!(used, Ok(len) if len == BUFFER_BYTES as u32) && rig.queue.take_used().is_none();
+    #[cfg(feature="evt2-verify")]
+    {
+        use kernel_core::subscription::{Delivery,Event};
+        assert_eq!(crate::subscription::take(observer.0,observer.1).unwrap(),crate::subscription::Read::Data(Delivery::Event(Event {first:1,last:1,value:1})));
+        assert!(proc::exit_idle(observer.0,0));assert!(proc::reap(observer.0).is_some());kobj::run_cleanup(usize::MAX);
+        kprintln!("[JSR-EVT2-IRQ] cpu={} delivered=true delta=1 snapshot_total=0 resources_cleanup=true",v.cpu);
+    }
     let ok = delivered && count_ok && dispatched_ok && spurious_ok && used_ok;
     check(used_ok, "已用环没有恰好推进 1 项（或写入字节数不对）");
     check(delivered, "中断没有成为一次完成");

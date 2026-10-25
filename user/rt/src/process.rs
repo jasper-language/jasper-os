@@ -39,7 +39,7 @@ pub struct Spec<'a> {
 /// A created child process.
 #[derive(Debug)]
 pub struct Child {
-    /// 指向子进程的句柄（WAIT）；关闭它会终止仍在运行的子进程。
+    /// 指向子进程的句柄（WAIT|SUBSCRIBE）；关闭它会终止仍在运行的子进程。
     pub process: Handle,
     /// 引导通道在父进程一侧的端点。
     pub channel: Channel,

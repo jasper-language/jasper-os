@@ -38,7 +38,7 @@ use alloc::vec::Vec;
 use kernel_core::async_ring::{AsyncRing, CancelError, Cancelled, Exec, SubmitError, Submission, Terminal};
 use kernel_core::object::{HandleId, ObjectType, Rights};
 use kernel_core::objtable::ObjId;
-use kernel_core::ring_abi::{Cqe, EnterArgs, MsgDesc, Sqe, CQE_SIZE, ENTER_ARGS_SIZE, SQE_SIZE};
+use kernel_core::ring_abi::{Cqe, EnterArgs, EnterUntilArgs, MsgDesc, Sqe, CQE_SIZE, ENTER_ARGS_SIZE, ENTER_UNTIL_SIZE, SQE_SIZE};
 
 use crate::ipc::{self, Delivery, RecvTarget};
 use crate::kobj::{self, KObject, Table};
@@ -67,6 +67,7 @@ type StateMachine = AsyncRing<CQ_CAPACITY, BLOCKS_PER_RING>;
 
 /// 正在执行的请求的后端状态（瞬时完成的操作不进入这里）。
 enum Backend {
+    SubscriptionWait(Box<crate::subscription::WaitTarget>),
     /// 等到时钟到达 `deadline`（可中止）。
     Wait {
         /// 截止 tick。
@@ -93,6 +94,7 @@ enum Backend {
 
 /// 一次提交要做的工作（提交时的可信快照；用户内存已在此之前复制或固定）。
 pub(crate) enum Work {
+    SubscriptionWait(Box<crate::subscription::WaitTarget>),
     /// `system.time.now`。
     Now,
     /// `system.time.wait`：等待 `ticks` 个 tick。
@@ -137,6 +139,8 @@ pub struct RingObj {
     sm: StateMachine,
     /// 正在执行的请求及其后端（请求静止后移除）。
     running: Vec<(u64, Backend)>,
+    /// Author: chatgpt。对象锁串行化的广播凭据；每项另持一份Ring保活引用到resume清理。
+    event_waiters: Vec<kernel_core::event_wait::Key>,
     /// 是否持有「自身的内部引用」（有未销毁的控制块时持有）。
     pinned: bool,
 }
@@ -200,6 +204,7 @@ fn ring_mut(t: &mut Table, id: ObjId) -> Option<&mut RingObj> {
 /// 释放一个已结束请求的后端资源（锁内）：recv 撤销等待登记并释放端点引用；固定随之解除。
 fn retire_in(t: &mut Table, ring: ObjId, req: u64, b: Backend) {
     match b {
+        Backend::SubscriptionWait(target)=>crate::subscription::release_target_in(t,*target,Some((ring,req))),
         Backend::Recv(target) => ipc::release_target_in(t, *target, Some((ring, req))),
         Backend::Manual { pins } => drop(pins),
         Backend::ExitWait { es } => {
@@ -253,6 +258,12 @@ fn settle_in(t: &mut Table, id: ObjId) {
             q.in_flight = q.in_flight.saturating_sub(reclaimed);
         }
     }
+    // 只有状态可能允许等待者重新检查时广播；wait_min仍必须由resume循环复核。
+    if let Some(r) = ring_mut(t, id) {
+        if r.sm.ready() > 0 || r.sm.reserved() == 0 || r.sm.is_closing() {
+            while let Some(key) = r.event_waiters.pop() { sched::wake_event_wait(key); }
+        }
+    }
     match change {
         Some(true) => {
             let _ = t.acquire_internal(id);
@@ -262,6 +273,37 @@ fn settle_in(t: &mut Table, id: ObjId) {
         }
         None => {}
     }
+}
+
+/// Author: chatgpt。同对象事务内先预留内存/保活，再登记并阻塞；失败不留下半项。
+/// sys_enter在同对象事务检查进程/完成条件后调用，释放guard后才yield。
+fn enroll_wait_in(t: &mut Table, id: ObjId, caller_deadline: Option<u64>) -> Result<Option<kernel_core::event_wait::Key>, ()> {
+    let r = ring_mut(t, id).ok_or(())?;
+    if r.event_waiters.len() >= sched::capacity() { return Err(()); }
+    r.event_waiters.try_reserve(1).map_err(|_| ())?;
+    let deadline = r.running.iter().filter_map(|(_, b)| match b {
+        Backend::Wait { deadline } => Some(*deadline), _ => None,
+    }).chain(caller_deadline).min();
+    t.acquire_internal(id).map_err(|_| ())?;
+    match sched::enroll_event_wait(deadline) {
+        Ok(Some(key)) => {
+            // 容量已预留，push不分配；保活引用留给resume唯一清理点。
+            ring_mut(t, id).expect("retained waiting Ring").event_waiters.push(key);
+            #[cfg(feature = "evt1-verify")]
+            crate::evt1_demo::registered();
+            Ok(Some(key))
+        }
+        other => { let _ = t.release_internal(id); other }
+    }
+}
+
+/// resume无论由完成、超时还是进程取消触发，精确撤销队列并释放本轮保活。
+/// 通知摘走队列项不释放此引用，避免句柄并发close后等待栈持有悬空对象。
+fn retire_wait_in(t: &mut Table, id: ObjId, key: kernel_core::event_wait::Key) {
+    if let Some(r) = ring_mut(t, id) {
+        if let Some(i) = r.event_waiters.iter().position(|k| *k == key) { r.event_waiters.swap_remove(i); }
+    }
+    let _ = t.release_internal(id);
 }
 
 /// 中止一个已被裁决为取消的执行中请求（锁内）：可立即停止的后端（等待、接收）释放资源并静止；
@@ -345,6 +387,8 @@ fn perr(e: ProcError) -> i64 {
 /// 用户指针错误 → 返回值。
 pub(crate) fn user_err(e: UserPtrError) -> i64 {
     match e {
+        UserPtrError::OutOfMemory => err(SYSTEM_MEMORY_ERROR_OUT_OF_MEMORY),
+        UserPtrError::Quota => err(SYSTEM_ERROR_QUOTA_EXCEEDED),
         UserPtrError::TooLong => err(SYSTEM_ERROR_INVALID_ARGUMENT),
         UserPtrError::InvalidAddress | UserPtrError::NotUserTask => err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS),
     }
@@ -384,7 +428,7 @@ pub fn create_for(pid: ObjId, capacity: u64) -> Result<HandleId, i64> {
         return Err(err(SYSTEM_ERROR_INVALID_ARGUMENT));
     }
     let sm = StateMachine::new(capacity as usize).ok_or(err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
-    let obj = KObject::Ring(Box::new(RingObj { owner: pid, sm, running: Vec::new(), pinned: false }));
+    let obj = KObject::Ring(Box::new(RingObj { owner: pid, sm, running: Vec::new(), event_waiters: Vec::new(), pinned: false }));
     kobj::with(|t| {
         proc::syscalls_in(t, pid).map_err(perr)?;
         if proc::ring_quota_in(t, pid).and_then(|q|
@@ -415,8 +459,10 @@ pub fn sys_create(capacity: u64) -> i64 {
 
 /// 检查一条提交记录的标志、操作是否可经 ring 提交、调用者是否被授予该操作。
 fn check_sqe(sqe: &Sqe, allowed: SyscallSet) -> Result<(), i64> {
-    if sqe.flags != 0 {
-        return Err(err(SYSTEM_ERROR_INVALID_ARGUMENT));
+    match kernel_core::extension_abi::check_sqe_flags(sqe.flags) {
+        Ok(()) => {},
+        Err(kernel_core::extension_abi::FlagError::Invalid) => return Err(err(SYSTEM_ERROR_INVALID_ARGUMENT)),
+        Err(kernel_core::extension_abi::FlagError::Unsupported) => return Err(err(SYSTEM_ERROR_UNSUPPORTED)),
     }
     if !matches!(
         sqe.op,
@@ -427,6 +473,7 @@ fn check_sqe(sqe: &Sqe, allowed: SyscallSet) -> Result<(), i64> {
             | SYSTEM_TASK_WAIT
             | SYSTEM_PROCESS_WAIT
             | SYSTEM_DEVICE_INTERRUPT_WAIT
+            | SYSTEM_EVENT_SUBSCRIPTION_WAIT
     ) {
         return Err(err(SYSTEM_ERROR_UNSUPPORTED));
     }
@@ -463,7 +510,10 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
             return reject(t, work, e);
         }
     }
-    let uses_buffer = matches!(work, Work::Recv(_) | Work::Manual { pins: Some(_), .. });
+    if let Work::SubscriptionWait(ref target)=work {
+        if let Err(e)=crate::subscription::check_wait_in(t,target.sub) {return reject(t,work,e);}
+    }
+    let uses_buffer = matches!(work, Work::SubscriptionWait(_) | Work::Recv(_) | Work::Manual { pins: Some(_), .. });
     let Some(r) = ring_mut(t, ring) else { return reject(t, work, err(SYSTEM_HANDLE_ERROR_INVALID)) };
     let id = match r.sm.submit(Submission { op, user_tag, context: 0, uses_buffer }) {
         Ok(id) => id,
@@ -471,6 +521,19 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
     };
     // 以下步骤不会失败：控制块已建立，信用已预留
     match work {
+        Work::SubscriptionWait(target)=>{
+            let _=r.sm.start(id,Exec::Abortable);
+            match crate::subscription::deliver_in(t,&target) {
+                crate::subscription::Attempt::Empty=>{
+                    crate::subscription::enroll_in(t,target.sub,(ring,id));
+                    if let Some(r)=ring_mut(t,ring) {r.running.push((id,Backend::SubscriptionWait(target)));}
+                },
+                crate::subscription::Attempt::Done(value)=>{
+                    if let Some(r)=ring_mut(t,ring) {let _=r.sm.finish(id,value);}
+                    retire_in(t,ring,id,Backend::SubscriptionWait(target));
+                }
+            }
+        }
         Work::Now => {
             let _ = r.sm.start(id, Exec::NonAbortable);
             let _ = r.sm.finish(id, sched::timer_ticks() as i64);
@@ -555,6 +618,7 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
 /// 释放一项未被接受的工作已持有的资源（锁内）。
 fn release_work_in(t: &mut Table, work: Work) {
     match work {
+        Work::SubscriptionWait(target)=>crate::subscription::release_target_in(t,*target,None),
         Work::Recv(target) => ipc::release_target_in(t, *target, None),
         Work::ExitWait { es } | Work::InterruptWait { irq: es } => {
             let _ = t.release_internal(es);
@@ -719,6 +783,13 @@ pub fn sys_cancel(h: u64, req: u64) -> i64 {
 fn prepare_user_work(pid: ObjId, sqe: &Sqe, allowed: SyscallSet) -> Result<Work, i64> {
     check_sqe(sqe, allowed)?;
     Ok(match sqe.op {
+        SYSTEM_EVENT_SUBSCRIPTION_WAIT => {
+            let mut bytes=[0;kernel_core::subscription_abi::WAIT_BYTES];
+            copy_from_user(&mut bytes,sqe.arg1,kernel_core::subscription_abi::WAIT_BYTES).map_err(|_|err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS))?;
+            let args=kernel_core::subscription_abi::WaitArgs::decode(&bytes).ok_or(err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
+            let target=kobj::with(|t|crate::subscription::prepare_wait_in(t,pid,crate::syscall::handle_arg(sqe.arg0),args))?;
+            Work::SubscriptionWait(Box::new(target))
+        }
         SYSTEM_TIME_NOW => Work::Now,
         SYSTEM_TIME_WAIT => Work::Wait { ticks: sqe.arg0 },
         SYSTEM_CHANNEL_SEND => {
@@ -756,7 +827,22 @@ pub fn sys_enter(h: u64, args_ptr: u64) -> i64 {
     if let Err(e) = copy_from_user(&mut raw, args_ptr, ENTER_ARGS_SIZE) {
         return user_err(e);
     }
-    let args = EnterArgs::decode(&raw);
+    enter_args_for(pid, h, args_ptr, EnterArgs::decode(&raw), None)
+}
+
+/// Author: chatgpt。独立版本描述符入口；旧enter仍只读取原56字节，不复用保留位。
+/// 超时仍回写submitted/reaped/first_error，收取已可见CQ后返回timed_out；不取消请求。
+pub fn sys_enter_until(h: u64, args_ptr: u64) -> i64 {
+    let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
+    let mut raw = [0u8; ENTER_UNTIL_SIZE];
+    if let Err(e) = copy_from_user(&mut raw, args_ptr, ENTER_UNTIL_SIZE) { return user_err(e); }
+    let Some(v) = EnterUntilArgs::decode_checked(&raw) else { return err(SYSTEM_ERROR_INVALID_ARGUMENT) };
+    let Some(legacy_ptr) = args_ptr.checked_add(16) else { return err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS) };
+    enter_args_for(pid, crate::syscall::handle_arg(h), legacy_ptr, v.enter, Some(v.deadline))
+}
+
+/// 提交和收取只保留一份实现；输出错误优先于deadline结果，防止静默丢失提交信息。
+fn enter_args_for(pid: ObjId, h: HandleId, args_ptr: u64, args: EnterArgs, deadline: Option<u64>) -> i64 {
     if args.reserved != 0 || args.sq_count as usize > SQ_BATCH || args.cq_max as usize > CQ_CAPACITY {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     }
@@ -809,23 +895,9 @@ pub fn sys_enter(h: u64, args_ptr: u64) -> i64 {
         }
     }
 
-    // 2. 等待：不持锁地让出处理器，每轮重新解析句柄
-    loop {
-        let state = kobj::with(|t| {
-            let ring = proc::resolve_in(t, pid, h, ObjectType::Ring, Rights::WAIT).ok()?;
-            settle_in(t, ring);
-            ring_mut(t, ring).map(|r| r.view())
-        });
-        match state {
-            Some(v) if v.ready < args.wait_min as usize && v.reserved > 0 && !v.closing => {
-                // 进程终止打断等待：本循环不持有资源，直接返回（Ring 随句柄表关闭进入 closing）
-                if proc::block_step().is_err() {
-                    return err(SYSTEM_ASYNC_ERROR_CANCELLED);
-                }
-            }
-            _ => break,
-        }
-    }
+    let outcome = match wait_ready_until(pid, h, args.wait_min as usize, deadline) {
+        Ok(outcome) => outcome, Err(e) => return e,
+    };
 
     // 3. 收取：复制成功才消费
     let mut reaped = 0u32;
@@ -854,7 +926,7 @@ pub fn sys_enter(h: u64, args_ptr: u64) -> i64 {
     match (res, wrote) {
         (Err(e), _) => e,
         (Ok(()), Err(e)) => user_err(e),
-        (Ok(()), Ok(())) => 0,
+        (Ok(()), Ok(())) => if outcome == WaitOutcome::TimedOut { err(SYSTEM_ASYNC_ERROR_TIMED_OUT) } else { 0 },
     }
 }
 
@@ -907,4 +979,78 @@ pub fn view(ring: ObjId) -> Option<RingView> {
         settle_in(t, ring);
         ring_mut(t, ring).map(|r| r.view())
     })
+}
+
+/// Author: chatgpt。Ring enter与专用内核演练共用的实际等待路径；不消费CQ。
+/// 进程退出拒绝新登记，成功登记始终在resume清理引用，wait_min每轮重查。
+pub(crate) fn wait_ready_for(pid: ObjId, h: HandleId, wait_min: usize) -> Result<(), i64> {
+    wait_ready_until(pid,h,wait_min,None).map(|_| ())
+}
+
+/// 同对象观察的等待结果；超时不消费或取消请求，调用者仍须收取/回写结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WaitOutcome { Ready, TimedOut }
+
+/// 显式期限与后端期限取最近值，ready优先于同刻timeout，close/exit保持原先语义。
+pub(crate) fn wait_ready_until(pid: ObjId, h: HandleId, wait_min: usize, deadline: Option<u64>) -> Result<WaitOutcome, i64> {
+    // 2. 同对象事务检查→预留引用/容量→登记并阻塞，放全部guard后才切换。
+    loop {
+        let waiting = kobj::with(|t| {
+            if !proc::running_in(t, pid) {
+                return Err(err(SYSTEM_ASYNC_ERROR_CANCELLED));
+            }
+            let ring = proc::resolve_in(t, pid, h, ObjectType::Ring, Rights::WAIT).map_err(perr)?;
+            settle_in(t, ring);
+            let v = ring_mut(t, ring).ok_or(err(SYSTEM_HANDLE_ERROR_INVALID))?.view();
+            if v.ready >= wait_min || v.reserved == 0 || v.closing { return Ok(None); }
+            if deadline.is_some_and(|at| sched::timer_ticks() >= at) { return Err(err(SYSTEM_ASYNC_ERROR_TIMED_OUT)); }
+            // 调度器同global事务判断到期；BSP推进造成的到期返回重查，不报配额错误。
+            let key = enroll_wait_in(t, ring, deadline).map_err(|_| err(SYSTEM_ERROR_QUOTA_EXCEEDED))?;
+            Ok(Some((ring, key)))
+        });
+        match waiting {
+            Err(e) if e == err(SYSTEM_ASYNC_ERROR_TIMED_OUT) => return Ok(WaitOutcome::TimedOut),
+            Err(e) => return Err(e),
+            Ok(None) => return Ok(WaitOutcome::Ready),
+            Ok(Some((_, None))) => continue,
+            Ok(Some((ring, Some(key)))) => {
+                #[cfg(feature = "evt1-verify")]
+                crate::evt1_demo::enrolled(ring);
+                sched::yield_now();
+                #[cfg(feature = "evt1-verify")]
+                crate::evt1_demo::resumed();
+                // 每个成功登记恰好到达这里一次；通知方绝不释放此栈持有的保活引用。
+                kobj::with(|t| retire_wait_in(t, ring, key));
+                if proc::current_exiting() { return Err(err(SYSTEM_ASYNC_ERROR_CANCELLED)); }
+            }
+        }
+    }
+
+}
+
+/// Author: chatgpt。独立机制guest核对实际Ring登记数量，不改变队列或唤醒。
+#[cfg(feature = "evt1-verify")]
+pub(crate) fn event_waiter_count(id: ObjId) -> usize {
+    kobj::with(|t| ring_mut(t,id).map_or(0, |r| r.event_waiters.len()))
+}
+
+/// Publication/cancellation/close are serialized by the object lock; one terminal only.
+pub(crate) fn poll_subscription_in(t:&mut Table,ring:ObjId,req:u64) {
+ let Some(r)=ring_mut(t,ring) else {return};
+ if r.sm.decision(req)!=Some(None) {return;}
+ let Some(backend)=r.take_running(req) else {return};
+ match backend {
+  Backend::SubscriptionWait(target)=>match crate::subscription::deliver_in(t,&target) {
+   crate::subscription::Attempt::Empty=>{if let Some(r)=ring_mut(t,ring){r.running.push((req,Backend::SubscriptionWait(target)));}},
+   crate::subscription::Attempt::Done(value)=>{
+    if let Some(r)=ring_mut(t,ring){let _=r.sm.finish(req,value);}
+    retire_in(t,ring,req,Backend::SubscriptionWait(target));settle_in(t,ring);
+   }
+  },
+  other=>{if let Some(r)=ring_mut(t,ring){r.running.push((req,other));}}
+ }
+}
+pub(crate) fn submit_subscription_for(pid:ObjId,ring:HandleId,sub:HandleId,args:kernel_core::subscription_abi::WaitArgs)->Result<u64,i64> {
+ let target=kobj::with(|t|crate::subscription::prepare_wait_in(t,pid,sub,args))?;
+ submit_work_for(pid,ring,SYSTEM_EVENT_SUBSCRIPTION_WAIT,0,Work::SubscriptionWait(Box::new(target)))
 }

@@ -19,3 +19,7 @@ path = "src/lib.rs"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[features]
+# Author: chatgpt. Isolated capacity validation; default capacity bounds unchanged.
+evt1-capacity = []

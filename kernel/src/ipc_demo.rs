@@ -61,6 +61,9 @@ const DESC_OFF: u64 = 0x90_0000;
 /// 用户程序可用的系统调用。
 fn user_calls() -> SyscallSet {
     SyscallSet::of(&[
+        abi::SYSTEM_MEMORY_OBJECT_CREATE,
+        abi::SYSTEM_MEMORY_OBJECT_MAP,
+        abi::SYSTEM_MEMORY_OBJECT_UNMAP,
         abi::SYSTEM_CHANNEL_CREATE,
         abi::SYSTEM_CHANNEL_SEND,
         abi::SYSTEM_CHANNEL_RECV,
@@ -371,4 +374,39 @@ fn byte_quota() {
     kobj::run_cleanup(usize::MAX);
     let (live1, pending1, _) = kobj::stats();
     check(live1 == live0 && pending1 == 0, "字节配额用例后对象未回到基线");
+}
+
+/// Opt-in SHM fixture only: publish a CPL3 probe exclusively on CPU1.
+#[cfg(feature="shm1-verify")]
+pub(crate) fn start_shm_revoke_probe(pid:ObjId,address:u64) -> bool {
+    let base=arch::USER_WINDOW.0;
+    let result=(|| {
+        let entry=proc::load_elf(pid,USER_IPC).map_err(|_| ProcError::Map(MapError::InvalidAddress))?;
+        for i in 1..=STACK_PAGES { proc::map_new(pid,base+STACK_TOP_OFF-i*FRAME_SIZE,MapFlags::USER|MapFlags::WRITE)?; }
+        let mut affinity=kernel_core::smp::CpuSet::EMPTY; affinity.insert(1);
+        proc::spawn_thread_affinity(pid,"shm-revoke-probe",entry,base+STACK_TOP_OFF,4,address,Some(affinity))
+    })();
+    result.is_ok()
+}
+
+/// Dedicated S3 real user-mode peers; default IPC acceptance roles unchanged.
+#[cfg(feature="shm1-verify")]
+pub(crate) fn s3_channel_roundtrip() {
+    let before=crate::baseline::baseline();
+    let a=proc::create("s3-channel-ping",user_calls().union(SyscallSet::of(&[abi::SYSTEM_HANDLE_RESTRICT]))).unwrap();
+    let b=proc::create("s3-channel-pong",user_calls()).unwrap();
+    let (ha,hb)=ipc::create_pair(a,b).unwrap();
+    for (pid,name,role,endpoint,cpu) in [(a,"s3-channel-ping",5u64,ha.raw(),0usize),(b,"s3-channel-pong",6u64,hb.raw(),usize::from(crate::smp::cpu_count()>1))] {
+        let base=arch::USER_WINDOW.0;
+        let entry=proc::load_elf(pid,USER_IPC).unwrap();
+        for i in 1..=STACK_PAGES {proc::map_new(pid,base+STACK_TOP_OFF-i*FRAME_SIZE,MapFlags::USER|MapFlags::WRITE).unwrap();}
+        let mut affinity=kernel_core::smp::CpuSet::EMPTY;affinity.insert(cpu);
+        proc::spawn_thread_affinity(pid,name,entry,base+STACK_TOP_OFF,role,endpoint,Some(affinity)).unwrap();
+    }
+    sched::run();
+    assert_eq!(proc::state(a),Some(ProcState::Exited {code:0}),"S3 Channel ping");
+    assert_eq!(proc::state(b),Some(ProcState::Exited {code:0}),"S3 Channel pong");
+    assert!(proc::reap(a).is_some() && proc::reap(b).is_some());kobj::run_cleanup(usize::MAX);
+    assert_eq!(crate::baseline::baseline(),before,"S3 Channel resources");
+    kprintln!("[JSR-S3-CHANNEL] rounds=32 ping_cpu=0 pong_cpu={} cpl3=true rights=true transfer=true unmap=true exits=true resources=true failed=0",usize::from(crate::smp::cpu_count()>1));
 }

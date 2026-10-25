@@ -11,6 +11,8 @@
 use core::arch::asm;
 use core::fmt::Write as _;
 
+use kernel_core::memory_abi::MapArgs;
+use core::sync::atomic::{AtomicU64,Ordering};
 use kernel_core::ring_abi::{Cqe, EnterArgs, MsgDesc, Sqe};
 
 /// 系统调用号（构建期从登记表生成）。
@@ -374,6 +376,16 @@ fn semantics() -> ! {
     exit(0)
 }
 
+fn shared_address() -> u64 {
+    let arch=if cfg!(target_arch="x86_64") { "x86_64" } else if cfg!(target_arch="aarch64") { "aarch64" }
+        else if cfg!(target_arch="riscv64") { "riscv64" } else { "riscv32" };
+    kernel_core::user_layout::window_base(arch).unwrap()+0x200000
+}
+fn shared_map(h:i64) -> i64 {
+    let args=MapArgs::new(shared_address(),0,1,true);
+    sys(ids::SYSTEM_MEMORY_OBJECT_MAP,h as u64,&args as *const MapArgs as u64)
+}
+
 /// 跨进程 ping：发送 "ping" + 一个线程句柄，等待 "pong" 与同一个句柄（新的句柄值）。
 fn ping(ep: i64) -> ! {
     let ring = sys(ids::SYSTEM_ASYNC_RING_CREATE, 4, 0);
@@ -388,6 +400,19 @@ fn ping(ep: i64) -> ! {
     let back = r.cqes[0].result == 4 && &buf[..4] == b"pong" && hs[0] != 0;
     check(back && close(hs[0] as i64) == 0, 23);
     say!("ping got=pong handle_returned=true");
+    let memory=sys(ids::SYSTEM_MEMORY_OBJECT_CREATE,1,0);
+    check(memory>0 && shared_map(memory)==0,24);
+    // SAFETY: Memory syscall established a page aligned shared RAM view. Atomic values are valid zero bits.
+    let value=unsafe { &*(shared_address() as *const AtomicU64) };
+    value.store(0x53484d3150494e47,Ordering::Release);
+    let sent=enter(ring,&[send_sqe(ep,&msg(b"shm1",&[memory as u64]),3)],4,1);
+    check(sent.cqes[0].result==4 && close(memory)==HANDLE_INVALID,25);
+    let mut data=[0u8;8]; let mut handles=[0u64;1]; let desc=rbuf(&mut data,&mut handles);
+    let received=enter(ring,&[recv_sqe(ep,&desc,4)],4,1);
+    check(received.cqes[0].result==4 && &data[..4]==b"shm2" && handles[0]!=0,26);
+    check(value.load(Ordering::Acquire)==0x53484d31504f4e47,27);
+    check(close(handles[0] as i64)==0 && sys(ids::SYSTEM_MEMORY_OBJECT_UNMAP,shared_address(),1)==0,28);
+    say!("shm ping channel_handle=true peer_write_visible=true resources_released=true");
     exit(0)
 }
 
@@ -403,7 +428,78 @@ fn pong(ep: i64) -> ! {
     let r = enter(ring, &[send_sqe(ep, &msg(b"pong", &[hs[0]]), 2)], 4, 1);
     check(r.cqes[0].result == 4, 33);
     say!("pong got=ping forwarded_handle=true");
+    let mut data=[0u8;8]; let mut handles=[0u64;1]; let desc=rbuf(&mut data,&mut handles);
+    let received=enter(ring,&[recv_sqe(ep,&desc,3)],4,1);
+    check(received.cqes[0].result==4 && &data[..4]==b"shm1" && handles[0]!=0,34);
+    check(shared_map(handles[0] as i64)==0,35);
+    // SAFETY: validated writable Memory mapping; use atomic shared accesses across processes.
+    let value=unsafe { &*(shared_address() as *const AtomicU64) };
+    check(value.load(Ordering::Acquire)==0x53484d3150494e47,36);
+    value.store(0x53484d31504f4e47,Ordering::Release);
+    let sent=enter(ring,&[send_sqe(ep,&msg(b"shm2",&handles),4)],4,1);
+    check(sent.cqes[0].result==4 && close(handles[0] as i64)==HANDLE_INVALID,37);
+    check(sys(ids::SYSTEM_MEMORY_OBJECT_UNMAP,shared_address(),1)==0,38);
+    say!("shm pong channel_handle=true shared_rw=true transfer_back=true");
     exit(0)
+}
+
+// S-3: real CPL3 peers repeatedly move one Memory handle through Channel.
+fn s3_channel_ping(ep:i64)->! {
+    let ring=sys(ids::SYSTEM_ASYNC_RING_CREATE,4,0);
+    let mut memory=sys(ids::SYSTEM_MEMORY_OBJECT_CREATE,1,0);
+    check(ring>0 && memory>0,100);
+    for round in 0..32u64 {
+        check(shared_map(memory)==0,101);
+        unsafe { (&*(shared_address() as *const AtomicU64)).store(round*2,Ordering::Release); }
+        let ro=syscall_duplicate_ro(memory);
+        let write=MapArgs::new(shared_address()+0x2000,0,1,true);
+        check(ro>0 && sys(ids::SYSTEM_MEMORY_OBJECT_MAP,ro as u64,&write as *const MapArgs as u64)==HANDLE_RIGHTS_DENIED,102);
+        check(sys(ids::SYSTEM_HANDLE_RESTRICT,ro as u64,1)==0,103);
+        let read=MapArgs::new(shared_address()+0x2000,0,1,false);
+        check(sys(ids::SYSTEM_MEMORY_OBJECT_MAP,ro as u64,&read as *const MapArgs as u64)==HANDLE_RIGHTS_DENIED,103);
+        check(close(ro)==0,103);
+        let sent=enter(ring,&[send_sqe(ep,&msg(b"s3rq",&[memory as u64]),round*2)],4,1);
+        check(sent.cqes[0].result==4 && close(memory)==HANDLE_INVALID,104);
+        if round%2==0 { check(sys(ids::SYSTEM_MEMORY_OBJECT_UNMAP,shared_address(),1)==0,105); }
+        let mut data=[0u8;8];let mut handles=[0u64;1];let desc=rbuf(&mut data,&mut handles);
+        let received=enter(ring,&[recv_sqe(ep,&desc,round*2+1)],4,1);
+        check(received.cqes[0].result==4 && &data[..4]==b"s3ok" && handles[0]!=0,106);
+        memory=handles[0] as i64;
+        if round%2==0 { check(shared_map(memory)==0,107); }
+        check(unsafe { (&*(shared_address() as *const AtomicU64)).load(Ordering::Acquire) }==round*2+1,108);
+        check(sys(ids::SYSTEM_MEMORY_OBJECT_UNMAP,shared_address(),1)==0,109);
+    }
+    check(close(memory)==0 && close(ring)==0,110);
+    say!("s3 ping rounds=32 channel=true readonly_denied=true stale=true alternating_unmap=true shared=true");exit(0)
+}
+fn syscall_duplicate_ro(memory:i64)->i64 { sys(ids::SYSTEM_HANDLE_DUPLICATE,memory as u64,(1<<0)|(1<<7)) }
+fn s3_channel_pong(ep:i64)->! {
+    let ring=sys(ids::SYSTEM_ASYNC_RING_CREATE,4,0);check(ring>0,111);
+    for round in 0..32u64 {
+        let mut data=[0u8;8];let mut handles=[0u64;1];let desc=rbuf(&mut data,&mut handles);
+        let received=enter(ring,&[recv_sqe(ep,&desc,round*2)],4,1);
+        check(received.cqes[0].result==4 && &data[..4]==b"s3rq" && handles[0]!=0,112);
+        let memory=handles[0] as i64;check(shared_map(memory)==0,113);
+        check(unsafe { (&*(shared_address() as *const AtomicU64)).load(Ordering::Acquire) }==round*2,114);
+        unsafe { (&*(shared_address() as *const AtomicU64)).store(round*2+1,Ordering::Release); }
+        check(sys(ids::SYSTEM_MEMORY_OBJECT_UNMAP,shared_address(),1)==0,115);
+        let sent=enter(ring,&[send_sqe(ep,&msg(b"s3ok",&[memory as u64]),round*2+1)],4,1);
+        check(sent.cqes[0].result==4 && close(memory)==HANDLE_INVALID,116);
+    }
+    check(close(ring)==0,117);say!("s3 pong rounds=32 channel=true shared=true stale=true views_released=true");exit(0)
+}
+
+// Dedicated SHM fixture role: fill a user TLB, wait for remote revoke acknowledgement,
+// then access the revoked address. Correct execution ends in a page fault, never exit(90).
+fn revoke_probe(address:u64) -> ! {
+    let data=unsafe { &*(address as *const AtomicU64) };
+    let phase=unsafe { &*((address+4096) as *const AtomicU64) };
+    check(data.load(Ordering::Acquire)==0x53484d315245564f,80);
+    phase.store(1,Ordering::Release);
+    while phase.load(Ordering::Acquire)!=2 { core::hint::spin_loop(); }
+    let stale=data.load(Ordering::Acquire);
+    say!("shm REVOKE FAILED stale={:#x}",stale);
+    exit(90)
 }
 
 /// 程序入口（链接脚本把它放在代码段最前面）。内核把两个参数各放进一个寄存器，因此按寄存器宽度（`usize`）接收。
@@ -412,6 +508,9 @@ fn pong(ep: i64) -> ! {
 pub extern "C" fn _start(role: usize, endpoint: usize) -> ! {
     let endpoint = endpoint as u64;
     match role {
+        5 => s3_channel_ping(endpoint as i64),
+        6 => s3_channel_pong(endpoint as i64),
+        4 => revoke_probe(endpoint),
         0 => semantics(),
         1 => ping(endpoint as i64),
         _ => pong(endpoint as i64),

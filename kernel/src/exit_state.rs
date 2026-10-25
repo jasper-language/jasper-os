@@ -22,6 +22,7 @@ use crate::kobj::{KObject, Table};
 pub struct ExitState {
     /// 退出码（未退出为 `None`）。
     code: Option<i64>,
+    source: Option<ObjId>,
     /// 等待者登记 (Ring, 请求 ID)——非拥有式。
     waiters: Vec<(ObjId, u64)>,
 }
@@ -35,7 +36,7 @@ fn es_mut(t: &mut Table, id: ObjId) -> Option<&mut ExitState> {
 
 /// 新建一个退出状态（锁内），初始由所属对象持有一个内部引用。
 pub(crate) fn create_in(t: &mut Table) -> Option<ObjId> {
-    t.insert(KObject::ExitState(ExitState { code: None, waiters: Vec::new() }), 0, 1).ok()
+    t.insert(KObject::ExitState(ExitState { code: None, source:None, waiters: Vec::new() }), 0, 1).ok()
 }
 
 /// 已退出则返回退出码。
@@ -64,7 +65,11 @@ pub(crate) fn notify_in(t: &mut Table, id: ObjId, code: i64) {
         return;
     }
     e.code = Some(code);
+    let source=e.source;
     let waiters: Vec<(ObjId, u64)> = e.waiters.drain(..).collect();
+    if let Some(source)=source {
+        assert!(crate::subscription::publish_in(t,source,report(code) as u64).is_ok(),"exit event source publish");
+    }
     for (ring, req) in waiters {
         crate::ring::complete_waiter_in(t, ring, req, report(code));
     }
@@ -73,4 +78,16 @@ pub(crate) fn notify_in(t: &mut Table, id: ObjId, code: i64) {
 /// 退出码 → wait 的结果值（32 位无符号，见模块文档）。
 pub fn report(code: i64) -> i64 {
     (code as u32) as i64
+}
+
+/// Lazy source attachment and initial snapshot are one object-table transaction.
+pub(crate) fn source_in(t:&mut Table,id:ObjId)->Result<ObjId,crate::subscription::Error> {
+ let (source,code)=match t.get(id) {Ok(KObject::ExitState(e))=>(e.source,e.code),_=>return Err(crate::subscription::Error::Invalid)};
+ if let Some(source)=source {return Ok(source);}
+ let snapshot=kernel_core::subscription::Snapshot {version:if code.is_some(){1}else{0},value:code.map(report).unwrap_or(0) as u64};
+ let source=crate::subscription::create_publisher_in(t,snapshot)?;
+ let Some(e)=es_mut(t,id) else {unreachable!()};e.source=Some(source);Ok(source)
+}
+pub(crate) fn destroy(e:ExitState) {
+ if let Some(source)=e.source {crate::kobj::with(|t|crate::subscription::finish_publisher_in(t,source));}
 }

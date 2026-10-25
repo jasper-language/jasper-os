@@ -1,0 +1,66 @@
+[package]
+name = "jasper-toolbox-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+[package.metadata]
+cargo-fuzz = true
+[workspace]
+[dependencies]
+libfuzzer-sys = "0.4"
+kernel-core = { path = "../../../kernel-core" }
+[[bin]]
+name = "memory_abi"
+path = "fuzz_targets/memory_abi.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "usage"
+path = "fuzz_targets/usage.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handle_sequence"
+path = "fuzz_targets/handle_sequence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cpu_time"
+path = "fuzz_targets/cpu_time.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "subscription"
+path = "fuzz_targets/subscription.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "subscription_abi"
+path = "fuzz_targets/subscription_abi.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "subscription_create"
+path = "fuzz_targets/subscription_create.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "limit"
+path = "fuzz_targets/limit.rs"
+test = false
+doc = false
+bench = false

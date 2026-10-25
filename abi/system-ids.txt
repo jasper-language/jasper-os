@@ -79,3 +79,25 @@
 4129	error	system.device.error.interrupt_busy	1	none	设备·中断已有未完成的等待	Interrupt wait already outstanding
 4130	error	system.device.error.interrupt_closed	1	none	设备·中断已关闭	Interrupt closed
 4131	error	system.async.error.ring_only	1	none	异步·该操作只能经异步环提交	Operation must be submitted through a ring
+
+33	op	system.async.ring.deadline.enter	1	write	异步环·带截止时刻提交并收取	Enter async ring until deadline
+4132	error	system.async.error.timed_out	1	none	异步·等待截止时刻已到	Async wait deadline reached
+
+34	op	system.memory.object.create	1	write	内存对象·创建	Create memory object
+35	op	system.memory.object.map	1	write	内存对象·映射	Map memory object
+36	op	system.memory.object.unmap	1	write	内存对象·撤销本进程映射	Unmap memory object view
+
+37	op	system.memory.buffer.create	1	write	内存·注册缓冲区（预留）	Register memory buffer reserved
+38	op	system.memory.buffer.destroy	1	write	内存·注销缓冲区（预留）	Unregister memory buffer reserved
+39	op	system.execution.restricted.create	1	write	执行·创建受限执行（预留）	Create restricted execution reserved
+40	op	system.task.interrupt.send	1	write	任务·投递异步中断（预留）	Send task interrupt reserved
+41	op	system.memory.dma.map	1	write	内存·建立 IOVA 映射（预留）	Map memory through IOVA reserved
+42	op	system.io.segment.submit	1	write	输入输出·提交分段请求（预留）	Submit segmented IO reserved
+43	op	system.task.syscalls.set	2	write	任务·设置扩展调用权限（预留）	Set extended syscall permissions reserved
+
+44	op	system.event.subscription.wait	1	write	事件·批量等待订阅	Wait for subscription batch
+4133	error	system.event.error.closed	1	read	事件·订阅已关闭	Subscription closed
+4134	error	system.event.error.busy	1	read	事件·已有等待请求	Subscription wait busy
+
+45	op	system.event.source.create	1	write	事件·打开事件源	Create event source capability
+46	op	system.event.subscription.create	1	write	事件·创建订阅并取得快照	Create subscription and snapshot

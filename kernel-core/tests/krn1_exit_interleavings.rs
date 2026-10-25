@@ -7,9 +7,28 @@ use kernel_core::objtable::{ObjectTable, Slot};
 #[path = "../../kernel/src/exit_state.rs"]
 mod exit_state;
 mod kobj {
-    pub enum KObject { ExitState(crate::exit_state::ExitState), #[allow(dead_code)] Other }
+    pub enum KObject { Source(kernel_core::subscription::Snapshot), ExitState(crate::exit_state::ExitState), #[allow(dead_code)] Other }
     pub type Table = kernel_core::objtable::ObjectTable<KObject>;
+    // This harness owns explicit local tables. Never silently emulate global cleanup.
+    pub fn with<R>(_:impl FnOnce(&mut Table)->R)->R {panic!("global cleanup is outside this local-table adapter; use kernel fixture");}
+
 }
+
+// Recording source adapter for the actual ExitState attachment/notify code.
+// Actual kernel source queues, locks, capabilities and destruction are separate QEMU coverage.
+mod subscription {
+    use kernel_core::{objtable::ObjId,subscription::Snapshot};
+    use crate::kobj::{Table,KObject};
+    #[derive(Debug)] pub enum Error {Invalid}
+    pub fn create_publisher_in(t:&mut Table,snapshot:Snapshot)->Result<ObjId,Error> {
+        t.insert(KObject::Source(snapshot),1,0).map_err(|_|Error::Invalid)
+    }
+    pub fn publish_in(t:&mut Table,id:ObjId,value:u64)->Result<(),Error> {
+        match t.get_mut(id) {Ok(KObject::Source(snapshot))=>snapshot.publish(value).map(|_|()).map_err(|_|Error::Invalid),_=>Err(Error::Invalid)}
+    }
+    pub fn finish_publisher_in(t:&mut Table,id:ObjId) {assert!(t.release_owner(id).is_ok());}
+}
+
 mod ring {
     use std::cell::RefCell;
     use kernel_core::objtable::ObjId;
@@ -66,4 +85,18 @@ fn krn1_exit_cancel_and_duplicate_notification_orders() {
             }
         }
     }
+}
+
+#[test]
+fn actual_exit_attachment_before_and_after_notification_preserves_snapshot() {
+ let mut table=ObjectTable::empty();
+ table.install(Box::leak((0..8).map(|_|Slot::VACANT).collect::<Vec<_>>().into_boxed_slice()),Box::leak(vec![0;8].into_boxed_slice())).unwrap();
+ let es=exit_state::create_in(&mut table).unwrap();let source=exit_state::source_in(&mut table,es).unwrap();
+ assert!(matches!(table.get(source),Ok(kobj::KObject::Source(s)) if s.version==0));
+ exit_state::notify_in(&mut table,es,37);exit_state::notify_in(&mut table,es,99);
+ assert!(matches!(table.get(source),Ok(kobj::KObject::Source(s)) if s.version==1 && s.value==37));
+ assert_eq!(exit_state::source_in(&mut table,es).unwrap(),source);
+ let late=exit_state::create_in(&mut table).unwrap();exit_state::notify_in(&mut table,late,19);
+ let late_source=exit_state::source_in(&mut table,late).unwrap();
+ assert!(matches!(table.get(late_source),Ok(kobj::KObject::Source(s)) if s.version==1 && s.value==19));
 }

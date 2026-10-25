@@ -1,7 +1,39 @@
-target/
-images/
-evidence/
-__pycache__/
 .idea/
 *.iml
 .DS_Store
+out/
+target/
+build/
+evidence/accept-*/
+evidence/pda1-*/
+evidence/**/*.log
+images/pda1-*
+
+# BM-1 raw VM evidence (summaries linked from docs, not boot firmware/images)
+evidence/bm1*/
+
+# PDA 设备原始 dump（boot/vendor_boot/fdt/getvar/getprop/pstore）只留本地，
+# 可能含序列号、MAC、IMEI 等；对外只分享 tools/pda 脱敏后的摘要。
+# 只忽略仓库根目录的 pda/，不要误伤 tools/pda/。
+/pda/
+__pycache__/
+evidence/a64-q66-*/
+# Local KRN-1 / FV-1 execution evidence and toolchain setup artifacts.
+/evidence/krn1/
+/evidence/fv1-setup/
+/evidence/s2/
+/evidence/s2-first-pass/
+/evidence/s2-second-pass/
+/evidence/s2-stalled-tlb/
+/evidence/s2-accepted/
+/evidence/fv1/
+/evidence/krn1-data/
+/evidence/local-ci/
+/evidence/krn2/
+
+# EVT-1 local raw model/runtime evidence, retained outside published sources.
+/evidence/evt1/
+
+/evidence/shm1/
+/verification/toolbox/fuzz/corpus/
+/verification/toolbox/fuzz/artifacts/

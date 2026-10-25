@@ -52,7 +52,7 @@ use crate::{arch, irq, kprintln, sched};
 
 /// 中断句柄的权限：经 Ring 等待（WAIT）、控制绑定（CONTROL）。可经 restrict 降权，不可复制或传递。
 /// Rights of an interrupt handle.
-pub const INTERRUPT_RIGHTS: Rights = Rights::WAIT.union(Rights::CONTROL);
+pub const INTERRUPT_RIGHTS: Rights = Rights::WAIT.union(Rights::CONTROL).union(Rights::SUBSCRIBE);
 
 /// 等待者令牌：（Ring 对象，请求 ID）。
 /// Waiter token: (ring object, request id).
@@ -67,6 +67,9 @@ pub struct InterruptObj {
     vector: u8,
     /// 已并入状态机的分发器到达计数（读数与它的差就是新到达）。
     seen: u32,
+    event_total:u64,
+    events_exhausted:bool,
+    source:Option<ObjId>,
     /// 全局递增的绑定序号（区分同一表项的先后两次绑定）。
     serial: u64,
     line: InterruptLine<Waiter>,
@@ -342,6 +345,7 @@ pub fn bind_for(pid: ObjId, device: HandleId, entry: u64, cpu: u64) -> Result<Ha
             cpu,
             vector,
             seen,
+            event_total:0,events_exhausted:false,source:None,
             serial,
             line: InterruptLine::new(),
             cancels: 0,
@@ -398,6 +402,24 @@ fn unbind_hw(bdf: Bdf, entry: u16) -> bool {
 
 // ———————————————————————— 到达与等待 ————————————————————————
 
+/// Author: chatgpt。分发/预算guard已释放后，将本向量的待处理到达转交对象层。
+/// 先复制规范ObjId后放DEVICES锁，再取对象锁；绝不以设备锁5反取对象锁4。
+/// ObjId包含对象代次，close/rebind后旧副本解析失败或closed，不会通知新绑定。
+/// 到达量仍以原单调msi_count为真源，此处不清计数，不持guard跨任务切换。
+pub(crate) fn service_msi(cpu: usize, vector: u8) {
+    let pending = {
+        let devices = DEVICES.lock();
+        devices.iter().flat_map(|d| d.bound.iter())
+            .find(|b| b.cpu == cpu && b.vector == vector).and_then(|b| b.obj)
+    };
+    let Some(id) = pending else { return };
+    kobj::with(|t| {
+        if obj_mut(t, id).is_some_and(|o| o.cpu == cpu && o.vector == vector && !o.line.is_closed()) {
+            sync_in(t, id);
+        }
+    });
+}
+
 /// 把中断对象 `id` 的新到达并入状态机（锁内）；有等待者就以交付次数完成它并推进其 Ring。
 ///
 /// 分发器计数只单调回绕、不清零（已绑定槽位不参与统计清零），新到达数按模 2³² 差计算，跨越回绕也不丢失。
@@ -410,9 +432,26 @@ pub(crate) fn sync_in(t: &mut Table, id: ObjId) {
     let now = irq::msi_count(o.cpu, o.vector);
     let delta = arrivals_since(o.seen, now);
     o.seen = now;
-    if let Some(((ring, req), n)) = o.line.arrive(delta) {
-        DELIVERIES.fetch_add(1, Ordering::Relaxed);
-        crate::ring::complete_waiter_in(t, ring, req, n as i64);
+    let legacy=o.line.arrive(delta);
+    let source=o.source;
+    let total=o.event_total.checked_add(delta as u64);
+    if let Some(total)=total {o.event_total=total;} else {o.events_exhausted=true;}
+    if delta>0 {
+        if let Some(source)=source {
+            if let Some(total)=total {
+                if crate::subscription::publish_value_in(t,source,delta as u64,total).is_err() {
+                    if let Some(o)=obj_mut(t,id) {o.source=None;o.events_exhausted=true;}
+                    crate::subscription::finish_publisher_in(t,source);
+                }
+            } else {
+                if let Some(o)=obj_mut(t,id) {o.source=None;o.events_exhausted=true;}
+                crate::subscription::finish_publisher_in(t,source);
+            }
+        }
+    }
+    if let Some(((ring,req),n))=legacy {
+        DELIVERIES.fetch_add(1,Ordering::Relaxed);
+        crate::ring::complete_waiter_in(t,ring,req,n as i64);
     }
 }
 
@@ -463,8 +502,10 @@ pub(crate) fn cancel_wait_in(t: &mut Table, id: ObjId, waiter: Waiter) {
 pub fn close_in(t: &mut Table, id: ObjId) {
     let Some(o) = obj_mut(t, id) else { return };
     let waiter = o.line.close();
+    let source=o.source.take();
     let (bdf, entry, serial) = (o.bdf, o.entry, o.serial);
     let unbound = unbind_hw(bdf, entry);
+    if let Some(source)=source {crate::subscription::finish_publisher_in(t,source);}
     if let Some((ring, req)) = waiter {
         crate::ring::complete_waiter_in(t, ring, req, err(SYSTEM_DEVICE_ERROR_INTERRUPT_CLOSED));
     }
@@ -523,4 +564,15 @@ pub fn msix_state(bdf: Bdf, entry: u16) -> Option<(usize, bool, bool)> {
     let enabled = d.msix.control().map(core_pci::msix_control_enabled).ok()?;
     let masked = d.msix.entry(entry).map(|e| e.masked()).ok()?;
     Some((d.bound.len(), enabled, masked))
+}
+
+/// IRQ source snapshots cumulative arrivals, while event payloads are deltas.
+pub(crate) fn source_in(t:&mut Table,id:ObjId)->Result<ObjId,crate::subscription::Error> {
+ sync_in(t,id);
+ if obj_mut(t,id).is_some_and(|o|o.events_exhausted) {return Err(crate::subscription::Error::Exhausted);}
+ let (source,total)=match obj_mut(t,id) {Some(o) if !o.line.is_closed()=>(o.source,o.event_total),_=>return Err(crate::subscription::Error::Closed)};
+ if let Some(source)=source {return Ok(source);}
+ let source=crate::subscription::create_publisher_in(t,kernel_core::subscription::Snapshot {version:0,value:total})?;
+ crate::subscription::policies_in(t,source,5);
+ let Some(o)=obj_mut(t,id) else {unreachable!()};o.source=Some(source);Ok(source)
 }

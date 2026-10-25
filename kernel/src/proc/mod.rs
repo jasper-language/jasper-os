@@ -18,6 +18,7 @@
 //! 全部强引用归零后由清理过程 [`crate::kobj::run_cleanup`] 调用 [`destroy`]：销毁地址空间、归还帧、释放线程表引用（级联）。
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -29,7 +30,7 @@ use kernel_core::paging::{MapError, MapFlags, VirtPage};
 
 use crate::kobj::{self, KObject, TaskObj};
 use crate::mm::space::{in_private_window, VmSpace};
-use crate::mm::{frame, phys_to_virt};
+use crate::mm::phys_to_virt;
 use crate::sync::IrqSpinLock;
 use crate::syscall::SyscallSet;
 use crate::task::TaskId;
@@ -63,8 +64,12 @@ pub struct Process {
     name: &'static str,
     space: VmSpace,
     handles: HandleTable<ObjectRef, HANDLES_PER_PROCESS>,
-    /// 进程拥有的数据帧（销毁时归还）。
-    frames: Vec<PhysFrame>,
+    /// Private mapping references to canonical Memory pages (including ELF and stack pages).
+    frames: Vec<Arc<crate::mm::memory_object::Page>>,
+    /// SHM mappings retain backing pages independently of the Memory handle.
+    shared_maps: Vec<SharedMapping>,
+    memory_account: Arc<crate::mm::memory_quota::Account>,
+    subscription_account: Arc<crate::mm::memory_quota::Account>,
     /// 页表修改已生效但击落未确认时被永久隔离的帧：不再归还分配器，避免旧 TLB 继续引用后复用。
     /// Frames permanently withheld from the allocator after an unconfirmed shootdown.
     quarantined: Vec<PhysFrame>,
@@ -112,6 +117,8 @@ pub struct ResourceQuota {
     /// 本进程发出、仍在接收队列中的消息体总字节数。
     pub ipc_bytes: u32,
 }
+
+struct SharedMapping { va: u64, page: Arc<crate::mm::memory_object::Page> }
 
 /// 一次成功的设备 BAR 映射：把创建它的句柄、虚拟区间与物理 BAR 起始地址记在一起。
 ///
@@ -172,6 +179,8 @@ pub enum ProcError {
     Map(MapError),
     /// 没有空闲物理帧。
     OutOfFrames,
+    /// Allocation or fixed-page reference quota exceeded.
+    MemoryQuota,
     /// 调度器槽位已满或对象表已满。
     NoTaskSlot,
     /// 句柄错误。
@@ -266,12 +275,17 @@ pub(crate) fn app_in(t: &mut kobj::Table, pid: ObjId) -> Option<u32> {
 
 pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcError> {
     let space = VmSpace::new().map_err(ProcError::Map)?;
+    let memory_account = crate::mm::memory_quota::Account::new().ok_or(ProcError::OutOfFrames)?;
+    let subscription_account=crate::mm::memory_quota::Account::new().ok_or(ProcError::OutOfFrames)?;
     let exit_state = kobj::with(crate::exit_state::create_in).ok_or(ProcError::NoTaskSlot)?;
     let p = Box::new(Process {
         name,
         space,
         handles: HandleTable::new(),
         frames: Vec::new(),
+        shared_maps: Vec::new(),
+        memory_account,
+        subscription_account,
         quarantined: Vec::new(),
         device_maps: Vec::new(),
         threads: Vec::new(),
@@ -307,28 +321,28 @@ fn with_proc<R>(id: ObjId, f: impl FnOnce(&mut Process) -> Result<R, ProcError>)
     })
 }
 
-/// 为进程分配一个清零的帧并映射到 `va`（帧归进程所有）。
+/// Create a private mapping of a zeroed Memory page (ELF/stack loader path).
 pub fn map_new(id: ObjId, va: u64, flags: MapFlags) -> Result<PhysFrame, ProcError> {
-    let f = frame::allocate().map_err(|_| ProcError::OutOfFrames)?;
-    if let Some(p) = phys_to_virt(f.start()) {
-        // SAFETY：刚分出的帧，经全物理内存映射清零。
-        unsafe { core::ptr::write_bytes(p, 0, FRAME_SIZE as usize) };
-    }
-    let r = with_proc(id, |p| {
-        p.space.map(VirtPage::containing(va), f, flags).map_err(ProcError::Map)?;
-        p.frames.push(f);
-        Ok(f)
-    });
-    if r.is_err() {
-        let _ = frame::deallocate(f);
-    }
-    r
+    let charge=kobj::with(|t| {
+        receiver(t,id)?.memory_account.reserve(1,0,MAX_PROCESS_FRAMES as u64,MAX_PROCESS_FRAMES as u64)
+            .ok_or(ProcError::MemoryQuota)
+    })?;
+    let page=crate::mm::memory_object::Page::zeroed(charge).ok_or(ProcError::OutOfFrames)?;
+    let f=page.frame();
+    with_proc(id, |p| {
+        if p.state!=ProcState::Running { return Err(ProcError::Exited); }
+        if p.frames.len()+p.shared_maps.len()>=MAX_PROCESS_FRAMES { return Err(ProcError::MemoryQuota); }
+        p.frames.try_reserve(1).map_err(|_| ProcError::OutOfFrames)?;
+        p.space.map(VirtPage::containing(va),f,flags).map_err(ProcError::Map)?;
+        p.frames.push(Arc::clone(&page)); Ok(f)
+    })
 }
 
 /// 取消进程中一页的映射并放弃该页的数据帧（仍被在飞请求固定时，帧延后到最后一次解除固定才归还）。
 /// Unmaps one page of a process; its frame is returned now or, if pinned, after the last unpin.
 pub fn unmap_page(id: ObjId, va: u64) -> Result<(), ProcError> {
     let frame = with_proc(id, |p| {
+        if is_shared_page(p, va) { return Err(ProcError::Map(MapError::InvalidAddress)); }
         if !p.space.begin_shootdown() {
             return Err(ProcError::Map(MapError::Busy));
         }
@@ -343,18 +357,19 @@ pub fn unmap_page(id: ObjId, va: u64) -> Result<(), ProcError> {
     let active = with_proc(id, |p| Ok(p.space.active_cpus()))?;
     if crate::smp::tlb_shootdown_on(active, va, 1).is_err() {
         with_proc(id, |p| {
-            p.frames.retain(|x| *x != frame);
+            for page in &p.frames { if page.frame()==frame { page.quarantine(); } }
+            p.frames.retain(|x| x.frame()!=frame);
             p.quarantine_one(frame);
             Ok(())
         }).ok();
         return Err(ProcError::Map(MapError::Busy));
     }
     with_proc(id, |p| {
-        p.frames.retain(|x| *x != frame);
+        crate::mm::pin::mapping_released(frame);
+        p.frames.retain(|x| x.frame()!=frame);
         p.space.end_shootdown();
         Ok(())
     })?;
-    crate::mm::pin::release(frame);
     Ok(())
 }
 
@@ -370,6 +385,10 @@ pub const MAX_DEVICE_MAP_PAGES: u64 = 1024;
 /// 匿名映射 / 取消映射的失败原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemError {
+    /// Memory handle missing/wrong type.
+    InvalidHandle,
+    /// Handle does not grant the requested shared mapping permissions.
+    RightsDenied,
     /// 同一地址空间的另一次跨核页表修改尚未完成。
     Busy,
     /// 起点未按页对齐、页数为 0 或超限、区间越出私有窗口。
@@ -407,80 +426,157 @@ fn checked_range(va: u64, pages: u64) -> Result<(), MemError> {
 /// （建页表时新分配的中间页表帧归地址空间所有，随地址空间销毁回收）。
 /// Maps zeroed anonymous pages, all-or-nothing.
 pub fn map_anon(pid: ObjId, va: u64, pages: u64, writable: bool) -> Result<(), MemError> {
-    checked_range(va, pages)?;
-    let n = pages as usize;
-    // 先按当前记账粗查配额，避免为必然失败的请求分配并清零大量帧（锁内仍会复核）。
-    let owned = with_proc(pid, |p| Ok(p.frames.len())).map_err(|_| MemError::NoSuchProcess)?;
-    if owned + n > MAX_PROCESS_FRAMES {
-        return Err(MemError::Quota);
-    }
-    // 内存压力准入：在分配任何帧之前判定，被拒时不留任何改动。
-    crate::mm::pressure::admit(sched::current_effective_qos(), n).map_err(|_| MemError::Pressure)?;
-    let mut fresh: Vec<PhysFrame> = Vec::new();
-    if fresh.try_reserve_exact(n).is_err() {
-        return Err(MemError::OutOfMemory);
-    }
-    for _ in 0..n {
-        match frame::allocate() {
-            Ok(f) => {
-                if let Some(p) = phys_to_virt(f.start()) {
-                    // SAFETY：刚分出的帧，经全物理内存映射清零。
-                    unsafe { core::ptr::write_bytes(p, 0, FRAME_SIZE as usize) };
+    checked_range(va,pages)?;
+    let n=pages as usize;
+    let charge=kobj::with(|t| {
+        let p=receiver(t,pid).map_err(|_| MemError::NoSuchProcess)?;
+        if p.frames.len()+p.shared_maps.len()+n>MAX_PROCESS_FRAMES { return Err(MemError::Quota); }
+        p.memory_account.reserve(pages,0,MAX_PROCESS_FRAMES as u64,MAX_PROCESS_FRAMES as u64).ok_or(MemError::Quota)
+    })?;
+    crate::mm::pressure::admit(sched::current_effective_qos(),n).map_err(|_| MemError::Pressure)?;
+    let backing=crate::mm::memory_object::MemoryObject::zeroed(pages,MAX_PROCESS_FRAMES as u64,charge)
+        .ok_or(MemError::OutOfMemory)?;
+    let range=kernel_core::memory_object::MapRange {offset_pages:0,pages,va,end:va+pages*FRAME_SIZE};
+    let fresh=backing.retain_range(range).ok_or(MemError::OutOfMemory)?;
+    let flags=if writable { MapFlags::USER.union(MapFlags::WRITE) } else { MapFlags::USER };
+    let mut published=0u64; let mut rollback_uncertain=false;
+    let mut active=kernel_core::smp::CpuSet::EMPTY;
+    let result=kobj::with(|t| {
+        let p=receiver(t,pid).map_err(|_| MemError::NoSuchProcess)?;
+        if p.frames.len()+p.shared_maps.len()+n>MAX_PROCESS_FRAMES { return Err(MemError::Quota); }
+        p.frames.try_reserve(n).map_err(|_| MemError::OutOfMemory)?;
+        for i in 0..pages { if p.space.translate(VirtPage::containing(va+i*FRAME_SIZE)).is_some() { return Err(MemError::AlreadyMapped); } }
+        if !p.space.begin_shootdown() { return Err(MemError::Busy); }
+        active=p.space.active_cpus();
+        for page in &fresh {
+            if p.space.map_raw(VirtPage::containing(va+published*FRAME_SIZE),page.frame(),flags).is_err() {
+                for i in 0..published {
+                    if p.space.unmap_raw(VirtPage::containing(va+i*FRAME_SIZE)).is_err() { rollback_uncertain=true; }
                 }
-                fresh.push(f);
-            }
-            Err(_) => {
-                for f in fresh {
-                    let _ = frame::deallocate(f);
-                }
+                if published==0 { p.space.end_shootdown(); }
                 return Err(MemError::OutOfMemory);
             }
+            published+=1;
         }
-    }
-    let flags = if writable { MapFlags::USER.union(MapFlags::WRITE) } else { MapFlags::USER };
-    let r = kobj::with(|t| {
-        let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
-        if p.state != ProcState::Running {
-            return Err(MemError::NoSuchProcess);
-        }
-        if p.frames.len() + n > MAX_PROCESS_FRAMES {
-            return Err(MemError::Quota);
-        }
-        if p.frames.try_reserve(n).is_err() {
-            return Err(MemError::OutOfMemory);
-        }
-        for i in 0..pages {
-            if p.space.translate(VirtPage::containing(va + i * FRAME_SIZE)).is_some() {
-                return Err(MemError::AlreadyMapped);
-            }
-        }
-        if !p.space.begin_shootdown() {
+        p.frames.extend(fresh.iter().cloned());
+        p.space.end_shootdown(); Ok(())
+    });
+    if result.is_err() && published>0 {
+        if crate::smp::tlb_shootdown_on(active,va,published).is_err() || rollback_uncertain {
+            for page in fresh.iter().take(published as usize) { page.quarantine(); }
             return Err(MemError::Busy);
         }
-        for (i, f) in fresh.iter().enumerate() {
-            let page = VirtPage::containing(va + i as u64 * FRAME_SIZE);
-            if let Err(e) = p.space.map_raw(page, *f, flags) {
-                for j in 0..i {
-                    let _ = p.space.unmap_raw(VirtPage::containing(va + j as u64 * FRAME_SIZE));
+        let _=with_proc(pid,|p| {p.space.end_shootdown();Ok(())});
+    }
+    result
+}
+
+/// SHM-1 creation candidate. No user ABI is exposed until full quota/lifecycle integration.
+pub fn create_memory(pid: ObjId, pages: u64) -> Result<HandleId, ProcError> {
+    if pages == 0 || pages > MAX_PROCESS_FRAMES as u64 { return Err(ProcError::MemoryQuota); }
+    let charge = kobj::with(|t| {
+        let p=receiver(t,pid)?;
+        p.memory_account.reserve(pages,0,MAX_PROCESS_FRAMES as u64,
+            MAX_PROCESS_FRAMES as u64).ok_or(ProcError::MemoryQuota)
+    })?;
+    crate::mm::pressure::admit(sched::current_effective_qos(),pages as usize).map_err(|_| ProcError::OutOfFrames)?;
+    let backing = crate::mm::memory_object::MemoryObject::zeroed(pages,MAX_PROCESS_FRAMES as u64,charge)
+        .ok_or(ProcError::OutOfFrames)?;
+    grant_new(pid, KObject::Memory(backing), ObjectType::Memory,
+        Rights::READ.union(Rights::WRITE).union(Rights::MAP).union(Rights::DUPLICATE).union(Rights::TRANSFER))
+}
+fn is_shared_page(p: &Process, va: u64) -> bool {
+    p.shared_maps.iter().any(|m| m.va == va - va % FRAME_SIZE)
+}
+
+/// Maps retained Memory pages; failed partial publication waits for TLB acknowledgement before dropping refs.
+pub fn map_memory(pid: ObjId, h: HandleId, va: u64, offset: u64, pages: u64, writable: bool) -> Result<(), MemError> {
+    let mut retained = Vec::new();
+    let mut published = 0u64;
+    let mut rollback_uncertain = false;
+    let mut active = kernel_core::smp::CpuSet::EMPTY;
+    let result = kobj::with(|t| {
+        let need = Rights::READ.union(Rights::MAP).union(if writable { Rights::WRITE } else { Rights::NONE });
+        let id = resolve_in(t, pid, h, ObjectType::Memory, need).map_err(|e| match e {
+            ProcError::Handle(HandleError::RightsDenied) => MemError::RightsDenied,
+            ProcError::NoSuchProcess | ProcError::Exited => MemError::NoSuchProcess,
+            _ => MemError::InvalidHandle,
+        })?;
+        let (_, have) = handle_in(t, pid, h).map_err(|_| MemError::InvalidRange)?;
+        let Ok(KObject::Memory(memory)) = t.get(id) else { return Err(MemError::InvalidRange) };
+        let range = kernel_core::memory_object::MapRange::checked(memory.page_count(),offset,pages,va,
+            arch::USER_WINDOW,MAX_MAP_PAGES,have,writable).map_err(|_| MemError::InvalidRange)?;
+        retained = memory.retain_range(range).ok_or(MemError::OutOfMemory)?;
+        let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
+        if p.frames.len().checked_add(p.shared_maps.len()).and_then(|n| n.checked_add(retained.len()))
+            .filter(|&n| n <= MAX_PROCESS_FRAMES).is_none() { return Err(MemError::Quota); }
+        p.shared_maps.try_reserve(retained.len()).map_err(|_| MemError::OutOfMemory)?;
+        for i in 0..pages {
+            if p.space.translate(VirtPage::containing(va+i*FRAME_SIZE)).is_some() { return Err(MemError::AlreadyMapped); }
+        }
+        if !p.space.begin_shootdown() { return Err(MemError::Busy); }
+        active = p.space.active_cpus();
+        let flags = if writable { MapFlags::USER.union(MapFlags::WRITE) } else { MapFlags::USER };
+        for page in &retained {
+            match p.space.map_raw(VirtPage::containing(va+published*FRAME_SIZE),page.frame(),flags) {
+                Ok(()) => published += 1,
+                Err(_) => {
+                    for i in 0..published { if p.space.unmap_raw(VirtPage::containing(va+i*FRAME_SIZE)).is_err() { rollback_uncertain = true; } }
+                    if published == 0 { p.space.end_shootdown(); }
+                    return Err(MemError::OutOfMemory);
                 }
-                p.space.end_shootdown();
-                return Err(match e {
-                    MapError::AlreadyMapped => MemError::AlreadyMapped,
-                    MapError::OutOfFrames => MemError::OutOfMemory,
-                    _ => MemError::InvalidRange,
-                });
             }
         }
-        p.frames.extend_from_slice(&fresh);
-        p.space.end_shootdown();
-        Ok(())
-    });
-    if r.is_err() {
-        for f in fresh {
-            let _ = frame::deallocate(f);
+        for (i,page) in retained.iter().enumerate() {
+            p.shared_maps.push(SharedMapping { va:va+i as u64*FRAME_SIZE,page:Arc::clone(page) });
         }
+        p.space.end_shootdown(); Ok(())
+    });
+    if result.is_err() && published > 0 {
+        #[cfg(feature="shm1-verify")]
+        crate::shm_demo::record_mapping_rollback(published);
+        if crate::smp::tlb_shootdown_on(active,va,published).is_err() || rollback_uncertain {
+            for page in retained.iter().take(published as usize) { page.quarantine(); }
+            return Err(MemError::Busy);
+        }
+        let _ = with_proc(pid, |p| { p.space.end_shootdown(); Ok(()) });
     }
-    r
+    result
+}
+
+/// Revokes only complete SHM page ranges. References survive until all active CPUs acknowledge.
+pub fn unmap_memory(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
+    checked_range(va,pages)?;
+    let active = kobj::with(|t| {
+        let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
+        if p.state != ProcState::Running { return Err(MemError::NoSuchProcess); }
+        for i in 0..pages {
+            let addr=va+i*FRAME_SIZE;
+            if !is_shared_page(p,addr) || p.space.translate(VirtPage::containing(addr)).is_none() { return Err(MemError::NotMapped); }
+        }
+        if !p.space.begin_shootdown() { return Err(MemError::Busy); }
+        for i in 0..pages {
+            // Prevalidated under the same object transaction; failure leaves refs and busy state intact.
+            if p.space.unmap_raw(VirtPage::containing(va+i*FRAME_SIZE)).is_err() {
+                for m in &p.shared_maps { if m.va >= va && m.va < va+pages*FRAME_SIZE { m.page.quarantine(); } }
+                return Err(MemError::Busy);
+            }
+        }
+        Ok(p.space.active_cpus())
+    })?;
+    #[cfg(feature="shm1-verify")]
+    crate::shm_demo::record_revoke_targets(active);
+    let confirmed=crate::smp::tlb_shootdown_on(active,va,pages).is_ok();
+    kobj::with(|t| {
+        let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
+        let end=va+pages*FRAME_SIZE;
+        if !confirmed {
+            for m in &p.shared_maps { if m.va>=va && m.va<end { m.page.quarantine(); } }
+            return Err(MemError::Busy);
+        }
+        p.shared_maps.retain(|m| m.va<va || m.va>=end);
+        p.space.end_shootdown(); Ok(())
+    })
 }
 
 /// 在进程 `pid` 的 `[va, va + size)` 建立设备 BAR 映射（`phys` 为 BAR 物理基址）。
@@ -614,7 +710,7 @@ pub fn unmap_range(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
     let active = kobj::with(|t| {
         let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
         for i in 0..pages {
-            if is_device_page(p, va + i * FRAME_SIZE) {
+            if is_device_page(p, va + i * FRAME_SIZE) || is_shared_page(p, va + i * FRAME_SIZE) {
                 return Err(MemError::InvalidRange);
             }
             if p.space.translate(VirtPage::containing(va + i * FRAME_SIZE)).is_none() {
@@ -646,7 +742,10 @@ pub fn unmap_range(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
         kobj::with(|t| {
             if let Ok(KObject::Process(p)) = t.get_mut(pid) {
                 gone.sort_unstable_by_key(|f| f.start());
-                p.frames.retain(|f| gone.binary_search_by_key(&f.start(), |g| g.start()).is_err());
+                for page in &p.frames {
+                    if gone.binary_search_by_key(&page.frame().start(),|g|g.start()).is_ok() { page.quarantine(); }
+                }
+                p.frames.retain(|f| gone.binary_search_by_key(&f.frame().start(), |g| g.start()).is_err());
                 p.quarantine(gone);
             }
             Ok::<(), MemError>(())
@@ -656,13 +755,11 @@ pub fn unmap_range(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
     kobj::with(|t| {
         let Ok(KObject::Process(p)) = t.get_mut(pid) else { return Err(MemError::NoSuchProcess) };
         gone.sort_unstable_by_key(|f| f.start());
-        p.frames.retain(|f| gone.binary_search_by_key(&f.start(), |g| g.start()).is_err());
+        for f in &gone { crate::mm::pin::mapping_released(*f); }
+        p.frames.retain(|f| gone.binary_search_by_key(&f.frame().start(), |g| g.start()).is_err());
         p.space.end_shootdown();
         Ok(())
     })?;
-    for f in gone {
-        crate::mm::pin::release(f);
-    }
     Ok(())
 }
 
@@ -693,7 +790,7 @@ pub fn protect_range(pid: ObjId, va: u64, pages: u64, writable: bool, executable
             return Err(MemError::NoSuchProcess);
         }
         for i in 0..pages {
-            if is_device_page(p, va + i * FRAME_SIZE) {
+            if is_device_page(p, va + i * FRAME_SIZE) || is_shared_page(p, va + i * FRAME_SIZE) {
                 return Err(MemError::InvalidRange);
             }
             match p.space.translate(VirtPage::containing(va + i * FRAME_SIZE)) {
@@ -722,7 +819,10 @@ pub fn protect_range(pid: ObjId, va: u64, pages: u64, writable: bool, executable
         kobj::with(|t| {
             if let Ok(KObject::Process(p)) = t.get_mut(pid) {
                 touched.sort_unstable_by_key(|f| f.start());
-                p.frames.retain(|f| touched.binary_search_by_key(&f.start(), |g| g.start()).is_err());
+                for page in &p.frames {
+                    if touched.binary_search_by_key(&page.frame().start(),|g|g.start()).is_ok() { page.quarantine(); }
+                }
+                p.frames.retain(|f| touched.binary_search_by_key(&f.frame().start(), |g| g.start()).is_err());
                 p.quarantine(touched);
             }
             Ok::<(), MemError>(())
@@ -744,6 +844,11 @@ pub fn page_flags(pid: ObjId, va: u64) -> Option<MapFlags> {
 /// 进程当前拥有的数据帧数（诊断与验收用）。
 pub fn frame_count(pid: ObjId) -> Option<usize> {
     with_proc(pid, |p| Ok(p.frames.len())).ok()
+}
+
+/// (Allocated backing pages, fixed-page references); account may outlive its creator.
+pub fn memory_quota(pid: ObjId) -> Option<kernel_core::memory_object::Usage> {
+    with_proc(pid, |p| Ok(p.memory_account.snapshot())).ok()
 }
 
 /// 进程当前持有的设备 BAR 映射数（诊断与验收用；进程已退出时应为 0）。
@@ -768,6 +873,7 @@ pub(crate) fn pin_user_in(
         _ => return Err(ProcError::NoSuchProcess),
     };
     let mut segs = Vec::new();
+    let mut page_refs = Vec::new();
     if len > 0 {
         let end = va.checked_add(len as u64).ok_or(bad)?;
         if !in_private_window(va) || !in_private_window(end - 1) {
@@ -781,11 +887,22 @@ pub(crate) fn pin_user_in(
             if !flags.contains(MapFlags::USER) || (write && !flags.contains(MapFlags::WRITE)) {
                 return Err(bad);
             }
+            segs.try_reserve(1).map_err(|_| ProcError::OutOfFrames)?;
+            let backing=if let Some(mapping)=p.shared_maps.iter().find(|m|m.va==cur-off) {
+                Some(Arc::clone(&mapping.page))
+            } else if let Some(page)=p.frames.iter().find(|page|page.frame()==f) {
+                Some(Arc::clone(page))
+            } else if is_device_page(p,cur-off) { None }
+            else { return Err(bad); };
+            page_refs.try_reserve(1).map_err(|_|ProcError::OutOfFrames)?;
+            page_refs.push(backing);
             segs.push((f, off as u32, n as u32));
             cur += n;
         }
     }
-    Ok(crate::mm::pin::PinnedRange::new(segs))
+    let charge = p.memory_account.reserve(0,segs.len() as u64,MAX_PROCESS_FRAMES as u64,
+        MAX_PROCESS_FRAMES as u64).ok_or(ProcError::MemoryQuota)?;
+    crate::mm::pin::PinnedRange::new(segs, page_refs, charge).ok_or(ProcError::OutOfFrames)
 }
 
 /// 向进程内存写入字节（经页表查询 + 物理映射；目标必须已映射）。用于装载代码与初始数据。
@@ -1088,7 +1205,10 @@ pub fn put_task_handle(task_obj: ObjId, rights: Rights) -> Result<HandleId, Proc
 /// 把一个已存在的对象发放给进程：增加一份外部所有权并放进其句柄表（全有或全无）。
 /// 接收进程已退出 ⇒ [`ProcError::Exited`]，对象引用计数不变。
 pub fn grant(pid: ObjId, obj: ObjId, ty: ObjectType, rights: Rights) -> Result<HandleId, ProcError> {
-    kobj::with(|t| {
+    kobj::with(|t|grant_in(t,pid,obj,ty,rights))
+}
+pub(crate) fn grant_in(t:&mut kobj::Table,pid:ObjId,obj:ObjId,ty:ObjectType,rights:Rights)->Result<HandleId,ProcError> {
+
         let room = receiver(t, pid)?.handles.free_slots();
         if room == 0 {
             return Err(ProcError::Handle(HandleError::TableFull));
@@ -1101,7 +1221,7 @@ pub fn grant(pid: ObjId, obj: ObjId, ty: ObjectType, rights: Rights) -> Result<H
             let _ = kobj::release_owner_in(t, obj);
         }
         r
-    })
+
 }
 
 /// 新建一个对象并直接发放给进程（对象的唯一外部所有权就是这个句柄）。
@@ -1384,6 +1504,12 @@ fn begin_exit_in_table(pid: ObjId, code: i64) -> bool {
     })
 }
 
+/// Author: chatgpt。对象锁内等待登记的进程门槛，与begin_exit状态迁移串行。
+/// 无效或非Running进程均拒绝新阻塞，不向其他模块暴露Process内部字段。
+pub(crate) fn running_in(t: &kobj::Table, pid: ObjId) -> bool {
+    matches!(t.get(pid), Ok(KObject::Process(p)) if p.state == ProcState::Running)
+}
+
 /// 当前线程所属进程是否处于 exiting（调度点据此停止该线程）。
 pub fn current_exiting() -> bool {
     let Some(pid) = current_process() else { return false };
@@ -1471,6 +1597,11 @@ pub(crate) fn acquire_exit_state_in(t: &mut kobj::Table, pid: ObjId, h: HandleId
 /// 关闭当前进程中的一个句柄：移出句柄表并释放它持有的那份外部所有权（INV-01：不等于销毁对象）。
 pub fn close_handle(h: HandleId) -> Result<(), ProcError> {
     let pid = current_process().ok_or(ProcError::NoSuchProcess)?;
+    close_handle_for(pid,h)
+}
+
+/// Internal caller supplies an already trusted Process identity; public syscall uses current_process.
+pub(crate) fn close_handle_for(pid:ObjId,h:HandleId)->Result<(),ProcError> {
     kobj::with(|t| {
         let obj = match t.get_mut(pid) {
             // 先移出句柄：同一句柄的映射只在这一次关闭时撤销；重复关闭在 remove 处被拒，
@@ -1592,7 +1723,7 @@ pub fn reap(id: ObjId) -> Option<ExitInfo> {
 /// 正常路径上句柄表在 exited 时已被关闭；这里**不依赖该假设**：仍有残余句柄则逐个释放其外部所有权，
 /// 并输出诊断标记（出现即说明某条路径漏了检查）。
 pub fn destroy(p: Box<Process>) {
-    let Process { mut space, frames, quarantined, device_maps, threads, mut handles, name, exit_state, children, cpu_group, .. } = *p;
+    let Process { mut space, frames, shared_maps, quarantined, device_maps, threads, mut handles, name, exit_state, children, cpu_group, .. } = *p;
     if let Some(g) = cpu_group {
         let _ = sched::release_cpu_group(g); // 持有者引用；线程早已全部退出，组随之释放
     }
@@ -1612,9 +1743,9 @@ pub fn destroy(p: Box<Process>) {
     }
     drop(handles);
     drop(space); // 先销毁地址空间（回收私有页表帧），再归还数据帧
-    for f in frames {
-        crate::mm::pin::release(f); // 仍被在飞请求固定的帧延后到最后一次解除固定时归还
-    }
+    drop(shared_maps); // Process has no active threads; shared page refs outlive its page tables.
+    for page in &frames { crate::mm::pin::mapping_released(page.frame()); }
+    drop(frames); // RAM allocation ownership is in Page; outstanding pins retain Page refs.
     if !quarantined.is_empty() {
         // 这些帧的击落从未确认；即使页表已随地址空间销毁，也绝不放回分配器。
         kprintln!("[JSR-LIFE] warning quarantined_frames={} process={}", quarantined.len(), name);
@@ -1627,4 +1758,13 @@ pub fn destroy(p: Box<Process>) {
         let _ = kobj::release_internal(c); // 防御：子进程表正常应已在退出时释放
     }
     let _ = kobj::release_internal(exit_state); // 进程 → 退出状态（在飞 wait 仍可持有它）
+}
+
+/// Dedicated subscription-count/queue-slot admission. Does not share memory quota.
+pub(crate) fn subscription_charge_in(t:&mut kobj::Table,pid:ObjId,slots:u64)->Option<crate::mm::memory_quota::Charge> {
+ receiver(t,pid).ok()?.subscription_account.reserve(1,slots,crate::subscription::PROCESS_SUBSCRIPTIONS,crate::subscription::PROCESS_QUEUE_SLOTS)
+}
+
+pub(crate) fn subscription_quota(pid:ObjId)->Option<kernel_core::memory_object::Usage> {
+ kobj::with(|t|match t.get(pid) {Ok(KObject::Process(p))=>Some(p.subscription_account.snapshot()),_=>None})
 }

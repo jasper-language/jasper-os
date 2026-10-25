@@ -79,6 +79,8 @@ pub mod job;
 pub mod l10n;
 pub mod lockorder;
 pub mod memory;
+pub mod memory_object;
+pub mod memory_abi;
 pub mod meta;
 pub mod msi;
 pub mod profile;
@@ -117,3 +119,13 @@ pub mod raw_timing;
 pub mod publication_credit;
 
 pub mod pi_work;
+pub mod sync_origin;
+pub mod event_wait;
+
+pub mod extension_abi;
+
+pub mod cpu_time;
+
+pub mod subscription;
+
+pub mod subscription_abi;

@@ -28,3 +28,7 @@ pub fn phys_to_virt(phys: u64) -> Option<*mut u8> {
     let offset = boot::get()?.phys_offset?;
     Some(offset.checked_add(phys)? as *mut u8)
 }
+
+pub mod memory_object;
+
+pub mod memory_quota;

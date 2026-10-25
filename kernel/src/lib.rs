@@ -20,6 +20,7 @@
 //!
 //! Core（除 `arch/` 外的一切）不得出现 ISA 专有代码，由 `verify-m1.4b.sh` 机械检查。
 #![no_std]
+#![feature(allocator_ext)]
 #![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
 
 extern crate alloc;
@@ -112,3 +113,17 @@ pub mod s2;
 
 #[cfg(all(feature = "krn1-soak", target_arch = "x86_64"))]
 pub mod soak;
+
+#[cfg(feature = "evt1-verify")]
+pub mod evt1_demo;
+
+#[cfg(feature = "shm1-verify")]
+pub mod shm_demo;
+
+pub mod subscription;
+
+#[cfg(feature="evt2-verify")]
+pub mod subscription_demo;
+
+#[cfg(feature="evt2-broadcast-verify")]
+pub mod subscription_broadcast_demo;

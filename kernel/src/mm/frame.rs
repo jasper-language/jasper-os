@@ -64,7 +64,9 @@ fn stats(regions: usize) -> FrameStats {
 pub fn allocate() -> Result<PhysFrame, FrameError> {
     #[cfg(feature = "fault-inject")]
     if crate::fault_inject::FRAME.hit() { return Err(FrameError::OutOfFrames); }
-    ALLOCATOR.get().ok_or(FrameError::OutOfFrames)?.lock().allocate()
+    let result=ALLOCATOR.get().ok_or(FrameError::OutOfFrames)?.lock().allocate();
+    if result.is_ok() {crate::mm::pressure::note_frame_change();}
+    result
 }
 
 /// 分配一个起始地址低于 `limit` 的物理页帧（硬件只能寻址低端内存时使用）；没有则失败且不改动。
@@ -72,7 +74,9 @@ pub fn allocate() -> Result<PhysFrame, FrameError> {
 pub fn allocate_below(limit: u64) -> Result<PhysFrame, FrameError> {
     #[cfg(feature = "fault-inject")]
     if crate::fault_inject::FRAME.hit() { return Err(FrameError::OutOfFrames); }
-    ALLOCATOR.get().ok_or(FrameError::OutOfFrames)?.lock().allocate_below(limit)
+    let result=ALLOCATOR.get().ok_or(FrameError::OutOfFrames)?.lock().allocate_below(limit);
+    if result.is_ok() {crate::mm::pressure::note_frame_change();}
+    result
 }
 
 /// 分配 `count` 个物理相邻的空闲页帧并返回首帧；失败时分配器状态不变。
@@ -80,18 +84,24 @@ pub fn allocate_below(limit: u64) -> Result<PhysFrame, FrameError> {
 pub fn allocate_contiguous(count: usize) -> Result<PhysFrame, FrameError> {
     #[cfg(feature = "fault-inject")]
     if crate::fault_inject::FRAME.hit() { return Err(FrameError::OutOfFrames); }
-    ALLOCATOR.get().ok_or(FrameError::OutOfFrames)?.lock().allocate_contiguous(count)
+    let result=ALLOCATOR.get().ok_or(FrameError::OutOfFrames)?.lock().allocate_contiguous(count);
+    if result.is_ok() {crate::mm::pressure::note_frame_change();}
+    result
 }
 
 /// 归还一段物理相邻的页帧；整段校验失败时不做任何改动。
 /// Release a contiguous run of frames.
 pub fn deallocate_contiguous(first: PhysFrame, count: usize) -> Result<(), FrameError> {
-    ALLOCATOR.get().ok_or(FrameError::NotUsable)?.lock().deallocate_contiguous(first, count)
+    let result=ALLOCATOR.get().ok_or(FrameError::NotUsable)?.lock().deallocate_contiguous(first, count);
+    if result.is_ok() {crate::mm::pressure::note_frame_change();}
+    result
 }
 
 /// 释放一个物理页帧。
 pub fn deallocate(frame: PhysFrame) -> Result<(), FrameError> {
-    ALLOCATOR.get().ok_or(FrameError::NotUsable)?.lock().deallocate(frame)
+    let result=ALLOCATOR.get().ok_or(FrameError::NotUsable)?.lock().deallocate(frame);
+    if result.is_ok() {crate::mm::pressure::note_frame_change();}
+    result
 }
 
 /// 当前空闲帧数。

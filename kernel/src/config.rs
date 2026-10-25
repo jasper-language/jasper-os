@@ -13,11 +13,20 @@ use kernel_core::config::KernelConfig;
 use crate::{kprint, kprintln};
 
 /// 本次构建生效的配置档。
-#[cfg(not(feature = "profile-compact"))]
+#[cfg(all(not(feature = "profile-compact"), not(feature = "evt1-verify")))]
 pub const ACTIVE: KernelConfig = KernelConfig::STANDARD;
 /// 本次构建生效的配置档。
-#[cfg(feature = "profile-compact")]
+#[cfg(all(feature = "profile-compact", not(feature = "evt1-verify")))]
 pub const ACTIVE: KernelConfig = KernelConfig::COMPACT;
+
+/// Author: chatgpt。独立EVT机制验证容量：1000等待者、控制器和引导槽；默认档不变。
+#[cfg(feature = "evt1-verify")]
+pub const ACTIVE: KernelConfig = {
+    let mut c = KernelConfig::STANDARD;
+    c.sched.max_tasks = 1024;
+    c.memory.heap_max = 128 * 1024 * 1024;
+    c
+};
 
 const _: () = assert!(ACTIVE.validate().is_ok(), "所选配置档未通过参数校验");
 

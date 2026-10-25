@@ -81,8 +81,19 @@ pub fn run() {
 /// 用户态端到端：装载并运行 `user/ring`。
 fn user_program() {
     let allowed = SyscallSet::of(&[
+        abi::SYSTEM_MEMORY_BUFFER_CREATE,
+        abi::SYSTEM_MEMORY_BUFFER_DESTROY,
+        abi::SYSTEM_EXECUTION_RESTRICTED_CREATE,
+        abi::SYSTEM_TASK_INTERRUPT_SEND,
+        abi::SYSTEM_MEMORY_DMA_MAP,
+        abi::SYSTEM_IO_SEGMENT_SUBMIT,
+        abi::SYSTEM_TASK_SYSCALLS_SET,
+        abi::SYSTEM_MEMORY_OBJECT_CREATE,
+        abi::SYSTEM_MEMORY_OBJECT_MAP,
+        abi::SYSTEM_MEMORY_OBJECT_UNMAP,
         abi::SYSTEM_ASYNC_RING_CREATE,
         abi::SYSTEM_ASYNC_RING_ENTER,
+        abi::SYSTEM_ASYNC_RING_DEADLINE_ENTER,
         abi::SYSTEM_ASYNC_CANCEL,
         abi::SYSTEM_TIME_NOW,
         abi::SYSTEM_TIME_WAIT,

@@ -30,6 +30,8 @@ pub enum TaskState {
 /// `entry` 是任务入口（槽位 0 的引导线程没有入口），`space` 是任务运行时应处于的地址空间
 /// （`None` = 内核地址空间；调度器在切换任务时据此切换地址空间）。
 pub struct Task {
+    /// Author: chatgpt。事件等待轮次由原调度器锁串行化；任何唤醒均消费旧登记。
+    pub event_wait: kernel_core::event_wait::Registration,
     // Author: chatgpt. Diagnostic only, serialized by the scheduler lock.
     #[cfg(feature = "krn2-observe")]
     pub raw_wake: kernel_core::raw_timing::WakePair,
@@ -94,6 +96,7 @@ impl Task {
     /// 新任务：可运行、默认档位「用户发起」、没有 QoS 上限、亲和集合只含引导处理器（创建方可放宽）。
     pub const fn new(id: TaskId, name: &'static str) -> Self {
         Task {
+            event_wait: kernel_core::event_wait::Registration::new(),
             #[cfg(feature = "krn2-observe")]
             raw_wake: kernel_core::raw_timing::WakePair::new(),
             #[cfg(feature = "krn2-observe")]

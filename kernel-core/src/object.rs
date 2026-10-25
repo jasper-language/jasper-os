@@ -47,10 +47,11 @@ impl Rights {
     /// 全部已定义的权限。
     ///
     /// ABI 说明：各位的数值一经发布永不改变，新权限只能占用新的位。
-    pub const ALL: Rights = Rights(0b1111_1111);
+    pub const SUBSCRIBE: Rights = Rights(1 << 8);
+    pub const ALL: Rights = Rights(0b1_1111_1111);
 
     /// 位名表（按位序），用于格式化输出。
-    const NAMES: [(Rights, &'static str); 8] = [
+    const NAMES: [(Rights, &'static str); 9] = [
         (Rights::READ, "READ"),
         (Rights::WRITE, "WRITE"),
         (Rights::EXECUTE, "EXECUTE"),
@@ -59,6 +60,7 @@ impl Rights {
         (Rights::DUPLICATE, "DUPLICATE"),
         (Rights::TRANSFER, "TRANSFER"),
         (Rights::MAP, "MAP"),
+        (Rights::SUBSCRIBE, "SUBSCRIBE"),
     ];
 
     /// 由原始位构造；未定义的位被丢弃（不允许凭空造出未知权限）。
@@ -217,6 +219,10 @@ pub enum ObjectType {
     /// v1 不可经消息转移：绑定归属创建它的进程，关闭即解绑。
     /// Device interrupt: one MSI-X entry bound to a processor vector; not transferable in v1.
     Interrupt,
+    /// Shared RAM backing, a transferable leaf with no handle ownership edges.
+    Memory,
+    EventSource,
+    Subscription,
 }
 
 impl ObjectType {
@@ -224,14 +230,10 @@ impl ObjectType {
     /// 也不强引用非叶子对象——可以传递。Channel 端点、Ring、Process、AddressSpace 在 v1 不可传递
     /// （阶段性限制，放宽前须证明仍保持强引用图无环）。
     ///
-    /// **范围说明**：设计约束中的叶子对象还包括「共享内存（Memory）对象」，但该对象类型**尚未实现**
-    /// （本枚举里没有它）。[`ObjectType::AddressSpace`] 是整套地址翻译、属于进程内部的非叶子资源，
-    /// **不是**共享内存对象，因此不可传递，也不得用它代替共享内存。共享内存对象实现时会作为新的
-    /// 叶子类型加入本函数，不改变其余类型的判定。
-    /// Whether v1 IPC may transfer this type (leaf objects only). The shared-memory leaf object is not
-    /// implemented yet; `AddressSpace` is not a substitute for it and stays non-transferable.
+    /// Memory是页存储叶子，无句柄/非叶对象强引用；AddressSpace仍是进程内部资源，不能传递。
+    /// Memory is a transferable page-storage leaf; AddressSpace remains non-transferable.
     pub const fn is_transferable_v1(self) -> bool {
-        matches!(self, ObjectType::Event | ObjectType::Timer | ObjectType::Task | ObjectType::Device)
+        matches!(self, ObjectType::Event | ObjectType::Timer | ObjectType::Task | ObjectType::Device | ObjectType::Memory)
     }
 
     /// 类型名（输出与元数据用）。
@@ -241,6 +243,9 @@ impl ObjectType {
             ObjectType::Timer => "Timer",
             ObjectType::Ring => "Ring",
             ObjectType::AddressSpace => "AddressSpace",
+            ObjectType::Memory => "Memory",
+            ObjectType::EventSource => "EventSource",
+            ObjectType::Subscription => "Subscription",
             ObjectType::Channel => "Channel",
             ObjectType::Task => "Task",
             ObjectType::Process => "Process",
@@ -590,7 +595,7 @@ mod tests {
     fn rights_display() {
         assert_eq!(format!("{}", Rights::WAIT.union(Rights::CONTROL)), "WAIT|CONTROL");
         assert_eq!(format!("{}", Rights::NONE), "NONE");
-        assert_eq!(format!("{}", Rights::ALL), "READ|WRITE|EXECUTE|WAIT|CONTROL|DUPLICATE|TRANSFER|MAP", "M4.0 v0.6 的 DUPLICATE / TRANSFER 与 DRV-1C 的 MAP");
+        assert_eq!(format!("{}", Rights::ALL), "READ|WRITE|EXECUTE|WAIT|CONTROL|DUPLICATE|TRANSFER|MAP|SUBSCRIBE", "M4.0 v0.6 的 DUPLICATE / TRANSFER 与 DRV-1C 的 MAP");
     }
 
     #[test]

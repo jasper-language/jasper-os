@@ -219,7 +219,11 @@ pub mod bounds {
     pub const MIN_TASKS: usize = 8;
     /// 任务槽位上限：已在 256 槽位下跑通全部验收；调度机制仍按槽位线性扫描（HARDEN-1D 处理），
     /// 更大的规模未经验证。
+    #[cfg(not(feature = "evt1-capacity"))]
     pub const MAX_TASKS: usize = 256;
+    /// Author: chatgpt。仅EVT独立容量验收构建允许1024槽，默认上界仍256。
+    #[cfg(feature = "evt1-capacity")]
+    pub const MAX_TASKS: usize = 1024;
     /// 内核对象表容量下限：引导期演练与基础服务需要的对象数。
     pub const MIN_OBJECTS: usize = 64;
     /// 内核对象表容量上限：已在该规模下验证；对象插入目前线性找空槽（HARDEN-1D 处理）。

@@ -305,3 +305,58 @@ mod tests {
         assert_eq!(&b[off + 12..off + 16], &0x5157u32.to_le_bytes());
     }
 }
+
+/// Author: chatgpt。显式绝对tick截止时刻的独立参数块候选，不改变旧EnterArgs布局。
+/// 未来由独立入口使用；version=1、bytes=72，拒绝未知版本/长度与旧保留位。
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnterUntilArgs {
+    pub version: u32,
+    pub bytes: u32,
+    /// 与system.time.now相同的绝对调度tick，u64::MAX也是有限绝对值，不作魔法无限值。
+    pub deadline: u64,
+    pub enter: EnterArgs,
+}
+/// 新描述符固定字节数；旧ENTER_ARGS_SIZE仍为56。
+pub const ENTER_UNTIL_SIZE: usize = 72;
+const _: () = assert!(core::mem::size_of::<EnterUntilArgs>() == ENTER_UNTIL_SIZE);
+impl EnterUntilArgs {
+    /// 显式校验输入版本与长度；此阶段只定义契约，尚未注册syscall入口。
+    pub fn decode_checked(b: &[u8; ENTER_UNTIL_SIZE]) -> Option<Self> {
+        let mut legacy = [0u8; ENTER_ARGS_SIZE];
+        legacy.copy_from_slice(&b[16..]);
+        let value = Self { version: u32_at(b,0), bytes: u32_at(b,4), deadline: u64_at(b,8), enter: EnterArgs::decode(&legacy) };
+        (value.version == 1 && value.bytes == ENTER_UNTIL_SIZE as u32 && value.enter.reserved == 0).then_some(value)
+    }
+    /// 按小端明确编码，输出前缀/旧enter字段分别定位，不使用Rust指针转型。
+    pub fn encode(&self) -> [u8; ENTER_UNTIL_SIZE] {
+        let mut b = [0; ENTER_UNTIL_SIZE];
+        b[0..4].copy_from_slice(&self.version.to_le_bytes());
+        b[4..8].copy_from_slice(&self.bytes.to_le_bytes());
+        b[8..16].copy_from_slice(&self.deadline.to_le_bytes());
+        b[16..].copy_from_slice(&self.enter.encode()); b
+    }
+}
+#[cfg(test)]
+mod until_contract {
+    use super::*;
+    #[test]
+    fn separate_versioned_descriptor_preserves_legacy_layout() {
+        let e = EnterArgs { wait_min: 2, first_error: -4109, ..EnterArgs::default() };
+        for deadline in [0,1,u32::MAX as u64,u64::MAX] {
+            let v = EnterUntilArgs { version:1, bytes:72, deadline, enter:e };
+            let raw = v.encode();
+            assert_eq!(EnterUntilArgs::decode_checked(&raw),Some(v));
+            assert_eq!(&raw[16..], &e.encode());
+            assert_eq!(ENTER_ARGS_SIZE,56);
+        }
+    }
+    #[test]
+    fn unknown_until_descriptor_refuses_without_legacy_reinterpretation() {
+        let v = EnterUntilArgs { version:1, bytes:72, deadline:0, enter:EnterArgs::default() };
+        for offset in [0,4,16+36] {
+            let mut raw = v.encode(); raw[offset] ^= 1;
+            assert!(EnterUntilArgs::decode_checked(&raw).is_none());
+        }
+    }
+}

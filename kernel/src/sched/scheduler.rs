@@ -362,6 +362,10 @@ pub const WATCHDOG_LOG: usize = crate::config::ACTIVE.sched.watchdog_log;
 /// 调度机制本体。槽位总数（含引导线程）在启动期决定，见 [`Scheduler::grow`]。
 pub struct Scheduler<P: SchedPolicy> {
     #[cfg(feature = "krn2-observe")]
+    pub(super) origin_total: kernel_core::sync_origin::Counts,
+    #[cfg(feature = "krn2-observe")]
+    pub(super) origin_window: kernel_core::sync_origin::Counts,
+    #[cfg(feature = "krn2-observe")]
     pub(super) pi_total: kernel_core::pi_work::PiWork,
     #[cfg(feature = "krn2-observe")]
     pub(super) pi_window: kernel_core::pi_work::PiWork,
@@ -384,6 +388,8 @@ pub struct Scheduler<P: SchedPolicy> {
     remote_wakes: u32,
     wake_fallbacks: u32,
     limit_tick_drains: [u32; 2],
+    // Bounded diagnostic observer; never grants or changes CPU limit.
+    limit_window: Option<(CpuGroupId, u64, u64, u64, Option<(u64,u64)>)>,
     /// 每个处理器的运行队列（各持一份策略实例；成员关系与入队计数由它维护）。
     queues: [CoreQueue<P>; MAX_CPUS],
     /// 每个运行队列的成员链表（表头与长度；链接在 `links` 里，与任务表同容量）。
@@ -422,6 +428,8 @@ pub struct Scheduler<P: SchedPolicy> {
     kicks: CpuSet,
     /// 每个处理器的调度统计。
     cpu_stats: [CpuStats; MAX_CPUS],
+    // Separate reference-clock residency; legacy local IRQ statistics stay unchanged.
+    cpu_residency: [kernel_core::cpu_time::Ledger; MAX_CPUS],
     deadline_wakes: [u32; MAX_CPUS],
     deadline_refills: [u32; MAX_CPUS],
     #[cfg(feature = "fault-inject")]
@@ -471,6 +479,12 @@ pub struct Scheduler<P: SchedPolicy> {
     nohz_divisor: u32,
     /// 计时处理器为停表处理器发出的重新调度请求次数（停表期间出现可接的工作）。
     nohz_kicks: u64,
+    #[cfg(feature="s3-nohz-verify")]
+    nohz_diag_start: u64,
+    #[cfg(feature="s3-nohz-verify")]
+    nohz_diag_local: [u64; MAX_CPUS],
+    #[cfg(feature="s3-nohz-verify")]
+    nohz_diag_missed: [u64; MAX_CPUS],
 }
 
 /// 空闲执行流下一步该做什么（[`Scheduler::idle_enter`] 的结果）。
@@ -517,6 +531,10 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         current[0] = BOOT_SLOT;
         Scheduler {
             #[cfg(feature = "krn2-observe")]
+            origin_total: kernel_core::sync_origin::Counts::EMPTY,
+            #[cfg(feature = "krn2-observe")]
+            origin_window: kernel_core::sync_origin::Counts::EMPTY,
+            #[cfg(feature = "krn2-observe")]
             pi_total: kernel_core::pi_work::PiWork::EMPTY,
             #[cfg(feature = "krn2-observe")]
             pi_window: kernel_core::pi_work::PiWork::EMPTY,
@@ -541,6 +559,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             remote_wakes: 0,
             wake_fallbacks: 0,
             limit_tick_drains: [0; 2],
+            limit_window: None,
             next_wake: [u64::MAX; MAX_CPUS],
             wake_heap: DeadlineForest::new(),
             wake_entries: BootSlots::Inline([Deadline::EMPTY; INLINE_SLOTS * MAX_CPUS]),
@@ -567,6 +586,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             #[cfg(feature = "fault-inject")]
             deadline_trace: [DeadlineTrace::EMPTY; MAX_CPUS],
             cpu_stats: [CpuStats { busy_ticks: 0, idle_ticks: 0, idle_waiting: 0, max_idle_waiting: 0, steals: 0, pulls: 0, pull_hot: 0 }; MAX_CPUS],
+            cpu_residency: [kernel_core::cpu_time::Ledger::new(0,false); MAX_CPUS],
             local_ticks: [0; MAX_CPUS],
             switches: 0,
             observer: None,
@@ -591,6 +611,12 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             nohz: StopBoard::new(0),
             nohz_divisor: 0,
             nohz_kicks: 0,
+            #[cfg(feature="s3-nohz-verify")]
+            nohz_diag_start: 0,
+            #[cfg(feature="s3-nohz-verify")]
+            nohz_diag_local: [0; MAX_CPUS],
+            #[cfg(feature="s3-nohz-verify")]
+            nohz_diag_missed: [0; MAX_CPUS],
             arbiter_on: false,
         }
     }
@@ -992,6 +1018,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             self.remove_rt_deadline(cur, r.token().generation);
         }
         if let Some(t) = self.tasks.get_mut(cur).and_then(|t| t.as_mut()) {
+            if let Some(key) = t.event_wait.pending() { t.event_wait.finish(key); }
             if is_worker(cur) && t.state != TaskState::Exited {
                 self.workers = self.workers.checked_sub(1).expect("live worker count underflow");
             }
@@ -1194,6 +1221,36 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         }
     }
 
+    /// Author: chatgpt。对象锁内完成条件检查后调用；登记与阻塞共用原global事务。
+    /// 调用者须先预留Ring队列/保活引用，并在释放所有guard后才让出CPU。
+    /// 非工作任务、已有登记或轮次耗尽均拒绝，不覆盖已有等待。
+    pub fn enroll_event_wait(&mut self, deadline: Option<u64>) -> Result<Option<kernel_core::event_wait::Key>, ()> {
+        let cur = self.cur();
+        if !is_worker(cur) { return Err(()); }
+        let token = self.epochs.get(cur).and_then(|e| e.history()).ok_or(())?.token();
+        let now = self.now;
+        let t = self.tasks.get_mut(cur).and_then(Option::as_mut).ok_or(())?;
+        let key = match t.event_wait.enroll(token, false, now, deadline) {
+            kernel_core::event_wait::Enroll::Armed(key) => key,
+            kernel_core::event_wait::Enroll::TimedOut => return Ok(None),
+            _ => return Err(()),
+        };
+        if self.block_current(deadline) { Ok(Some(key)) } else {
+            self.tasks[cur].as_mut().unwrap().event_wait.finish(key);
+            Err(())
+        }
+    }
+
+    /// 精确校验任务代次与等待轮次后唤醒；旧通知不允许降级为TaskId唤醒。
+    /// 返回沿用make_runnable的本CPU抢占提示，远端通知仍由原事务发布。
+    pub fn wake_event_wait(&mut self, key: kernel_core::event_wait::Key) -> bool {
+        let i = key.task.slot;
+        if !self.epochs.get(i).is_some_and(|e| e.live(key.task)) { return false; }
+        let Some(t) = self.tasks.get_mut(i).and_then(Option::as_mut) else { return false; };
+        if t.state != TaskState::Blocked || !t.event_wait.finish(key) { return false; }
+        self.make_runnable(i)
+    }
+
     /// 当前任务从调度器此刻起睡 `ticks` 个 tick（截止时刻 = 调度器时刻 + `ticks`，与阻塞在同一次持锁内完成）。
     /// 返回是否已阻塞（当前不是工作任务时为 `false`，状态不变）。
     /// Block the current task until `ticks` ticks after the scheduler's current time.
@@ -1217,6 +1274,8 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             if let Some(round) = t.raw_wake.begin(token, start) { t.raw_wake_round = Some(round); }
             else { self.raw_wake_errors[0] = self.raw_wake_errors[0].saturating_add(1); }
         }
+        // Author: chatgpt。超时/退出/普通wake也使本轮事件凭据失效。
+        if let Some(key) = t.event_wait.pending() { t.event_wait.finish(key); }
         t.state = TaskState::Runnable;
         t.wake_at = None;
         t.woken_at = Some(now);
@@ -1554,6 +1613,9 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     pub fn cpu_online(&mut self, c: usize) {
         assert_eq!(c, this_cpu(), "a CPU must register itself while its leaf is held");
         if c < MAX_CPUS {
+            if !self.online.contains(c) {
+                self.cpu_residency[c]=kernel_core::cpu_time::Ledger::new(self.now,is_worker(self.current[c]));
+            }
             self.online.insert(c);
         }
     }
@@ -1609,9 +1671,23 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         self.cpu_stats.get(c).copied().unwrap_or_default()
     }
 
+    /// Current busy/idle residency in the scheduler reference clock, including the open interval.
+    pub fn cpu_residency(&self,c:usize)->kernel_core::cpu_time::Totals {
+        self.cpu_residency[c].snapshot(self.now).expect("monotonic CPU residency snapshot")
+    }
+
     /// 清零全部处理器的调度统计（每个测量场景开始前调用）。
     pub fn reset_cpu_stats(&mut self) {
         self.cpu_stats = [CpuStats::default(); MAX_CPUS];
+        for ledger in &mut self.cpu_residency { ledger.reset(self.now).expect("monotonic CPU residency reset"); }
+        #[cfg(feature="s3-nohz-verify")]
+        { self.nohz_diag_start=self.now;self.nohz_diag_local=self.local_ticks;self.nohz_diag_missed=[0;MAX_CPUS]; }
+    }
+
+    #[cfg(feature="s3-nohz-verify")]
+    pub fn nohz_accounting(&self,c:usize)->(u64,u64,u64,u64,bool) {
+        let stats=self.cpu_stats[c];
+        (self.now-self.nohz_diag_start,self.local_ticks[c]-self.nohz_diag_local[c],self.nohz_diag_missed[c],stats.busy_ticks+stats.idle_ticks,self.nohz.stopped().contains(c))
     }
 
     // Author: chatgpt. Per-owner roots; no task-table scan or remote drain.
@@ -1681,6 +1757,12 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 返回需要切换时的原因（[`Cause`] 中的名字）；`preemption = false` 时只记账与唤醒、从不要求切换
     /// （被唤醒的任务等当前任务主动让出）。
     pub fn tick(&mut self, now: u64, preemption: bool) -> Option<&'static str> {
+        if let Some((group,_,deadline,_,None))=self.limit_window {
+            if now>=deadline {
+                let used=self.group_stats(group).expect("watched group live").used_ticks;
+                self.limit_window.as_mut().unwrap().4=Some((now,used));
+            }
+        }
         self.now = now;
         let c = this_cpu();
         let cur = self.current[c];
@@ -1826,6 +1908,8 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         match self.nohz.restart(c, self.now, self.local_ticks[c]) {
             Some(missed) => {
                 self.cpu_stats[c].idle_ticks += missed;
+                #[cfg(feature="s3-nohz-verify")]
+                { self.nohz_diag_missed[c]=self.nohz_diag_missed[c].checked_add(missed).expect("nohz diagnostic overflow"); }
                 true
             }
             None => false,
@@ -2084,6 +2168,8 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
                 cause,
             });
         }
+        // Charge the old execution class before publishing the new current slot.
+        self.cpu_residency[c].transition(now,is_worker(next)).expect("monotonic CPU switch residency");
         self.current[c] = next;
         self.switching_from[c] = Some(prev);
 
@@ -2206,6 +2292,22 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     }
 
     /// 组的记账快照。
+    /// Arm at a serialized accounting boundary, before any measured workers spawn.
+    pub fn limit_window_arm(&mut self,g:CpuGroupId,window:u64)->u64 {
+        assert!(self.limit_window.is_none(), "one limit observer at a time");
+        let used=self.group_stats(g).expect("arm live group").used_ticks;
+        let start=self.now;
+        let deadline=start.checked_add(window).expect("limit window overflow");
+        self.limit_window=Some((g,start,deadline,used,None)); deadline
+    }
+    /// Snapshot and clear under the same scheduler transaction (after pending drain).
+    /// Returns start,deadline,cutoff,start usage,cutoff usage,end,total usage.
+    pub fn limit_window_finish(&mut self)->Option<(u64,u64,u64,u64,u64,u64,u64)> {
+        let (g,start,deadline,used_start,cutoff)=self.limit_window.take()?;
+        let (at,used)=cutoff?;
+        let total=self.group_stats(g)?.used_ticks;
+        Some((start,deadline,at,used_start,used,self.now,total))
+    }
     pub fn group_stats(&self, g: CpuGroupId) -> Option<CpuLimitStats> {
         let slot = self.group_slot(g)?;
         self.groups[slot].as_ref().map(|grp| grp.limit.stats())

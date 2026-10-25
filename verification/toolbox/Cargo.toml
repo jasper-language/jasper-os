@@ -1,0 +1,11 @@
+[package]
+name = "jasper-verification-toolbox"
+version = "0.1.0"
+edition = "2021"
+publish = false
+[workspace]
+[dependencies]
+kernel-core = { path = "../../kernel-core" }
+[dev-dependencies]
+proptest = "1"
+loom = "0.7"

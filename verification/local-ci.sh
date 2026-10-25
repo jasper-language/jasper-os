@@ -10,7 +10,7 @@ manifest=$(mktemp)
 manifest_after=$(mktemp)
 trap 'rm -f "$manifest" "$manifest_after"' EXIT
 manifest_inputs() {
-    find kernel-core kernel verification tools/krn1 .cargo -name __pycache__ -prune -o -type f -print0 | sort -z | xargs -0 sha256sum
+    find kernel-core kernel abi user verification tools/krn1 .cargo -type d \( -name __pycache__ -o -name target -o -name corpus -o -name artifacts \) -prune -o -type f -print0 | sort -z | xargs -0 sha256sum
     sha256sum Cargo.toml Cargo.lock rust-toolchain.toml
 }
 manifest_inputs > "$manifest"
@@ -26,6 +26,10 @@ cp "$manifest" "$run/inputs.sha256"
 rm -f "$run/PASS"
 {
     date -u +%FT%TZ
+    cargo test --manifest-path verification/toolbox/Cargo.toml --locked
+    bash verification/toolbox/run-negative-transfer.sh
+    bash scripts/abi-freeze.sh --check-reservations
+    cargo test -p kernel-core --test extension_abi
     bash verification/run-pi-isolated-exit-tlc.sh
     if bash verification/run-pi-isolated-exit-tlc.sh pi_isolated_exit_missing_outgoing.cfg > "$run/pi-isolated-exit-negative.log" 2>&1; then exit 1; fi
     grep -q "Invariant Safety is violated" "$run/pi-isolated-exit-negative.log"
@@ -56,6 +60,76 @@ rm -f "$run/PASS"
         echo "Premature churn release unexpectedly passed"; exit 1
     fi
     grep -q "Invariant Safety is violated" "$run/churn-barrier-early.log"
+    bash verification/run-subscription-snapshot-tlc.sh subscription_snapshot.cfg
+    if bash verification/run-subscription-snapshot-tlc.sh subscription_split.cfg > "$run/subscription_split.log" 2>&1; then
+        echo "Negative model unexpectedly passed: subscription_split.cfg"; exit 1
+    fi
+    grep -q "Invariant Safety is violated" "$run/subscription_split.log"
+    if bash verification/run-subscription-snapshot-tlc.sh subscription_silent_overflow.cfg > "$run/subscription_silent_overflow.log" 2>&1; then
+        echo "Negative model unexpectedly passed: subscription_silent_overflow.cfg"; exit 1
+    fi
+    grep -q "Invariant Safety is violated" "$run/subscription_silent_overflow.log"
+    bash verification/run-subscription-broadcast-tlc.sh subscription_broadcast_events.cfg
+    bash verification/run-subscription-broadcast-tlc.sh subscription_broadcast_state.cfg
+    bash verification/run-subscription-broadcast-tlc.sh subscription_broadcast_count.cfg
+    if bash verification/run-subscription-broadcast-tlc.sh subscription_broadcast_drop.cfg > "$run/subscription_broadcast_drop.log" 2>&1; then
+        echo "Negative model unexpectedly passed: subscription_broadcast_drop.cfg"; exit 1
+    fi
+    grep -q "Invariant Safety is violated" "$run/subscription_broadcast_drop.log"
+    bash verification/run-subscription-lifetime-tlc.sh subscription_lifetime.cfg
+    if bash verification/run-subscription-lifetime-tlc.sh subscription_lifetime_early.cfg > "$run/subscription_lifetime_early.log" 2>&1; then
+        echo "Negative model unexpectedly passed: subscription_lifetime_early.cfg"; exit 1
+    fi
+    grep -q "Invariant Safety is violated" "$run/subscription_lifetime_early.log"
+    bash verification/run-subscription-wait-tlc.sh subscription_wait.cfg
+    if bash verification/run-subscription-wait-tlc.sh subscription_wait_duplicate.cfg > "$run/subscription_wait_duplicate.log" 2>&1; then
+        echo "Negative model unexpectedly passed: subscription_wait_duplicate.cfg"; exit 1
+    fi
+    grep -q "Invariant Safety is violated" "$run/subscription_wait_duplicate.log"
+    bash verification/run-subscription-publisher-anchor-tlc.sh subscription_publisher_anchor.cfg
+    if bash verification/run-subscription-publisher-anchor-tlc.sh subscription_publisher_no_anchor.cfg > "$run/subscription_publisher_no_anchor.log" 2>&1; then
+        echo "Negative model unexpectedly passed: subscription_publisher_no_anchor.cfg"; exit 1
+    fi
+    grep -q "Invariant Safety is violated" "$run/subscription_publisher_no_anchor.log"
+    bash verification/run-pressure-event-dirty-tlc.sh pressure_event_dirty.cfg
+    if bash verification/run-pressure-event-dirty-tlc.sh pressure_event_dirty_late.cfg > "$run/pressure_event_dirty_late.log" 2>&1; then
+        echo "Negative model unexpectedly passed: pressure_event_dirty_late.cfg"; exit 1
+    fi
+    grep -q "Invariant Safety is violated" "$run/pressure_event_dirty_late.log"
+    bash verification/run-limit-observation-tlc.sh
+    if bash verification/run-limit-observation-tlc.sh limit_observation_rewrite.cfg > "$run/limit-observation-negative.log" 2>&1; then
+        echo "Budget cutoff rewrite unexpectedly passed"; exit 1
+    fi
+    grep -q "Invariant Safety is violated" "$run/limit-observation-negative.log"
+    bash verification/run-shm-page-lifetime-tlc.sh
+    for variant in no_ack no_pin; do
+        if bash verification/run-shm-page-lifetime-tlc.sh "shm_page_lifetime_${variant}.cfg" > "$run/shm-lifetime-${variant}.log" 2>&1; then
+            echo "SHM lifetime negative unexpectedly passed: $variant"; exit 1
+        fi
+        grep -q "Invariant Safety is violated" "$run/shm-lifetime-${variant}.log"
+    done
+    bash verification/run-ring-wait-deadline-tlc.sh
+    if bash verification/run-ring-wait-deadline-tlc.sh ring_wait_deadline_timeout_first.cfg > "$run/ring-wait-deadline-negative.log" 2>&1; then
+        echo "Timeout-before-ready unexpectedly passed"; exit 1
+    fi
+    grep -q "Invariant Safety is violated" "$run/ring-wait-deadline-negative.log"
+    bash verification/run-irq-event-binding-tlc.sh
+    if bash verification/run-irq-event-binding-tlc.sh irq_event_binding_stale.cfg > "$run/irq-event-binding-stale.log" 2>&1; then
+        echo "Stale IRQ binding unexpectedly passed"; exit 1
+    fi
+    grep -q "Invariant Safety is violated" "$run/irq-event-binding-stale.log"
+    bash verification/run-ring-wait-lifecycle-tlc.sh
+    for variant in stale leak; do
+        if bash verification/run-ring-wait-lifecycle-tlc.sh "ring_wait_lifecycle_${variant}.cfg" > "$run/ring-wait-lifecycle-${variant}.log" 2>&1; then
+            echo "Ring wait lifecycle negative unexpectedly passed: $variant"; exit 1
+        fi
+        grep -q "Invariant Safety is violated" "$run/ring-wait-lifecycle-${variant}.log"
+    done
+    bash verification/run-ring-wait-enroll-tlc.sh
+    if bash verification/run-ring-wait-enroll-tlc.sh ring_wait_enroll_split.cfg > "$run/ring-wait-enroll-split.log" 2>&1; then
+        echo "Split event-wait enrollment unexpectedly passed"; exit 1
+    fi
+    grep -q "Invariant Safety is violated" "$run/ring-wait-enroll-split.log"
     bash verification/run-shared-tick-credit-tlc.sh
     for variant in duplicate undrained; do
         if bash verification/run-shared-tick-credit-tlc.sh "shared_tick_credit_${variant}.cfg" > "$run/shared-credit-${variant}.log" 2>&1; then
@@ -116,7 +190,9 @@ rm -f "$run/PASS"
     bash verification/run-env0-tlc.sh
     bash verification/run-ring-fv1-tlc.sh
     bash verification/run-kani.sh
-    cargo test -p kernel-core
+    cargo test -p kernel-core --lib --no-run --message-format=json > "$run/core-build.jsonl"
+    python3 verification/snapshot-core-test.py "$run"
+    cargo test -p kernel-core -- --format=json -Z unstable-options
     python3 -m unittest discover -s tools/krn1 -p 'test_*.py' -v
     manifest_inputs > "$manifest_after"
     cmp "$manifest" "$manifest_after"
