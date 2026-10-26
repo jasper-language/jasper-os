@@ -93,6 +93,104 @@ static AWAKE: AtomicU32 = AtomicU32::new(0);
 /// 交互任务完成的睡眠次数。
 static INTERACTIVE_DONE: AtomicU32 = AtomicU32::new(0);
 
+#[cfg(feature = "krn3-p999-verify")]
+static P999_DONE: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "krn3-p999-verify")]
+const P999_ROUNDS: u32 = 160;
+#[cfg(feature = "krn3-p999-verify")]
+const P999_ISOLATED_ROUNDS: u32 = 1_200;
+
+#[cfg(feature = "krn3-p999-verify")]
+fn p999_sleeper() {
+    for _ in 0..P999_ROUNDS {
+        sched::sleep_ticks(1);
+    }
+    P999_DONE.fetch_add(1, Ordering::Release);
+}
+
+#[cfg(feature = "krn3-p999-verify")]
+fn p999_isolated_sleeper() {
+    for _ in 0..P999_ISOLATED_ROUNDS {
+        sched::sleep_ticks(1);
+    }
+    P999_DONE.fetch_add(1, Ordering::Release);
+}
+
+/// Complete wake/resume sampling contract. Seven AP-affine workers each wake
+/// 160 times, yielding 1,120 observations on an eight-CPU guest. The test
+/// validates identity, completeness and resource recovery; latency thresholds
+/// remain a reported performance result rather than a correctness gate.
+#[cfg(feature = "krn3-p999-verify")]
+pub fn run_wake_latency_contract() -> u32 {
+    FAILED.store(0, Ordering::Relaxed);
+    TIMING_FAILED.store(0, Ordering::Relaxed);
+    P999_DONE.store(0, Ordering::Relaxed);
+    let saved = baseline();
+    let cpus = sched::online_cpus().len();
+    check(cpus >= 8, "p99.9契约需要八个在线CPU");
+
+    // First establish the local, non-fanout baseline on CPU1.
+    sched::reset_raw_wakes();
+    let mut cpu1 = CpuSet::EMPTY;
+    cpu1.insert(1);
+    let isolated_spawned = quiet(|| sched::spawn_on(
+        TaskId(0x5039393949534f),
+        "p999-isolated",
+        p999_isolated_sleeper,
+        None,
+        cpu1,
+    ).is_ok());
+    check(isolated_spawned, "必须创建CPU1隔离唤醒任务");
+    if isolated_spawned { sched::run(); }
+    let (isolated_raw, isolated, isolated_errors, isolated_carried, isolated_pending) =
+        sched::raw_wake_snapshot();
+    let isolated_complete = isolated.count == u64::from(P999_ISOLATED_ROUNDS)
+        && isolated.invalid == 0 && isolated_errors == [0; 3]
+        && isolated_carried == 0 && isolated_pending == 0;
+    check(isolated_complete, "隔离唤醒延迟样本必须完整");
+    check(P999_DONE.load(Ordering::Acquire) == 1, "隔离唤醒任务必须完成");
+    check(baseline() == saved, "隔离p99.9演练资源必须回到基线");
+    kprintln!("[JSR-WAKE-LATENCY] mode=isolated samples={} expected={} invalid={} p50_us={} p99_us={} p999_us={} max_ns={} complete={} raw_retained={} raw_dropped={} endpoint=resume-hook clock=shared-ns-serialized platform_sync=assumed",
+        isolated.count, P999_ISOLATED_ROUNDS, isolated.invalid, isolated.p50_us,
+        isolated.p99_us, isolated.p999_us, isolated.max_ns, isolated_complete,
+        isolated_raw.entries().len(), isolated_raw.dropped());
+
+    // Then measure a seven-way same-tick fanout separately.
+    P999_DONE.store(0, Ordering::Relaxed);
+    sched::reset_raw_wakes();
+    let workers = cpus.saturating_sub(1).min(7);
+    let spawned = quiet(|| {
+        (0..workers).all(|i| {
+            let mut affinity = CpuSet::EMPTY;
+            affinity.insert(i + 1);
+            sched::spawn_on(
+                TaskId(0x503939390000 + i as u64),
+                "p999-sleeper",
+                p999_sleeper,
+                None,
+                affinity,
+            ).is_ok()
+        })
+    });
+    check(spawned && workers == 7, "必须创建七个AP固定唤醒工作任务");
+    if spawned { sched::run(); }
+    let (raw, latency, errors, carried, pending) = sched::raw_wake_snapshot();
+    let expected = workers as u64 * u64::from(P999_ROUNDS);
+    let complete = latency.count == expected && latency.invalid == 0
+        && errors == [0; 3] && carried == 0 && pending == 0;
+    check(complete, "唤醒延迟样本必须完整且身份/时钟有效");
+    check(P999_DONE.load(Ordering::Acquire) as usize == workers,
+        "全部唤醒工作任务必须完成");
+    check(baseline() == saved, "p99.9演练资源必须回到基线");
+    check(lists_consistent(), "p99.9演练后运行列表必须一致");
+    kprintln!("[JSR-WAKE-LATENCY] mode=fanout-7 samples={} expected={} invalid={} p50_us={} p99_us={} p999_us={} max_ns={} complete={} raw_retained={} raw_dropped={} endpoint=resume-hook clock=shared-ns-serialized platform_sync=assumed",
+        latency.count, expected, latency.invalid, latency.p50_us, latency.p99_us,
+        latency.p999_us, latency.max_ns, complete, raw.entries().len(), raw.dropped());
+    kprintln!("[JSR-KRN3-P999] done failed={} workers={} rounds={} resources={} lists={}",
+        failed(), workers, P999_ROUNDS, baseline() == saved, lists_consistent());
+    failed()
+}
+
 /// 睡到 [`SLEEP_END`]（期间不可运行，不应出现在任何选择遍历里）。
 fn sleeper() {
     ASLEEP.fetch_add(1, Ordering::Relaxed);
@@ -490,12 +588,16 @@ pub fn run() {
     contention(n);
     #[cfg(feature = "krn2-observe")]
     {
-        let (raw, errors, carried, pending) = sched::raw_wake_snapshot();
+        let (raw, latency, errors, carried, pending) = sched::raw_wake_snapshot();
         let valid = !raw.entries().is_empty() && raw.entries().iter().flatten().all(|r|
             matches!(r.path, 3 | 4) && r.generation > 0 && r.wait_round > 0) && errors == [0; 3];
         check(valid, "真实唤醒选择记录必须匹配槽代次和轮次");
         kprintln!("[JSR-RAW-WAKE] samples={} dropped={} complete={} begin_refused={} finish_refused={} abandoned={} valid={} pending_at_reset={} pending_now={} endpoint=resume-hook clock=raw-unserialized",
             raw.entries().len(), raw.dropped(), raw.complete(), errors[0],errors[1],errors[2],valid,carried,pending);
+        let complete = latency.count >= 1_000 && latency.invalid == 0 && pending == 0 && errors == [0; 3];
+        kprintln!("[JSR-WAKE-LATENCY] samples={} invalid={} p50_us={} p99_us={} p999_us={} max_ns={} complete={} endpoint=resume-hook clock=shared-ns-serialized platform_sync=assumed",
+            latency.count, latency.invalid, latency.p50_us, latency.p99_us, latency.p999_us,
+            latency.max_ns, complete);
         for r in raw.entries().iter().flatten() {
             kprintln!("[JSR-WAKE-SAMPLE] path={} slot={} generation={} wait_round={} start_cpu={} end_cpu={} start={} end={}",
                 r.path,r.slot,r.generation,r.wait_round,r.start.cpu,r.end.cpu,r.start.counter,r.end.counter);

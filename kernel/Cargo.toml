@@ -29,6 +29,9 @@ krn3-fast-tick-verify = []
 # scaling/correctness drill so unrelated user-space and soak demos cannot hide
 # the KRN-3 result behind their timeout or serial volume.
 krn3-postsplit-verify = []
+# Dedicated complete wake/resume latency sampling guest. The workload records
+# more than 1,000 observations so p99.9 is defined without truncation.
+krn3-p999-verify = []
 # Diagnostic-only nohz ledger and isolated guest; default unchanged.
 s3-nohz-verify = []
 evt2-verify = ["user-programs"]

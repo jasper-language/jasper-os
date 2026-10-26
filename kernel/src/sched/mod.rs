@@ -246,11 +246,11 @@ fn with_mut_from<R>(origin: Origin, f: impl FnOnce(&mut Scheduler) -> R) -> R {
         #[cfg(feature = "krn2-observe")]
         let (slot, generation) = s.raw_callback_identity();
         #[cfg(feature = "krn2-observe")]
-        let start = kernel_core::raw_timing::Endpoint { cpu: cpu::cpu_index(), counter: cpu::cycles() };
+        let start = kernel_core::raw_timing::Endpoint { cpu: cpu::cpu_index(), counter: cpu::cycles(), clock: kernel_core::raw_timing::ClockDomain::Raw };
         let r = f(&mut s);
         #[cfg(feature = "krn2-observe")]
         {
-            let end = kernel_core::raw_timing::Endpoint { cpu: cpu::cpu_index(), counter: cpu::cycles() };
+            let end = kernel_core::raw_timing::Endpoint { cpu: cpu::cpu_index(), counter: cpu::cycles(), clock: kernel_core::raw_timing::ClockDomain::Raw };
             // Path 1 = callback only, NOT wake latency. No wait round exists.
             let _ = s.raw_callbacks.push(kernel_core::raw_timing::Sample {
                 path: 1, slot, generation, wait_round: 0, start, end,
@@ -275,10 +275,28 @@ fn send_kicks(kicks: CpuSet) {
     }
 }
 
+#[cfg(feature = "krn2-observe")]
+fn wake_endpoint() -> kernel_core::raw_timing::Endpoint {
+    let cpu = cpu::cpu_index();
+    if let Some(counter) = crate::hrtime::now() {
+        kernel_core::raw_timing::Endpoint {
+            cpu,
+            counter,
+            clock: kernel_core::raw_timing::ClockDomain::SharedNs,
+        }
+    } else {
+        kernel_core::raw_timing::Endpoint {
+            cpu,
+            counter: cpu::cycles(),
+            clock: kernel_core::raw_timing::ClockDomain::Raw,
+        }
+    }
+}
+
 /// 切换完成：在新执行流的开头（关中断时）调用，释放刚换下的任务并发出由此产生的重新调度请求。
 fn finish_switch() {
     #[cfg(feature = "krn2-observe")]
-    let end = kernel_core::raw_timing::Endpoint { cpu: cpu::cpu_index(), counter: cpu::cycles() };
+    let end = wake_endpoint();
     // The resumed CPU owns this completion.  Consume the leaf-local switch
     // marker and release the saved execution owner before waiting for global
     // cold-state bookkeeping.
@@ -649,7 +667,7 @@ pub fn yield_with_cause(cause: &'static str) {
     } else {
         #[cfg(feature = "krn2-observe")]
         {
-            let end = kernel_core::raw_timing::Endpoint { cpu: cpu::cpu_index(), counter: cpu::cycles() };
+            let end = wake_endpoint();
             with_mut(|s| s.note_raw_resume(end, 4)); // continued on the same context
         }
     }
@@ -1082,12 +1100,13 @@ pub fn reset_raw_wakes() {
     let mut s = lock_state();
     s.raw_pending_at_reset = s.raw_pending_count();
     s.raw_wakes = kernel_core::raw_timing::Samples::new();
+    s.wake_latency = kernel_core::raw_timing::NanoHistogram::new();
     s.raw_wake_errors = [0; 3];
 }
 #[cfg(feature = "krn2-observe")]
-pub fn raw_wake_snapshot() -> (kernel_core::raw_timing::Samples<64>, [u64; 3], usize, usize) {
+pub fn raw_wake_snapshot() -> (kernel_core::raw_timing::Samples<64>, kernel_core::raw_timing::NanoSummary, [u64; 3], usize, usize) {
     let s = lock_state();
-    (s.raw_wakes, s.raw_wake_errors, s.raw_pending_at_reset, s.raw_pending_count())
+    (s.raw_wakes, s.wake_latency.summary(), s.raw_wake_errors, s.raw_pending_at_reset, s.raw_pending_count())
 }
 
 /// Diagnostic counters are copied under the existing scheduler guard.

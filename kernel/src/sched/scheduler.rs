@@ -742,6 +742,8 @@ pub struct Scheduler {
     #[cfg(feature = "krn2-observe")]
     pub(super) raw_wakes: kernel_core::raw_timing::Samples<64>,
     #[cfg(feature = "krn2-observe")]
+    pub(super) wake_latency: kernel_core::raw_timing::NanoHistogram<2049>,
+    #[cfg(feature = "krn2-observe")]
     pub(super) raw_wake_errors: [u64; 3], // begin, finish, exit-with-pending
     #[cfg(feature = "krn2-observe")]
     pub(super) raw_pending_at_reset: usize,
@@ -904,6 +906,8 @@ impl Scheduler {
             raw_callbacks: kernel_core::raw_timing::Samples::new(),
             #[cfg(feature = "krn2-observe")]
             raw_wakes: kernel_core::raw_timing::Samples::new(),
+            #[cfg(feature = "krn2-observe")]
+            wake_latency: kernel_core::raw_timing::NanoHistogram::new(),
             #[cfg(feature = "krn2-observe")]
             raw_wake_errors: [0; 3],
             #[cfg(feature = "krn2-observe")]
@@ -1804,7 +1808,13 @@ impl Scheduler {
         #[cfg(feature = "krn2-observe")]
         {
             let token = kernel_core::task_index::Token { slot: i, generation };
-            let start = kernel_core::raw_timing::Endpoint { cpu: this_cpu(), counter: crate::arch::cycles() };
+            let start = if let Some(counter) = crate::hrtime::now() {
+                kernel_core::raw_timing::Endpoint { cpu: this_cpu(), counter,
+                    clock: kernel_core::raw_timing::ClockDomain::SharedNs }
+            } else {
+                kernel_core::raw_timing::Endpoint { cpu: this_cpu(), counter: crate::arch::cycles(),
+                    clock: kernel_core::raw_timing::ClockDomain::Raw }
+            };
             if let Some(round) = t.raw_wake.begin(token, start) { t.raw_wake_round = Some(round); }
             else { self.raw_wake_errors[0] = self.raw_wake_errors[0].saturating_add(1); }
         }
@@ -3148,7 +3158,11 @@ impl Scheduler {
             Some(t.raw_wake.finish(token, round, end))
         });
         match completion {
-            Some(Some(mut sample)) => { sample.path = path; let _ = self.raw_wakes.push(sample); }
+            Some(Some(mut sample)) => {
+                sample.path = path;
+                self.wake_latency.record(&sample);
+                let _ = self.raw_wakes.push(sample);
+            }
             Some(None) => self.raw_wake_errors[1] = self.raw_wake_errors[1].saturating_add(1),
             None => {}
         }

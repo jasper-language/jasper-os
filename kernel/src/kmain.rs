@@ -166,6 +166,19 @@ pub fn start(boot: &'static BootSpec) -> ! {
             ExitStatus::Success
         });
     }
+    #[cfg(feature="krn3-p999-verify")]
+    {
+        mm::demo::run_space();
+        smp::demo::run(smp::start_secondaries(TIMER_HZ));
+        let highres = sched::enable_highres();
+        let divisor = sched::configure_idle_tick();
+        kprintln!(
+            "[JSR-KRN3-P999] start cpus={} high_resolution={} nohz_divisor={}",
+            sched::online_cpus().len(), highres, divisor
+        );
+        let failed = crate::scale_demo::run_wake_latency_contract();
+        arch::exit_emulator(if failed == 0 { ExitStatus::Success } else { ExitStatus::Failure });
+    }
     #[cfg(feature="evt2-broadcast-verify")]
     {
         mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
