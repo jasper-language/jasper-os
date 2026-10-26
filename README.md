@@ -7,9 +7,6 @@ Jasper 生态的**操作系统侧项目**：一个用 Rust（`no_std`）实现�
 
 许可证：**Apache License 2.0**（见 [LICENSE](LICENSE)）。
 
-> 本文件是**私有仓库**的说明。公开仓库的 README 与 `docs/rust-kernel.md` 单独维护，不从这里复制；
-> 本仓库中的 Java 原型（`src/main/java/`）与 `docs/` 下的设计文稿不公开。
-
 ---
 
 ## 设计原则
@@ -97,8 +94,6 @@ jasper-os/
   scripts/accept.sh     # 一键验收：宿主测试 → 构建 → QEMU 真实启动 → 逐里程碑判定
   scripts/abi-freeze.sh # 发布时把登记表冻结进 lock
 ```
-
-私有内容（不公开）：`src/main/java/`（早期 Java 内核模拟原型，已不再演进）、`docs/`（设计文稿）、`M1.0-UNVERIFIED.md`。
 
 ---
 

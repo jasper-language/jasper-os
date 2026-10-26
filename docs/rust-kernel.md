@@ -47,7 +47,7 @@
 | `kernel/src/io.rs` | `IoOp` / `IoRequest` / `IoResult` / `Completion` / `MemIoCore`（M1.5 骨架） |
 | `xtask/` | 宿主机侧镜像构建器（生成 bootloader BIOS 磁盘镜像） |
 
-**本仓库只包含 Rust 实现**：前期内部原型的代码**不包含在本仓库内**，也不应从本仓库引用。
+本仓库包含 Rust 内核实现。
 
 ---
 
@@ -65,12 +65,12 @@
 
 ---
 
-## 四、未经编译的风险（完整 26 条见 `M1.0-UNVERIFIED.md`）
+## 四、构建注意事项
 
 按风险排序，最关键的几条：
 
 1. **`#[panic_handler]` 的位置**
-   规格书把它写在 `main.rs` 内联；本实现把它放在 `kernel/src/panic.rs`（由 `lib.rs` 声明），
+   本实现把它放在 `kernel/src/panic.rs`（由 `lib.rs` 声明），
    目的是让最终二进制**只有一个** panic handler。
    **风险**：若链接模型与假设不同，会出现"缺失或重复的 panic handler"。
 2. **同一个包里同时有 `[lib]` 与 `[[bin]]`**
