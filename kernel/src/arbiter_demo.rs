@@ -16,16 +16,14 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::sync::Atomic64;
 
-use kernel_core::rt::Charge;
 use kernel_core::sched::Qos;
 
 use kernel_core::smp::CpuSet;
 
 use crate::sched;
 use crate::task::TaskId;
-use crate::{kprintln, rt};
+use crate::kprintln;
 
-const RT_ID: u32 = 9500;
 const TASK_RT: u64 = 9500;
 const TASK_UI: u64 = 9501;
 const TASK_BATCH_BASE: u64 = 9510;
@@ -57,23 +55,16 @@ pub fn failed() -> u32 {
 /// 实时任务：每个周期计满配额后睡到下一个周期，记录是否越过截止期。
 fn rt_task() {
     for _ in 0..RT_PERIODS {
-        let deadline = sched::timer_ticks() + 10;
-        loop {
-            match rt::charge(RT_ID, 1) {
-                Ok(Charge::Within) => {
-                    sched::pause();
-                }
-                Ok(Charge::Exhausted) => break,
-                Err(_) => return,
-            }
-        }
+        let (_,_,deadline)=sched::rt_state(TaskId(TASK_RT)).expect("RT reservation");
+        let began=sched::timer_ticks();
+        // Actual execution is charged by the scheduler. One tick of work per job.
+        while sched::timer_ticks()==began {core::hint::spin_loop();}
         let now = sched::timer_ticks();
         if now > deadline {
             RT_MISSES.fetch_add(1, Ordering::Relaxed);
         }
         // 睡到下个周期；期间预算由调度器的周期补充恢复。
-        sched::sleep_until(now + 5);
-        rt::replenish(sched::timer_ticks());
+        sched::sleep_until(deadline);
     }
 }
 
@@ -113,7 +104,6 @@ fn quiet<R>(f: impl FnOnce() -> R) -> R {
 /// 演练入口。
 pub fn run() {
     let now = sched::timer_ticks();
-    check(rt::admit(RT_ID, 2, 10, now).is_ok(), "实时声明应被接纳");
     END.store(now + WINDOW, Ordering::Relaxed);
     UI_DONE.store(0, Ordering::Relaxed);
     BATCH_TICKS.store(0, Ordering::Relaxed);
@@ -123,6 +113,7 @@ pub fn run() {
     let previous = sched::set_arbiter(true);
     // 阶段 1 固定在 0 号核：三类真正争用同一个处理器。
     let one = CpuSet::first(1);
+    let irq=crate::arch::irq_save_disable();
     quiet(|| {
         let ok_rt = sched::spawn_on(TaskId(TASK_RT), "arb-rt", rt_task, None, one).is_ok();
         let ok_ui = sched::spawn_on(TaskId(TASK_UI), "arb-ui", ui_task, None, one).is_ok();
@@ -132,6 +123,8 @@ pub fn run() {
         }
         ok_rt && ok_ui && ok_batch
     });
+    check(sched::set_rt(TaskId(TASK_RT),2,10),"canonical RT admission");
+    crate::arch::irq_restore(irq);
     sched::run();
 
     sched::set_arbiter(previous);
@@ -182,7 +175,6 @@ pub fn run() {
         check(busy == n, "多核阶段有处理器未被使用");
     }
 
-    let _ = rt::release(RT_ID);
     kprintln!(
         "[JSR-ARB] summary checks={} failed={}",
         CHECKS.load(Ordering::Relaxed),

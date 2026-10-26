@@ -95,7 +95,7 @@ struct Entry<T> {
     state: Lifecycle,
 }
 
-/// 对象表的一个槽位（内部状态不公开；调用者只用 [`Slot::VACANT`] 准备存储）。
+/// 对象表的一个槽位（调用者只用 [`Slot::VACANT`] 准备存储）。
 /// One slot of the object table (opaque; callers only use [`Slot::VACANT`] to prepare storage).
 pub struct Slot<T> {
     generation: u32,

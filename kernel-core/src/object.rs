@@ -221,6 +221,9 @@ pub enum ObjectType {
     Interrupt,
     /// Shared RAM backing, a transferable leaf with no handle ownership edges.
     Memory,
+    /// User-visible inherited mutex. The object contains no handles; wait
+    /// edges live in the scheduler and blocked calls retain the object.
+    Mutex,
     EventSource,
     Subscription,
 }
@@ -233,7 +236,7 @@ impl ObjectType {
     /// Memory是页存储叶子，无句柄/非叶对象强引用；AddressSpace仍是进程内部资源，不能传递。
     /// Memory is a transferable page-storage leaf; AddressSpace remains non-transferable.
     pub const fn is_transferable_v1(self) -> bool {
-        matches!(self, ObjectType::Event | ObjectType::Timer | ObjectType::Task | ObjectType::Device | ObjectType::Memory)
+        matches!(self, ObjectType::Event | ObjectType::Timer | ObjectType::Task | ObjectType::Device | ObjectType::Memory | ObjectType::Mutex)
     }
 
     /// 类型名（输出与元数据用）。
@@ -244,6 +247,7 @@ impl ObjectType {
             ObjectType::Ring => "Ring",
             ObjectType::AddressSpace => "AddressSpace",
             ObjectType::Memory => "Memory",
+            ObjectType::Mutex => "Mutex",
             ObjectType::EventSource => "EventSource",
             ObjectType::Subscription => "Subscription",
             ObjectType::Channel => "Channel",
@@ -738,6 +742,7 @@ mod tests {
         assert_eq!(t.get(h).unwrap().1, Rights::WAIT);
         assert_eq!(t.free_slots(), 1);
         assert!(ObjectType::Task.is_transferable_v1() && ObjectType::Event.is_transferable_v1());
+        assert!(ObjectType::Mutex.is_transferable_v1() && ObjectType::Mutex.type_name() == "Mutex");
         assert!(ObjectType::Device.is_transferable_v1(), "设备对象是叶子：关闭句柄不销毁设备表项");
         assert!(!ObjectType::Channel.is_transferable_v1() && !ObjectType::Process.is_transferable_v1());
         assert!(!ObjectType::Ring.is_transferable_v1() && !ObjectType::AddressSpace.is_transferable_v1());

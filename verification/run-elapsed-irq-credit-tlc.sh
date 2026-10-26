@@ -8,7 +8,7 @@ if [[ ! -f "$jar" ]]; then
 fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-cp "$here/limit_observation.tla" "$work/"
-cp "$here/${1:-limit_observation.cfg}" "$work/selected.cfg"
+cp "$here/elapsed_irq_credit.tla" "$work/"
+cp "$here/${1:-elapsed_irq_credit.cfg}" "$work/selected.cfg"
 cd "$work"
-java -Xmx128m -XX:+UseSerialGC -cp "$jar" tlc2.TLC -workers 1 -cleanup -metadir "$work/states" -config selected.cfg limit_observation.tla
+java -Xmx128m -XX:+UseSerialGC -cp "$jar" tlc2.TLC -workers 1 -cleanup -metadir "$work/states" -config selected.cfg elapsed_irq_credit.tla

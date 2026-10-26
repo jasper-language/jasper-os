@@ -43,9 +43,59 @@ proof fn event_batch_bytes(capacity:u32)
 
 // Accounting partition only; not verification of timer IRQ attribution.
 verus! {
-proof fn limit_partition(start:int,cutoff:int,total:int)
+proof fn budget_partition(start:int,cutoff:int,total:int)
  requires 0<=start, start<=cutoff, cutoff<=total,
  ensures 0<=cutoff-start, 0<=total-cutoff,
          (cutoff-start)+(total-cutoff)==total-start,
+{}
+}
+
+verus! {
+proof fn rt_partition_capacity(load:int,added:int,limit:int)
+ requires 0<=load,0<added,load+added<=limit,limit<=1000,
+ ensures load<limit,load+added<=1000,
+{}
+}
+
+// EDF comparison companion; does not verify production iterator/filter code.
+verus! {
+proof fn edf_three_deadlines(a:int,b:int,c:int)
+ ensures
+  (a<=b && a<=c) ==> (a<=b && a<=c),
+  (b<a && b<=c) ==> (b<a && b<=c),
+  (!(a<=b && a<=c) && !(b<a && b<=c)) ==> (c<a && c<b),
+{}
+}
+
+// Ceiling inequalities imply non-early, less-than-one-count rounding error.
+verus! {
+proof fn timer_count_rounding(product:int,count:int)
+ requires product>=0,count>=1,(count-1)*1000000000<product,product<=count*1000000000,
+ ensures 0<=count*1000000000-product,count*1000000000-product<1000000000,
+{}
+}
+
+// Elapsed accounting conservation companion, not scheduler owner attribution.
+verus! {
+proof fn elapsed_credit_partition(elapsed:int,period:int,credit:int,remainder:int)
+ requires elapsed>=0,period>0,credit>=0,0<=remainder<period,elapsed==credit*period+remainder,
+ ensures credit*period<=elapsed,elapsed<(credit+1)*period,
+{ assert((credit+1)*period==credit*period+period) by(nonlinear_arith); }
+}
+// Saturating elapsed debit cannot mint runtime credit.
+verus! {
+proof fn ns_budget_debit(remaining:int,elapsed:int)
+ requires remaining>=0,elapsed>=0,
+ ensures 0<=(if elapsed>=remaining {0} else {remaining-elapsed})<=remaining,
+{}
+}
+
+// Ownership/reference conservation companion.  This proves the arithmetic
+// projection only; the production Rust object table and scheduler are tested
+// and model-checked separately.
+verus! {
+proof fn inherited_mutex_handoff(owner_refs:int,waiter_refs:int)
+ requires owner_refs==1, waiter_refs==1,
+ ensures owner_refs+waiter_refs-1==1,
 {}
 }

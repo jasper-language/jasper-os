@@ -48,11 +48,11 @@ impl Recovery {
         }
     }
 }
-/// Same declaration carries QoS (existing POL-1 type), hard limit/affinity and
+/// Same declaration carries QoS (existing POL-1 type), hard budget/affinity and
 /// exclusive placement. Soft preference cannot participate in admission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Demand {
-    pub task: u64, pub limit_units: u32, pub affinity: CpuSet,
+    pub task: u64, pub budget_units: u32, pub affinity: CpuSet,
     pub exclusive: bool, pub criticality: u8, pub qos: Qos,
     pub soft_energy_preference: u8,
 }
@@ -86,10 +86,10 @@ impl<const N: usize> Admission<N> {
     pub fn ceiling(&self) -> u32 { self.ceiling }
     pub fn used(&self) -> u32 {
         // All insertion is checked; private leases cannot exceed u32 capacity.
-        self.leases.iter().flatten().map(|l| l.demand.limit_units).sum()
+        self.leases.iter().flatten().map(|l| l.demand.budget_units).sum()
     }
     pub fn propose(&self, demand: Demand) -> Result<Plan<N>, Reject> {
-        if demand.limit_units == 0 || !demand.affinity.contains(self.cpu) {
+        if demand.budget_units == 0 || !demand.affinity.contains(self.cpu) {
             return Err(Reject::InvalidDemand);
         }
         if self.leases.iter().flatten().any(|l| l.demand.task == demand.task) {
@@ -98,7 +98,7 @@ impl<const N: usize> Admission<N> {
         let occupied = self.leases.iter().flatten().next().is_some();
         if (demand.exclusive && occupied)
             || self.leases.iter().flatten().any(|l| l.demand.exclusive)
-            || self.used().checked_add(demand.limit_units).is_none_or(|u| u > self.ceiling) {
+            || self.used().checked_add(demand.budget_units).is_none_or(|u| u > self.ceiling) {
             return Err(Reject::Capacity);
         }
         let mut leases = self.leases;
@@ -145,9 +145,9 @@ impl<const N: usize> Admission<N> {
         Ok(())
     }
 }
-/// Sensor cost is a local CPU-time limit (0.5%), not a latency promise.
+/// Sensor cost is a local CPU-time budget (0.5%), not a latency promise.
 /// u128 comparison avoids overflow even for arbitrary full-width counters.
-pub fn sampling_within_limit(cpu_time: u64, sampled_time: u64) -> bool {
+pub fn sampling_within_budget(cpu_time: u64, sampled_time: u64) -> bool {
     cpu_time != 0 && (sampled_time as u128) * 200 <= cpu_time as u128
 }
 
@@ -156,7 +156,7 @@ mod tests {
     use super::*;
     fn resource() -> Resource { Resource { id: 0, kind: ResourceKind::Cpu,
         capacity_units: 1000, reserved_units: 100, locality: 0, source: Source::Firmware } }
-    fn demand(task: u64, units: u32) -> Demand { Demand { task, limit_units: units,
+    fn demand(task: u64, units: u32) -> Demand { Demand { task, budget_units: units,
         affinity: CpuSet::first(1), exclusive: false, criticality: task as u8,
         qos: Qos::Interactive, soft_energy_preference: 0 } }
     fn sample(value: u32) -> Sample { Sample { source: Source::ArchitecturalCounter,
@@ -213,16 +213,16 @@ mod tests {
         }
     }
     #[test]
-    fn hysteresis_and_sampling_limit() {
+    fn hysteresis_and_sampling_budget() {
         let mut r = Recovery { state: Confidence::Unknown, healthy_samples: 0, last_change: 0 };
         r.update(false, 10, 5);
         for t in 11..=14 { r.update(true, t, 5); assert_eq!(r.state, Confidence::Degraded); }
         r.update(true, 15, 5); assert_eq!(r.state, Confidence::Normal);
         r.update(false, 16, 5); assert_eq!(r.state, Confidence::Degraded);
-        assert!(sampling_within_limit(1000, 5));
-        assert!(!sampling_within_limit(1000, 6));
-        assert!(!sampling_within_limit(0, 0));
-        assert!(!sampling_within_limit(u64::MAX, u64::MAX));
+        assert!(sampling_within_budget(1000, 5));
+        assert!(!sampling_within_budget(1000, 6));
+        assert!(!sampling_within_budget(0, 0));
+        assert!(!sampling_within_budget(u64::MAX, u64::MAX));
     }
     #[test]
     fn rejected_boundaries_are_atomic() {

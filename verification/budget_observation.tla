@@ -1,4 +1,4 @@
----------------------- MODULE limit_observation ----------------------
+---------------------- MODULE budget_observation ----------------------
 EXTENDS Naturals, TLC
 CONSTANT RewriteCutoff
 VARIABLES phase, now, used, cutoff, saved, finishUsed, bad

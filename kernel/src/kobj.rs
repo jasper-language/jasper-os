@@ -57,6 +57,9 @@ pub enum KObject {
     Process(Box<Process>),
     /// Shared RAM backing leaf; mappings and pins retain page references independently.
     Memory(crate::mm::memory_object::MemoryObject),
+    /// User-visible priority-inheriting mutex. Boxed so its scheduler wait key
+    /// remains stable even if the object-table slot storage moves.
+    Mutex(Box<crate::user_mutex::MutexObj>),
     /// 线程。
     Task(TaskObj),
     /// 事件（叶子对象：不持有句柄、不强引用其他对象）。
@@ -84,6 +87,7 @@ impl KObject {
         match self {
             KObject::Process(_) => "Process",
             KObject::Memory(_) => "Memory",
+            KObject::Mutex(_) => "Mutex",
             KObject::EventSource(_) => "EventSource",
             KObject::Subscription(_) => "Subscription",
             KObject::Task(_) => "Task",
@@ -159,6 +163,7 @@ pub fn release_owner_in(t: &mut Table, id: ObjId) -> Result<Released, ObjError> 
             Ok(KObject::EventSource(_)) | Ok(KObject::Subscription(_)) => crate::subscription::close_in(t,id),
             Ok(KObject::Ring(_)) => crate::ring::close_in(t, id),
             Ok(KObject::Endpoint(_)) => crate::ipc::close_in(t, id),
+            Ok(KObject::Mutex(_)) => crate::user_mutex::close_in(t, id),
             Ok(KObject::Process(_)) => crate::proc::spawn::close_in(t, id),
             Ok(KObject::Interrupt(_)) => crate::interrupt::close_in(t, id),
             _ => {}
@@ -218,7 +223,7 @@ pub fn run_cleanup(limit: usize) -> usize {
                 let _ = release_internal(task.exit_state); // 线程 → 退出状态
             }
             // 中断对象的硬件解绑在 closing 动作里已经完成，销毁时无事可做。
-            KObject::EventSource(_) | KObject::Subscription(_) | KObject::Memory(_) | KObject::Event { .. } | KObject::Device(_) | KObject::Interrupt(_) => {}
+            KObject::EventSource(_) | KObject::Subscription(_) | KObject::Memory(_) | KObject::Mutex(_) | KObject::Event { .. } | KObject::Device(_) | KObject::Interrupt(_) => {}
         }
         n += 1;
     }

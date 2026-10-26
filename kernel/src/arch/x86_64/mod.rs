@@ -96,6 +96,10 @@ impl Platform for X86_64 {
         apic::arm_oneshot(ticks)
     }
 
+    fn timer_cancel_local(){apic::cancel_local_timer()}
+
+    unsafe fn timer_arm_after_ns(delay_ns:u64)->bool {unsafe {apic::arm_after_ns(delay_ns)}}
+
     fn timer_resume() {
         apic::resume_periodic();
     }
@@ -332,3 +336,6 @@ impl Platform for X86_64 {
 pub fn soak_stop_requested() -> bool {
     uart::try_read_byte() == Some(b'S')
 }
+
+#[cfg(feature="rt2-verify")]
+pub(crate) fn verify_ns_programming()->bool {apic::verify_ns_programming()}

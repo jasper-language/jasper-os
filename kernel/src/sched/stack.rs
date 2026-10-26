@@ -13,7 +13,7 @@
 
 use alloc::vec::Vec;
 use core::alloc::Layout;
-use core::ptr::{addr_of_mut, null_mut};
+use core::ptr::{addr_of, addr_of_mut, null_mut};
 
 use crate::arch::TaskContext;
 
@@ -106,8 +106,13 @@ impl StackPool {
     }
 
     /// `slot` 的栈顶地址（中断从用户态进入内核时，CPU 切到这里；见 `arch::set_kernel_stack`）。
-    pub fn top(&mut self, slot: usize) -> u64 {
-        self.base(slot) as u64 + STACK_SIZE as u64
+    pub fn top(&self, slot: usize) -> u64 {
+        let base = if slot < STATIC_STACKS {
+            addr_of!(self.statics[slot]) as *const u8 as u64
+        } else {
+            self.heap[slot] as u64
+        };
+        base + STACK_SIZE as u64
     }
 
     /// 在 `slot` 的栈顶伪造首次切入帧，返回该任务的初始上下文。

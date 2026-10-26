@@ -39,22 +39,25 @@
 //!   代价与可运行任务数成正比，与任务表容量无关；链表按槽位号有序，策略「同键取先者」的结果不变。
 //!   每 tick 的到期唤醒与实时预算补充只在最早到期时刻到达时才扫描（缓存最早时刻）。
 
+use alloc::boxed::Box;
 use crate::arch::TaskContext;
 use crate::task::{Task, TaskId, TaskState};
 use kernel_core::deadline::{Deadline, ABSENT as NO_DEADLINE};
 use kernel_core::deadline_forest::DeadlineForest;
 use kernel_core::task_index::{TaskIndex, Node as IndexNode};
 use kernel_core::task_lifecycle::SlotLifecycle;
+use kernel_core::task_hot::Slot as HotSlot;
 
 use kernel_core::object::{advance_generation, GENERATION_RETIRED};
 use kernel_core::smp::{CpuSet, MAX_CPUS};
 use kernel_core::tickless::{plan_with, StopBoard, TickPlan};
 
 use super::policy::{
-    inherit, migrate, new_entity, qos_change_allowed, BalanceParams, Balancer, Candidate, ClassMask, CoreLoad, CoreQueue, CpuLimit, CpuLimitStats,
-    Dequeue, Enqueue, EntityState, LatencyHistogram, LimitError, Preempt, Qos, QueueError, Refusal, Requeue, SchedPolicy, Watchdog, WatchdogLog,
+    inherit, new_entity, qos_change_allowed, BalanceParams, Balancer, Candidate, ClassMask, CoreLoad, CoreQueue, CpuLimit, CpuLimitStats,
+    Dequeue, Enqueue, LatencyHistogram, LimitError, Preempt, Qos, QueueError, Refusal, Requeue, SchedPolicy, Watchdog, WatchdogLog,
     WatchdogReport, QOS_CLASSES,
 };
+use super::KernelPolicy;
 use super::slots::BootSlots;
 use kernel_core::sched::{Link, RunLists};
 use super::stack::{ReserveError, StackPool, STATIC_STACKS};
@@ -62,6 +65,370 @@ use super::stack::{ReserveError, StackPool, STATIC_STACKS};
 /// 堆就绪之前的内联槽位数（与静态内核栈数一致：那时只有这些槽位有栈）。
 pub const INLINE_SLOTS: usize = STATIC_STACKS;
 pub const WAKE_MAILBOX_CAPACITY: usize = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LeafTaskHot {
+    state: TaskState,
+    on_cpu: Option<usize>,
+    sched: super::policy::SchedEntity,
+    context: usize,
+    stack_top: Option<u64>,
+    space: Option<crate::arch::SpaceRoot>,
+    local_switchable: bool,
+}
+
+const fn inline_hot_slots() -> [HotSlot<LeafTaskHot>; INLINE_SLOTS] {
+    let mut slots = [const { HotSlot::empty(0) }; INLINE_SLOTS];
+    let mut i = 0;
+    while i < INLINE_SLOTS {
+        slots[i] = HotSlot::empty(i);
+        i += 1;
+    }
+    slots
+}
+
+struct RunLeaf {
+    queue: CoreQueue<KernelPolicy>,
+    runs: RunLists<MAX_CPUS>,
+    links: BootSlots<Link, INLINE_SLOTS>,
+    /// Generation-bound scheduling state owned by this CPU. During the
+    /// migration checkpoint it mirrors the canonical Task fields; the local
+    /// hot path will consume this table as those fields move out of Task.
+    hot: BootSlots<HotSlot<LeafTaskHot>, INLINE_SLOTS>,
+    current: usize,
+    slice_used: u32,
+    slice_quantum: u32,
+    switching_from: Option<usize>,
+    switching_immediate: bool,
+    local_transition: Option<LeafTransition>,
+    /// Context-save completion published by the resumed execution flow.  The
+    /// owner CPU releases the hot execution claim immediately; the next cold
+    /// scheduler transaction consumes this record and retires the lifecycle
+    /// attachment.  Keeping the one-slot handoff in the leaf removes the
+    /// global scheduler lock from the post-switch hot path.
+    completed: Option<LeafCompletion>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct LeafCompletion {
+    pub(super) prev: usize,
+    pub(super) token: Option<kernel_core::task_index::Token>,
+    #[cfg(feature = "krn2-observe")]
+    pub(super) resume: Option<kernel_core::raw_timing::Endpoint>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct LeafTransition {
+    pub(super) cpu: usize,
+    pub(super) prev: usize,
+    pub(super) next: usize,
+    pub(super) cause: &'static str,
+}
+impl RunLeaf {
+    const fn new(cpu: u8) -> Self {
+        let mut hot = inline_hot_slots();
+        if cpu == 0 {
+            hot[BOOT_SLOT] = HotSlot::initial(
+                BOOT_SLOT,
+                1,
+                LeafTaskHot {
+                    state: TaskState::Running,
+                    on_cpu: None,
+                    sched: new_entity(Qos::UserInitiated),
+                    context: 0,
+                    stack_top: None,
+                    space: None,
+                    local_switchable: false,
+                },
+            );
+        }
+        Self {
+            queue: CoreQueue::new(super::policy::kernel_policy(), cpu),
+            runs: RunLists::new(),
+            links: BootSlots::Inline([Link::EMPTY; INLINE_SLOTS]),
+            hot: BootSlots::Inline(hot),
+            current: if cpu == 0 { 0 } else { crate::smp::percpu::IDLE_SLOT },
+            slice_used: 0,
+            slice_quantum: 1,
+            switching_from: None,
+            switching_immediate: false,
+            local_transition: None,
+            completed: None,
+        }
+    }
+}
+macro_rules! run_leaves {
+    ($($cpu:expr),+ $(,)?) => { [$(kernel_core::ticket::TicketLock::new(RunLeaf::new($cpu))),+] };
+}
+static RUN_LEAVES: [kernel_core::ticket::TicketLock<RunLeaf>; MAX_CPUS] = run_leaves![
+    0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+    16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,
+];
+
+#[cfg(feature = "krn3-fast-tick-verify")]
+static LEAF_FINISHES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+#[cfg(feature = "krn3-fast-tick-verify")]
+static WORKER_LEAF_FINISHES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+#[cfg(feature = "krn3-fast-tick-verify")]
+static LEAF_LOCAL_SWITCHES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Complete the owner-local half of a context switch without taking the
+/// global scheduler lock.  IRQs are disabled by the caller, and the saved
+/// context is already durable when this function runs.  Cold lifecycle and
+/// migration publication are settled by `Scheduler::finish_switch` later.
+pub(super) fn finish_leaf_switch(
+    cpu: usize,
+    _resume: Option<kernel_core::raw_timing::Endpoint>,
+) -> bool {
+    with_leaf(cpu, |leaf| {
+        let Some(prev) = leaf.switching_from.take() else { return false; };
+        let force_immediate = core::mem::replace(&mut leaf.switching_immediate, false);
+        assert!(leaf.completed.is_none(), "leaf switch completion was not drained");
+        let token = leaf.hot.get(prev).and_then(|slot| slot.generation())
+            .map(|generation| kernel_core::task_index::Token { slot: prev, generation });
+        if let Some(token) = token {
+            let owner = leaf.hot[prev].get_mut(token).expect("finished switch exact hot owner");
+            if owner.on_cpu == Some(cpu) { owner.on_cpu = None; }
+        }
+        #[cfg(feature = "krn3-fast-tick-verify")]
+        {
+            LEAF_FINISHES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if token.is_some() {
+                WORKER_LEAF_FINISHES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        leaf.completed = Some(LeafCompletion {
+            prev,
+            token,
+            #[cfg(feature = "krn2-observe")]
+            resume: _resume,
+        });
+        // A migrated task's hot owner already lives on the destination leaf.
+        // Its cold completion must run now to publish the destination kick;
+        // waiting for an idle/nohz CPU's next scheduler transaction can leave
+        // the task stranded indefinitely.
+        force_immediate || token.is_none()
+    })
+}
+
+/// Consume the cold half of the previous context switch.  Callers hold the
+/// global scheduler lock, preserving the global -> leaf lock order.
+pub(super) fn take_leaf_switch_completion(cpu: usize) -> Option<LeafCompletion> {
+    with_leaf(cpu, |leaf| leaf.completed.take())
+}
+
+pub(super) fn take_leaf_transition(cpu: usize) -> Option<LeafTransition> {
+    with_leaf(cpu, |leaf| leaf.local_transition.take())
+}
+
+pub(super) enum FastLeafTick {
+    Rejected,
+    Continued,
+    Switch(SwitchPlan),
+}
+
+/// Account, select and publish one ordinary local preemption without taking
+/// the global scheduler lock. The global publisher grants only a single tick
+/// when local competition exists and only when every listed task is free of
+/// RT, shared-budget and inherited-priority state. Cold task/lifecycle mirrors
+/// are reconciled from `local_transition` before the next global mutation.
+pub(super) fn fast_leaf_competing_tick(
+    cpu: usize,
+    token: kernel_core::task_index::Token,
+    preemption: bool,
+) -> FastLeafTick {
+    with_leaf(cpu, |leaf| {
+        if leaf.current != token.slot || leaf.switching_from.is_some()
+            || leaf.local_transition.is_some() || leaf.completed.is_some()
+        {
+            return FastLeafTick::Rejected;
+        }
+        match leaf.hot[token.slot].get(token) {
+            Ok(owner) if owner.state == TaskState::Running && owner.local_switchable => {}
+            _ => return FastLeafTick::Rejected,
+        }
+        let mut waiting = ClassMask::EMPTY;
+        for slot in leaf.runs.iter(&leaf.links, cpu) {
+            let Some(generation) = leaf.hot[slot].generation() else { return FastLeafTick::Rejected; };
+            let hot_token = kernel_core::task_index::Token { slot, generation };
+            let Ok(owner) = leaf.hot[slot].get(hot_token) else { return FastLeafTick::Rejected; };
+            if !owner.local_switchable { return FastLeafTick::Rejected; }
+            if slot != token.slot && owner.state == TaskState::Runnable && owner.on_cpu.is_none() {
+                waiting.insert(owner.sched.qos);
+            }
+        }
+        {
+            let RunLeaf { queue, hot, slice_used, .. } = leaf;
+            let owner = hot[token.slot].get_mut(token).expect("fast competing tick exact owner");
+            queue.tick(Some(&mut owner.sched), waiting).expect("fast competing tick queue member");
+            *slice_used = slice_used.saturating_add(1);
+        }
+        let preempt = leaf.queue.should_preempt(
+            leaf.hot[token.slot].get(token).ok().map(|owner| &owner.sched),
+            leaf.slice_used,
+            leaf.slice_quantum,
+            waiting,
+        );
+        if !preemption || preempt.is_none() {
+            return FastLeafTick::Continued;
+        }
+        let cause = Cause::of(preempt.expect("checked local preemption"));
+        {
+            let RunLeaf { queue, hot, .. } = leaf;
+            let prev = hot[token.slot].get_mut(token).expect("fast switch previous owner");
+            prev.state = TaskState::Runnable;
+            queue.requeue(&mut prev.sched, Requeue::Preempted).expect("fast switch previous queue member");
+        }
+        let choice = {
+            let RunLeaf { queue, runs, links, hot, .. } = leaf;
+            let mut runnable = runs.iter(links, cpu).filter_map(|slot| {
+                let generation = hot[slot].generation()?;
+                let owner = hot[slot].get(kernel_core::task_index::Token { slot, generation }).ok()?;
+                (owner.local_switchable && owner.state == TaskState::Runnable
+                    && (owner.on_cpu.is_none() || slot == token.slot)).then_some((slot, &owner.sched))
+            });
+            queue.choose(&mut runnable)
+        };
+        let Some(choice) = choice else {
+            let prev = leaf.hot[token.slot].get_mut(token).expect("restore unselected previous owner");
+            prev.state = TaskState::Running;
+            leaf.queue.dispatched(&mut prev.sched).expect("restore previous dispatch");
+            return FastLeafTick::Continued;
+        };
+        leaf.slice_quantum = choice.quantum.max(1);
+        leaf.slice_used = 0;
+        let next = choice.slot;
+        let next_generation = leaf.hot[next].generation().expect("chosen task hot generation");
+        let next_token = kernel_core::task_index::Token { slot: next, generation: next_generation };
+        {
+            let RunLeaf { queue, hot, .. } = leaf;
+            let owner = hot[next].get_mut(next_token).expect("chosen task hot owner");
+            owner.state = TaskState::Running;
+            owner.on_cpu = Some(cpu);
+            queue.dispatched(&mut owner.sched).expect("chosen task queue member");
+        }
+        if next == token.slot {
+            return FastLeafTick::Continued;
+        }
+        let prev = token.slot;
+        let old = leaf.hot[prev].get(token).expect("switch previous metadata").context as *mut TaskContext;
+        let next_hot = *leaf.hot[next].get(next_token).expect("switch next metadata");
+        let new = next_hot.context as *const TaskContext;
+        assert!(!old.is_null() && !new.is_null(), "worker switch metadata must have contexts");
+        leaf.current = next;
+        leaf.switching_from = Some(prev);
+        leaf.switching_immediate = false;
+        leaf.local_transition = Some(LeafTransition { cpu, prev, next, cause });
+        #[cfg(feature = "krn3-fast-tick-verify")]
+        LEAF_LOCAL_SWITCHES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        FastLeafTick::Switch(SwitchPlan {
+            old,
+            new,
+            next_stack_top: next_hot.stack_top,
+            next_space: next_hot.space,
+            next_slot: next,
+        })
+    })
+}
+
+#[cfg(feature = "krn3-fast-tick-verify")]
+pub(super) fn leaf_finish_count() -> u32 {
+    LEAF_FINISHES.load(core::sync::atomic::Ordering::Relaxed)
+}
+#[cfg(feature = "krn3-fast-tick-verify")]
+pub(super) fn leaf_worker_finish_count() -> u32 {
+    WORKER_LEAF_FINISHES.load(core::sync::atomic::Ordering::Relaxed)
+}
+#[cfg(feature = "krn3-fast-tick-verify")]
+pub(super) fn leaf_local_switch_count() -> u32 {
+    LEAF_LOCAL_SWITCHES.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+fn with_leaf<R>(cpu: usize, f: impl FnOnce(&mut RunLeaf) -> R) -> R {
+    let mut guard = RUN_LEAVES[cpu].lock();
+    let result = f(&mut guard);
+    drop(guard);
+    result
+}
+
+/// Run a policy mutation against the generation-bound entity owned by one
+/// CPU leaf.  Queue policy state and task scheduling state change while the
+/// same leaf lock is held, so another CPU cannot observe a half-applied hook.
+fn with_leaf_hot<R>(
+    cpu: usize,
+    token: kernel_core::task_index::Token,
+    f: impl FnOnce(&mut CoreQueue<KernelPolicy>, &mut super::policy::SchedEntity) -> R,
+) -> (R, super::policy::SchedEntity) {
+    with_leaf(cpu, |leaf| {
+        let RunLeaf { queue, hot, .. } = leaf;
+        let owner = hot[token.slot].get_mut(token).expect("exact task hot owner");
+        let result = f(queue, &mut owner.sched);
+        (result, owner.sched)
+    })
+}
+
+/// Apply an already-authorized AP tick directly to its local scheduling
+/// entity and policy.  The caller holds that CPU's TickLease, so every global
+/// control transaction is excluded until this leaf update is complete.
+pub(super) fn fast_leaf_tick(cpu: usize, token: kernel_core::task_index::Token) {
+    with_leaf(cpu, |leaf| {
+        assert_eq!(leaf.current, token.slot, "fast tick changed current owner");
+        let RunLeaf { queue, hot, slice_used, .. } = leaf;
+        let owner = hot[token.slot].get_mut(token).expect("fast tick exact hot owner");
+        assert_eq!(owner.state, TaskState::Running, "fast tick owner is not running");
+        assert_eq!(owner.sched.queue(), Some(cpu), "fast tick owner moved queues");
+        queue.tick(Some(&mut owner.sched), ClassMask::EMPTY).expect("authorized fast tick queue member");
+        *slice_used = slice_used.saturating_add(1);
+    });
+}
+fn leaf_current(cpu: usize) -> usize {
+    with_leaf(cpu, |leaf| leaf.current)
+}
+fn leaf_run_state(cpu: usize) -> (usize, u32, u32, Option<usize>) {
+    with_leaf(cpu, |leaf| (leaf.current, leaf.slice_used, leaf.slice_quantum, leaf.switching_from))
+}
+fn leaf_has_completion(cpu: usize) -> bool {
+    with_leaf(cpu, |leaf| leaf.completed.is_some())
+}
+fn leaf_execution_settled(cpu: usize) -> bool {
+    with_leaf(cpu, |leaf| {
+        if leaf.switching_from.is_some() || leaf.completed.is_some() { return false; }
+        let current = leaf.current;
+        if !is_worker(current) { return true; }
+        leaf.hot.get(current).and_then(|slot| slot.generation()).and_then(|generation| {
+            leaf.hot[current].get(kernel_core::task_index::Token { slot: current, generation }).ok()
+        }).is_none_or(|owner| owner.on_cpu != Some(cpu))
+    })
+}
+#[derive(Clone)]
+struct LeafSlots {
+    cpu: usize,
+    next: Option<usize>,
+}
+impl LeafSlots {
+    fn new(cpu: usize) -> Self {
+        let next = with_leaf(cpu, |leaf| leaf.runs.first(cpu));
+        Self { cpu, next }
+    }
+}
+impl Iterator for LeafSlots {
+    type Item = usize;
+    fn next(&mut self) -> Option<Self::Item> {
+        let slot = self.next?;
+        self.next = with_leaf(self.cpu, |leaf| leaf.runs.next(&leaf.links, slot));
+        Some(slot)
+    }
+}
+fn with_leaf_pair<R>(source: usize, destination: usize, f: impl FnOnce(&mut RunLeaf, &mut RunLeaf) -> R) -> R {
+    let pair = kernel_core::percpu_migration::CpuPair::ordered(source as u16, destination as u16)
+        .expect("run-leaf pair requires distinct CPUs");
+    let mut first = RUN_LEAVES[pair.first as usize].lock();
+    let mut second = RUN_LEAVES[pair.second as usize].lock();
+    let result = if source == pair.first as usize { f(&mut first, &mut second) } else { f(&mut second, &mut first) };
+    drop(second);
+    drop(first);
+    result
+}
 #[cfg(feature = "fault-inject")]
 #[derive(Clone, Copy, Debug)]
 pub struct DeadlineTrace {
@@ -90,8 +457,9 @@ pub const BYTES_PER_SLOT: usize = core::mem::size_of::<Option<Task>>()
     + 2 * core::mem::size_of::<Option<Qos>>()
     + core::mem::size_of::<Option<usize>>()
     + core::mem::size_of::<bool>()
-    + 2 * core::mem::size_of::<Link>()
-    + core::mem::size_of::<*mut super::stack::Stack>();
+    + (MAX_CPUS + 1) * core::mem::size_of::<Link>()
+    + core::mem::size_of::<*mut super::stack::Stack>()
+    + MAX_CPUS*core::mem::size_of::<Deadline>()+2*core::mem::size_of::<usize>();
 
 /// 启动期扩容被拒绝的原因（被拒时调度器保持原样）。
 /// Why the boot-time grow was refused (the scheduler is left unchanged).
@@ -235,6 +603,8 @@ pub enum SpawnError {
 /// Why an affinity change was refused; the scheduler is left unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AffinityError {
+    /// RT reservations stay on their admitted partition until re-admitted.
+    RtPartition,
     /// 集合里没有在线处理器（含空集）。
     NoOnlineCpu,
     /// 任务不存在、已退出或是引导线程。
@@ -348,19 +718,11 @@ pub struct ScanStats {
     pub ticks: u64,
 }
 
-/// 实体从它所在的队列出队（睡眠或退出）；不在任何队列时拒绝。
-fn dequeue_from<P: SchedPolicy>(queues: &mut [CoreQueue<P>], e: &mut kernel_core::sched::SchedEntity<P::State>, why: Dequeue) -> Result<(), QueueError> {
-    match e.queue() {
-        Some(q) if q < queues.len() => queues[q].dequeue(e, why),
-        q => Err(QueueError::NotQueued(q)),
-    }
-}
-
 /// 看门狗报告日志容量。
 pub const WATCHDOG_LOG: usize = crate::config::ACTIVE.sched.watchdog_log;
 
 /// 调度机制本体。槽位总数（含引导线程）在启动期决定，见 [`Scheduler::grow`]。
-pub struct Scheduler<P: SchedPolicy> {
+pub struct Scheduler {
     #[cfg(feature = "krn2-observe")]
     pub(super) origin_total: kernel_core::sync_origin::Counts,
     #[cfg(feature = "krn2-observe")]
@@ -384,17 +746,9 @@ pub struct Scheduler<P: SchedPolicy> {
     stacks: StackPool,
     /// Successfully published, not-yet-exited workers (boot slot excluded).
     workers: usize,
-    wake_mailboxes: [kernel_core::wake_mailbox::WakeMailbox<WAKE_MAILBOX_CAPACITY>; MAX_CPUS],
-    remote_wakes: u32,
-    wake_fallbacks: u32,
-    limit_tick_drains: [u32; 2],
-    // Bounded diagnostic observer; never grants or changes CPU limit.
-    limit_window: Option<(CpuGroupId, u64, u64, u64, Option<(u64,u64)>)>,
-    /// 每个处理器的运行队列（各持一份策略实例；成员关系与入队计数由它维护）。
-    queues: [CoreQueue<P>; MAX_CPUS],
-    /// 每个运行队列的成员链表（表头与长度；链接在 `links` 里，与任务表同容量）。
-    runs: RunLists<MAX_CPUS>,
-    links: BootSlots<Link, INLINE_SLOTS>,
+    budget_tick_drains: [u32; 2],
+    // Bounded diagnostic observer; never grants or changes CPU budget.
+    budget_window: Option<(CpuGroupId, u64, u64, u64, Option<(u64,u64)>)>,
     /// 同步运行列表时被拒绝的次数（正常运行时恒为 0）。
     list_errors: u32,
     /// 睡眠任务中最早的定时唤醒时刻（`u64::MAX` = 没有；可能偏早，不会偏晚）。
@@ -409,17 +763,24 @@ pub struct Scheduler<P: SchedPolicy> {
     rt_entries: BootSlots<Deadline, {INLINE_SLOTS * MAX_CPUS}>,
     rt_positions: BootSlots<usize, INLINE_SLOTS>,
     rt_owners: BootSlots<usize, INLINE_SLOTS>,
+    ns_heap: DeadlineForest<MAX_CPUS>,
+    ns_entries: BootSlots<Deadline,{INLINE_SLOTS*MAX_CPUS}>,
+    ns_positions: BootSlots<usize,INLINE_SLOTS>,
+    ns_owners: BootSlots<usize,INLINE_SLOTS>,
+    ns_roots: [Option<u64>;MAX_CPUS],
+    ns_at: [u64;MAX_CPUS],
+    ns_credit: [Option<kernel_core::timer_units::PeriodicCredit>;MAX_CPUS],
+    ns_need_tick:[bool;MAX_CPUS],
+    ns_now:u64,
+    ns_active:bool,
+    ns_programmed:[Option<u64>;MAX_CPUS],
     /// 选择路径的遍历量统计。
     scan: ScanStats,
     /// 被运行队列拒绝的钩子调用次数（成员关系不符；正常运行时恒为 0）与最近一次的原因。
     hook_errors: u32,
     last_hook_error: Option<QueueError>,
-    /// 每个处理器的当前槽位（引导处理器起初为引导线程，其他处理器为空闲执行流）。
-    current: [usize; MAX_CPUS],
     /// 其他处理器空闲执行流被切走时保存上下文的位置。
     idle_ctx: [TaskContext; MAX_CPUS],
-    /// 每个处理器上一次切换换下的槽位（切换完成后由 [`Scheduler::finish_switch`] 清除其 `on_cpu`）。
-    switching_from: [Option<usize>; MAX_CPUS],
     /// 参与调度的处理器（引导处理器总在其中；其他处理器进入空闲执行流时加入）。
     online: CpuSet,
     /// 放置 / 窃取 / 周期均衡的决定者。
@@ -442,9 +803,6 @@ pub struct Scheduler<P: SchedPolicy> {
     observer: Option<SwitchObserver>,
     /// 调度器看到的当前时刻（tick；由 [`Scheduler::tick`] 推进）。
     now: u64,
-    /// 每个处理器当前时间片已用的 tick 数与长度。
-    slice_used: [u32; MAX_CPUS],
-    slice_quantum: [u32; MAX_CPUS],
     /// 每档的唤醒延迟直方图。
     latency: [LatencyHistogram; QOS_CLASSES],
     /// 是否沿等待关系传播档位（默认开启；关闭只用于对照测量）。
@@ -515,10 +873,10 @@ pub struct NohzStats {
     pub kicks: u64,
 }
 
-impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
+impl Scheduler {
     /// 构造调度器；槽位 0 预置为正在引导处理器上运行的引导线程，其他处理器起初在空闲执行流上。
     /// 起初只有 [`INLINE_SLOTS`] 个槽位，堆就绪后经 [`Scheduler::grow`] 扩到启动期容量。
-    pub const fn new(policy: P) -> Self {
+    pub const fn new(_policy: KernelPolicy) -> Self {
         let mut tasks = [const { None }; INLINE_SLOTS];
         let mut boot = Task::new(TaskId(0), "boot");
         boot.state = TaskState::Running;
@@ -527,8 +885,6 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         let mut i = 0;
         while i < INLINE_SLOTS { epochs[i] = SlotLifecycle::new(i); i += 1; }
         epochs[BOOT_SLOT] = SlotLifecycle::initial(BOOT_SLOT, 0);
-        let mut current = [IDLE; MAX_CPUS];
-        current[0] = BOOT_SLOT;
         Scheduler {
             #[cfg(feature = "krn2-observe")]
             origin_total: kernel_core::sync_origin::Counts::EMPTY,
@@ -550,16 +906,10 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             epochs: BootSlots::Inline(epochs),
             id_index: None,
             stacks: StackPool::new(),
-            queues: CoreQueue::array(policy),
-            runs: RunLists::new(),
-            links: BootSlots::Inline([Link::EMPTY; INLINE_SLOTS]),
             list_errors: 0,
             workers: 0,
-            wake_mailboxes: [const { kernel_core::wake_mailbox::WakeMailbox::new() }; MAX_CPUS],
-            remote_wakes: 0,
-            wake_fallbacks: 0,
-            limit_tick_drains: [0; 2],
-            limit_window: None,
+            budget_tick_drains: [0; 2],
+            budget_window: None,
             next_wake: [u64::MAX; MAX_CPUS],
             wake_heap: DeadlineForest::new(),
             wake_entries: BootSlots::Inline([Deadline::EMPTY; INLINE_SLOTS * MAX_CPUS]),
@@ -570,12 +920,17 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             rt_entries: BootSlots::Inline([Deadline::EMPTY; INLINE_SLOTS * MAX_CPUS]),
             rt_positions: BootSlots::Inline([NO_DEADLINE; INLINE_SLOTS]),
             rt_owners: BootSlots::Inline([NO_DEADLINE; INLINE_SLOTS]),
+            ns_heap:DeadlineForest::new(),
+            ns_entries:BootSlots::Inline([Deadline::EMPTY;INLINE_SLOTS*MAX_CPUS]),
+            ns_positions:BootSlots::Inline([NO_DEADLINE;INLINE_SLOTS]),
+            ns_owners:BootSlots::Inline([NO_DEADLINE;INLINE_SLOTS]),
+            ns_roots:[None;MAX_CPUS],ns_at:[0;MAX_CPUS],ns_credit:[None;MAX_CPUS],
+            ns_need_tick:[false;MAX_CPUS],
+            ns_now:0,ns_active:false,ns_programmed:[None;MAX_CPUS],
             scan: ScanStats { picks: 0, visited: 0, max_visited: 0, wake_scans: 0, ticks: 0 },
             hook_errors: 0,
             last_hook_error: None,
-            current,
             idle_ctx: [const { crate::arch::EMPTY_CONTEXT }; MAX_CPUS],
-            switching_from: [None; MAX_CPUS],
             online: CpuSet::first(1),
             balancer: Balancer::new(BalanceParams::DEFAULT),
             kicks: CpuSet::EMPTY,
@@ -591,8 +946,6 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             switches: 0,
             observer: None,
             now: 0,
-            slice_used: [0; MAX_CPUS],
-            slice_quantum: [1; MAX_CPUS],
             latency: [const { LatencyHistogram::new() }; QOS_CLASSES],
             inherit: true,
             wait_seq: 0,
@@ -631,6 +984,11 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 类别仲裁：选出本 tick 应运行的类别；该类没有候选时返回 `None`（不过滤）。
     fn pick_arb_class(&mut self, c: usize, prev: usize) -> Option<kernel_core::arbiter::Class> {
         use kernel_core::arbiter::{Class, Demand};
+        // An admitted eligible RT partition is active even for single-mode profiles.
+        if self.listed(c).any(|(i,t)|t.rt_period!=0 && t.state==TaskState::Runnable
+            && (t.on_cpu.is_none() || i==prev) && self.eligible(t)) {
+            return Some(Class::RealTime);
+        }
         if !self.arbiter_on {
             return None;
         }
@@ -667,12 +1025,12 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
 
     /// 当前策略名。
     pub fn policy_name(&self) -> &'static str {
-        self.queues[0].policy().name()
+        with_leaf(0, |leaf| leaf.queue.policy().name())
     }
 
     /// 默认档位的时间片（tick 数）。
     pub fn default_quantum(&self) -> u32 {
-        self.queues[0].policy().default_quantum()
+        with_leaf(0, |leaf| leaf.queue.policy().default_quantum())
     }
 
     // Author: chatgpt. Diagnostic start identity; idle has no canonical Token.
@@ -685,7 +1043,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
 
     /// 本处理器的当前槽位。
     fn cur(&self) -> usize {
-        self.current[this_cpu()]
+        leaf_current(this_cpu())
     }
 
     /// 槽位上的任务（越界或空槽位为 `None`；空闲执行流的取值越界，因此也是 `None`）。
@@ -696,6 +1054,68 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 槽位上的任务（可变）。
     fn task_mut(&mut self, slot: usize) -> Option<&mut Task> {
         self.tasks.get_mut(slot).and_then(|t| t.as_mut())
+    }
+
+    fn publish_hot(&self, home: usize, token: kernel_core::task_index::Token, task: &Task) {
+        let value = LeafTaskHot {
+            state: task.state,
+            on_cpu: task.on_cpu,
+            sched: task.sched,
+            context: (&task.context as *const TaskContext) as usize,
+            stack_top: is_worker(token.slot).then(|| self.stacks.top(token.slot)),
+            space: task.space,
+            local_switchable: task.cpu_group.is_none() && task.rt_period == 0
+                && task.ns_budget.is_none() && task.sched.qos == task.base_qos,
+        };
+        with_leaf(home, |leaf| {
+            leaf.hot[token.slot].publish(token, value).expect("publish empty task hot slot");
+        });
+    }
+
+    fn sync_hot(&self, slot: usize) {
+        let task = self.task(slot).expect("sync live task hot state");
+        let token = self.epochs[slot].history().expect("sync task identity").token();
+        let (state, on_cpu, space) = (task.state, task.on_cpu, task.space);
+        let local_switchable = task.cpu_group.is_none() && task.rt_period == 0
+            && task.ns_budget.is_none() && task.sched.qos == task.base_qos;
+        with_leaf(task.home, |leaf| {
+            match leaf.hot[slot].get_mut(token) {
+                Ok(hot) => {
+                    hot.state = state;
+                    hot.on_cpu = on_cpu;
+                    hot.space = space;
+                    hot.local_switchable = local_switchable;
+                }
+                Err(kernel_core::task_hot::Error::WrongSlot) => panic!("task hot wrong slot"),
+                Err(kernel_core::task_hot::Error::Stale) => panic!("task hot stale generation"),
+                Err(kernel_core::task_hot::Error::Empty) => panic!("task hot owner missing"),
+                Err(kernel_core::task_hot::Error::Occupied) => unreachable!(),
+            }
+        });
+    }
+
+    fn retire_hot(&self, home: usize, token: kernel_core::task_index::Token) {
+        with_leaf(home, |leaf| {
+            leaf.hot[token.slot].retire(token).expect("retire matching task hot slot");
+        });
+    }
+
+
+    /// Mutate the canonical per-CPU scheduling entity and refresh the cold
+    /// Task mirror after releasing the leaf lock.  All queue hooks use this
+    /// path; readers that have not yet moved into the leaf can remain source
+    /// compatible during the KRN-3 transition.
+    fn update_hot_sched<R>(
+        &mut self,
+        slot: usize,
+        f: impl FnOnce(&mut CoreQueue<KernelPolicy>, &mut super::policy::SchedEntity) -> R,
+    ) -> R {
+        let task = self.tasks[slot].as_ref().expect("hot scheduling task");
+        let home = task.home;
+        let token = self.epochs[slot].history().expect("hot scheduling identity").token();
+        let (result, sched) = with_leaf_hot(home, token, f);
+        self.tasks[slot].as_mut().expect("hot scheduling task mirror").sched = sched;
+        result
     }
 
     /// 启动期扩容：把任务表（及组表、调度暂存）扩到 `slots` 个槽位，并为新增槽位分配内核栈。
@@ -710,8 +1130,9 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             return Err(GrowError::Shrink);
         }
         let quiescent = self.online.len() == 1
-            && self.current[0] == BOOT_SLOT
-            && self.switching_from.iter().all(Option::is_none)
+            && leaf_current(0) == BOOT_SLOT
+            && (0..MAX_CPUS).all(|cpu| leaf_run_state(cpu).3.is_none())
+            && (0..MAX_CPUS).all(|cpu| !leaf_has_completion(cpu))
             && self.tasks.iter().enumerate().all(|(i, t)| {
                 i == BOOT_SLOT || t.as_ref().is_none_or(|t| t.state == TaskState::Exited && t.on_cpu.is_none())
             });
@@ -727,7 +1148,18 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         let eff = self.scratch_eff.prepare(slots, || None).ok_or_else(|| oom(self))?;
         let waits = self.scratch_waits.prepare(slots, || None).ok_or_else(|| oom(self))?;
         let wants = self.scratch_wants.prepare(slots, || false).ok_or_else(|| oom(self))?;
-        let links = self.links.prepare(slots, || Link::EMPTY).ok_or_else(|| oom(self))?;
+        let mut leaf_links: [Option<Box<[Link]>>; MAX_CPUS] = core::array::from_fn(|_| None);
+        let mut leaf_hot: [Option<Box<[HotSlot<LeafTaskHot>]>>; MAX_CPUS] = core::array::from_fn(|_| None);
+        for (cpu, prepared) in leaf_links.iter_mut().enumerate() {
+            *prepared = Some(with_leaf(cpu, |leaf| leaf.links.prepare(slots, || Link::EMPTY))
+                .ok_or_else(|| oom(self))?);
+            let mut slot = 0;
+            leaf_hot[cpu] = Some(with_leaf(cpu, |leaf| leaf.hot.prepare(slots, || {
+                let value = HotSlot::empty(slot);
+                slot += 1;
+                value
+            })).ok_or_else(|| oom(self))?);
+        }
         let deadline_count = slots.checked_mul(MAX_CPUS).ok_or_else(|| oom(self))?;
         let mut wake_entries = self.wake_entries.prepare(deadline_count, || Deadline::EMPTY).ok_or_else(|| oom(self))?;
         let mut wake_positions = self.wake_positions.prepare(slots, || NO_DEADLINE).ok_or_else(|| oom(self))?;
@@ -762,6 +1194,10 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         for e in self.epochs.iter() {
             if let Some(r) = e.history() { index.insert(r.label(), r.token()).expect("unique historical task labels"); }
         }
+        let ns_entries=self.ns_entries.prepare(deadline_count,||Deadline::EMPTY).ok_or_else(||oom(self))?;
+        let ns_positions=self.ns_positions.prepare(slots,||NO_DEADLINE).ok_or_else(||oom(self))?;
+        let ns_owners=self.ns_owners.prepare(slots,||NO_DEADLINE).ok_or_else(||oom(self))?;
+        self.ns_entries.commit(ns_entries);self.ns_positions.commit(ns_positions);self.ns_owners.commit(ns_owners);
         self.epochs.commit(epochs);
         self.id_index = Some(index);
         self.tasks.commit(tasks);
@@ -772,7 +1208,12 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         self.scratch_eff.commit(eff);
         self.scratch_waits.commit(waits);
         self.scratch_wants.commit(wants);
-        self.links.commit(links);
+        for (cpu, prepared) in leaf_links.into_iter().enumerate() {
+            with_leaf(cpu, |leaf| leaf.links.commit(prepared.expect("all leaf link tables prepared")));
+        }
+        for (cpu, prepared) in leaf_hot.into_iter().enumerate() {
+            with_leaf(cpu, |leaf| leaf.hot.commit(prepared.expect("all leaf hot tables prepared")));
+        }
         self.wake_entries = BootSlots::Heap(wake_entries);
         self.wake_positions = BootSlots::Heap(wake_positions);
         self.wake_owners = BootSlots::Heap(wake_owners);
@@ -886,6 +1327,9 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             assert_eq!(index.remove(id.0), old.map(|r| r.token()));
             index.insert(id.0, reservation.token()).expect("same label replacement capacity");
         }
+        if let (Some(old), Some(task)) = (old, self.tasks[slot].as_ref()) {
+            self.retire_hot(task.home, old.token());
+        }
         self.epochs[slot].publish(reservation).expect("publish current reservation");
         let creator = if is_worker(current) { self.task(current) } else { None };
         let mut task = Task::new(id, name);
@@ -909,11 +1353,10 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         // SAFETY：该槽位有栈且为空，没有任何任务在这块栈上运行。
         task.context = unsafe { self.stacks.prepare_initial_frame(slot, trampoline) };
         self.tasks[slot] = Some(task);
+        self.publish_hot(home, reservation.token(), self.tasks[slot].as_ref().unwrap());
         self.workers += 1;
-        if let Some(t) = self.tasks[slot].as_mut() {
-            let r = self.queues[home].enqueue(&mut t.sched, Enqueue::Spawn);
-            self.note(r);
-        }
+        let r = self.update_hot_sched(slot, |queue, sched| queue.enqueue(sched, Enqueue::Spawn));
+        self.note(r);
         self.relist(slot);
         if home != this_cpu() && loads[home].idle() {
             self.kicks.insert(home);
@@ -945,9 +1388,11 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
 
     /// 设置当前任务的地址空间（`None` = 内核空间）。之后每次切回该任务都会切到这个空间。
     pub fn set_current_space(&mut self, space: Option<crate::arch::SpaceRoot>) {
-        if let Some(t) = self.task_mut(self.cur()) {
+        let cur = self.cur();
+        if let Some(t) = self.task_mut(cur) {
             t.space = space;
         }
+        if self.task(cur).is_some() { self.sync_hot(cur); }
     }
 
     /// 设置当前任务可发起的系统调用集合。
@@ -1007,6 +1452,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 正在等它的任务（等它退出、或等它持有的锁）全部被唤醒，借给它的档位随之归还。
     pub fn mark_current_exited(&mut self) {
         let cur = self.cur();
+        if let Some(r)=self.epochs[cur].history(){self.ns_heap.remove(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,cur,r.token().generation).expect("ns exit identity");}
         let mut left = None;
         let mut pi_graph_changed = false;
         if is_worker(cur) && self.task(cur).is_some_and(|t| t.state != TaskState::Exited) {
@@ -1017,6 +1463,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             self.remove_wake_deadline(cur, r.token().generation);
             self.remove_rt_deadline(cur, r.token().generation);
         }
+        let mut dequeue = false;
         if let Some(t) = self.tasks.get_mut(cur).and_then(|t| t.as_mut()) {
             if let Some(key) = t.event_wait.pending() { t.event_wait.finish(key); }
             if is_worker(cur) && t.state != TaskState::Exited {
@@ -1030,9 +1477,15 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             pi_graph_changed |= t.waits_for.take().is_some();
             left = t.cpu_group.take();
             if is_worker(cur) {
-                let r = dequeue_from(&mut self.queues, &mut t.sched, Dequeue::Exit);
-                self.note(r);
+                dequeue = true;
             }
+        }
+        if dequeue {
+            let r = self.update_hot_sched(cur, |queue, sched| queue.dequeue(sched, Dequeue::Exit));
+            self.note(r);
+        }
+        if self.task(cur).is_some() {
+            self.sync_hot(cur);
         }
         self.relist(cur);
         if let Some(g) = left {
@@ -1120,11 +1573,27 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         inherit::resolve(base, waits, self.inherit, eff);
         #[cfg(feature = "krn2-observe")]
         let measured = inherit::resolve_measured(base, waits, self.inherit, eff);
-        for (t, q) in self.tasks.iter_mut().zip(eff.iter()) {
+        for (slot, (t, q)) in self.tasks.iter_mut().zip(eff.iter()).enumerate() {
             #[cfg(feature = "krn2-observe")]
             outer.slots(1);
             if let (Some(t), Some(q)) = (t.as_mut(), q) {
-                t.sched.qos = *q;
+                if t.sched.qos != *q {
+                    let token = self.epochs[slot].history().expect("PI task identity").token();
+                    let (_, sched) = with_leaf_hot(t.home, token, |_queue, sched| sched.qos = *q);
+                    t.sched = sched;
+                    t.pi_round = t.pi_round.wrapping_add(1).max(1);
+                    if t.home != this_cpu() {
+                        if let Some(history) = self.epochs[slot].history() {
+                            super::publish_pi_message(t.home, kernel_core::percpu_migration::PiMessage {
+                                token: kernel_core::percpu_migration::TaskToken {
+                                    slot: slot as u32, generation: history.token().generation,
+                                },
+                                round: t.pi_round, priority: q.index() as u8,
+                            });
+                            self.kicks.insert(t.home);
+                        }
+                    }
+                }
             }
         }
         #[cfg(feature = "krn2-observe")]
@@ -1151,12 +1620,13 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         let seq = self.wait_seq;
         let t = self.tasks[cur].as_mut().ok_or(BlockError::NotAWorker)?;
         t.state = TaskState::Blocked;
-        let r = dequeue_from(&mut self.queues, &mut t.sched, Dequeue::Block);
         t.wake_at = None;
         t.waits_for = Some(owner_slot);
         t.wait_key = key;
         t.wait_seq = seq;
+        let r = self.update_hot_sched(cur, |queue, sched| queue.dequeue(sched, Dequeue::Block));
         self.note(r);
+        self.sync_hot(cur);
         self.relist(cur);
         self.resolve_inheritance();
         Ok(())
@@ -1184,12 +1654,30 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         self.tasks[next].as_ref().map(|t| t.id)
     }
 
+    /// Cancels every task waiting on the exact owner/object pair. Used when a
+    /// user-visible synchronization object loses its last external owner.
+    /// Each resumed caller rechecks the object terminal state before return.
+    pub fn cancel_waiters(&mut self, owner: TaskId, key: u64) -> usize {
+        let Some(owner_slot) = self.historical_slot(owner) else { return 0 };
+        let mut count = 0;
+        for i in 1..self.tasks.len() {
+            let matches = self.tasks[i].as_ref().is_some_and(|t| {
+                t.state == TaskState::Blocked && t.waits_for == Some(owner_slot) && t.wait_key == key
+            });
+            if matches {
+                self.make_runnable(i);
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// 是否有可运行任务的有效档位高于当前任务（引导线程上：是否有任何可运行任务）。
     /// 交出锁、归还借来的档位之后据此决定是否立即让出。
     pub fn outranked(&self) -> bool {
         let Some(top) = self.waiting(this_cpu()).highest() else { return false };
         match self.task(self.cur()) {
-            Some(t) if is_worker(self.cur()) => self.queues[this_cpu()].policy().outranks(top, t.sched.qos),
+            Some(t) if is_worker(self.cur()) => with_leaf(this_cpu(), |leaf| leaf.queue.policy().outranks(top, t.sched.qos)),
             _ => true,
         }
     }
@@ -1208,34 +1696,74 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         } else {
             self.remove_wake_deadline(cur, generation);
         }
-        match self.tasks.get_mut(cur).and_then(|t| t.as_mut()) {
+        let blocked = match self.tasks.get_mut(cur).and_then(|t| t.as_mut()) {
             Some(t) => {
                 t.state = TaskState::Blocked;
                 t.wake_at = wake_at;
-                let r = dequeue_from(&mut self.queues, &mut t.sched, Dequeue::Block);
-                self.note(r);
-                self.relist(cur);
+                t.wake_ns = None;
                 true
             }
             None => false,
+        };
+        if blocked {
+            let r = self.update_hot_sched(cur, |queue, sched| queue.dequeue(sched, Dequeue::Block));
+            self.note(r);
+            self.relist(cur);
+            self.sync_hot(cur);
         }
+        blocked
     }
 
     /// Author: chatgpt。对象锁内完成条件检查后调用；登记与阻塞共用原global事务。
     /// 调用者须先预留Ring队列/保活引用，并在释放所有guard后才让出CPU。
     /// 非工作任务、已有登记或轮次耗尽均拒绝，不覆盖已有等待。
-    pub fn enroll_event_wait(&mut self, deadline: Option<u64>) -> Result<Option<kernel_core::event_wait::Key>, ()> {
+    pub fn enroll_event_wait(
+        &mut self,
+        deadline: Option<u64>,
+        donation: Option<(TaskId, u64)>,
+    ) -> Result<Option<kernel_core::event_wait::Key>, ()> {
         let cur = self.cur();
         if !is_worker(cur) { return Err(()); }
         let token = self.epochs.get(cur).and_then(|e| e.history()).ok_or(())?.token();
         let now = self.now;
-        let t = self.tasks.get_mut(cur).and_then(Option::as_mut).ok_or(())?;
-        let key = match t.event_wait.enroll(token, false, now, deadline) {
-            kernel_core::event_wait::Enroll::Armed(key) => key,
-            kernel_core::event_wait::Enroll::TimedOut => return Ok(None),
-            _ => return Err(()),
+        let key = {
+            let t = self.tasks.get_mut(cur).and_then(Option::as_mut).ok_or(())?;
+            match t.event_wait.enroll(token, false, now, deadline) {
+                kernel_core::event_wait::Enroll::Armed(key) => key,
+                kernel_core::event_wait::Enroll::TimedOut => return Ok(None),
+                _ => return Err(()),
+            }
         };
-        if self.block_current(deadline) { Ok(Some(key)) } else {
+        let edge = if let Some((owner, object_key)) = donation {
+            let owner_slot = match self.live_slot(owner) {
+                Some(slot) => slot,
+                None => {
+                    self.tasks[cur].as_mut().unwrap().event_wait.finish(key);
+                    return Err(());
+                }
+            };
+            for (w, t) in self.scratch_waits.iter_mut().zip(self.tasks.iter()) {
+                *w = t.as_ref().and_then(|t| t.waits_for);
+            }
+            if inherit::check_edge(&self.scratch_waits, cur, owner_slot).is_err() {
+                self.tasks[cur].as_mut().unwrap().event_wait.finish(key);
+                return Err(());
+            }
+            Some((owner_slot, object_key))
+        } else {
+            None
+        };
+        if self.block_current(deadline) {
+            if let Some((owner_slot, object_key)) = edge {
+                self.wait_seq += 1;
+                let t = self.tasks[cur].as_mut().expect("blocked event waiter");
+                t.waits_for = Some(owner_slot);
+                t.wait_key = object_key;
+                t.wait_seq = self.wait_seq;
+                self.resolve_inheritance();
+            }
+            Ok(Some(key))
+        } else {
             self.tasks[cur].as_mut().unwrap().event_wait.finish(key);
             Err(())
         }
@@ -1278,26 +1806,25 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         if let Some(key) = t.event_wait.pending() { t.event_wait.finish(key); }
         t.state = TaskState::Runnable;
         t.wake_at = None;
+        t.wake_ns = None;
         t.woken_at = Some(now);
         // 被任何途径唤醒都解除等待关系（例如所属进程开始终止）；醒来者自己重新检查等待条件。
         let had_edge = t.waits_for.take().is_some();
         if had_edge {
             self.resolve_inheritance();
         }
+        self.sync_hot(i);
         self.replace(i);
         // 直接借字段（而不是经 task_mut）：同时要借运行队列
-        if let Some(t) = self.tasks.get_mut(i).and_then(|t| t.as_mut()) {
-            let home = t.home.min(MAX_CPUS - 1);
-            let r = self.queues[home].enqueue(&mut t.sched, Enqueue::Wake);
-            self.note(r);
-        }
+        let r = self.update_hot_sched(i, |queue, sched| queue.enqueue(sched, Enqueue::Wake));
+        self.note(r);
         self.relist(i);
         // 被限速组的成员醒来也不抢占：令牌回正之前它本来就不会被选中。
         let Some(t) = self.task(i).filter(|t| self.eligible(t)) else { return false };
         let (woken, home) = (t.sched.qos, t.home);
-        let target = self.current[home];
+        let target = leaf_current(home);
         let running = if is_worker(target) { self.task(target).map(|t| t.sched.qos) } else { None };
-        let preempts = self.queues[home].wake_preempts(woken, running);
+        let preempts = with_leaf(home, |leaf| leaf.queue.wake_preempts(woken, running));
         if home == this_cpu() {
             return preempts;
         }
@@ -1310,6 +1837,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 为可运行且未被任何处理器占用的任务 `i` 重新选运行队列（亲和集合内按负载与迁移代价）。
     fn replace(&mut self, i: usize) {
         let Some(t) = self.task(i) else { return };
+        if t.rt_period != 0 { return; } // Partitioned RT is not load-balanced.
         if t.on_cpu.is_some() {
             // 还在被换下：等切换完成后由目标处理器的下一次检查（或窃取）接手，仍按原队列记
             return;
@@ -1324,32 +1852,82 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 把任务 `i` 的运行队列改为 `home`：它在某个队列上（可运行或运行中）时经迁移钩子换到新队列，
     /// 不在队列上（睡眠）时只改归属。
     fn rehome(&mut self, i: usize, home: usize) {
-        let Some(t) = self.tasks.get_mut(i).and_then(|t| t.as_mut()) else { return };
-        let r = match t.sched.queue() {
-            Some(q) if q != home => migrate(&mut self.queues, q, home, &mut t.sched),
+        let generation = self.epochs[i].history().expect("migrating task identity").token().generation;
+        let hot_token = kernel_core::task_index::Token { slot: i, generation };
+        let token = kernel_core::percpu_migration::TaskToken { slot: i as u32, generation };
+        let old_home = self.tasks[i].as_ref().expect("migrating live task").home;
+        let source = self.tasks.get(i).and_then(|t| t.as_ref()).and_then(|t| t.sched.queue());
+        let mut transaction = source.filter(|&q| q != home).map(|q| {
+            kernel_core::percpu_migration::Migration::begin(
+                token, kernel_core::percpu_migration::Owner::Cpu(q as u16), home as u16,
+            ).expect("distinct in-range CPU migration")
+        });
+        if let Some(tx) = transaction.as_mut() { tx.detach().expect("new migration is source-owned"); }
+        let r = match source {
+            Some(q) if q != home => {
+                with_leaf_pair(q, home, |src, dst| {
+                    let RunLeaf { queue, runs, links, hot, .. } = src;
+                    let owner = hot[i].get_mut(hot_token).expect("source task hot owner");
+                    let result = queue.migrate_to(&mut dst.queue, &mut owner.sched);
+                    if result.is_ok() {
+                        runs.remove(links, i).expect("source run-list member");
+                        dst.runs.insert(&mut dst.links, home, i).expect("destination run-list capacity");
+                    }
+                    result
+                })
+            }
             _ => Ok(()),
         };
-        t.home = home;
+        // A failed queue hook must not publish a destination home.  Keep the
+        // source owner so audit/retry cannot observe a task assigned to one CPU
+        // while it remains linked on another CPU's queue.
+        let actual_home = if r.is_ok() {
+            if let Some(tx) = transaction.as_mut() { tx.commit().expect("detached migration commits once"); }
+            home
+        } else {
+            if let Some(tx) = transaction.as_mut() { tx.abort().expect("detached migration aborts once"); }
+            source.unwrap_or_else(|| self.tasks[i].as_ref().unwrap().home)
+        };
+        if actual_home != old_home {
+            with_leaf_pair(old_home, actual_home, |src, dst| {
+                let hot = src.hot[i].retire(hot_token).expect("source task hot owner");
+                dst.hot[i].publish(hot_token, hot).expect("empty destination task hot slot");
+            });
+        }
+        let t = self.tasks[i].as_mut().expect("migrating live task");
+        t.home = actual_home;
+        t.sched = with_leaf(actual_home, |leaf| leaf.hot[i].get(hot_token).expect("migrated task hot owner").sched);
         let wake = t.wake_at;
-        let rt = (t.rt_period != 0 && t.state != TaskState::Exited).then_some(t.rt_next_period);
-        let generation = self.epochs[i].history().expect("migrating task identity").token().generation;
-        if let Some(at) = wake { self.set_wake_deadline(home, Deadline { at, slot: i, generation }); }
-        if let Some(at) = rt { self.set_rt_deadline(home, Deadline { at, slot: i, generation }); }
+        let rt = (t.rt_period != 0 && t.ns_budget.is_none() && t.state != TaskState::Exited).then_some(t.rt_next_period);
+        if let Some(at) = wake { self.set_wake_deadline(actual_home, Deadline { at, slot: i, generation }); }
+        if let Some(at) = rt { self.set_rt_deadline(actual_home, Deadline { at, slot: i, generation }); }
         self.note(r);
-        self.relist(i);
+        if source.is_none() { self.relist(i); }
     }
 
     /// 让槽位 `i` 的运行列表成员关系与它的实体队列字段一致（每次运行队列成员关系改变后调用）。
     fn relist(&mut self, i: usize) {
         let want = self.tasks.get(i).and_then(|t| t.as_ref()).and_then(|t| t.sched.queue());
-        if self.runs.place(&mut self.links, i, want).is_err() {
+        let have = (0..MAX_CPUS).find(|&cpu| with_leaf(cpu, |leaf| leaf.links.get(i).and_then(Link::queue).is_some()));
+        let result = match (have, want) {
+            (a, b) if a == b => Ok(false),
+            (Some(from), Some(to)) => with_leaf_pair(from, to, |src, dst| {
+                src.runs.remove(&mut src.links, i)?;
+                dst.runs.insert(&mut dst.links, to, i)?;
+                Ok(true)
+            }),
+            (Some(from), None) => with_leaf(from, |leaf| leaf.runs.remove(&mut leaf.links, i).map(|_| true)),
+            (None, Some(to)) => with_leaf(to, |leaf| leaf.runs.insert(&mut leaf.links, to, i).map(|_| true)),
+            (None, None) => Ok(false),
+        };
+        if result.is_err() {
             self.list_errors = self.list_errors.saturating_add(1);
         }
     }
 
     /// 处理器 `c` 运行列表上的任务（按槽位号升序；含运行中的任务）。
     fn listed(&self, c: usize) -> impl Iterator<Item = (usize, &Task)> + Clone + '_ {
-        self.runs.iter(&self.links, c).filter_map(move |i| self.tasks.get(i).and_then(|t| t.as_ref()).map(|t| (i, t)))
+        LeafSlots::new(c).filter_map(move |i| self.tasks.get(i).and_then(|t| t.as_ref()).map(|t| (i, t)))
     }
 
     /// 选择路径遍历量统计。
@@ -1389,17 +1967,72 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         let mut queued = 0;
         let mut count_mismatch = 0;
         let mut list_mismatch = self.list_errors;
-        for (c, (q, e)) in self.queues.iter().zip(expect).enumerate() {
-            queued += q.queued();
-            if q.queued() != e {
+        for (c, e) in expect.into_iter().enumerate() {
+            let (q, run_len) = with_leaf(c, |leaf| (leaf.queue.queued(), leaf.runs.len(c)));
+            queued += q;
+            if q != e {
                 count_mismatch += 1;
             }
-            if self.runs.len(c) != q.queued() as usize {
+            if run_len != q as usize {
                 list_mismatch += 1;
             }
         }
-        for (t, l) in self.tasks.iter().zip(self.links.iter()) {
-            if t.as_ref().and_then(|t| t.sched.queue()) != l.queue() {
+        for (i, t) in self.tasks.iter().enumerate() {
+            let listed = (0..MAX_CPUS).find(|&cpu| with_leaf(cpu, |leaf| leaf.links.get(i).and_then(Link::queue).is_some()));
+            if t.as_ref().and_then(|t| t.sched.queue()) != listed {
+                list_mismatch += 1;
+            }
+            let expected = t.as_ref().and_then(|task| {
+                let token = self.epochs.get(i)?.history()?.token();
+                Some((
+                    task.home,
+                    token,
+                    LeafTaskHot {
+                        state: task.state,
+                        on_cpu: task.on_cpu,
+                        sched: task.sched,
+                        context: (&task.context as *const TaskContext) as usize,
+                        stack_top: is_worker(i).then(|| self.stacks.top(i)),
+                        space: task.space,
+                        local_switchable: task.cpu_group.is_none() && task.rt_period == 0
+                            && task.ns_budget.is_none() && task.sched.qos == task.base_qos,
+                    },
+                ))
+            });
+            let mut owners = 0;
+            let mut exact = false;
+            for cpu in 0..MAX_CPUS {
+                let found = with_leaf(cpu, |leaf| {
+                    leaf.hot.get(i).and_then(|slot| {
+                        slot.generation().map(|_| {
+                            expected.is_some_and(|(home, token, value)| {
+                                cpu == home && slot.get(token).is_ok_and(|actual| {
+                                    let scheduling = actual.state == value.state
+                                        && actual.on_cpu == value.on_cpu && actual.sched == value.sched;
+                                    let executable = !is_worker(i)
+                                        || !matches!(value.state, TaskState::Runnable | TaskState::Running)
+                                        || (actual.context == value.context
+                                            && actual.stack_top == value.stack_top
+                                            && actual.space == value.space
+                                            && actual.local_switchable == value.local_switchable);
+                                    scheduling && executable
+                                })
+                            })
+                        })
+                    })
+                });
+                if let Some(matches) = found {
+                    owners += 1;
+                    exact |= matches;
+                }
+            }
+            if owners != usize::from(expected.is_some()) || expected.is_some() && !exact {
+                #[cfg(feature = "krn3-fast-tick-verify")]
+                if let Some((home, token, value)) = expected {
+                    let actual = with_leaf(home, |leaf| leaf.hot[i].get(token).ok().copied());
+                    crate::kprintln!("[JSR-KRN3-HOT-MISMATCH] slot={} home={} expected={:?} actual={:?}",
+                        i, home, value, actual);
+                }
                 list_mismatch += 1;
             }
         }
@@ -1416,13 +2049,12 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
                 if home != this_cpu() {
                     let token = self.epochs[i].history().expect("woken task identity").token();
                     use kernel_core::wake_mailbox::Enqueue;
-                    match self.wake_mailboxes[home].push(token) {
+                    match super::publish_wake_token(home, token) {
                         Enqueue::Queued | Enqueue::Coalesced => {
-                            self.remote_wakes = self.remote_wakes.wrapping_add(1);
                             self.kicks.insert(home);
                             return false;
                         }
-                        Enqueue::Full => self.wake_fallbacks = self.wake_fallbacks.wrapping_add(1),
+                        Enqueue::Full => {}
                     }
                 }
                 self.make_runnable(i)
@@ -1434,14 +2066,19 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     // Author: chatgpt. Bounded serialized delivery, not a lock-free consumer.
     // Run before any transaction mutation; revalidate generation and use actual
     // current affinity/home in make_runnable, rather than trusting routing data.
-    pub fn drain_wake_mailboxes(&mut self) {
-        for c in 0..MAX_CPUS {
-            while let Some(token) = self.wake_mailboxes[c].pop() {
-                if self.epochs.get(token.slot).is_some_and(|e| e.live(token)) {
-                    self.make_runnable(token.slot);
-                }
-            }
-        }
+    pub fn consume_wake_token(&mut self, token: kernel_core::task_index::Token) {
+        if self.epochs.get(token.slot).is_some_and(|e| e.live(token)) { self.make_runnable(token.slot); }
+    }
+
+    pub fn consume_pi_message(&mut self, cpu: usize, message: kernel_core::percpu_migration::PiMessage) {
+        let slot = message.token.slot as usize;
+        let live = kernel_core::task_index::Token { slot, generation: message.token.generation };
+        let Some(t) = self.tasks.get(slot).and_then(Option::as_ref) else { return };
+        if self.epochs.get(slot).is_none_or(|e| !e.live(live)) { return; }
+        if t.home != cpu || t.pi_round != message.round || t.sched.qos.index() as u8 != message.priority { return; }
+        // The global PI graph update is already committed. Consumption on the
+        // target CPU makes the notification generation-safe and causes the
+        // local scheduling point to observe that committed priority.
     }
     // Author: chatgpt. Deliberately program a later local timer so the real
     // BSP due-notification/IPI path, rather than the matching local expiry, runs.
@@ -1460,26 +2097,47 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             (self.rt_owners[i] != NO_DEADLINE).then_some(self.rt_owners[i])))
     }
     pub fn deadline_stats(&self) -> ([u32; MAX_CPUS], [u32; MAX_CPUS]) { (self.deadline_wakes, self.deadline_refills) }
+    pub fn ns_sleeping(&self,id:TaskId)->bool {self.live_slot(id).and_then(|i|self.task(i)).is_some_and(|t|t.state==TaskState::Blocked && t.wake_ns.is_some())}
+    pub fn rt_ns_state(&self,id:TaskId)->Option<kernel_core::ns_budget::Budget>{self.task(self.live_slot(id)?)?.ns_budget}
+    pub fn task_affinity(&self,id:TaskId)->Option<CpuSet> {Some(self.task(self.live_slot(id)?)?.affinity)}
+    pub fn rt_utilisation(&self)->u32 {
+        self.tasks.iter().flatten().filter(|t|t.state!=TaskState::Exited && t.rt_period!=0)
+            .map(|t|t.ns_budget.filter(|b|b.enabled).map_or_else(||kernel_core::rt_partition::utilisation(t.rt_quota,t.rt_period).expect("valid RT declaration"),|b|kernel_core::ns_budget::utilisation(b.quota,b.period).expect("ns RT declaration"))).sum()
+    }
     pub fn rt_state(&self, id: TaskId) -> Option<(u32,u32,u64)> {
         let t = self.task(self.live_slot(id)?)?;
         Some((t.rt_remaining,t.rt_period,t.rt_next_period))
     }
-    pub fn limit_tick_stats(&self) -> [u32; 2] { self.limit_tick_drains }
-    pub fn remote_wake_stats(&self) -> (u32, u32) { (self.remote_wakes, self.wake_fallbacks) }
+    pub fn budget_tick_stats(&self) -> [u32; 2] { self.budget_tick_drains }
+
+    #[cfg(feature = "krn3-fast-tick-verify")]
+    pub fn task_cpu_ticks(&self, id: TaskId) -> Option<u64> {
+        let slot = self.live_slot(id)?;
+        let task = self.task(slot)?;
+        let token = self.epochs.get(slot)?.history()?.token();
+        with_leaf(task.home, |leaf| leaf.hot[slot].get(token).ok().map(|hot| hot.sched.cpu_ticks))
+    }
 
     /// 尚未退出的工作任务数（可运行 + 运行中 + 睡眠）。
     pub fn live_workers(&self) -> usize {
         self.workers
     }
 
+    /// All workers have exited and every CPU has published and cold-settled
+    /// its final context save.  `run()` uses this stronger boundary so its
+    /// return cannot race an AP's deferred switch completion.
+    pub fn workers_settled(&self) -> bool {
+        self.workers == 0 && self.online.iter().all(leaf_execution_settled)
+    }
+
     /// 本处理器是否有可运行的工作任务可接（本队列中不含当前任务的，或可以从别的队列窃取的）。
     pub fn has_runnable_worker(&self) -> bool {
         let c = this_cpu();
-        self.waiting(c) != ClassMask::EMPTY || (!is_worker(self.current[c]) && self.stealable(c))
+        self.waiting(c) != ClassMask::EMPTY || (!is_worker(leaf_current(c)) && self.stealable(c))
     }
 
     /// Author: chatgpt. Conservative advisory permits, not a second scheduler.
-    /// Any waiting/stealable task disables every fast path. Complex limit or
+    /// Any waiting/stealable task disables every fast path. Complex budget or
     /// arbitration state falls back to the original locked yield.
     pub fn fast_yield_cpus(&self) -> CpuSet {
         let mut allow = CpuSet::first(0);
@@ -1488,8 +2146,9 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         // multi-mode alone must not disable this no-op optimization.
         if self.candidates().next().is_some() { return allow; }
         for c in self.online.iter() {
-            if self.switching_from[c].is_some() { continue; }
-            if let Some(t) = self.task(self.current[c]).filter(|_| is_worker(self.current[c])) {
+            let (current, _, _, switching_from) = leaf_run_state(c);
+            if switching_from.is_some() { continue; }
+            if let Some(t) = self.task(current).filter(|_| is_worker(current)) {
                 if t.state == TaskState::Running && t.home == c && t.cpu_group.is_none()
                     && t.rt_period == 0 && self.decide(c).is_none() {
                     allow.insert(c);
@@ -1500,22 +2159,30 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     }
     // Author: chatgpt. Publish at most one AP credit, allocating a SINGLE
     // shared-group allowance across all leaves held by StateGuard. Yield's
-    // limit-free predicate remains separate and unchanged.
-    pub fn tick_lease_owners(&mut self) -> [Option<kernel_core::task_index::Token>; MAX_CPUS] {
-        let mut owners = [None; MAX_CPUS];
-        if self.candidates().next().is_some() { return owners; }
+    // budget-free predicate remains separate and unchanged.
+    pub fn tick_lease_owners(&mut self) -> [(Option<kernel_core::task_index::Token>, u8); MAX_CPUS] {
+        if self.ns_active {return [(None, 0);MAX_CPUS];}
+        let mut owners = [(None, 0); MAX_CPUS];
+        let any_candidates = self.candidates().next().is_some();
         let mut touched = [None; MAX_CPUS];
         let mut touched_len = 0;
         for c in self.online.iter() {
-            if c == 0 || self.switching_from[c].is_some()
+            let (slot, _, _, switching_from) = leaf_run_state(c);
+            if c == 0 || switching_from.is_some()
                 || self.now >= self.next_wake[c] || self.now >= self.next_rt[c]
-                || self.slice_used[c].saturating_add(1) >= self.slice_quantum[c] { continue; }
-            let slot = self.current[c];
+            { continue; }
             let Some(t) = self.task(slot).filter(|_| is_worker(slot)) else { continue };
-            if t.state != TaskState::Running || t.home != c || self.decide(c).is_some()
+            let local_competition = self.waiting(c) != ClassMask::EMPTY;
+            let local_safe = local_competition && !self.arbiter_on && self.listed(c).all(|(_, task)| {
+                task.home == c && task.cpu_group.is_none() && task.rt_period == 0
+                    && task.ns_budget.is_none() && task.sched.qos == task.base_qos
+            });
+            if t.state != TaskState::Running || t.home != c
+                || (!local_safe && (any_candidates || self.decide(c).is_some()))
                 || (t.rt_period != 0 && t.rt_remaining <= 1)
                 || t.sched.qos != t.base_qos { continue; }
             let group = t.cpu_group;
+            let batched = !local_competition && t.rt_period == 0 && group.is_none();
             let Some(token) = self.epochs.get(slot).and_then(SlotLifecycle::history).map(|r| r.token()) else { continue };
             if let Some(group) = group {
                 let Some(grp) = self.groups[group].as_mut() else { continue };
@@ -1526,7 +2193,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
                     touched_len += 1;
                 }
             }
-            owners[c] = Some(token);
+            owners[c] = (Some(token), if batched { 64 } else { 1 });
         }
         // At most C touched slots; no full group-table clear or hot allocation.
         for group in touched[..touched_len].iter().flatten() {
@@ -1535,31 +2202,75 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         }
         owners
     }
-    pub fn drain_local_tick(&mut self, c: usize, owner: kernel_core::task_index::Token) {
-        assert_eq!(self.current[c], owner.slot, "deferred tick changed owner before drain");
+    /// BSP global time does not need the cold mirrors of ordinary ungrouped
+    /// AP runners.  Budgeted APs remain single-tick leases and are drained on
+    /// every BSP tick so refill/debit ordering is unchanged.
+    pub fn bsp_tick_lease_participants(&self) -> CpuSet {
+        let mut cpus = CpuSet::first(1);
+        for c in self.online.iter().filter(|&c| c != 0) {
+            let slot = leaf_current(c);
+            if self.task(slot).is_some_and(|t| t.cpu_group.is_some() || t.rt_period != 0 || t.ns_budget.is_some()) {
+                cpus.insert(c);
+            }
+        }
+        cpus
+    }
+
+    pub fn drain_local_ticks(&mut self, c: usize, owner: kernel_core::task_index::Token, ticks: u8) {
+        assert!(ticks != 0, "empty deferred tick batch");
         assert!(self.epochs[owner.slot].live(owner), "deferred tick changed generation before drain");
         let t = self.task(owner.slot).expect("deferred tick task");
-        assert_eq!(t.state, TaskState::Running);
+        assert!(matches!(t.state, TaskState::Running | TaskState::Runnable),
+            "deferred tick owner left runnable lifecycle before drain");
         assert!(t.rt_period == 0 || t.rt_remaining > 1, "RT credit exhausted before drain");
         let group = t.cpu_group;
-        self.account(c);
+        if t.rt_period != 0 || group.is_some() {
+            assert_eq!(leaf_current(c), owner.slot,
+                "budgeted deferred tick changed owner before drain");
+            assert_eq!(t.state, TaskState::Running,
+                "budgeted deferred tick owner stopped before drain");
+        }
+        // Entity/policy accounting already happened in the AP interrupt while
+        // its TickLease excluded global mutation.  Refresh the cold mirror and
+        // settle only global diagnostics/balancing here; never charge the
+        // entity or advance the policy a second time.
+        let sched = with_leaf(c, |leaf| leaf.hot[owner.slot].get(owner).expect("drain fast tick hot owner").sched);
+        self.tasks[owner.slot].as_mut().unwrap().sched = sched;
+        self.local_ticks[c] += u64::from(ticks);
+        for _ in 0..ticks { self.charge_watchdog(owner.slot, self.now); }
+        self.cpu_stats[c].busy_ticks += u64::from(ticks);
+        self.cpu_stats[c].idle_waiting = 0;
+        if self.balancer.due(self.local_ticks[c]) {
+            let loads = self.loads();
+            match self.balancer.pull(c, self.now, &loads, self.candidates()) {
+                Ok(slot) => {
+                    self.rehome(slot, c);
+                    self.cpu_stats[c].pulls += 1;
+                }
+                Err(Refusal::AllHot) => self.cpu_stats[c].pull_hot += 1,
+                Err(_) => {}
+            }
+        }
         // Debit only: consuming/refilling another CPU's RT heap here would
         // violate owner-local deadline processing. No deadline was due at grant.
         let t = self.tasks[owner.slot].as_mut().unwrap();
         if t.rt_period != 0 {
+            assert_eq!(ticks, 1, "RT leases are single tick");
             t.rt_remaining -= 1;
-            self.limit_tick_drains[0] = self.limit_tick_drains[0].wrapping_add(1);
+            self.budget_tick_drains[0] = self.budget_tick_drains[0].wrapping_add(1);
         }
         if let Some(grp) = group.and_then(|g| self.groups[g].as_mut()) {
+            assert_eq!(ticks, 1, "shared-group leases are single tick");
             assert!(grp.limit.eligible(), "shared credit oversubscribed");
             grp.limit.charge();
-            self.limit_tick_drains[1] = self.limit_tick_drains[1].wrapping_add(1);
+            self.budget_tick_drains[1] = self.budget_tick_drains[1].wrapping_add(1);
             assert!(grp.limit.eligible(), "shared credit must leave positive balance");
         }
     }
     pub fn note_fast_yield(&mut self, c: usize) {
         let wd = self.watchdog;
-        if let Some(slot) = self.current.get(c).copied() {
+        if c < MAX_CPUS {
+            let slot = leaf_current(c);
             if let Some(t) = self.tasks.get_mut(slot).and_then(|t| t.as_mut()) {
                 wd.yielded(&mut t.streak);
             }
@@ -1568,13 +2279,21 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
 
     /// 处理器 `c` 的队列里、除它的当前任务之外还有可运行任务的档位集合。
     fn waiting(&self, c: usize) -> ClassMask {
-        let mut m = ClassMask::EMPTY;
-        for (i, t) in self.listed(c) {
-            if i != self.current[c] && t.home == c && t.on_cpu.is_none() && t.state == TaskState::Runnable && self.eligible(t) {
-                m.insert(t.sched.qos);
+        let current = leaf_current(c);
+        with_leaf(c, |leaf| {
+            let mut m = ClassMask::EMPTY;
+            for i in leaf.runs.iter(&leaf.links, c) {
+                let Some(t) = self.task(i) else { continue };
+                let Some(token) = self.epochs[i].history().map(|r| r.token()) else { continue };
+                let Ok(hot) = leaf.hot[i].get(token) else { continue };
+                if i != current && t.home == c && hot.on_cpu.is_none()
+                    && hot.state == TaskState::Runnable && self.eligible(t)
+                {
+                    m.insert(hot.sched.qos);
+                }
             }
-        }
-        m
+            m
+        })
     }
 
     /// 是否有别的队列里的任务可以被处理器 `c` 窃取（可运行、未被占用、未被限速、亲和集合含 `c`）。
@@ -1585,7 +2304,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 可以被搬动的任务：可运行、未被任何处理器占用、未被限速（只遍历各运行列表：可运行任务一定在列表上）。
     fn candidates(&self) -> impl Iterator<Item = Candidate> + Clone + '_ {
         (0..MAX_CPUS).flat_map(move |q| self.listed(q)).filter_map(move |(i, t)| {
-            (t.state == TaskState::Runnable && t.on_cpu.is_none() && self.eligible(t))
+            (t.rt_period == 0 && t.state == TaskState::Runnable && t.on_cpu.is_none() && self.eligible(t))
                 .then_some(Candidate { slot: i, home: t.home, affinity: t.affinity, qos: t.sched.qos, last_ran: t.last_ran })
         })
     }
@@ -1595,7 +2314,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         let mut l = [CoreLoad::OFFLINE; MAX_CPUS];
         for (c, load) in l.iter_mut().enumerate() {
             if self.online.contains(c) {
-                let cur = self.current[c];
+                let cur = leaf_current(c);
                 load.online = true;
                 load.running = if is_worker(cur) { self.task(cur).filter(|t| t.state == TaskState::Running).map(|t| t.sched.qos) } else { None };
             }
@@ -1614,7 +2333,8 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         assert_eq!(c, this_cpu(), "a CPU must register itself while its leaf is held");
         if c < MAX_CPUS {
             if !self.online.contains(c) {
-                self.cpu_residency[c]=kernel_core::cpu_time::Ledger::new(self.now,is_worker(self.current[c]));
+                if self.ns_active {self.ns_at[c]=self.ns_now;self.ns_credit[c]=Some(kernel_core::timer_units::PeriodicCredit::new(self.ns_now,crate::hrtime::tick_ns()).unwrap());}
+                self.cpu_residency[c]=kernel_core::cpu_time::Ledger::new(self.now,is_worker(leaf_current(c)));
             }
             self.online.insert(c);
         }
@@ -1639,6 +2359,8 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
             return Err(AffinityError::NoOnlineCpu);
         }
         let i = self.live_slot(id).filter(|&i| i != BOOT_SLOT).ok_or(AffinityError::NoTask)?;
+        let t=self.task(i).ok_or(AffinityError::NoTask)?;
+        if t.rt_period!=0 && !set.contains(t.home) { return Err(AffinityError::RtPartition); }
         let me = this_cpu();
         let (home, on_cpu) = {
             let t = self.task_mut(i).ok_or(AffinityError::NoTask)?;
@@ -1757,15 +2479,15 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 返回需要切换时的原因（[`Cause`] 中的名字）；`preemption = false` 时只记账与唤醒、从不要求切换
     /// （被唤醒的任务等当前任务主动让出）。
     pub fn tick(&mut self, now: u64, preemption: bool) -> Option<&'static str> {
-        if let Some((group,_,deadline,_,None))=self.limit_window {
+        if let Some((group,_,deadline,_,None))=self.budget_window {
             if now>=deadline {
                 let used=self.group_stats(group).expect("watched group live").used_ticks;
-                self.limit_window.as_mut().unwrap().4=Some((now,used));
+                self.budget_window.as_mut().unwrap().4=Some((now,used));
             }
         }
         self.now = now;
         let c = this_cpu();
-        let cur = self.current[c];
+        let cur = leaf_current(c);
         self.account(c);
         self.charge_groups(cur);
         self.charge_rt(cur, now);
@@ -1799,7 +2521,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 实时预算记账与周期补充（POL-4）。
     fn charge_rt(&mut self, cur: usize, now: u64) {
         if let Some(t) = self.tasks.get_mut(cur).and_then(|t| t.as_mut()) {
-            if t.state == TaskState::Running && t.rt_period != 0 && t.rt_remaining > 0 {
+            if t.state == TaskState::Running && t.ns_budget.is_none() && t.rt_period != 0 && t.rt_remaining > 0 {
                 t.rt_remaining = t.rt_remaining.saturating_sub(1);
             }
         }
@@ -1822,26 +2544,193 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         self.refresh_rt(c);
     }
 
-    /// 设置任务的实时预算/周期（准入已由 kernel-core 判定）。
-    pub fn set_rt(&mut self, id: TaskId, quota: u32, period: u32, now: u64) -> bool {
-        let Some(slot) = self.live_slot(id) else { return false };
-        let Some(next) = now.checked_add(period as u64) else { return false };
-        if period == 0 {
-            let generation = self.epochs[slot].history().unwrap().token().generation;
-            self.remove_rt_deadline(slot, generation);
-        } else {
-            let generation = self.epochs[slot].history().unwrap().token().generation;
-            let home = self.task(slot).unwrap().home;
-            self.set_rt_deadline(home, Deadline { at: next, slot, generation });
+    /// Atomic admission and budget update from canonical task reservations.
+    /// Rejection leaves old partition, period, budget and deadline untouched.
+    pub fn enable_highres(&mut self,now:u64) {
+        assert!(!self.tasks.iter().flatten().any(|t|t.rt_period!=0 && t.state!=TaskState::Exited),"enable before RT admission");
+        self.ns_now=now;self.ns_at=[now;MAX_CPUS];self.ns_active=true;
+        self.ns_credit=[Some(kernel_core::timer_units::PeriodicCredit::new(now,crate::hrtime::tick_ns()).unwrap());MAX_CPUS];
+    }
+    pub fn settle_highres(&mut self,now:u64) {
+        if !self.ns_active {return;}
+        assert!(now>=self.ns_now,"shared clock moved backwards");self.ns_now=now;
+        for c in self.online.iter() {
+            let slot=leaf_current(c);let start=self.ns_at[c];
+            if let Some(t)=self.tasks.get_mut(slot).and_then(Option::as_mut) {
+                if let Some(b)=t.ns_budget.as_mut().filter(|b|b.enabled) {
+                    let old=b.next;b.settle(start,now,t.state==TaskState::Running).expect("ns budget clock exhausted");
+                    if b.next!=old {t.rt_next_period=t.rt_next_period.checked_add((b.next-old)/b.period*u64::from(t.rt_period)).expect("compat deadline overflow");}
+                    t.rt_remaining=u32::try_from(b.remaining.div_ceil(crate::hrtime::tick_ns())).unwrap_or(u32::MAX);
+                }
+            }
+            self.ns_at[c]=now;
         }
-        if let Some(t) = self.tasks.get_mut(slot).and_then(|t| t.as_mut()) {
-            t.rt_quota = quota;
-            t.rt_period = period;
-            t.rt_remaining = quota;
-            t.rt_next_period = next;
+        // Sleeping/runnable RT tasks replenish, but never accumulate old periods.
+        for t in self.tasks.iter_mut().flatten().filter(|t|t.state!=TaskState::Exited && t.state!=TaskState::Running) {
+            if let Some(b)=t.ns_budget.as_mut().filter(|b|b.enabled) {
+                let old=b.next;b.settle(now,now,false).expect("ns refill clock exhausted");
+                if b.next!=old {t.rt_next_period=t.rt_next_period.checked_add((b.next-old)/b.period*u64::from(t.rt_period)).expect("compat refill overflow");}
+                t.rt_remaining=u32::try_from(b.remaining.div_ceil(crate::hrtime::tick_ns())).unwrap_or(u32::MAX);
+            }
+        }
+        let c=this_cpu();
+        while let Some(e)=self.ns_heap.pop_due(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,c,now).expect("ns heap coherent") {
+            if !self.epochs[e.slot].live(kernel_core::task_index::Token {slot:e.slot,generation:e.generation}) {continue;}
+            if self.task(e.slot).is_some_and(|t|t.state==TaskState::Blocked && t.wake_ns.is_some_and(|at|at<=now)) {self.make_runnable(e.slot);}
+        }
+        for target in self.online.iter().filter(|&t|t!=c) {
+            if self.ns_roots[target].is_some_and(|at|at<=now) {self.kicks.insert(target);}
+        }
+    }
+    pub fn refresh_ns_events(&mut self) {
+        if !self.ns_active{return;}
+        for i in 0..self.tasks.len() {
+            let Some(r)=self.epochs[i].history() else {continue;};let generation=r.token().generation;
+            let event=self.task(i).filter(|t|t.state!=TaskState::Exited).and_then(|t| {
+                let sleep=(t.state==TaskState::Blocked).then_some(t.wake_ns).flatten();
+                let rt=t.ns_budget.filter(|b|b.enabled).map(|b|b.next);
+                sleep.into_iter().chain(rt).min().map(|at|(t.home,at))
+            });
+            if let Some((home,at))=event {self.ns_heap.set(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,home,Deadline {at,slot:i,generation}).expect("ns deadline reserved capacity");}
+            else {self.ns_heap.remove(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,i,generation).expect("ns remove identity");}
+        }
+        for c in self.online.iter() {
+            let next=self.ns_heap.peek(&self.ns_entries,&self.ns_positions,&self.ns_owners,c).expect("ns root").map(|e|e.at);
+            if next.is_some_and(|at|self.ns_roots[c].is_none_or(|old|at<old)) && c!=this_cpu(){self.kicks.insert(c);}
+            self.ns_roots[c]=next;
+        }
+    }
+    pub fn program_ns_local(&mut self) {
+        if !self.ns_active{return;}
+        let c=this_cpu();let now=crate::hrtime::now().expect("calibrated clock available");
+        let mut at=self.ns_roots[c];
+        let current=leaf_current(c);
+        if let Some(t)=self.task(current).filter(|t|t.state==TaskState::Running && is_worker(current)) {
+            let tick=crate::hrtime::tick_ns();let base=self.ns_now/tick*tick;
+            let fallback=base.checked_add(tick).expect("fallback clock overflow");at=Some(at.map_or(fallback,|old|old.min(fallback)));
+            if let Some(b)=t.ns_budget.filter(|b|b.enabled) {
+                let exhausted=self.ns_now.checked_add(b.remaining.max(1)).expect("budget alarm overflow");
+                at=Some(at.unwrap().min(exhausted));
+            }
+        }else if self.ns_need_tick[c] || self.next_wake[c]!=u64::MAX || self.next_rt[c]!=u64::MAX {
+            let fallback=self.ns_now.checked_add(crate::hrtime::tick_ns()).expect("legacy alarm overflow");at=Some(at.map_or(fallback,|old|old.min(fallback)));
+        }
+        let cur=self.task(current).filter(|t|t.state==TaskState::Running);
+        let cur_deadline=cur.and_then(|t|t.ns_budget.filter(|b|b.enabled)).map_or(u64::MAX,|b|b.next);
+        let ready_rt=self.listed(c).filter(|(_,t)|t.state==TaskState::Runnable && t.on_cpu.is_none() && self.eligible(t)).filter_map(|(_,t)|t.ns_budget.filter(|b|b.enabled).map(|b|b.next)).min();
+        if ready_rt.is_some_and(|deadline|deadline<cur_deadline) || cur.is_some_and(|t|t.ns_budget.is_some_and(|b|b.enabled && b.remaining==0)) {
+            let prompt=now.checked_add(1).expect("prompt clock overflow");at=Some(at.map_or(prompt,|old|old.min(prompt)));
+        }
+        if at==self.ns_programmed[c] && at.is_none_or(|at|at>now) {return;}
+        self.ns_programmed[c]=at;
+        match at {
+            Some(at)=>{
+                let mut delay=at.saturating_sub(now).clamp(1,100_000_000);
+                while !unsafe {crate::arch::timer_arm_after_ns(delay)} {
+                    assert!(delay>1,"high-res timer unsupported after calibration");delay=(delay/2).max(1);
+                }
+            },
+            None=>crate::arch::timer_cancel_local(),
+        }
+    }
+    pub fn block_current_ns(&mut self,deadline:u64)->bool {
+        if !self.ns_active || deadline<=self.ns_now {return false;}
+        if !self.block_current(None){return false;}
+        let c=self.cur();self.tasks[c].as_mut().unwrap().wake_ns=Some(deadline);true
+    }
+    pub fn highres_idle(&mut self,c:usize,needs_tick:bool)->IdleStep {
+        self.ns_need_tick[c]=needs_tick;self.idle_enter(c,needs_tick)
+    }
+    pub fn highres_event(&mut self,preemption:bool)->(u64,Option<&'static str>) {
+        let c=this_cpu();self.ns_programmed[c]=None;
+        let credits=self.ns_credit[c].as_mut().unwrap().advance(self.ns_now).expect("elapsed credit clock");
+        if c!=0 {
+            for _ in 0..credits {
+                let cur=leaf_current(c);self.account(c);
+                if let Some(g)=self.task(cur).filter(|t|t.state==TaskState::Running).and_then(|t|t.cpu_group).and_then(|g|self.groups[g].as_mut()){g.limit.charge();}
+            }
+        }
+        let woke=self.wake_due(c,self.now);
+        let cause=self.decide(c).or(woke.then_some(Cause::WAKE));
+        (credits,if preemption{cause}else{None})
+    }
+    pub fn set_rt_ns(&mut self,id:TaskId,quota:u64,period:u64)->bool {
+        if !self.ns_active || (quota==0)!=(period==0) || quota>period {return false;}
+        let Some(slot)=self.live_slot(id).filter(|&s|is_worker(s)) else{return false;};
+        let old=self.task(slot).unwrap();
+        if let Some(b)=old.ns_budget {
+            if b.enabled {
+                if quota==b.quota && period==b.period{return true;}
+                if period!=0{return false;}
+                let t=self.tasks[slot].as_mut().unwrap();t.ns_budget.as_mut().unwrap().disable();t.rt_period=0;t.rt_quota=0;t.rt_remaining=0;return true;
+            }
+            if period!=0 && self.ns_now<b.next{return false;}
+        }
+        if period==0{return true;}
+        if self.tasks.iter().flatten().filter(|t|t.state!=TaskState::Exited && t.rt_period!=0).count()>=crate::rt::admission_capacity(){return false;}
+        let Ok(budget)=kernel_core::ns_budget::Budget::new(self.ns_now,quota,period) else{return false;};
+        let Ok(added)=kernel_core::ns_budget::utilisation(quota,period) else{return false;};
+        let mut loads=[0u32;MAX_CPUS];
+        for (i,t) in self.tasks.iter().enumerate().filter_map(|(i,t)|t.as_ref().map(|t|(i,t))) {
+            if i==slot || t.state==TaskState::Exited || t.rt_period==0{continue;}
+            let usage=t.ns_budget.filter(|b|b.enabled).map_or_else(||kernel_core::rt_partition::utilisation(t.rt_quota,t.rt_period).unwrap(),|b|kernel_core::ns_budget::utilisation(b.quota,b.period).unwrap());
+            loads[t.home]=loads[t.home].checked_add(usage).expect("RT utilisation bounded");
+        }
+        let mut allowed=old.affinity.intersect(self.online);if old.on_cpu.is_some(){let mut only=CpuSet::EMPTY;only.insert(old.home);allowed=allowed.intersect(only);}
+        let Some(home)=allowed.iter().filter(|&c|loads[c].checked_add(added).is_some_and(|sum|sum<=900)).min_by_key(|&c|(loads[c],c)) else{return false;};
+        let tick=crate::hrtime::tick_ns();let view_period=period.div_ceil(tick).min(u64::from(u32::MAX)) as u32;
+        let Some(view_next)=self.now.checked_add(u64::from(view_period)) else{return false;};
+        if home!=self.task(slot).unwrap().home{self.rehome(slot,home);}
+        let t=self.tasks[slot].as_mut().unwrap();t.ns_budget=Some(budget);t.rt_quota=quota.div_ceil(tick).min(u64::from(u32::MAX)) as u32;
+        t.rt_remaining=t.rt_quota;t.rt_period=view_period;t.rt_next_period=view_next;
+        if home!=this_cpu(){self.kicks.insert(home);}true
+    }
+    pub fn set_rt(&mut self, id: TaskId, quota: u32, period: u32, now: u64) -> bool {
+        if self.ns_active {return self.set_rt_ns(id,u64::from(quota)*crate::hrtime::tick_ns(),u64::from(period)*crate::hrtime::tick_ns());}
+        let Some(slot) = self.live_slot(id).filter(|&i|is_worker(i)) else { return false };
+        if (quota==0)!=(period==0) {return false;}
+        let old=self.task(slot).unwrap();
+        if old.rt_period!=0 {
+            // Re-applying a reservation is idempotent, never a budget refill.
+            if quota==old.rt_quota && period==old.rt_period {return true;}
+            // Explicit disable retains the previous period-end cooldown.
+            if period!=0 {return false;}
+            self.remove_rt_deadline(slot,self.epochs[slot].history().unwrap().token().generation);
+            let t=self.tasks[slot].as_mut().unwrap();
+            t.rt_quota=0;t.rt_period=0;t.rt_remaining=0;
             return true;
         }
-        false
+        if period==0 {return true;}
+        // Canonical live reservations only; exited tasks release their slot.
+        // Boot configuration is atomic, avoiding a scheduler→legacy RT lock edge.
+        let active=self.tasks.iter().flatten().filter(|t|t.state!=TaskState::Exited && t.rt_period!=0).count();
+        if active>=crate::rt::admission_capacity() {return false;}
+        // Disabling/re-enabling cannot mint a second allowance in the same period.
+        if now<old.rt_next_period {return false;}
+        let Some(next) = now.checked_add(period as u64) else { return false };
+        let task=self.task(slot).unwrap();
+        let mut home=task.home;
+        if period!=0 {
+            let mut loads=[0u32;MAX_CPUS];
+            for (i,t) in self.tasks.iter().enumerate().filter_map(|(i,t)|t.as_ref().map(|t|(i,t))) {
+                if i==slot || t.state==TaskState::Exited || t.rt_period==0 {continue;}
+                let Ok(usage)=kernel_core::rt_partition::utilisation(t.rt_quota,t.rt_period) else {return false;};
+                let Some(sum)=loads[t.home].checked_add(usage) else {return false;};loads[t.home]=sum;
+            }
+            let mut allowed=task.affinity.intersect(self.online).bits() as u64;
+            // A currently running context cannot migrate before its old CPU stops.
+            if task.on_cpu.is_some() {allowed &= 1u64<<home;}
+            let Ok(chosen)=kernel_core::rt_partition::place(&loads,allowed,quota,period,900) else {return false;};
+            home=chosen;
+        }
+        let generation = self.epochs[slot].history().unwrap().token().generation;
+        if home!=self.task(slot).unwrap().home {self.rehome(slot,home);}
+        if period==0 {self.remove_rt_deadline(slot,generation);}
+        else {self.set_rt_deadline(home,Deadline {at:next,slot,generation});}
+        let t=self.tasks[slot].as_mut().unwrap();
+        t.rt_quota=quota;t.rt_period=period;t.rt_remaining=quota;t.rt_next_period=next;
+        if home!=this_cpu() {self.kicks.insert(home);}
+        true
     }
 
     /// 其他处理器的本地时钟 tick（在该处理器的中断上下文、关中断状态下调用）：给本处理器正在运行的任务
@@ -1849,7 +2738,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// Local tick of a secondary processor.
     pub fn local_tick(&mut self, preemption: bool) -> Option<&'static str> {
         let c = this_cpu();
-        let cur = self.current[c];
+        let cur = leaf_current(c);
         self.account(c);
         self.charge_rt(cur, self.now);
         let woke = self.wake_due(c, self.now);
@@ -1954,22 +2843,21 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
 
     /// 处理器 `c` 的每 tick 记账：策略记账、时间片、看门狗、统计、周期均衡。
     fn account(&mut self, c: usize) {
-        let cur = self.current[c];
+        let cur = leaf_current(c);
         let waiting = self.waiting(c);
         let worker = is_worker(cur) && self.task(cur).is_some_and(|t| t.state == TaskState::Running);
-        let running = if worker { self.tasks[cur].as_mut().map(|t| &mut t.sched) } else { None };
-        let r = match running {
-            Some(e) if e.queue() == Some(c) => self.queues[c].tick(Some(e), waiting),
+        let r = match worker.then(|| self.tasks[cur].as_ref().unwrap().sched.queue()) {
+            Some(Some(q)) if q == c => self.update_hot_sched(cur, |queue, sched| queue.tick(Some(sched), waiting)),
             // 迁移途中的一个 tick（亲和变更后、在下一个检查点换下之前）：它的私有状态已属于目标队列，
             // 本处理器的策略实例不为它记账，只记 Core 运行量
-            Some(e) => {
-                e.cpu_ticks += 1;
-                self.queues[c].tick(None, waiting)
+            Some(_) => {
+                self.update_hot_sched(cur, |_queue, sched| sched.cpu_ticks += 1);
+                with_leaf(c, |leaf| leaf.queue.tick(None, waiting))
             }
-            None => self.queues[c].tick(None, waiting),
+            None => with_leaf(c, |leaf| leaf.queue.tick(None, waiting)),
         };
         self.note(r);
-        self.slice_used[c] = self.slice_used[c].saturating_add(1);
+        with_leaf(c, |leaf| leaf.slice_used = leaf.slice_used.saturating_add(1));
         self.local_ticks[c] += 1;
         let now = self.now;
         self.charge_watchdog(cur, now);
@@ -2002,22 +2890,38 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 处理器 `c` 现在是否应切换及原因：当前任务已不属于本处理器 → 迁移；被限速 → 限速；
     /// 否则询问本处理器的策略；空闲且本队列无事可做但可以窃取 → 窃取。
     fn decide(&self, c: usize) -> Option<&'static str> {
-        let cur = self.current[c];
-        let cur_task = self.task(cur).filter(|t| is_worker(cur) && t.state == TaskState::Running);
+        let (cur, slice_used, slice_quantum, _) = leaf_run_state(c);
+        let cur_task = self.task(cur).filter(|_| is_worker(cur));
+        let current_sched = cur_task.and_then(|_| {
+            let token = self.epochs[cur].history()?.token();
+            with_leaf(c, |leaf| leaf.hot[cur].get(token).ok().copied())
+        }).filter(|hot| hot.state == TaskState::Running);
+        // A running task is detached from the old leaf before that CPU reaches
+        // its migration checkpoint.  Its hot owner therefore already lives on
+        // the destination leaf; check the cold home first instead of treating
+        // a missing local hot owner as idle.
         if let Some(t) = cur_task {
             if t.home != c {
                 return Some(Cause::MIGRATE);
             }
-            if !self.eligible(t) {
+            if current_sched.is_some() && !self.eligible(t) {
                 THROTTLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 return Some(Cause::THROTTLE);
             }
         }
-        let p = self.queues[c].should_preempt(cur_task.map(|t| &t.sched), self.slice_used[c], self.slice_quantum[c], self.waiting(c));
+        let earliest=kernel_core::rt_partition::edf(self.listed(c).filter_map(|(i,t)| {
+            (t.rt_period!=0 && self.eligible(t) && (i==cur || (t.state==TaskState::Runnable && t.on_cpu.is_none())))
+                .then_some((i,t.ns_budget.filter(|b|b.enabled).map_or(t.rt_next_period,|b|b.next)))
+        }));
+        if let Some(slot)=earliest {return (slot!=cur).then_some(Cause::PREEMPT);}
+        let waiting = self.waiting(c);
+        let p = with_leaf(c, |leaf| {
+            leaf.queue.should_preempt(current_sched.as_ref().map(|hot| &hot.sched), slice_used, slice_quantum, waiting)
+        });
         if let Some(p) = p {
             return Some(Cause::of(p));
         }
-        if cur_task.is_none() && self.stealable(c) {
+        if current_sched.is_none() && self.stealable(c) {
             return Some(Cause::STEAL);
         }
         None
@@ -2034,7 +2938,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
     /// 切换回来（或新任务开始执行）后调用 [`Scheduler::finish_switch`]；返回 `None` 表示无需切换（下一个就是自己）。
     pub fn prepare_switch(&mut self, cause: &'static str) -> Option<SwitchPlan> {
         let c = this_cpu();
-        let prev = self.current[c];
+        let prev = leaf_current(c);
         let now = self.now;
         let requeue_hook = if cause == Cause::THROTTLE {
             None
@@ -2043,23 +2947,28 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         } else {
             Some(Requeue::Preempted)
         };
+        let mut prev_queue_hook = None;
         let prev_runnable = match self.tasks.get_mut(prev).and_then(|t| t.as_mut()) {
             Some(t) if t.state == TaskState::Running => {
                 t.state = TaskState::Runnable;
                 t.last_ran = Some(now);
                 if is_worker(prev) {
-                    // 被换下仍可运行：让出钩子（或预算钩子）交给它所在的队列（亲和变更后可能已不是本处理器）
-                    let q = t.sched.queue().unwrap_or(c).min(MAX_CPUS - 1);
-                    let r = match requeue_hook {
-                        Some(why) => self.queues[q].requeue(&mut t.sched, why),
-                        None => self.queues[q].throttled(&mut t.sched),
-                    };
-                    self.note(r);
+                    prev_queue_hook = Some(requeue_hook);
                 }
                 is_worker(prev)
             }
             _ => false,
         };
+        if let Some(hook) = prev_queue_hook {
+            let r = self.update_hot_sched(prev, |queue, sched| match hook {
+                Some(why) => queue.requeue(sched, why),
+                None => queue.throttled(sched),
+            });
+            self.note(r);
+        }
+        if self.task(prev).is_some() {
+            self.sync_hot(prev);
+        }
         let yielding = cause == Cause::YIELD;
         if Cause::voluntary(cause) {
             let wd = self.watchdog;
@@ -2080,57 +2989,72 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         // 类别仲裁在借用 tasks 之前完成（它会修改仲裁器状态）。
         let wanted = self.pick_arb_class(c, prev);
         // 只遍历本处理器的运行列表（与任务表容量无关）；记下遍历长度供验收核对
-        let visited = self.runs.len(c) as u32;
+        let visited = with_leaf(c, |leaf| leaf.runs.len(c)) as u32;
         self.scan.picks += 1;
         self.scan.visited += visited as u64;
         self.scan.max_visited = self.scan.max_visited.max(visited);
-        let choice = {
+        let earliest=kernel_core::rt_partition::edf(self.listed(c).filter_map(|(i,t)| {
+            (t.rt_period!=0 && t.state==TaskState::Runnable && (t.on_cpu.is_none() || i==prev) && self.eligible(t))
+                .then_some((i,t.ns_budget.filter(|b|b.enabled).map_or(t.rt_next_period,|b|b.next)))
+        }));
+        let choice = if let Some(slot)=earliest {
+            Some(kernel_core::sched::Choice {slot,quantum:self.task(slot).unwrap().rt_remaining.max(1),rescued:false})
+        } else {
             let tasks = &self.tasks;
             let groups = &self.groups;
-            let (runs, links) = (&self.runs, &self.links);
-            let runnable = |skip_prev: bool| {
-                runs.iter(links, c).filter_map(move |i| match tasks[i].as_ref() {
-                    Some(t)
-                        if t.state == TaskState::Runnable
+            let epochs = &self.epochs;
+            with_leaf(c, |leaf| {
+                let runs = &leaf.runs;
+                let links = &leaf.links;
+                let hot = &leaf.hot;
+                let queue = &leaf.queue;
+                let runnable = |skip_prev: bool| {
+                    runs.iter(links, c).filter_map(move |i| {
+                        let t = tasks[i].as_ref()?;
+                        let token = epochs[i].history()?.token();
+                        let owner = hot[i].get(token).ok()?;
+                        (owner.state == TaskState::Runnable
                             && t.home == c
-                            && (t.on_cpu.is_none() || i == prev)
+                            && (owner.on_cpu.is_none() || i == prev)
                             && !(skip_prev && i == prev)
                             && wanted.is_none_or(|cl| arb_class(t) == cl)
-                            && eligible_in(groups, t) =>
-                    {
-                        Some((i, &t.sched))
-                    }
-                    _ => None,
-                })
-            };
-            let policy = &self.queues[c];
-            let mut it = runnable(yielding);
-            let mut ch = policy.choose(&mut it);
-            if yielding && prev_runnable {
-                let prev_qos = tasks[prev].as_ref().map(|t| t.sched.qos);
-                let worse = |slot: usize| match (tasks[slot].as_ref(), prev_qos) {
-                    (Some(t), Some(pq)) => policy.policy().outranks(pq, t.sched.qos),
-                    _ => false,
+                            && eligible_in(groups, t))
+                            .then_some((i, &owner.sched))
+                    })
                 };
-                if ch.is_none_or(|x| !x.rescued && worse(x.slot)) {
-                    let mut only_prev = runnable(false).filter(|(i, _)| *i == prev);
-                    ch = policy.choose(&mut only_prev);
+                let mut it = runnable(yielding);
+                let mut ch = queue.choose(&mut it);
+                if yielding && prev_runnable {
+                    let prev_qos = epochs.get(prev).and_then(SlotLifecycle::history)
+                        .and_then(|r| hot.get(prev)?.get(r.token()).ok()).map(|owner| owner.sched.qos);
+                    let worse = |slot: usize| match (epochs.get(slot).and_then(SlotLifecycle::history)
+                        .and_then(|r| hot.get(slot)?.get(r.token()).ok()), prev_qos)
+                    {
+                        (Some(owner), Some(pq)) => queue.policy().outranks(pq, owner.sched.qos),
+                        _ => false,
+                    };
+                    if ch.is_none_or(|x| !x.rescued && worse(x.slot)) {
+                        let mut only_prev = runnable(false).filter(|(i, _)| *i == prev);
+                        ch = queue.choose(&mut only_prev);
+                    }
                 }
-            }
-            ch
+                ch
+            })
         };
 
         let next = match choice {
             Some(ch) => {
-                self.slice_quantum[c] = ch.quantum.max(1);
+                with_leaf(c, |leaf| leaf.slice_quantum = ch.quantum.max(1));
                 ch.slot
             }
             None => {
-                self.slice_quantum[c] = 1;
+                with_leaf(c, |leaf| leaf.slice_quantum = 1);
                 idle_slot(c)
             }
         };
-        self.slice_used[c] = 0;
+        #[cfg(feature="rt1-verify")]
+        if let Some(t)=self.task(next) {crate::rt1_demo::record_dispatch(t.id);}
+        with_leaf(c, |leaf| leaf.slice_used = 0);
         let mut latency = None;
         if let Some(t) = self.task_mut(next) {
             t.state = TaskState::Running;
@@ -2142,15 +3066,16 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
                 }
             }
         }
+        if self.task(next).is_some() {
+            self.sync_hot(next);
+        }
         if is_worker(next) && next != prev {
             let r = self.epochs[next].history().expect("dispatched task identity");
             self.epochs[next].dispatch(r.token()).expect("dispatch detached live task");
         }
         if is_worker(next) {
-            if let Some(t) = self.tasks[next].as_mut() {
-                let r = self.queues[c].dispatched(&mut t.sched);
-                self.note(r);
-            }
+            let r = self.update_hot_sched(next, |queue, sched| queue.dispatched(sched));
+            self.note(r);
         }
         if let Some((q, d)) = latency {
             self.latency[q.index()].record(d);
@@ -2170,8 +3095,11 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         }
         // Charge the old execution class before publishing the new current slot.
         self.cpu_residency[c].transition(now,is_worker(next)).expect("monotonic CPU switch residency");
-        self.current[c] = next;
-        self.switching_from[c] = Some(prev);
+        with_leaf(c, |leaf| {
+            leaf.current = next;
+            leaf.switching_from = Some(prev);
+            leaf.switching_immediate = cause == Cause::MIGRATE;
+        });
 
         let next_space = self.task(next).and_then(|t| t.space);
         let next_stack_top = if is_worker(next) { Some(self.stacks.top(next)) } else { None };
@@ -2208,15 +3136,86 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         self.tasks.iter().flatten().filter(|t| t.raw_wake_round.is_some()).count()
     }
 
+    /// Reconcile the cold task table and slot lifecycle after an owner-local
+    /// leaf transaction has already selected and published a switch. Every
+    /// global scheduler entry consumes these records before doing other work,
+    /// so global readers never operate on a stale execution owner.
+    pub(super) fn settle_leaf_transition(&mut self, transition: LeafTransition) {
+        let LeafTransition { cpu, prev, next, cause } = transition;
+        assert_eq!(leaf_current(cpu), next, "cold transition changed leaf current");
+        let (prev_hot, next_hot) = with_leaf(cpu, |leaf| {
+            let prev_generation = leaf.hot[prev].generation().expect("cold previous generation");
+            let next_generation = leaf.hot[next].generation().expect("cold next generation");
+            let prev_token = kernel_core::task_index::Token { slot: prev, generation: prev_generation };
+            let next_token = kernel_core::task_index::Token { slot: next, generation: next_generation };
+            (*leaf.hot[prev].get(prev_token).expect("cold previous owner"),
+             *leaf.hot[next].get(next_token).expect("cold next owner"))
+        });
+        if let Some(task) = self.tasks.get_mut(prev).and_then(Option::as_mut) {
+            task.state = prev_hot.state;
+            task.on_cpu = prev_hot.on_cpu;
+            task.sched = prev_hot.sched;
+            task.last_ran = Some(self.now);
+        }
+        let mut latency = None;
+        if let Some(task) = self.tasks.get_mut(next).and_then(Option::as_mut) {
+            task.state = next_hot.state;
+            task.on_cpu = next_hot.on_cpu;
+            task.sched = next_hot.sched;
+            task.ran_on.insert(cpu);
+            if let Some(woken) = task.woken_at.take() {
+                latency = Some((task.sched.qos, self.now.saturating_sub(woken)));
+            }
+        }
+        if is_worker(next) {
+            let record = self.epochs[next].history().expect("cold dispatched identity");
+            self.epochs[next].dispatch(record.token()).expect("cold dispatch detached live task");
+        }
+        if let Some((qos, delay)) = latency { self.latency[qos.index()].record(delay); }
+        self.scan.picks = self.scan.picks.saturating_add(1);
+        let visited = with_leaf(cpu, |leaf| leaf.runs.len(cpu)) as u32;
+        self.scan.visited = self.scan.visited.saturating_add(u64::from(visited));
+        self.scan.max_visited = self.scan.max_visited.max(visited);
+        self.switches = self.switches.saturating_add(1);
+        if let Some(observer) = self.observer {
+            observer(&SwitchEvent {
+                from: self.task(prev).map(|task| task.name).unwrap_or("idle"),
+                to: self.task(next).map(|task| task.name).unwrap_or("idle"),
+                seq: self.switches,
+                cause,
+            });
+        }
+        self.cpu_residency[cpu].transition(self.now, is_worker(next))
+            .expect("monotonic local switch residency");
+    }
+
     /// 切换完成（在被切入的执行流上、关中断时调用）：本处理器上一次换下的任务已保存好上下文，
     /// 清除它的 `on_cpu`，此后其他处理器才可以选中它、它的槽位（若已退出）才可以复用。
     /// Complete a switch: the previous task's context is saved, release it.
-    pub fn finish_switch(&mut self) {
-        let c = this_cpu();
-        if let Some(p) = self.switching_from[c].take() {
+    pub fn finish_switch(&mut self, c: usize, completed: Option<(usize, Option<kernel_core::task_index::Token>)>) {
+        if let Some((p, hot_token)) = completed {
+            let mut released_remote_hot = false;
             if let Some(t) = self.task_mut(p).filter(|_| is_worker(p)) {
                 if t.on_cpu == Some(c) {
                     t.on_cpu = None;
+                    released_remote_hot = true;
+                }
+            }
+            // Migration moves the generation-bound hot slot to its destination
+            // before the old CPU reaches the switch checkpoint.  In that case
+            // the leaf-local completion cannot find the owner on the source
+            // leaf; mirror the cleared execution claim into the destination
+            // leaf while the cold transaction is serialized.
+            if released_remote_hot && self.task(p).is_some() {
+                self.sync_hot(p);
+            }
+            if let Some(token) = hot_token {
+                assert!(self.epochs.get(p).and_then(SlotLifecycle::history).is_some_and(|record| record.token() == token),
+                    "finished leaf switch changed generation before cold detach");
+                if let Some(t) = self.task(p) {
+                    let hot = with_leaf(c, |leaf| *leaf.hot[p].get(token).expect("finished hot owner retained"));
+                    assert_eq!(hot.state, t.state, "finished leaf state diverged");
+                    assert_eq!(hot.on_cpu, t.on_cpu, "finished leaf execution owner diverged");
                 }
             }
             if is_worker(p) {
@@ -2228,6 +3227,8 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
                 let home = t.home;
                 if self.online.contains(home) {
                     self.kicks.insert(home);
+                    #[cfg(feature = "krn3-fast-tick-verify")]
+                    crate::kprintln!("[JSR-KRN3-COLD] cpu={} prev={} migration_home={} kick=true", c, p, home);
                 }
             }
         }
@@ -2293,17 +3294,17 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
 
     /// 组的记账快照。
     /// Arm at a serialized accounting boundary, before any measured workers spawn.
-    pub fn limit_window_arm(&mut self,g:CpuGroupId,window:u64)->u64 {
-        assert!(self.limit_window.is_none(), "one limit observer at a time");
+    pub fn budget_window_arm(&mut self,g:CpuGroupId,window:u64)->u64 {
+        assert!(self.budget_window.is_none(), "one budget observer at a time");
         let used=self.group_stats(g).expect("arm live group").used_ticks;
         let start=self.now;
-        let deadline=start.checked_add(window).expect("limit window overflow");
-        self.limit_window=Some((g,start,deadline,used,None)); deadline
+        let deadline=start.checked_add(window).expect("budget window overflow");
+        self.budget_window=Some((g,start,deadline,used,None)); deadline
     }
     /// Snapshot and clear under the same scheduler transaction (after pending drain).
     /// Returns start,deadline,cutoff,start usage,cutoff usage,end,total usage.
-    pub fn limit_window_finish(&mut self)->Option<(u64,u64,u64,u64,u64,u64,u64)> {
-        let (g,start,deadline,used_start,cutoff)=self.limit_window.take()?;
+    pub fn budget_window_finish(&mut self)->Option<(u64,u64,u64,u64,u64,u64,u64)> {
+        let (g,start,deadline,used_start,cutoff)=self.budget_window.take()?;
         let (at,used)=cutoff?;
         let total=self.group_stats(g)?.used_ticks;
         Some((start,deadline,at,used_start,used,self.now,total))
@@ -2353,7 +3354,7 @@ impl<P: SchedPolicy<State = EntityState>> Scheduler<P> {
         for slot in self.group_runs.iter(&self.group_links, 0) { wants[slot] = false; }
         // 可运行或运行中的任务一定在某个运行列表上：只遍历列表
         for q in 0..MAX_CPUS {
-            for i in self.runs.iter(&self.links, q) {
+            for i in LeafSlots::new(q) {
                 if let Some(t) = self.tasks.get(i).and_then(|t| t.as_ref()) {
                     if let (Some(g), TaskState::Runnable | TaskState::Running) = (t.cpu_group, t.state) {
                         wants[g] = true;
@@ -2436,7 +3437,7 @@ fn arb_class(t: &Task) -> kernel_core::arbiter::Class {
 
 fn eligible_in(groups: &[Option<CpuGroup>], t: &Task) -> bool {
     // 实时预算耗尽必须等归属CPU真正补充；仅时钟到下一周期不构成授权。
-    if t.rt_period != 0 && t.rt_remaining == 0 {
+    if t.ns_budget.is_some_and(|b|b.enabled && b.remaining==0) || (t.ns_budget.is_none() && t.rt_period != 0 && t.rt_remaining == 0) {
         return false;
     }
     match t.cpu_group {

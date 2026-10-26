@@ -15,6 +15,7 @@
 #![no_main]
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::fmt::Write as _;
 
 use kernel_core::memory_abi::MapArgs;
@@ -46,6 +47,9 @@ const TRANSFER: u64 = 1 << 6;
 
 /// 一个「永远等不到」的等待时长（tick）。
 const FOREVER: u64 = 1 << 40;
+
+static RT3_PHASE: AtomicU64 = AtomicU64::new(0);
+static RT3_DONE: AtomicU64 = AtomicU64::new(0);
 
 /// 发起一个两参数的系统调用（x86_64：rax=ID，rdi/rsi=参数，rcx/r11 被占用）。
 ///
@@ -280,7 +284,15 @@ fn shared_memory_contract() {
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start(mode:u64,target:u64) -> ! {
+    if (7..=10).contains(&mode) { rt3_mutex_program(mode,target); }
+    if mode==6 {let deadline=ns_now()+1_000_000_000;unsafe{syscall2(ids::SYSTEM_TIME_DEADLINE_WAIT,deadline,0);}exit(99)}
+    if mode==5 {ns_time_program();}
     if mode==2 {event_subscription_program(target);}
+    if mode==4 {
+        check(unsafe {syscall2(ids::SYSTEM_TASK_RT_SET,0,0)}==e(ids::SYSTEM_ERROR_RIGHTS_DENIED),122);
+        say!("rt1 profile_denied=true allowed_syscall=true failed=0");exit(0)
+    }
+    if mode==3 {rt_control_program(target!=0);}
     shared_memory_contract();
     // 1. 创建
     let bad0 = create(0);
@@ -398,6 +410,51 @@ pub extern "C" fn _start(mode:u64,target:u64) -> ! {
 
     say!("all checks passed");
     exit(0)
+}
+
+fn rt3_mutex_program(role:u64,mutex:u64)->! {
+    match role {
+        7 => {
+            check(unsafe {syscall2(ids::SYSTEM_SYNC_MUTEX_ACQUIRE,mutex,0)}==0,131);
+            // Acquire at the inherited process default first, then lower while
+            // holding. This makes setup deterministic even on one CPU: a
+            // higher-QoS waiter cannot starve the would-be low owner before
+            // the inversion scenario has actually been established.
+            check(unsafe {syscall2(ids::SYSTEM_TASK_QOS_SET,3,0)}==0,130); // Background
+            RT3_PHASE.store(1,Ordering::Release);
+            while RT3_PHASE.load(Ordering::Acquire)<2 {unsafe{syscall2(ids::SYSTEM_TASK_YIELD,0,0);}}
+            for _ in 0..64 {unsafe{syscall2(ids::SYSTEM_TASK_YIELD,0,0);}}
+            check(unsafe {syscall2(ids::SYSTEM_SYNC_MUTEX_RELEASE,mutex,0)}==0,132);
+            RT3_DONE.fetch_or(1,Ordering::Release);exit(0)
+        }
+        8 => {
+            while RT3_PHASE.load(Ordering::Acquire)<1 {unsafe{syscall2(ids::SYSTEM_TASK_YIELD,0,0);}}
+            RT3_PHASE.store(2,Ordering::Release);
+            check(unsafe {syscall2(ids::SYSTEM_SYNC_MUTEX_ACQUIRE,mutex,0)}==0,133);
+            check(unsafe {syscall2(ids::SYSTEM_SYNC_MUTEX_RELEASE,mutex,0)}==0,134);
+            RT3_DONE.fetch_or(2,Ordering::Release);exit(0)
+        }
+        9 => {
+            check(unsafe {syscall2(ids::SYSTEM_TASK_QOS_SET,2,0)}==0,135); // Utility
+            while RT3_PHASE.load(Ordering::Acquire)<2 {unsafe{syscall2(ids::SYSTEM_TASK_YIELD,0,0);}}
+            for _ in 0..256 {
+                if RT3_DONE.load(Ordering::Acquire)&2!=0 {break;}
+                core::hint::spin_loop();unsafe{syscall2(ids::SYSTEM_TASK_YIELD,0,0);}
+            }
+            check(RT3_DONE.load(Ordering::Acquire)&2!=0,136);
+            RT3_DONE.fetch_or(4,Ordering::Release);exit(0)
+        }
+        10 => {
+            let h=unsafe{syscall2(ids::SYSTEM_SYNC_MUTEX_CREATE,0,0)};
+            check(h>0,137);
+            check(unsafe{syscall2(ids::SYSTEM_SYNC_MUTEX_ACQUIRE,h as u64,0)}==0,138);
+            check(unsafe{syscall2(ids::SYSTEM_SYNC_MUTEX_ACQUIRE,h as u64,0)}==INVALID_ARGUMENT,139);
+            check(unsafe{syscall2(ids::SYSTEM_SYNC_MUTEX_RELEASE,h as u64,0)}==0,140);
+            check(unsafe{syscall2(ids::SYSTEM_HANDLE_CLOSE,h as u64,0)}==0,141);
+            say!("rt3 create=true recursive_refused=true unlock=true close=true");exit(0)
+        }
+        _=>exit(142),
+    }
 }
 
 #[panic_handler]
@@ -535,4 +592,53 @@ fn public_process_spawn_event(ring:i64) {
  check(unsafe {syscall2(ids::SYSTEM_PROCESS_SPAWN,raw.as_mut_ptr() as u64,0)}==0,94);
  let output=kernel_core::spawn_abi::SpawnDesc::decode(&raw);observe_spawned_exit(ring,output.out_process,0,51);
  for handle in [output.out_process,output.out_channel] {check(unsafe {syscall2(ids::SYSTEM_HANDLE_CLOSE,handle,0)}==0,95);}
+}
+
+fn rt_control_program(permitted:bool)->! {
+ EVENT_THREAD_RELEASE.store(0,core::sync::atomic::Ordering::Release);
+ let stack=unsafe {core::ptr::addr_of_mut!(EVENT_THREAD_STACK.0).cast::<u8>().add(16384) as u64};
+ let child=unsafe {syscall3(ids::SYSTEM_TASK_SPAWN,event_child as *const () as u64,stack,0)};check(child>0,110);
+ let mut set=[0u8;32];set[..4].copy_from_slice(&1u32.to_le_bytes());set[4..8].copy_from_slice(&32u32.to_le_bytes());set[8..12].copy_from_slice(&1u32.to_le_bytes());set[12..16].copy_from_slice(&10u32.to_le_bytes());set[16..24].copy_from_slice(&(child as u64).to_le_bytes());
+ if !permitted {
+  check(unsafe {syscall2(ids::SYSTEM_TASK_RT_SET,set.as_ptr() as u64,0)}==e(ids::SYSTEM_ERROR_RIGHTS_DENIED),111);
+  EVENT_THREAD_RELEASE.store(1,core::sync::atomic::Ordering::Release);
+  check(unsafe {syscall2(ids::SYSTEM_TASK_WAIT,child as u64,0)}==49,121);
+  say!("rt1 cpl3=true syscall_denied=true failed=0");exit(0)
+ }
+ let mask=unsafe {syscall2(ids::SYSTEM_TASK_AFFINITY_GET,child as u64,0)};check(mask==1,112); // RT fixture parent is restricted to CPU0; child must inherit.
+ let mut affinity=[0u8;32];affinity[..4].copy_from_slice(&1u32.to_le_bytes());affinity[4..8].copy_from_slice(&32u32.to_le_bytes());affinity[8..16].copy_from_slice(&(child as u64).to_le_bytes());affinity[16..24].copy_from_slice(&(mask as u64).to_le_bytes());
+ check(unsafe {syscall2(ids::SYSTEM_TASK_AFFINITY_SET,affinity.as_ptr() as u64,0)}==0,113);
+ affinity[16..24].copy_from_slice(&(1u64<<32).to_le_bytes());check(unsafe {syscall2(ids::SYSTEM_TASK_AFFINITY_SET,affinity.as_ptr() as u64,0)}==INVALID_ARGUMENT,114);
+ let read_only=unsafe {syscall2(ids::SYSTEM_HANDLE_DUPLICATE,child as u64,WAIT)};check(read_only>0,115);
+ set[16..24].copy_from_slice(&(read_only as u64).to_le_bytes());check(unsafe {syscall2(ids::SYSTEM_TASK_RT_SET,set.as_ptr() as u64,0)}==e(ids::SYSTEM_HANDLE_ERROR_RIGHTS_DENIED),116);
+ set[16..24].copy_from_slice(&(child as u64).to_le_bytes());set[24]=1;check(unsafe {syscall2(ids::SYSTEM_TASK_RT_SET,set.as_ptr() as u64,0)}==INVALID_ARGUMENT,117);set[24]=0;
+ check(unsafe {syscall2(ids::SYSTEM_TASK_RT_SET,set.as_ptr() as u64,0)}==0,118);
+ check(unsafe {syscall2(ids::SYSTEM_TASK_RT_SET,set.as_ptr() as u64,0)}==0,119);
+ set[8..12].copy_from_slice(&10u32.to_le_bytes());check(unsafe {syscall2(ids::SYSTEM_TASK_RT_SET,set.as_ptr() as u64,0)}<0,120);
+ EVENT_THREAD_RELEASE.store(1,core::sync::atomic::Ordering::Release);
+ check(unsafe {syscall2(ids::SYSTEM_TASK_WAIT,child as u64,0)}==49,122);
+ say!("rt1 cpl3=true admission=true rights=true affinity=true descriptor=true repeat=true failed=0");exit(0)
+}
+
+fn ns_now()->u64 {let n=unsafe {syscall2(ids::SYSTEM_TIME_DEADLINE_GET,0,0)};check(n>=0,130);n as u64}
+extern "C" fn ns_rt_child(_:u64,_:u64)->! {
+ while EVENT_THREAD_RELEASE.load(core::sync::atomic::Ordering::Acquire)==0 {unsafe{syscall2(ids::SYSTEM_TASK_YIELD,0,0);}}
+ let end=ns_now()+12_000_000;while ns_now()<end {core::hint::spin_loop();}exit(53)
+}
+fn ns_time_program()->! {
+ let start=ns_now();let deadline=start+1_000_000;
+ check(unsafe{syscall2(ids::SYSTEM_TIME_DEADLINE_WAIT,deadline,0)}==0,131);check(ns_now()>=deadline,132);
+ check(unsafe{syscall2(ids::SYSTEM_TIME_DEADLINE_WAIT,start,0)}==0,133);
+ check(unsafe{syscall2(ids::SYSTEM_TIME_DEADLINE_WAIT,u64::MAX,0)}==INVALID_ARGUMENT,134);
+ EVENT_THREAD_RELEASE.store(0,core::sync::atomic::Ordering::Release);
+ let stack=unsafe{core::ptr::addr_of_mut!(EVENT_THREAD_STACK.0).cast::<u8>().add(16384) as u64};
+ let child=unsafe{syscall3(ids::SYSTEM_TASK_SPAWN,ns_rt_child as *const () as u64,stack,0)};check(child>0,135);
+ let mut b=[0u8;40];b[..4].copy_from_slice(&1u32.to_le_bytes());b[4..8].copy_from_slice(&40u32.to_le_bytes());
+ b[8..16].copy_from_slice(&1_000_000u64.to_le_bytes());b[16..24].copy_from_slice(&4_000_000u64.to_le_bytes());b[24..32].copy_from_slice(&(child as u64).to_le_bytes());
+ b[32]=1;check(unsafe{syscall2(ids::SYSTEM_TASK_RT_DEADLINE_SET,b.as_ptr() as u64,0)}==INVALID_ARGUMENT,136);b[32]=0;
+ check(unsafe{syscall2(ids::SYSTEM_TASK_RT_DEADLINE_SET,b.as_ptr() as u64,0)}==0,137);
+ check(unsafe{syscall2(ids::SYSTEM_TASK_RT_DEADLINE_SET,b.as_ptr() as u64,0)}==0,138);
+ EVENT_THREAD_RELEASE.store(1,core::sync::atomic::Ordering::Release);
+ check(unsafe{syscall2(ids::SYSTEM_TASK_WAIT,child as u64,0)}==53,139);
+ say!("rt2 ns_wait=true no_early=true descriptor=true ns_rt=true child_exit=true failed=0");exit(0)
 }

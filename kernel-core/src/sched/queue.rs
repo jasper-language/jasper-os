@@ -144,6 +144,19 @@ impl<P: SchedPolicy> CoreQueue<P> {
     pub fn wake_preempts(&self, woken: Qos, current: Option<Qos>) -> bool {
         self.policy.wake_preempts(woken, current)
     }
+
+    /// Move one member to a separately locked destination queue. Callers must
+    /// hold both queue locks in a globally consistent order.
+    pub fn migrate_to(&mut self, destination: &mut Self, e: &mut SchedEntity<P::State>) -> Result<(), QueueError> {
+        if self.id == destination.id { return Err(QueueError::SameQueue); }
+        self.member(e)?;
+        let source_policy = self.policy;
+        self.queued -= 1;
+        destination.policy.migrate_in(&source_policy, e);
+        e.queue = Some(destination.id);
+        destination.queued += 1;
+        Ok(())
+    }
 }
 
 /// 把实体从队列 `from` 迁到队列 `to`：源队列出队（不调用出队钩子：实体没有睡眠或退出），
@@ -156,12 +169,11 @@ pub fn migrate<P: SchedPolicy>(queues: &mut [CoreQueue<P>], from: usize, to: usi
     if from == to {
         return Err(QueueError::SameQueue);
     }
-    queues[from].member(e)?;
-    let src = queues[from].policy;
-    queues[from].queued -= 1;
-    let dst = &mut queues[to];
-    dst.policy.migrate_in(&src, e);
-    e.queue = Some(dst.id);
-    dst.queued += 1;
-    Ok(())
+    if from < to {
+        let (left, right) = queues.split_at_mut(to);
+        left[from].migrate_to(&mut right[0], e)
+    } else {
+        let (left, right) = queues.split_at_mut(from);
+        right[0].migrate_to(&mut left[to], e)
+    }
 }

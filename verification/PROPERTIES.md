@@ -71,6 +71,33 @@
 | FV1-V2-SUITE | 权限不提升/未授权拒绝、代次/引用、真实跨表转移、Ring唯一性及配额/索引边界 | `kernel-core/src/{fv1,object,objtable,quota}.rs` | Kani | proved | `bash verification/run-kani.sh` | 各有界范围见FV1.toml；容量1/2、Ring4步、64位目标；锁/硬件/完整Channel队列不在代码证明内 |
 | FV1-RING-LIVE | 一个执行中请求在显式弱公平后端完成/发布/回收假设下最终回收，始终保持唯一性与缓冲静止约束 | `verification/ring_fv1.tla`; `async_ring::{finish,cancel,close,quiesce}` | TLA+ | model-checked | `bash verification/run-ring-fv1-tlc.sh` | 54可达状态；公平性是假设，不证明真实调度器/驱动最终进展 |
 
+## RT-3 优先级反转全链
+
+| ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |
+|---|---|---|---|---|---|---|
+| RT3-MUTEX-01 | 用户互斥对象唯一持有、直接交接、关闭/退出后引用守恒；递归和成环在阻塞前拒绝 | `kernel-core::inherited_mutex`; `kernel::user_mutex`; `verification/rt3_mutex_lifecycle.tla` | TLA+正负模型 + 契约/四核CPL3 | tested | `bash verification/run-rt3-mutex-lifecycle-tlc.sh && bash scripts/rt3-mutex-sample.sh <label>` | 模型6可达状态；实际三用户任务；不证明任意链长或物理等待上界 |
+| RT3-IPC-01 | Ring等待回复时事件登记、阻塞和服务线程继承边原子建立，任意完成/关闭唤醒清除继承 | `kernel::ring::enroll_wait_in`; `kernel::ipc::donation_owner_in`; `Scheduler::enroll_event_wait`; `verification/rt3_ring_donation.tla` | TLA+正负模型 + 跨进程CPL3 | tested | `bash verification/run-rt3-ring-donation-tlc.sh && bash scripts/rt3-mutex-sample.sh <label>` | 模型4可达状态；实际两进程两轮请求应答；不含硬件弱内存或物理截止期保证 |
+| RT3-KMUTEX-01 | 可能扫描依赖并修改多记录的批处理队列使用阻塞继承锁，不在整个操作期间关中断自旋 | `kernel::job`; `kernel::sched::turnstile` | 编译/默认定点 | tested | `cargo build -p jasper-kernel --lib --release` | 默认1/4核作业27项0失败，但整机因既有非RT3项退出35，未记整机PASS；仅任务上下文，IRQ须有界转交 |
+
+## FV-3 Verus试点结论
+
+| ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |
+|---|---|---|---|---|---|---|
+| FV3-VERUS-PILOT-01 | 试点实现的权限截断、交集、原地降权成功/拒绝原子性均不可增加权限；并集负例必须违反后置条件 | `verification/toolbox/verus/{handle_rights,handle_rights_bad}.rs` | Verus+Z3正例/严格负例 | proved | VM `bash verification/toolbox/run-fv3-verus.sh` | 正例9verified/0errors；证明对象是独立可执行Verus实现，不是生产`object.rs`，因此不登记为生产V3证明 |
+| FV3-HANDLE-DIRECT-01 | 生产HandleTable降权、旧句柄、容量和跨表转移保持权限及唯一所有者，缺失TRANSFER检查产生反例 | `kernel-core/src/{object,fv1}.rs`; `verification/toolbox/tests/handle_sequence.rs` | Kani + Proptest/Miri/fuzz/Loom + 源码变异负例 | proved / tested | VM `bash verification/toolbox/run-fv3-handle-suite.sh` | 两个Kani harness各0失败；Proptest/Loom2、Miri1、fuzz10000；Loom验证外部互斥串行化，不证明生产锁或任意并发调用 |
+
+## KRN-3 每核队列迁移协议
+
+| ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |
+|---|---|---|---|---|---|---|
+| KRN3-MIGRATION-PROTOCOL-01 | 跨核迁移按较小CPU号先取锁；可运行任务在源核、事务保管或目标核三者中恰有一个所有者；提交/回滚只发生一次 | `kernel-core::percpu_migration`; `verification/krn3_percpu_migration.tla` | TLA+正负模型、Verus伴随、Proptest/Miri/fuzz/Kani/Loom | tested / model-checked / bounded Kani | VM `bash verification/toolbox/run-krn3-migration-suite.sh` | 正模型无错、破坏detach所有权的负例违反Safety；Proptest256、fuzz10000、Kani2 harness。当前Rust类型是生产迁移事务使用的纯协议，但不证明未来真实两把锁的弱内存或公平性 |
+| KRN3-MIGRATION-INTEGRATION-01 | 生产rehome仅在队列迁移成功后发布目标home；失败保留源home，代次不截断；CPL3亲和迁移后EDF/准入/退出资源守恒 | `kernel/src/sched/scheduler.rs::rehome`; `scripts/rt1-admission-sample.sh` | 默认内核编译 + 受控四核guest | tested | `krn3-migration-production-20261026` | exit33，CPL3/EDF/ADMISSION标记全真且source前后同；仍持全局Scheduler锁，不代表每核锁完成、低争用或物理性能达标 |
+| KRN3-TARGET-INBOX-01 | 远程wake/PI进入目标CPU独立有界inbox；消费前释放inbox锁，完整代次和PI轮次不匹配时不应用；wake满队列同步回退 | `kernel/src/sched/mod.rs`; `kernel/src/sched/scheduler.rs`; `kernel_core::percpu_migration::PiMailbox` | Verus+Z3/Proptest/Miri/fuzz/Kani/Loom/TLA + 四核定点guest | tested / model-checked / bounded Kani | `migration-suite/PASS`; `inbox-target-consume-20261026`失败；`inbox-irq-safe-20261026`目标标记 | 首轮未屏蔽同核中断而timeout124；修复后remote wake和16+1满邮箱全部返回、列表一致、资源守恒。该guest默认套件另有cap50时序/预算失败，故只登记目标契约，不登记默认套件通过；不证明真实RunLists已拆锁 |
+| KRN3-RUNLEAF-01 | 每核策略状态和真实运行列表由独立leaf锁拥有；跨核迁移按CPU号同时持源/目标leaf，策略成员与链表成员同事务迁移；旧源不能重复迁移或双入队 | `kernel-core::sched::queue::CoreQueue::migrate_to`; `kernel/src/sched/scheduler.rs::{RunLeaf,rehome,relist}` | 定点core契约 + 默认release编译 + 四核定点guest | tested | `cargo test -p kernel-core separately_locked_core_queues_migrate_exactly_once`; `evidence/krn3/runleaf-fixed-20261026/PASS` | 初次guest因decide持leaf后递归waiting自锁而timeout124；改为锁外等待快照后目标标记、列表和资源守恒通过。任务/current/Link仍受全局控制锁保护，不证明调度热路径已去全局锁；同次默认套件cap50时序失败不计通过 |
+| KRN3-MIGRATION-COMPLETION-01 | 任务热槽先迁到目标leaf时，源CPU切换完成仍必须清除目标热槽的旧执行所有权，并在冷结算后向目标CPU发kick；旧源不能令任务永久不可选 | `kernel/src/sched/scheduler.rs::{finish_leaf_switch,finish_switch}`; `kernel/src/sched/mod.rs::{finish_switch,on_timer_interrupt,on_local_timer}` | 默认release编译 + 双核聚焦guest + 热槽六工具套件 | tested | `evidence/krn3/fused-switch-migration-final2-20261026/PASS`; `bash verification/toolbox/run-krn3-task-hot-suite.sh` | 首次完整guest在亲和迁移后timeout124，定位为目标leaf热`on_cpu`残留；修复后CPU1→CPU0恢复、worker完成、列表和资源均通过。时钟tick与prepare已合并一次事务，但普通竞争路径仍取得一次`KERNEL_SCHED`，不登记KRN-3完成或物理性能达标 |
+| KRN3-BSP-LEASE-ISOLATION-01 | BSP tick不得排空普通无组非RT AP的本地记账；预算任务保持单tick结算；批次耗尽或控制事务后精确归并且退出不能越过在核运行所有权 | `kernel-core::tick_lease::TickLease`; `kernel/src/sched/mod.rs::lock_state_from`; `kernel/src/sched/scheduler.rs::{bsp_tick_lease_participants,drain_local_ticks,workers_settled}` | core契约 + 默认release编译 + 双核聚焦guest | tested | `cargo test -p kernel-core tick_lease`; `evidence/krn3/bsp-partial-batch-fixed-20261026/PASS` | 首轮发现退出到switch发布窗口会让run提前返回，已保留失败并用热`on_cpu`补齐settled边界；最终连续峰值8且实体/CPU账精确。竞争选择与切换仍回退全局，不证明KRN-3完成或物理延迟 |
+| KRN3-LOCAL-COMPETING-SWITCH-01 | 同核普通任务竞争时，获授权AP tick在单个RunLeaf内精确完成记账、策略选择、requeue/dispatch与切换发布；冷事务按完整代次结算原owner且不得重复扣费、双入队或提前复用 | `kernel/src/sched/scheduler.rs::{fast_leaf_competing_tick,settle_leaf_transition,drain_local_ticks}`; `kernel/src/sched/mod.rs::on_local_timer` | 默认release编译 + 热槽六工具套件 + 双核真实竞争guest | tested | `bash verification/toolbox/run-krn3-task-hot-suite.sh`; `bash scripts/krn3-fast-tick-sample.sh competing-local-switch-final2-20261026`（仅VM） | guest33/整批0/source同；两任务3次本核切换，lease hits6、实体/CPU账均12，队列/热槽审计全0且资源回收。仅覆盖无RT、无组预算、无ns预算、无PI提升的普通竞争；复杂控制保持全局事务；TCG不证明物理延迟或弱内存 |
+
 实现映射：模型Finish覆盖真实finish或已取消后quiesce，Publish对应advance内发布判断，Destroy对应满足Q且P或closing后的控制块回收。模型不建模锁或多请求并发。Kani跨表转移证明针对内核实际复用的transfer_to，不替换为假想转移模型。
 
 ## KRN-1 长跑数据消费
@@ -210,7 +237,7 @@ The following complete main-side registry (including assumptions/tool versions) 
   `verification/` 下的资产与登记表，不改内核功能代码。
 - 模型：TLA+ 模块 `verification/tlb_shootdown.tla`，配置 `verification/tlb_shootdown.cfg`。
 - 工具：TLC 2026.10.20.183001（`tla2tools.jar` 1.8.0），Java 21，4 个 worker。
-- 环境：构建虚拟机；QEMU 只验 x86_64。
+- 环境：构建虚拟机（`bash <vm-wrapper> <repo> <命令>`）；QEMU 只验 x86_64。
 - 复现命令均在构建虚拟机内、仓库根目录执行；宿主不直接运行 cargo / qemu。
 - PDA-0 工具基线：`abfe0b8`（`oc/Q69`）；Python 3.14.4（构建虚拟机），仅标准库。
 
@@ -348,10 +375,19 @@ cont-splash 帧缓冲仍未验证（见 `docs/PDA-1-image-dtb.md`）。
 - 宿主经构建虚拟机执行同一命令：
   `bash verification/run-tlc.sh`
 - 全量 x86_64 验收：`bash scripts/accept.sh`（单核、4 核、8 核与 q35；AArch64/RISC-V 记 N/A）。
-- 公开复验入口：`bash verification/run-tlc.sh`；具体性质与适用范围见本表。
+- 机械闸门：`bash verification/local-ci.sh`。
 
 
 ## Additional bm1 contract scopes
+
+| KRN3-LEAF-RUNSTATE-01 | 每核 current、时间片与切换在途状态由对应 leaf 独占；切换发布原子写入 current/from，完成精确消费一次 from | kernel::sched::scheduler::RunLeaf/prepare_switch/finish_switch | 默认内核编译 + 受控4核定点guest | tested | `bash scripts/krn3-inbox-sample.sh runstate-20261026`（仅VM） | 脚本整批0、guest35；remote wake、16+1邮箱、lists_ok和资源回收通过。CPU cap50下既有两项时序失败，非默认套件PASS；Task热状态仍在全局锁内，未证明热路径已去全局化 |
+| KRN3-LEAF-LINKS-01 | 每核 leaf 同时拥有运行列表表头与槽位链接；跨核迁移同时持源/目标 leaf 后原子摘链/入链；启动扩容在全部 leaf 链接表准备成功后才提交 | `kernel_core::sched::RunLists::{first,next}`; `kernel::sched::scheduler::{RunLeaf,LeafSlots,rehome,relist}` | 运行链契约 + 默认内核编译 + 受控4核定点guest | tested | `cargo test -p kernel-core sched::runlist`; `bash scripts/krn3-inbox-sample.sh leaf-links-20261026`（仅VM） | core 6项通过；脚本整批0、guest35、source前后同，remote wake、16+1邮箱、lists_ok和资源回收通过。CPU cap50既有时序项不计默认PASS；Task热状态仍在全局锁内 |
+| KRN3-TASK-HOT-IDENTITY-01 | 分槽热状态只接受完整槽号与代次匹配的读取、修改和退役；槽位复用后旧命令不能修改新任务 | `kernel_core::task_hot::Slot` | Verus+Z3 / Proptest / Miri / cargo-fuzz / Kani / Loom | tested / bounded Kani | `bash verification/toolbox/run-krn3-task-hot-suite.sh`（仅VM） | Verus 3项、Proptest/Loom 3项、Miri 1项、fuzz 10000次、Kani 2 harness 全过。Loom使用外部Mutex，Verus为身份逻辑伴随；尚未接入生产Task字段或证明IRQ/生产锁，不能据此标记KRN-3完成 |
+| KRN3-TASK-HOT-WIRE-01 | 每个历史任务的代次热状态恰好由其home CPU leaf持有；跨核迁移退役源后发布目标，状态转换保持镜像一致 | `kernel::sched::scheduler::{RunLeaf,publish_hot,sync_hot,retire_hot,rehome,queue_audit}` | 默认内核编译 + 受控4核定点guest | tested | `bash scripts/krn3-inbox-sample.sh task-hot-fixed-20261026`（仅VM） | 首轮boot代次0/1不一致在tick25真panic并保留；修复后脚本0、guest35、source前后同，remote wake、16+1邮箱、lists_ok与资源基线过。当前为生产镜像，Task仍是权威状态且热路径仍取全局锁；CPU cap50既有预算/时序失败不计默认PASS |
+| KRN3-LEAF-SCHED-ENTITY-01 | `SchedEntity`由完整任务代次绑定的home leaf权威持有；所有队列/策略写在leaf锁内与队列计数同事务，冷表镜像及审计不得分叉 | `kernel::sched::scheduler::{LeafTaskHot,with_leaf_hot,update_hot_sched,rehome,queue_audit}` | 六工具热槽切片 + 默认编译 + 受控4核定点guest | tested | `bash verification/toolbox/run-krn3-task-hot-suite.sh`; `bash scripts/krn3-inbox-sample.sh sched-hot-canonical-20261026`（仅VM） | Verus3/Proptest+Loom3/Miri1/fuzz10000/Kani2通过；默认编译过；guest脚本0/guest35/source同，remote wake、16+1邮箱、lists_ok与资源回收过。CPU cap50既有NOHZ/规模时序失败不计默认PASS；choose/decide及facade仍先取全局锁，KRN-3未完成 |
+| KRN3-LEAF-CHOOSE-01 | waiting/抢占/普通策略选择在单个本核leaf锁内遍历运行链并读取完整代次热槽；实体引用不跨锁且策略不回调全局锁 | `kernel::sched::scheduler::{waiting,decide,prepare_switch}` | 默认内核编译 + 受控4核定点guest | tested | `bash scripts/krn3-inbox-sample.sh leaf-choose-fixed-20261026`（仅VM） | 首轮真实发现迁移后旧CPU缺本地hot而漏home检查，亲和任务仍跑旧核；修复后脚本0/guest35/source同，CPU3→1→2准确、remote wake、满邮箱、lists_ok与资源回收过。CPUcap50既有时序/预算失败不计默认PASS；facade仍先取KERNEL_SCHED |
+| KRN3-FAST-LEAF-TICK-01 | 已授权AP tick持本CPU lease时在本leaf精确推进实体/策略/时间片一次；global drain只镜像并结算冷账，不重复实体tick | `tick_lease::try_tick_owner`; `scheduler::fast_leaf_tick/drain_local_tick`; `sched::on_local_timer` | core契约 + release编译 + 受控双核定点guest | tested | `cargo test -p kernel-core tick_lease`; `bash scripts/krn3-fast-tick-sample.sh UNIQUE`（仅VM） | core2项过；首轮仅hit1暴露quantum重复门槛并保留，修复后fast-leaf-tick-pass2整批0/guest33/source同，真实hits4且entity_ticks=busy_ticks=4、列表/热槽/资源过。仅无RT/无共享组单AP运行者；BSP/复杂AP路径保留global，不证明KRN-3完成或物理性能 |
+| KRN3-LEAF-FINISH-01 | 上下文保存后由恢复CPU在本leaf精确消费一次switching_from并清除旧执行者热on_cpu；冷生命周期随后核对同代次历史再detach | `scheduler::{finish_leaf_switch,finish_switch}`; `sched::finish_switch` | 默认编译 + 受控双核真实切入/切出guest | tested | `bash scripts/krn3-fast-tick-sample.sh UNIQUE`（仅VM） | 首轮错误要求Exited任务仍live而真panic，失败保留；leaf-finish-fixed整批0/guest33/source同，leaf_finishes=2、列表/热槽/资源过。槽位复用/迁移仍由后续global冷事务串行化，prepare_switch尚未去global，非弱内存或完整KRN-3证明 |
 
 | KRN1-SOAK-01 | 单客户机中每批1500轮用户IPC/Ring/线程/映射负载后，帧/对象/清理队列/固定帧及堆计数回到预热基线 | `kernel::soak::run`; `kernel::longrun_demo::run`; `tools/krn1/soak.py` | QEMU契约测试 | tested | `bash scripts/krn1-soak.sh` | 短时8核验证通过3000轮；8小时正式结果须另查status.json，当前不能宣称完成；不代表所有核持续满载或裸机性能 |
 | KRN1-SOAK-02 | 控制器只在时长足够、已请求停止、客户机批次完成且健康终态后接受 | `tools/krn1/soak.py`; `verification/soak_accept.tla` | TLA+ | model-checked | `bash verification/run-soak-tlc.sh` | TLC13可达状态、深度7、无违例；把宿主单调时钟、串口标记及客户机计数器视为可信；不证明工作负载内部 |
@@ -430,12 +466,24 @@ cont-splash 帧缓冲仍未验证（见 `docs/PDA-1-image-dtb.md`）。
 | EVT2-PUBLISHER-ANCHOR-01 | 活publisher保留anchor，用户cap全关后仍可重发放，结束后不复活 | verification/subscription_publisher_anchor.tla; kernel-core/src/objtable.rs; kernel/src/subscription.rs | TLA+/真实ObjectTable/QEMU | tested | cargo test -p kernel-core --lib publisher_anchor_keeps_source_regrantable_until_publisher_finishes | anchor正负模型/实际契约/80060全源三档过；不改ObjectTable Closing规则，非全图无环证明 |
 
 
-## CPU limit observation-window correction
+## CPU budget observation-window correction
 
 | ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |
 |---|---|---|---|---|---|---|
-| BUDGET-WINDOW-OBS-01 | 单观察者在调度器事务内arm/start，第一次BSP截止事务只捕获一次，finish区分固定窗口/完整生命周期/尾段并检查守恒，原160tick上界52不增大 | Scheduler::limit_window_arm/tick/limit_window_finish; balance_demo::limit | 实际八核隔离契约 | tested | VM CPU cap50且仅经vm-run执行 bash scripts/limit-window-sample.sh UNIQUE | limit-window-split-20261025整批0/guest33：window51<=52、life51<=60(elapsed190)、tail0、原资源断言过，source前后/host同。仅记账事务边界：pending已drain、当前BSP扣费前；不是硬件IRQ发生时间/弱内存/全调度证明。前置诊断cutoff49/life62的旧断言失败保留；原FULL54未逐tick还原。默认完整回归及纯窗口状态机/六工具覆盖仍待，不标proved |
+| BUDGET-WINDOW-OBS-01 | 单观察者在调度器事务内arm/start，第一次BSP截止事务只捕获一次，finish区分固定窗口/完整生命周期/尾段并检查守恒，原160tick上界52不增大 | Scheduler::budget_window_arm/tick/budget_window_finish; balance_demo::limit | 实际八核隔离契约 | tested | VM CPU cap50且仅经vm-run执行 bash scripts/budget-window-sample.sh UNIQUE | budget-window-split-20261025整批0/guest33：window51<=52、life51<=60(elapsed190)、tail0、原资源断言过，source前后/host同。仅记账事务边界：pending已drain、当前BSP扣费前；不是硬件IRQ发生时间/弱内存/全调度证明。前置诊断cutoff49/life62的旧断言失败保留；原FULL54未逐tick还原。默认完整回归及纯窗口状态机/六工具覆盖仍待，不标proved |
 
-| BUDGET-WINDOW-MODEL-01 | 截止快照一次捕获且尾段不能改写，finish保持窗口/尾段分账守恒 | verification/limit_observation.tla | TLC正模型+改写cutoff负例 | model-checked | bash verification/run-limit-observation-tlc.sh; bash verification/run-limit-observation-tlc.sh limit_observation_rewrite.cfg（预期Safety反例） | 50753整批0，71distinct/85generated/depth10；负例真Safety违例。仅单观察者、最多4次charge/3tick原子状态；不证明Rust/IRQ时刻/预算准入，Busy/溢出/迟截止尚未包含 |
+| BUDGET-WINDOW-MODEL-01 | 截止快照一次捕获且尾段不能改写，finish保持窗口/尾段分账守恒 | verification/budget_observation.tla | TLC正模型+改写cutoff负例 | model-checked | bash verification/run-budget-observation-tlc.sh; bash verification/run-budget-observation-tlc.sh budget_observation_rewrite.cfg（预期Safety反例） | 50753整批0，71distinct/85generated/depth10；负例真Safety违例。仅单观察者、最多4次charge/3tick原子状态；不证明Rust/IRQ时刻/预算准入，Busy/溢出/迟截止尚未包含 |
 
-| BUDGET-CORE-TOOLS-01 | 单CPU按eligible准入的CpuLimit保持窗口界与使用次数；分账整数恒等式成立 | kernel_core::sched::limit::CpuLimit; toolbox/tests/limit.rs; toolbox/src/lib.rs::limit_admitted_eight_steps | Verus伴随/Proptest/Miri/fuzz/Kani/Loom适配 | tested / bounded Kani | 见docs/EVT-2-status.md limit-tools-20261025 | 实际Verus8总proof/Miri8/Proptest128/fuzz10000/Kani8步1harness/Loom1；Kani显式合法rate/burst域假设，不证明多核准入/硬件时间/生产锁。Loom为Mutex适配，主FV1的15项不变；raw证据PASS不推断已丢失host session的总退出码 |
+| BUDGET-CORE-TOOLS-01 | 单CPU按eligible准入的CpuLimit保持窗口界与使用次数；分账整数恒等式成立 | kernel_core::sched::limit::CpuLimit; toolbox/tests/budget.rs; toolbox/src/lib.rs::budget_admitted_eight_steps | Verus伴随/Proptest/Miri/fuzz/Kani/Loom适配 | tested / bounded Kani | 见docs/EVT-2-status.md budget-tools-20261025 | 实际Verus8总proof/Miri8/Proptest128/fuzz10000/Kani8步1harness/Loom1；Kani显式合法rate/burst域假设，不证明多核准入/硬件时间/生产锁。Loom为Mutex适配，主FV1的15项不变；raw证据PASS不推断已丢失host session的总退出码 |
+
+| RT1-PARTITION-FOUNDATION-01 | 每核准入不超容量，拒绝不删除原预留，纯算法只返回可容纳的允许核且不修改输入 | rt_partition::place; rt_partition_admission.tla; Scheduler::set_rt | 有限正负模型/两契约/六工具切片/真实4核fixture | tested / model-checked | bash scripts/rt1-admission-sample.sh UNIQUE（仅VM） | 模型128states/1741gen/depth7，negative真Safety；实际rt1-scheduler-admission-stable-20261025整批0/33。setup断言期间BSP IRQ屏蔽、之后正常运行，非CPL3/EDF/任意重配置并发证明；原跨时间快照失败保留。legacy RtSet与用户安全重配仍未迁移 |
+| RT1-EDF-ENTRY-01 | 分区内最早绝对期末派发，用户RT声明需调用授权与Task CONTROL，取消不刷新本期预算 | Scheduler::prepare_switch/decide/set_rt; task_control; rt_partition_edf.tla; rt_reentry_debt.tla; rt_control_authority.tla | 有限正负模型/实际CPL3与kernelguest/纯选择六工具 | tested / model-checked | bash scripts/rt1-admission-sample.sh UNIQUE | 正EDF15state/debt126state/authority20state，负例真Safety；canonical-migration guest33，非用户第一指令/弱内存证明；Verus仅比较伴随，LoomMutex适配；时间单位ticks |
+| RT1-CANONICAL-CAPACITY-01 | 仅Task预算计费；启动容量外拒绝原子，同声明幂等，退出释放容量，子线程继承CPU允许集 | rt::install; Scheduler::set_rt; syscall::task_spawn; rtclass_demo; arbiter_demo | 真实4核guest | tested | bash scripts/rt1-admission-sample.sh UNIQUE | rt1-canonical-migration-20261025整批0/33，RTCLASS14/0与ARB7/0；不含10000周期报告/所有Profile运行；bootcapacity配置原子不是第二份预留表 |
+| RT1-PROFILE-RUNTIME-01 | 缺少sched.realtime的真实Profile拒绝获rt.set调用授权的用户进程，退出后无预留/资源泄漏 | profile::ACTIVE; task_control::rt_set; rt1_demo::profile_denial | CPL3契约guest | tested | RT1_FEATURES=rt1-no-realtime bash scripts/rt1-admission-sample.sh UNIQUE | rt1-profile-disabled-20261025整批0/33，HEADLESS_MIN双进程/资源；仅拒绝场景，非全Profile交叉组合证明 |
+| RT2-TIMER-COUNTS-01 | 单次计数ceil且至少1，未知频率/超u32拒绝，不截断或饱和伪装有效延时 | timer_units::oneshot_counts | core契约/Proptest/Miri/fuzz/Verus伴随 | tested | cargo test -p kernel-core timer_units; toolbox timer_units | 纯换算，不含校准准确度/硬件期限；宽域Kani求解中止未证明 |
+
+| RT2-ELAPSED-CREDIT-01 | 重复IRQ时间戳不铸造tick，累积小段保持floor总经过量，倒退拒绝不修改 | timer_units::PeriodicCredit; elapsed_irq_credit.tla | 正负模型/Proptest/Miri/fuzz/限定Kani/Verus伴随/Loom适配 | tested / model-checked / bounded Kani | run-elapsed-irq-credit-tlc.sh；toolbox timer_units | 模型21states/37gen/depth7；Kani仅period2/u8timestamps；不含跨owner分摊/真实时钟校准/弱内存锁证明 |
+| RT2-LAPIC-PRIMITIVE-01 | ns单次定时写寄存器前验证，拒绝溢出无修改；诊断IRQ不算整tick且恢复周期 | apic::arm_after_ns; rt2_demo; irq::LocalTimer | opt-in真实4CPUguest | tested | RT1_FEATURES=rt2-verify bash scripts/rt1-admission-sample.sh UNIQUE | rt2-lapic-irq-20261026 whole0/33，MMIO/路由/资源；旧pendingIRQ未辨来源，非无早唤醒/物理延迟或RT2完整调度 |
+| RT2-NS-INTEGRATION-01 | ns任务预算按执行owner区间扣费；新纳秒等待不早返回且退出可打断，旧ABI保留ticks | ns_budget::Budget; hrtime; Scheduler::settle_highres/refresh_ns_events/highres_event; syscall::time_wait_ns | owner正负模型/契约/属性/限定Kani/实际CPL3与kernelguest/默认旧功能定点回归 | tested / model-checked / bounded Kani | run-ns-owner-accounting-tlc.sh；RT1_FEATURES=rt2-verify scripts/rt1-admission-sample.sh UNIQUE；accept-20261026-113555 | rt2-production-routed-20261026整批0/4CPUguest33/source同，ns等待、BSP/AP、CPL3、预算、退出取消及资源全真；默认九项旧功能PASS、功能失败0，QEMU37仅TCG采样15/20。模型不证明真实TSC跨核校准/锁/弱内存/物理抖动；宽域换算Kani仍未证明，CPU纳秒值以校准域为准 |
+
+| KRN3-LEAF-COMPLETION-01 | 恢复执行流在本核叶精确释放一次旧执行者并延迟冷detach；再次调度前必须消费且槽位不可提前复用，run返回等待远端最终completion | sched::scheduler::{finish_leaf_switch,take_leaf_switch_completion,workers_settled}; sched::lock_state_from | 代次热槽六工具切片复跑 + 默认编译 + 真实双核切换夹具 | tested | bash verification/toolbox/run-krn3-task-hot-suite.sh; bash scripts/krn3-fast-tick-sample.sh leaf-cold-deferred-final2-20261026 | guest33/整批0/source同，切入切出2次、fast tick4次精确、列表/资源通过；首轮run提前返回guest35保留；冷生命周期仍由全局事务结算，未证明prepare选择去全局锁、完整Rust弱内存或物理性能 |

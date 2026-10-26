@@ -187,20 +187,92 @@ fn deadline_owner_contract(n: usize) {
     check(saved == baseline(), "每核到期唤醒演练资源不守恒");
     kprintln!("[JSR-DEADLINE-OWNER] registered={} moved={} target={} consumed={} ran={} reclaimed={}", registered, moved, target, consumed, ran, saved == baseline());
 }
-// Author: chatgpt. Two APs share one real group and independent RT limits.
+// Author: chatgpt. Two APs share one real group and independent RT budgets.
 static BUDGET_STOP: AtomicU32 = AtomicU32::new(0);
-fn limit_worker() { while BUDGET_STOP.load(Ordering::Acquire) == 0 { core::hint::spin_loop(); } }
-fn limit_tick_contract(n: usize) {
+fn budget_worker() { while BUDGET_STOP.load(Ordering::Acquire) == 0 { core::hint::spin_loop(); } }
+
+#[cfg(feature = "krn3-fast-tick-verify")]
+static FAST_TICK_STOP: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "krn3-fast-tick-verify")]
+fn fast_tick_worker() {
+    while FAST_TICK_STOP.load(Ordering::Acquire) == 0 { core::hint::spin_loop(); }
+}
+
+/// Isolated KRN-3 production contract: two ordinary AP workers compete on one
+/// leaf. Timer accounting, policy choice and the actual context switch must
+/// complete without acquiring the global scheduler lock. Reading counters is
+/// a cold transaction and reconciles the generation-bound leaf handoff.
+#[cfg(feature = "krn3-fast-tick-verify")]
+pub fn run_fast_leaf_tick_contract() -> u32 {
+    FAILED.store(0, Ordering::Relaxed);
+    let saved = baseline();
+    let old_arbiter = sched::set_arbiter(false);
+    let id = TaskId(0x4b524e3346415354);
+    let peer = TaskId(0x4b524e3346415355);
+    FAST_TICK_STOP.store(0, Ordering::Relaxed);
+    sched::reset_cpu_stats();
+    let before = sched::local_tick_hits(1);
+    let finishes_before = sched::leaf_finish_count();
+    let worker_finishes_before = sched::leaf_worker_finish_count();
+    let local_switches_before = sched::leaf_local_switch_count();
+    let mut cpu = CpuSet::EMPTY; cpu.insert(1);
+    let spawned = quiet(|| {
+        sched::spawn_on(id, "krn3-fast-a", fast_tick_worker, None, cpu).is_ok()
+            && sched::spawn_on(peer, "krn3-fast-b", fast_tick_worker, None, cpu).is_ok()
+    });
+    let deadline = sched::timer_ticks() + 120;
+    let mut hits = 0;
+    while spawned && sched::timer_ticks() < deadline {
+        if sched::leaf_local_switch_count().wrapping_sub(local_switches_before) >= 3 { break; }
+        core::hint::spin_loop();
+    }
+    kprintln!("[JSR-KRN3-FAST-STAGE] stage=observed switches={}",
+        sched::leaf_local_switch_count().wrapping_sub(local_switches_before));
+    hits = sched::local_tick_hits(1).wrapping_sub(before);
+    kprintln!("[JSR-KRN3-FAST-STAGE] stage=hits value={}", hits);
+    let entity_ticks = sched::task_cpu_ticks(id).unwrap_or(0)
+        .saturating_add(sched::task_cpu_ticks(peer).unwrap_or(0));
+    kprintln!("[JSR-KRN3-FAST-STAGE] stage=entity value={}", entity_ticks);
+    let busy_ticks = sched::cpu_stats(1).busy_ticks;
+    let batch_peak = sched::local_tick_batch_peak(1);
+    let local_switches = sched::leaf_local_switch_count().wrapping_sub(local_switches_before);
+    let audit = sched::queue_audit();
+    let exact = hits >= 3 && batch_peak == 1 && local_switches >= 3
+        && entity_ticks == busy_ticks && entity_ticks >= u64::from(hits);
+    check(spawned && exact, "competing leaf ticks must switch and account exactly once");
+    let lists_ok = audit.misplaced == 0 && audit.count_mismatch == 0
+        && audit.hook_errors == 0 && audit.list_mismatch == 0;
+    kprintln!("[JSR-KRN3-FAST-AUDIT] queued={} misplaced={} count_mismatch={} hook_errors={} list_mismatch={}",
+        audit.queued, audit.misplaced, audit.count_mismatch, audit.hook_errors, audit.list_mismatch);
+    check(lists_ok,
+        "fast leaf tick must preserve queue and hot ownership");
+    FAST_TICK_STOP.store(1, Ordering::Release);
+    sched::run();
+    sched::set_arbiter(old_arbiter);
+    let finishes = sched::leaf_finish_count().wrapping_sub(finishes_before);
+    let worker_finishes = sched::leaf_worker_finish_count().wrapping_sub(worker_finishes_before);
+    let reclaimed = saved == baseline();
+    check(worker_finishes >= 1, "worker switch-out must complete in the local leaf");
+    check(reclaimed, "fast leaf tick guest resources must return to baseline");
+    kprintln!("[JSR-KRN3-FAST-TICK] spawned={} hits={} batch_peak={} local_switches={} entity_ticks={} busy_ticks={} exact={} leaf_finishes={} worker_finishes={} lists_ok={} reclaimed={} failed={}",
+        spawned, hits, batch_peak, local_switches, entity_ticks, busy_ticks, exact,
+        finishes,
+        worker_finishes,
+        lists_ok,
+        reclaimed, failed());
+    failed()
+}
+fn budget_tick_contract(n: usize) {
     if n < 3 { return; }
     let saved = baseline();
-    let before = sched::limit_tick_stats();
+    let before = sched::budget_tick_stats();
     BUDGET_STOP.store(0, Ordering::Relaxed);
-    let group = sched::create_cpu_group(900).expect("limit lease group");
+    let group = sched::create_cpu_group(900).expect("budget lease group");
     let mut configured = true;
     for c in 1..=2 {
         let id = TaskId(0x42554447455400 + c as u64);
         let mut cpus = CpuSet::EMPTY; cpus.insert(c);
-        configured &= quiet(|| sched::spawn_on(id, "limit-credit", limit_worker, None, cpus).is_ok());
+        configured &= quiet(|| sched::spawn_on(id, "budget-credit", budget_worker, None, cpus).is_ok());
         configured &= sched::assign_cpu_group(id, Some(group)).is_ok();
         configured &= sched::set_rt(id, 4, 16);
     }
@@ -208,7 +280,7 @@ fn limit_tick_contract(n: usize) {
     // Measure the actual global clock instead of assuming that call slept 80 ticks.
     let until = sched::timer_ticks() + 80;
     while sched::timer_ticks() < until { sched::sleep_ticks(1); }
-    let after = sched::limit_tick_stats();
+    let after = sched::budget_tick_stats();
     let used = sched::cpu_group_stats(group).unwrap().used_ticks;
     BUDGET_STOP.store(1, Ordering::Release);
     for c in 1..=2 { sched::set_rt(TaskId(0x42554447455400 + c as u64), 0, 0); }
@@ -397,7 +469,7 @@ pub fn run() {
     mailbox_full_contract(n);
     deadline_owner_contract(n);
     local_rt_contract(n);
-    limit_tick_contract(n);
+    budget_tick_contract(n);
     scale(n);
     overload(n);
     recovery(n);

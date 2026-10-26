@@ -151,6 +151,15 @@ fn has_handler(id: u32) -> bool {
             | SYSTEM_TIME_WAIT
             | SYSTEM_CHANNEL_CREATE
             | SYSTEM_CHANNEL_SEND
+            | SYSTEM_TASK_RT_DEADLINE_SET
+            | SYSTEM_TIME_DEADLINE_GET
+            | SYSTEM_TIME_DEADLINE_WAIT
+            | SYSTEM_SYNC_MUTEX_CREATE
+            | SYSTEM_SYNC_MUTEX_ACQUIRE
+            | SYSTEM_SYNC_MUTEX_RELEASE
+            | SYSTEM_TASK_RT_SET
+            | SYSTEM_TASK_AFFINITY_SET
+            | SYSTEM_TASK_AFFINITY_GET
             | SYSTEM_EVENT_SOURCE_CREATE
             | SYSTEM_EVENT_SUBSCRIPTION_CREATE
             | SYSTEM_EVENT_SUBSCRIPTION_WAIT
@@ -208,7 +217,7 @@ fn error_name(ret: i64) -> &'static str {
 /// 每次系统调用返回前最多销毁的死亡对象数（见 [`on_syscall`] 的出口清理点）。
 const CLEANUP_PER_CALL: usize = 16;
 /// 创建对象前先回收死亡对象的调用（进程创建在 `spawn_child` 里自带回收）。
-const RECLAIM_BEFORE: [u32; 6] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, SYSTEM_CHANNEL_CREATE, SYSTEM_MEMORY_OBJECT_CREATE,SYSTEM_EVENT_SOURCE_CREATE,SYSTEM_EVENT_SUBSCRIPTION_CREATE];
+const RECLAIM_BEFORE: [u32; 7] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, SYSTEM_CHANNEL_CREATE, SYSTEM_MEMORY_OBJECT_CREATE,SYSTEM_EVENT_SOURCE_CREATE,SYSTEM_EVENT_SUBSCRIPTION_CREATE,SYSTEM_SYNC_MUTEX_CREATE];
 
 /// 系统调用入口（arch 调用；可能不返回——`system.task.exit` 会结束当前任务）。
 pub fn on_syscall(a: &SyscallArgs) -> i64 {
@@ -321,7 +330,12 @@ fn task_spawn(entry: u64, stack: u64, arg: u64) -> i64 {
     let Some(pid) = proc::current_process() else {
         return err(SYSTEM_ERROR_RIGHTS_DENIED);
     };
-    match proc::spawn_thread(pid, "thread", entry, stack, arg, 0) {
+    // Inherit the caller's allowed CPUs before publishing the child runnable.
+    // Kernel-created process roots continue to use their explicit boot policy.
+    let Some(affinity) = crate::sched::task_affinity(crate::sched::current().0) else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    match proc::spawn_thread_affinity(pid, "thread", entry, stack, arg, 0, Some(affinity)) {
         // 线程对象是叶子：句柄带 DUPLICATE 与 TRANSFER，持有者可以复制或（经 Channel）传递它。
         Ok((_, task_obj)) => match proc::put_task_handle(
             task_obj,
@@ -427,6 +441,19 @@ fn time_wait(ticks: u64) -> i64 {
     0
 }
 
+/// New absolute-ns contract; the legacy time.wait operation stays tick-based.
+fn time_wait_ns(deadline:u64)->i64 {
+ if !crate::hrtime::enabled(){return err(SYSTEM_ERROR_UNSUPPORTED);}
+ let Some(pid)=proc::current_process() else{return err(SYSTEM_ERROR_RIGHTS_DENIED);};
+ if deadline>i64::MAX as u64{return err(SYSTEM_ERROR_INVALID_ARGUMENT);}
+ loop {
+  if proc::current_exiting(){return err(SYSTEM_ASYNC_ERROR_CANCELLED);}
+  if crate::hrtime::now().expect("active clock")>=deadline{return 0;}
+  let blocked=kobj::with(|t|if proc::running_in(t,pid){Ok(sched::reserve_sleep_ns(deadline))}else{Err(())});
+  match blocked {Ok(true)=>sched::yield_with_cause(sched::scheduler::Cause::SLEEP),Ok(false)=>{},Err(())=>return err(SYSTEM_ASYNC_ERROR_CANCELLED)}
+ }
+}
+
 /// 按 ID 分派到真实实现。
 fn execute(e: &AbiEntry, a: &SyscallArgs, task_id: u64) -> i64 {
     match e.id {
@@ -473,6 +500,15 @@ fn execute(e: &AbiEntry, a: &SyscallArgs, task_id: u64) -> i64 {
         SYSTEM_TIME_WAIT => time_wait(a.args[0]),
         SYSTEM_CHANNEL_CREATE => crate::ipc::sys_create(a.args[0]),
         SYSTEM_CHANNEL_SEND => crate::ipc::sys_send(a.args[0], a.args[1]),
+        SYSTEM_TASK_RT_DEADLINE_SET =>crate::task_control::rt_set_ns(a.args[0]),
+        SYSTEM_TIME_DEADLINE_GET =>if crate::hrtime::enabled(){crate::hrtime::now().and_then(|n|i64::try_from(n).ok()).unwrap_or_else(||err(SYSTEM_ERROR_INVALID_ARGUMENT))}else{err(SYSTEM_ERROR_UNSUPPORTED)},
+        SYSTEM_TIME_DEADLINE_WAIT =>time_wait_ns(a.args[0]),
+        SYSTEM_SYNC_MUTEX_CREATE => crate::user_mutex::sys_create(),
+        SYSTEM_SYNC_MUTEX_ACQUIRE => crate::user_mutex::sys_lock(a.args[0]),
+        SYSTEM_SYNC_MUTEX_RELEASE => crate::user_mutex::sys_unlock(a.args[0]),
+        SYSTEM_TASK_RT_SET => crate::task_control::rt_set(a.args[0]),
+        SYSTEM_TASK_AFFINITY_SET => crate::task_control::affinity_set(a.args[0]),
+        SYSTEM_TASK_AFFINITY_GET => crate::task_control::affinity_get(a.args[0]),
         SYSTEM_EVENT_SOURCE_CREATE => crate::subscription::sys_source(a.args[0]),
         SYSTEM_EVENT_SUBSCRIPTION_CREATE => crate::subscription::sys_subscribe(a.args[0],a.args[1]),
         SYSTEM_EVENT_SUBSCRIPTION_WAIT => err(SYSTEM_ERROR_UNSUPPORTED),

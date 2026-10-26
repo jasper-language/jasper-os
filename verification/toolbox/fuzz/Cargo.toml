@@ -59,8 +59,43 @@ doc = false
 bench = false
 
 [[bin]]
-name = "limit"
-path = "fuzz_targets/limit.rs"
+name = "budget"
+path = "fuzz_targets/budget.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rt_partition"
+path = "fuzz_targets/rt_partition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "timer_units"
+path = "fuzz_targets/timer_units.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inherited_mutex"
+path = "fuzz_targets/inherited_mutex.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "percpu_migration"
+path = "fuzz_targets/percpu_migration.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "task_hot"
+path = "fuzz_targets/task_hot.rs"
 test = false
 doc = false
 bench = false

@@ -96,11 +96,11 @@ rm -f "$run/PASS"
         echo "Negative model unexpectedly passed: pressure_event_dirty_late.cfg"; exit 1
     fi
     grep -q "Invariant Safety is violated" "$run/pressure_event_dirty_late.log"
-    bash verification/run-limit-observation-tlc.sh
-    if bash verification/run-limit-observation-tlc.sh limit_observation_rewrite.cfg > "$run/limit-observation-negative.log" 2>&1; then
+    bash verification/run-budget-observation-tlc.sh
+    if bash verification/run-budget-observation-tlc.sh budget_observation_rewrite.cfg > "$run/budget-observation-negative.log" 2>&1; then
         echo "Budget cutoff rewrite unexpectedly passed"; exit 1
     fi
-    grep -q "Invariant Safety is violated" "$run/limit-observation-negative.log"
+    grep -q "Invariant Safety is violated" "$run/budget-observation-negative.log"
     bash verification/run-shm-page-lifetime-tlc.sh
     for variant in no_ack no_pin; do
         if bash verification/run-shm-page-lifetime-tlc.sh "shm_page_lifetime_${variant}.cfg" > "$run/shm-lifetime-${variant}.log" 2>&1; then
@@ -171,6 +171,36 @@ rm -f "$run/PASS"
         echo 'Unsafe TLB release unexpectedly passed'; exit 1
     fi
     grep -q 'Invariant NoReleaseWhileStale is violated' "$run/tlb-quarantine-negative.log"
+    bash verification/run-rt-partition-admission-tlc.sh
+    if bash verification/run-rt-partition-admission-tlc.sh rt_partition_admission_drop.cfg > "$run/rt-partition-admission-negative.log" 2>&1; then
+        echo 'RT negative unexpectedly passed'; exit 1
+    fi
+    grep -q 'Invariant Safety is violated' "$run/rt-partition-admission-negative.log"
+    bash verification/run-rt-reentry-debt-tlc.sh
+    if bash verification/run-rt-reentry-debt-tlc.sh rt_reentry_debt_refresh.cfg > "$run/rt-reentry-debt-negative.log" 2>&1; then
+        echo 'RT negative unexpectedly passed'; exit 1
+    fi
+    grep -q 'Invariant Safety is violated' "$run/rt-reentry-debt-negative.log"
+    bash verification/run-timer-deadline-recheck-tlc.sh
+    if bash verification/run-timer-deadline-recheck-tlc.sh timer_deadline_recheck_early.cfg > "$run/timer-deadline-recheck-negative.log" 2>&1; then
+        echo 'Timer negative unexpectedly passed'; exit 1
+    fi
+    grep -q 'Invariant Safety is violated' "$run/timer-deadline-recheck-negative.log"
+    bash verification/run-elapsed-irq-credit-tlc.sh
+    if bash verification/run-elapsed-irq-credit-tlc.sh elapsed_irq_credit_per_irq.cfg > "$run/elapsed-irq-credit-negative.log" 2>&1; then
+        echo 'Timer negative unexpectedly passed'; exit 1
+    fi
+    grep -q 'Invariant Safety is violated' "$run/elapsed-irq-credit-negative.log"
+    bash verification/run-rt-partition-edf-tlc.sh
+    if bash verification/run-rt-partition-edf-tlc.sh rt_partition_edf_reverse.cfg > "$run/rt-partition-edf-negative.log" 2>&1; then
+        echo 'RT negative unexpectedly passed'; exit 1
+    fi
+    grep -q 'Invariant Safety is violated' "$run/rt-partition-edf-negative.log"
+    bash verification/run-rt-control-authority-tlc.sh
+    if bash verification/run-rt-control-authority-tlc.sh rt_control_authority_split.cfg > "$run/rt-control-authority-negative.log" 2>&1; then
+        echo 'RT negative unexpectedly passed'; exit 1
+    fi
+    grep -q 'Invariant Safety is violated' "$run/rt-control-authority-negative.log"
     bash verification/run-rt-worker-teardown-tlc.sh
     if bash verification/run-rt-worker-teardown-tlc.sh rt_worker_teardown_early.cfg > "$run/rt-worker-teardown-negative.log" 2>&1; then
         echo 'Early worker stop unexpectedly passed'; exit 1
@@ -186,6 +216,8 @@ rm -f "$run/PASS"
         echo 'Repeated wake completion unexpectedly passed'; exit 1
     fi
     grep -q 'Invariant Safety is violated' "$run/wake-pair-negative.log"
+    bash verification/run-rt3-mutex-lifecycle-tlc.sh
+    bash verification/run-rt3-ring-donation-tlc.sh
     bash verification/run-worker-count-tlc.sh
     bash verification/run-env0-tlc.sh
     bash verification/run-ring-fv1-tlc.sh

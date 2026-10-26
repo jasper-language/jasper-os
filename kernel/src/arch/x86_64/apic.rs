@@ -164,7 +164,10 @@ pub fn calibrate_timer() -> u32 {
     write(REG_TIMER_DIVIDE, DIVIDE_BY_16);
     write(REG_LVT_TIMER, LVT_MASKED);
     write(REG_TIMER_INIT, u32::MAX);
+    let tsc_start=crate::arch::cycles();
     pit::delay_us(CALIBRATE_MS * 1000);
+    let tsc_end=crate::arch::cycles();
+    if let Some(delta)=tsc_end.checked_sub(tsc_start) {crate::hrtime::install(tsc_end,delta.saturating_mul(1000)/u64::from(CALIBRATE_MS));}
     let elapsed = u32::MAX - read(REG_TIMER_CURRENT);
     write(REG_TIMER_INIT, 0);
     let per_ms = (elapsed / CALIBRATE_MS).max(1);
@@ -186,6 +189,19 @@ pub fn arm_oneshot(ticks: u32) -> bool {
     // 模式位清零 = 一次性；中断向量保持不变。先改模式再写初值：写初值即开始倒计时。
     write(REG_LVT_TIMER, LOCAL_TIMER_VECTOR as u32);
     write(REG_TIMER_INIT, count);
+    true
+}
+
+/// RT-2 low-level primitive, not yet selected by the scheduler.
+/// Caller owns this CPU's timer mode with IRQs disabled and must recheck its
+/// absolute deadline after delivery; a successful arm is not a deadline result.
+/// All validation precedes MMIO writes; unsupported/range failure leaves mode intact.
+pub unsafe fn arm_after_ns(delay_ns:u64)->bool {
+    let per_ms=COUNTS_PER_MS.load(Ordering::Relaxed);
+    if per_ms==0 || !ready() {return false;}
+    let Ok(count)=kernel_core::timer_units::oneshot_counts(delay_ns,u64::from(per_ms)*1000) else {return false;};
+    write(REG_LVT_TIMER,LOCAL_TIMER_VECTOR as u32);
+    write(REG_TIMER_INIT,count);
     true
 }
 
@@ -214,3 +230,20 @@ pub fn start_periodic(hz: u32) -> bool {
     write(REG_TIMER_INIT, count);
     true
 }
+
+/// Opt-in MMIO programming drill only: IRQ delivery remains disabled and the
+/// original periodic mode is restored before returning. Not a latency test.
+#[cfg(feature="rt2-verify")]
+pub fn verify_ns_programming()->bool {
+ let old=read(REG_LVT_TIMER);let per_ms=COUNTS_PER_MS.load(Ordering::Relaxed);
+ if per_ms==0 || old&LVT_PERIODIC==0 {return false;}
+ let armed=unsafe {arm_after_ns(1_000_000)};
+ let programmed=armed && read(REG_TIMER_INIT)==per_ms && read(REG_LVT_TIMER)==LOCAL_TIMER_VECTOR as u32;
+ let before=(read(REG_LVT_TIMER),read(REG_TIMER_INIT));
+ let rejected=!unsafe {arm_after_ns(u64::MAX)};
+ let unchanged=before==(read(REG_LVT_TIMER),read(REG_TIMER_INIT));
+ write(REG_LVT_TIMER,old);write(REG_TIMER_INIT,COUNTS_PER_TICK.load(Ordering::Relaxed));
+ programmed && rejected && unchanged
+}
+
+pub fn cancel_local_timer(){if ready(){write(REG_LVT_TIMER,LOCAL_TIMER_VECTOR as u32|LVT_MASKED);write(REG_TIMER_INIT,0);}}

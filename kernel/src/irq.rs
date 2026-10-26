@@ -75,9 +75,16 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
         }
         // 每核事件只更新本处理器的每核数据，不进全局延迟队列（那是引导处理器主循环的队列）
         IrqLine::LocalTimer => {
-            crate::smp::on_local_tick();
-            device::on_cpu_tick();
-            sched::on_local_timer();
+            #[cfg(feature="rt2-verify")]
+            let diagnostic=crate::rt2_demo::timer_irq();
+            #[cfg(not(feature="rt2-verify"))]
+            let diagnostic=false;
+            if !diagnostic && crate::hrtime::enabled() {sched::on_highres_timer();}
+            else if !diagnostic {
+                crate::smp::on_local_tick();
+                device::on_cpu_tick();
+                sched::on_local_timer();
+            }
         }
         IrqLine::Ipi(kind) => crate::smp::on_ipi(kind),
     }
@@ -650,3 +657,6 @@ pub mod device {
         Ok(moved)
     }
 }
+
+/// Legacy device/smp credit follows elapsed accounting, not sub-tick IRQ count.
+pub(crate) fn on_elapsed_cpu_ticks(credits:u64){for _ in 0..credits{crate::smp::on_local_tick();device::on_cpu_tick();}}

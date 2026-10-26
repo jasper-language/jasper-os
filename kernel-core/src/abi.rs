@@ -65,7 +65,7 @@ pub enum AbiError {
 pub const VERBS: &[&str] = &[
     "create", "destroy", "open", "close", "duplicate", "restrict", "get", "list", "query", "set", "update", "read",
     "write", "send", "recv", "map", "unmap", "protect", "submit", "enter", "cancel", "wait", "signal", "spawn", "exit",
-    "kill", "yield", "load", "unload", "start", "stop", "watch", "unwatch",
+    "kill", "yield", "load", "unload", "start", "stop", "watch", "unwatch", "acquire", "release",
 ];
 /// 惯例词（与动词同等对待）。
 pub const IDIOMS: &[&str] = &["now"];

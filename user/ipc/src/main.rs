@@ -489,6 +489,37 @@ fn s3_channel_pong(ep:i64)->! {
     check(close(ring)==0,117);say!("s3 pong rounds=32 channel=true shared=true stale=true views_released=true");exit(0)
 }
 
+// RT-3: a low-QoS service receives through a Ring. The high-QoS client waits
+// through its own Ring, allowing the kernel to donate across the Channel.
+fn rt3_service(ep:i64)->! {
+    check(sys(ids::SYSTEM_TASK_QOS_SET,3,0)==0,120); // Background
+    let ring=sys(ids::SYSTEM_ASYNC_RING_CREATE,4,0);check(ring>0,121);
+    let mut data=[0u8;8];let mut handles=[];let desc=rbuf(&mut data,&mut handles);
+    let warm=enter(ring,&[recv_sqe(ep,&desc,1)],4,1);check(warm.cqes[0].result==4&&&data[..4]==b"warm",122);
+    // Arm the measured receive without waiting, so this task is published as
+    // the endpoint service before the acknowledgement lets the client issue
+    // its request. This is the request/reply binding point used by PI.
+    let pending=enter(ring,&[recv_sqe(ep,&desc,3)],0,0);check(pending.args.submitted==1,123);
+    let ack=enter(ring,&[send_sqe(ep,&msg(b"ack!",&[]),2)],4,1);check(ack.cqes[0].result==4,123);
+    let req=enter(ring,&[],4,1);check(req.cqes[0].result==4&&&data[..4]==b"work",124);
+    // Give the high client an explicit chance to enter its Ring wait before
+    // producing the reply. The service is Background here, so the first
+    // yield runs the client; once it blocks, the donation brings us back.
+    for _ in 0..4 { let _=sys(ids::SYSTEM_TASK_YIELD,0,0); }
+    let reply=enter(ring,&[send_sqe(ep,&msg(b"done",&[]),4)],4,1);check(reply.cqes[0].result==4,125);
+    check(close(ring)==0&&close(ep)==0,126);say!("rt3 service ring=true reply=true");exit(0)
+}
+
+fn rt3_client(ep:i64)->! {
+    let ring=sys(ids::SYSTEM_ASYNC_RING_CREATE,4,0);check(ring>0,127);
+    let warm=enter(ring,&[send_sqe(ep,&msg(b"warm",&[]),1)],4,1);check(warm.cqes[0].result==4,128);
+    let mut data=[0u8;8];let mut handles=[];let desc=rbuf(&mut data,&mut handles);
+    let ack=enter(ring,&[recv_sqe(ep,&desc,2)],4,1);check(ack.cqes[0].result==4&&&data[..4]==b"ack!",129);
+    let req=enter(ring,&[send_sqe(ep,&msg(b"work",&[]),3)],4,1);check(req.cqes[0].result==4,130);
+    let reply=enter(ring,&[recv_sqe(ep,&desc,4)],4,1);check(reply.cqes[0].result==4&&&data[..4]==b"done",131);
+    check(close(ring)==0&&close(ep)==0,132);say!("rt3 client ring=true reply=true");exit(0)
+}
+
 // Dedicated SHM fixture role: fill a user TLB, wait for remote revoke acknowledgement,
 // then access the revoked address. Correct execution ends in a page fault, never exit(90).
 fn revoke_probe(address:u64) -> ! {
@@ -508,6 +539,8 @@ fn revoke_probe(address:u64) -> ! {
 pub extern "C" fn _start(role: usize, endpoint: usize) -> ! {
     let endpoint = endpoint as u64;
     match role {
+        7 => rt3_service(endpoint as i64),
+        8 => rt3_client(endpoint as i64),
         5 => s3_channel_ping(endpoint as i64),
         6 => s3_channel_pong(endpoint as i64),
         4 => revoke_probe(endpoint),

@@ -104,6 +104,8 @@ pub mod sync;
 pub mod syscall;
 pub mod task;
 pub mod user_demo;
+#[cfg(feature = "rt3-verify")]
+pub mod rt3_demo;
 pub mod virtio;
 pub mod virtio_rng_demo;
 pub mod wcet;
@@ -127,3 +129,14 @@ pub mod subscription_demo;
 
 #[cfg(feature="evt2-broadcast-verify")]
 pub mod subscription_broadcast_demo;
+
+#[cfg(feature="rt1-verify")]
+pub mod rt1_demo;
+
+pub mod task_control;
+pub mod user_mutex;
+
+#[cfg(feature="rt2-verify")]
+pub mod rt2_demo;
+
+pub mod hrtime;

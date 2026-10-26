@@ -7,7 +7,7 @@ out="evidence/evt1/$label";mkdir "$out"
 inputs() { find kernel kernel-core abi user xtask .cargo scripts -type d -name target -prune -o -type f -print0 | sort -z | xargs -0 sha256sum;sha256sum Cargo.toml Cargo.lock rust-toolchain.toml; }
 inputs > "$out/source-before.sha256"
 cargo build --locked --release -p xtask > "$out/build.log" 2>&1
-cargo build --locked --release --target x86_64-unknown-none -p jasper-kernel --features limit-window-verify >> "$out/build.log" 2>&1
+cargo build --locked --release --target x86_64-unknown-none -p jasper-kernel --features budget-window-verify >> "$out/build.log" 2>&1
 target/release/xtask target/x86_64-unknown-none/release/jasper-kernel "$out/kernel.img" > "$out/image.log" 2>&1
 sha256sum "$out/kernel.img" target/x86_64-unknown-none/release/jasper-kernel > "$out/artifacts.sha256"
 set +e

@@ -22,14 +22,18 @@ use crate::{kprintln, config::ACTIVE as CONFIG};
 /// 参数部分直接取 `crate::config::ACTIVE`（受 `profile-compact` 特性影响），
 /// 模块表与运行保证取 headless。这样「参数档」与「模块面」共享同一份声明，
 /// 不会出现两份互相矛盾的配置。
+#[cfg(feature="rt1-no-realtime")]
+const BASE:SystemProfile=profile::HEADLESS_MIN;
+#[cfg(not(feature="rt1-no-realtime"))]
+const BASE:SystemProfile=profile::HEADLESS;
 pub const ACTIVE: SystemProfile = SystemProfile {
-    name: profile::HEADLESS.name,
-    display_zh: profile::HEADLESS.display_zh,
-    display_en: profile::HEADLESS.display_en,
+    name: BASE.name,
+    display_zh: BASE.display_zh,
+    display_en: BASE.display_en,
     config: CONFIG,
-    modules: profile::HEADLESS.modules,
-    guarantees: profile::HEADLESS.guarantees,
-    hot_load: profile::HEADLESS.hot_load,
+    modules: BASE.modules,
+    guarantees: BASE.guarantees,
+    hot_load: BASE.hot_load,
 };
 
 /// 渲染缓冲区的最小长度（再小一定放不下）。

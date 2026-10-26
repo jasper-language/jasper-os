@@ -64,6 +64,7 @@ pub mod elf;
 pub mod environment;
 pub mod ticket;
 pub mod task_index;
+pub mod task_hot;
 pub mod task_lifecycle;
 pub mod tick_lease;
 pub mod wake_mailbox;
@@ -73,6 +74,7 @@ pub mod fault;
 pub mod heap;
 pub mod image_header;
 pub mod interrupt;
+pub mod inherited_mutex;
 pub mod io;
 pub mod irq;
 pub mod job;
@@ -119,6 +121,7 @@ pub mod raw_timing;
 pub mod publication_credit;
 
 pub mod pi_work;
+pub mod percpu_migration;
 pub mod sync_origin;
 pub mod event_wait;
 
@@ -129,3 +132,11 @@ pub mod cpu_time;
 pub mod subscription;
 
 pub mod subscription_abi;
+
+pub mod rt_partition;
+
+pub mod rt_abi;
+
+pub mod timer_units;
+
+pub mod ns_budget;

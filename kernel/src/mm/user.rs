@@ -105,7 +105,10 @@ enum Target {
 }
 
 /// 会改动地址空间映射或产生共享地址空间的执行流的操作：不属于进程的任务若允许其中任何一个，就不能走直接路径。
-const MUTATING: [u32; 10] = [
+const MUTATING: [u32; 13] = [
+    abi::SYSTEM_TASK_RT_DEADLINE_SET,
+    abi::SYSTEM_TASK_RT_SET,
+    abi::SYSTEM_TASK_AFFINITY_SET,
     abi::SYSTEM_EVENT_SOURCE_CREATE,
     abi::SYSTEM_EVENT_SUBSCRIPTION_CREATE,
     abi::SYSTEM_MEMORY_OBJECT_CREATE,

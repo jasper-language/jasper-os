@@ -173,7 +173,10 @@ pub fn on_ipi(kind: IpiKind) {
     let me = percpu::this();
     me.count_ipi(kind);
     match kind {
-        IpiKind::Reschedule => me.request_resched(),
+        IpiKind::Reschedule => {
+            me.request_resched();
+            if crate::hrtime::enabled(){let _=unsafe {arch::timer_arm_after_ns(1)};}
+        },
         IpiKind::TlbShootdown => {
             service_shootdown(arch::cpu_index());
         }

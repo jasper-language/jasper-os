@@ -101,3 +101,15 @@
 
 45	op	system.event.source.create	1	write	事件·打开事件源	Create event source capability
 46	op	system.event.subscription.create	1	write	事件·创建订阅并取得快照	Create subscription and snapshot
+
+47	op	system.task.rt.set	1	write	任务·设置实时预算	Set task real-time reservation
+48	op	system.task.affinity.set	1	write	任务·设置处理器亲和	Set task CPU affinity
+49	op	system.task.affinity.get	1	read	任务·查询处理器亲和	Get task CPU affinity
+
+50	op	system.task.rt.deadline.set	1	write	任务·设置纳秒实时预算	Set nanosecond real-time reservation
+51	op	system.time.deadline.get	1	read	时间·查询单调纳秒时刻	Get monotonic nanosecond time
+52	op	system.time.deadline.wait	1	write	时间·等待绝对纳秒期限	Wait for absolute nanosecond deadline
+
+53	op	system.sync.mutex.create	1	write	同步·创建继承互斥对象	Create inherited mutex
+54	op	system.sync.mutex.acquire	1	write	同步·取得继承互斥对象	Acquire inherited mutex
+55	op	system.sync.mutex.release	1	write	同步·释放继承互斥对象	Release inherited mutex

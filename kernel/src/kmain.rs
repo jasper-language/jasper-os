@@ -111,11 +111,35 @@ pub fn start(boot: &'static BootSpec) -> ! {
     let multi_mode = profile::has_capability("sched.arbiter");
     sched::set_arbiter(multi_mode);
     kprintln!("[JSR-SCHED] mode={}", if multi_mode { "multi" } else { "single" });
-    #[cfg(feature="limit-window-verify")]
+    #[cfg(feature="rt3-verify")]
+    {
+        mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
+        let failed=crate::rt3_demo::run();
+        arch::exit_emulator(if failed==0 {ExitStatus::Success} else {ExitStatus::Failure});
+    }
+    #[cfg(feature="rt2-verify")]
+    {
+        mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
+        crate::rt2_demo::run();arch::exit_emulator(ExitStatus::Success);
+    }
+    #[cfg(feature="rt1-verify")]
+    {
+        mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
+        crate::rt1_demo::run();
+        arch::exit_emulator(ExitStatus::Success);
+    }
+    #[cfg(feature="budget-window-verify")]
     {
         mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
         crate::balance_demo::run_limit_diagnostic();
         arch::exit_emulator(if crate::balance_demo::failed()==0 {ExitStatus::Success} else {ExitStatus::Failure});
+    }
+    #[cfg(feature="krn3-fast-tick-verify")]
+    {
+        mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
+        let failed=crate::scale_demo::run_fast_leaf_tick_contract()
+            + crate::balance_demo::run_affinity_diagnostic();
+        arch::exit_emulator(if failed==0 {ExitStatus::Success} else {ExitStatus::Failure});
     }
     #[cfg(feature="evt2-broadcast-verify")]
     {
@@ -162,6 +186,7 @@ pub fn start(boot: &'static BootSpec) -> ! {
     mm::demo::run_space();
     // SMP-1：启动其他处理器（每核数据、各自计时、核间中断、跨核调用、TLB 击落）。
     smp::demo::run(smp::start_secondaries(TIMER_HZ));
+    let hr=sched::enable_highres();kprintln!("[JSR-RT2] high_resolution={} legacy_tick_abi=true",hr);
     #[cfg(feature = "fault-inject")]
     if crate::fault_inject::selftest() != 0 {
         kprintln!("[JSR-EXIT] failure fault_inject_failed=1");

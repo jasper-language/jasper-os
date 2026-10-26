@@ -9,17 +9,15 @@
 //! 5. 输出证据：交互唤醒延迟的最大值与样本数。
 //!
 //! # 边界（必须如实说明）
-//! 本阶段是**协作式**预算：任务自己记账并在耗尽时让出。抢占式执行
-//! （时钟中断里强制把超预算任务换下）尚未接入，因此不能宣称「失控任务也会被停住」。
+//! 所有预算由实际调度器 tick 扣费；任务不手工记账。TCG 只验证机制，不证明物理延迟。
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use kernel_core::rt::Charge;
 use kernel_core::sched::Qos;
 
 use crate::sched;
 use crate::task::TaskId;
-use crate::{kprintln, rt};
+use crate::kprintln;
 
 static CHECKS: AtomicU32 = AtomicU32::new(0);
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -40,25 +38,20 @@ pub fn failed() -> u32 {
     FAILED.load(Ordering::Relaxed)
 }
 
-/// 实时任务：每轮记 1 tick 预算，耗尽后让出直到下一个周期。
+// Observe actual scheduler depletion/refill; never manually charge a budget.
+static REFILLED:AtomicU32=AtomicU32::new(0);
 fn rt_body() {
-    loop {
-        match rt::charge(20, 1) {
-            Ok(Charge::Within) => {
-                sched::pause();
-            }
-            Ok(Charge::Exhausted) => {
-                // 协作式节流：睡到下一个周期，再继续。
-                sched::sleep_until(sched::timer_ticks() + 5);
-                rt::replenish(sched::timer_ticks());
-            }
-            Err(_) => return,
-        }
-        if rt::get(20).is_some_and(|t| t.throttles >= 1 && t.remaining == t.quota) {
-            return;
-        }
-    }
+ let id=sched::current().0;
+ let (_,_,deadline)=sched::rt_state(id).expect("admitted RT worker");
+ loop {
+  let (remaining,period,next)=sched::rt_state(id).unwrap();
+  if next>deadline {REFILLED.store(u32::from(remaining==3 && period==10),Ordering::Release);return;}
+  core::hint::spin_loop();
+ }
 }
+static RELEASE:AtomicU32=AtomicU32::new(0);
+fn admission_worker(){while RELEASE.load(Ordering::Acquire)==0 {sched::yield_now();}}
+fn only0()->kernel_core::smp::CpuSet {kernel_core::smp::CpuSet::first(1)}
 
 /// 交互任务：每 tick 醒一次。
 fn interactive() {
@@ -89,41 +82,39 @@ fn quiet<R>(f: impl FnOnce() -> R) -> R {
 
 /// 演练入口。
 pub fn run() {
-    let now = sched::timer_ticks();
-    // 1) 准入：500‰ 在界内；再加 600‰ 会被拒。
-    check(rt::admit(10, 2, 10, now).is_ok(), "2/10 应被接纳");
-    check(rt::admit(11, 3, 10, now).is_ok(), "3/10 应被接纳");
-    let before = rt::utilisation_permille();
-    check(rt::admit(12, 6, 10, now).is_err(), "超额请求应被拒绝");
-    check(rt::utilisation_permille() == before, "被拒后已有预留的利用率不得变化");
-    check(rt::get(10).is_some() && rt::get(11).is_some(), "已有预留必须保留");
-    kprintln!(
-        "[JSR-RTCLASS] admit accepted=2 rejected=1 utilisation={} limit={}",
-        rt::utilisation_permille(),
-        rt::limit_permille()
-    );
+    // Real Task reservations under one bounded setup transaction.
+    let irq=crate::arch::irq_save_disable();RELEASE.store(0,Ordering::Release);
+    for id in 9410..=9412 {sched::spawn_on(TaskId(id),"rt-admit",admission_worker,None,only0()).unwrap();}
+    check(sched::set_rt(TaskId(9410),2,10),"2/10 admission");
+    check(sched::set_rt(TaskId(9411),3,10),"3/10 admission");
+    let first=sched::rt_state(TaskId(9410));let second=sched::rt_state(TaskId(9411));
+    check(!sched::set_rt(TaskId(9412),6,10),"overfull partition rejected");
+    check(sched::rt_state(TaskId(9410))==first,"first reservation unchanged");
+    check(sched::rt_state(TaskId(9411))==second,"second reservation unchanged");
+    kprintln!("[JSR-RTCLASS] admit accepted=2 rejected=1 utilisation=500 limit=900");
+    RELEASE.store(1,Ordering::Release);crate::arch::irq_restore(irq);sched::run();
 
-    // 2) 预算耗尽与节流（协作式）。
-    check(rt::admit(20, 3, 10, now).is_ok(), "3/10 的实时任务应被接纳");
-    quiet(|| sched::spawn(TaskId(9400), "rt-quota", rt_body)).expect("创建实时任务");
-    // 3) 节流期间交互任务照常运行。
-    DONE.store(0, Ordering::Relaxed);
-    quiet(|| sched::spawn(TaskId(9401), "rt-ui", interactive)).expect("创建交互任务");
-    sched::run();
-    let task = rt::get(20);
-    check(task.is_some_and(|t| t.throttles >= 1), "预算耗尽后应记录节流");
-    check(task.is_some_and(|t| t.remaining == t.quota), "周期补充后预算应重置");
-    let done = DONE.load(Ordering::Relaxed);
-    check(done == ROUNDS, "节流期间交互任务未完成全部唤醒");
+    let irq=crate::arch::irq_save_disable();
+    sched::spawn_on(TaskId(9400),"rt-quota",rt_body,None,only0()).unwrap();
+    check(sched::set_rt(TaskId(9400),3,10),"scheduler quota admission");
+    REFILLED.store(0,Ordering::Release);DONE.store(0,Ordering::Relaxed);
+    sched::spawn_on(TaskId(9401),"rt-ui",interactive,None,only0()).unwrap();
+    let before_throttles=sched::throttle_count();
+    crate::arch::irq_restore(irq);sched::run();
+    let quota_throttles=sched::throttle_count().saturating_sub(before_throttles);
+    check(quota_throttles>=1,"actual budget exhaustion must throttle");
+    check(REFILLED.load(Ordering::Acquire)==1,"actual period refill restores quota");
+    check(DONE.load(Ordering::Relaxed)==ROUNDS,"interactive rounds during throttle");
 
     // 3b) 抢占式节流：失控任务不让出，也必须被预算换下。
-    let _ = rt::release(20);
-    check(rt::admit(9404, 2, 10, sched::timer_ticks()).is_ok(), "失控任务的实时声明应被接纳");
-    quiet(|| sched::spawn(TaskId(9404), "rt-runaway", runaway)).expect("创建失控任务");
+    let irq=crate::arch::irq_save_disable();
+    sched::spawn_on(TaskId(9404), "rt-runaway", runaway,None,only0()).expect("创建失控任务");
     check(sched::set_rt(TaskId(9404), 2, 10), "设置实时预算失败");
     DONE.store(0, Ordering::Relaxed);
     quiet(|| sched::spawn(TaskId(9405), "rt-ui2", interactive)).expect("创建交互任务");
+    let before_runaway=sched::throttle_count();
     let started = sched::timer_ticks();
+    crate::arch::irq_restore(irq);
     sched::run();
     let elapsed = sched::timer_ticks() - started;
     kprintln!(
@@ -133,7 +124,7 @@ pub fn run() {
         elapsed,
         sched::throttle_count()
     );
-    let throttles = sched::throttle_count();
+    let throttles = sched::throttle_count().saturating_sub(before_runaway);
     check(DONE.load(Ordering::Relaxed) == ROUNDS, "失控任务期间交互任务被饿死");
     // 失控任务以「墙钟 deadline」收工，elapsed 反映的是墙钟而不是它拿到的 CPU，
     // 因此判据用节流次数：证明调度器确实按预算把它换下（而不是靠它自己让出）。
@@ -145,7 +136,7 @@ pub fn run() {
         "[JSR-RTCLASS] evidence wake_samples={} wake_max_ticks={} throttle={}",
         lat.count(),
         lat.max(),
-        task.map(|t| t.throttles).unwrap_or(0)
+        quota_throttles
     );
 
     // 4b) 单模式 Profile：没有 `sched.realtime` 时实时接口整体不存在。
@@ -159,15 +150,12 @@ pub fn run() {
     check(full_rt, "headless 应声明实时能力");
     check(!min_rt, "headless-min 不该声明实时能力");
 
-    // 5) 收尾：释放额度，供后续演练复用。
-    let _ = rt::release(10);
-    let _ = rt::release(11);
-    let _ = rt::release(20);
-    let _ = rt::release(9404);
+    // Actual exited Task records no longer contribute reservation utilisation.
+    assert_eq!(sched::rt_utilisation(),0);
     kprintln!(
         "[JSR-RTCLASS] summary checks={} failed={} utilisation_after={}",
         CHECKS.load(Ordering::Relaxed),
         failed(),
-        rt::utilisation_permille()
+        sched::rt_utilisation()
     );
 }

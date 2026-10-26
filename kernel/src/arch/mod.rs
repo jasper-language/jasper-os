@@ -257,6 +257,12 @@ pub trait Platform {
     /// English: restore this CPU's periodic local tick.
     fn timer_resume() {}
 
+    /// RT-2 explicit nanosecond one-shot primitive. No scheduler activation yet.
+    /// Safety: IRQs disabled; caller owns mode restoration/reprogramming and
+    /// absolute-deadline rechecking. False means no hardware state was changed.
+    unsafe fn timer_arm_after_ns(_delay_ns:u64)->bool {false}
+    fn timer_cancel_local() {}
+
     /// 向控制台输出一个字节（阻塞直到设备可写）。调用者负责中断临界区。
     fn console_write_byte(byte: u8);
 
@@ -522,6 +528,12 @@ pub fn timer_stretch(ticks: u32) -> bool {
 /// 见 [`Platform::timer_resume`]。
 pub fn timer_resume() {
     Current::timer_resume()
+}
+
+/// Safety contract is identical to Platform::timer_arm_after_ns.
+pub fn timer_cancel_local(){Current::timer_cancel_local()}
+pub unsafe fn timer_arm_after_ns(delay_ns:u64)->bool {
+    unsafe {Current::timer_arm_after_ns(delay_ns)}
 }
 
 /// 见 [`Platform::irq_init`]。

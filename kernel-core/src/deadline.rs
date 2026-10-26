@@ -161,7 +161,7 @@ mod tests {
 
 /// First strictly future boundary of a periodic timer, preserving its phase.
 /// None means period zero or the next boundary cannot be represented. Skipped
-/// periods do not create accumulated limit grants. Author: chatgpt.
+/// periods do not create accumulated budget grants. Author: chatgpt.
 pub fn next_period(now: u64, previous: u64, period: u32) -> Option<u64> {
     if period == 0 { return None; }
     if previous > now { return Some(previous); }

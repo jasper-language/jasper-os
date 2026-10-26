@@ -1,5 +1,5 @@
 //! Author: chatgpt. Serial, publication-local count of granted group credits.
-//! Caller resets touched counts before returning; this is not persistent limit.
+//! Caller resets touched counts before returning; this is not persistent budget.
 //! Capacity is the existing conservative allowance, not the raw token balance.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PublicationCredit(u32);

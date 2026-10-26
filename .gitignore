@@ -35,7 +35,8 @@ evidence/a64-q66-*/
 /evidence/evt1/
 
 /evidence/shm1/
+/evidence/rt3/
+/evidence/fv3/
+/evidence/krn3/
 /verification/toolbox/fuzz/corpus/
 /verification/toolbox/fuzz/artifacts/
-
-/evidence/

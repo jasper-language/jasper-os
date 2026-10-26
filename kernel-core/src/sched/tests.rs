@@ -586,3 +586,26 @@ fn core_queue_refusals_leave_no_change() {
     assert_eq!((qs[0].queued(), qs[1].queued()), (1, 0));
     assert_eq!(qs[0].policy().owed(Qos::UserInitiated), ticks_before);
 }
+
+#[test]
+fn separately_locked_core_queues_migrate_exactly_once() {
+    use queue::QueueError::*;
+    let policy = TimeSharePolicy::new(QosParams::DEFAULT);
+    let mut source = queue::CoreQueue::new(policy, 1);
+    let mut destination = queue::CoreQueue::new(policy, 7);
+    let mut e = SchedEntity::new(Qos::Interactive, TimeShareState::INITIAL);
+
+    source.enqueue(&mut e, Enqueue::Spawn).unwrap();
+    source.tick(Some(&mut e), ClassMask::EMPTY).unwrap();
+    let before = e.cpu_ticks;
+    source.migrate_to(&mut destination, &mut e).unwrap();
+    assert_eq!((source.queued(), destination.queued(), e.queue()), (0, 1, Some(7)));
+    assert_eq!(e.cpu_ticks, before, "migration does not charge or run the entity");
+
+    let snapshot = e;
+    assert_eq!(source.migrate_to(&mut destination, &mut e), Err(NotQueued(Some(7))));
+    assert_eq!(e, snapshot, "a stale source owner cannot move the entity twice");
+    assert_eq!((source.queued(), destination.queued()), (0, 1));
+    assert_eq!(destination.enqueue(&mut e, Enqueue::Wake), Err(AlreadyQueued(7)));
+    assert_eq!((source.queued(), destination.queued()), (0, 1));
+}

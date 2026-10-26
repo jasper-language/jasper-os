@@ -178,6 +178,22 @@ impl<const M: usize> RunLists<M> {
     pub fn iter<'a>(&self, links: &'a [Link], q: usize) -> Iter<'a> {
         Iter { links, at: self.head.get(q).copied().unwrap_or(NIL) }
     }
+
+    /// First slot on queue `q`, for callers that keep link storage behind a
+    /// lock and therefore cannot let [`Iter`] borrow it across lock releases.
+    pub fn first(&self, q: usize) -> Option<usize> {
+        match self.head.get(q) {
+            Some(&NIL) | None => None,
+            Some(&slot) => Some(slot as usize),
+        }
+    }
+
+    /// Successor of `slot` in its current list.  The caller must serialize
+    /// this lookup with list mutation.
+    pub fn next(&self, links: &[Link], slot: usize) -> Option<usize> {
+        let next = links.get(slot)?.next;
+        (next != NIL).then_some(next as usize)
+    }
 }
 
 /// 一个列表的遍历器（产出槽位号）。

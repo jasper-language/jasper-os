@@ -57,6 +57,8 @@ pub struct Task {
     pub base_qos: Qos,
     /// 正在等的持有者所在槽位（等锁、等任务退出时有值；优先级继承沿它传播）。
     pub waits_for: Option<usize>,
+    /// Monotonic notification round for cross-CPU effective-priority changes.
+    pub pi_round: u64,
     /// 等待对象的标识（锁的地址或「等退出」标记；`waits_for` 为 `None` 时无意义）。
     pub wait_key: u64,
     /// 开始等待的序号（同档等待者按先来后到交接）。
@@ -83,6 +85,9 @@ pub struct Task {
     /// 曾经运行过它的处理器集合（诊断：亲和与迁移的验收依据）。
     pub ran_on: CpuSet,
     /// 实时预算（tick）；`rt_period == 0` 表示不是实时任务。
+    /// Compatibility tick declaration; ns_budget is canonical when present.
+    pub ns_budget: Option<kernel_core::ns_budget::Budget>,
+    pub wake_ns: Option<u64>,
     pub rt_quota: u32,
     /// 实时周期（tick）。
     pub rt_period: u32,
@@ -111,6 +116,7 @@ impl Task {
             sched: new_entity(Qos::UserInitiated),
             base_qos: Qos::UserInitiated,
             waits_for: None,
+            pi_round: 0,
             wait_key: 0,
             wait_seq: 0,
             qos_ceiling: None,
@@ -123,6 +129,8 @@ impl Task {
             last_ran: None,
             on_cpu: None,
             ran_on: CpuSet::EMPTY,
+            ns_budget: None,
+            wake_ns: None,
             rt_quota: 0,
             rt_period: 0,
             rt_remaining: 0,

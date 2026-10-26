@@ -76,7 +76,24 @@ fn user_calls() -> SyscallSet {
         abi::SYSTEM_HANDLE_CLOSE,
         abi::SYSTEM_CONSOLE_WRITE,
         abi::SYSTEM_TASK_EXIT,
+        abi::SYSTEM_TASK_QOS_SET,
+        abi::SYSTEM_TASK_YIELD,
     ])
+}
+
+#[cfg(feature="rt3-verify")]
+pub(crate) fn rt3_channel_inheritance() -> bool {
+    let before=crate::baseline::baseline();
+    let (Ok(server),Ok(client))=(proc::create("rt3-ipc-service",user_calls()),proc::create("rt3-ipc-client",user_calls())) else{return false};
+    let Ok((hs,hc))=ipc::create_pair(server,client) else{return false};
+    let ok=start(server,"rt3-ipc-service",7,hs.raw())&&start(client,"rt3-ipc-client",8,hc.raw());
+    if ok {sched::run();}
+    let exited=proc::state(server)==Some(ProcState::Exited{code:0})&&proc::state(client)==Some(ProcState::Exited{code:0});
+    let reaped=proc::reap(server).is_some()&&proc::reap(client).is_some();
+    kobj::run_cleanup(usize::MAX);
+    let resources=crate::baseline::baseline()==before;
+    kprintln!("[JSR-RT3-IPC] cpl3={} channel=true ring=true resources={}",exited&&reaped,resources);
+    ok&&exited&&reaped&&resources
 }
 
 /// 装载 `user/ipc` 到进程 `pid` 并创建主线程（入口参数 `role`、`endpoint`）。

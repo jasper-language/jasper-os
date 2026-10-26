@@ -277,15 +277,22 @@ fn settle_in(t: &mut Table, id: ObjId) {
 
 /// Author: chatgpt。同对象事务内先预留内存/保活，再登记并阻塞；失败不留下半项。
 /// sys_enter在同对象事务检查进程/完成条件后调用，释放guard后才yield。
-fn enroll_wait_in(t: &mut Table, id: ObjId, caller_deadline: Option<u64>) -> Result<Option<kernel_core::event_wait::Key>, ()> {
-    let r = ring_mut(t, id).ok_or(())?;
-    if r.event_waiters.len() >= sched::capacity() { return Err(()); }
-    r.event_waiters.try_reserve(1).map_err(|_| ())?;
+enum EnrollWaitError { Quota, Refused }
+
+fn enroll_wait_in(t: &mut Table, id: ObjId, caller_deadline: Option<u64>) -> Result<Option<kernel_core::event_wait::Key>, EnrollWaitError> {
+    let r = ring_mut(t, id).ok_or(EnrollWaitError::Refused)?;
+    if r.event_waiters.len() >= sched::capacity() { return Err(EnrollWaitError::Quota); }
+    r.event_waiters.try_reserve(1).map_err(|_| EnrollWaitError::Quota)?;
     let deadline = r.running.iter().filter_map(|(_, b)| match b {
         Backend::Wait { deadline } => Some(*deadline), _ => None,
     }).chain(caller_deadline).min();
-    t.acquire_internal(id).map_err(|_| ())?;
-    match sched::enroll_event_wait(deadline) {
+    let donation_endpoint = r.running.iter().find_map(|(_, b)| match b {
+        Backend::Recv(target) => Some(ipc::recv_endpoint(target)),
+        _ => None,
+    });
+    let donation = donation_endpoint.and_then(|endpoint| ipc::donation_owner_in(t, endpoint));
+    t.acquire_internal(id).map_err(|_| EnrollWaitError::Quota)?;
+    match sched::enroll_event_wait(deadline, donation) {
         Ok(Some(key)) => {
             // 容量已预留，push不分配；保活引用留给resume唯一清理点。
             ring_mut(t, id).expect("retained waiting Ring").event_waiters.push(key);
@@ -293,7 +300,8 @@ fn enroll_wait_in(t: &mut Table, id: ObjId, caller_deadline: Option<u64>) -> Res
             crate::evt1_demo::registered();
             Ok(Some(key))
         }
-        other => { let _ = t.release_internal(id); other }
+        Ok(None) => { let _ = t.release_internal(id); Ok(None) }
+        Err(()) => { let _ = t.release_internal(id); Err(EnrollWaitError::Refused) }
     }
 }
 
@@ -1005,7 +1013,10 @@ pub(crate) fn wait_ready_until(pid: ObjId, h: HandleId, wait_min: usize, deadlin
             if v.ready >= wait_min || v.reserved == 0 || v.closing { return Ok(None); }
             if deadline.is_some_and(|at| sched::timer_ticks() >= at) { return Err(err(SYSTEM_ASYNC_ERROR_TIMED_OUT)); }
             // 调度器同global事务判断到期；BSP推进造成的到期返回重查，不报配额错误。
-            let key = enroll_wait_in(t, ring, deadline).map_err(|_| err(SYSTEM_ERROR_QUOTA_EXCEEDED))?;
+            let key = enroll_wait_in(t, ring, deadline).map_err(|e| match e {
+                EnrollWaitError::Quota => err(SYSTEM_ERROR_QUOTA_EXCEEDED),
+                EnrollWaitError::Refused => err(SYSTEM_ERROR_INVALID_ARGUMENT),
+            })?;
             Ok(Some((ring, key)))
         });
         match waiting {

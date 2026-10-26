@@ -541,6 +541,17 @@ fn affinity(n: usize) {
     );
 }
 
+/// Focused KRN-3 migration contract used by the isolated leaf-switch image.
+/// It runs only the real affinity transaction instead of the full SMP2 load
+/// suite, keeping correctness diagnosis independent of CPU-cap timing tests.
+#[cfg(feature = "krn3-fast-tick-verify")]
+pub fn run_affinity_diagnostic() -> u32 {
+    FAILED.store(0, Ordering::Relaxed);
+    TIMING_FAILED.store(0, Ordering::Relaxed);
+    affinity(sched::online_cpus().len());
+    failed()
+}
+
 // ---------------------------------------------------------------------------
 // 用例 6：跨核优先级继承
 // ---------------------------------------------------------------------------
@@ -655,12 +666,12 @@ fn limit(n: usize) {
     let ok = quiet(|| {
         HOG_MIN_CPU.store(u32::MAX, Ordering::Relaxed);
         HOG_CPUS.store(0, Ordering::Relaxed);
-        HOG_END.store(sched::limit_window_arm(g,LIMIT_WINDOW), Ordering::Relaxed);
+        HOG_END.store(sched::budget_window_arm(g,LIMIT_WINDOW), Ordering::Relaxed);
         (0..n as u64).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 90 + i), "smp2-capped", hog, Some(g), all).is_ok())
     });
     check(ok, "上限用例任务创建失败");
     sched::run();
-    let (start,deadline,at,used_start,used_cutoff,end,total)=sched::limit_window_finish().expect("deadline snapshot captured");
+    let (start,deadline,at,used_start,used_cutoff,end,total)=sched::budget_window_finish().expect("deadline snapshot captured");
     assert_eq!(at,deadline,"fixed window observation must not be delayed");
     let window_used=used_cutoff.checked_sub(used_start).expect("monotonic window usage");
     let lifetime_used=total.checked_sub(used_start).expect("monotonic lifetime usage");
@@ -700,8 +711,8 @@ fn limit(n: usize) {
     );
 }
 
-/// Isolated diagnostic: unchanged production limit drill and assertions.
-#[cfg(feature="limit-window-verify")]
+/// Isolated diagnostic: unchanged production budget drill and assertions.
+#[cfg(feature="budget-window-verify")]
 pub fn run_limit_diagnostic() {
     let old=sched::set_preemption(true);
     let n=sched::online_cpus().len();

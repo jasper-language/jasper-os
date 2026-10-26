@@ -89,6 +89,14 @@ pub struct Endpoint {
     /// 在本端点上同步阻塞接收（`system.channel.recv` 同步形式）的任务——非拥有式登记。
     /// 消息到达或端点关闭时立即唤醒它们，而不是让它们等到下一个 tick 才发现（见 [`sys_recv`]）。
     sleepers: Vec<TaskId>,
+    /// Last task that synchronously waited for or received work on this
+    /// endpoint. Clients waiting on the peer may donate to this live service
+    /// task. This is a weak scheduler identity, never an object reference.
+    service_task: Option<TaskId>,
+}
+
+impl Endpoint {
+    fn wait_key(&self) -> u64 { self as *const Self as usize as u64 }
 }
 
 fn ep_mut(t: &mut Table, id: ObjId) -> Option<&mut Endpoint> {
@@ -143,7 +151,7 @@ pub fn create_pair(pa: ObjId, pb: ObjId) -> Result<(HandleId, HandleId), i64> {
                 return Err(err(SYSTEM_ERROR_QUOTA_EXCEEDED));
             }
         }
-        let new = |owner| KObject::Endpoint(Box::new(Endpoint { owner, peer: None, queue: VecDeque::new(), queued_bytes: 0, closed: false, waiters: VecDeque::new(), sleepers: Vec::new() }));
+        let new = |owner| KObject::Endpoint(Box::new(Endpoint { owner, peer: None, queue: VecDeque::new(), queued_bytes: 0, closed: false, waiters: VecDeque::new(), sleepers: Vec::new(), service_task: None }));
         let (ha, a) = proc::grant_new_in(t, pa, new(pa), ObjectType::Channel, ENDPOINT_RIGHTS).map_err(proc_err)?;
         let (hb, b) = match proc::grant_new_in(t, pb, new(pb), ObjectType::Channel, ENDPOINT_RIGHTS) {
             Ok(x) => x,
@@ -174,6 +182,7 @@ pub fn create_pair(pa: ObjId, pb: ObjId) -> Result<(HandleId, HandleId), i64> {
 pub fn close_in(t: &mut Table, id: ObjId) {
     let Some(e) = ep_mut(t, id) else { return };
     e.closed = true;
+    e.service_task = None;
     let msgs: Vec<Message> = e.queue.drain(..).collect();
     e.queued_bytes = 0;
     let waiters: Vec<(ObjId, u64)> = e.waiters.drain(..).collect();
@@ -218,6 +227,8 @@ pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, han
         Ok(id) => id,
         Err(e) => return proc_err(e),
     };
+    #[cfg(feature = "rt3-verify")]
+    crate::rt3_demo::observe_ipc_service(crate::sched::current_qos(), crate::sched::current_effective_qos());
     let peer = ep_mut(t, me).and_then(|e| e.peer);
     if is_closed(t, peer) {
         return err(SYSTEM_CHANNEL_ERROR_PEER_CLOSED);
@@ -369,8 +380,22 @@ pub(crate) fn release_target_in(t: &mut Table, target: RecvTarget, waiter: Optio
 /// 登记一个等待者（队列为空时）。
 pub(crate) fn add_waiter_in(t: &mut Table, target: &RecvTarget, ring: ObjId, req: u64) {
     if let Some(e) = ep_mut(t, target.endpoint) {
+        e.service_task = Some(crate::sched::current().0);
         e.waiters.push_back((ring, req));
     }
+}
+
+/// Returns the live service task on the peer endpoint, if one has registered
+/// by receiving there. Ring waits use this while holding the object-table lock
+/// to install the event registration and PI edge in one scheduler transaction.
+pub(crate) fn recv_endpoint(target: &RecvTarget) -> ObjId { target.endpoint }
+
+pub(crate) fn donation_owner_in(t: &mut Table, target_endpoint: ObjId) -> Option<(TaskId, u64)> {
+    let endpoint = ep_mut(t, target_endpoint)?;
+    let peer = endpoint.peer?;
+    let key = endpoint.wait_key();
+    let owner = ep_mut(t, peer)?.service_task?;
+    crate::sched::task_is_live(owner).then_some((owner, key))
 }
 
 /// 写 recv 描述的输出字段（经固定的帧）：消息体字节数、句柄数、发送方进程标识、发送方应用身份。
@@ -526,13 +551,30 @@ pub fn sys_recv(h: u64, desc_ptr: u64) -> i64 {
     };
     let me = crate::sched::current().0;
     loop {
-        let d = kobj::with(|t| {
+        let attempt = kobj::with(|t| {
             let d = try_deliver_in(t, &target);
-            if matches!(d, Delivery::Empty) {
-                set_sleeper_in(t, target.endpoint, me, true);
+            if matches!(d, Delivery::Done(_)) {
+                if let Some(endpoint) = ep_mut(t,target.endpoint) {endpoint.service_task=Some(me);}
+                return Ok((d,false));
             }
-            d
+            set_sleeper_in(t, target.endpoint, me, true);
+            if let Some(endpoint)=ep_mut(t,target.endpoint) {endpoint.service_task=Some(me);}
+            let donation = ep_mut(t,target.endpoint).and_then(|endpoint|endpoint.peer)
+                .and_then(|peer|ep_mut(t,peer).and_then(|endpoint|endpoint.service_task))
+                .filter(|owner|crate::sched::task_is_live(*owner));
+            let key=ep_mut(t,target.endpoint).map(|endpoint|endpoint.wait_key()).unwrap_or(0);
+            if let Some(owner)=donation {
+                crate::sched::block_on_owner(owner,key).map_err(|_|err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
+                Ok((d,true))
+            } else {Ok((d,false))}
         });
+        let (d,donated)=match attempt {
+            Ok(value)=>value,
+            Err(error)=>{
+                kobj::with(|t| {set_sleeper_in(t,target.endpoint,me,false);release_target_in(t,target,None);});
+                return error;
+            }
+        };
         match d {
             Delivery::Done(v) => {
                 kobj::with(|t| {
@@ -543,7 +585,11 @@ pub fn sys_recv(h: u64, desc_ptr: u64) -> i64 {
             }
             Delivery::Empty => {
                 // 进程终止打断等待：先撤销登记与目标（解除固定、释放端点引用）再返回
-                if proc::block_step().is_err() {
+                let cancelled=if donated {
+                    crate::sched::yield_with_cause(crate::sched::scheduler::Cause::BLOCK);
+                    proc::current_exiting()
+                } else {proc::block_step().is_err()};
+                if cancelled {
                     kobj::with(|t| {
                         set_sleeper_in(t, target.endpoint, me, false);
                         release_target_in(t, target, None);

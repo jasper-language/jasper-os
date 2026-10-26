@@ -18,7 +18,13 @@ pic8259 = "0.11.0"
 noto-sans-mono-bitmap = { version = "0.2.0", optional = true, default-features = false, features = ["regular", "size_16", "unicode-basic-latin"] }
 
 [features]
-limit-window-verify = []
+rt3-verify = ["user-programs"]
+rt1-verify = ["user-programs"]
+rt2-verify = ["user-programs"]
+rt1-no-realtime = ["rt1-verify"]
+budget-window-verify = []
+# Dedicated KRN-3 AP tick ownership/accounting guest; default unchanged.
+krn3-fast-tick-verify = []
 # Diagnostic-only nohz ledger and isolated guest; default unchanged.
 s3-nohz-verify = []
 evt2-verify = ["user-programs"]
