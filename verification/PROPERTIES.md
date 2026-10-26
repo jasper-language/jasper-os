@@ -210,7 +210,7 @@ The following complete main-side registry (including assumptions/tool versions) 
   `verification/` 下的资产与登记表，不改内核功能代码。
 - 模型：TLA+ 模块 `verification/tlb_shootdown.tla`，配置 `verification/tlb_shootdown.cfg`。
 - 工具：TLC 2026.10.20.183001（`tla2tools.jar` 1.8.0），Java 21，4 个 worker。
-- 环境：构建虚拟机（`bash vm-run.sh jasper-os-build/jasper-os <命令>`）；QEMU 只验 x86_64。
+- 环境：构建虚拟机；QEMU 只验 x86_64。
 - 复现命令均在构建虚拟机内、仓库根目录执行；宿主不直接运行 cargo / qemu。
 - PDA-0 工具基线：`abfe0b8`（`oc/Q69`）；Python 3.14.4（构建虚拟机），仅标准库。
 
@@ -346,9 +346,9 @@ cont-splash 帧缓冲仍未验证（见 `docs/PDA-1-image-dtb.md`）。
   用临时元数据目录运行 TLC，结束后清理。期望输出包含 `Model checking completed. No error has been found.`
   与 `0 states left on queue`。
 - 宿主经构建虚拟机执行同一命令：
-  `bash /home/auth/Documents/jasper/jasper-os-build/vm-run.sh jasper-os-build/jasper-os bash -lc 'bash verification/run-tlc.sh'`
+  `bash verification/run-tlc.sh`
 - 全量 x86_64 验收：`bash scripts/accept.sh`（单核、4 核、8 核与 q35；AArch64/RISC-V 记 N/A）。
-- 机械闸门：`bash /home/auth/Documents/jasper/jasper-build/fv-gate.sh /home/auth/Documents/jasper/jasper-os-build/jasper-os --base origin/main`。
+- 公开复验入口：`bash verification/run-tlc.sh`；具体性质与适用范围见本表。
 
 
 ## Additional bm1 contract scopes
