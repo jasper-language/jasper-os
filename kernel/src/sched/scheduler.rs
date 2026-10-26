@@ -2619,13 +2619,18 @@ impl Scheduler {
                 t.rt_remaining=u32::try_from(b.remaining.div_ceil(crate::hrtime::tick_ns())).unwrap_or(u32::MAX);
             }
         }
-        let c=this_cpu();
-        while let Some(e)=self.ns_heap.pop_due(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,c,now).expect("ns heap coherent") {
-            if !self.epochs[e.slot].live(kernel_core::task_index::Token {slot:e.slot,generation:e.generation}) {continue;}
-            if self.task(e.slot).is_some_and(|t|t.state==TaskState::Blocked && t.wake_ns.is_some_and(|at|at<=now)) {self.make_runnable(e.slot);}
-        }
-        for target in self.online.iter().filter(|&t|t!=c) {
-            if self.ns_roots[target].is_some_and(|at|at<=now) {self.kicks.insert(target);}
+        // One global high-resolution transaction owns every deadline forest
+        // root.  Drain all roots that are already due while that ownership is
+        // held instead of making seven simultaneous local timer interrupts
+        // serialize seven otherwise identical global transactions.  Each
+        // task remains published into its owner leaf by make_runnable(), and
+        // remote targets are kicked only after the global guard is released.
+        let due_cpus = self.online;
+        for c in due_cpus.iter() {
+            while let Some(e)=self.ns_heap.pop_due(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,c,now).expect("ns heap coherent") {
+                if !self.epochs[e.slot].live(kernel_core::task_index::Token {slot:e.slot,generation:e.generation}) {continue;}
+                if self.task(e.slot).is_some_and(|t|t.state==TaskState::Blocked && t.wake_ns.is_some_and(|at|at<=now)) {self.make_runnable(e.slot);}
+            }
         }
     }
     pub fn refresh_ns_events(&mut self) {

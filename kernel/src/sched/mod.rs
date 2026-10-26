@@ -742,9 +742,16 @@ pub fn sleep_until_ns(deadline:u64)->Result<(),()> {
 }
 pub fn on_highres_timer() {
     crate::smp::percpu::this().take_resched();
-    let (credits,cause)=with_mut_from(Origin::ApFallback,|s|s.highres_event(PREEMPTION.load(Ordering::Relaxed)));
+    // Keep the due publication, scheduling decision and switch publication in
+    // one transaction.  The old path returned a cause and immediately took
+    // KERNEL_SCHED again through yield_with_cause(), adding another queue wait
+    // to every simultaneous per-CPU deadline fanout.
+    let (credits,plan)=with_mut_from(Origin::ApFallback,|s| {
+        let (credits,cause)=s.highres_event(PREEMPTION.load(Ordering::Relaxed));
+        (credits,cause.and_then(|cause|s.prepare_switch(cause)))
+    });
     if cpu::cpu_index()!=0 {crate::irq::on_elapsed_cpu_ticks(credits);}
-    if let Some(cause)=cause {yield_with_cause(cause);}
+    if let Some(plan)=plan {execute_switch_plan(plan);}
 }
 
 /// 睡到 tick `deadline`（已过则立即返回）。
