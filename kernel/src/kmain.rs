@@ -367,6 +367,7 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("rt", rt_demo::timing_failed()),
         ("balance", balance_demo::timing_failed()),
         ("irq", irq_demo::timing_failed()),
+        ("arbiter", arbiter_demo::timing_failed()),
         #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
         ("drv2c2", crate::irqstorm_demo::timing_failed()),
     ];
@@ -376,6 +377,7 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("pi", pi_demo::timing_failed()),
         ("balance", balance_demo::timing_failed()),
         ("irq", irq_demo::timing_failed()),
+        ("arbiter", arbiter_demo::timing_failed()),
     ];
     let timing_total: u32 = timings.iter().map(|&(_, n)| n).sum();
     if timing_total > 0 {
