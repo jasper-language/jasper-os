@@ -114,7 +114,7 @@ pub(super) struct LeafCompletion {
     pub(super) prev: usize,
     pub(super) token: Option<kernel_core::task_index::Token>,
     #[cfg(feature = "krn2-observe")]
-    pub(super) resume: Option<kernel_core::raw_timing::Endpoint>,
+    pub(super) resume: Option<(kernel_core::task_index::Token, kernel_core::raw_timing::Endpoint)>,
 }
 
 #[derive(Clone, Copy)]
@@ -197,11 +197,17 @@ pub(super) fn finish_leaf_switch(
                 WORKER_LEAF_FINISHES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
         }
+        #[cfg(feature = "krn2-observe")]
+        let resume = _resume.and_then(|end| {
+            let slot = leaf.current;
+            leaf.hot.get(slot).and_then(|hot| hot.generation())
+                .map(|generation| (kernel_core::task_index::Token { slot, generation }, end))
+        });
         leaf.completed = Some(LeafCompletion {
             prev,
             token,
             #[cfg(feature = "krn2-observe")]
-            resume: _resume,
+            resume,
         });
         // A migrated task's hot owner already lives on the destination leaf.
         // Its cold completion must run now to publish the destination kick;
@@ -746,7 +752,7 @@ pub struct Scheduler {
     stacks: StackPool,
     /// Successfully published, not-yet-exited workers (boot slot excluded).
     workers: usize,
-    budget_tick_drains: [u32; 2],
+    budget_tick_charges: [u32; 2],
     // Bounded diagnostic observer; never grants or changes CPU budget.
     budget_window: Option<(CpuGroupId, u64, u64, u64, Option<(u64,u64)>)>,
     /// 同步运行列表时被拒绝的次数（正常运行时恒为 0）。
@@ -908,7 +914,7 @@ impl Scheduler {
             stacks: StackPool::new(),
             list_errors: 0,
             workers: 0,
-            budget_tick_drains: [0; 2],
+            budget_tick_charges: [0; 2],
             budget_window: None,
             next_wake: [u64::MAX; MAX_CPUS],
             wake_heap: DeadlineForest::new(),
@@ -2108,7 +2114,7 @@ impl Scheduler {
         let t = self.task(self.live_slot(id)?)?;
         Some((t.rt_remaining,t.rt_period,t.rt_next_period))
     }
-    pub fn budget_tick_stats(&self) -> [u32; 2] { self.budget_tick_drains }
+    pub fn budget_tick_stats(&self) -> [u32; 2] { self.budget_tick_charges }
 
     #[cfg(feature = "krn3-fast-tick-verify")]
     pub fn task_cpu_ticks(&self, id: TaskId) -> Option<u64> {
@@ -2257,13 +2263,13 @@ impl Scheduler {
         if t.rt_period != 0 {
             assert_eq!(ticks, 1, "RT leases are single tick");
             t.rt_remaining -= 1;
-            self.budget_tick_drains[0] = self.budget_tick_drains[0].wrapping_add(1);
+            self.budget_tick_charges[0] = self.budget_tick_charges[0].wrapping_add(1);
         }
         if let Some(grp) = group.and_then(|g| self.groups[g].as_mut()) {
             assert_eq!(ticks, 1, "shared-group leases are single tick");
             assert!(grp.limit.eligible(), "shared credit oversubscribed");
             grp.limit.charge();
-            self.budget_tick_drains[1] = self.budget_tick_drains[1].wrapping_add(1);
+            self.budget_tick_charges[1] = self.budget_tick_charges[1].wrapping_add(1);
             assert!(grp.limit.eligible(), "shared credit must leave positive balance");
         }
     }
@@ -2740,7 +2746,13 @@ impl Scheduler {
         let c = this_cpu();
         let cur = leaf_current(c);
         self.account(c);
+        let charged_rt = self.task(cur).is_some_and(|t|
+            t.state == TaskState::Running && t.ns_budget.is_none()
+                && t.rt_period != 0 && t.rt_remaining > 0);
         self.charge_rt(cur, self.now);
+        if charged_rt {
+            self.budget_tick_charges[0] = self.budget_tick_charges[0].wrapping_add(1);
+        }
         let woke = self.wake_due(c, self.now);
         let group = match self.task(cur) {
             Some(t) if is_worker(cur) && t.state == TaskState::Running => t.cpu_group,
@@ -2748,6 +2760,7 @@ impl Scheduler {
         };
         if let Some(grp) = group.and_then(|g| self.groups[g].as_mut()) {
             grp.limit.charge();
+            self.budget_tick_charges[1] = self.budget_tick_charges[1].wrapping_add(1);
         }
         let cause = self.decide(c).or(woke.then_some(Cause::WAKE));
         if preemption { cause } else { None }
@@ -2756,7 +2769,17 @@ impl Scheduler {
     /// 设置空闲停表的最大间隔（tick；< 2 关闭），返回之前的设置。关闭后已停表的处理器在下一次醒来时恢复周期 tick。
     /// Configure tickless idle (`divisor` < 2 disables it); returns the previous setting.
     pub fn set_idle_tick(&mut self, divisor: u32) -> u32 {
-        core::mem::replace(&mut self.nohz_divisor, divisor)
+        let old = core::mem::replace(&mut self.nohz_divisor, divisor);
+        // Disabling tickless mode is an immediate state transition.  CPUs
+        // whose local timer is currently stretched must be kicked so their
+        // idle loop calls idle_exit() and restores the periodic timer; merely
+        // changing the policy leaves the old one-shot in force indefinitely.
+        if divisor < 2 {
+            for cpu in self.nohz.stopped().intersect(self.online).iter() {
+                self.kicks.insert(cpu);
+            }
+        }
+        old
     }
 
     /// 空闲停表的统计快照。
@@ -3117,19 +3140,24 @@ impl Scheduler {
     // Author: chatgpt. Endpoint is captured on the resumed execution flow,
     // before acquiring this guard. IRQs remain masked, so current cannot migrate.
     #[cfg(feature = "krn2-observe")]
-    pub(super) fn note_raw_resume(&mut self, end: kernel_core::raw_timing::Endpoint, path: u16) {
-        let slot = self.cur();
-        if !is_worker(slot) { return; }
-        let token = self.epochs.get(slot).and_then(SlotLifecycle::history).map(|r| r.token());
-        let completion = self.task_mut(slot).and_then(|t| {
+    pub(super) fn note_raw_resume_for(&mut self, token: kernel_core::task_index::Token,
+        end: kernel_core::raw_timing::Endpoint, path: u16) {
+        if !is_worker(token.slot) || !self.epochs.get(token.slot).is_some_and(|e| e.live(token)) { return; }
+        let completion = self.task_mut(token.slot).and_then(|t| {
             let round = t.raw_wake_round.take()?;
-            Some(token.and_then(|token| t.raw_wake.finish(token, round, end)))
+            Some(t.raw_wake.finish(token, round, end))
         });
         match completion {
             Some(Some(mut sample)) => { sample.path = path; let _ = self.raw_wakes.push(sample); }
             Some(None) => self.raw_wake_errors[1] = self.raw_wake_errors[1].saturating_add(1),
             None => {}
         }
+    }
+    #[cfg(feature = "krn2-observe")]
+    pub(super) fn note_raw_resume(&mut self, end: kernel_core::raw_timing::Endpoint, path: u16) {
+        let slot = self.cur();
+        let Some(token) = self.epochs.get(slot).and_then(SlotLifecycle::history).map(|r| r.token()) else { return; };
+        self.note_raw_resume_for(token, end, path);
     }
     #[cfg(feature = "krn2-observe")]
     pub(super) fn raw_pending_count(&self) -> usize {

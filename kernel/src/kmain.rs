@@ -141,6 +141,31 @@ pub fn start(boot: &'static BootSpec) -> ! {
             + crate::balance_demo::run_affinity_diagnostic();
         arch::exit_emulator(if failed==0 {ExitStatus::Success} else {ExitStatus::Failure});
     }
+    #[cfg(feature="krn3-postsplit-verify")]
+    {
+        mm::demo::run_space();
+        smp::demo::run(smp::start_secondaries(TIMER_HZ));
+        let highres = sched::enable_highres();
+        let divisor = sched::configure_idle_tick();
+        kprintln!(
+            "[JSR-KRN3-POSTSPLIT] start cpus={} high_resolution={} nohz_divisor={}",
+            sched::online_cpus().len(), highres, divisor
+        );
+        crate::scale_demo::run();
+        let failed = crate::scale_demo::failed();
+        let timing = crate::scale_demo::timing_failed();
+        kprintln!(
+            "[JSR-KRN3-POSTSPLIT] done failed={} timing_failed={}",
+            failed, timing
+        );
+        arch::exit_emulator(if failed != 0 {
+            ExitStatus::Failure
+        } else if timing != 0 {
+            ExitStatus::TimingOnly
+        } else {
+            ExitStatus::Success
+        });
+    }
     #[cfg(feature="evt2-broadcast-verify")]
     {
         mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));

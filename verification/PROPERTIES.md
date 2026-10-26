@@ -97,6 +97,7 @@
 | KRN3-MIGRATION-COMPLETION-01 | 任务热槽先迁到目标leaf时，源CPU切换完成仍必须清除目标热槽的旧执行所有权，并在冷结算后向目标CPU发kick；旧源不能令任务永久不可选 | `kernel/src/sched/scheduler.rs::{finish_leaf_switch,finish_switch}`; `kernel/src/sched/mod.rs::{finish_switch,on_timer_interrupt,on_local_timer}` | 默认release编译 + 双核聚焦guest + 热槽六工具套件 | tested | `evidence/krn3/fused-switch-migration-final2-20261026/PASS`; `bash verification/toolbox/run-krn3-task-hot-suite.sh` | 首次完整guest在亲和迁移后timeout124，定位为目标leaf热`on_cpu`残留；修复后CPU1→CPU0恢复、worker完成、列表和资源均通过。时钟tick与prepare已合并一次事务，但普通竞争路径仍取得一次`KERNEL_SCHED`，不登记KRN-3完成或物理性能达标 |
 | KRN3-BSP-LEASE-ISOLATION-01 | BSP tick不得排空普通无组非RT AP的本地记账；预算任务保持单tick结算；批次耗尽或控制事务后精确归并且退出不能越过在核运行所有权 | `kernel-core::tick_lease::TickLease`; `kernel/src/sched/mod.rs::lock_state_from`; `kernel/src/sched/scheduler.rs::{bsp_tick_lease_participants,drain_local_ticks,workers_settled}` | core契约 + 默认release编译 + 双核聚焦guest | tested | `cargo test -p kernel-core tick_lease`; `evidence/krn3/bsp-partial-batch-fixed-20261026/PASS` | 首轮发现退出到switch发布窗口会让run提前返回，已保留失败并用热`on_cpu`补齐settled边界；最终连续峰值8且实体/CPU账精确。竞争选择与切换仍回退全局，不证明KRN-3完成或物理延迟 |
 | KRN3-LOCAL-COMPETING-SWITCH-01 | 同核普通任务竞争时，获授权AP tick在单个RunLeaf内精确完成记账、策略选择、requeue/dispatch与切换发布；冷事务按完整代次结算原owner且不得重复扣费、双入队或提前复用 | `kernel/src/sched/scheduler.rs::{fast_leaf_competing_tick,settle_leaf_transition,drain_local_ticks}`; `kernel/src/sched/mod.rs::on_local_timer` | 默认release编译 + 热槽六工具套件 + 双核真实竞争guest | tested | `bash verification/toolbox/run-krn3-task-hot-suite.sh`; `bash scripts/krn3-fast-tick-sample.sh competing-local-switch-final2-20261026`（仅VM） | guest33/整批0/source同；两任务3次本核切换，lease hits6、实体/CPU账均12，队列/热槽审计全0且资源回收。仅覆盖无RT、无组预算、无ns预算、无PI提升的普通竞争；复杂控制保持全局事务；TCG不证明物理延迟或弱内存 |
+| KRN3-POSTSPLIT-REGRESSION-01 | 结构拆分后的真实4/8核规模用例不得死锁、丢任务、双入队、遗留wake或漂移资源；全局控制事务取得的叶锁数应不超过全部在线叶理论上界 | `kernel/src/scale_demo.rs`; `kernel/src/sched/{mod.rs,scheduler.rs}`; `scripts/krn3-postsplit-sample.sh` | 默认release编译 + 聚焦4/8核guest | tested / timing deferred | `evidence/krn3/krn3-postsplit-focused-20261026/PASS` | 4/8核均脚本0、功能失败0、资源回收、wake拒绝0；同步工作分别避免45/273次叶获取。TCG计时仍有2/4项超界，调度锁696/967‰、对象表296/179‰；raw wake各64条且丢弃82/66、complete=false，不能形成p99.9或物理性能验收 |
 
 实现映射：模型Finish覆盖真实finish或已取消后quiesce，Publish对应advance内发布判断，Destroy对应满足Q且P或closing后的控制块回收。模型不建模锁或多请求并发。Kani跨表转移证明针对内核实际复用的transfer_to，不替换为假想转移模型。
 
@@ -206,7 +207,7 @@
 
 | KRN2-LEAF-MEMBERSHIP-01 | 事务覆盖全部在线叶及自注册当前CPU；排空先于改owner；离线从未授予许可 | lock_state/StateGuard；Scheduler::cpu_online | TLA+ / 真实内核回归 | tested / model-checked | bash verification/run-leaf-membership-tlc.sh；bash scripts/s2.sh | 两核单调online/SC/最多3已接受tick，147状态，漏当前注册叶反例；真实百万八核通过、原空闲断言不变；不支持CPU离线，不证明Rust弱内存 |
 
-| KRN2-SYNC-WORK-01 | 可选诊断分别报告global事务和全部在线叶获取，固定拓扑下leaf=online*transactions | sched::SYNC_WORK / scale_demo::contention | 实际内核计数契约 | tested | KRN2_OBSERVE=1 bash scripts/krn2-churn-sample.sh UNIQUE 1 4 8 | 实际事务/叶获取7/7、57/228、210/1680均覆盖；仅观测、不参与许可，global下更新/reset/snapshot，含观察事务；leaf_contended是非零自旋观测，不同于global try_lock失败；32位无回绕窗口；不含fast try_lock/发布周期或物理成本，诊断改变执行成本；默认关闭 |
+| KRN2-SYNC-WORK-01 | 可选诊断分别报告global事务和实际叶获取；拆锁后叶获取必须非空、不超过`online*transactions`，争用数不得超过实际获取数 | sched::SYNC_WORK / scale_demo::contention | 实际内核计数契约 | tested | `bash scripts/krn3-postsplit-sample.sh UNIQUE 4 8`（仅VM） | KRN-3后4核82/283/上界328、8核284/1999/上界2272，分别避免45/273次叶获取；仅观测、不参与许可，含控制面和观察事务；leaf_contended是叶锁非零自旋，不同于global try_lock失败；32位无回绕窗口，不含物理成本，默认关闭 |
 
 | KRN1-WRAPPER-SNAPSHOT-01 | 长等待期间公开脚本字节偏移被修改后仍仅执行原命令一次 | tools/krn1/vm_run_fixture.sh / 外层vm-run.sh | 隔离Shell契约测试 | tested | python3 -m unittest discover -s tools/krn1 -p test_vm_run_snapshot.py -v | 暂停假的传输后原地修改公开夹具，实际Bash快照只执行一次；不验证SSH/内核；外层原子部署，夹具与部署脚本实测相同 |
 
@@ -237,7 +238,7 @@ The following complete main-side registry (including assumptions/tool versions) 
   `verification/` 下的资产与登记表，不改内核功能代码。
 - 模型：TLA+ 模块 `verification/tlb_shootdown.tla`，配置 `verification/tlb_shootdown.cfg`。
 - 工具：TLC 2026.10.20.183001（`tla2tools.jar` 1.8.0），Java 21，4 个 worker。
-- 环境：构建虚拟机（`bash <vm-wrapper> <repo> <命令>`）；QEMU 只验 x86_64。
+- 环境：构建虚拟机（`bash vm-run.sh jasper-os-build/jasper-os <命令>`）；QEMU 只验 x86_64。
 - 复现命令均在构建虚拟机内、仓库根目录执行；宿主不直接运行 cargo / qemu。
 - PDA-0 工具基线：`abfe0b8`（`oc/Q69`）；Python 3.14.4（构建虚拟机），仅标准库。
 
@@ -373,9 +374,9 @@ cont-splash 帧缓冲仍未验证（见 `docs/PDA-1-image-dtb.md`）。
   用临时元数据目录运行 TLC，结束后清理。期望输出包含 `Model checking completed. No error has been found.`
   与 `0 states left on queue`。
 - 宿主经构建虚拟机执行同一命令：
-  `bash verification/run-tlc.sh`
+  `bash /home/auth/Documents/jasper/jasper-os-build/vm-run.sh jasper-os-build/jasper-os bash -lc 'bash verification/run-tlc.sh'`
 - 全量 x86_64 验收：`bash scripts/accept.sh`（单核、4 核、8 核与 q35；AArch64/RISC-V 记 N/A）。
-- 机械闸门：`bash verification/local-ci.sh`。
+- 机械闸门：`bash /home/auth/Documents/jasper/jasper-build/fv-gate.sh /home/auth/Documents/jasper/jasper-os-build/jasper-os --base origin/main`。
 
 
 ## Additional bm1 contract scopes

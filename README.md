@@ -25,7 +25,7 @@ Claude、OpenAI Codex 与 DeepSeek 共同参与开发。
 
 > **chatgpt 吐槽：** GitHub 的 Contributors 图只认默认分支上的提交和能够
 > 绑定 GitHub 账号的 author 邮箱，不认“代码实际上是谁写的”。本项目的
-> 代理提交使用过无法绑定 GitHub 账号的本地或服务地址，于是网页
+> 代理提交使用过 `agent@local`、`noreply@deepseek.com` 等地址，于是网页
 > 可能只显示一两个人，仿佛其余贡献者没干活——这是统计方式造成的失真，
 > 不是项目事实。
 
@@ -83,9 +83,9 @@ Claude、OpenAI Codex 与 DeepSeek 共同参与开发。
 
 未列为 ✅ 的能力**尚未实现**。已知的阶段性范围限制：
 
-- x86_64 SMP 已覆盖 1/4/8 核功能回归；物理机延迟、扩展效率和 p99/p99.9 仍单列复测。
-- Memory 对象、跨进程 Channel 转移、撤销与固定页配额已经接入；注册缓冲区、IOVA 与分段 I/O 仍返回 unsupported。
-- 没有文件系统、网络、图形或动态模块卸载。
+- x86_64 SMP、每核运行队列和跨核 wake/PI 已接通并完成 1/4/8 核功能回归；物理争用、扩展效率与 p99/p99.9 仍列为性能优化账。
+- `Memory` 共享内存对象、只降权映射、Channel 句柄转移、跨核撤销与页/固定配额已经接入；匿名页、ELF 与栈页也使用统一页对象生命周期。
+- 没有文件系统、网络、图形、动态模块卸载。
 
 ---
 
@@ -186,4 +186,4 @@ RT-1 补充：真实 `headless-min` 构建下，获 `rt.set` 调用授权的 CPL
 
 纳秒调度路径已经接通：校准后的串行化 TSC 域提供单调纳秒时间，Task 持有规范纳秒预算，调度事务按实际 owner 运行区间结算；绝对期限堆、LAPIC 单次定时、空闲取消和远端 IPI 提示共同驱动纳秒等待与预算事件。新操作 `system.time.wait.ns`、`system.time.monotonic.ns.get` 和 `system.task.rt.ns.set` 使用独立版本化描述符，旧 tick ABI 保持不变。
 
-受控四核生产 guest 已验证 CPL3 纳秒等待不早返回、BSP/AP 路径、纳秒预算耗尽与补充、退出取消、LAPIC 路由恢复和资源守恒。随后定点默认回归验证九项旧功能全部通过；TCG 时钟样本不完整只进入计时结果，功能断言为零失败。有限模型、Verus/Z3 伴随、Proptest、Miri、cargo-fuzz、限定 Kani 和 Loom 的准确范围见 `verification/PROPERTIES.md`。跨 CPU 时钟同步与校准是平台假设，宽域换算 Kani 仍未完成，物理精度、抖动和性能目标延期，不据此声称全 Rust 或硬件形式化证明。
+受控四核生产 guest 已验证 CPL3 纳秒等待不早返回、BSP/AP 路径、纳秒预算耗尽与补充、退出取消、LAPIC 路由恢复和资源守恒。随后定点默认回归验证九项旧功能全部通过；TCG 时钟样本不完整只进入计时结果，功能断言为零失败。有限模型、Verus/Z3 伴随、Proptest、Miri、cargo-fuzz、限定 Kani 和 Loom 的准确范围见状态文档。跨 CPU 时钟同步与校准是平台假设，宽域换算 Kani 仍未完成，物理精度、抖动和性能目标延期，不据此声称全 Rust 或硬件形式化证明。

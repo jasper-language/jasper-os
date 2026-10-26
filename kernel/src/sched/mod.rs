@@ -179,9 +179,7 @@ fn lock_state_from(_origin: Origin) -> StateGuard {
         }
         if let Some(completed) = scheduler::take_leaf_switch_completion(c) {
             #[cfg(feature = "krn2-observe")]
-            if c == local_cpu {
-                if let Some(end) = completed.resume { s.note_raw_resume(end, 3); }
-            }
+            if let Some((token, end)) = completed.resume { s.note_raw_resume_for(token, end, 3); }
             s.finish_switch(c, Some((completed.prev, completed.token)));
         }
     }
@@ -1067,7 +1065,8 @@ pub fn on_local_timer() {
     if let Some(plan) = plan { execute_switch_plan(plan); }
 }
 
-// Author: chatgpt. Counts real drained RT and shared-group leased ticks.
+// Author: chatgpt. Counts real tick-based AP RT and shared-group charges across
+// both the owner-local lease path and the globally serialized fallback path.
 pub fn budget_tick_stats() -> [u32; 2] { with(|s| s.budget_tick_stats()) }
 
 // Author: chatgpt. Copy under the existing scheduler guard, print after release.

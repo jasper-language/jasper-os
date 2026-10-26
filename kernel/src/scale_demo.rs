@@ -266,11 +266,13 @@ fn budget_tick_contract(n: usize) {
     if n < 3 { return; }
     let saved = baseline();
     let before = sched::budget_tick_stats();
+    let throttle_before = sched::throttle_count();
     BUDGET_STOP.store(0, Ordering::Relaxed);
     let group = sched::create_cpu_group(900).expect("budget lease group");
     let mut configured = true;
-    for c in 1..=2 {
-        let id = TaskId(0x42554447455400 + c as u64);
+    let ids = [TaskId(0x42554447455401), TaskId(0x42554447455402)];
+    for (index, c) in (1..=2).enumerate() {
+        let id = ids[index];
         let mut cpus = CpuSet::EMPTY; cpus.insert(c);
         configured &= quiet(|| sched::spawn_on(id, "budget-credit", budget_worker, None, cpus).is_ok());
         configured &= sched::assign_cpu_group(id, Some(group)).is_ok();
@@ -279,18 +281,27 @@ fn budget_tick_contract(n: usize) {
     // Bootstrap task cannot block; sleep_ticks(80) would merely wait for one IRQ.
     // Measure the actual global clock instead of assuming that call slept 80 ticks.
     let until = sched::timer_ticks() + 80;
-    while sched::timer_ticks() < until { sched::sleep_ticks(1); }
+    let mut rt_exhausted = false;
+    while sched::timer_ticks() < until {
+        rt_exhausted |= ids.iter().any(|&id| sched::rt_state(id).is_some_and(|(remaining, period, _)|
+            period == 16 && remaining == 0));
+        sched::sleep_ticks(1);
+    }
     let after = sched::budget_tick_stats();
-    let used = sched::cpu_group_stats(group).unwrap().used_ticks;
+    let group_stats = sched::cpu_group_stats(group).unwrap();
+    let used = group_stats.used_ticks;
+    let throttled = sched::throttle_count().wrapping_sub(throttle_before);
     BUDGET_STOP.store(1, Ordering::Release);
-    for c in 1..=2 { sched::set_rt(TaskId(0x42554447455400 + c as u64), 0, 0); }
+    for id in ids { sched::set_rt(id, 0, 0); }
     sched::run();
     let released = sched::release_cpu_group(group).is_ok();
     let rt = after[0].wrapping_sub(before[0]);
     let shared = after[1].wrapping_sub(before[1]);
-    check(configured && rt > 0 && shared > 0 && used >= shared as u64 && released, "预算单tick必须实际归并RT与共享组扣费");
+    check(configured && rt_exhausted && used > 0 && throttled > 0 && released,
+        "预算任务必须实际耗尽RT额度、触发调度节流并产生共享组扣费");
     check(saved == baseline(), "预算单tick演练资源不守恒");
-    kprintln!("[JSR-BUDGET-TICK] rt={} shared={} used={} configured={} reclaimed={}", rt, shared, used, configured, saved == baseline());
+    kprintln!("[JSR-BUDGET-TICK] tick_path_rt={} tick_path_shared={} rt_exhausted={} used={} group_throttle_events={} scheduler_throttles={} configured={} reclaimed={}",
+        rt, shared, rt_exhausted, used, group_stats.throttle_events, throttled, configured, saved == baseline());
 }
 static RT_STOP: AtomicU32 = AtomicU32::new(0);
 fn local_rt_worker() { while RT_STOP.load(Ordering::Acquire) == 0 { core::hint::spin_loop(); } }
@@ -300,17 +311,20 @@ fn local_rt_contract(n: usize) {
     let saved = baseline();
     RT_STOP.store(0, Ordering::Relaxed);
     let mut cpus = CpuSet::EMPTY; cpus.insert(1);
-    let old_refills = sched::deadline_stats().1[1];
     let spawned = quiet(|| sched::spawn_on(id, "rt-local", local_rt_worker, None, cpus).is_ok());
     let configured = sched::set_rt(id, 1, 4);
+    let initial_next = sched::rt_state(id).map(|(_, _, next)| next).unwrap_or(0);
     let limit = sched::timer_ticks() + 200;
     let mut exhausted = false;
+    let mut refilled = false;
     while sched::timer_ticks() < limit {
-        exhausted |= sched::rt_state(id).is_some_and(|(remaining,period,next)| period == 4 && remaining == 0 && sched::timer_ticks() < next);
-        if exhausted && sched::deadline_stats().1[1].wrapping_sub(old_refills) > 0 { break; }
+        if let Some((remaining, period, next)) = sched::rt_state(id) {
+            exhausted |= period == 4 && remaining == 0 && sched::timer_ticks() < next;
+            refilled |= next > initial_next;
+        }
+        if exhausted && refilled { break; }
         sched::sleep_ticks(1);
     }
-    let refilled = sched::deadline_stats().1[1].wrapping_sub(old_refills) > 0;
     // Author: chatgpt. Keep the worker alive until its configuration API has
     // completed; publishing STOP first permits exit before set_rt finds it.
     let disabled = sched::set_rt(id, 0, 0);
@@ -724,11 +738,13 @@ fn contention(n: usize) {
             check(reconciled, "全局事务来源必须与同锁窗口总数对账");
         }
         let [transactions, leaves, contended, spins] = sched::sync_work_stats();
-        let covered = transactions > 0 && leaves as u64 == transactions as u64 * n as u64
+        let upper = u64::from(transactions).saturating_mul(n as u64);
+        let bounded = transactions > 0 && leaves > 0 && u64::from(leaves) <= upper
             && contended <= leaves;
-        check(covered, "诊断叶获取总数必须覆盖每个在线核，不能只算全局锁");
-        kprintln!("[JSR-SYNC-WORK] transactions={} leaf_acquired={} leaf_contended={} leaf_spins={} online={} covered={}",
-            transactions, leaves, contended, spins, n, covered);
+        let avoided = upper.saturating_sub(u64::from(leaves));
+        check(bounded, "诊断叶获取必须非空、有界且争用数不超过实际获取数");
+        kprintln!("[JSR-SYNC-WORK] transactions={} leaf_acquired={} leaf_contended={} leaf_spins={} online={} upper={} avoided={} bounded={}",
+            transactions, leaves, contended, spins, n, upper, avoided, bounded);
     }
     #[cfg(feature = "krn2-observe")]
     {

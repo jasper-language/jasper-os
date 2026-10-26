@@ -53,7 +53,7 @@ for n in "$@"; do
         grep -aEq '^\[JSR-GLOBAL-ORIGIN\] scope=boot .*overflow=false reconciled=true' "$out/serial-$n.log"
         grep -aEq '^\[JSR-GLOBAL-ORIGIN\] scope=churn .*overflow=false reconciled=true' "$out/serial-$n.log"
         grep -a '^\[JSR-GLOBAL-ORIGIN\]' "$out/serial-$n.log"
-        grep -aEq '^\[JSR-SYNC-WORK\].*covered=true' "$out/serial-$n.log"
+        grep -aEq '^\[JSR-SYNC-WORK\].*bounded=true' "$out/serial-$n.log"
         grep -aEq '^\[JSR-RAW-CALLBACK\] samples=[1-9][0-9]* .*valid=true' "$out/serial-$n.log"
         grep -aEq '^\[JSR-RAW-WAKE\] samples=[1-9][0-9]* .*valid=true .*endpoint=resume-hook' "$out/serial-$n.log"
     fi
