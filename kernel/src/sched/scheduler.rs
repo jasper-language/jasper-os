@@ -744,6 +744,10 @@ pub struct Scheduler {
     #[cfg(feature = "krn2-observe")]
     pub(super) wake_latency: kernel_core::raw_timing::NanoHistogram<2049>,
     #[cfg(feature = "krn2-observe")]
+    pub(super) deadline_to_runnable: kernel_core::raw_timing::NanoHistogram<2049>,
+    #[cfg(feature = "krn2-observe")]
+    pub(super) deadline_to_resume: kernel_core::raw_timing::NanoHistogram<2049>,
+    #[cfg(feature = "krn2-observe")]
     pub(super) raw_wake_errors: [u64; 3], // begin, finish, exit-with-pending
     #[cfg(feature = "krn2-observe")]
     pub(super) raw_pending_at_reset: usize,
@@ -909,6 +913,10 @@ impl Scheduler {
             #[cfg(feature = "krn2-observe")]
             wake_latency: kernel_core::raw_timing::NanoHistogram::new(),
             #[cfg(feature = "krn2-observe")]
+            deadline_to_runnable: kernel_core::raw_timing::NanoHistogram::new(),
+            #[cfg(feature = "krn2-observe")]
+            deadline_to_resume: kernel_core::raw_timing::NanoHistogram::new(),
+            #[cfg(feature = "krn2-observe")]
             raw_wake_errors: [0; 3],
             #[cfg(feature = "krn2-observe")]
             raw_pending_at_reset: 0,
@@ -1031,6 +1039,12 @@ impl Scheduler {
     /// 安装切换观察者（覆盖旧的）。
     pub fn set_observer(&mut self, observer: SwitchObserver) {
         self.observer = Some(observer);
+    }
+
+    /// Remove a previously installed diagnostic switch callback. Performance
+    /// fixtures must not inherit synchronous serial logging from boot demos.
+    pub fn clear_observer(&mut self) {
+        self.observer = None;
     }
 
     /// 当前策略名。
@@ -1483,6 +1497,8 @@ impl Scheduler {
             if t.raw_wake_round.take().is_some() {
                 self.raw_wake_errors[2] = self.raw_wake_errors[2].saturating_add(1);
             }
+            #[cfg(feature = "krn2-observe")]
+            { t.raw_deadline_start = None; }
             t.state = TaskState::Exited;
             pi_graph_changed |= t.waits_for.take().is_some();
             left = t.cpu_group.take();
@@ -1803,6 +1819,8 @@ impl Scheduler {
         let now = self.now;
         if !self.task(i).is_some_and(|t| t.state == TaskState::Blocked) { return false; }
         let generation = self.epochs[i].history().expect("waking task identity").token().generation;
+        #[cfg(feature = "krn2-observe")]
+        let absolute_ns_deadline = self.task(i).and_then(|t| t.wake_ns);
         self.remove_wake_deadline(i, generation);
         let t = self.tasks[i].as_mut().unwrap();
         #[cfg(feature = "krn2-observe")]
@@ -1817,6 +1835,18 @@ impl Scheduler {
             };
             if let Some(round) = t.raw_wake.begin(token, start) { t.raw_wake_round = Some(round); }
             else { self.raw_wake_errors[0] = self.raw_wake_errors[0].saturating_add(1); }
+            // A due high-resolution sleep has an exact absolute deadline in
+            // the same shared-ns clock. Keep it until the resume hook so the
+            // diagnostic can separate timer/lock delay from runnable delay.
+            t.raw_deadline_start = absolute_ns_deadline.filter(|&at| at <= start.counter).map(|at|
+                kernel_core::raw_timing::Endpoint { cpu: t.home, counter: at,
+                    clock: kernel_core::raw_timing::ClockDomain::SharedNs });
+            if let Some(deadline) = t.raw_deadline_start {
+                self.deadline_to_runnable.record(&kernel_core::raw_timing::Sample {
+                    path: 5, slot: i, generation, wait_round: t.raw_wake_round.unwrap_or(0),
+                    start: deadline, end: start,
+                });
+            }
         }
         // Author: chatgpt。超时/退出/普通wake也使本轮事件凭据失效。
         if let Some(key) = t.event_wait.pending() { t.event_wait.finish(key); }
@@ -3153,10 +3183,18 @@ impl Scheduler {
     pub(super) fn note_raw_resume_for(&mut self, token: kernel_core::task_index::Token,
         end: kernel_core::raw_timing::Endpoint, path: u16) {
         if !is_worker(token.slot) || !self.epochs.get(token.slot).is_some_and(|e| e.live(token)) { return; }
+        let mut deadline = None;
         let completion = self.task_mut(token.slot).and_then(|t| {
             let round = t.raw_wake_round.take()?;
+            deadline = t.raw_deadline_start.take();
             Some(t.raw_wake.finish(token, round, end))
         });
+        if let Some(start) = deadline {
+            self.deadline_to_resume.record(&kernel_core::raw_timing::Sample {
+                path: 6, slot: token.slot, generation: token.generation, wait_round: 0,
+                start, end,
+            });
+        }
         match completion {
             Some(Some(mut sample)) => {
                 sample.path = path;

@@ -117,7 +117,7 @@ fn take_local_inbox(cpu: usize) -> LocalInbox {
 }
 type TickGuard = kernel_core::ticket::TicketGuard<'static, kernel_core::tick_lease::TickLease>;
 struct StateGuard(crate::sync::IrqSpinLockGuard<'static, Scheduler>,
-    [Option<TickGuard>; kernel_core::smp::MAX_CPUS]);
+    [Option<TickGuard>; kernel_core::smp::MAX_CPUS], bool);
 impl core::ops::Deref for StateGuard {
     type Target = Scheduler;
     fn deref(&self) -> &Self::Target { &self.0 }
@@ -127,7 +127,11 @@ impl core::ops::DerefMut for StateGuard {
 }
 impl Drop for StateGuard {
     fn drop(&mut self) {
-        self.0.refresh_ns_events();
+        // with_mut_from refreshes before extracting kicks. Repeating the full
+        // task-table scan here doubled every mutating high-resolution timer
+        // transaction and amplified multi-CPU wake contention. Direct guards
+        // still refresh on drop.
+        if !self.2 { self.0.refresh_ns_events(); }
         self.0.program_ns_local();
         let allow = self.0.fast_yield_cpus();
         for (c, gate) in YIELD_GATES.iter().enumerate() { gate.publish(allow.contains(c)); }
@@ -226,7 +230,7 @@ fn lock_state_from(_origin: Origin) -> StateGuard {
     for token in inbox.wakes.into_iter().flatten() { s.consume_wake_token(token); }
     for message in inbox.pi.into_iter().flatten() { s.consume_pi_message(local_cpu, message); }
     if crate::hrtime::enabled(){s.settle_highres(crate::hrtime::now().expect("high-res monotonic clock"));}
-    StateGuard(s, leaves)
+    StateGuard(s, leaves, false)
 }
 
 /// 以共享借用访问调度器（持锁、关中断执行：时钟中断与其他处理器也会访问调度器状态）。
@@ -257,6 +261,7 @@ fn with_mut_from<R>(origin: Origin, f: impl FnOnce(&mut Scheduler) -> R) -> R {
             });
         }
         s.refresh_ns_events();
+        s.2 = true;
         (r, s.take_kicks())
     };
     // Observed with_mut interval: includes global-lock waiting, leaf drain, callback,
@@ -427,6 +432,10 @@ extern "C" fn task_trampoline() -> ! {
 /// 安装切换观察者（例如串口日志）。
 pub fn set_observer(observer: SwitchObserver) {
     with_mut(|s| s.set_observer(observer));
+}
+
+pub fn clear_observer() {
+    with_mut(Scheduler::clear_observer);
 }
 
 /// 启动期扩容：任务槽位扩到 `slots`（启动期容量），并为新增槽位预留内核栈。
@@ -1101,12 +1110,19 @@ pub fn reset_raw_wakes() {
     s.raw_pending_at_reset = s.raw_pending_count();
     s.raw_wakes = kernel_core::raw_timing::Samples::new();
     s.wake_latency = kernel_core::raw_timing::NanoHistogram::new();
+    s.deadline_to_runnable = kernel_core::raw_timing::NanoHistogram::new();
+    s.deadline_to_resume = kernel_core::raw_timing::NanoHistogram::new();
     s.raw_wake_errors = [0; 3];
 }
 #[cfg(feature = "krn2-observe")]
 pub fn raw_wake_snapshot() -> (kernel_core::raw_timing::Samples<64>, kernel_core::raw_timing::NanoSummary, [u64; 3], usize, usize) {
     let s = lock_state();
     (s.raw_wakes, s.wake_latency.summary(), s.raw_wake_errors, s.raw_pending_at_reset, s.raw_pending_count())
+}
+#[cfg(feature = "krn2-observe")]
+pub fn raw_deadline_snapshot() -> (kernel_core::raw_timing::NanoSummary, kernel_core::raw_timing::NanoSummary) {
+    let s = lock_state();
+    (s.deadline_to_runnable.summary(), s.deadline_to_resume.summary())
 }
 
 /// Diagnostic counters are copied under the existing scheduler guard.

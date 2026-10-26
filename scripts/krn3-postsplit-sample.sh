@@ -43,8 +43,8 @@ for n in "$@"; do
     result=$?
     set -e
     echo "$result" > "$out/exit-$n.txt"
-    [[ "$result" == 33 || "$result" == 37 ]]
-    grep -aEq '^\[JSR-KRN3-POSTSPLIT\] done failed=0 timing_failed=[0-9]+' "$out/serial-$n.log"
+    [[ "$result" == 33 ]]
+    grep -aEq '^\[JSR-KRN3-POSTSPLIT\] done failed=0 timing_failed=0' "$out/serial-$n.log"
     grep -aEq '^\[JSR-SCALE\] summary .*reclaimed=true .*failed=0' "$out/serial-$n.log"
     grep -aEq '^\[JSR-SYNC-WORK\].*bounded=true' "$out/serial-$n.log"
     grep -aEq '^\[JSR-RAW-WAKE\] samples=[1-9][0-9]* .*valid=true .*endpoint=resume-hook' "$out/serial-$n.log"

@@ -84,6 +84,14 @@ const CHURN_ROUNDS: u32 = 2000;
 
 /// 吃满处理器的任务的截止时刻。
 static HOG_END: IrqU64 = IrqU64::new(0);
+/// 负载参与者已经真正获得过处理器、到达起跑屏障的数量。
+static LOAD_READY: AtomicU32 = AtomicU32::new(0);
+/// 起跑屏障：统计清零并发布窗口截止时刻后才允许负载开始。
+static LOAD_GO: AtomicU32 = AtomicU32::new(0);
+/// 本轮屏障参与者数量、测量窗口和是否清零交互延迟。
+static LOAD_TARGET: AtomicU32 = AtomicU32::new(0);
+static LOAD_WINDOW: AtomicU32 = AtomicU32::new(0);
+static LOAD_RESET_LATENCY: AtomicU32 = AtomicU32::new(0);
 /// 睡眠任务的唤醒时刻。
 static SLEEP_END: IrqU64 = IrqU64::new(0);
 /// 已进入睡眠的睡眠任务数。
@@ -96,14 +104,19 @@ static INTERACTIVE_DONE: AtomicU32 = AtomicU32::new(0);
 #[cfg(feature = "krn3-p999-verify")]
 static P999_DONE: AtomicU32 = AtomicU32::new(0);
 #[cfg(feature = "krn3-p999-verify")]
-const P999_ROUNDS: u32 = 160;
+const P999_ROUNDS: u32 = 2_048;
 #[cfg(feature = "krn3-p999-verify")]
-const P999_ISOLATED_ROUNDS: u32 = 1_200;
+const P999_ISOLATED_ROUNDS: u32 = 10_000;
+
+#[cfg(feature = "krn3-p999-verify")]
+const P999_INTERVAL_NS: u64 = 1_000_000;
 
 #[cfg(feature = "krn3-p999-verify")]
 fn p999_sleeper() {
     for _ in 0..P999_ROUNDS {
-        sched::sleep_ticks(1);
+        let deadline = crate::hrtime::now().expect("p99.9 shared clock")
+            .checked_add(P999_INTERVAL_NS).expect("p99.9 deadline overflow");
+        sched::sleep_until_ns(deadline).expect("p99.9 high-resolution sleep");
     }
     P999_DONE.fetch_add(1, Ordering::Release);
 }
@@ -111,7 +124,9 @@ fn p999_sleeper() {
 #[cfg(feature = "krn3-p999-verify")]
 fn p999_isolated_sleeper() {
     for _ in 0..P999_ISOLATED_ROUNDS {
-        sched::sleep_ticks(1);
+        let deadline = crate::hrtime::now().expect("p99.9 shared clock")
+            .checked_add(P999_INTERVAL_NS).expect("p99.9 deadline overflow");
+        sched::sleep_until_ns(deadline).expect("p99.9 high-resolution sleep");
     }
     P999_DONE.fetch_add(1, Ordering::Release);
 }
@@ -122,6 +137,10 @@ fn p999_isolated_sleeper() {
 /// remain a reported performance result rather than a correctness gate.
 #[cfg(feature = "krn3-p999-verify")]
 pub fn run_wake_latency_contract() -> u32 {
+    // Earlier boot demonstrations install a synchronous serial observer. It is
+    // unrelated to the latency endpoint and would add two serial writes to
+    // every sleep/wake round, so remove it before taking any sample.
+    sched::clear_observer();
     FAILED.store(0, Ordering::Relaxed);
     TIMING_FAILED.store(0, Ordering::Relaxed);
     P999_DONE.store(0, Ordering::Relaxed);
@@ -144,6 +163,7 @@ pub fn run_wake_latency_contract() -> u32 {
     if isolated_spawned { sched::run(); }
     let (isolated_raw, isolated, isolated_errors, isolated_carried, isolated_pending) =
         sched::raw_wake_snapshot();
+    let (isolated_due, isolated_total) = sched::raw_deadline_snapshot();
     let isolated_complete = isolated.count == u64::from(P999_ISOLATED_ROUNDS)
         && isolated.invalid == 0 && isolated_errors == [0; 3]
         && isolated_carried == 0 && isolated_pending == 0;
@@ -154,6 +174,10 @@ pub fn run_wake_latency_contract() -> u32 {
         isolated.count, P999_ISOLATED_ROUNDS, isolated.invalid, isolated.p50_us,
         isolated.p99_us, isolated.p999_us, isolated.max_ns, isolated_complete,
         isolated_raw.entries().len(), isolated_raw.dropped());
+    kprintln!("[JSR-WAKE-PHASE] mode=isolated deadline_to_runnable={}/{}/{}/{}us deadline_to_resume={}/{}/{}/{}us samples={}/{}",
+        isolated_due.p50_us, isolated_due.p99_us, isolated_due.p999_us, isolated_due.max_ns.div_ceil(1_000),
+        isolated_total.p50_us, isolated_total.p99_us, isolated_total.p999_us, isolated_total.max_ns.div_ceil(1_000),
+        isolated_due.count, isolated_total.count);
 
     // Then measure a seven-way same-tick fanout separately.
     P999_DONE.store(0, Ordering::Relaxed);
@@ -175,6 +199,7 @@ pub fn run_wake_latency_contract() -> u32 {
     check(spawned && workers == 7, "必须创建七个AP固定唤醒工作任务");
     if spawned { sched::run(); }
     let (raw, latency, errors, carried, pending) = sched::raw_wake_snapshot();
+    let (due, total) = sched::raw_deadline_snapshot();
     let expected = workers as u64 * u64::from(P999_ROUNDS);
     let complete = latency.count == expected && latency.invalid == 0
         && errors == [0; 3] && carried == 0 && pending == 0;
@@ -186,6 +211,9 @@ pub fn run_wake_latency_contract() -> u32 {
     kprintln!("[JSR-WAKE-LATENCY] mode=fanout-7 samples={} expected={} invalid={} p50_us={} p99_us={} p999_us={} max_ns={} complete={} raw_retained={} raw_dropped={} endpoint=resume-hook clock=shared-ns-serialized platform_sync=assumed",
         latency.count, expected, latency.invalid, latency.p50_us, latency.p99_us,
         latency.p999_us, latency.max_ns, complete, raw.entries().len(), raw.dropped());
+    kprintln!("[JSR-WAKE-PHASE] mode=fanout-7 deadline_to_runnable={}/{}/{}/{}us deadline_to_resume={}/{}/{}/{}us samples={}/{}",
+        due.p50_us, due.p99_us, due.p999_us, due.max_ns.div_ceil(1_000),
+        total.p50_us, total.p99_us, total.p999_us, total.max_ns.div_ceil(1_000), due.count, total.count);
     kprintln!("[JSR-KRN3-P999] done failed={} workers={} rounds={} resources={} lists={}",
         failed(), workers, P999_ROUNDS, baseline() == saved, lists_consistent());
     failed()
@@ -200,10 +228,19 @@ fn sleeper() {
 
 /// 工具档、吃满处理器直到 [`HOG_END`]。
 fn hog() {
-    let _ = sched::set_current_qos(Qos::Utility);
     while sched::timer_ticks() < HOG_END.load(Ordering::Relaxed) {
         core::hint::spin_loop();
     }
+}
+
+/// 在统计窗口外完成首次调度，再进入真正的吃满处理器循环。
+fn aligned_hog() {
+    let _ = sched::set_current_qos(Qos::Utility);
+    arrive_load();
+    while LOAD_GO.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    hog();
 }
 
 /// 交互档：反复睡 1 tick，共 [`ROUNDS`] 次。
@@ -212,9 +249,26 @@ fn interactive() {
     if sched::set_current_qos(Qos::Interactive).is_err() {
         return;
     }
+    interactive_rounds();
+}
+
+fn interactive_rounds() {
     for _ in 0..ROUNDS {
         sched::sleep_ticks(1);
         INTERACTIVE_DONE.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// 与吃满处理器任务使用同一起跑屏障，避免启动延迟吞掉交互窗口。
+fn aligned_interactive() {
+    sched::set_current_qos_ceiling(Some(Qos::Interactive));
+    let configured = sched::set_current_qos(Qos::Interactive).is_ok();
+    arrive_load();
+    while LOAD_GO.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    if configured {
+        interactive_rounds();
     }
 }
 
@@ -544,6 +598,50 @@ fn cores_busy(n: usize, window: u64) -> (bool, u64, u32) {
     (all, least, worst)
 }
 
+/// 准备并等待全部负载参与者真正运行到起跑屏障。
+fn prepare_load(target: usize, window: u64, reset_latency: bool) {
+    LOAD_READY.store(0, Ordering::Relaxed);
+    LOAD_GO.store(0, Ordering::Relaxed);
+    LOAD_TARGET.store(target as u32, Ordering::Relaxed);
+    LOAD_WINDOW.store(window as u32, Ordering::Relaxed);
+    LOAD_RESET_LATENCY.store(u32::from(reset_latency), Ordering::Relaxed);
+}
+
+/// 最后一个到达者建立窗口并放行所有参与者；不依赖可能已被负载挤下的引导任务。
+fn arrive_load() {
+    let ready = LOAD_READY.fetch_add(1, Ordering::AcqRel) + 1;
+    if ready == LOAD_TARGET.load(Ordering::Acquire) {
+        start_load(
+            u64::from(LOAD_WINDOW.load(Ordering::Relaxed)),
+            LOAD_RESET_LATENCY.load(Ordering::Relaxed) != 0,
+        );
+    }
+}
+
+fn align_load(target: usize) -> bool {
+    let give_up = sched::timer_ticks().saturating_add(256);
+    while LOAD_GO.load(Ordering::Acquire) == 0
+        && sched::timer_ticks() < give_up
+    {
+        sched::sleep_ticks(1);
+    }
+    LOAD_GO.load(Ordering::Acquire) != 0
+        && LOAD_READY.load(Ordering::Acquire) as usize == target
+}
+
+/// 原子地建立测量起点：先清统计、再发布截止时刻，最后放行参与者。
+fn start_load(window: u64, reset_latency: bool) {
+    quiet(|| {
+        sched::reset_cpu_stats();
+        sched::reset_scan_stats();
+        if reset_latency {
+            sched::reset_latency();
+        }
+        HOG_END.store(sched::timer_ticks().saturating_add(window), Ordering::Relaxed);
+        LOAD_GO.store(1, Ordering::Release);
+    });
+}
+
 /// 睡眠任务数：凑满 [`TARGET_TASKS`]，但给吃满处理器的任务、交互任务与其他演练的余量留出槽位。
 fn sleeper_count(n: usize) -> usize {
     let free = sched::capacity().saturating_sub(1 + sched::live_workers());
@@ -565,6 +663,15 @@ fn spawn_sleepers(base: u64, count: usize, until: u64, all: CpuSet) -> bool {
     // 计数先于真正睡下：再等一个 tick，确保最后一个也已离开运行列表
     sched::sleep_until(sched::timer_ticks() + 1);
     ok && ASLEEP.load(Ordering::Relaxed) as usize == count
+}
+
+
+/// 测量结束后显式回收睡眠任务；它们的有限远期 deadline 只用于验证到期堆登记，
+/// 不再承担夹具清理职责，因此 TCG 串行启动再慢也不会污染测量窗口。
+fn wake_sleepers(base: u64, count: usize) {
+    for i in 0..count {
+        sched::wake(TaskId(base + i as u64));
+    }
 }
 
 /// 运行全部用例；演练期间保持抢占开启，结束时恢复进入前的设置。
@@ -646,15 +753,24 @@ fn scale(n: usize) {
     let sleepers = sleeper_count(n);
     let hogs = 2 * n;
     let t0 = sched::timer_ticks();
-    let slept = spawn_sleepers(TASK_ID_BASE + 100, sleepers, t0 + WINDOW + 30, all);
+    let slept = spawn_sleepers(
+        TASK_ID_BASE + 100,
+        sleepers,
+        t0.saturating_add(WINDOW).saturating_add(4096),
+        all,
+    );
     check(slept, "睡眠任务创建失败或没有全部睡下");
+    prepare_load(hogs, WINDOW, false);
     let ok = quiet(|| {
-        sched::reset_cpu_stats();
-        sched::reset_scan_stats();
-        HOG_END.store(sched::timer_ticks() + WINDOW, Ordering::Relaxed);
-        (0..hogs).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 10 + i as u64), "scale-hog", hog, None, all).is_ok())
+        (0..hogs).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 10 + i as u64), "scale-hog", aligned_hog, None, all).is_ok())
     });
     check(ok, "吃满处理器的任务创建失败");
+    let aligned = ok && align_load(hogs);
+    check(aligned, "全部吃满处理器任务必须在开窗前到达起跑屏障");
+    if !aligned {
+        HOG_END.store(sched::timer_ticks(), Ordering::Relaxed);
+        LOAD_GO.store(1, Ordering::Release);
+    }
     // 窗口内只等吃满处理器的任务结束（睡眠任务在窗口之后才醒）
     while sched::timer_ticks() < HOG_END.load(Ordering::Relaxed) {
         sched::sleep_until(HOG_END.load(Ordering::Relaxed));
@@ -667,6 +783,7 @@ fn scale(n: usize) {
     let still_asleep = (ASLEEP.load(Ordering::Relaxed) as usize).saturating_sub(AWAKE.load(Ordering::Relaxed) as usize);
     let premise_held = still_asleep == sleepers;
     let expired = sleepers.saturating_sub(still_asleep);
+    wake_sleepers(TASK_ID_BASE + 100, sleepers);
     sched::run();
     let bound = (hogs + 1) as u32;
     let visit_ok = scan.max_visited <= bound;
@@ -712,22 +829,32 @@ fn overload(n: usize) {
     let hogs = 2 * n;
     let window = 2 * WINDOW;
     let t0 = sched::timer_ticks();
-    let slept = spawn_sleepers(TASK_ID_BASE + 300, sleepers, t0 + window + 30, all);
+    let slept = spawn_sleepers(
+        TASK_ID_BASE + 300,
+        sleepers,
+        t0.saturating_add(window).saturating_add(4096),
+        all,
+    );
     check(slept, "睡眠任务创建失败或没有全部睡下");
+    prepare_load(hogs + 1, window, true);
     let ok = quiet(|| {
-        sched::reset_cpu_stats();
-        sched::reset_latency();
         INTERACTIVE_DONE.store(0, Ordering::Relaxed);
-        HOG_END.store(sched::timer_ticks() + window, Ordering::Relaxed);
-        let mut ok = (0..hogs).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 40 + i as u64), "scale-load", hog, None, all).is_ok());
-        ok &= sched::spawn_on(TaskId(TASK_ID_BASE + 39), "scale-ui", interactive, None, all).is_ok();
+        let mut ok = (0..hogs).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 40 + i as u64), "scale-load", aligned_hog, None, all).is_ok());
+        ok &= sched::spawn_on(TaskId(TASK_ID_BASE + 39), "scale-ui", aligned_interactive, None, all).is_ok();
         ok
     });
     check(ok, "过载用例任务创建失败");
+    let aligned = ok && align_load(hogs + 1);
+    check(aligned, "全部过载参与者必须在开窗前到达起跑屏障");
+    if !aligned {
+        HOG_END.store(sched::timer_ticks(), Ordering::Relaxed);
+        LOAD_GO.store(1, Ordering::Release);
+    }
     while sched::timer_ticks() < HOG_END.load(Ordering::Relaxed) {
         sched::sleep_until(HOG_END.load(Ordering::Relaxed));
     }
     let (busy, least, worst) = cores_busy(n, window);
+    wake_sleepers(TASK_ID_BASE + 300, sleepers);
     sched::run();
     let lat = sched::latency(Qos::Interactive);
     let done = INTERACTIVE_DONE.load(Ordering::Relaxed);
