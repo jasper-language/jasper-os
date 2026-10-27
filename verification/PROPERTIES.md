@@ -62,6 +62,14 @@
 | S2-ARM-01 | 同一真实机制库及集成契约在ARM用户态三轮全部通过 | `kernel-core`; `scripts/s2-pda.sh` | ARM宿主测试 | tested | `bash scripts/s2-pda.sh` | 405项×3轮，8线程；Android用户态musl，不是Jasper原生启动证明 |
 
 
+## issue #1 系统调用能力集合与 spawn 授权
+
+| ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |
+|---|---|---|---|---|---|---|
+| SYS-ABI-01 | 256 位能力集合的成员判定与位图一致；ID 63/64/127/255 可见且互不串位；ID≥256 显式拒绝；32 字节序列化往返不变 | `kernel_core::syscall_set::SyscallSet` | 属性测试（固定种子 512 轮 + 边界/穷举） | tested | `cargo test -p kernel-core syscall_set` | 不证明编译后的机器码；32 位目标已编译但未在 32 位宿主运行全部用例 |
+| SYS-ABI-02 | spawn 通过 ⇔ 请求集合同时是调用者集合与登记集合的子集；头部/保留字段/映像/CPU 上限在改动状态前拒绝 | `kernel_core::spawn_abi::{SpawnDesc,check}` | 穷举 + 边界/恶意参数测试 | tested | `cargo test -p kernel-core spawn_` | 只覆盖无状态准入规则；配额、帧分配与 ELF 装载由内核集成路径另行验证 |
+| SYS-ABI-03 | 分发表实现集合与 `abi/system-ids.txt` 生成的登记集合完全相等 | `kernel::syscall::{IMPLEMENTED,execute,self_check}`; `kernel/build.rs`; `kernel::syscall::table::{REGISTERED_OPS,REGISTERED_OPS_SET}` | 编译期集合断言 + 启动自检 | tested | `cargo build --release --target x86_64-unknown-none -p jasper-kernel`（编译期断言）；QEMU 日志 `[JSR-SYSCALL] self_check ops=55 handlers=all` | 断言针对生成代码的常量；不证明登记表文本本身符合安全策略，也不替代每项系统调用的功能测试 |
+
 ## FV-1 真实代码有界验证（V2）
 
 机器可读逐性质规格、工具/版本、输入位宽、容量/步数、TCB、复现和最新记录统一登记于`verification/FV1.toml`。12项Kani harness实际通过，0失败，无assume/stub；不是测试结果的改名。

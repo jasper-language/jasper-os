@@ -8,6 +8,7 @@
 //! * 全有或全无：失败时不留下子进程、句柄或配额占用
 
 use kernel_core::spawn_abi::{SpawnDesc, CPU_UNLIMITED};
+use kernel_core::syscall_set::SyscallSet;
 
 use crate::channel::Channel;
 use crate::error::{check, Result};
@@ -45,9 +46,14 @@ pub struct Child {
     pub channel: Channel,
 }
 
-/// 把调用 ID 列表转为位集合（ID ≥ 64 不可能被授予，按参数非法处理）。
-fn mask(calls: &[u64]) -> Option<u64> {
-    calls.iter().try_fold(0u64, |m, &id| (id < 64).then(|| m | 1 << id))
+/// 把调用 ID 列表转为有界集合；超出当前 ABI 容量（256 位）时明确拒绝，不静默截断。
+fn mask(calls: &[u64]) -> Option<SyscallSet> {
+    let mut set = SyscallSet::EMPTY;
+    for &id in calls {
+        let id = u32::try_from(id).ok()?;
+        set = set.union(SyscallSet::from_id(id)?);
+    }
+    Some(set)
 }
 
 /// 创建子进程（见模块文档）。
@@ -65,7 +71,7 @@ pub fn spawn(spec: Spec<'_>) -> Result<Child> {
     let mut b = d.encode();
     // SAFETY：参数块与映像在调用期间有效；内核在返回前读完映像并写回输出字段。
     check(unsafe { sys::call3(ids::SYSTEM_PROCESS_SPAWN, b.as_mut_ptr() as u64, 0, 0) })?;
-    let out = SpawnDesc::decode(&b);
+    let out = SpawnDesc::decode(&b).map_err(|_| crate::Error::INVALID_ARGUMENT)?;
     // SAFETY：内核刚放入本进程句柄表的两个新句柄。
     Ok(unsafe { Child { process: Handle::from_raw(out.out_process), channel: Channel::from_handle(Handle::from_raw(out.out_channel)) } })
 }

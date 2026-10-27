@@ -24,6 +24,8 @@
 //! * [`async_ring`] —— 异步环的请求状态机：请求 ID、完成信用、终态裁决与事件依赖、取消、历史窗口、closing
 //! * [`ring_abi`] —— 异步环的用户态二进制布局（提交记录、完成记录、enter 参数块）
 //! * [`memory`] —— 虚拟内存区域与地址空间记账（真实页表在内核的 `arch/` 与后续 M2.x）
+//! * [`spawn_abi`] —— `system.process.spawn` 参数块 v2 与无状态准入规则
+//! * [`syscall_set`] —— 有界系统调用能力集合（256 位位图，ID 越界显式拒绝）
 //! * [`module`] —— 编译期模块描述符 + 依赖检查 + 顺序装载/逆序卸载
 //! * [`trap`]   —— 陷入帧与「名字 → 处理函数」的系统调用分发表
 //! * [`sched`]  —— 调度策略：QoS 四档 + 用量衰减 + 各档最低份额 + 唤醒延迟直方图（宿主可模拟测试）
@@ -99,6 +101,7 @@ pub mod sched;
 pub mod shard;
 pub mod smp;
 pub mod spawn_abi;
+pub mod syscall_set;
 pub mod module;
 pub mod object;
 pub mod objtable;

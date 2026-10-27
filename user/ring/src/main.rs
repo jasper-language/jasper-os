@@ -588,9 +588,10 @@ fn public_process_spawn_event(ring:i64) {
  image[24..32].copy_from_slice(&address.to_le_bytes());image[32..40].copy_from_slice(&64u64.to_le_bytes());image[52..54].copy_from_slice(&64u16.to_le_bytes());image[54..56].copy_from_slice(&56u16.to_le_bytes());image[56..58].copy_from_slice(&1u16.to_le_bytes());
  image[64..68].copy_from_slice(&1u32.to_le_bytes());image[68..72].copy_from_slice(&5u32.to_le_bytes());image[72..80].copy_from_slice(&4096u64.to_le_bytes());image[80..88].copy_from_slice(&address.to_le_bytes());image[96..104].copy_from_slice(&26u64.to_le_bytes());image[104..112].copy_from_slice(&26u64.to_le_bytes());image[112..120].copy_from_slice(&4096u64.to_le_bytes());
  let code=&mut image[4096..];code[0]=0xb8;code[1..5].copy_from_slice(&(ids::SYSTEM_TIME_WAIT as u32).to_le_bytes());code[5]=0xbf;code[6..10].copy_from_slice(&3u32.to_le_bytes());code[10..12].copy_from_slice(&[0x0f,0x05]);code[12]=0xb8;code[13..17].copy_from_slice(&(ids::SYSTEM_TASK_EXIT as u32).to_le_bytes());code[17]=0xbf;code[18..22].copy_from_slice(&51u32.to_le_bytes());code[22..26].copy_from_slice(&[0x0f,0x05,0x0f,0x0b]);
- let desc=kernel_core::spawn_abi::SpawnDesc {image_ptr:image.as_ptr() as u64,image_len:image.len() as u64,calls:(1u64<<ids::SYSTEM_TASK_EXIT)|(1u64<<ids::SYSTEM_TIME_WAIT),arg:0,cpu_limit_permille:kernel_core::spawn_abi::CPU_UNLIMITED,..Default::default()};let mut raw=desc.encode();
+ let calls=kernel_core::syscall_set::SyscallSet::of(&[ids::SYSTEM_TASK_EXIT as u32,ids::SYSTEM_TIME_WAIT as u32]);
+ let desc=kernel_core::spawn_abi::SpawnDesc {image_ptr:image.as_ptr() as u64,image_len:image.len() as u64,calls,arg:0,cpu_limit_permille:kernel_core::spawn_abi::CPU_UNLIMITED,..Default::default()};let mut raw=desc.encode();
  check(unsafe {syscall2(ids::SYSTEM_PROCESS_SPAWN,raw.as_mut_ptr() as u64,0)}==0,94);
- let output=kernel_core::spawn_abi::SpawnDesc::decode(&raw);observe_spawned_exit(ring,output.out_process,0,51);
+ let output=kernel_core::spawn_abi::SpawnDesc::decode(&raw).expect("spawn descriptor header");observe_spawned_exit(ring,output.out_process,0,51);
  for handle in [output.out_process,output.out_channel] {check(unsafe {syscall2(ids::SYSTEM_HANDLE_CLOSE,handle,0)}==0,95);}
 }
 
