@@ -128,6 +128,17 @@
 | ABI 声明与实现映射一致 | 已满足：生成常量 + 编译期断言 + 启动自检 | `REGISTERED_OPS_SET` / `self_check` |
 | 性能基准无意外回退并记录原始数据 | **未在本切片完成**：热路径仍为固定次数位运算；完整基准留给集成轮 | 见第六节第 4 项 |
 
+六步验证链（同一源码哈希一次跑完，脚本 `verification/toolbox/run-issue1-syscall-set-suite.sh`）：
+
+| 步 | 工具 | 结果 |
+|---|---|---|
+| ① | Verus/Z3 | 正例 37 verified / 0 errors；负例（只比较第一个字，即旧 `u64` 缺陷）按预期失败 |
+| ② | Proptest | 3 个性质对照 `BTreeSet` 参考模型全部通过 |
+| ③ | Miri | kernel-core 13 项 + 多级 spawn 固定链 1 项，无未定义行为 |
+| ④ | cargo-fuzz | `spawn_desc` 目标 200000 次无崩溃 |
+| ⑤ | Kani | 7 个生产代码 harness 全部 VERIFICATION SUCCESSFUL |
+| ⑥ | Loom | N/A：集合是无共享状态的值类型、准入为纯函数；以 QEMU 真实 spawn 断言替代 |
+
 定点验收结果（x86_64，单处理器）：
 
 * `cargo test -p kernel-core`：`483 passed; 0 failed`（另有集成/文档测试全部通过）；

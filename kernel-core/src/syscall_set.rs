@@ -212,6 +212,81 @@ impl core::fmt::Debug for SyscallSet {
     }
 }
 
+#[cfg(kani)]
+mod proofs {
+    //! 生产 `SyscallSet` 的实现级有界证明：位图字取任意值，ID 取整个 `u32`/`u64` 范围。
+    //! Implementation-level Kani proofs over arbitrary words and ids.
+    use super::*;
+
+    fn any_set() -> SyscallSet {
+        SyscallSet::from_words(kani::any())
+    }
+
+    #[kani::proof]
+    #[kani::unwind(9)]
+    fn contains_matches_word_bit_for_every_id() {
+        let s = any_set();
+        let id: u64 = kani::any();
+        let expect = id < MAX_IDS as u64 && (s.words()[(id / 64) as usize % WORDS] >> (id % 64)) & 1 == 1;
+        assert_eq!(s.contains(id), expect);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(9)]
+    fn from_id_is_exact_singleton_or_explicit_none() {
+        let id: u32 = kani::any();
+        let probe: u64 = kani::any();
+        match SyscallSet::from_id(id) {
+            None => assert!(id as usize >= MAX_IDS),
+            Some(one) => {
+                assert!((id as usize) < MAX_IDS);
+                assert_eq!(one.count(), 1);
+                assert_eq!(one.contains(probe), probe == id as u64);
+            }
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(9)]
+    fn set_algebra_is_pointwise() {
+        let a = any_set();
+        let b = any_set();
+        let id: u64 = kani::any();
+        assert_eq!(a.union(b).contains(id), a.contains(id) || b.contains(id));
+        assert_eq!(a.intersection(b).contains(id), a.contains(id) && b.contains(id));
+        assert_eq!(a.difference(b).contains(id), a.contains(id) && !b.contains(id));
+        // 撤权不可提升：差集永远是原集合的子集。
+        assert!(a.difference(b).is_subset_of(a));
+    }
+
+    #[kani::proof]
+    #[kani::unwind(9)]
+    fn subset_is_sound_and_complete() {
+        let a = any_set();
+        let b = any_set();
+        let id: u64 = kani::any();
+        // 完备：不是子集 ⇔ 差集非空（差集逐位语义已由上一个 harness 证明）。
+        assert_eq!(a.is_subset_of(b), a.difference(b).is_empty());
+        // 可靠：子集 ⇒ 任意 ID 的授权都被保留。
+        if a.is_subset_of(b) && a.contains(id) {
+            assert!(b.contains(id));
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(33)]
+    fn encode_decode_roundtrip() {
+        let s = any_set();
+        let mut buf = [0u8; BYTES];
+        s.encode(&mut buf);
+        assert_eq!(SyscallSet::decode(&buf), s);
+        let raw: [u8; BYTES] = kani::any();
+        let mut again = [0u8; BYTES];
+        SyscallSet::decode(&raw).encode(&mut again);
+        assert_eq!(again, raw);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

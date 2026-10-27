@@ -99,3 +99,10 @@ path = "fuzz_targets/task_hot.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "spawn_desc"
+path = "fuzz_targets/spawn_desc.rs"
+test = false
+doc = false
+bench = false

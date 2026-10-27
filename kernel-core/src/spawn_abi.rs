@@ -228,6 +228,66 @@ pub fn check(d: &SpawnDesc, caller: SyscallSet, known: SyscallSet) -> Result<(),
     Ok(())
 }
 
+#[cfg(kani)]
+mod proofs {
+    //! 生产 `SpawnDesc::decode` / `check` 的实现级有界证明：88 字节输入与三个集合均取任意值。
+    //! Implementation-level Kani proofs of spawn decoding and admission.
+    use super::*;
+
+    #[kani::proof]
+    #[kani::unwind(89)]
+    fn decode_accepts_only_v2_header_and_roundtrips() {
+        let raw: [u8; SPAWN_DESC_SIZE] = kani::any();
+        if let Ok(d) = SpawnDesc::decode(&raw) {
+            assert_eq!(d.magic, SPAWN_DESC_MAGIC);
+            assert_eq!(d.version, SPAWN_DESC_VERSION);
+            assert_eq!(d.size as usize, SPAWN_DESC_SIZE);
+            assert_eq!(d.encode(), raw);
+        } else {
+            let magic = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+            let version = u16::from_le_bytes([raw[4], raw[5]]);
+            let size = u16::from_le_bytes([raw[6], raw[7]]);
+            assert!(magic != SPAWN_DESC_MAGIC || version != SPAWN_DESC_VERSION || size as usize != SPAWN_DESC_SIZE);
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(9)]
+    fn check_ok_iff_all_admission_rules_hold() {
+        let d = SpawnDesc {
+            magic: kani::any(),
+            version: kani::any(),
+            size: kani::any(),
+            image_ptr: kani::any(),
+            image_len: kani::any(),
+            calls: SyscallSet::from_words(kani::any()),
+            arg: kani::any(),
+            cpu_limit_permille: kani::any(),
+            flags: kani::any(),
+            out_process: kani::any(),
+            out_channel: kani::any(),
+        };
+        let caller = SyscallSet::from_words(kani::any());
+        let known = SyscallSet::from_words(kani::any());
+        let rules = d.magic == SPAWN_DESC_MAGIC
+            && d.version == SPAWN_DESC_VERSION
+            && d.size as usize == SPAWN_DESC_SIZE
+            && d.flags == 0
+            && d.image_len != 0
+            && d.image_len <= MAX_IMAGE_BYTES
+            && d.calls.is_subset_of(known)
+            && d.calls.is_subset_of(caller)
+            && (MIN_CPU_LIMIT..=CPU_UNLIMITED).contains(&d.cpu_limit_permille);
+        let result = check(&d, caller, known);
+        assert_eq!(result.is_ok(), rules);
+        // 子进程授权 ⊆ 父进程：任意 ID 被子进程持有 ⇒ 父进程也持有。
+        let id: u64 = kani::any();
+        if result.is_ok() && d.calls.contains(id) {
+            assert!(caller.contains(id) && known.contains(id));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

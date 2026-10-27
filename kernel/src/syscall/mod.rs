@@ -419,11 +419,11 @@ syscall_dispatch! {
         kprintln!("[JSR-SYSCALL] exit name={} id={} code={} action=task_exited", e.name, e.id, code);
         proc::thread_exit(code, "exit")
     },
-    SYSTEM_TASK_YIELD => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+    SYSTEM_TASK_YIELD => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| {
         sched::yield_now();
         0
     },
-    SYSTEM_TIME_NOW => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { sched::timer_ticks() as i64 },
+    SYSTEM_TIME_NOW => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { sched::timer_ticks() as i64 },
     SYSTEM_CONSOLE_WRITE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { console_write(a.args[0], a.args[1]) },
     SYSTEM_TASK_SPAWN => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { task_spawn(a.args[0], a.args[1], a.args[2]) },
     SYSTEM_HANDLE_CLOSE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
@@ -455,7 +455,7 @@ syscall_dispatch! {
     SYSTEM_CHANNEL_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::ipc::sys_create(a.args[0]) },
     SYSTEM_CHANNEL_SEND => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::ipc::sys_send(a.args[0], a.args[1]) },
     SYSTEM_TASK_RT_DEADLINE_SET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::task_control::rt_set_ns(a.args[0]) },
-    SYSTEM_TIME_DEADLINE_GET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+    SYSTEM_TIME_DEADLINE_GET => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| {
         if crate::hrtime::enabled() {
             crate::hrtime::now().and_then(|n| i64::try_from(n).ok()).unwrap_or_else(|| err(SYSTEM_ERROR_INVALID_ARGUMENT))
         } else {
@@ -463,7 +463,7 @@ syscall_dispatch! {
         }
     },
     SYSTEM_TIME_DEADLINE_WAIT => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { time_wait_ns(a.args[0]) },
-    SYSTEM_SYNC_MUTEX_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::user_mutex::sys_create() },
+    SYSTEM_SYNC_MUTEX_CREATE => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { crate::user_mutex::sys_create() },
     SYSTEM_SYNC_MUTEX_ACQUIRE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::user_mutex::sys_lock(a.args[0]) },
     SYSTEM_SYNC_MUTEX_RELEASE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::user_mutex::sys_unlock(a.args[0]) },
     SYSTEM_TASK_RT_SET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::task_control::rt_set(a.args[0]) },
@@ -471,19 +471,19 @@ syscall_dispatch! {
     SYSTEM_TASK_AFFINITY_GET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::task_control::affinity_get(a.args[0]) },
     SYSTEM_EVENT_SOURCE_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::subscription::sys_source(a.args[0]) },
     SYSTEM_EVENT_SUBSCRIPTION_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::subscription::sys_subscribe(a.args[0], a.args[1]) },
-    SYSTEM_EVENT_SUBSCRIPTION_WAIT => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
+    SYSTEM_EVENT_SUBSCRIPTION_WAIT => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
     SYSTEM_CHANNEL_RECV => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::ipc::sys_recv(a.args[0], a.args[1]) },
     SYSTEM_PROCESS_EXIT => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { process_exit(a.args[0]) },
     SYSTEM_TASK_WAIT => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::ring::sys_wait(a.args[0], kernel_core::object::ObjectType::Task) },
     SYSTEM_PROCESS_WAIT => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::ring::sys_wait(a.args[0], kernel_core::object::ObjectType::Process) },
     // ABI-R reserved: no pointer access, allocation, authority change or hardware operation.
-    SYSTEM_MEMORY_BUFFER_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
-    SYSTEM_MEMORY_BUFFER_DESTROY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
-    SYSTEM_EXECUTION_RESTRICTED_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
-    SYSTEM_TASK_INTERRUPT_SEND => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
-    SYSTEM_MEMORY_DMA_MAP => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
-    SYSTEM_IO_SEGMENT_SUBMIT => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
-    SYSTEM_TASK_SYSCALLS_SET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
+    SYSTEM_MEMORY_BUFFER_CREATE => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
+    SYSTEM_MEMORY_BUFFER_DESTROY => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
+    SYSTEM_EXECUTION_RESTRICTED_CREATE => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
+    SYSTEM_TASK_INTERRUPT_SEND => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
+    SYSTEM_MEMORY_DMA_MAP => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
+    SYSTEM_IO_SEGMENT_SUBMIT => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
+    SYSTEM_TASK_SYSCALLS_SET => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
     SYSTEM_MEMORY_OBJECT_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { memory_object_create(a.args[0]) },
     SYSTEM_MEMORY_OBJECT_MAP => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { memory_object_map(a.args[0], a.args[1]) },
     SYSTEM_MEMORY_OBJECT_UNMAP => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { memory_object_unmap(a.args[0], a.args[1]) },
@@ -493,7 +493,7 @@ syscall_dispatch! {
     SYSTEM_TASK_QOS_SET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { task_qos_set(a.args[0]) },
     SYSTEM_PROCESS_SPAWN => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::proc::spawn::sys_spawn(a.args[0]) },
     // 系统调用只能返回标量：`list` 返回内建 Profile 的数量，具体描述用 `get` 按下标取。
-    SYSTEM_PROFILE_LIST => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { profile::count() as i64 },
+    SYSTEM_PROFILE_LIST => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { profile::count() as i64 },
     SYSTEM_PROFILE_GET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { profile_get(a.args[0], a.args[1], a.args[2]) },
     SYSTEM_DEVICE_LIST => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { device_list(a.args[0], a.args[1], a.args[2]) },
     SYSTEM_DEVICE_OPEN => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { device_open(a.args[0], a.args[1]) },
@@ -502,7 +502,7 @@ syscall_dispatch! {
     SYSTEM_DEVICE_CAPABILITY_LIST => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { device_capability_list(a.args[0], a.args[1], a.args[2]) },
     SYSTEM_DEVICE_INTERRUPT_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::interrupt::sys_bind(a.args[0], a.args[1], a.args[2]) },
     // 等待中断只有异步形式：结果作为完成记录交付，同步调用没有可以阻塞的语义
-    SYSTEM_DEVICE_INTERRUPT_WAIT => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ASYNC_ERROR_RING_ONLY) },
+    SYSTEM_DEVICE_INTERRUPT_WAIT => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ASYNC_ERROR_RING_ONLY) },
 }
 
 // 编译期证明：分发表在登记表之内，且两者基数相同 ⇒ 两个集合完全相等。
