@@ -2,7 +2,7 @@
 //! * 随机合格输入构建 → 读取往返一致，由文件还原再写出逐字节相同；
 //! * 对合格文件做任意改写并回填长度与摘要，读取只给出 Ok 或静态错误码，从不 panic；
 //! * 版本区间与参考求值一致；依赖列表切分与生成时的结构一致。
-//! `seed_fuzz_corpus` 把几份合格文件写进 cargo-fuzz 语料目录（内容确定，可重复执行）。
+//! `seed_fuzz_corpus` 把几份合格文件写进入库的 cargo-fuzz 种子目录 `fuzz/seeds/jaso_parse`（内容确定，可重复执行）。
 use jaso::build::{Builder, ExtensionIn, PlatformIn, SegmentIn};
 use jaso::{Arch, Jaso, Manifest, ModuleKind, Stage, VersionRange, DIGEST_OFFSET, FLAG_R, FLAG_W, FLAG_X, PAGE};
 use proptest::prelude::*;
@@ -120,7 +120,7 @@ fn managed_roundtrip() {
 
 #[test]
 fn seed_fuzz_corpus() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/corpus/jaso_parse");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/seeds/jaso_parse");
     std::fs::create_dir_all(&dir).unwrap();
     let mut b = Builder::native(Arch::X86_64, Stage::Runtime, manifest(&["f0".into()]).as_bytes());
     b.segments = vec![

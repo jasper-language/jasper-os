@@ -5,15 +5,11 @@ use vstd::prelude::*;
 
 verus! {
 
-// range_within：off + len 不溢出且 ≤ total
+// range_within：在 u64 上求和（两个 u32 之和不会溢出 u64），对任意 total 精确
 fn range_within(off: u32, len: u32, total: u64) -> (r: bool)
-    requires total <= 0x1_0000_0000
     ensures r == (off as int + len as int <= total as int)
 {
-    match off.checked_add(len) {
-        Some(end) => (end as u64) <= total,
-        None => false,
-    }
+    (off as u64) + (len as u64) <= total
 }
 
 // 扩展段内容起点：(8 + name_len) 向上取到 8 的倍数，且不超过段长
@@ -50,7 +46,12 @@ fn table_size_ok(size: u32, count: u32, rec: u32, max: u32) -> (r: bool)
     requires 1 <= rec <= 64, max <= 16
     ensures r == (1 <= count <= max && size as int == 8 + rec as int * count as int)
 {
-    if count == 0 || count > max { false } else { size == 8 + rec * count }
+    if count == 0 || count > max {
+        false
+    } else {
+        assert(rec * count <= 64 * 16) by (nonlinear_arith) requires rec <= 64, count <= 16;
+        size == 8 + rec * count
+    }
 }
 
 fn main() {}

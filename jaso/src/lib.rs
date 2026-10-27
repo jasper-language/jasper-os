@@ -505,12 +505,9 @@ pub fn signed_message(digest: &[u8; 32]) -> [u8; SIGNATURE_DOMAIN.len() + 32] {
     m
 }
 
-/// `[off, off + len)` 是否落在长度为 `total` 的范围内（检查式运算，不回绕）。
+/// `[off, off + len)` 是否落在长度为 `total` 的范围内：在 u64 上求和，对任意 `total` 都与数学定义一致（不回绕）。
 pub const fn range_within(off: u32, len: u32, total: usize) -> bool {
-    match off.checked_add(len) {
-        Some(end) => end as usize <= total,
-        None => false,
-    }
+    off as u64 + len as u64 <= total as u64
 }
 
 /// 签名段的内容（格式已校验；是否可信由 [`trust::TrustPolicy`] 判断）。
@@ -627,8 +624,8 @@ impl Extension<'_> {
     }
 }
 
-/// 扩展段布局（SPEC §9.1）；不合格返回 `None`。
-fn parse_extension(b: &[u8], flags: u32) -> Option<Extension<'_>> {
+/// 扩展段的数值布局：`(版本, 名字长度, 内容起点)`；版本、名字长度、保留字段、零填充不合格或越出段时返回 `None`。
+fn extension_layout(b: &[u8]) -> Option<(u32, usize, usize)> {
     if b.len() < 8 {
         return None;
     }
@@ -641,6 +638,12 @@ fn parse_extension(b: &[u8], flags: u32) -> Option<Extension<'_>> {
     if content_at > b.len() || b[8 + name_len..content_at].iter().any(|&c| c != 0) {
         return None;
     }
+    Some((version, name_len, content_at))
+}
+
+/// 扩展段布局（SPEC §9.1）；不合格返回 `None`。
+fn parse_extension(b: &[u8], flags: u32) -> Option<Extension<'_>> {
+    let (version, name_len, content_at) = extension_layout(b)?;
     let name = core::str::from_utf8(&b[8..8 + name_len]).ok()?;
     let charset = name.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"_.-".contains(&c));
     if !charset || !name.contains('.') {
@@ -889,13 +892,24 @@ impl<'a> ImageRef<'a> {
     }
 }
 
-fn export_at(b: &[u8], i: u32) -> Option<Export<'_>> {
+/// 第 `i` 个导出项名字在表内的字节范围；长度为 0、超过 [`MAX_NAME`] 或越出表时返回 `None`。
+/// 调用者保证第 `i` 项本身在表内。
+fn export_name_range(b: &[u8], i: u32) -> Option<core::ops::Range<usize>> {
     let o = 4 + i as usize * EXPORT_SIZE;
     let (no, nl) = (u32_at(b, o) as usize, u32_at(b, o + 4));
     if nl == 0 || nl > MAX_NAME {
         return None;
     }
-    let name = core::str::from_utf8(b.get(no..no.checked_add(nl as usize)?)?).ok()?;
+    let end = no.checked_add(nl as usize)?;
+    if end > b.len() {
+        return None;
+    }
+    Some(no..end)
+}
+
+fn export_at(b: &[u8], i: u32) -> Option<Export<'_>> {
+    let o = 4 + i as usize * EXPORT_SIZE;
+    let name = core::str::from_utf8(&b[export_name_range(b, i)?]).ok()?;
     if !is_symbol(name) {
         return None;
     }

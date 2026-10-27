@@ -105,6 +105,34 @@ fn nul_padded(b: &[u8]) -> Option<&str> {
     core::str::from_utf8(&b[..n]).ok()
 }
 
+/// 平台记录的数值字段与保留字段（不含两个名字字段）：取值已知、保留为 0，且满足
+/// 「isa = 0 ⇔ target = jvm ⇔ pointer_bytes = 0 ⇔ float_abi = none」与原生指针宽度规则。
+pub(crate) fn numeric_fields(b: &[u8]) -> Option<(Option<Arch>, u8, FloatAbi, Target)> {
+    if b.len() != PLATFORM_RECORD {
+        return None;
+    }
+    let isa = match u16::from_le_bytes([b[0], b[1]]) {
+        0 => None,
+        v => Some(Arch::from_u16(v)?),
+    };
+    let pointer_bytes = b[2];
+    let float_abi = FloatAbi::from_u8(b[3])?;
+    let target = Target::from_u16(u16::from_le_bytes([b[4], b[5]]))?;
+    if b[6] != 0 || b[7] != 0 || b[56..64].iter().any(|&c| c != 0) {
+        return None;
+    }
+    let managed = isa.is_none();
+    if managed != (target == Target::Jvm) || managed != (pointer_bytes == 0) || managed != (float_abi == FloatAbi::None) {
+        return None;
+    }
+    if let Some(a) = isa {
+        if pointer_bytes as u32 != a.pointer_bytes() {
+            return None;
+        }
+    }
+    Some((isa, pointer_bytes, float_abi, target))
+}
+
 fn isa_ext_ok(s: &str) -> bool {
     if s.is_empty() {
         return true;
@@ -124,34 +152,11 @@ pub(crate) fn abi_ok(s: &str) -> bool {
 impl<'a> Platform<'a> {
     /// 解析并校验一条 64 字节的记录（SPEC §6.1 的全部取值与一致性规则）；不合格返回 `None`。
     pub(crate) fn parse(b: &'a [u8]) -> Option<Platform<'a>> {
-        if b.len() != PLATFORM_RECORD {
-            return None;
-        }
-        let isa_v = u16::from_le_bytes([b[0], b[1]]);
-        let isa = match isa_v {
-            0 => None,
-            v => Some(Arch::from_u16(v)?),
-        };
-        let pointer_bytes = b[2];
-        let float_abi = FloatAbi::from_u8(b[3])?;
-        let target = Target::from_u16(u16::from_le_bytes([b[4], b[5]]))?;
-        if b[6] != 0 || b[7] != 0 || b[56..64].iter().any(|&c| c != 0) {
-            return None;
-        }
+        let (isa, pointer_bytes, float_abi, target) = numeric_fields(b)?;
         let isa_ext = nul_padded(&b[8..8 + ISA_EXT_FIELD])?;
         let abi = nul_padded(&b[40..40 + ABI_FIELD])?;
         if !isa_ext_ok(isa_ext) || !abi_ok(abi) {
             return None;
-        }
-        // isa = 0 ⇔ target = jvm ⇔ pointer_bytes = 0 ⇔ float_abi = none
-        let managed = isa.is_none();
-        if managed != (target == Target::Jvm) || managed != (pointer_bytes == 0) || managed != (float_abi == FloatAbi::None) {
-            return None;
-        }
-        if let Some(a) = isa {
-            if pointer_bytes as u32 != a.pointer_bytes() {
-                return None;
-            }
         }
         Some(Platform { isa, pointer_bytes, float_abi, target, isa_ext, abi })
     }

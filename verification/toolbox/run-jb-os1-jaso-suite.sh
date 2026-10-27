@@ -19,7 +19,7 @@ cargo test --manifest-path verification/toolbox/Cargo.toml --test jaso > "$out/p
 cargo +nightly miri test -p jaso --features pack -- tests::roundtrip tests::platform_rejections tests::extensions \
   tests::managed_images tests::multiple_images_and_selection tests::migrate_format0 tests::version_ranges_and_dependencies \
   > "$out/miri.log" 2>&1
-(cd verification/toolbox/fuzz && cargo fuzz run jaso_parse corpus/jaso_parse -- -runs=200000 -seed=1) > "$out/fuzz.log" 2>&1
+(cd verification/toolbox/fuzz && mkdir -p corpus/jaso_parse && cargo fuzz run jaso_parse corpus/jaso_parse seeds/jaso_parse -- -runs=2000000 -seed=1) > "$out/fuzz.log" 2>&1
 for h in range_within_is_exact extension_layout_is_bounded platform_record_rules export_entry_is_bounded; do
   cargo kani -p jaso --harness "$h" > "$out/kani-$h.log" 2>&1
 done
@@ -28,7 +28,7 @@ grep -Eq 'error|verified, [1-9]' "$out/verus-bad.log"
 grep -q 'test result: ok. 45 passed' "$out/host.log"
 grep -q 'test result: ok. 6 passed; 0 failed' "$out/proptest.log"
 grep -q 'test result: ok. 7 passed; 0 failed' "$out/miri.log"
-grep -q 'Done 200000 runs' "$out/fuzz.log"
+grep -q 'Done 2000000 runs' "$out/fuzz.log"
 for h in range_within_is_exact extension_layout_is_bounded platform_record_rules export_entry_is_bounded; do
   grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-$h.log"
 done

@@ -391,8 +391,10 @@ fn version_ranges_and_dependencies() {
     }
     assert!(VersionRange::parse(">=1.0,<2.0,>1.1,<1.9").is_some()); // 恰好 4 个
     const BASE: &str = "core.name = a\ncore.version = 0.0.1\ncore.abi = c.v1\ncore.stage = runtime\n";
-    let p = |extra: &str| Manifest::parse(std::boxed::Box::leak(std::format!("{}{}", BASE, extra).into_boxed_str()));
-    let m = p("core.depends = jaso-log@>=1.0,<2.0, jaso-fmt\ncore.depends = jaso-x@=0.3\ncore.runtime = >=0.1,<0.2\n").unwrap();
+    // 只取错误（不借用临时文本）
+    let p = |extra: &str| Manifest::parse(&std::format!("{}{}", BASE, extra)).map(|_| ());
+    let text = std::format!("{}core.depends = jaso-log@>=1.0,<2.0, jaso-fmt\ncore.depends = jaso-x@=0.3\ncore.runtime = >=0.1,<0.2\n", BASE);
+    let m = Manifest::parse(&text).unwrap();
     let d: Vec<_> = m.depends().collect();
     assert_eq!(d.iter().map(|d| d.name).collect::<Vec<_>>(), ["jaso-log", "jaso-fmt", "jaso-x"]);
     assert!(d[0].range.unwrap().contains((1, 5, 0)) && !d[0].range.unwrap().contains((2, 0, 0)));
