@@ -10,7 +10,7 @@ use crate::build::{Builder, SegmentIn, Signer};
 use crate::trust::{PolicyError, Provenance, Publisher, TrustError, TrustMode, TrustPolicy};
 use crate::*;
 
-const BASE_MANIFEST: &str = "core.name = demo.mod\ncore.version = 1.0.0\ncore.abi = c.v0\ncore.exports = f_one\n";
+const BASE_MANIFEST: &str = "core.name = demo.mod\ncore.version = 1.0.0\ncore.abi = c.v1\ncore.stage = runtime\ncore.exports = f_one\n";
 
 fn manifest(publisher: Option<&str>) -> Vec<u8> {
     let mut m = BASE_MANIFEST.as_bytes().to_vec();
@@ -21,17 +21,14 @@ fn manifest(publisher: Option<&str>) -> Vec<u8> {
 }
 
 fn builder(publisher: Option<&str>) -> Builder {
-    Builder {
-        arch: Arch::X86_64,
-        stage: Stage::Runtime,
-        manifest: manifest(publisher),
-        segments: vec![
-            SegmentIn { vaddr: 0, mem_size: 64, flags: FLAG_R, data: vec![5; 64] },
-            SegmentIn { vaddr: PAGE, mem_size: 32, flags: FLAG_R | FLAG_X, data: vec![0xC3; 32] },
-        ],
-        exports: vec![(b"f_one".to_vec(), PAGE)],
-        relocs: vec![(0, 0x10)],
-    }
+    let mut b = Builder::native(Arch::X86_64, Stage::Runtime, &manifest(publisher));
+    b.segments = vec![
+        SegmentIn { vaddr: 0, mem_size: 64, flags: FLAG_R, data: vec![5; 64] },
+        SegmentIn { vaddr: PAGE, mem_size: 32, flags: FLAG_R | FLAG_X, data: vec![0xC3; 32] },
+    ];
+    b.exports = vec![(b"f_one".to_vec(), PAGE)];
+    b.relocs = vec![(0, 0x10)];
+    b
 }
 
 fn seed(tag: u8) -> [u8; 32] {
@@ -57,7 +54,7 @@ fn publishers() -> [Publisher<'static>; 2] {
 fn verify_with(bytes: &[u8], mode: TrustMode) -> Result<Provenance<'static>, TrustError> {
     let table: &'static [Publisher<'static>] = std::boxed::Box::leak(std::boxed::Box::new(publishers()));
     let policy = TrustPolicy::new(table, mode).expect("策略应合法");
-    let img = Image::parse(bytes).expect("格式应合法");
+    let img = Jaso::parse(bytes).expect("格式应合法");
     policy.verify(&img)
 }
 
@@ -88,7 +85,7 @@ fn rfc8032_test_1() {
 #[test]
 fn signed_roundtrip() {
     let bytes = builder(Some("pub.a")).finish_signed(&signer_a()).unwrap();
-    let img = Image::parse(&bytes).unwrap();
+    let img = Jaso::parse(&bytes).unwrap();
     let sig = img.signature().expect("应有签名段");
     assert_eq!(sig.scheme, SIG_ED25519);
     assert_eq!(sig.publisher_key, signer_a().public_key());
@@ -98,10 +95,10 @@ fn signed_roundtrip() {
     // 开发模式下签名模块同样按发布者通过
     assert_eq!(verify_with(&bytes, TrustMode::Development), Ok(Provenance::Signed { publisher: "pub.a" }));
     // 从文件还原再签名，得到逐字节相同的结果（Ed25519 签名是确定性的）
-    assert_eq!(Builder::from_image(&img).finish_signed(&signer_a()).unwrap(), bytes);
+    assert_eq!(Builder::from_file(&img, 0).unwrap().finish_signed(&signer_a()).unwrap(), bytes);
     // 未签名文件没有签名段
     let plain = builder(Some("pub.a")).finish().unwrap();
-    assert!(Image::parse(&plain).unwrap().signature().is_none());
+    assert!(Jaso::parse(&plain).unwrap().signature().is_none());
 }
 
 #[test]
@@ -117,15 +114,15 @@ fn unsigned_rejected_unless_development() {
 fn tampered_bytes_rejected() {
     let good = builder(Some("pub.a")).finish_signed(&signer_a()).unwrap();
     let sig_off = good.len() - SIGNATURE_SIZE;
-    let img = Image::parse(&good).unwrap();
+    let img = Jaso::parse(&good).unwrap();
     // 映像段内容中的每个字节：不重算摘要 ⇒ 完整性校验拒绝；重算摘要 ⇒ 验签拒绝
-    let seg_start = img.segments().next().unwrap().data.as_ptr() as usize - good.as_ptr() as usize;
+    let seg_start = img.image(0).unwrap().segments().next().unwrap().data.as_ptr() as usize - good.as_ptr() as usize;
     for i in seg_start..sig_off {
         let mut t = good.clone();
         t[i] ^= 0x40;
-        assert_eq!(Image::parse(&t).err(), Some(JasoError::DigestMismatch), "byte {}", i);
+        assert_eq!(Jaso::parse(&t).err(), Some(JasoError::DigestMismatch), "byte {}", i);
         digest_fix(&mut t);
-        if Image::parse(&t).is_ok() {
+        if Jaso::parse(&t).is_ok() {
             assert!(verify(&t).is_err(), "篡改字节 {} 后仍被接受", i);
         }
     }
@@ -182,18 +179,18 @@ fn swapped_publisher_rejected() {
 #[test]
 fn resigning_someone_elses_module_rejected() {
     let good = builder(Some("pub.a")).finish_signed(&signer_a()).unwrap();
-    let img = Image::parse(&good).unwrap();
+    let img = Jaso::parse(&good).unwrap();
     // B 拿 A 的模块原样重签（仍声称 pub.a）：公钥不是 A 的
-    let resigned = Builder::from_image(&img).finish_signed(&signer_b()).unwrap();
+    let resigned = Builder::from_file(&img, 0).unwrap().finish_signed(&signer_b()).unwrap();
     assert_eq!(verify(&resigned), Err(TrustError::KeyMismatch));
     // B 重签并改称自己（pub.b）：B 无权签发 `demo.` 命名空间下的模块名
-    let mut claim = Builder::from_image(&img);
+    let mut claim = Builder::from_file(&img, 0).unwrap();
     claim.manifest = manifest(Some("pub.b"));
     let claimed = claim.finish_signed(&signer_b()).unwrap();
     assert_eq!(verify(&claimed), Err(TrustError::OutOfNamespace));
     // 不在表中的密钥签名、声称不在表中的发布者
     let stranger = Signer::from_seed(&seed(0x33));
-    let mut unknown = Builder::from_image(&img);
+    let mut unknown = Builder::from_file(&img, 0).unwrap();
     unknown.manifest = manifest(Some("pub.unknown"));
     assert_eq!(verify(&unknown.finish_signed(&stranger).unwrap()), Err(TrustError::UnknownPublisher));
     // 签名了却不声明发布者
@@ -208,7 +205,7 @@ fn development_mode_still_rejects_bad_signatures() {
     t[n - 1] ^= 0x80;
     digest_fix(&mut t);
     assert_eq!(verify_with(&t, TrustMode::Development), Err(TrustError::BadSignature));
-    let resigned = Builder::from_image(&Image::parse(&good).unwrap()).finish_signed(&signer_b()).unwrap();
+    let resigned = Builder::from_file(&Jaso::parse(&good).unwrap(), 0).unwrap().finish_signed(&signer_b()).unwrap();
     assert_eq!(verify_with(&resigned, TrustMode::Development), Err(TrustError::KeyMismatch));
 }
 
@@ -221,7 +218,7 @@ fn signature_section_format() {
         let mut t = good.clone();
         t[at..at + 4].copy_from_slice(&v.to_le_bytes());
         digest_fix(&mut t);
-        assert_eq!(Image::parse(&t).err(), Some(JasoError::BadSignatureSection));
+        assert_eq!(Jaso::parse(&t).err(), Some(JasoError::BadSignatureSection));
     }
     // 签名段目录项：长度改短（不在文件末尾）、偏移前移与其它段重叠
     let dir_count = u32::from_le_bytes(good[20..24].try_into().unwrap()) as usize;
@@ -230,16 +227,16 @@ fn signature_section_format() {
     let mut t = good.clone();
     t[sig_dir + 12..sig_dir + 16].copy_from_slice(&((SIGNATURE_SIZE - 8) as u32).to_le_bytes());
     digest_fix(&mut t);
-    assert_eq!(Image::parse(&t).err(), Some(JasoError::BadSignatureSection));
+    assert_eq!(Jaso::parse(&t).err(), Some(JasoError::BadSignatureSection));
     let mut t = good.clone();
     t[sig_dir + 8..sig_dir + 12].copy_from_slice(&((sig_off - 8) as u32).to_le_bytes());
     digest_fix(&mut t);
-    assert!(Image::parse(&t).is_err());
+    assert!(Jaso::parse(&t).is_err());
     // 签名段带了段标志
     let mut t = good.clone();
     t[sig_dir + 4..sig_dir + 8].copy_from_slice(&1u32.to_le_bytes());
     digest_fix(&mut t);
-    assert_eq!(Image::parse(&t).err(), Some(JasoError::BadSectionDir));
+    assert_eq!(Jaso::parse(&t).err(), Some(JasoError::BadSectionDir));
 }
 
 #[test]
@@ -264,7 +261,7 @@ fn policy_construction_rules() {
     // 空表：任何签名模块都是未知发布者
     let none = TrustPolicy::new(&[], TrustMode::Enforce).unwrap();
     let good = builder(Some("pub.a")).finish_signed(&signer_a()).unwrap();
-    assert_eq!(none.verify(&Image::parse(&good).unwrap()), Err(TrustError::UnknownPublisher));
+    assert_eq!(none.verify(&Jaso::parse(&good).unwrap()), Err(TrustError::UnknownPublisher));
     assert_eq!(none.mode(), TrustMode::Enforce);
     assert!(none.publishers().is_empty());
 }
@@ -293,7 +290,7 @@ fn random_tampering_never_accepted() {
         if t == good {
             continue;
         }
-        if let Ok(img) = Image::parse(&t) {
+        if let Ok(img) = Jaso::parse(&t) {
             parsed += 1;
             // 结构仍合法的变体一律被信任策略拒绝
             assert!(policy.verify(&img).is_err(), "变异后仍被接受");
@@ -311,13 +308,13 @@ fn development_signer_and_resign() {
     assert_eq!(dev.public_key(), crate::pack::development_signer().public_key());
     assert_ne!(dev.public_key(), crate::pack::signer_from_phrase(b"another phrase").public_key());
     let mut b = builder(Some(DEVELOPMENT_PUBLISHER));
-    b.manifest = std::format!("core.name = jaso-x\ncore.version = 1.0.0\ncore.abi = c.v0\ncore.exports = f_one\ncore.publisher = {}\n", DEVELOPMENT_PUBLISHER)
+    b.manifest = std::format!("core.name = jaso-x\ncore.version = 1.0.0\ncore.abi = c.v1\ncore.stage = runtime\ncore.exports = f_one\ncore.publisher = {}\n", DEVELOPMENT_PUBLISHER)
         .into_bytes();
     let unsigned = b.finish().unwrap();
     let signed = crate::pack::sign(&unsigned, &dev).unwrap();
     let table = [Publisher { name: DEVELOPMENT_PUBLISHER, namespace: DEVELOPMENT_NAMESPACE, key: dev.public_key() }];
     let policy = TrustPolicy::new(&table, TrustMode::Enforce).unwrap();
-    assert_eq!(policy.verify(&Image::parse(&signed).unwrap()), Ok(Provenance::Signed { publisher: DEVELOPMENT_PUBLISHER }));
+    assert_eq!(policy.verify(&Jaso::parse(&signed).unwrap()), Ok(Provenance::Signed { publisher: DEVELOPMENT_PUBLISHER }));
     // 重新签名已签名的文件：替换签名段而不是追加第二个
     assert_eq!(crate::pack::sign(&signed, &dev).unwrap(), signed);
     // 输入不合法：原样报告解析错误，不产出文件

@@ -2,14 +2,17 @@
 //! User-space loader for native `.jaso` modules.
 //!
 //! # 装载步骤（任何一步失败都撤销此前的全部改动）
-//! 1. **校验文件**：[`jaso::Image::parse`]（结构 + SHA-256 完整性）
+//! 1. **校验文件**：[`jaso::Jaso::parse`]（format 1 结构 + SHA-256 完整性）
 //! 2. **验证来源**：[`TrustPolicy::verify`]——签名必须出自调用者给出的受信发布者表中声明的发布者，
 //!    且模块名在其命名空间内；这一步在取槽位、映射任何内容之前完成，失败不留任何痕迹。
 //!    开发模式放行未签名模块时，装载器输出一条结构化审计事件（`JSR-AUDIT event=jaso.trust.unsigned_accepted ...`），
 //!    调用者无法绕过
-//! 3. **检查适用性**：指令集与本程序一致；装载阶段为 `runtime`；调用约定为 `c.v0`
+//! 3. **检查适用性**：装载阶段为 `runtime`；按本程序的平台（[`jaso::HostPlatform::jasper_os_native`]：本指令集、
+//!    jasper-os、软浮点、`c.v1`）选出镜像，没有相符的镜像即拒绝（报告镜像 0 第一个不符的字段）；
+//!    宿主运行时版本（[`RUNTIME_VERSION`]）须在清单 `core.runtime` 区间内；清单 `core.depends` 中的每项依赖都必须已装入——
+//!    本装载器尚不维护已装入模块表，声明了依赖的模块因此一律以依赖未满足拒绝（绝不跳过检查）
 //! 4. **检查能力**：清单里的每项能力都必须在调用者给出的授权 [`Grant::capabilities`] 中——清单是请求，授权由调用者决定
-//! 5. **检查宿主接口**：清单要求 `jaso.host.v0` 时，调用者必须提供宿主接口表，模块必须导出 `jaso_init`
+//! 5. **检查宿主接口**：清单要求 `jaso.host.v1` 时，调用者必须提供宿主接口表，模块必须导出 `jaso_init`
 //! 6. **判定放置**：进程内模块与宿主共享全部权限，只给可信模块——[`Grant::origin`] 为自动获取
 //!    （[`Origin::Acquired`]）的模块一律拒绝（不论策略如何），其余由 [`Grant::placement`] 判定；
 //!    要求隔离的模块经 [`crate::isolate`] 在独立进程中运行
@@ -38,8 +41,8 @@ pub use jaso::trust::{
     PolicyError, Provenance, Publisher, TrustError, TrustMode, TrustPolicy, DEVELOPMENT_NAMESPACE, DEVELOPMENT_PUBLISHER,
 };
 pub use jaso::placement::{AlwaysIsolated, InProcessPublishers, Origin, Placement, PlacementPolicy, Standard};
-pub use jaso::{HostV0, JasoError};
-use jaso::{Arch, Image, Stage, ABI_C_V0, FLAG_W, FLAG_X, HOST_V0, INIT_SYMBOL, PAGE};
+pub use jaso::{HostV1, JasoError, PlatformMismatch, HOST_TABLE_VERSION};
+use jaso::{HostPlatform, ImageRef, Jaso, Stage, FLAG_W, FLAG_X, HOST_V1, INIT_SYMBOL, PAGE};
 
 use crate::error::Error;
 use crate::{mem, sys};
@@ -68,8 +71,18 @@ extern "C" fn std_dealloc(ptr: *mut u8, size: usize, align: usize) {
 }
 
 /// 运行时提供的标准宿主接口表：输出到控制台（按行），分配走本进程的全局分配器。
-pub static STD_HOST: HostV0 =
-    HostV0 { version: 0, size: core::mem::size_of::<HostV0>() as u32, log: std_log, alloc: std_alloc, dealloc: std_dealloc };
+pub static STD_HOST: HostV1 =
+    HostV1 { version: HOST_TABLE_VERSION, size: core::mem::size_of::<HostV1>() as u32, log: std_log, alloc: std_alloc, dealloc: std_dealloc };
+
+/// 本程序的平台（运行时只为受支持的指令集编译；其它指令集在编译期即失败）。
+const HOST_PLATFORM: HostPlatform<'static> = match HostPlatform::jasper_os_native() {
+    Some(h) => h,
+    None => panic!("jasper-rt 不支持该指令集"),
+};
+
+/// 宿主运行时版本（与本 crate 的版本一致）：清单 `core.runtime` 区间据此判定。
+/// Host runtime version checked against `core.runtime`.
+pub const RUNTIME_VERSION: (u32, u32, u32) = (0, 1, 0);
 
 /// 调用者给模块的授权。
 #[derive(Clone, Copy)]
@@ -77,7 +90,7 @@ pub struct Grant<'a> {
     /// 授予的能力名（清单 `core.requires` 中的每一项都必须在此）。
     pub capabilities: &'a [&'a str],
     /// 宿主接口表（模块声明需要时必须提供；须比 [`Module`] 活得久，通常是 `static`）。
-    pub host: Option<&'static HostV0>,
+    pub host: Option<&'static HostV1>,
     /// 信任策略：受信发布者表 + 模式（强制 / 开发）。
     /// Trust policy: trusted publishers plus mode.
     pub trust: &'a TrustPolicy<'a>,
@@ -97,12 +110,14 @@ pub enum LoadError {
     /// 来源不可信（未签名、签名无效、发布者未知或不符、模块名越出命名空间）。
     /// The module's origin is not trusted.
     Untrusted(TrustError),
-    /// 指令集与本程序不符。
-    WrongArch(Arch),
+    /// 没有与本程序平台相符的镜像（指令集、目标环境、调用约定等）。
+    Platform(PlatformMismatch),
     /// 装载阶段不是 `runtime`（启动期 / 构建期模块不能由运行时装载器装入）。
     WrongStage(Stage),
-    /// 调用约定不受支持。
-    UnsupportedAbi(String),
+    /// 宿主运行时版本不在清单 `core.runtime` 区间内。
+    RuntimeVersion,
+    /// 依赖未满足（附依赖名）。
+    Dependency(String),
     /// 清单要求的能力没有被授予。
     MissingCapability(String),
     /// 宿主接口表版本不受支持。
@@ -145,7 +160,7 @@ pub fn unsigned_admitted() -> u32 {
 }
 
 /// 记录一次未签名放行：计数 + 结构化审计事件（模块名、版本、完整性摘要前 8 字节）。
-pub(crate) fn audit_unsigned(img: &Image<'_>) {
+pub(crate) fn audit_unsigned(img: &Jaso<'_>) {
     let n = UNSIGNED_ADMITTED.fetch_add(1, Ordering::Relaxed) + 1;
     let m = &img.manifest;
     let d = &img.digest;
@@ -228,41 +243,44 @@ impl<F> Drop for Function<'_, F> {
 /// 通过了第 1–5 步、尚未改动任何状态的模块（进程内装入与隔离运行共用）。
 /// A module that passed the stateless checks; nothing has been changed yet.
 pub struct Admitted<'b, 'p> {
-    /// 解析后的映像。
-    pub image: Image<'b>,
+    /// 解析后的文件。
+    pub file: Jaso<'b>,
+    /// 按本程序平台选出的镜像。
+    pub image: ImageRef<'b>,
     /// 验签结果。
     pub provenance: Provenance<'p>,
-    init: Option<(&'static HostV0, u32)>,
+    init: Option<(&'static HostV1, u32)>,
 }
 
 /// 第 1–5 步：校验文件、验证来源、检查适用性、能力与宿主接口。不改动任何状态，也不输出审计事件。
 /// Runs the stateless admission checks shared by in-process and isolated loading.
 pub fn admit<'b, 'p>(bytes: &'b [u8], grant: &Grant<'p>) -> Result<Admitted<'b, 'p>, LoadError> {
-    let img = Image::parse(bytes).map_err(LoadError::Format)?;
-    let provenance = grant.trust.verify(&img).map_err(LoadError::Untrusted)?;
-    if Some(img.arch) != Arch::current() {
-        return Err(LoadError::WrongArch(img.arch));
+    let file = Jaso::parse(bytes).map_err(LoadError::Format)?;
+    let provenance = grant.trust.verify(&file).map_err(LoadError::Untrusted)?;
+    if file.stage != Stage::Runtime {
+        return Err(LoadError::WrongStage(file.stage));
     }
-    if img.stage != Stage::Runtime {
-        return Err(LoadError::WrongStage(img.stage));
+    let img = file.select(&HOST_PLATFORM).map_err(LoadError::Platform)?;
+    let m = file.manifest;
+    if m.runtime.is_some_and(|r| !r.contains(RUNTIME_VERSION)) {
+        return Err(LoadError::RuntimeVersion);
     }
-    let m = img.manifest;
-    if m.abi != ABI_C_V0 {
-        return Err(LoadError::UnsupportedAbi(m.abi.to_string()));
+    if let Some(d) = m.depends().next() {
+        return Err(LoadError::Dependency(d.name.to_string()));
     }
     if let Some(cap) = m.requires().find(|c| !grant.capabilities.contains(c)) {
         return Err(LoadError::MissingCapability(cap.to_string()));
     }
     let init = match m.host {
         None => None,
-        Some(h) if h != HOST_V0 => return Err(LoadError::UnsupportedHost(h.to_string())),
+        Some(h) if h != HOST_V1 => return Err(LoadError::UnsupportedHost(h.to_string())),
         Some(_) => {
             let host = grant.host.ok_or(LoadError::HostRequired)?;
             let e = img.export(INIT_SYMBOL).ok_or(LoadError::MissingInit)?;
             Some((host, e.value))
         }
     };
-    Ok(Admitted { image: img, provenance, init })
+    Ok(Admitted { file, image: img, provenance, init })
 }
 
 /// 装入的位置：宿主进程（须经放置判定），或运行时自己的隔离进程（它本身就是隔离边界）。
@@ -283,16 +301,16 @@ impl Module {
     }
 
     pub(crate) fn load_at(bytes: &[u8], grant: Grant<'_>, site: Site) -> Result<Module, LoadError> {
-        let Admitted { image: img, provenance, init } = admit(bytes, &grant)?;
+        let Admitted { file, image: img, provenance, init } = admit(bytes, &grant)?;
         if site == Site::Host && jaso::placement::decide(grant.placement, grant.origin, &provenance) != Placement::InProcess {
             return Err(LoadError::IsolationRequired);
         }
-        let m = img.manifest;
+        let m = file.manifest;
         // 其余检查全部通过之后才审计放行：被拒的模块不产生「已接受」事件
         let publisher = match provenance {
             Provenance::Signed { publisher } => Some(publisher.to_string()),
             Provenance::UnsignedDevelopment => {
-                audit_unsigned(&img);
+                audit_unsigned(&file);
                 None
             }
         };
@@ -348,8 +366,8 @@ impl Module {
             chunked(base + start as u64, ((end - start) / PAGE) as u64, |va, n| mem::protect(va, n, flags)).map_err(LoadError::Memory)?;
         }
         if let Some((host, value)) = init {
-            // SAFETY：value 是解析器证明落在可执行段内的导出；签名由 v0 约定固定为 extern "C" fn(*const HostV0) -> i32。
-            let f: extern "C" fn(*const HostV0) -> i32 = unsafe { core::mem::transmute((base + value as u64) as usize) };
+            // SAFETY：value 是解析器证明落在可执行段内的导出；签名由 c.v1 约定固定为 extern "C" fn(*const HostV1) -> i32。
+            let f: extern "C" fn(*const HostV1) -> i32 = unsafe { core::mem::transmute((base + value as u64) as usize) };
             let rc = f(host);
             if rc != 0 {
                 return Err(LoadError::InitFailed(rc));

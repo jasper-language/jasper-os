@@ -8,6 +8,9 @@
 //! * `demo-boot.jaso`：装载阶段为 boot ⇒ 运行时装载器应拒绝
 //! * `demo-noinit.jaso`：去掉 `jaso_init` 导出 ⇒ 声明了宿主接口却没有初始化入口，应被拒
 //! * `demo-morecaps.jaso`：清单多要求一项能力 ⇒ 未授予时应被拒
+//! * `demo-runtime.jaso`：清单要求宿主运行时 `>=9.0` ⇒ 运行时版本不符
+//! * `demo-depends.jaso`：清单声明依赖 `jaso-base` ⇒ 依赖未满足
+//! * `demo-oldabi.jaso`：平台记录与清单的调用约定为旧的 `c.v0` ⇒ 平台不符（字段 abi）
 //!
 //! 以上全部以开发用发布者签名（来源检查在其它检查之前，变体须先通过它才能验证各自的拒绝原因）。签名相关的变体：
 //! * `demo-unsigned.jaso`：同一内容、不带签名 ⇒ 强制模式拒绝；开发模式放行并留下审计事件
@@ -19,16 +22,19 @@
 use std::path::{Path, PathBuf};
 
 use jaso::build::{Builder, Signer};
-use jaso::{Arch, Image, Stage};
+use jaso::{Arch, Jaso, Stage};
 
 /// 验收用的「另一个发布者」：种子公开、只用于验收。
 const OTHER_PUBLISHER_SEED: &[u8] = b"jasper-os acceptance: other publisher seed v0";
 
-fn rebuild(img: &Image<'_>, arch: Arch, stage: Stage, manifest: &str, drop_export: Option<&str>, signer: Option<&Signer>) -> Vec<u8> {
-    let mut b = Builder::from_image(img);
-    b.arch = arch;
+/// 由合格模块改出一个变体：指令集、装载阶段（清单的 `core.stage` 随之改写）、清单、去掉一个导出、签名者。
+fn rebuild(img: &Jaso<'_>, arch: Arch, stage: Stage, manifest: &str, drop_export: Option<&str>, signer: Option<&Signer>) -> Vec<u8> {
+    let mut b = Builder::from_file(img, 0).expect("合格模块至少有一个镜像");
+    b.platform.isa = Some(arch);
     b.stage = stage;
-    b.manifest = manifest.as_bytes().to_vec();
+    let manifest = manifest.replace("core.stage = runtime", &format!("core.stage = {}", stage.name()));
+    b.platform.abi = jaso::Manifest::parse(&manifest).ok().map(|m| m.abi.as_bytes().to_vec());
+    b.manifest = manifest.into_bytes();
     b.exports.retain(|(name, _)| Some(name.as_slice()) != drop_export.map(str::as_bytes));
     match signer {
         Some(s) => b.finish_signed(s),
@@ -68,7 +74,7 @@ fn main() {
     let dev = jaso::pack::development_signer();
     let other_pub = jaso::pack::signer_from_phrase(OTHER_PUBLISHER_SEED);
     let good = jaso::pack::sign(&packed, &dev).expect("签名失败");
-    let img = Image::parse(&good).expect("打包结果未通过校验");
+    let img = Jaso::parse(&good).expect("打包结果未通过校验");
     let write = |name: &str, bytes: &[u8]| std::fs::write(Path::new(&out).join(name), bytes).expect("写入失败");
     write("demo.jaso", &good);
     write("trust-dev.key", &dev.public_key());
@@ -82,6 +88,11 @@ fn main() {
     write("demo-noinit.jaso", &rebuild(&img, arch, Stage::Runtime, &noinit, Some("jaso_init"), d));
     let more = format!("{}core.requires = system.channel.send\n", manifest);
     write("demo-morecaps.jaso", &rebuild(&img, arch, Stage::Runtime, &more, None, d));
+    write("demo-runtime.jaso", &rebuild(&img, arch, Stage::Runtime, &format!("{}core.runtime = >=9.0\n", manifest), None, d));
+    write("demo-depends.jaso", &rebuild(&img, arch, Stage::Runtime, &format!("{}core.depends = jaso-base@>=1.0,<2.0\n", manifest), None, d));
+    let old = manifest.replace("core.abi = c.v1", "core.abi = c.v0");
+    assert_ne!(old, manifest, "清单中找不到 core.abi = c.v1");
+    write("demo-oldabi.jaso", &rebuild(&img, arch, Stage::Runtime, &old, None, d));
     // 签名相关变体
     let dev_name = format!("core.publisher = {}", jaso::trust::DEVELOPMENT_PUBLISHER);
     let claims_other = manifest.replace(&dev_name, "core.publisher = jasper.other");

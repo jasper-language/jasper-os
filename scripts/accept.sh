@@ -878,10 +878,11 @@ check_j3() {    # 最小 .jaso：格式宿主测试；memory.protect（W^X、全
      && has 'text=jasodemo: loaded name=jaso-demo base=0x[0-9a-f]+ pages=[0-9]+ sum_ok=true relocated_greeting=true counter=2 host_alloc=1/1' \
      && has 'text=jasodemo: two_instances bases=0x[0-9a-f]+,0x[0-9a-f]+ independent_data=true' \
      && has 'text=jasodemo: unload unmapped=true slot_reused=true fresh_state=true' \
-     && has 'text=jasodemo: rejected tamper=Some\(Format\(DigestMismatch\)\) truncated=Some\(Format\(LengthMismatch\)\) arch=Some\(WrongArch\((Aarch64|X86_64)\)\) stage=Some\(WrongStage\(Boot\)\) caps=Some\(MissingCapability\("system\.console\.write"\)\) host=Some\(HostRequired\) init=Some\(MissingInit\)' \
+     && has 'text=jasodemo: rejected tamper=Some\(Format\(DigestMismatch\)\) truncated=Some\(Format\(LengthMismatch\)\) arch=Some\(Platform\(PlatformMismatch \{ field: Isa, expected: "(aarch64|x86_64)", actual: "(aarch64|x86_64)" \}\)\) stage=Some\(WrongStage\(Boot\)\) caps=Some\(MissingCapability\("system\.console\.write"\)\) host=Some\(HostRequired\) init=Some\(MissingInit\)' \
+     && has 'text=jasodemo: format1 rejected runtime=Some\(RuntimeVersion\) depends=Some\(Dependency\("jaso-base"\)\) oldabi=Some\(Platform\(PlatformMismatch \{ field: Abi, expected: "c\.v1", actual: "c\.v0" \}\)\)' \
      && has 'text=jasodemo: ok checks=[0-9]+' \
      && has 'case=jasodemo exit=Some\(0\) expect=0 reclaimed=true'; then
-    record J-3 PASS "格式宿主测试 $(grep -oE '[0-9]+ passed' "$OUT/jaso-test.log" | head -1)；W^X 改权限；.jaso 装入/重定位/设权限/初始化/调用导出、两实例数据独立、卸载后映射消失；篡改/截断/指令集/阶段/能力/宿主表/初始化入口均被拒；回到基线"
+    record J-3 PASS "格式宿主测试 $(grep -oE '[0-9]+ passed' "$OUT/jaso-test.log" | head -1)；W^X 改权限；.jaso 装入/重定位/设权限/初始化/调用导出、两实例数据独立、卸载后映射消失；篡改/截断/指令集/阶段/能力/宿主表/初始化入口均被拒；format 1 运行时版本区间/依赖未满足/旧调用约定 c.v0 均被拒；回到基线"
   else
     record J-3 FAIL "jaso 宿主测试 rc=${JASO_RC:-?}，或缺少 jasodemo / protect 关键标记"
   fi

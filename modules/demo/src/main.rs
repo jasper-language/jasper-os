@@ -17,16 +17,16 @@
 
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
-use jaso::HostV0;
+use jaso::HostV1;
 
 /// 装载器传入的宿主接口表（`jaso_init` 之后有效，生命期与模块相同）。
-static HOST: AtomicPtr<HostV0> = AtomicPtr::new(core::ptr::null_mut());
+static HOST: AtomicPtr<HostV1> = AtomicPtr::new(core::ptr::null_mut());
 /// 调用计数（可写数据段）。
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 /// 只读的字符串表：每一项都是指针，装入后须经重定位指向本实例的映像。
 static GREETINGS: [&str; 3] = ["你好，来自 .jaso 模块", "hello from a .jaso module", "jaso-demo 0.1.0"];
 
-fn host() -> Option<&'static HostV0> {
+fn host() -> Option<&'static HostV1> {
     // SAFETY：指针只在 jaso_init 中写入一次，指向装载器保证在模块存续期间有效的表。
     unsafe { HOST.load(Ordering::Acquire).as_ref() }
 }
@@ -39,13 +39,13 @@ fn log(s: &str) {
 
 /// 初始化：检查宿主接口表的版本与长度，保存它，并经它输出一行文本。返回 0 表示成功。
 #[no_mangle]
-pub extern "C" fn jaso_init(host: *const HostV0) -> i32 {
+pub extern "C" fn jaso_init(host: *const HostV1) -> i32 {
     // SAFETY：装载器传入一张有效的表（或空指针）。
     let Some(h) = (unsafe { host.as_ref() }) else { return 1 };
-    if h.version != 0 || (h.size as usize) < core::mem::size_of::<HostV0>() {
+    if h.version != jaso::HOST_TABLE_VERSION || (h.size as usize) < core::mem::size_of::<HostV1>() {
         return 2;
     }
-    HOST.store(host as *mut HostV0, Ordering::Release);
+    HOST.store(host as *mut HostV1, Ordering::Release);
     log("jaso-demo: init ok");
     0
 }

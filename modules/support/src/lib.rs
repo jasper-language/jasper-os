@@ -2,7 +2,7 @@
 //! Shared support for `.jaso` modules.
 //!
 //! 依赖本 crate 的模块自动获得：
-//! * `jaso_init` 导出：检查宿主接口表的版本与长度并保存（清单须声明 `core.host = jaso.host.v0`）
+//! * `jaso_init` 导出：检查宿主接口表的版本与长度并保存（清单须声明 `core.host = jaso.host.v1`）
 //! * 全局分配器：把 `alloc` 的分配请求转给宿主接口表；在 `jaso_init` 之前或宿主拒绝时返回空指针（由 `alloc` 报告分配失败）
 //! * panic 处理：经宿主输出一行后执行非法指令，由内核终止所在进程
 //! * [`log`]：经宿主输出一行文本
@@ -13,12 +13,12 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-pub use jaso::HostV0;
+pub use jaso::HostV1;
 
-static HOST: AtomicPtr<HostV0> = AtomicPtr::new(core::ptr::null_mut());
+static HOST: AtomicPtr<HostV1> = AtomicPtr::new(core::ptr::null_mut());
 
 /// 装载器传入的宿主接口表（`jaso_init` 之前为 `None`）。
-pub fn host() -> Option<&'static HostV0> {
+pub fn host() -> Option<&'static HostV1> {
     // SAFETY：指针只在 jaso_init 中写入一次，指向装载器保证在模块存续期间有效的表。
     unsafe { HOST.load(Ordering::Acquire).as_ref() }
 }
@@ -32,13 +32,13 @@ pub fn log(s: &str) {
 
 /// 模块初始化：检查宿主接口表并保存。返回 0 表示成功。
 #[no_mangle]
-pub extern "C" fn jaso_init(host: *const HostV0) -> i32 {
+pub extern "C" fn jaso_init(host: *const HostV1) -> i32 {
     // SAFETY：装载器传入一张有效的表（或空指针）。
     let Some(h) = (unsafe { host.as_ref() }) else { return 1 };
-    if h.version != 0 || (h.size as usize) < core::mem::size_of::<HostV0>() {
+    if h.version != jaso::HOST_TABLE_VERSION || (h.size as usize) < core::mem::size_of::<HostV1>() {
         return 2;
     }
-    HOST.store(host as *mut HostV0, Ordering::Release);
+    HOST.store(host as *mut HostV1, Ordering::Release);
     0
 }
 

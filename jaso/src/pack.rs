@@ -7,7 +7,7 @@
 //! * 可装入段（`PT_LOAD`）互不共用页；段起点按页向下取整，前面补零（不把相邻段的字节带进来）
 //! * 动态重定位只允许「基址 + 加数」一种（x86_64 `R_X86_64_RELATIVE`、AArch64 `R_AARCH64_RELATIVE`、
 //!   RISC-V `R_RISCV_RELATIVE`），按指针宽度写成 `.jaso` 的 64 位或 32 位重定位；出现其它种类、`DT_REL`、PLT 重定位或 `DT_NEEDED` 即拒绝——
-//!   模块不按名字导入任何外部符号，宿主能力只经 [`crate::HostV0`] 表提供
+//!   模块不按名字导入任何外部符号，宿主能力只经 [`crate::HostV1`] 表提供
 //! * 导出 = 清单 `core.exports` 声明的名字，每个都必须是动态符号表中已定义的全局函数（链接器顺带导出的其它符号一律不收）；
 //!   动态符号表里有未定义的符号即拒绝
 
@@ -366,7 +366,8 @@ pub fn from_elf(elf: &[u8], manifest: &str, arch: Arch, stage: Stage) -> Result<
         exports.push(hit.clone());
     }
 
-    let b = Builder { arch, stage, manifest: manifest.as_bytes().to_vec(), segments, exports, relocs };
+    let mut b = Builder::native(arch, stage, manifest.as_bytes());
+    (b.segments, b.exports, b.relocs) = (segments, exports, relocs);
     b.finish().map_err(PackError::Format)
 }
 
@@ -437,7 +438,9 @@ pub fn signer_from_phrase(phrase: &[u8]) -> crate::build::Signer {
 /// 对一个已打包的 `.jaso` 重新签名：保留清单、各段、导出与重定位，替换（或新增）签名段。
 /// Re-signs a packed `.jaso` file with `signer`.
 pub fn sign(bytes: &[u8], signer: &crate::build::Signer) -> Result<Vec<u8>, JasoError> {
-    Builder::from_image(&crate::Image::parse(bytes)?).finish_signed(signer)
+    let f = crate::Jaso::parse(bytes)?;
+    // 校验通过的文件至少有一个镜像
+    Builder::from_file(&f, 0).ok_or(JasoError::ImageIndex)?.finish_signed(signer)
 }
 
 /// 构建工作区 `workspace` 中的模块 crate `package`（目录 `dir`，含 `jaso.manifest`），并打包为运行时装载的 `.jaso`。
@@ -550,13 +553,15 @@ mod pack_target_tests {
         f
     }
 
-    const MANIFEST32: &str = "core.name = demo.rv32\ncore.version = 1.0.0\ncore.abi = c.v0\ncore.host = jaso.host.v0\ncore.exports = f_one, f_two\n";
+    const MANIFEST32: &str = "core.name = demo.rv32\ncore.version = 1.0.0\ncore.abi = c.v1\ncore.stage = runtime\ncore.host = jaso.host.v1\ncore.exports = f_one, f_two\n";
 
     #[test]
     fn elf32_packs_with_four_byte_relocations() {
         let out = from_elf(&elf32(3, 0x2200), MANIFEST32, Arch::Riscv32, Stage::Runtime).unwrap();
-        let img = crate::Image::parse(&out).unwrap();
-        assert_eq!(img.arch, Arch::Riscv32);
+        let file = crate::Jaso::parse(&out).unwrap();
+        assert_eq!(file.arch, Some(Arch::Riscv32));
+        let img = file.image(0).unwrap();
+        assert_eq!(img.platform.pointer_bytes, 4);
         let r: std::vec::Vec<_> = img.relocs().collect();
         assert_eq!(r.len(), 1);
         assert_eq!((r[0].offset, r[0].kind, r[0].addend), (0x2200, crate::RELOC_RELATIVE32, 0x1000));

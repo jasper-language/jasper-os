@@ -33,7 +33,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use jasper_rt::channel;
 use jasper_rt::isolate::{CallError, IsolateError, IsolatedGrant, IsolatedModule};
 use jasper_rt::module::{
-    Grant, HostV0, LoadError, Module, Origin, Publisher, Standard, TrustMode, TrustPolicy, UnloadError, DEVELOPMENT_NAMESPACE,
+    Grant, HostV1, LoadError, Module, Origin, Publisher, Standard, TrustMode, TrustPolicy, UnloadError, DEVELOPMENT_NAMESPACE,
     DEVELOPMENT_PUBLISHER, STD_HOST,
 };
 use jasper_rt::process::{self, FAULT_CODE};
@@ -100,7 +100,7 @@ extern "C" fn gate_log(ptr: *const u8, len: usize) {
 }
 
 /// 进程内装载探测模块所用的宿主接口表（分配走标准表的实现）。
-static GATE_HOST: HostV0 = HostV0 { version: 0, size: core::mem::size_of::<HostV0>() as u32, log: gate_log, alloc: STD_HOST.alloc, dealloc: STD_HOST.dealloc };
+static GATE_HOST: HostV1 = HostV1 { version: jasper_rt::module::HOST_TABLE_VERSION, size: core::mem::size_of::<HostV1>() as u32, log: gate_log, alloc: STD_HOST.alloc, dealloc: STD_HOST.dealloc };
 
 // ———————————————————————— 辅助 ————————————————————————
 

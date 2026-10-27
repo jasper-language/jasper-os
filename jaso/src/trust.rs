@@ -2,7 +2,7 @@
 //! Publisher trust policy: the trusted-publisher table and signature verification.
 //!
 //! # 职责与边界
-//! * [`crate::Image::parse`] 只证明「文件结构合法、内容未被改动」；本模块证明「内容出自受信的发布者」。
+//! * [`crate::Jaso::parse`] 只证明「文件结构合法、内容未被改动」；本模块证明「内容出自受信的发布者」。
 //! * 装载器必须在映射任何内容之前调用 [`TrustPolicy::verify`]，失败即拒绝、无副作用。
 //! * 本模块只做验签（no_std、不分配）；签名在宿主打包侧完成（`sign` 特性下的 [`crate::build::Signer`]）。
 //!
@@ -18,7 +18,8 @@
 
 use ed25519_dalek::{Signature, VerifyingKey};
 
-use crate::{signed_message, Image};
+use crate::code::ErrorCode;
+use crate::{signed_message, Jaso};
 
 /// 开发用发布者名：工作区内置模块的清单都以它声明 `core.publisher`（签名密钥是公开的，只用于开发与验收）。
 /// Name of the development publisher used by the in-tree modules (its signing key is public).
@@ -79,6 +80,19 @@ pub enum TrustError {
     BadSignature,
 }
 
+impl TrustError {
+    /// 稳定错误码（SPEC §13）。
+    pub const fn code(self) -> ErrorCode {
+        match self {
+            TrustError::Unsigned => ErrorCode::TrustUnsigned,
+            TrustError::MissingPublisher | TrustError::UnknownPublisher => ErrorCode::TrustPublisher,
+            TrustError::KeyMismatch => ErrorCode::TrustKey,
+            TrustError::OutOfNamespace => ErrorCode::TrustNamespace,
+            TrustError::BadSignature => ErrorCode::SignatureInvalid,
+        }
+    }
+}
+
 /// 通过验证后的来源。
 /// The provenance of a module that passed the policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,7 +146,7 @@ impl<'a> TrustPolicy<'a> {
 
     /// 按模块文档的规则判定 `img` 是否可信；不修改任何状态。
     /// Decides whether `img` is trusted; has no side effects.
-    pub fn verify(&self, img: &Image<'_>) -> Result<Provenance<'a>, TrustError> {
+    pub fn verify(&self, img: &Jaso<'_>) -> Result<Provenance<'a>, TrustError> {
         let (Some(sig), Some(digest)) = (img.signature(), img.signed_digest()) else {
             return match self.mode {
                 TrustMode::Enforce => Err(TrustError::Unsigned),

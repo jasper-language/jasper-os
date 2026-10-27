@@ -24,7 +24,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use jaso::wire::{self, BoxError, Reply, ReplyKind, Request, TrustSpec, BytesFn, BindFn, BIND_SYMBOL};
-use jaso::Image;
 
 use crate::channel::Channel;
 use crate::error::Error;
@@ -145,8 +144,7 @@ impl IsolatedModule {
         // 1. 无状态检查（与进程内装载相同）；容器总是提供标准宿主接口表
         let view = Grant { capabilities: grant.capabilities, host: Some(&STD_HOST), trust: grant.trust, origin: Origin::Acquired, placement: &AlwaysIsolated };
         let admitted = admit(bytes, &view).map_err(IsolateError::Load)?;
-        let img: &Image<'_> = &admitted.image;
-        let m = img.manifest;
+        let m = admitted.file.manifest;
         // 2. 句柄：每个都登记在清单声明且被授权的能力名下
         if grant.handles.len() > wire::MAX_HANDLES {
             return Err(IsolateError::TooManyHandles);
@@ -163,7 +161,7 @@ impl IsolatedModule {
                 TrustSpec::Signed { name: p.name, namespace: p.namespace, key: p.key }
             }
             Provenance::UnsignedDevelopment => {
-                crate::module::audit_unsigned(img);
+                crate::module::audit_unsigned(&admitted.file);
                 TrustSpec::Development
             }
         };

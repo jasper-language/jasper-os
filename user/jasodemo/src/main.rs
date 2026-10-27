@@ -6,7 +6,8 @@
 //! 2. 导出地址落在映像内；对代码页请求「可写 + 可执行」被内核拒绝（W^X）
 //! 3. 同一模块装入两个实例：基址不同、可写数据各自独立
 //! 4. 卸载：映射消失、槽位可复用、重新装入后状态从头开始
-//! 5. 拒绝：篡改任一字节、截断、指令集不符、装载阶段不符、能力未授予、缺宿主接口表、缺初始化入口
+//! 5. 拒绝：篡改任一字节、截断、指令集不符、装载阶段不符、能力未授予、缺宿主接口表、缺初始化入口；
+//!    format 1 的装载步骤：宿主运行时版本不在 `core.runtime` 内、依赖未满足、旧调用约定 `c.v0`（平台不符）
 //! 6. 来源（发布者签名）：签名模块按受信发布者装入；未签名、篡改后重算完整性摘要（签名失效）、换发布者、
 //!    他人重签、他人重签并改称自己、发布者不在表中——全部在映射之前被拒且不留映射；
 //!    开发模式放行未签名模块并留下审计事件，但坏签名照样被拒
@@ -20,7 +21,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use jasper_rt::module::{
-    unsigned_admitted, Grant, HostV0, LoadError, Module, Origin, Publisher, Standard, TrustError, TrustMode, TrustPolicy, DEVELOPMENT_NAMESPACE,
+    unsigned_admitted, Grant, HostV1, LoadError, Module, Origin, Publisher, Standard, TrustError, TrustMode, TrustPolicy, DEVELOPMENT_NAMESPACE,
     DEVELOPMENT_PUBLISHER,
 };
 use jasper_rt::{entry, io, mem, println, Error};
@@ -32,6 +33,9 @@ static DEMO_OTHER_ARCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-o
 static DEMO_BOOT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-boot.jaso"));
 static DEMO_NOINIT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-noinit.jaso"));
 static DEMO_MORECAPS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-morecaps.jaso"));
+static DEMO_RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-runtime.jaso"));
+static DEMO_DEPENDS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-depends.jaso"));
+static DEMO_OLDABI: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-oldabi.jaso"));
 static DEMO_UNSIGNED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-unsigned.jaso"));
 static DEMO_OTHERPUB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-otherpub.jaso"));
 static DEMO_RESIGNED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-resigned.jaso"));
@@ -79,9 +83,9 @@ extern "C" fn host_dealloc(ptr: *mut u8, size: usize, align: usize) {
 }
 
 /// 本程序提供给模块的宿主接口表。
-static HOST: HostV0 = HostV0 {
-    version: 0,
-    size: core::mem::size_of::<HostV0>() as u32,
+static HOST: HostV1 = HostV1 {
+    version: jasper_rt::module::HOST_TABLE_VERSION,
+    size: core::mem::size_of::<HostV1>() as u32,
     log: host_log,
     alloc: host_alloc,
     dealloc: host_dealloc,
@@ -194,7 +198,7 @@ fn run(s: &mut Steps) -> Result<(), u32> {
     let r_trunc = Module::load(&DEMO[..DEMO.len() - 1], grant(t)).err();
     s.check(r_trunc == Some(LoadError::Format(jaso_err::LengthMismatch)))?;
     let r_arch = Module::load(DEMO_OTHER_ARCH, grant(t)).err();
-    s.check(matches!(r_arch, Some(LoadError::WrongArch(_))))?;
+    s.check(matches!(r_arch, Some(LoadError::Platform(m)) if m.field == jaso::PlatformField::Isa))?;
     let r_stage = Module::load(DEMO_BOOT, grant(t)).err();
     s.check(matches!(r_stage, Some(LoadError::WrongStage(_))))?;
     let r_caps = Module::load(DEMO, Grant { capabilities: &[], host: Some(&HOST), trust: t, origin: Origin::Local, placement: &Standard }).err();
@@ -206,6 +210,12 @@ fn run(s: &mut Steps) -> Result<(), u32> {
     s.check(r_host == Some(LoadError::HostRequired))?;
     let r_init = Module::load(DEMO_NOINIT, grant(t)).err();
     s.check(r_init == Some(LoadError::MissingInit))?;
+    let r_runtime = Module::load(DEMO_RUNTIME, grant(t)).err();
+    s.check(r_runtime == Some(LoadError::RuntimeVersion))?;
+    let r_depends = Module::load(DEMO_DEPENDS, grant(t)).err();
+    s.check(matches!(&r_depends, Some(LoadError::Dependency(d)) if d == "jaso-base"))?;
+    let r_oldabi = Module::load(DEMO_OLDABI, grant(t)).err();
+    s.check(matches!(r_oldabi, Some(LoadError::Platform(m)) if m.field == jaso::PlatformField::Abi && m.actual.as_str() == "c.v0"))?;
     // 所有被拒的装载都没有留下映射：全部槽位空闲，第一个槽位可再次装入
     let again = Module::load(DEMO, grant(t)).map_err(|_| 100 + s.0)?;
     s.check(again.base() == base)?;
@@ -213,13 +223,14 @@ fn run(s: &mut Steps) -> Result<(), u32> {
         "jasodemo: rejected tamper={:?} truncated={:?} arch={:?} stage={:?} caps={:?} host={:?} init={:?}",
         r_tamper, r_trunc, r_arch, r_stage, r_caps, r_host, r_init
     );
+    println!("jasodemo: format1 rejected runtime={:?} depends={:?} oldabi={:?}", r_runtime, r_depends, r_oldabi);
     drop(again);
     signatures(s, t, base)
 }
 
 /// 篡改代码段的一个字节并重算完整性摘要：文件结构与完整性都合格，只有签名失效。
 fn code_tampered() -> Option<Vec<u8>> {
-    let img = jaso::Image::parse(DEMO).ok()?;
+    let img = jaso::Jaso::parse(DEMO).ok()?.image(0)?;
     let code = img.segments().find(|seg| seg.flags & jaso::FLAG_X != 0)?;
     let at = code.data.as_ptr() as usize - DEMO.as_ptr() as usize + code.data.len() / 2;
     let mut t = DEMO.to_vec();

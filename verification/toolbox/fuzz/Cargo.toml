@@ -9,6 +9,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 kernel-core = { path = "../../../kernel-core" }
+jaso = { path = "../../../jaso", features = ["alloc"] }
 [[bin]]
 name = "memory_abi"
 path = "fuzz_targets/memory_abi.rs"
@@ -166,6 +167,13 @@ bench = false
 [[bin]]
 name = "elf_abi_section"
 path = "fuzz_targets/elf_abi_section.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jaso_parse"
+path = "fuzz_targets/jaso_parse.rs"
 test = false
 doc = false
 bench = false

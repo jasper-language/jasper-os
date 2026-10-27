@@ -1,4 +1,4 @@
-# jaso —— `.jaso` 模块格式（v0，Native-only，实验性、未冻结）：解析与校验（no_std）、构建（alloc）、从 ELF 打包（std）。
+# jaso —— `.jaso` 模块格式（format 1 = beta 1，见 SPEC.md）：解析与校验（no_std）、构建（alloc）、从 ELF 打包（std）。
 # 装载器（用户态）与宿主打包工具共用这一份定义。
 [package]
 name = "jaso"
@@ -22,3 +22,6 @@ sha2 = { version = "=0.11.1", default-features = false }
 # 发布者签名（Ed25519）：BSD-3-Clause；no_std、无 alloc 也可验签、不需要线程 / TLS / 运行时；
 # 关闭默认特性（不带预计算表与随机数生成），后端经工作区配置强制为纯软件（serial），不使用 SIMD 寄存器。
 ed25519-dalek = { version = "=3.0.0", default-features = false }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

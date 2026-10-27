@@ -311,6 +311,28 @@ In this order, first failure wins:
 7. extensions in directory order (§9), then the Hybrid requirement;
 8. signature section layout (§10).
 
+Order inside the steps (normative; the reference implementation follows it):
+
+* step 2, per directory entry: `kind` (`section.unknown`) → reserved field and per-kind `flags`/`vaddr`/`mem_size`
+  (`section.dir`) → bounds (`section.bounds`) → per-file count of that kind (`section.duplicate`). Per-image limits
+  (≤ 1 Exports per image, …) are not checked here.
+* step 3: Manifest, then Platform, then Images.
+* step 4, per image entry in index order: `image_kind` value, reserved bytes, platform index, section range, and
+  `isa = 0` ⇔ managed (all `image.index`) → kind allowed by the module kind (`image.kind`) → `image_size`
+  (`image.size`); then, over all pairs of entries, range overlap and shared-platform equality (`image.index`); then
+  section assignment in directory order (`image.index`); finally the header `arch` rule (`platform.arch`).
+* step 5, per image: composition (§7 / §8 counts, `image.index`) → each Segment in directory order → page overlap
+  → exports → relocs (native) or code then exports (managed).
+* step 6: manifest lines in order (first bad line wins); after all lines, missing keys in the order `core.name`,
+  `core.version`, `core.abi`, `core.stage`; then `manifest.stage`, `platform.abi`, `image.exports_mismatch`.
+  `core.depends`, `core.requires` and `core.exports` limits are reported on the line that exceeds them.
+* step 7, per Ext section in directory order: layout (`extension.malformed`) → same name as an earlier Ext
+  (`extension.duplicate`) → critical flag of a known `(name, version)` (`extension.malformed`) or unknown critical
+  (`extension.critical`); after all sections, the Hybrid requirement.
+
+A `platform.mismatch` report for `isa_ext` names the first file token the host lacks as the actual value and `-`
+as the expected value.
+
 ### 12.2 L1 runtime load
 
 Loading is all-or-nothing: nothing is mapped, linked or called before every step up to 7 succeeds, and a failure
