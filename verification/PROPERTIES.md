@@ -536,3 +536,17 @@ cont-splash 帧缓冲仍未验证（见 `docs/PDA-1-image-dtb.md`）。
 | MB1-STEP-4 | cargo-fuzz | 同上 | N/A：没有解析或编码入口可喂字节；替代证据为 S-2 系统调用健壮性探测 | N/A | `bash scripts/s2.sh`（仅VM） | 同 MB1-STEP-2 |
 | MB1-STEP-5 | Kani | 同上 | N/A：等待 tick、IPI 与客户机串口输出不是可有界建模的纯函数；替代证据为 fault-scale 客户机 `failed=0` | N/A | `bash scripts/s2.sh`（仅VM） | QEMU 只判正确性，不证明硬件时序 |
 | MB1-STEP-6 | Loom | 同上 | N/A：发布窗口用真实关中断而不是 std 同步原语，Loom 无法替换；替代证据为 8 核 fault-scale 客户机 `[JSR-TASK-INDEX]`、`[JSR-WAKE-MSG]`、`[JSR-WAKE-FULL]`、`[JSR-DEADLINE-OWNER]`、`[JSR-DEADLINE-IPI]`、`[JSR-RT-LOCAL]`、`[JSR-BUDGET-TICK]` 七项判据与 `checks=39 failed=0` | N/A | `bash scripts/s2.sh`（仅VM） | 单次 8 核运行，不是穷举交错 |
+
+## 原生 ABI 世代（issue #8 第一片）
+
+范围：`Major.Minor.Patch` 声明与盖章、同主版本兼容、跨主版本/次版本过新拒绝、装载前检查与查询通道。
+发布快照/轮换与能力要求不在本切片内。六个步骤的命令均在仓库根目录执行，并经 VM 运行；`VERUS` 由环境变量给出。
+
+| ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |
+|---|---|---|---|---|---|---|
+| ABI-GEN-01 | 加载被接受当且仅当主版本相同且程序最低次版本不高于内核次版本；Patch 不参与门槛 | `kernel_core::abi_version::compatible`; `verification/toolbox/verus/abi_version.rs` | Verus/Z3 | proved（仅规格模型） | `VERUS=<verus> bash verification/toolbox/run-abi-suite.sh`（步骤 1） | 7 条 proof 通过；模型是自然数抽象，不证明 Rust 编译产物、ELF 解析或装载器调用顺序 |
+| ABI-GEN-02 | 28 字节章编码/解析逐字节往返；被接受的任意 28 字节输入必须恰为规范编码；任意其它长度拒绝 | `kernel_core::abi_version::{encode_note,parse_note}`; `verification/toolbox/tests/abi_version.rs` | Proptest | tested | `cargo test --manifest-path verification/toolbox/Cargo.toml --test abi_version` | 512 例/性质、固定种子可复现；覆盖全部 u16 字段域与随机字节，不替代代码级证明 |
+| ABI-GEN-03 | 章解析与打包/解包在 Miri 下无未定义行为，少一字节明确拒绝 | `verification/toolbox/tests/abi_version.rs::note_roundtrip_under_miri` | Miri | tested | `cargo +nightly miri test --manifest-path verification/toolbox/Cargo.toml --test abi_version note_roundtrip_under_miri` | 1 项确定性用例；Miri 不执行 Rust 内核目标与内联汇编，硬件路径由 QEMU 证据承担 |
+| ABI-GEN-04 | 任意长度输入不让章解析 panic；成功解析的输入重新编码与原文逐字节一致 | `verification/toolbox/fuzz/fuzz_targets/abi_note.rs` | cargo-fuzz | tested | `(cd verification/toolbox/fuzz && cargo fuzz run abi_note -- -runs=10000)` | 10000 次、空语料起步、最长 4096 字节；覆盖引导 fuzz 不等于穷举 |
+| ABI-GEN-05 | 兼容性判定与 `check_image` 分类对任意 u16 输入满足规格；章编解码往返；打包保留高位拒绝 | `kernel-core/src/abi_version.rs`（`abi-fv` 特性下的 3 个 harness） | Kani | proved（有界） | `cargo kani -p kernel-core --features abi-fv --harness abi_compatibility_is_exactly_same_major_and_minor_bound` | 3 个 harness 全部 SUCCESSFUL；默认 Kani 套件计数不变（harness 只在 `abi-fv` 下编译）；不覆盖 ELF 节头解析与真实页表 |
+| ABI-GEN-06 | —（无并发状态可枚举） | `kernel_core::abi_version` 的纯函数 | Loom | N/A：纯函数，无锁/原子/线程交错；不能记为 PASS | 替代证据：`bash scripts/accept.sh` 的 `ABI` 检查（真实 QEMU 中缺章/损坏/跨主版本/次版本过新均在映射前拒绝，页帧回基线） | Loom 不适用；QEMU 演练证明装载器集成与拒绝顺序，不证明任意恶意 ELF 或硬件内存序 |

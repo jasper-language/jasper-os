@@ -6,6 +6,12 @@ use std::path::PathBuf;
 
 fn main() {
     let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    println!("cargo:rerun-if-changed={}", dir.join("../../abi/abi-version.txt").display());
+    // 原生 ABI 世代由 abi/abi-version.txt 唯一声明；链接脚本把它写成 .note.jasper.abi 章。
+    let abi = kernel_core::abi_version::NATIVE;
+    println!("cargo:rustc-link-arg-bins=--defsym=JSR_ABI_MAJOR={}", abi.major);
+    println!("cargo:rustc-link-arg-bins=--defsym=JSR_ABI_MINOR={}", abi.minor);
+    println!("cargo:rustc-link-arg-bins=--defsym=JSR_ABI_PATCH={}", abi.patch);
     let reg_path = dir.join("../../abi/system-ids.txt");
     println!("cargo:rerun-if-changed={}", reg_path.display());
     println!("cargo:rerun-if-changed={}", dir.join("link.ld").display());

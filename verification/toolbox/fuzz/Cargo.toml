@@ -152,6 +152,8 @@ bench = false
 [[bin]]
 name = "timer_event"
 path = "fuzz_targets/timer_event.rs"
+name = "abi_note"
+path = "fuzz_targets/abi_note.rs"
 test = false
 doc = false
 bench = false

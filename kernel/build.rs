@@ -12,15 +12,28 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+use kernel_core::elf::ElfClass;
+
 fn main() {
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("..");
     let reg_path = root.join("abi/system-ids.txt");
     let lock_path = root.join("abi/system-ids.lock");
+    let version_path = root.join("abi/abi-version.txt");
     println!("cargo:rerun-if-changed={}", reg_path.display());
     println!("cargo:rerun-if-changed={}", lock_path.display());
+    println!("cargo:rerun-if-changed={}", version_path.display());
 
     let reg = std::fs::read_to_string(&reg_path).expect("读取 abi/system-ids.txt 失败");
     let lock = std::fs::read_to_string(&lock_path).expect("读取 abi/system-ids.lock 失败");
+    let version_source = std::fs::read_to_string(&version_path).expect("读取 abi/abi-version.txt 失败");
+    let native = kernel_core::abi_version::parse_source(&version_source)
+        .unwrap_or_else(|e| panic!("abi/abi-version.txt 解析失败：{:?}", e));
+    // 两套解析器（kernel-core/build.rs 与 kernel-core::abi_version）必须对同一份真源得到同一结果。
+    assert_eq!(
+        native,
+        kernel_core::abi_version::NATIVE,
+        "abi/abi-version.txt 与 kernel-core 生成的常量不一致（构建缓存未刷新或解析器分歧）"
+    );
 
     let mut out = String::new();
     let mut entries = String::new();
@@ -61,8 +74,8 @@ fn main() {
         }
         Err(e) => panic!("abi/system-ids.txt 校验失败：{:?}", e),
     }
-    if let Err(e) = kernel_core::abi::check_frozen(&reg, &lock) {
-        panic!("已冻结的系统接口被破坏（abi/system-ids.lock）：{:?}", e);
+    if let Err(e) = kernel_core::abi::check_frozen_generation(&reg, &lock, native) {
+        panic!("已冻结的系统接口或 ABI 世代被破坏（abi/system-ids.lock）：{:?}", e);
     }
     // 能力集合的容量是 ABI 契约的一部分：登记表里的操作 ID 必须都能被 256 位集合表示。
     // 越界即构建失败，不允许出现「登记表承认、权限位却放不下」的操作。
@@ -104,7 +117,7 @@ fn main() {
     std::fs::write(dest, out).expect("写入生成代码失败");
 
     if std::env::var_os("CARGO_FEATURE_USER_PROGRAMS").is_some() {
-        build_user_programs(&root);
+        build_user_programs(&root, native);
     }
     // AArch64 / RISC-V 没有引导器，内核 ELF 由固件或仿真器直接装载：用本仓库的链接脚本固定装载地址与段布局。
     let script = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
@@ -124,8 +137,8 @@ fn main() {
 /// 产物路径经环境变量（`JSR_USER_HELLO`、`JSR_USER_RING`、`JSR_USER_IPC`、`JSR_USER_PROG`、`JSR_USER_ROBUST`、
 /// `JSR_USER_RTDEMO`、`JSR_USER_LIBCHECK`、`JSR_USER_JASODEMO`、`JSR_USER_MODHOST`、`JSR_USER_SCHEDTEST`、
 /// `JSR_USER_BENCH`、`JSR_USER_ISOHOST`）交给内核源码 `include_bytes!`。
-/// Builds the embedded user programs with a separate target dir and exposes their paths to the kernel.
-fn build_user_programs(root: &std::path::Path) {
+/// Builds the embedded user programs with a separate target dir, verifies their ABI stamps, and exposes their paths.
+fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version::AbiVersion) {
     let mut programs: Vec<(&str, &str, &str)> = vec![
         ("user/hello", "user-hello", "JSR_USER_HELLO"),
         ("user/ring", "user-ring", "JSR_USER_RING"),
@@ -180,10 +193,39 @@ fn build_user_programs(root: &std::path::Path) {
     }
     let status = cmd.arg("--target-dir").arg(&target_dir).status().expect("无法启动 cargo 构建用户程序");
     assert!(status.success(), "用户程序构建失败");
-    for (_, pkg, env) in &programs {
+    let (machine, class) = elf_target();
+    // 期望的章直接由构建脚本解析出的真源构造，避免「校验值来自另一份生成常量」的循环自证。
+    let expected = kernel_core::abi_version::ProgramAbi {
+        major: native.major,
+        min_minor: native.minor,
+        patch: native.patch,
+    };
+    for (dir, pkg, env) in &programs {
         let elf = target_dir.join(triple).join("release").join(pkg);
         assert!(elf.exists(), "找不到用户程序产物 {}", elf.display());
+        // 构建期一致性：每个内嵌程序都必须携带与当前真源完全一致的 ABI 章，
+        // 否则内核启动后会在装载阶段拒绝自己的程序——这类失配必须在这里就失败。
+        let bytes = std::fs::read(&elf).unwrap_or_else(|e| panic!("读取用户程序 {} 失败：{}", elf.display(), e));
+        let parsed = kernel_core::elf::parse(&bytes, machine, class)
+            .unwrap_or_else(|e| panic!("用户程序 {} 的 ELF 不合法：{:?}", dir, e));
+        assert_eq!(
+            parsed.abi(),
+            Some(expected),
+            "用户程序 {} 的 ABI 章与 abi/abi-version.txt 不一致",
+            dir
+        );
         println!("cargo:rustc-env={}={}", env, elf.display());
+    }
+}
+
+/// 当前内核目标指令集的 `(e_machine, ELF 类别)`，用于构建期校验用户程序。
+fn elf_target() -> (u16, ElfClass) {
+    match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("x86_64") => (62, ElfClass::Elf64),
+        Ok("aarch64") => (183, ElfClass::Elf64),
+        Ok("riscv64") => (243, ElfClass::Elf64),
+        Ok("riscv32") => (243, ElfClass::Elf32),
+        other => panic!("内嵌用户程序尚不支持该指令集：{:?}", other),
     }
 }
 

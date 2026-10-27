@@ -26,6 +26,7 @@
 extern crate alloc;
 
 pub mod appid_demo;
+pub mod abi_demo;
 pub mod arbiter_demo;
 pub mod arch;
 pub mod baseline;

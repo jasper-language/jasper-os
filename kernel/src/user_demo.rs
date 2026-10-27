@@ -436,14 +436,14 @@ static USER_HELLO: &[u8] = include_bytes!(env!("JSR_USER_HELLO"));
 ///
 /// 1. 截断的 ELF 被装载器拒绝（返回规范错误名，不做半装载）
 /// 2. 合法 ELF：按段权限映射（代码可执行只读、只读数据、两页 BSS），从 ELF 入口进入 Ring 3
-/// 3. 程序经 `system.console.write` 输出中文问候与 BSS 检查结果，经 `system.task.exit(0)` 退出
-///    （BSS 未清零时程序以退出码 3 退出，验收即失败）
+/// 3. 程序经 `system.console.write` 输出中文问候与 BSS 检查结果，经 `system.abi.get` 比对 ABI 世代，
+///    再经 `system.task.exit(0)` 退出（BSS 未清零或 ABI 不符时程序以退出码 3 退出，验收即失败）
 /// 4. 进程回收后空闲帧回到基线
 #[cfg(feature = "user-programs")]
 pub fn run_elf() {
     use crate::proc::{self, ProcState};
     let free_before = frame::free_frames();
-    let allowed = SyscallSet::of(&[abi::SYSTEM_CONSOLE_WRITE, abi::SYSTEM_TASK_EXIT]);
+    let allowed = SyscallSet::of(&[abi::SYSTEM_CONSOLE_WRITE, abi::SYSTEM_ABI_GET, abi::SYSTEM_TASK_EXIT]);
     let Ok(pid) = proc::create("user-hello", allowed) else {
         check(false, "进程创建失败");
         return;
@@ -498,7 +498,7 @@ pub fn run_lifecycle() {
 
     let free_before = frame::free_frames();
     let (live0, _, destroyed0) = kobj::stats();
-    let allowed = SyscallSet::of(&[abi::SYSTEM_CONSOLE_WRITE, abi::SYSTEM_TASK_EXIT]);
+    let allowed = SyscallSet::of(&[abi::SYSTEM_CONSOLE_WRITE, abi::SYSTEM_ABI_GET, abi::SYSTEM_TASK_EXIT]);
     let Ok(pid) = proc::create("life-proc", allowed) else {
         check(false, "进程创建失败");
         return;

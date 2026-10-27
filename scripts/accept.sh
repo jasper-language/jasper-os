@@ -678,6 +678,23 @@ check_m51pre() { # ELF 装载（M5.1 前置部分）：截断被拒；按段装�
   fi
 }
 
+check_abi() {   # ABI 世代（issue #8 第一片）：单一真源、真实章、装载前拒绝（缺章/损坏/跨主版本/次版本过新）、页帧回收
+  if has '^\[JSR-ABI\] native=[0-9]+\.[0-9]+\.[0-9]+ packed=0x[0-9a-f]+ single_source=true' \
+     && has '^\[JSR-ABI\] case=stamp major=[0-9]+ min_minor=[0-9]+ patch=[0-9]+ matches_native=true' \
+     && has '^\[JSR-ABI\] case=accepted entry=0x[0-9a-f]+ mapped=[1-9][0-9]*' \
+     && has '^\[JSR-ABI\] case=missing reject=system\.error\.abi_metadata mapped=0' \
+     && has '^\[JSR-ABI\] case=malformed reject=system\.error\.abi_metadata mapped=0' \
+     && has '^\[JSR-ABI\] case=major_mismatch reject=system\.error\.abi_mismatch mapped=0' \
+     && has '^\[JSR-ABI\] case=minor_too_new reject=system\.error\.abi_mismatch mapped=0' \
+     && has '^\[JSR-USERTEXT\] task=user-hello bytes=[0-9]+ text=abi=[0-9]+\.[0-9]+\.[0-9]+' \
+     && has '^\[JSR-USERTEXT\] task=user-hello bytes=[0-9]+ text=abi_query=true' \
+     && has '^\[JSR-ABI\] summary checks=[0-9]+ failed=0 reclaimed=true'; then
+    record ABI PASS "ABI 版本真源唯一，内嵌程序携带原生章；缺章/损坏/跨主版本/次版本过新均在映射前拒绝，运行期查询一致，页帧回到基线"
+  else
+    record ABI FAIL "缺少 JSR-ABI 关键标记、ABI 查询不符或 failed≠0"
+  fi
+}
+
 check_m41() {   # 对象生命周期：关句柄 ⇒ closing 不销毁；重复关闭被拒；线程退出后由线程表保活；reap 只入队；级联迭代清理；回到基线
   if has 'handle closed: became_unowned=true dead=false counts=Ok\(\(0, 2, Closing\)\) double_close=system\.object\.error\.underflow reacquire=system\.object\.error\.invalid' \
      && has 'thread exited: task counts=Err\(Invalid\)' \
@@ -1171,7 +1188,7 @@ check_smp1a() { # 多处理器第一阶段（x86_64）：4 与 8 个处理器都
   fi
   port_rerun "$SERIAL_SMP4" "$QRC_SMP4" "SMP4/" 256 \
     check_m11 check_m12 check_m13 check_m14 check_m15 check_m21 check_m22 check_m23 check_m24 check_m31 check_m32 check_m33 \
-    check_m34 check_m51pre check_m41 check_m42 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 \
+    check_m34 check_m51pre check_abi check_m41 check_m42 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 \
     check_j5 check_j6 check_sched1 check_sched2 check_sched3 check_t1 check_t2 check_fix
   local n=$PORT_N bad=$PORT_BAD miss=""
   smp1a_verdict "$SERIAL_SMP4" "$QRC_SMP4" "x86_64×4" 4; miss="$miss$SMP1A_MISS"
@@ -2413,11 +2430,11 @@ if [ "$SPOT" -eq 1 ]; then
     if declare -F "check_$c" >/dev/null; then "check_$c"; else record "$c" FAIL "定点验收：没有名为 check_$c 的检查"; fi
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
-  check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+  check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
   check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
-  check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+  check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
   check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
 fi
 

@@ -46,6 +46,11 @@ struct Layout {
     entry: usize,
     phoff: usize,
     phentsize: usize,
+    /// 文件头：节头表偏移、表项大小、表项数、节名字符串表下标。
+    shoff: usize,
+    shentsize: usize,
+    shnum: usize,
+    shstrndx: usize,
     /// 程序头大小与其中 p_flags、p_offset、p_vaddr、p_filesz、p_memsz 的偏移。
     phent: usize,
     p_flags: usize,
@@ -53,6 +58,12 @@ struct Layout {
     p_vaddr: usize,
     p_filesz: usize,
     p_memsz: usize,
+    /// 节头大小与其中 sh_name、sh_type、sh_offset、sh_size 的偏移。
+    shent: usize,
+    sh_name: usize,
+    sh_type: usize,
+    sh_offset: usize,
+    sh_size: usize,
     /// 地址空间上限（不含；ELF64 不另设上限）。
     limit: Option<u64>,
 }
@@ -64,12 +75,21 @@ const ELF32: Layout = Layout {
     entry: 24,
     phoff: 28,
     phentsize: 42,
+    shoff: 32,
+    shentsize: 46,
+    shnum: 48,
+    shstrndx: 50,
     phent: 32,
     p_flags: 24,
     p_offset: 4,
     p_vaddr: 8,
     p_filesz: 16,
     p_memsz: 20,
+    shent: 40,
+    sh_name: 0,
+    sh_type: 4,
+    sh_offset: 16,
+    sh_size: 20,
     limit: Some(1 << 32),
 };
 
@@ -80,12 +100,21 @@ const ELF64: Layout = Layout {
     entry: 24,
     phoff: 32,
     phentsize: 54,
+    shoff: 40,
+    shentsize: 58,
+    shnum: 60,
+    shstrndx: 62,
     phent: 56,
     p_flags: 4,
     p_offset: 8,
     p_vaddr: 16,
     p_filesz: 32,
     p_memsz: 40,
+    shent: 64,
+    sh_name: 0,
+    sh_type: 4,
+    sh_offset: 24,
+    sh_size: 32,
     limit: None,
 };
 
@@ -164,6 +193,8 @@ pub struct ElfImage {
     pub entry: u64,
     segs: [Option<Segment>; MAX_SEGMENTS],
     count: usize,
+    /// 程序声明的 ABI 要求；没有 `.note.jasper.abi` 节时为 `None`。
+    abi: Option<crate::abi_version::ProgramAbi>,
 }
 
 impl ElfImage {
@@ -175,6 +206,12 @@ impl ElfImage {
     /// 装载段个数。
     pub fn segment_count(&self) -> usize {
         self.count
+    }
+
+    /// 程序声明的 ABI 要求（未携带 ABI 章时为 `None`；章节格式错误会在解析时被拒）。
+    /// The program ABI requirement, or `None` when the image carries no ABI stamp.
+    pub fn abi(&self) -> Option<crate::abi_version::ProgramAbi> {
+        self.abi
     }
 }
 
@@ -199,6 +236,10 @@ pub enum ElfError {
     BadEntry,
     /// 装载段过多。
     TooManySegments,
+    /// 节头表或节名非法（越界、表项尺寸不符、扩展编号未支持）。
+    BadSection,
+    /// `.note.jasper.abi` 节存在但不是合法的 ABI 章。
+    BadAbiNote,
 }
 
 impl ElfError {
@@ -214,6 +255,8 @@ impl ElfError {
             ElfError::Overlap => "system.elf.error.overlap",
             ElfError::BadEntry => "system.elf.error.bad_entry",
             ElfError::TooManySegments => "system.elf.error.too_many_segments",
+            ElfError::BadSection => "system.elf.error.bad_section",
+            ElfError::BadAbiNote => "system.error.abi_metadata",
         }
     }
 }
@@ -231,6 +274,96 @@ fn u64_at(b: &[u8], off: usize) -> Result<u64, ElfError> {
     let mut a = [0u8; 8];
     a.copy_from_slice(s);
     Ok(u64::from_le_bytes(a))
+}
+
+/// 节头类型：普通数据 / 注释 / 不占文件空间。
+const SHT_PROGBITS: u32 = 1;
+const SHT_NOTE: u32 = 7;
+const SHT_NOBITS: u32 = 8;
+
+/// 读一个节头：`(sh_name, sh_type, sh_offset, sh_size)`。
+fn section_at(
+    image: &[u8],
+    lay: &Layout,
+    shoff: usize,
+    shentsize: usize,
+    index: usize,
+) -> Result<(u32, u32, u64, u64), ElfError> {
+    let base = index
+        .checked_mul(shentsize)
+        .and_then(|n| n.checked_add(shoff))
+        .ok_or(ElfError::BadSection)?;
+    let end = base.checked_add(shentsize).ok_or(ElfError::BadSection)?;
+    if end > image.len() {
+        return Err(ElfError::BadSection);
+    }
+    Ok((
+        u32_at(image, base + lay.sh_name)?,
+        u32_at(image, base + lay.sh_type)?,
+        lay.word_at(image, base + lay.sh_offset)?,
+        lay.word_at(image, base + lay.sh_size)?,
+    ))
+}
+
+/// 从节名字符串表读一个以 NUL 结尾的名字（只接受 UTF-8）。
+fn section_name(strtab: &[u8], offset: u32) -> Result<&str, ElfError> {
+    let rest = strtab.get(offset as usize..).ok_or(ElfError::BadSection)?;
+    let end = rest.iter().position(|&b| b == 0).ok_or(ElfError::BadSection)?;
+    core::str::from_utf8(&rest[..end]).map_err(|_| ElfError::BadSection)
+}
+
+/// 找 `.note.jasper.abi` 节的字节。没有节头表或没有该节时返回 `Ok(None)`，由装载策略以 Missing 拒绝；
+/// 节头表本身损坏返回 [`ElfError::BadSection`]，章格式错误留给 [`crate::abi_version::parse_note`] 判定。
+///
+/// 为什么用节而不是程序头：ABI 章是**文件元数据**，不需要被映射进用户地址空间；
+/// 节名由链接脚本固定，构建期还会逐个内嵌程序核对，因此节头表损坏或名字被改都会在这里被拒绝。
+fn abi_note_bytes<'a>(image: &'a [u8], lay: &Layout) -> Result<Option<&'a [u8]>, ElfError> {
+    let shoff64 = lay.word_at(image, lay.shoff)?;
+    if shoff64 == 0 {
+        return Ok(None);
+    }
+    let shoff = usize::try_from(shoff64).map_err(|_| ElfError::BadSection)?;
+    let shentsize = u16_at(image, lay.shentsize)? as usize;
+    let shnum = u16_at(image, lay.shnum)? as usize;
+    let shstrndx = u16_at(image, lay.shstrndx)? as usize;
+    // 扩展节数（SHN_XINDEX）与扩展字符串表下标不在本装载器支持范围内：明确拒绝，不猜测。
+    if shentsize != lay.shent || shnum == 0 || shstrndx == 0xffff || shstrndx >= shnum {
+        return Err(ElfError::BadSection);
+    }
+    let table_end = shnum
+        .checked_mul(shentsize)
+        .and_then(|n| n.checked_add(shoff))
+        .ok_or(ElfError::BadSection)?;
+    if table_end > image.len() {
+        return Err(ElfError::BadSection);
+    }
+    let (_, str_type, str_off64, str_size64) = section_at(image, lay, shoff, shentsize, shstrndx)?;
+    if str_type == SHT_NOBITS {
+        return Err(ElfError::BadSection);
+    }
+    let str_off = usize::try_from(str_off64).map_err(|_| ElfError::BadSection)?;
+    let str_size = usize::try_from(str_size64).map_err(|_| ElfError::BadSection)?;
+    let str_end = str_off.checked_add(str_size).ok_or(ElfError::BadSection)?;
+    let strtab = image.get(str_off..str_end).ok_or(ElfError::BadSection)?;
+
+    let mut found: Option<&[u8]> = None;
+    for i in 1..shnum {
+        let (name_off, ty, off64, size64) = section_at(image, lay, shoff, shentsize, i)?;
+        if section_name(strtab, name_off)? != crate::abi_version::NOTE_SECTION {
+            continue;
+        }
+        if found.is_some() {
+            return Err(ElfError::BadAbiNote);
+        }
+        if ty != SHT_PROGBITS && ty != SHT_NOTE {
+            return Err(ElfError::BadAbiNote);
+        }
+        let off = usize::try_from(off64).map_err(|_| ElfError::BadAbiNote)?;
+        let size = usize::try_from(size64).map_err(|_| ElfError::BadAbiNote)?;
+        let end = off.checked_add(size).ok_or(ElfError::BadAbiNote)?;
+        found = Some(image.get(off..end).ok_or(ElfError::BadAbiNote)?);
+    }
+    Ok(found)
 }
 
 /// 解析并校验一个 ELF 静态可执行文件。`machine` 为目标架构的 `e_machine` 值，`class` 为其类别；
@@ -263,7 +396,7 @@ pub fn parse(image: &[u8], machine: u16, class: ElfClass) -> Result<ElfImage, El
         return Err(ElfError::Truncated);
     }
 
-    let mut out = ElfImage { entry, segs: [None; MAX_SEGMENTS], count: 0 };
+    let mut out = ElfImage { entry, segs: [None; MAX_SEGMENTS], count: 0, abi: None };
     for i in 0..phnum {
         let ph = phoff + i * lay.phent;
         let ty = u32_at(image, ph)?;
@@ -313,7 +446,11 @@ pub fn parse(image: &[u8], machine: u16, class: ElfClass) -> Result<ElfImage, El
     if !entry_ok {
         return Err(ElfError::BadEntry);
     }
-    Ok(out)
+    let abi = match abi_note_bytes(image, lay)? {
+        Some(bytes) => Some(crate::abi_version::parse_note(bytes).map_err(|_| ElfError::BadAbiNote)?),
+        None => None,
+    };
+    Ok(ElfImage { entry, segs: out.segs, count: out.count, abi })
 }
 
 #[cfg(test)]
@@ -350,6 +487,67 @@ mod tests {
     }
 
     const CODE: u64 = 0x1000_0040_0000;
+
+    /// 给最小 ELF 加三个节头（空节、节名字符串表、ABI 章节），用于验证节头解析。
+    fn with_abi_note(mut img: Vec<u8>, note: [u8; crate::abi_version::NOTE_BYTES]) -> Vec<u8> {
+        let shoff = 0x1000usize;
+        let str_off = 0x1100usize;
+        let note_off = 0x1200usize;
+        let strtab = b"\0.shstrtab\0.note.jasper.abi\0";
+        let note_name = 11u32;
+        img[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
+        img[58..60].copy_from_slice(&64u16.to_le_bytes());
+        img[60..62].copy_from_slice(&3u16.to_le_bytes());
+        img[62..64].copy_from_slice(&1u16.to_le_bytes());
+        // 节头 1：.shstrtab（SHT_STRTAB = 3）
+        let s1 = shoff + 64;
+        img[s1..s1 + 4].copy_from_slice(&1u32.to_le_bytes());
+        img[s1 + 4..s1 + 8].copy_from_slice(&3u32.to_le_bytes());
+        img[s1 + 24..s1 + 32].copy_from_slice(&(str_off as u64).to_le_bytes());
+        img[s1 + 32..s1 + 40].copy_from_slice(&(strtab.len() as u64).to_le_bytes());
+        // 节头 2：.note.jasper.abi（SHT_PROGBITS = 1）
+        let s2 = shoff + 128;
+        img[s2..s2 + 4].copy_from_slice(&note_name.to_le_bytes());
+        img[s2 + 4..s2 + 8].copy_from_slice(&1u32.to_le_bytes());
+        img[s2 + 24..s2 + 32].copy_from_slice(&(note_off as u64).to_le_bytes());
+        img[s2 + 32..s2 + 40].copy_from_slice(&(note.len() as u64).to_le_bytes());
+        img[str_off..str_off + strtab.len()].copy_from_slice(strtab);
+        img[note_off..note_off + note.len()].copy_from_slice(&note);
+        img
+    }
+
+    #[test]
+    fn parses_program_abi_stamp_and_rejects_corruption() {
+        let program = crate::abi_version::ProgramAbi { major: 1, min_minor: 0, patch: 0 };
+        let base = build(&[(PT_LOAD, 0x1000, CODE, 0x100, 0x100, 5)], CODE);
+        let img = with_abi_note(base.clone(), crate::abi_version::encode_note(program));
+        let parsed = parse(&img, X86_64, ElfClass::Elf64).unwrap();
+        assert_eq!(parsed.abi(), Some(program));
+
+        // 章内容损坏：节存在但格式不合法 ⇒ 明确拒绝，而不是当成「没有章」
+        let mut bad_note = crate::abi_version::encode_note(program);
+        bad_note[12] = b'X';
+        let bad = with_abi_note(base.clone(), bad_note);
+        assert_eq!(parse(&bad, X86_64, ElfClass::Elf64).unwrap_err(), ElfError::BadAbiNote);
+
+        // 节名被破坏：等价于没有 ABI 章（装载策略层会以 Missing 拒绝）
+        let mut no_name = img.clone();
+        no_name[0x1100] = 0; // strtab 的第一个字节改成 0，下面把 .note 节名改成指向空串
+        let s2 = 0x1000 + 128;
+        no_name[s2..s2 + 4].copy_from_slice(&0u32.to_le_bytes());
+        let parsed = parse(&no_name, X86_64, ElfClass::Elf64).unwrap();
+        assert_eq!(parsed.abi(), None);
+
+        // 节类型非法：不能把一个普通数据节冒充 ABI 章
+        let mut bad_type = img.clone();
+        bad_type[s2 + 4..s2 + 8].copy_from_slice(&8u32.to_le_bytes()); // SHT_NOBITS
+        assert_eq!(parse(&bad_type, X86_64, ElfClass::Elf64).unwrap_err(), ElfError::BadAbiNote);
+
+        // 节头表整体越界：明确拒绝
+        let mut bad_table = img;
+        bad_table[40..48].copy_from_slice(&0x2ff0u64.to_le_bytes());
+        assert_eq!(parse(&bad_table, X86_64, ElfClass::Elf64).unwrap_err(), ElfError::BadSection);
+    }
 
     #[test]
     fn parses_code_and_bss_segments() {

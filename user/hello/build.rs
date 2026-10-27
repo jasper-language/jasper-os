@@ -6,6 +6,12 @@ use std::path::PathBuf;
 
 fn main() {
     let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    println!("cargo:rerun-if-changed={}", dir.join("../../abi/abi-version.txt").display());
+    // 原生 ABI 世代由 abi/abi-version.txt 唯一声明；链接脚本把它写成 .note.jasper.abi 章。
+    let abi = kernel_core::abi_version::NATIVE;
+    println!("cargo:rustc-link-arg-bins=--defsym=JSR_ABI_MAJOR={}", abi.major);
+    println!("cargo:rustc-link-arg-bins=--defsym=JSR_ABI_MINOR={}", abi.minor);
+    println!("cargo:rustc-link-arg-bins=--defsym=JSR_ABI_PATCH={}", abi.patch);
     let reg_path = dir.join("../../abi/system-ids.txt");
     println!("cargo:rerun-if-changed={}", reg_path.display());
     println!("cargo:rerun-if-changed={}", dir.join("link.ld").display());
@@ -15,6 +21,9 @@ fn main() {
         let _ = writeln!(out, "pub const {}: u64 = {};", r.name.to_ascii_uppercase().replace('.', "_"), r.id);
     })
     .expect("登记表校验失败");
+    // 程序编译时对应的 ABI 世代：运行时用 system.abi.get 与内核声明比对（章本身由链接脚本写入）。
+    let _ = writeln!(out, "pub const ABI_PACKED: u64 = {};", abi.packed());
+    let _ = writeln!(out, "pub const ABI_TEXT_LINE: &str = \"abi={}.{}.{}\";", abi.major, abi.minor, abi.patch);
     std::fs::write(PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("ids.rs"), out).unwrap();
     // 固定地址、非 PIE 的静态可执行文件（装载器只接受 ET_EXEC）。
     println!("cargo:rustc-link-arg-bins=-T{}", dir.join("link.ld").display());

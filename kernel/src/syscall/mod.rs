@@ -503,6 +503,9 @@ syscall_dispatch! {
     SYSTEM_DEVICE_INTERRUPT_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::interrupt::sys_bind(a.args[0], a.args[1], a.args[2]) },
     // 等待中断只有异步形式：结果作为完成记录交付，同步调用没有可以阻塞的语义
     SYSTEM_DEVICE_INTERRUPT_WAIT => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ASYNC_ERROR_RING_ONLY) },
+    // `system.abi.get`：返回内核声明的原生 ABI 世代（major<<32 | minor<<16 | patch）。
+    // 这是装载检查之外的**发现**通道；它不能替代装载阶段的最低世代检查。
+    SYSTEM_ABI_GET => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { kernel_core::abi_version::NATIVE.packed() as i64 },
 }
 
 // 编译期证明：分发表在登记表之内，且两者基数相同 ⇒ 两个集合完全相等。

@@ -1,3 +1,4 @@
+# abi-generation: 1.0.0
 # 已发布（冻结）的系统接口：由 scripts/abi-freeze.sh 维护，只追加不修改。构建期检查登记表必须包含这里的每一条（ID/种类/名字一致）。
 1	op	system.task.exit	1	irreversible	任务·退出
 2	op	system.task.yield	1	none	任务·让出处理器

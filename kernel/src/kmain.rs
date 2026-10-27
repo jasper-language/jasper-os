@@ -8,6 +8,8 @@ use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
 use crate::{appid_demo, arbiter_demo, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, l10n_demo, mech_demo, mm, msi_demo, pci, pci_demo, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, virtio_rng_demo, wcet};
 #[cfg(feature = "user-programs")]
+use crate::abi_demo;
+#[cfg(feature = "user-programs")]
 use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo, uptr_demo, longrun_demo};
 #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
 use crate::device_demo;
@@ -258,6 +260,9 @@ pub fn start(boot: &'static BootSpec) -> ! {
     // M5.1-pre：从 ELF 文件装载并运行用户程序。
     #[cfg(feature = "user-programs")]
     user_demo::run_elf();
+    // ABI 世代：单一真源、真实章、装载前拒绝（issue #8 第一片）。
+    #[cfg(feature = "user-programs")]
+    abi_demo::run();
     // M4.1：对象生命周期（外部所有权 / 内部引用 / 清理过程级联）。
     #[cfg(feature = "user-programs")]
     user_demo::run_lifecycle();
@@ -346,6 +351,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
         ("scale", scale_demo::failed()),
         ("nohz", nohz_demo::failed()),
         ("user", user_demo::failed()),
+        #[cfg(feature = "user-programs")]
+        ("abi", abi_demo::failed()),
         ("fix", fix_demo::failed()),
         ("profile", profile_demo::failed()),
         ("job", job_demo::failed()),

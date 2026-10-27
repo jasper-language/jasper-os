@@ -113,3 +113,7 @@
 53	op	system.sync.mutex.create	1	write	同步·创建继承互斥对象	Create inherited mutex
 54	op	system.sync.mutex.acquire	1	write	同步·取得继承互斥对象	Acquire inherited mutex
 55	op	system.sync.mutex.release	1	write	同步·释放继承互斥对象	Release inherited mutex
+
+56	op	system.abi.get	1	read	系统·读取原生 ABI 世代	Get native ABI generation
+4135	error	system.error.abi_mismatch	1	none	ABI 世代不兼容	ABI generation mismatch
+4136	error	system.error.abi_metadata	1	none	ABI 元数据缺失或损坏	ABI metadata missing or malformed

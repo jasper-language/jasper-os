@@ -929,6 +929,8 @@ pub fn write(id: ObjId, va: u64, bytes: &[u8]) -> Result<(), ProcError> {
 pub enum LoadError {
     /// 文件本身不合法（见 `kernel_core::elf::ElfError`）。
     Elf(kernel_core::elf::ElfError),
+    /// 程序 ABI 章缺失、损坏或与内核世代不兼容（在任何页映射之前拒绝）。
+    Abi(kernel_core::abi_version::AbiReject),
     /// 某个段不在用户私有窗口内。
     OutsideWindow,
     /// 映射或复制失败。
@@ -940,6 +942,7 @@ impl LoadError {
     pub fn name(self) -> &'static str {
         match self {
             LoadError::Elf(e) => e.name(),
+            LoadError::Abi(e) => e.name(),
             LoadError::OutsideWindow => "system.memory.error.invalid_address",
             LoadError::Proc(_) => "system.memory.error.out_of_frames",
         }
@@ -947,8 +950,12 @@ impl LoadError {
 }
 
 /// 把 ELF64 静态可执行文件装进进程，返回入口地址（按段权限映射，先清零再复制，BSS 天然为零）。
+///
+/// ABI 世代检查在**任何页映射之前**完成：没有章、章损坏、跨主版本或要求的次版本高于本内核，
+/// 都返回 [`LoadError::Abi`]，进程地址空间保持原样，用户代码没有机会执行。
 pub fn load_elf(id: ObjId, image: &[u8]) -> Result<u64, LoadError> {
     let elf = kernel_core::elf::parse(image, arch::ELF_MACHINE, arch::ELF_CLASS).map_err(LoadError::Elf)?;
+    kernel_core::abi_version::check_image(elf.abi(), kernel_core::abi_version::NATIVE).map_err(LoadError::Abi)?;
     for seg in elf.segments() {
         // 解析器保证 memsz > 0 且页区间可表示；这里仍用检查式算术，任何溢出都按「窗口外」拒绝
         let (lo, hi) = seg.page_range().ok_or(LoadError::OutsideWindow)?;

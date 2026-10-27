@@ -1,10 +1,11 @@
 //! user-hello：jasper-os 上第一个由 ELF 装载的用户程序。
 //! The first user program loaded from an ELF image on jasper-os.
 //!
-//! 做三件事：
+//! 做四件事：
 //! 1. 检查 BSS（跨两页的零初始化数组）确实被装载器清零
 //! 2. 经 `system.console.write` 输出一行中文问候与检查结果
-//! 3. 经 `system.task.exit` 以退出码 0 结束（BSS 检查失败时退出码 3）
+//! 3. 经 `system.abi.get` 查询内核原生 ABI 世代，与编译期盖章的世代逐位比对
+//! 4. 经 `system.task.exit` 以退出码 0 结束（BSS 检查或 ABI 比对失败时退出码 3）
 #![no_std]
 #![no_main]
 
@@ -119,7 +120,14 @@ pub extern "C" fn _start() -> ! {
     };
     let n = write("你好，来自 ELF 装载的用户程序（user-hello）");
     write(if bss_zero { "bss_zero=true" } else { "bss_zero=false" });
-    exit(if n > 0 && bss_zero { 0 } else { 3 })
+    // ABI 发现通道：查询内核声明，与构建期盖章值比对。
+    // 装载器已经用同一份世代做了准入检查，这里验证运行期返回值没有漂移。
+    // SAFETY：`system.abi.get` 不访问用户内存，无参数。
+    let queried = unsafe { syscall2(ids::SYSTEM_ABI_GET, 0, 0) };
+    let abi_ok = queried == ids::ABI_PACKED as i64;
+    write(ids::ABI_TEXT_LINE);
+    write(if abi_ok { "abi_query=true" } else { "abi_query=false" });
+    exit(if n > 0 && bss_zero && abi_ok { 0 } else { 3 })
 }
 
 #[panic_handler]

@@ -59,6 +59,14 @@ pub enum AbiError {
     FrozenRemoved { id: u32 },
     /// 已冻结的条目被改号、改名或改种类。
     FrozenChanged { id: u32 },
+    /// 锁文件缺少 `# abi-generation: Major.Minor.Patch` 头。
+    MissingGeneration,
+    /// 锁文件头不是合法的 `Major.Minor.Patch`。
+    BadGeneration { line: usize },
+    /// 锁文件属于另一个主版本：必须随新内核生成新世代快照，不能沿用旧锁。
+    GenerationMismatch { lock_major: u16, native_major: u16 },
+    /// 原生版本低于锁文件记录的已发布世代（同主版本内不允许回退）。
+    NativeOlder { lock: (u16, u16, u16), native: (u16, u16, u16) },
 }
 
 /// 受控动词（命名约定：操作的末段必须是其中之一，或登记过的惯例词）。
@@ -302,6 +310,58 @@ pub fn check_frozen(registry: &str, lock: &str) -> Result<usize, AbiError> {
     Ok(n)
 }
 
+/// 从锁文件头读取已发布世代：`# abi-generation: Major.Minor.Patch`。
+///
+/// 头不是接口条目，不参与 [`validate`]；它把「同一份锁」绑定到一个 ABI 主版本，
+/// 让跨主版本的破坏性变更必须显式建立新快照，而不是悄悄沿用旧编号。
+/// Reads the generation header of the lock file.
+pub fn lock_generation(lock: &str) -> Result<crate::abi_version::AbiVersion, AbiError> {
+    let mut found = None;
+    for (i, raw) in lock.lines().enumerate() {
+        let line = raw.trim();
+        let Some(rest) = line.strip_prefix("# abi-generation:") else { continue };
+        if found.is_some() {
+            return Err(AbiError::BadGeneration { line: i + 1 });
+        }
+        let mut parts = rest.trim().split('.');
+        let mut next = || parts.next().and_then(|s| s.parse::<u16>().ok());
+        let (Some(major), Some(minor), Some(patch)) = (next(), next(), next()) else {
+            return Err(AbiError::BadGeneration { line: i + 1 });
+        };
+        if parts.next().is_some() {
+            return Err(AbiError::BadGeneration { line: i + 1 });
+        }
+        found = Some(crate::abi_version::AbiVersion::new(major, minor, patch));
+    }
+    found.ok_or(AbiError::MissingGeneration)
+}
+
+/// 世代感知的冻结检查：同主版本才逐条核对旧锁；跨主版本拒绝沿用旧锁；同主版本内版本不得回退。
+///
+/// 判定顺序：
+/// 1. 锁文件必须有世代头；
+/// 2. `lock.major != native.major` ⇒ [`AbiError::GenerationMismatch`]（发布新主版本时必须连同新快照一起交付）；
+/// 3. 同主版本内 `native < lock` ⇒ [`AbiError::NativeOlder`]（次版本只能前进）；
+/// 4. 其余情况按 [`check_frozen`] 核对已发布条目。
+/// Generation-aware freeze gate: same major keeps the frozen entries; a new major requires a new snapshot.
+pub fn check_frozen_generation(
+    registry: &str,
+    lock: &str,
+    native: crate::abi_version::AbiVersion,
+) -> Result<usize, AbiError> {
+    let locked = lock_generation(lock)?;
+    if locked.major != native.major {
+        return Err(AbiError::GenerationMismatch { lock_major: locked.major, native_major: native.major });
+    }
+    if (native.minor, native.patch) < (locked.minor, locked.patch) {
+        return Err(AbiError::NativeOlder {
+            lock: (locked.major, locked.minor, locked.patch),
+            native: (native.major, native.minor, native.patch),
+        });
+    }
+    check_frozen(registry, lock)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +454,39 @@ mod tests {
         assert_eq!(check_frozen(renamed, lock), Err(AbiError::FrozenChanged { id: 1 }));
         let renumbered = "2 op system.task.exit 1 irreversible x\n3 op system.time.now 1 read x\n";
         assert_eq!(check_frozen(renumbered, lock), Err(AbiError::FrozenRemoved { id: 1 }));
+    }
+
+    #[test]
+    fn lock_generation_header_is_parsed_and_required() {
+        use crate::abi_version::AbiVersion;
+        let lock = "# abi-generation: 1.9.4\n1 op system.task.exit 1 irreversible 任务·退出\n";
+        assert_eq!(lock_generation(lock), Ok(AbiVersion::new(1, 9, 4)));
+        assert_eq!(lock_generation("1 op system.task.exit 1 irreversible x\n"), Err(AbiError::MissingGeneration));
+        assert_eq!(lock_generation("# abi-generation: 1.9\n"), Err(AbiError::BadGeneration { line: 1 }));
+        assert_eq!(lock_generation("# abi-generation: 1.9.4.1\n"), Err(AbiError::BadGeneration { line: 1 }));
+        assert_eq!(lock_generation("# abi-generation: x.9.4\n"), Err(AbiError::BadGeneration { line: 1 }));
+    }
+
+    #[test]
+    fn generation_gate_rejects_cross_major_and_backwards_minor() {
+        use crate::abi_version::AbiVersion;
+        let lock = "# abi-generation: 1.0.0\n1 op system.task.exit 1 irreversible 任务·退出\n3 op system.time.now 1 read 时间\n";
+        assert_eq!(check_frozen_generation(REG, lock, AbiVersion::new(1, 0, 0)), Ok(2));
+        assert_eq!(check_frozen_generation(REG, lock, AbiVersion::new(1, 9, 0)), Ok(2), "同主版本升次版本仍兼容");
+        assert_eq!(
+            check_frozen_generation(REG, lock, AbiVersion::new(2, 0, 0)),
+            Err(AbiError::GenerationMismatch { lock_major: 1, native_major: 2 }),
+            "跨主版本必须生成新快照"
+        );
+        assert_eq!(
+            check_frozen_generation(REG, lock, AbiVersion::new(1, 0, 0)),
+            Ok(2)
+        );
+        let newer_lock = "# abi-generation: 1.4.0\n1 op system.task.exit 1 irreversible 任务·退出\n";
+        assert_eq!(
+            check_frozen_generation(REG, newer_lock, AbiVersion::new(1, 3, 9)),
+            Err(AbiError::NativeOlder { lock: (1, 4, 0), native: (1, 3, 9) }),
+            "同主版本内不得回退"
+        );
     }
 }
