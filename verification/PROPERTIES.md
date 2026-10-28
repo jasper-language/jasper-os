@@ -612,3 +612,11 @@ cont-splash 帧缓冲仍未验证（见 `docs/PDA-1-image-dtb.md`）。
 | JASO-DEPENDS-FUZZ-01 | 任意字节不 panic；接受的清单依赖 ≤32 项且无重名（本轮新增断言） | `verification/toolbox/fuzz/fuzz_targets/jaso_parse.rs` | cargo-fuzz / libFuzzer | tested | 套件第 4 步 | 100 万次、seed=1、0 崩溃，cov 1981 |
 | JASO-DEPENDS-KANI-NA | — | `Manifest::parse` | Kani | N/A | — | N/A：试过两个单字节符号名字的完整解析 harness（unwind 70），约 16 分钟仍停在符号执行阶段（UTF-8 校验循环第 59 轮，CBMC 2.4 GB），已中止，未得到结论；窗口判断本身只是一次整数比较。替代证据：上面的 Verus 模型与 Proptest 参考对照。**未覆盖**：实际字符串解析的有界证明 |
 | JASO-DEPENDS-LOOM-NA | — | `Manifest::parse` | Loom | N/A | — | N/A：纯函数，只借用输入，无原子量、锁或共享可变状态。替代证据：同上 |
+
+## issue #5 第一片：Ring 后端登记表（六步链）
+
+| ID | 性质 | 源码 | 工具 | 级别 | 命令 | 范围、假设与结果 |
+|---|---|---|---|---|---|---|
+| RING-BACKEND-01 | Ring 后端路由查找：返回第一条同编号路由的后端，无匹配⇔None；良构表（编号非零互异、每后端至少一条）中结果唯一；内核 ROUTES 编译期断言良构 | kernel_core::ring_backend::{route,routes_well_formed}; kernel::ring::{ROUTES,check_sqe,prepare_user_work,submit_in} | Verus伴随模型/Proptest差分/Miri/fuzz差分/Kani(8条符号路由)/Loom N/A | verified(model) / tested / bounded Kani | VERUS=… bash verification/toolbox/run-ring-backend-suite.sh | Verus 0.2026.10.18 + Z3 4.16.0：7 verified/0 errors，负例(漏查首条)postcondition失败；Proptest 2×512；Miri 1；fuzz 100万0崩溃 cov184；Kani 0.68 SUCCESSFUL(表长8)；Loom N/A：常量表+纯函数无共享可变状态，替代证据为 const 断言与对象表锁内串行调用；伴随模型不直接验证Rust源，一致性靠差分 |
+| RING-BACKEND-02 | 后端静态契约一致：持用户缓冲⇒可中止且非瞬时；瞬时⇒不可中止；Kind::index 与 ALL 顺序一致 | kernel_core::ring_backend::Kind::{contract,index} | 单元/Miri/Kani全域(7种)/Loom N/A | verified(Kani全域) / tested | 同上 | Kani对全部7种后端穷举；Verus N/A：有限枚举由Kani全域覆盖、无算术；契约是否符合各后端真实行为由定点 M4.3/M4.4/M5.1/J-1/DRV2C1 回归覆盖(accept-20261028-141327) |
+| QUOTA-ADMIT-02 | quota::reserve_u32/usize 不回绕不越限且等于数学和（既有AI代码补链：原只有Kani） | kernel_core::quota::{reserve_u32,reserve_usize} | Verus伴随(减法守卫)/Proptest差分(全域u32/usize)/Miri/fuzz/Kani既有/Loom N/A | verified(model) / tested / Kani | 同上 | Verus伴随式与生产checked_add+filter等价性由Proptest/fuzz差分覆盖；Kani quota_admission_never_wraps_or_exceeds_limit SUCCESSFUL；Loom N/A：纯函数，调用方在对象表锁内串行 |

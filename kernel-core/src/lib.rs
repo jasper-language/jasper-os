@@ -97,6 +97,7 @@ pub mod pci;
 pub mod pressure;
 pub mod psci;
 pub mod ring_abi;
+pub mod ring_backend;
 pub mod quota;
 pub mod rt;
 pub mod sbi;

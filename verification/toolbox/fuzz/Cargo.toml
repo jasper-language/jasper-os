@@ -191,3 +191,10 @@ path = "fuzz_targets/jaso_binding.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ring_backend"
+path = "fuzz_targets/ring_backend.rs"
+test = false
+doc = false
+bench = false

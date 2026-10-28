@@ -18,6 +18,10 @@
 //! | `system.device.interrupt.wait` | `Backend::InterruptWait` | 是 | 只能经 ring 提交；已有到达即刻完成，否则等下一次到达；结果为交付的到达次数 |
 //! | （内核自检） | `Backend::Manual` | 由调用者指定 | 进展完全由内核调用者报告，可固定一段用户内存，用于验证收尾与固定 |
 //!
+//! 可经用户提交的后端由 [`ROUTES`]（操作编号 → [`Kind`]）静态登记，每个后端的可中止性、是否瞬时、
+//! 是否持有用户缓冲区取自 [`Kind::contract`]（见 `kernel_core::ring_backend`）；提交校验、解析与启动都按 `Kind`
+//! 穷举匹配（无兜底分支），加入新后端时编译器指出每一处必须补的位置。
+//!
 //! 访问用户缓冲区的请求（recv、带固定的人工后端）遵守「后端静止之后才发布完成」；它们持有的资源
 //! （固定的页帧、对端点的内部引用）随后端一起在请求结束时释放（`retire_in`）。
 //!
@@ -38,6 +42,7 @@ use alloc::vec::Vec;
 use kernel_core::async_ring::{AsyncRing, CancelError, Cancelled, Exec, SubmitError, Submission, Terminal};
 use kernel_core::object::{HandleId, ObjectType, Rights};
 use kernel_core::objtable::ObjId;
+use kernel_core::ring_backend::{self, Kind, Route};
 use kernel_core::ring_abi::{Cqe, EnterArgs, EnterUntilArgs, MsgDesc, Sqe, CQE_SIZE, ENTER_ARGS_SIZE, ENTER_UNTIL_SIZE, SQE_SIZE};
 
 use crate::ipc::{self, Delivery, RecvTarget};
@@ -65,6 +70,20 @@ pub const MAX_IN_FLIGHT_PER_PROCESS: u32 = config::ACTIVE.ring.max_in_flight_per
 pub const RING_RIGHTS: Rights = kernel_core::kobj_type::Kind::Ring.contract().rights;
 
 type StateMachine = AsyncRing<CQ_CAPACITY, BLOCKS_PER_RING>;
+
+/// 可经 Ring 提交的操作及其后端（唯一登记点）。编译期断言良构：编号非零且互不相同、每个后端至少一条路由。
+/// The single registration point of ring-submittable operations; checked well formed at compile time.
+pub const ROUTES: [Route; 8] = [
+    Route { op: SYSTEM_TIME_NOW, kind: Kind::Now },
+    Route { op: SYSTEM_TIME_WAIT, kind: Kind::Wait },
+    Route { op: SYSTEM_CHANNEL_SEND, kind: Kind::Send },
+    Route { op: SYSTEM_CHANNEL_RECV, kind: Kind::Recv },
+    Route { op: SYSTEM_TASK_WAIT, kind: Kind::ExitWait },
+    Route { op: SYSTEM_PROCESS_WAIT, kind: Kind::ExitWait },
+    Route { op: SYSTEM_DEVICE_INTERRUPT_WAIT, kind: Kind::InterruptWait },
+    Route { op: SYSTEM_EVENT_SUBSCRIPTION_WAIT, kind: Kind::SubscriptionWait },
+];
+const _: () = assert!(ring_backend::routes_well_formed(&ROUTES));
 
 /// 正在执行的请求的后端状态（瞬时完成的操作不进入这里）。
 enum Backend {
@@ -131,6 +150,22 @@ pub(crate) enum Work {
         /// 固定的用户内存。
         pins: Option<PinnedRange>,
     },
+}
+
+impl Work {
+    /// 工作所属的后端；内核自检的人工后端不在登记表中（返回 `None`）。
+    fn kind(&self) -> Option<Kind> {
+        Some(match self {
+            Work::SubscriptionWait(_) => Kind::SubscriptionWait,
+            Work::Now => Kind::Now,
+            Work::Wait { .. } => Kind::Wait,
+            Work::Send { .. } => Kind::Send,
+            Work::Recv(_) => Kind::Recv,
+            Work::ExitWait { .. } => Kind::ExitWait,
+            Work::InterruptWait { .. } => Kind::InterruptWait,
+            Work::Manual { .. } => return None,
+        })
+    }
 }
 
 /// 异步环对象。
@@ -466,30 +501,20 @@ pub fn sys_create(capacity: u64) -> i64 {
 
 // ———————————————————————— 提交 ————————————————————————
 
-/// 检查一条提交记录的标志、操作是否可经 ring 提交、调用者是否被授予该操作。
-fn check_sqe(sqe: &Sqe, allowed: SyscallSet) -> Result<(), i64> {
+/// 检查一条提交记录的标志、操作是否可经 ring 提交（[`ROUTES`]）、调用者是否被授予该操作；返回承担它的后端。
+fn check_sqe(sqe: &Sqe, allowed: SyscallSet) -> Result<Kind, i64> {
     match kernel_core::extension_abi::check_sqe_flags(sqe.flags) {
         Ok(()) => {},
         Err(kernel_core::extension_abi::FlagError::Invalid) => return Err(err(SYSTEM_ERROR_INVALID_ARGUMENT)),
         Err(kernel_core::extension_abi::FlagError::Unsupported) => return Err(err(SYSTEM_ERROR_UNSUPPORTED)),
     }
-    if !matches!(
-        sqe.op,
-        SYSTEM_TIME_NOW
-            | SYSTEM_TIME_WAIT
-            | SYSTEM_CHANNEL_SEND
-            | SYSTEM_CHANNEL_RECV
-            | SYSTEM_TASK_WAIT
-            | SYSTEM_PROCESS_WAIT
-            | SYSTEM_DEVICE_INTERRUPT_WAIT
-            | SYSTEM_EVENT_SUBSCRIPTION_WAIT
-    ) {
+    let Some(kind) = ring_backend::route(&ROUTES, sqe.op) else {
         return Err(err(SYSTEM_ERROR_UNSUPPORTED));
-    }
+    };
     if !allowed.contains(sqe.op as u64) {
         return Err(err(SYSTEM_ERROR_RIGHTS_DENIED));
     }
-    Ok(())
+    Ok(kind)
 }
 
 /// 在锁内提交一个请求（INV-11：检查、配额预留、信用预留原子成功或原子失败）并启动其后端。
@@ -522,7 +547,14 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
     if let Work::SubscriptionWait(ref target)=work {
         if let Err(e)=crate::subscription::check_wait_in(t,target.sub) {return reject(t,work,e);}
     }
-    let uses_buffer = matches!(work, Work::SubscriptionWait(_) | Work::Recv(_) | Work::Manual { pins: Some(_), .. });
+    // 已登记后端的可中止性与缓冲区持有取自静态契约；人工后端由自检调用者指定
+    let contract = work.kind().map(Kind::contract);
+    let uses_buffer = match (&contract, &work) {
+        (Some(c), _) => c.uses_buffer,
+        (None, Work::Manual { pins, .. }) => pins.is_some(),
+        (None, _) => false,
+    };
+    let exec = contract.map(|c| c.exec).unwrap_or(Exec::NonAbortable);
     let Some(r) = ring_mut(t, ring) else { return reject(t, work, err(SYSTEM_HANDLE_ERROR_INVALID)) };
     let id = match r.sm.submit(Submission { op, user_tag, context: 0, uses_buffer }) {
         Ok(id) => id,
@@ -531,7 +563,7 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
     // 以下步骤不会失败：控制块已建立，信用已预留
     match work {
         Work::SubscriptionWait(target)=>{
-            let _=r.sm.start(id,Exec::Abortable);
+            let _=r.sm.start(id,exec);
             match crate::subscription::deliver_in(t,&target) {
                 crate::subscription::Attempt::Empty=>{
                     crate::subscription::enroll_in(t,target.sub,(ring,id));
@@ -544,22 +576,22 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
             }
         }
         Work::Now => {
-            let _ = r.sm.start(id, Exec::NonAbortable);
+            let _ = r.sm.start(id, exec);
             let _ = r.sm.finish(id, sched::timer_ticks() as i64);
         }
         Work::Wait { .. } => {
-            let _ = r.sm.start(id, Exec::Abortable);
+            let _ = r.sm.start(id, exec);
             r.running.push((id, Backend::Wait { deadline }));
         }
         Work::Send { endpoint, body, handles } => {
-            let _ = r.sm.start(id, Exec::NonAbortable);
+            let _ = r.sm.start(id, exec);
             let v = ipc::send_in(t, pid, endpoint, body, &handles);
             if let Some(r) = ring_mut(t, ring) {
                 let _ = r.sm.finish(id, v);
             }
         }
         Work::Recv(target) => {
-            let _ = r.sm.start(id, Exec::Abortable);
+            let _ = r.sm.start(id, exec);
             match ipc::try_deliver_in(t, &target) {
                 Delivery::Empty => {
                     ipc::add_waiter_in(t, &target, ring, id);
@@ -576,7 +608,7 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
             }
         }
         Work::ExitWait { es } => {
-            let _ = r.sm.start(id, Exec::Abortable);
+            let _ = r.sm.start(id, exec);
             match crate::exit_state::code_in(t, es) {
                 Some(code) => {
                     // 目标已退出：立即完成（INV-13）
@@ -594,7 +626,7 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
             }
         }
         Work::InterruptWait { irq } => {
-            let _ = r.sm.start(id, Exec::Abortable);
+            let _ = r.sm.start(id, exec);
             match crate::interrupt::submit_wait_in(t, irq, (ring, id)) {
                 Ok(None) => {
                     if let Some(r) = ring_mut(t, ring) {
@@ -665,11 +697,12 @@ pub(crate) fn submit_work_for(pid: ObjId, h: HandleId, op: u32, user_tag: u64, w
 /// 以进程 `pid` 的身份经句柄 `h` 提交一条 `system.time.*` 记录（内核自检用；与 `enter` 的单条提交路径相同）。
 pub fn submit_for(pid: ObjId, h: HandleId, sqe: &Sqe) -> Result<u64, i64> {
     let allowed = kobj::with(|t| proc::syscalls_in(t, pid)).map_err(perr)?;
-    check_sqe(sqe, allowed)?;
-    let work = match sqe.op {
-        SYSTEM_TIME_NOW => Work::Now,
-        SYSTEM_TIME_WAIT => Work::Wait { ticks: sqe.arg0 },
-        _ => return Err(err(SYSTEM_ERROR_UNSUPPORTED)),
+    let work = match check_sqe(sqe, allowed)? {
+        Kind::Now => Work::Now,
+        Kind::Wait => Work::Wait { ticks: sqe.arg0 },
+        Kind::Send | Kind::Recv | Kind::ExitWait | Kind::InterruptWait | Kind::SubscriptionWait => {
+            return Err(err(SYSTEM_ERROR_UNSUPPORTED))
+        }
     };
     submit_work_for(pid, h, sqe.op, sqe.user_tag, work)
 }
@@ -790,31 +823,30 @@ pub fn sys_cancel(h: u64, req: u64) -> i64 {
 
 /// 为一条用户提交记录准备工作：send 完成阶段 A（复制消息体与句柄值）；recv 复制描述并固定缓冲区。
 fn prepare_user_work(pid: ObjId, sqe: &Sqe, allowed: SyscallSet) -> Result<Work, i64> {
-    check_sqe(sqe, allowed)?;
-    Ok(match sqe.op {
-        SYSTEM_EVENT_SUBSCRIPTION_WAIT => {
+    Ok(match check_sqe(sqe, allowed)? {
+        Kind::SubscriptionWait => {
             let mut bytes=[0;kernel_core::subscription_abi::WAIT_BYTES];
             copy_from_user(&mut bytes,sqe.arg1,kernel_core::subscription_abi::WAIT_BYTES).map_err(|_|err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS))?;
             let args=kernel_core::subscription_abi::WaitArgs::decode(&bytes).ok_or(err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
             let target=kobj::with(|t|crate::subscription::prepare_wait_in(t,pid,crate::syscall::handle_arg(sqe.arg0),args))?;
             Work::SubscriptionWait(Box::new(target))
         }
-        SYSTEM_TIME_NOW => Work::Now,
-        SYSTEM_TIME_WAIT => Work::Wait { ticks: sqe.arg0 },
-        SYSTEM_CHANNEL_SEND => {
+        Kind::Now => Work::Now,
+        Kind::Wait => Work::Wait { ticks: sqe.arg0 },
+        Kind::Send => {
             let (body, handles) = ipc::copy_send_args(sqe.arg1)?;
             Work::Send { endpoint: crate::syscall::handle_arg(sqe.arg0), body, handles }
         }
-        SYSTEM_DEVICE_INTERRUPT_WAIT => {
+        Kind::InterruptWait => {
             let irq = kobj::with(|t| crate::interrupt::prepare_wait_in(t, pid, crate::syscall::handle_arg(sqe.arg0)))?;
             Work::InterruptWait { irq }
         }
-        SYSTEM_TASK_WAIT | SYSTEM_PROCESS_WAIT => {
+        Kind::ExitWait => {
             let ty = if sqe.op == SYSTEM_TASK_WAIT { ObjectType::Task } else { ObjectType::Process };
             let es = kobj::with(|t| proc::acquire_exit_state_in(t, pid, crate::syscall::handle_arg(sqe.arg0), ty)).map_err(perr)?;
             Work::ExitWait { es }
         }
-        _ => {
+        Kind::Recv => {
             let d = ipc::copy_desc(sqe.arg1)?;
             let target = kobj::with(|t| ipc::prepare_recv_in(t, pid, crate::syscall::handle_arg(sqe.arg0), sqe.arg1, &d))?;
             Work::Recv(Box::new(target))
