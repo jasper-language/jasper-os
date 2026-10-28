@@ -57,8 +57,17 @@ pub fn run() {
 /// 抢占演示中每个任务执行的步数。
 const PREEMPT_STEPS: u32 = 8;
 
+/// 演练至少要观察到的 tick 抢占切换次数（验收门槛 10，留余量）。
+const MIN_TICK_SWITCHES: u64 = 12;
+
+/// 演练上限（tick）：抢占失效时任务按时结束，验收据切换数判 FAIL，而不是挂起。
+const DEMO_TICK_LIMIT: u64 = 2000;
+
 /// 由定时器抢占触发的切换次数（观察者统计）。
 static TICK_SWITCHES: IrqU64 = IrqU64::new(0);
+
+/// 本次演练的截止 tick（见 [`DEMO_TICK_LIMIT`]）。
+static DEMO_DEADLINE: IrqU64 = IrqU64::new(0);
 
 /// 抢占演示的切换观察者：打印并统计 `cause=tick` 的切换。
 fn log_and_count_switch(e: &SwitchEvent) {
@@ -70,8 +79,22 @@ fn log_and_count_switch(e: &SwitchEvent) {
 
 /// 抢占演示任务体：**从不调用 yield**。每一步忙等到定时器再走一个 tick 后打印一行。
 /// 若没有抢占，第一个任务会把所有步数背靠背跑完，其他任务的步数不会与它交错。
+///
+/// 时钟是全局的：TCG 下 vCPU 停顿后补发的一串 tick 会同时满足三个任务的等待，固定步数可能在
+/// 不足 10 次时间片到期内跑完。所以跑满步数后继续，直到观察到 [`MIN_TICK_SWITCHES`] 次 tick 切换
+/// （三个任务都留在运行队列里，切换才可能发生），或到 [`DEMO_DEADLINE`]。
 fn busy_task() {
-    for step in 1..=PREEMPT_STEPS {
+    let deadline = DEMO_DEADLINE.load(Ordering::Relaxed);
+    let mut step = 0u32;
+    while kernel_core::drill::preempt_step_continues(
+        step,
+        PREEMPT_STEPS,
+        TICK_SWITCHES.load(Ordering::Relaxed),
+        MIN_TICK_SWITCHES,
+        super::timer_ticks(),
+        deadline,
+    ) {
+        step += 1;
         let target = super::timer_ticks() + 1;
         while super::timer_ticks() < target {
             core::hint::spin_loop();
@@ -88,6 +111,8 @@ pub fn run_preemptive() {
     // 起始标记：验收从这里开始统计 tick 切换。若从 P 的第一步开始数，P 可能在打印第一步之前
     // 就被同一个 tick 抢占，开头的几次切换会被漏数（取决于引导线程让出时落在 tick 周期的哪个相位）。
     console::_print(format_args!("[JSR-SCHED] preemptive demo start\n"));
+    TICK_SWITCHES.store(0, Ordering::Relaxed);
+    DEMO_DEADLINE.store(super::timer_ticks() + DEMO_TICK_LIMIT, Ordering::Relaxed);
     super::set_observer(log_and_count_switch);
     // 三个任务钉在执行演练的处理器上：本演练验证的是「单个处理器上只靠时间片轮转」。
     // 多处理器时若允许分散，各任务可能独占一个处理器而无需被抢占，tick 切换数随负载均衡的时机浮动。

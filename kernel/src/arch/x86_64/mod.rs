@@ -329,6 +329,18 @@ impl Platform for X86_64 {
         // SAFETY：rdtsc 在内核态总是可用，没有副作用。
         unsafe { core::arch::x86_64::_rdtsc() }
     }
+
+    #[inline(always)]
+    fn clock_counter() -> u64 {
+        // TSC 在启动期以 PIT 校准（apic::calibrate）；lfence 夹住 rdtsc，使读数与前后指令有序。
+        let lo: u32;
+        let hi: u32;
+        // SAFETY：lfence/rdtsc 在内核态总是可用，只写 eax/edx，不访问内存、不用栈。
+        unsafe {
+            core::arch::asm!("lfence", "rdtsc", "lfence", out("eax") lo, out("edx") hi, options(nostack));
+        }
+        (u64::from(hi) << 32) | u64::from(lo)
+    }
 }
 
 /// Poll the exclusively owned test UART between soak rounds.

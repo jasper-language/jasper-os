@@ -99,3 +99,10 @@ path = "fuzz_targets/task_hot.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "drill_time"
+path = "fuzz_targets/drill_time.rs"
+test = false
+doc = false
+bench = false

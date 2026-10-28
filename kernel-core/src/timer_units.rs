@@ -55,3 +55,42 @@ mod credit_tests {
   assert_eq!(x.advance(u64::MAX),Ok((u64::MAX-10)/10));
  }
 }
+
+/// Calibrated counter delta → nanoseconds, rounded down: `floor(elapsed * 1e9 / hz)`.
+/// `None` when uncalibrated (`hz == 0`) or when the result does not fit `u64`;
+/// never wraps or truncates. Monotone in `elapsed` for a fixed `hz`.
+pub fn counter_ns(elapsed:u64, hz:u64)->Option<u64> {
+ if hz==0 {return None;}
+ u64::try_from(u128::from(elapsed)*1_000_000_000/u128::from(hz)).ok()
+}
+#[cfg(test)]
+mod counter_tests {
+ use super::*;
+ #[test] fn floor_uncalibrated_and_overflow_contract() {
+  assert_eq!(counter_ns(5,0),None);
+  assert_eq!(counter_ns(0,1),Some(0));
+  assert_eq!(counter_ns(3,1_000_000_000),Some(3));
+  assert_eq!(counter_ns(1,3),Some(333_333_333));
+  assert_eq!(counter_ns(2_000_000_000,2_000_000_000),Some(1_000_000_000));
+  assert_eq!(counter_ns(u64::MAX,1_000_000_000),Some(u64::MAX));
+  assert_eq!(counter_ns(u64::MAX,999_999_999),None);
+  assert_eq!(counter_ns(u64::MAX,u64::MAX),Some(1_000_000_000));
+ }
+}
+#[cfg(kani)]
+mod counter_proofs {
+ use super::*;
+ #[kani::proof]
+ fn uncalibrated_is_none() {let e:u64=kani::any();assert_eq!(counter_ns(e,0),None);}
+ /// Full 128-bit symbolic division does not converge; bounded 8-bit operands.
+ #[kani::proof]
+ #[kani::solver(cadical)]
+ fn floor_is_exact_and_monotone_bounded() {
+  let e:u8=kani::any();let d:u8=kani::any();let hz:u8=kani::any();kani::assume(hz>0);
+  let (e,hz)=(u64::from(e),u64::from(hz));
+  let n=counter_ns(e,hz).unwrap();
+  let p=u128::from(e)*1_000_000_000;
+  assert!(u128::from(n)*u128::from(hz)<=p && p<(u128::from(n)+1)*u128::from(hz));
+  assert!(counter_ns(e+u64::from(d),hz).unwrap()>=n);
+ }
+}

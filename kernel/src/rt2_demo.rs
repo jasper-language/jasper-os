@@ -15,8 +15,7 @@ static DONE:AtomicBool=AtomicBool::new(false);
 fn probe() {
  assert_eq!(crate::arch::cpu_index(),1);
  let irq=crate::arch::irq_save_disable();
- #[cfg(target_arch="x86_64")]
- assert!(crate::arch::x86_64::verify_ns_programming());
+ assert!(crate::arch::timer_verify_ns_programming());
  let before=crate::smp::percpu::this().ticks() as u32;
  FIRED.store(false,Ordering::Relaxed);ARMED.store(true,Ordering::Release);
  assert!(unsafe {crate::arch::timer_arm_after_ns(1_000_000)});

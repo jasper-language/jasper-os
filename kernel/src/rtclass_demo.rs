@@ -40,12 +40,21 @@ pub fn failed() -> u32 {
 
 // Observe actual scheduler depletion/refill; never manually charge a budget.
 static REFILLED:AtomicU32=AtomicU32::new(0);
+const QUOTA:u32=3;
 fn rt_body() {
  let id=sched::current().0;
  let (_,_,deadline)=sched::rt_state(id).expect("admitted RT worker");
  loop {
   let (remaining,period,next)=sched::rt_state(id).unwrap();
-  if next>deadline {REFILLED.store(u32::from(remaining==3 && period==10),Ordering::Release);return;}
+  if next>deadline {
+   // 观测时刻可能晚于补充所在的 tick（TCG 下 vCPU 停顿），判据见 kernel_core::drill::refill_consistent。
+   let start=next-u64::from(period);let now=sched::timer_ticks();
+   let ok=period==10 && kernel_core::drill::refill_consistent(QUOTA,remaining,start,now);
+   REFILLED.store(u32::from(ok),Ordering::Release);
+   let elapsed=now.saturating_sub(start);
+   kprintln!("[JSR-RTCLASS] refill remaining={} quota={} elapsed_ticks={}",remaining,QUOTA,elapsed);
+   return;
+  }
   core::hint::spin_loop();
  }
 }
@@ -96,7 +105,7 @@ pub fn run() {
 
     let irq=crate::arch::irq_save_disable();
     sched::spawn_on(TaskId(9400),"rt-quota",rt_body,None,only0()).unwrap();
-    check(sched::set_rt(TaskId(9400),3,10),"scheduler quota admission");
+    check(sched::set_rt(TaskId(9400),QUOTA,10),"scheduler quota admission");
     REFILLED.store(0,Ordering::Release);DONE.store(0,Ordering::Relaxed);
     sched::spawn_on(TaskId(9401),"rt-ui",interactive,None,only0()).unwrap();
     let before_throttles=sched::throttle_count();

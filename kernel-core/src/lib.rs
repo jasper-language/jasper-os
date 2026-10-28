@@ -57,6 +57,7 @@ pub mod capacity;
 pub mod config;
 pub mod device;
 pub mod deadline;
+pub mod drill;
 pub mod deadline_forest;
 pub mod yield_gate;
 pub mod dma_quiesce;

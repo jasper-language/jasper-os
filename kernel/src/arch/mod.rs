@@ -397,6 +397,13 @@ pub trait Platform {
     /// Read a monotonically increasing cycle counter; calibrate against timer ticks before converting to time.
     fn cycle_counter() -> u64;
 
+    /// 读取校准时钟域（hrtime）用的计数器：与 [`Self::cycle_counter`] 同源，但要求读数前后有序，
+    /// 不得被乱序执行提前或推后。默认实现直接用周期计数器。
+    /// English: counter for the calibrated clock domain; same source as cycle_counter, ordered reads.
+    fn clock_counter() -> u64 {
+        Self::cycle_counter()
+    }
+
     /// 取得 PCI 配置空间访问者（没有 PCI 的平台返回 `None`）。
     ///
     /// 启动期只调用一次；后端由平台决定（x86_64：有 MCFG 时 ECAM，否则传统端口）。
@@ -707,6 +714,25 @@ pub fn user_probe(probe: UserProbe) -> &'static [u8] {
 #[inline(always)]
 pub fn cycles() -> u64 {
     Current::cycle_counter()
+}
+/// 见 [`Platform::clock_counter`]。
+#[inline(always)]
+pub fn clock_counter() -> u64 {
+    Current::clock_counter()
+}
+/// RT-2 寄存器编程演练：纳秒单次定时器编程、越界拒绝与恢复周期模式均经寄存器读回确认。
+/// 没有纳秒单次定时器的平台返回 false。
+/// English: RT-2 register programming drill; false where no ns one-shot timer exists.
+#[cfg(feature = "rt2-verify")]
+pub fn timer_verify_ns_programming() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        x86_64::verify_ns_programming()
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
 }
 /// 见 [`Platform::pci_access`]。
 pub fn pci_access(boot: &crate::boot::BootSpec) -> Option<PciAccess> {
