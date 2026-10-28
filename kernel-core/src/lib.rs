@@ -101,6 +101,7 @@ pub mod smp;
 pub mod spawn_abi;
 pub mod module;
 pub mod object;
+pub mod kobj_type;
 pub mod objtable;
 pub mod sync;
 pub mod tickless;

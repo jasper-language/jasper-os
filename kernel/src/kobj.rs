@@ -20,6 +20,7 @@
 
 use alloc::boxed::Box;
 
+use kernel_core::kobj_type::{Closing, Kind, REGISTRY};
 use kernel_core::objtable::{InstallError, ObjError, ObjId, ObjectTable, Released, Slot};
 use kernel_core::pci::Bdf;
 
@@ -82,24 +83,68 @@ pub enum KObject {
 }
 
 impl KObject {
-    /// 类型名（日志用）。
-    pub fn type_name(&self) -> &'static str {
+    /// 对象种类（与 [`kernel_core::kobj_type::REGISTRY`] 中的契约一一对应；穷举匹配，新增变体必须在此登记）。
+    /// The object's kind in the type registry (exhaustive: a new variant must be registered here).
+    pub const fn kind(&self) -> Kind {
         match self {
-            KObject::Process(_) => "Process",
-            KObject::Memory(_) => "Memory",
-            KObject::Mutex(_) => "Mutex",
-            KObject::EventSource(_) => "EventSource",
-            KObject::Subscription(_) => "Subscription",
-            KObject::Task(_) => "Task",
-            KObject::Event { .. } => "Event",
-            KObject::Ring(_) => "Ring",
-            KObject::Endpoint(_) => "Endpoint",
-            KObject::ExitState(_) => "ExitState",
-            KObject::Device(_) => "Device",
-            KObject::Interrupt(_) => "Interrupt",
+            KObject::Process(_) => Kind::Process,
+            KObject::Memory(_) => Kind::Memory,
+            KObject::Mutex(_) => Kind::Mutex,
+            KObject::EventSource(_) => Kind::EventSource,
+            KObject::Subscription(_) => Kind::Subscription,
+            KObject::Task(_) => Kind::Task,
+            KObject::Event { .. } => Kind::Event,
+            KObject::Ring(_) => Kind::Ring,
+            KObject::Endpoint(_) => Kind::Endpoint,
+            KObject::ExitState(_) => Kind::ExitState,
+            KObject::Device(_) => Kind::Device,
+            KObject::Interrupt(_) => Kind::Interrupt,
         }
     }
+
+    /// 类型名（日志用；取自登记表）。
+    pub fn type_name(&self) -> &'static str {
+        self.kind().contract().name
+    }
 }
+
+/// closing 动作的签名：在对象表锁内、释放最后一份外部所有权之前调用，只做有界操作。
+type CloseHook = fn(&mut Table, ObjId);
+
+/// 种类 → closing 动作（穷举、无兜底分支；是否有动作必须与登记表的 `closing` 一致，见下方编译期断言）。
+/// Kind → closing hook; must agree with the registry's `closing` field (checked at compile time).
+const fn close_hook(kind: Kind) -> Option<CloseHook> {
+    match kind {
+        Kind::Process => Some(crate::proc::spawn::close_in),
+        Kind::Ring => Some(crate::ring::close_in),
+        Kind::Interrupt => Some(crate::interrupt::close_in),
+        Kind::Subscription | Kind::EventSource => Some(crate::subscription::close_in),
+        Kind::Endpoint => Some(crate::ipc::close_in),
+        Kind::Mutex => Some(crate::user_mutex::close_in),
+        Kind::Task | Kind::ExitState | Kind::Memory | Kind::Event | Kind::Device => None,
+    }
+}
+
+/// 按种类下标排列的 closing 动作表（热路径只查表）。
+const CLOSE_HOOKS: [Option<CloseHook>; Kind::COUNT] = {
+    let mut t: [Option<CloseHook>; Kind::COUNT] = [None; Kind::COUNT];
+    let mut i = 0;
+    while i < Kind::COUNT {
+        t[i] = close_hook(Kind::ALL[i]);
+        i += 1;
+    }
+    t
+};
+
+/// 编译期断言：每个种类「有 closing 动作」与登记表声明一致。
+const _: () = {
+    let mut i = 0;
+    while i < Kind::COUNT {
+        let declared = matches!(REGISTRY[i].closing, Closing::InLock);
+        assert!(CLOSE_HOOKS[i].is_some() == declared, "close_hook 与对象类型登记表的 closing 声明不一致");
+        i += 1;
+    }
+};
 
 static TABLE: IrqSpinLock<Table> = IrqSpinLock::ranked(crate::lockorder::OBJECT_TABLE, ObjectTable::empty());
 
@@ -148,7 +193,7 @@ pub fn insert(obj: KObject, owners: u32, internal: u32) -> Result<ObjId, ObjErro
 }
 
 /// 在对象表锁内释放一个外部所有权，并执行该类型的 **closing 动作**（有效外部所有权归零、对象尚未死亡时）：
-/// 有 closing 动作的类型：Ring（拒绝新提交、取消可取消的请求、丢弃未消费的完成记录）、
+/// 哪些种类有 closing 动作由对象类型登记表声明、[`close_hook`] 登记（编译期断言两者一致）：Ring（拒绝新提交、取消可取消的请求、丢弃未消费的完成记录）、
 /// 设备中断（解绑硬件、以「已关闭」终态完成未完成的等待）、
 /// Channel 端点（销毁队列中的消息、取消在其上等待的接收、通知对端）、
 /// 由用户进程创建的子进程（仍在运行则终止）。
@@ -159,14 +204,8 @@ pub fn insert(obj: KObject, owners: u32, internal: u32) -> Result<ObjId, ObjErro
 /// 之后再执行就找不到它了（队列里的消息因此泄漏、对端也收不到关闭通知）。
 pub fn release_owner_in(t: &mut Table, id: ObjId) -> Result<Released, ObjError> {
     if matches!(t.counts(id), Ok((1, _, _))) {
-        match t.get(id) {
-            Ok(KObject::EventSource(_)) | Ok(KObject::Subscription(_)) => crate::subscription::close_in(t,id),
-            Ok(KObject::Ring(_)) => crate::ring::close_in(t, id),
-            Ok(KObject::Endpoint(_)) => crate::ipc::close_in(t, id),
-            Ok(KObject::Mutex(_)) => crate::user_mutex::close_in(t, id),
-            Ok(KObject::Process(_)) => crate::proc::spawn::close_in(t, id),
-            Ok(KObject::Interrupt(_)) => crate::interrupt::close_in(t, id),
-            _ => {}
+        if let Some(hook) = t.get(id).ok().and_then(|o| CLOSE_HOOKS[o.kind().index()]) {
+            hook(t, id);
         }
     }
     t.release_owner(id)
@@ -214,6 +253,8 @@ pub fn run_cleanup(limit: usize) -> usize {
             break;
         };
         crate::kprintln!("[JSR-LIFE] cleanup destroy type={} id={:#x}", obj.type_name(), id.raw());
+        // 销毁动作穷举：登记表声明 Destroy::None 的种类在此为空臂（它们没有需要锁外释放的资源或强边，
+        // 由登记表良构条件 5 保证：有强边 / 携带句柄的种类必有 closing 或锁外销毁）。
         match obj {
             KObject::Process(p) => crate::proc::destroy(p),
             KObject::ExitState(e) => crate::exit_state::destroy(e),

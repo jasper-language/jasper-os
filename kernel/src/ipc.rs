@@ -60,8 +60,8 @@ pub const MAX_TOTAL_IPC_BYTES: usize = config::ACTIVE.ipc.max_total_bytes;
 static QUEUED_TOTAL: AtomicUsize = AtomicUsize::new(0);
 
 /// 端点句柄的权限：接收（READ）、发送（WRITE）、等待（WAIT）、控制（CONTROL）、进程内复制（DUPLICATE）；**v1 不带 TRANSFER**。
-pub const ENDPOINT_RIGHTS: Rights =
-    Rights::READ.union(Rights::WRITE).union(Rights::WAIT).union(Rights::CONTROL).union(Rights::DUPLICATE);
+/// 取自对象类型登记表（唯一定义处）。
+pub const ENDPOINT_RIGHTS: Rights = kernel_core::kobj_type::Kind::Endpoint.contract().rights;
 
 /// 一条消息：消息体 + 随消息移动的句柄（持有各对象的外部所有权）。
 struct Message {

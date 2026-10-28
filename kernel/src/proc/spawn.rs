@@ -167,7 +167,9 @@ pub fn spawn_child(parent: ObjId, image: &[u8], calls: SyscallSet, arg: u64, cpu
             if p.spawned_live as usize >= MAX_CHILDREN {
                 return Err(ProcError::NoTaskSlot);
             }
-            let hp = p.handles.put(ObjectRef { id: ObjectId(child.raw()), ty: ObjectType::Process }, Rights::WAIT.union(Rights::SUBSCRIBE)).map_err(ProcError::Handle)?;
+            let rights = Rights::WAIT.union(Rights::SUBSCRIBE);
+            super::admit_handle(kernel_core::kobj_type::Kind::Process, ObjectType::Process, rights)?;
+            let hp = p.handles.put(ObjectRef { id: ObjectId(child.raw()), ty: ObjectType::Process }, rights).map_err(ProcError::Handle)?;
             p.spawned_live += 1;
             Ok(hp)
         })();

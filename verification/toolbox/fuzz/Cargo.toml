@@ -99,3 +99,10 @@ path = "fuzz_targets/task_hot.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "kobj_type"
+path = "fuzz_targets/kobj_type.rs"
+test = false
+doc = false
+bench = false

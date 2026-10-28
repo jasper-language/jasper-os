@@ -52,7 +52,8 @@ use crate::{arch, irq, kprintln, sched};
 
 /// 中断句柄的权限：经 Ring 等待（WAIT）、控制绑定（CONTROL）。可经 restrict 降权，不可复制或传递。
 /// Rights of an interrupt handle.
-pub const INTERRUPT_RIGHTS: Rights = Rights::WAIT.union(Rights::CONTROL).union(Rights::SUBSCRIBE);
+/// 取自对象类型登记表（唯一定义处）。
+pub const INTERRUPT_RIGHTS: Rights = kernel_core::kobj_type::Kind::Interrupt.contract().rights;
 
 /// 等待者令牌：（Ring 对象，请求 ID）。
 /// Waiter token: (ring object, request id).

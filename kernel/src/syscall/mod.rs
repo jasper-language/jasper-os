@@ -571,8 +571,8 @@ fn profile_get(index: u64, ptr: u64, cap: u64) -> i64 {
 /// 设备句柄允许的最大权限集合：读取配置 / 资源描述、映射寄存器窗口、控制（绑定中断）、复制与传递。
 /// 调用者只能申请这个集合的子集；设备访问能力本身由系统调用集合授予。
 /// Maximum rights a device handle may carry; callers may request a subset only.
-pub const DEVICE_RIGHTS: Rights =
-    Rights::READ.union(Rights::MAP).union(Rights::CONTROL).union(Rights::DUPLICATE).union(Rights::TRANSFER);
+/// 取自对象类型登记表（唯一定义处）。
+pub const DEVICE_RIGHTS: Rights = kernel_core::kobj_type::Kind::Device.contract().rights;
 
 /// `system.device.list(filter, buf, cap)`：把匹配的启动期 PCI 功能写成定长记录。
 ///
