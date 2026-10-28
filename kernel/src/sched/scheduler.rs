@@ -781,7 +781,7 @@ pub struct Scheduler {
     ns_owners: BootSlots<usize,INLINE_SLOTS>,
     ns_roots: [Option<u64>;MAX_CPUS],
     ns_at: [u64;MAX_CPUS],
-    ns_credit: [Option<kernel_core::timer_units::PeriodicCredit>;MAX_CPUS],
+    ns_credit: [Option<kernel_core::timer_units::CreditLedger>;MAX_CPUS],
     ns_need_tick:[bool;MAX_CPUS],
     ns_now:u64,
     ns_active:bool,
@@ -2379,7 +2379,7 @@ impl Scheduler {
         assert_eq!(c, this_cpu(), "a CPU must register itself while its leaf is held");
         if c < MAX_CPUS {
             if !self.online.contains(c) {
-                if self.ns_active {self.ns_at[c]=self.ns_now;self.ns_credit[c]=Some(kernel_core::timer_units::PeriodicCredit::new(self.ns_now,crate::hrtime::tick_ns()).unwrap());}
+                if self.ns_active {self.ns_at[c]=self.ns_now;self.ns_credit[c]=Some(kernel_core::timer_units::CreditLedger::new(self.ns_now,crate::hrtime::tick_ns()).unwrap());}
                 self.cpu_residency[c]=kernel_core::cpu_time::Ledger::new(self.now,is_worker(leaf_current(c)));
             }
             self.online.insert(c);
@@ -2595,7 +2595,7 @@ impl Scheduler {
     pub fn enable_highres(&mut self,now:u64) {
         assert!(!self.tasks.iter().flatten().any(|t|t.rt_period!=0 && t.state!=TaskState::Exited),"enable before RT admission");
         self.ns_now=now;self.ns_at=[now;MAX_CPUS];self.ns_active=true;
-        self.ns_credit=[Some(kernel_core::timer_units::PeriodicCredit::new(now,crate::hrtime::tick_ns()).unwrap());MAX_CPUS];
+        self.ns_credit=[Some(kernel_core::timer_units::CreditLedger::new(now,crate::hrtime::tick_ns()).unwrap());MAX_CPUS];
     }
     pub fn settle_highres(&mut self,now:u64) {
         if !self.ns_active {return;}
@@ -2694,7 +2694,7 @@ impl Scheduler {
     }
     pub fn highres_event(&mut self,preemption:bool)->(u64,Option<&'static str>) {
         let c=this_cpu();self.ns_programmed[c]=None;
-        let credits=self.ns_credit[c].as_mut().unwrap().advance(self.ns_now).expect("elapsed credit clock");
+        let (credits,delivered)=self.ns_credit[c].as_mut().unwrap().event(self.ns_now).expect("elapsed credit clock");
         if c!=0 {
             for _ in 0..credits {
                 let cur=leaf_current(c);self.account(c);
@@ -2703,7 +2703,15 @@ impl Scheduler {
         }
         let woke=self.wake_due(c,self.now);
         let cause=self.decide(c).or(woke.then_some(Cause::WAKE));
-        (credits,if preemption{cause}else{None})
+        (delivered,if preemption{cause}else{None})
+    }
+    /// 高精度模式下处理器 `c`（非计时处理器）由空闲切入任务之前：空闲期间流逝的 tick 记为空闲，
+    /// 并留到下一次高精度事件一并交付（每核 tick 计数、设备配额），否则那次事件会把整段空闲时长
+    /// 记到切入的任务及其 CPU 组上，组上限因此被突破。
+    /// Settle ticks that elapsed while idle was current before a task is switched in.
+    fn settle_idle_credits(&mut self,c:usize) {
+        let credits=self.ns_credit[c].as_mut().unwrap().settle_idle(self.ns_now).expect("elapsed credit clock");
+        for _ in 0..credits {self.account(c);}
     }
     pub fn set_rt_ns(&mut self,id:TaskId,quota:u64,period:u64)->bool {
         if !self.ns_active || (quota==0)!=(period==0) || quota>period {return false;}
@@ -3007,6 +3015,9 @@ impl Scheduler {
     pub fn prepare_switch(&mut self, cause: &'static str) -> Option<SwitchPlan> {
         let c = this_cpu();
         let prev = leaf_current(c);
+        if c != 0 && self.ns_active && !is_worker(prev) {
+            self.settle_idle_credits(c);
+        }
         let now = self.now;
         let requeue_hook = if cause == Cause::THROTTLE {
             None

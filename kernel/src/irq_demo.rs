@@ -737,8 +737,10 @@ fn service(n: usize) {
     let imbalance = imbalance_permille(&many.processed[..n]);
     let speedup = one.makespan * 1000 / many.makespan.max(1);
     let in_order = OUT_OF_ORDER.load(Ordering::Relaxed) == 0;
-    // 每个核至少在完成时间的一半里都在处理（分片量最少的核先处理完）
-    let cores_busy = many.cpus_used == n && many.least_busy * 2 >= many.makespan;
+    // 每个核都参与处理（功能）；每个核至少在完成时间的一半里都在处理（分片量最少的核先处理完）属计时：
+    // 高精度模式下空闲时长不再记成切入任务的运行 tick 后，忙碌 tick 如实反映宿主给各 vCPU 的执行时间
+    let cores_used = many.cpus_used == n;
+    let cores_busy = many.least_busy * 2 >= many.makespan;
     // 判据是「N 分片确实并行推进」，不是「必须接近线性加速」：宿主核数少于 vCPU 时
     // （例如 2 核跑 4 vCPU 的 QEMU），加速比会明显低于线性，但串行化仍只有约 1000‰。
     // 因此取 1.4× 作为下限——既能区分「并行」与「串行」，又不对受限宿主提不切实际的要求。
@@ -746,7 +748,8 @@ fn service(n: usize) {
     check(done_one && done_many, "分片服务没有处理完全部请求");
     check(in_order, "分片服务出现流内乱序");
     check(imbalance <= IMBALANCE_BOUND, "各分片处理量不均衡度超过上界");
-    check(cores_busy, "分片服务有核没有参与处理");
+    check(cores_used, "分片服务有核没有参与处理");
+    check_timing(cores_busy, format_args!("分片服务有核在一半以上的完成时间里没有处理"));
     check_timing(faster, format_args!("N 分片的完成时间没有显著短于 1 分片（处理被串行化）"));
     check(baseline() == before, "分片服务后资源未回到基线");
     let mut loads = [0u64; MAX_CPUS];

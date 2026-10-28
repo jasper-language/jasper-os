@@ -106,3 +106,10 @@ path = "fuzz_targets/drill_time.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "idle_credit"
+path = "fuzz_targets/idle_credit.rs"
+test = false
+doc = false
+bench = false

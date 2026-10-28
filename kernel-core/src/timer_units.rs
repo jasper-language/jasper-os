@@ -29,7 +29,7 @@ mod tests {
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub struct PeriodicCredit {at:u64,period:u64,remainder:u64}
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub enum CreditError {ZeroPeriod,TimeReversed}
+pub enum CreditError {ZeroPeriod,TimeReversed,Overflow}
 impl PeriodicCredit {
  pub fn new(at:u64,period:u64)->Result<Self,CreditError> {
   if period==0 {return Err(CreditError::ZeroPeriod);}
@@ -43,6 +43,32 @@ impl PeriodicCredit {
   Ok(ticks)
  }
 }
+
+/// Per-CPU elapsed-tick ledger across idle switch-ins. Ticks that elapsed while
+/// the idle flow was current are settled as idle before a task is switched in,
+/// so the next timer event charges the incoming task (and its CPU group) only
+/// ticks after the switch. Settled ticks are still delivered with that next
+/// event (per-CPU tick counters, device quotas): no tick is minted or lost.
+/// Failed calls leave the ledger unchanged.
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub struct CreditLedger {clock:PeriodicCredit,idle_pending:u64}
+impl CreditLedger {
+ pub fn new(at:u64,period:u64)->Result<Self,CreditError> {Ok(Self {clock:PeriodicCredit::new(at,period)?,idle_pending:0})}
+ /// Idle → task switch at `now`: ticks to account as idle; kept for delivery.
+ pub fn settle_idle(&mut self,now:u64)->Result<u64,CreditError> {
+  let mut clock=self.clock;let ticks=clock.advance(now)?;
+  let pending=self.idle_pending.checked_add(ticks).ok_or(CreditError::Overflow)?;
+  self.clock=clock;self.idle_pending=pending;Ok(ticks)
+ }
+ /// Timer event at `now`: (ticks to charge the current runner, ticks to deliver).
+ pub fn event(&mut self,now:u64)->Result<(u64,u64),CreditError> {
+  let mut clock=self.clock;let ticks=clock.advance(now)?;
+  let delivered=ticks.checked_add(self.idle_pending).ok_or(CreditError::Overflow)?;
+  self.clock=clock;self.idle_pending=0;Ok((ticks,delivered))
+ }
+ /// Settled idle ticks not yet delivered.
+ pub const fn idle_pending(&self)->u64 {self.idle_pending}
+}
 #[cfg(test)]
 mod credit_tests {
  use super::*;
@@ -53,6 +79,16 @@ mod credit_tests {
   assert_eq!(x.advance(10),Ok(1));assert_eq!(x.advance(10),Ok(0));
   let old=x;assert_eq!(x.advance(9),Err(CreditError::TimeReversed));assert_eq!(x,old);
   assert_eq!(x.advance(u64::MAX),Ok((u64::MAX-10)/10));
+ }
+ #[test] fn idle_stretch_is_settled_not_charged_and_still_delivered() {
+  assert_eq!(CreditLedger::new(0,0),Err(CreditError::ZeroPeriod));
+  let mut l=CreditLedger::new(0,10).unwrap();
+  assert_eq!(l.settle_idle(155),Ok(15));assert_eq!(l.idle_pending(),15);
+  assert_eq!(l.event(160),Ok((1,16)));assert_eq!(l.idle_pending(),0);
+  assert_eq!(l.event(160),Ok((0,0)));
+  let old=l;assert_eq!(l.settle_idle(159),Err(CreditError::TimeReversed));assert_eq!(l,old);
+  assert_eq!(l.event(159),Err(CreditError::TimeReversed));assert_eq!(l,old);
+  assert_eq!(l.settle_idle(165),Ok(0));assert_eq!(l.settle_idle(171),Ok(1));assert_eq!(l.event(180),Ok((1,2)));
  }
 }
 
@@ -92,5 +128,30 @@ mod counter_proofs {
   let p=u128::from(e)*1_000_000_000;
   assert!(u128::from(n)*u128::from(hz)<=p && p<(u128::from(n)+1)*u128::from(hz));
   assert!(counter_ns(e+u64::from(d),hz).unwrap()>=n);
+ }
+}
+#[cfg(kani)]
+mod ledger_proofs {
+ use super::*;
+ /// 128-bit symbolic division: bounded 8-bit timestamps and periods.
+ #[kani::proof]
+ #[kani::solver(cadical)]
+ fn idle_settle_conserves_and_bounds_charge_bounded() {
+  let (o,i,r,p):(u8,u8,u8,u8)=(kani::any(),kani::any(),kani::any(),kani::any());kani::assume(p>0);
+  let (o,s,t,p)=(u64::from(o),u64::from(o)+u64::from(i),u64::from(o)+u64::from(i)+u64::from(r),u64::from(p));
+  let mut l=CreditLedger::new(o,p).unwrap();
+  let k=l.settle_idle(s).unwrap();assert_eq!(l.idle_pending(),k);
+  let (c,d)=l.event(t).unwrap();
+  assert_eq!(d,c+k);assert_eq!(l.idle_pending(),0);
+  assert!(c*p<(t-s)+p);
+  assert_eq!(k+c,(t-o)/p);
+ }
+ #[kani::proof]
+ fn failures_leave_ledger_unchanged() {
+  let (o,b,p):(u64,u64,u64)=(kani::any(),kani::any(),kani::any());kani::assume(p>0 && b>0 && b<=o);
+  let mut l=CreditLedger::new(o,p).unwrap();let before=l;
+  assert_eq!(l.settle_idle(o-b),Err(CreditError::TimeReversed));assert_eq!(l,before);
+  assert_eq!(l.event(o-b),Err(CreditError::TimeReversed));assert_eq!(l,before);
+  assert_eq!(CreditLedger::new(o,0),Err(CreditError::ZeroPeriod));
  }
 }

@@ -1813,8 +1813,10 @@ check_harden1c() { # 长期运行与并发正确性①：用户指针复制与�
 check_harden1e() { # 空闲停表（tickless idle）：同样长的全空闲窗口里非计时处理器的本地 tick 至少减半、确实停过表、
                    # 计时处理器永不停表、停表期间的空闲时长补记进调度统计；停表处理器上的唤醒延迟有上界；
                    # 其后的 SMP-3 中断演练（风暴、分散、预算）在停表开启下全部通过（由 check_smp3 判定）
+                   # 高精度定时开启后全空闲窗口可能一直停在已编程的本地期限上，不再保证窗口内新增停表（内核输出 new_stops）；
+                   # 「确实停过表」由唤醒延迟用例的 stops≥1 证明
   local miss="" f name
-  local idle='^\[JSR-NOHZ\] case=idle cpus=[2-9][0-9]* window=[0-9]+ divisor=[2-9][0-9]* periodic_ticks=[0-9]+ nohz_ticks=[0-9]+ reduced=true stops=[1-9][0-9]* timekeeper_stopped=false accounted_min=[0-9]+ covered=true reclaimed=true'
+  local idle='^\[JSR-NOHZ\] case=idle cpus=[2-9][0-9]* window=[0-9]+ divisor=[2-9][0-9]* periodic_ticks=[0-9]+ nohz_ticks=[0-9]+ reduced=true new_stops=[0-9]+ timekeeper_stopped=false accounted_min=[0-9]+ covered=true reclaimed=true'
   local wake='^\[JSR-NOHZ\] case=wake cpu=1 rounds=10 sleep=[0-9]+ samples=10 max=[0-2] bound=2 bounded=true stops=[1-9][0-9]* kicks=[0-9]+ reclaimed=true'
   local pairs=("$SERIAL_SMP4:x86_64×4" "$SERIAL_SMP8:x86_64×8")
   if [ "$ARCH_ALL" -eq 1 ]; then
