@@ -299,3 +299,35 @@ impl InstallError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// 任意 32 字节记录：parse 不 panic；成功 ⇒ 标记/版本/保留字正确，且 encode(parse(r)) == r（规范形、单射）。
+    /// For any 32-byte record parse never panics; success implies a canonical record.
+    #[kani::proof]
+    #[kani::unwind(34)]
+    fn parse_accepts_only_canonical_records() {
+        let r: [u8; RECORD_LEN] = kani::any();
+        if let Ok(ov) = parse(&r) {
+            assert!(r[..8] == RECORD_MAGIC);
+            assert!(get(&r, 8) == RECORD_VERSION && get(&r, 12) == 0 && get(&r, 28) == 0);
+            assert!(encode(ov) == r);
+            assert!(ov.objects != Some(0) && ov.tasks != Some(0) && ov.rt != Some(0));
+        }
+    }
+
+    /// 任意不含 Some(0) 的覆盖值：parse(encode(ov)) == Ok(ov)。Round trip for any override set.
+    #[kani::proof]
+    #[kani::unwind(34)]
+    fn encode_parse_round_trip() {
+        let pick = |v: u32, some: bool| if some && v != 0 { Some(v) } else { None };
+        let ov = Overrides {
+            objects: pick(kani::any(), kani::any()),
+            tasks: pick(kani::any(), kani::any()),
+            rt: pick(kani::any(), kani::any()),
+        };
+        assert!(parse(&encode(ov)) == Ok(ov));
+    }
+}

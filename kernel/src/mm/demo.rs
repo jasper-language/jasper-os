@@ -61,9 +61,9 @@ fn write_read_back(f: PhysFrame, pattern: u64) -> bool {
     }
 }
 
-/// 运行 M2.1 演练。
-pub fn run(boot: &'static BootSpec) {
-    let stats = frame::init(boot);
+/// 运行 M2.1 演练。分配器已由启动阶段 `frames` 初始化，`stats` 是该阶段的初始化结果。
+/// Runs the M2.1 exercise; the allocator was initialised by the `frames` boot stage.
+pub fn run(boot: &'static BootSpec, stats: frame::FrameStats) {
     kprintln!(
         "[JSR-FRAME] regions={} usable_frames={} usable_mib={} ignored={} dropped_regions={} phys_offset={}",
         stats.regions,
@@ -134,8 +134,9 @@ pub fn run(boot: &'static BootSpec) {
 const PROBE_VA: u64 = arch::KERNEL_PROBE_VA;
 
 /// 运行 M2.2 演练：映射 → 经虚拟地址写、经物理映射读回 → 改只读 → 取消映射 → 错误路径。
-pub fn run_map(boot: &'static BootSpec) {
-    check(map::init(boot), "内核映射器初始化失败（无物理内存映射）");
+/// 映射器已由启动阶段 `kernel_map` 初始化（失败时启动不会走到这里）。
+/// The mapper was initialised by the `kernel_map` boot stage.
+pub fn run_map() {
     let page = VirtPage::from_start(PROBE_VA).unwrap_or(VirtPage::containing(PROBE_VA));
     check(map::translate(page).is_none(), "探针地址事先已被映射");
 
@@ -202,9 +203,9 @@ pub fn run_map(boot: &'static BootSpec) {
 }
 
 /// 运行 M2.3 演练：Box / Vec / String（含中文）真实使用；大对象触发增长；全部释放后空闲字节回到基线且合并为一块。
+/// 堆已由启动阶段 `heap` 完成首批映射（失败时启动不会走到这里）。
+/// The heap was first mapped by the `heap` boot stage.
 pub fn run_heap() {
-    let init = heap::init();
-    check(init.is_ok(), "堆初始化失败");
     let (total0, free0, blocks0, mapped0) = heap::stats();
     kprintln!("[JSR-HEAP] init total={} free={} blocks={} mapped={}", total0, free0, blocks0, mapped0);
 

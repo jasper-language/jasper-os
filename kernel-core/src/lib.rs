@@ -56,6 +56,7 @@ pub mod acpi;
 pub mod argcase;
 pub mod arbiter;
 pub mod bench;
+pub mod boot_stage;
 pub mod async_ring;
 pub mod capacity;
 pub mod config;

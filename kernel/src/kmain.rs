@@ -1,11 +1,15 @@
 //! 架构无关的内核主流程：引导适配层（`main.rs`）完成平台入口后调用 [`start`]。
 //!
 //! 只通过 `arch::*` 使用硬件；换 ISA 时本文件不改。
-//! 当前流程即 M1.1–M1.5 的验收序列：横幅 → 异常验证 → 时钟中断 → 协作式调度 → 抢占式调度 →
-//! 机制演练（kernel-core）→ 物理页帧分配（M2.1）→ 退出。
+//! 全局初始化按 `kernel_core::boot_stage` 声明的阶段推进（控制台 → 平台 → 定时器 → 页帧 → 内核映射 →
+//! 堆 → 启动期容量 → 设备 → Profile），每个阶段由跟踪器检查依赖、拒绝重复初始化，失败即停止启动；
+//! 阶段之间穿插 M1.1 起的验收演练，最后按失败表退出模拟器（issue #7：生产与验收编排的拆分按切片推进）。
+//! Global initialisation advances through the stages declared in `kernel_core::boot_stage`;
+//! acceptance exercises are interleaved between stages and the emulator exits on the failure table.
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
+use kernel_core::boot_stage::{Stage, Tracker};
 use crate::{appid_demo, arbiter_demo, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, l10n_demo, mech_demo, mm, msi_demo, pci, pci_demo, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, virtio_rng_demo, wcet};
 #[cfg(feature = "user-programs")]
 use crate::abi_demo;
@@ -24,31 +28,78 @@ const BOOT_TICKS: u64 = config::ACTIVE.clock.boot_ticks;
 /// 等 tick 的兜底次数：定时器没配好时必须报错退出，而不是永远睡下去。
 const MAX_WAITS: u64 = 20_000_000;
 
-/// 内核主流程（永不返回）。`boot` 是引导适配层转换好的交接信息。
-pub fn start(boot: &'static BootSpec) -> ! {
-    arch::console_init();
-    kprintln!("[JSR-BOOT] jasper-os rust kernel {} {}", VERSION, arch::NAME);
-    config::report();
-    arch::early_init();
-
-    // 证明异常处理已接通。
-    arch::debug_breakpoint();
-
-    // M1.2：中断控制器 + 定时器，开中断后等到足够多的 tick。
-    arch::irq_init(TIMER_HZ);
-    arch::irq_enable();
-    let mut waits: u64 = 0;
-    while clock::ticks() < BOOT_TICKS {
-        arch::wait_for_interrupt();
-        irq::poll_and_handle();
-        waits += 1;
-        if waits > MAX_WAITS {
-            kprintln!("[JSR-TICK-TIMEOUT] n={}", clock::ticks());
-            arch::exit_emulator(ExitStatus::Failure);
+/// 在阶段跟踪器下执行一个全局启动阶段（issue #7）。`body` 执行该阶段的真实初始化，返回 `None` 表示失败。
+/// 阶段被拒（依赖缺失、重复初始化、已有阶段失败）或失败时如实报告并停止启动：
+/// 依赖它的后续阶段永远不会开始。
+/// Runs one global boot stage under the stage tracker. `body` performs the real initialisation and
+/// returns `None` on failure. A refused or failed stage is reported and boot stops, so no stage
+/// that depends on it ever starts.
+fn stage<T>(t: &mut Tracker, s: Stage, body: impl FnOnce() -> Option<T>) -> T {
+    if let Err(e) = t.begin(s) {
+        kprintln!("[JSR-BOOT-STAGE] refused stage={} reason={}", s.name(), e.as_str());
+        kprintln!("[JSR-EXIT] failure boot_stage={}", s.name());
+        arch::exit_emulator(ExitStatus::Failure);
+    }
+    match body() {
+        Some(v) => {
+            // begin 刚成功且阶段串行，complete 不会被拒。begin just succeeded; complete cannot be refused.
+            let _ = t.complete(s);
+            kprintln!("[JSR-BOOT-STAGE] done stage={} done_mask={:#x}", s.name(), t.done_mask());
+            v
+        }
+        None => {
+            let _ = t.fail(s);
+            kprint!("[JSR-BOOT-STAGE] failed stage={} blocked=", s.name());
+            let blocked = t.blocked_mask();
+            let mut first = true;
+            for b in Stage::ALL.iter().filter(|b| blocked & b.bit() != 0) {
+                kprint!("{}{}", if first { "" } else { "," }, b.name());
+                first = false;
+            }
+            kprintln!();
+            kprintln!("[JSR-EXIT] failure boot_stage={}", s.name());
+            arch::exit_emulator(ExitStatus::Failure)
         }
     }
-    // 收尾关中断，保证随后的协作式演示输出可复现。
-    arch::irq_disable();
+}
+
+/// 内核主流程（永不返回）。`boot` 是引导适配层转换好的交接信息。
+pub fn start(boot: &'static BootSpec) -> ! {
+    // 全局初始化按 `kernel_core::boot_stage::GRAPH` 的阶段推进；阶段之间穿插的是验收演练。
+    // Global initialisation advances through the declared stages; acceptance exercises sit between them.
+    let mut stages = Tracker::new();
+    stage(&mut stages, Stage::Console, || {
+        arch::console_init();
+        kprintln!("[JSR-BOOT] jasper-os rust kernel {} {}", VERSION, arch::NAME);
+        config::report();
+        Some(())
+    });
+    stage(&mut stages, Stage::Platform, || {
+        arch::early_init();
+        // 证明异常处理已接通。
+        arch::debug_breakpoint();
+        Some(())
+    });
+
+    // M1.2：中断控制器 + 定时器，开中断后等到足够多的 tick。
+    stage(&mut stages, Stage::Timer, || {
+        arch::irq_init(TIMER_HZ);
+        arch::irq_enable();
+        let mut waits: u64 = 0;
+        while clock::ticks() < BOOT_TICKS {
+            arch::wait_for_interrupt();
+            irq::poll_and_handle();
+            waits += 1;
+            if waits > MAX_WAITS {
+                kprintln!("[JSR-TICK-TIMEOUT] n={}", clock::ticks());
+                arch::irq_disable();
+                return None;
+            }
+        }
+        // 收尾关中断，保证随后的协作式演示输出可复现。
+        arch::irq_disable();
+        Some(())
+    });
 
     // M1.3：协作式调度（关中断）。
     sched::demo::run();
@@ -72,27 +123,39 @@ pub fn start(boot: &'static BootSpec) -> ! {
         arch::exit_emulator(ExitStatus::Failure);
     }
 
-    // M2.1：物理页帧分配（真实内存图 + 真实读写校验）。
-    mm::demo::run(boot);
+    // M2.1：物理页帧分配（真实内存图 + 真实读写校验）。没有任何可用帧时启动停止。
+    let frames = stage(&mut stages, Stage::Frames, || {
+        let stats = mm::frame::init(boot);
+        (stats.usable > 0).then_some(stats)
+    });
+    mm::demo::run(boot, frames);
     // 多处理器：趁低端内存尚未被占用时预留平台需要的启动帧（平台不需要时什么也不做）。
     if !smp::reserve_start_frame() {
         kprintln!("[JSR-SMP] start_frame unavailable");
     }
-    // M2.2：架构无关映射 API（x86_64 由 4 级页表实现）。
-    mm::demo::run_map(boot);
-    // M2.3：内核堆（Box/Vec/String 可用，按需增长）。
+    // M2.2：架构无关映射 API（x86_64 由 4 级页表实现）。引导器未提供物理内存映射时启动停止。
+    stage(&mut stages, Stage::KernelMap, || mm::map::init(boot).then_some(()));
+    mm::demo::run_map();
+    // M2.3：内核堆（Box/Vec/String 可用，按需增长）。首批映射失败时启动停止。
+    stage(&mut stages, Stage::Heap, || mm::heap::init().ok());
     mm::demo::run_heap();
     // 堆就绪：按启动期容量安装对象表、实时表，并把任务表扩到启动期容量（含内核栈；HARDEN-1B）。
-    // 容量越界、放不进内存或记录损坏都会在这里拒绝启动。
+    // 容量越界、放不进内存或记录损坏都会在这里拒绝启动（`bootcap::apply` 自行报告并退出）。
     // 之后把堆的空闲余量补回安装前的值（见 `heap::ensure_free`）。
-    let (_, heap_slack, _, _) = mm::heap::stats();
-    let cap = bootcap::apply();
-    if mm::heap::ensure_free(heap_slack).is_err() {
-        kprintln!("[JSR-SCHED] capacity heap_slack_restore_failed want={}", heap_slack);
-    }
+    let cap = stage(&mut stages, Stage::Capacity, || {
+        let (_, heap_slack, _, _) = mm::heap::stats();
+        let cap = bootcap::apply();
+        if mm::heap::ensure_free(heap_slack).is_err() {
+            kprintln!("[JSR-SCHED] capacity heap_slack_restore_failed want={}", heap_slack);
+        }
+        Some(cap)
+    });
     // DRV-1B：启动期取得 PCI 配置空间访问者（ECAM 或传统端口），穷举总线并建立只读设备表。
-    // 依赖内核映射服务与堆（ECAM 窗口映射、后端对象），因此放在 M2.2 / M2.3 之后。
-    pci::init(boot);
+    // 依赖内核映射服务与堆（ECAM 窗口映射、后端对象）。平台没有 PCI 时设备表为空，不算失败。
+    stage(&mut stages, Stage::Devices, || {
+        pci::init(boot);
+        Some(())
+    });
     pci_demo::run();
     kprintln!(
         "[JSR-SCHED] capacity slots={} static_stacks={} max={} policy={} preemption=default_on",
@@ -103,11 +166,15 @@ pub fn start(boot: &'static BootSpec) -> ! {
     );
     // POL-2：系统 Profile（模块面 + 参数档）在堆就绪后立刻校验；不合法就拒绝启动，
     // 因为后面的服务判定、配额与调度类别都以这份声明为前提。
-    let profile_failed = profile::boot_report();
-    if profile_failed > 0 {
-        kprintln!("[JSR-EXIT] failure profile_failed={}", profile_failed);
-        arch::exit_emulator(ExitStatus::Failure);
-    }
+    stage(&mut stages, Stage::Profile, || {
+        let profile_failed = profile::boot_report();
+        if profile_failed > 0 {
+            kprintln!("[JSR-EXIT] failure profile_failed={}", profile_failed);
+            return None;
+        }
+        Some(())
+    });
+    debug_assert!(stages.all_done());
     profile_demo::run();
     // POL-5：多模式 B（统一仲裁）由 Profile 决定；没有 `sched.arbiter` 时保持单模式 A。
     let multi_mode = profile::has_capability("sched.arbiter");

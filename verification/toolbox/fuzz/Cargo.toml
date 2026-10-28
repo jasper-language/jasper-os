@@ -198,3 +198,10 @@ path = "fuzz_targets/ring_backend.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "boot_stage"
+path = "fuzz_targets/boot_stage.rs"
+test = false
+doc = false
+bench = false
