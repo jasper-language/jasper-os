@@ -2653,30 +2653,34 @@ impl Scheduler {
     }
     pub fn program_ns_local(&mut self) {
         if !self.ns_active{return;}
+        // issue #3：各事件源经统一仲裁器取最早必须处理时刻；现有来源均为精确请求。
+        // issue #3: every source goes through the unified arbiter; all current sources are precise.
+        use kernel_core::timer_event::{Arbiter,Urgency,arm_delay,needs_reprogram};
         let c=this_cpu();let now=crate::hrtime::now().expect("calibrated clock available");
-        let mut at=self.ns_roots[c];
+        let mut arb=Arbiter::new();
+        arb.offer_opt(self.ns_roots[c],Urgency::Precise);
         let current=leaf_current(c);
         if let Some(t)=self.task(current).filter(|t|t.state==TaskState::Running && is_worker(current)) {
             let tick=crate::hrtime::tick_ns();let base=self.ns_now/tick*tick;
-            let fallback=base.checked_add(tick).expect("fallback clock overflow");at=Some(at.map_or(fallback,|old|old.min(fallback)));
+            arb.offer(base.checked_add(tick).expect("fallback clock overflow"),Urgency::Precise);
             if let Some(b)=t.ns_budget.filter(|b|b.enabled) {
-                let exhausted=self.ns_now.checked_add(b.remaining.max(1)).expect("budget alarm overflow");
-                at=Some(at.unwrap().min(exhausted));
+                arb.offer(self.ns_now.checked_add(b.remaining.max(1)).expect("budget alarm overflow"),Urgency::Precise);
             }
         }else if self.ns_need_tick[c] || self.next_wake[c]!=u64::MAX || self.next_rt[c]!=u64::MAX {
-            let fallback=self.ns_now.checked_add(crate::hrtime::tick_ns()).expect("legacy alarm overflow");at=Some(at.map_or(fallback,|old|old.min(fallback)));
+            arb.offer(self.ns_now.checked_add(crate::hrtime::tick_ns()).expect("legacy alarm overflow"),Urgency::Precise);
         }
         let cur=self.task(current).filter(|t|t.state==TaskState::Running);
         let cur_deadline=cur.and_then(|t|t.ns_budget.filter(|b|b.enabled)).map_or(u64::MAX,|b|b.next);
         let ready_rt=self.listed(c).filter(|(_,t)|t.state==TaskState::Runnable && t.on_cpu.is_none() && self.eligible(t)).filter_map(|(_,t)|t.ns_budget.filter(|b|b.enabled).map(|b|b.next)).min();
         if ready_rt.is_some_and(|deadline|deadline<cur_deadline) || cur.is_some_and(|t|t.ns_budget.is_some_and(|b|b.enabled && b.remaining==0)) {
-            let prompt=now.checked_add(1).expect("prompt clock overflow");at=Some(at.map_or(prompt,|old|old.min(prompt)));
+            arb.offer(now.checked_add(1).expect("prompt clock overflow"),Urgency::Precise);
         }
-        if at==self.ns_programmed[c] && at.is_none_or(|at|at>now) {return;}
+        let at=arb.program_at();
+        if !needs_reprogram(self.ns_programmed[c],at,now) {return;}
         self.ns_programmed[c]=at;
         match at {
             Some(at)=>{
-                let mut delay=at.saturating_sub(now).clamp(1,100_000_000);
+                let mut delay=arm_delay(at,now,100_000_000);
                 while !unsafe {crate::arch::timer_arm_after_ns(delay)} {
                     assert!(delay>1,"high-res timer unsupported after calibration");delay=(delay/2).max(1);
                 }
