@@ -569,3 +569,16 @@ cont-splash 帧缓冲仍未验证（见 `docs/PDA-1-image-dtb.md`）。
 | JB-OS1-PARSE-FUZZ-01 | 任意字节及「回填长度与摘要」的副本读取不 panic；接受的文件全部访问器不越界、错误码不是 load 类、按镜像 0 重写后仍合格；清单解析不 panic | `verification/toolbox/fuzz/fuzz_targets/jaso_parse.rs`；种子 `fuzz/seeds/jaso_parse/`（native / hybrid / managed 入库） | cargo-fuzz 0.13.2 / libFuzzer | tested | 套件第 4 步 | 200 万次（82 s）、seed=1、0 崩溃，cov 2055 / ft 6705；覆盖引导 fuzz 不是证明 |
 | JB-OS1-LAYOUT-KANI-01 | 对任意输入：`range_within` 与 u128 数学定义一致；扩展段数值布局（≤24 字节）不 panic 且内容起点对齐在段内；平台记录数值字段满足托管一致性与指针宽度规则；导出名范围非空、≤128、在表内 | `jaso/src/kani_proofs.rs` → `range_within`、`extension_layout`、`platform::numeric_fields`、`export_name_range` | Kani 0.68.0 / CBMC 6.11.0 | bounded Kani | 套件第 5 步 | 4 harness SUCCESSFUL；名字字段的 UTF-8 / 字符集判定与 SHA-256 不在范围内（符号化展开代价过高，首次把 from_utf8 纳入的 harness 23 分钟未结束、占 4 GB，已改为数值部分），由 Proptest / fuzz 覆盖 |
 | JB-OS1-LOOM-NA | — | `jaso` 核心层 | Loom | N/A | — | N/A：读取器是纯函数（只借用输入、无原子量 / 锁 / 共享可变状态），`Jaso` / `ImageRef` 为 `Copy` 视图；装载器里唯一的并发状态（槽位位图、未签名放行计数）本切片未改动。替代证据：QEMU 定点 J-3 两实例并存装入/卸载、J-6 隔离进程装载（accept-20261027-232528） |
+
+## JB-OS1 `.jaso` 一致性判定与向量（SPEC §14，六步链，2026-10-28）
+
+源码身份：分支 `dev/jb-os1-core`（本节随该分支提交）；`jaso/src/{conformance,vectors,vector_tests}.rs`、`tools/jasopack/src/main.rs`（`vectors` / `conform`）、`jaso/vectors/`（69 个向量 + 开发用公钥）。复现：VM `bash verification/toolbox/run-jb-os1-conformance-suite.sh`（证据 `evidence/jb-os1/conformance-suite/`，含 `source.sha256`、`vectors.sha256`）。
+
+| ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |
+|---|---|---|---|---|---|---|
+| JB-OS1-CONF-VERUS-01 | 判定按六步（结构、信任、平台、运行时、依赖、能力）依次进行：结果 ok 当且仅当每步通过，否则报告的恰是第一处失败步骤；能力步「每个请求都在授予表中」的全称判定精确；「报告最后一处失败」的负例必败 | `jaso::conformance::check` 的步骤顺序与 `requires().any(…)`；伴随 `verification/toolbox/verus/jaso_conformance{,_bad}.rs` | Verus 0.2026.10.18.7d82994 + Z3 | proved（伴随） | 套件第 1 步 | 正例 6 verified/0 errors，负例 2 verified/1 error；伴随是独立可执行 Verus 代码，不是对生产函数本身的证明；各步内部判定由 JB-OS1 结构读取一节与信任层测试覆盖 |
+| JB-OS1-CONF-PROPTEST-01 | 对四个合法签名向量做 1–3 处任意改写并回填摘要：字节有变就绝不放行；任意字节：判定不 panic，结构读取失败时结果即读取错误码，否则只能是 ok 或 load 类码 | `verification/toolbox/tests/jaso.rs` → `jaso::conformance::check` | Proptest 1.12.0（每性质 256 例） | tested | 套件第 2 步 | 8 passed（含前一节 6 项）；crate 内宿主 49 passed：仓库向量与生成器逐字节一致、69 个向量判定与 `.expect` 一致、51 个错误码与 ok 全覆盖、非法/他人公钥一律 `trust.key` |
+| JB-OS1-CONF-MIRI-01 | 69 个向量的读取与判定（含 Ed25519 验签与 SHA-256）、错误公钥配置路径无未定义行为与泄漏 | `vector_tests::{every_vector_yields_its_expected_line,a_bad_trust_key_never_admits}` | Miri 0.1.0 (19833af722 2026-10-20)，`-Zmiri-disable-isolation`（读向量文件） | tested | 套件第 3 步 | 2 passed（446 s）；生成器（签名路径）由宿主测试覆盖，未在 Miri 下跑 |
+| JB-OS1-CONF-FUZZ-01 | 任意字节及「回填魔数/版本/长度/摘要」的副本：判定不 panic；结构读取失败时结果等于读取错误码；结构合格时只能被 load 类码拒绝；放行的文件必须由受信公钥签名 | `verification/toolbox/fuzz/fuzz_targets/jaso_conformance.rs`；种子 `fuzz/seeds/jaso_conformance/`（7 个向量入库） | cargo-fuzz 0.13.2 / libFuzzer | tested | 套件第 4 步 | 100 万次（94 s）、seed=1、0 崩溃，cov 2185 / ft 5702；覆盖引导 fuzz 不是证明 |
+| JB-OS1-CONF-KANI-NA | — | `jaso::conformance::check` | Kani | N/A | — | N/A：判定是结构读取 + Ed25519 验签 + SHA-256 + 平台选择的组合，新增的只有步骤顺序与表查找；其中数值部分已有 Kani（JB-OS1-LAYOUT-KANI-01），而 Ed25519/SHA-256 的符号化展开超出 CBMC 可行范围（前一节 from_utf8 一项已 23 分钟未结束）。替代证据：步骤顺序 Verus 伴随（JB-OS1-CONF-VERUS-01）、Proptest、100 万次 fuzz、69 个固定向量 |
+| JB-OS1-CONF-LOOM-NA | — | `jaso::conformance` / `jaso::vectors` / `jasopack vectors` | Loom | N/A | — | N/A：纯函数，上下文为编译期常量，无原子量 / 锁 / 共享可变状态；`jasopack vectors` 单线程顺序写文件。替代证据：同上 |

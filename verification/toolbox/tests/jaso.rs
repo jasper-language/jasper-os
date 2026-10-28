@@ -137,3 +137,65 @@ fn seed_fuzz_corpus() {
         std::fs::write(dir.join(name), bytes).unwrap();
     }
 }
+
+// —— 一致性判定（SPEC §14）——
+
+fn vectors_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../jaso/vectors")
+}
+
+fn dev_key() -> [u8; 32] {
+    let t = std::fs::read_to_string(vectors_dir().join("jasper.dev.pub")).unwrap();
+    let t = t.trim();
+    let mut k = [0u8; 32];
+    for (i, b) in k.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&t[2 * i..2 * i + 2], 16).unwrap();
+    }
+    k
+}
+
+fn vector(name: &str) -> Vec<u8> {
+    std::fs::read(vectors_dir().join(format!("{name}.jaso"))).unwrap()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 256, failure_persistence: None, ..ProptestConfig::default() })]
+
+    /// 对合法签名文件做任意改写（再回填完整性摘要，越过 format.digest）：只要字节有变，就绝不被放行。
+    /// 签名覆盖除完整性摘要与签名值以外的全部字节，改签名值则验签失败。
+    #[test]
+    fn no_edit_of_a_signed_file_is_admitted(
+        which in 0usize..4,
+        edits in proptest::collection::vec((any::<u16>(), any::<u8>()), 1..4),
+    ) {
+        let name = ["ok-native", "ok-managed", "ok-hybrid", "ok-multi-image"][which];
+        let good = vector(name);
+        let key = dev_key();
+        prop_assert_eq!(jaso::conformance::check(&good, key), Ok(()));
+        let mut b = good.clone();
+        for (at, v) in edits {
+            let i = at as usize % b.len();
+            if !(DIGEST_OFFSET..DIGEST_OFFSET + 32).contains(&i) {
+                b[i] = v;
+            }
+        }
+        let d = jaso::digest_of(&b);
+        b[DIGEST_OFFSET..DIGEST_OFFSET + 32].copy_from_slice(&d);
+        let r = jaso::conformance::check(&b, key);
+        if b == good {
+            prop_assert_eq!(r, Ok(()));
+        } else {
+            prop_assert!(r.is_err(), "改写后的 {} 被放行", name);
+        }
+    }
+
+    /// 任意字节：判定不 panic；结构读取失败时结果就是读取的错误码，否则只能是 ok 或 load 类码。
+    #[test]
+    fn check_agrees_with_structural_read(data in proptest::collection::vec(any::<u8>(), 0..400)) {
+        let r = jaso::conformance::check(&data, dev_key());
+        match Jaso::parse(&data) {
+            Err(e) => prop_assert_eq!(r, Err(e.code())),
+            Ok(_) => prop_assert!(r.map_or_else(|c| c.is_load(), |()| true)),
+        }
+    }
+}

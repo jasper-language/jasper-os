@@ -8,6 +8,9 @@
 //! jasopack migrate <format 0 文件> <输出>                       把 format 0 文件一次性迁移为 format 1（未签名；需要时再 sign）
 //! jasopack sign <.jaso> <私钥种子文件> <输出>                  以发布者私钥（32 字节种子文件）签名（替换已有签名）
 //! jasopack pubkey <私钥种子文件>                              输出该私钥对应的公钥（十六进制，写进受信发布者表）
+//! jasopack vectors <目录>                                    重建一致性向量（SPEC §14）：写出 `<名>.jaso` / `<名>.expect` 与开发用公钥，
+//!                                                            逐个复核判定结果，删除目录中多余的旧向量
+//! jasopack conform <.jaso>                                   按一致性上下文判定一个文件，输出 `ok` 或码名（与 `.expect` 同格式）
 //! ```
 //! 退出码：0 成功；1 输入不合法（校验或打包失败）；2 用法错误或读写失败。
 
@@ -19,7 +22,8 @@ fn usage() -> ExitCode {
     eprintln!(
         "用法：jasopack pack <ELF> <清单文件> <指令集> <装载阶段> <输出>\n      jasopack inspect <.jaso>\n      \
          jasopack migrate <format 0 文件> <输出>\n      \
-         jasopack sign <.jaso> <私钥种子文件> <输出>\n      jasopack pubkey <私钥种子文件>"
+         jasopack sign <.jaso> <私钥种子文件> <输出>\n      jasopack pubkey <私钥种子文件>\n      \
+         jasopack vectors <目录>\n      jasopack conform <.jaso>"
     );
     ExitCode::from(2)
 }
@@ -208,6 +212,59 @@ fn migrate(input: &str, out: &str) -> ExitCode {
     }
 }
 
+fn vectors(dir: &str) -> ExitCode {
+    let dev = jaso::pack::development_signer();
+    let key = dev.public_key();
+    let all = jaso::vectors::all(&dev);
+    let dir = std::path::Path::new(dir);
+    let write = |name: String, bytes: &[u8]| std::fs::write(dir.join(&name), bytes).map_err(|e| format!("写入 {} 失败：{}", name, e));
+    let mut bad = 0;
+    for v in &all {
+        let got = jaso::conformance::expect_line(jaso::conformance::check(&v.bytes, key));
+        if got != v.expect {
+            eprintln!("{}: 期望 {}，判定为 {}", v.name, v.expect, got);
+            bad += 1;
+        }
+        let r = write(format!("{}.jaso", v.name), &v.bytes).and_then(|()| write(format!("{}.expect", v.name), format!("{}\n", v.expect).as_bytes()));
+        if let Err(e) = r {
+            eprintln!("{}", e);
+            return ExitCode::from(2);
+        }
+    }
+    if let Err(e) = write(jaso::vectors::DEV_KEY_FILE.into(), jaso::vectors::dev_key_text(&key).as_bytes()) {
+        eprintln!("{}", e);
+        return ExitCode::from(2);
+    }
+    // 删除不再生成的旧向量（只动 .jaso / .expect）
+    let keep = |stem: &str| all.iter().any(|v| v.name == stem);
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            let ext = p.extension().and_then(|x| x.to_str());
+            let stem = p.file_stem().and_then(|x| x.to_str()).unwrap_or("");
+            if matches!(ext, Some("jaso" | "expect")) && !keep(stem) {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+    println!("vectors: {} written to {}, {} mismatched", all.len(), dir.display(), bad);
+    if bad == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) }
+}
+
+fn conform(p: &str) -> ExitCode {
+    match std::fs::read(p) {
+        Ok(b) => {
+            let key = jaso::pack::development_signer().public_key();
+            println!("{}", jaso::conformance::expect_line(jaso::conformance::check(&b, key)));
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("读取 {} 失败：{}", p, e);
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
@@ -216,6 +273,8 @@ fn main() -> ExitCode {
         ["sign", input, seed, out] => sign(input, seed, out),
         ["pubkey", seed] => pubkey(seed),
         ["migrate", input, out] => migrate(input, out),
+        ["vectors", dir] => vectors(dir),
+        ["conform", p] => conform(p),
         _ => usage(),
     }
 }

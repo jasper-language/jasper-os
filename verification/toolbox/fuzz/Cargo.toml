@@ -177,3 +177,10 @@ path = "fuzz_targets/jaso_parse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "jaso_conformance"
+path = "fuzz_targets/jaso_conformance.rs"
+test = false
+doc = false
+bench = false

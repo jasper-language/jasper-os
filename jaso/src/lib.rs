@@ -24,6 +24,7 @@ extern crate alloc;
 #[cfg(feature = "alloc")]
 pub mod build;
 pub mod code;
+pub mod conformance;
 pub mod manifest;
 #[cfg(feature = "alloc")]
 pub mod migrate;
@@ -32,6 +33,8 @@ pub mod pack;
 pub mod placement;
 pub mod platform;
 pub mod trust;
+#[cfg(feature = "pack")]
+pub mod vectors;
 pub mod wire;
 
 pub use code::ErrorCode;
@@ -1340,3 +1343,5 @@ mod kani_proofs;
 mod tests;
 #[cfg(all(test, feature = "sign"))]
 mod trust_tests;
+#[cfg(all(test, feature = "pack"))]
+mod vector_tests;
