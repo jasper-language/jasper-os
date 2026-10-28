@@ -46,11 +46,14 @@ pub enum Stage {
     Devices = 7,
     /// 系统 Profile 校验（模块面与参数档）。System Profile validation (modules and parameters).
     Profile = 8,
+    /// 服务装配（issue #6）：按依赖启动 Profile 声明的模块，只发布就绪模块的能力。
+    /// Service assembly (issue #6): start declared modules in dependency order, publish only ready ones.
+    Assembly = 9,
 }
 
 impl Stage {
     /// 阶段个数。Number of stages.
-    pub const COUNT: usize = 9;
+    pub const COUNT: usize = 10;
     /// 全部阶段，下标即 [`Stage::index`]。All stages, indexed by [`Stage::index`].
     pub const ALL: [Stage; Stage::COUNT] = [
         Stage::Console,
@@ -62,6 +65,7 @@ impl Stage {
         Stage::Capacity,
         Stage::Devices,
         Stage::Profile,
+        Stage::Assembly,
     ];
 
     /// 阶段在 [`GRAPH`] 与 [`Stage::ALL`] 中的下标。Index into [`GRAPH`] and [`Stage::ALL`].
@@ -110,7 +114,8 @@ const fn bits2(a: Stage, b: Stage) -> u32 {
 /// - Platform 需要控制台报告异常；Timer 需要异常/中断入口；
 /// - Frames 需要引导交接信息与控制台（不依赖定时器）；KernelMap 需要页帧分配页表；
 /// - Heap 需要映射器与页帧；Capacity 在堆上安装对象表、实时表与任务栈；
-/// - Devices 需要映射器（ECAM 窗口）与堆（设备表）；Profile 校验需要堆（模块表）。
+/// - Devices 需要映射器（ECAM 窗口）与堆（设备表）；Profile 校验需要堆（模块表）；
+/// - Assembly 的就绪检查读取定时器、启动期容量（对象表、实时表、任务表）与校验过的 Profile。
 pub const GRAPH: [StageSpec; Stage::COUNT] = [
     StageSpec { stage: Stage::Console, name: "console", requires: 0 },
     StageSpec { stage: Stage::Platform, name: "platform", requires: Stage::Console.bit() },
@@ -121,6 +126,11 @@ pub const GRAPH: [StageSpec; Stage::COUNT] = [
     StageSpec { stage: Stage::Capacity, name: "capacity", requires: Stage::Heap.bit() },
     StageSpec { stage: Stage::Devices, name: "devices", requires: bits2(Stage::KernelMap, Stage::Heap) },
     StageSpec { stage: Stage::Profile, name: "profile", requires: Stage::Heap.bit() },
+    StageSpec {
+        stage: Stage::Assembly,
+        name: "assembly",
+        requires: Stage::Timer.bit() | Stage::Capacity.bit() | Stage::Profile.bit(),
+    },
 ];
 
 const fn str_eq(a: &str, b: &str) -> bool {
@@ -385,8 +395,12 @@ mod tests {
         for s in Stage::ALL {
             assert_eq!(t.begin(s), Err(StageError::Halted { failed: Stage::KernelMap }));
         }
-        // Heap/Capacity/Devices/Profile 都传递依赖 KernelMap。
-        let expect = Stage::Heap.bit() | Stage::Capacity.bit() | Stage::Devices.bit() | Stage::Profile.bit();
+        // Heap/Capacity/Devices/Profile/Assembly 都传递依赖 KernelMap。
+        let expect = Stage::Heap.bit()
+            | Stage::Capacity.bit()
+            | Stage::Devices.bit()
+            | Stage::Profile.bit()
+            | Stage::Assembly.bit();
         assert_eq!(t.blocked_mask(), expect);
     }
 

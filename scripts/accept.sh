@@ -549,15 +549,15 @@ check_m11() {   # 真实启动 + 横幅 + 自退出
   fi
 }
 
-check_boot_stage() {   # issue #7：九个全局启动阶段按声明顺序各完成一次，无拒绝、无失败
+check_boot_stage() {   # issue #7：十个全局启动阶段按声明顺序各完成一次，无拒绝、无失败
   local order
   order=$(grep -oE '^\[JSR-BOOT-STAGE\] done stage=[a-z_]+' "$SERIAL" 2>/dev/null | sed 's/.*stage=//' | tr '\n' ' ' || true)
-  if [ "$order" = "console platform timer frames kernel_map heap capacity devices profile " ] \
-     && has '^\[JSR-BOOT-STAGE\] done stage=profile done_mask=0x1ff' \
+  if [ "$order" = "console platform timer frames kernel_map heap capacity devices profile assembly " ] \
+     && has '^\[JSR-BOOT-STAGE\] done stage=assembly done_mask=0x3ff' \
      && ! has '^\[JSR-BOOT-STAGE\] (refused|failed)'; then
-    record BOOT-STAGE PASS "九个阶段按序完成（done_mask=0x1ff），无拒绝、无失败"
+    record BOOT-STAGE PASS "十个阶段按序完成（done_mask=0x3ff），无拒绝、无失败"
   else
-    record BOOT-STAGE FAIL "阶段序列=[$order]，或缺 done_mask=0x1ff，或出现 refused/failed"
+    record BOOT-STAGE FAIL "阶段序列=[$order]，或缺 done_mask=0x3ff，或出现 refused/failed"
   fi
 }
 
@@ -1806,6 +1806,18 @@ check_isa3b() { # RISC-V32 移植第二阶段：内嵌用户程序（ELF32 装�
   fi
 }
 
+check_asm1() {  # issue #6 第一切片：服务装配——按依赖顺序启动、只发布初始化成功的能力、
+                # 发布掩码与装配状态自动比对、重复启动与停用常驻服务被拒
+  if has '\[JSR-ASSEMBLY\] module=core order=0 state=ready reason=' \
+     && has '\[JSR-ASSEMBLY\] module=async order=7 state=ready reason=' \
+     && has '\[JSR-ASSEMBLY\] summary profile=headless modules=8 ready=8 failed=0 blocked=0 declared=9 published=9 pre_publish=0 audit=ok restart=system\.module\.error\.already_started stop_core=system\.module\.error\.in_use' \
+     && has '\[JSR-PROFILE\] summary profiles=2 rejects=4 gates=3 renders=2 checks=17 failed=0'; then
+    record ASM1 PASS "生效 Profile 8 个模块按依赖顺序（core 先）全部就绪；装配前发布掩码为 0，装配后 9 项声明能力全部发布且审计一致；重复启动被拒（already_started）、停用仍被依赖的 core 被拒（in_use）"
+  else
+    record ASM1 FAIL "缺少 [JSR-ASSEMBLY] 关键标记：模块未全部就绪、发布与声明不一致、审计失败或重复启动/停用未被拒"
+  fi
+}
+
 check_pol2() {  # POL-2：系统 Profile——启动期校验、两份内建 Profile 的服务面真实不同、
                 # 四类非法 Profile 各自给出结构化拒绝原因、结构化描述可渲染
   if has '\[JSR-PROFILE\] active name=headless valid=true params=(standard|compact) modules=8 services=11 capabilities=9 guarantees=2' \
@@ -2500,11 +2512,11 @@ if [ "$SPOT" -eq 1 ]; then
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_boot_stage; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
+  check_pol1; check_pol2; check_asm1; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_boot_stage; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
+  check_pol1; check_pol2; check_asm1; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------

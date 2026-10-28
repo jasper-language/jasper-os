@@ -205,3 +205,17 @@ path = "fuzz_targets/boot_stage.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "assembly"
+path = "fuzz_targets/assembly.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "module_mgr"
+path = "fuzz_targets/module_mgr.rs"
+test = false
+doc = false
+bench = false

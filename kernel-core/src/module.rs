@@ -290,3 +290,35 @@ mod tests {
         );
     }
 }
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    static KA: ModuleDescriptor = ModuleDescriptor { name: "ka", requires: &[], init: || Ok(()), fini: || {} };
+    static KB: ModuleDescriptor = ModuleDescriptor { name: "kb", requires: &["ka"], init: || Ok(()), fini: || {} };
+    static KC: ModuleDescriptor = ModuleDescriptor { name: "kc", requires: &[], init: || Err("x"), fini: || {} };
+    static POOL: [&ModuleDescriptor; 3] = [&KA, &KB, &KC];
+
+    /// 任意 3 步 load / unload 序列（容量 2）：已装载集合恒对 requires 闭包、依赖排在前面，
+    /// init 失败的模块从不出现在表中。
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn loaded_set_stays_dependency_closed() {
+        let mut mm: ModuleManager<2> = ModuleManager::new();
+        for _ in 0..3 {
+            let d = POOL[kani::any::<usize>() % 3];
+            if kani::any() {
+                let _ = mm.load(d);
+            } else {
+                let _ = mm.unload(d.name);
+            }
+            assert!(!mm.is_loaded("kc"));
+            assert!(!mm.is_loaded("kb") || mm.is_loaded("ka"));
+            if mm.is_loaded("kb") {
+                assert!(mm.loaded().next().map(|m| m.name) == Some("ka"));
+            }
+            assert!(mm.len() <= 2);
+        }
+    }
+}

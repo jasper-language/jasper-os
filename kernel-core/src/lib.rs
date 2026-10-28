@@ -92,6 +92,8 @@ pub mod memory_abi;
 pub mod meta;
 pub mod msi;
 pub mod profile;
+/// 服务装配契约：模块运行时状态、依赖顺序、能力发布与审计（issue #6）。
+pub mod assembly;
 pub mod paging;
 pub mod pagetable;
 pub mod pci;

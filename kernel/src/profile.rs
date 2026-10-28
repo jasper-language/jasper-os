@@ -9,7 +9,7 @@
 //!   写入用户缓冲区（内核里没有 JSON 编码器，也不值得为此引入一个）。
 //!
 //! # 边界
-//! 只做选择、校验与渲染；不初始化模块，也不做权限判定（那是系统调用入口的事）。
+//! 只做选择、校验与渲染；不初始化模块（装配见 `crate::assembly`），也不做权限判定（那是系统调用入口的事）。
 
 use core::fmt::Write;
 
@@ -57,9 +57,12 @@ pub fn resolved() -> Option<ResolvedProfile> {
     profile::resolve(&ACTIVE).ok()
 }
 
-/// 当前 Profile 是否提供某项能力（例如 `sched.realtime`）。
+/// 某项能力（例如 `sched.realtime`）当前是否**可用**：生效 Profile 声明了它，且提供它的模块已在
+/// 启动期装配中初始化成功并发布（见 [`crate::assembly`]）。只声明未就绪、或装配之前查询，一律为假。
+/// 只想知道声明面时用 [`resolved`]。
+/// English: true only when the capability is declared *and* published by the boot-time assembly.
 pub fn has_capability(capability: &str) -> bool {
-    resolved().is_some_and(|r| r.has_capability(capability))
+    crate::assembly::available(capability)
 }
 
 /// 启动期校验：逐个解析内建表，再解析生效 Profile。
@@ -148,6 +151,19 @@ pub fn render(index: usize, out: &mut [u8]) -> Option<usize> {
     write_join(&mut sink, resolved.services());
     let _ = write!(sink, "\ncapabilities=");
     write_join(&mut sink, resolved.capabilities());
+    // 运行时已发布（真正可用）的能力：只对生效 Profile 有意义，其他 Profile 恒为空。
+    let _ = write!(sink, "\npublished=");
+    let mask = if index == active_index() { crate::assembly::published_mask() } else { 0 };
+    let mut first = true;
+    for (b, cap) in resolved.capabilities().iter().enumerate() {
+        if mask & (1 << b) != 0 {
+            if !first {
+                let _ = sink.write_str(",");
+            }
+            let _ = sink.write_str(cap);
+            first = false;
+        }
+    }
     let _ = write!(sink, "\nguarantees=");
     for (i, g) in declared.guarantees.iter().enumerate() {
         if i > 0 {

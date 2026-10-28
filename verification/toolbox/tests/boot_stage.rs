@@ -107,10 +107,10 @@ proptest! {
 
     /// 变异阶段图：良构判定与参照一致；良构 ⇒ closure 等于 DFS 闭包且不含自身（无环）。
     #[test]
-    fn graph_check_matches_reference(edits in proptest::collection::vec((0usize..9, any::<u32>(), 0usize..9, any::<bool>()), 0..4)) {
+    fn graph_check_matches_reference(edits in proptest::collection::vec((0usize..10, any::<u32>(), 0usize..10, any::<bool>()), 0..4)) {
         let mut g = GRAPH;
         for (i, req, j, swap) in edits {
-            if swap { g.swap(i, j) } else { g[i].requires = req & 0x1ff }
+            if swap { g.swap(i, j) } else { g[i].requires = req & 0x3ff }
         }
         prop_assert_eq!(graph_well_formed(&g), reference_well_formed(&g));
         if graph_well_formed(&g) {

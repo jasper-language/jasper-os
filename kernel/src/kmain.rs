@@ -10,7 +10,7 @@
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
 use kernel_core::boot_stage::{Stage, Tracker};
-use crate::{appid_demo, arbiter_demo, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, l10n_demo, mech_demo, mm, msi_demo, pci, pci_demo, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, virtio_rng_demo, wcet};
+use crate::{appid_demo, arbiter_demo, assembly, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, l10n_demo, mech_demo, mm, msi_demo, pci, pci_demo, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, virtio_rng_demo, wcet};
 #[cfg(feature = "user-programs")]
 use crate::abi_demo;
 #[cfg(feature = "user-programs")]
@@ -170,6 +170,16 @@ pub fn start(boot: &'static BootSpec) -> ! {
         let profile_failed = profile::boot_report();
         if profile_failed > 0 {
             kprintln!("[JSR-EXIT] failure profile_failed={}", profile_failed);
+            return None;
+        }
+        Some(())
+    });
+    // issue #6：按依赖顺序装配生效 Profile 的模块；只有初始化成功的模块能力被发布，
+    // 之后的能力查询（包括下面的多模式判定）读的是发布结果而不是声明表。
+    stage(&mut stages, Stage::Assembly, || {
+        let assembly_failed = assembly::boot();
+        if assembly_failed > 0 {
+            kprintln!("[JSR-EXIT] failure assembly_failed={}", assembly_failed);
             return None;
         }
         Some(())

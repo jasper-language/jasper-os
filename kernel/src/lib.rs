@@ -72,6 +72,7 @@ pub mod pci;
 pub mod pci_demo;
 pub mod proc;
 pub mod profile;
+pub mod assembly;
 pub mod profile_demo;
 #[cfg(feature = "user-programs")]
 pub mod prog_demo;

@@ -8,7 +8,7 @@ pub open spec fn req(i: u32) -> u32 {
 }
 
 fn bad_begin(started: u32, done: u32, failed: bool, s: u32) -> (r: u8)
-    requires s < 9,
+    requires s < 10,
     ensures r == 0 ==> req(s) & !done == 0,
 {
     if failed {

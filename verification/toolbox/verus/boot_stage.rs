@@ -1,7 +1,7 @@
 // issue #7 第一片：启动阶段跟踪器（kernel_core::boot_stage::Tracker）的 Verus 伴随模型。
 // Verus companion model of kernel_core::boot_stage::Tracker (issue #7, slice 1).
 //
-// 模型与 Rust 源一一对应：started / done 为位掩码，running / failed 用 NONE(=9) 表示「无」。
+// 模型与 Rust 源一一对应：started / done 为位掩码，running / failed 用 NONE(=10) 表示「无」。
 // 证明：begin 成功 ⇒ 未失败、无运行中阶段、此前未开始、直接依赖全部完成；begin/complete/fail 保持不变量
 // （done ⊆ started ⊆ 全集；运行中阶段已开始未完成且依赖已完成；每个已完成阶段的直接依赖都已完成；
 // 失败后 begin 一律被拒）；依赖表只指向更靠前的阶段。
@@ -11,9 +11,9 @@ use vstd::prelude::*;
 
 verus! {
 
-pub const COUNT: u32 = 9;
-pub const NONE: u32 = 9;
-pub const ALL: u32 = 0x1ff;
+pub const COUNT: u32 = 10;
+pub const NONE: u32 = 10;
+pub const ALL: u32 = 0x3ff;
 
 /// 直接依赖表（与 GRAPH 一致）。Direct prerequisites, mirroring GRAPH.
 pub open spec fn req(i: u32) -> u32 {
@@ -25,7 +25,8 @@ pub open spec fn req(i: u32) -> u32 {
     else if i == 5 { 0x18 }
     else if i == 6 { 0x20 }
     else if i == 7 { 0x30 }
-    else { 0x20 }
+    else if i == 8 { 0x20 }
+    else { 0x144 }
 }
 
 fn req_exec(i: u32) -> (r: u32)
@@ -40,7 +41,8 @@ fn req_exec(i: u32) -> (r: u32)
     else if i == 5 { 0x18 }
     else if i == 6 { 0x20 }
     else if i == 7 { 0x30 }
-    else { 0x20 }
+    else if i == 8 { 0x20 }
+    else { 0x144 }
 }
 
 /// 依赖只指向更靠前的阶段（图无环的充分条件）。Prerequisites point strictly backwards.
@@ -56,7 +58,8 @@ proof fn graph_points_backwards(i: u32)
     else if i == 5 { assert(0x18u32 & !(((1u32 << 5u32) - 1) as u32) == 0) by (bit_vector); }
     else if i == 6 { assert(0x20u32 & !(((1u32 << 6u32) - 1) as u32) == 0) by (bit_vector); }
     else if i == 7 { assert(0x30u32 & !(((1u32 << 7u32) - 1) as u32) == 0) by (bit_vector); }
-    else { assert(0x20u32 & !(((1u32 << 8u32) - 1) as u32) == 0) by (bit_vector); }
+    else if i == 8 { assert(0x20u32 & !(((1u32 << 8u32) - 1) as u32) == 0) by (bit_vector); }
+    else { assert(0x144u32 & !(((1u32 << 9u32) - 1) as u32) == 0) by (bit_vector); }
 }
 
 pub struct Tracker {
@@ -127,7 +130,7 @@ fn begin(t: &mut Tracker, s: u32) -> (r: u8)
     let ghost st = old_t.started;
     let ghost d = old_t.done;
     assert(d & !st == 0 ==> d & !(st | bit) == 0) by (bit_vector);
-    assert(s < 9 && st & !0x1ffu32 == 0 ==> (st | (1u32 << s)) & !0x1ffu32 == 0) by (bit_vector);
+    assert(s < 10 && st & !0x3ffu32 == 0 ==> (st | (1u32 << s)) & !0x3ffu32 == 0) by (bit_vector);
     assert(s < 32 ==> (st | (1u32 << s)) & (1u32 << s) != 0) by (bit_vector);
     assert(s < 32 && st & (1u32 << s) == 0 && d & !st == 0 ==> d & (1u32 << s) == 0) by (bit_vector);
     0
