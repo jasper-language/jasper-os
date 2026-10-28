@@ -20,6 +20,7 @@
 #         JASPER_CORES=8-11 bash scripts/accept.sh
 #         JASPER_PROFILE=compact bash scripts/accept.sh   （内核配置档：standard（默认）| compact）
 #         JASPER_QEMU_TIMEOUT=300 bash scripts/accept.sh  （单次 QEMU 启动的时限，秒；默认 90。较慢的托管运行器上放宽）
+#         JASPER_QEMU_TIMEOUT_SMP8=900 bash scripts/accept.sh （x86_64 8 处理器那一次启动的时限，秒；默认为上一项的 3 倍）
 #         JASPER_ARCHES=all bash scripts/accept.sh        （架构范围：x86_64（默认）| all；默认只构建/启动 x86_64，
 #                                                         AArch64 / RISC-V64 / RISC-V32 冻结记 N/A；all 恢复四指令集全量验收）
 #         JASPER_QEMU_EXTRA='-icount shift=8' bash scripts/accept.sh
@@ -59,6 +60,10 @@ QEMU_TIMEOUT="${JASPER_QEMU_TIMEOUT:-90}"
 # 两次 QEMU 启动之间的间隔（秒）：连续压满会让宿主桌面失去响应，默认留 3 秒让系统喘口气。
 BOOT_GAP="${JASPER_BOOT_GAP:-3}"
 case "$QEMU_TIMEOUT" in ''|0|*[!0-9]*) echo "✗ JASPER_QEMU_TIMEOUT 必须是正整数秒：$QEMU_TIMEOUT"; exit 2 ;; esac
+# 8 处理器启动在 TCG 下用 8 个仿真线程跑完同一套演练：构建虚拟机空闲时实测 234 秒（2026-10-28），
+# 与其他车道并跑时慢 4 倍以上；单独给它时限，超时只是没跑完，不是任何判据被放宽。
+QEMU_TIMEOUT_SMP8="${JASPER_QEMU_TIMEOUT_SMP8:-$((QEMU_TIMEOUT * 3))}"
+case "$QEMU_TIMEOUT_SMP8" in ''|0|*[!0-9]*) echo "✗ JASPER_QEMU_TIMEOUT_SMP8 必须是正整数秒：$QEMU_TIMEOUT_SMP8"; exit 2 ;; esac
 case "$PROFILE" in
   standard) KFEAT=() ;;
   compact)  KFEAT=(--features profile-compact) ;;
@@ -297,7 +302,7 @@ QRC_SMP8=-1
 if [ "$BUILD_RC" -eq 0 ] && [ "$SPOT" -eq 0 ]; then
   echo "== QEMU 真实启动（x86_64，8 个处理器）=="
   sleep "$BOOT_GAP"
-  qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 8 \
+  qrun timeout "$QEMU_TIMEOUT_SMP8" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 8 \
     -serial stdio -display none -monitor none -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$SERIAL_SMP8" 2>&1
   QRC_SMP8=$?
