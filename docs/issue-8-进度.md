@@ -1,7 +1,7 @@
 # issue #8 进度：原生 ABI 世代（第一片）
 
 - 日期：2026-10-27
-- 分支：`oc/Q82`
+- 分支：`dev/issue8-s1`（第一片初版 + 2026-10-28 节头解析补链）
 - 范围：第一片可独立验收的切片；x86_64 为唯一运行目标，AArch64 / RISC-V 仅保持编译，不新增运行验收。
 - 结论：第一片已实现并通过真实启动与六步验证链；发布快照、轮换与能力要求留待后续切片。
 
@@ -100,6 +100,21 @@ QEMU 退出码为 37（仅计时类超界；功能失败数为 0），这是指�
 | cargo-fuzz | 10000 次运行完成，无 panic / 无违例 |
 | Kani | 3 个 `abi-fv` harness 全部 SUCCESSFUL |
 | Loom | N/A：纯函数，无锁、原子或线程交错；替代证据为真实 QEMU 装载演练 |
+
+### 3.2.1 ELF 节头 / ABI 章定位补链（2026-10-28）
+
+第一片初版的验证只覆盖 28 字节章本身；`elf::parse` 新增的节头表与章节定位同样处理不可信映像，本次补齐全链（登记 `ABI-GEN-07`～`ABI-GEN-12`）：
+
+| 步骤 | 结果 |
+|---|---|
+| Verus/Z3 | 地址算术模型 7 verified / 0 errors；off-by-one 负例必须失败，实测 1 error |
+| Proptest | 4 个性质 × 512 例 + 1 个确定性用例，5 passed |
+| Miri | 9 种拒绝/接受情形的确定性用例通过 |
+| cargo-fuzz | 两种模式（任意字节 / 合法夹具改写）100 万次，0 崩溃 |
+| Kani | 节名读取、节头读取 2 个 harness SUCCESSFUL |
+| Loom | N/A：纯函数；替代证据为畸形输入覆盖 + QEMU `ABI`/`m51pre` 检查 |
+
+同一脚本 `verification/toolbox/run-abi-suite.sh` 一次跑完 ABI 章与节头两部分；定点 `m11 abi m51pre` 复跑 PASS。
 
 Kani harness 只在 `abi-fv` 特性下编译，默认 Kani 套件的 harness 计数保持不变。
 

@@ -157,3 +157,10 @@ path = "fuzz_targets/abi_note.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "elf_abi_section"
+path = "fuzz_targets/elf_abi_section.rs"
+test = false
+doc = false
+bench = false

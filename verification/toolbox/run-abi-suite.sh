@@ -32,6 +32,11 @@ sha256sum \
   verification/toolbox/verus/abi_version.rs \
   verification/toolbox/tests/abi_version.rs \
   verification/toolbox/fuzz/fuzz_targets/abi_note.rs \
+  verification/toolbox/verus/elf_section_bounds.rs \
+  verification/toolbox/verus/elf_section_bounds_bad.rs \
+  verification/toolbox/tests/fixture/elf_abi.rs \
+  verification/toolbox/tests/elf_abi_section.rs \
+  verification/toolbox/fuzz/fuzz_targets/elf_abi_section.rs \
   > "$out/source.sha256"
 
 rustc --version > "$out/rustc-version.log"
@@ -43,16 +48,26 @@ cargo fuzz --version > "$out/fuzz-version.log"
 
 echo "== 1/6 Verus/Z3 =="
 "$VERUS" verification/toolbox/verus/abi_version.rs > "$out/verus.log" 2>&1
+"$VERUS" verification/toolbox/verus/elf_section_bounds.rs > "$out/verus-elf.log" 2>&1
+# 负例必须验证失败：off-by-one 的下标上界不能推出表项在文件内。
+if "$VERUS" verification/toolbox/verus/elf_section_bounds_bad.rs > "$out/verus-elf-bad.log" 2>&1; then
+  echo "负例 elf_section_bounds_bad.rs 竟然通过验证" >&2
+  exit 1
+fi
 
 echo "== 2/6 Proptest =="
 cargo test --manifest-path verification/toolbox/Cargo.toml --test abi_version > "$out/proptest.log" 2>&1
+cargo test --manifest-path verification/toolbox/Cargo.toml --test elf_abi_section > "$out/proptest-elf.log" 2>&1
 
 echo "== 3/6 Miri =="
 cargo +nightly miri test --manifest-path verification/toolbox/Cargo.toml --test abi_version \
   note_roundtrip_under_miri > "$out/miri.log" 2>&1
+cargo +nightly miri test --manifest-path verification/toolbox/Cargo.toml --test elf_abi_section \
+  section_rejections_under_miri > "$out/miri-elf.log" 2>&1
 
 echo "== 4/6 cargo-fuzz =="
 (cd verification/toolbox/fuzz && cargo fuzz run abi_note -- -runs=10000) > "$out/fuzz.log" 2>&1
+(cd verification/toolbox/fuzz && cargo fuzz run elf_abi_section -- -runs=1000000 -max_len=16384) > "$out/fuzz-elf.log" 2>&1
 
 echo "== 5/6 Kani =="
 cargo kani -p kernel-core --features abi-fv \
@@ -61,10 +76,15 @@ cargo kani -p kernel-core --features abi-fv \
   --harness abi_note_encode_parse_roundtrip > "$out/kani-note.log" 2>&1
 cargo kani -p kernel-core --features abi-fv \
   --harness abi_packed_rejects_reserved_high_bits > "$out/kani-packed.log" 2>&1
+cargo kani -p kernel-core --features abi-fv \
+  --harness elf_section_name_is_bounded_and_terminated > "$out/kani-elf-name.log" 2>&1
+cargo kani -p kernel-core --features abi-fv \
+  --harness elf_section_at_stays_inside_image > "$out/kani-elf-entry.log" 2>&1
 
 echo "== 6/6 Loom =="
 cat > "$out/loom-na.log" <<'EOF'
-N/A：ABI 世代判定（compatible/check_image/parse_note/encode_note）是纯函数，
+N/A：ABI 世代判定（compatible/check_image/parse_note/encode_note）与 ELF 节头/章定位
+（elf::section_at/section_name/abi_note_bytes）是纯函数，
 不读写共享状态，也没有锁、原子或线程交错可供 Loom 枚举。
 替代证据：Proptest 全输入域性质 + cargo-fuzz 畸形输入 + Kani 有界证明 + 真实 QEMU 装载演练。
 EOF
@@ -76,6 +96,13 @@ grep -q '#10000.*DONE' "$out/fuzz.log"
 grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-compat.log"
 grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-note.log"
 grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-packed.log"
+grep -Eq '[1-9][0-9]* verified, 0 errors' "$out/verus-elf.log"
+grep -Eq 'error: (postcondition not satisfied|assertion failed)' "$out/verus-elf-bad.log"
+grep -q '5 passed; 0 failed' "$out/proptest-elf.log"
+grep -q '1 passed; 0 failed' "$out/miri-elf.log"
+grep -q '#1000000.*DONE' "$out/fuzz-elf.log"
+grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-elf-name.log"
+grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-elf-entry.log"
 grep -q '^N/A：' "$out/loom-na.log"
 
 printf 'ABI generation suite: Verus/Proptest/Miri/fuzz/Kani passed; Loom N/A (pure functions)\n' | tee "$out/PASS"

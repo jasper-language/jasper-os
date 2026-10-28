@@ -453,6 +453,46 @@ pub fn parse(image: &[u8], machine: u16, class: ElfClass) -> Result<ElfImage, El
     Ok(ElfImage { entry, segs: out.segs, count: out.count, abi })
 }
 
+/// Kani：节名读取对任意字符串表与偏移不 panic；成功时名字在表内、不含 NUL、紧跟一个 NUL。
+/// Kani: section-name lookup never panics; an accepted name lies inside the table and is NUL-terminated.
+#[cfg(all(kani, feature = "abi-fv"))]
+#[kani::proof]
+#[kani::unwind(10)]
+fn elf_section_name_is_bounded_and_terminated() {
+    let strtab: [u8; 8] = kani::any();
+    let len: usize = kani::any();
+    kani::assume(len <= strtab.len());
+    let offset: u32 = kani::any();
+    let tab = &strtab[..len];
+    if let Ok(name) = section_name(tab, offset) {
+        let start = offset as usize;
+        assert!(start + name.len() < len);
+        assert!(!name.as_bytes().contains(&0));
+        assert_eq!(tab[start + name.len()], 0);
+    }
+}
+
+/// Kani：节头读取对任意偏移、表项大小与下标不 panic、不溢出；成功时整个表项落在映像内。
+/// Kani: section-header reads never panic or overflow; an accepted entry lies wholly inside the image.
+#[cfg(all(kani, feature = "abi-fv"))]
+#[kani::proof]
+fn elf_section_at_stays_inside_image() {
+    let image: [u8; 160] = kani::any();
+    let len: usize = kani::any();
+    kani::assume(len <= image.len());
+    let shoff: usize = kani::any();
+    let shentsize: usize = kani::any();
+    let index: usize = kani::any();
+    if section_at(&image[..len], &ELF64, shoff, shentsize, index).is_ok() {
+        let end = (index as u128) * (shentsize as u128) + shoff as u128 + shentsize as u128;
+        assert!(end <= len as u128);
+        // 生产调用方要求表项大小等于规范值；在该前提下所有字段都在表项内读取。
+        if shentsize == ELF64.shent {
+            assert!(ELF64.sh_size + 8 <= shentsize);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
