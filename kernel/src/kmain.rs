@@ -323,8 +323,17 @@ pub fn start(boot: &'static BootSpec) -> ! {
     l10n_demo::run();
     // WCET 证据：关键路径的最大实测值（系统调用周期、交互唤醒 tick）。
     wcet::report();
+    // issue #2：高精度期限事件增量同步计数——无变化的槽位不写堆；计数必须守恒。
+    // Deadline sync counters: unchanged slots write nothing; counters must balance.
+    let ns_sync = sched::ns_sync_stats();
+    kprintln!(
+        "[JSR-NS-SYNC] passes={} synced={} unchanged={} writes={} inserted={} rescheduled={} moved={} removed={} balanced={}",
+        ns_sync.passes, ns_sync.synced, ns_sync.unchanged, ns_sync.writes(),
+        ns_sync.inserted, ns_sync.rescheduled, ns_sync.moved, ns_sync.removed, ns_sync.balanced()
+    );
     // 各演练的断言失败数（顺序即输出顺序）；未编译的演练不出现。
     let fails: &[(&str, u32)] = &[
+        ("nssync", u32::from(!ns_sync.balanced())),
         ("mm", mm::demo::failed()),
         ("smp", smp::demo::failed()),
         ("balance", balance_demo::failed()),

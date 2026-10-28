@@ -786,6 +786,8 @@ pub struct Scheduler {
     ns_now:u64,
     ns_active:bool,
     ns_programmed:[Option<u64>;MAX_CPUS],
+    /// 高精度期限事件增量同步计数（issue #2）。
+    ns_sync: kernel_core::deadline_forest::SyncStats,
     /// 选择路径的遍历量统计。
     scan: ScanStats,
     /// 被运行队列拒绝的钩子调用次数（成员关系不符；正常运行时恒为 0）与最近一次的原因。
@@ -945,6 +947,7 @@ impl Scheduler {
             ns_roots:[None;MAX_CPUS],ns_at:[0;MAX_CPUS],ns_credit:[None;MAX_CPUS],
             ns_need_tick:[false;MAX_CPUS],
             ns_now:0,ns_active:false,ns_programmed:[None;MAX_CPUS],
+            ns_sync: kernel_core::deadline_forest::SyncStats { passes: 0, synced: 0, unchanged: 0, inserted: 0, rescheduled: 0, moved: 0, removed: 0 },
             scan: ScanStats { picks: 0, visited: 0, max_visited: 0, wake_scans: 0, ticks: 0 },
             hook_errors: 0,
             last_hook_error: None,
@@ -1982,6 +1985,12 @@ impl Scheduler {
         self.scan
     }
 
+    /// 高精度期限事件增量同步计数（issue #2）。
+    /// High-resolution deadline sync counters.
+    pub fn ns_sync_stats(&self) -> kernel_core::deadline_forest::SyncStats {
+        self.ns_sync
+    }
+
     /// 清零选择路径遍历量统计。
     pub fn reset_scan_stats(&mut self) {
         self.scan = ScanStats::default();
@@ -2635,6 +2644,7 @@ impl Scheduler {
     }
     pub fn refresh_ns_events(&mut self) {
         if !self.ns_active{return;}
+        self.ns_sync.passes=self.ns_sync.passes.saturating_add(1);
         for i in 0..self.tasks.len() {
             let Some(r)=self.epochs[i].history() else {continue;};let generation=r.token().generation;
             let event=self.task(i).filter(|t|t.state!=TaskState::Exited).and_then(|t| {
@@ -2642,8 +2652,10 @@ impl Scheduler {
                 let rt=t.ns_budget.filter(|b|b.enabled).map(|b|b.next);
                 sleep.into_iter().chain(rt).min().map(|at|(t.home,at))
             });
-            if let Some((home,at))=event {self.ns_heap.set(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,home,Deadline {at,slot:i,generation}).expect("ns deadline reserved capacity");}
-            else {self.ns_heap.remove(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,i,generation).expect("ns remove identity");}
+            // issue #2：与已发布节点相同则不写堆（不做无意义的 set/repair）。
+            // Unchanged events no longer rewrite and repair their heap node.
+            let outcome=self.ns_heap.sync(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,i,generation,event).expect("ns deadline identity and reserved capacity");
+            self.ns_sync.record(outcome);
         }
         for c in self.online.iter() {
             let next=self.ns_heap.peek(&self.ns_entries,&self.ns_positions,&self.ns_owners,c).expect("ns root").map(|e|e.at);

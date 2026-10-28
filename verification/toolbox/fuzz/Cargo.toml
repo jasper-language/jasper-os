@@ -99,3 +99,10 @@ path = "fuzz_targets/task_hot.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "deadline_sync"
+path = "fuzz_targets/deadline_sync.rs"
+test = false
+doc = false
+bench = false
