@@ -29,4 +29,10 @@ libfuzzer_sys::fuzz_target!(|b: [u8; 40]| {
     assert_eq!(go, now < end || (rem.count_ones() < want && now < cut));
     if now >= end && (now >= cut || rem.count_ones() >= want) { assert!(!go); }
     if want == 0 { assert_eq!(go, now < end); }
+    // dispatch_mask：40 字节当作至多 40 个处理器的运行 tick（每字节一核，长度取自首字节），逐位与参考一致。
+    let len = usize::from(b[0]) % 41;
+    let busy: Vec<u64> = b[..len].iter().map(|&x| u64::from(x)).collect();
+    let m = kernel_core::drill::dispatch_mask(&busy);
+    for i in 0..32 { assert_eq!(m >> i & 1 == 1, i < len && busy[i] > 0); }
+    assert!(m.count_ones() as usize <= len.min(32));
 });

@@ -681,11 +681,14 @@ fn limit(n: usize) {
     };
     let all = CpuSet::first(n);
     let ok = quiet(|| {
+        sched::reset_cpu_stats();
         arm_hogs_until(sched::budget_window_arm(g,LIMIT_WINDOW), 0);
         (0..n as u64).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 90 + i), "smp2-capped", hog, Some(g), all).is_ok())
     });
     check(ok, "上限用例任务创建失败");
     sched::run();
+    // 各核统计：25% 上限下各核本就不忙，「都忙」不参与判定；各核运行 tick 用于下面的分散判据
+    let _ = cores_busy("limit", n, LIMIT_WINDOW);
     let (start,deadline,at,used_start,used_cutoff,end,total)=sched::budget_window_finish().expect("deadline snapshot captured");
     assert_eq!(at,deadline,"fixed window observation must not be delayed");
     let window_used=used_cutoff.checked_sub(used_start).expect("monotonic window usage");
@@ -701,7 +704,12 @@ fn limit(n: usize) {
     // 单组上限的界：窗口 × 上限 + 桶容量 + 1；多核同时运行时最后一个可选中 tick 至多再超出 N−1
     let bound = (LIMIT_WINDOW * LIMIT_PERMILLE as u64).div_ceil(1000) + st.burst_ticks as u64 + 1 + (n as u64 - 1);
     let floor = LIMIT_WINDOW * LIMIT_PERMILLE as u64 / 1000 / 2;
-    let spread = HOG_CPUS.load(Ordering::Relaxed).count_ones() as usize;
+    // 分散按分派判（各核在本场景里运行过组成员的 tick），任务体自报的核只作参考：见 kernel_core::drill::dispatch_mask
+    let mut busy = [0u64; kernel_core::smp::MAX_CPUS];
+    for (c, b) in busy.iter_mut().enumerate().take(n) {
+        *b = sched::cpu_stats(c).busy_ticks;
+    }
+    let spread = kernel_core::drill::dispatch_mask(&busy[..n]).count_ones() as usize;
     check(window_used <= bound, "多核下固定窗口整组用量超过上限的界");
     let lifetime_bound=((end-start)*LIMIT_PERMILLE as u64).div_ceil(1000)+st.burst_ticks as u64+1+(n as u64-1);
     check(lifetime_used<=lifetime_bound,"完整生命周期用量超过实际区间上界");
@@ -712,7 +720,7 @@ fn limit(n: usize) {
     check(spread > 1, "组成员应分散在多个核上运行");
     check(baseline() == before && sched::live_cpu_groups() == groups, "上限用例后资源或 CPU 组未回到基线");
     kprintln!(
-        "[JSR-SMP2] case=limit cpus={} members={} limit_permille={} window={} used={} bound={} within={} floor={} throttle_events={} cores_used={}",
+        "[JSR-SMP2] case=limit cpus={} members={} limit_permille={} window={} used={} bound={} within={} floor={} throttle_events={} cores_used={} loop_cores={} busy_sum={}",
         n,
         n,
         LIMIT_PERMILLE,
@@ -722,7 +730,9 @@ fn limit(n: usize) {
         window_used <= bound,
         floor,
         st.throttle_events,
-        spread
+        spread,
+        HOG_CPUS.load(Ordering::Relaxed).count_ones(),
+        busy.iter().sum::<u64>()
     );
 }
 

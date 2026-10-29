@@ -24,6 +24,20 @@ pub fn hog_continues(now: u64, end: u64, covered: u32, want_cores: u32, cutoff: 
     now < end || (covered.count_ones() < want_cores && now < cutoff)
 }
 
+/// 场景内被分派过任务的处理器位图：`busy[i]` 是处理器 i 在场景内运行任务的 tick 数（只看前 32 个处理器）。
+///
+/// 「组成员分散到多个核」按调度器的分派判，不按任务体里的自报判：单线程 TCG 下持调度锁的 vCPU 被宿主轮转换下时，
+/// 已上核的任务可能整段时间片都在等调度锁、还没执行到任务体，但它确实运行在该核上并已计费。
+pub fn dispatch_mask(busy: &[u64]) -> u32 {
+    let mut mask = 0u32;
+    for (i, &ticks) in busy.iter().take(32).enumerate() {
+        if ticks > 0 {
+            mask |= 1 << i;
+        }
+    }
+    mask
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,6 +67,15 @@ mod tests {
         assert!(!hog_continues(10, 10, 0b1111, 4, 99));
         assert!(!hog_continues(99, 10, 0b0001, 4, 99));
         assert!(!hog_continues(10, 10, 0b0011, 2, 99));
+    }
+    #[test]
+    fn dispatch_mask_counts_cores_that_ran() {
+        assert_eq!(dispatch_mask(&[]), 0);
+        assert_eq!(dispatch_mask(&[14, 19, 23, 19, 17, 15, 14, 8]), 0xff);
+        assert_eq!(dispatch_mask(&[0, 3, 0, 1]), 0b1010);
+        let mut wide = [1u64; 33];
+        wide[31] = 0;
+        assert_eq!(dispatch_mask(&wide), 0x7fff_ffff);
     }
 }
 
@@ -108,5 +131,18 @@ mod proofs {
         if w == 0 {
             assert_eq!(go, n < e);
         }
+    }
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn dispatch_mask_exact_up_to_eight() {
+        let busy: [u64; 8] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= 8);
+        let m = dispatch_mask(&busy[..len]);
+        for i in 0..8 {
+            assert_eq!(m & (1 << i) != 0, i < len && busy[i] > 0);
+        }
+        assert_eq!(m >> 8, 0);
+        assert!(m.count_ones() as usize <= len);
     }
 }

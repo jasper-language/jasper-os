@@ -99,6 +99,60 @@ pub fn hog_loop_model(start: u64, end: u64, covered_cores: u32, want_cores: u32,
     now
 }
 
+// dispatch_mask：前 32 个处理器中运行过任务（busy > 0）的那些位恰好置位，其余为 0。
+pub open spec fn ran(busy: Seq<u64>, i: int) -> bool {
+    0 <= i < busy.len() && i < 32 && busy[i] > 0
+}
+
+pub fn dispatch_mask(busy: &[u64]) -> (m: u32)
+    ensures
+        forall|j: u32| j < 32 ==> (((m >> j) & 1u32) == 1u32 <==> ran(busy@, j as int)),
+{
+    let mut mask = 0u32;
+    let lim = if busy.len() < 32 { busy.len() } else { 32 };
+    let mut i: usize = 0;
+    assert forall|j: u32| j < 32 implies ((((0u32 >> j) & 1u32) == 1u32) == false) by {
+        assert(((0u32 >> j) & 1u32) == 0u32) by (bit_vector);
+    }
+    while i < lim
+        invariant
+            i <= lim,
+            lim <= 32,
+            lim <= busy.len(),
+            lim == busy.len() || lim == 32,
+            forall|j: u32| #![trigger (mask >> j)] j < 32 ==> ((((mask >> j) & 1u32) == 1u32) <==> ((j as int) < (i as int) && ran(busy@, j as int))),
+        decreases lim - i,
+    {
+        let k = i as u32;
+        if busy[i] > 0 {
+            let next = mask | (1u32 << k);
+            assert forall|j: u32| #![trigger (next >> j)] j < 32 implies
+                ((((next >> j) & 1u32) == 1u32) <==> ((j as int) < (i as int) + 1 && ran(busy@, j as int))) by {
+                assert((((mask | (1u32 << k)) >> j) & 1u32 == 1u32) == ((((mask >> j) & 1u32) == 1u32) || j == k))
+                    by (bit_vector) requires j < 32u32, k < 32u32;
+                assert((((next >> j) & 1u32) == 1u32) == ((((mask >> j) & 1u32) == 1u32) || j == k));
+                assert((((mask >> j) & 1u32) == 1u32) <==> ((j as int) < (i as int) && ran(busy@, j as int)));
+                if j == k {
+                    assert(j as int == i as int);
+                    assert(ran(busy@, j as int));
+                } else {
+                    assert(j as int != i as int);
+                }
+            }
+            mask = next;
+        } else {
+            assert forall|j: u32| #![trigger (mask >> j)] j < 32 implies
+                ((((mask >> j) & 1u32) == 1u32) <==> ((j as int) < (i as int) + 1 && ran(busy@, j as int))) by {
+                if j as int == i as int {
+                    assert(!ran(busy@, j as int));
+                }
+            }
+        }
+        i += 1;
+    }
+    mask
+}
+
 fn main() {}
 
 } // verus!

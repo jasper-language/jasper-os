@@ -1,5 +1,5 @@
 // counter_ns（hrtime 计数→纳秒换算）与 drill 判据：参考模型差分 + 固定序列（Miri）。
-use kernel_core::drill::{hog_continues, preempt_step_continues, refill_consistent};
+use kernel_core::drill::{dispatch_mask, hog_continues, preempt_step_continues, refill_consistent};
 use kernel_core::timer_units::counter_ns;
 use proptest::prelude::*;
 
@@ -63,6 +63,17 @@ proptest! {
         prop_assert_eq!(now, end.max(cutoff.min(t_cover)));
         if want == 0 { prop_assert_eq!(now, end); }
     }
+    #[test]
+    fn dispatch_mask_matches_reference(busy in proptest::collection::vec(prop_oneof![Just(0u64), any::<u64>()], 0..40)) {
+        // 参考：逐核判断，只看前 32 个处理器；被分派过的核数不超过处理器数，且总运行量为正时至少一个核。
+        let m = dispatch_mask(&busy);
+        for i in 0..32 {
+            prop_assert_eq!(m >> i & 1 == 1, i < busy.len() && busy[i] > 0);
+        }
+        prop_assert!(m.count_ones() as usize <= busy.len().min(32));
+        let head: u128 = busy.iter().take(32).map(|&b| u128::from(b)).sum();
+        prop_assert_eq!(m == 0, head == 0);
+    }
 }
 
 #[test]
@@ -94,4 +105,7 @@ fn fixed_sequence_under_miri() {
     let mut now = 0u64;
     while hog_continues(now, 60, 0x7f, 8, 1260) { now += 1; }
     assert_eq!(now, 1260);
+    // 跨核上限：S-2 实测 8 核各核运行 tick 均为正（任务体只自报 3 个核），按分派判为 8 个核。
+    assert_eq!(dispatch_mask(&[14, 19, 23, 19, 17, 15, 14, 8]).count_ones(), 8);
+    assert_eq!(dispatch_mask(&[0, 0, 5, 0]), 0b100);
 }
