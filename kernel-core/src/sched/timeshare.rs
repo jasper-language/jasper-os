@@ -94,6 +94,45 @@ impl TimeSharePolicy {
     }
 }
 
+/// 欠账档相对当前实体的位置（[`preempt_rule`] 的输入）。
+/// Where the owed class (if any) stands relative to the current entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owed {
+    /// 没有欠账满一个 tick 的低档。
+    None,
+    /// 欠账档就是当前实体的档：它正在（或应当）领取最低份额。
+    Current,
+    /// 欠账档是别的档。
+    Other,
+}
+
+/// 分时策略的抢占判定（[`SchedPolicy::should_preempt`] 有当前实体时的全部分支）。
+///
+/// 次序：最低份额保护 → 更高档 → 补给别的欠账档 → 时间片用完。
+///
+/// 最低份额保护：当前实体所在档欠账满一个 tick、且本片还没记过 tick（`used == 0`）时不抢占。
+/// 没有这一条时，补给派发之后、第一个 tick 之前的任何重新判定（重新调度请求、高精度事件）都会因
+/// 「有更高档在等」立即把它换下——它没有执行、欠账也没被偿还（欠账只在 tick 记到它身上时减少），
+/// 下一个 tick 又补给、又被立即换下，后台档在严格优先之下被饿死。保护至多一个 tick：记过 tick 后
+/// `used ≥ 1`，回到严格优先。
+/// Preemption rule: a class collecting its owed minimum share keeps the CPU until one tick is charged.
+pub const fn preempt_rule(used: u32, quantum: u32, higher: bool, owed: Owed, others_waiting: bool) -> Option<Preempt> {
+    if used == 0 && matches!(owed, Owed::Current) {
+        return None;
+    }
+    if higher {
+        return Some(Preempt::Higher);
+    }
+    if matches!(owed, Owed::Other) {
+        return Some(Preempt::Owed);
+    }
+    // 时间片用完：只有还有别的可运行实体时才值得切换（否则选回自己，徒增开销）。
+    if used >= quantum && others_waiting {
+        return Some(Preempt::Quantum);
+    }
+    None
+}
+
 impl SchedPolicy for TimeSharePolicy {
     type State = TimeShareState;
     const INITIAL: TimeShareState = TimeShareState::INITIAL;
@@ -198,17 +237,13 @@ impl SchedPolicy for TimeSharePolicy {
         };
         let mut all = waiting;
         all.insert(cur.qos);
-        if waiting.highest().is_some_and(|top| top.above(cur.qos)) {
-            return Some(Preempt::Higher);
-        }
-        if self.owed_class(all).is_some_and(|q| q != cur.qos) {
-            return Some(Preempt::Owed);
-        }
-        // 时间片用完：只有还有别的可运行实体时才值得切换（否则选回自己，徒增开销）。
-        if used >= quantum && waiting != ClassMask::EMPTY {
-            return Some(Preempt::Quantum);
-        }
-        None
+        let owed = match self.owed_class(all) {
+            None => Owed::None,
+            Some(q) if q == cur.qos => Owed::Current,
+            Some(_) => Owed::Other,
+        };
+        let higher = waiting.highest().is_some_and(|top| top.above(cur.qos));
+        preempt_rule(used, quantum, higher, owed, waiting != ClassMask::EMPTY)
     }
 
     fn wake_preempts(&self, woken: Qos, current: Option<Qos>) -> bool {
@@ -226,5 +261,46 @@ impl SchedPolicy for TimeSharePolicy {
 
     fn default_quantum(&self) -> u32 {
         self.params.quantum[Qos::UserInitiated.index()]
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    fn any_owed() -> Owed {
+        match kani::any::<u8>() % 3 {
+            0 => Owed::None,
+            1 => Owed::Current,
+            _ => Owed::Other,
+        }
+    }
+
+    /// 全域：保护只在「补给档、本片未记 tick」处生效，其余与修正前规则逐位一致。
+    #[kani::proof]
+    fn preempt_rule_guard_full_domain() {
+        let used: u32 = kani::any();
+        let quantum: u32 = kani::any();
+        let higher: bool = kani::any();
+        let others: bool = kani::any();
+        let owed = any_owed();
+        let r = preempt_rule(used, quantum, higher, owed, others);
+        let old = if higher {
+            Some(Preempt::Higher)
+        } else if owed == Owed::Other {
+            Some(Preempt::Owed)
+        } else if used >= quantum && others {
+            Some(Preempt::Quantum)
+        } else {
+            None
+        };
+        if used == 0 && owed == Owed::Current {
+            assert!(r.is_none());
+        } else {
+            assert!(r == old);
+        }
+        if used >= 1 && higher {
+            assert!(r == Some(Preempt::Higher));
+        }
     }
 }

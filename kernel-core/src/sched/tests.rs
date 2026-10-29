@@ -35,6 +35,8 @@ struct Sim<P: SchedPolicy> {
     quantum: u32,
     now: u64,
     idle_with_work: u64,
+    /// 每次派发后立即再判定一次是否抢占（模拟重新调度请求、高精度事件在第一个 tick 之前到达）。
+    redecide_after_dispatch: bool,
 }
 
 impl Sim<TimeSharePolicy> {
@@ -45,7 +47,7 @@ impl Sim<TimeSharePolicy> {
 
 impl<P: SchedPolicy> Sim<P> {
     fn with(policy: P) -> Self {
-        Sim { q: queue::CoreQueue::new(policy, 0), tasks: Vec::new(), current: None, used: 0, quantum: 0, now: 0, idle_with_work: 0 }
+        Sim { q: queue::CoreQueue::new(policy, 0), tasks: Vec::new(), current: None, used: 0, quantum: 0, now: 0, idle_with_work: 0, redecide_after_dispatch: false }
     }
 
     fn add(&mut self, qos: Qos, kind: Kind) -> usize {
@@ -153,6 +155,13 @@ impl<P: SchedPolicy> Sim<P> {
         }
         if resched || self.current.is_none() {
             self.pick();
+            // 派发后、第一个 tick 前的重新判定：判定要换就再选一次（有界：至多换一次）。
+            if self.redecide_after_dispatch {
+                let cur = self.current.map(|i| &self.tasks[i].e);
+                if self.q.should_preempt(cur, self.used, self.quantum, self.waiting()).is_some() {
+                    self.pick();
+                }
+            }
         }
         if self.current.is_none() && self.tasks.iter().any(|t| t.runnable) {
             self.idle_with_work += 1;
@@ -303,6 +312,40 @@ fn rescued_dispatch_gets_exactly_one_tick() {
     let c = p.choose(&mut it).unwrap();
     assert_eq!(c, Choice { slot: 2, quantum: 1, rescued: true });
     assert_eq!(p.should_preempt(Some(&hi_run), 0, 2, waiting), Some(Preempt::Owed));
+}
+
+#[test]
+fn rescued_dispatch_is_not_preempted_before_its_tick() {
+    let mut p = TimeSharePolicy::new(QosParams::DEFAULT);
+    let mut hi = SchedEntity::new(Qos::UserInitiated, TimeShareState::INITIAL);
+    let mut lo = SchedEntity::new(Qos::Background, TimeShareState::INITIAL);
+    let mut bg_waiting = ClassMask::EMPTY;
+    bg_waiting.insert(Qos::Background);
+    for _ in 0..50 {
+        p.on_tick(Some(&mut hi), bg_waiting);
+    }
+    let mut hi_waiting = ClassMask::EMPTY;
+    hi_waiting.insert(Qos::UserInitiated);
+    // 补给派发、还没记 tick：更高档在等也不换下
+    assert_eq!(p.should_preempt(Some(&lo), 0, 1, hi_waiting), None);
+    // 记过这个 tick 后欠账偿还，回到严格优先
+    p.on_tick(Some(&mut lo), hi_waiting);
+    assert_eq!(p.owed(Qos::Background), 0);
+    assert_eq!(p.should_preempt(Some(&lo), 1, 1, hi_waiting), Some(Preempt::Higher));
+}
+
+#[test]
+fn minimum_share_survives_redecide_before_first_tick() {
+    // 每次派发后都立即再判定：补给的后台档仍须拿到最低份额（修正前为 0）。
+    let mut s = Sim::new();
+    s.redecide_after_dispatch = true;
+    let fg = s.add(Qos::UserInitiated, Kind::Hog);
+    let bg = s.add(Qos::Background, Kind::Hog);
+    let total = 10_000u64;
+    s.run(total);
+    let bg_share = s.cpu(bg) * 1000 / total;
+    assert!((15..=30).contains(&bg_share), "后台份额 {}‰", bg_share);
+    assert_eq!(s.cpu(fg) + s.cpu(bg), total);
 }
 
 #[test]
