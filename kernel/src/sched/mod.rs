@@ -1155,7 +1155,7 @@ pub fn cpu_residency(c:usize)->kernel_core::cpu_time::Totals { with(|s|s.cpu_res
 
 /// Diagnostic observation only; does not alter admission or charging.
 pub fn budget_window_arm(g:CpuGroupId,window:u64)->u64 { with_mut(|s|s.budget_window_arm(g,window)) }
-pub fn budget_window_finish()->Option<(u64,u64,u64,u64,u64,u64,u64)> { with_mut(|s|s.budget_window_finish()) }
+pub fn budget_window_finish()->Option<scheduler::BudgetWindowReport> { with_mut(|s|s.budget_window_finish()) }
 
 /// Return the current-task migration decision; caller must drop object guards
 /// before yielding when false. with_mut already publishes reschedule IPIs.

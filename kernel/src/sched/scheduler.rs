@@ -727,6 +727,21 @@ pub struct ScanStats {
 /// 看门狗报告日志容量。
 pub const WATCHDOG_LOG: usize = crate::config::ACTIVE.sched.watchdog_log;
 
+/// 固定窗口用量观测的结果：窗口起止、截止时刻与起点/截止时刻的组用量与迟到计数、观测结束时刻与总用量。
+/// Fixed-window group usage observation: usage and late-charge counters at arm and at the cutoff tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BudgetWindowReport {
+    pub start: u64,
+    pub deadline: u64,
+    pub cutoff: u64,
+    pub used_start: u64,
+    pub used_cutoff: u64,
+    pub late_start: u64,
+    pub late_cutoff: u64,
+    pub end: u64,
+    pub total: u64,
+}
+
 /// 调度机制本体。槽位总数（含引导线程）在启动期决定，见 [`Scheduler::grow`]。
 pub struct Scheduler {
     #[cfg(feature = "krn2-observe")]
@@ -760,7 +775,7 @@ pub struct Scheduler {
     workers: usize,
     budget_tick_charges: [u32; 2],
     // Bounded diagnostic observer; never grants or changes CPU budget.
-    budget_window: Option<(CpuGroupId, u64, u64, u64, Option<(u64,u64)>)>,
+    budget_window: Option<(CpuGroupId, u64, u64, (u64,u64), Option<(u64,(u64,u64))>)>,
     /// 同步运行列表时被拒绝的次数（正常运行时恒为 0）。
     list_errors: u32,
     /// 睡眠任务中最早的定时唤醒时刻（`u64::MAX` = 没有；可能偏早，不会偏晚）。
@@ -2527,8 +2542,8 @@ impl Scheduler {
     pub fn tick(&mut self, now: u64, preemption: bool) -> Option<&'static str> {
         if let Some((group,_,deadline,_,None))=self.budget_window {
             if now>=deadline {
-                let used=self.group_stats(group).expect("watched group live").used_ticks;
-                self.budget_window.as_mut().unwrap().4=Some((now,used));
+                let st=self.group_stats(group).expect("watched group live");
+                self.budget_window.as_mut().unwrap().4=Some((now,(st.used_ticks,st.late_ticks)));
             }
         }
         self.now = now;
@@ -2696,10 +2711,10 @@ impl Scheduler {
         let c=this_cpu();self.ns_programmed[c]=None;
         let (credits,delivered)=self.ns_credit[c].as_mut().unwrap().event(self.ns_now).expect("elapsed credit clock");
         if c!=0 {
-            for _ in 0..credits {
-                let cur=leaf_current(c);self.account(c);
-                if let Some(g)=self.task(cur).filter(|t|t.state==TaskState::Running).and_then(|t|t.cpu_group).and_then(|g|self.groups[g].as_mut()){g.limit.charge();}
-            }
+            // 事件被推迟（中断晚到、vCPU 被宿主换下）时一次交付多个 tick：组按批计费，迟到部分单独计数
+            for _ in 0..credits {self.account(c);}
+            let cur=leaf_current(c);
+            if let Some(g)=self.task(cur).filter(|t|t.state==TaskState::Running).and_then(|t|t.cpu_group).and_then(|g|self.groups[g].as_mut()){g.limit.charge_batch(credits);}
         }
         let woke=self.wake_due(c,self.now);
         let cause=self.decide(c).or(woke.then_some(Cause::WAKE));
@@ -3392,18 +3407,17 @@ impl Scheduler {
     /// Arm at a serialized accounting boundary, before any measured workers spawn.
     pub fn budget_window_arm(&mut self,g:CpuGroupId,window:u64)->u64 {
         assert!(self.budget_window.is_none(), "one budget observer at a time");
-        let used=self.group_stats(g).expect("arm live group").used_ticks;
+        let st=self.group_stats(g).expect("arm live group");
         let start=self.now;
         let deadline=start.checked_add(window).expect("budget window overflow");
-        self.budget_window=Some((g,start,deadline,used,None)); deadline
+        self.budget_window=Some((g,start,deadline,(st.used_ticks,st.late_ticks),None)); deadline
     }
     /// Snapshot and clear under the same scheduler transaction (after pending drain).
-    /// Returns start,deadline,cutoff,start usage,cutoff usage,end,total usage.
-    pub fn budget_window_finish(&mut self)->Option<(u64,u64,u64,u64,u64,u64,u64)> {
-        let (g,start,deadline,used_start,cutoff)=self.budget_window.take()?;
-        let (at,used)=cutoff?;
+    pub fn budget_window_finish(&mut self)->Option<BudgetWindowReport> {
+        let (g,start,deadline,(used_start,late_start),cutoff)=self.budget_window.take()?;
+        let (cutoff,(used_cutoff,late_cutoff))=cutoff?;
         let total=self.group_stats(g)?.used_ticks;
-        Some((start,deadline,at,used_start,used,self.now,total))
+        Some(BudgetWindowReport{start,deadline,cutoff,used_start,used_cutoff,late_start,late_cutoff,end:self.now,total})
     }
     pub fn group_stats(&self, g: CpuGroupId) -> Option<CpuLimitStats> {
         let slot = self.group_slot(g)?;

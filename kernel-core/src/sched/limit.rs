@@ -45,6 +45,7 @@ pub struct CpuLimit {
     used_ticks: u64,
     throttled_ticks: u64,
     throttle_events: u64,
+    late_ticks: u64,
     throttled: bool,
 }
 
@@ -62,6 +63,8 @@ pub struct CpuLimitStats {
     pub throttled_ticks: u64,
     /// 从「可运行」变为「被限速」的次数。
     pub throttle_events: u64,
+    /// 迟到批量入账中、余额已不为正时仍被扣下的 tick 数（见 [`CpuLimit::charge_batch`]）。
+    pub late_ticks: u64,
     /// 当前是否被限速。
     pub throttled: bool,
 }
@@ -83,6 +86,7 @@ impl CpuLimit {
             used_ticks: 0,
             throttled_ticks: 0,
             throttle_events: 0,
+            late_ticks: 0,
             throttled: false,
         })
     }
@@ -131,6 +135,31 @@ impl CpuLimit {
         self.tokens -= TICK_COST;
     }
 
+    /// 一次处理器事件补交 `ticks` 个已运行的 tick（事件被推迟时一次交付多个），全部计费；返回其中「迟到」的个数。
+    /// 第一个 tick 与准时事件相同；其后的 tick 若扣费前余额已不为正，限速本应在准时事件处介入，
+    /// 记为迟到（只是下界：推迟期间全局时钟的补充已先入账，余额只会被高估）。不限速的组没有迟到。
+    /// 闭式计算，O(1)；余额饱和在 `i32::MIN`，计数饱和在 `u64::MAX`。
+    /// Charge `ticks` ticks delivered by one (possibly delayed) event; returns the late ones.
+    pub fn charge_batch(&mut self, ticks: u64) -> u64 {
+        if ticks == 0 {
+            return 0;
+        }
+        let late = if self.limit_permille >= UNLIMITED {
+            0
+        } else {
+            // 第 i 次扣费前余额 = tokens − i·TICK_COST，为正当且仅当 i < ⌈tokens / TICK_COST⌉
+            let on_time = if self.tokens > 0 { (self.tokens as u64).div_ceil(TICK_COST as u64) } else { 1 };
+            ticks - if on_time < ticks { on_time } else { ticks }
+        };
+        let cost = ticks.saturating_mul(TICK_COST as u64);
+        let cost = if cost > i64::MAX as u64 { i64::MAX } else { cost as i64 };
+        let left = (self.tokens as i64).saturating_sub(cost);
+        self.tokens = if left < i32::MIN as i64 { i32::MIN } else { left as i32 };
+        self.used_ticks = self.used_ticks.saturating_add(ticks);
+        self.late_ticks = self.late_ticks.saturating_add(late);
+        late
+    }
+
     /// 每个时钟 tick 调用一次：`ran` = 刚过去的这个 tick 是否由本组成员运行；
     /// `wants` = 本组是否还有成员可运行（用于统计被限速的 tick）。先扣费、再补充令牌。
     /// Per-tick accounting: charge the tick just run, then refill.
@@ -167,6 +196,7 @@ impl CpuLimit {
             used_ticks: self.used_ticks,
             throttled_ticks: self.throttled_ticks,
             throttle_events: self.throttle_events,
+            late_ticks: self.late_ticks,
             throttled: self.throttled,
         }
     }
@@ -315,6 +345,37 @@ mod deferred_credit_tests {
             }
         }
     }
+    /// 迟到批量入账：等价于逐个扣费，迟到 = 第一个之后扣费前余额已不为正的个数；不限速的组无迟到。
+    #[test]
+    fn batch_charge_matches_single_charges_and_counts_late() {
+        for limit in [1u32, 250, 999, UNLIMITED] {
+            for burst in [1u32, 4, MAX_BURST_TICKS] {
+                for pre in 0..6u32 {
+                    for ticks in 0..80u64 {
+                        let mut base = CpuLimit::new(limit, burst).unwrap();
+                        for _ in 0..pre { base.charge(); }
+                        let (mut batch, mut single) = (base, base);
+                        let mut late = 0;
+                        for i in 0..ticks {
+                            if i > 0 && !single.eligible() { late += 1; }
+                            single.charge();
+                        }
+                        assert_eq!(batch.charge_batch(ticks), late);
+                        assert_eq!(batch.late_ticks, late);
+                        batch.late_ticks = 0;
+                        assert_eq!(batch, single);
+                        if limit == UNLIMITED { assert_eq!(late, 0); }
+                    }
+                }
+            }
+        }
+        let mut deep = CpuLimit::new(500, 1).unwrap();
+        assert_eq!(deep.charge_batch(u64::MAX), u64::MAX - 1);
+        assert_eq!(deep.stats().used_ticks, u64::MAX);
+        assert_eq!(deep.tokens, i32::MIN);
+        assert_eq!(deep.charge_batch(u64::MAX), u64::MAX - 1, "余额已不为正：第一个之后全部迟到");
+        assert_eq!(deep.stats().late_ticks, u64::MAX);
+    }
     #[test]
     fn unlimited_and_reconfiguration_use_the_current_balance() {
         let mut balance = CpuLimit::new(UNLIMITED, 1).unwrap();
@@ -328,5 +389,52 @@ mod deferred_credit_tests {
         for _ in 0..4 { balance.on_tick(false, true); }
         // Burst one caps at exactly one tick: no positive remainder is possible.
         assert_eq!(balance.deferred_tick_credits(32), 0);
+    }
+}
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+    fn any_limit() -> CpuLimit {
+        let limit: u32 = kani::any();
+        kani::assume(limit >= 1 && limit <= UNLIMITED);
+        let mut l = CpuLimit::new(limit, 1).unwrap();
+        l.tokens = kani::any();
+        l.used_ticks = kani::any();
+        l.late_ticks = kani::any();
+        l
+    }
+    /// 任意余额、任意 tick 数：不溢出、不 panic；迟到不超过 ticks−1、余额只降不升、用量饱和累加。
+    #[kani::proof]
+    fn batch_charge_total_full_domain() {
+        let mut l = any_limit();
+        let before = l;
+        let ticks: u64 = kani::any();
+        let late = l.charge_batch(ticks);
+        assert!(late <= ticks.saturating_sub(1));
+        assert!(l.tokens <= before.tokens);
+        assert_eq!(l.used_ticks, before.used_ticks.saturating_add(ticks));
+        assert_eq!(l.late_ticks, before.late_ticks.saturating_add(late));
+        if l.limit_permille >= UNLIMITED || ticks == 0 { assert_eq!(late, 0); }
+        if ticks == 0 { assert_eq!(l, before); }
+        if before.tokens <= 0 && l.limit_permille < UNLIMITED { assert_eq!(late, ticks.saturating_sub(1)); }
+    }
+    /// 不饱和的区间内与逐个扣费逐位等价（ticks ≤ 8）。
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn batch_charge_equals_single_charges() {
+        let mut batch = any_limit();
+        kani::assume(batch.tokens >= i32::MIN + 8 * TICK_COST && batch.used_ticks <= u64::MAX - 8 && batch.late_ticks <= u64::MAX - 8);
+        let ticks: u64 = kani::any();
+        kani::assume(ticks <= 8);
+        let mut single = batch;
+        let mut late = 0;
+        for i in 0..ticks {
+            if i > 0 && !single.eligible() { late += 1; }
+            single.charge();
+        }
+        single.late_ticks += late;
+        assert_eq!(batch.charge_batch(ticks), late);
+        assert_eq!(batch, single);
     }
 }

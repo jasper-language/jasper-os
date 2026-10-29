@@ -113,3 +113,10 @@ path = "fuzz_targets/idle_credit.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "limit_batch"
+path = "fuzz_targets/limit_batch.rs"
+test = false
+doc = false
+bench = false

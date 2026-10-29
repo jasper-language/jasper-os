@@ -689,12 +689,14 @@ fn limit(n: usize) {
     sched::run();
     // 各核统计：25% 上限下各核本就不忙，「都忙」不参与判定；各核运行 tick 用于下面的分散判据
     let _ = cores_busy("limit", n, LIMIT_WINDOW);
-    let (start,deadline,at,used_start,used_cutoff,end,total)=sched::budget_window_finish().expect("deadline snapshot captured");
-    assert_eq!(at,deadline,"fixed window observation must not be delayed");
+    let w=sched::budget_window_finish().expect("deadline snapshot captured");
+    let (start,used_start,used_cutoff,end,total)=(w.start,w.used_start,w.used_cutoff,w.end,w.total);
+    assert_eq!(w.cutoff,w.deadline,"fixed window observation must not be delayed");
     let window_used=used_cutoff.checked_sub(used_start).expect("monotonic window usage");
     let lifetime_used=total.checked_sub(used_start).expect("monotonic lifetime usage");
     let tail=total.checked_sub(used_cutoff).expect("monotonic tail usage");
-    kprintln!("[JSR-BUDGET-CUTOFF] boundary=pre_bsp_charge_after_pending_drain start={} deadline={} observed={} used_start={} used_cutoff={} window_delta={} lifetime={} tail_delta={} end={}",start,deadline,at,used_start,used_cutoff,window_used,lifetime_used,tail,end);
+    let window_late=w.late_cutoff.checked_sub(w.late_start).expect("monotonic late count");
+    kprintln!("[JSR-BUDGET-CUTOFF] boundary=pre_bsp_charge_after_pending_drain start={} deadline={} observed={} used_start={} used_cutoff={} window_delta={} lifetime={} tail_delta={} end={} window_late={}",start,w.deadline,w.cutoff,used_start,used_cutoff,window_used,lifetime_used,tail,end,window_late);
     let st = sched::cpu_group_stats(g);
     let _ = sched::release_cpu_group(g);
     let Some(st) = st else {
@@ -710,17 +712,22 @@ fn limit(n: usize) {
         *b = sched::cpu_stats(c).busy_ticks;
     }
     let spread = kernel_core::drill::dispatch_mask(&busy[..n]).count_ones() as usize;
-    check(window_used <= bound, "多核下固定窗口整组用量超过上限的界");
+    // 迟到计费（处理器事件被推迟、一次补交多个 tick 时，余额已不为正仍被扣下的 tick，见 CpuLimit::charge_batch）
+    // 是限速无从介入的时间：功能判据扣除它；原界只在没有迟到时成立，超出记计时（QEMU 下 vCPU 被换下即会出现）
+    let lifetime_late=st.late_ticks.checked_sub(w.late_start).expect("monotonic late count");
+    check(window_used - window_late <= bound, "多核下固定窗口整组准时用量超过上限的界");
+    check_timing(window_used <= bound, format_args!("多核下固定窗口整组用量超过上限的界（迟到计费 {} tick）", window_late));
     let lifetime_bound=((end-start)*LIMIT_PERMILLE as u64).div_ceil(1000)+st.burst_ticks as u64+1+(n as u64-1);
-    check(lifetime_used<=lifetime_bound,"完整生命周期用量超过实际区间上界");
+    check(lifetime_used-lifetime_late<=lifetime_bound,"完整生命周期准时用量超过实际区间上界");
+    check_timing(lifetime_used<=lifetime_bound,format_args!("完整生命周期用量超过实际区间上界（迟到计费 {} tick）",lifetime_late));
     check(window_used+tail==lifetime_used,"窗口与尾段计费不守恒");
-    kprintln!("[JSR-BUDGET-LIFETIME] elapsed={} used={} bound={} tail={} within={}",end-start,lifetime_used,lifetime_bound,tail,lifetime_used<=lifetime_bound);
+    kprintln!("[JSR-BUDGET-LIFETIME] elapsed={} used={} bound={} tail={} within={} late={}",end-start,lifetime_used,lifetime_bound,tail,lifetime_used<=lifetime_bound,lifetime_late);
     check(window_used >= floor, "上限之内的份额没有用上");
     check(st.throttle_events > 0, "多核下应同样被限速");
     check(spread > 1, "组成员应分散在多个核上运行");
     check(baseline() == before && sched::live_cpu_groups() == groups, "上限用例后资源或 CPU 组未回到基线");
     kprintln!(
-        "[JSR-SMP2] case=limit cpus={} members={} limit_permille={} window={} used={} bound={} within={} floor={} throttle_events={} cores_used={} loop_cores={} busy_sum={}",
+        "[JSR-SMP2] case=limit cpus={} members={} limit_permille={} window={} used={} bound={} within={} floor={} throttle_events={} cores_used={} loop_cores={} busy_sum={} late={}",
         n,
         n,
         LIMIT_PERMILLE,
@@ -732,7 +739,8 @@ fn limit(n: usize) {
         st.throttle_events,
         spread,
         HOG_CPUS.load(Ordering::Relaxed).count_ones(),
-        busy.iter().sum::<u64>()
+        busy.iter().sum::<u64>(),
+        window_late
     );
 }
 

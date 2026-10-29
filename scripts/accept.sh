@@ -1423,8 +1423,11 @@ smp2_verdict() {
   grep -qaE "^\[JSR-SMP2\] case=affinity pinned_cpu=$s2pin seen_pinned=$s2seen refused_unchanged=true moved_to=1 seen_moved=0x2 self_to=2 self_after=2 seen_self=0x4 ok=true" "$s2f" || S2_MISS="$S2_MISS $s2name:亲和迁移"
   grep -qaE "^\[JSR-SMP2\] case=inherit cpus=$s2n hogs=$s2hogs work=4 wait=[0-9]+ bound=8 bounded=(true|false) holder_peak=interactive lock_free=true" "$s2f" || S2_MISS="$S2_MISS $s2name:跨核继承"
   grep -qaE "^\[JSR-SMP2\] case=inherit cpus=$s2n hogs=$s2hogs work=4 wait=[0-8] bound=8 bounded=true holder_peak=interactive lock_free=true" "$s2f" || S2_TIME_MISS="$S2_TIME_MISS $s2name:跨核继承等待"
-  grep -qaE "^\[JSR-SMP2\] case=limit cpus=$s2n members=$s2n limit_permille=250 window=160 used=[0-9]+ bound=[0-9]+ within=true floor=[0-9]+ throttle_events=[1-9][0-9]* cores_used=[2-$s2n]" "$s2f" || S2_MISS="$S2_MISS $s2name:跨核上限"
-  grep -qaE '^\[JSR-BUDGET-LIFETIME\] elapsed=[0-9]+ used=[0-9]+ bound=[0-9]+ tail=[0-9]+ within=true' "$s2f" || S2_MISS="$S2_MISS $s2name:生命周期预算"
+  # 扣除迟到计费后的界由内核功能断言判（汇总 failed=0）；未扣除的原界只在事件准时时成立，超界记计时
+  grep -qaE "^\[JSR-SMP2\] case=limit cpus=$s2n members=$s2n limit_permille=250 window=160 used=[0-9]+ bound=[0-9]+ within=(true|false) floor=[0-9]+ throttle_events=[1-9][0-9]* cores_used=[2-$s2n] loop_cores=[0-9]+ busy_sum=[0-9]+ late=[0-9]+" "$s2f" || S2_MISS="$S2_MISS $s2name:跨核上限"
+  grep -qaE "^\[JSR-SMP2\] case=limit cpus=$s2n .* within=true " "$s2f" || S2_TIME_MISS="$S2_TIME_MISS $s2name:跨核上限窗口（迟到计费）"
+  grep -qaE '^\[JSR-BUDGET-LIFETIME\] elapsed=[0-9]+ used=[0-9]+ bound=[0-9]+ tail=[0-9]+ within=(true|false) late=[0-9]+' "$s2f" || S2_MISS="$S2_MISS $s2name:生命周期预算"
+  grep -qaE '^\[JSR-BUDGET-LIFETIME\] .* within=true ' "$s2f" || S2_TIME_MISS="$S2_TIME_MISS $s2name:生命周期预算（迟到计费）"
   grep -qaE '^\[JSR-SMP2-FAIL\]|^\[JSR-LOCK-ORDER\]|^\[JSR-PANIC\]' "$s2f" && S2_MISS="$S2_MISS $s2name:出现失败断言/锁顺序违反/panic"
   grep -qaE "^\[JSR-SMP2\] summary cpus=$s2n free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=38 failed=0" "$s2f" && exit_ok "$s2f" && qemu_ok "$s2rc" \
     || S2_MISS="$S2_MISS $s2name:汇总/退出"
