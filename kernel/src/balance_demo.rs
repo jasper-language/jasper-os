@@ -94,6 +94,13 @@ static HOG_END: IrqU64 = IrqU64::new(0);
 static HOG_MIN_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
 /// 吃满处理器的任务曾运行过的处理器的并集。
 static HOG_CPUS: AtomicU32 = AtomicU32::new(0);
+/// 窗口结束后，到过的处理器不足这么多个时继续吃满（0 = 窗口一到即停）。
+static HOG_WANT: AtomicU32 = AtomicU32::new(0);
+/// 覆盖不足时继续吃满的截止时刻（有界结束）。
+static HOG_CUTOFF: IrqU64 = IrqU64::new(0);
+/// 窗口结束后为覆盖各核最多再等的 tick 数：宿主 vCPU 停顿时某核可能整个窗口都没轮到，
+/// 「铺到每一个核」是功能判据，不应取决于窗口内能否轮到；截止保证有界。
+const COVER_GRACE: u64 = 1200;
 /// 交互任务完成的睡眠次数。
 static INTERACTIVE_DONE: AtomicU32 = AtomicU32::new(0);
 
@@ -119,8 +126,12 @@ fn only(c: usize) -> CpuSet {
 fn hog() {
     let _ = sched::set_current_qos(Qos::Utility);
     let start = my_cpu();
-    while sched::timer_ticks() < HOG_END.load(Ordering::Relaxed) {
+    loop {
         HOG_CPUS.fetch_or(1 << arch::cpu_index(), Ordering::Relaxed);
+        if !kernel_core::drill::hog_continues(sched::timer_ticks(), HOG_END.load(Ordering::Relaxed),
+            HOG_CPUS.load(Ordering::Relaxed), HOG_WANT.load(Ordering::Relaxed), HOG_CUTOFF.load(Ordering::Relaxed)) {
+            break;
+        }
         core::hint::spin_loop();
     }
     let used = (my_cpu() - start).min(u32::MAX as u64 - 1) as u32;
@@ -232,11 +243,17 @@ pub fn run() {
     );
 }
 
-/// 重置吃满处理器任务的记录，设截止时刻。
-fn arm_hogs(window: u64) {
+/// 重置吃满处理器任务的记录，设截止时刻；到过的处理器不足 `want_cores` 个时继续到截止。
+fn arm_hogs(window: u64, want_cores: u32) {
+    arm_hogs_until(sched::timer_ticks() + window, want_cores);
+}
+
+fn arm_hogs_until(end: u64, want_cores: u32) {
     HOG_MIN_CPU.store(u32::MAX, Ordering::Relaxed);
     HOG_CPUS.store(0, Ordering::Relaxed);
-    HOG_END.store(sched::timer_ticks() + window, Ordering::Relaxed);
+    HOG_WANT.store(want_cores, Ordering::Relaxed);
+    HOG_CUTOFF.store(end + COVER_GRACE, Ordering::Relaxed);
+    HOG_END.store(end, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +297,7 @@ fn spread(n: usize) {
     let all = CpuSet::first(n);
     let spawned = quiet(|| {
         sched::reset_cpu_stats();
-        arm_hogs(WINDOW);
+        arm_hogs(WINDOW, n as u32);
         (0..n).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 10 + i as u64), "smp2-hog", hog, None, all).is_ok())
     });
     check(spawned, "铺满用例任务创建失败");
@@ -311,7 +328,7 @@ fn steal(n: usize) {
     // 全部任务在引导处理器的队列里排好、亲和放宽之后才开始调度（抢占关闭期间引导线程不被换下）
     let ok = quiet(|| {
         sched::reset_cpu_stats();
-        arm_hogs(WINDOW);
+        arm_hogs(WINDOW, n as u32);
         let mut ok = true;
         for i in 0..count {
             ok &= sched::spawn_on(TaskId(TASK_ID_BASE + 20 + i), "smp2-steal", hog, None, only(0)).is_ok();
@@ -350,7 +367,7 @@ fn overload(n: usize) {
         sched::reset_cpu_stats();
         sched::reset_latency();
         INTERACTIVE_DONE.store(0, Ordering::Relaxed);
-        arm_hogs(window);
+        arm_hogs(window, 0);
         let mut ok = true;
         for i in 0..count {
             ok &= sched::spawn_on(TaskId(TASK_ID_BASE + 40 + i), "smp2-load", hog, None, all).is_ok();
@@ -614,7 +631,7 @@ fn inherit(n: usize) {
     PI_HOLDER_PEAK.store(0xFF, Ordering::Relaxed);
     let window = 2 * WINDOW;
     let ok = quiet(|| {
-        arm_hogs(window);
+        arm_hogs(window, 0);
         let mut ok = sched::spawn_on(TaskId(TASK_ID_BASE + 80), "smp2-pi-low", pi_low, None, all).is_ok();
         for i in 0..2 * n as u64 {
             ok &= sched::spawn_on(TaskId(TASK_ID_BASE + 81 + i), "smp2-pi-hog", pi_hog, None, all).is_ok();
@@ -664,9 +681,7 @@ fn limit(n: usize) {
     };
     let all = CpuSet::first(n);
     let ok = quiet(|| {
-        HOG_MIN_CPU.store(u32::MAX, Ordering::Relaxed);
-        HOG_CPUS.store(0, Ordering::Relaxed);
-        HOG_END.store(sched::budget_window_arm(g,LIMIT_WINDOW), Ordering::Relaxed);
+        arm_hogs_until(sched::budget_window_arm(g,LIMIT_WINDOW), 0);
         (0..n as u64).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 90 + i), "smp2-capped", hog, Some(g), all).is_ok())
     });
     check(ok, "上限用例任务创建失败");

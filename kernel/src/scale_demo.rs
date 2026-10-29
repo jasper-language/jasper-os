@@ -466,14 +466,20 @@ fn local_rt_contract(n: usize) {
     let spawned = quiet(|| sched::spawn_on(id, "rt-local", local_rt_worker, None, cpus).is_ok());
     let configured = sched::set_rt(id, 1, 4);
     let initial_next = sched::rt_state(id).map(|(_, _, next)| next).unwrap_or(0);
+    let throttle_before = sched::throttle_count();
     let limit = sched::timer_ticks() + 200;
-    let mut exhausted = false;
+    let mut seen_zero = false;
     let mut refilled = false;
+    let mut exhausted = false;
     while sched::timer_ticks() < limit {
         if let Some((remaining, period, next)) = sched::rt_state(id) {
-            exhausted |= period == 4 && remaining == 0 && sched::timer_ticks() < next;
+            seen_zero |= period == 4 && remaining == 0 && sched::timer_ticks() < next;
             refilled |= next > initial_next;
         }
+        // 耗尽的两种证据：采样恰好看到剩余 0；或 AP 因额度耗尽把它节流换下（本演练只有它带预算）。
+        // 高精度模式下结算滞后时，同一次结算跨过周期边界会直接补满，采样看不到 0，节流计数仍记下耗尽。
+        let throttled = sched::throttle_count() != throttle_before;
+        exhausted = seen_zero || throttled;
         if exhausted && refilled { break; }
         sched::sleep_ticks(1);
     }
@@ -484,7 +490,8 @@ fn local_rt_contract(n: usize) {
     sched::run();
     check(spawned && configured && exhausted && refilled && disabled, "AP必须实际扣完预算并由本核到期堆补充");
     check(saved == baseline(), "AP实时记账演练资源不守恒");
-    kprintln!("[JSR-RT-LOCAL] exhausted={} refilled={} disabled={} reclaimed={}", exhausted, refilled, disabled, saved == baseline());
+    kprintln!("[JSR-RT-LOCAL] exhausted={} refilled={} disabled={} reclaimed={} seen_zero={} throttles={}", exhausted, refilled,
+        disabled, saved == baseline(), seen_zero, sched::throttle_count().wrapping_sub(throttle_before));
 }
 
 #[cfg(feature = "fault-inject")]

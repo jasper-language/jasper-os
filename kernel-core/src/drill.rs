@@ -18,6 +18,12 @@ pub fn preempt_step_continues(step: u32, min_steps: u32, switches: u64, min_swit
     step < min_steps || (switches < min_switches && now < deadline)
 }
 
+/// 吃满任务是否继续运行：窗口没到 `end`；或到过的处理器（`covered` 位图）不足 `want_cores` 个且没到截止 `cutoff`。
+/// 窗口之后只为覆盖各核而延长，截止保证有界结束；`want_cores = 0` 时与「窗口一到即停」相同。
+pub fn hog_continues(now: u64, end: u64, covered: u32, want_cores: u32, cutoff: u64) -> bool {
+    now < end || (covered.count_ones() < want_cores && now < cutoff)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38,6 +44,15 @@ mod tests {
         assert!(preempt_step_continues(8, 8, 11, 12, 9, 10));
         assert!(!preempt_step_continues(8, 8, 12, 12, 9, 10));
         assert!(!preempt_step_continues(8, 8, 0, 12, 10, 10));
+    }
+    #[test]
+    fn hog_extends_only_for_coverage_and_is_bounded() {
+        assert!(hog_continues(5, 10, 0, 0, 0));
+        assert!(!hog_continues(10, 10, 0, 0, 99));
+        assert!(hog_continues(10, 10, 0b0111, 4, 99));
+        assert!(!hog_continues(10, 10, 0b1111, 4, 99));
+        assert!(!hog_continues(99, 10, 0b0001, 4, 99));
+        assert!(!hog_continues(10, 10, 0b0011, 2, 99));
     }
 }
 
@@ -72,6 +87,26 @@ mod proofs {
         }
         if st < ms {
             assert!(go);
+        }
+    }
+    #[kani::proof]
+    fn hog_loop_bounded_full_domain() {
+        let (n, e, c, w, k): (u64, u64, u32, u32, u64) = (kani::any(), kani::any(), kani::any(), kani::any(), kani::any());
+        let go = hog_continues(n, e, c, w, k);
+        if n < e {
+            assert!(go);
+        }
+        if n >= e && n >= k {
+            assert!(!go);
+        }
+        if n >= e && c.count_ones() >= w {
+            assert!(!go);
+        }
+        if go {
+            assert!(n < e || (n < k && c.count_ones() < w));
+        }
+        if w == 0 {
+            assert_eq!(go, n < e);
         }
     }
 }

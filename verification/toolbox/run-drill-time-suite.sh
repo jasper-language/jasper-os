@@ -3,7 +3,8 @@
 # run-drill-time-suite.sh —— 主线全量复绿第一片的六步验证链
 #
 # 顺序固定：Verus/Z3 → Proptest → Miri → cargo-fuzz → Kani → Loom。
-# 范围：kernel-core/src/drill.rs（新写：refill_consistent / preempt_step_continues，M1.1 与 M1.4 演练判据）、
+# 范围：kernel-core/src/drill.rs（新写：refill_consistent / preempt_step_continues，M1.1 与 M1.4 演练判据；
+# 第三片 hog_continues，SMP-2 铺满/窃取的覆盖延长）、
 # kernel-core/src/timer_units.rs::counter_ns（补链：自 kernel/src/hrtime.rs 既有换算抽出，原只有部分性质登记）。
 # Loom N/A：三者都是纯函数，无共享可变状态；替代证据为 QEMU 定点三次复跑（见登记表）。
 # 所有命令在构建虚拟机内执行；输出保存在 evidence/main-green/drill-time-suite。
@@ -15,7 +16,7 @@ cd "$(dirname "$0")/../.."
 Z3="${Z3:-$(dirname "$VERUS")/z3}"
 out=evidence/main-green/drill-time-suite
 mkdir -p "$out"
-HARNESSES="uncalibrated_is_none floor_is_exact_and_monotone_bounded refill_judgement_full_domain preempt_loop_terminates_full_domain"
+HARNESSES="uncalibrated_is_none floor_is_exact_and_monotone_bounded refill_judgement_full_domain preempt_loop_terminates_full_domain hog_loop_bounded_full_domain"
 
 sha256sum \
   kernel-core/src/drill.rs \
@@ -23,6 +24,8 @@ sha256sum \
   kernel/src/hrtime.rs \
   verification/toolbox/verus/drill_time.rs \
   verification/toolbox/verus/drill_time_bad.rs \
+  verification/toolbox/verus/drill_hog_bad.rs \
+  kernel/src/balance_demo.rs \
   verification/toolbox/tests/drill_time.rs \
   verification/toolbox/fuzz/fuzz_targets/drill_time.rs \
   > "$out/source.sha256"
@@ -38,6 +41,11 @@ echo "== 1/6 Verus/Z3 =="
 # 负例必须验证失败：判据去掉「已扣额度 ≤ 流逝 tick」后，后置条件推不出。
 if "$VERUS" --triggers-mode silent verification/toolbox/verus/drill_time_bad.rs > "$out/verus-bad.log" 2>&1; then
   echo "负例 drill_time_bad.rs 竟然通过验证" >&2
+  exit 1
+fi
+# 负例：去掉截止的延长判据不再有界，decreases 推不出。
+if "$VERUS" --triggers-mode silent verification/toolbox/verus/drill_hog_bad.rs > "$out/verus-hog-bad.log" 2>&1; then
+  echo "负例 drill_hog_bad.rs 竟然通过验证" >&2
   exit 1
 fi
 
@@ -60,13 +68,14 @@ for h in $HARNESSES; do
 done
 
 echo "== 6/6 Loom =="
-echo "N/A：纯函数，无共享可变状态；替代证据见登记表 MAIN-GREEN-01..03" > "$out/loom.log"
+echo "N/A：纯函数，无共享可变状态；替代证据见登记表 MAIN-GREEN-01..03、05" > "$out/loom.log"
 
 grep -Eq '[1-9][0-9]* verified, 0 errors' "$out/verus.log"
 grep -Eq 'error: (postcondition not satisfied|precondition not satisfied|assertion failed)' "$out/verus-bad.log"
-grep -q '2 passed; 0 failed' "$out/core-drill.log"
-grep -q '3 passed; 0 failed' "$out/core-timer-units.log"
-grep -q '4 passed; 0 failed' "$out/proptest.log"
+grep -q 'error: decreases not satisfied' "$out/verus-hog-bad.log"
+grep -q '3 passed; 0 failed' "$out/core-drill.log"
+grep -q '4 passed; 0 failed' "$out/core-timer-units.log"
+grep -q '5 passed; 0 failed' "$out/proptest.log"
 grep -q '1 passed; 0 failed' "$out/miri.log"
 grep -q '#1000000.*DONE' "$out/fuzz.log"
 for h in $HARNESSES; do

@@ -24,4 +24,9 @@ libfuzzer_sys::fuzz_target!(|b: [u8; 40]| {
     let go = kernel_core::drill::preempt_step_continues(q, rem, e, d, hz, w(32));
     if !go { assert!(q >= rem); }
     if q >= rem && (hz >= w(32) || e >= d) { assert!(!go); }
+    let (now, end, cut, want) = (e, d, hz, u32::from(b[1] & 15));
+    let go = kernel_core::drill::hog_continues(now, end, rem, want, cut);
+    assert_eq!(go, now < end || (rem.count_ones() < want && now < cut));
+    if now >= end && (now >= cut || rem.count_ones() >= want) { assert!(!go); }
+    if want == 0 { assert_eq!(go, now < end); }
 });

@@ -63,6 +63,42 @@ pub fn preempt_step_continues(step: u32, min_steps: u32, switches: u64, min_swit
     step < min_steps || (switches < min_switches && now < deadline)
 }
 
+// hog_continues：Rust 源以 covered.count_ones() 求到过的核数，此处以其值 covered_cores 建模
+// （popcount 本身由 Kani hog_loop_bounded_full_domain 全域覆盖）。
+pub open spec fn hog_go(now: u64, end: u64, covered_cores: u32, want_cores: u32, cutoff: u64) -> bool {
+    now < end || (covered_cores < want_cores && now < cutoff)
+}
+
+pub fn hog_continues(now: u64, end: u64, covered_cores: u32, want_cores: u32, cutoff: u64) -> (go: bool)
+    ensures
+        go == hog_go(now, end, covered_cores, want_cores, cutoff),
+        now < end ==> go,
+        now >= end && now >= cutoff ==> !go,
+        now >= end && covered_cores >= want_cores ==> !go,
+        want_cores == 0 ==> (go <==> now < end),
+{
+    now < end || (covered_cores < want_cores && now < cutoff)
+}
+
+// 吃满任务的循环（时钟单调前进、覆盖数任意）必在 max(end, cutoff) 之前停止。
+pub fn hog_loop_model(start: u64, end: u64, covered_cores: u32, want_cores: u32, cutoff: u64) -> (stop: u64)
+    ensures
+        !hog_go(stop, end, covered_cores, want_cores, cutoff),
+        stop >= start,
+        stop <= if start >= end && start >= cutoff { start } else if end >= cutoff { end } else { cutoff },
+{
+    let mut now = start;
+    while hog_continues(now, end, covered_cores, want_cores, cutoff)
+        invariant
+            now >= start,
+            now <= if start >= end && start >= cutoff { start } else if end >= cutoff { end } else { cutoff },
+        decreases (if end >= cutoff { end } else { cutoff }) - now,
+    {
+        now = now + 1;
+    }
+    now
+}
+
 fn main() {}
 
 } // verus!

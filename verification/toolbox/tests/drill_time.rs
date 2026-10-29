@@ -1,5 +1,5 @@
 // counter_ns（hrtime 计数→纳秒换算）与 drill 判据：参考模型差分 + 固定序列（Miri）。
-use kernel_core::drill::{preempt_step_continues, refill_consistent};
+use kernel_core::drill::{hog_continues, preempt_step_continues, refill_consistent};
 use kernel_core::timer_units::counter_ns;
 use proptest::prelude::*;
 
@@ -42,6 +42,27 @@ proptest! {
         let reference = steps < min_steps || (sw < msw && now < dl);
         prop_assert_eq!(preempt_step_continues(steps, min_steps, sw, msw, now, dl), reference);
     }
+    #[test]
+    fn hog_loop_reference_and_bounded(start in 0u64..1 << 40, win in 0u64..256, grace in 0u64..256,
+        want in 0u32..9, arrivals in proptest::collection::vec((0u32..8, 0u64..512), 0..16)) {
+        // 参考模拟：时钟逐 tick 前进，各核在给定 tick 首次轮到（宿主 vCPU 停顿 = 很晚才轮到）。
+        let (end, cutoff) = (start + win, start + win + grace);
+        let mut covered = 0u32;
+        let mut now = start;
+        loop {
+            for &(cpu, at) in &arrivals { if start + at <= now { covered |= 1 << cpu; } }
+            let reference = now < end || (covered.count_ones() < want && now < cutoff);
+            let go = hog_continues(now, end, covered, want, cutoff);
+            prop_assert_eq!(go, reference);
+            if !go { break; }
+            now += 1;
+        }
+        // 停止时刻 = max(窗口末, min(截止, 首次覆盖够数的 tick))：覆盖够了立即停，不够等到截止为止。
+        let seen = |t: u64| arrivals.iter().filter(|&&(_, at)| start + at <= t).fold(0u32, |m, &(c, _)| m | 1 << c);
+        let t_cover = (start..=cutoff).find(|&t| seen(t).count_ones() >= want).unwrap_or(u64::MAX);
+        prop_assert_eq!(now, end.max(cutoff.min(t_cover)));
+        if want == 0 { prop_assert_eq!(now, end); }
+    }
 }
 
 #[test]
@@ -62,4 +83,15 @@ fn fixed_sequence_under_miri() {
     assert!(refill_consistent(3, 3, 10, 10));
     assert!(refill_consistent(3, 2, 10, 11));
     assert!(!refill_consistent(3, 2, 10, 10));
+    // 吃满任务：窗口 60，8 核里第 8 个核在窗口之后第 100 tick 才轮到，截止 1260。
+    let mut covered = 0x7fu32;
+    let mut now = 0u64;
+    while hog_continues(now, 60, covered, 8, 1260) {
+        now += 1;
+        if now == 160 { covered |= 0x80; }
+    }
+    assert_eq!(now, 160);
+    let mut now = 0u64;
+    while hog_continues(now, 60, 0x7f, 8, 1260) { now += 1; }
+    assert_eq!(now, 1260);
 }
