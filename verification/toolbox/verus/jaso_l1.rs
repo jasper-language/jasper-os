@@ -6,7 +6,7 @@ use vstd::prelude::*;
 verus! {
 
 spec fn holds(running: Seq<bool>, dep: spec_fn(int, int) -> bool) -> bool {
-    forall|j: int, k: int| 0 <= j < running.len() && 0 <= k < running.len() && running[j] && dep(j, k) ==> running[k]
+    forall|j: int, k: int| #![trigger dep(j, k)] 0 <= j < running.len() && 0 <= k < running.len() && running[j] && dep(j, k) ==> running[k]
 }
 
 /// stop(i)：前提是没有运行中的依赖者。
@@ -14,12 +14,12 @@ proof fn stop_preserves(running: Seq<bool>, dep: spec_fn(int, int) -> bool, i: i
     requires
         0 <= i < running.len(),
         holds(running, dep),
-        forall|j: int| 0 <= j < running.len() && running[j] ==> !dep(j, i),
+        forall|j: int| #![trigger dep(j, i)] 0 <= j < running.len() && running[j] ==> !dep(j, i),
     ensures
         holds(running.update(i, false), dep),
 {
     let after = running.update(i, false);
-    assert forall|j: int, k: int| 0 <= j < after.len() && 0 <= k < after.len() && after[j] && dep(j, k) implies after[k] by {
+    assert forall|j: int, k: int| #![trigger dep(j, k)] 0 <= j < after.len() && 0 <= k < after.len() && after[j] && dep(j, k) implies after[k] by {
         assert(running[j]);
         assert(running[k]);
         assert(k != i);
@@ -30,15 +30,15 @@ proof fn stop_preserves(running: Seq<bool>, dep: spec_fn(int, int) -> bool, i: i
 proof fn load_preserves(running: Seq<bool>, dep: spec_fn(int, int) -> bool)
     requires
         holds(running, dep),
-        forall|k: int| 0 <= k < running.len() && dep(running.len() as int, k) ==> running[k],
+        forall|k: int| #![trigger dep(running.len() as int, k)] 0 <= k < running.len() && dep(running.len() as int, k) ==> running[k],
         !dep(running.len() as int, running.len() as int),
-        forall|j: int| 0 <= j < running.len() ==> !dep(j, running.len() as int),
+        forall|j: int| #![trigger dep(j, running.len() as int)] 0 <= j < running.len() ==> !dep(j, running.len() as int),
     ensures
         holds(running.push(true), dep),
 {
     let after = running.push(true);
     let n = running.len() as int;
-    assert forall|j: int, k: int| 0 <= j < after.len() && 0 <= k < after.len() && after[j] && dep(j, k) implies after[k] by {
+    assert forall|j: int, k: int| #![trigger dep(j, k)] 0 <= j < after.len() && 0 <= k < after.len() && after[j] && dep(j, k) implies after[k] by {
         if j == n {
             assert(k != n);
             assert(running[k]);

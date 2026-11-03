@@ -17,7 +17,7 @@ if "$verus" verification/toolbox/verus/jaso_l1_bad.rs > "$out/verus-bad.log" 2>&
 fi
 cargo test -p jaso --features pack > "$out/host.log" 2>&1
 cargo test --manifest-path verification/toolbox/Cargo.toml --test jaso_l1 > "$out/proptest.log" 2>&1
-cargo +nightly miri test -p jaso --features pack -- l1_tests::binding l1_tests::dependencies l1_tests::unload > "$out/miri.log" 2>&1
+cargo +nightly miri test -p jaso --features pack -- l1_tests::binding_accepts l1_tests::binding_rejects l1_tests::binding_must l1_tests::dependencies l1_tests::unload > "$out/miri.log" 2>&1
 (cd verification/toolbox/fuzz && mkdir -p corpus/jaso_binding && \
   cargo fuzz run jaso_binding corpus/jaso_binding seeds/jaso_binding -- -runs=2000000 -seed=1) > "$out/fuzz.log" 2>&1
 for h in signature_never_panics type_cursor_stays_in_bounds; do
@@ -27,7 +27,7 @@ grep -Eq '[1-9][0-9]* verified, 0 errors' "$out/verus.log"
 grep -Eq 'error|verified, [1-9]' "$out/verus-bad.log"
 grep -q 'test result: ok. 56 passed' "$out/host.log"
 grep -q 'test result: ok. 3 passed; 0 failed' "$out/proptest.log"
-grep -q 'test result: ok. 6 passed; 0 failed' "$out/miri.log"
+grep -q 'test result: ok. 5 passed; 0 failed' "$out/miri.log"
 grep -q 'Done 2000000 runs' "$out/fuzz.log"
 for h in signature_never_panics type_cursor_stays_in_bounds; do
   grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-$h.log"

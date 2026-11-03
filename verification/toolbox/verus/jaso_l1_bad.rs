@@ -4,7 +4,7 @@ use vstd::prelude::*;
 verus! {
 
 spec fn holds(running: Seq<bool>, dep: spec_fn(int, int) -> bool) -> bool {
-    forall|j: int, k: int| 0 <= j < running.len() && 0 <= k < running.len() && running[j] && dep(j, k) ==> running[k]
+    forall|j: int, k: int| #![trigger dep(j, k)] 0 <= j < running.len() && 0 <= k < running.len() && running[j] && dep(j, k) ==> running[k]
 }
 
 proof fn stop_without_precondition(running: Seq<bool>, dep: spec_fn(int, int) -> bool, i: int)
