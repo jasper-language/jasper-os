@@ -81,4 +81,34 @@ grep -aq '^\[JSR-S2-MMIO\] zero=true rollback=true timeout=true quarantined=true
 grep -aq '^\[JSR-S2-QUARANTINE\] total=4 intentional=true' "$out/serial.log"
 grep -aq '^\[JSR-S2-DMA\] readback=unavailable bus_master_off=true missing=4 quarantine=4 intentional=true passed=true' "$out/serial.log"
 
+# Scheduler contracts removed from the dedicated guest above still need a checker:
+# run scale_demo alone with fault hooks, which also reaches the full-mailbox and
+# delayed-deadline paths that exist only under fault-inject.
+scale_out="$out/fault-scale"
+mkdir -p "$scale_out"
+cargo build --locked --release --target x86_64-unknown-none -p jasper-kernel \
+  --features krn3-postsplit-verify,fault-inject > "$scale_out/build.log" 2>&1
+target/release/xtask target/x86_64-unknown-none/release/jasper-kernel "$scale_out/s2.img" > "$scale_out/image.log" 2>&1
+set +e
+timeout "${S2_QEMU_TIMEOUT:-1200}" qemu-system-x86_64 -accel tcg \
+  -drive "format=raw,file=$scale_out/s2.img" -smp "$cpus" -m 256M \
+  -serial stdio -display none -monitor none -no-reboot \
+  -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$scale_out/serial.log" 2>&1
+rc=$?
+set -e
+printf '%s\n' "$rc" > "$scale_out/qemu-exit.txt"
+[[ "$rc" == 33 || "$rc" == 37 ]]
+if grep -aE 'panicked at|KERNEL PANIC|^\[JSR-PANIC\]' "$scale_out/serial.log"; then
+  echo 'unexpected panic in S-2 scheduler contracts' >&2
+  exit 1
+fi
+grep -aEq '^\[JSR-KRN3-POSTSPLIT\] done failed=0 timing_failed=[0-9]+' "$scale_out/serial.log"
+grep -aq '^\[JSR-TASK-INDEX\] duplicate=true unchanged=true reused=true reclaimed=true' "$scale_out/serial.log"
+grep -aEq '^\[JSR-WAKE-MSG\] routed=[1-9][0-9]* timely=true returned=true reclaimed=true' "$scale_out/serial.log"
+grep -aq '^\[JSR-DEADLINE-OWNER\] registered=true moved=true target=2 consumed=true ran=true reclaimed=true' "$scale_out/serial.log"
+grep -aq '^\[JSR-RT-LOCAL\] exhausted=true refilled=true disabled=true reclaimed=true' "$scale_out/serial.log"
+grep -aEq '^\[JSR-BUDGET-TICK\] tick_path_rt=[0-9]+ tick_path_shared=[0-9]+ rt_exhausted=true used=[1-9][0-9]* group_throttle_events=[0-9]+ scheduler_throttles=[1-9][0-9]* configured=true reclaimed=true' "$scale_out/serial.log"
+grep -aq '^\[JSR-WAKE-FULL\] queued=16 fallback=1 returned=17/17 timely=true reclaimed=true' "$scale_out/serial.log"
+grep -aEq '^\[JSR-DEADLINE-IPI\] .*stopped=true ipis=[1-9][0-9]* cpu=2 linked=true' "$scale_out/serial.log"
+
 echo 'S-2 million-probe campaign PASS; quarantine and fault-path evidence recorded'
