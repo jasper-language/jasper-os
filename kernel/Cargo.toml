@@ -45,6 +45,9 @@ evt1-verify = ["kernel-core/evt1-capacity"]
 fault-inject = []
 # S-2 fixed-seed eight-process syscall campaign (opt-in).
 s2-fuzz = ["user-programs"]
+# Dedicated S-2 guest: initialize the platform and scheduler, then run the
+# campaign without unrelated demos that depend on single-vCPU TCG timing.
+s2-only = ["s2-fuzz", "fault-inject"]
 # Independent opt-in long-run guest; not enabled by default or acceptance.
 krn1-soak = ["user-programs"]
 # Explicit QEMU BM-1 profile: RTL8139 log link, IB700 watchdog and CF9 reset.

@@ -230,6 +230,11 @@ pub fn start(boot: &'static BootSpec) -> ! {
         kprintln!("[JSR-EXIT] failure fault_inject_failed=1");
         arch::exit_emulator(ExitStatus::Failure);
     }
+    #[cfg(all(feature = "s2-only", target_arch = "x86_64"))]
+    {
+        let passed = crate::s2::run();
+        arch::exit_emulator(if passed { ExitStatus::Success } else { ExitStatus::Failure });
+    }
     // KRN-0①：两个钉在不同处理器的任务批量映射、读取、击落与回收。
     crate::krn0_tlb::run(smp::online_set().len());
     // DRV-2A：每核 MSI 向量池、绑定、投递与拒绝路径（放在其他处理器已报到之后）。

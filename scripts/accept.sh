@@ -813,7 +813,6 @@ check_s2() {    # S-2: preserve both four/eight-CPU campaigns and all quarantine
      && [ "$mmio" -eq 1 ] && [ "$dma" -eq 1 ] && [ "$quar" -eq 1 ] \
      && [ "$(grep -ac '^\[JSR-S2-ERROR\] case=.*passed=true' "$f")" -eq 4 ] \
      && [ "$(grep -ac '^\[JSR-S2-ERROR\] case=[23] .*quarantine=2 reclaimed=true passed=true' "$f")" -eq 2 ] \
-     && grep -qa '^\[JSR-RT\] case=rt-panic exit=Some(101) expect=101 reclaimed=true' "$f" \
      && ! { grep -aE 'panicked at|KERNEL PANIC|^\[JSR-PANIC\]' "$f" | grep -avE '^\[JSR-USERTEXT\] task=rt-panic bytes=[0-9]+ text=panic: panicked at user/rtdemo/src/main.rs:[0-9]+:[0-9]+:'; } \
      && ! grep -qa '^\[JSR-EXIT\] failure' "$f"; then
     record S-2 PASS "${expected} 个固定种子进程各 ${probes} 次有界探测、共 10^6 次系统调用，${expected} 个在线处理器均有实际调用；MMIO 回滚超时、帧/堆失败、unmap/protect 击落超时与 DMA 读回未知路径全部按预期失败或隔离，击落超时的 4 帧永久隔离且回收后基线可按隔离数解释；无 panic"

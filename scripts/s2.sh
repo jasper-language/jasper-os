@@ -41,13 +41,15 @@ grep -q 'Invariant NoReleaseWhileStale is violated' "$out/tlb-quarantine-negativ
 # Dedicated image with the explicit campaign and fault hooks.
 cargo build --locked --release -p xtask > "$out/xtask.log" 2>&1
 cargo build --locked --release --target x86_64-unknown-none -p jasper-kernel \
-  --features s2-fuzz,fault-inject > "$out/build.log" 2>&1
+  --features s2-only > "$out/build.log" 2>&1
 target/release/xtask target/x86_64-unknown-none/release/jasper-kernel "$out/s2.img" > "$out/image.log" 2>&1
 truncate -s 16M "$out/blank.img"
 
 # Four/eight pinned workers; per-worker shares always total 1,000,000 probes.
 set +e
-timeout "${S2_QEMU_TIMEOUT:-1200}" qemu-system-x86_64 -accel tcg,thread=single -icount shift=5,sleep=off \
+# True parallel vCPUs are required: a single-threaded TCG scheduler can strand
+# spinlock waiters across eight vCPUs even when every worker is runnable.
+timeout "${S2_QEMU_TIMEOUT:-1200}" qemu-system-x86_64 -accel tcg \
   -drive "format=raw,file=$out/s2.img" -device virtio-rng-pci \
   -device virtio-net-pci,netdev=n0 -netdev user,id=n0 \
   -device virtio-blk-pci,drive=d1 -drive "if=none,id=d1,file=$out/blank.img,format=raw" \
@@ -58,13 +60,11 @@ set -e
 printf '%s\n' "$rc" > "$out/qemu-exit.txt"
 [[ "$rc" == 33 || "$rc" == 37 ]]
 
-# The expected isolated user panic must exit 101 and reclaim resources.
-# Every other panic remains fatal; use an explicit branch (a bare ! ignores errexit).
+# Every panic remains fatal in the dedicated S-2 guest.
 if grep -aE 'panicked at|KERNEL PANIC|^\[JSR-PANIC\]' "$out/serial.log" | grep -avE '^\[JSR-USERTEXT\] task=rt-panic bytes=[0-9]+ text=panic: panicked at user/rtdemo/src/main.rs:[0-9]+:[0-9]+:'; then
   echo 'unexpected panic in S-2' >&2
   exit 1
 fi
-grep -aq '^\[JSR-RT\] case=rt-panic exit=Some(101) expect=101 reclaimed=true' "$out/serial.log"
 if grep -aq '^\[JSR-EXIT\] failure' "$out/serial.log"; then exit 1; fi
 
 # Four fixed streams, three of the four fault sites exercised before the campaign.
@@ -81,18 +81,4 @@ grep -aq '^\[JSR-S2-MMIO\] zero=true rollback=true timeout=true quarantined=true
 grep -aq '^\[JSR-S2-QUARANTINE\] total=4 intentional=true' "$out/serial.log"
 grep -aq '^\[JSR-S2-DMA\] readback=unavailable bus_master_off=true missing=4 quarantine=4 intentional=true passed=true' "$out/serial.log"
 
-grep -aq '^\[JSR-TASK-INDEX\] duplicate=true unchanged=true reused=true reclaimed=true' "$out/serial.log"
-grep -aEq '^\[JSR-WAKE-MSG\] routed=[1-9][0-9]* timely=true returned=true reclaimed=true' "$out/serial.log"
-grep -aq '^\[JSR-DEADLINE-OWNER\] registered=true moved=true target=2 consumed=true ran=true reclaimed=true' "$out/serial.log"
-grep -aq '^\[JSR-RT-LOCAL\] exhausted=true refilled=true disabled=true reclaimed=true' "$out/serial.log"
-grep -aEq '^\[JSR-BUDGET-TICK\] tick_path_rt=[0-9]+ tick_path_shared=[0-9]+ rt_exhausted=true used=[1-9][0-9]* group_throttle_events=[0-9]+ scheduler_throttles=[1-9][0-9]* configured=true reclaimed=true' "$out/serial.log"
-grep -aq '^\[JSR-WAKE-FULL\] queued=16 fallback=1 returned=17/17 timely=true reclaimed=true' "$out/serial.log"
-grep -aEq '^\[JSR-DEADLINE-IPI\] .*stopped=true ipis=[1-9][0-9]* cpu=2 linked=true' "$out/serial.log"
-grep -aq '^\[JSR-TASK-INDEX\] duplicate=true unchanged=true reused=true reclaimed=true' "$out/serial.log"
-grep -aEq '^\[JSR-WAKE-MSG\] routed=[1-9][0-9]* timely=true returned=true reclaimed=true' "$out/serial.log"
-grep -aq '^\[JSR-DEADLINE-OWNER\] registered=true moved=true target=2 consumed=true ran=true reclaimed=true' "$out/serial.log"
-grep -aq '^\[JSR-RT-LOCAL\] exhausted=true refilled=true disabled=true reclaimed=true' "$out/serial.log"
-grep -aEq '^\[JSR-BUDGET-TICK\] tick_path_rt=[0-9]+ tick_path_shared=[0-9]+ rt_exhausted=true used=[1-9][0-9]* group_throttle_events=[0-9]+ scheduler_throttles=[1-9][0-9]* configured=true reclaimed=true' "$out/serial.log"
-grep -aq '^\[JSR-WAKE-FULL\] queued=16 fallback=1 returned=17/17 timely=true reclaimed=true' "$out/serial.log"
-grep -aEq '^\[JSR-DEADLINE-IPI\] .*stopped=true ipis=[1-9][0-9]* cpu=2 linked=true' "$out/serial.log"
 echo 'S-2 million-probe campaign PASS; quarantine and fault-path evidence recorded'

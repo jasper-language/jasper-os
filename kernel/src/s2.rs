@@ -74,6 +74,11 @@ pub fn run() -> bool {
     ACTIVE.store(true, Ordering::Release);
 
     let mut results: [Option<(ObjId, bool)>; MAX_WORKERS] = [None; MAX_WORKERS];
+    // Keep the bootstrap thread from being preempted between worker
+    // publications. It is not itself a scheduler run-queue entry, so a local
+    // worker could otherwise delay creating the remaining workers until the
+    // first workers had already run to completion.
+    let irq = arch::irq_save_disable();
     for i in 0..workers as usize {
         let worker = i as u64 + 1;
         let cpu = online.iter().nth(i).unwrap_or(i);
@@ -86,6 +91,7 @@ pub fn run() -> bool {
         );
         results[i] = start(worker, cpu, probes);
     }
+    arch::irq_restore(irq);
     sched::run();
     ACTIVE.store(false, Ordering::Release);
 
