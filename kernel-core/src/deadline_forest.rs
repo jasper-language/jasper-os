@@ -291,64 +291,79 @@ mod proofs {
             && a.3 == b.3 && a.4 == b.4
     }
     /// 两核两槽、至多一个已存在节点；时刻与代次取 8 位值域（有界）。
-    fn world() -> (DeadlineForest<2>, [Deadline; 4], [usize; 2], [usize; 2], usize) {
+    /// 位置（槽、核）逐例枚举、不用符号值：符号下标的乘除让 CBMC 公式膨胀到 10 GB 以上。
+    fn world(pre: Option<(usize, usize)>) -> (DeadlineForest<2>, [Deadline; 4], [usize; 2], [usize; 2]) {
         let mut h = DeadlineForest::<2>::new();
         let mut e = [Deadline::EMPTY; 4]; let mut p = [ABSENT; 2]; let mut o = [ABSENT; 2];
-        let pre_slot: usize = kani::any(); kani::assume(pre_slot < 2);
-        let pre_cpu: usize = kani::any(); kani::assume(pre_cpu < 2);
-        if kani::any() { h.set(&mut e, &mut p, &mut o, pre_cpu, Deadline { at: small(), slot: pre_slot, generation: small() }).unwrap(); }
-        (h, e, p, o, pre_slot)
+        if let Some((pre_slot, pre_cpu)) = pre {
+            h.set(&mut e, &mut p, &mut o, pre_cpu, Deadline { at: small(), slot: pre_slot, generation: small() }).unwrap();
+        }
+        (h, e, p, o)
     }
-    fn target() -> (usize, u64, Option<(usize, u64)>) {
-        let slot: usize = kani::any(); kani::assume(slot < 3);
-        let wanted = if kani::any() { None } else {
-            let c: usize = kani::any(); kani::assume(c < 3); Some((c, small()))
-        };
-        (slot, small(), wanted)
-    }
-    /// sync 返回 Unchanged 或失败时不写任何存储。
-    #[kani::proof]
-    #[kani::unwind(5)]
-    fn sync_unchanged_or_failed_never_writes() {
-        let (mut h, mut e, mut p, mut o, _) = world();
-        let (slot, generation, wanted) = target();
-        let before = (e, p, o, h.len(0), h.len(1));
-        let r = h.sync(&mut e, &mut p, &mut o, slot, generation, wanted);
-        if r.is_err() || r == Ok(SyncOutcome::Unchanged) { assert!(same(&before, &(e, p, o, h.len(0), h.len(1)))); }
-    }
-    /// sync 成功后该槽恰好按目标发布，且只在一个所有者堆中（迁移不留旧节点）。
-    #[kani::proof]
-    #[kani::unwind(5)]
-    fn sync_success_publishes_target_in_one_heap() {
-        let (mut h, mut e, mut p, mut o, pre_slot) = world();
-        let (slot, generation, wanted) = target();
-        if h.sync(&mut e, &mut p, &mut o, slot, generation, wanted).is_ok() {
-            match wanted {
-                None => assert!(o[slot] == ABSENT && p[slot] == ABSENT),
-                Some((c, at)) => {
-                    assert!(o[slot] == c);
-                    let d = e[c * 2 + p[slot]];
-                    assert!(d.slot == slot && d.at == at && d.generation == generation);
-                    assert!(h.len(1 - c) == Some(usize::from(o[pre_slot] == 1 - c && pre_slot != slot)));
-                }
-            }
+    /// 枚举目标槽（含越界的 2）与目标核（不要、0、1、越界的 2），每一分支都是具体下标。
+    fn each_target(check: impl Fn(usize, Option<usize>)) {
+        match kani::any::<u8>() {
+            0 => check(0, None), 1 => check(0, Some(0)), 2 => check(0, Some(1)), 3 => check(0, Some(2)),
+            4 => check(1, None), 5 => check(1, Some(0)), 6 => check(1, Some(1)), 7 => check(1, Some(2)),
+            8 => check(2, None), 9 => check(2, Some(0)), 10 => check(2, Some(1)), _ => check(2, Some(2)),
         }
     }
+    /// sync 返回 Unchanged 或失败时不写任何存储。
+    fn unchanged_or_failed_never_writes(pre: Option<(usize, usize)>) {
+        each_target(|slot, cpu| {
+            let (mut h, mut e, mut p, mut o) = world(pre);
+            let before = (e, p, o, h.len(0), h.len(1));
+            let r = h.sync(&mut e, &mut p, &mut o, slot, small(), cpu.map(|c| (c, small())));
+            if r.is_err() || r == Ok(SyncOutcome::Unchanged) { assert!(same(&before, &(e, p, o, h.len(0), h.len(1)))); }
+        });
+    }
+    /// sync 成功后该槽恰好按目标发布，且只在一个所有者堆中（迁移不留旧节点）。
+    fn success_publishes_target_in_one_heap(pre: Option<(usize, usize)>) {
+        each_target(|slot, cpu| {
+            let (mut h, mut e, mut p, mut o) = world(pre);
+            let (generation, at) = (small(), small());
+            if h.sync(&mut e, &mut p, &mut o, slot, generation, cpu.map(|c| (c, at))).is_ok() {
+                match cpu {
+                    None => assert!(o[slot] == ABSENT && p[slot] == ABSENT),
+                    Some(c) => {
+                        assert!(o[slot] == c);
+                        let d = e[c * 2 + p[slot]];
+                        assert!(d.slot == slot && d.at == at && d.generation == generation);
+                        let other = pre.is_some_and(|(pre_slot, _)| pre_slot != slot && o[pre_slot] == 1 - c);
+                        assert!(h.len(1 - c) == Some(usize::from(other)));
+                    }
+                }
+            }
+        });
+    }
+    #[kani::proof] #[kani::unwind(5)] fn sync_unchanged_empty() { unchanged_or_failed_never_writes(None); }
+    #[kani::proof] #[kani::unwind(5)] fn sync_unchanged_s0_c0() { unchanged_or_failed_never_writes(Some((0, 0))); }
+    #[kani::proof] #[kani::unwind(5)] fn sync_unchanged_s0_c1() { unchanged_or_failed_never_writes(Some((0, 1))); }
+    #[kani::proof] #[kani::unwind(5)] fn sync_unchanged_s1_c0() { unchanged_or_failed_never_writes(Some((1, 0))); }
+    #[kani::proof] #[kani::unwind(5)] fn sync_unchanged_s1_c1() { unchanged_or_failed_never_writes(Some((1, 1))); }
+    #[kani::proof] #[kani::unwind(5)] fn sync_success_empty() { success_publishes_target_in_one_heap(None); }
+    #[kani::proof] #[kani::unwind(5)] fn sync_success_s0_c0() { success_publishes_target_in_one_heap(Some((0, 0))); }
+    #[kani::proof] #[kani::unwind(5)] fn sync_success_s0_c1() { success_publishes_target_in_one_heap(Some((0, 1))); }
+    #[kani::proof] #[kani::unwind(5)] fn sync_success_s1_c0() { success_publishes_target_in_one_heap(Some((1, 0))); }
+    #[kani::proof] #[kani::unwind(5)] fn sync_success_s1_c1() { success_publishes_target_in_one_heap(Some((1, 1))); }
     /// 既有 set（补链）：代次不同的节点不能被改期或迁移，拒绝时存储不变。
     #[kani::proof]
     #[kani::unwind(5)]
     fn set_rejects_stale_generation_atomically() {
-        let mut h = DeadlineForest::<2>::new();
-        let mut e = [Deadline::EMPTY; 4]; let mut p = [ABSENT; 2]; let mut o = [ABSENT; 2];
-        let slot: usize = kani::any(); kani::assume(slot < 2);
-        let old = Deadline { at: small(), slot, generation: small() };
-        let c0: usize = kani::any(); kani::assume(c0 < 2);
-        h.set(&mut e, &mut p, &mut o, c0, old).unwrap();
-        let c1: usize = kani::any(); kani::assume(c1 < 2);
-        let generation = small(); kani::assume(generation != old.generation);
-        let before = (e, p, o, h.len(0), h.len(1));
-        assert!(h.set(&mut e, &mut p, &mut o, c1, Deadline { at: small(), slot, generation }) == Err(HeapError::Stale));
-        assert!(same(&before, &(e, p, o, h.len(0), h.len(1))));
+        fn check(slot: usize, c0: usize, c1: usize) {
+            let mut h = DeadlineForest::<2>::new();
+            let mut e = [Deadline::EMPTY; 4]; let mut p = [ABSENT; 2]; let mut o = [ABSENT; 2];
+            let old = Deadline { at: small(), slot, generation: small() };
+            h.set(&mut e, &mut p, &mut o, c0, old).unwrap();
+            let generation = small(); kani::assume(generation != old.generation);
+            let before = (e, p, o, h.len(0), h.len(1));
+            assert!(h.set(&mut e, &mut p, &mut o, c1, Deadline { at: small(), slot, generation }) == Err(HeapError::Stale));
+            assert!(same(&before, &(e, p, o, h.len(0), h.len(1))));
+        }
+        match kani::any::<u8>() {
+            0 => check(0, 0, 0), 1 => check(0, 0, 1), 2 => check(0, 1, 0), 3 => check(0, 1, 1),
+            4 => check(1, 0, 0), 5 => check(1, 0, 1), 6 => check(1, 1, 0), _ => check(1, 1, 1),
+        }
     }
     /// 既有 pop_due（补链）：两节点同核时先弹出 (at, slot) 最小者，且只在已到期时弹出。
     #[kani::proof]

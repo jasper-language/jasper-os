@@ -14,7 +14,7 @@ cd "$(dirname "$0")/../.."
 Z3="${Z3:-$(dirname "$VERUS")/z3}"
 out=evidence/issue2/deadline-sync-suite
 mkdir -p "$out"
-HARNESSES="sync_unchanged_or_failed_never_writes sync_success_publishes_target_in_one_heap set_rejects_stale_generation_atomically pop_due_returns_earliest_only_when_due"
+HARNESSES="sync_unchanged_empty sync_unchanged_s0_c0 sync_unchanged_s0_c1 sync_unchanged_s1_c0 sync_unchanged_s1_c1 sync_success_empty sync_success_s0_c0 sync_success_s0_c1 sync_success_s1_c0 sync_success_s1_c1 set_rejects_stale_generation_atomically pop_due_returns_earliest_only_when_due"
 
 sha256sum \
   kernel-core/src/deadline_forest.rs \
