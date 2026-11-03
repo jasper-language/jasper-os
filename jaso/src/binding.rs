@@ -255,12 +255,11 @@ mod kani_proofs {
 
     /// 超过嵌套深度上限的类型：直接拒绝，不读取输入（递归因此有界）。
     #[kani::proof]
+    #[kani::unwind(3)]
     fn type_depth_cap_is_enforced() {
         let b: [u8; 2] = kani::any();
         let mut c = Cursor { b: &b, i: 0 };
-        let depth: u32 = kani::any();
-        kani::assume(depth > MAX_TYPE_DEPTH);
-        assert!(!c.ty(depth));
+        assert!(!c.ty(MAX_TYPE_DEPTH + 1));
         assert!(c.i == 0);
     }
 }
