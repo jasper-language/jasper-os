@@ -229,6 +229,24 @@ pub enum ObjectType {
 }
 
 impl ObjectType {
+    /// 全部句柄类型（按声明顺序；登记表与验证用）。
+    /// All handle types in declaration order.
+    pub const ALL: [ObjectType; 13] = [
+        ObjectType::Event,
+        ObjectType::Timer,
+        ObjectType::Ring,
+        ObjectType::AddressSpace,
+        ObjectType::Channel,
+        ObjectType::Task,
+        ObjectType::Process,
+        ObjectType::Device,
+        ObjectType::Interrupt,
+        ObjectType::Memory,
+        ObjectType::Mutex,
+        ObjectType::EventSource,
+        ObjectType::Subscription,
+    ];
+
     /// v1 是否允许经 Channel 传递：只有「叶子对象」——自身不持有句柄、
     /// 也不强引用非叶子对象——可以传递。Channel 端点、Ring、Process、AddressSpace 在 v1 不可传递
     /// （阶段性限制，放宽前须证明仍保持强引用图无环）。

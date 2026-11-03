@@ -638,8 +638,13 @@ pub fn run_handles() {
     let ev = KObject::Event { signaled: false };
     let h1 = proc::grant_new(a, ev, ObjectType::Event, Rights::WAIT.union(Rights::TRANSFER));
     let h_notr = proc::grant_new(a, KObject::Event { signaled: false }, ObjectType::Event, Rights::WAIT);
-    let h_proc = proc::grant(a, b, ObjectType::Process, Rights::WAIT.union(Rights::TRANSFER));
-    let (Ok(h1), Ok(h_notr), Ok(h_proc)) = (h1, h_notr, h_proc) else {
+    // 非叶子对象（进程）不可转移：按对象类型登记表，带 TRANSFER 的进程句柄在创建时就被拒绝，
+    // 拒绝后接收方句柄表与进程的外部所有权都不变。
+    let slots_before = proc::free_handle_slots(a);
+    let owners_before = kobj::with(|t| t.counts(b)).ok().map(|c| c.0);
+    let non_leaf = proc::grant(a, b, ObjectType::Process, Rights::WAIT.union(Rights::TRANSFER)).map(|_| ());
+    let non_leaf_clean = proc::free_handle_slots(a) == slots_before && kobj::with(|t| t.counts(b)).ok().map(|c| c.0) == owners_before;
+    let (Ok(h1), Ok(h_notr)) = (h1, h_notr) else {
         check(false, "发放句柄失败");
         return;
     };
@@ -652,8 +657,7 @@ pub fn run_handles() {
     check(moved_ok, "移动后发送方句柄应失效、外部所有权总数应不变");
     let no_right = proc::transfer(a, h_notr, b);
     check(no_right == Err(ProcError::Handle(HandleError::RightsDenied)) && proc::handle_info(a, h_notr).is_some(), "无 TRANSFER 应被拒且句柄保留");
-    let non_leaf = proc::transfer(a, h_proc, b);
-    check(non_leaf == Err(ProcError::NotTransferable) && proc::handle_info(a, h_proc).is_some(), "非叶子对象应被拒且句柄保留");
+    check(non_leaf == Err(ProcError::NotTransferable) && non_leaf_clean, "非叶子对象带 TRANSFER 的句柄应在创建时被拒且无副作用");
     // 填满接收方句柄表
     let mut filled = 0;
     while proc::free_handle_slots(b) > 0 {

@@ -24,6 +24,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::frame::{PhysFrame, FRAME_SIZE};
+use kernel_core::kobj_type::{check_grant, GrantCheck, Kind};
 use kernel_core::object::{HandleError, HandleId, HandleTable, ObjectId, ObjectRef, ObjectType, Rights};
 use kernel_core::objtable::ObjId;
 use kernel_core::paging::{MapError, MapFlags, VirtPage};
@@ -1184,11 +1185,30 @@ fn receiver<'a>(t: &'a mut kobj::Table, pid: ObjId) -> Result<&'a mut Process, P
     }
 }
 
+/// 按对象类型登记表检查一次句柄创建：句柄类型须与对象种类一致、`TRANSFER` 只给可转移种类、
+/// 权限须在该种类的合法上限之内。所有创建新句柄的路径都必须先经过这里（复制 / 降权只会让权限更小）。
+/// Checks a handle creation against the object type registry (type, transferability, rights ceiling).
+pub(crate) fn admit_handle(kind: Kind, ty: ObjectType, rights: Rights) -> Result<(), ProcError> {
+    match check_grant(kind, ty, rights) {
+        GrantCheck::Allowed => Ok(()),
+        GrantCheck::WrongType => Err(ProcError::Handle(HandleError::Invalid)),
+        GrantCheck::NotTransferable => Err(ProcError::NotTransferable),
+        GrantCheck::RightsDenied => Err(ProcError::Handle(HandleError::RightsDenied)),
+    }
+}
+
+/// [`admit_handle`] 的已存在对象版本（锁内；对象不存在 ⇒ 句柄无效）。
+fn admit_existing_in(t: &mut kobj::Table, obj: ObjId, ty: ObjectType, rights: Rights) -> Result<(), ProcError> {
+    let kind = t.get(obj).map(|o| o.kind()).map_err(|_| ProcError::Handle(HandleError::Invalid))?;
+    admit_handle(kind, ty, rights)
+}
+
 /// 在当前进程的句柄表中放入一个指向 Task 对象的句柄（同时增加该对象的一个外部所有权）。
 pub fn put_task_handle(task_obj: ObjId, rights: Rights) -> Result<HandleId, ProcError> {
     let pid = current_process().ok_or(ProcError::NoSuchProcess)?;
     kobj::with(|t| {
         receiver(t, pid)?; // 先确认可接收，再取所有权（失败路径无需回滚）
+        admit_existing_in(t, task_obj, ObjectType::Task, rights)?;
         t.acquire_owner(task_obj).map_err(|_| ProcError::Handle(HandleError::Invalid))?;
         let r = receiver(t, pid).and_then(|p| {
             p.handles
@@ -1213,6 +1233,7 @@ pub(crate) fn grant_in(t:&mut kobj::Table,pid:ObjId,obj:ObjId,ty:ObjectType,righ
         if room == 0 {
             return Err(ProcError::Handle(HandleError::TableFull));
         }
+        admit_existing_in(t, obj, ty, rights)?;
         t.acquire_owner(obj).map_err(|_| ProcError::Handle(HandleError::Invalid))?;
         // 已确认可接收且有空位：以下 put 不会失败；仍保留回滚以防御未来的修改。
         let r = receiver(t, pid)
@@ -1246,6 +1267,7 @@ pub(crate) fn grant_new_in(
     if receiver(t, pid)?.handles.free_slots() == 0 {
         return Err(ProcError::Handle(HandleError::TableFull));
     }
+    admit_handle(obj.kind(), ty, rights)?; // 不合法则根本不创建对象
     let id = t.insert(obj, 1, 0).map_err(|_| ProcError::NoTaskSlot)?;
     let r = receiver(t, pid)
         .and_then(|p| p.handles.put(ObjectRef { id: ObjectId(id.raw()), ty }, rights).map_err(ProcError::Handle));

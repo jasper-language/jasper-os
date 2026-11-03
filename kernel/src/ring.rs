@@ -61,7 +61,8 @@ pub const MAX_RINGS_PER_PROCESS: u32 = config::ACTIVE.ring.max_rings_per_process
 /// 每进程跨所有 Ring 的在飞请求（尚未销毁的控制块）上限。
 pub const MAX_IN_FLIGHT_PER_PROCESS: u32 = config::ACTIVE.ring.max_in_flight_per_process;
 /// Ring 句柄的权限：提交（WRITE）、收取（WAIT）、取消（CONTROL）、进程内复制（DUPLICATE）；**永不带 TRANSFER**。
-pub const RING_RIGHTS: Rights = Rights::WRITE.union(Rights::WAIT).union(Rights::CONTROL).union(Rights::DUPLICATE);
+/// 取自对象类型登记表（唯一定义处）。
+pub const RING_RIGHTS: Rights = kernel_core::kobj_type::Kind::Ring.contract().rights;
 
 type StateMachine = AsyncRing<CQ_CAPACITY, BLOCKS_PER_RING>;
 

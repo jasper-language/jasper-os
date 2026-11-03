@@ -35,10 +35,8 @@ enum LockStep {
     Error(i64),
 }
 
-const MUTEX_RIGHTS: Rights = Rights::WAIT
-    .union(Rights::CONTROL)
-    .union(Rights::DUPLICATE)
-    .union(Rights::TRANSFER);
+/// 取自对象类型登记表（唯一定义处）。
+const MUTEX_RIGHTS: Rights = kernel_core::kobj_type::Kind::Mutex.contract().rights;
 
 pub fn sys_create() -> i64 {
     let Some(pid) = proc::current_process() else { return crate::syscall::err(SYSTEM_ERROR_RIGHTS_DENIED) };
