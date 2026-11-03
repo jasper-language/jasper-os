@@ -49,7 +49,8 @@ truncate -s 16M "$out/blank.img"
 set +e
 # True parallel vCPUs are required: a single-threaded TCG scheduler can strand
 # spinlock waiters across eight vCPUs even when every worker is runnable.
-timeout "${S2_QEMU_TIMEOUT:-1200}" qemu-system-x86_64 -accel tcg \
+# The eight-CPU campaign takes about 29 minutes under TCG in the build VM.
+timeout "${S2_QEMU_TIMEOUT:-2400}" qemu-system-x86_64 -accel tcg \
   -drive "format=raw,file=$out/s2.img" -device virtio-rng-pci \
   -device virtio-net-pci,netdev=n0 -netdev user,id=n0 \
   -device virtio-blk-pci,drive=d1 -drive "if=none,id=d1,file=$out/blank.img,format=raw" \
@@ -90,7 +91,7 @@ cargo build --locked --release --target x86_64-unknown-none -p jasper-kernel \
   --features krn3-postsplit-verify,fault-inject > "$scale_out/build.log" 2>&1
 target/release/xtask target/x86_64-unknown-none/release/jasper-kernel "$scale_out/s2.img" > "$scale_out/image.log" 2>&1
 set +e
-timeout "${S2_QEMU_TIMEOUT:-1200}" qemu-system-x86_64 -accel tcg \
+timeout "${S2_QEMU_TIMEOUT:-600}" qemu-system-x86_64 -accel tcg \
   -drive "format=raw,file=$scale_out/s2.img" -smp "$cpus" -m 256M \
   -serial stdio -display none -monitor none -no-reboot \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$scale_out/serial.log" 2>&1
