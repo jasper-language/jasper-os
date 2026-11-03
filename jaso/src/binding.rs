@@ -264,4 +264,3 @@ mod kani_proofs {
         assert!(c.i == 0);
     }
 }
-}
