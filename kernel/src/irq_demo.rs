@@ -73,7 +73,7 @@ pub fn timing_failed() -> u32 {
 /// 本演练的内核任务号起点（与其它演练不重叠）。
 const TASK_ID_BASE: u64 = 9900;
 /// 送达用例中每个处理器上的风暴时长（tick）。
-const ROUTE_TICKS: u64 = 3;
+const ROUTE_TICKS: u64 = 20;
 /// 均衡用例的观察时长（tick）：两个均衡周期以上。
 const BALANCE_TICKS: u64 = 3 * device::BALANCE_PERIOD;
 /// 风暴 + 过载用例的窗口（tick）。
@@ -314,7 +314,7 @@ fn route(online: CpuSet, lines: usize) {
             ok &= device::set_enabled(l, false).is_ok();
         }
         // 停用后到达的最后一次中断也处理完
-        wait_ticks(1);
+        wait_ticks(2);
         let mut here = true;
         for l in 0..lines {
             let on_c = device::count_on(l, c);
