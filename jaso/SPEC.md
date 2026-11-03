@@ -240,9 +240,41 @@ A reader knows a set of `(name, version)` pairs. For each Ext section:
 | `jasper.types`, `jasper.gc`, `jasper.error`, `jasper.command` | — | — | reserved, no content defined in beta |
 
 A conforming beta reader knows exactly `(jasper.import, 1)` and `(jasper.source, 1)` at the core layer; it checks the
-critical flag above (`extension.malformed` if wrong) but not their contents. A Hybrid file without exactly one
-`jasper.import` → `extension.required`. Non-Jasper namespaces (`ui.*`, `web.*`, `jasql.*`, …) are owned by their
-frameworks.
+critical flag above (`extension.malformed` if wrong) but not their contents: structural reading never looks inside
+them. An L1 load checks `jasper.import` (§9.4, §12.2 step 6a). A Hybrid file without exactly one `jasper.import` →
+`extension.required`. Non-Jasper namespaces (`ui.*`, `web.*`, `jasql.*`, …) are owned by their frameworks.
+
+### 9.4 `jasper.import` version 1
+
+The content declares the module's typed exports. It is covered by the digest and the signature like every other
+section. It is UTF-8 text of at most 65536 bytes and at most 1024 effective lines. Each line has surrounding
+whitespace removed; empty lines and lines starting with `#` are ignored. An effective line is one of:
+
+```
+package <dotted>                 at most one; the Jasper package of the module
+type <ident>                     a type the module defines
+cap <capability>                 a capability the binding's functions use
+fn <symbol>(<params>): <type>    one exported function
+
+params  := empty | param (',' param)*
+param   := <ident> ':' <type>
+type    := [ 'own ' | 'borrow ' ] <dotted> [ '<' type (',' type)* '>' ] [ '?' ]      nesting depth ≤ 8
+dotted  := <ident> ('.' <ident>)*
+ident   := [A-Za-z_][A-Za-z0-9_]*
+symbol  := an export name (§7)
+```
+
+Spaces (U+0020 only) are allowed between tokens. `own` transfers ownership across the boundary, `borrow` lends for
+the duration of the call, no keyword passes by value; `?` means nullable. Type names are checked for syntax only,
+their meaning belongs to the Jasper layer. There is no pointer syntax, so raw pointers cannot appear in a binding.
+
+Agreement with the core layer, independent of line order:
+
+* the set of `fn` symbols equals `core.exports` minus the lifecycle exports `jaso_init`, `jaso_start`, `jaso_stop`;
+* every `cap` is listed in `core.requires`: a binding never asks for more than the manifest;
+* no two lines declare the same `fn`, `type` or `cap`.
+
+Any violation → `extension.binding`.
 
 ## 10. Signature (kind 5)
 
@@ -335,7 +367,7 @@ as the expected value.
 
 ### 12.2 L1 runtime load
 
-Loading is all-or-nothing: nothing is mapped, linked or called before every step up to 7 succeeds, and a failure
+Loading is all-or-nothing: nothing is mapped, linked or called before every step before 7 succeeds, and a failure
 leaves no trace except an audit record.
 
 1. **Read** the structure (§12.1).
@@ -350,10 +382,12 @@ leaves no trace except an audit record.
    `platform.mismatch`, reported with the first differing field of image 0 (`isa`, `isa_ext`, `target`,
    `abi`, `float_abi`, `pointer_bytes` — checked in this order) and its expected (host) and actual (file) value.
 4. **Runtime**: `core.runtime` against the host runtime version → `dependency.runtime`.
-5. **Dependencies**: each `core.depends` entry MUST be satisfied by an already-loaded module of that name whose
-   version is in range → `dependency.unsatisfied` (L1 never downloads anything).
+5. **Dependencies**: each `core.depends` entry MUST be satisfied by an already-loaded, running (not stopped) module
+   of that name whose version is in range → `dependency.unsatisfied` (L1 never downloads anything).
 6. **Capabilities**: every `core.requires` name MUST be granted by the caller → `capability.denied`.
    Capabilities in the manifest are requests, never grants.
+6a. **Binding**: a file carrying `jasper.import` (always a Hybrid file; optional on the others) MUST satisfy §9.4 →
+   `extension.binding`.
 7. **Link**: map segments with their permissions, apply relocations (native), or hand the Code payload to the
    managed runtime (managed).
 8. **Discover** services from the manifest and the export table — never by reflection.
@@ -363,7 +397,7 @@ leaves no trace except an audit record.
    `log`, `alloc`, `dealloc`; later functions are only appended). The native calling convention is `c.v1`.
 
 **stop and unload in beta.** `stop` is defined and implemented: the loader calls `jaso_stop` (if exported) and
-the module stops serving. Unloading (L2) and hot replacement (L3) are not part of beta: an unload request for a
+the module stops serving. A loader refuses to stop a module that a running module depends on. Unloading (L2) and hot replacement (L3) are not part of beta: an unload request for a
 `plugin` module returns *deferred* and the module stays mapped; a `system` module refuses unload. A loader MUST
 NOT report a deferred unload as done.
 
@@ -425,13 +459,14 @@ the numbers are for compact binary transport. Codes marked *load* need host cont
 | 1102 | `extension.critical` | unknown critical extension or unsupported version |
 | 1103 | `extension.duplicate` | two Ext sections with the same name |
 | 1104 | `extension.required` | Hybrid file without exactly one `jasper.import` |
+| 1105 | `extension.binding` | *load*: `jasper.import` violates §9.4 |
 
 ## 14. Conformance vectors
 
 `jaso/vectors/` holds files `<name>.jaso`, each with `<name>.expect` containing one line: `ok` or an error code
 from §13. Vectors are regenerated by a script in the repository; every implementation runs all of them and MUST
 produce the expected line. Static codes are checked by structural read (§12.1); *load* codes and `ok` are checked
-by an L1 load (§12.2, steps 1–6) in this fixed **conformance context**:
+by an L1 load (§12.2, steps 1–6a) in this fixed **conformance context**:
 
 * host platform: `isa` x86_64, `isa_ext` empty, `target` jasper-os, `pointer_bytes` 8, `float_abi` hard,
   `abi` `c.v1`; for Managed files: `isa` none, `target` jvm, `abi` `jvm.52`;

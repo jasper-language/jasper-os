@@ -18,6 +18,12 @@
 //! * `demo-resigned.jaso`：另一个发布者把本模块原样重签（仍声称开发用发布者）⇒ 公钥不符
 //! * `demo-claimed.jaso`：另一个发布者重签并改称自己 ⇒ 模块名不在其命名空间
 //! * `trust-dev.key` / `trust-other.key`：两个发布者的公钥（受信发布者表用）
+//!
+//! L1 全流程（模块 `modules/l1demo`，同一映像打包为两种）：
+//! * `l1-native.jaso`：签名的 Native 模块；`l1-hybrid.jaso`：签名的 Hybrid 模块，带 `jasper.import`，依赖前者
+//! * `l1-native-startfail.jaso`：`jaso_start` 指向恒返回 7 的函数 ⇒ 启动失败，不留映射
+//! * `l1-hybrid-otherarch` / `-morecaps` / `-range`：平台不符、缺能力、依赖版本不在区间内
+//! * `l1-hybrid-bind-*`：绑定缺函数、多函数、能力超出清单、含裸指针
 
 use std::path::{Path, PathBuf};
 
@@ -43,6 +49,64 @@ fn rebuild(img: &Jaso<'_>, arch: Arch, stage: Stage, manifest: &str, drop_export
     .expect("变体自检失败")
 }
 
+/// L1 变体：由 Native 文件改写清单、绑定（给了就是 Hybrid）与构建输入，再以 `signer` 签名。
+fn l1_variant(native: &[u8], manifest: &str, import: Option<&[u8]>, edit: impl FnOnce(&mut Builder), signer: &Signer) -> Vec<u8> {
+    let f = Jaso::parse(native).expect("L1 模块未通过校验");
+    let mut b = Builder::from_file(&f, 0).expect("合格模块至少有一个镜像");
+    b.manifest = manifest.as_bytes().to_vec();
+    edit(&mut b);
+    let bytes = b.finish().expect("L1 变体自检失败");
+    let bytes = match import {
+        // 绑定不一致的变体无法经 to_hybrid（它会拒绝），这里直接写段
+        Some(text) => {
+            let f = Jaso::parse(&bytes).expect("L1 变体未通过校验");
+            let mut b = Builder::from_file(&f, 0).expect("合格模块至少有一个镜像");
+            b.kind = jaso::ModuleKind::Hybrid;
+            b.extensions.push(jaso::build::ExtensionIn { name: jaso::EXT_JASPER_IMPORT.as_bytes().to_vec(), version: 1, critical: true, content: text.to_vec() });
+            b.finish().expect("Hybrid 变体自检失败")
+        }
+        None => bytes,
+    };
+    jaso::pack::sign(&bytes, signer).expect("签名失败")
+}
+
+/// 打包 L1 验收模块及其变体。
+fn l1_modules(root: &Path, out: &Path, arch: Arch, other: Arch, dev: &Signer) {
+    let dir = root.join("modules/l1demo");
+    let manifest = std::fs::read_to_string(dir.join("jaso.manifest")).expect("读取 L1 模块清单失败");
+    let import = std::fs::read(dir.join("jaso.import")).expect("读取 L1 模块绑定失败");
+    let packed = jaso::pack::build_module(root, "jaso-l1demo", &dir, &out.join("module-target"), arch).unwrap_or_else(|e| panic!("{}", e));
+    let write = |name: &str, bytes: &[u8]| std::fs::write(out.join(name), bytes).expect("写入失败");
+    let native = jaso::pack::sign(&packed, dev).expect("签名失败");
+    write("l1-native.jaso", &native);
+    let hybrid = manifest.replace("core.name = jaso-l1-native", "core.name = jaso-l1-hybrid") + "core.lifecycle = system\ncore.depends = jaso-l1-native@>=0.1,<0.2\n";
+    assert_ne!(hybrid, manifest + "core.lifecycle = system\ncore.depends = jaso-l1-native@>=0.1,<0.2\n", "清单中找不到模块名");
+    // 正式的 Hybrid 文件走工具链入口（to_hybrid 判定绑定与清单一致）
+    let plain = l1_variant(&native, &hybrid, None, |_| {}, dev);
+    write("l1-hybrid.jaso", &jaso::pack::sign(&jaso::pack::to_hybrid(&plain, &import).expect("绑定与清单不一致"), dev).expect("签名失败"));
+    let start_fails = |b: &mut Builder| {
+        let fail = b.exports.iter().find(|(n, _)| n == b"l1_fail").expect("l1_fail").1;
+        b.exports.iter_mut().find(|(n, _)| n == b"jaso_start").expect("jaso_start").1 = fail;
+    };
+    let startfail = std::fs::read_to_string(dir.join("jaso.manifest")).expect("读取 L1 模块清单失败").replace("core.name = jaso-l1-native", "core.name = jaso-l1-startfail");
+    write("l1-native-startfail.jaso", &l1_variant(&native, &startfail, None, start_fails, dev));
+    let imp = Some(&import[..]);
+    write("l1-hybrid-otherarch.jaso", &l1_variant(&native, &hybrid, imp, |b| b.platform.isa = Some(other), dev));
+    let more = hybrid.clone() + "core.requires = system.channel.send\n";
+    write("l1-hybrid-morecaps.jaso", &l1_variant(&native, &more, imp, |_| {}, dev));
+    write("l1-hybrid-range.jaso", &l1_variant(&native, &hybrid.replace(">=0.1,<0.2", ">=9.0"), imp, |_| {}, dev));
+    let bad_binding = |name: &str, from: &str, to: &str| {
+        let text = String::from_utf8(import.clone()).expect("绑定是 UTF-8");
+        let edited = text.replace(from, to);
+        assert_ne!(edited, text, "绑定中找不到 {}", from);
+        write(name, &l1_variant(&native, &hybrid, Some(edited.as_bytes()), |_| {}, dev));
+    };
+    bad_binding("l1-hybrid-bind-missing.jaso", "fn l1_fail(): Int32\n", "");
+    bad_binding("l1-hybrid-bind-extra.jaso", "fn l1_fail(): Int32\n", "fn l1_fail(): Int32\nfn l1_nope(): Int32\n");
+    bad_binding("l1-hybrid-bind-cap.jaso", "cap system.console.write", "cap system.channel.send");
+    bad_binding("l1-hybrid-bind-raw.jaso", "fn l1_add(a: UInt64, b: UInt64)", "fn l1_add(a: *u8, b: UInt64)");
+}
+
 fn main() {
     let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     println!("cargo:rerun-if-changed={}", dir.join("../../abi/abi-version.txt").display());
@@ -53,7 +117,7 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=--defsym=JSR_ABI_PATCH={}", abi.patch);
     let root = dir.join("../..");
     println!("cargo:rerun-if-changed={}", dir.join("link.ld").display());
-    for f in ["modules/demo/src/main.rs", "modules/demo/Cargo.toml", "modules/demo/build.rs", "modules/demo/jaso.manifest", "jaso/src"] {
+    for f in ["modules/demo/src/main.rs", "modules/demo/Cargo.toml", "modules/demo/build.rs", "modules/demo/jaso.manifest", "modules/l1demo/src/main.rs", "modules/l1demo/Cargo.toml", "modules/l1demo/build.rs", "modules/l1demo/jaso.manifest", "modules/l1demo/jaso.import", "jaso/src"] {
         println!("cargo:rerun-if-changed={}", root.join(f).display());
     }
     println!("cargo:rustc-link-arg-bins=-T{}", dir.join("link.ld").display());
@@ -101,4 +165,5 @@ fn main() {
     write("demo-otherpub.jaso", &rebuild(&img, arch, Stage::Runtime, &claims_other, None, d));
     write("demo-resigned.jaso", &rebuild(&img, arch, Stage::Runtime, &manifest, None, Some(&other_pub)));
     write("demo-claimed.jaso", &rebuild(&img, arch, Stage::Runtime, &claims_other, None, Some(&other_pub)));
+    l1_modules(&root, &out, arch, other, &dev);
 }

@@ -21,10 +21,14 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+pub mod binding;
 #[cfg(feature = "alloc")]
 pub mod build;
 pub mod code;
 pub mod conformance;
+pub mod kernel_gate;
+#[cfg(feature = "alloc")]
+pub mod lifecycle;
 pub mod manifest;
 #[cfg(feature = "alloc")]
 pub mod migrate;
@@ -1341,6 +1345,8 @@ pub const ABI_C_V1: &str = "c.v1";
 mod kani_proofs;
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, feature = "alloc"))]
+mod l1_tests;
 #[cfg(all(test, feature = "sign"))]
 mod trust_tests;
 #[cfg(all(test, feature = "pack"))]

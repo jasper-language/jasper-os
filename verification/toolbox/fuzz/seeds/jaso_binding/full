@@ -1,0 +1,6 @@
+# full
+package demo.lib
+type Buf
+cap log
+fn f_one(src: borrow Buf, tags: own List<Str?>?): own demo.lib.Buf?
+fn f_two(): Unit

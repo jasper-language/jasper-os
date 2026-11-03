@@ -1,0 +1,15 @@
+# jaso-l1demo —— L1 生命周期验收模块：导出 init / start / stop 与一个类型化函数；同一映像打包为 Native 与 Hybrid 两个文件。
+[package]
+name = "jaso-l1demo"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "jaso-l1demo"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+jaso-module = { path = "../support" }

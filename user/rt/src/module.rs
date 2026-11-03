@@ -1,5 +1,5 @@
-//! `.jaso` 模块装载器（用户态，Native-only）。
-//! User-space loader for native `.jaso` modules.
+//! `.jaso` 模块装载器的单模块机制（用户态，Native / Hybrid）；多模块的 L1 入口（依赖、`stop`、卸载答复）见 [`crate::loader`]。
+//! Per-module mechanism of the user-space `.jaso` loader; the L1 entry point is [`crate::loader`].
 //!
 //! # 装载步骤（任何一步失败都撤销此前的全部改动）
 //! 1. **校验文件**：[`jaso::Jaso::parse`]（format 1 结构 + SHA-256 完整性）
@@ -10,19 +10,20 @@
 //! 3. **检查适用性**：装载阶段为 `runtime`；按本程序的平台（[`jaso::HostPlatform::jasper_os_native`]：本指令集、
 //!    jasper-os、软浮点、`c.v1`）选出镜像，没有相符的镜像即拒绝（报告镜像 0 第一个不符的字段）；
 //!    宿主运行时版本（[`RUNTIME_VERSION`]）须在清单 `core.runtime` 区间内；清单 `core.depends` 中的每项依赖都必须已装入——
-//!    本装载器尚不维护已装入模块表，声明了依赖的模块因此一律以依赖未满足拒绝（绝不跳过检查）
-//! 4. **检查能力**：清单里的每项能力都必须在调用者给出的授权 [`Grant::capabilities`] 中——清单是请求，授权由调用者决定
+//!    模块表在 [`crate::loader::Loader`]；不经它直接装载时没有已装入模块，声明了依赖的模块一律以依赖未满足拒绝（绝不跳过检查）
+//! 4. **检查能力**：清单里的每项能力都必须在调用者给出的授权 [`Grant::capabilities`] 中——清单是请求，授权由调用者决定；
+//!    文件带 `jasper.import` 时再判定绑定（[`jaso::binding`]：与导出逐项一致，能力不超过清单）
 //! 5. **检查宿主接口**：清单要求 `jaso.host.v1` 时，调用者必须提供宿主接口表，模块必须导出 `jaso_init`
 //! 6. **判定放置**：进程内模块与宿主共享全部权限，只给可信模块——[`Grant::origin`] 为自动获取
 //!    （[`Origin::Acquired`]）的模块一律拒绝（不论策略如何），其余由 [`Grant::placement`] 判定；
 //!    要求隔离的模块经 [`crate::isolate`] 在独立进程中运行
 //! 7. **装入**：在模块区间取一个槽位，映射整个映像（可写），复制各段，应用重定位
 //! 8. **设权限**：映像先整体改为只读，再按段设为只读 / 读写 / 读执行（W^X，由内核强制）
-//! 9. **初始化**：调用 `jaso_init(宿主接口表)`，返回非 0 即视为失败
+//! 9. **初始化与启动**：调用 `jaso_init(宿主接口表)`，再调用 `jaso_start()`（若导出）；返回非 0 即装载失败，映像随之取消映射
 //!
 //! 第 1–5 步由 [`admit`] 完成（不改动任何状态），进程内装入与隔离运行共用。
 //!
-//! # 卸载与静默判定
+//! # 卸载与静默判定（下层机制，不属于 beta 的 L1 保证：L1 入口对卸载请求只答复推迟或拒绝）
 //! 经 [`Module::function`] 取得的 [`Function`] 在存续期间是模块的一次**活动**（计数）；活动期间
 //! 线程可能正在模块代码里执行（包括模块回调宿主、在宿主代码里阻塞的情形）。
 //! * [`Module::unload`]：没有活动 ⇒ 取消映射并归还槽位；仍有活动 ⇒ 拒绝（[`UnloadError::Busy`]），模块原样可用。
@@ -41,8 +42,9 @@ pub use jaso::trust::{
     PolicyError, Provenance, Publisher, TrustError, TrustMode, TrustPolicy, DEVELOPMENT_NAMESPACE, DEVELOPMENT_PUBLISHER,
 };
 pub use jaso::placement::{AlwaysIsolated, InProcessPublishers, Origin, Placement, PlacementPolicy, Standard};
-pub use jaso::{HostV1, JasoError, PlatformMismatch, HOST_TABLE_VERSION};
-use jaso::{HostPlatform, ImageRef, Jaso, Stage, FLAG_W, FLAG_X, HOST_V1, INIT_SYMBOL, PAGE};
+pub use jaso::binding::BindingError;
+pub use jaso::{ErrorCode, HostV1, JasoError, PlatformMismatch, HOST_TABLE_VERSION};
+use jaso::{Dependency, HostPlatform, ImageRef, Jaso, Stage, FLAG_W, FLAG_X, HOST_V1, INIT_SYMBOL, PAGE, START_SYMBOL, STOP_SYMBOL};
 
 use crate::error::Error;
 use crate::{mem, sys};
@@ -130,11 +132,35 @@ pub enum LoadError {
     InitFailed(i32),
     /// 模块槽位已用尽。
     NoSlot,
+    /// `jasper.import` 绑定不合法，或与清单不一致。
+    /// The `jasper.import` binding is malformed or disagrees with the manifest.
+    Binding(BindingError),
+    /// `jaso_start` 返回了非 0。
+    StartFailed(i32),
+    /// 模块表里已有同名模块（beta 没有卸载与热替换，名字不复用）。
+    AlreadyLoaded(String),
     /// 映射或改权限失败。
     Memory(Error),
     /// 放置判定要求隔离运行（例如自动获取的模块）：不得装入本进程。
     /// The module must run isolated; it was not mapped into this process.
     IsolationRequired,
+}
+
+impl LoadError {
+    /// SPEC §13 的稳定错误码；只属于本装载器、不由文件内容与一致性上下文决定的拒绝没有码（`None`）。
+    /// The stable error code, when the rejection has one.
+    pub fn code(&self) -> Option<ErrorCode> {
+        match self {
+            LoadError::Format(e) => Some(e.code()),
+            LoadError::Untrusted(e) => Some(e.code()),
+            LoadError::Platform(_) => Some(ErrorCode::PlatformMismatch),
+            LoadError::RuntimeVersion => Some(ErrorCode::DependencyRuntime),
+            LoadError::Dependency(_) => Some(ErrorCode::DependencyUnsatisfied),
+            LoadError::MissingCapability(_) => Some(ErrorCode::CapabilityDenied),
+            LoadError::Binding(e) => Some(e.code()),
+            _ => None,
+        }
+    }
 }
 
 /// 卸载被拒的原因。
@@ -255,6 +281,11 @@ pub struct Admitted<'b, 'p> {
 /// 第 1–5 步：校验文件、验证来源、检查适用性、能力与宿主接口。不改动任何状态，也不输出审计事件。
 /// Runs the stateless admission checks shared by in-process and isolated loading.
 pub fn admit<'b, 'p>(bytes: &'b [u8], grant: &Grant<'p>) -> Result<Admitted<'b, 'p>, LoadError> {
+    admit_with(bytes, grant, &|_| false)
+}
+
+/// [`admit`]，依赖按 `satisfied` 判定（模块表由调用者持有）。
+fn admit_with<'b, 'p>(bytes: &'b [u8], grant: &Grant<'p>, satisfied: &dyn Fn(&Dependency<'_>) -> bool) -> Result<Admitted<'b, 'p>, LoadError> {
     let file = Jaso::parse(bytes).map_err(LoadError::Format)?;
     let provenance = grant.trust.verify(&file).map_err(LoadError::Untrusted)?;
     if file.stage != Stage::Runtime {
@@ -265,12 +296,13 @@ pub fn admit<'b, 'p>(bytes: &'b [u8], grant: &Grant<'p>) -> Result<Admitted<'b, 
     if m.runtime.is_some_and(|r| !r.contains(RUNTIME_VERSION)) {
         return Err(LoadError::RuntimeVersion);
     }
-    if let Some(d) = m.depends().next() {
+    if let Some(d) = m.depends().find(|d| !satisfied(d)) {
         return Err(LoadError::Dependency(d.name.to_string()));
     }
     if let Some(cap) = m.requires().find(|c| !grant.capabilities.contains(c)) {
         return Err(LoadError::MissingCapability(cap.to_string()));
     }
+    jaso::binding::check_file(&file).map_err(LoadError::Binding)?;
     let init = match m.host {
         None => None,
         Some(h) if h != HOST_V1 => return Err(LoadError::UnsupportedHost(h.to_string())),
@@ -301,7 +333,21 @@ impl Module {
     }
 
     pub(crate) fn load_at(bytes: &[u8], grant: Grant<'_>, site: Site) -> Result<Module, LoadError> {
-        let Admitted { file, image: img, provenance, init } = admit(bytes, &grant)?;
+        Module::load_in(bytes, grant, site, &|_| false, &|_| false)
+    }
+
+    /// 装载；依赖按 `satisfied` 判定，`taken` 为真的名字拒绝（模块表由调用者持有）。
+    pub(crate) fn load_in(
+        bytes: &[u8],
+        grant: Grant<'_>,
+        site: Site,
+        satisfied: &dyn Fn(&Dependency<'_>) -> bool,
+        taken: &dyn Fn(&str) -> bool,
+    ) -> Result<Module, LoadError> {
+        let Admitted { file, image: img, provenance, init } = admit_with(bytes, &grant, satisfied)?;
+        if taken(file.manifest.name) {
+            return Err(LoadError::AlreadyLoaded(file.manifest.name.to_string()));
+        }
         if site == Site::Host && jaso::placement::decide(grant.placement, grant.origin, &provenance) != Placement::InProcess {
             return Err(LoadError::IsolationRequired);
         }
@@ -371,6 +417,14 @@ impl Module {
             let rc = f(host);
             if rc != 0 {
                 return Err(LoadError::InitFailed(rc));
+            }
+        }
+        if let Some(e) = img.export(START_SYMBOL) {
+            // SAFETY：e.value 是解析器证明落在可执行段内的导出；签名由 SPEC §12.2 固定为 extern "C" fn() -> i32。
+            let f: extern "C" fn() -> i32 = unsafe { core::mem::transmute((base + e.value as u64) as usize) };
+            let rc = f();
+            if rc != 0 {
+                return Err(LoadError::StartFailed(rc));
             }
         }
         Ok(module)
@@ -444,6 +498,19 @@ impl Module {
     fn unmap(&self) {
         let _ = chunked(self.base, self.pages, |va, n| mem::unmap(va, n));
         put_slot(self.slot);
+    }
+
+    /// 调用 `jaso_stop`（模块导出了才调用）；返回它的结果。
+    pub(crate) fn call_stop(&self) -> Option<i32> {
+        let a = self.symbol(STOP_SYMBOL)? as usize;
+        // SAFETY：a 是解析器证明落在可执行段内的导出；签名由 SPEC §12.2 固定为 extern "C" fn() -> i32。
+        let f: extern "C" fn() -> i32 = unsafe { core::mem::transmute(a) };
+        Some(f())
+    }
+
+    /// 全部导出（名字、地址）。
+    pub(crate) fn exports(&self) -> impl Iterator<Item = &(String, u64)> {
+        self.exports.iter()
     }
 
     /// 导出符号的地址（找不到为 `None`）。裸地址不受静默判定保护。

@@ -443,6 +443,18 @@ pub fn sign(bytes: &[u8], signer: &crate::build::Signer) -> Result<Vec<u8>, Jaso
     Builder::from_file(&f, 0).ok_or(JasoError::ImageIndex)?.finish_signed(signer)
 }
 
+/// 把一个 Native 文件转成带 `jasper.import` 绑定的 Hybrid 文件（未签名；需要时再 [`sign`]）；绑定与清单不一致时返回原因。
+/// Turns a Native file into an unsigned Hybrid file carrying `import`, after checking the binding against its manifest.
+pub fn to_hybrid(bytes: &[u8], import: &[u8]) -> Result<Vec<u8>, String> {
+    let f = crate::Jaso::parse(bytes).map_err(|e| alloc::format!("{:?}", e))?;
+    crate::binding::check(import, &f.manifest).map_err(|e| alloc::format!("{}: {:?}", e.code().name(), e))?;
+    let mut b = Builder::from_file(&f, 0).ok_or("文件没有镜像")?;
+    b.kind = crate::ModuleKind::Hybrid;
+    b.extensions.retain(|e| e.name != crate::EXT_JASPER_IMPORT.as_bytes());
+    b.extensions.push(crate::build::ExtensionIn { name: crate::EXT_JASPER_IMPORT.as_bytes().to_vec(), version: 1, critical: true, content: import.to_vec() });
+    b.finish().map_err(|e| alloc::format!("{:?}", e))
+}
+
 /// 构建工作区 `workspace` 中的模块 crate `package`（目录 `dir`，含 `jaso.manifest`），并打包为运行时装载的 `.jaso`。
 ///
 /// 用独立的 `target_dir` 调用 cargo（供其它 crate 的构建脚本使用时，避免与外层构建争用同一目录的锁）。

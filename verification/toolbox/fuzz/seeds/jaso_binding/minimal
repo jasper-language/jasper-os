@@ -1,0 +1,2 @@
+fn f_one(): Unit
+fn f_two(): Unit

@@ -25,7 +25,7 @@ for h in range_within_is_exact extension_layout_is_bounded platform_record_rules
 done
 grep -Eq '[1-9][0-9]* verified, 0 errors' "$out/verus.log"
 grep -Eq 'error|verified, [1-9]' "$out/verus-bad.log"
-grep -q 'test result: ok. 49 passed' "$out/host.log"
+grep -q 'test result: ok. 56 passed' "$out/host.log"
 grep -q 'test result: ok. 8 passed; 0 failed' "$out/proptest.log"
 grep -q 'test result: ok. 7 passed; 0 failed' "$out/miri.log"
 grep -q 'Done 2000000 runs' "$out/fuzz.log"

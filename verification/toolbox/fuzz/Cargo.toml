@@ -184,3 +184,10 @@ path = "fuzz_targets/jaso_conformance.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "jaso_binding"
+path = "fuzz_targets/jaso_binding.rs"
+test = false
+doc = false
+bench = false

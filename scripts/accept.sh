@@ -911,6 +911,25 @@ check_j5() {    # .jaso 发布者签名：签名段 + 受信发布者表，映�
   fi
 }
 
+check_jb_os2() {    # .jaso L1 全流程（SPEC §12.2）：运行时装入签名的 Native 与 Hybrid、依赖、服务发现；负向无残留；stop；卸载答复
+  if [ "${JASO_RC:-1}" -eq 0 ] \
+     && has 'text=jasodemo: l1 native name=jaso-l1-native publisher=jasper\.dev services=l1_add,l1_fail,l1_state service_key=adder add_ok=true state=1' \
+     && has 'text=jasodemo: l1 rejected tamper=format\.digest badsig=signature\.invalid bindsig=signature\.invalid platform=platform\.mismatch caps=capability\.denied deps=dependency\.unsatisfied range=dependency\.unsatisfied stage=Some\(WrongStage\(Boot\)\) no_residue=true' \
+     && has 'text=jasodemo: l1 binding rejected missing=true extra=true cap=true raw=true no_residue=true' \
+     && has 'text=jasodemo: l1 hybrid name=jaso-l1-hybrid kind=hybrid depends=jaso-l1-native binding_ok=true add_ok=true' \
+     && has 'text=jasodemo: l1 lifecycle start_failed=7 stop_blocked=jaso-l1-hybrid unload_plugin=Deferred unload_system=Refused still_serving=true stopped_serving=false stop_twice=AlreadyStopped stop_hooks=2 dep_on_stopped=dependency\.unsatisfied no_residue=true' \
+     && has 'text=jaso-l1: stopped' \
+     && has 'text=jasodemo: l1 kernel_gate running=Some\(RuntimeLoad\) boot_signed=ok stage=Some\(Stage\(Runtime\)\) dev_policy=Some\(DevelopmentPolicy\) unlisted=Some\(Untrusted\(UnknownPublisher\)\)' \
+     && ! grep -qE '^[^#]*module\.(load|install)' abi/system-ids.txt \
+     && ! grep -qE '^jaso[ =]' kernel/Cargo.toml \
+     && has 'text=jasodemo: ok checks=[0-9]+' \
+     && has 'case=jasodemo exit=Some\(0\) expect=0 reclaimed=true'; then
+    record JB-OS2 PASS ".jaso L1：运行时装入签名的 Native 与 Hybrid 并调用导出；依赖按运行中模块判定；清单发现服务；篡改（摘要/代码/绑定）、错误平台、缺能力、缺依赖、绑定不一致、启动失败均被拒且无残留；stop 被依赖者阻止、停止后不再服务；卸载请求只答复推迟/拒绝；内核没有运行期装载路径，内核态准入门在运行期一律拒绝、启动期只收白名单签名的 boot 文件"
+  else
+    record JB-OS2 FAIL "jaso 宿主测试 rc=${JASO_RC:-?}，或缺少 jasodemo l1 关键标记"
+  fi
+}
+
 check_j4() {    # 库作为 .jaso 模块：sha2 / crc / deflate / net 同时装入，已知答案与 J-2 一致；模块串联；全部卸载；回到基线
   if has 'text=modhost: loaded sha2=[0-9]+B crc=[0-9]+B deflate=[0-9]+B net=[0-9]+B' \
      && has 'text=modhost: module=jaso-sha2 vectors=5 ok=true' \
@@ -1190,7 +1209,7 @@ check_smp1a() { # 多处理器第一阶段（x86_64）：4 与 8 个处理器都
   port_rerun "$SERIAL_SMP4" "$QRC_SMP4" "SMP4/" 256 \
     check_m11 check_m12 check_m13 check_m14 check_m15 check_m21 check_m22 check_m23 check_m24 check_m31 check_m32 check_m33 \
     check_m34 check_m51pre check_abi check_m41 check_m42 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 \
-    check_j5 check_j6 check_sched1 check_sched2 check_sched3 check_t1 check_t2 check_fix
+    check_j5 check_jb_os2 check_j6 check_sched1 check_sched2 check_sched3 check_t1 check_t2 check_fix
   local n=$PORT_N bad=$PORT_BAD miss=""
   smp1a_verdict "$SERIAL_SMP4" "$QRC_SMP4" "x86_64×4" 4; miss="$miss$SMP1A_MISS"
   smp1a_verdict "$SERIAL_SMP8" "$QRC_SMP8" "x86_64×8" 8; miss="$miss$SMP1A_MISS"
@@ -1241,7 +1260,7 @@ check_smp1b_a64() { # 多处理器第二阶段（AArch64）：设备树发现 4 
   port_rerun "$SERIAL_A64_SMP4" "$QRC_A64_SMP4" "A64SMP4/" 128 \
     check_m11 check_m12 check_m13 check_m14 check_m15 check_m21 check_m22 check_m23 check_m24 check_m31 check_m32 check_m33 check_m34 \
     check_m42 check_fix check_sched2 check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 \
-    check_j5 check_j6 check_pol2 check_sched1 check_sched3 check_t1 check_t2
+    check_j5 check_jb_os2 check_j6 check_pol2 check_sched1 check_sched3 check_t1 check_t2
   local n=$PORT_N bad=$PORT_BAD miss="" f="$SERIAL_A64_SMP4" c
   grep -qE '^\[JSR-SMP\] start present=4 online=4 failed=0 source=fdt\.cpus ' "$f" || miss="$miss 启动"
   for c in 0 1 2 3; do grep -qE "^\[JSR-SMP\] cpu index=$c hw=$c state=online" "$f" || miss="$miss cpu$c"; done
@@ -1278,7 +1297,7 @@ rv_smp4_verdict() {
   port_rerun "$rvlog" "$rvqrc" "$rvprefix" 128 \
     check_m11 check_m12 check_m13 check_m14 check_m15 check_m21 check_m22 check_m23 check_m24 check_m31 check_m32 check_m33 check_m34 \
     check_m42 check_fix check_sched2 check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 \
-    check_j5 check_j6 check_pol2 check_sched1 check_sched3 check_t1 check_t2
+    check_j5 check_jb_os2 check_j6 check_pol2 check_sched1 check_sched3 check_t1 check_t2
   grep -qaE '^\[JSR-SMP\] start present=4 online=4 failed=0 source=fdt\.cpus ' "$rvlog" || RV_SMP_MISS="$RV_SMP_MISS 启动"
   rvhws=$(grep -aoE '^\[JSR-SMP\] cpu index=[0-3] hw=[0-3] state=online' "$rvlog" | grep -oE 'hw=[0-3]' | sort -u | wc -l)
   [ "$rvhws" -eq 4 ] || RV_SMP_MISS="$RV_SMP_MISS hart号($rvhws)"
@@ -1628,7 +1647,7 @@ check_isa1b() { # AArch64 移植第二阶段：内嵌用户程序（独立 Rust 
     record ISA1b FAIL "AArch64 构建 rc=$A64_BUILD_RC 或缺少 qemu-system-aarch64 / 串口日志（见 build-aarch64.log）"
     return
   fi
-  a64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 check_j6 \
+  a64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 check_jb_os2 check_j6 \
             check_pol2 check_sched1 check_sched3 check_t1 check_t2
   local progs
   progs=$(grep -cE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_A64" || true)
@@ -1666,7 +1685,7 @@ check_isa2b() { # RISC-V64 移植第二阶段：内嵌用户程序（独立 Rust
     record ISA2b FAIL "RISC-V64 构建 rc=$RV64_BUILD_RC 或缺少 qemu-system-riscv64 / 串口日志（见 build-riscv64.log）"
     return
   fi
-  rv64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 check_j6 \
+  rv64_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 check_jb_os2 check_j6 \
              check_pol2 check_sched1 check_sched3 check_t1 check_t2
   local progs
   progs=$(grep -cE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_RV64" || true)
@@ -1724,7 +1743,7 @@ check_isa3b() { # RISC-V32 移植第二阶段：内嵌用户程序（ELF32 装�
     record ISA3b FAIL "RISC-V32 构建 rc=$RV32_BUILD_RC 或缺少 qemu-system-riscv32 / 串口日志（见 build-riscv32.log）"
     return
   fi
-  rv32_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 check_j6 \
+  rv32_rerun check_m51pre check_m41 check_m43 check_m44 check_m51 check_s1 check_j1 check_j2 check_j3 check_j4 check_j5 check_jb_os2 check_j6 \
              check_pol2 check_sched1 check_sched3 check_t1 check_t2
   local progs
   progs=$(grep -caE '^\[JSR-PROC\] event=system.process.created ' "$SERIAL_RV32" || true)
@@ -2431,11 +2450,11 @@ if [ "$SPOT" -eq 1 ]; then
     if declare -F "check_$c" >/dev/null; then "check_$c"; else record "$c" FAIL "定点验收：没有名为 check_$c 的检查"; fi
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
-  check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+  check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
   check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
-  check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+  check_m10; check_isa; check_m11; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
   check_pol1; check_pol2; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
 fi
 

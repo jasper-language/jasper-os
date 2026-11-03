@@ -32,6 +32,7 @@ pub mod heap;
 pub mod io;
 pub mod isolate;
 pub mod mem;
+pub mod loader;
 pub mod module;
 pub mod process;
 pub mod ring;

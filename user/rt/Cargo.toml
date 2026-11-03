@@ -14,7 +14,7 @@ bench = false
 
 [dependencies]
 kernel-core = { path = "../../kernel-core" }
-jaso = { path = "../../jaso" }
+jaso = { path = "../../jaso", features = ["alloc"] }
 
 [build-dependencies]
 kernel-core = { path = "../../kernel-core" }

@@ -320,6 +320,21 @@ pub fn all(dev: &Signer) -> Vec<Vector> {
     add("load-capability-denied", remanifest(&native, &replaced("core.requires = log, alloc", "core.requires = log, net"), dev), "capability.denied");
     add("load-dependency-unsatisfied", remanifest(&native, &[MANIFEST.as_bytes(), b"core.depends = jaso-base@>=2.0"].concat(), dev), "dependency.unsatisfied");
     add("load-dependency-missing", remanifest(&native, &[MANIFEST.as_bytes(), b"core.depends = jaso-absent"].concat(), dev), "dependency.unsatisfied");
+    // —— 绑定（§12.2 第 6a 步、§9.4）——
+    let hybrid_with = |content: &[u8]| {
+        let mut h = native_builder(Arch::X86_64);
+        h.kind = ModuleKind::Hybrid;
+        h.extensions = vec![ExtensionIn { name: EXT_JASPER_IMPORT.as_bytes().to_vec(), version: 1, critical: true, content: content.to_vec() }];
+        h.finish_signed(dev).expect("hybrid")
+    };
+    add("ok-hybrid-binding", hybrid_with(b"# full syntax\npackage demo.lib\ntype Buf\ncap log\nfn f_one(src: borrow Buf, tags: own List<Str?>?): own demo.lib.Buf?\n"), "ok");
+    add("load-binding-syntax", hybrid_with(b"fn f_one(p: *u8): Unit"), "extension.binding");
+    add("load-binding-missing", hybrid_with(b"package demo.lib"), "extension.binding");
+    add("load-binding-extra", hybrid_with(b"fn f_one(): Unit\nfn f_two(): Unit"), "extension.binding");
+    add("load-binding-lifecycle", hybrid_with(b"fn f_one(): Unit\nfn jaso_init(): Unit"), "extension.binding");
+    add("load-binding-duplicate", hybrid_with(b"fn f_one(): Unit\nfn f_one(x: Int): Unit"), "extension.binding");
+    add("load-binding-capability", hybrid_with(b"fn f_one(): Unit\ncap net"), "extension.binding");
+    add("load-binding-utf8", hybrid_with(b"fn f_one(): Unit\n# \xFF"), "extension.binding");
     add("load-dependency-runtime", remanifest(&native, &[MANIFEST.as_bytes(), b"core.runtime = >=0.2"].concat(), dev), "dependency.runtime");
 
     // —— 顺序：两处违例，报告先查到的那处（§12.1）——

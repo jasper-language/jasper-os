@@ -11,6 +11,9 @@
 //! 6. 来源（发布者签名）：签名模块按受信发布者装入；未签名、篡改后重算完整性摘要（签名失效）、换发布者、
 //!    他人重签、他人重签并改称自己、发布者不在表中——全部在映射之前被拒且不留映射；
 //!    开发模式放行未签名模块并留下审计事件，但坏签名照样被拒
+//! 7. L1 全流程（[`jasper_rt::loader`]）：运行时装入签名的 Native 与 Hybrid 模块并调用导出、依赖、服务发现；
+//!    篡改、错误平台、缺能力、缺依赖、绑定不一致、启动失败都被拒且无残留；`stop` 与卸载答复（推迟 / 拒绝）；
+//!    内核态准入门：运行期请求一律拒绝，启动期只接受白名单签名的 boot 阶段文件
 #![no_std]
 #![no_main]
 
@@ -24,6 +27,7 @@ use jasper_rt::module::{
     unsigned_admitted, Grant, HostV1, LoadError, Module, Origin, Publisher, Standard, TrustError, TrustMode, TrustPolicy, DEVELOPMENT_NAMESPACE,
     DEVELOPMENT_PUBLISHER,
 };
+use jasper_rt::loader::{Loader, Phase, StopError, UnloadReply};
 use jasper_rt::{entry, io, mem, println, Error};
 
 entry!(main);
@@ -41,6 +45,17 @@ static DEMO_OTHERPUB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-oth
 static DEMO_RESIGNED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-resigned.jaso"));
 static DEMO_CLAIMED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-claimed.jaso"));
 
+static L1_NATIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/l1-native.jaso"));
+static L1_HYBRID: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/l1-hybrid.jaso"));
+static L1_STARTFAIL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/l1-native-startfail.jaso"));
+static L1_OTHERARCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/l1-hybrid-otherarch.jaso"));
+static L1_MORECAPS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/l1-hybrid-morecaps.jaso"));
+static L1_RANGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/l1-hybrid-range.jaso"));
+static L1_BIND_MISSING: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/l1-hybrid-bind-missing.jaso"));
+static L1_BIND_EXTRA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/l1-hybrid-bind-extra.jaso"));
+static L1_BIND_CAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/l1-hybrid-bind-cap.jaso"));
+static L1_BIND_RAW: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/l1-hybrid-bind-raw.jaso"));
+
 /// 另一个受信发布者（验收用）：命名空间 `other-`，管不到 `jaso-demo`。
 const OTHER_PUBLISHER: Publisher<'static> =
     Publisher { name: "jasper.other", namespace: "other-", key: *include_bytes!(concat!(env!("OUT_DIR"), "/trust-other.key")) };
@@ -54,11 +69,16 @@ static OTHER_ONLY: [Publisher<'static>; 1] = [OTHER_PUBLISHER];
 
 static ALLOCS: AtomicU32 = AtomicU32::new(0);
 static FREES: AtomicU32 = AtomicU32::new(0);
+/// 模块经宿主接口表报告 `jaso_stop` 被调用的次数。
+static STOP_HOOKS: AtomicU32 = AtomicU32::new(0);
 
 extern "C" fn host_log(ptr: *const u8, len: usize) {
     // SAFETY：模块按约定传入一段有效的 UTF-8 文本。
     let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
     if let Ok(s) = core::str::from_utf8(bytes) {
+        if s == "jaso-l1: stopped" {
+            STOP_HOOKS.fetch_add(1, Ordering::Relaxed);
+        }
         let _ = io::write_str(s);
     }
 }
@@ -225,7 +245,155 @@ fn run(s: &mut Steps) -> Result<(), u32> {
     );
     println!("jasodemo: format1 rejected runtime={:?} depends={:?} oldabi={:?}", r_runtime, r_depends, r_oldabi);
     drop(again);
-    signatures(s, t, base)
+    signatures(s, t, base)?;
+    l1(s, t)
+}
+
+/// 被拒装载的稳定错误码。
+fn code(r: &Result<jasper_rt::loader::ModuleId, LoadError>) -> &'static str {
+    match r {
+        Ok(_) => "accepted",
+        Err(e) => e.code().map_or("none", |c| c.name()),
+    }
+}
+
+/// 把 `bytes` 中 `part` 这段内的一个字节翻转并重算完整性摘要：文件结构与完整性都合格，只有签名失效。
+fn flipped(bytes: &[u8], part: &[u8]) -> Vec<u8> {
+    let at = part.as_ptr() as usize - bytes.as_ptr() as usize + part.len() / 2;
+    let mut t = bytes.to_vec();
+    t[at] ^= 0x01;
+    let d = jaso::digest_of(&t);
+    t[jaso::DIGEST_OFFSET..jaso::DIGEST_OFFSET + 32].copy_from_slice(&d);
+    t
+}
+
+type AddFn = extern "C" fn(u64, u64) -> u64;
+type StateFn = extern "C" fn() -> u32;
+
+/// 7. L1 全流程。
+fn l1(s: &mut Steps, t: &TrustPolicy<'_>) -> Result<(), u32> {
+    let mut l = Loader::new();
+    // 运行时装入签名的 Native 模块：init → start，读清单发现服务，调用导出
+    let native = l.load(L1_NATIVE, grant(t)).map_err(|_| 100 + s.0)?;
+    let v = l.get(native).ok_or(100 + s.0)?;
+    let services: Vec<&str> = v.services().collect();
+    s.check(services == ["l1_add", "l1_fail", "l1_state"] && v.manifest_value("demo.service") == Some("adder"))?;
+    // SAFETY：签名与模块中的 l1_add 一致。
+    let add = unsafe { v.function::<AddFn>("l1_add") }.map(|f| (f.get())(40, 2));
+    // SAFETY：签名与模块中的 l1_state 一致。
+    let state = unsafe { v.function::<StateFn>("l1_state") }.map(|f| (f.get())());
+    s.check(add == Some(42) && state == Some(1) && v.publisher() == Some(DEVELOPMENT_PUBLISHER))?;
+    println!(
+        "jasodemo: l1 native name={} publisher={} services={} service_key=adder add_ok=true state=1",
+        v.name(),
+        DEVELOPMENT_PUBLISHER,
+        services.join(",")
+    );
+    let native_base = v.base();
+    // 下一个空闲槽位：之后每批拒绝都检查它没有映射
+    let free = Module::load(DEMO, grant(t)).map_err(|_| 100 + s.0)?.base();
+    let no_residue = |l: &Loader, n: usize| mem::unmap(free, 1) == Err(Error::MEMORY_INVALID_ADDRESS) && l.len() == n;
+
+    // 拒绝：篡改（摘要 / 代码 / 绑定字节）、错误平台、缺能力、缺依赖（版本不符）、阶段；全部不留映射、不进模块表
+    let mut tampered = L1_HYBRID.to_vec();
+    let mid = tampered.len() / 2;
+    tampered[mid] ^= 0x01;
+    let r_tamper = l.load(&tampered, grant(t));
+    let f = jaso::Jaso::parse(L1_HYBRID).map_err(|_| 100 + s.0)?;
+    let code_seg = f.image(0).and_then(|i| i.segments().find(|seg| seg.flags & jaso::FLAG_X != 0)).ok_or(100 + s.0)?;
+    let r_badsig = l.load(&flipped(L1_HYBRID, code_seg.data), grant(t));
+    let import = f.extension(jaso::EXT_JASPER_IMPORT, 1).ok_or(100 + s.0)?;
+    let r_bindsig = l.load(&flipped(L1_HYBRID, import.content), grant(t));
+    let r_platform = l.load(L1_OTHERARCH, grant(t));
+    let r_caps = l.load(L1_MORECAPS, grant(t));
+    let r_range = l.load(L1_RANGE, grant(t));
+    let r_stage = l.load(DEMO_BOOT, grant(t)).err();
+    s.check(code(&r_tamper) == "format.digest" && code(&r_badsig) == "signature.invalid" && code(&r_bindsig) == "signature.invalid")?;
+    s.check(code(&r_platform) == "platform.mismatch" && code(&r_caps) == "capability.denied" && code(&r_range) == "dependency.unsatisfied")?;
+    s.check(matches!(r_stage, Some(LoadError::WrongStage(_))) && no_residue(&l, 1))?;
+    // 依赖缺失：另开一张空表，同一个 Hybrid 文件因依赖未装入被拒
+    let mut empty = Loader::new();
+    let r_deps = empty.load(L1_HYBRID, grant(t));
+    s.check(matches!(&r_deps, Err(LoadError::Dependency(d)) if d == "jaso-l1-native") && no_residue(&empty, 0))?;
+    drop(empty);
+    println!(
+        "jasodemo: l1 rejected tamper={} badsig={} bindsig={} platform={} caps={} deps={} range={} stage={:?} no_residue=true",
+        code(&r_tamper),
+        code(&r_badsig),
+        code(&r_bindsig),
+        code(&r_platform),
+        code(&r_caps),
+        code(&r_deps),
+        code(&r_range),
+        r_stage
+    );
+
+    // 绑定与清单不一致：语法、缺函数、多函数、能力超出清单
+    let bind = |l: &mut Loader, b: &[u8]| matches!(l.load(b, grant(t)), Err(LoadError::Binding(_)));
+    let (b_missing, b_extra, b_cap, b_raw) = (bind(&mut l, L1_BIND_MISSING), bind(&mut l, L1_BIND_EXTRA), bind(&mut l, L1_BIND_CAP), bind(&mut l, L1_BIND_RAW));
+    s.check(b_missing && b_extra && b_cap && b_raw && no_residue(&l, 1))?;
+    println!("jasodemo: l1 binding rejected missing={} extra={} cap={} raw={} no_residue=true", b_missing, b_extra, b_cap, b_raw);
+
+    // 启动失败：init 成功、start 返回非 0 ⇒ 装载失败，映像取消映射，不进模块表
+    let r_start = l.load(L1_STARTFAIL, grant(t)).err();
+    s.check(r_start == Some(LoadError::StartFailed(7)) && no_residue(&l, 1))?;
+
+    // Hybrid：依赖满足后装入并调用
+    let hybrid = l.load(L1_HYBRID, grant(t)).map_err(|_| 100 + s.0)?;
+    let h = l.get(hybrid).ok_or(100 + s.0)?;
+    // SAFETY：签名与模块中的 l1_add 一致。
+    let hadd = unsafe { h.function::<AddFn>("l1_add") }.map(|f| (f.get())(1, 2));
+    s.check(hadd == Some(3) && h.name() == "jaso-l1-hybrid" && h.base() != native_base)?;
+    println!("jasodemo: l1 hybrid name={} kind=hybrid depends=jaso-l1-native binding_ok=true add_ok=true", h.name());
+    // 同名不重复装入（beta 没有热替换）
+    s.check(matches!(l.load(L1_NATIVE, grant(t)), Err(LoadError::AlreadyLoaded(_))))?;
+
+    // stop 与卸载答复
+    let hooks0 = STOP_HOOKS.load(Ordering::Relaxed);
+    let blocked = l.stop(native);
+    s.check(matches!(&blocked, Err(StopError::Dependent(d)) if d == "jaso-l1-hybrid") && STOP_HOOKS.load(Ordering::Relaxed) == hooks0)?;
+    let (u_plugin, u_system) = (l.unload(native), l.unload(hybrid));
+    s.check(u_plugin == Some(UnloadReply::Deferred) && u_system == Some(UnloadReply::Refused))?;
+    // 卸载请求之后两个模块都还在服务
+    // SAFETY：签名与模块中的 l1_add 一致。
+    let still = unsafe { l.get(native).ok_or(100 + s.0)?.function::<AddFn>("l1_add") }.map(|f| (f.get())(5, 6));
+    s.check(still == Some(11))?;
+    s.check(l.stop(hybrid) == Ok(()) && l.get(hybrid).is_some_and(|h| h.phase() == Phase::Stopped))?;
+    // 已停止：不再服务，映像仍在（beta 不卸载），再停一次被拒且不再调用 jaso_stop
+    // SAFETY：签名与模块中的 l1_add 一致。
+    s.check(unsafe { l.get(hybrid).ok_or(100 + s.0)?.function::<AddFn>("l1_add") }.is_none())?;
+    s.check(l.stop(hybrid) == Err(StopError::AlreadyStopped))?;
+    s.check(l.stop(native) == Ok(()) && STOP_HOOKS.load(Ordering::Relaxed) == hooks0 + 2)?;
+    s.check(l.unload(native) == Some(UnloadReply::Deferred) && mem::protect(native_base, 1, 0).is_ok())?; // 映像仍映射
+    // 依赖已停止的模块不算满足
+    let r_after = l.load(L1_HYBRID, grant(t));
+    let code_after = code(&r_after);
+    s.check(code_after == "dependency.unsatisfied")?;
+    println!(
+        "jasodemo: l1 lifecycle start_failed=7 stop_blocked=jaso-l1-hybrid unload_plugin={:?} unload_system={:?} still_serving=true stopped_serving=false stop_twice=AlreadyStopped stop_hooks=2 dep_on_stopped={} no_residue=true",
+        u_plugin.ok_or(100 + s.0)?,
+        u_system.ok_or(100 + s.0)?,
+        code_after
+    );
+    kernel_gate(s, t)
+}
+
+/// 内核态准入门（内核自身没有运行期装载路径，见 `jaso::kernel_gate`）。
+fn kernel_gate(s: &mut Steps, t: &TrustPolicy<'_>) -> Result<(), u32> {
+    use jaso::kernel_gate::{admit_kernel, KernelLoadError, KernelPhase};
+    let running = admit_kernel(DEMO_BOOT, t, KernelPhase::Running).err();
+    s.check(running == Some(KernelLoadError::RuntimeLoad))?;
+    s.check(admit_kernel(DEMO_BOOT, t, KernelPhase::Boot).is_ok())?;
+    let stage = admit_kernel(DEMO, t, KernelPhase::Boot).err();
+    s.check(matches!(stage, Some(KernelLoadError::Stage(_))))?;
+    let dev = TrustPolicy::new(&PUBLISHERS, TrustMode::Development).map_err(|_| 100 + s.0)?;
+    let dev_policy = admit_kernel(DEMO_BOOT, &dev, KernelPhase::Boot).err();
+    s.check(dev_policy == Some(KernelLoadError::DevelopmentPolicy))?;
+    let other_only = TrustPolicy::new(&OTHER_ONLY, TrustMode::Enforce).map_err(|_| 100 + s.0)?;
+    let unlisted = admit_kernel(DEMO_BOOT, &other_only, KernelPhase::Boot).err();
+    s.check(matches!(unlisted, Some(KernelLoadError::Untrusted(_))))?;
+    println!("jasodemo: l1 kernel_gate running={:?} boot_signed=ok stage={:?} dev_policy={:?} unlisted={:?}", running, stage, dev_policy, unlisted);
+    Ok(())
 }
 
 /// 篡改代码段的一个字节并重算完整性摘要：文件结构与完整性都合格，只有签名失效。

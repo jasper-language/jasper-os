@@ -144,6 +144,8 @@ codes! {
     ExtensionDuplicate = 1103, "extension.duplicate", false;
     /// Hybrid 文件没有恰好一个 `jasper.import`。
     ExtensionRequired = 1104, "extension.required", false;
+    /// *load*：`jasper.import` 语法不合法，或与 `core.exports` / `core.requires` 不一致。
+    ExtensionBinding = 1105, "extension.binding", true;
 }
 
 impl ErrorCode {

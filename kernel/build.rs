@@ -164,8 +164,8 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
         }
     }
     // 用户程序依赖的库（运行时、`.jaso` 格式）与内嵌的模块：任何一个源文件变化都要重建
-    for lib in ["user/rt", "jaso", "modules/demo", "modules/support", "modules/sha2", "modules/crc", "modules/deflate", "modules/net", "modules/probe", "user/modbox"] {
-        for f in ["Cargo.toml", "build.rs", "jaso.manifest"] {
+    for lib in ["user/rt", "jaso", "modules/demo", "modules/support", "modules/sha2", "modules/crc", "modules/deflate", "modules/net", "modules/probe", "modules/l1demo", "user/modbox"] {
+        for f in ["Cargo.toml", "build.rs", "jaso.manifest", "jaso.import"] {
             println!("cargo:rerun-if-changed={}", root.join(lib).join(f).display());
         }
         if let Ok(dir) = std::fs::read_dir(root.join(lib).join("src")) {

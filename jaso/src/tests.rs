@@ -623,14 +623,14 @@ fn platform_mismatch_field_order() {
 
 #[test]
 fn error_code_table() {
-    assert_eq!(ErrorCode::ALL.len(), 51);
+    assert_eq!(ErrorCode::ALL.len(), 52);
     for (i, c) in ErrorCode::ALL.iter().enumerate() {
         assert_eq!(ErrorCode::from_name(c.name()), Some(*c));
         assert_eq!(ErrorCode::from_number(c.number()), Some(*c));
         assert!(ErrorCode::ALL[..i].iter().all(|p| p.number() < c.number() && p.name() != c.name()));
         assert!(c.name().contains('.'));
     }
-    assert_eq!(ErrorCode::ALL.iter().filter(|c| c.is_load()).count(), 9);
+    assert_eq!(ErrorCode::ALL.iter().filter(|c| c.is_load()).count(), 10);
     assert_eq!(JasoError::WriteExecute.code().name(), "image.wx");
     assert_eq!(JasoError::Manifest(ManifestError::Limit(3)).code().number(), 407);
     assert_eq!(crate::trust::TrustError::UnknownPublisher.code(), ErrorCode::TrustPublisher);

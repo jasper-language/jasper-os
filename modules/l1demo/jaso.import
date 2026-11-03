@@ -1,0 +1,6 @@
+# jasper.import 版本 1：jaso-l1-hybrid 的类型化导出声明（SPEC §9.4）
+package demo.l1
+cap system.console.write
+fn l1_add(a: UInt64, b: UInt64): UInt64
+fn l1_fail(): Int32
+fn l1_state(): UInt32

@@ -1,5 +1,5 @@
-//! 一致性判定（SPEC §14）：在固定的**一致性上下文**里对一个文件做 L1 装载的第 1–6 步，给出 `ok` 或一个稳定错误码。
-//! Conformance check: L1 load steps 1–6 (SPEC §12.2) in the fixed conformance context of SPEC §14.
+//! 一致性判定（SPEC §14）：在固定的**一致性上下文**里对一个文件做 L1 装载的第 1–6a 步，给出 `ok` 或一个稳定错误码。
+//! Conformance check: L1 load steps 1–6a (SPEC §12.2) in the fixed conformance context of SPEC §14.
 //!
 //! 每个实现都用同一上下文跑 `jaso/vectors/` 的全部向量，结果必须与 `<名>.expect` 一致。
 //! 这里不映射、不链接、不调用任何代码（第 7 步以后不属于一致性判定）。
@@ -27,7 +27,7 @@ pub const LOADED: [(&str, (u32, u32, u32)); 1] = [("jaso-base", (1, 2, 0))];
 pub const GRANTED: [&str; 2] = ["log", "alloc"];
 
 /// 按一致性上下文判定 `bytes`：结构读取 → 信任（强制模式，唯一受信发布者 `jasper.dev`、命名空间 `jaso-`、公钥 `dev_key`）
-/// → 平台 → 运行时版本 → 依赖 → 能力，第一处失败的码即结果。
+/// → 平台 → 运行时版本 → 依赖 → 能力 → 绑定，第一处失败的码即结果。
 ///
 /// `dev_key` 是与向量一同公开的开发用公钥（`jaso/vectors/jasper.dev.pub`）；不是合法曲线点时视为配置错误，按 `trust.key` 处理
 /// ——这样任何输入都不会 panic，也不会因为错误配置而放行。
@@ -50,7 +50,7 @@ pub fn check(bytes: &[u8], dev_key: [u8; 32]) -> Result<(), ErrorCode> {
     if f.manifest.requires().any(|c| !GRANTED.contains(&c)) {
         return Err(ErrorCode::CapabilityDenied);
     }
-    Ok(())
+    crate::binding::check_file(&f).map_err(|e| e.code())
 }
 
 /// `.expect` 文件的一行：`ok` 或码名。

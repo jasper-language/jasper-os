@@ -1,0 +1,11 @@
+# jaso-l1-native 的清单；Hybrid 变体由装载器验收程序的构建脚本改写名字、依赖与生命周期
+core.name = jaso-l1-native
+core.version = 0.1.0
+core.abi = c.v1
+core.stage = runtime
+core.publisher = jasper.dev
+core.host = jaso.host.v1
+core.requires = system.console.write
+core.description = L1 生命周期验收模块
+core.exports = jaso_init, jaso_start, jaso_stop, l1_add, l1_fail, l1_state
+demo.service = adder

@@ -7,6 +7,7 @@
 //!                                                            拒绝时输出稳定错误码（如 `rejected: image.wx (605) WriteExecute`）
 //! jasopack migrate <format 0 文件> <输出>                       把 format 0 文件一次性迁移为 format 1（未签名；需要时再 sign）
 //! jasopack sign <.jaso> <私钥种子文件> <输出>                  以发布者私钥（32 字节种子文件）签名（替换已有签名）
+//! jasopack hybrid <.jaso> <jasper.import 文本> <输出>         把 Native 文件转成带绑定的 Hybrid 文件（未签名；绑定与清单须一致，SPEC §9.4）
 //! jasopack pubkey <私钥种子文件>                              输出该私钥对应的公钥（十六进制，写进受信发布者表）
 //! jasopack vectors <目录>                                    重建一致性向量（SPEC §14）：写出 `<名>.jaso` / `<名>.expect` 与开发用公钥，
 //!                                                            逐个复核判定结果，删除目录中多余的旧向量
@@ -18,11 +19,34 @@ use std::process::ExitCode;
 
 use jaso::{Arch, Jaso, Stage, FLAG_R, FLAG_W, FLAG_X};
 
+fn hybrid(input: &str, import: &str, out: &str) -> ExitCode {
+    let (bytes, text) = match (std::fs::read(input), std::fs::read(import)) {
+        (Ok(b), Ok(t)) => (b, t),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("读取输入失败：{}", e);
+            return ExitCode::from(2);
+        }
+    };
+    match jaso::pack::to_hybrid(&bytes, &text) {
+        Ok(h) => match std::fs::write(out, h) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("写入 {} 失败：{}", out, e);
+                ExitCode::from(2)
+            }
+        },
+        Err(e) => {
+            println!("rejected: {}", e);
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn usage() -> ExitCode {
     eprintln!(
         "用法：jasopack pack <ELF> <清单文件> <指令集> <装载阶段> <输出>\n      jasopack inspect <.jaso>\n      \
          jasopack migrate <format 0 文件> <输出>\n      \
-         jasopack sign <.jaso> <私钥种子文件> <输出>\n      jasopack pubkey <私钥种子文件>\n      \
+         jasopack sign <.jaso> <私钥种子文件> <输出>\n      jasopack hybrid <.jaso> <jasper.import 文本> <输出>\n      jasopack pubkey <私钥种子文件>\n      \
          jasopack vectors <目录>\n      jasopack conform <.jaso>"
     );
     ExitCode::from(2)
@@ -271,6 +295,7 @@ fn main() -> ExitCode {
         ["inspect", p] => inspect(p),
         ["pack", elf, m, arch, stage, out] => pack(elf, m, arch, stage, out),
         ["sign", input, seed, out] => sign(input, seed, out),
+        ["hybrid", input, import, out] => hybrid(input, import, out),
         ["pubkey", seed] => pubkey(seed),
         ["migrate", input, out] => migrate(input, out),
         ["vectors", dir] => vectors(dir),
