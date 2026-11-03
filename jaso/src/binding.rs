@@ -242,14 +242,15 @@ pub fn check_file(f: &Jaso<'_>) -> Result<(), BindingError> {
 mod kani_proofs {
     use super::*;
 
-    /// 任意 4 字节的签名文本：不 panic；接受时必须以 `(` 开始。
+    /// 任意 4 字节的名字文本：不 panic，游标不越界；接受时首字节是字母或下划线。
     #[kani::proof]
     #[kani::unwind(6)]
-    fn signature_never_panics() {
+    fn dotted_cursor_stays_in_bounds() {
         let b: [u8; 4] = kani::any();
-        if signature_ok(&b) {
-            assert!(b[0] == b'(');
-        }
+        let mut c = Cursor { b: &b, i: 0 };
+        let ok = c.dotted();
+        assert!(c.i <= b.len());
+        assert!(!ok || b[0].is_ascii_alphabetic() || b[0] == b'_');
     }
 
     /// 任意 4 字节的类型文本、深度已到上限：不 panic，游标不越界；超过上限直接拒绝。
