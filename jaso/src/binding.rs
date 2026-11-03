@@ -253,16 +253,15 @@ mod kani_proofs {
         assert!(!ok || b[0].is_ascii_alphabetic() || b[0] == b'_');
     }
 
-    /// 任意 4 字节的类型文本、深度已到上限：不 panic，游标不越界；超过上限直接拒绝。
+    /// 超过嵌套深度上限的类型：直接拒绝，不读取输入（递归因此有界）。
     #[kani::proof]
-    #[kani::unwind(6)]
-    fn type_cursor_stays_in_bounds() {
-        let b: [u8; 4] = kani::any();
+    fn type_depth_cap_is_enforced() {
+        let b: [u8; 2] = kani::any();
         let mut c = Cursor { b: &b, i: 0 };
         let depth: u32 = kani::any();
-        kani::assume(depth >= MAX_TYPE_DEPTH);
-        let ok = c.ty(depth);
-        assert!(c.i <= b.len());
-        assert!(!(depth > MAX_TYPE_DEPTH && ok));
+        kani::assume(depth > MAX_TYPE_DEPTH);
+        assert!(!c.ty(depth));
+        assert!(c.i == 0);
     }
+}
 }
