@@ -76,8 +76,9 @@ pub enum SpawnError {
 }
 
 /// 已登记的全部操作 ID 的集合（`spawn_abi::check` 的 `known`）。
-fn known_calls() -> u64 {
-    ENTRIES.iter().filter(|e| e.kind == AbiKind::Op && e.id < 64).fold(0u64, |m, e| m | 1 << e.id)
+/// 由 `build.rs` 从 `abi/system-ids.txt` 生成，不在此处手工维护。
+fn known_calls() -> SyscallSet {
+    crate::syscall::table::REGISTERED_OPS_SET
 }
 
 /// 在锁内：子进程最后一份外部所有权即将释放时的 closing 动作——归还父进程的配额；仍在运行就发起终止。
@@ -206,10 +207,10 @@ pub fn spawn_child(parent: ObjId, image: &[u8], calls: SyscallSet, arg: u64, cpu
         return Err(SpawnError::Proc(e));
     }
     kprintln!(
-        "[JSR-PROC] event=system.process.spawned parent={:#x} child={:#x} calls={:#x} cpu_limit={} image_bytes={}",
+        "[JSR-PROC] event=system.process.spawned parent={:#x} child={:#x} calls={:x?} cpu_limit={} image_bytes={}",
         parent.raw(),
         child.raw(),
-        calls.0,
+        calls.words(),
         cpu_limit,
         image.len()
     );
@@ -236,8 +237,11 @@ pub fn sys_spawn(desc_ptr: u64) -> i64 {
     if let Err(e) = crate::mm::user::copy_from_user(&mut raw, desc_ptr, SPAWN_DESC_SIZE) {
         return crate::ring::user_err(e);
     }
-    let d = SpawnDesc::decode(&raw);
-    if let Err(r) = spawn_abi::check(&d, crate::sched::current_syscalls().0, known_calls()) {
+    let d = match SpawnDesc::decode(&raw) {
+        Ok(d) => d,
+        Err(r) => return spawn_err(SpawnError::Rejected(r)),
+    };
+    if let Err(r) = spawn_abi::check(&d, crate::sched::current_syscalls(), known_calls()) {
         return spawn_err(SpawnError::Rejected(r));
     }
     if let Err(e) = crate::mm::user::copy_to_user(desc_ptr, &raw, SPAWN_DESC_SIZE) {
@@ -248,7 +252,7 @@ pub fn sys_spawn(desc_ptr: u64) -> i64 {
     if let Err(e) = crate::mm::user::copy_from_user(&mut image, d.image_ptr, len) {
         return crate::ring::user_err(e);
     }
-    match spawn_child(pid, &image, SyscallSet(d.calls), d.arg, d.cpu_limit_permille) {
+    match spawn_child(pid, &image, d.calls, d.arg, d.cpu_limit_permille) {
         Ok(s) => {
             let out = d.with_outputs(s.process.raw(), s.channel.raw());
             match crate::mm::user::copy_to_user(desc_ptr, &out, SPAWN_DESC_SIZE) {

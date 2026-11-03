@@ -127,3 +127,10 @@ path = "fuzz_targets/share_guard.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "spawn_desc"
+path = "fuzz_targets/spawn_desc.rs"
+test = false
+doc = false
+bench = false

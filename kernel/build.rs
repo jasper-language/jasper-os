@@ -26,6 +26,8 @@ fn main() {
     let mut entries = String::new();
     // (ID, 规范名, 中文显示名, 英文显示名)：只收集错误码，稍后按 ID 排序生成渲染表。
     let mut error_texts: Vec<(u32, &str, &str, &str)> = Vec::new();
+    // 已登记操作 ID：生成唯一的能力集合常量，spawn 授权与分发自检共用。
+    let mut op_ids: Vec<(u32, &str)> = Vec::new();
     out.push_str("// 由 kernel/build.rs 依据 abi/system-ids.txt 生成，请勿手改。\n");
     out.push_str("// Generated from abi/system-ids.txt by kernel/build.rs. Do not edit.\n\n");
     let result = kernel_core::abi::validate(&reg, |r| {
@@ -45,6 +47,8 @@ fn main() {
         );
         if r.kind == "error" {
             error_texts.push((r.id, r.name, r.display_zh, r.display_en));
+        } else {
+            op_ids.push((r.id, r.name));
         }
     });
     match result {
@@ -60,6 +64,26 @@ fn main() {
     if let Err(e) = kernel_core::abi::check_frozen(&reg, &lock) {
         panic!("已冻结的系统接口被破坏（abi/system-ids.lock）：{:?}", e);
     }
+    // 能力集合的容量是 ABI 契约的一部分：登记表里的操作 ID 必须都能被 256 位集合表示。
+    // 越界即构建失败，不允许出现「登记表承认、权限位却放不下」的操作。
+    let max_ids = kernel_core::syscall_set::MAX_IDS;
+    if let Some((id, name)) = op_ids.iter().find(|(id, _)| *id as usize >= max_ids) {
+        panic!(
+            "abi/system-ids.txt 中的操作 `{}` ID={} 超出 SyscallSet 容量 {}；请先扩大 kernel-core::syscall_set::MAX_IDS",
+            name, id, max_ids
+        );
+    }
+    out.push_str("\n/// 全部已登记操作 ID（唯一真源：abi/system-ids.txt）。\npub const REGISTERED_OPS: &[u32] = &[");
+    for (i, (id, _)) in op_ids.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{}", id);
+    }
+    out.push_str("];\n");
+    out.push_str("\n/// 全部已登记操作构成的权限集合（spawn 的 `known` 与启动自检共用）。\npub const REGISTERED_OPS_SET: kernel_core::syscall_set::SyscallSet = kernel_core::syscall_set::SyscallSet::of(REGISTERED_OPS);\n");
+    out.push_str("\n/// 当前登记表中最大的操作 ID。\npub const MAX_REGISTERED_OP_ID: u32 = ");
+    let _ = writeln!(out, "{};", op_ids.iter().map(|(id, _)| *id).max().unwrap_or(0));
     out.push_str("\n/// 全部登记条目（按登记表顺序）。\npub static ENTRIES: &[AbiEntry] = &[\n");
     out.push_str(&entries);
     out.push_str("];\n");
