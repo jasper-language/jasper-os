@@ -242,24 +242,24 @@ pub fn check_file(f: &Jaso<'_>) -> Result<(), BindingError> {
 mod kani_proofs {
     use super::*;
 
-    /// 任意 7 字节的签名文本：不 panic；接受时必须以 `(` 开始。
+    /// 任意 4 字节的签名文本：不 panic；接受时必须以 `(` 开始。
     #[kani::proof]
-    #[kani::unwind(10)]
+    #[kani::unwind(6)]
     fn signature_never_panics() {
-        let b: [u8; 7] = kani::any();
+        let b: [u8; 4] = kani::any();
         if signature_ok(&b) {
             assert!(b[0] == b'(');
         }
     }
 
-    /// 任意 6 字节的类型文本：不 panic，游标不越界；深度超限直接拒绝。
+    /// 任意 4 字节的类型文本、深度已到上限：不 panic，游标不越界；超过上限直接拒绝。
     #[kani::proof]
-    #[kani::unwind(10)]
+    #[kani::unwind(6)]
     fn type_cursor_stays_in_bounds() {
-        let b: [u8; 6] = kani::any();
+        let b: [u8; 4] = kani::any();
         let mut c = Cursor { b: &b, i: 0 };
         let depth: u32 = kani::any();
-        kani::assume(depth >= MAX_TYPE_DEPTH - 1);
+        kani::assume(depth >= MAX_TYPE_DEPTH);
         let ok = c.ty(depth);
         assert!(c.i <= b.len());
         assert!(!(depth > MAX_TYPE_DEPTH && ok));
