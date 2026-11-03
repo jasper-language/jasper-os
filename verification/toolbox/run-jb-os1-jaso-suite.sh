@@ -16,7 +16,7 @@ if "$verus" verification/toolbox/verus/jaso_bounds_bad.rs > "$out/verus-bad.log"
 fi
 cargo test -p jaso --features pack > "$out/host.log" 2>&1
 cargo test --manifest-path verification/toolbox/Cargo.toml --test jaso > "$out/proptest.log" 2>&1
-cargo +nightly miri test -p jaso --features pack -- tests::roundtrip tests::platform_rejections tests::extensions \
+cargo +nightly miri test -p jaso --features pack --lib -- tests::roundtrip tests::platform_rejections tests::extensions \
   tests::managed_images tests::multiple_images_and_selection tests::migrate_format0 tests::version_ranges_and_dependencies \
   > "$out/miri.log" 2>&1
 (cd verification/toolbox/fuzz && mkdir -p corpus/jaso_parse && cargo fuzz run jaso_parse corpus/jaso_parse seeds/jaso_parse -- -runs=2000000 -seed=1) > "$out/fuzz.log" 2>&1

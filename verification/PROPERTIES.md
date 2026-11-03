@@ -582,3 +582,19 @@ cont-splash 帧缓冲仍未验证（见 `docs/PDA-1-image-dtb.md`）。
 | JB-OS1-CONF-FUZZ-01 | 任意字节及「回填魔数/版本/长度/摘要」的副本：判定不 panic；结构读取失败时结果等于读取错误码；结构合格时只能被 load 类码拒绝；放行的文件必须由受信公钥签名 | `verification/toolbox/fuzz/fuzz_targets/jaso_conformance.rs`；种子 `fuzz/seeds/jaso_conformance/`（7 个向量入库） | cargo-fuzz 0.13.2 / libFuzzer | tested | 套件第 4 步 | 100 万次（94 s）、seed=1、0 崩溃，cov 2185 / ft 5702；覆盖引导 fuzz 不是证明 |
 | JB-OS1-CONF-KANI-NA | — | `jaso::conformance::check` | Kani | N/A | — | N/A：判定是结构读取 + Ed25519 验签 + SHA-256 + 平台选择的组合，新增的只有步骤顺序与表查找；其中数值部分已有 Kani（JB-OS1-LAYOUT-KANI-01），而 Ed25519/SHA-256 的符号化展开超出 CBMC 可行范围（前一节 from_utf8 一项已 23 分钟未结束）。替代证据：步骤顺序 Verus 伴随（JB-OS1-CONF-VERUS-01）、Proptest、100 万次 fuzz、69 个固定向量 |
 | JB-OS1-CONF-LOOM-NA | — | `jaso::conformance` / `jaso::vectors` / `jasopack vectors` | Loom | N/A | — | N/A：纯函数，上下文为编译期常量，无原子量 / 锁 / 共享可变状态；`jasopack vectors` 单线程顺序写文件。替代证据：同上 |
+
+## JB-OS2 `.jaso` L1 全流程装载（六步链，2026-11-03）
+
+源码身份：提交 ba02cb8..f5db1cc；`jaso/src/{binding,lifecycle,kernel_gate,conformance}.rs`、`user/rt/src/{loader,module}.rs`、`user/jasodemo`、`modules/l1demo`。复现：VM `bash verification/toolbox/run-jb-os2-loader-suite.sh`（证据 `evidence/jb-os2/loader-suite/`，含 `source.sha256`）。
+
+| ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |
+|---|---|---|---|---|---|---|
+| JB-OS2-VERUS-01 | stop 前提「没有运行中的依赖者」与装入前提「依赖都在运行中」都保持不变量「运行中模块的依赖都在运行中」；绑定判定「两个方向的包含都成立」⇔ 两集合相等；去掉 stop 前提的负例必败 | `jaso::lifecycle::Registry::{begin_stop,satisfies}`、`jaso::binding::check` 的集合判定；伴随 `verification/toolbox/verus/jaso_l1{,_bad}.rs` | Verus 0.2026.10.18.7d82994 + Z3 | proved（伴随） | 套件第 1 步 | 正例 8 verified/0 errors，负例 1 verified/1 error；伴随是独立可执行 Verus 代码，不是对生产函数本身的证明；语法解析不在范围内 |
+| JB-OS2-PROPTEST-01 | 任意 load/stop/unload 序列下模块表与参考模型一致、不变量始终成立、stop 被拒当且仅当有运行中的依赖者、卸载请求不改变状态；合法绑定（打乱顺序、注释）被接受，删 fn / 多 fn / 超出清单的 cap / 破坏语法都被拒；任意文本不 panic | `verification/toolbox/tests/jaso_l1.rs` → `jaso::{lifecycle::Registry,binding::check}` | Proptest 1.12.0（每性质 512 例，固定配置，收缩） | tested | 套件第 2 步 | 3 passed；另有 crate 内宿主测试 56 passed（语法负例 30 条、限额、内核态准入门） |
+| JB-OS2-MIRI-01 | 绑定判定与模块表路径无未定义行为与泄漏 | `jaso/src/l1_tests.rs` 中 binding_accepts_the_grammar / binding_rejects_bad_syntax / binding_must_agree_with_the_manifest / dependencies_are_satisfied_only_by_running_modules_in_range / unload_is_never_reported_as_done | Miri 0.1.0 (19833af722 2026-10-20) | tested | 套件第 3 步 | 5 passed（18 s）；不覆盖 binding_limits（1024 行两两比较，Miri 下 19 分钟未结束，已中止）与内核态准入门（Ed25519 签名与验签路径），二者由宿主测试覆盖 |
+| JB-OS2-FUZZ-01 | 任意字节判定不 panic；放行时导出与 fn 行一一对应、cap 都在清单里、绑定里没有裸指针 | `verification/toolbox/fuzz/fuzz_targets/jaso_binding.rs`；种子 `fuzz/seeds/jaso_binding/`（2 个入库） | cargo-fuzz 0.13.2 / libFuzzer | tested | 套件第 4 步 | 200 万次（137 s）、seed=1、0 崩溃，cov 621 / ft 2471；覆盖引导 fuzz 不是证明 |
+| JB-OS2-KANI-01 | 任意 4 字节名字：游标不越界、接受时首字节合法；超过嵌套深度上限的类型直接拒绝且不读输入（递归因此有界） | `jaso/src/binding.rs` `kani_proofs` → `Cursor::{dotted,ty}` | Kani 0.68.0 / CBMC 6.11.0 | bounded Kani | 套件第 5 步 | 2 harness SUCCESSFUL；**未覆盖**：完整签名与类型的递归主体——4 字节签名 harness 12 分钟、2 字节类型 harness 7 分钟均未结束（`starts_with` 的 memcmp 符号化展开不收敛），已中止并收窄，这部分只由 Proptest 与 fuzz 覆盖 |
+| JB-OS2-LOOM-NA | — | `jaso::lifecycle`、`jasper_rt::loader` | Loom | N/A | — | N/A：模块表没有原子量或锁；`Function` 借用 `Loader`、`stop` 要 `&mut Loader`，活动中的调用与 stop 由借用检查在编译期互斥；`Module` 的活动计数本轮未改动。替代证据：QEMU J-3、JB-OS2、J-6（isohost 静默判定）；未测多线程共享 `Loader`（需要调用者自行加锁，本切片没有这种调用者） |
+| JB-OS2-QEMU-01 | 运行时装入签名的 Native 与 Hybrid 并调用导出；依赖、服务发现；篡改（摘要 / 代码 / 绑定）、错误平台、缺能力、缺依赖、版本不符、绑定 4 类、启动失败被拒且无残留；stop 被依赖者阻止、停止后不再服务、重复 stop 被拒且钩子只调用一次；卸载只答复推迟 / 拒绝且模块仍映射；内核态准入门 | `user/jasodemo/src/main.rs` `l1` / `kernel_gate`；`scripts/accept.sh` `check_jb_os2` | QEMU 用户态 | tested | 定点与全量 accept | 内核自身没有运行期装载路径（系统调用表无此项、内核不依赖 `jaso`，由 check_jb_os2 检查）；准入门在用户态验收程序中执行，不是内核路径上的负向用例。隔离运行不经 `Loader`：容器内模块会 `start`，但没有 `stop`，随容器进程结束 |
+
+更正：JB-OS1 记录与 README 写的「69 个向量」有误，当时实际是 68 个（`git ls-files` 与生成器一致）；本轮新增 8 个后为 76 个。一致性判定新增第 6a 步，`run-jb-os1-conformance-suite.sh` 在新代码上复跑；`run-jb-os1-jaso-suite.sh` 未复跑，读取器代码（`jaso/src/lib.rs` 除模块声明外）未改。

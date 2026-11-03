@@ -17,7 +17,7 @@ if "$verus" verification/toolbox/verus/jaso_conformance_bad.rs > "$out/verus-bad
 fi
 cargo test -p jaso --features pack > "$out/host.log" 2>&1
 cargo test --manifest-path verification/toolbox/Cargo.toml --test jaso > "$out/proptest.log" 2>&1
-MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test -p jaso --features pack -- \
+MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test -p jaso --features pack --lib -- \
   vector_tests::a_bad_trust_key_never_admits vector_tests::every_vector_yields_its_expected_line > "$out/miri.log" 2>&1
 (cd verification/toolbox/fuzz && mkdir -p corpus/jaso_conformance && \
   cargo fuzz run jaso_conformance corpus/jaso_conformance seeds/jaso_conformance -- -runs=1000000 -seed=1) > "$out/fuzz.log" 2>&1
