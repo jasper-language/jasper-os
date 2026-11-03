@@ -148,3 +148,10 @@ path = "fuzz_targets/deadline_sync.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "timer_event"
+path = "fuzz_targets/timer_event.rs"
+test = false
+doc = false
+bench = false

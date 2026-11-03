@@ -162,11 +162,10 @@ mod tests {
 /// First strictly future boundary of a periodic timer, preserving its phase.
 /// None means period zero or the next boundary cannot be represented. Skipped
 /// periods do not create accumulated budget grants. Author: chatgpt.
+/// 与统一定时事件契约共用同一实现（issue #3）。 / Shares the unified timer-event
+/// contract's implementation (issue #3).
 pub fn next_period(now: u64, previous: u64, period: u32) -> Option<u64> {
-    if period == 0 { return None; }
-    if previous > now { return Some(previous); }
-    let steps = (now as u128 - previous as u128) / period as u128 + 1;
-    u64::try_from(previous as u128 + steps * period as u128).ok()
+    crate::timer_event::next_boundary(now, previous, u64::from(period))
 }
 #[cfg(test)]
 mod periodic_tests {
