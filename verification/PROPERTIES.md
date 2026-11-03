@@ -559,7 +559,7 @@ cont-splash 帧缓冲仍未验证（见 `docs/PDA-1-image-dtb.md`）。
 
 ## JB-OS1 `.jaso` format 1 结构读取（六步链，2026-10-28）
 
-源码身份：分支 `dev/jb-os1-core`（本节随该分支提交；基于 4b70447）；`jaso/src/{lib,platform,manifest,code,build,migrate}.rs`。复现：VM `bash verification/toolbox/run-jb-os1-jaso-suite.sh`（证据 `evidence/jb-os1/jaso-suite/`，含 `source.sha256`）。
+源码身份：提交 2b217b3..a2564ab（rebase 到 ABI 世代合入后的 main，a2564ab 上两套件复跑 PASS）；`jaso/src/{lib,platform,manifest,code,build,migrate}.rs`。复现：VM `bash verification/toolbox/run-jb-os1-jaso-suite.sh`（证据 `evidence/jb-os1/jaso-suite/`，含 `source.sha256`）。
 
 | ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |
 |---|---|---|---|---|---|---|
@@ -572,7 +572,7 @@ cont-splash 帧缓冲仍未验证（见 `docs/PDA-1-image-dtb.md`）。
 
 ## JB-OS1 `.jaso` 一致性判定与向量（SPEC §14，六步链，2026-10-28）
 
-源码身份：分支 `dev/jb-os1-core`（本节随该分支提交）；`jaso/src/{conformance,vectors,vector_tests}.rs`、`tools/jasopack/src/main.rs`（`vectors` / `conform`）、`jaso/vectors/`（69 个向量 + 开发用公钥）。复现：VM `bash verification/toolbox/run-jb-os1-conformance-suite.sh`（证据 `evidence/jb-os1/conformance-suite/`，含 `source.sha256`、`vectors.sha256`）。
+源码身份：提交 d027a19（rebase 后 a2564ab 上复跑 PASS）；`jaso/src/{conformance,vectors,vector_tests}.rs`、`tools/jasopack/src/main.rs`（`vectors` / `conform`）、`jaso/vectors/`（69 个向量 + 开发用公钥）。复现：VM `bash verification/toolbox/run-jb-os1-conformance-suite.sh`（证据 `evidence/jb-os1/conformance-suite/`，含 `source.sha256`、`vectors.sha256`）。
 
 | ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |
 |---|---|---|---|---|---|---|
