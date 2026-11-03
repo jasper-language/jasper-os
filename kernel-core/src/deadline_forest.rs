@@ -4,6 +4,49 @@
 //! Caller initializes positions/owners to ABSENT and preserves coherent slices.
 use crate::deadline::{Deadline, DeadlineHeap, HeapError, ABSENT};
 pub struct DeadlineForest<const C: usize> { heaps: [DeadlineHeap; C] }
+/// [`DeadlineForest::sync`] 的结果；除 `Unchanged` 外都写了一次堆。
+/// Outcome of a sync; everything except `Unchanged` performed one heap write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncOutcome { Unchanged, Inserted, Rescheduled, Moved, Removed }
+impl SyncOutcome {
+    /// 是否写了堆存储 / whether heap storage was written.
+    pub fn wrote(self) -> bool { self != SyncOutcome::Unchanged }
+}
+/// 一轮或多轮增量同步的计数：`synced` 次 sync 调用中，`unchanged` 次未写堆，其余按种类计。
+/// 不变量：`synced == unchanged + inserted + rescheduled + moved + removed`。
+/// Sync counters; invariant: synced equals the sum of all outcome counters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SyncStats {
+    /// 刷新轮数 / refresh passes.
+    pub passes: u64,
+    /// sync 调用数（=被检查的槽位数）/ sync calls (slots examined).
+    pub synced: u64,
+    pub unchanged: u64,
+    pub inserted: u64,
+    pub rescheduled: u64,
+    pub moved: u64,
+    pub removed: u64,
+}
+impl SyncStats {
+    /// 记下一次 sync 结果（饱和计数）/ record one outcome (saturating).
+    pub fn record(&mut self, outcome: SyncOutcome) {
+        self.synced = self.synced.saturating_add(1);
+        let c = match outcome {
+            SyncOutcome::Unchanged => &mut self.unchanged,
+            SyncOutcome::Inserted => &mut self.inserted,
+            SyncOutcome::Rescheduled => &mut self.rescheduled,
+            SyncOutcome::Moved => &mut self.moved,
+            SyncOutcome::Removed => &mut self.removed,
+        };
+        *c = c.saturating_add(1);
+    }
+    /// 写堆次数 / heap writes.
+    pub fn writes(&self) -> u64 {
+        self.inserted.saturating_add(self.rescheduled).saturating_add(self.moved).saturating_add(self.removed)
+    }
+    /// 计数守恒（未饱和时成立）/ counter conservation while unsaturated.
+    pub fn balanced(&self) -> bool { self.unchanged.checked_add(self.writes()) == Some(self.synced) }
+}
 impl<const C: usize> DeadlineForest<C> {
     pub const fn new() -> Self { Self { heaps: [const { DeadlineHeap::new() }; C] } }
     pub fn len(&self, cpu: usize) -> Option<usize> { self.heaps.get(cpu).map(DeadlineHeap::len) }
@@ -63,6 +106,34 @@ impl<const C: usize> DeadlineForest<C> {
         assert_eq!(removed, Some(event));
         owners[slot] = ABSENT;
         Ok(removed)
+    }
+    /// 增量同步一个槽位的期限事件（issue #2）：`wanted` 为 `Some((owner_cpu, at))` 或 `None`。
+    /// 现有节点与目标完全相同（同一所有者、同一时刻、同一代次），或两边都不存在时，
+    /// 不写任何存储，返回 `Unchanged`；否则恰好做一次 set 或 remove。
+    /// 现有节点代次不同 ⇒ `Stale`；越界 CPU/槽位、坏形状 ⇒ 对应错误；所有失败都不改状态。
+    /// Incremental sync of one slot's deadline: identical (owner, at, generation)
+    /// or absent-on-both-sides writes nothing; otherwise exactly one set/remove.
+    /// Every failure leaves storage untouched.
+    pub fn sync(&mut self, entries: &mut [Deadline], positions: &mut [usize], owners: &mut [usize],
+        slot: usize, generation: u64, wanted: Option<(usize, u64)>) -> Result<SyncOutcome, HeapError> {
+        let old = self.locate(entries, positions, owners, slot)?;
+        if old.is_some_and(|(_, e)| e.generation != generation) { return Err(HeapError::Stale); }
+        match (old, wanted) {
+            (None, None) => Ok(SyncOutcome::Unchanged),
+            (Some(_), None) => {
+                self.remove(entries, positions, owners, slot, generation)?;
+                Ok(SyncOutcome::Removed)
+            }
+            (Some((c, e)), Some((cpu, at))) if c == cpu && e.at == at => Ok(SyncOutcome::Unchanged),
+            (old, Some((cpu, at))) => {
+                self.set(entries, positions, owners, cpu, Deadline { at, slot, generation })?;
+                Ok(match old {
+                    None => SyncOutcome::Inserted,
+                    Some((c, _)) if c == cpu => SyncOutcome::Rescheduled,
+                    Some(_) => SyncOutcome::Moved,
+                })
+            }
+        }
     }
     pub fn pop_due(&mut self, entries: &mut [Deadline], positions: &mut [usize], owners: &mut [usize], cpu: usize, now: u64)
         -> Result<Option<Deadline>, HeapError> {
@@ -165,5 +236,133 @@ mod tests {
             }
             panic!("seed={SEED:#x}, {error}, reduced={ops:?}");
         }
+    }
+    /// sync 与独立参考模型差分：结果种类、错误不改状态、Unchanged 不写任何存储、计数守恒。
+    #[test]
+    fn sync_matches_reference_and_unchanged_writes_nothing() {
+        let mut h = DeadlineForest::<3>::new();
+        let mut e = [Deadline::EMPTY; 24]; let mut p = [ABSENT;8]; let mut o = [ABSENT;8];
+        let mut reference: [Option<(usize,Deadline)>;8] = [None;8];
+        let mut stats = SyncStats::default();
+        let mut seed = 0x5359_4e43_4e53_4556u64;
+        for _ in 0..20_000 {
+            seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
+            let s = (seed>>8) as usize % 9; let g = (seed>>12)%3; let c = (seed>>16) as usize % 4;
+            let wanted = if seed % 5 == 0 { None } else { Some((c, (seed>>20)%6)) };
+            let before = (e,p,o,[h.len(0),h.len(1),h.len(2)]);
+            let expected = if s >= 8 { Err(HeapError::Slot) }
+                else if reference[s].is_some_and(|(_,old)| old.generation != g) { Err(HeapError::Stale) }
+                else { match (reference[s], wanted) {
+                    (None, None) => Ok(SyncOutcome::Unchanged),
+                    (Some(_), None) => Ok(SyncOutcome::Removed),
+                    (_, Some((cpu,_))) if cpu >= 3 => Err(HeapError::Slot),
+                    (Some((oc,old)), Some((cpu,at))) if oc == cpu && old.at == at => Ok(SyncOutcome::Unchanged),
+                    (None, Some(_)) => Ok(SyncOutcome::Inserted),
+                    (Some((oc,_)), Some((cpu,_))) => Ok(if oc == cpu { SyncOutcome::Rescheduled } else { SyncOutcome::Moved }),
+                } };
+            let actual = h.sync(&mut e,&mut p,&mut o,s,g,wanted);
+            assert_eq!(actual, expected, "slot={s} gen={g} wanted={wanted:?}");
+            match actual {
+                Ok(outcome) => {
+                    stats.record(outcome);
+                    if !outcome.wrote() { assert_eq!(before, (e,p,o,[h.len(0),h.len(1),h.len(2)]), "unchanged must not write"); }
+                    reference[s] = wanted.map(|(cpu,at)| (cpu, Deadline { at, slot: s, generation: g }));
+                }
+                Err(_) => assert_eq!(before, (e,p,o,[h.len(0),h.len(1),h.len(2)]), "failure must not write"),
+            }
+            for cpu in 0..3 {
+                let min = reference.iter().flatten().filter(|(owner,_)|*owner==cpu).map(|(_,d)|*d).min_by_key(|d|(d.at,d.slot));
+                assert_eq!(h.peek(&e,&p,&o,cpu), Ok(min));
+            }
+        }
+        assert!(stats.balanced() && stats.unchanged > 0 && stats.writes() > 0, "{stats:?}");
+    }
+}
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+    fn small() -> u64 { u64::from(kani::any::<u8>()) }
+    type Snap = ([Deadline; 4], [usize; 2], [usize; 2], Option<usize>, Option<usize>);
+    /// 逐元素比较（避免数组比较落到 memcmp 字节循环）/ element-wise, avoids memcmp unwinding.
+    fn same(a: &Snap, b: &Snap) -> bool {
+        a.0[0] == b.0[0] && a.0[1] == b.0[1] && a.0[2] == b.0[2] && a.0[3] == b.0[3]
+            && a.1[0] == b.1[0] && a.1[1] == b.1[1] && a.2[0] == b.2[0] && a.2[1] == b.2[1]
+            && a.3 == b.3 && a.4 == b.4
+    }
+    /// 两核两槽、至多一个已存在节点；时刻与代次取 8 位值域（有界）。
+    fn world() -> (DeadlineForest<2>, [Deadline; 4], [usize; 2], [usize; 2], usize) {
+        let mut h = DeadlineForest::<2>::new();
+        let mut e = [Deadline::EMPTY; 4]; let mut p = [ABSENT; 2]; let mut o = [ABSENT; 2];
+        let pre_slot: usize = kani::any(); kani::assume(pre_slot < 2);
+        let pre_cpu: usize = kani::any(); kani::assume(pre_cpu < 2);
+        if kani::any() { h.set(&mut e, &mut p, &mut o, pre_cpu, Deadline { at: small(), slot: pre_slot, generation: small() }).unwrap(); }
+        (h, e, p, o, pre_slot)
+    }
+    fn target() -> (usize, u64, Option<(usize, u64)>) {
+        let slot: usize = kani::any(); kani::assume(slot < 3);
+        let wanted = if kani::any() { None } else {
+            let c: usize = kani::any(); kani::assume(c < 3); Some((c, small()))
+        };
+        (slot, small(), wanted)
+    }
+    /// sync 返回 Unchanged 或失败时不写任何存储。
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn sync_unchanged_or_failed_never_writes() {
+        let (mut h, mut e, mut p, mut o, _) = world();
+        let (slot, generation, wanted) = target();
+        let before = (e, p, o, h.len(0), h.len(1));
+        let r = h.sync(&mut e, &mut p, &mut o, slot, generation, wanted);
+        if r.is_err() || r == Ok(SyncOutcome::Unchanged) { assert!(same(&before, &(e, p, o, h.len(0), h.len(1)))); }
+    }
+    /// sync 成功后该槽恰好按目标发布，且只在一个所有者堆中（迁移不留旧节点）。
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn sync_success_publishes_target_in_one_heap() {
+        let (mut h, mut e, mut p, mut o, pre_slot) = world();
+        let (slot, generation, wanted) = target();
+        if h.sync(&mut e, &mut p, &mut o, slot, generation, wanted).is_ok() {
+            match wanted {
+                None => assert!(o[slot] == ABSENT && p[slot] == ABSENT),
+                Some((c, at)) => {
+                    assert!(o[slot] == c);
+                    let d = e[c * 2 + p[slot]];
+                    assert!(d.slot == slot && d.at == at && d.generation == generation);
+                    assert!(h.len(1 - c) == Some(usize::from(o[pre_slot] == 1 - c && pre_slot != slot)));
+                }
+            }
+        }
+    }
+    /// 既有 set（补链）：代次不同的节点不能被改期或迁移，拒绝时存储不变。
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn set_rejects_stale_generation_atomically() {
+        let mut h = DeadlineForest::<2>::new();
+        let mut e = [Deadline::EMPTY; 4]; let mut p = [ABSENT; 2]; let mut o = [ABSENT; 2];
+        let slot: usize = kani::any(); kani::assume(slot < 2);
+        let old = Deadline { at: small(), slot, generation: small() };
+        let c0: usize = kani::any(); kani::assume(c0 < 2);
+        h.set(&mut e, &mut p, &mut o, c0, old).unwrap();
+        let c1: usize = kani::any(); kani::assume(c1 < 2);
+        let generation = small(); kani::assume(generation != old.generation);
+        let before = (e, p, o, h.len(0), h.len(1));
+        assert!(h.set(&mut e, &mut p, &mut o, c1, Deadline { at: small(), slot, generation }) == Err(HeapError::Stale));
+        assert!(same(&before, &(e, p, o, h.len(0), h.len(1))));
+    }
+    /// 既有 pop_due（补链）：两节点同核时先弹出 (at, slot) 最小者，且只在已到期时弹出。
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn pop_due_returns_earliest_only_when_due() {
+        let mut h = DeadlineForest::<2>::new();
+        let mut e = [Deadline::EMPTY; 4]; let mut p = [ABSENT; 2]; let mut o = [ABSENT; 2];
+        let a = Deadline { at: small(), slot: 0, generation: small() };
+        let b = Deadline { at: small(), slot: 1, generation: small() };
+        h.set(&mut e, &mut p, &mut o, 1, a).unwrap();
+        h.set(&mut e, &mut p, &mut o, 1, b).unwrap();
+        let now = small();
+        let first = if (a.at, a.slot) <= (b.at, b.slot) { a } else { b };
+        let got = h.pop_due(&mut e, &mut p, &mut o, 1, now).unwrap();
+        if first.at <= now { assert!(got == Some(first) && o[first.slot] == ABSENT); } else { assert!(got.is_none() && h.len(1) == Some(2)); }
     }
 }

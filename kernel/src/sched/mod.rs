@@ -393,6 +393,11 @@ pub fn reset_lock_stats() {
     KERNEL_SCHED.reset_stats();
 }
 
+/// 高精度期限事件增量同步计数（issue #2，见 [`kernel_core::deadline_forest::SyncStats`]）。
+pub fn ns_sync_stats() -> kernel_core::deadline_forest::SyncStats {
+    with(|s| s.ns_sync_stats())
+}
+
 /// 选择路径的遍历量统计（见 [`scheduler::ScanStats`]）。
 /// Selection-path scan statistics.
 pub fn scan_stats() -> scheduler::ScanStats {

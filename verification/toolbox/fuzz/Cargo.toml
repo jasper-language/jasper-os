@@ -141,3 +141,10 @@ path = "fuzz_targets/kobj_type.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "deadline_sync"
+path = "fuzz_targets/deadline_sync.rs"
+test = false
+doc = false
+bench = false
