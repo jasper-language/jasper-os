@@ -523,3 +523,16 @@ cont-splash 帧缓冲仍未验证（见 `docs/PDA-1-image-dtb.md`）。
 | TIMER-EVT-02 | TimerId=(slot,generation)：创建代数严格递增，关闭后旧身份对装填/取消/到期无效，代数用尽槽位永久退役 | timer_event::TimerTable | Verus 代数引理 / Proptest 参考模型差分 / Miri / fuzz / Kani | verified / tested / bounded Kani | 同上 | 调用方串行化（每表一把锁）；身份表尚未接入系统调用 |
 | TIMER-EVT-03 | 一次性到期至多交付一次；取消与到期竞争恰有一方生效；关闭撤下请求并恰好归还一次预算 | timer_event::TimerTable::{cancel,expire,close}; OwnerBudget | Proptest / Miri / fuzz / Kani / Loom 锁下竞争 | tested / bounded Kani | 同上 | Loom 覆盖调用方 Mutex 适配，不含内核真实锁 |
 | TIMER-EVT-04 | 周期边界是严格晚于 now 的第一个相位点，溢出拒绝；deadline::next_period 复用同一实现 | timer_event::next_boundary; deadline::next_period | Verus 整数模型 / Proptest 全值域与步进参考 / 有界 Kani（previous/差/周期均 8 位） / fuzz | verified / tested / bounded Kani | 同上 | 纯函数，Loom 不适用（由 TIMER-EVT-03 的周期竞争覆盖调用路径） |
+
+## 合入批次 1：验收演练与脚本改动（六步链逐步登记）
+
+源码身份：`125c5f0`（`scripts/s2.sh`、`scripts/accept.sh`、`kernel/src/kmain.rs` 的 `s2-only` 分支、`kernel/src/s2.rs` 发布工作线程时关中断）、`0bc6d34`（`kernel/src/sched/demo.rs` 发布对等任务时关中断、`user/schedtest` 恢复延迟转为计时类记录）、`8fcab89` 与 `66fa91b`（`kernel/src/irq_demo.rs` 演练等待 tick、`scripts/accept.sh`）、`c34f197`（`scripts/s2.sh` 恢复 7 项调度判据）。这些改动只在验收客户机或自检演练路径生效，不改系统调用、调度算法或内核数据结构。
+
+| ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |
+|---|---|---|---|---|---|---|
+| MB1-STEP-1 | Verus/Z3 | 同上 | N/A：只有等待时长、关中断发布窗口与 shell 判据，没有可写前后条件的纯算法；替代证据为全量 accept 的 M1.4、M1.2-IRQ、S-2、QoS 判据 | N/A | `bash scripts/accept.sh`（仅VM） | 未对演练路径做机器证明 |
+| MB1-STEP-2 | Proptest | 同上 | N/A：无可在宿主构造的输入空间，发布窗口依赖真实中断；替代证据为 S-2 八个固定种子各 125000 次探测 | N/A | `bash scripts/s2.sh`（仅VM） | 固定种子，不是随机输入全集 |
+| MB1-STEP-3 | Miri | 同上 | N/A：涉及内核 `no_std` 目标、关中断内联汇编、QEMU 设备与 shell，Miri 无法执行；未新增 unsafe 数据访问 | N/A | 不适用 | 关中断与恢复的配对由代码审阅确认 |
+| MB1-STEP-4 | cargo-fuzz | 同上 | N/A：没有解析或编码入口可喂字节；替代证据为 S-2 系统调用健壮性探测 | N/A | `bash scripts/s2.sh`（仅VM） | 同 MB1-STEP-2 |
+| MB1-STEP-5 | Kani | 同上 | N/A：等待 tick、IPI 与客户机串口输出不是可有界建模的纯函数；替代证据为 fault-scale 客户机 `failed=0` | N/A | `bash scripts/s2.sh`（仅VM） | QEMU 只判正确性，不证明硬件时序 |
+| MB1-STEP-6 | Loom | 同上 | N/A：发布窗口用真实关中断而不是 std 同步原语，Loom 无法替换；替代证据为 8 核 fault-scale 客户机 `[JSR-TASK-INDEX]`、`[JSR-WAKE-MSG]`、`[JSR-WAKE-FULL]`、`[JSR-DEADLINE-OWNER]`、`[JSR-DEADLINE-IPI]`、`[JSR-RT-LOCAL]`、`[JSR-BUDGET-TICK]` 七项判据与 `checks=39 failed=0` | N/A | `bash scripts/s2.sh`（仅VM） | 单次 8 核运行，不是穷举交错 |
