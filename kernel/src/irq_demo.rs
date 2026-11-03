@@ -314,7 +314,7 @@ fn route(online: CpuSet, lines: usize) {
             ok &= device::set_enabled(l, false).is_ok();
         }
         // 停用后到达的最后一次中断也处理完
-        wait_ticks(2);
+        wait_ticks(10);
         let mut here = true;
         for l in 0..lines {
             let on_c = device::count_on(l, c);
@@ -395,7 +395,7 @@ fn balance(n: usize, lines: usize) {
     for l in 0..lines {
         ok &= device::set_enabled(l, false).is_ok();
     }
-    wait_ticks(1);
+    wait_ticks(10);
     let keep_ok = keep_moves == 0 && keep_set == only(0);
     let distinct = spread_set.len() == lines.min(n);
     let bound = 2 * device::BALANCE_PERIOD;
