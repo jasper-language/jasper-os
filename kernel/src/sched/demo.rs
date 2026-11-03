@@ -118,11 +118,16 @@ pub fn run_preemptive() {
     // 多处理器时若允许分散，各任务可能独占一个处理器而无需被抢占，tick 切换数随负载均衡的时机浮动。
     let mut here = CpuSet::EMPTY;
     here.insert(crate::arch::cpu_index());
+    // Publish the whole peer set before the first one can be scheduled. The
+    // bootstrap thread is not a run-queue entry, so an early preemption here
+    // would strand Q/R until P reaches the demo deadline.
+    let irq = crate::arch::irq_save_disable();
     for (id, name) in [(11, "P"), (12, "Q"), (13, "R")] {
         if super::spawn_on(TaskId(id), name, busy_task, None, here).is_err() {
             console::_print(format_args!("[JSR-SCHED] spawn failed name={}\n", name));
         }
     }
+    crate::arch::irq_restore(irq);
     let prev_preemption = super::set_preemption(true);
     super::run();
     super::set_preemption(prev_preemption);
