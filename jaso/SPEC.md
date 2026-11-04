@@ -291,6 +291,8 @@ decision belong to the loader (§12.2), not to structural parsing.
 
 UTF-8 text (`manifest.utf8`). One `key = value` per line; key and value are trimmed of surrounding whitespace;
 blank lines and lines starting with `#` are ignored; any other line without `=` → `manifest.line`.
+"Whitespace" throughout this section is the Unicode `White_Space` property (it includes U+0085, U+00A0, U+2003 and
+U+3000, not only ASCII); the same definition applies to the comma-separated lists in manifest values.
 
 | Key | Required | Single | Value |
 |---|---|---|---|
@@ -476,6 +478,9 @@ by an L1 load (§12.2, steps 1–6a) in this fixed **conformance context**:
 * already-loaded modules: `jaso-base` version `1.2.0`;
 * granted capabilities: `log`, `alloc`;
 * extensions known at the core layer: §9.3.
+
+A trusted key that is not a valid curve point can never match a signing key, so its result is `trust.key`, the same
+as a key that differs from the table.
 
 ## 15. Changes from format 0
 
