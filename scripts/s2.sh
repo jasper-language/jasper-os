@@ -65,9 +65,11 @@ truncate -s 16M "$out/blank.img"
 set +e
 # True parallel vCPUs are required: a single-threaded TCG scheduler can strand
 # spinlock waiters across eight vCPUs even when every worker is runnable.
-# The eight-CPU campaign takes about 29 minutes under TCG in the build VM.
-hang_watch_on "$out" "${S2_QEMU_TIMEOUT:-2400}"
-timeout "${S2_QEMU_TIMEOUT:-2400}" qemu-system-x86_64 -accel tcg \
+# The eight-CPU campaign takes about 29 minutes under TCG in the build VM when
+# it is quiet; with other jobs running 2400 s was not enough (ticket lock still
+# advancing at the limit, 2026-11-04), so the limit leaves room for a loaded VM.
+hang_watch_on "$out" "${S2_QEMU_TIMEOUT:-4200}"
+timeout "${S2_QEMU_TIMEOUT:-4200}" qemu-system-x86_64 -accel tcg \
   -drive "format=raw,file=$out/s2.img" -device virtio-rng-pci \
   -device virtio-net-pci,netdev=n0 -netdev user,id=n0 \
   -device virtio-blk-pci,drive=d1 -drive "if=none,id=d1,file=$out/blank.img,format=raw" \
