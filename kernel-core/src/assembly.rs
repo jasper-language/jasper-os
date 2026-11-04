@@ -477,6 +477,12 @@ mod tests {
     use std::sync::Mutex;
 
     static LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    /// 激活函数写同一份日志：调用它们的测试须串行，否则并行测试的记录会互相混入。
+    /// Activations share one log, so tests that run them are serialised to keep their records apart.
+    static SERIAL: Mutex<()> = Mutex::new(());
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
     fn log(s: &str) {
         LOG.lock().unwrap().push(s.to_string());
     }
@@ -554,6 +560,7 @@ mod tests {
 
     #[test]
     fn order_follows_dependencies_and_publishes_only_ready() {
+        let _serial = serial();
         let binds = [
             b("top", ok_top, Some(fini_top)),
             b("mid", ok_mid, None),
@@ -592,6 +599,7 @@ mod tests {
 
     #[test]
     fn failure_all_or_nothing_rolls_back_and_publishes_nothing() {
+        let _serial = serial();
         let binds = [
             b("top", ok_top, None),
             b("mid", bad_mid, None),
@@ -612,6 +620,7 @@ mod tests {
 
     #[test]
     fn failure_partial_blocks_dependents_only() {
+        let _serial = serial();
         let binds = [b("top", ok_top, None), b("mid", bad_mid, None), b("base", ok_base, None), b("side", ok_side, None)];
         let mut a = Assembly::new(&T_PROFILE, &binds).unwrap();
         let r = a.start(Policy::Partial).unwrap();
@@ -651,6 +660,7 @@ mod tests {
 
     #[test]
     fn builtin_headless_orders_core_first() {
+        let _serial = serial();
         fn ok() -> Result<(), &'static str> {
             Ok(())
         }
