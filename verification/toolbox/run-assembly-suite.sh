@@ -15,7 +15,9 @@ cd "$(dirname "$0")/../.."
 Z3="${Z3:-$(dirname "$VERUS")/z3}"
 out=evidence/issue6/assembly-suite
 mkdir -p "$out"
-HARNESSES="published_mask_never_reports_unready audit_rejects_any_divergent_mask loaded_set_stays_dependency_closed"
+# 只跑本次改动对应的 harness 时用 KANI_HARNESSES 指定；空串表示本次不跑 Kani（沿用原证据，登记绑定的提交号）。
+# KANI_HARNESSES selects the harnesses for this change; empty keeps the earlier evidence.
+HARNESSES="${KANI_HARNESSES-published_mask_never_reports_unready audit_rejects_any_divergent_mask loaded_set_stays_dependency_closed}"
 
 sha256sum \
   kernel-core/src/assembly.rs \
@@ -61,12 +63,13 @@ echo "== 5/6 Kani =="
 for h in $HARNESSES; do
   # 单个 harness 上限 10 分钟、虚拟内存 3.5 GB，全虚拟机同时只跑一个。
   # Per-harness cap: 10 minutes and 3.5 GB of address space; one at a time in the VM.
-  # 撞上限无结论记「未判定」继续；得到反例照旧阻塞。Hitting a cap is recorded as undecided; a counterexample blocks.
+  # 撞上限无结论记「未判定」继续；只有检查项 FAILURE 才算反例（内存耗尽同样打印 VERIFICATION:- FAILED）。
+  # A cap is recorded as undecided; only a failed check is a counterexample (OOM also prints VERIFICATION:- FAILED).
   rc=0
   flock /tmp/jasper-kani.lock bash -c "ulimit -v 3500000; timeout 600 cargo kani -p kernel-core --harness $h" > "$out/kani-$h.log" 2>&1 || rc=$?
   if grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-$h.log"; then
     echo "$h SUCCESSFUL" >> "$out/kani-result.txt"
-  elif grep -q 'VERIFICATION:- FAILED' "$out/kani-$h.log"; then
+  elif grep -q 'Status: FAILURE' "$out/kani-$h.log"; then
     echo "$h FAILED" >> "$out/kani-result.txt"
     exit 1
   else
