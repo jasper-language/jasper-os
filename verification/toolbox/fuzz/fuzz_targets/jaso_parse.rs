@@ -34,8 +34,10 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     }
     if let Ok(t) = core::str::from_utf8(data) {
         if let Ok(m) = jaso::Manifest::parse(t) {
-            for d in m.depends() {
-                assert!(!d.name.is_empty());
+            let names: Vec<&str> = m.depends().map(|d| d.name).collect();
+            assert!(names.len() <= jaso::manifest::MAX_DEPENDS);
+            for (i, n) in names.iter().enumerate() {
+                assert!(!n.is_empty() && !names[..i].contains(n));
             }
         }
     }

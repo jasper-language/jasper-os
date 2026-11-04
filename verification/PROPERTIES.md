@@ -599,3 +599,16 @@ cont-splash 帧缓冲仍未验证（见 `docs/PDA-1-image-dtb.md`）。
 | JB-OS2-QEMU-01 | 运行时装入签名的 Native 与 Hybrid 并调用导出；依赖、服务发现；篡改（摘要 / 代码 / 绑定）、错误平台、缺能力、缺依赖、版本不符、绑定 4 类、启动失败被拒且无残留；stop 被依赖者阻止、停止后不再服务、重复 stop 被拒且钩子只调用一次；卸载只答复推迟 / 拒绝且模块仍映射；内核态准入门 | `user/jasodemo/src/main.rs` `l1` / `kernel_gate`；`scripts/accept.sh` `check_jb_os2` | QEMU 用户态 | tested | 定点与全量 accept | 内核自身没有运行期装载路径（系统调用表无此项、内核不依赖 `jaso`，由 check_jb_os2 检查）；准入门在用户态验收程序中执行，不是内核路径上的负向用例。隔离运行不经 `Loader`：容器内模块会 `start`，但没有 `stop`，随容器进程结束 |
 
 更正：JB-OS1 记录与 README 写的「69 个向量」有误，当时实际是 68 个（`git ls-files` 与生成器一致）；本轮新增 8 个后为 76 个。一致性判定新增第 6a 步，`run-jb-os1-conformance-suite.sh` 在新代码上复跑；`run-jb-os1-jaso-suite.sh` 未复跑，读取器代码（`jaso/src/lib.rs` 除模块声明外）未改。
+
+## `core.depends` 线性查重（六步链，2026-11-04）
+
+`Manifest::parse` 在验签之前运行，输入未经验证；原实现对每一项重扫此前全部行，一行百万项要跑数小时。改为只在前 32 项内查重（SPEC §12.1 写明），超出上限的项仍校验取值。接受与拒绝的集合不变；只有「超过上限、且重名只出现在第 33 项及之后」的清单错误码由 `manifest.duplicate` 变为 `manifest.limit`。`jaso/src/manifest.rs` sha256 前缀 69a6b67caac7，基于 1cb6c48 的工作树。
+
+| ID | 性质 | 源码 | 工具 | 级别 | 命令 | 范围、假设与结果 |
+|---|---|---|---|---|---|---|
+| JASO-DEPENDS-VERUS-01 | 接受的列表 ≤32 项、取值全合法、无重名；报上限时前 32 项无重名且取值全合法；≤32 项且合法不重名必接受；比较次数 ≤1024，与项数无关；去掉窗口的负例必败 | 模型 `verification/toolbox/verus/jaso_depends.rs`（对应 `Manifest::parse` 的 `core.depends` 分支），负例 `jaso_depends_bad.rs` | Verus + Z3 | model | `bash verification/toolbox/run-jaso-depends-suite.sh` 第 1 步 | 4 verified / 0 errors；负例 1 error（循环不变式不成立）。**假设**：模型用整数表示名字，字符串切分与逐行扫描不在模型内 |
+| JASO-DEPENDS-PROPTEST-01 | 多行、含重名与坏项的随机依赖列表，判定与按规则写的参考实现一致 | `verification/toolbox/tests/jaso.rs` `depends_scan_matches_reference` | Proptest | tested | 套件第 2 步 | 通过；套件 9 passed，jaso 宿主 57 passed（含百万项回归 `depends_scan_is_linear_in_entries`，未设时间断言，退化时表现为测试长时间不结束） |
+| JASO-DEPENDS-MIRI-01 | 清单规则与依赖路径无未定义行为 | `tests::{manifest_rules,version_ranges_and_dependencies}` | Miri | tested | 套件第 3 步 | 2 passed；百万项回归不在 Miri 内 |
+| JASO-DEPENDS-FUZZ-01 | 任意字节不 panic；接受的清单依赖 ≤32 项且无重名（本轮新增断言） | `verification/toolbox/fuzz/fuzz_targets/jaso_parse.rs` | cargo-fuzz / libFuzzer | tested | 套件第 4 步 | 100 万次、seed=1、0 崩溃，cov 1981 |
+| JASO-DEPENDS-KANI-NA | — | `Manifest::parse` | Kani | N/A | — | N/A：试过两个单字节符号名字的完整解析 harness（unwind 70），约 16 分钟仍停在符号执行阶段（UTF-8 校验循环第 59 轮，CBMC 2.4 GB），已中止，未得到结论；窗口判断本身只是一次整数比较。替代证据：上面的 Verus 模型与 Proptest 参考对照。**未覆盖**：实际字符串解析的有界证明 |
+| JASO-DEPENDS-LOOM-NA | — | `Manifest::parse` | Loom | N/A | — | N/A：纯函数，只借用输入，无原子量、锁或共享可变状态。替代证据：同上 |

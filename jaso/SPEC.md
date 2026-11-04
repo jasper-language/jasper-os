@@ -360,6 +360,10 @@ Order inside the steps (normative; the reference implementation follows it):
 * step 6: manifest lines in order (first bad line wins); after all lines, missing keys in the order `core.name`,
   `core.version`, `core.abi`, `core.stage`; then `manifest.stage`, `platform.abi`, `image.exports_mismatch`.
   `core.depends`, `core.requires` and `core.exports` limits are reported on the line that exceeds them.
+  Within such a line every entry is still value-checked first (`manifest.value` wins over `manifest.limit`).
+  `core.depends` uniqueness is checked for the first 32 entries of the manifest only: a line that exceeds the limit
+  reports `manifest.limit` even if a name repeats among the entries past the 32nd, so the check stays linear in the
+  manifest size.
 * step 7, per Ext section in directory order: layout (`extension.malformed`) → same name as an earlier Ext
   (`extension.duplicate`) → critical flag of a known `(name, version)` (`extension.malformed`) or unknown critical
   (`extension.critical`); after all sections, the Hybrid requirement.

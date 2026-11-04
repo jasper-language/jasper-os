@@ -1,9 +1,10 @@
 //! `.jaso` format 1 的属性测试（Proptest，固定种子 + 收缩）：
 //! * 随机合格输入构建 → 读取往返一致，由文件还原再写出逐字节相同；
 //! * 对合格文件做任意改写并回填长度与摘要，读取只给出 Ok 或静态错误码，从不 panic；
-//! * 版本区间与参考求值一致；依赖列表切分与生成时的结构一致。
+//! * 版本区间与参考求值一致；依赖列表切分与生成时的结构一致；依赖查重与上限判定和参考实现一致。
 //! `seed_fuzz_corpus` 把几份合格文件写进入库的 cargo-fuzz 种子目录 `fuzz/seeds/jaso_parse`（内容确定，可重复执行）。
 use jaso::build::{Builder, ExtensionIn, PlatformIn, SegmentIn};
+use jaso::manifest::ManifestError;
 use jaso::{Arch, Jaso, Manifest, ModuleKind, Stage, VersionRange, DIGEST_OFFSET, FLAG_R, FLAG_W, FLAG_X, PAGE};
 use proptest::prelude::*;
 
@@ -89,6 +90,43 @@ proptest! {
             match o { 0 => v >= w, 1 => v > w, 2 => v <= w, 3 => v < w, _ => v == w }
         });
         prop_assert_eq!(r.contains(v), want);
+    }
+
+    // 与平方参考实现对照：按「前 32 项查重、其余只校验取值、行末判上限」逐行判定。
+    #[test]
+    fn depends_scan_matches_reference(lines in proptest::collection::vec(proptest::collection::vec(0u32..40, 1..24), 1..5), bad in proptest::option::of(0usize..80)) {
+        let mut at = 0usize;
+        let rendered: Vec<Vec<String>> = lines.iter().map(|l| l.iter().map(|n| {
+            let s = if bad == Some(at) { "BAD".to_string() } else { format!("m{}", n) };
+            at += 1;
+            s
+        }).collect()).collect();
+        let text = format!("core.name = a\ncore.version = 1.0.0\ncore.abi = c.v1\ncore.stage = runtime\n{}", rendered.iter().map(|l| format!("core.depends = {}\n", l.join(","))).collect::<String>());
+        let mut seen: Vec<&str> = Vec::new();
+        let mut count = 0usize;
+        let mut want = Ok(());
+        'scan: for (no, l) in rendered.iter().enumerate() {
+            let line = no as u32 + 5;
+            for item in l {
+                if item == "BAD" {
+                    want = Err(ManifestError::BadValue(line));
+                    break 'scan;
+                }
+                if count < 32 && seen.contains(&item.as_str()) {
+                    want = Err(ManifestError::Duplicate(line));
+                    break 'scan;
+                }
+                if count < 32 {
+                    seen.push(item);
+                }
+                count += 1;
+            }
+            if count > 32 {
+                want = Err(ManifestError::Limit(line));
+                break 'scan;
+            }
+        }
+        prop_assert_eq!(Manifest::parse(&text).map(|_| ()), want);
     }
 
     #[test]

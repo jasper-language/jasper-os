@@ -409,6 +409,32 @@ fn version_ranges_and_dependencies() {
     assert_eq!(p("core.runtime = >=0.1\ncore.runtime = >=0.1\n").unwrap_err(), ManifestError::Duplicate(6));
     let many: String = (0..33).map(|i| std::format!("core.depends = m{}\n", i)).collect();
     assert_eq!(p(&many).unwrap_err(), ManifestError::Limit(37));
+    depends_uniqueness_window(&p);
+}
+
+/// 重名只在前 32 项内检查，超出上限的项仍校验取值（SPEC §12.1）。
+fn depends_uniqueness_window(p: &dyn Fn(&str) -> Result<(), ManifestError>) {
+    let line = |names: &[String]| std::format!("core.depends = {}\n", names.join(", "));
+    let mut names: Vec<String> = (0..32).map(|i| std::format!("m{}", i)).collect();
+    assert_eq!(p(&line(&names)), Ok(()));
+    // 第 32 项与第 1 项重名：仍在窗口内
+    names[31] = "m0".into();
+    assert_eq!(p(&line(&names)), Err(ManifestError::Duplicate(5)));
+    names[31] = "m31".into();
+    // 第 33 项超出上限：即使重名也只报上限
+    names.push("m0".into());
+    assert_eq!(p(&line(&names)), Err(ManifestError::Limit(5)));
+    // 超出上限的行里，后面的坏项优先于上限
+    names.push("BAD".into());
+    assert_eq!(p(&line(&names)), Err(ManifestError::BadValue(5)));
+}
+
+/// 回归：一行百万项的未验证清单必须线性解析完（旧实现按项重扫，这里要跑数小时）。
+#[test]
+fn depends_scan_is_linear_in_entries() {
+    let names: Vec<String> = (0..1_000_000).map(|i| std::format!("m{}", i)).collect();
+    let text = std::format!("{}core.depends = {}\n", "core.name = a\ncore.version = 1.0.0\ncore.abi = c.v1\ncore.stage = runtime\n", names.join(","));
+    assert_eq!(Manifest::parse(&text).unwrap_err(), ManifestError::Limit(5));
 }
 
 #[test]

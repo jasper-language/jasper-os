@@ -346,15 +346,18 @@ impl<'a> Manifest<'a> {
                 "core.depends" => {
                     for (i, d) in dependencies(v).enumerate() {
                         let d = d.ok_or(bad)?;
-                        // 与此前各行及本行此前各项都不得重名
-                        let earlier = entries(text)
-                            .take_while(|(m, _)| *m < n)
-                            .filter_map(|(_, kv)| kv)
-                            .filter(|(k, _)| *k == "core.depends")
-                            .flat_map(|(_, v)| dependencies(v))
-                            .chain(dependencies(v).take(i));
-                        if earlier.flatten().any(|e| e.name == d.name) {
-                            return Err(ManifestError::Duplicate(n));
+                        // 与此前各行及本行此前各项都不得重名。只查前 MAX_DEPENDS 项（SPEC §12.1）：超出上限的项已注定
+                        // 报 manifest.limit，再查会让验签前的未验证清单按项数平方耗时；这些项仍要校验取值。
+                        if depends < MAX_DEPENDS {
+                            let earlier = entries(text)
+                                .take_while(|(m, _)| *m < n)
+                                .filter_map(|(_, kv)| kv)
+                                .filter(|(k, _)| *k == "core.depends")
+                                .flat_map(|(_, v)| dependencies(v))
+                                .chain(dependencies(v).take(i));
+                            if earlier.flatten().any(|e| e.name == d.name) {
+                                return Err(ManifestError::Duplicate(n));
+                            }
                         }
                         depends += 1;
                     }
