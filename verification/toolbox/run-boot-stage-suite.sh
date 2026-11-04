@@ -56,14 +56,16 @@ echo "== 4/6 cargo-fuzz =="
 
 echo "== 5/6 Kani =="
 for h in $HARNESSES; do
-  cargo kani -p kernel-core --harness "$h" > "$out/kani-$h.log" 2>&1
+  # 单个 harness 上限 10 分钟、虚拟内存 3.5 GB，全虚拟机同时只跑一个。
+  # Per-harness cap: 10 minutes and 3.5 GB of address space; one at a time in the VM.
+  flock /tmp/jasper-kani.lock bash -c "ulimit -v 3500000; timeout 600 cargo kani -p kernel-core --harness $h" > "$out/kani-$h.log" 2>&1
 done
 
 echo "== 6/6 Loom =="
 # N/A：跟踪器只由引导处理器上的内核主流程独占持有（kmain 的局部变量，不是静态量、不跨核共享），
 # 阶段图是编译期常量，capacity 解析是纯函数；没有共享可变状态或线程交错可供 Loom 探索。
 # 替代证据：const 断言 graph_well_formed(&GRAPH)；Kani 对任意 ≤12 步操作序列证明跟踪器不变量；
-# 内核定点验收中 9 个阶段按序完成（done_mask=0x1ff）。
+# 内核定点验收中 10 个阶段按序完成（done_mask=0x3ff）。
 printf 'N/A: tracker is a BSP-local value, graph is const, parse is pure; no shared mutable state\n' > "$out/loom.log"
 
 grep -Eq '[1-9][0-9]* verified, 0 errors' "$out/verus.log"

@@ -58,7 +58,9 @@ echo "== 4/6 cargo-fuzz =="
 
 echo "== 5/6 Kani =="
 for h in $HARNESSES; do
-  cargo kani -p kernel-core --harness "$h" > "$out/kani-$h.log" 2>&1
+  # 单个 harness 上限 10 分钟、虚拟内存 3.5 GB，全虚拟机同时只跑一个。
+  # Per-harness cap: 10 minutes and 3.5 GB of address space; one at a time in the VM.
+  flock /tmp/jasper-kani.lock bash -c "ulimit -v 3500000; timeout 600 cargo kani -p kernel-core --harness $h" > "$out/kani-$h.log" 2>&1
 done
 
 echo "== 6/6 Loom =="
