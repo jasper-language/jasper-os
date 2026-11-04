@@ -26,7 +26,7 @@ for h in dotted_cursor_stays_in_bounds type_depth_cap_is_enforced; do
 done
 grep -Eq '[1-9][0-9]* verified, 0 errors' "$out/verus.log"
 grep -Eq 'error|verified, [1-9]' "$out/verus-bad.log"
-grep -q 'test result: ok. 56 passed' "$out/host.log"
+grep -q 'test result: ok. 57 passed' "$out/host.log"
 grep -q 'test result: ok. 3 passed; 0 failed' "$out/proptest.log"
 grep -q 'test result: ok. 5 passed; 0 failed' "$out/miri.log"
 grep -q 'Done 2000000 runs' "$out/fuzz.log"
