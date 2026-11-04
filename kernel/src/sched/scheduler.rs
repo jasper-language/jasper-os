@@ -2548,6 +2548,18 @@ impl Scheduler {
     ///
     /// 返回需要切换时的原因（[`Cause`] 中的名字）；`preemption = false` 时只记账与唤醒、从不要求切换
     /// （被唤醒的任务等当前任务主动让出）。
+    /// 补记被前进保证推迟的 tick：只补运行量记账，唤醒与调度决定由随后的 [`Self::tick`] 统一做。
+    /// Settle the accounting of ticks deferred by the forward-progress guard.
+    pub fn settle_deferred_ticks(&mut self, deferred: u32, now: u64) {
+        let c = this_cpu();
+        let cur = leaf_current(c);
+        for _ in 0..deferred {
+            self.account(c);
+            self.charge_groups(cur);
+            self.charge_rt(cur, now);
+            self.scan.ticks += 1;
+        }
+    }
     pub fn tick(&mut self, now: u64, preemption: bool) -> Option<&'static str> {
         if let Some((group,_,deadline,_,None))=self.budget_window {
             if now>=deadline {

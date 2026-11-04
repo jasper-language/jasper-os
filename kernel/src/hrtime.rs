@@ -13,6 +13,12 @@ pub fn now()->Option<u64>{
  let elapsed=crate::arch::clock_counter().checked_sub(EPOCH.load(Ordering::Relaxed))?;
  kernel_core::timer_units::counter_ns(elapsed,hz)
 }
+/// 一个 tick 对应的时钟计数；未校准时无上界。
+pub fn tick_counts()->u64 {
+ let hz=HZ.load(Ordering::Acquire);if hz==0 {u64::MAX} else {hz/crate::config::ACTIVE.clock.timer_hz as u64}
+}
+/// 时钟计数换算为纳秒；未校准或溢出时 `None`。
+pub fn counts_to_ns(counts:u64)->Option<u64> {kernel_core::timer_units::counter_ns(counts,HZ.load(Ordering::Acquire))}
 pub fn enable(){assert!(ready());ENABLED.store(true,Ordering::Release);}
 pub fn enabled()->bool{ENABLED.load(Ordering::Acquire)}
 pub const fn tick_ns()->u64{1_000_000_000/crate::config::ACTIVE.clock.timer_hz as u64}

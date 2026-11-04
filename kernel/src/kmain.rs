@@ -413,6 +413,8 @@ pub fn start(boot: &'static BootSpec) -> ! {
     // issue #2：高精度期限事件增量同步计数——无变化的槽位不写堆；计数必须守恒。
     // Deadline sync counters: unchanged slots write nothing; counters must balance.
     let ns_sync = sched::ns_sync_stats();
+    let (timer_full, timer_bsp, timer_highres, timer_cost) = sched::timer_progress_stats();
+    kprintln!("[JSR-TIMER-PROGRESS] full={} deferred_tick={} deferred_highres={} max_cost={}", timer_full, timer_bsp, timer_highres, timer_cost);
     kprintln!(
         "[JSR-NS-SYNC] passes={} synced={} unchanged={} writes={} inserted={} rescheduled={} moved={} removed={} balanced={}",
         ns_sync.passes, ns_sync.synced, ns_sync.unchanged, ns_sync.writes(),

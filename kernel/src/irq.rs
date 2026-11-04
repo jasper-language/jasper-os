@@ -66,12 +66,19 @@ static PENDING: Mutex<PendingQueue> =
 pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
     match line {
         IrqLine::Timer => {
+            let entry = crate::arch::clock_counter();
             crate::smp::on_local_tick();
             device::on_cpu_tick();
             device::on_balance_tick();
             enqueue(line);
+            // 时钟永远前进；调度事务要给被打断的代码留出前进的时间。
+            // 推迟时也不做下面的退出检查（它本身就是一次调度事务），留给下一次完整事务。
+            if !sched::timer_admit(entry) {
+                sched::defer_timer_tick();
+                return;
+            }
             crate::mm::pressure::sync_events();
-            sched::on_timer_interrupt();
+            sched::on_timer_interrupt(entry);
         }
         // 每核事件只更新本处理器的每核数据，不进全局延迟队列（那是引导处理器主循环的队列）
         IrqLine::LocalTimer => {
@@ -79,7 +86,14 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
             let diagnostic=crate::rt2_demo::timer_irq();
             #[cfg(not(feature="rt2-verify"))]
             let diagnostic=false;
-            if !diagnostic && crate::hrtime::enabled() {sched::on_highres_timer();}
+            if !diagnostic && crate::hrtime::enabled() {
+                let entry = crate::arch::clock_counter();
+                if !sched::timer_admit(entry) {
+                    sched::rearm_after_defer(entry);
+                    return;
+                }
+                sched::on_highres_timer(entry);
+            }
             else if !diagnostic {
                 crate::smp::on_local_tick();
                 device::on_cpu_tick();

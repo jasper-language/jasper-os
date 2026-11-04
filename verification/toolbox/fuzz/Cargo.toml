@@ -219,3 +219,10 @@ path = "fuzz_targets/module_mgr.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "timer_progress"
+path = "fuzz_targets/timer_progress.rs"
+test = false
+doc = false
+bench = false

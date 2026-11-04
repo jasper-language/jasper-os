@@ -302,6 +302,7 @@ hang_watch_off() {
 # boot_qemu <名> <时限> <串口日志> <QEMU 参数...>：启动一次 x86_64 QEMU，退出码放 BOOT_RC。
 # 撞时限且串口没有任何引导第四阶段输出（^INFO : ）时，客户机还没进内核（2026-11-04 实测：固件 int 13h 读盘报错，
 # 引导第二阶段 fail('z')，panic 只写 VGA 后 hlt）：这不是内核的结果，留下第一次的现场并重跑一次；第二次的结果就是最终结果。
+# 固件调试输出（端口 0x402）存 firmware-<名>.log，下次读盘报错时能看到是否固件超时（SeaBIOS 打印 WARNING - Timeout）。
 BOOT_RETRIES=""
 boot_qemu() {
   local name="$1" limit="$2" serial="$3" attempt
@@ -309,6 +310,7 @@ boot_qemu() {
   for attempt in 1 2; do
     hang_watch_on "$name" "$limit"
     qrun timeout "$limit" "$QEMU" "${ACCEL_ARGS[@]}" "$@" -serial stdio -display none "${MON_ARGS[@]}" -no-reboot \
+      -chardev "file,id=fw,path=$OUT/firmware-$name.log" -device isa-debugcon,iobase=0x402,chardev=fw \
       -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$serial" 2>&1
     BOOT_RC=$?
     hang_watch_off
@@ -316,6 +318,7 @@ boot_qemu() {
     BOOT_RETRIES="$BOOT_RETRIES $name"
     mv "$serial" "$serial.attempt1"
     [ -f "$OUT/hang-$name.txt" ] && mv "$OUT/hang-$name.txt" "$OUT/hang-$name.attempt1.txt"
+    mv "$OUT/firmware-$name.log" "$OUT/firmware-$name.attempt1.log"
     echo "  $name：撞时限且未进内核，重跑一次"
   done
 }
@@ -558,6 +561,17 @@ check_boot_stage() {   # issue #7：十个全局启动阶段按声明顺序各�
     record BOOT-STAGE PASS "十个阶段按序完成（done_mask=0x3ff），无拒绝、无失败"
   else
     record BOOT-STAGE FAIL "阶段序列=[$order]，或缺 done_mask=0x3ff，或出现 refused/failed"
+  fi
+}
+
+check_timer_progress() {   # 定时器中断活锁回归：-icount 下时钟相对指令很密时，启动仍能前进（修复前 shift=8、10 卡死）
+  local detail
+  if ! has '^\[JSR-TIMER-PROGRESS\] full=[1-9]'; then
+    record TIMER-PROGRESS FAIL "串口缺少前进保证计数"
+  elif detail=$(OUT="$OUT/timer-progress" bash "$ROOT/scripts/timer-progress-check.sh" "$IMG" 2>&1); then
+    record TIMER-PROGRESS PASS "$(echo "$detail" | wc -l) 个 icount 档位都在时限内走到第 1200 行；$(grep -m1 -oE '^\[JSR-TIMER-PROGRESS\].*' "$SERIAL")"
+  else
+    record TIMER-PROGRESS FAIL "$(echo "$detail" | grep FAIL | head -3 | tr '\n' ' ')"
   fi
 }
 
@@ -2511,11 +2525,11 @@ if [ "$SPOT" -eq 1 ]; then
     if declare -F "check_$c" >/dev/null; then "check_$c"; else record "$c" FAIL "定点验收：没有名为 check_$c 的检查"; fi
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
-  check_m10; check_isa; check_m11; check_boot_stage; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+  check_m10; check_isa; check_m11; check_boot_stage; check_timer_progress; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
   check_pol1; check_pol2; check_asm1; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
-  check_m10; check_isa; check_m11; check_boot_stage; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+  check_m10; check_isa; check_m11; check_boot_stage; check_timer_progress; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
   check_pol1; check_pol2; check_asm1; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
 fi
 

@@ -401,7 +401,10 @@ pub fn ns_sync_stats() -> kernel_core::deadline_forest::SyncStats {
 /// 选择路径的遍历量统计（见 [`scheduler::ScanStats`]）。
 /// Selection-path scan statistics.
 pub fn scan_stats() -> scheduler::ScanStats {
-    with(|s| s.scan_stats())
+    let mut stats = with(|s| s.scan_stats());
+    // 被前进保证推迟、还没补记的 tick 也已经流逝
+    stats.ticks += u64::from(timer_progress_load(0).deferred);
+    stats
 }
 
 /// 清零选择路径的遍历量统计。
@@ -745,7 +748,84 @@ pub fn sleep_until_ns(deadline:u64)->Result<(),()> {
     if with_mut(|s|s.block_current_ns(deadline)){yield_with_cause(Cause::SLEEP);}
     cpu::irq_restore(irq);Ok(())
 }
-pub fn on_highres_timer() {
+/// 每个处理器的定时器前进状态。只在该处理器关中断时访问，所以不需要锁；用原子量是为了能放进静态数组。
+struct TimerProgressCell {
+    last_exit: kernel_core::sync::Atomic64,
+    cost: kernel_core::sync::Atomic64,
+    deferred: AtomicU32,
+    short: AtomicU32,
+}
+static TIMER_PROGRESS: [TimerProgressCell; kernel_core::smp::MAX_CPUS] =
+    [const { TimerProgressCell { last_exit: kernel_core::sync::Atomic64::new(0), cost: kernel_core::sync::Atomic64::new(0), deferred: AtomicU32::new(0), short: AtomicU32::new(0) } }; kernel_core::smp::MAX_CPUS];
+/// 完整定时器事务数、引导处理器推迟的时钟事件数、高精度事件推迟数、记录到的最大开销（时钟计数，未封顶）。
+static TIMER_FULL: kernel_core::sync::Atomic64 = kernel_core::sync::Atomic64::new(0);
+static TIMER_DEFERRED_BSP: kernel_core::sync::Atomic64 = kernel_core::sync::Atomic64::new(0);
+static TIMER_DEFERRED_HIGHRES: kernel_core::sync::Atomic64 = kernel_core::sync::Atomic64::new(0);
+static TIMER_MAX_COST: kernel_core::sync::Atomic64 = kernel_core::sync::Atomic64::new(0);
+
+fn timer_progress_load(c: usize) -> kernel_core::timer_progress::Progress {
+    let cell = &TIMER_PROGRESS[c];
+    kernel_core::timer_progress::Progress {
+        last_exit: cell.last_exit.load(Ordering::Relaxed),
+        cost: cell.cost.load(Ordering::Relaxed),
+        deferred: cell.deferred.load(Ordering::Relaxed),
+        short: cell.short.load(Ordering::Relaxed),
+    }
+}
+
+fn timer_progress_update<R>(c: usize, f: impl FnOnce(&mut kernel_core::timer_progress::Progress) -> R) -> R {
+    let mut p = timer_progress_load(c);
+    let r = f(&mut p);
+    let cell = &TIMER_PROGRESS[c];
+    cell.last_exit.store(p.last_exit, Ordering::Relaxed);
+    cell.cost.store(p.cost, Ordering::Relaxed);
+    cell.deferred.store(p.deferred, Ordering::Relaxed);
+    cell.short.store(p.short, Ordering::Relaxed);
+    r
+}
+
+/// 这次定时器事件能否做完整事务（`entry` 是中断入口读到的时钟计数）。
+/// Whether this timer event may run a full scheduler transaction.
+pub fn timer_admit(entry: u64) -> bool {
+    timer_progress_load(cpu::cpu_index()).admit(entry)
+}
+
+fn timer_take_deferred() -> u32 {
+    timer_progress_update(cpu::cpu_index(), |p| p.take_deferred())
+}
+
+fn timer_record(entry: u64) {
+    let exit = crate::arch::clock_counter();
+    timer_progress_update(cpu::cpu_index(), |p| p.record(entry, exit, crate::hrtime::tick_counts()));
+    TIMER_FULL.fetch_add(1, Ordering::Relaxed);
+    let cost = exit.saturating_sub(entry);
+    if cost > TIMER_MAX_COST.load(Ordering::Relaxed) { TIMER_MAX_COST.store(cost, Ordering::Relaxed); }
+}
+
+/// 高精度事件被推迟：一次性定时器已经用掉，到可以做完整事务时再触发一次。
+pub fn rearm_after_defer(now: u64) {
+    TIMER_DEFERRED_HIGHRES.fetch_add(1, Ordering::Relaxed);
+    let left = timer_progress_load(cpu::cpu_index()).remaining(now);
+    let mut delay = crate::hrtime::counts_to_ns(left).unwrap_or(crate::hrtime::tick_ns()).max(1);
+    // SAFETY：中断上下文、关中断，本处理器的定时器模式由本路径独占；到期后重新走事务判定。
+    while !unsafe { crate::arch::timer_arm_after_ns(delay) } {
+        assert!(delay > 1, "high-res timer unsupported after calibration");
+        delay = (delay / 2).max(1);
+    }
+}
+
+/// 前进保证的计数：（完整事务数，引导处理器推迟的时钟事件数，推迟的高精度事件数，最大事务开销）。
+/// Counters of the forward-progress guard.
+pub fn timer_progress_stats() -> (u64, u64, u64, u64) {
+    (
+        TIMER_FULL.load(Ordering::Relaxed),
+        TIMER_DEFERRED_BSP.load(Ordering::Relaxed),
+        TIMER_DEFERRED_HIGHRES.load(Ordering::Relaxed),
+        TIMER_MAX_COST.load(Ordering::Relaxed),
+    )
+}
+
+pub fn on_highres_timer(entry: u64) {
     crate::smp::percpu::this().take_resched();
     // Keep the due publication, scheduling decision and switch publication in
     // one transaction.  The old path returned a cause and immediately took
@@ -755,6 +835,7 @@ pub fn on_highres_timer() {
         let (credits,cause)=s.highres_event(PREEMPTION.load(Ordering::Relaxed));
         (credits,cause.and_then(|cause|s.prepare_switch(cause)))
     });
+    timer_record(entry);
     if cpu::cpu_index()!=0 {crate::irq::on_elapsed_cpu_ticks(credits);}
     if let Some(plan)=plan {execute_switch_plan(plan);}
 }
@@ -1053,15 +1134,27 @@ impl kernel_core::wait::TimeSource for TickClock {
 /// 每个 tick：记账、唤醒到期的睡眠任务、询问策略是否抢占；需要时就在中断上下文里直接切换：
 /// 被切走任务的中断帧留在它自己的栈上，将来切回时从这里返回、经中断返回恢复它被打断的位置与中断标志。
 /// EOI 必须先发，否则在切回本任务之前中断控制器不会再投递定时器中断。
-pub fn on_timer_interrupt() {
+pub fn on_timer_interrupt(entry: u64) {
     // Full locked decision below consumes requests already published before it.
     crate::smp::percpu::this().take_resched();
     let now = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
     let preemption = PREEMPTION.load(Ordering::Relaxed);
+    let deferred = timer_take_deferred();
     let plan = with_mut_from(Origin::BspTick, |s| {
+        s.settle_deferred_ticks(deferred, now);
         s.tick(now, preemption).and_then(|cause| s.prepare_switch(cause))
     });
+    timer_record(entry);
     if let Some(plan) = plan { execute_switch_plan(plan); }
+}
+
+/// 引导处理器时钟中断的简化路径：只推进全局时钟，运行量记账留到下一次完整事务。
+/// Clock-only path of a boot-processor timer event.
+pub fn defer_timer_tick() {
+    TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+    let c = cpu::cpu_index();
+    timer_progress_update(c, |p| p.defer());
+    TIMER_DEFERRED_BSP.fetch_add(1, Ordering::Relaxed);
 }
 
 /// 其他处理器的本地定时器中断入口（中断上下文，EOI 之后）：给本处理器正在运行的任务记账、
