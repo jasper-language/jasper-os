@@ -274,15 +274,33 @@ if command -v truncate >/dev/null; then
 else
   dd if=/dev/zero of="$BLANK" bs=1M count=1 status=none
 fi
+# 撞时限前留现场：QEMU 开 monitor 套接字，时限前 60 秒由 qemu-hang-dump.py 取寄存器与栈（hang-<名>.txt）；QEMU 正常退出后撤掉。
+HANG_PID=""
+hang_watch_on() {
+  local name="$1" limit="$2" sock="/tmp/jasper-mon-$$-$1.sock"
+  MON_ARGS=(-monitor "unix:$sock,server,nowait")
+  HANG_SOCK="$sock"
+  if command -v python3 >/dev/null && [ "$limit" -gt 120 ]; then
+    python3 "$ROOT/scripts/qemu-hang-dump.py" "$sock" "$((limit - 60))" "$OUT/hang-$name.txt" 2>/dev/null &
+    HANG_PID=$!
+  fi
+}
+hang_watch_off() {
+  if [ -n "$HANG_PID" ]; then kill "$HANG_PID" 2>/dev/null; wait "$HANG_PID" 2>/dev/null; HANG_PID=""; fi
+  rm -f "$HANG_SOCK"
+  return 0
+}
 VIRTIO_ARGS=(-device virtio-rng-pci -device virtio-net-pci,netdev=n0 -netdev user,id=n0 \
   -device virtio-blk-pci,drive=d1 -drive if=none,id=d1,file="$BLANK",format=raw)
 if [ "$BUILD_RC" -eq 0 ]; then
   echo "== QEMU 真实启动 =="
   sleep "$BOOT_GAP"
+  hang_watch_on up "$QEMU_TIMEOUT"
   qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" \
-    -serial stdio -display none -monitor none -no-reboot \
+    -serial stdio -display none "${MON_ARGS[@]}" -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$SERIAL" 2>&1
   QRC=$?
+  hang_watch_off
 fi
 # 多处理器（SMP-1）：同一镜像以 4 个处理器再真实启动一次（其余参数不变）；上面的单处理器启动同时验证「只有引导处理器」的路径。
 SERIAL_SMP4="$OUT/serial-smp4.log"
@@ -290,10 +308,12 @@ QRC_SMP4=-1
 if [ "$BUILD_RC" -eq 0 ] && [ "$SPOT" -eq 0 ]; then
   echo "== QEMU 真实启动（x86_64，4 个处理器）=="
   sleep "$BOOT_GAP"
+  hang_watch_on smp4 "$QEMU_TIMEOUT"
   qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4 \
-    -serial stdio -display none -monitor none -no-reboot \
+    -serial stdio -display none "${MON_ARGS[@]}" -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$SERIAL_SMP4" 2>&1
   QRC_SMP4=$?
+  hang_watch_off
 fi
 # 多处理器（SMP-1）：同一镜像再以 8 个处理器真实启动一次。8 处理器启动排在 4 处理器之后、q35 之前，
 # 严格顺序执行（QEMU 一次只开一个），避免计时类检查互相抢核；退出码判定与 4 处理器相同。
@@ -302,10 +322,12 @@ QRC_SMP8=-1
 if [ "$BUILD_RC" -eq 0 ] && [ "$SPOT" -eq 0 ]; then
   echo "== QEMU 真实启动（x86_64，8 个处理器）=="
   sleep "$BOOT_GAP"
+  hang_watch_on smp8 "$QEMU_TIMEOUT_SMP8"
   qrun timeout "$QEMU_TIMEOUT_SMP8" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 8 \
-    -serial stdio -display none -monitor none -no-reboot \
+    -serial stdio -display none "${MON_ARGS[@]}" -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$SERIAL_SMP8" 2>&1
   QRC_SMP8=$?
+  hang_watch_off
 fi
 # DRV-1B：q35 机型的 4 处理器启动。q35 提供 ACPI MCFG，配置空间必须走 ECAM（不可缓存 MMIO），
 # 与上面 pc 机型的传统端口机制形成对照；同一组 virtio 设备仍须全部枚举到。
@@ -314,10 +336,12 @@ QRC_Q35=-1
 if [ "$BUILD_RC" -eq 0 ] && [ "$SPOT" -eq 0 ]; then
   echo "== QEMU 真实启动（x86_64 q35，4 个处理器，ECAM）=="
   sleep "$BOOT_GAP"
+  hang_watch_on q35 "$QEMU_TIMEOUT"
   qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -M q35 -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4 \
-    -serial stdio -display none -monitor none -no-reboot \
+    -serial stdio -display none "${MON_ARGS[@]}" -no-reboot \
     -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$SERIAL_Q35" 2>&1
   QRC_Q35=$?
+  hang_watch_off
 fi
 # AArch64（ISA-1）：同一内核以软浮点目标构建（不内嵌用户程序），在 QEMU virt 上直接装载 ELF 启动；
 # 退出经半主机（成功 33、失败 35，与 x86_64 一致）。缺少 qemu-system-aarch64 时如实记为失败。
