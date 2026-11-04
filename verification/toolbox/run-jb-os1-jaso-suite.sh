@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # JB-OS1 `.jaso` format 1 读取器六步链（仅在构建虚拟机经 vm-run.sh 运行）：
-# Verus/Z3 → Proptest → Miri → cargo-fuzz → Kani → Loom（Loom 不适用，见登记表）。
+# Verus/Z3 → Proptest → Miri → cargo-fuzz → Loom（Kani 发版时验证）（Loom 不适用，见登记表）。
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/kani-gate.sh"
 cd "$(dirname "$0")/../.."
 out=evidence/jb-os1/jaso-suite
 mkdir -p "$out"
@@ -20,16 +21,20 @@ cargo +nightly miri test -p jaso --features pack --lib -- tests::roundtrip tests
   tests::managed_images tests::multiple_images_and_selection tests::migrate_format0 tests::version_ranges_and_dependencies \
   > "$out/miri.log" 2>&1
 (cd verification/toolbox/fuzz && mkdir -p corpus/jaso_parse && cargo fuzz run jaso_parse corpus/jaso_parse seeds/jaso_parse -- -runs=2000000 -seed=1) > "$out/fuzz.log" 2>&1
-for h in range_within_is_exact extension_layout_is_bounded platform_record_rules export_entry_is_bounded; do
-  cargo kani -p jaso --harness "$h" > "$out/kani-$h.log" 2>&1
-done
+if kani_enabled; then
+  for h in range_within_is_exact extension_layout_is_bounded platform_record_rules export_entry_is_bounded; do
+    cargo kani -p jaso --harness "$h" > "$out/kani-$h.log" 2>&1
+  done
+fi
 grep -Eq '[1-9][0-9]* verified, 0 errors' "$out/verus.log"
 grep -Eq 'error|verified, [1-9]' "$out/verus-bad.log"
 grep -q 'test result: ok. 57 passed' "$out/host.log"
 grep -q 'test result: ok. 9 passed; 0 failed' "$out/proptest.log"
 grep -q 'test result: ok. 7 passed; 0 failed' "$out/miri.log"
 grep -q 'Done 2000000 runs' "$out/fuzz.log"
-for h in range_within_is_exact extension_layout_is_bounded platform_record_rules export_entry_is_bounded; do
-  grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-$h.log"
-done
-printf 'JB-OS1 jaso format 1 Verus/Proptest/Miri/fuzz/Kani completed; Loom N/A (no shared state)\n' | tee "$out/PASS"
+if kani_enabled; then
+  for h in range_within_is_exact extension_layout_is_bounded platform_record_rules export_entry_is_bounded; do
+    grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-$h.log"
+  done
+fi
+printf '%s\n' "JB-OS1 jaso format 1 Verus/Proptest/Miri/fuzz completed; Loom N/A (no shared state); $KANI_STATUS" | tee "$out/PASS"

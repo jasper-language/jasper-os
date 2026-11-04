@@ -2,7 +2,7 @@
 # =============================================================================
 # run-limit-batch-suite.sh —— 主线全量复绿第六片的六步验证链
 #
-# 顺序固定：Verus/Z3 → Proptest → Miri → cargo-fuzz → Kani → Loom。
+# 顺序固定：Verus/Z3 → Proptest → Miri → cargo-fuzz → Loom（Kani 发版时验证）。
 # 范围：kernel-core/src/sched/limit.rs 的 CpuLimit::charge_batch 与 late_ticks（新写：高精度模式下处理器事件
 # 被推迟、一次补交多个 tick 时整组按批计费，「扣费前余额已不为正」的部分记为迟到）。
 # Loom N/A：CpuLimit 是调度器锁内的普通值，charge_batch 无共享可变状态；并发面（调度器锁下的计费与窗口快照
@@ -11,6 +11,7 @@
 # 工具路径由环境变量提供：VERUS 指向 Verus 可执行文件，Z3 默认取同目录的 z3。
 # =============================================================================
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/kani-gate.sh"
 cd "$(dirname "$0")/../.."
 : "${VERUS:?请用 VERUS 环境变量指向 Verus 可执行文件}"
 Z3="${Z3:-$(dirname "$VERUS")/z3}"
@@ -29,7 +30,9 @@ sha256sum \
   > "$out/source.sha256"
 
 rustc --version > "$out/rustc-version.log"
-cargo kani --version > "$out/kani-version.log"
+if kani_enabled; then
+  cargo kani --version > "$out/kani-version.log"
+fi
 cargo fuzz --version > "$out/fuzz-version.log"
 "$Z3" --version > "$out/z3-version.log"
 "$VERUS" --version > "$out/verus-version.log" 2>&1 || true
@@ -54,10 +57,12 @@ cargo +nightly miri test --manifest-path verification/toolbox/Cargo.toml --test 
 echo "== 4/6 cargo-fuzz =="
 (cd verification/toolbox/fuzz && cargo fuzz run limit_batch -- -runs=1000000 -max_len=40) > "$out/fuzz.log" 2>&1
 
-echo "== 5/6 Kani =="
-for h in $HARNESSES; do
-  cargo kani -p kernel-core --harness "$h" > "$out/kani-$h.log" 2>&1
-done
+echo "== 5/6 Kani（$KANI_STATUS）=="
+if kani_enabled; then
+  for h in $HARNESSES; do
+    cargo kani -p kernel-core --harness "$h" > "$out/kani-$h.log" 2>&1
+  done
+fi
 
 echo "== 6/6 Loom =="
 echo "N/A：charge_batch 是调度器锁内的纯值计算，无共享可变状态；替代证据见登记表 MAIN-GREEN-07" > "$out/loom.log"
@@ -68,8 +73,10 @@ grep -q '9 passed; 0 failed' "$out/core-limit.log"
 grep -q '2 passed; 0 failed' "$out/proptest.log"
 grep -q '1 passed; 0 failed' "$out/miri.log"
 grep -q '#1000000.*DONE' "$out/fuzz.log"
-for h in $HARNESSES; do
-  grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-$h.log"
-done
+if kani_enabled; then
+  for h in $HARNESSES; do
+    grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-$h.log"
+  done
+fi
 
-printf 'Limit batch suite: Verus/Proptest/Miri/fuzz/Kani passed, Loom N/A\n' | tee "$out/PASS"
+printf '%s\n' "Limit batch suite: Verus/Proptest/Miri/fuzz passed, Loom N/A; $KANI_STATUS" | tee "$out/PASS"

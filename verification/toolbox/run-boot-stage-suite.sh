@@ -2,7 +2,7 @@
 # =============================================================================
 # run-boot-stage-suite.sh —— 启动阶段图与跟踪器（issue #7 第一切片）的六步验证链
 #
-# 顺序固定：Verus/Z3 → Proptest → Miri → cargo-fuzz → Kani → Loom。
+# 顺序固定：Verus/Z3 → Proptest → Miri → cargo-fuzz → Loom（Kani 发版时验证）。
 # 范围：kernel-core/src/boot_stage.rs（新写：Stage / GRAPH / graph_well_formed / closure / Tracker），
 # kernel/src/kmain.rs 的 stage 包装（经内核定点验收覆盖），以及既有的 kernel-core/src/capacity.rs
 # 启动容量记录 encode / parse（补链：原无验证链；Capacity 阶段读取的不可信输入）。
@@ -10,6 +10,7 @@
 # 工具路径由环境变量提供：VERUS 指向 Verus 可执行文件，Z3 默认取同目录的 z3。
 # =============================================================================
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/kani-gate.sh"
 cd "$(dirname "$0")/../.."
 : "${VERUS:?请用 VERUS 环境变量指向 Verus 可执行文件}"
 Z3="${Z3:-$(dirname "$VERUS")/z3}"
@@ -28,7 +29,9 @@ sha256sum \
   > "$out/source.sha256"
 
 rustc --version > "$out/rustc-version.log"
-cargo kani --version > "$out/kani-version.log"
+if kani_enabled; then
+  cargo kani --version > "$out/kani-version.log"
+fi
 cargo fuzz --version > "$out/fuzz-version.log"
 "$Z3" --version > "$out/z3-version.log"
 "$VERUS" --version > "$out/verus-version.log" 2>&1 || true
@@ -54,12 +57,14 @@ cargo +nightly miri test --manifest-path verification/toolbox/Cargo.toml --test 
 echo "== 4/6 cargo-fuzz =="
 (cd verification/toolbox/fuzz && cargo fuzz run boot_stage -- -runs=1000000 -max_len=128) > "$out/fuzz.log" 2>&1
 
-echo "== 5/6 Kani =="
-for h in $HARNESSES; do
-  # 单个 harness 上限 10 分钟、虚拟内存 3.5 GB，全虚拟机同时只跑一个。
-  # Per-harness cap: 10 minutes and 3.5 GB of address space; one at a time in the VM.
-  flock /tmp/jasper-kani.lock bash -c "ulimit -v 3500000; timeout 600 cargo kani -p kernel-core --harness $h" > "$out/kani-$h.log" 2>&1
-done
+echo "== 5/6 Kani（$KANI_STATUS）=="
+if kani_enabled; then
+  for h in $HARNESSES; do
+    # 单个 harness 上限 10 分钟、虚拟内存 3.5 GB，全虚拟机同时只跑一个。
+    # Per-harness cap: 10 minutes and 3.5 GB of address space; one at a time in the VM.
+    flock /tmp/jasper-kani.lock bash -c "ulimit -v 3500000; timeout 600 cargo kani -p kernel-core --harness $h" > "$out/kani-$h.log" 2>&1
+  done
+fi
 
 echo "== 6/6 Loom =="
 # N/A：跟踪器只由引导处理器上的内核主流程独占持有（kmain 的局部变量，不是静态量、不跨核共享），
@@ -75,8 +80,10 @@ grep -Eq '[1-9][0-9]* passed; 0 failed' "$out/core-capacity.log"
 grep -q '3 passed; 0 failed' "$out/proptest.log"
 grep -q '1 passed; 0 failed' "$out/miri.log"
 grep -q '#1000000.*DONE' "$out/fuzz.log"
-for h in $HARNESSES; do
-  grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-$h.log"
-done
+if kani_enabled; then
+  for h in $HARNESSES; do
+    grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-$h.log"
+  done
+fi
 
-printf 'Boot stage suite: Verus/Proptest/Miri/fuzz/Kani passed; Loom N/A (BSP-local value)\n' | tee "$out/PASS"
+printf '%s\n' "Boot stage suite: Verus/Proptest/Miri/fuzz passed; Loom N/A (BSP-local value); $KANI_STATUS" | tee "$out/PASS"

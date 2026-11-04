@@ -2,7 +2,7 @@
 # =============================================================================
 # run-share-guard-suite.sh —— 主线全量复绿第七片的六步验证链
 #
-# 顺序固定：Verus/Z3 → Proptest → Miri → cargo-fuzz → Kani → Loom。
+# 顺序固定：Verus/Z3 → Proptest → Miri → cargo-fuzz → Loom（Kani 发版时验证）。
 # 范围：kernel-core/src/sched/timeshare.rs 的 preempt_rule / Owed 与 TimeSharePolicy::should_preempt（新写：
 # 补给最低份额的档在本片第一个 tick 记账之前不被「更高档在等」抢占；修正前补给派发后的任何重新判定都会立即
 # 换下它，欠账不偿还，S-2 QoS 用例后台档 150 tick 无进展）。
@@ -12,6 +12,7 @@
 # 工具路径由环境变量提供：VERUS 指向 Verus 可执行文件，Z3 默认取同目录的 z3。
 # =============================================================================
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/kani-gate.sh"
 cd "$(dirname "$0")/../.."
 : "${VERUS:?请用 VERUS 环境变量指向 Verus 可执行文件}"
 Z3="${Z3:-$(dirname "$VERUS")/z3}"
@@ -29,7 +30,9 @@ sha256sum \
   > "$out/source.sha256"
 
 rustc --version > "$out/rustc-version.log"
-cargo kani --version > "$out/kani-version.log"
+if kani_enabled; then
+  cargo kani --version > "$out/kani-version.log"
+fi
 cargo fuzz --version > "$out/fuzz-version.log"
 "$Z3" --version > "$out/z3-version.log"
 "$VERUS" --version > "$out/verus-version.log" 2>&1 || true
@@ -54,10 +57,12 @@ cargo +nightly miri test --manifest-path verification/toolbox/Cargo.toml --test 
 echo "== 4/6 cargo-fuzz =="
 (cd verification/toolbox/fuzz && cargo fuzz run share_guard -- -runs=1000000 -max_len=600) > "$out/fuzz.log" 2>&1
 
-echo "== 5/6 Kani =="
-for h in $HARNESSES; do
-  cargo kani -p kernel-core --harness "$h" > "$out/kani-$h.log" 2>&1
-done
+echo "== 5/6 Kani（$KANI_STATUS）=="
+if kani_enabled; then
+  for h in $HARNESSES; do
+    cargo kani -p kernel-core --harness "$h" > "$out/kani-$h.log" 2>&1
+  done
+fi
 
 echo "== 6/6 Loom =="
 echo "N/A：preempt_rule 是纯函数、TimeSharePolicy 为每核队列锁内的普通值，无共享可变状态；替代证据见登记表 MAIN-GREEN-08" > "$out/loom.log"
@@ -69,8 +74,10 @@ grep -q 'rescued_dispatch_is_not_preempted_before_its_tick ... ok' "$out/core-sc
 grep -q '2 passed; 0 failed' "$out/proptest.log"
 grep -q '1 passed; 0 failed' "$out/miri.log"
 grep -q '#1000000.*DONE' "$out/fuzz.log"
-for h in $HARNESSES; do
-  grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-$h.log"
-done
+if kani_enabled; then
+  for h in $HARNESSES; do
+    grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-$h.log"
+  done
+fi
 
-printf 'Share guard suite: Verus/Proptest/Miri/fuzz/Kani passed, Loom N/A\n' | tee "$out/PASS"
+printf '%s\n' "Share guard suite: Verus/Proptest/Miri/fuzz passed, Loom N/A; $KANI_STATUS" | tee "$out/PASS"
