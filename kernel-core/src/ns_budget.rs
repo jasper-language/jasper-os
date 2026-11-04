@@ -16,7 +16,7 @@ impl Budget {
   if !self.enabled {return Ok(());}
   let mut copy=*self;
   if end>=copy.next {
-   let periods=(end-copy.next)/copy.period+1;
+   let periods=((end-copy.next)/copy.period).checked_add(1).ok_or(Error::Overflow)?;
    copy.next=copy.next.checked_add(periods.checked_mul(copy.period).ok_or(Error::Overflow)?).ok_or(Error::Overflow)?;
    copy.remaining=copy.quota;
    if running {copy.remaining=copy.remaining.saturating_sub(end-start.max(copy.next-copy.period));}
@@ -43,5 +43,7 @@ pub fn utilisation(quota:u64,period:u64)->Result<u32,Error> {
   let mut b=Budget::new(u64::MAX-10,1,5).unwrap();let old=b;
   assert_eq!(b.settle(u64::MAX-10,u64::MAX,true),Err(Error::Overflow));assert_eq!(b,old);
   assert_eq!(b.settle(9,8,true),Err(Error::TimeReversed));assert_eq!(b,old);
+  let mut b=Budget {quota:1,period:1,remaining:1,next:0,enabled:true};let old=b;
+  assert_eq!(b.settle(0,u64::MAX,true),Err(Error::Overflow));assert_eq!(b,old);
  }
 }

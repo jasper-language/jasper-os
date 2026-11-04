@@ -226,3 +226,10 @@ path = "fuzz_targets/timer_progress.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ns_budget"
+path = "fuzz_targets/ns_budget.rs"
+test = false
+doc = false
+bench = false
