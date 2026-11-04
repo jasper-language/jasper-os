@@ -390,6 +390,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "jaso-l1demo"
+version = "0.1.0"
+dependencies = [
+ "jaso-module",
+]
+
+[[package]]
 name = "jaso-module"
 version = "0.1.0"
 dependencies = [

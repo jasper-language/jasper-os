@@ -303,37 +303,53 @@ fn timed_remote_worker() {
     sched::sleep_ticks(30);
     TIMED_CPU.store(crate::arch::cpu_index() as u32 + 1, Ordering::Release);
 }
+/// 停表的目标核仍会被推迟后的本地 tick 叫醒：它恰好在通知发出的同一 tick 醒来时，
+/// 由自己的空闲路径消费到期事件，核间中断随后才到。这一轮没走到被测路径，换一轮再测。
+#[cfg(feature = "fault-inject")]
+const DEADLINE_IPI_ATTEMPTS: u64 = 8;
 fn deadline_owner_contract(n: usize) {
     if n < 2 { return; }
-    let id = TaskId(0x444541444f574e);
     let saved = baseline();
-    TIMED_CPU.store(0, Ordering::Relaxed);
     let old_idle = sched::set_idle_tick(64);
     let mut first = CpuSet::EMPTY; first.insert(1);
     let target = if n > 2 { 2 } else { 1 };
     let mut dest = CpuSet::EMPTY; dest.insert(target);
-    let spawned = quiet(|| sched::spawn_on(id, "deadline-owner", timed_remote_worker, None, first).is_ok());
-    let limit = sched::timer_ticks() + 100;
-    while sched::deadline_owners(id).and_then(|(w,_)|w).is_none() && sched::timer_ticks() < limit { sched::sleep_ticks(1); }
-    let registered = sched::deadline_owners(id).is_some_and(|(w,_)|w == Some(1));
-    let moved = sched::set_affinity(id, dest).is_ok() && sched::deadline_owners(id).is_some_and(|(w,_)|w == Some(target));
-    #[cfg(feature = "fault-inject")]
-    sched::fault_delay_deadline_timer(target, true);
-    let before = sched::deadline_stats().0[target];
-    sched::run();
-    let consumed = sched::deadline_stats().0[target].wrapping_sub(before) > 0;
-    let ran = TIMED_CPU.load(Ordering::Acquire) == target as u32 + 1;
-    #[cfg(feature = "fault-inject")]
-    {
-        let trace = sched::fault_deadline_trace(target).unwrap();
-        let ipi = trace.ipis_after.wrapping_sub(trace.ipis_before);
-        let linked = trace.stopped && trace.consumed && trace.consumer == target
-            && trace.requested_at >= trace.at && trace.consumed_at >= trace.requested_at && ipi > 0;
-        sched::fault_delay_deadline_timer(target, false);
-        check(linked, "延迟本地到期timer后必须关联停表、BSP到期通知、IPI接收和owner消费");
-        kprintln!("[JSR-DEADLINE-IPI] slot={} generation={} at={} requested={} consumed={} stopped={} ipis={} cpu={} linked={}",
-            trace.token.slot, trace.token.generation, trace.at, trace.requested_at, trace.consumed_at, trace.stopped, ipi, trace.consumer, linked);
-    }
+    let mut attempt = 0;
+    let (spawned, registered, moved, consumed, ran) = loop {
+        let id = TaskId(0x444541444f574e + attempt);
+        TIMED_CPU.store(0, Ordering::Relaxed);
+        let spawned = quiet(|| sched::spawn_on(id, "deadline-owner", timed_remote_worker, None, first).is_ok());
+        let limit = sched::timer_ticks() + 100;
+        while sched::deadline_owners(id).and_then(|(w,_)|w).is_none() && sched::timer_ticks() < limit { sched::sleep_ticks(1); }
+        let registered = sched::deadline_owners(id).is_some_and(|(w,_)|w == Some(1));
+        let moved = sched::set_affinity(id, dest).is_ok() && sched::deadline_owners(id).is_some_and(|(w,_)|w == Some(target));
+        #[cfg(feature = "fault-inject")]
+        sched::fault_delay_deadline_timer(target, true);
+        let before = sched::deadline_stats().0[target];
+        sched::run();
+        let consumed = sched::deadline_stats().0[target].wrapping_sub(before) > 0;
+        let ran = TIMED_CPU.load(Ordering::Acquire) == target as u32 + 1;
+        #[cfg(feature = "fault-inject")]
+        {
+            let trace = sched::fault_deadline_trace(target).unwrap();
+            let ipi = trace.ipis_after.wrapping_sub(trace.ipis_before);
+            let owner = trace.consumed && trace.consumer == target
+                && trace.requested_at >= trace.at && trace.consumed_at >= trace.requested_at;
+            let linked = trace.stopped && owner && ipi > 0;
+            sched::fault_delay_deadline_timer(target, false);
+            if !linked && owner && spawned && registered && moved && consumed && ran && attempt + 1 < DEADLINE_IPI_ATTEMPTS {
+                let late = crate::smp::percpu::get(target).unwrap().ipis(kernel_core::smp::IpiKind::Reschedule).wrapping_sub(trace.ipis_before);
+                kprintln!("[JSR-DEADLINE-IPI-RETRY] attempt={} at={} requested={} consumed={} stopped={} ipis={} late_ipis={}",
+                    attempt, trace.at, trace.requested_at, trace.consumed_at, trace.stopped, ipi, late);
+                attempt += 1;
+                continue;
+            }
+            check(linked, "延迟本地到期timer后必须关联停表、BSP到期通知、IPI接收和owner消费");
+            kprintln!("[JSR-DEADLINE-IPI] slot={} generation={} at={} requested={} consumed={} stopped={} ipis={} cpu={} linked={} attempts={}",
+                trace.token.slot, trace.token.generation, trace.at, trace.requested_at, trace.consumed_at, trace.stopped, ipi, trace.consumer, linked, attempt + 1);
+        }
+        break (spawned, registered, moved, consumed, ran);
+    };
     sched::set_idle_tick(old_idle);
     check(spawned && registered && moved && consumed && ran, "每核到期堆迁移后必须由目标CPU唤醒");
     check(saved == baseline(), "每核到期唤醒演练资源不守恒");

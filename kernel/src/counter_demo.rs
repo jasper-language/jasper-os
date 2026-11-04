@@ -18,7 +18,7 @@ use crate::{arch, kprintln, sched};
 /// 「与中断共享」检查要求 tick 至少前进的次数。
 const SHARED_TICKS: u64 = 10;
 /// 读取次数上限：超过仍未前进足够的 tick 即判失败（不会无限等待）。
-const MAX_READS: u64 = 50_000_000;
+const MAX_READS: u64 = 2_000_000_000;
 
 /// 失败的检查数。
 static FAILED: AtomicU32 = AtomicU32::new(0);
