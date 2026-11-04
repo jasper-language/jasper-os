@@ -20,6 +20,7 @@
 #         JASPER_CORES=8-11 bash scripts/accept.sh
 #         JASPER_PROFILE=compact bash scripts/accept.sh   （内核配置档：standard（默认）| compact）
 #         JASPER_QEMU_TIMEOUT=300 bash scripts/accept.sh  （单次 QEMU 启动的时限，秒；默认 90。较慢的托管运行器上放宽）
+#         JASPER_ACCEPT_NICE=5 bash scripts/accept.sh （构建与 QEMU 的 nice 值，默认 19；构建机上其他任务占满 CPU 时 19 会把 QEMU 饿到撞时限）
 #         JASPER_QEMU_TIMEOUT_SMP8=900 bash scripts/accept.sh （x86_64 8 处理器那一次启动的时限，秒；默认为上一项的 3 倍）
 #         JASPER_ARCHES=all bash scripts/accept.sh        （架构范围：x86_64（默认）| all；默认只构建/启动 x86_64，
 #                                                         AArch64 / RISC-V64 / RISC-V32 冻结记 N/A；all 恢复四指令集全量验收）
@@ -127,7 +128,7 @@ if [ -n "${JASPER_QEMU_EXTRA:-}" ]; then read -r -a X86_EXTRA <<< "$JASPER_QEMU_
 # 在限定核上、以最低 CPU / I/O 优先级运行（工具不存在时跳过相应限制）。
 run() {
   local pre=()
-  command -v nice >/dev/null && pre+=(nice -n 19)
+  command -v nice >/dev/null && pre+=(nice -n "${JASPER_ACCEPT_NICE:-19}")
   command -v ionice >/dev/null && pre+=(ionice -c3)
   command -v taskset >/dev/null && pre+=(taskset -c "$CORES")
   "${pre[@]}" "$@"
