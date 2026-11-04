@@ -147,7 +147,14 @@ keep_awake_off() {
   [ "${#KEEP_PIDS[@]}" -gt 0 ] || return 0
   kill "${KEEP_PIDS[@]}" 2>/dev/null; wait "${KEEP_PIDS[@]}" 2>/dev/null; KEEP_PIDS=()
 }
-trap keep_awake_off EXIT
+# 全量时记录文件系统卡顿（fs-stall.txt，判断 QEMU 撞时限或固件读盘超时是否与之同时发生）
+PROBE_PID=""
+if [ "$SPOT" -eq 0 ] && command -v python3 >/dev/null; then
+  python3 "$ROOT/scripts/fs-stall-probe.py" "$OUT" "$OUT/fs-stall.txt" 2>/dev/null &
+  PROBE_PID=$!
+fi
+accept_cleanup() { keep_awake_off; [ -z "$PROBE_PID" ] || kill "$PROBE_PID" 2>/dev/null; }
+trap accept_cleanup EXIT
 # qrun：QEMU 启动专用的 run（前后开关空转进程）
 qrun() { keep_awake_on; run "$@"; local rc=$?; keep_awake_off; return $rc; }
 # 定点模式下被有意跳过的启动日志：缺失时记为「未运行（定点）」而不是失败
@@ -291,17 +298,33 @@ hang_watch_off() {
   rm -f "$HANG_SOCK"
   return 0
 }
+# boot_qemu <名> <时限> <串口日志> <QEMU 参数...>：启动一次 x86_64 QEMU，退出码放 BOOT_RC。
+# 撞时限且串口没有任何引导第四阶段输出（^INFO : ）时，客户机还没进内核（2026-11-04 实测：固件 int 13h 读盘报错，
+# 引导第二阶段 fail('z')，panic 只写 VGA 后 hlt）：这不是内核的结果，留下第一次的现场并重跑一次；第二次的结果就是最终结果。
+BOOT_RETRIES=""
+boot_qemu() {
+  local name="$1" limit="$2" serial="$3" attempt
+  shift 3
+  for attempt in 1 2; do
+    hang_watch_on "$name" "$limit"
+    qrun timeout "$limit" "$QEMU" "${ACCEL_ARGS[@]}" "$@" -serial stdio -display none "${MON_ARGS[@]}" -no-reboot \
+      -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$serial" 2>&1
+    BOOT_RC=$?
+    hang_watch_off
+    if [ "$BOOT_RC" -ne 124 ] || grep -q '^INFO : ' "$serial" || [ "$attempt" -eq 2 ]; then return 0; fi
+    BOOT_RETRIES="$BOOT_RETRIES $name"
+    mv "$serial" "$serial.attempt1"
+    [ -f "$OUT/hang-$name.txt" ] && mv "$OUT/hang-$name.txt" "$OUT/hang-$name.attempt1.txt"
+    echo "  $name：撞时限且未进内核，重跑一次"
+  done
+}
 VIRTIO_ARGS=(-device virtio-rng-pci -device virtio-net-pci,netdev=n0 -netdev user,id=n0 \
   -device virtio-blk-pci,drive=d1 -drive if=none,id=d1,file="$BLANK",format=raw)
 if [ "$BUILD_RC" -eq 0 ]; then
   echo "== QEMU 真实启动 =="
   sleep "$BOOT_GAP"
-  hang_watch_on up "$QEMU_TIMEOUT"
-  qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" \
-    -serial stdio -display none "${MON_ARGS[@]}" -no-reboot \
-    -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$SERIAL" 2>&1
-  QRC=$?
-  hang_watch_off
+  boot_qemu up "$QEMU_TIMEOUT" "$SERIAL" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}"
+  QRC=$BOOT_RC
 fi
 # 多处理器（SMP-1）：同一镜像以 4 个处理器再真实启动一次（其余参数不变）；上面的单处理器启动同时验证「只有引导处理器」的路径。
 SERIAL_SMP4="$OUT/serial-smp4.log"
@@ -309,12 +332,8 @@ QRC_SMP4=-1
 if [ "$BUILD_RC" -eq 0 ] && [ "$SPOT" -eq 0 ]; then
   echo "== QEMU 真实启动（x86_64，4 个处理器）=="
   sleep "$BOOT_GAP"
-  hang_watch_on smp4 "$QEMU_TIMEOUT"
-  qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4 \
-    -serial stdio -display none "${MON_ARGS[@]}" -no-reboot \
-    -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$SERIAL_SMP4" 2>&1
-  QRC_SMP4=$?
-  hang_watch_off
+  boot_qemu smp4 "$QEMU_TIMEOUT" "$SERIAL_SMP4" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4
+  QRC_SMP4=$BOOT_RC
 fi
 # 多处理器（SMP-1）：同一镜像再以 8 个处理器真实启动一次。8 处理器启动排在 4 处理器之后、q35 之前，
 # 严格顺序执行（QEMU 一次只开一个），避免计时类检查互相抢核；退出码判定与 4 处理器相同。
@@ -323,12 +342,8 @@ QRC_SMP8=-1
 if [ "$BUILD_RC" -eq 0 ] && [ "$SPOT" -eq 0 ]; then
   echo "== QEMU 真实启动（x86_64，8 个处理器）=="
   sleep "$BOOT_GAP"
-  hang_watch_on smp8 "$QEMU_TIMEOUT_SMP8"
-  qrun timeout "$QEMU_TIMEOUT_SMP8" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 8 \
-    -serial stdio -display none "${MON_ARGS[@]}" -no-reboot \
-    -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$SERIAL_SMP8" 2>&1
-  QRC_SMP8=$?
-  hang_watch_off
+  boot_qemu smp8 "$QEMU_TIMEOUT_SMP8" "$SERIAL_SMP8" -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 8
+  QRC_SMP8=$BOOT_RC
 fi
 # DRV-1B：q35 机型的 4 处理器启动。q35 提供 ACPI MCFG，配置空间必须走 ECAM（不可缓存 MMIO），
 # 与上面 pc 机型的传统端口机制形成对照；同一组 virtio 设备仍须全部枚举到。
@@ -337,12 +352,8 @@ QRC_Q35=-1
 if [ "$BUILD_RC" -eq 0 ] && [ "$SPOT" -eq 0 ]; then
   echo "== QEMU 真实启动（x86_64 q35，4 个处理器，ECAM）=="
   sleep "$BOOT_GAP"
-  hang_watch_on q35 "$QEMU_TIMEOUT"
-  qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -M q35 -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4 \
-    -serial stdio -display none "${MON_ARGS[@]}" -no-reboot \
-    -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$SERIAL_Q35" 2>&1
-  QRC_Q35=$?
-  hang_watch_off
+  boot_qemu q35 "$QEMU_TIMEOUT" "$SERIAL_Q35" -M q35 -drive format=raw,file="$IMG" "${VIRTIO_ARGS[@]}" -smp 4
+  QRC_Q35=$BOOT_RC
 fi
 # AArch64（ISA-1）：同一内核以软浮点目标构建（不内嵌用户程序），在 QEMU virt 上直接装载 ELF 启动；
 # 退出经半主机（成功 33、失败 35，与 x86_64 一致）。缺少 qemu-system-aarch64 时如实记为失败。
@@ -2505,6 +2516,7 @@ fi
     [ -n "$SPOT_SKIPPED" ] && echo "定点未运行的日志：$(echo $SPOT_SKIPPED | tr ' ' '\n' | sort -u | tr '\n' ' ')"
   else
     echo "验收层：全量"
+    [ -n "$BOOT_RETRIES" ] && echo "未进内核而重跑的启动：$BOOT_RETRIES（第一次现场：serial*.attempt1、hang-*.attempt1.txt）"
   fi
   if [ "$ARCH_ALL" -eq 1 ]; then
     echo "QEMU 退出码：$QRC（4 处理器：$QRC_SMP4，8 处理器：$QRC_SMP8，AArch64：$QRC_A64，AArch64 4 处理器：$QRC_A64_SMP4，RISC-V64：$QRC_RV64，RISC-V32：$QRC_RV32）"
