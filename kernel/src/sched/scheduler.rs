@@ -2841,6 +2841,24 @@ impl Scheduler {
     pub fn local_tick(&mut self, preemption: bool) -> Option<&'static str> {
         let c = this_cpu();
         let cur = leaf_current(c);
+        self.charge_local_tick(c, cur);
+        let woke = self.wake_due(c, self.now);
+        let cause = self.decide(c).or(woke.then_some(Cause::WAKE));
+        if preemption { cause } else { None }
+    }
+
+    /// 补记其他处理器被前进保证推迟的 tick：只补运行量记账，唤醒与调度决定由随后的 [`Self::local_tick`] 统一做。
+    /// Settle the accounting of a secondary processor's deferred ticks.
+    pub fn settle_deferred_local_ticks(&mut self, deferred: u32) {
+        let c = this_cpu();
+        let cur = leaf_current(c);
+        for _ in 0..deferred {
+            self.charge_local_tick(c, cur);
+        }
+    }
+
+    /// 一个本地 tick 的运行量记账。
+    fn charge_local_tick(&mut self, c: usize, cur: usize) {
         self.account(c);
         let charged_rt = self.task(cur).is_some_and(|t|
             t.state == TaskState::Running && t.ns_budget.is_none()
@@ -2849,7 +2867,6 @@ impl Scheduler {
         if charged_rt {
             self.budget_tick_charges[0] = self.budget_tick_charges[0].wrapping_add(1);
         }
-        let woke = self.wake_due(c, self.now);
         let group = match self.task(cur) {
             Some(t) if is_worker(cur) && t.state == TaskState::Running => t.cpu_group,
             _ => None,
@@ -2858,8 +2875,6 @@ impl Scheduler {
             grp.limit.charge();
             self.budget_tick_charges[1] = self.budget_tick_charges[1].wrapping_add(1);
         }
-        let cause = self.decide(c).or(woke.then_some(Cause::WAKE));
-        if preemption { cause } else { None }
     }
 
     /// 设置空闲停表的最大间隔（tick；< 2 关闭），返回之前的设置。关闭后已停表的处理器在下一次醒来时恢复周期 tick。

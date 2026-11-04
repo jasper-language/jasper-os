@@ -8,7 +8,7 @@
 # 经过秒数、串口行数、loadavg、各线程累计 CPU 秒数。结束时向标准输出写一行汇总。
 # --stop-at-info：串口出现 ^INFO : （已进内核）就结束，只测引导阶段。
 # --stop-at-lines：串口到第 N 行就结束，只测启动的前段。
-# --stall-secs：进内核后串口这么久没有新行，就取两次（相隔 5 秒）寄存器与本地中断控制器写入 <前缀>.stall，继续运行。
+# --stall-secs：进内核后串口这么久没有新行，就取两次（相隔 5 秒）每个处理器的寄存器、栈顶与本地中断控制器写入 <前缀>.stall，继续运行。
 # --icount：QEMU -icount shift=N,sleep=off：虚拟时钟按指令数走，每条指令 2^N 纳秒，N 越大相对指令的时钟中断越密（确定性地模拟 vCPU 很慢）。
 # --evict：启动前把镜像移出页缓存，引导阶段的读盘必须真正到磁盘。
 # 撞时限且没进内核时，从 monitor 取 CPU0 寄存器写入 <前缀>.regs。固件调试输出（端口 0x402）写入 <前缀>.bios。
@@ -129,7 +129,8 @@ with open(args.out + ".trace", "w") as trace, open(serial_path, "rb") as reader:
                 with open(args.out + ".stall", "w") as f:
                     f.write(f"t={now - start:.0f} lines={lines} cpu={thread_cpu(qemu.pid)}\n")
                     for _ in range(2):
-                        f.write(monitor(sock, "info registers") + monitor(sock, "info lapic"))
+                        for c in range(args.smp):
+                            f.write(monitor(sock, f"cpu {c}\ninfo registers\nx/48gx $rsp\ninfo lapic"))
                         time.sleep(5)
                     f.write(f"cpu={thread_cpu(qemu.pid)}\n")
             except OSError as e:

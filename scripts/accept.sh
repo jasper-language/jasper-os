@@ -564,12 +564,12 @@ check_boot_stage() {   # issue #7：十个全局启动阶段按声明顺序各�
   fi
 }
 
-check_timer_progress() {   # 定时器中断活锁回归：-icount 下时钟相对指令很密时，启动仍能前进（修复前 shift=8、10 卡死）
+check_timer_progress() {   # 定时器中断活锁回归：-icount 下时钟相对指令很密时，启动仍能前进（单处理器修复前 shift=8、10 卡死，4 处理器修复前 shift=9 卡死）
   local detail
   if ! has '^\[JSR-TIMER-PROGRESS\] full=[1-9]'; then
     record TIMER-PROGRESS FAIL "串口缺少前进保证计数"
   elif detail=$(OUT="$OUT/timer-progress" bash "$ROOT/scripts/timer-progress-check.sh" "$IMG" 2>&1); then
-    record TIMER-PROGRESS PASS "$(echo "$detail" | wc -l) 个 icount 档位都在时限内走到第 1200 行；$(grep -m1 -oE '^\[JSR-TIMER-PROGRESS\].*' "$SERIAL")"
+    record TIMER-PROGRESS PASS "$(echo "$detail" | wc -l) 个 icount 组合都在时限内走到第 1200 行；$(grep -m1 -oE '^\[JSR-TIMER-PROGRESS\].*' "$SERIAL")"
   else
     record TIMER-PROGRESS FAIL "$(echo "$detail" | grep FAIL | head -3 | tr '\n' ' ')"
   fi

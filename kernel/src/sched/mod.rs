@@ -760,6 +760,7 @@ static TIMER_PROGRESS: [TimerProgressCell; kernel_core::smp::MAX_CPUS] =
 /// 完整定时器事务数、引导处理器推迟的时钟事件数、高精度事件推迟数、记录到的最大开销（时钟计数，未封顶）。
 static TIMER_FULL: kernel_core::sync::Atomic64 = kernel_core::sync::Atomic64::new(0);
 static TIMER_DEFERRED_BSP: kernel_core::sync::Atomic64 = kernel_core::sync::Atomic64::new(0);
+static TIMER_DEFERRED_LOCAL: kernel_core::sync::Atomic64 = kernel_core::sync::Atomic64::new(0);
 static TIMER_DEFERRED_HIGHRES: kernel_core::sync::Atomic64 = kernel_core::sync::Atomic64::new(0);
 static TIMER_MAX_COST: kernel_core::sync::Atomic64 = kernel_core::sync::Atomic64::new(0);
 
@@ -814,12 +815,13 @@ pub fn rearm_after_defer(now: u64) {
     }
 }
 
-/// 前进保证的计数：（完整事务数，引导处理器推迟的时钟事件数，推迟的高精度事件数，最大事务开销）。
+/// 前进保证的计数：（完整事务数，引导处理器推迟的时钟事件数，其他处理器推迟的时钟事件数，推迟的高精度事件数，最大事务开销）。
 /// Counters of the forward-progress guard.
-pub fn timer_progress_stats() -> (u64, u64, u64, u64) {
+pub fn timer_progress_stats() -> (u64, u64, u64, u64, u64) {
     (
         TIMER_FULL.load(Ordering::Relaxed),
         TIMER_DEFERRED_BSP.load(Ordering::Relaxed),
+        TIMER_DEFERRED_LOCAL.load(Ordering::Relaxed),
         TIMER_DEFERRED_HIGHRES.load(Ordering::Relaxed),
         TIMER_MAX_COST.load(Ordering::Relaxed),
     )
@@ -1160,9 +1162,11 @@ pub fn defer_timer_tick() {
 /// 其他处理器的本地定时器中断入口（中断上下文，EOI 之后）：给本处理器正在运行的任务记账、
 /// 到检查点做周期均衡，需要时就地切换。空闲执行流被打断时不在这里切换（中断返回后空闲循环自己取任务）。
 /// Local timer entry of a secondary processor.
-pub fn on_local_timer() {
+pub fn on_local_timer(entry: u64) {
     let requested = crate::smp::percpu::this().take_resched();
-    if !requested {
+    // 欠账要在全局锁内补记，有欠账时不走租约快路径。
+    let deferred = timer_take_deferred();
+    if !requested && deferred == 0 {
         let fast = {
             let c = cpu::cpu_index();
             TICK_LEASES[c].try_lock().and_then(|mut lease| {
@@ -1180,8 +1184,12 @@ pub fn on_local_timer() {
             })
         }; // leaf released before any path can take the global scheduler lock
         match fast {
-            Some(scheduler::FastLeafTick::Continued) => return,
+            Some(scheduler::FastLeafTick::Continued) => {
+                timer_record(entry);
+                return;
+            }
             Some(scheduler::FastLeafTick::Switch(plan)) => {
+                timer_record(entry);
                 execute_switch_plan(plan);
                 return;
             }
@@ -1191,10 +1199,19 @@ pub fn on_local_timer() {
     let preemption = PREEMPTION.load(Ordering::Relaxed);
     let idle = crate::smp::percpu::this().current() == crate::smp::percpu::IDLE_SLOT;
     let plan = with_mut_from(Origin::ApFallback, |s| {
+        s.settle_deferred_local_ticks(deferred);
         if idle { s.local_tick(preemption); None }
         else { s.local_tick(preemption).and_then(|cause| s.prepare_switch(cause)) }
     });
+    timer_record(entry);
     if let Some(plan) = plan { execute_switch_plan(plan); }
+}
+
+/// 其他处理器时钟中断的简化路径：只记下欠账，运行量记账与到期唤醒留到下一次完整事务。
+/// Clock-only path of a secondary-processor timer event.
+pub fn defer_local_tick() {
+    timer_progress_update(cpu::cpu_index(), |p| p.defer());
+    TIMER_DEFERRED_LOCAL.fetch_add(1, Ordering::Relaxed);
 }
 
 // Author: chatgpt. Counts real tick-based AP RT and shared-group charges across

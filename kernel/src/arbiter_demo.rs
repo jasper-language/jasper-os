@@ -39,6 +39,9 @@ static TIMING_FAILED: AtomicU32 = AtomicU32::new(0);
 static UI_DONE: AtomicU32 = AtomicU32::new(0);
 // 32 位目标没有 64 位原子：用 kernel-core 的模拟单元。
 static BATCH_TICKS: Atomic64 = Atomic64::new(0);
+/// 在窗口结束之前开始运行的批处理任务数：调度器确实把处理器交给了批处理。
+/// 处理器相对时钟很慢时，任务开始运行后可能还没走到计数循环窗口就结束了，那只是慢，不是饿死。
+static BATCH_STARTED: AtomicU32 = AtomicU32::new(0);
 static RT_MISSES: AtomicU32 = AtomicU32::new(0);
 static END: Atomic64 = Atomic64::new(0);
 
@@ -95,6 +98,9 @@ fn ui_task() {
 
 /// 批处理任务：吃满到窗口结束。
 fn batch_task() {
+    if sched::timer_ticks() < END.load(Ordering::Relaxed) {
+        BATCH_STARTED.fetch_add(1, Ordering::Relaxed);
+    }
     let _ = sched::set_current_qos(Qos::Background);
     while sched::timer_ticks() < END.load(Ordering::Relaxed) {
         BATCH_TICKS.fetch_add(1, Ordering::Relaxed);
@@ -122,6 +128,7 @@ pub fn run() {
     END.store(now + WINDOW, Ordering::Relaxed);
     UI_DONE.store(0, Ordering::Relaxed);
     BATCH_TICKS.store(0, Ordering::Relaxed);
+    BATCH_STARTED.store(0, Ordering::Relaxed);
     RT_MISSES.store(0, Ordering::Relaxed);
     // The latency histogram is shared instrumentation.  This drill must not
     // inherit samples produced by earlier acceptance stages.
@@ -149,18 +156,21 @@ pub fn run() {
     let lat = sched::latency(Qos::Interactive);
     let ui_done = UI_DONE.load(Ordering::Relaxed);
     let batch = BATCH_TICKS.load(Ordering::Relaxed);
+    let started = BATCH_STARTED.load(Ordering::Relaxed);
     let misses = RT_MISSES.load(Ordering::Relaxed);
     kprintln!(
-        "[JSR-ARB] three_class rt_misses={} ui_rounds={} ui_latency_max={} batch_ticks={}",
+        "[JSR-ARB] three_class rt_misses={} ui_rounds={} ui_latency_max={} batch_started={} batch_ticks={}",
         misses,
         ui_done,
         lat.max(),
+        started,
         batch
     );
     check_timing(misses == 0, "实时任务越过了截止期");
     check(ui_done == UI_ROUNDS, "交互任务未完成全部唤醒");
     check_timing(lat.max() <= 2, "交互唤醒延迟超过上界");
-    check(batch > 0, "批处理任务被饿死");
+    check(started > 0, "批处理任务被饿死");
+    check_timing(batch > 0, "窗口内批处理任务没有走到计数循环");
 
     // 阶段 2：多核下三类各占一个核，验证"各核都忙"。
     let n = crate::smp::cpu_count();

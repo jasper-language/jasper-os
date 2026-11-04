@@ -95,9 +95,14 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
                 sched::on_highres_timer(entry);
             }
             else if !diagnostic {
+                let entry = crate::arch::clock_counter();
                 crate::smp::on_local_tick();
                 device::on_cpu_tick();
-                sched::on_local_timer();
+                if !sched::timer_admit(entry) {
+                    sched::defer_local_tick();
+                    return;
+                }
+                sched::on_local_timer(entry);
             }
         }
         IrqLine::Ipi(kind) => crate::smp::on_ipi(kind),
