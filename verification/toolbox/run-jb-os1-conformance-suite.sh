@@ -24,7 +24,7 @@ MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test -p jaso --features p
 grep -Eq '[1-9][0-9]* verified, 0 errors' "$out/verus.log"
 grep -Eq 'error|verified, [1-9]' "$out/verus-bad.log"
 grep -q 'test result: ok. 57 passed' "$out/host.log"
-grep -q 'test result: ok. 8 passed; 0 failed' "$out/proptest.log"
+grep -q 'test result: ok. 9 passed; 0 failed' "$out/proptest.log"
 grep -q 'test result: ok. 2 passed; 0 failed' "$out/miri.log"
 grep -q 'Done 1000000 runs' "$out/fuzz.log"
 printf 'JB-OS1 conformance Verus/Proptest/Miri/fuzz completed; Kani N/A, Loom N/A (see PROPERTIES.md)\n' | tee "$out/PASS"
