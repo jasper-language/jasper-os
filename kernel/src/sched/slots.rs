@@ -62,3 +62,94 @@ impl<T, const I: usize> DerefMut for BootSlots<T, I> {
         }
     }
 }
+
+/// 记录「谁被改过」的槽位存储（issue #2）：可变访问一律先标脏，没有绕开标记的可变入口
+/// （不实现 `DerefMut`，只读访问经 `Deref` 到切片），所以不可能漏登记；代价只是偶尔多同步一个
+/// 其实没变的槽位，而同步对未变化的槽位不写堆。
+/// Slot storage where every mutable access marks the slot dirty; there is no
+/// unmarked mutable path, so a state transition cannot forget to register.
+pub struct TrackedSlots<T, const I: usize, const W: usize> {
+    slots: BootSlots<T, I>,
+    dirty: BootSlots<u64, W>,
+}
+
+impl<T, const I: usize, const W: usize> TrackedSlots<T, I, W> {
+    /// 内联存储上的新表，初始全部未标记。
+    pub const fn new(slots: [T; I]) -> Self {
+        Self { slots: BootSlots::Inline(slots), dirty: BootSlots::Inline([0; W]) }
+    }
+
+    /// 可变访问一个槽位并标脏；越界返回 `None`。
+    pub fn get_mut(&mut self, slot: usize) -> Option<&mut T> {
+        kernel_core::dirty_slots::mark(&mut self.dirty, slot);
+        self.slots.get_mut(slot)
+    }
+
+    /// 可变遍历满足条件的槽位，只标脏这些槽位。
+    pub fn iter_mut_where<'a>(&'a mut self, mut wanted: impl FnMut(usize, &T) -> bool + 'a)
+        -> impl Iterator<Item = (usize, &'a mut T)> + 'a
+    where T: 'a {
+        let (slots, dirty) = (&mut *self.slots, &mut *self.dirty);
+        slots.iter_mut().enumerate().filter_map(move |(i, t)| {
+            if !wanted(i, t) { return None; }
+            kernel_core::dirty_slots::mark(dirty, i);
+            Some((i, t))
+        })
+    }
+
+    /// 不改内容地标脏（内容之外的输入变了时用）；越界是空操作。
+    pub fn mark_dirty(&mut self, slot: usize) {
+        kernel_core::dirty_slots::mark(&mut self.dirty, slot);
+    }
+
+    /// 全部标脏。
+    pub fn mark_all_dirty(&mut self) {
+        let n = self.slots.len();
+        kernel_core::dirty_slots::mark_first(&mut self.dirty, n);
+    }
+
+    /// 槽位是否有待同步标记。
+    pub fn is_dirty(&self, slot: usize) -> bool {
+        kernel_core::dirty_slots::is_marked(&self.dirty, slot)
+    }
+
+    /// 取走不小于 `from` 的最小脏槽位。
+    pub fn take_dirty(&mut self, from: usize) -> Option<usize> {
+        kernel_core::dirty_slots::take_next(&mut self.dirty, from)
+    }
+
+    /// 为扩到 `n` 项准备新存储，语义同 [`BootSlots::prepare`]。
+    pub fn prepare(&self, n: usize, fill: impl FnMut() -> T) -> Option<(Box<[T]>, Box<[u64]>)> {
+        let slots = self.slots.prepare(n, fill)?;
+        let dirty = self.dirty.prepare(kernel_core::dirty_slots::words_for(n), || 0)?;
+        Some((slots, dirty))
+    }
+
+    /// 按原下标搬进新存储，不会失败。扩容后全部标脏。
+    pub fn commit(&mut self, (slots, dirty): (Box<[T]>, Box<[u64]>)) {
+        self.slots.commit(slots);
+        self.dirty.commit(dirty);
+        self.mark_all_dirty();
+    }
+}
+
+impl<T, const I: usize, const W: usize> Deref for TrackedSlots<T, I, W> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.slots
+    }
+}
+
+impl<T, const I: usize, const W: usize> core::ops::Index<usize> for TrackedSlots<T, I, W> {
+    type Output = T;
+    fn index(&self, slot: usize) -> &T {
+        &self.slots[slot]
+    }
+}
+
+impl<T, const I: usize, const W: usize> core::ops::IndexMut<usize> for TrackedSlots<T, I, W> {
+    fn index_mut(&mut self, slot: usize) -> &mut T {
+        kernel_core::dirty_slots::mark(&mut self.dirty, slot);
+        &mut self.slots[slot]
+    }
+}

@@ -153,5 +153,6 @@ pub mod timer_units;
 // issue #3：统一定时事件契约。 / Unified timer-event contract.
 pub mod timer_event;
 pub mod timer_progress;
+pub mod dirty_slots;
 
 pub mod ns_budget;

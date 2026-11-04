@@ -58,7 +58,7 @@ use super::policy::{
     WatchdogReport, QOS_CLASSES,
 };
 use super::KernelPolicy;
-use super::slots::BootSlots;
+use super::slots::{BootSlots, TrackedSlots};
 use kernel_core::sched::{Link, RunLists};
 use super::stack::{ReserveError, StackPool, STATIC_STACKS};
 
@@ -766,7 +766,8 @@ pub struct Scheduler {
     pub(super) raw_wake_errors: [u64; 3], // begin, finish, exit-with-pending
     #[cfg(feature = "krn2-observe")]
     pub(super) raw_pending_at_reset: usize,
-    tasks: BootSlots<Option<Task>, INLINE_SLOTS>,
+    /// 任务表：可变访问自动标脏，期限事件只同步脏槽位（issue #2）。
+    tasks: TrackedSlots<Option<Task>, INLINE_SLOTS, { kernel_core::dirty_slots::words_for(INLINE_SLOTS) }>,
     // Author: chatgpt. One canonical generation state per slot; lock serialized.
     epochs: BootSlots<SlotLifecycle, INLINE_SLOTS>,
     id_index: Option<TaskIndex<BootSlots<IndexNode, { 2 * INLINE_SLOTS - 1 }>>>,
@@ -803,6 +804,10 @@ pub struct Scheduler {
     ns_programmed:[Option<u64>;MAX_CPUS],
     /// 高精度期限事件增量同步计数（issue #2）。
     ns_sync: kernel_core::deadline_forest::SyncStats,
+    /// 根可能变化、需要重新读取的处理器（离线的留到上线）。
+    ns_root_dirty: CpuSet,
+    #[cfg(feature = "ns-dirty-audit")]
+    ns_audits: u64,
     /// 选择路径的遍历量统计。
     scan: ScanStats,
     /// 被运行队列拒绝的钩子调用次数（成员关系不符；正常运行时恒为 0）与最近一次的原因。
@@ -937,7 +942,7 @@ impl Scheduler {
             raw_wake_errors: [0; 3],
             #[cfg(feature = "krn2-observe")]
             raw_pending_at_reset: 0,
-            tasks: BootSlots::Inline(tasks),
+            tasks: TrackedSlots::new(tasks),
             epochs: BootSlots::Inline(epochs),
             id_index: None,
             stacks: StackPool::new(),
@@ -962,6 +967,9 @@ impl Scheduler {
             ns_roots:[None;MAX_CPUS],ns_at:[0;MAX_CPUS],ns_credit:[None;MAX_CPUS],
             ns_need_tick:[false;MAX_CPUS],
             ns_now:0,ns_active:false,ns_programmed:[None;MAX_CPUS],
+            ns_root_dirty: CpuSet::EMPTY,
+            #[cfg(feature = "ns-dirty-audit")]
+            ns_audits: 0,
             ns_sync: kernel_core::deadline_forest::SyncStats { passes: 0, synced: 0, unchanged: 0, inserted: 0, rescheduled: 0, moved: 0, removed: 0 },
             scan: ScanStats { picks: 0, visited: 0, max_visited: 0, wake_scans: 0, ticks: 0 },
             hook_errors: 0,
@@ -1494,7 +1502,11 @@ impl Scheduler {
     /// 正在等它的任务（等它退出、或等它持有的锁）全部被唤醒，借给它的档位随之归还。
     pub fn mark_current_exited(&mut self) {
         let cur = self.cur();
-        if let Some(r)=self.epochs[cur].history(){self.ns_heap.remove(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,cur,r.token().generation).expect("ns exit identity");}
+        if let Some(r)=self.epochs[cur].history(){
+            let owner=self.ns_owners[cur];
+            if self.ns_heap.remove(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,cur,r.token().generation).expect("ns exit identity").is_some() {self.ns_root_dirty.insert(owner);}
+            self.tasks.mark_dirty(cur);
+        }
         let mut left = None;
         let mut pi_graph_changed = false;
         if is_worker(cur) && self.task(cur).is_some_and(|t| t.state != TaskState::Exited) {
@@ -1617,25 +1629,25 @@ impl Scheduler {
         inherit::resolve(base, waits, self.inherit, eff);
         #[cfg(feature = "krn2-observe")]
         let measured = inherit::resolve_measured(base, waits, self.inherit, eff);
-        for (slot, (t, q)) in self.tasks.iter_mut().zip(eff.iter()).enumerate() {
-            #[cfg(feature = "krn2-observe")]
-            outer.slots(1);
-            if let (Some(t), Some(q)) = (t.as_mut(), q) {
-                if t.sched.qos != *q {
-                    let token = self.epochs[slot].history().expect("PI task identity").token();
-                    let (_, sched) = with_leaf_hot(t.home, token, |_queue, sched| sched.qos = *q);
-                    t.sched = sched;
-                    t.pi_round = t.pi_round.wrapping_add(1).max(1);
-                    if t.home != this_cpu() {
-                        if let Some(history) = self.epochs[slot].history() {
-                            super::publish_pi_message(t.home, kernel_core::percpu_migration::PiMessage {
-                                token: kernel_core::percpu_migration::TaskToken {
-                                    slot: slot as u32, generation: history.token().generation,
-                                },
-                                round: t.pi_round, priority: q.index() as u8,
-                            });
-                            self.kicks.insert(t.home);
-                        }
+        #[cfg(feature = "krn2-observe")]
+        outer.slots(eff.len() as u64);
+        // 只有档位确实变化的任务才取可变引用（可变访问会标脏）。
+        let qos_changed = |slot: usize, t: &Option<Task>| matches!((t, eff.get(slot)), (Some(t), Some(Some(q))) if t.sched.qos != *q);
+        for (slot, t) in self.tasks.iter_mut_where(qos_changed) {
+            if let (Some(t), Some(q)) = (t.as_mut(), &eff[slot]) {
+                let token = self.epochs[slot].history().expect("PI task identity").token();
+                let (_, sched) = with_leaf_hot(t.home, token, |_queue, sched| sched.qos = *q);
+                t.sched = sched;
+                t.pi_round = t.pi_round.wrapping_add(1).max(1);
+                if t.home != this_cpu() {
+                    if let Some(history) = self.epochs[slot].history() {
+                        super::publish_pi_message(t.home, kernel_core::percpu_migration::PiMessage {
+                            token: kernel_core::percpu_migration::TaskToken {
+                                slot: slot as u32, generation: history.token().generation,
+                            },
+                            round: t.pi_round, priority: q.index() as u8,
+                        });
+                        self.kicks.insert(t.home);
                     }
                 }
             }
@@ -1688,8 +1700,9 @@ impl Scheduler {
             self.resolve_inheritance();
             return None;
         };
-        for (i, t) in self.tasks.iter_mut().enumerate() {
-            if let Some(t) = t.as_mut().filter(|t| i != next && waiting_on(t)) {
+        let moved = |i: usize, t: &Option<Task>| i != next && t.as_ref().is_some_and(&waiting_on);
+        for (_, t) in self.tasks.iter_mut_where(moved) {
+            if let Some(t) = t.as_mut() {
                 t.waits_for = Some(next);
             }
         }
@@ -2004,6 +2017,14 @@ impl Scheduler {
     /// High-resolution deadline sync counters.
     pub fn ns_sync_stats(&self) -> kernel_core::deadline_forest::SyncStats {
         self.ns_sync
+    }
+
+    /// 已做的每轮校验次数（只有 `ns-dirty-audit` 构建非 0）。
+    pub fn ns_audits(&self) -> u64 {
+        #[cfg(feature = "ns-dirty-audit")]
+        { self.ns_audits }
+        #[cfg(not(feature = "ns-dirty-audit"))]
+        { 0 }
     }
 
     /// 清零选择路径遍历量统计。
@@ -2631,6 +2652,8 @@ impl Scheduler {
     pub fn enable_highres(&mut self,now:u64) {
         assert!(!self.tasks.iter().flatten().any(|t|t.rt_period!=0 && t.state!=TaskState::Exited),"enable before RT admission");
         self.ns_now=now;self.ns_at=[now;MAX_CPUS];self.ns_active=true;
+        // 启用前的状态迁移没有发布过事件：第一轮全部同步一次。
+        self.tasks.mark_all_dirty();
         self.ns_credit=[Some(kernel_core::timer_units::CreditLedger::new(now,crate::hrtime::tick_ns()).unwrap());MAX_CPUS];
     }
     pub fn settle_highres(&mut self,now:u64) {
@@ -2638,8 +2661,10 @@ impl Scheduler {
         assert!(now>=self.ns_now,"shared clock moved backwards");self.ns_now=now;
         for c in self.online.iter() {
             let slot=leaf_current(c);let start=self.ns_at[c];
-            if let Some(t)=self.tasks.get_mut(slot).and_then(Option::as_mut) {
-                if let Some(b)=t.ns_budget.as_mut().filter(|b|b.enabled) {
+            // 没有启用预算的任务不取可变引用（可变访问会标脏）。
+            if self.task(slot).is_some_and(|t|t.ns_budget.is_some_and(|b|b.enabled)) {
+                let t=self.tasks[slot].as_mut().expect("budgeted current task");
+                if let Some(b)=t.ns_budget.as_mut() {
                     let old=b.next;b.settle(start,now,t.state==TaskState::Running).expect("ns budget clock exhausted");
                     if b.next!=old {t.rt_next_period=t.rt_next_period.checked_add((b.next-old)/b.period*u64::from(t.rt_period)).expect("compat deadline overflow");}
                     t.rt_remaining=u32::try_from(b.remaining.div_ceil(crate::hrtime::tick_ns())).unwrap_or(u32::MAX);
@@ -2648,8 +2673,10 @@ impl Scheduler {
             self.ns_at[c]=now;
         }
         // Sleeping/runnable RT tasks replenish, but never accumulate old periods.
-        for t in self.tasks.iter_mut().flatten().filter(|t|t.state!=TaskState::Exited && t.state!=TaskState::Running) {
-            if let Some(b)=t.ns_budget.as_mut().filter(|b|b.enabled) {
+        let refills=|_:usize,t:&Option<Task>|t.as_ref().is_some_and(|t|t.state!=TaskState::Exited && t.state!=TaskState::Running && t.ns_budget.is_some_and(|b|b.enabled));
+        for (_,t) in self.tasks.iter_mut_where(refills) {
+            let Some(t)=t.as_mut() else {continue;};
+            if let Some(b)=t.ns_budget.as_mut() {
                 let old=b.next;b.settle(now,now,false).expect("ns refill clock exhausted");
                 if b.next!=old {t.rt_next_period=t.rt_next_period.checked_add((b.next-old)/b.period*u64::from(t.rt_period)).expect("compat refill overflow");}
                 t.rt_remaining=u32::try_from(b.remaining.div_ceil(crate::hrtime::tick_ns())).unwrap_or(u32::MAX);
@@ -2664,31 +2691,72 @@ impl Scheduler {
         let due_cpus = self.online;
         for c in due_cpus.iter() {
             while let Some(e)=self.ns_heap.pop_due(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,c,now).expect("ns heap coherent") {
+                // 节点已弹出：没有被唤醒的任务（例如预算期限）要重新发布。
+                self.tasks.mark_dirty(e.slot);self.ns_root_dirty.insert(c);
                 if !self.epochs[e.slot].live(kernel_core::task_index::Token {slot:e.slot,generation:e.generation}) {continue;}
                 if self.task(e.slot).is_some_and(|t|t.state==TaskState::Blocked && t.wake_ns.is_some_and(|at|at<=now)) {self.make_runnable(e.slot);}
             }
         }
     }
+    /// 槽位当前应发布的期限事件：`(所有者处理器, 时刻)`。
+    fn ns_event_wanted(&self,i:usize)->Option<(usize,u64)> {
+        self.task(i).filter(|t|t.state!=TaskState::Exited).and_then(|t| {
+            let sleep=(t.state==TaskState::Blocked).then_some(t.wake_ns).flatten();
+            let rt=t.ns_budget.filter(|b|b.enabled).map(|b|b.next);
+            sleep.into_iter().chain(rt).min().map(|at|(t.home,at))
+        })
+    }
+    /// 把脏槽位的期限事件同步进堆，再重读受影响处理器的根（issue #2）。工作量 O(字数 + 脏槽位数)。
+    /// Syncs only dirty slots, then re-reads only the roots they could have changed.
     pub fn refresh_ns_events(&mut self) {
         if !self.ns_active{return;}
         self.ns_sync.passes=self.ns_sync.passes.saturating_add(1);
-        for i in 0..self.tasks.len() {
+        let mut from=0;
+        while let Some(i)=self.tasks.take_dirty(from) {
+            from=i+1;
             let Some(r)=self.epochs[i].history() else {continue;};let generation=r.token().generation;
-            let event=self.task(i).filter(|t|t.state!=TaskState::Exited).and_then(|t| {
-                let sleep=(t.state==TaskState::Blocked).then_some(t.wake_ns).flatten();
-                let rt=t.ns_budget.filter(|b|b.enabled).map(|b|b.next);
-                sleep.into_iter().chain(rt).min().map(|at|(t.home,at))
-            });
+            let event=self.ns_event_wanted(i);
+            let old_owner=self.ns_owners[i];
             // issue #2：与已发布节点相同则不写堆（不做无意义的 set/repair）。
             // Unchanged events no longer rewrite and repair their heap node.
             let outcome=self.ns_heap.sync(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,i,generation,event).expect("ns deadline identity and reserved capacity");
             self.ns_sync.record(outcome);
+            if outcome.wrote() {
+                if old_owner!=NO_DEADLINE {self.ns_root_dirty.insert(old_owner);}
+                if let Some((c,_))=event {self.ns_root_dirty.insert(c);}
+            }
         }
-        for c in self.online.iter() {
+        for c in self.ns_root_dirty.intersect(self.online).iter() {
             let next=self.ns_heap.peek(&self.ns_entries,&self.ns_positions,&self.ns_owners,c).expect("ns root").map(|e|e.at);
             if next.is_some_and(|at|self.ns_roots[c].is_none_or(|old|at<old)) && c!=this_cpu(){self.kicks.insert(c);}
             self.ns_roots[c]=next;
+            self.ns_root_dirty.remove(c);
         }
+        #[cfg(feature = "ns-dirty-audit")]
+        {
+            let bad=self.ns_audit();
+            assert!(bad==0,"ns dirty audit: {} mismatches at pass {}",bad,self.ns_sync.passes);
+            self.ns_audits=self.ns_audits.saturating_add(1);
+        }
+    }
+    /// 全表校验脏集合的不变量（issue #2）：没有待同步标记的槽位，已发布的节点必须等于应发布的事件；
+    /// 没有待重读标记的在线处理器，缓存的根必须等于堆顶。返回不一致的项数。工作量 O(槽位数)，
+    /// 默认构建只在启动汇总时调用一次；`ns-dirty-audit` 构建每轮刷新后都调用。
+    /// Full-table check of the dirty-set invariant; returns the mismatch count.
+    pub fn ns_audit(&self)->u32 {
+        if !self.ns_active {return 0;}
+        let mut bad=0u32;
+        for i in 0..self.tasks.len() {
+            if self.tasks.is_dirty(i) {continue;}
+            let published=self.ns_heap.published(&self.ns_entries,&self.ns_positions,&self.ns_owners,i).expect("ns published node").map(|(c,e)|(c,e.at,e.generation));
+            let wanted=self.epochs[i].history().and_then(|r|self.ns_event_wanted(i).map(|(c,at)|(c,at,r.token().generation)));
+            if self.epochs[i].history().is_some() && published!=wanted {bad=bad.saturating_add(1);}
+        }
+        for c in self.online.iter().filter(|&c|!self.ns_root_dirty.contains(c)) {
+            let root=self.ns_heap.peek(&self.ns_entries,&self.ns_positions,&self.ns_owners,c).expect("ns root").map(|e|e.at);
+            if root!=self.ns_roots[c] {bad=bad.saturating_add(1);}
+        }
+        bad
     }
     pub fn program_ns_local(&mut self) {
         if !self.ns_active{return;}

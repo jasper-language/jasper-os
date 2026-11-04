@@ -221,6 +221,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "dirty_slots"
+path = "fuzz_targets/dirty_slots.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "timer_progress"
 path = "fuzz_targets/timer_progress.rs"
 test = false

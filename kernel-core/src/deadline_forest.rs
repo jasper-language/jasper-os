@@ -69,6 +69,11 @@ impl<const C: usize> DeadlineForest<C> {
         if event.slot != slot { return Err(HeapError::Corrupt); }
         Ok(Some((cpu, event)))
     }
+    /// 槽位已发布的节点：`(所有者, 节点)`，只读（校验用）。
+    pub fn published(&self, entries: &[Deadline], positions: &[usize], owners: &[usize], slot: usize)
+        -> Result<Option<(usize, Deadline)>, HeapError> {
+        self.locate(entries, positions, owners, slot)
+    }
     pub fn peek(&self, entries: &[Deadline], positions: &[usize], owners: &[usize], cpu: usize)
         -> Result<Option<Deadline>, HeapError> {
         let n = Self::shape(entries, positions, owners)?;

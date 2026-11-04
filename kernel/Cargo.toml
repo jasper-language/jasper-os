@@ -41,6 +41,8 @@ shm1-verify = ["user-programs", "fault-inject"]
 krn2-observe = []
 # Author: chatgpt. Dedicated event-wait mechanism guest, not enabled in production.
 evt1-verify = ["kernel-core/evt1-capacity"]
+# Dedicated guest: full-table check of the deadline dirty-set invariant after every refresh.
+ns-dirty-audit = []
 # Explicitly armed KRN-1 fault sites; default builds contain no hooks.
 fault-inject = []
 # S-2 fixed-seed eight-process syscall campaign (opt-in).

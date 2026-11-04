@@ -398,6 +398,11 @@ pub fn ns_sync_stats() -> kernel_core::deadline_forest::SyncStats {
     with(|s| s.ns_sync_stats())
 }
 
+/// 期限事件脏集合的不变量校验：`(不一致项数, 已做的每轮校验次数)`。
+pub fn ns_audit() -> (u32, u64) {
+    with(|s| (s.ns_audit(), s.ns_audits()))
+}
+
 /// 选择路径的遍历量统计（见 [`scheduler::ScanStats`]）。
 /// Selection-path scan statistics.
 pub fn scan_stats() -> scheduler::ScanStats {

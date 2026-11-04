@@ -413,16 +413,17 @@ pub fn start(boot: &'static BootSpec) -> ! {
     // issue #2：高精度期限事件增量同步计数——无变化的槽位不写堆；计数必须守恒。
     // Deadline sync counters: unchanged slots write nothing; counters must balance.
     let ns_sync = sched::ns_sync_stats();
+    let (ns_mismatch, ns_audits) = sched::ns_audit();
     let (timer_full, timer_bsp, timer_local, timer_highres, timer_cost) = sched::timer_progress_stats();
     kprintln!("[JSR-TIMER-PROGRESS] full={} deferred_tick={} deferred_local={} deferred_highres={} max_cost={}", timer_full, timer_bsp, timer_local, timer_highres, timer_cost);
     kprintln!(
-        "[JSR-NS-SYNC] passes={} synced={} unchanged={} writes={} inserted={} rescheduled={} moved={} removed={} balanced={}",
+        "[JSR-NS-SYNC] passes={} synced={} unchanged={} writes={} inserted={} rescheduled={} moved={} removed={} balanced={} audit_mismatch={} audits={}",
         ns_sync.passes, ns_sync.synced, ns_sync.unchanged, ns_sync.writes(),
-        ns_sync.inserted, ns_sync.rescheduled, ns_sync.moved, ns_sync.removed, ns_sync.balanced()
+        ns_sync.inserted, ns_sync.rescheduled, ns_sync.moved, ns_sync.removed, ns_sync.balanced(), ns_mismatch, ns_audits
     );
     // 各演练的断言失败数（顺序即输出顺序）；未编译的演练不出现。
     let fails: &[(&str, u32)] = &[
-        ("nssync", u32::from(!ns_sync.balanced())),
+        ("nssync", u32::from(!ns_sync.balanced()) + ns_mismatch),
         ("mm", mm::demo::failed()),
         ("smp", smp::demo::failed()),
         ("balance", balance_demo::failed()),
