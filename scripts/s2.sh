@@ -6,6 +6,22 @@ cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1
 out="${S2_OUT:-evidence/s2}"
 mkdir -p "$out"
+
+# 撞时限前留现场（同 accept.sh）：时限前 60 秒经 monitor 写 <输出目录>/hang.txt；QEMU 正常退出后什么也不写。
+hang_watch_on() {
+  local dir="$1" limit="$2"
+  hang_sock="/tmp/jasper-mon-$$-s2.sock"
+  hang_pid=""
+  if command -v python3 >/dev/null && [ "$limit" -gt 120 ]; then
+    python3 scripts/qemu-hang-dump.py "$hang_sock" "$((limit - 60))" "$dir/hang.txt" 2>/dev/null &
+    hang_pid=$!
+  fi
+}
+hang_watch_off() {
+  if [ -n "$hang_pid" ]; then kill "$hang_pid" 2>/dev/null; wait "$hang_pid" 2>/dev/null; fi
+  rm -f "$hang_sock"
+  return 0
+}
 # Author: chatgpt. Keep the generalized main-side campaign, default to the
 # stricter eight-CPU integration scope while allowing an explicit four-CPU run.
 cpus=${S2_CPUS:-8}
@@ -50,13 +66,15 @@ set +e
 # True parallel vCPUs are required: a single-threaded TCG scheduler can strand
 # spinlock waiters across eight vCPUs even when every worker is runnable.
 # The eight-CPU campaign takes about 29 minutes under TCG in the build VM.
+hang_watch_on "$out" "${S2_QEMU_TIMEOUT:-2400}"
 timeout "${S2_QEMU_TIMEOUT:-2400}" qemu-system-x86_64 -accel tcg \
   -drive "format=raw,file=$out/s2.img" -device virtio-rng-pci \
   -device virtio-net-pci,netdev=n0 -netdev user,id=n0 \
   -device virtio-blk-pci,drive=d1 -drive "if=none,id=d1,file=$out/blank.img,format=raw" \
-  -smp "$cpus" -m 256M -serial stdio -display none -monitor none -no-reboot \
+  -smp "$cpus" -m 256M -serial stdio -display none -monitor "unix:$hang_sock,server,nowait" -no-reboot \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$out/serial.log" 2>&1
 rc=$?
+hang_watch_off
 set -e
 printf '%s\n' "$rc" > "$out/qemu-exit.txt"
 [[ "$rc" == 33 || "$rc" == 37 ]]
@@ -91,11 +109,13 @@ cargo build --locked --release --target x86_64-unknown-none -p jasper-kernel \
   --features krn3-postsplit-verify,fault-inject > "$scale_out/build.log" 2>&1
 target/release/xtask target/x86_64-unknown-none/release/jasper-kernel "$scale_out/s2.img" > "$scale_out/image.log" 2>&1
 set +e
+hang_watch_on "$scale_out" "${S2_QEMU_TIMEOUT:-600}"
 timeout "${S2_QEMU_TIMEOUT:-600}" qemu-system-x86_64 -accel tcg \
   -drive "format=raw,file=$scale_out/s2.img" -smp "$cpus" -m 256M \
-  -serial stdio -display none -monitor none -no-reboot \
+  -serial stdio -display none -monitor "unix:$hang_sock,server,nowait" -no-reboot \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$scale_out/serial.log" 2>&1
 rc=$?
+hang_watch_off
 set -e
 printf '%s\n' "$rc" > "$scale_out/qemu-exit.txt"
 [[ "$rc" == 33 || "$rc" == 37 ]]
