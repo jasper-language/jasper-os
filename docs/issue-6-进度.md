@@ -48,7 +48,7 @@
 ### 合入验证（变基到含启动阶段图的 main 之后）
 - 变基时把装配接入阶段图：`Stage::Assembly`（`COUNT` 由 9 变 10，`done_mask` 由 `0x1ff` 变 `0x3ff`），阶段跟踪器的 Verus 伴随模型、差分测试与 `BOOT-STAGE` 判据同步修改。阶段图套件 `run-boot-stage-suite.sh` 通过：Verus 34 verified / 0 errors + 负例、kernel-core 5、Proptest 3、Miri 1、fuzz 100 万 cov 82、Kani 4 个 harness 均 SUCCESSFUL，Loom N/A。
 - 装配套件 `run-assembly-suite.sh` 在 `48cd76f` 通过除 Kani 外的五步：Verus 13 verified / 0 errors + 负例、kernel-core 5 + 4、Proptest 3、Miri 1、fuzz 装配 100 万 cov 417、ModuleManager 100 万 cov 100、Loom 1。
-- **Kani 三个 harness 在现行上限（单个 10 分钟、虚拟内存 3.5 GB）下未判定**：`published_mask_never_reports_unready`、`audit_rejects_any_divergent_mask`、`loaded_set_stays_dependency_closed` 都因内存耗尽没有结论，日志中没有任何失败检查项。前两个的内存耗尽出现在求解器逐项判定之后；第三个是求解器在命题化阶段报内存不足。把第一个收窄为两处任意激活后同样耗尽，已撤销收窄。上限之外的结论只有 `d0e7bc9`（无内存上限）的 3 个 SUCCESSFUL；它们覆盖的非测试代码至今未变，但本次没有在现行上限下复现。
+- **Kani 三个 harness 在现行上限（单个 10 分钟、虚拟内存 3.5 GB）下未判定**：`published_mask_never_reports_unready`、`audit_rejects_any_divergent_mask`、`loaded_set_stays_dependency_closed` 都因内存耗尽没有结论，日志中没有任何失败检查项。前两个是求解器跑过若干轮后驱动进程分配内存失败；第三个是求解器在命题化阶段报内存不足。把第一个收窄为两处任意激活后同样耗尽，已撤销收窄。上限之外的结论只有 `d0e7bc9`（无内存上限）的 3 个 SUCCESSFUL；它们覆盖的非测试代码至今未变，但本次没有在现行上限下复现。
 - 修了一个测试缺陷：`failure_all_or_nothing_rolls_back_and_publishes_nothing` 与其他激活测试共用一份日志，并行时记录混入，偶发失败；现在这些测试串行执行，修复后连续 10 次通过。
 - 定点验收 `accept-20261104-131513`：M1.1、BOOT-STAGE、ASM1、POL1、POL2、POL3、SCHED1、SCHED2、SCHED3 通过，`SCHED2/计时` 1 行超界（只作 QEMU 参考，不阻塞）。依赖审计 0 漏洞（只有 bincode 未维护告警）。
 - **定点通过，等批次全量**：本片尚未经过 1/4/8 核与 q35 全量验收；装配只在引导处理器的启动期执行，多处理器路径未单独运行。
