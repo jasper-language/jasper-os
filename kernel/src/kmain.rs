@@ -199,7 +199,15 @@ pub fn start(boot: &'static BootSpec) -> ! {
     #[cfg(feature="rt2-verify")]
     {
         mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
-        crate::rt2_demo::run();arch::exit_emulator(ExitStatus::Success);
+        crate::rt2_demo::run();
+        // issue #2：高精度睡眠、取消与预算到期都走完之后，汇报脏集合校验（校验内核专用）。
+        #[cfg(feature="ns-dirty-audit")]
+        {
+            let stats=sched::ns_sync_stats();let (mismatch,audits)=sched::ns_audit();
+            kprintln!("[JSR-NS-SYNC] passes={} synced={} unchanged={} writes={} inserted={} rescheduled={} moved={} removed={} balanced={} audit_mismatch={} audits={}",
+                stats.passes,stats.synced,stats.unchanged,stats.writes(),stats.inserted,stats.rescheduled,stats.moved,stats.removed,stats.balanced(),mismatch,audits);
+        }
+        arch::exit_emulator(ExitStatus::Success);
     }
     #[cfg(feature="rt1-verify")]
     {

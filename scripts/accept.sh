@@ -582,7 +582,7 @@ check_ns_dirty() {   # issue #2：期限事件只同步脏槽位。默认启动�
   if ! [[ "$line" =~ balanced=true\ audit_mismatch=0 ]] || [ -z "$passes" ] || [ "$passes" -eq 0 ] || [ "$synced" -ge $((passes * 4)) ]; then
     record NS-DIRTY FAIL "默认启动计数不守恒、不变量不一致或平均每轮检查的槽位不少于 4：${line:-缺 JSR-NS-SYNC}"
   elif detail=$(OUT="$OUT/ns-dirty" bash "$ROOT/scripts/ns-dirty-check.sh" 2>&1); then
-    record NS-DIRTY PASS "默认启动 passes=$passes synced=$synced；校验内核 $(echo "$detail" | wc -l) 个处理器组合走完启动：$(echo "$detail" | sed -nE 's/^cpus=([0-9]+) PASS.*audits=([0-9]+).*/\1核\2轮/p' | tr '\n' ' ')0 不一致"
+    record NS-DIRTY PASS "默认启动 passes=$passes synced=$synced；校验内核 $(echo "$detail" | wc -l) 个组合走完（含 RT2 专项）：$(echo "$detail" | sed -nE 's/^cpus=([0-9a-z+]+) PASS.*audits=([0-9]+).*/\1核\2轮/p' | tr '\n' ' ')0 不一致"
   else
     record NS-DIRTY FAIL "$(echo "$detail" | grep FAIL | head -3 | tr '\n' ' ')"
   fi
