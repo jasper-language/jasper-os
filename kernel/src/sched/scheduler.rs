@@ -455,6 +455,15 @@ impl DeadlineTrace {
         consumed_at: 0, consumer: usize::MAX, consumed: false };
 }
 
+/// 高精度定时器事务携带的前两个时间点；后续点由真实发布路径补全。
+/// The first two timestamps carried through one high-resolution timer transaction.
+#[cfg(feature = "krn2-observe")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct WakePhaseSource {
+    pub interrupt_entry: kernel_core::raw_timing::Endpoint,
+    pub lock_acquired: kernel_core::raw_timing::Endpoint,
+}
+
 
 /// 每个槽位在各张随容量增长的表里占用的字节数（任务表、组表、组世代、调度暂存、栈指针表；不含栈本身）。
 pub const BYTES_PER_SLOT: usize = core::mem::size_of::<Option<Task>>()
@@ -759,9 +768,19 @@ pub struct Scheduler {
     #[cfg(feature = "krn2-observe")]
     pub(super) wake_latency: kernel_core::raw_timing::NanoHistogram<2049>,
     #[cfg(feature = "krn2-observe")]
+    pub(super) deadline_to_interrupt: kernel_core::raw_timing::NanoHistogram<2049>,
+    #[cfg(feature = "krn2-observe")]
+    pub(super) deadline_to_lock: kernel_core::raw_timing::NanoHistogram<2049>,
+    #[cfg(feature = "krn2-observe")]
+    pub(super) deadline_to_wake: kernel_core::raw_timing::NanoHistogram<2049>,
+    #[cfg(feature = "krn2-observe")]
     pub(super) deadline_to_runnable: kernel_core::raw_timing::NanoHistogram<2049>,
     #[cfg(feature = "krn2-observe")]
     pub(super) deadline_to_resume: kernel_core::raw_timing::NanoHistogram<2049>,
+    #[cfg(feature = "krn2-observe")]
+    pub(super) deadline_phase_errors: [u64; 4], // late, early, bad-order, resume
+    #[cfg(feature = "krn2-observe")]
+    pub(super) raw_highres_phase: Option<WakePhaseSource>,
     #[cfg(feature = "krn2-observe")]
     pub(super) raw_wake_errors: [u64; 3], // begin, finish, exit-with-pending
     #[cfg(feature = "krn2-observe")]
@@ -935,9 +954,19 @@ impl Scheduler {
             #[cfg(feature = "krn2-observe")]
             wake_latency: kernel_core::raw_timing::NanoHistogram::new(),
             #[cfg(feature = "krn2-observe")]
+            deadline_to_interrupt: kernel_core::raw_timing::NanoHistogram::new(),
+            #[cfg(feature = "krn2-observe")]
+            deadline_to_lock: kernel_core::raw_timing::NanoHistogram::new(),
+            #[cfg(feature = "krn2-observe")]
+            deadline_to_wake: kernel_core::raw_timing::NanoHistogram::new(),
+            #[cfg(feature = "krn2-observe")]
             deadline_to_runnable: kernel_core::raw_timing::NanoHistogram::new(),
             #[cfg(feature = "krn2-observe")]
             deadline_to_resume: kernel_core::raw_timing::NanoHistogram::new(),
+            #[cfg(feature = "krn2-observe")]
+            deadline_phase_errors: [0; 4],
+            #[cfg(feature = "krn2-observe")]
+            raw_highres_phase: None,
             #[cfg(feature = "krn2-observe")]
             raw_wake_errors: [0; 3],
             #[cfg(feature = "krn2-observe")]
@@ -1528,7 +1557,10 @@ impl Scheduler {
                 self.raw_wake_errors[2] = self.raw_wake_errors[2].saturating_add(1);
             }
             #[cfg(feature = "krn2-observe")]
-            { t.raw_deadline_start = None; }
+            {
+                t.raw_deadline_start = None;
+                t.raw_deadline = None;
+            }
             t.state = TaskState::Exited;
             pi_graph_changed |= t.waits_for.take().is_some();
             left = t.cpu_group.take();
@@ -1852,32 +1884,23 @@ impl Scheduler {
         let generation = self.epochs[i].history().expect("waking task identity").token().generation;
         #[cfg(feature = "krn2-observe")]
         let absolute_ns_deadline = self.task(i).and_then(|t| t.wake_ns);
+        #[cfg(feature = "krn2-observe")]
+        let phase_source = self.raw_highres_phase;
+        #[cfg(feature = "krn2-observe")]
+        let wake_start = if let Some(counter) = crate::hrtime::now() {
+            kernel_core::raw_timing::Endpoint { cpu: this_cpu(), counter,
+                clock: kernel_core::raw_timing::ClockDomain::SharedNs }
+        } else {
+            kernel_core::raw_timing::Endpoint { cpu: this_cpu(), counter: crate::arch::cycles(),
+                clock: kernel_core::raw_timing::ClockDomain::Raw }
+        };
         self.remove_wake_deadline(i, generation);
         let t = self.tasks[i].as_mut().unwrap();
         #[cfg(feature = "krn2-observe")]
         {
             let token = kernel_core::task_index::Token { slot: i, generation };
-            let start = if let Some(counter) = crate::hrtime::now() {
-                kernel_core::raw_timing::Endpoint { cpu: this_cpu(), counter,
-                    clock: kernel_core::raw_timing::ClockDomain::SharedNs }
-            } else {
-                kernel_core::raw_timing::Endpoint { cpu: this_cpu(), counter: crate::arch::cycles(),
-                    clock: kernel_core::raw_timing::ClockDomain::Raw }
-            };
-            if let Some(round) = t.raw_wake.begin(token, start) { t.raw_wake_round = Some(round); }
+            if let Some(round) = t.raw_wake.begin(token, wake_start) { t.raw_wake_round = Some(round); }
             else { self.raw_wake_errors[0] = self.raw_wake_errors[0].saturating_add(1); }
-            // A due high-resolution sleep has an exact absolute deadline in
-            // the same shared-ns clock. Keep it until the resume hook so the
-            // diagnostic can separate timer/lock delay from runnable delay.
-            t.raw_deadline_start = absolute_ns_deadline.filter(|&at| at <= start.counter).map(|at|
-                kernel_core::raw_timing::Endpoint { cpu: t.home, counter: at,
-                    clock: kernel_core::raw_timing::ClockDomain::SharedNs });
-            if let Some(deadline) = t.raw_deadline_start {
-                self.deadline_to_runnable.record(&kernel_core::raw_timing::Sample {
-                    path: 5, slot: i, generation, wait_round: t.raw_wake_round.unwrap_or(0),
-                    start: deadline, end: start,
-                });
-            }
         }
         // Author: chatgpt。超时/退出/普通wake也使本轮事件凭据失效。
         if let Some(key) = t.event_wait.pending() { t.event_wait.finish(key); }
@@ -1896,6 +1919,47 @@ impl Scheduler {
         let r = self.update_hot_sched(i, |queue, sched| queue.enqueue(sched, Enqueue::Wake));
         self.note(r);
         self.relist(i);
+        #[cfg(feature = "krn2-observe")]
+        if let Some(at) = absolute_ns_deadline.filter(|&at| at <= wake_start.counter) {
+            let (home, round) = self.task(i)
+                .map(|t| (t.home, t.raw_wake_round.unwrap_or(0)))
+                .expect("due wake task");
+            // 队列字段、策略入队状态和运行列表成员关系都已发布后，才取这里的端点。
+            // Capture only after the queue fields, policy state, and run-list membership are published.
+            let published = super::wake_endpoint();
+            let deadline = kernel_core::raw_timing::Endpoint { cpu: home, counter: at,
+                clock: kernel_core::raw_timing::ClockDomain::SharedNs };
+            self.deadline_to_runnable.record(&kernel_core::raw_timing::Sample {
+                path: 8, slot: i, generation, wait_round: round, start: deadline, end: published,
+            });
+            self.tasks[i].as_mut().expect("due wake task").raw_deadline_start = Some(deadline);
+            if let Some(source) = phase_source {
+                if source.interrupt_entry.clock == kernel_core::raw_timing::ClockDomain::SharedNs
+                    && source.lock_acquired.clock == kernel_core::raw_timing::ClockDomain::SharedNs
+                    && (source.interrupt_entry.counter < at || source.lock_acquired.counter < at)
+                {
+                    self.deadline_phase_errors[1] =
+                        self.deadline_phase_errors[1].saturating_add(1);
+                } else if let Some(timeline) = kernel_core::raw_timing::DeadlineTimeline::new(
+                    deadline, source.interrupt_entry, source.lock_acquired, wake_start, published,
+                ) {
+                    let samples = timeline.samples_to_published(i, generation, round);
+                    for (hist, sample) in [
+                        &mut self.deadline_to_interrupt,
+                        &mut self.deadline_to_lock,
+                        &mut self.deadline_to_wake,
+                    ].into_iter().zip(samples.into_iter().take(3)) {
+                        hist.record(&sample);
+                    }
+                    self.tasks[i].as_mut().expect("timed wake task").raw_deadline = Some(timeline);
+                } else {
+                    self.deadline_phase_errors[2] =
+                        self.deadline_phase_errors[2].saturating_add(1);
+                }
+            } else {
+                self.deadline_phase_errors[0] = self.deadline_phase_errors[0].saturating_add(1);
+            }
+        }
         // 被限速组的成员醒来也不抢占：令牌回正之前它本来就不会被选中。
         let Some(t) = self.task(i).filter(|t| self.eligible(t)) else { return false };
         let (woken, home) = (t.sched.qos, t.home);
@@ -3326,25 +3390,47 @@ impl Scheduler {
         end: kernel_core::raw_timing::Endpoint, path: u16) {
         if !is_worker(token.slot) || !self.epochs.get(token.slot).is_some_and(|e| e.live(token)) { return; }
         let mut deadline = None;
+        let mut timeline = None;
         let completion = self.task_mut(token.slot).and_then(|t| {
             let round = t.raw_wake_round.take()?;
-            deadline = t.raw_deadline_start.take();
+            deadline = t.raw_deadline_start.take().map(|start| (start, round));
+            timeline = t.raw_deadline.take();
             Some(t.raw_wake.finish(token, round, end))
         });
-        if let Some(start) = deadline {
-            self.deadline_to_resume.record(&kernel_core::raw_timing::Sample {
-                path: 6, slot: token.slot, generation: token.generation, wait_round: 0,
-                start, end,
-            });
-        }
         match completion {
             Some(Some(mut sample)) => {
+                if let Some((start, round)) = deadline {
+                    let resume = kernel_core::raw_timing::Sample {
+                        path: 9, slot: token.slot, generation: token.generation,
+                        wait_round: round, start, end,
+                    };
+                    if resume.shared_ns_delta().is_some() {
+                        self.deadline_to_resume.record(&resume);
+                    } else {
+                        self.deadline_phase_errors[3] =
+                            self.deadline_phase_errors[3].saturating_add(1);
+                    }
+                } else if timeline.is_some() {
+                    self.deadline_phase_errors[3] =
+                        self.deadline_phase_errors[3].saturating_add(1);
+                }
                 sample.path = path;
                 self.wake_latency.record(&sample);
                 let _ = self.raw_wakes.push(sample);
             }
-            Some(None) => self.raw_wake_errors[1] = self.raw_wake_errors[1].saturating_add(1),
-            None => {}
+            Some(None) => {
+                self.raw_wake_errors[1] = self.raw_wake_errors[1].saturating_add(1);
+                if deadline.is_some() || timeline.is_some() {
+                    self.deadline_phase_errors[3] =
+                        self.deadline_phase_errors[3].saturating_add(1);
+                }
+            }
+            None => {
+                if deadline.is_some() || timeline.is_some() {
+                    self.deadline_phase_errors[3] =
+                        self.deadline_phase_errors[3].saturating_add(1);
+                }
+            }
         }
     }
     #[cfg(feature = "krn2-observe")]

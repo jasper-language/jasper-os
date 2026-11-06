@@ -88,11 +88,15 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
             let diagnostic=false;
             if !diagnostic && crate::hrtime::enabled() {
                 let entry = crate::arch::clock_counter();
+                #[cfg(feature = "krn2-observe")]
+                let interrupt_entry = Some(sched::wake_endpoint());
+                #[cfg(not(feature = "krn2-observe"))]
+                let interrupt_entry = None;
                 if !sched::timer_admit(entry) {
                     sched::rearm_after_defer(entry);
                     return;
                 }
-                sched::on_highres_timer(entry);
+                sched::on_highres_timer(entry, interrupt_entry);
             }
             else if !diagnostic {
                 let entry = crate::arch::clock_counter();

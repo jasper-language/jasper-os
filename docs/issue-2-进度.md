@@ -103,3 +103,56 @@
 - 验证链 `run-dirty-slots-suite.sh`（性质 NS-DIRTY-01）：Verus 19/0 + 负例、Proptest 2、Miri 1、fuzz 100 万 cov349，Loom N/A（全局调度器锁内访问），Kani 发版时验证。接入路径（NS-DIRTY-02）无法独立运行，五步 N/A，替代证据为校验内核。
 - 定点 `accept-20261105-140303`：M1.1 / BOOT-STAGE / TIMER-PROGRESS / NS-DIRTY / SCHED1–3 / POL1–3 / DRV2C1 / DRV2C2 PASS。NS-DIRTY：默认启动 passes=494562、synced=43369；校验内核 1 处理器 488459 轮、4 处理器 509772 轮、8 处理器 578019 轮、RT2 专项 21945 轮，0 不一致。
 - 定点通过，等批次全量。
+
+## 7. 第三片：deadline 到 resume 时间点拆分（2026-11-06）
+
+- 分支：`dev/issue2-s3`
+- 基线：Wave 1 合入后的 `269fb84`
+- 范围：只改高精度期限唤醒的诊断路径；`settle_highres()` 全表结算、owner-leaf 到期快路径、KVM/裸机对照、Ring/对象释放和模块装配均不在本片。
+
+### 六个时间点
+
+| 时间点 | 观测位置 | 边界 |
+|---|---|---|
+| deadline | 睡眠登记的绝对纳秒时刻 | 与其它点同为启动校准后的共享纳秒域 |
+| interrupt | Core 本地定时器分发进入高精度路径，在取调度锁之前 | x86_64 架构 EOI 之后；不是硬件向量第一条指令 |
+| lock | 现有全局 `KERNEL_SCHED` 锁取得后 | 不新增锁；包含此前的取锁等待 |
+| wake | `make_runnable()` 真正开始处理到期任务 | 在删除期限节点之后、改任务状态之前取点 |
+| queue publication | `make_runnable()` 内 `queue.enqueue()` 与 `relist()` 都返回后 | 运行队列字段、策略入队状态和运行列表成员均已发布 |
+| resume | 恢复执行流上的 Rust 恢复钩子 | 已在 IRQ 屏蔽下，但不是架构返回指令或用户第一条指令 |
+
+`deadline_to_interrupt / lock / wake / runnable` 是从 deadline 起算的累计区间；`deadline_to_runnable` 现在指向真实队列发布，不再指向 `make_runnable()` 入口。`deadline_to_resume` 仍覆盖全部到期唤醒。严格五点分解只接纳共享时钟且顺序有效的定时器事务样本。
+
+对不是由定时器事务发现的到期唤醒，记为 `late_settlement`，仍计入 deadline→runnable 与 deadline→resume，但不伪造 interrupt 点。若定时器入口或取锁先于精确期限（校准/取时间的边界），记为 `early_timer`，同样保留总路径而排除五点分解。`invalid_order` 与 `invalid_resume` 是功能失败，不能用计时豁免。
+
+### 开销与边界
+
+- 观测只在 `krn2-observe` / `krn3-p999-verify` 构建存在；默认构建不取这些额外时钟，也不增加字段写入。
+- 每次到期唤醒增加固定数量的共享时钟读数与定长直方图更新；没有分配、没有遍历任务表、没有额外锁。
+- 本片没有去除 `settle_highres()` 的结算扫描（第四片），没有实现 fifth owner-leaf 快路径或 KVM/裸机性能对照。
+- 共享纳秒跨处理器比较仍是平台校准假设；TCG 数值只作为机制与路径分解证据，不是物理 p99/p99.9 结论。
+
+### 固定证据
+
+- 单元 / Proptest / Miri：`verification/toolbox/run-deadline-phase-suite.sh`，生产 `raw_timing` 5/0；Proptest 3/0（顺序与时钟性质含 512 例）；Miri 1/0。Kani 两个 harness 已留在生产模块，按发版门禁运行。
+- 8 核专项：`evidence/issue2/p999-phase2-20261106/krn3-p999-verify.serial`，计划完整、退出 33、资源与列表恢复。
+- 定点 accept：`accept-20261106-185207`，M1.1 / TIMER-PROGRESS / NS-DIRTY / M1.4 / SCHED1 / SCHED1-计时 / SCHED2 / SCHED2-计时 PASS；QEMU 37 仅为计时参考项，定点点位不代表全量。
+
+```text
+[JSR-WAKE-PHASE] mode=isolated deadline=0us interrupt=10/10/10/6us lock=10/10/10/10us wake=10/10/20/14us runnable=10/20/20/20us resume=20/30/50/48us samples=9890/10000/10000 late=68 early_timer=42 invalid_order=0 invalid_resume=0 queue_publication=after-enqueue-relist clock=shared-ns-serialized
+[JSR-WAKE-PHASE] mode=fanout-7 deadline=0us interrupt=10/10/10/5us lock=10/10/10/12us wake=10/10/10/16us runnable=10/10/20/20us resume=20/20/30/79us samples=14297/14336/14336 late=35 early_timer=4 invalid_order=0 invalid_resume=0 queue_publication=after-enqueue-relist clock=shared-ns-serialized
+```
+
+输出中的 `samples=严格五点分解/发布/恢复`；`interrupt/lock/wake/runnable/resume` 各组均为 `p50/p99/p99.9/max`，单位 μs。
+
+### 验收条目
+
+| 条目 | 状态 |
+|---|---|
+| deadline→中断→取锁→开始唤醒→队列发布→resume 六点可观察 | 已完成；严格有序定时器样本与 late/early 边界分别记账 |
+| 队列发布点位于 `make_runnable()` 真正发布之后 | 已完成；端点在 `enqueue + relist` 后取得 |
+| 不引入无界开销或额外锁区间 | 已满足；观测为定长 O(1)，复用现有全局锁，无新增分配/锁 |
+| 单元、属性与定点证据 | 已满足；见上 |
+| `settle_highres()` 去全表扫描 | 留第四片 |
+| owner-leaf 本地到期快路径 | 留第五片 |
+| KVM / 裸机性能对照 | 留第六片 |

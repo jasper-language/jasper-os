@@ -131,6 +131,29 @@ fn p999_isolated_sleeper() {
     P999_DONE.fetch_add(1, Ordering::Release);
 }
 
+#[cfg(feature = "krn3-p999-verify")]
+fn phase_accounting_complete(
+    phases: kernel_core::raw_timing::WakePhaseSummaries,
+    expected: u64,
+) -> bool {
+    let valid = phases.deadline_to_interrupt.count;
+    [
+        phases.deadline_to_interrupt,
+        phases.deadline_to_lock,
+        phases.deadline_to_wake,
+    ].iter().all(|s| s.count == valid && s.invalid == 0)
+        && phases.deadline_to_runnable.count == expected
+        && phases.deadline_to_runnable.invalid == 0
+        && phases.deadline_to_resume.count == expected
+        && phases.deadline_to_resume.invalid == 0
+        && valid
+            .saturating_add(phases.late_settlement)
+            .saturating_add(phases.early_timer)
+            .saturating_add(phases.invalid_order)
+            == expected
+        && phases.invalid_resume == 0
+}
+
 /// Complete wake/resume sampling contract. Seven AP-affine workers each wake
 /// 160 times, yielding 1,120 observations on an eight-CPU guest. The test
 /// validates identity, completeness and resource recovery; latency thresholds
@@ -163,21 +186,36 @@ pub fn run_wake_latency_contract() -> u32 {
     if isolated_spawned { sched::run(); }
     let (isolated_raw, isolated, isolated_errors, isolated_carried, isolated_pending) =
         sched::raw_wake_snapshot();
-    let (isolated_due, isolated_total) = sched::raw_deadline_snapshot();
+    let isolated_phases = sched::raw_deadline_snapshot();
     let isolated_complete = isolated.count == u64::from(P999_ISOLATED_ROUNDS)
         && isolated.invalid == 0 && isolated_errors == [0; 3]
         && isolated_carried == 0 && isolated_pending == 0;
+    let isolated_phase_complete =
+        phase_accounting_complete(isolated_phases, u64::from(P999_ISOLATED_ROUNDS));
     check(isolated_complete, "隔离唤醒延迟样本必须完整");
+    check(isolated_phase_complete, "隔离期限时间点样本必须完整且有序");
     check(P999_DONE.load(Ordering::Acquire) == 1, "隔离唤醒任务必须完成");
     check(baseline() == saved, "隔离p99.9演练资源必须回到基线");
     kprintln!("[JSR-WAKE-LATENCY] mode=isolated samples={} expected={} invalid={} p50_us={} p99_us={} p999_us={} max_ns={} complete={} raw_retained={} raw_dropped={} endpoint=resume-hook clock=shared-ns-serialized platform_sync=assumed",
         isolated.count, P999_ISOLATED_ROUNDS, isolated.invalid, isolated.p50_us,
         isolated.p99_us, isolated.p999_us, isolated.max_ns, isolated_complete,
         isolated_raw.entries().len(), isolated_raw.dropped());
-    kprintln!("[JSR-WAKE-PHASE] mode=isolated deadline_to_runnable={}/{}/{}/{}us deadline_to_resume={}/{}/{}/{}us samples={}/{}",
-        isolated_due.p50_us, isolated_due.p99_us, isolated_due.p999_us, isolated_due.max_ns.div_ceil(1_000),
-        isolated_total.p50_us, isolated_total.p99_us, isolated_total.p999_us, isolated_total.max_ns.div_ceil(1_000),
-        isolated_due.count, isolated_total.count);
+    kprintln!("[JSR-WAKE-PHASE] mode=isolated deadline={}us interrupt={}/{}/{}/{}us lock={}/{}/{}/{}us wake={}/{}/{}/{}us runnable={}/{}/{}/{}us resume={}/{}/{}/{}us samples={}/{}/{} late={} early_timer={} invalid_order={} invalid_resume={} queue_publication=after-enqueue-relist clock=shared-ns-serialized",
+        0,
+        isolated_phases.deadline_to_interrupt.p50_us, isolated_phases.deadline_to_interrupt.p99_us,
+        isolated_phases.deadline_to_interrupt.p999_us, isolated_phases.deadline_to_interrupt.max_ns.div_ceil(1_000),
+        isolated_phases.deadline_to_lock.p50_us, isolated_phases.deadline_to_lock.p99_us,
+        isolated_phases.deadline_to_lock.p999_us, isolated_phases.deadline_to_lock.max_ns.div_ceil(1_000),
+        isolated_phases.deadline_to_wake.p50_us, isolated_phases.deadline_to_wake.p99_us,
+        isolated_phases.deadline_to_wake.p999_us, isolated_phases.deadline_to_wake.max_ns.div_ceil(1_000),
+        isolated_phases.deadline_to_runnable.p50_us, isolated_phases.deadline_to_runnable.p99_us,
+        isolated_phases.deadline_to_runnable.p999_us, isolated_phases.deadline_to_runnable.max_ns.div_ceil(1_000),
+        isolated_phases.deadline_to_resume.p50_us, isolated_phases.deadline_to_resume.p99_us,
+        isolated_phases.deadline_to_resume.p999_us, isolated_phases.deadline_to_resume.max_ns.div_ceil(1_000),
+        isolated_phases.deadline_to_interrupt.count,
+        isolated_phases.deadline_to_runnable.count, isolated_phases.deadline_to_resume.count,
+        isolated_phases.late_settlement, isolated_phases.early_timer,
+        isolated_phases.invalid_order, isolated_phases.invalid_resume);
 
     // Then measure a seven-way same-tick fanout separately.
     P999_DONE.store(0, Ordering::Relaxed);
@@ -199,11 +237,13 @@ pub fn run_wake_latency_contract() -> u32 {
     check(spawned && workers == 7, "必须创建七个AP固定唤醒工作任务");
     if spawned { sched::run(); }
     let (raw, latency, errors, carried, pending) = sched::raw_wake_snapshot();
-    let (due, total) = sched::raw_deadline_snapshot();
+    let phases = sched::raw_deadline_snapshot();
     let expected = workers as u64 * u64::from(P999_ROUNDS);
     let complete = latency.count == expected && latency.invalid == 0
         && errors == [0; 3] && carried == 0 && pending == 0;
+    let phase_complete = phase_accounting_complete(phases, expected);
     check(complete, "唤醒延迟样本必须完整且身份/时钟有效");
+    check(phase_complete, "期限时间点样本必须完整且有序");
     check(P999_DONE.load(Ordering::Acquire) as usize == workers,
         "全部唤醒工作任务必须完成");
     check(baseline() == saved, "p99.9演练资源必须回到基线");
@@ -211,9 +251,22 @@ pub fn run_wake_latency_contract() -> u32 {
     kprintln!("[JSR-WAKE-LATENCY] mode=fanout-7 samples={} expected={} invalid={} p50_us={} p99_us={} p999_us={} max_ns={} complete={} raw_retained={} raw_dropped={} endpoint=resume-hook clock=shared-ns-serialized platform_sync=assumed",
         latency.count, expected, latency.invalid, latency.p50_us, latency.p99_us,
         latency.p999_us, latency.max_ns, complete, raw.entries().len(), raw.dropped());
-    kprintln!("[JSR-WAKE-PHASE] mode=fanout-7 deadline_to_runnable={}/{}/{}/{}us deadline_to_resume={}/{}/{}/{}us samples={}/{}",
-        due.p50_us, due.p99_us, due.p999_us, due.max_ns.div_ceil(1_000),
-        total.p50_us, total.p99_us, total.p999_us, total.max_ns.div_ceil(1_000), due.count, total.count);
+    kprintln!("[JSR-WAKE-PHASE] mode=fanout-7 deadline={}us interrupt={}/{}/{}/{}us lock={}/{}/{}/{}us wake={}/{}/{}/{}us runnable={}/{}/{}/{}us resume={}/{}/{}/{}us samples={}/{}/{} late={} early_timer={} invalid_order={} invalid_resume={} queue_publication=after-enqueue-relist clock=shared-ns-serialized",
+        0,
+        phases.deadline_to_interrupt.p50_us, phases.deadline_to_interrupt.p99_us,
+        phases.deadline_to_interrupt.p999_us, phases.deadline_to_interrupt.max_ns.div_ceil(1_000),
+        phases.deadline_to_lock.p50_us, phases.deadline_to_lock.p99_us,
+        phases.deadline_to_lock.p999_us, phases.deadline_to_lock.max_ns.div_ceil(1_000),
+        phases.deadline_to_wake.p50_us, phases.deadline_to_wake.p99_us,
+        phases.deadline_to_wake.p999_us, phases.deadline_to_wake.max_ns.div_ceil(1_000),
+        phases.deadline_to_runnable.p50_us, phases.deadline_to_runnable.p99_us,
+        phases.deadline_to_runnable.p999_us, phases.deadline_to_runnable.max_ns.div_ceil(1_000),
+        phases.deadline_to_resume.p50_us, phases.deadline_to_resume.p99_us,
+        phases.deadline_to_resume.p999_us, phases.deadline_to_resume.max_ns.div_ceil(1_000),
+        phases.deadline_to_interrupt.count,
+        phases.deadline_to_runnable.count, phases.deadline_to_resume.count,
+        phases.late_settlement, phases.early_timer,
+        phases.invalid_order, phases.invalid_resume);
     kprintln!("[JSR-KRN3-P999] done failed={} workers={} rounds={} resources={} lists={}",
         failed(), workers, P999_ROUNDS, baseline() == saved, lists_consistent());
     failed()

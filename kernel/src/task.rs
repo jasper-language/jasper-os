@@ -37,11 +37,15 @@ pub struct Task {
     pub raw_wake: kernel_core::raw_timing::WakePair,
     #[cfg(feature = "krn2-observe")]
     pub raw_wake_round: Option<u64>,
-    /// Exact absolute ns deadline retained across Runnable until the resumed
-    /// execution hook consumes it. Diagnostic only; early explicit wakes do
-    /// not populate this field.
+    /// Deadline retained for every due wake, independent of which transaction
+    /// discovers it.
     #[cfg(feature = "krn2-observe")]
     pub raw_deadline_start: Option<kernel_core::raw_timing::Endpoint>,
+    /// Exact absolute ns deadline retained across Runnable until the resumed
+    /// execution hook consumes it. Only a timer transaction with ordered
+    /// endpoints populates this full diagnostic timeline.
+    #[cfg(feature = "krn2-observe")]
+    pub raw_deadline: Option<kernel_core::raw_timing::DeadlineTimeline>,
     /// 任务标识。
     pub id: TaskId,
     /// 任务名（诊断输出）。
@@ -113,6 +117,8 @@ impl Task {
             raw_wake_round: None,
             #[cfg(feature = "krn2-observe")]
             raw_deadline_start: None,
+            #[cfg(feature = "krn2-observe")]
+            raw_deadline: None,
             id,
             name,
             state: TaskState::Runnable,
