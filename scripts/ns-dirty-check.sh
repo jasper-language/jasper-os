@@ -25,7 +25,7 @@ if [ -n "$CPUS" ]; then
 fi
 for n in $CPUS; do
   cp "$OUT/kernel.img" "$OUT/k$n.img"
-  python3 scripts/boot-trace.py --img "$OUT/k$n.img" --out "$OUT/p$n" --timeout "$LIMIT" --nice 10 --io-class 2 --smp "$n" \
+  flock /tmp/jasper-os-qemu.lock python3 scripts/boot-trace.py --img "$OUT/k$n.img" --out "$OUT/p$n" --timeout "$LIMIT" --nice 10 --io-class 2 --smp "$n" \
     > "$OUT/p$n.result" 2>&1 &
 done
 wait

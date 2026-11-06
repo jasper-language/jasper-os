@@ -19,6 +19,8 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     assert!(u.is_ok_and(|u| u <= 1000));
+    let checkpoint = b.running_settle_at(now);
+    assert!(checkpoint.is_some_and(|at| at <= b.next));
     for ev in data[24..].chunks_exact(17) {
         let (start, end) = (word(ev), word(&ev[8..]));
         let old = b;
@@ -27,6 +29,7 @@ fuzz_target!(|data: &[u8]| {
                 assert!(b.remaining <= b.quota);
                 assert!(b.next >= old.next);
                 assert!(end < b.next);
+                assert!(b.running_settle_at(end).is_some_and(|at| at >= end || b.remaining == 0));
             }
             Err(_) => assert_eq!(b, old),
         }

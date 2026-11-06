@@ -71,6 +71,18 @@ fn ns_budget_six_intervals() {
 
 #[cfg(kani)]
 #[kani::proof]
+fn ns_budget_running_checkpoint() {
+ let now:u8=kani::any();let quota:u8=kani::any();let extra:u8=kani::any();let start:u8=kani::any();
+ let quota=quota.max(1);let period=quota.saturating_add(extra);
+ let Some(b)=kernel_core::ns_budget::Budget::new(u64::from(now),u64::from(quota),u64::from(period)) else{return;};
+ let at=b.running_settle_at(u64::from(start)).unwrap();
+ assert!(at<=b.next);
+ if b.remaining>0 {assert!(at<=u64::from(start).saturating_add(b.remaining));}
+ else {assert_eq!(at,b.next);}
+}
+
+#[cfg(kani)]
+#[kani::proof]
 fn inherited_mutex_two_callers() {
     use kernel_core::inherited_mutex::{Claim, State};
     let first: u8 = kani::any();

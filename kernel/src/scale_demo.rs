@@ -269,6 +269,7 @@ pub fn run_wake_latency_contract() -> u32 {
         phases.invalid_order, phases.invalid_resume);
     let budget = sched::ns_budget_stats();
     let sync = sched::ns_sync_stats();
+    check(budget.table_slots == 0, "预算结算不得扫描任务表全表");
     kprintln!(
         "[JSR-NS-BUDGET] passes={} budget_cpu_checks={} due_cpu_checks={} due_cpus={} table_slots={} due_events={} running_settlements={} inactive_settlements={} heap_ops={} max_settle_cycles={}",
         budget.passes, budget.budget_cpu_checks, budget.due_cpu_checks, budget.due_cpus,

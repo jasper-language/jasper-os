@@ -734,6 +734,9 @@ fn sync_counters_ns_only() {
     let stats = sched::ns_sync_stats();
     let budget = sched::ns_budget_stats();
     let (mismatch, audits) = sched::ns_audit();
+    assert_eq!(budget.table_slots, 0, "budget settlement scanned the task table");
+    assert!(budget.running_settlements > 0, "RT2 must settle a running budget");
+    assert!(budget.inactive_settlements > 0, "RT2 must refill an inactive budget");
     kprintln!(
         "[JSR-NS-SYNC] passes={} synced={} unchanged={} writes={} inserted={} rescheduled={} moved={} removed={} balanced={} audit_mismatch={} audits={}",
         stats.passes, stats.synced, stats.unchanged, stats.writes(), stats.inserted, stats.rescheduled, stats.moved, stats.removed, stats.balanced(), mismatch, audits
