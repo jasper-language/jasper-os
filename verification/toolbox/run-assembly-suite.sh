@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run-assembly-suite.sh —— 服务装配契约（issue #6 第一切片）的六步验证链
+# run-assembly-suite.sh —— 服务装配与模块激活（issue #6 第一、二切片）的六步验证链
 #
 # 顺序固定：Verus/Z3 → Proptest → Miri → cargo-fuzz → Loom（Kani 发版时验证）。
-# 范围：kernel-core/src/assembly.rs（新写：Assembly / Binding / Policy / State / audit / mask_has），
-# kernel/src/assembly.rs（新写：绑定表与发布协议），以及既有的 kernel-core/src/module.rs
-# ModuleManager（load / unload / unload_all，补链：原无验证链；Loom N/A：&mut 单所有者，无共享可变状态）。
+# 范围：kernel-core/src/assembly.rs（Assembly / Binding / Policy / State / audit / mask_has）
+# 与 kernel/src/assembly.rs（真实模块激活、发布协议）。旧 ModuleManager 已退役。
 # 所有命令在构建虚拟机内执行；输出保存在 evidence/issue6/assembly-suite。
 # 工具路径由环境变量提供：VERUS 指向 Verus 可执行文件，Z3 默认取同目录的 z3。
 # =============================================================================
@@ -18,17 +17,15 @@ out=evidence/issue6/assembly-suite
 mkdir -p "$out"
 # 只跑本次改动对应的 harness 时用 KANI_HARNESSES 指定；空串表示本次不跑 Kani（沿用原证据，登记绑定的提交号）。
 # KANI_HARNESSES selects the harnesses for this change; empty keeps the earlier evidence.
-HARNESSES="${KANI_HARNESSES-published_mask_never_reports_unready audit_rejects_any_divergent_mask loaded_set_stays_dependency_closed}"
+HARNESSES="${KANI_HARNESSES-published_mask_never_reports_unready audit_rejects_any_divergent_mask}"
 
 sha256sum \
   kernel-core/src/assembly.rs \
-  kernel-core/src/module.rs \
   kernel/src/assembly.rs \
   verification/toolbox/verus/assembly.rs \
   verification/toolbox/verus/assembly_bad.rs \
   verification/toolbox/tests/assembly.rs \
   verification/toolbox/fuzz/fuzz_targets/assembly.rs \
-  verification/toolbox/fuzz/fuzz_targets/module_mgr.rs \
   > "$out/source.sha256"
 
 rustc --version > "$out/rustc-version.log"
@@ -49,7 +46,6 @@ fi
 
 echo "== 2/6 Proptest =="
 cargo test -p kernel-core --lib assembly > "$out/core.log" 2>&1
-cargo test -p kernel-core --lib module::tests > "$out/core-module.log" 2>&1
 cargo test --manifest-path verification/toolbox/Cargo.toml --test assembly -- \
   --skip under_miri --skip loom > "$out/proptest.log" 2>&1
 
@@ -59,7 +55,6 @@ cargo +nightly miri test --manifest-path verification/toolbox/Cargo.toml --test 
 
 echo "== 4/6 cargo-fuzz =="
 (cd verification/toolbox/fuzz && cargo fuzz run assembly -- -runs=1000000 -max_len=32) > "$out/fuzz.log" 2>&1
-(cd verification/toolbox/fuzz && cargo fuzz run module_mgr -- -runs=1000000 -max_len=64) > "$out/fuzz-module-mgr.log" 2>&1
 
 echo "== 5/6 Kani（$KANI_STATUS）=="
 : > "$out/kani-result.txt"
@@ -89,11 +84,9 @@ cargo test --manifest-path verification/toolbox/Cargo.toml --test assembly publi
 grep -Eq '[1-9][0-9]* verified, 0 errors' "$out/verus.log"
 grep -Eq 'error: (postcondition not satisfied|precondition not satisfied|assertion failed|invariant not satisfied)' "$out/verus-bad.log"
 grep -q '5 passed; 0 failed' "$out/core.log"
-grep -q '4 passed; 0 failed' "$out/core-module.log"
-grep -q '3 passed; 0 failed' "$out/proptest.log"
+grep -q '2 passed; 0 failed' "$out/proptest.log"
 grep -q '1 passed; 0 failed' "$out/miri.log"
 grep -q '#1000000.*DONE' "$out/fuzz.log"
-grep -q '#1000000.*DONE' "$out/fuzz-module-mgr.log"
 cat "$out/kani-result.txt"
 grep -q '1 passed; 0 failed' "$out/loom.log"
 

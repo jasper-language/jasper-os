@@ -546,10 +546,10 @@ const PREFIX: &[Step] = &[
     case("mm-heap", Stage::Heap, "mm", mm_heap),
     st(Stage::Capacity),
     st(Stage::Devices),
-    case("pci-table", Stage::Devices, "pci", pci_table),
-    case("capacity-report", Stage::Capacity, "", capacity_report),
     st(Stage::Profile),
     st(Stage::Assembly),
+    case("pci-table", Stage::Assembly, "pci", pci_table),
+    case("capacity-report", Stage::Assembly, "", capacity_report),
     case("profile-checks", Stage::Assembly, "profile", profile_checks),
     st(Stage::SchedMode),
 ];

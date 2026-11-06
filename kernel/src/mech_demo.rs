@@ -15,11 +15,13 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use kernel_core::assembly::{Assembly, Binding, Policy, State};
+use kernel_core::config::KernelConfig;
 use kernel_core::io::{IoBackend, IoOp, IoRequest, MemIoCore, Ring};
 use kernel_core::memory::{AddressSpace, SimpleAddressSpace, VmProtection, PAGE_SIZE};
 use kernel_core::meta::{Effects, InterfaceMeta};
-use kernel_core::module::{ModuleDescriptor, ModuleError, ModuleEvent, ModuleManager};
 use kernel_core::object::{HandleError, HandleTable, ObjectManager, ObjectRef, ObjectType, Rights};
+use kernel_core::profile::{self, ModuleDecl, SchedClass, SystemProfile};
 use kernel_core::trace::Tag;
 use kernel_core::trap::{Dispatcher, SysError, SyscallEntry, SysResult, TrapEvent, TrapFrame};
 use kernel_core::wait::{Event, TimeSource, Timer, WaitResult, WaitSet};
@@ -216,45 +218,190 @@ fn log_trap(e: &TrapEvent<'_>) {
     }
 }
 
-// ---- 模块装配 ----
+// ---- 装配机制 ----
 
-static SYSCALL_CORE: ModuleDescriptor = ModuleDescriptor { name: "syscall_core", requires: &[], init: || Ok(()), fini: || {} };
-static HELLO_SYSCALL: ModuleDescriptor = ModuleDescriptor {
-    name: "hello_syscall",
-    requires: &["syscall_core"],
-    init: || match Dispatcher::new(&SYSCALLS).validate() {
-        Ok(_) => Ok(()),
-        Err(_) => Err("系统调用表校验失败"),
+static MECH_MODULES: &[ModuleDecl] = &[
+    ModuleDecl {
+        name: "syscall-core",
+        provides: &["x.mech.syscall-core"],
+        requires: &[],
+        services: &[],
+        hot_load: false,
+        sched_class: SchedClass::Interactive,
+        min_tasks: 0,
+        min_objects: 0,
     },
-    fini: || {},
-};
-static NEEDS_MISSING: ModuleDescriptor =
-    ModuleDescriptor { name: "needs_missing", requires: &["not_present"], init: || Ok(()), fini: || {} };
+    ModuleDecl {
+        name: "hello-syscall",
+        provides: &["x.mech.syscall-table"],
+        requires: &["x.mech.syscall-core"],
+        services: &[],
+        hot_load: false,
+        sched_class: SchedClass::Interactive,
+        min_tasks: 0,
+        min_objects: 0,
+    },
+];
 
-/// 模块观察者：打印并记入追踪。
-fn log_module(e: ModuleEvent) {
-    let verb = match e {
-        ModuleEvent::Loaded(_) => "loaded",
-        ModuleEvent::Unloaded(_) => "unloaded",
-    };
-    kprintln!("[JSR-MOD] {} module={}", verb, e.module());
-    ktrace::emit(e.name(), &[Tag::str("module", e.module())]);
+static MECH_PROFILE: SystemProfile = SystemProfile {
+    name: "mech-assembly",
+    display_zh: "机制装配",
+    display_en: "mechanism assembly",
+    config: KernelConfig::STANDARD,
+    modules: MECH_MODULES,
+    guarantees: &[],
+    hot_load: false,
+};
+
+static BROKEN_MODULES: &[ModuleDecl] = &[
+    ModuleDecl {
+        name: "broken-base",
+        provides: &["x.mech.broken-base"],
+        requires: &[],
+        services: &[],
+        hot_load: false,
+        sched_class: SchedClass::Interactive,
+        min_tasks: 0,
+        min_objects: 0,
+    },
+    ModuleDecl {
+        name: "broken",
+        provides: &["x.mech.broken"],
+        requires: &["x.mech.broken-base"],
+        services: &[],
+        hot_load: false,
+        sched_class: SchedClass::Interactive,
+        min_tasks: 0,
+        min_objects: 0,
+    },
+    ModuleDecl {
+        name: "blocked",
+        provides: &["x.mech.blocked"],
+        requires: &["x.mech.broken"],
+        services: &[],
+        hot_load: false,
+        sched_class: SchedClass::Interactive,
+        min_tasks: 0,
+        min_objects: 0,
+    },
+];
+
+static BROKEN_PROFILE: SystemProfile = SystemProfile {
+    name: "mech-broken",
+    display_zh: "机制失败",
+    display_en: "mechanism failure",
+    config: KernelConfig::STANDARD,
+    modules: BROKEN_MODULES,
+    guarantees: &[],
+    hot_load: false,
+};
+
+static BLOCKED_ACTIVATIONS: AtomicU32 = AtomicU32::new(0);
+
+/// 打印并记录一次成功的模块激活。
+fn log_module(module: &'static str) {
+    kprintln!("[JSR-MOD] loaded module={}", module);
+    ktrace::emit("system.module.loaded", &[Tag::str("module", module)]);
 }
 
-/// 模块：按序装载两个模块、缺依赖被拒、逆序卸载。
-fn exercise_modules(c: &Checker, mm: &mut ModuleManager<4>) {
-    mm.set_observer(log_module);
-    c.check(mm.load_all(&[&SYSCALL_CORE, &HELLO_SYSCALL]) == Ok(2), "module: 顺序装载");
-    let e = mm.load(&NEEDS_MISSING);
-    c.check(e == Err(ModuleError::MissingDependency("needs_missing", "not_present")), "module: 缺依赖被拒");
-    if let Err(e) = e {
-        kprintln!("[JSR-MOD] rejected module=needs_missing err={}", e.name());
-    }
+fn activate_syscall_core() -> Result<(), &'static str> {
+    log_module("syscall-core");
+    Ok(())
+}
+
+fn activate_hello_syscall() -> Result<(), &'static str> {
+    Dispatcher::new(&SYSCALLS)
+        .validate()
+        .map(|_| log_module("hello-syscall"))
+        .map_err(|_| "系统调用表校验失败")
+}
+
+fn activate_broken_base() -> Result<(), &'static str> {
+    log_module("broken-base");
+    Ok(())
+}
+
+fn activate_broken() -> Result<(), &'static str> {
+    Err("planned activation failure")
+}
+
+fn activate_blocked() -> Result<(), &'static str> {
+    BLOCKED_ACTIVATIONS.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
+static MECH_BINDINGS: [Binding; 2] = [
+    Binding { module: "syscall-core", activate: activate_syscall_core, deactivate: None },
+    Binding { module: "hello-syscall", activate: activate_hello_syscall, deactivate: None },
+];
+
+static BROKEN_BINDINGS: [Binding; 3] = [
+    Binding { module: "broken-base", activate: activate_broken_base, deactivate: None },
+    Binding { module: "broken", activate: activate_broken, deactivate: None },
+    Binding { module: "blocked", activate: activate_blocked, deactivate: None },
+];
+
+/// 按依赖顺序激活、审计发布掩码、拒绝重复启动，并验证失败依赖者的激活不被调用。
+fn exercise_assembly(c: &Checker) -> Option<Assembly> {
+    let declared = match profile::resolve(&MECH_PROFILE) {
+        Ok(r) => r,
+        Err(_) => {
+            c.check(false, "assembly: 机制 Profile 校验");
+            return None;
+        }
+    };
+    let mut assembly = match Assembly::new(&MECH_PROFILE, &MECH_BINDINGS) {
+        Ok(a) => a,
+        Err(_) => {
+            c.check(false, "assembly: 构造");
+            return None;
+        }
+    };
+    let report = match assembly.start(Policy::AllOrNothing) {
+        Ok(r) => r,
+        Err(_) => {
+            c.check(false, "assembly: 启动");
+            return None;
+        }
+    };
+    c.check(report.ready == 2, "assembly: 两个依赖模块就绪");
+    c.check(
+        assembly.state("hello-syscall").map(|s| s.0) == Some(State::Ready),
+        "assembly: hello_syscall 就绪",
+    );
+    c.check(assembly.audit(&declared, assembly.published_mask(&declared)).is_ok(), "assembly: 发布审计");
+    c.check(assembly.start(Policy::AllOrNothing).is_err(), "assembly: 重复启动被拒");
+
+    BLOCKED_ACTIVATIONS.store(0, Ordering::Relaxed);
+    let mut broken = match Assembly::new(&BROKEN_PROFILE, &BROKEN_BINDINGS) {
+        Ok(a) => a,
+        Err(_) => {
+            c.check(false, "assembly: 失败路径构造");
+            return Some(assembly);
+        }
+    };
+    let failed = match broken.start(Policy::Partial) {
+        Ok(r) => r,
+        Err(_) => {
+            c.check(false, "assembly: 部分策略启动");
+            return Some(assembly);
+        }
+    };
+    c.check(failed.failed == 1 && failed.blocked == 1, "assembly: 失败与阻断计数");
+    c.check(
+        broken.state("blocked").map(|s| s.0) == Some(State::Blocked),
+        "assembly: 依赖失败者被阻断",
+    );
+    c.check(BLOCKED_ACTIVATIONS.load(Ordering::Relaxed) == 0, "assembly: 阻断模块激活未调用");
+    Some(assembly)
 }
 
 /// 系统调用：经已装载的 hello_syscall 分发一次已知调用与一次未知调用。
-fn exercise_syscalls(c: &Checker, mm: &ModuleManager<4>) {
-    c.check(mm.is_loaded("hello_syscall"), "syscall: 提供者模块已装载");
+fn exercise_syscalls(c: &Checker, assembly: &Assembly) {
+    c.check(
+        assembly.state("hello-syscall").map(|s| s.0) == Some(State::Ready),
+        "syscall: 提供者模块已装配",
+    );
     let mut d = Dispatcher::new(&SYSCALLS);
     d.set_observer(log_trap);
     let task = sched::current().0 .0;
@@ -295,11 +442,9 @@ fn mech_task() {
     exercise_wait(&c);
     exercise_io(&c);
     exercise_memory(&c);
-    let mut mm: ModuleManager<4> = ModuleManager::new();
-    exercise_modules(&c, &mut mm);
-    exercise_syscalls(&c, &mm);
-    let unloaded = mm.unload_all();
-    c.check(unloaded == 2 && mm.is_empty(), "module: 逆序卸载全部");
+    if let Some(assembly) = exercise_assembly(&c) {
+        exercise_syscalls(&c, &assembly);
+    }
     exercise_sync(&c);
 
     let (kept, total) = ktrace::stats();

@@ -43,7 +43,7 @@
 | `kernel/src/sync.rs` | 真实可用的 `SpinLock<T>` + `IrqSpinLock` 桩（M1.5 骨架） |
 | `kernel/src/context.rs` | `TaskContext` + `global_asm! switch_context`（M1.3 骨架，**尚未接线**） |
 | `kernel/src/object.rs` | `Rights` / `Handle` / `HandleTable`（M1.5 骨架） |
-| `kernel/src/module.rs` | `ModuleDescriptor` / `ModuleManager`（M1.5 骨架） |
+| `kernel-core/src/assembly.rs` | 服务装配状态机、依赖顺序、能力发布与审计；旧独立模块管理器已退役 |
 | `kernel/src/io.rs` | `IoOp` / `IoRequest` / `IoResult` / `Completion` / `MemIoCore`（M1.5 骨架） |
 | `xtask/` | 宿主机侧镜像构建器（生成 bootloader BIOS 磁盘镜像） |
 

@@ -1,6 +1,5 @@
 // 负例（必须验证失败）：停用时漏掉「没有就绪模块依赖 i」的前置条件，闭包推不出。
-// 伴随模型（issue #6 第一片）：kernel_core::assembly::Assembly 的就绪集合闭包性，
-// 以及既有 kernel_core::module::ModuleManager（补链）装载/卸载的同一闭包性。
+// 伴随模型（issue #6）：kernel_core::assembly::Assembly 的就绪集合闭包性。
 // 模块集合以 u16 位图建模（MAX_MODULES = 16），deps[j] = 模块 j 依赖的提供者位图。
 // 「闭包」= 每个就绪（已装载）模块的依赖都在就绪集合内——这正是「未启动却报告可用」不可能发生的条件：
 // 发布掩码只取就绪模块的能力，闭包保证这些能力所依赖的服务也都可用。
@@ -50,7 +49,7 @@ proof fn lemma_shrink_keeps_subset(d: u16, r: u16, i: u16)
         requires i < 16, d & !r == 0, d & (1u16 << i) == 0;
 }
 
-/// Assembly::start 的一步 / ModuleManager::load：依赖全部就绪且激活成功才加入就绪集合。
+/// Assembly::start 的一步：依赖全部就绪且激活成功才加入就绪集合。
 fn activate_step(ready: u16, Ghost(deps): Ghost<Seq<u16>>, di: u16, i: u16, ok: bool) -> (r: u16)
     requires i < 16, closed(ready, deps), deps[i as int] == di,
     ensures
@@ -79,7 +78,7 @@ fn activate_step(ready: u16, Ghost(deps): Ghost<Seq<u16>>, di: u16, i: u16, ok: 
     }
 }
 
-/// Assembly::stop / ModuleManager::unload：只有没有就绪模块依赖 i 时才移除 i。
+/// Assembly::stop：只有没有就绪模块依赖 i 时才移除 i。
 fn stop_step(ready: u16, Ghost(deps): Ghost<Seq<u16>>, i: u16) -> (r: u16)
     requires
         i < 16,
@@ -97,7 +96,7 @@ fn stop_step(ready: u16, Ghost(deps): Ghost<Seq<u16>>, i: u16) -> (r: u16)
     r
 }
 
-/// 全有全无回滚 / ModuleManager::unload_all：清空后平凡闭包、什么都不发布。
+/// 全有全无回滚：清空后平凡闭包、什么都不发布。
 fn rollback(Ghost(deps): Ghost<Seq<u16>>) -> (r: u16)
     requires deps.len() == 16,
     ensures closed(r, deps), forall|j: u16| j < 16 ==> #[trigger] has(r, j) == false,

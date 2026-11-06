@@ -1,5 +1,5 @@
-//! PCI 设备发现的启动期部分：取得平台访问者、穷举总线 / 设备 / 功能、建立只读设备表并输出结构化事件。
-//! Boot-time PCI discovery: obtain the platform accessor, enumerate functions, and build a read-only device table.
+//! PCI 设备发现的启动期部分：`devices` 阶段取得平台访问者，`devices` 模块激活时穷举并建立只读设备表。
+//! Boot-time PCI discovery: the devices stage prepares access and module activation builds the table.
 //!
 //! # 职责
 //! * 复用 `kernel_core::pci` 的头部解码、BAR 探测与穷举枚举；本文件不重复任何解码规则。
@@ -144,13 +144,28 @@ impl Table {
 static TABLE: Once<Table> = Once::new();
 /// 启动期枚举使用的唯一配置空间后端（枚举结束后保留，供设备初始化写 MSI-X 控制字段）。
 static CONFIG: Once<IrqSpinLock<&'static mut dyn ConfigSpace>> = Once::new();
+/// `devices` 阶段取得、等待模块激活消费的一次性访问者。
+/// One-shot accessor prepared by the devices stage and consumed by module activation.
+static PREPARED: IrqSpinLock<Option<arch::PciAccess>> = IrqSpinLock::new(None);
 static EMPTY: Table = Table::empty();
 
-/// 启动期枚举一次并把结果放进只读静态表；重复调用返回第一次的结果。
-/// Enumerate once at boot; repeated calls return the same table.
-pub fn init(boot: &'static BootSpec) -> &'static Table {
+/// 硬件顺序阶段只取得平台配置空间访问者，不建立设备服务状态。
+/// The hardware-order stage only obtains the platform config-space accessor.
+pub fn prepare(boot: &'static BootSpec) {
+    if TABLE.is_completed() {
+        return;
+    }
+    match arch::pci_access(boot) {
+        Some(access) => *PREPARED.lock() = Some(access),
+        None => kprintln!("[JSR-PCI] unavailable reason=system.device.error.config_unreachable"),
+    }
+}
+
+/// `devices` 模块激活：消费准备好的访问者，枚举总线并建立只读设备表。
+/// Device-module activation: consume prepared access, enumerate and build the read-only table.
+pub fn activate() -> Result<(), &'static str> {
     TABLE.call_once(|| {
-        let Some(access) = arch::pci_access(boot) else {
+        let Some(access) = PREPARED.lock().take() else {
             kprintln!("[JSR-PCI] unavailable reason=system.device.error.config_unreachable");
             return Table::empty();
         };
@@ -158,7 +173,14 @@ pub fn init(boot: &'static BootSpec) -> &'static Table {
         let table = build(config, mechanism, buses);
         let _ = CONFIG.call_once(|| IrqSpinLock::new(config));
         table
-    })
+    });
+    ready().then_some(()).ok_or("PCI table not activated")
+}
+
+/// 设备表已由模块激活建立（空表也包括不可用平台的真实结果）。
+/// Whether module activation has established the table, including a real empty table.
+pub fn ready() -> bool {
+    TABLE.is_completed()
 }
 
 /// 已建立的设备表；未初始化时返回空表（机制不可用，不伪造设备）。

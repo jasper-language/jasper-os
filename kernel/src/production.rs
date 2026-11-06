@@ -27,7 +27,9 @@ pub const NAME: &str = "production";
 /// 进入等待后过多少 tick 报告一次存活（只报告一次）。Ticks before the single alive report.
 const ALIVE_AFTER_TICKS: u64 = 100;
 
-/// 生产计划：按声明顺序执行全部阶段。The production plan: every stage in declaration order.
+/// 生产计划：按声明顺序执行全部阶段。capacity 只校验容量、devices 只准备 PCI 硬件访问，
+/// 对象/任务/实时/作业/设备服务表由 assembly 模块激活建立；计划顺序不变。
+/// The production plan runs every stage in declaration order; service tables are activated in assembly.
 pub const PLAN: &[&[Step]] = &[&[
     PlanItem::Stage(Stage::Console),
     PlanItem::Stage(Stage::Platform),

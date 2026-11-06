@@ -8,14 +8,37 @@
 //! callers use `KMutex` instead of holding interrupts off for the whole operation.
 //! Interrupt context must enqueue work through its own bounded handoff path.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use kernel_core::job::{Job, JobError, JobPriority, JobQueue, JobStats};
 
 use crate::sched::{KMutex, KMutexGuard};
 
 static QUEUE: KMutex<JobQueue> = KMutex::new(JobQueue::new());
+static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 fn queue() -> KMutexGuard<'static, JobQueue> {
     QUEUE.lock().unwrap_or_else(|_| panic!("job queue KMutex wait graph rejected"))
+}
+
+/// `job` 模块激活：把编译期空队列置为本次启动的可用初始状态；重复激活被拒。
+/// Activate the job module by establishing the single empty boot queue.
+pub fn activate() -> Result<(), &'static str> {
+    ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| "job queue already activated")?;
+    reset();
+    if stats().total != 0 {
+        ACTIVE.store(false, Ordering::Release);
+        return Err("job queue not empty after activation");
+    }
+    Ok(())
+}
+
+/// 作业服务是否完成了模块激活。
+/// Whether the job module activation completed.
+pub fn active() -> bool {
+    ACTIVE.load(Ordering::Acquire)
 }
 
 /// 提交作业。

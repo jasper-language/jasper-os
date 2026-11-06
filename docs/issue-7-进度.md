@@ -15,7 +15,7 @@
 | `boot_stage::Tracker` | `begin` / `complete` / `fail`。检查顺序：已有阶段失败（`halted`）→ 另一阶段在运行（`busy`）→ 重复初始化（`duplicate`）→ 直接依赖未完成（`missing_dependency`，指出最靠前的缺失项）。失败之后任何阶段都不得开始。 |
 | 内核 `kmain::stage` | 在跟踪器下执行一个阶段：阶段体返回 `None` 即失败。成功输出 `[JSR-BOOT-STAGE] done stage=<名> done_mask=<掩码>`；被拒输出 `refused stage=<名> reason=<原因>`；失败输出 `failed stage=<名> blocked=<被阻断阶段>`，随后 `[JSR-EXIT] failure boot_stage=<名>` 并退出（退出码与其他功能失败相同，原因由标记区分）。 |
 | 初始化与演练拆开 | `mm::demo::run` 改为接收 `frames` 阶段的初始化结果；`run_map` / `run_heap` 不再自行初始化。**行为变化**：以前映射器或堆初始化失败只记为一次演练断言失败、启动继续往下走（随后的容量安装、设备枚举都建立在未初始化的堆上）；现在这两类失败直接停止启动，后续阶段不会开始。 |
-| 失败即停 | 定时器等不到 tick（原来直接退出）、没有可用页帧、无物理内存映射、堆首批映射失败、Profile 校验失败，都改为经阶段失败路径停止启动。启动期容量的拒绝仍由 `bootcap::apply` 自行输出结构化原因后退出（标记不变）。 |
+| 失败即停 | 定时器等不到 tick（原来直接退出）、没有可用页帧、无物理内存映射、堆首批映射失败、Profile 校验失败，都改为经阶段失败路径停止启动。启动期容量的拒绝仍由容量校验路径自行输出结构化原因后退出（标记不变）。 |
 
 ### 阶段与依赖
 
@@ -27,7 +27,7 @@
 | `frames` | platform | 按引导内存图建立页帧分配器 | 可用帧为 0 |
 | `kernel_map` | frames | 内核映射器 | 引导器未提供物理内存映射 |
 | `heap` | frames, kernel_map | 堆首批映射 | 映射或取帧失败 |
-| `capacity` | heap | 对象表、实时表、任务表与内核栈按启动期容量安装 | 由 `bootcap::apply` 拒绝并退出 |
+| `capacity` | heap | 校验启动期容量与内存预算；具体表由模块激活安装 | 由 `bootcap::validate` 拒绝并退出 |
 | `devices` | kernel_map, heap | PCI 配置空间访问者与只读设备表 | 平台没有 PCI 时设备表为空，不算失败 |
 | `profile` | heap | 系统 Profile 校验 | 校验失败项 > 0 |
 
@@ -180,6 +180,15 @@
 ## 后续变动
 
 issue #6 第一片把服务装配加为第十个阶段 `assembly`（`done_mask=0x3ff`）。上文的「九个阶段」与 `0x1ff` 是本片当时的记录，未改写。
+
+### issue #6 第二片：服务初始化进入模块激活
+
+- 阶段数仍为 16，production 与 full 两个计划仍各覆盖 `stages=0xffff`；`capacity`、`devices`、`profile`、`assembly` 的相对顺序不变。
+- `capacity` 阶段只读取容量记录、校验范围/一致性与内存预算，并保存批准结果；对象表由 `core` 激活安装，任务表和内核栈由 `sched` 激活扩容，实时表由 `realtime` 激活安装。
+- `devices` 阶段只在真实硬件顺序位置取得 PCI 配置空间访问者；`devices` 模块激活才枚举总线并建立只读设备表。`assembly` 阶段因此直接依赖 `devices` 阶段。
+- 全量验收计划把 `pci-table` 与 `capacity-report` 两个用例移到 `assembly` 之后，并声明它们依赖 `assembly`；生产计划仍是 16 个阶段、1 个 `first-program` 用例和收尾。
+- BOOT-STAGE 判据继续要求 16 个阶段按原顺序完成、最后 `done_mask=0xffff`、full 计划到 `stages=0xffff` 收尾；ASM1 同步要求 9 个模块全部就绪，且对象/任务/实时/作业/PCI 激活证据早于 `[JSR-CAP] boot`。
+- 验证：`accept-20261106-183417` 的 BOOT-STAGE、ASM1、M1.5、PRODUCTION 全 PASS；full 计划仍为 53 用例，生产计划 1 核 / 4 核均到 alive 等待。启动计划套件 Verus 43/0、kernel-core 7、Proptest 5、Miri 1、fuzz 100 万 cov192 通过；Kani 按发版规则未在本片重跑。
 
 ### 其他处理器的周期定时器接入前进保证（批次全量 `accept-20261105-114916` 通过）
 
