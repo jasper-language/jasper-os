@@ -102,6 +102,9 @@ ARCH_NA_REASON="架构冻结（用户 2026-10-21），未运行、不计入通�
 TS="$(date '+%Y%m%d-%H%M%S')"
 OUT="$ROOT/evidence/accept-$TS"
 IMG="$ROOT/images/jasper-kernel.img"
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+XTASK="${JASPER_XTASK:-$TARGET_DIR/release/xtask}"
+KERNEL_RELEASE="$TARGET_DIR/x86_64-unknown-none/release/jasper-kernel"
 SERIAL="$OUT/serial.log"
 QEMU="$(command -v qemu-system-x86_64 || true)"
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -214,7 +217,7 @@ cfg() { local v; v="$(grep -aoE "^\[JSR-CONFIG\] $1=[0-9]+" "$SERIAL" 2>/dev/nul
 bootcap() { local v; v="$(grep -aoE "^\[JSR-CAP\] boot source=[a-z]+ .*\b$1=[0-9]+" "${2:-$SERIAL}" 2>/dev/null | head -1 | grep -oE "\b$1=[0-9]+" | head -1 | grep -oE '[0-9]+$')"; echo "${v:-0}"; }
 # bootcap_patch <内核 ELF>：设置了 JASPER_BOOTCAP（如 "objects=16384 tasks=256 rt=64"）时，构建后原地改写镜像里的启动容量记录，
 # 让同一套验收以该容量复跑（HARDEN-1B：大容量配置可启动并通过既有验收）。未设置时什么也不做。
-bootcap_patch() { [ -z "${JASPER_BOOTCAP:-}" ] && return 0; run "$ROOT/target/release/xtask" bootcap "$1" "$1" $JASPER_BOOTCAP >> "$OUT/build.log" 2>&1; }
+bootcap_patch() { [ -z "${JASPER_BOOTCAP:-}" ] && return 0; run "$XTASK" bootcap "$1" "$1" $JASPER_BOOTCAP >> "$OUT/build.log" 2>&1; }
 
 # ---- 阶段 A：构建、测试、启动（产出证据）------------------------------------
 echo "== 构建与测试（核：$CORES，配置档：$PROFILE）=="
@@ -227,11 +230,18 @@ else
 fi
 run cargo test -p jaso --features pack > "$OUT/jaso-test.log" 2>&1;                           JASO_RC=$?
 run cargo build --release --target x86_64-unknown-none -p kernel-core > "$OUT/build.log" 2>&1; CORE_RC=$?
-run cargo build --release --target x86_64-unknown-none -p jasper-kernel "${KFEAT[@]}" "${SFEAT[@]}" >> "$OUT/build.log" 2>&1 \
-  && run cargo build --release -p xtask >> "$OUT/build.log" 2>&1 \
-  && bootcap_patch "$ROOT/target/x86_64-unknown-none/release/jasper-kernel" \
-  && run "$ROOT/target/release/xtask" "$ROOT/target/x86_64-unknown-none/release/jasper-kernel" "$IMG" >> "$OUT/build.log" 2>&1
+run cargo build --release --target x86_64-unknown-none -p jasper-kernel "${KFEAT[@]}" "${SFEAT[@]}" >> "$OUT/build.log" 2>&1
 BUILD_RC=$?
+# 受限构建盘可复用已由同一源码构建的 xtask；产品源码仍须由上面的镜像构建重新产出。
+if [ "$BUILD_RC" -eq 0 ] && [ -z "${JASPER_XTASK:-}" ]; then
+  run cargo build --release -p xtask >> "$OUT/build.log" 2>&1 || BUILD_RC=$?
+fi
+if [ "$BUILD_RC" -eq 0 ]; then
+  bootcap_patch "$KERNEL_RELEASE" || BUILD_RC=$?
+fi
+if [ "$BUILD_RC" -eq 0 ]; then
+  run "$XTASK" "$KERNEL_RELEASE" "$IMG" >> "$OUT/build.log" 2>&1 || BUILD_RC=$?
+fi
 
 # S-2：独立镜像 + 4 个在线处理器，运行 4 个固定种子工作者共 10^6 次有界系统调用，
 # 并在同一启动中执行故障路径与击落超时隔离审计。定点模式不运行。
@@ -259,7 +269,7 @@ isa_test() {
   local t="$1" runner="${2:-}" var
   var="CARGO_TARGET_$(echo "$t" | tr 'a-z-' 'A-Z_')"
   run env "${var}_LINKER=rust-lld" ${runner:+"${var}_RUNNER=$runner"} RUSTFLAGS="-C link-self-contained=yes -C target-feature=+crt-static" \
-    CARGO_TARGET_DIR="$ROOT/target/isa-test" cargo test -p kernel-core --target "$t" > "$OUT/isa-test-$t.log" 2>&1
+    CARGO_TARGET_DIR="$TARGET_DIR/isa-test" cargo test -p kernel-core --target "$t" > "$OUT/isa-test-$t.log" 2>&1
 }
 ISA_TESTS_RAN=""; ISA_TESTS_FAIL=""; ISA_TESTS_SKIPPED=""
 if [ "$SPOT" -eq 1 ]; then ISA_TESTS_SKIPPED="定点模式"; elif isa_test i686-unknown-linux-musl; then ISA_TESTS_RAN="$ISA_TESTS_RAN 32位"; else ISA_TESTS_FAIL="$ISA_TESTS_FAIL 32位"; fi
@@ -364,7 +374,7 @@ fi
 # 架构冻结（AN）：仅在 JASPER_ARCHES=all 时构建与启动；默认 x86_64 时变量保持「未运行」初值。
 QEMU_A64=""
 SERIAL_A64="$OUT/serial-aarch64.log"
-A64_ELF="$ROOT/target/aarch64-unknown-none-softfloat/release/jasper-kernel"
+A64_ELF="$TARGET_DIR/aarch64-unknown-none-softfloat/release/jasper-kernel"
 QRC_A64=-1
 A64_BUILD_RC=1
 SERIAL_A64_SMP4="$OUT/serial-aarch64-smp4.log"
@@ -395,7 +405,7 @@ fi
 # 架构冻结（AN）：仅在 JASPER_ARCHES=all 时构建与启动。
 QEMU_RV64=""
 SERIAL_RV64="$OUT/serial-riscv64.log"
-RV64_ELF="$ROOT/target/riscv64imac-unknown-none-elf/release/jasper-kernel"
+RV64_ELF="$TARGET_DIR/riscv64imac-unknown-none-elf/release/jasper-kernel"
 QRC_RV64=-1
 RV64_BUILD_RC=1
 SERIAL_RV64_SMP4="$OUT/serial-riscv64-smp4.log"; QRC_RV64_SMP4=-1
@@ -428,7 +438,7 @@ QEMU_RV32=""
 RV32_FW=""
 RV32_BIOS=()
 SERIAL_RV32="$OUT/serial-riscv32.log"
-RV32_ELF="$ROOT/target/riscv32imac-unknown-none-elf/release/jasper-kernel"
+RV32_ELF="$TARGET_DIR/riscv32imac-unknown-none-elf/release/jasper-kernel"
 QRC_RV32=-1
 RV32_BUILD_RC=1
 SERIAL_RV32_SMP4="$OUT/serial-riscv32-smp4.log"; QRC_RV32_SMP4=-1
@@ -479,8 +489,8 @@ CAPREJ="$OUT/bootcap"; mkdir -p "$CAPREJ"
 caprej_x86() {
   local name="$1"; shift
   local elf="$CAPREJ/x86-$name.elf" img="$CAPREJ/x86-$name.img"
-  if run "$ROOT/target/release/xtask" bootcap "$ROOT/target/x86_64-unknown-none/release/jasper-kernel" "$elf" "$@" >> "$OUT/build.log" 2>&1 \
-     && run "$ROOT/target/release/xtask" "$elf" "$img" >> "$OUT/build.log" 2>&1; then
+  if run "$XTASK" bootcap "$KERNEL_RELEASE" "$elf" "$@" >> "$OUT/build.log" 2>&1 \
+     && run "$XTASK" "$elf" "$img" >> "$OUT/build.log" 2>&1; then
     qrun timeout "$QEMU_TIMEOUT" "$QEMU" "${ACCEL_ARGS[@]}" -drive format=raw,file="$img" -serial stdio -display none -monitor none -no-reboot \
       -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04 "${X86_EXTRA[@]}" > "$CAPREJ/serial-x86-$name.log" 2>&1
     echo $? > "$CAPREJ/rc-x86-$name"
@@ -492,7 +502,7 @@ caprej_x86() {
 caprej_elf() {
   local label="$1" src="$2"; shift 2
   local elf="$CAPREJ/$label-oor.elf" args=() a
-  if run "$ROOT/target/release/xtask" bootcap "$src" "$elf" tasks=4096 >> "$OUT/build.log" 2>&1; then
+  if run "$XTASK" bootcap "$src" "$elf" tasks=4096 >> "$OUT/build.log" 2>&1; then
     for a in "$@"; do args+=("${a//@ELF@/$elf}"); done
     qrun timeout "$QEMU_TIMEOUT" "${args[@]}" -serial stdio -display none -monitor none -no-reboot > "$CAPREJ/serial-$label-oor.log" 2>&1
     echo $? > "$CAPREJ/rc-$label-oor"
@@ -1870,10 +1880,18 @@ check_asm1() {  # issue #6 第一切片：服务装配——按依赖顺序启�
      && has '^\[JSR-PCI\] summary mechanism=(ecam|port) .* failed=0' \
      && [ -n "$last_activation_at" ] && [ -n "$cap_at" ] && [ "$last_activation_at" -lt "$cap_at" ] \
      && has '\[JSR-ASSEMBLY\] summary profile=headless modules=9 ready=9 failed=0 blocked=0 declared=10 published=10 pre_publish=0 audit=ok restart=system\.module\.error\.already_started stop_core=system\.module\.error\.in_use' \
-     && has '\[JSR-PROFILE\] summary profiles=2 rejects=4 gates=3 renders=2 checks=17 failed=0'; then
-    record ASM1 PASS "生效 Profile 9 个模块按依赖顺序全部就绪；对象、任务、实时、作业与 PCI 设备服务均由激活建立；装配前发布掩码为 0，装配后 10 项声明能力全部发布且审计一致；重复启动与停用常驻 core 被拒"
+     && has '\[JSR-MOD\] withdraw module=discard bits=0x[1-9a-f][0-9a-f]*' \
+     && has '\[JSR-MOD\] stopped module=discard' \
+     && has '\[JSR-ASSEMBLY\] runtime stop_dependent=in_use stop_permanent=permanent health=healthy->unhealthy->healthy published=0x[0-9a-f]+->withdrawn->0x[0-9a-f]+ lease_enter=true reader_drain=true' \
+     && has '\[JSR-ASSEMBLY\] health module=devices from=healthy to=unhealthy removed=0x0*[1-9a-f][0-9a-f]* published=0x0*[0-9a-f]+ readers=0' \
+     && has '\[JSR-PROFILE\] layers idx=0 modules=9 module_lines=9 four_layers=true' \
+     && has '\[JSR-PROFILE\] layers idx=1 modules=5 module_lines=5 four_layers=true' \
+     && has '\[JSR-PROFILE\] layers_sample idx=0 module=core feature=compiled config=declared runtime=available health=healthy authorization=granted' \
+     && has '\[JSR-PROFILE\] layers_sample idx=1 module=core feature=compiled config=declared runtime=not_selected health=unknown authorization=granted' \
+     && has '\[JSR-PROFILE\] summary profiles=2 rejects=4 gates=3 renders=2 checks=30 failed=0'; then
+    record ASM1 PASS "生效 Profile 9 个模块按依赖顺序全部就绪；发布门以租约撤位、排空 reader 后停用，依赖模块返回 in_use、常驻模块返回 permanent；devices 健康降级保持生命周期但撤出发布面并可恢复；profile.get 为 9/5 个模块逐项报告编译期特性、启动配置、运行时状态/健康和调用者授权"
   else
-    record ASM1 FAIL "缺少 [JSR-ASSEMBLY] 激活证据：模块未全部就绪、服务安装仍早于装配、发布与声明不一致、审计失败或重复启动/停用未被拒"
+    record ASM1 FAIL "缺少 [JSR-ASSEMBLY] 激活/撤回/健康证据：发布门、依赖与常驻拒绝、排空顺序、四层逐模块报告或审计不一致"
   fi
 }
 
@@ -1890,8 +1908,8 @@ check_pol2() {  # POL-2：系统 Profile——启动期校验、两份内建 Pro
      && has '\[JSR-PROFILE\] reject case=hot-load-not-allowed code=hot_load_not_allowed' \
      && has '\[JSR-PROFILE\] render idx=0 bytes=[0-9]+ head=profile=headless' \
      && has '\[JSR-PROFILE\] render idx=1 bytes=[0-9]+ head=profile=headless-min' \
-     && has '\[JSR-PROFILE\] summary profiles=2 rejects=4 gates=3 renders=2 checks=17 failed=0'; then
-    record POL2 PASS "启动期校验通过：headless（9 模块 / 12 服务 / 10 能力）与 headless-min（5 模块 / 9 服务）服务面真实不同（异步环在精简档被门拒绝）；缺依赖 / 能力冲突 / 参数下限不可满足 / 未授权热加载四类各自给出结构化拒绝码；结构化描述可渲染；17 项断言 0 失败"
+     && has '\[JSR-PROFILE\] summary profiles=2 rejects=4 gates=3 renders=2 checks=30 failed=0'; then
+    record POL2 PASS "启动期校验通过：headless（9 模块 / 12 服务 / 10 能力）与 headless-min（5 模块 / 9 服务）服务面真实不同（异步环在精简档被门拒绝）；缺依赖 / 能力冲突 / 参数下限不可满足 / 未授权热加载四类各自给出结构化拒绝码；9/5 个模块逐项输出四层状态；30 项断言 0 失败"
   else
     record POL2 FAIL "缺少 [JSR-PROFILE] 关键标记、结构化拒绝不全、两份 Profile 服务面相同或 failed≠0"
   fi

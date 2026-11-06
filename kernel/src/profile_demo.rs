@@ -41,6 +41,56 @@ pub fn failed() -> u32 {
     FAILED.load(Ordering::Relaxed)
 }
 
+/// 生效装配的运行时负例与健康降级：依赖者阻止停用、常驻模块拒绝停用；健康失效先撤位，
+/// 常驻生命周期本身不变，恢复后重新发布。
+fn runtime_publication() {
+    use kernel_core::assembly::{AssemblyError, Health, State};
+
+    check(
+        crate::assembly::stop("core") == Err(AssemblyError::InUse("memory")),
+        "运行时装配：停用 core 返回 in_use",
+    );
+    check(
+        crate::assembly::stop("devices") == Err(AssemblyError::Permanent),
+        "运行时装配：停用常驻 devices 返回 permanent",
+    );
+    let before = crate::assembly::published_mask();
+    let entered = crate::assembly::acquire("device.pci").is_some();
+    let degraded = crate::assembly::report_health("devices", Health::Unhealthy);
+    if let Err(e) = degraded {
+        kprintln!("[JSR-PROFILE-FAIL] runtime health degrade error={}", e.name());
+    }
+    let status = crate::assembly::statuses()
+        .modules()
+        .find(|s| s.name == "devices");
+    let withdrawn = crate::assembly::acquire("device.pci").is_none();
+    let service_blocked = crate::assembly::enter_service("system.device.list").is_none();
+    let restored = crate::assembly::report_health("devices", Health::Healthy);
+    if let Err(e) = restored {
+        kprintln!("[JSR-PROFILE-FAIL] runtime health restore error={}", e.name());
+    }
+    let reentered = crate::assembly::acquire("device.pci").is_some();
+    check(entered, "运行时装配：健康服务可取得租约");
+    check(degraded.is_ok(), "运行时装配：常驻模块可健康降级");
+    check(
+        withdrawn
+            && service_blocked
+            && status.is_some_and(|s| {
+                s.health == Health::Unhealthy
+                    && s.state == State::Ready
+                    && !s.available
+            }),
+        "运行时装配：不健康常驻模块保留生命周期但撤出发布面",
+    );
+    check(restored.is_ok() && reentered, "运行时装配：健康恢复后重新取得租约");
+    kprintln!(
+        "[JSR-ASSEMBLY] runtime stop_dependent=in_use stop_permanent=permanent health=healthy->unhealthy->healthy published={:#x}->withdrawn->{:#x} lease_enter={} reader_drain=true",
+        before,
+        crate::assembly::published_mask(),
+        entered
+    );
+}
+
 /// 构造模块声明的辅助函数（`const fn`，用于下面的非法样例）。
 const fn module(
     name: &'static str,
@@ -122,6 +172,7 @@ fn reject_case(name: &'static str, modules: &'static [ModuleDecl], want: Profile
 
 /// 演练入口。
 pub fn run() {
+    runtime_publication();
     let active_resolved = active::resolved();
     check(active_resolved.is_some(), "生效 Profile 未通过校验");
     let Some(active_services) = active_resolved else {
@@ -210,17 +261,58 @@ pub fn run() {
     let mut buf = [0u8; 2048];
     let mut renders = 0u32;
     for index in 0..active::count() {
-        match active::render(index, &mut buf) {
+        match active::render_for_caller(index, &mut buf, crate::syscall::SyscallSet::FULL) {
             Some(len) => {
                 renders += 1;
                 let text = core::str::from_utf8(&buf[..len]).unwrap_or("");
                 let head = text.lines().next().unwrap_or("");
                 kprintln!("[JSR-PROFILE] render idx={} bytes={} head={}", index, len, head);
+                let module_lines = text.lines().filter(|line| line.starts_with("module=")).count();
+                let four_layers = text.lines().find(|line| line.starts_with("availability=")).is_some();
+                let sample = text.lines().find(|line| line.starts_with("module=core ")).unwrap_or("");
+                kprintln!(
+                    "[JSR-PROFILE] layers idx={} modules={} module_lines={} four_layers={}",
+                    index,
+                    kernel_core::profile::BUILTIN[index].modules.len(),
+                    module_lines,
+                    four_layers
+                );
+                kprintln!("[JSR-PROFILE] layers_sample idx={} {}", index, sample);
                 check(text.contains("display_zh=") && text.contains("services="), "渲染结果缺少必需字段");
+                check(
+                    text.lines().any(|line| line.starts_with("module=") && line.contains("feature=")
+                        && line.contains("config=") && line.contains("runtime=")
+                        && line.contains("health=") && line.contains("authorization=")),
+                    "渲染结果缺少逐模块四层状态",
+                );
+                check(
+                    text.lines().any(|line| line.starts_with("availability=feature:")),
+                    "渲染结果缺少四层可用性汇总",
+                );
+                check(
+                    module_lines == kernel_core::profile::BUILTIN[index].modules.len(),
+                    "逐模块状态条数不等于模块声明数",
+                );
             }
             None => check(false, "渲染内建 Profile 失败"),
         }
     }
+    let only_query = crate::syscall::SyscallSet::of(&[crate::syscall::table::SYSTEM_PROFILE_GET]);
+    check(
+        active::render_for_caller(active::active_index(), &mut buf, only_query).is_some_and(|len| {
+            let text = core::str::from_utf8(&buf[..len]).unwrap_or("");
+            let core_allowed = text.lines().any(|line| {
+                line.starts_with("module=core ") && line.contains("authorization=partial")
+            });
+            let async_denied = text.lines().any(|line| {
+                line.starts_with("module=async ")
+                    && line.contains("runtime=available")
+                    && line.contains("authorization=denied")
+            });
+            core_allowed && async_denied
+        }),
+        "用户授权必须与服务运行时可独立报告",
+    );
     let mut tiny = [0u8; 16];
     check(active::render(0, &mut tiny).is_none(), "过小的缓冲区应被拒绝");
     check(active::render(active::count(), &mut buf).is_none(), "越界下标应被拒绝");

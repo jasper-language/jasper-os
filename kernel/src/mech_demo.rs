@@ -15,7 +15,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use kernel_core::assembly::{Assembly, Binding, Policy, State};
+use kernel_core::assembly::{Assembly, Binding, Health, Policy, State};
 use kernel_core::config::KernelConfig;
 use kernel_core::io::{IoBackend, IoOp, IoRequest, MemIoCore, Ring};
 use kernel_core::memory::{AddressSpace, SimpleAddressSpace, VmProtection, PAGE_SIZE};
@@ -241,6 +241,16 @@ static MECH_MODULES: &[ModuleDecl] = &[
         min_tasks: 0,
         min_objects: 0,
     },
+    ModuleDecl {
+        name: "discard",
+        provides: &["x.mech.discard"],
+        requires: &[],
+        services: &[],
+        hot_load: false,
+        sched_class: SchedClass::Interactive,
+        min_tasks: 0,
+        min_objects: 0,
+    },
 ];
 
 static MECH_PROFILE: SystemProfile = SystemProfile {
@@ -330,9 +340,19 @@ fn activate_blocked() -> Result<(), &'static str> {
     Ok(())
 }
 
-static MECH_BINDINGS: [Binding; 2] = [
+fn activate_discard() -> Result<(), &'static str> {
+    log_module("discard");
+    Ok(())
+}
+
+fn deactivate_discard() {
+    kprintln!("[JSR-MOD] stopped module=discard");
+}
+
+static MECH_BINDINGS: [Binding; 3] = [
     Binding { module: "syscall-core", activate: activate_syscall_core, deactivate: None },
     Binding { module: "hello-syscall", activate: activate_hello_syscall, deactivate: None },
+    Binding { module: "discard", activate: activate_discard, deactivate: Some(deactivate_discard) },
 ];
 
 static BROKEN_BINDINGS: [Binding; 3] = [
@@ -364,13 +384,49 @@ fn exercise_assembly(c: &Checker) -> Option<Assembly> {
             return None;
         }
     };
-    c.check(report.ready == 2, "assembly: 两个依赖模块就绪");
+    c.check(report.ready == 3, "assembly: 三个模块就绪");
     c.check(
         assembly.state("hello-syscall").map(|s| s.0) == Some(State::Ready),
         "assembly: hello_syscall 就绪",
     );
     c.check(assembly.audit(&declared, assembly.published_mask(&declared)).is_ok(), "assembly: 发布审计");
     c.check(assembly.start(Policy::AllOrNothing).is_err(), "assembly: 重复启动被拒");
+    c.check(
+        assembly.preflight_stop("syscall-core") == Err(kernel_core::assembly::AssemblyError::InUse("hello-syscall")),
+        "assembly: 被依赖模块停用返回 in_use",
+    );
+    c.check(
+        assembly.preflight_stop("hello-syscall") == Err(kernel_core::assembly::AssemblyError::Permanent),
+        "assembly: 常驻模块停用返回 permanent",
+    );
+    let discard_bits = match assembly.preflight_stop("discard") {
+        Ok(bits) => bits,
+        Err(_) => {
+            c.check(false, "assembly: 可停用模块预检");
+            return Some(assembly);
+        }
+    };
+    let stopped = assembly.stop_with("discard", |bits| {
+        kprintln!("[JSR-MOD] withdraw module=discard bits={:#x}", bits);
+    });
+    c.check(
+        stopped.is_ok() && discard_bits != 0 && assembly.state("discard").map(|s| s.0) == Some(State::Stopped),
+        "assembly: 撤位后排空再停用",
+    );
+    c.check(
+        assembly.set_health("hello-syscall", Health::Unhealthy).is_ok()
+            && assembly.state("hello-syscall").map(|s| s.0) == Some(State::Ready),
+        "assembly: 健康失效不改变生命周期",
+    );
+    c.check(
+        assembly.published_mask(&declared) & (1 << declared.capabilities().iter().position(|c| *c == "x.mech.syscall-table").unwrap()) == 0,
+        "assembly: 不健康能力退出发布面",
+    );
+    c.check(
+        assembly.set_health("hello-syscall", Health::Healthy).is_ok()
+            && assembly.audit(&declared, assembly.published_mask(&declared)).is_ok(),
+        "assembly: 健康恢复后重新发布",
+    );
 
     BLOCKED_ACTIVATIONS.store(0, Ordering::Relaxed);
     let mut broken = match Assembly::new(&BROKEN_PROFILE, &BROKEN_BINDINGS) {

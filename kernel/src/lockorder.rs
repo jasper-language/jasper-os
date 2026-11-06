@@ -20,6 +20,9 @@ use kernel_core::lockorder::{validate_registry, LockClass};
 /// 进程登记表（进程与成员线程）。
 /// Process registry.
 pub const PROC_REGISTRY: LockClass = LockClass::new(2, "system.process.registry");
+/// 服务装配的生命周期状态（模块状态与健康检查快照）。
+/// Service-assembly lifecycle state.
+pub const ASSEMBLY: LockClass = LockClass::new(3, "system.module.assembly");
 /// 内核对象表。
 /// Kernel object table.
 pub const OBJECT_TABLE: LockClass = LockClass::new(4, "system.object.table");
@@ -67,6 +70,7 @@ pub const CONSOLE: LockClass = LockClass::new(24, "system.console");
 /// The registry, in ascending rank order.
 pub const REGISTRY: &[LockClass] = &[
     PROC_REGISTRY,
+    ASSEMBLY,
     OBJECT_TABLE,
     DEVICE_IRQ,
     MEMORY_PINS,

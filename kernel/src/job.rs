@@ -44,9 +44,9 @@ pub fn active() -> bool {
 /// 提交作业。
 pub fn submit(id: u32, priority: JobPriority, deps: &[u32]) -> Result<(), JobError> {
     // Profile 没有声明 `sched.batch` 时，批处理接口整体不存在（与实时能力的口径一致）。
-    if !crate::profile::has_capability("sched.batch") {
+    let Some(_service) = crate::assembly::acquire("sched.batch") else {
         return Err(JobError::NotPermitted);
-    }
+    };
     queue().submit(id, priority, deps)
 }
 

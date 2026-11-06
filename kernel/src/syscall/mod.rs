@@ -6,8 +6,10 @@
 //! 1. **查表**：只认登记表中的操作 ID；未登记 ⇒ `system.error.unsupported`
 //! 2. **统一权限检查**：当前任务的「可用系统调用集合」必须包含该 ID ⇒ 否则 `system.error.rights_denied`
 //!    （集合由创建任务的一方授予；M4 起再叠加针对句柄的 Rights 检查）
-//! 3. **执行**：按 ID 分派到真实处理函数
-//! 4. **返回约定**：非负 = 成功值；负数 = `-(错误码 ID)`
+//! 3. **服务可用性检查**：操作属于 Profile 模块服务时取得发布租约；模块已声明但当前不健康或
+//!    已撤回 ⇒ `system.error.unsupported`，与用户授权拒绝分开
+//! 4. **执行**：按 ID 分派到真实处理函数，租约覆盖整次执行
+//! 5. **返回约定**：非负 = 成功值；负数 = `-(错误码 ID)`
 //!
 //! # 不允许占位实现
 //! [`self_check`] 在启动时核对：登记表里的**每个**操作都必须有处理函数；缺一个内核就拒绝继续启动。
@@ -176,6 +178,13 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
         }
         return ret;
     }
+    let Some(_service) = crate::assembly::enter_service(e.name) else {
+        let ret = err(SYSTEM_ERROR_UNSUPPORTED);
+        if tracing() {
+            kprintln!("[JSR-SYSCALL] unavailable name={} task={} ret={}", e.name, task_name, error_name(ret));
+        }
+        return ret;
+    };
     let trace = tracing();
     if trace {
         kprintln!("[JSR-SYSCALL] enter name={} id={} task={} effects={}", e.name, e.id, task_name, e.effects.as_str());
@@ -494,7 +503,9 @@ syscall_dispatch! {
     SYSTEM_PROCESS_SPAWN => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::proc::spawn::sys_spawn(a.args[0]) },
     // 系统调用只能返回标量：`list` 返回内建 Profile 的数量，具体描述用 `get` 按下标取。
     SYSTEM_PROFILE_LIST => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { profile::count() as i64 },
-    SYSTEM_PROFILE_GET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { profile_get(a.args[0], a.args[1], a.args[2]) },
+    SYSTEM_PROFILE_GET => |_e: &AbiEntry, a: &SyscallArgs, task_id: u64| {
+        profile_get(a.args[0], a.args[1], a.args[2], task_id)
+    },
     SYSTEM_DEVICE_LIST => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { device_list(a.args[0], a.args[1], a.args[2]) },
     SYSTEM_DEVICE_OPEN => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { device_open(a.args[0], a.args[1]) },
     SYSTEM_DEVICE_GET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { device_get(a.args[0], a.args[1], a.args[2]) },
@@ -513,14 +524,15 @@ syscall_dispatch! {
 const _: () = assert!(IMPLEMENTED.is_subset_of(REGISTERED_OPS_SET));
 const _: () = assert!(IMPLEMENTED.count() == REGISTERED_OPS.len());
 
-/// `system.profile.get(index, buf, cap)`：把第 `index` 个内建 Profile 的键=值描述写入用户缓冲区。
+/// `system.profile.get(index, buf, cap)`：把第 `index` 个内建 Profile 的键=值描述写入用户缓冲区，
+/// 并按调用者授权集合报告逐模块的四层状态。
 ///
 /// 失败模式：
 /// * 缓冲区为空或超过 [`PROFILE_TEXT_MAX`] ⇒ `invalid_argument`；
 /// * 下标越界、Profile 自身不合法或描述装不下用户缓冲区 ⇒ `profile.error.buffer_too_small`
 ///   （调用方据此扩大缓冲区或换下标，不需要解析自然语言）。
 /// English: write the structured description of one profile into a user buffer.
-fn profile_get(index: u64, ptr: u64, cap: u64) -> i64 {
+fn profile_get(index: u64, ptr: u64, cap: u64, task_id: u64) -> i64 {
     let Ok(capacity) = usize::try_from(cap) else {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     };
@@ -528,7 +540,8 @@ fn profile_get(index: u64, ptr: u64, cap: u64) -> i64 {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     }
     let mut buf = [0u8; PROFILE_TEXT_MAX];
-    let Some(len) = profile::render(index as usize, &mut buf) else {
+    let calls = if task_id == 0 { SyscallSet::EMPTY } else { sched::current_syscalls() };
+    let Some(len) = profile::render_for_caller(index as usize, &mut buf, calls) else {
         return err(SYSTEM_PROFILE_ERROR_BUFFER_TOO_SMALL);
     };
     if len > capacity {

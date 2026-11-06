@@ -2,7 +2,9 @@
 //! 参照实现用标准库直接写出规格。
 use std::cell::RefCell;
 
-use kernel_core::assembly::{mask_has, Assembly, AssemblyError, Availability, Binding, Policy, State};
+use kernel_core::assembly::{
+    mask_has, Assembly, AssemblyError, Availability, Binding, Health, Policy, State,
+};
 use kernel_core::config::KernelConfig;
 use kernel_core::profile::{self, ModuleDecl, SchedClass, SystemProfile};
 use proptest::prelude::*;
@@ -243,6 +245,121 @@ fn fixed_sequence_under_miri() {
     check_case(&base);
     check_case(&Case { ok: vec![true, false, true, true], ..base.clone() });
     check_case(&Case { ok: vec![true, false, true, true], all_or_nothing: false, ..base.clone() });
+
+    OUTCOME.with(|o| *o.borrow_mut() = [true; 8]);
+    let p = build(&base);
+    let declared = profile::resolve(p).unwrap();
+    let mut a = Assembly::new(p, &bindings(base.n)).unwrap();
+    a.start(Policy::Partial).unwrap();
+    a.set_health("m0", Health::Degraded).unwrap();
+    assert_eq!(a.availability(CAPS[1]), Availability::Degraded);
+    let withdrawn = a.mask_with_health("m0", Health::Unhealthy, &declared).unwrap();
+    assert!(!mask_has(&declared, withdrawn, CAPS[0]));
+    assert!(!mask_has(&declared, withdrawn, CAPS[1]));
+    a.set_health("m0", Health::Unhealthy).unwrap();
+    assert_eq!(a.published_mask(&declared), withdrawn);
+    let bits = a.preflight_stop("m2").unwrap();
+    a.stop_with("m2", |withdraw| assert_eq!(withdraw, bits)).unwrap();
+    assert_eq!(a.state("m2").map(|s| s.0), Some(State::Stopped));
+
+    let gate = kernel_core::service_gate::Gate::new();
+    gate.publish(0b1);
+    let lease = gate.acquire(0).expect("published service lease");
+    gate.withdraw(0b1);
+    drop(lease);
+    gate.wait_quiescent(|| {});
+    assert!(gate.acquire(0).is_none());
+}
+
+#[derive(Debug, Clone)]
+struct HealthCase {
+    n: usize,
+    deps: Vec<Vec<usize>>,
+    decl_order: Vec<usize>,
+    health: Vec<u8>,
+}
+
+fn health_case_strategy() -> impl Strategy<Value = HealthCase> {
+    (1usize..=8).prop_flat_map(|n| {
+        (
+            Just(n),
+            proptest::collection::vec(any::<u8>(), n),
+            Just((0..n).collect::<Vec<_>>()).prop_shuffle(),
+            proptest::collection::vec(0u8..3, n),
+        )
+    })
+    .prop_map(|(n, masks, decl_order, health)| HealthCase {
+        n,
+        deps: (0..n).map(|k| (0..k).filter(|d| masks[k] & (1 << d) != 0).collect()).collect(),
+        decl_order,
+        health,
+    })
+}
+
+fn expected_availability(c: &HealthCase, m: usize) -> Health {
+    let own = match c.health[m] {
+        0 => Health::Healthy,
+        1 => Health::Degraded,
+        _ => Health::Unhealthy,
+    };
+    if own == Health::Unhealthy {
+        return Health::Unhealthy;
+    }
+    if c.deps[m].iter().any(|&d| expected_availability(c, d) == Health::Unhealthy) {
+        Health::Unhealthy
+    } else if own == Health::Degraded
+        || c.deps[m].iter().any(|&d| expected_availability(c, d) == Health::Degraded)
+    {
+        Health::Degraded
+    } else {
+        Health::Healthy
+    }
+}
+
+fn check_health_case(c: &HealthCase) {
+    let base = Case {
+        n: c.n,
+        deps: c.deps.clone(),
+        decl_order: c.decl_order.clone(),
+        ok: vec![true; c.n],
+        all_or_nothing: true,
+    };
+    let p = build(&base);
+    let declared = profile::resolve(p).unwrap();
+    let mut a = Assembly::new(p, &bindings(c.n)).unwrap();
+    a.start(Policy::AllOrNothing).unwrap();
+    for m in 0..c.n {
+        let health = match c.health[m] {
+            0 => Health::Healthy,
+            1 => Health::Degraded,
+            _ => Health::Unhealthy,
+        };
+        a.set_health(NAMES[m], health).unwrap();
+    }
+    let mut mask = 0u32;
+    for m in 0..c.n {
+        let expected = expected_availability(c, m);
+        assert_eq!(a.effective_health(NAMES[m]), Some(expected));
+        let available = expected.usable();
+        assert_eq!(a.availability(CAPS[m]) == Availability::Ready || a.availability(CAPS[m]) == Availability::Degraded, available);
+        if available {
+            mask |= 1 << declared.capabilities().iter().position(|cap| *cap == CAPS[m]).unwrap();
+        }
+    }
+    assert_eq!(a.published_mask(&declared), mask);
+    assert_eq!(a.audit(&declared, mask), Ok(()));
+    if mask != (1u32 << c.n) - 1 {
+        assert!(a.audit(&declared, (1u32 << c.n) - 1).is_err());
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
+
+    #[test]
+    fn health_and_transitive_availability_match_reference(c in health_case_strategy()) {
+        check_health_case(&c);
+    }
 }
 
 // ---- Loom：内核发布协议模型 ------------------------------------------------------
@@ -255,25 +372,59 @@ fn publication_protocol_loom() {
     use loom::sync::atomic::{AtomicU32, Ordering};
     use loom::sync::Arc;
     loom::model(|| {
-        let state = Arc::new((AtomicU32::new(0), AtomicU32::new(0)));
+        let published = Arc::new(AtomicU32::new(1));
+        let state = Arc::new(AtomicU32::new(0));
+        let stopped = Arc::new(loom::sync::atomic::AtomicBool::new(false));
         let writer = {
-            let s = state.clone();
+            let published = published.clone();
+            let state = state.clone();
+            let stopped = stopped.clone();
             loom::thread::spawn(move || {
-                s.0.store(64, Ordering::Relaxed); // activate：安装表
-                s.1.store(0b1, Ordering::Release); // 发布
-            })
-        };
-        let reader = {
-            let s = state.clone();
-            loom::thread::spawn(move || {
-                let mask = s.1.load(Ordering::Acquire);
-                if mask & 1 != 0 {
-                    assert_eq!(s.0.load(Ordering::Relaxed), 64, "published capability must see its activation");
+                loop {
+                    let initial = state.load(Ordering::SeqCst);
+                    let writer = (initial ^ (1 << 30)) | (1 << 31);
+                    if state.compare_exchange(initial, writer, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                        break;
+                    }
+                    loom::thread::yield_now();
                 }
-                mask
+                published.fetch_and(!1, Ordering::SeqCst);
+                while state.load(Ordering::SeqCst) & ((1 << 30) - 1) != 0 {
+                    loom::thread::yield_now();
+                }
+                state.fetch_and(!(1 << 31), Ordering::SeqCst);
+                stopped.store(true, Ordering::SeqCst);
             })
         };
+        let mut readers_out = Vec::new();
+        for _ in 0..1 {
+            let published = published.clone();
+            let state = state.clone();
+            let stopped = stopped.clone();
+            readers_out.push(loom::thread::spawn(move || {
+                let current = state.load(Ordering::SeqCst);
+                if current & (1 << 31) != 0 {
+                    return 0;
+                }
+                if state.compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                    return 0;
+                }
+                if published.load(Ordering::SeqCst) & 1 == 0 {
+                    state.fetch_sub(1, Ordering::SeqCst);
+                    return 0;
+                }
+                assert!(!stopped.load(Ordering::SeqCst), "stop completed with an active reader");
+                state.fetch_sub(1, Ordering::SeqCst);
+                1
+            }));
+        }
         writer.join().unwrap();
-        let _ = reader.join().unwrap();
+        for reader in readers_out {
+            let _ = reader.join().unwrap();
+        }
+        assert!(stopped.load(Ordering::SeqCst));
+        assert_eq!(published.load(Ordering::SeqCst) & 1, 0);
+        let final_state = state.load(Ordering::SeqCst);
+        assert_eq!(final_state & ((1 << 30) - 1), 0, "final state={final_state:#x}");
     });
 }

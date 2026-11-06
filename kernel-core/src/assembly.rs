@@ -17,6 +17,8 @@
 //!    └──某个依赖不是 Ready──▶ Blocked
 //! ```
 //! `Ready` 之外的任何状态都不发布能力；`Stopped`、`Failed`、`Blocked` 都是本次启动的终态。
+//! 健康状态与生命周期正交：`Ready` 的服务可以是 healthy、degraded 或 unhealthy；只有 healthy /
+//! degraded 且全部依赖健康时才发布能力。健康状态不能把常驻模块变成可停用模块。
 //!
 //! # 裁决（issue #6 工作要求 2）
 //! * **依赖顺序**：由能力依赖自动推出（稳定拓扑序：同一层按声明顺序），不再由调用者硬编码；
@@ -74,6 +76,37 @@ impl State {
     }
 }
 
+/// 运行时健康状态；与声明、生命周期和用户授权分开记录。
+/// Runtime health, distinct from declaration, lifecycle and caller authorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    /// 尚未启动或尚未探测。
+    Unknown,
+    /// 提供完整声明的服务。
+    Healthy,
+    /// 服务仍可用，但已进入降级状态。
+    Degraded,
+    /// 服务不得发布；依赖它的能力也必须撤回。
+    Unhealthy,
+}
+
+impl Health {
+    /// 规范状态名。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Health::Unknown => "unknown",
+            Health::Healthy => "healthy",
+            Health::Degraded => "degraded",
+            Health::Unhealthy => "unhealthy",
+        }
+    }
+
+    /// 该健康状态是否允许服务被访问。
+    pub const fn usable(self) -> bool {
+        matches!(self, Health::Healthy | Health::Degraded)
+    }
+}
+
 /// 模块激活：检查/建立服务真正可用所需的状态；失败时返回静态原因，且不得留下半初始化状态。
 pub type Activate = fn() -> Result<(), &'static str>;
 /// 模块停用：释放 `activate` 建立的状态。
@@ -125,6 +158,12 @@ pub enum AssemblyError {
     InUse(&'static str),
     /// 启动期常驻模块，不可停用。
     Permanent,
+    /// 另一个生命周期或健康事务正在进行。
+    Busy,
+    /// 健康状态未通过发布掩码审计。
+    AuditFailed,
+    /// 不支持的运行时健康状态。
+    InvalidHealth,
 }
 
 impl AssemblyError {
@@ -142,6 +181,9 @@ impl AssemblyError {
             AssemblyError::NotReady(_) => "system.module.error.not_ready",
             AssemblyError::InUse(_) => "system.module.error.in_use",
             AssemblyError::Permanent => "system.module.error.permanent",
+            AssemblyError::Busy => "system.module.error.busy",
+            AssemblyError::AuditFailed => "system.module.error.audit_failed",
+            AssemblyError::InvalidHealth => "system.module.error.invalid_health",
         }
     }
 }
@@ -153,6 +195,10 @@ pub enum Availability {
     NotDeclared,
     /// 声明了，但提供它的模块处于给定状态（不是 `Ready`）。
     Pending(State),
+    /// 服务可用，但自身或依赖处于降级健康状态。
+    Degraded,
+    /// 自身或传递依赖不健康，能力不得发布。
+    Unhealthy,
     /// 提供者已就绪，能力可用。
     Ready,
 }
@@ -183,6 +229,8 @@ pub enum AuditError {
     UnknownBit(u32),
     /// 就绪模块的某个依赖不是 `Ready`。
     DependencyNotReady(&'static str),
+    /// 健康假设引用了不存在的模块。
+    UnknownModule,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +240,7 @@ enum Phase {
 }
 
 /// 一份 Profile 的运行时装配状态。
+#[derive(Clone)]
 pub struct Assembly {
     modules: [Option<&'static ModuleDecl>; MAX_MODULES],
     bindings: [Option<Binding>; MAX_MODULES],
@@ -199,6 +248,10 @@ pub struct Assembly {
     reason: [&'static str; MAX_MODULES],
     /// 第 i 个模块依赖的提供者模块位图。
     deps: [u16; MAX_MODULES],
+    /// 第 i 个模块提供的能力位图（对应解析后的 Profile 能力顺序）。
+    provides_mask: [u32; MAX_MODULES],
+    /// 第 i 个模块的运行时健康状态。
+    health: [Health; MAX_MODULES],
     /// 启动顺序（模块下标）。
     order: [u8; MAX_MODULES],
     /// 实际就绪顺序（用于逆序回滚 / 停用）。
@@ -223,6 +276,8 @@ impl Assembly {
             state: [State::Declared; MAX_MODULES],
             reason: [""; MAX_MODULES],
             deps: [0; MAX_MODULES],
+            provides_mask: [0; MAX_MODULES],
+            health: [Health::Unknown; MAX_MODULES],
             order: [0; MAX_MODULES],
             started: [0; MAX_MODULES],
             started_len: 0,
@@ -243,6 +298,11 @@ impl Assembly {
         // resolve 已保证每项所需能力恰好有一个提供者，且模块不依赖自己提供的能力。
         for i in 0..count {
             let m = a.module(i);
+            for (bit, capability) in declared.capabilities().iter().enumerate() {
+                if m.provides.contains(capability) {
+                    a.provides_mask[i] |= 1 << bit;
+                }
+            }
             for cap in m.requires {
                 debug_assert!(declared.has_capability(cap));
                 if let Some(p) = a.provider(cap) {
@@ -286,6 +346,25 @@ impl Assembly {
         (0..self.count).filter(|&i| self.state[i] == State::Ready).fold(0, |m, i| m | (1 << i))
     }
 
+    /// 模块自身及其全部传递依赖的生效健康状态。
+    /// Effective health over the module and every transitive dependency.
+    fn effective_health_at(&self, i: usize) -> Health {
+        if self.state[i] != State::Ready || !self.health[i].usable() {
+            return Health::Unhealthy;
+        }
+        let mut result = self.health[i];
+        for j in 0..self.count {
+            if self.deps[i] & (1 << j) != 0 {
+                match self.effective_health_at(j) {
+                    Health::Unhealthy => return Health::Unhealthy,
+                    Health::Degraded | Health::Unknown => result = Health::Degraded,
+                    Health::Healthy => {}
+                }
+            }
+        }
+        result
+    }
+
     /// 首个不是 `Ready` 的依赖能力名。
     fn first_unmet(&self, i: usize) -> &'static str {
         for cap in self.module(i).requires {
@@ -324,6 +403,7 @@ impl Assembly {
             match (binding.activate)() {
                 Ok(()) => {
                     self.state[i] = State::Ready;
+                    self.health[i] = Health::Healthy;
                     self.started[self.started_len] = i as u8;
                     self.started_len += 1;
                 }
@@ -349,6 +429,7 @@ impl Assembly {
             self.started_len -= 1;
             let i = self.started[self.started_len] as usize;
             self.state[i] = State::Stopped;
+            self.health[i] = Health::Unknown;
             if let Some(fini) = self.bindings[i].and_then(|b| b.deactivate) {
                 fini();
             }
@@ -357,10 +438,12 @@ impl Assembly {
         n
     }
 
-    /// 停用一个就绪模块。成功时先把状态改为 `Stopped`（撤回能力），再调用 `deactivate`；
-    /// 调用方若把掩码发布到别处，必须在调用本函数**之前**撤回该模块的能力位。
-    /// English: stop one ready module; publishers must withdraw its capabilities first.
-    pub fn stop(&mut self, name: &str) -> Result<(), AssemblyError> {
+    /// 停用前检查：返回该模块的发布位，且尚未改变状态。
+    ///
+    /// 被就绪模块依赖时返回 [`AssemblyError::InUse`]；没有停用函数的启动期常驻模块返回
+    /// [`AssemblyError::Permanent`]。调用者可据此先撤位、等待读者退出，再调用 [`Self::stop_with`]。
+    /// English: validate a stop and return its publication bits without changing state.
+    pub fn preflight_stop(&self, name: &str) -> Result<u32, AssemblyError> {
         if self.phase != Phase::Started {
             return Err(AssemblyError::NotStarted);
         }
@@ -371,13 +454,33 @@ impl Assembly {
         if let Some(user) = (0..self.count).find(|&j| self.state[j] == State::Ready && self.deps[j] & (1 << i) != 0) {
             return Err(AssemblyError::InUse(self.module(user).name));
         }
-        let fini = self.bindings[i].and_then(|b| b.deactivate).ok_or(AssemblyError::Permanent)?;
+        self.bindings[i].and_then(|b| b.deactivate).ok_or(AssemblyError::Permanent)?;
+        Ok(self.provides_mask[i])
+    }
+
+    /// 停用一个就绪模块。`withdraw` 必须先清除本模块能力位并等待旧读者退出，随后才调用停用函数。
+    ///
+    /// 所有拒绝条件在调用 `withdraw` 之前检查，因此 `in_use` / `permanent` 不会造成部分撤位。
+    /// English: stop one module after the publisher withdraws its bits and drains readers.
+    pub fn stop_with(&mut self, name: &str, mut withdraw: impl FnMut(u32)) -> Result<(), AssemblyError> {
+        let bits = self.preflight_stop(name)?;
+        let i = (0..self.count).find(|&i| self.module(i).name == name).expect("preflight found the module");
+        let fini = self.bindings[i].and_then(|b| b.deactivate).expect("preflight checked deactivate");
+        withdraw(bits);
         self.state[i] = State::Stopped;
+        self.health[i] = Health::Unknown;
         let at = self.started[..self.started_len].iter().position(|&s| s as usize == i).expect("ready module is in the started list");
         self.started.copy_within(at + 1..self.started_len, at);
         self.started_len -= 1;
         fini();
         Ok(())
+    }
+
+    /// 无外部发布门时的顺序契约入口；生产发布方应使用 [`Self::preflight_stop`] 与
+    /// [`Self::stop_with`] 完成“撤位 → 排空 → 停用”。
+    /// English: stop without an external publisher.
+    pub fn stop(&mut self, name: &str) -> Result<(), AssemblyError> {
+        self.stop_with(name, |_| {})
     }
 
     /// 按就绪逆序停用全部可停用模块；返回 (停用个数, 因常驻或仍被常驻模块依赖而保留的个数)。
@@ -415,12 +518,78 @@ impl Assembly {
         (0..self.count).find(|&i| self.module(i).name == name).map(|i| (self.state[i], self.reason[i]))
     }
 
+    /// 某模块的运行时健康状态。
+    /// Runtime health of one module.
+    pub fn health(&self, name: &str) -> Option<Health> {
+        (0..self.count).find(|&i| self.module(i).name == name).map(|i| self.health[i])
+    }
+
+    /// 模块及其传递依赖的生效健康状态。
+    /// Effective health over one module and its transitive dependencies.
+    pub fn effective_health(&self, name: &str) -> Option<Health> {
+        (0..self.count)
+            .find(|&i| self.module(i).name == name)
+            .map(|i| self.effective_health_at(i))
+    }
+
+    /// 更新一个已就绪模块的健康状态；返回更新前的状态。
+    ///
+    /// 发布方必须在把状态改为 [`Health::Unhealthy`] 前撤掉所有将失效的能力位，并在公开恢复后
+    /// 才重新置位。本方法与生命周期停用分开，常驻模块也可以健康降级。
+    /// English: update runtime health without changing the module lifecycle.
+    pub fn set_health(&mut self, name: &str, health: Health) -> Result<Health, AssemblyError> {
+        if health == Health::Unknown {
+            return Err(AssemblyError::InvalidHealth);
+        }
+        let i = (0..self.count).find(|&i| self.module(i).name == name).ok_or(AssemblyError::UnknownModule)?;
+        if self.state[i] != State::Ready {
+            return Err(AssemblyError::NotReady(self.state[i]));
+        }
+        let old = self.health[i];
+        self.health[i] = health;
+        Ok(old)
+    }
+
+    /// 模块提供的能力位图。
+    /// Capability bits provided by one module.
+    pub fn module_mask(&self, name: &str) -> Option<u32> {
+        (0..self.count).find(|&i| self.module(i).name == name).map(|i| self.provides_mask[i])
+    }
+
+    /// 假设只改变一个模块的健康状态时，装配应发布的完整掩码；不修改装配。
+    /// Publication mask that would follow one health change, without mutating the assembly.
+    pub fn mask_with_health(&self, name: &str, health: Health, declared: &ResolvedProfile) -> Option<u32> {
+        let i = (0..self.count).find(|&i| self.module(i).name == name)?;
+        let mut copy = self.clone();
+        copy.health[i] = health;
+        Some(copy.published_mask(declared))
+    }
+
+    /// 假设一个模块健康状态改变后，用同一假设状态审计候选发布掩码；不修改装配。
+    /// Audit a candidate mask under one prospective health change, without mutating the assembly.
+    pub fn audit_with_health(
+        &self,
+        name: &str,
+        health: Health,
+        declared: &ResolvedProfile,
+        mask: u32,
+    ) -> Result<(), AuditError> {
+        let i = (0..self.count).find(|&i| self.module(i).name == name).ok_or(AuditError::UnknownModule)?;
+        let mut copy = self.clone();
+        copy.health[i] = health;
+        copy.audit(declared, mask)
+    }
+
     /// 能力查询：区分未声明、未就绪与可用。
     pub fn availability(&self, cap: &str) -> Availability {
         match self.provider(cap) {
             None => Availability::NotDeclared,
-            Some(p) if self.state[p] == State::Ready => Availability::Ready,
-            Some(p) => Availability::Pending(self.state[p]),
+            Some(p) if self.state[p] != State::Ready => Availability::Pending(self.state[p]),
+            Some(p) => match self.effective_health_at(p) {
+                Health::Healthy => Availability::Ready,
+                Health::Degraded => Availability::Degraded,
+                Health::Unknown | Health::Unhealthy => Availability::Unhealthy,
+            },
         }
     }
 
@@ -431,7 +600,7 @@ impl Assembly {
             .capabilities()
             .iter()
             .enumerate()
-            .filter(|(_, c)| self.availability(c) == Availability::Ready)
+            .filter(|(_, c)| matches!(self.availability(c), Availability::Ready | Availability::Degraded))
             .fold(0, |m, (b, _)| m | (1 << b))
     }
 
@@ -445,7 +614,7 @@ impl Assembly {
         }
         for (b, cap) in caps.iter().enumerate() {
             let published = mask & (1 << b) != 0;
-            let ready = self.availability(cap) == Availability::Ready;
+            let ready = matches!(self.availability(cap), Availability::Ready | Availability::Degraded);
             if published && !ready {
                 return Err(AuditError::PublishedNotReady(cap));
             }
@@ -453,9 +622,8 @@ impl Assembly {
                 return Err(AuditError::ReadyNotPublished(cap));
             }
         }
-        let ready = self.ready_mask();
         for i in 0..self.count {
-            if self.state[i] == State::Ready && self.deps[i] & !ready != 0 {
+            if mask & self.provides_mask[i] != 0 && self.effective_health_at(i) == Health::Unhealthy {
                 return Err(AuditError::DependencyNotReady(self.module(i).name));
             }
         }
@@ -673,6 +841,82 @@ mod tests {
         let mask = a.published_mask(&declared);
         assert_eq!(mask.count_ones() as usize, declared.capabilities().len());
         assert_eq!(a.audit(&declared, mask), Ok(()));
+        let degraded = a.mask_with_health("devices", Health::Unhealthy, &declared).unwrap();
+        assert_eq!(a.availability("device.pci"), Availability::Ready);
+        assert!(!mask_has(&declared, degraded, "device.pci"));
+        assert_eq!(
+            a.audit_with_health("devices", Health::Unhealthy, &declared, degraded),
+            Ok(()),
+            "prospective health audit must use the prospective state"
+        );
+        take("a:");
+    }
+
+    #[test]
+    fn stop_withdraws_before_deactivate_and_rejects_in_use_before_withdrawal() {
+        let _serial = serial();
+        let binds = [
+            b("top", ok_top, Some(fini_top)),
+            b("mid", ok_mid, None),
+            b("base", ok_base, Some(fini_base)),
+            b("side", ok_side, Some(fini_side)),
+        ];
+        let mut a = Assembly::new(&T_PROFILE, &binds).unwrap();
+        a.start(Policy::AllOrNothing).unwrap();
+        take("a:");
+
+        assert_eq!(a.preflight_stop("base"), Err(AssemblyError::InUse("mid")));
+        assert_eq!(a.preflight_stop("mid"), Err(AssemblyError::InUse("top")));
+        let bits = a.preflight_stop("top").unwrap();
+        let declared = profile::resolve(&T_PROFILE).unwrap();
+        assert!(bits & a.published_mask(&declared) != 0);
+        a.stop_with("top", |withdrawn| {
+            assert_eq!(withdrawn, bits);
+            log("a:withdraw top");
+        })
+        .unwrap();
+        assert_eq!(take("a:"), ["a:withdraw top", "a:fini top"]);
+        assert_eq!(a.preflight_stop("mid"), Err(AssemblyError::Permanent));
+        assert_eq!(a.health("top"), Some(Health::Unknown));
+        assert_eq!(a.audit(&declared, a.published_mask(&declared)), Ok(()));
+    }
+
+    #[test]
+    fn health_is_separate_from_lifecycle_and_cascades_to_dependents() {
+        let _serial = serial();
+        let binds = [
+            b("top", ok_top, None),
+            b("mid", ok_mid, None),
+            b("base", ok_base, None),
+            b("side", ok_side, None),
+        ];
+        let mut a = Assembly::new(&T_PROFILE, &binds).unwrap();
+        a.start(Policy::AllOrNothing).unwrap();
+        let declared = profile::resolve(&T_PROFILE).unwrap();
+        let all = a.published_mask(&declared);
+        assert_eq!(a.set_health("base", Health::Unknown), Err(AssemblyError::InvalidHealth));
+        assert_eq!(a.health("base"), Some(Health::Healthy));
+        assert_eq!(a.set_health("missing", Health::Degraded), Err(AssemblyError::UnknownModule));
+        assert_eq!(a.set_health("base", Health::Degraded), Ok(Health::Healthy));
+        assert_eq!(a.availability("t.base"), Availability::Degraded);
+        assert_eq!(a.availability("t.mid"), Availability::Degraded);
+        assert_eq!(a.published_mask(&declared), all, "degraded services stay reachable");
+
+        let next = a.mask_with_health("base", Health::Unhealthy, &declared).unwrap();
+        assert!(!mask_has(&declared, next, "t.base"));
+        assert!(!mask_has(&declared, next, "t.mid"));
+        assert!(!mask_has(&declared, next, "t.top"));
+        assert!(mask_has(&declared, next, "t.side"));
+        assert_eq!(a.set_health("base", Health::Unhealthy), Ok(Health::Degraded));
+        assert_eq!(a.state("base"), Some((State::Ready, "")));
+        assert_eq!(a.health("base"), Some(Health::Unhealthy));
+        assert_eq!(a.published_mask(&declared), next);
+        assert_eq!(a.audit(&declared, next), Ok(()));
+        assert!(matches!(a.audit(&declared, all), Err(AuditError::PublishedNotReady(_))));
+        assert_eq!(a.set_health("base", Health::Healthy), Ok(Health::Unhealthy));
+        assert_eq!(a.published_mask(&declared), all);
+        assert_eq!(a.audit(&declared, all), Ok(()));
+        take("a:");
     }
 }
 
@@ -757,5 +1001,36 @@ mod proofs {
         let flip: u32 = kani::any();
         kani::assume(flip != 0);
         assert!(a.audit(&declared, mask ^ flip).is_err());
+    }
+
+    /// 任意模块健康组合：发布掩码始终通过审计；标记为 unhealthy 的模块不得出现在发布面。
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn health_changes_never_publish_unavailable_service() {
+        let binds = [
+            Binding { module: "c", activate: ok, deactivate: None },
+            Binding { module: "b", activate: ok, deactivate: None },
+            Binding { module: "a", activate: ok, deactivate: None },
+        ];
+        let mut a = Assembly::new(&K_PROFILE, &binds).unwrap();
+        a.start(Policy::AllOrNothing).unwrap();
+        let health = |pick: u8| match pick % 3 {
+            0 => Health::Healthy,
+            1 => Health::Degraded,
+            _ => Health::Unhealthy,
+        };
+        a.set_health("a", health(kani::any())).unwrap();
+        a.set_health("b", health(kani::any())).unwrap();
+        a.set_health("c", health(kani::any())).unwrap();
+        let declared = profile::resolve(&K_PROFILE).unwrap();
+        let mask = a.published_mask(&declared);
+        assert!(a.audit(&declared, mask).is_ok());
+        for i in 0..3 {
+            let name = ["c", "b", "a"][i];
+            if a.effective_health(name) == Some(Health::Unhealthy) {
+                let bits = a.module_mask(name).unwrap();
+                assert!(mask & bits == 0);
+            }
+        }
     }
 }
