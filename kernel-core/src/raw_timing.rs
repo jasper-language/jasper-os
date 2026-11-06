@@ -42,6 +42,91 @@ impl Sample {
     }
 }
 
+/// 一个高精度期限唤醒的五个中间端点；期限本身是第六个时间点。
+/// Five intermediate endpoints for one high-resolution deadline wake; the
+/// deadline timestamp itself is the sixth point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeadlineTimeline {
+    pub deadline: Endpoint,
+    pub interrupt_entry: Endpoint,
+    pub lock_acquired: Endpoint,
+    pub wake_start: Endpoint,
+    pub queue_published: Endpoint,
+}
+
+impl DeadlineTimeline {
+    /// 只接受同一共享纳秒时钟上的非递减端点。失败样本不得进入任何直方图。
+    /// Accepts only nondecreasing endpoints from the shared nanosecond clock.
+    pub fn new(
+        deadline: Endpoint,
+        interrupt_entry: Endpoint,
+        lock_acquired: Endpoint,
+        wake_start: Endpoint,
+        queue_published: Endpoint,
+    ) -> Option<Self> {
+        let points = [deadline, interrupt_entry, lock_acquired, wake_start, queue_published];
+        let shared = points
+            .iter()
+            .all(|p| p.clock == ClockDomain::SharedNs);
+        let ordered = points
+            .windows(2)
+            .all(|w| w[0].counter <= w[1].counter);
+        (shared && ordered).then_some(Self {
+            deadline,
+            interrupt_entry,
+            lock_acquired,
+            wake_start,
+            queue_published,
+        })
+    }
+
+    /// 队列发布后即可观测的四个累计区间：期限到中断、取锁、唤醒起点和发布。
+    /// Four cumulative intervals observable once the queue publication is complete.
+    pub fn samples_to_published(
+        &self,
+        slot: usize,
+        generation: u64,
+        wait_round: u64,
+    ) -> [Sample; 4] {
+        let make = |path, end| Sample {
+            path,
+            slot,
+            generation,
+            wait_round,
+            start: self.deadline,
+            end,
+        };
+        [
+            make(5, self.interrupt_entry),
+            make(6, self.lock_acquired),
+            make(7, self.wake_start),
+            make(8, self.queue_published),
+        ]
+    }
+
+    /// 恢复端点仍须在同一共享时钟上且不早于队列发布。
+    /// The resume endpoint must share the clock and follow queue publication.
+    pub fn sample_to_resume(
+        &self,
+        slot: usize,
+        generation: u64,
+        wait_round: u64,
+        resume: Endpoint,
+    ) -> Option<Sample> {
+        (resume.clock == ClockDomain::SharedNs
+            && self.deadline.clock == ClockDomain::SharedNs
+            && resume.counter >= self.queue_published.counter)
+            .then_some(Sample {
+                path: 9,
+                slot,
+                generation,
+                wait_round,
+                start: self.deadline,
+                end: resume,
+            })
+    }
+}
+
 /// Ten-microsecond buckets up to `(N-2)*10` us, with the final bucket retaining
 /// all larger observations and the exact maximum. This records every completed
 /// sample without allocating or replacing earlier observations while keeping
@@ -54,7 +139,7 @@ pub struct NanoHistogram<const N: usize> {
     max_ns: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NanoSummary {
     pub count: u64,
     pub invalid: u64,
@@ -62,6 +147,21 @@ pub struct NanoSummary {
     pub p99_us: u64,
     pub p999_us: u64,
     pub max_ns: u64,
+}
+
+/// 六个期限唤醒时间点对应的累计延迟汇总。
+/// Cumulative summaries for the six deadline-to-resume points.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WakePhaseSummaries {
+    pub deadline_to_interrupt: NanoSummary,
+    pub deadline_to_lock: NanoSummary,
+    pub deadline_to_wake: NanoSummary,
+    pub deadline_to_runnable: NanoSummary,
+    pub deadline_to_resume: NanoSummary,
+    pub late_settlement: u64,
+    pub early_timer: u64,
+    pub invalid_order: u64,
+    pub invalid_resume: u64,
 }
 
 impl<const N: usize> NanoHistogram<N> {
@@ -113,6 +213,56 @@ impl<const N: usize> NanoHistogram<N> {
 
 impl<const N: usize> Default for NanoHistogram<N> {
     fn default() -> Self { Self::new() }
+}
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    fn shared(counter: u64) -> Endpoint {
+        Endpoint {
+            cpu: 1,
+            counter,
+            clock: ClockDomain::SharedNs,
+        }
+    }
+
+    #[kani::proof]
+    fn ordered_shared_timeline_preserves_all_six_points() {
+        let a: u64 = kani::any();
+        let b: u64 = kani::any();
+        let c: u64 = kani::any();
+        let d: u64 = kani::any();
+        let e: u64 = kani::any();
+        kani::assume(a <= b && b <= c && c <= d && d <= e);
+        let timeline = DeadlineTimeline::new(shared(a), shared(b), shared(c), shared(d), shared(e))
+            .expect("ordered shared timeline");
+        let samples = timeline.samples_to_published(3, 7, 11);
+        assert_eq!(samples[0].end.counter, b);
+        assert_eq!(samples[1].end.counter, c);
+        assert_eq!(samples[2].end.counter, d);
+        assert_eq!(samples[3].end.counter, e);
+        assert_eq!(samples[0].start.counter, a);
+        assert_eq!(
+            timeline.sample_to_resume(3, 7, 11, shared(e)).unwrap().end.counter,
+            e
+        );
+    }
+
+    #[kani::proof]
+    fn reversed_endpoint_is_rejected() {
+        let a: u64 = kani::any();
+        let b: u64 = kani::any();
+        kani::assume(b < a);
+        assert!(DeadlineTimeline::new(
+            shared(a),
+            shared(b),
+            shared(a),
+            shared(a),
+            shared(a),
+        )
+        .is_none());
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -200,6 +350,56 @@ mod tests {
         raw.start.clock = ClockDomain::SharedNs;
         hist.record(&raw);
         assert_eq!(hist.summary().invalid, 1);
+    }
+
+    #[test]
+    fn deadline_timeline_requires_clock_and_order() {
+        let point = |counter| Endpoint {
+            cpu: 3,
+            counter,
+            clock: ClockDomain::SharedNs,
+        };
+        let timeline = DeadlineTimeline::new(
+            point(100),
+            point(120),
+            point(140),
+            point(170),
+            point(190),
+        )
+        .expect("ordered shared timeline");
+        let samples = timeline.samples_to_published(7, 9, 11);
+        assert_eq!(samples.map(|s| s.path), [5, 6, 7, 8]);
+        assert_eq!(
+            samples.map(|s| s.shared_ns_delta().unwrap()),
+            [20, 40, 70, 90]
+        );
+        assert_eq!(
+            timeline
+                .sample_to_resume(7, 9, 11, point(220))
+                .unwrap()
+                .shared_ns_delta(),
+            Some(120)
+        );
+        assert!(timeline.sample_to_resume(7, 9, 11, point(189)).is_none());
+
+        assert!(DeadlineTimeline::new(
+            point(100),
+            point(99),
+            point(140),
+            point(170),
+            point(190),
+        )
+        .is_none());
+        let mut raw = point(120);
+        raw.clock = ClockDomain::Raw;
+        assert!(DeadlineTimeline::new(
+            point(100),
+            raw,
+            point(140),
+            point(170),
+            point(190),
+        )
+        .is_none());
     }
 }
 

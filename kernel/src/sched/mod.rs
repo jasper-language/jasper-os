@@ -127,6 +127,8 @@ impl core::ops::DerefMut for StateGuard {
 }
 impl Drop for StateGuard {
     fn drop(&mut self) {
+        #[cfg(feature = "krn2-observe")]
+        { self.0.raw_highres_phase = None; }
         // with_mut_from refreshes before extracting kicks. Repeating the full
         // task-table scan here doubled every mutating high-resolution timer
         // transaction and amplified multi-CPU wake contention. Direct guards
@@ -165,12 +167,26 @@ pub fn sync_work_stats() -> [u32; 4] {
 }
 // Direct diagnostic/reset/snapshot transactions are explicitly attributed.
 fn lock_state() -> StateGuard { lock_state_from(Origin::Diagnostic) }
-fn lock_state_from(_origin: Origin) -> StateGuard {
+fn lock_state_from(origin: Origin) -> StateGuard {
+    lock_state_from_observed(origin, None)
+}
+fn lock_state_from_observed(
+    _origin: Origin,
+    highres_irq_entry: Option<kernel_core::raw_timing::Endpoint>,
+) -> StateGuard {
     // A CPU is the sole consumer of its inbox. Never retain this leaf while
     // taking KERNEL_SCHED: producers use global -> inbox ordering.
     let local_cpu = crate::arch::cpu_index();
     let inbox = cpu::without_irq(|| take_local_inbox(local_cpu));
     let mut s = KERNEL_SCHED.lock();
+    #[cfg(feature = "krn2-observe")]
+    {
+        s.raw_highres_phase = highres_irq_entry.map(|interrupt_entry| {
+            scheduler::WakePhaseSource { interrupt_entry, lock_acquired: wake_endpoint() }
+        });
+    }
+    #[cfg(not(feature = "krn2-observe"))]
+    let _ = highres_irq_entry;
     // The resumed task has already released its predecessor's leaf-local
     // execution claim.  Retire the cold lifecycle attachment at the next
     // scheduler transaction instead of forcing every context switch to wait
@@ -244,9 +260,16 @@ fn with_mut<R>(f: impl FnOnce(&mut Scheduler) -> R) -> R {
     with_mut_from(Origin::Mutation, f)
 }
 fn with_mut_from<R>(origin: Origin, f: impl FnOnce(&mut Scheduler) -> R) -> R {
+    with_mut_from_observed(origin, None, f)
+}
+fn with_mut_from_observed<R>(
+    origin: Origin,
+    highres_irq_entry: Option<kernel_core::raw_timing::Endpoint>,
+    f: impl FnOnce(&mut Scheduler) -> R,
+) -> R {
     let started = crate::arch::cycles();
     let (r, kicks) = {
-        let mut s = lock_state_from(origin);
+        let mut s = lock_state_from_observed(origin, highres_irq_entry);
         #[cfg(feature = "krn2-observe")]
         let (slot, generation) = s.raw_callback_identity();
         #[cfg(feature = "krn2-observe")]
@@ -281,7 +304,7 @@ fn send_kicks(kicks: CpuSet) {
 }
 
 #[cfg(feature = "krn2-observe")]
-fn wake_endpoint() -> kernel_core::raw_timing::Endpoint {
+pub(crate) fn wake_endpoint() -> kernel_core::raw_timing::Endpoint {
     let cpu = cpu::cpu_index();
     if let Some(counter) = crate::hrtime::now() {
         kernel_core::raw_timing::Endpoint {
@@ -832,13 +855,16 @@ pub fn timer_progress_stats() -> (u64, u64, u64, u64, u64) {
     )
 }
 
-pub fn on_highres_timer(entry: u64) {
+pub fn on_highres_timer(
+    entry: u64,
+    interrupt_entry: Option<kernel_core::raw_timing::Endpoint>,
+) {
     crate::smp::percpu::this().take_resched();
     // Keep the due publication, scheduling decision and switch publication in
     // one transaction.  The old path returned a cause and immediately took
     // KERNEL_SCHED again through yield_with_cause(), adding another queue wait
     // to every simultaneous per-CPU deadline fanout.
-    let (credits,plan)=with_mut_from(Origin::ApFallback,|s| {
+    let (credits,plan)=with_mut_from_observed(Origin::ApFallback,interrupt_entry,|s| {
         let (credits,cause)=s.highres_event(PREEMPTION.load(Ordering::Relaxed));
         (credits,cause.and_then(|cause|s.prepare_switch(cause)))
     });
@@ -1237,8 +1263,12 @@ pub fn reset_raw_wakes() {
     s.raw_pending_at_reset = s.raw_pending_count();
     s.raw_wakes = kernel_core::raw_timing::Samples::new();
     s.wake_latency = kernel_core::raw_timing::NanoHistogram::new();
+    s.deadline_to_interrupt = kernel_core::raw_timing::NanoHistogram::new();
+    s.deadline_to_lock = kernel_core::raw_timing::NanoHistogram::new();
+    s.deadline_to_wake = kernel_core::raw_timing::NanoHistogram::new();
     s.deadline_to_runnable = kernel_core::raw_timing::NanoHistogram::new();
     s.deadline_to_resume = kernel_core::raw_timing::NanoHistogram::new();
+    s.deadline_phase_errors = [0; 4];
     s.raw_wake_errors = [0; 3];
 }
 #[cfg(feature = "krn2-observe")]
@@ -1247,9 +1277,19 @@ pub fn raw_wake_snapshot() -> (kernel_core::raw_timing::Samples<64>, kernel_core
     (s.raw_wakes, s.wake_latency.summary(), s.raw_wake_errors, s.raw_pending_at_reset, s.raw_pending_count())
 }
 #[cfg(feature = "krn2-observe")]
-pub fn raw_deadline_snapshot() -> (kernel_core::raw_timing::NanoSummary, kernel_core::raw_timing::NanoSummary) {
+pub fn raw_deadline_snapshot() -> kernel_core::raw_timing::WakePhaseSummaries {
     let s = lock_state();
-    (s.deadline_to_runnable.summary(), s.deadline_to_resume.summary())
+    kernel_core::raw_timing::WakePhaseSummaries {
+        deadline_to_interrupt: s.deadline_to_interrupt.summary(),
+        deadline_to_lock: s.deadline_to_lock.summary(),
+        deadline_to_wake: s.deadline_to_wake.summary(),
+        deadline_to_runnable: s.deadline_to_runnable.summary(),
+        deadline_to_resume: s.deadline_to_resume.summary(),
+        late_settlement: s.deadline_phase_errors[0],
+        early_timer: s.deadline_phase_errors[1],
+        invalid_order: s.deadline_phase_errors[2],
+        invalid_resume: s.deadline_phase_errors[3],
+    }
 }
 
 /// Diagnostic counters are copied under the existing scheduler guard.
