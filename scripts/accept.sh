@@ -792,11 +792,11 @@ check_m41() {   # 对象生命周期：关句柄 ⇒ closing 不销毁；重复�
   fi
 }
 
-check_issue4_destroy() {   # issue #4 第二片：生产销毁表只按种类分派，Destroy::None 槽经启动期检查为空
-  if has '^\[JSR-LIFE\] destroy_dispatch outside_lock=5 none=7 none_empty=true destroyed_when_none=0 hooks_match_registry=true'; then
-    record ISSUE4-DESTROY PASS "5 个锁外销毁入口均由所属模块承载；7 个 Destroy::None 槽为空且启动期检查一致"
+check_issue4_destroy() {   # issue #4 第二、三片：closing/destroy 按种类分派，动作与有序锁路径经启动期检查一致
+  if has '^\[JSR-LIFE\] release_dispatch closing_locks=true outside_lock=5 none=7 none_empty=true destroyed_when_none=0 hooks_match_registry=true'; then
+    record ISSUE4-DESTROY PASS "7 个 closing 与 5 个锁外销毁入口的锁路径和动作声明均与登记表一致；7 个 Destroy::None 槽为空"
   else
-    record ISSUE4-DESTROY FAIL "缺少销毁分派启动期检查，或钩子存在性与 Destroy 声明不一致"
+    record ISSUE4-DESTROY FAIL "缺少释放分派启动期检查，或 closing/destroy 动作、锁路径与登记表不一致"
   fi
 }
 

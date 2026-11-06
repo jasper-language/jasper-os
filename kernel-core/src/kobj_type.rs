@@ -1,10 +1,11 @@
-//! 内核对象类型登记与生命周期契约（issue #4 第一切片）。
-//! Kernel object type registry and lifetime contracts (issue #4, slice 1).
+//! 内核对象类型登记与生命周期契约（issue #4 第一至三切片）。
+//! Kernel object type registry and lifetime contracts (issue #4, slices 1–3).
 //!
 //! # 为什么需要
 //! 内核对象表（唯一 `ObjectTable`）里的每一种对象都有一组类型特有的规则：句柄类型、合法权限上限、
-//! 能否经 Channel 转移、外部所有权归零时是否有 closing 动作、内部引用归零后销毁是否需要在锁外做事，
-//! 以及它对其他对象持有哪些强引用。这些规则原先散落在中心匹配逻辑与各处常量里，新增类型时容易漏掉一处。
+//! 能否经 Channel 转移、外部所有权归零时是否有 closing 动作、内部引用归零后销毁是否需要在锁外做事、
+//! 各阶段的锁路径，以及它对其他对象持有哪些强引用。这些规则原先散落在中心匹配逻辑与各处常量里，
+//! 新增类型时容易漏掉一处。
 //! 本模块把它们收拢为**一张编译期常量表** [`REGISTRY`]，并给出可由编译器与验证工具检查的良构条件
 //! [`registry_well_formed`]：内核侧以 `const` 断言要求登记表良构，不良构即编译失败。
 //! Every kernel object kind's rules are declared once in [`REGISTRY`]; the kernel asserts
@@ -108,11 +109,55 @@ pub enum Destroy {
     OutsideLock,
 }
 
+/// closing 钩子允许持有的有序锁路径。首项固定为对象表锁；其余项按内核全局锁顺序排列。
+/// Ordered lock path allowed while a closing hook runs; the object-table lock is always first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ClosingLocks {
+    /// 没有 closing 钩子。
+    None,
+    /// 只在对象表锁内。
+    ObjectTable,
+    /// 对象表锁 → 设备中断登记表。
+    ObjectTableThenDeviceIrq,
+    /// 对象表锁 → 调度器锁。
+    ObjectTableThenScheduler,
+    /// 对象表锁 → 调度器锁 → 控制台锁。
+    ObjectTableThenSchedulerThenConsole,
+    /// 对象表锁 → 设备中断登记表 → 调度器锁。
+    ObjectTableThenDeviceIrqThenScheduler,
+    /// 对象表锁 → 设备中断登记表 → 调度器锁 → 控制台锁。
+    ObjectTableThenDeviceIrqThenSchedulerThenConsole,
+}
+
+/// 销毁钩子的锁要求。
+/// Lock requirement of a destroy hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DestroyLocks {
+    /// 没有销毁钩子。
+    None,
+    /// 对象已离开对象表，且对象表锁已经释放；钩子可以重新进入对象表。
+    AfterObjectTable,
+}
+
 /// 销毁声明是否与内核侧「存在模块销毁钩子」一致。
 /// `Destroy::None` 必须没有钩子；`Destroy::OutsideLock` 必须有钩子。
 /// English: true only when hook presence agrees with the declared destroy action.
 pub const fn destroy_hook_matches(declared: Destroy, hook_present: bool) -> bool {
     matches!(declared, Destroy::OutsideLock) == hook_present
+}
+
+/// closing 动作与锁路径声明是否一致：没有动作 ⇔ `ClosingLocks::None`。
+/// Whether closing action presence agrees with the declared lock path.
+pub const fn closing_locks_match(declared: Closing, locks: ClosingLocks) -> bool {
+    matches!(declared, Closing::InLock) == !matches!(locks, ClosingLocks::None)
+}
+
+/// 销毁动作与锁路径声明是否一致：`OutsideLock` ⇔ `AfterObjectTable`。
+/// Whether destroy action presence agrees with the declared lock path.
+pub const fn destroy_locks_match(declared: Destroy, locks: DestroyLocks) -> bool {
+    matches!(declared, Destroy::OutsideLock) == matches!(locks, DestroyLocks::AfterObjectTable)
 }
 
 /// 对象是否携带其他对象的句柄（外部所有权）。
@@ -143,8 +188,12 @@ pub struct Contract {
     pub transferable: bool,
     /// closing 动作。
     pub closing: Closing,
+    /// closing 钩子可取得的有序锁路径。
+    pub closing_locks: ClosingLocks,
     /// 销毁动作。
     pub destroy: Destroy,
+    /// 销毁钩子的锁要求。
+    pub destroy_locks: DestroyLocks,
     /// 强边指向的种类。
     pub strong: &'static [Kind],
     /// 是否有同种类的树形强边（进程 → 子进程）。
@@ -167,7 +216,9 @@ pub const REGISTRY: [Contract; Kind::COUNT] = [
         rights: Rights::WAIT.union(Rights::SUBSCRIBE),
         transferable: false,
         closing: Closing::InLock, // 用户创建的子进程仍在运行则终止
+        closing_locks: ClosingLocks::ObjectTableThenSchedulerThenConsole,
         destroy: Destroy::OutsideLock, // 地址空间、页帧、线程表 / 子进程表 / 退出状态引用
+        destroy_locks: DestroyLocks::AfterObjectTable,
         strong: &[Kind::Task, Kind::ExitState],
         tree_self: true,
         carries: Carry::AnyClosedOnExit,
@@ -179,7 +230,9 @@ pub const REGISTRY: [Contract; Kind::COUNT] = [
         rights: Rights::WRITE.union(Rights::WAIT).union(Rights::CONTROL).union(Rights::DUPLICATE),
         transferable: false,
         closing: Closing::InLock, // 拒绝新提交、取消可取消请求、丢弃未消费完成记录
+        closing_locks: ClosingLocks::ObjectTableThenSchedulerThenConsole,
         destroy: Destroy::OutsideLock, // 归还所属进程的 Ring 配额
+        destroy_locks: DestroyLocks::AfterObjectTable,
         strong: &[Kind::Interrupt, Kind::Subscription, Kind::Endpoint, Kind::ExitState], // 在飞请求的等待目标
         tree_self: false,
         carries: Carry::Nothing,
@@ -191,7 +244,9 @@ pub const REGISTRY: [Contract; Kind::COUNT] = [
         rights: TASK_RIGHTS,
         transferable: true,
         closing: Closing::None,
+        closing_locks: ClosingLocks::None,
         destroy: Destroy::OutsideLock, // 释放对退出状态的内部引用
+        destroy_locks: DestroyLocks::AfterObjectTable,
         strong: &[Kind::ExitState],
         tree_self: false,
         carries: Carry::Nothing,
@@ -203,7 +258,9 @@ pub const REGISTRY: [Contract; Kind::COUNT] = [
         rights: Rights::WAIT.union(Rights::CONTROL).union(Rights::SUBSCRIBE),
         transferable: false,
         closing: Closing::InLock, // 解绑硬件、以「已关闭」终态完成等待、结束事件发布者
+        closing_locks: ClosingLocks::ObjectTableThenDeviceIrqThenSchedulerThenConsole,
         destroy: Destroy::None,
+        destroy_locks: DestroyLocks::None,
         strong: &[Kind::EventSource],
         tree_self: false,
         carries: Carry::Nothing,
@@ -215,7 +272,9 @@ pub const REGISTRY: [Contract; Kind::COUNT] = [
         rights: Rights::READ.union(Rights::WAIT),
         transferable: false,
         closing: Closing::InLock, // 摘除订阅、释放对事件源的内部引用
+        closing_locks: ClosingLocks::ObjectTableThenSchedulerThenConsole,
         destroy: Destroy::None,
+        destroy_locks: DestroyLocks::None,
         strong: &[Kind::EventSource],
         tree_self: false,
         carries: Carry::Nothing,
@@ -227,7 +286,9 @@ pub const REGISTRY: [Contract; Kind::COUNT] = [
         rights: Rights::READ.union(Rights::WRITE).union(Rights::WAIT).union(Rights::CONTROL).union(Rights::DUPLICATE),
         transferable: false,
         closing: Closing::InLock, // 销毁队列消息（释放其中句柄）、取消接收等待、通知对端
+        closing_locks: ClosingLocks::ObjectTableThenSchedulerThenConsole,
         destroy: Destroy::OutsideLock, // 归还创建者的端点配额
+        destroy_locks: DestroyLocks::AfterObjectTable,
         strong: &[],
         tree_self: false,
         carries: Carry::TransferableOnly,
@@ -239,7 +300,9 @@ pub const REGISTRY: [Contract; Kind::COUNT] = [
         rights: Rights::NONE,
         transferable: false,
         closing: Closing::None,
+        closing_locks: ClosingLocks::None,
         destroy: Destroy::OutsideLock, // 结束退出事件的发布者
+        destroy_locks: DestroyLocks::AfterObjectTable,
         strong: &[Kind::EventSource],
         tree_self: false,
         carries: Carry::Nothing,
@@ -251,7 +314,9 @@ pub const REGISTRY: [Contract; Kind::COUNT] = [
         rights: Rights::READ.union(Rights::SUBSCRIBE).union(Rights::DUPLICATE),
         transferable: false,
         closing: Closing::InLock, // 非发布者持有的源关闭并通知订阅者
+        closing_locks: ClosingLocks::ObjectTableThenSchedulerThenConsole,
         destroy: Destroy::None,
+        destroy_locks: DestroyLocks::None,
         strong: &[],
         tree_self: false,
         carries: Carry::Nothing,
@@ -263,7 +328,9 @@ pub const REGISTRY: [Contract; Kind::COUNT] = [
         rights: Rights::WAIT.union(Rights::CONTROL).union(Rights::DUPLICATE).union(Rights::TRANSFER),
         transferable: true,
         closing: Closing::InLock, // 关闭并唤醒等待者
+        closing_locks: ClosingLocks::ObjectTableThenScheduler,
         destroy: Destroy::None,
+        destroy_locks: DestroyLocks::None,
         strong: &[],
         tree_self: false,
         carries: Carry::Nothing,
@@ -275,7 +342,9 @@ pub const REGISTRY: [Contract; Kind::COUNT] = [
         rights: Rights::READ.union(Rights::WRITE).union(Rights::MAP).union(Rights::DUPLICATE).union(Rights::TRANSFER),
         transferable: true,
         closing: Closing::None,
+        closing_locks: ClosingLocks::None,
         destroy: Destroy::None, // 页引用由映射与固定各自持有，丢弃对象值即归还
+        destroy_locks: DestroyLocks::None,
         strong: &[],
         tree_self: false,
         carries: Carry::Nothing,
@@ -287,7 +356,9 @@ pub const REGISTRY: [Contract; Kind::COUNT] = [
         rights: Rights::WAIT.union(Rights::TRANSFER),
         transferable: true,
         closing: Closing::None,
+        closing_locks: ClosingLocks::None,
         destroy: Destroy::None,
+        destroy_locks: DestroyLocks::None,
         strong: &[],
         tree_self: false,
         carries: Carry::Nothing,
@@ -299,7 +370,9 @@ pub const REGISTRY: [Contract; Kind::COUNT] = [
         rights: Rights::READ.union(Rights::MAP).union(Rights::CONTROL).union(Rights::DUPLICATE).union(Rights::TRANSFER),
         transferable: true,
         closing: Closing::None,
+        closing_locks: ClosingLocks::None,
         destroy: Destroy::None, // 设备表项常驻，句柄关闭不销毁它
+        destroy_locks: DestroyLocks::None,
         strong: &[],
         tree_self: false,
         carries: Carry::Nothing,
@@ -400,7 +473,8 @@ const fn closure_carries(reg: &[Contract], k: usize) -> bool {
 /// 3. 可经句柄访问 ⇒ 句柄类型互异、权限上限非空；可转移 ⇔ 上限含 `TRANSFER` ⇔ 句柄类型属于 v1 可转移类型；
 /// 4. 每条强边指向声明顺序更靠后的种类（类型层面无环）；只有携带任意句柄的种类可以有树形自边；
 /// 5. 有强边或携带句柄 ⇒ 有 closing 或锁外销毁动作来释放它们；
-/// 6. 可转移 ⇒ 叶子：不携带句柄，且强引用闭包中没有携带句柄的种类。
+/// 6. 可转移 ⇒ 叶子：不携带句柄，且强引用闭包中没有携带句柄的种类；
+/// 7. closing / destroy 的动作存在性与锁路径声明一致。
 ///
 /// Registry well-formedness; the kernel asserts it at compile time.
 pub const fn registry_well_formed(reg: &[Contract]) -> bool {
@@ -448,6 +522,11 @@ pub const fn registry_well_formed(reg: &[Contract]) -> bool {
             e += 1;
         }
         if c.tree_self && !matches!(c.carries, Carry::AnyClosedOnExit) {
+            return false;
+        }
+        if !closing_locks_match(c.closing, c.closing_locks)
+            || !destroy_locks_match(c.destroy, c.destroy_locks)
+        {
             return false;
         }
         let holds = !c.strong.is_empty() || c.tree_self || !matches!(c.carries, Carry::Nothing);
@@ -509,6 +588,18 @@ mod tests {
         assert!(!destroy_hook_matches(Destroy::None, true));
         assert!(destroy_hook_matches(Destroy::OutsideLock, true));
         assert!(!destroy_hook_matches(Destroy::OutsideLock, false));
+        assert!(closing_locks_match(Closing::None, ClosingLocks::None));
+        assert!(!closing_locks_match(Closing::InLock, ClosingLocks::None));
+        assert!(closing_locks_match(
+            Closing::InLock,
+            ClosingLocks::ObjectTableThenScheduler
+        ));
+        assert!(destroy_locks_match(Destroy::None, DestroyLocks::None));
+        assert!(destroy_locks_match(
+            Destroy::OutsideLock,
+            DestroyLocks::AfterObjectTable
+        ));
+        assert!(!destroy_locks_match(Destroy::OutsideLock, DestroyLocks::None));
     }
 
     #[test]
@@ -525,6 +616,12 @@ mod tests {
         assert!(!registry_well_formed(&r));
         let mut r = REGISTRY;
         r[Kind::Interrupt.index()].closing = Closing::None;
+        assert!(!registry_well_formed(&r));
+        let mut r = REGISTRY;
+        r[Kind::Ring.index()].closing_locks = ClosingLocks::None;
+        assert!(!registry_well_formed(&r));
+        let mut r = REGISTRY;
+        r[Kind::Endpoint.index()].destroy_locks = DestroyLocks::None;
         assert!(!registry_well_formed(&r));
         let mut r = REGISTRY;
         r.swap(0, 1);

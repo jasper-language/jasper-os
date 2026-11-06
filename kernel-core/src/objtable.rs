@@ -93,6 +93,10 @@ struct Entry<T> {
     owners: u32,
     internal: u32,
     state: Lifecycle,
+    /// The last-owner release has started a type-specific closing hook.  The
+    /// entry stays addressable until that hook returns, but it cannot die or
+    /// accept another owner while the hook may still mutate related objects.
+    closing_in_progress: bool,
 }
 
 /// 对象表的一个槽位（调用者只用 [`Slot::VACANT`] 准备存储）。
@@ -190,7 +194,13 @@ impl<T: 'static> ObjectTable<T> {
             .ok_or(ObjError::Full)?;
         // 新对象一律从 Live 开始：closing 只在外部所有权「从有降到零」的那一刻触发（release_owner），
         // 刚创建、尚未发放任何句柄的对象（例如新线程对象）必须仍能获得第一个所有者。
-        slot.entry = Some(Entry { value, owners, internal, state: Lifecycle::Live });
+        slot.entry = Some(Entry {
+            value,
+            owners,
+            internal,
+            state: Lifecycle::Live,
+            closing_in_progress: false,
+        });
         self.live += 1;
         Ok(ObjId { index: index as u32, generation: slot.generation })
     }
@@ -261,16 +271,39 @@ impl<T: 'static> ObjectTable<T> {
 
     /// 释放一个外部所有权。
     pub fn release_owner(&mut self, id: ObjId) -> Result<Released, ObjError> {
+        self.release_owner_with_closing(id, |_, _| {})
+    }
+
+    /// 释放一个外部所有权；若它正是最后一份，则在 `closing` 返回前保持对象可寻址且不可死亡。
+    ///
+    /// `closing` 在对象表锁内执行，允许顺序释放其他对象。本对象的外部所有权已经线性化为 0，
+    /// 因此钩子内再次关闭本对象会得到 [`ObjError::Underflow`]，不会重入钩子；内部引用可以变化，
+    /// 但只有钩子返回后才检查两者是否同时归零并入清理队列。
+    /// Releases one owner; on the last owner, keeps the object addressable until the closing hook returns.
+    pub fn release_owner_with_closing(
+        &mut self,
+        id: ObjId,
+        closing: impl FnOnce(&mut Self, ObjId),
+    ) -> Result<Released, ObjError> {
         let e = self.entry_mut(id)?;
         if e.owners == 0 {
             return Err(ObjError::Underflow);
         }
-        e.owners -= 1;
-        let became_unowned = e.owners == 0;
-        if became_unowned {
-            e.state = Lifecycle::Closing;
+        if e.owners > 1 {
+            e.owners -= 1;
+            return Ok(Released { became_unowned: false, dead: false });
         }
-        Ok(Released { became_unowned, dead: self.maybe_die(id) })
+        // 先发布 owners=0 / Closing，再运行类型特有动作。closing_in_progress
+        // 暂时禁止 maybe_die，使钩子仍能访问本对象并在需要时释放本对象的内部引用。
+        e.owners -= 1;
+        e.state = Lifecycle::Closing;
+        e.closing_in_progress = true;
+        closing(self, id);
+        if let Some(e) = self.slots.get_mut(id.index as usize).and_then(|s| s.entry.as_mut()) {
+            e.closing_in_progress = false;
+        }
+        let dead = self.maybe_die(id);
+        Ok(Released { became_unowned: true, dead })
     }
 
     /// 释放一个内部引用。
@@ -291,7 +324,12 @@ impl<T: 'static> ObjectTable<T> {
         let Some(e) = slot.entry.as_mut() else {
             return false;
         };
-        if e.owners == 0 && e.internal == 0 && e.state != Lifecycle::Dead {
+        if e.owners == 0
+            && e.internal == 0
+            && e.state != Lifecycle::Dead
+            && !e.closing_in_progress
+        {
+            e.closing_in_progress = false;
             e.state = Lifecycle::Dead;
             let tail = (self.head + self.len) % self.pending.len();
             self.pending[tail] = id.index;
@@ -391,6 +429,41 @@ mod tests {
         let (gone, v) = t.take_dead().unwrap();
         assert_eq!((gone, v), (id, Obj::Leaf(1)));
         assert_eq!(t.live(), 0);
+    }
+
+    #[test]
+    fn closing_hook_keeps_last_owner_entry_alive_and_is_not_reentered() {
+        let mut t: ObjectTable<Obj> = ObjectTable::for_test(4);
+        let id = t.insert(Obj::Leaf(1), 1, 1).unwrap();
+        let mut hooks = 0;
+        let released = t
+            .release_owner_with_closing(id, |table, current| {
+                hooks += 1;
+                assert_eq!(table.counts(current), Ok((0, 1, Lifecycle::Closing)));
+                assert_eq!(table.release_owner(current), Err(ObjError::Underflow));
+                let r = table.release_internal(current).unwrap();
+                assert!(!r.dead, "仅钩子返回后才允许最后引用触发死亡");
+            })
+            .unwrap();
+        assert_eq!(hooks, 1);
+        assert_eq!(released, Released { became_unowned: true, dead: true });
+        assert_eq!(t.pending(), 1);
+        assert_eq!(t.take_dead().map(|(gone, value)| (gone, value)), Some((id, Obj::Leaf(1))));
+    }
+
+    #[test]
+    fn closing_hook_can_acquire_internal_only_until_owner_transition() {
+        let mut t: ObjectTable<Obj> = ObjectTable::for_test(4);
+        let id = t.insert(Obj::Leaf(2), 1, 0).unwrap();
+        let released = t
+            .release_owner_with_closing(id, |table, current| {
+                assert_eq!(table.acquire_owner(current), Err(ObjError::Invalid));
+                table.acquire_internal(current).unwrap();
+                table.release_internal(current).unwrap();
+            })
+            .unwrap();
+        assert!(released.became_unowned && released.dead);
+        assert_eq!(t.pending(), 1);
     }
 
     #[test]

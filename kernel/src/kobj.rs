@@ -5,6 +5,8 @@
 //! * 句柄 = **外部所有权**；在飞请求、线程执行上下文、进程线程表 = **内部引用**（第 1、2 节）
 //! * 两者都归零 ⇒ 对象只进入清理队列；销毁动作由 [`run_cleanup`] 在**不持对象表锁、非中断上下文**中执行（第 6.2 节）
 //! * 销毁动作可以释放其他对象（例如 Process 销毁时释放线程表对 Task 的引用），被释放者入队，下一轮处理——迭代而非递归
+//! * 最后一份外部所有权先线性化为 0，再运行类型特有 closing；closing 返回前对象仍可寻址但不可死亡或重获所有者
+//! * closing 的嵌套锁路径与锁外销毁阶段由对象类型登记表声明，生产钩子表逐项核对
 //!
 //! # 已实现的对象种类
 //! 包括 Process、Task、Ring、Channel、设备资源与页存储叶子Memory（SHM-1正在接入映射与ABI）；
@@ -20,7 +22,10 @@
 
 use alloc::boxed::Box;
 
-use kernel_core::kobj_type::{destroy_hook_matches, Closing, Destroy, Kind, REGISTRY};
+use kernel_core::kobj_type::{
+    closing_locks_match, destroy_hook_matches, destroy_locks_match, ClosingLocks, Destroy, DestroyLocks,
+    Kind, REGISTRY,
+};
 use kernel_core::objtable::{InstallError, ObjError, ObjId, ObjectTable, Released, Slot};
 use kernel_core::pci::Bdf;
 
@@ -108,26 +113,60 @@ impl KObject {
     }
 }
 
-/// closing 动作的签名：在对象表锁内、释放最后一份外部所有权之前调用，只做有界操作。
+/// closing 动作的签名：最后一份外部所有权已线性化为 0，但对象仍留在表中；只做有界操作。
 type CloseHook = fn(&mut Table, ObjId);
+
+/// closing 动作及其锁路径声明；锁路径必须与 [`REGISTRY`] 对应行逐项一致。
+/// Closing action together with the exact lock path declared by the registry.
+#[derive(Clone, Copy)]
+struct CloseHookEntry {
+    run: CloseHook,
+    locks: ClosingLocks,
+}
+
+const fn close_entry(run: CloseHook, locks: ClosingLocks) -> CloseHookEntry {
+    CloseHookEntry { run, locks }
+}
 
 /// 种类 → closing 动作（穷举、无兜底分支；是否有动作必须与登记表的 `closing` 一致，见下方编译期断言）。
 /// Kind → closing hook; must agree with the registry's `closing` field (checked at compile time).
-const fn close_hook(kind: Kind) -> Option<CloseHook> {
+const fn close_hook(kind: Kind) -> Option<CloseHookEntry> {
     match kind {
-        Kind::Process => Some(crate::proc::spawn::close_in),
-        Kind::Ring => Some(crate::ring::close_in),
-        Kind::Interrupt => Some(crate::interrupt::close_in),
-        Kind::Subscription | Kind::EventSource => Some(crate::subscription::close_in),
-        Kind::Endpoint => Some(crate::ipc::close_in),
-        Kind::Mutex => Some(crate::user_mutex::close_in),
+        Kind::Process => Some(close_entry(
+            crate::proc::spawn::close_in,
+            ClosingLocks::ObjectTableThenSchedulerThenConsole,
+        )),
+        Kind::Ring => Some(close_entry(
+            crate::ring::close_in,
+            ClosingLocks::ObjectTableThenSchedulerThenConsole,
+        )),
+        Kind::Interrupt => Some(close_entry(
+            crate::interrupt::close_in,
+            ClosingLocks::ObjectTableThenDeviceIrqThenSchedulerThenConsole,
+        )),
+        Kind::Subscription => Some(close_entry(
+            crate::subscription::close_in,
+            ClosingLocks::ObjectTableThenSchedulerThenConsole,
+        )),
+        Kind::EventSource => Some(close_entry(
+            crate::subscription::close_in,
+            ClosingLocks::ObjectTableThenSchedulerThenConsole,
+        )),
+        Kind::Endpoint => Some(close_entry(
+            crate::ipc::close_in,
+            ClosingLocks::ObjectTableThenSchedulerThenConsole,
+        )),
+        Kind::Mutex => Some(close_entry(
+            crate::user_mutex::close_in,
+            ClosingLocks::ObjectTableThenScheduler,
+        )),
         Kind::Task | Kind::ExitState | Kind::Memory | Kind::Event | Kind::Device => None,
     }
 }
 
 /// 按种类下标排列的 closing 动作表（热路径只查表）。
-const CLOSE_HOOKS: [Option<CloseHook>; Kind::COUNT] = {
-    let mut t: [Option<CloseHook>; Kind::COUNT] = [None; Kind::COUNT];
+const CLOSE_HOOKS: [Option<CloseHookEntry>; Kind::COUNT] = {
+    let mut t: [Option<CloseHookEntry>; Kind::COUNT] = [None; Kind::COUNT];
     let mut i = 0;
     while i < Kind::COUNT {
         t[i] = close_hook(Kind::ALL[i]);
@@ -140,8 +179,15 @@ const CLOSE_HOOKS: [Option<CloseHook>; Kind::COUNT] = {
 const _: () = {
     let mut i = 0;
     while i < Kind::COUNT {
-        let declared = matches!(REGISTRY[i].closing, Closing::InLock);
-        assert!(CLOSE_HOOKS[i].is_some() == declared, "close_hook 与对象类型登记表的 closing 声明不一致");
+        let actual = match CLOSE_HOOKS[i] {
+            Some(hook) => hook.locks as u8,
+            None => ClosingLocks::None as u8,
+        };
+        assert!(
+            closing_locks_match(REGISTRY[i].closing, REGISTRY[i].closing_locks)
+                && actual == REGISTRY[i].closing_locks as u8,
+            "close_hook 与对象类型登记表的 closing 动作或锁路径不一致"
+        );
         i += 1;
     }
 };
@@ -220,15 +266,24 @@ pub fn install(capacity: usize) -> Result<usize, Option<InstallError>> {
     with(|t| t.install(slots, pending)).map_err(Some)
 }
 
-/// 可执行检查：遍历生产销毁表，返回 `(锁外销毁种类数, 无动作种类数)`。
+/// 可执行检查：遍历生产 closing / 销毁表，返回 `(锁外销毁种类数, 无销毁动作种类数)`。
 ///
-/// 不一致时返回原因；`Destroy::None` 带钩子、`Destroy::OutsideLock` 缺钩子都会失败。
-/// Executable check of the production destroy table; both directions of the registry relation are enforced.
-pub fn verify_destroy_dispatch() -> Result<(usize, usize), &'static str> {
+/// 不一致时返回原因；动作存在性与登记表的锁路径都会逐项核对。
+/// Executable check of production release dispatch, including exact lock-path declarations.
+pub fn verify_release_dispatch() -> Result<(usize, usize), &'static str> {
     let mut outside = 0;
     let mut none = 0;
     let mut i = 0;
     while i < Kind::COUNT {
+        let close_actual = match CLOSE_HOOKS[i] {
+            Some(hook) => hook.locks,
+            None => ClosingLocks::None,
+        };
+        if !closing_locks_match(REGISTRY[i].closing, REGISTRY[i].closing_locks)
+            || close_actual as u8 != REGISTRY[i].closing_locks as u8
+        {
+            return Err("closing_lock_path_mismatch");
+        }
         let declared = REGISTRY[i].destroy;
         let hook_present = DESTROY_HOOKS[i].is_some();
         if !destroy_hook_matches(declared, hook_present) {
@@ -236,6 +291,11 @@ pub fn verify_destroy_dispatch() -> Result<(usize, usize), &'static str> {
                 Destroy::None => "destroy_none_has_hook",
                 Destroy::OutsideLock => "destroy_outside_lock_has_no_hook",
             });
+        }
+        if !destroy_locks_match(REGISTRY[i].destroy, REGISTRY[i].destroy_locks)
+            || matches!(REGISTRY[i].destroy_locks, DestroyLocks::AfterObjectTable) != hook_present
+        {
+            return Err("destroy_lock_path_mismatch");
         }
         match declared {
             Destroy::None => none += 1,
@@ -266,7 +326,7 @@ pub fn insert(obj: KObject, owners: u32, internal: u32) -> Result<ObjId, ObjErro
     with(|t| t.insert(obj, owners, internal))
 }
 
-/// 在对象表锁内释放一个外部所有权，并执行该类型的 **closing 动作**（有效外部所有权归零、对象尚未死亡时）：
+/// 在对象表锁内释放一个外部所有权；最后一份所有权归零时执行该类型的 **closing 动作**：
 /// 哪些种类有 closing 动作由对象类型登记表声明、[`close_hook`] 登记（编译期断言两者一致）：Ring（拒绝新提交、取消可取消的请求、丢弃未消费的完成记录）、
 /// 设备中断（解绑硬件、以「已关闭」终态完成未完成的等待）、
 /// Channel 端点（销毁队列中的消息、取消在其上等待的接收、通知对端）、
@@ -274,15 +334,15 @@ pub fn insert(obj: KObject, owners: u32, internal: u32) -> Result<ObjId, ObjErro
 /// 所有释放外部所有权的路径（关闭句柄、进程退出关闭句柄表、回滚）都必须经由这里，closing 才不会被漏掉。
 /// Releases one external ownership and runs the type's closing action when it becomes unowned.
 ///
-/// closing 动作在**释放最后一份外部所有权之前**执行：没有内部引用的对象在释放的同一刻就会死亡并离开对象表，
-/// 之后再执行就找不到它了（队列里的消息因此泄漏、对端也收不到关闭通知）。
+/// 所有者计数先降到 0，随后 closing 在同一个对象表事务内运行；对象在钩子返回前保持可寻址且禁止死亡，
+/// 因而钩子可以释放本对象的内部引用、顺序关闭其他对象或取消等待，而不会重入 closing 或提前离开对象表。
+/// 钩子返回后才检查两种计数是否都归零；死亡仍只进入清理队列，锁外销毁仍由 [`run_cleanup`] 分派。
 pub fn release_owner_in(t: &mut Table, id: ObjId) -> Result<Released, ObjError> {
-    if matches!(t.counts(id), Ok((1, _, _))) {
+    t.release_owner_with_closing(id, |t, id| {
         if let Some(hook) = t.get(id).ok().and_then(|o| CLOSE_HOOKS[o.kind().index()]) {
-            hook(t, id);
+            (hook.run)(t, id);
         }
-    }
-    t.release_owner(id)
+    })
 }
 
 /// 释放一个外部所有权（见 [`release_owner_in`]）。

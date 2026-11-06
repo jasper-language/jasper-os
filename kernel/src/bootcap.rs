@@ -98,18 +98,18 @@ pub fn apply() -> BootCapacity {
         Err(None) => reject_install("objects", cap.objects, CapReason::ExceedsMemory.as_str()),
         Err(Some(e)) => reject_install("objects", cap.objects, e.as_str()),
     }
-    match crate::kobj::verify_destroy_dispatch() {
+    match crate::kobj::verify_release_dispatch() {
         Ok((outside, none)) => kprintln!(
-            "[JSR-LIFE] destroy_dispatch outside_lock={} none={} none_empty=true destroyed_when_none=0 hooks_match_registry=true",
+            "[JSR-LIFE] release_dispatch closing_locks=true outside_lock={} none={} none_empty=true destroyed_when_none=0 hooks_match_registry=true",
             outside,
             none
         ),
         Err(reason) => {
             kprintln!(
-                "[JSR-LIFE] destroy_dispatch consistency=failed reason={} none_empty=false destroyed_when_none=unknown hooks_match_registry=false",
+                "[JSR-LIFE] release_dispatch consistency=failed reason={} closing_locks=false none_empty=false destroyed_when_none=unknown hooks_match_registry=false",
                 reason
             );
-            kprintln!("[JSR-EXIT] failure destroy_dispatch");
+            kprintln!("[JSR-EXIT] failure release_dispatch");
             arch::exit_emulator(ExitStatus::Failure);
         }
     }
