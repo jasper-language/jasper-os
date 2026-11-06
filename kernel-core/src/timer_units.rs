@@ -99,6 +99,14 @@ pub fn counter_ns(elapsed:u64, hz:u64)->Option<u64> {
  if hz==0 {return None;}
  u64::try_from(u128::from(elapsed)*1_000_000_000/u128::from(hz)).ok()
 }
+/// 把旧绝对 tick 期限换算到共享单调纳秒时钟；已过期映射到 `now_ns`，零周期和溢出拒绝。
+/// Convert an absolute legacy tick deadline to the shared monotonic nanosecond
+/// clock at `now_ns`. Expired tick deadlines map to `now_ns`; zero period and
+/// arithmetic overflow are rejected instead of wrapping.
+pub fn tick_deadline_ns(now_tick:u64,now_ns:u64,deadline_tick:u64,tick_ns:u64)->Option<u64> {
+ if tick_ns==0 {return None;}
+ now_ns.checked_add(deadline_tick.saturating_sub(now_tick).checked_mul(tick_ns)?)
+}
 #[cfg(test)]
 mod counter_tests {
  use super::*;
@@ -111,6 +119,13 @@ mod counter_tests {
   assert_eq!(counter_ns(u64::MAX,1_000_000_000),Some(u64::MAX));
   assert_eq!(counter_ns(u64::MAX,999_999_999),None);
   assert_eq!(counter_ns(u64::MAX,u64::MAX),Some(1_000_000_000));
+ }
+ #[test] fn tick_deadline_bridge_rejects_overflow_and_keeps_expired_immediate() {
+  assert_eq!(tick_deadline_ns(10,100,12,10),Some(120));
+  assert_eq!(tick_deadline_ns(10,100,10,10),Some(100));
+  assert_eq!(tick_deadline_ns(10,100,9,10),Some(100));
+  assert_eq!(tick_deadline_ns(0,0,1,0),None);
+  assert_eq!(tick_deadline_ns(0,u64::MAX,1,1),None);
  }
 }
 #[cfg(kani)]

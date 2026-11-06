@@ -133,6 +133,29 @@ proptest! {
             }
         }
     }
+
+    #[test]
+    fn tick_deadline_bridge_matches_checked_reference(
+        now_tick in any::<u64>(),
+        now_ns in any::<u64>(),
+        deadline_tick in any::<u64>(),
+        tick_ns in any::<u64>(),
+    ) {
+        let actual = kernel_core::timer_units::tick_deadline_ns(
+            now_tick, now_ns, deadline_tick, tick_ns,
+        );
+        let expected = (tick_ns != 0)
+            .then(|| deadline_tick.saturating_sub(now_tick).checked_mul(tick_ns))
+            .flatten()
+            .and_then(|delta| now_ns.checked_add(delta));
+        prop_assert_eq!(actual, expected);
+        if let Some(at) = actual {
+            prop_assert!(at >= now_ns);
+            if deadline_tick <= now_tick {
+                prop_assert_eq!(at, now_ns);
+            }
+        }
+    }
 }
 
 #[test]

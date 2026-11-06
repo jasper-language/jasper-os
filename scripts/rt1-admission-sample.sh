@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 label=${1:?unique evidence label};[[ "$label" =~ ^[a-zA-Z0-9._-]+$ ]]
-out="evidence/evt1/$label";mkdir "$out"
+out="evidence/evt1/$label";mkdir -p "$out"
 inputs() { find kernel kernel-core abi user xtask .cargo scripts -type d -name target -prune -o -type f -print0 | sort -z | xargs -0 sha256sum;sha256sum Cargo.toml Cargo.lock rust-toolchain.toml; }
 inputs > "$out/source-before.sha256"
 cargo build --locked --release -p xtask > "$out/build.log" 2>&1
