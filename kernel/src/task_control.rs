@@ -12,7 +12,7 @@ fn read(ptr:u64)->Result<[u8;32],i64> {
  let mut b=[0;32];crate::mm::user::copy_from_user(&mut b,ptr,32).map_err(crate::ring::user_err)?;Ok(b)
 }
 pub fn rt_set(ptr:u64)->i64 {
- if !crate::profile::has_capability("sched.realtime") {return err(SYSTEM_ERROR_RIGHTS_DENIED);}
+ let Some(_service)=crate::assembly::acquire("sched.realtime") else{return err(SYSTEM_ERROR_RIGHTS_DENIED);};
  let Some(pid)=proc::current_process() else {return err(SYSTEM_ERROR_RIGHTS_DENIED);};
  let b=match read(ptr) {Ok(b)=>b,Err(e)=>return e};
  let Some(a)=kernel_core::rt_abi::SetArgs::decode(&b) else {return err(SYSTEM_ERROR_INVALID_ARGUMENT);};
@@ -34,7 +34,7 @@ pub fn affinity_get(raw:u64)->i64 {
 }
 
 pub fn rt_set_ns(ptr:u64)->i64 {
- if !crate::profile::has_capability("sched.realtime"){return err(SYSTEM_ERROR_RIGHTS_DENIED);}
+ let Some(_service)=crate::assembly::acquire("sched.realtime") else{return err(SYSTEM_ERROR_RIGHTS_DENIED);};
  if !crate::hrtime::enabled(){return err(SYSTEM_ERROR_UNSUPPORTED);}
  let Some(pid)=proc::current_process() else{return err(SYSTEM_ERROR_RIGHTS_DENIED);};
  let mut b=[0;40];if let Err(e)=crate::mm::user::copy_from_user(&mut b,ptr,40){return crate::ring::user_err(e);}

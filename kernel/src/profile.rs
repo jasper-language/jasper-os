@@ -15,7 +15,8 @@ use core::fmt::Write;
 
 use kernel_core::profile::{self, ResolvedProfile, SystemProfile};
 
-use crate::{kprintln, config::ACTIVE as CONFIG};
+use crate::syscall::{table::{AbiKind, ENTRIES}, SyscallSet};
+use crate::{config::ACTIVE as CONFIG, kprintln};
 
 /// 本次构建生效的 Profile。
 ///
@@ -37,7 +38,7 @@ pub const ACTIVE: SystemProfile = SystemProfile {
 };
 
 /// 渲染缓冲区的最小长度（再小一定放不下）。
-pub const MIN_TEXT: usize = 512;
+pub const MIN_TEXT: usize = 1536;
 
 /// 内建 Profile 的数量。
 pub fn count() -> usize {
@@ -62,7 +63,7 @@ pub fn resolved() -> Option<ResolvedProfile> {
 /// 只想知道声明面时用 [`resolved`]。
 /// English: true only when the capability is declared *and* published by the boot-time assembly.
 pub fn has_capability(capability: &str) -> bool {
-    crate::assembly::available(capability)
+    crate::assembly::acquire(capability).is_some()
 }
 
 /// 启动期校验：逐个解析内建表，再解析生效 Profile。
@@ -128,6 +129,16 @@ pub fn boot_report() -> u32 {
 /// 返回写入的字节数；下标越界、Profile 自身不合法或缓冲区不足时返回 None。
 /// English: render one built-in profile into `out`; None when it does not fit.
 pub fn render(index: usize, out: &mut [u8]) -> Option<usize> {
+    render_with(index, out, None)
+}
+
+/// 按调用者系统调用授权集合渲染 Profile；授权只影响报告，不改变声明或运行时状态。
+/// Render a profile with caller authorization, which never changes declaration or runtime state.
+pub fn render_for_caller(index: usize, out: &mut [u8], calls: SyscallSet) -> Option<usize> {
+    render_with(index, out, Some(calls))
+}
+
+fn render_with(index: usize, out: &mut [u8], calls: Option<SyscallSet>) -> Option<usize> {
     if out.len() < MIN_TEXT {
         return None;
     }
@@ -164,6 +175,57 @@ pub fn render(index: usize, out: &mut [u8]) -> Option<usize> {
             first = false;
         }
     }
+    let statuses = if index == active_index() { Some(crate::assembly::statuses()) } else { None };
+    let mut feature_count = 0u32;
+    let mut runtime_count = 0u32;
+    let mut healthy_count = 0u32;
+    let mut authorization_count = 0u32;
+    let _ = write!(sink, "\nmodules_detail={}", declared.modules.len());
+    for module in declared.modules.iter() {
+        let compiled = crate::assembly::feature_compiled(module.name);
+        let status = statuses.and_then(|snapshot| snapshot.modules().find(|s| s.name == module.name));
+        let (runtime, health) = match status {
+            Some(s) if s.available => ("available", s.effective_health.as_str()),
+            Some(s) if s.state == kernel_core::assembly::State::Ready => ("withdrawn", s.effective_health.as_str()),
+            Some(s) => (s.state.as_str(), s.effective_health.as_str()),
+            None if index == active_index() => ("missing", "unknown"),
+            None => ("not_selected", "unknown"),
+        };
+        let authorization = match calls {
+            Some(calls) => service_authorization(module, calls).as_str(),
+            None => Authorization::NotEvaluated.as_str(),
+        };
+        if compiled {
+            feature_count += 1;
+        }
+        if runtime == "available" {
+            runtime_count += 1;
+        }
+        if health == "healthy" {
+            healthy_count += 1;
+        }
+        if authorization != "not_applicable" && authorization != "not_evaluated" {
+            authorization_count += 1;
+        }
+        let _ = write!(
+            sink,
+            "\nmodule={} feature={} config=declared runtime={} health={} authorization={}",
+            module.name,
+            if compiled { "compiled" } else { "missing" },
+            runtime,
+            health,
+            authorization
+        );
+    }
+    let _ = write!(
+        sink,
+        "\navailability=feature:{},config:{},runtime:{},health:{},authorization:{}\n",
+        feature_count,
+        declared.modules.len(),
+        runtime_count,
+        healthy_count,
+        authorization_count
+    );
     let _ = write!(sink, "\nguarantees=");
     for (i, g) in declared.guarantees.iter().enumerate() {
         if i > 0 {
@@ -176,6 +238,56 @@ pub fn render(index: usize, out: &mut [u8]) -> Option<usize> {
         None
     } else {
         Some(sink.len)
+    }
+}
+
+/// 调用者对某模块服务前缀的授权分布。
+/// Caller authorization distribution over a module's service prefixes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Authorization {
+    Granted,
+    Partial,
+    Denied,
+    NotApplicable,
+    NotEvaluated,
+}
+
+impl Authorization {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Authorization::Granted => "granted",
+            Authorization::Partial => "partial",
+            Authorization::Denied => "denied",
+            Authorization::NotApplicable => "not_applicable",
+            Authorization::NotEvaluated => "not_evaluated",
+        }
+    }
+}
+
+fn service_authorization(module: &kernel_core::profile::ModuleDecl, calls: SyscallSet) -> Authorization {
+    if module.services.is_empty() {
+        return Authorization::NotApplicable;
+    }
+    let mut seen = 0u32;
+    let mut allowed = 0u32;
+    for entry in ENTRIES.iter().filter(|e| e.kind == AbiKind::Op) {
+        if module.services.iter().any(|service| {
+            entry.name.strip_prefix(service).is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+        }) {
+            seen += 1;
+            if calls.contains(entry.id as u64) {
+                allowed += 1;
+            }
+        }
+    }
+    if seen == 0 {
+        Authorization::NotApplicable
+    } else if allowed == 0 {
+        Authorization::Denied
+    } else if allowed == seen {
+        Authorization::Granted
+    } else {
+        Authorization::Partial
     }
 }
 

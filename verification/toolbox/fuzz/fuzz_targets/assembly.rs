@@ -3,7 +3,7 @@
 //! 发布掩码通过审计且任意偏离被拒、全有全无失败时不发布、重复启动被拒）。
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use kernel_core::assembly::{mask_has, Assembly, AssemblyError, Binding, Policy, State};
+use kernel_core::assembly::{mask_has, Assembly, AssemblyError, Binding, Health, Policy, State};
 use kernel_core::config::KernelConfig;
 use kernel_core::profile::{self, ModuleDecl, SchedClass, SystemProfile};
 
@@ -101,9 +101,52 @@ fn check(p: &'static SystemProfile, data: &[u8], n: usize, all_or_nothing: bool,
     }
     assert_eq!(r.ready as usize, ready.iter().filter(|x| **x).count());
     assert!(a.audit(&declared, mask).is_ok());
+    let health: Vec<Health> = (0..n)
+        .map(|m| match data.get(9 + m).copied().unwrap_or(0) % 3 {
+            0 => Health::Healthy,
+            1 => Health::Degraded,
+            _ => Health::Unhealthy,
+        })
+        .collect();
+    for m in 0..n {
+        if ready[m] {
+            a.set_health(NAMES[m], health[m]).unwrap();
+        }
+    }
+    fn effective(
+        m: usize,
+        n: usize,
+        ready: &[bool],
+        health: &[Health],
+        deps: &[Vec<usize>],
+    ) -> Health {
+        if m >= n || !ready[m] || health[m] == Health::Unhealthy {
+            return Health::Unhealthy;
+        }
+        if deps[m].iter().any(|&d| effective(d, n, ready, health, deps) == Health::Unhealthy) {
+            return Health::Unhealthy;
+        }
+        if health[m] == Health::Degraded
+            || deps[m].iter().any(|&d| effective(d, n, ready, health, deps) == Health::Degraded)
+        {
+            Health::Degraded
+        } else {
+            Health::Healthy
+        }
+    }
+    let mut available_mask = 0u32;
+    for m in 0..n {
+        let expected = effective(m, n, &ready, &health, deps);
+        assert_eq!(a.effective_health(NAMES[m]), Some(expected));
+        if expected.usable() {
+            available_mask |= 1 << declared.capabilities().iter().position(|cap| *cap == CAPS[m]).unwrap();
+        }
+    }
+    assert_eq!(a.published_mask(&declared), available_mask);
+    assert!(a.audit(&declared, available_mask).is_ok());
     let flip = u32::from(data[8]) & ((1u32 << n) - 1);
     if flip != 0 {
-        assert!(a.audit(&declared, mask ^ flip).is_err());
+        assert!(a.audit(&declared, available_mask ^ flip).is_err());
     }
     assert_eq!(a.start(policy), Err(AssemblyError::AlreadyStarted));
 }
