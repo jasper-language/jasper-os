@@ -3,7 +3,7 @@
 //!
 //! 参考模型不复用生产代码的任何位运算：集合用 `BTreeSet<u32>`，准入规则按 ABI 文档逐条重写。
 use kernel_core::spawn_abi::{check, SpawnDesc, SpawnReject, CPU_UNLIMITED, MAX_IMAGE_BYTES, MIN_CPU_LIMIT, SPAWN_DESC_SIZE};
-use kernel_core::syscall_set::{SyscallSet, MAX_IDS};
+use kernel_core::syscall_set::{CallIdError, SyscallSet, MAX_IDS};
 use proptest::prelude::*;
 use std::collections::BTreeSet;
 
@@ -29,6 +29,15 @@ fn valid_ids() -> impl Strategy<Value = Vec<u32>> {
     prop::collection::vec(valid_id(), 0..24)
 }
 
+/// 严格构造输入：包含容量边界、`u32` 宽度之外的越界值和均匀随机值。
+fn strict_ids() -> impl Strategy<Value = Vec<u64>> {
+    let one = prop_oneof![
+        valid_id().prop_map(u64::from),
+        prop::sample::select(vec![255u64, 256, 257, u32::MAX as u64, u32::MAX as u64 + 1, u64::MAX]),
+    ];
+    prop::collection::vec(one, 0..24)
+}
+
 /// 参考构造：任一 ID 越界 ⇒ 整体拒绝（不截断）。
 fn reference(ids: &[u32]) -> Option<BTreeSet<u32>> {
     if ids.iter().any(|&i| i as usize >= MAX_IDS) {
@@ -45,6 +54,23 @@ fn assert_same(set: SyscallSet, model: &BTreeSet<u32>) -> Result<(), TestCaseErr
     prop_assert_eq!(set.count(), model.len());
     prop_assert_eq!(set.ids().collect::<Vec<_>>(), model.iter().copied().collect::<Vec<_>>());
     Ok(())
+}
+
+/// 独立按顺序重写严格构造规则；错误值只描述拒绝原因，不参与位图计算。
+fn reference_strict(ids: &[u64], known: &BTreeSet<u32>) -> Result<BTreeSet<u32>, CallIdError> {
+    let mut set = BTreeSet::new();
+    for &id in ids {
+        if id >= MAX_IDS as u64 {
+            return Err(CallIdError::OutOfRange(id));
+        }
+        if !known.contains(&(id as u32)) {
+            return Err(CallIdError::Unknown(id));
+        }
+        if !set.insert(id as u32) {
+            return Err(CallIdError::Duplicate(id));
+        }
+    }
+    Ok(set)
 }
 
 /// 按 ABI 文档重写的准入判定（规则顺序与拒绝原因一一对应）。
@@ -89,6 +115,18 @@ proptest! {
         let mut buf = [0u8; 32];
         sa.encode(&mut buf);
         prop_assert_eq!(SyscallSet::decode(&buf), sa);
+    }
+
+    #[test]
+    fn strict_construction_matches_reference(ids in strict_ids(), known in valid_ids()) {
+        let model_known: BTreeSet<u32> = known.iter().copied().collect();
+        let got = SyscallSet::try_from_ids(&ids, SyscallSet::try_of(&known).unwrap());
+        let want = reference_strict(&ids, &model_known);
+        match (got, want) {
+            (Ok(set), Ok(model)) => assert_same(set, &model)?,
+            (Err(got), Err(want)) => prop_assert_eq!(got, want),
+            (got, want) => prop_assert!(false, "result mismatch: got={:?} want={:?}", got, want),
+        }
     }
 
     #[test]

@@ -36,7 +36,7 @@ use jasper_rt::module::{
     Grant, HostV1, LoadError, Module, Origin, Publisher, Standard, TrustMode, TrustPolicy, UnloadError, DEVELOPMENT_NAMESPACE,
     DEVELOPMENT_PUBLISHER, STD_HOST,
 };
-use jasper_rt::process::{self, FAULT_CODE};
+use jasper_rt::process::{self, CallSet, CallSetError, FAULT_CODE};
 use jasper_rt::{entry, ids, io, println, task, time, Error, Rights};
 
 entry!(main);
@@ -225,24 +225,40 @@ fn run(s: &mut Steps) -> Result<(), u32> {
 
 /// 用例 1：创建子进程只能授予自己拥有的系统调用。
 fn spawn_boundary(s: &mut Steps) -> Result<(), u32> {
+    let duplicate = CallSet::try_from_ids(&[ids::SYSTEM_PROCESS_EXIT, ids::SYSTEM_PROCESS_EXIT]);
+    s.check(duplicate == Err(CallSetError::Duplicate(ids::SYSTEM_PROCESS_EXIT)))?;
+    let unregistered = (0u64..256)
+        .find(|id| !ids::REGISTERED_CALLS.contains(*id))
+        .ok_or(s.0 + 1)?;
+    s.check(CallSet::try_from_ids(&[unregistered]) == Err(CallSetError::Unknown(unregistered)))?;
+    s.check(CallSet::try_from_ids(&[u64::MAX]) == Err(CallSetError::OutOfRange(u64::MAX)))?;
+    let mut incremental = CallSet::try_from_ids(&[ids::SYSTEM_PROCESS_EXIT]).map_err(|_| s.0 + 1)?;
+    s.check(incremental.try_insert(ids::SYSTEM_PROCESS_EXIT) == Err(CallSetError::Duplicate(ids::SYSTEM_PROCESS_EXIT)))?;
+    s.check(incremental.try_insert(unregistered) == Err(CallSetError::Unknown(unregistered)))?;
+    s.check(incremental.try_insert(u64::MAX) == Err(CallSetError::OutOfRange(u64::MAX)))?;
+    s.check(incremental.len() == 1)?;
+    println!("isohost: calls duplicate_rejected=true unregistered_rejected=true out_of_range_rejected=true insert_atomic=true");
     // 本进程没有 system.task.qos.set
-    let over = [ids::SYSTEM_CONSOLE_WRITE, ids::SYSTEM_PROCESS_EXIT, ids::SYSTEM_TASK_QOS_SET];
-    let denied = process::spawn(process::Spec { image: CONTAINER, calls: &over, arg: 0, cpu_limit_permille: None }).err();
+    let over = CallSet::try_from_ids(&[ids::SYSTEM_CONSOLE_WRITE, ids::SYSTEM_PROCESS_EXIT, ids::SYSTEM_TASK_QOS_SET])
+        .map_err(|_| s.0 + 1)?;
+    let denied = process::spawn(process::Spec { image: CONTAINER, calls: over, arg: 0, cpu_limit_permille: None }).err();
     s.check(denied == Some(Error::RIGHTS_DENIED))?;
     // 非法映像被拒
-    let bad = process::spawn(process::Spec { image: b"not an elf", calls: &[ids::SYSTEM_PROCESS_EXIT], arg: 0, cpu_limit_permille: None }).err();
+    let exit_only = CallSet::try_from_ids(&[ids::SYSTEM_PROCESS_EXIT]).map_err(|_| s.0 + 1)?;
+    let bad = process::spawn(process::Spec { image: b"not an elf", calls: exit_only, arg: 0, cpu_limit_permille: None }).err();
     s.check(bad == Some(Error::INVALID_ARGUMENT))?;
     // 被拒之后正常创建成功：子进程只拿到退出调用，关闭引导通道后它收不到请求，退出
     let calls = [ids::SYSTEM_CONSOLE_WRITE, ids::SYSTEM_PROCESS_EXIT, ids::SYSTEM_TASK_EXIT, ids::SYSTEM_CHANNEL_RECV, ids::SYSTEM_CHANNEL_SEND,
                  ids::SYSTEM_MEMORY_MAP, ids::SYSTEM_MEMORY_UNMAP, ids::SYSTEM_MEMORY_PROTECT, ids::SYSTEM_HANDLE_CLOSE, ids::SYSTEM_TASK_YIELD];
-    let child = process::spawn(process::Spec { image: CONTAINER, calls: &calls, arg: 0, cpu_limit_permille: None }).map_err(|_| s.0 + 1)?;
+    let calls = CallSet::try_from_ids(&calls).map_err(|_| s.0 + 1)?;
+    let child = process::spawn(process::Spec { image: CONTAINER, calls, arg: 0, cpu_limit_permille: None }).map_err(|_| s.0 + 1)?;
     let process::Child { process: ph, channel: ch } = child;
     drop(ch);
     let code = task::wait_process(&ph);
     drop(ph);
     s.check(code == Ok(0))?;
     // 配额：同时持有 MAX_CHILDREN 个子进程时再创建被拒；关闭一个后又能创建
-    let spec = process::Spec { image: CONTAINER, calls: &calls, arg: 0, cpu_limit_permille: None };
+    let spec = process::Spec { image: CONTAINER, calls, arg: 0, cpu_limit_permille: None };
     let mut held = Vec::new();
     for _ in 0..MAX_CHILDREN {
         held.push(process::spawn(spec).map_err(|_| s.0 + 1)?);
