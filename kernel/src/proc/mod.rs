@@ -15,7 +15,8 @@
 //!
 //! # 生命周期
 //! 创建 → 运行 → **exited**（最后一个线程停止：确定退出码、关闭整张句柄表）→ 创建者 [`reap`]（释放其所有权）→
-//! 全部强引用归零后由清理过程 [`crate::kobj::run_cleanup`] 调用 [`destroy`]：销毁地址空间、归还帧、释放线程表引用（级联）。
+//! 全部强引用归零后由清理过程 [`crate::kobj::run_cleanup`] 调用 [`destroy_object`] 或
+//! [`destroy_task_object`]：销毁地址空间、归还帧、释放线程表引用（级联）。
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -1723,7 +1724,7 @@ pub fn state(id: ObjId) -> Option<ProcState> {
 
 /// 创建者回收已退出的进程：读取退出信息并**释放创建者持有的外部所有权**。未退出返回 `None`。
 ///
-/// 进程对象在全部强引用释放后才被清理过程销毁（[`destroy`]）；调用者需要立即回收资源时调用 `kobj::run_cleanup`。
+/// 进程对象在全部强引用释放后才被清理过程销毁（[`destroy_object`]）；调用者需要立即回收资源时调用 `kobj::run_cleanup`。
 pub fn reap(id: ObjId) -> Option<ExitInfo> {
     let info = kobj::with(|t| {
         let info = match t.get(id) {
@@ -1747,11 +1748,29 @@ pub fn reap(id: ObjId) -> Option<ExitInfo> {
     Some(info)
 }
 
-/// 进程对象的销毁动作（只由清理过程调用，不持对象表锁）：销毁地址空间、归还帧、释放线程表引用（级联）。
+/// 进程对象所属模块的唯一锁外销毁入口。调用者已释放对象表锁；这里解释 `Process` 载荷。
+/// The Process module's sole lock-outside destroy entry.
+pub(crate) fn destroy_object(object: KObject) {
+    let KObject::Process(p) = object else {
+        panic!("process destroy hook received another object kind");
+    };
+    destroy_process(p);
+}
+
+/// Task 对象所属模块的唯一锁外销毁入口：释放线程对象对退出状态的内部引用（级联）。
+/// The Task module's sole lock-outside destroy entry.
+pub(crate) fn destroy_task_object(object: KObject) {
+    let KObject::Task(task) = object else {
+        panic!("task destroy hook received another object kind");
+    };
+    let _ = kobj::release_internal(task.exit_state);
+}
+
+/// 进程载荷的销毁动作（只由 [`destroy_object`] 调用，不持对象表锁）：销毁地址空间、归还帧、释放线程表引用（级联）。
 ///
 /// 正常路径上句柄表在 exited 时已被关闭；这里**不依赖该假设**：仍有残余句柄则逐个释放其外部所有权，
 /// 并输出诊断标记（出现即说明某条路径漏了检查）。
-pub fn destroy(p: Box<Process>) {
+fn destroy_process(p: Box<Process>) {
     let Process { mut space, frames, shared_maps, quarantined, device_maps, threads, mut handles, name, exit_state, children, cpu_group, .. } = *p;
     if let Some(g) = cpu_group {
         let _ = sched::release_cpu_group(g); // 持有者引用；线程早已全部退出，组随之释放

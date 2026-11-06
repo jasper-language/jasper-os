@@ -202,8 +202,12 @@ pub fn close_in(t: &mut Table, id: ObjId) {
     crate::kprintln!("[JSR-IPC] event=system.channel.closing endpoint={:#x} dropped_messages={}", id.raw(), dropped);
 }
 
-/// 销毁动作（清理过程调用，不持对象表锁）：归还创建者的端点配额。
-pub fn destroy(e: Box<Endpoint>) {
+/// Endpoint 对象所属模块的唯一锁外销毁入口，归还创建者的端点配额。
+/// The Endpoint module's sole lock-outside destroy entry.
+pub(crate) fn destroy_object(object: KObject) {
+    let KObject::Endpoint(e) = object else {
+        panic!("endpoint destroy hook received another object kind");
+    };
     kobj::with(|t| {
         if let Some(q) = proc::ring_quota_in(t, e.owner) {
             q.endpoints = q.endpoints.saturating_sub(1);

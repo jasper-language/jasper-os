@@ -108,6 +108,13 @@ pub enum Destroy {
     OutsideLock,
 }
 
+/// 销毁声明是否与内核侧「存在模块销毁钩子」一致。
+/// `Destroy::None` 必须没有钩子；`Destroy::OutsideLock` 必须有钩子。
+/// English: true only when hook presence agrees with the declared destroy action.
+pub const fn destroy_hook_matches(declared: Destroy, hook_present: bool) -> bool {
+    matches!(declared, Destroy::OutsideLock) == hook_present
+}
+
 /// 对象是否携带其他对象的句柄（外部所有权）。
 /// Whether the object carries handles (external ownerships) of other objects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -494,6 +501,14 @@ mod tests {
         assert_eq!(check_grant(Kind::Process, ObjectType::Process, tr), GrantCheck::NotTransferable);
         assert_eq!(check_grant(Kind::Event, ObjectType::Event, Rights::READ), GrantCheck::RightsDenied);
         assert_eq!(check_grant(Kind::Process, ObjectType::Process, Rights::NONE), GrantCheck::Allowed);
+    }
+
+    #[test]
+    fn destroy_none_requires_an_empty_hook() {
+        assert!(destroy_hook_matches(Destroy::None, false));
+        assert!(!destroy_hook_matches(Destroy::None, true));
+        assert!(destroy_hook_matches(Destroy::OutsideLock, true));
+        assert!(!destroy_hook_matches(Destroy::OutsideLock, false));
     }
 
     #[test]

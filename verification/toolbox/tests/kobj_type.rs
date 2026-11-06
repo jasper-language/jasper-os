@@ -3,7 +3,8 @@
 use std::collections::HashSet;
 
 use kernel_core::kobj_type::{
-    check_grant, kind_for_handle, registry_well_formed, Carry, Closing, Contract, Destroy, GrantCheck, Kind, REGISTRY,
+    check_grant, destroy_hook_matches, kind_for_handle, registry_well_formed, Carry, Closing, Contract, Destroy,
+    GrantCheck, Kind, REGISTRY,
 };
 use kernel_core::object::{ObjectType, Rights};
 use proptest::prelude::*;
@@ -134,6 +135,18 @@ proptest! {
         prop_assert!(ra.contains(ra.intersect(rb)) && rb.contains(ra.intersect(rb)));
         prop_assert_eq!(ra.is_empty(), a & all == 0);
     }
+
+    /// Destroy::None 只能对应空销毁动作；OutsideLock 必须对应非空模块入口。
+    #[test]
+    fn destroy_hook_presence_matches_registry(
+        declared in prop_oneof![Just(Destroy::None), Just(Destroy::OutsideLock)],
+        hook_present in any::<bool>(),
+    ) {
+        prop_assert_eq!(
+            destroy_hook_matches(declared, hook_present),
+            hook_present == (declared == Destroy::OutsideLock)
+        );
+    }
 }
 
 /// Miri 固定序列：生产表良构、每个种类每个句柄类型的检查结论、若干变异必被拒。
@@ -141,6 +154,10 @@ proptest! {
 fn fixed_sequence_under_miri() {
     assert!(registry_well_formed(&REGISTRY));
     assert!(reference_well_formed(&REGISTRY) && acyclic(&REGISTRY));
+    assert!(destroy_hook_matches(Destroy::None, false));
+    assert!(!destroy_hook_matches(Destroy::None, true));
+    assert!(destroy_hook_matches(Destroy::OutsideLock, true));
+    assert!(!destroy_hook_matches(Destroy::OutsideLock, false));
     for k in Kind::ALL {
         for ty in ObjectType::ALL {
             for r in [Rights::NONE, Rights::WAIT, Rights::TRANSFER, Rights::ALL, k.contract().rights] {
