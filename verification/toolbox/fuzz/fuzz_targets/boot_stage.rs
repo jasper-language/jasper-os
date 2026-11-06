@@ -1,6 +1,6 @@
 #![no_main]
-//! issue #7 第一片：启动阶段跟踪器与参照模型的差分（任意操作序列）；补链 capacity 记录 parse/encode。
-use kernel_core::boot_stage::{Stage, StageError, Tracker, GRAPH};
+//! issue #7：启动阶段跟踪器与静态计划相对参照模型的差分（任意操作序列）；补链 capacity 记录 parse/encode。
+use kernel_core::boot_stage::{plan_check, CaseSpec, PlanItem, Stage, StageError, Tracker, GRAPH};
 use kernel_core::capacity::{encode, parse, RECORD_LEN};
 
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
@@ -12,6 +12,40 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
             assert_eq!(parse(&encode(ov)), Ok(ov));
         }
     }
+    // issue #7 第二片：同一串字节解释成计划，与真实跟踪器走一遍的结论比较。
+    let items: Vec<PlanItem<()>> = data
+        .iter()
+        .map(|&b| {
+            let s = Stage::ALL[(b & 0x0f) as usize % Stage::COUNT];
+            match b >> 5 {
+                0..=4 => PlanItem::Stage(s),
+                5 | 6 => PlanItem::Case(CaseSpec { name: s.name(), requires: s.bit(), summary: "", timing: false }, ()),
+                _ => PlanItem::Finish(()),
+            }
+        })
+        .collect();
+    let mut walk = Tracker::new();
+    let mut names = std::collections::HashSet::new();
+    let mut ok = false;
+    for (i, item) in items.iter().enumerate() {
+        match item {
+            PlanItem::Stage(s) => {
+                if walk.begin(*s).is_err() || walk.complete(*s).is_err() {
+                    break;
+                }
+            }
+            PlanItem::Case(spec, _) => {
+                if spec.requires & !walk.done_mask() != 0 || !names.insert(spec.name) {
+                    break;
+                }
+            }
+            PlanItem::Finish(_) => {
+                ok = i + 1 == items.len();
+                break;
+            }
+        }
+    }
+    assert_eq!(plan_check(&[&items[..]]).is_ok(), ok);
     // 其余每字节一次操作：低 4 位选阶段，高位选 begin/complete/fail。
     let mut t = Tracker::new();
     let (mut started, mut done, mut running, mut failed) = (0u32, 0u32, None::<Stage>, None::<Stage>);

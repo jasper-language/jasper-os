@@ -16,8 +16,12 @@ pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
-/// 处理一个 tick：计数并打印 `[JSR-TICK] n=<n>`。
+/// 处理一个 tick：计数；启动自检期间打印 `[JSR-TICK] n=<n>`，之后不再输出（生产启动的等待循环会一直走到这里）。
+/// Count a tick; print the marker only during the boot self-check, since a production boot keeps
+/// coming here while it waits.
 pub fn on_tick() {
     let n = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
-    kprintln!("[JSR-TICK] n={}", n);
+    if n <= crate::config::ACTIVE.clock.boot_ticks {
+        kprintln!("[JSR-TICK] n={}", n);
+    }
 }

@@ -20,5 +20,12 @@ fn bad_begin(started: u32, done: u32, failed: bool, s: u32) -> (r: u8)
     0
 }
 
+// 故意错误的负例：用例步不看依赖，「接受 ⇒ 声明的阶段都已出现」必须验证失败。
+fn bad_plan_case_step(done: u32, requires_mask: u32) -> (r: bool)
+    ensures r ==> requires_mask & !done == 0,
+{
+    true
+}
+
 fn main() {}
 }

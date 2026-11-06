@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 
 use kernel_core::capacity::{self, BootCapacity, CapError, CapReason, MemoryCost, Overrides, RECORD_LEN};
 
-use crate::arch::{self, ExitStatus};
+use crate::arch::ExitStatus;
 use crate::config::ACTIVE;
 use crate::kprintln;
 
@@ -70,13 +70,13 @@ fn reject(e: CapError) -> ! {
         e.reason.as_str()
     );
     kprintln!("[JSR-EXIT] failure boot_capacity");
-    arch::exit_emulator(ExitStatus::Failure)
+    crate::kmain::stop_boot(ExitStatus::Failure)
 }
 
 fn reject_install(table: &'static str, value: usize, why: &'static str) -> ! {
     kprintln!("[JSR-CAP] reject field={} value={} min=0 max=0 reason={}", table, value, why);
     kprintln!("[JSR-EXIT] failure boot_capacity");
-    arch::exit_emulator(ExitStatus::Failure)
+    crate::kmain::stop_boot(ExitStatus::Failure)
 }
 
 /// 读取、校验并安装启动期容量；成功返回生效容量，任何失败都拒绝启动（不返回）。
@@ -86,7 +86,7 @@ pub fn apply() -> BootCapacity {
         Err(e) => {
             kprintln!("[JSR-CAP] reject field=record value=0 min=0 max=0 reason={}", e.as_str());
             kprintln!("[JSR-EXIT] failure boot_capacity");
-            arch::exit_emulator(ExitStatus::Failure)
+            crate::kmain::stop_boot(ExitStatus::Failure)
         }
     };
     let (cap, source) = match capacity::resolve(ACTIVE.boot_capacity(), overrides, cost()) {

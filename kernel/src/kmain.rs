@@ -1,23 +1,17 @@
 //! 架构无关的内核主流程：引导适配层（`main.rs`）完成平台入口后调用 [`start`]。
 //!
 //! 只通过 `arch::*` 使用硬件；换 ISA 时本文件不改。
-//! 全局初始化按 `kernel_core::boot_stage` 声明的阶段推进（控制台 → 平台 → 定时器 → 页帧 → 内核映射 →
-//! 堆 → 启动期容量 → 设备 → Profile），每个阶段由跟踪器检查依赖、拒绝重复初始化，失败即停止启动；
-//! 阶段之间穿插 M1.1 起的验收演练，最后按失败表退出模拟器（issue #7：生产与验收编排的拆分按切片推进）。
-//! Global initialisation advances through the stages declared in `kernel_core::boot_stage`;
-//! acceptance exercises are interleaved between stages and the emulator exits on the failure table.
+//! 本文件只负责全局阶段转移：[`run_stage`] 是每个阶段的真实初始化，由 `kernel_core::boot_stage` 的
+//! 跟踪器检查依赖、拒绝重复初始化，失败即停止启动。执行哪些阶段和用例由 `plan` 决定（构建期选择
+//! 生产启动 `production` 或验收清单 `acceptance`，issue #7）。这里不写特性分支，也不写演练。
+//! This file only drives global stage transitions. Which stages and cases run comes from `plan`,
+//! chosen at build time. No feature branches and no exercises live here.
 
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
-use kernel_core::boot_stage::{Stage, Tracker};
-use crate::{appid_demo, arbiter_demo, assembly, balance_demo, bootcap, clock, irq_demo, config, counter_demo, fix_demo, irq, job_demo, kprint, kprintln, l10n_demo, mech_demo, mm, msi_demo, pci, pci_demo, pi_demo, profile, profile_demo, rtclass_demo, sched, smp, user_demo, virtio_rng_demo, wcet};
-#[cfg(feature = "user-programs")]
-use crate::abi_demo;
-#[cfg(feature = "user-programs")]
-use crate::{bench_demo, ipc_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo, uptr_demo, longrun_demo};
-#[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
-use crate::device_demo;
-use crate::{nohz_demo, scale_demo};
+use crate::plan;
+use kernel_core::boot_stage::{plan_check, PlanItem, PlanSummary, Stage, Tracker};
+use crate::{assembly, bootcap, clock, config, irq, kprint, kprintln, mm, pci, profile, sched, smp};
 
 /// 内核版本（横幅中输出）。
 pub const VERSION: &str = "0.0.1";
@@ -28,513 +22,235 @@ const BOOT_TICKS: u64 = config::ACTIVE.clock.boot_ticks;
 /// 等 tick 的兜底次数：定时器没配好时必须报错退出，而不是永远睡下去。
 const MAX_WAITS: u64 = 20_000_000;
 
+/// 计划的一步。计划是静态数据，执行体取得启动上下文。A plan step; the body gets the boot context.
+pub type Step = PlanItem<fn(&mut BootCtx)>;
+
+/// 计划在编译期检查：依赖顺序、用例依赖、用例名唯一、恰好一个收尾步。
+/// The plan is checked at compile time.
+const PLAN_SUMMARY: PlanSummary = match plan_check(plan::PLAN) {
+    Ok(s) => s,
+    Err(_) => panic!("启动计划不良构"),
+};
+
+/// 阶段产生、后续步骤要用的结果。Results of stages that later steps use.
+pub struct BootCtx {
+    /// 引导交接信息。Boot hand-off information.
+    pub boot: &'static BootSpec,
+    /// 阶段跟踪器（引导处理器独占）。Stage tracker, owned by the boot processor.
+    tracker: Tracker,
+    /// `frames` 阶段的页帧统计。Frame statistics from the `frames` stage.
+    pub frames: Option<mm::frame::FrameStats>,
+    /// `capacity` 阶段的生效容量。Effective capacity from the `capacity` stage.
+    pub capacity: Option<kernel_core::capacity::BootCapacity>,
+    /// `smp` 阶段的启动结果。Start-up report from the `smp` stage.
+    pub smp: Option<smp::StartReport>,
+    /// `idle_tick` 阶段生效的停表间隔。Effective divisor from the `idle_tick` stage.
+    pub idle_divisor: u32,
+}
+
+impl BootCtx {
+    /// 已完成阶段的掩码。Mask of completed stages.
+    pub fn done_mask(&self) -> u32 {
+        self.tracker.done_mask()
+    }
+}
+
+/// 阶段失败或被拒之后停止启动：验收构建退出模拟器，生产构建停机。
+/// Stop after a failed or refused stage: acceptance exits the emulator, production halts.
+pub fn stop_boot(status: ExitStatus) -> ! {
+    plan::stop(status)
+}
+
 /// 在阶段跟踪器下执行一个全局启动阶段（issue #7）。`body` 执行该阶段的真实初始化，返回 `None` 表示失败。
 /// 阶段被拒（依赖缺失、重复初始化、已有阶段失败）或失败时如实报告并停止启动：
 /// 依赖它的后续阶段永远不会开始。
 /// Runs one global boot stage under the stage tracker. `body` performs the real initialisation and
 /// returns `None` on failure. A refused or failed stage is reported and boot stops, so no stage
 /// that depends on it ever starts.
-fn stage<T>(t: &mut Tracker, s: Stage, body: impl FnOnce() -> Option<T>) -> T {
-    if let Err(e) = t.begin(s) {
+fn stage(ctx: &mut BootCtx, s: Stage, body: impl FnOnce(&mut BootCtx) -> Option<()>) {
+    if let Err(e) = ctx.tracker.begin(s) {
         kprintln!("[JSR-BOOT-STAGE] refused stage={} reason={}", s.name(), e.as_str());
         kprintln!("[JSR-EXIT] failure boot_stage={}", s.name());
-        arch::exit_emulator(ExitStatus::Failure);
+        stop_boot(ExitStatus::Failure);
     }
-    match body() {
-        Some(v) => {
-            // begin 刚成功且阶段串行，complete 不会被拒。begin just succeeded; complete cannot be refused.
-            let _ = t.complete(s);
-            kprintln!("[JSR-BOOT-STAGE] done stage={} done_mask={:#x}", s.name(), t.done_mask());
-            v
-        }
-        None => {
-            let _ = t.fail(s);
-            kprint!("[JSR-BOOT-STAGE] failed stage={} blocked=", s.name());
-            let blocked = t.blocked_mask();
-            let mut first = true;
-            for b in Stage::ALL.iter().filter(|b| blocked & b.bit() != 0) {
-                kprint!("{}{}", if first { "" } else { "," }, b.name());
-                first = false;
+    if body(ctx).is_some() {
+        // begin 刚成功且阶段串行，complete 不会被拒。begin just succeeded; complete cannot be refused.
+        let _ = ctx.tracker.complete(s);
+        kprintln!("[JSR-BOOT-STAGE] done stage={} done_mask={:#x}", s.name(), ctx.tracker.done_mask());
+        return;
+    }
+    let _ = ctx.tracker.fail(s);
+    kprint!("[JSR-BOOT-STAGE] failed stage={} blocked=", s.name());
+    let blocked = ctx.tracker.blocked_mask();
+    let mut first = true;
+    for b in Stage::ALL.iter().filter(|b| blocked & b.bit() != 0) {
+        kprint!("{}{}", if first { "" } else { "," }, b.name());
+        first = false;
+    }
+    kprintln!();
+    kprintln!("[JSR-EXIT] failure boot_stage={}", s.name());
+    stop_boot(ExitStatus::Failure)
+}
+
+/// 每个全局阶段的真实初始化。生产与验收共用这一份。
+/// The real initialisation of each global stage, shared by production and acceptance.
+fn run_stage(ctx: &mut BootCtx, s: Stage) {
+    match s {
+        Stage::Console => stage(ctx, s, |_| {
+            arch::console_init();
+            kprintln!("[JSR-BOOT] jasper-os rust kernel {} {}", VERSION, arch::NAME);
+            config::report();
+            Some(())
+        }),
+        Stage::Platform => stage(ctx, s, |_| {
+            arch::early_init();
+            // 证明异常处理已接通。
+            arch::debug_breakpoint();
+            Some(())
+        }),
+        // 中断控制器 + 定时器，开中断后等到足够多的 tick。
+        Stage::Timer => stage(ctx, s, |_| {
+            arch::irq_init(TIMER_HZ);
+            arch::irq_enable();
+            let mut waits: u64 = 0;
+            while clock::ticks() < BOOT_TICKS {
+                arch::wait_for_interrupt();
+                irq::poll_and_handle();
+                waits += 1;
+                if waits > MAX_WAITS {
+                    kprintln!("[JSR-TICK-TIMEOUT] n={}", clock::ticks());
+                    arch::irq_disable();
+                    return None;
+                }
             }
-            kprintln!();
-            kprintln!("[JSR-EXIT] failure boot_stage={}", s.name());
-            arch::exit_emulator(ExitStatus::Failure)
-        }
+            // 收尾关中断，保证随后的协作式演示输出可复现。
+            arch::irq_disable();
+            Some(())
+        }),
+        // 物理页帧分配（真实内存图）。没有任何可用帧时启动停止。
+        Stage::Frames => stage(ctx, s, |ctx| {
+            let stats = mm::frame::init(ctx.boot);
+            ctx.frames = Some(stats);
+            (stats.usable > 0).then_some(())
+        }),
+        // 架构无关映射 API（x86_64 由 4 级页表实现）。引导器未提供物理内存映射时启动停止。
+        Stage::KernelMap => stage(ctx, s, |ctx| {
+            // 多处理器：趁低端内存尚未被占用时预留平台需要的启动帧（平台不需要时什么也不做）。
+            if !smp::reserve_start_frame() {
+                kprintln!("[JSR-SMP] start_frame unavailable");
+            }
+            mm::map::init(ctx.boot).then_some(())
+        }),
+        // 内核堆（Box/Vec/String 可用，按需增长）。首批映射失败时启动停止。
+        Stage::Heap => stage(ctx, s, |_| mm::heap::init().ok()),
+        // 堆就绪：按启动期容量安装对象表、实时表，并把任务表扩到启动期容量（含内核栈；HARDEN-1B）。
+        // 容量越界、放不进内存或记录损坏都会在这里拒绝启动（`bootcap::apply` 自行报告并停止）。
+        // 之后把堆的空闲余量补回安装前的值（见 `heap::ensure_free`）。
+        Stage::Capacity => stage(ctx, s, |ctx| {
+            let (_, heap_slack, _, _) = mm::heap::stats();
+            let cap = bootcap::apply();
+            if mm::heap::ensure_free(heap_slack).is_err() {
+                kprintln!("[JSR-SCHED] capacity heap_slack_restore_failed want={}", heap_slack);
+            }
+            ctx.capacity = Some(cap);
+            Some(())
+        }),
+        // DRV-1B：启动期取得 PCI 配置空间访问者（ECAM 或传统端口），穷举总线并建立只读设备表。
+        // 依赖内核映射服务与堆（ECAM 窗口映射、后端对象）。平台没有 PCI 时设备表为空，不算失败。
+        Stage::Devices => stage(ctx, s, |ctx| {
+            pci::init(ctx.boot);
+            Some(())
+        }),
+        // POL-2：系统 Profile（模块面 + 参数档）在堆就绪后立刻校验；不合法就拒绝启动，
+        // 因为后面的服务判定、配额与调度类别都以这份声明为前提。
+        Stage::Profile => stage(ctx, s, |_| {
+            let profile_failed = profile::boot_report();
+            if profile_failed > 0 {
+                kprintln!("[JSR-EXIT] failure profile_failed={}", profile_failed);
+                return None;
+            }
+            Some(())
+        }),
+        // issue #6：按依赖顺序装配生效 Profile 的模块；只有初始化成功的模块能力被发布，
+        // 之后的能力查询（包括多模式判定）读的是发布结果而不是声明表。
+        Stage::Assembly => stage(ctx, s, |_| {
+            let assembly_failed = assembly::boot();
+            if assembly_failed > 0 {
+                kprintln!("[JSR-EXIT] failure assembly_failed={}", assembly_failed);
+                return None;
+            }
+            Some(())
+        }),
+        // POL-5：多模式 B（统一仲裁）由 Profile 决定；没有 `sched.arbiter` 时保持单模式 A。
+        Stage::SchedMode => stage(ctx, s, |_| {
+            let multi_mode = profile::has_capability("sched.arbiter");
+            sched::set_arbiter(multi_mode);
+            kprintln!("[JSR-SCHED] mode={}", if multi_mode { "multi" } else { "single" });
+            Some(())
+        }),
+        // 内核地址空间：准备失败时不能创建任何独立地址空间。
+        Stage::Space => stage(ctx, s, |_| match mm::space::init() {
+            Ok(_) => Some(()),
+            Err(e) => {
+                kprintln!("[JSR-SPACE] kernel space not ready: {:?}", e);
+                None
+            }
+        }),
+        // SMP-1：启动其他处理器。部分处理器没上线不算失败，结果由 `StartReport` 报告。
+        Stage::Smp => stage(ctx, s, |ctx| {
+            ctx.smp = Some(smp::start_secondaries(TIMER_HZ));
+            Some(())
+        }),
+        // 没有高精度时钟源时退回 tick，不算失败。
+        Stage::HighRes => stage(ctx, s, |_| {
+            let hr = sched::enable_highres();
+            kprintln!("[JSR-RT2] high_resolution={} legacy_tick_abi=true", hr);
+            Some(())
+        }),
+        // HARDEN-1E：按配置档的功耗策略启用空闲停表。
+        Stage::IdleTick => stage(ctx, s, |ctx| {
+            let divisor = sched::configure_idle_tick();
+            ctx.idle_divisor = divisor;
+            kprintln!(
+                "[JSR-NOHZ] configured power={} divisor={} cpus={}",
+                config::ACTIVE.policy.power.as_str(),
+                divisor,
+                sched::online_cpus().len()
+            );
+            Some(())
+        }),
+        // 用户运行时只判定「可以装载用户程序」；运行哪些服务由装配决定。
+        Stage::UserRuntime => stage(ctx, s, |_| {
+            kprintln!("[JSR-STAGE] user_runtime embedded_programs={}", cfg!(feature = "user-programs"));
+            mm::space::init().ok().map(|_| ())
+        }),
     }
 }
 
 /// 内核主流程（永不返回）。`boot` 是引导适配层转换好的交接信息。
 pub fn start(boot: &'static BootSpec) -> ! {
-    // 全局初始化按 `kernel_core::boot_stage::GRAPH` 的阶段推进；阶段之间穿插的是验收演练。
-    // Global initialisation advances through the declared stages; acceptance exercises sit between them.
-    let mut stages = Tracker::new();
-    stage(&mut stages, Stage::Console, || {
-        arch::console_init();
-        kprintln!("[JSR-BOOT] jasper-os rust kernel {} {}", VERSION, arch::NAME);
-        config::report();
-        Some(())
-    });
-    stage(&mut stages, Stage::Platform, || {
-        arch::early_init();
-        // 证明异常处理已接通。
-        arch::debug_breakpoint();
-        Some(())
-    });
-
-    // M1.2：中断控制器 + 定时器，开中断后等到足够多的 tick。
-    stage(&mut stages, Stage::Timer, || {
-        arch::irq_init(TIMER_HZ);
-        arch::irq_enable();
-        let mut waits: u64 = 0;
-        while clock::ticks() < BOOT_TICKS {
-            arch::wait_for_interrupt();
-            irq::poll_and_handle();
-            waits += 1;
-            if waits > MAX_WAITS {
-                kprintln!("[JSR-TICK-TIMEOUT] n={}", clock::ticks());
-                arch::irq_disable();
-                return None;
+    let mut ctx = BootCtx { boot, tracker: Tracker::new(), frames: None, capacity: None, smp: None, idle_divisor: 0 };
+    for part in plan::PLAN {
+        for step in part.iter() {
+            match step {
+                PlanItem::Stage(s) => run_stage(&mut ctx, *s),
+                PlanItem::Case(spec, run) => {
+                    kprintln!("[JSR-PLAN] case name={}", spec.name);
+                    run(&mut ctx);
+                }
+                PlanItem::Finish(run) => {
+                    kprintln!(
+                        "[JSR-PLAN] finish plan={} stages={:#x} cases={}",
+                        plan::NAME,
+                        PLAN_SUMMARY.stages,
+                        PLAN_SUMMARY.cases
+                    );
+                    run(&mut ctx);
+                }
             }
         }
-        // 收尾关中断，保证随后的协作式演示输出可复现。
-        arch::irq_disable();
-        Some(())
-    });
-
-    // M1.3：协作式调度（关中断）。
-    sched::demo::run();
-
-    // M1.4：定时器抢占（需要开中断才能收到定时器中断）。
-    arch::irq_enable();
-    sched::demo::run_preemptive();
-    arch::irq_disable();
-
-    // 64 位计数单元：宽值与「与定时器中断共享」（32 位目标上没有 64 位原子指令，这里证明实现不会在中断中自锁）。
-    counter_demo::run();
-    if counter_demo::failed() > 0 {
-        kprintln!("[JSR-EXIT] failure counter64_failed={}", counter_demo::failed());
-        arch::exit_emulator(ExitStatus::Failure);
     }
-
-    // M1.5：以内核任务演练 kernel-core 的全部机制（任务内自行开关中断）。
-    mech_demo::run();
-    if mech_demo::failed() > 0 {
-        kprintln!("[JSR-EXIT] failure mech_failed={}", mech_demo::failed());
-        arch::exit_emulator(ExitStatus::Failure);
-    }
-
-    // M2.1：物理页帧分配（真实内存图 + 真实读写校验）。没有任何可用帧时启动停止。
-    let frames = stage(&mut stages, Stage::Frames, || {
-        let stats = mm::frame::init(boot);
-        (stats.usable > 0).then_some(stats)
-    });
-    mm::demo::run(boot, frames);
-    // 多处理器：趁低端内存尚未被占用时预留平台需要的启动帧（平台不需要时什么也不做）。
-    if !smp::reserve_start_frame() {
-        kprintln!("[JSR-SMP] start_frame unavailable");
-    }
-    // M2.2：架构无关映射 API（x86_64 由 4 级页表实现）。引导器未提供物理内存映射时启动停止。
-    stage(&mut stages, Stage::KernelMap, || mm::map::init(boot).then_some(()));
-    mm::demo::run_map();
-    // M2.3：内核堆（Box/Vec/String 可用，按需增长）。首批映射失败时启动停止。
-    stage(&mut stages, Stage::Heap, || mm::heap::init().ok());
-    mm::demo::run_heap();
-    // 堆就绪：按启动期容量安装对象表、实时表，并把任务表扩到启动期容量（含内核栈；HARDEN-1B）。
-    // 容量越界、放不进内存或记录损坏都会在这里拒绝启动（`bootcap::apply` 自行报告并退出）。
-    // 之后把堆的空闲余量补回安装前的值（见 `heap::ensure_free`）。
-    let cap = stage(&mut stages, Stage::Capacity, || {
-        let (_, heap_slack, _, _) = mm::heap::stats();
-        let cap = bootcap::apply();
-        if mm::heap::ensure_free(heap_slack).is_err() {
-            kprintln!("[JSR-SCHED] capacity heap_slack_restore_failed want={}", heap_slack);
-        }
-        Some(cap)
-    });
-    // DRV-1B：启动期取得 PCI 配置空间访问者（ECAM 或传统端口），穷举总线并建立只读设备表。
-    // 依赖内核映射服务与堆（ECAM 窗口映射、后端对象）。平台没有 PCI 时设备表为空，不算失败。
-    stage(&mut stages, Stage::Devices, || {
-        pci::init(boot);
-        Some(())
-    });
-    pci_demo::run();
-    kprintln!(
-        "[JSR-SCHED] capacity slots={} static_stacks={} max={} policy={} preemption=default_on",
-        sched::capacity(),
-        sched::stack::STATIC_STACKS,
-        cap.tasks,
-        sched::policy_name()
-    );
-    // POL-2：系统 Profile（模块面 + 参数档）在堆就绪后立刻校验；不合法就拒绝启动，
-    // 因为后面的服务判定、配额与调度类别都以这份声明为前提。
-    stage(&mut stages, Stage::Profile, || {
-        let profile_failed = profile::boot_report();
-        if profile_failed > 0 {
-            kprintln!("[JSR-EXIT] failure profile_failed={}", profile_failed);
-            return None;
-        }
-        Some(())
-    });
-    // issue #6：按依赖顺序装配生效 Profile 的模块；只有初始化成功的模块能力被发布，
-    // 之后的能力查询（包括下面的多模式判定）读的是发布结果而不是声明表。
-    stage(&mut stages, Stage::Assembly, || {
-        let assembly_failed = assembly::boot();
-        if assembly_failed > 0 {
-            kprintln!("[JSR-EXIT] failure assembly_failed={}", assembly_failed);
-            return None;
-        }
-        Some(())
-    });
-    debug_assert!(stages.all_done());
-    profile_demo::run();
-    // POL-5：多模式 B（统一仲裁）由 Profile 决定；没有 `sched.arbiter` 时保持单模式 A。
-    let multi_mode = profile::has_capability("sched.arbiter");
-    sched::set_arbiter(multi_mode);
-    kprintln!("[JSR-SCHED] mode={}", if multi_mode { "multi" } else { "single" });
-    #[cfg(feature="rt3-verify")]
-    {
-        mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
-        let failed=crate::rt3_demo::run();
-        arch::exit_emulator(if failed==0 {ExitStatus::Success} else {ExitStatus::Failure});
-    }
-    #[cfg(feature="rt2-verify")]
-    {
-        mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
-        crate::rt2_demo::run();
-        // issue #2：高精度睡眠、取消与预算到期都走完之后，汇报脏集合校验（校验内核专用）。
-        #[cfg(feature="ns-dirty-audit")]
-        {
-            let stats=sched::ns_sync_stats();let (mismatch,audits)=sched::ns_audit();
-            kprintln!("[JSR-NS-SYNC] passes={} synced={} unchanged={} writes={} inserted={} rescheduled={} moved={} removed={} balanced={} audit_mismatch={} audits={}",
-                stats.passes,stats.synced,stats.unchanged,stats.writes(),stats.inserted,stats.rescheduled,stats.moved,stats.removed,stats.balanced(),mismatch,audits);
-        }
-        arch::exit_emulator(ExitStatus::Success);
-    }
-    #[cfg(feature="rt1-verify")]
-    {
-        mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
-        crate::rt1_demo::run();
-        arch::exit_emulator(ExitStatus::Success);
-    }
-    #[cfg(feature="budget-window-verify")]
-    {
-        mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
-        crate::balance_demo::run_limit_diagnostic();
-        arch::exit_emulator(if crate::balance_demo::failed()==0 {ExitStatus::Success} else {ExitStatus::Failure});
-    }
-    #[cfg(feature="krn3-fast-tick-verify")]
-    {
-        mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
-        let failed=crate::scale_demo::run_fast_leaf_tick_contract()
-            + crate::balance_demo::run_affinity_diagnostic();
-        arch::exit_emulator(if failed==0 {ExitStatus::Success} else {ExitStatus::Failure});
-    }
-    #[cfg(feature="krn3-postsplit-verify")]
-    {
-        mm::demo::run_space();
-        smp::demo::run(smp::start_secondaries(TIMER_HZ));
-        let highres = sched::enable_highres();
-        let divisor = sched::configure_idle_tick();
-        kprintln!(
-            "[JSR-KRN3-POSTSPLIT] start cpus={} high_resolution={} nohz_divisor={}",
-            sched::online_cpus().len(), highres, divisor
-        );
-        crate::scale_demo::run();
-        let failed = crate::scale_demo::failed();
-        let timing = crate::scale_demo::timing_failed();
-        kprintln!(
-            "[JSR-KRN3-POSTSPLIT] done failed={} timing_failed={}",
-            failed, timing
-        );
-        arch::exit_emulator(if failed != 0 {
-            ExitStatus::Failure
-        } else if timing != 0 {
-            ExitStatus::TimingOnly
-        } else {
-            ExitStatus::Success
-        });
-    }
-    #[cfg(feature="krn3-p999-verify")]
-    {
-        mm::demo::run_space();
-        smp::demo::run(smp::start_secondaries(TIMER_HZ));
-        let highres = sched::enable_highres();
-        let divisor = sched::configure_idle_tick();
-        kprintln!(
-            "[JSR-KRN3-P999] start cpus={} high_resolution={} nohz_divisor={}",
-            sched::online_cpus().len(), highres, divisor
-        );
-        let failed = crate::scale_demo::run_wake_latency_contract();
-        arch::exit_emulator(if failed == 0 { ExitStatus::Success } else { ExitStatus::Failure });
-    }
-    #[cfg(feature="evt2-broadcast-verify")]
-    {
-        mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
-        crate::subscription_broadcast_demo::run();
-        arch::exit_emulator(ExitStatus::Success);
-    }
-    #[cfg(feature="evt2-verify")]
-    {
-        mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
-        crate::subscription_demo::run();
-        arch::exit_emulator(ExitStatus::Success);
-    }
-    #[cfg(feature="s3-nohz-verify")]
-    {
-        mm::demo::run_space();smp::demo::run(smp::start_secondaries(TIMER_HZ));
-        nohz_demo::run();
-        kprintln!("[JSR-NOHZ-DIAGNOSTIC] failed={}",nohz_demo::failed());
-        arch::exit_emulator(if nohz_demo::failed()==0 { ExitStatus::Success } else { ExitStatus::Failure });
-    }
-    #[cfg(feature = "shm1-verify")]
-    {
-        mm::demo::run_space();
-        smp::demo::run(smp::start_secondaries(TIMER_HZ));
-        let failed=crate::shm_demo::run();
-        arch::exit_emulator(if failed == 0 { ExitStatus::Success } else { ExitStatus::Failure });
-    }
-    #[cfg(feature = "evt1-verify")]
-    {
-        // 独立机制guest只初始化地址空间与SMP；原完整验收仍走默认主流程。
-        mm::demo::run_space();
-        smp::demo::run(smp::start_secondaries(TIMER_HZ));
-        let divisor = sched::configure_idle_tick();
-        kprintln!("[JSR-EVT1-NOHZ] divisor={}", divisor);
-        let failed = crate::evt1_demo::run();
-        kprintln!("[JSR-EVT1-EXIT] failed={}", failed);
-        arch::exit_emulator(if failed == 0 { ExitStatus::Success } else { ExitStatus::Failure });
-    }
-    // POL-3：批处理作业（依赖 / 优先级 / 取消 / 终态 / 满载下交互性）。
-    job_demo::run();
-    // POL-4：实时准入与预算（协作式节流；抢占式执行待接入）。
-    rtclass_demo::run();
-    // M2.4：独立地址空间（同一虚拟地址、不同物理帧，真实切换）。
-    mm::demo::run_space();
-    // SMP-1：启动其他处理器（每核数据、各自计时、核间中断、跨核调用、TLB 击落）。
-    smp::demo::run(smp::start_secondaries(TIMER_HZ));
-    let hr=sched::enable_highres();kprintln!("[JSR-RT2] high_resolution={} legacy_tick_abi=true",hr);
-    #[cfg(feature = "fault-inject")]
-    if crate::fault_inject::selftest() != 0 {
-        kprintln!("[JSR-EXIT] failure fault_inject_failed=1");
-        arch::exit_emulator(ExitStatus::Failure);
-    }
-    #[cfg(all(feature = "s2-only", target_arch = "x86_64"))]
-    {
-        let passed = crate::s2::run();
-        arch::exit_emulator(if passed { ExitStatus::Success } else { ExitStatus::Failure });
-    }
-    // KRN-0①：两个钉在不同处理器的任务批量映射、读取、击落与回收。
-    crate::krn0_tlb::run(smp::online_set().len());
-    // DRV-2A：每核 MSI 向量池、绑定、投递与拒绝路径（放在其他处理器已报到之后）。
-    msi_demo::run();
-    // DRV-2B：真实 virtio-rng 设备的 MSI-X 送达、改核、屏蔽与待决释放。
-    virtio_rng_demo::run();
-    // HARDEN-1E：按配置档的功耗策略启用空闲停表（在各核独立计时的演练之后；此后全部演练都在停表开启下运行）。
-    let idle_divisor = sched::configure_idle_tick();
-    kprintln!("[JSR-NOHZ] configured power={} divisor={} cpus={}", config::ACTIVE.policy.power.as_str(), idle_divisor, sched::online_cpus().len());
-    nohz_demo::run();
-    // POL-5：三类线程同核争用 + 多核下各类各占一个核（放在 SMP 启动之后）。
-    arbiter_demo::run();
-    // M3.1：真实进入 Ring 3；用户态异常只终止该任务。
-    user_demo::run();
-    // M3.2：系统调用入口 + 稳定 ID 登记表 + 统一权限检查。
-    user_demo::run_syscall();
-    // M3.3：用户指针安全（校验 + 经物理映射复制）。
-    user_demo::run_user_pointers();
-    // M3.4：进程 / 线程对象（同一进程两个线程、句柄、退出与回收）。
-    user_demo::run_process();
-    // M5.1-pre：从 ELF 文件装载并运行用户程序。
-    #[cfg(feature = "user-programs")]
-    user_demo::run_elf();
-    // ABI 世代：单一真源、真实章、装载前拒绝（issue #8 第一片）。
-    #[cfg(feature = "user-programs")]
-    abi_demo::run();
-    // M4.1：对象生命周期（外部所有权 / 内部引用 / 清理过程级联）。
-    #[cfg(feature = "user-programs")]
-    user_demo::run_lifecycle();
-    // M4.2：Handle/Rights（duplicate/restrict 只降权；跨进程原子转移）。
-    user_demo::run_handles();
-    // DRV-1C：设备内核对象与 list / open / get 系统调用（设备表由 DRV-1B 在启动期建立）。
-    #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
-    device_demo::run();
-    // DRV-2C-1：设备中断对象——真实 virtio-rng 的 MSI-X 中断经中断对象成为用户 Ring 上的一条完成。
-    #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
-    crate::irqring_demo::run();
-    // DRV-2C-2：真实 virtio-rng 的 MSI-X 中断风暴受每核预算约束（屏蔽 / 下一 tick 解除、到达不丢）。
-    #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
-    crate::irqstorm_demo::run();
-    // KRN-0：中断到达计数跨 u32 回绕仍按模差正确计数。
-    crate::krn0_demo::run();
-    // KRN-0②：virtio 复位失败时关总线主控并读回确认，仍不可信则隔离队列页（真实设备演练）。
-    crate::krn0_demo::run_dma();
-    // KRN-0④：MMIO 槽位 CAS 分配、耗尽拒绝与位图回收。
-    crate::krn0_demo::run_mmio();
-    // 基础设施修复的回归演练：失败路径与回滚。
-    fix_demo::run();
-    #[cfg(feature = "user-programs")]
-    {
-        // M4.3：用户态异步环（提交 → 完成；完成信用；取消；closing；配额）。
-        ring_demo::run();
-        // M4.4：IPC Channel（send/recv 经 ring；两阶段 send；原子交付；取消竞争；页帧固定）。
-        ipc_demo::run();
-        // M5.1：最小非特权程序（特权级 3、隔离、用户异常、坏指针、进程终止与等待、完全回收）。
-        prog_demo::run();
-        // S-1：系统调用健壮性回归（真实用户态、固定种子、有界调用、资源回到基线）。
-        robust_demo::run();
-        // J-1：用户态运行时（匿名内存系统调用；用运行时写成的普通 Rust 程序：堆、线程、Channel、异步环）。
-        rt_demo::run();
-        // HARDEN-1C：用户指针复制与并发取消映射（多核下不得读写已回收、已分给别的进程的帧）。
-        uptr_demo::run();
-        // HARDEN-1C ③：长期运行（同一组资源反复创建 / 使用 / 关闭 1500 轮后回到基线、容量不塌陷）。
-        longrun_demo::run();
-        // SCHED-1：服务质量分级调度（档位规则、动态任务数、过载下的唤醒延迟、压力撤销后恢复）。
-        // 纯轮转策略不提供分级语义，其构建跳过这些依赖 QoS 保证的演练（分时构建照常执行）。
-        #[cfg(not(feature = "sched-rr"))]
-        qos_demo::run();
-    }
-    // SCHED-2：优先级继承（三任务反转有界、传递继承、拒绝路径、持有者退出、压力撤销后恢复）。
-    #[cfg(not(feature = "sched-rr"))]
-    pi_demo::run();
-    // SMP-2：每核运行队列与负载均衡（各核都忙、窃取、过载下交互延迟有上界、恢复、亲和与迁移、跨核继承与上限）。
-    // 其中的延迟与继承判据依赖 QoS 保证，纯轮转构建跳过（分时构建照常执行）。
-    #[cfg(not(feature = "sched-rr"))]
-    balance_demo::run();
-    // SMP-3：中断与服务的多核化（送达、均衡、风暴预算下交互延迟有上界、恢复、分片服务各核均衡）。
-    #[cfg(not(feature = "sched-rr"))]
-    irq_demo::run();
-    // HARDEN-1D：调度规模化（选择只遍历本核运行列表、到期唤醒按最早时刻跳过、锁争用测量、同规模下的响应性底线）。
-    #[cfg(not(feature = "sched-rr"))]
-    scale_demo::run();
-    #[cfg(feature = "user-programs")]
-    {
-        // SCHED-3：过载防护（每进程 CPU 上限、看门狗、内存压力分级准入、压力撤销后回到基线）。
-        #[cfg(not(feature = "sched-rr"))]
-        overload_demo::run();
-        // T-2：基准（时钟中断、上下文切换、页帧、堆、系统调用、异步环、IPC 往返）与按预算评估参数取值。
-        bench_demo::run();
-    }
-    // DRV-0：应用身份的写入与不可变性（放在最后，避免占用早期演练依赖的对象编号）。
-    appid_demo::run();
-    // L10N-1：登记表中英显示名齐全，且据此生成的错误渲染表可用（中英渲染、非错误与未知码被拒）。
-    l10n_demo::run();
-    // WCET 证据：关键路径的最大实测值（系统调用周期、交互唤醒 tick）。
-    wcet::report();
-    // issue #2：高精度期限事件增量同步计数——无变化的槽位不写堆；计数必须守恒。
-    // Deadline sync counters: unchanged slots write nothing; counters must balance.
-    let ns_sync = sched::ns_sync_stats();
-    let (ns_mismatch, ns_audits) = sched::ns_audit();
-    let (timer_full, timer_bsp, timer_local, timer_highres, timer_cost) = sched::timer_progress_stats();
-    kprintln!("[JSR-TIMER-PROGRESS] full={} deferred_tick={} deferred_local={} deferred_highres={} max_cost={}", timer_full, timer_bsp, timer_local, timer_highres, timer_cost);
-    kprintln!(
-        "[JSR-NS-SYNC] passes={} synced={} unchanged={} writes={} inserted={} rescheduled={} moved={} removed={} balanced={} audit_mismatch={} audits={}",
-        ns_sync.passes, ns_sync.synced, ns_sync.unchanged, ns_sync.writes(),
-        ns_sync.inserted, ns_sync.rescheduled, ns_sync.moved, ns_sync.removed, ns_sync.balanced(), ns_mismatch, ns_audits
-    );
-    // 各演练的断言失败数（顺序即输出顺序）；未编译的演练不出现。
-    let fails: &[(&str, u32)] = &[
-        ("nssync", u32::from(!ns_sync.balanced()) + ns_mismatch),
-        ("mm", mm::demo::failed()),
-        ("smp", smp::demo::failed()),
-        ("balance", balance_demo::failed()),
-        ("irq", irq_demo::failed()),
-        ("scale", scale_demo::failed()),
-        ("nohz", nohz_demo::failed()),
-        ("user", user_demo::failed()),
-        #[cfg(feature = "user-programs")]
-        ("abi", abi_demo::failed()),
-        ("fix", fix_demo::failed()),
-        ("profile", profile_demo::failed()),
-        ("job", job_demo::failed()),
-        ("rtclass", rtclass_demo::failed()),
-        ("arbiter", arbiter_demo::failed()),
-        ("appid", appid_demo::failed()),
-        ("pci", pci_demo::failed()),
-        ("msi", msi_demo::failed()),
-        ("msix", virtio_rng_demo::failed()),
-        #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
-        ("drv1c", device_demo::failed()),
-        #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
-        ("drv2c1", crate::irqring_demo::failed()),
-        #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
-        ("drv2c2", crate::irqstorm_demo::failed()),
-        ("krn0", crate::krn0_demo::failed()),
-        ("l10n", l10n_demo::failed()),
-        #[cfg(feature = "user-programs")]
-        ("ring", ring_demo::failed()),
-        #[cfg(feature = "user-programs")]
-        ("ipc", ipc_demo::failed()),
-        #[cfg(feature = "user-programs")]
-        ("prog", prog_demo::failed()),
-        #[cfg(feature = "user-programs")]
-        ("robust", robust_demo::failed()),
-        #[cfg(feature = "user-programs")]
-        ("rt", rt_demo::failed()),
-        #[cfg(feature = "user-programs")]
-        ("uptr", uptr_demo::failed()),
-        #[cfg(feature = "user-programs")]
-        ("longrun", longrun_demo::failed()),
-        #[cfg(feature = "user-programs")]
-        ("qos", qos_demo::failed()),
-        ("pi", pi_demo::failed()),
-        #[cfg(feature = "user-programs")]
-        ("overload", overload_demo::failed()),
-        #[cfg(feature = "user-programs")]
-        ("bench", bench_demo::failed()),
-    ];
-    if fails.iter().any(|&(_, f)| f > 0) {
-        kprint!("[JSR-EXIT] failure");
-        for (name, f) in fails {
-            kprint!(" {}_failed={}", name, f);
-        }
-        kprintln!();
-        arch::exit_emulator(ExitStatus::Failure);
-    }
-    #[cfg(all(feature = "s2-fuzz", target_arch = "x86_64"))]
-    if !crate::s2::run() {
-        kprintln!("[JSR-EXIT] failure s2_failed=1");
-        arch::exit_emulator(ExitStatus::Failure);
-    }
-    #[cfg(all(feature = "krn1-soak", target_arch = "x86_64"))]
-    if !crate::soak::run() {
-        kprintln!("[JSR-EXIT] failure soak_failed=1");
-        arch::exit_emulator(ExitStatus::Failure);
-    }
-    // 未内嵌用户程序时如实说明：依赖用户程序的演练没有运行。
-    if !cfg!(feature = "user-programs") {
-        kprintln!("[JSR-STAGE] user_programs=absent skipped=elf,lifecycle,ring,ipc,prog,rt,qos,overload,bench");
-    }
-    // 计时类断言超界只记录、不阻塞：指令翻译型仿真器的时间基准跟随宿主，性能只在裸机上判定。
-    // 功能失败表在上面已按原样判过；这里只区分「功能全过但只有计时超界」，用独立退出码如实报告。
-    // Timing-class overruns are reported, not failed; performance is judged on bare metal only.
-    #[cfg(feature = "user-programs")]
-    let timings: &[(&str, u32)] = &[
-        ("bench", bench_demo::timing_failed()),
-        ("scale", scale_demo::timing_failed()),
-        ("qos", qos_demo::timing_failed()),
-        ("pi", pi_demo::timing_failed()),
-        ("rt", rt_demo::timing_failed()),
-        ("balance", balance_demo::timing_failed()),
-        ("irq", irq_demo::timing_failed()),
-        ("arbiter", arbiter_demo::timing_failed()),
-        #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
-        ("drv2c2", crate::irqstorm_demo::timing_failed()),
-    ];
-    #[cfg(not(feature = "user-programs"))]
-    let timings: &[(&str, u32)] = &[
-        ("scale", scale_demo::timing_failed()),
-        ("pi", pi_demo::timing_failed()),
-        ("balance", balance_demo::timing_failed()),
-        ("irq", irq_demo::timing_failed()),
-        ("arbiter", arbiter_demo::timing_failed()),
-    ];
-    let timing_total: u32 = timings.iter().map(|&(_, n)| n).sum();
-    if timing_total > 0 {
-        kprint!("[JSR-EXIT] timing-only");
-        for (name, n) in timings.iter().filter(|&&(_, n)| n > 0) {
-            kprint!(" {}_timing_failed={}", name, n);
-        }
-        kprintln!();
-        arch::exit_emulator(ExitStatus::TimingOnly);
-    }
-    kprintln!("[JSR-EXIT] success");
-    arch::exit_emulator(ExitStatus::Success)
+    // 收尾步按约定不返回；万一返回也不能当作正常结束。The finish step does not return by contract.
+    kprintln!("[JSR-EXIT] failure plan_returned");
+    stop_boot(ExitStatus::Failure)
 }

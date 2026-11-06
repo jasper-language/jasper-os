@@ -579,15 +579,37 @@ fn public_spawn_events(ring:i64) {
  say!("evt2 public_task_spawn=true public_process_spawn={} source_rights=true exit_event=true",cfg!(target_arch="x86_64"));
 }
 #[cfg(target_arch="x86_64")]
+// Write the ELF64 section fields consulted by the kernel's ABI-note lookup.
+fn write_section64(image:&mut[u8],shoff:usize,index:usize,name:u32,ty:u32,offset:usize,size:usize,align:u64) {
+ let base=shoff+index*64;
+ image[base..base+4].copy_from_slice(&name.to_le_bytes());
+ image[base+4..base+8].copy_from_slice(&ty.to_le_bytes());
+ image[base+8..base+16].copy_from_slice(&0u64.to_le_bytes());
+ image[base+24..base+32].copy_from_slice(&(offset as u64).to_le_bytes());
+ image[base+32..base+40].copy_from_slice(&(size as u64).to_le_bytes());
+ image[base+48..base+56].copy_from_slice(&align.to_le_bytes());
+}
+
+#[cfg(target_arch="x86_64")]
 fn public_process_spawn_event(ring:i64) {
  // A minimal real static ELF fixture, passed through the public process.spawn syscall.
  // It waits briefly then exits51. Snapshot-or-event accepts either actual scheduling order.
- let mut image=[0u8;4096+26];image[..7].copy_from_slice(&[0x7f,b'E',b'L',b'F',2,1,1]);
+ // The appended section table carries the same program ABI stamp as the kernel.
+ const NOTE_OFFSET:usize=4096+26;
+ const SHSTR:&[u8;28]=b"\0.shstrtab\0.note.jasper.abi\0";
+ const SHSTR_OFFSET:usize=NOTE_OFFSET+kernel_core::abi_version::NOTE_BYTES;
+ const SHOFF:usize=SHSTR_OFFSET+SHSTR.len();
+ let mut image=[0u8;SHOFF+3*64];image[..7].copy_from_slice(&[0x7f,b'E',b'L',b'F',2,1,1]);
  image[16..18].copy_from_slice(&2u16.to_le_bytes());image[18..20].copy_from_slice(&62u16.to_le_bytes());image[20..24].copy_from_slice(&1u32.to_le_bytes());
+ image[40..48].copy_from_slice(&(SHOFF as u64).to_le_bytes());image[58..60].copy_from_slice(&64u16.to_le_bytes());image[60..62].copy_from_slice(&3u16.to_le_bytes());image[62..64].copy_from_slice(&1u16.to_le_bytes());
  let address=kernel_core::user_layout::window_base("x86_64").unwrap()+0x200000;
  image[24..32].copy_from_slice(&address.to_le_bytes());image[32..40].copy_from_slice(&64u64.to_le_bytes());image[52..54].copy_from_slice(&64u16.to_le_bytes());image[54..56].copy_from_slice(&56u16.to_le_bytes());image[56..58].copy_from_slice(&1u16.to_le_bytes());
  image[64..68].copy_from_slice(&1u32.to_le_bytes());image[68..72].copy_from_slice(&5u32.to_le_bytes());image[72..80].copy_from_slice(&4096u64.to_le_bytes());image[80..88].copy_from_slice(&address.to_le_bytes());image[96..104].copy_from_slice(&26u64.to_le_bytes());image[104..112].copy_from_slice(&26u64.to_le_bytes());image[112..120].copy_from_slice(&4096u64.to_le_bytes());
  let code=&mut image[4096..];code[0]=0xb8;code[1..5].copy_from_slice(&(ids::SYSTEM_TIME_WAIT as u32).to_le_bytes());code[5]=0xbf;code[6..10].copy_from_slice(&3u32.to_le_bytes());code[10..12].copy_from_slice(&[0x0f,0x05]);code[12]=0xb8;code[13..17].copy_from_slice(&(ids::SYSTEM_TASK_EXIT as u32).to_le_bytes());code[17]=0xbf;code[18..22].copy_from_slice(&51u32.to_le_bytes());code[22..26].copy_from_slice(&[0x0f,0x05,0x0f,0x0b]);
+ let note=kernel_core::abi_version::encode_note(kernel_core::abi_version::ProgramAbi::native_requirement());
+ image[NOTE_OFFSET..NOTE_OFFSET+note.len()].copy_from_slice(&note);image[SHSTR_OFFSET..SHOFF].copy_from_slice(SHSTR);
+ write_section64(&mut image,SHOFF,1,1,3,SHSTR_OFFSET,SHSTR.len(),1);
+ write_section64(&mut image,SHOFF,2,11,7,NOTE_OFFSET,note.len(),4);
  let calls=kernel_core::syscall_set::SyscallSet::of(&[ids::SYSTEM_TASK_EXIT as u32,ids::SYSTEM_TIME_WAIT as u32]);
  let desc=kernel_core::spawn_abi::SpawnDesc {image_ptr:image.as_ptr() as u64,image_len:image.len() as u64,calls,arg:0,cpu_limit_permille:kernel_core::spawn_abi::CPU_UNLIMITED,..Default::default()};let mut raw=desc.encode();
  check(unsafe {syscall2(ids::SYSTEM_PROCESS_SPAWN,raw.as_mut_ptr() as u64,0)}==0,94);

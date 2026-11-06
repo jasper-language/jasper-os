@@ -552,15 +552,25 @@ check_m11() {   # 真实启动 + 横幅 + 自退出
   fi
 }
 
-check_boot_stage() {   # issue #7：十个全局启动阶段按声明顺序各完成一次，无拒绝、无失败
+check_boot_stage() {   # issue #7：十六个全局启动阶段按声明顺序各完成一次，无拒绝、无失败；计划跑到收尾
   local order
   order=$(grep -oE '^\[JSR-BOOT-STAGE\] done stage=[a-z_]+' "$SERIAL" 2>/dev/null | sed 's/.*stage=//' | tr '\n' ' ' || true)
-  if [ "$order" = "console platform timer frames kernel_map heap capacity devices profile assembly " ] \
-     && has '^\[JSR-BOOT-STAGE\] done stage=assembly done_mask=0x3ff' \
+  if [ "$order" = "console platform timer frames kernel_map heap capacity devices profile assembly sched_mode space smp highres idle_tick user_runtime " ] \
+     && has '^\[JSR-BOOT-STAGE\] done stage=user_runtime done_mask=0xffff' \
+     && has '^\[JSR-PLAN\] finish plan=full stages=0xffff cases=[1-9][0-9]*' \
      && ! has '^\[JSR-BOOT-STAGE\] (refused|failed)'; then
-    record BOOT-STAGE PASS "十个阶段按序完成（done_mask=0x3ff），无拒绝、无失败"
+    record BOOT-STAGE PASS "十六个阶段按序完成（done_mask=0xffff），无拒绝、无失败；$(grep -m1 -aoE '^\[JSR-PLAN\] finish .*' "$SERIAL")"
   else
-    record BOOT-STAGE FAIL "阶段序列=[$order]，或缺 done_mask=0x3ff，或出现 refused/failed"
+    record BOOT-STAGE FAIL "阶段序列=[$order]，或缺 done_mask=0xffff 或计划收尾，或出现 refused/failed"
+  fi
+}
+
+check_production() {   # issue #7 第二片：生产启动持续运行、不退出模拟器、不跑演练；启动期失败时停机不退出
+  local detail
+  if detail=$(OUT="$OUT/production" LIMIT="${JASPER_PRODUCTION_TIMEOUT:-30}" bash "$ROOT/scripts/production-check.sh" 2>&1); then
+    record PRODUCTION PASS "$(echo "$detail" | tr '\n' ' ')"
+  else
+    record PRODUCTION FAIL "$(echo "$detail" | grep FAIL | head -3 | tr '\n' ' ')"
   fi
 }
 
@@ -2538,11 +2548,11 @@ if [ "$SPOT" -eq 1 ]; then
     if declare -F "check_$c" >/dev/null; then "check_$c"; else record "$c" FAIL "定点验收：没有名为 check_$c 的检查"; fi
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
-  check_m10; check_isa; check_m11; check_boot_stage; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+  check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
   check_pol1; check_pol2; check_asm1; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
-  check_m10; check_isa; check_m11; check_boot_stage; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+  check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
   check_pol1; check_pol2; check_asm1; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
 fi
 

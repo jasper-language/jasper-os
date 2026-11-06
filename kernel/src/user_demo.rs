@@ -481,6 +481,35 @@ pub fn run_elf() {
     );
 }
 
+/// 生产启动的第一个用户程序：装载内嵌的 `user-hello`，运行到结束并回收。
+/// 返回进程终态，以及页帧是否全部归还。
+/// The first user program of a production boot: load, run to completion and reclaim the embedded
+/// `user-hello`. Returns the final process state and whether every frame came back.
+#[cfg(feature = "user-programs")]
+pub fn run_first_program() -> (Option<crate::proc::ProcState>, bool) {
+    use crate::proc;
+    let free_before = frame::free_frames();
+    let allowed = SyscallSet::of(&[abi::SYSTEM_CONSOLE_WRITE, abi::SYSTEM_ABI_GET, abi::SYSTEM_TASK_EXIT]);
+    let Ok(pid) = proc::create("first-program", allowed) else {
+        return (None, false);
+    };
+    let base = arch::USER_WINDOW.0;
+    let started = match proc::load_elf(pid, USER_HELLO) {
+        Ok(entry) => {
+            proc::map_new(pid, base + STACK_OFF - FRAME_SIZE, MapFlags::USER | MapFlags::WRITE).is_ok()
+                && proc::spawn_thread(pid, "first-program", entry, base + STACK_OFF, 0, 0).is_ok()
+        }
+        Err(_) => false,
+    };
+    if started {
+        sched::run();
+    }
+    let state = proc::state(pid);
+    let _ = proc::reap(pid);
+    crate::kobj::run_cleanup(usize::MAX); // reap 只释放所有权；销毁由清理过程完成
+    (state, frame::free_frames() == free_before)
+}
+
 /// 运行 M4.1 演练：对象生命周期（M4.0 规范 v0.6 第 9 节 M4.1 行）。
 ///
 /// 1. 线程对象由「外部所有权」（模拟句柄）+「内部引用」（执行上下文、进程线程表）共同保活

@@ -1,7 +1,7 @@
 // issue #7 第一片：启动阶段跟踪器（kernel_core::boot_stage::Tracker）的 Verus 伴随模型。
 // Verus companion model of kernel_core::boot_stage::Tracker (issue #7, slice 1).
 //
-// 模型与 Rust 源一一对应：started / done 为位掩码，running / failed 用 NONE(=10) 表示「无」。
+// 模型与 Rust 源一一对应：started / done 为位掩码，running / failed 用 NONE(=16) 表示「无」。
 // 证明：begin 成功 ⇒ 未失败、无运行中阶段、此前未开始、直接依赖全部完成；begin/complete/fail 保持不变量
 // （done ⊆ started ⊆ 全集；运行中阶段已开始未完成且依赖已完成；每个已完成阶段的直接依赖都已完成；
 // 失败后 begin 一律被拒）；依赖表只指向更靠前的阶段。
@@ -11,9 +11,9 @@ use vstd::prelude::*;
 
 verus! {
 
-pub const COUNT: u32 = 10;
-pub const NONE: u32 = 10;
-pub const ALL: u32 = 0x3ff;
+pub const COUNT: u32 = 16;
+pub const NONE: u32 = 16;
+pub const ALL: u32 = 0xffff;
 
 /// 直接依赖表（与 GRAPH 一致）。Direct prerequisites, mirroring GRAPH.
 pub open spec fn req(i: u32) -> u32 {
@@ -26,7 +26,13 @@ pub open spec fn req(i: u32) -> u32 {
     else if i == 6 { 0x20 }
     else if i == 7 { 0x30 }
     else if i == 8 { 0x20 }
-    else { 0x144 }
+    else if i == 9 { 0x144 }
+    else if i == 10 { 0x200 }
+    else if i == 11 { 0x30 }
+    else if i == 12 { 0x844 }
+    else if i == 13 { 0x1000 }
+    else if i == 14 { 0x1000 }
+    else { 0x1a00 }
 }
 
 fn req_exec(i: u32) -> (r: u32)
@@ -42,7 +48,13 @@ fn req_exec(i: u32) -> (r: u32)
     else if i == 6 { 0x20 }
     else if i == 7 { 0x30 }
     else if i == 8 { 0x20 }
-    else { 0x144 }
+    else if i == 9 { 0x144 }
+    else if i == 10 { 0x200 }
+    else if i == 11 { 0x30 }
+    else if i == 12 { 0x844 }
+    else if i == 13 { 0x1000 }
+    else if i == 14 { 0x1000 }
+    else { 0x1a00 }
 }
 
 /// 依赖只指向更靠前的阶段（图无环的充分条件）。Prerequisites point strictly backwards.
@@ -59,7 +71,13 @@ proof fn graph_points_backwards(i: u32)
     else if i == 6 { assert(0x20u32 & !(((1u32 << 6u32) - 1) as u32) == 0) by (bit_vector); }
     else if i == 7 { assert(0x30u32 & !(((1u32 << 7u32) - 1) as u32) == 0) by (bit_vector); }
     else if i == 8 { assert(0x20u32 & !(((1u32 << 8u32) - 1) as u32) == 0) by (bit_vector); }
-    else { assert(0x144u32 & !(((1u32 << 9u32) - 1) as u32) == 0) by (bit_vector); }
+    else if i == 9 { assert(0x144u32 & !(((1u32 << 9u32) - 1) as u32) == 0) by (bit_vector); }
+    else if i == 10 { assert(0x200u32 & !(((1u32 << 10u32) - 1) as u32) == 0) by (bit_vector); }
+    else if i == 11 { assert(0x30u32 & !(((1u32 << 11u32) - 1) as u32) == 0) by (bit_vector); }
+    else if i == 12 { assert(0x844u32 & !(((1u32 << 12u32) - 1) as u32) == 0) by (bit_vector); }
+    else if i == 13 { assert(0x1000u32 & !(((1u32 << 13u32) - 1) as u32) == 0) by (bit_vector); }
+    else if i == 14 { assert(0x1000u32 & !(((1u32 << 14u32) - 1) as u32) == 0) by (bit_vector); }
+    else { assert(0x1a00u32 & !(((1u32 << 15u32) - 1) as u32) == 0) by (bit_vector); }
 }
 
 pub struct Tracker {
@@ -107,9 +125,13 @@ fn begin(t: &mut Tracker, s: u32) -> (r: u8)
     ensures
         inv(*final(t)),
         r == 0 ==> old(t).failed == NONE && old(t).running == NONE && !bit_in(old(t).started, s)
-            && req(s) & !old(t).done == 0 && final(t).running == s,
+            && req(s) & !old(t).done == 0 && final(t).running == s
+            && final(t).started == (old(t).started | (1u32 << s)) && final(t).done == old(t).done
+            && final(t).failed == NONE,
         r != 0 ==> *final(t) == *old(t),
         old(t).failed < NONE ==> r != 0,
+        old(t).failed == NONE && old(t).running == NONE && !bit_in(old(t).started, s)
+            && req(s) & !old(t).done == 0 ==> r == 0,
 {
     if t.failed < NONE {
         return 1;
@@ -130,7 +152,7 @@ fn begin(t: &mut Tracker, s: u32) -> (r: u8)
     let ghost st = old_t.started;
     let ghost d = old_t.done;
     assert(d & !st == 0 ==> d & !(st | bit) == 0) by (bit_vector);
-    assert(s < 10 && st & !0x3ffu32 == 0 ==> (st | (1u32 << s)) & !0x3ffu32 == 0) by (bit_vector);
+    assert(s < 16 && st & !0xffffu32 == 0 ==> (st | (1u32 << s)) & !0xffffu32 == 0) by (bit_vector);
     assert(s < 32 ==> (st | (1u32 << s)) & (1u32 << s) != 0) by (bit_vector);
     assert(s < 32 && st & (1u32 << s) == 0 && d & !st == 0 ==> d & (1u32 << s) == 0) by (bit_vector);
     0
@@ -139,7 +161,8 @@ fn begin(t: &mut Tracker, s: u32) -> (r: u8)
 fn complete(t: &mut Tracker, s: u32) -> (r: bool)
     requires inv(*old(t)), s < COUNT,
     ensures inv(*final(t)), r == (old(t).running == s), !r ==> *final(t) == *old(t),
-        r ==> final(t).done == (old(t).done | (1u32 << s)),
+        r ==> final(t).done == (old(t).done | (1u32 << s)) && final(t).started == old(t).started
+            && final(t).running == NONE && final(t).failed == old(t).failed,
 {
     if t.running != s {
         return false;
@@ -211,6 +234,43 @@ proof fn override_round_trip(o: Option<u32>)
     requires o != Some(0u32),
     ensures dec(enc(o)) == o,
 {
+}
+
+/// issue #7 第二片：计划检查里的阶段步。接受 ⇔ 此前没有出现过且直接依赖都已出现。
+/// The stage step of plan_check: accepted iff not seen before and all prerequisites have been seen.
+fn plan_stage_step(done: u32, s: u32) -> (r: bool)
+    requires s < COUNT,
+    ensures r == (!bit_in(done, s) && req(s) & !done == 0),
+{
+    done & (1u32 << s) == 0 && req_exec(s) & !done == 0
+}
+
+/// 计划检查里的用例步：声明的阶段都已出现。The case step: every declared stage has been seen.
+fn plan_case_step(done: u32, requires_mask: u32) -> (r: bool)
+    ensures r == (requires_mask & !done == 0),
+{
+    requires_mask & !done == 0
+}
+
+/// 计划检查接受的阶段步，跟踪器一定接受：执行计划不会因为依赖或重复被拒。
+/// 循环不变量是 started == done，也就是阶段之间没有运行中的阶段。
+/// A stage step accepted by plan_check is accepted by the tracker, so running a checked plan is
+/// never refused for a duplicate or a missing dependency.
+fn checked_stage_is_accepted(t: &mut Tracker, s: u32)
+    requires
+        inv(*old(t)), s < COUNT,
+        old(t).started == old(t).done, old(t).running == NONE, old(t).failed == NONE,
+        !bit_in(old(t).done, s), req(s) & !old(t).done == 0,
+    ensures
+        inv(*final(t)),
+        final(t).started == final(t).done,
+        final(t).done == (old(t).done | (1u32 << s)),
+        final(t).running == NONE, final(t).failed == NONE,
+{
+    let r = begin(t, s);
+    assert(r == 0);
+    let ok = complete(t, s);
+    assert(ok);
 }
 
 fn main() {}

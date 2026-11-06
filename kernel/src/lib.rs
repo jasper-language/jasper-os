@@ -25,6 +25,16 @@
 
 extern crate alloc;
 
+/// 构建期选择启动计划：`production` 只有阶段和等待，其余构建走验收清单（issue #7）。
+#[cfg(not(feature = "production"))]
+pub mod acceptance;
+#[cfg(not(feature = "production"))]
+pub use acceptance as plan;
+#[cfg(feature = "production")]
+pub mod production;
+#[cfg(feature = "production")]
+pub use production as plan;
+
 pub mod appid_demo;
 pub mod abi_demo;
 pub mod arbiter_demo;

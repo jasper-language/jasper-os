@@ -1,5 +1,5 @@
-//! 启动阶段图与阶段跟踪器（issue #7 第一切片）。
-//! Boot stage graph and stage tracker (issue #7, slice 1).
+//! 启动阶段图、跟踪器与静态启动计划（issue #7）。
+//! Boot stage graph, tracker and static boot plans (issue #7).
 //!
 //! 内核主流程按「阶段」推进全局初始化：每个阶段在 [`GRAPH`] 中声明它依赖的前序阶段，
 //! [`Tracker`] 在运行时保证四件事：
@@ -49,11 +49,24 @@ pub enum Stage {
     /// 服务装配（issue #6）：按依赖启动 Profile 声明的模块，只发布就绪模块的能力。
     /// Service assembly (issue #6): start declared modules in dependency order, publish only ready ones.
     Assembly = 9,
+    /// 调度模式：按已发布的能力决定单模式或统一仲裁。Scheduling mode, from published capabilities.
+    SchedMode = 10,
+    /// 内核地址空间就绪，此后可以创建独立地址空间。Kernel space ready; address spaces can be created.
+    Space = 11,
+    /// 启动其他处理器。Start the secondary processors.
+    Smp = 12,
+    /// 高精度时钟事件。High-resolution timer events.
+    HighRes = 13,
+    /// 按功耗策略启用空闲停表。Tickless idle per the power policy.
+    IdleTick = 14,
+    /// 用户运行时：地址空间、处理器和服务都就绪，可以装载用户程序。
+    /// User runtime: user programs can be loaded and run.
+    UserRuntime = 15,
 }
 
 impl Stage {
     /// 阶段个数。Number of stages.
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 16;
     /// 全部阶段，下标即 [`Stage::index`]。All stages, indexed by [`Stage::index`].
     pub const ALL: [Stage; Stage::COUNT] = [
         Stage::Console,
@@ -66,6 +79,12 @@ impl Stage {
         Stage::Devices,
         Stage::Profile,
         Stage::Assembly,
+        Stage::SchedMode,
+        Stage::Space,
+        Stage::Smp,
+        Stage::HighRes,
+        Stage::IdleTick,
+        Stage::UserRuntime,
     ];
 
     /// 阶段在 [`GRAPH`] 与 [`Stage::ALL`] 中的下标。Index into [`GRAPH`] and [`Stage::ALL`].
@@ -115,7 +134,11 @@ const fn bits2(a: Stage, b: Stage) -> u32 {
 /// - Frames 需要引导交接信息与控制台（不依赖定时器）；KernelMap 需要页帧分配页表；
 /// - Heap 需要映射器与页帧；Capacity 在堆上安装对象表、实时表与任务栈；
 /// - Devices 需要映射器（ECAM 窗口）与堆（设备表）；Profile 校验需要堆（模块表）；
-/// - Assembly 的就绪检查读取定时器、启动期容量（对象表、实时表、任务表）与校验过的 Profile。
+/// - Assembly 的就绪检查读取定时器、启动期容量（对象表、实时表、任务表）与校验过的 Profile；
+/// - SchedMode 读 Assembly 发布的能力；Space 准备内核页表，需要映射器和堆；
+/// - Smp 的启动帧映射到内核空间，每核数据和任务表来自启动期容量，其他处理器要接定时器；
+/// - HighRes 和 IdleTick 写每核状态，所以排在其他处理器上线之后；
+/// - UserRuntime 需要地址空间、其他处理器和装配结果。
 pub const GRAPH: [StageSpec; Stage::COUNT] = [
     StageSpec { stage: Stage::Console, name: "console", requires: 0 },
     StageSpec { stage: Stage::Platform, name: "platform", requires: Stage::Console.bit() },
@@ -131,9 +154,25 @@ pub const GRAPH: [StageSpec; Stage::COUNT] = [
         name: "assembly",
         requires: Stage::Timer.bit() | Stage::Capacity.bit() | Stage::Profile.bit(),
     },
+    StageSpec { stage: Stage::SchedMode, name: "sched_mode", requires: Stage::Assembly.bit() },
+    StageSpec { stage: Stage::Space, name: "space", requires: bits2(Stage::KernelMap, Stage::Heap) },
+    StageSpec {
+        stage: Stage::Smp,
+        name: "smp",
+        requires: Stage::Timer.bit() | Stage::Capacity.bit() | Stage::Space.bit(),
+    },
+    StageSpec { stage: Stage::HighRes, name: "highres", requires: Stage::Smp.bit() },
+    StageSpec { stage: Stage::IdleTick, name: "idle_tick", requires: Stage::Smp.bit() },
+    StageSpec {
+        stage: Stage::UserRuntime,
+        name: "user_runtime",
+        requires: Stage::Assembly.bit() | Stage::Space.bit() | Stage::Smp.bit(),
+    },
 ];
 
-const fn str_eq(a: &str, b: &str) -> bool {
+/// 常量上下文中比较两个字符串是否逐字节相等。
+/// Compare two strings byte-for-byte in a constant context.
+pub const fn str_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
         return false;
@@ -193,6 +232,137 @@ pub const fn closure(g: &[StageSpec], stage: Stage) -> u32 {
         }
     }
     acc
+}
+
+/// 一个登记用例的静态声明（issue #7 第二片）。
+/// Static declaration of one registered case (issue #7, slice 2).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CaseSpec {
+    /// 稳定英文名，在一份计划内唯一。Stable ASCII name, unique within a plan.
+    pub name: &'static str,
+    /// 运行前必须已完成的阶段。Stages that must be done before this case runs.
+    pub requires: u32,
+    /// 失败汇总表里的行名；空串表示这一步不产生断言。Row in the failure summary; empty if none.
+    pub summary: &'static str,
+    /// 这一步是否报告计时类结果（只在裸机判定）。Whether the case reports timing-class results.
+    pub timing: bool,
+}
+
+/// 启动计划的一步。`R` 是执行体，纯检查只看结构。
+/// One step of a boot plan. `R` is the body; the checker only looks at the structure.
+#[derive(Clone, Copy, Debug)]
+pub enum PlanItem<R> {
+    /// 执行一个全局阶段。Run a global stage.
+    Stage(Stage),
+    /// 运行一个登记用例。Run a registered case.
+    Case(CaseSpec, R),
+    /// 计划的最后一步：等待服务或按结果退出，不再返回。
+    /// The last step of a plan: wait for services or exit on the result; does not return.
+    Finish(R),
+}
+
+/// 计划不良构的原因。Why a boot plan is malformed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PlanError {
+    /// 同一阶段出现两次。A stage appears twice.
+    DuplicateStage(Stage),
+    /// 阶段的直接依赖在它之前没有出现。A direct prerequisite does not appear earlier.
+    MissingDependency { stage: Stage, missing: Stage },
+    /// 用例依赖的阶段在它之前没有出现（或者不存在）。A case needs a stage that has not run.
+    CaseNotReady { step: usize },
+    /// 用例名重复或为空。A case name is duplicated or empty.
+    BadCaseName { step: usize },
+    /// 收尾步之后还有步骤。Steps follow the finish step.
+    StepAfterFinish { step: usize },
+    /// 计划没有收尾步。The plan has no finish step.
+    NoFinish,
+}
+
+/// 良构计划的统计。Summary of a well-formed plan.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PlanSummary {
+    /// 计划执行的阶段。Stages the plan runs.
+    pub stages: u32,
+    /// 用例个数。Number of cases.
+    pub cases: u32,
+}
+
+/// 检查启动计划。通过时，按序执行不会被 [`Tracker`] 以「重复」或「缺失依赖」拒绝，
+/// 每个用例运行时它声明的阶段都已完成，收尾步恰好一个且在最后。
+/// Check a boot plan. When it passes, running the steps in order is never refused by [`Tracker`]
+/// as a duplicate or missing dependency, every case sees its declared stages done, and there is
+/// exactly one finish step, at the end.
+pub const fn plan_check<R>(parts: &[&[PlanItem<R>]]) -> Result<PlanSummary, PlanError> {
+    let mut done = 0u32;
+    let mut cases = 0u32;
+    let mut finished = false;
+    let mut step = 0usize;
+    let mut p = 0;
+    while p < parts.len() {
+        let items = parts[p];
+        let mut i = 0;
+        while i < items.len() {
+            if finished {
+                return Err(PlanError::StepAfterFinish { step });
+            }
+            match &items[i] {
+                PlanItem::Stage(s) => {
+                    let s = *s;
+                    if done & s.bit() != 0 {
+                        return Err(PlanError::DuplicateStage(s));
+                    }
+                    let missing = s.spec().requires & !done;
+                    if missing != 0 {
+                        let missing = Stage::ALL[missing.trailing_zeros() as usize];
+                        return Err(PlanError::MissingDependency { stage: s, missing });
+                    }
+                    done |= s.bit();
+                }
+                PlanItem::Case(spec, _) => {
+                    if spec.requires & !done != 0 {
+                        return Err(PlanError::CaseNotReady { step });
+                    }
+                    if spec.name.is_empty() || case_name_seen(parts, spec.name, p, i) {
+                        return Err(PlanError::BadCaseName { step });
+                    }
+                    cases += 1;
+                }
+                PlanItem::Finish(_) => finished = true,
+            }
+            step += 1;
+            i += 1;
+        }
+        p += 1;
+    }
+    if !finished {
+        return Err(PlanError::NoFinish);
+    }
+    Ok(PlanSummary { stages: done, cases })
+}
+
+/// `name` 是否已在 `(part, index)` 之前的步骤里出现。Whether `name` occurs before `(part, index)`.
+const fn case_name_seen<R>(parts: &[&[PlanItem<R>]], name: &str, part: usize, index: usize) -> bool {
+    let mut p = 0;
+    while p <= part {
+        let items = parts[p];
+        let end = if p == part { index } else { items.len() };
+        let mut i = 0;
+        while i < end {
+            if let PlanItem::Case(spec, _) = &items[i] {
+                if str_eq(spec.name, name) {
+                    return true;
+                }
+            }
+            i += 1;
+        }
+        p += 1;
+    }
+    false
+}
+
+/// 计划是否良构（供 `const` 断言）。Whether a plan is well formed, for `const` assertions.
+pub const fn plan_well_formed<R>(parts: &[&[PlanItem<R>]]) -> bool {
+    plan_check(parts).is_ok()
 }
 
 /// 阶段的运行状态。Run state of a stage.
@@ -400,8 +570,61 @@ mod tests {
             | Stage::Capacity.bit()
             | Stage::Devices.bit()
             | Stage::Profile.bit()
-            | Stage::Assembly.bit();
+            | Stage::Assembly.bit()
+            | Stage::SchedMode.bit()
+            | Stage::Space.bit()
+            | Stage::Smp.bit()
+            | Stage::HighRes.bit()
+            | Stage::IdleTick.bit()
+            | Stage::UserRuntime.bit();
         assert_eq!(t.blocked_mask(), expect);
+    }
+
+    fn case(name: &'static str, requires: u32) -> PlanItem<()> {
+        PlanItem::Case(CaseSpec { name, requires, summary: "", timing: false }, ())
+    }
+
+    #[test]
+    fn full_stage_order_is_a_valid_plan() {
+        let mut items = [PlanItem::Stage(Stage::Console); Stage::COUNT + 1];
+        for (slot, s) in items.iter_mut().zip(Stage::ALL) {
+            *slot = PlanItem::Stage(s);
+        }
+        items[Stage::COUNT] = PlanItem::Finish(());
+        let r = plan_check(&[&items[..]]).unwrap();
+        assert_eq!(r, PlanSummary { stages: ALL_MASK, cases: 0 });
+    }
+
+    #[test]
+    fn plan_check_rejects_each_kind_of_mistake() {
+        use PlanItem::{Finish, Stage as S};
+        let console = S(Stage::Console);
+        assert_eq!(plan_check::<()>(&[&[console]]), Err(PlanError::NoFinish));
+        assert_eq!(
+            plan_check(&[&[console], &[console, Finish(())]]),
+            Err(PlanError::DuplicateStage(Stage::Console))
+        );
+        assert_eq!(
+            plan_check(&[&[S(Stage::Timer), Finish(())]]),
+            Err(PlanError::MissingDependency { stage: Stage::Timer, missing: Stage::Platform })
+        );
+        assert_eq!(
+            plan_check(&[&[console, case("a", Stage::Timer.bit()), Finish(())]]),
+            Err(PlanError::CaseNotReady { step: 1 })
+        );
+        assert_eq!(
+            plan_check(&[&[console, case("a", 0)], &[case("a", 0), Finish(())]]),
+            Err(PlanError::BadCaseName { step: 2 })
+        );
+        assert_eq!(plan_check(&[&[case("", 0), Finish(())]]), Err(PlanError::BadCaseName { step: 0 }));
+        assert_eq!(
+            plan_check(&[&[Finish(()), console]]),
+            Err(PlanError::StepAfterFinish { step: 1 })
+        );
+        assert_eq!(
+            plan_check(&[&[console, case("a", Stage::Console.bit()), Finish(())]]),
+            Ok(PlanSummary { stages: Stage::Console.bit(), cases: 1 })
+        );
     }
 
     #[test]

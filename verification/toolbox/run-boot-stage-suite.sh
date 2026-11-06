@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run-boot-stage-suite.sh —— 启动阶段图与跟踪器（issue #7 第一切片）的六步验证链
+# run-boot-stage-suite.sh —— 启动阶段图、跟踪器与静态启动计划（issue #7）的验证链
 #
 # 顺序固定：Verus/Z3 → Proptest → Miri → cargo-fuzz → Loom（Kani 发版时验证）。
-# 范围：kernel-core/src/boot_stage.rs（新写：Stage / GRAPH / graph_well_formed / closure / Tracker），
+# 范围：kernel-core/src/boot_stage.rs（Stage / GRAPH / graph_well_formed / closure / Tracker / plan_check），
 # kernel/src/kmain.rs 的 stage 包装（经内核定点验收覆盖），以及既有的 kernel-core/src/capacity.rs
 # 启动容量记录 encode / parse（补链：原无验证链；Capacity 阶段读取的不可信输入）。
 # 所有命令在构建虚拟机内执行；输出保存在 evidence/issue7/boot-stage-suite。
@@ -22,6 +22,8 @@ sha256sum \
   kernel-core/src/boot_stage.rs \
   kernel-core/src/capacity.rs \
   kernel/src/kmain.rs \
+  kernel/src/acceptance.rs \
+  kernel/src/production.rs \
   verification/toolbox/verus/boot_stage.rs \
   verification/toolbox/verus/boot_stage_bad.rs \
   verification/toolbox/tests/boot_stage.rs \
@@ -70,14 +72,14 @@ echo "== 6/6 Loom =="
 # N/A：跟踪器只由引导处理器上的内核主流程独占持有（kmain 的局部变量，不是静态量、不跨核共享），
 # 阶段图是编译期常量，capacity 解析是纯函数；没有共享可变状态或线程交错可供 Loom 探索。
 # 替代证据：const 断言 graph_well_formed(&GRAPH)；Kani 对任意 ≤12 步操作序列证明跟踪器不变量；
-# 内核定点验收中 10 个阶段按序完成（done_mask=0x3ff）。
+# 内核定点验收中 16 个阶段按序完成（done_mask=0xffff）。
 printf 'N/A: tracker is a BSP-local value, graph is const, parse is pure; no shared mutable state\n' > "$out/loom.log"
 
 grep -Eq '[1-9][0-9]* verified, 0 errors' "$out/verus.log"
 grep -Eq 'error: (postcondition not satisfied|assertion failed|invariant not satisfied)' "$out/verus-bad.log"
-grep -q '5 passed; 0 failed' "$out/core.log"
+grep -q '7 passed; 0 failed' "$out/core.log"
 grep -Eq '[1-9][0-9]* passed; 0 failed' "$out/core-capacity.log"
-grep -q '3 passed; 0 failed' "$out/proptest.log"
+grep -q '5 passed; 0 failed' "$out/proptest.log"
 grep -q '1 passed; 0 failed' "$out/miri.log"
 grep -q '#1000000.*DONE' "$out/fuzz.log"
 if kani_enabled; then
