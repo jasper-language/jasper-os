@@ -53,6 +53,33 @@
 - 定点验收 `accept-20261104-131513`：M1.1、BOOT-STAGE、ASM1、POL1、POL2、POL3、SCHED1、SCHED2、SCHED3 通过，`SCHED2/计时` 1 行超界（只作 QEMU 参考，不阻塞）。依赖审计 0 漏洞（只有 bincode 未维护告警）。
 - **2026-11-05 更新：批次全量 `accept-20261105-114916` 已覆盖本片（ASM1 PASS，105 PASS / 0 FAIL）。** 当时记录：**定点通过，等批次全量**：本片尚未经过 1/4/8 核与 q35 全量验收；装配只在引导处理器的启动期执行，多处理器路径未单独运行。
 
+## 第二切片（2026-11-06）
+
+### 做了什么
+
+- **容量校验与安装分离**：`capacity` 阶段只读取镜像记录、校验范围/一致性和内存预算，保存已批准容量与安装前堆余量。`core` 激活安装对象表并检查销毁分派，`sched` 激活扩容任务表和内核栈，`realtime` 激活安装实时准入容量；全部安装后统一恢复堆余量并报告实际表大小。
+- **PCI 硬件准备与设备服务分离**：`devices` 阶段只取得平台配置空间访问者，满足 ECAM 映射等硬件顺序约束；`devices` 模块激活才枚举总线、建立只读设备表。Profile 新增 `device.pci` 能力与 `system.device` 服务，`HEADLESS` 和 `HEADLESS_MIN` 都声明该模块。
+- **作业队列进入激活**：`job` 模块激活建立本次启动唯一的空队列，并拒绝重复激活；提交仍由发布后的 `sched.batch` 能力门控。
+- **旧模块管理器退役**：删除 `kernel_core::module` 的 `ModuleDescriptor` / `ModuleManager` 第二套状态机，及其宿主测试、Verus 引用、Proptest 和 fuzz 目标。机制演练改为直接用 `kernel_core::assembly` 验证依赖顺序、发布审计、重复启动拒绝和失败依赖者不被激活。
+- **计划同步**：`assembly` 阶段直接依赖 `devices`；全量计划的 `pci-table` 与 `capacity-report` 移到装配之后并声明依赖 `assembly`。阶段数仍为 16，生产/全量计划仍分别覆盖 `stages=0xffff`，未改变 issue #7 的 `first-program`、收尾和阶段顺序。
+
+### 边界
+
+- 本片没有实现运行时停用、能力撤回宽限期或健康降级；第三片的范围不变。
+- 阶段失败仍停在当前启动路径，不新增内核内故障注入或阶段资源回滚。
+- `capacity` 阶段仍负责容量记录不可信输入的拒绝，因此损坏记录的失败标记与退出行为保持不变。
+
+### 验证
+
+- 定向编译：x86_64 release 内核通过；AArch64 `production`、`--no-default-features` 内核通过。
+- 宿主测试：`kernel-core` 533 passed / 0 failed。
+- 装配套件 `run-assembly-suite.sh`：Verus 13 verified / 0 errors，负例 precondition not satisfied；kernel-core assembly 5 passed；Proptest 2 passed（512 例随机 DAG / 策略）；Miri 1 passed；装配 fuzz 100 万次 0 崩溃（cov 417、ft 1072）；Loom 1 passed。Kani 按发版规则未在本片提交上运行。
+- 启动计划套件 `run-boot-stage-suite.sh`：Verus 43 verified / 0 errors + 负例；kernel-core 7 passed；Proptest 5 passed；Miri 1 passed；fuzz 100 万次 0 崩溃（cov 192）；Loom N/A（BSP 局部状态），Kani 发版时验证。
+- 定点验收 `accept-20261106-183417`（共享 QEMU 锁）：M1.1、BOOT-STAGE、ASM1、POL2、M1.5、PRODUCTION 全 PASS；单核退出码 37，仅 `drv2c2` 与 `bench` 计时类超界。16 阶段按序到 `done_mask=0xffff`，full 计划 `stages=0xffff cases=53`。
+- ASM1 原始证据：对象表 1024、任务表/内核栈 64、实时表 8、作业队列为空、PCI device 表 `port` 机制 8 个功能，均先于 `[JSR-CAP] boot`；9 个模块全部 ready，10 项能力发布并通过审计。M1.5 的装配机制演练 `checks=30 failed=0`，其中 2 个依赖模块成功、失败模块的依赖者未被调用激活。
+- 生产模式在 1 核和 4 核均完成 16 阶段与 `plan=production stages=0xffff cases=1`，首个用户程序退出且进入 `alive` 等待；损坏容量记录仍以 `bad_version` 拒绝停机。
+
+产物证据位于 `evidence/issue6/assembly-suite/`、`evidence/issue7/boot-stage-suite/` 与 `evidence/accept-20261106-183417/`。本片只做单核标准验收、生产 1/4 核和 AArch64 编译；未把结果写成批次全量通过，也未重跑 q35 / 8 核全量。
+
 ## 剩余切片
-1. **第二片**：把 `kmain` 中与硬件顺序无关的服务初始化（如 PCI 设备表、作业队列、实时表安装）迁为模块激活函数，阶段性步骤只保留硬件约束部分；旧 `ModuleManager` 与装配合并或退役（机制演练改用装配）。
-2. **第三片**：运行时停用 / 健康降级——发布掩码可撤回（先撤位再停用，读者以引用计数或宽限期保证不在撤回后进入服务），`system.profile.get` 增加逐模块状态；用户态授权与服务可用分开报告（区分编译期特性、启动期配置、运行时健康、用户授权四层）。
+1. **第三片**：运行时停用 / 健康降级——发布掩码可撤回（先撤位再停用，读者以引用计数或宽限期保证不在撤回后进入服务），`system.profile.get` 增加逐模块状态；用户态授权与服务可用分开报告（区分编译期特性、启动期配置、运行时健康、用户授权四层）。

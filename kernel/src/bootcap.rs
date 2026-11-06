@@ -1,11 +1,11 @@
-//! 启动期容量的内核侧：读镜像里的启动容量记录，合成并校验对象表 / 任务表 / 实时表的容量，然后安装。
-//! Kernel side of boot-time capacities: read the image's capacity record, validate, install the tables.
+//! 启动期容量的内核侧：读镜像里的启动容量记录，合成并校验对象表 / 任务表 / 实时表的容量。
+//! Kernel side of boot-time capacities: read the capacity record and validate the table sizes.
 //!
-//! # 流程（堆就绪后、其他处理器上线前，由 `kmain` 调用 [`apply`] 一次）
+//! # 流程（堆就绪后、其他处理器上线前，由 `capacity` 阶段调用 [`validate`] 一次）
 //! 1. 读取 [`RECORD`]（宿主工具可在不重新编译的情况下改写它，见 `xtask bootcap`）；记录损坏 ⇒ 拒绝启动；
 //! 2. 以生效配置档的容量为默认值、叠加记录里的覆盖值，经 `kernel_core::capacity::resolve` 检查
 //!    范围、一致性与内存预算；不通过 ⇒ 打印结构化原因并拒绝启动；
-//! 3. 依次安装对象表、实时表存储，并把调度器任务表扩到启动期容量（含内核栈）；任一步失败 ⇒ 拒绝启动。
+//! 3. 保存已批准的容量，由 `core`、`sched`、`realtime` 模块的激活函数分别安装对象表、任务表和实时表。
 //!
 //! # 为什么拒绝启动而不是「降级到默认值」
 //! 容量是部署者声明的约束。悄悄换成别的值会让后面所有配额、调度与验收判定建立在错误前提上；
@@ -18,11 +18,22 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use kernel_core::capacity::{self, BootCapacity, CapError, CapReason, MemoryCost, Overrides, RECORD_LEN};
+use kernel_core::capacity::{self, BootCapacity, CapError, MemoryCost, Overrides, RECORD_LEN};
+use spin::Once;
 
-use crate::{arch, arch::ExitStatus};
+use crate::arch::ExitStatus;
 use crate::config::ACTIVE;
 use crate::kprintln;
+
+/// 已校验的容量与来源。Validated capacity and its source.
+#[derive(Clone, Copy)]
+struct Plan {
+    capacity: BootCapacity,
+    source: capacity::Source,
+}
+
+static PLAN: Once<Plan> = Once::new();
+static HEAP_SLACK: Once<usize> = Once::new();
 
 /// 镜像里的启动容量记录。默认「不覆盖」（全部取配置档默认值）；宿主工具按记录标记定位并改写。
 /// `#[used]` 保证即使内核代码只经易失读取访问它，链接器也不会丢弃。
@@ -73,14 +84,9 @@ fn reject(e: CapError) -> ! {
     crate::kmain::stop_boot(ExitStatus::Failure)
 }
 
-fn reject_install(table: &'static str, value: usize, why: &'static str) -> ! {
-    kprintln!("[JSR-CAP] reject field={} value={} min=0 max=0 reason={}", table, value, why);
-    kprintln!("[JSR-EXIT] failure boot_capacity");
-    crate::kmain::stop_boot(ExitStatus::Failure)
-}
-
-/// 读取、校验并安装启动期容量；成功返回生效容量，任何失败都拒绝启动（不返回）。
-pub fn apply() -> BootCapacity {
+/// 读取并校验启动期容量，保存批准结果而不安装任何表；任何失败都拒绝启动（不返回）。
+/// Resolve and validate boot capacities; table installation belongs to module activation.
+pub fn validate() -> BootCapacity {
     let overrides = match capacity::parse(&read_record()) {
         Ok(ov) => ov,
         Err(e) => {
@@ -93,46 +99,38 @@ pub fn apply() -> BootCapacity {
         Ok(r) => r,
         Err(e) => reject(e),
     };
-    match crate::kobj::install(cap.objects) {
-        Ok(_) => {}
-        Err(None) => reject_install("objects", cap.objects, CapReason::ExceedsMemory.as_str()),
-        Err(Some(e)) => reject_install("objects", cap.objects, e.as_str()),
+    let (_, heap_slack, _, _) = crate::mm::heap::stats();
+    HEAP_SLACK.call_once(|| heap_slack);
+    PLAN.call_once(|| Plan { capacity: cap, source });
+    cap
+}
+
+/// `capacity` 阶段批准、等待模块激活安装的容量。
+/// Capacity approved by the stage and awaiting module activation.
+pub fn requested() -> Result<BootCapacity, &'static str> {
+    PLAN.get().map(|p| p.capacity).ok_or("boot capacity not validated")
+}
+
+/// 模块安装完成后恢复堆余量；失败只报告，不改变已经安装的表。
+/// Restore heap headroom after module activation; a failure is reported without changing tables.
+pub fn restore_heap() {
+    let Some(heap_slack) = HEAP_SLACK.get().copied() else { return };
+    if crate::mm::heap::ensure_free(heap_slack).is_err() {
+        kprintln!("[JSR-SCHED] capacity heap_slack_restore_failed want={}", heap_slack);
     }
-    match crate::kobj::verify_destroy_dispatch() {
-        Ok((outside, none)) => kprintln!(
-            "[JSR-LIFE] destroy_dispatch outside_lock={} none={} none_empty=true destroyed_when_none=0 hooks_match_registry=true",
-            outside,
-            none
-        ),
-        Err(reason) => {
-            kprintln!(
-                "[JSR-LIFE] destroy_dispatch consistency=failed reason={} none_empty=false destroyed_when_none=unknown hooks_match_registry=false",
-                reason
-            );
-            kprintln!("[JSR-EXIT] failure destroy_dispatch");
-            arch::exit_emulator(ExitStatus::Failure);
-        }
-    }
-    match crate::rt::install(cap.rt) {
-        Ok(_) => {}
-        Err(None) => reject_install("rt", cap.rt, CapReason::ExceedsMemory.as_str()),
-        Err(Some(e)) => reject_install("rt", cap.rt, e.as_str()),
-    }
-    let stacks = match crate::sched::grow(cap.tasks) {
-        Ok(n) if n == cap.tasks => n,
-        Ok(n) => reject_install("tasks", n, CapReason::ExceedsMemory.as_str()),
-        Err(crate::sched::GrowError::OutOfMemory { available }) => reject_install("tasks", available, CapReason::ExceedsMemory.as_str()),
-        Err(crate::sched::GrowError::Shrink) => reject_install("tasks", cap.tasks, "shrink"),
-        Err(crate::sched::GrowError::NotQuiescent) => reject_install("tasks", cap.tasks, "not_quiescent"),
-    };
+}
+
+/// 所有服务激活完成后报告生效容量与真实表大小。
+/// Report effective capacities and actual installed sizes after all activations.
+pub fn report_boot() {
+    let Some(plan) = PLAN.get() else { return };
     kprintln!(
         "[JSR-CAP] boot source={} objects={} tasks={} rt={} task_stacks={} mem_limit={}",
-        source.as_str(),
+        plan.source.as_str(),
         crate::kobj::capacity(),
         crate::sched::slots(),
         crate::rt::capacity(),
-        stacks,
+        crate::sched::capacity(),
         mem_limit()
     );
-    cap
 }

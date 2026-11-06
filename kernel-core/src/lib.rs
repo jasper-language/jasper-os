@@ -27,7 +27,6 @@
 //! * [`memory`] —— 虚拟内存区域与地址空间记账（真实页表在内核的 `arch/` 与后续 M2.x）
 //! * [`spawn_abi`] —— `system.process.spawn` 参数块 v2 与无状态准入规则
 //! * [`syscall_set`] —— 有界系统调用能力集合（256 位位图，ID 越界显式拒绝）
-//! * [`module`] —— 编译期模块描述符 + 依赖检查 + 顺序装载/逆序卸载
 //! * [`trap`]   —— 陷入帧与「名字 → 处理函数」的系统调用分发表
 //! * [`sched`]  —— 调度策略：QoS 四档 + 用量衰减 + 各档最低份额 + 唤醒延迟直方图（宿主可模拟测试）
 //! * [`argcase`] —— 系统调用参数用例生成：确定性伪随机数、边界值、避开受保护区间的地址规划（健壮性测试共用）
@@ -109,7 +108,6 @@ pub mod shard;
 pub mod smp;
 pub mod spawn_abi;
 pub mod syscall_set;
-pub mod module;
 pub mod object;
 pub mod kobj_type;
 pub mod objtable;

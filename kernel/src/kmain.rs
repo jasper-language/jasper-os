@@ -143,22 +143,17 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         }),
         // 内核堆（Box/Vec/String 可用，按需增长）。首批映射失败时启动停止。
         Stage::Heap => stage(ctx, s, |_| mm::heap::init().ok()),
-        // 堆就绪：按启动期容量安装对象表、实时表，并把任务表扩到启动期容量（含内核栈；HARDEN-1B）。
-        // 容量越界、放不进内存或记录损坏都会在这里拒绝启动（`bootcap::apply` 自行报告并停止）。
-        // 之后把堆的空闲余量补回安装前的值（见 `heap::ensure_free`）。
+        // 堆就绪：校验启动期容量记录与内存预算。对象表、实时表和任务表由模块激活安装，
+        // 这样阶段只保留容量验证这一真实内存顺序约束。
         Stage::Capacity => stage(ctx, s, |ctx| {
-            let (_, heap_slack, _, _) = mm::heap::stats();
-            let cap = bootcap::apply();
-            if mm::heap::ensure_free(heap_slack).is_err() {
-                kprintln!("[JSR-SCHED] capacity heap_slack_restore_failed want={}", heap_slack);
-            }
+            let cap = bootcap::validate();
             ctx.capacity = Some(cap);
             Some(())
         }),
-        // DRV-1B：启动期取得 PCI 配置空间访问者（ECAM 或传统端口），穷举总线并建立只读设备表。
-        // 依赖内核映射服务与堆（ECAM 窗口映射、后端对象）。平台没有 PCI 时设备表为空，不算失败。
+        // DRV-1B：硬件顺序阶段只取得 PCI 配置空间访问者（ECAM 或传统端口）。总线枚举和
+        // 只读设备表属于 `devices` 模块激活；平台没有 PCI 时激活出空表，不算失败。
         Stage::Devices => stage(ctx, s, |ctx| {
-            pci::init(ctx.boot);
+            pci::prepare(ctx.boot);
             Some(())
         }),
         // POL-2：系统 Profile（模块面 + 参数档）在堆就绪后立刻校验；不合法就拒绝启动，
@@ -171,8 +166,8 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
             }
             Some(())
         }),
-        // issue #6：按依赖顺序装配生效 Profile 的模块；只有初始化成功的模块能力被发布，
-        // 之后的能力查询（包括多模式判定）读的是发布结果而不是声明表。
+        // issue #6：按依赖顺序装配生效 Profile 的模块；对象、任务、实时、作业与设备服务
+        // 的初始化在这里发生。只有激活成功的模块能力被发布。
         Stage::Assembly => stage(ctx, s, |_| {
             let assembly_failed = assembly::boot();
             if assembly_failed > 0 {

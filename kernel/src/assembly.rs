@@ -10,8 +10,8 @@
 //! 因此「装配前查询」一律得到不可用，而不是回落到声明表。
 //!
 //! # 绑定的含义
-//! 内核的子系统（对象表、任务表、内核堆、定时器、实时表）由启动阶段按硬件约束依次建立，
-//! 这些阶段步骤保留在 `kmain`；模块的激活函数在其后检查该模块对外服务真正依赖的状态是否已经建立。
+//! 启动阶段只建立有真实硬件顺序约束的基础（堆、定时器、PCI 配置空间访问者等）。对象表、
+//! 任务表、实时表、作业队列和 PCI 设备表由对应模块的激活函数建立；激活成功后才发布能力。
 //! 这些模块都是启动期常驻服务，没有停用函数（停用请求会得到 `permanent`）。
 //!
 //! # 锁序
@@ -22,7 +22,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::assembly::{self, Assembly, AuditError, Binding, Policy};
 
-use crate::{clock, kprintln, profile};
+use crate::{bootcap, clock, job, kprintln, pci, profile};
 
 /// 生效 Profile 的静态副本（装配保存 `&'static` 引用）。
 static ACTIVE: kernel_core::profile::SystemProfile = profile::ACTIVE;
@@ -31,25 +31,42 @@ static ACTIVE: kernel_core::profile::SystemProfile = profile::ACTIVE;
 static PUBLISHED: AtomicU32 = AtomicU32::new(0);
 
 /// 内核能构建的全部模块的绑定（生效 Profile 未声明的条目被忽略）。
-static BINDINGS: [Binding; 8] = [
-    Binding { module: "core", activate: core_ready, deactivate: None },
+static BINDINGS: [Binding; 9] = [
+    Binding { module: "core", activate: core_activate, deactivate: None },
     Binding { module: "memory", activate: memory_ready, deactivate: None },
     Binding { module: "time", activate: time_ready, deactivate: None },
-    Binding { module: "sched", activate: sched_ready, deactivate: None },
+    Binding { module: "sched", activate: sched_activate, deactivate: None },
     Binding { module: "channel", activate: channel_ready, deactivate: None },
-    Binding { module: "realtime", activate: realtime_ready, deactivate: None },
-    Binding { module: "job", activate: job_ready, deactivate: None },
+    Binding { module: "realtime", activate: realtime_activate, deactivate: None },
+    Binding { module: "job", activate: job_activate, deactivate: None },
     Binding { module: "async", activate: async_ready, deactivate: None },
+    Binding { module: "devices", activate: devices_activate, deactivate: None },
 ];
 
-/// 进程、句柄与任务服务需要对象表和任务表已按启动期容量安装。
-fn core_ready() -> Result<(), &'static str> {
-    if crate::kobj::capacity() == 0 {
-        return Err("object table not installed");
+/// `core` 模块激活时安装对象表，并执行销毁分派登记一致性检查。
+/// Install the object table and verify the destroy-dispatch registry.
+fn core_activate() -> Result<(), &'static str> {
+    let cap = bootcap::requested()?;
+    match crate::kobj::install(cap.objects) {
+        Ok(_) => {}
+        Err(None) => return Err("object table allocation failed"),
+        Err(Some(e)) => return Err(e.as_str()),
     }
-    if crate::sched::capacity() == 0 {
-        return Err("task table not installed");
+    match crate::kobj::verify_destroy_dispatch() {
+        Ok((outside, none)) => kprintln!(
+            "[JSR-LIFE] destroy_dispatch outside_lock={} none={} none_empty=true destroyed_when_none=0 hooks_match_registry=true",
+            outside,
+            none
+        ),
+        Err(reason) => {
+            kprintln!(
+                "[JSR-LIFE] destroy_dispatch consistency=failed reason={} none_empty=false destroyed_when_none=unknown hooks_match_registry=false",
+                reason
+            );
+            return Err(reason);
+        }
     }
+    kprintln!("[JSR-ASSEMBLY] activate module=core objects={}", crate::kobj::capacity());
     Ok(())
 }
 
@@ -70,11 +87,21 @@ fn time_ready() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// 调度服务需要任务表已安装且至少容纳引导线程之外的任务。
-fn sched_ready() -> Result<(), &'static str> {
+/// `sched` 模块激活时把任务表扩到启动期容量，并为新槽位预留内核栈。
+/// Grow the task table and reserve kernel stacks during scheduler-module activation.
+fn sched_activate() -> Result<(), &'static str> {
+    let cap = bootcap::requested()?;
+    let stacks = match crate::sched::grow(cap.tasks) {
+        Ok(n) if n == cap.tasks => n,
+        Ok(_) => return Err("task table capacity mismatch"),
+        Err(crate::sched::GrowError::OutOfMemory { .. }) => return Err("task table allocation failed"),
+        Err(crate::sched::GrowError::Shrink) => return Err("task table shrink"),
+        Err(crate::sched::GrowError::NotQuiescent) => return Err("task table not quiescent"),
+    };
     if crate::sched::capacity() < 2 {
         return Err("task table too small");
     }
+    kprintln!("[JSR-ASSEMBLY] activate module=sched tasks={} stacks={}", crate::sched::capacity(), stacks);
     Ok(())
 }
 
@@ -86,20 +113,41 @@ fn channel_ready() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// 实时服务需要实时参数表已按启动期容量安装。
-fn realtime_ready() -> Result<(), &'static str> {
-    if crate::rt::capacity() == 0 {
-        return Err("realtime table not installed");
+/// `realtime` 模块激活时安装实时准入表容量。
+/// Install the real-time admission-table capacity.
+fn realtime_activate() -> Result<(), &'static str> {
+    let cap = bootcap::requested()?;
+    match crate::rt::install(cap.rt) {
+        Ok(_) => {}
+        Err(None) => return Err("realtime table allocation failed"),
+        Err(Some(e)) => return Err(e.as_str()),
     }
+    kprintln!("[JSR-ASSEMBLY] activate module=realtime rt={}", crate::rt::capacity());
     Ok(())
 }
 
-/// 作业服务：作业队列在启动时必须为空（没有残留作业）。
-fn job_ready() -> Result<(), &'static str> {
-    let s = crate::job::stats();
-    if s.total != 0 {
+/// `job` 模块激活时建立本次启动唯一的空作业队列。
+/// Establish the single empty boot-time job queue.
+fn job_activate() -> Result<(), &'static str> {
+    job::activate()?;
+    let s = job::stats();
+    if !job::active() || s.total != 0 {
         return Err("job queue not empty at boot");
     }
+    kprintln!("[JSR-ASSEMBLY] activate module=job queue=empty");
+    Ok(())
+}
+
+/// `devices` 模块激活时建立 PCI 只读设备表。
+/// Build the read-only PCI device table during device-module activation.
+fn devices_activate() -> Result<(), &'static str> {
+    pci::activate()?;
+    let table = pci::table();
+    kprintln!(
+        "[JSR-ASSEMBLY] activate module=devices pci={} functions={}",
+        table.mechanism.as_str(),
+        table.functions()
+    );
     Ok(())
 }
 
@@ -136,6 +184,8 @@ pub fn boot() -> u32 {
             return 1;
         }
     };
+    bootcap::restore_heap();
+    bootcap::report_boot();
     for k in 0..asm.len() {
         let Some(name) = asm.order(k) else { break };
         let (state, reason) = asm.state(name).unwrap_or((assembly::State::Declared, ""));

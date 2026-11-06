@@ -1855,20 +1855,32 @@ check_isa3b() { # RISC-V32 移植第二阶段：内嵌用户程序（ELF32 装�
 
 check_asm1() {  # issue #6 第一切片：服务装配——按依赖顺序启动、只发布初始化成功的能力、
                 # 发布掩码与装配状态自动比对、重复启动与停用常驻服务被拒
+  local last_activation_at cap_at
+  last_activation_at=$(grep -nE '\[JSR-ASSEMBLY\] activate module=(core|sched|realtime|job|devices)' "$SERIAL" 2>/dev/null \
+    | cut -d: -f1 | sort -n | tail -1)
+  cap_at=$(grep -n -m1 '^\[JSR-CAP\] boot ' "$SERIAL" 2>/dev/null | cut -d: -f1)
   if has '\[JSR-ASSEMBLY\] module=core order=0 state=ready reason=' \
      && has '\[JSR-ASSEMBLY\] module=async order=7 state=ready reason=' \
-     && has '\[JSR-ASSEMBLY\] summary profile=headless modules=8 ready=8 failed=0 blocked=0 declared=9 published=9 pre_publish=0 audit=ok restart=system\.module\.error\.already_started stop_core=system\.module\.error\.in_use' \
+     && has '\[JSR-ASSEMBLY\] module=devices order=8 state=ready reason=' \
+     && has '\[JSR-ASSEMBLY\] activate module=core objects=[1-9][0-9]*' \
+     && has '\[JSR-ASSEMBLY\] activate module=sched tasks=[1-9][0-9]* stacks=[1-9][0-9]*' \
+     && has '\[JSR-ASSEMBLY\] activate module=realtime rt=[1-9][0-9]*' \
+     && has '\[JSR-ASSEMBLY\] activate module=job queue=empty' \
+     && has '\[JSR-ASSEMBLY\] activate module=devices pci=(ecam|port) functions=[1-9][0-9]*' \
+     && has '^\[JSR-PCI\] summary mechanism=(ecam|port) .* failed=0' \
+     && [ -n "$last_activation_at" ] && [ -n "$cap_at" ] && [ "$last_activation_at" -lt "$cap_at" ] \
+     && has '\[JSR-ASSEMBLY\] summary profile=headless modules=9 ready=9 failed=0 blocked=0 declared=10 published=10 pre_publish=0 audit=ok restart=system\.module\.error\.already_started stop_core=system\.module\.error\.in_use' \
      && has '\[JSR-PROFILE\] summary profiles=2 rejects=4 gates=3 renders=2 checks=17 failed=0'; then
-    record ASM1 PASS "生效 Profile 8 个模块按依赖顺序（core 先）全部就绪；装配前发布掩码为 0，装配后 9 项声明能力全部发布且审计一致；重复启动被拒（already_started）、停用仍被依赖的 core 被拒（in_use）"
+    record ASM1 PASS "生效 Profile 9 个模块按依赖顺序全部就绪；对象、任务、实时、作业与 PCI 设备服务均由激活建立；装配前发布掩码为 0，装配后 10 项声明能力全部发布且审计一致；重复启动与停用常驻 core 被拒"
   else
-    record ASM1 FAIL "缺少 [JSR-ASSEMBLY] 关键标记：模块未全部就绪、发布与声明不一致、审计失败或重复启动/停用未被拒"
+    record ASM1 FAIL "缺少 [JSR-ASSEMBLY] 激活证据：模块未全部就绪、服务安装仍早于装配、发布与声明不一致、审计失败或重复启动/停用未被拒"
   fi
 }
 
 check_pol2() {  # POL-2：系统 Profile——启动期校验、两份内建 Profile 的服务面真实不同、
                 # 四类非法 Profile 各自给出结构化拒绝原因、结构化描述可渲染
-  if has '\[JSR-PROFILE\] active name=headless valid=true params=(standard|compact) modules=8 services=11 capabilities=9 guarantees=2' \
-     && has '\[JSR-PROFILE\] table idx=1 name=headless-min valid=true modules=4 services=8' \
+  if has '\[JSR-PROFILE\] active name=headless valid=true params=(standard|compact) modules=9 services=12 capabilities=10 guarantees=2' \
+     && has '\[JSR-PROFILE\] table idx=1 name=headless-min valid=true modules=5 services=9' \
      && has '\[JSR-PROFILE\] gate profile=headless op=system\.async\.ring\.create allowed=true' \
      && has '\[JSR-PROFILE\] gate profile=headless-min op=system\.async\.ring\.create allowed=false' \
      && has '\[JSR-PROFILE\] gate profile=headless-min op=system\.time\.now allowed=true' \
@@ -1879,7 +1891,7 @@ check_pol2() {  # POL-2：系统 Profile——启动期校验、两份内建 Pro
      && has '\[JSR-PROFILE\] render idx=0 bytes=[0-9]+ head=profile=headless' \
      && has '\[JSR-PROFILE\] render idx=1 bytes=[0-9]+ head=profile=headless-min' \
      && has '\[JSR-PROFILE\] summary profiles=2 rejects=4 gates=3 renders=2 checks=17 failed=0'; then
-    record POL2 PASS "启动期校验通过：headless（6 模块 / 10 服务 / 6 能力）与 headless-min（4 模块 / 8 服务）服务面真实不同（异步环在精简档被门拒绝）；缺依赖 / 能力冲突 / 参数下限不可满足 / 未授权热加载四类各自给出结构化拒绝码；结构化描述可渲染；14 项断言 0 失败"
+    record POL2 PASS "启动期校验通过：headless（9 模块 / 12 服务 / 10 能力）与 headless-min（5 模块 / 9 服务）服务面真实不同（异步环在精简档被门拒绝）；缺依赖 / 能力冲突 / 参数下限不可满足 / 未授权热加载四类各自给出结构化拒绝码；结构化描述可渲染；17 项断言 0 失败"
   else
     record POL2 FAIL "缺少 [JSR-PROFILE] 关键标记、结构化拒绝不全、两份 Profile 服务面相同或 failed≠0"
   fi

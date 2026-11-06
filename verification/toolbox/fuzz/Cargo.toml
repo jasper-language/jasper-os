@@ -214,13 +214,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "module_mgr"
-path = "fuzz_targets/module_mgr.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "dirty_slots"
 path = "fuzz_targets/dirty_slots.rs"
 test = false

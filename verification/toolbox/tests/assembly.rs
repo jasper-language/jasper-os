@@ -1,10 +1,9 @@
-//! issue #6 第一片：服务装配契约 kernel_core::assembly 的差分性质测试、Miri 固定序列与 Loom 发布协议模型；
-//! 以及既有 kernel_core::module::ModuleManager（补链）的差分性质测试。参照实现用标准库直接写出规格。
+//! issue #6：服务装配契约 kernel_core::assembly 的差分性质测试、Miri 固定序列与 Loom 发布协议模型。
+//! 参照实现用标准库直接写出规格。
 use std::cell::RefCell;
 
 use kernel_core::assembly::{mask_has, Assembly, AssemblyError, Availability, Binding, Policy, State};
 use kernel_core::config::KernelConfig;
-use kernel_core::module::{ModuleDescriptor, ModuleError, ModuleManager};
 use kernel_core::profile::{self, ModuleDecl, SchedClass, SystemProfile};
 use proptest::prelude::*;
 
@@ -220,10 +219,6 @@ proptest! {
         check_case(&c);
     }
 
-    #[test]
-    fn module_manager_matches_reference(ops in proptest::collection::vec((0u8..3, 0usize..5), 0..24)) {
-        module_manager_case(&ops);
-    }
 }
 
 /// 依赖环在构造时被拒（两个模块互相依赖）。
@@ -248,93 +243,6 @@ fn fixed_sequence_under_miri() {
     check_case(&base);
     check_case(&Case { ok: vec![true, false, true, true], ..base.clone() });
     check_case(&Case { ok: vec![true, false, true, true], all_or_nothing: false, ..base.clone() });
-    module_manager_case(&[(0, 0), (0, 1), (0, 2), (1, 0), (0, 4), (1, 2), (2, 0), (0, 3)]);
-}
-
-// ---- 补链：既有 ModuleManager ----------------------------------------------------
-
-thread_local! {
-    static MM_LOG: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
-}
-fn mm_log(s: &'static str) {
-    MM_LOG.with(|l| l.borrow_mut().push(s));
-}
-static MA: ModuleDescriptor = ModuleDescriptor { name: "ma", requires: &[], init: || { mm_log("i:ma"); Ok(()) }, fini: || mm_log("f:ma") };
-static MB: ModuleDescriptor = ModuleDescriptor { name: "mb", requires: &["ma"], init: || { mm_log("i:mb"); Ok(()) }, fini: || mm_log("f:mb") };
-static MC: ModuleDescriptor = ModuleDescriptor { name: "mc", requires: &["ma", "mb"], init: || { mm_log("i:mc"); Ok(()) }, fini: || mm_log("f:mc") };
-static MD: ModuleDescriptor = ModuleDescriptor { name: "md", requires: &[], init: || { mm_log("i:md"); Ok(()) }, fini: || mm_log("f:md") };
-static ME: ModuleDescriptor = ModuleDescriptor { name: "me", requires: &["md"], init: || { mm_log("i:me"); Err("boom") }, fini: || mm_log("f:me") };
-static POOL: [&ModuleDescriptor; 5] = [&MA, &MB, &MC, &MD, &ME];
-
-/// ops：(0=load,1=unload,2=unload_all, 下标)。参照模型为已装载名字的 Vec；容量 3。
-fn module_manager_case(ops: &[(u8, usize)]) {
-    MM_LOG.with(|l| l.borrow_mut().clear());
-    let mut mm: ModuleManager<3> = ModuleManager::new();
-    let mut model: Vec<&'static ModuleDescriptor> = Vec::new();
-    let mut expect_log: Vec<&'static str> = Vec::new();
-    for &(op, k) in ops {
-        let d = POOL[k];
-        match op {
-            0 => {
-                let want = if model.iter().any(|m| m.name == d.name) {
-                    Err(ModuleError::AlreadyLoaded(d.name))
-                } else if let Some(r) = d.requires.iter().find(|r| !model.iter().any(|m| m.name == **r)) {
-                    Err(ModuleError::MissingDependency(d.name, r))
-                } else if model.len() == 3 {
-                    Err(ModuleError::TableFull)
-                } else {
-                    expect_log.push(match d.name { "ma" => "i:ma", "mb" => "i:mb", "mc" => "i:mc", "md" => "i:md", _ => "i:me" });
-                    if d.name == "me" {
-                        Err(ModuleError::InitFailed("me", "boom"))
-                    } else {
-                        model.push(d);
-                        Ok(())
-                    }
-                };
-                assert_eq!(mm.load(d), want);
-            }
-            1 => {
-                let want = match model.iter().position(|m| m.name == d.name) {
-                    None => Err(ModuleError::NotLoaded),
-                    Some(i) => match model.iter().find(|m| m.requires.contains(&d.name)) {
-                        Some(u) => Err(ModuleError::InUse(d.name, u.name)),
-                        None => {
-                            model.remove(i);
-                            expect_log.push(fini_name(d.name));
-                            Ok(())
-                        }
-                    },
-                };
-                assert_eq!(mm.unload(d.name), want);
-            }
-            _ => {
-                let n = model.len();
-                while let Some(m) = model.pop() {
-                    expect_log.push(fini_name(m.name));
-                }
-                assert_eq!(mm.unload_all(), n);
-            }
-        }
-        // 闭包不变量：每个已装载模块的依赖都已装载，且装载顺序中依赖在前。
-        let names: Vec<&str> = mm.loaded().map(|m| m.name).collect();
-        assert_eq!(names, model.iter().map(|m| m.name).collect::<Vec<_>>());
-        for (i, m) in mm.loaded().enumerate() {
-            for r in m.requires {
-                assert!(names[..i].contains(r));
-            }
-        }
-    }
-    assert_eq!(MM_LOG.with(|l| l.borrow().clone()), expect_log);
-}
-
-fn fini_name(n: &str) -> &'static str {
-    match n {
-        "ma" => "f:ma",
-        "mb" => "f:mb",
-        "mc" => "f:mc",
-        "md" => "f:md",
-        _ => "f:me",
-    }
 }
 
 // ---- Loom：内核发布协议模型 ------------------------------------------------------

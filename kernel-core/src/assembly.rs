@@ -664,7 +664,7 @@ mod tests {
         fn ok() -> Result<(), &'static str> {
             Ok(())
         }
-        let names = ["core", "memory", "time", "sched", "channel", "realtime", "job", "async"];
+        let names = ["core", "memory", "time", "sched", "channel", "realtime", "job", "async", "devices"];
         let binds: Vec<Binding> = names.iter().map(|n| b(n, ok, None)).collect();
         let mut a = Assembly::new(&HEADLESS, &binds).unwrap();
         assert_eq!(a.order(0), Some("core"));

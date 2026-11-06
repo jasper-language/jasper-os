@@ -40,9 +40,10 @@ pub enum Stage {
     KernelMap = 4,
     /// 内核堆首批映射。First mapping of the kernel heap.
     Heap = 5,
-    /// 启动期容量：对象表、实时表、任务表与内核栈。Boot capacity: object, RT and task tables.
+    /// 启动期容量记录校验与内存预算。Boot capacity validation and memory budget.
     Capacity = 6,
-    /// 设备枚举（PCI 配置空间访问者与只读设备表）。Device enumeration (PCI config access, table).
+    /// PCI 配置空间访问者准备；设备表建立属于服务激活。
+    /// Prepare the PCI config-space accessor; building the device table is service activation.
     Devices = 7,
     /// 系统 Profile 校验（模块面与参数档）。System Profile validation (modules and parameters).
     Profile = 8,
@@ -132,9 +133,9 @@ const fn bits2(a: Stage, b: Stage) -> u32 {
 /// 依赖说明 / rationale：
 /// - Platform 需要控制台报告异常；Timer 需要异常/中断入口；
 /// - Frames 需要引导交接信息与控制台（不依赖定时器）；KernelMap 需要页帧分配页表；
-/// - Heap 需要映射器与页帧；Capacity 在堆上安装对象表、实时表与任务栈；
-/// - Devices 需要映射器（ECAM 窗口）与堆（设备表）；Profile 校验需要堆（模块表）；
-/// - Assembly 的就绪检查读取定时器、启动期容量（对象表、实时表、任务表）与校验过的 Profile；
+/// - Heap 需要映射器与页帧；Capacity 只校验容量记录与内存预算，表由后续模块激活安装；
+/// - Devices 需要映射器（ECAM 窗口）与堆，只准备硬件配置空间访问者；Profile 校验需要堆（模块表）；
+/// - Assembly 依赖已校验的容量、硬件访问准备和 Profile，并由模块激活安装对象、任务、实时与设备表；
 /// - SchedMode 读 Assembly 发布的能力；Space 准备内核页表，需要映射器和堆；
 /// - Smp 的启动帧映射到内核空间，每核数据和任务表来自启动期容量，其他处理器要接定时器；
 /// - HighRes 和 IdleTick 写每核状态，所以排在其他处理器上线之后；
@@ -152,7 +153,10 @@ pub const GRAPH: [StageSpec; Stage::COUNT] = [
     StageSpec {
         stage: Stage::Assembly,
         name: "assembly",
-        requires: Stage::Timer.bit() | Stage::Capacity.bit() | Stage::Profile.bit(),
+        requires: Stage::Timer.bit()
+            | Stage::Capacity.bit()
+            | Stage::Devices.bit()
+            | Stage::Profile.bit(),
     },
     StageSpec { stage: Stage::SchedMode, name: "sched_mode", requires: Stage::Assembly.bit() },
     StageSpec { stage: Stage::Space, name: "space", requires: bits2(Stage::KernelMap, Stage::Heap) },

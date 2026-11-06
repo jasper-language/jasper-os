@@ -477,7 +477,7 @@ pub const HEADLESS_MODULES: &[ModuleDecl] = &[
     ModuleDecl {
         name: "realtime",
         provides: &["sched.realtime"],
-        requires: &["kernel.core"],
+        requires: &["kernel.core", "sched.qos"],
         services: &[],
         hot_load: false,
         sched_class: SchedClass::Realtime,
@@ -503,6 +503,16 @@ pub const HEADLESS_MODULES: &[ModuleDecl] = &[
         sched_class: SchedClass::Interactive,
         min_tasks: 0,
         min_objects: 128,
+    },
+    ModuleDecl {
+        name: "devices",
+        provides: &["device.pci"],
+        requires: &["kernel.core", "memory.virtual"],
+        services: &["system.device"],
+        hot_load: false,
+        sched_class: SchedClass::Interactive,
+        min_tasks: 0,
+        min_objects: 64,
     },
 ];
 
@@ -555,6 +565,16 @@ pub const HEADLESS_MIN_MODULES: &[ModuleDecl] = &[
         sched_class: SchedClass::Interactive,
         min_tasks: 32,
         min_objects: 0,
+    },
+    ModuleDecl {
+        name: "devices",
+        provides: &["device.pci"],
+        requires: &["kernel.core", "memory.virtual"],
+        services: &["system.device"],
+        hot_load: false,
+        sched_class: SchedClass::Interactive,
+        min_tasks: 0,
+        min_objects: 64,
     },
 ];
 
