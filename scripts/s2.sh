@@ -114,6 +114,7 @@ set +e
 hang_watch_on "$scale_out" "${S2_QEMU_TIMEOUT:-600}"
 timeout "${S2_QEMU_TIMEOUT:-600}" qemu-system-x86_64 -accel tcg \
   -drive "format=raw,file=$scale_out/s2.img" -smp "$cpus" -m 256M \
+  -device virtio-rng-pci \
   -serial stdio -display none -monitor "unix:$hang_sock,server,nowait" -no-reboot \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$scale_out/serial.log" 2>&1
 rc=$?
