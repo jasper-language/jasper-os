@@ -170,7 +170,17 @@ fn closing_and_buffer() {
     let quota_before = proc::ring_quota(pid);
     check(proc::exit_idle(pid, 0), "无线程进程未能退出"); // 关闭句柄表 ⇒ Ring 外部所有权归零 ⇒ closing
     let after = ring::view(rid);
-    let closing_ok = matches!(after, Some(v) if v.closing && v.ready == 0 && v.in_flight == 2);
+    let closing_ok = matches!(
+        after,
+        Some(v) if v.closing
+            && v.ready == 0
+            && v.in_flight == 2
+            && v.running_backends == 2
+            && v.backends_created == 5
+            && v.backends_started == 4
+            && v.backends_released == 3
+            && v.started_backends_released == 2
+    );
     // 进程已退出：提交原子失败，配额不变
     let late = ring::submit_for(pid, h, &Sqe { op: abi::SYSTEM_TIME_NOW, flags: 0, user_tag: 6, arg0: 0, arg1: 0 });
     let quota_mid = proc::ring_quota(pid);
@@ -178,13 +188,28 @@ fn closing_and_buffer() {
     let (live_mid, _, _) = kobj::stats();
     // 收尾：可中止的报告静止；不可中止的自然结束 ⇒ 最后一个控制块销毁 ⇒ Ring 死亡入清理队列
     let q1 = abortable.map(|id| ring::manual_quiesce(rid, id)).unwrap_or(false);
-    let still = ring::view(rid).map(|v| v.in_flight);
+    let after_abort = ring::view(rid);
+    let abort_accounting_ok = matches!(
+        after_abort,
+        Some(v) if v.in_flight == 1
+            && v.running_backends == 1
+            && v.backends_created == 5
+            && v.backends_started == 4
+            && v.backends_released == 4
+            && v.started_backends_released == 3
+    );
     let f1 = nonab.map(|id| ring::manual_finish(rid, id, 7)).unwrap_or(false);
     let gone_before_cleanup = ring::view(rid).is_none();
     kobj::run_cleanup(usize::MAX);
     let (live_end, pending_end, _) = kobj::stats();
     let quota_end = proc::ring_quota(pid);
-    let drained = q1 && f1 && still == Some(1) && gone_before_cleanup && live_end + 1 == live_mid && pending_end == 0 && quota_end == Some(ResourceQuota::default());
+    let drained = q1
+        && f1
+        && abort_accounting_ok
+        && gone_before_cleanup
+        && live_end + 1 == live_mid
+        && pending_end == 0
+        && quota_end == Some(ResourceQuota::default());
     check(closing_ok, "closing 后状态不正确");
     check(late_ok, "进程退出后的提交未原子失败或配额被改动");
     check(drained, "closing 收尾或 Ring 销毁不正确");
@@ -203,6 +228,16 @@ fn closing_and_buffer() {
         f1,
         gone_before_cleanup && live_end + 1 == live_mid,
         quota_end == Some(ResourceQuota::default())
+    );
+    kprintln!(
+        "[JSR-RING] backend accounting after_close_running={} after_abort_running={} created={} started={} released={} started_released={} accounted={}",
+        after.map(|v| v.running_backends).unwrap_or(0),
+        after_abort.map(|v| v.running_backends).unwrap_or(0),
+        after_abort.map(|v| v.backends_created).unwrap_or(0),
+        after_abort.map(|v| v.backends_started).unwrap_or(0),
+        after_abort.map(|v| v.backends_released).unwrap_or(0),
+        after_abort.map(|v| v.started_backends_released).unwrap_or(0),
+        abort_accounting_ok
     );
     proc::reap(pid);
     kobj::run_cleanup(usize::MAX);

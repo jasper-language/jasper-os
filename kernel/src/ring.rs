@@ -23,7 +23,7 @@
 //! 穷举匹配（无兜底分支），加入新后端时编译器指出每一处必须补的位置。
 //!
 //! 访问用户缓冲区的请求（recv、带固定的人工后端）遵守「后端静止之后才发布完成」；它们持有的资源
-//! （固定的页帧、对端点的内部引用）随后端一起在请求结束时释放（`retire_in`）。
+//! （固定的页帧、对端点的内部引用）随后端一起经统一的 `BackendAction::Retire` 分派释放。
 //!
 //! # 保活与收尾
 //! * 只要还有尚未销毁的请求控制块，Ring 就持有**自身的一个内部引用**——请求的收尾不依赖用户句柄：
@@ -112,6 +112,30 @@ enum Backend {
     },
 }
 
+impl Backend {
+    /// 已登记后端所属的静态种类；内核自检的人工后端返回 `None`。
+    /// Registered backend kind; the kernel-only manual backend has no registered kind.
+    fn kind(&self) -> Option<Kind> {
+        Some(match self {
+            Backend::SubscriptionWait(_) => Kind::SubscriptionWait,
+            Backend::Wait { .. } => Kind::Wait,
+            Backend::Recv(_) => Kind::Recv,
+            Backend::Manual { .. } => return None,
+            Backend::ExitWait { .. } => Kind::ExitWait,
+            Backend::InterruptWait { .. } => Kind::InterruptWait,
+        })
+    }
+}
+
+/// 已放入执行中集合的一次后端。`started` 只用于核对状态机与后端资源的两本账：
+/// 人工后端的排队态拥有资源但尚未调用 `start`，关闭时仍需恰好释放一次。
+/// A backend owned by the running set; `started` separates accepted resources from state-machine starts.
+struct BackendEntry {
+    request: u64,
+    backend: Backend,
+    started: bool,
+}
+
 /// 一次提交要做的工作（提交时的可信快照；用户内存已在此之前复制或固定）。
 pub(crate) enum Work {
     SubscriptionWait(Box<crate::subscription::WaitTarget>),
@@ -174,11 +198,34 @@ pub struct RingObj {
     owner: ObjId,
     sm: StateMachine,
     /// 正在执行的请求及其后端（请求静止后移除）。
-    running: Vec<(u64, Backend)>,
+    running: Vec<BackendEntry>,
+    /// 后端生命周期账：创建 = 尚未释放 + 已释放。
+    backends_created: u64,
+    /// 状态机已启动的后端数；释放数不得超过它。
+    backends_started: u64,
+    /// 后端资源累计释放数。
+    backends_released: u64,
+    /// 已启动后端累计释放数。
+    started_backends_released: u64,
+    /// 已被状态机接受、但仍由当前提交流程调用栈持有的后端数（允许交付路径重入收尾）。
+    backends_in_call: u32,
     /// Author: chatgpt。对象锁串行化的广播凭据；每项另持一份Ring保活引用到resume清理。
     event_waiters: Vec<kernel_core::event_wait::Key>,
     /// 是否持有「自身的内部引用」（有未销毁的控制块时持有）。
     pinned: bool,
+}
+
+impl Drop for RingObj {
+    fn drop(&mut self) {
+        assert!(self.running.is_empty(), "Ring dropped with an owned backend");
+        assert_eq!(self.backends_released, self.backends_created, "Ring dropped before releasing every backend");
+        assert_eq!(
+            self.started_backends_released,
+            self.backends_started,
+            "Ring dropped before releasing every started backend"
+        );
+        assert_eq!(self.backends_in_call, 0, "Ring dropped while a submit call owned a backend");
+    }
 }
 
 /// Ring 的可观测状态（诊断与验收用）。
@@ -192,6 +239,18 @@ pub struct RingView {
     pub ready: usize,
     /// 尚未销毁的控制块数。
     pub in_flight: usize,
+    /// 执行中集合里仍归 Ring 所有的后端资源数。
+    pub running_backends: usize,
+    /// 已接受提交累计创建的后端生命周期数。
+    pub backends_created: u64,
+    /// 已成功调用状态机 `start` 的次数。
+    pub backends_started: u64,
+    /// 已释放的后端生命周期数。
+    pub backends_released: u64,
+    /// 已启动后端中已经释放的次数。
+    pub started_backends_released: u64,
+    /// 已接受但仍由当前提交流程调用栈持有的后端数。
+    pub backends_in_call: u32,
     /// 已裁决但尚未发布的请求数。
     pub decided_unpublished: usize,
     /// 是否已 closing。
@@ -205,28 +264,20 @@ impl RingObj {
             reserved: self.sm.reserved(),
             ready: self.sm.ready(),
             in_flight: self.sm.in_flight(),
+            running_backends: self.running.len(),
+            backends_created: self.backends_created,
+            backends_started: self.backends_started,
+            backends_released: self.backends_released,
+            started_backends_released: self.started_backends_released,
+            backends_in_call: self.backends_in_call,
             decided_unpublished: self.sm.decided_unpublished(),
             closing: self.sm.is_closing(),
         }
     }
 
-    fn take_running(&mut self, id: u64) -> Option<Backend> {
-        let i = self.running.iter().position(|(rid, _)| *rid == id)?;
-        Some(self.running.swap_remove(i).1)
-    }
-
-    /// 推进到期的等待后端：截止 tick 已到 ⇒ 自然结束并静止。
-    fn poll(&mut self, now: u64) {
-        let mut i = 0;
-        while i < self.running.len() {
-            match self.running[i] {
-                (id, Backend::Wait { deadline }) if now >= deadline => {
-                    self.running.swap_remove(i);
-                    let _ = self.sm.finish(id, 0);
-                }
-                _ => i += 1,
-            }
-        }
+    fn take_running(&mut self, id: u64) -> Option<BackendEntry> {
+        let i = self.running.iter().position(|entry| entry.request == id)?;
+        Some(self.running.swap_remove(i))
     }
 }
 
@@ -237,44 +288,242 @@ fn ring_mut(t: &mut Table, id: ObjId) -> Option<&mut RingObj> {
     }
 }
 
-/// 释放一个已结束请求的后端资源（锁内）：recv 撤销等待登记并释放端点引用；固定随之解除。
-fn retire_in(t: &mut Table, ring: ObjId, req: u64, b: Backend) {
-    match b {
-        Backend::SubscriptionWait(target)=>crate::subscription::release_target_in(t,*target,Some((ring,req))),
-        Backend::Recv(target) => ipc::release_target_in(t, *target, Some((ring, req))),
-        Backend::Manual { pins } => drop(pins),
-        Backend::ExitWait { es } => {
-            crate::exit_state::remove_waiter_in(t, es, (ring, req));
+/// 后端推进、中止与释放三类动作；锁内执行，调用者仍负责状态机的完成/静止报告。
+#[derive(Clone, Copy)]
+enum BackendAction {
+    Progress { now: u64 },
+    Abort,
+    Retire,
+}
+
+/// 一次后端动作的结果：继续等待、可完成，或资源已释放。
+enum BackendOutcome {
+    Pending(BackendEntry),
+    Complete { entry: BackendEntry, value: i64 },
+    Released,
+}
+
+/// 唯一的已启动后端分派点：按 `Kind` 穷举到每后端自己的推进、中止和释放函数。
+/// The single exhaustive dispatch point for running backends.
+fn run_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action: BackendAction) -> BackendOutcome {
+    match entry.backend.kind() {
+        Some(Kind::Wait) => wait_backend_in(entry, action),
+        Some(Kind::Recv) => recv_backend_in(t, ring, entry, action),
+        Some(Kind::ExitWait) => exit_wait_backend_in(t, ring, entry, action),
+        Some(Kind::InterruptWait) => interrupt_wait_backend_in(t, ring, entry, action),
+        Some(Kind::SubscriptionWait) => subscription_wait_backend_in(t, ring, entry, action),
+        Some(Kind::Now | Kind::Send) => panic!("an instantaneous backend entered the running set"),
+        None => manual_backend_in(entry, action),
+    }
+}
+
+/// `Wait`：到期即自然完成；中止与释放都没有额外资源。
+fn wait_backend_in(entry: BackendEntry, action: BackendAction) -> BackendOutcome {
+    let BackendEntry { request, started, backend } = entry;
+    let Backend::Wait { deadline } = backend else { panic!("Kind::Wait carried another backend") };
+    match action {
+        BackendAction::Progress { now } if now >= deadline => {
+            BackendOutcome::Complete { entry: BackendEntry { request, started, backend: Backend::Wait { deadline } }, value: 0 }
+        }
+        BackendAction::Progress { .. } => BackendOutcome::Pending(BackendEntry { request, started, backend: Backend::Wait { deadline } }),
+        BackendAction::Abort | BackendAction::Retire => BackendOutcome::Released,
+    }
+}
+
+/// `Recv`：推进时尝试原子交付；终止时撤销等待登记、释放端点引用并解除固定。
+fn recv_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action: BackendAction) -> BackendOutcome {
+    let BackendEntry { request, started, backend } = entry;
+    let Backend::Recv(target) = backend else { panic!("Kind::Recv carried another backend") };
+    match action {
+        BackendAction::Progress { .. } => match ipc::try_deliver_in(t, &target) {
+            Delivery::Empty => BackendOutcome::Pending(BackendEntry { request, started, backend: Backend::Recv(target) }),
+            Delivery::Done(value) => BackendOutcome::Complete { entry: BackendEntry { request, started, backend: Backend::Recv(target) }, value },
+        },
+        BackendAction::Abort | BackendAction::Retire => {
+            ipc::release_target_in(t, *target, Some((ring, request)));
+            BackendOutcome::Released
+        }
+    }
+}
+
+/// `ExitWait`：推进时检查退出码；终止时撤销等待登记并释放退出状态引用。
+fn exit_wait_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action: BackendAction) -> BackendOutcome {
+    let BackendEntry { request, started, backend } = entry;
+    let Backend::ExitWait { es } = backend else { panic!("Kind::ExitWait carried another backend") };
+    match action {
+        BackendAction::Progress { .. } => match crate::exit_state::code_in(t, es) {
+            Some(code) => {
+                BackendOutcome::Complete { entry: BackendEntry { request, started, backend: Backend::ExitWait { es } }, value: crate::exit_state::report(code) }
+            }
+            None => BackendOutcome::Pending(BackendEntry { request, started, backend: Backend::ExitWait { es } }),
+        },
+        BackendAction::Abort | BackendAction::Retire => {
+            crate::exit_state::remove_waiter_in(t, es, (ring, request));
             let _ = t.release_internal(es);
+            BackendOutcome::Released
         }
-        Backend::InterruptWait { irq } => {
-            crate::interrupt::cancel_wait_in(t, irq, (ring, req));
+    }
+}
+
+/// `InterruptWait`：到达由其对象同步函数推入；中止与释放撤销等待登记并释放中断对象引用。
+fn interrupt_wait_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action: BackendAction) -> BackendOutcome {
+    let BackendEntry { request, started, backend } = entry;
+    let Backend::InterruptWait { irq } = backend else { panic!("Kind::InterruptWait carried another backend") };
+    match action {
+        BackendAction::Progress { .. } => BackendOutcome::Pending(BackendEntry { request, started, backend: Backend::InterruptWait { irq } }),
+        BackendAction::Abort | BackendAction::Retire => {
+            crate::interrupt::cancel_wait_in(t, irq, (ring, request));
             let _ = t.release_internal(irq);
+            BackendOutcome::Released
         }
-        Backend::Wait { .. } => {}
+    }
+}
+
+/// `SubscriptionWait`：推进时尝试批量交付；终止时撤销订阅等待并释放订阅引用。
+fn subscription_wait_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action: BackendAction) -> BackendOutcome {
+    let BackendEntry { request, started, backend } = entry;
+    let Backend::SubscriptionWait(target) = backend else { panic!("Kind::SubscriptionWait carried another backend") };
+    match action {
+        BackendAction::Progress { .. } => match crate::subscription::deliver_in(t, &target) {
+            crate::subscription::Attempt::Empty => {
+                BackendOutcome::Pending(BackendEntry { request, started, backend: Backend::SubscriptionWait(target) })
+            }
+            crate::subscription::Attempt::Done(value) => {
+                BackendOutcome::Complete { entry: BackendEntry { request, started, backend: Backend::SubscriptionWait(target) }, value }
+            }
+        },
+        BackendAction::Abort | BackendAction::Retire => {
+            crate::subscription::release_target_in(t, *target, Some((ring, request)));
+            BackendOutcome::Released
+        }
+    }
+}
+
+/// 人工后端：推进等待外部报告；被取消时保留到显式静止；只有最终释放时丢弃固定。
+fn manual_backend_in(entry: BackendEntry, action: BackendAction) -> BackendOutcome {
+    match action {
+        BackendAction::Progress { .. } | BackendAction::Abort => BackendOutcome::Pending(entry),
+        BackendAction::Retire => {
+            let BackendEntry { backend, .. } = entry;
+            let Backend::Manual { pins } = backend else { panic!("manual backend carried another backend") };
+            drop(pins);
+            BackendOutcome::Released
+        }
+    }
+}
+
+/// 记录一笔后端资源释放，并在每次释放时核对不会超过创建与启动数。
+fn account_backend_release(r: &mut RingObj, started: bool) {
+    assert!(r.backends_released < r.backends_created, "backend released more than once");
+    r.backends_released += 1;
+    if started {
+        assert!(r.started_backends_released < r.backends_started, "started backend released more than once");
+        r.started_backends_released += 1;
+    }
+}
+
+/// 释放一个执行中后端；所有权移动保证调用点无法重复释放同一资源。
+fn release_entry_in(t: &mut Table, ring: ObjId, entry: BackendEntry) {
+    let started = entry.started;
+    match run_backend_in(t, ring, entry, BackendAction::Retire) {
+        BackendOutcome::Released => {}
+        _ => panic!("backend did not release on the retire transition"),
+    }
+    let r = ring_mut(t, ring).expect("Ring retained while releasing a backend");
+    account_backend_release(r, started);
+}
+
+/// 推进所有非中断后端并合并唯一中断对象的到达。持缓冲后端先释放资源，再由状态机发布完成。
+fn progress_backends_in(t: &mut Table, id: ObjId, now: u64) {
+    // 中断对象推进可能通过完成回调再次进入 Ring；先复制、去重并放掉 Ring 借用。
+    let interrupts = match ring_mut(t, id) {
+        Some(r) => {
+            let mut ids: Vec<ObjId> = r
+                .running
+                .iter()
+                .filter_map(|entry| match &entry.backend {
+                    Backend::InterruptWait { irq } => Some(*irq),
+                    _ => None,
+                })
+                .collect();
+            ids.sort_unstable_by_key(|id| id.raw());
+            ids.dedup();
+            ids
+        }
+        None => return,
+    };
+    for irq in interrupts {
+        crate::interrupt::sync_in(t, irq);
+    }
+
+    let requests: Vec<u64> = match ring_mut(t, id) {
+        Some(r) => r.running.iter().map(|entry| entry.request).collect(),
+        None => return,
+    };
+    for request in requests {
+        let decision = ring_mut(t, id).and_then(|r| r.sm.decision(request));
+        match decision {
+            None => {
+                // 排队态可在状态机 close 中直接销毁，但后端资源仍存在；这里补齐唯一一次释放。
+                let entry = ring_mut(t, id).and_then(|r| r.take_running(request));
+                if let Some(entry) = entry {
+                    release_entry_in(t, id, entry);
+                }
+            }
+            Some(Some(_)) => {}
+            Some(None) => {
+                let entry = ring_mut(t, id).and_then(|r| r.take_running(request));
+                let Some(entry) = entry else { continue };
+                match run_backend_in(t, id, entry, BackendAction::Progress { now }) {
+                    BackendOutcome::Pending(entry) => {
+                        if let Some(r) = ring_mut(t, id) {
+                            r.running.push(entry);
+                        }
+                    }
+                    BackendOutcome::Complete { entry, value } => {
+                        release_entry_in(t, id, entry);
+                        let r = ring_mut(t, id).expect("Ring retained while publishing backend completion");
+                        assert_eq!(r.sm.finish(request, value), Ok(Terminal::Done(value)), "backend completion lost its undecided request");
+                    }
+                    BackendOutcome::Released => panic!("backend progress released without a terminal"),
+                }
+            }
+        }
+    }
+}
+
+/// 断言创建、运行中与释放三本账一致；Ring 排空后还必须核对全部启动后端都已释放。
+fn assert_backend_accounting(r: &RingObj) {
+    if r.backends_created != r.backends_released + r.running.len() as u64 + u64::from(r.backends_in_call) {
+        crate::kprintln!(
+            "[JSR-RING-FAIL] backend accounting created={} released={} running={} in_call={} in_flight={}",
+            r.backends_created,
+            r.backends_released,
+            r.running.len(),
+            r.backends_in_call,
+            r.sm.in_flight()
+        );
+    }
+    assert_eq!(
+        r.backends_created,
+        r.backends_released + r.running.len() as u64 + u64::from(r.backends_in_call),
+        "backend lifecycle accounting diverged"
+    );
+    assert!(r.started_backends_released <= r.backends_started, "started backend release count exceeds starts");
+    if r.sm.in_flight() == 0 {
+        assert_eq!(r.backends_released, r.backends_created, "drained Ring retained an unreleased backend");
+        assert_eq!(r.started_backends_released, r.backends_started, "drained Ring skipped a started backend release");
+        assert_eq!(r.backends_in_call, 0, "drained Ring has a backend owned by a submit call");
     }
 }
 
 /// 收尾记账（每次改动状态机之后调用）：推进到期后端 → 归还已销毁控制块占用的在飞配额 →
 /// 维持「有控制块 ⇔ 持有自身内部引用」。最后一个控制块销毁且 Ring 已无外部所有者时，Ring 随之死亡并入清理队列。
 fn settle_in(t: &mut Table, id: ObjId) {
-    // 先把等待中的设备中断的新到达并入（可能完成其中的请求）；没有中断等待时不分配
+    // 推进到期等待、交付尝试与设备中断到达；统一分派见 `progress_backends_in`。
+    progress_backends_in(t, id, sched::timer_ticks());
     let Some(r) = ring_mut(t, id) else { return };
-    if r.running.iter().any(|(_, b)| matches!(b, Backend::InterruptWait { .. })) {
-        let irqs: Vec<ObjId> = r
-            .running
-            .iter()
-            .filter_map(|(_, b)| match b {
-                Backend::InterruptWait { irq } => Some(*irq),
-                _ => None,
-            })
-            .collect();
-        for irq in irqs {
-            crate::interrupt::sync_in(t, irq);
-        }
-    }
-    let Some(r) = ring_mut(t, id) else { return };
-    r.poll(sched::timer_ticks());
+    assert_backend_accounting(r);
     let mut reclaimed = 0u32;
     while r.sm.take_reclaimed().is_some() {
         reclaimed += 1;
@@ -319,10 +568,10 @@ fn enroll_wait_in(t: &mut Table, id: ObjId, caller_deadline: Option<u64>) -> Res
     let r = ring_mut(t, id).ok_or(EnrollWaitError::Refused)?;
     if r.event_waiters.len() >= sched::capacity() { return Err(EnrollWaitError::Quota); }
     r.event_waiters.try_reserve(1).map_err(|_| EnrollWaitError::Quota)?;
-    let deadline = r.running.iter().filter_map(|(_, b)| match b {
+    let deadline = r.running.iter().filter_map(|entry| match &entry.backend {
         Backend::Wait { deadline } => Some(*deadline), _ => None,
     }).chain(caller_deadline).min();
-    let donation_endpoint = r.running.iter().find_map(|(_, b)| match b {
+    let donation_endpoint = r.running.iter().find_map(|entry| match &entry.backend {
         Backend::Recv(target) => Some(ipc::recv_endpoint(target)),
         _ => None,
     });
@@ -353,16 +602,21 @@ fn retire_wait_in(t: &mut Table, id: ObjId, key: kernel_core::event_wait::Key) {
 /// 中止一个已被裁决为取消的执行中请求（锁内）：可立即停止的后端（等待、接收）释放资源并静止；
 /// 人工后端放回原处，由调用者报告静止。
 fn abort_in(t: &mut Table, ring: ObjId, req: u64) {
-    let Some(r) = ring_mut(t, ring) else { return };
-    match r.take_running(req) {
-        Some(Backend::Manual { pins }) => r.running.push((req, Backend::Manual { pins })),
-        Some(b) => {
-            retire_in(t, ring, req, b);
+    let entry = ring_mut(t, ring).and_then(|r| r.take_running(req));
+    let Some(entry) = entry else { return };
+    let started = entry.started;
+    match run_backend_in(t, ring, entry, BackendAction::Abort) {
+        BackendOutcome::Pending(entry) => {
             if let Some(r) = ring_mut(t, ring) {
-                let _ = r.sm.quiesce(req);
+                r.running.push(entry);
             }
         }
-        None => {}
+        BackendOutcome::Released => {
+            let r = ring_mut(t, ring).expect("Ring retained while aborting a backend");
+            account_backend_release(r, started);
+            assert!(r.sm.quiesce(req).is_ok(), "aborted backend did not quiesce a decided request");
+        }
+        BackendOutcome::Complete { .. } => panic!("backend completed on the abort transition"),
     }
 }
 
@@ -395,22 +649,22 @@ pub(crate) fn deliver_waiter_in(t: &mut Table, ring: ObjId, req: u64) -> bool {
     if r.sm.decision(req) != Some(None) {
         return true; // 已被取消或已结束：陈旧登记，丢弃
     }
-    let Some(Backend::Recv(target)) = r.take_running(req) else { return true };
-    match ipc::try_deliver_in(t, &target) {
-        Delivery::Empty => {
+    let Some(entry) = r.take_running(req) else { return true };
+    match run_backend_in(t, ring, entry, BackendAction::Progress { now: sched::timer_ticks() }) {
+        BackendOutcome::Pending(entry) => {
             if let Some(r) = ring_mut(t, ring) {
-                r.running.push((req, Backend::Recv(target)));
+                r.running.push(entry);
             }
             false
         }
-        Delivery::Done(v) => {
-            if let Some(r) = ring_mut(t, ring) {
-                let _ = r.sm.finish(req, v);
-            }
-            retire_in(t, ring, req, Backend::Recv(target));
+        BackendOutcome::Complete { entry, value } => {
+            release_entry_in(t, ring, entry);
+            let r = ring_mut(t, ring).expect("Ring retained while publishing recv completion");
+            assert_eq!(r.sm.finish(req, value), Ok(Terminal::Done(value)), "recv completion lost its undecided request");
             settle_in(t, ring);
             true
         }
+        BackendOutcome::Released => true,
     }
 }
 
@@ -472,7 +726,18 @@ pub fn create_for(pid: ObjId, capacity: u64) -> Result<HandleId, i64> {
         return Err(err(SYSTEM_ERROR_INVALID_ARGUMENT));
     }
     let sm = StateMachine::new(capacity as usize).ok_or(err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
-    let obj = KObject::Ring(Box::new(RingObj { owner: pid, sm, running: Vec::new(), event_waiters: Vec::new(), pinned: false }));
+    let obj = KObject::Ring(Box::new(RingObj {
+        owner: pid,
+        sm,
+        running: Vec::new(),
+        backends_created: 0,
+        backends_started: 0,
+        backends_released: 0,
+        started_backends_released: 0,
+        backends_in_call: 0,
+        event_waiters: Vec::new(),
+        pinned: false,
+    }));
     kobj::with(|t| {
         proc::syscalls_in(t, pid).map_err(perr)?;
         if proc::ring_quota_in(t, pid).and_then(|q|
@@ -515,6 +780,129 @@ fn check_sqe(sqe: &Sqe, allowed: SyscallSet) -> Result<Kind, i64> {
         return Err(err(SYSTEM_ERROR_RIGHTS_DENIED));
     }
     Ok(kind)
+}
+
+/// 状态机开始执行一笔已接受请求，并单独记一笔启动账。
+fn start_request_in(t: &mut Table, ring: ObjId, request: u64, exec: Exec) {
+    let r = ring_mut(t, ring).expect("Ring retained while starting its backend");
+    assert!(r.sm.start(request, exec).is_ok(), "accepted request did not start");
+    assert!(r.backends_started < r.backends_created, "backend started more than once");
+    r.backends_started += 1;
+}
+
+/// 把一个尚未终止的后端放入执行中集合。
+fn park_backend_in(t: &mut Table, ring: ObjId, request: u64, backend: Backend, started: bool) {
+    let r = ring_mut(t, ring).expect("Ring retained while parking its backend");
+    assert!(r.backends_in_call > 0, "parked backend has no accepted submit owner");
+    r.backends_in_call -= 1;
+    r.running.push(BackendEntry { request, backend, started });
+}
+
+/// 释放一笔已接受但未进入执行中集合的瞬时后端，并记启动后的释放账。
+fn release_accepted_work_in(t: &mut Table, ring: ObjId, work: Work) {
+    release_work_in(t, work);
+    let r = ring_mut(t, ring).expect("Ring retained while releasing an accepted backend");
+    assert!(r.backends_in_call > 0, "released backend has no accepted submit owner");
+    r.backends_in_call -= 1;
+    account_backend_release(r, true);
+}
+
+/// 完成一笔在提交内裁决的后端：先释放后端资源，再让状态机发布终态。
+fn finish_accepted_work_in(t: &mut Table, ring: ObjId, request: u64, work: Work, value: i64) {
+    release_accepted_work_in(t, ring, work);
+    let r = ring_mut(t, ring).expect("Ring retained while publishing an accepted backend");
+    assert_eq!(r.sm.finish(request, value), Ok(Terminal::Done(value)), "accepted backend lost its undecided request");
+}
+
+/// 已接受请求的唯一执行分派：外层按 `Kind` 穷举到每后端自己的启动函数。
+/// The single execution dispatch for accepted work, grouped by backend kind.
+fn launch_work_in(t: &mut Table, pid: ObjId, ring: ObjId, request: u64, deadline: u64, exec: Exec, work: Work) {
+    match work.kind() {
+        Some(Kind::SubscriptionWait) => launch_subscription_wait_in(t, ring, request, exec, work),
+        Some(Kind::Now) => launch_now_in(t, ring, request, exec, work),
+        Some(Kind::Wait) => launch_wait_in(t, ring, request, deadline, exec, work),
+        Some(Kind::Send) => launch_send_in(t, pid, ring, request, exec, work),
+        Some(Kind::Recv) => launch_recv_in(t, ring, request, exec, work),
+        Some(Kind::ExitWait) => launch_exit_wait_in(t, ring, request, exec, work),
+        Some(Kind::InterruptWait) => launch_interrupt_wait_in(t, ring, request, exec, work),
+        None => launch_manual_in(t, ring, request, work),
+    }
+}
+
+fn launch_subscription_wait_in(t: &mut Table, ring: ObjId, request: u64, exec: Exec, work: Work) {
+    let Work::SubscriptionWait(target) = work else { panic!("Kind::SubscriptionWait carried another work item") };
+    start_request_in(t, ring, request, exec);
+    match crate::subscription::deliver_in(t, &target) {
+        crate::subscription::Attempt::Empty => {
+            crate::subscription::enroll_in(t, target.sub, (ring, request));
+            park_backend_in(t, ring, request, Backend::SubscriptionWait(target), true);
+        }
+        crate::subscription::Attempt::Done(value) => {
+            finish_accepted_work_in(t, ring, request, Work::SubscriptionWait(target), value);
+        }
+    }
+}
+
+fn launch_now_in(t: &mut Table, ring: ObjId, request: u64, exec: Exec, work: Work) {
+    assert!(matches!(work, Work::Now), "Kind::Now carried another work item");
+    start_request_in(t, ring, request, exec);
+    finish_accepted_work_in(t, ring, request, Work::Now, sched::timer_ticks() as i64);
+}
+
+fn launch_wait_in(t: &mut Table, ring: ObjId, request: u64, deadline: u64, exec: Exec, work: Work) {
+    assert!(matches!(work, Work::Wait { .. }), "Kind::Wait carried another work item");
+    start_request_in(t, ring, request, exec);
+    park_backend_in(t, ring, request, Backend::Wait { deadline }, true);
+}
+
+fn launch_send_in(t: &mut Table, pid: ObjId, ring: ObjId, request: u64, exec: Exec, work: Work) {
+    let Work::Send { endpoint, body, handles } = work else { panic!("Kind::Send carried another work item") };
+    start_request_in(t, ring, request, exec);
+    let value = ipc::send_in(t, pid, endpoint, body, &handles);
+    finish_accepted_work_in(t, ring, request, Work::Send { endpoint, body: Vec::new(), handles }, value);
+}
+
+fn launch_recv_in(t: &mut Table, ring: ObjId, request: u64, exec: Exec, work: Work) {
+    let Work::Recv(target) = work else { panic!("Kind::Recv carried another work item") };
+    start_request_in(t, ring, request, exec);
+    match ipc::try_deliver_in(t, &target) {
+        Delivery::Empty => {
+            ipc::add_waiter_in(t, &target, ring, request);
+            park_backend_in(t, ring, request, Backend::Recv(target), true);
+        }
+        Delivery::Done(value) => finish_accepted_work_in(t, ring, request, Work::Recv(target), value),
+    }
+}
+
+fn launch_exit_wait_in(t: &mut Table, ring: ObjId, request: u64, exec: Exec, work: Work) {
+    let Work::ExitWait { es } = work else { panic!("Kind::ExitWait carried another work item") };
+    start_request_in(t, ring, request, exec);
+    match crate::exit_state::code_in(t, es) {
+        Some(code) => finish_accepted_work_in(t, ring, request, Work::ExitWait { es }, crate::exit_state::report(code)),
+        None => {
+            crate::exit_state::add_waiter_in(t, es, (ring, request));
+            park_backend_in(t, ring, request, Backend::ExitWait { es }, true);
+        }
+    }
+}
+
+fn launch_interrupt_wait_in(t: &mut Table, ring: ObjId, request: u64, exec: Exec, work: Work) {
+    let Work::InterruptWait { irq } = work else { panic!("Kind::InterruptWait carried another work item") };
+    start_request_in(t, ring, request, exec);
+    match crate::interrupt::submit_wait_in(t, irq, (ring, request)) {
+        Ok(None) => park_backend_in(t, ring, request, Backend::InterruptWait { irq }, true),
+        Ok(Some(value)) | Err(value) => {
+            finish_accepted_work_in(t, ring, request, Work::InterruptWait { irq }, value);
+        }
+    }
+}
+
+fn launch_manual_in(t: &mut Table, ring: ObjId, request: u64, work: Work) {
+    let Work::Manual { start, pins } = work else { panic!("manual backend kind carried another work item") };
+    if let Some(exec) = start {
+        start_request_in(t, ring, request, exec);
+    }
+    park_backend_in(t, ring, request, Backend::Manual { pins }, start.is_some());
 }
 
 /// 在锁内提交一个请求（INV-11：检查、配额预留、信用预留原子成功或原子失败）并启动其后端。
@@ -560,95 +948,11 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
         Ok(id) => id,
         Err(e) => return reject(t, work, submit_err(e)),
     };
+    r.backends_created += 1;
+    r.backends_in_call += 1;
     // 以下步骤不会失败：控制块已建立，信用已预留
-    match work {
-        Work::SubscriptionWait(target)=>{
-            let _=r.sm.start(id,exec);
-            match crate::subscription::deliver_in(t,&target) {
-                crate::subscription::Attempt::Empty=>{
-                    crate::subscription::enroll_in(t,target.sub,(ring,id));
-                    if let Some(r)=ring_mut(t,ring) {r.running.push((id,Backend::SubscriptionWait(target)));}
-                },
-                crate::subscription::Attempt::Done(value)=>{
-                    if let Some(r)=ring_mut(t,ring) {let _=r.sm.finish(id,value);}
-                    retire_in(t,ring,id,Backend::SubscriptionWait(target));
-                }
-            }
-        }
-        Work::Now => {
-            let _ = r.sm.start(id, exec);
-            let _ = r.sm.finish(id, sched::timer_ticks() as i64);
-        }
-        Work::Wait { .. } => {
-            let _ = r.sm.start(id, exec);
-            r.running.push((id, Backend::Wait { deadline }));
-        }
-        Work::Send { endpoint, body, handles } => {
-            let _ = r.sm.start(id, exec);
-            let v = ipc::send_in(t, pid, endpoint, body, &handles);
-            if let Some(r) = ring_mut(t, ring) {
-                let _ = r.sm.finish(id, v);
-            }
-        }
-        Work::Recv(target) => {
-            let _ = r.sm.start(id, exec);
-            match ipc::try_deliver_in(t, &target) {
-                Delivery::Empty => {
-                    ipc::add_waiter_in(t, &target, ring, id);
-                    if let Some(r) = ring_mut(t, ring) {
-                        r.running.push((id, Backend::Recv(target)));
-                    }
-                }
-                Delivery::Done(v) => {
-                    if let Some(r) = ring_mut(t, ring) {
-                        let _ = r.sm.finish(id, v);
-                    }
-                    retire_in(t, ring, id, Backend::Recv(target));
-                }
-            }
-        }
-        Work::ExitWait { es } => {
-            let _ = r.sm.start(id, exec);
-            match crate::exit_state::code_in(t, es) {
-                Some(code) => {
-                    // 目标已退出：立即完成（INV-13）
-                    if let Some(r) = ring_mut(t, ring) {
-                        let _ = r.sm.finish(id, crate::exit_state::report(code));
-                    }
-                    retire_in(t, ring, id, Backend::ExitWait { es });
-                }
-                None => {
-                    crate::exit_state::add_waiter_in(t, es, (ring, id));
-                    if let Some(r) = ring_mut(t, ring) {
-                        r.running.push((id, Backend::ExitWait { es }));
-                    }
-                }
-            }
-        }
-        Work::InterruptWait { irq } => {
-            let _ = r.sm.start(id, exec);
-            match crate::interrupt::submit_wait_in(t, irq, (ring, id)) {
-                Ok(None) => {
-                    if let Some(r) = ring_mut(t, ring) {
-                        r.running.push((id, Backend::InterruptWait { irq }));
-                    }
-                }
-                // 已有到达：立即完成；预检之后不会被拒，防御性地把错误作为结果
-                Ok(Some(v)) | Err(v) => {
-                    if let Some(r) = ring_mut(t, ring) {
-                        let _ = r.sm.finish(id, v);
-                    }
-                    retire_in(t, ring, id, Backend::InterruptWait { irq });
-                }
-            }
-        }
-        Work::Manual { start, pins } => {
-            if let Some(exec) = start {
-                let _ = r.sm.start(id, exec);
-            }
-            r.running.push((id, Backend::Manual { pins }));
-        }
-    }
+    // 释放状态机借用后按 Kind 穷举执行；各函数只借用对象表中需要协作的对象。
+    launch_work_in(t, pid, ring, id, deadline, exec, work);
     if let Some(q) = proc::ring_quota_in(t, pid) {
         q.in_flight += 1;
     }
@@ -658,14 +962,39 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
 
 /// 释放一项未被接受的工作已持有的资源（锁内）。
 fn release_work_in(t: &mut Table, work: Work) {
-    match work {
-        Work::SubscriptionWait(target)=>crate::subscription::release_target_in(t,*target,None),
-        Work::Recv(target) => ipc::release_target_in(t, *target, None),
-        Work::ExitWait { es } | Work::InterruptWait { irq: es } => {
-            let _ = t.release_internal(es);
-        }
-        _ => {}
+    match work.kind() {
+        Some(Kind::SubscriptionWait) => release_subscription_work_in(t, work),
+        Some(Kind::Recv) => release_recv_work_in(t, work),
+        Some(Kind::ExitWait) => release_exit_work_in(t, work),
+        Some(Kind::InterruptWait) => release_interrupt_work_in(t, work),
+        Some(Kind::Now | Kind::Wait | Kind::Send) => drop(work),
+        None => release_manual_work_in(work),
     }
+}
+
+fn release_subscription_work_in(t: &mut Table, work: Work) {
+    let Work::SubscriptionWait(target) = work else { panic!("Kind::SubscriptionWait carried another work item") };
+    crate::subscription::release_target_in(t, *target, None);
+}
+
+fn release_recv_work_in(t: &mut Table, work: Work) {
+    let Work::Recv(target) = work else { panic!("Kind::Recv carried another work item") };
+    ipc::release_target_in(t, *target, None);
+}
+
+fn release_exit_work_in(t: &mut Table, work: Work) {
+    let Work::ExitWait { es } = work else { panic!("Kind::ExitWait carried another work item") };
+    let _ = t.release_internal(es);
+}
+
+fn release_interrupt_work_in(t: &mut Table, work: Work) {
+    let Work::InterruptWait { irq } = work else { panic!("Kind::InterruptWait carried another work item") };
+    let _ = t.release_internal(irq);
+}
+
+fn release_manual_work_in(work: Work) {
+    let Work::Manual { pins, .. } = work else { panic!("manual backend kind carried another work item") };
+    drop(pins);
 }
 
 /// 等待的目标到达时为一个请求完成（锁内；由退出状态的通知或中断对象的到达调用）。请求已被取消或已结束则什么也不做。
@@ -674,9 +1003,10 @@ pub(crate) fn complete_waiter_in(t: &mut Table, ring: ObjId, req: u64, value: i6
     if r.sm.decision(req) != Some(None) {
         return;
     }
-    let Some(b) = r.take_running(req) else { return };
-    let _ = r.sm.finish(req, value);
-    retire_in(t, ring, req, b);
+    let Some(entry) = r.take_running(req) else { return };
+    release_entry_in(t, ring, entry);
+    let r = ring_mut(t, ring).expect("Ring retained while publishing waiter completion");
+    assert_eq!(r.sm.finish(req, value), Ok(Terminal::Done(value)), "waiter completion lost its undecided request");
     settle_in(t, ring);
 }
 
@@ -762,12 +1092,11 @@ pub fn submit_manual(pid: ObjId, h: HandleId, user_tag: u64, start: Option<Exec>
 /// 内核自检：人工后端自然结束（结果 `value`）。
 pub fn manual_finish(ring: ObjId, req: u64, value: i64) -> bool {
     kobj::with(|t| {
-        let Some(r) = ring_mut(t, ring) else { return false };
-        let b = r.take_running(req);
+        let entry = ring_mut(t, ring).and_then(|r| r.take_running(req));
+        let Some(entry) = entry else { return false };
+        release_entry_in(t, ring, entry);
+        let r = ring_mut(t, ring).expect("Ring retained while finishing manual backend");
         let ok = r.sm.finish(req, value).is_ok();
-        if let Some(b) = b {
-            retire_in(t, ring, req, b);
-        }
         settle_in(t, ring);
         ok
     })
@@ -776,12 +1105,11 @@ pub fn manual_finish(ring: ObjId, req: u64, value: i64) -> bool {
 /// 内核自检：人工后端在被要求中止后报告静止。
 pub fn manual_quiesce(ring: ObjId, req: u64) -> bool {
     kobj::with(|t| {
-        let Some(r) = ring_mut(t, ring) else { return false };
-        let b = r.take_running(req);
+        let entry = ring_mut(t, ring).and_then(|r| r.take_running(req));
+        let Some(entry) = entry else { return false };
+        release_entry_in(t, ring, entry);
+        let r = ring_mut(t, ring).expect("Ring retained while quiescing manual backend");
         let ok = r.sm.quiesce(req).is_ok();
-        if let Some(b) = b {
-            retire_in(t, ring, req, b);
-        }
         settle_in(t, ring);
         ok
     })
@@ -796,8 +1124,9 @@ pub fn cancel_for(pid: ObjId, h: HandleId, req: u64) -> i64 {
             Ok(r) => r,
             Err(e) => return perr(e),
         };
+        // 先推进到期与已可交付的后端：已自然结束的请求应得到 already_completed。
+        progress_backends_in(t, ring, sched::timer_ticks());
         let Some(r) = ring_mut(t, ring) else { return err(SYSTEM_HANDLE_ERROR_INVALID) };
-        r.poll(sched::timer_ticks()); // 先推进到期后端：已自然结束的请求应得到 already_completed
         let ret = match r.sm.cancel(req) {
             Ok(Cancelled::NotStarted) => 0,
             Ok(Cancelled::AbortBackend { .. }) => {
@@ -979,7 +1308,12 @@ fn enter_args_for(pid: ObjId, h: HandleId, args_ptr: u64, args: EnterArgs, deadl
 pub fn kernel_cancel_time_waits(ring: ObjId) -> usize {
     kobj::with(|t| {
         let Some(r) = ring_mut(t, ring) else { return 0 };
-        let waits: Vec<u64> = r.running.iter().filter(|(_, b)| matches!(b, Backend::Wait { .. })).map(|(id, _)| *id).collect();
+        let waits: Vec<u64> = r
+            .running
+            .iter()
+            .filter(|entry| matches!(entry.backend, Backend::Wait { .. }))
+            .map(|entry| entry.request)
+            .collect();
         for req in &waits {
             kernel_cancel_in(t, ring, *req);
         }
@@ -992,7 +1326,9 @@ pub fn kernel_cancel_time_waits(ring: ObjId) -> usize {
 pub fn running_time_waits(ring: ObjId) -> usize {
     kobj::with(|t| {
         settle_in(t, ring);
-        ring_mut(t, ring).map(|r| r.running.iter().filter(|(_, b)| matches!(b, Backend::Wait { .. })).count()).unwrap_or(0)
+        ring_mut(t, ring)
+            .map(|r| r.running.iter().filter(|entry| matches!(entry.backend, Backend::Wait { .. })).count())
+            .unwrap_or(0)
     })
 }
 
@@ -1080,19 +1416,23 @@ pub(crate) fn event_waiter_count(id: ObjId) -> usize {
 
 /// Publication/cancellation/close are serialized by the object lock; one terminal only.
 pub(crate) fn poll_subscription_in(t:&mut Table,ring:ObjId,req:u64) {
- let Some(r)=ring_mut(t,ring) else {return};
- if r.sm.decision(req)!=Some(None) {return;}
- let Some(backend)=r.take_running(req) else {return};
- match backend {
-  Backend::SubscriptionWait(target)=>match crate::subscription::deliver_in(t,&target) {
-   crate::subscription::Attempt::Empty=>{if let Some(r)=ring_mut(t,ring){r.running.push((req,Backend::SubscriptionWait(target)));}},
-   crate::subscription::Attempt::Done(value)=>{
-    if let Some(r)=ring_mut(t,ring){let _=r.sm.finish(req,value);}
-    retire_in(t,ring,req,Backend::SubscriptionWait(target));settle_in(t,ring);
-   }
-  },
-  other=>{if let Some(r)=ring_mut(t,ring){r.running.push((req,other));}}
- }
+    let Some(r) = ring_mut(t, ring) else { return };
+    if r.sm.decision(req) != Some(None) { return; }
+    let Some(entry) = r.take_running(req) else { return };
+    match run_backend_in(t, ring, entry, BackendAction::Progress { now: sched::timer_ticks() }) {
+        BackendOutcome::Pending(entry) => {
+            if let Some(r) = ring_mut(t, ring) {
+                r.running.push(entry);
+            }
+        }
+        BackendOutcome::Complete { entry, value } => {
+            release_entry_in(t, ring, entry);
+            let r = ring_mut(t, ring).expect("Ring retained while publishing subscription completion");
+            assert_eq!(r.sm.finish(req, value), Ok(Terminal::Done(value)), "subscription completion lost its undecided request");
+            settle_in(t, ring);
+        }
+        BackendOutcome::Released => {}
+    }
 }
 pub(crate) fn submit_subscription_for(pid:ObjId,ring:HandleId,sub:HandleId,args:kernel_core::subscription_abi::WaitArgs)->Result<u64,i64> {
  let target=kobj::with(|t|crate::subscription::prepare_wait_in(t,pid,sub,args))?;
