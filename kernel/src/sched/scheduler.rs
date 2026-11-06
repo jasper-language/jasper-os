@@ -733,6 +733,30 @@ pub struct ScanStats {
     pub ticks: u64,
 }
 
+/// 高精度预算结算路径的计数快照（issue #2 第四片）。
+/// Counters for the high-resolution budget settlement path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NsBudgetStats {
+    /// 结算函数调用次数。
+    pub passes: u64,
+    /// 为运行中预算逐处理器访问的 CPU 数。
+    pub budget_cpu_checks: u64,
+    /// 为到期事件访问的 CPU 根数。
+    pub due_cpu_checks: u64,
+    /// 本轮至少弹出一个到期事件的 CPU 数。
+    pub due_cpus: u64,
+    /// 为找非运行态预算而访问的任务槽位数。
+    pub table_slots: u64,
+    /// 从期限堆弹出的到期事件数。
+    pub due_events: u64,
+    /// 运行态预算结算次数。
+    pub running_settlements: u64,
+    /// 非运行态预算补充次数。
+    pub inactive_settlements: u64,
+    /// 单次高精度结算路径的最长架构周期数。
+    pub max_settle_cycles: u64,
+}
+
 /// 看门狗报告日志容量。
 pub const WATCHDOG_LOG: usize = crate::config::ACTIVE.sched.watchdog_log;
 
@@ -823,6 +847,10 @@ pub struct Scheduler {
     ns_programmed:[Option<u64>;MAX_CPUS],
     /// 高精度期限事件增量同步计数（issue #2）。
     ns_sync: kernel_core::deadline_forest::SyncStats,
+    /// 高精度预算结算路径计数（issue #2 第四片）。
+    ns_budget: NsBudgetStats,
+    /// 当前启用纳秒预算的任务数；为零时切换检查点不访问任何 leaf。
+    ns_budget_tasks: usize,
     /// 根可能变化、需要重新读取的处理器（离线的留到上线）。
     ns_root_dirty: CpuSet,
     #[cfg(feature = "ns-dirty-audit")]
@@ -1000,6 +1028,12 @@ impl Scheduler {
             #[cfg(feature = "ns-dirty-audit")]
             ns_audits: 0,
             ns_sync: kernel_core::deadline_forest::SyncStats { passes: 0, synced: 0, unchanged: 0, inserted: 0, rescheduled: 0, moved: 0, removed: 0 },
+            ns_budget: NsBudgetStats {
+                passes: 0, budget_cpu_checks: 0, due_cpu_checks: 0, due_cpus: 0,
+                table_slots: 0, due_events: 0, running_settlements: 0,
+                inactive_settlements: 0, max_settle_cycles: 0,
+            },
+            ns_budget_tasks: 0,
             scan: ScanStats { picks: 0, visited: 0, max_visited: 0, wake_scans: 0, ticks: 0 },
             hook_errors: 0,
             last_hook_error: None,
@@ -1531,6 +1565,11 @@ impl Scheduler {
     /// 正在等它的任务（等它退出、或等它持有的锁）全部被唤醒，借给它的档位随之归还。
     pub fn mark_current_exited(&mut self) {
         let cur = self.cur();
+        self.checkpoint_running_budget(this_cpu(), self.ns_now);
+        if self.task(cur).is_some_and(|t| t.ns_budget.is_some_and(|b| b.enabled)) {
+            self.ns_budget_tasks = self.ns_budget_tasks.checked_sub(1)
+                .expect("enabled budget task count underflow");
+        }
         if let Some(r)=self.epochs[cur].history(){
             let owner=self.ns_owners[cur];
             if self.ns_heap.remove(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,cur,r.token().generation).expect("ns exit identity").is_some() {self.ns_root_dirty.insert(owner);}
@@ -1704,6 +1743,7 @@ impl Scheduler {
             *w = t.as_ref().and_then(|t| t.waits_for);
         }
         inherit::check_edge(waits, cur, owner_slot).map_err(BlockError::Refused)?;
+        self.checkpoint_running_budget(this_cpu(), self.ns_now);
         self.wait_seq += 1;
         let seq = self.wait_seq;
         let t = self.tasks[cur].as_mut().ok_or(BlockError::NotAWorker)?;
@@ -1779,6 +1819,7 @@ impl Scheduler {
         }
         let cur = self.cur();
         let Some(generation) = self.epochs.get(cur).and_then(SlotLifecycle::history).map(|r| r.token().generation) else { return false };
+        self.checkpoint_running_budget(this_cpu(), self.ns_now);
         if let Some(at) = wake_at {
             let home = self.task(cur).unwrap().home;
             self.set_wake_deadline(home, Deadline { at, slot: cur, generation });
@@ -2081,6 +2122,12 @@ impl Scheduler {
     /// High-resolution deadline sync counters.
     pub fn ns_sync_stats(&self) -> kernel_core::deadline_forest::SyncStats {
         self.ns_sync
+    }
+
+    /// 高精度预算结算路径计数（issue #2 第四片）。
+    /// High-resolution budget settlement counters.
+    pub fn ns_budget_stats(&self) -> NsBudgetStats {
+        self.ns_budget
     }
 
     /// 已做的每轮校验次数（只有 `ns-dirty-audit` 构建非 0）。
@@ -2720,30 +2767,86 @@ impl Scheduler {
         self.tasks.mark_all_dirty();
         self.ns_credit=[Some(kernel_core::timer_units::CreditLedger::new(now,crate::hrtime::tick_ns()).unwrap());MAX_CPUS];
     }
+    /// 结算一个启用纳秒预算的任务；`start..end` 是该 CPU 自上次检查点以来的运行区间，
+    /// 非运行态补充固定以 `now..now` 结算。
+    /// Settle one enabled nanosecond budget over an explicit owner interval.
+    fn settle_ns_budget(&mut self, slot: usize, start: u64, end: u64, running: bool) -> bool {
+        let Some(task) = self.tasks.get_mut(slot).and_then(Option::as_mut) else {
+            return false;
+        };
+        let Some(budget) = task.ns_budget.as_mut().filter(|b| b.enabled) else {
+            return false;
+        };
+        let old = budget.next;
+        budget.settle(start, end, running).expect("ns budget clock exhausted");
+        if budget.next != old {
+            task.rt_next_period = task.rt_next_period
+                .checked_add((budget.next - old) / budget.period * u64::from(task.rt_period))
+                .expect("compat budget deadline overflow");
+        }
+        task.rt_remaining =
+            u32::try_from(budget.remaining.div_ceil(crate::hrtime::tick_ns())).unwrap_or(u32::MAX);
+        if running {
+            self.ns_budget.running_settlements =
+                self.ns_budget.running_settlements.saturating_add(1);
+        } else {
+            self.ns_budget.inactive_settlements =
+                self.ns_budget.inactive_settlements.saturating_add(1);
+        }
+        true
+    }
+
+    /// 任务不再是处理器 owner 之前结算运行区间，并把该 CPU 的运行区间起点推进到 `now`。
+    /// 与只处理到期 CPU 的周期路径分开，不漏记切走前的最后一段执行。
+    /// Settle the departing owner interval, then checkpoint the CPU.
+    fn checkpoint_running_budget(&mut self, cpu: usize, now: u64) {
+        if !self.ns_active { return; }
+        if self.ns_budget_tasks == 0 {
+            self.ns_at[cpu] = now;
+            return;
+        }
+        let slot = leaf_current(cpu);
+        let running = self.task(slot).is_some_and(|t| {
+            t.state == TaskState::Running && t.ns_budget.is_some_and(|b| b.enabled)
+        });
+        if running && now > self.ns_at[cpu] {
+            self.settle_ns_budget(slot, self.ns_at[cpu], now, true);
+        }
+        self.ns_at[cpu] = now;
+    }
+
+    /// 到期堆节点通知预算边界。只有 `budget.next` 正是该节点时才结算，避免把较晚的
+    /// 唤醒节点误当成预算补充；非运行任务不累积已经错过的周期。
+    /// Settle only the budget event that names this exact heap boundary.
+    fn settle_due_budget(&mut self, cpu: usize, slot: usize, at: u64, now: u64) -> bool {
+        let Some(task) = self.task(slot) else { return false; };
+        let Some(_) = task.ns_budget.filter(|b| b.enabled && b.next == at && at <= now) else {
+            return false;
+        };
+        let running = task.state == TaskState::Running && task.home == cpu && leaf_current(cpu) == slot;
+        let start = if running { self.ns_at[cpu] } else { now };
+        self.settle_ns_budget(slot, start, now, running)
+    }
+
     pub fn settle_highres(&mut self,now:u64) {
         if !self.ns_active {return;}
+        let started = crate::arch::cycles();
+        self.ns_budget.passes = self.ns_budget.passes.saturating_add(1);
         assert!(now>=self.ns_now,"shared clock moved backwards");self.ns_now=now;
+        // 运行预算只检查当前 CPU owner；只有配额耗尽或周期边界到达的 CPU 才取可变引用
+        // 并结算。未到期 CPU 的 ns_at 保持不变，切走时由 checkpoint_running_budget 收尾。
+        self.ns_budget.budget_cpu_checks = self.ns_budget.budget_cpu_checks
+            .saturating_add(self.online.len() as u64);
         for c in self.online.iter() {
-            let slot=leaf_current(c);let start=self.ns_at[c];
-            // 没有启用预算的任务不取可变引用（可变访问会标脏）。
-            if self.task(slot).is_some_and(|t|t.ns_budget.is_some_and(|b|b.enabled)) {
-                let t=self.tasks[slot].as_mut().expect("budgeted current task");
-                if let Some(b)=t.ns_budget.as_mut() {
-                    let old=b.next;b.settle(start,now,t.state==TaskState::Running).expect("ns budget clock exhausted");
-                    if b.next!=old {t.rt_next_period=t.rt_next_period.checked_add((b.next-old)/b.period*u64::from(t.rt_period)).expect("compat deadline overflow");}
-                    t.rt_remaining=u32::try_from(b.remaining.div_ceil(crate::hrtime::tick_ns())).unwrap_or(u32::MAX);
-                }
-            }
-            self.ns_at[c]=now;
-        }
-        // Sleeping/runnable RT tasks replenish, but never accumulate old periods.
-        let refills=|_:usize,t:&Option<Task>|t.as_ref().is_some_and(|t|t.state!=TaskState::Exited && t.state!=TaskState::Running && t.ns_budget.is_some_and(|b|b.enabled));
-        for (_,t) in self.tasks.iter_mut_where(refills) {
-            let Some(t)=t.as_mut() else {continue;};
-            if let Some(b)=t.ns_budget.as_mut() {
-                let old=b.next;b.settle(now,now,false).expect("ns refill clock exhausted");
-                if b.next!=old {t.rt_next_period=t.rt_next_period.checked_add((b.next-old)/b.period*u64::from(t.rt_period)).expect("compat refill overflow");}
-                t.rt_remaining=u32::try_from(b.remaining.div_ceil(crate::hrtime::tick_ns())).unwrap_or(u32::MAX);
+            let slot = leaf_current(c);
+            let Some(task) = self.task(slot) else { continue; };
+            let Some(budget) = task.ns_budget.filter(|b| b.enabled) else { continue; };
+            if task.state != TaskState::Running { continue; }
+            let start = self.ns_at[c];
+            let settle_at = budget.running_settle_at(start).expect("enabled budget has a checkpoint");
+            if now >= settle_at {
+                self.settle_ns_budget(slot, start, now, true);
+                self.ns_at[c] = now;
             }
         }
         // One global high-resolution transaction owns every deadline forest
@@ -2753,14 +2856,25 @@ impl Scheduler {
         // task remains published into its owner leaf by make_runnable(), and
         // remote targets are kicked only after the global guard is released.
         let due_cpus = self.online;
+        self.ns_budget.due_cpu_checks = self.ns_budget.due_cpu_checks
+            .saturating_add(due_cpus.len() as u64);
         for c in due_cpus.iter() {
+            if self.ns_roots[c].is_none_or(|at| at > now) { continue; }
+            let before = self.ns_budget.due_events;
             while let Some(e)=self.ns_heap.pop_due(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,c,now).expect("ns heap coherent") {
+                self.ns_budget.due_events = self.ns_budget.due_events.saturating_add(1);
                 // 节点已弹出：没有被唤醒的任务（例如预算期限）要重新发布。
                 self.tasks.mark_dirty(e.slot);self.ns_root_dirty.insert(c);
                 if !self.epochs[e.slot].live(kernel_core::task_index::Token {slot:e.slot,generation:e.generation}) {continue;}
+                self.settle_due_budget(c,e.slot,e.at,now);
                 if self.task(e.slot).is_some_and(|t|t.state==TaskState::Blocked && t.wake_ns.is_some_and(|at|at<=now)) {self.make_runnable(e.slot);}
             }
+            if self.ns_budget.due_events != before {
+                self.ns_budget.due_cpus = self.ns_budget.due_cpus.saturating_add(1);
+            }
         }
+        self.ns_budget.max_settle_cycles = self.ns_budget.max_settle_cycles
+            .max(crate::arch::cycles().wrapping_sub(started));
     }
     /// 槽位当前应发布的期限事件：`(所有者处理器, 时刻)`。
     fn ns_event_wanted(&self,i:usize)->Option<(usize,u64)> {
@@ -2819,6 +2933,13 @@ impl Scheduler {
         for c in self.online.iter().filter(|&c|!self.ns_root_dirty.contains(c)) {
             let root=self.ns_heap.peek(&self.ns_entries,&self.ns_positions,&self.ns_owners,c).expect("ns root").map(|e|e.at);
             if root!=self.ns_roots[c] {bad=bad.saturating_add(1);}
+        }
+        #[cfg(feature = "ns-dirty-audit")]
+        {
+            let enabled = self.tasks.iter().flatten()
+                .filter(|t| t.state != TaskState::Exited && t.ns_budget.is_some_and(|b| b.enabled))
+                .count();
+            if enabled != self.ns_budget_tasks { bad = bad.saturating_add(1); }
         }
         bad
     }
@@ -2892,11 +3013,15 @@ impl Scheduler {
         if !self.ns_active || (quota==0)!=(period==0) || quota>period {return false;}
         let Some(slot)=self.live_slot(id).filter(|&s|is_worker(s)) else{return false;};
         let old=self.task(slot).unwrap();
+        let running_home=(old.state==TaskState::Running).then_some(old.home);
         if let Some(b)=old.ns_budget {
             if b.enabled {
                 if quota==b.quota && period==b.period{return true;}
                 if period!=0{return false;}
-                let t=self.tasks[slot].as_mut().unwrap();t.ns_budget.as_mut().unwrap().disable();t.rt_period=0;t.rt_quota=0;t.rt_remaining=0;return true;
+                if let Some(cpu)=running_home{self.checkpoint_running_budget(cpu,self.ns_now);}
+                let t=self.tasks[slot].as_mut().unwrap();t.ns_budget.as_mut().unwrap().disable();t.rt_period=0;t.rt_quota=0;t.rt_remaining=0;
+                self.ns_budget_tasks=self.ns_budget_tasks.checked_sub(1).expect("enabled budget task count underflow");
+                return true;
             }
             if period!=0 && self.ns_now<b.next{return false;}
         }
@@ -2914,9 +3039,11 @@ impl Scheduler {
         let Some(home)=allowed.iter().filter(|&c|loads[c].checked_add(added).is_some_and(|sum|sum<=900)).min_by_key(|&c|(loads[c],c)) else{return false;};
         let tick=crate::hrtime::tick_ns();let view_period=period.div_ceil(tick).min(u64::from(u32::MAX)) as u32;
         let Some(view_next)=self.now.checked_add(u64::from(view_period)) else{return false;};
+        if let Some(cpu)=running_home{self.checkpoint_running_budget(cpu,self.ns_now);}
         if home!=self.task(slot).unwrap().home{self.rehome(slot,home);}
         let t=self.tasks[slot].as_mut().unwrap();t.ns_budget=Some(budget);t.rt_quota=quota.div_ceil(tick).min(u64::from(u32::MAX)) as u32;
         t.rt_remaining=t.rt_quota;t.rt_period=view_period;t.rt_next_period=view_next;
+        self.ns_budget_tasks=self.ns_budget_tasks.checked_add(1).expect("enabled budget task count overflow");
         if home!=this_cpu(){self.kicks.insert(home);}true
     }
     pub fn set_rt(&mut self, id: TaskId, quota: u32, period: u32, now: u64) -> bool {
@@ -3205,6 +3332,7 @@ impl Scheduler {
     pub fn prepare_switch(&mut self, cause: &'static str) -> Option<SwitchPlan> {
         let c = this_cpu();
         let prev = leaf_current(c);
+        self.checkpoint_running_budget(c, self.ns_now);
         if c != 0 && self.ns_active && !is_worker(prev) {
             self.settle_idle_credits(c);
         }

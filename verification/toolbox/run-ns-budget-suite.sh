@@ -54,8 +54,8 @@ printf 'N/A: value type serialized by its caller; no atomics or shared state in 
 
 grep -Eq '[1-9][0-9]* verified, 0 errors' "$out/verus.log"
 grep -Eq 'error: (postcondition not satisfied|assertion failed|invariant not satisfied)' "$out/verus-bad.log"
-grep -q '2 passed; 0 failed' "$out/core.log"
-grep -q '4 passed; 0 failed' "$out/proptest.log"
+grep -q '3 passed; 0 failed' "$out/core.log"
+grep -q '5 passed; 0 failed' "$out/proptest.log"
 grep -q '1 passed; 0 failed' "$out/miri.log"
 grep -q '#1000000.*DONE' "$out/fuzz.log"
 

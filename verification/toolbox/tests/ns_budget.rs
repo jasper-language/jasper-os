@@ -89,6 +89,28 @@ proptest! {
             Err(e) => { prop_assert_eq!(e, Error::Shape); prop_assert!(q == 0 || p == 0 || q > p); }
         }
     }
+
+    /// 运行检查点取配额耗尽与周期边界较早者；剩余为零时不再由已过去的配额点触发。
+    #[test]
+    fn running_checkpoint_matches_reference(
+        quota in 1u64..=u64::MAX,
+        period in 1u64..=u64::MAX,
+        remaining in any::<u64>(),
+        next in any::<u64>(),
+        start in any::<u64>(),
+        enabled in any::<bool>(),
+    ) {
+        let (quota, period) = (quota.min(period), quota.max(period));
+        let b = Budget { quota, period, remaining: remaining.min(quota), next, enabled };
+        let want = if !enabled {
+            None
+        } else if b.remaining == 0 {
+            Some(b.next)
+        } else {
+            Some(b.next.min(start.saturating_add(b.remaining)))
+        };
+        prop_assert_eq!(b.running_settle_at(start), want);
+    }
 }
 
 #[test]
@@ -111,4 +133,9 @@ fn fixed_sequence_under_miri() {
     assert_eq!(b.settle(0, u64::MAX, true), Err(Error::Overflow));
     assert_eq!(b, old);
     assert_eq!(Budget::new(0, 2, 1), Err(Error::Shape));
+    let mut b = Budget::new(0, 3, 10).unwrap();
+    assert_eq!(b.running_settle_at(2), Some(5));
+    b.remaining = 0;
+    assert_eq!(b.running_settle_at(2), Some(10));
+    assert_eq!(b.running_settle_at(u64::MAX), Some(10));
 }

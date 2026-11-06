@@ -30,6 +30,23 @@ fn new(now: u64, quota: u64, period: u64) -> (r: Option<Budget>)
     }
 }
 
+/// 源码 `Budget::running_settle_at` 的启用分支。配额未耗尽时，检查点不晚于配额耗尽点
+/// 和周期边界；剩余为零时只等周期边界。
+fn running_settle_at(b: Budget, start: u64) -> (r: u64)
+    requires well_formed(b),
+    ensures
+        r <= b.next,
+        b.remaining > 0 ==> r <= start + b.remaining,
+        b.remaining == 0 ==> r == b.next,
+{
+    if b.remaining == 0 {
+        b.next
+    } else {
+        let quota_due = if b.remaining > u64::MAX - start { u64::MAX } else { start + b.remaining };
+        if b.next < quota_due { b.next } else { quota_due }
+    }
+}
+
 /// 源码 `Budget::settle`，只保留启用状态、时间不倒退之后的分支。
 fn settle(b: Budget, start: u64, end: u64, running: bool) -> (r: Option<Budget>)
     requires well_formed(b), start <= end,
