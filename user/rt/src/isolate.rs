@@ -166,8 +166,12 @@ impl IsolatedModule {
             }
         };
         // 4. 隔离进程的系统调用：运行时所需 + 清单声明（已证明 ⊆ 授权）的系统调用
-        let mut calls: Vec<u64> = CONTAINER_CALLS.to_vec();
-        calls.extend(m.requires().filter_map(call_id).filter(|id| !CONTAINER_CALLS.contains(id)));
+        let mut calls = process::CallSet::try_from_ids(CONTAINER_CALLS).map_err(|_| IsolateError::Protocol)?;
+        for id in m.requires().filter_map(call_id) {
+            if !calls.contains(id) {
+                calls.try_insert(id).map_err(|_| IsolateError::Protocol)?;
+            }
+        }
         let caps: Vec<&str> = m.requires().collect();
         let handle_caps: Vec<&str> = grant.handles.iter().map(|(c, _)| *c).collect();
         let handles: Vec<Handle> = grant.handles.into_iter().map(|(_, h)| h).collect();
@@ -181,7 +185,7 @@ impl IsolatedModule {
             Provenance::UnsignedDevelopment => None,
         };
         // 5. 创建隔离进程；此后任何失败都随 `child` 被丢弃而终止它
-        let child = process::spawn(process::Spec { image: grant.container, calls: &calls, arg: 0, cpu_limit_permille: grant.cpu_limit_permille })
+        let child = process::spawn(process::Spec { image: grant.container, calls, arg: 0, cpu_limit_permille: grant.cpu_limit_permille })
             .map_err(IsolateError::Spawn)?;
         let fail = |child: &Child, e: Option<Error>| match e {
             Some(e) => IsolateError::Channel(e),

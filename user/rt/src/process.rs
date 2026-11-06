@@ -2,6 +2,7 @@
 //! Child processes created from an in-memory ELF image with a subset of the caller's rights.
 //!
 //! 内核语义（`system.process.spawn`）：
+//! * [`Spec::calls`] 是显式 [`CallSet`]；构造时只接受登记操作，重复、未登记或越界 ID 整体拒绝
 //! * 子进程的系统调用集合必须是调用者集合的子集，否则 `rights_denied`
 //! * 子进程起步时只有一个句柄：与父进程相连的引导通道端点（主线程入口参数 0）；其它句柄只能由父进程经该通道发送
 //! * 父进程得到的 [`Child::process`] 是子进程唯一的外部所有权：它被关闭（或父进程退出）时子进程若仍在运行即被终止
@@ -14,6 +15,8 @@ use crate::channel::Channel;
 use crate::error::{check, Result};
 use crate::handle::Handle;
 use crate::{ids, sys};
+
+pub use kernel_core::syscall_set::CallIdError as CallSetError;
 
 /// 故障（缺页、非法指令……）终止的进程的退出码（`-1`；退出码按 32 位无符号值报告）。
 /// Exit code of a process terminated by a fault (`-1` reported as a 32-bit unsigned value).
@@ -28,12 +31,54 @@ pub const KILLED_CODE: u64 = (-2i32) as u32 as u64;
 pub struct Spec<'a> {
     /// ELF 映像。
     pub image: &'a [u8],
-    /// 授予子进程的系统调用 ID（每一个都必须是调用者自己被授予的）。
-    pub calls: &'a [u64],
+    /// 授予子进程的显式系统调用能力集合（每一个都必须是调用者自己持有的子集）。
+    pub calls: CallSet,
     /// 主线程的第二个入口参数。
     pub arg: u64,
     /// CPU 上限（千分比；`None` = 不限）。
     pub cpu_limit_permille: Option<u32>,
+}
+
+/// 用户态显式系统调用能力集合。
+///
+/// 内部唯一状态是内核的 [`SyscallSet`]；本类型不定义第二套位语义、序列化或授权通道。
+/// 构造时只接受登记表中的操作 ID，并拒绝越界、未登记和重复输入。其私有字段保证调用者
+/// 不能绕过这些检查直接向 spawn 参数块写入任意位图。
+/// Explicit user-space call capability set backed by the kernel's sole `SyscallSet`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CallSet {
+    set: SyscallSet,
+}
+
+impl CallSet {
+    /// 空能力集合；spawn 仍允许创建不持有任何系统调用的子进程。
+    /// Empty capability set.
+    pub const EMPTY: CallSet = CallSet { set: SyscallSet::EMPTY };
+
+    /// 严格从操作 ID 构造集合；任一越界、未登记或重复 ID 都使整个构造失败。
+    /// Strictly constructs a set and rejects the whole request on any invalid ID.
+    pub fn try_from_ids(ids: &[u64]) -> core::result::Result<CallSet, CallSetError> {
+        SyscallSet::try_from_ids(ids, ids::REGISTERED_CALLS).map(|set| CallSet { set })
+    }
+
+    /// 加入一个已登记操作；失败时集合保持不变。
+    /// Adds one registered operation, leaving the set unchanged on failure.
+    pub fn try_insert(&mut self, id: u64) -> core::result::Result<(), CallSetError> {
+        self.set = self.set.try_with_id(id, ids::REGISTERED_CALLS)?;
+        Ok(())
+    }
+
+    /// 集合是否包含指定操作 ID。
+    /// Whether this set contains the operation ID.
+    pub const fn contains(self, id: u64) -> bool {
+        self.set.contains(id)
+    }
+
+    /// 集合中的操作数。
+    /// Number of operations in the set.
+    pub const fn len(self) -> usize {
+        self.set.count()
+    }
 }
 
 /// 已创建的子进程。
@@ -46,24 +91,13 @@ pub struct Child {
     pub channel: Channel,
 }
 
-/// 把调用 ID 列表转为有界集合；超出当前 ABI 容量（256 位）时明确拒绝，不静默截断。
-fn mask(calls: &[u64]) -> Option<SyscallSet> {
-    let mut set = SyscallSet::EMPTY;
-    for &id in calls {
-        let id = u32::try_from(id).ok()?;
-        set = set.union(SyscallSet::from_id(id)?);
-    }
-    Some(set)
-}
-
 /// 创建子进程（见模块文档）。
 /// Creates a child process.
 pub fn spawn(spec: Spec<'_>) -> Result<Child> {
-    let calls = mask(spec.calls).ok_or(crate::Error::INVALID_ARGUMENT)?;
     let d = SpawnDesc {
         image_ptr: spec.image.as_ptr() as u64,
         image_len: spec.image.len() as u64,
-        calls,
+        calls: spec.calls.set,
         arg: spec.arg,
         cpu_limit_permille: spec.cpu_limit_permille.unwrap_or(CPU_UNLIMITED),
         ..Default::default()

@@ -1,7 +1,7 @@
-# issue #1 第一切片进度：SyscallSet 容量上限与 spawn 授权 ABI
+# issue #1 进度：SyscallSet、spawn 授权 ABI 与用户运行时能力集合
 
-更新日期：2026-10-27
-状态：第一切片已实现并通过定点编译 / 宿主测试 / x86_64 QEMU 验收；issue #1 尚未整体关闭。
+更新日期：2026-11-06
+状态：第一、第二切片已实现并通过定点编译 / 宿主测试 / x86_64 QEMU 验收；Jasper 语言侧的显式构造、保留 ABI 和高编号操作仍未完成，issue #1 尚未整体关闭。
 
 ## 一、问题与切片边界
 
@@ -152,8 +152,7 @@
 
 1. **容量演进**：当登记表最高 ID 接近 255 时，提高 `MAX_IDS` / `WORDS` 并同步
    `SpawnDesc` 大小；同时补 32 位目标上的单元测试轮次。
-2. **用户运行时 API**：把 `jasper-rt` 的调用列表从 `&[u64]` 收敛为显式能力集合类型，
-   让用户代码在编译期就能表达「只授予这些操作」，并在 Jasper 语言侧提供对应构造。
+2. **用户运行时 API**：Rust 运行时部分已完成（见第八节）；Jasper 语言侧的对应构造仍未完成。
 3. **保留 ABI**：`system.task.syscalls.set`、扩展能力等目前仍返回 `unsupported`；
    若启用，必须复用同一个 `SyscallSet`，不得引入第二套授权通道。
 4. **性能证据**：把系统调用权限检查、spawn 解码与任务切换的集合复制纳入 T-2 基准，
@@ -175,3 +174,53 @@
 * `abi/system-ids.txt`：`system.process.spawn` 主版本升到 2；
 * `verification/check-abi-reservations.py`：容量上限改读 `MAX_IDS`，并识别单源分发表；
 * `verification/PROPERTIES.md`：性质登记条目。
+
+## 八、用户运行时显式能力集合 API（第二切片）
+
+`jasper-rt::process::Spec::calls` 不再保存 `&[u64]`，改为值类型
+`jasper_rt::process::CallSet`。真实调用者先显式构造能力集合，再把同一个值放入 spawn 参数：
+
+```rust
+let calls = jasper_rt::process::CallSet::try_from_ids(&[
+    jasper_rt::ids::SYSTEM_PROCESS_EXIT,
+    jasper_rt::ids::SYSTEM_TIME_WAIT,
+])?;
+
+let child = jasper_rt::process::spawn(jasper_rt::process::Spec {
+    image,
+    calls,
+    arg: 0,
+    cpu_limit_permille: None,
+})?;
+```
+
+### 唯一集合语义
+
+* `CallSet` 的私有字段是 `kernel_core::syscall_set::SyscallSet`，没有自己的位图、长度字段、
+  序列化器或授权判定；spawn 直接把该内核集合写入既有 88 字节 v2 参数块。
+* 构造输入仍使用寄存器宽度的 `u64`，不会把大于 `u32` 的值截断。任一 ID 满足以下条件即整体拒绝：
+  * `OutOfRange`：ID 不小于 `MAX_IDS`（含 `u64::MAX`）；
+  * `Unknown`：ID 不在 `abi/system-ids.txt` 生成的 `REGISTERED_CALLS` 中；
+  * `Duplicate`：同一 ID 在输入中出现超过一次。
+* `try_insert` 只在成功时替换内部集合；失败后集合内容和长度保持不变。
+* 内核原有的 `child ⊆ parent`、未登记调用拒绝、映像/CPU/保留字段检查和全有或全无语义没有变化。
+  用户运行时拒绝非法构造，内核仍独立执行最终授权检查，用户侧 API 不是新的可信授权点。
+
+隔离模块的容器调用集合也改用 `CallSet`：先严格装入 `CONTAINER_CALLS`，再逐个合并清单声明的
+登记系统调用。原先临时 `Vec<u64>` 只在构造阶段存在，不再穿过 spawn API。
+
+### 验证证据
+
+| 层 | 命令 / 位置 | 结果 |
+|---|---|---|
+| 单元 | `cargo test -p kernel-core syscall_set` | 8 passed / 0 failed；新增重复、未知、越界与失败不变测试 |
+| 属性 | `cargo test --manifest-path verification/toolbox/Cargo.toml --test syscall_set` | 4 passed / 0 failed；严格构造对照独立 `BTreeSet` 参考模型 |
+| Miri | `cargo +nightly miri test -p kernel-core --lib -- syscall_set::` | 8 passed / 0 failed |
+| 编译 | `cargo build --release --target x86_64-unknown-none -p user-isohost` | 通过 |
+| QEMU 契约 | `JASPER_ACCEPT=spot JASPER_CHECKS=j6 ... bash scripts/accept.sh`（共享 QEMU 锁内） | J-6 功能与计时项 PASS；`case=isohost exit=Some(0)`、`checks=43`、`reclaimed=true`；QEMU 退出码 37 仅计时类参考项超界 |
+
+QEMU 串口同时出现
+`isohost: calls duplicate_rejected=true unregistered_rejected=true out_of_range_rejected=true insert_atomic=true`
+与原有的 spawn 越权拒绝、非法映像拒绝、配额和回收标记。
+
+本切片未修改 `system.process.spawn` 参数块布局，也未登记或启用任何高编号 / 保留操作。

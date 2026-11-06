@@ -32,7 +32,7 @@ fi
 # 2. Proptest：生产代码对照 BTreeSet 参考模型（默认 256 例/性质，失败自动收缩）。
 if want 2; then
 cargo test --manifest-path verification/toolbox/Cargo.toml --test syscall_set > "$out/proptest.log" 2>&1
-grep -q '3 passed; 0 failed' "$out/proptest.log"
+grep -q '4 passed; 0 failed' "$out/proptest.log"
 fi
 
 # 3. Miri：kernel-core 内的能力集合/参数块单元测试与工具箱固定链测试。

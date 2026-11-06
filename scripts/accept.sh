@@ -1054,6 +1054,7 @@ check_j6() {   # J-6：隔离模块（isohost 的一条判据是「CPU 压力下
   fi
   if [ "${TEST_RC:-1}" -eq 0 ] && [ "${JASO_RC:-1}" -eq 0 ] && [ "$t" -eq 10 ] \
      && has 'text=isohost: spawn escalation_denied=true bad_image_rejected=true child_exit=0 quota=8 quota_exceeded_rejected=true churn=24 ok=true' \
+     && has 'text=isohost: calls duplicate_rejected=true unregistered_rejected=true out_of_range_rejected=true insert_atomic=true' \
      && has 'text=isohost: admission undeclared_handle_rejected=true missing_capability_rejected=true' \
      && has 'text=isohost: rights granted_call_ok=true denied=channel\.create,process\.spawn,time\.wait foreign_handle=invalid host_handle_intact=true' \
      && has 'text=isohost: address_space outcome=(own_memory|faulted) host_data_intact=true' \

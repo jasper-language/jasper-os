@@ -31,6 +31,18 @@ pub const BYTES: usize = WORDS * 8;
 
 const _: () = assert!(MAX_IDS % 64 == 0);
 
+/// 严格构造能力集合时的拒绝原因。
+/// Why a strict capability-set construction was rejected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallIdError {
+    /// 操作 ID 超出 [`MAX_IDS`]，不能进入 256 位集合。
+    OutOfRange(u64),
+    /// 操作 ID 尚未登记，不能作为能力授予。
+    Unknown(u64),
+    /// 同一个操作 ID 在输入中出现超过一次。
+    Duplicate(u64),
+}
+
 /// 任务/进程可发起的系统调用集合。
 ///
 /// `Copy` 且大小固定，可放进任务控制块；比较按 4 个字整体进行。
@@ -71,6 +83,37 @@ impl SyscallSet {
             set = set.union(SyscallSet::from_id(id)?);
         }
         Some(set)
+    }
+
+    /// 严格由用户提供的操作 ID 构造集合：越界、未登记或重复任一项即整体拒绝。
+    ///
+    /// 与 [`SyscallSet::try_of`] 不同，此函数按原始寄存器宽度接收 ID，不截断超过 `u32`
+    /// 的值，也不把重复项静默合并。`registered` 必须来自同一份系统接口登记表。
+    /// Strictly builds a set from caller-provided IDs; any bad or duplicate ID rejects all input.
+    pub fn try_from_ids(ids: &[u64], registered: SyscallSet) -> Result<SyscallSet, CallIdError> {
+        let mut set = SyscallSet::EMPTY;
+        for &id in ids {
+            set = set.try_with_id(id, registered)?;
+        }
+        Ok(set)
+    }
+
+    /// 在不修改原集合的前提下加入一个已登记 ID；失败时原集合保持不变。
+    /// Returns a set with one registered ID added, rejecting bad or duplicate input without mutation.
+    pub fn try_with_id(self, id: u64, registered: SyscallSet) -> Result<SyscallSet, CallIdError> {
+        if id >= MAX_IDS as u64 {
+            return Err(CallIdError::OutOfRange(id));
+        }
+        if !registered.contains(id) {
+            return Err(CallIdError::Unknown(id));
+        }
+        if self.contains(id) {
+            return Err(CallIdError::Duplicate(id));
+        }
+        match SyscallSet::from_id(id as u32) {
+            Some(one) => Ok(self.union(one)),
+            None => Err(CallIdError::OutOfRange(id)),
+        }
     }
 
     /// 只含一个操作 ID 的集合；ID 超出容量时返回 `None`。
@@ -321,6 +364,36 @@ mod tests {
         // 越界 ID 不被静默截断：单 ID 构造失败，集合也不会「看起来包含 0」。
         assert!(!SyscallSet::of(&[255]).contains(256));
         assert!(!SyscallSet::EMPTY.contains(256));
+    }
+
+    #[test]
+    fn strict_construction_rejects_bad_or_duplicate_ids() {
+        let registered = SyscallSet::of(&[0, 1, 63, 64]);
+        assert_eq!(
+            SyscallSet::try_from_ids(&[0, 63, 64], registered),
+            Ok(SyscallSet::of(&[0, 63, 64]))
+        );
+        assert_eq!(
+            SyscallSet::try_from_ids(&[0, 1, 1], registered),
+            Err(CallIdError::Duplicate(1))
+        );
+        assert_eq!(
+            SyscallSet::try_from_ids(&[0, 2], registered),
+            Err(CallIdError::Unknown(2))
+        );
+        assert_eq!(
+            SyscallSet::try_from_ids(&[0, 256], registered),
+            Err(CallIdError::OutOfRange(256))
+        );
+        assert_eq!(
+            SyscallSet::try_from_ids(&[u64::MAX], registered),
+            Err(CallIdError::OutOfRange(u64::MAX))
+        );
+        let original = SyscallSet::of(&[0]);
+        assert_eq!(original.try_with_id(0, registered), Err(CallIdError::Duplicate(0)));
+        assert_eq!(original.try_with_id(2, registered), Err(CallIdError::Unknown(2)));
+        assert_eq!(original.try_with_id(256, registered), Err(CallIdError::OutOfRange(256)));
+        assert_eq!(original, SyscallSet::of(&[0]));
     }
 
     #[test]
