@@ -158,6 +158,8 @@
 | 计划构建矩阵 | PASS：S-2、长跑、故障注入、轮转策略、精简 Profile、无默认特性、生产（含 AArch64）均编译；多个专项同开及生产与验收特性同开均被构建期拒绝 |
 | 专项计划真实启动 | 12/12 PASS：rt1 / rt2 / rt3 / budget-window（8 核、icount 5）/ krn3-fast-tick / krn3-postsplit（4 核、icount 5）/ krn3-p999（8 核、icount 0）/ evt1 / evt2 / evt2-broadcast（8 核、icount 0）/ s3-nohz / shm1 均到计划收尾并以 33 退出 |
 
+实现提交为 `2a98cca`。专项原始串口与结果保存在 `evidence/plan-guests/`；广播正式入口的独立证据为 `evidence/evt1/q202-evt2-broadcast-20261106/PASS`。
+
 ### 运行边界
 
 - `evt2` 的手工最小 ELF 已补合法节头表、节名表与 `.note.jasper.abi`；`system.process.spawn` 不再被 ABI 元数据拒绝，4 核专项以 33 完成。
