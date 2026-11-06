@@ -144,6 +144,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "kobj_release"
+path = "fuzz_targets/kobj_release.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "deadline_sync"
 path = "fuzz_targets/deadline_sync.rs"
 test = false

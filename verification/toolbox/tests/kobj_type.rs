@@ -3,8 +3,9 @@
 use std::collections::HashSet;
 
 use kernel_core::kobj_type::{
-    check_grant, destroy_hook_matches, kind_for_handle, registry_well_formed, Carry, Closing, Contract, Destroy,
-    GrantCheck, Kind, REGISTRY,
+    check_grant, closing_locks_match, destroy_hook_matches, destroy_locks_match, kind_for_handle,
+    registry_well_formed, Carry, Closing, ClosingLocks, Contract, Destroy, DestroyLocks, GrantCheck, Kind,
+    REGISTRY,
 };
 use kernel_core::object::{ObjectType, Rights};
 use proptest::prelude::*;
@@ -57,7 +58,9 @@ fn reference_well_formed(reg: &[Contract]) -> bool {
         let tree_ok = !c.tree_self || c.carries == Carry::AnyClosedOnExit;
         let holds = !c.strong.is_empty() || c.tree_self || c.carries != Carry::Nothing;
         let released = c.closing == Closing::InLock || c.destroy == Destroy::OutsideLock;
-        if !(ok_handle && ordered && tree_ok && (!holds || released)) {
+        let locked = closing_locks_match(c.closing, c.closing_locks)
+            && destroy_locks_match(c.destroy, c.destroy_locks);
+        if !(ok_handle && ordered && tree_ok && locked && (!holds || released)) {
             return false;
         }
     }
@@ -84,7 +87,7 @@ fn mutate(reg: &mut [Contract; Kind::COUNT], m: (u8, u8, u8, u32)) {
     let (field, at, choice, bits) = m;
     let i = at as usize % Kind::COUNT;
     let c = &mut reg[i];
-    match field % 9 {
+    match field % 11 {
         0 => c.transferable = !c.transferable,
         1 => c.rights = Rights::from_bits_truncate(bits),
         2 => c.strong = EDGE_SETS[choice as usize % EDGE_SETS.len()],
@@ -93,7 +96,21 @@ fn mutate(reg: &mut [Contract; Kind::COUNT], m: (u8, u8, u8, u32)) {
         5 => c.destroy = if c.destroy == Destroy::None { Destroy::OutsideLock } else { Destroy::None },
         6 => c.handle = if choice % 3 == 0 { None } else { Some(ObjectType::ALL[choice as usize % ObjectType::ALL.len()]) },
         7 => c.tree_self = !c.tree_self,
-        _ => reg.swap(i, choice as usize % Kind::COUNT),
+        8 => reg.swap(i, choice as usize % Kind::COUNT),
+        9 => {
+            c.closing_locks = if c.closing_locks == ClosingLocks::None {
+                ClosingLocks::ObjectTableThenScheduler
+            } else {
+                ClosingLocks::None
+            }
+        }
+        _ => {
+            c.destroy_locks = if c.destroy_locks == DestroyLocks::None {
+                DestroyLocks::AfterObjectTable
+            } else {
+                DestroyLocks::None
+            }
+        }
     }
 }
 
@@ -147,6 +164,24 @@ proptest! {
             hook_present == (declared == Destroy::OutsideLock)
         );
     }
+
+    /// closing / destroy 动作存在性与锁路径声明一致。
+    #[test]
+    fn lock_path_presence_matches_actions(
+        closing in prop_oneof![Just(Closing::None), Just(Closing::InLock)],
+        destroy in prop_oneof![Just(Destroy::None), Just(Destroy::OutsideLock)],
+        close_locks in prop_oneof![Just(ClosingLocks::None), Just(ClosingLocks::ObjectTableThenScheduler)],
+        destroy_locks in prop_oneof![Just(DestroyLocks::None), Just(DestroyLocks::AfterObjectTable)],
+    ) {
+        prop_assert_eq!(
+            closing_locks_match(closing, close_locks),
+            (closing == Closing::InLock) == (close_locks != ClosingLocks::None)
+        );
+        prop_assert_eq!(
+            destroy_locks_match(destroy, destroy_locks),
+            (destroy == Destroy::OutsideLock) == (destroy_locks == DestroyLocks::AfterObjectTable)
+        );
+    }
 }
 
 /// Miri 固定序列：生产表良构、每个种类每个句柄类型的检查结论、若干变异必被拒。
@@ -158,6 +193,9 @@ fn fixed_sequence_under_miri() {
     assert!(!destroy_hook_matches(Destroy::None, true));
     assert!(destroy_hook_matches(Destroy::OutsideLock, true));
     assert!(!destroy_hook_matches(Destroy::OutsideLock, false));
+    assert!(closing_locks_match(Closing::InLock, ClosingLocks::ObjectTableThenScheduler));
+    assert!(!closing_locks_match(Closing::None, ClosingLocks::ObjectTable));
+    assert!(destroy_locks_match(Destroy::OutsideLock, DestroyLocks::AfterObjectTable));
     for k in Kind::ALL {
         for ty in ObjectType::ALL {
             for r in [Rights::NONE, Rights::WAIT, Rights::TRANSFER, Rights::ALL, k.contract().rights] {
@@ -166,7 +204,7 @@ fn fixed_sequence_under_miri() {
         }
     }
     let mut seen = 0;
-    for field in 0..9u8 {
+    for field in 0..11u8 {
         for at in 0..Kind::COUNT as u8 {
             let mut reg = REGISTRY;
             mutate(&mut reg, (field, at, at.wrapping_mul(7), 0x1ff));
@@ -174,5 +212,5 @@ fn fixed_sequence_under_miri() {
             seen += 1;
         }
     }
-    assert_eq!(seen, 9 * Kind::COUNT);
+    assert_eq!(seen, 11 * Kind::COUNT);
 }

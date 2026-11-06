@@ -66,6 +66,20 @@ fn core_activate() -> Result<(), &'static str> {
             return Err(reason);
         }
     }
+    match crate::kobj::verify_release_dispatch() {
+        Ok((outside, none)) => kprintln!(
+            "[JSR-LIFE] release_dispatch closing_locks=true outside_lock={} none={} none_empty=true destroyed_when_none=0 hooks_match_registry=true",
+            outside,
+            none
+        ),
+        Err(reason) => {
+            kprintln!(
+                "[JSR-LIFE] release_dispatch consistency=failed reason={} closing_locks=false none_empty=false destroyed_when_none=unknown hooks_match_registry=false",
+                reason
+            );
+            return Err(reason);
+        }
+    }
     kprintln!("[JSR-ASSEMBLY] activate module=core objects={}", crate::kobj::capacity());
     Ok(())
 }

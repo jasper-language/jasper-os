@@ -1,6 +1,8 @@
 #![no_main]
 //! issue #4 第一片：句柄创建检查与参照实现的差分；Rights 位运算补链。
-use kernel_core::kobj_type::{check_grant, kind_for_handle, GrantCheck, Kind, REGISTRY};
+use kernel_core::kobj_type::{
+    check_grant, closing_locks_match, destroy_locks_match, kind_for_handle, GrantCheck, Kind, REGISTRY,
+};
 use kernel_core::object::{ObjectType, Rights};
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     if data.len() < 10 {
@@ -16,6 +18,8 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     assert_eq!(ra.union(rb).bits(), (a | b) & all);
     assert_eq!(ra.contains(rb), (a & all) & (b & all) == (b & all));
     let c = &REGISTRY[k.index()];
+    assert!(closing_locks_match(c.closing, c.closing_locks));
+    assert!(destroy_locks_match(c.destroy, c.destroy_locks));
     let expect = if c.handle != Some(ty) {
         GrantCheck::WrongType
     } else if ra.bits() & Rights::TRANSFER.bits() != 0 && !c.transferable {
