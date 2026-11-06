@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 
 use kernel_core::capacity::{self, BootCapacity, CapError, CapReason, MemoryCost, Overrides, RECORD_LEN};
 
-use crate::arch::ExitStatus;
+use crate::{arch, arch::ExitStatus};
 use crate::config::ACTIVE;
 use crate::kprintln;
 
