@@ -40,6 +40,47 @@ pub fn run() {
 
 static KILL_PID:kernel_core::sync::Atomic64=kernel_core::sync::Atomic64::new(0);
 static KILL_TASK:kernel_core::sync::Atomic64=kernel_core::sync::Atomic64::new(0);
+static FIRST_TIMER_SLOT:kernel_core::sync::Atomic64=kernel_core::sync::Atomic64::new(0);
+static FIRST_TIMER_GENERATION:kernel_core::sync::Atomic64=kernel_core::sync::Atomic64::new(0);
+static FIRST_TIMER_OWNER:kernel_core::sync::Atomic64=kernel_core::sync::Atomic64::new(0);
+
+fn timer_identity_worker(pass:u64){
+ let (id,owner)=sched::current_timer_identity().expect("worker owns timer identity");
+ let deadline=crate::hrtime::now().unwrap().checked_add(500_000).unwrap();
+ sched::sleep_until_ns(deadline).unwrap();
+ assert!(crate::hrtime::now().unwrap()>=deadline);
+ assert_eq!(sched::current_timer_identity(),Some((id,owner)));
+ if pass==0 {
+  FIRST_TIMER_SLOT.store(u64::from(id.slot),Ordering::Release);
+  FIRST_TIMER_GENERATION.store(id.generation,Ordering::Release);
+  FIRST_TIMER_OWNER.store(u64::from(owner),Ordering::Release);
+ }else{
+  let old=kernel_core::timer_event::TimerId{
+   slot:u32::try_from(FIRST_TIMER_SLOT.load(Ordering::Acquire)).unwrap(),
+   generation:FIRST_TIMER_GENERATION.load(Ordering::Acquire),
+  };
+  assert_eq!(id.slot,old.slot);
+  assert!(id.generation>old.generation);
+  assert!(sched::reject_stale_timer(old,u32::try_from(FIRST_TIMER_OWNER.load(Ordering::Acquire)).unwrap()));
+  let audit=sched::timer_identity_audit();
+  assert_eq!((audit.live,audit.budget_used,audit.stale_rejections),(1,1,1));
+ }
+}
+fn timer_identity_first(){timer_identity_worker(0)}
+fn timer_identity_second(){timer_identity_worker(1)}
+
+fn timer_identity_contract(){
+ let mut cpu=kernel_core::smp::CpuSet::EMPTY;cpu.insert(0);
+ for entry in [timer_identity_first as fn(),timer_identity_second] {
+  sched::spawn_on(TaskId(98850),"issue3-timer-identity",entry,None,cpu).unwrap();
+  sched::run();
+ }
+ let audit=sched::timer_identity_audit();
+ assert_eq!((audit.live,audit.armed,audit.budget_used,audit.stale_rejections),(0,0,0,1));
+ kprintln!("[JSR-TIMER-ID] normal=2 stale_rejected={} live={} armed={} budget={}/{} failed=0",
+  audit.stale_rejections,audit.live,audit.armed,audit.budget_used,audit.budget_limit);
+}
+
 fn canceller(){
  let end=crate::hrtime::now().unwrap()+200_000_000;
  let task=TaskId(KILL_TASK.load(Ordering::Acquire));
@@ -54,6 +95,7 @@ fn ns_waiter(){
 fn integration(){
  use crate::{proc,syscall::{SyscallSet,table::*}};
  use kernel_core::paging::MapFlags;
+ timer_identity_contract();
  for pass in 0..2u64 {
   let before=crate::baseline::baseline();
   for cpu in 0..2 {let mut set=kernel_core::smp::CpuSet::EMPTY;set.insert(cpu);sched::spawn_on(TaskId(98800+pass*10+cpu as u64),"rt2-ns-wait",ns_waiter,None,set).unwrap();}

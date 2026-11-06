@@ -27,7 +27,7 @@ use kernel_core::ring_abi::Sqe;
 use crate::kobj;
 use crate::mm::frame;
 use crate::proc::{self, ProcError, ProcState, ResourceQuota};
-use crate::ring::{self, MAX_IN_FLIGHT_PER_PROCESS, MAX_RINGS_PER_PROCESS};
+use crate::ring::{self, BLOCKS_PER_RING, MAX_IN_FLIGHT_PER_PROCESS, MAX_RINGS_PER_PROCESS};
 use crate::syscall::{err, table as abi, SyscallSet};
 use crate::{arch, kprintln, sched};
 
@@ -60,22 +60,71 @@ pub fn run() {
     let free0 = frame::free_frames();
     let (live0, _, _) = kobj::stats();
     user_program();
+    wait_timer_identity();
     closing_and_buffer();
     transfer_denied();
     quotas();
     kobj::run_cleanup(usize::MAX);
     let (live1, pending1, _) = kobj::stats();
     let reclaimed = frame::free_frames() == free0;
+    let timers = sched::timer_identity_audit();
+    let timers_drained = timers.live == 0
+        && timers.armed == 0
+        && timers.budget_used == 0;
     check(live1 == live0 && pending1 == 0 && reclaimed, "异步环演练后对象或页帧未回到基线");
+    check(timers_drained, "异步环演练后统一定时身份或预算未回到基线");
     kprintln!(
-        "[JSR-RING] objects_live={}/{} pending={} reclaimed={} checks={} failed={}",
+        "[JSR-RING] objects_live={}/{} pending={} reclaimed={} timer_live={} timer_armed={} timer_budget={}/{} checks={} failed={}",
         live1,
         live0,
         pending1,
         reclaimed,
+        timers.live,
+        timers.armed,
+        timers.budget_used,
+        timers.budget_limit,
         CHECKS.load(Ordering::Relaxed),
         failed()
     );
+}
+
+/// 每条 Ring `Wait` 独立进入身份表；取消只关闭该请求并归还预算。
+fn wait_timer_identity() {
+    let Ok(pid) = proc::create("ring-wait-timer", SyscallSet::of(&[abi::SYSTEM_TIME_WAIT])) else {
+        check(false, "期限身份表用例进程创建失败");
+        return;
+    };
+    let Ok(h) = ring::create_for(pid, 4) else {
+        check(false, "期限身份表用例 Ring 创建失败");
+        return;
+    };
+    let Some(rid) = ring::ring_of(pid, h) else {
+        check(false, "期限身份表用例 Ring 句柄解析失败");
+        return;
+    };
+    let request = ring::submit_for(pid, h, &Sqe {
+        op: abi::SYSTEM_TIME_WAIT,
+        flags: 0,
+        user_tag: 0x33,
+        arg0: 1,
+        arg1: 0,
+    });
+    let armed = ring::view(rid).is_some_and(|v|
+        v.wait_timer_live == 1
+            && v.wait_timer_armed == 1
+            && v.wait_timer_budget == (1, BLOCKS_PER_RING as u32));
+    let cancelled = request.map(|id| ring::cancel_for(pid, h, id)).unwrap_or(!0) == 0;
+    let returned = ring::view(rid).is_some_and(|v|
+        v.wait_timer_live == 0
+            && v.wait_timer_armed == 0
+            && v.wait_timer_budget == (0, BLOCKS_PER_RING as u32));
+    check(armed && cancelled && returned, "Ring Wait 身份未独立建立或取消后未归还预算");
+    kprintln!("[JSR-RING] wait_timer per_request=true armed={} cancelled={} returned={}",
+        armed, cancelled, returned);
+    let _ = proc::exit_idle(pid, 0);
+    kobj::run_cleanup(usize::MAX);
+    proc::reap(pid);
+    kobj::run_cleanup(usize::MAX);
 }
 
 /// 用户态端到端：装载并运行 `user/ring`。

@@ -47,6 +47,7 @@ use kernel_core::deadline_forest::DeadlineForest;
 use kernel_core::task_index::{TaskIndex, Node as IndexNode};
 use kernel_core::task_lifecycle::SlotLifecycle;
 use kernel_core::task_hot::Slot as HotSlot;
+use kernel_core::timer_event::{OwnerBudget, Request, TimerId, TimerTable, Urgency};
 
 use kernel_core::object::{advance_generation, GENERATION_RETIRED};
 use kernel_core::smp::{CpuSet, MAX_CPUS};
@@ -65,6 +66,35 @@ use super::stack::{ReserveError, StackPool, STATIC_STACKS};
 /// 堆就绪之前的内联槽位数（与静态内核栈数一致：那时只有这些槽位有栈）。
 pub const INLINE_SLOTS: usize = STATIC_STACKS;
 pub const WAKE_MAILBOX_CAPACITY: usize = 16;
+/// 统一身份表的编译期上界；实际任务容量不得超过它。
+/// Compile-time upper bound of the unified timer table.
+pub const TIMER_SLOTS: usize = kernel_core::config::bounds::MAX_TASKS;
+
+/// 真实调度路径使用身份表后的可观测账目。
+/// Observable accounting after the scheduler routes through the identity table.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TimerIdentityAudit {
+    /// 存活身份数。 / Live identities.
+    pub live: usize,
+    /// 已装填身份数。 / Armed identities.
+    pub armed: usize,
+    /// 已使用预算。 / Used budget.
+    pub budget_used: u32,
+    /// 预算上限。 / Budget limit.
+    pub budget_limit: u32,
+    /// 陈旧身份拒绝次数。 / Stale-identity rejections.
+    pub stale_rejections: u64,
+}
+
+/// 外部等待登记使用的时钟域；跨域转换必须显式，不能把 tick 当纳秒。
+/// Clock domain of an external wait registration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitDeadline {
+    /// 现有绝对调度 tick 边界。 / Existing absolute scheduler-tick boundary.
+    Tick(u64),
+    /// 共享单调纳秒时刻。 / Shared monotonic nanosecond instant.
+    Nanos(u64),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LeafTaskHot {
@@ -845,6 +875,11 @@ pub struct Scheduler {
     ns_now:u64,
     ns_active:bool,
     ns_programmed:[Option<u64>;MAX_CPUS],
+    /// 任务纳秒唤醒、预算期限与 Ring 期限等待共用的身份来源。
+    /// Shared identity source for task ns wakeups, budget deadlines and Ring waits.
+    timer_table: TimerTable<TIMER_SLOTS>,
+    timer_budget: OwnerBudget,
+    timer_stale_rejections: u64,
     /// 高精度期限事件增量同步计数（issue #2）。
     ns_sync: kernel_core::deadline_forest::SyncStats,
     /// 高精度预算结算路径计数（issue #2 第四片）。
@@ -1024,6 +1059,9 @@ impl Scheduler {
             ns_roots:[None;MAX_CPUS],ns_at:[0;MAX_CPUS],ns_credit:[None;MAX_CPUS],
             ns_need_tick:[false;MAX_CPUS],
             ns_now:0,ns_active:false,ns_programmed:[None;MAX_CPUS],
+            timer_table: TimerTable::new(),
+            timer_budget: OwnerBudget::new(TIMER_SLOTS as u32),
+            timer_stale_rejections: 0,
             ns_root_dirty: CpuSet::EMPTY,
             #[cfg(feature = "ns-dirty-audit")]
             ns_audits: 0,
@@ -1307,9 +1345,19 @@ impl Scheduler {
         for e in self.epochs.iter() {
             if let Some(r) = e.history() { index.insert(r.label(), r.token()).expect("unique historical task labels"); }
         }
-        let ns_entries=self.ns_entries.prepare(deadline_count,||Deadline::EMPTY).ok_or_else(||oom(self))?;
-        let ns_positions=self.ns_positions.prepare(slots,||NO_DEADLINE).ok_or_else(||oom(self))?;
-        let ns_owners=self.ns_owners.prepare(slots,||NO_DEADLINE).ok_or_else(||oom(self))?;
+        let mut ns_entries=self.ns_entries.prepare(deadline_count,||Deadline::EMPTY).ok_or_else(||oom(self))?;
+        let mut ns_positions=self.ns_positions.prepare(slots,||NO_DEADLINE).ok_or_else(||oom(self))?;
+        let mut ns_owners=self.ns_owners.prepare(slots,||NO_DEADLINE).ok_or_else(||oom(self))?;
+        let mut ns_heap=DeadlineForest::<MAX_CPUS>::new();
+        // The forest stride follows the task-slot count. Rebuilding preserves
+        // every live timer identity when startup capacity changes.
+        for c in 0..MAX_CPUS {
+            for n in 0..self.ns_heap.len(c).unwrap() {
+                let event=self.ns_entries[c*self.tasks.len()+n];
+                ns_heap.set(&mut ns_entries,&mut ns_positions,&mut ns_owners,c,event)
+                    .expect("preallocated ns deadline forest rebuild");
+            }
+        }
         self.ns_entries.commit(ns_entries);self.ns_positions.commit(ns_positions);self.ns_owners.commit(ns_owners);
         self.epochs.commit(epochs);
         self.id_index = Some(index);
@@ -1335,6 +1383,8 @@ impl Scheduler {
         self.rt_positions = BootSlots::Heap(rt_positions);
         self.rt_owners = BootSlots::Heap(rt_owners);
         self.rt_heap = rt_heap;
+        self.ns_heap = ns_heap;
+        self.ns_root_dirty = self.online;
         self.stacks.reserve(slots).map_err(|ReserveError { available }| GrowError::OutOfMemory { available })
     }
 
@@ -1422,6 +1472,8 @@ impl Scheduler {
             })
             .ok_or(SpawnError::NoFreeSlot)?;
         let (slot, reservation) = slot;
+        let timer = self.timer_table.create(slot as u32, &mut self.timer_budget)
+            .map_err(|_| SpawnError::NoFreeSlot)?;
         // At most one label per slot, and 2*N-1 nodes. Preflight insertion
         // before changing task/group/stack state; failure aborts the reservation.
         let old = self.epochs[slot].history();
@@ -1433,6 +1485,8 @@ impl Scheduler {
             if index.insert(id.0, reservation.token()).is_err() {
                 if let Some(r) = old { index.insert(r.label(), r.token()).expect("restore historical label"); }
                 self.epochs[slot].abort(reservation).expect("abort current reservation");
+                self.timer_table.close(timer, slot as u32, &mut self.timer_budget)
+                    .expect("rollback newly reserved timer identity");
                 return Err(SpawnError::NoFreeSlot);
             }
         } else {
@@ -1447,6 +1501,7 @@ impl Scheduler {
         let creator = if is_worker(current) { self.task(current) } else { None };
         let mut task = Task::new(id, name);
         task.entry = Some(entry);
+        task.timer = Some(timer);
         if let Some(creator) = creator {
             task.sched = new_entity(creator.base_qos);
             task.base_qos = creator.base_qos;
@@ -1570,9 +1625,20 @@ impl Scheduler {
             self.ns_budget_tasks = self.ns_budget_tasks.checked_sub(1)
                 .expect("enabled budget task count underflow");
         }
-        if let Some(r)=self.epochs[cur].history(){
-            let owner=self.ns_owners[cur];
-            if self.ns_heap.remove(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,cur,r.token().generation).expect("ns exit identity").is_some() {self.ns_root_dirty.insert(owner);}
+        if let Some(timer) = self.task(cur).and_then(|t| t.timer) {
+            let owner = self.ns_owners[timer.slot as usize];
+            self.ns_heap.remove(
+                &mut self.ns_entries,
+                &mut self.ns_positions,
+                &mut self.ns_owners,
+                timer.slot as usize,
+                timer.generation,
+            ).expect("ns exit identity");
+            if owner != NO_DEADLINE {
+                self.ns_root_dirty.insert(owner);
+            }
+            self.timer_table.close(timer, cur as u32, &mut self.timer_budget)
+                .expect("close live task timer identity");
             self.tasks.mark_dirty(cur);
         }
         let mut left = None;
@@ -1601,6 +1667,8 @@ impl Scheduler {
                 t.raw_deadline = None;
             }
             t.state = TaskState::Exited;
+            t.wake_ns = None;
+            t.timer = None;
             pi_graph_changed |= t.waits_for.take().is_some();
             left = t.cpu_group.take();
             if is_worker(cur) {
@@ -1849,16 +1917,32 @@ impl Scheduler {
     /// 非工作任务、已有登记或轮次耗尽均拒绝，不覆盖已有等待。
     pub fn enroll_event_wait(
         &mut self,
-        deadline: Option<u64>,
+        deadline: Option<WaitDeadline>,
         donation: Option<(TaskId, u64)>,
     ) -> Result<Option<kernel_core::event_wait::Key>, ()> {
         let cur = self.cur();
         if !is_worker(cur) { return Err(()); }
         let token = self.epochs.get(cur).and_then(|e| e.history()).ok_or(())?.token();
-        let now = self.now;
+        let (deadline_ns, at, now) = match deadline {
+            Some(WaitDeadline::Nanos(at)) if self.ns_active => (true, Some(at), self.ns_now),
+            Some(WaitDeadline::Nanos(at)) => {
+                let now_ns = self.now.checked_mul(crate::hrtime::tick_ns()).ok_or(())?;
+                let wait = at.saturating_sub(now_ns).div_ceil(crate::hrtime::tick_ns());
+                (false, Some(self.now.checked_add(wait).ok_or(())?), self.now)
+            }
+            Some(WaitDeadline::Tick(at)) if self.ns_active => {
+                let wait = at.saturating_sub(self.now);
+                let at = self.ns_now.checked_add(
+                    wait.checked_mul(crate::hrtime::tick_ns()).ok_or(())?,
+                ).ok_or(())?;
+                (true, Some(at), self.ns_now)
+            }
+            Some(WaitDeadline::Tick(at)) => (false, Some(at), self.now),
+            None => (self.ns_active, None, if self.ns_active { self.ns_now } else { self.now }),
+        };
         let key = {
             let t = self.tasks.get_mut(cur).and_then(Option::as_mut).ok_or(())?;
-            match t.event_wait.enroll(token, false, now, deadline) {
+            match t.event_wait.enroll(token, false, now, at) {
                 kernel_core::event_wait::Enroll::Armed(key) => key,
                 kernel_core::event_wait::Enroll::TimedOut => return Ok(None),
                 _ => return Err(()),
@@ -1883,7 +1967,12 @@ impl Scheduler {
         } else {
             None
         };
-        if self.block_current(deadline) {
+        let blocked = match at {
+            Some(at) if deadline_ns => self.block_current_ns(at),
+            Some(at) => self.block_current(Some(at)),
+            None => self.block_current(None),
+        };
+        if blocked {
             if let Some((owner_slot, object_key)) = edge {
                 self.wait_seq += 1;
                 let t = self.tasks[cur].as_mut().expect("blocked event waiter");
@@ -2136,6 +2225,41 @@ impl Scheduler {
         { self.ns_audits }
         #[cfg(not(feature = "ns-dirty-audit"))]
         { 0 }
+    }
+
+    /// 统一定时身份表的完整账目。 / Unified timer-identity accounting.
+    pub fn timer_identity_audit(&self) -> TimerIdentityAudit {
+        TimerIdentityAudit {
+            live: self.timer_table.live(),
+            armed: self.timer_table.armed(),
+            budget_used: self.timer_budget.used(),
+            budget_limit: self.timer_budget.limit(),
+            stale_rejections: self.timer_stale_rejections,
+        }
+    }
+
+    /// 任务代次对应的定时身份。 / Timer identity for a live task generation.
+    pub fn timer_identity(&self, id: TaskId) -> Option<TimerId> {
+        self.task(self.live_slot(id)?)?.timer
+    }
+
+    /// 当前任务的定时身份与表所有者键。
+    /// Current task's timer identity and table owner key.
+    pub fn current_timer_identity(&self) -> Option<(TimerId, u32)> {
+        let slot = self.cur();
+        Some((self.task(slot)?.timer?, slot as u32))
+    }
+
+    /// 验收负路径：旧身份只能得到 `Stale`，不得触碰同槽位新身份。
+    /// Negative acceptance path: an old identity must return `Stale` without
+    /// touching the successor in the same timer slot.
+    #[cfg(feature = "rt2-verify")]
+    pub fn reject_stale_timer(&mut self, id: TimerId, owner: u32) -> bool {
+        if self.timer_table.cancel(id, owner) != Err(kernel_core::timer_event::Error::Stale) {
+            return false;
+        }
+        self.timer_stale_rejections = self.timer_stale_rejections.saturating_add(1);
+        true
     }
 
     /// 清零选择路径遍历量统计。
@@ -2865,9 +2989,21 @@ impl Scheduler {
                 self.ns_budget.due_events = self.ns_budget.due_events.saturating_add(1);
                 // 节点已弹出：没有被唤醒的任务（例如预算期限）要重新发布。
                 self.tasks.mark_dirty(e.slot);self.ns_root_dirty.insert(c);
-                if !self.epochs[e.slot].live(kernel_core::task_index::Token {slot:e.slot,generation:e.generation}) {continue;}
-                self.settle_due_budget(c,e.slot,e.at,now);
-                if self.task(e.slot).is_some_and(|t|t.state==TaskState::Blocked && t.wake_ns.is_some_and(|at|at<=now)) {self.make_runnable(e.slot);}
+                let timer = TimerId { slot: e.slot as u32, generation: e.generation };
+                let fired = self.timer_table.expire(timer, now)
+                    .expect("one-shot task timer expiry cannot overflow");
+                let Some(fired) = fired else { continue };
+                let task = fired.owner as usize;
+                if self.task(task).is_none_or(|t| t.timer != Some(timer)) {
+                    continue;
+                }
+                // The table is the single terminal authority; only the exact
+                // winning identity may observe this task's due request.
+                self.tasks.mark_dirty(task);
+                self.settle_due_budget(c, task, e.at, now);
+                if self.task(task).is_some_and(|t| t.state == TaskState::Blocked && t.wake_ns.is_some_and(|at| at <= now)) {
+                    self.make_runnable(task);
+                }
             }
             if self.ns_budget.due_events != before {
                 self.ns_budget.due_cpus = self.ns_budget.due_cpus.saturating_add(1);
@@ -2876,12 +3012,14 @@ impl Scheduler {
         self.ns_budget.max_settle_cycles = self.ns_budget.max_settle_cycles
             .max(crate::arch::cycles().wrapping_sub(started));
     }
-    /// 槽位当前应发布的期限事件：`(所有者处理器, 时刻)`。
-    fn ns_event_wanted(&self,i:usize)->Option<(usize,u64)> {
+    /// 槽位当前应发布的期限事件：`(所有者处理器, 时刻, 定时身份)`。
+    /// Current event for a task: owner CPU, instant and unified timer identity.
+    fn ns_event_wanted(&self,i:usize)->Option<(usize,u64,TimerId)> {
         self.task(i).filter(|t|t.state!=TaskState::Exited).and_then(|t| {
+            let timer = t.timer?;
             let sleep=(t.state==TaskState::Blocked).then_some(t.wake_ns).flatten();
             let rt=t.ns_budget.filter(|b|b.enabled).map(|b|b.next);
-            sleep.into_iter().chain(rt).min().map(|at|(t.home,at))
+            sleep.into_iter().chain(rt).min().map(|at|(t.home,at,timer))
         })
     }
     /// 把脏槽位的期限事件同步进堆，再重读受影响处理器的根（issue #2）。工作量 O(字数 + 脏槽位数)。
@@ -2892,16 +3030,38 @@ impl Scheduler {
         let mut from=0;
         while let Some(i)=self.tasks.take_dirty(from) {
             from=i+1;
-            let Some(r)=self.epochs[i].history() else {continue;};let generation=r.token().generation;
             let event=self.ns_event_wanted(i);
-            let old_owner=self.ns_owners[i];
+            let Some(timer)=self.task(i).and_then(|t|t.timer) else {continue;};
+            let timer_slot=timer.slot as usize;
+            let old_owner=self.ns_owners[timer_slot];
+            match event {
+                Some((_,at,_)) => {
+                    self.timer_table.arm(timer, i as u32, Request {
+                        at,
+                        urgency: Urgency::Precise,
+                        period_ns: 0,
+                    }).expect("arm live task timer identity");
+                }
+                None => {
+                    self.timer_table.cancel(timer, i as u32)
+                        .expect("cancel live task timer identity");
+                }
+            }
             // issue #2：与已发布节点相同则不写堆（不做无意义的 set/repair）。
             // Unchanged events no longer rewrite and repair their heap node.
-            let outcome=self.ns_heap.sync(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,i,generation,event).expect("ns deadline identity and reserved capacity");
+            let wanted=event.map(|(cpu,at,_)|(cpu,at));
+            let outcome=self.ns_heap.sync(
+                &mut self.ns_entries,
+                &mut self.ns_positions,
+                &mut self.ns_owners,
+                timer_slot,
+                timer.generation,
+                wanted,
+            ).expect("ns deadline identity and reserved capacity");
             self.ns_sync.record(outcome);
             if outcome.wrote() {
                 if old_owner!=NO_DEADLINE {self.ns_root_dirty.insert(old_owner);}
-                if let Some((c,_))=event {self.ns_root_dirty.insert(c);}
+                if let Some((c,_,_))=event {self.ns_root_dirty.insert(c);}
             }
         }
         for c in self.ns_root_dirty.intersect(self.online).iter() {
@@ -2926,9 +3086,15 @@ impl Scheduler {
         let mut bad=0u32;
         for i in 0..self.tasks.len() {
             if self.tasks.is_dirty(i) {continue;}
-            let published=self.ns_heap.published(&self.ns_entries,&self.ns_positions,&self.ns_owners,i).expect("ns published node").map(|(c,e)|(c,e.at,e.generation));
-            let wanted=self.epochs[i].history().and_then(|r|self.ns_event_wanted(i).map(|(c,at)|(c,at,r.token().generation)));
-            if self.epochs[i].history().is_some() && published!=wanted {bad=bad.saturating_add(1);}
+            let Some(timer)=self.task(i).and_then(|t|t.timer) else {continue;};
+            let published=self.ns_heap.published(
+                &self.ns_entries,
+                &self.ns_positions,
+                &self.ns_owners,
+                timer.slot as usize,
+            ).expect("ns published node").map(|(c,e)|(c,e.at,e.generation));
+            let wanted=self.ns_event_wanted(i).map(|(c,at,timer)|(c,at,timer.generation));
+            if published!=wanted {bad=bad.saturating_add(1);}
         }
         for c in self.online.iter().filter(|&c|!self.ns_root_dirty.contains(c)) {
             let root=self.ns_heap.peek(&self.ns_entries,&self.ns_positions,&self.ns_owners,c).expect("ns root").map(|e|e.at);

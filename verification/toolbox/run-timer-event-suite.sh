@@ -18,12 +18,21 @@ mkdir -p "$out"
 
 sha256sum \
   kernel-core/src/timer_event.rs \
+  kernel-core/src/timer_units.rs \
   kernel-core/src/deadline.rs \
+  kernel/src/task.rs \
+  kernel/src/ring.rs \
   kernel/src/sched/scheduler.rs \
+  kernel/src/sched/mod.rs \
+  kernel/src/rt2_demo.rs \
+  kernel/src/ring_demo.rs \
   verification/toolbox/verus/timer_event.rs \
   verification/toolbox/verus/timer_event_bad.rs \
   verification/toolbox/tests/timer_event.rs \
   verification/toolbox/fuzz/fuzz_targets/timer_event.rs \
+  verification/timer_identity_integration.tla \
+  verification/timer_identity_integration.cfg \
+  verification/timer_identity_integration_stale.cfg \
   > "$out/source.sha256"
 
 rustc --version > "$out/rustc-version.log"
@@ -64,9 +73,12 @@ fi
 echo "== 6/6 Loom =="
 cargo test --manifest-path verification/toolbox/Cargo.toml --test timer_event race > "$out/loom.log" 2>&1
 
+echo "== model: TLA+ identity integration =="
+bash verification/run-timer-identity-integration-tlc.sh > "$out/tla.log" 2>&1
+
 grep -Eq '[1-9][0-9]* verified, 0 errors' "$out/verus.log"
 grep -Eq 'error: (postcondition not satisfied|assertion failed)' "$out/verus-bad.log"
-grep -q '5 passed; 0 failed' "$out/proptest.log"
+grep -q '6 passed; 0 failed' "$out/proptest.log"
 grep -q '1 passed; 0 failed' "$out/miri.log"
 grep -q '#1000000.*DONE' "$out/fuzz.log"
 if kani_enabled; then
@@ -76,5 +88,6 @@ if kani_enabled; then
   done
 fi
 grep -q '2 passed; 0 failed' "$out/loom.log"
+grep -q 'Timer identity integration TLA: positive PASS; stale mutation rejected' "$out/tla.log"
 
-printf '%s\n' "Timer event suite: Verus/Proptest/Miri/fuzz/Loom passed; $KANI_STATUS" | tee "$out/PASS"
+printf '%s\n' "Timer event suite: Verus/Proptest/Miri/fuzz/Loom/TLA passed; $KANI_STATUS" | tee "$out/PASS"

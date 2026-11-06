@@ -227,6 +227,7 @@ pub struct TimerTable<const N: usize> {
     /// 空闲槽位栈（下标），`free_len` 之前有效。 / Free-slot stack.
     free: [u32; N],
     free_len: usize,
+    live: usize,
     armed: usize,
 }
 
@@ -250,13 +251,14 @@ impl<const N: usize> TimerTable<N> {
             entries: [Entry { generation: 0, owner: 0, state: State::Free }; N],
             free,
             free_len: N,
+            live: 0,
             armed: 0,
         }
     }
 
     /// 存活（已创建未关闭）的定时器数。 / Number of live timers.
-    pub fn live(&self) -> usize {
-        self.entries.iter().filter(|e| matches!(e.state, State::Idle | State::Armed(_))).count()
+    pub const fn live(&self) -> usize {
+        self.live
     }
     /// 已装填数（O(1) 计数）。 / Number of armed timers (O(1) counter).
     pub const fn armed(&self) -> usize {
@@ -278,6 +280,7 @@ impl<const N: usize> TimerTable<N> {
         e.generation += 1;
         e.owner = owner;
         e.state = State::Idle;
+        self.live += 1;
         Ok(TimerId { slot, generation: e.generation })
     }
 
@@ -334,6 +337,7 @@ impl<const N: usize> TimerTable<N> {
         if old.is_some() {
             self.armed -= 1;
         }
+        self.live -= 1;
         budget.release();
         if !retire {
             self.free[self.free_len] = id.slot;

@@ -82,6 +82,9 @@ pub struct Task {
     pub cpu_group: Option<usize>,
     /// 自上次主动放弃处理器以来连续占用的 tick（看门狗依据）。
     pub streak: RunStreak,
+    /// 本任务在统一定时身份表中的稳定身份；任务槽复用时旧身份必须失效。
+    /// Stable identity of this task in the unified timer table.
+    pub timer: Option<kernel_core::timer_event::TimerId>,
     /// 所在运行队列的处理器下标（只会被该处理器选中；负载均衡改写它即完成迁移）。
     pub home: usize,
     /// 亲和集合：允许运行的处理器（硬约束；`home` 总在其中）。
@@ -137,6 +140,7 @@ impl Task {
             woken_at: None,
             cpu_group: None,
             streak: RunStreak::new(),
+            timer: None,
             home: 0,
             affinity: CpuSet::first(1),
             last_ran: None,

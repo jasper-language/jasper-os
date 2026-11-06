@@ -47,7 +47,7 @@ use kernel_core::smp::CpuSet;
 use kernel_core::sync_origin::Origin;
 
 use policy::{kernel_policy, CpuLimitStats, KernelPolicy, LatencyHistogram, Qos, WatchdogLog};
-pub use scheduler::{AffinityError, CpuStats, NohzStats, ScanStats};
+pub use scheduler::{AffinityError, CpuStats, NohzStats, ScanStats, TimerIdentityAudit, WaitDeadline};
 pub use scheduler::GrowError;
 use scheduler::{BlockError, Cause, CpuGroupId, GroupError, IdleStep, QosError, Scheduler, SpawnError, SwitchObserver, WATCHDOG_LOG};
 
@@ -771,6 +771,25 @@ pub fn enable_highres()->bool {
     with_mut(|s|{s.enable_highres(now);crate::hrtime::enable();});true
 }
 pub fn ns_sleeping(id:TaskId)->bool{with(|s|s.ns_sleeping(id))}
+/// Ring 内部期限统一使用纳秒；未校准高精度时钟时用 tick 的等间隔纳秒值。
+/// Ring deadlines use nanoseconds internally, with a tick-equivalent fallback.
+pub(crate) fn now_ns()->u64 {
+    crate::hrtime::now().unwrap_or_else(|| timer_ticks().saturating_mul(crate::hrtime::tick_ns()))
+}
+/// 把现有绝对 tick 边界转换成同一单调时钟里的纳秒时刻。
+/// Convert an existing absolute tick boundary to the monotonic nanosecond clock.
+pub(crate) fn tick_deadline_ns(deadline:u64)->Option<u64> {
+    let now_ticks=timer_ticks();
+    kernel_core::timer_units::tick_deadline_ns(now_ticks,now_ns(),deadline,crate::hrtime::tick_ns())
+}
+pub fn timer_identity_audit()->TimerIdentityAudit{with(|s|s.timer_identity_audit())}
+pub fn current_timer_identity()->Option<(kernel_core::timer_event::TimerId,u32)> {
+    with(|s|s.current_timer_identity())
+}
+#[cfg(feature = "rt2-verify")]
+pub fn reject_stale_timer(id:kernel_core::timer_event::TimerId,owner:u32)->bool {
+    with_mut(|s|s.reject_stale_timer(id,owner))
+}
 pub fn rt_ns_state(id:TaskId)->Option<kernel_core::ns_budget::Budget>{with(|s|s.rt_ns_state(id))}
 pub fn set_rt_ns(id:TaskId,quota:u64,period:u64)->bool {with_mut(|s|s.set_rt_ns(id,quota,period))}
 /// Absolute ns deadline. Spurious/exit wakes return to the caller to recheck.
@@ -1017,7 +1036,7 @@ pub fn wake(id: TaskId) {
 
 /// Author: chatgpt。仅供对象锁内事件登记；返回后须先释放对象锁再yield。
 pub fn enroll_event_wait(
-    deadline: Option<u64>,
+    deadline: Option<WaitDeadline>,
     donation: Option<(TaskId, u64)>,
 ) -> Result<Option<kernel_core::event_wait::Key>, ()> {
     with_mut(|s| s.enroll_event_wait(deadline, donation))

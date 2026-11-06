@@ -78,5 +78,25 @@ proof fn closed_identity_never_matches(old_generation: int, slot_generation: int
 {
 }
 
+// Absolute tick → nanosecond bridge preserves the remaining duration and never
+// moves an already-expired deadline into the future.
+pub open spec fn spec_tick_deadline_ns(now_tick: u64, now_ns: u64, deadline_tick: u64, tick_ns: u64) -> int {
+    if deadline_tick <= now_tick { now_ns as int }
+    else { now_ns as int + (deadline_tick - now_tick) as int * tick_ns as int }
+}
+
+proof fn tick_deadline_bridge_is_not_early(now_tick: u64, now_ns: u64, deadline_tick: u64, tick_ns: u64)
+    requires
+        now_ns as int + (if deadline_tick <= now_tick { 0 } else { (deadline_tick - now_tick) as int * tick_ns as int }) <= u64::MAX as int,
+    ensures spec_tick_deadline_ns(now_tick, now_ns, deadline_tick, tick_ns) >= now_ns as int,
+{
+}
+
+proof fn expired_tick_deadline_is_immediate(now_tick: u64, now_ns: u64, deadline_tick: u64, tick_ns: u64)
+    requires deadline_tick <= now_tick,
+    ensures spec_tick_deadline_ns(now_tick, now_ns, deadline_tick, tick_ns) == now_ns as int,
+{
+}
+
 fn main() {}
 }
