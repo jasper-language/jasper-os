@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run-kobj-type-suite.sh —— 内核对象类型登记表（issue #4 第一切片）的六步验证链
+# run-kobj-type-suite.sh —— 内核对象类型登记表与销毁分派（issue #4 第一、二切片）的六步验证链
 #
 # 顺序固定：Verus/Z3 → Proptest → Miri → cargo-fuzz → Loom（Kani 发版时验证）。
-# 范围：kernel-core/src/kobj_type.rs（新写：Kind / Contract / REGISTRY / check_grant / kind_for_handle /
-# edge_ordered / registry_well_formed），以及既有的 kernel-core/src/object.rs Rights 位运算
+# 范围：kernel-core/src/kobj_type.rs（Kind / Contract / REGISTRY / Destroy 钩子关系 / check_grant /
+# kind_for_handle / edge_ordered / registry_well_formed），内核销毁钩子表及其所属模块入口，
+# 以及既有的 kernel-core/src/object.rs Rights 位运算
 # （from_bits_truncate / union / intersect / difference / contains / is_empty，补链：原无验证链）。
 # 所有命令在构建虚拟机内执行；输出保存在 evidence/issue4/kobj-type-suite。
 # 工具路径由环境变量提供：VERUS 指向 Verus 可执行文件，Z3 默认取同目录的 z3。
@@ -23,6 +24,9 @@ sha256sum \
   kernel-core/src/object.rs \
   kernel/src/kobj.rs \
   kernel/src/proc/mod.rs \
+  kernel/src/ring.rs \
+  kernel/src/ipc.rs \
+  kernel/src/exit_state.rs \
   verification/toolbox/verus/kobj_type.rs \
   verification/toolbox/verus/kobj_type_bad.rs \
   verification/toolbox/tests/kobj_type.rs \
@@ -72,8 +76,8 @@ printf 'N/A: pure const table + pure functions, no shared mutable state\n' > "$o
 
 grep -Eq '[1-9][0-9]* verified, 0 errors' "$out/verus.log"
 grep -Eq 'error: (postcondition not satisfied|assertion failed|invariant not satisfied)' "$out/verus-bad.log"
-grep -q '4 passed; 0 failed' "$out/core.log"
-grep -q '3 passed; 0 failed' "$out/proptest.log"
+grep -q '5 passed; 0 failed' "$out/core.log"
+grep -q '4 passed; 0 failed' "$out/proptest.log"
 grep -q '1 passed; 0 failed' "$out/miri.log"
 grep -q '#1000000.*DONE' "$out/fuzz.log"
 if kani_enabled; then

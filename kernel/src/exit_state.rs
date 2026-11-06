@@ -88,6 +88,13 @@ pub(crate) fn source_in(t:&mut Table,id:ObjId)->Result<ObjId,crate::subscription
  let source=crate::subscription::create_publisher_in(t,snapshot)?;
  let Some(e)=es_mut(t,id) else {unreachable!()};e.source=Some(source);Ok(source)
 }
-pub(crate) fn destroy(e:ExitState) {
- if let Some(source)=e.source {crate::kobj::with(|t|crate::subscription::finish_publisher_in(t,source));}
+/// ExitState 对象所属模块的唯一锁外销毁入口，结束它创建的退出事件发布者。
+/// The ExitState module's sole lock-outside destroy entry.
+pub(crate) fn destroy_object(object: KObject) {
+    let KObject::ExitState(e) = object else {
+        panic!("exit-state destroy hook received another object kind");
+    };
+    if let Some(source) = e.source {
+        crate::kobj::with(|t| crate::subscription::finish_publisher_in(t, source));
+    }
 }

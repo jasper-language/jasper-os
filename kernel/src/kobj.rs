@@ -1,5 +1,5 @@
 //! 内核全局对象表（M4.1）：Process 与 Task 对象的生命周期记账与清理过程。
-//! Kernel-wide object table: lifetime accounting and the cleanup pass for Process and Task objects.
+//! Kernel-wide object table: lifetime accounting, type-dispatched lock-outside destruction and cleanup.
 //!
 //! # 依据（M4.0 规范 v0.6）
 //! * 句柄 = **外部所有权**；在飞请求、线程执行上下文、进程线程表 = **内部引用**（第 1、2 节）
@@ -20,7 +20,7 @@
 
 use alloc::boxed::Box;
 
-use kernel_core::kobj_type::{Closing, Kind, REGISTRY};
+use kernel_core::kobj_type::{destroy_hook_matches, Closing, Destroy, Kind, REGISTRY};
 use kernel_core::objtable::{InstallError, ObjError, ObjId, ObjectTable, Released, Slot};
 use kernel_core::pci::Bdf;
 
@@ -146,6 +146,54 @@ const _: () = {
     }
 };
 
+/// 销毁动作的签名：对象已离开对象表且对象表锁已释放，模块独占该对象值。
+/// Destroy hook: invoked after the object leaves the table and its lock is released.
+type DestroyHook = fn(KObject);
+
+/// 种类 → 所属模块的锁外销毁入口。没有额外动作的种类为 `None`；存在性与登记表在编译期比对。
+/// Kind → owning module's lock-outside destroy entry, checked against the registry at compile time.
+const fn destroy_hook(kind: Kind) -> Option<DestroyHook> {
+    match kind {
+        Kind::Process => Some(crate::proc::destroy_object),
+        Kind::Ring => Some(crate::ring::destroy_object),
+        Kind::Task => Some(crate::proc::destroy_task_object),
+        Kind::Endpoint => Some(crate::ipc::destroy_object),
+        Kind::ExitState => Some(crate::exit_state::destroy_object),
+        Kind::Interrupt
+        | Kind::Subscription
+        | Kind::EventSource
+        | Kind::Mutex
+        | Kind::Memory
+        | Kind::Event
+        | Kind::Device => None,
+    }
+}
+
+/// 按种类下标排列的销毁动作表（清理过程只查表，不展开任何对象变体）。
+/// Destroy hooks indexed by kind; cleanup never matches individual object variants.
+const DESTROY_HOOKS: [Option<DestroyHook>; Kind::COUNT] = {
+    let mut t: [Option<DestroyHook>; Kind::COUNT] = [None; Kind::COUNT];
+    let mut i = 0;
+    while i < Kind::COUNT {
+        t[i] = destroy_hook(Kind::ALL[i]);
+        i += 1;
+    }
+    t
+};
+
+/// 编译期断言：每个种类是否有销毁钩子与登记表声明一致，特别要求 `Destroy::None` 的槽为空。
+/// Compile-time assertion that destroy hooks agree with the registry, including empty `Destroy::None` slots.
+const _: () = {
+    let mut i = 0;
+    while i < Kind::COUNT {
+        assert!(
+            destroy_hook_matches(REGISTRY[i].destroy, DESTROY_HOOKS[i].is_some()),
+            "destroy_hook 与对象类型登记表的 destroy 声明不一致"
+        );
+        i += 1;
+    }
+};
+
 static TABLE: IrqSpinLock<Table> = IrqSpinLock::ranked(crate::lockorder::OBJECT_TABLE, ObjectTable::empty());
 
 /// 对象表锁的争用测量值。
@@ -170,6 +218,32 @@ pub fn install(capacity: usize) -> Result<usize, Option<InstallError>> {
     let slots = crate::bootcap::try_leak(capacity, || Slot::VACANT).ok_or(None)?;
     let pending = crate::bootcap::try_leak(capacity, || 0u32).ok_or(None)?;
     with(|t| t.install(slots, pending)).map_err(Some)
+}
+
+/// 可执行检查：遍历生产销毁表，返回 `(锁外销毁种类数, 无动作种类数)`。
+///
+/// 不一致时返回原因；`Destroy::None` 带钩子、`Destroy::OutsideLock` 缺钩子都会失败。
+/// Executable check of the production destroy table; both directions of the registry relation are enforced.
+pub fn verify_destroy_dispatch() -> Result<(usize, usize), &'static str> {
+    let mut outside = 0;
+    let mut none = 0;
+    let mut i = 0;
+    while i < Kind::COUNT {
+        let declared = REGISTRY[i].destroy;
+        let hook_present = DESTROY_HOOKS[i].is_some();
+        if !destroy_hook_matches(declared, hook_present) {
+            return Err(match declared {
+                Destroy::None => "destroy_none_has_hook",
+                Destroy::OutsideLock => "destroy_outside_lock_has_no_hook",
+            });
+        }
+        match declared {
+            Destroy::None => none += 1,
+            Destroy::OutsideLock => outside += 1,
+        }
+        i += 1;
+    }
+    Ok((outside, none))
 }
 
 /// 对象表容量（安装之前为 0）。
@@ -253,18 +327,10 @@ pub fn run_cleanup(limit: usize) -> usize {
             break;
         };
         crate::kprintln!("[JSR-LIFE] cleanup destroy type={} id={:#x}", obj.type_name(), id.raw());
-        // 销毁动作穷举：登记表声明 Destroy::None 的种类在此为空臂（它们没有需要锁外释放的资源或强边，
-        // 由登记表良构条件 5 保证：有强边 / 携带句柄的种类必有 closing 或锁外销毁）。
-        match obj {
-            KObject::Process(p) => crate::proc::destroy(p),
-            KObject::ExitState(e) => crate::exit_state::destroy(e),
-            KObject::Ring(r) => crate::ring::destroy(r),
-            KObject::Endpoint(e) => crate::ipc::destroy(e),
-            KObject::Task(task) => {
-                let _ = release_internal(task.exit_state); // 线程 → 退出状态
-            }
-            // 中断对象的硬件解绑在 closing 动作里已经完成，销毁时无事可做。
-            KObject::EventSource(_) | KObject::Subscription(_) | KObject::Memory(_) | KObject::Mutex(_) | KObject::Event { .. } | KObject::Device(_) | KObject::Interrupt(_) => {}
+        // 只按种类查表分派。Destroy::None 的槽为空，对象值在本轮直接丢弃；
+        // 类型特有的销毁载荷由所属模块的单一入口解释，中心代码不展开任何对象变体。
+        if let Some(hook) = DESTROY_HOOKS[obj.kind().index()] {
+            hook(obj);
         }
         n += 1;
     }

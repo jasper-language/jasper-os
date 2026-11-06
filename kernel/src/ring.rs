@@ -414,8 +414,12 @@ pub(crate) fn deliver_waiter_in(t: &mut Table, ring: ObjId, req: u64) -> bool {
     }
 }
 
-/// 销毁动作（清理过程调用，不持对象表锁）：归还所属进程的 Ring 配额。
-pub fn destroy(r: Box<RingObj>) {
+/// Ring 对象所属模块的唯一锁外销毁入口，归还所属进程的 Ring 配额。
+/// The Ring module's sole lock-outside destroy entry.
+pub(crate) fn destroy_object(object: KObject) {
+    let KObject::Ring(r) = object else {
+        panic!("ring destroy hook received another object kind");
+    };
     kobj::with(|t| {
         if let Some(q) = proc::ring_quota_in(t, r.owner) {
             q.rings = q.rings.saturating_sub(1);

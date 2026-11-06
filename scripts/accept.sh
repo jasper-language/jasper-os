@@ -782,6 +782,14 @@ check_m41() {   # 对象生命周期：关句柄 ⇒ closing 不销毁；重复�
   fi
 }
 
+check_issue4_destroy() {   # issue #4 第二片：生产销毁表只按种类分派，Destroy::None 槽经启动期检查为空
+  if has '^\[JSR-LIFE\] destroy_dispatch outside_lock=5 none=7 none_empty=true destroyed_when_none=0 hooks_match_registry=true'; then
+    record ISSUE4-DESTROY PASS "5 个锁外销毁入口均由所属模块承载；7 个 Destroy::None 槽为空且启动期检查一致"
+  else
+    record ISSUE4-DESTROY FAIL "缺少销毁分派启动期检查，或钩子存在性与 Destroy 声明不一致"
+  fi
+}
+
 check_m42() {   # Handle/Rights：复制只降权、提权被拒；跨进程原子转移（移动/无权/非叶子/表满）；回到基线
   if has 'user dup=true escalate_dup=-4102 restrict=0 dup_without_right=-4102 escalate_restrict=-4102' \
      && has 'transfer moved=true sender_invalid=true owners_after=Some\(1\) no_transfer_right=rights_denied non_leaf=not_transferable receiver_full=table_full' \
@@ -2538,11 +2546,11 @@ if [ "$SPOT" -eq 1 ]; then
     if declare -F "check_$c" >/dev/null; then "check_$c"; else record "$c" FAIL "定点验收：没有名为 check_$c 的检查"; fi
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
-  check_m10; check_isa; check_m11; check_boot_stage; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+  check_m10; check_isa; check_m11; check_boot_stage; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
   check_pol1; check_pol2; check_asm1; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
-  check_m10; check_isa; check_m11; check_boot_stage; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+  check_m10; check_isa; check_m11; check_boot_stage; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
   check_pol1; check_pol2; check_asm1; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
 fi
 
