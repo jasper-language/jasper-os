@@ -80,3 +80,142 @@ fn fixed_sequence_under_miri() {
     assert_eq!(reserve_u32(3, 5, 7), None);
     assert_eq!(reserve_usize(usize::MAX - 1, 1, usize::MAX), Some(usize::MAX));
 }
+
+/// Loom 适配：生产 `AsyncRing` 由模拟对象表 Mutex 串行化，后端资源只在此适配中计数。
+/// Loom adapter: the production request state machine plus the object-lock publication protocol.
+struct LoomBackend {
+    ring: kernel_core::async_ring::AsyncRing<4, 4>,
+    id: u64,
+    backend_active: bool,
+    releases: u32,
+    closing: bool,
+    publications: u32,
+}
+
+impl LoomBackend {
+    fn new(uses_buffer: bool) -> Self {
+        let mut ring = kernel_core::async_ring::AsyncRing::<4, 4>::new(4).unwrap();
+        let id = ring
+            .submit(kernel_core::async_ring::Submission { op: 21, user_tag: 1, context: 9, uses_buffer })
+            .unwrap();
+        ring.start(id, Exec::Abortable).unwrap();
+        Self { ring, id, backend_active: true, releases: 0, closing: false, publications: 0 }
+    }
+
+    fn release_backend(&mut self) {
+        assert!(self.backend_active, "the same backend was released twice");
+        assert_eq!(self.releases, 0);
+        self.backend_active = false;
+        self.releases = 1;
+    }
+
+    fn publish_ready(&mut self) {
+        if self.ring.ready() > 0 {
+            assert!(!self.backend_active, "buffer completion was published before backend release");
+            self.publications += 1;
+            self.ring.consume(usize::MAX);
+        }
+    }
+
+    fn cancel(&mut self) {
+        if let Ok(kernel_core::async_ring::Cancelled::AbortBackend { .. }) = self.ring.cancel(self.id) {
+            self.release_backend();
+            self.ring.quiesce(self.id).unwrap();
+        }
+        self.publish_ready();
+    }
+
+    fn deliver(&mut self) {
+        if self.ring.decision(self.id) == Some(None) {
+            // Production releases the backend before reporting natural quiescence/publication.
+            self.release_backend();
+            self.ring.finish(self.id, 7).unwrap();
+        }
+        self.publish_ready();
+    }
+
+    fn close(&mut self, source: &'static str) {
+        let mut aborted = Vec::new();
+        self.ring.close(|_, request| aborted.push(request));
+        self.closing = true;
+        assert!(matches!(source, "close" | "exit"));
+        if aborted.contains(&self.id) {
+            self.release_backend();
+            self.ring.quiesce(self.id).unwrap();
+        }
+        self.publish_ready();
+    }
+
+    fn finish(&mut self) {
+        match self.ring.decision(self.id) {
+            Some(None) if self.backend_active => {
+                self.release_backend();
+                self.ring.finish(self.id, 9).unwrap();
+            }
+            Some(Some(kernel_core::async_ring::Terminal::Cancelled)) if self.backend_active => {
+                self.release_backend();
+                self.ring.quiesce(self.id).unwrap();
+            }
+            _ => {}
+        }
+        let _ = self.ring.close(|_, request| {
+            assert_eq!(request, self.id);
+        });
+        self.closing = true;
+        assert!(!self.backend_active);
+        assert_eq!(self.releases, 1);
+        assert!(self.ring.is_drained());
+        assert_eq!(self.ring.stats().destroyed, 1);
+        assert!(self.ring.stats().published <= 1);
+        assert!(self.publications <= 1);
+    }
+}
+
+fn run_loom_race(
+    uses_buffer: bool,
+    first: fn(&mut LoomBackend),
+    second: fn(&mut LoomBackend),
+) {
+    use loom::sync::{Arc, Mutex};
+    loom::model(move || {
+        let shared = Arc::new(Mutex::new(LoomBackend::new(uses_buffer)));
+        let left = shared.clone();
+        let right = shared.clone();
+        let a = loom::thread::spawn(move || first(&mut left.lock().unwrap()));
+        let b = loom::thread::spawn(move || second(&mut right.lock().unwrap()));
+        a.join().unwrap();
+        b.join().unwrap();
+        shared.lock().unwrap().finish();
+    });
+}
+
+fn loom_cancel(state: &mut LoomBackend) {
+    state.cancel();
+}
+
+fn loom_deliver(state: &mut LoomBackend) {
+    state.deliver();
+}
+
+fn loom_close(state: &mut LoomBackend) {
+    state.close("close");
+}
+
+fn loom_exit(state: &mut LoomBackend) {
+    state.close("exit");
+}
+
+#[test]
+fn loom_cancel_vs_delivery_releases_once() {
+    run_loom_race(true, loom_cancel, loom_deliver);
+}
+
+#[test]
+fn loom_close_vs_delivery_releases_once() {
+    run_loom_race(true, loom_close, loom_deliver);
+}
+
+#[test]
+fn loom_exit_vs_cancel_releases_once() {
+    run_loom_race(true, loom_exit, loom_cancel);
+}
