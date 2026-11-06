@@ -467,6 +467,7 @@ fn wcet_report(_: &mut BootCtx) {
 /// issue #2：高精度期限事件增量同步计数；定时器前进保证计数。
 fn sync_counters(_: &mut BootCtx) {
     let ns_sync = sched::ns_sync_stats();
+    let ns_budget = sched::ns_budget_stats();
     let (ns_mismatch, ns_audits) = sched::ns_audit();
     let (timer_full, timer_bsp, timer_local, timer_highres, timer_cost) = sched::timer_progress_stats();
     kprintln!("[JSR-TIMER-PROGRESS] full={} deferred_tick={} deferred_local={} deferred_highres={} max_cost={}", timer_full, timer_bsp, timer_local, timer_highres, timer_cost);
@@ -474,6 +475,13 @@ fn sync_counters(_: &mut BootCtx) {
         "[JSR-NS-SYNC] passes={} synced={} unchanged={} writes={} inserted={} rescheduled={} moved={} removed={} balanced={} audit_mismatch={} audits={}",
         ns_sync.passes, ns_sync.synced, ns_sync.unchanged, ns_sync.writes(),
         ns_sync.inserted, ns_sync.rescheduled, ns_sync.moved, ns_sync.removed, ns_sync.balanced(), ns_mismatch, ns_audits
+    );
+    kprintln!(
+        "[JSR-NS-BUDGET] passes={} budget_cpu_checks={} due_cpu_checks={} due_cpus={} table_slots={} due_events={} running_settlements={} inactive_settlements={} heap_ops={} max_settle_cycles={}",
+        ns_budget.passes, ns_budget.budget_cpu_checks, ns_budget.due_cpu_checks, ns_budget.due_cpus,
+        ns_budget.table_slots, ns_budget.due_events, ns_budget.running_settlements,
+        ns_budget.inactive_settlements, ns_sync.writes().saturating_add(ns_budget.due_events),
+        ns_budget.max_settle_cycles
     );
 }
 
@@ -724,10 +732,18 @@ mod dedicated {
 #[cfg(feature = "rt2-verify")]
 fn sync_counters_ns_only() {
     let stats = sched::ns_sync_stats();
+    let budget = sched::ns_budget_stats();
     let (mismatch, audits) = sched::ns_audit();
     kprintln!(
         "[JSR-NS-SYNC] passes={} synced={} unchanged={} writes={} inserted={} rescheduled={} moved={} removed={} balanced={} audit_mismatch={} audits={}",
         stats.passes, stats.synced, stats.unchanged, stats.writes(), stats.inserted, stats.rescheduled, stats.moved, stats.removed, stats.balanced(), mismatch, audits
+    );
+    kprintln!(
+        "[JSR-NS-BUDGET] passes={} budget_cpu_checks={} due_cpu_checks={} due_cpus={} table_slots={} due_events={} running_settlements={} inactive_settlements={} heap_ops={} max_settle_cycles={}",
+        budget.passes, budget.budget_cpu_checks, budget.due_cpu_checks, budget.due_cpus,
+        budget.table_slots, budget.due_events, budget.running_settlements,
+        budget.inactive_settlements, stats.writes().saturating_add(budget.due_events),
+        budget.max_settle_cycles
     );
 }
 

@@ -267,6 +267,15 @@ pub fn run_wake_latency_contract() -> u32 {
         phases.deadline_to_runnable.count, phases.deadline_to_resume.count,
         phases.late_settlement, phases.early_timer,
         phases.invalid_order, phases.invalid_resume);
+    let budget = sched::ns_budget_stats();
+    let sync = sched::ns_sync_stats();
+    kprintln!(
+        "[JSR-NS-BUDGET] passes={} budget_cpu_checks={} due_cpu_checks={} due_cpus={} table_slots={} due_events={} running_settlements={} inactive_settlements={} heap_ops={} max_settle_cycles={}",
+        budget.passes, budget.budget_cpu_checks, budget.due_cpu_checks, budget.due_cpus,
+        budget.table_slots, budget.due_events, budget.running_settlements,
+        budget.inactive_settlements, sync.writes().saturating_add(budget.due_events),
+        budget.max_settle_cycles
+    );
     kprintln!("[JSR-KRN3-P999] done failed={} workers={} rounds={} resources={} lists={}",
         failed(), workers, P999_ROUNDS, baseline() == saved, lists_consistent());
     failed()
