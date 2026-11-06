@@ -16,6 +16,11 @@ RT2="${RT2:-1}"
 LIMIT="${LIMIT:-900}"
 OUT="${OUT:-evidence/ns-dirty}"
 TARGET=target/ns-dirty-audit
+QEMU_LOCK=(flock /tmp/jasper-os-qemu.lock)
+if [ "${JASPER_QEMU_LOCK_HELD:-0}" = 1 ]; then
+  # 调用方已持全局锁：改用子锁仍让三个客户机串行，同时避免重复加同一把锁。
+  QEMU_LOCK=(flock /tmp/jasper-os-qemu-children.lock)
+fi
 mkdir -p "$OUT"
 cargo build --locked --release -p xtask > "$OUT/build.log" 2>&1 || { echo "FAIL xtask 构建失败"; exit 1; }
 if [ -n "$CPUS" ]; then
@@ -25,7 +30,7 @@ if [ -n "$CPUS" ]; then
 fi
 for n in $CPUS; do
   cp "$OUT/kernel.img" "$OUT/k$n.img"
-  flock /tmp/jasper-os-qemu.lock python3 scripts/boot-trace.py --img "$OUT/k$n.img" --out "$OUT/p$n" --timeout "$LIMIT" --nice 10 --io-class 2 --smp "$n" \
+  "${QEMU_LOCK[@]}" python3 scripts/boot-trace.py --img "$OUT/k$n.img" --out "$OUT/p$n" --timeout "$LIMIT" --nice 10 --io-class 2 --smp "$n" \
     > "$OUT/p$n.result" 2>&1 &
 done
 wait
