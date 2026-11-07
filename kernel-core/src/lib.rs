@@ -157,5 +157,6 @@ pub mod timer_units;
 pub mod timer_event;
 pub mod timer_progress;
 pub mod dirty_slots;
+pub mod hwvirt;
 
 pub mod ns_budget;
