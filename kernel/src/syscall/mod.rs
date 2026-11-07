@@ -474,6 +474,7 @@ syscall_dispatch! {
     SYSTEM_TIME_DEADLINE_WAIT => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { time_wait_ns(a.args[0]) },
     SYSTEM_SYNC_MUTEX_CREATE => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { crate::user_mutex::sys_create() },
     SYSTEM_SYNC_MUTEX_ACQUIRE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::user_mutex::sys_lock(a.args[0]) },
+    SYSTEM_SYNC_MUTEX_TRY_ACQUIRE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::user_mutex::sys_try_lock(a.args[0]) },
     SYSTEM_SYNC_MUTEX_RELEASE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::user_mutex::sys_unlock(a.args[0]) },
     SYSTEM_TASK_RT_SET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::task_control::rt_set(a.args[0]) },
     SYSTEM_TASK_AFFINITY_SET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::task_control::affinity_set(a.args[0]) },
@@ -523,6 +524,9 @@ syscall_dispatch! {
 // 「登记表承认但实现缺失」和「实现了却未登记」都会让内核直接编译失败。
 const _: () = assert!(IMPLEMENTED.is_subset_of(REGISTERED_OPS_SET));
 const _: () = assert!(IMPLEMENTED.count() == REGISTERED_OPS.len());
+// 真实高编号操作必须位于第二个 64 位字，并由生成登记集合与分发表共同承认。
+const _: () = assert!(SYSTEM_SYNC_MUTEX_TRY_ACQUIRE >= 64);
+const _: () = assert!(REGISTERED_OPS_SET.contains(SYSTEM_SYNC_MUTEX_TRY_ACQUIRE as u64));
 
 /// `system.profile.get(index, buf, cap)`：把第 `index` 个内建 Profile 的键=值描述写入用户缓冲区，
 /// 并按调用者授权集合报告逐模块的四层状态。

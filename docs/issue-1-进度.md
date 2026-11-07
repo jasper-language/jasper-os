@@ -1,7 +1,7 @@
 # issue #1 进度：SyscallSet、spawn 授权 ABI 与用户运行时能力集合
 
-更新日期：2026-11-06
-状态：第一、第二切片已实现并通过定点编译 / 宿主测试 / x86_64 QEMU 验收；Jasper 语言侧的显式构造、保留 ABI 和高编号操作仍未完成，issue #1 尚未整体关闭。
+更新日期：2026-11-07
+状态：前三切片已实现并通过定点编译 / 宿主测试 / x86_64 QEMU 验收；Jasper 语言侧的显式构造和保留 ABI 处置仍未完成，issue #1 尚未整体关闭。
 
 ## 一、问题与切片边界
 
@@ -13,7 +13,7 @@
   `caller` / `known` 同样是 `u64`；
 * 系统调用分发表在 `has_handler()` 与 `execute()` 中各写一份操作清单，新增操作时可能漂移。
 
-本切片只做第一组可独立验收的改动：
+第一切片完成第一组可独立验收的改动：
 
 1. 新的权威能力集合（`kernel-core::syscall_set::SyscallSet`）及其不变量测试；
 2. `system.process.spawn` 参数块 v2（88 字节）接入这条真实路径，保持
@@ -21,8 +21,9 @@
 3. 登记表 → 生成常量 → 分发表 → 启动自检的单源一致性；
 4. 中英文代码注释、性质登记与本文档。
 
-本切片**没有**做：把登记表扩到 256 个以上操作、Jasper 语言侧能力集合 API、
-`system.task.syscalls.set` 等保留 ABI 的重新启用、全量性能基准。这些在第五节按切片列出。
+第一切片**没有**做：把登记表扩到 256 个以上操作、Jasper 语言侧能力集合 API、
+`system.task.syscalls.set` 等保留 ABI 的重新启用、全量性能基准。第二切片补了 Rust 用户运行时
+`CallSet`，第三切片补了真实 ID 64 的 CPL3 端到端路径；语言侧和保留 ABI 仍按后续切片处理。
 
 ## 二、权威数据结构
 
@@ -52,7 +53,7 @@
 | 分段集合（`Vec<u64>` / 稀疏段） | 24 B + 堆块 | 查找段（最坏 O(段数)）或二分 | 分配失败、段表增长、热路径分支 | 变长 + 长度字段 | 按实际授权数增长，但每个任务多一次分配 | 当前规模不值得复杂度 |
 | 能力表 / 链表 | 每能力一项 | 最坏 O(能力数) 遍历 | 分配失败、部分插入、回收路径 | 需要显式长度与校验 | 授权少时省，授权多时更贵 | 与「统一权限检查」热路径不符 |
 
-选择定长位图的理由：当前最高登记 ID 为 55，256 位有 4.6 倍余量；热路径可预测；
+选择定长位图的理由：当前最高登记 ID 为 64，256 位有 4 倍余量；热路径可预测；
 失败模式只有「越界显式拒绝」；没有分配失败路径可被恶意参数触发。若登记表逼近 255，
 把 `MAX_IDS` / `WORDS` 一起提高即可（生成器会重新校验），语义不变；不保留旧宽度通道。
 
@@ -110,21 +111,21 @@
   * `IMPLEMENTED.count() == REGISTERED_OPS.len()`。
   两者合起来 ⇒ 分发表与登记表**完全相等**。「登记了却没实现」或「实现了却没登记」都会
   使内核编译失败，不再依赖两份手工清单。
-* 启动自检 `syscall::self_check()` 仍逐条核对并输出 `ops=55 handlers=all`，同时检查
+* 启动自检 `syscall::self_check()` 仍逐条核对并输出 `ops=57 handlers=all`，同时检查
   ID 63/64/127/255 可表示、256 被显式拒绝。
 
 ## 五、对照 issue #1 验收条目
 
 | issue #1 验收条目 | 本切片状态 | 证据 |
 |---|---|---|
-| ID 63、64、127 及更高有效编号的授权/拒绝确定测试 | 已满足（位图；spawn 子集授权/拒绝；255 边界） | `syscall_set` 与 `spawn_abi` 宿主测试 |
+| ID 63、64、127 及更高有效编号的授权/拒绝确定测试 | 已满足；ID 64 是已登记真实操作并在 CPL3 成功/拒绝路径执行 | 32/64 位单元测试 + `user/isohost` QEMU 契约 |
 | 高编号不能被静默忽略 | 已满足：`try_of` 越界返回 `None`，`of` 越界 panic，启动自检拒绝 256 | 单元测试 + 启动日志 |
 | 子集性质 | 已满足：`is_subset_of` 四字检查；spawn 4 位穷举 | `spawn_check_subset_exhaustive_small` 等 |
-| 未知操作拒绝 | 已满足：请求位 ∉ 登记集合 ⇒ `UnknownCall` | `spawn_check_rejects_each_rule` |
+| 未知操作拒绝 | 已满足：spawn 参数块非登记位 ⇒ `UnknownCall`；CPL3 原始 ID 255 ⇒ `unsupported` | `spawn_check_rejects_each_rule` + `user/isohost` |
 | 恶意参数 | 已满足：magic/version/size/flags/映像/CPU 上限；解码前无副作用 | `spawn_desc_rejects_foreign_or_truncated_header` |
 | 容量上限 | 已满足：255 可用、256 显式拒绝 | `capacity_boundary_is_explicit` |
 | 分配失败 | 结构无堆分配；不存在部分授权路径 | 设计约束 + 代码审查 |
-| 32/64 位布局 | 序列化固定 `u64`；32 字节结构断言；i686 目标编译通过（未在 32 位宿主运行全部用例） | `bit_63_64_127_are_distinct_and_visible`；`cargo test -p kernel-core --target i686-unknown-linux-musl --no-run` |
+| 32/64 位布局 | 已满足：序列化固定 `u64`；ID 64 字边界断言在 x86_64 与 i686 实跑 | 两目标各 544 passed；`high_id_64_serialization_is_target_width_independent` |
 | ABI 声明与实现映射一致 | 已满足：生成常量 + 编译期断言 + 启动自检 | `REGISTERED_OPS_SET` / `self_check` |
 | 性能基准无意外回退并记录原始数据 | **未在本切片完成**：热路径仍为固定次数位运算；完整基准留给集成轮 | 见第六节第 4 项 |
 
@@ -141,11 +142,12 @@
 
 定点验收结果（x86_64，单处理器）：
 
-* `cargo test -p kernel-core`：`483 passed; 0 failed`（另有集成/文档测试全部通过）；
-* `cargo test -p kernel-core --target i686-unknown-linux-musl --no-run`：32 位目标编译通过；
+* `cargo test -p kernel-core`：544 passed / 0 failed（另有集成/文档测试全部通过）；
+* `cargo test -p kernel-core --target i686-unknown-linux-musl --lib`：32 位目标 544 passed / 0 failed；
 * x86_64 裸机编译成功；
-* QEMU 定点检查 `m11 m32 j6`：全部 PASS；启动日志
-  `[JSR-SYSCALL] self_check ops=55 handlers=all`；
+* QEMU 定点检查 `m32 j6`：全部 PASS；启动日志
+  `[JSR-SYSCALL] self_check ops=57 handlers=all`；真实宿主与子进程均出现
+  `system.sync.mutex.try.acquire id=64 ret=0`；
 * QEMU 退出码 37（仅计时类断言超界，功能全过；BM-0 分层验收的既定语义）。
 
 ## 六、剩余工作（按可独立验收的切片）
@@ -157,9 +159,7 @@
    若启用，必须复用同一个 `SyscallSet`，不得引入第二套授权通道。
 4. **性能证据**：把系统调用权限检查、spawn 解码与任务切换的集合复制纳入 T-2 基准，
    记录 `u64` 与 256 位位图的原始样本，确认没有显著非预期回退。
-5. **更多真实调用者**：为 CPL3 用户程序增加高编号操作（≥64）的端到端用例；
-   本切片已验证参数块与位图，但登记表中尚无 ID ≥ 64 的操作可供真实调用。
-6. **AArch64 仅编译**：本轮按要求不为 AArch64 写代码或跑验收；其构建由集成轮确认。
+5. **AArch64 仅编译**：本轮按要求不为 AArch64 写代码或跑验收；其构建由集成轮确认。
 
 ## 七、改动文件
 
@@ -174,6 +174,9 @@
 * `abi/system-ids.txt`：`system.process.spawn` 主版本升到 2；
 * `verification/check-abi-reservations.py`：容量上限改读 `MAX_IDS`，并识别单源分发表；
 * `verification/PROPERTIES.md`：性质登记条目。
+* `kernel/src/user_mutex.rs`、`abi/system-ids.txt`：ID 64 非阻塞取得操作与 busy 错误；
+* `user/rt/src/sync.rs`、`user/isohost/src/main.rs`：真实运行时调用人和权限边界验收；
+* `modules/probe`、`kernel/src/rt_demo.rs`、`scripts/accept.sh`：spawn 子进程继承与 CPL3 串口契约。
 
 ## 八、用户运行时显式能力集合 API（第二切片）
 
@@ -223,4 +226,54 @@ QEMU 串口同时出现
 `isohost: calls duplicate_rejected=true unregistered_rejected=true out_of_range_rejected=true insert_atomic=true`
 与原有的 spawn 越权拒绝、非法映像拒绝、配额和回收标记。
 
-本切片未修改 `system.process.spawn` 参数块布局，也未登记或启用任何高编号 / 保留操作。
+第二切片未修改 `system.process.spawn` 参数块布局，也未登记或启用任何高编号 / 保留操作。
+
+## 九、真实 CPL3 高编号操作（第三切片）
+
+### 操作与语义
+
+新增 `system.sync.mutex.try.acquire`，稳定 ID 为 **64**，恰好位于能力位图第二个 `u64` 字的第 0 位。
+它复用既有继承互斥对象、Handle/Rights 和 `SyscallSet` 权限检查，没有新增授权通道：
+
+* 未持有或旧持有者已死亡：按既有所有权引用规则取得对象，返回 0；
+* 当前任务已持有：返回 `system.error.invalid_argument`，不把它伪装为递归成功；
+* 其他活动任务持有：返回新增的 `system.sync.error.busy`（ID 4137），不修改对象或引用计数；
+* 对象已关闭：返回取消错误；句柄类型或权限不符仍返回既有句柄错误。
+
+`jasper-rt::sync::PriorityMutex` 是真实运行时调用人：`try_lock` 直接发 ID 64，只把
+`busy` 映射为 `Ok(false)`，其他错误原样返回。操作编号 57..63 保持未分配，以便真实操作落在字边界，
+同时让测试能区分“容量内未登记”与“已登记高编号”。
+
+### 端到端覆盖
+
+1. 获得 ID 64 的 `isohost` 宿主通过运行时创建互斥对象，成功尝试取得、拒绝递归并释放；
+2. 隔离模块清单声明同一操作，`system.process.spawn` v2 把包含第二个字位 0 的集合交给子进程；
+   串口 spawn 日志显示 `calls=[..., 1, 0, 0]`；
+3. 子进程在宿主持有时得到 `busy`，宿主释放后成功取得、拒绝递归并释放；
+4. 未获 ID 64 授权的第二个真实进程直接调用得到 `rights_denied`；
+5. 同一进程经 spawn v2 试图把 ID 64 授予子进程，在创建对象前得到 `rights_denied`；
+6. 子进程调用未登记 ID 255 得到 `unsupported`，证明登记检查先于权限检查；
+7. 两个进程退出后内核对象、帧和固定计数全部回到基线。
+
+### 验证证据
+
+| 层 | 命令 / 位置 | 结果 |
+|---|---|---|
+| 64 位宿主单元/属性 | `cargo test -p kernel-core` | 544 passed / 0 failed |
+| 32 位宿主单元/属性 | `cargo test -p kernel-core --target i686-unknown-linux-musl --lib` | 544 passed / 0 failed |
+| 六步链 | `verification/toolbox/run-issue1-syscall-set-suite.sh`（步骤 1/2/3/4/6） | 见 `verification/PROPERTIES.md` SYS-ABI-11 |
+| 真实 QEMU | 共享锁内 `JASPER_ACCEPT=spot JASPER_CHECKS='m32 j6' bash scripts/accept.sh` | `accept-20261107-034359`：M3.2、J-6、J-6 计时均 PASS；`case=isohost` 与 `case=isohost-high-id-denied` 均退出 0，资源回基线 |
+
+QEMU 串口关键行：
+
+```text
+[JSR-SYSCALL] self_check ops=57 handlers=all
+[JSR-PROC] ... calls=[800000003bc0d6, 1, 0, 0] ...
+[JSR-SYSCALL] exit name=system.sync.mutex.try.acquire id=64 task=spawned ret=-4137 status=system.sync.error.busy
+[JSR-SYSCALL] exit name=system.sync.mutex.try.acquire id=64 task=spawned ret=0 status=OK
+[JSR-SYSCALL] deny name=system.sync.mutex.try.acquire id=64 task=isohost-high-id-denied ret=system.error.rights_denied
+[JSR-SYSCALL] reject id=255 task=isohost-high-id-denied ret=system.error.unsupported
+```
+
+本切片没有扩展第二切片的 `CallSet` API，没有启用 `system.task.syscalls.set` 或其他保留 ABI，
+也没有修改 `SpawnDesc` 的既有 88 字节 v2 布局。

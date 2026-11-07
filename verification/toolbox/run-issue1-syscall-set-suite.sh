@@ -11,7 +11,9 @@ mkdir -p "$out"
 verus=${VERUS:?需要 VERUS=<verus 可执行文件路径>}
 steps=" ${STEPS:-1 2 3 4 5 6} "
 want() { [[ "$steps" == *" $1 "* ]]; }
-git rev-parse HEAD > "$out/head.txt"
+if ! git rev-parse HEAD > "$out/head.txt" 2>/dev/null; then
+  printf '%s\n' "${SOURCE_HEAD:?linked worktree has no Git metadata in the build VM; set SOURCE_HEAD}" > "$out/head.txt"
+fi
 sha256sum kernel-core/src/syscall_set.rs kernel-core/src/spawn_abi.rs \
   verification/toolbox/verus/syscall_set.rs verification/toolbox/verus/syscall_set_bad.rs \
   verification/toolbox/tests/syscall_set.rs verification/toolbox/fuzz/fuzz_targets/spawn_desc.rs > "$out/source.sha256"
@@ -32,7 +34,7 @@ fi
 # 2. Proptest：生产代码对照 BTreeSet 参考模型（默认 256 例/性质，失败自动收缩）。
 if want 2; then
 cargo test --manifest-path verification/toolbox/Cargo.toml --test syscall_set > "$out/proptest.log" 2>&1
-grep -q '4 passed; 0 failed' "$out/proptest.log"
+grep -q '5 passed; 0 failed' "$out/proptest.log"
 fi
 
 # 3. Miri：kernel-core 内的能力集合/参数块单元测试与工具箱固定链测试。

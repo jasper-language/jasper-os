@@ -37,7 +37,8 @@ use jasper_rt::module::{
     DEVELOPMENT_PUBLISHER, STD_HOST,
 };
 use jasper_rt::process::{self, CallSet, CallSetError, FAULT_CODE};
-use jasper_rt::{entry, ids, io, println, task, time, Error, Rights};
+use jasper_rt::sync::PriorityMutex;
+use jasper_rt::{entry, ids, io, println, sys, task, time, Error, Rights};
 
 entry!(main);
 
@@ -52,7 +53,13 @@ static PUBLISHERS: [Publisher<'static>; 1] = [Publisher {
     key: *include_bytes!(concat!(env!("OUT_DIR"), "/trust-dev.key")),
 }];
 /// 探测模块清单声明的能力（宿主全部授予）。
-const PROBE_CAPS: &[&str] = &["system.console.write", "system.task.wait", "system.handle.duplicate"];
+const PROBE_CAPS: &[&str] = &[
+    "system.console.write",
+    "system.task.wait",
+    "system.handle.duplicate",
+    "system.sync.mutex.try.acquire",
+    "system.sync.mutex.release",
+];
 
 /// 字节调用约定的导出类型。
 type BytesFn = unsafe extern "C" fn(*const u8, usize, *mut u8, usize) -> isize;
@@ -191,9 +198,10 @@ fn latency(m: &mut IsolatedModule) -> (u64, bool) {
 
 // ———————————————————————— 用例 ————————————————————————
 
-fn main(_: u64, _: u64) -> i32 {
+fn main(role: u64, _: u64) -> i32 {
     let mut s = Steps(0, 0);
-    match run(&mut s) {
+    let result = if role == 1 { high_id_denial(&mut s) } else { run(&mut s) };
+    match result {
         Ok(()) => {
             if s.1 != 0 {
                 println!("isohost: TIMING step={}", s.1);
@@ -279,17 +287,46 @@ fn spawn_boundary(s: &mut Steps) -> Result<(), u32> {
     Ok(())
 }
 
+/// 角色 1：调用者没有被授予高编号操作，但登记表仍承认它。
+///
+/// 直接调用必须由统一权限检查拒绝；通过 spawn v2 请求给子进程同一高位也必须
+/// 在创建任何对象前以提权拒绝。未登记 ID 则先于权限检查返回 unsupported。
+fn high_id_denial(s: &mut Steps) -> Result<(), u32> {
+    let direct = sys::call(ids::SYSTEM_SYNC_MUTEX_TRY_ACQUIRE, 0, 0, 0);
+    s.check(direct == neg(Error::RIGHTS_DENIED))?;
+    let calls = CallSet::try_from_ids(&[ids::SYSTEM_PROCESS_EXIT, ids::SYSTEM_SYNC_MUTEX_TRY_ACQUIRE])
+        .map_err(|_| s.0 + 1)?;
+    let escalation = process::spawn(process::Spec { image: CONTAINER, calls, arg: 0, cpu_limit_permille: None }).err();
+    s.check(escalation == Some(Error::RIGHTS_DENIED))?;
+    let unregistered = sys::call(255, 0, 0, 0);
+    s.check(unregistered == neg(Error::UNSUPPORTED))?;
+    println!("isohost: high_id id={} direct=rights_denied spawn_escalation=rights_denied unregistered=unsupported", ids::SYSTEM_SYNC_MUTEX_TRY_ACQUIRE);
+    Ok(())
+}
+
 /// 用例 2：句柄登记在清单未声明的能力名下 ⇒ 创建隔离进程之前被拒。
 fn handle_admission(s: &mut Steps, t: &TrustPolicy<'_>) -> Result<(), u32> {
     let (a, _b) = channel::pair().map_err(|_| s.0 + 1)?;
     let mut g = plain_grant(t, None);
-    g.capabilities = &["system.console.write", "system.task.wait", "system.handle.duplicate", "system.channel.send"];
+    g.capabilities = &[
+        "system.console.write",
+        "system.task.wait",
+        "system.handle.duplicate",
+        "system.sync.mutex.try.acquire",
+        "system.sync.mutex.release",
+        "system.channel.send",
+    ];
     g.handles.push(("system.channel.send", a.into_handle()));
     let r = IsolatedModule::spawn(PROBE, g).err();
     s.check(matches!(&r, Some(IsolateError::UndeclaredHandle(c)) if c == "system.channel.send"))?;
     // 能力未授予 ⇒ 无状态检查即被拒
     let mut g = plain_grant(t, None);
-    g.capabilities = &["system.console.write", "system.task.wait"];
+    g.capabilities = &[
+        "system.console.write",
+        "system.task.wait",
+        "system.sync.mutex.try.acquire",
+        "system.sync.mutex.release",
+    ];
     let r = IsolatedModule::spawn(PROBE, g).err();
     s.check(matches!(&r, Some(IsolateError::Load(LoadError::MissingCapability(c))) if c == "system.handle.duplicate"))?;
     println!("isohost: admission undeclared_handle_rejected=true missing_capability_rejected=true");
@@ -301,6 +338,13 @@ fn rights_boundary(s: &mut Steps, t: &TrustPolicy<'_>) -> Result<(), u32> {
     // 授予一个句柄：宿主一个线程的任务句柄（可移动），登记在清单声明的 system.task.wait 名下
     let worker = task::spawn(|| 7).map_err(|_| s.0 + 1)?;
     let granted = worker.handle().duplicate(Rights::WAIT.union(Rights::DUPLICATE).union(Rights::TRANSFER)).map_err(|_| s.0 + 1)?;
+    let mutex = PriorityMutex::create().map_err(|_| s.0 + 1)?;
+    s.check(mutex.try_lock() == Ok(true))?;
+    s.check(mutex.try_lock() == Err(Error::INVALID_ARGUMENT))?;
+    let granted_mutex = mutex
+        .handle()
+        .duplicate(Rights::WAIT.union(Rights::CONTROL).union(Rights::TRANSFER))
+        .map_err(|_| s.0 + 1)?;
     // 宿主自己的句柄：多建几对通道，使其槽位号超出隔离进程句柄表已用的部分
     let mut keep = Vec::new();
     for _ in 0..6 {
@@ -309,13 +353,26 @@ fn rights_boundary(s: &mut Steps, t: &TrustPolicy<'_>) -> Result<(), u32> {
     let host_raw = keep[5].0.handle().raw();
     let mut g = plain_grant(t, None);
     g.handles.push(("system.task.wait", granted));
+    g.handles.push(("system.sync.mutex.try.acquire", granted_mutex));
     let mut m = IsolatedModule::spawn(PROBE, g).map_err(|_| s.0 + 1)?;
     s.check(m.name() == "jaso-probe" && m.publisher() == Some(DEVELOPMENT_PUBLISHER))?;
     s.check(sum_ok(&mut m))?;
     let bound = m.call("probe_bound", &[], 8).ok().and_then(|o| le64(&o.bytes)).ok_or(s.0 + 1)?;
+    let mutex_bound = m.call("probe_mutex", &[], 8).ok().and_then(|o| le64(&o.bytes)).ok_or(s.0 + 1)?;
     // 授予的调用 + 授予的句柄：复制成功
     let dup = raw_call(&mut m, ids::SYSTEM_HANDLE_DUPLICATE, bound, Rights::WAIT.bits() as u64, 0).map_err(|_| s.0 + 1)?;
     s.check(dup > 0)?;
+    // 高编号操作随 spawn v2 子集继承到子进程。宿主先持有对象，子进程的
+    // 非阻塞尝试必须原子返回 busy；宿主释放后，同一子进程真实取得并释放。
+    let busy = raw_call(&mut m, ids::SYSTEM_SYNC_MUTEX_TRY_ACQUIRE, mutex_bound, 0, 0).map_err(|_| s.0 + 1)?;
+    s.check(busy == neg(Error::SYNC_BUSY))?;
+    s.check(mutex.unlock().is_ok())?;
+    let high = raw_call(&mut m, ids::SYSTEM_SYNC_MUTEX_TRY_ACQUIRE, mutex_bound, 0, 0).map_err(|_| s.0 + 1)?;
+    s.check(high == 0)?;
+    let recursive = raw_call(&mut m, ids::SYSTEM_SYNC_MUTEX_TRY_ACQUIRE, mutex_bound, 0, 0).map_err(|_| s.0 + 1)?;
+    s.check(recursive == neg(Error::INVALID_ARGUMENT))?;
+    let release = raw_call(&mut m, ids::SYSTEM_SYNC_MUTEX_RELEASE, mutex_bound, 0, 0).map_err(|_| s.0 + 1)?;
+    s.check(release == 0)?;
     // 未授予的调用：被拒
     let create = raw_call(&mut m, ids::SYSTEM_CHANNEL_CREATE, 0, 0, 0).map_err(|_| s.0 + 1)?;
     s.check(create == neg(Error::RIGHTS_DENIED))?;
@@ -323,6 +380,8 @@ fn rights_boundary(s: &mut Steps, t: &TrustPolicy<'_>) -> Result<(), u32> {
     s.check(spawn == neg(Error::RIGHTS_DENIED))?;
     let sleep = raw_call(&mut m, ids::SYSTEM_TIME_WAIT, 1, 0, 0).map_err(|_| s.0 + 1)?;
     s.check(sleep == neg(Error::RIGHTS_DENIED))?;
+    let unregistered = raw_call(&mut m, 255, 0, 0, 0).map_err(|_| s.0 + 1)?;
+    s.check(unregistered == neg(Error::UNSUPPORTED))?;
     // 宿主的句柄值在隔离进程里无效
     let foreign = raw_call(&mut m, ids::SYSTEM_HANDLE_DUPLICATE, host_raw as u64, Rights::WAIT.bits() as u64, 0).map_err(|_| s.0 + 1)?;
     s.check(foreign == neg(Error::HANDLE_INVALID))?;
@@ -333,6 +392,10 @@ fn rights_boundary(s: &mut Steps, t: &TrustPolicy<'_>) -> Result<(), u32> {
     s.check(sum_ok(&mut m))?;
     s.check(worker.join() == Ok(7))?;
     println!("isohost: rights granted_call_ok=true denied=channel.create,process.spawn,time.wait foreign_handle=invalid host_handle_intact=true");
+    println!(
+        "isohost: high_id id={} child_inherited=true try_acquire=true busy_refused=true recursive_rejected=true unlock=true unregistered_denied=true",
+        ids::SYSTEM_SYNC_MUTEX_TRY_ACQUIRE
+    );
     Ok(())
 }
 

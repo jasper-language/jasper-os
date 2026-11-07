@@ -170,3 +170,23 @@ fn multi_level_spawn_never_escalates() {
     // 孙进程请求祖先有、父进程没有的 ID 127 ⇒ 提权被拒。
     assert_eq!(check(&ok(SyscallSet::of(&[127])), child, known), Err(SpawnReject::Escalation));
 }
+
+/// 登记高编号操作 ID 64 在 v2 参数块的第二个字中保持独立，并且只在双向子集成立时准入。
+#[test]
+fn registered_high_id_64_roundtrips_through_spawn_v2() {
+    let high = SyscallSet::of(&[64]);
+    let parent = SyscallSet::of(&[64, 127]);
+    let known = SyscallSet::of(&[63, 64, 127, 255]);
+    let desc = SpawnDesc {
+        image_len: 64,
+        calls: high,
+        cpu_limit_permille: CPU_UNLIMITED,
+        ..Default::default()
+    };
+    let raw = desc.encode();
+    assert_eq!(&raw[32..40], &1u64.to_le_bytes());
+    assert_eq!(SpawnDesc::decode(&raw), Ok(desc));
+    assert_eq!(check(&desc, parent, known), Ok(()));
+    assert_eq!(check(&desc, SyscallSet::of(&[63, 127]), known), Err(SpawnReject::Escalation));
+    assert_eq!(check(&desc, parent, SyscallSet::of(&[63, 127])), Err(SpawnReject::UnknownCall));
+}
