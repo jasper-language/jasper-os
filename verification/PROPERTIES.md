@@ -234,6 +234,12 @@
 |---|---|---|---|---|---|---|
 | KRN2-OWNER-LEAF-01 | 本地到期读取后的发布必须仍与迁移和 TimerId 终态处于同一规范线性化点；仅持本核 leaf 锁时允许迁移交错会产生陈旧 owner 发布；非 owner 发布同样被拒 | `Scheduler::{settle_highres,make_runnable,rehome,timer_table}`；`verification/owner_leaf_fast_path.tla` | TLA+ + 状态归属审计 | model-checked | `bash verification/run-owner-leaf-fast-path-tlc.sh` | 单任务、2 CPU、最多一次迁移；正模型17生成/15可达/深度5，迁移交错与非 owner 两个负例均命中 `NoStaleWake`。结论是当前不新增 leaf-local 发布旁路；不证明未来 per-CPU 权威状态方案不可行，也不替代真实 KVM p99.9 样本 |
 
+## KRN-2 KVM 正式性能基线
+
+| ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |
+|---|---|---|---|---|---|---|
+| KRN2-KVM-PERF-01 | 同一宿主 KVM、CPU 4–11、相同 8-vCPU p999 客机和采样脚本下，当前版本 isolated/fanout 唤醒 p99.9 相对 issue #2 性能改造前无稳定回退；失败/不完整轮次必须原样保留 | `kernel/src/scale_demo.rs`; `scripts/kvm-p999-repeat.sh`; `scripts/boot-trace.py` | 宿主 KVM 交替重复 8-vCPU guest | tested / ambiguous-sample retained | `JASPER_CORES=4-11 ROUNDS=5 bash scripts/kvm-p999-repeat.sh`；基线 image from `269fb84` | 基线3/3完整；当前10轮中9轮完整、1轮14335/14336被功能门拒绝；补诊断后当前连续5/5完整。常见 p99.9 40–50µs，最大长尾受宿主调度影响；未证明 256核、裸机或硬实时 |
+
 ## ABI 1.1 程序能力要求
 
 | ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |

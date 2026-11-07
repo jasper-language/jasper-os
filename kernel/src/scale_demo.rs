@@ -196,10 +196,11 @@ pub fn run_wake_latency_contract() -> u32 {
     check(isolated_phase_complete, "隔离期限时间点样本必须完整且有序");
     check(P999_DONE.load(Ordering::Acquire) == 1, "隔离唤醒任务必须完成");
     check(baseline() == saved, "隔离p99.9演练资源必须回到基线");
-    kprintln!("[JSR-WAKE-LATENCY] mode=isolated samples={} expected={} invalid={} p50_us={} p99_us={} p999_us={} max_ns={} complete={} raw_retained={} raw_dropped={} endpoint=resume-hook clock=shared-ns-serialized platform_sync=assumed",
+    kprintln!("[JSR-WAKE-LATENCY] mode=isolated samples={} expected={} invalid={} p50_us={} p99_us={} p999_us={} max_ns={} complete={} raw_retained={} raw_dropped={} errors={:?} carried={} pending={} endpoint=resume-hook clock=shared-ns-serialized platform_sync=assumed",
         isolated.count, P999_ISOLATED_ROUNDS, isolated.invalid, isolated.p50_us,
         isolated.p99_us, isolated.p999_us, isolated.max_ns, isolated_complete,
-        isolated_raw.entries().len(), isolated_raw.dropped());
+        isolated_raw.entries().len(), isolated_raw.dropped(), isolated_errors,
+        isolated_carried, isolated_pending);
     kprintln!("[JSR-WAKE-PHASE] mode=isolated deadline={}us interrupt={}/{}/{}/{}us lock={}/{}/{}/{}us wake={}/{}/{}/{}us runnable={}/{}/{}/{}us resume={}/{}/{}/{}us samples={}/{}/{} late={} early_timer={} invalid_order={} invalid_resume={} queue_publication=after-enqueue-relist clock=shared-ns-serialized",
         0,
         isolated_phases.deadline_to_interrupt.p50_us, isolated_phases.deadline_to_interrupt.p99_us,
@@ -248,9 +249,10 @@ pub fn run_wake_latency_contract() -> u32 {
         "全部唤醒工作任务必须完成");
     check(baseline() == saved, "p99.9演练资源必须回到基线");
     check(lists_consistent(), "p99.9演练后运行列表必须一致");
-    kprintln!("[JSR-WAKE-LATENCY] mode=fanout-7 samples={} expected={} invalid={} p50_us={} p99_us={} p999_us={} max_ns={} complete={} raw_retained={} raw_dropped={} endpoint=resume-hook clock=shared-ns-serialized platform_sync=assumed",
+    kprintln!("[JSR-WAKE-LATENCY] mode=fanout-7 samples={} expected={} invalid={} p50_us={} p99_us={} p999_us={} max_ns={} complete={} raw_retained={} raw_dropped={} errors={:?} carried={} pending={} endpoint=resume-hook clock=shared-ns-serialized platform_sync=assumed",
         latency.count, expected, latency.invalid, latency.p50_us, latency.p99_us,
-        latency.p999_us, latency.max_ns, complete, raw.entries().len(), raw.dropped());
+        latency.p999_us, latency.max_ns, complete, raw.entries().len(), raw.dropped(),
+        errors, carried, pending);
     kprintln!("[JSR-WAKE-PHASE] mode=fanout-7 deadline={}us interrupt={}/{}/{}/{}us lock={}/{}/{}/{}us wake={}/{}/{}/{}us runnable={}/{}/{}/{}us resume={}/{}/{}/{}us samples={}/{}/{} late={} early_timer={} invalid_order={} invalid_resume={} queue_publication=after-enqueue-relist clock=shared-ns-serialized",
         0,
         phases.deadline_to_interrupt.p50_us, phases.deadline_to_interrupt.p99_us,
