@@ -7,6 +7,32 @@ export PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1
 out="${S2_OUT:-evidence/s2}"
 mkdir -p "$out"
 
+# 标准 S-2 使用宿主机 KVM。只有显式选择 TCG 时才允许用于确定性故障注入；
+# KVM 运行才可用于宿主侧 p99/p99.9 性能证据。
+accel="${S2_QEMU_ACCEL:-${JASPER_ACCEL:-kvm}}"
+case "$accel" in
+  kvm)
+    [ -r /dev/kvm ] && [ -w /dev/kvm ] || { echo 'S-2: KVM requested but /dev/kvm is unavailable' >&2; exit 2; }
+    accel_args=(-accel kvm -cpu host)
+    ;;
+  tcg)
+    accel_args=(-accel tcg)
+    ;;
+  *)
+    echo "S-2: unsupported accelerator: $accel" >&2
+    exit 2
+    ;;
+esac
+qemu=(qemu-system-x86_64 "${accel_args[@]}")
+if [ -n "${JASPER_CORES:-}" ]; then qemu=(taskset -c "$JASPER_CORES" "${qemu[@]}"); fi
+{
+  echo "accelerator=$accel"
+  echo "cpu_affinity=${JASPER_CORES:-unrestricted}"
+  echo "host_load=$(cut -d' ' -f1-3 /proc/loadavg)"
+  qemu-system-x86_64 --version | head -1
+  command -v lscpu >/dev/null && lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket|CPU max MHz|CPU min MHz|CPU MHz)' || true
+} > "$out/environment.txt"
+
 # 撞时限前留现场（同 accept.sh）：时限前 60 秒经 monitor 写 <输出目录>/hang.txt；QEMU 正常退出后什么也不写。
 hang_watch_on() {
   local dir="$1" limit="$2"
@@ -69,7 +95,7 @@ set +e
 # it is quiet; with other jobs running 2400 s was not enough (ticket lock still
 # advancing at the limit, 2026-11-04), so the limit leaves room for a loaded VM.
 hang_watch_on "$out" "${S2_QEMU_TIMEOUT:-4200}"
-timeout "${S2_QEMU_TIMEOUT:-4200}" qemu-system-x86_64 -accel tcg \
+timeout "${S2_QEMU_TIMEOUT:-4200}" "${qemu[@]}" \
   -drive "format=raw,file=$out/s2.img" -device virtio-rng-pci \
   -device virtio-net-pci,netdev=n0 -netdev user,id=n0 \
   -device virtio-blk-pci,drive=d1 -drive "if=none,id=d1,file=$out/blank.img,format=raw" \
@@ -112,7 +138,7 @@ cargo build --locked --release --target x86_64-unknown-none -p jasper-kernel \
 target/release/xtask target/x86_64-unknown-none/release/jasper-kernel "$scale_out/s2.img" > "$scale_out/image.log" 2>&1
 set +e
 hang_watch_on "$scale_out" "${S2_QEMU_TIMEOUT:-600}"
-timeout "${S2_QEMU_TIMEOUT:-600}" qemu-system-x86_64 -accel tcg \
+timeout "${S2_QEMU_TIMEOUT:-600}" "${qemu[@]}" \
   -drive "format=raw,file=$scale_out/s2.img" -smp "$cpus" -m 256M \
   -device virtio-rng-pci \
   -serial stdio -display none -monitor "unix:$hang_sock,server,nowait" -no-reboot \

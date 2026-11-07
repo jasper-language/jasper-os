@@ -28,8 +28,9 @@
 #         JASPER_QEMU_EXTRA='-icount shift=8' bash scripts/accept.sh
 #                                                         （原样追加到每次 x86_64 QEMU 命令行末尾；用于人为放慢，
 #                                                         复核「计时类断言只记录、不阻塞」的分层；默认空）
-# 计时分层（BM-0）：QEMU 只判正确性，性能只在裸机判。功能自检全过、只有计时类断言超界时内核以退出码 37 退出；
-# 脚本把退出码 33 与 37 都视为启动成功（qemu_ok），并把「计时·参考」行记为 TIME（不阻塞），紧接最终结论前汇总行数。
+# 计时分层（BM-0，2026-11-07 修订）：标准性能环境改为宿主机 KVM，p50/p99/p99.9/max
+# 以 KVM 同口径重复样本为主，裸机用于后续硬件交叉核验。功能自检全过、只有计时类断言超界时
+# 内核以退出码 37 退出；脚本把 33/37 都视为启动成功，并把未承诺的计时行记为 TIME（不阻塞）。
 # 架构裁决（用户 2026-10-21）：jasper-os 暂时只针对 x86_64 开发，AArch64 / RISC-V64 / RISC-V32 冻结、「后续再补上」。
 # 为什么默认用最后几个核：前几个核（尤其 CPU 0）通常承担显卡、硬盘等设备中断与按核的内核后台工作；
 # 把它们压满会让桌面失去响应。构建与 QEMU 一律以 nice 19 / ionice 空闲级运行，桌面需要时随时让出。
@@ -114,15 +115,36 @@ cd "$ROOT" || { echo "✗ 无法进入仓库根目录"; exit 2; }
 command -v cargo >/dev/null || { echo "✗ 找不到 cargo"; exit 2; }
 [ -n "$QEMU" ] || { echo "✗ 找不到 qemu-system-x86_64"; exit 2; }
 
-# x86_64 加速方式（用户 2026-10-21 为与主流系统做性能对比开启构建虚拟机嵌套虚拟化）：
-# 默认 TCG：2026-10-21 实测 VirtualBox 嵌套 KVM 不稳定（-smp 8 时整台构建虚拟机挂死；单核可启动但 isohost 第 25 步失败、60 秒未跑完），
-# 在查清前 KVM 只作实验：JASPER_ACCEL=kvm 或 auto（/dev/kvm 可读写时用 KVM）。
-ACCEL="${JASPER_ACCEL:-tcg}"
-if [ "$ACCEL" = auto ]; then
-  if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then ACCEL=kvm; else ACCEL=tcg; fi
-fi
-ACCEL_ARGS=(-accel "$ACCEL")
-echo "x86_64 加速方式：$ACCEL"
+# x86_64 加速方式（用户 2026-11-07 裁决）：标准验收默认使用宿主机 KVM，
+# 并要求调用方通过 JASPER_CORES 排除 0-3 号 CPU。KVM 不可用时显式失败，
+# 不再静默退回 TCG。TCG 仅允许在明确设置 JASPER_ACCEL=tcg 时运行确定性
+# -icount 故障注入；TCG 计时数据不得用于 p99.9 或物理性能结论。
+ACCEL="${JASPER_ACCEL:-kvm}"
+case "$ACCEL" in
+  kvm)
+    if ! [ -r /dev/kvm ] || ! [ -w /dev/kvm ]; then
+      echo "✗ 标准验收要求宿主 KVM，但 /dev/kvm 不可读写；确定性测试可显式设置 JASPER_ACCEL=tcg"
+      exit 2
+    fi
+    ACCEL_ARGS=(-accel kvm -cpu host)
+    ;;
+  tcg)
+    ACCEL_ARGS=(-accel tcg)
+    ;;
+  *)
+    echo "✗ 未知加速方式：$ACCEL（可选 kvm / tcg；auto 已取消，避免静默降级）"
+    exit 2
+    ;;
+esac
+echo "x86_64 加速方式：$ACCEL（CPU 亲和：$CORES）"
+{
+  echo "time=$(date --iso-8601=seconds)"
+  echo "accelerator=$ACCEL"
+  echo "cpu_affinity=$CORES"
+  echo "host_load=$(cut -d' ' -f1-3 /proc/loadavg)"
+  "$QEMU" --version | head -1
+  command -v lscpu >/dev/null && lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket|CPU max MHz|CPU min MHz|CPU MHz)' || true
+} > "$OUT/environment.txt"
 # 演练注入开关（BM-0）：原样追加到每次 x86_64 QEMU 命令行末尾，便于人为放慢（例如 -icount shift=8）复核计时分层。
 # 默认空，不影响正常验收；不用于放宽任何判据，只改变仿真器速度。
 X86_EXTRA=()
@@ -189,7 +211,7 @@ record_na() {
 # 计时·参考行超界计数（BM-0）：这些行不阻塞，只在最终结论前汇总。
 TIMING_ROWS=0
 # record_timing <行名> <PASS|FAIL> <说明>：计时类判据专用。PASS 照常；FAIL 写成 TIME 并加“计时·参考”前缀，
-# 不置 FAILED、不改变任何功能判据。QEMU 的时间基准跟随宿主，性能结论只在裸机上算数。
+# 不置 FAILED、不改变任何功能判据。KVM 原始样本用于尾延迟分析；裸机用于硬件差异交叉核验。
 # Timing-class row: an over-limit result is recorded as TIME and never blocks the run.
 record_timing() {
   if [ "${PORT_NA:-0}" = "1" ]; then
@@ -586,7 +608,13 @@ check_production() {   # issue #7 第二片：生产启动持续运行、不退�
 
 check_timer_progress() {   # 定时器中断活锁回归：-icount 下时钟相对指令很密时，启动仍能前进（单处理器修复前 shift=8、10 卡死，4 处理器修复前 shift=9 卡死）
   local detail
-  if ! has '^\[JSR-TIMER-PROGRESS\] full=[1-9]'; then
+  if [ "$ACCEL" != tcg ]; then
+    if has '^\[JSR-TIMER-PROGRESS\] full=[1-9]'; then
+      record_na TIMER-PROGRESS "标准 KVM 主启动已确认前进保证启用；shift 5–10 的确定性 -icount 活锁矩阵是 TCG 专属门，不在 KVM 计时环境运行"
+    else
+      record TIMER-PROGRESS FAIL "KVM 主启动串口缺少前进保证计数"
+    fi
+  elif ! has '^\[JSR-TIMER-PROGRESS\] full=[1-9]'; then
     record TIMER-PROGRESS FAIL "串口缺少前进保证计数"
   elif detail=$(OUT="$OUT/timer-progress" bash "$ROOT/scripts/timer-progress-check.sh" "$IMG" 2>&1); then
     record TIMER-PROGRESS PASS "$(echo "$detail" | wc -l) 个 icount 组合都在时限内走到第 1200 行；$(grep -m1 -oE '^\[JSR-TIMER-PROGRESS\].*' "$SERIAL")"
@@ -1233,13 +1261,13 @@ check_t2() {    # 基准（功能）：宿主统计/取值测试；周期计数�
   else
     record T-2 FAIL "缺少 JSR-BENCH 标记、样本不全、失败路径未被拒、取值结论缺失、宿主测试未通过或未回到基线"
   fi
-  # 计时类判据（BM-0）：只记录、不阻塞。QEMU 的时间基准跟随宿主，性能只在裸机上判定；
+  # 计时类判据（BM-0）：只记录、不阻塞。KVM 样本进入 p50/p99/p99.9/max 报告，裸机交叉核验；
   # 内核在功能自检全过、只有计时类断言超界时以退出码 37 退出，汇总行末 timing_failed=<n> 即该计数。
   if has '^\[JSR-BENCH\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0 timing_failed=0' \
      && ! has 'within_limit=false gated=true'; then
     record_timing T-2/计时 PASS "串口 [JSR-BENCH] summary timing_failed=0：默认配置档 timer_hz 与各档时间片都在 1% 开销预算内"
   else
-    record_timing T-2/计时 FAIL "内核报告计时类断言超界（timing_failed>0）或出现「强制生效却超出预算」；功能判据不受影响，性能结论以裸机为准"
+    record_timing T-2/计时 FAIL "内核报告计时类断言超界（timing_failed>0）或出现「强制生效却超出预算」；功能判据不受影响，KVM 原始计时用于尾延迟报告"
   fi
 }
 
@@ -2607,6 +2635,8 @@ fi
   echo "jasper-os 一键验收  $TS"
   echo "提交：$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$(git -C "$ROOT" diff --quiet 2>/dev/null || echo '（工作区有未提交改动）')"
   echo "配置档：$PROFILE"
+  echo "加速方式：$ACCEL"
+  echo "CPU 亲和：$CORES"
   if [ "$SPOT" -eq 1 ]; then
     echo "验收层：定点（x86_64 单处理器；检查：${JASPER_CHECKS:-m11}；宿主测试：$HOST_TESTS）——不代表全量通过"
     [ -n "$SPOT_SKIPPED" ] && echo "定点未运行的日志：$(echo $SPOT_SKIPPED | tr ' ' '\n' | sort -u | tr '\n' ' ')"
@@ -2638,7 +2668,7 @@ for f in "${EVIDENCE_FILES[@]}"; do
 done
 echo
 echo "证据目录：$OUT"
-# 计时·参考行只在最终结论前汇总一次：它们是记录，不是失败（QEMU 只判正确性，性能只在裸机判）。
+# 计时·参考行只在最终结论前汇总一次：它们是记录，不是失败（功能与性能分账）。
 if [ "$TIMING_ROWS" -gt 0 ]; then echo "accept: 计时·参考 $TIMING_ROWS 行超界（不阻塞）"; fi
 if [ "$FAILED" -ne 0 ]; then echo "accept: FAIL"; exit 1; fi
 if [ "$SPOT" -eq 1 ]; then echo "accept: SPOT PASS（定点，不代表全量通过）"; else echo "accept: ALL PASS"; fi
