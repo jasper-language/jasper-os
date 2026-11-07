@@ -35,9 +35,30 @@ ap.add_argument("--stall-secs", type=int, default=0)
 ap.add_argument("--evict", action="store_true")
 ap.add_argument("--keep-awake", action="store_true")
 ap.add_argument("--icount", type=int)
+ap.add_argument("--accel", default=os.environ.get("JASPER_ACCEL", "kvm"),
+                choices=("kvm", "tcg"))
+ap.add_argument("--cpus", default=os.environ.get("JASPER_CORES", ""))
 args = ap.parse_args()
 
 TICK = os.sysconf("SC_CLK_TCK")
+
+
+if args.accel == "kvm" and args.icount is not None:
+    raise SystemExit("boot-trace: -icount is deterministic TCG-only; select --accel tcg explicitly")
+
+
+def cpu_list(text):
+    if not text:
+        return list(range(os.cpu_count() or 0))
+    cpus = []
+    for part in text.split(","):
+        bounds = part.split("-", 1)
+        if len(bounds) == 1:
+            cpus.append(int(bounds[0]))
+        else:
+            start, end = map(int, bounds)
+            cpus.extend(range(start, end + 1))
+    return cpus
 
 
 def thread_cpu(pid):
@@ -78,7 +99,7 @@ if args.evict:
 
 spinners = []
 if args.keep_awake:
-    for cpu in range(os.cpu_count()):
+    for cpu in cpu_list(args.cpus):
         spinners.append(subprocess.Popen(
             ["taskset", "-c", str(cpu), "chrt", "-i", "0", "sh", "-c", "while :; do :; done"]))
 
@@ -88,8 +109,13 @@ blank = f"{tmp}/blank.img"
 with open(blank, "wb") as f:
     f.truncate(16 << 20)
 serial_path = args.out + ".serial"
-cmd = ["nice", "-n", str(args.nice), "ionice", "-c", str(args.io_class),
-       "qemu-system-x86_64", "-accel", "tcg", "-drive", f"format=raw,file={args.img}",
+cmd = ["nice", "-n", str(args.nice), "ionice", "-c", str(args.io_class)]
+if args.cpus:
+    cmd += ["taskset", "-c", args.cpus]
+cmd += ["qemu-system-x86_64", "-accel", args.accel]
+if args.accel == "kvm":
+    cmd += ["-cpu", "host"]
+cmd += ["-drive", f"format=raw,file={args.img}",
        "-device", "virtio-rng-pci", "-device", "virtio-net-pci,netdev=n0", "-netdev", "user,id=n0",
        "-device", "virtio-blk-pci,drive=d1", "-drive", f"if=none,id=d1,file={blank},format=raw",
        "-serial", "stdio", "-display", "none", "-monitor", f"unix:{sock},server,nowait", "-no-reboot",

@@ -12,13 +12,26 @@
 # =============================================================================
 set -uo pipefail
 cd "$(dirname "$0")/.."
+export PATH="$HOME/.cargo/bin:$PATH"
 LIMIT="${LIMIT:-900}"
 SMP="${SMP:-4}"
 MATRIX="${MATRIX:-1}"
 OUT="${OUT:-evidence/plan-guests}"
 TARGET=target/plan-guests
 KTARGET=x86_64-unknown-none
+QEMU_ACCEL="${JASPER_ACCEL:-kvm}"
+case "$QEMU_ACCEL" in
+  kvm|tcg) ;;
+  *) echo "unsupported JASPER_ACCEL=$QEMU_ACCEL" >&2; exit 2 ;;
+esac
 mkdir -p "$OUT"
+{
+  echo "accelerator=$QEMU_ACCEL"
+  echo "cpu_affinity=${JASPER_CORES:-unrestricted}"
+  echo "host_load=$(cut -d' ' -f1-3 /proc/loadavg)"
+  qemu-system-x86_64 --version | head -1
+  command -v lscpu >/dev/null && lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket|CPU max MHz|CPU min MHz|CPU MHz)' || true
+} > "$OUT/environment.txt"
 rc=0
 cargo build --locked --release -p xtask > "$OUT/build.log" 2>&1 || { echo "FAIL xtask 构建失败"; exit 1; }
 
@@ -65,11 +78,11 @@ for g in $GUESTS; do
   guest_limit="$LIMIT"
   extra=()
   case "$f" in
-    budget-window-verify) cpus=8; extra=(--icount 5);;
-    krn3-postsplit-verify) cpus=4; extra=(--icount 5);;
-    krn3-p999-verify|evt2-broadcast-verify) cpus=8; guest_limit=1200; extra=(--icount 0);;
+    budget-window-verify) cpus=8; [ "$QEMU_ACCEL" = tcg ] && extra=(--icount 5);;
+    krn3-postsplit-verify) cpus=4; [ "$QEMU_ACCEL" = tcg ] && extra=(--icount 5);;
+    krn3-p999-verify|evt2-broadcast-verify) cpus=8; guest_limit=1200; [ "$QEMU_ACCEL" = tcg ] && extra=(--icount 0);;
   esac
-  python3 scripts/boot-trace.py --img "$OUT/$f.img" --out "$OUT/$f" --timeout "$guest_limit" --nice 10 --io-class 2 --smp "$cpus" "${extra[@]}" > "$OUT/$f.result" 2>&1
+  python3 scripts/boot-trace.py --img "$OUT/$f.img" --out "$OUT/$f" --timeout "$guest_limit" --nice 10 --io-class 2 --smp "$cpus" --accel "$QEMU_ACCEL" "${extra[@]}" > "$OUT/$f.result" 2>&1
 done
 
 for g in $selected; do
