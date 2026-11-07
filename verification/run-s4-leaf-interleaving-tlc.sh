@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-jar=${TLA2TOOLS_JAR:-/home/auth/Documents/jasper/jasper/build/tools/tla2tools.jar}
+jar=${TLA2TOOLS_JAR:?set TLA2TOOLS_JAR to the TLA+ tools jar}
 if [[ ! -f "$jar" ]]; then
   echo "missing TLA2TOOLS_JAR=$jar" >&2
   exit 2
