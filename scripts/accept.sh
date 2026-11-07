@@ -860,6 +860,8 @@ check_m43() {   # 用户态异步环：用户程序端到端（ID 单调、cq_fu
      && has 'text=ring: closed_with_pending=true enter_after_close=-4101 cancel_after_close=-4101' \
      && has 'text=ring: all checks passed' \
      && has '\[JSR-RING\] user exit=Some\(Exited \{ code: 0 \}\) quota_after=Some\(ResourceQuota \{ rings: 0, in_flight: 0, endpoints: 0, ipc_bytes: 0 \}\)' \
+     && has '\[JSR-RING\] wait_timer swap_cancel=0 natural_after_swap=true results=\[' \
+     && has '\[JSR-RING-WAIT-SCALE\] rounds=64 batch=16 requests=1024 scan_slots=0 heap_ops=([0-9]+) cycle_p50=[0-9]+ cycle_p99=[0-9]+ cycle_p999=[0-9]+ cycle_max=[0-9]+ sched_contended=[0-9]+ object_contended=[0-9]+ failed_ok=true' \
      && has 'buffer cancel=Ok\(0\) hidden_before_quiesce=true cancel_again=Ok\(-4106\) visible_after_quiesce=true' \
      && has 'closing before=Some\(\(2, 3\)\) after_in_flight=Some\(2\) dropped_ready=true submit_after_exit=Some\(-[0-9]+\) quota=Some\(3\)->Some\(2\)' \
      && has 'closing abortable_quiesced=true nonabortable_finished=true ring_destroyed_after_last_request=true quota_returned=true' \
@@ -868,7 +870,7 @@ check_m43() {   # 用户态异步环：用户程序端到端（ID 单调、cq_fu
      && has "quota rings=$(cfg max_rings_per_process) ninth=Some\\(-4111\\) in_flight=$(cfg max_in_flight_per_process) over=Some\\(-4111\\) unchanged_on_reject=true returned=true" \
      && has '^\[JSR-RING\] objects_live=([0-9]+)/\1 pending=0 reclaimed=true timer_live=0 timer_armed=0 timer_budget=0/[0-9]+ checks=[0-9]+ failed=0' \
      && ! has '\[JSR-LOCK-ORDER\]'; then
-    record M4.3 PASS "用户态 ring 提交→完成；cq_full 原子失败；信用耗尽可同步取消；信用消费时归还；取消结果表与窗口；closing 各类收尾；逐后端创建/启动/释放记账；配额；回到基线"
+    record M4.3 PASS "用户态 ring 提交→完成；Wait 由每 Ring 期限堆推进且收尾扫描为 0；取消交换后的自然到期、cq_full、信用、closing、逐后端记账与配额均通过；回到基线"
   else
     record M4.3 FAIL "缺少 JSR-RING / user-ring 关键标记或 failed≠0"
   fi
@@ -1240,7 +1242,7 @@ check_t2() {    # 基准（功能）：宿主统计/取值测试；周期计数�
                spawn.decode.current spawn.calls.decode.current spawn.calls.decode.u64-reference; do
     has "^\[JSR-BENCH\] name=$names iters=[1-9][0-9]* min=[0-9]+ p50=[0-9]+ p99=[0-9]+ p999=[0-9]+ max=[0-9]+ mean=[0-9]+ unit=cycles p50_ns=[0-9]+ p99_ns=[0-9]+ p999_ns=[0-9]+" || ok=0
   done
-  for names in syscall.roundtrip ring.submit_complete ipc.roundtrip; do
+  for names in syscall.roundtrip ring.submit_complete ring.wait_complete ring.wait_cancel ipc.roundtrip; do
     has "text=bench: name=$names iters=2048 min=[0-9]+ p50=[1-9][0-9]* p99=[0-9]+ p999=[0-9]+ max=[0-9]+ mean=[0-9]+ unit=cycles p50_ns=[0-9]+ p99_ns=[0-9]+ p999_ns=[0-9]+" || ok=0
   done
   # 这里只要求取值结论齐全（同一次测量同时给出 within_limit 与 gated）：是否超预算属于计时类判据，
@@ -1263,7 +1265,7 @@ check_t2() {    # 基准（功能）：宿主统计/取值测试；周期计数�
      && has '^\[JSR-BENCH\] case=tune_refusal invalid_candidate_refused=true' \
      && has '^\[JSR-BENCH\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0 timing_failed=[0-9]+' \
      && ! has '^\[JSR-BENCH-FAIL\]'; then
-    record T-2 PASS "9 项基础基准（内核 6 + 用户态 3）与 SyscallSet/spawn 追加微基准样本齐全，p99.9 可用；时钟中断样本可用；失败路径被拒无改动；配置档 $PROFILE 的取值结论齐全；回到基线"
+    record T-2 PASS "11 项基础基准（内核 6 + 用户态 5）与 SyscallSet/spawn 追加微基准样本齐全，p99.9 可用；Ring Wait 自然完成与取消路径有同口径尾延迟；时钟中断样本可用；失败路径被拒无改动；配置档 $PROFILE 的取值结论齐全；回到基线"
   else
     record T-2 FAIL "缺少 JSR-BENCH 标记、样本不全、失败路径未被拒、取值结论缺失、宿主测试未通过或未回到基线"
   fi

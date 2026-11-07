@@ -64,7 +64,7 @@ fn locked_ring_helpers_do_not_reenter_the_table_or_block() {
     let functions = top_level_functions(RING_SOURCE);
     for required in [
         "run_backend_in",
-        "progress_backends_in",
+        "progress_due_waits_in",
         "settle_in",
         "close_in",
         "kernel_cancel_in",
