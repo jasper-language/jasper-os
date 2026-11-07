@@ -151,6 +151,25 @@ pub fn run() {
     );
 }
 
+/// S-4 inheritance slice: multi-hop donation plus orphan/exit cleanup.
+pub fn run_s4_contracts() -> bool {
+    let prev_preemption = sched::set_preemption(true);
+    let start = baseline();
+    let failed_before = failed();
+    chain();
+    orphan();
+    recovery();
+    let audit = sched::queue_audit();
+    let clean = failed() == failed_before
+        && baseline() == start
+        && audit.misplaced == 0
+        && audit.count_mismatch == 0
+        && audit.hook_errors == 0
+        && audit.list_mismatch == 0;
+    sched::set_preemption(prev_preemption);
+    clean
+}
+
 // ---------------------------------------------------------------------------
 // 用例 1、2：经典三任务反转
 // ---------------------------------------------------------------------------

@@ -589,7 +589,7 @@ const HIGHRES: &[Step] = &[st(Stage::HighRes)];
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "boot-stage-rollback-verify",
-    feature = "s2-only",
+    feature = "s2-only", feature = "s4-soak",
 )))]
 const FULL: &[Step] = &[
     case("krn0-tlb", Stage::Smp, "", krn0_tlb),
@@ -665,7 +665,7 @@ const FULL: &[Step] = &[
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "boot-stage-rollback-verify",
-    feature = "s2-only",
+    feature = "s2-only", feature = "s4-soak",
 )))]
 pub use full_selected::{NAME, PLAN};
 
@@ -674,7 +674,7 @@ pub use full_selected::{NAME, PLAN};
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "boot-stage-rollback-verify",
-    feature = "s2-only",
+    feature = "s2-only", feature = "s4-soak",
 )))]
 mod full_selected {
     use super::*;
@@ -698,13 +698,30 @@ const DEDICATED_SELECTED: usize = cfg!(feature = "rt1-verify") as usize
     + cfg!(feature = "s3-nohz-verify") as usize
     + cfg!(feature = "shm1-verify") as usize
     + cfg!(feature = "boot-stage-rollback-verify") as usize
-    + cfg!(feature = "s2-only") as usize;
+    + cfg!(feature = "s2-only") as usize
+    + cfg!(feature = "s4-soak") as usize;
 const _: () = assert!(DEDICATED_SELECTED <= 1, "专项验收特性只能选一个");
 
 /// 专项计划的收尾：按失败数退出。Finish a dedicated plan on a failure count.
 #[allow(dead_code)]
 fn exit_on(failed: u64) {
     arch::exit_emulator(if failed == 0 { ExitStatus::Success } else { ExitStatus::Failure });
+}
+
+#[cfg(feature = "s4-soak")]
+mod dedicated {
+    use super::*;
+
+    pub const NAME: &str = "s4";
+
+    fn finish(_: &mut BootCtx) {
+        let passed = crate::s4_soak::run();
+        kprintln!("[JSR-EXIT] {}", if passed { "success" } else { "failure" });
+        exit_on(u64::from(!passed));
+    }
+
+    pub const PLAN: &[&[Step]] =
+        &[PREFIX, SMP_UP, &[st(Stage::HighRes), st(Stage::IdleTick), PlanItem::Finish(finish)]];
 }
 
 #[cfg(feature = "rt3-verify")]
@@ -962,6 +979,6 @@ mod dedicated {
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "boot-stage-rollback-verify",
-    feature = "s2-only",
+    feature = "s2-only", feature = "s4-soak",
 ))]
 pub use dedicated::{NAME, PLAN};

@@ -821,6 +821,22 @@ pub fn run() {
     );
 }
 
+/// S-4 repeats only ownership, remote publication and mailbox contracts.
+pub fn run_s4_contracts() -> bool {
+    let prev_preemption = sched::set_preemption(true);
+    let start = baseline();
+    let n = sched::online_cpus().len();
+    let failed_before = failed();
+    identity_contracts();
+    remote_wake_contract(n);
+    #[cfg(feature = "fault-inject")]
+    mailbox_full_contract(n);
+    deadline_owner_contract(n);
+    let clean = failed() == failed_before && baseline() == start && lists_consistent();
+    sched::set_preemption(prev_preemption);
+    clean
+}
+
 /// 空亲和集合的创建被拒：任务数、运行列表、资源都不变。
 fn refusals() {
     let before = baseline();

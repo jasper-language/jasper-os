@@ -243,6 +243,26 @@ pub fn run() {
     );
 }
 
+/// S-4 migration slice: real cross-leaf rehome and affinity publication.
+pub fn run_s4_contracts() -> bool {
+    let prev_preemption = sched::set_preemption(true);
+    let start = baseline();
+    let n = sched::online_cpus().len();
+    let failed_before = failed();
+    if n > 1 {
+        affinity(n);
+    }
+    let audit = sched::queue_audit();
+    let clean = failed() == failed_before
+        && baseline() == start
+        && audit.misplaced == 0
+        && audit.count_mismatch == 0
+        && audit.hook_errors == 0
+        && audit.list_mismatch == 0;
+    sched::set_preemption(prev_preemption);
+    clean
+}
+
 /// 重置吃满处理器任务的记录，设截止时刻；到过的处理器不足 `want_cores` 个时继续到截止。
 fn arm_hogs(window: u64, want_cores: u32) {
     arm_hogs_until(sched::timer_ticks() + window, want_cores);
