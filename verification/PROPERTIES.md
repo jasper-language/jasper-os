@@ -241,6 +241,12 @@
 | ABI-GEN-13 | 能力章精确解析：版本/flags/count 有界、名字合法且 NUL 结尾、重复/截断/尾随字节拒绝；无章等价空集 | `kernel-core/src/program_caps.rs`; `kernel-core/src/elf.rs` | 契约测试 + 真实 ELF 装载 | tested | `cargo test -p kernel-core program_caps && cargo test -p kernel-core elf::` | 单章最多 24 项、每名最多 64 字节；不证明未来格式，新增版本必须换 desc version |
 | ABI-GEN-14 | 所有必需能力在生效 Profile 中已发布后才允许任何页映射；缺能力与版本/元数据错误分开报告；spawn 复用同一门槛 | `kernel/src/proc/mod.rs::load_elf`; `kernel/src/proc/spawn.rs`; `kernel/src/abi_demo.rs` | 真实 KVM 装载正负例 | tested | `JASPER_ACCEL=kvm JASPER_CORES=4-11 JASPER_ACCEPT=spot JASPER_CHECKS='m11 abi m51pre' bash scripts/accept.sh` | 标准档真实 `user-hello` 要求 `kernel.core`；缺失/坏章 `mapped=0`；服务撤回后的调用由各操作门禁另行验证，不由初始装载检查代替 |
 
+## issue #12 拓扑与异构资源阶段 A
+
+| ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |
+|---|---|---|---|---|---|---|
+| TOPO-CONTRACT-01 | 硬件/逻辑/设备/内存/远程对象身份有明确作用域与失效规则；容量不足禁止静默截断；CPU/GPU/内存/节点共享对象权限但保留不同执行、驻留、一致性与故障语义；U0～U4 不得静默升级 | `docs/issue-12-拓扑与异构资源约束.md`; `verification/topology_constraints.toml`; `kernel-core/src/{smp,environment}.rs`; `kernel/src/{sched,mm,arch/x86_64}` | 源码约束矩阵 + 机器可读拒绝规则检查 | checked | `python3 verification/check-topology-constraints.py` | 只完成阶段 A 架构契约；未实现 NUMA、x2APIC、GPU、IOMMU、U1～U4、跨节点或 32 核以上真实启动。任何扩展仍需独立硬件、并发与性能证据 |
+
 | KRN2-BUDGET-TICK-01 | 每CPU至多单tick；共享组总信用来自单余额；RT余量保留；配置修改前归并 | Scheduler::tick_lease_owners/drain_local_tick；StateGuard | shared_tick_credit/tick_lease模型与实际预算演练 | tested | bash scripts/s2.sh | 真实双AP共享组900与RT4/16：rt7/shared7/used40；百万八核通过。模型有限，不证明Rust弱内存或PI；yield预算限制不变，PI任务走原路径 |
 
 | KRN2-CHURN-BARRIER-01 | 全部参与者就绪后才开始原2000轮工作；AP先发布避免CPU0阻断创建 | scale_demo::churn/contention；churn_barrier.tla | TLA+与实际参与/完成/CPU mask断言 | tested / model-checked | bash verification/run-churn-barrier-tlc.sh；bash scripts/krn2-churn-sample.sh UNIQUE_LABEL 1 4 8 | 模型11状态、提前放行反例；实际1/4/8核全部就绪/完成/正确mask、各2000轮。两核单次发布SC模型，非Rust弱内存/公平性证明；新测量需相同补丁施于基线；失败创建释放已创建任务但不算成功 |
