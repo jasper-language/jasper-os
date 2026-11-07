@@ -53,6 +53,11 @@ Claude、OpenAI Codex 与 DeepSeek 共同参与开发。
 
 已在 QEMU（x86_64）中真实启动验证，可用 `scripts/accept.sh` 一键复现：
 
+最新基线为 public `main` `07886ac`：完整宿主 KVM 验收
+`accept-20261107-192226` 为 **ALL PASS**，kernel-core 559 项通过，
+x86_64 单核 / 4 核 / 8 核 / q35、生产启动、NS-DIRTY 与 S-2 均通过。
+Wave 6–9 的架构债与 S-4 / FV-4 / HWV-0 里程碑已完成。
+
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | M1.0–M1.2 | 工作区、真实启动、GDT/IDT/PIC/PIT、真实时钟中断 | ✅ |
@@ -85,20 +90,20 @@ Claude、OpenAI Codex 与 DeepSeek 共同参与开发。
 | 任务系统调用集合替换（issue #1 保留 ABI 片） | `system.task.syscalls.set` 启用：32 字节唯一 `SyscallSet`、target=0 为自身、Task 句柄需 CONTROL、请求 ⊆ 调用者当前集合 ∧ 请求 ⊆ 登记集合；检查与写回在调度器事务内失败原子；Rust 运行时提供 `set_calls` / `set_current_calls`。因已发布 reserved 契约变更，ABI 升到 2.0.0 | ✅ 32/64 位 kernel-core 各 559 tests；KVM `accept-20261107-183039` M3.2/J-6 PASS，真实 CPL3 覆盖目标线程收缩、自收缩、失败原子性、越权/未登记/无效目标拒绝，`ops=62`，资源回基线；Jasper 语言侧构造仍未完成 |
 | 对象销毁局部化（issue #4 第二片） | 锁外销毁按对象种类查表分派，5 个动作由所属模块单一入口承载；7 个 `Destroy::None` 槽由编译期断言和启动期执行检查验证为空；对象身份、引用计数、最后所有权释放与锁序不变 | ✅ 定点 M4.1 / M4.3 / M4.4 / FIX / ISSUE4-DESTROY 全 PASS（QEMU 退出码 37，仅计时项）；后续释放协议与竞态验证见 `docs/issue-4-进度.md` |
 | 原生 ABI 世代（第一片） | `abi/abi-version.txt` 为唯一真源（当前 2.0.0）、用户程序携带 `.note.jasper.abi` 章、装载前拒绝缺章/损坏/跨主版本/次版本过新、`system.abi.get` 查询 | ✅ 第一片当时 1.2.0 全量验收 100 项通过、0 失败；ID 43 的 reserved→实实现变更按规则升到 2.0.0，见 `docs/issue-1-进度.md` 第十一节 |
-| 原生 ABI 完整契约快照（第二片） | 每个 ABI 版本一份不可变 `abi/snapshots/<Major.Minor.Patch>.contract`，覆盖 syscall ID/逐操作参数/返回、Rights、关键定长布局与异步/跨域语义；同主版本只增不改、Patch 契约不变、主版本独立换代；构建脚本和 CI 机械拦截 | ✅ 定点通过，等批次全量：kernel-core 6、Proptest 3、Miri 1、fuzz 10 万次与目标构建通过；真实装载 `accept-20261107-144141` ABI/m51pre PASS；能力清单随程序章下发仍为后续切片 |
-| ABI required-capabilities（第三片） | 可选 `.note.jasper.caps` 声明程序所需 Profile 能力；缺章兼容为空集；坏章/重复/非法名拒绝；装载器在任何映射前核对生效 Profile 的真实已发布能力，失败返回 `system.error.abi_capability` | ✅ KVM 定点 `accept-20261107-161452` PASS：真实 `user-hello` 声明 `kernel.core`，缺能力与坏章均 `mapped=0`；完整批次留集成轮 |
-| 用户定时器对象与宽容差路由（issue #3 第三、四片） | ABI 1.2.0 新增 create/arm/cancel/wait/get；一次性/固定周期、进程所有且不可传递、单等待者、取消/关闭终态、相对溢出与 Rights 拒绝；宽容差请求可由真实共享定时器中断在 `[at, at+slack]` 内合并唤醒 | ✅ 宿主 KVM J-1 PASS `accept-20261107-173634`：`coalesced=2 early=1`、`timers=0`、资源回基线；大规模时间轮基准与 issue #5 Wait 接入仍开放 |
+| 原生 ABI 完整契约快照（第二片） | 每个 ABI 版本一份不可变 `abi/snapshots/<Major.Minor.Patch>.contract`，覆盖 syscall ID/逐操作参数/返回、Rights、关键定长布局与异步/跨域语义；同主版本只增不改、Patch 契约不变、主版本独立换代；构建脚本和 CI 机械拦截 | ✅ ABI 2.0.0 快照、历史不可变门槛与装载回归均通过；完整 KVM `accept-20261107-192226` ALL PASS |
+| ABI required-capabilities（第三片） | 可选 `.note.jasper.caps` 声明程序所需 Profile 能力；缺章兼容为空集；坏章/重复/非法名拒绝；装载器在任何映射前核对生效 Profile 的真实已发布能力，失败返回 `system.error.abi_capability` | ✅ 真实 CPL3 与装载前拒绝路径通过；完整 KVM `accept-20261107-192226` ALL PASS |
+| 用户定时器对象与宽容差路由（issue #3 第三至五片） | ABI 1.2.0 新增 create/arm/cancel/wait/get；一次性/固定周期、进程所有且不可传递、单等待者、取消/关闭终态、相对溢出与 Rights 拒绝；宽容差请求可由真实共享定时器中断在 `[at, at+slack]` 内合并唤醒；普通超时算法经 65,536 槽位压力后正式暂不引入时间轮 | ✅ issue #3 已关闭；真实 KVM J-1、Wait p99.9、中断合并和完整批次通过 |
 | 普通超时后端裁决（issue #3 Wave 9） | 65,536 槽位混合装填/更新/取消/乱序到期压力；Ring Wait 使用每 Ring 固定期限堆，收尾不再扫描运行集合 | ✅ 三个 release 轮次 163,840 次堆操作 p99.9=165–187 ns；端到端 Wait 自然完成 p99.9 24.64→13.35 ms；当前运行上限没有时间轮收益证据，暂不实现，超过 4,096 活跃普通超时且真实尾延迟超预算时重评 |
-| `.jaso` format 1（beta 1） | 字节级规范 `jaso/SPEC.md`、`jaso` 核心层读取与校验（Platform / Images / Ext 段、清单核心键、52 个错误码）、`jasopack` 产 format 1 并提供 v0→1 迁移、语言中立一致性向量 `jaso/vectors/`（76 个）；用户态 L1 全流程（`jasper_rt::loader`）：校验（摘要、签名与信任、平台、运行时、依赖、能力、`jasper.import` 绑定）→ 链接 → 读清单发现服务 → `init` → `start`，`stop` 已实现，卸载请求只答复推迟 / 拒绝；内核态只收启动期白名单签名文件，运行期一律拒绝 | ✅ 全量验收 104 项通过、0 失败（x86_64 单核 / 4 核 / 8 核 / q35）；另有 4 行计时类超界仅作 QEMU 参考 |
-| Ring 后端登记（issue #5 第一片） | 可经 Ring 提交的操作由一张编译期静态表登记（`kernel_core::ring_backend`），提交校验、用户提交解析与启动按后端种类穷举匹配，无兜底分支；执行、释放路径的收敛和性能对比未做 | ✅ 定点 M4.3/M4.4/M5.1/J-1/DRV-2C-1 |
-| 启动阶段与启动模式（issue #7 第一、二片） | `kmain` 全局初始化收敛为 `kernel_core::boot_stage` 声明的 16 个阶段；静态验收计划登记用例名称、依赖阶段、计时类与失败汇总行，计划在编译期检查；原专项 feature 不再在 `kmain` 增加分支。生产模式完成阶段和首个用户程序后等待服务、不退出模拟器；验收模式按失败表退出；回滚与阶段失败注入未做 | ✅ 定点通过，等批次全量：16 阶段 `done_mask=0xffff`，计划 `cases=53`；生产模式单核 / 4 核持续运行与容量拒绝停机通过；启动计划验证链 Verus 43/0、Proptest 5、Miri 1、fuzz 100 万 0 崩溃；12 项专项计划真实启动全部通过（p999 与广播使用各自正式机制配置）；范围见 `docs/issue-7-进度.md` |
-| 定时器中断活锁修复 | 处理器相对时钟很慢时，定时器事务可以吃满处理器，被打断的代码一条指令也执行不了（`-icount shift=8` 稳定复现）。`kernel_core::timer_progress`：连续 2 次窗口不足事务开销之后，定时器事件只推进时钟、记账推迟，直到窗口够长 | ✅ 全量验收 105 项通过、0 失败（x86_64 单核 / 4 核 / 8 核 / q35，2026-11-05，放宽的时限）；另有 6 行计时类超界仅作 QEMU 参考；单处理器 `shift` 5–10、4 与 8 处理器 `shift` 9 全部走过第 1200 行（修复前单处理器 8、10 与 4 处理器 9 卡死）；正常启动 5979 次完整事务只推迟 1 次；4、8 处理器完整启动退出码 37、0 个功能失败。事务开销本身未降，见 `docs/issue-7-进度.md` |
-| 期限事件增量维护（issue #2 第二至六片） | 任务表可变访问自动标脏，`refresh_ns_events()` 只同步脏槽位、只重读受影响处理器的根；运行预算只在配额耗尽点或周期边界结算，非运行预算只在自身堆节点到期时补充。owner-leaf 经 TLA 评估后当前不采纳；宿主 KVM 同口径对照显示 isolated/fanout 唤醒 p99.9 常见 40–50 μs、无稳定回退。当前 10 轮中 1 轮 fanout 少 1 个样本，失败轮原样保留；补诊断后连续 5 轮完整 | ✅ KVM 本轮通过；裸机仅作后续硬件差异交叉核验（详见 `docs/issue-2-进度.md`） |
-| 服务装配与模块激活（issue #6 第一、二片） | 模块状态机、依赖顺序、全有全无回滚、发布掩码与审计；对象表、任务表、实时表、空作业队列和 PCI 设备表均由模块激活建立，`capacity` / `devices` 阶段只保留容量校验与硬件访问准备；旧 `ModuleManager` 已退役，机制演练改用装配；运行时停用与健康降级未做 | ✅ 定点通过，等批次全量：`accept-20261106-183417` 中 M1.1 / BOOT-STAGE / ASM1 / POL2 / M1.5 / PRODUCTION 全 PASS，16 阶段 `done_mask=0xffff`、full 计划 53 用例，生产 1/4 核持续运行；kernel-core 533/0，装配套件 Verus 13/0、Proptest 2、Miri 1、fuzz 100 万、Loom 1，启动计划套件 Verus 43/0；Kani 发版时验证，范围见 `docs/issue-6-进度.md` |
+| `.jaso` format 1（beta 1） | 字节级规范 `jaso/SPEC.md`、`jaso` 核心层读取与校验（Platform / Images / Ext 段、清单核心键、52 个错误码）、`jasopack` 产 format 1 并提供 v0→1 迁移、语言中立一致性向量 `jaso/vectors/`（76 个）；用户态 L1 全流程（`jasper_rt::loader`）：校验（摘要、签名与信任、平台、运行时、依赖、能力、`jasper.import` 绑定）→ 链接 → 读清单发现服务 → `init` → `start`，`stop` 已实现，卸载请求只答复推迟 / 拒绝；内核态只收启动期白名单签名文件，运行期一律拒绝 | ✅ 完整 KVM `accept-20261107-192226` ALL PASS（x86_64 单核 / 4 核 / 8 核 / q35） |
+| Ring 后端契约化（issue #5） | 后端路由、执行/推进/取消/释放收敛；锁区间审计；Wait 到期接入每 Ring 固定期限堆，运行表槽位直达；取消/关闭/退出与交付竞争保持唯一终态 | ✅ issue #5 已关闭；64×16 并发 Wait `scan_slots=0`，自然完成 p99.9/max 13.9/58.1 ms，完整 KVM ALL PASS |
+| 启动阶段与启动模式（issue #7） | 16 个全局阶段、静态验收计划、生产模式、失败回滚与重复初始化检查 | ✅ issue #7 已关闭；启动计划与生产模式在单核 / 4 核 / 8 核 / q35 均通过 |
+| 定时器中断活锁修复 | 处理器相对时钟很慢时，定时器事务可以吃满处理器，被打断的代码一条指令也执行不了（`-icount shift=8` 稳定复现）。`kernel_core::timer_progress`：连续 2 次窗口不足事务开销之后，定时器事件只推进时钟、记账推迟，直到窗口够长 | ✅ 确定性 `-icount` 矩阵与完整 KVM 回归通过；TCG 只作功能性活锁证据，不作 p99.9 性能结论 |
+| 期限事件增量维护（issue #2 第二至六片） | 任务表可变访问自动标脏，`refresh_ns_events()` 只同步脏槽位、只重读受影响处理器的根；运行预算只在配额耗尽点或周期边界结算，非运行预算只在自身堆节点到期时补充。owner-leaf 经 TLA 评估后当前不采纳；宿主 KVM 连续 5 轮完整样本通过 | ✅ issue #2 已关闭；裸机仅作后续硬件差异交叉核验 |
+| 服务装配与模块激活（issue #6） | 模块状态机、依赖顺序、全有全无回滚、发布掩码与审计；运行时停用、健康降级与恢复 | ✅ issue #6 已关闭；完整/精简 Profile、运行时停用和健康降级真实 QEMU 通过 |
 | 模块化宏内核装配边界（issue #11） | K-01～K-08 在 Wave 4 后源码上重新复核；每个登记系统操作必须有唯一服务所有者，服务前缀歧义在 Profile 校验期拒绝，移除未认领操作的 `Ungated` 直通；完整/精简 Profile 对“基础调用、未装配服务、健康撤回、调用者未授权”分别给出证据。当前仍只实现模块化宏内核，不创建第二套内核形态 | ✅ 架构文档、机器可读约束矩阵、宿主单测与双 Profile 真实 QEMU 审计已实现；跨域 IPC、服务死亡、重启和物理性能保证明确列为未实现，见 `docs/issue-11-架构约束.md` |
 | ISA-0 | 多指令集准备：`kernel-core` 在 x86_64 / AArch64 / RISC-V64 / RISC-V32 上编译，单元测试在 64 位与 32 位上运行 | ✅ |
 | ISA-1–3 | 内核移植到 AArch64、RISC-V64、RISC-V32 并在各自的 QEMU 上复跑全部验收 | ⬜ 未实现 |
-| M5.1 | 装载并运行最小非特权程序（ELF），完整隔离与资源回收 | 🟡 ELF 装载与运行已验证；完整回收验收待 M4 |
+| M5.1 | 装载并运行最小非特权程序（ELF），完整隔离与资源回收 | ✅ |
 
 未列为 ✅ 的能力**尚未实现**。已知的阶段性范围限制：
 
@@ -151,27 +156,30 @@ jasper-os/
 - `qemu-system-x86_64`
 
 ```bash
-taskset -c 0-3 cargo build --release --target x86_64-unknown-none -p jasper-kernel
-taskset -c 0-3 cargo build --release -p xtask
+taskset -c 4-11 cargo build --release --target x86_64-unknown-none -p jasper-kernel
+taskset -c 4-11 cargo build --release -p xtask
 ./target/release/xtask target/x86_64-unknown-none/release/jasper-kernel images/jasper-kernel.img
 ```
 
 手动运行（成功时以退出码 33 结束）：
 
 ```bash
-timeout 60 qemu-system-x86_64 -drive format=raw,file=images/jasper-kernel.img -serial stdio \
+taskset -c 4-11 timeout 60 qemu-system-x86_64 -accel kvm -cpu host \
+  -drive format=raw,file=images/jasper-kernel.img -serial stdio \
   -display none -monitor none -no-reboot -m 256M -device isa-debug-exit,iobase=0xf4,iosize=0x04
 ```
 
 ## 验收
 
 ```bash
-taskset -c 0-3 cargo test -p kernel-core   # 宿主单元测试
-bash scripts/accept.sh                     # 一次真实启动覆盖全部已完成里程碑
+taskset -c 4-11 cargo test -p kernel-core   # 宿主单元测试
+env JASPER_ACCEL=kvm JASPER_CORES=4-11 \
+  bash scripts/accept.sh                    # 单核 / 4 核 / 8 核 / q35 完整验收
 ```
 
 `accept.sh` 运行宿主测试、构建镜像、在 QEMU 中启动一次，按各里程碑的串口判据打印 PASS/FAIL 表，
-并做指令集泄漏检查；证据归档到 `evidence/accept-<时间戳>/`。
+并做指令集泄漏检查；证据归档到 `evidence/accept-<时间戳>/`。标准性能环境固定为宿主 KVM、
+`-cpu host`、CPU 4–11；TCG 仅用于显式指定的确定性 `-icount` 故障注入。
 
 ---
 
@@ -181,7 +189,18 @@ Jasper 是 GC-only 的主要开发语言；Rust 是底层基础设施的实现�
 Jasper 只经语言无关、版本化的系统接口（`system.*`）使用内核能力，不依赖 Rust 的内部类型。
 模块交付格式 `.jaso` 的规范见 `jaso/SPEC.md`（format 1，beta）。
 
-## 共享内存与扩展契约进展（2026-10-24）
+## 当前边界与下一步
+
+- `#2/#3/#4/#5/#6/#7/#8/#11` 已完成关闭；`#10/#12/#13` 是长期研究项。
+- `#1` 的操作系统侧 256 位能力集合、spawn 授权与 `system.task.syscalls.set` 已完成；
+  issue 保持打开仅因为 Jasper 语言侧能力集合构造尚未落地。
+- S-4、FV-4、HWV-0 已完成。HWV-1～7 是独立大型系列，覆盖真实 Intel/AMD
+  VMX/SVM、EPT/NPT、VM-Exit、虚拟设备与 IOMMU 直通，尚未启动。
+- 下一阶段先做性能与扩展性基线（PEX-0），测量全局调度事务、多 Ring 并行、
+  对象表锁、页帧缓存、内核堆、TLB 公告板和本核选择路径，再依据数据决定是否修改结构。
+- 当前仍没有文件系统、网络、GPU 或运行期内核模块装卸；这些能力不会用空后端或临时接口冒充完成。
+
+## 历史检查点（2026-10-24，部分已被后续里程碑取代）
 
 - 用户 RAM 统一由引用计数页对象持有；匿名页、ELF/栈、共享映射与固定缓冲区共用页生命周期。已验证真实固定页配额耗尽、安全拒绝、撤销失败隔离与资源回收。
 - 内存对象支持用户态创建/映射/撤销和通过 Channel 转移。ABI-R 已定义版本化扩展描述符；未实现的注册缓冲区、受限执行、任务异步中断、IOVA 与分段 I/O 等入口明确返回 unsupported，不代表这些功能已启用。
