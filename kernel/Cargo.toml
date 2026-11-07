@@ -55,6 +55,8 @@ s2-fuzz = ["user-programs"]
 s2-only = ["s2-fuzz", "fault-inject"]
 # Independent opt-in long-run guest; not enabled by default or acceptance.
 krn1-soak = ["user-programs"]
+# Short KRN-3 interoperability campaign used by milestone S-4.
+s4-soak = ["fault-inject", "krn2-observe"]
 # Explicit QEMU BM-1 profile: RTL8139 log link, IB700 watchdog and CF9 reset.
 bm1-vm = ["dep:noto-sans-mono-bitmap"]
 bm1-hang = ["bm1-vm"]

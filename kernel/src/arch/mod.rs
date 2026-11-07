@@ -830,5 +830,5 @@ pub fn mmio_window() -> Option<(u64, u64)> {
 pub use x86_64::bm1_init;
 
 /// Test-only stop input; unavailable outside the explicit x86 soak profile.
-#[cfg(all(feature = "krn1-soak", target_arch = "x86_64"))]
+#[cfg(all(any(feature = "krn1-soak", feature = "s4-soak"), target_arch = "x86_64"))]
 pub use self::x86_64::soak_stop_requested;

@@ -77,6 +77,8 @@ Claude、OpenAI Codex 与 DeepSeek 共同参与开发。
 | RT-3 | 用户互斥继承、Channel/Ring请求应答继承、内核长临界区阻塞锁 | ✅ 功能与资源回归；物理延迟优化延期 |
 | FV-3 | Handle/Rights Verus代码级证明试点 | ✅ no-go：完整表需复制状态机；生产代码继续直接Kani+属性/解释器/模糊/交错验证 |
 | KRN-3 | 每核运行队列、按核号迁移锁序、跨核 PI 消息 | ✅ 普通本核竞争 tick/选择/切换由代次热槽与 `RunLeaf` 独立完成；远程 wake/PI 由目标核消费，复杂 RT/组预算/生命周期仍走低频全局控制面；物理性能复测单列延期 |
+| S-4 | KRN-3 后每核锁、迁移、跨核继承短时交错压力 | ✅ 宿主 KVM CPU 4–11、8 vCPU、3×300 秒；每次都完成 301 轮，wake 5134/302，`deadlocks=0`、`invariant_violations=0`、资源/堆守恒，QEMU 退出 33；见 `docs/S-4-status.md` |
+| FV-4 | 地址空间隔离、SHM 别名、TLB 击落与页帧生命周期组合验证 | ✅ Verus no-go 沿用；TLA+ 组合模型正例无 Safety 违例、旧视图释放负例被拒；原 TLB 模型 940 可达状态、超时隔离 6 状态；生产 M2.4 / HARDEN-1C / TLB-KRN0 / SHM-1 与多核 KVM 回归；见 `docs/FV-4-status.md` |
 | ABI 与调度第一批切片 | 按需扩展的系统调用集合与统一 spawn 授权、对象类型登记表与句柄创建检查、期限事件增量同步、统一定时事件契约与每核仲裁 | ✅ 全量验收 99 项通过、0 失败（x86_64 单核 / 4 核 / 8 核 / q35）；另有 5 行计时类超界仅作 QEMU 参考，性能以裸机为准；各切片的后续范围见 `docs/issue-1/2/3/4-进度.md` |
 | SyscallSet / spawn 性能（issue #1） | 2048 样本 p50/p99/p99.9/max 基准：生产 256 位集合与旧 u64 参考模型的 contains/subset/copy 对比、88 字节 SpawnDesc 解码、用户 syscall/ring/IPC 端到端 | ✅ 三轮宿主 KVM（CPU 4–11）T-2 PASS；contains/copy 各约增加 6 周期，subset 无可测回归，calls 字段 p99.9 增加 ≤18 周期；原始数据见 `docs/issue-1-进度.md` 第十节 |
 | 任务系统调用集合替换（issue #1 保留 ABI 片） | `system.task.syscalls.set` 启用：32 字节唯一 `SyscallSet`、target=0 为自身、Task 句柄需 CONTROL、请求 ⊆ 调用者当前集合 ∧ 请求 ⊆ 登记集合；检查与写回在调度器事务内失败原子；Rust 运行时提供 `set_calls` / `set_current_calls`。因已发布 reserved 契约变更，ABI 升到 2.0.0 | ✅ 32/64 位 kernel-core 各 559 tests；KVM `accept-20261107-183039` M3.2/J-6 PASS，真实 CPL3 覆盖目标线程收缩、自收缩、失败原子性、越权/未登记/无效目标拒绝，`ops=62`，资源回基线；Jasper 语言侧构造仍未完成 |

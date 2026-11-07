@@ -344,7 +344,7 @@ impl Platform for X86_64 {
 }
 
 /// Poll the exclusively owned test UART between soak rounds.
-#[cfg(feature = "krn1-soak")]
+#[cfg(any(feature = "krn1-soak", feature = "s4-soak"))]
 pub fn soak_stop_requested() -> bool {
     uart::try_read_byte() == Some(b'S')
 }

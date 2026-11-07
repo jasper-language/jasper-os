@@ -130,6 +130,9 @@ pub mod s2;
 #[cfg(all(feature = "krn1-soak", target_arch = "x86_64"))]
 pub mod soak;
 
+#[cfg(all(feature = "s4-soak", target_arch = "x86_64"))]
+pub mod s4_soak;
+
 #[cfg(feature = "evt1-verify")]
 pub mod evt1_demo;
 
