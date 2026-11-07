@@ -227,6 +227,12 @@
 
 | KRN2-SHARED-CREDIT-MODEL-01 | 两核单发布周期的总信用小于共享余额；扣费归并先于配置修改 | shared_tick_credit.tla；对应CpuLimit::deferred_tick_credits和未来global→leaf协议 | TLA+ | model-checked | bash verification/run-shared-tick-credit-tlc.sh | 13状态；单位tick成本、初始余额2、两核一次发布；非生产接入/弱内存/PI/RT证明；duplicate与undrained负例均破坏Safety |
 
+## KRN-2 owner-leaf 到期快路径评估
+
+| ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |
+|---|---|---|---|---|---|---|
+| KRN2-OWNER-LEAF-01 | 本地到期读取后的发布必须仍与迁移和 TimerId 终态处于同一规范线性化点；仅持本核 leaf 锁时允许迁移交错会产生陈旧 owner 发布；非 owner 发布同样被拒 | `Scheduler::{settle_highres,make_runnable,rehome,timer_table}`；`verification/owner_leaf_fast_path.tla` | TLA+ + 状态归属审计 | model-checked | `bash verification/run-owner-leaf-fast-path-tlc.sh` | 单任务、2 CPU、最多一次迁移；正模型17生成/15可达/深度5，迁移交错与非 owner 两个负例均命中 `NoStaleWake`。结论是当前不新增 leaf-local 发布旁路；不证明未来 per-CPU 权威状态方案不可行，也不替代真实 KVM p99.9 样本 |
+
 | KRN2-BUDGET-TICK-01 | 每CPU至多单tick；共享组总信用来自单余额；RT余量保留；配置修改前归并 | Scheduler::tick_lease_owners/drain_local_tick；StateGuard | shared_tick_credit/tick_lease模型与实际预算演练 | tested | bash scripts/s2.sh | 真实双AP共享组900与RT4/16：rt7/shared7/used40；百万八核通过。模型有限，不证明Rust弱内存或PI；yield预算限制不变，PI任务走原路径 |
 
 | KRN2-CHURN-BARRIER-01 | 全部参与者就绪后才开始原2000轮工作；AP先发布避免CPU0阻断创建 | scale_demo::churn/contention；churn_barrier.tla | TLA+与实际参与/完成/CPU mask断言 | tested / model-checked | bash verification/run-churn-barrier-tlc.sh；bash scripts/krn2-churn-sample.sh UNIQUE_LABEL 1 4 8 | 模型11状态、提前放行反例；实际1/4/8核全部就绪/完成/正确mask、各2000轮。两核单次发布SC模型，非Rust弱内存/公平性证明；新测量需相同补丁施于基线；失败创建释放已创建任务但不算成功 |
