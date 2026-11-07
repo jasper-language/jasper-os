@@ -78,6 +78,7 @@ Claude、OpenAI Codex 与 DeepSeek 共同参与开发。
 | FV-3 | Handle/Rights Verus代码级证明试点 | ✅ no-go：完整表需复制状态机；生产代码继续直接Kani+属性/解释器/模糊/交错验证 |
 | KRN-3 | 每核运行队列、按核号迁移锁序、跨核 PI 消息 | ✅ 普通本核竞争 tick/选择/切换由代次热槽与 `RunLeaf` 独立完成；远程 wake/PI 由目标核消费，复杂 RT/组预算/生命周期仍走低频全局控制面；物理性能复测单列延期 |
 | ABI 与调度第一批切片 | 按需扩展的系统调用集合与统一 spawn 授权、对象类型登记表与句柄创建检查、期限事件增量同步、统一定时事件契约与每核仲裁 | ✅ 全量验收 99 项通过、0 失败（x86_64 单核 / 4 核 / 8 核 / q35）；另有 5 行计时类超界仅作 QEMU 参考，性能以裸机为准；各切片的后续范围见 `docs/issue-1/2/3/4-进度.md` |
+| SyscallSet / spawn 性能（issue #1） | 2048 样本 p50/p99/p99.9/max 基准：生产 256 位集合与旧 u64 参考模型的 contains/subset/copy 对比、88 字节 SpawnDesc 解码、用户 syscall/ring/IPC 端到端 | ✅ 三轮宿主 KVM（CPU 4–11）T-2 PASS；contains/copy 各约增加 6 周期，subset 无可测回归，calls 字段 p99.9 增加 ≤18 周期；原始数据见 `docs/issue-1-进度.md` 第十节 |
 | 对象销毁局部化（issue #4 第二片） | 锁外销毁按对象种类查表分派，5 个动作由所属模块单一入口承载；7 个 `Destroy::None` 槽由编译期断言和启动期执行检查验证为空；对象身份、引用计数、最后所有权释放与锁序不变 | ✅ 定点 M4.1 / M4.3 / M4.4 / FIX / ISSUE4-DESTROY 全 PASS（QEMU 退出码 37，仅计时项）；后续释放协议与竞态验证见 `docs/issue-4-进度.md` |
 | 原生 ABI 世代（第一片） | `abi/abi-version.txt` 为唯一真源（当前 1.0.0）、用户程序携带 `.note.jasper.abi` 章、装载前拒绝缺章/损坏/跨主版本/次版本过新、`system.abi.get` 查询 | ✅ 全量验收 100 项通过、0 失败（x86_64 单核 / 4 核 / 8 核 / q35）；另有 6 行计时类超界仅作 QEMU 参考；发布快照、轮换与能力要求的后续范围见 `docs/issue-8-进度.md` |
 | 原生 ABI 完整契约快照（第二片） | 每个 ABI 版本一份不可变 `abi/snapshots/<Major.Minor.Patch>.contract`，覆盖 syscall ID/逐操作参数/返回、Rights、关键定长布局与异步/跨域语义；同主版本只增不改、Patch 契约不变、主版本独立换代；构建脚本和 CI 机械拦截 | ✅ 定点通过，等批次全量：kernel-core 6、Proptest 3、Miri 1、fuzz 10 万次与目标构建通过；真实装载 `accept-20261107-144141` ABI/m51pre PASS；能力清单随程序章下发仍为后续切片 |
