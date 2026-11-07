@@ -33,6 +33,40 @@ pub fn affinity_get(raw:u64)->i64 {
  kobj::with(|t|match target(t,pid,raw) {Ok(id)=>sched::task_affinity(id).map(|s|i64::from(s.bits())).unwrap_or(err(SYSTEM_HANDLE_ERROR_INVALID)),Err(e)=>e})
 }
 
+/// `system.task.syscalls.set(target, calls_ptr, flags)`：把任务的可用系统调用集合替换为
+/// 32 字节规范 `SyscallSet`。`target == 0` 表示当前任务；其他值必须是本进程句柄表中的
+/// Task 句柄并带 `CONTROL`。新集合必须同时属于调用者当前集合与登记集合。
+pub fn syscalls_set(caller: u64, target_raw: u64, ptr: u64, flags: u64) -> i64 {
+    if flags != 0 {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    }
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let bytes = match read(ptr) {
+        Ok(bytes) => bytes,
+        Err(e) => return e,
+    };
+    let requested = crate::syscall::SyscallSet::decode(&bytes);
+    let caller = TaskId(caller);
+    let result = kobj::with(|t| {
+        let target = if target_raw == 0 {
+            sched::current().0
+        } else {
+            target(t, pid, target_raw)?
+        };
+        sched::set_task_syscalls(caller, target, requested, REGISTERED_OPS_SET).map_err(|e| match e {
+            sched::SetCallsError::Unregistered => err(SYSTEM_ERROR_INVALID_ARGUMENT),
+            sched::SetCallsError::Escalation => err(SYSTEM_ERROR_RIGHTS_DENIED),
+            sched::SetCallsError::NoTask => err(SYSTEM_HANDLE_ERROR_INVALID),
+        })
+    });
+    match result {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
 pub fn rt_set_ns(ptr:u64)->i64 {
  let Some(_service)=crate::assembly::acquire("sched.realtime") else{return err(SYSTEM_ERROR_RIGHTS_DENIED);};
  if !crate::hrtime::enabled(){return err(SYSTEM_ERROR_UNSUPPORTED);}

@@ -10,6 +10,10 @@ bash scripts/abi-contract.sh check  # 校验当前源码与全部快照
 bash scripts/abi-freeze.sh          # 冻结名字/ID，再次校验完整契约
 ```
 
+跨主版本时，先把上一代 `system-ids.lock` 归档到 `abi/archive/`，再为新主版本建立
+新的活动锁与完整快照。`abi/archive/system-ids-1.2.0.lock` 是 1.x 的最终归档，
+不被构建期当作当前锁读取。
+
 规则：
 
 * 同主版本新增 Minor：旧快照的每一行必须原样保留，只能增加新条目。

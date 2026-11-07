@@ -1,7 +1,7 @@
 # issue #1 进度：SyscallSet、spawn 授权 ABI 与用户运行时能力集合
 
 更新日期：2026-11-07
-状态：前三切片已实现并通过定点编译 / 宿主测试 / x86_64 QEMU 验收；Jasper 语言侧的显式构造和保留 ABI 处置仍未完成，issue #1 尚未整体关闭。
+状态：SyscallSet、spawn 授权、Rust 用户运行时和 `system.task.syscalls.set` 均已实现并通过 32/64 位宿主测试与真实 x86_64 CPL3 验收；Jasper 语言侧的显式构造仍未完成，issue #1 尚未整体关闭。
 
 ## 一、问题与切片边界
 
@@ -155,8 +155,8 @@
 1. **容量演进**：当登记表最高 ID 接近 255 时，提高 `MAX_IDS` / `WORDS` 并同步
    `SpawnDesc` 大小；同时补 32 位目标上的单元测试轮次。
 2. **用户运行时 API**：Rust 运行时部分已完成（见第八节）；Jasper 语言侧的对应构造仍未完成。
-3. **保留 ABI**：`system.task.syscalls.set`、扩展能力等目前仍返回 `unsupported`；
-   若启用，必须复用同一个 `SyscallSet`，不得引入第二套授权通道。
+3. **保留 ABI**：`system.task.syscalls.set` 已按第十一节启用；其余预留操作仍返回
+   `unsupported`。后续扩展能力必须复用同一个 `SyscallSet`，不得引入第二套授权通道。
 4. **性能证据**：把系统调用权限检查、spawn 解码与任务切换的集合复制纳入 T-2 基准，
    记录 `u64` 与 256 位位图的原始样本，确认没有显著非预期回退。
 5. **AArch64 仅编译**：本轮按要求不为 AArch64 写代码或跑验收；其构建由集成轮确认。
@@ -322,3 +322,96 @@ QEMU 串口关键行：
 - `evidence/accept-20261107-162456`
 - `evidence/accept-20261107-162634`
 - `evidence/accept-20261107-162803`
+
+## 十一、任务能力集合替换与 ABI 2.0.0（2026-11-07，宿主 KVM）
+
+### 操作契约
+
+`system.task.syscalls.set`（ID 43）不再返回 `unsupported`：
+
+| 参数 | 语义 |
+|---|---|
+| `args[0]` | 目标任务句柄；`0` 表示当前任务 |
+| `args[1]` | 指向 32 字节规范 `SyscallSet` 的用户指针 |
+| `args[2]` | flags，当前必须为 0 |
+| 返回 | 成功 0；失败为登记的错误 ID |
+
+非零目标必须是调用者进程句柄表中的 `Task` 对象，并带 `CONTROL`；句柄索引、代次、
+对象类型和所属进程存活状态仍由既有 Handle/Rights 路径检查。请求位图先经过 32 字节
+`SyscallSet` 解码，再由以下固定顺序检查：
+
+1. 请求集合必须是 `REGISTERED_OPS_SET` 的子集，否则 `invalid_argument`；
+2. 请求集合必须是调用者当前集合的子集，否则 `rights_denied`；
+3. 调用者和目标都必须是尚未退出的用户任务，否则 `handle.error.invalid`。
+
+检查与目标任务写回在同一个调度器事务内完成。任何失败均不改变调用者、目标、句柄、
+引用或资源；成功只替换目标的 256 位任务集合。已经通过入口授权并在执行的系统调用
+可以完成，撤权线性化于之后的统一权限检查，不追溯中断在飞调用。
+
+`jasper-rt` 新增：
+
+```rust
+task::set_calls(&task_handle, calls)?; // 经带 CONTROL 的 Task 句柄
+task::set_current_calls(calls)?;       // target = 0，当前任务
+```
+
+两者仍只用 `process::CallSet` 内部的唯一 `SyscallSet` 表示；`CallSet::encode` 只写既有
+32 字节线上格式，没有新增位图、授权规则或特权旁路。
+
+### ABI 世代裁决
+
+ID 43 在已发布的 1.0/1.1/1.2 快照中都是稳定条目 `args=reserved|result=unsupported`。
+同主版本规则禁止改写这条契约，因此原生 ABI 从 `1.2.0` 升到 **`2.0.0`**：
+
+* 旧 1.x 快照保持逐字节不变；
+* 旧锁文件归档到 `abi/archive/system-ids-1.2.0.lock`；
+* 新快照 `abi/snapshots/2.0.0.contract` 记录 ID 43 的参数、返回与既有
+  `syscall.set.v1|size=32` 布局；
+* 所有内嵌用户程序随 ABI 2.0.0 重新构建，不保留 1.x 的 reserved 兼容解析路径。
+
+这不是为新增操作顺带升级主版本：变化本身就是把一个稳定 reserved 契约改为可执行契约，
+旧二进制无法在同一主版本兼容规则下安全获得新语义。
+
+### 真实 CPL3 覆盖
+
+`user/isohost` 的宿主先创建一个真实用户线程，再覆盖：
+
+* 仅带 `WAIT` 的 Task 句柄不能设置集合，返回 `handle.error.rights_denied`；
+* 无效 Task 句柄返回 `handle.error.invalid`；
+* `flags != 0` 和含未登记 ID 255 位的请求返回 `invalid_argument`；非零 flags
+  先于用户指针访问被拒绝，合法 flags 配无效指针返回 `memory.error.invalid_address`；
+* 请求调用者没有的已登记操作返回 `system.error.rights_denied`；
+* 上述失败后，目标任务仍能成功调用自己的 `system.time.now`，证明失败原子性；
+* 成功收缩目标任务到 `{task.yield, task.exit}` 后，同一线程的 `system.time.now`
+  被统一权限检查拒绝，随后正常退出；
+* 参数块不含 `system.task.syscalls.set` 的角色直接调用返回 `rights_denied`，
+  经 spawn 尝试给子进程该权限也返回 `rights_denied`；
+* 宿主最后以 `target = 0` 自收缩到只剩 `system.process.exit`，下一个 `time.now`
+  被拒绝后以退出码 0 正常结束。
+
+### 验证证据
+
+| 层 | 命令 / 位置 | 结果 |
+|---|---|---|
+| 64 位宿主 | `cargo test -p kernel-core --lib` | 559 passed / 0 failed |
+| 32 位宿主 | `cargo test -p kernel-core --target i686-unknown-linux-musl --lib` | 559 passed / 0 failed |
+| 属性 | `cargo test --manifest-path verification/toolbox/Cargo.toml --test syscall_set` | 新增集合替换模型与独立 `BTreeSet` 参考一致 |
+| ABI | `bash scripts/abi-contract.sh check` | ABI 2.0.0 完整快照 PASS |
+| 真实 QEMU | 共享锁内 `JASPER_ACCEL=kvm JASPER_CORES=4-11 JASPER_ACCEPT=spot JASPER_CHECKS='m32 j6' bash scripts/accept.sh` | `accept-20261107-183039`：M3.2、J-6 PASS；isohost 退出 0、资源回基线 |
+
+关键串口证据：
+
+```text
+[JSR-SYSCALL] self_check ops=62 handlers=all ownership=complete
+[JSR-SYSCALL] exit name=system.task.syscalls.set id=43 ret=-4102 status=system.handle.error.rights_denied
+[JSR-SYSCALL] exit name=system.task.syscalls.set id=43 ret=0 status=OK
+[JSR-SYSCALL] deny name=system.time.now id=3 task=thread ret=system.error.rights_denied
+[JSR-USERTEXT] text=isohost: task_syscalls target_shrink=true denied_after=true atomic_failures=true invalid_target=true rights_checked=true unregistered_denied=true escalation_denied=true
+[JSR-SYSCALL] exit name=system.task.syscalls.set id=43 ret=0 status=OK
+[JSR-SYSCALL] deny name=system.time.now id=3 task=isohost ret=system.error.rights_denied
+[JSR-PROC] event=system.process.exited id=0x3100000002 name=isohost code=0 threads=4 handles_closed=0
+[JSR-RT] summary free_frames=61101/61101 objects=0/0 pending=0 pinned=(0, 0) reclaimed=true timers=0 coalesced=1 early=1 checks=28 failed=0 timing_failed=0
+```
+
+本切片没有实现 Jasper 语言侧的能力集合构造，也没有把 issue #1 的其他扩展能力一并启用；
+这两项仍是 issue #1 整体关闭前的明确边界。

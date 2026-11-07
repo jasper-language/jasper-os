@@ -1110,6 +1110,7 @@ check_j6() {   # J-6：隔离模块（isohost 的一条判据是「CPU 压力下
      && has 'text=isohost: calls duplicate_rejected=true unregistered_rejected=true out_of_range_rejected=true insert_atomic=true' \
      && has 'text=isohost: high_id id=64 child_inherited=true try_acquire=true busy_refused=true recursive_rejected=true unlock=true unregistered_denied=true' \
      && has 'text=isohost: high_id id=64 direct=rights_denied spawn_escalation=rights_denied unregistered=unsupported' \
+     && has 'text=isohost: task_syscalls target_shrink=true denied_after=true atomic_failures=true invalid_target=true rights_checked=true unregistered_denied=true escalation_denied=true' \
      && has 'text=isohost: admission undeclared_handle_rejected=true missing_capability_rejected=true' \
      && has 'text=isohost: rights granted_call_ok=true denied=channel\.create,process\.spawn,time\.wait foreign_handle=invalid host_handle_intact=true' \
      && has 'text=isohost: address_space outcome=(own_memory|faulted) host_data_intact=true' \
