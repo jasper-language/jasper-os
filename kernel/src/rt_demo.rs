@@ -142,6 +142,7 @@ pub fn run() {
     isohost_program(rt_calls().union(SyscallSet::of(&[
         abi::SYSTEM_PROCESS_SPAWN,
         abi::SYSTEM_PROCESS_WAIT,
+        abi::SYSTEM_TASK_SYSCALLS_SET,
         abi::SYSTEM_SYNC_MUTEX_CREATE,
         abi::SYSTEM_SYNC_MUTEX_TRY_ACQUIRE,
         abi::SYSTEM_SYNC_MUTEX_RELEASE,

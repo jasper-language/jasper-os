@@ -1134,8 +1134,8 @@ pub const OPERATIONS: &[OperationContract] = &[
     },
     OperationContract {
         name: "system.task.syscalls.set",
-        args: "reserved",
-        result: "unsupported",
+        args: "task_handle,u64:calls_set_ptr,u64:flags",
+        result: "0_or_error",
     },
     OperationContract {
         name: "system.event.subscription.wait",
@@ -1765,11 +1765,12 @@ mod tests {
     fn new_major_does_not_inherit_old_major_contracts() {
         let mut current = render();
         let native = crate::abi_version::NATIVE;
+        let next_major = native.major + 1;
         current = current.replace(
             &format!("abi={}.{}.{}", native.major, native.minor, native.patch),
-            "abi=2.0.0",
+            &format!("abi={}.0.0", next_major),
         );
-        let version = AbiVersion::new(2, 0, 0);
+        let version = AbiVersion::new(next_major, 0, 0);
         let old = render();
         assert_eq!(
             check_snapshot_set(

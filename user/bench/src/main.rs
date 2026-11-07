@@ -6,6 +6,8 @@
 //! |---|---|
 //! | `syscall.roundtrip` | 一次 `time.now`（进入内核 → 分发 → 返回用户态） |
 //! | `ring.submit_complete` | 一次 enter：提交一条 `time.now` 请求并等到它的完成记录被收取 |
+//! | `ring.wait_complete` | 一次 enter：提交一条 1 tick 的 `time.wait` 并等到自然完成 |
+//! | `ring.wait_cancel` | 提交一条长等待、同步取消，并收取取消终态 |
 //! | `ipc.roundtrip` | 端点 A 发 16 字节 → 端点 B 收 → B 原样发回 → A 收（同一线程，4 次系统调用） |
 //!
 //! 每项先预热 [`WARMUP`] 次，再采 [`ITERS`] 个样本；样本单位是周期计数器读数，入口参数 `arg` 是内核校准得到的
@@ -110,6 +112,69 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
     }
     s.check(ok)?;
     report(s, "ring.submit_complete", &mut samples, &cal)?;
+
+    // ---- 异步环：Wait 自然完成与取消（issue #5 第四片同口径）----
+    let mut samples = Vec::with_capacity(ITERS as usize);
+    let mut ok = true;
+    for i in 0..WARMUP + ITERS {
+        let tag = 0xB100 + i as u64;
+        let sqe = Sqe {
+            op: ids::SYSTEM_TIME_WAIT as u32,
+            flags: 0,
+            user_tag: tag,
+            arg0: 1,
+            arg1: 0,
+        };
+        let mut id = [0u64; 1];
+        let mut cq = [Cqe::default(); 1];
+        let t0 = time::cycles();
+        // SAFETY：time.wait 不引用用户内存。
+        let e = unsafe { ring.enter_raw(core::slice::from_ref(&sqe), &mut id, &mut cq, 1) };
+        let dt = time::cycles().wrapping_sub(t0);
+        ok &= matches!(e, Ok(x) if x.submitted == 1 && x.reaped == 1)
+            && cq[0].user_tag == tag
+            && cq[0].request_id == id[0]
+            && cq[0].result == 0;
+        if i >= WARMUP {
+            samples.push(dt);
+        }
+    }
+    s.check(ok)?;
+    report(s, "ring.wait_complete", &mut samples, &cal)?;
+
+    let mut samples = Vec::with_capacity(ITERS as usize);
+    let mut ok = true;
+    for i in 0..WARMUP + ITERS {
+        let tag = 0xB200 + i as u64;
+        let sqe = Sqe {
+            op: ids::SYSTEM_TIME_WAIT as u32,
+            flags: 0,
+            user_tag: tag,
+            arg0: 1 << 40,
+            arg1: 0,
+        };
+        let mut id = [0u64; 1];
+        let mut cq = [Cqe::default(); 1];
+        let t0 = time::cycles();
+        // SAFETY：time.wait 不引用用户内存；该请求在同一线程内立即取消并收取。
+        let submit = unsafe { ring.enter_raw(core::slice::from_ref(&sqe), &mut id, &mut [], 0) };
+        let cancelled = ring.cancel(id[0]).is_ok();
+        // SAFETY：不提交新记录；取消后的完成记录必须在消费前保持对应请求有效。
+        let reap = unsafe { ring.enter_raw(&[], &mut [], &mut cq, 1) };
+        let dt = time::cycles().wrapping_sub(t0);
+        ok &= matches!(submit, Ok(x) if x.submitted == 1)
+            && cancelled
+            && matches!(reap, Ok(x) if x.reaped == 1)
+            && cq[0].user_tag == tag
+            && cq[0].request_id == id[0]
+            && cq[0].result == -(ids::SYSTEM_ASYNC_ERROR_CANCELLED as i64);
+        if i >= WARMUP {
+            samples.push(dt);
+        }
+    }
+    s.check(ok)?;
+    report(s, "ring.wait_cancel", &mut samples, &cal)?;
+
     // 失败路径：未登记的操作被拒，且不产生任何完成记录
     let bad = Sqe { op: BOGUS_OP, flags: 0, user_tag: 1, arg0: 0, arg1: 0 };
     let mut id = [0u64; 1];

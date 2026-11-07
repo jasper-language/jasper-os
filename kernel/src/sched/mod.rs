@@ -47,7 +47,7 @@ use kernel_core::smp::CpuSet;
 use kernel_core::sync_origin::Origin;
 
 use policy::{kernel_policy, CpuLimitStats, KernelPolicy, LatencyHistogram, Qos, WatchdogLog};
-pub use scheduler::{AffinityError, CpuStats, NohzStats, ScanStats, TimerIdentityAudit, WaitDeadline};
+pub use scheduler::{AffinityError, CpuStats, NohzStats, ScanStats, SetCallsError, TimerIdentityAudit, WaitDeadline};
 pub use scheduler::GrowError;
 use scheduler::{BlockError, Cause, CpuGroupId, GroupError, IdleStep, QosError, Scheduler, SpawnError, SwitchObserver, WATCHDOG_LOG};
 
@@ -1354,3 +1354,11 @@ pub fn budget_window_finish()->Option<scheduler::BudgetWindowReport> { with_mut(
 /// before yielding when false. with_mut already publishes reschedule IPIs.
 pub(crate) fn set_affinity_deferred(id:TaskId,set:CpuSet)->Result<bool,AffinityError> {with_mut(|s|s.set_affinity(id,set))}
 pub(crate) fn task_affinity(id:TaskId)->Option<CpuSet> {with(|s|s.task_affinity(id))}
+pub(crate) fn set_task_syscalls(
+    caller: TaskId,
+    target: TaskId,
+    requested: crate::syscall::SyscallSet,
+    registered: crate::syscall::SyscallSet,
+) -> Result<(), SetCallsError> {
+    with_mut(|s| s.set_task_syscalls(caller, target, requested, registered))
+}
