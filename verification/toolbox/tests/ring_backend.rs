@@ -90,6 +90,9 @@ struct LoomBackend {
     releases: u32,
     closing: bool,
     publications: u32,
+    locked: bool,
+    lock_steps: usize,
+    terminal: Option<kernel_core::async_ring::Terminal>,
 }
 
 impl LoomBackend {
@@ -99,7 +102,17 @@ impl LoomBackend {
             .submit(kernel_core::async_ring::Submission { op: 21, user_tag: 1, context: 9, uses_buffer })
             .unwrap();
         ring.start(id, Exec::Abortable).unwrap();
-        Self { ring, id, backend_active: true, releases: 0, closing: false, publications: 0 }
+        Self {
+            ring,
+            id,
+            backend_active: true,
+            releases: 0,
+            closing: false,
+            publications: 0,
+            locked: false,
+            lock_steps: 0,
+            terminal: None,
+        }
     }
 
     fn release_backend(&mut self) {
@@ -119,6 +132,7 @@ impl LoomBackend {
 
     fn cancel(&mut self) {
         if let Ok(kernel_core::async_ring::Cancelled::AbortBackend { .. }) = self.ring.cancel(self.id) {
+            self.terminal = Some(kernel_core::async_ring::Terminal::Cancelled);
             self.release_backend();
             self.ring.quiesce(self.id).unwrap();
         }
@@ -129,7 +143,7 @@ impl LoomBackend {
         if self.ring.decision(self.id) == Some(None) {
             // Production releases the backend before reporting natural quiescence/publication.
             self.release_backend();
-            self.ring.finish(self.id, 7).unwrap();
+            self.terminal = Some(self.ring.finish(self.id, 7).unwrap());
         }
         self.publish_ready();
     }
@@ -140,6 +154,7 @@ impl LoomBackend {
         self.closing = true;
         assert!(matches!(source, "close" | "exit"));
         if aborted.contains(&self.id) {
+            self.terminal = Some(kernel_core::async_ring::Terminal::Cancelled);
             self.release_backend();
             self.ring.quiesce(self.id).unwrap();
         }
@@ -203,6 +218,59 @@ fn loom_close(state: &mut LoomBackend) {
 
 fn loom_exit(state: &mut LoomBackend) {
     state.close("exit");
+}
+
+fn locked_turn(state: &mut LoomBackend, op: u8) {
+    assert!(!state.locked, "object-table lock was re-entered");
+    state.locked = true;
+    state.lock_steps = 0;
+    match op {
+        0 => loom_cancel(state),
+        1 => loom_deliver(state),
+        2 => loom_close(state),
+        3 => loom_exit(state),
+        _ => unreachable!(),
+    }
+    state.lock_steps += 1;
+    assert!(state.lock_steps <= 1, "backend handler exceeded one bounded table turn");
+    state.locked = false;
+}
+
+fn permutations<const N: usize>(mut visit: impl FnMut(&[usize; N])) -> usize {
+    fn walk<const N: usize>(
+        values: &mut [usize; N],
+        position: usize,
+        count: &mut usize,
+        visit: &mut impl FnMut(&[usize; N]),
+    ) {
+        if position == N {
+            *count += 1;
+            visit(values);
+            return;
+        }
+        for i in position..N {
+            values.swap(position, i);
+            walk(values, position + 1, count, visit);
+            values.swap(position, i);
+        }
+    }
+    let mut values = core::array::from_fn(|i| i);
+    let mut count = 0;
+    walk(&mut values, 0, &mut count, &mut visit);
+    count
+}
+
+#[test]
+fn all_four_lock_scoped_control_orders_share_one_terminal() {
+    let count = permutations::<4>(|order| {
+        let mut state = LoomBackend::new(true);
+        for op in order {
+            locked_turn(&mut state, *op as u8);
+        }
+        assert!(state.terminal.is_some(), "one racing operation must decide {order:?}");
+        state.finish();
+    });
+    assert_eq!(count, 24);
 }
 
 #[test]

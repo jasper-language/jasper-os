@@ -154,6 +154,12 @@ impl HeldRanks {
         }
     }
 
+    /// 当前是否持有级别 `rank`（越界级别恒为 `false`，不改动状态）。
+    /// Whether this execution flow currently holds `rank`.
+    pub fn holds(&self, rank: u8) -> bool {
+        rank <= MAX_RANK && self.bits() & (1u32 << rank) != 0
+    }
+
     /// 能否获取级别 `rank`（不改动）。
     /// Check whether `rank` may be acquired now, without recording it.
     pub fn check(&self, rank: u8) -> Result<(), LockOrderError> {
@@ -225,13 +231,17 @@ mod tests {
     fn ascending_acquire_and_any_order_release() {
         let h = HeldRanks::new();
         assert_eq!(h.highest(), None);
+        assert!(!h.holds(A.rank));
         assert_eq!(h.acquire(A.rank), Ok(()));
         assert_eq!(h.acquire(B.rank), Ok(()));
         assert_eq!(h.acquire(C.rank), Ok(()));
         assert_eq!(h.highest(), Some(9));
+        assert!(h.holds(A.rank) && h.holds(B.rank) && h.holds(C.rank));
+        assert!(!h.holds(MAX_RANK + 1));
         // 释放顺序不限
         assert_eq!(h.release(A.rank), Ok(()));
         assert_eq!(h.highest(), Some(9));
+        assert!(!h.holds(A.rank));
         assert_eq!(h.release(C.rank), Ok(()));
         assert_eq!(h.release(B.rank), Ok(()));
         assert_eq!(h.bits(), 0);

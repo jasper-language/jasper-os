@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run-ring-backend-suite.sh —— 异步 Ring 后端登记表与生命周期（issue #5 第二切片）的六步验证链
+# run-ring-backend-suite.sh —— 异步 Ring 后端登记、生命周期与锁区间（issue #5 第三切片）的六步验证链
 #
 # 顺序固定：Verus/Z3 → Proptest → Miri → cargo-fuzz → Loom（Kani 发版时验证）。
-# 范围：Kind / Contract / Route、quota 准入，以及取消/交付/关闭/退出下的后端恰好释放一次。
+# 范围：Kind / Contract / Route、quota 准入、对象表锁区间，以及取消/交付/关闭/退出下的
+# 后端恰好释放一次。
 # 所有命令在构建虚拟机内执行；输出保存在 evidence/issue5/ring-backend-suite。
 # 工具路径由环境变量提供：VERUS 指向 Verus 可执行文件，Z3 默认取同目录的 z3。
 # =============================================================================
@@ -27,9 +28,15 @@ sha256sum \
   verification/ring_backend_lifecycle_double_release.cfg \
   verification/ring_backend_lifecycle_early_publish.cfg \
   verification/run-ring-backend-lifecycle-tlc.sh \
+  verification/ring_lock_scope.tla \
+  verification/ring_lock_scope.cfg \
+  verification/ring_lock_scope_nested.cfg \
+  verification/ring_lock_scope_blocking.cfg \
+  verification/run-ring-lock-scope-tlc.sh \
   verification/toolbox/verus/ring_backend.rs \
   verification/toolbox/verus/ring_backend_bad.rs \
   verification/toolbox/tests/ring_backend.rs \
+  verification/toolbox/tests/ring_lock_scope.rs \
   verification/toolbox/fuzz/fuzz_targets/ring_backend.rs \
   > "$out/source.sha256"
 
@@ -49,11 +56,13 @@ if "$VERUS" verification/toolbox/verus/ring_backend_bad.rs > "$out/verus-bad.log
   exit 1
 fi
 bash verification/run-ring-backend-lifecycle-tlc.sh > "$out/tla.log" 2>&1
+bash verification/run-ring-lock-scope-tlc.sh > "$out/tla-lock-scope.log" 2>&1
 
 echo "== 2/6 Proptest =="
 cargo test -p kernel-core ring_backend > "$out/core.log" 2>&1
 cargo test --manifest-path verification/toolbox/Cargo.toml --test ring_backend -- \
   --skip under_miri --skip loom_ > "$out/proptest.log" 2>&1
+cargo test --manifest-path verification/toolbox/Cargo.toml --test ring_lock_scope > "$out/lock-scope.log" 2>&1
 
 echo "== 3/6 Miri =="
 cargo +nightly miri test --manifest-path verification/toolbox/Cargo.toml --test ring_backend \
@@ -76,8 +85,10 @@ cargo test --manifest-path verification/toolbox/Cargo.toml --test ring_backend l
 grep -Eq '[1-9][0-9]* verified, 0 errors' "$out/verus.log"
 grep -Eq 'error: (postcondition not satisfied|assertion failed|invariant not satisfied)' "$out/verus-bad.log"
 grep -q 'positive PASS; double-release and early-publication negatives rejected' "$out/tla.log"
+grep -q 'positive PASS; nested-acquisition and blocking negatives rejected' "$out/tla-lock-scope.log"
 grep -q '4 passed; 0 failed' "$out/core.log"
-grep -q '3 passed; 0 failed' "$out/proptest.log"
+grep -q '4 passed; 0 failed' "$out/proptest.log"
+grep -q '2 passed; 0 failed' "$out/lock-scope.log"
 grep -q '1 passed; 0 failed' "$out/miri.log"
 grep -q '#1000000.*DONE' "$out/fuzz.log"
 grep -q '3 passed; 0 failed' "$out/loom.log"

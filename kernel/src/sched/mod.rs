@@ -704,6 +704,15 @@ pub fn yield_now() {
 /// 再次进入调度器（重入）。切换回来后恢复**本任务自己**被切走前的中断状态——
 /// 每个任务的中断标志随它的栈一起保存/恢复，互不影响。
 pub fn yield_with_cause(cause: &'static str) {
+    // The object-table transaction is bounded and must end before the current
+    // task can be descheduled. Otherwise another task could resume while the
+    // table remains owned by a suspended context.
+    assert!(
+        !crate::smp::percpu::this()
+            .held_locks()
+            .holds(crate::lockorder::OBJECT_TABLE.rank),
+        "task switch attempted while holding the object table"
+    );
     let was_enabled = cpu::irq_save_disable();
     // 锁与借用都在本块内结束，不跨越下面的栈切换（中断仍关着）。
     let (plan, kicks) = {
