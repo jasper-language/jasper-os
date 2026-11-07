@@ -5,11 +5,12 @@
 //!
 //! | 导出 | 说明 |
 //! |---|---|
-//! | `jaso_bind(能力名, 长度, 句柄值)` | 记下宿主授予的句柄值（只接受 `system.task.wait` 名下的一个），返回 0 |
+//! | `jaso_bind(能力名, 长度, 句柄值)` | 记下宿主授予的任务或互斥句柄，返回 0 |
 //! | `probe_sum` | 输出输入各字节之和（8 字节小端） |
 //! | `probe_wait` | 经宿主接口表输出 `probe: waiting` 后返回 0（宿主可在回调里阻塞，制造「线程停在模块内」） |
 //! | `probe_syscall` | 输入 4 个 `u64`（调用号与 3 个参数）：直接执行系统调用指令，输出返回值（8 字节） |
-//! | `probe_bound` | 输出已绑定的句柄值（8 字节）；未绑定返回 -1 |
+//! | `probe_bound` | 输出已绑定的任务句柄值（8 字节）；未绑定返回 -1 |
+//! | `probe_mutex` | 输出已绑定的互斥句柄值（8 字节）；未绑定返回 -1 |
 //! | `probe_poke` | 输入（地址, 值）：向该地址写入值并读回，输出读回值（地址不可写即故障） |
 //! | `probe_spin` | 永不返回的忙循环（占满处理器） |
 //!
@@ -24,7 +25,8 @@ use jaso_module::log;
 ///
 /// 句柄是 64 位的逻辑值，但并非每个目标都提供 64 位原子操作；绑定只发生在装载阶段、
 /// 由单线程完成，之后只读，因此用普通静态变量配合易失访问即可。
-static mut BOUND: u64 = 0;
+static mut BOUND_TASK: u64 = 0;
+static mut BOUND_MUTEX: u64 = 0;
 
 /// 原始系统调用（与运行时相同的寄存器约定；返回值非负 = 成功值，负数 = `-(错误 ID)`）。
 #[cfg(target_arch = "x86_64")]
@@ -82,12 +84,21 @@ unsafe fn put8(out: *mut u8, cap: usize, v: u64) -> isize {
 #[no_mangle]
 pub unsafe extern "C" fn jaso_bind(name: *const u8, len: usize, handle: u64) -> i32 {
     let n = core::slice::from_raw_parts(name, len);
-    if n != b"system.task.wait" || handle == 0 {
+    if handle == 0 {
         return 1;
     }
     // SAFETY：绑定只在装载阶段由单线程写入一次，之后只读。
-    unsafe { core::ptr::addr_of_mut!(BOUND).write_volatile(handle) };
-    0
+    if n == b"system.task.wait" {
+        // SAFETY：绑定只在装载阶段由单线程写入一次，之后只读。
+        unsafe { core::ptr::addr_of_mut!(BOUND_TASK).write_volatile(handle) };
+        return 0;
+    }
+    if n == b"system.sync.mutex.try.acquire" {
+        // SAFETY：同一装载阶段由单线程写入一次，之后只读。
+        unsafe { core::ptr::addr_of_mut!(BOUND_MUTEX).write_volatile(handle) };
+        return 0;
+    }
+    1
 }
 
 /// 输入字节之和。
@@ -130,7 +141,20 @@ pub unsafe extern "C" fn probe_syscall(input: *const u8, len: usize, out: *mut u
 #[no_mangle]
 pub unsafe extern "C" fn probe_bound(_input: *const u8, _len: usize, out: *mut u8, cap: usize) -> isize {
     // SAFETY：只读上面写入的句柄值。
-    match unsafe { core::ptr::addr_of!(BOUND).read_volatile() } {
+    match unsafe { core::ptr::addr_of!(BOUND_TASK).read_volatile() } {
+        0 => -1,
+        h => put8(out, cap, h as u64),
+    }
+}
+
+/// 已绑定的互斥句柄值。
+///
+/// # Safety
+/// 输出可写 `cap` 字节。
+#[no_mangle]
+pub unsafe extern "C" fn probe_mutex(_input: *const u8, _len: usize, out: *mut u8, cap: usize) -> isize {
+    // SAFETY：只读上面写入的互斥句柄值。
+    match unsafe { core::ptr::addr_of!(BOUND_MUTEX).read_volatile() } {
         0 => -1,
         h => put8(out, cap, h as u64),
     }

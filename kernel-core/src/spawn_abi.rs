@@ -389,4 +389,23 @@ mod tests {
         // 越界 ID 无法进入参数块：构造阶段就失败，不会被解码成 0 或别的位。
         assert_eq!(SyscallSet::try_of(&[256]), None);
     }
+
+    #[test]
+    fn registered_id_64_roundtrips_at_the_second_word_boundary() {
+        let calls = SyscallSet::of(&[64]);
+        let d = SpawnDesc { calls, ..ok_desc() };
+        let raw = d.encode();
+
+        // `calls` 从参数块偏移 24 开始；ID 64 是第二个 u64 字的第 0 位，
+        // 对应绝对偏移 32。该断言与目标的 usize 宽度无关。
+        assert_eq!(&raw[24..32], &[0u8; 8]);
+        assert_eq!(&raw[32..40], &1u64.to_le_bytes());
+        assert_eq!(&raw[40..56], &[0u8; 16]);
+
+        let decoded = SpawnDesc::decode(&raw).expect("合法 v2 参数块必须可解码");
+        assert_eq!(decoded.calls, calls);
+        assert!(decoded.calls.contains(64));
+        assert!(!decoded.calls.contains(63));
+        assert!(!decoded.calls.contains(65));
+    }
 }

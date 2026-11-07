@@ -14,7 +14,8 @@ use crate::kobj::{self, KObject};
 use crate::proc;
 use crate::sched;
 use crate::syscall::table::{SYSTEM_ASYNC_ERROR_CANCELLED, SYSTEM_ERROR_INVALID_ARGUMENT,
-    SYSTEM_ERROR_QUOTA_EXCEEDED, SYSTEM_ERROR_RIGHTS_DENIED, SYSTEM_HANDLE_ERROR_INVALID};
+    SYSTEM_ERROR_QUOTA_EXCEEDED, SYSTEM_ERROR_RIGHTS_DENIED, SYSTEM_HANDLE_ERROR_INVALID,
+    SYSTEM_SYNC_ERROR_BUSY};
 use crate::task::TaskId;
 
 pub struct MutexObj {
@@ -125,6 +126,76 @@ pub fn sys_lock(raw: u64) -> i64 {
                 sched::yield_with_cause(sched::scheduler::Cause::BLOCK);
             }
         }
+    }
+}
+
+/// Attempts to lock `handle` without blocking or creating a scheduler wait edge.
+///
+/// A free or stale-owner mutex is acquired with the same ownership reference rules as
+/// [`sys_lock`]. A live owner returns `system.sync.error.busy`; recursive acquisition is
+/// rejected just like the blocking entry point. No state changes occur on refusal.
+pub fn sys_try_lock(raw: u64) -> i64 {
+    let Some(pid) = proc::current_process() else { return crate::syscall::err(SYSTEM_ERROR_RIGHTS_DENIED) };
+    let me = sched::current().0;
+    match kobj::with(|t| {
+        let id = proc::resolve_in(t, pid, HandleId::from_raw(raw), ObjectType::Mutex, Rights::WAIT)
+            .map_err(crate::syscall::proc_err)?;
+        let (owner, closed) = match t.get(id) {
+            Ok(KObject::Mutex(m)) => (m.state.owner(), m.state.is_closed()),
+            _ => return Err(crate::syscall::err(SYSTEM_HANDLE_ERROR_INVALID)),
+        };
+        if closed {
+            return Err(crate::syscall::err(SYSTEM_ASYNC_ERROR_CANCELLED));
+        }
+        if owner == Some(me) {
+            return Err(crate::syscall::err(SYSTEM_ERROR_INVALID_ARGUMENT));
+        }
+        if owner.is_some_and(sched::task_is_live) {
+            return Err(crate::syscall::err(SYSTEM_SYNC_ERROR_BUSY));
+        }
+
+        // A free or stale owner needs an ownership reference before `claim`
+        // publishes the caller as owner. Refusal therefore leaves ownership untouched.
+        let reserved_owner_ref = owner.is_none();
+        if reserved_owner_ref && t.acquire_internal(id).is_err() {
+            return Err(crate::syscall::err(SYSTEM_ERROR_QUOTA_EXCEEDED));
+        }
+        let claim = match t.get_mut(id) {
+            Ok(KObject::Mutex(m)) => m.state.claim(me, owner.is_some_and(sched::task_is_live)),
+            _ => {
+                if reserved_owner_ref {
+                    let _ = t.release_internal(id);
+                }
+                return Err(crate::syscall::err(SYSTEM_HANDLE_ERROR_INVALID));
+            }
+        };
+        match claim {
+            Claim::Acquired { reused_owner_ref } => {
+                debug_assert_eq!(reserved_owner_ref, !reused_owner_ref);
+                Ok(())
+            }
+            Claim::WaitFor(_) => {
+                if reserved_owner_ref {
+                    let _ = t.release_internal(id);
+                }
+                Err(crate::syscall::err(SYSTEM_SYNC_ERROR_BUSY))
+            }
+            Claim::Recursive => {
+                if reserved_owner_ref {
+                    let _ = t.release_internal(id);
+                }
+                Err(crate::syscall::err(SYSTEM_ERROR_INVALID_ARGUMENT))
+            }
+            Claim::Closed => {
+                if reserved_owner_ref {
+                    let _ = t.release_internal(id);
+                }
+                Err(crate::syscall::err(SYSTEM_ASYNC_ERROR_CANCELLED))
+            }
+        }
+    }) {
+        Ok(()) => 0,
+        Err(error) => error,
     }
 }
 

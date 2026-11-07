@@ -131,7 +131,13 @@ pub fn run() {
     program("modhost", USER_MODHOST, 0, 0);
     // isohost 的一条判据是「CPU 压力下仍能响应」，依赖 QoS 保证；纯轮转构建跳过该程序。
     #[cfg(not(feature = "sched-rr"))]
-    isohost_program(rt_calls().union(SyscallSet::of(&[abi::SYSTEM_PROCESS_SPAWN, abi::SYSTEM_PROCESS_WAIT])));
+    isohost_program(rt_calls().union(SyscallSet::of(&[
+        abi::SYSTEM_PROCESS_SPAWN,
+        abi::SYSTEM_PROCESS_WAIT,
+        abi::SYSTEM_SYNC_MUTEX_CREATE,
+        abi::SYSTEM_SYNC_MUTEX_TRY_ACQUIRE,
+        abi::SYSTEM_SYNC_MUTEX_RELEASE,
+    ])));
     let end = baseline();
     check(end == start, "演练结束后资源未回到起点");
     sched::set_preemption(prev_preemption);
@@ -299,6 +305,11 @@ fn isohost_program(calls: SyscallSet) {
         check(false, "用户程序装载失败");
         return;
     };
+    let denied_calls = calls.difference(SyscallSet::of(&[abi::SYSTEM_SYNC_MUTEX_TRY_ACQUIRE]));
+    let Some((denied_st, denied_code)) = run_program("isohost-high-id-denied", USER_ISOHOST, 1, denied_calls) else {
+        check(false, "高编号拒绝用例的用户程序装载失败");
+        return;
+    };
     let after = baseline();
     let timing_only = code == Some(EXIT_TIMING_ONLY) && matches!(st, Some(ProcState::Exited { code: EXIT_TIMING_ONLY }));
     if timing_only {
@@ -306,8 +317,17 @@ fn isohost_program(calls: SyscallSet) {
     } else {
         check(st == Some(ProcState::Exited { code: 0 }) && code == Some(0), "isohost");
     }
+    check(
+        denied_st == Some(ProcState::Exited { code: 0 }) && denied_code == Some(0),
+        "isohost 高编号权限拒绝",
+    );
     check(after == before, "用例结束后资源未回到基线");
     kprintln!("[JSR-RT] case=isohost exit={:?} expect=0 reclaimed={} timing_only={}", code, after == before, timing_only);
+    kprintln!(
+        "[JSR-RT] case=isohost-high-id-denied exit={:?} expect=0 reclaimed={}",
+        denied_code,
+        after == before
+    );
 }
 
 /// 同 [`program`]，授予指定的系统调用集合。

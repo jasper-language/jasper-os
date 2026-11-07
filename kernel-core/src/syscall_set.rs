@@ -17,7 +17,7 @@
 //!   边界比较、1 次下标、1 次位测试）。
 //!
 //! # 容量与增长
-//! 256 位 = 当前最高操作 ID（55）的 4.6 倍余量；结构大小 32 字节，可随任务控制块
+//! 256 位 = 当前最高操作 ID（64）的 4 倍余量；结构大小 32 字节，可随任务控制块
 //! 直接复制。若将来登记表突破 255，只需把 [`MAX_IDS`] / [`WORDS`] 一起提高并同步
 //! 重新生成 ABI（`SpawnDesc` 的大小由 [`WORDS`] 决定），语义不变；不保留旧宽度
 //! 的影子通道。
@@ -483,5 +483,21 @@ mod tests {
             assert!(s.contains((word * 64) as u64));
             assert!(!s.contains((word * 64 + 1) as u64));
         }
+    }
+
+    #[test]
+    fn high_id_64_serialization_is_target_width_independent() {
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(core::mem::size_of::<usize>(), 4);
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(core::mem::size_of::<usize>(), 8);
+
+        let mut bytes = [0u8; BYTES];
+        SyscallSet::of(&[64]).encode(&mut bytes);
+        assert_eq!(&bytes[0..8], &[0u8; 8]);
+        assert_eq!(&bytes[8..16], &1u64.to_le_bytes());
+        assert_eq!(&bytes[16..24], &[0u8; 8]);
+        assert_eq!(&bytes[24..32], &[0u8; 8]);
+        assert_eq!(SyscallSet::decode(&bytes), SyscallSet::of(&[64]));
     }
 }

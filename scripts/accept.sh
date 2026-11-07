@@ -1068,6 +1068,9 @@ check_j6() {   # J-6：隔离模块（isohost 的一条判据是「CPU 压力下
      || has 'case=isohost exit=Some\(64\) expect=0 reclaimed=true timing_only=true'; then
     iso_exit=1
   fi
+  if has 'case=isohost-high-id-denied exit=Some\(0\) expect=0 reclaimed=true'; then
+    iso_exit=$((iso_exit + 1))
+  fi
   iso_complete=0
   if has 'text=isohost: ok checks=[0-9]+' || has 'text=isohost: TIMING step=[0-9]+'; then
     iso_complete=1
@@ -1075,6 +1078,8 @@ check_j6() {   # J-6：隔离模块（isohost 的一条判据是「CPU 压力下
   if [ "${TEST_RC:-1}" -eq 0 ] && [ "${JASO_RC:-1}" -eq 0 ] && [ "$t" -eq 10 ] \
      && has 'text=isohost: spawn escalation_denied=true bad_image_rejected=true child_exit=0 quota=8 quota_exceeded_rejected=true churn=24 ok=true' \
      && has 'text=isohost: calls duplicate_rejected=true unregistered_rejected=true out_of_range_rejected=true insert_atomic=true' \
+     && has 'text=isohost: high_id id=64 child_inherited=true try_acquire=true busy_refused=true recursive_rejected=true unlock=true unregistered_denied=true' \
+     && has 'text=isohost: high_id id=64 direct=rights_denied spawn_escalation=rights_denied unregistered=unsupported' \
      && has 'text=isohost: admission undeclared_handle_rejected=true missing_capability_rejected=true' \
      && has 'text=isohost: rights granted_call_ok=true denied=channel\.create,process\.spawn,time\.wait foreign_handle=invalid host_handle_intact=true' \
      && has 'text=isohost: address_space outcome=(own_memory|faulted) host_data_intact=true' \
@@ -1085,7 +1090,7 @@ check_j6() {   # J-6：隔离模块（isohost 的一条判据是「CPU 压力下
      && [ "$iso_complete" -eq 1 ] \
      && has '^\[JSR-USER\] event=system\.task\.faulted task=spawned .*kind=page_fault .*action=terminated' \
      && has '^\[JSR-PROC\] event=system\.process\.killed id=0x[0-9a-f]+ cause=last_handle_released code=-2' \
-     && [ "$iso_exit" -eq 1 ] \
+     && [ "$iso_exit" -eq 2 ] \
      && ! has 'text=isohost: FAIL'; then
     record J-6 PASS "宿主测试 $t/10（创建参数块/调用子集、放置规则、隔离协议）；隔离模块在独立进程运行：越权调用 rights_denied、宿主句柄值无效、写不到宿主数据、崩溃只终止隔离进程；自动获取的模块进程内装载被拒；线程停在模块内时卸载被拒且模块可用；子进程配额与回收；回到基线"
     pressure=$(grep -aE 'text=isohost: cpu_pressure hogs=2 rounds=20' "$SERIAL" | head -1)
