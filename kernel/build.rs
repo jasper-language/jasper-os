@@ -19,9 +19,11 @@ fn main() {
     let reg_path = root.join("abi/system-ids.txt");
     let lock_path = root.join("abi/system-ids.lock");
     let version_path = root.join("abi/abi-version.txt");
+    let snapshots_path = root.join("abi/snapshots");
     println!("cargo:rerun-if-changed={}", reg_path.display());
     println!("cargo:rerun-if-changed={}", lock_path.display());
     println!("cargo:rerun-if-changed={}", version_path.display());
+    println!("cargo:rerun-if-changed={}", snapshots_path.display());
 
     let reg = std::fs::read_to_string(&reg_path).expect("读取 abi/system-ids.txt 失败");
     let lock = std::fs::read_to_string(&lock_path).expect("读取 abi/system-ids.lock 失败");
@@ -76,6 +78,45 @@ fn main() {
     }
     if let Err(e) = kernel_core::abi::check_frozen_generation(&reg, &lock, native) {
         panic!("已冻结的系统接口或 ABI 世代被破坏（abi/system-ids.lock）：{:?}", e);
+    }
+    // 完整契约快照门槛：当前源码必须与当前版本的不可变快照逐行一致；同主版本旧快照
+    // 只能被新增条目扩展，Patch 升级则要求契约完全不变。主版本换代必须随新内核提交新快照。
+    let mut current_contract = String::new();
+    if let Err(e) = kernel_core::abi_contract::render_current(&reg, &mut current_contract) {
+        panic!("无法从当前 ABI 真源渲染契约快照：{:?}", e);
+    }
+    let snapshot_entries = std::fs::read_dir(&snapshots_path)
+        .unwrap_or_else(|e| panic!("读取 {} 失败：{}", snapshots_path.display(), e));
+    let mut snapshot_paths: Vec<PathBuf> = snapshot_entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("contract"))
+        .collect();
+    snapshot_paths.sort();
+    let mut snapshot_texts: Vec<(kernel_core::abi_version::AbiVersion, String)> = Vec::new();
+    for path in snapshot_paths {
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读取 ABI 快照 {} 失败：{}", path.display(), e));
+        let version = kernel_core::abi_contract::snapshot_version(&text)
+            .unwrap_or_else(|e| panic!("ABI 快照 {} 的世代头不合法：{:?}", path.display(), e));
+        let expected = format!("{}.{}.{}.contract", version.major, version.minor, version.patch);
+        assert_eq!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some(expected.as_str()),
+            "ABI 快照文件名与 `abi=` 世代不一致：{}",
+            path.display()
+        );
+        snapshot_texts.push((version, text));
+    }
+    let snapshot_refs: Vec<kernel_core::abi_contract::Snapshot<'_>> = snapshot_texts
+        .iter()
+        .map(|(version, text)| kernel_core::abi_contract::Snapshot { version: *version, text })
+        .collect();
+    if let Err(e) = kernel_core::abi_contract::check_snapshot_set(&current_contract, &snapshot_refs) {
+        panic!(
+            "ABI 契约快照门槛失败：{:?}；契约变化必须提升 abi/abi-version.txt 并新增 abi/snapshots/<Major.Minor.Patch>.contract",
+            e
+        );
     }
     // 能力集合的容量是 ABI 契约的一部分：登记表里的操作 ID 必须都能被 256 位集合表示。
     // 越界即构建失败，不允许出现「登记表承认、权限位却放不下」的操作。

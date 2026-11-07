@@ -577,6 +577,18 @@ cont-splash 帧缓冲仍未验证（见 `docs/PDA-1-image-dtb.md`）。
 | ABI-GEN-11 | 节名读取对任意 ≤8 字节字符串表与任意偏移不 panic，接受时名字在表内、无 NUL、紧跟 NUL；节头读取对任意偏移/表项大小/下标不 panic 不溢出，接受时表项整体在 ≤160 字节映像内 | `kernel-core/src/elf.rs`（`abi-fv` 特性下 `elf_section_name_is_bounded_and_terminated`、`elf_section_at_stays_inside_image`） | Kani | proved（有界） | `cargo kani -p kernel-core --features abi-fv --harness elf_section_name_is_bounded_and_terminated`（另一 harness 同） | 2 个 harness SUCCESSFUL（3.1 s / 121.8 s）；界限为字符串表 8 字节、映像 160 字节 |
 | ABI-GEN-12 | —（无并发状态可枚举） | `kernel_core::elf` 的节头 / 章定位纯函数 | Loom | N/A：纯函数，无锁/原子/线程交错；不能记为 PASS | 替代证据：ABI-GEN-08/10 的畸形输入覆盖 + `scripts/accept.sh` 的 `ABI`、`m51pre` 检查（真实 QEMU 装载） | Loom 不适用 |
 
+## 原生 ABI 完整契约快照（issue #8 第二片）
+
+范围：`abi/snapshots/<Major.Minor.Patch>.contract` 的完整可发布契约、构建期快照门槛、同主版本只增不改与主版本轮换。快照覆盖 syscall ID/种类/版本/副作用、逐操作参数与返回形状、Rights、关键定长布局、错误接口和异步/跨域语义；不包括 Profile 能力清单与程序 ABI 章的能力字段，该项仍为后续切片。
+
+| ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |
+|---|---|---|---|---|---|---|
+| ABI-GEN-13 | 当前 ABI 版本恰有一个同名快照且正文与源码确定性渲染逐行一致；每个登记操作恰有一个参数契约，所有布局字段都在记录范围内 | `kernel_core::abi_contract::{render_current,check_snapshot_set}`；`kernel/build.rs` | 单元/构建期门槛 | tested | `cargo test -p kernel-core abi_contract --lib`；`bash scripts/abi-contract.sh check`；`cargo check -p jasper-kernel --target x86_64-unknown-none --no-default-features` | 6 个 `abi_contract` 单元用例；内核构建脚本在编译前复用同一门槛。TCB 之外的人仍可改代码与快照，历史不可变由 ABI-GEN-15 补上 |
+| ABI-GEN-14 | 同主版本 Minor 升级只允许新增契约行；旧 ID/参数/布局/Rights/语义不得删除或修改。同主版本 Patch 升级要求契约正文完全相等。新 Major 不继承旧 Major 快照 | `kernel_core::abi_contract::check_snapshot_set` | 单元 + Proptest | tested | `cargo test --manifest-path verification/toolbox/Cargo.toml --test abi_contract`；`bash scripts/abi-release.sh <version>` | 3 个性质/确定性用例；比较是规范文本逐行相等，证明登记层的机械差异，不证明实现行为仍符合文字语义 |
+| ABI-GEN-15 | CI 拒绝修改、删除或重命名历史 `abi/snapshots/*.contract`；新 ABI 只能新增快照文件 | `scripts/abi-contract.sh immutable`; `.github/workflows/ci.yml` | Git 历史 diff | tested（脚本）+ CI 接入 | `bash scripts/abi-contract.sh immutable <base>` | 本地无完整 git base 时会明确跳过；托管 CI checkout 使用完整历史。该门槛防止无意改写，不防拥有仓库写权限者同时篡改 workflow |
+| ABI-GEN-16 | 任意 UTF-8 文本不得让快照世代解析与集合比较 panic；任意当前正文行变异都不能被接受为当前契约 | `verification/toolbox/fuzz/fuzz_targets/abi_contract.rs`; `verification/toolbox/tests/abi_contract.rs` | cargo-fuzz + Proptest | tested | `(cd verification/toolbox/fuzz && cargo fuzz run abi_contract -- -runs=100000)`；`cargo test --manifest-path verification/toolbox/Cargo.toml --test abi_contract` | 100000 次 fuzz 与 512 例性质；fuzz 从空语料起步，覆盖不等于穷举 |
+| ABI-GEN-17 | 快照渲染和比较是纯函数，无锁、原子或共享状态 | `kernel_core::abi_contract` | Loom | N/A | 不适用 | 快照门禁由构建脚本/CI 单线程调用；并发发布流程不在本切片 |
+
 ## JB-OS1 `.jaso` format 1 结构读取（六步链，2026-10-28）
 
 源码身份：提交 2b217b3..a2564ab（rebase 到 ABI 世代合入后的 main，a2564ab 上两套件复跑 PASS）；`jaso/src/{lib,platform,manifest,code,build,migrate}.rs`。复现：VM `bash verification/toolbox/run-jb-os1-jaso-suite.sh`（证据 `evidence/jb-os1/jaso-suite/`，含 `source.sha256`）。

@@ -43,3 +43,5 @@ while IFS= read -r line; do
   fi
 done < "$REG"
 echo "新冻结 $added 条"
+# 冻结只更新名字/ID 锁；完整参数/布局/语义仍由不可变契约快照把关。
+bash "$ROOT/scripts/abi-contract.sh" check

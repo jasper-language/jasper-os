@@ -21,18 +21,26 @@ mkdir -p "$out"
 
 sha256sum \
   abi/abi-version.txt \
+  abi/snapshots/1.0.0.contract \
   kernel-core/build.rs \
+  kernel-core/src/abi_contract.rs \
   kernel-core/src/abi_version.rs \
   kernel-core/src/elf.rs \
   kernel-core/src/abi.rs \
   kernel/build.rs \
+  xtask/src/main.rs \
+  scripts/abi-contract.sh \
+  scripts/abi-release.sh \
   kernel/src/proc/mod.rs \
   kernel/src/proc/spawn.rs \
   kernel/src/syscall/mod.rs \
   kernel/src/abi_demo.rs \
   verification/toolbox/verus/abi_version.rs \
   verification/toolbox/tests/abi_version.rs \
+  verification/toolbox/tests/abi_contract.rs \
   verification/toolbox/fuzz/fuzz_targets/abi_note.rs \
+  verification/toolbox/fuzz/fuzz_targets/abi_contract.rs \
+  verification/toolbox/fuzz/Cargo.toml \
   verification/toolbox/verus/elf_section_bounds.rs \
   verification/toolbox/verus/elf_section_bounds_bad.rs \
   verification/toolbox/tests/fixture/elf_abi.rs \
@@ -49,6 +57,9 @@ cargo fuzz --version > "$out/fuzz-version.log"
 # Verus 不同发行版对 --version 的支持不一致；版本证据以 Z3 与编译器版本为主，这里尽力记录。
 "$VERUS" --version > "$out/verus-version.log" 2>&1 || true
 
+echo "== 0/6 ABI 契约快照 =="
+bash scripts/abi-contract.sh check > "$out/contract.log" 2>&1
+
 echo "== 1/6 Verus/Z3 =="
 "$VERUS" verification/toolbox/verus/abi_version.rs > "$out/verus.log" 2>&1
 "$VERUS" verification/toolbox/verus/elf_section_bounds.rs > "$out/verus-elf.log" 2>&1
@@ -60,16 +71,20 @@ fi
 
 echo "== 2/6 Proptest =="
 cargo test --manifest-path verification/toolbox/Cargo.toml --test abi_version > "$out/proptest.log" 2>&1
+cargo test --manifest-path verification/toolbox/Cargo.toml --test abi_contract > "$out/proptest-contract.log" 2>&1
 cargo test --manifest-path verification/toolbox/Cargo.toml --test elf_abi_section > "$out/proptest-elf.log" 2>&1
 
 echo "== 3/6 Miri =="
 cargo +nightly miri test --manifest-path verification/toolbox/Cargo.toml --test abi_version \
   note_roundtrip_under_miri > "$out/miri.log" 2>&1
+cargo +nightly miri test --manifest-path verification/toolbox/Cargo.toml --test abi_contract \
+  contract_snapshot_rules_under_miri > "$out/miri-contract.log" 2>&1
 cargo +nightly miri test --manifest-path verification/toolbox/Cargo.toml --test elf_abi_section \
   section_rejections_under_miri > "$out/miri-elf.log" 2>&1
 
 echo "== 4/6 cargo-fuzz =="
 (cd verification/toolbox/fuzz && cargo fuzz run abi_note -- -runs=10000) > "$out/fuzz.log" 2>&1
+(cd verification/toolbox/fuzz && cargo fuzz run abi_contract -- -runs=100000) > "$out/fuzz-contract.log" 2>&1
 (cd verification/toolbox/fuzz && cargo fuzz run elf_abi_section -- -runs=1000000 -max_len=16384) > "$out/fuzz-elf.log" 2>&1
 
 echo "== 5/6 Kani（$KANI_STATUS）=="
@@ -96,8 +111,11 @@ EOF
 
 grep -Eq '[1-9][0-9]* verified, 0 errors' "$out/verus.log"
 grep -q '7 passed; 0 failed' "$out/proptest.log"
+grep -q '3 passed; 0 failed' "$out/proptest-contract.log"
 grep -q '1 passed; 0 failed' "$out/miri.log"
+grep -q '1 passed; 0 failed' "$out/miri-contract.log"
 grep -q '#10000.*DONE' "$out/fuzz.log"
+grep -q '#100000.*DONE' "$out/fuzz-contract.log"
 if kani_enabled; then
   grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-compat.log"
   grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-note.log"
@@ -113,5 +131,6 @@ if kani_enabled; then
   grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-elf-entry.log"
 fi
 grep -q '^N/A：' "$out/loom-na.log"
+grep -q 'ABI contract check: PASS (1.0.0)' "$out/contract.log"
 
-printf '%s\n' "ABI generation suite: Verus/Proptest/Miri/fuzz passed; Loom N/A (pure functions); $KANI_STATUS" | tee "$out/PASS"
+printf '%s\n' "ABI generation suite: snapshots/Verus/Proptest/Miri/fuzz passed; Loom N/A (pure functions); $KANI_STATUS" | tee "$out/PASS"
