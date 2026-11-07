@@ -279,7 +279,7 @@ pub fn run_syscall() {
     let base = arch::USER_WINDOW.0;
     let allowed = SyscallSet::of(&[abi::SYSTEM_TIME_NOW, abi::SYSTEM_TASK_EXIT]);
     match syscall::self_check() {
-        Ok(n) => kprintln!("[JSR-SYSCALL] self_check ops={} handlers=all", n),
+        Ok(n) => kprintln!("[JSR-SYSCALL] self_check ops={} handlers=all ownership=complete", n),
         Err(name) => check(false, name),
     }
     let calls_before = syscall::call_count();

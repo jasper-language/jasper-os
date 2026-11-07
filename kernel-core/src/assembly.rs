@@ -203,6 +203,46 @@ pub enum Availability {
     Ready,
 }
 
+/// 一个已登记系统操作在 Profile 声明中的唯一所有者。
+///
+/// `core` 模块提供的操作归为内核基础调用；其他模块提供的操作归为模块服务。
+/// 当前 Profile 未声明所有者的操作不是“无门禁”，调用方必须拒绝执行。
+/// One declared owner of a registered operation. An operation absent from the active
+/// profile is unavailable, never ungated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperationRoute {
+    /// 提供该操作所属服务的模块。
+    pub module: &'static str,
+    /// 匹配到的服务前缀。
+    pub service: &'static str,
+}
+
+impl OperationRoute {
+    /// 是否属于内核基础调用（当前唯一基础模块是 `core`）。
+    /// Whether this is a kernel-base operation (the current base module is `core`).
+    pub fn is_kernel_base(self) -> bool {
+        self.module == "core"
+    }
+}
+
+/// 在 Profile 中查找系统操作的唯一服务所有者。
+///
+/// 前缀只按点边界匹配。Profile 校验拒绝互相包含的服务前缀，因此一个操作至多有一个所有者。
+/// Find the unique service owner of an operation in a profile.
+pub fn operation_route(profile: &SystemProfile, operation: &str) -> Option<OperationRoute> {
+    for module in profile.modules {
+        for service in module.services {
+            if operation
+                .strip_prefix(service)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+            {
+                return Some(OperationRoute { module: module.name, service });
+            }
+        }
+    }
+    None
+}
+
 /// 一次 [`Assembly::start`] 的结果统计。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Report {
@@ -850,6 +890,54 @@ mod tests {
             "prospective health audit must use the prospective state"
         );
         take("a:");
+    }
+
+    #[test]
+    fn every_registered_operation_has_one_builtin_owner() {
+        let registry = include_str!("../../abi/system-ids.txt");
+        let mut operations = 0usize;
+        let mut kernel_base = 0usize;
+        let mut module_services = 0usize;
+        for line in registry.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<_> = line.split('\t').collect();
+            assert!(fields.len() >= 7, "malformed registry line: {line}");
+            if fields[1] != "op" {
+                continue;
+            }
+            let name = fields[2];
+            let route = operation_route(&HEADLESS, name)
+                .unwrap_or_else(|| panic!("registered operation has no profile owner: {name}"));
+            operations += 1;
+            if route.is_kernel_base() {
+                kernel_base += 1;
+            } else {
+                module_services += 1;
+            }
+        }
+        assert!(operations >= 57);
+        assert_eq!(operations, kernel_base + module_services);
+        assert_eq!(
+            operation_route(&HEADLESS, "system.sync.mutex.try.acquire"),
+            Some(OperationRoute { module: "core", service: "system.sync" })
+        );
+        assert_eq!(
+            operation_route(&HEADLESS, "system.event.source.create"),
+            Some(OperationRoute { module: "async", service: "system.event" })
+        );
+        assert_eq!(
+            operation_route(&profile::HEADLESS_MIN, "system.event.source.create"),
+            None,
+            "the compact profile does not assemble the async owner"
+        );
+        assert_eq!(
+            operation_route(&profile::HEADLESS_MIN, "system.time.now"),
+            Some(OperationRoute { module: "time", service: "system.time" })
+        );
+        assert_eq!(operation_route(&HEADLESS, "system.taskish.escape"), None);
     }
 
     #[test]

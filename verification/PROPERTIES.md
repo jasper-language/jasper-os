@@ -39,6 +39,15 @@
 
 故障倒计时模型映射：`Hit(w)`为`FaultPoint::hit`的成功原子更新线性化点；`remaining=0`时`checked_sub`失败、不改变状态；`remaining=1`时唯一返回true。CAS重试及线程调度不可见，未证明并发重新arm（契约禁止）。KRN1-FAULT-01状态只对模型成立；实际帧/堆/复位/IPI挂钩需单独QEMU证据，不能由该小模型推导。
 
+## 模块化宏内核的装配边界（issue #11）
+
+| ID | 性质 | 代码位置 | 方法 | 状态 | 复现 | 假设/未覆盖 |
+|---|---|---|---|---|---|---|
+| ARCH-ROUTE-01 | 完整内建服务面中的每个登记操作恰有一个服务所有者；服务前缀只按点边界匹配；精简 Profile 未装配的所有者不会被误判为内核基础调用 | `kernel_core::assembly::operation_route`; `kernel_core::profile::resolve` 的前缀歧义检查；`kernel/src/syscall::self_check` | 宿主单元测试 / 真实 QEMU 启动自检 | tested | `cargo test -p kernel-core assembly::tests --lib`；`cargo test -p kernel-core profile:: --lib` | 测试读取 `abi/system-ids.txt` 全表；服务所有权来自当前 `HEADLESS` 完整服务面，新增模块必须同时更新 Profile 与绑定 |
+| ARCH-ROUTE-02 | 同前缀或互相包含的服务前缀被拒绝；`system.async` 与 `system.asynchronous` 不冲突 | `kernel_core::profile::{resolve,service_prefixes_overlap}` | 宿主负例与边界测试 | tested | `cargo test -p kernel-core profile:: --lib` | 只检查当前 Profile 内的服务前缀；能力名本身的点分语法由既有测试覆盖 |
+| ARCH-K06-01 | `enter_service` 不存在无所有者直通；操作无唯一所有者或当前 Profile 未装配/未发布所有者时均返回不可用；调用者授权检查仍在服务门之前 | `kernel::assembly::enter_service`; `kernel::syscall::on_syscall`; `kernel/src/assembly.rs::operation_audit` | 代码审计 / 真实标准与精简 Profile 启动 / 既有 J-6 未授权负例 | tested | `bash scripts/k06-service-audit.sh`（标准 `active_unavailable=0`，精简 `active_unavailable=11`）；`JASPER_ACCEPT=spot JASPER_CHECKS=k06 bash scripts/accept.sh`（accept-20261107-142434）；J-6 未授权负例既有 | 真实审计证明装配与门禁分类；不证明未来跨域 IPC、服务死亡或代理对象语义 |
+| ARCH-MATRIX-01 | 架构矩阵恰好覆盖 K-01～K-08 与九个装配维度；非法判例有唯一 ID 和拒绝码；代码中不得重新出现 `Ungated` 路径 | `verification/architecture_constraints.toml`; `verification/check-architecture-constraints.py`; `docs/issue-11-架构约束.md` | TOML 结构检查 + 源码标记检查 | tested | `python3 verification/check-architecture-constraints.py` | 检查机器可读契约与关键实现标记，不替代编译器、QEMU 或未来跨域模型 |
+
 | KRN1-HOOK-01 | 显式注入帧/堆失败不扣资源，复位与IPI超时返回错误且下次重试可恢复 | `kernel::fault_inject::selftest`; `mm::frame`; `mm::heap`; `virtio::VirtioPci::reset`; `smp::tlb_shootdown_on` | QEMU契约测试 | tested | `bash scripts/krn1-fault.sh` | 4核TCG指令时钟，4站点一次触发；不覆盖全部调用者回滚或DMA在飞拆除；不作性能结论 |
 
 ## S-2 健壮性回归

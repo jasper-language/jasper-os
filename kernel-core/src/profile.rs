@@ -125,6 +125,8 @@ pub enum ProfileErrorCode {
     MissingCapability,
     /// 系统服务被多个模块声明。
     ServiceConflict,
+    /// 两个系统服务前缀互相包含，导致同一操作可能有多个所有者。
+    AmbiguousService,
     /// 模块要求的最小任务槽位超过参数档。
     UnsatisfiableTasks,
     /// 模块要求的最小对象表容量超过参数档。
@@ -146,6 +148,7 @@ impl ProfileErrorCode {
             ProfileErrorCode::CapabilityConflict => "capability_conflict",
             ProfileErrorCode::MissingCapability => "missing_capability",
             ProfileErrorCode::ServiceConflict => "service_conflict",
+            ProfileErrorCode::AmbiguousService => "ambiguous_service",
             ProfileErrorCode::UnsatisfiableTasks => "unsatisfiable_tasks",
             ProfileErrorCode::UnsatisfiableObjects => "unsatisfiable_objects",
             ProfileErrorCode::HotLoadNotAllowed => "hot_load_not_allowed",
@@ -313,6 +316,20 @@ fn is_capability(text: &str) -> bool {
     !text.is_empty() && text.len() <= 64 && text.split('.').all(is_kebab)
 }
 
+/// 两个服务前缀是否互相包含。
+///
+/// 只按点边界判定：`system.async` 与 `system.async.ring` 冲突，
+/// 但 `system.async` 与 `system.asynchronous` 不冲突。
+/// English: service prefixes overlap only on a dotted boundary.
+fn service_prefixes_overlap(a: &str, b: &str) -> bool {
+    let nested = |outer: &str, inner: &str| {
+        inner
+            .strip_prefix(outer)
+            .is_some_and(|rest| rest.starts_with('.'))
+    };
+    nested(a, b) || nested(b, a)
+}
+
 /// 解析并校验一份 Profile。
 ///
 /// 返回**全部**问题而不是第一个：Profile 作者一次就能看到所有违规项。
@@ -380,6 +397,12 @@ pub fn resolve(profile: &SystemProfile) -> Result<ResolvedProfile, ProfileErrors
             }
             if resolved.services().contains(service) {
                 errors.push(ProfileErrorCode::ServiceConflict, service);
+            } else if resolved
+                .services()
+                .iter()
+                .any(|existing| service_prefixes_overlap(existing, service))
+            {
+                errors.push(ProfileErrorCode::AmbiguousService, service);
             } else if resolved.service_count < MAX_SERVICES {
                 resolved.add_service(service);
             } else {
@@ -426,6 +449,9 @@ pub const HEADLESS_MODULES: &[ModuleDecl] = &[
             "system.error",
             "system.console",
             "system.profile",
+            "system.sync",
+            "system.abi",
+            "system.execution",
         ],
         hot_load: false,
         sched_class: SchedClass::Interactive,
@@ -498,7 +524,7 @@ pub const HEADLESS_MODULES: &[ModuleDecl] = &[
         name: "async",
         provides: &["async.ring"],
         requires: &["kernel.core", "memory.virtual"],
-        services: &["system.async"],
+        services: &["system.async", "system.event", "system.io"],
         hot_load: false,
         sched_class: SchedClass::Interactive,
         min_tasks: 0,
@@ -530,6 +556,9 @@ pub const HEADLESS_MIN_MODULES: &[ModuleDecl] = &[
             "system.error",
             "system.console",
             "system.profile",
+            "system.sync",
+            "system.abi",
+            "system.execution",
         ],
         hot_load: false,
         sched_class: SchedClass::Interactive,
