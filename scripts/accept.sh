@@ -1233,11 +1233,14 @@ check_t2() {    # 基准（功能）：宿主统计/取值测试；周期计数�
            overhead_is_ppm_and_saturates select_picks_bound_by_direction select_reports_none_and_out_of_limit_current select_rejects_invalid_inputs_without_partial_result; do
     grep -qE "bench::tests::$t \.\.\. ok" "$OUT/cargo-test.log" || ok=0
   done
-  for names in kernel.timer_irq sched.context_switch frame.alloc frame.free heap.alloc_free_64 heap.alloc_free_4096; do
-    has "^\[JSR-BENCH\] name=$names iters=[1-9][0-9]* min=[0-9]+ p50=[0-9]+ p99=[0-9]+ max=[0-9]+ mean=[0-9]+ unit=cycles p50_ns=[0-9]+ p99_ns=[0-9]+" || ok=0
+  for names in kernel.timer_irq sched.context_switch frame.alloc frame.free heap.alloc_free_64 heap.alloc_free_4096 \
+               syscallset.contains.current syscallset.contains.u64-reference syscallset.subset.current \
+               syscallset.subset.u64-reference syscallset.copy.current syscallset.copy.u64-reference \
+               spawn.decode.current spawn.calls.decode.current spawn.calls.decode.u64-reference; do
+    has "^\[JSR-BENCH\] name=$names iters=[1-9][0-9]* min=[0-9]+ p50=[0-9]+ p99=[0-9]+ p999=[0-9]+ max=[0-9]+ mean=[0-9]+ unit=cycles p50_ns=[0-9]+ p99_ns=[0-9]+ p999_ns=[0-9]+" || ok=0
   done
   for names in syscall.roundtrip ring.submit_complete ipc.roundtrip; do
-    has "text=bench: name=$names iters=200 min=[0-9]+ p50=[1-9][0-9]* p99=[0-9]+ max=[0-9]+ mean=[0-9]+ unit=cycles p50_ns=[0-9]+" || ok=0
+    has "text=bench: name=$names iters=2048 min=[0-9]+ p50=[1-9][0-9]* p99=[0-9]+ p999=[0-9]+ max=[0-9]+ mean=[0-9]+ unit=cycles p50_ns=[0-9]+ p99_ns=[0-9]+ p999_ns=[0-9]+" || ok=0
   done
   # 这里只要求取值结论齐全（同一次测量同时给出 within_limit 与 gated）：是否超预算属于计时类判据，
   # 由 T-2/计时 单独记录，不在功能行里判失败。gated 的含义见基准演练：只有 x86_64 默认档的预算作数。
@@ -1259,7 +1262,7 @@ check_t2() {    # 基准（功能）：宿主统计/取值测试；周期计数�
      && has '^\[JSR-BENCH\] case=tune_refusal invalid_candidate_refused=true' \
      && has '^\[JSR-BENCH\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 reclaimed=true checks=[0-9]+ failed=0 timing_failed=[0-9]+' \
      && ! has '^\[JSR-BENCH-FAIL\]'; then
-    record T-2 PASS "9 项基准样本齐全（内核 6 + 用户态 3）；时钟中断样本可用（事件匹配属计时参考）；失败路径被拒无改动；配置档 $PROFILE 的取值结论齐全；回到基线"
+    record T-2 PASS "9 项基础基准（内核 6 + 用户态 3）与 SyscallSet/spawn 追加微基准样本齐全，p99.9 可用；时钟中断样本可用；失败路径被拒无改动；配置档 $PROFILE 的取值结论齐全；回到基线"
   else
     record T-2 FAIL "缺少 JSR-BENCH 标记、样本不全、失败路径未被拒、取值结论缺失、宿主测试未通过或未回到基线"
   fi

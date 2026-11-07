@@ -18,17 +18,20 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use jasper_rt::channel;
 use jasper_rt::ring::{Cqe, Ring, Sqe};
 use jasper_rt::{entry, ids, println, time};
-use kernel_core::bench::{Calibration, Samples, Summary};
+use kernel_core::bench::{summarize, Calibration, Summary};
 
 entry!(main);
 
 /// 每项的预热次数（不计入样本）。
 const WARMUP: u32 = 16;
 /// 每项的样本数。
-const ITERS: u32 = 200;
+const ITERS: u32 = 2048;
 /// 往返消息的长度。
 const MSG: usize = 16;
 /// 一个不存在的异步操作 ID（失败路径用）。
@@ -68,7 +71,7 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
     let Some(cal) = cal else { return Err(s.0) };
 
     // ---- 系统调用往返 ----
-    let mut samples = Samples::new();
+    let mut samples = Vec::with_capacity(ITERS as usize);
     let mut ok = true;
     for i in 0..WARMUP + ITERS {
         let t0 = time::cycles();
@@ -80,13 +83,13 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
         }
     }
     s.check(ok)?;
-    report(s, "syscall.roundtrip", &samples, &cal)?;
+    report(s, "syscall.roundtrip", &mut samples, &cal)?;
 
     // ---- 异步环：提交 → 完成（一次 enter）----
     let ring = Ring::create(8);
     s.check(ring.is_ok())?;
     let Ok(ring) = ring else { return Err(s.0) };
-    let mut samples = Samples::new();
+    let mut samples = Vec::with_capacity(ITERS as usize);
     let mut ok = true;
     for i in 0..WARMUP + ITERS {
         let tag = 0xB000 + i as u64;
@@ -106,7 +109,7 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
         }
     }
     s.check(ok)?;
-    report(s, "ring.submit_complete", &samples, &cal)?;
+    report(s, "ring.submit_complete", &mut samples, &cal)?;
     // 失败路径：未登记的操作被拒，且不产生任何完成记录
     let bad = Sqe { op: BOGUS_OP, flags: 0, user_tag: 1, arg0: 0, arg1: 0 };
     let mut id = [0u64; 1];
@@ -123,7 +126,7 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
     let pair = channel::pair();
     s.check(pair.is_ok())?;
     let Ok((a, b)) = pair else { return Err(s.0) };
-    let mut samples = Samples::new();
+    let mut samples = Vec::with_capacity(ITERS as usize);
     let mut ok = true;
     let mut buf = [0u8; MSG];
     for i in 0..WARMUP + ITERS {
@@ -140,7 +143,7 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
         }
     }
     s.check(ok)?;
-    report(s, "ipc.roundtrip", &samples, &cal)?;
+    report(s, "ipc.roundtrip", &mut samples, &cal)?;
     // 失败路径：缓冲区过小 ⇒ 被拒，消息留在队列；随后完整收到
     let msg = [0x5Au8; MSG];
     s.check(a.send(&msg).is_ok())?;
@@ -154,22 +157,24 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
 }
 
 /// 输出一项基准的汇总（周期 + 纳秒），并检查样本完整。
-fn report(s: &mut Steps, name: &str, samples: &Samples, cal: &Calibration) -> Result<(), u32> {
-    s.check(samples.len() == ITERS as usize && samples.rejected() == 0)?;
-    let sum: Option<Summary> = samples.summary();
+fn report(s: &mut Steps, name: &str, samples: &mut [u64], cal: &Calibration) -> Result<(), u32> {
+    s.check(samples.len() == ITERS as usize)?;
+    let sum: Option<Summary> = summarize(samples);
     s.check(sum.is_some())?;
     if let Some(m) = sum {
         println!(
-            "bench: name={} iters={} min={} p50={} p99={} max={} mean={} unit=cycles p50_ns={} p99_ns={}",
+            "bench: name={} iters={} min={} p50={} p99={} p999={} max={} mean={} unit=cycles p50_ns={} p99_ns={} p999_ns={}",
             name,
             m.count,
             m.min,
             m.p50,
             m.p99,
+            m.p999,
             m.max,
             m.mean,
             cal.to_ns(m.p50),
-            cal.to_ns(m.p99)
+            cal.to_ns(m.p99),
+            cal.to_ns(m.p999)
         );
     }
     Ok(())

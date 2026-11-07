@@ -31,8 +31,10 @@ use alloc::vec::Vec;
 use core::hint::black_box;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use kernel_core::bench::{quantum_overhead, select, timer_overhead, Calibration, Decision, Prefer, Samples, Summary};
+use kernel_core::bench::{quantum_overhead, select, summarize, timer_overhead, Calibration, Decision, Prefer, Samples, Summary};
 use kernel_core::sync::SpinLock;
+use kernel_core::spawn_abi::SpawnDesc;
+use kernel_core::syscall_set::SyscallSet;
 
 use crate::mm::{frame, heap};
 use crate::proc::ProcState;
@@ -91,8 +93,12 @@ static USER_BENCH: &[u8] = include_bytes!(env!("JSR_USER_BENCH"));
 const WINDOW_TICKS: u64 = 20;
 /// 每项的预热次数（不计入样本）。
 const WARMUP: u32 = 16;
-/// 每项的样本数。
+/// 既有基准的样本数。
 const ITERS: u32 = 200;
+/// SyscallSet 追加微基准的预热次数。
+const SET_WARMUP: u32 = 64;
+/// SyscallSet 追加微基准的样本数；超过 1000，使 p99.9 不退化为最大值。
+const SET_ITERS: u32 = 2048;
 /// 测量循环本身耗时的读数次数（关中断）。
 const LOOP_PROBE: u32 = 4096;
 /// 周期性开销预算（百万分比）：1%。
@@ -119,6 +125,7 @@ pub fn run() {
         let switch = context_switch(&cal);
         frames(&cal);
         heap_paths(&cal);
+        syscall_set_paths(&cal);
         user_program(&cal);
         if let (Some(tick), Some(switch)) = (tick, switch) {
             tuning(&cal, tick.p50, switch.p50);
@@ -147,19 +154,116 @@ fn report(name: &str, samples: &Samples, cal: &Calibration) -> Option<Summary> {
     check(sum.is_some() && samples.rejected() == 0, "基准样本缺失或被拒收");
     if let Some(m) = sum {
         kprintln!(
-            "[JSR-BENCH] name={} iters={} min={} p50={} p99={} max={} mean={} unit=cycles p50_ns={} p99_ns={}",
+            "[JSR-BENCH] name={} iters={} min={} p50={} p99={} p999={} max={} mean={} unit=cycles p50_ns={} p99_ns={} p999_ns={}",
             name,
             m.count,
             m.min,
             m.p50,
             m.p99,
+            m.p999,
             m.max,
             m.mean,
             cal.to_ns(m.p50),
-            cal.to_ns(m.p99)
+            cal.to_ns(m.p99),
+            cal.to_ns(m.p999)
         );
     }
     sum
+}
+
+fn cycle_samples(mut op: impl FnMut()) -> Vec<u64> {
+    let mut samples = Vec::with_capacity(SET_ITERS as usize);
+    for _ in 0..SET_WARMUP {
+        op();
+    }
+    for _ in 0..SET_ITERS {
+        let start = arch::cycles();
+        op();
+        samples.push(arch::cycles().wrapping_sub(start));
+    }
+    samples
+}
+
+fn report_values(name: &str, samples: &mut [u64], cal: &Calibration) -> Option<Summary> {
+    let sum = summarize(samples);
+    check(sum.is_some() && samples.len() == SET_ITERS as usize, "追加基准样本缺失");
+    if let Some(m) = sum {
+        kprintln!(
+            "[JSR-BENCH] name={} iters={} min={} p50={} p99={} p999={} max={} mean={} unit=cycles p50_ns={} p99_ns={} p999_ns={}",
+            name, m.count, m.min, m.p50, m.p99, m.p999, m.max, m.mean,
+            cal.to_ns(m.p50), cal.to_ns(m.p99), cal.to_ns(m.p999)
+        );
+    }
+    sum
+}
+
+/// issue #1 追加微基准：比较唯一生产 `SyscallSet` 与旧 `u64` 语义参考模型。
+/// 高编号正确性由功能测试覆盖；这里只用两者都可表达的 0..63 范围做公平性能对比。
+fn syscall_set_paths(cal: &Calibration) {
+    let ids = [0u64, 1, 4, 6, 15, 16, 19, 63];
+    let current = SyscallSet::of(&[0, 1, 4, 6, 15, 16, 19, 63]);
+    let other = SyscallSet::of(&[1, 4, 6, 19, 63]);
+    let old = ids.iter().fold(0u64, |word, &id| word | (1u64 << id));
+    let old_other = [1usize, 4, 6, 19, 63].iter().fold(0u64, |word, &id| word | (1u64 << id));
+
+    let mut cursor = 0u64;
+    let mut current_contains = cycle_samples(|| {
+        cursor = cursor.wrapping_add(1);
+        black_box(current.contains(ids[cursor as usize % ids.len()]));
+    });
+    report_values("syscallset.contains.current", &mut current_contains, cal);
+
+    let mut cursor = 0u64;
+    let mut old_contains = cycle_samples(|| {
+        cursor = cursor.wrapping_add(1);
+        let id = ids[cursor as usize % ids.len()];
+        black_box(id < 64 && old & (1u64 << id) != 0);
+    });
+    report_values("syscallset.contains.u64-reference", &mut old_contains, cal);
+
+    let mut current_subset = cycle_samples(|| {
+        black_box(other.is_subset_of(current));
+    });
+    report_values("syscallset.subset.current", &mut current_subset, cal);
+
+    let mut old_subset = cycle_samples(|| {
+        black_box(old_other & !old == 0);
+    });
+    report_values("syscallset.subset.u64-reference", &mut old_subset, cal);
+
+    let mut current_copy = cycle_samples(|| {
+        black_box(black_box(current));
+    });
+    report_values("syscallset.copy.current", &mut current_copy, cal);
+
+    let mut old_copy = cycle_samples(|| {
+        black_box(black_box(old));
+    });
+    report_values("syscallset.copy.u64-reference", &mut old_copy, cal);
+
+    let mut raw = SpawnDesc::default();
+    raw.image_len = 64;
+    raw.cpu_limit_permille = kernel_core::spawn_abi::CPU_UNLIMITED;
+    raw.calls = current;
+    let encoded = black_box(raw.encode());
+    let mut current_decode = cycle_samples(|| {
+        black_box(SpawnDesc::decode(black_box(&encoded)).expect("bench fixture decodes"));
+    });
+    report_values("spawn.decode.current", &mut current_decode, cal);
+
+    let mut call_bytes = [0u8; kernel_core::syscall_set::BYTES];
+    current.encode(&mut call_bytes);
+    let mut current_calls_decode = cycle_samples(|| {
+        black_box(SyscallSet::decode(black_box(&call_bytes)));
+    });
+    report_values("spawn.calls.decode.current", &mut current_calls_decode, cal);
+
+    let mut old_calls_decode = cycle_samples(|| {
+        let mut word = [0u8; 8];
+        word.copy_from_slice(&call_bytes[..8]);
+        black_box(u64::from_le_bytes(word));
+    });
+    report_values("spawn.calls.decode.u64-reference", &mut old_calls_decode, cal);
 }
 
 /// 开中断等到下一个 tick 的边沿，返回边沿处的 tick 数。

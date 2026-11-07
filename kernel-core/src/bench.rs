@@ -3,7 +3,7 @@
 //!
 //! # 职责
 //! * [`Samples`] —— 定长样本缓冲（无堆）：记录每次操作的耗时（周期计数器单位），满了就拒收并计数；
-//! * [`Summary`] —— 样本的最小值 / 中位数 / 第 99 百分位 / 最大值 / 均值（最近秩法，结果可复现）；
+//! * [`Summary`] —— 样本的最小值 / 中位数 / 第 99 / 第 99.9 百分位 / 最大值 / 均值（最近秩法，结果可复现）；
 //! * [`Calibration`] —— 用定时器 tick 校准周期计数器：周期 → 纳秒、每秒周期数；
 //! * [`overhead_ppm`] 与 [`select`] —— 把「固定开销 / 周期长度」换算成百万分比，按预算与偏好方向
 //!   在候选取值中选出边界值，并给出当前取值是否在预算内（[`Decision`]）。
@@ -75,22 +75,30 @@ impl Samples {
     /// 汇总；没有样本时为 `None`。不修改缓冲（在副本上排序）。
     /// Summarize the samples; `None` when empty. The buffer itself is not reordered.
     pub fn summary(&self) -> Option<Summary> {
-        if self.len == 0 {
-            return None;
-        }
         let mut sorted = self.buf;
-        let s = &mut sorted[..self.len];
-        s.sort_unstable();
+        summarize(&mut sorted[..self.len])
+    }
+}
+
+/// 对调用者提供的样本直接排序并汇总；用于需要超过 [`MAX_SAMPLES`] 个 p99.9
+/// 样本的基准缓冲。样本被就地排序，调用者应传入副本。
+/// Summarize a caller-owned sample slice in place.
+pub fn summarize(values: &mut [u64]) -> Option<Summary> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    let s = &*values;
         let sum: u128 = s.iter().map(|&v| v as u128).sum();
         Some(Summary {
-            count: self.len as u32,
+            count: s.len() as u32,
             min: s[0],
             p50: rank(s, 500),
             p99: rank(s, 990),
-            max: s[self.len - 1],
-            mean: (sum / self.len as u128) as u64,
+            p999: rank(s, 999),
+            max: s[s.len() - 1],
+            mean: (sum / s.len() as u128) as u64,
         })
-    }
 }
 
 /// 最近秩法的千分位：第 `ceil(p × n / 1000)` 小的样本（`s` 已排序且非空）。
@@ -112,6 +120,8 @@ pub struct Summary {
     pub p50: u64,
     /// 第 99 百分位（最近秩）。
     pub p99: u64,
+    /// 第 99.9 百分位（最近秩）。
+    pub p999: u64,
     /// 最大值。
     pub max: u64,
     /// 算术平均（向下取整）。
@@ -292,12 +302,12 @@ mod tests {
             assert!(s.push(v));
         }
         let sum = s.summary().unwrap();
-        assert_eq!(sum, Summary { count: 100, min: 1, p50: 50, p99: 99, max: 100, mean: 50 });
+        assert_eq!(sum, Summary { count: 100, min: 1, p50: 50, p99: 99, p999: 100, max: 100, mean: 50 });
         // 汇总不改变缓冲本身：再次汇总结果相同
         assert_eq!(s.summary().unwrap(), sum);
         let mut one = Samples::new();
         one.push(7);
-        assert_eq!(one.summary().unwrap(), Summary { count: 1, min: 7, p50: 7, p99: 7, max: 7, mean: 7 });
+        assert_eq!(one.summary().unwrap(), Summary { count: 1, min: 7, p50: 7, p99: 7, p999: 7, max: 7, mean: 7 });
     }
 
     #[test]
@@ -312,6 +322,16 @@ mod tests {
         assert_eq!(s.len(), MAX_SAMPLES);
         assert_eq!(s.rejected(), 2);
         assert_eq!(s.summary().unwrap(), before, "拒收不得改变已有样本");
+    }
+
+    #[test]
+    fn large_slice_p999_uses_nearest_rank() {
+        let mut values: std::vec::Vec<u64> = (1..=2000).collect();
+        let sum = summarize(&mut values).unwrap();
+        assert_eq!(sum.count, 2000);
+        assert_eq!(sum.p99, 1980);
+        assert_eq!(sum.p999, 1998);
+        assert_eq!(sum.max, 2000);
     }
 
     #[test]
