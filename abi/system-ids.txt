@@ -119,3 +119,4 @@
 4135	error	system.error.abi_mismatch	1	none	ABI 世代不兼容	ABI generation mismatch
 4136	error	system.error.abi_metadata	1	none	ABI 元数据缺失或损坏	ABI metadata missing or malformed
 4137	error	system.sync.error.busy	1	none	同步·互斥对象已被其他任务持有	Inherited mutex already held
+4138	error	system.error.abi_capability	1	none	程序所需系统能力不可用	Required system capability unavailable

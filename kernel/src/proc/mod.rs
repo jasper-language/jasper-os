@@ -932,6 +932,8 @@ pub enum LoadError {
     Elf(kernel_core::elf::ElfError),
     /// 程序 ABI 章缺失、损坏或与内核世代不兼容（在任何页映射之前拒绝）。
     Abi(kernel_core::abi_version::AbiReject),
+    /// 程序声明的所需能力在当前生效 Profile 中未装配或不可用。
+    Capability,
     /// 某个段不在用户私有窗口内。
     OutsideWindow,
     /// 映射或复制失败。
@@ -944,6 +946,7 @@ impl LoadError {
         match self {
             LoadError::Elf(e) => e.name(),
             LoadError::Abi(e) => e.name(),
+            LoadError::Capability => "system.error.abi_capability",
             LoadError::OutsideWindow => "system.memory.error.invalid_address",
             LoadError::Proc(_) => "system.memory.error.out_of_frames",
         }
@@ -957,6 +960,9 @@ impl LoadError {
 pub fn load_elf(id: ObjId, image: &[u8]) -> Result<u64, LoadError> {
     let elf = kernel_core::elf::parse(image, arch::ELF_MACHINE, arch::ELF_CLASS).map_err(LoadError::Elf)?;
     kernel_core::abi_version::check_image(elf.abi(), kernel_core::abi_version::NATIVE).map_err(LoadError::Abi)?;
+    if elf.required_capabilities().first_unavailable(crate::profile::has_capability).is_some() {
+        return Err(LoadError::Capability);
+    }
     for seg in elf.segments() {
         // 解析器保证 memsz > 0 且页区间可表示；这里仍用检查式算术，任何溢出都按「窗口外」拒绝
         let (lo, hi) = seg.page_range().ok_or(LoadError::OutsideWindow)?;

@@ -71,6 +71,8 @@ pub enum SpawnError {
     BadImage,
     /// 映像的 ABI 章缺失、损坏或与内核世代不兼容（未映射任何页）。
     Abi(kernel_core::abi_version::AbiReject),
+    /// 映像要求的 Profile 能力不可用。
+    Capability,
     /// 进程层操作失败（父进程已退出、句柄表满、帧不足等）。
     Proc(ProcError),
     /// 通道创建失败（已映射为系统调用错误码）。
@@ -143,6 +145,7 @@ pub fn spawn_child(parent: ObjId, image: &[u8], calls: SyscallSet, arg: u64, cpu
         let entry = match super::load_elf(child, image) {
             Ok(entry) => entry,
             Err(super::LoadError::Abi(reject)) => return Err(SpawnError::Abi(reject)),
+                Err(super::LoadError::Capability) => return Err(SpawnError::Capability),
             Err(_) => return Err(SpawnError::BadImage),
         };
         for i in 1..=STACK_PAGES {
@@ -232,6 +235,7 @@ fn spawn_err(e: SpawnError) -> i64 {
         // ABI 元数据问题与世代不兼容分开报告，调用方不需要解析自然语言就能判断升级方向。
         SpawnError::Abi(reject) if reject.is_metadata() => err(SYSTEM_ERROR_ABI_METADATA),
         SpawnError::Abi(_) => err(SYSTEM_ERROR_ABI_MISMATCH),
+        SpawnError::Capability => err(SYSTEM_ERROR_ABI_CAPABILITY),
         SpawnError::TooManyChildren => err(SYSTEM_ERROR_QUOTA_EXCEEDED),
         SpawnError::Proc(ProcError::OutOfFrames) => err(SYSTEM_MEMORY_ERROR_OUT_OF_MEMORY),
         SpawnError::Proc(e) => crate::syscall::proc_err(e),

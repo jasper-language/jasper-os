@@ -718,6 +718,23 @@ pub const LAYOUTS: &[LayoutContract] = &[
         fields: PROGRAM_NOTE_FIELDS,
     },
     LayoutContract {
+        name: "program.caps_note",
+        version: 1,
+        size: crate::program_caps::CAPS_NOTE_MAX_BYTES as u32,
+        magic: 0,
+        fields: &[
+            LayoutField { name: "namesz", offset: 0, width: 4 },
+            LayoutField { name: "descsz", offset: 4, width: 4 },
+            LayoutField { name: "type", offset: 8, width: 4 },
+            LayoutField { name: "name", offset: 12, width: 8 },
+            LayoutField { name: "version", offset: 20, width: 2 },
+            LayoutField { name: "flags", offset: 22, width: 2 },
+            LayoutField { name: "count", offset: 24, width: 2 },
+            LayoutField { name: "reserved", offset: 26, width: 2 },
+            LayoutField { name: "names", offset: 28, width: 64 },
+        ],
+    },
+    LayoutContract {
         name: "syscall.set.v1",
         version: 1,
         size: syscall_set::BYTES as u32,
@@ -1221,6 +1238,14 @@ pub const SEMANTICS: &[(&str, &str)] = &[
         "ELF.note.jasper.abi;exact_28_bytes;unknown_flags_rejected",
     ),
     (
+        "abi.program_capabilities",
+        "ELF.note.jasper.caps;version_1;nul_names;max_24;duplicates_rejected;missing_note_means_empty",
+    ),
+    (
+        "abi.capability_gate",
+        "all_required_capabilities_published_by_active_profile_before_any_mapping",
+    ),
+    (
         "syscall.arguments",
         "id_register_plus_six_u64_registers;little_endian_descriptors",
     ),
@@ -1690,14 +1715,18 @@ mod tests {
     #[test]
     fn new_major_does_not_inherit_old_major_contracts() {
         let mut current = render();
-        current = current.replace("abi=1.0.0", "abi=2.0.0");
+        let native = crate::abi_version::NATIVE;
+        current = current.replace(
+            &format!("abi={}.{}.{}", native.major, native.minor, native.patch),
+            "abi=2.0.0",
+        );
         let version = AbiVersion::new(2, 0, 0);
         let old = render();
         assert_eq!(
             check_snapshot_set(
                 &current,
                 &[
-                    snap(AbiVersion::new(1, 0, 0), &old),
+                    snap(native, &old),
                     snap(version, &current)
                 ]
             ),

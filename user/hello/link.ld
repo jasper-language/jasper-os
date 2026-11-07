@@ -17,6 +17,21 @@ SECTIONS
     SHORT(JSR_ABI_PATCH);
     SHORT(0);                /* flags = 0 */
   }
+  /* ABI 1.1 required capability: this real Rust program needs kernel.core.
+   * 版本 1 描述头 + NUL 结尾能力名；缺省该节表示旧 1.0 程序能力集为空。 */
+  .note.jasper.caps : {
+    LONG(8);                 /* namesz */
+    LONG(20);                /* descsz */
+    LONG(2);                 /* type = required capabilities */
+    LONG(0x5053414a);        /* "JASP" */
+    LONG(0x00005245);        /* "ER\0\0" */
+    SHORT(1);                /* version */
+    SHORT(0);                /* flags */
+    SHORT(1);                /* count */
+    SHORT(0);                /* reserved */
+    BYTE(107); BYTE(101); BYTE(114); BYTE(110); BYTE(101); BYTE(108); BYTE(46);
+    BYTE(99); BYTE(111); BYTE(114); BYTE(101); BYTE(0);
+  }
   /* 章独占一页：与 .text 分属不同 PT_LOAD，避免页粒度重叠（装载器按页拒绝重叠段）。 */
   . = ALIGN(4096);
   .text   : { *(.text._start) *(.text .text.*) }
