@@ -31,9 +31,11 @@
 //! * closing 动作由 [`crate::kobj::release_owner_in`] 在外部所有权归零时调用（[`close_in`]）：拒绝新提交、
 //!   取消可取消的请求、丢弃未消费的完成记录；不可中止的请求继续到自然结束。
 //!
-//! # 锁
-//! 全部记账在对象表锁内完成（单 CPU；对象表锁在全局锁顺序中处于句柄表一层，之后只会取页帧/映射等更低层的锁）。
-//! `enter` 等待完成时**不持锁**地让出处理器并休眠到下一个中断（[`sched::pause`]），每轮重新解析句柄（期间句柄可能已被关闭）。
+//! # 锁区间
+//! 状态机、后端表、等待登记和完成发布由对象表锁串行化。持锁区间只执行固定容量内的查表、
+//! 引用计数、状态迁移、有界扫描/复制，以及按规定顺序获取的更低层调度器/页帧/映射锁；不得让出任务、
+//! 写控制台或重入对象表。`enter` 在登记等待后先释放对象表，再让出处理器；每轮恢复后重新解析句柄。
+//! Backend processing is bounded under the object-table lock and never blocks or re-enters that lock.
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -521,20 +523,15 @@ fn progress_backends_in(t: &mut Table, id: ObjId, now_ns: u64) {
 
 /// 断言创建、运行中与释放三本账一致；Ring 排空后还必须核对全部启动后端都已释放。
 fn assert_backend_accounting(r: &RingObj) {
-    if r.backends_created != r.backends_released + r.running.len() as u64 + u64::from(r.backends_in_call) {
-        crate::kprintln!(
-            "[JSR-RING-FAIL] backend accounting created={} released={} running={} in_call={} in_flight={}",
-            r.backends_created,
-            r.backends_released,
-            r.running.len(),
-            r.backends_in_call,
-            r.sm.in_flight()
-        );
-    }
     assert_eq!(
         r.backends_created,
         r.backends_released + r.running.len() as u64 + u64::from(r.backends_in_call),
-        "backend lifecycle accounting diverged"
+        "backend accounting created={} released={} running={} in_call={} in_flight={}",
+        r.backends_created,
+        r.backends_released,
+        r.running.len(),
+        r.backends_in_call,
+        r.sm.in_flight(),
     );
     assert!(r.started_backends_released <= r.backends_started, "started backend release count exceeds starts");
     if r.sm.in_flight() == 0 {
@@ -661,8 +658,6 @@ pub fn close_in(t: &mut Table, id: ObjId) {
     for req in aborted {
         abort_in(t, id, req);
     }
-    let n = ring_mut(t, id).map(|r| r.sm.in_flight()).unwrap_or(0);
-    crate::kprintln!("[JSR-RING] event=system.async.ring.closing ring={:#x} in_flight={}", id.raw(), n);
     settle_in(t, id);
 }
 
@@ -782,11 +777,10 @@ pub fn create_for(pid: ObjId, capacity: u64) -> Result<HandleId, i64> {
             kernel_core::quota::reserve_u32(q.rings, 1, MAX_RINGS_PER_PROCESS)).is_none() {
             return Err(err(SYSTEM_ERROR_QUOTA_EXCEEDED));
         }
-        let (h, id) = proc::grant_new_in(t, pid, obj, ObjectType::Ring, RING_RIGHTS).map_err(perr)?;
+        let (h, _id) = proc::grant_new_in(t, pid, obj, ObjectType::Ring, RING_RIGHTS).map_err(perr)?;
         if let Some(q) = proc::ring_quota_in(t, pid) {
             q.rings += 1;
         }
-        crate::kprintln!("[JSR-RING] event=system.async.ring.created ring={:#x} capacity={}", id.raw(), capacity);
         Ok(h)
     })
 }
