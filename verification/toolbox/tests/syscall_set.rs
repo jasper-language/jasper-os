@@ -3,7 +3,7 @@
 //!
 //! 参考模型不复用生产代码的任何位运算：集合用 `BTreeSet<u32>`，准入规则按 ABI 文档逐条重写。
 use kernel_core::spawn_abi::{check, SpawnDesc, SpawnReject, CPU_UNLIMITED, MAX_IMAGE_BYTES, MIN_CPU_LIMIT, SPAWN_DESC_SIZE};
-use kernel_core::syscall_set::{CallIdError, SyscallSet, MAX_IDS};
+use kernel_core::syscall_set::{CallIdError, SetError, SyscallSet, MAX_IDS};
 use proptest::prelude::*;
 use std::collections::BTreeSet;
 
@@ -127,6 +127,28 @@ proptest! {
             (Err(got), Err(want)) => prop_assert_eq!(got, want),
             (got, want) => prop_assert!(false, "result mismatch: got={:?} want={:?}", got, want),
         }
+    }
+
+    #[test]
+    fn task_set_admission_matches_reference(
+        requested in valid_ids(), caller in valid_ids(), registered in valid_ids()
+    ) {
+        let requested: BTreeSet<u32> = requested.into_iter().collect();
+        let caller: BTreeSet<u32> = caller.into_iter().collect();
+        let registered: BTreeSet<u32> = registered.into_iter().collect();
+        let want = if !requested.is_subset(&registered) {
+            Err(SetError::Unregistered)
+        } else if !requested.is_subset(&caller) {
+            Err(SetError::Escalation)
+        } else {
+            Ok(())
+        };
+        let got = SyscallSet::check_set(
+            SyscallSet::try_of(&requested.iter().copied().collect::<Vec<_>>()).unwrap(),
+            SyscallSet::try_of(&caller.iter().copied().collect::<Vec<_>>()).unwrap(),
+            SyscallSet::try_of(&registered.iter().copied().collect::<Vec<_>>()).unwrap(),
+        );
+        prop_assert_eq!(got, want);
     }
 
     #[test]

@@ -16,6 +16,7 @@
 //!
 //! 最后对象数、清理队列、空闲帧回到基线。
 
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::async_ring::Exec;
@@ -61,6 +62,7 @@ pub fn run() {
     let (live0, _, _) = kobj::stats();
     user_program();
     wait_timer_identity();
+    wait_event_scaling();
     closing_and_buffer();
     transfer_denied();
     quotas();
@@ -86,6 +88,88 @@ pub fn run() {
         CHECKS.load(Ordering::Relaxed),
         failed()
     );
+}
+
+/// 统一期限堆路径：批量 Wait 的装填、到期和取消只访问对应堆节点；
+/// 普通收尾不得再扫描执行中集合。周期数用于同机前后对照，不是硬实时承诺。
+fn wait_event_scaling() {
+    const ROUNDS: usize = 64;
+    const BATCH: usize = 16;
+    let Ok(pid) = proc::create("ring-wait-scale", SyscallSet::of(&[abi::SYSTEM_TIME_WAIT])) else {
+        check(false, "Wait 扩展用例进程创建失败");
+        return;
+    };
+    let Ok(h) = ring::create_for(pid, BATCH as u64) else {
+        check(false, "Wait 扩展用例 Ring 创建失败");
+        return;
+    };
+    let Some(rid) = ring::ring_of(pid, h) else {
+        check(false, "Wait 扩展用例 Ring 句柄解析失败");
+        return;
+    };
+    sched::reset_lock_stats();
+    kobj::reset_lock_stats();
+    let mut rounds = [0u64; ROUNDS];
+    let mut requests = 0u64;
+    for round in &mut rounds {
+        let start = arch::cycles();
+        for _ in 0..BATCH {
+            let submitted = ring::submit_for(pid, h, &Sqe {
+                op: abi::SYSTEM_TIME_WAIT,
+                flags: 0,
+                user_tag: 1,
+                arg0: 0,
+                arg1: 0,
+            });
+            if submitted.is_err() {
+                check(false, "Wait 扩展用例提交失败");
+                break;
+            }
+            requests += 1;
+        }
+        let ready = ring::view(rid).is_some_and(|v| v.ready == BATCH);
+        if !ready {
+            check(false, "Wait 扩展用例未完成");
+            break;
+        }
+        if ring::reap_kernel(rid, BATCH).iter().any(|(_, value)| *value != 0) {
+            check(false, "Wait 扩展用例完成值错误");
+        }
+        *round = arch::cycles().saturating_sub(start);
+    }
+    rounds.sort_unstable();
+    let view = ring::view(rid);
+    let heap_ok = view.is_some_and(|v|
+        v.wait_scan_slots == 0
+            && v.wait_heap_ops >= (ROUNDS * BATCH * 2) as u64
+            && v.ready == 0
+            && v.running_backends == 0
+            && v.wait_timer_live == 0
+            && v.wait_timer_armed == 0
+            && v.wait_timer_budget.0 == 0
+    );
+    check(heap_ok, "Wait 到期仍扫描运行集合或期限堆/身份未排空");
+    let sched_lock = sched::lock_stats();
+    let object_lock = kobj::lock_stats();
+    kprintln!(
+        "[JSR-RING-WAIT-SCALE] rounds={} batch={} requests={} scan_slots={} heap_ops={} cycle_p50={} cycle_p99={} cycle_p999={} cycle_max={} sched_contended={} object_contended={} failed_ok={}",
+        ROUNDS,
+        BATCH,
+        requests,
+        view.map_or(!0, |v| v.wait_scan_slots),
+        view.map_or(0, |v| v.wait_heap_ops),
+        rounds[ROUNDS / 2],
+        rounds[ROUNDS * 99 / 100],
+        rounds[ROUNDS * 999 / 1000],
+        rounds[ROUNDS - 1],
+        sched_lock.contended,
+        object_lock.contended,
+        heap_ok,
+    );
+    let _ = proc::exit_idle(pid, 0);
+    kobj::run_cleanup(usize::MAX);
+    proc::reap(pid);
+    kobj::run_cleanup(usize::MAX);
 }
 
 /// 每条 Ring `Wait` 独立进入身份表；取消只关闭该请求并归还预算。
@@ -121,6 +205,44 @@ fn wait_timer_identity() {
     check(armed && cancelled && returned, "Ring Wait 身份未独立建立或取消后未归还预算");
     kprintln!("[JSR-RING] wait_timer per_request=true armed={} cancelled={} returned={}",
         armed, cancelled, returned);
+    assert_eq!(ring::reap_kernel(rid, 1).len(), 1, "initial cancelled Wait completion");
+
+    // 取消较早的 Wait 会交换运行集合末项；被移动的较晚 Wait 仍须按新下标自然到期。
+    let first = ring::submit_for(pid, h, &Sqe {
+        op: abi::SYSTEM_TIME_WAIT,
+        flags: 0,
+        user_tag: 0x34,
+        arg0: 1,
+        arg1: 0,
+    });
+    let second = ring::submit_for(pid, h, &Sqe {
+        op: abi::SYSTEM_TIME_WAIT,
+        flags: 0,
+        user_tag: 0x35,
+        arg0: 1,
+        arg1: 0,
+    });
+    let first_cancel = first.map(|id| ring::cancel_for(pid, h, id)).unwrap_or(!0);
+    let mut done = Vec::new();
+    for _ in 0..8 {
+        done.extend(ring::reap_kernel(rid, 2 - done.len()));
+        if done.len() == 2 {
+            break;
+        }
+        sched::sleep_ticks(1);
+    }
+    let swapped_ok = first_cancel == 0
+        && second.is_ok()
+        && done.len() == 2
+        && done.iter().any(|(_, value)| *value == 0)
+        && done.iter().any(|(_, value)| *value == err(abi::SYSTEM_ASYNC_ERROR_CANCELLED));
+    check(swapped_ok, "取消较早 Wait 后，被交换的 Wait 未能自然到期");
+    kprintln!(
+        "[JSR-RING] wait_timer swap_cancel={} natural_after_swap={} results={:?}",
+        first_cancel,
+        swapped_ok,
+        done
+    );
     let _ = proc::exit_idle(pid, 0);
     kobj::run_cleanup(usize::MAX);
     proc::reap(pid);

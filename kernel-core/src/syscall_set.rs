@@ -43,6 +43,19 @@ pub enum CallIdError {
     Duplicate(u64),
 }
 
+/// 用新集合替换任务能力集合时的拒绝原因。
+///
+/// 这是一个纯值转换规则：新集合只能从调用者已有授权与登记表中的真实操作选择，
+/// 不接受位图中凭空出现的权限。
+/// Why a task capability-set replacement was rejected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetError {
+    /// 请求包含未登记操作为 1 的位。
+    Unregistered,
+    /// 请求不是调用者当前集合的子集。
+    Escalation,
+}
+
 /// 任务/进程可发起的系统调用集合。
 ///
 /// `Copy` 且大小固定，可放进任务控制块；比较按 4 个字整体进行。
@@ -238,6 +251,20 @@ impl SyscallSet {
     pub fn ids(self) -> impl Iterator<Item = u32> {
         (0..MAX_IDS as u32).filter(move |&id| self.contains(id as u64))
     }
+
+    /// 检查一次任务能力集合替换是否可由调用者执行。
+    ///
+    /// 规则按固定顺序执行：先拒绝未登记位，再拒绝越过调用者当前集合的位。
+    /// 函数无副作用；内核在其他状态改变之前完成检查，再在调度器锁内原子写回。
+    pub const fn check_set(requested: SyscallSet, caller: SyscallSet, registered: SyscallSet) -> Result<(), SetError> {
+        if !requested.is_subset_of(registered) {
+            return Err(SetError::Unregistered);
+        }
+        if !requested.is_subset_of(caller) {
+            return Err(SetError::Escalation);
+        }
+        Ok(())
+    }
 }
 
 impl core::fmt::Debug for SyscallSet {
@@ -313,6 +340,21 @@ mod proofs {
         // 可靠：子集 ⇒ 任意 ID 的授权都被保留。
         if a.is_subset_of(b) && a.contains(id) {
             assert!(b.contains(id));
+        }
+    }
+
+    #[kani::proof]
+    fn task_set_admission_is_exact() {
+        let requested = any_set();
+        let caller = any_set();
+        let registered = any_set();
+        let got = SyscallSet::check_set(requested, caller, registered);
+        if !requested.is_subset_of(registered) {
+            assert_eq!(got, Err(SetError::Unregistered));
+        } else if !requested.is_subset_of(caller) {
+            assert_eq!(got, Err(SetError::Escalation));
+        } else {
+            assert_eq!(got, Ok(()));
         }
     }
 
@@ -416,6 +458,16 @@ mod tests {
         let removed = a.difference(b);
         assert_eq!(removed.union(a.intersection(b)), a);
         assert_eq!(a.union(b).difference(b), a.difference(b));
+    }
+
+    #[test]
+    fn set_admission_checks_registration_before_caller_authority() {
+        let registered = SyscallSet::of(&[1, 43, 64, 127]);
+        let caller = SyscallSet::of(&[1, 43, 64]);
+        assert_eq!(SyscallSet::check_set(SyscallSet::of(&[43, 64]), caller, registered), Ok(()));
+        assert_eq!(SyscallSet::check_set(SyscallSet::of(&[127]), caller, registered), Err(SetError::Escalation));
+        assert_eq!(SyscallSet::check_set(SyscallSet::of(&[127, 200]), caller, registered), Err(SetError::Unregistered));
+        assert_eq!(SyscallSet::check_set(SyscallSet::EMPTY, caller, registered), Ok(()));
     }
 
     #[test]

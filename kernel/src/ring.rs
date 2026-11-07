@@ -42,6 +42,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use kernel_core::async_ring::{AsyncRing, CancelError, Cancelled, Exec, SubmitError, Submission, Terminal};
+use kernel_core::deadline::{Deadline, DeadlineHeap, ABSENT};
 use kernel_core::object::{HandleId, ObjectType, Rights};
 use kernel_core::objtable::ObjId;
 use kernel_core::ring_backend::{self, Kind, Route};
@@ -142,6 +143,13 @@ struct BackendEntry {
     started: bool,
 }
 
+/// TimerTable 槽位到运行集合的固定容量索引。
+#[derive(Clone, Copy)]
+struct WaitRunning {
+    request: u64,
+    position: usize,
+}
+
 /// 一次提交要做的工作（提交时的可信快照；用户内存已在此之前复制或固定）。
 pub(crate) enum Work {
     SubscriptionWait(Box<crate::subscription::WaitTarget>),
@@ -221,6 +229,16 @@ pub struct RingObj {
     /// Per-request nanosecond identities and budget for running Wait backends.
     wait_timers: TimerTable<BLOCKS_PER_RING>,
     wait_budget: OwnerBudget,
+    /// 到期 Wait 的固定容量索引；节点只在装填、撤销和到期时访问。
+    wait_heap: DeadlineHeap,
+    wait_entries: [Deadline; BLOCKS_PER_RING],
+    wait_positions: [usize; BLOCKS_PER_RING],
+    /// TimerTable 槽位 → Ring 请求 ID 与运行表下标，使到期无需遍历运行集合。
+    wait_running: [Option<WaitRunning>; BLOCKS_PER_RING],
+    /// 诊断：已检查的运行集合项数；新实现不得随普通收尾增长。
+    wait_scan_slots: u64,
+    /// 诊断：Wait 期限堆写/弹出次数。
+    wait_heap_ops: u64,
     /// 是否持有「自身的内部引用」（有未销毁的控制块时持有）。
     pinned: bool,
 }
@@ -269,6 +287,10 @@ pub struct RingView {
     pub wait_timer_armed: usize,
     /// Ring 期限身份预算使用量 / 上限。
     pub wait_timer_budget: (u32, u32),
+    /// 诊断：收尾路径检查的执行中集合项数。
+    pub wait_scan_slots: u64,
+    /// 诊断：Wait 期限堆写/删除/弹出次数。
+    pub wait_heap_ops: u64,
     /// 是否已 closing。
     pub closing: bool,
 }
@@ -290,13 +312,44 @@ impl RingObj {
             wait_timer_live: self.wait_timers.live(),
             wait_timer_armed: self.wait_timers.armed(),
             wait_timer_budget: (self.wait_budget.used(), self.wait_budget.limit()),
+            wait_scan_slots: self.wait_scan_slots,
+            wait_heap_ops: self.wait_heap_ops,
             closing: self.sm.is_closing(),
         }
     }
 
     fn take_running(&mut self, id: u64) -> Option<BackendEntry> {
         let i = self.running.iter().position(|entry| entry.request == id)?;
-        Some(self.running.swap_remove(i))
+        self.take_running_at(i)
+    }
+
+    fn take_running_at(&mut self, i: usize) -> Option<BackendEntry> {
+        if i >= self.running.len() {
+            return None;
+        }
+        let removed = self.running.swap_remove(i);
+        if let Some(entry) = self.running.get(i) {
+            if let Backend::Wait { timer } = entry.backend {
+                let waiting = self.wait_running[timer.slot as usize]
+                    .as_mut()
+                    .expect("running Wait has a slot-indexed identity");
+                assert_eq!(waiting.request, entry.request, "Wait running map points at another request");
+                waiting.position = i;
+            }
+        }
+        Some(removed)
+    }
+
+    fn push_running(&mut self, entry: BackendEntry) {
+        let position = self.running.len();
+        if let Backend::Wait { timer } = entry.backend {
+            let waiting = self.wait_running[timer.slot as usize]
+                .as_mut()
+                .expect("running Wait has a slot-indexed identity");
+            assert_eq!(waiting.request, entry.request, "Wait running map points at another request");
+            waiting.position = position;
+        }
+        self.running.push(entry);
     }
 }
 
@@ -352,6 +405,13 @@ fn wait_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action: Back
         }
         BackendAction::Abort | BackendAction::Retire => {
             let r = ring_mut(t, ring).expect("Ring retained while closing a Wait backend");
+            if r.wait_heap
+                .remove(&mut r.wait_entries, &mut r.wait_positions, timer.slot as usize, timer.generation)
+                .is_some()
+            {
+                r.wait_heap_ops = r.wait_heap_ops.saturating_add(1);
+            }
+            r.wait_running[timer.slot as usize] = None;
             r.wait_timers.close(timer, WAIT_TIMER_OWNER, &mut r.wait_budget)
                 .expect("close live Ring Wait identity");
             BackendOutcome::Released
@@ -463,61 +523,36 @@ fn release_entry_in(t: &mut Table, ring: ObjId, entry: BackendEntry) {
 }
 
 /// 推进所有非中断后端并合并唯一中断对象的到达。持缓冲后端先释放资源，再由状态机发布完成。
-fn progress_backends_in(t: &mut Table, id: ObjId, now_ns: u64) {
-    // 中断对象推进可能通过完成回调再次进入 Ring；先复制、去重并放掉 Ring 借用。
-    let interrupts = match ring_mut(t, id) {
-        Some(r) => {
-            let mut ids: Vec<ObjId> = r
-                .running
-                .iter()
-                .filter_map(|entry| match &entry.backend {
-                    Backend::InterruptWait { irq } => Some(*irq),
-                    _ => None,
-                })
-                .collect();
-            ids.sort_unstable_by_key(|id| id.raw());
-            ids.dedup();
-            ids
-        }
-        None => return,
-    };
-    for irq in interrupts {
-        crate::interrupt::sync_in(t, irq);
-    }
-
-    let requests: Vec<u64> = match ring_mut(t, id) {
-        Some(r) => r.running.iter().map(|entry| entry.request).collect(),
-        None => return,
-    };
-    for request in requests {
-        let decision = ring_mut(t, id).and_then(|r| r.sm.decision(request));
-        match decision {
-            None => {
-                // 排队态可在状态机 close 中直接销毁，但后端资源仍存在；这里补齐唯一一次释放。
-                let entry = ring_mut(t, id).and_then(|r| r.take_running(request));
-                if let Some(entry) = entry {
-                    release_entry_in(t, id, entry);
-                }
-            }
-            Some(Some(_)) => {}
-            Some(None) => {
-                let entry = ring_mut(t, id).and_then(|r| r.take_running(request));
-                let Some(entry) = entry else { continue };
-                match run_backend_in(t, id, entry, BackendAction::Progress { now: now_ns }) {
-                    BackendOutcome::Pending(entry) => {
-                        if let Some(r) = ring_mut(t, id) {
-                            r.running.push(entry);
-                        }
-                    }
-                    BackendOutcome::Complete { entry, value } => {
-                        release_entry_in(t, id, entry);
-                        let r = ring_mut(t, id).expect("Ring retained while publishing backend completion");
-                        assert_eq!(r.sm.finish(request, value), Ok(Terminal::Done(value)), "backend completion lost its undecided request");
-                    }
-                    BackendOutcome::Released => panic!("backend progress released without a terminal"),
-                }
-            }
-        }
+fn progress_due_waits_in(t: &mut Table, id: ObjId, now_ns: u64) {
+    loop {
+        let due = {
+            let Some(r) = ring_mut(t, id) else { return };
+            let Some(deadline) = r.wait_heap.pop_due(&mut r.wait_entries, &mut r.wait_positions, now_ns) else {
+                return;
+            };
+            r.wait_heap_ops = r.wait_heap_ops.saturating_add(1);
+            let timer = TimerId { slot: deadline.slot as u32, generation: deadline.generation };
+            let Some(running) = r.wait_timers.expire(timer, now_ns)
+                .expect("one-shot Ring Wait cannot overflow")
+                .map(|_| r.wait_running[deadline.slot].take())
+                .flatten()
+            else {
+                continue;
+            };
+            running
+        };
+        let Some(r) = ring_mut(t, id) else { return };
+        let Some(entry) = r.take_running_at(due.position) else {
+            panic!("Wait running index does not name a live backend");
+        };
+        assert_eq!(entry.request, due.request, "Wait running index names another request");
+        release_entry_in(t, id, entry);
+        let r = ring_mut(t, id).expect("Ring retained while publishing Wait completion");
+        assert_eq!(
+            r.sm.finish(due.request, 0),
+            Ok(Terminal::Done(0)),
+            "Wait completion lost its undecided request"
+        );
     }
 }
 
@@ -544,8 +579,8 @@ fn assert_backend_accounting(r: &RingObj) {
 /// 收尾记账（每次改动状态机之后调用）：推进到期后端 → 归还已销毁控制块占用的在飞配额 →
 /// 维持「有控制块 ⇔ 持有自身内部引用」。最后一个控制块销毁且 Ring 已无外部所有者时，Ring 随之死亡并入清理队列。
 fn settle_in(t: &mut Table, id: ObjId) {
-    // 推进到期等待、交付尝试与设备中断到达；统一分派见 `progress_backends_in`。
-    progress_backends_in(t, id, sched::now_ns());
+    // 其它后端由各自事件直接完成；这里只弹出统一期限堆中的到期 Wait。
+    progress_due_waits_in(t, id, sched::now_ns());
     let Some(r) = ring_mut(t, id) else { return };
     assert_backend_accounting(r);
     let mut reclaimed = 0u32;
@@ -596,10 +631,7 @@ fn enroll_wait_in(t: &mut Table, id: ObjId, caller_deadline: Option<u64>) -> Res
         Some(tick) => Some(sched::tick_deadline_ns(tick).ok_or(EnrollWaitError::Refused)?),
         None => None,
     };
-    let deadline = r.running.iter().filter_map(|entry| match &entry.backend {
-        Backend::Wait { timer } => r.wait_timers.armed_request(*timer).map(|request| request.at),
-        _ => None,
-    }).chain(caller_deadline).min();
+    let deadline = r.wait_heap.next_at(&r.wait_entries).into_iter().chain(caller_deadline).min();
     let donation_endpoint = r.running.iter().find_map(|entry| match &entry.backend {
         Backend::Recv(target) => Some(ipc::recv_endpoint(target)),
         _ => None,
@@ -636,8 +668,13 @@ fn abort_in(t: &mut Table, ring: ObjId, req: u64) {
     let started = entry.started;
     match run_backend_in(t, ring, entry, BackendAction::Abort) {
         BackendOutcome::Pending(entry) => {
-            if let Some(r) = ring_mut(t, ring) {
-                r.running.push(entry);
+            let undecided = ring_mut(t, ring).is_some_and(|r| r.sm.decision(req).is_none());
+            if undecided {
+                // close() removes queued control blocks without starting their
+                // backend; the abort callback is their final release point.
+                release_entry_in(t, ring, entry);
+            } else if let Some(r) = ring_mut(t, ring) {
+                r.push_running(entry);
             }
         }
         BackendOutcome::Released => {
@@ -655,8 +692,14 @@ pub fn close_in(t: &mut Table, id: ObjId) {
     let Some(r) = ring_mut(t, id) else { return };
     let mut aborted: Vec<u64> = Vec::new();
     r.sm.close(|_, req| aborted.push(req));
+    let unstarted: Vec<u64> = r.running.iter().filter(|entry| !entry.started).map(|entry| entry.request).collect();
     for req in aborted {
         abort_in(t, id, req);
+    }
+    for req in unstarted {
+        if let Some(entry) = ring_mut(t, id).and_then(|r| r.take_running(req)) {
+            release_entry_in(t, id, entry);
+        }
     }
     settle_in(t, id);
 }
@@ -680,7 +723,7 @@ pub(crate) fn deliver_waiter_in(t: &mut Table, ring: ObjId, req: u64) -> bool {
     match run_backend_in(t, ring, entry, BackendAction::Progress { now: sched::now_ns() }) {
         BackendOutcome::Pending(entry) => {
             if let Some(r) = ring_mut(t, ring) {
-                r.running.push(entry);
+                r.push_running(entry);
             }
             false
         }
@@ -769,6 +812,12 @@ pub fn create_for(pid: ObjId, capacity: u64) -> Result<HandleId, i64> {
         event_waiters: Vec::new(),
         wait_timers: TimerTable::new(),
         wait_budget: OwnerBudget::new(BLOCKS_PER_RING as u32),
+        wait_heap: DeadlineHeap::new(),
+        wait_entries: [Deadline::EMPTY; BLOCKS_PER_RING],
+        wait_positions: [ABSENT; BLOCKS_PER_RING],
+        wait_running: [None; BLOCKS_PER_RING],
+        wait_scan_slots: 0,
+        wait_heap_ops: 0,
         pinned: false,
     }));
     kobj::with(|t| {
@@ -827,7 +876,7 @@ fn park_backend_in(t: &mut Table, ring: ObjId, request: u64, backend: Backend, s
     let r = ring_mut(t, ring).expect("Ring retained while parking its backend");
     assert!(r.backends_in_call > 0, "parked backend has no accepted submit owner");
     r.backends_in_call -= 1;
-    r.running.push(BackendEntry { request, backend, started });
+    r.push_running(BackendEntry { request, backend, started });
 }
 
 /// 释放一笔已接受但未进入执行中集合的瞬时后端，并记启动后的释放账。
@@ -898,6 +947,16 @@ fn launch_wait_in(t: &mut Table, ring: ObjId, request: u64, wait: (u64, TimerId)
         urgency: Urgency::Precise,
         period_ns: 0,
     }).expect("arm newly created Ring Wait identity");
+    r.wait_running[timer.slot as usize] = Some(WaitRunning {
+        request,
+        position: r.running.len(),
+    });
+    r.wait_heap.set(
+        &mut r.wait_entries,
+        &mut r.wait_positions,
+        Deadline { at: deadline, slot: timer.slot as usize, generation: timer.generation },
+    ).expect("Wait timer identity has one reserved heap slot");
+    r.wait_heap_ops = r.wait_heap_ops.saturating_add(1);
     start_request_in(t, ring, request, exec);
     park_backend_in(t, ring, request, Backend::Wait { timer }, true);
 }
@@ -1196,7 +1255,7 @@ pub fn cancel_for(pid: ObjId, h: HandleId, req: u64) -> i64 {
             Err(e) => return perr(e),
         };
         // 先推进到期与已可交付的后端：已自然结束的请求应得到 already_completed。
-        progress_backends_in(t, ring, sched::now_ns());
+        settle_in(t, ring);
         let Some(r) = ring_mut(t, ring) else { return err(SYSTEM_HANDLE_ERROR_INVALID) };
         let ret = match r.sm.cancel(req) {
             Ok(Cancelled::NotStarted) => 0,
@@ -1495,7 +1554,7 @@ pub(crate) fn poll_subscription_in(t:&mut Table,ring:ObjId,req:u64) {
     match run_backend_in(t, ring, entry, BackendAction::Progress { now: sched::now_ns() }) {
         BackendOutcome::Pending(entry) => {
             if let Some(r) = ring_mut(t, ring) {
-                r.running.push(entry);
+                r.push_running(entry);
             }
         }
         BackendOutcome::Complete { entry, value } => {

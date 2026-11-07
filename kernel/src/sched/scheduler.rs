@@ -685,6 +685,18 @@ pub enum QosError {
     NotAWorker,
 }
 
+/// 替换任务系统调用集合失败的原因。失败时调用者与目标任务均保持不变。
+/// Why replacing a task's capability set was refused; both tasks remain unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetCallsError {
+    /// 新集合含有未登记位。
+    Unregistered,
+    /// 新集合不是调用者当前集合的子集。
+    Escalation,
+    /// 调用者或目标任务不存在、已退出，或不是用户任务。
+    NoTask,
+}
+
 /// 建立等待关系（等锁、等任务退出）失败的原因。失败时调度器状态不变。
 /// Why blocking on an owner was refused; the scheduler is left unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1578,6 +1590,29 @@ impl Scheduler {
     /// 当前任务可发起的系统调用集合。
     pub fn current_syscalls(&self) -> crate::syscall::SyscallSet {
         self.task(self.cur()).map(|t| t.syscalls).unwrap_or(crate::syscall::SyscallSet::EMPTY)
+    }
+
+    /// 在同一个调度器事务内检查授权并替换目标任务的能力集合。
+    ///
+    /// 新集合必须同时是调用者当前集合与登记集合的子集。检查全部完成后才写入，
+    /// 因此任何拒绝都不会改变调用者、目标或调度器状态。
+    pub fn set_task_syscalls(
+        &mut self,
+        caller: TaskId,
+        target: TaskId,
+        requested: crate::syscall::SyscallSet,
+        registered: crate::syscall::SyscallSet,
+    ) -> Result<(), SetCallsError> {
+        let caller_slot = self.live_slot(caller).filter(|&i| is_worker(i)).ok_or(SetCallsError::NoTask)?;
+        let target_slot = self.live_slot(target).filter(|&i| is_worker(i)).ok_or(SetCallsError::NoTask)?;
+        let caller_calls = self.task(caller_slot).ok_or(SetCallsError::NoTask)?.syscalls;
+        match crate::syscall::SyscallSet::check_set(requested, caller_calls, registered) {
+            Ok(()) => {}
+            Err(kernel_core::syscall_set::SetError::Unregistered) => return Err(SetCallsError::Unregistered),
+            Err(kernel_core::syscall_set::SetError::Escalation) => return Err(SetCallsError::Escalation),
+        }
+        self.task_mut(target_slot).ok_or(SetCallsError::NoTask)?.syscalls = requested;
+        Ok(())
     }
 
     /// 当前任务的自身 QoS 档位（不含借来的档位；引导线程为 `None`）。

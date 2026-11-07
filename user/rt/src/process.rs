@@ -51,6 +51,9 @@ pub struct CallSet {
 }
 
 impl CallSet {
+    /// 规范能力集合的线上字节数。
+    pub const BYTES: usize = kernel_core::syscall_set::BYTES;
+
     /// 空能力集合；spawn 仍允许创建不持有任何系统调用的子进程。
     /// Empty capability set.
     pub const EMPTY: CallSet = CallSet { set: SyscallSet::EMPTY };
@@ -78,6 +81,14 @@ impl CallSet {
     /// Number of operations in the set.
     pub const fn len(self) -> usize {
         self.set.count()
+    }
+
+    /// 把小端规范位图写入调用方提供的 32 字节缓冲区。
+    ///
+    /// 这只是既有 [`SyscallSet`] 的线上编码，不提供第二套集合表示；缓冲区应由
+    /// [`crate::process::spawn`] 或 [`crate::task::set_calls`] 在调用期间保持有效。
+    pub fn encode(self, out: &mut [u8; Self::BYTES]) {
+        self.set.encode(out);
     }
 }
 

@@ -93,7 +93,7 @@
 40	op	system.task.interrupt.send	1	write	任务·投递异步中断（预留）	Send task interrupt reserved
 41	op	system.memory.dma.map	1	write	内存·建立 IOVA 映射（预留）	Map memory through IOVA reserved
 42	op	system.io.segment.submit	1	write	输入输出·提交分段请求（预留）	Submit segmented IO reserved
-43	op	system.task.syscalls.set	2	write	任务·设置扩展调用权限（预留）	Set extended syscall permissions reserved
+43	op	system.task.syscalls.set	3	write	任务·设置系统调用能力集合	Set task syscall capability set
 
 44	op	system.event.subscription.wait	1	write	事件·批量等待订阅	Wait for subscription batch
 4133	error	system.event.error.closed	1	read	事件·订阅已关闭	Subscription closed
