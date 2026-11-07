@@ -22,7 +22,7 @@ for c in $CASES; do
   cpus=${c%:*}; n=${c#*:}
   cp "$IMG" "$WORK/k$cpus-$n.img"
   python3 scripts/boot-trace.py --img "$WORK/k$cpus-$n.img" --out "$OUT/p$cpus-s$n" --timeout "$LIMIT" --nice 10 --io-class 2 \
-    --smp "$cpus" --icount "$n" --stop-at-lines "$LINES" --stall-secs 60 > "$OUT/p$cpus-s$n.result" 2>&1 &
+    --accel tcg --smp "$cpus" --icount "$n" --stop-at-lines "$LINES" --stall-secs 60 > "$OUT/p$cpus-s$n.result" 2>&1 &
 done
 wait
 rc=0

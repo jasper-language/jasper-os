@@ -16,6 +16,11 @@ RT2="${RT2:-1}"
 LIMIT="${LIMIT:-900}"
 OUT="${OUT:-evidence/ns-dirty}"
 TARGET=target/ns-dirty-audit
+QEMU_ACCEL="${JASPER_ACCEL:-kvm}"
+case "$QEMU_ACCEL" in
+  kvm|tcg) ;;
+  *) echo "unsupported JASPER_ACCEL=$QEMU_ACCEL" >&2; exit 2 ;;
+esac
 QEMU_LOCK=(flock /tmp/jasper-os-qemu.lock)
 if [ "${JASPER_QEMU_LOCK_HELD:-0}" = 1 ]; then
   # 调用方已持全局锁：改用子锁仍让三个客户机串行，同时避免重复加同一把锁。
@@ -54,7 +59,9 @@ if [ "$RT2" != 0 ]; then
      || ! target/release/xtask "$T2/x86_64-unknown-none/release/jasper-kernel" "$OUT/rt2.img" >> "$OUT/image.log" 2>&1; then
     echo "cpus=4+rt2 FAIL 专项内核构建失败"; exit 1
   fi
-  python3 scripts/boot-trace.py --img "$OUT/rt2.img" --out "$OUT/rt2" --timeout "$LIMIT" --nice 10 --io-class 2 --smp 4 --icount 5 > "$OUT/rt2.result" 2>&1
+  rt2_extra=()
+  [ "$QEMU_ACCEL" = tcg ] && rt2_extra=(--icount 5)
+  python3 scripts/boot-trace.py --img "$OUT/rt2.img" --out "$OUT/rt2" --timeout "$LIMIT" --nice 10 --io-class 2 --accel "$QEMU_ACCEL" --smp 4 "${rt2_extra[@]}" > "$OUT/rt2.result" 2>&1
   s="$OUT/rt2.serial"
   line=$(grep -am1 -E '^\[JSR-NS-SYNC\]' "$s" || true)
   if grep -aq 'rc=33 ' "$OUT/rt2.result" && ! grep -aqE 'panicked at|KERNEL PANIC|^\[JSR-PANIC\]' "$s" \

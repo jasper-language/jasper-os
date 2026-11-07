@@ -608,7 +608,13 @@ check_production() {   # issue #7 第二片：生产启动持续运行、不退�
 
 check_timer_progress() {   # 定时器中断活锁回归：-icount 下时钟相对指令很密时，启动仍能前进（单处理器修复前 shift=8、10 卡死，4 处理器修复前 shift=9 卡死）
   local detail
-  if ! has '^\[JSR-TIMER-PROGRESS\] full=[1-9]'; then
+  if [ "$ACCEL" != tcg ]; then
+    if has '^\[JSR-TIMER-PROGRESS\] full=[1-9]'; then
+      record_na TIMER-PROGRESS "标准 KVM 主启动已确认前进保证启用；shift 5–10 的确定性 -icount 活锁矩阵是 TCG 专属门，不在 KVM 计时环境运行"
+    else
+      record TIMER-PROGRESS FAIL "KVM 主启动串口缺少前进保证计数"
+    fi
+  elif ! has '^\[JSR-TIMER-PROGRESS\] full=[1-9]'; then
     record TIMER-PROGRESS FAIL "串口缺少前进保证计数"
   elif detail=$(OUT="$OUT/timer-progress" bash "$ROOT/scripts/timer-progress-check.sh" "$IMG" 2>&1); then
     record TIMER-PROGRESS PASS "$(echo "$detail" | wc -l) 个 icount 组合都在时限内走到第 1200 行；$(grep -m1 -oE '^\[JSR-TIMER-PROGRESS\].*' "$SERIAL")"
