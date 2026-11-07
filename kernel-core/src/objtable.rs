@@ -163,6 +163,26 @@ impl<T: 'static> ObjectTable<T> {
         self.slots.len()
     }
 
+    /// 启动期回滚：仅当表仍完全为空时交还两块启动期存储。
+    ///
+    /// 该入口只用于把尚未投入使用的启动期存储恢复到安装前状态；有对象、清理项或已退役
+    /// 槽位时拒绝，调用者不得把它当作运行期卸载对象的路径。
+    /// Boot rollback: hand back storage only while the table is still completely unused.
+    pub fn take_storage_if_vacant(&mut self) -> Option<(&'static mut [Slot<T>], &'static mut [u32])> {
+        if self.live != 0
+            || self.len != 0
+            || self.retired_slots() != 0
+            || !self.slots.iter().all(Slot::is_vacant)
+        {
+            return None;
+        }
+        let slots = core::mem::replace(&mut self.slots, &mut []);
+        let pending = core::mem::replace(&mut self.pending, &mut []);
+        self.head = 0;
+        self.destroyed = 0;
+        Some((slots, pending))
+    }
+
     /// 因世代用尽而永久退役的槽位数（长期运行审计用：它增长意味着可用容量在下降）。
     /// Slots permanently retired because their generation was exhausted.
     pub fn retired_slots(&self) -> usize {
@@ -543,6 +563,24 @@ mod tests {
         assert_eq!(t.capacity(), 0);
         assert_eq!(t.insert(1, 1, 0), Err(ObjError::Full), "未安装存储 ⇒ 安全失败而不是越界");
         assert_eq!(t.take_dead(), None);
+    }
+
+    #[test]
+    fn vacant_boot_storage_can_be_returned_without_touching_live_objects() {
+        let mut t: ObjectTable<u8> = ObjectTable::for_test(3);
+        let (slots, pending) = t.take_storage_if_vacant().unwrap();
+        assert_eq!(t.capacity(), 0);
+        // SAFETY: `for_test` created both allocations with Box, and the table
+        // relinquished them in the preceding call.
+        unsafe {
+            drop(Box::from_raw(slots as *mut [Slot<u8>]));
+            drop(Box::from_raw(pending as *mut [u32]));
+        }
+
+        let mut t: ObjectTable<u8> = ObjectTable::for_test(3);
+        t.insert(7, 1, 0).unwrap();
+        assert!(t.take_storage_if_vacant().is_none());
+        assert_eq!(t.capacity(), 3);
     }
 
     #[test]

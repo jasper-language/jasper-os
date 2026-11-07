@@ -261,9 +261,46 @@ pub const BYTES_PER_OBJECT: usize = core::mem::size_of::<Slot<KObject>>() + core
 /// 分配失败返回 `Err(None)`；表拒绝安装返回 `Err(Some(原因))`。两种情况下表都保持为空，调用者拒绝启动。
 /// Install the object-table storage at boot (once).
 pub fn install(capacity: usize) -> Result<usize, Option<InstallError>> {
-    let slots = crate::bootcap::try_leak(capacity, || Slot::VACANT).ok_or(None)?;
-    let pending = crate::bootcap::try_leak(capacity, || 0u32).ok_or(None)?;
-    with(|t| t.install(slots, pending)).map_err(Some)
+    let slots = crate::bootcap::try_boxed(capacity, || Slot::VACANT).ok_or(None)?;
+    let pending = crate::bootcap::try_boxed(capacity, || 0u32).ok_or(None)?;
+    let slots = Box::into_raw(slots);
+    let pending = Box::into_raw(pending);
+    // SAFETY: The boxed storage is not aliased, and the table either adopts both
+    // allocations on success or this function reconstructs both boxes below.
+    let installed = with(|t| unsafe { t.install(&mut *slots, &mut *pending) });
+    match installed {
+        Ok(n) => Ok(n),
+        Err(e) => {
+            // SAFETY: both slices were released from their boxes immediately above
+            // and have not been adopted by a successful installation.
+            unsafe {
+                drop(Box::from_raw(slots as *mut [Slot<KObject>]));
+                drop(Box::from_raw(pending as *mut [u32]));
+            }
+            Err(Some(e))
+        }
+    }
+}
+
+/// 启动期回滚对象表：只接受仍完全为空的对象表，释放其存储并把容量恢复到 0。
+///
+/// 运行期对象释放继续只走既有所有权/closing 协议；本入口不处理活对象。
+/// Roll back an unused boot-time object table and return its storage to the heap.
+pub fn rollback_boot() -> Result<(), &'static str> {
+    if capacity() == 0 {
+        return Ok(());
+    }
+    let storage = with(|t| t.take_storage_if_vacant());
+    let Some((slots, pending)) = storage else {
+        return Err("object table not vacant");
+    };
+    // SAFETY: Vacant storage was allocated by `install` using Box and has never
+    // contained a live object. The table no longer aliases either allocation.
+    unsafe {
+        drop(Box::from_raw(slots as *mut [Slot<KObject>]));
+        drop(Box::from_raw(pending as *mut [u32]));
+    }
+    Ok(())
 }
 
 /// 可执行检查：遍历生产 closing / 销毁表，返回 `(锁外销毁种类数, 无销毁动作种类数)`。

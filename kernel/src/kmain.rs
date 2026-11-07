@@ -10,7 +10,7 @@
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
 use crate::plan;
-use kernel_core::boot_stage::{plan_check, PlanItem, PlanSummary, Stage, Tracker};
+use kernel_core::boot_stage::{plan_check, PlanItem, PlanSummary, Stage, StageError, StageState, Tracker};
 use crate::{assembly, bootcap, clock, config, irq, kprint, kprintln, mm, pci, profile, sched, smp};
 
 /// 内核版本（横幅中输出）。
@@ -53,12 +53,33 @@ impl BootCtx {
     pub fn done_mask(&self) -> u32 {
         self.tracker.done_mask()
     }
+
+    /// 对已完成阶段发起一次重复初始化探针；只有得到 `duplicate` 且状态不变才算通过。
+    /// Probe duplicate initialisation of a completed stage; pass only on an unchanged `duplicate` refusal.
+    pub(crate) fn probe_duplicate(&mut self, stage: Stage) -> bool {
+        let done = self.tracker.done_mask();
+        let refused = self.tracker.begin(stage) == Err(StageError::Duplicate(stage));
+        refused && self.tracker.done_mask() == done && self.tracker.state(stage) == StageState::Done
+    }
 }
 
 /// 阶段失败或被拒之后停止启动：验收构建退出模拟器，生产构建停机。
 /// Stop after a failed or refused stage: acceptance exits the emulator, production halts.
 pub fn stop_boot(status: ExitStatus) -> ! {
     plan::stop(status)
+}
+
+fn assembly_rollback(_: &mut BootCtx) -> bool {
+    assembly::rollback_boot()
+}
+
+/// 可回滚启动阶段的逆动作登记。`None` 表示该阶段只做保存状态或无持久资源。
+/// Reverse actions registered for rollback-capable boot stages. `None` means no persistent resource.
+const fn stage_rollback(stage: Stage) -> Option<fn(&mut BootCtx) -> bool> {
+    match stage {
+        Stage::Assembly => Some(assembly_rollback),
+        _ => None,
+    }
 }
 
 /// 在阶段跟踪器下执行一个全局启动阶段（issue #7）。`body` 执行该阶段的真实初始化，返回 `None` 表示失败。
@@ -88,6 +109,28 @@ fn stage(ctx: &mut BootCtx, s: Stage, body: impl FnOnce(&mut BootCtx) -> Option<
         first = false;
     }
     kprintln!();
+    if let Some(rollback) = stage_rollback(s) {
+        let resources_baseline = rollback(ctx);
+        kprintln!(
+            "[JSR-BOOT-STAGE] rollback stage={} action={} resources_baseline={}",
+            s.name(),
+            s.name(),
+            resources_baseline
+        );
+    }
+    if let Some(blocked_stage) = Stage::ALL.iter().find(|candidate| blocked & candidate.bit() != 0) {
+        let refusal = ctx.tracker.begin(*blocked_stage);
+        let (begin, started) = match refusal {
+            Err(e) => (e.as_str(), 0),
+            Ok(()) => ("accepted", 1),
+        };
+        kprintln!(
+            "[JSR-BOOT-STAGE] blocked stage={} begin={} started={}",
+            blocked_stage.name(),
+            begin,
+            started
+        );
+    }
     kprintln!("[JSR-EXIT] failure boot_stage={}", s.name());
     stop_boot(ExitStatus::Failure)
 }

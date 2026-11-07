@@ -45,6 +45,9 @@ evt1-verify = ["kernel-core/evt1-capacity"]
 ns-dirty-audit = []
 # Explicitly armed KRN-1 fault sites; default builds contain no hooks.
 fault-inject = []
+# Dedicated boot-stage negative guest: inject an assembly activation failure,
+# exercise boot rollback, and verify blocked/duplicate transitions in the real kernel.
+boot-stage-rollback-verify = ["fault-inject"]
 # S-2 fixed-seed eight-process syscall campaign (opt-in).
 s2-fuzz = ["user-programs"]
 # Dedicated S-2 guest: initialize the platform and scheduler, then run the
