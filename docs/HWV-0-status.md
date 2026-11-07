@@ -53,3 +53,11 @@ IOMMU/VT-d/AMD-Vi/中断重映射的固件表发现尚未接入，因此在矩�
 * x86_64 真实 KVM 启动输出 `[JSR-HWV0]`，拒绝请求必须得到 `iommu`/`dependency`/`rejected`，有完整能力时必须得到 `accepted`；
 * `scripts/accept.sh` 的 `HWV-0` 行要求矩阵 10 项、真实探测完成、功能失败为 0；
 * AArch64 只验证不破坏编译，不把它记作 HWV-0 通过。
+
+宿主 KVM 定点 `accept-20261107-195858` 结果：HWV-0 PASS。
+
+```text
+[JSR-HWV0] vendor=Intel matrix=10 caps=0x105 selected=vmx reject=iommu failed=0
+```
+
+即真实 CPU 上发现 VMX、EPT、x2APIC，选择 VMX；未发现 IOMMU 证据，依赖 IOMMU 的请求被明确拒绝。该进程只读取 CPUID 与 `IA32_VMX_EPT_VPID_CAP`，未执行 VMXON、VMCS、EPT 映射或任何 vCPU 操作。QEMU 退出 37 只是既有计时类参考，HWV-0 功能失败为 0。
