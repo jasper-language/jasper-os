@@ -76,6 +76,8 @@ pub const SUMMARIES: &[Summary] = &[
     row("abi", abi_demo::failed),
     row("fix", fix_demo::failed),
     row("profile", profile_demo::failed),
+    #[cfg(target_arch = "x86_64")]
+    row("hwv0", crate::hwvirt_demo::failed),
     row("job", job_demo::failed),
     row("rtclass", rtclass_demo::failed),
     both("arbiter", arbiter_demo::failed, arbiter_demo::timing_failed),
@@ -227,6 +229,14 @@ fn capacity_report(ctx: &mut BootCtx) {
 
 fn profile_checks(_: &mut BootCtx) {
     profile_demo::run();
+}
+
+#[cfg(target_arch = "x86_64")]
+fn hardware_virt(_: &mut BootCtx) {
+    crate::hwvirt_demo::run();
+    if crate::hwvirt_demo::failed() != 0 {
+        kprintln!("[JSR-HWV0-FAIL] failed={}", crate::hwvirt_demo::failed());
+    }
 }
 
 /// POL-3：批处理作业（依赖 / 优先级 / 取消 / 终态 / 满载下交互性）。
@@ -560,6 +570,8 @@ const PREFIX: &[Step] = &[
     case("capacity-report", Stage::Assembly, "", capacity_report),
     case("profile-checks", Stage::Assembly, "profile", profile_checks),
     st(Stage::SchedMode),
+    #[cfg(target_arch = "x86_64")]
+    case("hardware-virt", Stage::Assembly, "hwv0", hardware_virt),
 ];
 
 /// 地址空间与其他处理器上线，专项计划在这之后运行各自的用例。

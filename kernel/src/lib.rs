@@ -116,6 +116,8 @@ pub mod sync;
 pub mod syscall;
 pub mod task;
 pub mod user_demo;
+#[cfg(target_arch = "x86_64")]
+pub mod hwvirt_demo;
 #[cfg(feature = "rt3-verify")]
 pub mod rt3_demo;
 pub mod virtio;
