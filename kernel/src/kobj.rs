@@ -66,6 +66,8 @@ pub enum KObject {
     /// User-visible priority-inheriting mutex. Boxed so its scheduler wait key
     /// remains stable even if the object-table slot storage moves.
     Mutex(Box<crate::user_mutex::MutexObj>),
+    /// User-visible absolute/relative timer with one waiter at a time.
+    Timer(Box<crate::user_timer::TimerObj>),
     /// 线程。
     Task(TaskObj),
     /// 事件（叶子对象：不持有句柄、不强引用其他对象）。
@@ -95,6 +97,7 @@ impl KObject {
             KObject::Process(_) => Kind::Process,
             KObject::Memory(_) => Kind::Memory,
             KObject::Mutex(_) => Kind::Mutex,
+            KObject::Timer(_) => Kind::Timer,
             KObject::EventSource(_) => Kind::EventSource,
             KObject::Subscription(_) => Kind::Subscription,
             KObject::Task(_) => Kind::Task,
@@ -160,6 +163,10 @@ const fn close_hook(kind: Kind) -> Option<CloseHookEntry> {
             crate::user_mutex::close_in,
             ClosingLocks::ObjectTableThenScheduler,
         )),
+        Kind::Timer => Some(close_entry(
+            crate::user_timer::close_in,
+            ClosingLocks::ObjectTableThenScheduler,
+        )),
         Kind::Task | Kind::ExitState | Kind::Memory | Kind::Event | Kind::Device => None,
     }
 }
@@ -209,6 +216,7 @@ const fn destroy_hook(kind: Kind) -> Option<DestroyHook> {
         | Kind::Subscription
         | Kind::EventSource
         | Kind::Mutex
+        | Kind::Timer
         | Kind::Memory
         | Kind::Event
         | Kind::Device => None,

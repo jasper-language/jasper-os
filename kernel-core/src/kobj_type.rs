@@ -50,6 +50,8 @@ pub enum Kind {
     EventSource,
     /// 用户互斥量。
     Mutex,
+    /// 用户可见定时器，绑定创建者进程。
+    Timer,
     /// 共享内存页存储。
     Memory,
     /// 事件。
@@ -60,7 +62,7 @@ pub enum Kind {
 
 impl Kind {
     /// 种类数。
-    pub const COUNT: usize = 12;
+    pub const COUNT: usize = 13;
     /// 全部种类（按声明顺序）。
     pub const ALL: [Kind; Kind::COUNT] = [
         Kind::Process,
@@ -72,6 +74,7 @@ impl Kind {
         Kind::ExitState,
         Kind::EventSource,
         Kind::Mutex,
+        Kind::Timer,
         Kind::Memory,
         Kind::Event,
         Kind::Device,
@@ -336,6 +339,20 @@ pub const REGISTRY: [Contract; Kind::COUNT] = [
         carries: Carry::Nothing,
     },
     Contract {
+        kind: Kind::Timer,
+        name: "Timer",
+        handle: Some(ObjectType::Timer),
+        rights: Rights::READ.union(Rights::WRITE).union(Rights::WAIT).union(Rights::CONTROL).union(Rights::DUPLICATE),
+        transferable: false,
+        closing: Closing::InLock, // 取消等待并唤醒等待者
+        closing_locks: ClosingLocks::ObjectTableThenScheduler,
+        destroy: Destroy::None,
+        destroy_locks: DestroyLocks::None,
+        strong: &[],
+        tree_self: false,
+        carries: Carry::Nothing,
+    },
+    Contract {
         kind: Kind::Memory,
         name: "Memory",
         handle: Some(ObjectType::Memory),
@@ -567,7 +584,7 @@ mod tests {
                 assert_eq!(kind_for_handle(ty), Some(k));
             }
         }
-        assert_eq!(kind_for_handle(ObjectType::Timer), None);
+        assert_eq!(kind_for_handle(ObjectType::Timer), Some(Kind::Timer));
         assert_eq!(kind_for_handle(ObjectType::AddressSpace), None);
     }
 

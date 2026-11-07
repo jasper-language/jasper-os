@@ -986,7 +986,7 @@ check_j1() {    # 用户态运行时：匿名内存系统调用（全有或全�
      && has 'task=rt-panic bytes=[0-9]+ text=panic: panicked at ' \
      && has 'case=rt-panic exit=Some\(101\) expect=101 reclaimed=true' \
      && has 'case=rt-overflow exit=Some\(-1\) expect=-1 reclaimed=true' \
-     && has '^\[JSR-RT\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 pending=0 pinned=\(0, 0\) reclaimed=true checks=[0-9]+ failed=0' \
+     && has '^\[JSR-RT\] summary free_frames=([0-9]+)/\1 objects=([0-9]+)/\2 pending=0 pinned=\(0, 0\) reclaimed=true timers=0 coalesced=[1-9][0-9]* early=[1-9][0-9]* checks=[0-9]+ failed=0' \
      && ! has 'JSR-RT-FAIL'; then
     record J-1 PASS "匿名内存 map/unmap 全有或全无、配额与权限；运行时程序（堆增长与回收、线程、Channel 字节+句柄往返、ring 取消与等待）以 0 退出；panic=101、栈溢出只终止该进程；回到基线"
   else

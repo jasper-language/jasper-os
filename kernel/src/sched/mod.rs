@@ -1051,8 +1051,8 @@ pub fn enroll_event_wait(
     with_mut(|s| s.enroll_event_wait(deadline, donation))
 }
 /// 事件通知携带完整凭据；不匹配时不产生TaskId-only后备唤醒。
-pub fn wake_event_wait(key: kernel_core::event_wait::Key) {
-    with_mut(|s| { s.wake_event_wait(key); });
+pub fn wake_event_wait(key: kernel_core::event_wait::Key) -> bool {
+    with_mut(|s| s.wake_event_wait(key))
 }
 
 /// 当前任务的 id 与名字。

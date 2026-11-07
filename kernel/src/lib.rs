@@ -147,6 +147,7 @@ pub mod rt1_demo;
 
 pub mod task_control;
 pub mod user_mutex;
+pub mod user_timer;
 
 #[cfg(feature="rt2-verify")]
 pub mod rt2_demo;

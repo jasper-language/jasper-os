@@ -96,6 +96,12 @@ pub(crate) fn rt_calls() -> SyscallSet {
         abi::SYSTEM_TASK_WAIT,
         abi::SYSTEM_TIME_NOW,
         abi::SYSTEM_TIME_WAIT,
+        abi::SYSTEM_TIME_DEADLINE_GET,
+        abi::SYSTEM_TIME_TIMER_CREATE,
+        abi::SYSTEM_TIME_TIMER_ARM,
+        abi::SYSTEM_TIME_TIMER_CANCEL,
+        abi::SYSTEM_TIME_TIMER_WAIT,
+        abi::SYSTEM_TIME_TIMER_GET,
         abi::SYSTEM_PROCESS_EXIT,
         abi::SYSTEM_HANDLE_CLOSE,
         abi::SYSTEM_HANDLE_DUPLICATE,
@@ -122,6 +128,8 @@ fn reap(pid: ObjId) -> Option<i64> {
 pub fn run() {
     let prev_preemption = sched::set_preemption(true);
     let start = baseline();
+    let live_timers = crate::user_timer::live();
+    let coalesce_start = crate::user_timer::coalesce_stats();
     memory_kernel_side();
     program("rt-main", USER_RTDEMO, 0, 0);
     program("rt-panic", USER_RTDEMO, 1, 101);
@@ -140,9 +148,18 @@ pub fn run() {
     ])));
     let end = baseline();
     check(end == start, "演练结束后资源未回到起点");
+    check(
+        crate::user_timer::live() == live_timers,
+        "定时器对象回到基线",
+    );
+    let coalesce = crate::user_timer::coalesce_stats();
+    check(
+        coalesce.0 > coalesce_start.0 && coalesce.1 > coalesce_start.1,
+        "宽容差定时器由真实共享定时器中断合并唤醒",
+    );
     sched::set_preemption(prev_preemption);
     kprintln!(
-        "[JSR-RT] summary free_frames={}/{} objects={}/{} pending={} pinned={:?} reclaimed={} checks={} failed={} timing_failed={}",
+        "[JSR-RT] summary free_frames={}/{} objects={}/{} pending={} pinned={:?} reclaimed={} timers={} coalesced={} early={} checks={} failed={} timing_failed={}",
         end.free_frames,
         start.free_frames,
         end.objects,
@@ -150,6 +167,9 @@ pub fn run() {
         end.pending,
         end.pins,
         end == start,
+        crate::user_timer::live(),
+        coalesce.0,
+        coalesce.1,
         CHECKS.load(Ordering::Relaxed),
         failed(),
         timing_failed()

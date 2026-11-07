@@ -1207,6 +1207,31 @@ pub const OPERATIONS: &[OperationContract] = &[
         args: "mutex_handle",
         result: "0_or_busy",
     },
+    OperationContract {
+        name: "system.time.timer.create",
+        args: "u64:period_ns,u64:slack_ns,u64:flags",
+        result: "handle_or_error",
+    },
+    OperationContract {
+        name: "system.time.timer.arm",
+        args: "timer_handle,u64:when_ns,u64:flags",
+        result: "0_or_error",
+    },
+    OperationContract {
+        name: "system.time.timer.cancel",
+        args: "timer_handle",
+        result: "1_if_armed_else_0_or_error",
+    },
+    OperationContract {
+        name: "system.time.timer.wait",
+        args: "timer_handle",
+        result: "0_or_error",
+    },
+    OperationContract {
+        name: "system.time.timer.get",
+        args: "timer_handle",
+        result: "u64:remaining_ns_or_error",
+    },
 ];
 
 /// Rights 位是外部 ABI；位值变化必须产生新快照并随 ABI 版本裁决。
@@ -1313,6 +1338,30 @@ pub const SEMANTICS: &[(&str, &str)] = &[
     (
         "cross_domain.performance",
         "same_workload_and_sample_size_required_for_release_claims",
+    ),
+    (
+        "timer.clock",
+        "monotonic_unsigned_nanoseconds;relative_overflow_rejected",
+    ),
+    (
+        "timer.urgency",
+        "precise_at;tolerant_at_through_at_plus_slack;never_after_latest",
+    ),
+    (
+        "timer.period",
+        "zero_is_one_shot;nonzero_is_fixed_phase;missed_periods_are_skipped",
+    ),
+    (
+        "timer.identity",
+        "object_local_slot_plus_generation;closed_identity_never_reused",
+    ),
+    (
+        "timer.waiters",
+        "at_most_one;arm_cancel_close_wake_with_terminal_result",
+    ),
+    (
+        "timer.coalescing",
+        "shared_timer_irq_may_wake_after_at_and_never_after_latest",
     ),
 ];
 

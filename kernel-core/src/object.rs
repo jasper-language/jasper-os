@@ -254,7 +254,7 @@ impl ObjectType {
     /// Memory是页存储叶子，无句柄/非叶对象强引用；AddressSpace仍是进程内部资源，不能传递。
     /// Memory is a transferable page-storage leaf; AddressSpace remains non-transferable.
     pub const fn is_transferable_v1(self) -> bool {
-        matches!(self, ObjectType::Event | ObjectType::Timer | ObjectType::Task | ObjectType::Device | ObjectType::Memory | ObjectType::Mutex)
+        matches!(self, ObjectType::Event | ObjectType::Task | ObjectType::Device | ObjectType::Memory | ObjectType::Mutex)
     }
 
     /// 类型名（输出与元数据用）。
@@ -765,6 +765,7 @@ mod tests {
         assert!(!ObjectType::Channel.is_transferable_v1() && !ObjectType::Process.is_transferable_v1());
         assert!(!ObjectType::Ring.is_transferable_v1() && !ObjectType::AddressSpace.is_transferable_v1());
         assert!(!ObjectType::Interrupt.is_transferable_v1(), "中断绑定归属创建它的进程");
+        assert!(!ObjectType::Timer.is_transferable_v1(), "定时器对象绑定创建者进程");
         assert_eq!(ObjectType::Interrupt.type_name(), "Interrupt");
     }
 
