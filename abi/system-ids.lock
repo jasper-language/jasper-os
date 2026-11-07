@@ -99,3 +99,9 @@
 4136	error	system.error.abi_metadata	1	none	ABI 元数据缺失或损坏	ABI metadata missing or malformed
 4137	error	system.sync.error.busy	1	none	同步·互斥对象已被其他任务持有	Inherited mutex already held
 4138	error	system.error.abi_capability	1	none	程序所需系统能力不可用	Required system capability unavailable
+65	op	system.time.timer.create	1	write	时间·创建定时器对象	Create timer object
+66	op	system.time.timer.arm	1	write	时间·装填定时器	Arm timer
+67	op	system.time.timer.cancel	1	write	时间·取消定时器	Cancel timer
+68	op	system.time.timer.wait	1	write	时间·等待定时器	Wait for timer
+69	op	system.time.timer.get	1	read	时间·查询定时器剩余时间	Get timer remaining time
+4139	error	system.time.error.busy	1	none	时间·定时器已有等待者	Timer already has a waiter

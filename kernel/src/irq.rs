@@ -67,6 +67,9 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
     match line {
         IrqLine::Timer => {
             let entry = crate::arch::clock_counter();
+            if let Some(now) = crate::hrtime::now() {
+                crate::user_timer::wake_due(now);
+            }
             crate::smp::on_local_tick();
             device::on_cpu_tick();
             device::on_balance_tick();
@@ -82,6 +85,9 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
         }
         // 每核事件只更新本处理器的每核数据，不进全局延迟队列（那是引导处理器主循环的队列）
         IrqLine::LocalTimer => {
+            if let Some(now) = crate::hrtime::now() {
+                crate::user_timer::wake_due(now);
+            }
             #[cfg(feature="rt2-verify")]
             let diagnostic=crate::rt2_demo::timer_irq();
             #[cfg(not(feature="rt2-verify"))]

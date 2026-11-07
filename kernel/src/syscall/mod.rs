@@ -156,7 +156,7 @@ fn error_name(ret: i64) -> &'static str {
 /// 每次系统调用返回前最多销毁的死亡对象数（见 [`on_syscall`] 的出口清理点）。
 const CLEANUP_PER_CALL: usize = 16;
 /// 创建对象前先回收死亡对象的调用（进程创建在 `spawn_child` 里自带回收）。
-const RECLAIM_BEFORE: [u32; 7] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, SYSTEM_CHANNEL_CREATE, SYSTEM_MEMORY_OBJECT_CREATE,SYSTEM_EVENT_SOURCE_CREATE,SYSTEM_EVENT_SUBSCRIPTION_CREATE,SYSTEM_SYNC_MUTEX_CREATE];
+const RECLAIM_BEFORE: [u32; 8] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, SYSTEM_CHANNEL_CREATE, SYSTEM_MEMORY_OBJECT_CREATE,SYSTEM_EVENT_SOURCE_CREATE,SYSTEM_EVENT_SUBSCRIPTION_CREATE,SYSTEM_SYNC_MUTEX_CREATE,SYSTEM_TIME_TIMER_CREATE];
 
 /// 系统调用入口（arch 调用；可能不返回——`system.task.exit` 会结束当前任务）。
 pub fn on_syscall(a: &SyscallArgs) -> i64 {
@@ -476,6 +476,11 @@ syscall_dispatch! {
         }
     },
     SYSTEM_TIME_DEADLINE_WAIT => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { time_wait_ns(a.args[0]) },
+    SYSTEM_TIME_TIMER_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::user_timer::sys_create(a.args[0], a.args[1], a.args[2]) },
+    SYSTEM_TIME_TIMER_ARM => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::user_timer::sys_arm(a.args[0], a.args[1], a.args[2]) },
+    SYSTEM_TIME_TIMER_CANCEL => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::user_timer::sys_cancel(a.args[0]) },
+    SYSTEM_TIME_TIMER_WAIT => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::user_timer::sys_wait(a.args[0]) },
+    SYSTEM_TIME_TIMER_GET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::user_timer::sys_remaining(a.args[0]) },
     SYSTEM_SYNC_MUTEX_CREATE => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { crate::user_mutex::sys_create() },
     SYSTEM_SYNC_MUTEX_ACQUIRE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::user_mutex::sys_lock(a.args[0]) },
     SYSTEM_SYNC_MUTEX_TRY_ACQUIRE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::user_mutex::sys_try_lock(a.args[0]) },

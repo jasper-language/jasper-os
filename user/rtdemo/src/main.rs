@@ -23,12 +23,16 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::{format, vec};
+use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use jasper_rt::channel;
 use jasper_rt::ring::{Completion, Op, Ring, Sqe};
 use jasper_rt::{entry, heap, mem, println, sys, task, time, Error, Handle, Rights};
 
 entry!(main);
+
+static TIMER_WORKER_READY: AtomicBool = AtomicBool::new(false);
+static TIMER_WORKER_RESULT: AtomicI64 = AtomicI64::new(i64::MAX);
 
 /// 一个遵守 C 调用约定、返回 42 的函数的机器码（x86_64：`mov eax, 42; ret`）。
 #[cfg(target_arch = "x86_64")]
@@ -82,8 +86,139 @@ fn all() -> Result<u32, u32> {
     thread_cases(&mut s)?;
     channel_cases(&mut s)?;
     ring_cases(&mut s)?;
+    timer_cases(&mut s)?;
     error_cases(&mut s)?;
     Ok(s.0)
+}
+
+/// User-visible timer objects: one-shot, cancel and periodic re-arm through
+/// the real monotonic-clock wait path.
+fn timer_cases(s: &mut Steps) -> Result<(), u32> {
+    s.check(
+        jasper_rt::error::check(sys::call(jasper_rt::ids::SYSTEM_TIME_TIMER_CREATE, 0, 0, 1))
+            == Err(Error::INVALID_ARGUMENT),
+    )?;
+    let one = time::Timer::one_shot();
+    s.check(one.is_ok())?;
+    let one = one.map_err(|_| s.0)?;
+    s.check(one.remaining().unwrap_or(1) == 0)?;
+    s.check(one.arm_after(u64::MAX).is_err())?;
+    s.check(
+        jasper_rt::error::check(sys::call(jasper_rt::ids::SYSTEM_TIME_TIMER_ARM, one.handle().raw(), 1, 2))
+            == Err(Error::INVALID_ARGUMENT),
+    )?;
+    let weak = one.handle().duplicate(Rights::WAIT).map_err(|_| s.0)?;
+    s.check(
+        jasper_rt::error::check(sys::call(jasper_rt::ids::SYSTEM_TIME_TIMER_ARM, weak.raw(), 1, 0))
+            == Err(Error::HANDLE_RIGHTS_DENIED),
+    )?;
+    weak.close().map_err(|_| s.0)?;
+    let (channel_a, channel_b) = channel::pair().map_err(|_| s.0)?;
+    s.check(
+        jasper_rt::error::check(sys::call(
+            jasper_rt::ids::SYSTEM_TIME_TIMER_ARM,
+            channel_a.handle().raw(),
+            1,
+            0,
+        )) == Err(Error::HANDLE_INVALID),
+    )?;
+    drop(channel_b);
+    drop(channel_a);
+    s.check(one.arm_after(1_000_000).is_ok())?;
+    s.check(one.wait().is_ok())?;
+    s.check(one.remaining().unwrap_or(1) == 0)?;
+    s.check(matches!(one.cancel(), Ok(false)))?;
+
+    let periodic = time::Timer::periodic(20_000_000, 2_000_000);
+    s.check(periodic.is_ok())?;
+    let periodic = periodic.map_err(|_| s.0)?;
+    s.check(matches!(time::Timer::periodic(0, 0), Err(Error::INVALID_ARGUMENT)))?;
+    s.check(periodic.arm_after(1_000_000).is_ok())?;
+    s.check(periodic.wait().is_ok())?;
+    let left = periodic.remaining().unwrap_or(u64::MAX);
+    s.check(left <= 22_000_000)?;
+    s.check(matches!(periodic.cancel(), Ok(true)))?;
+    s.check(matches!(periodic.cancel(), Ok(false)))?;
+
+    let idle = time::Timer::one_shot().map_err(|_| s.0)?;
+    s.check(matches!(idle.wait(), Err(Error::ASYNC_CANCELLED)))?;
+
+    // Two waiters are rejected without disturbing the registered one.
+    TIMER_WORKER_READY.store(false, Ordering::Release);
+    TIMER_WORKER_RESULT.store(i64::MAX, Ordering::Release);
+    let busy = time::Timer::one_shot().map_err(|_| s.0)?;
+    busy.arm_after(2_000_000_000).map_err(|_| s.0)?;
+    let busy_raw = busy.handle().raw();
+    let busy_worker = task::spawn(move || {
+        TIMER_WORKER_READY.store(true, Ordering::Release);
+        let result = sys::call(jasper_rt::ids::SYSTEM_TIME_TIMER_WAIT, busy_raw, 0, 0);
+        TIMER_WORKER_RESULT.store(result, Ordering::Release);
+        0
+    })
+    .map_err(|_| s.0)?;
+    while !TIMER_WORKER_READY.load(Ordering::Acquire) { task::yield_now(); }
+    time::sleep(1).map_err(|_| s.0)?;
+    s.check(matches!(busy.wait(), Err(Error::TIME_BUSY)))?;
+    s.check(matches!(busy.cancel(), Ok(true)))?;
+    s.check(busy_worker.join() == Ok(0))?;
+    s.check(
+        TIMER_WORKER_RESULT.load(Ordering::Acquire)
+            == -(Error::ASYNC_CANCELLED.id() as i64),
+    )?;
+
+    // Closing the final handle wakes the blocked waiter with a terminal result.
+    TIMER_WORKER_READY.store(false, Ordering::Release);
+    TIMER_WORKER_RESULT.store(i64::MAX, Ordering::Release);
+    let closing = time::Timer::one_shot().map_err(|_| s.0)?;
+    closing.arm_after(2_000_000_000).map_err(|_| s.0)?;
+    let closing_raw = closing.handle().raw();
+    let close_worker = task::spawn(move || {
+        TIMER_WORKER_READY.store(true, Ordering::Release);
+        TIMER_WORKER_RESULT.store(
+            sys::call(jasper_rt::ids::SYSTEM_TIME_TIMER_WAIT, closing_raw, 0, 0),
+            Ordering::Release,
+        );
+        0
+    })
+    .map_err(|_| s.0)?;
+    while !TIMER_WORKER_READY.load(Ordering::Acquire) { task::yield_now(); }
+    time::sleep(1).map_err(|_| s.0)?;
+    closing.into_handle().close().map_err(|_| s.0)?;
+    s.check(close_worker.join() == Ok(0))?;
+    s.check(
+        TIMER_WORKER_RESULT.load(Ordering::Acquire)
+            == -(Error::ASYNC_CANCELLED.id() as i64),
+    )?;
+
+    // A precise deadline and an overlapping tolerant request share the precise
+    // hardware event; the tolerant waiter must wake inside, not after, its window.
+    TIMER_WORKER_READY.store(false, Ordering::Release);
+    TIMER_WORKER_RESULT.store(i64::MAX, Ordering::Release);
+    let at = time::monotonic_ns().map_err(|_| s.0)? + 20_000_000;
+    let slack_ns = 500_000_000;
+    let tolerant = time::Timer::one_shot_with_slack(slack_ns).map_err(|_| s.0)?;
+    let precise = time::Timer::one_shot().map_err(|_| s.0)?;
+    tolerant.arm_at(at).map_err(|_| s.0)?;
+    precise.arm_at(at).map_err(|_| s.0)?;
+    let precise_raw = precise.handle().raw();
+    let precise_worker = task::spawn(move || {
+        TIMER_WORKER_READY.store(true, Ordering::Release);
+        TIMER_WORKER_RESULT.store(
+            sys::call(jasper_rt::ids::SYSTEM_TIME_TIMER_WAIT, precise_raw, 0, 0),
+            Ordering::Release,
+        );
+        0
+    })
+    .map_err(|_| s.0)?;
+    while !TIMER_WORKER_READY.load(Ordering::Acquire) { task::yield_now(); }
+    tolerant.wait().map_err(|_| s.0)?;
+    let woke = time::monotonic_ns().map_err(|_| s.0)?;
+    s.check(precise_worker.join() == Ok(0))?;
+    s.check(TIMER_WORKER_RESULT.load(Ordering::Acquire) == 0)?;
+    s.check(woke >= at && woke < at.saturating_add(slack_ns))?;
+
+    println!("rtdemo: timer one_shot=true periodic=true cancel=true slack=true");
+    Ok(())
 }
 
 /// 堆：集合、格式化（含中文）、闭包、触发增长、全部释放后空闲字节回到总量、超量请求得到错误而不是 panic。
