@@ -104,3 +104,67 @@ rtdemo: timer one_shot=true periodic=true cancel=true slack=true
 - 大规模普通超时基准尚不足以裁决分层非级联时间轮；本片没有加入假时间轮或空后端。
 - `Wait` 到期推进接入统一事件层属于 issue #5 第四片。
 - 跨多处理器压力、8 核和完整批次验收在 Wave 7 集成时执行。
+
+## 11. 大规模普通超时基准与后端裁决（Wave 9）
+
+### 运行上限
+
+当前通用定时器对象上限为 256；standard 配置下每个 Ring 的 Wait 身份表为 64。
+通用定时器、任务纳秒等待和 Ring Wait 已各自使用固定容量 `TimerTable`，到期索引使用
+每对象/每 Ring 的 `DeadlineHeap`，不再扫描执行中集合。
+
+### 65,536 项混合期限压力
+
+`kernel-core/tests/timer_backend_bench.rs` 在 65,536 个槽位上进行 16,384 次更新、
+16,384 次取消和 49,152 次乱序到期弹出，共 163,840 次独立堆操作。固定种子，
+release 构建，64 位宿主：
+
+```text
+timer-backend-heap n=65536 ops=163840 p50_ns=35 p99_ns=144 p999_ns=165 max_ns=7664
+entry_bytes=24 index_bytes=2097152
+```
+
+该规模是当前 single Ring 容量的 1024 倍、通用定时器对象上限的 256 倍。即使在此规模，
+三轮 p99.9 为 165/170/187 ns；存储主要是每槽 24 字节节点加一个位置下标，
+`DeadlineHeap` 不分配、不保留陈旧节点。
+
+### 同口径端到端负载
+
+`user/bench` 的 `ring.wait_complete` 每轮提交 1 tick Wait、由真实定时器唤醒并收取完成；
+`ring.wait_cancel` 提交长等待后同步取消。两项各 2048 样本，宿主 KVM：
+
+| 指标 | 实现前 | Wave 8/9 |
+|---|---:|---:|
+| Wait 自然完成 p50 | 44,824,902 cycles / 12.45 ms | 45,119,248 cycles / 12.54 ms |
+| Wait 自然完成 p99 | 53,617,258 cycles / 14.90 ms | 46,341,042 cycles / 12.88 ms |
+| Wait 自然完成 p99.9 | 88,673,048 cycles / 24.64 ms | 48,056,230 cycles / 13.35 ms |
+| Wait 自然完成 max | 94,806,988 cycles / 26.35 ms | 48,751,192 cycles / 13.55 ms |
+| Wait 取消 p50 | 17,454,514 cycles / 4.85 ms | 18,131,890 cycles / 5.04 ms |
+| Wait 取消 p99.9 | 23,787,506 cycles / 6.61 ms | 23,173,762 cycles / 6.44 ms |
+
+同批 64×16 内核批量 Wait 压力：
+
+```text
+[JSR-RING-WAIT-SCALE] rounds=64 batch=16 requests=1024 scan_slots=0
+heap_ops=2048 cycle_p50=88060 cycle_p99=261202 cycle_p999=261202
+sched_contended=0 object_contended=0 failed_ok=true
+```
+
+真实定时器宽容差压力由 J-1 覆盖：精确与宽容差请求共享一个硬件中断，
+`coalesced/early` 计数由真实中断路径递增，所有对象和定时器预算回到基线。
+完整 KVM 批次 `accept-20261107-185724` 为 106 PASS / 0 FAIL / 8 行计时参考 / 9 N/A。
+
+### 裁决
+
+**Wave 9 不实现分层非级联时间轮。**
+
+理由：
+
+1. 当前配置的真实并发上限远低于 65,536；在该数量级堆操作 p99.9 仍只有 170 ns。
+2. 现有每对象/每 Ring 索引堆无分配、无陈旧节点，装填/取消是 O(log N)，登记等待取最早期限是 O(1)。
+3. Wave 8 已把 Ring 收尾的任务表扫描降为 0；自然完成 p99.9 明显下降，没有证据显示中断次数或堆操作成为瓶颈。
+4. 现在加入时间轮会增加级联/路由状态、取消节点回收和跨 CPU 迁移复杂度，却没有当前负载下的收益证据。
+
+重新评估门槛：当实际配置需要单个 Ring 或单进程同时维持不少于 4,096 个活跃普通超时，
+并且同负载 p99.9 的堆操作或定时器中断成本超过既定预算时，再以真实基准决定是否引入时间轮。
+该结论是性能裁决，不是“时间轮永不实现”的永久承诺。
