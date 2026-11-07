@@ -28,12 +28,16 @@ S-4 按用户 2026-10-27 裁决执行：不跑 8 小时长跑，改为 8 处理�
 
 `verification/s4_leaf_interleaving.tla` 建模任务在 owner leaf 间迁移时，唤醒与 PI 消息和迁移并发。正例检查 `Safety`；负例允许陈旧代次唤醒入队，必须违反 `Safety`。
 
-## 尚未宣称
+## 验收结果
 
-本文件在三次 KVM 运行完成前不宣称 S-4 通过。完成时必须同时存在：
+三次 KVM 串行压力均通过：
 
-* 三次 `status.json` 均 `pass=true`；
-* `[JSR-S4] ready cpus=8`、至少一个 `[JSR-S4] progress`、`[JSR-S4] complete`；
-* `[JSR-EXIT] success|timing-only`；
-* 每轮 `clean=true`、`deadlocks=0`、`invariant_violations=0`、资源与堆守恒；
-* QEMU 优雅退出码 33 或 37。
+| 证据目录 | guest 时长 | 完整轮次 | wake queued/fallback | 结果 |
+|---|---:|---:|---:|---|
+| `evidence/s4/soak-20261107T184238Z` | 300.12 s | 301 | 5134 / 302 | pass, rc=33 |
+| `evidence/s4/soak-20261107T184741Z` | 300.14 s | 301 | 5134 / 302 | pass, rc=33 |
+| `evidence/s4/soak-20261107T185244Z` | 300.09 s | 301 | 5134 / 302 | pass, rc=33 |
+
+每次均为 `[JSR-S4] ready cpus=8`、`[JSR-S4] complete ... conserved=true deadlocks=0 invariant_violations=0`、`[JSR-EXIT] success`。页帧 `62786`、对象 `0`、pending `0`、固定 `0`、堆 `(5304320,399760,1,5304320)` 从 ready 到 complete 完全不变；调度队列审计每轮清洁。总计 guest 时间 900.36 秒，低于 30 分钟上限。
+
+S-4 镜像 SHA-256：`022faa56b8cc3ac4671b7cfe6fc62fd7c8066dbd539aa4f63ed9660e853915a7`。
