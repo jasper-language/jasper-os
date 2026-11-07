@@ -255,6 +255,10 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
             "用户程序 {} 的 ABI 章与 abi/abi-version.txt 不一致",
             dir
         );
+        let required = parsed.required_capabilities();
+        if *dir == "user/hello" {
+            assert_eq!(required.iter().collect::<Vec<_>>(), vec!["kernel.core"], "user-hello capability note differs");
+        }
         println!("cargo:rustc-env={}={}", env, elf.display());
     }
 }

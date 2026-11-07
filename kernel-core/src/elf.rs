@@ -188,16 +188,18 @@ impl Segment {
 
 /// 解析结果。
 #[derive(Debug, Clone, Copy)]
-pub struct ElfImage {
+pub struct ElfImage<'a> {
     /// 入口地址。
     pub entry: u64,
     segs: [Option<Segment>; MAX_SEGMENTS],
     count: usize,
     /// 程序声明的 ABI 要求；没有 `.note.jasper.abi` 节时为 `None`。
     abi: Option<crate::abi_version::ProgramAbi>,
+    /// Raw required-capability note, validated during parse.
+    caps: Option<&'a [u8]>,
 }
 
-impl ElfImage {
+impl<'a> ElfImage<'a> {
     /// 全部装载段（按程序头顺序）。
     pub fn segments(&self) -> impl Iterator<Item = &Segment> {
         self.segs[..self.count].iter().filter_map(|s| s.as_ref())
@@ -212,6 +214,14 @@ impl ElfImage {
     /// The program ABI requirement, or `None` when the image carries no ABI stamp.
     pub fn abi(&self) -> Option<crate::abi_version::ProgramAbi> {
         self.abi
+    }
+
+    /// Program required capabilities. Legacy programs without the note return
+    /// an empty set; malformed notes were already rejected by `parse`.
+    pub fn required_capabilities(&self) -> crate::program_caps::RequiredCapabilities<'a> {
+        self.caps
+            .map(|note| crate::program_caps::parse_caps_note(note).expect("validated capability note"))
+            .unwrap_or_else(crate::program_caps::RequiredCapabilities::empty)
     }
 }
 
@@ -240,6 +250,8 @@ pub enum ElfError {
     BadSection,
     /// `.note.jasper.abi` 节存在但不是合法的 ABI 章。
     BadAbiNote,
+    /// `.note.jasper.caps` 节存在但不是合法的 required-capabilities 章。
+    BadCapsNote,
 }
 
 impl ElfError {
@@ -257,6 +269,7 @@ impl ElfError {
             ElfError::TooManySegments => "system.elf.error.too_many_segments",
             ElfError::BadSection => "system.elf.error.bad_section",
             ElfError::BadAbiNote => "system.error.abi_metadata",
+            ElfError::BadCapsNote => "system.error.abi_metadata",
         }
     }
 }
@@ -312,12 +325,12 @@ fn section_name(strtab: &[u8], offset: u32) -> Result<&str, ElfError> {
     core::str::from_utf8(&rest[..end]).map_err(|_| ElfError::BadSection)
 }
 
-/// 找 `.note.jasper.abi` 节的字节。没有节头表或没有该节时返回 `Ok(None)`，由装载策略以 Missing 拒绝；
+/// 找指定 note 节的字节。没有节头表或没有该节时返回 `Ok(None)`；
 /// 节头表本身损坏返回 [`ElfError::BadSection`]，章格式错误留给 [`crate::abi_version::parse_note`] 判定。
 ///
 /// 为什么用节而不是程序头：ABI 章是**文件元数据**，不需要被映射进用户地址空间；
 /// 节名由链接脚本固定，构建期还会逐个内嵌程序核对，因此节头表损坏或名字被改都会在这里被拒绝。
-fn abi_note_bytes<'a>(image: &'a [u8], lay: &Layout) -> Result<Option<&'a [u8]>, ElfError> {
+fn section_bytes<'a>(image: &'a [u8], lay: &Layout, wanted: &str) -> Result<Option<&'a [u8]>, ElfError> {
     let shoff64 = lay.word_at(image, lay.shoff)?;
     if shoff64 == 0 {
         return Ok(None);
@@ -349,7 +362,7 @@ fn abi_note_bytes<'a>(image: &'a [u8], lay: &Layout) -> Result<Option<&'a [u8]>,
     let mut found: Option<&[u8]> = None;
     for i in 1..shnum {
         let (name_off, ty, off64, size64) = section_at(image, lay, shoff, shentsize, i)?;
-        if section_name(strtab, name_off)? != crate::abi_version::NOTE_SECTION {
+        if section_name(strtab, name_off)? != wanted {
             continue;
         }
         if found.is_some() {
@@ -369,7 +382,7 @@ fn abi_note_bytes<'a>(image: &'a [u8], lay: &Layout) -> Result<Option<&'a [u8]>,
 /// 解析并校验一个 ELF 静态可执行文件。`machine` 为目标架构的 `e_machine` 值，`class` 为其类别；
 /// 类别不符（例如 64 位内核收到 ELF32）按文件头错误拒绝。
 /// Parses and validates a static ELF executable of the given machine and class.
-pub fn parse(image: &[u8], machine: u16, class: ElfClass) -> Result<ElfImage, ElfError> {
+pub fn parse<'a>(image: &'a [u8], machine: u16, class: ElfClass) -> Result<ElfImage<'a>, ElfError> {
     let lay = class.layout();
     if image.len() < lay.header {
         return Err(ElfError::Truncated);
@@ -396,7 +409,7 @@ pub fn parse(image: &[u8], machine: u16, class: ElfClass) -> Result<ElfImage, El
         return Err(ElfError::Truncated);
     }
 
-    let mut out = ElfImage { entry, segs: [None; MAX_SEGMENTS], count: 0, abi: None };
+    let mut out = ElfImage { entry, segs: [None; MAX_SEGMENTS], count: 0, abi: None, caps: None };
     for i in 0..phnum {
         let ph = phoff + i * lay.phent;
         let ty = u32_at(image, ph)?;
@@ -446,11 +459,18 @@ pub fn parse(image: &[u8], machine: u16, class: ElfClass) -> Result<ElfImage, El
     if !entry_ok {
         return Err(ElfError::BadEntry);
     }
-    let abi = match abi_note_bytes(image, lay)? {
+    let abi = match section_bytes(image, lay, crate::abi_version::NOTE_SECTION)? {
         Some(bytes) => Some(crate::abi_version::parse_note(bytes).map_err(|_| ElfError::BadAbiNote)?),
         None => None,
     };
-    Ok(ElfImage { entry, segs: out.segs, count: out.count, abi })
+    let caps = match section_bytes(image, lay, crate::program_caps::CAPS_SECTION)? {
+        Some(bytes) => {
+            crate::program_caps::parse_caps_note(bytes).map_err(|_| ElfError::BadCapsNote)?;
+            Some(bytes)
+        }
+        None => None,
+    };
+    Ok(ElfImage { entry, segs: out.segs, count: out.count, abi, caps })
 }
 
 /// Kani：节名读取对任意字符串表与偏移不 panic；成功时名字在表内、不含 NUL、紧跟一个 NUL。

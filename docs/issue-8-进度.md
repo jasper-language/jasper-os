@@ -195,3 +195,37 @@ VERUS=<verus> bash verification/toolbox/run-abi-suite.sh
 2. **Jasper 语言侧程序盖章**：当前真实用户程序都是仓库内 Rust 程序；Jasper 工具链可用时必须在同一装载门槛下增加真实 Jasper 产物。
 3. **语义文本仍是设计契约**：快照能机械阻止语义文字在同一主版本内被修改，但不能自动证明实现永远符合文字。实现行为由 Ring/调度/对象等专项验证承担。
 4. **历史不可变防误改**：CI 能阻止普通修改/删除旧快照；拥有仓库写权限并能同时修改 CI 的对手不在该门槛的威胁模型内。
+
+## 第三片：required-capabilities 与装载前 Profile 校验（2026-11-07）
+
+- 分支：`dev/issue8-s3`
+- ABI：`1.1.0`；`abi/snapshots/1.0.0.contract` 保持不可变，新增 `1.1.0.contract`
+- 状态：实现、宿主全测、标准 Profile KVM 定点与真实能力章/拒绝路径已通过；批次全量留根线程
+
+### 1. 兼容格式
+
+- 原 28 字节 `.note.jasper.abi` 版本章完全不变；只依赖 ABI 1.0 稳定契约的程序继续装载。
+- 新增可选 `.note.jasper.caps`（note type 2）：版本/flags/count/reserved 描述头后跟按序 NUL 结尾能力名。
+- 缺少能力章等价于“所需能力为空”；空章、未知版本/flags、超过 24 项、非法名字、重复、截断或尾随字节均按 ABI 元数据损坏拒绝。
+- 真实 Rust `user-hello` 现在声明 `kernel.core`；内核构建期逐个解析其能力章，不能由产物外的手写元数据替代。
+
+### 2. 装载门槛
+
+- `proc::load_elf` 在映射任何页之前依次执行：ELF/能力章解析、ABI 世代检查、逐项确认能力由生效 Profile 真实发布。
+- 缺能力返回稳定错误码 `system.error.abi_capability`（4138）；元数据损坏仍为 `system.error.abi_metadata`，世代不兼容仍为 `system.error.abi_mismatch`。
+- `system.process.spawn` 复用同一 `load_elf` 路径，并把能力不可用映射为同一 ABI 能力错误。
+- `profile::has_capability` 只认已初始化并发布的模块能力；声明但未装配、初始化失败或 unhealthy 的服务都不能满足程序要求。
+
+### 3. 验证
+
+- `cargo test -p kernel-core`：555 个库测试及全部集成/文档测试通过。
+- `scripts/abi-contract.sh check`：1.1.0 快照与源码一致；1.0.0 历史快照不可变。
+- KVM 标准 Profile 定点 `accept-20261107-161452`：M1.1 / ABI / M5.1p PASS；`required_caps=1`，26 项 ABI 检查 0 失败、页帧回基线。
+- 真实拒绝路径：`caps_malformed → system.error.abi_metadata`、`capability_missing → system.error.abi_capability`，两者均 `mapped=0`。
+- 精简模块面由 K06/Profile 装配真实验证缺少 `ipc.channel` 等模块能力；装载门槛使用同一 `profile::has_capability`，本片不再伪造第二套 Profile 判定。
+
+### 4. 边界
+
+- 当前真实用户产物仍来自仓库内 Rust 程序；Jasper 工具链可产程序时必须写同一 ABI/capability 章。
+- 能力清单表达“运行前前提”，不替代运行期句柄 Rights、SyscallSet 或服务撤回检查。
+- 初始能力可用性检查不是能力永久驻留承诺；服务撤回后的调用仍按对应操作返回 unavailable。

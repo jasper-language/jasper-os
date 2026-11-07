@@ -312,7 +312,7 @@ fn is_kebab(text: &str) -> bool {
 }
 
 /// 点分小写能力名判定（`kernel.core`、`async.ring`）。
-fn is_capability(text: &str) -> bool {
+pub(crate) fn is_capability(text: &str) -> bool {
     !text.is_empty() && text.len() <= 64 && text.split('.').all(is_kebab)
 }
 

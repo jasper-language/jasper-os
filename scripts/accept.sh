@@ -810,10 +810,12 @@ check_abi() {   # ABI 世代（issue #8 第一片）：单一真源、真实章�
      && has '^\[JSR-ABI\] case=malformed reject=system\.error\.abi_metadata mapped=0' \
      && has '^\[JSR-ABI\] case=major_mismatch reject=system\.error\.abi_mismatch mapped=0' \
      && has '^\[JSR-ABI\] case=minor_too_new reject=system\.error\.abi_mismatch mapped=0' \
+     && has '^\[JSR-ABI\] case=caps_malformed reject=system\.error\.abi_metadata mapped=0' \
+     && has '^\[JSR-ABI\] case=capability_missing reject=system\.error\.abi_capability mapped=0' \
      && has '^\[JSR-USERTEXT\] task=user-hello bytes=[0-9]+ text=abi=[0-9]+\.[0-9]+\.[0-9]+' \
      && has '^\[JSR-USERTEXT\] task=user-hello bytes=[0-9]+ text=abi_query=true' \
      && has '^\[JSR-ABI\] summary checks=[0-9]+ failed=0 reclaimed=true'; then
-    record ABI PASS "ABI 版本真源唯一，内嵌程序携带原生章；缺章/损坏/跨主版本/次版本过新均在映射前拒绝，运行期查询一致，页帧回到基线"
+    record ABI PASS "ABI 版本真源唯一，程序版本章与 required-capabilities 章可审计；缺章/损坏/跨主版本/次版本过新/能力不可用均在映射前结构化拒绝，运行期查询一致，页帧回到基线"
   else
     record ABI FAIL "缺少 JSR-ABI 关键标记、ABI 查询不符或 failed≠0"
   fi

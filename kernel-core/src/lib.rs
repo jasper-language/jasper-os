@@ -93,6 +93,7 @@ pub mod memory_abi;
 pub mod meta;
 pub mod msi;
 pub mod profile;
+pub mod program_caps;
 /// 服务装配契约：模块运行时状态、依赖顺序、能力发布与审计（issue #6）。
 pub mod assembly;
 /// 可撤回能力发布门：读者租约、撤位与排空（issue #6）。

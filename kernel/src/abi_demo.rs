@@ -1,4 +1,5 @@
-//! 原生 ABI 世代演练（issue #8 第一片）：声明唯一、盖章可验、装载前拒绝。
+//! 原生 ABI 世代演练（issue #8）：版本声明唯一、程序章可验、required-capabilities
+//! 在装载前核对生效 Profile，并在映射任何页之前结构化拒绝。
 //! Native ABI generation drill: one declaration, verifiable stamps, rejection before mapping.
 //!
 //! # 覆盖
@@ -12,7 +13,7 @@
 //! 验收要求 `failed=0` 且 `reclaimed=true`。
 //!
 //! # 边界
-//! 本演练只覆盖「版本号 + 章 + 装载门槛 + 查询通道」。发布快照、轮换与能力要求属于后续切片，不在本文件假装完成。
+//! 发布快照/轮换由契约工具验证；本演练覆盖真实版本章、能力章、装载门槛与查询通道。
 
 #[cfg(feature = "user-programs")]
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -60,6 +61,11 @@ static USER_HELLO: &[u8] = include_bytes!(env!("JSR_USER_HELLO"));
 #[cfg(feature = "user-programs")]
 fn note_offset(image: &[u8], note: &[u8; abi_version::NOTE_BYTES]) -> Option<usize> {
     image.windows(note.len()).position(|w| w == note)
+}
+
+#[cfg(feature = "user-programs")]
+fn caps_offset(image: &[u8], note: &[u8]) -> Option<usize> {
+    image.windows(note.len()).position(|window| window == note)
 }
 /// 装载一次并立即回收：返回装载结果与本次装载消耗的页帧数。
 ///
@@ -132,12 +138,23 @@ pub fn run() {
     };
     let stamp = abi_version::parse_note(&image[note_at..note_at + abi_version::NOTE_BYTES]);
     check(stamp == Ok(ProgramAbi::native_requirement()), "内嵌镜像的 ABI 章与原生要求不一致");
+    let mut caps_storage = [0u8; kernel_core::program_caps::CAPS_NOTE_MAX_BYTES];
+    let caps_note = kernel_core::program_caps::encode_caps_note(&["kernel.core"], &mut caps_storage)
+        .expect("encode required capability fixture");
+    let caps_at = caps_offset(&image, caps_note)
+        .unwrap_or_else(|| panic!("内嵌 user-hello 未找到 required-capabilities 章"));
+    let parsed_caps = kernel_core::program_caps::parse_caps_note(&image[caps_at..caps_at + caps_note.len()])
+        .expect("内嵌 required-capabilities 章不合法");
+    let mut cap_names = parsed_caps.iter();
+    let caps_ok = cap_names.next() == Some("kernel.core") && cap_names.next().is_none();
+    check(caps_ok, "内嵌 user-hello 的 required-capabilities 与构建声明不一致");
     kprintln!(
-        "[JSR-ABI] case=stamp major={} min_minor={} patch={} matches_native={}",
+        "[JSR-ABI] case=stamp major={} min_minor={} patch={} matches_native={} required_caps={}",
         stamp.map(|s| s.major).unwrap_or(u16::MAX),
         stamp.map(|s| s.min_minor).unwrap_or(u16::MAX),
         stamp.map(|s| s.patch).unwrap_or(u16::MAX),
-        stamp == Ok(ProgramAbi::native_requirement())
+        stamp == Ok(ProgramAbi::native_requirement()),
+        parsed_caps.len()
     );
 
     // 3. 正例：真实镜像装载成功，入口非 0，装载过程确实映射了页。
@@ -198,6 +215,40 @@ pub fn run() {
             &minor_too_new,
             "system.error.abi_mismatch",
             LoadError::Abi(AbiReject::MinorTooNew { required: next, kernel: native.minor }),
+        );
+    }
+
+    // 4e. 能力章存在但格式非法：在解析阶段拒绝，尚未建立进程映射。
+    let mut bad_caps = image.clone();
+    bad_caps[caps_at + 12] = b'X';
+    expect_rejected(
+        "caps_malformed",
+        &bad_caps,
+        "system.error.abi_metadata",
+        LoadError::Elf(ElfError::BadCapsNote),
+    );
+
+    // 4f. 合法但未由生效 Profile 发布的能力：在任何页映射之前返回独立错误码。
+    let mut missing_cap = image.clone();
+    let replacement = b"no.such.cap\0";
+    assert_eq!(replacement.len(), 12);
+    missing_cap[caps_at + 28..caps_at + 40].copy_from_slice(replacement);
+    expect_rejected(
+        "capability_missing",
+        &missing_cap,
+        "system.error.abi_capability",
+        LoadError::Capability,
+    );
+    if crate::profile::ACTIVE.name == "headless-min" {
+        // Compact 档真实缺少 ipc.channel。长度与 kernel.core 相同，只改能力名，
+        // 从而验证生效 Profile 的能力面，而不是单纯构造一个未知名字。
+        let mut compact_missing = image.clone();
+        compact_missing[caps_at + 28..caps_at + 40].copy_from_slice(b"ipc.channel\0");
+        expect_rejected(
+            "capability_compact_unassembled",
+            &compact_missing,
+            "system.error.abi_capability",
+            LoadError::Capability,
         );
     }
 
