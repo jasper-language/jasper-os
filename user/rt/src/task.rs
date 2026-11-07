@@ -12,6 +12,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::error::{check, Error, Result};
 use crate::handle::Handle;
+use crate::process::CallSet;
 use crate::{ids, mem, sys};
 
 /// 结束调用线程（不返回）。本进程最后一个线程结束时，进程以 `code` 退出。
@@ -66,6 +67,30 @@ pub fn set_qos_raw(v: u64) -> Result<()> {
 /// 同步等待句柄所指的线程退出，返回其退出码（按 32 位无符号值报告）。
 pub fn wait_task(h: &Handle) -> Result<u64> {
     check(sys::call(ids::SYSTEM_TASK_WAIT, h.raw() as u64, 0, 0))
+}
+
+/// 设置目标任务可发起的系统调用集合（`system.task.syscalls.set`）。
+///
+/// 调用者必须持有 `SYSTEM_TASK_SYSCALLS_SET`，且 `target` 是带 `CONTROL` 的 Task 句柄。
+/// `calls` 必须只包含调用者自己当前拥有的已登记操作；内核在调度器事务内完成最终检查。
+/// 成功只改变目标任务；失败不改变任何任务。
+pub fn set_calls(target: &Handle, calls: CallSet) -> Result<()> {
+    set_calls_raw(target.raw(), calls)
+}
+
+/// 把当前任务可发起的系统调用集合替换为 `calls`。
+///
+/// 这是 [`set_calls`] 的无句柄形式，目标固定为当前任务。一旦调用者从自己的集合中
+/// 移除 `system.task.syscalls.set`，之后的替换调用会先被统一权限检查拒绝。
+pub fn set_current_calls(calls: CallSet) -> Result<()> {
+    set_calls_raw(0, calls)
+}
+
+fn set_calls_raw(target: u64, calls: CallSet) -> Result<()> {
+    let mut bytes = [0u8; CallSet::BYTES];
+    calls.encode(&mut bytes);
+    // `bytes` 在系统调用读取期间保持有效；target 是 0 或一个现存句柄。
+    check(sys::call(ids::SYSTEM_TASK_SYSCALLS_SET, target, bytes.as_ptr() as u64, 0)).map(|_| ())
 }
 
 /// 同步等待句柄所指的进程退出，返回其退出码（按 32 位无符号值报告）。

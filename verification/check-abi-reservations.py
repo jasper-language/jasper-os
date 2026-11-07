@@ -20,9 +20,13 @@ source=(root/'kernel/src/syscall/mod.rs').read_text()
 # 兼容两种分发表形状：旧的多 ID `A | B => err(...)` 与当前「一 ID 一个闭包」的宏展开。
 arms=re.findall(r'((?:SYSTEM_[A-Z0-9_]+\s*\|\s*)*SYSTEM_[A-Z0-9_]+)\s*=>[^\n]*?err\(SYSTEM_ERROR_UNSUPPORTED\)',source)
 unsupported={name.strip() for arm in arms for name in arm.split('|')}
-for num in range(37,44):
+# ID 43 crossed the ABI 2.0.0 boundary from a stable reserved slot to an
+# executable operation. The remaining reserved IDs must still fail closed.
+assert reg[43][3]=='3', 'ID 43 must use the executable v3 contract'
+for num in range(37,43):
     constant=reg[num][2].upper().replace('.','_')
     assert constant in unsupported, f'reserved handler must explicitly return unsupported: {constant}'
+assert 'SYSTEM_TASK_SYSCALLS_SET => |_e: &AbiEntry, a: &SyscallArgs, task_id: u64|' in source
 ring=(root/'kernel/src/ring.rs').read_text()
 assert 'extension_abi::check_sqe_flags(sqe.flags)' in ring
 assert 'FlagError::Unsupported) => return Err(err(SYSTEM_ERROR_UNSUPPORTED))' in ring

@@ -28,7 +28,7 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 
 use jasper_rt::channel;
 use jasper_rt::isolate::{CallError, IsolateError, IsolatedGrant, IsolatedModule};
@@ -66,6 +66,12 @@ type BytesFn = unsafe extern "C" fn(*const u8, usize, *mut u8, usize) -> isize;
 
 /// 宿主的一段数据：隔离模块向它的地址写入后检查它不变。
 static MARKER: AtomicU32 = AtomicU32::new(0x5a5a_5a5a);
+
+const CALLS_PENDING: i64 = i64::MIN;
+/// `system.task.syscalls.set` 验收工作线程的阶段与结果。
+static CALLS_PHASE: AtomicU32 = AtomicU32::new(0);
+static CALLS_BEFORE: AtomicI64 = AtomicI64::new(CALLS_PENDING);
+static CALLS_AFTER: AtomicI64 = AtomicI64::new(CALLS_PENDING);
 
 /// CPU 压力下往返调用延迟的上界（tick）：两个吃满处理器的隔离进程与宿主轮转，每轮往返最多等过几个时间片。
 const LOADED_BOUND_TICKS: u64 = 4;
@@ -223,12 +229,13 @@ fn run(s: &mut Steps) -> Result<(), u32> {
     spawn_boundary(s)?;
     handle_admission(s, &t)?;
     rights_boundary(s, &t)?;
+    task_syscalls_target(s)?;
     address_space(s, &t)?;
     crash_isolation(s, &t)?;
     cpu_pressure(s, &t)?;
     placement(s, &t)?;
     quiescence(s, &t)?;
-    Ok(())
+    self_syscalls_restriction(s)
 }
 
 /// 用例 1：创建子进程只能授予自己拥有的系统调用。
@@ -302,6 +309,78 @@ fn high_id_denial(s: &mut Steps) -> Result<(), u32> {
     s.check(unregistered == neg(Error::UNSUPPORTED))?;
     println!("isohost: high_id id={} direct=rights_denied spawn_escalation=rights_denied unregistered=unsupported", ids::SYSTEM_SYNC_MUTEX_TRY_ACQUIRE);
     Ok(())
+}
+
+/// 角色 0 的最后一个用例：通过真实 Task 句柄收缩另一线程，并检查失败路径不改变其集合。
+fn task_syscalls_target(s: &mut Steps) -> Result<(), u32> {
+    let narrow = CallSet::try_from_ids(&[ids::SYSTEM_TASK_YIELD, ids::SYSTEM_TASK_EXIT]).map_err(|_| s.0 + 1)?;
+    let worker = task::spawn(|| {
+        while CALLS_PHASE.load(Ordering::Acquire) < 1 {
+            task::yield_now();
+        }
+        CALLS_BEFORE.store(sys::call(ids::SYSTEM_TIME_NOW, 0, 0, 0), Ordering::Release);
+        while CALLS_PHASE.load(Ordering::Acquire) < 2 {
+            task::yield_now();
+        }
+        CALLS_AFTER.store(sys::call(ids::SYSTEM_TIME_NOW, 0, 0, 0), Ordering::Release);
+        0
+    })
+    .map_err(|_| s.0 + 1)?;
+
+    let mut valid = [0u8; CallSet::BYTES];
+    narrow.encode(&mut valid);
+    let weak = worker.handle().duplicate(Rights::WAIT).map_err(|_| s.0 + 1)?;
+    s.check(task::set_calls(&weak, narrow) == Err(Error::HANDLE_RIGHTS_DENIED))?;
+    s.check(
+        sys::call(ids::SYSTEM_TASK_SYSCALLS_SET, u64::MAX, valid.as_ptr() as u64, 0)
+            == neg(Error::HANDLE_INVALID),
+    )?;
+    s.check(
+        sys::call(ids::SYSTEM_TASK_SYSCALLS_SET, 0, u64::MAX, 1)
+            == neg(Error::INVALID_ARGUMENT),
+    )?;
+    s.check(
+        sys::call(ids::SYSTEM_TASK_SYSCALLS_SET, 0, u64::MAX, 0)
+            == neg(Error::MEMORY_INVALID_ADDRESS),
+    )?;
+
+    // Deliberately malformed raw descriptor: bit 255 is capacity-valid but unregistered.
+    // The typed CallSet API cannot construct this, so exercise the kernel's final check directly.
+    let mut unregistered = [0u8; CallSet::BYTES];
+    unregistered[CallSet::BYTES - 1] = 0x80;
+    s.check(
+        sys::call(ids::SYSTEM_TASK_SYSCALLS_SET, 0, unregistered.as_ptr() as u64, 0)
+            == neg(Error::INVALID_ARGUMENT),
+    )?;
+    let escalation = CallSet::try_from_ids(&[ids::SYSTEM_TASK_QOS_SET]).map_err(|_| s.0 + 1)?;
+    s.check(task::set_current_calls(escalation) == Err(Error::RIGHTS_DENIED))?;
+    s.check(sys::call(ids::SYSTEM_TIME_NOW, 0, 0, 0) >= 0)?;
+
+    CALLS_PHASE.store(1, Ordering::Release);
+    let start = time::now();
+    while CALLS_BEFORE.load(Ordering::Acquire) == CALLS_PENDING && time::now() - start < ENTER_TIMEOUT_TICKS {
+        task::yield_now();
+    }
+    s.check(CALLS_BEFORE.load(Ordering::Acquire) >= 0)?;
+
+    s.check(task::set_calls(worker.handle(), narrow).is_ok())?;
+    CALLS_PHASE.store(2, Ordering::Release);
+    s.check(worker.join() == Ok(0))?;
+    s.check(CALLS_AFTER.load(Ordering::Acquire) == neg(Error::RIGHTS_DENIED))?;
+    println!("isohost: task_syscalls target_shrink=true denied_after=true atomic_failures=true invalid_target=true rights_checked=true unregistered_denied=true escalation_denied=true");
+    Ok(())
+}
+
+/// 角色 0 的终点：以 `target = 0` 收缩当前任务，确认操作立即生效后退出。
+///
+/// 这里之后不能再依赖 `console.write` 等被移除的调用，因此只以进程退出码报告剩余结果。
+fn self_syscalls_restriction(s: &mut Steps) -> Result<(), u32> {
+    let only_exit = CallSet::try_from_ids(&[ids::SYSTEM_PROCESS_EXIT]).map_err(|_| s.0 + 1)?;
+    println!("isohost: self_syscalls begin");
+    task::set_current_calls(only_exit).map_err(|_| s.0 + 1)?;
+    let denied = sys::call(ids::SYSTEM_TIME_NOW, 0, 0, 0) == neg(Error::RIGHTS_DENIED);
+    let code = if denied { 0 } else { s.0 + 1 };
+    task::exit_process(code.into())
 }
 
 /// 用例 2：句柄登记在清单未声明的能力名下 ⇒ 创建隔离进程之前被拒。

@@ -502,7 +502,9 @@ syscall_dispatch! {
     SYSTEM_TASK_INTERRUPT_SEND => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
     SYSTEM_MEMORY_DMA_MAP => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
     SYSTEM_IO_SEGMENT_SUBMIT => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
-    SYSTEM_TASK_SYSCALLS_SET => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
+    SYSTEM_TASK_SYSCALLS_SET => |_e: &AbiEntry, a: &SyscallArgs, task_id: u64| {
+        crate::task_control::syscalls_set(task_id, a.args[0], a.args[1], a.args[2])
+    },
     SYSTEM_MEMORY_OBJECT_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { memory_object_create(a.args[0]) },
     SYSTEM_MEMORY_OBJECT_MAP => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { memory_object_map(a.args[0], a.args[1]) },
     SYSTEM_MEMORY_OBJECT_UNMAP => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { memory_object_unmap(a.args[0], a.args[1]) },
