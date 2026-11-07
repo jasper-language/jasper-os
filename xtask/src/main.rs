@@ -11,11 +11,21 @@
 //       只检查语法，不检查取值范围：越界值由内核在启动期拒绝，这正是要验收的行为。
 //       `record=corrupt` 写入一份版本号错误的记录，用来验收「记录损坏 ⇒ 拒绝启动」。
 //       Patch the boot-capacity record in a kernel ELF; range checks are the kernel's job at boot.
+//   xtask abi-contract generate|check
+//       生成当前 ABI 版本的不可变契约快照，或校验当前源码与全部 ABI 快照。
+//       Generate one immutable ABI contract snapshot or check the complete snapshot set.
 
 use kernel_core::capacity::{self, Overrides, RECORD_LEN, RECORD_MAGIC};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("abi-contract") {
+        if let Err(e) = abi_contract(&args[1..]) {
+            eprintln!("xtask abi-contract: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.first().map(String::as_str) == Some("bootcap") {
         if let Err(e) = bootcap(&args[1..]) {
             eprintln!("xtask bootcap: {e}");
@@ -88,5 +98,107 @@ fn bootcap(args: &[String]) -> Result<(), String> {
         ov.rt,
         if corrupt { " record=corrupt" } else { "" }
     );
+    Ok(())
+}
+
+/// 仓库根目录：xtask 位于 `<root>/xtask`，因此构建期路径不依赖调用者的 cwd。
+/// Repository root, independent of the caller's current working directory.
+fn repo_root() -> Result<std::path::PathBuf, String> {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| "无法定位仓库根目录".to_string())
+}
+
+/// 读取 `abi/abi-version.txt` 的当前版本。
+fn native_version(root: &std::path::Path) -> Result<kernel_core::abi_version::AbiVersion, String> {
+    let path = root.join("abi/abi-version.txt");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+    kernel_core::abi_version::parse_source(&text).map_err(|e| format!("解析 {} 失败：{e:?}", path.display()))
+}
+
+/// 从当前登记表与源码常量渲染规范快照。
+fn render_current(root: &std::path::Path) -> Result<String, String> {
+    let path = root.join("abi/system-ids.txt");
+    let registry = std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+    let mut output = String::new();
+    kernel_core::abi_contract::render_current(&registry, &mut output)
+        .map_err(|e| format!("渲染 ABI 契约失败：{e:?}"))?;
+    Ok(output)
+}
+
+/// 读取 `<root>/abi/snapshots/*.contract`，按路径稳定排序。
+fn read_snapshots(root: &std::path::Path) -> Result<Vec<(kernel_core::abi_version::AbiVersion, String)>, String> {
+    let dir = root.join("abi/snapshots");
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("读取 {} 失败：{e}", dir.display()))?;
+    let mut paths: Vec<_> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("contract"))
+        .collect();
+    paths.sort();
+    let mut snapshots = Vec::new();
+    for path in paths {
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+        let version = kernel_core::abi_contract::snapshot_version(&text)
+            .map_err(|e| format!("{} 的世代头不合法：{e:?}", path.display()))?;
+        let expected = format!("{}.{}.{}.contract", version.major, version.minor, version.patch);
+        if path.file_name().and_then(|s| s.to_str()) != Some(expected.as_str()) {
+            return Err(format!(
+                "{} 的 `abi=` 是 {}.{}.{}，文件名必须是 {}",
+                path.display(), version.major, version.minor, version.patch, expected
+            ));
+        }
+        snapshots.push((version, text));
+    }
+    Ok(snapshots)
+}
+
+fn check_snapshots(root: &std::path::Path, current: &str) -> Result<(), String> {
+    let owned = read_snapshots(root)?;
+    let refs: Vec<kernel_core::abi_contract::Snapshot<'_>> = owned
+        .iter()
+        .map(|(version, text)| kernel_core::abi_contract::Snapshot { version: *version, text })
+        .collect();
+    kernel_core::abi_contract::check_snapshot_set(current, &refs)
+        .map_err(|e| format!("ABI 契约门槛失败：{e:?}"))
+}
+
+/// `abi-contract generate|check`：快照一旦存在就不可覆盖；版本变化必须新增文件。
+fn abi_contract(args: &[String]) -> Result<(), String> {
+    let action = args.first().map(String::as_str).ok_or_else(|| {
+        "用法：xtask abi-contract generate|check".to_string()
+    })?;
+    let root = repo_root()?;
+    let current = render_current(&root)?;
+    let version = native_version(&root)?;
+    let dir = root.join("abi/snapshots");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 {} 失败：{e}", dir.display()))?;
+    let path = dir.join(format!("{}.{}.{}.contract", version.major, version.minor, version.patch));
+    match action {
+        "generate" => {
+            match std::fs::read_to_string(&path) {
+                Ok(existing) if existing == current => {
+                    println!("ABI 快照已是最新：{}", path.display());
+                }
+                Ok(_) => {
+                    return Err(format!(
+                        "拒绝覆盖不可变快照 {}；契约变化必须提升 ABI 版本并新建快照",
+                        path.display()
+                    ));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::write(&path, &current)
+                        .map_err(|e| format!("写入 {} 失败：{e}", path.display()))?;
+                    println!("写入 ABI 快照：{}", path.display());
+                }
+                Err(e) => return Err(format!("读取 {} 失败：{e}", path.display())),
+            }
+            check_snapshots(&root, &current)?;
+        }
+        "check" => check_snapshots(&root, &current)?,
+        _ => return Err("用法：xtask abi-contract generate|check".to_string()),
+    }
+    println!("ABI contract check: PASS ({}.{}.{})", version.major, version.minor, version.patch);
     Ok(())
 }

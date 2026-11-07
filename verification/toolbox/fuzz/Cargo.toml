@@ -179,6 +179,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "abi_contract"
+path = "fuzz_targets/abi_contract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "jaso_parse"
 path = "fuzz_targets/jaso_parse.rs"
 test = false

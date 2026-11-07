@@ -42,6 +42,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: 安装 qemu-user（跨指令集运行单元测试） / install qemu-user
         run: |
           sudo apt-get update -q
@@ -52,6 +54,16 @@ jobs:
             --target x86_64-unknown-none,aarch64-unknown-none,aarch64-unknown-none-softfloat,riscv64gc-unknown-none-elf,riscv64imac-unknown-none-elf,riscv32imac-unknown-none-elf,i686-unknown-linux-musl,aarch64-unknown-linux-musl,riscv64gc-unknown-linux-musl
           echo "RUSTUP_TOOLCHAIN=$RUST_NIGHTLY" >> "$GITHUB_ENV"
       - run: rustc -Vv && cargo -V
+      - name: ABI 契约快照与历史不可变性 / ABI contract snapshots
+        env:
+          ABI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          bash scripts/abi-contract.sh check
+          if [ -n "${ABI_BASE_SHA:-}" ] && ! [[ "$ABI_BASE_SHA" =~ ^0+$ ]]; then
+            bash scripts/abi-contract.sh immutable "$ABI_BASE_SHA"
+          else
+            echo "没有可比较的 ABI 历史 base；当前工作树仍已通过完整快照一致性检查"
+          fi
       - uses: actions/cache@v4
         with:
           path: |

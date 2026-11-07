@@ -144,3 +144,54 @@ VERUS=<verus> bash verification/toolbox/run-abi-suite.sh
 ## 合入记录（2026-11-03）
 
 第一片已变基到含 issue #1/#2/#3/#4 第一切片的主线后合入：`system.abi.get` 改接主线的宏分发表（登记表与分发表的编译期相等断言同样覆盖它）。变基后重新通过 ABI 六步链（`verification/toolbox/run-abi-suite.sh`，Loom 仍为 N/A）、定点 ABI 检查与全量验收（100 项通过、0 失败、6 行计时类仅作参考）。
+
+## 第二片：不可变完整契约快照与发布门槛（2026-11-07）
+
+- 分支：`dev/issue8-s2`
+- 基线：Wave 4 合入后的 `dc3f7ba`
+- 状态：实现完成，等待批次集成全量；本片不把定点结果表述成全量通过。
+
+### 1. 本片解决的问题
+
+第一片的 `abi/system-ids.lock` 只比较 ID、种类和名字，`abi-version.txt` 只声明版本号；两者都不能证明参数形状、Rights、Ring/Channel/Spawn 记录、取消/完成语义没有在同一主版本内被悄悄改变。本片新增按 ABI 版本独立保存的完整契约快照，并把快照与真实源码常量、登记表、构建脚本和 CI 连通。
+
+### 2. 已交付
+
+| 项 | 内容 |
+|---|---|
+| 契约导出 | `kernel_core::abi_contract::render_current` 从 `abi/system-ids.txt` 与源码权威常量生成确定性快照。接口按 ID 排序，改变登记表顺序不会造成无关差异。 |
+| syscall 覆盖 | 57 个登记操作都有一条参数/返回形状记录；全部操作和错误接口同时记录 ID、种类、单项版本与副作用。缺失、重复或额外签名都会使生成/构建失败。 |
+| Rights 覆盖 | `READ/WRITE/EXECUTE/WAIT/CONTROL/DUPLICATE/TRANSFER/MAP/SUBSCRIBE` 的名称与位值进入快照。 |
+| 定长布局 | 快照登记 Program ABI 章、256 位 syscall set、Ring SQE/CQE/enter/deadline-enter/MsgDesc、SpawnDesc v2、内存映射、RT/亲和、订阅、ABI-R 扩展描述符与设备记录/描述/能力记录的尺寸、版本、magic 和字段偏移。 |
+| 语义契约 | 明确记录 syscall 返回编码、能力检查顺序、Handle 世代、Rights 只降不升、异步请求单终态/发布顺序/取消线性化、spawn 子集与失败原子性、模块能力发布/撤回，以及未来跨域对象所需的身份、取消、服务死亡、回滚和同口径性能门槛。 |
+| 不可变快照 | 每个 ABI 版本对应 `abi/snapshots/<Major.Minor.Patch>.contract`。当前为 `abi/snapshots/1.0.0.contract`，214 行。生成工具拒绝覆盖已存在的不同快照。 |
+| 构建期门槛 | `kernel/build.rs` 渲染当前契约并校验：当前版本恰有一个同名快照且逐行一致；同主版本旧快照只能被新增条目扩展；Patch 升级必须保持正文完全相同；跨主版本不继承旧快照。失败直接阻止内核编译。 |
+| 发布脚本 | `scripts/abi-release.sh Major.Minor.Patch` 只能单调提升版本，更新唯一真源并创建该版本的新快照；随后运行完整快照检查。`scripts/abi-freeze.sh` 冻结名字/ID 后也复跑完整契约检查。 |
+| CI 历史不可变 | `scripts/abi-contract.sh immutable <base>` 拒绝修改、删除或重命名 base 中已有的快照，只允许新增文件；CI host job 使用完整 checkout 执行当前快照检查与历史门槛。 |
+
+### 3. 三类发布路径
+
+1. **内核变、ABI 不变**：不改 `abi-version.txt` 和任何快照；允许内部实现、性能和安全修复，只要外部契约未变。
+2. **同主版本新增次版本**：提升 Minor，新增快照。当前契约必须逐行包含旧快照的全部条目；可以新增操作/布局/语义，不能删除或改写旧条目。
+3. **主版本轮换**：提升 Major，新增该主版本的快照；不要求继承旧主版本的 ID、布局或语义。旧程序仍由装载器在执行前按 Major 明确拒绝。
+
+补丁版本单独受更严格约束：Patch 只表示不改变契约的修订，因此新增 Patch 快照的正文必须与同主同次的旧契约完全相等。
+
+### 4. 验证
+
+| 层 | 结果 |
+|---|---|
+| 快照生成/检查 | `bash scripts/abi-contract.sh check`：PASS，`1.0.0` 当前快照与源码一致 |
+| kernel-core 单元 | `cargo test -p kernel-core abi_contract --lib`：6 passed / 0 failed |
+| Proptest | `cargo test --manifest-path verification/toolbox/Cargo.toml --test abi_contract`：3 passed / 0 failed；任意正文行变异都被拒、任意伪造版本不能绕过当前快照要求 |
+| Miri | PASS：构建 VM `cargo +nightly miri test ... --test abi_contract contract_snapshot_rules_under_miri`，1 passed / 0 failed；只覆盖纯函数 |
+| cargo-fuzz | PASS：构建 VM `cargo fuzz run abi_contract -- -runs=100000`，100000 DONE、0 崩溃，最终 cov 335 / ft 1096。首轮抓到 fuzz 夹具自身在 UTF-8 非字符边界切分的问题；修正夹具后重新跑满 |
+| 内核构建期门槛 | `cargo check -p jasper-kernel --target x86_64-unknown-none --no-default-features`：PASS；构建脚本实际读取并校验当前快照 |
+| 真实装载回归 | `accept-20261107-144141` 定点 SPOT PASS：`ABI` 与 `m51pre` 均 PASS；缺章/损坏/跨主版本/次版本过新均在映射前拒绝，QEMU 37 仅为计时参考 |
+
+### 5. 明确边界与后续
+
+1. **能力清单尚未随程序 ABI 章下发**：本片让 Profile/能力的发布语义进入契约、防止未来悄悄改变，但用户程序的 `.note.jasper.abi` 仍只有版本字段；下一片需设计版本化的 required-capabilities 章，并在映射前按生效 Profile 的真实服务面校验。
+2. **Jasper 语言侧程序盖章**：当前真实用户程序都是仓库内 Rust 程序；Jasper 工具链可用时必须在同一装载门槛下增加真实 Jasper 产物。
+3. **语义文本仍是设计契约**：快照能机械阻止语义文字在同一主版本内被修改，但不能自动证明实现永远符合文字。实现行为由 Ring/调度/对象等专项验证承担。
+4. **历史不可变防误改**：CI 能阻止普通修改/删除旧快照；拥有仓库写权限并能同时修改 CI 的对手不在该门槛的威胁模型内。
