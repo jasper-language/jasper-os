@@ -62,7 +62,8 @@ pub struct IrqSpinLock<T> {
 pub struct LockStats {
     /// 加锁次数。
     pub acquired: u32,
-    /// 加锁时遇到占用（需要等待）的次数。
+    /// 已完成的加锁中，加锁时遇到占用（需要等待）的次数。
+    /// 与 `acquired` 成对提交，快照不会看到尚未完成的等待。
     pub contended: u32,
     /// 等待期间的累计自旋次数。
     pub spins: u32,
@@ -100,19 +101,24 @@ impl<T> IrqSpinLock<T> {
                 order_violation(c, e);
             }
         }
-        let guard = match self.inner.try_lock() {
-            Some(g) => g,
+        let (guard, contended, spins) = match self.inner.try_lock() {
+            Some(g) => (g, false, 0),
             None => {
-                self.contended.fetch_add(1, Ordering::Relaxed);
                 // Allocate exactly one FIFO ticket; do not repeatedly race for
                 // a free lock and bypass already queued processors. Author: chatgpt.
                 let (g, n) = self.inner.lock_counted();
-                self.spins.fetch_add(n, Ordering::Relaxed);
-                self.max_spins.fetch_max(n, Ordering::Relaxed);
-                g
+                (g, true, n)
             }
         };
         self.acquired[arch::cpu_index()].fetch_add(1, Ordering::Relaxed);
+        // Commit contention only after the acquisition exists. A concurrent
+        // snapshot may then observe either both counters or neither, never a
+        // contended acquisition that has not yet been acquired.
+        if contended {
+            self.contended.fetch_add(1, Ordering::Relaxed);
+            self.spins.fetch_add(spins, Ordering::Relaxed);
+            self.max_spins.fetch_max(spins, Ordering::Relaxed);
+        }
         IrqSpinLockGuard { guard: Some(guard), rank: self.class.map(|c| c.rank), was_enabled, _cpu_local: core::marker::PhantomData }
     }
 
@@ -134,7 +140,7 @@ impl<T> IrqSpinLock<T> {
         self.inner.try_lock()
     }
 
-    /// 加锁时遇到占用（需要等待）的次数。
+    /// 已完成的加锁中，加锁时遇到占用（需要等待）的次数。
     /// Number of contended acquisitions.
     pub fn contended(&self) -> u32 {
         self.contended.load(Ordering::Relaxed)
