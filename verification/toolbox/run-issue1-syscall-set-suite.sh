@@ -37,7 +37,7 @@ cargo test --manifest-path verification/toolbox/Cargo.toml --test syscall_set > 
 grep -q '5 passed; 0 failed' "$out/proptest.log"
 fi
 
-# 3. Miri：kernel-core 内的能力集合/参数块单元测试与工具箱固定链测试。
+# 3. Miri：kernel-core 内的 16 项能力集合/参数块测试与工具箱固定链测试。
 if want 3; then
 cargo +nightly miri test -p kernel-core --lib -- syscall_set:: spawn_abi:: > "$out/miri-core.log" 2>&1
 grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$out/miri-core.log"

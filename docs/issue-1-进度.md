@@ -134,10 +134,10 @@
 | 步 | 工具 | 结果 |
 |---|---|---|
 | ① | Verus/Z3 | 正例 37 verified / 0 errors；负例（只比较第一个字，即旧 `u64` 缺陷）按预期失败 |
-| ② | Proptest | 3 个性质对照 `BTreeSet` 参考模型全部通过 |
-| ③ | Miri | kernel-core 13 项 + 多级 spawn 固定链 1 项，无未定义行为 |
-| ④ | cargo-fuzz | `spawn_desc` 目标 200000 次无崩溃 |
-| ⑤ | Kani | 7 个生产代码 harness 全部 VERIFICATION SUCCESSFUL |
+| ② | Proptest | 5 项（3 个随机性质 + 2 个固定高编号链）全部通过 |
+| ③ | Miri | kernel-core 16 项 + 多级 spawn 固定链 1 项，无未定义行为 |
+| ④ | cargo-fuzz | `spawn_desc` 目标 200000 次无崩溃，cov 101 / ft 106 |
+| ⑤ | Kani | 本轮按发版规则未运行；既有 7 个生产 harness 证据保留在原提交 |
 | ⑥ | Loom | N/A：集合是无共享状态的值类型、准入为纯函数；以 QEMU 真实 spawn 断言替代 |
 
 定点验收结果（x86_64，单处理器）：
@@ -261,7 +261,7 @@ QEMU 串口同时出现
 |---|---|---|
 | 64 位宿主单元/属性 | `cargo test -p kernel-core` | 544 passed / 0 failed |
 | 32 位宿主单元/属性 | `cargo test -p kernel-core --target i686-unknown-linux-musl --lib` | 544 passed / 0 failed |
-| 六步链 | `verification/toolbox/run-issue1-syscall-set-suite.sh`（步骤 1/2/3/4/6） | 见 `verification/PROPERTIES.md` SYS-ABI-11 |
+| 六步链 | `verification/toolbox/run-issue1-syscall-set-suite.sh`（步骤 1/2/3/4/6） | Verus 37/0 + 负例按预期失败；Proptest 5/0；Miri 16+1；fuzz 200000 次 cov101；Loom N/A；Kani 发版时验证 |
 | 真实 QEMU | 共享锁内 `JASPER_ACCEPT=spot JASPER_CHECKS='m32 j6' bash scripts/accept.sh` | `accept-20261107-034359`：M3.2、J-6、J-6 计时均 PASS；`case=isohost` 与 `case=isohost-high-id-denied` 均退出 0，资源回基线 |
 
 QEMU 串口关键行：
