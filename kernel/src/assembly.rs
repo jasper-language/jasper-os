@@ -25,6 +25,7 @@ use kernel_core::assembly::{self, Assembly, AuditError, Binding, Health, Policy,
 use kernel_core::service_gate::{Gate, Lease};
 
 use crate::sync::IrqSpinLock;
+use crate::syscall::table::{AbiKind, ENTRIES};
 use crate::{bootcap, clock, job, kprintln, pci, profile, sched};
 
 /// 生效 Profile 的静态副本（装配保存 `&'static` 引用）。
@@ -43,6 +44,44 @@ static BOOT_BASE: IrqSpinLock<Option<BootResources>> = IrqSpinLock::new(None);
 
 /// 生命周期写者互斥：不与运行队列锁重叠，等待读者排空时可以让出处理器。
 static LIFECYCLE_WRITER: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy)]
+struct OperationAudit {
+    operations: usize,
+    kernel_base: usize,
+    module_services: usize,
+    active_unavailable: usize,
+    gate_mismatch: usize,
+}
+
+/// 核对完整服务面中的唯一所有者，并核对生效 Profile 的服务门。
+/// Audit unique owners in the complete service surface and live gates in the active profile.
+fn operation_audit(live: bool) -> Result<OperationAudit, &'static str> {
+    let mut report = OperationAudit {
+        operations: 0,
+        kernel_base: 0,
+        module_services: 0,
+        active_unavailable: 0,
+        gate_mismatch: 0,
+    };
+    for entry in ENTRIES.iter().filter(|entry| entry.kind == AbiKind::Op) {
+        report.operations += 1;
+        let full = kernel_core::assembly::operation_route(&kernel_core::profile::HEADLESS, entry.name)
+            .ok_or(entry.name)?;
+        if full.is_kernel_base() {
+            report.kernel_base += 1;
+        } else {
+            report.module_services += 1;
+        }
+        let active = kernel_core::assembly::operation_route(&ACTIVE, entry.name);
+        if active.is_none() {
+            report.active_unavailable += 1;
+        } else if live && enter_service(entry.name).is_none() {
+            report.gate_mismatch += 1;
+        }
+    }
+    Ok(report)
+}
 
 /// 内核能构建的全部模块的绑定（生效 Profile 未声明的条目被忽略）。
 static BINDINGS: [Binding; 9] = [
@@ -220,6 +259,13 @@ pub fn boot() -> u32 {
         kprintln!("[JSR-ASSEMBLY] error={}", assembly::AssemblyError::ProfileInvalid.name());
         return 1;
     };
+    let ownership = match operation_audit(false) {
+        Ok(report) => report,
+        Err(operation) => {
+            kprintln!("[JSR-K06-FAIL] unclaimed op={} ownership=incomplete", operation);
+            return 1;
+        }
+    };
     let mut asm = match Assembly::new(&ACTIVE, &BINDINGS) {
         Ok(a) => a,
         Err(e) => {
@@ -253,6 +299,27 @@ pub fn boot() -> u32 {
         bootcap::report_boot();
         *RUNTIME.lock() = Some(asm);
         PUBLICATIONS.publish(mask);
+        let live = operation_audit(true).unwrap_or(ownership);
+        let ring = enter_service("system.async.ring.create").is_some();
+        let time = enter_service("system.time.now").is_some();
+        let sync = enter_service("system.sync.mutex.try.acquire").is_some();
+        kprintln!(
+            "[JSR-K06] profile={} ops={} kernel_base={} module_service={} active_unavailable={} unclaimed=0 gate_mismatch={} ring={} time={} sync={}",
+            ACTIVE.name,
+            ownership.operations,
+            ownership.kernel_base,
+            ownership.module_services,
+            ownership.active_unavailable,
+            live.gate_mismatch,
+            if ring { "available" } else { "unavailable" },
+            if time { "available" } else { "unavailable" },
+            if sync { "available" } else { "unavailable" }
+        );
+        if live.gate_mismatch != 0 {
+            PUBLICATIONS.withdraw_and_wait(mask, || sched::yield_now());
+            *RUNTIME.lock() = None;
+            return 1;
+        }
         *BOOT_BASE.lock() = None;
     } else {
         // The failed assembly is not observable as a live service set. Its
@@ -366,36 +433,28 @@ pub fn acquire(capability: &str) -> Option<Lease<'static>> {
     PUBLICATIONS.acquire(bit as u32)
 }
 
-/// 系统调用进入模块服务的门：该操作属于生效 Profile 的某个模块服务时，租约必须覆盖整次执行；
-/// 不属于任何声明服务的操作由各自的调用授权处理。
-/// English: hold the serving module's publication lease across the operation.
+/// 系统调用进入已装配服务的凭据：租约必须覆盖整次执行。
+///
+/// 不存在“无所有者即可执行”的变体。完整内建服务面中的每个操作都必须有唯一所有者；
+/// 当前 Profile 未装配该所有者时，[`enter_service`] 返回 `None`。
+/// English: a lease over the operation; unowned or unassembled operations never execute.
 pub enum ServiceEntry {
     /// 持有对应模块能力租约。
     Held(Lease<'static>),
-    /// 该操作不属于任何 Profile 模块服务。
-    Ungated,
 }
 
-/// 为系统调用名取得服务租约；声明了服务但当前不可发布时返回 `None`。
-/// Acquire the service lease for an operation; `None` means a declared service is unavailable.
+/// 为系统调用名取得服务租约；操作无唯一所有者，或所有者在当前 Profile 中未装配/不可发布，
+/// 都返回 `None`。
+/// Acquire the unique owner's lease; `None` means the owner is absent or unavailable.
 pub fn enter_service(operation: &str) -> Option<ServiceEntry> {
-    for module in ACTIVE.modules {
-        let serves = module.services.iter().any(|service| {
-            operation
-                .strip_prefix(service)
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
-        });
-        if !serves {
-            continue;
+    let owner = assembly::operation_route(&ACTIVE, operation)?;
+    let module = ACTIVE.modules.iter().find(|module| module.name == owner.module)?;
+    for capability in module.provides {
+        if let Some(lease) = acquire(capability) {
+            return Some(ServiceEntry::Held(lease));
         }
-        for capability in module.provides {
-            if let Some(lease) = acquire(capability) {
-                return Some(ServiceEntry::Held(lease));
-            }
-        }
-        return None;
     }
-    Some(ServiceEntry::Ungated)
+    None
 }
 
 /// 运行期健康与停用时的快照；不返回锁内引用。

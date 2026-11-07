@@ -6,13 +6,14 @@
 //! 1. **查表**：只认登记表中的操作 ID；未登记 ⇒ `system.error.unsupported`
 //! 2. **统一权限检查**：当前任务的「可用系统调用集合」必须包含该 ID ⇒ 否则 `system.error.rights_denied`
 //!    （集合由创建任务的一方授予；M4 起再叠加针对句柄的 Rights 检查）
-//! 3. **服务可用性检查**：操作属于 Profile 模块服务时取得发布租约；模块已声明但当前不健康或
-//!    已撤回 ⇒ `system.error.unsupported`，与用户授权拒绝分开
+//! 3. **服务归属与可用性检查**：操作必须在完整服务面中有唯一模块所有者；当前 Profile 未装配、
+//!    不健康或已撤回 ⇒ `system.error.unsupported`，不存在无所有者直通路径，且与用户授权拒绝分开
 //! 4. **执行**：按 ID 分派到真实处理函数，租约覆盖整次执行
 //! 5. **返回约定**：非负 = 成功值；负数 = `-(错误码 ID)`
 //!
 //! # 不允许占位实现
-//! [`self_check`] 在启动时核对：登记表里的**每个**操作都必须有处理函数；缺一个内核就拒绝继续启动。
+//! [`self_check`] 在启动时核对：登记表里的**每个**操作都必须有处理函数和唯一服务所有者；
+//! 缺一个内核就拒绝继续启动。
 
 pub mod table;
 
@@ -131,6 +132,9 @@ pub fn self_check() -> Result<usize, &'static str> {
             return Err(e.name);
         }
         if !IMPLEMENTED.contains(e.id as u64) {
+            return Err(e.name);
+        }
+        if kernel_core::assembly::operation_route(&kernel_core::profile::HEADLESS, e.name).is_none() {
             return Err(e.name);
         }
         n += 1;

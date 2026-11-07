@@ -1901,10 +1901,18 @@ check_asm1() {  # issue #6 第一切片：服务装配——按依赖顺序启�
   fi
 }
 
+check_k06() {  # issue #11：每个登记操作有唯一服务所有者；未装配服务明确不可用
+  if has '^\[JSR-K06\] profile=headless ops=[0-9]+ kernel_base=[0-9]+ module_service=[0-9]+ active_unavailable=0 unclaimed=0 gate_mismatch=0 ring=available time=available sync=available'; then
+    record K06 PASS "完整服务面每个已登记操作恰有唯一所有者；完整 Profile 无未装配/门禁不一致；异步环、时间与同步基础服务均可用"
+  else
+    record K06 FAIL "缺少完整 Profile 的唯一服务所有者与实时门禁审计，或存在 unclaimed/gate_mismatch"
+  fi
+}
+
 check_pol2() {  # POL-2：系统 Profile——启动期校验、两份内建 Profile 的服务面真实不同、
                 # 四类非法 Profile 各自给出结构化拒绝原因、结构化描述可渲染
-  if has '\[JSR-PROFILE\] active name=headless valid=true params=(standard|compact) modules=9 services=12 capabilities=10 guarantees=2' \
-     && has '\[JSR-PROFILE\] table idx=1 name=headless-min valid=true modules=5 services=9' \
+  if has '\[JSR-PROFILE\] active name=headless valid=true params=(standard|compact) modules=9 services=17 capabilities=10 guarantees=2' \
+     && has '\[JSR-PROFILE\] table idx=1 name=headless-min valid=true modules=5 services=12' \
      && has '\[JSR-PROFILE\] gate profile=headless op=system\.async\.ring\.create allowed=true' \
      && has '\[JSR-PROFILE\] gate profile=headless-min op=system\.async\.ring\.create allowed=false' \
      && has '\[JSR-PROFILE\] gate profile=headless-min op=system\.time\.now allowed=true' \
@@ -1915,7 +1923,7 @@ check_pol2() {  # POL-2：系统 Profile——启动期校验、两份内建 Pro
      && has '\[JSR-PROFILE\] render idx=0 bytes=[0-9]+ head=profile=headless' \
      && has '\[JSR-PROFILE\] render idx=1 bytes=[0-9]+ head=profile=headless-min' \
      && has '\[JSR-PROFILE\] summary profiles=2 rejects=4 gates=3 renders=2 checks=30 failed=0'; then
-    record POL2 PASS "启动期校验通过：headless（9 模块 / 12 服务 / 10 能力）与 headless-min（5 模块 / 9 服务）服务面真实不同（异步环在精简档被门拒绝）；缺依赖 / 能力冲突 / 参数下限不可满足 / 未授权热加载四类各自给出结构化拒绝码；9/5 个模块逐项输出四层状态；30 项断言 0 失败"
+    record POL2 PASS "启动期校验通过：headless（9 模块 / 17 服务 / 10 能力）与 headless-min（5 模块 / 12 服务）服务面真实不同（异步环在精简档被门拒绝）；缺依赖 / 能力冲突 / 参数下限不可满足 / 未授权热加载四类各自给出结构化拒绝码；9/5 个模块逐项输出四层状态；30 项断言 0 失败"
   else
     record POL2 FAIL "缺少 [JSR-PROFILE] 关键标记、结构化拒绝不全、两份 Profile 服务面相同或 failed≠0"
   fi
@@ -2595,11 +2603,11 @@ if [ "$SPOT" -eq 1 ]; then
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_asm1; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
+  check_pol1; check_pol2; check_asm1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_asm1; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
+  check_pol1; check_pol2; check_asm1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------

@@ -171,6 +171,35 @@ fn duplicate_service_is_rejected() {
 }
 
 #[test]
+fn overlapping_service_prefixes_are_rejected_as_ambiguous() {
+    const MODULES: &[ModuleDecl] = &[full(
+        "a",
+        &[],
+        &[],
+        &["system.async", "system.async.ring"],
+        false,
+        0,
+        0,
+    )];
+    let errors = resolve(&sample(MODULES)).unwrap_err();
+    assert!(has(&errors, ProfileErrorCode::AmbiguousService, "system.async.ring"));
+}
+
+#[test]
+fn service_prefix_boundary_does_not_create_false_overlap() {
+    const MODULES: &[ModuleDecl] = &[full(
+        "a",
+        &[],
+        &[],
+        &["system.async", "system.asynchronous"],
+        false,
+        0,
+        0,
+    )];
+    resolve(&sample(MODULES)).expect("non-nested similar prefixes are distinct");
+}
+
+#[test]
 fn service_must_use_system_prefix() {
     const MODULES: &[ModuleDecl] = &[full("a", &[], &[], &["app.time"], false, 0, 0)];
     let errors = resolve(&sample(MODULES)).unwrap_err();
