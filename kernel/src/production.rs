@@ -11,7 +11,8 @@
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "s2-fuzz", feature = "krn1-soak",
-    feature = "fault-inject", feature = "selftest-inject-failure", feature = "bm1-vm",
+    feature = "fault-inject", feature = "boot-stage-rollback-verify",
+    feature = "selftest-inject-failure", feature = "bm1-vm",
 ))]
 compile_error!("production 不能和验收或故障注入特性同开");
 

@@ -588,7 +588,8 @@ const HIGHRES: &[Step] = &[st(Stage::HighRes)];
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "s2-only",
+    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "boot-stage-rollback-verify",
+    feature = "s2-only",
 )))]
 const FULL: &[Step] = &[
     case("krn0-tlb", Stage::Smp, "", krn0_tlb),
@@ -663,7 +664,8 @@ const FULL: &[Step] = &[
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "s2-only",
+    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "boot-stage-rollback-verify",
+    feature = "s2-only",
 )))]
 pub use full_selected::{NAME, PLAN};
 
@@ -671,7 +673,8 @@ pub use full_selected::{NAME, PLAN};
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "s2-only",
+    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "boot-stage-rollback-verify",
+    feature = "s2-only",
 )))]
 mod full_selected {
     use super::*;
@@ -694,6 +697,7 @@ const DEDICATED_SELECTED: usize = cfg!(feature = "rt1-verify") as usize
     + cfg!(feature = "evt2-broadcast-verify") as usize
     + cfg!(feature = "s3-nohz-verify") as usize
     + cfg!(feature = "shm1-verify") as usize
+    + cfg!(feature = "boot-stage-rollback-verify") as usize
     + cfg!(feature = "s2-only") as usize;
 const _: () = assert!(DEDICATED_SELECTED <= 1, "专项验收特性只能选一个");
 
@@ -885,6 +889,59 @@ mod dedicated {
     pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[st(Stage::IdleTick), PlanItem::Finish(finish)]];
 }
 
+#[cfg(feature = "boot-stage-rollback-verify")]
+mod dedicated {
+    use super::*;
+
+    pub const NAME: &str = "boot-stage-rollback";
+
+    fn duplicate_probe(ctx: &mut BootCtx) {
+        let refused = ctx.probe_duplicate(Stage::Capacity);
+        kprintln!(
+            "[JSR-BOOT-DUPLICATE] stage=capacity result={} state_unchanged={}",
+            if refused { "duplicate" } else { "accepted" },
+            refused
+        );
+        if !refused {
+            arch::exit_emulator(ExitStatus::Failure);
+        }
+    }
+
+    fn arm_assembly_failure(_: &mut BootCtx) {
+        let nth = crate::fault_inject::BOOT_ACTIVATION
+            .arm(0x7d03, 1)
+            .expect("one-shot boot activation fault window");
+        kprintln!("[JSR-BOOT-FAULT] point=assembly_activation nth={} armed=true", nth);
+    }
+
+    fn finish(_: &mut BootCtx) {
+        kprintln!("[JSR-BOOT-FAULT] point=assembly_activation observed=false");
+        arch::exit_emulator(ExitStatus::Failure);
+    }
+
+    pub const PLAN: &[&[Step]] = &[&[
+        st(Stage::Console),
+        st(Stage::Platform),
+        st(Stage::Timer),
+        st(Stage::Frames),
+        st(Stage::KernelMap),
+        st(Stage::Heap),
+        st(Stage::Capacity),
+        st(Stage::Devices),
+        st(Stage::Profile),
+        case("boot-duplicate-probe", Stage::Profile, "", duplicate_probe),
+        case("arm-boot-assembly-failure", Stage::Profile, "", arm_assembly_failure),
+        st(Stage::Assembly),
+        st(Stage::SchedMode),
+        st(Stage::Space),
+        st(Stage::Smp),
+        st(Stage::HighRes),
+        st(Stage::IdleTick),
+        st(Stage::UserRuntime),
+        PlanItem::Finish(finish),
+    ]];
+}
+
 #[cfg(feature = "s2-only")]
 mod dedicated {
     use super::*;
@@ -904,6 +961,7 @@ mod dedicated {
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "s2-only",
+    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "boot-stage-rollback-verify",
+    feature = "s2-only",
 ))]
 pub use dedicated::{NAME, PLAN};

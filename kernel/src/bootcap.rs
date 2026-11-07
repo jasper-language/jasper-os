@@ -46,14 +46,21 @@ fn read_record() -> [u8; RECORD_LEN] {
     unsafe { core::ptr::read_volatile(&RECORD) }
 }
 
-/// 分配 `n` 项并逐项用 `fill` 初始化，之后常驻（启动期表存储，永不释放）。内核堆不足返回 `None`。
-pub fn try_leak<T>(n: usize, mut fill: impl FnMut() -> T) -> Option<&'static mut [T]> {
+/// 分配 `n` 项并逐项用 `fill` 初始化。内核堆不足返回 `None`。
+/// Allocate and initialise `n` items, returning ownership to the caller.
+pub fn try_boxed<T>(n: usize, mut fill: impl FnMut() -> T) -> Option<Box<[T]>> {
     let mut v = Vec::new();
     v.try_reserve_exact(n).ok()?;
     for _ in 0..n {
         v.push(fill());
     }
-    Some(Box::leak(v.into_boxed_slice()))
+    Some(v.into_boxed_slice())
+}
+
+/// 分配 `n` 项并逐项用 `fill` 初始化，之后常驻（启动期表存储，永不释放）。内核堆不足返回 `None`。
+/// Allocate and leak boot-time table storage.
+pub fn try_leak<T>(n: usize, fill: impl FnMut() -> T) -> Option<&'static mut [T]> {
+    try_boxed(n, fill).map(Box::leak)
 }
 
 /// 三张表合计可用的内存预算：堆上限减去 IPC 全系统配额的两倍。

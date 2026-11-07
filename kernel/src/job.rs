@@ -41,6 +41,18 @@ pub fn active() -> bool {
     ACTIVE.load(Ordering::Acquire)
 }
 
+/// 启动期回滚：撤下尚未使用的空作业队列，重复回滚是空操作。
+/// Boot rollback for the unused empty job queue; repeating it is a no-op.
+pub fn rollback_boot() -> bool {
+    if !ACTIVE.compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire).is_ok()
+        && ACTIVE.load(Ordering::Acquire)
+    {
+        return false;
+    }
+    reset();
+    true
+}
+
 /// 提交作业。
 pub fn submit(id: u32, priority: JobPriority, deps: &[u32]) -> Result<(), JobError> {
     // Profile 没有声明 `sched.batch` 时，批处理接口整体不存在（与实时能力的口径一致）。

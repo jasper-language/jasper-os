@@ -37,6 +37,10 @@ static PUBLICATIONS: Gate = Gate::new();
 static RUNTIME: IrqSpinLock<Option<Assembly>> =
     IrqSpinLock::ranked(crate::lockorder::ASSEMBLY, None);
 
+/// `assembly` 阶段开始前的启动期资源快照；只在单处理器启动期访问。
+/// Boot-resource snapshot taken immediately before the assembly stage starts.
+static BOOT_BASE: IrqSpinLock<Option<BootResources>> = IrqSpinLock::new(None);
+
 /// 生命周期写者互斥：不与运行队列锁重叠，等待读者排空时可以让出处理器。
 static LIFECYCLE_WRITER: AtomicBool = AtomicBool::new(false);
 
@@ -52,6 +56,37 @@ static BINDINGS: [Binding; 9] = [
     Binding { module: "async", activate: async_ready, deactivate: None },
     Binding { module: "devices", activate: devices_activate, deactivate: None },
 ];
+
+/// 启动期回滚需要核对的资源类别。
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BootResources {
+    objects: usize,
+    tasks: usize,
+    rt: usize,
+    job: bool,
+    pci: bool,
+    published: u32,
+    runtime: bool,
+    heap_total: usize,
+    heap_free: usize,
+    heap_mapped: u64,
+}
+
+fn boot_resources() -> BootResources {
+    let (heap_total, heap_free, _, heap_mapped) = crate::mm::heap::stats();
+    BootResources {
+        objects: crate::kobj::capacity(),
+        tasks: crate::sched::slots(),
+        rt: crate::rt::capacity(),
+        job: job::active(),
+        pci: pci::ready(),
+        published: PUBLICATIONS.mask(),
+        runtime: RUNTIME.lock().is_some(),
+        heap_total,
+        heap_free,
+        heap_mapped,
+    }
+}
 
 /// `core` 模块激活时安装对象表，并执行销毁分派登记一致性检查。
 /// Install the object table and verify the destroy-dispatch registry.
@@ -82,6 +117,10 @@ fn core_activate() -> Result<(), &'static str> {
 
 /// 内存服务需要内核堆已初始化（映射服务先于堆建立，堆可用即映射可用）。
 fn memory_ready() -> Result<(), &'static str> {
+    #[cfg(feature = "fault-inject")]
+    if crate::fault_inject::BOOT_ACTIVATION.hit() {
+        return Err("injected boot activation failure");
+    }
     let (total, _, _, mapped) = crate::mm::heap::stats();
     if total == 0 || mapped == 0 {
         return Err("kernel heap not initialized");
@@ -175,6 +214,8 @@ fn async_ready() -> Result<(), &'static str> {
 /// 调用方必须拒绝继续启动。每个模块输出一行 `[JSR-ASSEMBLY] module=…`。
 /// English: assemble, audit and publish; returns the number of failures.
 pub fn boot() -> u32 {
+    let base = boot_resources();
+    *BOOT_BASE.lock() = Some(base);
     let Some(declared) = profile::resolved() else {
         kprintln!("[JSR-ASSEMBLY] error={}", assembly::AssemblyError::ProfileInvalid.name());
         return 1;
@@ -194,8 +235,6 @@ pub fn boot() -> u32 {
             return 1;
         }
     };
-    bootcap::restore_heap();
-    bootcap::report_boot();
     for k in 0..asm.len() {
         let Some(name) = asm.order(k) else { break };
         let (state, reason) = asm.state(name).unwrap_or((assembly::State::Declared, ""));
@@ -209,9 +248,16 @@ pub fn boot() -> u32 {
     let stop = asm.stop("core").err().map_or("none", |e| e.name());
     let stop_devices = asm.preflight_stop("devices").err().map_or("none", |e| e.name());
     let publish = audit.is_ok() && report.failed == 0 && report.blocked == 0;
-    *RUNTIME.lock() = Some(asm);
     if publish {
+        bootcap::restore_heap();
+        bootcap::report_boot();
+        *RUNTIME.lock() = Some(asm);
         PUBLICATIONS.publish(mask);
+        *BOOT_BASE.lock() = None;
+    } else {
+        // The failed assembly is not observable as a live service set. Its
+        // boot-owned resources are undone by the stage rollback action.
+        drop(asm);
     }
     kprintln!(
         "[JSR-ASSEMBLY] summary profile={} modules={} ready={} failed={} blocked={} declared={} published={} pre_publish={} audit={} restart={} stop_core={} stop_devices={} generation={} readers={}",
@@ -231,6 +277,67 @@ pub fn boot() -> u32 {
         PUBLICATIONS.readers()
     );
     u32::from(report.failed) + u32::from(report.blocked) + u32::from(audit.is_err())
+}
+
+/// `assembly` 阶段的启动期回滚：释放本阶段安装且仍为空的服务表，并逐项核对资源基线。
+///
+/// 该动作只在启动失败路径调用；它不把启动期常驻模块变成运行期可停用模块，也不改变对象
+/// 释放协议。返回 `true` 表示对象表、任务槽位、实时容量、作业/PCI 状态及堆统计都回到阶段
+/// 开始前的值。
+/// Roll back boot-owned assembly resources and verify the pre-stage resource baseline.
+pub fn rollback_boot() -> bool {
+    let Some(base) = *BOOT_BASE.lock() else {
+        kprintln!("[JSR-BOOT-ROLLBACK] owner=assembly baseline=missing resources_baseline=false");
+        return false;
+    };
+    let occupied = boot_resources();
+    let objects = crate::kobj::rollback_boot().is_ok();
+    let rt = crate::rt::rollback_boot();
+    let jobs = job::rollback_boot();
+    let now = boot_resources();
+    let used_before = base.heap_total.saturating_sub(base.heap_free);
+    let used_after = now.heap_total.saturating_sub(now.heap_free);
+    // The heap deliberately grows without shrinking. Baseline is allocated bytes,
+    // not mapped capacity: newly mapped but fully free pages are not occupied.
+    let heap_used_restored =
+        used_after == used_before && now.heap_total >= base.heap_total && now.heap_free >= base.heap_free;
+    let resources_baseline = objects
+        && rt
+        && jobs
+        && now.objects == base.objects
+        && now.tasks == base.tasks
+        && now.rt == base.rt
+        && now.job == base.job
+        && now.pci == base.pci
+        && now.published == base.published
+        && now.runtime == base.runtime
+        && heap_used_restored;
+    kprintln!(
+        "[JSR-BOOT-ROLLBACK] owner=assembly objects_before={} objects_after={} tasks_before={} tasks_after={} rt_before={} rt_after={} job_before={} job_after={} pci_before={} pci_after={} published_before={:#x} published_after={:#x} runtime_before={} runtime_after={} heap_used_before={} heap_used_after={} heap_mapped_before={} heap_mapped_after={} heap_used_restored={} resources_baseline={}",
+        occupied.objects,
+        now.objects,
+        occupied.tasks,
+        now.tasks,
+        occupied.rt,
+        now.rt,
+        occupied.job,
+        now.job,
+        occupied.pci,
+        now.pci,
+        occupied.published,
+        now.published,
+        occupied.runtime,
+        now.runtime,
+        used_before,
+        used_after,
+        base.heap_mapped,
+        now.heap_mapped,
+        heap_used_restored,
+        resources_baseline
+    );
+    *RUNTIME.lock() = None;
+    *BOOT_BASE.lock() = None;
+    resources_baseline
 }
 
 fn audit_name(a: Result<(), AuditError>) -> &'static str {

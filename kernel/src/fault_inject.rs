@@ -4,6 +4,7 @@ pub static FRAME: FaultPoint = FaultPoint::new();
 pub static HEAP: FaultPoint = FaultPoint::new();
 pub static RESET_TIMEOUT: FaultPoint = FaultPoint::new();
 pub static IPI_TIMEOUT: FaultPoint = FaultPoint::new();
+pub static BOOT_ACTIVATION: FaultPoint = FaultPoint::new();
 
 /// Bootstrap acceptance: explicitly arm each real hook, then verify recovery.
 /// Calls occur before general workloads; a seed fixes the per-site invocation.

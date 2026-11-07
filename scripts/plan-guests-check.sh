@@ -35,6 +35,7 @@ evt2-broadcast-verify:evt2-broadcast s3-nohz-verify:s3-nohz shm1-verify:shm1"
 if [ "$MATRIX" = 1 ]; then
   for spec in \
     "$KTARGET --features s2-only" "$KTARGET --features s2-fuzz" "$KTARGET --features krn1-soak" "$KTARGET --features fault-inject" \
+    "$KTARGET --features boot-stage-rollback-verify" \
     "$KTARGET --features sched-rr" "$KTARGET --features profile-compact" "$KTARGET --no-default-features" \
     "$KTARGET --no-default-features --features production" "$KTARGET --features ns-dirty-audit,rt2-verify" \
     "aarch64-unknown-none --no-default-features" "aarch64-unknown-none --no-default-features --features production"; do
