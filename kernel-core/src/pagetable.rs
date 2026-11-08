@@ -197,6 +197,58 @@ impl<F: EntryFormat, M: TableMemory> PageTable<F, M> {
         PhysFrame::from_start(F::output_address(e)).ok_or(MapError::InvalidAddress)
     }
 
+    /// Unmap one 4 KiB page and free every lower-level table made empty by
+    /// removing it. The root table is always retained by its owner.
+    ///
+    /// This is the ownership-preserving unmap used by second-level guest
+    /// address spaces: repeated map/unmap cycles across different regions
+    /// must not accumulate otherwise-unreachable page-table frames.
+    pub fn unmap_and_prune(
+        &mut self,
+        va: u64,
+        frames: &mut dyn FrameAllocator,
+    ) -> Result<PhysFrame, MapError> {
+        Self::check(va)?;
+        let mut tables = [0u64; MAX_LEVELS];
+        let mut indices = [0usize; MAX_LEVELS - 1];
+        let mut table = self.root;
+        tables[0] = table;
+        for level in 0..F::LEVELS - 1 {
+            let index = Self::index(va, level);
+            let entry = self.mem.read(table, index);
+            if !F::is_valid(entry) {
+                return Err(MapError::NotMapped);
+            }
+            if !F::is_table(entry) {
+                return Err(MapError::HugePage);
+            }
+            indices[level] = index;
+            table = F::output_address(entry);
+            tables[level + 1] = table;
+        }
+
+        let leaf_index = Self::index(va, F::LEVELS - 1);
+        let leaf = self.mem.read(table, leaf_index);
+        if !F::is_valid(leaf) {
+            return Err(MapError::NotMapped);
+        }
+        self.mem.write(table, leaf_index, 0);
+        let frame = PhysFrame::from_start(F::output_address(leaf)).ok_or(MapError::InvalidAddress)?;
+
+        // Remove bottom-up. Once one level is non-empty, every ancestor still
+        // owns a live child and must remain installed.
+        for level in (1..F::LEVELS).rev() {
+            let child = tables[level];
+            if (0..Self::ENTRIES).any(|i| F::is_valid(self.mem.read(child, i))) {
+                break;
+            }
+            let parent = tables[level - 1];
+            self.mem.write(parent, indices[level - 1], 0);
+            frames.deallocate(PhysFrame::from_number(child / FRAME_SIZE)).map_err(|_| MapError::OutOfFrames)?;
+        }
+        Ok(frame)
+    }
+
     /// 查询 `va` 所在 4 KiB 页的映射与权限（地址不必对齐）；未映射或位于大页块内返回 `None`。只读，不修改任何表。
     /// Look up the 4 KiB mapping containing `va`; read-only.
     pub fn translate(&self, va: u64) -> Option<(PhysFrame, MapFlags)> {
@@ -499,6 +551,27 @@ mod tests {
         assert_eq!(pt.free_tables(32..64, &mut frames), 3);
         assert!(frames.live.is_empty(), "下级表全部回收");
         assert_eq!(pt.translate(va + FRAME_SIZE), None);
+    }
+
+    #[test]
+    fn unmap_and_prune_reclaims_only_empty_branches() {
+        let mut mem = Mem::default();
+        let mut frames = Frames::new(16);
+        let mut pt = Pt::new(ROOT, &mut mem);
+        let va = 0x1000_0000_0000u64 + 0x5000;
+        let first = PhysFrame::from_start(DATA).unwrap();
+        let second = PhysFrame::from_start(DATA + FRAME_SIZE).unwrap();
+        pt.map(va, first, MapFlags::WRITE, &mut frames).unwrap();
+        pt.map(va + FRAME_SIZE, second, MapFlags::READ_ONLY, &mut frames).unwrap();
+        assert_eq!(frames.live.len(), 3, "both pages share three lower tables");
+
+        assert_eq!(pt.unmap_and_prune(va, &mut frames), Ok(first));
+        assert_eq!(frames.live.len(), 3, "shared lower tables stay installed");
+        assert_eq!(pt.translate(va + FRAME_SIZE), Some((second, MapFlags::READ_ONLY)));
+
+        assert_eq!(pt.unmap_and_prune(va + FRAME_SIZE, &mut frames), Ok(second));
+        assert!(frames.live.is_empty(), "last leaf removal prunes the complete branch");
+        assert!(pt.translate(va + FRAME_SIZE).is_none());
     }
 
     #[test]

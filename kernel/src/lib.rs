@@ -117,7 +117,9 @@ pub mod syscall;
 pub mod task;
 pub mod user_demo;
 #[cfg(target_arch = "x86_64")]
-pub mod hwvirt_demo;
+pub use arch::hwvirt_demo;
+#[cfg(target_arch = "x86_64")]
+pub mod hwv1_demo;
 #[cfg(feature = "rt3-verify")]
 pub mod rt3_demo;
 pub mod virtio;
@@ -153,6 +155,7 @@ pub mod rt1_demo;
 pub mod task_control;
 pub mod user_mutex;
 pub mod user_timer;
+pub mod vcpu;
 
 #[cfg(feature="rt2-verify")]
 pub mod rt2_demo;

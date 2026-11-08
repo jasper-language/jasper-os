@@ -85,6 +85,7 @@ Wave 6–9 的架构债与 S-4 / FV-4 / HWV-0 里程碑已完成。
 | S-4 | KRN-3 后每核锁、迁移、跨核继承短时交错压力 | ✅ 宿主 KVM CPU 4–11、8 vCPU、3×300 秒；每次都完成 301 轮，wake 5134/302，`deadlocks=0`、`invariant_violations=0`、资源/堆守恒，QEMU 退出 33；见 `docs/S-4-status.md` |
 | FV-4 | 地址空间隔离、SHM 别名、TLB 击落与页帧生命周期组合验证 | ✅ Verus no-go 沿用；TLA+ 组合模型正例无 Safety 违例、旧视图释放负例被拒；原 TLB 模型 940 可达状态、超时隔离 6 状态；生产 M2.4 / HARDEN-1C / TLB-KRN0 / SHM-1 与多核 KVM 回归；见 `docs/FV-4-status.md` |
 | HWV-0 | VMX/SVM、EPT/NPT、IOMMU、中断重映射、xAPIC/x2APIC 能力发现与拒绝契约 | ✅ 10 项机器可读能力矩阵；真实 KVM `vendor=Intel caps=0x105 selected=vmx reject=iommu`；未知位/无后端/厂商不匹配/缺能力/依赖不完整均结构化拒绝，不构造空后端；未进入 VMX/SVM，后续 HWV-1～7 独立排期 |
+| HWV-1 | vCPU Handle/Rights、状态保存恢复、48 位 GPA、EPT/NPT、Memory 固定与失效 | ✅ 独立 vCPU 对象契约；Offline/Ready 生命周期；稳定边界状态保存；每 vCPU 独立四级 EPT/NPT 根；同一 Memory 多 GPA 别名与跨 vCPU 同 GPA 隔离；失败原子、取消映射回收空中间表、Memory pin 与全部资源回基线；未执行 VM Entry；完整 KVM `accept-20261108-173014` ALL PASS，见 `docs/HWV-1-status.md` |
 | ABI 与调度第一批切片 | 按需扩展的系统调用集合与统一 spawn 授权、对象类型登记表与句柄创建检查、期限事件增量同步、统一定时事件契约与每核仲裁 | ✅ 全量验收 99 项通过、0 失败（x86_64 单核 / 4 核 / 8 核 / q35）；另有 5 行计时类超界仅作 QEMU 参考，性能以裸机为准；各切片的后续范围见 `docs/issue-1/2/3/4-进度.md` |
 | SyscallSet / spawn 性能（issue #1） | 2048 样本 p50/p99/p99.9/max 基准：生产 256 位集合与旧 u64 参考模型的 contains/subset/copy 对比、88 字节 SpawnDesc 解码、用户 syscall/ring/IPC 端到端 | ✅ 三轮宿主 KVM（CPU 4–11）T-2 PASS；contains/copy 各约增加 6 周期，subset 无可测回归，calls 字段 p99.9 增加 ≤18 周期；原始数据见 `docs/issue-1-进度.md` 第十节 |
 | 任务系统调用集合替换（issue #1 保留 ABI 片） | `system.task.syscalls.set` 启用：32 字节唯一 `SyscallSet`、target=0 为自身、Task 句柄需 CONTROL、请求 ⊆ 调用者当前集合 ∧ 请求 ⊆ 登记集合；检查与写回在调度器事务内失败原子；Rust 运行时提供 `set_calls` / `set_current_calls`。因已发布 reserved 契约变更，ABI 升到 2.0.0 | ✅ 32/64 位 kernel-core 各 559 tests；KVM `accept-20261107-183039` M3.2/J-6 PASS，真实 CPL3 覆盖目标线程收缩、自收缩、失败原子性、越权/未登记/无效目标拒绝，`ops=62`，资源回基线；Jasper 语言侧构造仍未完成 |
@@ -194,8 +195,9 @@ Jasper 只经语言无关、版本化的系统接口（`system.*`）使用内核
 - `#2/#3/#4/#5/#6/#7/#8/#11` 已完成关闭；`#10/#12/#13` 是长期研究项。
 - `#1` 的操作系统侧 256 位能力集合、spawn 授权与 `system.task.syscalls.set` 已完成；
   issue 保持打开仅因为 Jasper 语言侧能力集合构造尚未落地。
-- S-4、FV-4、HWV-0 已完成。HWV-1～7 是独立大型系列，覆盖真实 Intel/AMD
-  VMX/SVM、EPT/NPT、VM-Exit、虚拟设备与 IOMMU 直通，尚未启动。
+- S-4、FV-4、HWV-0、HWV-1 已完成。HWV-1 目前到 vCPU 管理面、GPA 与
+  可回收 EPT/NPT 表为止，没有执行 VM Entry；HWV-2～7 仍覆盖真实 Intel/AMD
+  VMX/SVM、VM-Exit、虚拟设备与 IOMMU 直通。
 - 下一阶段先做性能与扩展性基线（PEX-0），测量全局调度事务、多 Ring 并行、
   对象表锁、页帧缓存、内核堆、TLB 公告板和本核选择路径，再依据数据决定是否修改结构。
 - 当前仍没有文件系统、网络、GPU 或运行期内核模块装卸；这些能力不会用空后端或临时接口冒充完成。

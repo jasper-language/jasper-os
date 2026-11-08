@@ -52,6 +52,8 @@ pub enum Kind {
     Mutex,
     /// 用户可见定时器，绑定创建者进程。
     Timer,
+    /// 硬件虚拟化 vCPU；固定 Memory 对象，不携带句柄。
+    Vcpu,
     /// 共享内存页存储。
     Memory,
     /// 事件。
@@ -62,7 +64,7 @@ pub enum Kind {
 
 impl Kind {
     /// 种类数。
-    pub const COUNT: usize = 13;
+    pub const COUNT: usize = 14;
     /// 全部种类（按声明顺序）。
     pub const ALL: [Kind; Kind::COUNT] = [
         Kind::Process,
@@ -75,6 +77,7 @@ impl Kind {
         Kind::EventSource,
         Kind::Mutex,
         Kind::Timer,
+        Kind::Vcpu,
         Kind::Memory,
         Kind::Event,
         Kind::Device,
@@ -349,6 +352,20 @@ pub const REGISTRY: [Contract; Kind::COUNT] = [
         destroy: Destroy::None,
         destroy_locks: DestroyLocks::None,
         strong: &[],
+        tree_self: false,
+        carries: Carry::Nothing,
+    },
+    Contract {
+        kind: Kind::Vcpu,
+        name: "Vcpu",
+        handle: Some(ObjectType::Vcpu),
+        rights: Rights::READ.union(Rights::WRITE).union(Rights::WAIT).union(Rights::CONTROL).union(Rights::DUPLICATE),
+        transferable: false,
+        closing: Closing::InLock, // stop state changes and release all pinned Memory objects
+        closing_locks: ClosingLocks::ObjectTable,
+        destroy: Destroy::None,
+        destroy_locks: DestroyLocks::None,
+        strong: &[Kind::Memory],
         tree_self: false,
         carries: Carry::Nothing,
     },

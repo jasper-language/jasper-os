@@ -224,6 +224,8 @@ pub enum ObjectType {
     /// User-visible inherited mutex. The object contains no handles; wait
     /// edges live in the scheduler and blocked calls retain the object.
     Mutex,
+    /// Hardware-virtualization vCPU.
+    Vcpu,
     EventSource,
     Subscription,
 }
@@ -231,7 +233,7 @@ pub enum ObjectType {
 impl ObjectType {
     /// 全部句柄类型（按声明顺序；登记表与验证用）。
     /// All handle types in declaration order.
-    pub const ALL: [ObjectType; 13] = [
+    pub const ALL: [ObjectType; 14] = [
         ObjectType::Event,
         ObjectType::Timer,
         ObjectType::Ring,
@@ -243,6 +245,7 @@ impl ObjectType {
         ObjectType::Interrupt,
         ObjectType::Memory,
         ObjectType::Mutex,
+        ObjectType::Vcpu,
         ObjectType::EventSource,
         ObjectType::Subscription,
     ];
@@ -266,6 +269,7 @@ impl ObjectType {
             ObjectType::AddressSpace => "AddressSpace",
             ObjectType::Memory => "Memory",
             ObjectType::Mutex => "Mutex",
+            ObjectType::Vcpu => "Vcpu",
             ObjectType::EventSource => "EventSource",
             ObjectType::Subscription => "Subscription",
             ObjectType::Channel => "Channel",

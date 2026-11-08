@@ -1,16 +1,27 @@
 //! HWV-0 discovery probe. It never enters VMX root or SVM host mode.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use kernel_core::hwvirt::{
     select, Backend, Capabilities, Capability, ContractError, Discovery, Request, Vendor,
 };
 use crate::kprintln;
 
 static FAILED: AtomicU32 = AtomicU32::new(0);
+static SELECTED_BACKEND: AtomicU8 = AtomicU8::new(0);
 
 pub fn failed() -> u32 {
     FAILED.load(Ordering::Relaxed)
+}
+
+/// Backend selected by the real HWV-0 probe. `None` means the host exposed no
+/// supported hardware-virtualization backend.
+pub fn selected_backend() -> Option<Backend> {
+    match SELECTED_BACKEND.load(Ordering::Acquire) {
+        1 => Some(Backend::Vmx),
+        2 => Some(Backend::Svm),
+        _ => None,
+    }
 }
 
 fn read_msr(index: u32) -> u64 {
@@ -87,6 +98,14 @@ pub fn run() {
         Ok(Backend::Svm) => "svm",
         Err(_) => "unsupported",
     };
+    SELECTED_BACKEND.store(
+        match selected {
+            Ok(Backend::Vmx) => 1,
+            Ok(Backend::Svm) => 2,
+            Err(_) => 0,
+        },
+        Ordering::Release,
+    );
 
     let rejection = select(
         discovery,

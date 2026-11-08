@@ -24,6 +24,55 @@ pub mod riscv;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64", target_arch = "riscv32"))]
 pub mod phys_tables;
 
+#[cfg(target_arch = "x86_64")]
+pub use self::x86_64::second_level;
+#[cfg(target_arch = "x86_64")]
+pub use self::x86_64::hwvirt_demo;
+
+/// Hardware second-level paging is only defined for the x86 VMX/SVM
+/// backends in HWV-1. Other targets compile the vCPU object contract but
+/// cannot construct a working second-level address space.
+#[cfg(not(target_arch = "x86_64"))]
+pub mod second_level {
+    use kernel_core::frame::PhysFrame;
+    use kernel_core::hwvirt::Backend;
+    use kernel_core::hwvirt_vcpu::GuestPermissions;
+    use kernel_core::paging::MapError;
+
+    pub struct SecondLevel;
+
+    impl SecondLevel {
+        pub fn new(_: Backend) -> Result<Self, MapError> {
+            Err(MapError::InvalidAddress)
+        }
+
+        pub fn backend(&self) -> Backend {
+            unreachable!("unsupported second-level backend")
+        }
+
+        pub fn root_physical(&self) -> u64 {
+            0
+        }
+
+        pub fn map(
+            &mut self,
+            _: u64,
+            _: &[PhysFrame],
+            _: GuestPermissions,
+        ) -> Result<(), MapError> {
+            Err(MapError::InvalidAddress)
+        }
+
+        pub fn unmap(&mut self, _: u64, _: u64) -> Result<(), MapError> {
+            Err(MapError::InvalidAddress)
+        }
+
+        pub fn translate(&self, _: u64) -> Option<PhysFrame> {
+            None
+        }
+    }
+}
+
 /// 当前编译目标的平台实现。
 #[cfg(target_arch = "x86_64")]
 pub use self::x86_64::X86_64 as Current;

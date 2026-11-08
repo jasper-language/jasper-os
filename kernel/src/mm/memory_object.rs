@@ -62,4 +62,16 @@ impl MemoryObject {
         let mut refs = Vec::new(); refs.try_reserve_exact(len).ok()?;
         refs.extend(source.iter().cloned()); Some(refs)
     }
+
+    /// Return the physical frames for a range. The caller must retain the
+    /// Memory object itself for the lifetime of the second-level mapping.
+    pub fn physical_range(&self, offset_pages: u64, pages: u64) -> Option<Vec<kernel_core::frame::PhysFrame>> {
+        let start = usize::try_from(offset_pages).ok()?;
+        let len = usize::try_from(pages).ok()?;
+        let source = self.pages.get(start..start.checked_add(len)?)?;
+        let mut frames = Vec::new();
+        frames.try_reserve_exact(len).ok()?;
+        frames.extend(source.iter().map(|page| page.frame()));
+        Some(frames)
+    }
 }

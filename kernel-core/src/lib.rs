@@ -158,5 +158,6 @@ pub mod timer_event;
 pub mod timer_progress;
 pub mod dirty_slots;
 pub mod hwvirt;
+pub mod hwvirt_vcpu;
 
 pub mod ns_budget;

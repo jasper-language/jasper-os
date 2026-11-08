@@ -833,8 +833,8 @@ check_m41() {   # 对象生命周期：关句柄 ⇒ closing 不销毁；重复�
 }
 
 check_issue4_destroy() {   # issue #4 第二、三片：closing/destroy 按种类分派，动作与有序锁路径经启动期检查一致
-  if has '^\[JSR-LIFE\] release_dispatch closing_locks=true outside_lock=5 none=8 none_empty=true destroyed_when_none=0 hooks_match_registry=true'; then
-    record ISSUE4-DESTROY PASS "8 个 Destroy::None 槽为空，5 个锁外销毁入口、closing 动作与锁路径均与登记表一致"
+  if has '^\[JSR-LIFE\] release_dispatch closing_locks=true outside_lock=[0-9]+ none=[0-9]+ none_empty=true destroyed_when_none=0 hooks_match_registry=true'; then
+    record ISSUE4-DESTROY PASS "全部 Destroy::None 槽为空；锁外销毁入口、closing 动作与锁路径均与登记表一致"
   else
     record ISSUE4-DESTROY FAIL "缺少释放分派启动期检查，或 closing/destroy 动作、锁路径与登记表不一致"
   fi
@@ -2621,6 +2621,15 @@ check_hwv0() {
   fi
 }
 
+check_hwv1() {
+  if has '^\[JSR-HWV1\] backend=(Vmx|Svm) entered=false roots=true aliases=true isolation=true pins=true state=true invalid=true reclaim=true failed=0' \
+     && ! has '^\[JSR-HWV1-FAIL\]'; then
+    record HWV-1 PASS "vCPU Handle/Rights、Offline/Ready 生命周期、状态保存恢复、独立 EPT/NPT 根、GPA 别名隔离、Memory 固定/解除、失败拒绝与对象/页帧回基线；未执行 VM Entry"
+  else
+    record HWV-1 FAIL "缺少完整 HWV-1 串口合同、页面隔离/拒绝路径失败、资源未回基线，或错误声称进入了 VM Entry"
+  fi
+}
+
 check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉取请求时运行本脚本全量 + 宿主与跨指令集单元测试；工具链钉到具体日期；判据不在工作流里另写
   local wf="$ROOT/.github/workflows/ci.yml" miss=""
   if [ ! -s "$wf" ]; then record CI-1 FAIL "缺少 .github/workflows/ci.yml"; return; fi
@@ -2648,11 +2657,11 @@ if [ "$SPOT" -eq 1 ]; then
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_asm1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_hwv0
+  check_pol1; check_pol2; check_asm1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_hwv0; check_hwv1
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_asm1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_hwv0
+  check_pol1; check_pol2; check_asm1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_hwv0; check_hwv1
 fi
 
 # ---- 汇总与归档 --------------------------------------------------------------

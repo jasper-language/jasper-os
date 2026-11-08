@@ -78,6 +78,8 @@ pub const SUMMARIES: &[Summary] = &[
     row("profile", profile_demo::failed),
     #[cfg(target_arch = "x86_64")]
     row("hwv0", crate::hwvirt_demo::failed),
+    #[cfg(target_arch = "x86_64")]
+    row("hwv1", crate::hwv1_demo::failed),
     row("job", job_demo::failed),
     row("rtclass", rtclass_demo::failed),
     both("arbiter", arbiter_demo::failed, arbiter_demo::timing_failed),
@@ -237,6 +239,11 @@ fn hardware_virt(_: &mut BootCtx) {
     if crate::hwvirt_demo::failed() != 0 {
         kprintln!("[JSR-HWV0-FAIL] failed={}", crate::hwvirt_demo::failed());
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn hardware_virt_vcpu(_: &mut BootCtx) {
+    crate::hwv1_demo::run();
 }
 
 /// POL-3：批处理作业（依赖 / 优先级 / 取消 / 终态 / 满载下交互性）。
@@ -600,7 +607,7 @@ const HIGHRES: &[Step] = &[st(Stage::HighRes)];
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "boot-stage-rollback-verify",
+    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "boot-stage-rollback-verify",
     feature = "s2-only", feature = "s4-soak",
 )))]
 const FULL: &[Step] = &[
@@ -632,6 +639,8 @@ const FULL: &[Step] = &[
     case("krn0-dma", Stage::Smp, "krn0", krn0_dma),
     case("krn0-mmio", Stage::Smp, "krn0", krn0_mmio),
     case("fixes", Stage::Smp, "fix", fixes),
+    #[cfg(target_arch = "x86_64")]
+    case("hwv1-vcpu", Stage::Smp, "hwv1", hardware_virt_vcpu),
     #[cfg(feature = "user-programs")]
     case("async-ring", Stage::UserRuntime, "ring", async_ring),
     #[cfg(feature = "user-programs")]
@@ -676,7 +685,7 @@ const FULL: &[Step] = &[
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "boot-stage-rollback-verify",
+    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "boot-stage-rollback-verify",
     feature = "s2-only", feature = "s4-soak",
 )))]
 pub use full_selected::{NAME, PLAN};
@@ -685,7 +694,7 @@ pub use full_selected::{NAME, PLAN};
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "boot-stage-rollback-verify",
+    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "boot-stage-rollback-verify",
     feature = "s2-only", feature = "s4-soak",
 )))]
 mod full_selected {
@@ -709,6 +718,7 @@ const DEDICATED_SELECTED: usize = cfg!(feature = "rt1-verify") as usize
     + cfg!(feature = "evt2-broadcast-verify") as usize
     + cfg!(feature = "s3-nohz-verify") as usize
     + cfg!(feature = "shm1-verify") as usize
+    + cfg!(feature = "hwv1-verify") as usize
     + cfg!(feature = "boot-stage-rollback-verify") as usize
     + cfg!(feature = "s2-only") as usize
     + cfg!(feature = "s4-soak") as usize;
@@ -904,6 +914,26 @@ mod dedicated {
     pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[PlanItem::Finish(finish)]];
 }
 
+#[cfg(feature = "hwv1-verify")]
+mod dedicated {
+    use super::*;
+    pub const NAME: &str = "hwv1";
+
+    #[cfg(target_arch = "x86_64")]
+    fn finish(_: &mut BootCtx) {
+        crate::hwv1_demo::run();
+        exit_on(u64::from(crate::hwv1_demo::failed()));
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn finish(_: &mut BootCtx) {
+        kprintln!("[JSR-HWV1] unsupported_arch=true failed=1");
+        exit_on(1);
+    }
+
+    pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[PlanItem::Finish(finish)]];
+}
+
 #[cfg(feature = "evt1-verify")]
 mod dedicated {
     use super::*;
@@ -990,7 +1020,7 @@ mod dedicated {
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "boot-stage-rollback-verify",
+    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "boot-stage-rollback-verify",
     feature = "s2-only", feature = "s4-soak",
 ))]
 pub use dedicated::{NAME, PLAN};

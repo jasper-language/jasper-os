@@ -68,6 +68,8 @@ pub enum KObject {
     Mutex(Box<crate::user_mutex::MutexObj>),
     /// User-visible absolute/relative timer with one waiter at a time.
     Timer(Box<crate::user_timer::TimerObj>),
+    /// Vendor-neutral hardware-virtualization vCPU.
+    Vcpu(Box<crate::vcpu::VcpuObj>),
     /// 线程。
     Task(TaskObj),
     /// 事件（叶子对象：不持有句柄、不强引用其他对象）。
@@ -98,6 +100,7 @@ impl KObject {
             KObject::Memory(_) => Kind::Memory,
             KObject::Mutex(_) => Kind::Mutex,
             KObject::Timer(_) => Kind::Timer,
+            KObject::Vcpu(_) => Kind::Vcpu,
             KObject::EventSource(_) => Kind::EventSource,
             KObject::Subscription(_) => Kind::Subscription,
             KObject::Task(_) => Kind::Task,
@@ -167,6 +170,7 @@ const fn close_hook(kind: Kind) -> Option<CloseHookEntry> {
             crate::user_timer::close_in,
             ClosingLocks::ObjectTableThenScheduler,
         )),
+        Kind::Vcpu => Some(close_entry(crate::vcpu::close_in, ClosingLocks::ObjectTable)),
         Kind::Task | Kind::ExitState | Kind::Memory | Kind::Event | Kind::Device => None,
     }
 }
@@ -217,6 +221,7 @@ const fn destroy_hook(kind: Kind) -> Option<DestroyHook> {
         | Kind::EventSource
         | Kind::Mutex
         | Kind::Timer
+        | Kind::Vcpu
         | Kind::Memory
         | Kind::Event
         | Kind::Device => None,
