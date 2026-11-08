@@ -120,6 +120,8 @@ pub mod user_demo;
 pub use arch::hwvirt_demo;
 #[cfg(target_arch = "x86_64")]
 pub mod hwv1_demo;
+#[cfg(target_arch = "x86_64")]
+pub use arch::hwv2_demo;
 #[cfg(feature = "rt3-verify")]
 pub mod rt3_demo;
 pub mod virtio;

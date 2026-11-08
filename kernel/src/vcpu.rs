@@ -138,6 +138,9 @@ pub fn map_for(
         if vcpu_mut(t, vcpu_id).is_none_or(|vcpu| vcpu.closing) {
             return Err(VcpuError::Closed);
         }
+        if vcpu_mut(t, vcpu_id).is_some_and(|vcpu| vcpu.lifecycle.status() == Lifecycle::Running) {
+            return Err(VcpuError::State(StateError::Running));
+        }
         vcpu_mut(t, vcpu_id)
             .expect("resolved Vcpu")
             .guest
@@ -205,6 +208,9 @@ pub fn unmap_exact_for(
         if vcpu.closing {
             return Err(VcpuError::Closed);
         }
+        if vcpu.lifecycle.status() == Lifecycle::Running {
+            return Err(VcpuError::State(StateError::Running));
+        }
         let slot = vcpu
             .guest
             .iter()
@@ -270,6 +276,50 @@ pub fn make_ready_for(pid: ObjId, vcpu_handle: HandleId) -> Result<(), VcpuError
         }
         vcpu.lifecycle.make_ready().map_err(VcpuError::State)
     })
+}
+
+/// Mark the vCPU Running immediately before the HWV-2 hardware backend enters
+/// the guest. The caller must pair this with `finish_run_for` or `fail_run_for`.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn begin_run_for(pid: ObjId, vcpu_handle: HandleId) -> Result<(), VcpuError> {
+    kobj::with(|t| {
+        let id = resolve(t, pid, vcpu_handle, Rights::CONTROL)?;
+        let vcpu = vcpu_mut(t, id).ok_or(VcpuError::Closed)?;
+        if vcpu.closing {
+            return Err(VcpuError::Closed);
+        }
+        vcpu.lifecycle.begin_run().map_err(VcpuError::State)
+    })
+}
+
+/// Commit the architectural state captured after a hardware VM exit and move
+/// the vCPU to Halted.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn finish_run_for(
+    pid: ObjId,
+    vcpu_handle: HandleId,
+    state: VcpuState,
+) -> Result<(), VcpuError> {
+    kobj::with(|t| {
+        let id = resolve(t, pid, vcpu_handle, Rights::CONTROL)?;
+        let vcpu = vcpu_mut(t, id).ok_or(VcpuError::Closed)?;
+        if vcpu.closing {
+            return Err(VcpuError::Closed);
+        }
+        vcpu.lifecycle.halt().map_err(VcpuError::State)?;
+        vcpu.lifecycle.save(state).map_err(VcpuError::State)
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn fail_run_for(pid: ObjId, vcpu_handle: HandleId) {
+    let _ = kobj::with(|t| {
+        let id = resolve(t, pid, vcpu_handle, Rights::READ)?;
+        if let Some(vcpu) = vcpu_mut(t, id) {
+            vcpu.lifecycle.fail();
+        }
+        Ok::<(), VcpuError>(())
+    });
 }
 
 pub fn view(pid: ObjId, vcpu_handle: HandleId) -> Result<VcpuView, VcpuError> {

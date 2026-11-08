@@ -27,6 +27,7 @@ pub use bm1::init as bm1_init;
 mod apic;
 mod context;
 pub mod hwvirt_demo;
+pub mod hwv2_demo;
 mod paging;
 mod gdt;
 mod idt;
@@ -43,6 +44,7 @@ mod smp;
 pub(crate) use smp::tlb_flush_all_local as flush_all_local_tlb;
 mod uart;
 mod user;
+pub mod vmx;
 
 use super::{ExitStatus, PciAccess, Platform, UserProbe};
 

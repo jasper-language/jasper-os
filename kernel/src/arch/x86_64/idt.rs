@@ -85,11 +85,15 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, _code: 
 }
 
 /// 一般保护错误：用户态执行特权指令等 ⇒ 终止该任务；内核态 ⇒ 停机。
-extern "x86-interrupt" fn general_protection_handler(frame: InterruptStackFrame, _code: u64) {
+extern "x86-interrupt" fn general_protection_handler(frame: InterruptStackFrame, code: u64) {
     if from_user(&frame) {
         fault::on_user_fault(UserFault { kind: UserFaultKind::ProtectionFault, ip: frame.instruction_pointer.as_u64(), addr: 0 });
     }
-    console::_print(format_args!("[JSR-EXC] general protection ip={:#x}\n", frame.instruction_pointer.as_u64()));
+    console::_print(format_args!(
+        "[JSR-EXC] general protection ip={:#x} code={:#x}\n",
+        frame.instruction_pointer.as_u64(),
+        code
+    ));
     crate::arch::halt_forever()
 }
 
