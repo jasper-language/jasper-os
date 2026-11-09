@@ -26,7 +26,7 @@ pub struct SourceArgs {pub kind:u32,pub target:u64}
 impl SourceArgs {
  pub fn decode(b:&[u8;SOURCE_BYTES])->Option<Self> {
   if b[..2]!=1u16.to_le_bytes() || b[2..4]!=(SOURCE_BYTES as u16).to_le_bytes() || b[16..24]!=[0;8] {return None;}
-  let kind=u32::from_le_bytes(b[4..8].try_into().ok()?);if kind>3 {return None;}
+  let kind=u32::from_le_bytes(b[4..8].try_into().ok()?);if kind>4 {return None;}
   Some(Self {kind,target:u64::from_le_bytes(b[8..16].try_into().ok()?)})
  }
 }

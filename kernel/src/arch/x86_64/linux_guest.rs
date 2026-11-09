@@ -631,10 +631,16 @@ fn run_impl(virtio_rng: bool) -> bool {
     let virtio_ok = !virtio_rng
         || (devices.rng_requests != 0
             && devices.console_bytes != 0
-            && devices.block_requests != 0);
+            && devices.block_requests != 0
+            && report.pio_marker
+            && report.pio_reads != 0
+            && report.pio_writes != 0
+            && report.pio_probe_generation == 2
+            && report.pio_requests == 1
+            && report.pio_cancels == 1);
     let ok = report.marker && report.halted && lifecycle && shutdown && reclaimed && virtio_ok;
     kprintln!(
-        "[JSR-HWV4-LINUX] linux=true exits={} serial_bytes={} timer_interrupts={} timer_eois={} virtio_rng_requests={} virtio_console_bytes={} virtio_block_requests={} marker={} halted={} lifecycle={} shutdown={} reclaim={}",
+        "[JSR-HWV4-LINUX] linux=true exits={} serial_bytes={} timer_interrupts={} timer_eois={} virtio_rng_requests={} virtio_console_bytes={} virtio_block_requests={} pio_reads={} pio_writes={} pio_generation={} pio_requests={} pio_cancels={} pio_marker={} marker={} halted={} lifecycle={} shutdown={} reclaim={}",
         report.exits,
         report.serial_bytes,
         report.timer_interrupts,
@@ -642,6 +648,12 @@ fn run_impl(virtio_rng: bool) -> bool {
         devices.rng_requests,
         devices.console_bytes,
         devices.block_requests,
+        report.pio_reads,
+        report.pio_writes,
+        report.pio_probe_generation,
+        report.pio_requests,
+        report.pio_cancels,
+        report.pio_marker,
         report.marker,
         report.halted,
         lifecycle,

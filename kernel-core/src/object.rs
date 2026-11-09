@@ -18,6 +18,7 @@
 use core::fmt;
 use core::sync::atomic::Ordering;
 
+use crate::capability::{CapabilityId, CapabilityLink, CapabilityState};
 use crate::sync::Atomic64;
 
 /// 句柄上的权限位掩码。
@@ -427,34 +428,88 @@ struct Slot<V> {
     retired: bool,
     /// 占用时的值与权限。
     entry: Option<(V, Rights)>,
+    /// SEC-2 capability lineage for this handle. `None` only exists in a
+    /// vacant slot; every live handle receives an opaque graph identity.
+    capability: Option<CapabilityLink>,
 }
 
 impl<V> Slot<V> {
-    const EMPTY: Slot<V> = Slot { generation: 0, retired: false, entry: None };
+    const EMPTY: Slot<V> = Slot {
+        generation: 0,
+        retired: false,
+        entry: None,
+        capability: None,
+    };
 }
 
 /// 固定容量（`N` ≤ 65535）的句柄表，不使用堆。
 pub struct HandleTable<V, const N: usize> {
     slots: [Slot<V>; N],
     live: usize,
+    next_capability: u64,
 }
 
 impl<V, const N: usize> HandleTable<V, N> {
     /// 新建空表。
     pub const fn new() -> Self {
         assert!(N > 0 && N < 0xFFFF, "句柄表容量必须在 1..65535 之间");
-        HandleTable { slots: [const { Slot::EMPTY }; N], live: 0 }
+        HandleTable {
+            slots: [const { Slot::EMPTY }; N],
+            live: 0,
+            next_capability: 1,
+        }
     }
 
     /// 放入一个值，返回新句柄。优先使用编号最小的空闲槽位。
     pub fn put(&mut self, value: V, rights: Rights) -> Result<HandleId, HandleError> {
+        self.put_with_parent(value, rights, None)
+    }
+
+    /// Create a delegated handle whose authority is derived from `parent`.
+    ///
+    /// The child cannot gain rights or survive a subtree revocation of the
+    /// parent. This is the primitive used by `system.handle.duplicate`.
+    pub fn put_delegated(
+        &mut self,
+        value: V,
+        rights: Rights,
+        parent: CapabilityId,
+    ) -> Result<HandleId, HandleError> {
+        self.put_with_parent(value, rights, Some(parent))
+    }
+
+    fn put_with_parent(
+        &mut self,
+        value: V,
+        rights: Rights,
+        parent: Option<CapabilityId>,
+    ) -> Result<HandleId, HandleError> {
+        if let Some(parent_id) = parent {
+            let (parent_link, parent_rights) = self
+                .capability_slot(parent_id)
+                .ok_or(HandleError::Invalid)?;
+            if !parent_link.is_active() || !parent_rights.contains(rights) {
+                return Err(HandleError::RightsDenied);
+            }
+        }
+        let capability_id =
+            CapabilityId::from_raw(self.next_capability).ok_or(HandleError::TableFull)?;
+        let next_capability = self
+            .next_capability
+            .checked_add(1)
+            .ok_or(HandleError::TableFull)?;
         let (index, slot) = self
             .slots
             .iter_mut()
             .enumerate()
             .find(|(_, s)| s.entry.is_none() && !s.retired)
             .ok_or(HandleError::TableFull)?;
+        self.next_capability = next_capability;
         slot.entry = Some((value, rights));
+        slot.capability = Some(match parent {
+            Some(parent_id) => CapabilityLink::delegated(capability_id, parent_id),
+            None => CapabilityLink::root(capability_id),
+        });
         self.live += 1;
         Ok(HandleId::encode(index, slot.generation))
     }
@@ -467,14 +522,20 @@ impl<V, const N: usize> HandleTable<V, N> {
     {
         let (value, rights) = self.get(h)?;
         if !rights.contains(Rights::TRANSFER) { return Err(HandleError::RightsDenied); }
+        // A parent with live delegated children must be revoked or its children
+        // retired first. Otherwise moving the parent would split one authority
+        // tree across two independently revocable tables.
+        if self.has_dependents(h) {
+            return Err(HandleError::RightsDenied);
+        }
         // Destination insertion can fail; do it before touching the source.
         let moved = to.put(*value, rights)?;
         self.remove(h).expect("exclusive validated source handle cannot disappear");
         Ok(moved)
     }
 
-    /// 查找句柄对应的槽位；世代不匹配视为无效。
-    fn slot(&self, h: HandleId) -> Result<&Slot<V>, HandleError> {
+    /// 查找句柄对应的槽位；只校验槽位占用与世代，不校验能力撤销状态。
+    fn slot_raw(&self, h: HandleId) -> Result<&Slot<V>, HandleError> {
         let slot = h.index().and_then(|i| self.slots.get(i)).ok_or(HandleError::Invalid)?;
         if slot.entry.is_none() || slot.generation != h.generation() {
             return Err(HandleError::Invalid);
@@ -482,10 +543,35 @@ impl<V, const N: usize> HandleTable<V, N> {
         Ok(slot)
     }
 
+    /// 查找可用句柄对应的槽位；已撤销能力视为无效。
+    fn slot(&self, h: HandleId) -> Result<&Slot<V>, HandleError> {
+        let slot = self.slot_raw(h)?;
+        match slot.capability {
+            Some(link) if link.is_active() => Ok(slot),
+            Some(_) => Err(HandleError::Invalid),
+            None => Err(HandleError::Invalid),
+        }
+    }
+
+    fn capability_slot(&self, id: CapabilityId) -> Option<(CapabilityLink, Rights)> {
+        self.slots.iter().find_map(|slot| {
+            let (_, rights) = slot.entry.as_ref()?;
+            let link = slot.capability?;
+            (link.id == id).then_some((link, *rights))
+        })
+    }
+
     /// 取值与权限。
     pub fn get(&self, h: HandleId) -> Result<(&V, Rights), HandleError> {
         let (v, r) = self.slot(h)?.entry.as_ref().ok_or(HandleError::Invalid)?;
         Ok((v, *r))
+    }
+
+    /// 读取该句柄的 SEC-2 谱系标识（只用于内核内部授权迁移）。
+    pub fn capability(&self, h: HandleId) -> Result<CapabilityLink, HandleError> {
+        self.slot(h)?
+            .capability
+            .ok_or(HandleError::Invalid)
     }
 
     /// 取值并检查句柄至少拥有 `required` 权限（统一权限检查入口）。
@@ -511,6 +597,71 @@ impl<V, const N: usize> HandleTable<V, N> {
         Ok(())
     }
 
+    /// Revoke `h` and every delegated descendant currently represented by
+    /// this table. Revocation is fail-closed: subsequent `get`/`get_checked`
+    /// and authority resolution reject every affected handle. The caller must
+    /// still close the revoked slots to return object ownership counts.
+    pub fn revoke(&mut self, h: HandleId) -> Result<usize, HandleError> {
+        let root = self.capability(h)?.id;
+        let mut affected_ids: [CapabilityId; N] = [CapabilityId::ZERO; N];
+        let mut candidates = 0usize;
+        for slot in &self.slots {
+            let Some(link) = slot.capability else {
+                continue;
+            };
+            if link.state == CapabilityState::Active
+                && (link.id == root || self.capability_is_descendant(link.id, root))
+            {
+                affected_ids[candidates] = link.id;
+                candidates += 1;
+            }
+        }
+        let mut affected = 0usize;
+        for slot in &mut self.slots {
+            let Some(link) = slot.capability else {
+                continue;
+            };
+            if link.state == CapabilityState::Active
+                && affected_ids[..candidates].contains(&link.id)
+            {
+                slot.capability = Some(CapabilityLink {
+                    state: CapabilityState::Revoked,
+                    ..link
+                });
+                affected += 1;
+            }
+        }
+        Ok(affected)
+    }
+
+    fn capability_is_descendant(&self, candidate: CapabilityId, ancestor: CapabilityId) -> bool {
+        let mut current = self.capability_slot(candidate).and_then(|(link, _)| link.parent);
+        let mut walked = 0usize;
+        while let Some(id) = current {
+            if id == ancestor {
+                return true;
+            }
+            walked += 1;
+            if walked > N {
+                return false;
+            }
+            current = self.capability_slot(id).and_then(|(link, _)| link.parent);
+        }
+        false
+    }
+
+    /// Whether a handle has live delegated descendants in this table.
+    pub fn has_dependents(&self, h: HandleId) -> bool {
+        let Ok(root) = self.capability(h) else {
+            return false;
+        };
+        self.slots.iter().any(|slot| {
+            slot.capability
+                .is_some_and(|link| link.state == CapabilityState::Active
+                    && self.capability_is_descendant(link.id, root.id))
+        })
+    }
+
     /// 还能放入多少个句柄（空闲且未退役的槽位数）。
     pub fn free_slots(&self) -> usize {
         self.slots.iter().filter(|s| s.entry.is_none() && !s.retired).count()
@@ -520,17 +671,32 @@ impl<V, const N: usize> HandleTable<V, N> {
     pub fn close_all(&mut self, mut f: impl FnMut(V)) -> usize {
         let mut n = 0;
         for slot in self.slots.iter_mut() {
-            if let Some((value, _)) = slot.entry.take() {
-                // 代次达到「可表示的最大值」时退役：位宽是索引+代次之和，
-                // 超过这个值再编码就会截断并让旧句柄重新有效。
-                if slot.generation >= MAX_GENERATION {
-                    slot.retired = true;
-                } else {
-                    slot.generation += 1;
-                }
+            if let Some(value) = clear_slot(slot) {
                 self.live -= 1;
                 n += 1;
                 f(value);
+            }
+        }
+        n
+    }
+
+    /// Close only revoked handles. The callback receives the stale handle
+    /// value so callers can revoke handle-owned mappings before releasing the
+    /// corresponding object ownership.
+    pub fn close_revoked_with(&mut self, mut f: impl FnMut(HandleId, V)) -> usize {
+        let mut n = 0;
+        for (index, slot) in self.slots.iter_mut().enumerate() {
+            let revoked = slot
+                .capability
+                .is_some_and(|link| link.state == CapabilityState::Revoked);
+            if !revoked {
+                continue;
+            }
+            let handle = HandleId::encode(index, slot.generation);
+            if let Some(value) = clear_slot(slot) {
+                self.live -= 1;
+                n += 1;
+                f(handle, value);
             }
         }
         n
@@ -551,15 +717,10 @@ impl<V, const N: usize> HandleTable<V, N> {
     }
 
     pub fn remove(&mut self, h: HandleId) -> Result<V, HandleError> {
-        self.slot(h)?;
+        self.slot_raw(h)?;
         let index = h.index().ok_or(HandleError::Invalid)?;
         let slot = &mut self.slots[index];
-        let (value, _) = slot.entry.take().ok_or(HandleError::Invalid)?;
-        if slot.generation >= MAX_GENERATION {
-            slot.retired = true;
-        } else {
-            slot.generation += 1;
-        }
+        let value = clear_slot(slot).ok_or(HandleError::Invalid)?;
         self.live -= 1;
         Ok(value)
     }
@@ -580,8 +741,22 @@ impl<V: Clone, const N: usize> HandleTable<V, N> {
     pub fn restrict(&mut self, h: HandleId, mask: Rights) -> Result<HandleId, HandleError> {
         let (v, r) = self.get(h)?;
         let (v, r) = (v.clone(), r.intersect(mask));
-        self.put(v, r)
+        let parent = self.capability(h)?.id;
+        self.put_delegated(v, r, parent)
     }
+}
+
+fn clear_slot<V>(slot: &mut Slot<V>) -> Option<V> {
+    let (value, _) = slot.entry.take()?;
+    // 代次达到「可表示的最大值」时退役：位宽是索引+代次之和，
+    // 超过这个值再编码就会截断并让旧句柄重新有效。
+    if slot.generation >= MAX_GENERATION {
+        slot.retired = true;
+    } else {
+        slot.generation += 1;
+    }
+    slot.capability = None;
+    Some(value)
 }
 
 impl<V, const N: usize> Default for HandleTable<V, N> {
@@ -730,6 +905,48 @@ mod tests {
         let r = t.restrict(h, Rights::WAIT.union(Rights::WRITE)).unwrap();
         assert_eq!(t.get(r).unwrap().1, Rights::WAIT, "WRITE 不能被凭空加上");
         assert_eq!(t.get_checked(r, Rights::CONTROL), Err(HandleError::RightsDenied));
+    }
+
+    #[test]
+    fn delegated_handles_cannot_escalate_and_revoke_as_a_subtree() {
+        let mut t: HandleTable<u8, 8> = HandleTable::new();
+        let root = t.put(1, Rights::ALL).unwrap();
+        let root_id = t.capability(root).unwrap().id;
+        let child = t.put_delegated(1, Rights::READ, root_id).unwrap();
+        let parent_id = t.capability(child).unwrap().id;
+        let grandchild = t.put_delegated(1, Rights::READ, parent_id).unwrap();
+        assert_eq!(
+            t.put_delegated(2, Rights::WRITE, parent_id),
+            Err(HandleError::RightsDenied),
+            "a delegated handle cannot gain rights"
+        );
+        assert!(t.has_dependents(root));
+        assert_eq!(t.revoke(root), Ok(3));
+        assert_eq!(t.get(root), Err(HandleError::Invalid));
+        assert_eq!(t.get(child), Err(HandleError::Invalid));
+        assert_eq!(t.get(grandchild), Err(HandleError::Invalid));
+        let mut closed = 0;
+        assert_eq!(
+            t.close_revoked_with(|_, value| {
+                assert_eq!(value, 1);
+                closed += 1;
+            }),
+            3
+        );
+        assert_eq!(closed, 3);
+        assert!(t.is_empty());
+    }
+
+    #[test]
+    fn transfer_is_refused_while_delegated_children_exist() {
+        let mut a: HandleTable<u8, 4> = HandleTable::new();
+        let mut b: HandleTable<u8, 4> = HandleTable::new();
+        let root = a.put(7, Rights::READ.union(Rights::TRANSFER)).unwrap();
+        let parent = a.capability(root).unwrap().id;
+        let _child = a.put_delegated(7, Rights::READ, parent).unwrap();
+        assert_eq!(a.transfer_to(root, &mut b), Err(HandleError::RightsDenied));
+        assert!(a.get(root).is_ok(), "refusal leaves the authority tree intact");
+        assert!(b.is_empty());
     }
 
     #[test]

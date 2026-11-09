@@ -4,13 +4,60 @@ use alloc::vec::Vec;
 
 use kernel_core::assembly::{Health, State};
 use kernel_core::usi;
+use kernel_core::usi_request::Begin;
 
 use crate::mm::user::copy_to_user;
 use crate::syscall::table::{
-    SYSTEM_ERROR_INVALID_ARGUMENT, SYSTEM_USI_ERROR_REQUEST_ID,
+    SYSTEM_ERROR_INVALID_ARGUMENT, SYSTEM_ERROR_QUOTA_EXCEEDED, SYSTEM_USI_ERROR_REQUEST_ID,
 };
 use crate::syscall::{err, user_ptr_err};
 use crate::{assembly, proc, profile, sched};
+
+struct RequestGuard {
+    pid: kernel_core::objtable::ObjId,
+    request_id: u64,
+    service: u16,
+    slot: Option<usize>,
+}
+
+impl RequestGuard {
+    fn begin(request_id: u64, service: usi::Service) -> Result<Self, i64> {
+        if request_id == 0 {
+            return Err(err(SYSTEM_USI_ERROR_REQUEST_ID));
+        }
+        let pid = proc::current_process().ok_or_else(|| err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
+        let service_id = service as u16;
+        let slot = match proc::begin_usi_request(pid, request_id, service_id) {
+            Ok(Begin::New(slot)) => Some(slot),
+            Ok(Begin::Retry) => None,
+            Ok(Begin::Busy | Begin::Conflict) => {
+                return Err(err(SYSTEM_USI_ERROR_REQUEST_ID));
+            }
+            Ok(Begin::Exhausted) => return Err(err(SYSTEM_ERROR_QUOTA_EXCEEDED)),
+            Err(_) => return Err(err(SYSTEM_ERROR_INVALID_ARGUMENT)),
+        };
+        Ok(Self {
+            pid,
+            request_id,
+            service: service_id,
+            slot,
+        })
+    }
+
+    fn complete(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            proc::complete_usi_request(self.pid, slot, self.request_id, self.service);
+        }
+    }
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            proc::abort_usi_request(self.pid, slot, self.request_id, self.service);
+        }
+    }
+}
 
 fn respond(
     request_id: u64,
@@ -19,10 +66,12 @@ fn respond(
     payload: &[u8],
     ptr: u64,
     cap: u64,
+    request: &mut RequestGuard,
 ) -> i64 {
     if request_id == 0 {
         return err(SYSTEM_USI_ERROR_REQUEST_ID);
     }
+    request.complete();
     let Ok(capacity) = usize::try_from(cap) else {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     };
@@ -51,6 +100,10 @@ fn respond(
 }
 
 pub fn info_get(request_id: u64, ptr: u64, cap: u64) -> i64 {
+    let mut request = match RequestGuard::begin(request_id, usi::Service::Info) {
+        Ok(request) => request,
+        Err(error) => return error,
+    };
     let snapshot = proc::process_snapshot();
     let modules = assembly::statuses().modules().count();
     let resolved = match profile::resolved() {
@@ -70,10 +123,22 @@ pub fn info_get(request_id: u64, ptr: u64, cap: u64) -> i64 {
         profile_name_len: copy_len as u16,
         profile_name: profile_bytes,
     };
-    respond(request_id, usi::Service::Info, 1, &info.encode(), ptr, cap)
+    respond(
+        request_id,
+        usi::Service::Info,
+        1,
+        &info.encode(),
+        ptr,
+        cap,
+        &mut request,
+    )
 }
 
 pub fn process_list(request_id: u64, ptr: u64, cap: u64) -> i64 {
+    let mut request = match RequestGuard::begin(request_id, usi::Service::ProcessList) {
+        Ok(request) => request,
+        Err(error) => return error,
+    };
     let snapshot = proc::process_snapshot();
     let mut payload = Vec::with_capacity(snapshot.len() * usi::PROCESS_BYTES);
     for process in &snapshot {
@@ -86,6 +151,7 @@ pub fn process_list(request_id: u64, ptr: u64, cap: u64) -> i64 {
         &payload,
         ptr,
         cap,
+        &mut request,
     )
 }
 
@@ -103,6 +169,10 @@ fn module_records(
     ptr: u64,
     cap: u64,
 ) -> i64 {
+    let mut request = match RequestGuard::begin(request_id, service) {
+        Ok(request) => request,
+        Err(error) => return error,
+    };
     let statuses = assembly::statuses();
     let mut payload = Vec::new();
     let mut records = 0u32;
@@ -120,6 +190,7 @@ fn module_records(
         &payload,
         ptr,
         cap,
+        &mut request,
     )
 }
 

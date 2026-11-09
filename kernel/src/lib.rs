@@ -113,6 +113,8 @@ pub mod bench_demo;
 pub mod blk;
 #[cfg(target_arch = "x86_64")]
 pub mod blk1_demo;
+#[cfg(all(target_arch = "x86_64", feature = "fs0-journal-verify"))]
+pub mod fs0_demo;
 #[cfg(feature = "pex0-verify")]
 pub mod pex0_demo;
 pub mod balance_demo;
@@ -121,6 +123,8 @@ pub mod sched;
 pub mod security;
 #[cfg(feature = "sec1-verify")]
 pub mod sec1_demo;
+#[cfg(feature = "sec2-verify")]
+pub mod sec2_demo;
 pub mod shard;
 pub mod smp;
 pub mod sync;
@@ -128,6 +132,8 @@ pub mod syscall;
 pub mod task;
 pub mod usi;
 pub mod usi1_demo;
+#[cfg(feature = "usi2-verify")]
+pub mod usi2_demo;
 pub mod user_demo;
 #[cfg(target_arch = "x86_64")]
 pub use arch::hwvirt_demo;
@@ -163,6 +169,7 @@ pub mod evt1_demo;
 pub mod shm_demo;
 
 pub mod subscription;
+pub mod service_catalog;
 
 #[cfg(feature="evt2-verify")]
 pub mod subscription_demo;

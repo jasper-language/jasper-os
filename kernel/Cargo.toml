@@ -62,10 +62,17 @@ drv3-verify = []
 pex0-verify = ["user-programs"]
 # Dedicated SEC-1 identity and metadata substrate.
 sec1-verify = ["kernel-core/sec1-verify"]
+# Dedicated SEC-2 capability-lineage slice; full revocation/in-flight coverage
+# remains in progress and is not implied by this feature.
+sec2-verify = []
 # Dedicated USI-1 CLI/structured service acceptance.
 usi1-verify = ["user-programs"]
+# Dedicated USI-2 idempotency, capability events and cancellation acceptance.
+usi2-verify = ["user-programs"]
 # BLK-1 real virtio-blk persistence and lifecycle drill.
 blk1-verify = []
+# FS-0 journal-to-virtio-blk integration and same-disk power-cut drill.
+fs0-journal-verify = []
 # Dedicated MOD-1 contract: assembly ordering, publication and runtime stop/health.
 mod1-verify = []
 # Author: chatgpt. Optional diagnostic counters; absent from default builds.

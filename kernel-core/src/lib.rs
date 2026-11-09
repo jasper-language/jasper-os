@@ -8,6 +8,7 @@
 //! * [`meta`]   —— 接口元数据（名字、版本、所需 Rights、副作用、稳定性、中文显示名）
 //! * [`objtable`] —— 内核对象表：外部所有权与内部引用分开计数、带世代标识、迭代式清理队列（M4.1）
 //! * [`object`] —— 对象标识、[`object::Rights`] 位掩码、带世代计数的句柄表、对象管理器
+//! * [`fs`]     —— 与 ext4/JaFS 无关的 FS-0 文件系统契约、命名空间、句柄、持久化与 mmap 世代
 //! * [`wait`]   —— 可等待对象（事件、定时器）与等待集合；时间源抽象为 trait
 //! * [`abi`]    —— 系统接口登记表：显式稳定 ID 的解析、命名校验与冻结检查（M3.2，构建期使用）
 //! * [`abi_version`] —— 原生 ABI 世代：版本真源、用户程序 ABI 章与同主版本兼容判定（issue #8）
@@ -61,6 +62,7 @@ pub mod block;
 pub mod boot_stage;
 pub mod async_ring;
 pub mod capacity;
+pub mod capability;
 pub mod config;
 pub mod device;
 pub mod deadline;
@@ -79,6 +81,7 @@ pub mod tick_lease;
 pub mod wake_mailbox;
 pub mod fdt;
 pub mod frame;
+pub mod fs;
 pub mod fault;
 pub mod heap;
 pub mod image_header;
@@ -103,6 +106,7 @@ pub mod service_gate;
 pub mod paging;
 pub mod pagetable;
 pub mod pci;
+pub mod pio;
 pub mod pressure;
 pub mod psci;
 pub mod ring_abi;
@@ -123,6 +127,7 @@ pub mod tickless;
 pub mod trace;
 pub mod trap;
 pub mod usi;
+pub mod usi_request;
 pub mod user_layout;
 pub mod vmm_device;
 pub mod wait;

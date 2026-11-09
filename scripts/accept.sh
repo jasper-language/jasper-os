@@ -74,9 +74,12 @@ case "$PROFILE" in
 esac
 [ "${JASPER_CHECKS:-}" = "drv3" ] && KFEAT+=(--features drv3-verify)
 [ "${JASPER_CHECKS:-}" = "blk1" ] && KFEAT+=(--features blk1-verify)
+[ "${JASPER_CHECKS:-}" = "fs0-journal" ] && KFEAT+=(--features fs0-journal-verify)
 [ "${JASPER_CHECKS:-}" = "mod1" ] && KFEAT+=(--features mod1-verify)
 [ "${JASPER_CHECKS:-}" = "usi1" ] && KFEAT+=(--features usi1-verify)
+[ "${JASPER_CHECKS:-}" = "usi2" ] && KFEAT+=(--features usi2-verify)
 [ "${JASPER_CHECKS:-}" = "sec1" ] && KFEAT+=(--features sec1-verify)
+[ "${JASPER_CHECKS:-}" = "sec2" ] && KFEAT+=(--features sec2-verify)
 HWV4_FEAT=()
 if [ -n "${JSR_LINUX_GUEST_HEADER:-}" ] && [ -n "${JSR_LINUX_GUEST_KERNEL:-}" ]; then
   if [ ! -s "$JSR_LINUX_GUEST_HEADER" ] || [ ! -s "$JSR_LINUX_GUEST_KERNEL" ]; then
@@ -145,13 +148,14 @@ command -v cargo >/dev/null || { echo "✗ 找不到 cargo"; exit 2; }
 # 不再静默退回 TCG。TCG 仅允许在明确设置 JASPER_ACCEL=tcg 时运行确定性
 # -icount 故障注入；TCG 计时数据不得用于 p99.9 或物理性能结论。
 ACCEL="${JASPER_ACCEL:-kvm}"
+CPU_MODEL="${JASPER_CPU_MODEL:-host}"
 case "$ACCEL" in
   kvm)
     if ! [ -r /dev/kvm ] || ! [ -w /dev/kvm ]; then
       echo "✗ 标准验收要求宿主 KVM，但 /dev/kvm 不可读写；确定性测试可显式设置 JASPER_ACCEL=tcg"
       exit 2
     fi
-    ACCEL_ARGS=(-accel kvm -cpu host)
+    ACCEL_ARGS=(-accel kvm -cpu "$CPU_MODEL")
     ;;
   tcg)
     ACCEL_ARGS=(-accel tcg)
@@ -2749,12 +2753,19 @@ check_hwv5() {
      && has '\[JSR-VIRTIO\] device=rng ok=true' \
      && has '\[JSR-VIRTIO\] device=console ok=true' \
      && has '\[JSR-VIRTIO\] device=block ok=true' \
-     && has '\[JSR-HWV4-LINUX\] linux=true exits=[0-9]+ serial_bytes=[0-9]+ timer_interrupts=[0-9]+ timer_eois=[0-9]+ virtio_rng_requests=[1-9][0-9]* virtio_console_bytes=[1-9][0-9]* virtio_block_requests=[1-9][0-9]* marker=true halted=true lifecycle=true shutdown=true reclaim=true' \
+     && has '\[JSR-HWV4-LINUX\] linux=true exits=[0-9]+ serial_bytes=[0-9]+ timer_interrupts=[0-9]+ timer_eois=[0-9]+ virtio_rng_requests=[1-9][0-9]* virtio_console_bytes=[1-9][0-9]* virtio_block_requests=[1-9][0-9]* pio_reads=[1-9][0-9]* pio_writes=[1-9][0-9]* pio_generation=2 pio_requests=1 pio_cancels=1 pio_marker=true marker=true halted=true lifecycle=true shutdown=true reclaim=true' \
      && has '\[JSR-HWV5\] backend=Vmx bus=mmio devices=rng,console,block linux=true failed=0' \
      && ! has '\[JSR-HWV5-FAIL\]'; then
     record HWV-5-CORE PASS "真实 Linux 经 virtio-MMIO 发现 virtio-rng、virtio-console 与 virtio-blk；现代 virtqueue 描述符链、可用/已用环、设备通知、PIC IRQ、中断确认、随机数据回写、控制台输出和块读取通过；宿主内存与对象资源回基线。net/fs 与用户态 VMM 未完成，不记 HWV-5 完整通过"
   else
     record HWV-5 FAIL "缺少 virtio-MMIO/rng Linux 驱动标记、virtqueue 完成、IRQ 或资源回基线"
+  fi
+  if has '\[JSR-HWV5-PIO\] device=jpio discovered=true ping=true reset=true pending=true cancel=true generation=2 writes=0 ok=true' \
+     && has '\[JSR-HWV5-PIO\] backend=Vmx transport=pio decoded=true routed=true probe=true reset=true pending=true cancel=true failure_atomic=true resource=true failed=0' \
+     && ! has '\[JSR-HWV5-PIO-FAIL\]'; then
+    record HWV-5-PIO PASS "真实 Linux 用户态经 ioperm/in/out 发现并驱动 PIO 探针：ping、reset 世代推进、pending 与 cancel 状态、只读寄存器拒绝和失败原子性通过；UART/PIC/PIT/i8042 经同一端口映射路由；MMIO/PIO 路径分离，宿主内存与对象资源回基线"
+  else
+    record HWV-5-PIO FAIL "缺少真实 guest PIO 发现/复位/取消合同、MMIO 边界或资源回基线"
   fi
 }
 
@@ -2782,6 +2793,17 @@ check_usi1() {
   fi
 }
 
+check_usi2() {
+  if has 'usi: mode=idempotent retry=true conflict=.* invalid=.* ok=true' \
+     && has 'usi: mode=capability source=true subscription=true version=[0-9]+ mask=0x[0-9a-f]+' \
+     && has '\[JSR-USI2\] summary idempotent=true capability=true cancel=true failed=0' \
+     && ! has '^\[JSR-USI2-FAIL\]'; then
+    record USI-2 PASS "同一请求 ID 对同一只读 USI 服务可重试并拒绝跨服务复用；能力发布掩码通过标准 EventSource 提供初值、撤回、恢复和重复状态抑制；Ring 等待可取消且不丢失后续能力事件；资源回基线"
+  else
+    record USI-2 FAIL "缺少请求幂等/冲突、能力变更通知、取消后事件保持或资源基线证据"
+  fi
+}
+
 check_blk1() {
   if has '\[JSR-BLK1\] device=0x[0-9a-f]+ capacity_sectors=[1-9][0-9]* logical_block=([0-9]+) physical_block=([0-9]+) atomic_write=([0-9]+) discard=true fua=true checkpoint=true restored=(true|false)' \
      && has '^\[JSR-BLK1\] summary failed=0 restored=(true|false) resources=true' \
@@ -2798,6 +2820,15 @@ check_sec1() {
     record SEC-1 PASS "boot-scoped object identity、完整应用身份继承、Memory 上下文、句柄复制/降权/转移、IPC 发送方上下文、模块版本身份与 legacy 失败关闭通过；资源回基线"
   else
     record SEC-1 FAIL "缺少身份继承、一次性绑定、IPC 上下文、legacy 拒绝或资源基线证据"
+  fi
+}
+
+check_sec2() {
+  if has '^\[JSR-SEC2\] root=true attenuate=true escalation=false subtree=true aliases=true old_generation=false resources=true failed=0 reclaimed=true' \
+     && ! has '^\[JSR-SEC2-FAIL\]'; then
+    record SEC-2 PASS "Handle/Rights 生产路径接入能力谱系：复制产生可追踪子能力，子能力不可提权；撤销沿派生边覆盖根与全部别名，旧句柄不能解析新对象世代；对象所有权与页帧回基线。可靠审计、MAC/PEP、所有在飞 I/O 后端与跨进程撤销仍属未完成范围"
+  else
+    record SEC-2 FAIL "缺少能力派生/禁止提权/子树撤销/旧世代拒绝/资源回基线证据"
   fi
 }
 

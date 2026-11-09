@@ -210,6 +210,10 @@ pub fn sys_source(ptr:u64)->i64 {
    if args.target!=0 {return err(SYSTEM_ERROR_INVALID_ARGUMENT);}
    kobj::with(|t| match crate::mm::pressure::source_in(t).and_then(|source|proc::grant_in(t,pid,source,ObjectType::EventSource,Rights::READ.union(Rights::SUBSCRIBE)).map_err(Error::Process)) {Ok(handle)=>handle.raw() as i64,Err(e)=>report_error(e)})
   },
+  4=>{
+   if args.target!=0 {return err(SYSTEM_ERROR_INVALID_ARGUMENT);}
+   kobj::with(|t| match crate::service_catalog::source_in(t).and_then(|source|proc::grant_in(t,pid,source,ObjectType::EventSource,Rights::READ.union(Rights::SUBSCRIBE)).map_err(Error::Process)) {Ok(handle)=>handle.raw() as i64,Err(e)=>report_error(e)})
+  },
   _=>err(SYSTEM_ERROR_UNSUPPORTED),
  }
 }

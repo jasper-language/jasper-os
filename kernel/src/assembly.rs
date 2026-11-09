@@ -307,6 +307,7 @@ pub fn boot() -> u32 {
         bootcap::report_boot();
         *RUNTIME.lock() = Some(asm);
         PUBLICATIONS.publish(mask);
+        crate::service_catalog::publish_capabilities(PUBLICATIONS.mask());
         let live = operation_audit(true).unwrap_or(ownership);
         let ring = enter_service("system.async.ring.create").is_some();
         let time = enter_service("system.time.now").is_some();
@@ -325,6 +326,7 @@ pub fn boot() -> u32 {
         );
         if live.gate_mismatch != 0 {
             PUBLICATIONS.withdraw_and_wait(mask, || sched::yield_now());
+            crate::service_catalog::publish_capabilities(PUBLICATIONS.mask());
             *RUNTIME.lock() = None;
             return 1;
         }
@@ -590,6 +592,7 @@ pub fn report_health(module: &str, health: Health) -> Result<(), assembly::Assem
     let added = next_mask & !old_mask;
     if removed != 0 {
         PUBLICATIONS.withdraw_and_wait(removed, || sched::yield_now());
+        crate::service_catalog::publish_capabilities(PUBLICATIONS.mask());
     }
     let (from, published, readers) = {
         let mut runtime = RUNTIME.lock();
@@ -621,6 +624,7 @@ pub fn report_health(module: &str, health: Health) -> Result<(), assembly::Assem
         }
         (from, published, PUBLICATIONS.readers())
     };
+    crate::service_catalog::publish_capabilities(PUBLICATIONS.mask());
     kprintln!(
         "[JSR-ASSEMBLY] health module={} from={} to={} removed={:#x} published={:#x} readers={}",
         module,
@@ -644,6 +648,7 @@ pub fn stop(module: &str) -> Result<(), assembly::AssemblyError> {
     };
     if bits != 0 {
         PUBLICATIONS.withdraw_and_wait(bits, || sched::yield_now());
+        crate::service_catalog::publish_capabilities(PUBLICATIONS.mask());
     }
     let (published, readers) = {
         let mut runtime = RUNTIME.lock();
@@ -656,6 +661,7 @@ pub fn stop(module: &str) -> Result<(), assembly::AssemblyError> {
         }
         (published, PUBLICATIONS.readers())
     };
+    crate::service_catalog::publish_capabilities(PUBLICATIONS.mask());
     kprintln!(
         "[JSR-ASSEMBLY] stop module={} withdrawn={:#x} published={:#x} readers={}",
         module,

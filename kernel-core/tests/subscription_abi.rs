@@ -18,7 +18,8 @@ fn creation_descriptors_reject_unknown_and_keep_output_separate() {
  let mut source=[0;SOURCE_BYTES];source[..2].copy_from_slice(&1u16.to_le_bytes());source[2..4].copy_from_slice(&24u16.to_le_bytes());source[8..16].copy_from_slice(&0xffff000100000002u64.to_le_bytes());
  assert_eq!(SourceArgs::decode(&source).unwrap().target,0xffff000100000002);
  for i in [0,2,16,23] {let mut bad=source;bad[i]^=1;assert!(SourceArgs::decode(&bad).is_none());}
- source[4..8].copy_from_slice(&4u32.to_le_bytes());assert!(SourceArgs::decode(&source).is_none());
+ source[4..8].copy_from_slice(&4u32.to_le_bytes());assert_eq!(SourceArgs::decode(&source).unwrap().kind,4);
+ source[4..8].copy_from_slice(&5u32.to_le_bytes());assert!(SourceArgs::decode(&source).is_none());
  let mut sub=[0;SUBSCRIBE_BYTES];sub[..2].copy_from_slice(&1u16.to_le_bytes());sub[2..4].copy_from_slice(&32u16.to_le_bytes());sub[8..12].copy_from_slice(&16u32.to_le_bytes());sub[16..].fill(0xff);
  assert!(SubscribeArgs::decode(&sub).is_some());
  for i in [0,2,8,12] {let mut bad=sub;bad[i]^=1;assert!(SubscribeArgs::decode(&bad).is_none());}

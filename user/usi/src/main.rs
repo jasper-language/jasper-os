@@ -272,6 +272,97 @@ fn module_available(name: &str) -> Result<bool, i64> {
     Ok(module.available != 0)
 }
 
+fn idempotent_requests() -> i32 {
+    let req = request_id();
+    let first = query(ids::SYSTEM_INFO_GET, usi::Service::Info, req);
+    let retry = query(ids::SYSTEM_INFO_GET, usi::Service::Info, req);
+    let conflict = query(ids::SYSTEM_MODULE_LIST, usi::Service::ModuleList, req);
+    let invalid = query(ids::SYSTEM_INFO_GET, usi::Service::Info, 0);
+    let conflict_code = conflict.as_ref().err().copied().unwrap_or(0);
+    let invalid_code = invalid.as_ref().err().copied().unwrap_or(0);
+    let ok = first.is_ok()
+        && retry.is_ok()
+        && conflict == Err(-(ids::SYSTEM_USI_ERROR_REQUEST_ID as i64))
+        && invalid == Err(-(ids::SYSTEM_USI_ERROR_REQUEST_ID as i64));
+    println!(
+        "usi: mode=idempotent retry={} conflict={} invalid={} ok={}",
+        retry.is_ok(),
+        conflict_code,
+        invalid_code,
+        ok
+    );
+    if ok { 0 } else { 8 }
+}
+
+fn capability_source() -> i32 {
+    let mut source = [0u8; 24];
+    source[0..2].copy_from_slice(&1u16.to_le_bytes());
+    source[2..4].copy_from_slice(&24u16.to_le_bytes());
+    source[4..8].copy_from_slice(&4u32.to_le_bytes());
+    // SAFETY: source is a versioned 24-byte descriptor with kind=capability catalog.
+    let source_handle = unsafe {
+        sys::call3(
+            ids::SYSTEM_EVENT_SOURCE_CREATE,
+            source.as_ptr() as u64,
+            0,
+            0,
+        )
+    };
+    if source_handle <= 0 {
+        println!("usi: mode=capability source_error={}", source_handle);
+        return 9;
+    }
+
+    let mut subscribe = [0u8; 32];
+    subscribe[0..2].copy_from_slice(&1u16.to_le_bytes());
+    subscribe[2..4].copy_from_slice(&32u16.to_le_bytes());
+    subscribe[4..8].copy_from_slice(&1u32.to_le_bytes()); // State policy.
+    subscribe[8..12].copy_from_slice(&16u32.to_le_bytes());
+    // SAFETY: subscribe points at a writable 32-byte descriptor plus 16-byte snapshot.
+    let sub_handle = unsafe {
+        sys::call3(
+            ids::SYSTEM_EVENT_SUBSCRIPTION_CREATE,
+            source_handle as u64,
+            subscribe.as_mut_ptr() as u64,
+            0,
+        )
+    };
+    if sub_handle <= 0 {
+        let _ = unsafe {
+            sys::call3(
+                ids::SYSTEM_HANDLE_CLOSE,
+                source_handle as u64,
+                0,
+                0,
+            )
+        };
+        println!("usi: mode=capability subscription_error={}", sub_handle);
+        return 10;
+    }
+    let mut version = [0u8; 8];
+    version.copy_from_slice(&subscribe[16..24]);
+    let mut mask = [0u8; 8];
+    mask.copy_from_slice(&subscribe[24..32]);
+    let version = u64::from_le_bytes(version);
+    let mask = u64::from_le_bytes(mask);
+    let _ = unsafe {
+        sys::call3(ids::SYSTEM_HANDLE_CLOSE, sub_handle as u64, 0, 0)
+    };
+    let _ = unsafe {
+        sys::call3(
+            ids::SYSTEM_HANDLE_CLOSE,
+            source_handle as u64,
+            0,
+            0,
+        )
+    };
+    println!(
+        "usi: mode=capability source=true subscription=true version={} mask={:#x}",
+        version, mask
+    );
+    0
+}
+
 fn main(mode: u64, _: u64) -> i32 {
     match mode {
         0 => match snapshot() {
@@ -315,6 +406,8 @@ fn main(mode: u64, _: u64) -> i32 {
                 6
             }
         },
+        5 => idempotent_requests(),
+        6 => capability_source(),
         _ => 7,
     }
 }

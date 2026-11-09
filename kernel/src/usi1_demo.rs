@@ -19,16 +19,18 @@ fn check(ok: bool, what: &'static str) {
     }
 }
 
-fn usi_calls() -> SyscallSet {
+pub(crate) fn usi_calls() -> SyscallSet {
     rt_calls().union(SyscallSet::of(&[
         crate::syscall::table::SYSTEM_INFO_GET,
         crate::syscall::table::SYSTEM_PROCESS_LIST,
         crate::syscall::table::SYSTEM_MODULE_LIST,
         crate::syscall::table::SYSTEM_MODULE_LIFECYCLE_GET,
+        crate::syscall::table::SYSTEM_EVENT_SOURCE_CREATE,
+        crate::syscall::table::SYSTEM_EVENT_SUBSCRIPTION_CREATE,
     ]))
 }
 
-fn run_mode(name: &'static str, mode: u64, calls: SyscallSet) {
+pub(crate) fn run_mode(name: &'static str, mode: u64, calls: SyscallSet) {
     let result = run_program(name, USER_USI, mode, calls);
     check(
         matches!(

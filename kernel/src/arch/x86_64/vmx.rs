@@ -11,6 +11,7 @@ use kernel_core::frame::{PhysFrame, FRAME_SIZE};
 use kernel_core::hwvirt::Backend;
 use kernel_core::hwvirt_vcpu::VcpuState;
 use kernel_core::hwvirt_vmm::VmExitEvent;
+use kernel_core::pio::{PioAccess, PioDirection, PioError, PioProbe, PioWidth, PortMap, PIO_PROBE_BASE};
 
 use crate::kprintln;
 
@@ -187,6 +188,7 @@ pub enum VmxError {
     OutOfFrames,
     TooManyExits,
     EventDelivery,
+    Pio(PioError),
 }
 
 impl VmxError {
@@ -209,6 +211,7 @@ impl VmxError {
             VmxError::OutOfFrames => "hwvirt.vmx.error.out_of_frames",
             VmxError::TooManyExits => "hwvirt.vmx.error.too_many_exits",
             VmxError::EventDelivery => "hwvirt.vmx.error.event_delivery",
+            VmxError::Pio(error) => error.name(),
         }
     }
 }
@@ -1012,6 +1015,12 @@ pub struct LinuxReport {
     pub serial_bytes: u32,
     pub timer_interrupts: u32,
     pub timer_eois: u32,
+    pub pio_reads: u32,
+    pub pio_writes: u32,
+    pub pio_probe_generation: u16,
+    pub pio_requests: u32,
+    pub pio_cancels: u32,
+    pub pio_marker: bool,
     pub marker: bool,
     pub halted: bool,
 }
@@ -1048,14 +1057,25 @@ impl LinuxPlatform for NoLinuxDevices {
 }
 
 const LINUX_MARKER: &[u8] = b"[JSR-LINUX-GUEST]";
+const PIO_MARKER: &[u8] = b"[JSR-HWV5-PIO]";
+
+const PIO_PIC_MASTER: u16 = 1;
+const PIO_PIT: u16 = 2;
+const PIO_I8042: u16 = 3;
+const PIO_PIC_SLAVE: u16 = 4;
+const PIO_UART: u16 = 5;
+const PIO_DISCARD: u16 = 6;
+const PIO_PROBE: u16 = 7;
 
 struct LinuxRuntime {
     uart_lcr: u8,
     uart_ier: u8,
     uart_mcr: u8,
     serial_match: usize,
+    pio_match: usize,
     serial_bytes: u32,
     marker_seen: bool,
+    pio_marker_seen: bool,
     pic_master_mask: u8,
     pic_slave_mask: u8,
     pic_master_vector: u8,
@@ -1072,6 +1092,10 @@ struct LinuxRuntime {
     pit_remaining: u32,
     pit_active: bool,
     timer_countdown: u32,
+    pio_map: PortMap<8>,
+    pio_probe: PioProbe,
+    pio_reads: u32,
+    pio_writes: u32,
     msrs: [(u32, u64); 64],
     msr_count: usize,
 }
@@ -1083,8 +1107,10 @@ impl LinuxRuntime {
             uart_ier: 0,
             uart_mcr: 0,
             serial_match: 0,
+            pio_match: 0,
             serial_bytes: 0,
             marker_seen: false,
+            pio_marker_seen: false,
             pic_master_mask: 0xff,
             pic_slave_mask: 0xff,
             pic_master_vector: 0x20,
@@ -1101,6 +1127,18 @@ impl LinuxRuntime {
             pit_remaining: 0,
             pit_active: false,
             timer_countdown: 1024,
+            pio_map: PortMap::<8>::new()
+                .with_claim(0x20, 2, PIO_PIC_MASTER)
+                .with_claim(0x40, 4, PIO_PIT)
+                .with_claim(0x61, 1, PIO_DISCARD)
+                .with_claim(0x64, 1, PIO_I8042)
+                .with_claim(0x80, 1, PIO_DISCARD)
+                .with_claim(0xa0, 2, PIO_PIC_SLAVE)
+                .with_claim(0x3f8, 8, PIO_UART)
+                .with_claim(PIO_PROBE_BASE, 32, PIO_PROBE),
+            pio_probe: PioProbe::new(),
+            pio_reads: 0,
+            pio_writes: 0,
             msrs: [(0, 0); 64],
             msr_count: 0,
         }
@@ -1116,6 +1154,16 @@ impl LinuxRuntime {
                 }
             } else {
                 self.serial_match = usize::from(byte == LINUX_MARKER[0]);
+            }
+        }
+        if !self.pio_marker_seen {
+            if byte == PIO_MARKER[self.pio_match] {
+                self.pio_match += 1;
+                if self.pio_match == PIO_MARKER.len() {
+                    self.pio_marker_seen = true;
+                }
+            } else {
+                self.pio_match = usize::from(byte == PIO_MARKER[0]);
             }
         }
         if byte == b'\n' {
@@ -1264,6 +1312,112 @@ impl LinuxRuntime {
         }
     }
 
+    fn pio_in(&mut self, port: u16, width: PioWidth) -> Result<u64, PioError> {
+        let token = self.pio_map.route(port).ok_or(PioError::UnmappedPort)?;
+        let value = match token {
+            PIO_UART => {
+                byte_width(width)?;
+                u64::from(match (port - 0x3f8) as u8 {
+                    0 => {
+                        if self.uart_lcr & 0x80 != 0 {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    1 => {
+                        if self.uart_lcr & 0x80 != 0 {
+                            0
+                        } else {
+                            self.uart_ier
+                        }
+                    }
+                    2 => 1,
+                    3 => self.uart_lcr,
+                    4 => self.uart_mcr,
+                    5 => 0x60,
+                    6 => 0xb0,
+                    _ => 0,
+                })
+            }
+            PIO_PIC_MASTER | PIO_PIC_SLAVE => {
+                byte_width(width)?;
+                u64::from(self.pic_in(port))
+            }
+            PIO_PIT => {
+                byte_width(width)?;
+                if port == 0x40 {
+                    u64::from(self.pit_in_data())
+                } else {
+                    0
+                }
+            }
+            PIO_I8042 => {
+                byte_width(width)?;
+                if port == 0x64 {
+                    0x14
+                } else {
+                    0
+                }
+            }
+            PIO_DISCARD => {
+                byte_width(width)?;
+                0
+            }
+            PIO_PROBE => {
+                let offset = u64::from(port - PIO_PROBE_BASE);
+                self.pio_probe.read(offset, width)?
+            }
+            _ => return Err(PioError::UnmappedPort),
+        };
+        self.pio_reads = self.pio_reads.saturating_add(1);
+        Ok(value & width.mask())
+    }
+
+    fn pio_out(&mut self, port: u16, width: PioWidth, value: u64) -> Result<(), PioError> {
+        let token = self.pio_map.route(port).ok_or(PioError::UnmappedPort)?;
+        match token {
+            PIO_UART => {
+                byte_width(width)?;
+                match (port - 0x3f8) as u8 {
+                    0 if self.uart_lcr & 0x80 == 0 => self.serial_byte(value as u8),
+                    1 if self.uart_lcr & 0x80 == 0 => self.uart_ier = value as u8,
+                    3 => self.uart_lcr = value as u8,
+                    4 => self.uart_mcr = value as u8,
+                    _ => {}
+                }
+            }
+            PIO_PIC_MASTER | PIO_PIC_SLAVE => {
+                byte_width(width)?;
+                self.pic_out(port, value as u8);
+            }
+            PIO_PIT => {
+                byte_width(width)?;
+                if port == 0x40 {
+                    self.pit_out_data(value as u8);
+                } else if port == 0x43 {
+                    self.pit_out_command(value as u8);
+                }
+            }
+            PIO_I8042 => {
+                byte_width(width)?;
+                // The minimal guest only probes the controller status. A
+                // command write is accepted as an observation point but does
+                // not invent a keyboard reset or interrupt.
+            }
+            PIO_DISCARD => {
+                byte_width(width)?;
+            }
+            PIO_PROBE => {
+                let offset = u64::from(port - PIO_PROBE_BASE);
+                self.pio_probe.write(offset, width, value)?;
+            }
+            _ => return Err(PioError::UnmappedPort),
+        }
+        self.pio_writes = self.pio_writes.saturating_add(1);
+        Ok(())
+    }
+
     fn timer_interrupt(&mut self) -> Option<u8> {
         if !self.pit_active || self.pic_in_service & 1 != 0 {
             return None;
@@ -1302,6 +1456,14 @@ impl LinuxRuntime {
         }
         self.pic_in_service |= 1u16 << irq;
         Some(self.pic_master_vector.wrapping_add(irq))
+    }
+}
+
+fn byte_width(width: PioWidth) -> Result<(), PioError> {
+    if width == PioWidth::Byte {
+        Ok(())
+    } else {
+        Err(PioError::UnsupportedWidth)
     }
 }
 
@@ -1526,7 +1688,18 @@ impl VmxVm {
                 EXIT_IO => {
                     report.io += 1;
                     let qualification = vmread(EXIT_QUALIFICATION)?;
-                    self.emulate_linux_io(qualification, &mut linux);
+                    if let Err(error) =
+                        self.emulate_linux_io(qualification, length, &mut linux)
+                    {
+                        kprintln!(
+                            "[JSR-HWV5-PIO-FAIL] error={} qualification={:#x} length={} rip={:#x}",
+                            error.name(),
+                            qualification,
+                            length,
+                            self.guest.state.rip
+                        );
+                        return Err(VmxError::Pio(error));
+                    }
                     self.advance_rip(length);
                 }
                 EXIT_CR_ACCESS => {
@@ -1574,6 +1747,12 @@ impl VmxVm {
                         serial_bytes: report.serial_bytes,
                         timer_interrupts: linux.timer_injections,
                         timer_eois: linux.pic_eois,
+                        pio_reads: linux.pio_reads,
+                        pio_writes: linux.pio_writes,
+                        pio_probe_generation: linux.pio_probe.generation(),
+                        pio_requests: linux.pio_probe.requests(),
+                        pio_cancels: linux.pio_probe.cancels(),
+                        pio_marker: linux.pio_marker_seen,
                         marker: report.linux_marker,
                         halted: true,
                     });
@@ -1973,74 +2152,25 @@ impl VmxVm {
         Ok(())
     }
 
-    fn emulate_linux_io(&mut self, qualification: u64, linux: &mut LinuxRuntime) {
-        let width = match qualification & 7 {
-            0 => 1,
-            1 => 2,
-            3 => 4,
-            _ => 1,
-        };
-        let input = qualification & (1 << 3) != 0;
+    fn emulate_linux_io(
+        &mut self,
+        qualification: u64,
+        length: u64,
+        linux: &mut LinuxRuntime,
+    ) -> Result<(), PioError> {
         let register = ((qualification >> 8) & 0xf) as usize;
-        let port = ((qualification >> 16) & 0xffff) as u16;
-        if !input {
-            let value = self.gpr(register);
-            if (0x3f8..=0x3ff).contains(&port) {
-                let offset = (port - 0x3f8) as u8;
-                match offset {
-                    0 if linux.uart_lcr & 0x80 == 0 => linux.serial_byte(value as u8),
-                    1 if linux.uart_lcr & 0x80 == 0 => linux.uart_ier = value as u8,
-                    3 => linux.uart_lcr = value as u8,
-                    4 => linux.uart_mcr = value as u8,
-                    _ => {}
-                }
-            } else if matches!(port, 0x20 | 0x21 | 0xa0 | 0xa1) {
-                linux.pic_out(port, value as u8);
-            } else if port == 0x40 {
-                linux.pit_out_data(value as u8);
-            } else if port == 0x43 {
-                linux.pit_out_command(value as u8);
+        let access =
+            PioAccess::decode_vmx(qualification, length, self.gpr(register))?;
+        match access.direction {
+            PioDirection::In => {
+                let value = linux.pio_in(access.port, access.width)?;
+                self.set_gpr(usize::from(access.register), value);
             }
-            return;
+            PioDirection::Out => {
+                linux.pio_out(access.port, access.width, access.value)?;
+            }
         }
-        let value = if (0x3f8..=0x3ff).contains(&port) {
-            match (port - 0x3f8) as u8 {
-                0 => {
-                    if linux.uart_lcr & 0x80 != 0 {
-                        1
-                    } else {
-                        0
-                    }
-                }
-                1 => {
-                    if linux.uart_lcr & 0x80 != 0 {
-                        0
-                    } else {
-                        u64::from(linux.uart_ier)
-                    }
-                }
-                2 => 1,
-                3 => u64::from(linux.uart_lcr),
-                4 => u64::from(linux.uart_mcr),
-                5 => 0x60,
-                6 => 0xb0,
-                _ => 0,
-            }
-        } else if matches!(port, 0x20 | 0x21 | 0xa0 | 0xa1) {
-            u64::from(linux.pic_in(port))
-        } else if port == 0x40 {
-            u64::from(linux.pit_in_data())
-        } else if port == 0x64 {
-            0x14
-        } else {
-            u64::MAX
-        };
-        let mask = if width == 8 {
-            u64::MAX
-        } else {
-            (1u64 << (width * 8)) - 1
-        };
-        self.set_gpr(register, value & mask);
+        Ok(())
     }
 
     fn emulate_linux_cr_access(&mut self, qualification: u64, length: u64) -> Result<(), VmxError> {

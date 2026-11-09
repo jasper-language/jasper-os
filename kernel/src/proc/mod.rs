@@ -24,6 +24,7 @@ use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use kernel_core::capability::CapabilityLink;
 use kernel_core::frame::{PhysFrame, FRAME_SIZE};
 use kernel_core::kobj_type::{check_grant, GrantCheck, Kind};
 use kernel_core::object::{
@@ -32,6 +33,7 @@ use kernel_core::object::{
 use kernel_core::objtable::ObjId;
 use kernel_core::paging::{MapError, MapFlags, VirtPage};
 use kernel_core::security::{ApplicationIdentity, IdentityClass};
+use kernel_core::usi_request::{Begin as UsiRequestBegin, Ledger as UsiRequestLedger};
 
 use crate::kobj::{self, KObject, TaskObj};
 use crate::mm::phys_to_virt;
@@ -45,6 +47,7 @@ pub mod spawn;
 
 /// 每个进程句柄表的容量。
 pub const HANDLES_PER_PROCESS: usize = crate::config::ACTIVE.objects.handles_per_process;
+const USI_REQUEST_SLOTS: usize = 16;
 
 /// 进程状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +94,9 @@ pub struct Process {
     syscalls: SyscallSet,
     /// 资源配额记账（Ring、在飞请求、Channel 端点）。
     ring_quota: ResourceQuota,
+    /// USI request IDs are scoped to this process; completed read-only entries are
+    /// bounded and evicted oldest-first.
+    usi_requests: UsiRequestLedger<USI_REQUEST_SLOTS>,
     /// 本进程的退出状态（持有一个内部引用）。
     exit_state: ObjId,
     /// 子进程表：每项持有子进程的一个内部引用（父 → 子单向）；本进程退出时释放。
@@ -341,6 +347,7 @@ pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcErr
         threads: Vec::new(),
         syscalls,
         ring_quota: ResourceQuota::default(),
+        usi_requests: UsiRequestLedger::new(),
         exit_state,
         children: Vec::new(),
         threads_live: 0,
@@ -1653,6 +1660,38 @@ pub fn current_process() -> Option<ObjId> {
         .map(|m| m.process)
 }
 
+/// Reserve or classify a USI request ID under the process object-table lock.
+pub(crate) fn begin_usi_request(
+    pid: ObjId,
+    request_id: u64,
+    service: u16,
+) -> Result<UsiRequestBegin, ProcError> {
+    with_proc(pid, |p| Ok(p.usi_requests.begin(request_id, service)))
+}
+
+/// Mark a successfully executed (possibly replayable read-only) request complete.
+pub(crate) fn complete_usi_request(
+    pid: ObjId,
+    slot: usize,
+    request_id: u64,
+    service: u16,
+) {
+    kobj::with(|t| {
+        if let Ok(KObject::Process(p)) = t.get_mut(pid) {
+            p.usi_requests.complete(slot, request_id, service);
+        }
+    });
+}
+
+/// Remove a request reservation after a pre-response failure.
+pub(crate) fn abort_usi_request(pid: ObjId, slot: usize, request_id: u64, service: u16) {
+    kobj::with(|t| {
+        if let Ok(KObject::Process(p)) = t.get_mut(pid) {
+            p.usi_requests.abort(slot, request_id, service);
+        }
+    });
+}
+
 /// 取得一个**允许接收新句柄**的进程（存在且处于 Running）。
 ///
 /// 进程进入 exited 时已经关闭并释放了整张句柄表；之后若再放入句柄，这些句柄持有的外部所有权
@@ -1908,6 +1947,14 @@ pub fn handle_info(pid: ObjId, h: HandleId) -> Option<(ObjectRef, Rights)> {
     .ok()
 }
 
+/// SEC-2 lineage diagnostics. This does not expose a user-callable token.
+pub fn capability_info(pid: ObjId, h: HandleId) -> Option<CapabilityLink> {
+    with_proc(pid, |p| {
+        p.handles.capability(h).map_err(ProcError::Handle)
+    })
+    .ok()
+}
+
 /// 进程 `pid` 的句柄表还能容纳的句柄数。
 pub fn free_handle_slots(pid: ObjId) -> usize {
     with_proc(pid, |p| Ok(p.handles.free_slots())).unwrap_or(0)
@@ -1937,12 +1984,12 @@ fn duplicate_in(
     h: HandleId,
     rights: Rights,
 ) -> Result<HandleId, ProcError> {
-    let (r, have) = match t.get(pid) {
-        Ok(KObject::Process(p)) => p
-            .handles
-            .get(h)
-            .map(|(r, x)| (*r, x))
-            .map_err(ProcError::Handle)?,
+    let (r, have, parent) = match t.get(pid) {
+        Ok(KObject::Process(p)) => {
+            let (r, have) = p.handles.get(h).map_err(ProcError::Handle)?;
+            let parent = p.handles.capability(h).map_err(ProcError::Handle)?;
+            (*r, have, parent)
+        }
         _ => return Err(ProcError::NoSuchProcess),
     };
     if !have.contains(Rights::DUPLICATE) || !have.contains(rights) {
@@ -1952,7 +1999,11 @@ fn duplicate_in(
     receiver(t, pid)?;
     t.acquire_owner(obj)
         .map_err(|_| ProcError::Handle(HandleError::Invalid))?;
-    let put = receiver(t, pid).and_then(|p| p.handles.put(r, rights).map_err(ProcError::Handle));
+    let put = receiver(t, pid).and_then(|p| {
+        p.handles
+            .put_delegated(r, rights, parent.id)
+            .map_err(ProcError::Handle)
+    });
     if put.is_err() {
         let _ = kobj::release_owner_in(t, obj);
     }
@@ -2000,12 +2051,11 @@ pub(crate) fn inherit_application(parent: ObjId, child: ObjId) -> Result<(), Pro
 /// 成功时外部所有权总数不变（从 from 的句柄转为 to 的句柄），发送方旧句柄值永久失效。
 pub fn transfer(from: ObjId, h: HandleId, to: ObjId) -> Result<HandleId, ProcError> {
     kobj::with(|t| {
-        let (r, rights) = match t.get(from) {
-            Ok(KObject::Process(p)) => p
-                .handles
-                .get(h)
-                .map(|(r, x)| (*r, x))
-                .map_err(ProcError::Handle)?,
+        let (r, rights, has_dependents) = match t.get(from) {
+            Ok(KObject::Process(p)) => {
+                let (r, rights) = p.handles.get(h).map_err(ProcError::Handle)?;
+                (*r, rights, p.handles.has_dependents(h))
+            }
             _ => return Err(ProcError::NoSuchProcess),
         };
         if !rights.contains(Rights::TRANSFER) {
@@ -2013,6 +2063,9 @@ pub fn transfer(from: ObjId, h: HandleId, to: ObjId) -> Result<HandleId, ProcErr
         }
         if !r.ty.is_transferable_v1() {
             return Err(ProcError::NotTransferable);
+        }
+        if has_dependents {
+            return Err(ProcError::Handle(HandleError::RightsDenied));
         }
         // 接收方必须仍可接收句柄（Running），且句柄表有空位
         if receiver(t, to)?.handles.free_slots() == 0 {
@@ -2281,6 +2334,42 @@ pub(crate) fn close_handle_for(pid: ObjId, h: HandleId) -> Result<(), ProcError>
             let _ = kobj::release_owner_in(t, id);
         }
         Ok(())
+    })
+}
+
+/// Revoke a capability subtree rooted at `h` and close every revoked handle in
+/// that process. This is the SEC-2 authority-lifetime primitive: aliases and
+/// all delegated descendants become invalid before their object ownership is
+/// returned, so an old handle cannot be reconstructed through a copied slot.
+pub fn revoke_current(h: HandleId) -> Result<usize, ProcError> {
+    let pid = current_process().ok_or(ProcError::NoSuchProcess)?;
+    revoke_for(pid, h)
+}
+
+pub(crate) fn revoke_for(pid: ObjId, h: HandleId) -> Result<usize, ProcError> {
+    kobj::with(|t| {
+        let mut closed = Vec::new();
+        let mut revoked_handles = Vec::new();
+        let affected = match t.get_mut(pid) {
+            Ok(KObject::Process(p)) => {
+                let affected = p.handles.revoke(h).map_err(ProcError::Handle)?;
+                p.handles.close_revoked_with(|handle, object| {
+                    revoked_handles.push(handle);
+                    closed.push(object);
+                });
+                for handle in revoked_handles {
+                    revoke_device_mappings_for_handle(p, handle);
+                }
+                affected
+            }
+            _ => return Err(ProcError::NoSuchProcess),
+        };
+        for object in closed {
+            if let Some(id) = ObjId::from_raw(object.id.0) {
+                let _ = kobj::release_owner_in(t, id);
+            }
+        }
+        Ok(affected)
     })
 }
 
