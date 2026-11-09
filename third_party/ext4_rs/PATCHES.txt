@@ -1,0 +1,11 @@
+Source: https://github.com/yuoo655/ext4_rs
+Version: 1.3.3 (crates.io)
+License: MIT (see LICENSE)
+
+Jasper local patches:
+1. Remove the now-stable error_in_core feature gate for the pinned nightly.
+2. Preserve the real directory-entry file type instead of hard-coding directory.
+3. Treat parent inode 0 as the root sentinel and return ENOTDIR instead of
+   panicking when a caller supplies a non-directory parent.
+
+These files are otherwise the crates.io 1.3.3 source used by the FS-1 backend.

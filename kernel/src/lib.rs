@@ -36,6 +36,8 @@ pub mod production;
 pub use production as plan;
 
 pub mod appid_demo;
+#[cfg(all(feature = "arch2-verify", target_arch = "x86_64"))]
+pub mod arch2_demo;
 pub mod abi_demo;
 pub mod arbiter_demo;
 pub mod arch;
@@ -115,6 +117,8 @@ pub mod blk;
 pub mod blk1_demo;
 #[cfg(all(target_arch = "x86_64", feature = "fs0-journal-verify"))]
 pub mod fs0_demo;
+#[cfg(all(target_arch = "x86_64", feature = "fs1-ext4-verify"))]
+pub mod fs1_demo;
 #[cfg(feature = "pex0-verify")]
 pub mod pex0_demo;
 pub mod balance_demo;

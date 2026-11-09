@@ -16,11 +16,19 @@ name = "kernel_core"
 path = "src/lib.rs"
 
 [dependencies]
+crc = { version = "3", optional = true }
+ext4-view = { version = "1.0.0", default-features = false, optional = true }
+ext4_rs = { path = "../third_party/ext4_rs", optional = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [features]
+# FS-1 read-only ext4 VFS plus JBD2 recovery overlay.
+ext4-view = ["dep:crc", "dep:ext4-view"]
+# Experimental FS-1 write engine: buffered ext4_rs metadata operations committed
+# through Jasper's own JBD2 writer.
+ext4-write = ["ext4-view", "dep:ext4_rs"]
 # Author: chatgpt. Isolated capacity validation; default capacity bounds unchanged.
 evt1-capacity = []
 # SEC-1 dedicated acceptance hooks; never enabled in production profiles.

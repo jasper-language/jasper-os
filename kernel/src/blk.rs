@@ -82,6 +82,12 @@ pub struct BlockDevice {
     geometry: Geometry,
 }
 
+// SAFETY: the device owns the DMA-backed queue pointers for its whole
+// lifetime. Every operation takes `&mut self`, and cross-thread callers in
+// FS-1 access the device only through one IRQ-safe ticket lock. Moving the
+// owner between tasks does not invalidate the physical frames or queue state.
+unsafe impl Send for BlockDevice {}
+
 fn discard_process(pid: ObjId) {
     let _ = proc::exit_idle(pid, -1);
     let _ = proc::reap(pid);

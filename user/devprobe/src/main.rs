@@ -18,7 +18,11 @@
 
 use core::arch::asm;
 use core::fmt::{self, Write as _};
+use core::sync::atomic::{fence, Ordering};
 
+use kernel_core::arch2::{
+    BAR_MAP_WORD, CONTROL_MAGIC, DEVICE_HANDLE_WORD, READY_VALUE, READY_WORD, RING_HANDLE_WORD,
+};
 use kernel_core::device::{
     CapabilityRecord, Desc, Filter, Record, BAR_KIND_IO, BAR_KIND_NONE, CAP_CFG_COMMON, CAP_RECORD_SIZE, DESC_SIZE,
     FILTER_ALL_CLASS, FILTER_ALL_VENDOR, RECORD_SIZE,
@@ -676,6 +680,103 @@ fn probe_map_no_capability() -> ! {
     exit(if failed() == 0 { 0 } else { 1 });
 }
 
+/// 角色 5：ARCH-2 的长期用户态驱动。
+///
+/// 打开并映射真实 virtio-net 设备，创建 Ring，把三个实际句柄和映射结果写入内核提供的
+/// 控制页，然后进入长时间睡眠。内核负责查询/USI、终止进程并验证旧句柄与映射失效。
+fn probe_service_driver(control: usize) -> ! {
+    let mut net_bdf = 0u32;
+
+    // SAFETY：单线程，独占 LIST。
+    let list: &mut [u8] = unsafe { &mut *core::ptr::addr_of_mut!(LIST) };
+    let listed = list_raw(Filter::ALL.to_word(), list.as_mut_ptr() as u64, list.len() as u64);
+    let count = if listed > 0 { listed as usize / RECORD_SIZE } else { 0 };
+    for i in 0..count {
+        let mut raw = [0u8; RECORD_SIZE];
+        raw.copy_from_slice(&list[i * RECORD_SIZE..(i + 1) * RECORD_SIZE]);
+        let record = Record::decode(&raw);
+        if record.vendor == 0x1AF4 && record.class == 0x02 {
+            net_bdf = record.bdf;
+            break;
+        }
+    }
+    if net_bdf == 0 {
+        exit(40);
+    }
+
+    let max = Rights::READ.union(Rights::MAP);
+    let device = open(net_bdf, max);
+    if device <= 0 {
+        exit(41);
+    }
+
+    // SAFETY：单线程，独占 DESC。
+    let desc_buf: &mut [u8] = unsafe { &mut *core::ptr::addr_of_mut!(DESC) };
+    if get(device, desc_buf) != DESC_SIZE as i64 {
+        exit(42);
+    }
+    let mut desc_raw = [0u8; DESC_SIZE];
+    desc_raw.copy_from_slice(desc_buf);
+    let desc = Desc::decode(&desc_raw);
+
+    let cap_need = capability_list(device, 0, 0);
+    if cap_need <= 0 || cap_need as usize > 256 {
+        exit(43);
+    }
+    // SAFETY：单线程，独占 CAPS。
+    let caps: &mut [u8] = unsafe { &mut *core::ptr::addr_of_mut!(CAPS) };
+    let caps_got = capability_list(device, caps.as_mut_ptr() as u64, caps.len() as u64);
+    let cap_count = if caps_got > 0 {
+        caps_got as usize / CAP_RECORD_SIZE
+    } else {
+        0
+    };
+    let mut common = CapabilityRecord::NONE;
+    let mut common_found = false;
+    for i in 0..cap_count {
+        let mut raw = [0u8; CAP_RECORD_SIZE];
+        raw.copy_from_slice(&caps[i * CAP_RECORD_SIZE..(i + 1) * CAP_RECORD_SIZE]);
+        let cap = CapabilityRecord::decode(&raw);
+        if cap.cfg_type == CAP_CFG_COMMON {
+            common = cap;
+            common_found = true;
+            break;
+        }
+    }
+    if !common_found || common.bar as usize >= desc.bars.len() {
+        exit(44);
+    }
+    if map_bar(device, common.bar as u32, MAP_VA) != 0 {
+        exit(45);
+    }
+
+    // SAFETY: 参数是整数；内核创建句柄并完成请求记账。
+    let ring = unsafe { syscall3(ids::SYSTEM_ASYNC_RING_CREATE, 4, 0, 0) };
+    if ring <= 0 {
+        exit(46);
+    }
+
+    // SAFETY: 内核为本进程映射并清零了 control 指向的一整页；本线程独占该页。
+    unsafe {
+        let out = control as *mut u64;
+        out.add(DEVICE_HANDLE_WORD).write_volatile(device as u64);
+        out.add(RING_HANDLE_WORD).write_volatile(ring as u64);
+        out.add(BAR_MAP_WORD).write_volatile(MAP_VA);
+        out.add(READY_WORD).write_volatile(READY_VALUE);
+        fence(Ordering::SeqCst);
+        out.write_volatile(CONTROL_MAGIC);
+    }
+    log(format_args!(
+        "[JSR-ARCH2-USER] ready device={} ring={} mapped=0x{:x}",
+        device, ring, MAP_VA
+    ));
+
+    // begin_exit 会唤醒本睡眠线程；返回后由正常退出路径释放全部句柄、Ring 与设备映射。
+    let wait = unsafe { syscall3(ids::SYSTEM_TIME_WAIT, u64::MAX / 4, 0, 0) };
+    log(format_args!("[JSR-ARCH2-USER] terminating wait={}", wait));
+    exit(0)
+}
+
 /// 角色 1：进程没有设备访问能力；设备调用必须在分发层被拒。
 fn probe_no_capability() -> ! {
     let list_ret = list_raw(Filter::ALL.to_word(), 0, 0);
@@ -708,12 +809,13 @@ fn failed() -> u32 {
 /// Program entry (placed first in the text segment by the linker); `role` comes from the kernel.
 #[no_mangle]
 #[link_section = ".text._start"]
-pub extern "C" fn _start(role: usize, _arg: usize) -> ! {
+pub extern "C" fn _start(role: usize, arg: usize) -> ! {
     match role {
         0 => probe_devices(),
         1 => probe_no_capability(),
         2 => probe_map(),
         3 => probe_map_no_capability(),
+        5 => probe_service_driver(arg),
         _ => exit(100),
     }
 }

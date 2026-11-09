@@ -51,8 +51,12 @@
 //! 本 crate 内的 Rust 模块名只是代码组织，不是接口。
 #![cfg_attr(not(test), no_std)]
 
+#[cfg(any(test, feature = "ext4-view"))]
+extern crate alloc;
+
 pub mod abi;
 pub mod abi_contract;
+pub mod arch2;
 pub mod abi_version;
 pub mod acpi;
 pub mod argcase;
@@ -72,6 +76,10 @@ pub mod yield_gate;
 pub mod dma_quiesce;
 pub mod dma_abi;
 pub mod elf;
+#[cfg(feature = "ext4-view")]
+pub mod ext4_view;
+#[cfg(feature = "ext4-write")]
+pub mod ext4_write;
 pub mod environment;
 pub mod ticket;
 pub mod task_index;
@@ -98,6 +106,7 @@ pub mod memory_abi;
 pub mod meta;
 pub mod msi;
 pub mod net;
+pub mod net1a;
 pub mod profile;
 pub mod program_caps;
 /// 服务装配契约：模块运行时状态、依赖顺序、能力发布与审计（issue #6）。

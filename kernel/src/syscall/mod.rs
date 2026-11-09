@@ -189,6 +189,7 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
         }
         return ret;
     };
+    let mut service = Some(service);
     let trace = tracing();
     if trace {
         kprintln!("[JSR-SYSCALL] enter name={} id={} task={} effects={}", e.name, e.id, task_name, e.effects.as_str());
@@ -204,7 +205,7 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
     // path, otherwise the publication gate retains a reader forever and every
     // later health change waits on a task that no longer exists.
     if matches!(e.id, SYSTEM_TASK_EXIT | SYSTEM_PROCESS_EXIT) {
-        drop(service);
+        let _ = service.take();
     }
     let enqueued_before = crate::kobj::enqueued_total();
     let started = crate::arch::cycles();
@@ -226,6 +227,11 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
     crate::mm::pressure::sync_events();
     // 出口调度点：调用期间所属进程进入了 exiting（例如阻塞等待被终止打断）⇒ 不再返回用户态
     if proc::current_exiting() {
+        // This path does not unwind the syscall stack. Drop the service lease
+        // before the non-returning thread exit just as the explicit exit paths
+        // above do; otherwise a service call blocked and then killed retains a
+        // publication reader forever and every health withdrawal stalls.
+        let _ = service.take();
         proc::thread_exit(0, "killed");
     }
     ret

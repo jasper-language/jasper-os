@@ -73,8 +73,10 @@ case "$PROFILE" in
   *) echo "✗ 未知配置档：$PROFILE（可选 standard / compact）"; exit 2 ;;
 esac
 [ "${JASPER_CHECKS:-}" = "drv3" ] && KFEAT+=(--features drv3-verify)
+[ "${JASPER_CHECKS:-}" = "arch2" ] && KFEAT+=(--features arch2-verify)
 [ "${JASPER_CHECKS:-}" = "blk1" ] && KFEAT+=(--features blk1-verify)
 [ "${JASPER_CHECKS:-}" = "fs0-journal" ] && KFEAT+=(--features fs0-journal-verify)
+[ "${JASPER_CHECKS:-}" = "fs1" ] && KFEAT+=(--features fs1-ext4-verify)
 [ "${JASPER_CHECKS:-}" = "mod1" ] && KFEAT+=(--features mod1-verify)
 [ "${JASPER_CHECKS:-}" = "usi1" ] && KFEAT+=(--features usi1-verify)
 [ "${JASPER_CHECKS:-}" = "usi2" ] && KFEAT+=(--features usi2-verify)
@@ -351,7 +353,17 @@ QRC=-1
 # DRV-1B：加挂三个 virtio 设备（熵源 / 网络 / 块），并为块设备生成一个临时空白镜像。
 # PCI 枚举在两种机制下都必须找到厂商 0x1af4、设备号在 virtio 范围内的三个功能。
 BLANK="$OUT/virtio-blank.img"
-if command -v truncate >/dev/null; then
+if [ "${JASPER_CHECKS:-}" = "fs1" ]; then
+  if ! command -v mke2fs >/dev/null || ! command -v debugfs >/dev/null || ! command -v e2fsck >/dev/null; then
+    echo "✗ FS-1 requires mke2fs/debugfs/e2fsck"
+    exit 2
+  fi
+  truncate -s 64M "$BLANK"
+  mke2fs -q -t ext4 -b 4096 -F -L JASPER_FS1 "$BLANK"
+  printf 'HOST-SEED\n' > "$OUT/fs1-seed.txt"
+  debugfs -w -R "write $OUT/fs1-seed.txt /seed.txt" "$BLANK" > "$OUT/fs1-fixture.log" 2>&1
+  e2fsck -fy "$BLANK" >> "$OUT/fs1-fixture.log" 2>&1 || [ $? -eq 1 ]
+elif command -v truncate >/dev/null; then
   truncate -s 1M "$BLANK"
 else
   dd if=/dev/zero of="$BLANK" bs=1M count=1 status=none
@@ -2778,6 +2790,20 @@ check_drv3() {
   fi
 }
 
+check_arch2() {
+  if has '^\[JSR-ARCH2\] driver=arch2-driver-a state=running .*maps=1 ring_quota=1' \
+     && has 'usi: mode=restored devices_available=true' \
+     && has '^\[JSR-ARCH2\] driver_exit .*old_handles=false old_mapping=false objects_reclaimed=true' \
+     && has 'usi: mode=degraded devices_available=false' \
+     && has '^\[JSR-ARCH2\] driver=arch2-driver-b state=running .*maps=1 ring_quota=1' \
+     && has '^\[JSR-ARCH2\] summary drivers=2 restarts=1 available=true unavailable=true old_handles=false old_mapping=false old_lease=false abi=3\.1\.0 unchanged=true resources=true failed=0' \
+     && ! has '^\[JSR-ARCH2-FAIL\]'; then
+    record ARCH-2 PASS "真实用户态驱动打开并映射 virtio-net、创建 Ring 后保持运行；USI 报告 available；进程死亡后 unavailable，旧 Device/Ring 句柄与 BAR 映射失效并回收；第二次启动恢复服务并再次通过死亡路径；资源回基线，ABI 3.1.0 不变"
+  else
+    record ARCH-2 FAIL "缺少真实用户态驱动、USI available/unavailable、死亡后句柄/映射失效、重启恢复、资源基线或 ABI 证据"
+  fi
+}
+
 check_usi1() {
   if has 'usi: mode=human snapshot=' \
      && has 'usi: mode=json \{"schema":"usi.v1"' \
@@ -2839,6 +2865,23 @@ check_fs0() {
     record FS-0 PASS "版本化文件服务完成 create/lookup/open/close/unlink/rename/sync/mmap 分发；同盘 virtio-blk 双槽 journal 在宿主强杀后恢复第 1 检查点并提交第 2 检查点；不可信 wire/checkpoint 变异失败关闭，资源回基线"
   else
     record FS-0 FAIL "缺少内核文件服务分发、真实 journal 恢复、强杀后提交或资源回基线证据"
+  fi
+}
+
+check_fs1() {
+  local fsck_ok=0 content=""
+  if e2fsck -fn "$BLANK" > "$OUT/fs1-e2fsck.log" 2>&1; then
+    fsck_ok=1
+  fi
+  content="$(debugfs -R 'cat /jasper-renamed.txt' "$BLANK" 2>/dev/null | tr -d '\r')"
+  if has '^\[JSR-FS1\] mounted=true read=true write=true fsync=true rename=true handles=0' \
+     && has '^\[JSR-FS1\] summary failed=0 resources=true' \
+     && ! has '^\[JSR-FS1-FAIL\]' \
+     && [ "$fsck_ok" -eq 1 ] \
+     && [ "$content" = "written by Jasper" ]; then
+    record FS-1 PASS "真实 virtio-blk ext4：Linux 镜像读取；VFS create/write/fsync/rename/read；打开句柄跨 rename 保持；句柄关闭后回收；宿主 e2fsck 无修复且 Linux debugfs 读到 rename 后内容"
+  else
+    record FS-1 FAIL "缺少真实 ext4 VFS、JBD2/flush、atomic rename、Linux e2fsck 干净或资源回收证据"
   fi
 }
 

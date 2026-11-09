@@ -69,10 +69,14 @@ sec2-verify = []
 usi1-verify = ["user-programs"]
 # Dedicated USI-2 idempotency, capability events and cancellation acceptance.
 usi2-verify = ["user-programs"]
+# Dedicated ARCH-2 user-space driver death/restart and resource-reclamation proof.
+arch2-verify = ["user-programs"]
 # BLK-1 real virtio-blk persistence and lifecycle drill.
 blk1-verify = []
 # FS-0 journal-to-virtio-blk integration and same-disk power-cut drill.
 fs0-journal-verify = []
+# FS-1 real ext4 VFS read/write/fsync/rename over virtio-blk.
+fs1-ext4-verify = ["kernel-core/ext4-write"]
 # Dedicated MOD-1 contract: assembly ordering, publication and runtime stop/health.
 mod1-verify = []
 # Author: chatgpt. Optional diagnostic counters; absent from default builds.
