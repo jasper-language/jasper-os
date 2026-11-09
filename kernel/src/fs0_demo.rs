@@ -7,7 +7,8 @@ use kernel_core::fs::journal::{
     BlockJournalStorage, FsJournal, JournalError, SectorIo, STORAGE_UNIT_BYTES,
 };
 use kernel_core::fs::{
-    EntryName, FsCapabilities, FsContract, MountIdentity, NodeKind, PersistentIdentity,
+    EntryName, FsCapabilities, FsContract, FsServiceReply, FsServiceRequest, MountIdentity,
+    NodeKind, PersistentIdentity,
 };
 use kernel_core::object::Rights;
 
@@ -116,6 +117,68 @@ fn create_file(
     )
 }
 
+fn exercise_file_service(
+    fs: &mut FsContract<JOURNAL_NODES, JOURNAL_HANDLES>,
+) -> bool {
+    let root = fs.root();
+    let create = FsServiceRequest::create(
+        root,
+        EntryName::new(b"wire").unwrap(),
+        NodeKind::File,
+        Rights::READ.union(Rights::WRITE),
+    );
+    let Ok(FsServiceReply::Created(_)) = fs.dispatch(create) else {
+        return false;
+    };
+    let open = FsServiceRequest::open(
+        root,
+        EntryName::new(b"wire").unwrap(),
+        Rights::READ
+            .union(Rights::WRITE)
+            .union(Rights::MAP),
+    );
+    let Ok(FsServiceReply::Open(handle)) = fs.dispatch(open) else {
+        return false;
+    };
+    if fs.write(handle, 4096).is_err() {
+        return false;
+    }
+    let mmap = FsServiceRequest::mmap(handle, 0, 4096, false);
+    if !matches!(
+        fs.dispatch(mmap),
+        Ok(FsServiceReply::Mapped(mapping)) if fs.mapping_valid(mapping)
+    ) {
+        return false;
+    }
+    if fs.dispatch(FsServiceRequest::close(handle)) != Ok(FsServiceReply::Closed) {
+        return false;
+    }
+    let rename = FsServiceRequest::rename(
+        root,
+        EntryName::new(b"wire").unwrap(),
+        root,
+        EntryName::new(b"wire-renamed").unwrap(),
+        false,
+        Rights::READ
+            .union(Rights::WRITE)
+            .union(Rights::CONTROL),
+    );
+    if !matches!(
+        fs.dispatch(rename),
+        Ok(FsServiceReply::Renamed(_))
+    ) {
+        return false;
+    }
+    let unlink = FsServiceRequest::unlink(
+        root,
+        EntryName::new(b"wire-renamed").unwrap(),
+        Rights::READ
+            .union(Rights::WRITE)
+            .union(Rights::CONTROL),
+    );
+    matches!(fs.dispatch(unlink), Ok(FsServiceReply::Unlinked(_)))
+}
+
 fn run_journal(block: &mut BlockDevice) -> Outcome {
     // BlockJournalStorage translates its partition-relative offsets to absolute
     // device sectors before calling SectorIo. The adapter must not offset again.
@@ -156,6 +219,9 @@ fn run_journal(block: &mut BlockDevice) -> Outcome {
                 seed_present
             );
             let mut state = replay.state;
+            let service = exercise_file_service(&mut state);
+            check(service, "file-service contract dispatch failed");
+            kprintln!("[JSR-FS0] service={}", service);
             if create_file(&mut state, b"after-reboot").is_err() {
                 check(false, "could not create post-reboot file");
             }

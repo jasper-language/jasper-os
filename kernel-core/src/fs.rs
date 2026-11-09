@@ -8,6 +8,7 @@
 //! evidence required by FS-1.
 
 use crate::block::{Request, Terminal};
+use crate::memory_object::PAGE_BYTES;
 use crate::object::{HandleError, HandleId, HandleTable, Rights};
 
 pub const CONTRACT_MAJOR: u16 = 1;
@@ -1127,6 +1128,14 @@ impl<const N: usize, const H: usize> FsContract<N, H> {
     /// `FsContract` namespace, HandleTable and Rights checks as the typed API.
     pub fn dispatch(&mut self, request: FsServiceRequest) -> Result<FsServiceReply, FsError> {
         match request.op {
+            FsServiceOp::Create => self
+                .create(
+                    request.parent,
+                    request.name,
+                    request.kind,
+                    request.rights,
+                )
+                .map(FsServiceReply::Created),
             FsServiceOp::Lookup => self
                 .lookup(request.parent, request.name, request.rights)
                 .map(FsServiceReply::Lookup),
@@ -1138,6 +1147,106 @@ impl<const N: usize, const H: usize> FsContract<N, H> {
                 self.close(request.handle)?;
                 Ok(FsServiceReply::Closed)
             }
+            FsServiceOp::Unlink => self
+                .unlink(
+                    request.parent,
+                    request.name,
+                    request.rights,
+                    request.rights,
+                )
+                .map(FsServiceReply::Unlinked),
+            FsServiceOp::Rename => self
+                .rename(RenameRequest {
+                    source_parent: request.parent,
+                    source_name: request.name,
+                    target_mount: self.mount,
+                    target_parent: request.target_parent,
+                    target_name: request.target_name,
+                    mode: if request.replace {
+                        RenameMode::ReplaceFile
+                    } else {
+                        RenameMode::NoReplace
+                    },
+                    authority: RenameAuthority {
+                        source_parent: request.rights,
+                        target_parent: request.rights,
+                        object: request.rights,
+                        replaced: request.rights,
+                    },
+                })
+                .map(FsServiceReply::Renamed),
+            FsServiceOp::Sync => {
+                let ticket = self.begin_sync(request.handle, SyncScope::DataAndMetadata)?;
+                self.complete_sync(request.handle, ticket, true)
+                    .map(FsServiceReply::Synced)
+            }
+            FsServiceOp::Mmap => self
+                .map(
+                    request.handle,
+                    request.offset,
+                    request.length,
+                    request.writable,
+                )
+                .map(FsServiceReply::Mapped),
+        }
+    }
+
+    /// Complete typed VFS dispatch. Translation from future syscall/UST
+    /// records lands here; every operation uses the same handle table,
+    /// namespace, rights and durability state.
+    pub fn dispatch_call(&mut self, call: FsServiceCall) -> Result<FsServiceResult, FsError> {
+        match call {
+            FsServiceCall::Lookup {
+                parent,
+                name,
+                parent_rights,
+            } => self
+                .lookup(parent, name, parent_rights)
+                .map(FsServiceResult::Identity),
+            FsServiceCall::Create {
+                parent,
+                name,
+                kind,
+                parent_rights,
+            } => self
+                .create(parent, name, kind, parent_rights)
+                .map(FsServiceResult::Identity),
+            FsServiceCall::Open { identity, rights } => {
+                self.open(identity, rights).map(FsServiceResult::Handle)
+            }
+            FsServiceCall::Close { handle } => {
+                self.close(handle)?;
+                Ok(FsServiceResult::Unit)
+            }
+            FsServiceCall::Write { handle, bytes } => {
+                self.write(handle, bytes).map(FsServiceResult::Size)
+            }
+            FsServiceCall::Truncate { handle, size } => {
+                self.truncate(handle, size)?;
+                Ok(FsServiceResult::Unit)
+            }
+            FsServiceCall::Unlink {
+                parent,
+                name,
+                parent_rights,
+                object_rights,
+            } => {
+                self.unlink(parent, name, parent_rights, object_rights)?;
+                Ok(FsServiceResult::Unit)
+            }
+            FsServiceCall::Rename(request) => self.rename(request).map(FsServiceResult::Rename),
+            FsServiceCall::BeginSync { handle, scope } => self
+                .begin_sync(handle, scope)
+                .map(FsServiceResult::SyncTicket),
+            FsServiceCall::Map {
+                handle,
+                offset,
+                length,
+                writable,
+            } => self
+                .map(handle, offset, length, writable)
+                .map(FsServiceResult::Mapping),
+            FsServiceCall::Info { identity } => self.info(identity).map(FsServiceResult::Info),
         }
     }
 
@@ -1239,30 +1348,45 @@ impl<const N: usize, const H: usize> FsContract<N, H> {
     }
 }
 
-pub const FS_SERVICE_REQUEST_BYTES: usize = 128;
-pub const FS_SERVICE_REPLY_BYTES: usize = 64;
+pub const FS_SERVICE_REQUEST_BYTES: usize = 256;
+pub const FS_SERVICE_REPLY_BYTES: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FsServiceOp {
+    Create,
     Lookup,
     Open,
     Close,
+    Unlink,
+    Rename,
+    Sync,
+    Mmap,
 }
 
 impl FsServiceOp {
     const fn code(self) -> u8 {
         match self {
-            Self::Lookup => 1,
-            Self::Open => 2,
-            Self::Close => 3,
+            Self::Create => 1,
+            Self::Lookup => 2,
+            Self::Open => 3,
+            Self::Close => 4,
+            Self::Unlink => 5,
+            Self::Rename => 6,
+            Self::Sync => 7,
+            Self::Mmap => 8,
         }
     }
 
     const fn from_code(code: u8) -> Option<Self> {
         match code {
-            1 => Some(Self::Lookup),
-            2 => Some(Self::Open),
-            3 => Some(Self::Close),
+            1 => Some(Self::Create),
+            2 => Some(Self::Lookup),
+            3 => Some(Self::Open),
+            4 => Some(Self::Close),
+            5 => Some(Self::Unlink),
+            6 => Some(Self::Rename),
+            7 => Some(Self::Sync),
+            8 => Some(Self::Mmap),
             _ => None,
         }
     }
@@ -1279,9 +1403,49 @@ pub struct FsServiceRequest {
     pub name: EntryName,
     pub rights: Rights,
     pub handle: FileHandle,
+    pub kind: NodeKind,
+    pub target_parent: PersistentIdentity,
+    pub target_name: EntryName,
+    pub offset: u64,
+    pub length: u64,
+    pub replace: bool,
+    pub writable: bool,
 }
 
 impl FsServiceRequest {
+    fn empty(op: FsServiceOp) -> Self {
+        Self {
+            op,
+            parent: PersistentIdentity::new(0, 0, 0),
+            name: EntryName::root(),
+            rights: Rights::NONE,
+            handle: FileHandle::NULL,
+            kind: NodeKind::File,
+            target_parent: PersistentIdentity::new(0, 0, 0),
+            target_name: EntryName::root(),
+            offset: 0,
+            length: 0,
+            replace: false,
+            writable: false,
+        }
+    }
+
+    pub fn create(
+        parent: PersistentIdentity,
+        name: EntryName,
+        kind: NodeKind,
+        rights: Rights,
+    ) -> Self {
+        Self {
+            op: FsServiceOp::Create,
+            parent,
+            name,
+            rights,
+            kind,
+            ..Self::empty(FsServiceOp::Create)
+        }
+    }
+
     pub fn lookup(
         parent: PersistentIdentity,
         name: EntryName,
@@ -1292,7 +1456,7 @@ impl FsServiceRequest {
             parent,
             name,
             rights,
-            handle: FileHandle::NULL,
+            ..Self::empty(FsServiceOp::Lookup)
         }
     }
 
@@ -1302,17 +1466,68 @@ impl FsServiceRequest {
             parent,
             name,
             rights,
-            handle: FileHandle::NULL,
+            ..Self::empty(FsServiceOp::Open)
         }
     }
 
     pub fn close(handle: FileHandle) -> Self {
         Self {
             op: FsServiceOp::Close,
-            parent: PersistentIdentity::new(0, 0, 0),
-            name: EntryName::root(),
-            rights: Rights::NONE,
             handle,
+            ..Self::empty(FsServiceOp::Close)
+        }
+    }
+
+    pub fn unlink(
+        parent: PersistentIdentity,
+        name: EntryName,
+        rights: Rights,
+    ) -> Self {
+        Self {
+            op: FsServiceOp::Unlink,
+            parent,
+            name,
+            rights,
+            ..Self::empty(FsServiceOp::Unlink)
+        }
+    }
+
+    pub fn rename(
+        source_parent: PersistentIdentity,
+        source_name: EntryName,
+        target_parent: PersistentIdentity,
+        target_name: EntryName,
+        replace: bool,
+        rights: Rights,
+    ) -> Self {
+        Self {
+            op: FsServiceOp::Rename,
+            parent: source_parent,
+            name: source_name,
+            rights,
+            target_parent,
+            target_name,
+            replace,
+            ..Self::empty(FsServiceOp::Rename)
+        }
+    }
+
+    pub fn sync(handle: FileHandle) -> Self {
+        Self {
+            op: FsServiceOp::Sync,
+            handle,
+            ..Self::empty(FsServiceOp::Sync)
+        }
+    }
+
+    pub fn mmap(handle: FileHandle, offset: u64, length: u64, writable: bool) -> Self {
+        Self {
+            op: FsServiceOp::Mmap,
+            handle,
+            offset,
+            length,
+            writable,
+            ..Self::empty(FsServiceOp::Mmap)
         }
     }
 
@@ -1324,23 +1539,37 @@ impl FsServiceRequest {
         out[..WIRE_HEADER_BYTES]
             .copy_from_slice(&WireHeader::new(FS_SERVICE_REQUEST_BYTES).encode());
         out[16] = self.op.code();
+        out[17] = u8::from(self.kind == NodeKind::Directory);
+        out[18] = u8::from(self.replace);
+        out[19] = u8::from(self.writable);
         out[20..24].copy_from_slice(&self.rights.bits().to_le_bytes());
         out[24..32].copy_from_slice(&self.parent.namespace_id.to_le_bytes());
         out[32..40].copy_from_slice(&self.parent.object_id.to_le_bytes());
         out[40..44].copy_from_slice(&self.parent.generation.to_le_bytes());
         out[44..52].copy_from_slice(&self.handle.raw().to_le_bytes());
         out[52] = self.name.len;
-        out[56..56 + self.name.len as usize]
-            .copy_from_slice(self.name.as_bytes());
+        out[56..56 + self.name.len as usize].copy_from_slice(self.name.as_bytes());
+        out[120..128].copy_from_slice(&self.target_parent.namespace_id.to_le_bytes());
+        out[128..136].copy_from_slice(&self.target_parent.object_id.to_le_bytes());
+        out[136..140].copy_from_slice(&self.target_parent.generation.to_le_bytes());
+        out[144] = self.target_name.len;
+        out[152..152 + self.target_name.len as usize]
+            .copy_from_slice(self.target_name.as_bytes());
+        out[216..224].copy_from_slice(&self.offset.to_le_bytes());
+        out[224..232].copy_from_slice(&self.length.to_le_bytes());
         Ok(out)
     }
 
     pub fn decode(input: [u8; FS_SERVICE_REQUEST_BYTES]) -> Result<Self, FsError> {
         let header = WireHeader::decode(input[..WIRE_HEADER_BYTES].try_into().unwrap())?;
         if header.bytes != FS_SERVICE_REQUEST_BYTES as u32
-            || input[17..20].iter().any(|byte| *byte != 0)
+            || input[17] > 1
+            || input[18] > 1
+            || input[19] > 1
             || input[53..56].iter().any(|byte| *byte != 0)
-            || input[120..].iter().any(|byte| *byte != 0)
+            || input[140..144].iter().any(|byte| *byte != 0)
+            || input[145..152].iter().any(|byte| *byte != 0)
+            || input[232..].iter().any(|byte| *byte != 0)
         {
             return Err(FsError::InvalidVersion);
         }
@@ -1367,22 +1596,106 @@ impl FsServiceRequest {
         } else {
             EntryName::new(&input[56..56 + name_len])?
         };
+        let target_parent = PersistentIdentity::new(
+            u64::from_le_bytes(input[120..128].try_into().unwrap()),
+            u64::from_le_bytes(input[128..136].try_into().unwrap()),
+            u32::from_le_bytes(input[136..140].try_into().unwrap()),
+        );
+        let target_name_len = input[144] as usize;
+        if target_name_len > MAX_NAME_BYTES
+            || input[152 + target_name_len..216]
+                .iter()
+                .any(|byte| *byte != 0)
+        {
+            return Err(FsError::InvalidName);
+        }
+        let target_name = if target_name_len == 0 {
+            EntryName::root()
+        } else {
+            EntryName::new(&input[152..152 + target_name_len])?
+        };
+        let offset = u64::from_le_bytes(input[216..224].try_into().unwrap());
+        let length = u64::from_le_bytes(input[224..232].try_into().unwrap());
         let request = Self {
             op,
             parent,
             name,
             rights: Rights::from_bits_truncate(rights_bits),
             handle,
+            kind: if input[17] == 1 {
+                NodeKind::Directory
+            } else {
+                NodeKind::File
+            },
+            target_parent,
+            target_name,
+            offset,
+            length,
+            replace: input[18] == 1,
+            writable: input[19] == 1,
         };
         match op {
-            FsServiceOp::Lookup | FsServiceOp::Open => {
+            FsServiceOp::Create | FsServiceOp::Lookup | FsServiceOp::Open | FsServiceOp::Unlink => {
                 if !parent.is_valid() || name_len == 0 || handle.raw() != 0 {
                     return Err(FsError::InvalidIdentity);
                 }
+                if op != FsServiceOp::Create && input[17] != 0 {
+                    return Err(FsError::InvalidVersion);
+                }
+                if target_parent.is_valid()
+                    || target_name_len != 0
+                    || offset != 0
+                    || length != 0
+                    || request.replace
+                    || request.writable
+                {
+                    return Err(FsError::InvalidVersion);
+                }
             }
             FsServiceOp::Close => {
-                if handle.raw() == 0 || parent.is_valid() || name_len != 0 || rights_bits != 0 {
+                if handle.raw() == 0
+                    || parent.is_valid()
+                    || name_len != 0
+                    || rights_bits != 0
+                    || target_parent.is_valid()
+                    || target_name_len != 0
+                    || offset != 0
+                    || length != 0
+                    || request.replace
+                    || request.writable
+                {
                     return Err(FsError::InvalidIdentity);
+                }
+            }
+            FsServiceOp::Rename => {
+                if !parent.is_valid()
+                    || name_len == 0
+                    || !target_parent.is_valid()
+                    || target_name_len == 0
+                    || handle.raw() != 0
+                    || offset != 0
+                    || length != 0
+                    || request.writable
+                {
+                    return Err(FsError::InvalidIdentity);
+                }
+            }
+            FsServiceOp::Sync | FsServiceOp::Mmap => {
+                if handle.raw() == 0
+                    || parent.is_valid()
+                    || name_len != 0
+                    || rights_bits != 0
+                    || target_parent.is_valid()
+                    || target_name_len != 0
+                    || request.replace
+                {
+                    return Err(FsError::InvalidIdentity);
+                }
+                if op == FsServiceOp::Sync && (offset != 0 || length != 0 || request.writable) {
+                    return Err(FsError::InvalidVersion);
+                }
+                if op == FsServiceOp::Mmap && length == 0 {
+                    return Err(FsError::MappingRange);
                 }
             }
         }
@@ -1392,9 +1705,231 @@ impl FsServiceRequest {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FsServiceReply {
+    Created(PersistentIdentity),
     Lookup(PersistentIdentity),
     Open(FileHandle),
     Closed,
+    Unlinked(PersistentIdentity),
+    Renamed(RenameReceipt),
+    Synced(SyncState),
+    Mapped(Mapping),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FsServiceCall {
+    Lookup {
+        parent: PersistentIdentity,
+        name: EntryName,
+        parent_rights: Rights,
+    },
+    Create {
+        parent: PersistentIdentity,
+        name: EntryName,
+        kind: NodeKind,
+        parent_rights: Rights,
+    },
+    Open {
+        identity: PersistentIdentity,
+        rights: Rights,
+    },
+    Close {
+        handle: FileHandle,
+    },
+    Write {
+        handle: FileHandle,
+        bytes: u64,
+    },
+    Truncate {
+        handle: FileHandle,
+        size: u64,
+    },
+    Unlink {
+        parent: PersistentIdentity,
+        name: EntryName,
+        parent_rights: Rights,
+        object_rights: Rights,
+    },
+    Rename(RenameRequest),
+    BeginSync {
+        handle: FileHandle,
+        scope: SyncScope,
+    },
+    Map {
+        handle: FileHandle,
+        offset: u64,
+        length: u64,
+        writable: bool,
+    },
+    Info {
+        identity: PersistentIdentity,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FsServiceResult {
+    Identity(PersistentIdentity),
+    Handle(FileHandle),
+    Size(u64),
+    Rename(RenameReceipt),
+    SyncTicket(SyncTicket),
+    Mapping(Mapping),
+    Info(NodeInfo),
+    Unit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CachedPage {
+    pub identity: PersistentIdentity,
+    pub offset: u64,
+    pub length: u64,
+    pub content_epoch: u32,
+    pub data_version: u64,
+    pub dirty: bool,
+}
+
+/// Bounded page-cache contract used by mmap/read/write. It stores versions
+/// rather than caller memory; a concrete VFS must copy into/out of the mapped
+/// Memory object under the same object-table serialization.
+pub struct PageCache<const P: usize> {
+    pages: [Option<CachedPage>; P],
+}
+
+impl<const P: usize> PageCache<P> {
+    pub const fn new() -> Self {
+        assert!(P > 0, "page cache capacity must be non-zero");
+        Self { pages: [None; P] }
+    }
+
+    pub fn live_pages(&self) -> usize {
+        self.pages.iter().flatten().count()
+    }
+
+    pub fn dirty_pages(&self) -> usize {
+        self.pages.iter().flatten().filter(|page| page.dirty).count()
+    }
+
+    pub fn fill<const N: usize, const H: usize>(
+        &mut self,
+        fs: &FsContract<N, H>,
+        handle: FileHandle,
+        offset: u64,
+        length: u64,
+        writable: bool,
+    ) -> Result<CachedPage, FsError> {
+        if offset % PAGE_BYTES != 0
+            || length == 0
+            || length % PAGE_BYTES != 0
+        {
+            return Err(FsError::MappingRange);
+        }
+        let required = if writable {
+            Rights::READ.union(Rights::WRITE)
+        } else {
+            Rights::READ
+        };
+        let index = fs.handle_index(handle, required)?;
+        let node = fs.nodes[index].expect("validated node");
+        if node.kind != NodeKind::File
+            || offset
+                .checked_add(length)
+                .filter(|end| *end <= node.size)
+                .is_none()
+        {
+            return Err(FsError::MappingRange);
+        }
+        if let Some(cached) = self.pages.iter().flatten().find(|page| {
+            page.identity == node.identity && page.offset == offset && page.length == length
+        }) {
+            if cached.content_epoch != node.content_epoch {
+                return Err(FsError::StaleMapping);
+            }
+            return Ok(*cached);
+        }
+        let slot = self
+            .pages
+            .iter()
+            .position(Option::is_none)
+            .ok_or(FsError::NoSpace)?;
+        let page = CachedPage {
+            identity: node.identity,
+            offset,
+            length,
+            content_epoch: node.content_epoch,
+            data_version: node.data_version,
+            dirty: false,
+        };
+        self.pages[slot] = Some(page);
+        Ok(page)
+    }
+
+    pub fn write<const N: usize, const H: usize>(
+        &mut self,
+        fs: &mut FsContract<N, H>,
+        handle: FileHandle,
+        offset: u64,
+        length: u64,
+    ) -> Result<CachedPage, FsError> {
+        let page = self.fill(fs, handle, offset, length, true)?;
+        fs.write(handle, 0)?;
+        let index = fs.handle_index(handle, Rights::WRITE)?;
+        let version = fs.nodes[index]
+            .expect("validated handle points to a node")
+            .data_version;
+        for cached in self.pages.iter_mut().flatten() {
+            if cached.identity == page.identity && cached.content_epoch == page.content_epoch {
+                cached.data_version = version;
+                cached.dirty = true;
+            }
+        }
+        Ok(CachedPage {
+            data_version: version,
+            dirty: true,
+            ..page
+        })
+    }
+
+    pub fn mark_durable(
+        &mut self,
+        identity: PersistentIdentity,
+        durable_version: u64,
+    ) -> usize {
+        let mut marked = 0;
+        for page in self.pages.iter_mut().flatten() {
+            if page.identity == identity && page.data_version <= durable_version {
+                page.dirty = false;
+                marked += 1;
+            }
+        }
+        marked
+    }
+
+    pub fn invalidate_truncate(
+        &mut self,
+        identity: PersistentIdentity,
+        content_epoch: u32,
+        size: u64,
+    ) -> usize {
+        let mut invalidated = 0;
+        for slot in &mut self.pages {
+            let invalid = slot.is_some_and(|page| {
+                page.identity == identity
+                    && (page.content_epoch != content_epoch
+                        || page.offset >= size
+                        || page.offset.saturating_add(page.length) > size)
+            });
+            if invalid {
+                *slot = None;
+                invalidated += 1;
+            }
+        }
+        invalidated
+    }
+}
+
+impl<const P: usize> Default for PageCache<P> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FsServiceReply {
@@ -1403,54 +1938,194 @@ impl FsServiceReply {
         out[..WIRE_HEADER_BYTES]
             .copy_from_slice(&WireHeader::new(FS_SERVICE_REPLY_BYTES).encode());
         match self {
-            Self::Lookup(identity) => {
+            Self::Created(identity) => {
                 out[16] = 1;
-                out[24..32].copy_from_slice(&identity.namespace_id.to_le_bytes());
-                out[32..40].copy_from_slice(&identity.object_id.to_le_bytes());
-                out[40..44].copy_from_slice(&identity.generation.to_le_bytes());
+                write_identity(&mut out, 24, identity);
+            }
+            Self::Lookup(identity) => {
+                out[16] = 2;
+                write_identity(&mut out, 24, identity);
             }
             Self::Open(handle) => {
-                out[16] = 2;
+                out[16] = 3;
                 out[24..32].copy_from_slice(&handle.raw().to_le_bytes());
             }
-            Self::Closed => out[16] = 3,
+            Self::Closed => out[16] = 4,
+            Self::Unlinked(identity) => {
+                out[16] = 5;
+                write_identity(&mut out, 24, identity);
+            }
+            Self::Renamed(receipt) => {
+                out[16] = 6;
+                write_identity(&mut out, 24, receipt.identity);
+                write_identity(&mut out, 48, receipt.source_parent);
+                write_identity(&mut out, 72, receipt.target_parent);
+                if let Some(replaced) = receipt.replaced {
+                    out[17] = 1;
+                    write_identity(&mut out, 96, replaced);
+                }
+            }
+            Self::Synced(state) => {
+                out[16] = 7;
+                write_u64(&mut out, 24, state.data_version);
+                write_u64(&mut out, 32, state.metadata_version);
+                write_u64(&mut out, 40, state.durable_data_version);
+                write_u64(&mut out, 48, state.durable_metadata_version);
+            }
+            Self::Mapped(mapping) => {
+                out[16] = 8;
+                write_u64(&mut out, 24, mapping.handle.raw());
+                write_identity(&mut out, 32, mapping.identity);
+                write_u64(&mut out, 56, mapping.offset);
+                write_u64(&mut out, 64, mapping.length);
+                out[72] = u8::from(mapping.writable);
+                out[76..80].copy_from_slice(&mapping.mapping_epoch.to_le_bytes());
+                write_u64(&mut out, 80, mapping.mount.namespace_id);
+                write_u64(&mut out, 88, mapping.mount.volume_id);
+                out[96..100].copy_from_slice(&mapping.mount.mount_generation.to_le_bytes());
+            }
         }
         out
     }
 
     pub fn decode(input: [u8; FS_SERVICE_REPLY_BYTES]) -> Result<Self, FsError> {
         let header = WireHeader::decode(input[..WIRE_HEADER_BYTES].try_into().unwrap())?;
-        if header.bytes != FS_SERVICE_REPLY_BYTES as u32
-            || input[44..].iter().any(|byte| *byte != 0)
-        {
+        if header.bytes != FS_SERVICE_REPLY_BYTES as u32 || input[17] > 1 {
             return Err(FsError::InvalidVersion);
         }
         match input[16] {
             1 => {
-                if input[17..24].iter().any(|byte| *byte != 0) {
+                if input[17..24].iter().any(|byte| *byte != 0)
+                    || input[44..].iter().any(|byte| *byte != 0)
+                {
                     return Err(FsError::InvalidVersion);
                 }
-                let identity = PersistentIdentity::new(
-                    u64::from_le_bytes(input[24..32].try_into().unwrap()),
-                    u64::from_le_bytes(input[32..40].try_into().unwrap()),
-                    u32::from_le_bytes(input[40..44].try_into().unwrap()),
-                );
-                identity.is_valid().then_some(Self::Lookup(identity)).ok_or(FsError::InvalidIdentity)
+                read_identity(&input, 24).map(Self::Created)
             }
             2 => {
-                if input[17..24].iter().any(|byte| *byte != 0) {
+                if input[17..24].iter().any(|byte| *byte != 0)
+                    || input[44..].iter().any(|byte| *byte != 0)
+                {
+                    return Err(FsError::InvalidVersion);
+                }
+                read_identity(&input, 24).map(Self::Lookup)
+            }
+            3 => {
+                if input[17..24].iter().any(|byte| *byte != 0)
+                    || input[32..].iter().any(|byte| *byte != 0)
+                {
                     return Err(FsError::InvalidVersion);
                 }
                 let raw = u64::from_le_bytes(input[24..32].try_into().unwrap());
-                if raw == 0 || input[32..44].iter().any(|byte| *byte != 0) {
+                if raw == 0 {
                     return Err(FsError::InvalidIdentity);
                 }
                 Ok(Self::Open(FileHandle::from_raw(raw)))
             }
-            3 if input[17..].iter().all(|byte| *byte == 0) => Ok(Self::Closed),
+            4 if input[17..].iter().all(|byte| *byte == 0) => Ok(Self::Closed),
+            5 => {
+                if input[17..24].iter().any(|byte| *byte != 0)
+                    || input[44..].iter().any(|byte| *byte != 0)
+                {
+                    return Err(FsError::InvalidVersion);
+                }
+                read_identity(&input, 24).map(Self::Unlinked)
+            }
+            6 => {
+                if input[17] > 1
+                    || input[18..24].iter().any(|byte| *byte != 0)
+                    || input[120..].iter().any(|byte| *byte != 0)
+                {
+                    return Err(FsError::InvalidVersion);
+                }
+                let identity = read_identity(&input, 24)?;
+                let source_parent = read_identity(&input, 48)?;
+                let target_parent = read_identity(&input, 72)?;
+                let replaced = if input[17] == 1 {
+                    Some(read_identity(&input, 96)?)
+                } else {
+                    None
+                };
+                Ok(Self::Renamed(RenameReceipt {
+                    identity,
+                    source_parent,
+                    target_parent,
+                    replaced,
+                }))
+            }
+            7 => {
+                if input[17..24].iter().any(|byte| *byte != 0)
+                    || input[56..].iter().any(|byte| *byte != 0)
+                {
+                    return Err(FsError::InvalidVersion);
+                }
+                Ok(Self::Synced(SyncState {
+                    data_version: read_u64(&input, 24),
+                    metadata_version: read_u64(&input, 32),
+                    durable_data_version: read_u64(&input, 40),
+                    durable_metadata_version: read_u64(&input, 48),
+                }))
+            }
+            8 => {
+                if input[17..24].iter().any(|byte| *byte != 0)
+                    || input[73..76].iter().any(|byte| *byte != 0)
+                    || input[100..].iter().any(|byte| *byte != 0)
+                {
+                    return Err(FsError::InvalidVersion);
+                }
+                let handle = FileHandle::from_raw(read_u64(&input, 24));
+                if handle.raw() == 0 {
+                    return Err(FsError::InvalidIdentity);
+                }
+                Ok(Self::Mapped(Mapping {
+                    handle,
+                    identity: read_identity(&input, 32)?,
+                    mount: {
+                        let mount = MountIdentity::new(
+                            read_u64(&input, 80),
+                            read_u64(&input, 88),
+                            u32::from_le_bytes(input[96..100].try_into().unwrap()),
+                        );
+                        if !mount.is_valid() {
+                            return Err(FsError::InvalidIdentity);
+                        }
+                        mount
+                    },
+                    offset: read_u64(&input, 56),
+                    length: read_u64(&input, 64),
+                    writable: input[72] == 1,
+                    mapping_epoch: u32::from_le_bytes(input[76..80].try_into().unwrap()),
+                }))
+            }
             _ => Err(FsError::InvalidVersion),
         }
     }
+}
+
+fn write_identity(out: &mut [u8], at: usize, identity: PersistentIdentity) {
+    write_u64(out, at, identity.namespace_id);
+    write_u64(out, at + 8, identity.object_id);
+    out[at + 16..at + 20].copy_from_slice(&identity.generation.to_le_bytes());
+}
+
+fn read_identity(input: &[u8], at: usize) -> Result<PersistentIdentity, FsError> {
+    let identity = PersistentIdentity::new(
+        read_u64(input, at),
+        read_u64(input, at + 8),
+        u32::from_le_bytes(input[at + 16..at + 20].try_into().unwrap()),
+    );
+    identity
+        .is_valid()
+        .then_some(identity)
+        .ok_or(FsError::InvalidIdentity)
+}
+
+fn write_u64(out: &mut [u8], at: usize, value: u64) {
+    out[at..at + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn read_u64(input: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(input[at..at + 8].try_into().unwrap())
 }
 
 /// Bounded, two-slot metadata journal for the FS-0 contract.
@@ -2310,6 +2985,80 @@ mod tests {
     }
 
     #[test]
+    fn file_service_v1_covers_create_rename_unlink_sync_and_mmap() {
+        let mut fs = fs::<16, 16>();
+        let root = fs.root();
+        let create = FsServiceRequest::create(
+            root,
+            name(b"source"),
+            NodeKind::File,
+            Rights::READ.union(Rights::WRITE),
+        );
+        assert_eq!(FsServiceRequest::decode(create.encode().unwrap()), Ok(create));
+        let FsServiceReply::Created(source) = fs.dispatch(create).unwrap() else {
+            panic!("create reply");
+        };
+
+        let rename = FsServiceRequest::rename(
+            root,
+            name(b"source"),
+            root,
+            name(b"target"),
+            false,
+            Rights::READ
+                .union(Rights::WRITE)
+                .union(Rights::CONTROL),
+        );
+        assert_eq!(FsServiceRequest::decode(rename.encode().unwrap()), Ok(rename));
+        let renamed = fs.dispatch(rename).unwrap();
+        assert_eq!(FsServiceReply::decode(renamed.encode()), Ok(renamed));
+        assert!(matches!(
+            renamed,
+            FsServiceReply::Renamed(RenameReceipt { identity, .. }) if identity == source
+        ));
+
+        let open = FsServiceRequest::open(root, name(b"target"), read_write_map());
+        let FsServiceReply::Open(handle) = fs.dispatch(open).unwrap() else {
+            panic!("open reply");
+        };
+        fs.write(handle, 16).unwrap();
+
+        let sync = FsServiceRequest::sync(handle);
+        assert_eq!(FsServiceRequest::decode(sync.encode().unwrap()), Ok(sync));
+        let synced = fs.dispatch(sync).unwrap();
+        assert_eq!(FsServiceReply::decode(synced.encode()), Ok(synced));
+        let FsServiceReply::Synced(state) = synced else {
+            panic!("sync reply");
+        };
+        assert_eq!(state.durable_data_version, state.data_version);
+        assert_eq!(state.durable_metadata_version, state.metadata_version);
+
+        let mmap = FsServiceRequest::mmap(handle, 0, 16, true);
+        assert_eq!(FsServiceRequest::decode(mmap.encode().unwrap()), Ok(mmap));
+        let mapped = fs.dispatch(mmap).unwrap();
+        assert_eq!(FsServiceReply::decode(mapped.encode()), Ok(mapped));
+        assert!(matches!(mapped, FsServiceReply::Mapped(Mapping { length: 16, .. })));
+
+        let unlink = FsServiceRequest::unlink(
+            root,
+            name(b"target"),
+            Rights::READ
+                .union(Rights::WRITE)
+                .union(Rights::CONTROL),
+        );
+        assert_eq!(FsServiceRequest::decode(unlink.encode().unwrap()), Ok(unlink));
+        assert_eq!(
+            fs.dispatch(unlink),
+            Ok(FsServiceReply::Unlinked(source))
+        );
+        assert_eq!(
+            fs.lookup(root, name(b"target"), Rights::READ),
+            Err(FsError::NotFound)
+        );
+        fs.close(handle).unwrap();
+    }
+
+    #[test]
     fn file_service_v1_rejects_unknown_bits_reserved_fields_and_operation_shapes() {
         let mut fs = fs::<8, 8>();
         let root = fs.root();
@@ -2338,16 +3087,134 @@ mod tests {
         );
 
         let handle = fs.open(file, Rights::READ).unwrap();
-        let malformed_close = FsServiceRequest {
-            op: FsServiceOp::Close,
-            parent: file,
-            name: name(b"file"),
-            rights: Rights::READ,
-            handle,
-        };
+        let mut malformed_close = FsServiceRequest::close(handle);
+        malformed_close.parent = file;
+        malformed_close.name = name(b"file");
+        malformed_close.rights = Rights::READ;
         assert_eq!(
             FsServiceRequest::decode(malformed_close.encode().unwrap()),
             Err(FsError::InvalidIdentity)
+        );
+    }
+
+    #[test]
+    fn typed_vfs_dispatch_covers_file_mutation_sync_and_mmap_paths() {
+        let mut fs = fs::<8, 8>();
+        let root = fs.root();
+        let identity = match fs
+            .dispatch_call(FsServiceCall::Create {
+                parent: root,
+                name: name(b"file"),
+                kind: NodeKind::File,
+                parent_rights: read_write(),
+            })
+            .unwrap()
+        {
+            FsServiceResult::Identity(identity) => identity,
+            _ => panic!("create returns identity"),
+        };
+        let handle = match fs
+            .dispatch_call(FsServiceCall::Open {
+                identity,
+                rights: read_write_map(),
+            })
+            .unwrap()
+        {
+            FsServiceResult::Handle(handle) => handle,
+            _ => panic!("open returns handle"),
+        };
+        assert_eq!(
+            fs.dispatch_call(FsServiceCall::Write {
+                handle,
+                bytes: PAGE_BYTES,
+            }),
+            Ok(FsServiceResult::Size(PAGE_BYTES))
+        );
+        let mapping = match fs
+            .dispatch_call(FsServiceCall::Map {
+                handle,
+                offset: 0,
+                length: PAGE_BYTES,
+                writable: true,
+            })
+            .unwrap()
+        {
+            FsServiceResult::Mapping(mapping) => mapping,
+            _ => panic!("map returns mapping"),
+        };
+        assert!(fs.mapping_valid(mapping));
+        let ticket = match fs
+            .dispatch_call(FsServiceCall::BeginSync {
+                handle,
+                scope: SyncScope::DataAndMetadata,
+            })
+            .unwrap()
+        {
+            FsServiceResult::SyncTicket(ticket) => ticket,
+            _ => panic!("sync returns ticket"),
+        };
+        fs.complete_sync(handle, ticket, true).unwrap();
+        assert_eq!(
+            fs.dispatch_call(FsServiceCall::Truncate {
+                handle,
+                size: PAGE_BYTES / 2,
+            }),
+            Ok(FsServiceResult::Unit)
+        );
+        assert!(!fs.mapping_valid(mapping));
+        fs.dispatch_call(FsServiceCall::Close { handle }).unwrap();
+        assert!(matches!(
+            fs.dispatch_call(FsServiceCall::Info { identity }),
+            Ok(FsServiceResult::Info(_))
+        ));
+    }
+
+    #[test]
+    fn page_cache_tracks_dirty_durable_and_truncate_generations() {
+        let mut fs = fs::<8, 8>();
+        let root = fs.root();
+        let identity = create_file(&mut fs, root, b"cached");
+        let handle = fs.open(identity, read_write_map()).unwrap();
+        fs.write(handle, PAGE_BYTES * 2).unwrap();
+        let mut cache = PageCache::<2>::new();
+        let first = cache
+            .fill(&fs, handle, 0, PAGE_BYTES, false)
+            .unwrap();
+        let second = cache
+            .fill(&fs, handle, PAGE_BYTES, PAGE_BYTES, false)
+            .unwrap();
+        assert_eq!(cache.live_pages(), 2);
+        assert_eq!(cache.dirty_pages(), 0);
+
+        let dirty = cache.write(&mut fs, handle, 0, PAGE_BYTES).unwrap();
+        assert!(dirty.dirty);
+        assert_eq!(cache.dirty_pages(), 2);
+        let ticket = fs.begin_sync(handle, SyncScope::DataAndMetadata).unwrap();
+        let state = fs.complete_sync(handle, ticket, true).unwrap();
+        assert_eq!(state.durable_data_version, dirty.data_version);
+        assert_eq!(cache.mark_durable(identity, state.durable_data_version), 2);
+        assert_eq!(cache.dirty_pages(), 0);
+
+        fs.truncate(handle, PAGE_BYTES).unwrap();
+        let info = fs.info(identity).unwrap();
+        assert_eq!(
+            cache.invalidate_truncate(identity, info.content_epoch, info.size),
+            2
+        );
+        assert_eq!(cache.live_pages(), 0);
+        assert!(cache.fill(&fs, handle, 0, PAGE_BYTES, false).is_ok());
+        assert_eq!(
+            cache.fill(&fs, handle, PAGE_BYTES, PAGE_BYTES, false),
+            Err(FsError::MappingRange)
+        );
+        assert_eq!(first.identity, second.identity);
+
+        let mut full = PageCache::<1>::new();
+        full.fill(&fs, handle, 0, PAGE_BYTES, false).unwrap();
+        fs.write(handle, PAGE_BYTES).unwrap();
+        assert_eq!(
+            full.fill(&fs, handle, PAGE_BYTES, PAGE_BYTES, false),
+            Err(FsError::NoSpace)
         );
     }
 

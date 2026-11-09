@@ -182,7 +182,7 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
         }
         return ret;
     }
-    let Some(_service) = crate::assembly::enter_service(e.name) else {
+    let Some(service) = crate::assembly::enter_service(e.name) else {
         let ret = err(SYSTEM_ERROR_UNSUPPORTED);
         if tracing() {
             kprintln!("[JSR-SYSCALL] unavailable name={} task={} ret={}", e.name, task_name, error_name(ret));
@@ -198,6 +198,13 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
     // 否则（例如线程句柄先关闭、线程随后才退出——死亡发生在任何系统调用之外）它们会一直堆着直到耗尽
     if RECLAIM_BEFORE.contains(&e.id) {
         crate::kobj::run_cleanup(CLEANUP_PER_CALL);
+    }
+    // `task.exit` and `process.exit` end the calling task without unwinding
+    // this stack. Drop the service lease explicitly before that non-returning
+    // path, otherwise the publication gate retains a reader forever and every
+    // later health change waits on a task that no longer exists.
+    if matches!(e.id, SYSTEM_TASK_EXIT | SYSTEM_PROCESS_EXIT) {
+        drop(service);
     }
     let enqueued_before = crate::kobj::enqueued_total();
     let started = crate::arch::cycles();
@@ -267,6 +274,7 @@ pub(crate) fn proc_err(e: ProcError) -> i64 {
         ProcError::NoSuchProcess | ProcError::Exited | ProcError::BadApp => err(SYSTEM_ERROR_RIGHTS_DENIED),
         ProcError::Map(_) => err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS),
         ProcError::OutOfFrames | ProcError::NoTaskSlot => err(SYSTEM_ERROR_INVALID_ARGUMENT),
+        ProcError::CapabilityNotice => err(SYSTEM_HANDLE_ERROR_INVALID),
     }
 }
 

@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use kernel_core::capability::CapabilityLink;
+use kernel_core::capability::{CapabilityId, CapabilityLink};
 use kernel_core::frame::{PhysFrame, FRAME_SIZE};
 use kernel_core::kobj_type::{check_grant, GrantCheck, Kind};
 use kernel_core::object::{
@@ -212,6 +212,9 @@ pub enum ProcError {
     Handle(HandleError),
     /// 对象在 v1 不可经 IPC 传递（非叶子对象，M4.0 规范 v0.6 §2.1）。
     NotTransferable,
+    /// Revocation committed but its mandatory EventSource notice could not be
+    /// published. Callers must treat the security transition as failed closed.
+    CapabilityNotice,
 }
 
 /// 回收时返回的退出信息。
@@ -1871,6 +1874,46 @@ pub(crate) fn resolve_in(
     ObjId::from_raw(r.id.0).ok_or(ProcError::Handle(HandleError::Invalid))
 }
 
+/// Captured authority for an asynchronous operation. This value never leaves
+/// the kernel and contains no raw handle; effects revalidate the exact live
+/// capability lineage immediately before committing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HandleAuthority {
+    capability: CapabilityId,
+    rights: Rights,
+}
+
+pub(crate) fn authority_in(
+    t: &mut kobj::Table,
+    pid: ObjId,
+    h: HandleId,
+    required: Rights,
+) -> Result<HandleAuthority, ProcError> {
+    let p = receiver(t, pid)?;
+    let (_, rights) = p.handles.get(h).map_err(ProcError::Handle)?;
+    if !rights.contains(required) {
+        return Err(ProcError::Handle(HandleError::RightsDenied));
+    }
+    let link = p.handles.capability(h).map_err(ProcError::Handle)?;
+    Ok(HandleAuthority {
+        capability: link.id,
+        rights: required,
+    })
+}
+
+pub(crate) fn authority_active_in(
+    t: &mut kobj::Table,
+    pid: ObjId,
+    authority: HandleAuthority,
+) -> bool {
+    match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .handles
+            .authority_active(authority.capability, authority.rights),
+        _ => false,
+    }
+}
+
 /// 在锁内读取进程 `pid` 的句柄 `h`（对象引用与权限）。进程须仍在运行。
 pub(crate) fn handle_in(
     t: &mut kobj::Table,
@@ -2010,6 +2053,46 @@ fn duplicate_in(
     put
 }
 
+/// Delegate an attenuated capability into another process while retaining the
+/// source. Capability IDs are globally unique, so revoking either the source or
+/// the child invalidates the complete cross-process descendant closure.
+pub fn delegate_to(
+    from: ObjId,
+    h: HandleId,
+    to: ObjId,
+    rights: Rights,
+) -> Result<HandleId, ProcError> {
+    kobj::with(|t| {
+        let (r, have, parent) = match t.get(from) {
+            Ok(KObject::Process(p)) => {
+                let (r, have) = p.handles.get(h).map_err(ProcError::Handle)?;
+                let parent = p.handles.capability(h).map_err(ProcError::Handle)?;
+                (*r, have, parent)
+            }
+            _ => return Err(ProcError::NoSuchProcess),
+        };
+        if !have.contains(Rights::DUPLICATE) || !have.contains(rights) {
+            return Err(ProcError::Handle(HandleError::RightsDenied));
+        }
+        let obj = ObjId::from_raw(r.id.0).ok_or(ProcError::Handle(HandleError::Invalid))?;
+        receiver(t, to)?;
+        if receiver(t, to)?.handles.free_slots() == 0 {
+            return Err(ProcError::Handle(HandleError::TableFull));
+        }
+        t.acquire_owner(obj)
+            .map_err(|_| ProcError::Handle(HandleError::Invalid))?;
+        let inserted = receiver(t, to).and_then(|p| {
+            p.handles
+                .put_delegated_shared(r, rights, parent.id)
+                .map_err(ProcError::Handle)
+        });
+        if inserted.is_err() {
+            let _ = kobj::release_owner_in(t, obj);
+        }
+        inserted
+    })
+}
+
 /// 原地降低当前进程中句柄的权限（只减不增）。
 pub fn restrict_current(h: HandleId, rights: Rights) -> Result<(), ProcError> {
     let pid = current_process().ok_or(ProcError::NoSuchProcess)?;
@@ -2089,13 +2172,19 @@ pub fn transfer(from: ObjId, h: HandleId, to: ObjId) -> Result<HandleId, ProcErr
         }
         // —— 提交：以下步骤在检查通过后不会失败 ——
         if let Ok(KObject::Process(p)) = t.get_mut(from) {
+            let link = p.handles.capability(h).map_err(ProcError::Handle)?;
             p.handles.remove(h).map_err(ProcError::Handle)?;
             // 转移后发送方不再持有句柄，它经该句柄建立的设备窗口一并撤销（只改页表，不会失败）。
             revoke_device_mappings_for_handle(p, h);
-        }
-        match t.get_mut(to) {
-            Ok(KObject::Process(p)) => p.handles.put(r, rights).map_err(ProcError::Handle),
-            _ => Err(ProcError::NoSuchProcess),
+            match t.get_mut(to) {
+                Ok(KObject::Process(p)) => p
+                    .handles
+                    .put_capability_link(r, rights, link)
+                    .map_err(ProcError::Handle),
+                _ => Err(ProcError::NoSuchProcess),
+            }
+        } else {
+            Err(ProcError::NoSuchProcess)
         }
     })
 }
@@ -2347,28 +2436,92 @@ pub fn revoke_current(h: HandleId) -> Result<usize, ProcError> {
 }
 
 pub(crate) fn revoke_for(pid: ObjId, h: HandleId) -> Result<usize, ProcError> {
+    revoke_global_for(pid, h)
+}
+
+/// Revoke one capability subtree across every process table.
+///
+/// The complete closure is computed before any capability is marked revoked,
+/// then each affected handle is closed under the same object-table
+/// transaction. A cross-process delegate and every descendant become unusable
+/// before object ownership is released.
+pub(crate) fn revoke_global_for(pid: ObjId, h: HandleId) -> Result<usize, ProcError> {
     kobj::with(|t| {
-        let mut closed = Vec::new();
-        let mut revoked_handles = Vec::new();
-        let affected = match t.get_mut(pid) {
-            Ok(KObject::Process(p)) => {
-                let affected = p.handles.revoke(h).map_err(ProcError::Handle)?;
-                p.handles.close_revoked_with(|handle, object| {
-                    revoked_handles.push(handle);
-                    closed.push(object);
-                });
-                for handle in revoked_handles {
-                    revoke_device_mappings_for_handle(p, handle);
-                }
-                affected
-            }
+        let root = match t.get(pid) {
+            Ok(KObject::Process(p)) => p
+                .handles
+                .capability(h)
+                .map_err(ProcError::Handle)?
+                .id,
             _ => return Err(ProcError::NoSuchProcess),
         };
+        let mut processes = Vec::new();
+        t.for_each_live(|id, object| {
+            if matches!(object, KObject::Process(_)) {
+                processes.push(id);
+            }
+            true
+        });
+        let mut records = Vec::new();
+        for process in &processes {
+            if let Ok(KObject::Process(p)) = t.get(*process) {
+                for (handle, link, _) in p.handles.capability_records() {
+                    records.push((*process, handle, link));
+                }
+            }
+        }
+        let mut revoked = Vec::new();
+        revoked.push(root);
+        loop {
+            let mut changed = false;
+            for (_, _, link) in &records {
+                if link.state == kernel_core::capability::CapabilityState::Active
+                    && link.parent.is_some_and(|parent| revoked.contains(&parent))
+                    && !revoked.contains(&link.id)
+                {
+                    revoked.push(link.id);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        let mut affected = 0usize;
+        let mut closed = Vec::new();
+        for process in processes {
+            let mut revoked_handles = Vec::new();
+            let Ok(KObject::Process(p)) = t.get_mut(process) else {
+                continue;
+            };
+            let local = p.handles.revoke_ids(&revoked);
+            if local == 0 {
+                continue;
+            }
+            affected += local;
+            p.handles.close_revoked_with(|handle, object| {
+                revoked_handles.push(handle);
+                closed.push(object);
+            });
+            for handle in revoked_handles {
+                revoke_device_mappings_for_handle(p, handle);
+            }
+            kprintln!(
+                "[JSR-SEC2-REVOKE] process={:#x} capabilities={} root={:#x}",
+                process.raw(),
+                local,
+                root.raw()
+            );
+        }
         for object in closed {
             if let Some(id) = ObjId::from_raw(object.id.0) {
                 let _ = kobj::release_owner_in(t, id);
             }
         }
+        #[cfg(feature = "sec2-verify")]
+        crate::sec2_notices::publish_in(t, affected)
+            .map_err(|_| ProcError::CapabilityNotice)?;
         Ok(affected)
     })
 }

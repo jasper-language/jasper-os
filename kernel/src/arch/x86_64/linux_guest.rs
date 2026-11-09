@@ -724,14 +724,14 @@ fn prepare(
             pid,
             handle,
             COMMAND_LINE,
-            b"earlyprintk=serial earlycon=uart,io,0x3f8,115200 keep_bootcon quiet loglevel=3 nokaslr panic=-1 init=/init io_delay=none initcall_blacklist=serial8250_init virtio_mmio.device=0x200@0xd0000000:5 virtio_mmio.device=0x200@0xd0001000:6 virtio_mmio.device=0x200@0xd0002000:3\0",
+            b"earlyprintk=serial earlycon=uart,io,0x3f8,115200 keep_bootcon ignore_loglevel loglevel=7 nokaslr no_timer_check lpj=1000000 panic=-1 init=/init io_delay=none initcall_blacklist=serial8250_init virtio_mmio.device=0x200@0xd0000000:5 virtio_mmio.device=0x200@0xd0001000:6 virtio_mmio.device=0x200@0xd0002000:3\0",
         )?;
     } else {
         write_bytes(
             pid,
             handle,
             COMMAND_LINE,
-            b"earlyprintk=serial earlycon=uart,io,0x3f8,115200 keep_bootcon quiet loglevel=3 nokaslr panic=-1 init=/init io_delay=none initcall_blacklist=serial8250_init\0",
+            b"earlyprintk=serial earlycon=uart,io,0x3f8,115200 keep_bootcon ignore_loglevel loglevel=7 nokaslr no_timer_check lpj=1000000 panic=-1 init=/init io_delay=none initcall_blacklist=serial8250_init\0",
         )?;
     }
     write_u32(pid, handle, BOOT_PARAMS + 0x228, COMMAND_LINE as u32);

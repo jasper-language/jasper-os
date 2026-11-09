@@ -104,12 +104,7 @@ __attribute__((noreturn)) void _start(void) {
     pio_ok = 0;
     if (syscall3(173, 0x500, 32, 1) == 0) {
         unsigned int control = inl(0x500);
-        unsigned short status = inw(0x504);
-        unsigned short generation = inw(0x506);
-        if ((control & 0xffffU) == 0x4f49504aU
-            && (control >> 16) == 0x50490001U
-            && (status & 1U) != 0
-            && generation == 1) {
+        if (control == 0x4f49504aU) {
             outb(0x508, 2);
             if (inl(0x50c) == 1) {
                 outb(0x508, 1);

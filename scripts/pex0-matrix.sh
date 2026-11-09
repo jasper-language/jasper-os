@@ -46,4 +46,5 @@ python3 scripts/pex0-matrix.py \
   --smps "$SMPS" \
   --cpus "$CORES" \
   --idle-wait-seconds "$IDLE_WAIT" \
+  ${PEX0_RESUME:+--resume} \
   --timeout "$TIMEOUT"

@@ -401,6 +401,46 @@ def parse_serial(path: Path, smp: int, round_no: int) -> list[dict]:
     return unique
 
 
+def load_resumed_run(
+    prefix: Path, smp: int, round_no: int, prior: dict | None
+) -> tuple[list[dict], dict] | None:
+    """Load one already completed run without rerunning QEMU.
+
+    Only a normal boot-trace exit with parsed workload metrics is reusable.
+    This lets long matrices survive an execution session limit without
+    discarding samples that already passed the contamination and resource
+    gates.
+    """
+    if prior is None or prior.get("valid") is not True:
+        return None
+    result_path = prefix.with_suffix(".result")
+    serial_path = prefix.with_suffix(".serial")
+    if not result_path.is_file() or not serial_path.is_file():
+        return None
+    result = result_path.read_text(errors="replace")
+    if "timed_out=0" not in result or not re.search(r"\brc=33\b", result):
+        return None
+    rows = parse_serial(serial_path, smp, round_no)
+    if not rows or any(row["workload"] == "failure" for row in rows):
+        return None
+    rc_match = re.search(r"\brc=(-?\d+)\b", result)
+    receipt = {
+        "vcpus": smp,
+        "round": round_no,
+        "returncode": 0,
+        "qemu_returncode": int(rc_match.group(1)) if rc_match else None,
+        "boot_trace": result.strip(),
+        "metrics": len(rows),
+        "failure_markers": False,
+        "busy_before_percent": prior.get("busy_before_percent"),
+        "busy_after_percent": prior.get("busy_after_percent"),
+        "qemu_after": prior.get("qemu_after", []),
+        "resumed": True,
+        "valid": True,
+    }
+    return rows, receipt
+
+
 def median_summary(rows: list[dict]) -> list[dict]:
     grouped: dict[tuple[int, str, str], list[dict]] = {}
     for row in rows:
@@ -540,6 +580,11 @@ def main() -> int:
     parser.add_argument("--max-busy-percent", type=float, default=5.0)
     parser.add_argument("--idle-wait-seconds", type=int, default=60)
     parser.add_argument("--allow-busy", action="store_true")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="reuse completed round result/serial files in --out",
+    )
     args = parser.parse_args()
 
     image = Path(args.image).resolve()
@@ -569,10 +614,47 @@ def main() -> int:
 
     committed_rows: list[dict] = []
     run_receipts: list[dict] = []
+    prior_receipts: dict[tuple[int, int], dict] = {}
+    previous_matrix = out / "matrix.json"
+    if args.resume and previous_matrix.is_file():
+        try:
+            previous = json.loads(previous_matrix.read_text(encoding="utf-8"))
+            prior_receipts = {
+                (int(run["vcpus"]), int(run["round"])): run
+                for run in previous.get("runs", [])
+            }
+        except (OSError, ValueError, KeyError, TypeError):
+            prior_receipts = {}
+    resume_manifest = out / "resume-valid.json"
+    if args.resume and resume_manifest.is_file():
+        try:
+            previous = json.loads(resume_manifest.read_text(encoding="utf-8"))
+            for run in previous.get("runs", []):
+                if run.get("valid") is True:
+                    prior_receipts[(int(run["vcpus"]), int(run["round"]))] = run
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
     smps = [int(x) for x in args.smps.split(",")]
     for smp in smps:
         for round_no in range(1, args.rounds + 1):
             prefix = out / f"smp{smp}-round{round_no}"
+            if args.resume:
+                resumed = load_resumed_run(
+                    prefix,
+                    smp,
+                    round_no,
+                    prior_receipts.get((smp, round_no)),
+                )
+                if resumed is not None:
+                    rows, receipt = resumed
+                    committed_rows.extend(rows)
+                    run_receipts.append(receipt)
+                    print(
+                        f"PEX-0: vcpus={smp} round={round_no} resumed "
+                        f"rc={receipt['qemu_returncode']} metrics={len(rows)}",
+                        flush=True,
+                    )
+                    continue
             before = host_sample(Path(f"{prefix}.environment-before.json"))
             before_busy = (
                 0.0

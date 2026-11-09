@@ -2824,11 +2824,21 @@ check_sec1() {
 }
 
 check_sec2() {
-  if has '^\[JSR-SEC2\] root=true attenuate=true escalation=false subtree=true aliases=true old_generation=false resources=true failed=0 reclaimed=true' \
+  if has '^\[JSR-SEC2\] root=true attenuate=true escalation=false subtree=true cross_process=true notices=true aliases=true old_generation=false resources=true failed=0 reclaimed=true' \
      && ! has '^\[JSR-SEC2-FAIL\]'; then
-    record SEC-2 PASS "Handle/Rights 生产路径接入能力谱系：复制产生可追踪子能力，子能力不可提权；撤销沿派生边覆盖根与全部别名，旧句柄不能解析新对象世代；对象所有权与页帧回基线。可靠审计、MAC/PEP、所有在飞 I/O 后端与跨进程撤销仍属未完成范围"
+    record SEC-2 PASS "Handle/Rights 生产路径接入全局唯一能力谱系：复制产生可追踪子能力，子能力不可提权；跨进程委派与全部别名经同一全局闭包撤销，旧句柄不能解析新对象世代；标准 EventSource 发布强制撤销通知；对象所有权与页帧回基线"
   else
-    record SEC-2 FAIL "缺少能力派生/禁止提权/子树撤销/旧世代拒绝/资源回基线证据"
+    record SEC-2 FAIL "缺少能力派生/禁止提权/跨进程子树撤销/撤销通知/旧世代拒绝/资源回基线证据"
+  fi
+}
+
+check_fs0() {
+  if has '^\[JSR-FS0\] service=true' \
+     && has '^\[JSR-FS0\] summary failed=0 recovered=true seed=true final_sequence=2 after_reboot=true resources=true' \
+     && ! has '^\[JSR-FS0-FAIL\]'; then
+    record FS-0 PASS "版本化文件服务完成 create/lookup/open/close/unlink/rename/sync/mmap 分发；同盘 virtio-blk 双槽 journal 在宿主强杀后恢复第 1 检查点并提交第 2 检查点；不可信 wire/checkpoint 变异失败关闭，资源回基线"
+  else
+    record FS-0 FAIL "缺少内核文件服务分发、真实 journal 恢复、强杀后提交或资源回基线证据"
   fi
 }
 
@@ -2856,7 +2866,9 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 if [ "$SPOT" -eq 1 ]; then
   for c in ${JASPER_CHECKS:-m11}; do
     [ "$c" = "jaso1_multi" ] && continue
-    if declare -F "check_$c" >/dev/null; then "check_$c"; else record "$c" FAIL "定点验收：没有名为 check_$c 的检查"; fi
+    checker="check_$c"
+    [ "$c" = "fs0-journal" ] && checker="check_fs0"
+    if declare -F "$checker" >/dev/null; then "$checker"; else record "$c" FAIL "定点验收：没有名为 check_$c 的检查"; fi
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3

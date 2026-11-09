@@ -22,7 +22,6 @@ const OPS_PER_WORKER: usize = 256;
 
 static NEXT_WORKER: AtomicU64 = AtomicU64::new(0);
 static WORKERS: AtomicU64 = AtomicU64::new(0);
-static READY: AtomicU64 = AtomicU64::new(0);
 static START_CYCLES: AtomicU64 = AtomicU64::new(0);
 static END_CYCLES: AtomicU64 = AtomicU64::new(0);
 static DONE: AtomicU64 = AtomicU64::new(0);
@@ -63,7 +62,6 @@ pub fn failed() -> u32 {
 fn reset_measurement(workers: usize) {
     NEXT_WORKER.store(0, Ordering::Relaxed);
     WORKERS.store(workers as u64, Ordering::Relaxed);
-    READY.store(0, Ordering::Relaxed);
     START_CYCLES.store(0, Ordering::Relaxed);
     END_CYCLES.store(0, Ordering::Relaxed);
     DONE.store(0, Ordering::Relaxed);
@@ -91,15 +89,6 @@ fn worker() {
     let Some(ring) = ObjId::from_raw(RINGS[index].load(Ordering::Acquire)) else {
         return;
     };
-
-    let ready = READY.fetch_add(1, Ordering::AcqRel) + 1;
-    if ready == workers as u64 {
-        START_CYCLES.store(arch::cycles(), Ordering::Release);
-    } else {
-        while START_CYCLES.load(Ordering::Acquire) == 0 {
-            sched::yield_now();
-        }
-    }
 
     let mut completed = 0u64;
     for op in 0..OPS_PER_WORKER {
@@ -269,6 +258,10 @@ fn run_profile(profile: Profile, sequence: u64) {
     }
 
     let affinity = sched::online_cpus();
+    // `spawn_on` can publish a worker to another CPU immediately. Start the
+    // common window before the first task is published; task creation cost is
+    // therefore included conservatively in the measured window.
+    START_CYCLES.store(arch::cycles(), Ordering::Release);
     let mut spawned = true;
     for index in 0..workers {
         let id = TaskId(0x5045_5830_0000 + sequence * 0x100 + index as u64);

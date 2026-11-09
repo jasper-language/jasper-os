@@ -18,6 +18,7 @@ pub const PIO_PROBE_LAST_COMMAND: u64 = 0x0a;
 pub const PIO_PROBE_WRITES: u64 = 0x0c;
 pub const PIO_PROBE_REQUESTS: u64 = 0x10;
 pub const PIO_PROBE_CANCELS: u64 = 0x14;
+pub const PIO_PROBE_VERSION_DEVICE: u64 = 0x18;
 
 pub const PIO_STATUS_READY: u8 = 1;
 pub const PIO_STATUS_PENDING: u8 = 2;
@@ -319,6 +320,7 @@ impl PioProbe {
                 | (PIO_PROBE_LAST_COMMAND, PioWidth::Byte)
                 | (PIO_PROBE_REQUESTS, PioWidth::Dword)
                 | (PIO_PROBE_CANCELS, PioWidth::Dword)
+                | (PIO_PROBE_VERSION_DEVICE, PioWidth::Dword)
         ) {
             return Err(PioError::UnknownRegister);
         }
@@ -340,6 +342,9 @@ impl PioProbe {
             PIO_PROBE_LAST_COMMAND => u64::from(self.last_command),
             PIO_PROBE_REQUESTS => u64::from(self.requests),
             PIO_PROBE_CANCELS => u64::from(self.cancels),
+            PIO_PROBE_VERSION_DEVICE => {
+                u64::from(PIO_PROBE_VERSION) | (u64::from(PIO_PROBE_DEVICE_ID) << 16)
+            }
             _ => return Err(PioError::UnknownRegister),
         })
     }
@@ -390,6 +395,7 @@ impl PioProbe {
             PIO_PROBE_LAST_COMMAND | PIO_PROBE_REQUESTS | PIO_PROBE_CANCELS => {
                 Err(PioError::NotReady)
             }
+            PIO_PROBE_VERSION_DEVICE => Err(PioError::NotReady),
             _ => Err(PioError::UnknownRegister),
         }
     }
@@ -500,6 +506,10 @@ mod tests {
         assert_eq!((control >> 32) as u16, PIO_PROBE_VERSION);
         assert_eq!((control >> 48) as u16, PIO_PROBE_DEVICE_ID);
         assert_eq!(probe.read(PIO_PROBE_STATUS, PioWidth::Word), Ok(1));
+        assert_eq!(
+            probe.read(PIO_PROBE_VERSION_DEVICE, PioWidth::Dword),
+            Ok(0x5049_0001)
+        );
         assert_eq!(probe.generation(), 1);
         assert_eq!(
             probe.write(PIO_PROBE_COMMAND, PioWidth::Byte, 0xff),
@@ -569,6 +579,7 @@ mod tests {
             (PIO_PROBE_WRITES, PioWidth::Dword),
             (PIO_PROBE_REQUESTS, PioWidth::Dword),
             (PIO_PROBE_CANCELS, PioWidth::Dword),
+            (PIO_PROBE_VERSION_DEVICE, PioWidth::Dword),
         ];
         for (index, (offset, width)) in registers.iter().copied().enumerate() {
             let end = offset + u64::from(width.bytes());

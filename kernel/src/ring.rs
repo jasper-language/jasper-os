@@ -141,6 +141,7 @@ struct BackendEntry {
     request: u64,
     backend: Backend,
     started: bool,
+    authority: Option<proc::HandleAuthority>,
 }
 
 /// TimerTable 槽位到运行集合的固定容量索引。
@@ -152,7 +153,10 @@ struct WaitRunning {
 
 /// 一次提交要做的工作（提交时的可信快照；用户内存已在此之前复制或固定）。
 pub(crate) enum Work {
-    SubscriptionWait(Box<crate::subscription::WaitTarget>),
+    SubscriptionWait {
+        target: Box<crate::subscription::WaitTarget>,
+        authority: proc::HandleAuthority,
+    },
     /// `system.time.now`。
     Now,
     /// `system.time.wait`：等待 `ticks` 个 tick。
@@ -164,22 +168,29 @@ pub(crate) enum Work {
     Send {
         /// 发送所用的端点句柄。
         endpoint: HandleId,
+        /// Authority captured from the endpoint handle at submission.
+        authority: proc::HandleAuthority,
         /// 消息体。
         body: Vec<u8>,
         /// 要随消息移动的句柄值。
         handles: Vec<u64>,
     },
     /// `system.channel.recv`：目标已建立（缓冲区已固定、端点内部引用已取得）。
-    Recv(Box<RecvTarget>),
+    Recv {
+        target: Box<RecvTarget>,
+        authority: proc::HandleAuthority,
+    },
     /// `system.task.wait` / `system.process.wait`：已取得目标退出状态的内部引用。
     ExitWait {
         /// 目标的退出状态。
         es: ObjId,
+        authority: proc::HandleAuthority,
     },
     /// `system.device.interrupt.wait`：已取得中断对象的内部引用。
     InterruptWait {
         /// 中断对象。
         irq: ObjId,
+        authority: proc::HandleAuthority,
     },
     /// 内核自检：人工后端；`start = None` 停留在排队状态。
     Manual {
@@ -194,15 +205,26 @@ impl Work {
     /// 工作所属的后端；内核自检的人工后端不在登记表中（返回 `None`）。
     fn kind(&self) -> Option<Kind> {
         Some(match self {
-            Work::SubscriptionWait(_) => Kind::SubscriptionWait,
+            Work::SubscriptionWait { .. } => Kind::SubscriptionWait,
             Work::Now => Kind::Now,
             Work::Wait { .. } => Kind::Wait,
             Work::Send { .. } => Kind::Send,
-            Work::Recv(_) => Kind::Recv,
+            Work::Recv { .. } => Kind::Recv,
             Work::ExitWait { .. } => Kind::ExitWait,
             Work::InterruptWait { .. } => Kind::InterruptWait,
             Work::Manual { .. } => return None,
         })
+    }
+
+    fn authority(&self) -> Option<proc::HandleAuthority> {
+        match self {
+            Work::SubscriptionWait { authority, .. }
+            | Work::Send { authority, .. }
+            | Work::Recv { authority, .. }
+            | Work::ExitWait { authority, .. }
+            | Work::InterruptWait { authority, .. } => Some(*authority),
+            Work::Now | Work::Wait { .. } | Work::Manual { .. } => None,
+        }
     }
 }
 
@@ -378,6 +400,17 @@ enum BackendOutcome {
 /// 唯一的已启动后端分派点：按 `Kind` 穷举到每后端自己的推进、中止和释放函数。
 /// The single exhaustive dispatch point for running backends.
 fn run_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action: BackendAction) -> BackendOutcome {
+    if matches!(action, BackendAction::Progress { .. }) {
+        let owner = ring_mut(t, ring).map(|ring| ring.owner);
+        if let (Some(owner), Some(authority)) = (owner, entry.authority) {
+            if !proc::authority_active_in(t, owner, authority) {
+                return BackendOutcome::Complete {
+                    entry,
+                    value: err(SYSTEM_HANDLE_ERROR_INVALID),
+                };
+            }
+        }
+    }
     match entry.backend.kind() {
         Some(Kind::Wait) => wait_backend_in(t, ring, entry, action),
         Some(Kind::Recv) => recv_backend_in(t, ring, entry, action),
@@ -391,9 +424,9 @@ fn run_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action: Backe
 
 /// `Wait`：统一身份表裁决一次到期；中止与释放恰好关闭一次身份并归还预算。
 fn wait_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action: BackendAction) -> BackendOutcome {
-    let BackendEntry { request, started, backend } = entry;
+    let BackendEntry { request, started, backend, authority } = entry;
     let Backend::Wait { timer } = backend else { panic!("Kind::Wait carried another backend") };
-    let candidate = BackendEntry { request, started, backend: Backend::Wait { timer } };
+    let candidate = BackendEntry { request, started, backend: Backend::Wait { timer }, authority };
     match action {
         BackendAction::Progress { now } => {
             let r = ring_mut(t, ring).expect("Ring retained while advancing a Wait backend");
@@ -421,12 +454,12 @@ fn wait_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action: Back
 
 /// `Recv`：推进时尝试原子交付；终止时撤销等待登记、释放端点引用并解除固定。
 fn recv_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action: BackendAction) -> BackendOutcome {
-    let BackendEntry { request, started, backend } = entry;
+    let BackendEntry { request, started, backend, authority } = entry;
     let Backend::Recv(target) = backend else { panic!("Kind::Recv carried another backend") };
     match action {
         BackendAction::Progress { .. } => match ipc::try_deliver_in(t, &target) {
-            Delivery::Empty => BackendOutcome::Pending(BackendEntry { request, started, backend: Backend::Recv(target) }),
-            Delivery::Done(value) => BackendOutcome::Complete { entry: BackendEntry { request, started, backend: Backend::Recv(target) }, value },
+            Delivery::Empty => BackendOutcome::Pending(BackendEntry { request, started, backend: Backend::Recv(target), authority }),
+            Delivery::Done(value) => BackendOutcome::Complete { entry: BackendEntry { request, started, backend: Backend::Recv(target), authority }, value },
         },
         BackendAction::Abort | BackendAction::Retire => {
             ipc::release_target_in(t, *target, Some((ring, request)));
@@ -437,14 +470,14 @@ fn recv_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action: Back
 
 /// `ExitWait`：推进时检查退出码；终止时撤销等待登记并释放退出状态引用。
 fn exit_wait_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action: BackendAction) -> BackendOutcome {
-    let BackendEntry { request, started, backend } = entry;
+    let BackendEntry { request, started, backend, authority } = entry;
     let Backend::ExitWait { es } = backend else { panic!("Kind::ExitWait carried another backend") };
     match action {
         BackendAction::Progress { .. } => match crate::exit_state::code_in(t, es) {
             Some(code) => {
-                BackendOutcome::Complete { entry: BackendEntry { request, started, backend: Backend::ExitWait { es } }, value: crate::exit_state::report(code) }
+                BackendOutcome::Complete { entry: BackendEntry { request, started, backend: Backend::ExitWait { es }, authority }, value: crate::exit_state::report(code) }
             }
-            None => BackendOutcome::Pending(BackendEntry { request, started, backend: Backend::ExitWait { es } }),
+            None => BackendOutcome::Pending(BackendEntry { request, started, backend: Backend::ExitWait { es }, authority }),
         },
         BackendAction::Abort | BackendAction::Retire => {
             crate::exit_state::remove_waiter_in(t, es, (ring, request));
@@ -456,10 +489,10 @@ fn exit_wait_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action:
 
 /// `InterruptWait`：到达由其对象同步函数推入；中止与释放撤销等待登记并释放中断对象引用。
 fn interrupt_wait_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action: BackendAction) -> BackendOutcome {
-    let BackendEntry { request, started, backend } = entry;
+    let BackendEntry { request, started, backend, authority } = entry;
     let Backend::InterruptWait { irq } = backend else { panic!("Kind::InterruptWait carried another backend") };
     match action {
-        BackendAction::Progress { .. } => BackendOutcome::Pending(BackendEntry { request, started, backend: Backend::InterruptWait { irq } }),
+        BackendAction::Progress { .. } => BackendOutcome::Pending(BackendEntry { request, started, backend: Backend::InterruptWait { irq }, authority }),
         BackendAction::Abort | BackendAction::Retire => {
             crate::interrupt::cancel_wait_in(t, irq, (ring, request));
             let _ = t.release_internal(irq);
@@ -470,15 +503,15 @@ fn interrupt_wait_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, ac
 
 /// `SubscriptionWait`：推进时尝试批量交付；终止时撤销订阅等待并释放订阅引用。
 fn subscription_wait_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action: BackendAction) -> BackendOutcome {
-    let BackendEntry { request, started, backend } = entry;
+    let BackendEntry { request, started, backend, authority } = entry;
     let Backend::SubscriptionWait(target) = backend else { panic!("Kind::SubscriptionWait carried another backend") };
     match action {
         BackendAction::Progress { .. } => match crate::subscription::deliver_in(t, &target) {
             crate::subscription::Attempt::Empty => {
-                BackendOutcome::Pending(BackendEntry { request, started, backend: Backend::SubscriptionWait(target) })
+                BackendOutcome::Pending(BackendEntry { request, started, backend: Backend::SubscriptionWait(target), authority })
             }
             crate::subscription::Attempt::Done(value) => {
-                BackendOutcome::Complete { entry: BackendEntry { request, started, backend: Backend::SubscriptionWait(target) }, value }
+                BackendOutcome::Complete { entry: BackendEntry { request, started, backend: Backend::SubscriptionWait(target), authority }, value }
             }
         },
         BackendAction::Abort | BackendAction::Retire => {
@@ -872,11 +905,18 @@ fn start_request_in(t: &mut Table, ring: ObjId, request: u64, exec: Exec) {
 }
 
 /// 把一个尚未终止的后端放入执行中集合。
-fn park_backend_in(t: &mut Table, ring: ObjId, request: u64, backend: Backend, started: bool) {
+fn park_backend_in(
+    t: &mut Table,
+    ring: ObjId,
+    request: u64,
+    backend: Backend,
+    started: bool,
+    authority: Option<proc::HandleAuthority>,
+) {
     let r = ring_mut(t, ring).expect("Ring retained while parking its backend");
     assert!(r.backends_in_call > 0, "parked backend has no accepted submit owner");
     r.backends_in_call -= 1;
-    r.push_running(BackendEntry { request, backend, started });
+    r.push_running(BackendEntry { request, backend, started, authority });
 }
 
 /// 释放一笔已接受但未进入执行中集合的瞬时后端，并记启动后的释放账。
@@ -919,15 +959,15 @@ fn launch_work_in(
 }
 
 fn launch_subscription_wait_in(t: &mut Table, ring: ObjId, request: u64, exec: Exec, work: Work) {
-    let Work::SubscriptionWait(target) = work else { panic!("Kind::SubscriptionWait carried another work item") };
+    let Work::SubscriptionWait { target, authority } = work else { panic!("Kind::SubscriptionWait carried another work item") };
     start_request_in(t, ring, request, exec);
     match crate::subscription::deliver_in(t, &target) {
         crate::subscription::Attempt::Empty => {
             crate::subscription::enroll_in(t, target.sub, (ring, request));
-            park_backend_in(t, ring, request, Backend::SubscriptionWait(target), true);
+            park_backend_in(t, ring, request, Backend::SubscriptionWait(target), true, Some(authority));
         }
         crate::subscription::Attempt::Done(value) => {
-            finish_accepted_work_in(t, ring, request, Work::SubscriptionWait(target), value);
+            finish_accepted_work_in(t, ring, request, Work::SubscriptionWait { target, authority }, value);
         }
     }
 }
@@ -958,47 +998,51 @@ fn launch_wait_in(t: &mut Table, ring: ObjId, request: u64, wait: (u64, TimerId)
     ).expect("Wait timer identity has one reserved heap slot");
     r.wait_heap_ops = r.wait_heap_ops.saturating_add(1);
     start_request_in(t, ring, request, exec);
-    park_backend_in(t, ring, request, Backend::Wait { timer }, true);
+    park_backend_in(t, ring, request, Backend::Wait { timer }, true, None);
 }
 
 fn launch_send_in(t: &mut Table, pid: ObjId, ring: ObjId, request: u64, exec: Exec, work: Work) {
-    let Work::Send { endpoint, body, handles } = work else { panic!("Kind::Send carried another work item") };
+    let Work::Send { endpoint, authority, body, handles } = work else { panic!("Kind::Send carried another work item") };
     start_request_in(t, ring, request, exec);
-    let value = ipc::send_in(t, pid, endpoint, body, &handles);
-    finish_accepted_work_in(t, ring, request, Work::Send { endpoint, body: Vec::new(), handles }, value);
+    let value = if proc::authority_active_in(t, pid, authority) {
+        ipc::send_in(t, pid, endpoint, body, &handles)
+    } else {
+        err(SYSTEM_HANDLE_ERROR_INVALID)
+    };
+    finish_accepted_work_in(t, ring, request, Work::Send { endpoint, authority, body: Vec::new(), handles }, value);
 }
 
 fn launch_recv_in(t: &mut Table, ring: ObjId, request: u64, exec: Exec, work: Work) {
-    let Work::Recv(target) = work else { panic!("Kind::Recv carried another work item") };
+    let Work::Recv { target, authority } = work else { panic!("Kind::Recv carried another work item") };
     start_request_in(t, ring, request, exec);
     match ipc::try_deliver_in(t, &target) {
         Delivery::Empty => {
             ipc::add_waiter_in(t, &target, ring, request);
-            park_backend_in(t, ring, request, Backend::Recv(target), true);
+            park_backend_in(t, ring, request, Backend::Recv(target), true, Some(authority));
         }
-        Delivery::Done(value) => finish_accepted_work_in(t, ring, request, Work::Recv(target), value),
+        Delivery::Done(value) => finish_accepted_work_in(t, ring, request, Work::Recv { target, authority }, value),
     }
 }
 
 fn launch_exit_wait_in(t: &mut Table, ring: ObjId, request: u64, exec: Exec, work: Work) {
-    let Work::ExitWait { es } = work else { panic!("Kind::ExitWait carried another work item") };
+    let Work::ExitWait { es, authority } = work else { panic!("Kind::ExitWait carried another work item") };
     start_request_in(t, ring, request, exec);
     match crate::exit_state::code_in(t, es) {
-        Some(code) => finish_accepted_work_in(t, ring, request, Work::ExitWait { es }, crate::exit_state::report(code)),
+        Some(code) => finish_accepted_work_in(t, ring, request, Work::ExitWait { es, authority }, crate::exit_state::report(code)),
         None => {
             crate::exit_state::add_waiter_in(t, es, (ring, request));
-            park_backend_in(t, ring, request, Backend::ExitWait { es }, true);
+            park_backend_in(t, ring, request, Backend::ExitWait { es }, true, Some(authority));
         }
     }
 }
 
 fn launch_interrupt_wait_in(t: &mut Table, ring: ObjId, request: u64, exec: Exec, work: Work) {
-    let Work::InterruptWait { irq } = work else { panic!("Kind::InterruptWait carried another work item") };
+    let Work::InterruptWait { irq, authority } = work else { panic!("Kind::InterruptWait carried another work item") };
     start_request_in(t, ring, request, exec);
     match crate::interrupt::submit_wait_in(t, irq, (ring, request)) {
-        Ok(None) => park_backend_in(t, ring, request, Backend::InterruptWait { irq }, true),
+        Ok(None) => park_backend_in(t, ring, request, Backend::InterruptWait { irq }, true, Some(authority)),
         Ok(Some(value)) | Err(value) => {
-            finish_accepted_work_in(t, ring, request, Work::InterruptWait { irq }, value);
+            finish_accepted_work_in(t, ring, request, Work::InterruptWait { irq, authority }, value);
         }
     }
 }
@@ -1008,7 +1052,7 @@ fn launch_manual_in(t: &mut Table, ring: ObjId, request: u64, work: Work) {
     if let Some(exec) = start {
         start_request_in(t, ring, request, exec);
     }
-    park_backend_in(t, ring, request, Backend::Manual { pins }, start.is_some());
+    park_backend_in(t, ring, request, Backend::Manual { pins }, start.is_some(), None);
 }
 
 /// 在锁内提交一个请求（INV-11：检查、配额预留、信用预留原子成功或原子失败）并启动其后端。
@@ -1018,6 +1062,12 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
         release_work_in(t, work);
         Err(e)
     };
+    if work
+        .authority()
+        .is_some_and(|authority| !proc::authority_active_in(t, pid, authority))
+    {
+        return reject(t, work, err(SYSTEM_HANDLE_ERROR_INVALID));
+    }
     let quota = match proc::ring_quota_in(t, pid) {
         Some(q) => q.in_flight,
         None => return reject(t, work, err(SYSTEM_ERROR_RIGHTS_DENIED)),
@@ -1038,12 +1088,12 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
         _ => 0,
     };
     // 中断等待：忙或已关闭在建立控制块之前拒绝（与上面的检查同在一把锁内，提交因此原子成功或原子失败）
-    if let Work::InterruptWait { irq } = work {
+    if let Work::InterruptWait { irq, .. } = work {
         if let Err(e) = crate::interrupt::check_wait_in(t, irq) {
             return reject(t, work, e);
         }
     }
-    if let Work::SubscriptionWait(ref target)=work {
+    if let Work::SubscriptionWait { ref target, .. }=work {
         if let Err(e)=crate::subscription::check_wait_in(t,target.sub) {return reject(t,work,e);}
     }
     // 已登记后端的可中止性与缓冲区持有取自静态契约；人工后端由自检调用者指定
@@ -1103,22 +1153,22 @@ fn release_work_in(t: &mut Table, work: Work) {
 }
 
 fn release_subscription_work_in(t: &mut Table, work: Work) {
-    let Work::SubscriptionWait(target) = work else { panic!("Kind::SubscriptionWait carried another work item") };
+    let Work::SubscriptionWait { target, .. } = work else { panic!("Kind::SubscriptionWait carried another work item") };
     crate::subscription::release_target_in(t, *target, None);
 }
 
 fn release_recv_work_in(t: &mut Table, work: Work) {
-    let Work::Recv(target) = work else { panic!("Kind::Recv carried another work item") };
+    let Work::Recv { target, .. } = work else { panic!("Kind::Recv carried another work item") };
     ipc::release_target_in(t, *target, None);
 }
 
 fn release_exit_work_in(t: &mut Table, work: Work) {
-    let Work::ExitWait { es } = work else { panic!("Kind::ExitWait carried another work item") };
+    let Work::ExitWait { es, .. } = work else { panic!("Kind::ExitWait carried another work item") };
     let _ = t.release_internal(es);
 }
 
 fn release_interrupt_work_in(t: &mut Table, work: Work) {
-    let Work::InterruptWait { irq } = work else { panic!("Kind::InterruptWait carried another work item") };
+    let Work::InterruptWait { irq, .. } = work else { panic!("Kind::InterruptWait carried another work item") };
     let _ = t.release_internal(irq);
 }
 
@@ -1169,15 +1219,23 @@ pub fn submit_for(pid: ObjId, h: HandleId, sqe: &Sqe) -> Result<u64, i64> {
 
 /// 内核自检：以进程 `pid` 的身份经 Ring `h` 提交 recv（`desc` 是已写入进程内存 `desc_ptr` 处的描述）。
 pub fn submit_recv_for(pid: ObjId, h: HandleId, endpoint: HandleId, desc_ptr: u64, desc: &MsgDesc) -> Result<u64, i64> {
-    let target = kobj::with(|t| ipc::prepare_recv_in(t, pid, endpoint, desc_ptr, desc))?;
-    submit_work_for(pid, h, SYSTEM_CHANNEL_RECV, 0, Work::Recv(Box::new(target)))
+    let (target, authority) = kobj::with(|t| {
+        let target = ipc::prepare_recv_in(t, pid, endpoint, desc_ptr, desc)?;
+        let authority = proc::authority_in(t, pid, endpoint, Rights::READ).map_err(perr)?;
+        Ok::<_, i64>((target, authority))
+    })?;
+    submit_work_for(pid, h, SYSTEM_CHANNEL_RECV, 0, Work::Recv { target: Box::new(target), authority })
 }
 
 /// 以进程 `pid` 的身份经 Ring `h` 提交对 `target`（进程或线程句柄，须带 WAIT）的 wait。
 pub fn submit_wait_for(pid: ObjId, h: HandleId, target: HandleId, ty: ObjectType) -> Result<u64, i64> {
-    let es = kobj::with(|t| proc::acquire_exit_state_in(t, pid, target, ty)).map_err(perr)?;
+    let (es, authority) = kobj::with(|t| {
+        let es = proc::acquire_exit_state_in(t, pid, target, ty).map_err(perr)?;
+        let authority = proc::authority_in(t, pid, target, Rights::WAIT).map_err(perr)?;
+        Ok::<_, i64>((es, authority))
+    })?;
     let op = if ty == ObjectType::Task { SYSTEM_TASK_WAIT } else { SYSTEM_PROCESS_WAIT };
-    submit_work_for(pid, h, op, 0, Work::ExitWait { es })
+    submit_work_for(pid, h, op, 0, Work::ExitWait { es, authority })
 }
 
 /// `system.task.wait(h)` / `system.process.wait(h)` 的同步形式：阻塞到目标退出，返回退出码（32 位无符号）。
@@ -1206,7 +1264,8 @@ pub fn sys_wait(h: u64, ty: ObjectType) -> i64 {
 
 /// 内核自检：以进程 `pid` 的身份经 Ring `h` 提交 send（消息体与句柄值由内核给出，相当于阶段 A 已完成）。
 pub fn submit_send_for(pid: ObjId, h: HandleId, endpoint: HandleId, body: Vec<u8>, handles: Vec<u64>) -> Result<u64, i64> {
-    submit_work_for(pid, h, SYSTEM_CHANNEL_SEND, 0, Work::Send { endpoint, body, handles })
+    let authority = kobj::with(|t| proc::authority_in(t, pid, endpoint, Rights::WRITE)).map_err(perr)?;
+    submit_work_for(pid, h, SYSTEM_CHANNEL_SEND, 0, Work::Send { endpoint, authority, body, handles })
 }
 
 /// 内核自检：提交一个人工后端请求；`start = None` 时请求停留在排队状态，否则以给定可中止性开始执行。
@@ -1287,28 +1346,50 @@ fn prepare_user_work(pid: ObjId, sqe: &Sqe, allowed: SyscallSet) -> Result<Work,
             let mut bytes=[0;kernel_core::subscription_abi::WAIT_BYTES];
             copy_from_user(&mut bytes,sqe.arg1,kernel_core::subscription_abi::WAIT_BYTES).map_err(|_|err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS))?;
             let args=kernel_core::subscription_abi::WaitArgs::decode(&bytes).ok_or(err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
-            let target=kobj::with(|t|crate::subscription::prepare_wait_in(t,pid,crate::syscall::handle_arg(sqe.arg0),args))?;
-            Work::SubscriptionWait(Box::new(target))
+            let handle = crate::syscall::handle_arg(sqe.arg0);
+            let (target, authority) = kobj::with(|t| {
+                let target = crate::subscription::prepare_wait_in(t, pid, handle, args)?;
+                let authority = proc::authority_in(t, pid, handle, Rights::WAIT).map_err(perr)?;
+                Ok::<_, i64>((target, authority))
+            })?;
+            Work::SubscriptionWait { target: Box::new(target), authority }
         }
         Kind::Now => Work::Now,
         Kind::Wait => Work::Wait { ticks: sqe.arg0 },
         Kind::Send => {
             let (body, handles) = ipc::copy_send_args(sqe.arg1)?;
-            Work::Send { endpoint: crate::syscall::handle_arg(sqe.arg0), body, handles }
+            let endpoint = crate::syscall::handle_arg(sqe.arg0);
+            let authority = kobj::with(|t| proc::authority_in(t, pid, endpoint, Rights::WRITE)).map_err(perr)?;
+            Work::Send { endpoint, authority, body, handles }
         }
         Kind::InterruptWait => {
-            let irq = kobj::with(|t| crate::interrupt::prepare_wait_in(t, pid, crate::syscall::handle_arg(sqe.arg0)))?;
-            Work::InterruptWait { irq }
+            let handle = crate::syscall::handle_arg(sqe.arg0);
+            let (irq, authority) = kobj::with(|t| {
+                let irq = crate::interrupt::prepare_wait_in(t, pid, handle)?;
+                let authority = proc::authority_in(t, pid, handle, Rights::WAIT).map_err(perr)?;
+                Ok::<_, i64>((irq, authority))
+            })?;
+            Work::InterruptWait { irq, authority }
         }
         Kind::ExitWait => {
             let ty = if sqe.op == SYSTEM_TASK_WAIT { ObjectType::Task } else { ObjectType::Process };
-            let es = kobj::with(|t| proc::acquire_exit_state_in(t, pid, crate::syscall::handle_arg(sqe.arg0), ty)).map_err(perr)?;
-            Work::ExitWait { es }
+            let handle = crate::syscall::handle_arg(sqe.arg0);
+            let (es, authority) = kobj::with(|t| {
+                let es = proc::acquire_exit_state_in(t, pid, handle, ty).map_err(perr)?;
+                let authority = proc::authority_in(t, pid, handle, Rights::WAIT).map_err(perr)?;
+                Ok::<_, i64>((es, authority))
+            })?;
+            Work::ExitWait { es, authority }
         }
         Kind::Recv => {
             let d = ipc::copy_desc(sqe.arg1)?;
-            let target = kobj::with(|t| ipc::prepare_recv_in(t, pid, crate::syscall::handle_arg(sqe.arg0), sqe.arg1, &d))?;
-            Work::Recv(Box::new(target))
+            let handle = crate::syscall::handle_arg(sqe.arg0);
+            let (target, authority) = kobj::with(|t| {
+                let target = ipc::prepare_recv_in(t, pid, handle, sqe.arg1, &d)?;
+                let authority = proc::authority_in(t, pid, handle, Rights::READ).map_err(perr)?;
+                Ok::<_, i64>((target, authority))
+            })?;
+            Work::Recv { target: Box::new(target), authority }
         }
     })
 }
@@ -1567,6 +1648,10 @@ pub(crate) fn poll_subscription_in(t:&mut Table,ring:ObjId,req:u64) {
     }
 }
 pub(crate) fn submit_subscription_for(pid:ObjId,ring:HandleId,sub:HandleId,args:kernel_core::subscription_abi::WaitArgs)->Result<u64,i64> {
- let target=kobj::with(|t|crate::subscription::prepare_wait_in(t,pid,sub,args))?;
- submit_work_for(pid,ring,SYSTEM_EVENT_SUBSCRIPTION_WAIT,0,Work::SubscriptionWait(Box::new(target)))
+ let (target,authority)=kobj::with(|t|{
+   let target=crate::subscription::prepare_wait_in(t,pid,sub,args)?;
+   let authority=proc::authority_in(t,pid,sub,Rights::WAIT).map_err(perr)?;
+   Ok::<_,i64>((target,authority))
+ })?;
+ submit_work_for(pid,ring,SYSTEM_EVENT_SUBSCRIPTION_WAIT,0,Work::SubscriptionWait{target:Box::new(target),authority})
 }

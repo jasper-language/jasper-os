@@ -124,6 +124,8 @@ pub mod security;
 #[cfg(feature = "sec1-verify")]
 pub mod sec1_demo;
 #[cfg(feature = "sec2-verify")]
+pub mod sec2_notices;
+#[cfg(feature = "sec2-verify")]
 pub mod sec2_demo;
 pub mod shard;
 pub mod smp;

@@ -1066,6 +1066,7 @@ const PIO_PIC_SLAVE: u16 = 4;
 const PIO_UART: u16 = 5;
 const PIO_DISCARD: u16 = 6;
 const PIO_PROBE: u16 = 7;
+const PIO_CMOS: u16 = 8;
 
 struct LinuxRuntime {
     uart_lcr: u8,
@@ -1092,10 +1093,15 @@ struct LinuxRuntime {
     pit_remaining: u32,
     pit_active: bool,
     timer_countdown: u32,
-    pio_map: PortMap<8>,
+    cmos_index: u8,
+    cmos_value: u8,
+    pio_map: PortMap<12>,
     pio_probe: PioProbe,
     pio_reads: u32,
     pio_writes: u32,
+    last_pio_port: u16,
+    last_pio_qualification: u64,
+    last_pio_width: u8,
     msrs: [(u32, u64); 64],
     msr_count: usize,
 }
@@ -1127,18 +1133,26 @@ impl LinuxRuntime {
             pit_remaining: 0,
             pit_active: false,
             timer_countdown: 1024,
-            pio_map: PortMap::<8>::new()
+            cmos_index: 0,
+            cmos_value: 0,
+            pio_map: PortMap::<12>::new()
                 .with_claim(0x20, 2, PIO_PIC_MASTER)
                 .with_claim(0x40, 4, PIO_PIT)
-                .with_claim(0x61, 1, PIO_DISCARD)
-                .with_claim(0x64, 1, PIO_I8042)
-                .with_claim(0x80, 1, PIO_DISCARD)
+                .with_claim(0x70, 2, PIO_CMOS)
+                .with_claim(0x60, 5, PIO_I8042)
+                .with_claim(0x80, 16, PIO_DISCARD)
+                .with_claim(0x2e8, 8, PIO_DISCARD)
+                .with_claim(0x2f8, 8, PIO_DISCARD)
+                .with_claim(0x3e8, 8, PIO_DISCARD)
                 .with_claim(0xa0, 2, PIO_PIC_SLAVE)
                 .with_claim(0x3f8, 8, PIO_UART)
                 .with_claim(PIO_PROBE_BASE, 32, PIO_PROBE),
             pio_probe: PioProbe::new(),
             pio_reads: 0,
             pio_writes: 0,
+            last_pio_port: 0,
+            last_pio_qualification: 0,
+            last_pio_width: 0,
             msrs: [(0, 0); 64],
             msr_count: 0,
         }
@@ -1360,6 +1374,14 @@ impl LinuxRuntime {
                     0
                 }
             }
+            PIO_CMOS => {
+                byte_width(width)?;
+                if port == 0x70 {
+                    u64::from(self.cmos_index)
+                } else {
+                    u64::from(self.cmos_value)
+                }
+            }
             PIO_DISCARD => {
                 byte_width(width)?;
                 0
@@ -1405,6 +1427,14 @@ impl LinuxRuntime {
                 // command write is accepted as an observation point but does
                 // not invent a keyboard reset or interrupt.
             }
+            PIO_CMOS => {
+                byte_width(width)?;
+                if port == 0x70 {
+                    self.cmos_index = value as u8 & 0x7f;
+                } else {
+                    self.cmos_value = value as u8;
+                }
+            }
             PIO_DISCARD => {
                 byte_width(width)?;
             }
@@ -1419,6 +1449,13 @@ impl LinuxRuntime {
     }
 
     fn timer_interrupt(&mut self) -> Option<u8> {
+        // The minimal guest installs its vector table after probing PIC/PIT.
+        // Delivering an early timer vectors causes an unhandled 0x20 IRQ and
+        // traps the guest before userspace; HLT remains the single forced
+        // wake-up point.
+        if !self.marker_seen {
+            return None;
+        }
         if !self.pit_active || self.pic_in_service & 1 != 0 {
             return None;
         }
@@ -1432,6 +1469,7 @@ impl LinuxRuntime {
         if self.pic_master_mask & 1 != 0 {
             return None;
         }
+        self.pit_remaining = self.pit_reload;
         self.pic_in_service |= 1;
         self.timer_injections = self.timer_injections.saturating_add(1);
         Some(self.pic_master_vector.wrapping_add(0))
@@ -1792,6 +1830,17 @@ impl VmxVm {
             report.ept_violations,
             self.guest.state.rip,
             self.guest.rsp
+        );
+        kprintln!(
+            "[JSR-HWV4-LINUX-FAIL] last_pio port={:#x} qualification={:#x} width={} reads={} writes={} pit_remaining={} pit_reload={} irq_masked={}",
+            linux.last_pio_port,
+            linux.last_pio_qualification,
+            linux.last_pio_width,
+            linux.pio_reads,
+            linux.pio_writes,
+            linux.pit_remaining,
+            linux.pit_reload,
+            linux.pic_master_mask & 1 != 0
         );
         Err(VmxError::TooManyExits)
     }
@@ -2161,6 +2210,9 @@ impl VmxVm {
         let register = ((qualification >> 8) & 0xf) as usize;
         let access =
             PioAccess::decode_vmx(qualification, length, self.gpr(register))?;
+        linux.last_pio_port = access.port;
+        linux.last_pio_qualification = qualification;
+        linux.last_pio_width = access.width.bytes();
         match access.direction {
             PioDirection::In => {
                 let value = linux.pio_in(access.port, access.width)?;

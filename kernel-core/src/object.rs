@@ -21,6 +21,29 @@ use core::sync::atomic::Ordering;
 use crate::capability::{CapabilityId, CapabilityLink, CapabilityState};
 use crate::sync::Atomic64;
 
+/// Capability identifiers are process-independent. This lets a delegated
+/// authority tree cross process boundaries without making equal local
+/// counters alias unrelated capabilities.
+static NEXT_CAPABILITY: Atomic64 = Atomic64::new(1);
+
+fn allocate_capability() -> Result<CapabilityId, HandleError> {
+    let mut current = NEXT_CAPABILITY.load(Ordering::Relaxed);
+    loop {
+        if current == 0 || current == u64::MAX {
+            return Err(HandleError::TableFull);
+        }
+        match NEXT_CAPABILITY.compare_exchange(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return CapabilityId::from_raw(current).ok_or(HandleError::TableFull),
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 /// 句柄上的权限位掩码。
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rights(u32);
@@ -446,7 +469,6 @@ impl<V> Slot<V> {
 pub struct HandleTable<V, const N: usize> {
     slots: [Slot<V>; N],
     live: usize,
-    next_capability: u64,
 }
 
 impl<V, const N: usize> HandleTable<V, N> {
@@ -456,7 +478,6 @@ impl<V, const N: usize> HandleTable<V, N> {
         HandleTable {
             slots: [const { Slot::EMPTY }; N],
             live: 0,
-            next_capability: 1,
         }
     }
 
@@ -492,24 +513,66 @@ impl<V, const N: usize> HandleTable<V, N> {
                 return Err(HandleError::RightsDenied);
             }
         }
-        let capability_id =
-            CapabilityId::from_raw(self.next_capability).ok_or(HandleError::TableFull)?;
-        let next_capability = self
-            .next_capability
-            .checked_add(1)
-            .ok_or(HandleError::TableFull)?;
         let (index, slot) = self
             .slots
             .iter_mut()
             .enumerate()
             .find(|(_, s)| s.entry.is_none() && !s.retired)
             .ok_or(HandleError::TableFull)?;
-        self.next_capability = next_capability;
+        let capability_id = allocate_capability()?;
         slot.entry = Some((value, rights));
         slot.capability = Some(match parent {
             Some(parent_id) => CapabilityLink::delegated(capability_id, parent_id),
             None => CapabilityLink::root(capability_id),
         });
+        self.live += 1;
+        Ok(HandleId::encode(index, slot.generation))
+    }
+
+    /// Import a delegated capability whose parent remains in another process
+    /// table. The trusted caller must have validated the parent and rights;
+    /// subsequent global revocation uses the globally unique parent identity.
+    pub fn put_delegated_shared(
+        &mut self,
+        value: V,
+        rights: Rights,
+        parent: CapabilityId,
+    ) -> Result<HandleId, HandleError> {
+        if !parent.is_valid() {
+            return Err(HandleError::Invalid);
+        }
+        let (index, slot) = self
+            .slots
+            .iter_mut()
+            .enumerate()
+            .find(|(_, s)| s.entry.is_none() && !s.retired)
+            .ok_or(HandleError::TableFull)?;
+        let capability_id = allocate_capability()?;
+        slot.entry = Some((value, rights));
+        slot.capability = Some(CapabilityLink::delegated(capability_id, parent));
+        self.live += 1;
+        Ok(HandleId::encode(index, slot.generation))
+    }
+
+    /// Insert an already-validated capability link without allocating a new
+    /// node. Atomic transfer uses this to preserve the exact authority root.
+    pub fn put_capability_link(
+        &mut self,
+        value: V,
+        rights: Rights,
+        link: CapabilityLink,
+    ) -> Result<HandleId, HandleError> {
+        if !link.is_active() || !link.id.is_valid() {
+            return Err(HandleError::Invalid);
+        }
+        let (index, slot) = self
+            .slots
+            .iter_mut()
+            .enumerate()
+            .find(|(_, s)| s.entry.is_none() && !s.retired)
+            .ok_or(HandleError::TableFull)?;
+        slot.entry = Some((value, rights));
+        slot.capability = Some(link);
         self.live += 1;
         Ok(HandleId::encode(index, slot.generation))
     }
@@ -528,8 +591,9 @@ impl<V, const N: usize> HandleTable<V, N> {
         if self.has_dependents(h) {
             return Err(HandleError::RightsDenied);
         }
+        let link = self.capability(h)?;
         // Destination insertion can fail; do it before touching the source.
-        let moved = to.put(*value, rights)?;
+        let moved = to.put_capability_link(*value, rights, link)?;
         self.remove(h).expect("exclusive validated source handle cannot disappear");
         Ok(moved)
     }
@@ -572,6 +636,49 @@ impl<V, const N: usize> HandleTable<V, N> {
         self.slot(h)?
             .capability
             .ok_or(HandleError::Invalid)
+    }
+
+    /// Snapshot every live capability link. Allocation is performed by the
+    /// caller so this bounded table remains heap-free.
+    pub fn capability_records(
+        &self,
+    ) -> impl Iterator<Item = (HandleId, CapabilityLink, Rights)> + '_ {
+        self.slots.iter().enumerate().filter_map(|(index, slot)| {
+            let (_, rights) = slot.entry.as_ref()?;
+            let link = slot.capability?;
+            Some((
+                HandleId::encode(index, slot.generation),
+                link,
+                *rights,
+            ))
+        })
+    }
+
+    /// Revoke exactly the named globally unique capabilities. The caller
+    /// computes the transitive closure across all process tables first.
+    pub fn revoke_ids(&mut self, ids: &[CapabilityId]) -> usize {
+        let mut affected = 0usize;
+        for slot in &mut self.slots {
+            let Some(link) = slot.capability else {
+                continue;
+            };
+            if link.state == CapabilityState::Active && ids.contains(&link.id) {
+                slot.capability = Some(CapabilityLink {
+                    state: CapabilityState::Revoked,
+                    ..link
+                });
+                affected += 1;
+            }
+        }
+        affected
+    }
+
+    /// Revalidate a captured capability lineage without turning the opaque
+    /// graph id into a user-visible authorization token.
+    pub fn authority_active(&self, id: CapabilityId, required: Rights) -> bool {
+        self.capability_slot(id).is_some_and(|(link, rights)| {
+            link.is_active() && rights.contains(required)
+        })
     }
 
     /// 取值并检查句柄至少拥有 `required` 权限（统一权限检查入口）。
@@ -947,6 +1054,32 @@ mod tests {
         assert_eq!(a.transfer_to(root, &mut b), Err(HandleError::RightsDenied));
         assert!(a.get(root).is_ok(), "refusal leaves the authority tree intact");
         assert!(b.is_empty());
+    }
+
+    #[test]
+    fn transfer_preserves_exact_capability_and_global_ids_do_not_alias() {
+        let mut a: HandleTable<u8, 4> = HandleTable::new();
+        let mut b: HandleTable<u8, 4> = HandleTable::new();
+        let root = a.put(7, Rights::READ.union(Rights::TRANSFER)).unwrap();
+        let root_link = a.capability(root).unwrap();
+        let moved = a.transfer_to(root, &mut b).unwrap();
+        assert_eq!(b.capability(moved).unwrap().id, root_link.id);
+        assert_eq!(a.get(root), Err(HandleError::Invalid));
+
+        let cross_parent = b.put(8, Rights::ALL).unwrap();
+        let cross_parent_id = b.capability(cross_parent).unwrap().id;
+        let mut c: HandleTable<u8, 4> = HandleTable::new();
+        let child = c
+            .put_delegated_shared(8, Rights::READ, cross_parent_id)
+            .unwrap();
+        assert_ne!(c.capability(child).unwrap().id, cross_parent_id);
+        assert_eq!(c.capability(child).unwrap().parent, Some(cross_parent_id));
+        assert_eq!(
+            c.revoke_ids(&[cross_parent_id, c.capability(child).unwrap().id]),
+            1,
+            "globally unique parent identity revokes the imported child"
+        );
+        assert_eq!(c.get(child), Err(HandleError::Invalid));
     }
 
     #[test]
