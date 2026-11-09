@@ -12,12 +12,18 @@
 
 use core::arch::global_asm;
 
-use kernel_core::fdt::{self, BootSummary, Fdt, Node, PixelFormat};
+use kernel_core::fdt::{self, BootSummary, Fdt, PixelFormat};
+#[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
+use kernel_core::fdt::Node;
 use kernel_core::frame::{PhysRegion, RegionKind};
 use kernel_core::image_header;
 use kernel_core::psci::Conduit;
 
-use super::{devirq, gic, mmu, semihost, smp, timer, uart};
+#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+use super::samsung_uart;
+use super::{devirq, gic, mmu, semihost, smp, timer};
+#[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
+use super::uart;
 use crate::boot::{self, BootSpec, FrameBufferFormat, FrameBufferInfo, PsciBoot, SerialBoot};
 
 /// 启动栈大小。
@@ -34,6 +40,112 @@ static mut JSR_BOOT_STACK: BootStack = BootStack([0; BOOT_STACK_BYTES]);
 const QEMU_VIRT_DTB: u64 = 0x4000_0000;
 /// 找不到设备树或必需设备时的退出码（与 x86_64 的失败码相同）。
 const EXIT_FAILURE: u32 = 35;
+
+// Pixel 6a's FDT declares /timer clock-frequency = 0x1770000. The virtual
+// counter is usable from the PE probe, but CNTFRQ_EL0 reads as zero here.
+#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full-probe"))]
+const PIXEL6A_GENERIC_TIMER_HZ: u64 = 24_576_000;
+
+#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full-probe"))]
+fn pixel6a_timer_frequency() -> u64 {
+    let frequency: u64;
+    unsafe { core::arch::asm!("mrs {}, cntfrq_el0", out(reg) frequency) };
+    if frequency >= 1_000_000 {
+        frequency
+    } else {
+        PIXEL6A_GENERIC_TIMER_HZ
+    }
+}
+
+#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full-probe"))]
+pub(super) fn pixel6a_reset_after(seconds: u64) -> ! {
+    let start: u64;
+    unsafe { core::arch::asm!("mrs {}, cntvct_el0", out(reg) start) };
+    let frequency = pixel6a_timer_frequency();
+    let deadline = start.saturating_add(frequency.saturating_mul(seconds));
+    loop {
+        let now: u64;
+        unsafe { core::arch::asm!("mrs {}, cntvct_el0", out(reg) now) };
+        if now >= deadline {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    // Prefer PSCI SYSTEM_RESET2(arch warm), then fall back to SYSTEM_RESET.
+    unsafe {
+        core::arch::asm!(
+            "smc #0",
+            inout("x0") 0xc400_000cu64 => _,
+            inout("x1") 0u64 => _,
+            inout("x2") 0u64 => _,
+            options(nostack)
+        );
+        core::arch::asm!("smc #0", inout("x0") 0x8400_0009u64 => _, options(nostack));
+    }
+    loop {
+        unsafe { core::arch::asm!("wfe", options(nomem, nostack, preserves_flags)) };
+    }
+}
+
+#[cfg(any(
+    feature = "pixel6a-full-probe",
+    feature = "pixel6a-gic-init-probe",
+    feature = "pixel6a-before-kmain-probe",
+    feature = "pixel6a-smp-probe"
+))]
+pub(crate) fn pixel6a_power_off() -> ! {
+    unsafe {
+        core::arch::asm!("smc #0", inout("x0") 0x8400_0008u64 => _, options(nostack));
+    }
+    loop {
+        unsafe { core::arch::asm!("wfe", options(nomem, nostack, preserves_flags)) };
+    }
+}
+
+#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+unsafe fn uefi_console_line(system_table: u64, text: &[u8]) {
+    type OutputString = unsafe extern "efiapi" fn(*mut u8, *const u16) -> usize;
+    const CONSOLE_OUT: u64 = 64;
+    const OUTPUT_STRING: u64 = 32;
+
+    if system_table < 4096 || system_table % 8 != 0 {
+        return;
+    }
+    let conout = ((system_table + CONSOLE_OUT) as *const u64).read();
+    if conout < 4096 || conout % 8 != 0 {
+        return;
+    }
+    let function = ((conout + OUTPUT_STRING) as *const usize).read();
+    if function == 0 || text.len() >= 256 {
+        return;
+    }
+    let output: OutputString = core::mem::transmute(function);
+    let mut wide = [0u16; 256];
+    for (slot, &byte) in wide.iter_mut().zip(text) {
+        *slot = u16::from(byte);
+    }
+    output(conout as *mut u8, wide.as_ptr());
+}
+
+#[cfg(feature = "pixel6a-full")]
+unsafe fn disable_uefi_watchdog(system_table: u64) {
+    const BOOT_SERVICES: u64 = 96;
+    const SET_WATCHDOG_TIMER: u64 = 256;
+    type SetWatchdog = unsafe extern "efiapi" fn(usize, u64, usize, *const u16) -> usize;
+
+    if system_table < 4096 || system_table % 8 != 0 {
+        return;
+    }
+    let services = ((system_table + BOOT_SERVICES) as *const u64).read();
+    if services < 4096 || services % 8 != 0 {
+        return;
+    }
+    let function = ((services + SET_WATCHDOG_TIMER) as *const usize).read();
+    if function != 0 {
+        let set_watchdog: SetWatchdog = core::mem::transmute(function);
+        set_watchdog(0, 0, 0, core::ptr::null());
+    }
+}
 
 // arm64 Linux Image 头。Linux 要求前两条是跳转指令；QEMU 把入口设为
 // RAM 基址 + text_offset（text_offset=0 时按 QEMU 规则落在 +2 MiB），
@@ -68,6 +180,7 @@ _start:
     cbnz x9, 8f
     msr tpidr_el1, xzr
     mov x19, x0
+    mov x20, x1
     mrs x9, CurrentEL
     lsr x9, x9, #2
     cmp x9, #2
@@ -103,6 +216,7 @@ _start:
     mov x10, #{stack}
     add sp, x9, x10
     mov x0, x19
+    mov x1, x20
     bl jsr_aarch64_boot
 8:
     wfe
@@ -129,8 +243,91 @@ fn find_fdt(candidate: u64, mapped_end: u64) -> Option<(u64, Fdt<'static>)> {
     Some((candidate, Fdt::parse(blob).ok()?))
 }
 
+/// Find the runtime FDT through the UEFI configuration table.
+///
+/// Pixel's PE loader enters with the UEFI calling convention (`x0` image
+/// handle, `x1` system table), not the Linux arm64 boot convention where `x0`
+/// holds the DTB. UEFI publishes the device tree as a configuration-table
+/// entry under `EFI_DEVICE_TREE_GUID`.
+#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+fn find_uefi_fdt(system_table: u64, mapped_end: u64) -> Option<(u64, Fdt<'static>)> {
+    const NUMBER_OF_TABLE_ENTRIES: u64 = 104;
+    const CONFIGURATION_TABLE: u64 = 112;
+    const CONFIG_ENTRY_SIZE: u64 = 24;
+    const EFI_DEVICE_TREE_GUID: [u8; 16] = [
+        0xd5, 0xb6, 0x21, 0xb1, 0x9c, 0xf1, 0xa5, 0x41, 0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69,
+        0xaa, 0xe0,
+    ];
+
+    if system_table == 0
+        || system_table % 8 != 0
+        || system_table.checked_add(CONFIGURATION_TABLE + 8)? > mapped_end
+    {
+        return None;
+    }
+    let linear = mmu::PHYS_OFFSET;
+    // SAFETY: the UEFI system table and its configuration table pointer were
+    // range-checked against the early physical linear map. Firmware owns both.
+    let count = unsafe {
+        ((linear + system_table + NUMBER_OF_TABLE_ENTRIES) as *const u32).read()
+    } as u64;
+    if count == 0 || count > 256 {
+        return None;
+    }
+    let table = unsafe {
+        ((linear + system_table + CONFIGURATION_TABLE) as *const u64).read()
+    };
+    if table == 0 || table % 8 != 0 {
+        return None;
+    }
+    for index in 0..count {
+        let entry = table.checked_add(index.checked_mul(CONFIG_ENTRY_SIZE)?)?;
+        if entry.checked_add(CONFIG_ENTRY_SIZE)? > mapped_end {
+            break;
+        }
+        // SAFETY: this entry is inside the range checked immediately above.
+        let guid = unsafe {
+            core::slice::from_raw_parts((linear + entry) as *const u8, 16)
+        };
+        if guid == EFI_DEVICE_TREE_GUID {
+            // SAFETY: same range check; the vendor table pointer is the FDT address.
+            let dtb = unsafe { ((linear + entry + 16) as *const u64).read() };
+            return find_fdt(dtb, mapped_end);
+        }
+    }
+    None
+}
+
 /// 由已校验的设备树摘要配置串口、中断控制器与定时器；缺少任一必需设备返回其名字。
 fn configure_devices(fdt: &Fdt<'_>, summary: &BootSummary<'_>) -> Result<(), &'static str> {
+    #[cfg(feature = "pixel6a-smoke")]
+    {
+        let _ = (fdt, summary);
+        samsung_uart::set_base(mmu::PHYS_OFFSET + 0x10a0_0000);
+        samsung_uart::init();
+        return Ok(());
+    }
+    #[cfg(feature = "pixel6a-full")]
+    {
+        samsung_uart::set_base(mmu::PHYS_OFFSET + 0x10a0_0000);
+        samsung_uart::init();
+        let gic = summary.gic.ok_or("interrupt controller")?;
+        let redist = gic.redist.ok_or("gic redistributor reg")?;
+        gic::set_bases(
+            mmu::PHYS_OFFSET + gic.dist,
+            if gic.v3 { 0 } else { mmu::PHYS_OFFSET + gic.cpu.ok_or("gic cpu interface reg")? },
+            if gic.v3 { mmu::PHYS_OFFSET + redist } else { 0 },
+            gic.redist_size,
+            gic.redist_stride,
+        );
+        let ppi = summary.timer_irq.ok_or("arm,armv8-timer interrupts")?;
+        timer::set_interrupt(ppi);
+        devirq::set_ids(None, None);
+        smp::configure(fdt);
+        return Ok(());
+    }
+    #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
+    {
     let serial = summary.serial.ok_or("arm,pl011")?;
     uart::set_base(mmu::PHYS_OFFSET + serial.base);
     uart::init();
@@ -142,13 +339,20 @@ fn configure_devices(fdt: &Fdt<'_>, summary: &BootSummary<'_>) -> Result<(), &'s
     let rtc = fdt.find_compatible("arm,pl031").ok().flatten();
     devirq::set_ids(serial.irq, rtc.as_ref().and_then(spi));
 
-    let gic = summary.gic.ok_or("arm,gic-v2")?;
-    if gic.v3 {
-        // 本内核当前实现 GICv2；GICv3 的 redistributor / SGI 框架尚未落地，不能假装可用。
-        return Err("arm,gic-v3 (not implemented)");
-    }
-    let cpu = gic.cpu.ok_or("gic cpu interface reg")?;
-    gic::set_bases(mmu::PHYS_OFFSET + gic.dist, mmu::PHYS_OFFSET + cpu);
+    let gic = summary.gic.ok_or("interrupt controller")?;
+    let cpu = if gic.v3 { 0 } else { gic.cpu.ok_or("gic cpu interface reg")? };
+    let redist = if gic.v3 {
+        gic.redist.ok_or("gic redistributor reg")?
+    } else {
+        0
+    };
+    gic::set_bases(
+        mmu::PHYS_OFFSET + gic.dist,
+        if gic.v3 { 0 } else { mmu::PHYS_OFFSET + cpu },
+        if gic.v3 { mmu::PHYS_OFFSET + redist } else { 0 },
+        gic.redist_size,
+        gic.redist_stride,
+    );
 
     // 定时器节点的 interrupts：四组 (类型, 编号, 标志)，第三组为虚拟定时器；私有中断号 = 编号 + 16。
     let ppi = summary.timer_irq.ok_or("arm,armv8-timer interrupts")?;
@@ -156,6 +360,7 @@ fn configure_devices(fdt: &Fdt<'_>, summary: &BootSummary<'_>) -> Result<(), &'s
     // 处理器拓扑与 PSCI 调用途径（缺失时只用引导处理器，不算启动失败）
     smp::configure(fdt);
     Ok(())
+    }
 }
 
 /// 把设备树里的 bootargs 打印成一行：只显示可打印 ASCII，过长截断，控制字符替换为 `.`。
@@ -229,6 +434,21 @@ fn print_dtb_summary(
     }
 
     match summary.gic {
+        Some(gic) if gic.v3 => match gic.redist {
+            Some(redist) => crate::kprintln!(
+                "[JSR-DTB] gic=compatible={} kind=v3 dist=0x{:x} redist=0x{:x}+0x{:x} stride=0x{:x}",
+                gic.compatible,
+                gic.dist,
+                redist,
+                gic.redist_size,
+                gic.redist_stride
+            ),
+            None => crate::kprintln!(
+                "[JSR-DTB] gic=compatible={} kind=v3 dist=0x{:x} redist=none",
+                gic.compatible,
+                gic.dist
+            ),
+        },
         Some(gic) => match gic.cpu {
             Some(cpu) => crate::kprintln!(
                 "[JSR-DTB] gic=compatible={} kind={} dist=0x{:x} cpu=0x{:x}",
@@ -336,7 +556,20 @@ fn framebuffer_of(fb: &kernel_core::fdt::FramebufferInfo) -> FrameBufferInfo {
 
 /// 汇编入口之后的第一段 Rust 代码（MMU 关闭、启动栈、单执行流）。
 #[no_mangle]
-extern "C" fn jsr_aarch64_boot(dtb_hint: u64) -> ! {
+extern "C" fn jsr_aarch64_boot(dtb_hint: u64, uefi_system_table: u64) -> ! {
+    #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+    unsafe {
+        uefi_console_line(
+            uefi_system_table,
+            b"[JSR-PIXEL6A] Jasper-OS code entered\r\n",
+        );
+    }
+
+    #[cfg(feature = "pixel6a-full")]
+    unsafe {
+        disable_uefi_watchdog(uefi_system_table);
+    }
+
     // 头校验必须在 MMU 打开前完成：此时映像仍按恒等映射可读，且不会执行任何依赖
     // 未校验头部字段的代码。解析是纯函数，不读头之外的字节。
     let header_probe = {
@@ -353,12 +586,41 @@ extern "C" fn jsr_aarch64_boot(dtb_hint: u64) -> ! {
         }
         mmu::enable();
     }
+
+    #[cfg(feature = "pixel6a-entry-probe")]
+    {
+        samsung_uart::set_base(mmu::PHYS_OFFSET + 0x10a0_0000);
+        samsung_uart::init();
+        crate::kprintln!("[JSR-PIXEL6A] entry=reached stage=after-mmu");
+        pixel6a_reset_after(3);
+    }
+
     let early_end = mmu::cover_phys(0);
-    let Some((dtb_pa, fdt)) = find_fdt(dtb_hint, early_end).or_else(|| find_fdt(QEMU_VIRT_DTB, early_end)) else {
+    let runtime_fdt = {
+        #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+        {
+            find_uefi_fdt(uefi_system_table, early_end)
+        }
+        #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
+        {
+            let _ = uefi_system_table;
+            None
+        }
+    };
+    let Some((dtb_pa, fdt)) = runtime_fdt
+        .or_else(|| find_fdt(dtb_hint, early_end))
+        .or_else(|| find_fdt(QEMU_VIRT_DTB, early_end))
+    else {
         semihost::exit(EXIT_FAILURE)
     };
 
     // 先只取串口基址，让「头/树被拒绝」也能打印结构化原因；完整设备配置在摘要之后。
+    #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+    {
+        samsung_uart::set_base(mmu::PHYS_OFFSET + 0x10a0_0000);
+        samsung_uart::init();
+    }
+    #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
     if let Ok(Some(node)) = fdt.find_compatible("arm,pl011") {
         if let Some((base, _)) = node.reg(0) {
             uart::set_base(mmu::PHYS_OFFSET + base);
@@ -410,11 +672,26 @@ extern "C" fn jsr_aarch64_boot(dtb_hint: u64) -> ! {
         spec.push_region(PhysRegion { start: base, end, kind: RegionKind::Usable });
     });
 
+    print_dtb_summary(&fdt, &summary, &memory, memory_count, memory_truncated);
+
+    #[cfg(feature = "pixel6a-before-kmain-probe")]
+    pixel6a_power_off();
+
     if let Err(missing) = configure_devices(&fdt, &summary) {
         crate::kprintln!("[JSR-BOOT] device tree lacks {}", missing);
         semihost::exit(EXIT_FAILURE);
     }
-    print_dtb_summary(&fdt, &summary, &memory, memory_count, memory_truncated);
+
+    #[cfg(feature = "pixel6a-smoke")]
+    {
+        crate::kprintln!(
+            "[JSR-PIXEL6A] smoke=entered dtb=0x{:x} memory_regions={}",
+            dtb_pa,
+            memory_count
+        );
+        crate::kprintln!("[JSR-PIXEL6A] probe=complete action=psci-reset");
+        pixel6a_reset_after(3);
+    }
 
     let covered = mmu::cover_phys(ram_end);
     // 保留：内核映像、设备树本身、设备树声明的固件保留区（分配器按「保留优先」处理重叠）

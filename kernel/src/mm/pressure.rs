@@ -64,9 +64,10 @@ pub fn reset_stats() {
 
 // One bounded global publisher, lazy initialized; independent of creating Process.
 // Frame/pressure locks only set a dirty bit. Object delivery runs after those locks.
-use core::sync::atomic::{AtomicBool,AtomicU64,Ordering};
+use core::sync::atomic::{AtomicBool,Ordering};
+use crate::sync::IrqU64;
 use kernel_core::objtable::ObjId;
-static EVENT_SOURCE:AtomicU64=AtomicU64::new(0);
+static EVENT_SOURCE:IrqU64=IrqU64::new(0);
 static EVENT_DIRTY:AtomicBool=AtomicBool::new(false);
 static EVENT_EXHAUSTED:AtomicBool=AtomicBool::new(false);
 fn event_value()->u64 {match level() {PressureLevel::Normal=>0,PressureLevel::Low=>1,PressureLevel::Critical=>2}}

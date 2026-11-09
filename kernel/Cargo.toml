@@ -41,6 +41,33 @@ shm1-verify = ["user-programs", "fault-inject"]
 hwv1-verify = []
 # Dedicated Intel VMX VMCS/VM-Entry/VM-Exit drill; requires nested Intel VMX.
 hwv2-verify = []
+# Dedicated AMD SVM VMCB/NPT/VM-Exit drill. On non-AMD hosts this verifies the
+# fail-closed VMCB contract and explicitly reports hardware=false.
+hwv3-verify = []
+# Dedicated HWV-4 first checkpoint: VM exits through a real Ring, cancel and
+# single-terminal checks, plus the virtual PIC/IOAPIC/PIT contract.
+hwv4-verify = []
+# Embed a real x86_64 Linux kernel for the HWV-4 minimal-guest acceptance.
+# The artifacts are supplied by JSR_LINUX_GUEST_HEADER and
+# JSR_LINUX_GUEST_KERNEL and are intentionally not checked into the repo.
+hwv4-linux = ["hwv4-verify"]
+# HWV-5 guest-facing virtio-MMIO devices and minimal Linux acceptance.
+hwv5-verify = ["hwv4-linux"]
+# JASO-1 multi-image and source-envelope acceptance only.
+jaso1-verify = []
+# DRV-3 DMA mapping lifecycle drill.
+drv3-verify = []
+# Dedicated PEX-0 workload: existing low/medium/high drills plus parallel
+# multi-process, multi-Ring throughput measurements.
+pex0-verify = ["user-programs"]
+# Dedicated SEC-1 identity and metadata substrate.
+sec1-verify = ["kernel-core/sec1-verify"]
+# Dedicated USI-1 CLI/structured service acceptance.
+usi1-verify = ["user-programs"]
+# BLK-1 real virtio-blk persistence and lifecycle drill.
+blk1-verify = []
+# Dedicated MOD-1 contract: assembly ordering, publication and runtime stop/health.
+mod1-verify = []
 # Author: chatgpt. Optional diagnostic counters; absent from default builds.
 krn2-observe = []
 # Author: chatgpt. Dedicated event-wait mechanism guest, not enabled in production.
@@ -67,6 +94,15 @@ bm1-hang = ["bm1-vm"]
 default = ["user-programs"]
 # 生产启动（issue #7）：只执行全局阶段和第一个用户程序，然后等待服务，不退出模拟器。不能和验收特性同开。
 production = []
+# Pixel 6a (Google Tensor GS101) early-boot probe: Samsung UART only, no scheduler/IRQ start.
+pixel6a-smoke = []
+pixel6a-entry-probe = ["pixel6a-smoke"]
+pixel6a-pe = []
+pixel6a-full = []
+pixel6a-full-probe = ["pixel6a-full"]
+pixel6a-gic-init-probe = ["pixel6a-full"]
+pixel6a-before-kmain-probe = ["pixel6a-full"]
+pixel6a-smp-probe = ["pixel6a-full"]
 # 构建期配置档：默认 standard；启用本特性得到 compact（参数见 kernel-core 的 config 模块）。
 profile-compact = []
 # 构建期调度策略：默认分时策略；启用本特性改用纯轮转（不分级、固定时间片）。

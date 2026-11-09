@@ -136,6 +136,35 @@ impl LockedU64 {
     pub fn compare_exchange_weak(&self, cur: u64, new: u64, s: Ordering, f: Ordering) -> Result<u64, u64> {
         self.compare_exchange(cur, new, s, f)
     }
+
+    /// Atomically replace the value when `f` returns `Some`; return the old
+    /// value on success or the unchanged value when `f` returns `None`.
+    pub fn try_update(
+        &self,
+        _success: Ordering,
+        _failure: Ordering,
+        mut f: impl FnMut(u64) -> Option<u64>,
+    ) -> Result<u64, u64> {
+        let mut guard = self.v.lock();
+        let old = *guard;
+        match f(old) {
+            Some(new) => {
+                *guard = new;
+                Ok(old)
+            }
+            None => Err(old),
+        }
+    }
+
+    /// Atomically keep the smaller of the current value and `x`.
+    pub fn fetch_min(&self, x: u64, _o: Ordering) -> u64 {
+        let mut guard = self.v.lock();
+        let old = *guard;
+        if x < old {
+            *guard = x;
+        }
+        old
+    }
 }
 
 /// 中断屏蔽策略：关闭本处理器的中断并返回之前是否开着、按返回值恢复。由内核按指令集提供（本 crate 不碰硬件）。
@@ -194,6 +223,36 @@ impl<M: IrqMask> IrqLockedU64<M> {
     pub fn swap(&self, x: u64, _o: Ordering) -> u64 {
         self.with(|v| core::mem::replace(v, x))
     }
+
+    /// Atomically replace the value when `f` returns `Some`.
+    pub fn try_update(
+        &self,
+        _success: Ordering,
+        _failure: Ordering,
+        mut f: impl FnMut(u64) -> Option<u64>,
+    ) -> Result<u64, u64> {
+        self.with(|value| {
+            let old = *value;
+            match f(old) {
+                Some(new) => {
+                    *value = new;
+                    Ok(old)
+                }
+                None => Err(old),
+            }
+        })
+    }
+
+    /// Atomically keep the smaller of the current value and `x`.
+    pub fn fetch_min(&self, x: u64, _o: Ordering) -> u64 {
+        self.with(|value| {
+            let old = *value;
+            if x < old {
+                *value = x;
+            }
+            old
+        })
+    }
 }
 
 /// 中断安全的 64 位单元（见模块文档）：有 64 位原子指令时为硬件原子，否则为 [`IrqLockedU64`]。
@@ -243,6 +302,33 @@ impl<M: IrqMask> NativeU64<M> {
     pub fn swap(&self, x: u64, o: Ordering) -> u64 {
         self.v.swap(x, o)
     }
+
+    /// Atomically replace the value when `f` returns `Some`.
+    pub fn try_update(
+        &self,
+        success: Ordering,
+        failure: Ordering,
+        mut f: impl FnMut(u64) -> Option<u64>,
+    ) -> Result<u64, u64> {
+        let mut current = self.load(failure);
+        loop {
+            let Some(new) = f(current) else {
+                return Err(current);
+            };
+            match self
+                .v
+                .compare_exchange_weak(current, new, success, failure)
+            {
+                Ok(_) => return Ok(current),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Atomically keep the smaller of the current value and `x`.
+    pub fn fetch_min(&self, x: u64, o: Ordering) -> u64 {
+        self.v.fetch_min(x, o)
+    }
 }
 
 /// 本目标使用的 64 位原子单元（见模块文档）。
@@ -267,6 +353,18 @@ mod tests {
         assert_eq!(a.compare_exchange_weak(0, 5, Ordering::AcqRel, Ordering::Relaxed), Ok(0));
         a.store(9, Ordering::Relaxed);
         assert_eq!(a.load(Ordering::Relaxed), 9);
+        assert_eq!(
+            a.try_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                (v < 9).then_some(v + 1)
+            }),
+            Err(9)
+        );
+        assert_eq!(
+            a.try_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v + 1)),
+            Ok(9)
+        );
+        assert_eq!(a.fetch_min(4, Ordering::Relaxed), 10);
+        assert_eq!(a.load(Ordering::Relaxed), 4);
         // 多线程下 fetch_add 不丢更新
         use std::sync::Arc;
         let c = Arc::new(LockedU64::new(0));
@@ -358,7 +456,15 @@ mod tests {
         assert_eq!(n.fetch_max(5, Ordering::Relaxed), u64::MAX);
         n.store(7, Ordering::Relaxed);
         assert_eq!(n.load(Ordering::Relaxed), 7);
-        assert_eq!(n.swap(0, Ordering::Relaxed), 7);
+        assert_eq!(
+            n.try_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                (v < 8).then_some(v + 1)
+            }),
+            Ok(7)
+        );
+        assert_eq!(n.fetch_min(2, Ordering::Relaxed), 8);
+        assert_eq!(n.load(Ordering::Relaxed), 2);
+        assert_eq!(n.swap(0, Ordering::Relaxed), 2);
         assert_eq!(n.load(Ordering::Relaxed), 0);
         // 无 64 位原子目标上的实现：语义相同
         let l: IrqLockedU64<MockMask> = IrqLockedU64::new(9);

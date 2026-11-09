@@ -91,7 +91,7 @@
 38	op	system.memory.buffer.destroy	1	write	内存·注销缓冲区（预留）	Unregister memory buffer reserved
 39	op	system.execution.restricted.create	1	write	执行·创建受限执行（预留）	Create restricted execution reserved
 40	op	system.task.interrupt.send	1	write	任务·投递异步中断（预留）	Send task interrupt reserved
-41	op	system.memory.dma.map	1	write	内存·建立 IOVA 映射（预留）	Map memory through IOVA reserved
+41	op	system.memory.dma.map	1	write	内存·建立设备 DMA 映射	Map memory for device DMA
 42	op	system.io.segment.submit	1	write	输入输出·提交分段请求（预留）	Submit segmented IO reserved
 43	op	system.task.syscalls.set	3	write	任务·设置系统调用能力集合	Set task syscall capability set
 
@@ -121,8 +121,15 @@
 67	op	system.time.timer.cancel	1	write	时间·取消定时器	Cancel timer
 68	op	system.time.timer.wait	1	write	时间·等待定时器	Wait for timer
 69	op	system.time.timer.get	1	read	时间·查询定时器剩余时间	Get timer remaining time
+70	op	system.info.get	1	read	信息·系统概览	Get system information
+71	op	system.process.list	1	read	进程·结构化列举	List processes
+72	op	system.module.list	1	read	模块·结构化列举	List modules
+73	op	system.module.lifecycle.get	1	read	模块·查询生命周期	Get module lifecycle
 4135	error	system.error.abi_mismatch	1	none	ABI 世代不兼容	ABI generation mismatch
 4136	error	system.error.abi_metadata	1	none	ABI 元数据缺失或损坏	ABI metadata missing or malformed
 4137	error	system.sync.error.busy	1	none	同步·互斥对象已被其他任务持有	Inherited mutex already held
 4138	error	system.error.abi_capability	1	none	程序所需系统能力不可用	Required system capability unavailable
 4139	error	system.time.error.busy	1	none	时间·定时器已有等待者	Timer already has a waiter
+4140	error	system.usi.error.buffer_too_small	1	none	USI·缓冲区不足	USI buffer too small
+4141	error	system.usi.error.schema	1	none	USI·Schema 或版本不支持	Unsupported USI schema or version
+4142	error	system.usi.error.request_id	1	none	USI·请求标识非法	Invalid USI request identifier

@@ -54,6 +54,8 @@ pub enum Kind {
     Timer,
     /// 硬件虚拟化 vCPU；固定 Memory 对象，不携带句柄。
     Vcpu,
+    /// DMA mapping; strongly references its Memory and Device objects.
+    DmaMapping,
     /// 共享内存页存储。
     Memory,
     /// 事件。
@@ -64,7 +66,7 @@ pub enum Kind {
 
 impl Kind {
     /// 种类数。
-    pub const COUNT: usize = 14;
+    pub const COUNT: usize = 15;
     /// 全部种类（按声明顺序）。
     pub const ALL: [Kind; Kind::COUNT] = [
         Kind::Process,
@@ -78,6 +80,7 @@ impl Kind {
         Kind::Mutex,
         Kind::Timer,
         Kind::Vcpu,
+        Kind::DmaMapping,
         Kind::Memory,
         Kind::Event,
         Kind::Device,
@@ -366,6 +369,20 @@ pub const REGISTRY: [Contract; Kind::COUNT] = [
         destroy: Destroy::None,
         destroy_locks: DestroyLocks::None,
         strong: &[Kind::Memory],
+        tree_self: false,
+        carries: Carry::Nothing,
+    },
+    Contract {
+        kind: Kind::DmaMapping,
+        name: "DmaMapping",
+        handle: Some(ObjectType::DmaMapping),
+        rights: Rights::READ.union(Rights::CONTROL).union(Rights::DUPLICATE),
+        transferable: false,
+        closing: Closing::InLock,
+        closing_locks: ClosingLocks::ObjectTable,
+        destroy: Destroy::None,
+        destroy_locks: DestroyLocks::None,
+        strong: &[Kind::Memory, Kind::Device],
         tree_self: false,
         carries: Carry::Nothing,
     },

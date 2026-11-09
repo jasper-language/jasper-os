@@ -36,6 +36,7 @@ pub mod migrate;
 pub mod pack;
 pub mod placement;
 pub mod platform;
+pub mod source;
 pub mod trust;
 #[cfg(feature = "pack")]
 pub mod vectors;
@@ -1195,6 +1196,9 @@ impl<'a> Jaso<'a> {
                 None if e.critical => return Err(JasoError::ExtensionCritical),
                 None => {}
             }
+            if e.name == EXT_JASPER_SOURCE && e.version == 1 {
+                source::parse(e.content).map_err(|_| JasoError::ExtensionMalformed)?;
+            }
         }
         if self.kind == ModuleKind::Hybrid && self.extension(EXT_JASPER_IMPORT, 1).is_none() {
             return Err(JasoError::ExtensionRequired);
@@ -1278,6 +1282,12 @@ impl<'a> Jaso<'a> {
     /// 按名字与版本查扩展段。
     pub fn extension(&self, name: &str, version: u32) -> Option<Extension<'a>> {
         self.extensions().find(|e| e.name == name && e.version == version)
+    }
+
+    /// Parsed `jasper.source` v1 envelope, when present.
+    pub fn source_v1(&self) -> Option<source::SourceV1<'a>> {
+        let extension = self.extension(EXT_JASPER_SOURCE, 1)?;
+        source::parse(extension.content).ok()
     }
 
     /// 签名段（没有签名时为 `None`）。

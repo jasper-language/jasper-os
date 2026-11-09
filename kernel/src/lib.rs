@@ -49,6 +49,8 @@ pub mod fault_inject;
 pub mod fix_demo;
 pub mod console;
 pub mod counter_demo;
+pub mod dma;
+pub mod drv3_demo;
 #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
 pub mod device_demo;
 pub mod interrupt;
@@ -107,14 +109,25 @@ pub mod qos_demo;
 pub mod overload_demo;
 #[cfg(feature = "user-programs")]
 pub mod bench_demo;
+#[cfg(target_arch = "x86_64")]
+pub mod blk;
+#[cfg(target_arch = "x86_64")]
+pub mod blk1_demo;
+#[cfg(feature = "pex0-verify")]
+pub mod pex0_demo;
 pub mod balance_demo;
 pub mod pi_demo;
 pub mod sched;
+pub mod security;
+#[cfg(feature = "sec1-verify")]
+pub mod sec1_demo;
 pub mod shard;
 pub mod smp;
 pub mod sync;
 pub mod syscall;
 pub mod task;
+pub mod usi;
+pub mod usi1_demo;
 pub mod user_demo;
 #[cfg(target_arch = "x86_64")]
 pub use arch::hwvirt_demo;
@@ -122,6 +135,12 @@ pub use arch::hwvirt_demo;
 pub mod hwv1_demo;
 #[cfg(target_arch = "x86_64")]
 pub use arch::hwv2_demo;
+#[cfg(target_arch = "x86_64")]
+pub use arch::hwv3_demo;
+#[cfg(target_arch = "x86_64")]
+pub use arch::hwv4_demo;
+#[cfg(all(target_arch = "x86_64", feature = "hwv5-verify"))]
+pub use arch::hwv5_demo;
 #[cfg(feature = "rt3-verify")]
 pub mod rt3_demo;
 pub mod virtio;

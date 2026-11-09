@@ -236,7 +236,13 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         }),
         // SMP-1：启动其他处理器。部分处理器没上线不算失败，结果由 `StartReport` 报告。
         Stage::Smp => stage(ctx, s, |ctx| {
-            ctx.smp = Some(smp::start_secondaries(TIMER_HZ));
+            let report = smp::start_secondaries(TIMER_HZ);
+            #[cfg(feature = "pixel6a-smp-probe")]
+            if report.present == 8 && report.online == 8 && report.failed == 0 {
+                kprintln!("[JSR-PIXEL6A] smp=8 online=8 action=psci-off");
+                crate::arch::aarch64::boot::pixel6a_power_off();
+            }
+            ctx.smp = Some(report);
             Some(())
         }),
         // 没有高精度时钟源时退回 tick，不算失败。

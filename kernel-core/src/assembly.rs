@@ -118,6 +118,10 @@ pub type Deactivate = fn();
 pub struct Binding {
     /// 对应 [`ModuleDecl::name`]。
     pub module: &'static str,
+    /// 本实现声明的 `major.minor.patch` 版本。
+    pub version: &'static str,
+    /// 不能与这些模块同时装配的模块名。
+    pub conflicts: &'static [&'static str],
     /// 激活函数。
     pub activate: Activate,
     /// 停用函数；`None` = 启动期常驻服务，不可停用。
@@ -144,6 +148,10 @@ pub enum AssemblyError {
     MissingBinding(&'static str),
     /// 同一模块有多条绑定。
     DuplicateBinding(&'static str),
+    /// 绑定版本不是规范的 `major.minor.patch`。
+    InvalidVersion(&'static str),
+    /// 两个已选模块声明互相冲突。
+    Conflict(&'static str, &'static str),
     /// 依赖成环（报告环上第一个按声明顺序的模块）。
     DependencyCycle(&'static str),
     /// 已经启动过。
@@ -174,6 +182,8 @@ impl AssemblyError {
             AssemblyError::TooManyModules => "system.module.error.table_full",
             AssemblyError::MissingBinding(_) => "system.module.error.missing_binding",
             AssemblyError::DuplicateBinding(_) => "system.module.error.duplicate_binding",
+            AssemblyError::InvalidVersion(_) => "system.module.error.invalid_version",
+            AssemblyError::Conflict(_, _) => "system.module.error.conflict",
             AssemblyError::DependencyCycle(_) => "system.module.error.dependency_cycle",
             AssemblyError::AlreadyStarted => "system.module.error.already_started",
             AssemblyError::NotStarted => "system.module.error.not_started",
@@ -334,6 +344,17 @@ impl Assembly {
                 found = Some(*b);
             }
             a.bindings[i] = Some(found.ok_or(AssemblyError::MissingBinding(m.name))?);
+        }
+        for i in 0..count {
+            let binding = a.bindings[i].expect("binding slot below count is filled");
+            if !valid_module_version(binding.version) {
+                return Err(AssemblyError::InvalidVersion(binding.module));
+            }
+            for conflict in binding.conflicts {
+                if (0..count).any(|j| j != i && a.module(j).name == *conflict) {
+                    return Err(AssemblyError::Conflict(binding.module, conflict));
+                }
+            }
         }
         // resolve 已保证每项所需能力恰好有一个提供者，且模块不依赖自己提供的能力。
         for i in 0..count {
@@ -564,6 +585,14 @@ impl Assembly {
         (0..self.count).find(|&i| self.module(i).name == name).map(|i| self.health[i])
     }
 
+    /// 已绑定实现版本。
+    pub fn version(&self, name: &str) -> Option<&'static str> {
+        (0..self.count)
+            .find(|&i| self.module(i).name == name)
+            .and_then(|i| self.bindings[i])
+            .map(|binding| binding.version)
+    }
+
     /// 模块及其传递依赖的生效健康状态。
     /// Effective health over one module and its transitive dependencies.
     pub fn effective_health(&self, name: &str) -> Option<Health> {
@@ -677,6 +706,20 @@ pub fn mask_has(declared: &ResolvedProfile, mask: u32, cap: &str) -> bool {
     declared.capabilities().iter().position(|c| *c == cap).is_some_and(|b| b < 32 && mask & (1 << b) != 0)
 }
 
+/// Validate the stable module version form without allocation.
+pub fn valid_module_version(version: &str) -> bool {
+    let mut parts = version.split('.');
+    for _ in 0..3 {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+    }
+    parts.next().is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -763,7 +806,13 @@ mod tests {
     }
 
     const fn b(module: &'static str, activate: Activate, deactivate: Option<Deactivate>) -> Binding {
-        Binding { module, activate, deactivate }
+        Binding {
+            module,
+            version: "1.0.0",
+            conflicts: &[],
+            activate,
+            deactivate,
+        }
     }
 
     #[test]
@@ -863,6 +912,46 @@ mod tests {
         let mut a = Assembly::new(&T_PROFILE, &dup[..4]).unwrap();
         assert_eq!(a.stop("top"), Err(AssemblyError::NotStarted));
         assert_eq!(AssemblyError::DependencyCycle("").name(), "system.module.error.dependency_cycle");
+        take("a:");
+    }
+
+    #[test]
+    fn module_identity_version_and_conflicts_are_failure_atomic() {
+        let mut bad_version = [
+            b("top", ok_top, None),
+            b("mid", ok_mid, None),
+            b("base", ok_base, None),
+            b("side", ok_side, None),
+        ];
+        bad_version[2].version = "1.0";
+        assert_eq!(
+            Assembly::new(&T_PROFILE, &bad_version).err(),
+            Some(AssemblyError::InvalidVersion("base"))
+        );
+
+        let mut conflict = [
+            b("top", ok_top, None),
+            b("mid", ok_mid, None),
+            b("base", ok_base, None),
+            b("side", ok_side, None),
+        ];
+        conflict[3].conflicts = &["base"];
+        assert_eq!(
+            Assembly::new(&T_PROFILE, &conflict).err(),
+            Some(AssemblyError::Conflict("side", "base"))
+        );
+
+        let good = [
+            b("top", ok_top, None),
+            b("mid", ok_mid, None),
+            b("base", ok_base, None),
+            b("side", ok_side, None),
+        ];
+        let assembly = Assembly::new(&T_PROFILE, &good).unwrap();
+        assert_eq!(assembly.version("mid"), Some("1.0.0"));
+        assert!(valid_module_version("0.0.0"));
+        assert!(!valid_module_version("1.2.3.4"));
+        assert!(!valid_module_version("1..3"));
         take("a:");
     }
 
@@ -1055,9 +1144,9 @@ mod proofs {
     fn published_mask_never_reports_unready() {
         let pick = |x: bool| -> Activate { if x { ok } else { bad } };
         let binds = [
-            Binding { module: "c", activate: pick(kani::any()), deactivate: None },
-            Binding { module: "b", activate: pick(kani::any()), deactivate: None },
-            Binding { module: "a", activate: pick(kani::any()), deactivate: None },
+            Binding { module: "c", version: "1.0.0", conflicts: &[], activate: pick(kani::any()), deactivate: None },
+            Binding { module: "b", version: "1.0.0", conflicts: &[], activate: pick(kani::any()), deactivate: None },
+            Binding { module: "a", version: "1.0.0", conflicts: &[], activate: pick(kani::any()), deactivate: None },
         ];
         let all_or_nothing: bool = kani::any();
         let policy = if all_or_nothing { Policy::AllOrNothing } else { Policy::Partial };
@@ -1078,9 +1167,9 @@ mod proofs {
     #[kani::unwind(10)]
     fn audit_rejects_any_divergent_mask() {
         let binds = [
-            Binding { module: "c", activate: ok, deactivate: None },
-            Binding { module: "b", activate: bad, deactivate: None },
-            Binding { module: "a", activate: ok, deactivate: None },
+            Binding { module: "c", version: "1.0.0", conflicts: &[], activate: ok, deactivate: None },
+            Binding { module: "b", version: "1.0.0", conflicts: &[], activate: bad, deactivate: None },
+            Binding { module: "a", version: "1.0.0", conflicts: &[], activate: ok, deactivate: None },
         ];
         let mut a = Assembly::new(&K_PROFILE, &binds).unwrap();
         a.start(Policy::Partial).unwrap();
@@ -1096,9 +1185,9 @@ mod proofs {
     #[kani::unwind(10)]
     fn health_changes_never_publish_unavailable_service() {
         let binds = [
-            Binding { module: "c", activate: ok, deactivate: None },
-            Binding { module: "b", activate: ok, deactivate: None },
-            Binding { module: "a", activate: ok, deactivate: None },
+            Binding { module: "c", version: "1.0.0", conflicts: &[], activate: ok, deactivate: None },
+            Binding { module: "b", version: "1.0.0", conflicts: &[], activate: ok, deactivate: None },
+            Binding { module: "a", version: "1.0.0", conflicts: &[], activate: ok, deactivate: None },
         ];
         let mut a = Assembly::new(&K_PROFILE, &binds).unwrap();
         a.start(Policy::AllOrNothing).unwrap();

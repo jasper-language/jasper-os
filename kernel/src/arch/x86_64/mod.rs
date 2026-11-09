@@ -28,6 +28,12 @@ mod apic;
 mod context;
 pub mod hwvirt_demo;
 pub mod hwv2_demo;
+pub mod hwv3_demo;
+pub mod hwv4_demo;
+#[cfg(feature = "hwv4-linux")]
+pub mod linux_guest;
+#[cfg(feature = "hwv5-verify")]
+pub mod hwv5_demo;
 mod paging;
 mod gdt;
 mod idt;
@@ -37,6 +43,8 @@ mod pci;
 mod pic;
 mod pit;
 pub mod second_level;
+pub mod svm;
+pub mod virtual_interrupt;
 mod space;
 mod syscall;
 mod port;

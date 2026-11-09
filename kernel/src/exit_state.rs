@@ -36,7 +36,26 @@ fn es_mut(t: &mut Table, id: ObjId) -> Option<&mut ExitState> {
 
 /// 新建一个退出状态（锁内），初始由所属对象持有一个内部引用。
 pub(crate) fn create_in(t: &mut Table) -> Option<ObjId> {
-    t.insert(KObject::ExitState(ExitState { code: None, source:None, waiters: Vec::new() }), 0, 1).ok()
+    create_in_with_security(t, kernel_core::security::SecuritySeed::legacy())
+}
+
+/// 新建带显式 SEC-1 元数据的退出状态（锁内）。运行期对象使用 active
+/// identity；宿主测试可用 legacy 形式而不依赖内核级 boot-id 提供者。
+pub(crate) fn create_in_with_security(
+    t: &mut Table,
+    security: kernel_core::security::SecuritySeed,
+) -> Option<ObjId> {
+    t.insert_with_security(
+        KObject::ExitState(ExitState {
+            code: None,
+            source: None,
+            waiters: Vec::new(),
+        }),
+        0,
+        1,
+        security,
+    )
+    .ok()
 }
 
 /// 已退出则返回退出码。

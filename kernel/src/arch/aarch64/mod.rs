@@ -21,13 +21,15 @@
 //! 与 Core 的回调方向：中断入口调用 `crate::irq::on_hardware_irq`，系统调用入口调用 `crate::syscall::on_syscall`，
 //! 用户故障调用 `crate::fault::on_user_fault`（均在 `vectors.rs`）；引导适配层调用 `crate::kmain::start`。
 
-mod boot;
+pub(crate) mod boot;
 mod context;
 mod cpu;
 mod devirq;
 mod gic;
 mod mmu;
 mod paging;
+#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+mod samsung_uart;
 mod semihost;
 mod smp;
 pub(crate) use smp::tlb_flush_all_local as flush_all_local_tlb;
@@ -76,6 +78,9 @@ impl Platform for Aarch64 {
     const INVALID_VA: u64 = 0x0000_8000_0000_0000;
 
     fn console_init() {
+        #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+        samsung_uart::init();
+        #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
         uart::init();
     }
 
@@ -90,6 +95,8 @@ impl Platform for Aarch64 {
             crate::console::write_str("[JSR-IRQ] interrupt controller or timer interrupt unavailable\n");
             Self::exit_emulator(ExitStatus::Failure);
         }
+        #[cfg(feature = "pixel6a-gic-init-probe")]
+        boot::pixel6a_power_off();
         devirq::configure();
         timer::init(timer_hz);
     }
@@ -103,6 +110,9 @@ impl Platform for Aarch64 {
     }
 
     fn console_write_byte(byte: u8) {
+        #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+        samsung_uart::write_byte(byte);
+        #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
         uart::write_byte(byte);
     }
 

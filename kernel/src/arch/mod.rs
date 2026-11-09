@@ -30,6 +30,12 @@ pub use self::x86_64::second_level;
 pub use self::x86_64::hwvirt_demo;
 #[cfg(target_arch = "x86_64")]
 pub use self::x86_64::hwv2_demo;
+#[cfg(target_arch = "x86_64")]
+pub use self::x86_64::hwv3_demo;
+#[cfg(target_arch = "x86_64")]
+pub use self::x86_64::hwv4_demo;
+#[cfg(feature = "hwv5-verify")]
+pub use self::x86_64::hwv5_demo;
 
 /// Hardware second-level paging is only defined for the x86 VMX/SVM
 /// backends in HWV-1. Other targets compile the vCPU object contract but

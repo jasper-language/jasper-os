@@ -1,7 +1,8 @@
 //! 构建 `.jaso` 文件（format 1）：按格式写出各段、（可选）以发布者密钥签名、计算完整性摘要，最后用解析器自检一遍。
 //! Builds (and optionally signs) a format 1 `.jaso` file and validates the result with the parser.
 //!
-//! beta 的写入方每个文件只产出**一个**镜像（读取方须接受至多 8 个）。
+//! [`Builder`] 为一个镜像的写入器；[`MultiBuilder`] 把多个镜像组合为单个
+//! 多架构容器（读取方须接受至多 8 个）。
 //!
 //! 签名只在宿主打包侧发生（`sign` 特性）；装载侧只需要 [`crate::trust`] 的验签。
 
@@ -10,8 +11,8 @@ use alloc::vec::Vec;
 use crate::platform::PLATFORM_RECORD;
 use crate::{
     digest_of, Arch, FloatAbi, ImageKind, Jaso, JasoError, Manifest, ModuleKind, SectionKind, Stage, Target, ABI_C_V1, CODE_JVM_CLASSES,
-    DIGEST_OFFSET, EXPORT_FUNC, EXPORT_MANAGED, EXPORT_SIZE, EXT_CRITICAL, FORMAT_VERSION, HEADER_SIZE, IMAGE_ENTRY_SIZE, MAGIC, PAGE,
-    RELOC_RELATIVE32, RELOC_RELATIVE64, RELOC_SIZE, SECTION_SIZE,
+    DIGEST_OFFSET, EXPORT_FUNC, EXPORT_MANAGED, EXPORT_SIZE, EXT_CRITICAL, FORMAT_VERSION, HEADER_SIZE, IMAGE_ENTRY_SIZE,
+    MAGIC, MAX_IMAGES, PAGE, RELOC_RELATIVE32, RELOC_RELATIVE64, RELOC_SIZE, SECTION_SIZE,
 };
 #[cfg(feature = "sign")]
 use crate::{signed_digest_of, signed_message, SIGNATURE_SIZE, SIGNATURE_VALUE_OFFSET, SIG_ED25519};
@@ -359,4 +360,262 @@ impl Builder {
         out[DIGEST_OFFSET..DIGEST_OFFSET + 32].copy_from_slice(&d);
         Ok(out)
     }
+}
+
+/// 多镜像 `.jaso` 构建器：共享清单、模块种类、阶段与文件级扩展，每个镜像保留
+/// 自己的平台、映像段、导出和重定位。
+#[derive(Debug, Clone)]
+pub struct MultiBuilder {
+    /// 模块种类；所有镜像必须属于同一种类。
+    pub kind: ModuleKind,
+    /// 装载阶段。
+    pub stage: Stage,
+    /// 文件级清单。
+    pub manifest: Vec<u8>,
+    /// 至少一个、至多 [`MAX_IMAGES`] 个镜像。
+    pub images: Vec<Builder>,
+    /// 文件级扩展段。
+    pub extensions: Vec<ExtensionIn>,
+}
+
+impl MultiBuilder {
+    /// 新建一个空的原生多架构容器。
+    pub fn native(stage: Stage, manifest: &[u8]) -> MultiBuilder {
+        MultiBuilder {
+            kind: ModuleKind::Native,
+            stage,
+            manifest: manifest.to_vec(),
+            images: Vec::new(),
+            extensions: Vec::new(),
+        }
+    }
+
+    /// 从已校验文件保留全部镜像、清单和扩展，用于重新打包、签名或转 Hybrid。
+    pub fn from_file(f: &Jaso<'_>) -> Option<MultiBuilder> {
+        let mut images = Vec::new();
+        for index in 0..f.images().count() {
+            let mut image = Builder::from_file(f, index as u32)?;
+            image.kind = f.kind;
+            image.stage = f.stage;
+            image.manifest = f.manifest.text().as_bytes().to_vec();
+            image.extensions.clear();
+            images.push(image);
+        }
+        if images.is_empty() {
+            return None;
+        }
+        Some(MultiBuilder {
+            kind: f.kind,
+            stage: f.stage,
+            manifest: f.manifest.text().as_bytes().to_vec(),
+            images,
+            extensions: f
+                .extensions()
+                .map(|e| ExtensionIn {
+                    name: e.name.as_bytes().to_vec(),
+                    version: e.version,
+                    critical: e.critical,
+                    content: e.content.to_vec(),
+                })
+                .collect(),
+        })
+    }
+
+    /// 添加一个镜像。镜像必须与容器共享清单、种类和阶段。
+    pub fn push_image(&mut self, mut image: Builder) -> Result<(), JasoError> {
+        if self.images.len() >= MAX_IMAGES as usize
+            || image.kind != self.kind
+            || image.stage != self.stage
+            || image.manifest != self.manifest
+            || !image.extensions.is_empty()
+        {
+            return Err(JasoError::ImageIndex);
+        }
+        image.kind = self.kind;
+        image.stage = self.stage;
+        image.manifest = self.manifest.clone();
+        self.images.push(image);
+        Ok(())
+    }
+
+    /// 写出未签名容器并用读取器自检。
+    pub fn finish(&self) -> Result<Vec<u8>, JasoError> {
+        let out = self.layout(false)?;
+        Jaso::parse(&out)?;
+        Ok(out)
+    }
+
+    /// 写出以 `signer` 签名的容器。签名覆盖全部镜像与文件级扩展。
+    #[cfg(feature = "sign")]
+    pub fn finish_signed(&self, signer: &Signer) -> Result<Vec<u8>, JasoError> {
+        let mut out = self.layout(true)?;
+        let sig_off = out.len() - SIGNATURE_SIZE;
+        out[sig_off..sig_off + 4].copy_from_slice(&SIG_ED25519.to_le_bytes());
+        out[sig_off + 8..sig_off + 40].copy_from_slice(&signer.public_key());
+        let value = signer.sign(&signed_message(&signed_digest_of(&out, sig_off)));
+        out[sig_off + SIGNATURE_VALUE_OFFSET..].copy_from_slice(&value);
+        let digest = digest_of(&out);
+        out[DIGEST_OFFSET..DIGEST_OFFSET + 32].copy_from_slice(&digest);
+        Jaso::parse(&out)?;
+        Ok(out)
+    }
+
+    fn check_images(&self) -> Result<(), JasoError> {
+        if self.images.is_empty() || self.images.len() > MAX_IMAGES as usize {
+            return Err(JasoError::ImageIndex);
+        }
+        let mut saw_native = false;
+        let mut saw_managed = false;
+        for image in &self.images {
+            if image.kind != self.kind
+                || image.stage != self.stage
+                || image.manifest != self.manifest
+                || !image.extensions.is_empty()
+            {
+                return Err(JasoError::ImageIndex);
+            }
+            match image.image_kind() {
+                ImageKind::Native => saw_native = true,
+                ImageKind::Managed => saw_managed = true,
+            }
+            if image.kind.image_kind() != image.image_kind() {
+                return Err(JasoError::ImageKindNotAllowed);
+            }
+        }
+        if saw_native == saw_managed {
+            return Err(JasoError::ImageIndex);
+        }
+        Ok(())
+    }
+
+    fn layout(&self, signature: bool) -> Result<Vec<u8>, JasoError> {
+        self.check_images()?;
+        let mut bodies: Vec<Body> = Vec::new();
+        bodies.push((SectionKind::Manifest as u32, 0, 0, 0, self.manifest.clone()));
+
+        let mut platforms = Vec::new();
+        put_u32(&mut platforms, self.images.len() as u32);
+        put_u32(&mut platforms, 0);
+        for image in &self.images {
+            platforms.extend_from_slice(&image.platform_record());
+        }
+        bodies.push((SectionKind::Platform as u32, 0, 0, 0, platforms));
+
+        let image_bodies: Vec<Vec<Body>> = self.images.iter().map(Builder::image_bodies).collect();
+        let first = bodies.len() as u32 + 1;
+        let mut index = Vec::with_capacity(8 + self.images.len() * IMAGE_ENTRY_SIZE);
+        put_u32(&mut index, self.images.len() as u32);
+        put_u32(&mut index, 0);
+        let mut next_section = first;
+        for (platform, (image, body)) in self.images.iter().zip(&image_bodies).enumerate() {
+            if body.is_empty() {
+                return Err(JasoError::ImageIndex);
+            }
+            put_u16(&mut index, image.image_kind() as u16);
+            put_u16(&mut index, platform as u16);
+            put_u32(&mut index, next_section);
+            put_u32(&mut index, body.len() as u32);
+            put_u32(
+                &mut index,
+                if image.image_kind() == ImageKind::Native {
+                    image.image_size()
+                } else {
+                    0
+                },
+            );
+            index.resize(index.len() + 16, 0);
+            next_section = next_section
+                .checked_add(body.len() as u32)
+                .ok_or(JasoError::ImageIndex)?;
+        }
+        bodies.push((SectionKind::Images as u32, 0, 0, 0, index));
+        for body in image_bodies {
+            bodies.extend(body);
+        }
+        for extension in &self.extensions {
+            bodies.push(extension_body(extension));
+        }
+        if signature {
+            bodies.push((
+                SectionKind::Signature as u32,
+                0,
+                0,
+                0,
+                alloc::vec![0u8; crate::SIGNATURE_SIZE],
+            ));
+        }
+
+        let arch = {
+            let first = self.images[0].platform.isa;
+            if self.images.iter().all(|image| image.platform.isa == first) {
+                first
+            } else {
+                None
+            }
+        };
+        emit_file(self.kind, self.stage, arch, &bodies)
+    }
+}
+
+fn extension_body(extension: &ExtensionIn) -> Body {
+    let mut body = Vec::new();
+    put_u32(&mut body, extension.version);
+    put_u16(&mut body, extension.name.len() as u16);
+    put_u16(&mut body, 0);
+    body.extend_from_slice(&extension.name);
+    body.resize(body.len().next_multiple_of(8), 0);
+    body.extend_from_slice(&extension.content);
+    (
+        SectionKind::Ext as u32,
+        if extension.critical { EXT_CRITICAL } else { 0 },
+        0,
+        0,
+        body,
+    )
+}
+
+fn emit_file(kind: ModuleKind, stage: Stage, arch: Option<Arch>, bodies: &[Body]) -> Result<Vec<u8>, JasoError> {
+    if bodies.len() > crate::MAX_SECTIONS as usize {
+        return Err(JasoError::BadSectionDir);
+    }
+    let dir_offset = HEADER_SIZE;
+    let mut offset = dir_offset
+        .checked_add(bodies.len() * SECTION_SIZE)
+        .ok_or(JasoError::LengthMismatch)?;
+    let mut out = Vec::new();
+    out.extend_from_slice(&MAGIC);
+    put_u16(&mut out, FORMAT_VERSION);
+    put_u16(&mut out, kind as u16);
+    put_u16(&mut out, arch.map_or(0, |a| a as u16));
+    out.push(stage as u8);
+    out.push(0);
+    put_u32(&mut out, HEADER_SIZE as u32);
+    put_u32(&mut out, bodies.len() as u32);
+    put_u32(&mut out, dir_offset as u32);
+    put_u32(&mut out, 0);
+    put_u32(&mut out, 0);
+    put_u32(&mut out, 0);
+    out.extend_from_slice(&[0u8; 32]);
+    put_u64(&mut out, 0);
+    debug_assert_eq!(out.len(), HEADER_SIZE);
+    for (kind, flags, vaddr, mem_size, bytes) in bodies {
+        put_u32(&mut out, *kind);
+        put_u32(&mut out, *flags);
+        put_u32(&mut out, offset as u32);
+        put_u32(&mut out, bytes.len() as u32);
+        put_u32(&mut out, *vaddr);
+        put_u32(&mut out, *mem_size);
+        put_u64(&mut out, 0);
+        offset = offset
+            .checked_add(bytes.len())
+            .ok_or(JasoError::LengthMismatch)?;
+    }
+    for (_, _, _, _, bytes) in bodies {
+        out.extend_from_slice(bytes);
+    }
+    let len = u32::try_from(out.len()).map_err(|_| JasoError::LengthMismatch)?;
+    out[28..32].copy_from_slice(&len.to_le_bytes());
+    let digest = digest_of(&out);
+    out[DIGEST_OFFSET..DIGEST_OFFSET + 32].copy_from_slice(&digest);
+    Ok(out)
 }

@@ -3,6 +3,8 @@
 //!
 //! ```text
 //! jasopack pack <ELF> <清单文件> <指令集> <装载阶段> <输出>   打包（指令集：x86_64|aarch64|riscv64|riscv32；阶段：runtime|boot|build）
+//! jasopack pack-multi <清单文件> <装载阶段> <输出> <指令集=ELF>...  打包多架构容器（1–8 个镜像）
+//! jasopack build-multi-dev <包名> <模块目录> <输出> <指令集>...  开发签名：逐指令集构建模块并合成多架构容器
 //! jasopack inspect <.jaso>                                   校验并列出头部、清单、各镜像（平台、段、导出、重定位数）、扩展与签名；
 //!                                                            拒绝时输出稳定错误码（如 `rejected: image.wx (605) WriteExecute`）
 //! jasopack migrate <format 0 文件> <输出>                       把 format 0 文件一次性迁移为 format 1（未签名；需要时再 sign）
@@ -17,6 +19,7 @@
 
 use std::process::ExitCode;
 
+use jaso::build::{Builder, MultiBuilder};
 use jaso::{Arch, Jaso, Stage, FLAG_R, FLAG_W, FLAG_X};
 
 fn hybrid(input: &str, import: &str, out: &str) -> ExitCode {
@@ -44,7 +47,9 @@ fn hybrid(input: &str, import: &str, out: &str) -> ExitCode {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "用法：jasopack pack <ELF> <清单文件> <指令集> <装载阶段> <输出>\n      jasopack inspect <.jaso>\n      \
+        "用法：jasopack pack <ELF> <清单文件> <指令集> <装载阶段> <输出>\n      \
+         jasopack pack-multi <清单文件> <装载阶段> <输出> <指令集=ELF>...\n      jasopack inspect <.jaso>\n      \
+         jasopack build-multi-dev <包名> <模块目录> <输出> <指令集>...\n      \
          jasopack migrate <format 0 文件> <输出>\n      \
          jasopack sign <.jaso> <私钥种子文件> <输出>\n      jasopack hybrid <.jaso> <jasper.import 文本> <输出>\n      jasopack pubkey <私钥种子文件>\n      \
          jasopack vectors <目录>\n      jasopack conform <.jaso>"
@@ -210,6 +215,146 @@ fn pack(elf: &str, manifest: &str, arch: &str, stage: &str, out: &str) -> ExitCo
     }
 }
 
+fn pack_multi(manifest: &str, stage: &str, out: &str, images: &[&str]) -> ExitCode {
+    let Some(stage) = Stage::from_name(stage) else { return usage() };
+    let text = match std::fs::read_to_string(manifest) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("读取 {} 失败：{}", manifest, error);
+            return ExitCode::from(2);
+        }
+    };
+    let mut owned = Vec::new();
+    for item in images {
+        let Some((arch, path)) = item.split_once('=') else { return usage() };
+        let Some(arch) = Arch::from_name(arch) else { return usage() };
+        match std::fs::read(path) {
+            Ok(elf) => owned.push((arch, elf)),
+            Err(error) => {
+                eprintln!("读取 {} 失败：{}", path, error);
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let refs: Vec<(Arch, &[u8])> = owned
+        .iter()
+        .map(|(arch, elf)| (*arch, elf.as_slice()))
+        .collect();
+    match jaso::pack::from_elfs(&refs, &text, stage) {
+        Ok(bytes) => match std::fs::write(out, &bytes) {
+            Ok(()) => {
+                println!("packed: {} ({} images, {} bytes)", out, refs.len(), bytes.len());
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("写入 {} 失败：{}", out, error);
+                ExitCode::from(2)
+            }
+        },
+        Err(error) => {
+            println!("rejected: {:?}", error);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn build_multi_dev(package: &str, module_dir: &str, out: &str, arches: &[&str]) -> ExitCode {
+    if arches.is_empty() || arches.len() > jaso::MAX_IMAGES as usize {
+        return usage();
+    }
+    let root = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("读取当前目录失败：{}", error);
+            return ExitCode::from(2);
+        }
+    };
+    let module_dir = root.join(module_dir);
+    let out = root.join(out);
+    let Some(parent) = out.parent() else { return usage() };
+    let target_dir = parent.join("jaso1-module-target");
+    let mut parsed_arches = Vec::new();
+    for name in arches {
+        let Some(arch) = Arch::from_name(name) else { return usage() };
+        if parsed_arches.contains(&arch) {
+            eprintln!("重复的指令集：{}", name);
+            return ExitCode::from(2);
+        }
+        parsed_arches.push(arch);
+    }
+
+    let signer = jaso::pack::development_signer();
+    let manifest = match std::fs::read(module_dir.join("jaso.manifest")) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            eprintln!("读取模块清单失败：{}", error);
+            return ExitCode::from(2);
+        }
+    };
+    let mut multi = MultiBuilder::native(Stage::Runtime, &manifest);
+    let source_text = b"module jaso_demo\n";
+    let source_payload = match jaso::source::encode(
+        jaso::source::LANGUAGE_JASPER,
+        jaso::source::COMPRESSION_NONE,
+        source_text.len() as u32,
+        source_text,
+    ) {
+        Ok(payload) => payload,
+        Err(error) => {
+            eprintln!("构建 jasper.source 信封失败：{}", error.name());
+            return ExitCode::from(1);
+        }
+    };
+    multi.extensions.push(jaso::build::ExtensionIn {
+        name: jaso::EXT_JASPER_SOURCE.as_bytes().to_vec(),
+        version: 1,
+        critical: false,
+        content: source_payload,
+    });
+    for arch in parsed_arches {
+        let packed = match jaso::pack::build_module(&root, package, &module_dir, &target_dir, arch) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("构建 {}（{}）失败：{}", package, arch.name(), error);
+                return ExitCode::from(1);
+            }
+        };
+        let file = match Jaso::parse(&packed) {
+            Ok(file) => file,
+            Err(error) => {
+                eprintln!("构建结果未通过校验：{:?}", error);
+                return ExitCode::from(1);
+            }
+        };
+        let Some(image) = Builder::from_file(&file, 0) else {
+            eprintln!("构建结果没有镜像");
+            return ExitCode::from(1);
+        };
+        if let Err(error) = multi.push_image(image) {
+            eprintln!("合成多架构容器失败：{:?}", error);
+            return ExitCode::from(1);
+        }
+    }
+    let bytes = match multi.finish_signed(&signer) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("多架构容器自检失败：{:?}", error);
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(error) = std::fs::write(&out, &bytes) {
+        eprintln!("写入 {} 失败：{}", out.display(), error);
+        return ExitCode::from(2);
+    }
+    println!(
+        "built: {} ({} images, {} bytes, development signature)",
+        out.display(),
+        multi.images.len(),
+        bytes.len()
+    );
+    ExitCode::SUCCESS
+}
+
 fn migrate(input: &str, out: &str) -> ExitCode {
     let bytes = match std::fs::read(input) {
         Ok(b) => b,
@@ -294,6 +439,12 @@ fn main() -> ExitCode {
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["inspect", p] => inspect(p),
         ["pack", elf, m, arch, stage, out] => pack(elf, m, arch, stage, out),
+        ["pack-multi", m, stage, out, images @ ..] if !images.is_empty() => {
+            pack_multi(m, stage, out, images)
+        }
+        ["build-multi-dev", package, dir, out, arches @ ..] if !arches.is_empty() => {
+            build_multi_dev(package, dir, out, arches)
+        }
         ["sign", input, seed, out] => sign(input, seed, out),
         ["hybrid", input, import, out] => hybrid(input, import, out),
         ["pubkey", seed] => pubkey(seed),

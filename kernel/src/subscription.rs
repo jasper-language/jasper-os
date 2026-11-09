@@ -114,7 +114,15 @@ pub(crate) fn close_in(t:&mut Table,id:ObjId) {
 /// when the last user capability closes. Subscription edges remain internal refs.
 pub(crate) fn create_publisher_in(t:&mut Table,snapshot:Snapshot)->Result<ObjId,Error> {
  let source=Box::try_new(Source {snapshot,subscribers:Vec::new(),closed:false,publisher_owned:true,policies:7}).map_err(|_|Error::Allocation)?;
- t.insert(KObject::EventSource(source),1,0).map_err(|_|Error::Allocation)
+ t.insert_with_security(
+     KObject::EventSource(source),
+     1,
+     0,
+     kernel_core::security::SecuritySeed::active(
+         crate::security::boot_id(),
+         kernel_core::security::IdentityClass::Service,
+     ),
+ ).map_err(|_| Error::Allocation)
 }
 pub(crate) fn finish_publisher_in(t:&mut Table,id:ObjId) {
  if let Ok(KObject::EventSource(source))=t.get_mut(id) {source.closed=true;source.publisher_owned=false;}

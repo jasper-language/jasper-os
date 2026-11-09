@@ -398,6 +398,12 @@ pub struct GicInfo<'a> {
     pub dist: u64,
     /// CPU 接口 `reg` 的物理基址（GICv3 缺失）。
     pub cpu: Option<u64>,
+    /// GICv3 redistributor 帧基址（GICv2 为 `None`）。
+    pub redist: Option<u64>,
+    /// GICv3 redistributor 总区间大小。
+    pub redist_size: u64,
+    /// 相邻 redistributor 帧的步长。
+    pub redist_stride: u64,
 }
 
 /// 串口摘要。
@@ -543,11 +549,16 @@ fn psci_info<'a>(node: Node<'a>) -> PsciInfo<'a> {
 fn gic_info<'a>(node: Node<'a>, v3: bool) -> GicInfo<'a> {
     let (dist, _) = node.reg(0).unwrap_or((0, 0));
     let cpu = if v3 { None } else { node.reg(1).map(|(base, _)| base) };
+    let (redist, redist_size) = if v3 { node.reg(1).unwrap_or((0, 0)) } else { (0, 0) };
+    let redist_stride = node.cell("redistributor-stride", 0).map(u64::from).unwrap_or(0x20_000);
     GicInfo {
         compatible: node.string("compatible").unwrap_or(if v3 { "arm,gic-v3" } else { "arm,gic" }),
         v3,
         dist,
         cpu,
+        redist: (redist != 0).then_some(redist),
+        redist_size,
+        redist_stride,
     }
 }
 
@@ -1159,6 +1170,33 @@ mod tests {
         assert_eq!((fb.width, fb.height, fb.stride), (1080, 2400, 4320));
         assert_eq!(fb.format, PixelFormat::A8B8G8R8);
         assert!(fb.layout_fits());
+    }
+
+    #[test]
+    fn boot_summary_extracts_gicv3_distributor_and_redistributor() {
+        let mut b = Builder::new();
+        b.begin("").cells("#address-cells", &[2]).cells("#size-cells", &[2]);
+        b.begin("intc@8000000")
+            .prop("compatible", b"arm,gic-v3\0")
+            .cells(
+                "reg",
+                &[
+                    0, 0x0800_0000, 0, 0x0001_0000, 0, 0x080a_0000, 0, 0x00f6_0000,
+                ],
+            )
+            .cells("#interrupt-cells", &[3])
+            .cells("redistributor-stride", &[0x20_000])
+            .end();
+        b.end();
+        let blob = b.finish(&[]);
+        let fdt = Fdt::parse(&blob).unwrap();
+        let gic = fdt.boot_summary().unwrap().gic.unwrap();
+        assert!(gic.v3);
+        assert_eq!(gic.dist, 0x0800_0000);
+        assert_eq!(gic.cpu, None);
+        assert_eq!(gic.redist, Some(0x080a_0000));
+        assert_eq!(gic.redist_size, 0x00f6_0000);
+        assert_eq!(gic.redist_stride, 0x20_000);
     }
 
     #[test]

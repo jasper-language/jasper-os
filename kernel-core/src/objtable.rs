@@ -21,6 +21,7 @@
 //! Storage is supplied once at boot (`install`), so the capacity is a boot-time setting, not a const generic.
 
 pub use crate::capacity::InstallError;
+use crate::security::{SecurityContext, SecuritySeed};
 
 /// 对象标识（槽位下标 + 世代，打包为 64 位跨边界传递）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -30,6 +31,16 @@ pub struct ObjId {
 }
 
 impl ObjId {
+    /// Slot index component.
+    pub const fn index(self) -> u32 {
+        self.index
+    }
+
+    /// Generation component.
+    pub const fn generation(self) -> u32 {
+        self.generation
+    }
+
     /// 打包成 64 位（高 32 位世代，低 32 位下标 + 1；0 表示空标识）。
     pub const fn raw(self) -> u64 {
         ((self.generation as u64) << 32) | (self.index as u64 + 1)
@@ -90,6 +101,7 @@ pub enum Lifecycle {
 
 struct Entry<T> {
     value: T,
+    security: SecurityContext,
     owners: u32,
     internal: u32,
     state: Lifecycle,
@@ -201,6 +213,19 @@ impl<T: 'static> ObjectTable<T> {
 
     /// 放入新对象，初始持有 `owners` 个外部所有权与 `internal` 个内部引用（两者之和须 ≥ 1）。
     pub fn insert(&mut self, value: T, owners: u32, internal: u32) -> Result<ObjId, ObjError> {
+        self.insert_with_security(value, owners, internal, SecuritySeed::legacy())
+    }
+
+    /// Insert with SEC-1 metadata. The final object identity is built only
+    /// after the slot and generation have been selected, so it can never drift
+    /// from the object table's `ObjId`.
+    pub fn insert_with_security(
+        &mut self,
+        value: T,
+        owners: u32,
+        internal: u32,
+        security: SecuritySeed,
+    ) -> Result<ObjId, ObjError> {
         match owners.checked_add(internal) {
             None => return Err(ObjError::Full),
             Some(0) => return Err(ObjError::Underflow),
@@ -214,15 +239,58 @@ impl<T: 'static> ObjectTable<T> {
             .ok_or(ObjError::Full)?;
         // 新对象一律从 Live 开始：closing 只在外部所有权「从有降到零」的那一刻触发（release_owner），
         // 刚创建、尚未发放任何句柄的对象（例如新线程对象）必须仍能获得第一个所有者。
+        let id = ObjId {
+            index: index as u32,
+            generation: slot.generation,
+        };
         slot.entry = Some(Entry {
             value,
+            security: SecurityContext::new(
+                security.boot_id,
+                security.class,
+                id,
+                security.application,
+                security.state,
+            ),
             owners,
             internal,
             state: Lifecycle::Live,
             closing_in_progress: false,
         });
         self.live += 1;
-        Ok(ObjId { index: index as u32, generation: slot.generation })
+        Ok(id)
+    }
+
+    /// Read SEC-1 metadata for a live object.
+    pub fn security(&self, id: ObjId) -> Result<SecurityContext, ObjError> {
+        self.entry(id).map(|entry| entry.security)
+    }
+
+    /// Bind the application context once without altering lifecycle counts.
+    pub fn bind_application(
+        &mut self,
+        id: ObjId,
+        application: crate::security::ApplicationIdentity,
+    ) -> Result<SecurityContext, crate::security::SecurityError> {
+        let entry = self
+            .entry_mut(id)
+            .map_err(|_| crate::security::SecurityError::MissingMetadata)?;
+        entry.security.bind_application(application)?;
+        Ok(entry.security)
+    }
+
+    /// SEC-1 acceptance-only metadata downgrade/restore hook. The kernel
+    /// feature forwards this capability only to the dedicated verification
+    /// profile; production builds do not contain the method.
+    #[cfg(feature = "sec1-verify")]
+    pub fn set_security_for_verify(
+        &mut self,
+        id: ObjId,
+        security: SecurityContext,
+    ) -> Result<(), ObjError> {
+        let entry = self.entry_mut(id)?;
+        entry.security = security;
+        Ok(())
     }
 
     fn entry(&self, id: ObjId) -> Result<&Entry<T>, ObjError> {
@@ -384,6 +452,28 @@ impl<T: 'static> ObjectTable<T> {
         self.live
     }
 
+    /// Visit every live object in slot order without exposing mutable storage.
+    ///
+    /// Returning `false` stops the scan. The callback must not re-enter the
+    /// object table because this method only holds a shared borrow.
+    pub fn for_each_live(&self, mut visit: impl FnMut(ObjId, &T) -> bool) {
+        for (index, slot) in self.slots.iter().enumerate() {
+            let Some(entry) = slot.entry.as_ref() else {
+                continue;
+            };
+            if entry.state == Lifecycle::Dead {
+                continue;
+            }
+            let id = ObjId {
+                index: index as u32,
+                generation: slot.generation,
+            };
+            if !visit(id, &entry.value) {
+                break;
+            }
+        }
+    }
+
     /// 清理队列长度（规范 6.2：可观测，负载结束后应归零）。
     pub fn pending(&self) -> usize {
         self.len
@@ -502,6 +592,61 @@ mod tests {
         let id3 = t.insert(Obj::Leaf(9), 0, 1).unwrap();
         assert_eq!(t.release_owner(id3), Err(ObjError::Underflow));
         assert_eq!(t.insert(Obj::Leaf(0), 0, 0), Err(ObjError::Underflow));
+    }
+
+    #[test]
+    fn security_context_survives_aliases_and_rejects_stale_generation() {
+        use crate::security::{
+            ApplicationIdentity, BootId, IdentityClass, MetadataState, SecuritySeed,
+        };
+
+        let boot = BootId::from_words([0x1111, 0x2222]);
+        let first_app = ApplicationIdentity::measured(0x1_0000_0001, 1, [0x31; 32]);
+        let mut t: ObjectTable<Obj> = ObjectTable::for_test(1);
+        let first = t
+            .insert_with_security(
+                Obj::Leaf(1),
+                1,
+                0,
+                SecuritySeed::active(boot, IdentityClass::Memory)
+                    .with_application(Some(first_app)),
+            )
+            .unwrap();
+        assert_eq!(first.generation(), 0);
+        let first_context = t.security(first).unwrap();
+        assert_eq!(first_context.application, Some(first_app));
+
+        // Another owner (copy/grant/transfer destination) aliases the same
+        // object and therefore observes the same non-authority context.
+        t.acquire_owner(first).unwrap();
+        assert_eq!(t.security(first), Ok(first_context));
+        assert!(t.release_owner(first).unwrap().became_unowned == false);
+        assert_eq!(t.security(first), Ok(first_context));
+        assert!(t.release_owner(first).unwrap().dead);
+        assert_eq!(t.security(first), Err(ObjError::Invalid));
+
+        let (stale, _) = t.take_dead().unwrap();
+        assert_eq!(stale, first);
+        let second_app = ApplicationIdentity::migrated(0x9999);
+        let second = t
+            .insert_with_security(
+                Obj::Leaf(2),
+                1,
+                0,
+                SecuritySeed::active(boot, IdentityClass::Memory)
+                    .with_application(Some(second_app)),
+            )
+            .unwrap();
+        assert_eq!(second.index(), first.index(), "the slot is reused");
+        assert_ne!(second.generation(), first.generation());
+        assert_eq!(t.security(stale), Err(ObjError::Invalid));
+        assert_eq!(t.security(second).unwrap().application, Some(second_app));
+        assert_ne!(
+            t.security(second).unwrap().object,
+            first_context.object,
+            "a reused slot must not inherit the old authorization root"
+        );
+        assert_eq!(t.security(second).unwrap().state, MetadataState::Active);
     }
 
     #[test]

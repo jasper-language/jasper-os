@@ -9,12 +9,13 @@
 //! # 边界
 //! 运行于内核映射窗口，不代替用户地址空间的权限检查；所有映射和页帧最终回到基线。
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::paging::{MapFlags, VirtPage};
 use kernel_core::smp::CpuSet;
 
 use crate::task::TaskId;
+use crate::sync::IrqU64;
 use crate::{arch, kprintln, mm, sched};
 
 const BATCH_PAGES: usize = 512;
@@ -28,9 +29,9 @@ const PATTERN_B: u64 = 0x4B524E30_544C4242;
 /// 0 = 等待写入者，1 = 本批可读，2 = 读者完成。
 static PARTICIPANTS: AtomicU32 = AtomicU32::new(0);
 static PHASE: AtomicU32 = AtomicU32::new(0);
-static BATCH: AtomicU64 = AtomicU64::new(0);
-static READS: AtomicU64 = AtomicU64::new(0);
-static MISMATCHES: AtomicU64 = AtomicU64::new(0);
+static BATCH: IrqU64 = IrqU64::new(0);
+static READS: IrqU64 = IrqU64::new(0);
+static MISMATCHES: IrqU64 = IrqU64::new(0);
 static WRITER_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
 static READER_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
 static FINISHED: AtomicU32 = AtomicU32::new(0);

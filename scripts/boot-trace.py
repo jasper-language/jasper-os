@@ -117,7 +117,7 @@ if args.accel == "kvm":
     cmd += ["-cpu", "host"]
 cmd += ["-drive", f"format=raw,file={args.img}",
        "-device", "virtio-rng-pci", "-device", "virtio-net-pci,netdev=n0", "-netdev", "user,id=n0",
-       "-device", "virtio-blk-pci,drive=d1", "-drive", f"if=none,id=d1,file={blank},format=raw",
+       "-device", "virtio-blk-pci,drive=d1", "-drive", f"if=none,id=d1,file={blank},format=raw,discard=unmap",
        "-serial", "stdio", "-display", "none", "-monitor", f"unix:{sock},server,nowait", "-no-reboot",
        "-m", "256M", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-smp", str(args.smp),
        "-chardev", f"file,id=fw,path={args.out}.bios", "-device", "isa-debugcon,iobase=0x402,chardev=fw"]

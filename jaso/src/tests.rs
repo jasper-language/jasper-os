@@ -7,7 +7,7 @@ use std::string::String;
 use std::vec;
 use std::vec::Vec;
 
-use crate::build::{Builder, ExtensionIn, PlatformIn, SegmentIn};
+use crate::build::{Builder, ExtensionIn, MultiBuilder, PlatformIn, SegmentIn};
 use crate::*;
 
 const MANIFEST: &str = "# 测试模块\ncore.name = demo.mod\ncore.version = 1.2.3\ncore.abi = c.v1\ncore.stage = runtime\ncore.host = jaso.host.v1\n\
@@ -504,6 +504,48 @@ fn extensions() {
 }
 
 #[test]
+fn source_extension_v1_envelope_is_validated_and_decoded() {
+    let text = b"module source_demo\n";
+    let content = crate::source::encode(
+        crate::source::LANGUAGE_JASPER,
+        crate::source::COMPRESSION_NONE,
+        text.len() as u32,
+        text,
+    )
+    .unwrap();
+    let mut b = sample();
+    b.extensions = vec![ExtensionIn {
+        name: EXT_JASPER_SOURCE.as_bytes().to_vec(),
+        version: 1,
+        critical: false,
+        content,
+    }];
+    let bytes = b.finish().unwrap();
+    let file = Jaso::parse(&bytes).unwrap();
+    let source = file.source_v1().unwrap();
+    assert_eq!(source.language(), crate::source::LANGUAGE_JASPER);
+    assert_eq!(
+        source.decode(|_, _| None).unwrap().as_bytes(),
+        text,
+        "uncompressed source must be borrowed from the container"
+    );
+
+    let mut broken = bytes.clone();
+    let ext = Jaso::parse(&bytes)
+        .unwrap()
+        .extension(EXT_JASPER_SOURCE, 1)
+        .unwrap();
+    let at = ext.content.as_ptr() as usize - bytes.as_ptr() as usize;
+    broken[at] ^= 1;
+    let digest = crate::digest_of(&broken);
+    broken[crate::DIGEST_OFFSET..crate::DIGEST_OFFSET + 32].copy_from_slice(&digest);
+    assert_eq!(
+        Jaso::parse(&broken).unwrap_err(),
+        JasoError::ExtensionMalformed
+    );
+}
+
+#[test]
 fn hybrid_requires_jasper_import() {
     let ok = hybrid().finish().unwrap();
     let f = Jaso::parse(&ok).unwrap();
@@ -546,7 +588,7 @@ fn managed_images() {
     assert_eq!(b.finish().unwrap_err(), JasoError::ImageIndex);
 }
 
-/// 两个镜像：手工在单镜像文件后追加第二个镜像的段与索引项（beta 写入方只产出单镜像）。
+/// 两个镜像：手工在单镜像文件后追加第二个镜像的段与索引项，验证读取器兼容这一历史构造。
 fn two_images(second: Arch) -> Vec<u8> {
     let one = sample().finish().unwrap();
     let f = Jaso::parse(&one).unwrap();
@@ -622,6 +664,76 @@ fn multiple_images_and_selection() {
     }), JasoError::ImageIndex);
     // 区间重叠
     assert_eq!(edit(&two, |b| { let o = section_offset(b, 2) + 8 + 32 + 4; put32(b, o, 4) }), JasoError::ImageIndex);
+}
+
+#[test]
+fn multi_image_builder_writes_selects_and_preserves_all_images() {
+    let mut multi = MultiBuilder::native(Stage::Runtime, MANIFEST.as_bytes());
+    for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64, Arch::Riscv32] {
+        let mut image = sample();
+        image.platform = PlatformIn::jasper_os(arch);
+        multi.push_image(image).unwrap();
+    }
+    let bytes = multi.finish().expect("four-image container");
+    let file = Jaso::parse(&bytes).expect("parse four-image container");
+    assert_eq!(file.images().count(), 4);
+    assert_eq!(file.arch, None);
+    for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64, Arch::Riscv32] {
+        let host = HostPlatform {
+            isa: Some(arch),
+            isa_ext: &[],
+            target: Target::JasperOs,
+            pointer_bytes: arch.pointer_bytes() as u8,
+            float_abi: FloatAbi::Soft,
+            abi: ABI_C_V1,
+        };
+        assert_eq!(file.select(&host).unwrap().platform.isa, Some(arch));
+    }
+    assert_eq!(
+        MultiBuilder::from_file(&file).unwrap().finish().unwrap(),
+        bytes,
+        "parsed containers must round-trip without losing images"
+    );
+}
+
+#[test]
+fn multi_image_builder_rejects_mixed_manifest_and_section_budget() {
+    let mut multi = MultiBuilder::native(Stage::Runtime, MANIFEST.as_bytes());
+    multi.push_image(sample()).unwrap();
+    let mut different = sample();
+    different.manifest = MANAGED_MANIFEST.as_bytes().to_vec();
+    assert_eq!(multi.push_image(different), Err(JasoError::ImageIndex));
+
+    let mut image = sample();
+    image.platform.isa = Some(Arch::Aarch64);
+    multi.push_image(image).unwrap();
+    let mut too_many = MultiBuilder::native(Stage::Runtime, MANIFEST.as_bytes());
+    for _ in 0..MAX_IMAGES {
+        too_many.push_image(sample()).unwrap();
+    }
+    assert_eq!(too_many.push_image(sample()), Err(JasoError::ImageIndex));
+}
+
+#[test]
+fn multi_image_resign_and_hybrid_keep_every_image() {
+    let mut multi = MultiBuilder::native(Stage::Runtime, MANIFEST.as_bytes());
+    for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64, Arch::Riscv32] {
+        let mut image = sample();
+        image.platform = PlatformIn::jasper_os(arch);
+        multi.push_image(image).unwrap();
+    }
+    let bytes = multi.finish().unwrap();
+    let signer = crate::pack::signer_from_phrase(b"multi-image-test");
+    let signed = crate::pack::sign(&bytes, &signer).unwrap();
+    let parsed = Jaso::parse(&signed).unwrap();
+    assert_eq!(parsed.images().count(), 4);
+    assert!(parsed.signature().is_some());
+
+    let hybrid = crate::pack::to_hybrid(&bytes, b"fn f_one(): Unit\nfn f_two(): Unit\n").unwrap();
+    let parsed = Jaso::parse(&hybrid).unwrap();
+    assert_eq!(parsed.kind, ModuleKind::Hybrid);
+    assert_eq!(parsed.images().count(), 4);
+    assert!(parsed.extension(EXT_JASPER_IMPORT, 1).is_some());
 }
 
 #[test]

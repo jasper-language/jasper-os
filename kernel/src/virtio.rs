@@ -32,6 +32,10 @@ pub const RNG_DEVICE_LEGACY: u16 = 0x1005;
 /// 仅现代（modern-only）virtio-rng 的设备号。
 /// Modern-only virtio-rng device ID.
 pub const RNG_DEVICE_MODERN: u16 = 0x1044;
+/// 传统（transitional）virtio-blk 的设备号。
+pub const BLK_DEVICE_LEGACY: u16 = 0x1001;
+/// 仅现代（modern-only）virtio-blk 的设备号。
+pub const BLK_DEVICE_MODERN: u16 = 0x1042;
 
 /// 设备状态：已确认。
 pub const STATUS_ACKNOWLEDGE: u8 = 1;
@@ -47,9 +51,10 @@ pub const STATUS_FAILED: u8 = 128;
 /// `VIRTIO_F_VERSION_1` 位于设备特性第 1 页的第 0 位。
 /// `VIRTIO_F_VERSION_1` is bit 0 of feature page 1.
 const VIRTIO_F_VERSION_1: u32 = 1 << 0;
+/// 描述符标志：后续还有链式描述符。
+pub const VIRTQ_DESC_F_NEXT: u16 = 1;
 /// 描述符标志：设备可写。
-/// Descriptor flag: device-writable buffer.
-const VIRTQ_DESC_F_WRITE: u16 = 2;
+pub const VIRTQ_DESC_F_WRITE: u16 = 2;
 
 /// 通用配置各寄存器的字节偏移。
 const COMMON_DEVICE_FEATURE_SELECT: u64 = 0x00;
@@ -147,6 +152,10 @@ pub const fn is_rng_device(device: u16) -> bool {
     device == RNG_DEVICE_LEGACY || device == RNG_DEVICE_MODERN
 }
 
+pub const fn is_blk_device(device: u16) -> bool {
+    device == BLK_DEVICE_LEGACY || device == BLK_DEVICE_MODERN
+}
+
 /// 现代 virtio PCI 传输句柄（四个能力窗口各持有一份映射）。
 /// Modern virtio PCI transport handle with one mapping per capability window.
 pub struct VirtioPci {
@@ -217,7 +226,7 @@ impl VirtioPci {
 
     /// 读取设备特性的一页。
     /// Reads one page of device features.
-    fn device_features(&self, page: u32) -> u32 {
+    pub fn device_features(&self, page: u32) -> u32 {
         // SAFETY：选择寄存器与数据寄存器都在通用配置窗口内。
         unsafe {
             self.common.write32(COMMON_DEVICE_FEATURE_SELECT, page);
@@ -235,24 +244,29 @@ impl VirtioPci {
         }
     }
 
-    /// 按现代传输协商 `VIRTIO_F_VERSION_1` 并确认 `FEATURES_OK`。
-    ///
-    /// 设备未提供该特性或写入后没有回读确认时返回结构化错误，调用者不得继续使用该设备。
-    /// Negotiates `VIRTIO_F_VERSION_1` and confirms `FEATURES_OK`.
-    pub fn negotiate_version_1(&self) -> Result<(), VirtioError> {
+    /// Negotiate `VIRTIO_F_VERSION_1` plus the requested page-0 device features.
+    pub fn negotiate_features(&self, device_features: u32) -> Result<(), VirtioError> {
         self.add_status(STATUS_ACKNOWLEDGE);
         self.add_status(STATUS_DRIVER);
         let offered = self.device_features(1);
         if offered & VIRTIO_F_VERSION_1 == 0 {
             return Err(VirtioError::Version1Unavailable);
         }
-        self.driver_features(0, 0);
+        if device_features & !self.device_features(0) != 0 {
+            return Err(VirtioError::FeatureRejected);
+        }
+        self.driver_features(0, device_features);
         self.driver_features(1, VIRTIO_F_VERSION_1);
         self.add_status(STATUS_FEATURES_OK);
         if self.status() & STATUS_FEATURES_OK == 0 {
             return Err(VirtioError::FeatureRejected);
         }
         Ok(())
+    }
+
+    /// 按现代传输协商 `VIRTIO_F_VERSION_1` 并确认 `FEATURES_OK`。
+    pub fn negotiate_version_1(&self) -> Result<(), VirtioError> {
+        self.negotiate_features(0)
     }
 
     /// 建立队列 0 并请求 MSI-X 表项下标 `entry`；返回设备给出的 `queue_notify_off`。
@@ -318,6 +332,25 @@ impl VirtioPci {
         // SAFETY：调用者给出的偏移必须落在设备配置窗口内；本演练只用于诊断。
         unsafe { self.device_config.read32(offset) }
     }
+
+    /// Read one byte from device-specific configuration with bounds checking.
+    pub fn read_device_config8(&self, offset: u64) -> Option<u8> {
+        if offset >= self.device_config.len() {
+            return None;
+        }
+        // SAFETY: the offset was checked against the mapped capability window.
+        Some(unsafe { self.device_config.read8(offset) })
+    }
+
+    /// Read a little-endian 64-bit value as two checked dwords.
+    pub fn read_device_config64(&self, offset: u64) -> Option<u64> {
+        if offset.checked_add(8)? > self.device_config.len() {
+            return None;
+        }
+        let low = self.read_device_config32(offset);
+        let high = self.read_device_config32(offset + 4);
+        Some(u64::from(low) | (u64::from(high) << 32))
+    }
 }
 
 /// 按能力类型映射一段 BAR 窗口；能力缺失或映射失败时返回结构化错误。
@@ -345,6 +378,7 @@ pub struct Queue {
     avail: *mut u8,
     used: *mut u8,
     buffers: *mut u8,
+    buffers_phys: u64,
     desc_phys: u64,
     avail_phys: u64,
     used_phys: u64,
@@ -392,6 +426,7 @@ impl Queue {
             avail,
             used,
             buffers,
+            buffers_phys,
             desc_phys,
             avail_phys,
             used_phys,
@@ -413,6 +448,11 @@ impl Queue {
     /// Physical addresses of the descriptor table, available ring and used ring.
     pub const fn addresses(&self) -> (u64, u64, u64) {
         (self.desc_phys, self.avail_phys, self.used_phys)
+    }
+
+    /// Physical start of the queue scratch page.
+    pub const fn buffer_phys(&self) -> u64 {
+        self.buffers_phys
     }
 
     /// 设置实际队列大小；超过本地描述符容量时按本地容量截断。
@@ -457,6 +497,69 @@ impl Queue {
         fence(Ordering::Acquire);
         self.used_idx = self.used_idx.wrapping_add(1);
         Some((id as u16, len))
+    }
+
+    /// Replace one descriptor. The caller is responsible for constructing a
+    /// bounded, acyclic chain and for publishing only its head.
+    pub fn set_descriptor(
+        &mut self,
+        index: u16,
+        address: u64,
+        length: u32,
+        flags: u16,
+        next: u16,
+    ) -> Result<(), VirtioError> {
+        if index >= WANTED_QUEUE_SIZE
+            || (flags & VIRTQ_DESC_F_NEXT != 0 && next >= WANTED_QUEUE_SIZE)
+        {
+            return Err(VirtioError::BadQueueSize);
+        }
+        let at = usize::from(index) * 16;
+        // SAFETY: the descriptor table is an owned queue page and the index was
+        // checked against its fixed capacity.
+        unsafe {
+            write_u64(self.desc.add(at), address);
+            write_u32(self.desc.add(at + 8), length);
+            write_u16(self.desc.add(at + 12), flags);
+            write_u16(self.desc.add(at + 14), next);
+        }
+        Ok(())
+    }
+
+    /// Copy bytes into the queue scratch page with a checked range.
+    pub fn write_buffer(&mut self, offset: u64, bytes: &[u8]) -> bool {
+        let Ok(offset) = usize::try_from(offset) else {
+            return false;
+        };
+        let Some(end) = offset.checked_add(bytes.len()) else {
+            return false;
+        };
+        if end > FRAME_SIZE as usize {
+            return false;
+        }
+        // SAFETY: the range was checked against the owned scratch page.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.buffers.add(offset), bytes.len());
+        }
+        true
+    }
+
+    /// Copy bytes from the queue scratch page with a checked range.
+    pub fn read_buffer(&self, offset: u64, bytes: &mut [u8]) -> bool {
+        let Ok(offset) = usize::try_from(offset) else {
+            return false;
+        };
+        let Some(end) = offset.checked_add(bytes.len()) else {
+            return false;
+        };
+        if end > FRAME_SIZE as usize {
+            return false;
+        }
+        // SAFETY: the range was checked against the owned scratch page.
+        unsafe {
+            core::ptr::copy_nonoverlapping(self.buffers.add(offset), bytes.as_mut_ptr(), bytes.len());
+        }
+        true
     }
 
     /// 已用环的当前下标（诊断用）。

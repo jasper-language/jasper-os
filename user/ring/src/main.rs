@@ -38,6 +38,7 @@ const NOT_FOUND: i64 = e(ids::SYSTEM_ASYNC_ERROR_NOT_FOUND);
 const CQ_FULL: i64 = e(ids::SYSTEM_ASYNC_ERROR_CQ_FULL);
 const INVALID_ARGUMENT: i64 = e(ids::SYSTEM_ERROR_INVALID_ARGUMENT);
 const UNSUPPORTED: i64 = e(ids::SYSTEM_ERROR_UNSUPPORTED);
+const INVALID_ADDRESS: i64 = e(ids::SYSTEM_MEMORY_ERROR_INVALID_ADDRESS);
 const HANDLE_INVALID: i64 = e(ids::SYSTEM_HANDLE_ERROR_INVALID);
 const HANDLE_RIGHTS_DENIED: i64 = e(ids::SYSTEM_HANDLE_ERROR_RIGHTS_DENIED);
 
@@ -274,10 +275,11 @@ fn shared_memory_contract() {
     check(unsafe { syscall2(ids::SYSTEM_MEMORY_OBJECT_MAP,h as u64,&args as *const MapArgs as u64) }==HANDLE_INVALID,43);
     say!("shm zeroed=true alias=true readonly_denied=true handle_close_retains=true unmap=true stale_handle=true");
     // Reserved ABI-R calls must not dereference even invalid descriptor addresses.
-    for id in [ids::SYSTEM_MEMORY_BUFFER_CREATE, ids::SYSTEM_MEMORY_BUFFER_DESTROY, ids::SYSTEM_EXECUTION_RESTRICTED_CREATE, ids::SYSTEM_TASK_INTERRUPT_SEND, ids::SYSTEM_MEMORY_DMA_MAP, ids::SYSTEM_IO_SEGMENT_SUBMIT] {
+    for id in [ids::SYSTEM_MEMORY_BUFFER_CREATE, ids::SYSTEM_MEMORY_BUFFER_DESTROY, ids::SYSTEM_EXECUTION_RESTRICTED_CREATE, ids::SYSTEM_TASK_INTERRUPT_SEND, ids::SYSTEM_IO_SEGMENT_SUBMIT] {
         check(unsafe { syscall2(id,u64::MAX,u64::MAX) } == UNSUPPORTED,44);
     }
-    say!("abir reserved_unsupported=6 invalid_pointer_untouched=true");
+    check(unsafe { syscall2(ids::SYSTEM_MEMORY_DMA_MAP,u64::MAX,u64::MAX) } == INVALID_ADDRESS,44);
+    say!("abir reserved_unsupported=5 dma_pointer_rejected=true invalid_pointer_untouched=true");
 }
 
 /// 程序入口（链接脚本把它放在代码段最前面）。

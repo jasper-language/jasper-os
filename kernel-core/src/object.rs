@@ -226,6 +226,8 @@ pub enum ObjectType {
     Mutex,
     /// Hardware-virtualization vCPU.
     Vcpu,
+    /// Device-visible mapping of a pinned Memory range.
+    DmaMapping,
     EventSource,
     Subscription,
 }
@@ -233,7 +235,7 @@ pub enum ObjectType {
 impl ObjectType {
     /// 全部句柄类型（按声明顺序；登记表与验证用）。
     /// All handle types in declaration order.
-    pub const ALL: [ObjectType; 14] = [
+    pub const ALL: [ObjectType; 15] = [
         ObjectType::Event,
         ObjectType::Timer,
         ObjectType::Ring,
@@ -246,6 +248,7 @@ impl ObjectType {
         ObjectType::Memory,
         ObjectType::Mutex,
         ObjectType::Vcpu,
+        ObjectType::DmaMapping,
         ObjectType::EventSource,
         ObjectType::Subscription,
     ];
@@ -270,6 +273,7 @@ impl ObjectType {
             ObjectType::Memory => "Memory",
             ObjectType::Mutex => "Mutex",
             ObjectType::Vcpu => "Vcpu",
+            ObjectType::DmaMapping => "DmaMapping",
             ObjectType::EventSource => "EventSource",
             ObjectType::Subscription => "Subscription",
             ObjectType::Channel => "Channel",

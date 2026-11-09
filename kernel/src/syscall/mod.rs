@@ -156,7 +156,7 @@ fn error_name(ret: i64) -> &'static str {
 /// 每次系统调用返回前最多销毁的死亡对象数（见 [`on_syscall`] 的出口清理点）。
 const CLEANUP_PER_CALL: usize = 16;
 /// 创建对象前先回收死亡对象的调用（进程创建在 `spawn_child` 里自带回收）。
-const RECLAIM_BEFORE: [u32; 8] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, SYSTEM_CHANNEL_CREATE, SYSTEM_MEMORY_OBJECT_CREATE,SYSTEM_EVENT_SOURCE_CREATE,SYSTEM_EVENT_SUBSCRIPTION_CREATE,SYSTEM_SYNC_MUTEX_CREATE,SYSTEM_TIME_TIMER_CREATE];
+const RECLAIM_BEFORE: [u32; 9] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, SYSTEM_CHANNEL_CREATE, SYSTEM_MEMORY_OBJECT_CREATE,SYSTEM_EVENT_SOURCE_CREATE,SYSTEM_EVENT_SUBSCRIPTION_CREATE,SYSTEM_SYNC_MUTEX_CREATE,SYSTEM_TIME_TIMER_CREATE,SYSTEM_MEMORY_DMA_MAP];
 
 /// 系统调用入口（arch 调用；可能不返回——`system.task.exit` 会结束当前任务）。
 pub fn on_syscall(a: &SyscallArgs) -> i64 {
@@ -225,7 +225,7 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
 }
 
 /// 用户指针错误 → 系统调用错误码。
-fn user_ptr_err(e: UserPtrError) -> i64 {
+pub(crate) fn user_ptr_err(e: UserPtrError) -> i64 {
     match e {
         UserPtrError::OutOfMemory => err(SYSTEM_MEMORY_ERROR_OUT_OF_MEMORY),
         UserPtrError::Quota => err(SYSTEM_ERROR_QUOTA_EXCEEDED),
@@ -500,7 +500,7 @@ syscall_dispatch! {
     SYSTEM_MEMORY_BUFFER_DESTROY => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
     SYSTEM_EXECUTION_RESTRICTED_CREATE => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
     SYSTEM_TASK_INTERRUPT_SEND => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
-    SYSTEM_MEMORY_DMA_MAP => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
+    SYSTEM_MEMORY_DMA_MAP => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { memory_dma_map(a.args[0], a.args[1]) },
     SYSTEM_IO_SEGMENT_SUBMIT => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ERROR_UNSUPPORTED) },
     SYSTEM_TASK_SYSCALLS_SET => |_e: &AbiEntry, a: &SyscallArgs, task_id: u64| {
         crate::task_control::syscalls_set(task_id, a.args[0], a.args[1], a.args[2])
@@ -529,6 +529,18 @@ syscall_dispatch! {
     // `system.abi.get`：返回内核声明的原生 ABI 世代（major<<32 | minor<<16 | patch）。
     // 这是装载检查之外的**发现**通道；它不能替代装载阶段的最低世代检查。
     SYSTEM_ABI_GET => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { kernel_core::abi_version::NATIVE.packed() as i64 },
+    SYSTEM_INFO_GET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        crate::usi::info_get(a.args[0], a.args[1], a.args[2])
+    },
+    SYSTEM_PROCESS_LIST => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        crate::usi::process_list(a.args[0], a.args[1], a.args[2])
+    },
+    SYSTEM_MODULE_LIST => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        crate::usi::module_list(a.args[0], a.args[1], a.args[2])
+    },
+    SYSTEM_MODULE_LIFECYCLE_GET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        crate::usi::module_lifecycle(a.args[0], a.args[1], a.args[2])
+    },
 }
 
 // 编译期证明：分发表在登记表之内，且两者基数相同 ⇒ 两个集合完全相等。
@@ -811,4 +823,32 @@ fn memory_object_map(raw:u64,ptr:u64) -> i64 {
 fn memory_object_unmap(address:u64,pages:u64) -> i64 {
     let Some(pid)=proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
     match proc::unmap_memory(pid,address,pages) { Ok(())=>0, Err(e)=>mem_err(e) }
+}
+
+/// DRV-3: map a validated Memory range to an opaque device IOVA.
+///
+/// The returned handle owns the mapping. Its descriptor output slot receives
+/// the IOVA; the kernel never exposes a host physical address.
+fn memory_dma_map(raw: u64, ptr: u64) -> i64 {
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let mut bytes = [0u8; kernel_core::dma_abi::ARGS_BYTES];
+    if let Err(error) = copy_from_user(&mut bytes, ptr, kernel_core::dma_abi::ARGS_BYTES) {
+        return user_ptr_err(error);
+    }
+    let Some(args) = kernel_core::dma_abi::MapArgs::decode(&bytes) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let (handle, iova) = match crate::dma::create_for(pid, handle_arg(raw), args) {
+        Ok(mapped) => mapped,
+        Err(error) => return crate::dma::error_code(error),
+    };
+    let mut output = args;
+    output.iova = iova;
+    if let Err(error) = copy_to_user(ptr, &output.encode(), kernel_core::dma_abi::ARGS_BYTES) {
+        let _ = proc::close_handle_for(pid, handle);
+        return user_ptr_err(error);
+    }
+    handle.raw() as i64
 }

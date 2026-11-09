@@ -23,6 +23,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 [features]
 # Author: chatgpt. Isolated capacity validation; default capacity bounds unchanged.
 evt1-capacity = []
+# SEC-1 dedicated acceptance hooks; never enabled in production profiles.
+sec1-verify = []
 # Opt-in Kani harnesses for the native ABI generation contract (issue #8).
 # 默认 Kani 套件不包含这些证明，避免改变既有 FV-1 harness 计数。
 abi-fv = []

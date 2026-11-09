@@ -1124,8 +1124,8 @@ pub const OPERATIONS: &[OperationContract] = &[
     },
     OperationContract {
         name: "system.memory.dma.map",
-        args: "reserved",
-        result: "unsupported",
+        args: "memory_handle,u64:dma_map_args_ptr",
+        result: "handle_or_error",
     },
     OperationContract {
         name: "system.io.segment.submit",
@@ -1231,6 +1231,26 @@ pub const OPERATIONS: &[OperationContract] = &[
         name: "system.time.timer.get",
         args: "timer_handle",
         result: "u64:remaining_ns_or_error",
+    },
+    OperationContract {
+        name: "system.info.get",
+        args: "u64:request_id,u64:buf,u64:cap",
+        result: "bytes_or_required",
+    },
+    OperationContract {
+        name: "system.process.list",
+        args: "u64:request_id,u64:buf,u64:cap",
+        result: "bytes_or_required",
+    },
+    OperationContract {
+        name: "system.module.list",
+        args: "u64:request_id,u64:buf,u64:cap",
+        result: "bytes_or_required",
+    },
+    OperationContract {
+        name: "system.module.lifecycle.get",
+        args: "u64:request_id,u64:buf,u64:cap",
+        result: "bytes_or_required",
     },
 ];
 

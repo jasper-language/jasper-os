@@ -134,11 +134,11 @@ pub fn spawn_child(parent: ObjId, image: &[u8], calls: SyscallSet, arg: u64, cpu
         Ok(())
     })?;
     let child = super::create(CHILD_NAME, calls).map_err(SpawnError::Proc)?;
-    // DRV-0：子进程继承父进程的应用身份；用户进程无法改写（内核侧 `set_app` 只允许一次）。
-    if let Some(app) = super::app(parent) {
-        if app != 0 {
-            let _ = super::set_app(child, app);
-        }
+    // DRV-0/SEC-1：子进程继承父进程完整应用身份，包括内容测量；
+    // 旧 32 位 app 投影仅为兼容字段，不能作为内部身份来源。
+    if let Err(error) = super::inherit_application(parent, child) {
+        discard(child);
+        return Err(SpawnError::Proc(error));
     }
     let base = arch::USER_WINDOW.0;
     let prepared = (|| {

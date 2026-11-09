@@ -32,6 +32,7 @@ use alloc::vec::Vec;
 use kernel_core::object::{HandleId, HandleRaw, ObjectRef, ObjectType, Rights, HANDLE_BYTES};
 use kernel_core::objtable::ObjId;
 use kernel_core::ring_abi::MsgDesc;
+use kernel_core::security::SecurityContext;
 
 use crate::kobj::{self, KObject, Table};
 use crate::mm::pin::PinnedRange;
@@ -71,6 +72,9 @@ struct Message {
     sender: ObjId,
     /// 发送时定格的发送方应用身份（0 = 发送时未绑定）；接收方据此判断来源，发送方无法伪造。
     sender_app: u32,
+    /// Boot-scoped sender context captured under the same object-table lock as
+    /// enqueue. SEC-1 carries it; policy consumption belongs to SEC-2/3.
+    sender_security: SecurityContext,
 }
 
 /// Channel 的一个端点。
@@ -227,6 +231,13 @@ pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, han
     if body.len() > MAX_MSG_BYTES || handle_vals.len() > MAX_MSG_HANDLES {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     }
+    let Some(sender_security) = t
+        .security(pid)
+        .ok()
+        .and_then(|context| context.require_active().ok())
+    else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
     let me = match proc::resolve_in(t, pid, h, ObjectType::Channel, Rights::WRITE) {
         Ok(id) => id,
         Err(e) => return proc_err(e),
@@ -282,14 +293,27 @@ pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, han
     }
     QUEUED_TOTAL.fetch_add(n, Ordering::Relaxed);
     // 身份在入队时定格：读取与入队都在本函数已持有的同一把表锁内，发送方此后退出/被回收也不改变这个值。
-    let sender_app = proc::app_in(t, pid).unwrap_or(0);
+    let sender_app = crate::security::legacy_app_id(sender_security.application);
     if let Some(p) = ep_mut(t, peer) {
         p.queued_bytes += n;
-        p.queue.push_back(Message { body, handles, sender: pid, sender_app });
+        p.queue.push_back(Message {
+            body,
+            handles,
+            sender: pid,
+            sender_app,
+            sender_security,
+        });
     }
     wake_in(t, peer);
     wake_sleepers_in(t, peer);
     n as i64
+}
+
+/// SEC-1 inspection helper: context of the oldest queued message.
+pub(crate) fn queued_sender_security(t: &mut Table, endpoint: ObjId) -> Option<SecurityContext> {
+    ep_mut(t, endpoint)
+        .and_then(|endpoint| endpoint.queue.front())
+        .map(|message| message.sender_security)
 }
 
 /// 唤醒在端点 `id` 上同步阻塞接收的任务（消息到达或关闭时调用，锁内）。

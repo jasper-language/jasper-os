@@ -231,6 +231,21 @@ pub fn all(dev: &Signer) -> Vec<Vector> {
     let mut u = native_builder(Arch::X86_64);
     u.extensions = vec![ExtensionIn { name: b"ui.layout".to_vec(), version: 3, critical: false, content: vec![1, 2, 3] }];
     add("ok-unknown-noncritical-ext", u.finish_signed(dev).expect("ok-unknown-ext"), "ok");
+    let source_text = b"module source_demo\n";
+    let mut source = native_builder(Arch::X86_64);
+    source.extensions = vec![ExtensionIn {
+        name: crate::EXT_JASPER_SOURCE.as_bytes().to_vec(),
+        version: 1,
+        critical: false,
+        content: crate::source::encode(
+            crate::source::LANGUAGE_JASPER,
+            crate::source::COMPRESSION_NONE,
+            source_text.len() as u32,
+            source_text,
+        )
+        .expect("source envelope"),
+    }];
+    add("ok-source-v1", source.finish_signed(dev).expect("ok-source"), "ok");
     let deps = "core.depends = jaso-base@>=1.0,<2.0\ncore.runtime = >=0.1,<0.2\n";
     add("ok-depends-runtime", remanifest(&native, &[MANIFEST.as_bytes(), deps.as_bytes()].concat(), dev), "ok");
     let (mut head, bodies) = split(&native);
@@ -298,6 +313,24 @@ pub fn all(dev: &Signer) -> Vec<Vector> {
     };
     add("bad-extension-malformed", ext(ExtensionIn { name: b"nodot".to_vec(), version: 1, critical: false, content: vec![] }), "extension.malformed");
     add("bad-extension-critical", ext(ExtensionIn { name: b"ui.layout".to_vec(), version: 1, critical: true, content: vec![] }), "extension.critical");
+    let mut bad_source = crate::source::encode(
+        crate::source::LANGUAGE_JASPER,
+        crate::source::COMPRESSION_NONE,
+        source_text.len() as u32,
+        source_text,
+    )
+    .expect("source envelope");
+    bad_source[5] = 2;
+    add(
+        "bad-source-language",
+        ext(ExtensionIn {
+            name: crate::EXT_JASPER_SOURCE.as_bytes().to_vec(),
+            version: 1,
+            critical: false,
+            content: bad_source,
+        }),
+        "extension.malformed",
+    );
     let (head, mut bodies) = split(&ext(import_ext()));
     let second = bodies[8].clone();
     bodies.insert(9, second);

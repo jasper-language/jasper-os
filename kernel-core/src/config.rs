@@ -65,8 +65,10 @@ pub struct MemoryParams {
     pub heap_grow_step: u64,
     /// 内存压力分级与保留帧。
     pub pressure: PressureParams,
-    /// 每个进程最多拥有的数据帧数。
+    /// 每个进程可选的数据帧上限；`0` 表示默认不设固定上限，仅受全局物理内存与压力准入约束。
     pub max_process_frames: usize,
+    /// 每个进程可创建的 VM guest RAM 上限；独立于普通进程匿名内存配额。
+    pub max_vm_guest_frames: usize,
     /// 单次映射 / 取消映射最多涉及的页数。
     pub max_map_pages: u64,
     /// 页帧位图的字数（每字 64 帧；16K 字 ≈ 4 GiB，256K 字 ≈ 64 GiB）。
@@ -243,7 +245,10 @@ impl KernelConfig {
     /// 每次增长 64 KiB；1024 个内核对象；每进程 64 个句柄。
     pub const STANDARD: KernelConfig = KernelConfig {
         name: "standard",
-        clock: ClockParams { timer_hz: 100, boot_ticks: 25 },
+        clock: ClockParams {
+            timer_hz: 100,
+            boot_ticks: 25,
+        },
         sched: SchedParams {
             qos: QosParams::DEFAULT,
             max_tasks: 64,
@@ -257,12 +262,16 @@ impl KernelConfig {
             heap_max: 64 * 1024 * 1024,
             heap_grow_step: 64 * 1024,
             pressure: PressureParams::DEFAULT,
-            max_process_frames: 8192,
+            max_process_frames: 0,
+            max_vm_guest_frames: 32 * 1024,
             max_map_pages: 1024,
             // 256K 字 × 64 帧 × 4 KiB = 64 GiB 物理内存（.bss 占 2 MiB）。
             frame_bitmap_words: 256 * 1024,
         },
-        objects: ObjectParams { max_objects: 1024, handles_per_process: 64 },
+        objects: ObjectParams {
+            max_objects: 1024,
+            handles_per_process: 64,
+        },
         ring: RingParams {
             cq_capacity: 64,
             blocks_per_ring: 64,
@@ -276,17 +285,31 @@ impl KernelConfig {
             max_process_bytes: 4 * 1024 * 1024,
             max_total_bytes: 16 * 1024 * 1024,
         },
-        diag: DiagParams { trace_capacity: 32, irq_queue_len: 64 },
-        policy: PolicyParams { memory: MemoryPolicy::PressureAware, power: PowerPolicy::Tickless, idle_tick_divisor: 4, group_share_permille: 250 },
+        diag: DiagParams {
+            trace_capacity: 32,
+            irq_queue_len: 64,
+        },
+        policy: PolicyParams {
+            memory: MemoryPolicy::PressureAware,
+            power: PowerPolicy::Tickless,
+            idle_tick_divisor: 4,
+            group_share_permille: 250,
+        },
     };
 
     /// 紧凑配置档：250 Hz、时间片减半（交互档 1 tick），看门狗阈值按相同的墙钟时间（0.5 秒）换算；
     /// 任务槽位、内核对象、在飞请求、IPC 字节配额与堆增长步长都更小；内存压力阈值与保留帧更低。
     pub const COMPACT: KernelConfig = KernelConfig {
         name: "compact",
-        clock: ClockParams { timer_hz: 250, boot_ticks: 25 },
+        clock: ClockParams {
+            timer_hz: 250,
+            boot_ticks: 25,
+        },
         sched: SchedParams {
-            qos: QosParams { quantum: [1, 1, 2, 2], ..QosParams::DEFAULT },
+            qos: QosParams {
+                quantum: [1, 1, 2, 2],
+                ..QosParams::DEFAULT
+            },
             max_tasks: 32,
             max_rt: 8,
             kernel_stack_bytes: 64 * 1024,
@@ -297,13 +320,21 @@ impl KernelConfig {
         memory: MemoryParams {
             heap_max: 32 * 1024 * 1024,
             heap_grow_step: 16 * 1024,
-            pressure: PressureParams { low_permille: 100, critical_permille: 40, reserve_frames: 128 },
-            max_process_frames: 8192,
+            pressure: PressureParams {
+                low_permille: 100,
+                critical_permille: 40,
+                reserve_frames: 128,
+            },
+            max_process_frames: 0,
+            max_vm_guest_frames: 16 * 1024,
             max_map_pages: 1024,
             // 紧凑档只覆盖 4 GiB，把 .bss 压回 128 KiB。
             frame_bitmap_words: 16 * 1024,
         },
-        objects: ObjectParams { max_objects: 512, handles_per_process: 64 },
+        objects: ObjectParams {
+            max_objects: 512,
+            handles_per_process: 64,
+        },
         ring: RingParams {
             cq_capacity: 64,
             blocks_per_ring: 64,
@@ -317,8 +348,16 @@ impl KernelConfig {
             max_process_bytes: 2 * 1024 * 1024,
             max_total_bytes: 8 * 1024 * 1024,
         },
-        diag: DiagParams { trace_capacity: 16, irq_queue_len: 32 },
-        policy: PolicyParams { memory: MemoryPolicy::FixedThreshold, power: PowerPolicy::Periodic, idle_tick_divisor: 1, group_share_permille: 500 },
+        diag: DiagParams {
+            trace_capacity: 16,
+            irq_queue_len: 32,
+        },
+        policy: PolicyParams {
+            memory: MemoryPolicy::FixedThreshold,
+            power: PowerPolicy::Periodic,
+            idle_tick_divisor: 1,
+            group_share_permille: 500,
+        },
     };
 
     /// 检查参数之间的约束；通过返回 `Ok(())`，否则返回第一个违反约束的参数名。`const`：内核在编译期调用。
@@ -328,11 +367,17 @@ impl KernelConfig {
         match (self.policy.power, self.policy.idle_tick_divisor) {
             (PowerPolicy::Tickless, d) if d >= 2 => {}
             (PowerPolicy::Periodic, 1) => {}
-            _ => return Err(ConfigError { field: "policy.idle_tick_divisor" }),
+            _ => {
+                return Err(ConfigError {
+                    field: "policy.idle_tick_divisor",
+                })
+            }
         }
         // 组份额必须在 (0, 1000] 内，否则组永远得不到处理器或永远独占。
         if self.policy.group_share_permille == 0 || self.policy.group_share_permille > 1000 {
-            return Err(ConfigError { field: "policy.group_share_permille" });
+            return Err(ConfigError {
+                field: "policy.group_share_permille",
+            });
         }
         macro_rules! require {
             ($cond:expr, $field:literal) => {
@@ -342,7 +387,10 @@ impl KernelConfig {
             };
         }
         let c = &self.clock;
-        require!(c.timer_hz >= bounds::MIN_TIMER_HZ && c.timer_hz <= bounds::MAX_TIMER_HZ, "timer_hz");
+        require!(
+            c.timer_hz >= bounds::MIN_TIMER_HZ && c.timer_hz <= bounds::MAX_TIMER_HZ,
+            "timer_hz"
+        );
         require!(c.boot_ticks >= 1, "boot_ticks");
 
         let s = &self.sched;
@@ -357,43 +405,80 @@ impl KernelConfig {
             i += 1;
         }
         require!(s.qos.decay_period >= 1, "decay_period");
-        require!(s.max_tasks >= bounds::MIN_TASKS && s.max_tasks <= bounds::MAX_TASKS, "max_tasks");
-        require!(s.max_rt >= bounds::MIN_RT && s.max_rt <= bounds::MAX_RT && s.max_rt < s.max_tasks, "max_rt");
         require!(
-            s.kernel_stack_bytes >= bounds::MIN_KERNEL_STACK && s.kernel_stack_bytes as u64 % PAGE == 0,
+            s.max_tasks >= bounds::MIN_TASKS && s.max_tasks <= bounds::MAX_TASKS,
+            "max_tasks"
+        );
+        require!(
+            s.max_rt >= bounds::MIN_RT && s.max_rt <= bounds::MAX_RT && s.max_rt < s.max_tasks,
+            "max_rt"
+        );
+        require!(
+            s.kernel_stack_bytes >= bounds::MIN_KERNEL_STACK
+                && s.kernel_stack_bytes as u64 % PAGE == 0,
             "kernel_stack_bytes"
         );
         // 看门狗必须比任何一档的时间片都长，否则正常用完时间片的任务也会被记录。
         require!(s.watchdog_ticks > max_quantum, "watchdog_ticks");
         require!(s.watchdog_log >= 1, "watchdog_log");
-        require!(s.cpu_burst_ticks >= 1 && s.cpu_burst_ticks <= crate::sched::limit::MAX_BURST_TICKS, "cpu_burst_ticks");
+        require!(
+            s.cpu_burst_ticks >= 1 && s.cpu_burst_ticks <= crate::sched::limit::MAX_BURST_TICKS,
+            "cpu_burst_ticks"
+        );
 
         let m = &self.memory;
-        require!(m.heap_grow_step >= PAGE && m.heap_grow_step % PAGE == 0, "heap_grow_step");
-        require!(m.heap_max % PAGE == 0 && m.heap_max >= m.heap_grow_step, "heap_max");
+        require!(
+            m.heap_grow_step >= PAGE && m.heap_grow_step % PAGE == 0,
+            "heap_grow_step"
+        );
+        require!(
+            m.heap_max % PAGE == 0 && m.heap_max >= m.heap_grow_step,
+            "heap_max"
+        );
         // IPC 队列里的消息体都在内核堆上：全系统配额必须给堆留下至少同样多的余量。
-        require!(self.ipc.max_total_bytes as u64 * 2 <= m.heap_max, "heap_max");
+        require!(
+            self.ipc.max_total_bytes as u64 * 2 <= m.heap_max,
+            "heap_max"
+        );
         require!(
             m.pressure.critical_permille > 0
                 && m.pressure.critical_permille < m.pressure.low_permille
                 && m.pressure.low_permille <= 1000,
             "pressure"
         );
-        require!(m.max_process_frames >= 1, "max_process_frames");
+        require!(m.max_vm_guest_frames >= 1, "max_vm_guest_frames");
         require!(m.max_map_pages >= 1, "max_map_pages");
 
         let o = &self.objects;
-        require!(o.handles_per_process >= 1 && o.max_objects >= o.handles_per_process, "max_objects");
-        require!(o.max_objects >= bounds::MIN_OBJECTS && o.max_objects <= bounds::MAX_OBJECTS, "max_objects");
+        require!(
+            o.handles_per_process >= 1 && o.max_objects >= o.handles_per_process,
+            "max_objects"
+        );
+        require!(
+            o.max_objects >= bounds::MIN_OBJECTS && o.max_objects <= bounds::MAX_OBJECTS,
+            "max_objects"
+        );
 
         let r = &self.ring;
-        require!(r.cq_capacity >= 1 && r.blocks_per_ring >= r.cq_capacity, "blocks_per_ring");
-        require!(r.sq_batch >= 1 && r.sq_batch <= r.blocks_per_ring, "sq_batch");
+        require!(
+            r.cq_capacity >= 1 && r.blocks_per_ring >= r.cq_capacity,
+            "blocks_per_ring"
+        );
+        require!(
+            r.sq_batch >= 1 && r.sq_batch <= r.blocks_per_ring,
+            "sq_batch"
+        );
         require!(r.max_rings_per_process >= 1, "max_rings_per_process");
-        require!(r.max_in_flight_per_process as usize >= r.blocks_per_ring, "max_in_flight_per_process");
+        require!(
+            r.max_in_flight_per_process as usize >= r.blocks_per_ring,
+            "max_in_flight_per_process"
+        );
 
         let p = &self.ipc;
-        require!(p.max_endpoints_per_process >= 1, "max_endpoints_per_process");
+        require!(
+            p.max_endpoints_per_process >= 1,
+            "max_endpoints_per_process"
+        );
         require!(
             p.max_queue_bytes >= bounds::MSG_BYTES
                 && p.max_queue_bytes <= p.max_process_bytes
@@ -425,19 +510,44 @@ impl KernelConfig {
         f("cpu_burst_ticks", self.sched.cpu_burst_ticks as u64);
         f("heap_max", self.memory.heap_max);
         f("heap_grow_step", self.memory.heap_grow_step);
-        f("pressure_low_permille", self.memory.pressure.low_permille as u64);
-        f("pressure_critical_permille", self.memory.pressure.critical_permille as u64);
-        f("pressure_reserve_frames", self.memory.pressure.reserve_frames as u64);
+        f(
+            "pressure_low_permille",
+            self.memory.pressure.low_permille as u64,
+        );
+        f(
+            "pressure_critical_permille",
+            self.memory.pressure.critical_permille as u64,
+        );
+        f(
+            "pressure_reserve_frames",
+            self.memory.pressure.reserve_frames as u64,
+        );
         f("max_process_frames", self.memory.max_process_frames as u64);
+        f(
+            "max_vm_guest_frames",
+            self.memory.max_vm_guest_frames as u64,
+        );
         f("max_map_pages", self.memory.max_map_pages);
         f("max_objects", self.objects.max_objects as u64);
-        f("handles_per_process", self.objects.handles_per_process as u64);
+        f(
+            "handles_per_process",
+            self.objects.handles_per_process as u64,
+        );
         f("cq_capacity", self.ring.cq_capacity as u64);
         f("blocks_per_ring", self.ring.blocks_per_ring as u64);
         f("sq_batch", self.ring.sq_batch as u64);
-        f("max_rings_per_process", self.ring.max_rings_per_process as u64);
-        f("max_in_flight_per_process", self.ring.max_in_flight_per_process as u64);
-        f("max_endpoints_per_process", self.ipc.max_endpoints_per_process as u64);
+        f(
+            "max_rings_per_process",
+            self.ring.max_rings_per_process as u64,
+        );
+        f(
+            "max_in_flight_per_process",
+            self.ring.max_in_flight_per_process as u64,
+        );
+        f(
+            "max_endpoints_per_process",
+            self.ipc.max_endpoints_per_process as u64,
+        );
         f("ipc_max_queue_bytes", self.ipc.max_queue_bytes as u64);
         f("ipc_max_process_bytes", self.ipc.max_process_bytes as u64);
         f("ipc_max_total_bytes", self.ipc.max_total_bytes as u64);
@@ -448,14 +558,22 @@ impl KernelConfig {
     /// 启动期容量的默认值（启动容量记录未覆盖时使用，见 [`crate::capacity`]）。
     /// Default boot-time capacities taken from this profile.
     pub const fn boot_capacity(&self) -> crate::capacity::BootCapacity {
-        crate::capacity::BootCapacity { objects: self.objects.max_objects, tasks: self.sched.max_tasks, rt: self.sched.max_rt }
+        crate::capacity::BootCapacity {
+            objects: self.objects.max_objects,
+            tasks: self.sched.max_tasks,
+            rt: self.sched.max_rt,
+        }
     }
 
     /// 时间换算：`ms` 毫秒对应的 tick 数（向上取整，至少 1）。
     /// Convert milliseconds to ticks at this profile's timer frequency (rounded up, at least 1).
     pub const fn ms_to_ticks(&self, ms: u64) -> u64 {
         let t = (ms * self.clock.timer_hz as u64).div_ceil(1000);
-        if t == 0 { 1 } else { t }
+        if t == 0 {
+            1
+        } else {
+            t
+        }
     }
 }
 
@@ -481,11 +599,27 @@ mod tests {
         let s = KernelConfig::STANDARD;
         assert_eq!((s.clock.timer_hz, s.clock.boot_ticks), (100, 25));
         assert_eq!(s.sched.qos, QosParams::DEFAULT);
-        assert_eq!((s.sched.max_tasks, s.sched.kernel_stack_bytes, s.sched.watchdog_ticks), (64, 64 * 1024, 50));
+        assert_eq!(
+            (
+                s.sched.max_tasks,
+                s.sched.kernel_stack_bytes,
+                s.sched.watchdog_ticks
+            ),
+            (64, 64 * 1024, 50)
+        );
         assert_eq!(s.memory.pressure, PressureParams::DEFAULT);
-        assert_eq!((s.memory.heap_max, s.memory.heap_grow_step), (64 << 20, 64 << 10));
-        assert_eq!((s.objects.max_objects, s.objects.handles_per_process), (1024, 64));
-        assert_eq!((s.ring.cq_capacity, s.ring.max_in_flight_per_process), (64, 256));
+        assert_eq!(
+            (s.memory.heap_max, s.memory.heap_grow_step),
+            (64 << 20, 64 << 10)
+        );
+        assert_eq!(
+            (s.objects.max_objects, s.objects.handles_per_process),
+            (1024, 64)
+        );
+        assert_eq!(
+            (s.ring.cq_capacity, s.ring.max_in_flight_per_process),
+            (64, 256)
+        );
         assert_eq!(s.ipc.max_total_bytes, 16 << 20);
     }
 
@@ -555,15 +689,23 @@ mod tests {
         rejects("timer_hz", |c| c.clock.timer_hz = 5000);
         rejects("boot_ticks", |c| c.clock.boot_ticks = 0);
         rejects("quantum", |c| c.sched.qos.quantum[2] = 0);
-        rejects("min_share_permille", |c| c.sched.qos.min_share_permille[1] = 1001);
+        rejects("min_share_permille", |c| {
+            c.sched.qos.min_share_permille[1] = 1001
+        });
         rejects("decay_period", |c| c.sched.qos.decay_period = 0);
         rejects("max_tasks", |c| c.sched.max_tasks = 4);
         rejects("max_tasks", |c| c.sched.max_tasks = bounds::MAX_TASKS + 1);
         rejects("max_rt", |c| c.sched.max_rt = 0);
         rejects("max_rt", |c| c.sched.max_rt = bounds::MAX_RT + 1);
-        rejects("max_objects", |c| c.objects.max_objects = bounds::MAX_OBJECTS + 1);
-        rejects("kernel_stack_bytes", |c| c.sched.kernel_stack_bytes = 16 * 1024);
-        rejects("kernel_stack_bytes", |c| c.sched.kernel_stack_bytes = 64 * 1024 + 8);
+        rejects("max_objects", |c| {
+            c.objects.max_objects = bounds::MAX_OBJECTS + 1
+        });
+        rejects("kernel_stack_bytes", |c| {
+            c.sched.kernel_stack_bytes = 16 * 1024
+        });
+        rejects("kernel_stack_bytes", |c| {
+            c.sched.kernel_stack_bytes = 64 * 1024 + 8
+        });
         rejects("watchdog_ticks", |c| c.sched.watchdog_ticks = 4);
         rejects("watchdog_log", |c| c.sched.watchdog_log = 0);
         rejects("cpu_burst_ticks", |c| c.sched.cpu_burst_ticks = 0);
@@ -573,16 +715,24 @@ mod tests {
         rejects("heap_max", |c| c.memory.heap_max = 16 * 1024 * 1024);
         rejects("pressure", |c| c.memory.pressure.critical_permille = 200);
         rejects("pressure", |c| c.memory.pressure.critical_permille = 0);
-        rejects("max_process_frames", |c| c.memory.max_process_frames = 0);
+        rejects("max_vm_guest_frames", |c| c.memory.max_vm_guest_frames = 0);
         rejects("max_map_pages", |c| c.memory.max_map_pages = 0);
         rejects("max_objects", |c| c.objects.max_objects = 10);
         rejects("blocks_per_ring", |c| c.ring.blocks_per_ring = 32);
         rejects("sq_batch", |c| c.ring.sq_batch = 0);
-        rejects("max_rings_per_process", |c| c.ring.max_rings_per_process = 0);
-        rejects("max_in_flight_per_process", |c| c.ring.max_in_flight_per_process = 10);
-        rejects("max_endpoints_per_process", |c| c.ipc.max_endpoints_per_process = 0);
+        rejects("max_rings_per_process", |c| {
+            c.ring.max_rings_per_process = 0
+        });
+        rejects("max_in_flight_per_process", |c| {
+            c.ring.max_in_flight_per_process = 10
+        });
+        rejects("max_endpoints_per_process", |c| {
+            c.ipc.max_endpoints_per_process = 0
+        });
         rejects("ipc_bytes", |c| c.ipc.max_queue_bytes = 1024);
-        rejects("ipc_bytes", |c| c.ipc.max_process_bytes = c.ipc.max_total_bytes + 1);
+        rejects("ipc_bytes", |c| {
+            c.ipc.max_process_bytes = c.ipc.max_total_bytes + 1
+        });
         rejects("trace_capacity", |c| c.diag.trace_capacity = 0);
         rejects("irq_queue_len", |c| c.diag.irq_queue_len = 0);
     }

@@ -33,6 +33,22 @@ use jaso::{Arch, Jaso, Stage};
 /// 验收用的「另一个发布者」：种子公开、只用于验收。
 const OTHER_PUBLISHER_SEED: &[u8] = b"jasper-os acceptance: other publisher seed v0";
 
+fn build_container(root: &Path, target_dir: &Path, triple: &str) -> Vec<u8> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let status = std::process::Command::new(cargo)
+        .current_dir(root)
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_TARGET_DIR")
+        .args(["build", "--release", "--target", triple, "-p", "user-modbox", "--target-dir"])
+        .arg(target_dir)
+        .status()
+        .expect("无法启动 cargo 构建容器程序");
+    assert!(status.success(), "容器程序 user-modbox 构建失败");
+    let elf = target_dir.join(triple).join("release").join("user-modbox");
+    std::fs::read(&elf).unwrap_or_else(|e| panic!("读取 {} 失败：{}", elf.display(), e))
+}
+
 /// 由合格模块改出一个变体：指令集、装载阶段（清单的 `core.stage` 随之改写）、清单、去掉一个导出、签名者。
 fn rebuild(img: &Jaso<'_>, arch: Arch, stage: Stage, manifest: &str, drop_export: Option<&str>, signer: Option<&Signer>) -> Vec<u8> {
     let mut b = Builder::from_file(img, 0).expect("合格模块至少有一个镜像");
@@ -117,6 +133,7 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=--defsym=JSR_ABI_PATCH={}", abi.patch);
     let root = dir.join("../..");
     println!("cargo:rerun-if-changed={}", dir.join("link.ld").display());
+    println!("cargo:rerun-if-env-changed=JSR_JASO1_MULTI");
     for f in ["modules/demo/src/main.rs", "modules/demo/Cargo.toml", "modules/demo/build.rs", "modules/demo/jaso.manifest", "modules/l1demo/src/main.rs", "modules/l1demo/Cargo.toml", "modules/l1demo/build.rs", "modules/l1demo/jaso.manifest", "modules/l1demo/jaso.import", "jaso/src"] {
         println!("cargo:rerun-if-changed={}", root.join(f).display());
     }
@@ -141,6 +158,15 @@ fn main() {
     let img = Jaso::parse(&good).expect("打包结果未通过校验");
     let write = |name: &str, bytes: &[u8]| std::fs::write(Path::new(&out).join(name), bytes).expect("写入失败");
     write("demo.jaso", &good);
+    let multi = match std::env::var_os("JSR_JASO1_MULTI") {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            println!("cargo:rerun-if-changed={}", path.display());
+            std::fs::read(&path).unwrap_or_else(|e| panic!("读取多架构容器 {} 失败：{}", path.display(), e))
+        }
+        None => good.clone(),
+    };
+    write("demo-multi.jaso", &multi);
     write("trust-dev.key", &dev.public_key());
     write("trust-other.key", &other_pub.public_key());
     let d = Some(&dev);
@@ -165,5 +191,7 @@ fn main() {
     write("demo-otherpub.jaso", &rebuild(&img, arch, Stage::Runtime, &claims_other, None, d));
     write("demo-resigned.jaso", &rebuild(&img, arch, Stage::Runtime, &manifest, None, Some(&other_pub)));
     write("demo-claimed.jaso", &rebuild(&img, arch, Stage::Runtime, &claims_other, None, Some(&other_pub)));
+    let container = build_container(&root, &out.join("container-target"), jaso::pack::target_triple(arch));
+    write("modbox.elf", &container);
     l1_modules(&root, &out, arch, other, &dev);
 }

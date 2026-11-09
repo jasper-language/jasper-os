@@ -193,6 +193,11 @@ fn handle_irq(from_user: bool) {
         gic::end(iar);
         let line = if super::smp::cpu_index() == 0 { IrqLine::Timer } else { IrqLine::LocalTimer };
         irq::on_hardware_irq(line, from_user);
+        #[cfg(feature = "pixel6a-full-probe")]
+        if super::smp::cpu_index() == 0 && crate::clock::ticks() >= 50 {
+            crate::kprintln!("[JSR-PIXEL6A] full=alive ticks={} action=psci-off", crate::clock::ticks());
+            super::boot::pixel6a_power_off();
+        }
     } else if let Some(kind) = gic::ipi_kind(id) {
         gic::end(iar);
         irq::on_hardware_irq(IrqLine::Ipi(kind), from_user);

@@ -104,13 +104,21 @@ fn timer_cases(s: &mut Steps) -> Result<(), u32> {
     s.check(one.remaining().unwrap_or(1) == 0)?;
     s.check(one.arm_after(u64::MAX).is_err())?;
     s.check(
-        jasper_rt::error::check(sys::call(jasper_rt::ids::SYSTEM_TIME_TIMER_ARM, one.handle().raw(), 1, 2))
-            == Err(Error::INVALID_ARGUMENT),
+        jasper_rt::error::check(sys::call(
+            jasper_rt::ids::SYSTEM_TIME_TIMER_ARM,
+            one.handle().raw(),
+            1,
+            2,
+        )) == Err(Error::INVALID_ARGUMENT),
     )?;
     let weak = one.handle().duplicate(Rights::WAIT).map_err(|_| s.0)?;
     s.check(
-        jasper_rt::error::check(sys::call(jasper_rt::ids::SYSTEM_TIME_TIMER_ARM, weak.raw(), 1, 0))
-            == Err(Error::HANDLE_RIGHTS_DENIED),
+        jasper_rt::error::check(sys::call(
+            jasper_rt::ids::SYSTEM_TIME_TIMER_ARM,
+            weak.raw(),
+            1,
+            0,
+        )) == Err(Error::HANDLE_RIGHTS_DENIED),
     )?;
     weak.close().map_err(|_| s.0)?;
     let (channel_a, channel_b) = channel::pair().map_err(|_| s.0)?;
@@ -132,7 +140,10 @@ fn timer_cases(s: &mut Steps) -> Result<(), u32> {
     let periodic = time::Timer::periodic(20_000_000, 2_000_000);
     s.check(periodic.is_ok())?;
     let periodic = periodic.map_err(|_| s.0)?;
-    s.check(matches!(time::Timer::periodic(0, 0), Err(Error::INVALID_ARGUMENT)))?;
+    s.check(matches!(
+        time::Timer::periodic(0, 0),
+        Err(Error::INVALID_ARGUMENT)
+    ))?;
     s.check(periodic.arm_after(1_000_000).is_ok())?;
     s.check(periodic.wait().is_ok())?;
     let left = periodic.remaining().unwrap_or(u64::MAX);
@@ -156,15 +167,14 @@ fn timer_cases(s: &mut Steps) -> Result<(), u32> {
         0
     })
     .map_err(|_| s.0)?;
-    while !TIMER_WORKER_READY.load(Ordering::Acquire) { task::yield_now(); }
+    while !TIMER_WORKER_READY.load(Ordering::Acquire) {
+        task::yield_now();
+    }
     time::sleep(1).map_err(|_| s.0)?;
     s.check(matches!(busy.wait(), Err(Error::TIME_BUSY)))?;
     s.check(matches!(busy.cancel(), Ok(true)))?;
     s.check(busy_worker.join() == Ok(0))?;
-    s.check(
-        TIMER_WORKER_RESULT.load(Ordering::Acquire)
-            == -(Error::ASYNC_CANCELLED.id() as i64),
-    )?;
+    s.check(TIMER_WORKER_RESULT.load(Ordering::Acquire) == -(Error::ASYNC_CANCELLED.id() as i64))?;
 
     // Closing the final handle wakes the blocked waiter with a terminal result.
     TIMER_WORKER_READY.store(false, Ordering::Release);
@@ -181,14 +191,13 @@ fn timer_cases(s: &mut Steps) -> Result<(), u32> {
         0
     })
     .map_err(|_| s.0)?;
-    while !TIMER_WORKER_READY.load(Ordering::Acquire) { task::yield_now(); }
+    while !TIMER_WORKER_READY.load(Ordering::Acquire) {
+        task::yield_now();
+    }
     time::sleep(1).map_err(|_| s.0)?;
     closing.into_handle().close().map_err(|_| s.0)?;
     s.check(close_worker.join() == Ok(0))?;
-    s.check(
-        TIMER_WORKER_RESULT.load(Ordering::Acquire)
-            == -(Error::ASYNC_CANCELLED.id() as i64),
-    )?;
+    s.check(TIMER_WORKER_RESULT.load(Ordering::Acquire) == -(Error::ASYNC_CANCELLED.id() as i64))?;
 
     // A precise deadline and an overlapping tolerant request share the precise
     // hardware event; the tolerant waiter must wake inside, not after, its window.
@@ -210,7 +219,9 @@ fn timer_cases(s: &mut Steps) -> Result<(), u32> {
         0
     })
     .map_err(|_| s.0)?;
-    while !TIMER_WORKER_READY.load(Ordering::Acquire) { task::yield_now(); }
+    while !TIMER_WORKER_READY.load(Ordering::Acquire) {
+        task::yield_now();
+    }
     tolerant.wait().map_err(|_| s.0)?;
     let woke = time::monotonic_ns().map_err(|_| s.0)?;
     s.check(precise_worker.join() == Ok(0))?;
@@ -243,12 +254,13 @@ fn heap_cases(s: &mut Steps) -> Result<(), u32> {
     // 全部释放：空闲链表合并回一块或少数几块，空闲字节等于总量
     let (total, free, blocks) = heap::stats();
     s.check(total == free)?;
-    println!("rtdemo: heap after_free total={} free={} blocks={}", total, free, blocks);
+    println!(
+        "rtdemo: heap after_free total={} free={} blocks={}",
+        total, free, blocks
+    );
     // 超过堆区间上限：得到错误
     let mut big: Vec<u8> = Vec::new();
     s.check(big.try_reserve(512 << 20).is_err())?;
-    // 堆区间内、但超过进程帧配额（多次映射中途被拒并回滚）：同样得到错误，且之后堆照常可用
-    s.check(big.try_reserve(64 << 20).is_err())?;
     let small = vec![7u8; 4096];
     s.check(small.iter().all(|&b| b == 7))?;
     Ok(())
@@ -276,9 +288,14 @@ fn memory_cases(s: &mut Steps) -> Result<(), u32> {
     s.check(mem::map(base + 8 * page, 0, mem::WRITE) == Err(Error::MEMORY_INVALID_ADDRESS))?;
     s.check(mem::map(base + 8 * page, 1, 1 << 1) == Err(Error::INVALID_ARGUMENT))?;
     s.check(mem::map(0x1000, 1, mem::WRITE) == Err(Error::MEMORY_INVALID_ADDRESS))?;
-    s.check(mem::map(0x2000_0000_0000 - page, 2, mem::WRITE) == Err(Error::MEMORY_INVALID_ADDRESS))?;
+    s.check(
+        mem::map(0x2000_0000_0000 - page, 2, mem::WRITE) == Err(Error::MEMORY_INVALID_ADDRESS),
+    )?;
     s.check(mem::map(base + 8 * page, 1025, mem::WRITE) == Err(Error::MEMORY_INVALID_ADDRESS))?;
-    s.check(mem::map(base + 8 * page, u64::MAX / page, mem::WRITE) == Err(Error::MEMORY_INVALID_ADDRESS))?;
+    s.check(
+        mem::map(base + 8 * page, u64::MAX / page, mem::WRITE)
+            == Err(Error::MEMORY_INVALID_ADDRESS),
+    )?;
 
     // 改权限：写入一段返回 42 的机器码（见 RETURN_42），改为可执行后调用；W^X 与空洞被拒
     let code = base + 2 * page;
@@ -298,32 +315,25 @@ fn memory_cases(s: &mut Steps) -> Result<(), u32> {
     s.check(mem::unmap(base, 4).is_ok())?;
     s.check(mem::unmap(base, 1) == Err(Error::MEMORY_INVALID_ADDRESS))?; // 重复取消映射
 
-    // 帧配额：每次 1024 页（4 MiB）直到被拒；被拒的那次不留下任何映射；随后全部取消映射
-    // 模块区间末端到最小窗口末端之间（RISC-V32 上约 124 MiB），足够放下配额（默认 8192 帧 = 8 块）再多一块
+    // 默认没有固定的小内存上限：映射 9 块共 36 MiB，超过旧 32 MiB 默认值后再全部归还。
+    // 显式配额拒绝路径由内核侧受限账户测试覆盖。
     let quota_base = sys::MODULES_BASE + sys::MODULE_SLOTS as u64 * sys::MODULE_STRIDE;
     const _: () = assert!(
         sys::MODULES_BASE + sys::MODULE_SLOTS as u64 * sys::MODULE_STRIDE + 16 * 1024 * sys::PAGE
             <= sys::LAYOUT_END
     );
     let chunk = 1024u64;
-    let mut mapped = 0u64;
-    let refused = loop {
-        match mem::map(quota_base + mapped * chunk * page, chunk, mem::WRITE) {
-            Ok(()) => mapped += 1,
-            Err(e) => break e,
-        }
-        if mapped > 15 {
-            break Error(0);
-        }
-    };
-    s.check(refused == Error::QUOTA_EXCEEDED && mapped >= 1)?;
-    s.check(mem::unmap(quota_base + mapped * chunk * page, 1) == Err(Error::MEMORY_INVALID_ADDRESS))?;
-    for i in 0..mapped {
+    for i in 0..9 {
+        s.check(mem::map(quota_base + i * chunk * page, chunk, mem::WRITE).is_ok())?;
+    }
+    for i in 0..9 {
         s.check(mem::unmap(quota_base + i * chunk * page, chunk).is_ok())?;
     }
-    println!("rtdemo: memory quota_chunks={} refused={}", mapped, refused);
-    // 配额释放后可以再次映射
-    s.check(mem::map(quota_base, chunk, mem::WRITE).is_ok() && mem::unmap(quota_base, chunk).is_ok())?;
+    println!("rtdemo: memory small_cap_absent=true chunks=9");
+    // 归还后可以再次映射
+    s.check(
+        mem::map(quota_base, chunk, mem::WRITE).is_ok() && mem::unmap(quota_base, chunk).is_ok(),
+    )?;
     Ok(())
 }
 
@@ -378,13 +388,18 @@ fn channel_cases(s: &mut Steps) -> Result<(), u32> {
         77
     })
     .map_err(|_| 2000 + s.0)?;
-    let dup = sleeper.handle().duplicate(Rights::WAIT.union(Rights::TRANSFER)).map_err(|_| 2000 + s.0)?;
+    let dup = sleeper
+        .handle()
+        .duplicate(Rights::WAIT.union(Rights::TRANSFER))
+        .map_err(|_| 2000 + s.0)?;
     s.check(here.send_with(b"with-handle", vec![dup]).is_ok())?;
     let (_, mut back) = here.recv_vec().map_err(|_| 2000 + s.0)?;
     s.check(back.len() == 1)?;
     let returned: Handle = back.pop().ok_or(2000 + s.0)?;
     s.check(task::wait_task(&returned) == Ok(77))?;
-    s.check(returned.duplicate(Rights::WAIT.union(Rights::CONTROL)) == Err(Error::HANDLE_RIGHTS_DENIED))?; // 只能降权
+    s.check(
+        returned.duplicate(Rights::WAIT.union(Rights::CONTROL)) == Err(Error::HANDLE_RIGHTS_DENIED),
+    )?; // 只能降权
     drop(returned);
     s.check(sleeper.join() == Ok(77))?;
 
@@ -420,32 +435,55 @@ fn ring_cases(s: &mut Steps) -> Result<(), u32> {
     let long = ring.submit(1, Op::Sleep(100_000)).map_err(|_| 3000 + s.0)?;
     let now = ring.submit(2, Op::Now).map_err(|_| 3000 + s.0)?;
     s.check(now > long)?; // 请求 ID 单调递增
-    let mut out = [Completion { request_id: 0, user_tag: 0, op: 0, result: 0 }; 4];
+    let mut out = [Completion {
+        request_id: 0,
+        user_tag: 0,
+        op: 0,
+        result: 0,
+    }; 4];
     let n = ring.reap(&mut out, 1).map_err(|_| 3000 + s.0)?;
-    s.check(n == 1 && out[0].request_id == now && out[0].user_tag == 2 && out[0].outcome().is_ok())?;
+    s.check(
+        n == 1 && out[0].request_id == now && out[0].user_tag == 2 && out[0].outcome().is_ok(),
+    )?;
 
     // 取消长等待：同步取消成功，完成记录以 cancelled 到达；重复取消得到 already_completed / not_found
     s.check(ring.cancel(long).is_ok())?;
     let n = ring.reap(&mut out, 1).map_err(|_| 3000 + s.0)?;
-    s.check(n == 1 && out[0].request_id == long && out[0].outcome() == Err(Error::ASYNC_CANCELLED))?;
+    s.check(
+        n == 1 && out[0].request_id == long && out[0].outcome() == Err(Error::ASYNC_CANCELLED),
+    )?;
     let again = ring.cancel(long);
     s.check(again == Err(Error::ASYNC_ALREADY_COMPLETED) || again == Err(Error::ASYNC_NOT_FOUND))?;
 
     // 经 ring 等待线程退出
     let t = task::spawn(|| 55).map_err(|_| 3000 + s.0)?;
-    let w = ring.submit(3, Op::WaitTask(t.handle())).map_err(|_| 3000 + s.0)?;
+    let w = ring
+        .submit(3, Op::WaitTask(t.handle()))
+        .map_err(|_| 3000 + s.0)?;
     let n = ring.reap(&mut out, 1).map_err(|_| 3000 + s.0)?;
     s.check(n == 1 && out[0].request_id == w && out[0].outcome() == Ok(55))?;
     // 句柄参数超出 32 位：一律视为无效句柄，不截断成低 32 位所指的那个线程（同步与经 ring 两条路径）
     let alias = t.handle().raw() as u64 | 1 << 32;
-    s.check(jasper_rt::error::check(sys::call(jasper_rt::ids::SYSTEM_TASK_WAIT, alias, 0, 0)) == Err(Error::HANDLE_INVALID))?;
-    let sqe = Sqe { op: jasper_rt::ids::SYSTEM_TASK_WAIT as u32, flags: 0, user_tag: 5, arg0: alias, arg1: 0 };
+    s.check(
+        jasper_rt::error::check(sys::call(jasper_rt::ids::SYSTEM_TASK_WAIT, alias, 0, 0))
+            == Err(Error::HANDLE_INVALID),
+    )?;
+    let sqe = Sqe {
+        op: jasper_rt::ids::SYSTEM_TASK_WAIT as u32,
+        flags: 0,
+        user_tag: 5,
+        arg0: alias,
+        arg1: 0,
+    };
     // SAFETY：该操作不引用用户内存。
     s.check(unsafe { ring.submit_raw(sqe) } == Err(Error::HANDLE_INVALID))?;
     s.check(t.join() == Ok(55))?;
 
     // 被拒的提交：句柄不指向线程 ⇒ 不产生请求，错误随提交返回
-    let not_a_task = ring.handle().duplicate(Rights::WAIT).map_err(|_| 3000 + s.0)?;
+    let not_a_task = ring
+        .handle()
+        .duplicate(Rights::WAIT)
+        .map_err(|_| 3000 + s.0)?;
     let r = ring.submit(4, Op::WaitTask(&not_a_task));
     s.check(r == Err(Error::HANDLE_INVALID) || r == Err(Error::HANDLE_RIGHTS_DENIED))?;
     println!("rtdemo: ring cancelled_ok=true wait_task=55");
@@ -542,17 +580,22 @@ fn uptr_attacker(wide: bool) -> i32 {
             return 1;
         }
     };
-    let (mut writes_ok, mut writes_refused, mut reads_refused, mut reads_rejected, mut bad) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut writes_ok, mut writes_refused, mut reads_refused, mut reads_rejected, mut bad) =
+        (0u64, 0u64, 0u64, 0u64, 0u64);
     while !UPTR_STOP.load(Ordering::Acquire) {
         // SAFETY：缓冲区是本进程的页 X（可能正被另一个线程取消映射——这正是要验证的场景），内核自行校验。
-        let w = jasper_rt::error::check(unsafe { sys::call3(jasper_rt::ids::SYSTEM_PROFILE_GET, 0, UPTR_PAGE, 2048) });
+        let w = jasper_rt::error::check(unsafe {
+            sys::call3(jasper_rt::ids::SYSTEM_PROFILE_GET, 0, UPTR_PAGE, 2048)
+        });
         match w {
             Ok(_) => writes_ok += 1,
             Err(e) if e == Error::MEMORY_INVALID_ADDRESS => writes_refused += 1,
             Err(_) => bad += 1,
         }
         // SAFETY：同上；X 里是全零或 Profile 文本，不构成合法的创建参数块。
-        let r = jasper_rt::error::check(unsafe { sys::call3(jasper_rt::ids::SYSTEM_PROCESS_SPAWN, UPTR_PAGE, 0, 0) });
+        let r = jasper_rt::error::check(unsafe {
+            sys::call3(jasper_rt::ids::SYSTEM_PROCESS_SPAWN, UPTR_PAGE, 0, 0)
+        });
         match r {
             Ok(_) => bad += 1, // 竟然创建成功：参数块不可能合法
             Err(e) if e == Error::MEMORY_INVALID_ADDRESS => reads_refused += 1,
@@ -577,7 +620,11 @@ fn uptr_attacker(wide: bool) -> i32 {
 fn uptr_victim(wide: bool) -> i32 {
     let mut corrupt = 0u64;
     let mut rounds = 0u64;
-    let total = if wide { VICTIM_ROUNDS_WIDE } else { VICTIM_ROUNDS };
+    let total = if wide {
+        VICTIM_ROUNDS_WIDE
+    } else {
+        VICTIM_ROUNDS
+    };
     for round in 0..total {
         if mem::map(VICTIM_BASE, VICTIM_PAGES, mem::WRITE).is_err() {
             println!("uptr-victim: FAIL map round={}", round);
@@ -604,7 +651,12 @@ fn uptr_victim(wide: bool) -> i32 {
         }
         rounds += 1;
     }
-    println!("uptr-victim: done mode={} rounds={} corrupt={}", if wide { "wide" } else { "natural" }, rounds, corrupt);
+    println!(
+        "uptr-victim: done mode={} rounds={} corrupt={}",
+        if wide { "wide" } else { "natural" },
+        rounds,
+        corrupt
+    );
     if corrupt == 0 {
         0
     } else {
@@ -630,7 +682,9 @@ const LONGRUN_PAGE: u64 = sys::WINDOW_BASE + 0x0500_0000;
 fn longrun() -> i32 {
     for cycle in 0..LONGRUN_CYCLES {
         let fail = (cycle + 1) as i32;
-        let Ok((a, b)) = channel::pair() else { return fail };
+        let Ok((a, b)) = channel::pair() else {
+            return fail;
+        };
         if a.send(&cycle.to_le_bytes()).is_err() {
             return fail;
         }
@@ -640,7 +694,9 @@ fn longrun() -> i32 {
             _ => return fail,
         }
         drop((a, b));
-        let Ok(ring) = Ring::create(4) else { return fail };
+        let Ok(ring) = Ring::create(4) else {
+            return fail;
+        };
         drop(ring);
         match task::spawn(move || cycle % 7).map(|t| t.join()) {
             Ok(Ok(v)) if v == cycle % 7 => {}

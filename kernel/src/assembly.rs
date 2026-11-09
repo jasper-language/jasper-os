@@ -85,15 +85,15 @@ fn operation_audit(live: bool) -> Result<OperationAudit, &'static str> {
 
 /// 内核能构建的全部模块的绑定（生效 Profile 未声明的条目被忽略）。
 static BINDINGS: [Binding; 9] = [
-    Binding { module: "core", activate: core_activate, deactivate: None },
-    Binding { module: "memory", activate: memory_ready, deactivate: None },
-    Binding { module: "time", activate: time_ready, deactivate: None },
-    Binding { module: "sched", activate: sched_activate, deactivate: None },
-    Binding { module: "channel", activate: channel_ready, deactivate: None },
-    Binding { module: "realtime", activate: realtime_activate, deactivate: None },
-    Binding { module: "job", activate: job_activate, deactivate: None },
-    Binding { module: "async", activate: async_ready, deactivate: None },
-    Binding { module: "devices", activate: devices_activate, deactivate: None },
+    Binding { module: "core", version: "1.0.0", conflicts: &[], activate: core_activate, deactivate: None },
+    Binding { module: "memory", version: "1.0.0", conflicts: &[], activate: memory_ready, deactivate: None },
+    Binding { module: "time", version: "1.0.0", conflicts: &[], activate: time_ready, deactivate: None },
+    Binding { module: "sched", version: "1.0.0", conflicts: &[], activate: sched_activate, deactivate: None },
+    Binding { module: "channel", version: "1.0.0", conflicts: &[], activate: channel_ready, deactivate: None },
+    Binding { module: "realtime", version: "1.0.0", conflicts: &[], activate: realtime_activate, deactivate: None },
+    Binding { module: "job", version: "1.0.0", conflicts: &[], activate: job_activate, deactivate: None },
+    Binding { module: "async", version: "1.0.0", conflicts: &[], activate: async_ready, deactivate: None },
+    Binding { module: "devices", version: "1.0.0", conflicts: &[], activate: devices_activate, deactivate: None },
 ];
 
 /// 启动期回滚需要核对的资源类别。
@@ -284,7 +284,15 @@ pub fn boot() -> u32 {
     for k in 0..asm.len() {
         let Some(name) = asm.order(k) else { break };
         let (state, reason) = asm.state(name).unwrap_or((assembly::State::Declared, ""));
-        kprintln!("[JSR-ASSEMBLY] module={} order={} state={} reason={}", name, k, state.as_str(), reason);
+        let version = asm.version(name).unwrap_or("");
+        kprintln!(
+            "[JSR-ASSEMBLY] module={} order={} state={} reason={} version={}",
+            name,
+            k,
+            state.as_str(),
+            reason,
+            version
+        );
     }
     let mask = asm.published_mask(&declared);
     let audit = asm.audit(&declared, mask);
@@ -463,6 +471,8 @@ pub fn enter_service(operation: &str) -> Option<ServiceEntry> {
 pub struct ModuleStatus {
     /// 模块名。
     pub name: &'static str,
+    /// 编译期绑定版本。
+    pub version: &'static str,
     /// 生命周期状态。
     pub state: State,
     /// 自身健康状态。
@@ -506,6 +516,7 @@ pub fn statuses() -> StatusSnapshot {
         let available = asm.module_mask(name).is_some_and(|bits| bits & published != 0);
         snapshot.modules[snapshot.len] = Some(ModuleStatus {
             name,
+            version: asm.version(name).unwrap_or(""),
             state,
             health,
             effective_health,

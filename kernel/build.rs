@@ -160,8 +160,26 @@ fn main() {
     if std::env::var_os("CARGO_FEATURE_USER_PROGRAMS").is_some() {
         build_user_programs(&root, native);
     }
+    if std::env::var_os("CARGO_FEATURE_HWV4_LINUX").is_some() {
+        for (source, target) in [
+            ("JSR_LINUX_GUEST_HEADER", "JSR_LINUX_GUEST_HEADER"),
+            ("JSR_LINUX_GUEST_KERNEL", "JSR_LINUX_GUEST_KERNEL"),
+        ] {
+            println!("cargo:rerun-if-env-changed={source}");
+            let path = std::env::var_os(source).unwrap_or_else(|| {
+                panic!("hwv4-linux 需要环境变量 {source} 指向真实的 Linux boot artifact")
+            });
+            let path = PathBuf::from(path);
+            assert!(path.is_file(), "{} 指向的文件不存在：{}", source, path.display());
+            println!("cargo:rerun-if-changed={}", path.display());
+            println!("cargo:rustc-env={target}={}", path.display());
+        }
+    }
     // AArch64 / RISC-V 没有引导器，内核 ELF 由固件或仿真器直接装载：用本仓库的链接脚本固定装载地址与段布局。
     let script = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") if std::env::var_os("CARGO_FEATURE_PIXEL6A_PE").is_some()
+            || std::env::var_os("CARGO_FEATURE_PIXEL6A_FULL").is_some() => Some("kernel/link-pixel6a-pe.ld"),
+        Ok("aarch64") if std::env::var_os("CARGO_FEATURE_PIXEL6A_SMOKE").is_some() => Some("kernel/link-pixel6a.ld"),
         Ok("aarch64") => Some("kernel/link-aarch64.ld"),
         Ok("riscv64") => Some("kernel/link-riscv64.ld"),
         Ok("riscv32") => Some("kernel/link-riscv32.ld"),
@@ -180,7 +198,7 @@ fn main() {
 /// `JSR_USER_BENCH`、`JSR_USER_ISOHOST`）交给内核源码 `include_bytes!`。
 /// Builds the embedded user programs with a separate target dir, verifies their ABI stamps, and exposes their paths.
 fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version::AbiVersion) {
-    let mut programs: Vec<(&str, &str, &str)> = vec![
+    let mut all_programs: Vec<(&str, &str, &str)> = vec![
         ("user/hello", "user-hello", "JSR_USER_HELLO"),
         ("user/ring", "user-ring", "JSR_USER_RING"),
         ("user/ipc", "user-ipc", "JSR_USER_IPC"),
@@ -193,12 +211,23 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
         ("user/schedtest", "user-schedtest", "JSR_USER_SCHEDTEST"),
         ("user/bench", "user-bench", "JSR_USER_BENCH"),
         ("user/isohost", "user-isohost", "JSR_USER_ISOHOST"),
+        ("user/usi", "user-usi", "JSR_USER_USI"),
     ];
     // DRV-1C / DRV-2C 的用户态演练只在 x86_64 上构建与内嵌（其它指令集冻结，不写对应代码）。
     if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") {
-        programs.push(("user/devprobe", "user-devprobe", "JSR_USER_DEVPROBE"));
-        programs.push(("user/irqprobe", "user-irqprobe", "JSR_USER_IRQPROBE"));
+        all_programs.push(("user/devprobe", "user-devprobe", "JSR_USER_DEVPROBE"));
+        all_programs.push(("user/irqprobe", "user-irqprobe", "JSR_USER_IRQPROBE"));
     }
+    let jasodemo_only = std::env::var_os("CARGO_FEATURE_JASO1_VERIFY").is_some();
+    let programs: Vec<(&str, &str, &str)> = if jasodemo_only {
+        all_programs
+            .iter()
+            .copied()
+            .filter(|(dir, _, _)| *dir == "user/jasodemo")
+            .collect()
+    } else {
+        all_programs.clone()
+    };
     for (dir, _, _) in &programs {
         for f in ["src/main.rs", "Cargo.toml", "link.ld", "build.rs"] {
             println!("cargo:rerun-if-changed={}", root.join(dir).join(f).display());
@@ -260,6 +289,16 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
             assert_eq!(required.iter().collect::<Vec<_>>(), vec!["kernel.core"], "user-hello capability note differs");
         }
         println!("cargo:rustc-env={}={}", env, elf.display());
+    }
+    if jasodemo_only {
+        let elf = target_dir.join(triple).join("release").join("user-jasodemo");
+        for (_, _, env) in &all_programs {
+            if *env != "JSR_USER_JASODEMO" {
+                // The dedicated image never runs these programs. Their static
+                // include sites still need a valid ABI-stamped ELF to compile.
+                println!("cargo:rustc-env={}={}", env, elf.display());
+            }
+        }
     }
 }
 

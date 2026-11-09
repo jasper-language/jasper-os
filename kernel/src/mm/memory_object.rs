@@ -74,4 +74,24 @@ impl MemoryObject {
         frames.extend(source.iter().map(|page| page.frame()));
         Some(frames)
     }
+
+    /// Permanently retain a range when a device cannot be proven quiescent.
+    pub fn quarantine_range(&self, offset_pages: u64, pages: u64) -> bool {
+        let Ok(start) = usize::try_from(offset_pages) else {
+            return false;
+        };
+        let Ok(len) = usize::try_from(pages) else {
+            return false;
+        };
+        let Some(end) = start.checked_add(len) else {
+            return false;
+        };
+        let Some(source) = self.pages.get(start..end) else {
+            return false;
+        };
+        for page in source {
+            page.quarantine();
+        }
+        true
+    }
 }

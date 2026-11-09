@@ -350,15 +350,15 @@ fn deactivate_discard() {
 }
 
 static MECH_BINDINGS: [Binding; 3] = [
-    Binding { module: "syscall-core", activate: activate_syscall_core, deactivate: None },
-    Binding { module: "hello-syscall", activate: activate_hello_syscall, deactivate: None },
-    Binding { module: "discard", activate: activate_discard, deactivate: Some(deactivate_discard) },
+    Binding { module: "syscall-core", version: "1.0.0", conflicts: &[], activate: activate_syscall_core, deactivate: None },
+    Binding { module: "hello-syscall", version: "1.0.0", conflicts: &[], activate: activate_hello_syscall, deactivate: None },
+    Binding { module: "discard", version: "1.0.0", conflicts: &[], activate: activate_discard, deactivate: Some(deactivate_discard) },
 ];
 
 static BROKEN_BINDINGS: [Binding; 3] = [
-    Binding { module: "broken-base", activate: activate_broken_base, deactivate: None },
-    Binding { module: "broken", activate: activate_broken, deactivate: None },
-    Binding { module: "blocked", activate: activate_blocked, deactivate: None },
+    Binding { module: "broken-base", version: "1.0.0", conflicts: &[], activate: activate_broken_base, deactivate: None },
+    Binding { module: "broken", version: "1.0.0", conflicts: &[], activate: activate_broken, deactivate: None },
+    Binding { module: "blocked", version: "1.0.0", conflicts: &[], activate: activate_blocked, deactivate: None },
 ];
 
 /// 按依赖顺序激活、审计发布掩码、拒绝重复启动，并验证失败依赖者的激活不被调用。

@@ -72,6 +72,25 @@ case "$PROFILE" in
   compact)  KFEAT=(--features profile-compact) ;;
   *) echo "✗ 未知配置档：$PROFILE（可选 standard / compact）"; exit 2 ;;
 esac
+[ "${JASPER_CHECKS:-}" = "drv3" ] && KFEAT+=(--features drv3-verify)
+[ "${JASPER_CHECKS:-}" = "blk1" ] && KFEAT+=(--features blk1-verify)
+[ "${JASPER_CHECKS:-}" = "mod1" ] && KFEAT+=(--features mod1-verify)
+[ "${JASPER_CHECKS:-}" = "usi1" ] && KFEAT+=(--features usi1-verify)
+[ "${JASPER_CHECKS:-}" = "sec1" ] && KFEAT+=(--features sec1-verify)
+HWV4_FEAT=()
+if [ -n "${JSR_LINUX_GUEST_HEADER:-}" ] && [ -n "${JSR_LINUX_GUEST_KERNEL:-}" ]; then
+  if [ ! -s "$JSR_LINUX_GUEST_HEADER" ] || [ ! -s "$JSR_LINUX_GUEST_KERNEL" ]; then
+    echo "✗ HWV-4 Linux artifact 路径存在但文件为空：$JSR_LINUX_GUEST_HEADER / $JSR_LINUX_GUEST_KERNEL"
+    exit 2
+  fi
+  if [ "${JASPER_CHECKS:-}" = "hwv5" ]; then
+    HWV4_FEAT=(--features hwv5-verify)
+  elif [ "${JASPER_CHECKS:-}" = "drv3" ]; then
+    HWV4_FEAT=()
+  else
+    HWV4_FEAT=(--features hwv4-linux)
+  fi
+fi
 # 调度策略（POL-1）：ts = 分时策略（默认），rr = 纯轮转（构建期特性 sched-rr）。
 # 轮转构建用于验证「换策略只改一个选择点」，机制层全部验收照跑；QoS 专项检查检验的是分时策略的语义，
 # 在轮转构建下如实记为不适用，仍在分时构建中照常执行并通过。
@@ -81,6 +100,12 @@ case "$SCHED_POLICY" in
   rr) SFEAT=(--features sched-rr) ;;
   *) echo "✗ 未知调度策略：$SCHED_POLICY（可选 ts / rr）"; exit 2 ;;
 esac
+for c in ${JASPER_CHECKS:-}; do
+  if [ "$c" = "jaso1_multi" ]; then
+    KFEAT+=(--features jaso1-verify)
+    break
+  fi
+done
 # 架构范围（AN，用户 2026-10-21 裁决）：默认只构建并启动 x86_64；AArch64 / RISC-V64 / RISC-V32 冻结，
 # 相关构建、QEMU 启动与宿主交叉测试全部跳过，只依赖它们的判据如实记 N/A（不计入通过）。
 # JASPER_ARCHES=all 恢复此前的四指令集全量验收，行为与默认引入前完全一致。
@@ -243,6 +268,17 @@ bootcap_patch() { [ -z "${JASPER_BOOTCAP:-}" ] && return 0; run "$XTASK" bootcap
 
 # ---- 阶段 A：构建、测试、启动（产出证据）------------------------------------
 echo "== 构建与测试（核：$CORES，配置档：$PROFILE）=="
+JASO1_MULTI_RC=0
+if [ "$ARCH_ALL" -eq 1 ]; then
+  mkdir -p "$OUT/jaso1-multi"
+  if [ -n "${JASPER_JASO1_MULTI:-}" ]; then
+    cp "$JASPER_JASO1_MULTI" "$OUT/jaso1-multi/jaso-demo-multi.jaso" || JASO1_MULTI_RC=1
+  else
+    run bash "$ROOT/scripts/jaso1-build-multi.sh" "$OUT/jaso1-multi" > "$OUT/jaso1-multi-build.log" 2>&1 || JASO1_MULTI_RC=$?
+  fi
+  export JSR_JASO1_MULTI="$OUT/jaso1-multi/jaso-demo-multi.jaso"
+  [ -s "$JSR_JASO1_MULTI" ] || JASO1_MULTI_RC=1
+fi
 if [ "$HOST_TESTS" = pda ] && [ -s "$ROOT/.pda/cargo-test.log" ]; then
   cp "$ROOT/.pda/cargo-test.log" "$OUT/cargo-test.log"
   if grep -qE '^test result: ok\. [0-9]+ passed; 0 failed' "$OUT/cargo-test.log"; then TEST_RC=0; else TEST_RC=1; fi
@@ -252,8 +288,9 @@ else
 fi
 run cargo test -p jaso --features pack > "$OUT/jaso-test.log" 2>&1;                           JASO_RC=$?
 run cargo build --release --target x86_64-unknown-none -p kernel-core > "$OUT/build.log" 2>&1; CORE_RC=$?
-run cargo build --release --target x86_64-unknown-none -p jasper-kernel "${KFEAT[@]}" "${SFEAT[@]}" >> "$OUT/build.log" 2>&1
+run cargo build --release --target x86_64-unknown-none -p jasper-kernel "${KFEAT[@]}" "${SFEAT[@]}" "${HWV4_FEAT[@]}" >> "$OUT/build.log" 2>&1
 BUILD_RC=$?
+[ "$JASO1_MULTI_RC" -eq 0 ] || BUILD_RC=1
 # 受限构建盘可复用已由同一源码构建的 xtask；产品源码仍须由上面的镜像构建重新产出。
 if [ "$BUILD_RC" -eq 0 ] && [ -z "${JASPER_XTASK:-}" ]; then
   run cargo build --release -p xtask >> "$OUT/build.log" 2>&1 || BUILD_RC=$?
@@ -355,7 +392,7 @@ boot_qemu() {
   done
 }
 VIRTIO_ARGS=(-device virtio-rng-pci -device virtio-net-pci,netdev=n0 -netdev user,id=n0 \
-  -device virtio-blk-pci,drive=d1 -drive if=none,id=d1,file="$BLANK",format=raw)
+  -device virtio-blk-pci,drive=d1 -drive if=none,id=d1,file="$BLANK",format=raw,discard=unmap)
 if [ "$BUILD_RC" -eq 0 ]; then
   echo "== QEMU 真实启动 =="
   sleep "$BOOT_GAP"
@@ -414,7 +451,7 @@ if [ "$ARCH_ALL" -eq 1 ]; then
     QRC_A64=$?
   fi
   # 多处理器（SMP-1b-A64）：同一 AArch64 内核以 4 个处理器再真实启动一次（设备树处理器节点 + PSCI 唤醒 + GIC 软件生成中断）。
-  if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ]; then
+  if [ "$A64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_A64" ] && [ "$SPOT" -eq 0 ]; then
     echo "== QEMU 真实启动（AArch64，4 个处理器）=="
     sleep "$BOOT_GAP"
     qrun timeout "$QEMU_TIMEOUT" "$QEMU_A64" -M virt -cpu cortex-a72 -m 256M -smp 4 -kernel "$A64_ELF" -semihosting \
@@ -444,7 +481,7 @@ if [ "$ARCH_ALL" -eq 1 ]; then
     QRC_RV64=$?
   fi
   # 多处理器（SMP-1b-RV）：同一 RISC-V64 内核以 4 个处理器再真实启动一次（设备树处理器节点 + SBI HSM 唤醒 + SBI IPI 软件中断）。
-  if [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ]; then
+  if [ "$RV64_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV64" ] && [ "$SPOT" -eq 0 ]; then
     echo "== QEMU 真实启动（RISC-V64，4 个处理器）=="
     sleep "$BOOT_GAP"
     qrun timeout "$QEMU_TIMEOUT" "$QEMU_RV64" -M virt -m 256M -smp 4 -kernel "$RV64_ELF" \
@@ -483,7 +520,7 @@ if [ "$ARCH_ALL" -eq 1 ]; then
     QRC_RV32=$?
     grep -q 'Unable to find the RISC-V BIOS' "$SERIAL_RV32" 2>/dev/null && QRC_RV32=-2
   fi
-  if [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ]; then
+  if [ "$RV32_BUILD_RC" -eq 0 ] && [ -n "$QEMU_RV32" ] && [ "$SPOT" -eq 0 ]; then
     echo "== QEMU 真实启动（RISC-V32，4 个处理器）=="
     sleep "$BOOT_GAP"
     qrun timeout "$QEMU_TIMEOUT" "$QEMU_RV32" -M virt -m 256M -smp 4 "${RV32_BIOS[@]}" -kernel "$RV32_ELF" \
@@ -1023,6 +1060,27 @@ check_j3() {    # 最小 .jaso：格式宿主测试；memory.protect（W^X、全
     record J-3 PASS "格式宿主测试 $(grep -oE '[0-9]+ passed' "$OUT/jaso-test.log" | head -1)；W^X 改权限；.jaso 装入/重定位/设权限/初始化/调用导出、两实例数据独立、卸载后映射消失；篡改/截断/指令集/阶段/能力/宿主表/初始化入口均被拒；format 1 运行时版本区间/依赖未满足/旧调用约定 c.v0 均被拒；回到基线"
   else
     record J-3 FAIL "jaso 宿主测试 rc=${JASO_RC:-?}，或缺少 jasodemo / protect 关键标记"
+  fi
+}
+
+check_jaso1_multi() {
+  if [ "$ARCH_ALL" -ne 1 ]; then
+    record_na JASO-1/多架构 "未设置 JASPER_ARCHES=all；四 ISA 多镜像 QEMU 验收未运行，不计入通过"
+    return
+  fi
+  local miss="" images
+  images=$(grep -c '^image ' "$OUT/jaso1-multi/inspect.log" 2>/dev/null || true)
+  [ "${images:-0}" -eq 4 ] || miss="$miss inspect-images=${images:-0}"
+  for item in "x86_64:$SERIAL" "aarch64:$SERIAL_A64" "riscv64:$SERIAL_RV64" "riscv32:$SERIAL_RV32"; do
+    local arch="${item%%:*}" log="${item#*:}"
+    grep -qaE "text=jasodemo: multi_arch images=4 arch=any selected=$arch in_process=true isolated=true source_v1=true" "$log" 2>/dev/null \
+      || miss="$miss $arch"
+  done
+  [ "$JASO1_MULTI_RC" -eq 0 ] || miss="$miss build"
+  if [ -z "$miss" ]; then
+    record JASO-1/多架构 PASS "同一四 ISA 签名容器由 x86_64/AArch64/RISC-V64/RISC-V32 的 QEMU 各自选中对应镜像，进程内与隔离装载均调用导出；jasper.source v1 信封同步解码通过"
+  else
+    record JASO-1/多架构 FAIL "缺少四 ISA 多镜像或隔离/进程内证据：$miss"
   fi
 }
 
@@ -1937,6 +1995,23 @@ check_asm1() {  # issue #6 第一切片：服务装配——按依赖顺序启�
   fi
 }
 
+check_mod1() {  # MOD-1：模块身份/版本、依赖/冲突、初始化回滚、发布/停用和资源归属统一契约
+  if has '\[JSR-ASSEMBLY\] module=core order=0 state=ready reason= version=1\.0\.0' \
+     && has '\[JSR-ASSEMBLY\] module=devices order=8 state=ready reason= version=1\.0\.0' \
+     && has '\[JSR-ASSEMBLY\] summary profile=headless modules=9 ready=9 failed=0 blocked=0 declared=10 published=10 pre_publish=0 audit=ok restart=system\.module\.error\.already_started stop_core=system\.module\.error\.in_use stop_devices=system\.module\.error\.permanent' \
+     && has '\[JSR-MOD\] withdraw module=discard bits=0x[1-9a-f][0-9a-f]*' \
+     && has '\[JSR-MOD\] stopped module=discard' \
+     && has '\[JSR-ASSEMBLY\] runtime stop_dependent=in_use stop_permanent=permanent health=healthy->unhealthy->healthy .* lease_enter=true reader_drain=true' \
+     && has '^\[JSR-K06\] .* unclaimed=0 gate_mismatch=0 ' \
+     && qemu_ok "$QRC" \
+     && ! has '^\[JSR-ASSEMBLY\] .*state=(failed|blocked)' \
+     && ! has '^\[JSR-ASSEMBLY\] error='; then
+    record MOD-1 PASS "模块身份/版本与冲突进入统一装配契约；9 个模块按能力依赖稳定拓扑启动并全量发布；缺依赖/冲突/激活失败在构造或全有全无回滚中拒绝；重复启动、依赖中服务、常驻模块、撤位后停用、读者排空、健康撤回与恢复均走同一装配状态机"
+  else
+    record MOD-1 FAIL "缺少模块版本、稳定拓扑、发布审计、回滚/停用拒绝或 reader drain 证据"
+  fi
+}
+
 check_k06() {  # issue #11：每个登记操作有唯一服务所有者；未装配服务明确不可用
   if has '^\[JSR-K06\] profile=headless ops=[0-9]+ kernel_base=[0-9]+ module_service=[0-9]+ active_unavailable=0 unclaimed=0 gate_mismatch=0 ring=available time=available sync=available'; then
     record K06 PASS "完整服务面每个已登记操作恰有唯一所有者；完整 Profile 无未装配/门禁不一致；异步环、时间与同步基础服务均可用"
@@ -2639,6 +2714,93 @@ check_hwv2() {
   fi
 }
 
+check_hwv3() {
+  # HWV-3 is not claimed complete on a non-AMD host. The same serial contract
+  # accepts either a real VMRUN pass or an explicit vendor-mismatch checkpoint.
+  if { has '^\[JSR-HWV3\] backend=Svm hardware=true vmrun=true vmcb=true npt=true cpuid=1 rdtsc=1 msr=1 io=1 npf=1 exception=1 exits=6 host_restore=true invalid=true reclaim=true failed=0' \
+       || has '^\[JSR-HWV3\] backend=Svm hardware=false reason=vendor_mismatch vmcb=true npt=true intercepts=true invalid=true reclaim=true failed=0'; } \
+     && ! has '^\[JSR-HWV3-FAIL\]'; then
+    if has '^\[JSR-HWV3\] backend=Svm hardware=true '; then
+      record HWV-3 PASS "真实 AMD VMRUN；VMCB 连续 IOPM/MSRPM、NPT nested_cr3、CPUID/RDTSC/RDMSR/I/O/NPF/#UD 退出与宿主恢复；非法状态拒绝；对象/页帧回基线"
+    else
+      record HWV-3-CONTRACT PASS "VMCB 固定布局、连续 IOPM/MSRPM、NPT nested_cr3、拦截合同与失败拒绝已在非 AMD 宿主验证；hardware=false，真实 AMD VMRUN 尚未验收，不记 HWV-3 完成"
+    fi
+  else
+    record HWV-3 FAIL "缺少 SVM VMCB/NPT/退出合同；若 hardware=false 未明确报告 vendor_mismatch，或失败/资源回基线不成立"
+  fi
+}
+
+check_hwv4() {
+  if has '\[JSR-LINUX-GUEST\] init=true arch=x86_64 syscall=true' \
+     && has '\[JSR-HWV4-LINUX\] linux=true exits=[0-9]+ serial_bytes=[0-9]+ timer_interrupts=[0-9]+ timer_eois=[0-9]+ virtio_rng_requests=[0-9]+ virtio_console_bytes=[0-9]+ virtio_block_requests=[0-9]+ marker=true halted=true lifecycle=true shutdown=true reclaim=true' \
+     && has '\[JSR-HWV4\] backend=Vmx exit_ring=true exits=6 cancelled=1 single_terminal=true wait_ready=true cross_task_wait=true inject=true vic=true pic=true ioapic=true pit=true linux=true reclaim=true failed=0' \
+     && ! has '^\[JSR-HWV4-FAIL\]'; then
+    record HWV-4 PASS "真实 Intel VMX 六类退出逐条经现有 Ring 发布；取消/迟到竞争保持单一终态；跨任务等待唤醒、VMCS 中断注入、虚拟 PIC/IOAPIC/PIT 合同通过；真实 Linux 6.12 startup_64/用户态 syscall 启动并输出标记，宿主 MSR/CR/TSC 状态恢复且资源回基线"
+  elif has '\[JSR-HWV4\] backend=Vmx exit_ring=true exits=6 cancelled=1 single_terminal=true wait_ready=true cross_task_wait=true inject=true vic=true pic=true ioapic=true pit=true linux=false reclaim=true failed=0' \
+       && ! has '^\[JSR-HWV4-FAIL\]'; then
+    record HWV-4-CONTRACT PASS "VMX 退出/Ring/取消/等待/中断注入/PIC/PIT 合同通过；本次未提供 JSR_LINUX_GUEST_HEADER/KERNEL，未启动 Linux 客体，不记 HWV-4 完成"
+  else
+    record HWV-4 FAIL "缺少 VM-Exit Ring、中断/等待合同、真实 Linux 启动标记或资源回基线"
+  fi
+}
+
+check_hwv5() {
+  if has '\[JSR-LINUX-GUEST\] init=true arch=x86_64 syscall=true' \
+     && has '\[JSR-VIRTIO\] device=rng ok=true' \
+     && has '\[JSR-VIRTIO\] device=console ok=true' \
+     && has '\[JSR-VIRTIO\] device=block ok=true' \
+     && has '\[JSR-HWV4-LINUX\] linux=true exits=[0-9]+ serial_bytes=[0-9]+ timer_interrupts=[0-9]+ timer_eois=[0-9]+ virtio_rng_requests=[1-9][0-9]* virtio_console_bytes=[1-9][0-9]* virtio_block_requests=[1-9][0-9]* marker=true halted=true lifecycle=true shutdown=true reclaim=true' \
+     && has '\[JSR-HWV5\] backend=Vmx bus=mmio devices=rng,console,block linux=true failed=0' \
+     && ! has '\[JSR-HWV5-FAIL\]'; then
+    record HWV-5-CORE PASS "真实 Linux 经 virtio-MMIO 发现 virtio-rng、virtio-console 与 virtio-blk；现代 virtqueue 描述符链、可用/已用环、设备通知、PIC IRQ、中断确认、随机数据回写、控制台输出和块读取通过；宿主内存与对象资源回基线。net/fs 与用户态 VMM 未完成，不记 HWV-5 完整通过"
+  else
+    record HWV-5 FAIL "缺少 virtio-MMIO/rng Linux 驱动标记、virtqueue 完成、IRQ 或资源回基线"
+  fi
+}
+
+check_drv3() {
+  if has '\[JSR-DRV3\] device=0x[0-9a-f]+ iova=0x[0-9a-f]+ pages=1 writable=true iova_opaque=true pinned=true owner_close=true reclaim=true failed=0' \
+     && ! has '^\[JSR-DRV3-FAIL\]'; then
+    record DRV-3 PASS "Memory 对象复用 pin；用户只得到页对齐的设备 IOVA；关闭 Memory/Device 所有者句柄后映射仍有效；关闭 DMA 句柄后引用与 pin 配额回收；越界/零页拒绝且失败原子；资源回基线"
+  else
+    record DRV-3 FAIL "缺少 DMA 映射生命周期、失败原子或资源回收证据"
+  fi
+}
+
+check_usi1() {
+  if has 'usi: mode=human snapshot=' \
+     && has 'usi: mode=json \{"schema":"usi.v1"' \
+     && has 'usi: mode=denied all_denied=true' \
+     && has 'usi: mode=degraded devices_available=false' \
+     && has 'usi: mode=restored devices_available=true' \
+     && has '\[JSR-USI\] summary cli=true structured=true denied=true degraded=true restored=true failed=0 reclaimed=true' \
+     && ! has 'usi: .*error=' \
+     && ! has '^\[JSR-USI-FAIL\]'; then
+    record USI-1 PASS "同一 USI v1 Schema 经人类 CLI 与结构化客户端查询；五个服务可解码；缺权限调用由 SyscallSet/ServiceGate 拒绝；设备服务健康撤回后 available=false，恢复后 available=true；资源回基线"
+  else
+    record USI-1 FAIL "缺少双客户端、五个服务、权限拒绝、服务撤回恢复或资源基线证据"
+  fi
+}
+
+check_blk1() {
+  if has '\[JSR-BLK1\] device=0x[0-9a-f]+ capacity_sectors=[1-9][0-9]* logical_block=([0-9]+) physical_block=([0-9]+) atomic_write=([0-9]+) discard=true fua=true checkpoint=true restored=(true|false)' \
+     && has '^\[JSR-BLK1\] summary failed=0 restored=(true|false) resources=true' \
+     && ! has '^\[JSR-BLK1-FAIL\]'; then
+    record BLK-1 PASS "真实 virtio-blk 完成 4 KiB 对齐读写、FUA、flush、discard、取消后设备退休、块几何上报与资源回基线"
+  else
+    record BLK-1 FAIL "缺少 virtio-blk 真实 I/O、FUA/flush/discard、单一终态或资源回基线证据"
+  fi
+}
+
+check_sec1() {
+  if has '^\[JSR-SEC1\] boot=true process=true memory=true aliases=true measured_inherit=true child=true ipc=true missing_rejected=true module=true legacy_rejected=true failed=0 reclaimed=true' \
+     && ! has '^\[JSR-SEC1-FAIL\]'; then
+    record SEC-1 PASS "boot-scoped object identity、完整应用身份继承、Memory 上下文、句柄复制/降权/转移、IPC 发送方上下文、模块版本身份与 legacy 失败关闭通过；资源回基线"
+  else
+    record SEC-1 FAIL "缺少身份继承、一次性绑定、IPC 上下文、legacy 拒绝或资源基线证据"
+  fi
+}
+
 check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉取请求时运行本脚本全量 + 宿主与跨指令集单元测试；工具链钉到具体日期；判据不在工作流里另写
   local wf="$ROOT/.github/workflows/ci.yml" miss=""
   if [ ! -s "$wf" ]; then record CI-1 FAIL "缺少 .github/workflows/ci.yml"; return; fi
@@ -2662,16 +2824,19 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
 
 if [ "$SPOT" -eq 1 ]; then
   for c in ${JASPER_CHECKS:-m11}; do
+    [ "$c" = "jaso1_multi" ] && continue
     if declare -F "check_$c" >/dev/null; then "check_$c"; else record "$c" FAIL "定点验收：没有名为 check_$c 的检查"; fi
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_asm1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_hwv0; check_hwv1; check_hwv2
+  check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_asm1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_hwv0; check_hwv1; check_hwv2
+  check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
 fi
+
+check_jaso1_multi
 
 # ---- 汇总与归档 --------------------------------------------------------------
 {
@@ -2704,7 +2869,11 @@ else
   EVIDENCE_FILES=(cargo-test.log build.log serial.log serial-smp4.log serial-smp8.log serial-q35.log summary.txt s2/serial.log s2/build.log)
 fi
 if [ "$ARCH_ALL" -eq 1 ]; then
-  EVIDENCE_FILES+=(serial-aarch64.log serial-aarch64-smp4.log serial-riscv64.log serial-riscv32.log)
+  if [ "$SPOT" -eq 1 ]; then
+    EVIDENCE_FILES+=(serial-aarch64.log serial-riscv64.log serial-riscv32.log)
+  else
+    EVIDENCE_FILES+=(serial-aarch64.log serial-aarch64-smp4.log serial-riscv64.log serial-riscv64-smp4.log serial-riscv32.log serial-riscv32-smp4.log)
+  fi
 fi
 for f in "${EVIDENCE_FILES[@]}"; do
   [ -s "$OUT/$f" ] || { echo "✗ 证据文件为空或缺失：$f"; FAILED=1; }

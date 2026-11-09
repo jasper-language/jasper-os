@@ -28,11 +28,14 @@ use jasper_rt::module::{
     DEVELOPMENT_PUBLISHER,
 };
 use jasper_rt::loader::{Loader, Phase, StopError, UnloadReply};
+use jasper_rt::isolate::{IsolatedGrant, IsolatedModule};
 use jasper_rt::{entry, io, mem, println, Error};
 
 entry!(main);
 
 static DEMO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo.jaso"));
+static MULTI: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-multi.jaso"));
+static CONTAINER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/modbox.elf"));
 static DEMO_OTHER_ARCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-otherarch.jaso"));
 static DEMO_BOOT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-boot.jaso"));
 static DEMO_NOINIT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/demo-noinit.jaso"));
@@ -208,6 +211,7 @@ fn run(s: &mut Steps) -> Result<(), u32> {
     drop(m2);
     drop(m3);
     println!("jasodemo: unload unmapped=true slot_reused=true fresh_state=true");
+    multi_arch(s, t)?;
 
     // 5. 拒绝
     let mut tampered = DEMO.to_vec();
@@ -247,6 +251,94 @@ fn run(s: &mut Steps) -> Result<(), u32> {
     drop(again);
     signatures(s, t, base)?;
     l1(s, t)
+}
+
+/// Four-ISA container acceptance shared by every architecture's QEMU boot.
+fn multi_arch(s: &mut Steps, t: &TrustPolicy<'_>) -> Result<(), u32> {
+    let file = jaso::Jaso::parse(MULTI).map_err(|_| 100 + s.0)?;
+    let images = file.images().count();
+    println!(
+        "jasodemo: multi_begin images={} arch_any={} source={}",
+        images,
+        file.arch.is_none(),
+        file.source_v1().is_some()
+    );
+    if images > 1 {
+        s.check(images == 4 && file.arch.is_none())?;
+        let host = jaso::HostPlatform::jasper_os_native().ok_or(100 + s.0)?;
+        let selected = file.select(&host).map_err(|_| 100 + s.0)?;
+        s.check(selected.platform.isa == host.isa)?;
+        let source = file.source_v1().ok_or(100 + s.0)?;
+        s.check(
+            source.language() == jaso::source::LANGUAGE_JASPER
+                && source.compression() == jaso::source::COMPRESSION_NONE,
+        )?;
+        let decoded = source.decode(|_, _| None).map_err(|_| 100 + s.0)?;
+        s.check(decoded.as_bytes() == b"module jaso_demo\n")?;
+    } else {
+        s.check(images == 1)?;
+    }
+
+    let m = Module::load(MULTI, grant(t)).map_err(|_| 100 + s.0)?;
+    s.check(m.name() == "jaso-demo")?;
+    let data = b"multi-arch";
+    // SAFETY: the C signature matches `demo_sum`; `data` is readable.
+    let sum = unsafe { m.function::<SumFn>("demo_sum") }
+        .map(|f| unsafe { (f.get())(data.as_ptr(), data.len()) });
+    s.check(sum == Some(data.iter().map(|&byte| byte as u64).sum()))?;
+    s.check(counter(&m) == 1)?;
+    drop(m);
+    println!("jasodemo: multi_in_process ok=true");
+
+    let mut isolated = match IsolatedModule::spawn(
+        MULTI,
+        IsolatedGrant {
+            container: CONTAINER,
+            capabilities: CAPS,
+            trust: t,
+            handles: Vec::new(),
+            cpu_limit_permille: None,
+        },
+    ) {
+        Ok(module) => module,
+        Err(error) => {
+            println!("jasodemo: multi_isolated_fail={:?}", error);
+            return Err(100 + s.0);
+        }
+    };
+    println!("jasodemo: multi_isolated_name={}", isolated.name());
+    s.check(isolated.name() == "jaso-demo")?;
+    // SAFETY: `demo_counter` ignores the byte-protocol input pointers and only
+    // increments module-local state. The container enforces the response bound.
+    let first = match isolated.call("demo_counter", &[], 2) {
+        Ok(value) => value,
+        Err(error) => {
+            println!("jasodemo: multi_isolated_first_fail={:?}", error);
+            return Err(100 + s.0);
+        }
+    };
+    let second = match isolated.call("demo_counter", &[], 2) {
+        Ok(value) => value,
+        Err(error) => {
+            println!("jasodemo: multi_isolated_second_fail={:?}", error);
+            return Err(100 + s.0);
+        }
+    };
+    println!(
+        "jasodemo: multi_isolated first={} second={}",
+        first.value, second.value
+    );
+    s.check(first.value == 1 && second.value == 2)?;
+    drop(isolated);
+
+    let host = jaso::HostPlatform::jasper_os_native().ok_or(100 + s.0)?;
+    let selected = file.select(&host).map_err(|_| 100 + s.0)?.platform.isa.map_or("any", |a| a.name());
+    println!(
+        "jasodemo: multi_arch images={} arch=any selected={} in_process=true isolated=true source_v1=true",
+        file.images().count(),
+        selected
+    );
+    Ok(())
 }
 
 /// 被拒装载的稳定错误码。

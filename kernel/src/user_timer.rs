@@ -7,9 +7,9 @@
 //! generation are independent from scheduler task slots.
 
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 
-use crate::sync::IrqSpinLock;
+use crate::sync::{IrqSpinLock, IrqU64};
 use kernel_core::deadline::{Deadline, DeadlineHeap, ABSENT};
 use kernel_core::event_wait::Key;
 use kernel_core::object::{HandleId, ObjectType, Rights};
@@ -44,11 +44,11 @@ impl TimerObj {
     pub const fn identity(&self) -> TimerId { self.id }
 }
 
-static LIVE_TIMERS: AtomicU64 = AtomicU64::new(0);
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-static COALESCE_EARLIEST: AtomicU64 = AtomicU64::new(u64::MAX);
-static COALESCE_WAKES: AtomicU64 = AtomicU64::new(0);
-static COALESCE_EARLY: AtomicU64 = AtomicU64::new(0);
+static LIVE_TIMERS: IrqU64 = IrqU64::new(0);
+static NEXT_ID: IrqU64 = IrqU64::new(1);
+static COALESCE_EARLIEST: IrqU64 = IrqU64::new(u64::MAX);
+static COALESCE_WAKES: IrqU64 = IrqU64::new(0);
+static COALESCE_EARLY: IrqU64 = IrqU64::new(0);
 
 const TIMER_RIGHTS: Rights = kernel_core::kobj_type::Kind::Timer.contract().rights;
 

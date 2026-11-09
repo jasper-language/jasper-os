@@ -6,7 +6,7 @@ use kernel_core::frame::PhysFrame;
 use kernel_core::hwvirt::Backend;
 use kernel_core::hwvirt_vcpu::{GuestPermissions, VcpuState};
 
-use crate::{kprintln, kobj, mm, proc, vcpu};
+use crate::{kobj, kprintln, mm, proc, vcpu};
 
 static FAILED: AtomicU32 = AtomicU32::new(0);
 
@@ -23,7 +23,10 @@ fn check(ok: bool, what: &'static str) {
 
 pub fn run() {
     let backend = crate::hwvirt_demo::selected_backend();
-    check(backend == Some(Backend::Vmx), "Intel VMX backend not selected");
+    check(
+        backend == Some(Backend::Vmx),
+        "Intel VMX backend not selected",
+    );
     if backend != Some(Backend::Vmx) {
         return;
     }
@@ -36,7 +39,7 @@ pub fn run() {
             return;
         }
     };
-    let memory = match proc::create_memory(pid, 512) {
+    let memory = match proc::create_guest_memory(pid, 512) {
         Ok(handle) => handle,
         Err(_) => {
             check(false, "2 MiB guest backing allocation failed");
@@ -75,8 +78,14 @@ pub fn run() {
     state.rip = 0x4000;
     state.rflags = 2;
     state.registers[4] = 0x1f_f000;
-    check(vcpu::save_state_for(pid, handle, state).is_ok(), "initial guest state save failed");
-    check(vcpu::make_ready_for(pid, handle).is_ok(), "Offline -> Ready failed");
+    check(
+        vcpu::save_state_for(pid, handle, state).is_ok(),
+        "initial guest state save failed",
+    );
+    check(
+        vcpu::make_ready_for(pid, handle).is_ok(),
+        "Offline -> Ready failed",
+    );
 
     let ept_root = match vcpu::view(pid, handle) {
         Ok(view) => view.table_root,
@@ -109,12 +118,19 @@ pub fn run() {
     let report = match vm.run() {
         Ok(report) => {
             let final_state = vm.guest_state();
-            check(vcpu::finish_run_for(pid, handle, final_state).is_ok(), "Running -> Halted commit failed");
+            check(
+                vcpu::finish_run_for(pid, handle, final_state).is_ok(),
+                "Running -> Halted commit failed",
+            );
             report
         }
         Err(error) => {
             vcpu::fail_run_for(pid, handle);
-            kprintln!("[JSR-HWV2-FAIL] execution={:?} name={}", error, error.name());
+            kprintln!(
+                "[JSR-HWV2-FAIL] execution={:?} name={}",
+                error,
+                error.name()
+            );
             FAILED.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -138,13 +154,30 @@ pub fn run() {
 
     check(report.cpuid == 1, "CPUID did not cause exactly one VM exit");
     check(report.rdtsc == 1, "RDTSC did not cause exactly one VM exit");
-    check(report.msr_reads == 1, "MSR read did not cause exactly one VM exit");
-    check(report.io == 1, "I/O instruction did not cause exactly one VM exit");
-    check(report.ept_violations == 1, "MMIO/E2PT violation was not observed");
-    check(report.exceptions == 1, "guest #UD exception was not observed");
+    check(
+        report.msr_reads == 1,
+        "MSR read did not cause exactly one VM exit",
+    );
+    check(
+        report.io == 1,
+        "I/O instruction did not cause exactly one VM exit",
+    );
+    check(
+        report.ept_violations == 1,
+        "MMIO/E2PT violation was not observed",
+    );
+    check(
+        report.exceptions == 1,
+        "guest #UD exception was not observed",
+    );
     check(report.exits == 6, "unexpected total VM-exit count");
-    let final_state = vcpu::view(pid, handle).map(|view| view.state).unwrap_or_else(|_| VcpuState::initial());
-    check(final_state.rip == 0x4038, "guest architectural state did not advance through exits");
+    let final_state = vcpu::view(pid, handle)
+        .map(|view| view.state)
+        .unwrap_or_else(|_| VcpuState::initial());
+    check(
+        final_state.rip == 0x4038,
+        "guest architectural state did not advance through exits",
+    );
 
     let mut invalid = execution;
     invalid.efer = 0;
@@ -163,7 +196,10 @@ pub fn run() {
         check(false, "HWV-2 process exit failed");
     }
     kobj::run_cleanup(usize::MAX);
-    check(before == crate::baseline::baseline(), "HWV-2 frames/objects did not return to baseline");
+    check(
+        before == crate::baseline::baseline(),
+        "HWV-2 frames/objects did not return to baseline",
+    );
     kprintln!(
         "[JSR-HWV2] backend=Vmx entered=true vmxoff={} vmcs=true ept=true cpuid={} rdtsc={} msr={} io={} ept_exit={} exception={} exits={} tsc=true xsave={} state_saved=true failed={}",
         vmxoff_ok,
@@ -190,14 +226,18 @@ fn prepare_guest(pid: kernel_core::objtable::ObjId, handle: kernel_core::object:
     let code = [
         0x0f, 0xa2, 0x0f, 0x31, 0xb9, 0x10, 0x00, 0x00, 0x00, 0x0f, 0x32, 0x66, 0xba, 0x80, 0x00,
         0xec, 0xdb, 0xe3, 0xd9, 0xe8, 0xb9, 0x78, 0x56, 0x34, 0x12, 0x66, 0x0f, 0x6e, 0xc1, 0xb8,
-        0x03, 0x00, 0x00, 0x00, 0x31, 0xd2, 0x48, 0xc7, 0xc0, 0x00, 0x50, 0x00, 0x00,
-        0x0f, 0xae, 0x20, 0x48, 0xc7, 0xc0, 0x00, 0x00, 0x20, 0x00, 0x48, 0x89, 0x00,
-        0x0f, 0x0b,
+        0x03, 0x00, 0x00, 0x00, 0x31, 0xd2, 0x48, 0xc7, 0xc0, 0x00, 0x50, 0x00, 0x00, 0x0f, 0xae,
+        0x20, 0x48, 0xc7, 0xc0, 0x00, 0x00, 0x20, 0x00, 0x48, 0x89, 0x00, 0x0f, 0x0b,
     ];
     write_gpa(pid, handle, 0x4000, &code);
 }
 
-fn write_u64(pid: kernel_core::objtable::ObjId, handle: kernel_core::object::HandleId, gpa: u64, value: u64) {
+fn write_u64(
+    pid: kernel_core::objtable::ObjId,
+    handle: kernel_core::object::HandleId,
+    gpa: u64,
+    value: u64,
+) {
     write_gpa(pid, handle, gpa, &value.to_le_bytes());
 }
 

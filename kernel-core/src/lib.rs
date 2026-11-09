@@ -57,6 +57,7 @@ pub mod acpi;
 pub mod argcase;
 pub mod arbiter;
 pub mod bench;
+pub mod block;
 pub mod boot_stage;
 pub mod async_ring;
 pub mod capacity;
@@ -67,6 +68,7 @@ pub mod drill;
 pub mod deadline_forest;
 pub mod yield_gate;
 pub mod dma_quiesce;
+pub mod dma_abi;
 pub mod elf;
 pub mod environment;
 pub mod ticket;
@@ -120,7 +122,9 @@ pub mod sync;
 pub mod tickless;
 pub mod trace;
 pub mod trap;
+pub mod usi;
 pub mod user_layout;
+pub mod vmm_device;
 pub mod wait;
 
 #[cfg(test)]
@@ -159,5 +163,7 @@ pub mod timer_progress;
 pub mod dirty_slots;
 pub mod hwvirt;
 pub mod hwvirt_vcpu;
+pub mod hwvirt_vmm;
 
 pub mod ns_budget;
+pub mod security;

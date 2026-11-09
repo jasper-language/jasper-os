@@ -8,7 +8,9 @@ use core::arch::{asm, global_asm};
 use core::ptr;
 
 use kernel_core::frame::{PhysFrame, FRAME_SIZE};
+use kernel_core::hwvirt::Backend;
 use kernel_core::hwvirt_vcpu::VcpuState;
+use kernel_core::hwvirt_vmm::VmExitEvent;
 
 use crate::kprintln;
 
@@ -90,9 +92,11 @@ const EXCEPTION_BITMAP: u32 = 0x4004;
 const EXIT_CONTROLS: u32 = 0x400C;
 const ENTRY_CONTROLS: u32 = 0x4012;
 const SECONDARY_CONTROLS: u32 = 0x401E;
+const ENTRY_INTR_INFO: u32 = 0x4016;
 const VM_INSTRUCTION_ERROR: u32 = 0x4400;
 const VM_EXIT_REASON: u32 = 0x4402;
 const VM_EXIT_INTR_INFO: u32 = 0x4404;
+const VM_EXIT_INTR_ERROR_CODE: u32 = 0x4406;
 const VM_EXIT_INSTRUCTION_LENGTH: u32 = 0x440C;
 const GUEST_ES_LIMIT: u32 = 0x4800;
 const GUEST_CS_LIMIT: u32 = 0x4802;
@@ -161,6 +165,8 @@ const EXIT_MSR_READ: u32 = 31;
 const EXIT_MSR_WRITE: u32 = 32;
 const EXIT_EPT_VIOLATION: u32 = 48;
 const EXIT_RDTSCP: u32 = 51;
+const EXIT_CR_ACCESS: u32 = 28;
+const EXIT_CR8_ACCESS: u32 = 44;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmxError {
@@ -180,6 +186,7 @@ pub enum VmxError {
     MissingPhysicalMap,
     OutOfFrames,
     TooManyExits,
+    EventDelivery,
 }
 
 impl VmxError {
@@ -201,6 +208,7 @@ impl VmxError {
             VmxError::MissingPhysicalMap => "hwvirt.vmx.error.missing_physical_map",
             VmxError::OutOfFrames => "hwvirt.vmx.error.out_of_frames",
             VmxError::TooManyExits => "hwvirt.vmx.error.too_many_exits",
+            VmxError::EventDelivery => "hwvirt.vmx.error.event_delivery",
         }
     }
 }
@@ -270,6 +278,11 @@ struct HostRegisters {
     sysenter_cs: u64,
     sysenter_esp: u64,
     sysenter_eip: u64,
+    star: u64,
+    lstar: u64,
+    cstar: u64,
+    sfmask: u64,
+    kernel_gs_base: u64,
     cs: u16,
     ds: u16,
     es: u16,
@@ -327,8 +340,8 @@ pub(crate) struct HostSnapshot {
 }
 
 pub(crate) fn host_snapshot() -> HostSnapshot {
-    use x86_64::instructions::tables::{sidt, sgdt};
     use x86_64::instructions::segmentation::{Segment, CS, DS, ES, FS, GS, SS};
+    use x86_64::instructions::tables::{sgdt, sidt};
     let gdt = sgdt();
     let idt = sidt();
     let mut tr_selector: u16;
@@ -394,7 +407,11 @@ struct HostXsave {
 
 impl HostXsave {
     fn new(mask: u64) -> Result<Self, VmxError> {
-        Ok(Self { area: Region::allocate_zeroed(0)?, mask, saved: false })
+        Ok(Self {
+            area: Region::allocate_zeroed(0)?,
+            mask,
+            saved: false,
+        })
     }
 
     fn save(&mut self) -> Result<(), VmxError> {
@@ -735,8 +752,10 @@ fn vmwrite(field: u32, value: u64) -> Result<(), VmxError> {
             out(reg) flags
         )
     };
-    instruction_status(flags)
-        .map_err(|_| VmxError::Vmwrite { field: field as u32, code: read_vm_error() })
+    instruction_status(flags).map_err(|_| VmxError::Vmwrite {
+        field: field as u32,
+        code: read_vm_error(),
+    })
 }
 
 fn vmread(field: u32) -> Result<u64, VmxError> {
@@ -754,7 +773,10 @@ fn vmread(field: u32) -> Result<u64, VmxError> {
             out(reg) flags
         )
     };
-    instruction_status(flags).map_err(|_| VmxError::Vmread { field, code: read_vm_error() })?;
+    instruction_status(flags).map_err(|_| VmxError::Vmread {
+        field,
+        code: read_vm_error(),
+    })?;
     Ok(value)
 }
 
@@ -773,8 +795,8 @@ fn read_vm_error() -> u64 {
 }
 
 fn host_registers(cr0: u64, cr3: u64, cr4_after: u64) -> HostRegisters {
-    use x86_64::instructions::tables::{sidt, sgdt};
     use x86_64::instructions::segmentation::{Segment, CS, DS, ES, FS, GS, SS};
+    use x86_64::instructions::tables::{sgdt, sidt};
     let gdt = sgdt();
     let idt = sidt();
     let mut tr_selector: u16;
@@ -801,6 +823,11 @@ fn host_registers(cr0: u64, cr3: u64, cr4_after: u64) -> HostRegisters {
             sysenter_cs: rdmsr(0x174),
             sysenter_esp: rdmsr(0x175),
             sysenter_eip: rdmsr(0x176),
+            star: rdmsr(0xc000_0081),
+            lstar: rdmsr(0xc000_0082),
+            cstar: rdmsr(0xc000_0083),
+            sfmask: rdmsr(0xc000_0084),
+            kernel_gs_base: rdmsr(0xc000_0102),
             cs: CS::get_reg().0,
             ds: DS::get_reg().0,
             es: ES::get_reg().0,
@@ -822,11 +849,22 @@ fn descriptor_base(table: u64, selector: u16) -> u64 {
 
 fn enable_vmx() -> Result<(HostRegisters, EntryRestore), VmxError> {
     // SAFETY: the caller is on the boot processor at CPL0.
-    let (cr0, cr3, cr4_before, feature) =
-        unsafe { (read_cr0(), read_cr3(), read_cr4(), rdmsr(IA32_FEATURE_CONTROL)) };
+    let (cr0, cr3, cr4_before, feature) = unsafe {
+        (
+            read_cr0(),
+            read_cr3(),
+            read_cr4(),
+            rdmsr(IA32_FEATURE_CONTROL),
+        )
+    };
     if feature & FEATURE_LOCK == 0 {
         // SAFETY: lock and permit VMX outside SMX, as required on this CPU.
-        unsafe { wrmsr(IA32_FEATURE_CONTROL, feature | FEATURE_LOCK | FEATURE_VMX_OUTSIDE_SMX) };
+        unsafe {
+            wrmsr(
+                IA32_FEATURE_CONTROL,
+                feature | FEATURE_LOCK | FEATURE_VMX_OUTSIDE_SMX,
+            )
+        };
     } else if feature & FEATURE_VMX_OUTSIDE_SMX == 0 {
         return Err(VmxError::FeatureControl);
     }
@@ -841,7 +879,8 @@ fn enable_vmx() -> Result<(HostRegisters, EntryRestore), VmxError> {
         });
     }
     let add_osxsave = xsave && cr4_before & CR4_OSXSAVE == 0;
-    let add_fxsr = fxsr && cr4_before & (CR4_OSFXSR | CR4_OSXMMEXCPT) != (CR4_OSFXSR | CR4_OSXMMEXCPT);
+    let add_fxsr =
+        fxsr && cr4_before & (CR4_OSFXSR | CR4_OSXMMEXCPT) != (CR4_OSFXSR | CR4_OSXMMEXCPT);
     let cr4_after = cr4_before
         | CR4_VMXE
         | if xsave { CR4_OSXSAVE } else { 0 }
@@ -963,6 +1002,307 @@ pub struct RunReport {
     pub exceptions: u32,
     pub halted: bool,
     pub xsave_enabled: bool,
+    pub serial_bytes: u32,
+    pub linux_marker: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LinuxReport {
+    pub exits: u32,
+    pub serial_bytes: u32,
+    pub timer_interrupts: u32,
+    pub timer_eois: u32,
+    pub marker: bool,
+    pub halted: bool,
+}
+
+/// Guest-memory and MMIO services consumed by the Linux run loop.
+pub trait LinuxPlatform {
+    fn read_guest(&mut self, gpa: u64, out: &mut [u8]) -> bool;
+    fn write_guest(&mut self, gpa: u64, bytes: &[u8]) -> bool;
+    fn read_mmio(&mut self, gpa: u64, width: u8) -> Option<u64>;
+    fn write_mmio(&mut self, gpa: u64, width: u8, value: u64) -> bool;
+    fn take_irq(&mut self) -> Option<u8>;
+    fn return_irq(&mut self, irq: u8);
+}
+
+struct NoLinuxDevices;
+
+impl LinuxPlatform for NoLinuxDevices {
+    fn read_guest(&mut self, _: u64, _: &mut [u8]) -> bool {
+        false
+    }
+    fn write_guest(&mut self, _: u64, _: &[u8]) -> bool {
+        false
+    }
+    fn read_mmio(&mut self, _: u64, _: u8) -> Option<u64> {
+        None
+    }
+    fn write_mmio(&mut self, _: u64, _: u8, _: u64) -> bool {
+        false
+    }
+    fn take_irq(&mut self) -> Option<u8> {
+        None
+    }
+    fn return_irq(&mut self, _: u8) {}
+}
+
+const LINUX_MARKER: &[u8] = b"[JSR-LINUX-GUEST]";
+
+struct LinuxRuntime {
+    uart_lcr: u8,
+    uart_ier: u8,
+    uart_mcr: u8,
+    serial_match: usize,
+    serial_bytes: u32,
+    marker_seen: bool,
+    pic_master_mask: u8,
+    pic_slave_mask: u8,
+    pic_master_vector: u8,
+    pic_slave_vector: u8,
+    pic_init_stage: [u8; 2],
+    pic_in_service: u16,
+    pic_eois: u32,
+    timer_injections: u32,
+    kernel_gs_base: u64,
+    pit_access: u8,
+    pit_write_high: bool,
+    pit_latch: u16,
+    pit_reload: u32,
+    pit_remaining: u32,
+    pit_active: bool,
+    timer_countdown: u32,
+    msrs: [(u32, u64); 64],
+    msr_count: usize,
+}
+
+impl LinuxRuntime {
+    const fn new() -> Self {
+        Self {
+            uart_lcr: 0,
+            uart_ier: 0,
+            uart_mcr: 0,
+            serial_match: 0,
+            serial_bytes: 0,
+            marker_seen: false,
+            pic_master_mask: 0xff,
+            pic_slave_mask: 0xff,
+            pic_master_vector: 0x20,
+            pic_slave_vector: 0x28,
+            pic_init_stage: [0; 2],
+            pic_in_service: 0,
+            pic_eois: 0,
+            timer_injections: 0,
+            kernel_gs_base: 0,
+            pit_access: 3,
+            pit_write_high: false,
+            pit_latch: 0,
+            pit_reload: 0,
+            pit_remaining: 0,
+            pit_active: false,
+            timer_countdown: 1024,
+            msrs: [(0, 0); 64],
+            msr_count: 0,
+        }
+    }
+
+    fn serial_byte(&mut self, byte: u8) {
+        self.serial_bytes = self.serial_bytes.saturating_add(1);
+        if !self.marker_seen {
+            if byte == LINUX_MARKER[self.serial_match] {
+                self.serial_match += 1;
+                if self.serial_match == LINUX_MARKER.len() {
+                    self.marker_seen = true;
+                }
+            } else {
+                self.serial_match = usize::from(byte == LINUX_MARKER[0]);
+            }
+        }
+        if byte == b'\n' {
+            crate::arch::console_write_byte(b'\r');
+        }
+        crate::arch::console_write_byte(byte);
+    }
+
+    fn msr_read(&self, index: u32) -> Option<u64> {
+        self.msrs[..self.msr_count]
+            .iter()
+            .rev()
+            .find_map(|(saved, value)| (*saved == index).then_some(*value))
+    }
+
+    fn msr_write(&mut self, index: u32, value: u64) -> bool {
+        if let Some((_, saved)) = self.msrs[..self.msr_count]
+            .iter_mut()
+            .rev()
+            .find(|(saved, _)| *saved == index)
+        {
+            *saved = value;
+            return true;
+        }
+        if self.msr_count == self.msrs.len() {
+            return false;
+        }
+        self.msrs[self.msr_count] = (index, value);
+        self.msr_count += 1;
+        true
+    }
+
+    fn syscall_msr(&self, index: u32) -> u64 {
+        match index {
+            0xc000_0081 | 0xc000_0082 | 0xc000_0083 | 0xc000_0084 => {
+                self.msr_read(index).unwrap_or(0)
+            }
+            0xc000_0102 => self.kernel_gs_base,
+            _ => 0,
+        }
+    }
+
+    fn pic_out(&mut self, port: u16, value: u8) {
+        let slave = port >= 0xa0;
+        let index = usize::from(slave);
+        if self.pic_init_stage[index] != 0 {
+            match self.pic_init_stage[index] {
+                1 => {
+                    if slave {
+                        self.pic_slave_vector = value & 0xf8;
+                    } else {
+                        self.pic_master_vector = value & 0xf8;
+                    }
+                    self.pic_init_stage[index] = 2;
+                }
+                2 => self.pic_init_stage[index] = 3,
+                _ => self.pic_init_stage[index] = 0,
+            }
+            return;
+        }
+        match port {
+            0x20 => {
+                if value & 0x10 != 0 {
+                    self.pic_init_stage[0] = 1;
+                    self.pic_master_mask = 0xff;
+                } else if value & 0x20 != 0 {
+                    let irq = if value & 0xe0 == 0x60 {
+                        (value & 7) as u8
+                    } else {
+                        self.pic_in_service.trailing_zeros().min(15) as u8
+                    };
+                    self.pic_in_service &= !(1u16 << irq);
+                    self.pic_eois = self.pic_eois.saturating_add(1);
+                }
+            }
+            0x21 => self.pic_master_mask = value,
+            0xa0 => {
+                if value & 0x10 != 0 {
+                    self.pic_init_stage[1] = 1;
+                    self.pic_slave_mask = 0xff;
+                } else if value & 0x20 != 0 {
+                    // Slave EOI is not needed for the UP timer path.
+                }
+            }
+            0xa1 => self.pic_slave_mask = value,
+            _ => {}
+        }
+    }
+
+    fn pic_in(&self, port: u16) -> u8 {
+        match port {
+            0x21 => self.pic_master_mask,
+            0xa1 => self.pic_slave_mask,
+            0x20 | 0xa0 => 0,
+            _ => 0,
+        }
+    }
+
+    fn pit_out_command(&mut self, value: u8) {
+        let channel = value >> 6;
+        if channel == 0 {
+            self.pit_access = (value >> 4) & 3;
+            self.pit_write_high = false;
+            self.pit_latch = 0;
+        }
+    }
+
+    fn pit_out_data(&mut self, value: u8) {
+        match self.pit_access {
+            1 => {
+                self.pit_reload = u32::from(value);
+                self.pit_write_high = false;
+            }
+            2 => {
+                self.pit_reload = u32::from(value) << 8;
+                self.pit_write_high = false;
+            }
+            3 => {
+                if !self.pit_write_high {
+                    self.pit_latch = u16::from(value);
+                    self.pit_write_high = true;
+                } else {
+                    self.pit_reload = (u32::from(value) << 8) | u32::from(self.pit_latch);
+                    self.pit_write_high = false;
+                }
+            }
+            _ => {}
+        }
+        if self.pit_reload != 0 {
+            self.pit_remaining = self.pit_reload;
+            self.pit_active = true;
+        }
+    }
+
+    fn pit_in_data(&mut self) -> u8 {
+        if !self.pit_active || self.pit_reload == 0 {
+            return 0xff;
+        }
+        let value = self.pit_remaining & 0xffff;
+        if !self.pit_write_high {
+            self.pit_write_high = true;
+            value as u8
+        } else {
+            self.pit_write_high = false;
+            (value >> 8) as u8
+        }
+    }
+
+    fn timer_interrupt(&mut self) -> Option<u8> {
+        if !self.pit_active || self.pic_in_service & 1 != 0 {
+            return None;
+        }
+        // The minimal-guest acceptance uses exits as deterministic virtual
+        // time. Frequency is not used as a performance measurement.
+        self.timer_countdown = self.timer_countdown.saturating_sub(1);
+        if self.timer_countdown != 0 {
+            return None;
+        }
+        self.timer_countdown = 1024;
+        if self.pic_master_mask & 1 != 0 {
+            return None;
+        }
+        self.pic_in_service |= 1;
+        self.timer_injections = self.timer_injections.saturating_add(1);
+        Some(self.pic_master_vector.wrapping_add(0))
+    }
+
+    fn force_timer_interrupt(&mut self) -> Option<u8> {
+        if !self.pit_active || self.pic_in_service & 1 != 0 || self.pic_master_mask & 1 != 0 {
+            return None;
+        }
+        self.pit_remaining = self.pit_reload;
+        self.pic_in_service |= 1;
+        self.timer_injections = self.timer_injections.saturating_add(1);
+        Some(self.pic_master_vector)
+    }
+
+    fn raise_irq(&mut self, irq: u8) -> Option<u8> {
+        if irq >= 8
+            || self.pic_master_mask & (1u8 << irq) != 0
+            || self.pic_in_service & (1u16 << irq) != 0
+        {
+            return None;
+        }
+        self.pic_in_service |= 1u16 << irq;
+        Some(self.pic_master_vector.wrapping_add(irq))
+    }
 }
 
 pub struct VmxVm {
@@ -978,6 +1318,7 @@ pub struct VmxVm {
     basic: u64,
     guest: GuestExecutionState,
     gprs: [u64; 16],
+    pending_interrupt: Option<u8>,
     launched: bool,
     active: bool,
 }
@@ -1000,7 +1341,9 @@ impl VmxVm {
         let (host, restore) = enable_vmx()?;
         if guest.state.xcr0 & !restore.xcr0_supported != 0 {
             restore_entry(restore);
-            return Err(VmxError::InvalidState { code: guest.state.xcr0 });
+            return Err(VmxError::InvalidState {
+                code: guest.state.xcr0,
+            });
         }
         if restore.cr4_osxsave {
             write_xcr0(guest.state.xcr0);
@@ -1029,17 +1372,19 @@ impl VmxVm {
             restore_entry(restore);
             return Err(error);
         }
-        let initialized = vmclear(vmcs.physical()).and_then(|_| vmptrld(vmcs.physical())).and_then(|_| {
-            initialize_vmcs(
-                ept_root,
-                guest,
-                &host,
-                controls,
-                msr_bitmap.physical(),
-                io_bitmap_a.physical(),
-                io_bitmap_b.physical(),
-            )
-        });
+        let initialized = vmclear(vmcs.physical())
+            .and_then(|_| vmptrld(vmcs.physical()))
+            .and_then(|_| {
+                initialize_vmcs(
+                    ept_root,
+                    guest,
+                    &host,
+                    controls,
+                    msr_bitmap.physical(),
+                    io_bitmap_a.physical(),
+                    io_bitmap_b.physical(),
+                )
+            });
         if let Err(error) = initialized {
             let _ = vmxoff();
             if let Some(state) = host_xsave.as_mut() {
@@ -1064,13 +1409,226 @@ impl VmxVm {
             basic,
             guest,
             gprs,
+            pending_interrupt: None,
             launched: false,
             active: true,
         })
     }
 
+    /// Enter a native Linux guest through the x86 64-bit boot protocol.
+    /// Exceptions remain owned by the guest kernel instead of terminating the
+    /// VMM run loop; I/O and architectural MSRs are virtualized below.
+    pub fn new_linux(ept_root: u64, guest: GuestExecutionState) -> Result<Self, VmxError> {
+        let mut vm = Self::new(ept_root, guest)?;
+        vm.controls.primary &= !PROC_RDTSC_EXITING;
+        let configured = vmwrite(EXCEPTION_BITMAP, 0)
+            .and_then(|_| vmwrite(PROC_BASED_CONTROLS, u64::from(vm.controls.primary)))
+            .and_then(|_| vmwrite(CR0_GUEST_HOST_MASK, u64::from(u32::MAX)))
+            .and_then(|_| vmwrite(CR4_GUEST_HOST_MASK, u64::from(u32::MAX)));
+        if let Err(error) = configured {
+            let _ = vm.shutdown();
+            return Err(error);
+        }
+        Ok(vm)
+    }
+
     pub fn run(&mut self) -> Result<RunReport, VmxError> {
-        let mut report = RunReport { xsave_enabled: self._host_xsave.is_some(), ..RunReport::default() };
+        self.run_with_observer(&mut |_| Ok(VmxObserverAction::Continue))
+    }
+
+    /// Run the minimal Linux guest until it halts or reaches the bounded exit
+    /// budget. The serial marker is derived only from bytes emitted by the
+    /// guest through COM1.
+    pub fn run_linux(&mut self) -> Result<LinuxReport, VmxError> {
+        self.run_linux_with(&mut NoLinuxDevices)
+    }
+
+    pub fn run_linux_with<B: LinuxPlatform>(&mut self, devices: &mut B) -> Result<LinuxReport, VmxError> {
+        let mut linux = LinuxRuntime::new();
+        let mut report = RunReport {
+            xsave_enabled: self._host_xsave.is_some(),
+            ..RunReport::default()
+        };
+        for _ in 0..2_000_000 {
+            if self.pending_interrupt.is_none()
+                && self.guest.state.rflags & 0x200 != 0
+                && vmread(GUEST_INTERRUPTIBILITY).unwrap_or(1) == 0
+            {
+                self.pending_interrupt = devices
+                    .take_irq()
+                    .and_then(|irq| {
+                        let vector = linux.raise_irq(irq);
+                        if vector.is_none() {
+                            devices.return_irq(irq);
+                        }
+                        vector
+                    })
+                    .or_else(|| linux.timer_interrupt());
+            }
+            self.stage_state()?;
+            self.load_linux_syscall_msrs(&linux);
+            let resume = self.launched;
+            let status = unsafe { jsr_vmx_run(u64::from(resume)) };
+            if status == 0 {
+                linux.kernel_gs_base = unsafe { rdmsr(0xc000_0102) };
+            }
+            self.restore_host_syscall_msrs();
+            if status != 0 {
+                let code = read_vm_error();
+                return Err(if resume {
+                    VmxError::Resume { code }
+                } else {
+                    VmxError::Launch { code }
+                });
+            }
+            self.pending_interrupt = None;
+            self.launched = true;
+            self.collect_gprs();
+            report.exits += 1;
+            let raw_reason = vmread(VM_EXIT_REASON)? as u32;
+            if raw_reason & 0x8000_0000 != 0 {
+                self.dump_entry_failure(raw_reason);
+                return Err(VmxError::EntryFailure { reason: raw_reason });
+            }
+            self.guest.state.rip = vmread(GUEST_RIP)?;
+            self.guest.rsp = vmread(GUEST_RSP)?;
+            self.guest.state.rflags = vmread(GUEST_RFLAGS)?;
+            let reason = raw_reason & 0xffff;
+            let length = vmread(VM_EXIT_INSTRUCTION_LENGTH).unwrap_or(0);
+            match reason {
+                EXIT_CPUID => {
+                    report.cpuid += 1;
+                    self.emulate_linux_cpuid();
+                    self.advance_rip(length);
+                }
+                EXIT_RDTSC | EXIT_RDTSCP => {
+                    report.rdtsc += 1;
+                    let (lo, hi) = self.guest_tsc();
+                    self.set_gpr(0, u64::from(lo));
+                    self.set_gpr(2, u64::from(hi));
+                    self.advance_rip(length);
+                }
+                EXIT_MSR_READ => {
+                    report.msr_reads += 1;
+                    let index = self.gpr(1) as u32;
+                    let value = self.linux_msr_read(index, &linux);
+                    self.set_gpr(0, value as u32 as u64);
+                    self.set_gpr(2, (value >> 32) as u32 as u64);
+                    self.advance_rip(length);
+                }
+                EXIT_MSR_WRITE => {
+                    let index = self.gpr(1) as u32;
+                    let value =
+                        u64::from(self.gpr(0) as u32) | (u64::from(self.gpr(2) as u32) << 32);
+                    self.linux_msr_write(index, value, &mut linux)?;
+                    self.advance_rip(length);
+                }
+                EXIT_IO => {
+                    report.io += 1;
+                    let qualification = vmread(EXIT_QUALIFICATION)?;
+                    self.emulate_linux_io(qualification, &mut linux);
+                    self.advance_rip(length);
+                }
+                EXIT_CR_ACCESS => {
+                    self.emulate_linux_cr_access(vmread(EXIT_QUALIFICATION)?, length)?;
+                }
+                EXIT_CR8_ACCESS => {
+                    return Err(VmxError::InvalidState {
+                        code: 0x8_0000_0000 | vmread(EXIT_QUALIFICATION).unwrap_or(0),
+                    });
+                }
+                EXIT_EPT_VIOLATION => {
+                    let physical = vmread(GUEST_PHYSICAL_ADDRESS).unwrap_or(u64::MAX);
+                    let qualification = vmread(EXIT_QUALIFICATION).unwrap_or(u64::MAX);
+                    if self.emulate_linux_mmio(physical, qualification, length, devices)? {
+                        continue;
+                    }
+                    kprintln!(
+                        "[JSR-HWV4-LINUX-FAIL] ept physical={:#x} qualification={:#x} rip={:#x} rsp={:#x} cr3={:#x}",
+                        physical,
+                        qualification,
+                        self.guest.state.rip,
+                        self.guest.rsp,
+                        self.guest.state.cr3
+                    );
+                    return Err(VmxError::InvalidState {
+                        code: 0xe000_0000_0000_0000
+                            | ((physical & 0xffff_ffff) << 32)
+                            | (qualification & 0xffff_ffff),
+                    });
+                }
+                EXIT_HLT => {
+                    if !linux.marker_seen {
+                        self.pending_interrupt = linux.force_timer_interrupt();
+                        if self.pending_interrupt.is_some() {
+                            vmwrite(GUEST_INTERRUPTIBILITY, 0)?;
+                            vmwrite(GUEST_ACTIVITY_STATE, 0)?;
+                            continue;
+                        }
+                    }
+                    report.halted = true;
+                    report.serial_bytes = linux.serial_bytes;
+                    report.linux_marker = linux.marker_seen;
+                    return Ok(LinuxReport {
+                        exits: report.exits,
+                        serial_bytes: report.serial_bytes,
+                        timer_interrupts: linux.timer_injections,
+                        timer_eois: linux.pic_eois,
+                        marker: report.linux_marker,
+                        halted: true,
+                    });
+                }
+                EXIT_EXCEPTION_NMI => {
+                    let info = vmread(VM_EXIT_INTR_INFO)? as u32;
+                    return Err(VmxError::InvalidState {
+                        code: 0xf_0000_0000 | u64::from(info),
+                    });
+                }
+                other => {
+                    kprintln!(
+                        "[JSR-HWV4-LINUX-FAIL] exit={} rip={:#x} rsp={:#x} cr3={:#x} rax={:#x} rbx={:#x} rbp={:#x} rsi={:#x} rdi={:#x} cr4={:#x}",
+                        other,
+                        vmread(GUEST_RIP).unwrap_or(u64::MAX),
+                        vmread(GUEST_RSP).unwrap_or(u64::MAX),
+                        vmread(GUEST_CR3).unwrap_or(u64::MAX),
+                        self.gpr(0),
+                        self.gpr(3),
+                        self.gpr(5),
+                        self.gpr(6),
+                        self.gpr(7),
+                        vmread(GUEST_CR4).unwrap_or(u64::MAX)
+                    );
+                    return Err(VmxError::InvalidState {
+                        code: u64::from(other),
+                    });
+                }
+            }
+        }
+        kprintln!(
+            "[JSR-HWV4-LINUX-FAIL] exit_budget cpuid={} io={} msr={} rdtsc={} ept={} rip={:#x} rsp={:#x}",
+            report.cpuid,
+            report.io,
+            report.msr_reads,
+            report.rdtsc,
+            report.ept_violations,
+            self.guest.state.rip,
+            self.guest.rsp
+        );
+        Err(VmxError::TooManyExits)
+    }
+
+    /// Run the guest while publishing every architectural exit to the caller.
+    /// The observer runs after hardware state has been collected and before
+    /// the backend emulates the exit. A delivery failure aborts the run; the
+    /// caller must still shut the backend down and fail the vCPU lifecycle.
+    pub fn run_with_observer<F>(&mut self, observer: &mut F) -> Result<RunReport, VmxError>
+    where
+        F: FnMut(VmExitEvent) -> Result<VmxObserverAction, VmxError>,
+    {
+        let mut report = RunReport {
+            xsave_enabled: self._host_xsave.is_some(),
+            ..RunReport::default()
+        };
         for _ in 0..256 {
             self.stage_state()?;
             let resume = self.launched;
@@ -1083,6 +1641,7 @@ impl VmxVm {
                     VmxError::Launch { code }
                 });
             }
+            self.pending_interrupt = None;
             self.launched = true;
             self.collect_gprs();
             report.exits += 1;
@@ -1095,6 +1654,18 @@ impl VmxVm {
             self.guest.rsp = vmread(GUEST_RSP)?;
             let reason = raw_reason & 0xffff;
             let length = vmread(VM_EXIT_INSTRUCTION_LENGTH).unwrap_or(0);
+            let intr = vmread(VM_EXIT_INTR_INFO).unwrap_or(0);
+            let action = observer(VmExitEvent {
+                backend: Backend::Vmx,
+                reason,
+                qualification: vmread(EXIT_QUALIFICATION).unwrap_or(0),
+                guest_physical: vmread(GUEST_PHYSICAL_ADDRESS).unwrap_or(0),
+                vector: intr as u8,
+                instruction_length: length as u8,
+            })?;
+            if let VmxObserverAction::Inject(vector) = action {
+                self.pending_interrupt = Some(vector);
+            }
             match reason {
                 EXIT_CPUID => {
                     report.cpuid += 1;
@@ -1125,7 +1696,9 @@ impl VmxVm {
                     report.io += 1;
                     let qualification = vmread(EXIT_QUALIFICATION)?;
                     if (qualification >> 16) as u16 != 0x80 {
-                        return Err(VmxError::InvalidState { code: qualification });
+                        return Err(VmxError::InvalidState {
+                            code: qualification,
+                        });
                     }
                     if qualification & (1 << 3) != 0 {
                         self.set_gpr(0, 0xff);
@@ -1142,10 +1715,19 @@ impl VmxVm {
                     let info = vmread(VM_EXIT_INTR_INFO)? as u32;
                     let vector = (info & 0xff) as u8;
                     report.exceptions += 1;
+                    kprintln!(
+                        "[JSR-HWV4-DBG] exception vector={} info={:#x} error={:#x} rip={:#x}",
+                        vector,
+                        info,
+                        vmread(VM_EXIT_INTR_ERROR_CODE).unwrap_or(0),
+                        self.guest.state.rip
+                    );
                     if vector == 6 {
                         return Ok(report);
                     }
-                    return Err(VmxError::InvalidState { code: u64::from(info) });
+                    return Err(VmxError::InvalidState {
+                        code: u64::from(info),
+                    });
                 }
                 EXIT_RDTSCP => {
                     let (lo, hi) = self.guest_tsc();
@@ -1166,7 +1748,9 @@ impl VmxVm {
                         vmread(GUEST_CR3).unwrap_or(u64::MAX),
                         vmread(VM_EXIT_INTR_INFO).unwrap_or(u64::MAX)
                     );
-                    return Err(VmxError::InvalidState { code: u64::from(other) });
+                    return Err(VmxError::InvalidState {
+                        code: u64::from(other),
+                    });
                 }
             }
         }
@@ -1174,7 +1758,391 @@ impl VmxVm {
     }
 
     pub fn report(&self) -> (u64, u64, u64) {
-        (self.controls.primary.into(), self.controls.secondary.into(), self.basic)
+        (
+            self.controls.primary.into(),
+            self.controls.secondary.into(),
+            self.basic,
+        )
+    }
+
+    fn emulate_linux_mmio<B: LinuxPlatform>(
+        &mut self,
+        physical: u64,
+        qualification: u64,
+        length: u64,
+        devices: &mut B,
+    ) -> Result<bool, VmxError> {
+        if qualification & (1 << 2) != 0 {
+            return Ok(false);
+        }
+        let mut bytes = [0u8; 15];
+        if !self.read_guest_va(devices, self.guest.state.rip, &mut bytes) {
+            return Ok(false);
+        }
+        let Some(access) = decode_memory_data_access(&bytes) else {
+            return Ok(false);
+        };
+        let write = qualification & (1 << 1) != 0;
+        if write != access.store {
+            return Ok(false);
+        }
+        if access.store {
+            if !devices.write_mmio(physical, access.width, self.gpr(access.register)) {
+                return Ok(false);
+            }
+        } else {
+            let Some(value) = devices.read_mmio(physical, access.width) else {
+                return Ok(false);
+            };
+            self.set_gpr(access.register, value);
+        }
+        self.advance_rip(if length == 0 { access.length as u64 } else { length });
+        Ok(true)
+    }
+
+    fn read_guest_va<B: LinuxPlatform>(&self, devices: &mut B, va: u64, out: &mut [u8]) -> bool {
+        let mut done = 0;
+        let mut address = va;
+        let cr3 = vmread(GUEST_CR3).unwrap_or(self.guest.state.cr3);
+        while done < out.len() {
+            let Some(gpa) = guest_va_to_gpa(cr3, address, devices) else {
+                return false;
+            };
+            let page_left = 4096 - (address & 0xfff) as usize;
+            let count = (out.len() - done).min(page_left);
+            if !devices.read_guest(gpa, &mut out[done..done + count]) {
+                return false;
+            }
+            done += count;
+            address = address.wrapping_add(count as u64);
+        }
+        true
+    }
+
+    fn emulate_linux_cpuid(&mut self) {
+        let leaf = self.gpr(0) as u32;
+        let subleaf = self.gpr(1) as u32;
+        let result = match leaf {
+            0 => {
+                let mut value = cpuid(0, 0);
+                value.eax = 0x16;
+                value
+            }
+            1 => {
+                let mut value = cpuid(1, 0);
+                // Native PIC/PIT boot with an explicit device model. VMX,
+                // APIC, x2APIC, XSAVE and hypervisor leaves are not exposed.
+                value.ecx &= (1 << 0) | (1 << 1) | (1 << 9);
+                value.edx &= (1 << 0)
+                    | (1 << 3)
+                    | (1 << 4)
+                    | (1 << 5)
+                    | (1 << 6)
+                    | (1 << 7)
+                    | (1 << 8)
+                    | (1 << 11)
+                    | (1 << 12)
+                    | (1 << 13)
+                    | (1 << 15)
+                    | (1 << 16)
+                    | (1 << 19)
+                    | (1 << 23)
+                    | (1 << 24)
+                    | (1 << 25)
+                    | (1 << 26);
+                value
+            }
+            7 => core::arch::x86_64::CpuidResult {
+                eax: 0,
+                ebx: 0,
+                ecx: 0,
+                edx: 0,
+            },
+            0x15 => core::arch::x86_64::CpuidResult {
+                eax: 1,
+                ebx: 100,
+                ecx: 20_000_000,
+                edx: 0,
+            },
+            0x16 => core::arch::x86_64::CpuidResult {
+                eax: 2_000,
+                ebx: 2_000,
+                ecx: 100,
+                edx: 0,
+            },
+            0x8000_0000 => {
+                let mut value = cpuid(0x8000_0000, 0);
+                value.eax = 0x8000_0008;
+                value
+            }
+            0x8000_0001 => {
+                let mut value = cpuid(0x8000_0001, 0);
+                value.ecx &= (1 << 0) | (1 << 5) | (1 << 6) | (1 << 11);
+                value.edx &= (1 << 11) | (1 << 20) | (1 << 26) | (1 << 27) | (1 << 29) | (1 << 30);
+                value
+            }
+            0x8000_0008 => core::arch::x86_64::CpuidResult {
+                eax: 48,
+                ebx: 0,
+                ecx: 0,
+                edx: 0,
+            },
+            0x4000_0000..=0x4fff_ffff => core::arch::x86_64::CpuidResult {
+                eax: 0,
+                ebx: 0,
+                ecx: 0,
+                edx: 0,
+            },
+            _ => cpuid(leaf, subleaf),
+        };
+        self.set_gpr(0, u64::from(result.eax));
+        self.set_gpr(1, u64::from(result.ecx));
+        self.set_gpr(2, u64::from(result.edx));
+        self.set_gpr(3, u64::from(result.ebx));
+    }
+
+    fn load_linux_syscall_msrs(&self, linux: &LinuxRuntime) {
+        // SAFETY: these are the architectural MSRs used by SYSCALL/SWAPGS.
+        // Host values are restored immediately after every VM exit.
+        unsafe {
+            wrmsr(0xc000_0081, linux.syscall_msr(0xc000_0081));
+            wrmsr(0xc000_0082, linux.syscall_msr(0xc000_0082));
+            wrmsr(0xc000_0083, linux.syscall_msr(0xc000_0083));
+            wrmsr(0xc000_0084, linux.syscall_msr(0xc000_0084));
+            wrmsr(0xc000_0102, linux.kernel_gs_base);
+        }
+    }
+
+    fn restore_host_syscall_msrs(&self) {
+        // SAFETY: restore the exact hardware values captured before VM entry.
+        unsafe {
+            wrmsr(0xc000_0081, self.host.star);
+            wrmsr(0xc000_0082, self.host.lstar);
+            wrmsr(0xc000_0083, self.host.cstar);
+            wrmsr(0xc000_0084, self.host.sfmask);
+            wrmsr(0xc000_0102, self.host.kernel_gs_base);
+        }
+    }
+
+    fn linux_msr_read(&self, index: u32, linux: &LinuxRuntime) -> u64 {
+        if let Some(value) = linux.msr_read(index) {
+            return value;
+        }
+        match index {
+            0x10 => {
+                let (lo, hi) = self.guest_tsc();
+                (u64::from(hi) << 32) | u64::from(lo)
+            }
+            0x1b => 0,
+            0xfe => 0x500,
+            0x2ff => 0x800,
+            0xc000_0080 => self.guest.efer,
+            0xc000_0102 => linux.kernel_gs_base,
+            _ => 0,
+        }
+    }
+
+    fn linux_msr_write(
+        &mut self,
+        index: u32,
+        mut value: u64,
+        linux: &mut LinuxRuntime,
+    ) -> Result<(), VmxError> {
+        if !linux.msr_write(index, value) {
+            return Err(VmxError::InvalidState {
+                code: u64::from(index),
+            });
+        }
+        match index {
+            0x277 => vmwrite(GUEST_IA32_PAT, value)?,
+            0xc000_0080 => {
+                value |= 0x500;
+                self.guest.efer = value;
+                if !linux.msr_write(index, value) {
+                    return Err(VmxError::InvalidState {
+                        code: u64::from(index),
+                    });
+                }
+                vmwrite(GUEST_IA32_EFER, value)?;
+            }
+            0xc000_0100 => vmwrite(GUEST_FS_BASE, value)?,
+            0xc000_0101 => vmwrite(GUEST_GS_BASE, value)?,
+            0xc000_0102 => linux.kernel_gs_base = value,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn emulate_linux_io(&mut self, qualification: u64, linux: &mut LinuxRuntime) {
+        let width = match qualification & 7 {
+            0 => 1,
+            1 => 2,
+            3 => 4,
+            _ => 1,
+        };
+        let input = qualification & (1 << 3) != 0;
+        let register = ((qualification >> 8) & 0xf) as usize;
+        let port = ((qualification >> 16) & 0xffff) as u16;
+        if !input {
+            let value = self.gpr(register);
+            if (0x3f8..=0x3ff).contains(&port) {
+                let offset = (port - 0x3f8) as u8;
+                match offset {
+                    0 if linux.uart_lcr & 0x80 == 0 => linux.serial_byte(value as u8),
+                    1 if linux.uart_lcr & 0x80 == 0 => linux.uart_ier = value as u8,
+                    3 => linux.uart_lcr = value as u8,
+                    4 => linux.uart_mcr = value as u8,
+                    _ => {}
+                }
+            } else if matches!(port, 0x20 | 0x21 | 0xa0 | 0xa1) {
+                linux.pic_out(port, value as u8);
+            } else if port == 0x40 {
+                linux.pit_out_data(value as u8);
+            } else if port == 0x43 {
+                linux.pit_out_command(value as u8);
+            }
+            return;
+        }
+        let value = if (0x3f8..=0x3ff).contains(&port) {
+            match (port - 0x3f8) as u8 {
+                0 => {
+                    if linux.uart_lcr & 0x80 != 0 {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                1 => {
+                    if linux.uart_lcr & 0x80 != 0 {
+                        0
+                    } else {
+                        u64::from(linux.uart_ier)
+                    }
+                }
+                2 => 1,
+                3 => u64::from(linux.uart_lcr),
+                4 => u64::from(linux.uart_mcr),
+                5 => 0x60,
+                6 => 0xb0,
+                _ => 0,
+            }
+        } else if matches!(port, 0x20 | 0x21 | 0xa0 | 0xa1) {
+            u64::from(linux.pic_in(port))
+        } else if port == 0x40 {
+            u64::from(linux.pit_in_data())
+        } else if port == 0x64 {
+            0x14
+        } else {
+            u64::MAX
+        };
+        let mask = if width == 8 {
+            u64::MAX
+        } else {
+            (1u64 << (width * 8)) - 1
+        };
+        self.set_gpr(register, value & mask);
+    }
+
+    fn emulate_linux_cr_access(&mut self, qualification: u64, length: u64) -> Result<(), VmxError> {
+        let cr = (qualification & 0xf) as u8;
+        let access = ((qualification >> 4) & 3) as u8;
+        let register = ((qualification >> 8) & 0xf) as usize;
+        let cr0_fixed0 = unsafe { rdmsr(IA32_VMX_CR0_FIXED0) };
+        let cr0_fixed1 = unsafe { rdmsr(IA32_VMX_CR0_FIXED1) };
+        let cr4_fixed0 = unsafe { rdmsr(IA32_VMX_CR4_FIXED0) };
+        let cr4_fixed1 = unsafe { rdmsr(IA32_VMX_CR4_FIXED1) };
+        match access {
+            0 => {
+                let value = self.gpr(register);
+                match cr {
+                    0 => {
+                        let value = (value & cr0_fixed1) | cr0_fixed0;
+                        self.guest.state.cr0 = value;
+                        vmwrite(GUEST_CR0, value)?;
+                        vmwrite(CR0_READ_SHADOW, value)?;
+                    }
+                    3 => {
+                        self.guest.state.cr3 = value;
+                        vmwrite(GUEST_CR3, value)?;
+                    }
+                    4 => {
+                        let value = (value & cr4_fixed1) | cr4_fixed0;
+                        self.guest.state.cr4 = value;
+                        vmwrite(GUEST_CR4, value)?;
+                        vmwrite(CR4_READ_SHADOW, value)?;
+                    }
+                    8 => {}
+                    _ => {
+                        return Err(VmxError::InvalidState {
+                            code: qualification,
+                        })
+                    }
+                }
+            }
+            1 => {
+                let value = match cr {
+                    0 => self.guest.state.cr0,
+                    3 => self.guest.state.cr3,
+                    4 => self.guest.state.cr4,
+                    8 => 0,
+                    _ => {
+                        return Err(VmxError::InvalidState {
+                            code: qualification,
+                        })
+                    }
+                };
+                self.set_gpr(register, value);
+            }
+            2 => {
+                let value = self.guest.state.cr0 & !(1 << 3);
+                self.guest.state.cr0 = value;
+                vmwrite(GUEST_CR0, value)?;
+            }
+            3 => {
+                let value = qualification >> 16;
+                let cr0 = (self.guest.state.cr0 & !0xffff) | (value & 0xffff) | cr0_fixed0;
+                self.guest.state.cr0 = cr0;
+                vmwrite(GUEST_CR0, cr0)?;
+            }
+            _ => {
+                return Err(VmxError::InvalidState {
+                    code: qualification,
+                })
+            }
+        }
+        self.advance_rip(if length == 0 { 3 } else { length });
+        Ok(())
+    }
+
+    /// Override the guest IDT used for hardware event injection.
+    pub fn set_guest_idt(&mut self, base: u64, limit: u16) -> Result<(), VmxError> {
+        if base & 0xf != 0 {
+            return Err(VmxError::InvalidState { code: base });
+        }
+        vmwrite(GUEST_IDTR_BASE, base)?;
+        vmwrite(GUEST_IDTR_LIMIT, u64::from(limit))?;
+        Ok(())
+    }
+
+    /// Override the guest GDT used by interrupt-gate selectors.
+    pub fn set_guest_gdt(&mut self, base: u64, limit: u16) -> Result<(), VmxError> {
+        if base & 0xf != 0 {
+            return Err(VmxError::InvalidState { code: base });
+        }
+        vmwrite(GUEST_GDTR_BASE, base)?;
+        vmwrite(GUEST_GDTR_LIMIT, u64::from(limit))?;
+        Ok(())
+    }
+
+    /// Queue an external interrupt for the next VM entry.
+    pub fn inject_external_interrupt(&mut self, vector: u8) -> Result<(), VmxError> {
+        if vector < 32 {
+            return Err(VmxError::InvalidState {
+                code: u64::from(vector),
+            });
+        }
+        self.pending_interrupt = Some(vector);
+        Ok(())
     }
 
     pub fn guest_state(&self) -> VcpuState {
@@ -1204,7 +2172,18 @@ impl VmxVm {
     fn stage_state(&mut self) -> Result<(), VmxError> {
         vmwrite(GUEST_RIP, self.guest.state.rip)?;
         vmwrite(GUEST_RSP, self.guest.rsp)?;
-        vmwrite(GUEST_RFLAGS, self.guest.state.rflags | 2)?;
+        let pending_if = if self.pending_interrupt.is_some() {
+            1 << 9
+        } else {
+            0
+        };
+        vmwrite(GUEST_RFLAGS, (self.guest.state.rflags | pending_if) | 2)?;
+        let interruption = self
+            .pending_interrupt
+            .map(u64::from)
+            .map(|vector| (1u64 << 31) | vector)
+            .unwrap_or(0);
+        vmwrite(ENTRY_INTR_INFO, interruption)?;
         // SAFETY: HWV-2 intentionally permits one active VM entry on the
         // boot processor; VmxVm owns that execution until run() returns.
         unsafe { JSR_VMX_GUEST_GPRS = self.gprs };
@@ -1271,6 +2250,12 @@ impl VmxVm {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VmxObserverAction {
+    Continue,
+    Inject(u8),
+}
+
 impl Drop for VmxVm {
     fn drop(&mut self) {
         let _ = self.shutdown();
@@ -1306,13 +2291,19 @@ fn restore_entry(restore: EntryRestore) {
 }
 
 fn restore_descriptor_tables(host: &HostRegisters) {
-    use x86_64::instructions::tables::{lidt, lgdt};
     use x86_64::instructions::segmentation::{Segment, CS, DS, ES, FS, GS, SS};
+    use x86_64::instructions::tables::{lgdt, lidt};
     use x86_64::structures::gdt::SegmentSelector;
     use x86_64::structures::DescriptorTablePointer;
     use x86_64::VirtAddr;
-    let gdtr = DescriptorTablePointer { base: VirtAddr::new(host.gdtr_base), limit: host.gdtr_limit };
-    let idtr = DescriptorTablePointer { base: VirtAddr::new(host.idtr_base), limit: host.idtr_limit };
+    let gdtr = DescriptorTablePointer {
+        base: VirtAddr::new(host.gdtr_base),
+        limit: host.gdtr_limit,
+    };
+    let idtr = DescriptorTablePointer {
+        base: VirtAddr::new(host.idtr_base),
+        limit: host.idtr_limit,
+    };
     // SAFETY: these are the exact descriptor table pointers active before the
     // VM entry; reloading them repairs limits that VMX does not restore.
     unsafe {
@@ -1383,7 +2374,10 @@ fn initialize_vmcs(
             code: guest_cr0 ^ guest_cr4 ^ guest.efer ^ guest.state.rip ^ guest.rsp,
         });
     }
-    vmwrite(CR0_GUEST_HOST_MASK, (guest_cr0 ^ host.cr0) | cr0_fixed0 | !cr0_fixed1)?;
+    vmwrite(
+        CR0_GUEST_HOST_MASK,
+        (guest_cr0 ^ host.cr0) | cr0_fixed0 | !cr0_fixed1,
+    )?;
     vmwrite(CR4_GUEST_HOST_MASK, guest_cr4 ^ host.cr4_after)?;
     vmwrite(CR0_READ_SHADOW, guest_cr0)?;
     vmwrite(CR4_READ_SHADOW, guest_cr4)?;
@@ -1396,19 +2390,42 @@ fn initialize_vmcs(
 
     let flat_data_ar = 0xC093u64;
     let code_ar = 0xA09Bu64;
-    for (selector, limit, ar, base) in
-        [(GUEST_SS_SELECTOR, GUEST_SS_LIMIT, GUEST_SS_AR, GUEST_SS_BASE)]
-    {
+    for (selector, limit, ar, base) in [(
+        GUEST_SS_SELECTOR,
+        GUEST_SS_LIMIT,
+        GUEST_SS_AR,
+        GUEST_SS_BASE,
+    )] {
         vmwrite(selector, u64::from(host_ds))?;
         vmwrite(limit, 0xffff_ffff)?;
         vmwrite(ar, flat_data_ar)?;
         vmwrite(base, 0)?;
     }
     for (selector, limit, ar, base) in [
-        (GUEST_ES_SELECTOR, GUEST_ES_LIMIT, GUEST_ES_AR, GUEST_ES_BASE),
-        (GUEST_DS_SELECTOR, GUEST_DS_LIMIT, GUEST_DS_AR, GUEST_DS_BASE),
-        (GUEST_FS_SELECTOR, GUEST_FS_LIMIT, GUEST_FS_AR, GUEST_FS_BASE),
-        (GUEST_GS_SELECTOR, GUEST_GS_LIMIT, GUEST_GS_AR, GUEST_GS_BASE),
+        (
+            GUEST_ES_SELECTOR,
+            GUEST_ES_LIMIT,
+            GUEST_ES_AR,
+            GUEST_ES_BASE,
+        ),
+        (
+            GUEST_DS_SELECTOR,
+            GUEST_DS_LIMIT,
+            GUEST_DS_AR,
+            GUEST_DS_BASE,
+        ),
+        (
+            GUEST_FS_SELECTOR,
+            GUEST_FS_LIMIT,
+            GUEST_FS_AR,
+            GUEST_FS_BASE,
+        ),
+        (
+            GUEST_GS_SELECTOR,
+            GUEST_GS_LIMIT,
+            GUEST_GS_AR,
+            GUEST_GS_BASE,
+        ),
     ] {
         vmwrite(selector, 0)?;
         vmwrite(limit, 0xffff)?;
@@ -1488,4 +2505,102 @@ fn canonical(value: u64) -> bool {
     } else {
         upper == 0xffff
     }
+}
+
+#[derive(Clone, Copy)]
+struct MemoryDataAccess {
+    register: usize,
+    width: u8,
+    store: bool,
+    length: usize,
+}
+
+fn decode_memory_data_access(bytes: &[u8; 15]) -> Option<MemoryDataAccess> {
+    let mut pos = 0usize;
+    let mut operand_16 = false;
+    let mut rex = 0u8;
+    while pos < bytes.len() {
+        match bytes[pos] {
+            0x40..=0x4f => {
+                rex = bytes[pos];
+                pos += 1;
+            }
+            0x66 => {
+                operand_16 = true;
+                pos += 1;
+            }
+            0x26 | 0x2e | 0x36 | 0x3e | 0x64 | 0x65 | 0x67 | 0xf0 | 0xf2 | 0xf3 => pos += 1,
+            _ => break,
+        }
+    }
+    let opcode = *bytes.get(pos)?;
+    let (store, byte, zero_extend) = match opcode {
+        0x8a => (false, true, false),
+        0x88 => (true, true, false),
+        0x8b => (false, false, false),
+        0x89 => (true, false, false),
+        0x0f => match *bytes.get(pos + 1)? {
+            0xb6 => (false, true, true),
+            0xb7 => (false, false, true),
+            0xbe | 0xbf => return None,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let modrm_at = pos + if opcode == 0x0f { 2 } else { 1 };
+    let modrm = *bytes.get(modrm_at)?;
+    if modrm >> 6 == 3 {
+        return None;
+    }
+    let register = usize::from((modrm >> 3) & 7) | (usize::from(rex & 4 != 0) << 3);
+    let width = if byte || (zero_extend && opcode == 0x0f && *bytes.get(pos + 1)? == 0xb6) {
+        1
+    } else if operand_16 || (zero_extend && *bytes.get(pos + 1)? == 0xb7) {
+        2
+    } else if rex & 8 != 0 {
+        8
+    } else {
+        4
+    };
+    Some(MemoryDataAccess {
+        register,
+        width,
+        store,
+        length: modrm_at + 1,
+    })
+}
+
+fn guest_va_to_gpa<B: LinuxPlatform>(cr3: u64, va: u64, devices: &mut B) -> Option<u64> {
+    let pml4 = cr3 & 0x000f_ffff_ffff_f000;
+    let pml4e = guest_read_u64(devices, pml4 + ((va >> 39) & 0x1ff) * 8)?;
+    if pml4e & 1 == 0 {
+        return None;
+    }
+    let pdpt = pml4e & 0x000f_ffff_ffff_f000;
+    let pdpte = guest_read_u64(devices, pdpt + ((va >> 30) & 0x1ff) * 8)?;
+    if pdpte & 1 == 0 {
+        return None;
+    }
+    if pdpte & (1 << 7) != 0 {
+        return Some((pdpte & 0x000f_ffff_c000_0000) + (va & 0x3fff_ffff));
+    }
+    let pd = pdpte & 0x000f_ffff_ffff_f000;
+    let pde = guest_read_u64(devices, pd + ((va >> 21) & 0x1ff) * 8)?;
+    if pde & 1 == 0 {
+        return None;
+    }
+    if pde & (1 << 7) != 0 {
+        return Some((pde & 0x000f_ffff_ffe0_0000) + (va & 0x1f_ffff));
+    }
+    let pt = pde & 0x000f_ffff_ffff_f000;
+    let pte = guest_read_u64(devices, pt + ((va >> 12) & 0x1ff) * 8)?;
+    if pte & 1 == 0 {
+        return None;
+    }
+    Some((pte & 0x000f_ffff_ffff_f000) + (va & 0xfff))
+}
+
+fn guest_read_u64<B: LinuxPlatform>(devices: &mut B, gpa: u64) -> Option<u64> {
+    let mut bytes = [0u8; 8];
+    devices.read_guest(gpa, &mut bytes).then_some(u64::from_le_bytes(bytes))
 }

@@ -33,7 +33,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 
 use kernel_core::interrupt::{arrivals_since, InterruptLine, Submitted, WaitError};
 use kernel_core::msi::{MsiError, Vector, VectorPool};
@@ -43,6 +43,7 @@ use kernel_core::pci::{self as core_pci, Bdf};
 use spin::Once;
 
 use crate::kobj::{self, KObject, Table};
+use crate::sync::IrqU64;
 use crate::msix::{MsixDevice, MsixError};
 use crate::proc::{self, ProcError};
 use crate::sync::IrqSpinLock;
@@ -123,15 +124,15 @@ static DEVICES: IrqSpinLock<Vec<DeviceIrq>> = IrqSpinLock::ranked(crate::lockord
 /// 中断对象共用的每核向量池（首次绑定时按当时的在线处理器建立）。
 static POOL: Once<Option<VectorPool>> = Once::new();
 /// 分发到中断对象处理函数的次数。
-static DISPATCHED: AtomicU64 = AtomicU64::new(0);
+static DISPATCHED: IrqU64 = IrqU64::new(0);
 /// 以到达完成的等待总数（到达时交付与提交时立即交付都算）。
-static DELIVERIES: AtomicU64 = AtomicU64::new(0);
+static DELIVERIES: IrqU64 = IrqU64::new(0);
 /// 下一个绑定序号。
-static SERIAL: AtomicU64 = AtomicU64::new(1);
+static SERIAL: IrqU64 = IrqU64::new(1);
 /// 因预算而屏蔽表项的次数。
-static THROTTLE_MASKS: AtomicU64 = AtomicU64::new(0);
+static THROTTLE_MASKS: IrqU64 = IrqU64::new(0);
 /// 解除屏蔽时挂起位已置（随即重新送达）的次数。
-static REDELIVERED: AtomicU64 = AtomicU64::new(0);
+static REDELIVERED: IrqU64 = IrqU64::new(0);
 
 /// 中断对象登记给分发器的预算动作。
 static MASK_OPS: irq::MsiMaskOps = irq::MsiMaskOps { mask: throttle_mask, unmask: throttle_unmask };

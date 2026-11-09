@@ -1,0 +1,107 @@
+# abi-generation: 2.0.0
+# 已发布（冻结）的系统接口：由 scripts/abi-freeze.sh 维护，只追加不修改。构建期检查登记表必须包含这里的每一条（ID/种类/名字一致）。
+1	op	system.task.exit	1	irreversible	任务·退出
+2	op	system.task.yield	1	none	任务·让出处理器
+3	op	system.time.now	1	read	时间·读取当前时刻
+4097	error	system.error.unsupported	1	none	不支持的接口
+4098	error	system.error.rights_denied	1	none	权限不足
+4099	error	system.error.invalid_argument	1	none	参数非法
+4	op	system.console.write	1	write	控制台·写入文本
+4100	error	system.memory.error.invalid_address	1	none	地址非法
+5	op	system.task.spawn	1	write	任务·在本进程创建线程
+6	op	system.handle.close	1	write	句柄·关闭
+4101	error	system.handle.error.invalid	1	none	句柄无效
+7	op	system.handle.duplicate	1	write	句柄·复制（只可降权）
+8	op	system.handle.restrict	1	write	句柄·降低权限
+4102	error	system.handle.error.rights_denied	1	none	句柄权限不足
+4103	error	system.handle.error.table_full	1	none	句柄表已满
+4104	error	system.handle.error.not_transferable	1	none	对象不可传递
+9	op	system.async.ring.create	1	write	异步环·创建
+10	op	system.async.ring.enter	1	write	异步环·提交并收取完成
+11	op	system.async.cancel	1	write	异步·同步取消请求
+12	op	system.time.wait	1	none	时间·等待指定时长
+4105	error	system.async.error.cancelled	1	none	请求已取消
+4106	error	system.async.error.already_completed	1	none	请求已完成
+4107	error	system.async.error.not_found	1	none	请求不存在
+4108	error	system.async.error.in_progress	1	none	请求执行中不可取消
+4109	error	system.async.error.cq_full	1	none	完成信用耗尽
+4110	error	system.async.error.id_exhausted	1	none	请求 ID 已用尽
+4111	error	system.error.quota_exceeded	1	none	超出配额
+13	op	system.channel.create	1	write	通道·创建一对端点
+14	op	system.channel.send	1	write	通道·发送消息
+15	op	system.channel.recv	1	write	通道·接收消息
+4112	error	system.channel.error.peer_closed	1	none	对端已关闭
+4113	error	system.channel.error.queue_full	1	none	消息队列已满
+4114	error	system.channel.error.buffer_too_small	1	none	接收缓冲区不足
+16	op	system.process.exit	1	irreversible	进程·退出（终止全部线程）
+17	op	system.task.wait	1	read	任务·等待退出
+18	op	system.process.wait	1	read	进程·等待退出
+19	op	system.memory.map	1	write	内存·映射匿名页
+20	op	system.memory.unmap	1	write	内存·取消映射
+4115	error	system.memory.error.already_mapped	1	none	地址已有映射
+4116	error	system.memory.error.out_of_memory	1	none	物理内存不足
+21	op	system.memory.protect	1	write	内存·修改访问权限
+22	op	system.task.qos.set	1	write	任务·设置服务质量等级
+23	op	system.process.spawn	1	write	进程·创建子进程（映像 + 调用子集 + 引导通道）
+24	op	system.profile.list	1	read	配置档·列举（返回数量）
+25	op	system.profile.get	1	read	配置档·读取结构化描述
+4117	error	system.profile.error.buffer_too_small	1	none	配置档·缓冲区过小
+26	op	system.device.list	1	read	设备·列举
+27	op	system.device.open	1	write	设备·打开
+28	op	system.device.get	1	read	设备·读取描述
+4118	error	system.device.error.not_found	1	none	设备不存在
+4119	error	system.device.error.buffer_too_small	1	none	设备·缓冲区过小
+29	op	system.device.map	1	write	设备·映射寄存器窗口	Map device registers
+30	op	system.device.capability.list	1	read	设备·列举能力	List device capabilities
+4120	error	system.device.error.bar_out_of_range	1	none	设备·BAR 号越界或未实现	Device BAR out of range
+4121	error	system.device.error.bar_not_memory	1	none	设备·BAR 不是内存型	Device BAR not memory mapped
+4122	error	system.device.error.bar_invalid	1	none	设备·BAR 地址或尺寸非法	Device BAR address or size invalid
+4123	error	system.device.error.bad_capability	1	none	设备·能力链非法	Device capability chain invalid
+31	op	system.device.interrupt.create	1	write	设备·创建中断绑定（MSI-X 表项 → 处理器）	Create device interrupt binding
+32	op	system.device.interrupt.wait	1	read	设备·等待中断（只经异步环）	Wait for device interrupt
+4124	error	system.device.error.no_msix	1	none	设备·没有 MSI-X 能力	Device has no MSI-X
+4125	error	system.device.error.entry_out_of_range	1	none	设备·MSI-X 表项越界	MSI-X entry out of range
+4126	error	system.device.error.cpu_offline	1	none	设备·目标处理器不在线	Target processor offline
+4127	error	system.device.error.interrupt_slots_exhausted	1	none	设备·目标处理器的中断槽位已用尽	Interrupt slots exhausted on processor
+4128	error	system.device.error.already_bound	1	none	设备·表项已绑定	MSI-X entry already bound
+4129	error	system.device.error.interrupt_busy	1	none	设备·中断已有未完成的等待	Interrupt wait already outstanding
+4130	error	system.device.error.interrupt_closed	1	none	设备·中断已关闭	Interrupt closed
+4131	error	system.async.error.ring_only	1	none	异步·该操作只能经异步环提交	Operation must be submitted through a ring
+33	op	system.async.ring.deadline.enter	1	write	异步环·带截止时刻提交并收取	Enter async ring until deadline
+4132	error	system.async.error.timed_out	1	none	异步·等待截止时刻已到	Async wait deadline reached
+34	op	system.memory.object.create	1	write	内存对象·创建	Create memory object
+35	op	system.memory.object.map	1	write	内存对象·映射	Map memory object
+36	op	system.memory.object.unmap	1	write	内存对象·撤销本进程映射	Unmap memory object view
+37	op	system.memory.buffer.create	1	write	内存·注册缓冲区（预留）	Register memory buffer reserved
+38	op	system.memory.buffer.destroy	1	write	内存·注销缓冲区（预留）	Unregister memory buffer reserved
+39	op	system.execution.restricted.create	1	write	执行·创建受限执行（预留）	Create restricted execution reserved
+40	op	system.task.interrupt.send	1	write	任务·投递异步中断（预留）	Send task interrupt reserved
+41	op	system.memory.dma.map	1	write	内存·建立 IOVA 映射（预留）	Map memory through IOVA reserved
+42	op	system.io.segment.submit	1	write	输入输出·提交分段请求（预留）	Submit segmented IO reserved
+43	op	system.task.syscalls.set	3	write	任务·设置系统调用能力集合	Set task syscall capability set
+44	op	system.event.subscription.wait	1	write	事件·批量等待订阅	Wait for subscription batch
+4133	error	system.event.error.closed	1	read	事件·订阅已关闭	Subscription closed
+4134	error	system.event.error.busy	1	read	事件·已有等待请求	Subscription wait busy
+45	op	system.event.source.create	1	write	事件·打开事件源	Create event source capability
+46	op	system.event.subscription.create	1	write	事件·创建订阅并取得快照	Create subscription and snapshot
+47	op	system.task.rt.set	1	write	任务·设置实时预算	Set task real-time reservation
+48	op	system.task.affinity.set	1	write	任务·设置处理器亲和	Set task CPU affinity
+49	op	system.task.affinity.get	1	read	任务·查询处理器亲和	Get task CPU affinity
+50	op	system.task.rt.deadline.set	1	write	任务·设置纳秒实时预算	Set nanosecond real-time reservation
+51	op	system.time.deadline.get	1	read	时间·查询单调纳秒时刻	Get monotonic nanosecond time
+52	op	system.time.deadline.wait	1	write	时间·等待绝对纳秒期限	Wait for absolute nanosecond deadline
+53	op	system.sync.mutex.create	1	write	同步·创建继承互斥对象	Create inherited mutex
+54	op	system.sync.mutex.acquire	1	write	同步·取得继承互斥对象	Acquire inherited mutex
+55	op	system.sync.mutex.release	1	write	同步·释放继承互斥对象	Release inherited mutex
+56	op	system.abi.get	1	read	系统·读取原生 ABI 世代	Get native ABI generation
+64	op	system.sync.mutex.try.acquire	1	write	同步·尝试取得继承互斥对象	Try to acquire inherited mutex
+4135	error	system.error.abi_mismatch	1	none	ABI 世代不兼容	ABI generation mismatch
+4136	error	system.error.abi_metadata	1	none	ABI 元数据缺失或损坏	ABI metadata missing or malformed
+4137	error	system.sync.error.busy	1	none	同步·互斥对象已被其他任务持有	Inherited mutex already held
+4138	error	system.error.abi_capability	1	none	程序所需系统能力不可用	Required system capability unavailable
+65	op	system.time.timer.create	1	write	时间·创建定时器对象	Create timer object
+66	op	system.time.timer.arm	1	write	时间·装填定时器	Arm timer
+67	op	system.time.timer.cancel	1	write	时间·取消定时器	Cancel timer
+68	op	system.time.timer.wait	1	write	时间·等待定时器	Wait for timer
+69	op	system.time.timer.get	1	read	时间·查询定时器剩余时间	Get timer remaining time
+4139	error	system.time.error.busy	1	none	时间·定时器已有等待者	Timer already has a waiter

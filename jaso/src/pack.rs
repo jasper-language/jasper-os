@@ -14,7 +14,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::build::{Builder, SegmentIn};
+use crate::build::{Builder, MultiBuilder, SegmentIn};
 use crate::{Arch, JasoError, Stage, FLAG_R, FLAG_W, FLAG_X, PAGE};
 
 /// 打包错误。
@@ -371,6 +371,30 @@ pub fn from_elf(elf: &[u8], manifest: &str, arch: Arch, stage: Stage) -> Result<
     b.finish().map_err(PackError::Format)
 }
 
+/// 把多个位置无关 ELF 打包成同一个多架构 `.jaso` 容器。
+///
+/// 每个输入独立执行与 [`from_elf`] 相同的机器、段、重定位、导出检查；最终由
+/// [`MultiBuilder`] 写出共享清单、逐镜像平台记录和全量镜像索引。组合后仍由读取器
+/// 检查清单导出一致性、平台 ABI 与所有镜像级约束。
+pub fn from_elfs(
+    elfs: &[(Arch, &[u8])],
+    manifest: &str,
+    stage: Stage,
+) -> Result<Vec<u8>, PackError> {
+    if elfs.is_empty() || elfs.len() > crate::MAX_IMAGES as usize {
+        return Err(PackError::BadElf("多架构容器需要 1 到 8 个 ELF"));
+    }
+    let mut multi = MultiBuilder::native(stage, manifest.as_bytes());
+    for (arch, elf) in elfs {
+        let single = from_elf(elf, manifest, *arch, stage)?;
+        let parsed = crate::Jaso::parse(&single).map_err(PackError::Format)?;
+        let image = Builder::from_file(&parsed, 0)
+            .ok_or(PackError::Format(JasoError::ImageIndex))?;
+        multi.push_image(image).map_err(PackError::Format)?;
+    }
+    multi.finish().map_err(PackError::Format)
+}
+
 /// 指令集 → 裸机目标三元组。
 ///
 /// AArch64 与 RISC-V 用软浮点目标：内核不在上下文切换时保存浮点 / SIMD 寄存器，并让它们的任何访问陷入，
@@ -439,8 +463,9 @@ pub fn signer_from_phrase(phrase: &[u8]) -> crate::build::Signer {
 /// Re-signs a packed `.jaso` file with `signer`.
 pub fn sign(bytes: &[u8], signer: &crate::build::Signer) -> Result<Vec<u8>, JasoError> {
     let f = crate::Jaso::parse(bytes)?;
-    // 校验通过的文件至少有一个镜像
-    Builder::from_file(&f, 0).ok_or(JasoError::ImageIndex)?.finish_signed(signer)
+    MultiBuilder::from_file(&f)
+        .ok_or(JasoError::ImageIndex)?
+        .finish_signed(signer)
 }
 
 /// 把一个 Native 文件转成带 `jasper.import` 绑定的 Hybrid 文件（未签名；需要时再 [`sign`]）；绑定与清单不一致时返回原因。
@@ -448,8 +473,11 @@ pub fn sign(bytes: &[u8], signer: &crate::build::Signer) -> Result<Vec<u8>, Jaso
 pub fn to_hybrid(bytes: &[u8], import: &[u8]) -> Result<Vec<u8>, String> {
     let f = crate::Jaso::parse(bytes).map_err(|e| alloc::format!("{:?}", e))?;
     crate::binding::check(import, &f.manifest).map_err(|e| alloc::format!("{}: {:?}", e.code().name(), e))?;
-    let mut b = Builder::from_file(&f, 0).ok_or("文件没有镜像")?;
+    let mut b = MultiBuilder::from_file(&f).ok_or("文件没有镜像")?;
     b.kind = crate::ModuleKind::Hybrid;
+    for image in &mut b.images {
+        image.kind = crate::ModuleKind::Hybrid;
+    }
     b.extensions.retain(|e| e.name != crate::EXT_JASPER_IMPORT.as_bytes());
     b.extensions.push(crate::build::ExtensionIn { name: crate::EXT_JASPER_IMPORT.as_bytes().to_vec(), version: 1, critical: true, content: import.to_vec() });
     b.finish().map_err(|e| alloc::format!("{:?}", e))
@@ -580,6 +608,21 @@ mod pack_target_tests {
         assert_eq!(img.exports().map(|e| e.value).collect::<std::vec::Vec<_>>(), [0x1000, 0x1008]);
         // 4 字节对齐（而非 8 字节）的位置在 32 位指令集上是合法的
         assert!(from_elf(&elf32(3, 0x2204), MANIFEST32, Arch::Riscv32, Stage::Runtime).is_ok());
+    }
+
+    #[test]
+    fn multi_pack_keeps_each_checked_elf_image() {
+        let elf = elf32(3, 0x2200);
+        let out = from_elfs(
+            &[(Arch::Riscv32, elf.as_slice()), (Arch::Riscv32, elf.as_slice())],
+            MANIFEST32,
+            Stage::Runtime,
+        )
+        .unwrap();
+        let file = crate::Jaso::parse(&out).unwrap();
+        assert_eq!(file.images().count(), 2);
+        assert_eq!(file.arch, Some(Arch::Riscv32));
+        assert_eq!(file.images().map(|image| image.exports().count()).collect::<std::vec::Vec<_>>(), [2, 2]);
     }
 
     #[test]

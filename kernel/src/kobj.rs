@@ -28,6 +28,7 @@ use kernel_core::kobj_type::{
 };
 use kernel_core::objtable::{InstallError, ObjError, ObjId, ObjectTable, Released, Slot};
 use kernel_core::pci::Bdf;
+use kernel_core::security::{ApplicationIdentity, IdentityClass, SecurityContext, SecuritySeed};
 
 use crate::proc::Process;
 use crate::sync::IrqSpinLock;
@@ -70,6 +71,8 @@ pub enum KObject {
     Timer(Box<crate::user_timer::TimerObj>),
     /// Vendor-neutral hardware-virtualization vCPU.
     Vcpu(Box<crate::vcpu::VcpuObj>),
+    /// One device-visible mapping of a pinned Memory range.
+    DmaMapping(Box<crate::dma::DmaMapping>),
     /// 线程。
     Task(TaskObj),
     /// 事件（叶子对象：不持有句柄、不强引用其他对象）。
@@ -101,6 +104,7 @@ impl KObject {
             KObject::Mutex(_) => Kind::Mutex,
             KObject::Timer(_) => Kind::Timer,
             KObject::Vcpu(_) => Kind::Vcpu,
+            KObject::DmaMapping(_) => Kind::DmaMapping,
             KObject::EventSource(_) => Kind::EventSource,
             KObject::Subscription(_) => Kind::Subscription,
             KObject::Task(_) => Kind::Task,
@@ -171,6 +175,7 @@ const fn close_hook(kind: Kind) -> Option<CloseHookEntry> {
             ClosingLocks::ObjectTableThenScheduler,
         )),
         Kind::Vcpu => Some(close_entry(crate::vcpu::close_in, ClosingLocks::ObjectTable)),
+        Kind::DmaMapping => Some(close_entry(crate::dma::close_in, ClosingLocks::ObjectTable)),
         Kind::Task | Kind::ExitState | Kind::Memory | Kind::Event | Kind::Device => None,
     }
 }
@@ -222,6 +227,7 @@ const fn destroy_hook(kind: Kind) -> Option<DestroyHook> {
         | Kind::Mutex
         | Kind::Timer
         | Kind::Vcpu
+        | Kind::DmaMapping
         | Kind::Memory
         | Kind::Event
         | Kind::Device => None,
@@ -373,7 +379,59 @@ pub fn with<R>(f: impl FnOnce(&mut Table) -> R) -> R {
 
 /// 放入新对象。
 pub fn insert(obj: KObject, owners: u32, internal: u32) -> Result<ObjId, ObjError> {
-    with(|t| t.insert(obj, owners, internal))
+    let class = crate::security::identity_class(obj.kind());
+    let boot = crate::security::boot_id();
+    with(|t| {
+        t.insert_with_security(
+            obj,
+            owners,
+            internal,
+            SecuritySeed::active(boot, class),
+        )
+    })
+}
+
+/// Insert with an explicit SEC-1 class and application context.
+pub fn insert_classified(
+    obj: KObject,
+    owners: u32,
+    internal: u32,
+    class: IdentityClass,
+    application: Option<ApplicationIdentity>,
+) -> Result<ObjId, ObjError> {
+    let boot = crate::security::boot_id();
+    with(|t| {
+        t.insert_with_security(
+            obj,
+            owners,
+            internal,
+            SecuritySeed::active(boot, class).with_application(application),
+        )
+    })
+}
+
+/// Insert a process-owned object while preserving the process application
+/// context. The caller must hold the object-table lock.
+pub(crate) fn insert_for_process_in(
+    t: &mut Table,
+    pid: ObjId,
+    obj: KObject,
+    owners: u32,
+    internal: u32,
+) -> Result<ObjId, ObjError> {
+    let application = crate::security::process_application_in(t, pid);
+    let class = crate::security::identity_class(obj.kind());
+    let boot = crate::security::boot_id();
+    t.insert_with_security(
+        obj,
+        owners,
+        internal,
+        SecuritySeed::active(boot, class).with_application(application),
+    )
+}
+
+pub fn security(id: ObjId) -> Option<SecurityContext> {
+    with(|t| t.security(id).ok())
 }
 
 /// 在对象表锁内释放一个外部所有权；最后一份所有权归零时执行该类型的 **closing 动作**：
