@@ -1,0 +1,11 @@
+[build]
+target = "loongarch64-unknown-none-softfloat"
+
+[target.loongarch64-unknown-none-softfloat]
+rustflags = [
+  "-C", "linker=rust-lld",
+  "-C", "link-arg=-Tlink.ld",
+  "--cfg", "sha2_backend=\"soft\"",
+  "--cfg", "curve25519_dalek_backend=\"serial\"",
+]
+

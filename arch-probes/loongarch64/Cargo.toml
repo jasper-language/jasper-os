@@ -1,0 +1,11 @@
+[package]
+name = "jasper-loongarch64-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+kernel-core = { path = "../../kernel-core" }
+

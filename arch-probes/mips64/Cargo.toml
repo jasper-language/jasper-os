@@ -1,0 +1,14 @@
+[package]
+name = "jasper-mips64-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[profile.release]
+panic = "abort"
+
+[dependencies]
+kernel-core = { path = "../../kernel-core" }
+
