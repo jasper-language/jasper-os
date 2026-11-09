@@ -14,8 +14,8 @@ pub const PIO_PROBE_CONTROL: u64 = 0x00;
 pub const PIO_PROBE_STATUS: u64 = 0x04;
 pub const PIO_PROBE_GENERATION: u64 = 0x06;
 pub const PIO_PROBE_COMMAND: u64 = 0x08;
+pub const PIO_PROBE_LAST_COMMAND: u64 = 0x0a;
 pub const PIO_PROBE_WRITES: u64 = 0x0c;
-pub const PIO_PROBE_LAST_COMMAND: u64 = 0x0e;
 pub const PIO_PROBE_REQUESTS: u64 = 0x10;
 pub const PIO_PROBE_CANCELS: u64 = 0x14;
 
@@ -556,5 +556,27 @@ mod tests {
             Err(PioError::NotReady)
         );
         assert_eq!(probe.generation(), 1);
+    }
+
+    #[test]
+    fn declared_probe_registers_do_not_overlap() {
+        let registers = [
+            (PIO_PROBE_CONTROL, PioWidth::Dword),
+            (PIO_PROBE_STATUS, PioWidth::Word),
+            (PIO_PROBE_GENERATION, PioWidth::Word),
+            (PIO_PROBE_COMMAND, PioWidth::Byte),
+            (PIO_PROBE_LAST_COMMAND, PioWidth::Byte),
+            (PIO_PROBE_WRITES, PioWidth::Dword),
+            (PIO_PROBE_REQUESTS, PioWidth::Dword),
+            (PIO_PROBE_CANCELS, PioWidth::Dword),
+        ];
+        for (index, (offset, width)) in registers.iter().copied().enumerate() {
+            let end = offset + u64::from(width.bytes());
+            assert!(end <= 32);
+            for (other, other_width) in registers[index + 1..].iter().copied() {
+                let other_end = other + u64::from(other_width.bytes());
+                assert!(end <= other || other_end <= offset);
+            }
+        }
     }
 }
