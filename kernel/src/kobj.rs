@@ -420,13 +420,18 @@ pub(crate) fn insert_for_process_in(
     internal: u32,
 ) -> Result<ObjId, ObjError> {
     let application = crate::security::process_application_in(t, pid);
+    let mac = crate::security::process_mac_label_in(t, pid);
     let class = crate::security::identity_class(obj.kind());
     let boot = crate::security::boot_id();
+    let mut seed = SecuritySeed::active(boot, class).with_application(application);
+    if let Some(mac) = mac {
+        seed = seed.with_mac_label(mac.as_object(class));
+    }
     t.insert_with_security(
         obj,
         owners,
         internal,
-        SecuritySeed::active(boot, class).with_application(application),
+        seed,
     )
 }
 

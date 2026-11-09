@@ -190,6 +190,29 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
         return ret;
     };
     let mut service = Some(service);
+    let Some(pid) = proc::current_process() else {
+        let ret = err(SYSTEM_ERROR_RIGHTS_DENIED);
+        if tracing() {
+            kprintln!("[JSR-SYSCALL] deny name={} id={} task={} ret={}", e.name, e.id, task_name, error_name(ret));
+        }
+        return ret;
+    };
+    if let Err(denial) = crate::security::authorize_syscall(pid, a.args[0], e.name, e.effects) {
+        crate::security::flush_audit();
+        let ret = err(SYSTEM_ERROR_RIGHTS_DENIED);
+        if tracing() {
+            kprintln!(
+                "[JSR-SYSCALL] deny name={} id={} task={} mac={} ret={}",
+                e.name,
+                e.id,
+                task_name,
+                denial.name(),
+                error_name(ret)
+            );
+        }
+        return ret;
+    }
+    crate::security::flush_audit();
     let trace = tracing();
     if trace {
         kprintln!("[JSR-SYSCALL] enter name={} id={} task={} effects={}", e.name, e.id, task_name, e.effects.as_str());
@@ -225,6 +248,7 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
         crate::kobj::run_cleanup(CLEANUP_PER_CALL);
     }
     crate::mm::pressure::sync_events();
+    crate::security::flush_audit();
     // 出口调度点：调用期间所属进程进入了 exiting（例如阻塞等待被终止打断）⇒ 不再返回用户态
     if proc::current_exiting() {
         // This path does not unwind the syscall stack. Drop the service lease

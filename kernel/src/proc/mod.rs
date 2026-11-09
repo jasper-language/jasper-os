@@ -27,6 +27,9 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use kernel_core::capability::{CapabilityId, CapabilityLink};
 use kernel_core::frame::{PhysFrame, FRAME_SIZE};
 use kernel_core::kobj_type::{check_grant, GrantCheck, Kind};
+use kernel_core::memory_capability::{
+    BackingIdentity, MemoryCapabilityTable, MemoryKind, MemoryRights,
+};
 use kernel_core::object::{
     HandleError, HandleId, HandleTable, ObjectId, ObjectRef, ObjectType, Rights,
 };
@@ -76,6 +79,9 @@ pub struct Process {
     frames: Vec<Arc<crate::mm::memory_object::Page>>,
     /// SHM mappings retain backing pages independently of the Memory handle.
     shared_maps: Vec<SharedMapping>,
+    /// SEC-6 software capabilities bound to this address space.  This is a
+    /// provenance mirror, not a second page table.
+    memory_caps: MemoryCapabilityTable<{ kernel_core::memory_capability::MAX_MEMORY_CAPABILITIES }>,
     memory_account: Arc<crate::mm::memory_quota::Account>,
     /// Optional hard limits for the ordinary process account (`u64::MAX` = no fixed cap).
     memory_owned_limit: u64,
@@ -137,6 +143,7 @@ pub struct ResourceQuota {
 struct SharedMapping {
     va: u64,
     page: Arc<crate::mm::memory_object::Page>,
+    source: BackingIdentity,
 }
 
 /// 一次成功的设备 BAR 映射：把创建它的句柄、虚拟区间与物理 BAR 起始地址记在一起。
@@ -340,6 +347,7 @@ pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcErr
         handles: HandleTable::new(),
         frames: Vec::new(),
         shared_maps: Vec::new(),
+        memory_caps: MemoryCapabilityTable::new(),
         memory_account,
         memory_owned_limit: MAX_PROCESS_FRAMES as u64,
         memory_pin_limit: MAX_PROCESS_FRAMES as u64,
@@ -411,12 +419,29 @@ pub fn map_new(id: ObjId, va: u64, flags: MapFlags) -> Result<PhysFrame, ProcErr
         if p.frames.len() + p.shared_maps.len() >= MAX_PROCESS_FRAMES {
             return Err(ProcError::MemoryQuota);
         }
+        if !p.memory_caps.can_grant(va, 1, MemoryKind::Image) {
+            return Err(ProcError::MemoryQuota);
+        }
         p.frames
             .try_reserve(1)
             .map_err(|_| ProcError::OutOfFrames)?;
         p.space
             .map(VirtPage::containing(va), f, flags)
             .map_err(ProcError::Map)?;
+        let rights = MemoryRights::READ.union(if flags.contains(MapFlags::WRITE) {
+            MemoryRights::WRITE
+        } else {
+            MemoryRights::NONE
+        });
+        p.memory_caps
+            .grant(
+                va,
+                1,
+                rights,
+                MemoryKind::Image,
+                BackingIdentity::new(0, 1).expect("fixed valid generation"),
+            )
+            .map_err(|_| ProcError::MemoryQuota)?;
         p.frames.push(Arc::clone(&page));
         Ok(f)
     })
@@ -433,7 +458,10 @@ pub fn unmap_page(id: ObjId, va: u64) -> Result<(), ProcError> {
             return Err(ProcError::Map(MapError::Busy));
         }
         match p.space.unmap_raw(VirtPage::containing(va)) {
-            Ok(f) => Ok(f),
+            Ok(f) => {
+                let _ = p.memory_caps.revoke_range(va, 1);
+                Ok(f)
+            }
             Err(e) => {
                 p.space.end_shootdown();
                 Err(ProcError::Map(e))
@@ -577,6 +605,9 @@ pub fn map_anon(pid: ObjId, va: u64, pages: u64, writable: bool) -> Result<(), M
         if !p.space.begin_shootdown() {
             return Err(MemError::Busy);
         }
+        if !p.memory_caps.can_grant(va, pages, MemoryKind::Anonymous) {
+            return Err(MemError::Quota);
+        }
         active = p.space.active_cpus();
         for page in &fresh {
             if p.space
@@ -602,6 +633,19 @@ pub fn map_anon(pid: ObjId, va: u64, pages: u64, writable: bool) -> Result<(), M
             }
             published += 1;
         }
+        p.memory_caps
+            .grant(
+                va,
+                pages,
+                MemoryRights::READ.union(if writable {
+                    MemoryRights::WRITE
+                } else {
+                    MemoryRights::NONE
+                }),
+                MemoryKind::Anonymous,
+                BackingIdentity::new(0, 1).expect("fixed valid generation"),
+            )
+            .map_err(|_| MemError::Quota)?;
         p.frames.extend(fresh.iter().cloned());
         p.space.end_shootdown();
         Ok(())
@@ -699,11 +743,12 @@ pub fn map_memory(
             _ => MemError::InvalidHandle,
         })?;
         let (_, have) = handle_in(t, pid, h).map_err(|_| MemError::InvalidRange)?;
-        let Ok(KObject::Memory(memory)) = t.get(id) else {
-            return Err(MemError::InvalidRange);
+        let page_count = match t.get(id) {
+            Ok(KObject::Memory(memory)) => memory.page_count(),
+            _ => return Err(MemError::InvalidRange),
         };
         let range = kernel_core::memory_object::MapRange::checked(
-            memory.page_count(),
+            page_count,
             offset,
             pages,
             va,
@@ -713,10 +758,16 @@ pub fn map_memory(
             writable,
         )
         .map_err(|_| MemError::InvalidRange)?;
+        let Ok(KObject::Memory(memory)) = t.get(id) else {
+            return Err(MemError::InvalidRange);
+        };
         retained = memory.retain_range(range).ok_or(MemError::OutOfMemory)?;
         let Ok(KObject::Process(p)) = t.get_mut(pid) else {
             return Err(MemError::NoSuchProcess);
         };
+        if !p.memory_caps.can_grant(va, pages, MemoryKind::Shared) {
+            return Err(MemError::Quota);
+        }
         if p.frames
             .len()
             .checked_add(p.shared_maps.len())
@@ -773,8 +824,26 @@ pub fn map_memory(
             p.shared_maps.push(SharedMapping {
                 va: va + i as u64 * FRAME_SIZE,
                 page: Arc::clone(page),
+                source: BackingIdentity::new(id.raw(), id.generation())
+                    .expect("live object has a valid generation"),
             });
         }
+        p.memory_caps
+            .grant(
+                va,
+                pages,
+                MemoryRights::READ
+                    .union(MemoryRights::MAP)
+                    .union(if writable {
+                        MemoryRights::WRITE
+                    } else {
+                        MemoryRights::NONE
+                    }),
+                MemoryKind::Shared,
+                BackingIdentity::new(id.raw(), id.generation())
+                    .expect("live object has a valid generation"),
+            )
+            .map_err(|_| MemError::Quota)?;
         p.space.end_shootdown();
         Ok(())
     });
@@ -828,6 +897,7 @@ pub fn unmap_memory(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
                 return Err(MemError::Busy);
             }
         }
+        let _ = p.memory_caps.revoke_range(va, pages);
         Ok(p.space.active_cpus())
     })?;
     #[cfg(feature = "shm1-verify")]
@@ -909,6 +979,9 @@ pub fn map_device_bar(
         if p.device_maps.try_reserve(1).is_err() {
             return Err(MemError::OutOfMemory);
         }
+        if !p.memory_caps.can_grant(va, pages, MemoryKind::DeviceMmio) {
+            return Err(MemError::Quota);
+        }
         if !p.space.begin_shootdown() {
             return Err(MemError::Busy);
         }
@@ -961,6 +1034,17 @@ pub fn map_device_bar(
             pages,
             phys,
         });
+        p.memory_caps
+            .grant(
+                va,
+                pages,
+                MemoryRights::READ
+                    .union(MemoryRights::WRITE)
+                    .union(MemoryRights::MMIO),
+                MemoryKind::DeviceMmio,
+                BackingIdentity::new(phys, 1).expect("fixed valid generation"),
+            )
+            .map_err(|_| MemError::Quota)?;
         p.space.end_shootdown();
         Ok(())
     })
@@ -968,10 +1052,11 @@ pub fn map_device_bar(
 
 /// 撤销一条设备映射（只改页表，不归还任何数据帧）。
 /// Revokes one device mapping (page tables only; no data frames are returned).
-fn unmap_device_mapping(space: &mut VmSpace, mapping: &DeviceMapping) {
+fn unmap_device_mapping(p: &mut Process, mapping: &DeviceMapping) {
     for i in 0..mapping.pages {
-        let _ = space.unmap(VirtPage::containing(mapping.va + i * FRAME_SIZE));
+        let _ = p.space.unmap(VirtPage::containing(mapping.va + i * FRAME_SIZE));
     }
+    let _ = p.memory_caps.revoke_range(mapping.va, mapping.pages);
 }
 
 /// `va` 所在页是否属于设备映射（匿名映射 / 取消映射 / 改权限不得触碰设备窗口）。
@@ -990,7 +1075,7 @@ fn revoke_device_mappings_for_handle(p: &mut Process, handle: HandleId) {
     while i < p.device_maps.len() {
         if p.device_maps[i].handle == handle {
             let mapping = p.device_maps.swap_remove(i);
-            unmap_device_mapping(&mut p.space, &mapping);
+        unmap_device_mapping(p, &mapping);
         } else {
             i += 1;
         }
@@ -1002,7 +1087,7 @@ fn revoke_device_mappings_for_handle(p: &mut Process, handle: HandleId) {
 fn revoke_all_device_mappings(p: &mut Process) {
     let maps = core::mem::take(&mut p.device_maps);
     for mapping in &maps {
-        unmap_device_mapping(&mut p.space, mapping);
+        unmap_device_mapping(p, mapping);
     }
 }
 
@@ -1048,6 +1133,7 @@ pub fn unmap_range(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
                 }
             }
         }
+        let _ = p.memory_caps.revoke_range(va, pages);
         Ok(p.space.active_cpus())
     })?;
     // 页表修改已经完成，但帧仍记在进程名下；必须先等所有活跃处理器应答，才能归还。
@@ -1254,6 +1340,11 @@ pub fn device_map_count(pid: ObjId) -> Option<usize> {
     with_proc(pid, |p| Ok(p.device_maps.len())).ok()
 }
 
+/// SEC-6 diagnostic: active software memory capabilities and revocation count.
+pub fn memory_capability_stats(pid: ObjId) -> Option<(usize, u64)> {
+    with_proc(pid, |p| Ok((p.memory_caps.active(), p.memory_caps.revoked()))).ok()
+}
+
 /// 在锁内固定进程 `pid` 的用户区间 `[va, va+len)`：区间须位于私有窗口、每页已映射且带用户权限（`write` 时还须可写）。
 /// 返回的范围此后只经物理映射访问；任一页不满足 ⇒ 不固定任何帧。
 /// Pins a user range of `pid` (all-or-nothing).
@@ -1284,8 +1375,17 @@ pub(crate) fn pin_user_in(
             if !flags.contains(MapFlags::USER) || (write && !flags.contains(MapFlags::WRITE)) {
                 return Err(bad);
             }
+            let required = MemoryRights::READ.union(if write {
+                MemoryRights::WRITE
+            } else {
+                MemoryRights::NONE
+            });
+            let shared = p.shared_maps.iter().find(|m| m.va == cur - off);
+            p.memory_caps
+                .check(cur, n, required, shared.map(|mapping| mapping.source))
+                .map_err(|_| bad)?;
             segs.try_reserve(1).map_err(|_| ProcError::OutOfFrames)?;
-            let backing = if let Some(mapping) = p.shared_maps.iter().find(|m| m.va == cur - off) {
+            let backing = if let Some(mapping) = shared {
                 Some(Arc::clone(&mapping.page))
             } else if let Some(page) = p.frames.iter().find(|page| page.frame() == f) {
                 Some(Arc::clone(page))
@@ -2681,11 +2781,11 @@ pub(crate) fn destroy_task_object(object: KObject) {
 /// 并输出诊断标记（出现即说明某条路径漏了检查）。
 fn destroy_process(p: Box<Process>) {
     let Process {
-        mut space,
+        space,
         frames,
         shared_maps,
         quarantined,
-        device_maps,
+        device_maps: _,
         threads,
         mut handles,
         name,
@@ -2698,9 +2798,8 @@ fn destroy_process(p: Box<Process>) {
         let _ = sched::release_cpu_group(g); // 持有者引用；线程早已全部退出，组随之释放
     }
     // 防御：正常路径已在 exiting / exited 时撤销；这里再撤销一次，且不触碰页帧分配器。
-    for mapping in &device_maps {
-        unmap_device_mapping(&mut space, mapping);
-    }
+    // Device mappings are revoked while the process is still addressable;
+    // destroy_process only receives the detached address space.
     let mut residual: Vec<ObjectRef> = Vec::new();
     let n = handles.close_all(|r| residual.push(r));
     if n > 0 {

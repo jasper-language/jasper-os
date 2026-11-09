@@ -9,6 +9,7 @@ license = "Apache-2.0"
 [dependencies]
 kernel-core = { path = "../kernel-core" }
 spin = "0.12.3"
+ed25519-dalek = { version = "=3.0.0", default-features = false }
 
 # 只在 x86_64 上使用：引导协议、描述符表 / 页表封装、8259 PIC。其它指令集的平台代码不依赖第三方 crate。
 [target.'cfg(target_arch = "x86_64")'.dependencies]
@@ -65,6 +66,12 @@ sec1-verify = ["kernel-core/sec1-verify"]
 # Dedicated SEC-2 capability-lineage slice; full revocation/in-flight coverage
 # remains in progress and is not implied by this feature.
 sec2-verify = []
+# Dedicated SEC-3 MAC, signed-policy and reliable-audit acceptance.
+sec3-verify = ["kernel-core/sec3-verify"]
+# Dedicated SEC-4 domain, gateway, compromise and restart boundary.
+sec4-verify = []
+# SEC-6 software memory capabilities, pointer provenance and CHERI-ready boundary.
+sec6-verify = []
 # Dedicated USI-1 CLI/structured service acceptance.
 usi1-verify = ["user-programs"]
 # Dedicated USI-2 idempotency, capability events and cancellation acceptance.

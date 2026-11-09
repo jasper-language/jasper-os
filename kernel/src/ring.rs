@@ -1347,6 +1347,8 @@ fn prepare_user_work(pid: ObjId, sqe: &Sqe, allowed: SyscallSet) -> Result<Work,
             copy_from_user(&mut bytes,sqe.arg1,kernel_core::subscription_abi::WAIT_BYTES).map_err(|_|err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS))?;
             let args=kernel_core::subscription_abi::WaitArgs::decode(&bytes).ok_or(err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
             let handle = crate::syscall::handle_arg(sqe.arg0);
+            crate::security::authorize_handle(pid, handle, kernel_core::mac::MacEffect::Read)
+                .map_err(|_| err(SYSTEM_ERROR_RIGHTS_DENIED))?;
             let (target, authority) = kobj::with(|t| {
                 let target = crate::subscription::prepare_wait_in(t, pid, handle, args)?;
                 let authority = proc::authority_in(t, pid, handle, Rights::WAIT).map_err(perr)?;
@@ -1359,11 +1361,15 @@ fn prepare_user_work(pid: ObjId, sqe: &Sqe, allowed: SyscallSet) -> Result<Work,
         Kind::Send => {
             let (body, handles) = ipc::copy_send_args(sqe.arg1)?;
             let endpoint = crate::syscall::handle_arg(sqe.arg0);
+            crate::security::authorize_handle(pid, endpoint, kernel_core::mac::MacEffect::Share)
+                .map_err(|_| err(SYSTEM_ERROR_RIGHTS_DENIED))?;
             let authority = kobj::with(|t| proc::authority_in(t, pid, endpoint, Rights::WRITE)).map_err(perr)?;
             Work::Send { endpoint, authority, body, handles }
         }
         Kind::InterruptWait => {
             let handle = crate::syscall::handle_arg(sqe.arg0);
+            crate::security::authorize_handle(pid, handle, kernel_core::mac::MacEffect::Read)
+                .map_err(|_| err(SYSTEM_ERROR_RIGHTS_DENIED))?;
             let (irq, authority) = kobj::with(|t| {
                 let irq = crate::interrupt::prepare_wait_in(t, pid, handle)?;
                 let authority = proc::authority_in(t, pid, handle, Rights::WAIT).map_err(perr)?;
@@ -1374,6 +1380,8 @@ fn prepare_user_work(pid: ObjId, sqe: &Sqe, allowed: SyscallSet) -> Result<Work,
         Kind::ExitWait => {
             let ty = if sqe.op == SYSTEM_TASK_WAIT { ObjectType::Task } else { ObjectType::Process };
             let handle = crate::syscall::handle_arg(sqe.arg0);
+            crate::security::authorize_handle(pid, handle, kernel_core::mac::MacEffect::Read)
+                .map_err(|_| err(SYSTEM_ERROR_RIGHTS_DENIED))?;
             let (es, authority) = kobj::with(|t| {
                 let es = proc::acquire_exit_state_in(t, pid, handle, ty).map_err(perr)?;
                 let authority = proc::authority_in(t, pid, handle, Rights::WAIT).map_err(perr)?;
@@ -1384,6 +1392,8 @@ fn prepare_user_work(pid: ObjId, sqe: &Sqe, allowed: SyscallSet) -> Result<Work,
         Kind::Recv => {
             let d = ipc::copy_desc(sqe.arg1)?;
             let handle = crate::syscall::handle_arg(sqe.arg0);
+            crate::security::authorize_handle(pid, handle, kernel_core::mac::MacEffect::Read)
+                .map_err(|_| err(SYSTEM_ERROR_RIGHTS_DENIED))?;
             let (target, authority) = kobj::with(|t| {
                 let target = ipc::prepare_recv_in(t, pid, handle, sqe.arg1, &d)?;
                 let authority = proc::authority_in(t, pid, handle, Rights::READ).map_err(perr)?;

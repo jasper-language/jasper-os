@@ -82,6 +82,9 @@ esac
 [ "${JASPER_CHECKS:-}" = "usi2" ] && KFEAT+=(--features usi2-verify)
 [ "${JASPER_CHECKS:-}" = "sec1" ] && KFEAT+=(--features sec1-verify)
 [ "${JASPER_CHECKS:-}" = "sec2" ] && KFEAT+=(--features sec2-verify)
+[ "${JASPER_CHECKS:-}" = "sec3" ] && KFEAT+=(--features sec3-verify)
+[ "${JASPER_CHECKS:-}" = "sec4" ] && KFEAT+=(--features sec4-verify)
+[ "${JASPER_CHECKS:-}" = "sec6" ] && KFEAT+=(--features sec6-verify)
 HWV4_FEAT=()
 if [ -n "${JSR_LINUX_GUEST_HEADER:-}" ] && [ -n "${JSR_LINUX_GUEST_KERNEL:-}" ]; then
   if [ ! -s "$JSR_LINUX_GUEST_HEADER" ] || [ ! -s "$JSR_LINUX_GUEST_KERNEL" ]; then
@@ -2855,6 +2858,33 @@ check_sec2() {
     record SEC-2 PASS "Handle/Rights 生产路径接入全局唯一能力谱系：复制产生可追踪子能力，子能力不可提权；跨进程委派与全部别名经同一全局闭包撤销，旧句柄不能解析新对象世代；标准 EventSource 发布强制撤销通知；对象所有权与页帧回基线"
   else
     record SEC-2 FAIL "缺少能力派生/禁止提权/跨进程子树撤销/撤销通知/旧世代拒绝/资源回基线证据"
+  fi
+}
+
+check_sec3() {
+  if has '^\[JSR-SEC3\] deny_default=true labels=true secret=true integrity=true domain=true corrupt=false audit=true signed_policy=true atomic=true epoch=[0-9]+ audited=[0-9]+ denied=[0-9]+ overflow=0 failed=0 reclaimed=true' \
+     && ! has '^\[JSR-SEC3-FAIL\]'; then
+    record SEC-3 PASS "deny-by-default 策略、机密性/完整性/类型/域多维标签、跨域默认拒绝、损坏标签失败关闭、签名策略原子替换边界及有界不可覆盖审计队列通过；资源回基线"
+  else
+    record SEC-3 FAIL "缺少 deny-by-default、标签隔离、跨域拒绝、损坏标签/策略拒绝、可靠审计或资源基线证据"
+  fi
+}
+
+check_sec4() {
+  if has '^\[JSR-SEC4\] default_deny=true gateways=6 channel_bind=true compromise=true restart=true old_generation=false audit=true isolated=true resources=true failed=0' \
+     && ! has '^\[JSR-SEC4-FAIL\]'; then
+    record SEC-4 PASS "Application/Service/VM 安全域默认互不可见；六类跨域通道独立授权且不可替换；域失陷只撤销本域并保持其他域运行；崩溃/重启代次隔离旧权限；所有允许/拒绝决策可审计，资源回基线"
+  else
+    record SEC-4 FAIL "缺少默认拒绝、通道绑定、域失陷隔离、重启旧代次拒绝、审计或资源基线证据"
+  fi
+}
+
+check_sec6() {
+  if has '^\[JSR-SEC6\] bounds=true rights=true stale=false shared_retained=true revoked=false hardware=unsupported resources=true failed=0' \
+     && ! has '^\[JSR-SEC6-FAIL\]'; then
+    record SEC-6 PASS "软件内存能力范围/权限、越界拒绝、撤销后访问拒绝、共享映射后备身份保留、地址复用旧权限不复活、CHERI 硬件不可用显式 unsupported；资源回基线"
+  else
+    record SEC-6 FAIL "缺少内存能力范围/权限、越界、撤销、共享后备身份、硬件不可用或资源基线证据"
   fi
 }
 

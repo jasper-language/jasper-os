@@ -245,13 +245,17 @@ impl<T: 'static> ObjectTable<T> {
         };
         slot.entry = Some(Entry {
             value,
-            security: SecurityContext::new(
-                security.boot_id,
-                security.class,
-                id,
-                security.application,
-                security.state,
-            ),
+            security: {
+                let mut context = SecurityContext::new(
+                    security.boot_id,
+                    security.class,
+                    id,
+                    security.application,
+                    security.state,
+                );
+                context.mac = security.mac;
+                context
+            },
             owners,
             internal,
             state: Lifecycle::Live,
@@ -290,6 +294,19 @@ impl<T: 'static> ObjectTable<T> {
     ) -> Result<(), ObjError> {
         let entry = self.entry_mut(id)?;
         entry.security = security;
+        Ok(())
+    }
+
+    /// SEC-3 acceptance-only label mutation hook. Production code has no
+    /// operation that can rewrite MAC labels from a user-provided value.
+    #[cfg(feature = "sec3-verify")]
+    pub fn set_mac_for_verify(
+        &mut self,
+        id: ObjId,
+        mac: crate::mac::MacLabel,
+    ) -> Result<(), ObjError> {
+        let entry = self.entry_mut(id)?;
+        entry.security.mac = mac;
         Ok(())
     }
 

@@ -8,6 +8,17 @@ use crate::objtable::ObjId;
 
 pub const SECURITY_CONTEXT_FORMAT_VERSION: u16 = 1;
 
+/// Security-domain identity.  Domain zero is the trusted platform domain;
+/// user-facing subjects and their process-owned objects use `USER`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct SecurityDomain(pub u32);
+
+impl SecurityDomain {
+    pub const SYSTEM: Self = Self(0);
+    pub const USER: Self = Self(1);
+}
+
 /// Opaque boot identity. It is stable for one kernel boot and is never a
 /// secret or a replacement for cryptographic randomness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -178,6 +189,9 @@ pub struct SecurityContext {
     pub object: ObjectIdentity,
     pub application: Option<ApplicationIdentity>,
     pub state: MetadataState,
+    /// SEC-3 label.  It is internal metadata, not a user-visible pointer or
+    /// capability.  Process-owned objects inherit their creator's label.
+    pub mac: crate::mac::MacLabel,
 }
 
 impl SecurityContext {
@@ -199,6 +213,7 @@ impl SecurityContext {
             },
             application,
             state,
+            mac: crate::mac::MacLabel::for_class(class),
         }
     }
 
@@ -214,6 +229,7 @@ impl SecurityContext {
             },
             application: None,
             state: MetadataState::LegacyBootstrap,
+            mac: crate::mac::MacLabel::system(IdentityClass::Bootstrap),
         }
     }
 
@@ -289,6 +305,7 @@ pub struct SecuritySeed {
     pub class: IdentityClass,
     pub application: Option<ApplicationIdentity>,
     pub state: MetadataState,
+    pub mac: crate::mac::MacLabel,
 }
 
 impl SecuritySeed {
@@ -298,11 +315,17 @@ impl SecuritySeed {
             class,
             application: None,
             state: MetadataState::Active,
+            mac: crate::mac::MacLabel::for_class(class),
         }
     }
 
     pub const fn with_application(mut self, application: Option<ApplicationIdentity>) -> Self {
         self.application = application;
+        self
+    }
+
+    pub const fn with_mac_label(mut self, mac: crate::mac::MacLabel) -> Self {
+        self.mac = mac;
         self
     }
 
@@ -312,6 +335,7 @@ impl SecuritySeed {
             class: IdentityClass::Bootstrap,
             application: None,
             state: MetadataState::LegacyBootstrap,
+            mac: crate::mac::MacLabel::system(IdentityClass::Bootstrap),
         }
     }
 }

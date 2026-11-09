@@ -131,6 +131,12 @@ pub mod sec1_demo;
 pub mod sec2_notices;
 #[cfg(feature = "sec2-verify")]
 pub mod sec2_demo;
+#[cfg(feature = "sec3-verify")]
+pub mod sec3_demo;
+#[cfg(feature = "sec4-verify")]
+pub mod sec4_demo;
+#[cfg(feature = "sec6-verify")]
+pub mod sec6_demo;
 pub mod shard;
 pub mod smp;
 pub mod sync;

@@ -100,9 +100,11 @@ pub mod irq;
 pub mod job;
 pub mod l10n;
 pub mod lockorder;
+pub mod mac;
 pub mod memory;
 pub mod memory_object;
 pub mod memory_abi;
+pub mod memory_capability;
 pub mod meta;
 pub mod msi;
 pub mod net;
@@ -182,3 +184,5 @@ pub mod hwvirt_vmm;
 
 pub mod ns_budget;
 pub mod security;
+pub mod security_domain;
+pub mod net1b;
