@@ -186,3 +186,4 @@ pub mod ns_budget;
 pub mod security;
 pub mod security_domain;
 pub mod net1b;
+pub mod net1c;
