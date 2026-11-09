@@ -339,6 +339,10 @@ pub struct FileHandle(HandleId);
 impl FileHandle {
     pub const NULL: Self = Self(HandleId::NULL);
 
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(HandleId::from_raw(raw))
+    }
+
     #[allow(clippy::useless_conversion)] // HandleRaw is u32 on the 32-bit targets.
     pub fn raw(self) -> u64 {
         u64::from(self.0.raw())
@@ -1118,6 +1122,25 @@ impl<const N: usize, const H: usize> FsContract<N, H> {
         self.nodes.iter().filter(|node| node.is_some()).count()
     }
 
+    /// Versioned file-service and VFS dispatch boundary. This method is the
+    /// only wire-facing entry: lookup/open/close all consume the same
+    /// `FsContract` namespace, HandleTable and Rights checks as the typed API.
+    pub fn dispatch(&mut self, request: FsServiceRequest) -> Result<FsServiceReply, FsError> {
+        match request.op {
+            FsServiceOp::Lookup => self
+                .lookup(request.parent, request.name, request.rights)
+                .map(FsServiceReply::Lookup),
+            FsServiceOp::Open => {
+                let identity = self.lookup(request.parent, request.name, request.rights)?;
+                self.open(identity, request.rights).map(FsServiceReply::Open)
+            }
+            FsServiceOp::Close => {
+                self.close(request.handle)?;
+                Ok(FsServiceReply::Closed)
+            }
+        }
+    }
+
     fn sync_state_from_node(&self, node: Node) -> SyncState {
         SyncState {
             data_version: node.data_version,
@@ -1213,6 +1236,220 @@ impl<const N: usize, const H: usize> FsContract<N, H> {
                 !node.deleted && node.parent == parent && node.identity != parent
             })
         })
+    }
+}
+
+pub const FS_SERVICE_REQUEST_BYTES: usize = 128;
+pub const FS_SERVICE_REPLY_BYTES: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FsServiceOp {
+    Lookup,
+    Open,
+    Close,
+}
+
+impl FsServiceOp {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Lookup => 1,
+            Self::Open => 2,
+            Self::Close => 3,
+        }
+    }
+
+    const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Lookup),
+            2 => Some(Self::Open),
+            3 => Some(Self::Close),
+            _ => None,
+        }
+    }
+}
+
+/// Fixed-layout request used by the kernel/user file-service boundary.
+///
+/// Paths never appear on this interface. Names are a single directory entry;
+/// the parent identity is only a lookup key and does not confer authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FsServiceRequest {
+    pub op: FsServiceOp,
+    pub parent: PersistentIdentity,
+    pub name: EntryName,
+    pub rights: Rights,
+    pub handle: FileHandle,
+}
+
+impl FsServiceRequest {
+    pub fn lookup(
+        parent: PersistentIdentity,
+        name: EntryName,
+        rights: Rights,
+    ) -> Self {
+        Self {
+            op: FsServiceOp::Lookup,
+            parent,
+            name,
+            rights,
+            handle: FileHandle::NULL,
+        }
+    }
+
+    pub fn open(parent: PersistentIdentity, name: EntryName, rights: Rights) -> Self {
+        Self {
+            op: FsServiceOp::Open,
+            parent,
+            name,
+            rights,
+            handle: FileHandle::NULL,
+        }
+    }
+
+    pub fn close(handle: FileHandle) -> Self {
+        Self {
+            op: FsServiceOp::Close,
+            parent: PersistentIdentity::new(0, 0, 0),
+            name: EntryName::root(),
+            rights: Rights::NONE,
+            handle,
+        }
+    }
+
+    pub fn encode(self) -> Result<[u8; FS_SERVICE_REQUEST_BYTES], FsError> {
+        if self.rights.bits() & !Rights::ALL.bits() != 0 {
+            return Err(FsError::RightsDenied);
+        }
+        let mut out = [0u8; FS_SERVICE_REQUEST_BYTES];
+        out[..WIRE_HEADER_BYTES]
+            .copy_from_slice(&WireHeader::new(FS_SERVICE_REQUEST_BYTES).encode());
+        out[16] = self.op.code();
+        out[20..24].copy_from_slice(&self.rights.bits().to_le_bytes());
+        out[24..32].copy_from_slice(&self.parent.namespace_id.to_le_bytes());
+        out[32..40].copy_from_slice(&self.parent.object_id.to_le_bytes());
+        out[40..44].copy_from_slice(&self.parent.generation.to_le_bytes());
+        out[44..52].copy_from_slice(&self.handle.raw().to_le_bytes());
+        out[52] = self.name.len;
+        out[56..56 + self.name.len as usize]
+            .copy_from_slice(self.name.as_bytes());
+        Ok(out)
+    }
+
+    pub fn decode(input: [u8; FS_SERVICE_REQUEST_BYTES]) -> Result<Self, FsError> {
+        let header = WireHeader::decode(input[..WIRE_HEADER_BYTES].try_into().unwrap())?;
+        if header.bytes != FS_SERVICE_REQUEST_BYTES as u32
+            || input[17..20].iter().any(|byte| *byte != 0)
+            || input[53..56].iter().any(|byte| *byte != 0)
+            || input[120..].iter().any(|byte| *byte != 0)
+        {
+            return Err(FsError::InvalidVersion);
+        }
+        let op = FsServiceOp::from_code(input[16]).ok_or(FsError::InvalidVersion)?;
+        let rights_bits = u32::from_le_bytes(input[20..24].try_into().unwrap());
+        if rights_bits & !Rights::ALL.bits() != 0 {
+            return Err(FsError::RightsDenied);
+        }
+        let parent = PersistentIdentity::new(
+            u64::from_le_bytes(input[24..32].try_into().unwrap()),
+            u64::from_le_bytes(input[32..40].try_into().unwrap()),
+            u32::from_le_bytes(input[40..44].try_into().unwrap()),
+        );
+        let handle =
+            FileHandle::from_raw(u64::from_le_bytes(input[44..52].try_into().unwrap()));
+        let name_len = input[52] as usize;
+        if name_len > MAX_NAME_BYTES
+            || input[56 + name_len..120].iter().any(|byte| *byte != 0)
+        {
+            return Err(FsError::InvalidName);
+        }
+        let name = if name_len == 0 {
+            EntryName::root()
+        } else {
+            EntryName::new(&input[56..56 + name_len])?
+        };
+        let request = Self {
+            op,
+            parent,
+            name,
+            rights: Rights::from_bits_truncate(rights_bits),
+            handle,
+        };
+        match op {
+            FsServiceOp::Lookup | FsServiceOp::Open => {
+                if !parent.is_valid() || name_len == 0 || handle.raw() != 0 {
+                    return Err(FsError::InvalidIdentity);
+                }
+            }
+            FsServiceOp::Close => {
+                if handle.raw() == 0 || parent.is_valid() || name_len != 0 || rights_bits != 0 {
+                    return Err(FsError::InvalidIdentity);
+                }
+            }
+        }
+        Ok(request)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FsServiceReply {
+    Lookup(PersistentIdentity),
+    Open(FileHandle),
+    Closed,
+}
+
+impl FsServiceReply {
+    pub fn encode(self) -> [u8; FS_SERVICE_REPLY_BYTES] {
+        let mut out = [0u8; FS_SERVICE_REPLY_BYTES];
+        out[..WIRE_HEADER_BYTES]
+            .copy_from_slice(&WireHeader::new(FS_SERVICE_REPLY_BYTES).encode());
+        match self {
+            Self::Lookup(identity) => {
+                out[16] = 1;
+                out[24..32].copy_from_slice(&identity.namespace_id.to_le_bytes());
+                out[32..40].copy_from_slice(&identity.object_id.to_le_bytes());
+                out[40..44].copy_from_slice(&identity.generation.to_le_bytes());
+            }
+            Self::Open(handle) => {
+                out[16] = 2;
+                out[24..32].copy_from_slice(&handle.raw().to_le_bytes());
+            }
+            Self::Closed => out[16] = 3,
+        }
+        out
+    }
+
+    pub fn decode(input: [u8; FS_SERVICE_REPLY_BYTES]) -> Result<Self, FsError> {
+        let header = WireHeader::decode(input[..WIRE_HEADER_BYTES].try_into().unwrap())?;
+        if header.bytes != FS_SERVICE_REPLY_BYTES as u32
+            || input[44..].iter().any(|byte| *byte != 0)
+        {
+            return Err(FsError::InvalidVersion);
+        }
+        match input[16] {
+            1 => {
+                if input[17..24].iter().any(|byte| *byte != 0) {
+                    return Err(FsError::InvalidVersion);
+                }
+                let identity = PersistentIdentity::new(
+                    u64::from_le_bytes(input[24..32].try_into().unwrap()),
+                    u64::from_le_bytes(input[32..40].try_into().unwrap()),
+                    u32::from_le_bytes(input[40..44].try_into().unwrap()),
+                );
+                identity.is_valid().then_some(Self::Lookup(identity)).ok_or(FsError::InvalidIdentity)
+            }
+            2 => {
+                if input[17..24].iter().any(|byte| *byte != 0) {
+                    return Err(FsError::InvalidVersion);
+                }
+                let raw = u64::from_le_bytes(input[24..32].try_into().unwrap());
+                if raw == 0 || input[32..44].iter().any(|byte| *byte != 0) {
+                    return Err(FsError::InvalidIdentity);
+                }
+                Ok(Self::Open(FileHandle::from_raw(raw)))
+            }
+            3 if input[17..].iter().all(|byte| *byte == 0) => Ok(Self::Closed),
+            _ => Err(FsError::InvalidVersion),
+        }
     }
 }
 
@@ -2040,6 +2277,81 @@ mod tests {
     }
 
     #[test]
+    fn file_service_v1_roundtrips_and_dispatches_through_handle_rights() {
+        let mut fs = fs::<8, 8>();
+        let root = fs.root();
+        let file = create_file(&mut fs, root, b"file");
+
+        let lookup = FsServiceRequest::lookup(root, name(b"file"), Rights::READ);
+        assert_eq!(
+            FsServiceRequest::decode(lookup.encode().unwrap()),
+            Ok(lookup)
+        );
+        assert_eq!(
+            fs.dispatch(lookup),
+            Ok(FsServiceReply::Lookup(file))
+        );
+
+        let open = FsServiceRequest::open(root, name(b"file"), Rights::READ);
+        let reply = fs.dispatch(open).unwrap();
+        let FsServiceReply::Open(handle) = reply else {
+            panic!("open must return a FileHandle");
+        };
+        assert_eq!(FsServiceReply::decode(reply.encode()), Ok(reply));
+        assert_eq!(fs.info(file).unwrap().open_count, 1);
+
+        let close = FsServiceRequest::close(handle);
+        assert_eq!(
+            FsServiceRequest::decode(close.encode().unwrap()),
+            Ok(close)
+        );
+        assert_eq!(fs.dispatch(close), Ok(FsServiceReply::Closed));
+        assert_eq!(fs.info(file).unwrap().open_count, 0);
+    }
+
+    #[test]
+    fn file_service_v1_rejects_unknown_bits_reserved_fields_and_operation_shapes() {
+        let mut fs = fs::<8, 8>();
+        let root = fs.root();
+        let file = create_file(&mut fs, root, b"file");
+        let request = FsServiceRequest::lookup(root, name(b"file"), Rights::READ);
+
+        let mut reserved = request.encode().unwrap();
+        reserved[17] = 1;
+        assert_eq!(
+            FsServiceRequest::decode(reserved),
+            Err(FsError::InvalidVersion)
+        );
+
+        let mut unknown_right = request.encode().unwrap();
+        unknown_right[20..24].copy_from_slice(&Rights::ALL.bits().wrapping_add(1).to_le_bytes());
+        assert_eq!(
+            FsServiceRequest::decode(unknown_right),
+            Err(FsError::RightsDenied)
+        );
+
+        let mut unknown_op = request.encode().unwrap();
+        unknown_op[16] = 0xff;
+        assert_eq!(
+            FsServiceRequest::decode(unknown_op),
+            Err(FsError::InvalidVersion)
+        );
+
+        let handle = fs.open(file, Rights::READ).unwrap();
+        let malformed_close = FsServiceRequest {
+            op: FsServiceOp::Close,
+            parent: file,
+            name: name(b"file"),
+            rights: Rights::READ,
+            handle,
+        };
+        assert_eq!(
+            FsServiceRequest::decode(malformed_close.encode().unwrap()),
+            Err(FsError::InvalidIdentity)
+        );
+    }
+
+    #[test]
     fn capabilities_reject_unknown_bits_and_required_features() {
         assert_eq!(
             FsCapabilities::from_bits(FsCapabilities::ALL.bits()),
@@ -2782,6 +3094,76 @@ mod journal_tests {
             ),
             Err(JournalError::InvalidCheckpoint)
         ));
+    }
+
+    #[test]
+    fn untrusted_checkpoint_mutations_never_panic_and_preserve_invariants() {
+        let mut fs = blank_fs();
+        let root = fs.root();
+        let directory = fs
+            .create(
+                root,
+                EntryName::new(b"dir").unwrap(),
+                NodeKind::Directory,
+                Rights::READ.union(Rights::WRITE),
+            )
+            .unwrap();
+        fs.create(
+            directory,
+            EntryName::new(b"file").unwrap(),
+            NodeKind::File,
+            Rights::READ.union(Rights::WRITE),
+        )
+        .unwrap();
+        let mut encoded = [0u8; SCRATCH_BYTES];
+        let bytes = encode_checkpoint(&fs, &mut encoded).unwrap();
+
+        for length in 0..bytes {
+            let _ = journal::restore_checkpoint::<NODES, HANDLES>(
+                &encoded[..length],
+                mount(),
+                FsCapabilities::OPEN,
+            );
+        }
+        for offset in 0..bytes {
+            for mask in [0x01u8, 0x80, 0xff] {
+                let mut mutant = encoded;
+                mutant[offset] ^= mask;
+                if let Ok(state) = journal::restore_checkpoint::<NODES, HANDLES>(
+                    &mutant[..bytes],
+                    mount(),
+                    FsCapabilities::OPEN,
+                ) {
+                    assert_eq!(state.mount(), mount());
+                    assert_eq!(state.live_handles(), 0);
+                    assert!(state.info(state.root()).is_ok());
+                }
+            }
+        }
+
+        let mut seed = 0x4653_304d_4554_4144u64;
+        for _ in 0..20_000 {
+            let mut mutant = encoded;
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let changes = (seed as usize % 4) + 1;
+            for _ in 0..changes {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                mutant[seed as usize % bytes] ^= (seed >> 32) as u8;
+            }
+            if let Ok(state) = journal::restore_checkpoint::<NODES, HANDLES>(
+                &mutant[..bytes],
+                mount(),
+                FsCapabilities::OPEN,
+            ) {
+                assert_eq!(state.mount(), mount());
+                assert_eq!(state.live_handles(), 0);
+                assert!(state.info(state.root()).is_ok());
+            }
+        }
     }
 
     #[test]

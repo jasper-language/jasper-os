@@ -11,7 +11,7 @@
 //! mutating operations are serialized by the caller (the kernel object-table
 //! lock in production).
 
-use crate::object::Rights;
+use crate::{object::Rights, syscall_set::SyscallSet};
 use crate::security::{BootId, IdentityClass, ObjectIdentity};
 
 /// Opaque, monotonically allocated capability identity.  Zero is never valid.
@@ -115,6 +115,10 @@ pub enum CapabilityError {
     ObjectMismatch,
     OwnerMismatch,
     UseInvalid,
+    SyscallDenied,
+    ServiceDenied,
+    ProgramCapabilityDenied,
+    SnapshotChanged,
 }
 
 impl CapabilityError {
@@ -133,8 +137,112 @@ impl CapabilityError {
             Self::ObjectMismatch => "system.capability.error.object_mismatch",
             Self::OwnerMismatch => "system.capability.error.owner_mismatch",
             Self::UseInvalid => "system.capability.error.use_invalid",
+            Self::SyscallDenied => "system.capability.error.syscall_denied",
+            Self::ServiceDenied => "system.capability.error.service_denied",
+            Self::ProgramCapabilityDenied => "system.capability.error.program_capability_denied",
+            Self::SnapshotChanged => "system.capability.error.snapshot_changed",
         }
     }
+}
+
+/// One authority request expressed across every existing production gate.
+///
+/// This is a projection, not a new registry: handle rights remain owned by
+/// `HandleTable`, syscall IDs by `SyscallSet`, service publication by
+/// `ServiceGate`, and profile/program capabilities by the existing masks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuthorityRequest {
+    pub rights: Rights,
+    pub syscall: Option<u64>,
+    pub service_bit: Option<u32>,
+    pub program_bit: Option<u32>,
+}
+
+impl AuthorityRequest {
+    pub const fn new(rights: Rights) -> Self {
+        Self {
+            rights,
+            syscall: None,
+            service_bit: None,
+            program_bit: None,
+        }
+    }
+
+    pub const fn with_syscall(mut self, id: u64) -> Self {
+        self.syscall = Some(id);
+        self
+    }
+
+    pub const fn with_service(mut self, bit: u32) -> Self {
+        self.service_bit = Some(bit);
+        self
+    }
+
+    pub const fn with_program_capability(mut self, bit: u32) -> Self {
+        self.program_bit = Some(bit);
+        self
+    }
+}
+
+/// A pinned snapshot of all authority domains checked for one effect.
+///
+/// A changed rights set, syscall set, service publication mask or
+/// profile/program capability mask invalidates an in-flight grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuthoritySnapshot {
+    pub rights: Rights,
+    pub syscalls: SyscallSet,
+    pub published_services: u32,
+    pub program_capabilities: u32,
+}
+
+impl AuthoritySnapshot {
+    pub const fn new(
+        rights: Rights,
+        syscalls: SyscallSet,
+        published_services: u32,
+        program_capabilities: u32,
+    ) -> Self {
+        Self {
+            rights,
+            syscalls,
+            published_services,
+            program_capabilities,
+        }
+    }
+
+    pub fn authorize(self, request: AuthorityRequest) -> Result<(), CapabilityError> {
+        if !self.rights.contains(request.rights) {
+            return Err(CapabilityError::RightsDenied);
+        }
+        if request
+            .syscall
+            .is_some_and(|id| !self.syscalls.contains(id))
+        {
+            return Err(CapabilityError::SyscallDenied);
+        }
+        if request.service_bit.is_some_and(|bit| {
+            bit >= 32 || self.published_services & (1u32 << bit) == 0
+        }) {
+            return Err(CapabilityError::ServiceDenied);
+        }
+        if request.program_bit.is_some_and(|bit| {
+            bit >= 32 || self.program_capabilities & (1u32 << bit) == 0
+        }) {
+            return Err(CapabilityError::ProgramCapabilityDenied);
+        }
+        Ok(())
+    }
+}
+
+/// In-flight grant over all authority domains. The graph token is the
+/// revocable capability lease; the snapshot prevents a second domain from
+/// changing between check and effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuthorityGrant {
+    pub capability_use: CapabilityUse,
+    pub snapshot: AuthoritySnapshot,
+    pub request: AuthorityRequest,
 }
 
 /// A capability node.  `parent` is immutable, and because nodes only receive
@@ -474,6 +582,49 @@ impl<const N: usize> CapabilityGraph<N> {
         Ok(())
     }
 
+    /// Begin one effect across handle rights, syscalls, service publication
+    /// and profile/program capabilities.
+    pub fn begin_authority(
+        &mut self,
+        capability: CapabilityId,
+        owner: PrincipalId,
+        request: AuthorityRequest,
+        snapshot: AuthoritySnapshot,
+    ) -> Result<AuthorityGrant, CapabilityError> {
+        snapshot.authorize(request)?;
+        let capability_use = self.begin_use(capability, owner, request.rights)?;
+        if self.node(capability)?.rights != snapshot.rights {
+            self.end_use(capability_use)?;
+            return Err(CapabilityError::SnapshotChanged);
+        }
+        Ok(AuthorityGrant {
+            capability_use,
+            snapshot,
+            request,
+        })
+    }
+
+    /// Revalidate every authority domain immediately before committing an
+    /// effect. Any changed snapshot or revoked graph node fails closed.
+    pub fn validate_authority(
+        &self,
+        grant: AuthorityGrant,
+        current: AuthoritySnapshot,
+    ) -> Result<(), CapabilityError> {
+        if current != grant.snapshot {
+            return Err(CapabilityError::SnapshotChanged);
+        }
+        self.validate_use(grant.capability_use)?;
+        current.authorize(grant.request)
+    }
+
+    pub fn end_authority(
+        &mut self,
+        grant: AuthorityGrant,
+    ) -> Result<(), CapabilityError> {
+        self.end_use(grant.capability_use)
+    }
+
     /// Retire a node after it has no live descendants or in-flight users.  A
     /// revoked node may be retired after its uses drain; callers close the
     /// object ownership separately.
@@ -807,6 +958,98 @@ mod tests {
         assert!(graph.event_overflow() > 0);
         while graph.next_death().is_some() {}
         graph.delegate(root, object(), owner(2), Rights::READ).unwrap_err();
+    }
+
+    #[test]
+    fn unified_authority_projection_requires_every_existing_gate() {
+        let rights = Rights::READ.union(Rights::MAP);
+        let syscalls = SyscallSet::from_id(41).unwrap();
+        let request = AuthorityRequest::new(rights)
+            .with_syscall(41)
+            .with_service(3)
+            .with_program_capability(2);
+
+        AuthoritySnapshot::new(rights, syscalls, 1 << 3, 1 << 2)
+            .authorize(request)
+            .unwrap();
+        assert_eq!(
+            AuthoritySnapshot::new(rights.difference(Rights::MAP), syscalls, 1 << 3, 1 << 2)
+                .authorize(request),
+            Err(CapabilityError::RightsDenied)
+        );
+        assert_eq!(
+            AuthoritySnapshot::new(rights, SyscallSet::EMPTY, 1 << 3, 1 << 2)
+                .authorize(request),
+            Err(CapabilityError::SyscallDenied)
+        );
+        assert_eq!(
+            AuthoritySnapshot::new(rights, syscalls, 0, 1 << 2).authorize(request),
+            Err(CapabilityError::ServiceDenied)
+        );
+        assert_eq!(
+            AuthoritySnapshot::new(rights, syscalls, 1 << 3, 0).authorize(request),
+            Err(CapabilityError::ProgramCapabilityDenied)
+        );
+        assert_eq!(
+            AuthoritySnapshot::new(rights, syscalls, 1 << 3, 1 << 2)
+                .authorize(request.with_service(32)),
+            Err(CapabilityError::ServiceDenied)
+        );
+    }
+
+    #[test]
+    fn in_flight_authority_grant_pins_graph_and_all_other_masks() {
+        let mut graph = CapabilityGraph::<4>::new();
+        let capability = graph.create_root(object(), owner(1), Rights::ALL).unwrap();
+        let request = AuthorityRequest::new(Rights::READ)
+            .with_syscall(7)
+            .with_service(1)
+            .with_program_capability(2);
+        let snapshot = AuthoritySnapshot::new(
+            Rights::ALL,
+            SyscallSet::from_id(7).unwrap(),
+            1 << 1,
+            1 << 2,
+        );
+        let grant = graph
+            .begin_authority(capability, owner(1), request, snapshot)
+            .unwrap();
+        graph.validate_authority(grant, snapshot).unwrap();
+
+        let changed = AuthoritySnapshot {
+            published_services: 0,
+            ..snapshot
+        };
+        assert_eq!(
+            graph.validate_authority(grant, changed),
+            Err(CapabilityError::SnapshotChanged)
+        );
+        graph.revoke(capability).unwrap();
+        assert_eq!(
+            graph.validate_authority(grant, snapshot),
+            Err(CapabilityError::UseInvalid)
+        );
+        graph.end_authority(grant).unwrap();
+    }
+
+    #[test]
+    fn begin_authority_rejects_handle_snapshot_mismatch_without_leaking_use() {
+        let mut graph = CapabilityGraph::<2>::new();
+        let capability = graph
+            .create_root(object(), owner(1), Rights::READ)
+            .unwrap();
+        let request = AuthorityRequest::new(Rights::READ);
+        let snapshot = AuthoritySnapshot::new(
+            Rights::READ.union(Rights::WRITE),
+            SyscallSet::EMPTY,
+            0,
+            0,
+        );
+        assert_eq!(
+            graph.begin_authority(capability, owner(1), request, snapshot),
+            Err(CapabilityError::SnapshotChanged)
+        );
+        assert_eq!(graph.node(capability).unwrap().active_uses, 0);
     }
 }
 
