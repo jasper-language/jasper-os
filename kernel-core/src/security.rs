@@ -95,8 +95,10 @@ pub struct ObjectIdentity {
 }
 
 impl ObjectIdentity {
-    pub fn matches(self, id: ObjId) -> bool {
-        self.object_id == id.raw() && self.generation == id.generation()
+    pub fn matches(self, boot_id: BootId, id: ObjId) -> bool {
+        self.boot_id == boot_id
+            && self.object_id == id.raw()
+            && self.generation == id.generation()
     }
 }
 
@@ -363,7 +365,8 @@ mod tests {
             None,
             MetadataState::Active,
         );
-        assert!(context.object.matches(id));
+        assert!(context.object.matches(boot(), id));
+        assert!(!context.object.matches(BootId::from_words([0xAAAA, 0xBBBB]), id));
         assert_eq!(context.object.object_id, id.raw());
         assert_eq!(context.object.generation, id.generation());
         let subject = context.subject_identity().unwrap();
@@ -383,7 +386,7 @@ mod tests {
             None,
             MetadataState::Active,
         );
-        assert!(context.object.matches(id));
+        assert!(context.object.matches(boot(), id));
         assert_eq!(context.require_active(), Ok(context));
     }
 

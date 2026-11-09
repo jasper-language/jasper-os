@@ -38,7 +38,7 @@ pub fn run() {
         parent_context.is_some_and(|context| {
             context.state == MetadataState::Active
                 && context.object.class == IdentityClass::Process
-                && context.object.matches(parent)
+                && context.object.matches(boot, parent)
                 && context.application.is_none()
         }),
         "process lacks active object identity",
@@ -226,7 +226,7 @@ pub fn run() {
         peer.and_then(|endpoint| kobj::with(|t| ipc::queued_sender_security(t, endpoint)));
     check(
         queued_context.is_some_and(|context| {
-            context.object.matches(parent) && context.application == Some(application)
+            context.object.matches(boot, parent) && context.application == Some(application)
         }),
         "IPC did not preserve the sender security context",
     );
