@@ -11,6 +11,8 @@
 #![deny(missing_docs)]
 
 pub mod boot;
+pub mod diagnostics;
+pub mod manifest;
 pub mod update;
 
 /// 一份启动控制记录的固定线上长度（字节）。

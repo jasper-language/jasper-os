@@ -1164,7 +1164,10 @@ mod tests {
         commit(&mut store, &mut local, next).unwrap();
         assert_eq!(store.last_written, Some(0));
         assert_eq!(store.copies[1], old.encode());
-        assert_eq!(recover(Some(&store.copies[0]), Some(&store.copies[1])), Ok(next));
+        assert_eq!(
+            recover(Some(&store.copies[0]), Some(&store.copies[1])),
+            Ok(next)
+        );
 
         let prior_generation = store.copies[0];
         let mut newer = local;
@@ -1172,6 +1175,9 @@ mod tests {
         commit(&mut store, &mut local, newer).unwrap();
         assert_eq!(store.last_written, Some(1));
         assert_eq!(store.copies[0], prior_generation);
-        assert_eq!(recover(Some(&store.copies[0]), Some(&store.copies[1])), Ok(newer));
+        assert_eq!(
+            recover(Some(&store.copies[0]), Some(&store.copies[1])),
+            Ok(newer)
+        );
     }
 }

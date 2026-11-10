@@ -719,6 +719,8 @@ name = "jasper-lifecycle-model"
 version = "0.1.0"
 dependencies = [
  "crc32fast",
+ "ed25519-dalek",
+ "sha2",
 ]
 
 [[package]]
