@@ -13,7 +13,8 @@ manifest_inputs() {
     find kernel-core kernel lifecycle-model abi user verification tools/krn1 .cargo -type d \( -name __pycache__ -o -name target -o -name corpus -o -name artifacts \) -prune -o -type f -print0 | sort -z | xargs -0 sha256sum
     sha256sum Cargo.toml Cargo.lock rust-toolchain.toml \
       kernel/build.rs kernel/production-features.txt kernel/src/production.rs \
-      scripts/check-production-feature-isolation.py
+      kernel/demo-path-classification.txt scripts/check-production-feature-isolation.py \
+      scripts/check-issue19-demo-paths.py
     # The public code-only export intentionally omits planning documents and checks.
     # Hash and run those inputs only when the private planning tree is present.
     planning_inputs=(
@@ -44,6 +45,7 @@ rm -f "$run/PASS"
 {
     date -u +%FT%TZ
     python3 scripts/check-production-feature-isolation.py
+    python3 scripts/check-issue19-demo-paths.py
     if [[ -f scripts/check-issue21-lc0.py && -f scripts/check-issue21-lifecycle.py \
           && -f scripts/check-milestone-dag.py ]]; then
         python3 scripts/check-issue21-lc0.py

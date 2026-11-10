@@ -18,6 +18,7 @@ TARGET=target/production
 ORDER="console platform timer frames kernel_map heap capacity devices profile assembly sched_mode space smp highres idle_tick user_runtime "
 mkdir -p "$OUT"
 python3 scripts/check-production-feature-isolation.py
+python3 scripts/check-issue19-demo-paths.py
 cargo build --locked --release -p xtask > "$OUT/build.log" 2>&1 || { echo "FAIL xtask 构建失败"; exit 1; }
 ELF="$TARGET/x86_64-unknown-none/release/jasper-kernel"
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none -p jasper-kernel --features production >> "$OUT/build.log" 2>&1 \
