@@ -12,6 +12,7 @@
 
 pub mod boot;
 pub mod diagnostics;
+pub mod layout;
 pub mod manifest;
 pub mod update;
 
