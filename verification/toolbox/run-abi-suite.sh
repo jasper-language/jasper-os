@@ -18,10 +18,18 @@ cd "$(dirname "$0")/../.."
 Z3="${Z3:-$(dirname "$VERUS")/z3}"
 out=evidence/abi/abi-generation-suite
 mkdir -p "$out"
+abi_version="$(awk -F= '
+  $1 ~ /^[[:space:]]*major[[:space:]]*$/ {gsub(/[[:space:]]/, "", $2); major=$2}
+  $1 ~ /^[[:space:]]*minor[[:space:]]*$/ {gsub(/[[:space:]]/, "", $2); minor=$2}
+  $1 ~ /^[[:space:]]*patch[[:space:]]*$/ {gsub(/[[:space:]]/, "", $2); patch=$2}
+  END {print major "." minor "." patch}
+' abi/abi-version.txt)"
+abi_snapshot="abi/snapshots/${abi_version}.contract"
+test -f "$abi_snapshot"
 
 sha256sum \
   abi/abi-version.txt \
-  abi/snapshots/1.0.0.contract \
+  "$abi_snapshot" \
   kernel-core/build.rs \
   kernel-core/src/abi_contract.rs \
   kernel-core/src/abi_version.rs \
@@ -131,6 +139,6 @@ if kani_enabled; then
   grep -q 'VERIFICATION:- SUCCESSFUL' "$out/kani-elf-entry.log"
 fi
 grep -q '^N/A：' "$out/loom-na.log"
-grep -q 'ABI contract check: PASS (1.0.0)' "$out/contract.log"
+grep -q "ABI contract check: PASS (${abi_version})" "$out/contract.log"
 
 printf '%s\n' "ABI generation suite: snapshots/Verus/Proptest/Miri/fuzz passed; Loom N/A (pure functions); $KANI_STATUS" | tee "$out/PASS"
