@@ -10,10 +10,13 @@ export PATH="${HOME}/.cargo/bin:${PATH}"
 OUT="${ISSUE21_UEFI_OUT:-$ROOT/evidence/issue21-uefi-boot-$(date '+%Y%m%d-%H%M%S')}"
 TARGET="${ISSUE21_UEFI_TARGET:-$ROOT/target/issue21-uefi-check}"
 LIMIT="${ISSUE21_UEFI_TIMEOUT:-45}"
-mkdir -p "$OUT"
+mkdir "$OUT"
 IMAGE="$TARGET/p0.img"
 ESP_IMAGE="$TARGET/esp.img"
 OVMF_VARS="$TARGET/OVMF_VARS.fd"
+# 仅清理本脚本固定命名的派生产物；证据目录必须独占，防止陈旧日志混入。
+# Remove only this script's fixed derived files; evidence output must be fresh.
+rm -f -- "$IMAGE" "$ESP_IMAGE" "$OVMF_VARS"
 
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none \
   -p jasper-kernel --features production >"$OUT/kernel-build.log" 2>&1
