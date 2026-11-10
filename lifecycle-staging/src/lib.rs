@@ -11,13 +11,14 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
+use jasper_lifecycle_model::manifest::{authorize_install, LocalInstallGrant, ManifestError};
 use jasper_lifecycle_model::manifest_cbor::{
     ArtifactKind, VerifiedArtifact, VerifiedCborManifest, MAX_MANIFEST_CBOR_BYTES,
 };
@@ -81,6 +82,21 @@ pub struct DiskBudget {
     pub block_size: u64,
 }
 
+/// 已完成授权、依赖预检、磁盘预算和持久暂存的更新准备事实。
+///
+/// 该值不是提交成功，也不包含启动槽切换或交易持久状态。
+/// Prepared update after authorization, dependency preflight, disk budgeting and durable staging.
+/// This is not a commit and contains no slot switch or persisted transaction state.
+#[derive(Debug)]
+pub struct PreparedUpdate {
+    /// 已验签清单。Verified manifest.
+    pub manifest: VerifiedCborManifest,
+    /// 磁盘预算。Disk budget.
+    pub budget: DiskBudget,
+    /// 持久暂存回执。Durable staging receipt.
+    pub staging: StagingReceipt,
+}
+
 /// 暂存失败原因。
 /// Staging failure.
 #[derive(Debug)]
@@ -136,6 +152,12 @@ pub enum StagingError {
     BudgetOverflow,
     /// 目标文件系统返回不可用几何参数。Destination filesystem returned unusable geometry.
     InvalidFilesystem(&'static str),
+    /// 本地安装授权或清单安全验证失败。Local install authorization or manifest security verification failed.
+    Manifest(ManifestError),
+    /// 清单声明的直接依赖不在当前本地快照中。A declared direct dependency is absent from the local snapshot.
+    MissingDependency(String),
+    /// 依赖快照包含空名或重复名。Dependency snapshot contains an empty or duplicate name.
+    InvalidDependencySnapshot,
 }
 
 impl fmt::Display for StagingError {
@@ -185,6 +207,16 @@ impl fmt::Display for StagingError {
                 write!(
                     formatter,
                     "invalid destination filesystem geometry: {reason}"
+                )
+            }
+            Self::Manifest(error) => write!(formatter, "manifest verification failed: {error:?}"),
+            Self::MissingDependency(name) => {
+                write!(formatter, "manifest dependency is not installed: {name}")
+            }
+            Self::InvalidDependencySnapshot => {
+                write!(
+                    formatter,
+                    "dependency snapshot contains an empty or duplicate name"
                 )
             }
         }
@@ -253,6 +285,65 @@ pub fn stage_verified_artifacts(
             }),
         },
     }
+}
+
+/// 串联本地安装授权、直接依赖、磁盘预算和持久暂存。
+///
+/// `manifest` 必须来自规范 CBOR 和签名验证。成功只表示可进入非活动暂存，不表示
+/// 交易已提交、槽位已激活或系统可启动。
+/// Chains local install authorization, direct dependencies, disk budget and durable staging.
+/// The manifest must originate from canonical-CBOR and signature verification. Success only
+/// means the payload may remain staged; it is not a commit, activation or bootability claim.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_update(
+    manifest: VerifiedCborManifest,
+    manifest_bytes: &[u8],
+    grant: LocalInstallGrant,
+    now: u64,
+    installed_dependencies: &[String],
+    sources: &[ArtifactSource<'_>],
+    staging_root: &Path,
+    metadata_headroom: u64,
+) -> Result<PreparedUpdate, StagingError> {
+    authorize_install(manifest.manifest, grant, now).map_err(StagingError::Manifest)?;
+    check_dependency_snapshot(&manifest.dependencies, installed_dependencies)?;
+    let destination_parent = staging_root
+        .parent()
+        .ok_or(StagingError::InconsistentManifest(
+            "staging root has no parent directory",
+        ))?;
+    let budget = check_disk_budget(
+        &manifest,
+        manifest_bytes.len() as u64,
+        destination_parent,
+        metadata_headroom,
+    )?;
+    let staging = stage_verified_artifacts(&manifest, manifest_bytes, sources, staging_root)?;
+    Ok(PreparedUpdate {
+        manifest,
+        budget,
+        staging,
+    })
+}
+
+/// 验证清单的直接依赖全部存在于当前本地已安装名称快照。
+/// Verifies that every direct manifest dependency exists in the local installed-name snapshot.
+pub fn check_dependency_snapshot(
+    required: &[String],
+    installed: &[String],
+) -> Result<(), StagingError> {
+    let mut unique = BTreeSet::new();
+    for name in installed {
+        if name.is_empty() || !unique.insert(name.as_str()) {
+            return Err(StagingError::InvalidDependencySnapshot);
+        }
+    }
+    for dependency in required {
+        if !unique.contains(dependency.as_str()) {
+            return Err(StagingError::MissingDependency(dependency.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// 按实际文件系统块大小检查暂存预算；`metadata_headroom` 由协调器显式提供。
@@ -782,5 +873,128 @@ mod tests {
             ),
             Err(StagingError::BudgetOverflow)
         ));
+    }
+
+    #[test]
+    fn prepare_update_chains_authorization_dependencies_budget_and_staging() {
+        let temp = TestDir::new("prepare-update");
+        let manifest_bytes = b"signed-update-manifest";
+        let bytes = b"kernel-image";
+        let source_path = temp.path().join("kernel.source");
+        fs::write(&source_path, bytes).unwrap();
+        let mut manifest = manifest(
+            manifest_bytes,
+            vec![artifact(ArtifactKind::Kernel, "kernel", bytes)],
+        );
+        manifest.dependencies = vec![String::from("jasper.base")];
+        let grant = LocalInstallGrant {
+            locally_authenticated: true,
+            purpose: 1,
+            manifest_sha256: manifest.manifest.manifest_sha256,
+            profile: manifest.manifest.target_profile,
+            expires_at: 10,
+        };
+        let staging_root = temp.path().join("staging");
+        let prepared = prepare_update(
+            manifest,
+            manifest_bytes,
+            grant,
+            9,
+            &[String::from("jasper.base")],
+            &[ArtifactSource {
+                name: "kernel",
+                path: &source_path,
+            }],
+            &staging_root,
+            4096,
+        )
+        .unwrap();
+        assert_eq!(prepared.staging.artifacts.len(), 1);
+        assert!(prepared.budget.required_bytes >= 4096);
+        assert_eq!(
+            fs::read(staging_root.join(ARTIFACT_DIR).join("kernel")).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn prepare_update_rejects_missing_dependencies_before_staging() {
+        let temp = TestDir::new("prepare-dependency");
+        let manifest_bytes = b"signed-update-manifest";
+        let bytes = b"kernel-image";
+        let source_path = temp.path().join("kernel.source");
+        fs::write(&source_path, bytes).unwrap();
+        let mut manifest = manifest(
+            manifest_bytes,
+            vec![artifact(ArtifactKind::Kernel, "kernel", bytes)],
+        );
+        manifest.dependencies = vec![String::from("jasper.missing")];
+        let grant = LocalInstallGrant {
+            locally_authenticated: true,
+            purpose: 1,
+            manifest_sha256: manifest.manifest.manifest_sha256,
+            profile: manifest.manifest.target_profile,
+            expires_at: 10,
+        };
+        let staging_root = temp.path().join("staging");
+        assert!(matches!(
+            prepare_update(
+                manifest,
+                manifest_bytes,
+                grant,
+                9,
+                &[String::from("jasper.base")],
+                &[ArtifactSource {
+                    name: "kernel",
+                    path: &source_path,
+                }],
+                &staging_root,
+                0,
+            ),
+            Err(StagingError::MissingDependency(name)) if name == "jasper.missing"
+        ));
+        assert!(!staging_root.exists());
+        assert!(matches!(
+            check_dependency_snapshot(&[], &[String::from("same"), String::from("same")]),
+            Err(StagingError::InvalidDependencySnapshot)
+        ));
+    }
+
+    #[test]
+    fn prepare_update_requires_a_live_local_grant() {
+        let temp = TestDir::new("prepare-grant");
+        let manifest_bytes = b"signed-update-manifest";
+        let bytes = b"kernel-image";
+        let source_path = temp.path().join("kernel.source");
+        fs::write(&source_path, bytes).unwrap();
+        let manifest = manifest(
+            manifest_bytes,
+            vec![artifact(ArtifactKind::Kernel, "kernel", bytes)],
+        );
+        let grant = LocalInstallGrant {
+            locally_authenticated: true,
+            purpose: 1,
+            manifest_sha256: manifest.manifest.manifest_sha256,
+            profile: manifest.manifest.target_profile,
+            expires_at: 9,
+        };
+        let staging_root = temp.path().join("staging");
+        assert!(matches!(
+            prepare_update(
+                manifest,
+                manifest_bytes,
+                grant,
+                9,
+                &[],
+                &[ArtifactSource {
+                    name: "kernel",
+                    path: &source_path,
+                }],
+                &staging_root,
+                0,
+            ),
+            Err(StagingError::Manifest(ManifestError::Authorization))
+        ));
+        assert!(!staging_root.exists());
     }
 }
