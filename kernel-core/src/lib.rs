@@ -147,6 +147,7 @@ pub mod usi_request;
 pub mod user_layout;
 pub mod vmm_device;
 pub mod virtio_fs;
+pub mod virtio_gpu;
 pub mod virtio_net;
 pub mod wait;
 pub mod wireguard;

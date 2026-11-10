@@ -1,0 +1,9 @@
+[package]
+name = "jasper-compat-core"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+kernel-core = { path = "../kernel-core" }
+linux-raw-sys = { version = "=0.12.1", default-features = false, features = ["general", "errno", "no_std"] }

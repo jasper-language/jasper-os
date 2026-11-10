@@ -11,6 +11,7 @@ use kernel_core::hwvirt_vcpu::{GuestPermissions, VcpuState};
 use kernel_core::virtio_fs::{
     VirtioFsBackend, FUSE_OUT_HEADER_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, OP_WRITE,
 };
+use kernel_core::virtio_gpu::{VirtioGpuBackend, CONTROL_HEADER_BYTES};
 use kernel_core::virtio_net::{
     VirtioNetBackend, VirtioNetHeader, MAX_FRAME_BYTES, VIRTIO_NET_HEADER_BYTES,
 };
@@ -46,6 +47,8 @@ const VIRTIO_NET_BASE: u64 = 0xd000_3000;
 const VIRTIO_NET_IRQ: u8 = 10;
 const VIRTIO_FS_BASE: u64 = 0xd000_4000;
 const VIRTIO_FS_IRQ: u8 = 11;
+const VIRTIO_GPU_BASE: u64 = 0xd000_5000;
+const VIRTIO_GPU_IRQ: u8 = 12;
 
 struct VirtioGuestBus {
     pid: kernel_core::objtable::ObjId,
@@ -57,6 +60,8 @@ struct VirtioGuestBus {
     net_backend: VirtioNetBackend,
     fs: VirtioMmio,
     fs_backend: VirtioFsBackend,
+    gpu: VirtioMmio,
+    gpu_backend: VirtioGpuBackend,
     last_avail: [u16; 2],
     console_last_avail: [u16; 2],
     console_bytes: u32,
@@ -70,6 +75,9 @@ struct VirtioGuestBus {
     fs_last_avail: u16,
     fs_requests: u32,
     fs_rejected: u32,
+    gpu_last_avail: u16,
+    gpu_requests: u32,
+    gpu_rejected: u32,
     disk: [u8; 4096],
     pending_irqs: u16,
     rng_requests: u32,
@@ -92,6 +100,8 @@ impl VirtioGuestBus {
             net_backend: VirtioNetBackend::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x57], [10, 0, 2, 2]),
             fs: VirtioMmio::new(VirtioDeviceType::Fs, 16, [0, FEATURE_VERSION_1]),
             fs_backend: VirtioFsBackend::new(),
+            gpu: VirtioMmio::new(VirtioDeviceType::Gpu, 16, [0, FEATURE_VERSION_1]),
+            gpu_backend: VirtioGpuBackend::new(),
             last_avail: [0; 2],
             console_last_avail: [0; 2],
             console_bytes: 0,
@@ -105,6 +115,9 @@ impl VirtioGuestBus {
             fs_last_avail: 0,
             fs_requests: 0,
             fs_rejected: 0,
+            gpu_last_avail: 0,
+            gpu_requests: 0,
+            gpu_rejected: 0,
             disk: {
                 let mut disk = [0u8; 4096];
                 let marker = b"JASPER-BLOCK-001";
@@ -589,6 +602,94 @@ impl VirtioGuestBus {
         }
     }
 
+    fn process_gpu(&mut self, queue_index: u16) {
+        if queue_index != 0 {
+            return;
+        }
+        let Some(queue) = self.gpu.queue(queue_index) else {
+            return;
+        };
+        if !queue.ready {
+            return;
+        }
+        let Some(available) = self.read_u16(queue.address.driver + 2) else {
+            return;
+        };
+        while self.gpu_last_avail != available {
+            let slot = usize::from(self.gpu_last_avail % queue.size);
+            let Some(head) = self.read_u16(queue.address.driver + 4 + (slot as u64) * 2) else {
+                return;
+            };
+            let mut chain = [(0u64, 0u32, 0u16, 0u16); 8];
+            let count = match self.read_virtio_chain(queue, head, &mut chain) {
+                Ok(count) if count >= 2 => count,
+                _ => {
+                    self.gpu_rejected = self.gpu_rejected.saturating_add(1);
+                    return;
+                }
+            };
+            let mut request = [0u8; MAX_REQUEST_BYTES];
+            let mut request_len = 0usize;
+            let mut writable = false;
+            for &(address, length, flags, _) in &chain[..count] {
+                if flags & 2 != 0 {
+                    writable = true;
+                    continue;
+                }
+                let length = length as usize;
+                let Some(end) = request_len.checked_add(length) else {
+                    self.gpu_rejected = self.gpu_rejected.saturating_add(1);
+                    return;
+                };
+                if end > request.len() || !self.read_guest(address, &mut request[request_len..end])
+                {
+                    self.gpu_rejected = self.gpu_rejected.saturating_add(1);
+                    return;
+                }
+                request_len = end;
+            }
+            if !writable || request_len < CONTROL_HEADER_BYTES {
+                self.gpu_rejected = self.gpu_rejected.saturating_add(1);
+                return;
+            }
+            let mut response = [0u8; MAX_RESPONSE_BYTES];
+            let response_len = match self
+                .gpu_backend
+                .handle_command(&request[..request_len], &mut response)
+            {
+                Ok(length) => length,
+                Err(_) if request_len >= CONTROL_HEADER_BYTES => {
+                    response[..CONTROL_HEADER_BYTES].fill(0);
+                    response[..4].copy_from_slice(&0x1200u32.to_le_bytes());
+                    response[8..16].copy_from_slice(&request[8..16]);
+                    self.gpu_rejected = self.gpu_rejected.saturating_add(1);
+                    CONTROL_HEADER_BYTES
+                }
+                Err(_) => {
+                    self.gpu_rejected = self.gpu_rejected.saturating_add(1);
+                    return;
+                }
+            };
+            if response_len > response.len() {
+                self.gpu_rejected = self.gpu_rejected.saturating_add(1);
+                return;
+            }
+            let Some(written) =
+                self.write_virtio_output(&chain[..count], &response[..response_len])
+            else {
+                self.gpu_rejected = self.gpu_rejected.saturating_add(1);
+                return;
+            };
+            if !self.complete_gpu_used(queue, head, written) {
+                return;
+            }
+            self.gpu_last_avail = self.gpu_last_avail.wrapping_add(1);
+            self.gpu_requests = self.gpu_requests.saturating_add(1);
+            self.gpu.raise_interrupt(1);
+            self.pending_irqs |= 1u16 << VIRTIO_GPU_IRQ;
+        }
+    }
+
     fn read_virtio_chain(
         &mut self,
         queue: kernel_core::vmm_device::QueueState,
@@ -727,6 +828,22 @@ impl VirtioGuestBus {
     ) -> bool {
         let used = self.fs_last_avail.wrapping_add(1);
         let slot = usize::from(self.fs_last_avail % queue.size);
+        fence(Ordering::Release);
+        self.write_u32(
+            queue.address.device + 4 + (slot as u64) * 8,
+            u32::from(head),
+        ) && self.write_u32(queue.address.device + 8 + (slot as u64) * 8, length)
+            && self.write_u16(queue.address.device + 2, used)
+    }
+
+    fn complete_gpu_used(
+        &mut self,
+        queue: kernel_core::vmm_device::QueueState,
+        head: u16,
+        length: u32,
+    ) -> bool {
+        let used = self.gpu_last_avail.wrapping_add(1);
+        let slot = usize::from(self.gpu_last_avail % queue.size);
         fence(Ordering::Release);
         self.write_u32(
             queue.address.device + 4 + (slot as u64) * 8,
@@ -892,6 +1009,26 @@ impl LinuxPlatform for VirtioGuestBus {
             }
             return self.fs.read(offset, width).ok();
         }
+        if (VIRTIO_GPU_BASE..VIRTIO_GPU_BASE + 0x1000).contains(&gpa) {
+            let offset = gpa - VIRTIO_GPU_BASE;
+            if let Some(config_offset) = offset.checked_sub(0x100) {
+                if !matches!(width, 1 | 2 | 4 | 8)
+                    || config_offset % u64::from(width) != 0
+                    || config_offset + u64::from(width) > 16
+                {
+                    return None;
+                }
+                let mut config = [0u8; 16];
+                config[8..12].copy_from_slice(&1u32.to_le_bytes());
+                let start = config_offset as usize;
+                let mut value = 0u64;
+                for (index, byte) in config[start..start + width as usize].iter().enumerate() {
+                    value |= u64::from(*byte) << (index * 8);
+                }
+                return Some(value);
+            }
+            return self.gpu.read(offset, width).ok();
+        }
         None
     }
 
@@ -971,6 +1108,25 @@ impl LinuxPlatform for VirtioGuestBus {
             }
             if let Some(queue) = event.queue_notified {
                 self.process_fs(queue);
+            }
+            return true;
+        }
+        if (VIRTIO_GPU_BASE..VIRTIO_GPU_BASE + 0x1000).contains(&gpa) {
+            let offset = gpa - VIRTIO_GPU_BASE;
+            if (0x100..0x110).contains(&offset) {
+                return matches!(width, 1 | 2 | 4 | 8)
+                    && offset % u64::from(width) == 0;
+            }
+            let Ok(event) = self.gpu.write(offset, width, value) else {
+                return false;
+            };
+            if offset == 0x070 && value == 0 {
+                self.gpu_backend.reset();
+                self.gpu_last_avail = 0;
+                self.pending_irqs &= !(1u16 << VIRTIO_GPU_IRQ);
+            }
+            if let Some(queue) = event.queue_notified {
+                self.process_gpu(queue);
             }
             return true;
         }
@@ -1145,7 +1301,7 @@ fn run_impl(virtio_rng: bool) -> bool {
             && report.pio_cancels == 1);
     let ok = report.marker && report.halted && lifecycle && shutdown && reclaimed && virtio_ok;
     kprintln!(
-        "[JSR-HWV4-LINUX] linux=true exits={} serial_bytes={} timer_interrupts={} timer_eois={} virtio_rng_requests={} virtio_console_bytes={} virtio_block_requests={} virtio_net_tx_frames={} virtio_net_rx_frames={} virtio_net_backend_tx={} virtio_net_backend_rx={} virtio_net_reset_generation={} virtio_net_rejected={} virtio_fs_requests={} virtio_fs_rejected={} virtio_fs_handles={} virtio_fs_reset_generation={} pio_reads={} pio_writes={} pio_generation={} pio_requests={} pio_cancels={} pio_marker={} marker={} halted={} lifecycle={} shutdown={} reclaim={}",
+        "[JSR-HWV4-LINUX] linux=true exits={} serial_bytes={} timer_interrupts={} timer_eois={} virtio_rng_requests={} virtio_console_bytes={} virtio_block_requests={} virtio_net_tx_frames={} virtio_net_rx_frames={} virtio_net_backend_tx={} virtio_net_backend_rx={} virtio_net_reset_generation={} virtio_net_rejected={} virtio_fs_requests={} virtio_fs_rejected={} virtio_fs_handles={} virtio_fs_reset_generation={} virtio_gpu_requests={} virtio_gpu_rejected={} virtio_gpu_resources={} virtio_gpu_reset_generation={} pio_reads={} pio_writes={} pio_generation={} pio_requests={} pio_cancels={} pio_marker={} marker={} halted={} lifecycle={} shutdown={} reclaim={}",
         report.exits,
         report.serial_bytes,
         report.timer_interrupts,
@@ -1163,6 +1319,10 @@ fn run_impl(virtio_rng: bool) -> bool {
         devices.fs_rejected,
         devices.fs_backend.handle_count(),
         devices.fs_backend.generation(),
+        devices.gpu_requests,
+        devices.gpu_rejected,
+        devices.gpu_backend.resource_count(),
+        devices.gpu_backend.generation(),
         report.pio_reads,
         report.pio_writes,
         report.pio_probe_generation,
@@ -1239,7 +1399,7 @@ fn prepare(
             pid,
             handle,
             COMMAND_LINE,
-            b"earlyprintk=serial earlycon=uart,io,0x3f8,115200 keep_bootcon ignore_loglevel loglevel=7 nokaslr no_timer_check lpj=1000000 panic=-1 init=/init io_delay=none initcall_blacklist=serial8250_init virtio_mmio.device=0x200@0xd0000000:5 virtio_mmio.device=0x200@0xd0001000:6 virtio_mmio.device=0x200@0xd0002000:3 virtio_mmio.device=0x200@0xd0003000:10 virtio_mmio.device=0x200@0xd0004000:11\0",
+            b"earlyprintk=serial earlycon=uart,io,0x3f8,115200 keep_bootcon ignore_loglevel loglevel=7 nokaslr no_timer_check lpj=1000000 panic=-1 init=/init io_delay=none initcall_blacklist=serial8250_init virtio_mmio.device=0x200@0xd0000000:5 virtio_mmio.device=0x200@0xd0001000:6 virtio_mmio.device=0x200@0xd0002000:3 virtio_mmio.device=0x200@0xd0003000:10 virtio_mmio.device=0x200@0xd0004000:11 virtio_mmio.device=0x200@0xd0005000:12\0",
         )?;
     } else {
         write_bytes(

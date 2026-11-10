@@ -622,6 +622,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jasper-compat-core"
+version = "0.1.0"
+dependencies = [
+ "kernel-core",
+ "linux-raw-sys",
+]
+
+[[package]]
 name = "jasper-kernel"
 version = "0.1.0"
 dependencies = [
