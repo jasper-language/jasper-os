@@ -42,6 +42,8 @@ pub struct SlotRecord {
     release: u64,
     digest: [u8; 32],
     attempts: u8,
+    data_schema_min: u32,
+    data_schema_max: u32,
 }
 
 impl SlotRecord {
@@ -51,6 +53,8 @@ impl SlotRecord {
         release: 0,
         digest: [0; 32],
         attempts: 0,
+        data_schema_min: 0,
+        data_schema_max: 0,
     };
 
     /// 槽状态。Slot state.
@@ -76,6 +80,11 @@ impl SlotRecord {
     /// 已使用的连续启动尝试。Consecutive boot attempts consumed.
     pub const fn attempts(self) -> u8 {
         self.attempts
+    }
+
+    /// 该槽能够读取的数据 Schema 范围。Data-schema range readable by this slot.
+    pub const fn data_schema_range(self) -> (u32, u32) {
+        (self.data_schema_min, self.data_schema_max)
     }
 }
 
@@ -145,12 +154,20 @@ pub enum BootControlError {
     Overflow,
     /// 两代记录声称相同世代但内容不同。Two records claim the same generation with different contents.
     EqualGenerationMismatch,
+    /// 候选槽不能读取升级前的数据 Schema，无法保留安全回滚边界。
+    /// The candidate cannot read the pre-upgrade data schema, so safe rollback is not possible.
+    IncompatibleDataSchema,
+    /// 健康证据不属于当前候选或活动槽。Health evidence does not belong to the active slot or current candidate.
+    UnexpectedHealthEvidence,
+    /// 候选尚未持久消耗试启动预算，不能提交健康结果。
+    /// The candidate has not durably consumed a trial attempt, so health cannot be reported.
+    TrialNotPrepared,
 }
 
 const MAGIC: [u8; 8] = *b"JLC0CTL1";
 const FORMAT_VERSION: u16 = 1;
 const HEADER_BYTES: usize = 56;
-const SLOT_BYTES: usize = 52;
+const SLOT_BYTES: usize = 60;
 const CRC_OFFSET: usize = CONTROL_RECORD_BYTES - 4;
 
 /// 权威启动控制事实。
@@ -191,12 +208,14 @@ impl ControlBlock {
         record.generation = 1;
         record.release = release;
         record.digest = digest;
+        record.data_schema_min = data_schema_min;
+        record.data_schema_max = data_schema_max;
         let mut slots = [SlotRecord::EMPTY; 2];
         slots[slot.index()] = record;
         Ok(Self {
             generation: 1,
             transaction_id,
-            rollback_floor: 0,
+            rollback_floor: release,
             security_epoch,
             data_schema_min,
             data_schema_max,
@@ -286,7 +305,13 @@ impl ControlBlock {
         {
             return Err(BootControlError::RollbackRejected);
         }
-        let record = &mut self.slots[slot.index()];
+        if candidate.data_schema_min > self.data_schema_min
+            || candidate.data_schema_max < self.data_schema_max
+        {
+            return Err(BootControlError::IncompatibleDataSchema);
+        }
+        let mut next = *self;
+        let record = &mut next.slots[slot.index()];
         record.state = SlotState::Candidate;
         record.generation = record
             .generation
@@ -295,34 +320,38 @@ impl ControlBlock {
         record.release = candidate.release;
         record.digest = candidate.digest;
         record.attempts = 0;
-        self.transaction_id = candidate.transaction_id;
-        self.security_epoch = candidate.security_epoch;
-        self.data_schema_min = candidate.data_schema_min;
-        self.data_schema_max = candidate.data_schema_max;
-        self.bump_generation()?;
+        record.data_schema_min = candidate.data_schema_min;
+        record.data_schema_max = candidate.data_schema_max;
+        next.transaction_id = candidate.transaction_id;
+        next.security_epoch = candidate.security_epoch;
+        next.bump_generation()?;
+        *self = next;
         Ok(())
     }
 
     /// 记录启动候选前必须提交的选择；候选预算耗尽时自动回退。
     /// Records a decision that must be committed before boot; an exhausted candidate falls back.
     pub fn prepare_boot(&mut self) -> Result<BootDecision, BootControlError> {
-        if let Some((slot, record)) = self.candidate() {
+        let mut next = *self;
+        if let Some((slot, record)) = next.candidate() {
             if record.attempts < MAX_BOOT_ATTEMPTS {
-                let next = record.attempts + 1;
-                self.slots[slot.index()].attempts = next;
-                self.bump_slot_and_control(slot)?;
+                let attempt = record.attempts + 1;
+                next.slots[slot.index()].attempts = attempt;
+                next.bump_slot_and_control(slot)?;
+                *self = next;
                 return Ok(BootDecision {
                     slot,
-                    attempt: next,
+                    attempt,
                     reason: BootReason::CandidateTrial,
                 });
             }
-            self.slots[slot.index()].state = SlotState::Failed;
-            self.bump_slot_and_control(slot)?;
+            next.slots[slot.index()].state = SlotState::Failed;
+            next.slots[slot.index()].attempts = 0;
+            next.bump_slot_and_control(slot)?;
         }
 
         let mut choice = None;
-        for candidate in self.confirmed().into_iter().flatten() {
+        for candidate in next.confirmed().into_iter().flatten() {
             if candidate.1.attempts >= MAX_BOOT_ATTEMPTS {
                 continue;
             }
@@ -335,12 +364,13 @@ impl ControlBlock {
             }
         }
         let (slot, record) = choice.ok_or(BootControlError::NoSafeSlot)?;
-        let next = record.attempts + 1;
-        self.slots[slot.index()].attempts = next;
-        self.bump_slot_and_control(slot)?;
+        let attempt = record.attempts + 1;
+        next.slots[slot.index()].attempts = attempt;
+        next.bump_slot_and_control(slot)?;
+        *self = next;
         Ok(BootDecision {
             slot,
-            attempt: next,
+            attempt,
             reason: BootReason::ConfirmedRelease,
         })
     }
@@ -349,27 +379,44 @@ impl ControlBlock {
     /// Records the minimum-health result; a passing candidate becomes the new known-good release.
     pub fn report_health(&mut self, slot: Slot, healthy: bool) -> Result<(), BootControlError> {
         let state = self.slots[slot.index()].state;
-        if !matches!(state, SlotState::Candidate | SlotState::Confirmed) {
-            return Err(BootControlError::InvalidSlotState(state));
+        match state {
+            SlotState::Candidate if self.slots[slot.index()].attempts == 0 => {
+                return Err(BootControlError::TrialNotPrepared)
+            }
+            SlotState::Candidate => {}
+            SlotState::Confirmed if self.candidate().is_some() || slot != self.active_slot => {
+                return Err(BootControlError::UnexpectedHealthEvidence)
+            }
+            SlotState::Confirmed => {}
+            _ => return Err(BootControlError::InvalidSlotState(state)),
         }
+        if !healthy && state == SlotState::Confirmed && self.confirmed_count() == 1 {
+            return Err(BootControlError::NoSafeSlot);
+        }
+        let mut next = *self;
         if healthy {
-            let release = self.slots[slot.index()].release;
-            self.slots[slot.index()].state = SlotState::Confirmed;
-            self.slots[slot.index()].attempts = 0;
-            self.rollback_floor = self.rollback_floor.max(release);
-            self.active_slot = slot;
-        } else if state == SlotState::Candidate
-            || self
-                .slots
-                .iter()
-                .filter(|record| record.state == SlotState::Confirmed)
-                .count()
-                > 1
-        {
-            self.slots[slot.index()].state = SlotState::Failed;
-            self.slots[slot.index()].attempts = 0;
+            let release = next.slots[slot.index()].release;
+            if state == SlotState::Candidate {
+                next.slots[slot.index()].state = SlotState::Confirmed;
+                next.active_slot = slot;
+                next.rollback_floor = next.rollback_floor.max(release);
+            }
+            next.slots[slot.index()].attempts = 0;
+        } else {
+            next.slots[slot.index()].state = SlotState::Failed;
+            next.slots[slot.index()].attempts = 0;
+            if state == SlotState::Confirmed {
+                let fallback = next
+                    .confirmed()
+                    .into_iter()
+                    .flatten()
+                    .max_by_key(|(_, record)| record.release)
+                    .ok_or(BootControlError::NoSafeSlot)?;
+                next.active_slot = fallback.0;
+            }
         }
-        self.bump_slot_and_control(slot)?;
+        next.bump_slot_and_control(slot)?;
+        *self = next;
         Ok(())
     }
 
@@ -378,8 +425,8 @@ impl ControlBlock {
         self.find(SlotState::Candidate)
     }
 
-    /// 编码固定的 164 字节控制记录。
-    /// Encodes the fixed 164-byte control record.
+    /// 编码固定的 180 字节控制记录。
+    /// Encodes the fixed 180-byte control record.
     pub fn encode(self) -> [u8; CONTROL_RECORD_BYTES] {
         let mut out = [0u8; CONTROL_RECORD_BYTES];
         out[0..8].copy_from_slice(&MAGIC);
@@ -399,6 +446,8 @@ impl ControlBlock {
             out[at + 4..at + 12].copy_from_slice(&record.generation.to_le_bytes());
             out[at + 12..at + 20].copy_from_slice(&record.release.to_le_bytes());
             out[at + 20..at + 52].copy_from_slice(&record.digest);
+            out[at + 52..at + 56].copy_from_slice(&record.data_schema_min.to_le_bytes());
+            out[at + 56..at + 60].copy_from_slice(&record.data_schema_max.to_le_bytes());
         }
         let crc = crc32fast::hash(&out[..CRC_OFFSET]);
         out[CRC_OFFSET..].copy_from_slice(&crc.to_le_bytes());
@@ -462,6 +511,8 @@ impl ControlBlock {
                 digest: bytes[at + 20..at + 52]
                     .try_into()
                     .map_err(|_| BootControlError::InvalidRecord)?,
+                data_schema_min: read_u32(&bytes[at + 52..at + 56]),
+                data_schema_max: read_u32(&bytes[at + 56..at + 60]),
             };
             if record.attempts > MAX_BOOT_ATTEMPTS {
                 return Err(BootControlError::InvalidRecord);
@@ -470,7 +521,11 @@ impl ControlBlock {
                 if *record != SlotRecord::EMPTY {
                     return Err(BootControlError::InvalidRecord);
                 }
-            } else if record.generation == 0 || record.release == 0 || record.digest == [0; 32] {
+            } else if record.generation == 0
+                || record.release == 0
+                || record.digest == [0; 32]
+                || record.data_schema_min > record.data_schema_max
+            {
                 return Err(BootControlError::InvalidRecord);
             }
         }
@@ -498,6 +553,13 @@ impl ControlBlock {
             return Err(BootControlError::InvalidRecord);
         }
         if block.slots[active_slot.index()].state != SlotState::Confirmed {
+            return Err(BootControlError::InvalidRecord);
+        }
+        if block.slots.iter().any(|record| {
+            matches!(record.state, SlotState::Candidate | SlotState::Confirmed)
+                && (record.data_schema_min > data_schema_min
+                    || record.data_schema_max < data_schema_max)
+        }) {
             return Err(BootControlError::InvalidRecord);
         }
         if let Some((_, candidate)) = block.candidate() {
@@ -540,6 +602,13 @@ impl ControlBlock {
             (self.slots[0].state == SlotState::Confirmed).then_some((Slot::A, self.slots[0])),
             (self.slots[1].state == SlotState::Confirmed).then_some((Slot::B, self.slots[1])),
         ]
+    }
+
+    fn confirmed_count(self) -> usize {
+        self.slots
+            .iter()
+            .filter(|record| record.state == SlotState::Confirmed)
+            .count()
     }
 }
 
@@ -715,7 +784,9 @@ mod tests {
         assert_eq!(block.rollback_floor(), 2);
         assert_eq!(block.active_slot(), Slot::B);
         assert_eq!(block.security_epoch(), 2);
-        assert_eq!(block.data_schema_range(), (1, 2));
+        assert_eq!(block.data_schema_range(), (1, 1));
+        assert_eq!(block.slot(Slot::A).data_schema_range(), (1, 1));
+        assert_eq!(block.slot(Slot::B).data_schema_range(), (1, 2));
         assert_eq!(block.slot(Slot::B).state(), SlotState::Confirmed);
         assert_eq!(ControlBlock::decode(&block.encode()), Ok(block));
         assert_eq!(
@@ -764,6 +835,134 @@ mod tests {
             block.stage_candidate(Slot::A, lower_epoch),
             Err(BootControlError::RollbackRejected)
         );
+    }
+
+    #[test]
+    fn candidate_must_preserve_the_current_data_schema_for_rollback() {
+        let mut block = initial();
+        let incompatible = Candidate {
+            release: 2,
+            digest: digest(2),
+            transaction_id: 2,
+            security_epoch: 2,
+            data_schema_min: 2,
+            data_schema_max: 3,
+        };
+        assert_eq!(
+            block.stage_candidate(Slot::B, incompatible),
+            Err(BootControlError::IncompatibleDataSchema)
+        );
+        assert_eq!(block.data_schema_range(), (1, 1));
+        assert_eq!(block.slot(Slot::B).state(), SlotState::Empty);
+
+        block
+            .stage_candidate(
+                Slot::B,
+                Candidate {
+                    release: 2,
+                    digest: digest(2),
+                    transaction_id: 2,
+                    security_epoch: 2,
+                    data_schema_min: 1,
+                    data_schema_max: 3,
+                },
+            )
+            .unwrap();
+        block.prepare_boot().unwrap();
+        block.report_health(Slot::B, true).unwrap();
+        assert_eq!(block.slot(Slot::A).data_schema_range(), (1, 1));
+        assert_eq!(block.slot(Slot::B).data_schema_range(), (1, 3));
+        assert_eq!(block.data_schema_range(), (1, 1));
+    }
+
+    #[test]
+    fn health_requires_a_prepared_trial_and_rejects_foreign_evidence() {
+        let mut block = initial();
+        stage(&mut block);
+        assert_eq!(
+            block.report_health(Slot::B, true),
+            Err(BootControlError::TrialNotPrepared)
+        );
+        assert_eq!(
+            block.report_health(Slot::A, true),
+            Err(BootControlError::UnexpectedHealthEvidence)
+        );
+        block.prepare_boot().unwrap();
+        block.report_health(Slot::B, true).unwrap();
+        assert_eq!(
+            block.report_health(Slot::A, false),
+            Err(BootControlError::UnexpectedHealthEvidence)
+        );
+        assert_eq!(block.active_slot(), Slot::B);
+    }
+
+    #[test]
+    fn generation_exhaustion_never_leaves_partial_state() {
+        let mut stage_block = initial();
+        stage_block.generation = u64::MAX;
+        let before_stage = stage_block;
+        assert_eq!(
+            stage_block.stage_candidate(
+                Slot::B,
+                Candidate {
+                    release: 2,
+                    digest: digest(2),
+                    transaction_id: 2,
+                    security_epoch: 2,
+                    data_schema_min: 1,
+                    data_schema_max: 1,
+                }
+            ),
+            Err(BootControlError::Overflow)
+        );
+        assert_eq!(stage_block, before_stage);
+
+        let mut prepare_block = initial();
+        stage(&mut prepare_block);
+        prepare_block.generation = u64::MAX;
+        let before_prepare = prepare_block;
+        assert_eq!(
+            prepare_block.prepare_boot(),
+            Err(BootControlError::Overflow)
+        );
+        assert_eq!(prepare_block, before_prepare);
+
+        let mut health_block = initial();
+        stage(&mut health_block);
+        health_block.prepare_boot().unwrap();
+        health_block.generation = u64::MAX;
+        let before_health = health_block;
+        assert_eq!(
+            health_block.report_health(Slot::B, true),
+            Err(BootControlError::Overflow)
+        );
+        assert_eq!(health_block, before_health);
+    }
+
+    #[test]
+    fn sole_confirmed_slot_cannot_be_declared_unhealthy() {
+        let mut block = initial();
+        let before = block;
+        assert_eq!(
+            block.report_health(Slot::A, false),
+            Err(BootControlError::NoSafeSlot)
+        );
+        assert_eq!(block, before);
+    }
+
+    #[test]
+    fn failed_new_release_falls_back_to_the_old_confirmed_slot() {
+        let mut block = initial();
+        stage(&mut block);
+        block.prepare_boot().unwrap();
+        block.report_health(Slot::B, true).unwrap();
+        block.prepare_boot().unwrap();
+        block.report_health(Slot::B, false).unwrap();
+        assert_eq!(block.active_slot(), Slot::A);
+        assert_eq!(block.slot(Slot::A).state(), SlotState::Confirmed);
+        assert_eq!(block.slot(Slot::B).state(), SlotState::Failed);
+        assert_eq!(block.rollback_floor(), 2);
+        assert_eq!(ControlBlock::decode(&block.encode()), Ok(block));
     }
 
     #[test]
@@ -923,5 +1122,56 @@ mod tests {
         assert_eq!(commit(&mut store, &mut local, next), Ok(()));
         assert_eq!(local, next);
         assert_eq!(store.bytes, next.encode());
+    }
+
+    #[test]
+    fn commits_alternate_physical_copies_and_keep_the_prior_generation() {
+        struct Store {
+            copies: [[u8; CONTROL_RECORD_BYTES]; 2],
+            last_written: Option<usize>,
+        }
+        impl ControlIo for Store {
+            fn write_copy(
+                &mut self,
+                copy: usize,
+                bytes: &[u8; CONTROL_RECORD_BYTES],
+            ) -> Result<(), ControlIoError> {
+                self.copies[copy] = *bytes;
+                self.last_written = Some(copy);
+                Ok(())
+            }
+            fn flush(&mut self) -> Result<(), ControlIoError> {
+                Ok(())
+            }
+            fn read_copy(
+                &mut self,
+                copy: usize,
+                out: &mut [u8; CONTROL_RECORD_BYTES],
+            ) -> Result<(), ControlIoError> {
+                *out = self.copies[copy];
+                Ok(())
+            }
+        }
+
+        let old = initial();
+        let mut next = old;
+        stage(&mut next);
+        let mut local = old;
+        let mut store = Store {
+            copies: [old.encode(); 2],
+            last_written: None,
+        };
+        commit(&mut store, &mut local, next).unwrap();
+        assert_eq!(store.last_written, Some(0));
+        assert_eq!(store.copies[1], old.encode());
+        assert_eq!(recover(Some(&store.copies[0]), Some(&store.copies[1])), Ok(next));
+
+        let prior_generation = store.copies[0];
+        let mut newer = local;
+        newer.prepare_boot().unwrap();
+        commit(&mut store, &mut local, newer).unwrap();
+        assert_eq!(store.last_written, Some(1));
+        assert_eq!(store.copies[0], prior_generation);
+        assert_eq!(recover(Some(&store.copies[0]), Some(&store.copies[1])), Ok(newer));
     }
 }

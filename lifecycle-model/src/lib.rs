@@ -15,4 +15,4 @@ pub mod update;
 
 /// 一份启动控制记录的固定线上长度（字节）。
 /// Fixed on-wire size of one boot-control record in bytes.
-pub const CONTROL_RECORD_BYTES: usize = 164;
+pub const CONTROL_RECORD_BYTES: usize = 180;
