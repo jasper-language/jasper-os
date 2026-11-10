@@ -394,6 +394,38 @@ fn configure_dynamic_libc_fixtures() {
         );
         println!("cargo:rustc-env={variable}={}", path.display());
     }
+    if std::env::var_os("CARGO_FEATURE_COMPAT_SIGNAL_VERIFY").is_some() {
+        let variable = "JSR_UBUNTU_SIGNAL";
+        let path = std::env::var_os(variable)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                panic!("compat-signal-verify 需要 {variable} 指向已编译的 Ubuntu signal fixture")
+            });
+        println!("cargo:rerun-if-env-changed={variable}");
+        println!("cargo:rerun-if-changed={}", path.display());
+        let bytes = std::fs::read(&path).unwrap_or_else(|error| {
+            panic!("signal fixture 无法读取：{}（{error}）", path.display())
+        });
+        assert_eq!(&bytes[..4], b"\x7fELF", "signal fixture 不是 ELF");
+        assert_eq!(bytes[4], 2, "signal fixture 必须是 ELF64");
+        assert_eq!(bytes[5], 1, "signal fixture 必须是小端");
+        assert_eq!(
+            fixture_u16(&bytes, 18),
+            Some(62),
+            "signal fixture 必须是 x86_64"
+        );
+        assert_eq!(
+            fixture_u16(&bytes, 16),
+            Some(3),
+            "signal fixture 必须是 ET_DYN"
+        );
+        assert_eq!(
+            dynamic_interpreter(&bytes),
+            Some(b"/lib64/ld-linux-x86-64.so.2".as_slice()),
+            "signal fixture 必须声明未修改的 ld-linux"
+        );
+        println!("cargo:rustc-env={variable}={}", path.display());
+    }
 }
 
 /// Reads one bounded little-endian ELF fixture field.

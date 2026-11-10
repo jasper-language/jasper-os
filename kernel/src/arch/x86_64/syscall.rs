@@ -84,6 +84,7 @@ jsr_syscall_entry:
     push rax
     mov rdi, rsp
     call jsr_syscall_dispatch
+    mov rax, qword ptr [rsp]
     add rsp, 8
     pop rdi
     pop rsi
@@ -106,12 +107,25 @@ extern "C" fn jsr_syscall_dispatch(frame: &mut RawFrame) -> u64 {
         args: [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9],
         user_ip: Some((frame.rcx, frame.user_rsp)),
     };
-    let ret = syscall::on_entry(&args);
+    let outcome = syscall::on_entry(&args);
+    frame.rax = outcome.value as u64;
+    if let Some(user) = outcome.redirect {
+        frame.rax = user.rax;
+        frame.rdi = user.rdi;
+        frame.rsi = user.rsi;
+        frame.rdx = user.rdx;
+        frame.r10 = user.r10;
+        frame.r8 = user.r8;
+        frame.r9 = user.r9;
+        frame.r11 = user.r11;
+        frame.rcx = user.rcx;
+        frame.user_rsp = user.user_rsp;
+    }
     let rip = frame.rcx;
     if ((rip << 16) as i64 >> 16) as u64 != rip {
         fault::on_user_fault(UserFault { kind: UserFaultKind::ProtectionFault, ip: rip, addr: 0 });
     }
-    ret as u64
+    outcome.value as u64
 }
 
 /// 在本处理器上启用 `syscall` 指令、设置入口，并让 IA32_KERNEL_GS_BASE 指向逻辑下标为 `index` 的入口块

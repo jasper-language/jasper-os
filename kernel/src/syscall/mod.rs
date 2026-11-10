@@ -52,6 +52,41 @@ pub struct SyscallArgs {
     pub user_ip: Option<(u64, u64)>,
 }
 
+/// Registers to publish instead of the ordinary syscall return path.
+///
+/// 系统调用返回时用于进入 Linux 信号处理器或恢复被信号打断上下文的寄存器集合。
+#[derive(Debug, Clone, Copy)]
+pub struct UserReturn {
+    pub rax: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rdx: u64,
+    pub r10: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r11: u64,
+    pub rcx: u64,
+    pub user_rsp: u64,
+}
+
+/// One syscall result plus an optional user-context redirect.
+///
+/// 一次系统调用的返回值，以及可选的用户上下文重定向。
+#[derive(Debug, Clone, Copy)]
+pub struct SyscallOutcome {
+    pub value: i64,
+    pub redirect: Option<UserReturn>,
+}
+
+impl SyscallOutcome {
+    pub const fn value(value: i64) -> Self {
+        Self {
+            value,
+            redirect: None,
+        }
+    }
+}
+
 /// 把完整HandleRaw寄存器值解释为不透明句柄（含索引与代次），不截断。
 /// 有效性由规范句柄表校验，布局以kernel_core::object为唯一事实来源。
 /// Interprets a 64-bit register as a handle value without truncation.
@@ -165,13 +200,13 @@ const RECLAIM_BEFORE: [u32; 9] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, S
 ///
 /// 仅当显式装配 Linux 兼容服务且当前进程标为 Linux Profile 时进入兼容分发；
 /// 原生 Profile 在编译期不包含兼容入口。
-pub fn on_entry(a: &SyscallArgs) -> i64 {
+pub fn on_entry(a: &SyscallArgs) -> SyscallOutcome {
     #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
     if proc::current_process().is_some_and(proc::is_linux_process) {
         CALLS.fetch_add(1, Ordering::Relaxed);
         return crate::linux_abi::on_syscall(a);
     }
-    on_syscall(a)
+    SyscallOutcome::value(on_syscall(a))
 }
 
 /// 系统调用入口（arch 调用；可能不返回——`system.task.exit` 会结束当前任务）。

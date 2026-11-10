@@ -16,7 +16,7 @@ use kernel_core::paging::MapFlags;
 
 use crate::mm::user::{copy_from_user, copy_to_user};
 use crate::sync::IrqSpinLock;
-use crate::syscall::{SyscallArgs, CONSOLE_WRITE_MAX};
+use crate::syscall::{SyscallArgs, SyscallOutcome, UserReturn, CONSOLE_WRITE_MAX};
 use crate::{console, proc, sched};
 
 #[cfg(feature = "compat-dynamic-libc-verify")]
@@ -38,6 +38,9 @@ struct LinuxThread {
     robust_list_len: u64,
     rseq: u64,
     rseq_len: u32,
+    /// Standard-signal pending bits for this Linux TID.
+    /// 当前 Linux TID 的标准信号 pending 位图。
+    pending_signals: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -185,6 +188,7 @@ pub(crate) fn register_linux_thread(
             robust_list_len: 0,
             rseq: 0,
             rseq_len: 0,
+            pending_signals: 0,
         });
         tid
     };
@@ -226,6 +230,270 @@ fn linux_tid_for_task(task: crate::task::TaskId) -> Option<(ObjId, u32)> {
         .flatten()
         .find(|entry| entry.task == task)
         .map(|entry| (entry.process, entry.tid))
+}
+
+/// Queues one standard signal on the current Linux thread.
+/// 在当前 Linux 线程上登记一个标准信号。
+fn queue_current_thread_signal(process: ObjId, tid: u32, signal: u32) -> bool {
+    if !(1..=64).contains(&signal) {
+        return false;
+    }
+    let (task, _) = sched::current();
+    let mut state = COMPAT.lock();
+    let Some(entry) = state
+        .threads
+        .iter_mut()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task && entry.tid == tid)
+    else {
+        return false;
+    };
+    entry.pending_signals |= 1u64 << (signal - 1);
+    true
+}
+
+/// Takes the lowest unmasked pending signal for the current thread.
+/// 取出当前线程编号最低且未被屏蔽的 pending 信号。
+fn take_deliverable_signal(process: ObjId) -> Option<u32> {
+    let blocked = proc::linux_signal_mask(process).unwrap_or(u64::MAX);
+    let (task, _) = sched::current();
+    let mut state = COMPAT.lock();
+    let entry = state
+        .threads
+        .iter_mut()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)?;
+    let deliverable = entry.pending_signals & !blocked;
+    if deliverable == 0 {
+        return None;
+    }
+    let index = deliverable.trailing_zeros();
+    let bit = 1u64 << index;
+    entry.pending_signals &= !bit;
+    Some(index + 1)
+}
+
+const SIGNAL_FRAME_BYTES: usize = 8 + 968 + 128;
+const SIGNAL_UC_OFFSET: usize = 8;
+const SIGNAL_UC_GREGS: usize = 40;
+const SIGNAL_UC_SIGMASK: usize = 296;
+const SIGNAL_INFO_OFFSET: usize = SIGNAL_UC_OFFSET + 968;
+
+fn write_frame_u64(frame: &mut [u8], offset: usize, value: u64) {
+    if let Some(field) = frame.get_mut(offset..offset + 8) {
+        field.copy_from_slice(&value.to_le_bytes());
+    }
+}
+
+fn user_register(register: u64) -> bool {
+    let window = crate::arch::USER_WINDOW;
+    let Some(last) = register.checked_sub(1) else {
+        return false;
+    };
+    register < window.1 && last >= window.0
+}
+
+/// Builds the bounded Linux x86_64 signal frame on the interrupted user stack.
+/// 在被打断的用户栈上构造有界 Linux x86_64 信号帧。
+fn build_signal_frame(
+    process: ObjId,
+    signal: u32,
+    args: &SyscallArgs,
+    user_ip: (u64, u64),
+) -> Result<UserReturn, CompatErrno> {
+    const SA_SIGINFO: u64 = 0x0000_0004;
+    const SA_RESTORER: u64 = 0x0400_0000;
+    const SIG_DFL: u64 = 0;
+    const SIG_IGN: u64 = 1;
+    let action = proc::linux_signal_action(process, signal).ok_or(CompatErrno::Invalid)?;
+    let handler = action[0];
+    if handler == SIG_IGN {
+        return Err(CompatErrno::Interrupted);
+    }
+    if handler == SIG_DFL {
+        let _ = proc::begin_exit(process, 128 + i64::from(signal));
+        return Err(CompatErrno::Interrupted);
+    }
+    if action[1] & !(SA_SIGINFO | SA_RESTORER) != 0
+        || !user_register(handler)
+        || !user_register(action[2])
+        || !user_register(user_ip.0)
+        || !user_register(user_ip.1)
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let old_mask = proc::linux_signal_mask(process).ok_or(CompatErrno::Invalid)?;
+    let frame_address = user_ip
+        .1
+        .checked_sub(128 + SIGNAL_FRAME_BYTES as u64)
+        .map(|value| value & !0xf)
+        .filter(|value| {
+            *value >= crate::arch::USER_WINDOW.0
+                && value
+                    .checked_add(SIGNAL_FRAME_BYTES as u64)
+                    .is_some_and(|end| end <= crate::arch::USER_WINDOW.1)
+        })
+        .ok_or(CompatErrno::Fault)?;
+    let info_address = frame_address
+        .checked_add(SIGNAL_INFO_OFFSET as u64)
+        .ok_or(CompatErrno::Fault)?;
+    let context_address = frame_address
+        .checked_add(SIGNAL_UC_OFFSET as u64)
+        .ok_or(CompatErrno::Fault)?;
+    let mut frame = [0u8; SIGNAL_FRAME_BYTES];
+    write_frame_u64(&mut frame, 0, action[2]);
+    let gregs = SIGNAL_UC_OFFSET + SIGNAL_UC_GREGS;
+    write_frame_u64(&mut frame, gregs, args.args[4]);
+    write_frame_u64(&mut frame, gregs + 8, args.args[5]);
+    write_frame_u64(&mut frame, gregs + 16, args.args[3]);
+    write_frame_u64(&mut frame, gregs + 64, args.args[0]);
+    write_frame_u64(&mut frame, gregs + 72, args.args[1]);
+    write_frame_u64(&mut frame, gregs + 96, args.args[2]);
+    write_frame_u64(&mut frame, gregs + 104, 0);
+    write_frame_u64(&mut frame, gregs + 112, 0);
+    write_frame_u64(&mut frame, gregs + 120, user_ip.1);
+    write_frame_u64(&mut frame, gregs + 128, user_ip.0);
+    write_frame_u64(&mut frame, gregs + 136, 0x202);
+    write_frame_u64(&mut frame, SIGNAL_UC_OFFSET + SIGNAL_UC_SIGMASK, old_mask);
+    write_frame_u64(&mut frame, SIGNAL_INFO_OFFSET, u64::from(signal));
+    write_frame_u64(
+        &mut frame,
+        SIGNAL_INFO_OFFSET + 16,
+        u64::from(proc::linux_pid(process).ok_or(CompatErrno::NoProcess)?),
+    );
+    let handler_mask = old_mask | action[3] | (1u64 << (signal - 1));
+    if !proc::set_linux_signal_mask(process, handler_mask) {
+        return Err(CompatErrno::Invalid);
+    }
+    if proc::write(process, frame_address, &frame).is_err() {
+        let _ = proc::set_linux_signal_mask(process, old_mask);
+        return Err(CompatErrno::Fault);
+    }
+    crate::kprintln!(
+        "[JSR-LINUX-SIGNAL] delivered signal={} handler={:#x} frame={:#x} info={:#x} context={:#x}",
+        signal,
+        handler,
+        frame_address,
+        info_address,
+        context_address
+    );
+    Ok(UserReturn {
+        rax: 0,
+        rdi: u64::from(signal),
+        rsi: info_address,
+        rdx: context_address,
+        r10: 0,
+        r8: 0,
+        r9: 0,
+        r11: 0,
+        rcx: handler,
+        user_rsp: frame_address,
+    })
+}
+
+/// Delivers at most one pending signal at a syscall return point.
+/// 在 syscall 返回点最多投递一个 pending 信号。
+fn deliver_pending_signal(
+    process: ObjId,
+    args: &SyscallArgs,
+    user_ip: Option<(u64, u64)>,
+) -> Option<UserReturn> {
+    let signal = take_deliverable_signal(process)?;
+    let action = proc::linux_signal_action(process, signal)?;
+    if action[0] == 1 {
+        crate::kprintln!("[JSR-LINUX-SIGNAL] ignored signal={}", signal);
+        return None;
+    }
+    let user_ip = user_ip?;
+    match build_signal_frame(process, signal, args, user_ip) {
+        Ok(user) => Some(user),
+        Err(error) => {
+            crate::kprintln!(
+                "[JSR-LINUX-SIGNAL] complete=false signal={} error={}",
+                signal,
+                error as i32
+            );
+            let _ = proc::begin_exit(process, 128 + i64::from(signal));
+            None
+        }
+    }
+}
+
+/// Validates and queues a current-thread `tgkill` request.
+/// 校验并在当前线程登记 `tgkill` 请求。
+fn linux_tgkill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+    let tgid = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let tid = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let signal = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if tgid == 0 || tid == 0 || signal > 64 {
+        return Err(CompatErrno::Invalid);
+    }
+    if proc::linux_pid(process) != Some(tgid) || linux_tid(process) != Some(tid) {
+        return Err(CompatErrno::NoProcess);
+    }
+    if signal == 0 {
+        return Ok(());
+    }
+    if matches!(signal, 9 | 19) {
+        return Err(CompatErrno::Invalid);
+    }
+    if queue_current_thread_signal(process, tid, signal) {
+        Ok(())
+    } else {
+        Err(CompatErrno::NoProcess)
+    }
+}
+
+/// Restores the interrupted register and signal-mask context from `rt_sigreturn`.
+/// 从 `rt_sigreturn` 恢复被打断的寄存器和信号屏蔽上下文。
+fn linux_rt_sigreturn(process: ObjId, user_rsp: u64) -> Result<UserReturn, CompatErrno> {
+    if user_rsp < crate::arch::USER_WINDOW.0
+        || user_rsp
+            .checked_add(968)
+            .is_none_or(|end| end > crate::arch::USER_WINDOW.1)
+    {
+        return Err(CompatErrno::Fault);
+    }
+    let mut context = [0u8; 968];
+    proc::read(process, user_rsp, &mut context).map_err(|_| CompatErrno::Fault)?;
+    let greg = |index: usize| {
+        u64::from_le_bytes(
+            context[SIGNAL_UC_GREGS + index * 8..SIGNAL_UC_GREGS + index * 8 + 8]
+                .try_into()
+                .expect("fixed greg field"),
+        )
+    };
+    let rip = greg(16);
+    let rsp = greg(15);
+    if !user_register(rip) || !user_register(rsp) {
+        return Err(CompatErrno::Fault);
+    }
+    let old_mask = u64::from_le_bytes(
+        context[SIGNAL_UC_SIGMASK..SIGNAL_UC_SIGMASK + 8]
+            .try_into()
+            .expect("fixed signal-mask field"),
+    );
+    if !proc::set_linux_signal_mask(process, old_mask) {
+        return Err(CompatErrno::Invalid);
+    }
+    crate::kprintln!(
+        "[JSR-LINUX-SIGNAL] restored rip={:#x} rsp={:#x} mask={:#x}",
+        rip,
+        rsp,
+        old_mask
+    );
+    Ok(UserReturn {
+        rax: greg(13),
+        rdi: greg(8),
+        rsi: greg(9),
+        rdx: greg(12),
+        r10: greg(2),
+        r8: greg(0),
+        r9: greg(1),
+        r11: greg(3),
+        rcx: rip,
+        user_rsp: rsp,
+    })
 }
 
 fn set_clear_child_tid(process: ObjId, address: u64) -> Option<u32> {
@@ -518,25 +786,42 @@ fn futex_timeout(pointer: u64, realtime: bool) -> Result<Option<u64>, CompatErrn
 ///
 /// 执行当前 Linux flavor 进程的一次 syscall；未映射调用返回 `ENOSYS`，未授权调用
 /// 返回 `EPERM`，所有错误使用 Linux 负 errno 返回约定。
-pub fn on_syscall(a: &SyscallArgs) -> i64 {
+pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
     if proc::current_exiting() {
         proc::thread_exit(0, "killed linux process");
     }
     #[cfg(feature = "compat-dynamic-libc-verify")]
     trace_request(a);
     let Some(pid) = proc::current_process() else {
-        return -i64::from(CompatErrno::NoSys as i32);
+        return SyscallOutcome::value(-i64::from(CompatErrno::NoSys as i32));
     };
     let SyscallDispatch::Mapped(call) = dispatch(SyscallRequest {
         number: a.id,
         args: a.args,
     }) else {
-        return -i64::from(CompatErrno::NoSys as i32);
+        return SyscallOutcome::value(-i64::from(CompatErrno::NoSys as i32));
     };
     if !proc::linux_syscall_allowed(pid, call.syscall) {
-        return -i64::from(CompatErrno::Perm as i32);
+        return SyscallOutcome::value(-i64::from(CompatErrno::Perm as i32));
     }
-    execute(pid, call, a.user_ip)
+    if call.syscall == LinuxSyscall::RtSigReturn {
+        let Some((_, user_rsp)) = a.user_ip else {
+            return SyscallOutcome::value(-i64::from(CompatErrno::Fault as i32));
+        };
+        return match linux_rt_sigreturn(pid, user_rsp) {
+            Ok(user) => SyscallOutcome {
+                value: 0,
+                redirect: Some(user),
+            },
+            Err(error) => SyscallOutcome::value(-i64::from(error as i32)),
+        };
+    }
+    let value = execute(pid, call, a.user_ip);
+    let redirect = deliver_pending_signal(pid, a, a.user_ip);
+    if proc::current_exiting() {
+        proc::thread_exit(0, "linux signal default action");
+    }
+    SyscallOutcome { value, redirect }
 }
 
 fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
@@ -565,6 +850,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::ClockGettime => compat_result(linux_clock_gettime(call.args)),
         LinuxSyscall::RtSigAction => compat_result(linux_rt_sigaction(pid, call.args)),
         LinuxSyscall::RtSigProcMask => compat_result(linux_rt_sigprocmask(pid, call.args)),
+        LinuxSyscall::Tgkill => compat_result(linux_tgkill(pid, call.args).map(|()| 0)),
         LinuxSyscall::GetPid => proc::linux_pid(pid)
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)

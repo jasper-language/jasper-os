@@ -24,6 +24,8 @@ static GETCONF: &[u8] = include_bytes!(env!("JSR_UBUNTU_GETCONF"));
 static PRINTF: &[u8] = include_bytes!(env!("JSR_UBUNTU_PRINTF"));
 #[cfg(feature = "compat-pthread-verify")]
 static PTHREAD: &[u8] = include_bytes!(env!("JSR_UBUNTU_PTHREAD"));
+#[cfg(feature = "compat-signal-verify")]
+static SIGNAL: &[u8] = include_bytes!(env!("JSR_UBUNTU_SIGNAL"));
 static INTERPRETER: &[u8] = include_bytes!(env!("JSR_UBUNTU_LD_LINUX"));
 static FAILED: AtomicU32 = AtomicU32::new(0);
 
@@ -91,6 +93,8 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::ClockGettime,
         LinuxSyscall::RtSigAction,
         LinuxSyscall::RtSigProcMask,
+        LinuxSyscall::RtSigReturn,
+        LinuxSyscall::Tgkill,
         LinuxSyscall::Mmap,
         LinuxSyscall::Munmap,
         LinuxSyscall::Mprotect,
@@ -211,14 +215,49 @@ pub fn run() {
         result
     };
 
+    #[cfg(feature = "compat-signal-verify")]
+    let signal_result = {
+        let signal_argv: [&[u8]; 1] = [b"/usr/bin/jasper-signal-basic"];
+        let signal_baseline = free_frames();
+        let result = run_program(
+            "ubuntu-dynamic-signal",
+            SIGNAL,
+            &signal_argv,
+            signal_baseline,
+            true,
+        );
+        kprintln!(
+            "[JSR-COMPAT-SIGNAL] fixture=ubuntu-x86_64 executable=signal-basic mapped={} entry=interpreter true interpreter_syscalls={} syscall_delta={} exit_zero={} resources={} failed={}",
+            result.mapped,
+            result.interpreter_entered,
+            result.syscalls,
+            result.exited_zero,
+            result.resources,
+            failed()
+        );
+        result
+    };
+
     let frames_after = free_frames();
-    let resources = true_result.resources && getconf_result.resources && printf_result.resources
+    let resources = true_result.resources
+        && getconf_result.resources
+        && printf_result.resources
         && {
             #[cfg(feature = "compat-pthread-verify")]
             {
                 pthread_result.resources && pthread_result.exited_zero
             }
             #[cfg(not(feature = "compat-pthread-verify"))]
+            {
+                true
+            }
+        }
+        && {
+            #[cfg(feature = "compat-signal-verify")]
+            {
+                signal_result.resources && signal_result.exited_zero
+            }
+            #[cfg(not(feature = "compat-signal-verify"))]
             {
                 true
             }

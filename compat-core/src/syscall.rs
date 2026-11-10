@@ -1,15 +1,14 @@
 //! Linux x86_64 syscall identification mapped to Jasper compatibility operations.
 
 use linux_raw_sys::general::{
-    __NR_access, __NR_arch_prctl, __NR_brk, __NR_clock_gettime, __NR_clone, __NR_clone3, __NR_close,
-    __NR_epoll_create1, __NR_epoll_ctl, __NR_epoll_pwait, __NR_epoll_pwait2, __NR_epoll_wait,
-    __NR_execve, __NR_exit, __NR_exit_group, __NR_fcntl, __NR_fstat, __NR_futex, __NR_getpid,
-    __NR_getppid, __NR_getrandom, __NR_gettid, __NR_io_uring_enter, __NR_io_uring_register,
-    __NR_io_uring_setup,
-    __NR_madvise, __NR_mmap, __NR_mprotect, __NR_munmap, __NR_newfstatat, __NR_openat, __NR_poll,
-    __NR_pread64, __NR_prlimit64, __NR_read, __NR_readlink, __NR_rseq, __NR_rt_sigaction,
-    __NR_rt_sigprocmask, __NR_set_robust_list, __NR_set_tid_address, __NR_statfs, __NR_write,
-    __NR_writev,
+    __NR_access, __NR_arch_prctl, __NR_brk, __NR_clock_gettime, __NR_clone, __NR_clone3,
+    __NR_close, __NR_epoll_create1, __NR_epoll_ctl, __NR_epoll_pwait, __NR_epoll_pwait2,
+    __NR_epoll_wait, __NR_execve, __NR_exit, __NR_exit_group, __NR_fcntl, __NR_fstat, __NR_futex,
+    __NR_getpid, __NR_getppid, __NR_getrandom, __NR_gettid, __NR_io_uring_enter,
+    __NR_io_uring_register, __NR_io_uring_setup, __NR_madvise, __NR_mmap, __NR_mprotect,
+    __NR_munmap, __NR_newfstatat, __NR_openat, __NR_poll, __NR_pread64, __NR_prlimit64, __NR_read,
+    __NR_readlink, __NR_rseq, __NR_rt_sigaction, __NR_rt_sigprocmask, __NR_rt_sigreturn,
+    __NR_set_robust_list, __NR_set_tid_address, __NR_statfs, __NR_tgkill, __NR_write, __NR_writev,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +50,8 @@ pub enum LinuxSyscall {
     Futex,
     RtSigAction,
     RtSigProcMask,
+    RtSigReturn,
+    Tgkill,
     EpollCreate1,
     EpollCtl,
     EpollWait,
@@ -127,6 +128,7 @@ pub enum SyscallDispatch {
 pub enum CompatErrno {
     Perm = linux_raw_sys::errno::EPERM,
     NoEntry = linux_raw_sys::errno::ENOENT,
+    NoProcess = linux_raw_sys::errno::ESRCH,
     Interrupted = linux_raw_sys::errno::EINTR,
     BadFd = linux_raw_sys::errno::EBADF,
     TryAgain = linux_raw_sys::errno::EAGAIN,
@@ -186,6 +188,8 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_futex) => LinuxSyscall::Futex,
         value if value == u64::from(__NR_rt_sigaction) => LinuxSyscall::RtSigAction,
         value if value == u64::from(__NR_rt_sigprocmask) => LinuxSyscall::RtSigProcMask,
+        value if value == u64::from(__NR_rt_sigreturn) => LinuxSyscall::RtSigReturn,
+        value if value == u64::from(__NR_tgkill) => LinuxSyscall::Tgkill,
         value if value == u64::from(__NR_epoll_create1) => LinuxSyscall::EpollCreate1,
         value if value == u64::from(__NR_epoll_ctl) => LinuxSyscall::EpollCtl,
         value if value == u64::from(__NR_epoll_wait) => LinuxSyscall::EpollWait,
@@ -243,6 +247,8 @@ mod tests {
             (__NR_gettid, LinuxSyscall::GetTid),
             (__NR_getrandom, LinuxSyscall::GetRandom),
             (__NR_futex, LinuxSyscall::Futex),
+            (__NR_tgkill, LinuxSyscall::Tgkill),
+            (__NR_rt_sigreturn, LinuxSyscall::RtSigReturn),
             (__NR_epoll_wait, LinuxSyscall::EpollWait),
             (__NR_epoll_pwait, LinuxSyscall::EpollPWait),
             (__NR_epoll_pwait2, LinuxSyscall::EpollPWait2),
