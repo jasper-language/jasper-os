@@ -12,6 +12,21 @@ trap 'rm -f "$manifest" "$manifest_after"' EXIT
 manifest_inputs() {
     find kernel-core kernel lifecycle-model abi user verification tools/krn1 .cargo -type d \( -name __pycache__ -o -name target -o -name corpus -o -name artifacts \) -prune -o -type f -print0 | sort -z | xargs -0 sha256sum
     sha256sum Cargo.toml Cargo.lock rust-toolchain.toml
+    # The public code-only export intentionally omits planning documents and checks.
+    # Hash and run those inputs only when the private planning tree is present.
+    planning_inputs=(
+      scripts/check-issue21-lc0.py
+      scripts/check-issue21-lifecycle.py
+      scripts/check-milestone-dag.py
+      docs/issue-21-lifecycle-reliability.md
+      docs/ISSUE-21-LC0-status.md
+      milestones/unified-dag.toml
+    )
+    existing_inputs=()
+    for path in "${planning_inputs[@]}"; do
+        [[ -f "$path" ]] && existing_inputs+=("$path")
+    done
+    ((${#existing_inputs[@]} == 0)) || sha256sum "${existing_inputs[@]}"
 }
 manifest_inputs > "$manifest"
 key=$(sha256sum "$manifest" | cut -d' ' -f1)
@@ -26,6 +41,12 @@ cp "$manifest" "$run/inputs.sha256"
 rm -f "$run/PASS"
 {
     date -u +%FT%TZ
+    if [[ -f scripts/check-issue21-lc0.py && -f scripts/check-issue21-lifecycle.py \
+          && -f scripts/check-milestone-dag.py ]]; then
+        python3 scripts/check-issue21-lc0.py
+        python3 scripts/check-issue21-lifecycle.py
+        python3 scripts/check-milestone-dag.py
+    fi
     cargo test --locked -p jasper-lifecycle-model
     cargo test --manifest-path verification/toolbox/Cargo.toml --locked
     bash verification/toolbox/run-negative-transfer.sh
