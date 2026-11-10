@@ -12,7 +12,8 @@ use kernel_core::hwvirt::Backend;
 use kernel_core::hwvirt_vcpu::VcpuState;
 use kernel_core::hwvirt_vmm::VmExitEvent;
 use kernel_core::pio::{
-    PioAccess, PioDirection, PioError, PioProbe, PioWidth, PortMap, PIO_PROBE_BASE,
+    PioAccess, PioDirection, PioError, PioProbe, PioWidth, PortMap, PIO_COMMAND_RESET,
+    PIO_PROBE_BASE,
 };
 
 use crate::kprintln;
@@ -1330,9 +1331,6 @@ impl LinuxRuntime {
 
     fn pio_in(&mut self, port: u16, width: PioWidth) -> Result<u64, PioError> {
         let token = self.pio_map.route(port).ok_or(PioError::UnmappedPort)?;
-        if !crate::hwv5_policy::pio_read() {
-            return Err(PioError::NotReady);
-        }
         let value = match token {
             PIO_UART => {
                 byte_width(width)?;
@@ -1403,9 +1401,6 @@ impl LinuxRuntime {
 
     fn pio_out(&mut self, port: u16, width: PioWidth, value: u64) -> Result<(), PioError> {
         let token = self.pio_map.route(port).ok_or(PioError::UnmappedPort)?;
-        if !crate::hwv5_policy::pio_write() {
-            return Err(PioError::NotReady);
-        }
         match token {
             PIO_UART => {
                 byte_width(width)?;
@@ -1527,6 +1522,10 @@ pub struct VmxVm {
     guest: GuestExecutionState,
     gprs: [u64; 16],
     pending_interrupt: Option<u8>,
+    /// PIO security generation captured when this VM execution context starts.
+    ///
+    /// 设备面复位后旧上下文保留失效租约，下一次 I/O 必须失败关闭。
+    pio_lease: Option<crate::hwv5_policy::Hwv5Lease>,
     launched: bool,
     active: bool,
 }
@@ -1618,6 +1617,7 @@ impl VmxVm {
             guest,
             gprs,
             pending_interrupt: None,
+            pio_lease: crate::hwv5_policy::lease(crate::hwv5_policy::Hwv5Surface::Pio),
             launched: false,
             active: true,
         })
@@ -2225,6 +2225,13 @@ impl VmxVm {
         linux.last_pio_port = access.port;
         linux.last_pio_qualification = qualification;
         linux.last_pio_width = access.width.bytes();
+        let allowed = match access.direction {
+            PioDirection::In => crate::hwv5_policy::pio_read_at(self.pio_lease),
+            PioDirection::Out => crate::hwv5_policy::pio_write_at(self.pio_lease),
+        };
+        if !allowed {
+            return Err(PioError::NotReady);
+        }
         match access.direction {
             PioDirection::In => {
                 let value = linux.pio_in(access.port, access.width)?;
@@ -2233,6 +2240,18 @@ impl VmxVm {
             PioDirection::Out => {
                 linux.pio_out(access.port, access.width, access.value)?;
             }
+        }
+        // JPIO reset advances the device generation. Only this active context
+        // adopts the replacement lease; another stale VM context remains
+        // bound to the revoked generation.
+        if access.direction == PioDirection::Out
+            && access.port == PIO_PROBE_BASE + 8
+            && access.value == u64::from(PIO_COMMAND_RESET)
+        {
+            self.pio_lease = Some(
+                crate::hwv5_policy::rotate_surface(crate::hwv5_policy::Hwv5Surface::Pio)
+                    .ok_or(PioError::NotReady)?,
+            );
         }
         Ok(())
     }

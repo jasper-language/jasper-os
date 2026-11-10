@@ -32,7 +32,7 @@ pub mod hwv3_demo;
 pub mod hwv4_demo;
 #[cfg(feature = "hwv4-linux")]
 pub mod linux_guest;
-#[cfg(feature = "hwv5-verify")]
+#[cfg(any(feature = "hwv5-verify", feature = "hwv5-prod-verify"))]
 pub mod hwv5_demo;
 mod paging;
 mod gdt;

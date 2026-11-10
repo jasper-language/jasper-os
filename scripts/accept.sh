@@ -88,6 +88,7 @@ esac
 [ "${JASPER_CHECKS:-}" = "sec6" ] && KFEAT+=(--features sec6-verify)
 [ "${JASPER_CHECKS:-}" = "net2" ] && KFEAT+=(--features net2-verify)
 [ "${JASPER_CHECKS:-}" = "net3" ] && KFEAT+=(--features net3-verify)
+[ "${JASPER_CHECKS:-}" = "hwv5-prod" ] && KFEAT+=(--features hwv5-prod-verify)
 HWV4_FEAT=()
 if [ -n "${JSR_LINUX_GUEST_HEADER:-}" ] && [ -n "${JSR_LINUX_GUEST_KERNEL:-}" ]; then
   if [ ! -s "$JSR_LINUX_GUEST_HEADER" ] || [ ! -s "$JSR_LINUX_GUEST_KERNEL" ]; then
@@ -96,7 +97,7 @@ if [ -n "${JSR_LINUX_GUEST_HEADER:-}" ] && [ -n "${JSR_LINUX_GUEST_KERNEL:-}" ];
   fi
   if [ "${JASPER_CHECKS:-}" = "hwv5" ]; then
     HWV4_FEAT=(--features hwv5-verify)
-  elif [ "${JASPER_CHECKS:-}" = "drv3" ]; then
+  elif [ "${JASPER_CHECKS:-}" = "drv3" ] || [ "${JASPER_CHECKS:-}" = "hwv5-prod" ]; then
     HWV4_FEAT=()
   else
     HWV4_FEAT=(--features hwv4-linux)
@@ -2767,6 +2768,12 @@ check_hwv4() {
 }
 
 check_hwv5() {
+  if has '\[JSR-HWV5-PROD\] matrix=pio,net,fs,vmm stale=denied rotation=true rotations=[1-9][0-9]*' \
+     && ! has '^\[JSR-HWV5-PROD-FAIL\]'; then
+    record HWV-5-PROD PASS "PIO、virtio-net、virtio-fs 与 VMM 的生产策略 rotate 路径通过：活动世代允许，旧租约被拒绝，只安装严格更新的世代；真实网络/FUSE 设备后端仍由独立 guest 门验收"
+  else
+    record HWV-5-PROD FAIL "缺少统一 PEP 活动租约、旧租约拒绝或生产 rotate 新世代证据"
+  fi
   if has '\[JSR-LINUX-GUEST\] init=true arch=x86_64 syscall=true' \
      && has '\[JSR-VIRTIO\] device=rng ok=true' \
      && has '\[JSR-VIRTIO\] device=console ok=true' \
@@ -2788,6 +2795,16 @@ check_hwv5() {
     record HWV-5-PIO PASS "真实 Linux 用户态经 ioperm/in/out 发现并驱动 PIO 探针：ping、reset 世代推进、pending 与 cancel 状态、只读寄存器拒绝和失败原子性通过；UART/PIC/PIT/i8042 经同一端口映射路由；MMIO/PIO 路径分离，宿主内存与对象资源回基线"
   else
     record HWV-5-PIO FAIL "缺少真实 guest PIO 发现/复位/取消合同、MMIO 边界或资源回基线"
+  fi
+}
+
+check_hwv5_prod() {
+  if has '\[JSR-HWV5-PROD\] matrix=pio,net,fs,vmm stale=denied rotation=true rotations=[1-9][0-9]*' \
+     && has '\[JSR-HWV5-PROD\] backend=pio,net,fs,vmm runtime=true policy=true vmm=not-run linux=not-run policy_allowed=[1-9][0-9]* policy_denied=[1-9][0-9]* policy_overflow=0 failed=0' \
+     && ! has '^\[JSR-HWV5-PROD-FAIL\]'; then
+    record HWV-5-PROD PASS "真实 Jasper QEMU 运行中，PIO、网络、文件与 VMM 四个生产策略适配器均执行 rotate：旧租约被拒绝，新世代恢复，审计无溢出；该专项不启动 VMM/Linux 设备后端"
+  else
+    record HWV-5-PROD FAIL "缺少生产 rotate 矩阵、旧租约拒绝、新世代恢复或审计失败关闭证据"
   fi
 }
 
@@ -2982,6 +2999,7 @@ if [ "$SPOT" -eq 1 ]; then
     [ "$c" = "jaso1_multi" ] && continue
     checker="check_$c"
     [ "$c" = "fs0-journal" ] && checker="check_fs0"
+    [ "$c" = "hwv5-prod" ] && checker="check_hwv5_prod"
     if declare -F "$checker" >/dev/null; then "$checker"; else record "$c" FAIL "定点验收：没有名为 check_$c 的检查"; fi
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then

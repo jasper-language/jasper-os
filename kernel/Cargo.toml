@@ -54,6 +54,8 @@ hwv4-verify = []
 hwv4-linux = ["hwv4-verify"]
 # HWV-5 guest-facing virtio-MMIO devices and minimal Linux acceptance.
 hwv5-verify = ["hwv4-linux", "user-programs"]
+# Production PEP/runtime lease drill without network/FUSE Linux artifacts.
+hwv5-prod-verify = []
 # JASO-1 multi-image and source-envelope acceptance only.
 jaso1-verify = []
 # DRV-3 DMA mapping lifecycle drill.

@@ -41,7 +41,7 @@ pub use self::x86_64::hwv2_demo;
 pub use self::x86_64::hwv3_demo;
 #[cfg(target_arch = "x86_64")]
 pub use self::x86_64::hwv4_demo;
-#[cfg(feature = "hwv5-verify")]
+#[cfg(any(feature = "hwv5-verify", feature = "hwv5-prod-verify"))]
 pub use self::x86_64::hwv5_demo;
 
 /// Hardware second-level paging is only defined for the x86 VMX/SVM

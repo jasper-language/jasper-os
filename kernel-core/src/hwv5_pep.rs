@@ -203,16 +203,14 @@ impl<const RESOURCES: usize, const DELEGATIONS: usize, const AUDIT: usize>
     }
 
     /// Rebind an existing opaque object to a newer incarnation. Repeating the
-    /// same active generation is idempotent; stale delegations are removed.
+    /// exact same active resource is idempotent; any other change requires a
+    /// strictly newer generation. Stale delegations are removed on renewal.
     pub fn renew(&mut self, resource: Hwv5Resource) -> Result<(), Hwv5PepError> {
-        if !self
-            .resources
-            .iter()
-            .flatten()
-            .any(|binding| binding.resource.object == resource.object)
-        {
+        let Some(slot) = self.resources.iter().position(|binding| {
+            binding.is_some_and(|binding| binding.resource.object == resource.object)
+        }) else {
             return self.register(resource);
-        }
+        };
         if resource.object == 0
             || resource.generation == 0
             || resource.rights == 0
@@ -222,19 +220,33 @@ impl<const RESOURCES: usize, const DELEGATIONS: usize, const AUDIT: usize>
         {
             return Err(Hwv5PepError::InvalidResource);
         }
-        let binding = self
-            .resources
-            .iter_mut()
-            .flatten()
-            .find(|binding| binding.resource.object == resource.object)
+        let binding = self.resources[slot]
+            .as_mut()
             .ok_or(Hwv5PepError::InvalidResource)?;
-        if binding.active
-            && binding.resource.generation == resource.generation
-            && binding.resource == resource
+        if binding.resource.owner != resource.owner || binding.resource.surface != resource.surface
         {
-            return Ok(());
+            return Err(Hwv5PepError::InvalidResource);
         }
-        binding.epoch = binding.epoch.saturating_add(1);
+        if binding.active && binding.resource.generation == resource.generation {
+            return if binding.resource == resource {
+                Ok(())
+            } else {
+                // 同代资源不得通过续租扩展 Rights 或更改安全标签。
+                // A live generation cannot gain Rights or change labels through renewal.
+                Err(Hwv5PepError::InvalidResource)
+            };
+        }
+        // 已撤销对象只能以严格更新的世代重新登记；设备面和所有者属于
+        // 不可替换的安全身份，不能借 renew 漂移到另一类资源。
+        // A revoked object must advance its generation and cannot change its
+        // security identity through renewal.
+        if resource.generation < binding.resource.generation
+            || (!binding.active && resource.generation == binding.resource.generation)
+        {
+            return Err(Hwv5PepError::InvalidResource);
+        }
+        let next_epoch = binding.epoch.checked_add(1).ok_or(Hwv5PepError::Capacity)?;
+        binding.epoch = next_epoch;
         binding.resource = resource;
         binding.active = true;
         for delegation in &mut self.delegations {
@@ -333,8 +345,9 @@ impl<const RESOURCES: usize, const DELEGATIONS: usize, const AUDIT: usize>
             .flatten()
             .find(|binding| binding.active && binding.resource.object == object)
             .ok_or(Hwv5PepError::InvalidResource)?;
+        let next_epoch = binding.epoch.checked_add(1).ok_or(Hwv5PepError::Capacity)?;
         binding.active = false;
-        binding.epoch = binding.epoch.checked_add(1).ok_or(Hwv5PepError::Capacity)?;
+        binding.epoch = next_epoch;
         let mut removed = 0;
         for delegation in &mut self.delegations {
             if delegation.is_some_and(|delegation| delegation.object == object) {
@@ -345,13 +358,26 @@ impl<const RESOURCES: usize, const DELEGATIONS: usize, const AUDIT: usize>
         Ok(removed)
     }
 
-    pub fn reset_surface(&mut self, surface: Hwv5Surface) -> usize {
-        let mut revoked = 0;
+    /// 原子撤销一个设备面的全部活动对象。
+    ///
+    /// Atomically revokes every active object on one device surface. The
+    /// validation pass completes before any state changes, so epoch exhaustion
+    /// cannot leave a partially reset surface.
+    pub fn reset_surface(&mut self, surface: Hwv5Surface) -> Result<usize, Hwv5PepError> {
+        let mut revoked = 0usize;
+        for binding in self.resources.iter().flatten() {
+            if binding.active && binding.resource.surface == surface {
+                binding.epoch.checked_add(1).ok_or(Hwv5PepError::Capacity)?;
+                revoked += 1;
+            }
+        }
         for binding in self.resources.iter_mut().flatten() {
             if binding.active && binding.resource.surface == surface {
                 binding.active = false;
-                binding.epoch = binding.epoch.saturating_add(1);
-                revoked += 1;
+                binding.epoch = binding
+                    .epoch
+                    .checked_add(1)
+                    .expect("reset epochs validated in the first pass");
             }
         }
         for delegation in &mut self.delegations {
@@ -365,7 +391,29 @@ impl<const RESOURCES: usize, const DELEGATIONS: usize, const AUDIT: usize>
                 *delegation = None;
             }
         }
-        revoked
+        Ok(revoked)
+    }
+
+    /// Return the last registered generation even when the object is revoked.
+    ///
+    /// 仅用于内核生成下一次安全世代；授权仍要求对象处于活动状态。
+    pub fn registered_generation(&self, object: u64) -> Option<u32> {
+        self.resources
+            .iter()
+            .flatten()
+            .find(|binding| binding.resource.object == object)
+            .map(|binding| binding.resource.generation)
+    }
+
+    /// Return the active generation or `None` after revocation.
+    ///
+    /// 撤销后的旧租约不能借由该查询重新获得访问资格。
+    pub fn active_generation(&self, object: u64) -> Option<u32> {
+        self.resources
+            .iter()
+            .flatten()
+            .find(|binding| binding.active && binding.resource.object == object)
+            .map(|binding| binding.resource.generation)
     }
 
     pub fn active_resources(&self) -> usize {
@@ -663,7 +711,7 @@ mod tests {
         let mut pep = Hwv5Pep::<4, 4, 16>::new();
         pep.register(resource(50, owner, Hwv5Surface::Pio)).unwrap();
         pep.register(resource(51, owner, Hwv5Surface::Net)).unwrap();
-        assert_eq!(pep.reset_surface(Hwv5Surface::Pio), 1);
+        assert_eq!(pep.reset_surface(Hwv5Surface::Pio), Ok(1));
         assert_eq!(pep.active_resources(), 1);
         assert_eq!(
             pep.authorize(
@@ -718,6 +766,102 @@ mod tests {
                 }
             ),
             Ok(Hwv5Decision::Denied(Hwv5Deny::DomainDelegation))
+        );
+    }
+
+    #[test]
+    fn renew_requires_monotonic_generation_and_stable_identity() {
+        let owner = domain(1);
+        let mut pep = Hwv5Pep::<2, 2, 16>::new();
+        pep.register(resource(70, owner, Hwv5Surface::Net)).unwrap();
+        assert_eq!(pep.revoke(70), Ok(0));
+        assert_eq!(pep.active_generation(70), None);
+        assert_eq!(pep.registered_generation(70), Some(1));
+
+        assert_eq!(
+            pep.renew(resource(70, owner, Hwv5Surface::Net)),
+            Err(Hwv5PepError::InvalidResource)
+        );
+        assert_eq!(
+            pep.renew(Hwv5Resource {
+                surface: Hwv5Surface::Fs,
+                ..resource(70, owner, Hwv5Surface::Fs)
+            }),
+            Err(Hwv5PepError::InvalidResource)
+        );
+        assert_eq!(
+            pep.renew(Hwv5Resource {
+                owner: domain(2),
+                generation: 2,
+                ..resource(70, owner, Hwv5Surface::Net)
+            }),
+            Err(Hwv5PepError::InvalidResource)
+        );
+        assert_eq!(pep.active_generation(70), None);
+
+        let next = Hwv5Resource {
+            generation: 2,
+            ..resource(70, owner, Hwv5Surface::Net)
+        };
+        pep.renew(next).unwrap();
+        assert_eq!(pep.active_generation(70), Some(2));
+    }
+
+    #[test]
+    fn active_renewal_cannot_expand_rights_in_the_same_generation() {
+        let owner = domain(1);
+        let mut original = resource(75, owner, Hwv5Surface::Net);
+        original.rights = READ;
+        let mut pep = Hwv5Pep::<1, 1, 8>::new();
+        pep.register(original).unwrap();
+
+        assert_eq!(
+            pep.renew(Hwv5Resource {
+                rights: READ | WRITE,
+                ..original
+            }),
+            Err(Hwv5PepError::InvalidResource)
+        );
+        assert_eq!(pep.active_generation(75), Some(1));
+        assert_eq!(
+            pep.authorize(
+                subject(owner, IdentityClass::Device),
+                Hwv5Request {
+                    object: 75,
+                    generation: 1,
+                    surface: Hwv5Surface::Net,
+                    rights: WRITE,
+                    effect: Hwv5Effect::Write,
+                }
+            ),
+            Ok(Hwv5Decision::Denied(Hwv5Deny::Rights))
+        );
+    }
+
+    #[test]
+    fn epoch_exhaustion_never_partially_mutates_revocation() {
+        let owner = domain(1);
+        let mut pep = Hwv5Pep::<2, 2, 16>::new();
+        pep.register(resource(80, owner, Hwv5Surface::Pio)).unwrap();
+        pep.register(resource(81, owner, Hwv5Surface::Pio)).unwrap();
+        pep.resources[0]
+            .as_mut()
+            .expect("registered resource")
+            .epoch = u64::MAX;
+
+        assert_eq!(pep.revoke(80), Err(Hwv5PepError::Capacity));
+        assert_eq!(pep.active_resources(), 2);
+        assert_eq!(
+            pep.reset_surface(Hwv5Surface::Pio),
+            Err(Hwv5PepError::Capacity)
+        );
+        assert_eq!(pep.active_resources(), 2);
+        assert_eq!(
+            pep.resources[1]
+                .as_ref()
+                .expect("registered resource")
+                .epoch,
+            1
         );
     }
 }

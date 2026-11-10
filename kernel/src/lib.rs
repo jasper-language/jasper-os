@@ -116,7 +116,10 @@ pub mod bench_demo;
 pub mod blk;
 #[cfg(target_arch = "x86_64")]
 pub mod blk1_demo;
-#[cfg(all(target_arch = "x86_64", feature = "hwv5-verify"))]
+#[cfg(all(
+    target_arch = "x86_64",
+    any(feature = "hwv5-verify", feature = "hwv5-prod-verify")
+))]
 pub mod hwv5_vmm_demo;
 #[cfg(target_arch = "x86_64")]
 pub mod hwv5_policy;
@@ -169,7 +172,10 @@ pub use arch::hwv2_demo;
 pub use arch::hwv3_demo;
 #[cfg(target_arch = "x86_64")]
 pub use arch::hwv4_demo;
-#[cfg(all(target_arch = "x86_64", feature = "hwv5-verify"))]
+#[cfg(all(
+    target_arch = "x86_64",
+    any(feature = "hwv5-verify", feature = "hwv5-prod-verify")
+))]
 pub use arch::hwv5_demo;
 #[cfg(feature = "rt3-verify")]
 pub mod rt3_demo;

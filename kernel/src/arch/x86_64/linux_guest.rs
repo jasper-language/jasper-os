@@ -18,6 +18,7 @@ use kernel_core::virtio_net::{
 use kernel_core::vmm_device::{VirtioDeviceType, VirtioMmio, FEATURE_VERSION_1};
 
 use crate::arch::x86_64::vmx::{GuestExecutionState, LinuxPlatform, LinuxReport, VmxVm};
+use crate::hwv5_policy::{self, Hwv5Lease, Hwv5Surface};
 use crate::{kobj, kprintln, mm, proc, vcpu};
 use core::sync::atomic::{fence, Ordering};
 
@@ -58,8 +59,10 @@ struct VirtioGuestBus {
     block: VirtioMmio,
     net: VirtioMmio,
     net_backend: VirtioNetBackend,
+    net_lease: Option<Hwv5Lease>,
     fs: VirtioMmio,
     fs_backend: VirtioFsBackend,
+    fs_lease: Option<Hwv5Lease>,
     gpu: VirtioMmio,
     gpu_backend: VirtioGpuBackend,
     last_avail: [u16; 2],
@@ -98,8 +101,10 @@ impl VirtioGuestBus {
                 [kernel_core::virtio_net::FEATURE_MAC, FEATURE_VERSION_1],
             ),
             net_backend: VirtioNetBackend::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x57], [10, 0, 2, 2]),
+            net_lease: hwv5_policy::lease(Hwv5Surface::Net),
             fs: VirtioMmio::new(VirtioDeviceType::Fs, 16, [0, FEATURE_VERSION_1]),
             fs_backend: VirtioFsBackend::new(),
+            fs_lease: hwv5_policy::lease(Hwv5Surface::Fs),
             gpu: VirtioMmio::new(VirtioDeviceType::Gpu, 16, [0, FEATURE_VERSION_1]),
             gpu_backend: VirtioGpuBackend::new(),
             last_avail: [0; 2],
@@ -377,7 +382,7 @@ impl VirtioGuestBus {
             return;
         };
         while self.net_rx_last_avail != available {
-            if !crate::hwv5_policy::net_read() {
+            if !hwv5_policy::net_read_at(self.net_lease) {
                 self.net_rejected = self.net_rejected.saturating_add(1);
                 return;
             }
@@ -473,7 +478,7 @@ impl VirtioGuestBus {
                     .gather_virtio_chain(&chain[..count], &mut raw[..total as usize])
                     .is_none()
                 || VirtioNetHeader::decode(&raw[..VIRTIO_NET_HEADER_BYTES]).is_err()
-                || !crate::hwv5_policy::net_write()
+                || !hwv5_policy::net_write_at(self.net_lease)
                 || self
                     .net_backend
                     .transmit(&raw[VIRTIO_NET_HEADER_BYTES..total as usize])
@@ -555,9 +560,9 @@ impl VirtioGuestBus {
             let mut response = [0u8; MAX_RESPONSE_BYTES];
             let opcode = u32::from_le_bytes(request[4..8].try_into().unwrap());
             let allowed = if opcode == OP_WRITE {
-                crate::hwv5_policy::fs_write()
+                hwv5_policy::fs_write_at(self.fs_lease)
             } else {
-                crate::hwv5_policy::fs_read()
+                hwv5_policy::fs_read_at(self.fs_lease)
             };
             let response_len = if !allowed {
                 let unique = u64::from_le_bytes(request[8..16].try_into().unwrap());
@@ -1082,6 +1087,10 @@ impl LinuxPlatform for VirtioGuestBus {
                 return false;
             };
             if offset == 0x070 && value == 0 {
+                let Some(lease) = hwv5_policy::rotate_surface(Hwv5Surface::Net) else {
+                    return false;
+                };
+                self.net_lease = Some(lease);
                 self.net_backend.reset();
                 self.net_rx_last_avail = 0;
                 self.net_tx_last_avail = 0;
@@ -1102,6 +1111,10 @@ impl LinuxPlatform for VirtioGuestBus {
                 return false;
             };
             if offset == 0x070 && value == 0 {
+                let Some(lease) = hwv5_policy::rotate_surface(Hwv5Surface::Fs) else {
+                    return false;
+                };
+                self.fs_lease = Some(lease);
                 self.fs_backend.reset();
                 self.fs_last_avail = 0;
                 self.pending_irqs &= !(1u16 << VIRTIO_FS_IRQ);
