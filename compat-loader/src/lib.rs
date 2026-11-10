@@ -11,6 +11,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+mod execution;
 mod memory;
 mod relocation;
 
@@ -27,6 +28,12 @@ use goblin::elf::reloc::*;
 use goblin::elf::sym::{STB_GLOBAL, STB_LOCAL, STB_WEAK};
 use goblin::elf::Elf;
 
+pub use execution::{
+    build_initial_stack, run_preloaded_entry, run_preloaded_exit, run_process_entry,
+    stack_input_for_program, AuxvEntry, EntryCall, EntryCallKind, EntryFrame, EntrySource,
+    ExecutionBackend, ExecutionPlan, InitialStackInput, InitialStackPlan, ProgramStackInput,
+    RuntimeModule,
+};
 pub use memory::{
     initialize_tls_block, map_image, protect_relro, select_load_bias, ImageLayout, LoaderMemory,
     MappedFileRange, MappedPage, MappedSegment, MappingRequest, MemoryPermissions,
@@ -65,6 +72,8 @@ pub enum LoaderError {
     BadTls,
     BadRelocation,
     EntryOutsideExecutable,
+    BadExecution,
+    BadStack,
     UnsupportedRelocation(u32),
     BadPageSize,
     BadLoadBias,
@@ -225,6 +234,9 @@ pub struct LoadPlan {
     pub rpaths: Vec<String>,
     pub runpaths: Vec<String>,
     pub segments: Vec<LoadSegment>,
+    pub program_headers: Option<VirtualRange>,
+    pub program_header_entry_size: u16,
+    pub program_header_count: u16,
     pub tls: Option<TlsSegment>,
     pub relro: Option<VirtualRange>,
     pub lifecycle: LifecyclePlan,
@@ -385,6 +397,13 @@ pub fn parse(bytes: &[u8]) -> Result<LoadPlan, LoaderError> {
     let rpaths = collect_dynamic_names(elf.rpaths.iter().copied())?;
     let runpaths = collect_dynamic_names(elf.runpaths.iter().copied())?;
     let lifecycle = collect_lifecycle(&elf, &segments)?;
+    let program_headers = program_header_range(
+        header.e_phoff,
+        header.e_phentsize,
+        header.e_phnum,
+        &segments,
+        bytes.len() as u64,
+    )?;
 
     Ok(LoadPlan {
         entry: header.e_entry,
@@ -394,12 +413,57 @@ pub fn parse(bytes: &[u8]) -> Result<LoadPlan, LoaderError> {
         rpaths,
         runpaths,
         segments,
+        program_headers,
+        program_header_entry_size: header.e_phentsize,
+        program_header_count: header.e_phnum,
         tls,
         relro,
         lifecycle,
         relocations,
         max_align,
     })
+}
+
+fn program_header_range(
+    file_offset: u64,
+    entry_size: u16,
+    count: u16,
+    segments: &[LoadSegment],
+    file_len: u64,
+) -> Result<Option<VirtualRange>, LoaderError> {
+    if count == 0 {
+        return Ok(None);
+    }
+    if entry_size == 0 {
+        return Err(LoaderError::BadSegment);
+    }
+    let bytes = u64::from(entry_size)
+        .checked_mul(u64::from(count))
+        .ok_or(LoaderError::BadSegment)?;
+    let end = file_offset
+        .checked_add(bytes)
+        .ok_or(LoaderError::BadSegment)?;
+    if end > file_len {
+        return Err(LoaderError::BadSegment);
+    }
+    for segment in segments {
+        let segment_file_end = segment
+            .file_offset
+            .checked_add(segment.file_bytes)
+            .ok_or(LoaderError::BadSegment)?;
+        if segment.readable && file_offset >= segment.file_offset && end <= segment_file_end {
+            return Ok(Some(VirtualRange {
+                address: segment
+                    .virtual_address
+                    .checked_add(file_offset - segment.file_offset)
+                    .ok_or(LoaderError::BadSegment)?,
+                bytes,
+            }));
+        }
+    }
+    // AT_PHDR 必须可由新进程读取；落到不可读段或文件未映射区域时不能静默省略。
+    // AT_PHDR must be readable by the new process; an unmapped or non-readable table fails closed.
+    Err(LoaderError::BadSegment)
 }
 
 fn collect_relocations<'a>(
@@ -805,5 +869,51 @@ mod tests {
             ..valid_tls
         };
         assert!(!tls_in_load_image(&outside_tls, &segments));
+    }
+
+    #[test]
+    fn program_headers_require_a_complete_readable_load_mapping() {
+        let segment = LoadSegment {
+            file_offset: 0x100,
+            virtual_address: 0x40_0100,
+            file_bytes: 0x100,
+            memory_bytes: 0x100,
+            align: 0x100,
+            readable: true,
+            writable: false,
+            executable: false,
+        };
+        assert_eq!(
+            program_header_range(0x110, 56, 2, &[segment], 0x200),
+            Ok(Some(VirtualRange {
+                address: 0x40_0110,
+                bytes: 112,
+            }))
+        );
+        assert_eq!(
+            program_header_range(
+                0x110,
+                56,
+                2,
+                &[LoadSegment {
+                    readable: false,
+                    ..segment
+                }],
+                0x200,
+            ),
+            Err(LoaderError::BadSegment)
+        );
+        assert_eq!(
+            program_header_range(0x1f0, 56, 2, &[segment], 0x300),
+            Err(LoaderError::BadSegment)
+        );
+        assert_eq!(
+            program_header_range(0x110, 56, 2, &[segment], 0x120),
+            Err(LoaderError::BadSegment)
+        );
+        assert_eq!(
+            program_header_range(0x110, 0, 0, &[segment], 0x200),
+            Ok(None)
+        );
     }
 }
