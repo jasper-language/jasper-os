@@ -135,6 +135,10 @@ fn execute(pid: ObjId, call: LinuxCall) -> i64 {
         LinuxSyscall::OpenAt => compat_result(linux_openat(pid, call.args)),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
         LinuxSyscall::NewFstatAt => compat_result(linux_newfstatat(pid, call.args)),
+        LinuxSyscall::Fcntl => compat_result(linux_fcntl(pid, call.args)),
+        LinuxSyscall::Poll => compat_result(linux_poll(pid, call.args)),
+        LinuxSyscall::StatFs => compat_result(linux_statfs(call.args)),
+        LinuxSyscall::ReadLink => compat_result(linux_readlink(pid, call.args)),
         LinuxSyscall::Mmap => compat_result(linux_mmap(pid, call.args)),
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
@@ -142,6 +146,8 @@ fn execute(pid: ObjId, call: LinuxCall) -> i64 {
         LinuxSyscall::Access => compat_result(linux_access(call.args[0])),
         LinuxSyscall::ArchPrctl => compat_result(linux_arch_prctl(call.args)),
         LinuxSyscall::ClockGettime => compat_result(linux_clock_gettime(call.args)),
+        LinuxSyscall::RtSigAction => compat_result(linux_rt_sigaction(pid, call.args)),
+        LinuxSyscall::RtSigProcMask => compat_result(linux_rt_sigprocmask(pid, call.args)),
         LinuxSyscall::GetPid | LinuxSyscall::GetTid => proc::linux_pid(pid)
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
@@ -587,6 +593,184 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Invalid);
     };
     write_linux_stat(args[2], file.bytes().len() as u64, file.inode())?;
+    Ok(0)
+}
+
+/// Implements `fcntl(2)` descriptor flag operations.
+///
+/// 当前支持 `F_GETFD` 与 `F_SETFD`；未知命令和未知 fd 标志失败关闭。
+fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const F_GETFD: u64 = 1;
+    const F_SETFD: u64 = 2;
+    const FD_CLOEXEC: u64 = 1;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    match args[1] {
+        F_GETFD => Ok(u64::from(entry.close_on_exec)),
+        F_SETFD if args[2] & !FD_CLOEXEC == 0 => {
+            if proc::linux_set_fd_cloexec(pid, fd, args[2] & FD_CLOEXEC != 0) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::BadFd)
+            }
+        }
+        F_SETFD => Err(CompatErrno::Invalid),
+        _ => Err(CompatErrno::NoSys),
+    }
+}
+
+/// Implements a bounded non-blocking `poll(2)` over Jasper compatibility fds.
+///
+/// 只接受零超时；常规文件按其请求的读写事件就绪，控制台当前无输入。无效 fd
+/// 返回 `POLLNVAL`，调用不会因未实现的阻塞等待而伪装成功。
+fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const POLLIN: u16 = 0x001;
+    const POLLOUT: u16 = 0x004;
+    const POLLNVAL: u16 = 0x020;
+    const MAX_POLLFDS: usize = 64;
+    let count = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let timeout = args[2] as u32 as i32;
+    if count > MAX_POLLFDS || timeout != 0 {
+        return Err(CompatErrno::NoSys);
+    }
+    for index in 0..count {
+        let address = args[0]
+            .checked_add((index * 8) as u64)
+            .ok_or(CompatErrno::Fault)?;
+        let mut pollfd = [0u8; 8];
+        copy_from_user(&mut pollfd, address, 8).map_err(|_| CompatErrno::Fault)?;
+        let fd = i32::from_le_bytes(pollfd[0..4].try_into().unwrap());
+        let events = u16::from_le_bytes(pollfd[4..6].try_into().unwrap());
+        let revents = if fd < 0 {
+            0
+        } else {
+            match proc::linux_fd(pid, fd as u32) {
+                None => POLLNVAL,
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::File => {
+                    events & (POLLIN | POLLOUT)
+                }
+                Some(_) => 0,
+            }
+        };
+        pollfd[6..8].copy_from_slice(&revents.to_le_bytes());
+        copy_to_user(address, &pollfd, pollfd.len()).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(0)
+}
+
+/// Implements `statfs(2)` over the exact read-only verification namespace.
+///
+/// 已知虚拟文件返回 ext4 形态的只读统计；未知路径返回 `ENOENT`，不泄漏宿主挂载。
+fn linux_statfs(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const STATFS_BYTES: usize = 120;
+    let path = linux_c_string(args[0], 4096)?;
+    let file = crate::linux_vfs::lookup(&path).ok_or(CompatErrno::NoEntry)?;
+    let blocks = (file.bytes().len() as u64).div_ceil(4096);
+    let mut statfs = [0u8; STATFS_BYTES];
+    statfs[0..8].copy_from_slice(&0xef53u64.to_le_bytes());
+    statfs[8..16].copy_from_slice(&4096u64.to_le_bytes());
+    statfs[16..24].copy_from_slice(&blocks.to_le_bytes());
+    statfs[24..32].copy_from_slice(&0u64.to_le_bytes());
+    statfs[32..40].copy_from_slice(&blocks.to_le_bytes());
+    statfs[40..48].copy_from_slice(&1u64.to_le_bytes());
+    statfs[48..56].copy_from_slice(&1u64.to_le_bytes());
+    statfs[64..72].copy_from_slice(&255u64.to_le_bytes());
+    statfs[72..80].copy_from_slice(&4096u64.to_le_bytes());
+    copy_to_user(args[1], &statfs, statfs.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Implements `readlink(2)` for `/proc/self/exe`.
+///
+/// 返回本进程真实执行路径；其他虚拟路径返回 `ENOENT`。结果按 Linux 语义不加 NUL，
+/// 并返回放入用户缓冲区的字节数。
+fn linux_readlink(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let path = linux_c_string(args[0], 4096)?;
+    if path != b"/proc/self/exe" {
+        return Err(CompatErrno::NoEntry);
+    }
+    let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if capacity > 4096 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut target = [0u8; 128];
+    let take = capacity.min(target.len());
+    let copied =
+        proc::linux_exec_path(pid, &mut target[..take]).ok_or(CompatErrno::NoEntry)?;
+    if copied != 0 {
+        copy_to_user(args[1], &target[..copied], copied).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(copied as u64)
+}
+
+/// Stores or queries one x86_64 Linux signal action.
+///
+/// 只保存线程库的同步处置配置；信号生成、排队和用户栈帧投递尚未接入，因此该
+/// 接口不会把“已登记处置”冒充为“已投递信号”。
+fn linux_rt_sigaction(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SIGKILL: u64 = 9;
+    const SIGSTOP: u64 = 19;
+    const SIGACTION_BYTES: usize = 32;
+    if args[3] != 8 || !(1..=64).contains(&args[0]) {
+        return Err(CompatErrno::Invalid);
+    }
+    let signal = args[0] as u32;
+    let old = proc::linux_signal_action(pid, signal).ok_or(CompatErrno::NoSys)?;
+    if args[1] != 0 {
+        if args[0] == SIGKILL || args[0] == SIGSTOP {
+            return Err(CompatErrno::Perm);
+        }
+        let mut action = [0u8; SIGACTION_BYTES];
+        copy_from_user(&mut action, args[1], SIGACTION_BYTES)
+            .map_err(|_| CompatErrno::Fault)?;
+        let disposition = [
+            u64::from_le_bytes(action[0..8].try_into().unwrap()),
+            u64::from_le_bytes(action[8..16].try_into().unwrap()),
+            u64::from_le_bytes(action[16..24].try_into().unwrap()),
+            u64::from_le_bytes(action[24..32].try_into().unwrap()),
+        ];
+        if !proc::set_linux_signal_action(pid, signal, disposition) {
+            return Err(CompatErrno::NoSys);
+        }
+    }
+    if args[2] != 0 {
+        let mut action = [0u8; SIGACTION_BYTES];
+        for (index, value) in old.iter().copied().enumerate() {
+            action[index * 8..index * 8 + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        copy_to_user(args[2], &action, SIGACTION_BYTES).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(0)
+}
+
+/// Queries or updates the process blocked-signal mask.
+///
+/// SIGKILL 和 SIGSTOP 始终保持不可阻塞；信号排队与投递仍明确为 pending。
+fn linux_rt_sigprocmask(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SIG_BLOCK: u64 = 0;
+    const SIG_UNBLOCK: u64 = 1;
+    const SIG_SETMASK: u64 = 2;
+    if args[3] != 8 || args[0] > SIG_SETMASK {
+        return Err(CompatErrno::Invalid);
+    }
+    let old = proc::linux_signal_mask(pid).ok_or(CompatErrno::NoSys)?;
+    if args[1] != 0 {
+        let mut value = [0u8; 8];
+        copy_from_user(&mut value, args[1], 8).map_err(|_| CompatErrno::Fault)?;
+        let requested = u64::from_le_bytes(value);
+        let new = match args[0] {
+            SIG_BLOCK => old | requested,
+            SIG_UNBLOCK => old & !requested,
+            SIG_SETMASK => requested,
+            _ => unreachable!(),
+        };
+        if !proc::set_linux_signal_mask(pid, new) {
+            return Err(CompatErrno::NoSys);
+        }
+    }
+    if args[2] != 0 {
+        copy_to_user(args[2], &old.to_le_bytes(), 8).map_err(|_| CompatErrno::Fault)?;
+    }
     Ok(0)
 }
 

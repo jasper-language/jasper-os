@@ -9,6 +9,26 @@
 static LIBC: &[u8] = include_bytes!(env!("JSR_UBUNTU_LIBC"));
 #[cfg(not(feature = "compat-dynamic-libc-verify"))]
 static LIBC: &[u8] = &[];
+#[cfg(feature = "compat-dynamic-libc-verify")]
+static LIBSYSTEMD: &[u8] = include_bytes!(env!("JSR_UBUNTU_LIBSYSTEMD"));
+#[cfg(not(feature = "compat-dynamic-libc-verify"))]
+static LIBSYSTEMD: &[u8] = &[];
+#[cfg(feature = "compat-dynamic-libc-verify")]
+static LIBSELINUX: &[u8] = include_bytes!(env!("JSR_UBUNTU_LIBSELINUX"));
+#[cfg(not(feature = "compat-dynamic-libc-verify"))]
+static LIBSELINUX: &[u8] = &[];
+#[cfg(feature = "compat-dynamic-libc-verify")]
+static LIBGCC_S: &[u8] = include_bytes!(env!("JSR_UBUNTU_LIBGCC_S"));
+#[cfg(not(feature = "compat-dynamic-libc-verify"))]
+static LIBGCC_S: &[u8] = &[];
+#[cfg(feature = "compat-dynamic-libc-verify")]
+static LIBM: &[u8] = include_bytes!(env!("JSR_UBUNTU_LIBM"));
+#[cfg(not(feature = "compat-dynamic-libc-verify"))]
+static LIBM: &[u8] = &[];
+#[cfg(feature = "compat-dynamic-libc-verify")]
+static LIBPCRE2: &[u8] = include_bytes!(env!("JSR_UBUNTU_LIBPCRE2"));
+#[cfg(not(feature = "compat-dynamic-libc-verify"))]
+static LIBPCRE2: &[u8] = &[];
 
 const HANDLE_BASE: u64 = 0xffff_0000_0000_0000;
 
@@ -16,6 +36,11 @@ const HANDLE_BASE: u64 = 0xffff_0000_0000_0000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileId {
     Libc,
+    LibSystemd,
+    LibSelinux,
+    LibGccS,
+    LibM,
+    LibPcre2,
 }
 
 impl FileId {
@@ -25,6 +50,11 @@ impl FileId {
     pub const fn inode(self) -> u64 {
         match self {
             Self::Libc => 1,
+            Self::LibSystemd => 2,
+            Self::LibSelinux => 3,
+            Self::LibGccS => 4,
+            Self::LibM => 5,
+            Self::LibPcre2 => 6,
         }
     }
 
@@ -35,6 +65,11 @@ impl FileId {
         HANDLE_BASE
             | match self {
                 Self::Libc => 1,
+                Self::LibSystemd => 2,
+                Self::LibSelinux => 3,
+                Self::LibGccS => 4,
+                Self::LibM => 5,
+                Self::LibPcre2 => 6,
             }
     }
 
@@ -44,6 +79,11 @@ impl FileId {
     pub const fn from_handle(handle: u64) -> Option<Self> {
         match handle {
             value if value == (HANDLE_BASE | 1) => Some(Self::Libc),
+            value if value == (HANDLE_BASE | 2) => Some(Self::LibSystemd),
+            value if value == (HANDLE_BASE | 3) => Some(Self::LibSelinux),
+            value if value == (HANDLE_BASE | 4) => Some(Self::LibGccS),
+            value if value == (HANDLE_BASE | 5) => Some(Self::LibM),
+            value if value == (HANDLE_BASE | 6) => Some(Self::LibPcre2),
             _ => None,
         }
     }
@@ -54,6 +94,11 @@ impl FileId {
     pub const fn bytes(self) -> &'static [u8] {
         match self {
             Self::Libc => LIBC,
+            Self::LibSystemd => LIBSYSTEMD,
+            Self::LibSelinux => LIBSELINUX,
+            Self::LibGccS => LIBGCC_S,
+            Self::LibM => LIBM,
+            Self::LibPcre2 => LIBPCRE2,
         }
     }
 }
@@ -70,6 +115,17 @@ pub fn lookup(path: &[u8]) -> Option<FileId> {
         b"/lib/x86_64-linux-gnu/libc.so.6" | b"/usr/lib/x86_64-linux-gnu/libc.so.6" => {
             Some(FileId::Libc)
         }
+        b"/lib/x86_64-linux-gnu/libsystemd.so.0"
+        | b"/usr/lib/x86_64-linux-gnu/libsystemd.so.0" => Some(FileId::LibSystemd),
+        b"/lib/x86_64-linux-gnu/libselinux.so.1"
+        | b"/usr/lib/x86_64-linux-gnu/libselinux.so.1" => Some(FileId::LibSelinux),
+        b"/lib/x86_64-linux-gnu/libgcc_s.so.1"
+        | b"/usr/lib/x86_64-linux-gnu/libgcc_s.so.1" => Some(FileId::LibGccS),
+        b"/lib/x86_64-linux-gnu/libm.so.6" | b"/usr/lib/x86_64-linux-gnu/libm.so.6" => {
+            Some(FileId::LibM)
+        }
+        b"/lib/x86_64-linux-gnu/libpcre2-8.so.0"
+        | b"/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0" => Some(FileId::LibPcre2),
         _ => None,
     }
 }

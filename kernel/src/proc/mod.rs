@@ -75,6 +75,12 @@ struct LinuxProcessState {
     file_offsets: [u64; 64],
     brk: u64,
     mmap_next: u64,
+    /// Linux signal dispositions and blocked mask.
+    signal_actions: [[u64; 4]; 64],
+    signal_mask: u64,
+    /// Exact executable path exposed through `/proc/self/exe`.
+    exec_path: [u8; 128],
+    exec_path_len: usize,
 }
 
 /// 进程状态。
@@ -478,6 +484,69 @@ pub(crate) fn linux_close_fd(pid: ObjId, fd: u32) -> bool {
     .is_ok()
 }
 
+/// Updates close-on-exec for one Linux descriptor.
+///
+/// 更新 Linux fd 的 close-on-exec；只作用于当前有效世代。
+pub(crate) fn linux_set_fd_cloexec(pid: ObjId, fd: u32, enabled: bool) -> bool {
+    with_proc(pid, |p| {
+        p.linux
+            .as_mut()
+            .ok_or(ProcError::Exited)?
+            .fds
+            .set_close_on_exec_fd(fd, enabled)
+            .map_err(|_| ProcError::NoTaskSlot)
+    })
+    .is_ok()
+}
+
+/// Returns one Linux signal disposition as `(handler, flags, restorer, mask)`.
+///
+/// 返回 Linux 信号处置；当前保存启动配置，信号队列与用户栈帧投递仍为 pending。
+pub(crate) fn linux_signal_action(pid: ObjId, signal: u32) -> Option<[u64; 4]> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) if (1..=64).contains(&signal) => {
+            Some(p.linux.as_ref()?.signal_actions[signal as usize - 1])
+        }
+        _ => None,
+    })
+}
+
+/// Commits one validated Linux signal disposition.
+///
+/// 提交已验证的 Linux 信号处置；实际信号生成、排队与用户栈帧投递尚未实现。
+pub(crate) fn set_linux_signal_action(pid: ObjId, signal: u32, action: [u64; 4]) -> bool {
+    with_proc(pid, |p| {
+        if !(1..=64).contains(&signal) {
+            return Err(ProcError::Exited);
+        }
+        p.linux.as_mut().ok_or(ProcError::Exited)?.signal_actions[signal as usize - 1] = action;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Returns the blocked Linux signal mask.
+///
+/// 返回 Linux 兼容进程当前阻塞的信号集合。
+pub(crate) fn linux_signal_mask(pid: ObjId) -> Option<u64> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => Some(p.linux.as_ref()?.signal_mask),
+        _ => None,
+    })
+}
+
+/// Commits a Linux blocked-signal mask while preserving unmaskable signals.
+///
+/// 提交阻塞信号集合，并强制保持 SIGKILL/SIGSTOP 不可阻塞。
+pub(crate) fn set_linux_signal_mask(pid: ObjId, mask: u64) -> bool {
+    const UNMASKABLE: u64 = (1u64 << (9 - 1)) | (1u64 << (19 - 1));
+    with_proc(pid, |p| {
+        p.linux.as_mut().ok_or(ProcError::Exited)?.signal_mask = mask & !UNMASKABLE;
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Returns the non-zero Linux pid namespace identity for one compatibility process.
 ///
 /// 返回 Linux 兼容进程在兼容 pid 命名空间中的非零身份。
@@ -485,6 +554,40 @@ pub(crate) fn linux_close_fd(pid: ObjId, fd: u32) -> bool {
 pub(crate) fn linux_pid(pid: ObjId) -> Option<u32> {
     crate::kobj::with(|t| match t.get(pid) {
         Ok(KObject::Process(p)) => p.linux.as_ref().map(|linux| linux.pid),
+        _ => None,
+    })
+}
+
+/// Records the exact executable path used for Linux `/proc/self/exe`.
+///
+/// 记录 Linux 程序的实际执行路径；超长、空或带 NUL 的路径失败关闭。
+pub(crate) fn linux_set_exec_path(pid: ObjId, path: &[u8]) -> bool {
+    if path.is_empty() || path.len() > 128 || path.contains(&0) {
+        return false;
+    }
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux.exec_path[..path.len()].copy_from_slice(path);
+        linux.exec_path_len = path.len();
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Copies the executable path into a bounded caller buffer.
+///
+/// 将可执行路径复制到调用者缓冲区并返回实际长度。
+pub(crate) fn linux_exec_path(pid: ObjId, output: &mut [u8]) -> Option<usize> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => {
+            let linux = p.linux.as_ref()?;
+            if linux.exec_path_len == 0 {
+                return None;
+            }
+            let len = linux.exec_path_len.min(output.len());
+            output[..len].copy_from_slice(&linux.exec_path[..len]);
+            Some(len)
+        }
         _ => None,
     })
 }
@@ -582,6 +685,10 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         file_offsets: [0; 64],
         brk: crate::arch::USER_WINDOW.0 + 0x1000_0000,
         mmap_next: crate::arch::USER_WINDOW.0 + 0x4000_0000,
+        signal_actions: [[0; 4]; 64],
+        signal_mask: 0,
+        exec_path: [0; 128],
+        exec_path_len: 0,
     };
     create_process(name, SyscallSet::EMPTY, move |process| {
         process.linux = Some(linux);
@@ -1581,6 +1688,27 @@ pub fn page_flags(pid: ObjId, va: u64) -> Option<MapFlags> {
 /// 进程当前拥有的数据帧数（诊断与验收用）。
 pub fn frame_count(pid: ObjId) -> Option<usize> {
     with_proc(pid, |p| Ok(p.frames.len())).ok()
+}
+
+/// Returns `(page_count, total Arc references, maximum Arc references per page)`.
+///
+/// 返回进程页引用诊断；用于证明退出回收并非被额外 Arc 强引用阻止。
+pub fn frame_reference_stats(pid: ObjId) -> Option<(usize, usize, usize)> {
+    with_proc(pid, |p| {
+        let total = p
+            .frames
+            .iter()
+            .map(|page| alloc::sync::Arc::strong_count(page))
+            .sum();
+        let max = p
+            .frames
+            .iter()
+            .map(|page| alloc::sync::Arc::strong_count(page))
+            .max()
+            .unwrap_or(0);
+        Ok((p.frames.len(), total, max))
+    })
+    .ok()
 }
 
 /// (Allocated backing pages, fixed-page references); account may outlive its creator.

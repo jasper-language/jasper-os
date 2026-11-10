@@ -181,6 +181,24 @@ impl<const N: usize> FdTable<N> {
         Ok(())
     }
 
+    /// Updates close-on-exec by descriptor and current generation.
+    ///
+    /// 按 fd 当前世代更新 close-on-exec；陈旧或关闭的 fd 不会被误改。
+    pub fn set_close_on_exec_fd(
+        &mut self,
+        fd: u32,
+        enabled: bool,
+    ) -> Result<(), FdTableError> {
+        let entry = self.get_fd(fd).ok_or(FdTableError::InvalidFd)?;
+        self.set_close_on_exec(
+            FdHandle {
+                fd,
+                generation: entry.generation,
+            },
+            enabled,
+        )
+    }
+
     pub fn close(&mut self, handle: FdHandle) -> Result<u64, FdTableError> {
         let entry = self.get(handle)?;
         let slot = self.slots[handle.fd as usize]
@@ -328,6 +346,13 @@ mod tests {
         assert_eq!(replacement.fd(), 10);
         assert_eq!(fds.get(copy), Err(FdTableError::Stale));
         assert_eq!(fds.get(replacement).unwrap().handle, 0x300);
+        fds.set_close_on_exec_fd(replacement.fd(), true)
+            .unwrap();
+        assert!(fds.get_fd(replacement.fd()).unwrap().close_on_exec);
+        assert_eq!(
+            fds.set_close_on_exec_fd(63, true),
+            Err(FdTableError::InvalidFd)
+        );
     }
 
     #[test]

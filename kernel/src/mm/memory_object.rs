@@ -6,8 +6,18 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use kernel_core::{frame::{PhysFrame, FRAME_SIZE}, memory_object::MapRange};
 
 static QUARANTINED_PAGES: AtomicU32=AtomicU32::new(0);
+static FAILED_PAGE_FREES: AtomicU32 = AtomicU32::new(0);
+static RELEASED_PAGES: AtomicU32 = AtomicU32::new(0);
 /// Unique physical backing pages intentionally withheld after uncertain TLB revocation.
 pub fn quarantined_pages() -> u32 { QUARANTINED_PAGES.load(Ordering::Acquire) }
+/// Number of final Page drops whose frame release failed.
+///
+/// 最终 Page 引用销毁时页帧归还失败的累计次数；非零表示双重释放或分配器不变量破坏。
+pub fn failed_page_frees() -> u32 { FAILED_PAGE_FREES.load(Ordering::Acquire) }
+/// Number of successful final Page frame releases.
+///
+/// 最终 Page 引用销毁并成功归还页帧的累计次数。
+pub fn released_pages() -> u32 { RELEASED_PAGES.load(Ordering::Acquire) }
 
 pub struct Page {
     frame: PhysFrame,
@@ -34,7 +44,13 @@ impl Page {
 }
 impl Drop for Page {
     fn drop(&mut self) {
-        if !self.is_quarantined() { let _ = super::frame::deallocate(self.frame); }
+        if !self.is_quarantined() {
+            if super::frame::deallocate(self.frame).is_err() {
+                FAILED_PAGE_FREES.fetch_add(1, Ordering::Relaxed);
+            } else {
+                RELEASED_PAGES.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         else if let Some(charge) = self.owned.take() {
             // Permanent physical quarantine also permanently retains its allocation charge.
             charge.quarantine_owned();

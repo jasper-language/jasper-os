@@ -289,6 +289,11 @@ fn configure_dynamic_libc_fixtures() {
             "Ubuntu getconf executable",
         ),
         (
+            "JSR_UBUNTU_PRINTF",
+            "/usr/bin/printf",
+            "Ubuntu printf executable",
+        ),
+        (
             "JSR_UBUNTU_LD_LINUX",
             "/lib64/ld-linux-x86-64.so.2",
             "Ubuntu program interpreter",
@@ -297,6 +302,31 @@ fn configure_dynamic_libc_fixtures() {
             "JSR_UBUNTU_LIBC",
             "/lib/x86_64-linux-gnu/libc.so.6",
             "Ubuntu libc",
+        ),
+        (
+            "JSR_UBUNTU_LIBSYSTEMD",
+            "/usr/lib/x86_64-linux-gnu/libsystemd.so.0",
+            "Ubuntu libsystemd",
+        ),
+        (
+            "JSR_UBUNTU_LIBSELINUX",
+            "/usr/lib/x86_64-linux-gnu/libselinux.so.1",
+            "Ubuntu libselinux",
+        ),
+        (
+            "JSR_UBUNTU_LIBGCC_S",
+            "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
+            "Ubuntu libgcc_s",
+        ),
+        (
+            "JSR_UBUNTU_LIBM",
+            "/usr/lib/x86_64-linux-gnu/libm.so.6",
+            "Ubuntu libm",
+        ),
+        (
+            "JSR_UBUNTU_LIBPCRE2",
+            "/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0",
+            "Ubuntu libpcre2-8",
         ),
     ] {
         println!("cargo:rerun-if-env-changed={variable}");
@@ -327,7 +357,7 @@ fn configure_dynamic_libc_fixtures() {
             "{description} 必须是 ET_DYN"
         );
         match variable {
-            "JSR_UBUNTU_TRUE" | "JSR_UBUNTU_GETCONF" => assert_eq!(
+            "JSR_UBUNTU_TRUE" | "JSR_UBUNTU_GETCONF" | "JSR_UBUNTU_PRINTF" => assert_eq!(
                 dynamic_interpreter(&bytes),
                 Some(b"/lib64/ld-linux-x86-64.so.2".as_slice()),
                 "{description} 必须声明未修改的 ld-linux"
@@ -339,7 +369,7 @@ fn configure_dynamic_libc_fixtures() {
                 )
             }
             "JSR_UBUNTU_LIBC" => assert!(!bytes.is_empty(), "libc fixture 不得为空"),
-            _ => unreachable!(),
+            _ => {}
         }
         println!("cargo:rustc-env={variable}={}", path.display());
     }

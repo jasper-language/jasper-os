@@ -2984,10 +2984,12 @@ check_compatdynamic() {
      && has '^\[JSR-LINUX-SYSCALL\].* nr=9 ' \
      && has '^glibc 2\.[0-9]+' \
      && has '^\[JSR-COMPAT-DYNAMIC-GETCONF\].* exit_zero=true .*resources=true failed=0' \
-     && has '^\[JSR-COMPAT-DYNAMIC-SUMMARY\] true=true getconf=true resources=true failed=0' \
+     && has '^jasper-dynamic' \
+     && has '^\[JSR-COMPAT-DYNAMIC-PRINTF\].* libraries=6 .*exit_zero=true resources=true failed=0' \
+     && has '^\[JSR-COMPAT-DYNAMIC-SUMMARY\] true=true getconf=true printf=true resources=true .*failed=0' \
      && has '^\[JSR-PROC\] event=system\.process\.exited .*name=ubuntu-dynamic-true code=0 ' \
      && ! has '^\[JSR-COMPAT-DYNAMIC-FAIL\]'; then
-    record COMPAT-DYNAMIC-LIBC PASS "真实 QEMU 中未修改的 Ubuntu x86_64 PIE 与 ld-linux 进入 Jasper Ring 3；true 以 0 退出，getconf 经真实 libc 输出 glibc 版本并以 0 退出；页帧回基线"
+    record COMPAT-DYNAMIC-LIBC PASS "真实 QEMU 中未修改 Ubuntu x86_64 true/getconf/printf 经 ld-linux 与六个共享库执行；getconf 输出 glibc 版本，printf 输出预期文本，均以 0 退出；进程页帧与固定引用回基线"
   else
     record COMPAT-DYNAMIC-LIBC FAIL "缺少未修改 Ubuntu PIE/ld-linux/libc、解释器路径与 syscall、0 退出或资源回收证据"
   fi
