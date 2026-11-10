@@ -11,6 +11,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod control;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
