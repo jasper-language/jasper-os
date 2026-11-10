@@ -61,6 +61,8 @@ drv3-verify = []
 # Dedicated PEX-0 workload: existing low/medium/high drills plus parallel
 # multi-process, multi-Ring throughput measurements.
 pex0-verify = ["user-programs"]
+# Dedicated scheduler transaction categorization matrix.
+pex1-verify = ["user-programs", "krn2-observe"]
 # Dedicated SEC-1 identity and metadata substrate.
 sec1-verify = ["kernel-core/sec1-verify"]
 # Dedicated SEC-2 capability-lineage slice; full revocation/in-flight coverage

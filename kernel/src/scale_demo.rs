@@ -379,7 +379,10 @@ fn deadline_owner_contract(n: usize) {
     let mut first = CpuSet::EMPTY; first.insert(1);
     let target = if n > 2 { 2 } else { 1 };
     let mut dest = CpuSet::EMPTY; dest.insert(target);
+    #[allow(unused_mut)]
     let mut attempt = 0;
+    #[cfg(feature = "pex1-verify")]
+    let migration_started_ns;
     let (spawned, registered, moved, consumed, ran) = loop {
         let id = TaskId(0x444541444f574e + attempt);
         TIMED_CPU.store(0, Ordering::Relaxed);
@@ -391,6 +394,10 @@ fn deadline_owner_contract(n: usize) {
         #[cfg(feature = "fault-inject")]
         sched::fault_delay_deadline_timer(target, true);
         let before = sched::deadline_stats().0[target];
+        #[cfg(feature = "pex1-verify")]
+        {
+            migration_started_ns = crate::hrtime::now();
+        }
         sched::run();
         let consumed = sched::deadline_stats().0[target].wrapping_sub(before) > 0;
         let ran = TIMED_CPU.load(Ordering::Acquire) == target as u32 + 1;
@@ -415,6 +422,23 @@ fn deadline_owner_contract(n: usize) {
         }
         break (spawned, registered, moved, consumed, ran);
     };
+    #[cfg(feature = "pex1-verify")]
+    {
+        let elapsed_ns = migration_started_ns
+            .zip(crate::hrtime::now())
+            .map_or(0, |(start, end)| end.saturating_sub(start));
+        kprintln!(
+            "[JSR-PEX1] category=migration registered={} moved={} consumed={} ran={} reclaimed={} elapsed_ns={} attempts={} clock={}",
+            registered,
+            moved,
+            consumed,
+            ran,
+            saved == baseline(),
+            elapsed_ns,
+            attempt + 1,
+            migration_started_ns.is_some()
+        );
+    }
     sched::set_idle_tick(old_idle);
     check(spawned && registered && moved && consumed && ran, "每核到期堆迁移后必须由目标CPU唤醒");
     check(saved == baseline(), "每核到期唤醒演练资源不守恒");
@@ -629,6 +653,8 @@ fn remote_wake_contract(n: usize) {
     // the block. The generous 1000-tick sleep cannot count as an explicit wake.
     sched::sleep_ticks(1);
     let started = sched::timer_ticks();
+    #[cfg(feature = "pex1-verify")]
+    let started_ns = crate::hrtime::now();
     sched::wake(TaskId(0x57414b45));
     sched::run();
     let routed = sched::remote_wake_stats().0.wrapping_sub(before);
@@ -636,6 +662,21 @@ fn remote_wake_contract(n: usize) {
     let returned = REMOTE_STAGE.load(Ordering::Acquire) == 2;
     check(spawned && routed > 0 && timely && returned, "跨核消息必须唤醒真实阻塞任务而非等超时");
     check(saved == baseline(), "跨核唤醒演练资源不守恒");
+    #[cfg(feature = "pex1-verify")]
+    {
+        let elapsed_ns = started_ns
+            .zip(crate::hrtime::now())
+            .map_or(0, |(start, end)| end.saturating_sub(start));
+        kprintln!(
+            "[JSR-PEX1] category=remote-wake routed={} timely={} returned={} reclaimed={} elapsed_ns={} clock={}",
+            routed,
+            timely,
+            returned,
+            saved == baseline(),
+            elapsed_ns,
+            started_ns.is_some()
+        );
+    }
     kprintln!("[JSR-WAKE-MSG] routed={} timely={} returned={} reclaimed={}", routed, timely, returned, saved == baseline());
 }
 
@@ -1043,6 +1084,8 @@ fn contention(n: usize) {
     });
     check(ok, "锁争用测量任务创建失败");
     if !ok { CHURN_GO.store(2, Ordering::Release); }
+    #[cfg(feature = "pex1-verify")]
+    let contention_started_ns = crate::hrtime::now();
     sched::run();
     let s = sched::lock_stats();
     let o = kobj::lock_stats();
@@ -1093,6 +1136,22 @@ fn contention(n: usize) {
         }
     }
     let sane = report_lock("sched", n, s) & report_lock("objtable", n, o);
+    #[cfg(feature = "pex1-verify")]
+    {
+        let elapsed_ns = contention_started_ns
+            .zip(crate::hrtime::now())
+            .map_or(0, |(start, end)| end.saturating_sub(start));
+        kprintln!(
+            "[JSR-PEX1] category=reschedule elapsed_ns={} sched_contended={} sched_spins={} object_contended={} object_spins={} yield_bypasses={} clock={}",
+            elapsed_ns,
+            s.contended,
+            s.spins,
+            o.contended,
+            o.spins,
+            sched::fast_yield_count().wrapping_sub(fast_before),
+            contention_started_ns.is_some()
+        );
+    }
     check(sane, "锁争用计数不自洽");
     check(baseline() == before, "锁争用测量后资源未回到基线");
     kprintln!("[JSR-SCALE] case=contention cpus={} tasks={} rounds={} measured={}", n, n, CHURN_ROUNDS, sane);
