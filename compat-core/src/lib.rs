@@ -7,10 +7,15 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod fd;
+pub mod native;
 pub mod process;
 pub mod syscall;
 
 pub use fd::{CompatKind, FdBatch, FdEntry, FdHandle, FdTable, FdTableError};
+pub use native::{
+    Epoll, EpollEvent, EpollInterest, EventSourceTable, Futex, FutexWake, MemoryMapping,
+    NativeError, NativeHandle, NativeMemory, NativeWait, Uring,
+};
 pub use process::{LinuxPid, ProcessEntry, ProcessTable, ProcessTableError, ProcessToken};
 pub use syscall::{
     compat_result, dispatch, CompatErrno, LinuxCall, LinuxSyscall, SyscallDispatch, SyscallRequest,

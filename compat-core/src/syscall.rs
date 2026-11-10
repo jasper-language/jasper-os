@@ -2,8 +2,10 @@
 
 use linux_raw_sys::general::{
     __NR_clone, __NR_close, __NR_epoll_create1, __NR_epoll_ctl, __NR_epoll_wait, __NR_execve,
-    __NR_exit, __NR_exit_group, __NR_futex, __NR_getpid, __NR_gettid, __NR_mmap, __NR_mprotect,
-    __NR_munmap, __NR_openat, __NR_read, __NR_rt_sigaction, __NR_rt_sigprocmask, __NR_write,
+    __NR_epoll_pwait, __NR_epoll_pwait2, __NR_exit, __NR_exit_group, __NR_futex, __NR_getpid,
+    __NR_gettid, __NR_io_uring_enter, __NR_io_uring_register, __NR_io_uring_setup, __NR_mmap,
+    __NR_mprotect, __NR_munmap, __NR_openat, __NR_read, __NR_rt_sigaction,
+    __NR_rt_sigprocmask, __NR_write,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +29,21 @@ pub enum LinuxSyscall {
     EpollCreate1,
     EpollCtl,
     EpollWait,
+    /// epoll wait with an atomically applied signal mask.
+    /// 带原子信号掩码切换的 epoll 等待。
+    EpollPWait,
+    /// Nanosecond-deadline epoll wait with a signal mask.
+    /// 带信号掩码和纳秒截止期的 epoll 等待。
+    EpollPWait2,
+    /// io_uring setup.
+    /// 创建 io_uring 兼容环。
+    IoUringSetup,
+    /// io_uring submission and completion entry.
+    /// io_uring 提交与完成入口。
+    IoUringEnter,
+    /// io_uring buffer/file registration.
+    /// io_uring 缓冲与文件注册。
+    IoUringRegister,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +75,18 @@ pub enum CompatErrno {
     NoMemory = linux_raw_sys::errno::ENOMEM,
     Fault = linux_raw_sys::errno::EFAULT,
     Invalid = linux_raw_sys::errno::EINVAL,
+    /// Resource is already owned or waited on.
+    /// 资源已被占用或已有等待者。
+    Busy = linux_raw_sys::errno::EBUSY,
+    /// Bounded compatibility capacity is exhausted.
+    /// 有界兼容容量耗尽。
+    NoSpace = linux_raw_sys::errno::ENOSPC,
+    /// Absolute deadline elapsed.
+    /// 绝对截止期已到。
+    TimedOut = linux_raw_sys::errno::ETIMEDOUT,
+    /// An operation was cancelled.
+    /// 操作已取消。
+    Canceled = linux_raw_sys::errno::ECANCELED,
     NoSys = linux_raw_sys::errno::ENOSYS,
 }
 
@@ -82,6 +111,11 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_epoll_create1) => LinuxSyscall::EpollCreate1,
         value if value == u64::from(__NR_epoll_ctl) => LinuxSyscall::EpollCtl,
         value if value == u64::from(__NR_epoll_wait) => LinuxSyscall::EpollWait,
+        value if value == u64::from(__NR_epoll_pwait) => LinuxSyscall::EpollPWait,
+        value if value == u64::from(__NR_epoll_pwait2) => LinuxSyscall::EpollPWait2,
+        value if value == u64::from(__NR_io_uring_setup) => LinuxSyscall::IoUringSetup,
+        value if value == u64::from(__NR_io_uring_enter) => LinuxSyscall::IoUringEnter,
+        value if value == u64::from(__NR_io_uring_register) => LinuxSyscall::IoUringRegister,
         number => return SyscallDispatch::Unsupported { number },
     };
     SyscallDispatch::Mapped(LinuxCall {
@@ -112,6 +146,11 @@ mod tests {
             (__NR_getpid, LinuxSyscall::GetPid),
             (__NR_futex, LinuxSyscall::Futex),
             (__NR_epoll_wait, LinuxSyscall::EpollWait),
+            (__NR_epoll_pwait, LinuxSyscall::EpollPWait),
+            (__NR_epoll_pwait2, LinuxSyscall::EpollPWait2),
+            (__NR_io_uring_setup, LinuxSyscall::IoUringSetup),
+            (__NR_io_uring_enter, LinuxSyscall::IoUringEnter),
+            (__NR_io_uring_register, LinuxSyscall::IoUringRegister),
         ];
         for (number, syscall) in expected {
             assert_eq!(
