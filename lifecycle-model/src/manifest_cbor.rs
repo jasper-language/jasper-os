@@ -141,6 +141,20 @@ pub enum CborManifestError {
     Manifest(ManifestError),
 }
 
+/// 已通过规范编码和完整性字段检查的工件。
+/// Artifact that passed canonical-encoding and integrity-field validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedArtifact {
+    /// 工件类别。Artifact kind.
+    pub kind: ArtifactKind,
+    /// 稳定且唯一的工件名。Stable and unique artifact name.
+    pub name: String,
+    /// 工件字节数。Artifact size in bytes.
+    pub size: u64,
+    /// 工件完整内容 SHA-256。SHA-256 of the complete artifact.
+    pub sha256: [u8; 32],
+}
+
 /// 通过 CBOR、工件和发布策略验证的清单。
 /// Manifest that passed CBOR, artifact, and release-policy verification.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,6 +177,11 @@ pub struct VerifiedCborManifest {
     pub rollback_allowed: bool,
     /// 直接依赖名称。Direct dependency names.
     pub dependencies: Vec<String>,
+    /// 经验证的工件描述，顺序与规范清单一致。
+    /// Verified artifact descriptors in canonical manifest order.
+    pub artifacts: Vec<VerifiedArtifact>,
+    /// 所有工件大小之和。Sum of all artifact sizes.
+    pub artifact_bytes: u64,
 }
 
 /// 解析规范 CBOR、验证每个工件并执行完整签名/信任/反回滚检查。
@@ -188,7 +207,7 @@ pub fn verify_cbor_manifest(
         return Err(CborManifestError::InvalidPolicy);
     }
     validate_dependencies(&wire.dependencies)?;
-    validate_artifacts(&wire.artifacts)?;
+    let (artifacts, artifact_bytes) = validate_artifacts(&wire.artifacts)?;
     let mut canonical = Vec::with_capacity(bytes.len());
     ciborium::ser::into_writer(&wire, &mut canonical).map_err(|_| CborManifestError::Decode)?;
     if canonical != bytes {
@@ -218,6 +237,8 @@ pub fn verify_cbor_manifest(
         migration_reversible: wire.migration_reversible,
         rollback_allowed: wire.rollback_allowed,
         dependencies: wire.dependencies,
+        artifacts,
+        artifact_bytes,
     })
 }
 
@@ -240,15 +261,19 @@ fn validate_dependencies(dependencies: &[String]) -> Result<(), CborManifestErro
     Ok(())
 }
 
-fn validate_artifacts(artifacts: &[ArtifactWire]) -> Result<(), CborManifestError> {
+fn validate_artifacts(
+    artifacts: &[ArtifactWire],
+) -> Result<(Vec<VerifiedArtifact>, u64), CborManifestError> {
     if artifacts.is_empty() || artifacts.len() > MAX_ARTIFACTS {
         return Err(CborManifestError::InvalidArtifact);
     }
     let mut names = BTreeSet::new();
     let mut digests = BTreeSet::new();
+    let mut verified = Vec::with_capacity(artifacts.len());
+    let mut total_bytes = 0u64;
     for artifact in artifacts {
-        if ArtifactKind::parse(&artifact.kind).is_none()
-            || artifact.name.is_empty()
+        let kind = ArtifactKind::parse(&artifact.kind).ok_or(CborManifestError::InvalidArtifact)?;
+        if artifact.name.is_empty()
             || artifact.name.len() > 63
             || !artifact
                 .name
@@ -256,17 +281,23 @@ fn validate_artifacts(artifacts: &[ArtifactWire]) -> Result<(), CborManifestErro
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
             || artifact.size == 0
             || artifact.sha256 == [0; 32]
-            || !names.insert(artifact.name.as_str())
-            || !digests.insert(artifact.sha256)
         {
-            return if names.contains(artifact.name.as_str()) || digests.contains(&artifact.sha256) {
-                Err(CborManifestError::DuplicateArtifact)
-            } else {
-                Err(CborManifestError::InvalidArtifact)
-            };
+            return Err(CborManifestError::InvalidArtifact);
         }
+        if !names.insert(artifact.name.as_str()) || !digests.insert(artifact.sha256) {
+            return Err(CborManifestError::DuplicateArtifact);
+        }
+        total_bytes = total_bytes
+            .checked_add(artifact.size)
+            .ok_or(CborManifestError::InvalidArtifact)?;
+        verified.push(VerifiedArtifact {
+            kind,
+            name: artifact.name.clone(),
+            size: artifact.size,
+            sha256: artifact.sha256,
+        });
     }
-    Ok(())
+    Ok((verified, total_bytes))
 }
 
 #[cfg(test)]
@@ -350,6 +381,9 @@ mod tests {
         assert_eq!(verified.created_at, 100);
         assert_eq!(verified.expires_at, 200);
         assert_eq!(verified.dependencies, [String::from("jasper.base")]);
+        assert_eq!(verified.artifact_bytes, 4096);
+        assert_eq!(verified.artifacts.len(), 1);
+        assert_eq!(verified.artifacts[0].kind, ArtifactKind::BaseSystem);
         let grant = LocalInstallGrant {
             locally_authenticated: true,
             purpose: 1,
@@ -512,5 +546,27 @@ mod tests {
                 })
                 .collect();
         });
+    }
+
+    #[test]
+    fn artifact_size_sum_overflow_fails_closed() {
+        let artifacts = [
+            ArtifactWire {
+                kind: String::from("kernel"),
+                name: String::from("one"),
+                size: u64::MAX,
+                sha256: [1; 32],
+            },
+            ArtifactWire {
+                kind: String::from("driver"),
+                name: String::from("two"),
+                size: 1,
+                sha256: [2; 32],
+            },
+        ];
+        assert_eq!(
+            validate_artifacts(&artifacts),
+            Err(CborManifestError::InvalidArtifact)
+        );
     }
 }

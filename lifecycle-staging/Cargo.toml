@@ -1,0 +1,11 @@
+[package]
+name = "jasper-lifecycle-staging"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Verified, durable artifact staging for the Jasper lifecycle service"
+
+[dependencies]
+jasper-lifecycle-model = { path = "../lifecycle-model" }
+libc = { version = "=0.2.191" }
+sha2 = { version = "=0.11.1", default-features = false }

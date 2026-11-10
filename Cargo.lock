@@ -770,6 +770,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jasper-lifecycle-staging"
+version = "0.1.0"
+dependencies = [
+ "jasper-lifecycle-model",
+ "libc",
+ "sha2",
+]
+
+[[package]]
 name = "jasper-netd"
 version = "0.1.0"
 dependencies = [
