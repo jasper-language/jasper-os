@@ -153,6 +153,9 @@ impl ComponentManifest {
         if unique.len() != self.requires.len() {
             return Err(PackageError::Manifest(0, "requires 重复".into()));
         }
+        if self.requires.iter().any(|required| required == &self.name) {
+            return Err(PackageError::Manifest(0, "组件不能依赖自身".into()));
+        }
         Ok(())
     }
 }
@@ -191,6 +194,22 @@ pub enum PackageError {
     Incompatible(String),
     /// 指定组件没有可切换的安装状态。
     NotInstalled(String),
+    /// 组件声明的直接依赖尚未安装或已损坏。
+    /// A declared direct dependency is absent or corrupt.
+    MissingDependency {
+        /// 正在安装的组件。Component being installed.
+        component: String,
+        /// 缺失或不可用的直接依赖。Missing or unusable direct dependency.
+        required: String,
+    },
+    /// 仍有活动组件依赖目标组件，因此不能安全卸载。
+    /// An active component still depends on the target, so removal would break the closure.
+    DependencyInUse {
+        /// 待卸载的组件。Component requested for removal.
+        component: String,
+        /// 阻止卸载的活动组件。Active component blocking removal.
+        dependent: String,
+    },
     /// 已保存的状态文件损坏或指向不存在的工件。
     CorruptState {
         /// 状态所属组件名。
@@ -213,6 +232,14 @@ impl std::fmt::Display for PackageError {
             Self::UnsafeArchive(reason) => write!(formatter, "不安全的归档：{reason}"),
             Self::Incompatible(reason) => write!(formatter, "组件不兼容：{reason}"),
             Self::NotInstalled(name) => write!(formatter, "组件未安装：{name}"),
+            Self::MissingDependency {
+                component,
+                required,
+            } => write!(formatter, "组件 {component} 缺少可用依赖：{required}"),
+            Self::DependencyInUse {
+                component,
+                dependent,
+            } => write!(formatter, "组件 {component} 仍被 {dependent} 依赖"),
             Self::CorruptState { name, reason } => {
                 write!(formatter, "组件状态损坏：{name}：{reason}")
             }
@@ -266,6 +293,7 @@ impl ComponentInstaller {
     ) -> Result<Installed, PackageError> {
         let manifest_text = fs::read_to_string(manifest_path)?;
         let manifest = ComponentManifest::parse(&manifest_text)?;
+        self.preflight_dependency_closure(&manifest)?;
         let actual = digest_file(archive_path)?;
         if !actual.eq_ignore_ascii_case(&manifest.archive_sha256) {
             return Err(PackageError::Digest {
@@ -351,6 +379,44 @@ impl ComponentInstaller {
         })
     }
 
+    /// 遍历并验证组件声明的完整依赖闭包，不跟随已访问组件形成环。
+    /// Walks and validates the complete declared dependency closure, stopping at visited components.
+    pub fn preflight_dependency_closure(
+        &self,
+        manifest: &ComponentManifest,
+    ) -> Result<(), PackageError> {
+        let mut pending: Vec<(String, String)> = manifest
+            .requires
+            .iter()
+            .map(|required| (manifest.name.clone(), required.clone()))
+            .collect();
+        let mut visited = BTreeSet::new();
+        while let Some((component, required)) = pending.pop() {
+            if !visited.insert(required.clone()) {
+                continue;
+            }
+            let dependency = match self.current(&required) {
+                Ok(dependency) => dependency,
+                Err(PackageError::NotInstalled(_)) => {
+                    return Err(PackageError::MissingDependency {
+                        component,
+                        required,
+                    })
+                }
+                Err(error) => return Err(error),
+            };
+            let dependency_manifest =
+                self.installed_manifest(&dependency.name, &dependency.version)?;
+            pending.extend(
+                dependency_manifest
+                    .requires
+                    .into_iter()
+                    .map(|nested| (required.clone(), nested)),
+            );
+        }
+        Ok(())
+    }
+
     /// 将当前组件切换到上一次激活的版本。
     ///
     /// Switches the active component back to its previously activated version.
@@ -361,6 +427,8 @@ impl ComponentInstaller {
             .clone()
             .ok_or_else(|| PackageError::NotInstalled(name.into()))?;
         self.verify_installed(name, &previous)?;
+        let previous_manifest = self.installed_manifest(name, &previous)?;
+        self.preflight_dependency_closure(&previous_manifest)?;
         let pending = self.write_state_temporary_values(name, &previous, Some(&state.current))?;
         if let Err(error) = fs::rename(&pending, self.state_path(name)) {
             let _ = fs::remove_file(pending);
@@ -378,6 +446,12 @@ impl ComponentInstaller {
         }
         let state_path = self.state_path(name);
         self.read_state(name)?;
+        if let Some(dependent) = self.active_dependent(name)? {
+            return Err(PackageError::DependencyInUse {
+                component: name.into(),
+                dependent,
+            });
+        }
         let component_root = self.root.join(COMPONENT_DIR).join(name);
         let trash = self.root.join(format!(".uninstall-{name}-{}", now_nanos()));
         if component_root.exists() {
@@ -622,6 +696,57 @@ impl ComponentInstaller {
         Ok(())
     }
 
+    fn installed_manifest(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Result<ComponentManifest, PackageError> {
+        let path = self.component_path(name, version).join(MANIFEST_NAME);
+        let text = fs::read_to_string(path).map_err(|error| PackageError::CorruptState {
+            name: name.into(),
+            reason: format!("读取清单失败：{error}"),
+        })?;
+        let manifest =
+            ComponentManifest::parse(&text).map_err(|error| PackageError::CorruptState {
+                name: name.into(),
+                reason: format!("清单无效：{error}"),
+            })?;
+        if manifest.name != name || manifest.version != version {
+            return Err(PackageError::CorruptState {
+                name: name.into(),
+                reason: "清单与安装路径不一致".into(),
+            });
+        }
+        Ok(manifest)
+    }
+
+    fn active_dependent(&self, component: &str) -> Result<Option<String>, PackageError> {
+        let state_dir = self.root.join(STATE_DIR);
+        for entry in fs::read_dir(state_dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("state") {
+                continue;
+            }
+            let dependent = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| PackageError::Incompatible("invalid component state".into()))?;
+            if dependent == component {
+                continue;
+            }
+            let state = self.read_state(dependent)?;
+            let manifest = self.installed_manifest(dependent, &state.current)?;
+            if manifest
+                .requires
+                .iter()
+                .any(|required| required == component)
+            {
+                return Ok(Some(dependent.into()));
+            }
+        }
+        Ok(None)
+    }
+
     fn ensure_layout(&self) -> Result<(), PackageError> {
         ensure_real_directory(&self.root)?;
         ensure_real_directory(&self.root.join(COMPONENT_DIR))?;
@@ -639,10 +764,7 @@ impl ComponentInstaller {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error.into()),
         }
-        for path in [
-            self.root.join(COMPONENT_DIR),
-            self.root.join(STATE_DIR),
-        ] {
+        for path in [self.root.join(COMPONENT_DIR), self.root.join(STATE_DIR)] {
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
                 Ok(_) => {
@@ -895,11 +1017,26 @@ mod tests {
     }
 
     fn manifest(dir: &Path, version: &str, digest: &str) -> PathBuf {
-        let path = dir.join(format!("{version}.component.manifest"));
+        component_manifest(dir, "wine", version, digest, "")
+    }
+
+    fn component_manifest(
+        dir: &Path,
+        name: &str,
+        version: &str,
+        digest: &str,
+        requires: &str,
+    ) -> PathBuf {
+        let path = dir.join(format!("{name}-{version}.component.manifest"));
+        let requires_line = if requires.is_empty() {
+            String::new()
+        } else {
+            format!("requires={requires}\n")
+        };
         fs::write(
             &path,
             format!(
-                "name=wine\nversion={version}\narch=x86_64\nsha256={digest}\nlicense=LGPL-2.1-or-later\nentrypoint=bin/wine\nrequires=linux-abi-1,vulkan-1\n"
+                "name={name}\nversion={version}\narch=x86_64\nsha256={digest}\nlicense=LGPL-2.1-or-later\nentrypoint=bin/wine\n{requires_line}"
             ),
         )
         .unwrap();
@@ -999,6 +1136,81 @@ mod tests {
             Err(PackageError::Incompatible(_))
         ));
         assert_eq!(installer.current("wine").unwrap().version, "1.0");
+        assert!(transient_entries(&root).is_empty());
+    }
+
+    #[test]
+    fn install_rejects_missing_or_corrupt_direct_dependencies_before_staging() {
+        let temp = TestDir::new("dependencies");
+        let root = temp.path().join("root");
+        let installer = ComponentInstaller::new(&root);
+        let (dependency_archive, dependency_digest) = archive(temp.path(), "abi");
+        let dependency =
+            component_manifest(temp.path(), "linux-abi-1", "1.0", &dependency_digest, "");
+        let (wine_archive, wine_digest) = archive(temp.path(), "wine");
+        let wine = component_manifest(temp.path(), "wine", "1.0", &wine_digest, "linux-abi-1");
+
+        assert!(matches!(
+            installer.install(&wine, &wine_archive),
+            Err(PackageError::MissingDependency {
+                component,
+                required
+            }) if component == "wine" && required == "linux-abi-1"
+        ));
+        assert!(!root.exists());
+        assert!(transient_entries(&root).is_empty());
+
+        installer.install(&dependency, &dependency_archive).unwrap();
+        installer.install(&wine, &wine_archive).unwrap();
+        assert_eq!(installer.current("wine").unwrap().version, "1.0");
+
+        let state = root.join(STATE_DIR).join("linux-abi-1.state");
+        fs::write(&state, b"corrupt").unwrap();
+        let next_wine = component_manifest(temp.path(), "wine", "2.0", &wine_digest, "linux-abi-1");
+        assert!(matches!(
+            installer.install(&next_wine, &wine_archive),
+            Err(PackageError::CorruptState { name, .. }) if name == "linux-abi-1"
+        ));
+        assert!(transient_entries(&root).is_empty());
+    }
+
+    #[test]
+    fn dependency_closure_guards_uninstall_and_rollback() {
+        let temp = TestDir::new("dependency-closure");
+        let root = temp.path().join("root");
+        let installer = ComponentInstaller::new(&root);
+        let (base_archive, base_digest) = archive(temp.path(), "base");
+        let base = component_manifest(temp.path(), "base-1", "1.0", &base_digest, "");
+        let (abi_archive, abi_digest) = archive(temp.path(), "abi-closure");
+        let abi = component_manifest(temp.path(), "linux-abi-1", "1.0", &abi_digest, "base-1");
+        let (wine1_archive, wine1_digest) = archive(temp.path(), "wine-closure-1");
+        let wine1 = component_manifest(temp.path(), "wine", "1.0", &wine1_digest, "linux-abi-1");
+        let (wine2_archive, wine2_digest) = archive(temp.path(), "wine-closure-2");
+        let wine2 = component_manifest(temp.path(), "wine", "2.0", &wine2_digest, "linux-abi-1");
+
+        installer.install(&base, &base_archive).unwrap();
+        installer.install(&abi, &abi_archive).unwrap();
+        installer.install(&wine1, &wine1_archive).unwrap();
+        installer.install(&wine2, &wine2_archive).unwrap();
+
+        assert!(matches!(
+            installer.uninstall("base-1"),
+            Err(PackageError::DependencyInUse {
+                component,
+                dependent
+            }) if component == "base-1" && dependent == "linux-abi-1"
+        ));
+        assert_eq!(installer.current("base-1").unwrap().version, "1.0");
+
+        fs::remove_file(root.join(STATE_DIR).join("base-1.state")).unwrap();
+        assert!(matches!(
+            installer.rollback("wine"),
+            Err(PackageError::MissingDependency {
+                component,
+                required
+            }) if component == "linux-abi-1" && required == "base-1"
+        ));
+        assert_eq!(installer.current("wine").unwrap().version, "2.0");
         assert!(transient_entries(&root).is_empty());
     }
 
