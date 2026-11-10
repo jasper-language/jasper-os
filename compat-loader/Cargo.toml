@@ -1,0 +1,8 @@
+[package]
+name = "jasper-compat-loader"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+goblin = { version = "=0.10.7", default-features = false, features = ["alloc", "elf32", "elf64", "endian_fd"] }
