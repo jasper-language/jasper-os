@@ -22,6 +22,34 @@ use crate::manifest::{
 pub const MAX_MANIFEST_CBOR_BYTES: usize = 8192;
 /// 单个清单最多包含的工件数。Maximum artifacts in one manifest.
 pub const MAX_ARTIFACTS: usize = 64;
+/// 单个清单最多包含的直接依赖数。Maximum direct dependencies in one manifest.
+pub const MAX_DEPENDENCIES: usize = 64;
+
+/// 更新发布通道。
+/// Update release channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Channel {
+    /// 开发通道。Development channel.
+    Dev,
+    /// 预览通道。Preview channel.
+    Preview,
+    /// 稳定通道。Stable channel.
+    Stable,
+    /// 长期维护通道。Long-term-support channel.
+    Lts,
+}
+
+impl Channel {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "dev" => Self::Dev,
+            "preview" => Self::Preview,
+            "stable" => Self::Stable,
+            "lts" => Self::Lts,
+            _ => return None,
+        })
+    }
+}
 
 /// 清单中的工件类别。
 /// Artifact classes in a manifest.
@@ -76,10 +104,20 @@ struct ArtifactWire {
 #[derive(Serialize, Deserialize)]
 struct ManifestWire {
     schema_version: u16,
+    channel: String,
     release_sequence: u64,
     security_epoch: u64,
+    created_at: u64,
+    expires_at: u64,
+    target_abi_min: u16,
+    target_abi_max: u16,
+    data_schema_min: u32,
+    data_schema_max: u32,
+    migration_reversible: bool,
+    rollback_allowed: bool,
     target_profile: [u8; 32],
     signer: [u8; 32],
+    dependencies: Vec<String>,
     artifacts: Vec<ArtifactWire>,
 }
 
@@ -97,8 +135,34 @@ pub enum CborManifestError {
     InvalidArtifact,
     /// 工件名称或摘要重复。Artifact name or digest is duplicated.
     DuplicateArtifact,
+    /// 通道、ABI、Schema、迁移或依赖策略非法。Channel, ABI, schema, migration, or dependency policy is invalid.
+    InvalidPolicy,
     /// 签名、信任、反回滚或 Profile 验证失败。Signature, trust, anti-rollback, or profile failure.
     Manifest(ManifestError),
+}
+
+/// 通过 CBOR、工件和发布策略验证的清单。
+/// Manifest that passed CBOR, artifact, and release-policy verification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedCborManifest {
+    /// 基础清单验证结果。Base manifest verification result.
+    pub manifest: VerifiedManifest,
+    /// 发布通道。Release channel.
+    pub channel: Channel,
+    /// 目标原生 ABI 范围。Target native-ABI range.
+    pub target_abi: (u16, u16),
+    /// 数据 Schema 范围。Data-schema range.
+    pub data_schema: (u32, u32),
+    /// 清单创建时间。Manifest creation time.
+    pub created_at: u64,
+    /// 清单过期时间；零表示不按墙钟过期。Manifest expiry; zero means no wall-clock expiry.
+    pub expires_at: u64,
+    /// 迁移是否可逆。Whether migration is reversible.
+    pub migration_reversible: bool,
+    /// 是否允许自动回滚。Whether automatic rollback is allowed.
+    pub rollback_allowed: bool,
+    /// 直接依赖名称。Direct dependency names.
+    pub dependencies: Vec<String>,
 }
 
 /// 解析规范 CBOR、验证每个工件并执行完整签名/信任/反回滚检查。
@@ -108,19 +172,29 @@ pub fn verify_cbor_manifest(
     target: UpdateTarget,
     bytes: &[u8],
     signature: [u8; 64],
-) -> Result<VerifiedManifest, CborManifestError> {
+) -> Result<VerifiedCborManifest, CborManifestError> {
     if bytes.is_empty() || bytes.len() > MAX_MANIFEST_CBOR_BYTES {
         return Err(CborManifestError::TooLarge);
     }
     let wire: ManifestWire =
         ciborium::de::from_reader(bytes).map_err(|_| CborManifestError::Decode)?;
+    let channel = Channel::parse(&wire.channel).ok_or(CborManifestError::InvalidPolicy)?;
+    if wire.target_abi_min == 0
+        || wire.target_abi_min > wire.target_abi_max
+        || wire.data_schema_min > wire.data_schema_max
+        || (wire.expires_at != 0 && wire.expires_at < wire.created_at)
+        || (!wire.migration_reversible && wire.rollback_allowed)
+    {
+        return Err(CborManifestError::InvalidPolicy);
+    }
+    validate_dependencies(&wire.dependencies)?;
     validate_artifacts(&wire.artifacts)?;
     let mut canonical = Vec::with_capacity(bytes.len());
     ciborium::ser::into_writer(&wire, &mut canonical).map_err(|_| CborManifestError::Decode)?;
     if canonical != bytes {
         return Err(CborManifestError::NonCanonical);
     }
-    verify_manifest(
+    let manifest = verify_manifest(
         policy,
         target,
         ManifestEnvelope {
@@ -133,7 +207,37 @@ pub fn verify_cbor_manifest(
             signature,
         },
     )
-    .map_err(CborManifestError::Manifest)
+    .map_err(CborManifestError::Manifest)?;
+    Ok(VerifiedCborManifest {
+        manifest,
+        channel,
+        target_abi: (wire.target_abi_min, wire.target_abi_max),
+        data_schema: (wire.data_schema_min, wire.data_schema_max),
+        created_at: wire.created_at,
+        expires_at: wire.expires_at,
+        migration_reversible: wire.migration_reversible,
+        rollback_allowed: wire.rollback_allowed,
+        dependencies: wire.dependencies,
+    })
+}
+
+fn validate_dependencies(dependencies: &[String]) -> Result<(), CborManifestError> {
+    if dependencies.len() > MAX_DEPENDENCIES {
+        return Err(CborManifestError::InvalidPolicy);
+    }
+    let mut unique = BTreeSet::new();
+    for dependency in dependencies {
+        if dependency.is_empty()
+            || dependency.len() > 63
+            || !dependency
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            || !unique.insert(dependency.as_str())
+        {
+            return Err(CborManifestError::InvalidPolicy);
+        }
+    }
+    Ok(())
 }
 
 fn validate_artifacts(artifacts: &[ArtifactWire]) -> Result<(), CborManifestError> {
@@ -176,10 +280,20 @@ mod tests {
     fn encode(key: &SigningKey, artifacts: &[ArtifactWire]) -> Vec<u8> {
         let wire = ManifestWire {
             schema_version: MANIFEST_SCHEMA_VERSION,
+            channel: String::from("stable"),
             release_sequence: 9,
             security_epoch: 4,
+            created_at: 100,
+            expires_at: 200,
+            target_abi_min: 3,
+            target_abi_max: 3,
+            data_schema_min: 1,
+            data_schema_max: 2,
+            migration_reversible: true,
+            rollback_allowed: true,
             target_profile: PROFILE,
             signer: key.verifying_key().to_bytes(),
+            dependencies: alloc::vec![String::from("jasper.base")],
             artifacts: artifacts.to_vec(),
         };
         let mut bytes = Vec::new();
@@ -229,17 +343,23 @@ mod tests {
             signature,
         )
         .unwrap();
-        assert_eq!(verified.release_sequence, 9);
+        assert_eq!(verified.manifest.release_sequence, 9);
+        assert_eq!(verified.channel, Channel::Stable);
+        assert_eq!(verified.target_abi, (3, 3));
+        assert_eq!(verified.data_schema, (1, 2));
+        assert_eq!(verified.created_at, 100);
+        assert_eq!(verified.expires_at, 200);
+        assert_eq!(verified.dependencies, [String::from("jasper.base")]);
         let grant = LocalInstallGrant {
             locally_authenticated: true,
             purpose: 1,
-            manifest_sha256: verified.manifest_sha256,
+            manifest_sha256: verified.manifest.manifest_sha256,
             profile: PROFILE,
             expires_at: 10,
         };
         assert_eq!(
-            crate::manifest::authorize_install(verified, grant, 9),
-            Ok(verified)
+            crate::manifest::authorize_install(verified.manifest, grant, 9),
+            Ok(verified.manifest)
         );
     }
 
@@ -310,5 +430,87 @@ mod tests {
             ),
             Err(CborManifestError::NonCanonical)
         );
+    }
+
+    #[test]
+    fn contradictory_migration_and_rollback_policy_is_rejected() {
+        let (_, bytes, signature) = fixture();
+        let mut wire: ManifestWire = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        wire.migration_reversible = false;
+        wire.rollback_allowed = true;
+        let mut invalid = Vec::new();
+        ciborium::ser::into_writer(&wire, &mut invalid).unwrap();
+        assert_eq!(
+            verify_cbor_manifest(
+                TrustPolicy {
+                    trusted_keys: &[],
+                    revoked_keys: &[],
+                    minimum_security_epoch: 0,
+                },
+                UpdateTarget {
+                    rollback_floor: 0,
+                    profile: PROFILE,
+                },
+                &invalid,
+                signature,
+            ),
+            Err(CborManifestError::InvalidPolicy)
+        );
+        assert_eq!(
+            validate_dependencies(&[String::from("one"), String::from("one")]),
+            Err(CborManifestError::InvalidPolicy)
+        );
+    }
+
+    #[test]
+    fn every_declared_manifest_policy_range_fails_closed() {
+        let (_, bytes, signature) = fixture();
+        let reject = |mutate: &dyn Fn(&mut ManifestWire)| {
+            let mut wire: ManifestWire = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+            mutate(&mut wire);
+            let mut invalid = Vec::new();
+            ciborium::ser::into_writer(&wire, &mut invalid).unwrap();
+            assert_eq!(
+                verify_cbor_manifest(
+                    TrustPolicy {
+                        trusted_keys: &[],
+                        revoked_keys: &[],
+                        minimum_security_epoch: 0,
+                    },
+                    UpdateTarget {
+                        rollback_floor: 0,
+                        profile: PROFILE,
+                    },
+                    &invalid,
+                    signature,
+                ),
+                Err(CborManifestError::InvalidPolicy)
+            );
+        };
+
+        reject(&|wire| wire.channel = String::from("nightly"));
+        reject(&|wire| wire.target_abi_min = 0);
+        reject(&|wire| {
+            wire.target_abi_min = 4;
+            wire.target_abi_max = 3;
+        });
+        reject(&|wire| {
+            wire.data_schema_min = 3;
+            wire.data_schema_max = 2;
+        });
+        reject(&|wire| {
+            wire.created_at = 201;
+            wire.expires_at = 200;
+        });
+        reject(&|wire| wire.dependencies = alloc::vec![String::from("bad/name")]);
+        reject(&|wire| {
+            wire.dependencies = (0..=MAX_DEPENDENCIES)
+                .map(|index| {
+                    let mut name = String::from("dep");
+                    name.push((b'0' + (index % 10) as u8) as char);
+                    name
+                })
+                .collect();
+        });
     }
 }
