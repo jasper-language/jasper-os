@@ -53,7 +53,15 @@ for cpus in 4 8; do
     echo "compat-dynamic-smp: cpus=$cpus lacks getconf success evidence" >&2
     exit 1
   }
-  grep -q '^\[JSR-COMPAT-DYNAMIC-SUMMARY\] true=true getconf=true resources=true failed=0' "$serial" || {
+  grep -q '^jasper-dynamic' "$serial" || {
+    echo "compat-dynamic-smp: cpus=$cpus lacks printf output" >&2
+    exit 1
+  }
+  grep -qE '^\[JSR-COMPAT-DYNAMIC-PRINTF\] .*libraries=6 .*exit_zero=true resources=true failed=0' "$serial" || {
+    echo "compat-dynamic-smp: cpus=$cpus lacks multi-library printf success evidence" >&2
+    exit 1
+  }
+  grep -q '^\[JSR-COMPAT-DYNAMIC-SUMMARY\] true=true getconf=true printf=true resources=true .*failed=0' "$serial" || {
     echo "compat-dynamic-smp: cpus=$cpus lacks combined dynamic summary" >&2
     exit 1
   }
