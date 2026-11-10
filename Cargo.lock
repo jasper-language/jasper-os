@@ -137,7 +137,7 @@ dependencies = [
  "anyhow",
  "bootloader-boot-config",
  "fatfs",
- "gpt",
+ "gpt 3.1.0",
  "llvm-tools",
  "mbrman",
  "serde_json",
@@ -592,6 +592,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpt"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3696fafb1ecdcc2ae3ce337de73e9202806068594b77d22fdf2f3573c5ec2219"
+dependencies = [
+ "bitflags 2.13.2",
+ "crc",
+ "simple-bytes",
+ "uuid",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -773,10 +785,12 @@ dependencies = [
 name = "jasper-lifecycle-staging"
 version = "0.1.0"
 dependencies = [
+ "gpt 4.1.0",
  "jasper-lifecycle-model",
  "libc",
  "rustix",
  "sha2",
+ "uuid",
 ]
 
 [[package]]
@@ -1362,6 +1376,12 @@ name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+
+[[package]]
+name = "simple-bytes"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c11532d9d241904f095185f35dcdaf930b1427a94d5b01d7002d74ba19b44cc4"
 
 [[package]]
 name = "siphasher"

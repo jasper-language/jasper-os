@@ -12,6 +12,7 @@
 #![deny(missing_docs)]
 
 pub mod control;
+pub mod gpt_layout;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
