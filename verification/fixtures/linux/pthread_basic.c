@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include <pthread.h>
+#include <errno.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -12,6 +13,7 @@ static pthread_cond_t condition = PTHREAD_COND_INITIALIZER;
 static atomic_int completed;
 static uintptr_t shared_word;
 static atomic_uint worker_tids[2];
+static pthread_mutex_t robust_mutex;
 
 static void *worker(void *argument) {
     uintptr_t marker = (uintptr_t)argument;
@@ -24,6 +26,14 @@ static void *worker(void *argument) {
     pthread_cond_signal(&condition);
     pthread_mutex_unlock(&mutex);
     return (void *)(marker ^ UINT64_C(0x55aa55aa));
+}
+
+static void *robust_owner(void *argument) {
+    (void)argument;
+    if (pthread_mutex_lock(&robust_mutex) != 0) {
+        return (void *)UINT64_C(1);
+    }
+    pthread_exit((void *)UINT64_C(0x700));
 }
 
 int main(void) {
@@ -65,6 +75,26 @@ int main(void) {
         second_result != (void *)(UINT64_C(0x200) ^ UINT64_C(0x55aa55aa))) {
         puts("pthread-result-mismatch");
         return 12;
+    }
+
+    pthread_mutexattr_t attributes;
+    pthread_t robust_thread;
+    void *robust_result = 0;
+    if (pthread_mutexattr_init(&attributes) != 0 ||
+        pthread_mutexattr_setrobust(&attributes, PTHREAD_MUTEX_ROBUST) != 0 ||
+        pthread_mutex_init(&robust_mutex, &attributes) != 0 ||
+        pthread_create(&robust_thread, 0, robust_owner, 0) != 0 ||
+        pthread_join(robust_thread, &robust_result) != 0 ||
+        robust_result != (void *)UINT64_C(0x700)) {
+        puts("pthread-robust-setup-failed");
+        return 13;
+    }
+    int robust_lock = pthread_mutex_lock(&robust_mutex);
+    if (robust_lock != EOWNERDEAD ||
+        pthread_mutex_consistent(&robust_mutex) != 0 ||
+        pthread_mutex_unlock(&robust_mutex) != 0) {
+        printf("pthread-robust-failed:%d\n", robust_lock);
+        return 14;
     }
 
     puts("jasper-pthread-ok");

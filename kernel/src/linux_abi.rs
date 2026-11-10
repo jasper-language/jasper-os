@@ -294,7 +294,7 @@ fn register_rseq(process: ObjId, address: u64, length: u64, flags: u64, signatur
 /// 在线程退出时清零 `clear_child_tid` 并唤醒 Linux join 等待者。
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
 pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
-    let clear = {
+    let (clear, tid, robust_list) = {
         let mut state = COMPAT.lock();
         let Some(slot) = state
             .threads
@@ -304,12 +304,77 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
             return;
         };
         let entry = state.threads[slot].take().expect("live Linux thread");
-        entry.clear_child_tid
+        (entry.clear_child_tid, entry.tid, entry.robust_list)
     };
+    if robust_list != 0 {
+        let handled = process_robust_list(process, tid, robust_list);
+        crate::kprintln!("[JSR-LINUX-ROBUST] handled={handled} tid={tid}");
+    }
     if clear != 0 {
         let _ = proc::write(process, clear, &0u32.to_le_bytes());
         let _ = futex_wake(process, clear, usize::MAX);
     }
+}
+
+fn process_robust_list(process: ObjId, tid: u32, head: u64) -> usize {
+    const MAX_NODES: usize = 64;
+    const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
+    let window = crate::arch::USER_WINDOW;
+    let Some(first) = proc::read_u64(process, head) else {
+        return 0;
+    };
+    let Some(offset) = proc::read_u64(process, head + 8) else {
+        return 0;
+    };
+    let Some(pending) = proc::read_u64(process, head + 16) else {
+        return 0;
+    };
+    let offset = offset as i64;
+    let mut visited = [0u64; MAX_NODES];
+    let mut visited_len = 0usize;
+    let mut handled = 0usize;
+    for node in [pending, first] {
+        let mut current = node;
+        while current != 0 && current != head && visited_len < MAX_NODES {
+            if current < window.0
+                || current + 8 > window.1
+                || visited[..visited_len].contains(&current)
+            {
+                break;
+            }
+            visited[visited_len] = current;
+            visited_len += 1;
+            let futex = current as i128 + i128::from(offset);
+            if futex >= i128::from(window.0)
+                && futex + 4 <= i128::from(window.1)
+                && futex as u64 % 4 == 0
+            {
+                let address = futex as u64;
+                let mut value = [0u8; 4];
+                if proc::read(process, address, &mut value).is_ok()
+                    && u32::from_le_bytes(value) == tid
+                    && proc::write(
+                        process,
+                        address,
+                        &(tid | FUTEX_OWNER_DIED).to_le_bytes(),
+                    )
+                    .is_ok()
+                {
+                    let _ = futex_wake(process, address, 1);
+                    handled += 1;
+                }
+            }
+            let Some(next) = proc::read_u64(process, current) else {
+                break;
+            };
+            current = next;
+        }
+        if node == pending && first != 0 {
+            // Pending is not part of the circular list; visit it once, then walk `first`.
+            continue;
+        }
+    }
+    handled
 }
 
 fn futex_value(process: ObjId, address: u64) -> Result<u32, CompatErrno> {
