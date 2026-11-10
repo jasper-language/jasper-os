@@ -264,8 +264,18 @@ pub fn install_uefi_esp(
     normalize_fat32_partition(path, esp)?;
     verify_uefi_esp_contents(path, total_bytes, &source_fs.root_dir(), esp)?;
     let source_root = source_fs.root_dir();
-    let bootloader_bytes = file_size(&source_root, "efi/boot/bootx64.efi")?;
-    let kernel_bytes = file_size(&source_root, "kernel-x86_64")?;
+    let bootloader_bytes = if source_root.open_file("efi/boot/jasper-loader.efi").is_ok() {
+        file_size(&source_root, "efi/boot/jasper-loader.efi")?
+    } else {
+        file_size(&source_root, "efi/boot/bootx64.efi")?
+    };
+    let kernel_bytes = if source_root.open_file("kernel-x86_64").is_ok() {
+        file_size(&source_root, "kernel-x86_64")?
+    } else {
+        file_size(&source_root, "slots/a/kernel-x86_64")?
+            .checked_add(file_size(&source_root, "slots/b/kernel-x86_64")?)
+            .ok_or_else(|| GptImageError::Tool("slot kernel size overflow".into()))?
+    };
     Ok(EspInstallReceipt {
         bootloader_bytes,
         kernel_bytes,
@@ -488,38 +498,63 @@ fn verify_uefi_esp_contents(
     )?;
     let filesystem = fatfs::FileSystem::new(slice, fatfs::FsOptions::new())?;
     let root = filesystem.root_dir();
-    for path in [
-        "efi/boot/bootx64.efi",
-        "kernel-x86_64",
-        "boot.json",
-        "ramdisk",
-    ] {
-        let source = expected_root.open_file(path);
-        let target = root.open_file(path);
-        match (source, target) {
-            (Ok(mut source), Ok(mut target)) => {
-                if digest_file(&mut source)? != digest_file(&mut target)? {
-                    return Err(GptImageError::Tool(format!(
-                        "installed ESP file digest mismatch: {path}"
-                    )));
-                }
-            }
-            (Err(_), Err(error)) if error.kind() == io::ErrorKind::NotFound => {}
-            (Ok(_), Err(_)) => {
-                return Err(GptImageError::Tool(format!(
-                    "installed ESP is missing {path}"
-                )))
-            }
-            (Err(_), Ok(_)) => {
-                return Err(GptImageError::Tool(format!(
-                    "installed ESP contains unexpected {path}"
-                )))
-            }
-            (Err(_), Err(error)) => return Err(GptImageError::Fat(error)),
-        }
+    let mut expected = BTreeMap::new();
+    collect_fat_tree(expected_root, "", &mut expected)?;
+    let mut installed = BTreeMap::new();
+    collect_fat_tree(&root, "", &mut installed)?;
+    if expected != installed {
+        return Err(GptImageError::Tool(
+            "installed ESP tree differs from mature bootloader output".into(),
+        ));
     }
     drop(root);
     filesystem.unmount()?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FatFingerprint {
+    Directory,
+    File { bytes: u64, digest: [u8; 32] },
+}
+
+fn collect_fat_tree<T: Read + Seek + Write>(
+    directory: &fatfs::Dir<T>,
+    prefix: &str,
+    entries: &mut BTreeMap<String, FatFingerprint>,
+) -> Result<(), GptImageError> {
+    for entry in directory.iter() {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            continue;
+        }
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let fingerprint = if entry.is_dir() {
+            FatFingerprint::Directory
+        } else if entry.is_file() {
+            let mut file = directory.open_file(&name)?;
+            let (bytes, digest) = digest_file(&mut file)?;
+            FatFingerprint::File { bytes, digest }
+        } else {
+            return Err(GptImageError::Tool(format!(
+                "unsupported FAT entry type in verification: {path}"
+            )));
+        };
+        if entries.insert(path.clone(), fingerprint).is_some() {
+            return Err(GptImageError::Tool(format!(
+                "duplicate FAT path in verification: {path}"
+            )));
+        }
+        if entry.is_dir() {
+            let child = directory.open_dir(&name)?;
+            collect_fat_tree(&child, &path, entries)?;
+        }
+    }
     Ok(())
 }
 
@@ -622,17 +657,21 @@ fn file_size(root: &fatfs::Dir<fs::File>, path: &str) -> Result<u64, GptImageErr
     Ok(io::copy(&mut file, &mut io::sink())?)
 }
 
-fn digest_file<T: Read + Seek + Write>(file: &mut fatfs::File<'_, T>) -> io::Result<[u8; 32]> {
+fn digest_file<T: Read + Seek + Write>(
+    file: &mut fatfs::File<'_, T>,
+) -> io::Result<(u64, [u8; 32])> {
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
+    let mut bytes = 0u64;
     loop {
         let count = file.read(&mut buffer)?;
         if count == 0 {
             break;
         }
+        bytes += count as u64;
         hasher.update(&buffer[..count]);
     }
-    Ok(hasher.finalize().into())
+    Ok((bytes, hasher.finalize().into()))
 }
 
 #[derive(Default)]
@@ -693,7 +732,7 @@ fn open_image_ro(path: &Path) -> Result<fs::File, GptImageError> {
         .map_err(GptImageError::Fat)
 }
 
-fn ensure_partition_range_zero(
+pub(crate) fn ensure_partition_range_zero(
     path: &Path,
     partition: jasper_lifecycle_model::layout::Partition,
 ) -> Result<(), GptImageError> {

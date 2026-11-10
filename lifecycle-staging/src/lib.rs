@@ -13,6 +13,7 @@
 
 pub mod control;
 pub mod gpt_layout;
+pub mod p0_control;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

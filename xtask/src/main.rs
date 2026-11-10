@@ -8,6 +8,8 @@
 //       Build an OVMF/UEFI GPT boot image; the default command remains BIOS.
 //   xtask uefi-esp <kernel-elf> <out-fat-image>
 //       Build the bootable UEFI FAT partition without an outer MBR/GPT.
+//   xtask uefi-managed-esp <kernel-a> <kernel-b> <boot-manager> <out-fat-image>
+//       Build a P0 A/B FAT partition managed by the Jasper UEFI selector.
 //   xtask bootcap <in-elf> <out-elf> [objects=N] [tasks=N] [rt=N] [record=corrupt]
 //       改写内核镜像里的启动容量记录（不重新编译即可以不同容量启动）；未给出的项不覆盖。
 //       只检查语法，不检查取值范围：越界值由内核在启动期拒绝，这正是要验收的行为。
@@ -18,6 +20,7 @@
 //       Generate one immutable ABI contract snapshot or check the complete snapshot set.
 
 use kernel_core::capacity::{self, Overrides, RECORD_LEN, RECORD_MAGIC};
+use std::io::Write as _;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -47,6 +50,13 @@ fn main() {
         println!("wrote {out} ({size} bytes)");
         return;
     }
+    if args.first().map(String::as_str) == Some("uefi-managed-esp") {
+        if let Err(error) = managed_uefi_esp(&args[1..]) {
+            eprintln!("xtask uefi-managed-esp: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let uefi = args.first().map(String::as_str) == Some("uefi");
     let args = if uefi { &args[1..] } else { &args[..] };
     let kernel = args.first().expect("kernel elf path");
@@ -62,6 +72,92 @@ fn main() {
     }
     let sz = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
     println!("wrote {out} ({sz} bytes)");
+}
+
+fn managed_uefi_esp(args: &[String]) -> Result<(), String> {
+    let [kernel_a, kernel_b, manager, output] = args else {
+        return Err(
+            "usage: xtask uefi-managed-esp <kernel-a> <kernel-b> <boot-manager> <out-fat-image>"
+                .into(),
+        );
+    };
+    let kernel_a = std::fs::read(kernel_a).map_err(|error| format!("read slot A: {error}"))?;
+    let kernel_b = std::fs::read(kernel_b).map_err(|error| format!("read slot B: {error}"))?;
+    let manager = std::fs::read(manager).map_err(|error| format!("read boot manager: {error}"))?;
+    if kernel_a.is_empty() || kernel_b.is_empty() || manager.is_empty() {
+        return Err("managed ESP inputs must be non-empty".into());
+    }
+
+    let output_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(output)
+        .map_err(|error| format!("create {output}: {error}"))?;
+    output_file
+        .set_len(64 * 1024 * 1024)
+        .map_err(|error| format!("size {output}: {error}"))?;
+    fatfs::format_volume(
+        output_file,
+        fatfs::FormatVolumeOptions::new()
+            .bytes_per_sector(512)
+            .total_sectors(131_072)
+            .fat_type(fatfs::FatType::Fat32)
+            .fats(2)
+            .volume_label(*b"JASPER ESP "),
+    )
+    .map_err(|error| format!("format {output}: {error}"))?;
+
+    let output_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(output)
+        .map_err(|error| format!("reopen {output}: {error}"))?;
+    let filesystem = fatfs::FileSystem::new(output_file, fatfs::FsOptions::new())
+        .map_err(|error| format!("open {output}: {error}"))?;
+    let root = filesystem.root_dir();
+    root.create_dir("efi")
+        .map_err(|error| format!("create EFI directory: {error}"))?;
+    root.create_dir("efi/boot")
+        .map_err(|error| format!("create EFI boot directory: {error}"))?;
+    root.create_dir("slots")
+        .map_err(|error| format!("create slots directory: {error}"))?;
+    root.create_dir("slots/a")
+        .map_err(|error| format!("create slot A directory: {error}"))?;
+    root.create_dir("slots/b")
+        .map_err(|error| format!("create slot B directory: {error}"))?;
+    write_fat_file(&root, "efi/boot/bootx64.efi", &manager)?;
+    write_fat_file(&root, "slots/a/kernel-x86_64", &kernel_a)?;
+    write_fat_file(&root, "slots/b/kernel-x86_64", &kernel_b)?;
+    drop(root);
+    filesystem
+        .unmount()
+        .map_err(|error| format!("close {output}: {error}"))?;
+    let file = std::fs::File::open(output).map_err(|error| format!("reopen {output}: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("flush {output}: {error}"))?;
+    println!(
+        "wrote {output} ({} bytes, slot_a={} slot_b={} manager={})",
+        64 * 1024 * 1024,
+        kernel_a.len(),
+        kernel_b.len(),
+        manager.len()
+    );
+    Ok(())
+}
+
+fn write_fat_file(
+    root: &fatfs::Dir<std::fs::File>,
+    path: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let mut file = root
+        .create_file(path)
+        .map_err(|error| format!("create FAT file {path}: {error}"))?;
+    file.truncate()
+        .and_then(|_| file.write_all(bytes))
+        .and_then(|_| file.flush())
+        .map_err(|error| format!("write FAT file {path}: {error}"))
 }
 
 /// 在镜像里定位启动容量记录：标记必须恰好出现一次（出现多次就无法确定哪一份是内核真正读取的那份）。
