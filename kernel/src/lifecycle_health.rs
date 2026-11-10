@@ -14,12 +14,14 @@ use crc::{Crc, CRC_32_ISO_HDLC};
 use jasper_lifecycle_boot::{
     recover, BootControlError, ControlIo, ControlIoError, CONTROL_RECORD_BYTES, P0_CONTROL_A_LBA,
     P0_CONTROL_A_PARTITION_GUID, P0_CONTROL_A_TYPE_GUID, P0_CONTROL_B_LBA,
-    P0_CONTROL_B_PARTITION_GUID, P0_CONTROL_B_TYPE_GUID, P0_DISK_GUID,
+    P0_CONTROL_B_PARTITION_GUID, P0_CONTROL_B_TYPE_GUID, P0_DISK_GUID, P0_SYSTEM_A_LBA,
+    P0_SYSTEM_B_LBA, P0_SYSTEM_BYTES, Slot,
 };
 #[cfg(not(feature = "lifecycle-health-fail-verify"))]
 use jasper_lifecycle_boot::commit;
 use jasper_lifecycle_boot::CommitError;
 use kernel_core::block::{self, Request, Terminal};
+use kernel_core::ext4_view::{Ext4ByteSource, Ext4Reader, Ext4SourceError};
 
 use crate::blk::BlockDevice;
 use crate::sync::IrqSpinLock;
@@ -50,6 +52,14 @@ pub enum HealthError {
     GptCrc,
     /// Control 分区项不符。A Control partition entry does not match.
     GptPartition,
+    /// 所选系统 ext4 无法挂载。The selected system ext4 cannot be mounted.
+    RootMount,
+    /// 系统根卷标不符。The system-root label does not match.
+    RootLabel,
+    /// 系统根标识文件缺失或不可读。The root marker is missing or unreadable.
+    RootFile,
+    /// 系统根标识内容不符。The root marker content does not match.
+    RootContent,
     /// 两份控制记录不能恢复。The two control records cannot be recovered.
     Recovery(BootControlError),
     /// 健康状态机拒绝当前槽。The health state machine rejected the current slot.
@@ -70,6 +80,10 @@ impl HealthError {
             Self::GptHeader => "gpt_header",
             Self::GptCrc => "gpt_crc",
             Self::GptPartition => "gpt_partition",
+            Self::RootMount => "root_mount",
+            Self::RootLabel => "root_label",
+            Self::RootFile => "root_file",
+            Self::RootContent => "root_content",
             Self::Recovery(_) => "recovery",
             Self::State(_) => "state",
             Self::Commit(_) => "commit",
@@ -185,6 +199,53 @@ impl ControlIo for KernelControlIo {
     }
 }
 
+struct PartitionExt4Source {
+    device: Arc<IrqSpinLock<BlockDevice>>,
+    start_lba: u64,
+}
+
+impl Ext4ByteSource for PartitionExt4Source {
+    fn read_exact(&mut self, offset: u64, dst: &mut [u8]) -> Result<(), Ext4SourceError> {
+        let mut done = 0usize;
+        let mut page = [0u8; block::IO_ALIGNMENT as usize];
+        while done < dst.len() {
+            let absolute = offset.checked_add(done as u64).ok_or(Ext4SourceError)?;
+            let block = absolute / block::IO_ALIGNMENT;
+            let inner = (absolute % block::IO_ALIGNMENT) as usize;
+            let take = (dst.len() - done).min(page.len() - inner);
+            if absolute
+                .checked_add(take as u64)
+                .filter(|end| *end <= P0_SYSTEM_BYTES)
+                .is_none()
+            {
+                return Err(Ext4SourceError);
+            }
+            let sector = self
+                .start_lba
+                .checked_add(
+                    block
+                        .checked_mul(block::SECTORS_PER_IO_UNIT)
+                        .ok_or(Ext4SourceError)?,
+                )
+                .ok_or(Ext4SourceError)?;
+            let mut device = self.device.lock();
+            if !matches!(
+                device.execute(Request::read(sector, 1), false),
+                Ok(Terminal::Completed)
+            ) {
+                return Err(Ext4SourceError);
+            }
+            device
+                .copy_prefix(&mut page)
+                .map_err(|_| Ext4SourceError)?;
+            drop(device);
+            dst[done..done + take].copy_from_slice(&page[inner..inner + take]);
+            done += take;
+        }
+        Ok(())
+    }
+}
+
 fn read_u32(bytes: &[u8]) -> u32 {
     u32::from_le_bytes(bytes[..4].try_into().expect("fixed u32 field"))
 }
@@ -273,6 +334,42 @@ fn validate_partition_entry(
     Ok(())
 }
 
+fn validate_system_root(
+    device: Arc<IrqSpinLock<BlockDevice>>,
+    slot: Slot,
+    release: u64,
+) -> Result<(), HealthError> {
+    let (start_lba, label) = match slot {
+        Slot::A => (P0_SYSTEM_A_LBA, b"JASPER-SYS-A".as_slice()),
+        Slot::B => (P0_SYSTEM_B_LBA, b"JASPER-SYS-B".as_slice()),
+    };
+    let root = Ext4Reader::open(PartitionExt4Source { device, start_lba })
+        .map_err(|_| HealthError::RootMount)?;
+    let actual_label = root
+        .label()
+        .split(|byte| *byte == 0 || *byte == b' ')
+        .next()
+        .unwrap_or(&[]);
+    if actual_label != label {
+        return Err(HealthError::RootLabel);
+    }
+    let marker = root
+        .read_file("/etc/jasper-root", 256)
+        .map_err(|_| HealthError::RootFile)?;
+    let expected_slot = match slot {
+        Slot::A => b'A',
+        Slot::B => b'B',
+    };
+    let expected_prefix = alloc::format!(
+        "slot={}\nrelease={release}\nschema=1\n",
+        expected_slot as char
+    );
+    if marker != expected_prefix.as_bytes() {
+        return Err(HealthError::RootContent);
+    }
+    Ok(())
+}
+
 /// 确认当前 A/B 槽的最小健康集合并持久提交。
 /// Confirms the minimum health set for the current A/B slot and commits it durably.
 pub fn confirm_minimum_health() -> Result<(), HealthError> {
@@ -312,6 +409,8 @@ pub fn confirm_minimum_health() -> Result<(), HealthError> {
             .candidate()
             .map(|(slot, _)| slot)
             .unwrap_or_else(|| current.active_slot());
+        let release = current.slot(slot).release();
+        validate_system_root(Arc::clone(&device), slot, release)?;
         let mut next = current;
         next.report_health(slot, true).map_err(HealthError::State)?;
         let mut published = current;

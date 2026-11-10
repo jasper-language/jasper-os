@@ -149,7 +149,7 @@ default = ["user-programs"]
 # 生产启动（issue #7）：只执行全局阶段和第一个用户程序，然后等待服务，不退出模拟器。不能和验收特性同开。
 production = []
 # P0 A/B 最小生产健康门：从 Jasper virtio-blk P0 控制分区恢复记录并持久确认当前槽。
-lifecycle-ab-health = []
+lifecycle-ab-health = ["kernel-core/ext4-view"]
 # Dedicated negative acceptance: reach the health gate without enabling production features.
 lifecycle-health-fail-verify = ["lifecycle-ab-health"]
 # Pixel 6a (Google Tensor GS101) early-boot probe: Samsung UART only, no scheduler/IRQ start.

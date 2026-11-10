@@ -43,6 +43,10 @@ cargo run --locked -p jasper-lifecycle-staging --bin jasper-esp-install -- \
   "$IMAGE" "$TOTAL" "$UEFI_ESP" >"$OUT/esp-install.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-ext4-provision -- \
   "$IMAGE" "$TOTAL" >"$OUT/ext4-provision.log" 2>&1
+bash scripts/issue21-system-root-fixture.sh \
+  "$IMAGE" "$TARGET" 1050624 A 1 >"$OUT/system-root-a.log" 2>&1
+bash scripts/issue21-system-root-fixture.sh \
+  "$IMAGE" "$TARGET" 17827840 B 2 >"$OUT/system-root-b.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-init -- \
   "$IMAGE" "$TOTAL" "$KERNEL_A" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-stage -- \

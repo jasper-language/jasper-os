@@ -40,6 +40,15 @@ pub const P0_CONTROL_B_TYPE_GUID: [u8; 16] = [
 pub const P0_CONTROL_B_PARTITION_GUID: [u8; 16] = [
     0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0xa0, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
 ];
+/// P0 System A 的固定绝对 LBA。
+/// Fixed absolute LBA of P0 System A.
+pub const P0_SYSTEM_A_LBA: u64 = 1_050_624;
+/// P0 System B 的固定绝对 LBA。
+/// Fixed absolute LBA of P0 System B.
+pub const P0_SYSTEM_B_LBA: u64 = 17_827_840;
+/// P0 System A/B 的固定分区字节数。
+/// Fixed partition size in bytes for P0 System A/B.
+pub const P0_SYSTEM_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// 双槽 A/B 的稳定编号。Stable identifiers for the two boot slots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -773,6 +782,11 @@ mod tests {
         const ESP_SECTORS: u64 = 512 * MIB_SECTORS;
         const SYSTEM_SECTORS: u64 = 8 * 1024 * MIB_SECTORS;
         const CONTROL_SECTORS: u64 = 64 * MIB_SECTORS;
+        let system_a = MIB_SECTORS + ESP_SECTORS;
+        let system_b = system_a + SYSTEM_SECTORS;
+        assert_eq!(P0_SYSTEM_A_LBA, system_a);
+        assert_eq!(P0_SYSTEM_B_LBA, system_b);
+        assert_eq!(P0_SYSTEM_BYTES, SYSTEM_SECTORS * 512);
         let control_a = MIB_SECTORS + ESP_SECTORS + 2 * SYSTEM_SECTORS;
         assert_eq!(P0_CONTROL_A_LBA, control_a);
         assert_eq!(P0_CONTROL_B_LBA, control_a + CONTROL_SECTORS);
