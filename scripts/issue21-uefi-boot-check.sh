@@ -21,7 +21,7 @@ KERNEL="$TARGET/x86_64-unknown-none/release/jasper-kernel"
 rm -f -- "$IMAGE" "$ESP_IMAGE" "$UEFI_ESP" "$OVMF_VARS"
 
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none \
-  -p jasper-kernel --features production >"$OUT/kernel-build.log" 2>&1
+  -p jasper-kernel --features production,lifecycle-ab-health >"$OUT/kernel-build.log" 2>&1
 cargo build --locked --release -p xtask >"$OUT/xtask-build.log" 2>&1
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-uefi \
   -p jasper-boot-manager >"$OUT/boot-manager-build.log" 2>&1
@@ -60,7 +60,7 @@ timeout "$LIMIT" qemu-system-x86_64 \
   -smp 1 \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
   -drive if=pflash,format=raw,file="$OVMF_VARS" \
-  -drive file="$IMAGE",format=raw,if=ide \
+  -drive file="$IMAGE",format=raw,if=virtio \
   -serial "file:$OUT/serial.log" \
   -display none -monitor none -no-reboot
 rc=$?
@@ -71,13 +71,15 @@ grep -aq 'Jasper-OS boot manager starting' "$OUT/serial.log"
 grep -aq 'selecting slot=A reason=ConfirmedRelease attempt=1 release=1' "$OUT/serial.log"
 grep -aq '^\[JSR-BOOT-STAGE\] done stage=user_runtime' "$OUT/serial.log"
 grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
-grep -aq '^\[JSR-PLAN\] finish plan=production stages=0xffff cases=1' "$OUT/serial.log"
+grep -aq '^\[JSR-PLAN\] finish plan=production stages=0xffff cases=2' "$OUT/serial.log"
 grep -aqE '^\[JSR-PROD\] alive ticks=[1-9][0-9]*' "$OUT/serial.log"
+grep -aq '^\[JSR-LIFE-HEALTH\] result=confirmed slot=A generation=3 release=1 attempts=0 storage=virtio-blk' \
+  "$OUT/serial.log"
 ! grep -aqE '^\[JSR-(PANIC|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-inspect -- \
   "$IMAGE" 38654705664 >"$OUT/control-postboot.log" 2>&1
-grep -q 'generation=2 ' "$OUT/control-postboot.log"
-grep -q 'slot=A state=Confirmed generation=2 release=1 attempts=1' \
+grep -q 'generation=3 ' "$OUT/control-postboot.log"
+grep -q 'slot=A state=Confirmed generation=3 release=1 attempts=0' \
   "$OUT/control-postboot.log"
 
 echo "issue21-uefi-boot: PASS qemu_rc=$rc evidence=$OUT"

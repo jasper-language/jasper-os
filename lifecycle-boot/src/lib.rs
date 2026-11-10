@@ -9,6 +9,38 @@
 /// Fixed on-wire size of one boot-control record in bytes.
 pub const CONTROL_RECORD_BYTES: usize = 180;
 
+/// P0 GPT 的固定磁盘 GUID 原始字节。
+/// Raw P0 GPT disk-GUID bytes.
+pub const P0_DISK_GUID: [u8; 16] = [
+    0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+/// P0 Control A 的固定绝对 LBA。
+/// Fixed absolute LBA of P0 Control A.
+pub const P0_CONTROL_A_LBA: u64 = 34_605_056;
+/// P0 Control A 的分区类型 GUID 原始字节。
+/// Raw partition-type GUID bytes for P0 Control A.
+pub const P0_CONTROL_A_TYPE_GUID: [u8; 16] = [
+    0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+];
+/// P0 Control A 的唯一分区 GUID 原始字节。
+/// Raw unique partition GUID bytes for P0 Control A.
+pub const P0_CONTROL_A_PARTITION_GUID: [u8; 16] = [
+    0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0xa0, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
+];
+/// P0 Control B 的固定绝对 LBA。
+/// Fixed absolute LBA of P0 Control B.
+pub const P0_CONTROL_B_LBA: u64 = 34_736_128;
+/// P0 Control B 的分区类型 GUID 原始字节。
+/// Raw partition-type GUID bytes for P0 Control B.
+pub const P0_CONTROL_B_TYPE_GUID: [u8; 16] = [
+    0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
+];
+/// P0 Control B 的唯一分区 GUID 原始字节。
+/// Raw unique partition GUID bytes for P0 Control B.
+pub const P0_CONTROL_B_PARTITION_GUID: [u8; 16] = [
+    0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0xa0, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+];
+
 /// 双槽 A/B 的稳定编号。Stable identifiers for the two boot slots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -733,6 +765,49 @@ mod tests {
 
     fn digest(byte: u8) -> [u8; 32] {
         [byte; 32]
+    }
+
+    #[test]
+    fn p0_control_lbas_are_fixed_before_shared_data() {
+        const MIB_SECTORS: u64 = 2048;
+        const ESP_SECTORS: u64 = 512 * MIB_SECTORS;
+        const SYSTEM_SECTORS: u64 = 8 * 1024 * MIB_SECTORS;
+        const CONTROL_SECTORS: u64 = 64 * MIB_SECTORS;
+        let control_a = MIB_SECTORS + ESP_SECTORS + 2 * SYSTEM_SECTORS;
+        assert_eq!(P0_CONTROL_A_LBA, control_a);
+        assert_eq!(P0_CONTROL_B_LBA, control_a + CONTROL_SECTORS);
+    }
+
+    #[test]
+    fn p0_guid_constants_match_gpt_on_disk_byte_order() {
+        assert_eq!(
+            P0_CONTROL_A_TYPE_GUID,
+            [
+                0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0x80, 0x01, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x03,
+            ]
+        );
+        assert_eq!(
+            P0_CONTROL_A_PARTITION_GUID,
+            [
+                0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0xa0, 0x04, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x04,
+            ]
+        );
+        assert_eq!(
+            P0_CONTROL_B_TYPE_GUID,
+            [
+                0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0x80, 0x01, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x04,
+            ]
+        );
+        assert_eq!(
+            P0_CONTROL_B_PARTITION_GUID,
+            [
+                0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0xa0, 0x05, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x05,
+            ]
+        );
     }
 
     fn initial() -> ControlBlock {

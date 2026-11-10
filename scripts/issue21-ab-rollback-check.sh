@@ -16,12 +16,19 @@ mkdir -p "$TARGET"
 IMAGE="$TARGET/p0.img"
 UEFI_ESP="$TARGET/uefi-esp.img"
 OVMF_VARS="$TARGET/OVMF_VARS.fd"
-KERNEL="$TARGET/x86_64-unknown-none/release/jasper-kernel"
+KERNEL_A="$TARGET/kernel-a"
+KERNEL_B="$TARGET/kernel-b"
 MANAGER="$TARGET/x86_64-unknown-uefi/release/jasper-boot-manager.efi"
 rm -f -- "$IMAGE" "$UEFI_ESP" "$OVMF_VARS"
 
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none \
-  -p jasper-kernel --features production >"$OUT/kernel-build.log" 2>&1
+  -p jasper-kernel --features production,lifecycle-ab-health >"$OUT/kernel-a-build.log" 2>&1
+cp "$TARGET/x86_64-unknown-none/release/jasper-kernel" "$KERNEL_A"
+CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none \
+  -p jasper-kernel \
+  --features production,lifecycle-ab-health,lifecycle-health-inject-failure \
+  >"$OUT/kernel-b-build.log" 2>&1
+cp "$TARGET/x86_64-unknown-none/release/jasper-kernel" "$KERNEL_B"
 cargo build --locked --release -p xtask >"$OUT/xtask-build.log" 2>&1
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-uefi \
   -p jasper-boot-manager >"$OUT/boot-manager-build.log" 2>&1
@@ -31,21 +38,22 @@ cargo run --locked -p jasper-lifecycle-staging --bin jasper-gpt-image -- \
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-esp-format -- \
   "$IMAGE" "$TOTAL" >"$OUT/esp-format.log" 2>&1
 target/release/xtask uefi-managed-esp \
-  "$KERNEL" "$KERNEL" "$MANAGER" "$UEFI_ESP" >"$OUT/uefi-esp.log" 2>&1
+  "$KERNEL_A" "$KERNEL_B" "$MANAGER" "$UEFI_ESP" >"$OUT/uefi-esp.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-esp-install -- \
   "$IMAGE" "$TOTAL" "$UEFI_ESP" >"$OUT/esp-install.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-ext4-provision -- \
   "$IMAGE" "$TOTAL" >"$OUT/ext4-provision.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-init -- \
-  "$IMAGE" "$TOTAL" "$KERNEL" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
+  "$IMAGE" "$TOTAL" "$KERNEL_A" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-stage -- \
-  "$IMAGE" "$TOTAL" "$KERNEL" 2 2 2 1 1 >"$OUT/control-stage.log" 2>&1
+  "$IMAGE" "$TOTAL" "$KERNEL_B" 2 2 2 1 1 >"$OUT/control-stage.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-inspect -- \
   "$IMAGE" "$TOTAL" >"$OUT/control-candidate.log" 2>&1
 
 run_boot() {
   local label="$1"
   local expected="$2"
+  local health="$3"
   local run="$OUT/$label"
   mkdir "$run"
   rm -f -- "$OVMF_VARS"
@@ -58,7 +66,7 @@ run_boot() {
     -smp 1 \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,file="$OVMF_VARS" \
-    -drive file="$IMAGE",format=raw,if=ide \
+    -drive file="$IMAGE",format=raw,if=virtio \
     -serial "file:$run/serial.log" \
     -display none -monitor none -no-reboot >"$run/qemu.log" 2>&1
   local rc=$?
@@ -68,21 +76,28 @@ run_boot() {
   grep -aFq "$expected" "$run/serial.log"
   grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' \
     "$run/serial.log"
-  grep -aqE '^\[JSR-PROD\] alive ticks=[1-9][0-9]*' "$run/serial.log"
+  if [ "$health" = "confirm" ]; then
+    grep -aq '^\[JSR-LIFE-HEALTH\] result=confirmed slot=A generation=7 release=1 attempts=0 storage=virtio-blk' \
+      "$run/serial.log"
+    grep -aqE '^\[JSR-PROD\] alive ticks=[1-9][0-9]*' "$run/serial.log"
+  else
+    grep -aq '^\[JSR-LIFE-HEALTH\] result=failed reason=injected_failure' \
+      "$run/serial.log"
+  fi
   ! grep -aqE '^\[JSR-(PANIC|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \
     "$run/serial.log"
 }
 
-run_boot candidate-1 'selecting slot=B reason=CandidateTrial attempt=1 release=2'
-run_boot candidate-2 'selecting slot=B reason=CandidateTrial attempt=2 release=2'
-run_boot candidate-3 'selecting slot=B reason=CandidateTrial attempt=3 release=2'
-run_boot fallback-a 'selecting slot=A reason=ConfirmedRelease attempt=1 release=1'
+run_boot candidate-1 'selecting slot=B reason=CandidateTrial attempt=1 release=2' fail
+run_boot candidate-2 'selecting slot=B reason=CandidateTrial attempt=2 release=2' fail
+run_boot candidate-3 'selecting slot=B reason=CandidateTrial attempt=3 release=2' fail
+run_boot fallback-a 'selecting slot=A reason=ConfirmedRelease attempt=1 release=1' confirm
 
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-inspect -- \
   "$IMAGE" "$TOTAL" >"$OUT/control-rollback.log" 2>&1
-grep -q 'generation=6 ' "$OUT/control-rollback.log"
+grep -q 'generation=7 ' "$OUT/control-rollback.log"
 grep -q 'active=A ' "$OUT/control-rollback.log"
-grep -q 'slot=A state=Confirmed generation=2 release=1 attempts=1' \
+grep -q 'slot=A state=Confirmed generation=3 release=1 attempts=0' \
   "$OUT/control-rollback.log"
 grep -q 'slot=B state=Failed generation=5 release=2 attempts=0' \
   "$OUT/control-rollback.log"

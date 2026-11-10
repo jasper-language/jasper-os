@@ -810,9 +810,11 @@ name = "jasper-kernel"
 version = "0.1.0"
 dependencies = [
  "bootloader_api",
+ "crc",
  "ed25519-dalek",
  "jasper-compat-core",
  "jasper-compat-loader",
+ "jasper-lifecycle-boot",
  "kernel-core",
  "noto-sans-mono-bitmap",
  "pic8259",

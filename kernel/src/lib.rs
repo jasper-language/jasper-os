@@ -46,6 +46,8 @@ pub mod boot;
 pub mod bootcap;
 pub mod clock;
 pub mod config;
+#[cfg(feature = "lifecycle-ab-health")]
+pub mod lifecycle_health;
 #[cfg(feature = "fault-inject")]
 pub mod fault_inject;
 pub mod fix_demo;

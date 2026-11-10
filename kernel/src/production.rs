@@ -50,6 +50,16 @@ pub const PLAN: &[&[Step]] = &[&[
         },
         first_program,
     ),
+    #[cfg(feature = "lifecycle-ab-health")]
+    PlanItem::Case(
+        CaseSpec {
+            name: "lifecycle-health",
+            requires: Stage::UserRuntime.bit(),
+            summary: "",
+            timing: false,
+        },
+        minimum_health,
+    ),
     PlanItem::Finish(wait_for_services),
 ]];
 
@@ -79,6 +89,16 @@ fn first_program(_ctx: &mut BootCtx) {
 #[cfg(not(feature = "user-programs"))]
 fn first_program(_ctx: &mut BootCtx) {
     kprintln!("[JSR-PROD] first_program absent");
+}
+
+/// 确认启动阶段、设备装配、存储读写和首个用户程序均已通过后，持久提交槽位健康。
+/// Persists slot health only after boot stages, devices, storage I/O and the first program pass.
+#[cfg(feature = "lifecycle-ab-health")]
+fn minimum_health(_ctx: &mut BootCtx) {
+    if let Err(error) = crate::lifecycle_health::confirm_minimum_health() {
+        kprintln!("[JSR-LIFE-HEALTH] result=failed reason={}", error.name());
+        stop(ExitStatus::Failure);
+    }
 }
 
 /// 持续运行：开中断等待。Keep running: wait with interrupts enabled.

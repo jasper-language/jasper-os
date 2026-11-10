@@ -8,6 +8,7 @@ license = "Apache-2.0"
 
 [dependencies]
 kernel-core = { path = "../kernel-core" }
+jasper-lifecycle-boot = { path = "../lifecycle-boot" }
 # Compatibility crates are optional services. Native Jasper profiles must link
 # neither crate and must remain buildable when these components are absent.
 # 兼容 crate 属于可选服务；原生 Jasper Profile 不链接它们，并可在组件缺失时构建。
@@ -15,6 +16,7 @@ jasper-compat-loader = { path = "../compat-loader", optional = true }
 compat-core = { package = "jasper-compat-core", path = "../compat-core", optional = true }
 spin = "0.12.3"
 ed25519-dalek = { version = "=3.0.0", default-features = false }
+crc = "=3.4.0"
 
 # 只在 x86_64 上使用：引导协议、描述符表 / 页表封装、8259 PIC。其它指令集的平台代码不依赖第三方 crate。
 [target.'cfg(target_arch = "x86_64")'.dependencies]
@@ -144,6 +146,10 @@ bm1-hang = ["bm1-vm"]
 default = ["user-programs"]
 # 生产启动（issue #7）：只执行全局阶段和第一个用户程序，然后等待服务，不退出模拟器。不能和验收特性同开。
 production = []
+# P0 A/B 最小生产健康门：从 Jasper virtio-blk P0 控制分区恢复记录并持久确认当前槽。
+lifecycle-ab-health = []
+# Dedicated negative fixture: reach the health gate, then fail it without touching control state.
+lifecycle-health-inject-failure = ["lifecycle-ab-health"]
 # Pixel 6a (Google Tensor GS101) early-boot probe: Samsung UART only, no scheduler/IRQ start.
 pixel6a-smoke = []
 pixel6a-entry-probe = ["pixel6a-smoke"]
