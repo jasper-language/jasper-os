@@ -73,6 +73,14 @@ pub enum TransitionError {
     GenerationExhausted,
 }
 
+/// 从持久记录恢复状态机时的错误。
+/// Error while restoring a state machine from a persistent record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestoreError {
+    /// 阶段与世代组合不可能由状态机产生。The stage/generation pair cannot be produced by the state machine.
+    InvalidState,
+}
+
 /// 一个更新事务的持久状态。
 /// Persistent state of one update transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +106,28 @@ impl UpdateMachine {
     /// 每次成功迁移后严格递增的记录世代。Strictly increasing record generation after each transition.
     pub const fn generation(self) -> u64 {
         self.generation
+    }
+
+    /// 从经过完整性和状态校验的持久字段恢复状态机。
+    /// Restores a state machine from validated persistent fields.
+    pub const fn restore(stage: UpdateStage, generation: u64) -> Result<Self, RestoreError> {
+        let valid = match stage {
+            UpdateStage::Idle => generation == 0,
+            UpdateStage::Discovered => generation == 1,
+            UpdateStage::Verified => generation == 2,
+            UpdateStage::Prepared => generation == 3,
+            UpdateStage::Committed => generation == 4,
+            UpdateStage::Trial => generation == 5,
+            UpdateStage::Confirmed => generation == 6,
+            UpdateStage::Complete => generation == 7,
+            UpdateStage::Aborted => generation >= 1 && generation <= 4,
+            UpdateStage::Rollback => generation == 6,
+            UpdateStage::RolledBack => generation == 7,
+        };
+        if !valid {
+            return Err(RestoreError::InvalidState);
+        }
+        Ok(Self { stage, generation })
     }
 
     /// 判断事务是否进入不可继续推进的终态。
@@ -222,5 +252,23 @@ mod tests {
             })
         );
         assert_eq!(machine, before);
+    }
+
+    #[test]
+    fn restore_rejects_impossible_idle_and_non_idle_generations() {
+        assert!(UpdateMachine::restore(UpdateStage::Idle, 0).is_ok());
+        assert!(UpdateMachine::restore(UpdateStage::Prepared, 3).is_ok());
+        assert_eq!(
+            UpdateMachine::restore(UpdateStage::Idle, 1),
+            Err(RestoreError::InvalidState)
+        );
+        assert_eq!(
+            UpdateMachine::restore(UpdateStage::Prepared, 0),
+            Err(RestoreError::InvalidState)
+        );
+        assert_eq!(
+            UpdateMachine::restore(UpdateStage::Discovered, 3),
+            Err(RestoreError::InvalidState)
+        );
     }
 }

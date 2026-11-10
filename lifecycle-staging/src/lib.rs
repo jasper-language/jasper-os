@@ -22,10 +22,13 @@ use jasper_lifecycle_model::manifest::{authorize_install, LocalInstallGrant, Man
 use jasper_lifecycle_model::manifest_cbor::{
     ArtifactKind, VerifiedArtifact, VerifiedCborManifest, MAX_MANIFEST_CBOR_BYTES,
 };
+use jasper_lifecycle_model::transaction::{recover, TransactionError, TransactionRecord};
+use jasper_lifecycle_model::update::UpdateStage;
 use sha2::{Digest, Sha256};
 
 const MANIFEST_FILE: &str = "manifest.cbor";
 const ARTIFACT_DIR: &str = "artifacts";
+const TRANSACTION_COPIES: [&str; 2] = ["transaction.0", "transaction.1"];
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 
 /// 本地制品来源；名称必须与已验签清单中的工件名称精确匹配。
@@ -84,9 +87,9 @@ pub struct DiskBudget {
 
 /// 已完成授权、依赖预检、磁盘预算和持久暂存的更新准备事实。
 ///
-/// 该值不是提交成功，也不包含启动槽切换或交易持久状态。
+/// 该值包含持久 `Prepared` 交易记录，但不是提交成功，也不包含启动槽切换。
 /// Prepared update after authorization, dependency preflight, disk budgeting and durable staging.
-/// This is not a commit and contains no slot switch or persisted transaction state.
+/// It contains a durable `Prepared` transaction record but is not a commit and contains no slot switch.
 #[derive(Debug)]
 pub struct PreparedUpdate {
     /// 已验签清单。Verified manifest.
@@ -95,6 +98,8 @@ pub struct PreparedUpdate {
     pub budget: DiskBudget,
     /// 持久暂存回执。Durable staging receipt.
     pub staging: StagingReceipt,
+    /// 持久 Prepared 交易记录。Durable Prepared transaction record.
+    pub record: TransactionRecord,
 }
 
 /// 暂存失败原因。
@@ -158,6 +163,8 @@ pub enum StagingError {
     MissingDependency(String),
     /// 依赖快照包含空名或重复名。Dependency snapshot contains an empty or duplicate name.
     InvalidDependencySnapshot,
+    /// 交易记录损坏或状态不一致。Transaction record is corrupt or inconsistent.
+    Transaction(TransactionError),
 }
 
 impl fmt::Display for StagingError {
@@ -219,6 +226,7 @@ impl fmt::Display for StagingError {
                     "dependency snapshot contains an empty or duplicate name"
                 )
             }
+            Self::Transaction(error) => write!(formatter, "transaction record failed: {error:?}"),
         }
     }
 }
@@ -319,10 +327,24 @@ pub fn prepare_update(
         metadata_headroom,
     )?;
     let staging = stage_verified_artifacts(&manifest, manifest_bytes, sources, staging_root)?;
+    let record = match persist_prepared_transaction(staging_root, manifest.manifest.manifest_sha256)
+    {
+        Ok(record) => record,
+        Err(error) => {
+            return match fs::remove_dir_all(staging_root) {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(StagingError::Cleanup {
+                    cause: Box::new(error),
+                    cleanup,
+                }),
+            }
+        }
+    };
     Ok(PreparedUpdate {
         manifest,
         budget,
         staging,
+        record,
     })
 }
 
@@ -344,6 +366,45 @@ pub fn check_dependency_snapshot(
         }
     }
     Ok(())
+}
+
+/// 把 Prepared 交易的相同完整记录写入两份副本并刷新目录。
+/// Writes the same complete Prepared record to both copies and flushes the directory.
+pub fn persist_prepared_transaction(
+    staging_root: &Path,
+    manifest_sha256: [u8; 32],
+) -> Result<TransactionRecord, StagingError> {
+    let record = TransactionRecord::prepared(manifest_sha256).map_err(StagingError::Transaction)?;
+    let bytes = record.encode();
+    for name in TRANSACTION_COPIES {
+        write_new(&staging_root.join(name), &bytes)?;
+    }
+    sync_directory(staging_root)?;
+    let first = read_file(&staging_root.join(TRANSACTION_COPIES[0]))?;
+    let second = read_file(&staging_root.join(TRANSACTION_COPIES[1]))?;
+    let recovered = recover(Some(&first), Some(&second)).map_err(StagingError::Transaction)?;
+    if recovered != record {
+        return Err(StagingError::Transaction(
+            TransactionError::EqualGenerationMismatch,
+        ));
+    }
+    Ok(recovered)
+}
+
+/// 恢复并验证指定清单的 Prepared 交易；单副本损坏时使用另一份完整副本。
+/// Recovers and validates the Prepared transaction for one manifest, using the intact copy
+/// when one copy is torn.
+pub fn load_prepared_transaction(
+    staging_root: &Path,
+    manifest_sha256: [u8; 32],
+) -> Result<TransactionRecord, StagingError> {
+    let first = read_optional_file(&staging_root.join(TRANSACTION_COPIES[0]))?;
+    let second = read_optional_file(&staging_root.join(TRANSACTION_COPIES[1]))?;
+    let record = recover(first.as_deref(), second.as_deref()).map_err(StagingError::Transaction)?;
+    if record.stage() != UpdateStage::Prepared || record.manifest_sha256() != manifest_sha256 {
+        return Err(StagingError::Transaction(TransactionError::InvalidState));
+    }
+    Ok(record)
 }
 
 /// 按实际文件系统块大小检查暂存预算；`metadata_headroom` 由协调器显式提供。
@@ -622,6 +683,14 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), StagingError> {
 
 fn read_file(path: &Path) -> Result<Vec<u8>, StagingError> {
     fs::read(path).map_err(|source| io_error("read staged file", path, source))
+}
+
+fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>, StagingError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(io_error("read staged file", path, source)),
+    }
 }
 
 fn sync_directory(path: &Path) -> Result<(), StagingError> {
@@ -911,6 +980,12 @@ mod tests {
         .unwrap();
         assert_eq!(prepared.staging.artifacts.len(), 1);
         assert!(prepared.budget.required_bytes >= 4096);
+        assert_eq!(prepared.record.stage(), UpdateStage::Prepared);
+        assert_eq!(
+            load_prepared_transaction(&staging_root, prepared.manifest.manifest.manifest_sha256)
+                .unwrap(),
+            prepared.record
+        );
         assert_eq!(
             fs::read(staging_root.join(ARTIFACT_DIR).join("kernel")).unwrap(),
             bytes
@@ -996,5 +1071,23 @@ mod tests {
             Err(StagingError::Manifest(ManifestError::Authorization))
         ));
         assert!(!staging_root.exists());
+    }
+
+    #[test]
+    fn prepared_transaction_recovers_from_one_torn_copy_and_rejects_both() {
+        let temp = TestDir::new("transaction-recovery");
+        let root = temp.path().join("staging");
+        fs::create_dir(&root).unwrap();
+        let record = persist_prepared_transaction(&root, [0x44; 32]).unwrap();
+        fs::write(root.join(TRANSACTION_COPIES[0]), b"torn").unwrap();
+        assert_eq!(
+            load_prepared_transaction(&root, [0x44; 32]).unwrap(),
+            record
+        );
+        fs::write(root.join(TRANSACTION_COPIES[1]), b"torn").unwrap();
+        assert!(matches!(
+            load_prepared_transaction(&root, [0x44; 32]),
+            Err(StagingError::Transaction(TransactionError::CorruptRecord))
+        ));
     }
 }
