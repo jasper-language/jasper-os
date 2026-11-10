@@ -13,6 +13,7 @@ CARGO = ROOT / "kernel/Cargo.toml"
 ALLOWLIST = ROOT / "kernel/production-features.txt"
 BUILD = ROOT / "kernel/build.rs"
 PRODUCTION = ROOT / "kernel/src/production.rs"
+STATUS = ROOT / "docs/ISSUE-19-convergence-status.md"
 
 REQUIRED = {"production", "default", "user-programs"}
 CONFIGURATION_ONLY = {"profile-compact", "sched-rr"}
@@ -67,6 +68,10 @@ def main() -> int:
         fail("production.rs must not keep a stale partial compile_error feature list")
 
     protected = sorted(set(features) - allowed)
+    if STATUS.is_file():
+        status = STATUS.read_text(encoding="utf-8")
+        if f"default_denied={len(protected)}" not in status:
+            fail("Issue #19 status does not match the protected feature count")
     print(
         "production-feature-isolation: PASS "
         f"allowed={len(allowed)} default_denied={len(protected)}"
