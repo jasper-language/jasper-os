@@ -428,10 +428,6 @@ pub fn run_process() {
     kprintln!("[JSR-PROC] checks={} failed={}", CHECKS.load(Ordering::Relaxed), failed());
 }
 
-/// 内嵌的用户程序 `user-hello`（由 `kernel/build.rs` 构建的独立静态 ELF）。
-#[cfg(feature = "user-programs")]
-static USER_HELLO: &[u8] = include_bytes!(env!("JSR_USER_HELLO"));
-
 /// 运行 M5.1-pre 演练：从 ELF 文件装载并运行用户程序。
 ///
 /// 1. 截断的 ELF 被装载器拒绝（返回规范错误名，不做半装载）
@@ -442,20 +438,21 @@ static USER_HELLO: &[u8] = include_bytes!(env!("JSR_USER_HELLO"));
 #[cfg(feature = "user-programs")]
 pub fn run_elf() {
     use crate::proc::{self, ProcState};
+    let image = crate::first_program::image();
     let free_before = frame::free_frames();
     let allowed = SyscallSet::of(&[abi::SYSTEM_CONSOLE_WRITE, abi::SYSTEM_ABI_GET, abi::SYSTEM_TASK_EXIT]);
     let Ok(pid) = proc::create("user-hello", allowed) else {
         check(false, "进程创建失败");
         return;
     };
-    let truncated = proc::load_elf(pid, &USER_HELLO[..100]);
+    let truncated = proc::load_elf(pid, &image[..100]);
     check(truncated.is_err(), "截断的 ELF 未被拒绝");
-    let entry = proc::load_elf(pid, USER_HELLO);
+    let entry = proc::load_elf(pid, image);
     check(entry.is_ok(), "合法 ELF 装载失败");
     let base = arch::USER_WINDOW.0;
     kprintln!(
         "[JSR-PROG] elf bytes={} truncated={} entry={:#x}",
-        USER_HELLO.len(),
+        image.len(),
         truncated.err().map(|e| e.name()).unwrap_or("accepted"),
         entry.unwrap_or(0)
     );
@@ -481,35 +478,6 @@ pub fn run_elf() {
     );
 }
 
-/// 生产启动的第一个用户程序：装载内嵌的 `user-hello`，运行到结束并回收。
-/// 返回进程终态，以及页帧是否全部归还。
-/// The first user program of a production boot: load, run to completion and reclaim the embedded
-/// `user-hello`. Returns the final process state and whether every frame came back.
-#[cfg(feature = "user-programs")]
-pub fn run_first_program() -> (Option<crate::proc::ProcState>, bool) {
-    use crate::proc;
-    let free_before = frame::free_frames();
-    let allowed = SyscallSet::of(&[abi::SYSTEM_CONSOLE_WRITE, abi::SYSTEM_ABI_GET, abi::SYSTEM_TASK_EXIT]);
-    let Ok(pid) = proc::create("first-program", allowed) else {
-        return (None, false);
-    };
-    let base = arch::USER_WINDOW.0;
-    let started = match proc::load_elf(pid, USER_HELLO) {
-        Ok(entry) => {
-            proc::map_new(pid, base + STACK_OFF - FRAME_SIZE, MapFlags::USER | MapFlags::WRITE).is_ok()
-                && proc::spawn_thread(pid, "first-program", entry, base + STACK_OFF, 0, 0).is_ok()
-        }
-        Err(_) => false,
-    };
-    if started {
-        sched::run();
-    }
-    let state = proc::state(pid);
-    let _ = proc::reap(pid);
-    crate::kobj::run_cleanup(usize::MAX); // reap 只释放所有权；销毁由清理过程完成
-    (state, frame::free_frames() == free_before)
-}
-
 /// 运行 M4.1 演练：对象生命周期（M4.0 规范 v0.6 第 9 节 M4.1 行）。
 ///
 /// 1. 线程对象由「外部所有权」（模拟句柄）+「内部引用」（执行上下文、进程线程表）共同保活
@@ -533,7 +501,7 @@ pub fn run_lifecycle() {
         return;
     };
     let base = arch::USER_WINDOW.0;
-    let entry = proc::load_elf(pid, USER_HELLO).unwrap_or(0);
+    let entry = proc::load_elf(pid, crate::first_program::image()).unwrap_or(0);
     let stack_ok = proc::map_new(pid, base + STACK_OFF - FRAME_SIZE, MapFlags::USER | MapFlags::WRITE).is_ok();
     check(entry != 0 && stack_ok, "装载失败");
     // 下面的计数检查要求线程在 `sched::run()` 之前不运行：期间关闭定时器抢占，否则一次抢占就会让线程提前跑完、

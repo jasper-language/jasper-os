@@ -58,6 +58,8 @@ pub mod device_demo;
 pub mod interrupt;
 pub mod exit_state;
 pub mod fault;
+#[cfg(feature = "user-programs")]
+pub(crate) mod first_program;
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
 pub mod linux_abi;
 #[cfg(all(feature = "compat-dynamic-libc-verify", target_arch = "x86_64"))]

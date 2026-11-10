@@ -63,7 +63,7 @@ pub fn stop(_status: ExitStatus) -> ! {
 /// 装载并运行第一个用户程序，要求它以退出码 0 结束。Run the first user program; it must exit 0.
 #[cfg(feature = "user-programs")]
 fn first_program(_ctx: &mut BootCtx) {
-    let (state, reclaimed) = crate::user_demo::run_first_program();
+    let (state, reclaimed) = crate::first_program::run();
     kprintln!(
         "[JSR-PROD] first_program state={:?} reclaimed={}",
         state,
