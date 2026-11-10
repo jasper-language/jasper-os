@@ -785,6 +785,7 @@ dependencies = [
 name = "jasper-lifecycle-staging"
 version = "0.1.0"
 dependencies = [
+ "fatfs",
  "gpt 4.1.0",
  "jasper-lifecycle-model",
  "libc",
