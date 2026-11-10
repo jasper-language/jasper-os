@@ -173,7 +173,7 @@ pub fn authorize_install(
     Ok(manifest)
 }
 
-fn signing_message(
+pub(crate) fn signing_message(
     envelope: &ManifestEnvelope<'_>,
 ) -> Result<([u8; MAX_CANONICAL_MANIFEST_BYTES], usize), ManifestError> {
     if envelope.canonical_cbor.is_empty() {

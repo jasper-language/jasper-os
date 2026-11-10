@@ -14,6 +14,7 @@ pub mod boot;
 pub mod diagnostics;
 pub mod layout;
 pub mod manifest;
+pub mod manifest_cbor;
 pub mod update;
 
 /// 一份启动控制记录的固定线上长度（字节）。
