@@ -19,9 +19,16 @@
 pub mod x86_64;
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
+#[cfg(target_arch = "loongarch64")]
+pub mod loongarch64;
 #[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
 pub mod riscv;
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64", target_arch = "riscv32"))]
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "loongarch64",
+    target_arch = "riscv64",
+    target_arch = "riscv32"
+))]
 pub mod phys_tables;
 
 #[cfg(target_arch = "x86_64")]
@@ -87,6 +94,9 @@ pub use self::x86_64::X86_64 as Current;
 /// 当前编译目标的平台实现。
 #[cfg(target_arch = "aarch64")]
 pub use self::aarch64::Aarch64 as Current;
+/// 当前编译目标的平台实现。
+#[cfg(target_arch = "loongarch64")]
+pub use self::loongarch64::LoongArch64 as Current;
 /// 当前编译目标的平台实现。
 #[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
 pub use self::riscv::Riscv as Current;

@@ -107,6 +107,8 @@ pub const SUMMARIES: &[Summary] = &[
     row("fs1", crate::fs1_demo::failed),
     #[cfg(feature = "sec4-verify")]
     row("sec4", crate::sec4_demo::failed),
+    #[cfg(feature = "sec5-verify")]
+    row("sec5", crate::sec5_demo::failed),
     #[cfg(target_arch = "x86_64")]
     row("blk1", crate::blk1_demo::failed),
     row("krn0", crate::krn0_demo::failed),
@@ -658,7 +660,7 @@ const HIGHRES: &[Step] = &[st(Stage::HighRes)];
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec6-verify",
+    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "sec6-verify",
     feature = "s2-only", feature = "s4-soak",
 )))]
 const FULL: &[Step] = &[
@@ -742,7 +744,7 @@ const FULL: &[Step] = &[
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec6-verify",
+    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "sec6-verify",
     feature = "s2-only", feature = "s4-soak",
 )))]
 pub use full_selected::{NAME, PLAN};
@@ -751,7 +753,7 @@ pub use full_selected::{NAME, PLAN};
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec6-verify",
+    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "sec6-verify",
     feature = "s2-only", feature = "s4-soak",
 )))]
 mod full_selected {
@@ -795,6 +797,7 @@ const DEDICATED_SELECTED: usize = cfg!(feature = "rt1-verify") as usize
     + cfg!(feature = "sec2-verify") as usize
     + cfg!(feature = "sec3-verify") as usize
     + cfg!(feature = "sec4-verify") as usize
+    + cfg!(feature = "sec5-verify") as usize
     + cfg!(feature = "sec6-verify") as usize
     + cfg!(feature = "s2-only") as usize
     + cfg!(feature = "s4-soak") as usize;
@@ -1441,6 +1444,20 @@ mod dedicated {
     pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[PlanItem::Finish(finish)]];
 }
 
+#[cfg(feature = "sec5-verify")]
+mod dedicated {
+    use super::*;
+
+    pub const NAME: &str = "sec5";
+
+    fn finish(_: &mut BootCtx) {
+        crate::sec5_demo::run();
+        exit_on(u64::from(crate::sec5_demo::failed()));
+    }
+
+    pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[PlanItem::Finish(finish)]];
+}
+
 #[cfg(feature = "sec6-verify")]
 mod dedicated {
     use super::*;
@@ -1459,7 +1476,7 @@ mod dedicated {
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec6-verify",
+    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "sec6-verify",
     feature = "s2-only", feature = "s4-soak",
 ))]
 pub use dedicated::{NAME, PLAN};

@@ -90,7 +90,21 @@ const fn stage_rollback(stage: Stage) -> Option<fn(&mut BootCtx) -> bool> {
 /// that depends on it ever starts.
 fn stage(ctx: &mut BootCtx, s: Stage, body: impl FnOnce(&mut BootCtx) -> Option<()>) {
     if let Err(e) = ctx.tracker.begin(s) {
-        kprintln!("[JSR-BOOT-STAGE] refused stage={} reason={}", s.name(), e.as_str());
+        match e {
+            StageError::Halted { failed } => kprintln!(
+                "[JSR-BOOT-STAGE] refused stage={} reason={} failed={}",
+                s.name(),
+                e.as_str(),
+                failed.name()
+            ),
+            StageError::MissingDependency { missing, .. } => kprintln!(
+                "[JSR-BOOT-STAGE] refused stage={} reason={} missing={}",
+                s.name(),
+                e.as_str(),
+                missing.name()
+            ),
+            _ => kprintln!("[JSR-BOOT-STAGE] refused stage={} reason={}", s.name(), e.as_str()),
+        }
         kprintln!("[JSR-EXIT] failure boot_stage={}", s.name());
         stop_boot(ExitStatus::Failure);
     }

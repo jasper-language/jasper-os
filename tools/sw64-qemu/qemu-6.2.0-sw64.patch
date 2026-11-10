@@ -1,0 +1,157 @@
+diff --git a/linux-user/strace.c b/linux-user/strace.c
+index b66a645..be6656e 100644
+--- a/linux-user/strace.c
++++ b/linux-user/strace.c
+@@ -3326,7 +3326,7 @@ print_openat(void *cpu_env, const struct syscallname *name,
+ 
+ #ifdef TARGET_NR_pidfd_send_signal
+ static void
+-print_pidfd_send_signal(CPUArchState *cpu_env, const struct syscallname *name,
++print_pidfd_send_signal(void *cpu_env, const struct syscallname *name,
+                 abi_long arg0, abi_long arg1, abi_long arg2,
+                 abi_long arg3, abi_long arg4, abi_long arg5)
+ {
+@@ -3571,7 +3571,7 @@ print_unshare(void *cpu_env, const struct syscallname *name,
+ 
+ #ifdef TARGET_NR_clock_nanosleep
+ static void
+-print_clock_nanosleep(CPUArchState *cpu_env, const struct syscallname *name,
++print_clock_nanosleep(void *cpu_env, const struct syscallname *name,
+                 abi_long arg0, abi_long arg1, abi_long arg2,
+                 abi_long arg3, abi_long arg4, abi_long arg5)
+ {
+diff --git a/linux-user/sw64/target_elf.h b/linux-user/sw64/target_elf.h
+index be48b6d..2bfbde0 100644
+--- a/linux-user/sw64/target_elf.h
++++ b/linux-user/sw64/target_elf.h
+@@ -9,6 +9,6 @@
+ #define SW64_TARGET_ELF_H
+ static inline const char *cpu_get_model(uint32_t eflags)
+ {
+-    return "any";
++    return "core3";
+ }
+ #endif
+diff --git a/linux-user/sw64/target_fcntl.h b/linux-user/sw64/target_fcntl.h
+index 9721e3d..95741c9 100644
+--- a/linux-user/sw64/target_fcntl.h
++++ b/linux-user/sw64/target_fcntl.h
+@@ -6,7 +6,33 @@
+  */
+ 
+ #ifndef SW64_TARGET_FCNTL_H
+-#define sw64_TARGET_FCNTL_H
++#define SW64_TARGET_FCNTL_H
++#define TARGET_O_NONBLOCK           04
++#define TARGET_O_APPEND            010
++#define TARGET_O_CREAT           01000 /* not fcntl */
++#define TARGET_O_TRUNC           02000 /* not fcntl */
++#define TARGET_O_EXCL            04000 /* not fcntl */
++#define TARGET_O_NOCTTY         010000 /* not fcntl */
++#define TARGET_O_DSYNC          040000
++#define TARGET_O_LARGEFILE           0 /* not necessary, always 64-bit */
++#define TARGET_O_DIRECTORY     0100000 /* must be a directory */
++#define TARGET_O_NOFOLLOW      0200000 /* don't follow links */
++#define TARGET_O_DIRECT       02000000 /* direct disk access hint */
++#define TARGET_O_NOATIME      04000000
++#define TARGET_O_CLOEXEC     010000000
++#define TARGET___O_SYNC      020000000
++#define TARGET_O_PATH        040000000
++#define TARGET___O_TMPFILE  0100000000
++
++#define TARGET_F_GETLK         7
++#define TARGET_F_SETLK         8
++#define TARGET_F_SETLKW        9
++#define TARGET_F_SETOWN        5       /* for sockets. */
++#define TARGET_F_GETOWN        6       /* for sockets. */
++
++#define TARGET_F_RDLCK         1
++#define TARGET_F_WRLCK         2
++#define TARGET_F_UNLCK         8
+ #include "../generic/fcntl.h"
+ #endif
+diff --git a/linux-user/syscall_defs.h b/linux-user/syscall_defs.h
+index 077a059..45fe7c7 100644
+--- a/linux-user/syscall_defs.h
++++ b/linux-user/syscall_defs.h
+@@ -721,7 +721,7 @@ struct target_rlimit {
+         abi_ulong   rlim_max;
+ };
+ 
+-#if defined(TARGET_ALPHA)
++#if defined(TARGET_ALPHA) || defined(TARGET_SW64)
+ #define TARGET_RLIM_INFINITY	0x7fffffffffffffffull
+ #elif defined(TARGET_MIPS) || (defined(TARGET_SPARC) && TARGET_ABI_BITS == 32)
+ #define TARGET_RLIM_INFINITY	0x7fffffffUL
+@@ -826,7 +826,7 @@ struct target_rtc_pll_info {
+ #define TARGET_RTC_VL_CLR           TARGET_IO('p', 0x14)
+ 
+ #if defined(TARGET_ALPHA) || defined(TARGET_MIPS) || defined(TARGET_SH4) ||    \
+-       defined(TARGET_XTENSA)
++       defined(TARGET_XTENSA) || defined(TARGET_SW64)
+ #define TARGET_FIOGETOWN       TARGET_IOR('f', 123, int)
+ #define TARGET_FIOSETOWN       TARGET_IOW('f', 124, int)
+ #define TARGET_SIOCATMARK      TARGET_IOR('s', 7, int)
+@@ -1340,7 +1340,7 @@ struct target_winsize {
+ #define TARGET_MAP_NONBLOCK	0x10000		/* do not block on IO */
+ #define TARGET_MAP_STACK        0x20000         /* ignored */
+ #define TARGET_MAP_HUGETLB      0x40000         /* create a huge page mapping */
+-#elif defined(TARGET_ALPHA)
++#elif defined(TARGET_ALPHA) || defined(TARGET_SW64)
+ #define TARGET_MAP_ANONYMOUS	0x10		/* don't use a file */
+ #define TARGET_MAP_FIXED	0x100		/* Interpret addr exactly */
+ #define TARGET_MAP_GROWSDOWN	0x01000		/* stack-like segment */
+diff --git a/target/sw64/cpu.h b/target/sw64/cpu.h
+index 4e14891..908cc9e 100644
+--- a/target/sw64/cpu.h
++++ b/target/sw64/cpu.h
+@@ -229,7 +229,7 @@ static inline SW64CPU *sw64_env_get_cpu(CPUSW64State *env)
+ #define SW64_CPU_TYPE_SUFFIX "-" TYPE_SW64_CPU
+ #define SW64_CPU_TYPE_NAME(name) (name SW64_CPU_TYPE_SUFFIX)
+ int cpu_sw64_signal_handler(int host_signum, void *pinfo, void *puc);
+-int sw64_cpu_gdb_read_register(CPUState *cs, uint8_t *buf, int reg);
++int sw64_cpu_gdb_read_register(CPUState *cs, GByteArray *buf, int reg);
+ int sw64_cpu_gdb_write_register(CPUState *cs, uint8_t *buf, int reg);
+ bool sw64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
+ 		      MMUAccessType access_type, int mmu_idx,
+diff --git a/target/sw64/gdbstub.c b/target/sw64/gdbstub.c
+index da4d39d..b3a49b6 100644
+--- a/target/sw64/gdbstub.c
++++ b/target/sw64/gdbstub.c
+@@ -21,7 +21,7 @@
+ #include "cpu.h"
+ #include "exec/gdbstub.h"
+ 
+-int sw64_cpu_gdb_read_register(CPUState *cs, uint8_t *mem_buf, int n)
++int sw64_cpu_gdb_read_register(CPUState *cs, GByteArray *mem_buf, int n)
+ {
+     SW64CPU *cpu = SW64_CPU(cs);
+     CPUSW64State *env = &cpu->env;
+diff --git a/target/sw64/helper.c b/target/sw64/helper.c
+index e317c08..a46cc8b 100644
+--- a/target/sw64/helper.c
++++ b/target/sw64/helper.c
+@@ -394,8 +394,22 @@ uint64_t helper_read_csr(CPUSW64State *env, uint64_t index)
+ {
+     if (index == PRI_BASE)
+ 	env->csr[index] = 0x10000;
+-    if (index == SHTCLOCK)
+-	env->csr[index] = qemu_clock_get_ns(QEMU_CLOCK_HOST) / 40;
++#ifdef CONFIG_USER_ONLY
++    /*
++     * RTID (CSR 0xc7) supplies the thread-private base used by the SW64 TLS
++     * sequence (`rtid r0; addl tls_offset,r0,r0`).  linux-user stores that
++     * base in env->unique when CLONE_SETTLS or the ABI TLS syscall runs.
++     */
++    if (index == TID)
++        env->csr[index] = env->unique;
++#endif
++    if (index == SHTCLOCK) {
++#ifdef CONFIG_USER_ONLY
++        env->csr[index] = (uint64_t)g_get_monotonic_time() * 1000 / 40;
++#else
++        env->csr[index] = qemu_clock_get_ns(QEMU_CLOCK_HOST) / 40;
++#endif
++    }
+     return env->csr[index];
+ }

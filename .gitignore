@@ -3,6 +3,7 @@
 .DS_Store
 out/
 target/
+/target-loongarch/
 build/
 evidence/accept-*/
 evidence/pda1-*/

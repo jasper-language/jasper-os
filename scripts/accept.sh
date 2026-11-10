@@ -84,6 +84,7 @@ esac
 [ "${JASPER_CHECKS:-}" = "sec2" ] && KFEAT+=(--features sec2-verify)
 [ "${JASPER_CHECKS:-}" = "sec3" ] && KFEAT+=(--features sec3-verify)
 [ "${JASPER_CHECKS:-}" = "sec4" ] && KFEAT+=(--features sec4-verify)
+[ "${JASPER_CHECKS:-}" = "sec5" ] && KFEAT+=(--features sec5-verify)
 [ "${JASPER_CHECKS:-}" = "sec6" ] && KFEAT+=(--features sec6-verify)
 HWV4_FEAT=()
 if [ -n "${JSR_LINUX_GUEST_HEADER:-}" ] && [ -n "${JSR_LINUX_GUEST_KERNEL:-}" ]; then
@@ -2769,11 +2770,15 @@ check_hwv5() {
      && has '\[JSR-VIRTIO\] device=console ok=true' \
      && has '\[JSR-VIRTIO\] device=block ok=true' \
      && has '\[JSR-HWV4-LINUX\] linux=true exits=[0-9]+ serial_bytes=[0-9]+ timer_interrupts=[0-9]+ timer_eois=[0-9]+ virtio_rng_requests=[1-9][0-9]* virtio_console_bytes=[1-9][0-9]* virtio_block_requests=[1-9][0-9]* pio_reads=[1-9][0-9]* pio_writes=[1-9][0-9]* pio_generation=2 pio_requests=1 pio_cancels=1 pio_marker=true marker=true halted=true lifecycle=true shutdown=true reclaim=true' \
-     && has '\[JSR-HWV5\] backend=Vmx bus=mmio devices=rng,console,block linux=true failed=0' \
+     && has '\[JSR-HWV5-VMM\] abi=1 generation=2 crashed=true old_handles=false old_mapping=false exits=6 records=6 ring=true restart=true revoked=true resources=true failed=0' \
+     && has '\[JSR-HWV5\] backend=Vmx bus=mmio devices=rng,console,block linux=true vmm=true failed=0' \
+     && ! has '^\[JSR-HWV5-VMM-FAIL\]' \
      && ! has '\[JSR-HWV5-FAIL\]'; then
-    record HWV-5-CORE PASS "真实 Linux 经 virtio-MMIO 发现 virtio-rng、virtio-console 与 virtio-blk；现代 virtqueue 描述符链、可用/已用环、设备通知、PIC IRQ、中断确认、随机数据回写、控制台输出和块读取通过；宿主内存与对象资源回基线。net/fs 与用户态 VMM 未完成，不记 HWV-5 完整通过"
+    record HWV-5-CORE PASS "真实 Linux 经 virtio-MMIO 发现 virtio-rng、virtio-console 与 virtio-blk；现代 virtqueue 描述符链、可用/已用环、设备通知、PIC IRQ、中断确认、随机数据回写、控制台输出和块读取通过；宿主内存与对象资源回基线。net/fs 未完成，不记 HWV-5 完整通过"
+    record HWV-5-VMM PASS "真实用户态 VMM 创建 Ring 并持有 VM/vCPU/Memory；固定 v1 服务 ABI 校验通过；崩溃后旧 Ring/vCPU/Memory 句柄、映射与世代全部失效并回收；第二代服务重启后接收六类真实 VMX 退出，固定 exit 记录与 Ring 完成一致，资源回基线"
   else
     record HWV-5 FAIL "缺少 virtio-MMIO/rng Linux 驱动标记、virtqueue 完成、IRQ 或资源回基线"
+    record HWV-5-VMM FAIL "缺少用户态 VMM 服务、崩溃撤销、重启代次、Ring 退出交付或固定记录证据"
   fi
   if has '\[JSR-HWV5-PIO\] device=jpio discovered=true ping=true reset=true pending=true cancel=true generation=2 writes=0 ok=true' \
      && has '\[JSR-HWV5-PIO\] backend=Vmx transport=pio decoded=true routed=true probe=true reset=true pending=true cancel=true failure_atomic=true resource=true failed=0' \
@@ -2885,6 +2890,16 @@ check_sec6() {
     record SEC-6 PASS "软件内存能力范围/权限、越界拒绝、撤销后访问拒绝、共享映射后备身份保留、地址复用旧权限不复活、CHERI 硬件不可用显式 unsupported；资源回基线"
   else
     record SEC-6 FAIL "缺少内存能力范围/权限、越界、撤销、共享后备身份、硬件不可用或资源基线证据"
+  fi
+}
+
+check_sec5() {
+  if [ "$TEST_RC" -eq 0 ] && [ "$BUILD_RC" -eq 0 ] \
+     && has '^\[JSR-SEC5\] default_deny=true alias=true aggregate=true encoded=true control=true expiry=true declassify=true stale=false channels=7 audit=true ipc_gate=true resources=true failed=0' \
+     && ! has '^\[JSR-SEC5-FAIL\]'; then
+    record SEC-5 PASS "IFC/DIFC 数据与控制流标签、别名/聚合/编码传播、显式限时降密、跨通道拒绝、IPC 真实门禁、审计与资源回基线全部通过"
+  else
+    record SEC-5 FAIL "缺少 IFC 标签传播、别名/聚合绕过拒绝、独立限时降密、跨通道/IPC 门禁或审计/资源证据"
   fi
 }
 

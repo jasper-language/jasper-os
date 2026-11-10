@@ -23,7 +23,6 @@ use alloc::vec;
 
 use kernel_core::object::HandleId;
 use kernel_core::objtable::ObjId;
-use kernel_core::paging::MapFlags;
 use kernel_core::ring_abi::MsgDesc;
 
 use crate::kobj;
@@ -100,10 +99,11 @@ fn fixture(app: Option<u32>) -> Option<Fixture> {
     let base = arch::USER_WINDOW.0;
     let send_desc_va = base + DESC_OFF;
     let recv_desc_va = base + DESC_OFF + 0x100;
+    let recv_desc_page = base + DESC_OFF;
     let buf_va = base + BUF_OFF;
-    proc::map_new(sender, send_desc_va, MapFlags::USER | MapFlags::WRITE).ok()?;
-    proc::map_new(receiver, recv_desc_va, MapFlags::USER | MapFlags::WRITE).ok()?;
-    proc::map_new(receiver, buf_va, MapFlags::USER | MapFlags::WRITE).ok()?;
+    proc::map_anon(sender, send_desc_va, 1, true).ok()?;
+    proc::map_anon(receiver, recv_desc_page, 1, true).ok()?;
+    proc::map_anon(receiver, buf_va, 1, true).ok()?;
     let (send_ep, recv_ep) = ipc::create_pair(sender, receiver).ok()?;
     let send_ring = ring::create_for(sender, 8).ok()?;
     let recv_ring = ring::create_for(receiver, 8).ok()?;

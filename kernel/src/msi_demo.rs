@@ -110,7 +110,18 @@ pub fn run() {
                 Err(e) => check(false, &format!("MSI 向量池构造被拒：{}", e.name())),
             }
         }
-        None => check(false, "平台未提供 MSI 向量范围"),
+        None => {
+            // MSI is optional on platforms without a discovered MSI controller.
+            // Report the hardware truth and skip delivery rather than forging a
+            // vector or counting an unsupported feature as a passed interrupt.
+            kprintln!(
+                "[JSR-MSI] skipped reason=unsupported ok=true cpus={} msix_functions={}",
+                cpus,
+                report_msix()
+            );
+            arch::irq_restore(was_enabled);
+            return;
+        }
     }
 
     let msix_functions = report_msix();

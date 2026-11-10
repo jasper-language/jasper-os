@@ -53,7 +53,7 @@ hwv4-verify = []
 # JSR_LINUX_GUEST_KERNEL and are intentionally not checked into the repo.
 hwv4-linux = ["hwv4-verify"]
 # HWV-5 guest-facing virtio-MMIO devices and minimal Linux acceptance.
-hwv5-verify = ["hwv4-linux"]
+hwv5-verify = ["hwv4-linux", "user-programs"]
 # JASO-1 multi-image and source-envelope acceptance only.
 jaso1-verify = []
 # DRV-3 DMA mapping lifecycle drill.
@@ -70,6 +70,8 @@ sec2-verify = []
 sec3-verify = ["kernel-core/sec3-verify"]
 # Dedicated SEC-4 domain, gateway, compromise and restart boundary.
 sec4-verify = []
+# Dedicated SEC-5 IFC/DIFC enforcement, declassification and audit acceptance.
+sec5-verify = []
 # SEC-6 software memory capabilities, pointer provenance and CHERI-ready boundary.
 sec6-verify = []
 # Dedicated USI-1 CLI/structured service acceptance.

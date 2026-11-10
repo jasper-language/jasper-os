@@ -175,12 +175,13 @@ fn main() {
             println!("cargo:rustc-env={target}={}", path.display());
         }
     }
-    // AArch64 / RISC-V 没有引导器，内核 ELF 由固件或仿真器直接装载：用本仓库的链接脚本固定装载地址与段布局。
+    // AArch64 / LoongArch64 / RISC-V 没有本项目使用的引导器：用本仓库的链接脚本固定装载地址与段布局。
     let script = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("aarch64") if std::env::var_os("CARGO_FEATURE_PIXEL6A_PE").is_some()
             || std::env::var_os("CARGO_FEATURE_PIXEL6A_FULL").is_some() => Some("kernel/link-pixel6a-pe.ld"),
         Ok("aarch64") if std::env::var_os("CARGO_FEATURE_PIXEL6A_SMOKE").is_some() => Some("kernel/link-pixel6a.ld"),
         Ok("aarch64") => Some("kernel/link-aarch64.ld"),
+        Ok("loongarch64") => Some("kernel/link-loongarch64.ld"),
         Ok("riscv64") => Some("kernel/link-riscv64.ld"),
         Ok("riscv32") => Some("kernel/link-riscv32.ld"),
         _ => None,
@@ -217,6 +218,7 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
     if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") {
         all_programs.push(("user/devprobe", "user-devprobe", "JSR_USER_DEVPROBE"));
         all_programs.push(("user/irqprobe", "user-irqprobe", "JSR_USER_IRQPROBE"));
+        all_programs.push(("user/vmm", "user-vmm", "JSR_USER_VMM"));
     }
     let jasodemo_only = std::env::var_os("CARGO_FEATURE_JASO1_VERIFY").is_some();
     let programs: Vec<(&str, &str, &str)> = if jasodemo_only {

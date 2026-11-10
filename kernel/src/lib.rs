@@ -59,6 +59,7 @@ pub mod interrupt;
 pub mod exit_state;
 pub mod fault;
 pub mod ipc;
+pub mod ifc;
 #[cfg(feature = "user-programs")]
 pub mod ipc_demo;
 pub mod irq;
@@ -115,6 +116,8 @@ pub mod bench_demo;
 pub mod blk;
 #[cfg(target_arch = "x86_64")]
 pub mod blk1_demo;
+#[cfg(all(target_arch = "x86_64", feature = "hwv5-verify"))]
+pub mod hwv5_vmm_demo;
 #[cfg(all(target_arch = "x86_64", feature = "fs0-journal-verify"))]
 pub mod fs0_demo;
 #[cfg(all(target_arch = "x86_64", feature = "fs1-ext4-verify"))]
@@ -135,6 +138,8 @@ pub mod sec2_demo;
 pub mod sec3_demo;
 #[cfg(feature = "sec4-verify")]
 pub mod sec4_demo;
+#[cfg(feature = "sec5-verify")]
+pub mod sec5_demo;
 #[cfg(feature = "sec6-verify")]
 pub mod sec6_demo;
 pub mod shard;
@@ -143,6 +148,7 @@ pub mod sync;
 pub mod syscall;
 pub mod task;
 pub mod usi;
+#[cfg(feature = "user-programs")]
 pub mod usi1_demo;
 #[cfg(feature = "usi2-verify")]
 pub mod usi2_demo;

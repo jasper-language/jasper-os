@@ -249,6 +249,16 @@ pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, han
         return err(SYSTEM_CHANNEL_ERROR_PEER_CLOSED);
     }
     let Some(peer) = peer else { return err(SYSTEM_CHANNEL_ERROR_PEER_CLOSED) };
+    let receiver = match t.get(peer) {
+        Ok(KObject::Endpoint(endpoint)) => endpoint.owner,
+        _ => return err(SYSTEM_CHANNEL_ERROR_PEER_CLOSED),
+    };
+    let Ok(sink_security) = t.security(receiver) else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    if crate::ifc::authorize_ipc(sender_security, sink_security).is_err() {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    }
     match ep_mut(t, peer) {
         Some(p) if p.queue.len() < MAX_QUEUE_MSGS && p.queued_bytes + body.len() <= MAX_QUEUE_BYTES => {}
         _ => return err(SYSTEM_CHANNEL_ERROR_QUEUE_FULL),

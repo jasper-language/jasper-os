@@ -11,6 +11,10 @@ pub fn failed() -> u32 {
 }
 
 pub fn run() {
+    let vmm_ok = crate::hwv5_vmm_demo::run();
+    if !vmm_ok {
+        FAILED.fetch_add(1, Ordering::Relaxed);
+    }
     let ok = crate::arch::x86_64::linux_guest::run_virtio();
     if !ok {
         FAILED.fetch_add(1, Ordering::Relaxed);
@@ -21,7 +25,8 @@ pub fn run() {
         );
     }
     kprintln!(
-        "[JSR-HWV5] backend=Vmx bus=mmio devices=rng,console,block linux=true failed={}",
+        "[JSR-HWV5] backend=Vmx bus=mmio devices=rng,console,block linux=true vmm={} failed={}",
+        vmm_ok,
         failed()
     );
 }

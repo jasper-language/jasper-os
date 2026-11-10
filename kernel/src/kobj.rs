@@ -500,6 +500,7 @@ pub fn run_cleanup(limit: usize) -> usize {
             break;
         };
         crate::kprintln!("[JSR-LIFE] cleanup destroy type={} id={:#x}", obj.type_name(), id.raw());
+        crate::ifc::release(id.raw(), id.generation());
         // 只按种类查表分派。Destroy::None 的槽为空，对象值在本轮直接丢弃；
         // 类型特有的销毁载荷由所属模块的单一入口解释，中心代码不展开任何对象变体。
         if let Some(hook) = DESTROY_HOOKS[obj.kind().index()] {

@@ -66,6 +66,9 @@ pub fn run() {
     let host_bridge = table.devices().any(|d| d.header.class == 0x06 && d.header.subclass == 0x00);
     let isa_bridge = table.devices().any(|d| d.header.class == 0x06 && d.header.subclass == 0x01);
     check(host_bridge, "找不到宿主桥（class 0x06 / subclass 0x00）");
+    // ISA is an x86 platform contract. PCIe-only ARM64, RISC-V and LoongArch
+    // machines legitimately have no class-06/subclass-01 bridge.
+    #[cfg(target_arch = "x86_64")]
     check(isa_bridge, "找不到 ISA 桥（class 0x06 / subclass 0x01）");
 
     let mut virtio = 0u32;

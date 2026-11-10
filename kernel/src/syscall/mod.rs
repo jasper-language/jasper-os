@@ -190,23 +190,34 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
         return ret;
     };
     let mut service = Some(service);
-    let Some(pid) = proc::current_process() else {
-        let ret = err(SYSTEM_ERROR_RIGHTS_DENIED);
-        if tracing() {
-            kprintln!("[JSR-SYSCALL] deny name={} id={} task={} ret={}", e.name, e.id, task_name, error_name(ret));
+    // Synthetic architecture probes are trusted kernel tasks with TaskIds
+    // below 1000 and intentionally have no Process object. Their SyscallSet
+    // still gates every operation. Real process threads (>= 1000) must have a
+    // Process identity and pass MAC authorization.
+    if let Some(pid) = proc::current_process() {
+        if let Err(denial) = crate::security::authorize_syscall(pid, a.args[0], e.name, e.effects) {
+            crate::security::flush_audit();
+            let ret = err(SYSTEM_ERROR_RIGHTS_DENIED);
+            if tracing() {
+                kprintln!(
+                    "[JSR-SYSCALL] deny name={} id={} task={} mac={} ret={}",
+                    e.name,
+                    e.id,
+                    task_name,
+                    denial.name(),
+                    error_name(ret)
+                );
+            }
+            return ret;
         }
-        return ret;
-    };
-    if let Err(denial) = crate::security::authorize_syscall(pid, a.args[0], e.name, e.effects) {
-        crate::security::flush_audit();
+    } else if task_id.0 >= 1000 {
         let ret = err(SYSTEM_ERROR_RIGHTS_DENIED);
         if tracing() {
             kprintln!(
-                "[JSR-SYSCALL] deny name={} id={} task={} mac={} ret={}",
+                "[JSR-SYSCALL] deny name={} id={} task={} reason=no_process ret={}",
                 e.name,
                 e.id,
                 task_name,
-                denial.name(),
                 error_name(ret)
             );
         }
