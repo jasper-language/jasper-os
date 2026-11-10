@@ -88,6 +88,7 @@ esac
 [ "${JASPER_CHECKS:-}" = "sec6" ] && KFEAT+=(--features sec6-verify)
 [ "${JASPER_CHECKS:-}" = "net2" ] && KFEAT+=(--features net2-verify)
 [ "${JASPER_CHECKS:-}" = "net3" ] && KFEAT+=(--features net3-verify)
+[ "${JASPER_CHECKS:-}" = "net4runtime" ] && KFEAT+=(--features net4-runtime-verify)
 [ "${JASPER_CHECKS:-}" = "hwv5-prod" ] && KFEAT+=(--features hwv5-prod-verify)
 HWV4_FEAT=()
 if [ -n "${JSR_LINUX_GUEST_HEADER:-}" ] && [ -n "${JSR_LINUX_GUEST_KERNEL:-}" ]; then
@@ -2939,6 +2940,15 @@ check_net3() {
     record NET-3 PASS "接口探测/上线/降级/停止生命周期、指数退避与重试耗尽、断开恢复、传输/队列/配额/畸形流量分类、观测快照有界、陈旧世代拒绝和资源回基线通过"
   else
     record NET-3 FAIL "缺少生命周期、重试预算、丢包分类、可观测快照、陈旧世代或资源守恒证据"
+  fi
+}
+
+check_net4runtime() {
+  if has '^\[JSR-NET4-RUNTIME\] wire=true udp=true socket=true quota=true generation=true echo=true reset=true resources=true failed=0' \
+     && ! has '^\[JSR-NET4-RUNTIME-FAIL\]'; then
+    record NET-4-RUNTIME PASS "真实 QEMU 中以太网/IPv4/UDP 帧经过 virtio-net 后端、运行时 socket、配额、校验和、世代、收发与关闭路径并回送；设备复位撤销 socket，资源回基线"
+  else
+    record NET-4-RUNTIME FAIL "缺少真实 UDP 帧、socket 生命周期、配额/世代/校验和或资源回收证据"
   fi
 }
 

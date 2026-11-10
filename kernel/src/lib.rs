@@ -149,6 +149,8 @@ pub mod sec5_demo;
 pub mod net2_demo;
 #[cfg(feature = "net3-verify")]
 pub mod net3_demo;
+#[cfg(feature = "net4-runtime-verify")]
+pub mod net4_runtime_demo;
 #[cfg(feature = "sec6-verify")]
 pub mod sec6_demo;
 pub mod shard;

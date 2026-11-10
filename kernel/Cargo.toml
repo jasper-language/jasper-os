@@ -82,6 +82,8 @@ sec5-verify = []
 net2-verify = []
 # Dedicated network lifecycle, retry, loss and observability contract.
 net3-verify = []
+# NET-4 no_std UDP socket runtime without hosted QUIC artifacts.
+net4-runtime-verify = []
 # SEC-6 software memory capabilities, pointer provenance and CHERI-ready boundary.
 sec6-verify = []
 # Dedicated USI-1 CLI/structured service acceptance.

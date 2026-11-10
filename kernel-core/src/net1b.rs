@@ -110,7 +110,7 @@ pub fn parse_ipv4_transport(ip: Ipv4Header<'_>) -> Result<Net1bPacket<'_>, NetEr
     }
 }
 
-pub(crate) fn ipv4_transport_checksum(
+pub fn ipv4_transport_checksum(
     source: [u8; 4],
     destination: [u8; 4],
     protocol: IpProtocol,

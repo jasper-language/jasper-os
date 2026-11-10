@@ -5,6 +5,14 @@
 //! and deterministic host replies. A kernel/hypervisor backend still performs
 //! guest-memory descriptor walks and interrupt delivery.
 
+use crate::net1a::{
+    EthernetFrame, IpProtocol, Ipv4Header, Net1aPacket, parse_ethernet_payload,
+};
+use crate::net1b::{UdpDatagram, ipv4_transport_checksum};
+use crate::net4_runtime::{
+    UdpAddress, UdpHandle, UdpRights, UdpRuntimeError, UdpSocketRuntime, UdpStats,
+};
+
 pub const MAC_BYTES: usize = 6;
 pub const VIRTIO_NET_HEADER_BYTES: usize = 12;
 pub const ETHERNET_HEADER_BYTES: usize = 14;
@@ -102,6 +110,7 @@ impl VirtioNetHeader {
 pub enum TransmitOutcome {
     ArpReply,
     IcmpEchoReply,
+    UdpEchoReply,
     Accepted,
 }
 
@@ -133,6 +142,8 @@ pub struct VirtioNetBackend {
     rx: [RxFrame; RX_QUEUE_CAPACITY],
     rx_head: usize,
     rx_len: usize,
+    udp: UdpSocketRuntime<2, 4>,
+    udp_handle: Option<UdpHandle>,
 }
 
 impl VirtioNetBackend {
@@ -148,6 +159,8 @@ impl VirtioNetBackend {
             rx: [RxFrame::EMPTY; RX_QUEUE_CAPACITY],
             rx_head: 0,
             rx_len: 0,
+            udp: UdpSocketRuntime::new(crate::net4_runtime::UdpQuota::new(2, 8, 8192)),
+            udp_handle: None,
         }
     }
 
@@ -184,10 +197,30 @@ impl VirtioNetBackend {
         self.rx_head = 0;
         self.rx_len = 0;
         self.rx = [RxFrame::EMPTY; RX_QUEUE_CAPACITY];
+        self.udp.revoke_all();
+        self.udp_handle = None;
     }
 
     pub fn set_link(&mut self, up: bool) {
         self.link_up = up;
+    }
+
+    /// 在本机 IPv4 地址上启用 UDP 服务 socket。
+    ///
+    /// Enables one UDP service socket on the backend's IPv4 address.
+    pub fn enable_udp_service(&mut self, port: u16) -> Result<UdpHandle, UdpRuntimeError> {
+        if self.udp_handle.is_some() {
+            return Err(UdpRuntimeError::Capacity);
+        }
+        let handle = self
+            .udp
+            .bind(UdpAddress::new(self.ipv4, port), UdpRights::SERVICE)?;
+        self.udp_handle = Some(handle);
+        Ok(handle)
+    }
+
+    pub fn udp_stats(&self) -> UdpStats {
+        self.udp.stats()
     }
 
     pub fn transmit(&mut self, bytes: &[u8]) -> Result<TransmitOutcome, NetError> {
@@ -198,6 +231,15 @@ impl VirtioNetBackend {
         let reply = match outcome {
             TransmitOutcome::ArpReply => Some(arp_reply(bytes, self.mac, self.ipv4)?),
             TransmitOutcome::IcmpEchoReply => Some(icmp_echo_reply(bytes, self.mac, self.ipv4)?),
+            TransmitOutcome::UdpEchoReply => {
+                let Some(handle) = self.udp_handle else {
+                    return Ok(TransmitOutcome::Accepted);
+                };
+                match udp_echo_reply(bytes, self.mac, self.ipv4, &mut self.udp, handle) {
+                    Ok(reply) => Some(reply),
+                    Err(_) => return Ok(TransmitOutcome::Accepted),
+                }
+            }
             TransmitOutcome::Accepted => None,
         };
         if let Some(reply) = reply {
@@ -277,6 +319,11 @@ fn classify(
         {
             return Ok(TransmitOutcome::IcmpEchoReply);
         }
+        if ip[9] == 17 && ip[16..20] == ipv4 {
+            let header = Ipv4Header::parse(ip).map_err(|_| NetError::MalformedChecksum)?;
+            UdpDatagram::parse(header).map_err(|_| NetError::MalformedChecksum)?;
+            return Ok(TransmitOutcome::UdpEchoReply);
+        }
         return Ok(TransmitOutcome::Accepted);
     }
     Ok(TransmitOutcome::Accepted)
@@ -323,6 +370,88 @@ fn icmp_echo_reply(request: &[u8], mac: [u8; MAC_BYTES], ipv4: [u8; 4]) -> Resul
     let icmp_sum = checksum(&out_ip[ip_header..ip_total]);
     out_ip[ip_header + 2..ip_header + 4].copy_from_slice(&icmp_sum.to_be_bytes());
     frame.len = ETHERNET_HEADER_BYTES + ip_total;
+    Ok(frame)
+}
+
+fn udp_echo_reply(
+    request: &[u8],
+    mac: [u8; MAC_BYTES],
+    ipv4: [u8; 4],
+    runtime: &mut UdpSocketRuntime<2, 4>,
+    handle: UdpHandle,
+) -> Result<RxFrame, UdpRuntimeError> {
+    let ethernet = EthernetFrame::parse(request).map_err(|_| UdpRuntimeError::InvalidAddress)?;
+    let Net1aPacket::Ipv4(ip) =
+        parse_ethernet_payload(ethernet).map_err(|_| UdpRuntimeError::InvalidAddress)?
+    else {
+        return Err(UdpRuntimeError::InvalidAddress);
+    };
+    let datagram = UdpDatagram::parse(ip).map_err(|_| UdpRuntimeError::InvalidAddress)?;
+    let source = UdpAddress::new(ip.source, datagram.source_port);
+    let destination = UdpAddress::new(ip.destination, datagram.destination_port);
+    runtime.receive(source, destination, datagram.payload)?;
+    let mut payload = [0u8; crate::net4_runtime::MAX_UDP_DATAGRAM_BYTES];
+    let (reply_to, payload_len) = runtime.recv(handle, &mut payload)?;
+    let reply = build_udp_reply(
+        request,
+        mac,
+        ipv4,
+        ip.source,
+        datagram.destination_port,
+        datagram.source_port,
+        &payload[..payload_len],
+    )?;
+    runtime.send(handle, reply_to, &payload[..payload_len])?;
+    Ok(reply)
+}
+
+fn build_udp_reply(
+    request: &[u8],
+    mac: [u8; MAC_BYTES],
+    ipv4: [u8; 4],
+    peer_ip: [u8; 4],
+    source_port: u16,
+    destination_port: u16,
+    payload: &[u8],
+) -> Result<RxFrame, UdpRuntimeError> {
+    let ip_bytes = 28usize
+        .checked_add(payload.len())
+        .ok_or(UdpRuntimeError::DatagramTooLarge)?;
+    let frame_len = ETHERNET_HEADER_BYTES
+        .checked_add(ip_bytes)
+        .ok_or(UdpRuntimeError::DatagramTooLarge)?;
+    if frame_len > MAX_FRAME_BYTES || ip_bytes > u16::MAX as usize {
+        return Err(UdpRuntimeError::DatagramTooLarge);
+    }
+    let mut frame = RxFrame::EMPTY;
+    frame.bytes[..6].copy_from_slice(&request[6..12]);
+    frame.bytes[6..12].copy_from_slice(&mac);
+    frame.bytes[12..14].copy_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
+    let ip = &mut frame.bytes[ETHERNET_HEADER_BYTES..ETHERNET_HEADER_BYTES + ip_bytes];
+    ip[0] = 0x45;
+    ip[2..4].copy_from_slice(&(ip_bytes as u16).to_be_bytes());
+    ip[6..8].copy_from_slice(&0x4000u16.to_be_bytes());
+    ip[8] = 64;
+    ip[9] = 17;
+    ip[12..16].copy_from_slice(&ipv4);
+    ip[16..20].copy_from_slice(&peer_ip);
+    let ip_checksum = checksum(&ip[..20]);
+    ip[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+    let udp = &mut ip[20..];
+    udp[0..2].copy_from_slice(&source_port.to_be_bytes());
+    udp[2..4].copy_from_slice(&destination_port.to_be_bytes());
+    udp[4..6].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    udp[8..].copy_from_slice(payload);
+    let udp_checksum = ipv4_transport_checksum(ipv4, peer_ip, IpProtocol::Udp, udp);
+    udp[6..8].copy_from_slice(
+        &(if udp_checksum == 0 {
+            u16::MAX
+        } else {
+            udp_checksum
+        })
+        .to_be_bytes(),
+    );
+    frame.len = frame_len;
     Ok(frame)
 }
 
@@ -420,5 +549,85 @@ mod tests {
         backend.reset();
         assert_eq!(backend.reset_generation(), 2);
         assert!(backend.pop_rx().is_none());
+    }
+
+    fn udp_frame(payload: &[u8]) -> [u8; 46] {
+        let mut frame = [0u8; 46];
+        frame[..6].copy_from_slice(&[2, 0, 0, 0, 0, 1]);
+        frame[6..12].copy_from_slice(&[2, 0, 0, 0, 0, 2]);
+        frame[12..14].copy_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
+        let ip = &mut frame[ETHERNET_HEADER_BYTES..];
+        ip[0] = 0x45;
+        ip[2..4].copy_from_slice(&((28 + payload.len()) as u16).to_be_bytes());
+        ip[6..8].copy_from_slice(&0x4000u16.to_be_bytes());
+        ip[8] = 64;
+        ip[9] = 17;
+        ip[12..16].copy_from_slice(&[10, 0, 2, 15]);
+        ip[16..20].copy_from_slice(&[10, 0, 2, 1]);
+        let ip_sum = checksum(&ip[..20]);
+        ip[10..12].copy_from_slice(&ip_sum.to_be_bytes());
+        let udp = &mut ip[20..];
+        udp[0..2].copy_from_slice(&49152u16.to_be_bytes());
+        udp[2..4].copy_from_slice(&4433u16.to_be_bytes());
+        udp[4..6].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        udp[8..].copy_from_slice(payload);
+        let udp_sum = ipv4_transport_checksum(
+            [10, 0, 2, 15],
+            [10, 0, 2, 1],
+            IpProtocol::Udp,
+            udp,
+        );
+        udp[6..8].copy_from_slice(&udp_sum.to_be_bytes());
+        frame
+    }
+
+    #[test]
+    fn udp_runtime_socket_echoes_real_frame_and_returns_quota() {
+        let mut backend = VirtioNetBackend::new([2, 0, 0, 0, 0, 1], [10, 0, 2, 1]);
+        backend.enable_udp_service(4433).unwrap();
+        assert_eq!(
+            backend.enable_udp_service(4434),
+            Err(UdpRuntimeError::Capacity)
+        );
+        assert_eq!(backend.udp_stats().active_sockets, 1);
+        let request = udp_frame(b"quic");
+        assert_eq!(
+            backend.transmit(&request),
+            Ok(TransmitOutcome::UdpEchoReply)
+        );
+        let reply = backend.pop_rx().unwrap();
+        let EthernetFrame { payload, .. } = EthernetFrame::parse(reply.bytes()).unwrap();
+        let ip = Ipv4Header::parse(payload).unwrap();
+        assert_eq!(ip.source, [10, 0, 2, 1]);
+        assert_eq!(ip.destination, [10, 0, 2, 15]);
+        let udp = UdpDatagram::parse(ip).unwrap();
+        assert_eq!(udp.source_port, 4433);
+        assert_eq!(udp.destination_port, 49152);
+        assert_eq!(udp.payload, b"quic");
+        let stats = backend.udp_stats();
+        assert_eq!(stats.received_datagrams, 1);
+        assert_eq!(stats.sent_datagrams, 1);
+        assert_eq!(stats.queued_datagrams, 0);
+        backend.reset();
+        assert_eq!(backend.udp_stats().active_sockets, 0);
+        assert_eq!(
+            backend.transmit(&request),
+            Ok(TransmitOutcome::Accepted)
+        );
+        assert!(backend.pop_rx().is_none());
+    }
+
+    #[test]
+    fn malformed_udp_checksum_is_rejected_without_reply() {
+        let mut backend = VirtioNetBackend::new([2, 0, 0, 0, 0, 1], [10, 0, 2, 1]);
+        backend.enable_udp_service(4433).unwrap();
+        let mut request = udp_frame(b"quic");
+        request[40] ^= 0xff;
+        assert_eq!(
+            backend.transmit(&request),
+            Err(NetError::MalformedChecksum)
+        );
+        assert!(backend.pop_rx().is_none());
+        assert_eq!(backend.malformed(), 1);
     }
 }
