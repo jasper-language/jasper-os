@@ -483,13 +483,19 @@ mod tests {
         command(CMD_RESOURCE_ATTACH_BACKING, 2, &payload)
     }
 
+    fn assert_response(response: &[u8], expected: u32) {
+        assert_eq!(get_u32(response, 0), expected);
+    }
+
     #[test]
     fn create_attach_scanout_transfer_flush_and_unref_roundtrip() {
         let mut gpu = VirtioGpuBackend::new();
         let mut response = [0u8; 512];
         assert_eq!(gpu.handle_command(&create(), &mut response), Ok(24));
+        assert_response(&response, RESP_OK_NODATA);
         assert_eq!(gpu.resource_count(), 1);
         assert_eq!(gpu.handle_command(&attach(), &mut response), Ok(24));
+        assert_response(&response, RESP_OK_NODATA);
         let mut scanout = [0u8; 24];
         put_u32(&mut scanout, 8, 64);
         put_u32(&mut scanout, 12, 64);
@@ -499,6 +505,7 @@ mod tests {
             gpu.handle_command(&command(CMD_SET_SCANOUT, 3, &scanout), &mut response),
             Ok(24)
         );
+        assert_response(&response, RESP_OK_NODATA);
         let mut transfer = [0u8; 32];
         put_u32(&mut transfer, 8, 64);
         put_u32(&mut transfer, 12, 64);
@@ -510,14 +517,40 @@ mod tests {
             ),
             Ok(24)
         );
+        assert_response(&response, RESP_OK_NODATA);
         let mut unref = [0u8; 8];
         put_u32(&mut unref, 0, 1);
         assert_eq!(
             gpu.handle_command(&command(CMD_RESOURCE_UNREF, 5, &unref), &mut response),
             Ok(24)
         );
+        assert_response(&response, RESP_OK_NODATA);
         assert_eq!(gpu.resource_count(), 0);
         assert_eq!(gpu.transfers(), 1);
+    }
+
+    #[test]
+    fn backing_size_uses_width_times_height_pixels_and_rejects_short_range() {
+        let mut gpu = VirtioGpuBackend::new();
+        let mut response = [0u8; 512];
+        gpu.handle_command(&create(), &mut response).unwrap();
+
+        let mut short = [0u8; 24];
+        put_u32(&mut short, 0, 1);
+        put_u32(&mut short, 4, 1);
+        put_u64(&mut short, 8, 0x20_0000);
+        put_u32(&mut short, 16, 64 * 64 * 4 - 1);
+        assert_eq!(
+            gpu.handle_command(
+                &command(CMD_RESOURCE_ATTACH_BACKING, 3, &short),
+                &mut response
+            ),
+            Ok(24)
+        );
+        assert_response(&response, RESP_ERR_UNSPEC);
+
+        assert_eq!(gpu.handle_command(&attach(), &mut response), Ok(24));
+        assert_response(&response, RESP_OK_NODATA);
     }
 
     #[test]

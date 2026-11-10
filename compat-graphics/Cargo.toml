@@ -1,0 +1,10 @@
+[package]
+name = "jasper-compat-graphics"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Bounded Linux Vulkan, WSI, input and Jasper GPU compatibility core"
+
+[dependencies]
+ash = { version = "=0.38.0", default-features = false }
+kernel-core = { path = "../kernel-core" }

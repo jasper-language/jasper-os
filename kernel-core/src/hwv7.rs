@@ -314,6 +314,15 @@ impl GpuQueue {
         let completion = self.completions[self.completion_head].take();
         self.completion_head = (self.completion_head + 1) % COMPLETION_CAPACITY;
         self.completion_len -= 1;
+        if let Some(request) = completion {
+            if let Some(slot) = self
+                .requests
+                .iter()
+                .position(|value| value.is_some_and(|value| value.id == request.request))
+            {
+                self.requests[slot] = None;
+            }
+        }
         completion
     }
 
@@ -512,6 +521,21 @@ mod tests {
         assert!(completion.success);
         assert_eq!(queue.pop_completion(), Some(completion));
         assert_eq!(queue.stats().doorbells, 1);
+    }
+
+    #[test]
+    fn consumed_completion_releases_the_request_slot() {
+        let mut queue = queue(GpuBackend::VirtioGpu, false);
+        let request = queue.submit(1, SUBMIT, 1).unwrap();
+        queue.start(request).unwrap();
+        let completion = queue.complete(request, true).unwrap();
+        assert_eq!(queue.pop_completion(), Some(completion));
+        assert_eq!(
+            queue.complete(request, true),
+            Err(GpuError::RequestNotFound)
+        );
+        let replacement = queue.submit(1, SUBMIT, 1).unwrap();
+        assert_eq!(replacement, request + 1);
     }
 
     #[test]
