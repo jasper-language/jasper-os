@@ -275,17 +275,27 @@ fn register_rseq(process: ObjId, address: u64, length: u64, flags: u64, signatur
         return false;
     }
     let (task, _) = sched::current();
-    let mut state = COMPAT.lock();
-    let Some(entry) = state
-        .threads
-        .iter_mut()
-        .flatten()
-        .find(|entry| entry.process == process && entry.task == task)
-    else {
+    {
+        let mut state = COMPAT.lock();
+        let Some(entry) = state
+            .threads
+            .iter_mut()
+            .flatten()
+            .find(|entry| entry.process == process && entry.task == task)
+        else {
+            return false;
+        };
+        entry.rseq = address;
+        entry.rseq_len = length as u32;
+    }
+    let cpu = crate::arch::cpu_index() as u32;
+    let mut initial = [0u8; 16];
+    initial[..4].copy_from_slice(&cpu.to_le_bytes());
+    initial[4..8].copy_from_slice(&cpu.to_le_bytes());
+    if proc::write(process, address, &initial).is_err() {
+        unregister_linux_thread(task);
         return false;
-    };
-    entry.rseq = address;
-    entry.rseq_len = length as u32;
+    }
     true
 }
 
@@ -294,7 +304,7 @@ fn register_rseq(process: ObjId, address: u64, length: u64, flags: u64, signatur
 /// 在线程退出时清零 `clear_child_tid` 并唤醒 Linux join 等待者。
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
 pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
-    let (clear, tid, robust_list) = {
+    let (clear, tid, robust_list, rseq, rseq_len) = {
         let mut state = COMPAT.lock();
         let Some(slot) = state
             .threads
@@ -304,11 +314,22 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
             return;
         };
         let entry = state.threads[slot].take().expect("live Linux thread");
-        (entry.clear_child_tid, entry.tid, entry.robust_list)
+        (
+            entry.clear_child_tid,
+            entry.tid,
+            entry.robust_list,
+            entry.rseq,
+            entry.rseq_len,
+        )
     };
     if robust_list != 0 {
         let handled = process_robust_list(process, tid, robust_list);
         crate::kprintln!("[JSR-LINUX-ROBUST] handled={handled} tid={tid}");
+    }
+    if rseq != 0 && rseq_len >= 16 {
+        let mut unregister = [0u8; 16];
+        unregister[..8].fill(0xff);
+        let _ = proc::write(process, rseq, &unregister);
     }
     if clear != 0 {
         let _ = proc::write(process, clear, &0u32.to_le_bytes());
