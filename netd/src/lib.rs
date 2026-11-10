@@ -11,6 +11,7 @@ pub use quinn;
 pub use rustls;
 
 pub mod service;
+pub mod jasper_sink;
 pub mod wireguard_driver;
 
 /// WireGuard protocol state comes from the same no_std adapter used by the

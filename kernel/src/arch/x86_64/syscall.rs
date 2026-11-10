@@ -105,7 +105,7 @@ extern "C" fn jsr_syscall_dispatch(frame: &mut RawFrame) -> u64 {
         id: frame.rax,
         args: [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9],
     };
-    let ret = syscall::on_syscall(&args);
+    let ret = syscall::on_entry(&args);
     let rip = frame.rcx;
     if ((rip << 16) as i64 >> 16) as u64 != rip {
         fault::on_user_fault(UserFault { kind: UserFaultKind::ProtectionFault, ip: rip, addr: 0 });

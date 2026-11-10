@@ -219,6 +219,11 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
         all_programs.push(("user/devprobe", "user-devprobe", "JSR_USER_DEVPROBE"));
         all_programs.push(("user/irqprobe", "user-irqprobe", "JSR_USER_IRQPROBE"));
         all_programs.push(("user/vmm", "user-vmm", "JSR_USER_VMM"));
+        all_programs.push((
+            "user/linuxprobe",
+            "user-linuxprobe",
+            "JSR_USER_LINUXPROBE",
+        ));
     }
     let jasodemo_only = std::env::var_os("CARGO_FEATURE_JASO1_VERIFY").is_some();
     let programs: Vec<(&str, &str, &str)> = if jasodemo_only {
@@ -280,15 +285,27 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
         let bytes = std::fs::read(&elf).unwrap_or_else(|e| panic!("读取用户程序 {} 失败：{}", elf.display(), e));
         let parsed = kernel_core::elf::parse(&bytes, machine, class)
             .unwrap_or_else(|e| panic!("用户程序 {} 的 ELF 不合法：{:?}", dir, e));
-        assert_eq!(
-            parsed.abi(),
-            Some(expected),
-            "用户程序 {} 的 ABI 章与 abi/abi-version.txt 不一致",
-            dir
-        );
-        let required = parsed.required_capabilities();
-        if *dir == "user/hello" {
-            assert_eq!(required.iter().collect::<Vec<_>>(), vec!["kernel.core"], "user-hello capability note differs");
+        if *dir == "user/linuxprobe" {
+            assert_eq!(
+                parsed.abi(),
+                None,
+                "Linux compatibility fixture must not carry Jasper ABI metadata"
+            );
+            assert!(
+                parsed.required_capabilities().iter().next().is_none(),
+                "Linux compatibility fixture must not carry Jasper capability metadata"
+            );
+        } else {
+            assert_eq!(
+                parsed.abi(),
+                Some(expected),
+                "用户程序 {} 的 ABI 章与 abi/abi-version.txt 不一致",
+                dir
+            );
+            let required = parsed.required_capabilities();
+            if *dir == "user/hello" {
+                assert_eq!(required.iter().collect::<Vec<_>>(), vec!["kernel.core"], "user-hello capability note differs");
+            }
         }
         println!("cargo:rustc-env={}={}", env, elf.display());
     }

@@ -461,9 +461,10 @@ fn program_header_range(
             }));
         }
     }
-    // AT_PHDR 必须可由新进程读取；落到不可读段或文件未映射区域时不能静默省略。
-    // AT_PHDR must be readable by the new process; an unmapped or non-readable table fails closed.
-    Err(LoaderError::BadSegment)
+    // A static image may keep its program headers outside PT_LOAD. Report the table
+    // as unavailable; dynamic stack construction will reject the absence of AT_PHDR.
+    // 静态映像可把程序头表留在 PT_LOAD 外；此处报告不可用，动态初始栈会失败关闭。
+    Ok(None)
 }
 
 fn collect_relocations<'a>(
@@ -872,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn program_headers_require_a_complete_readable_load_mapping() {
+    fn program_headers_report_only_complete_readable_load_ranges() {
         let segment = LoadSegment {
             file_offset: 0x100,
             virtual_address: 0x40_0100,
@@ -901,11 +902,11 @@ mod tests {
                 }],
                 0x200,
             ),
-            Err(LoaderError::BadSegment)
+            Ok(None)
         );
         assert_eq!(
             program_header_range(0x1f0, 56, 2, &[segment], 0x300),
-            Err(LoaderError::BadSegment)
+            Ok(None)
         );
         assert_eq!(
             program_header_range(0x110, 56, 2, &[segment], 0x120),

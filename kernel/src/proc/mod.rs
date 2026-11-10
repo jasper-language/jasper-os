@@ -42,15 +42,22 @@ use crate::kobj::{self, KObject, TaskObj};
 use crate::mm::phys_to_virt;
 use crate::mm::space::{in_private_window, VmSpace};
 use crate::sync::IrqSpinLock;
-use crate::syscall::SyscallSet;
+use crate::syscall::{SyscallFlavor, SyscallSet};
 use crate::task::TaskId;
 use crate::{arch, kprintln, sched};
+use compat_core::fd::FdTable;
+use compat_core::syscall::{LinuxSyscall, LinuxSyscallSet};
 
 pub mod spawn;
 
 /// 每个进程句柄表的容量。
 pub const HANDLES_PER_PROCESS: usize = crate::config::ACTIVE.objects.handles_per_process;
 const USI_REQUEST_SLOTS: usize = 16;
+static LINUX_PID_NEXT: AtomicU32 = AtomicU32::new(1);
+/// Opaque sentinel used only by the Linux standard-stream compatibility table.
+///
+/// 仅用于 Linux 标准流兼容表的受控控制台哨兵；它不是可解析的 Jasper 句柄。
+pub(crate) const LINUX_CONSOLE_HANDLE: u64 = u64::MAX;
 
 /// 进程状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +96,11 @@ pub struct Process {
     /// Guest RAM ownership is a separate VM budget from ordinary process memory.
     vm_guest_account: Arc<crate::mm::memory_quota::Account>,
     subscription_account: Arc<crate::mm::memory_quota::Account>,
+    /// Linux compatibility process state; absent behavior is native Jasper.
+    syscall_flavor: SyscallFlavor,
+    linux_calls: LinuxSyscallSet,
+    linux_fds: FdTable<64>,
+    linux_pid: u32,
     /// 页表修改已生效但击落未确认时被永久隔离的帧：不再归还分配器，避免旧 TLB 继续引用后复用。
     /// Frames permanently withheld from the allocator after an unconfirmed shootdown.
     quarantined: Vec<PhysFrame>,
@@ -325,12 +337,106 @@ pub(crate) fn app_in(t: &mut kobj::Table, pid: ObjId) -> Option<u32> {
     }
 }
 
+/// Returns the syscall register convention selected for `pid`.
+///
+/// 返回进程的 syscall 编号约定；不存在或已退出时返回 `None`。
+pub fn syscall_flavor(pid: ObjId) -> Option<SyscallFlavor> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => Some(p.syscall_flavor),
+        _ => None,
+    })
+}
+
+/// Checks that `pid` explicitly authorized one Linux syscall.
+///
+/// 检查进程是否显式授权某个 Linux syscall；权限集合不授予任何 Jasper 原生操作。
+pub(crate) fn linux_syscall_allowed(pid: ObjId, call: LinuxSyscall) -> bool {
+    crate::kobj::with(|t| {
+        matches!(
+            t.get(pid),
+            Ok(KObject::Process(p))
+                if p.syscall_flavor == SyscallFlavor::LinuxX86_64
+                    && p.linux_calls.contains(call)
+        )
+    })
+}
+
+/// Resolves one Linux fd through the process compatibility table.
+///
+/// 通过兼容 fd 表解析描述符；返回副本，后续 Handle/Rights 验证仍须执行。
+pub(crate) fn linux_fd(pid: ObjId, fd: u32) -> Option<compat_core::fd::FdEntry> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) if p.syscall_flavor == SyscallFlavor::LinuxX86_64 => {
+            p.linux_fds.get_fd(fd)
+        }
+        _ => None,
+    })
+}
+
+/// Returns the non-zero Linux pid namespace identity for one compatibility process.
+///
+/// 返回 Linux 兼容进程在兼容 pid 命名空间中的非零身份。
+pub(crate) fn linux_pid(pid: ObjId) -> Option<u32> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p))
+            if p.syscall_flavor == SyscallFlavor::LinuxX86_64 && p.linux_pid != 0 =>
+        {
+            Some(p.linux_pid)
+        }
+        _ => None,
+    })
+}
+
 pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcError> {
+    create_with_flavor(
+        name,
+        syscalls,
+        SyscallFlavor::Jasper,
+        LinuxSyscallSet::EMPTY,
+        false,
+    )
+}
+
+/// Creates a process whose x86_64 syscall entry uses the Linux compatibility flavor.
+///
+/// 创建使用 Linux x86_64 syscall 编号的进程。Jasper 原生 SyscallSet 保持为空；
+/// Linux 调用权限由独立集合控制，标准输入输出仅映射到受控控制台哨兵。
+pub fn create_linux(
+    name: &'static str,
+    calls: LinuxSyscallSet,
+) -> Result<ObjId, ProcError> {
+    create_with_flavor(name, SyscallSet::EMPTY, SyscallFlavor::LinuxX86_64, calls, true)
+}
+
+fn create_with_flavor(
+    name: &'static str,
+    syscalls: SyscallSet,
+    syscall_flavor: SyscallFlavor,
+    linux_calls: LinuxSyscallSet,
+    install_linux_fds: bool,
+) -> Result<ObjId, ProcError> {
+    let linux_pid = if syscall_flavor == SyscallFlavor::LinuxX86_64 {
+        allocate_linux_pid().ok_or(ProcError::NoTaskSlot)?
+    } else {
+        0
+    };
     let space = VmSpace::new().map_err(ProcError::Map)?;
     let memory_account = crate::mm::memory_quota::Account::new().ok_or(ProcError::OutOfFrames)?;
     let vm_guest_account = crate::mm::memory_quota::Account::new().ok_or(ProcError::OutOfFrames)?;
     let subscription_account =
         crate::mm::memory_quota::Account::new().ok_or(ProcError::OutOfFrames)?;
+    let mut linux_fds = FdTable::new();
+    if install_linux_fds {
+        for (fd, rights) in [
+            (0, Rights::READ),
+            (1, Rights::WRITE),
+            (2, Rights::WRITE),
+        ] {
+            linux_fds
+                .install_at(fd, LINUX_CONSOLE_HANDLE, rights, compat_core::fd::CompatKind::Other, false)
+                .map_err(|_| ProcError::NoTaskSlot)?;
+        }
+    }
     let exit_state = kobj::with(|t| {
         crate::exit_state::create_in_with_security(
             t,
@@ -353,6 +459,10 @@ pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcErr
         memory_pin_limit: MAX_PROCESS_FRAMES as u64,
         vm_guest_account,
         subscription_account,
+        syscall_flavor,
+        linux_calls,
+        linux_fds,
+        linux_pid,
         quarantined: Vec::new(),
         device_maps: Vec::new(),
         threads: Vec::new(),
@@ -389,6 +499,22 @@ pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcErr
         name
     );
     Ok(id)
+}
+
+fn allocate_linux_pid() -> Option<u32> {
+    loop {
+        let current = LINUX_PID_NEXT.load(Ordering::Acquire);
+        if current == 0 {
+            return None;
+        }
+        let next = current.checked_add(1).unwrap_or(0);
+        if LINUX_PID_NEXT
+            .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Some(current);
+        }
+    }
 }
 
 /// 在对象表锁内对进程执行 `f`。
@@ -428,12 +554,18 @@ pub fn map_new(id: ObjId, va: u64, flags: MapFlags) -> Result<PhysFrame, ProcErr
         p.space
             .map(VirtPage::containing(va), f, flags)
             .map_err(ProcError::Map)?;
-        let rights = MemoryRights::READ.union(if flags.contains(MapFlags::WRITE) {
-            MemoryRights::WRITE
-        } else {
-            MemoryRights::NONE
-        });
-        p.memory_caps
+        let rights = MemoryRights::READ
+            .union(if flags.contains(MapFlags::WRITE) {
+                MemoryRights::WRITE
+            } else {
+                MemoryRights::NONE
+            })
+            .union(if flags.contains(MapFlags::EXECUTE) {
+                MemoryRights::EXECUTE
+            } else {
+                MemoryRights::NONE
+            });
+        if p.memory_caps
             .grant(
                 va,
                 1,
@@ -441,7 +573,11 @@ pub fn map_new(id: ObjId, va: u64, flags: MapFlags) -> Result<PhysFrame, ProcErr
                 MemoryKind::Image,
                 BackingIdentity::new(0, 1).expect("fixed valid generation"),
             )
-            .map_err(|_| ProcError::MemoryQuota)?;
+            .is_err()
+        {
+            let _ = p.space.unmap_raw(VirtPage::containing(va));
+            return Err(ProcError::MemoryQuota);
+        }
         p.frames.push(Arc::clone(&page));
         Ok(f)
     })
@@ -1436,6 +1572,43 @@ pub fn write(id: ObjId, va: u64, bytes: &[u8]) -> Result<(), ProcError> {
     })
 }
 
+/// Read bytes from a mapped process range through the page table and physical mapping.
+///
+/// 经页表查询和物理映射读取已映射的进程内存；复制前验证整个范围，失败不产生部分输出。
+pub fn read(id: ObjId, va: u64, output: &mut [u8]) -> Result<(), ProcError> {
+    with_proc(id, |p| {
+        if output.is_empty() {
+            return Ok(());
+        }
+        let end = va
+            .checked_add(output.len() as u64)
+            .ok_or(ProcError::Map(MapError::InvalidAddress))?;
+        let mut check = va;
+        while check < end {
+            p.space
+                .translate(VirtPage::containing(check))
+                .ok_or(ProcError::Map(MapError::NotMapped))?;
+            check = (check - check % FRAME_SIZE) + FRAME_SIZE;
+        }
+        let mut done = 0usize;
+        while done < output.len() {
+            let cur = va + done as u64;
+            let off = cur % FRAME_SIZE;
+            let n = ((FRAME_SIZE - off) as usize).min(output.len() - done);
+            let (f, _) = p
+                .space
+                .translate(VirtPage::containing(cur))
+                .ok_or(ProcError::Map(MapError::NotMapped))?;
+            let k =
+                phys_to_virt(f.start() + off).ok_or(ProcError::Map(MapError::InvalidAddress))?;
+            // SAFETY: the mapped frame belongs to this process and n stays within the page.
+            unsafe { core::ptr::copy_nonoverlapping(k, output[done..].as_mut_ptr(), n) };
+            done += n;
+        }
+        Ok(())
+    })
+}
+
 /// 装载 ELF 失败的原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadError {
@@ -1449,6 +1622,9 @@ pub enum LoadError {
     OutsideWindow,
     /// 映射或复制失败。
     Proc(ProcError),
+    /// Linux compatibility input unexpectedly carried Jasper ABI metadata.
+    /// Linux 兼容输入意外携带了 Jasper ABI 元数据。
+    UnexpectedMetadata,
 }
 
 impl LoadError {
@@ -1460,6 +1636,7 @@ impl LoadError {
             LoadError::Capability => "system.error.abi_capability",
             LoadError::OutsideWindow => "system.memory.error.invalid_address",
             LoadError::Proc(_) => "system.memory.error.out_of_frames",
+            LoadError::UnexpectedMetadata => "system.error.abi_metadata",
         }
     }
 }
@@ -1469,16 +1646,37 @@ impl LoadError {
 /// ABI 世代检查在**任何页映射之前**完成：没有章、章损坏、跨主版本或要求的次版本高于本内核，
 /// 都返回 [`LoadError::Abi`]，进程地址空间保持原样，用户代码没有机会执行。
 pub fn load_elf(id: ObjId, image: &[u8]) -> Result<u64, LoadError> {
+    load_static_elf(id, image, true)
+}
+
+/// Loads an unmodified static Linux ET_EXEC into a Linux-flavored process.
+///
+/// 把没有 Jasper ABI/capability 章的静态 Linux ET_EXEC 映射到 Linux flavor 进程。
+/// 这是首片静态执行入口；动态解释器、libc 和信号栈仍由后续节点实现。
+pub fn load_linux_elf(id: ObjId, image: &[u8]) -> Result<u64, LoadError> {
+    if syscall_flavor(id) != Some(SyscallFlavor::LinuxX86_64) {
+        return Err(LoadError::OutsideWindow);
+    }
+    load_static_elf(id, image, false)
+}
+
+fn load_static_elf(id: ObjId, image: &[u8], require_jasper_abi: bool) -> Result<u64, LoadError> {
     let elf = kernel_core::elf::parse(image, arch::ELF_MACHINE, arch::ELF_CLASS)
         .map_err(LoadError::Elf)?;
-    kernel_core::abi_version::check_image(elf.abi(), kernel_core::abi_version::NATIVE)
-        .map_err(LoadError::Abi)?;
-    if elf
-        .required_capabilities()
-        .first_unavailable(crate::profile::has_capability)
-        .is_some()
+    if require_jasper_abi {
+        kernel_core::abi_version::check_image(elf.abi(), kernel_core::abi_version::NATIVE)
+            .map_err(LoadError::Abi)?;
+        if elf
+            .required_capabilities()
+            .first_unavailable(crate::profile::has_capability)
+            .is_some()
+        {
+            return Err(LoadError::Capability);
+        }
+    } else if elf.abi().is_some()
+        || elf.required_capabilities().iter().next().is_some()
     {
-        return Err(LoadError::Capability);
+        return Err(LoadError::UnexpectedMetadata);
     }
     for seg in elf.segments() {
         // 解析器保证 memsz > 0 且页区间可表示；这里仍用检查式算术，任何溢出都按「窗口外」拒绝

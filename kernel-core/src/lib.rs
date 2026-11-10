@@ -113,6 +113,7 @@ pub mod net;
 pub mod net1a;
 pub mod net3;
 pub mod net4_runtime;
+pub mod net4_service;
 pub mod numa;
 pub mod profile;
 pub mod program_caps;

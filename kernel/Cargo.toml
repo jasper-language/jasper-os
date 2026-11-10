@@ -8,6 +8,8 @@ license = "Apache-2.0"
 
 [dependencies]
 kernel-core = { path = "../kernel-core" }
+jasper-compat-loader = { path = "../compat-loader" }
+compat-core = { package = "jasper-compat-core", path = "../compat-core" }
 spin = "0.12.3"
 ed25519-dalek = { version = "=3.0.0", default-features = false }
 
@@ -84,6 +86,10 @@ net2-verify = []
 net3-verify = []
 # NET-4 no_std UDP socket runtime without hosted QUIC artifacts.
 net4-runtime-verify = []
+# Real compat-loader page-table backend and ELF entry handoff using an embedded Jasper image.
+compat-elf-backend-verify = ["user-programs"]
+# Linux user-space syscall entry, explicit compatibility flavor and CPL3 probe.
+compat-syscall-verify = ["user-programs"]
 # SEC-6 software memory capabilities, pointer provenance and CHERI-ready boundary.
 sec6-verify = []
 # Dedicated USI-1 CLI/structured service acceptance.

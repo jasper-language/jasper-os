@@ -89,6 +89,8 @@ esac
 [ "${JASPER_CHECKS:-}" = "net2" ] && KFEAT+=(--features net2-verify)
 [ "${JASPER_CHECKS:-}" = "net3" ] && KFEAT+=(--features net3-verify)
 [ "${JASPER_CHECKS:-}" = "net4runtime" ] && KFEAT+=(--features net4-runtime-verify)
+[ "${JASPER_CHECKS:-}" = "compatelfbackend" ] && KFEAT+=(--features compat-elf-backend-verify)
+[ "${JASPER_CHECKS:-}" = "compatsyscall" ] && KFEAT+=(--features compat-syscall-verify)
 [ "${JASPER_CHECKS:-}" = "hwv5-prod" ] && KFEAT+=(--features hwv5-prod-verify)
 HWV4_FEAT=()
 if [ -n "${JSR_LINUX_GUEST_HEADER:-}" ] && [ -n "${JSR_LINUX_GUEST_KERNEL:-}" ]; then
@@ -2944,11 +2946,31 @@ check_net3() {
 }
 
 check_net4runtime() {
-  if has '^\[JSR-NET4-RUNTIME\] wire=true udp=true socket=true quota=true generation=true echo=true reset=true resources=true failed=0' \
+  if has '^\[JSR-NET4-RUNTIME\] wire=true udp=true socket=true quota=true generation=true echo=true service=true wireguard=true reset=true resources=true failed=0' \
      && ! has '^\[JSR-NET4-RUNTIME-FAIL\]'; then
-    record NET-4-RUNTIME PASS "真实 QEMU 中以太网/IPv4/UDP 帧经过 virtio-net 后端、运行时 socket、配额、校验和、世代、收发与关闭路径并回送；设备复位撤销 socket，资源回基线"
+    record NET-4-RUNTIME PASS "真实 QEMU 中以太网/IPv4/UDP 帧经过 virtio-net、Jasper socket、配额、世代和回送路径；成熟 WireGuard 服务在 Jasper UDP runtime 上完成握手、加密传输与关闭回收"
   else
-    record NET-4-RUNTIME FAIL "缺少真实 UDP 帧、socket 生命周期、配额/世代/校验和或资源回收证据"
+    record NET-4-RUNTIME FAIL "缺少真实 UDP 帧、socket 生命周期、mature WireGuard 服务路径或资源回收证据"
+  fi
+}
+
+check_compatelfbackend() {
+  if has '^\[JSR-COMPAT-ELF\] backend=true map=true relocate=true stack=true ring3=true exit=true resources=true failed=0' \
+     && ! has '^\[JSR-COMPAT-ELF-FAIL\]'; then
+    record COMPAT-ELF-BACKEND PASS "真实 QEMU 中 compat-loader 生成的真实静态 ELF 布局经 Jasper 页表映射、重定位、初始栈和线程入口进入 Ring 3，程序完成 syscall 与退出，页帧回基线"
+  else
+    record COMPAT-ELF-BACKEND FAIL "缺少真实 Jasper 页表、重定位、入口、Ring 3、退出或资源回收证据"
+  fi
+}
+
+check_compatsyscall() {
+  if has '^\[JSR-LINUX-ABI\] exec=true flavor=true write=true getpid=true gettid=true denied=true exit=true cpl3=true syscalls=[1-9][0-9]* frames_before=[0-9]+ resources=true failed=0' \
+     && has '^linux-abi: fd1 raw x86_64 ET_EXEC entered' \
+     && has '^linux-abi: fd2 raw bytes accepted' \
+     && ! has '^\[JSR-LINUX-ABI-FAIL\]'; then
+    record COMPAT-SYSCALL PASS "真实 CPL3 静态 Linux ET_EXEC 经 flavor 分发执行 fd1/fd2 任意字节 write、getpid/gettid/exit_group；未授权 getppid 返回负 errno，退出与页帧回收通过"
+  else
+    record COMPAT-SYSCALL FAIL "缺少真实 Linux ET_EXEC 执行、syscall、权限拒绝、退出或资源回收证据"
   fi
 }
 

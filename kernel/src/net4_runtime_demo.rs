@@ -12,7 +12,13 @@ use kernel_core::net1b::UdpDatagram;
 use kernel_core::net4_runtime::{
     UdpAddress, UdpQuota, UdpRights, UdpRuntimeError, UdpSocketRuntime,
 };
+use kernel_core::net4_service::{
+    WireGuardEmit, WireGuardReceive, WireGuardService,
+};
 use kernel_core::virtio_net::{TransmitOutcome, VirtioNetBackend};
+use kernel_core::wireguard::{
+    testing::DeterministicRng, Config, Now, StaticSecret,
+};
 
 use crate::kprintln;
 
@@ -58,6 +64,102 @@ fn udp_frame(payload: &[u8]) -> [u8; 46] {
     );
     udp[6..8].copy_from_slice(&udp_sum.to_be_bytes());
     frame
+}
+
+fn verify_wireguard_service() -> bool {
+    let mut keys = DeterministicRng::new(0x4e45_5434_5345_5256);
+    let a_key = match StaticSecret::generate(&mut keys) {
+        Ok(key) => key,
+        Err(_) => return false,
+    };
+    let b_key = match StaticSecret::generate(&mut keys) {
+        Ok(key) => key,
+        Err(_) => return false,
+    };
+    let a_public = a_key.public_key();
+    let b_public = b_key.public_key();
+    let quota = UdpQuota::new(1, 1, 1200);
+    let mut a = match WireGuardService::<1, 1>::new(
+        Config::new(a_key, b_public),
+        UdpAddress::new([10, 0, 3, 1], 51820),
+        UdpAddress::new([10, 0, 3, 2], 51820),
+        quota,
+    ) {
+        Ok(service) => service,
+        Err(_) => return false,
+    };
+    let mut b = match WireGuardService::<1, 1>::new(
+        Config::new(b_key, a_public),
+        UdpAddress::new([10, 0, 3, 2], 51820),
+        UdpAddress::new([10, 0, 3, 1], 51820),
+        quota,
+    ) {
+        Ok(service) => service,
+        Err(_) => return false,
+    };
+    let now = Now::new(0, 1_700_000_000, 0);
+    let mut rng = DeterministicRng::new(9);
+    let mut a_wire = [0u8; kernel_core::net4_runtime::MAX_UDP_DATAGRAM_BYTES];
+    let mut plaintext = [0u8; 2048];
+    let mut packet = [0u8; 64];
+    let total = 26usize;
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+    packet[8] = 64;
+    packet[9] = 17;
+    packet[12..16].copy_from_slice(&[10, 0, 3, 1]);
+    packet[16..20].copy_from_slice(&[10, 0, 3, 2]);
+    packet[20..total].copy_from_slice(b"wg-e2e");
+    let ip_sum = kernel_core::net1a::internet_checksum(&packet[..20]);
+    packet[10..12].copy_from_slice(&ip_sum.to_be_bytes());
+
+    match a.encapsulate(now, &packet[..total], &mut a_wire, &mut rng) {
+        Ok((WireGuardEmit::HandshakeInitiation, wire)) => {
+            if b.deliver(a.local(), wire).is_err() {
+                return false;
+            }
+        }
+        _ => return false,
+    }
+    match b.receive(now, &mut plaintext, &mut rng) {
+        Ok(WireGuardReceive::Reply(reply)) => {
+            if a.deliver(b.local(), reply).is_err() {
+                return false;
+            }
+        }
+        _ => return false,
+    }
+    if a.receive(now, &mut plaintext, &mut rng)
+        != Ok(WireGuardReceive::HandshakeComplete)
+    {
+        return false;
+    }
+    match a.encapsulate(now, &packet[..total], &mut a_wire, &mut rng) {
+        Ok((WireGuardEmit::Transport, wire)) => {
+            if b.deliver(a.local(), wire).is_err() {
+                return false;
+            }
+        }
+        _ => return false,
+    }
+    let data_len = match b.receive(now, &mut plaintext, &mut rng) {
+        Ok(WireGuardReceive::Data(len)) => len,
+        _ => return false,
+    };
+    if data_len < total || &plaintext[..total] != &packet[..total] {
+        return false;
+    }
+    if a.close().is_err() || b.close().is_err() {
+        return false;
+    }
+    let a_quota = a.quota();
+    let b_quota = b.quota();
+    a_quota.sockets == 0
+        && b_quota.sockets == 0
+        && a_quota.datagrams == 0
+        && b_quota.datagrams == 0
+        && a_quota.bytes == 0
+        && b_quota.bytes == 0
 }
 
 pub fn run() {
@@ -123,6 +225,8 @@ pub fn run() {
         quota.sockets == 0 && quota.datagrams == 0 && quota.bytes == 0,
         "quota_return",
     );
+    let hosted_wireguard = verify_wireguard_service();
+    check(hosted_wireguard, "hosted_wireguard");
 
     let mut malformed = udp_frame(b"quic");
     malformed[40] ^= 0xff;
@@ -147,7 +251,7 @@ pub fn run() {
     let resources = before == after;
     check(resources, "resources");
     kprintln!(
-        "[JSR-NET4-RUNTIME] wire=true udp=true socket=true quota=true generation=true echo=true reset=true resources={} failed={}",
+        "[JSR-NET4-RUNTIME] wire=true udp=true socket=true quota=true generation=true echo=true service=true wireguard=true reset=true resources={} failed={}",
         resources,
         failed()
     );

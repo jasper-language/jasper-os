@@ -18,5 +18,6 @@ pub use native::{
 };
 pub use process::{LinuxPid, ProcessEntry, ProcessTable, ProcessTableError, ProcessToken};
 pub use syscall::{
-    compat_result, dispatch, CompatErrno, LinuxCall, LinuxSyscall, SyscallDispatch, SyscallRequest,
+    compat_result, dispatch, CompatErrno, LinuxCall, LinuxSyscall, LinuxSyscallSet,
+    SyscallDispatch, SyscallRequest,
 };

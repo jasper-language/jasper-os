@@ -27,6 +27,15 @@ pub fn write_str(s: &str) {
     write_str_raw(s);
 }
 
+/// 输出任意字节序列（整段原子输出）。
+///
+/// Write one byte sequence atomically. Linux compatibility `write` uses this path because its
+/// payloads are arbitrary bytes, not necessarily valid UTF-8.
+pub fn write_bytes(bytes: &[u8]) {
+    let _g = CONSOLE.lock();
+    write_bytes_raw(bytes);
+}
+
 /// 停机前的紧急格式化输出：有界尝试取控制台锁（不登记顺序），取不到也照样输出。
 /// Emergency formatted output before halting; never blocks indefinitely.
 pub fn emergency_print(args: fmt::Arguments) {
@@ -53,7 +62,11 @@ pub fn contended() -> u32 {
 
 /// 不加临界区的输出，只在已经处于临界区内时调用。
 fn write_str_raw(s: &str) {
-    for b in s.bytes() {
+    write_bytes_raw(s.as_bytes());
+}
+
+fn write_bytes_raw(bytes: &[u8]) {
+    for &b in bytes {
         if b == b'\n' {
             arch::console_write_byte(b'\r');
         }

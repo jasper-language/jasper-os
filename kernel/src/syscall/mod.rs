@@ -40,6 +40,21 @@ pub const CONSOLE_WRITE_MAX: usize = 4096;
 pub const PROFILE_TEXT_MAX: usize = 2048;
 use table::*;
 
+/// Syscall register convention selected for one process.
+///
+/// 一个进程当前使用的 syscall 寄存器编号约定。Linux 兼容进程不能把 Linux
+/// syscall 编号送进 Jasper 原生操作表；Jasper 进程也不能进入 Linux 分发器。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SyscallFlavor {
+    /// Jasper native operation IDs and return encoding.
+    /// Jasper 原生操作编号与返回编码。
+    #[default]
+    Jasper,
+    /// Linux x86_64 syscall numbers and negative-errno encoding.
+    /// Linux x86_64 syscall 编号和负 errno 返回编码。
+    LinuxX86_64,
+}
+
 /// 一次系统调用的输入（与 ISA 无关）。
 #[derive(Debug, Clone, Copy)]
 pub struct SyscallArgs {
@@ -157,6 +172,21 @@ fn error_name(ret: i64) -> &'static str {
 const CLEANUP_PER_CALL: usize = 16;
 /// 创建对象前先回收死亡对象的调用（进程创建在 `spawn_child` 里自带回收）。
 const RECLAIM_BEFORE: [u32; 9] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, SYSTEM_CHANNEL_CREATE, SYSTEM_MEMORY_OBJECT_CREATE,SYSTEM_EVENT_SOURCE_CREATE,SYSTEM_EVENT_SUBSCRIPTION_CREATE,SYSTEM_SYNC_MUTEX_CREATE,SYSTEM_TIME_TIMER_CREATE,SYSTEM_MEMORY_DMA_MAP];
+
+/// Selects the syscall ABI from the current process flavor.
+///
+/// 根据当前进程 flavor 选择 Linux 或 Jasper 分发；没有进程的内核任务保持 Jasper。
+pub fn on_entry(a: &SyscallArgs) -> i64 {
+    #[cfg(target_arch = "x86_64")]
+    if proc::current_process()
+        .and_then(proc::syscall_flavor)
+        .is_some_and(|flavor| flavor == SyscallFlavor::LinuxX86_64)
+    {
+        CALLS.fetch_add(1, Ordering::Relaxed);
+        return crate::linux_abi::on_syscall(a);
+    }
+    on_syscall(a)
+}
 
 /// 系统调用入口（arch 调用；可能不返回——`system.task.exit` 会结束当前任务）。
 pub fn on_syscall(a: &SyscallArgs) -> i64 {
@@ -286,7 +316,7 @@ pub(crate) fn user_ptr_err(e: UserPtrError) -> i64 {
 ///
 /// 先经 [`copy_from_user`] 完整校验并复制到内核缓冲区，再做 UTF-8 校验（非法 UTF-8 拒绝，不做替换），
 /// 最后整行输出。内核从不直接解引用用户地址。
-fn console_write(ptr: u64, len: u64) -> i64 {
+pub(crate) fn console_write(ptr: u64, len: u64) -> i64 {
     if len as usize > CONSOLE_WRITE_MAX {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     }
