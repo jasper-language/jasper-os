@@ -16,14 +16,14 @@ use jasper_lifecycle_boot::{
     P0_CONTROL_A_PARTITION_GUID, P0_CONTROL_A_TYPE_GUID, P0_CONTROL_B_LBA,
     P0_CONTROL_B_PARTITION_GUID, P0_CONTROL_B_TYPE_GUID, P0_DISK_GUID,
 };
-#[cfg(not(feature = "lifecycle-health-inject-failure"))]
+#[cfg(not(feature = "lifecycle-health-fail-verify"))]
 use jasper_lifecycle_boot::commit;
 use jasper_lifecycle_boot::CommitError;
 use kernel_core::block::{self, Request, Terminal};
 
 use crate::blk::BlockDevice;
 use crate::sync::IrqSpinLock;
-#[cfg(not(feature = "lifecycle-health-inject-failure"))]
+#[cfg(not(feature = "lifecycle-health-fail-verify"))]
 use crate::kprintln;
 use crate::{mmio, pci, virtio};
 
@@ -301,12 +301,12 @@ pub fn confirm_minimum_health() -> Result<(), HealthError> {
         .map_err(|_| HealthError::Block)?;
     let current = recover(Some(&first), Some(&second)).map_err(HealthError::Recovery)?;
 
-    #[cfg(feature = "lifecycle-health-inject-failure")]
+#[cfg(feature = "lifecycle-health-fail-verify")]
     {
         let _ = current;
         Err(HealthError::InjectedFailure)
     }
-    #[cfg(not(feature = "lifecycle-health-inject-failure"))]
+#[cfg(not(feature = "lifecycle-health-fail-verify"))]
     {
         let slot = current
             .candidate()

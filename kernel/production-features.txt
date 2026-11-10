@@ -6,4 +6,3 @@ user-programs
 profile-compact
 sched-rr
 lifecycle-ab-health
-lifecycle-health-inject-failure

@@ -26,7 +26,7 @@ CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknow
 cp "$TARGET/x86_64-unknown-none/release/jasper-kernel" "$KERNEL_A"
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none \
   -p jasper-kernel \
-  --features production,lifecycle-ab-health,lifecycle-health-inject-failure \
+  --features lifecycle-health-fail-verify \
   >"$OUT/kernel-b-build.log" 2>&1
 cp "$TARGET/x86_64-unknown-none/release/jasper-kernel" "$KERNEL_B"
 cargo build --locked --release -p xtask >"$OUT/xtask-build.log" 2>&1
