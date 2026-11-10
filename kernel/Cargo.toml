@@ -99,7 +99,8 @@ compat-elf = ["dep:jasper-compat-loader"]
 compat-elf-backend-verify = ["user-programs", "compat-elf"]
 # Linux user-space syscall entry, explicit compatibility flavor and CPL3 probe.
 compat-syscall-verify = ["user-programs", "linux-abi"]
-# Real unmodified Ubuntu x86_64 PIE, ld-linux and libc execution through Jasper syscalls.
+# Real unmodified Ubuntu x86_64 PIE, ld-linux and libc execution through the optional
+# Linux syscall and ELF compatibility services; no unrelated Jasper user bundle is linked.
 compat-dynamic-libc-verify = ["linux-abi", "compat-elf"]
 # SEC-6 software memory capabilities, pointer provenance and CHERI-ready boundary.
 sec6-verify = []
@@ -165,9 +166,6 @@ selftest-inject-failure = []
 [build-dependencies]
 # 构建期复用 kernel-core 的登记表解析与校验（宿主上编译，零依赖）。
 kernel-core = { path = "../kernel-core" }
-# 仅用于验证真实 Ubuntu 动态 ELF fixture 的类别、机器和解释器字段；内核运行时不依赖。
-# Validates real Ubuntu dynamic ELF fixtures at build time; the kernel runtime does not use it.
-goblin = { version = "=0.10.7", default-features = false, features = ["alloc", "elf32", "elf64", "endian_fd"] }
 
 [lib]
 name = "jasper_kernel"

@@ -87,7 +87,11 @@ def check_dependency_trees() -> int:
         fail("ELF feature tree is missing jasper-compat-loader")
     if "jasper-compat-core" in elf:
         fail("ELF feature tree unexpectedly contains jasper-compat-core")
-    return 3
+
+    dynamic = tree(["--features", "compat-dynamic-libc-verify"])
+    if "jasper-compat-core" not in dynamic or "jasper-compat-loader" not in dynamic:
+        fail("dynamic libc feature tree is missing one or both compatibility services")
+    return 4
 
 
 def main() -> int:
@@ -142,15 +146,23 @@ def main() -> int:
         fail("ELF acceptance must explicitly activate compat-elf")
     if "linux-abi" not in features.get("compat-syscall-verify", []):
         fail("syscall acceptance must explicitly activate linux-abi")
+    dynamic = features.get("compat-dynamic-libc-verify", [])
+    if not {"linux-abi", "compat-elf"}.issubset(dynamic):
+        fail("dynamic libc acceptance must explicitly activate both compatibility services")
     default = features.get("default", [])
     if any("compat" in item or "linux" in item for item in default):
         fail("default kernel features contain a compatibility component")
+    build_dependencies = manifest.get("build-dependencies", {})
+    for forbidden in ("goblin", "jasper-compat-core", "jasper-compat-loader"):
+        if forbidden in build_dependencies:
+            fail(f"native build dependency chain contains {forbidden}")
 
     require_anchors(
         "kernel/src/lib.rs",
         (
             '#[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]\npub mod linux_abi;',
             '#[cfg(all(feature = "compat-elf", target_arch = "x86_64"))]\npub mod compat_elf;',
+            '#[cfg(all(feature = "compat-dynamic-libc-verify", target_arch = "x86_64"))]\npub mod linux_vfs;',
         ),
     )
     require_anchors(

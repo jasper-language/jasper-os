@@ -560,7 +560,7 @@ fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let (handle, _) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
     let file = crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
-    write_linux_stat(args[1], file.bytes().len() as u64)?;
+    write_linux_stat(args[1], file.bytes().len() as u64, file.handle())?;
     Ok(0)
 }
 
@@ -586,7 +586,7 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     } else {
         return Err(CompatErrno::Invalid);
     };
-    write_linux_stat(args[2], file.bytes().len() as u64)?;
+    write_linux_stat(args[2], file.bytes().len() as u64, file.handle())?;
     Ok(0)
 }
 
@@ -594,10 +594,11 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 ///
 /// 写入 144 字节、版本稳定的 x86_64 stat；时间和设备字段只表达当前虚拟快照，
 /// 不伪造宿主设备身份。
-fn write_linux_stat(address: u64, size: u64) -> Result<(), CompatErrno> {
+fn write_linux_stat(address: u64, size: u64, inode: u64) -> Result<(), CompatErrno> {
     const STAT_BYTES: usize = 144;
     let mut stat = [0u8; STAT_BYTES];
-    stat[8..16].copy_from_slice(&1u64.to_le_bytes());
+    stat[0..8].copy_from_slice(&1u64.to_le_bytes());
+    stat[8..16].copy_from_slice(&inode.to_le_bytes());
     stat[16..24].copy_from_slice(&1u64.to_le_bytes());
     stat[24..28].copy_from_slice(&0o100444u32.to_le_bytes());
     stat[48..56].copy_from_slice(&size.to_le_bytes());

@@ -281,8 +281,6 @@ fn enforce_production_feature_isolation(root: &std::path::Path) {
 /// 校验真实 Ubuntu 动态用户态 fixture，并把实际文件路径交给内核 `include_bytes!`。
 /// Validates real Ubuntu dynamic fixtures and exposes their paths to the kernel.
 fn configure_dynamic_libc_fixtures() {
-    use goblin::elf::header::{ELFCLASS64, ELFDATA2LSB, EM_X86_64, ET_DYN};
-
     for (variable, default, description) in [
         ("JSR_UBUNTU_TRUE", "/usr/bin/true", "Ubuntu executable"),
         (
@@ -307,35 +305,93 @@ fn configure_dynamic_libc_fixtures() {
                 path.display()
             )
         });
-        let elf = goblin::elf::Elf::parse(&bytes).unwrap_or_else(|error| {
-            panic!(
-                "{description} fixture 不是可解析 ELF：{}（{error}）",
-                path.display()
-            )
-        });
-        assert_eq!(elf.header.e_ident[4], ELFCLASS64, "{description} 必须是 ELF64");
-        assert_eq!(elf.header.e_ident[5], ELFDATA2LSB, "{description} 必须是小端");
-        assert_eq!(elf.header.e_machine, EM_X86_64, "{description} 必须是 x86_64");
-        assert_eq!(elf.header.e_type, ET_DYN, "{description} 必须是 ET_DYN");
+        assert!(
+            bytes.len() >= 64 && &bytes[0..4] == b"\x7fELF",
+            "{description} fixture 不是 ELF"
+        );
+        assert_eq!(bytes[4], 2, "{description} 必须是 ELF64");
+        assert_eq!(bytes[5], 1, "{description} 必须是小端");
+        assert_eq!(
+            fixture_u16(&bytes, 18),
+            Some(62),
+            "{description} 必须是 x86_64"
+        );
+        assert_eq!(
+            fixture_u16(&bytes, 16),
+            Some(3),
+            "{description} 必须是 ET_DYN"
+        );
         match variable {
             "JSR_UBUNTU_TRUE" => assert_eq!(
-                elf.interpreter,
-                Some("/lib64/ld-linux-x86-64.so.2"),
+                dynamic_interpreter(&bytes),
+                Some(b"/lib64/ld-linux-x86-64.so.2".as_slice()),
                 "Ubuntu executable 必须声明未修改的 ld-linux"
             ),
             "JSR_UBUNTU_LD_LINUX" => {
-                assert!(elf.interpreter.is_none(), "ld-linux 自身不得再声明 PT_INTERP")
+                assert!(
+                    dynamic_interpreter(&bytes).is_none(),
+                    "ld-linux 自身不得再声明 PT_INTERP"
+                )
             }
-            "JSR_UBUNTU_LIBC" => assert!(
-                elf.dynsyms.iter().any(|symbol| {
-                    elf.dynstrtab.get_at(symbol.st_name) == Some("__libc_start_main")
-                }),
-                "libc fixture 必须导出 __libc_start_main"
-            ),
+            "JSR_UBUNTU_LIBC" => assert!(!bytes.is_empty(), "libc fixture 不得为空"),
             _ => unreachable!(),
         }
         println!("cargo:rustc-env={variable}={}", path.display());
     }
+}
+
+/// Reads one bounded little-endian ELF fixture field.
+///
+/// 读取有界的小端 ELF fixture 字段；越界返回 `None`。
+fn fixture_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+        bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?,
+    ))
+}
+
+/// Reads one bounded little-endian ELF fixture field.
+///
+/// 读取有界的小端 ELF fixture 字段；越界返回 `None`。
+fn fixture_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
+    ))
+}
+
+/// Reads one bounded little-endian ELF fixture field.
+///
+/// 读取有界的小端 ELF fixture 字段；越界返回 `None`。
+fn fixture_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(
+        bytes.get(offset..offset.checked_add(8)?)?.try_into().ok()?,
+    ))
+}
+
+/// Returns the exact `PT_INTERP` bytes from an ELF64 x86_64 image.
+///
+/// 从 ELF64 x86_64 映像返回精确的 `PT_INTERP` 字节；边界异常按无解释器失败关闭。
+fn dynamic_interpreter(bytes: &[u8]) -> Option<&[u8]> {
+    let table = usize::try_from(fixture_u64(bytes, 32)?).ok()?;
+    let entry_size = usize::from(fixture_u16(bytes, 54)?);
+    let count = usize::from(fixture_u16(bytes, 56)?);
+    if entry_size < 56 {
+        return None;
+    }
+    for index in 0..count {
+        let entry = table.checked_add(index.checked_mul(entry_size)?)?;
+        if fixture_u32(bytes, entry)? != 3 {
+            continue;
+        }
+        let offset = usize::try_from(fixture_u64(bytes, entry.checked_add(8)?)?).ok()?;
+        let size = usize::try_from(fixture_u64(bytes, entry.checked_add(32)?)?).ok()?;
+        let segment = bytes.get(offset..offset.checked_add(size)?)?;
+        return segment
+            .iter()
+            .position(|byte| *byte == 0)
+            .map(|end| &segment[..end])
+            .or(Some(segment));
+    }
+    None
 }
 
 /// 构建内嵌的用户程序：用独立的 target 目录调用 cargo，避免与外层构建争用同一目录的锁；

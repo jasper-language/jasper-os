@@ -60,7 +60,7 @@ pub mod exit_state;
 pub mod fault;
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
 pub mod linux_abi;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "compat-dynamic-libc-verify", target_arch = "x86_64"))]
 pub mod linux_vfs;
 #[cfg(all(feature = "compat-syscall-verify", target_arch = "x86_64"))]
 pub mod linux_abi_demo;

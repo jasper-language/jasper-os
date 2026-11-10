@@ -71,8 +71,8 @@ pub(crate) const LINUX_CONSOLE_HANDLE: u64 = u64::MAX;
 struct LinuxProcessState {
     calls: LinuxSyscallSet,
     fds: FdTable<64>,
-    file_offsets: [u64; 64],
     pid: u32,
+    file_offsets: [u64; 64],
     brk: u64,
     mmap_next: u64,
 }
@@ -400,10 +400,10 @@ pub(crate) fn linux_install_file(
     close_on_exec: bool,
 ) -> Option<u32> {
     with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
         if handle == 0 {
             return Err(ProcError::Exited);
         }
-        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
         let fd = linux
             .fds
             .install(
@@ -495,7 +495,11 @@ pub(crate) fn linux_pid(pid: ObjId) -> Option<u32> {
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_brk_value(pid: ObjId) -> Option<u64> {
     crate::kobj::with(|t| match t.get(pid) {
-        Ok(KObject::Process(p)) => p.linux.as_ref().map(|linux| linux.brk),
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()
+            .map(|linux| linux.brk)
+            .filter(|brk| *brk != 0),
         _ => None,
     })
 }
@@ -508,6 +512,9 @@ pub(crate) fn set_linux_brk(pid: ObjId, value: u64) -> bool {
     value != 0
         && with_proc(pid, |p| {
             let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+            if linux.brk == 0 {
+                return Err(ProcError::Exited);
+            }
             linux.brk = value;
             Ok(())
         })
@@ -520,7 +527,11 @@ pub(crate) fn set_linux_brk(pid: ObjId, value: u64) -> bool {
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_mmap_cursor(pid: ObjId) -> Option<u64> {
     crate::kobj::with(|t| match t.get(pid) {
-        Ok(KObject::Process(p)) => p.linux.as_ref().map(|linux| linux.mmap_next),
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()
+            .map(|linux| linux.mmap_next)
+            .filter(|next| *next != 0),
         _ => None,
     })
 }
@@ -533,6 +544,9 @@ pub(crate) fn set_linux_mmap_cursor(pid: ObjId, value: u64) -> bool {
     value != 0
         && with_proc(pid, |p| {
             let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+            if linux.mmap_next == 0 {
+                return Err(ProcError::Exited);
+            }
             linux.mmap_next = value;
             Ok(())
         })
@@ -564,10 +578,10 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
     let linux = LinuxProcessState {
         calls,
         fds,
-        file_offsets: [0; 64],
         pid,
-        brk: arch::USER_WINDOW.0 + 0x1000_0000,
-        mmap_next: arch::USER_WINDOW.0 + 0x4000_0000,
+        file_offsets: [0; 64],
+        brk: crate::arch::USER_WINDOW.0 + 0x1000_0000,
+        mmap_next: crate::arch::USER_WINDOW.0 + 0x4000_0000,
     };
     create_process(name, SyscallSet::EMPTY, move |process| {
         process.linux = Some(linux);
