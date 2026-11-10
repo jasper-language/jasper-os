@@ -1,22 +1,24 @@
 //! LC-3 P0 GPT 映像创建与回读。
 //! LC-3 P0 GPT image creation and readback.
 //!
-//! 使用成熟 `gpt` 库写保护性 MBR、主/备份 GPT 头与分区表。本模块只创建空分区
-//! 容器，不格式化文件系统、不复制系统映像，也不表示映像可启动。
-//! Uses the mature `gpt` crate for the protective MBR, primary/backup headers and entry
-//! arrays. This module creates empty partition containers only; it formats no filesystem,
-//! copies no system image and does not claim bootability.
+//! 使用成熟 `gpt`、`fatfs` 与 e2fsprogs 写保护性 MBR、GPT、ESP 和 ext4 文件系统。
+//! 本模块不复制系统映像，也不表示映像可启动。
+//! Uses mature `gpt`, `fatfs` and e2fsprogs for the protective MBR, GPT, ESP and ext4
+//! filesystems. This module copies no system image and does not claim bootability.
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::process::Command;
 
 use gpt::disk::LogicalBlockSize;
 use gpt::partition_types::{OperatingSystem, Type};
 use gpt::{GptConfig, GptError};
 use jasper_lifecycle_model::layout::{LayoutError, P0Layout, PartitionRole, SECTOR_BYTES};
+use rustix::fs::{seek as sparse_seek, SeekFrom as SparseSeekFrom};
+use rustix::io::Errno;
 use uuid::Uuid;
 
 const DISK_GUID: Uuid = uuid::uuid!("4a617370-6572-4f53-9000-000000000000");
@@ -33,6 +35,10 @@ pub enum GptImageError {
     Gpt(GptError),
     /// FAT 文件系统操作失败。FAT filesystem operation failed.
     Fat(io::Error),
+    /// 外部成熟格式化工具失败。External mature formatting tool failed.
+    Tool(String),
+    /// 待格式化分区不是全零，拒绝覆盖潜在数据。Target partition is not all zero.
+    NonEmptyPartition(PartitionRole),
     /// 回读的分区表与 P0 布局绑定不符。Readback partition table differs from the P0 binding.
     CorruptTable(&'static str),
 }
@@ -46,6 +52,10 @@ impl std::fmt::Display for GptImageError {
             }
             Self::Gpt(error) => write!(formatter, "GPT operation failed: {error}"),
             Self::Fat(error) => write!(formatter, "FAT operation failed: {error}"),
+            Self::Tool(error) => write!(formatter, "filesystem tool failed: {error}"),
+            Self::NonEmptyPartition(role) => {
+                write!(formatter, "partition {role:?} contains non-zero data")
+            }
             Self::CorruptTable(reason) => write!(formatter, "GPT readback mismatch: {reason}"),
         }
     }
@@ -93,6 +103,24 @@ pub struct EspReceipt {
     pub sectors: u64,
     /// FAT 类型。FAT type.
     pub fat_type: fatfs::FatType,
+    /// 卷标。Volume label.
+    pub volume_label: String,
+}
+
+/// 已由 ext4 工具格式化的角色分区。
+/// Role partition formatted by the ext4 tool.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ext4Receipt {
+    /// 分区角色。Partition role.
+    pub role: PartitionRole,
+    /// 首扇区。First LBA.
+    pub start_lba: u64,
+    /// 扇区数。Sector count.
+    pub sectors: u64,
+    /// 文件系统块数。Filesystem block count.
+    pub blocks: u64,
+    /// 文件系统 UUID。Filesystem UUID.
+    pub uuid: Uuid,
     /// 卷标。Volume label.
     pub volume_label: String,
 }
@@ -184,6 +212,91 @@ pub fn format_esp_fat32(path: &Path, total_bytes: u64) -> Result<EspReceipt, Gpt
     filesystem.stats()?;
     filesystem.unmount()?;
     Ok(receipt)
+}
+
+/// 使用 e2fsprogs `mkfs.ext4` 创建 A/B 系统槽和共享 Data 文件系统。
+///
+/// 每个目标分区必须先全零；函数不覆盖已有文件系统或用户数据。
+/// Creates A/B system and shared-data ext4 filesystems with e2fsprogs `mkfs.ext4`.
+/// Every target partition must be entirely zero, preventing silent data overwrite.
+pub fn format_p0_ext4(path: &Path, total_bytes: u64) -> Result<Vec<Ext4Receipt>, GptImageError> {
+    let gpt = verify_p0_gpt(path, total_bytes)?;
+    let layout = P0Layout::new(gpt.total_sectors)?;
+    let mut receipts = Vec::new();
+    for (role, uuid, label) in [
+        (
+            PartitionRole::SystemA,
+            uuid::uuid!("4a617370-6572-4f53-b001-000000000001"),
+            "JASPER-SYS-A",
+        ),
+        (
+            PartitionRole::SystemB,
+            uuid::uuid!("4a617370-6572-4f53-b001-000000000002"),
+            "JASPER-SYS-B",
+        ),
+        (
+            PartitionRole::Data,
+            uuid::uuid!("4a617370-6572-4f53-b001-000000000003"),
+            "JASPER-DATA",
+        ),
+    ] {
+        let partition = layout.partition(role);
+        ensure_partition_range_zero(path, partition)?;
+        let offset = partition
+            .start_lba
+            .checked_mul(SECTOR_BYTES)
+            .ok_or_else(|| GptImageError::Tool("ext4 partition offset overflow".into()))?;
+        let byte_length = partition
+            .sectors
+            .checked_mul(SECTOR_BYTES)
+            .ok_or_else(|| GptImageError::Tool("ext4 partition length overflow".into()))?;
+        if !byte_length.is_multiple_of(4096) {
+            return Err(GptImageError::Tool(
+                "ext4 partition is not 4 KiB aligned".into(),
+            ));
+        }
+        let blocks = byte_length / 4096;
+        let offset_option = format!("offset={offset},nodiscard");
+        let uuid_text = uuid.to_string();
+        let output = Command::new("mkfs.ext4")
+            .args([
+                "-F",
+                "-q",
+                "-t",
+                "ext4",
+                "-b",
+                "4096",
+                "-m",
+                "1",
+                "-L",
+                label,
+                "-U",
+                &uuid_text,
+                "-E",
+                &offset_option,
+            ])
+            .arg(path)
+            .arg(blocks.to_string())
+            .output()
+            .map_err(|error| GptImageError::Tool(error.to_string()))?;
+        if !output.status.success() {
+            return Err(GptImageError::Tool(format!(
+                "mkfs.ext4 {role:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        verify_ext4_magic(path, partition)?;
+        receipts.push(Ext4Receipt {
+            role,
+            start_lba: partition.start_lba,
+            sectors: partition.sectors,
+            blocks,
+            uuid,
+            volume_label: label.into(),
+        });
+    }
+    verify_p0_gpt(path, total_bytes)?;
+    Ok(receipts)
 }
 
 fn write_layout(path: &Path, layout: P0Layout) -> Result<(), GptImageError> {
@@ -300,6 +413,14 @@ fn open_image_rw(path: &Path) -> Result<fs::File, GptImageError> {
         .map_err(GptImageError::Fat)
 }
 
+fn open_image_ro(path: &Path) -> Result<fs::File, GptImageError> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(GptImageError::Fat)
+}
+
 struct PartitionSlice {
     file: fs::File,
     offset: u64,
@@ -380,6 +501,87 @@ impl Seek for PartitionSlice {
         self.position = target;
         Ok(target)
     }
+}
+
+fn ensure_partition_range_zero(
+    path: &Path,
+    partition: jasper_lifecycle_model::layout::Partition,
+) -> Result<(), GptImageError> {
+    let mut file = open_image_ro(path)?;
+    let offset = partition
+        .start_lba
+        .checked_mul(SECTOR_BYTES)
+        .ok_or_else(|| GptImageError::Tool("partition offset overflow".into()))?;
+    let length = partition
+        .sectors
+        .checked_mul(SECTOR_BYTES)
+        .ok_or_else(|| GptImageError::Tool("partition length overflow".into()))?;
+    let end = offset
+        .checked_add(length)
+        .ok_or_else(|| GptImageError::Tool("partition end overflow".into()))?;
+    let mut cursor = 0u64;
+    loop {
+        let data = match sparse_seek(&file, SparseSeekFrom::Data(cursor)) {
+            Ok(position) => position,
+            Err(Errno::NXIO) => return Ok(()),
+            Err(Errno::NOTSUP) => {
+                return ensure_byte_range_zero(&mut file, offset, length, partition.role)
+            }
+            Err(error) => return Err(GptImageError::Tool(format!("SEEK_DATA failed: {error:?}"))),
+        };
+        if data >= end {
+            return Ok(());
+        }
+        let hole = sparse_seek(&file, SparseSeekFrom::Hole(data)).unwrap_or(end);
+        let start = data.max(offset);
+        let stop = hole.min(end);
+        if start < stop {
+            ensure_byte_range_zero(&mut file, start, stop - start, partition.role)?;
+        }
+        cursor = hole.max(data.saturating_add(1));
+    }
+}
+
+fn ensure_byte_range_zero(
+    file: &mut fs::File,
+    offset: u64,
+    length: u64,
+    role: PartitionRole,
+) -> Result<(), GptImageError> {
+    file.seek(SeekFrom::Start(offset))?;
+    let mut remaining = length;
+    let mut buffer = vec![0u8; 4 * 1024 * 1024];
+    while remaining != 0 {
+        let count = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        file.read_exact(&mut buffer[..count])?;
+        if buffer[..count].iter().any(|byte| *byte != 0) {
+            return Err(GptImageError::NonEmptyPartition(role));
+        }
+        remaining -= count as u64;
+    }
+    Ok(())
+}
+
+fn verify_ext4_magic(
+    path: &Path,
+    partition: jasper_lifecycle_model::layout::Partition,
+) -> Result<(), GptImageError> {
+    let mut file = open_image_ro(path)?;
+    let superblock = partition
+        .start_lba
+        .checked_mul(SECTOR_BYTES)
+        .and_then(|offset| offset.checked_add(1024 + 56))
+        .ok_or_else(|| GptImageError::Tool("ext4 superblock offset overflow".into()))?;
+    file.seek(SeekFrom::Start(superblock))?;
+    let mut magic = [0u8; 2];
+    file.read_exact(&mut magic)?;
+    if magic != [0x53, 0xef] {
+        return Err(GptImageError::Tool(format!(
+            "ext4 superblock missing for {:?}",
+            partition.role
+        )));
+    }
+    Ok(())
 }
 
 fn role_for_id(id: u32) -> Option<PartitionRole> {
@@ -478,6 +680,28 @@ mod tests {
         assert_eq!(esp.fat_type, fatfs::FatType::Fat32);
         assert_eq!(esp.volume_label, "JASPER ESP");
         assert_eq!(verify_p0_gpt(&path, bytes).unwrap(), gpt);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn formats_system_and_data_ext4_without_overwriting_existing_filesystems() {
+        let path = temp_path("ext4");
+        let bytes = 36 * 1024 * 1024 * 1024u64;
+        let gpt = create_p0_gpt(&path, bytes).unwrap();
+        let receipts = format_p0_ext4(&path, bytes).unwrap();
+        assert_eq!(receipts.len(), 3);
+        assert_eq!(receipts[0].role, PartitionRole::SystemA);
+        assert_eq!(receipts[1].role, PartitionRole::SystemB);
+        assert_eq!(receipts[2].role, PartitionRole::Data);
+        assert_eq!(receipts[0].blocks, 2_097_152);
+        assert_eq!(receipts[0].volume_label, "JASPER-SYS-A");
+        assert_eq!(receipts[1].volume_label, "JASPER-SYS-B");
+        assert_eq!(receipts[2].volume_label, "JASPER-DATA");
+        assert_eq!(verify_p0_gpt(&path, bytes).unwrap(), gpt);
+        assert!(matches!(
+            format_p0_ext4(&path, bytes),
+            Err(GptImageError::NonEmptyPartition(PartitionRole::SystemA))
+        ));
         let _ = fs::remove_file(path);
     }
 
