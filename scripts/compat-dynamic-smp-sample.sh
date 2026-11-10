@@ -49,6 +49,14 @@ for cpus in 4 8; do
     echo "compat-dynamic-smp: cpus=$cpus lacks dynamic-libc success evidence" >&2
     exit 1
   }
+  grep -qE '^\[JSR-COMPAT-DYNAMIC-GETCONF\] .*exit_zero=true .*resources=true failed=0' "$serial" || {
+    echo "compat-dynamic-smp: cpus=$cpus lacks getconf success evidence" >&2
+    exit 1
+  }
+  grep -q '^\[JSR-COMPAT-DYNAMIC-SUMMARY\] true=true getconf=true resources=true failed=0' "$serial" || {
+    echo "compat-dynamic-smp: cpus=$cpus lacks combined dynamic summary" >&2
+    exit 1
+  }
   ! grep -aqE '^\[JSR-(PANIC|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$serial" || {
     echo "compat-dynamic-smp: cpus=$cpus contains a panic/failure marker" >&2
     exit 1
