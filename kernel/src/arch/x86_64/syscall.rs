@@ -104,6 +104,7 @@ extern "C" fn jsr_syscall_dispatch(frame: &mut RawFrame) -> u64 {
     let args = SyscallArgs {
         id: frame.rax,
         args: [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9],
+        user_ip: Some((frame.rcx, frame.user_rsp)),
     };
     let ret = syscall::on_entry(&args);
     let rip = frame.rcx;

@@ -208,6 +208,8 @@ struct ThreadStart {
     stack: u64,
     arg0: u64,
     arg1: u64,
+    linux_clone: bool,
+    fs_base: Option<u64>,
 }
 
 /// 运行中线程的身份：任务 → (所属进程, 自己的 Task 对象)。
@@ -400,11 +402,7 @@ pub(crate) fn linux_fd(pid: ObjId, fd: u32) -> Option<compat_core::fd::FdEntry> 
 ///
 /// 安装只读 Linux 虚拟文件；失败不留下部分 fd 状态。
 #[cfg(feature = "linux-abi")]
-pub(crate) fn linux_install_file(
-    pid: ObjId,
-    handle: u64,
-    close_on_exec: bool,
-) -> Option<u32> {
+pub(crate) fn linux_install_file(pid: ObjId, handle: u64, close_on_exec: bool) -> Option<u32> {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
         if handle == 0 {
@@ -472,10 +470,7 @@ pub(crate) fn set_linux_file_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
 pub(crate) fn linux_close_fd(pid: ObjId, fd: u32) -> bool {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
-        linux
-            .fds
-            .close_fd(fd)
-            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.fds.close_fd(fd).map_err(|_| ProcError::NoTaskSlot)?;
         if (fd as usize) < linux.file_offsets.len() {
             linux.file_offsets[fd as usize] = 0;
         }
@@ -2030,6 +2025,14 @@ fn thread_entry() {
     };
     sched::set_current_space(Some(root));
     sched::set_current_syscalls(syscalls);
+    if let Some(base) = s.fs_base {
+        let _ = arch::set_user_fs_base(base);
+    }
+    #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+    if s.linux_clone {
+        // SAFETY：clone 的 RIP/RSP 已由 spawn_linux_clone 校验在用户私有窗口内。
+        unsafe { crate::arch::x86_64::enter_syscall_return(s.entry, s.stack) }
+    }
     // SAFETY：entry/stack 已校验位于私有窗口，代码与栈页由创建方映射；内核栈顶由调度器设置。
     unsafe { arch::enter_user(s.entry, s.stack, s.arg0, s.arg1) }
 }
@@ -2045,7 +2048,7 @@ pub fn spawn_thread(
     arg0: u64,
     arg1: u64,
 ) -> Result<(TaskId, ObjId), ProcError> {
-    spawn_thread_affinity(id, name, entry, stack, arg0, arg1, None)
+    spawn_thread_mode(id, name, entry, stack, arg0, arg1, None, false, None, 0)
 }
 
 /// Author: chatgpt. Install affinity before publishing the runnable thread.
@@ -2058,6 +2061,48 @@ pub(crate) fn spawn_thread_affinity(
     arg0: u64,
     arg1: u64,
     affinity: Option<kernel_core::smp::CpuSet>,
+) -> Result<(TaskId, ObjId), ProcError> {
+    spawn_thread_mode(id, name, entry, stack, arg0, arg1, affinity, false, None, 0)
+}
+
+/// Creates a Linux clone child that resumes at the syscall return address with `rax=0`.
+///
+/// 创建 Linux clone 子线程；首次进入用户态时按 syscall 子线程约定返回 `rax=0`。
+#[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+pub fn spawn_linux_clone(
+    id: ObjId,
+    name: &'static str,
+    user_rip: u64,
+    user_stack: u64,
+    fs_base: Option<u64>,
+    clear_child_tid: u64,
+) -> Result<(TaskId, ObjId), ProcError> {
+    spawn_thread_mode(
+        id,
+        name,
+        user_rip,
+        user_stack,
+        0,
+        0,
+        None,
+        true,
+        fs_base,
+        clear_child_tid,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_thread_mode(
+    id: ObjId,
+    name: &'static str,
+    entry: u64,
+    stack: u64,
+    arg0: u64,
+    arg1: u64,
+    affinity: Option<kernel_core::smp::CpuSet>,
+    linux_clone: bool,
+    fs_base: Option<u64>,
+    linux_clear_child_tid: u64,
 ) -> Result<(TaskId, ObjId), ProcError> {
     // 栈顶为 0 时 `stack - 1` 会下溢：用检查式算术，失败按非法地址拒绝
     let stack_last = stack
@@ -2114,6 +2159,8 @@ pub(crate) fn spawn_thread_affinity(
             stack,
             arg0,
             arg1,
+            linux_clone,
+            fs_base,
         });
         reg.members.push(Member {
             task,
@@ -2162,6 +2209,10 @@ pub(crate) fn spawn_thread_affinity(
     if let Err(e) = accounted {
         return Err(rollback(e, false));
     }
+    #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+    if !crate::linux_abi::register_linux_thread(id, task, linux_clear_child_tid) {
+        return Err(rollback(ProcError::NoTaskSlot, true));
+    }
     // 新线程与进程的其它线程同属一个 CPU 组。交给调度器之后再核对一次：设置上限与创建线程并发时，
     // 两边总有一边把新线程放进组里。
     let group = with_proc(id, |p| Ok(p.cpu_group)).ok().flatten();
@@ -2171,6 +2222,8 @@ pub(crate) fn spawn_thread_affinity(
         (None, None) => sched::spawn(task, name, thread_entry),
     };
     if spawned.is_err() {
+        #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+        crate::linux_abi::unregister_linux_thread(task);
         return Err(rollback(ProcError::NoTaskSlot, true));
     }
     if let Some(g) = with_proc(id, |p| Ok(p.cpu_group)).ok().flatten() {
@@ -3131,6 +3184,8 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
         m
     };
     if let Some(m) = member {
+        #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+        crate::linux_abi::linux_thread_exit(m.process, m.task);
         let exited = kobj::with(|t| {
             // 线程自己的退出状态：写入本线程的退出码
             if let Ok(KObject::Task(task)) = t.get(m.task_obj) {

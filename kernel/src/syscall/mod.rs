@@ -47,6 +47,9 @@ pub struct SyscallArgs {
     pub id: u64,
     /// 最多 6 个参数。
     pub args: [u64; 6],
+    /// x86_64 `clone` 所需的用户返回地址与栈指针；其他入口可为 `None`。
+    /// User return RIP and RSP needed by x86_64 `clone`; other entries may use `None`.
+    pub user_ip: Option<(u64, u64)>,
 }
 
 /// 把完整HandleRaw寄存器值解释为不透明句柄（含索引与代次），不截断。

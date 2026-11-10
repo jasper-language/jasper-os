@@ -9,19 +9,57 @@ use compat_core::syscall::{
     compat_result, dispatch, CompatErrno, LinuxCall, LinuxSyscall, SyscallDispatch, SyscallRequest,
 };
 
-#[cfg(feature = "compat-dynamic-libc-verify")]
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::objtable::ObjId;
+use kernel_core::paging::MapFlags;
 
 use crate::mm::user::{copy_from_user, copy_to_user};
+use crate::sync::IrqSpinLock;
 use crate::syscall::{SyscallArgs, CONSOLE_WRITE_MAX};
-use crate::{console, proc};
+use crate::{console, proc, sched};
 
 #[cfg(feature = "compat-dynamic-libc-verify")]
 static SYSCALL_TRACE_REMAINING: AtomicU32 = AtomicU32::new(512);
 #[cfg(feature = "compat-dynamic-libc-verify")]
 static PATH_TRACE_REMAINING: AtomicU32 = AtomicU32::new(24);
+
+const MAX_LINUX_THREADS: usize = 64;
+const MAX_FUTEX_WORDS: usize = 32;
+static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
+
+#[derive(Clone, Copy)]
+struct LinuxThread {
+    process: ObjId,
+    task: crate::task::TaskId,
+    tid: u32,
+    clear_child_tid: u64,
+}
+
+#[derive(Clone, Copy)]
+struct FutexWord {
+    process: ObjId,
+    address: u64,
+    generation: u64,
+    waiters: u16,
+}
+
+struct CompatState {
+    threads: [Option<LinuxThread>; MAX_LINUX_THREADS],
+    futexes: [Option<FutexWord>; MAX_FUTEX_WORDS],
+}
+
+impl CompatState {
+    const fn new() -> Self {
+        Self {
+            threads: [None; MAX_LINUX_THREADS],
+            futexes: [None; MAX_FUTEX_WORDS],
+        }
+    }
+}
+
+static COMPAT: IrqSpinLock<CompatState> =
+    IrqSpinLock::ranked(crate::lockorder::LINUX_COMPAT, CompatState::new());
 
 #[cfg(feature = "compat-dynamic-libc-verify")]
 fn trace_request(args: &SyscallArgs) {
@@ -100,6 +138,239 @@ fn trace_path_address(pid: ObjId, kind: &str, address: u64) {
     }
 }
 
+/// Registers the first task of a Linux process as leader and later tasks with unique TIDs.
+///
+/// 将 Linux 进程首个任务登记为 leader，并为后续任务分配唯一 TID。
+#[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+pub(crate) fn register_linux_thread(
+    process: ObjId,
+    task: crate::task::TaskId,
+    clear_child_tid: u64,
+) -> bool {
+    if !proc::is_linux_process(process) {
+        return true;
+    }
+    let Some(pid) = proc::linux_pid(process) else {
+        return false;
+    };
+    let tid = {
+        let mut state = COMPAT.lock();
+        let has_leader = state
+            .threads
+            .iter()
+            .flatten()
+            .any(|entry| entry.process == process);
+        let tid = if has_leader {
+            let tid = NEXT_LINUX_TID.fetch_add(1, Ordering::Relaxed);
+            if tid == 0 || tid == u32::MAX {
+                return false;
+            }
+            tid
+        } else {
+            pid
+        };
+        let Some(slot) = state.threads.iter().position(Option::is_none) else {
+            return false;
+        };
+        state.threads[slot] = Some(LinuxThread {
+            process,
+            task,
+            tid,
+            clear_child_tid,
+        });
+        tid
+    };
+    if clear_child_tid != 0 && proc::write(process, clear_child_tid, &tid.to_le_bytes()).is_err() {
+        unregister_linux_thread(task);
+        return false;
+    }
+    true
+}
+
+#[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+pub(crate) fn unregister_linux_thread(task: crate::task::TaskId) {
+    let mut state = COMPAT.lock();
+    if let Some(slot) = state
+        .threads
+        .iter()
+        .position(|entry| entry.is_some_and(|entry| entry.task == task))
+    {
+        state.threads[slot] = None;
+    }
+}
+
+fn linux_tid(process: ObjId) -> Option<u32> {
+    let (task, _) = sched::current();
+    COMPAT
+        .lock()
+        .threads
+        .iter()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)
+        .map(|entry| entry.tid)
+}
+
+fn linux_tid_for_task(task: crate::task::TaskId) -> Option<(ObjId, u32)> {
+    COMPAT
+        .lock()
+        .threads
+        .iter()
+        .flatten()
+        .find(|entry| entry.task == task)
+        .map(|entry| (entry.process, entry.tid))
+}
+
+fn set_clear_child_tid(process: ObjId, address: u64) -> Option<u32> {
+    let (task, _) = sched::current();
+    let mut state = COMPAT.lock();
+    let entry = state
+        .threads
+        .iter_mut()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)?;
+    entry.clear_child_tid = address;
+    Some(entry.tid)
+}
+
+/// Clears `clear_child_tid` and wakes a joining Linux thread.
+///
+/// 在线程退出时清零 `clear_child_tid` 并唤醒 Linux join 等待者。
+#[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
+    let clear = {
+        let mut state = COMPAT.lock();
+        let Some(slot) = state
+            .threads
+            .iter()
+            .position(|entry| entry.is_some_and(|entry| entry.task == task))
+        else {
+            return;
+        };
+        let entry = state.threads[slot].take().expect("live Linux thread");
+        entry.clear_child_tid
+    };
+    if clear != 0 {
+        let _ = proc::write(process, clear, &0u32.to_le_bytes());
+        let _ = futex_wake(process, clear, usize::MAX);
+    }
+}
+
+fn futex_value(process: ObjId, address: u64) -> Result<u32, CompatErrno> {
+    let mut bytes = [0u8; 4];
+    proc::read(process, address, &mut bytes).map_err(|_| CompatErrno::Fault)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn futex_wait(
+    process: ObjId,
+    address: u64,
+    expected: u32,
+    deadline_ns: Option<u64>,
+) -> Result<u64, CompatErrno> {
+    if address % 4 != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if futex_value(process, address)? != expected {
+        return Err(CompatErrno::TryAgain);
+    }
+    let generation = {
+        let mut state = COMPAT.lock();
+        let slot = if let Some(slot) = state.futexes.iter().position(|entry| {
+            entry.is_some_and(|entry| entry.process == process && entry.address == address)
+        }) {
+            slot
+        } else {
+            let slot = state
+                .futexes
+                .iter()
+                .position(Option::is_none)
+                .ok_or(CompatErrno::NoSpace)?;
+            state.futexes[slot] = Some(FutexWord {
+                process,
+                address,
+                generation: 1,
+                waiters: 0,
+            });
+            slot
+        };
+        let word = state.futexes[slot].as_mut().ok_or(CompatErrno::NoSpace)?;
+        word.waiters = word.waiters.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+        word.generation
+    };
+    let result = loop {
+        if proc::current_exiting() {
+            break Err(CompatErrno::Interrupted);
+        }
+        if deadline_ns.is_some_and(|deadline| sched::now_ns() >= deadline) {
+            break Err(CompatErrno::TimedOut);
+        }
+        let woke = {
+            let state = COMPAT.lock();
+            state
+                .futexes
+                .iter()
+                .flatten()
+                .find(|word| word.process == process && word.address == address)
+                .is_none_or(|word| word.generation != generation)
+        };
+        if woke {
+            break Ok(0);
+        }
+        sched::pause();
+    };
+    if let Some(word) = COMPAT
+        .lock()
+        .futexes
+        .iter_mut()
+        .flatten()
+        .find(|word| word.process == process && word.address == address)
+    {
+        word.waiters = word.waiters.saturating_sub(1);
+    }
+    result
+}
+
+fn futex_wake(process: ObjId, address: u64, count: usize) -> Result<u64, CompatErrno> {
+    if address % 4 != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut state = COMPAT.lock();
+    let Some(word) = state
+        .futexes
+        .iter_mut()
+        .flatten()
+        .find(|word| word.process == process && word.address == address)
+    else {
+        return Ok(0);
+    };
+    let count = count.min(usize::from(word.waiters));
+    if count != 0 {
+        word.generation = word.generation.wrapping_add(1).max(1);
+    }
+    Ok(count as u64)
+}
+
+fn futex_timeout(pointer: u64, realtime: bool) -> Result<Option<u64>, CompatErrno> {
+    if pointer == 0 {
+        return Ok(None);
+    }
+    if realtime {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut bytes = [0u8; 16];
+    copy_from_user(&mut bytes, pointer, 16).map_err(|_| CompatErrno::Fault)?;
+    let seconds = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+    let nanos = u64::from_le_bytes(bytes[8..].try_into().unwrap());
+    if nanos >= 1_000_000_000 {
+        return Err(CompatErrno::Invalid);
+    }
+    let duration = seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(nanos))
+        .ok_or(CompatErrno::Invalid)?;
+    Ok(Some(sched::now_ns().saturating_add(duration)))
+}
+
 /// Dispatches one x86_64 Linux syscall for the current process.
 ///
 /// 执行当前 Linux flavor 进程的一次 syscall；未映射调用返回 `ENOSYS`，未授权调用
@@ -122,10 +393,10 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
     if !proc::linux_syscall_allowed(pid, call.syscall) {
         return -i64::from(CompatErrno::Perm as i32);
     }
-    execute(pid, call)
+    execute(pid, call, a.user_ip)
 }
 
-fn execute(pid: ObjId, call: LinuxCall) -> i64 {
+fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
     match call.syscall {
         LinuxSyscall::Write => compat_result(linux_write(pid, call.args)),
         LinuxSyscall::WriteV => compat_result(linux_writev(pid, call.args)),
@@ -142,16 +413,27 @@ fn execute(pid: ObjId, call: LinuxCall) -> i64 {
         LinuxSyscall::Mmap => compat_result(linux_mmap(pid, call.args)),
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
+        LinuxSyscall::Madvise => compat_result(linux_madvise(pid, call.args)),
+        LinuxSyscall::Clone => compat_result(linux_clone(pid, call.args, user_ip)),
         LinuxSyscall::Brk => compat_result(linux_brk(pid, call.args[0])),
         LinuxSyscall::Access => compat_result(linux_access(call.args[0])),
         LinuxSyscall::ArchPrctl => compat_result(linux_arch_prctl(call.args)),
         LinuxSyscall::ClockGettime => compat_result(linux_clock_gettime(call.args)),
         LinuxSyscall::RtSigAction => compat_result(linux_rt_sigaction(pid, call.args)),
         LinuxSyscall::RtSigProcMask => compat_result(linux_rt_sigprocmask(pid, call.args)),
-        LinuxSyscall::GetPid | LinuxSyscall::GetTid => proc::linux_pid(pid)
+        LinuxSyscall::GetPid => proc::linux_pid(pid)
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
             .unwrap_or_else(|error| -i64::from(error as i32)),
+        LinuxSyscall::GetTid => linux_tid(pid)
+            .map(i64::from)
+            .ok_or(CompatErrno::NoSys)
+            .unwrap_or_else(|error| -i64::from(error as i32)),
+        LinuxSyscall::SetTidAddress => set_clear_child_tid(pid, call.args[0])
+            .map(i64::from)
+            .ok_or(CompatErrno::NoSys)
+            .unwrap_or_else(|error| -i64::from(error as i32)),
+        LinuxSyscall::Futex => compat_result(linux_futex(pid, call.args)),
         LinuxSyscall::Exit | LinuxSyscall::ExitGroup => {
             let code = call.args[0] as i64;
             proc::thread_exit(code, "linux process exit")
@@ -292,6 +574,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MAP_ANONYMOUS: u64 = 0x20;
     const MAP_DENYWRITE: u64 = 0x800;
     const MAP_NORESERVE: u64 = 0x4000;
+    const MAP_STACK: u64 = 0x20000;
     const PROT_READ: u64 = 0x1;
     const PROT_WRITE: u64 = 0x2;
     const PROT_EXEC: u64 = 0x4;
@@ -304,7 +587,14 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Perm);
     }
     if args[3] & MAP_PRIVATE == 0
-        || args[3] & !(MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS | MAP_DENYWRITE | MAP_NORESERVE) != 0
+        || args[3]
+            & !(MAP_PRIVATE
+                | MAP_FIXED
+                | MAP_ANONYMOUS
+                | MAP_DENYWRITE
+                | MAP_NORESERVE
+                | MAP_STACK)
+            != 0
         || args[5] % PAGE != 0
     {
         return Err(CompatErrno::Invalid);
@@ -463,6 +753,167 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(0)
 }
 
+/// Implements the two `madvise(2)` operations required by glibc thread stacks.
+///
+/// 实现 glibc 线程栈所需的 guard 安装与 DONTNEED；其他 advice 仅接受已知安全集合。
+fn linux_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    const MADV_NORMAL: u64 = 0;
+    const MADV_RANDOM: u64 = 1;
+    const MADV_SEQUENTIAL: u64 = 2;
+    const MADV_WILLNEED: u64 = 3;
+    const MADV_DONTNEED: u64 = 4;
+    const MADV_GUARD_INSTALL: u64 = 102;
+    let address = args[0];
+    let length = args[1];
+    let advice = args[2];
+    if address % PAGE != 0
+        || length == 0
+        || address < crate::arch::USER_WINDOW.0
+        || address
+            .checked_add(length)
+            .is_none_or(|end| end > crate::arch::USER_WINDOW.1)
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    match advice {
+        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED => Ok(0),
+        MADV_GUARD_INSTALL => {
+            let pages = length.div_ceil(PAGE);
+            for page in 0..pages {
+                let _ = proc::unmap_page(pid, address + page * PAGE);
+            }
+            Ok(0)
+        }
+        MADV_DONTNEED => {
+            let pages = length.div_ceil(PAGE);
+            for page in 0..pages {
+                let va = address + page * PAGE;
+                let flags = proc::page_flags(pid, va).unwrap_or(MapFlags::USER);
+                let _ = proc::unmap_page(pid, va);
+                proc::map_new(pid, va, flags).map_err(|_| CompatErrno::NoMemory)?;
+            }
+            Ok(0)
+        }
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+/// Implements the x86_64 Linux `clone(2)` thread subset used by glibc pthreads.
+///
+/// 实现 glibc pthread 使用的 x86_64 Linux `clone(2)` 线程子集；共享同一 Jasper 地址空间、
+/// fd 与信号状态，并为子任务分配独立 Linux TID。
+fn linux_clone(
+    pid: ObjId,
+    args: [u64; 6],
+    user_ip: Option<(u64, u64)>,
+) -> Result<u64, CompatErrno> {
+    const CLONE_VM: u64 = 0x0000_0100;
+    const CLONE_FS: u64 = 0x0000_0200;
+    const CLONE_FILES: u64 = 0x0000_0400;
+    const CLONE_SIGHAND: u64 = 0x0000_0800;
+    const CLONE_THREAD: u64 = 0x0001_0000;
+    const CLONE_SYSVSEM: u64 = 0x0004_0000;
+    const CLONE_SETTLS: u64 = 0x0008_0000;
+    const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+    const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
+    const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+    const SUPPORTED: u64 = CLONE_VM
+        | CLONE_FS
+        | CLONE_FILES
+        | CLONE_SIGHAND
+        | CLONE_THREAD
+        | CLONE_SYSVSEM
+        | CLONE_SETTLS
+        | CLONE_PARENT_SETTID
+        | CLONE_CHILD_CLEARTID
+        | CLONE_CHILD_SETTID;
+    let flags = args[0];
+    let child_stack = args[1];
+    let parent_tid = args[2];
+    let child_tid = args[3];
+    let tls = args[4];
+    let required = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
+    if flags & !SUPPORTED != 0
+        || flags & required != required
+        || child_stack < crate::arch::USER_WINDOW.0
+        || child_stack > crate::arch::USER_WINDOW.1
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let (user_rip, _) = user_ip.ok_or(CompatErrno::NoSys)?;
+    let fs_base = if flags & CLONE_SETTLS != 0 {
+        if tls < crate::arch::USER_WINDOW.0 || tls >= crate::arch::USER_WINDOW.1 {
+            return Err(CompatErrno::Invalid);
+        }
+        Some(tls)
+    } else {
+        None
+    };
+    let clear_child_tid = if flags & CLONE_CHILD_CLEARTID != 0 {
+        child_tid
+    } else {
+        0
+    };
+    let (task, _) = proc::spawn_linux_clone(
+        pid,
+        "linux-clone",
+        user_rip,
+        child_stack,
+        fs_base,
+        clear_child_tid,
+    )
+    .map_err(|_| CompatErrno::NoMemory)?;
+    let (_, tid) = linux_tid_for_task(task).ok_or(CompatErrno::NoSys)?;
+    let tid_bytes = tid.to_le_bytes();
+    if flags & CLONE_PARENT_SETTID != 0 {
+        copy_to_user(parent_tid, &tid_bytes, tid_bytes.len()).map_err(|_| CompatErrno::Fault)?;
+    }
+    if flags & CLONE_CHILD_SETTID != 0 {
+        copy_to_user(child_tid, &tid_bytes, tid_bytes.len()).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(u64::from(tid))
+}
+
+/// Implements the futex wait/wake subset used by glibc mutexes and condition variables.
+///
+/// 实现 glibc mutex/condvar 使用的 futex wait/wake 子集；等待使用内核调度暂停，
+/// 失去唤醒在兼容锁内判定，避免 compare 与 sleep 之间丢失通知。
+fn linux_futex(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const FUTEX_WAIT: u64 = 0;
+    const FUTEX_WAKE: u64 = 1;
+    const FUTEX_WAIT_BITSET: u64 = 9;
+    const FUTEX_WAKE_BITSET: u64 = 10;
+    const FUTEX_PRIVATE_FLAG: u64 = 128;
+    const FUTEX_CLOCK_REALTIME: u64 = 256;
+    let operation = args[1] & !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
+    match operation {
+        FUTEX_WAIT => futex_wait(
+            pid,
+            args[0],
+            u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
+            futex_timeout(args[3], false)?,
+        ),
+        FUTEX_WAIT_BITSET => futex_wait(
+            pid,
+            args[0],
+            u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
+            futex_timeout(args[3], args[1] & FUTEX_CLOCK_REALTIME != 0)?,
+        ),
+        FUTEX_WAKE => futex_wake(
+            pid,
+            args[0],
+            usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
+        ),
+        FUTEX_WAKE_BITSET => futex_wake(
+            pid,
+            args[0],
+            usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
+        ),
+        _ => Err(CompatErrno::NoSys),
+    }
+}
+
 /// Implements the x86_64 `arch_prctl(2)` TLS base operation.
 ///
 /// 当前切片仅接受 `ARCH_SET_FS`，地址必须位于本架构用户私有窗口。线程级 FS_BASE 随
@@ -566,7 +1017,7 @@ fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let (handle, _) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
     let file = crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
-    write_linux_stat(args[1], file.bytes().len() as u64, file.inode())?;
+    write_linux_stat(args[1], file)?;
     Ok(0)
 }
 
@@ -592,7 +1043,7 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     } else {
         return Err(CompatErrno::Invalid);
     };
-    write_linux_stat(args[2], file.bytes().len() as u64, file.inode())?;
+    write_linux_stat(args[2], file)?;
     Ok(0)
 }
 
@@ -695,8 +1146,7 @@ fn linux_readlink(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     let mut target = [0u8; 128];
     let take = capacity.min(target.len());
-    let copied =
-        proc::linux_exec_path(pid, &mut target[..take]).ok_or(CompatErrno::NoEntry)?;
+    let copied = proc::linux_exec_path(pid, &mut target[..take]).ok_or(CompatErrno::NoEntry)?;
     if copied != 0 {
         copy_to_user(args[1], &target[..copied], copied).map_err(|_| CompatErrno::Fault)?;
     }
@@ -721,8 +1171,7 @@ fn linux_rt_sigaction(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             return Err(CompatErrno::Perm);
         }
         let mut action = [0u8; SIGACTION_BYTES];
-        copy_from_user(&mut action, args[1], SIGACTION_BYTES)
-            .map_err(|_| CompatErrno::Fault)?;
+        copy_from_user(&mut action, args[1], SIGACTION_BYTES).map_err(|_| CompatErrno::Fault)?;
         let disposition = [
             u64::from_le_bytes(action[0..8].try_into().unwrap()),
             u64::from_le_bytes(action[8..16].try_into().unwrap()),
@@ -778,11 +1227,12 @@ fn linux_rt_sigprocmask(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
 ///
 /// 写入 144 字节、版本稳定的 x86_64 stat；时间和设备字段只表达当前虚拟快照，
 /// 不伪造宿主设备身份。
-fn write_linux_stat(address: u64, size: u64, inode: u64) -> Result<(), CompatErrno> {
+fn write_linux_stat(address: u64, file: crate::linux_vfs::FileId) -> Result<(), CompatErrno> {
     const STAT_BYTES: usize = 144;
+    let size = file.bytes().len() as u64;
     let mut stat = [0u8; STAT_BYTES];
-    stat[0..8].copy_from_slice(&1u64.to_le_bytes());
-    stat[8..16].copy_from_slice(&inode.to_le_bytes());
+    stat[0..8].copy_from_slice(&1u64.to_le_bytes()); // st_dev
+    stat[8..16].copy_from_slice(&file.inode().to_le_bytes()); // st_ino
     stat[16..24].copy_from_slice(&1u64.to_le_bytes());
     stat[24..28].copy_from_slice(&0o100444u32.to_le_bytes());
     stat[48..56].copy_from_slice(&size.to_le_bytes());

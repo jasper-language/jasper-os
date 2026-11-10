@@ -22,6 +22,8 @@ use crate::{arch, kobj, kprintln, sched};
 static TRUE: &[u8] = include_bytes!(env!("JSR_UBUNTU_TRUE"));
 static GETCONF: &[u8] = include_bytes!(env!("JSR_UBUNTU_GETCONF"));
 static PRINTF: &[u8] = include_bytes!(env!("JSR_UBUNTU_PRINTF"));
+#[cfg(feature = "compat-pthread-verify")]
+static PTHREAD: &[u8] = include_bytes!(env!("JSR_UBUNTU_PTHREAD"));
 static INTERPRETER: &[u8] = include_bytes!(env!("JSR_UBUNTU_LD_LINUX"));
 static FAILED: AtomicU32 = AtomicU32::new(0);
 
@@ -92,12 +94,15 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Mmap,
         LinuxSyscall::Munmap,
         LinuxSyscall::Mprotect,
+        LinuxSyscall::Madvise,
+        LinuxSyscall::Clone,
         LinuxSyscall::Futex,
         LinuxSyscall::Exit,
         LinuxSyscall::ExitGroup,
         LinuxSyscall::GetPid,
         LinuxSyscall::GetPpid,
         LinuxSyscall::GetTid,
+        LinuxSyscall::SetTidAddress,
     ])
 }
 
@@ -178,8 +183,41 @@ pub fn run() {
         failed()
     );
 
+    #[cfg(feature = "compat-pthread-verify")]
+    let pthread_result = {
+        let pthread_argv: [&[u8]; 1] = [b"/usr/bin/jasper-pthread-basic"];
+        let pthread_baseline = free_frames();
+        let result = run_program(
+            "ubuntu-dynamic-pthread",
+            PTHREAD,
+            &pthread_argv,
+            pthread_baseline,
+            true,
+        );
+        kprintln!(
+            "[JSR-COMPAT-PTHREAD] fixture=ubuntu-x86_64 executable=pthread-basic mapped={} entry=interpreter true interpreter_syscalls={} syscall_delta={} exit_zero={} resources={} failed={}",
+            result.mapped,
+            result.interpreter_entered,
+            result.syscalls,
+            result.exited_zero,
+            result.resources,
+            failed()
+        );
+        result
+    };
+
     let frames_after = free_frames();
-    let resources = true_result.resources && getconf_result.resources && printf_result.resources;
+    let resources = true_result.resources && getconf_result.resources && printf_result.resources
+        && {
+            #[cfg(feature = "compat-pthread-verify")]
+            {
+                pthread_result.resources && pthread_result.exited_zero
+            }
+            #[cfg(not(feature = "compat-pthread-verify"))]
+            {
+                true
+            }
+        };
     check(
         true_result.exited_zero
             && getconf_result.exited_zero

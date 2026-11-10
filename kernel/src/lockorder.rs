@@ -37,6 +37,9 @@ pub const HWV5_POLICY: LockClass = LockClass::new(7, "system.device.hwv5_policy"
 /// 调度器（任务表、运行队列、时钟记账）。
 /// Scheduler state.
 pub const SCHED: LockClass = LockClass::new(8, "system.sched");
+/// Linux 兼容线程身份与 futex 等待字。
+/// Linux-compatible thread identities and futex words.
+pub const LINUX_COMPAT: LockClass = LockClass::new(9, "system.compat.linux");
 /// 最近一次用户态故障记录。
 /// Last user fault record.
 pub const FAULT_LAST: LockClass = LockClass::new(10, "system.fault.last");
@@ -78,6 +81,7 @@ pub const REGISTRY: &[LockClass] = &[
     MEMORY_PINS,
     HWV5_POLICY,
     SCHED,
+    LINUX_COMPAT,
     FAULT_LAST,
     SYSCALL_LAST_EXIT,
     MEMORY_PRESSURE,

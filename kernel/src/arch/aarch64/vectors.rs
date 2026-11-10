@@ -217,7 +217,11 @@ fn handle_user_sync(frame: &mut TrapFrame) {
     let ec = esr >> 26;
     if ec == EC_SVC64 {
         let x = &frame.x;
-        let args = SyscallArgs { id: x[8], args: [x[0], x[1], x[2], x[3], x[4], x[5]] };
+        let args = SyscallArgs {
+            id: x[8],
+            args: [x[0], x[1], x[2], x[3], x[4], x[5]],
+            user_ip: None,
+        };
         frame.x[0] = syscall::on_syscall(&args) as u64;
         return;
     }

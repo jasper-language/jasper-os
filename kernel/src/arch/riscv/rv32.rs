@@ -185,7 +185,11 @@ pub fn set_syscall_return(x: &mut [usize; 32], value: i64) {
 /// high halves in `a3`–`a5`.
 pub fn syscall_args(x: &[usize; 32]) -> SyscallArgs {
     let pair = |lo: usize, hi: usize| (x[lo] as u32 as u64) | ((x[hi] as u32 as u64) << 32);
-    SyscallArgs { id: x[17] as u32 as u64, args: [pair(10, 13), pair(11, 14), pair(12, 15), 0, 0, 0] }
+    SyscallArgs {
+        id: x[17] as u32 as u64,
+        args: [pair(10, 13), pair(11, 14), pair(12, 15), 0, 0, 0],
+        user_ip: None,
+    }
 }
 
 /// 本文件内汇编使用的寄存器宽度宏（在每段汇编开头展开、结尾以 [`xlen_asm_end`] 撤销，各段自成一体）：

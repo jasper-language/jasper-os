@@ -178,7 +178,11 @@ pub fn set_syscall_return(x: &mut [usize; 32], value: i64) {
 /// Collect the syscall id and arguments: on RV64 every register already holds a full 64-bit value.
 pub fn syscall_args(x: &[usize; 32]) -> SyscallArgs {
     let r = |i: usize| x[i] as u64;
-    SyscallArgs { id: r(17), args: [r(10), r(11), r(12), r(13), r(14), r(15)] }
+    SyscallArgs {
+        id: r(17),
+        args: [r(10), r(11), r(12), r(13), r(14), r(15)],
+        user_ip: None,
+    }
 }
 
 /// 本文件内汇编使用的寄存器宽度宏（在每段汇编开头展开、结尾以 [`xlen_asm_end`] 撤销，各段自成一体）：

@@ -104,6 +104,8 @@ compat-syscall-verify = ["user-programs", "linux-abi"]
 # Real unmodified Ubuntu x86_64 PIE, ld-linux and libc execution through the optional
 # Linux syscall and ELF compatibility services; no unrelated Jasper user bundle is linked.
 compat-dynamic-libc-verify = ["linux-abi", "compat-elf"]
+# Unmodified Ubuntu glibc pthread create/join/mutex/condvar path over clone/futex.
+compat-pthread-verify = ["compat-dynamic-libc-verify"]
 # SEC-6 software memory capabilities, pointer provenance and CHERI-ready boundary.
 sec6-verify = []
 # Dedicated USI-1 CLI/structured service acceptance.

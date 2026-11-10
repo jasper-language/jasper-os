@@ -221,6 +221,7 @@ extern "C" fn jsr_loongarch64_trap(frame: &mut TrapFrame) {
         let args = SyscallArgs {
             id: frame.x[11],
             args: [frame.x[4], frame.x[5], frame.x[6], frame.x[7], frame.x[8], frame.x[9]],
+            user_ip: None,
         };
         frame.era += 4;
         let result = syscall::on_syscall(&args);

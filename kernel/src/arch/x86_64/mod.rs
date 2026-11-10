@@ -52,6 +52,7 @@ mod smp;
 pub(crate) use smp::tlb_flush_all_local as flush_all_local_tlb;
 mod uart;
 mod user;
+pub(crate) use user::enter_syscall_return;
 pub mod vmx;
 
 use super::{ExitStatus, PciAccess, Platform, UserProbe};
