@@ -210,6 +210,8 @@ struct ThreadStart {
     arg1: u64,
     linux_clone: bool,
     fs_base: Option<u64>,
+    clone_rdx: u64,
+    clone_r8: u64,
 }
 
 /// 运行中线程的身份：任务 → (所属进程, 自己的 Task 对象)。
@@ -2031,7 +2033,7 @@ fn thread_entry() {
     #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
     if s.linux_clone {
         // SAFETY：clone 的 RIP/RSP 已由 spawn_linux_clone 校验在用户私有窗口内。
-        unsafe { crate::arch::x86_64::enter_syscall_return(s.entry, s.stack) }
+        unsafe { crate::arch::x86_64::enter_syscall_return(s.entry, s.stack, s.clone_rdx, s.clone_r8) }
     }
     // SAFETY：entry/stack 已校验位于私有窗口，代码与栈页由创建方映射；内核栈顶由调度器设置。
     unsafe { arch::enter_user(s.entry, s.stack, s.arg0, s.arg1) }
@@ -2048,7 +2050,7 @@ pub fn spawn_thread(
     arg0: u64,
     arg1: u64,
 ) -> Result<(TaskId, ObjId), ProcError> {
-    spawn_thread_mode(id, name, entry, stack, arg0, arg1, None, false, None, 0)
+    spawn_thread_mode(id, name, entry, stack, arg0, arg1, None, false, None, 0, 0, 0)
 }
 
 /// Author: chatgpt. Install affinity before publishing the runnable thread.
@@ -2062,7 +2064,7 @@ pub(crate) fn spawn_thread_affinity(
     arg1: u64,
     affinity: Option<kernel_core::smp::CpuSet>,
 ) -> Result<(TaskId, ObjId), ProcError> {
-    spawn_thread_mode(id, name, entry, stack, arg0, arg1, affinity, false, None, 0)
+    spawn_thread_mode(id, name, entry, stack, arg0, arg1, affinity, false, None, 0, 0, 0)
 }
 
 /// Creates a Linux clone child that resumes at the syscall return address with `rax=0`.
@@ -2076,6 +2078,8 @@ pub fn spawn_linux_clone(
     user_stack: u64,
     fs_base: Option<u64>,
     clear_child_tid: u64,
+    clone_rdx: u64,
+    clone_r8: u64,
 ) -> Result<(TaskId, ObjId), ProcError> {
     spawn_thread_mode(
         id,
@@ -2088,6 +2092,8 @@ pub fn spawn_linux_clone(
         true,
         fs_base,
         clear_child_tid,
+        clone_rdx,
+        clone_r8,
     )
 }
 
@@ -2103,6 +2109,8 @@ fn spawn_thread_mode(
     linux_clone: bool,
     fs_base: Option<u64>,
     linux_clear_child_tid: u64,
+    clone_rdx: u64,
+    clone_r8: u64,
 ) -> Result<(TaskId, ObjId), ProcError> {
     // 栈顶为 0 时 `stack - 1` 会下溢：用检查式算术，失败按非法地址拒绝
     let stack_last = stack
@@ -2161,6 +2169,8 @@ fn spawn_thread_mode(
             arg1,
             linux_clone,
             fs_base,
+            clone_rdx,
+            clone_r8,
         });
         reg.members.push(Member {
             task,

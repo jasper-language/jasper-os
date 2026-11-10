@@ -34,6 +34,10 @@ struct LinuxThread {
     task: crate::task::TaskId,
     tid: u32,
     clear_child_tid: u64,
+    robust_list: u64,
+    robust_list_len: u64,
+    rseq: u64,
+    rseq_len: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -177,6 +181,10 @@ pub(crate) fn register_linux_thread(
             task,
             tid,
             clear_child_tid,
+            robust_list: 0,
+            robust_list_len: 0,
+            rseq: 0,
+            rseq_len: 0,
         });
         tid
     };
@@ -230,6 +238,55 @@ fn set_clear_child_tid(process: ObjId, address: u64) -> Option<u32> {
         .find(|entry| entry.process == process && entry.task == task)?;
     entry.clear_child_tid = address;
     Some(entry.tid)
+}
+
+fn register_robust_list(process: ObjId, address: u64, length: u64) -> bool {
+    if length != 24
+        || address < crate::arch::USER_WINDOW.0
+        || address >= crate::arch::USER_WINDOW.1
+    {
+        return false;
+    }
+    let (task, _) = sched::current();
+    let mut state = COMPAT.lock();
+    let Some(entry) = state
+        .threads
+        .iter_mut()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)
+    else {
+        return false;
+    };
+    entry.robust_list = address;
+    entry.robust_list_len = length;
+    true
+}
+
+fn register_rseq(process: ObjId, address: u64, length: u64, flags: u64, signature: u64) -> bool {
+    if flags != 0
+        || signature != 0x5305_3053
+        || length == 0
+        || length > 32
+        || address < crate::arch::USER_WINDOW.0
+        || address
+            .checked_add(length)
+            .is_none_or(|end| end > crate::arch::USER_WINDOW.1)
+    {
+        return false;
+    }
+    let (task, _) = sched::current();
+    let mut state = COMPAT.lock();
+    let Some(entry) = state
+        .threads
+        .iter_mut()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)
+    else {
+        return false;
+    };
+    entry.rseq = address;
+    entry.rseq_len = length as u32;
+    true
 }
 
 /// Clears `clear_child_tid` and wakes a joining Linux thread.
@@ -415,6 +472,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
         LinuxSyscall::Madvise => compat_result(linux_madvise(pid, call.args)),
         LinuxSyscall::Clone => compat_result(linux_clone(pid, call.args, user_ip)),
+        LinuxSyscall::Clone3 => compat_result(linux_clone3(pid, call.args, user_ip)),
         LinuxSyscall::Brk => compat_result(linux_brk(pid, call.args[0])),
         LinuxSyscall::Access => compat_result(linux_access(call.args[0])),
         LinuxSyscall::ArchPrctl => compat_result(linux_arch_prctl(call.args)),
@@ -433,6 +491,27 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
             .unwrap_or_else(|error| -i64::from(error as i32)),
+        LinuxSyscall::SetRobustList => {
+            if register_robust_list(pid, call.args[0], call.args[1]) {
+                0
+            } else {
+                -i64::from(CompatErrno::Invalid as i32)
+            }
+        }
+        LinuxSyscall::Rseq => {
+            if register_rseq(
+                pid,
+                call.args[0],
+                call.args[1],
+                call.args[2],
+                call.args[3],
+            ) {
+                0
+            } else {
+                -i64::from(CompatErrno::Invalid as i32)
+            }
+        }
+        LinuxSyscall::Prlimit64 => compat_result(linux_prlimit(pid, call.args)),
         LinuxSyscall::Futex => compat_result(linux_futex(pid, call.args)),
         LinuxSyscall::Exit | LinuxSyscall::ExitGroup => {
             let code = call.args[0] as i64;
@@ -808,6 +887,105 @@ fn linux_clone(
     args: [u64; 6],
     user_ip: Option<(u64, u64)>,
 ) -> Result<u64, CompatErrno> {
+    linux_spawn_clone(
+        pid,
+        args[0],
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+        user_ip,
+        args[2],
+        args[4],
+    )
+}
+
+/// Implements the structured `clone3(2)` layout used by modern glibc.
+///
+/// 解析现代 glibc 使用的 88 字节 `clone3` 参数结构，并复用同一线程创建路径。
+fn linux_clone3(
+    pid: ObjId,
+    args: [u64; 6],
+    user_ip: Option<(u64, u64)>,
+) -> Result<u64, CompatErrno> {
+    const CLONE_ARGS_BYTES: usize = 88;
+    let size = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if size < CLONE_ARGS_BYTES || size > 256 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut bytes = [0u8; 256];
+    copy_from_user(&mut bytes[..size], args[0], size).map_err(|_| CompatErrno::Fault)?;
+    let read = |offset: usize| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    let flags = read(0);
+    let pidfd = read(8);
+    let child_tid = read(16);
+    let parent_tid = read(24);
+    let exit_signal = read(32);
+    let stack = read(40);
+    let stack_size = read(48);
+    let tls = read(56);
+    let set_tid = read(64);
+    let set_tid_size = read(72);
+    let cgroup = read(80);
+    #[cfg(feature = "compat-dynamic-libc-verify")]
+    crate::kprintln!(
+        "[JSR-LINUX-CLONE3-ARGS] flags={:#x} pidfd={:#x} child_tid={:#x} parent_tid={:#x} exit_signal={:#x} stack={:#x} size={:#x} tls={:#x} set_tid={:#x} set_tid_size={} cgroup={:#x}",
+        flags,
+        pidfd,
+        child_tid,
+        parent_tid,
+        exit_signal,
+        stack,
+        stack_size,
+        tls,
+        set_tid,
+        set_tid_size,
+        cgroup
+    );
+    let _ = (pidfd, set_tid, set_tid_size, cgroup);
+    if exit_signal != 0 || stack_size == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let child_stack = stack
+        .checked_add(stack_size)
+        .filter(|top| *top <= crate::arch::USER_WINDOW.1)
+        .ok_or(CompatErrno::Invalid)?;
+    #[cfg(feature = "compat-dynamic-libc-verify")]
+    crate::kprintln!(
+        "[JSR-LINUX-CLONE3] flags={:#x} stack={:#x} size={:#x} top={:#x} tls={:#x} child_tid={:#x} parent_tid={:#x} rip={:#x}",
+        flags,
+        stack,
+        stack_size,
+        child_stack,
+        tls,
+        child_tid,
+        parent_tid,
+        user_ip.map_or(0, |value| value.0)
+    );
+    linux_spawn_clone(
+        pid,
+        flags,
+        child_stack,
+        parent_tid,
+        child_tid,
+        tls,
+        user_ip,
+        args[2],
+        args[4],
+    )
+}
+
+fn linux_spawn_clone(
+    pid: ObjId,
+    flags: u64,
+    child_stack: u64,
+    parent_tid: u64,
+    child_tid: u64,
+    tls: u64,
+    user_ip: Option<(u64, u64)>,
+    clone_rdx: u64,
+    clone_r8: u64,
+) -> Result<u64, CompatErrno> {
     const CLONE_VM: u64 = 0x0000_0100;
     const CLONE_FS: u64 = 0x0000_0200;
     const CLONE_FILES: u64 = 0x0000_0400;
@@ -828,11 +1006,6 @@ fn linux_clone(
         | CLONE_PARENT_SETTID
         | CLONE_CHILD_CLEARTID
         | CLONE_CHILD_SETTID;
-    let flags = args[0];
-    let child_stack = args[1];
-    let parent_tid = args[2];
-    let child_tid = args[3];
-    let tls = args[4];
     let required = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
     if flags & !SUPPORTED != 0
         || flags & required != required
@@ -862,6 +1035,8 @@ fn linux_clone(
         child_stack,
         fs_base,
         clear_child_tid,
+        clone_rdx,
+        clone_r8,
     )
     .map_err(|_| CompatErrno::NoMemory)?;
     let (_, tid) = linux_tid_for_task(task).ok_or(CompatErrno::NoSys)?;
@@ -912,6 +1087,30 @@ fn linux_futex(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         ),
         _ => Err(CompatErrno::NoSys),
     }
+}
+
+/// Reports the compatibility service's read-only resource limits.
+///
+/// 返回兼容服务的只读资源上限；本切片不伪造 `prlimit64` 写操作。
+fn linux_prlimit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const RLIMIT_STACK: u64 = 3;
+    const RLIMIT_NOFILE: u64 = 7;
+    const RLIM_INFINITY: u64 = u64::MAX;
+    if args[1] != 0 || args[2] != 0 || proc::linux_pid(pid).is_none() {
+        return Err(CompatErrno::Invalid);
+    }
+    let (current, maximum): (u64, u64) = match args[0] {
+        RLIMIT_STACK => (8 * 1024 * 1024, RLIM_INFINITY),
+        RLIMIT_NOFILE => (64, 64),
+        _ => return Err(CompatErrno::Invalid),
+    };
+    if args[3] != 0 {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&current.to_le_bytes());
+        bytes[8..].copy_from_slice(&maximum.to_le_bytes());
+        copy_to_user(args[3], &bytes, bytes.len()).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(0)
 }
 
 /// Implements the x86_64 `arch_prctl(2)` TLS base operation.

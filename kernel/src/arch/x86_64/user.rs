@@ -45,7 +45,7 @@ pub unsafe fn enter(entry: u64, stack: u64, arg0: u64, arg1: u64) -> ! {
 
 /// 进入克隆子线程：用户 RIP/栈取自 `clone`，`rax=0` 表示 syscall 子进程返回。
 /// Enters a cloned child with `rax=0`, the Linux syscall child-return convention.
-pub unsafe fn enter_syscall_return(entry: u64, stack: u64) -> ! {
+pub unsafe fn enter_syscall_return(entry: u64, stack: u64, clone_rdx: u64, clone_r8: u64) -> ! {
     let sel = gdt::selectors();
     let cs = sel.user_code.0 as u64;
     let ss = sel.user_data.0 as u64;
@@ -65,9 +65,9 @@ pub unsafe fn enter_syscall_return(entry: u64, stack: u64) -> ! {
         in("rax") 0u64,
         in("rdi") 0u64,
         in("rsi") 0u64,
-        in("rdx") 0u64,
+        in("rdx") clone_rdx,
         in("r10") 0u64,
-        in("r8") 0u64,
+        in("r8") clone_r8,
         in("r9") 0u64,
         options(noreturn)
     );

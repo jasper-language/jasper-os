@@ -96,6 +96,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Mprotect,
         LinuxSyscall::Madvise,
         LinuxSyscall::Clone,
+        LinuxSyscall::Clone3,
         LinuxSyscall::Futex,
         LinuxSyscall::Exit,
         LinuxSyscall::ExitGroup,
@@ -103,6 +104,9 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::GetPpid,
         LinuxSyscall::GetTid,
         LinuxSyscall::SetTidAddress,
+        LinuxSyscall::SetRobustList,
+        LinuxSyscall::Rseq,
+        LinuxSyscall::Prlimit64,
     ])
 }
 
