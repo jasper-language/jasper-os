@@ -19,6 +19,15 @@ pub enum FileId {
 }
 
 impl FileId {
+    /// Returns a stable virtual inode unique within this read-only file namespace.
+    ///
+    /// 返回本只读虚拟命名空间内稳定的唯一 inode；动态装载器依赖它区分不同共享库。
+    pub const fn inode(self) -> u64 {
+        match self {
+            Self::Libc => 1,
+        }
+    }
+
     /// Returns the non-zero virtual handle for this file.
     ///
     /// 返回本文件的非零虚拟句柄。

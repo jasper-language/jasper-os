@@ -284,6 +284,11 @@ fn configure_dynamic_libc_fixtures() {
     for (variable, default, description) in [
         ("JSR_UBUNTU_TRUE", "/usr/bin/true", "Ubuntu executable"),
         (
+            "JSR_UBUNTU_GETCONF",
+            "/usr/bin/getconf",
+            "Ubuntu getconf executable",
+        ),
+        (
             "JSR_UBUNTU_LD_LINUX",
             "/lib64/ld-linux-x86-64.so.2",
             "Ubuntu program interpreter",
@@ -322,10 +327,10 @@ fn configure_dynamic_libc_fixtures() {
             "{description} 必须是 ET_DYN"
         );
         match variable {
-            "JSR_UBUNTU_TRUE" => assert_eq!(
+            "JSR_UBUNTU_TRUE" | "JSR_UBUNTU_GETCONF" => assert_eq!(
                 dynamic_interpreter(&bytes),
                 Some(b"/lib64/ld-linux-x86-64.so.2".as_slice()),
-                "Ubuntu executable 必须声明未修改的 ld-linux"
+                "{description} 必须声明未修改的 ld-linux"
             ),
             "JSR_UBUNTU_LD_LINUX" => {
                 assert!(

@@ -1,9 +1,9 @@
 //! Real unmodified Ubuntu dynamic ELF execution through `ld-linux`.
 //!
-//! 职责：把真实 Ubuntu `/usr/bin/true` 与未修改的 `ld-linux` 映射到 Jasper 页表，
-//! 经 Ring 3 进入解释器，由解释器自行装载 libc、重定位和初始化，最终以退出码 0 结束。
-//! Responsibility: map a real Ubuntu PIE and its unmodified interpreter, then transfer to the
-//! interpreter itself. The kernel never invokes target constructors or substitutes host execution.
+//! 职责：运行未修改的 Ubuntu `true` 与 `getconf`，由上游 `ld-linux` 装载真实
+//! libc，完成重定位、TLS 和初始化。
+//! Responsibility: run unmodified Ubuntu fixtures through the upstream interpreter,
+//! Jasper page tables, Ring 3 and Linux syscall compatibility.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -12,20 +12,41 @@ use jasper_compat_loader::{
     build_initial_stack, map_image, plan_dynamic_program, run_process_entry,
     stack_input_for_program, ProgramStackInput,
 };
+use kernel_core::objtable::ObjId;
 
 use crate::compat_elf::{JasperExecutionBackend, JasperLoaderMemory};
 use crate::mm::frame::free_frames;
 use crate::proc::{self, ProcState};
 use crate::{arch, kobj, kprintln, sched};
 
-static EXECUTABLE: &[u8] = include_bytes!(env!("JSR_UBUNTU_TRUE"));
+static TRUE: &[u8] = include_bytes!(env!("JSR_UBUNTU_TRUE"));
+static GETCONF: &[u8] = include_bytes!(env!("JSR_UBUNTU_GETCONF"));
 static INTERPRETER: &[u8] = include_bytes!(env!("JSR_UBUNTU_LD_LINUX"));
 static FAILED: AtomicU32 = AtomicU32::new(0);
 
 const EXECUTABLE_BASE: u64 = arch::USER_WINDOW.0 + 0x40_0000;
 const INTERPRETER_BASE: u64 = arch::USER_WINDOW.0 + 0x20_0000_0000;
-const STACK_TOP: u64 = arch::USER_WINDOW.0 + 0xc0_0000;
+const STACK_TOP: u64 = arch::USER_WINDOW.0 + 0x10_0000_0000;
 const STACK_RESERVE_BYTES: u64 = 64 * kernel_core::frame::FRAME_SIZE;
+
+#[derive(Clone, Copy)]
+struct ProgramResult {
+    mapped: bool,
+    interpreter_entered: bool,
+    exited_zero: bool,
+    resources: bool,
+    syscalls: u32,
+}
+
+impl ProgramResult {
+    const FAILED: Self = Self {
+        mapped: false,
+        interpreter_entered: false,
+        exited_zero: false,
+        resources: false,
+        syscalls: 0,
+    };
+}
 
 pub fn failed() -> u32 {
     FAILED.load(Ordering::Relaxed)
@@ -38,15 +59,13 @@ fn check(ok: bool, stage: &'static str) {
     }
 }
 
-fn cleanup(pid: kernel_core::objtable::ObjId) {
+fn cleanup(pid: ObjId) {
     let _ = proc::reap(pid);
     kobj::run_cleanup(usize::MAX);
 }
 
-pub fn run() {
-    let frames_before = free_frames();
-    let calls_before = crate::syscall::call_count();
-    let calls = LinuxSyscallSet::of(&[
+fn allowed_calls() -> LinuxSyscallSet {
+    LinuxSyscallSet::of(&[
         LinuxSyscall::Read,
         LinuxSyscall::Pread64,
         LinuxSyscall::Write,
@@ -68,20 +87,71 @@ pub fn run() {
         LinuxSyscall::GetPid,
         LinuxSyscall::GetPpid,
         LinuxSyscall::GetTid,
-    ]);
-    let Ok(pid) = proc::create_linux("ubuntu-dynamic-true", calls) else {
-        check(false, "create");
-        report(frames_before, 0, false, false, false, false, false);
-        return;
-    };
+    ])
+}
 
-    let executable_plan = match jasper_compat_loader::parse(EXECUTABLE) {
+pub fn run() {
+    let frames_before = free_frames();
+    check(crate::linux_vfs::fixture_nonempty(), "libc_fixture");
+
+    let true_argv: [&[u8]; 1] = [b"/usr/bin/true"];
+    let true_result = run_program("ubuntu-dynamic-true", TRUE, &true_argv, frames_before);
+    kprintln!(
+        "[JSR-COMPAT-DYNAMIC] fixture=ubuntu-x86_64 executable=true ld_linux=true libc=true mapped={} entry=interpreter true interpreter_syscalls={} syscall_delta={} exit_zero={} frames_before={} resources={} failed={}",
+        true_result.mapped,
+        true_result.interpreter_entered,
+        true_result.syscalls,
+        true_result.exited_zero,
+        frames_before,
+        true_result.resources,
+        failed()
+    );
+
+    let getconf_argv: [&[u8]; 2] = [b"/usr/bin/getconf", b"GNU_LIBC_VERSION"];
+    let getconf_result =
+        run_program("ubuntu-dynamic-getconf", GETCONF, &getconf_argv, frames_before);
+    kprintln!(
+        "[JSR-COMPAT-DYNAMIC-GETCONF] fixture=ubuntu-x86_64 executable=getconf mapped={} entry=interpreter true interpreter_syscalls={} syscall_delta={} exit_zero={} resources={} failed={}",
+        getconf_result.mapped,
+        getconf_result.interpreter_entered,
+        getconf_result.syscalls,
+        getconf_result.exited_zero,
+        getconf_result.resources,
+        failed()
+    );
+
+    let resources = free_frames() == frames_before;
+    check(resources, "final_resources");
+    check(
+        true_result.exited_zero && getconf_result.exited_zero && resources,
+        "program_summary",
+    );
+    kprintln!(
+        "[JSR-COMPAT-DYNAMIC-SUMMARY] true={} getconf={} resources={} failed={}",
+        true_result.exited_zero,
+        getconf_result.exited_zero,
+        resources,
+        failed()
+    );
+}
+
+fn run_program(
+    name: &'static str,
+    executable: &[u8],
+    argv: &[&[u8]],
+    frames_before: usize,
+) -> ProgramResult {
+    let calls_before = crate::syscall::call_count();
+    let Ok(pid) = proc::create_linux(name, allowed_calls()) else {
+        check(false, "create");
+        return ProgramResult::FAILED;
+    };
+    let executable_plan = match jasper_compat_loader::parse(executable) {
         Ok(plan) => plan,
         Err(_) => {
             check(false, "parse_executable");
             cleanup(pid);
-            report(frames_before, 0, false, false, false, false, false);
-            return;
+            return ProgramResult::FAILED;
         }
     };
     let interpreter_plan = match jasper_compat_loader::parse(INTERPRETER) {
@@ -89,8 +159,7 @@ pub fn run() {
         Err(_) => {
             check(false, "parse_interpreter");
             cleanup(pid);
-            report(frames_before, 0, false, false, false, false, false);
-            return;
+            return ProgramResult::FAILED;
         }
     };
     check(
@@ -108,31 +177,28 @@ pub fn run() {
         Err(_) => {
             check(false, "dynamic_layout");
             cleanup(pid);
-            report(frames_before, 0, false, false, false, false, false);
-            return;
+            return ProgramResult::FAILED;
         }
     };
 
     let mut memory = JasperLoaderMemory::new(pid);
-    check(
-        map_image(&mut memory, EXECUTABLE, &dynamic.executable).is_ok(),
-        "map_executable",
-    );
-    check(
-        map_image(&mut memory, INTERPRETER, &dynamic.interpreter).is_ok(),
-        "map_interpreter",
-    );
-    check(crate::linux_vfs::fixture_nonempty(), "libc_fixture");
+    let executable_mapped = map_image(&mut memory, executable, &dynamic.executable).is_ok();
+    let interpreter_mapped =
+        map_image(&mut memory, INTERPRETER, &dynamic.interpreter).is_ok();
+    check(executable_mapped, "map_executable");
+    check(interpreter_mapped, "map_interpreter");
+    if !executable_mapped || !interpreter_mapped {
+        cleanup(pid);
+        return ProgramResult::FAILED;
+    }
 
-    let argv0 = b"/usr/bin/true".as_slice();
-    let argv = [argv0];
     let random = [0x5au8; 16];
     let stack = stack_input_for_program(ProgramStackInput {
         plan: &executable_plan,
         image: &dynamic.executable,
         interpreter_base: dynamic.interpreter.load_bias,
         stack_top: STACK_TOP,
-        argv: &argv,
+        argv,
         envp: &[],
         auxv: &[],
         random: Some(&random),
@@ -141,54 +207,37 @@ pub fn run() {
     check(stack.is_ok(), "initial_stack");
 
     let mut backend =
-        JasperExecutionBackend::with_stack_reserve(pid, "ubuntu-dynamic-true", STACK_RESERVE_BYTES);
+        JasperExecutionBackend::with_stack_reserve(pid, name, STACK_RESERVE_BYTES);
+    let mut entered = false;
+    let mut thread = false;
     if let Ok(stack) = stack {
-        check(
-            run_process_entry(&mut backend, &dynamic.execution, stack).is_ok(),
-            "transfer_interpreter",
-        );
-        check(backend.task().is_some(), "thread");
+        match run_process_entry(&mut backend, &dynamic.execution, stack) {
+            Ok(()) => entered = true,
+            Err(error) => kprintln!(
+                "[JSR-COMPAT-DYNAMIC-ERROR] program={} stage=transfer error={:?}",
+                name,
+                error
+            ),
+        }
+        check(entered, "transfer_interpreter");
+        thread = backend.task().is_some();
+        check(thread, "thread");
         sched::run();
     }
 
-    let state = proc::state(pid);
-    let exited_zero = state == Some(ProcState::Exited { code: 0 });
-    let syscall_delta = crate::syscall::call_count().saturating_sub(calls_before);
-    let interpreter_entered = syscall_delta > 0;
+    let exited_zero = proc::state(pid) == Some(ProcState::Exited { code: 0 });
+    let syscalls = crate::syscall::call_count().saturating_sub(calls_before);
+    let interpreter_entered = entered && thread && syscalls > 0;
     check(interpreter_entered, "interpreter_syscall");
     check(exited_zero, "exit_zero");
     cleanup(pid);
     let resources = free_frames() == frames_before;
     check(resources, "resources");
-    report(
-        frames_before,
-        syscall_delta,
-        true,
-        true,
+    ProgramResult {
+        mapped: true,
         interpreter_entered,
         exited_zero,
         resources,
-    );
-}
-
-fn report(
-    frames_before: usize,
-    syscall_delta: u32,
-    mapped: bool,
-    entry_is_interpreter: bool,
-    interpreter_entered: bool,
-    exited_zero: bool,
-    resources: bool,
-) {
-    kprintln!(
-        "[JSR-COMPAT-DYNAMIC] fixture=ubuntu-x86_64 executable=true ld_linux=true libc=true mapped={} entry=interpreter {} interpreter_syscalls={} syscall_delta={} exit_zero={} frames_before={} resources={} failed={}",
-        mapped,
-        entry_is_interpreter,
-        interpreter_entered,
-        syscall_delta,
-        exited_zero,
-        frames_before,
-        resources,
-        failed()
-    );
+        syscalls,
+    }
 }

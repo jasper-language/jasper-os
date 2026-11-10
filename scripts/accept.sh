@@ -2982,9 +2982,12 @@ check_compatdynamic() {
      && has '^\[JSR-LINUX-PATH\] kind=openat path=/lib/x86_64-linux-gnu/libc\.so\.6' \
      && has '^\[JSR-LINUX-SYSCALL\].* nr=158 ' \
      && has '^\[JSR-LINUX-SYSCALL\].* nr=9 ' \
+     && has '^glibc 2\.[0-9]+' \
+     && has '^\[JSR-COMPAT-DYNAMIC-GETCONF\].* exit_zero=true .*resources=true failed=0' \
+     && has '^\[JSR-COMPAT-DYNAMIC-SUMMARY\] true=true getconf=true resources=true failed=0' \
      && has '^\[JSR-PROC\] event=system\.process\.exited .*name=ubuntu-dynamic-true code=0 ' \
      && ! has '^\[JSR-COMPAT-DYNAMIC-FAIL\]'; then
-    record COMPAT-DYNAMIC-LIBC PASS "真实 QEMU 中未修改的 Ubuntu x86_64 PIE 与 ld-linux 进入 Jasper Ring 3；解释器打开真实路径、读取并 mmap 未修改 libc，完成 arch_prctl/TLS 后执行 /usr/bin/true 并以 0 退出；页帧回基线"
+    record COMPAT-DYNAMIC-LIBC PASS "真实 QEMU 中未修改的 Ubuntu x86_64 PIE 与 ld-linux 进入 Jasper Ring 3；true 以 0 退出，getconf 经真实 libc 输出 glibc 版本并以 0 退出；页帧回基线"
   else
     record COMPAT-DYNAMIC-LIBC FAIL "缺少未修改 Ubuntu PIE/ld-linux/libc、解释器路径与 syscall、0 退出或资源回收证据"
   fi

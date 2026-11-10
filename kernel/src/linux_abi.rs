@@ -19,7 +19,7 @@ use crate::syscall::{SyscallArgs, CONSOLE_WRITE_MAX};
 use crate::{console, proc};
 
 #[cfg(feature = "compat-dynamic-libc-verify")]
-static SYSCALL_TRACE_REMAINING: AtomicU32 = AtomicU32::new(96);
+static SYSCALL_TRACE_REMAINING: AtomicU32 = AtomicU32::new(512);
 #[cfg(feature = "compat-dynamic-libc-verify")]
 static PATH_TRACE_REMAINING: AtomicU32 = AtomicU32::new(24);
 
@@ -29,7 +29,7 @@ fn trace_request(args: &SyscallArgs) {
     if remaining == 0 {
         return;
     }
-    let index = 96 - remaining;
+    let index = 512 - remaining;
     if SYSCALL_TRACE_REMAINING
         .compare_exchange(
             remaining,
@@ -560,7 +560,7 @@ fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let (handle, _) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
     let file = crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
-    write_linux_stat(args[1], file.bytes().len() as u64, file.handle())?;
+    write_linux_stat(args[1], file.bytes().len() as u64, file.inode())?;
     Ok(0)
 }
 
@@ -586,7 +586,7 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     } else {
         return Err(CompatErrno::Invalid);
     };
-    write_linux_stat(args[2], file.bytes().len() as u64, file.handle())?;
+    write_linux_stat(args[2], file.bytes().len() as u64, file.inode())?;
     Ok(0)
 }
 
