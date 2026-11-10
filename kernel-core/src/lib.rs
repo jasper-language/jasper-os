@@ -90,10 +90,12 @@ pub mod wake_mailbox;
 pub mod fdt;
 pub mod frame;
 pub mod fs;
+pub mod fs_prod;
 pub mod fault;
 pub mod heap;
 pub mod image_header;
 pub mod interrupt;
+pub mod iommu;
 pub mod inherited_mutex;
 pub mod io;
 pub mod irq;
@@ -109,6 +111,8 @@ pub mod meta;
 pub mod msi;
 pub mod net;
 pub mod net1a;
+pub mod net3;
+pub mod numa;
 pub mod profile;
 pub mod program_caps;
 /// 服务装配契约：模块运行时状态、依赖顺序、能力发布与审计（issue #6）。
@@ -142,7 +146,10 @@ pub mod usi;
 pub mod usi_request;
 pub mod user_layout;
 pub mod vmm_device;
+pub mod virtio_fs;
+pub mod virtio_net;
 pub mod wait;
+pub mod wireguard;
 
 #[cfg(test)]
 mod robustness;
@@ -179,6 +186,7 @@ pub mod timer_event;
 pub mod timer_progress;
 pub mod dirty_slots;
 pub mod hwvirt;
+pub mod hwv5_pep;
 pub mod hwvirt_vcpu;
 pub mod hwvirt_vmm;
 
@@ -187,4 +195,5 @@ pub mod security;
 pub mod security_domain;
 pub mod net1b;
 pub mod net1c;
+pub mod net2;
 pub mod ifc;

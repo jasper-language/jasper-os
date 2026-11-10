@@ -50,6 +50,7 @@ pub enum IdentityClass {
     Service = 7,
     Module = 8,
     Bootstrap = 9,
+    File = 10,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

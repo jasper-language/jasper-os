@@ -11,6 +11,12 @@ use kernel_core::hwvirt_vcpu::{GuestPermissions, VcpuState};
 use kernel_core::vmm_device::{
     VirtioDeviceType, VirtioMmio, FEATURE_VERSION_1,
 };
+use kernel_core::virtio_net::{
+    VirtioNetBackend, VirtioNetHeader, MAX_FRAME_BYTES, VIRTIO_NET_HEADER_BYTES,
+};
+use kernel_core::virtio_fs::{
+    VirtioFsBackend, FUSE_OUT_HEADER_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
+};
 
 use crate::arch::x86_64::vmx::{GuestExecutionState, LinuxPlatform, LinuxReport, VmxVm};
 use crate::{kobj, kprintln, mm, proc, vcpu};
@@ -38,6 +44,10 @@ const VIRTIO_CONSOLE_BASE: u64 = 0xd000_1000;
 const VIRTIO_CONSOLE_IRQ: u8 = 6;
 const VIRTIO_BLOCK_BASE: u64 = 0xd000_2000;
 const VIRTIO_BLOCK_IRQ: u8 = 3;
+const VIRTIO_NET_BASE: u64 = 0xd000_3000;
+const VIRTIO_NET_IRQ: u8 = 10;
+const VIRTIO_FS_BASE: u64 = 0xd000_4000;
+const VIRTIO_FS_IRQ: u8 = 11;
 
 struct VirtioGuestBus {
     pid: kernel_core::objtable::ObjId,
@@ -45,11 +55,23 @@ struct VirtioGuestBus {
     rng: VirtioMmio,
     console: VirtioMmio,
     block: VirtioMmio,
+    net: VirtioMmio,
+    net_backend: VirtioNetBackend,
+    fs: VirtioMmio,
+    fs_backend: VirtioFsBackend,
     last_avail: [u16; 2],
     console_last_avail: [u16; 2],
     console_bytes: u32,
     block_last_avail: u16,
     block_requests: u32,
+    net_rx_last_avail: u16,
+    net_tx_last_avail: u16,
+    net_tx_frames: u32,
+    net_rx_frames: u32,
+    net_rejected: u32,
+    fs_last_avail: u16,
+    fs_requests: u32,
+    fs_rejected: u32,
     disk: [u8; 4096],
     pending_irqs: u16,
     rng_requests: u32,
@@ -76,11 +98,34 @@ impl VirtioGuestBus {
                 16,
                 [0, FEATURE_VERSION_1],
             ),
+            net: VirtioMmio::new(
+                VirtioDeviceType::Net,
+                16,
+                [kernel_core::virtio_net::FEATURE_MAC, FEATURE_VERSION_1],
+            ),
+            net_backend: VirtioNetBackend::new(
+                [0x52, 0x54, 0x00, 0x12, 0x34, 0x57],
+                [10, 0, 2, 2],
+            ),
+            fs: VirtioMmio::new(
+                VirtioDeviceType::Fs,
+                16,
+                [0, FEATURE_VERSION_1],
+            ),
+            fs_backend: VirtioFsBackend::new(),
             last_avail: [0; 2],
             console_last_avail: [0; 2],
             console_bytes: 0,
             block_last_avail: 0,
             block_requests: 0,
+            net_rx_last_avail: 0,
+            net_tx_last_avail: 0,
+            net_tx_frames: 0,
+            net_rx_frames: 0,
+            net_rejected: 0,
+            fs_last_avail: 0,
+            fs_requests: 0,
+            fs_rejected: 0,
             disk: {
                 let mut disk = [0u8; 4096];
                 let marker = b"JASPER-BLOCK-001";
@@ -319,6 +364,374 @@ impl VirtioGuestBus {
         }
     }
 
+    fn process_net_rx(&mut self, queue_index: u16) {
+        if queue_index != 0 {
+            return;
+        }
+        let Some(queue) = self.net.queue(queue_index) else {
+            return;
+        };
+        if !queue.ready {
+            return;
+        }
+        let Some(available) = self.read_u16(queue.address.driver + 2) else {
+            return;
+        };
+        while self.net_rx_last_avail != available {
+            let Some(frame) = self.net_backend.pop_rx() else {
+                break;
+            };
+            let slot = usize::from(self.net_rx_last_avail % queue.size);
+            let Some(head) = self.read_u16(queue.address.driver + 4 + (slot as u64) * 2) else {
+                return;
+            };
+            let mut chain = [(0u64, 0u32, 0u16, 0u16); 8];
+            let count = match self.read_virtio_chain(queue, head, &mut chain) {
+                Ok(count) => count,
+                Err(()) => {
+                    self.net_rejected = self.net_rejected.saturating_add(1);
+                    return;
+                }
+            };
+            if chain[..count].iter().any(|descriptor| descriptor.2 & 2 == 0) {
+                self.net_rejected = self.net_rejected.saturating_add(1);
+                return;
+            }
+            let header = [0u8; VIRTIO_NET_HEADER_BYTES];
+            let Some(written) = self.write_virtio_scatter(
+                &chain[..count],
+                &header,
+                frame.bytes(),
+            ) else {
+                self.net_rejected = self.net_rejected.saturating_add(1);
+                return;
+            };
+            let expected = VIRTIO_NET_HEADER_BYTES as u32 + frame.bytes().len() as u32;
+            if written != expected
+                || !self.complete_net_used(queue_index, queue, head, written)
+            {
+                self.net_rejected = self.net_rejected.saturating_add(1);
+                return;
+            }
+            self.net_rx_last_avail = self.net_rx_last_avail.wrapping_add(1);
+            self.net_rx_frames = self.net_rx_frames.saturating_add(1);
+            self.net.raise_interrupt(1);
+            self.pending_irqs |= 1u16 << VIRTIO_NET_IRQ;
+            break;
+        }
+    }
+
+    fn process_net_tx(&mut self, queue_index: u16) {
+        if queue_index != 1 {
+            return;
+        }
+        let Some(queue) = self.net.queue(queue_index) else {
+            return;
+        };
+        if !queue.ready {
+            return;
+        }
+        let Some(available) = self.read_u16(queue.address.driver + 2) else {
+            return;
+        };
+        while self.net_tx_last_avail != available {
+            let slot = usize::from(self.net_tx_last_avail % queue.size);
+            let Some(head) = self.read_u16(queue.address.driver + 4 + (slot as u64) * 2) else {
+                return;
+            };
+            let mut chain = [(0u64, 0u32, 0u16, 0u16); 8];
+            let count = match self.read_virtio_chain(queue, head, &mut chain) {
+                Ok(count) => count,
+                Err(()) => {
+                    self.net_rejected = self.net_rejected.saturating_add(1);
+                    return;
+                }
+            };
+            if chain[..count].iter().any(|descriptor| descriptor.2 & 2 != 0) {
+                self.net_rejected = self.net_rejected.saturating_add(1);
+                return;
+            }
+            let total = chain[..count]
+                .iter()
+                .try_fold(0u32, |sum, descriptor| sum.checked_add(descriptor.1));
+            let Some(total) = total else {
+                self.net_rejected = self.net_rejected.saturating_add(1);
+                return;
+            };
+            if total < VIRTIO_NET_HEADER_BYTES as u32 {
+                self.net_rejected = self.net_rejected.saturating_add(1);
+                return;
+            }
+            let mut raw = [0u8; VIRTIO_NET_HEADER_BYTES + MAX_FRAME_BYTES];
+            let payload_len = (total - VIRTIO_NET_HEADER_BYTES as u32) as usize;
+            if payload_len > MAX_FRAME_BYTES
+                || self.gather_virtio_chain(&chain[..count], &mut raw[..total as usize]).is_none()
+                || VirtioNetHeader::decode(&raw[..VIRTIO_NET_HEADER_BYTES]).is_err()
+                || self
+                    .net_backend
+                    .transmit(&raw[VIRTIO_NET_HEADER_BYTES..total as usize])
+                    .is_err()
+            {
+                self.net_rejected = self.net_rejected.saturating_add(1);
+                if !self.complete_net_used(queue_index, queue, head, total) {
+                    return;
+                }
+            } else {
+                if !self.complete_net_used(queue_index, queue, head, total) {
+                    return;
+                }
+                self.net_tx_frames = self.net_tx_frames.saturating_add(1);
+            }
+            self.net_tx_last_avail = self.net_tx_last_avail.wrapping_add(1);
+        }
+        self.process_net_rx(0);
+    }
+
+    fn process_fs(&mut self, queue_index: u16) {
+        // Queue 0 is reserved for high-priority FUSE messages. This frontend
+        // accepts ordinary requests from queue 1 and leaves queue 0 idle.
+        if queue_index != 1 {
+            return;
+        }
+        let Some(queue) = self.fs.queue(queue_index) else {
+            return;
+        };
+        if !queue.ready {
+            return;
+        }
+        let Some(available) = self.read_u16(queue.address.driver + 2) else {
+            return;
+        };
+        while self.fs_last_avail != available {
+            let slot = usize::from(self.fs_last_avail % queue.size);
+            let Some(head) = self.read_u16(queue.address.driver + 4 + (slot as u64) * 2) else {
+                return;
+            };
+            let mut chain = [(0u64, 0u32, 0u16, 0u16); 8];
+            let count = match self.read_virtio_chain(queue, head, &mut chain) {
+                Ok(count) if count >= 2 => count,
+                _ => {
+                    self.fs_rejected = self.fs_rejected.saturating_add(1);
+                    return;
+                }
+            };
+            let mut request = [0u8; MAX_REQUEST_BYTES];
+            let mut request_len = 0usize;
+            let mut writable = false;
+            for &(address, length, flags, _) in &chain[..count] {
+                if flags & 2 != 0 {
+                    writable = true;
+                    continue;
+                }
+                let length = length as usize;
+                let Some(end) = request_len.checked_add(length) else {
+                    self.fs_rejected = self.fs_rejected.saturating_add(1);
+                    return;
+                };
+                if end > request.len() || !self.read_guest(address, &mut request[request_len..end]) {
+                    self.fs_rejected = self.fs_rejected.saturating_add(1);
+                    return;
+                }
+                request_len = end;
+            }
+            if !writable || request_len < 4 {
+                self.fs_rejected = self.fs_rejected.saturating_add(1);
+                return;
+            }
+            let declared = u32::from_le_bytes(request[..4].try_into().unwrap()) as usize;
+            if declared < FUSE_OUT_HEADER_BYTES || declared > request_len {
+                self.fs_rejected = self.fs_rejected.saturating_add(1);
+                return;
+            }
+            let request = &request[..declared];
+            let mut response = [0u8; MAX_RESPONSE_BYTES];
+            let response_len = match self.fs_backend.handle_request(request, &mut response) {
+                Ok(length) => length,
+                Err(_) if request.len() >= 16 => {
+                    let unique = u64::from_le_bytes(request[8..16].try_into().unwrap());
+                    response[..FUSE_OUT_HEADER_BYTES].fill(0);
+                    response[..4].copy_from_slice(
+                        &(FUSE_OUT_HEADER_BYTES as u32).to_le_bytes(),
+                    );
+                    response[4..8].copy_from_slice(&(-5i32 as u32).to_le_bytes());
+                    response[8..16].copy_from_slice(&unique.to_le_bytes());
+                    self.fs_rejected = self.fs_rejected.saturating_add(1);
+                    FUSE_OUT_HEADER_BYTES
+                }
+                Err(_) => {
+                    self.fs_rejected = self.fs_rejected.saturating_add(1);
+                    return;
+                }
+            };
+            let Some(written) =
+                self.write_virtio_output(&chain[..count], &response[..response_len])
+            else {
+                self.fs_rejected = self.fs_rejected.saturating_add(1);
+                return;
+            };
+            if !self.complete_fs_used(queue, head, written) {
+                return;
+            }
+            self.fs_last_avail = self.fs_last_avail.wrapping_add(1);
+            self.fs_requests = self.fs_requests.saturating_add(1);
+            self.fs.raise_interrupt(1);
+            self.pending_irqs |= 1u16 << VIRTIO_FS_IRQ;
+        }
+    }
+
+    fn read_virtio_chain(
+        &mut self,
+        queue: kernel_core::vmm_device::QueueState,
+        head: u16,
+        output: &mut [(u64, u32, u16, u16); 8],
+    ) -> Result<usize, ()> {
+        if !queue.ready || queue.size == 0 || head >= queue.size {
+            return Err(());
+        }
+        let mut index = head;
+        let mut seen = 0u64;
+        for count in 0..output.len() {
+            if index >= queue.size || index >= 64 || seen & (1u64 << index) != 0 {
+                return Err(());
+            }
+            seen |= 1u64 << index;
+            let base = queue.address.descriptor + u64::from(index) * 16;
+            let address = self.read_u64(base).ok_or(())?;
+            let length = self.read_u32(base + 8).ok_or(())?;
+            let flags = self.read_u16(base + 12).ok_or(())?;
+            let next = self.read_u16(base + 14).ok_or(())?;
+            output[count] = (address, length, flags, next);
+            if flags & 1 == 0 {
+                return Ok(count + 1);
+            }
+            if next >= queue.size {
+                return Err(());
+            }
+            index = next;
+        }
+        Err(())
+    }
+
+    fn gather_virtio_chain(
+        &mut self,
+        chain: &[(u64, u32, u16, u16)],
+        out: &mut [u8],
+    ) -> Option<()> {
+        let mut cursor = 0usize;
+        for (address, length, _, _) in chain {
+            let count = (*length as usize).min(out.len().saturating_sub(cursor));
+            if count != 0 && !self.read_guest(*address, &mut out[cursor..cursor + count]) {
+                return None;
+            }
+            cursor += count;
+            if cursor == out.len() {
+                return Some(());
+            }
+        }
+        None
+    }
+
+    fn write_virtio_scatter(
+        &mut self,
+        chain: &[(u64, u32, u16, u16)],
+        header: &[u8],
+        frame: &[u8],
+    ) -> Option<u32> {
+        let total = header.len().checked_add(frame.len())?;
+        let mut written = 0usize;
+        for (address, length, _, _) in chain {
+            let count = (*length as usize).min(total - written);
+            for index in 0..count {
+                let absolute = written + index;
+                let byte = if absolute < header.len() {
+                    header[absolute]
+                } else {
+                    frame[absolute - header.len()]
+                };
+                if !self.write_guest(*address + index as u64, &[byte]) {
+                    return None;
+                }
+            }
+            written += count;
+            if written == total {
+                return u32::try_from(written).ok();
+            }
+        }
+        None
+    }
+
+    fn write_virtio_output(
+        &mut self,
+        chain: &[(u64, u32, u16, u16)],
+        bytes: &[u8],
+    ) -> Option<u32> {
+        let capacity = chain
+            .iter()
+            .filter(|descriptor| descriptor.2 & 2 != 0)
+            .try_fold(0usize, |sum, descriptor| {
+                sum.checked_add(descriptor.1 as usize)
+            })?;
+        if capacity < bytes.len() {
+            return None;
+        }
+        let mut written = 0usize;
+        for &(address, length, flags, _) in chain {
+            if flags & 2 == 0 {
+                continue;
+            }
+            let count = (length as usize).min(bytes.len().saturating_sub(written));
+            if count != 0 && !self.write_guest(address, &bytes[written..written + count]) {
+                return None;
+            }
+            written += count;
+            if written == bytes.len() {
+                return u32::try_from(written).ok();
+            }
+        }
+        None
+    }
+
+    fn complete_net_used(
+        &mut self,
+        queue_index: u16,
+        queue: kernel_core::vmm_device::QueueState,
+        head: u16,
+        length: u32,
+    ) -> bool {
+        let last = if queue_index == 0 {
+            self.net_rx_last_avail
+        } else {
+            self.net_tx_last_avail
+        };
+        let used = last.wrapping_add(1);
+        let slot = usize::from(last % queue.size);
+        fence(Ordering::Release);
+        self.write_u32(queue.address.device + 4 + (slot as u64) * 8, u32::from(head))
+            && self.write_u32(
+                queue.address.device + 8 + (slot as u64) * 8,
+                length,
+            )
+            && self.write_u16(queue.address.device + 2, used)
+    }
+
+    fn complete_fs_used(
+        &mut self,
+        queue: kernel_core::vmm_device::QueueState,
+        head: u16,
+        length: u32,
+    ) -> bool {
+        let used = self.fs_last_avail.wrapping_add(1);
+        let slot = usize::from(self.fs_last_avail % queue.size);
+        fence(Ordering::Release);
+        self.write_u32(
+            queue.address.device + 4 + (slot as u64) * 8,
+            u32::from(head),
+        ) && self.write_u32(
+            queue.address.device + 8 + (slot as u64) * 8,
+            length,
+        ) && self.write_u16(queue.address.device + 2, used)
+    }
+
     fn complete_block(
         &mut self,
         queue: kernel_core::vmm_device::QueueState,
@@ -429,6 +842,54 @@ impl LinuxPlatform for VirtioGuestBus {
                 _ => self.block.read(offset, width).ok(),
             };
         }
+        if (VIRTIO_NET_BASE..VIRTIO_NET_BASE + 0x1000).contains(&gpa) {
+            let offset = gpa - VIRTIO_NET_BASE;
+            if let Some(config_offset) = offset.checked_sub(0x100) {
+                if !matches!(width, 1 | 2 | 4 | 8)
+                    || config_offset % u64::from(width) != 0
+                    || config_offset + u64::from(width) > 8
+                {
+                    return None;
+                }
+                let mut config = [0u8; 8];
+                config[..6].copy_from_slice(&self.net_backend.mac());
+                config[6..8].copy_from_slice(&1u16.to_le_bytes());
+                let start = config_offset as usize;
+                let mut value = 0u64;
+                for (index, byte) in config[start..start + width as usize]
+                    .iter()
+                    .enumerate()
+                {
+                    value |= u64::from(*byte) << (index * 8);
+                }
+                return Some(value);
+            }
+            return self.net.read(offset, width).ok();
+        }
+        if (VIRTIO_FS_BASE..VIRTIO_FS_BASE + 0x1000).contains(&gpa) {
+            let offset = gpa - VIRTIO_FS_BASE;
+            if let Some(config_offset) = offset.checked_sub(0x100) {
+                if !matches!(width, 1 | 2 | 4 | 8)
+                    || config_offset % u64::from(width) != 0
+                    || config_offset + u64::from(width) > 40
+                {
+                    return None;
+                }
+                let mut config = [0u8; 40];
+                config[..8].copy_from_slice(b"jasperfs");
+                config[36..40].copy_from_slice(&1u32.to_le_bytes());
+                let start = config_offset as usize;
+                let mut value = 0u64;
+                for (index, byte) in config[start..start + width as usize]
+                    .iter()
+                    .enumerate()
+                {
+                    value |= u64::from(*byte) << (index * 8);
+                }
+                return Some(value);
+            }
+            return self.fs.read(offset, width).ok();
+        }
         None
     }
 
@@ -473,6 +934,41 @@ impl LinuxPlatform for VirtioGuestBus {
             }
             if let Some(queue) = event.queue_notified {
                 self.process_block(queue);
+            }
+            return true;
+        }
+        if (VIRTIO_NET_BASE..VIRTIO_NET_BASE + 0x1000).contains(&gpa) {
+            let offset = gpa - VIRTIO_NET_BASE;
+            let Ok(event) = self.net.write(offset, width, value) else {
+                return false;
+            };
+            if offset == 0x070 && value == 0 {
+                self.net_backend.reset();
+                self.net_rx_last_avail = 0;
+                self.net_tx_last_avail = 0;
+                self.pending_irqs &= !(1u16 << VIRTIO_NET_IRQ);
+            }
+            if let Some(queue) = event.queue_notified {
+                match queue {
+                    0 => self.process_net_rx(queue),
+                    1 => self.process_net_tx(queue),
+                    _ => return false,
+                }
+            }
+            return true;
+        }
+        if (VIRTIO_FS_BASE..VIRTIO_FS_BASE + 0x1000).contains(&gpa) {
+            let offset = gpa - VIRTIO_FS_BASE;
+            let Ok(event) = self.fs.write(offset, width, value) else {
+                return false;
+            };
+            if offset == 0x070 && value == 0 {
+                self.fs_backend.reset();
+                self.fs_last_avail = 0;
+                self.pending_irqs &= !(1u16 << VIRTIO_FS_IRQ);
+            }
+            if let Some(queue) = event.queue_notified {
+                self.process_fs(queue);
             }
             return true;
         }
@@ -628,10 +1124,17 @@ fn run_impl(virtio_rng: bool) -> bool {
             after
         );
     }
+    let net_ok = !virtio_rng
+        || (devices.net_backend.tx_frames() != 0
+            && devices.net_backend.rx_frames() != 0
+            && devices.net_tx_frames != 0
+            && devices.net_rx_frames != 0
+            && devices.net_rejected == 0);
     let virtio_ok = !virtio_rng
         || (devices.rng_requests != 0
             && devices.console_bytes != 0
             && devices.block_requests != 0
+            && net_ok
             && report.pio_marker
             && report.pio_reads != 0
             && report.pio_writes != 0
@@ -640,7 +1143,7 @@ fn run_impl(virtio_rng: bool) -> bool {
             && report.pio_cancels == 1);
     let ok = report.marker && report.halted && lifecycle && shutdown && reclaimed && virtio_ok;
     kprintln!(
-        "[JSR-HWV4-LINUX] linux=true exits={} serial_bytes={} timer_interrupts={} timer_eois={} virtio_rng_requests={} virtio_console_bytes={} virtio_block_requests={} pio_reads={} pio_writes={} pio_generation={} pio_requests={} pio_cancels={} pio_marker={} marker={} halted={} lifecycle={} shutdown={} reclaim={}",
+        "[JSR-HWV4-LINUX] linux=true exits={} serial_bytes={} timer_interrupts={} timer_eois={} virtio_rng_requests={} virtio_console_bytes={} virtio_block_requests={} virtio_net_tx_frames={} virtio_net_rx_frames={} virtio_net_backend_tx={} virtio_net_backend_rx={} virtio_net_reset_generation={} virtio_net_rejected={} virtio_fs_requests={} virtio_fs_rejected={} virtio_fs_handles={} virtio_fs_reset_generation={} pio_reads={} pio_writes={} pio_generation={} pio_requests={} pio_cancels={} pio_marker={} marker={} halted={} lifecycle={} shutdown={} reclaim={}",
         report.exits,
         report.serial_bytes,
         report.timer_interrupts,
@@ -648,6 +1151,16 @@ fn run_impl(virtio_rng: bool) -> bool {
         devices.rng_requests,
         devices.console_bytes,
         devices.block_requests,
+        devices.net_tx_frames,
+        devices.net_rx_frames,
+        devices.net_backend.tx_frames(),
+        devices.net_backend.rx_frames(),
+        devices.net_backend.reset_generation(),
+        devices.net_rejected,
+        devices.fs_requests,
+        devices.fs_rejected,
+        devices.fs_backend.handle_count(),
+        devices.fs_backend.generation(),
         report.pio_reads,
         report.pio_writes,
         report.pio_probe_generation,
@@ -724,7 +1237,7 @@ fn prepare(
             pid,
             handle,
             COMMAND_LINE,
-            b"earlyprintk=serial earlycon=uart,io,0x3f8,115200 keep_bootcon ignore_loglevel loglevel=7 nokaslr no_timer_check lpj=1000000 panic=-1 init=/init io_delay=none initcall_blacklist=serial8250_init virtio_mmio.device=0x200@0xd0000000:5 virtio_mmio.device=0x200@0xd0001000:6 virtio_mmio.device=0x200@0xd0002000:3\0",
+            b"earlyprintk=serial earlycon=uart,io,0x3f8,115200 keep_bootcon ignore_loglevel loglevel=7 nokaslr no_timer_check lpj=1000000 panic=-1 init=/init io_delay=none initcall_blacklist=serial8250_init virtio_mmio.device=0x200@0xd0000000:5 virtio_mmio.device=0x200@0xd0001000:6 virtio_mmio.device=0x200@0xd0002000:3 virtio_mmio.device=0x200@0xd0003000:10 virtio_mmio.device=0x200@0xd0004000:11\0",
         )?;
     } else {
         write_bytes(

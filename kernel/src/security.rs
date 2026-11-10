@@ -9,8 +9,8 @@ use kernel_core::mac::{
 };
 use kernel_core::object::HandleId;
 use kernel_core::security::{
-    ApplicationIdentity, BootId, IdentityClass, ModuleIdentity, SecurityContext, SecurityError,
-    SecurityDomain,
+    ApplicationIdentity, BootId, IdentityClass, ModuleIdentity, ObjectIdentity, SecurityContext,
+    SecurityError, SecurityDomain,
 };
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -218,6 +218,55 @@ fn authorize_label_pair(
             effect,
         )
         .map(|_| ())
+}
+
+/// Authorize a non-KObject identity such as a network endpoint or file object
+/// with an explicit class, generation and MAC label.
+pub fn authorize_object_label(
+    context: SecurityContext,
+    class: IdentityClass,
+    object_id: u64,
+    generation: u32,
+    label: MacLabel,
+    effect: MacEffect,
+) -> Result<(), MacDenial> {
+    if object_id == 0 || generation == 0 {
+        return Err(MacDenial::InvalidObjectLabel);
+    }
+    init_mac()?;
+    MAC.lock()
+        .authorize(
+            context.object,
+            subject_label(context),
+            ObjectIdentity {
+                boot_id: context.object.boot_id,
+                class,
+                object_id,
+                generation,
+            },
+            label,
+            effect,
+        )
+        .map(|_| ())
+}
+
+/// File objects use the generic labeled-object gate with the stable
+/// KernelObject MAC class retained by the signed bootstrap policy.
+pub fn authorize_file_label(
+    context: SecurityContext,
+    file_object_id: u64,
+    file_generation: u32,
+    label: MacLabel,
+    effect: MacEffect,
+) -> Result<(), MacDenial> {
+    authorize_object_label(
+        context,
+        IdentityClass::KernelObject,
+        file_object_id,
+        file_generation,
+        label,
+        effect,
+    )
 }
 
 /// Authorize a public syscall effect.  The first handle argument, when valid,

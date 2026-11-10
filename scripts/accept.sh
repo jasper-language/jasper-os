@@ -86,6 +86,8 @@ esac
 [ "${JASPER_CHECKS:-}" = "sec4" ] && KFEAT+=(--features sec4-verify)
 [ "${JASPER_CHECKS:-}" = "sec5" ] && KFEAT+=(--features sec5-verify)
 [ "${JASPER_CHECKS:-}" = "sec6" ] && KFEAT+=(--features sec6-verify)
+[ "${JASPER_CHECKS:-}" = "net2" ] && KFEAT+=(--features net2-verify)
+[ "${JASPER_CHECKS:-}" = "net3" ] && KFEAT+=(--features net3-verify)
 HWV4_FEAT=()
 if [ -n "${JSR_LINUX_GUEST_HEADER:-}" ] && [ -n "${JSR_LINUX_GUEST_KERNEL:-}" ]; then
   if [ ! -s "$JSR_LINUX_GUEST_HEADER" ] || [ ! -s "$JSR_LINUX_GUEST_KERNEL" ]; then
@@ -2903,6 +2905,26 @@ check_sec5() {
   fi
 }
 
+check_net2() {
+  if has '^\[JSR-NET2\] service=true mac_allow=true secret_denied=true ifc_allow=true ifc_denied=true audited=[1-9][0-9]* denied=[1-9][0-9]* tcp=true quota=true failed=0' \
+     && has '^\[JSR-NET2\] summary resources=true failed=0' \
+     && ! has '^\[JSR-NET2-FAIL\]'; then
+    record NET-2 PASS "生产 TCP 服务完成 connect/listen/SYN 处理/established、序列与窗口、接收缓冲、FIN/关闭、取消、超时和配额；网络对象 MAC 默认拒绝与机密读拒绝、IFC 允许/污点拒绝、可靠审计和资源回基线通过"
+  else
+    record NET-2 FAIL "缺少 TCP 生命周期、授权/标签/审计、取消/超时或资源守恒证据"
+  fi
+}
+
+check_net3() {
+  if has '^\[JSR-NET3\] lifecycle=true retry=true loss=true mismatch_atomic=true observable=true stale=false generations=[1-9][0-9]* snapshots=[1-9][0-9]* lost=[1-9][0-9]* failed=0' \
+     && has '^\[JSR-NET3\] summary resources=true failed=0' \
+     && ! has '^\[JSR-NET3-FAIL\]'; then
+    record NET-3 PASS "接口探测/上线/降级/停止生命周期、指数退避与重试耗尽、断开恢复、传输/队列/配额/畸形流量分类、观测快照有界、陈旧世代拒绝和资源回基线通过"
+  else
+    record NET-3 FAIL "缺少生命周期、重试预算、丢包分类、可观测快照、陈旧世代或资源守恒证据"
+  fi
+}
+
 check_fs0() {
   if has '^\[JSR-FS0\] service=true' \
      && has '^\[JSR-FS0\] summary failed=0 recovered=true seed=true final_sequence=2 after_reboot=true resources=true' \
@@ -2921,12 +2943,16 @@ check_fs1() {
   content="$(debugfs -R 'cat /jasper-renamed.txt' "$BLANK" 2>/dev/null | tr -d '\r')"
   if has '^\[JSR-FS1\] mounted=true read=true write=true fsync=true rename=true handles=0' \
      && has '^\[JSR-FS1\] summary failed=0 resources=true' \
+     && has '^\[JSR-FS1-PROD\] mac_allow=true secret_denied=true flow_denied=true flow_result=Ok\(Denied\) audited=[1-9][0-9]* denied=[1-9][0-9]* domain_bound=true' \
+     && ! has '^\[JSR-FS1-PROD-FAIL\]' \
      && ! has '^\[JSR-FS1-FAIL\]' \
      && [ "$fsck_ok" -eq 1 ] \
      && [ "$content" = "written by Jasper" ]; then
     record FS-1 PASS "真实 virtio-blk ext4：Linux 镜像读取；VFS create/write/fsync/rename/read；打开句柄跨 rename 保持；句柄关闭后回收；宿主 e2fsck 无修复且 Linux debugfs 读到 rename 后内容"
+    record FS-1-PROD PASS "生产文件门接入签名 MAC、默认拒绝、IFC 数据流、文件身份/世代、撤销、配额和可靠审计；允许与拒绝决定在 ext4 变更前裁决；真实 ext4、JBD2、fsync、rename、Linux e2fsck/debugfs 与资源回基线同时通过"
   else
     record FS-1 FAIL "缺少真实 ext4 VFS、JBD2/flush、atomic rename、Linux e2fsck 干净或资源回收证据"
+    record FS-1-PROD FAIL "缺少文件 MAC/IFC/PEP、默认拒绝、审计或真实 ext4 组合证据"
   fi
 }
 

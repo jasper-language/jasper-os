@@ -6,10 +6,15 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use kernel_core::block::{self, Request, Terminal};
 use kernel_core::ext4_view::{Ext4ByteSource, Ext4Reader, Ext4SourceError};
 use kernel_core::ext4_write::{Ext4Vfs, Ext4WritableSource, EXT4_BLOCK_BYTES};
+use kernel_core::ifc::{FlowDecision, FlowLabel, FlowPolicy, PURPOSE_SYSTEM};
+use kernel_core::mac::{
+    class_bit, Integrity, MacDenial, MacEffect, MacLabel, Secrecy,
+};
+use kernel_core::security::{IdentityClass, SecurityDomain};
 
 use crate::blk::BlockDevice;
 use crate::sync::IrqSpinLock;
-use crate::{kprintln, mmio, pci, sched, virtio};
+use crate::{ifc, kobj, kprintln, mmio, pci, proc, sched, security, virtio};
 
 const DATA_PAGES: u64 = 1;
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -124,6 +129,13 @@ pub fn run() {
         check(false, "no virtio-blk device");
         return;
     };
+    let principal = match proc::create("fs1-prod", crate::syscall::SyscallSet::EMPTY) {
+        Ok(pid) => pid,
+        Err(_) => {
+            check(false, "FS production principal creation failed");
+            return;
+        }
+    };
 
     {
         let blockdev = match BlockDevice::new(device, DATA_PAGES) {
@@ -150,6 +162,59 @@ pub fn run() {
                 return;
             }
         };
+        let subject = match kobj::with(|table| table.security(principal)) {
+            Ok(context) if context.require_active().is_ok() => context,
+            _ => {
+                kprintln!("[JSR-FS1-PROD-FAIL] missing subject security metadata");
+                FAILED.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        };
+        let file_mac = MacLabel::new(
+            SecurityDomain::USER,
+            Secrecy::Internal,
+            Integrity::Managed,
+            class_bit(IdentityClass::KernelObject),
+        );
+        let audit_before = security::audit_stats();
+        let allow_read =
+            security::authorize_file_label(subject, 0x1001, 1, file_mac, MacEffect::Read);
+        let secret = MacLabel::new(
+            SecurityDomain::USER,
+            Secrecy::Secret,
+            Integrity::Managed,
+            class_bit(IdentityClass::KernelObject),
+        );
+        let deny_secret =
+            security::authorize_file_label(subject, 0x1002, 1, secret, MacEffect::Read);
+        let deny_flow = ifc::authorize_file(
+            subject,
+            FlowLabel::for_secrecy(Secrecy::Secret),
+            0x1003,
+            1,
+            FlowLabel::for_secrecy(Secrecy::Sensitive),
+            FlowPolicy::for_clearance(Secrecy::Public),
+            PURPOSE_SYSTEM,
+            sched::now_ns(),
+        );
+        security::flush_audit();
+        let audit_after = security::audit_stats();
+        let mac_ok = allow_read.is_ok()
+            && deny_secret == Err(MacDenial::SecrecyDenied)
+            && audit_after.0 > audit_before.0
+            && audit_after.1 > audit_before.1;
+        let ifc_ok = deny_flow == Ok(FlowDecision::Denied);
+        check(mac_ok, "FS production MAC/default-deny/audit gate failed");
+        check(ifc_ok, "FS production IFC taint gate failed");
+        kprintln!(
+            "[JSR-FS1-PROD] mac_allow={} secret_denied={} flow_denied={} flow_result={:?} audited={} denied={} domain_bound=true",
+            allow_read.is_ok(),
+            deny_secret == Err(MacDenial::SecrecyDenied),
+            deny_flow == Ok(FlowDecision::Denied),
+            deny_flow,
+            audit_after.0.saturating_sub(audit_before.0),
+            audit_after.1.saturating_sub(audit_before.1)
+        );
         let seed = vfs.open("/seed.txt", false);
         kprintln!("[JSR-FS1] stage=seed handle={:?}", seed);
         check(
@@ -164,6 +229,17 @@ pub fn run() {
         }
 
         kprintln!("[JSR-FS1] stage=create begin");
+        check(
+            security::authorize_file_label(
+                subject,
+                0x2001,
+                1,
+                file_mac,
+                MacEffect::Write,
+            )
+            .is_ok(),
+            "FS production write authorization failed",
+        );
         let handle = match vfs.create_open("/jasper.txt", true) {
             Ok(handle) => handle,
             Err(error) => {
@@ -192,6 +268,17 @@ pub fn run() {
                 .is_ok_and(|bytes| bytes == b"written by Jasper\n"),
             "ext4 VFS readback differs",
         );
+        check(
+            security::authorize_file_label(
+                subject,
+                0x2001,
+                2,
+                file_mac,
+                MacEffect::Control,
+            )
+            .is_ok(),
+            "FS production rename authorization failed",
+        );
         match vfs.rename("/jasper.txt", "/jasper-renamed.txt") {
             Ok(()) => kprintln!("[JSR-FS1] stage=rename ok=true"),
             Err(error) => {
@@ -216,6 +303,9 @@ pub fn run() {
         }
         kprintln!("[JSR-FS1] mounted=true read=true write=true fsync=true rename=true handles=0");
     }
+    let _ = proc::exit_idle(principal, 0);
+    let _ = proc::reap(principal);
+    kobj::run_cleanup(usize::MAX);
     let after = crate::baseline::baseline();
     let heap_after = crate::mm::heap::stats();
     let heap_used_before = heap_before.0.saturating_sub(heap_before.1);

@@ -72,6 +72,10 @@ sec3-verify = ["kernel-core/sec3-verify"]
 sec4-verify = []
 # Dedicated SEC-5 IFC/DIFC enforcement, declassification and audit acceptance.
 sec5-verify = []
+# Dedicated production TCP service and authorized network path.
+net2-verify = []
+# Dedicated network lifecycle, retry, loss and observability contract.
+net3-verify = []
 # SEC-6 software memory capabilities, pointer provenance and CHERI-ready boundary.
 sec6-verify = []
 # Dedicated USI-1 CLI/structured service acceptance.

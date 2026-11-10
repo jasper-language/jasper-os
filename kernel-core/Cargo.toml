@@ -19,6 +19,7 @@ path = "src/lib.rs"
 crc = { version = "3", optional = true }
 ext4-view = { version = "1.0.0", default-features = false, optional = true }
 ext4_rs = { path = "../third_party/ext4_rs", optional = true }
+wireguard-sans-io = { version = "=1.0.0", default-features = false }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

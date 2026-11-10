@@ -18,7 +18,7 @@ pub const MAC_LABEL_VERSION: u16 = 1;
 pub const MAX_POLICY_RULES: usize = 32;
 pub const MAX_AUDIT_EVENTS: usize = 256;
 pub const POLICY_AUTHORITY_JASPER: u64 = 0x4a53_524d_4143_0001;
-pub const OBJECT_CLASS_ALL: u16 = (1u16 << 9) - 1;
+pub const OBJECT_CLASS_ALL: u16 = (1u16 << 10) - 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -135,6 +135,12 @@ impl MacLabel {
                 SecurityDomain::USER,
                 Secrecy::Internal,
                 Integrity::Untrusted,
+                class_bit(class),
+            ),
+            IdentityClass::File => Self::new(
+                SecurityDomain::USER,
+                Secrecy::Internal,
+                Integrity::Managed,
                 class_bit(class),
             ),
         }

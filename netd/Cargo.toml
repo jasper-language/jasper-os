@@ -1,0 +1,16 @@
+[package]
+name = "jasper-netd"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Mature-library QUIC and WireGuard service facade for Jasper networking"
+
+[dependencies]
+jasper-kernel-core = { package = "kernel-core", path = "../kernel-core" }
+quinn = { version = "=0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring", "bloom"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
+tokio = { version = "=1.54.1", default-features = false, features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+wireguard-sans-io = { version = "=1.0.0", default-features = false }
+
+[dev-dependencies]
+rcgen = { version = "=0.14.10", default-features = true }

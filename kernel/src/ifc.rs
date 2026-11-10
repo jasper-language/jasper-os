@@ -19,7 +19,11 @@ static LAST_DIGEST: AtomicU64 = AtomicU64::new(0);
 pub fn identity(context: SecurityContext) -> FlowIdentity {
     FlowIdentity {
         object: context.object.object_id,
-        generation: context.object.generation,
+        // SEC-1 deliberately permits generation zero for the first object
+        // generation; SEC-5 uses zero as an invalid sentinel. Map that valid
+        // object generation to the first flow generation instead of rejecting
+        // the object.
+        generation: context.object.generation.max(1),
     }
 }
 
@@ -72,6 +76,66 @@ pub fn authorize_ipc(source: SecurityContext, sink: SecurityContext) -> Result<(
     })();
     flush(&mut engine);
     result
+}
+
+/// Authorize an arbitrary labeled channel sink. File, network and device
+/// services reuse this gate so labels cannot be bypassed by choosing a
+/// different service boundary.
+pub fn authorize_labeled_flow(
+    source_context: SecurityContext,
+    source_flow: FlowLabel,
+    sink_object: u64,
+    sink_generation: u32,
+    sink_label: FlowLabel,
+    sink_policy: FlowPolicy,
+    channel: FlowChannel,
+    purpose: u32,
+    now: u64,
+) -> Result<FlowDecision, FlowError> {
+    if sink_object == 0 || sink_generation == 0 {
+        return Err(FlowError::InvalidIdentity);
+    }
+    let mut engine = FLOWS.lock();
+    let result = (|| {
+        let source = ensure(&mut engine, source_context)?;
+        engine.set_label(source, source_flow)?;
+        let sink = FlowIdentity {
+            object: sink_object,
+            generation: sink_generation,
+        };
+        if engine.contains(sink) {
+            engine.set_label(sink, sink_label)?;
+        } else {
+            engine.register(sink, sink_label)?;
+        }
+        engine.set_policy(sink, sink_policy)?;
+        engine.authorize(source, sink, channel, purpose, now)
+    })();
+    flush(&mut engine);
+    result
+}
+
+pub fn authorize_file(
+    source_context: SecurityContext,
+    source_flow: FlowLabel,
+    file_object: u64,
+    file_generation: u32,
+    file_label: FlowLabel,
+    file_policy: FlowPolicy,
+    purpose: u32,
+    now: u64,
+) -> Result<FlowDecision, FlowError> {
+    authorize_labeled_flow(
+        source_context,
+        source_flow,
+        file_object,
+        file_generation,
+        file_label,
+        file_policy,
+        FlowChannel::File,
+        purpose,
+        now,
+    )
 }
 
 pub fn declassify(
