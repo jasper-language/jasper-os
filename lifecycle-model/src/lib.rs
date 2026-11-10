@@ -10,7 +10,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-pub mod boot;
+pub use jasper_lifecycle_boot as boot;
 pub mod diagnostics;
 pub mod layout;
 pub mod manifest;
@@ -20,7 +20,7 @@ pub mod update;
 
 /// 一份启动控制记录的固定线上长度（字节）。
 /// Fixed on-wire size of one boot-control record in bytes.
-pub const CONTROL_RECORD_BYTES: usize = 180;
+pub const CONTROL_RECORD_BYTES: usize = jasper_lifecycle_boot::CONTROL_RECORD_BYTES;
 /// 一份更新交易记录的固定线上长度（字节）。
 /// Fixed on-wire size of one update-transaction record in bytes.
 pub const TRANSACTION_RECORD_BYTES: usize = 64;

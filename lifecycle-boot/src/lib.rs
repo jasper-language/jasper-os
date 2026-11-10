@@ -1,7 +1,13 @@
 //! 双槽启动控制的持久格式、启动选择与断电恢复。
 //! Persistent format, boot selection, and power-loss recovery for dual-slot boot control.
 
-use crate::CONTROL_RECORD_BYTES;
+#![no_std]
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+/// 一份启动控制记录的固定线上长度（字节）。
+/// Fixed on-wire size of one boot-control record in bytes.
+pub const CONTROL_RECORD_BYTES: usize = 180;
 
 /// 双槽 A/B 的稳定编号。Stable identifiers for the two boot slots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -347,7 +353,7 @@ impl ControlBlock {
             }
             next.slots[slot.index()].state = SlotState::Failed;
             next.slots[slot.index()].attempts = 0;
-            next.bump_slot_and_control(slot)?;
+            next.bump_slot_generation(slot)?;
         }
 
         let mut choice = None;
@@ -579,12 +585,17 @@ impl ControlBlock {
     }
 
     fn bump_slot_and_control(&mut self, slot: Slot) -> Result<(), BootControlError> {
+        self.bump_slot_generation(slot)?;
+        self.bump_generation()
+    }
+
+    fn bump_slot_generation(&mut self, slot: Slot) -> Result<(), BootControlError> {
         let record = &mut self.slots[slot.index()];
         record.generation = record
             .generation
             .checked_add(1)
             .ok_or(BootControlError::Overflow)?;
-        self.bump_generation()
+        Ok(())
     }
 
     fn find(self, state: SlotState) -> Option<(Slot, SlotRecord)> {
@@ -764,6 +775,7 @@ mod tests {
     fn boot_attempt_is_counted_before_transfer_and_exhaustion_rolls_back() {
         let mut block = initial();
         stage(&mut block);
+        let generation_before_trials = block.generation();
         for attempt in 1..=MAX_BOOT_ATTEMPTS {
             let decision = block.prepare_boot().unwrap();
             assert_eq!(decision.slot, Slot::B);
@@ -773,6 +785,12 @@ mod tests {
         assert_eq!(fallback.slot, Slot::A);
         assert_eq!(fallback.reason, BootReason::ConfirmedRelease);
         assert_eq!(block.slot(Slot::B).state(), SlotState::Failed);
+        assert_eq!(
+            block.generation(),
+            generation_before_trials + u64::from(MAX_BOOT_ATTEMPTS) + 1
+        );
+        assert_eq!(block.slot(Slot::B).generation(), 5);
+        assert_eq!(block.slot(Slot::A).generation(), 2);
     }
 
     #[test]
