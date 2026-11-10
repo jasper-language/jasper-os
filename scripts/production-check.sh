@@ -23,6 +23,7 @@ cargo build --locked --release -p xtask > "$OUT/build.log" 2>&1 || { echo "FAIL 
 ELF="$TARGET/x86_64-unknown-none/release/jasper-kernel"
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none -p jasper-kernel --features production >> "$OUT/build.log" 2>&1 \
   || { echo "FAIL 生产内核构建失败"; exit 1; }
+python3 scripts/check-production-symbols.py "$ELF"
 
 # 未列入生产清单的特性必须被 build.rs 默认拒绝。
 # The negative case proves the build gate rejects an unlisted verification feature.

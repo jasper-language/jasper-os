@@ -487,6 +487,7 @@ pub(crate) fn linux_close_fd(pid: ObjId, fd: u32) -> bool {
 /// Updates close-on-exec for one Linux descriptor.
 ///
 /// 更新 Linux fd 的 close-on-exec；只作用于当前有效世代。
+#[cfg(feature = "linux-abi")]
 pub(crate) fn linux_set_fd_cloexec(pid: ObjId, fd: u32, enabled: bool) -> bool {
     with_proc(pid, |p| {
         p.linux
@@ -502,6 +503,7 @@ pub(crate) fn linux_set_fd_cloexec(pid: ObjId, fd: u32, enabled: bool) -> bool {
 /// Returns one Linux signal disposition as `(handler, flags, restorer, mask)`.
 ///
 /// 返回 Linux 信号处置；当前保存启动配置，信号队列与用户栈帧投递仍为 pending。
+#[cfg(feature = "linux-abi")]
 pub(crate) fn linux_signal_action(pid: ObjId, signal: u32) -> Option<[u64; 4]> {
     crate::kobj::with(|t| match t.get(pid) {
         Ok(KObject::Process(p)) if (1..=64).contains(&signal) => {
@@ -514,6 +516,7 @@ pub(crate) fn linux_signal_action(pid: ObjId, signal: u32) -> Option<[u64; 4]> {
 /// Commits one validated Linux signal disposition.
 ///
 /// 提交已验证的 Linux 信号处置；实际信号生成、排队与用户栈帧投递尚未实现。
+#[cfg(feature = "linux-abi")]
 pub(crate) fn set_linux_signal_action(pid: ObjId, signal: u32, action: [u64; 4]) -> bool {
     with_proc(pid, |p| {
         if !(1..=64).contains(&signal) {
@@ -528,6 +531,7 @@ pub(crate) fn set_linux_signal_action(pid: ObjId, signal: u32, action: [u64; 4])
 /// Returns the blocked Linux signal mask.
 ///
 /// 返回 Linux 兼容进程当前阻塞的信号集合。
+#[cfg(feature = "linux-abi")]
 pub(crate) fn linux_signal_mask(pid: ObjId) -> Option<u64> {
     crate::kobj::with(|t| match t.get(pid) {
         Ok(KObject::Process(p)) => Some(p.linux.as_ref()?.signal_mask),
@@ -538,6 +542,7 @@ pub(crate) fn linux_signal_mask(pid: ObjId) -> Option<u64> {
 /// Commits a Linux blocked-signal mask while preserving unmaskable signals.
 ///
 /// 提交阻塞信号集合，并强制保持 SIGKILL/SIGSTOP 不可阻塞。
+#[cfg(feature = "linux-abi")]
 pub(crate) fn set_linux_signal_mask(pid: ObjId, mask: u64) -> bool {
     const UNMASKABLE: u64 = (1u64 << (9 - 1)) | (1u64 << (19 - 1));
     with_proc(pid, |p| {
@@ -561,6 +566,7 @@ pub(crate) fn linux_pid(pid: ObjId) -> Option<u32> {
 /// Records the exact executable path used for Linux `/proc/self/exe`.
 ///
 /// 记录 Linux 程序的实际执行路径；超长、空或带 NUL 的路径失败关闭。
+#[cfg(feature = "linux-abi")]
 pub(crate) fn linux_set_exec_path(pid: ObjId, path: &[u8]) -> bool {
     if path.is_empty() || path.len() > 128 || path.contains(&0) {
         return false;
@@ -577,6 +583,7 @@ pub(crate) fn linux_set_exec_path(pid: ObjId, path: &[u8]) -> bool {
 /// Copies the executable path into a bounded caller buffer.
 ///
 /// 将可执行路径复制到调用者缓冲区并返回实际长度。
+#[cfg(feature = "linux-abi")]
 pub(crate) fn linux_exec_path(pid: ObjId, output: &mut [u8]) -> Option<usize> {
     crate::kobj::with(|t| match t.get(pid) {
         Ok(KObject::Process(p)) => {

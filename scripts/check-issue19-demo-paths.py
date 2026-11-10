@@ -8,11 +8,12 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-LIB = ROOT / "kernel/src/lib.rs"
+SRC = ROOT / "kernel/src"
+LIB = SRC / "lib.rs"
 PRODUCTION = ROOT / "kernel/src/production.rs"
 CLASSIFICATION = ROOT / "kernel/demo-path-classification.txt"
 VALID = {"verification-only", "temporary-in-use", "superseded"}
-TEMPORARY_PRODUCTION_CALLERS = {"user_demo"}
+TEMPORARY_PRODUCTION_CALLERS: set[str] = set()
 
 
 def fail(message: str) -> None:
@@ -41,7 +42,20 @@ def classified() -> dict[str, str]:
 
 def main() -> int:
     source = LIB.read_text(encoding="utf-8")
-    modules = set(re.findall(r"pub\s+mod\s+([A-Za-z0-9_]*_demo)\s*;", source))
+    modules = set()
+    declaration = re.compile(
+        r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z0-9_]*demo)\s*;",
+        re.MULTILINE,
+    )
+    for path in SRC.rglob("*.rs"):
+        relative = path.relative_to(SRC)
+        if relative.name in {"lib.rs", "main.rs", "mod.rs"}:
+            parts = list(relative.parent.parts)
+        else:
+            parts = [*relative.parent.parts, relative.stem]
+        parent = "::".join(part for part in parts if part != ".")
+        for name in declaration.findall(path.read_text(encoding="utf-8")):
+            modules.add(f"{parent}::{name}" if parent else name)
     modules.update(
         re.findall(r"pub\s+use\s+(?:[A-Za-z0-9_]+::)*([A-Za-z0-9_]*_demo)\s*;", source)
     )
@@ -49,8 +63,26 @@ def main() -> int:
     if set(classes) != modules:
         fail(f"classification drift: {sorted(set(classes) ^ modules)}")
     production = PRODUCTION.read_text(encoding="utf-8")
-    referenced = set(re.findall(r"(?:crate::)?([A-Za-z0-9_]*_demo)::", production))
-    undeclared = referenced - set(classes)
+    tokens = set(
+        re.findall(
+            r"(?:^|::)([A-Za-z0-9_]*(?:_demo|demo))::",
+            production,
+            re.MULTILINE,
+        )
+    )
+    referenced = set()
+    undeclared = set()
+    for token in tokens:
+        if token in classes:
+            referenced.add(token)
+            continue
+        matches = {name for name in classes if name.endswith(f"::{token}")}
+        if not matches:
+            undeclared.add(token)
+        elif len(matches) > 1:
+            fail(f"production token {token} is ambiguous: {sorted(matches)}")
+        else:
+            referenced.update(matches)
     if undeclared:
         fail(f"production references unclassified demo modules: {sorted(undeclared)}")
     forbidden = {

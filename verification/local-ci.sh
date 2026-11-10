@@ -10,11 +10,11 @@ manifest=$(mktemp)
 manifest_after=$(mktemp)
 trap 'rm -f "$manifest" "$manifest_after"' EXIT
 manifest_inputs() {
-    find kernel-core kernel lifecycle-model abi user verification tools/krn1 .cargo -type d \( -name __pycache__ -o -name target -o -name corpus -o -name artifacts \) -prune -o -type f -print0 | sort -z | xargs -0 sha256sum
+    find kernel-core kernel lifecycle-model lifecycle-staging abi user verification tools/krn1 .cargo -type d \( -name __pycache__ -o -name target -o -name corpus -o -name artifacts \) -prune -o -type f -print0 | sort -z | xargs -0 sha256sum
     sha256sum Cargo.toml Cargo.lock rust-toolchain.toml \
       kernel/build.rs kernel/production-features.txt kernel/src/production.rs \
       kernel/demo-path-classification.txt scripts/check-production-feature-isolation.py \
-      scripts/check-issue19-demo-paths.py
+      scripts/check-issue19-demo-paths.py scripts/check-production-symbols.py
     # The public code-only export intentionally omits planning documents and checks.
     # Hash and run those inputs only when the private planning tree is present.
     planning_inputs=(
@@ -53,6 +53,7 @@ rm -f "$run/PASS"
         python3 scripts/check-milestone-dag.py
     fi
     cargo test --locked -p jasper-lifecycle-model
+    cargo test --locked -p jasper-lifecycle-staging
     cargo test --manifest-path verification/toolbox/Cargo.toml --locked
     bash verification/toolbox/run-negative-transfer.sh
     bash scripts/abi-freeze.sh --check-reservations
