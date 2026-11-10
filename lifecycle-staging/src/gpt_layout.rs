@@ -19,6 +19,7 @@ use gpt::{GptConfig, GptError};
 use jasper_lifecycle_model::layout::{LayoutError, P0Layout, PartitionRole, SECTOR_BYTES};
 use rustix::fs::{seek as sparse_seek, SeekFrom as SparseSeekFrom};
 use rustix::io::Errno;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 const DISK_GUID: Uuid = uuid::uuid!("4a617370-6572-4f53-9000-000000000000");
@@ -125,6 +126,20 @@ pub struct Ext4Receipt {
     pub volume_label: String,
 }
 
+/// 已安装 UEFI 启动文件的 ESP。
+/// ESP containing installed UEFI boot files.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EspInstallReceipt {
+    /// UEFI 启动器字节数。UEFI bootloader byte count.
+    pub bootloader_bytes: u64,
+    /// 内核字节数。Kernel byte count.
+    pub kernel_bytes: u64,
+    /// 复制的文件数。Copied file count.
+    pub files: usize,
+    /// 复制的目录数。Copied directory count.
+    pub directories: usize,
+}
+
 /// 在不存在的新路径上创建稀疏 P0 GPT 映像并立即回读验证。
 /// Creates a sparse P0 GPT image at a fresh path and verifies it by reopening.
 pub fn create_p0_gpt(path: &Path, total_bytes: u64) -> Result<GptImageReceipt, GptImageError> {
@@ -212,6 +227,51 @@ pub fn format_esp_fat32(path: &Path, total_bytes: u64) -> Result<EspReceipt, Gpt
     filesystem.stats()?;
     filesystem.unmount()?;
     Ok(receipt)
+}
+
+/// 把成熟 bootloader 生成的 FAT 分区文件递归安装到 P0 ESP，并逐文件复核摘要。
+/// Recursively installs files from a mature bootloader-generated FAT partition into the P0 ESP
+/// and verifies every copied file by digest.
+pub fn install_uefi_esp(
+    path: &Path,
+    total_bytes: u64,
+    source_fat: &Path,
+) -> Result<EspInstallReceipt, GptImageError> {
+    let gpt = verify_p0_gpt(path, total_bytes)?;
+    let layout = P0Layout::new(gpt.total_sectors)?;
+    let esp = layout.partition(PartitionRole::Esp);
+    let source_file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(source_fat)
+        .map_err(GptImageError::Fat)?;
+    let source_fs = fatfs::FileSystem::new(source_file, fatfs::FsOptions::new())?;
+    let target_file = open_image_rw(path)?;
+    let target_slice = PartitionSlice::new(
+        target_file,
+        esp.start_lba * SECTOR_BYTES,
+        esp.sectors * SECTOR_BYTES,
+    )?;
+    let target_fs = fatfs::FileSystem::new(target_slice, fatfs::FsOptions::new())?;
+    if target_fs.root_dir().iter().next().is_some() {
+        return Err(GptImageError::Tool(
+            "target ESP is not empty; refusing to merge boot files".into(),
+        ));
+    }
+    let mut stats = CopyStats::default();
+    copy_fat_tree(&source_fs.root_dir(), &target_fs.root_dir(), &mut stats)?;
+    target_fs.unmount()?;
+    normalize_fat32_partition(path, esp)?;
+    verify_uefi_esp_contents(path, total_bytes, &source_fs.root_dir(), esp)?;
+    let source_root = source_fs.root_dir();
+    let bootloader_bytes = file_size(&source_root, "efi/boot/bootx64.efi")?;
+    let kernel_bytes = file_size(&source_root, "kernel-x86_64")?;
+    Ok(EspInstallReceipt {
+        bootloader_bytes,
+        kernel_bytes,
+        files: stats.files,
+        directories: stats.directories,
+    })
 }
 
 /// 使用 e2fsprogs `mkfs.ext4` 创建 A/B 系统槽和共享 Data 文件系统。
@@ -413,12 +473,305 @@ fn open_image_rw(path: &Path) -> Result<fs::File, GptImageError> {
         .map_err(GptImageError::Fat)
 }
 
+fn verify_uefi_esp_contents(
+    image: &Path,
+    total_bytes: u64,
+    expected_root: &fatfs::Dir<fs::File>,
+    esp: jasper_lifecycle_model::layout::Partition,
+) -> Result<(), GptImageError> {
+    verify_p0_gpt(image, total_bytes)?;
+    let file = open_image_rw(image)?;
+    let slice = PartitionSlice::new(
+        file,
+        esp.start_lba * SECTOR_BYTES,
+        esp.sectors * SECTOR_BYTES,
+    )?;
+    let filesystem = fatfs::FileSystem::new(slice, fatfs::FsOptions::new())?;
+    let root = filesystem.root_dir();
+    for path in [
+        "efi/boot/bootx64.efi",
+        "kernel-x86_64",
+        "boot.json",
+        "ramdisk",
+    ] {
+        let source = expected_root.open_file(path);
+        let target = root.open_file(path);
+        match (source, target) {
+            (Ok(mut source), Ok(mut target)) => {
+                if digest_file(&mut source)? != digest_file(&mut target)? {
+                    return Err(GptImageError::Tool(format!(
+                        "installed ESP file digest mismatch: {path}"
+                    )));
+                }
+            }
+            (Err(_), Err(error)) if error.kind() == io::ErrorKind::NotFound => {}
+            (Ok(_), Err(_)) => {
+                return Err(GptImageError::Tool(format!(
+                    "installed ESP is missing {path}"
+                )))
+            }
+            (Err(_), Ok(_)) => {
+                return Err(GptImageError::Tool(format!(
+                    "installed ESP contains unexpected {path}"
+                )))
+            }
+            (Err(_), Err(error)) => return Err(GptImageError::Fat(error)),
+        }
+    }
+    drop(root);
+    filesystem.unmount()?;
+    Ok(())
+}
+
+fn normalize_fat32_partition(
+    image: &Path,
+    esp: jasper_lifecycle_model::layout::Partition,
+) -> Result<(), GptImageError> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let temporary = std::env::temp_dir().join(format!(
+        "jasper-esp-normalize-{}-{nanos}.img",
+        std::process::id()
+    ));
+    let extract = Command::new("dd")
+        .args([
+            format!("if={}", image.display()),
+            format!("of={}", temporary.display()),
+            "bs=512".into(),
+            format!("skip={}", esp.start_lba),
+            format!("count={}", esp.sectors),
+            "conv=sparse".into(),
+            "status=none".into(),
+        ])
+        .output()
+        .map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            GptImageError::Tool(format!("dd extraction failed: {error}"))
+        })?;
+    if !extract.status.success() {
+        let _ = fs::remove_file(&temporary);
+        return Err(GptImageError::Tool(format!(
+            "dd extraction failed: {}",
+            String::from_utf8_lossy(&extract.stderr).trim()
+        )));
+    }
+    let result = (|| {
+        let mut clean = false;
+        for _ in 0..3 {
+            let repair = Command::new("fsck.fat")
+                .args(["-a", "-w"])
+                .arg(&temporary)
+                .output()
+                .map_err(|error| GptImageError::Tool(format!("fsck.fat repair failed: {error}")))?;
+            if repair.status.code().is_none() {
+                return Err(GptImageError::Tool(
+                    "fsck.fat repair terminated by signal".into(),
+                ));
+            }
+            let check = Command::new("fsck.fat")
+                .args(["-n", "-v", "-l"])
+                .arg(&temporary)
+                .output()
+                .map_err(|error| GptImageError::Tool(format!("fsck.fat check failed: {error}")))?;
+            let text = String::from_utf8_lossy(&check.stdout);
+            clean = ![
+                "Expected a valid",
+                "Bad short file name",
+                "Renamed to",
+                "share clusters",
+                "Start does point",
+                "Deleting ",
+            ]
+            .iter()
+            .any(|marker| text.contains(marker));
+            if clean {
+                break;
+            }
+        }
+        if !clean {
+            return Err(GptImageError::Tool("fsck.fat did not normalize ESP".into()));
+        }
+        let restore = Command::new("dd")
+            .args([
+                format!("if={}", temporary.display()),
+                format!("of={}", image.display()),
+                "bs=512".into(),
+                format!("seek={}", esp.start_lba),
+                "conv=notrunc,sparse".into(),
+                "status=none".into(),
+            ])
+            .output()
+            .map_err(|error| GptImageError::Tool(format!("dd restore failed: {error}")))?;
+        if !restore.status.success() {
+            return Err(GptImageError::Tool(format!(
+                "dd restore failed: {}",
+                String::from_utf8_lossy(&restore.stderr).trim()
+            )));
+        }
+        let file = open_image_rw(image)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(temporary);
+    result
+}
+
+fn file_size(root: &fatfs::Dir<fs::File>, path: &str) -> Result<u64, GptImageError> {
+    let mut file = root.open_file(path)?;
+    Ok(io::copy(&mut file, &mut io::sink())?)
+}
+
+fn digest_file<T: Read + Seek + Write>(file: &mut fatfs::File<'_, T>) -> io::Result<[u8; 32]> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(hasher.finalize().into())
+}
+
+#[derive(Default)]
+struct CopyStats {
+    files: usize,
+    directories: usize,
+}
+
+fn copy_fat_tree(
+    source: &fatfs::Dir<fs::File>,
+    target: &fatfs::Dir<PartitionSlice>,
+    stats: &mut CopyStats,
+) -> Result<(), GptImageError> {
+    for entry in source.iter() {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            continue;
+        }
+        let path = name;
+        if entry.is_dir() {
+            target
+                .create_dir(&path)
+                .map_err(|error| GptImageError::Tool(format!("create ESP dir {path}: {error}")))?;
+            stats.directories += 1;
+            let source_dir = source.open_dir(&path).map_err(|error| {
+                GptImageError::Tool(format!("open source FAT dir {path}: {error}"))
+            })?;
+            let target_dir = target.open_dir(&path).map_err(|error| {
+                GptImageError::Tool(format!("open target ESP dir {path}: {error}"))
+            })?;
+            copy_fat_tree(&source_dir, &target_dir, stats)?;
+        } else if entry.is_file() {
+            let mut source_file = source.open_file(&path).map_err(|error| {
+                GptImageError::Tool(format!("open source FAT file {path}: {error}"))
+            })?;
+            let mut target_file = target.create_file(&path).map_err(|error| {
+                GptImageError::Tool(format!("create target ESP file {path}: {error}"))
+            })?;
+            target_file.truncate()?;
+            io::copy(&mut source_file, &mut target_file)?;
+            target_file.flush()?;
+            stats.files += 1;
+        } else {
+            return Err(GptImageError::Tool(format!(
+                "unsupported FAT entry type: {path}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn open_image_ro(path: &Path) -> Result<fs::File, GptImageError> {
     OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
         .map_err(GptImageError::Fat)
+}
+
+fn ensure_partition_range_zero(
+    path: &Path,
+    partition: jasper_lifecycle_model::layout::Partition,
+) -> Result<(), GptImageError> {
+    let mut file = open_image_ro(path)?;
+    let offset = partition
+        .start_lba
+        .checked_mul(SECTOR_BYTES)
+        .ok_or_else(|| GptImageError::Tool("partition offset overflow".into()))?;
+    let length = partition
+        .sectors
+        .checked_mul(SECTOR_BYTES)
+        .ok_or_else(|| GptImageError::Tool("partition length overflow".into()))?;
+    let end = offset
+        .checked_add(length)
+        .ok_or_else(|| GptImageError::Tool("partition end overflow".into()))?;
+    let mut cursor = 0u64;
+    loop {
+        let data = match sparse_seek(&file, SparseSeekFrom::Data(cursor)) {
+            Ok(position) => position,
+            Err(Errno::NXIO) => return Ok(()),
+            Err(Errno::NOTSUP) => {
+                return ensure_byte_range_zero(&mut file, offset, length, partition.role)
+            }
+            Err(error) => return Err(GptImageError::Tool(format!("SEEK_DATA failed: {error:?}"))),
+        };
+        if data >= end {
+            return Ok(());
+        }
+        let hole = sparse_seek(&file, SparseSeekFrom::Hole(data)).unwrap_or(end);
+        let start = data.max(offset);
+        let stop = hole.min(end);
+        if start < stop {
+            ensure_byte_range_zero(&mut file, start, stop - start, partition.role)?;
+        }
+        cursor = hole.max(data.saturating_add(1));
+    }
+}
+
+fn ensure_byte_range_zero(
+    file: &mut fs::File,
+    offset: u64,
+    length: u64,
+    role: PartitionRole,
+) -> Result<(), GptImageError> {
+    file.seek(SeekFrom::Start(offset))?;
+    let mut remaining = length;
+    let mut buffer = vec![0u8; 4 * 1024 * 1024];
+    while remaining != 0 {
+        let count = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        file.read_exact(&mut buffer[..count])?;
+        if buffer[..count].iter().any(|byte| *byte != 0) {
+            return Err(GptImageError::NonEmptyPartition(role));
+        }
+        remaining -= count as u64;
+    }
+    Ok(())
+}
+
+fn verify_ext4_magic(
+    path: &Path,
+    partition: jasper_lifecycle_model::layout::Partition,
+) -> Result<(), GptImageError> {
+    let mut file = open_image_ro(path)?;
+    let superblock = partition
+        .start_lba
+        .checked_mul(SECTOR_BYTES)
+        .and_then(|offset| offset.checked_add(1024 + 56))
+        .ok_or_else(|| GptImageError::Tool("ext4 superblock offset overflow".into()))?;
+    file.seek(SeekFrom::Start(superblock))?;
+    let mut magic = [0u8; 2];
+    file.read_exact(&mut magic)?;
+    if magic != [0x53, 0xef] {
+        return Err(GptImageError::Tool(format!(
+            "ext4 superblock missing for {:?}",
+            partition.role
+        )));
+    }
+    Ok(())
 }
 
 struct PartitionSlice {
@@ -501,87 +854,6 @@ impl Seek for PartitionSlice {
         self.position = target;
         Ok(target)
     }
-}
-
-fn ensure_partition_range_zero(
-    path: &Path,
-    partition: jasper_lifecycle_model::layout::Partition,
-) -> Result<(), GptImageError> {
-    let mut file = open_image_ro(path)?;
-    let offset = partition
-        .start_lba
-        .checked_mul(SECTOR_BYTES)
-        .ok_or_else(|| GptImageError::Tool("partition offset overflow".into()))?;
-    let length = partition
-        .sectors
-        .checked_mul(SECTOR_BYTES)
-        .ok_or_else(|| GptImageError::Tool("partition length overflow".into()))?;
-    let end = offset
-        .checked_add(length)
-        .ok_or_else(|| GptImageError::Tool("partition end overflow".into()))?;
-    let mut cursor = 0u64;
-    loop {
-        let data = match sparse_seek(&file, SparseSeekFrom::Data(cursor)) {
-            Ok(position) => position,
-            Err(Errno::NXIO) => return Ok(()),
-            Err(Errno::NOTSUP) => {
-                return ensure_byte_range_zero(&mut file, offset, length, partition.role)
-            }
-            Err(error) => return Err(GptImageError::Tool(format!("SEEK_DATA failed: {error:?}"))),
-        };
-        if data >= end {
-            return Ok(());
-        }
-        let hole = sparse_seek(&file, SparseSeekFrom::Hole(data)).unwrap_or(end);
-        let start = data.max(offset);
-        let stop = hole.min(end);
-        if start < stop {
-            ensure_byte_range_zero(&mut file, start, stop - start, partition.role)?;
-        }
-        cursor = hole.max(data.saturating_add(1));
-    }
-}
-
-fn ensure_byte_range_zero(
-    file: &mut fs::File,
-    offset: u64,
-    length: u64,
-    role: PartitionRole,
-) -> Result<(), GptImageError> {
-    file.seek(SeekFrom::Start(offset))?;
-    let mut remaining = length;
-    let mut buffer = vec![0u8; 4 * 1024 * 1024];
-    while remaining != 0 {
-        let count = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
-        file.read_exact(&mut buffer[..count])?;
-        if buffer[..count].iter().any(|byte| *byte != 0) {
-            return Err(GptImageError::NonEmptyPartition(role));
-        }
-        remaining -= count as u64;
-    }
-    Ok(())
-}
-
-fn verify_ext4_magic(
-    path: &Path,
-    partition: jasper_lifecycle_model::layout::Partition,
-) -> Result<(), GptImageError> {
-    let mut file = open_image_ro(path)?;
-    let superblock = partition
-        .start_lba
-        .checked_mul(SECTOR_BYTES)
-        .and_then(|offset| offset.checked_add(1024 + 56))
-        .ok_or_else(|| GptImageError::Tool("ext4 superblock offset overflow".into()))?;
-    file.seek(SeekFrom::Start(superblock))?;
-    let mut magic = [0u8; 2];
-    file.read_exact(&mut magic)?;
-    if magic != [0x53, 0xef] {
-        return Err(GptImageError::Tool(format!(
-            "ext4 superblock missing for {:?}",
-            partition.role
-        )));
-    }
-    Ok(())
 }
 
 fn role_for_id(id: u32) -> Option<PartitionRole> {
@@ -703,6 +975,57 @@ mod tests {
             Err(GptImageError::NonEmptyPartition(PartitionRole::SystemA))
         ));
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn installs_bootloader_fat_tree_into_empty_esp() {
+        let source_path = temp_path("esp-source");
+        let image_path = temp_path("esp-image");
+        let bytes = 36 * 1024 * 1024 * 1024u64;
+        create_p0_gpt(&image_path, bytes).unwrap();
+        format_esp_fat32(&image_path, bytes).unwrap();
+
+        let source_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&source_path)
+            .unwrap();
+        source_file.set_len(64 * 1024 * 1024).unwrap();
+        fatfs::format_volume(
+            source_file,
+            fatfs::FormatVolumeOptions::new().fat_type(fatfs::FatType::Fat32),
+        )
+        .unwrap();
+        let source_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&source_path)
+            .unwrap();
+        let source = fatfs::FileSystem::new(source_file, fatfs::FsOptions::new()).unwrap();
+        source.root_dir().create_dir("efi").unwrap();
+        source.root_dir().create_dir("efi/boot").unwrap();
+        source
+            .root_dir()
+            .create_file("efi/boot/bootx64.efi")
+            .unwrap()
+            .write_all(b"uefi-bootloader")
+            .unwrap();
+        source
+            .root_dir()
+            .create_file("kernel-x86_64")
+            .unwrap()
+            .write_all(b"kernel-image")
+            .unwrap();
+        source.unmount().unwrap();
+
+        let receipt = install_uefi_esp(&image_path, bytes, &source_path).unwrap();
+        assert_eq!(receipt.bootloader_bytes, 15);
+        assert_eq!(receipt.kernel_bytes, 12);
+        assert_eq!(receipt.files, 2);
+        assert_eq!(receipt.directories, 2);
+        let _ = fs::remove_file(source_path);
+        let _ = fs::remove_file(image_path);
     }
 
     #[test]

@@ -6,6 +6,8 @@
 //       由内核 ELF 生成可引导的 BIOS 磁盘镜像（x86_64）。Build a bootable BIOS disk image.
 //   xtask uefi <kernel-elf> <out-image>
 //       Build an OVMF/UEFI GPT boot image; the default command remains BIOS.
+//   xtask uefi-esp <kernel-elf> <out-fat-image>
+//       Build the bootable UEFI FAT partition without an outer MBR/GPT.
 //   xtask bootcap <in-elf> <out-elf> [objects=N] [tasks=N] [rt=N] [record=corrupt]
 //       改写内核镜像里的启动容量记录（不重新编译即可以不同容量启动）；未给出的项不覆盖。
 //       只检查语法，不检查取值范围：越界值由内核在启动期拒绝，这正是要验收的行为。
@@ -33,16 +35,30 @@ fn main() {
         }
         return;
     }
+    if args.first().map(String::as_str) == Some("uefi-esp") {
+        let kernel = args.get(1).expect("kernel elf path");
+        let out = args.get(2).expect("out FAT image path");
+        bootloader::DiskImageBuilder::new(std::path::PathBuf::from(kernel))
+            .create_uefi_fat_partition(std::path::Path::new(out))
+            .expect("UEFI FAT partition");
+        let size = std::fs::metadata(out)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        println!("wrote {out} ({size} bytes)");
+        return;
+    }
     let uefi = args.first().map(String::as_str) == Some("uefi");
     let args = if uefi { &args[1..] } else { &args[..] };
     let kernel = args.first().expect("kernel elf path");
     let out = args.get(1).expect("out image path");
     if uefi {
         bootloader::UefiBoot::new(std::path::Path::new(kernel))
-            .create_disk_image(std::path::Path::new(out)).expect("UEFI image");
+            .create_disk_image(std::path::Path::new(out))
+            .expect("UEFI image");
     } else {
         bootloader::BiosBoot::new(std::path::Path::new(kernel))
-            .create_disk_image(std::path::Path::new(out)).expect("BIOS image");
+            .create_disk_image(std::path::Path::new(out))
+            .expect("BIOS image");
     }
     let sz = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
     println!("wrote {out} ({sz} bytes)");
@@ -50,39 +66,59 @@ fn main() {
 
 /// 在镜像里定位启动容量记录：标记必须恰好出现一次（出现多次就无法确定哪一份是内核真正读取的那份）。
 fn locate(image: &[u8]) -> Result<usize, String> {
-    let hits: Vec<usize> = image.windows(RECORD_MAGIC.len()).enumerate().filter(|(_, w)| *w == RECORD_MAGIC).map(|(i, _)| i).collect();
+    let hits: Vec<usize> = image
+        .windows(RECORD_MAGIC.len())
+        .enumerate()
+        .filter(|(_, w)| *w == RECORD_MAGIC)
+        .map(|(i, _)| i)
+        .collect();
     match hits.as_slice() {
         [one] if one + RECORD_LEN <= image.len() => Ok(*one),
         [] => Err("镜像里没有启动容量记录（标记未找到）".into()),
         [_] => Err("启动容量记录被截断".into()),
-        many => Err(format!("启动容量记录标记出现了 {} 次，无法确定位置", many.len())),
+        many => Err(format!(
+            "启动容量记录标记出现了 {} 次，无法确定位置",
+            many.len()
+        )),
     }
 }
 
 fn bootcap(args: &[String]) -> Result<(), String> {
     let (input, output) = match args {
         [i, o, ..] => (i, o),
-        _ => return Err("用法：xtask bootcap <in-elf> <out-elf> [objects=N] [tasks=N] [rt=N] [record=corrupt]".into()),
+        _ => return Err(
+            "用法：xtask bootcap <in-elf> <out-elf> [objects=N] [tasks=N] [rt=N] [record=corrupt]"
+                .into(),
+        ),
     };
     let mut image = std::fs::read(input).map_err(|e| format!("读取 {input} 失败：{e}"))?;
     let at = locate(&image)?;
     let mut record = [0u8; RECORD_LEN];
     record.copy_from_slice(&image[at..at + RECORD_LEN]);
-    let mut ov: Overrides = capacity::parse(&record).map_err(|e| format!("镜像里现有的记录已损坏：{}", e.as_str()))?;
+    let mut ov: Overrides =
+        capacity::parse(&record).map_err(|e| format!("镜像里现有的记录已损坏：{}", e.as_str()))?;
     let mut corrupt = false;
     for kv in &args[2..] {
-        let (k, v) = kv.split_once('=').ok_or_else(|| format!("参数应为 名=值：{kv}"))?;
+        let (k, v) = kv
+            .split_once('=')
+            .ok_or_else(|| format!("参数应为 名=值：{kv}"))?;
         if k == "record" && v == "corrupt" {
             corrupt = true;
             continue;
         }
-        let n: u32 = v.parse().map_err(|_| format!("{k} 的取值不是十进制整数：{v}"))?;
+        let n: u32 = v
+            .parse()
+            .map_err(|_| format!("{k} 的取值不是十进制整数：{v}"))?;
         let n = if n == 0 { None } else { Some(n) };
         match k {
             "objects" => ov.objects = n,
             "tasks" => ov.tasks = n,
             "rt" => ov.rt = n,
-            _ => return Err(format!("未知参数：{k}（可用：objects / tasks / rt / record）")),
+            _ => {
+                return Err(format!(
+                    "未知参数：{k}（可用：objects / tasks / rt / record）"
+                ))
+            }
         }
     }
     let mut new = capacity::encode(ov);
@@ -113,14 +149,17 @@ fn repo_root() -> Result<std::path::PathBuf, String> {
 /// 读取 `abi/abi-version.txt` 的当前版本。
 fn native_version(root: &std::path::Path) -> Result<kernel_core::abi_version::AbiVersion, String> {
     let path = root.join("abi/abi-version.txt");
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
-    kernel_core::abi_version::parse_source(&text).map_err(|e| format!("解析 {} 失败：{e:?}", path.display()))
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+    kernel_core::abi_version::parse_source(&text)
+        .map_err(|e| format!("解析 {} 失败：{e:?}", path.display()))
 }
 
 /// 从当前登记表与源码常量渲染规范快照。
 fn render_current(root: &std::path::Path) -> Result<String, String> {
     let path = root.join("abi/system-ids.txt");
-    let registry = std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+    let registry =
+        std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
     let mut output = String::new();
     kernel_core::abi_contract::render_current(&registry, &mut output)
         .map_err(|e| format!("渲染 ABI 契约失败：{e:?}"))?;
@@ -128,9 +167,12 @@ fn render_current(root: &std::path::Path) -> Result<String, String> {
 }
 
 /// 读取 `<root>/abi/snapshots/*.contract`，按路径稳定排序。
-fn read_snapshots(root: &std::path::Path) -> Result<Vec<(kernel_core::abi_version::AbiVersion, String)>, String> {
+fn read_snapshots(
+    root: &std::path::Path,
+) -> Result<Vec<(kernel_core::abi_version::AbiVersion, String)>, String> {
     let dir = root.join("abi/snapshots");
-    let entries = std::fs::read_dir(&dir).map_err(|e| format!("读取 {} 失败：{e}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(&dir).map_err(|e| format!("读取 {} 失败：{e}", dir.display()))?;
     let mut paths: Vec<_> = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -139,14 +181,22 @@ fn read_snapshots(root: &std::path::Path) -> Result<Vec<(kernel_core::abi_versio
     paths.sort();
     let mut snapshots = Vec::new();
     for path in paths {
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
         let version = kernel_core::abi_contract::snapshot_version(&text)
             .map_err(|e| format!("{} 的世代头不合法：{e:?}", path.display()))?;
-        let expected = format!("{}.{}.{}.contract", version.major, version.minor, version.patch);
+        let expected = format!(
+            "{}.{}.{}.contract",
+            version.major, version.minor, version.patch
+        );
         if path.file_name().and_then(|s| s.to_str()) != Some(expected.as_str()) {
             return Err(format!(
                 "{} 的 `abi=` 是 {}.{}.{}，文件名必须是 {}",
-                path.display(), version.major, version.minor, version.patch, expected
+                path.display(),
+                version.major,
+                version.minor,
+                version.patch,
+                expected
             ));
         }
         snapshots.push((version, text));
@@ -158,7 +208,10 @@ fn check_snapshots(root: &std::path::Path, current: &str) -> Result<(), String> 
     let owned = read_snapshots(root)?;
     let refs: Vec<kernel_core::abi_contract::Snapshot<'_>> = owned
         .iter()
-        .map(|(version, text)| kernel_core::abi_contract::Snapshot { version: *version, text })
+        .map(|(version, text)| kernel_core::abi_contract::Snapshot {
+            version: *version,
+            text,
+        })
         .collect();
     kernel_core::abi_contract::check_snapshot_set(current, &refs)
         .map_err(|e| format!("ABI 契约门槛失败：{e:?}"))
@@ -166,15 +219,19 @@ fn check_snapshots(root: &std::path::Path, current: &str) -> Result<(), String> 
 
 /// `abi-contract generate|check`：快照一旦存在就不可覆盖；版本变化必须新增文件。
 fn abi_contract(args: &[String]) -> Result<(), String> {
-    let action = args.first().map(String::as_str).ok_or_else(|| {
-        "用法：xtask abi-contract generate|check".to_string()
-    })?;
+    let action = args
+        .first()
+        .map(String::as_str)
+        .ok_or_else(|| "用法：xtask abi-contract generate|check".to_string())?;
     let root = repo_root()?;
     let current = render_current(&root)?;
     let version = native_version(&root)?;
     let dir = root.join("abi/snapshots");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建 {} 失败：{e}", dir.display()))?;
-    let path = dir.join(format!("{}.{}.{}.contract", version.major, version.minor, version.patch));
+    let path = dir.join(format!(
+        "{}.{}.{}.contract",
+        version.major, version.minor, version.patch
+    ));
     match action {
         "generate" => {
             match std::fs::read_to_string(&path) {
@@ -199,6 +256,9 @@ fn abi_contract(args: &[String]) -> Result<(), String> {
         "check" => check_snapshots(&root, &current)?,
         _ => return Err("用法：xtask abi-contract generate|check".to_string()),
     }
-    println!("ABI contract check: PASS ({}.{}.{})", version.major, version.minor, version.patch);
+    println!(
+        "ABI contract check: PASS ({}.{}.{})",
+        version.major, version.minor, version.patch
+    );
     Ok(())
 }
