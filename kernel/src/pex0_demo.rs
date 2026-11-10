@@ -42,9 +42,18 @@ struct Profile {
 }
 
 const PROFILES: [Profile; 3] = [
-    Profile { name: "low", processes: 2 },
-    Profile { name: "medium", processes: 4 },
-    Profile { name: "high", processes: 8 },
+    Profile {
+        name: "low",
+        processes: 2,
+    },
+    Profile {
+        name: "medium",
+        processes: 4,
+    },
+    Profile {
+        name: "high",
+        processes: 8,
+    },
 ];
 
 fn check(ok: bool, what: &str) {
@@ -217,8 +226,50 @@ fn print_profile(
     let p999_ns = hrtime::counts_to_ns(p999).unwrap_or(0);
     let after = baseline();
     let resources = after == before;
-    check(complete, "PEX-0 parallel workers did not complete every operation");
-    check(resources, "PEX-0 parallel workload did not return resources to baseline");
+    check(
+        complete,
+        "PEX-0 parallel workers did not complete every operation",
+    );
+    check(
+        resources,
+        "PEX-0 parallel workload did not return resources to baseline",
+    );
+    #[cfg(feature = "pex2-verify")]
+    {
+        kprintln!(
+            "[JSR-PEX2] category=independent-ring density={} processes={} rings={} workers={} ops={} throughput_ops_s={} p50_ns={} p99_ns={} p999_ns={} max={} complete={} resources={}",
+            profile.name,
+            profile.processes,
+            workers,
+            workers,
+            total_ops,
+            throughput,
+            p50_ns,
+            p99_ns,
+            p999_ns,
+            max,
+            complete,
+            resources
+        );
+        kprintln!(
+            "[JSR-PEX2] category=cross-process density={} processes={} rings={} ops={} throughput_ops_s={} p50_ns={} p99_ns={} p999_ns={} max={} sched_contended={} sched_spins={} object_contended={} object_spins={} complete={} resources={}",
+            profile.name,
+            profile.processes,
+            workers,
+            total_ops,
+            throughput,
+            p50_ns,
+            p99_ns,
+            p999_ns,
+            max,
+            sched_contended,
+            sched_spins,
+            object_contended,
+            object_spins,
+            complete,
+            resources
+        );
+    }
     kprintln!(
         "[JSR-PEX0-PAR] density={} vcpus={} processes={} rings={} workers={} ops={} window_cycles={} window_ns={} throughput_ops_s={} per_cpu_ops_s={} p50={} p99={} p999={} max={} p50_ns={} p99_ns={} p999_ns={} sched_contended={} sched_spins={} object_contended={} object_spins={} complete={} resources={}",
         profile.name,
@@ -293,5 +344,9 @@ pub fn run() {
     for (index, profile) in PROFILES.into_iter().enumerate() {
         run_profile(profile, index as u64 + 1);
     }
-    kprintln!("[JSR-PEX0] checks={} failed={}", CHECKS.load(Ordering::Relaxed), failed());
+    kprintln!(
+        "[JSR-PEX0] checks={} failed={}",
+        CHECKS.load(Ordering::Relaxed),
+        failed()
+    );
 }

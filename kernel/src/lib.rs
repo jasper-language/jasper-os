@@ -122,7 +122,7 @@ pub mod hwv5_vmm_demo;
 pub mod fs0_demo;
 #[cfg(all(target_arch = "x86_64", feature = "fs1-ext4-verify"))]
 pub mod fs1_demo;
-#[cfg(feature = "pex0-verify")]
+#[cfg(any(feature = "pex0-verify", feature = "pex2-verify"))]
 pub mod pex0_demo;
 pub mod balance_demo;
 pub mod pi_demo;
