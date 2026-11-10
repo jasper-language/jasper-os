@@ -5,16 +5,9 @@
 //! 现在系统里还没有常驻服务，第一个用户程序是内嵌的 `user-hello`，它证明用户运行时真的可用。
 //! Compiled only with the `production` feature; it contains no exercises. There are no long-lived
 //! services yet, so the first user program is the embedded `user-hello`.
-
-#[cfg(any(
-    feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
-    feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
-    feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "s2-fuzz", feature = "krn1-soak",
-    feature = "fault-inject", feature = "boot-stage-rollback-verify",
-    feature = "selftest-inject-failure", feature = "bm1-vm",
-))]
-compile_error!("production 不能和验收或故障注入特性同开");
+//!
+//! `kernel/build.rs` rejects every feature not listed in `kernel/production-features.txt`.
+//! `kernel/build.rs` 会拒绝 `kernel/production-features.txt` 之外的所有特性。
 
 use kernel_core::boot_stage::{CaseSpec, PlanItem, Stage};
 
@@ -49,7 +42,12 @@ pub const PLAN: &[&[Step]] = &[&[
     PlanItem::Stage(Stage::IdleTick),
     PlanItem::Stage(Stage::UserRuntime),
     PlanItem::Case(
-        CaseSpec { name: "first-program", requires: Stage::UserRuntime.bit(), summary: "", timing: false },
+        CaseSpec {
+            name: "first-program",
+            requires: Stage::UserRuntime.bit(),
+            summary: "",
+            timing: false,
+        },
         first_program,
     ),
     PlanItem::Finish(wait_for_services),
@@ -66,7 +64,11 @@ pub fn stop(_status: ExitStatus) -> ! {
 #[cfg(feature = "user-programs")]
 fn first_program(_ctx: &mut BootCtx) {
     let (state, reclaimed) = crate::user_demo::run_first_program();
-    kprintln!("[JSR-PROD] first_program state={:?} reclaimed={}", state, reclaimed);
+    kprintln!(
+        "[JSR-PROD] first_program state={:?} reclaimed={}",
+        state,
+        reclaimed
+    );
     if state != Some(crate::proc::ProcState::Exited { code: 0 }) || !reclaimed {
         kprintln!("[JSR-EXIT] failure first_program");
         stop(ExitStatus::Failure);

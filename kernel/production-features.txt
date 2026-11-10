@@ -1,0 +1,7 @@
+# Features allowed in a production kernel build.
+# 生产内核允许的特性；任何未列出的特性都会由 build.rs 机械拒绝。
+production
+default
+user-programs
+profile-compact
+sched-rr

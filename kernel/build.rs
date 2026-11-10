@@ -16,6 +16,7 @@ use kernel_core::elf::ElfClass;
 
 fn main() {
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("..");
+    enforce_production_feature_isolation(&root);
     let reg_path = root.join("abi/system-ids.txt");
     let lock_path = root.join("abi/system-ids.lock");
     let version_path = root.join("abi/abi-version.txt");
@@ -27,7 +28,8 @@ fn main() {
 
     let reg = std::fs::read_to_string(&reg_path).expect("读取 abi/system-ids.txt 失败");
     let lock = std::fs::read_to_string(&lock_path).expect("读取 abi/system-ids.lock 失败");
-    let version_source = std::fs::read_to_string(&version_path).expect("读取 abi/abi-version.txt 失败");
+    let version_source =
+        std::fs::read_to_string(&version_path).expect("读取 abi/abi-version.txt 失败");
     let native = kernel_core::abi_version::parse_source(&version_source)
         .unwrap_or_else(|e| panic!("abi/abi-version.txt 解析失败：{:?}", e));
     // 两套解析器（kernel-core/build.rs 与 kernel-core::abi_version）必须对同一份真源得到同一结果。
@@ -47,8 +49,16 @@ fn main() {
     out.push_str("// Generated from abi/system-ids.txt by kernel/build.rs. Do not edit.\n\n");
     let result = kernel_core::abi::validate(&reg, |r| {
         let const_name = r.name.to_ascii_uppercase().replace('.', "_");
-        let _ = writeln!(out, "/// `{}`（{}）。\npub const {}: u32 = {};", r.name, r.display_zh, const_name, r.id);
-        let kind = if r.kind == "op" { "AbiKind::Op" } else { "AbiKind::Error" };
+        let _ = writeln!(
+            out,
+            "/// `{}`（{}）。\npub const {}: u32 = {};",
+            r.name, r.display_zh, const_name, r.id
+        );
+        let kind = if r.kind == "op" {
+            "AbiKind::Op"
+        } else {
+            "AbiKind::Error"
+        };
         let effects = match r.effects {
             "none" => "Effects::None",
             "read" => "Effects::Read",
@@ -72,12 +82,18 @@ fn main() {
             panic!("abi/system-ids.txt 第 {} 行缺少英文显示名", line)
         }
         Err(kernel_core::abi::AbiError::BadDisplayEn { line, reason }) => {
-            panic!("abi/system-ids.txt 第 {} 行的英文显示名不合法：{}", line, reason)
+            panic!(
+                "abi/system-ids.txt 第 {} 行的英文显示名不合法：{}",
+                line, reason
+            )
         }
         Err(e) => panic!("abi/system-ids.txt 校验失败：{:?}", e),
     }
     if let Err(e) = kernel_core::abi::check_frozen_generation(&reg, &lock, native) {
-        panic!("已冻结的系统接口或 ABI 世代被破坏（abi/system-ids.lock）：{:?}", e);
+        panic!(
+            "已冻结的系统接口或 ABI 世代被破坏（abi/system-ids.lock）：{:?}",
+            e
+        );
     }
     // 完整契约快照门槛：当前源码必须与当前版本的不可变快照逐行一致；同主版本旧快照
     // 只能被新增条目扩展，Patch 升级则要求契约完全不变。主版本换代必须随新内核提交新快照。
@@ -99,7 +115,10 @@ fn main() {
             .unwrap_or_else(|e| panic!("读取 ABI 快照 {} 失败：{}", path.display(), e));
         let version = kernel_core::abi_contract::snapshot_version(&text)
             .unwrap_or_else(|e| panic!("ABI 快照 {} 的世代头不合法：{:?}", path.display(), e));
-        let expected = format!("{}.{}.{}.contract", version.major, version.minor, version.patch);
+        let expected = format!(
+            "{}.{}.{}.contract",
+            version.major, version.minor, version.patch
+        );
         assert_eq!(
             path.file_name().and_then(|s| s.to_str()),
             Some(expected.as_str()),
@@ -110,9 +129,13 @@ fn main() {
     }
     let snapshot_refs: Vec<kernel_core::abi_contract::Snapshot<'_>> = snapshot_texts
         .iter()
-        .map(|(version, text)| kernel_core::abi_contract::Snapshot { version: *version, text })
+        .map(|(version, text)| kernel_core::abi_contract::Snapshot {
+            version: *version,
+            text,
+        })
         .collect();
-    if let Err(e) = kernel_core::abi_contract::check_snapshot_set(&current_contract, &snapshot_refs) {
+    if let Err(e) = kernel_core::abi_contract::check_snapshot_set(&current_contract, &snapshot_refs)
+    {
         panic!(
             "ABI 契约快照门槛失败：{:?}；契约变化必须提升 abi/abi-version.txt 并新增 abi/snapshots/<Major.Minor.Patch>.contract",
             e
@@ -137,7 +160,11 @@ fn main() {
     out.push_str("];\n");
     out.push_str("\n/// 全部已登记操作构成的权限集合（spawn 的 `known` 与启动自检共用）。\npub const REGISTERED_OPS_SET: kernel_core::syscall_set::SyscallSet = kernel_core::syscall_set::SyscallSet::of(REGISTERED_OPS);\n");
     out.push_str("\n/// 当前登记表中最大的操作 ID。\npub const MAX_REGISTERED_OP_ID: u32 = ");
-    let _ = writeln!(out, "{};", op_ids.iter().map(|(id, _)| *id).max().unwrap_or(0));
+    let _ = writeln!(
+        out,
+        "{};",
+        op_ids.iter().map(|(id, _)| *id).max().unwrap_or(0)
+    );
     out.push_str("\n/// 全部登记条目（按登记表顺序）。\npub static ENTRIES: &[AbiEntry] = &[\n");
     out.push_str(&entries);
     out.push_str("];\n");
@@ -170,16 +197,27 @@ fn main() {
                 panic!("hwv4-linux 需要环境变量 {source} 指向真实的 Linux boot artifact")
             });
             let path = PathBuf::from(path);
-            assert!(path.is_file(), "{} 指向的文件不存在：{}", source, path.display());
+            assert!(
+                path.is_file(),
+                "{} 指向的文件不存在：{}",
+                source,
+                path.display()
+            );
             println!("cargo:rerun-if-changed={}", path.display());
             println!("cargo:rustc-env={target}={}", path.display());
         }
     }
     // AArch64 / LoongArch64 / RISC-V 没有本项目使用的引导器：用本仓库的链接脚本固定装载地址与段布局。
     let script = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
-        Ok("aarch64") if std::env::var_os("CARGO_FEATURE_PIXEL6A_PE").is_some()
-            || std::env::var_os("CARGO_FEATURE_PIXEL6A_FULL").is_some() => Some("kernel/link-pixel6a-pe.ld"),
-        Ok("aarch64") if std::env::var_os("CARGO_FEATURE_PIXEL6A_SMOKE").is_some() => Some("kernel/link-pixel6a.ld"),
+        Ok("aarch64")
+            if std::env::var_os("CARGO_FEATURE_PIXEL6A_PE").is_some()
+                || std::env::var_os("CARGO_FEATURE_PIXEL6A_FULL").is_some() =>
+        {
+            Some("kernel/link-pixel6a-pe.ld")
+        }
+        Ok("aarch64") if std::env::var_os("CARGO_FEATURE_PIXEL6A_SMOKE").is_some() => {
+            Some("kernel/link-pixel6a.ld")
+        }
         Ok("aarch64") => Some("kernel/link-aarch64.ld"),
         Ok("loongarch64") => Some("kernel/link-loongarch64.ld"),
         Ok("riscv64") => Some("kernel/link-riscv64.ld"),
@@ -190,6 +228,50 @@ fn main() {
         let script = root.join(script);
         println!("cargo:rerun-if-changed={}", script.display());
         println!("cargo:rustc-link-arg-bins=-T{}", script.display());
+    }
+}
+
+/// 生产构建只能启用显式声明的生产特性。
+/// A production build may enable only features explicitly listed for production.
+///
+/// 机制默认拒绝所有未知特性，因此新增验收、故障注入、硬件探针或诊断特性不需要维护
+/// 一份容易漂移的 compile_error 清单。非生产构建不受影响。
+/// Unknown features fail by default, so new verification, fault, probe, or diagnostic features
+/// need no brittle compile_error list. Non-production builds are unaffected.
+fn enforce_production_feature_isolation(root: &std::path::Path) {
+    if std::env::var_os("CARGO_FEATURE_PRODUCTION").is_none() {
+        return;
+    }
+    let path = root.join("kernel/production-features.txt");
+    println!("cargo:rerun-if-changed={}", path.display());
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("读取生产特性清单 {} 失败：{error}", path.display()));
+    let allowed: std::collections::BTreeSet<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            format!(
+                "CARGO_FEATURE_{}",
+                line.replace('-', "_").to_ascii_uppercase()
+            )
+        })
+        .collect();
+    assert!(
+        allowed.contains("CARGO_FEATURE_PRODUCTION"),
+        "kernel/production-features.txt 必须包含 production"
+    );
+    let mut forbidden: Vec<String> = std::env::vars_os()
+        .filter_map(|(name, _)| name.into_string().ok())
+        .filter(|name| name.starts_with("CARGO_FEATURE_"))
+        .filter(|name| !allowed.contains(name))
+        .collect();
+    if !forbidden.is_empty() {
+        forbidden.sort();
+        panic!(
+            "production feature isolation: forbidden features enabled: {}",
+            forbidden.join(", ")
+        );
     }
 }
 
@@ -219,11 +301,7 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
         all_programs.push(("user/devprobe", "user-devprobe", "JSR_USER_DEVPROBE"));
         all_programs.push(("user/irqprobe", "user-irqprobe", "JSR_USER_IRQPROBE"));
         all_programs.push(("user/vmm", "user-vmm", "JSR_USER_VMM"));
-        all_programs.push((
-            "user/linuxprobe",
-            "user-linuxprobe",
-            "JSR_USER_LINUXPROBE",
-        ));
+        all_programs.push(("user/linuxprobe", "user-linuxprobe", "JSR_USER_LINUXPROBE"));
     }
     let jasodemo_only = std::env::var_os("CARGO_FEATURE_JASO1_VERIFY").is_some();
     let programs: Vec<(&str, &str, &str)> = if jasodemo_only {
@@ -237,13 +315,31 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
     };
     for (dir, _, _) in &programs {
         for f in ["src/main.rs", "Cargo.toml", "link.ld", "build.rs"] {
-            println!("cargo:rerun-if-changed={}", root.join(dir).join(f).display());
+            println!(
+                "cargo:rerun-if-changed={}",
+                root.join(dir).join(f).display()
+            );
         }
     }
     // 用户程序依赖的库（运行时、`.jaso` 格式）与内嵌的模块：任何一个源文件变化都要重建
-    for lib in ["user/rt", "jaso", "modules/demo", "modules/support", "modules/sha2", "modules/crc", "modules/deflate", "modules/net", "modules/probe", "modules/l1demo", "user/modbox"] {
+    for lib in [
+        "user/rt",
+        "jaso",
+        "modules/demo",
+        "modules/support",
+        "modules/sha2",
+        "modules/crc",
+        "modules/deflate",
+        "modules/net",
+        "modules/probe",
+        "modules/l1demo",
+        "user/modbox",
+    ] {
         for f in ["Cargo.toml", "build.rs", "jaso.manifest", "jaso.import"] {
-            println!("cargo:rerun-if-changed={}", root.join(lib).join(f).display());
+            println!(
+                "cargo:rerun-if-changed={}",
+                root.join(lib).join(f).display()
+            );
         }
         if let Ok(dir) = std::fs::read_dir(root.join(lib).join("src")) {
             for f in dir.flatten() {
@@ -252,9 +348,18 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
         }
     }
     // 用户程序共享 kernel-core 的记录布局：它变化时也要重建
-    println!("cargo:rerun-if-changed={}", root.join("kernel-core/src/ring_abi.rs").display());
-    println!("cargo:rerun-if-changed={}", root.join("kernel-core/src/bench.rs").display());
-    println!("cargo:rerun-if-changed={}", root.join("kernel-core/src/device.rs").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("kernel-core/src/ring_abi.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("kernel-core/src/bench.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("kernel-core/src/device.rs").display()
+    );
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let target_dir = out_dir.join("user-target");
     let triple = user_triple();
@@ -268,7 +373,11 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
     for (_, pkg, _) in &programs {
         cmd.args(["-p", *pkg]);
     }
-    let status = cmd.arg("--target-dir").arg(&target_dir).status().expect("无法启动 cargo 构建用户程序");
+    let status = cmd
+        .arg("--target-dir")
+        .arg(&target_dir)
+        .status()
+        .expect("无法启动 cargo 构建用户程序");
     assert!(status.success(), "用户程序构建失败");
     let (machine, class) = elf_target();
     // 期望的章直接由构建脚本解析出的真源构造，避免「校验值来自另一份生成常量」的循环自证。
@@ -282,7 +391,8 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
         assert!(elf.exists(), "找不到用户程序产物 {}", elf.display());
         // 构建期一致性：每个内嵌程序都必须携带与当前真源完全一致的 ABI 章，
         // 否则内核启动后会在装载阶段拒绝自己的程序——这类失配必须在这里就失败。
-        let bytes = std::fs::read(&elf).unwrap_or_else(|e| panic!("读取用户程序 {} 失败：{}", elf.display(), e));
+        let bytes = std::fs::read(&elf)
+            .unwrap_or_else(|e| panic!("读取用户程序 {} 失败：{}", elf.display(), e));
         let parsed = kernel_core::elf::parse(&bytes, machine, class)
             .unwrap_or_else(|e| panic!("用户程序 {} 的 ELF 不合法：{:?}", dir, e));
         if *dir == "user/linuxprobe" {
@@ -304,13 +414,20 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
             );
             let required = parsed.required_capabilities();
             if *dir == "user/hello" {
-                assert_eq!(required.iter().collect::<Vec<_>>(), vec!["kernel.core"], "user-hello capability note differs");
+                assert_eq!(
+                    required.iter().collect::<Vec<_>>(),
+                    vec!["kernel.core"],
+                    "user-hello capability note differs"
+                );
             }
         }
         println!("cargo:rustc-env={}={}", env, elf.display());
     }
     if jasodemo_only {
-        let elf = target_dir.join(triple).join("release").join("user-jasodemo");
+        let elf = target_dir
+            .join(triple)
+            .join("release")
+            .join("user-jasodemo");
         for (_, _, env) in &all_programs {
             if *env != "JSR_USER_JASODEMO" {
                 // The dedicated image never runs these programs. Their static

@@ -17,10 +17,21 @@ OUT="${OUT:-evidence/production}"
 TARGET=target/production
 ORDER="console platform timer frames kernel_map heap capacity devices profile assembly sched_mode space smp highres idle_tick user_runtime "
 mkdir -p "$OUT"
+python3 scripts/check-production-feature-isolation.py
 cargo build --locked --release -p xtask > "$OUT/build.log" 2>&1 || { echo "FAIL xtask 构建失败"; exit 1; }
 ELF="$TARGET/x86_64-unknown-none/release/jasper-kernel"
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none -p jasper-kernel --features production >> "$OUT/build.log" 2>&1 \
   || { echo "FAIL 生产内核构建失败"; exit 1; }
+
+# 未列入生产清单的特性必须被 build.rs 默认拒绝。
+# The negative case proves the build gate rejects an unlisted verification feature.
+if CARGO_TARGET_DIR="$TARGET" cargo check --locked --target x86_64-unknown-none -p jasper-kernel \
+    --features production,compat-elf-backend-verify >> "$OUT/build.log" 2>&1; then
+  echo "FAIL 生产构建错误接受了验收特性"
+  exit 1
+fi
+grep -q 'production feature isolation: forbidden features enabled' "$OUT/build.log" \
+  || { echo "FAIL 生产特性负例缺少机械拒绝原因"; exit 1; }
 target/release/xtask "$ELF" "$OUT/kernel.img" > "$OUT/image.log" 2>&1 || { echo "FAIL 镜像生成失败"; exit 1; }
 # 同一个生产内核，容量记录写成不支持的版本号（与 accept.sh 的 x86-corrupt 相同）。
 target/release/xtask bootcap "$ELF" "$OUT/caprej.elf" record=corrupt >> "$OUT/build.log" 2>&1 \
