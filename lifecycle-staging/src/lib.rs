@@ -69,6 +69,18 @@ pub struct StagingReceipt {
     pub artifacts: Vec<StagedArtifact>,
 }
 
+/// 导入前磁盘预算结果。
+/// Disk-budget result produced before import.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiskBudget {
+    /// 文件系统当前可用字节。Currently available filesystem bytes.
+    pub available_bytes: u64,
+    /// 清单、工件和调用方元数据余量所需字节。Required bytes for manifest, artifacts and caller metadata headroom.
+    pub required_bytes: u64,
+    /// 采用的文件系统块大小。Filesystem allocation block size.
+    pub block_size: u64,
+}
+
 /// 暂存失败原因。
 /// Staging failure.
 #[derive(Debug)]
@@ -113,6 +125,17 @@ pub enum StagingError {
         /// 清理失败。Cleanup failure.
         cleanup: io::Error,
     },
+    /// 磁盘可用空间不足。Available disk space is insufficient.
+    InsufficientSpace {
+        /// 当前可用字节。Available bytes.
+        available: u64,
+        /// 所需字节。Required bytes.
+        required: u64,
+    },
+    /// 磁盘预算算术溢出。Disk-budget arithmetic overflowed.
+    BudgetOverflow,
+    /// 目标文件系统返回不可用几何参数。Destination filesystem returned unusable geometry.
+    InvalidFilesystem(&'static str),
 }
 
 impl fmt::Display for StagingError {
@@ -150,6 +173,20 @@ impl fmt::Display for StagingError {
             Self::Cleanup { cause, cleanup } => {
                 write!(formatter, "{cause}; staging cleanup failed: {cleanup}")
             }
+            Self::InsufficientSpace {
+                available,
+                required,
+            } => write!(
+                formatter,
+                "insufficient staging space: available {available}, required {required}"
+            ),
+            Self::BudgetOverflow => write!(formatter, "staging disk budget overflowed"),
+            Self::InvalidFilesystem(reason) => {
+                write!(
+                    formatter,
+                    "invalid destination filesystem geometry: {reason}"
+                )
+            }
         }
     }
 }
@@ -183,18 +220,7 @@ pub fn stage_verified_artifacts(
     if Sha256::digest(manifest_bytes).as_slice() != manifest.manifest.manifest_sha256.as_slice() {
         return Err(StagingError::ManifestDigest);
     }
-    let declared_total = manifest
-        .artifacts
-        .iter()
-        .try_fold(0u64, |total, artifact| total.checked_add(artifact.size))
-        .ok_or(StagingError::InconsistentManifest(
-            "artifact byte sum overflowed",
-        ))?;
-    if declared_total != manifest.artifact_bytes {
-        return Err(StagingError::InconsistentManifest(
-            "artifact byte sum does not match the receipt",
-        ));
-    }
+    validate_declared_total(manifest)?;
     match fs::symlink_metadata(staging_root) {
         Ok(_) => return Err(StagingError::AlreadyExists(staging_root.to_path_buf())),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -206,6 +232,12 @@ pub fn stage_verified_artifacts(
             ))
         }
     }
+    let parent = staging_root
+        .parent()
+        .ok_or(StagingError::InconsistentManifest(
+            "staging root has no parent directory",
+        ))?;
+    check_disk_budget(manifest, manifest_bytes.len() as u64, parent, 0)?;
     let sources = source_map(sources, &manifest.artifacts)?;
 
     fs::create_dir(staging_root)
@@ -221,6 +253,85 @@ pub fn stage_verified_artifacts(
             }),
         },
     }
+}
+
+/// 按实际文件系统块大小检查暂存预算；`metadata_headroom` 由协调器显式提供。
+/// Checks staging capacity using real filesystem blocks; metadata headroom is explicit.
+pub fn check_disk_budget(
+    manifest: &VerifiedCborManifest,
+    manifest_bytes: u64,
+    destination_parent: &Path,
+    metadata_headroom: u64,
+) -> Result<DiskBudget, StagingError> {
+    validate_declared_total(manifest)?;
+    if manifest_bytes == 0 || manifest_bytes > MAX_MANIFEST_CBOR_BYTES as u64 {
+        return Err(StagingError::InconsistentManifest(
+            "manifest CBOR length is out of bounds",
+        ));
+    }
+    let stats = rustix::fs::statvfs(destination_parent).map_err(|source| {
+        io_error(
+            "read destination filesystem capacity",
+            destination_parent,
+            source.into(),
+        )
+    })?;
+    if stats.f_frsize == 0 {
+        return Err(StagingError::InvalidFilesystem(
+            "filesystem block size is zero",
+        ));
+    }
+    let block_size = stats.f_frsize;
+    let available_bytes = stats
+        .f_bavail
+        .checked_mul(block_size)
+        .ok_or(StagingError::BudgetOverflow)?;
+    let mut required_bytes = round_up(manifest_bytes, block_size)?;
+    for artifact in &manifest.artifacts {
+        required_bytes = required_bytes
+            .checked_add(round_up(artifact.size, block_size)?)
+            .ok_or(StagingError::BudgetOverflow)?;
+    }
+    required_bytes = required_bytes
+        .checked_add(metadata_headroom)
+        .ok_or(StagingError::BudgetOverflow)?;
+    if available_bytes < required_bytes {
+        return Err(StagingError::InsufficientSpace {
+            available: available_bytes,
+            required: required_bytes,
+        });
+    }
+    Ok(DiskBudget {
+        available_bytes,
+        required_bytes,
+        block_size,
+    })
+}
+
+fn validate_declared_total(manifest: &VerifiedCborManifest) -> Result<(), StagingError> {
+    let declared_total = manifest
+        .artifacts
+        .iter()
+        .try_fold(0u64, |total, artifact| total.checked_add(artifact.size))
+        .ok_or(StagingError::InconsistentManifest(
+            "artifact byte sum overflowed",
+        ))?;
+    if declared_total != manifest.artifact_bytes {
+        return Err(StagingError::InconsistentManifest(
+            "artifact byte sum does not match the receipt",
+        ));
+    }
+    Ok(())
+}
+
+fn round_up(value: u64, block_size: u64) -> Result<u64, StagingError> {
+    if value == 0 {
+        return Ok(0);
+    }
+    value
+        .checked_add(block_size - 1)
+        .map(|rounded| rounded / block_size * block_size)
+        .ok_or(StagingError::BudgetOverflow)
 }
 
 fn source_map<'a>(
@@ -647,5 +758,29 @@ mod tests {
             Err(StagingError::ManifestDigest)
         ));
         assert!(!staging.exists());
+    }
+
+    #[test]
+    fn disk_budget_uses_block_rounding_and_rejects_impossible_headroom() {
+        let temp = TestDir::new("disk-budget");
+        let manifest_bytes = b"signed-manifest";
+        let bytes = [0x5a; 17];
+        let manifest = manifest(
+            manifest_bytes,
+            vec![artifact(ArtifactKind::Kernel, "kernel", &bytes)],
+        );
+        let budget =
+            check_disk_budget(&manifest, manifest_bytes.len() as u64, temp.path(), 0).unwrap();
+        assert!(budget.block_size > 0);
+        assert!(budget.required_bytes >= bytes.len() as u64 + manifest_bytes.len() as u64);
+        assert!(matches!(
+            check_disk_budget(
+                &manifest,
+                manifest_bytes.len() as u64,
+                temp.path(),
+                u64::MAX
+            ),
+            Err(StagingError::BudgetOverflow)
+        ));
     }
 }

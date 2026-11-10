@@ -775,6 +775,7 @@ version = "0.1.0"
 dependencies = [
  "jasper-lifecycle-model",
  "libc",
+ "rustix",
  "sha2",
 ]
 
