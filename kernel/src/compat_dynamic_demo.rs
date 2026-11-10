@@ -103,6 +103,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::GetPid,
         LinuxSyscall::GetPpid,
         LinuxSyscall::GetTid,
+        LinuxSyscall::GetRandom,
         LinuxSyscall::SetTidAddress,
         LinuxSyscall::SetRobustList,
         LinuxSyscall::Rseq,

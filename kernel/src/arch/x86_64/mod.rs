@@ -55,6 +55,33 @@ mod user;
 pub(crate) use user::enter_syscall_return;
 pub mod vmx;
 
+/// Reads one hardware random word after verifying CPUID support.
+///
+/// 在 CPUID 确认支持后读取一个硬件随机字；无 RDRAND 或连续重试失败时返回 `None`。
+pub fn hardware_random_u64() -> Option<u64> {
+    let cpu = core::arch::x86_64::__cpuid(1);
+    if cpu.ecx & (1 << 30) == 0 {
+        return None;
+    }
+    for _ in 0..10 {
+        let mut value = 0u64;
+        let mut success = 0u8;
+        unsafe {
+            core::arch::asm!(
+                "rdrand {value}",
+                "setc {success}",
+                value = out(reg) value,
+                success = out(reg_byte) success,
+                options(nostack)
+            );
+        }
+        if success != 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
 use super::{ExitStatus, PciAccess, Platform, UserProbe};
 
 /// 设备寄存器窗口在内核高半区的位置与大小（PML4 下标 352；启动期已预分配顶级表项）。

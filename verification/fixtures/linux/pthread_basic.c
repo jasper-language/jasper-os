@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/syscall.h>
+#include <sys/random.h>
 #include <unistd.h>
 
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -95,6 +96,26 @@ int main(void) {
         pthread_mutex_unlock(&robust_mutex) != 0) {
         printf("pthread-robust-failed:%d\n", robust_lock);
         return 14;
+    }
+
+    unsigned char random_first[32];
+    unsigned char random_second[32];
+    if (getrandom(random_first, sizeof(random_first), GRND_NONBLOCK) !=
+            (ssize_t)sizeof(random_first) ||
+        getrandom(random_second, sizeof(random_second), GRND_NONBLOCK) !=
+            (ssize_t)sizeof(random_second)) {
+        puts("getrandom-failed");
+        return 15;
+    }
+    int random_nonzero = 0;
+    int random_equal = 1;
+    for (size_t index = 0; index < sizeof(random_first); index++) {
+        random_nonzero |= random_first[index] != 0;
+        random_equal &= random_first[index] == random_second[index];
+    }
+    if (!random_nonzero || random_equal) {
+        puts("getrandom-deterministic");
+        return 16;
     }
 
     puts("jasper-pthread-ok");

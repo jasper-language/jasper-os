@@ -27,6 +27,7 @@ set +e
 timeout "$TIMEOUT" qemu-system-x86_64 \
   -accel tcg \
   -machine q35 \
+  -cpu max \
   -m 512M \
   -smp "$CPUS" \
   -drive format=raw,file="$OUT/kernel.img" \

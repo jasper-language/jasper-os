@@ -573,6 +573,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
             .unwrap_or_else(|error| -i64::from(error as i32)),
+        LinuxSyscall::GetRandom => compat_result(linux_getrandom(call.args)),
         LinuxSyscall::SetTidAddress => set_clear_child_tid(pid, call.args[0])
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
@@ -1197,6 +1198,37 @@ fn linux_prlimit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         copy_to_user(args[3], &bytes, bytes.len()).map_err(|_| CompatErrno::Fault)?;
     }
     Ok(0)
+}
+
+/// Fills a bounded userspace buffer from x86_64 RDRAND.
+///
+/// 从 CPUID 验证过的 RDRAND 填充有界用户缓冲区；没有硬件熵源时明确返回 EAGAIN。
+fn linux_getrandom(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const GRND_NONBLOCK: u64 = 1;
+    const GRND_RANDOM: u64 = 2;
+    const GRND_INSECURE: u64 = 4;
+    const MAX_RANDOM: usize = 1024 * 1024;
+    let length = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if length > MAX_RANDOM
+        || args[2] & !(GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE) != 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    if length == 0 {
+        return Ok(0);
+    }
+    let mut output = alloc::vec![0u8; length];
+    let mut offset = 0usize;
+    while offset < output.len() {
+        let value =
+            crate::arch::x86_64::hardware_random_u64().ok_or(CompatErrno::TryAgain)?;
+        let bytes = value.to_le_bytes();
+        let count = (output.len() - offset).min(bytes.len());
+        output[offset..offset + count].copy_from_slice(&bytes[..count]);
+        offset += count;
+    }
+    copy_to_user(args[0], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(length as u64)
 }
 
 /// Implements the x86_64 `arch_prctl(2)` TLS base operation.
