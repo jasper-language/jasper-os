@@ -705,6 +705,7 @@ version = "0.1.0"
 dependencies = [
  "bootloader_api",
  "ed25519-dalek",
+ "goblin",
  "jasper-compat-core",
  "jasper-compat-loader",
  "kernel-core",

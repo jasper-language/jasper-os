@@ -418,6 +418,40 @@ pub enum RecordError {
     IdsExhausted,
 }
 
+/// 有界诊断查询；隐私上限之外的事件不会返回。
+/// Bounded diagnostic query; events above the privacy ceiling are never returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiagnosticQuery {
+    /// 可选类别过滤。Optional category filter.
+    pub kind: Option<EventKind>,
+    /// 最低严重度。Minimum severity.
+    pub minimum_severity: Severity,
+    /// 允许返回的最高隐私级别。Highest privacy class allowed in results.
+    pub privacy_ceiling: PrivacyClass,
+    /// 仅返回大于该 ID 的事件。Return only events with a greater ID.
+    pub after_id: u64,
+    /// 本次最多返回的事件数。Maximum events returned by this query session.
+    pub remaining: usize,
+}
+
+impl DiagnosticQuery {
+    /// 创建从头开始的有界查询。Creates a bounded query from the beginning.
+    pub const fn new(
+        kind: Option<EventKind>,
+        minimum_severity: Severity,
+        privacy_ceiling: PrivacyClass,
+        limit: usize,
+    ) -> Self {
+        Self {
+            kind,
+            minimum_severity,
+            privacy_ceiling,
+            after_id: 0,
+            remaining: limit,
+        }
+    }
+}
+
 /// 固定容量诊断事件环；满时优先淘汰最低严重度，同级保留先到事件。
 /// Fixed-capacity diagnostic ring; evicts the lowest severity first and keeps earlier equal-severity events.
 #[derive(Clone, Debug)]
@@ -496,6 +530,26 @@ impl<const N: usize> DiagnosticRing<N> {
     /// 按事件 ID 查找。Finds an event by ID.
     pub fn get(&self, id: u64) -> Option<&DiagnosticEvent> {
         self.events.iter().flatten().find(|event| event.id == id)
+    }
+
+    /// 返回下一匹配事件并推进查询游标。
+    /// Returns the next matching event and advances the query cursor.
+    pub fn query_next(&self, query: &mut DiagnosticQuery) -> Option<&DiagnosticEvent> {
+        if query.remaining == 0 {
+            return None;
+        }
+        let next = self
+            .events
+            .iter()
+            .flatten()
+            .filter(|event| event.id > query.after_id)
+            .filter(|event| query.kind.is_none_or(|kind| event.kind == kind))
+            .filter(|event| event.severity >= query.minimum_severity)
+            .filter(|event| event.privacy <= query.privacy_ceiling)
+            .min_by_key(|event| event.id)?;
+        query.after_id = next.id;
+        query.remaining -= 1;
+        Some(next)
     }
 
     /// 快照统计。Snapshot statistics.
@@ -792,5 +846,39 @@ mod tests {
         input = base(EventKind::DriverHardware, Severity::Error);
         input.causes = &causes;
         assert_eq!(DiagnosticEvent::new(input), Err(SchemaError::Causes));
+    }
+
+    #[test]
+    fn bounded_query_filters_and_pages_without_exposing_secret_events() {
+        let mut ring = DiagnosticRing::<4>::new();
+        let mut info = base(EventKind::Network, Severity::Info);
+        info.privacy = PrivacyClass::Internal;
+        ring.record(DiagnosticEvent::new(info).unwrap()).unwrap();
+        ring.record(
+            DiagnosticEvent::new(base(EventKind::StorageCorruption, Severity::Error)).unwrap(),
+        )
+        .unwrap();
+        let mut sensitive = base(EventKind::ServiceCrash, Severity::Warning);
+        sensitive.privacy = PrivacyClass::Sensitive;
+        ring.record(DiagnosticEvent::new(sensitive).unwrap())
+            .unwrap();
+        let mut secret = base(EventKind::KernelException, Severity::Critical);
+        secret.privacy = PrivacyClass::Secret;
+        ring.record(DiagnosticEvent::new(secret).unwrap()).unwrap();
+
+        let mut query = DiagnosticQuery::new(None, Severity::Error, PrivacyClass::Internal, 1);
+        assert_eq!(ring.query_next(&mut query).unwrap().id(), 2);
+        assert_eq!(ring.query_next(&mut query), None);
+        query.remaining = 4;
+        assert_eq!(ring.query_next(&mut query), None);
+
+        let mut category = DiagnosticQuery::new(
+            Some(EventKind::ServiceCrash),
+            Severity::Info,
+            PrivacyClass::Sensitive,
+            4,
+        );
+        assert_eq!(ring.query_next(&mut category).unwrap().id(), 3);
+        assert_eq!(ring.query_next(&mut category), None);
     }
 }
