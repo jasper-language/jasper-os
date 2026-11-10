@@ -118,6 +118,8 @@ pub mod blk;
 pub mod blk1_demo;
 #[cfg(all(target_arch = "x86_64", feature = "hwv5-verify"))]
 pub mod hwv5_vmm_demo;
+#[cfg(target_arch = "x86_64")]
+pub mod hwv5_policy;
 #[cfg(all(target_arch = "x86_64", feature = "fs0-journal-verify"))]
 pub mod fs0_demo;
 #[cfg(all(target_arch = "x86_64", feature = "fs1-ext4-verify"))]

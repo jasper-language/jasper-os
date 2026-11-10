@@ -10,6 +10,9 @@ use std::time::Duration;
 pub use quinn;
 pub use rustls;
 
+pub mod service;
+pub mod wireguard_driver;
+
 /// WireGuard protocol state comes from the same no_std adapter used by the
 /// kernel core. Socket, clock and entropy remain service responsibilities.
 pub mod wireguard {

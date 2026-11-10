@@ -26,6 +26,7 @@ pub const FEATURE_VERSION_1: u32 = 1 << 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VirtioDeviceType {
+    Gpu,
     Net,
     Block,
     Console,
@@ -36,6 +37,7 @@ pub enum VirtioDeviceType {
 impl VirtioDeviceType {
     pub const fn id(self) -> u32 {
         match self {
+            VirtioDeviceType::Gpu => 5,
             VirtioDeviceType::Net => 1,
             VirtioDeviceType::Block => 2,
             VirtioDeviceType::Console => 3,
@@ -46,6 +48,7 @@ impl VirtioDeviceType {
 
     pub const fn name(self) -> &'static str {
         match self {
+            VirtioDeviceType::Gpu => "virtio-gpu",
             VirtioDeviceType::Net => "virtio-net",
             VirtioDeviceType::Block => "virtio-blk",
             VirtioDeviceType::Console => "virtio-console",

@@ -32,6 +32,8 @@ pub const DEVICE_IRQ: LockClass = LockClass::new(5, "system.device.interrupt");
 /// 固定（pin）页帧记录。
 /// Pinned frame records.
 pub const MEMORY_PINS: LockClass = LockClass::new(6, "system.memory.pins");
+/// HWV-5 unified device and VMM policy gate.
+pub const HWV5_POLICY: LockClass = LockClass::new(7, "system.device.hwv5_policy");
 /// 调度器（任务表、运行队列、时钟记账）。
 /// Scheduler state.
 pub const SCHED: LockClass = LockClass::new(8, "system.sched");
@@ -74,6 +76,7 @@ pub const REGISTRY: &[LockClass] = &[
     OBJECT_TABLE,
     DEVICE_IRQ,
     MEMORY_PINS,
+    HWV5_POLICY,
     SCHED,
     FAULT_LAST,
     SYSCALL_LAST_EXIT,

@@ -11,6 +11,10 @@ pub fn failed() -> u32 {
 }
 
 pub fn run() {
+    if !crate::hwv5_policy::verify_runtime() {
+        FAILED.fetch_add(1, Ordering::Relaxed);
+        kprintln!("[JSR-HWV5-PROD-FAIL] stage=policy-selftest");
+    }
     let vmm_ok = crate::hwv5_vmm_demo::run();
     if !vmm_ok {
         FAILED.fetch_add(1, Ordering::Relaxed);
@@ -24,9 +28,13 @@ pub fn run() {
             "[JSR-HWV5-PIO] backend=Vmx transport=pio decoded=true routed=true probe=true reset=true pending=true cancel=true failure_atomic=true resource=true failed=0"
         );
     }
+    let (policy_allowed, policy_denied, policy_overflow) = crate::hwv5_policy::stats();
     kprintln!(
-        "[JSR-HWV5] backend=Vmx bus=mmio devices=rng,console,block linux=true vmm={} failed={}",
+        "[JSR-HWV5] backend=Vmx bus=mmio devices=rng,console,block linux=true vmm={} policy=true policy_allowed={} policy_denied={} policy_overflow={} failed={}",
         vmm_ok,
+        policy_allowed,
+        policy_denied,
+        policy_overflow,
         failed()
     );
 }

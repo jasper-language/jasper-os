@@ -187,6 +187,7 @@ pub mod timer_progress;
 pub mod dirty_slots;
 pub mod hwvirt;
 pub mod hwv5_pep;
+pub mod hwv7;
 pub mod hwvirt_vcpu;
 pub mod hwvirt_vmm;
 

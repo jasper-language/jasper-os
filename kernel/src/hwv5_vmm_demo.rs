@@ -7,8 +7,8 @@ use kernel_core::frame::{PhysFrame, FRAME_SIZE};
 use kernel_core::hwvirt::Backend;
 use kernel_core::hwvirt_vcpu::{GuestPermissions, VcpuState};
 use kernel_core::hwvirt_vmm::{
-    ServiceLifecycle, ServiceState, VmExitEvent, VmExitRecord, VMM_ABI_VERSION,
-    VMM_CONTROL_MAGIC, VM_EXIT_RECORD_BYTES,
+    ServiceLifecycle, ServiceState, VmExitEvent, VmExitRecord, VMM_ABI_VERSION, VMM_CONTROL_MAGIC,
+    VM_EXIT_RECORD_BYTES,
 };
 use kernel_core::object::{HandleId, ObjectType};
 use kernel_core::objtable::ObjId;
@@ -95,16 +95,7 @@ fn launch(name: &'static str, role: u64, generation: u32) -> Option<ServiceProce
             return None;
         }
     }
-    if proc::spawn_thread(
-        pid,
-        name,
-        entry,
-        stack,
-        role,
-        u64::from(generation),
-    )
-    .is_err()
-    {
+    if proc::spawn_thread(pid, name, entry, stack, role, u64::from(generation)).is_err() {
         cleanup_pid(pid);
         return None;
     }
@@ -142,17 +133,19 @@ fn launch(name: &'static str, role: u64, generation: u32) -> Option<ServiceProce
         generation,
         ring_handle.raw()
     );
-    Some(ServiceProcess { pid, ring: ring_handle, ring_object, control })
+    Some(ServiceProcess {
+        pid,
+        ring: ring_handle,
+        ring_object,
+        control,
+    })
 }
 
-fn create_owned_resources(
-    service: &ServiceProcess,
-) -> Option<(HandleId, ObjId, HandleId, ObjId)> {
+fn create_owned_resources(service: &ServiceProcess) -> Option<(HandleId, ObjId, HandleId, ObjId)> {
     let memory = proc::create_guest_memory(service.pid, 512).ok()?;
     let memory_object = ObjId::from_raw(proc::handle_info(service.pid, memory)?.0.id.0)?;
     let cpu = vcpu::create_for(service.pid, Backend::Vmx).ok()?;
-    let cpu_object =
-        ObjId::from_raw(proc::handle_info(service.pid, cpu)?.0.id.0)?;
+    let cpu_object = ObjId::from_raw(proc::handle_info(service.pid, cpu)?.0.id.0)?;
     if vcpu::map_for(
         service.pid,
         cpu,
@@ -189,8 +182,8 @@ fn crash_service(
     let old_handles = proc::handle_info(service.pid, service.ring).is_none()
         && proc::handle_info(service.pid, cpu).is_none()
         && proc::handle_info(service.pid, memory).is_none();
-    let old_mapping = proc::vm_guest_memory_quota(service.pid)
-        .is_some_and(|usage| usage.mapped == 0);
+    let old_mapping =
+        proc::vm_guest_memory_quota(service.pid).is_some_and(|usage| usage.mapped == 0);
     let reaped = proc::reap(service.pid).is_some();
     kobj::run_cleanup(usize::MAX);
     let objects = kobj::with(|table| {
@@ -220,9 +213,7 @@ fn wait_exited(pid: ObjId) -> Option<ProcState> {
 }
 
 fn run_dispatch(service: &ServiceProcess, generation: u32) -> bool {
-    let Some((memory, _memory_object, cpu, _cpu_object)) =
-        create_owned_resources(service)
-    else {
+    let Some((memory, _memory_object, cpu, _cpu_object)) = create_owned_resources(service) else {
         kprintln!("[JSR-HWV5-VMM-FAIL] stage=resources");
         return false;
     };
@@ -314,6 +305,14 @@ fn run_dispatch(service: &ServiceProcess, generation: u32) -> bool {
     let mut delivered = 0usize;
     let mut observer = |event: VmExitEvent| {
         let index = exit_count;
+        if !crate::hwv5_policy::vmm_exit(generation) {
+            kprintln!(
+                "[JSR-HWV5-VMM-FAIL] stage=policy index={} generation={}",
+                index,
+                generation
+            );
+            return Err(crate::arch::x86_64::vmx::VmxError::EventDelivery);
+        }
         kprintln!(
             "[JSR-HWV5-VMM] exit index={} reason={} vector={} gpa=0x{:x} rip_len={}",
             index,
@@ -441,8 +440,7 @@ pub fn run() -> bool {
         sched::set_preemption(previous_preemption);
         return false;
     };
-    let Some((memory, memory_object, cpu, cpu_object)) = create_owned_resources(&first)
-    else {
+    let Some((memory, memory_object, cpu, cpu_object)) = create_owned_resources(&first) else {
         check(false, "first VMM did not own VM resources");
         sched::set_preemption(previous_preemption);
         return false;
@@ -453,7 +451,10 @@ pub fn run() -> bool {
     );
     check(service.crash(), "service lifecycle did not enter Failed");
     let next_generation = service.recover().unwrap_or(0);
-    check(next_generation == 2, "service restart did not advance generation");
+    check(
+        next_generation == 2,
+        "service restart did not advance generation",
+    );
     check(
         before == baseline::baseline(),
         "crashed VMM resources did not return to baseline",
@@ -466,7 +467,10 @@ pub fn run() -> bool {
         return false;
     };
     let dispatch = run_dispatch(&second, next_generation);
-    check(dispatch, "restarted VMM did not complete the exit delivery path");
+    check(
+        dispatch,
+        "restarted VMM did not complete the exit delivery path",
+    );
     if dispatch {
         check(service.finish(), "service could not return to Ready");
     }
@@ -478,7 +482,10 @@ pub fn run() -> bool {
     sched::set_preemption(previous_preemption);
     let after = baseline::baseline();
     let resources = after == before;
-    check(resources, "VMM restart resources did not return to baseline");
+    check(
+        resources,
+        "VMM restart resources did not return to baseline",
+    );
     kprintln!(
         "[JSR-HWV5-VMM] abi={} generation=2 crashed=true old_handles=false old_mapping=false exits={} records={} ring=true restart=true revoked=true resources={} failed={}",
         VMM_ABI_VERSION,
@@ -535,8 +542,7 @@ fn write_gpa(pid: ObjId, handle: HandleId, gpa: u64, bytes: &[u8]) {
         .ok()
         .flatten()
         .expect("guest GPA translation");
-    let mapped = mm::phys_to_virt(frame.start() + gpa % FRAME_SIZE)
-        .expect("guest physical map");
+    let mapped = mm::phys_to_virt(frame.start() + gpa % FRAME_SIZE).expect("guest physical map");
     assert!((gpa % FRAME_SIZE) as usize + bytes.len() <= FRAME_SIZE as usize);
     // SAFETY: the GPA is pinned by the vCPU mapping and this write stays in
     // one physical page.
@@ -548,8 +554,7 @@ fn read_gpa(pid: ObjId, handle: HandleId, gpa: u64) -> u64 {
         .ok()
         .flatten()
         .expect("guest GPA translation");
-    let mapped = mm::phys_to_virt(frame.start() + gpa % FRAME_SIZE)
-        .expect("guest physical map");
+    let mapped = mm::phys_to_virt(frame.start() + gpa % FRAME_SIZE).expect("guest physical map");
     // SAFETY: the GPA is pinned and this reads one aligned u64 within a page.
     unsafe { (mapped as *const u64).read_volatile() }
 }

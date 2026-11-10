@@ -2773,7 +2773,7 @@ check_hwv5() {
      && has '\[JSR-VIRTIO\] device=block ok=true' \
      && has '\[JSR-HWV4-LINUX\] linux=true exits=[0-9]+ serial_bytes=[0-9]+ timer_interrupts=[0-9]+ timer_eois=[0-9]+ virtio_rng_requests=[1-9][0-9]* virtio_console_bytes=[1-9][0-9]* virtio_block_requests=[1-9][0-9]* pio_reads=[1-9][0-9]* pio_writes=[1-9][0-9]* pio_generation=2 pio_requests=1 pio_cancels=1 pio_marker=true marker=true halted=true lifecycle=true shutdown=true reclaim=true' \
      && has '\[JSR-HWV5-VMM\] abi=1 generation=2 crashed=true old_handles=false old_mapping=false exits=6 records=6 ring=true restart=true revoked=true resources=true failed=0' \
-     && has '\[JSR-HWV5\] backend=Vmx bus=mmio devices=rng,console,block linux=true vmm=true failed=0' \
+     && has '\[JSR-HWV5\] backend=Vmx bus=mmio devices=rng,console,block linux=true vmm=true policy=true policy_allowed=[1-9][0-9]* policy_denied=[1-9][0-9]* policy_overflow=0 failed=0' \
      && ! has '^\[JSR-HWV5-VMM-FAIL\]' \
      && ! has '\[JSR-HWV5-FAIL\]'; then
     record HWV-5-CORE PASS "真实 Linux 经 virtio-MMIO 发现 virtio-rng、virtio-console 与 virtio-blk；现代 virtqueue 描述符链、可用/已用环、设备通知、PIC IRQ、中断确认、随机数据回写、控制台输出和块读取通过；宿主内存与对象资源回基线。net/fs 未完成，不记 HWV-5 完整通过"

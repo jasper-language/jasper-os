@@ -202,6 +202,49 @@ impl<const RESOURCES: usize, const DELEGATIONS: usize, const AUDIT: usize>
         Ok(())
     }
 
+    /// Rebind an existing opaque object to a newer incarnation. Repeating the
+    /// same active generation is idempotent; stale delegations are removed.
+    pub fn renew(&mut self, resource: Hwv5Resource) -> Result<(), Hwv5PepError> {
+        if !self
+            .resources
+            .iter()
+            .flatten()
+            .any(|binding| binding.resource.object == resource.object)
+        {
+            return self.register(resource);
+        }
+        if resource.object == 0
+            || resource.generation == 0
+            || resource.rights == 0
+            || resource.rights & !resource.surface.allowed_rights() != 0
+            || !valid_label(resource.label, resource.surface.identity_class())
+            || !resource.owner.is_valid()
+        {
+            return Err(Hwv5PepError::InvalidResource);
+        }
+        let binding = self
+            .resources
+            .iter_mut()
+            .flatten()
+            .find(|binding| binding.resource.object == resource.object)
+            .ok_or(Hwv5PepError::InvalidResource)?;
+        if binding.active
+            && binding.resource.generation == resource.generation
+            && binding.resource == resource
+        {
+            return Ok(());
+        }
+        binding.epoch = binding.epoch.saturating_add(1);
+        binding.resource = resource;
+        binding.active = true;
+        for delegation in &mut self.delegations {
+            if delegation.is_some_and(|delegation| delegation.object == resource.object) {
+                *delegation = None;
+            }
+        }
+        Ok(())
+    }
+
     pub fn delegate(
         &mut self,
         source: DomainKey,
@@ -647,6 +690,34 @@ mod tests {
                 }
             ),
             Ok(Hwv5Decision::Allowed)
+        );
+    }
+
+    #[test]
+    fn renew_rebinds_restarted_service_generation_and_clears_stale_grants() {
+        let owner = domain(1);
+        let peer = domain(2);
+        let mut pep = Hwv5Pep::<2, 2, 16>::new();
+        pep.register(resource(60, owner, Hwv5Surface::Vmm)).unwrap();
+        pep.delegate(owner, peer, 60, 1, VM_ENTER | CONTROL)
+            .unwrap();
+        let next = Hwv5Resource {
+            generation: 2,
+            ..resource(60, owner, Hwv5Surface::Vmm)
+        };
+        pep.renew(next).unwrap();
+        assert_eq!(
+            pep.authorize(
+                subject(peer, IdentityClass::Vcpu),
+                Hwv5Request {
+                    object: 60,
+                    generation: 2,
+                    surface: Hwv5Surface::Vmm,
+                    rights: VM_ENTER | CONTROL,
+                    effect: Hwv5Effect::Control,
+                }
+            ),
+            Ok(Hwv5Decision::Denied(Hwv5Deny::DomainDelegation))
         );
     }
 }

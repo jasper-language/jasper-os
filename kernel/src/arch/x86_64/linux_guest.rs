@@ -8,15 +8,13 @@
 use kernel_core::frame::PhysFrame;
 use kernel_core::hwvirt::Backend;
 use kernel_core::hwvirt_vcpu::{GuestPermissions, VcpuState};
-use kernel_core::vmm_device::{
-    VirtioDeviceType, VirtioMmio, FEATURE_VERSION_1,
+use kernel_core::virtio_fs::{
+    VirtioFsBackend, FUSE_OUT_HEADER_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, OP_WRITE,
 };
 use kernel_core::virtio_net::{
     VirtioNetBackend, VirtioNetHeader, MAX_FRAME_BYTES, VIRTIO_NET_HEADER_BYTES,
 };
-use kernel_core::virtio_fs::{
-    VirtioFsBackend, FUSE_OUT_HEADER_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
-};
+use kernel_core::vmm_device::{VirtioDeviceType, VirtioMmio, FEATURE_VERSION_1};
 
 use crate::arch::x86_64::vmx::{GuestExecutionState, LinuxPlatform, LinuxReport, VmxVm};
 use crate::{kobj, kprintln, mm, proc, vcpu};
@@ -83,35 +81,16 @@ impl VirtioGuestBus {
         Self {
             pid,
             vcpu,
-            rng: VirtioMmio::new(
-                VirtioDeviceType::Rng,
-                16,
-                [0, FEATURE_VERSION_1],
-            ),
-            console: VirtioMmio::new(
-                VirtioDeviceType::Console,
-                16,
-                [0, FEATURE_VERSION_1],
-            ),
-            block: VirtioMmio::new(
-                VirtioDeviceType::Block,
-                16,
-                [0, FEATURE_VERSION_1],
-            ),
+            rng: VirtioMmio::new(VirtioDeviceType::Rng, 16, [0, FEATURE_VERSION_1]),
+            console: VirtioMmio::new(VirtioDeviceType::Console, 16, [0, FEATURE_VERSION_1]),
+            block: VirtioMmio::new(VirtioDeviceType::Block, 16, [0, FEATURE_VERSION_1]),
             net: VirtioMmio::new(
                 VirtioDeviceType::Net,
                 16,
                 [kernel_core::virtio_net::FEATURE_MAC, FEATURE_VERSION_1],
             ),
-            net_backend: VirtioNetBackend::new(
-                [0x52, 0x54, 0x00, 0x12, 0x34, 0x57],
-                [10, 0, 2, 2],
-            ),
-            fs: VirtioMmio::new(
-                VirtioDeviceType::Fs,
-                16,
-                [0, FEATURE_VERSION_1],
-            ),
+            net_backend: VirtioNetBackend::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x57], [10, 0, 2, 2]),
+            fs: VirtioMmio::new(VirtioDeviceType::Fs, 16, [0, FEATURE_VERSION_1]),
             fs_backend: VirtioFsBackend::new(),
             last_avail: [0; 2],
             console_last_avail: [0; 2],
@@ -188,8 +167,10 @@ impl VirtioGuestBus {
                 }
             }
             let used_slot = usize::from(last % queue.size);
-            if !self.write_u32(queue.address.device + 4 + (used_slot as u64) * 8, u32::from(head))
-                || !self.write_u32(queue.address.device + 8 + (used_slot as u64) * 8, length)
+            if !self.write_u32(
+                queue.address.device + 4 + (used_slot as u64) * 8,
+                u32::from(head),
+            ) || !self.write_u32(queue.address.device + 8 + (used_slot as u64) * 8, length)
                 || !self.write_u16(queue.address.device + 2, last.wrapping_add(1))
             {
                 return;
@@ -241,8 +222,10 @@ impl VirtioGuestBus {
                 crate::arch::console_write_byte(byte[0]);
             }
             let used_slot = usize::from(last % queue.size);
-            if !self.write_u32(queue.address.device + 4 + (used_slot as u64) * 8, u32::from(head))
-                || !self.write_u32(queue.address.device + 8 + (used_slot as u64) * 8, length)
+            if !self.write_u32(
+                queue.address.device + 4 + (used_slot as u64) * 8,
+                u32::from(head),
+            ) || !self.write_u32(queue.address.device + 8 + (used_slot as u64) * 8, length)
                 || !self.write_u16(queue.address.device + 2, last.wrapping_add(1))
             {
                 return;
@@ -312,7 +295,10 @@ impl VirtioGuestBus {
             }
             let request_type = u32::from_le_bytes(header[0..4].try_into().unwrap());
             let sector = u64::from_le_bytes(header[8..16].try_into().unwrap());
-            let disk_offset = match usize::try_from(sector).ok().and_then(|s| s.checked_mul(512)) {
+            let disk_offset = match usize::try_from(sector)
+                .ok()
+                .and_then(|s| s.checked_mul(512))
+            {
                 Some(offset) if offset < self.disk.len() => offset,
                 _ => {
                     if !self.write_guest(descriptors[count - 1].0, &[1]) {
@@ -378,6 +364,10 @@ impl VirtioGuestBus {
             return;
         };
         while self.net_rx_last_avail != available {
+            if !crate::hwv5_policy::net_read() {
+                self.net_rejected = self.net_rejected.saturating_add(1);
+                return;
+            }
             let Some(frame) = self.net_backend.pop_rx() else {
                 break;
             };
@@ -393,23 +383,21 @@ impl VirtioGuestBus {
                     return;
                 }
             };
-            if chain[..count].iter().any(|descriptor| descriptor.2 & 2 == 0) {
+            if chain[..count]
+                .iter()
+                .any(|descriptor| descriptor.2 & 2 == 0)
+            {
                 self.net_rejected = self.net_rejected.saturating_add(1);
                 return;
             }
             let header = [0u8; VIRTIO_NET_HEADER_BYTES];
-            let Some(written) = self.write_virtio_scatter(
-                &chain[..count],
-                &header,
-                frame.bytes(),
-            ) else {
+            let Some(written) = self.write_virtio_scatter(&chain[..count], &header, frame.bytes())
+            else {
                 self.net_rejected = self.net_rejected.saturating_add(1);
                 return;
             };
             let expected = VIRTIO_NET_HEADER_BYTES as u32 + frame.bytes().len() as u32;
-            if written != expected
-                || !self.complete_net_used(queue_index, queue, head, written)
-            {
+            if written != expected || !self.complete_net_used(queue_index, queue, head, written) {
                 self.net_rejected = self.net_rejected.saturating_add(1);
                 return;
             }
@@ -447,7 +435,10 @@ impl VirtioGuestBus {
                     return;
                 }
             };
-            if chain[..count].iter().any(|descriptor| descriptor.2 & 2 != 0) {
+            if chain[..count]
+                .iter()
+                .any(|descriptor| descriptor.2 & 2 != 0)
+            {
                 self.net_rejected = self.net_rejected.saturating_add(1);
                 return;
             }
@@ -465,8 +456,11 @@ impl VirtioGuestBus {
             let mut raw = [0u8; VIRTIO_NET_HEADER_BYTES + MAX_FRAME_BYTES];
             let payload_len = (total - VIRTIO_NET_HEADER_BYTES as u32) as usize;
             if payload_len > MAX_FRAME_BYTES
-                || self.gather_virtio_chain(&chain[..count], &mut raw[..total as usize]).is_none()
+                || self
+                    .gather_virtio_chain(&chain[..count], &mut raw[..total as usize])
+                    .is_none()
                 || VirtioNetHeader::decode(&raw[..VIRTIO_NET_HEADER_BYTES]).is_err()
+                || !crate::hwv5_policy::net_write()
                 || self
                     .net_backend
                     .transmit(&raw[VIRTIO_NET_HEADER_BYTES..total as usize])
@@ -528,7 +522,8 @@ impl VirtioGuestBus {
                     self.fs_rejected = self.fs_rejected.saturating_add(1);
                     return;
                 };
-                if end > request.len() || !self.read_guest(address, &mut request[request_len..end]) {
+                if end > request.len() || !self.read_guest(address, &mut request[request_len..end])
+                {
                     self.fs_rejected = self.fs_rejected.saturating_add(1);
                     return;
                 }
@@ -545,22 +540,37 @@ impl VirtioGuestBus {
             }
             let request = &request[..declared];
             let mut response = [0u8; MAX_RESPONSE_BYTES];
-            let response_len = match self.fs_backend.handle_request(request, &mut response) {
-                Ok(length) => length,
-                Err(_) if request.len() >= 16 => {
-                    let unique = u64::from_le_bytes(request[8..16].try_into().unwrap());
-                    response[..FUSE_OUT_HEADER_BYTES].fill(0);
-                    response[..4].copy_from_slice(
-                        &(FUSE_OUT_HEADER_BYTES as u32).to_le_bytes(),
-                    );
-                    response[4..8].copy_from_slice(&(-5i32 as u32).to_le_bytes());
-                    response[8..16].copy_from_slice(&unique.to_le_bytes());
-                    self.fs_rejected = self.fs_rejected.saturating_add(1);
-                    FUSE_OUT_HEADER_BYTES
-                }
-                Err(_) => {
-                    self.fs_rejected = self.fs_rejected.saturating_add(1);
-                    return;
+            let opcode = u32::from_le_bytes(request[4..8].try_into().unwrap());
+            let allowed = if opcode == OP_WRITE {
+                crate::hwv5_policy::fs_write()
+            } else {
+                crate::hwv5_policy::fs_read()
+            };
+            let response_len = if !allowed {
+                let unique = u64::from_le_bytes(request[8..16].try_into().unwrap());
+                response[..FUSE_OUT_HEADER_BYTES].fill(0);
+                response[..4].copy_from_slice(&(FUSE_OUT_HEADER_BYTES as u32).to_le_bytes());
+                response[4..8].copy_from_slice(&(-13i32 as u32).to_le_bytes());
+                response[8..16].copy_from_slice(&unique.to_le_bytes());
+                self.fs_rejected = self.fs_rejected.saturating_add(1);
+                FUSE_OUT_HEADER_BYTES
+            } else {
+                match self.fs_backend.handle_request(request, &mut response) {
+                    Ok(length) => length,
+                    Err(_) if request.len() >= 16 => {
+                        let unique = u64::from_le_bytes(request[8..16].try_into().unwrap());
+                        response[..FUSE_OUT_HEADER_BYTES].fill(0);
+                        response[..4]
+                            .copy_from_slice(&(FUSE_OUT_HEADER_BYTES as u32).to_le_bytes());
+                        response[4..8].copy_from_slice(&(-5i32 as u32).to_le_bytes());
+                        response[8..16].copy_from_slice(&unique.to_le_bytes());
+                        self.fs_rejected = self.fs_rejected.saturating_add(1);
+                        FUSE_OUT_HEADER_BYTES
+                    }
+                    Err(_) => {
+                        self.fs_rejected = self.fs_rejected.saturating_add(1);
+                        return;
+                    }
                 }
             };
             let Some(written) =
@@ -660,11 +670,7 @@ impl VirtioGuestBus {
         None
     }
 
-    fn write_virtio_output(
-        &mut self,
-        chain: &[(u64, u32, u16, u16)],
-        bytes: &[u8],
-    ) -> Option<u32> {
+    fn write_virtio_output(&mut self, chain: &[(u64, u32, u16, u16)], bytes: &[u8]) -> Option<u32> {
         let capacity = chain
             .iter()
             .filter(|descriptor| descriptor.2 & 2 != 0)
@@ -706,11 +712,10 @@ impl VirtioGuestBus {
         let used = last.wrapping_add(1);
         let slot = usize::from(last % queue.size);
         fence(Ordering::Release);
-        self.write_u32(queue.address.device + 4 + (slot as u64) * 8, u32::from(head))
-            && self.write_u32(
-                queue.address.device + 8 + (slot as u64) * 8,
-                length,
-            )
+        self.write_u32(
+            queue.address.device + 4 + (slot as u64) * 8,
+            u32::from(head),
+        ) && self.write_u32(queue.address.device + 8 + (slot as u64) * 8, length)
             && self.write_u16(queue.address.device + 2, used)
     }
 
@@ -726,10 +731,8 @@ impl VirtioGuestBus {
         self.write_u32(
             queue.address.device + 4 + (slot as u64) * 8,
             u32::from(head),
-        ) && self.write_u32(
-            queue.address.device + 8 + (slot as u64) * 8,
-            length,
-        ) && self.write_u16(queue.address.device + 2, used)
+        ) && self.write_u32(queue.address.device + 8 + (slot as u64) * 8, length)
+            && self.write_u16(queue.address.device + 2, used)
     }
 
     fn complete_block(
@@ -740,8 +743,10 @@ impl VirtioGuestBus {
     ) {
         let used_slot = usize::from(self.block_last_avail % queue.size);
         fence(Ordering::Release);
-        if !self.write_u32(queue.address.device + 4 + (used_slot as u64) * 8, u32::from(head))
-            || !self.write_u32(queue.address.device + 8 + (used_slot as u64) * 8, length)
+        if !self.write_u32(
+            queue.address.device + 4 + (used_slot as u64) * 8,
+            u32::from(head),
+        ) || !self.write_u32(queue.address.device + 8 + (used_slot as u64) * 8, length)
             || !self.write_u16(
                 queue.address.device + 2,
                 self.block_last_avail.wrapping_add(1),
@@ -756,17 +761,20 @@ impl VirtioGuestBus {
 
     fn read_u16(&mut self, gpa: u64) -> Option<u16> {
         let mut bytes = [0; 2];
-        self.read_guest(gpa, &mut bytes).then_some(u16::from_le_bytes(bytes))
+        self.read_guest(gpa, &mut bytes)
+            .then_some(u16::from_le_bytes(bytes))
     }
 
     fn read_u32(&mut self, gpa: u64) -> Option<u32> {
         let mut bytes = [0; 4];
-        self.read_guest(gpa, &mut bytes).then_some(u32::from_le_bytes(bytes))
+        self.read_guest(gpa, &mut bytes)
+            .then_some(u32::from_le_bytes(bytes))
     }
 
     fn read_u64(&mut self, gpa: u64) -> Option<u64> {
         let mut bytes = [0; 8];
-        self.read_guest(gpa, &mut bytes).then_some(u64::from_le_bytes(bytes))
+        self.read_guest(gpa, &mut bytes)
+            .then_some(u64::from_le_bytes(bytes))
     }
 
     fn write_u16(&mut self, gpa: u64, value: u16) -> bool {
@@ -856,10 +864,7 @@ impl LinuxPlatform for VirtioGuestBus {
                 config[6..8].copy_from_slice(&1u16.to_le_bytes());
                 let start = config_offset as usize;
                 let mut value = 0u64;
-                for (index, byte) in config[start..start + width as usize]
-                    .iter()
-                    .enumerate()
-                {
+                for (index, byte) in config[start..start + width as usize].iter().enumerate() {
                     value |= u64::from(*byte) << (index * 8);
                 }
                 return Some(value);
@@ -880,10 +885,7 @@ impl LinuxPlatform for VirtioGuestBus {
                 config[36..40].copy_from_slice(&1u32.to_le_bytes());
                 let start = config_offset as usize;
                 let mut value = 0u64;
-                for (index, byte) in config[start..start + width as usize]
-                    .iter()
-                    .enumerate()
-                {
+                for (index, byte) in config[start..start + width as usize].iter().enumerate() {
                     value |= u64::from(*byte) << (index * 8);
                 }
                 return Some(value);

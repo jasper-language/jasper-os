@@ -11,7 +11,9 @@ use kernel_core::frame::{PhysFrame, FRAME_SIZE};
 use kernel_core::hwvirt::Backend;
 use kernel_core::hwvirt_vcpu::VcpuState;
 use kernel_core::hwvirt_vmm::VmExitEvent;
-use kernel_core::pio::{PioAccess, PioDirection, PioError, PioProbe, PioWidth, PortMap, PIO_PROBE_BASE};
+use kernel_core::pio::{
+    PioAccess, PioDirection, PioError, PioProbe, PioWidth, PortMap, PIO_PROBE_BASE,
+};
 
 use crate::kprintln;
 
@@ -1328,6 +1330,9 @@ impl LinuxRuntime {
 
     fn pio_in(&mut self, port: u16, width: PioWidth) -> Result<u64, PioError> {
         let token = self.pio_map.route(port).ok_or(PioError::UnmappedPort)?;
+        if !crate::hwv5_policy::pio_read() {
+            return Err(PioError::NotReady);
+        }
         let value = match token {
             PIO_UART => {
                 byte_width(width)?;
@@ -1398,6 +1403,9 @@ impl LinuxRuntime {
 
     fn pio_out(&mut self, port: u16, width: PioWidth, value: u64) -> Result<(), PioError> {
         let token = self.pio_map.route(port).ok_or(PioError::UnmappedPort)?;
+        if !crate::hwv5_policy::pio_write() {
+            return Err(PioError::NotReady);
+        }
         match token {
             PIO_UART => {
                 byte_width(width)?;
@@ -1643,7 +1651,10 @@ impl VmxVm {
         self.run_linux_with(&mut NoLinuxDevices)
     }
 
-    pub fn run_linux_with<B: LinuxPlatform>(&mut self, devices: &mut B) -> Result<LinuxReport, VmxError> {
+    pub fn run_linux_with<B: LinuxPlatform>(
+        &mut self,
+        devices: &mut B,
+    ) -> Result<LinuxReport, VmxError> {
         let mut linux = LinuxRuntime::new();
         let mut report = RunReport {
             xsave_enabled: self._host_xsave.is_some(),
@@ -1726,9 +1737,7 @@ impl VmxVm {
                 EXIT_IO => {
                     report.io += 1;
                     let qualification = vmread(EXIT_QUALIFICATION)?;
-                    if let Err(error) =
-                        self.emulate_linux_io(qualification, length, &mut linux)
-                    {
+                    if let Err(error) = self.emulate_linux_io(qualification, length, &mut linux) {
                         kprintln!(
                             "[JSR-HWV5-PIO-FAIL] error={} qualification={:#x} length={} rip={:#x}",
                             error.name(),
@@ -2024,7 +2033,11 @@ impl VmxVm {
             };
             self.set_gpr(access.register, value);
         }
-        self.advance_rip(if length == 0 { access.length as u64 } else { length });
+        self.advance_rip(if length == 0 {
+            access.length as u64
+        } else {
+            length
+        });
         Ok(true)
     }
 
@@ -2208,8 +2221,7 @@ impl VmxVm {
         linux: &mut LinuxRuntime,
     ) -> Result<(), PioError> {
         let register = ((qualification >> 8) & 0xf) as usize;
-        let access =
-            PioAccess::decode_vmx(qualification, length, self.gpr(register))?;
+        let access = PioAccess::decode_vmx(qualification, length, self.gpr(register))?;
         linux.last_pio_port = access.port;
         linux.last_pio_qualification = qualification;
         linux.last_pio_width = access.width.bytes();
@@ -2784,5 +2796,7 @@ fn guest_va_to_gpa<B: LinuxPlatform>(cr3: u64, va: u64, devices: &mut B) -> Opti
 
 fn guest_read_u64<B: LinuxPlatform>(devices: &mut B, gpa: u64) -> Option<u64> {
     let mut bytes = [0u8; 8];
-    devices.read_guest(gpa, &mut bytes).then_some(u64::from_le_bytes(bytes))
+    devices
+        .read_guest(gpa, &mut bytes)
+        .then_some(u64::from_le_bytes(bytes))
 }
