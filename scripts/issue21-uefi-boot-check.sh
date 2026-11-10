@@ -13,24 +13,35 @@ LIMIT="${ISSUE21_UEFI_TIMEOUT:-45}"
 mkdir "$OUT"
 IMAGE="$TARGET/p0.img"
 ESP_IMAGE="$TARGET/esp.img"
+UEFI_ESP="$TARGET/uefi-esp.img"
 OVMF_VARS="$TARGET/OVMF_VARS.fd"
+KERNEL="$TARGET/x86_64-unknown-none/release/jasper-kernel"
 # 仅清理本脚本固定命名的派生产物；证据目录必须独占，防止陈旧日志混入。
 # Remove only this script's fixed derived files; evidence output must be fresh.
-rm -f -- "$IMAGE" "$ESP_IMAGE" "$OVMF_VARS"
+rm -f -- "$IMAGE" "$ESP_IMAGE" "$UEFI_ESP" "$OVMF_VARS"
 
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none \
   -p jasper-kernel --features production >"$OUT/kernel-build.log" 2>&1
 cargo build --locked --release -p xtask >"$OUT/xtask-build.log" 2>&1
+CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-uefi \
+  -p jasper-boot-manager >"$OUT/boot-manager-build.log" 2>&1
 
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-gpt-image -- \
   "$IMAGE" 38654705664 >"$OUT/gpt.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-esp-format -- \
   "$IMAGE" 38654705664 >"$OUT/esp-format.log" 2>&1
-target/release/xtask uefi-esp \
-  "$TARGET/x86_64-unknown-none/release/jasper-kernel" "$OUT/uefi-esp.img" \
-  >"$OUT/uefi-esp.log" 2>&1
+target/release/xtask uefi-managed-esp \
+  "$KERNEL" "$KERNEL" \
+  "$TARGET/x86_64-unknown-uefi/release/jasper-boot-manager.efi" \
+  "$UEFI_ESP" >"$OUT/uefi-esp.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-esp-install -- \
-  "$IMAGE" 38654705664 "$OUT/uefi-esp.img" >"$OUT/esp-install.log" 2>&1
+  "$IMAGE" 38654705664 "$UEFI_ESP" >"$OUT/esp-install.log" 2>&1
+cargo run --locked -p jasper-lifecycle-staging --bin jasper-ext4-provision -- \
+  "$IMAGE" 38654705664 >"$OUT/ext4-provision.log" 2>&1
+cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-init -- \
+  "$IMAGE" 38654705664 "$KERNEL" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
+cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-inspect -- \
+  "$IMAGE" 38654705664 >"$OUT/control-inspect.log" 2>&1
 
 dd if="$IMAGE" of="$ESP_IMAGE" bs=512 skip=2048 count=1048576 \
   conv=sparse status=none
@@ -56,10 +67,17 @@ rc=$?
 set -e
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
 [ "$rc" -eq 124 ]
+grep -aq 'Jasper-OS boot manager starting' "$OUT/serial.log"
+grep -aq 'selecting slot=A reason=ConfirmedRelease attempt=1 release=1' "$OUT/serial.log"
 grep -aq '^\[JSR-BOOT-STAGE\] done stage=user_runtime' "$OUT/serial.log"
 grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
 grep -aq '^\[JSR-PLAN\] finish plan=production stages=0xffff cases=1' "$OUT/serial.log"
 grep -aqE '^\[JSR-PROD\] alive ticks=[1-9][0-9]*' "$OUT/serial.log"
 ! grep -aqE '^\[JSR-(PANIC|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
+cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-inspect -- \
+  "$IMAGE" 38654705664 >"$OUT/control-postboot.log" 2>&1
+grep -q 'generation=2 ' "$OUT/control-postboot.log"
+grep -q 'slot=A state=Confirmed generation=2 release=1 attempts=1' \
+  "$OUT/control-postboot.log"
 
 echo "issue21-uefi-boot: PASS qemu_rc=$rc evidence=$OUT"
