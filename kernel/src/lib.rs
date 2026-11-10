@@ -58,7 +58,7 @@ pub mod device_demo;
 pub mod interrupt;
 pub mod exit_state;
 pub mod fault;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
 pub mod linux_abi;
 #[cfg(all(feature = "compat-syscall-verify", target_arch = "x86_64"))]
 pub mod linux_abi_demo;
@@ -118,7 +118,7 @@ pub mod overload_demo;
 pub mod bench_demo;
 #[cfg(target_arch = "x86_64")]
 pub mod blk;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "compat-elf", target_arch = "x86_64"))]
 pub mod compat_elf;
 #[cfg(all(target_arch = "x86_64", feature = "compat-elf-backend-verify"))]
 pub mod compat_elf_demo;

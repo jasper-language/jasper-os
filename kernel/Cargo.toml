@@ -8,8 +8,11 @@ license = "Apache-2.0"
 
 [dependencies]
 kernel-core = { path = "../kernel-core" }
-jasper-compat-loader = { path = "../compat-loader" }
-compat-core = { package = "jasper-compat-core", path = "../compat-core" }
+# Compatibility crates are optional services. Native Jasper profiles must link
+# neither crate and must remain buildable when these components are absent.
+# 兼容 crate 属于可选服务；原生 Jasper Profile 不链接它们，并可在组件缺失时构建。
+jasper-compat-loader = { path = "../compat-loader", optional = true }
+compat-core = { package = "jasper-compat-core", path = "../compat-core", optional = true }
 spin = "0.12.3"
 ed25519-dalek = { version = "=3.0.0", default-features = false }
 
@@ -86,10 +89,16 @@ net2-verify = []
 net3-verify = []
 # NET-4 no_std UDP socket runtime without hosted QUIC artifacts.
 net4-runtime-verify = []
+# Linux syscall 兼容服务；只用显式 Linux Profile 引入，默认构建不含该依赖。
+# Linux syscall compatibility service. Only explicit Linux profiles enable it.
+linux-abi = ["dep:compat-core"]
+# Bounded Linux ELF planning and page-table backend as an optional service.
+# 有界 Linux ELF 规划与页表后端，仅在显式兼容 Profile 中装配。
+compat-elf = ["dep:jasper-compat-loader"]
 # Real compat-loader page-table backend and ELF entry handoff using an embedded Jasper image.
-compat-elf-backend-verify = ["user-programs"]
+compat-elf-backend-verify = ["user-programs", "compat-elf"]
 # Linux user-space syscall entry, explicit compatibility flavor and CPL3 probe.
-compat-syscall-verify = ["user-programs"]
+compat-syscall-verify = ["user-programs", "linux-abi"]
 # SEC-6 software memory capabilities, pointer provenance and CHERI-ready boundary.
 sec6-verify = []
 # Dedicated USI-1 CLI/structured service acceptance.

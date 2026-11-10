@@ -42,10 +42,12 @@ use crate::kobj::{self, KObject, TaskObj};
 use crate::mm::phys_to_virt;
 use crate::mm::space::{in_private_window, VmSpace};
 use crate::sync::IrqSpinLock;
-use crate::syscall::{SyscallFlavor, SyscallSet};
+use crate::syscall::SyscallSet;
 use crate::task::TaskId;
 use crate::{arch, kprintln, sched};
+#[cfg(feature = "linux-abi")]
 use compat_core::fd::FdTable;
+#[cfg(feature = "linux-abi")]
 use compat_core::syscall::{LinuxSyscall, LinuxSyscallSet};
 
 pub mod spawn;
@@ -53,11 +55,24 @@ pub mod spawn;
 /// 每个进程句柄表的容量。
 pub const HANDLES_PER_PROCESS: usize = crate::config::ACTIVE.objects.handles_per_process;
 const USI_REQUEST_SLOTS: usize = 16;
+#[cfg(feature = "linux-abi")]
 static LINUX_PID_NEXT: AtomicU32 = AtomicU32::new(1);
 /// Opaque sentinel used only by the Linux standard-stream compatibility table.
 ///
 /// 仅用于 Linux 标准流兼容表的受控控制台哨兵；它不是可解析的 Jasper 句柄。
+#[cfg(feature = "linux-abi")]
 pub(crate) const LINUX_CONSOLE_HANDLE: u64 = u64::MAX;
+
+/// Compatibility-only process state installed by the optional Linux service.
+///
+/// 可选 Linux 服务安装的进程兼容状态。原生 Jasper 进程不携带 fd 表、
+/// Linux pid 或 Linux syscall 权限位。
+#[cfg(feature = "linux-abi")]
+struct LinuxProcessState {
+    calls: LinuxSyscallSet,
+    fds: FdTable<64>,
+    pid: u32,
+}
 
 /// 进程状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,11 +111,10 @@ pub struct Process {
     /// Guest RAM ownership is a separate VM budget from ordinary process memory.
     vm_guest_account: Arc<crate::mm::memory_quota::Account>,
     subscription_account: Arc<crate::mm::memory_quota::Account>,
-    /// Linux compatibility process state; absent behavior is native Jasper.
-    syscall_flavor: SyscallFlavor,
-    linux_calls: LinuxSyscallSet,
-    linux_fds: FdTable<64>,
-    linux_pid: u32,
+    /// Present only when this process explicitly belongs to the Linux profile.
+    /// 仅当进程显式属于 Linux Profile 时存在。
+    #[cfg(feature = "linux-abi")]
+    linux: Option<LinuxProcessState>,
     /// 页表修改已生效但击落未确认时被永久隔离的帧：不再归还分配器，避免旧 TLB 继续引用后复用。
     /// Frames permanently withheld from the allocator after an unconfirmed shootdown.
     quarantined: Vec<PhysFrame>,
@@ -337,26 +351,27 @@ pub(crate) fn app_in(t: &mut kobj::Table, pid: ObjId) -> Option<u32> {
     }
 }
 
-/// Returns the syscall register convention selected for `pid`.
+/// Returns whether `pid` explicitly belongs to the optional Linux profile.
 ///
-/// 返回进程的 syscall 编号约定；不存在或已退出时返回 `None`。
-pub fn syscall_flavor(pid: ObjId) -> Option<SyscallFlavor> {
+/// 返回进程是否显式属于可选 Linux Profile；进程不存在或已退出时返回 `false`。
+#[cfg(feature = "linux-abi")]
+pub fn is_linux_process(pid: ObjId) -> bool {
     crate::kobj::with(|t| match t.get(pid) {
-        Ok(KObject::Process(p)) => Some(p.syscall_flavor),
-        _ => None,
+        Ok(KObject::Process(p)) => p.linux.is_some(),
+        _ => false,
     })
 }
 
 /// Checks that `pid` explicitly authorized one Linux syscall.
 ///
 /// 检查进程是否显式授权某个 Linux syscall；权限集合不授予任何 Jasper 原生操作。
+#[cfg(feature = "linux-abi")]
 pub(crate) fn linux_syscall_allowed(pid: ObjId, call: LinuxSyscall) -> bool {
     crate::kobj::with(|t| {
         matches!(
             t.get(pid),
             Ok(KObject::Process(p))
-                if p.syscall_flavor == SyscallFlavor::LinuxX86_64
-                    && p.linux_calls.contains(call)
+                if p.linux.as_ref().is_some_and(|linux| linux.calls.contains(call))
         )
     })
 }
@@ -364,11 +379,10 @@ pub(crate) fn linux_syscall_allowed(pid: ObjId, call: LinuxSyscall) -> bool {
 /// Resolves one Linux fd through the process compatibility table.
 ///
 /// 通过兼容 fd 表解析描述符；返回副本，后续 Handle/Rights 验证仍须执行。
+#[cfg(feature = "linux-abi")]
 pub(crate) fn linux_fd(pid: ObjId, fd: u32) -> Option<compat_core::fd::FdEntry> {
     crate::kobj::with(|t| match t.get(pid) {
-        Ok(KObject::Process(p)) if p.syscall_flavor == SyscallFlavor::LinuxX86_64 => {
-            p.linux_fds.get_fd(fd)
-        }
+        Ok(KObject::Process(p)) => p.linux.as_ref()?.fds.get_fd(fd),
         _ => None,
     })
 }
@@ -376,67 +390,52 @@ pub(crate) fn linux_fd(pid: ObjId, fd: u32) -> Option<compat_core::fd::FdEntry> 
 /// Returns the non-zero Linux pid namespace identity for one compatibility process.
 ///
 /// 返回 Linux 兼容进程在兼容 pid 命名空间中的非零身份。
+#[cfg(feature = "linux-abi")]
 pub(crate) fn linux_pid(pid: ObjId) -> Option<u32> {
     crate::kobj::with(|t| match t.get(pid) {
-        Ok(KObject::Process(p))
-            if p.syscall_flavor == SyscallFlavor::LinuxX86_64 && p.linux_pid != 0 =>
-        {
-            Some(p.linux_pid)
-        }
+        Ok(KObject::Process(p)) => p.linux.as_ref().map(|linux| linux.pid),
         _ => None,
     })
 }
 
 pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcError> {
-    create_with_flavor(
-        name,
-        syscalls,
-        SyscallFlavor::Jasper,
-        LinuxSyscallSet::EMPTY,
-        false,
-    )
+    create_process(name, syscalls, |_| {})
 }
 
 /// Creates a process whose x86_64 syscall entry uses the Linux compatibility flavor.
 ///
 /// 创建使用 Linux x86_64 syscall 编号的进程。Jasper 原生 SyscallSet 保持为空；
 /// Linux 调用权限由独立集合控制，标准输入输出仅映射到受控控制台哨兵。
-pub fn create_linux(
-    name: &'static str,
-    calls: LinuxSyscallSet,
-) -> Result<ObjId, ProcError> {
-    create_with_flavor(name, SyscallSet::EMPTY, SyscallFlavor::LinuxX86_64, calls, true)
+#[cfg(feature = "linux-abi")]
+pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId, ProcError> {
+    let pid = allocate_linux_pid().ok_or(ProcError::NoTaskSlot)?;
+    let mut fds = FdTable::new();
+    for (fd, rights) in [(0, Rights::READ), (1, Rights::WRITE), (2, Rights::WRITE)] {
+        fds.install_at(
+            fd,
+            LINUX_CONSOLE_HANDLE,
+            rights,
+            compat_core::fd::CompatKind::Other,
+            false,
+        )
+        .map_err(|_| ProcError::NoTaskSlot)?;
+    }
+    let linux = LinuxProcessState { calls, fds, pid };
+    create_process(name, SyscallSet::EMPTY, move |process| {
+        process.linux = Some(linux);
+    })
 }
 
-fn create_with_flavor(
+fn create_process(
     name: &'static str,
     syscalls: SyscallSet,
-    syscall_flavor: SyscallFlavor,
-    linux_calls: LinuxSyscallSet,
-    install_linux_fds: bool,
+    initialize: impl FnOnce(&mut Process),
 ) -> Result<ObjId, ProcError> {
-    let linux_pid = if syscall_flavor == SyscallFlavor::LinuxX86_64 {
-        allocate_linux_pid().ok_or(ProcError::NoTaskSlot)?
-    } else {
-        0
-    };
     let space = VmSpace::new().map_err(ProcError::Map)?;
     let memory_account = crate::mm::memory_quota::Account::new().ok_or(ProcError::OutOfFrames)?;
     let vm_guest_account = crate::mm::memory_quota::Account::new().ok_or(ProcError::OutOfFrames)?;
     let subscription_account =
         crate::mm::memory_quota::Account::new().ok_or(ProcError::OutOfFrames)?;
-    let mut linux_fds = FdTable::new();
-    if install_linux_fds {
-        for (fd, rights) in [
-            (0, Rights::READ),
-            (1, Rights::WRITE),
-            (2, Rights::WRITE),
-        ] {
-            linux_fds
-                .install_at(fd, LINUX_CONSOLE_HANDLE, rights, compat_core::fd::CompatKind::Other, false)
-                .map_err(|_| ProcError::NoTaskSlot)?;
-        }
-    }
     let exit_state = kobj::with(|t| {
         crate::exit_state::create_in_with_security(
             t,
@@ -447,7 +446,7 @@ fn create_with_flavor(
         )
     })
     .ok_or(ProcError::NoTaskSlot)?;
-    let p = Box::new(Process {
+    let mut process = Process {
         name,
         space,
         handles: HandleTable::new(),
@@ -459,10 +458,8 @@ fn create_with_flavor(
         memory_pin_limit: MAX_PROCESS_FRAMES as u64,
         vm_guest_account,
         subscription_account,
-        syscall_flavor,
-        linux_calls,
-        linux_fds,
-        linux_pid,
+        #[cfg(feature = "linux-abi")]
+        linux: None,
         quarantined: Vec::new(),
         device_maps: Vec::new(),
         threads: Vec::new(),
@@ -479,14 +476,11 @@ fn create_with_flavor(
         spawned_by: None,
         spawned_live: 0,
         app: 0,
-    });
-    let id = match kobj::insert_classified(
-        KObject::Process(p),
-        1,
-        0,
-        IdentityClass::Process,
-        None,
-    ) {
+    };
+    initialize(&mut process);
+    let p = Box::new(process);
+    let id = match kobj::insert_classified(KObject::Process(p), 1, 0, IdentityClass::Process, None)
+    {
         Ok(id) => id,
         Err(_) => {
             let _ = kobj::release_internal(exit_state); // 回滚：退出状态随之死亡
@@ -501,6 +495,7 @@ fn create_with_flavor(
     Ok(id)
 }
 
+#[cfg(feature = "linux-abi")]
 fn allocate_linux_pid() -> Option<u32> {
     loop {
         let current = LINUX_PID_NEXT.load(Ordering::Acquire);
@@ -1653,8 +1648,9 @@ pub fn load_elf(id: ObjId, image: &[u8]) -> Result<u64, LoadError> {
 ///
 /// 把没有 Jasper ABI/capability 章的静态 Linux ET_EXEC 映射到 Linux flavor 进程。
 /// 这是首片静态执行入口；动态解释器、libc 和信号栈仍由后续节点实现。
+#[cfg(feature = "linux-abi")]
 pub fn load_linux_elf(id: ObjId, image: &[u8]) -> Result<u64, LoadError> {
-    if syscall_flavor(id) != Some(SyscallFlavor::LinuxX86_64) {
+    if !is_linux_process(id) {
         return Err(LoadError::OutsideWindow);
     }
     load_static_elf(id, image, false)

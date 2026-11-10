@@ -285,6 +285,7 @@ bootcap_patch() { [ -z "${JASPER_BOOTCAP:-}" ] && return 0; run "$XTASK" bootcap
 # ---- 阶段 A：构建、测试、启动（产出证据）------------------------------------
 echo "== 构建与测试（核：$CORES，配置档：$PROFILE）=="
 JASO1_MULTI_RC=0
+NATIVE_ECO_RC=0
 if [ "$ARCH_ALL" -eq 1 ]; then
   mkdir -p "$OUT/jaso1-multi"
   if [ -n "${JASPER_JASO1_MULTI:-}" ]; then
@@ -303,6 +304,7 @@ else
   run cargo test -p kernel-core > "$OUT/cargo-test.log" 2>&1;                                 TEST_RC=$?
 fi
 run cargo test -p jaso --features pack > "$OUT/jaso-test.log" 2>&1;                           JASO_RC=$?
+run python3 scripts/check-native-ecosystem.py --dependency-tree > "$OUT/native-ecosystem.log" 2>&1; NATIVE_ECO_RC=$?
 run cargo build --release --target x86_64-unknown-none -p kernel-core > "$OUT/build.log" 2>&1; CORE_RC=$?
 run cargo build --release --target x86_64-unknown-none -p jasper-kernel "${KFEAT[@]}" "${SFEAT[@]}" "${HWV4_FEAT[@]}" >> "$OUT/build.log" 2>&1
 BUILD_RC=$?
@@ -3026,6 +3028,14 @@ check_ci1() {   # 公开仓库自动化验证：工作流在每次推送 / 拉�
   fi
 }
 
+check_nativeecosystem() {
+  if [ "$NATIVE_ECO_RC" -eq 0 ] && grep -q 'native-ecosystem: PASS \[core-passed\]' "$OUT/native-ecosystem.log"; then
+    record NATIVE-ECOSYSTEM PASS "默认 Jasper Profile 不链接兼容 crate；Linux syscall 与 ELF 后端由显式特性引入；组件安装/停用/卸载和默认发行退出仍 pending"
+  else
+    record NATIVE-ECOSYSTEM FAIL "兼容依赖边界、显式特性门控或原生 Profile 隔离检查失败"
+  fi
+}
+
 if [ "$SPOT" -eq 1 ]; then
   for c in ${JASPER_CHECKS:-m11}; do
     [ "$c" = "jaso1_multi" ] && continue
@@ -3035,11 +3045,11 @@ if [ "$SPOT" -eq 1 ]; then
     if declare -F "$checker" >/dev/null; then "$checker"; else record "$c" FAIL "定点验收：没有名为 check_$c 的检查"; fi
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
-  check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+  check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_nativeecosystem; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
   check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
   check_sched1; check_sched2; check_sched3
 else
-  check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+  check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_nativeecosystem; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
   check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
 fi
 
@@ -3071,9 +3081,9 @@ check_jaso1_multi
 } | tee "$OUT/summary.txt"
 
 if [ "$SPOT" -eq 1 ]; then
-  EVIDENCE_FILES=(cargo-test.log build.log serial.log summary.txt)
+  EVIDENCE_FILES=(cargo-test.log native-ecosystem.log build.log serial.log summary.txt)
 else
-  EVIDENCE_FILES=(cargo-test.log build.log serial.log serial-smp4.log serial-smp8.log serial-q35.log summary.txt s2/serial.log s2/build.log)
+  EVIDENCE_FILES=(cargo-test.log native-ecosystem.log build.log serial.log serial-smp4.log serial-smp8.log serial-q35.log summary.txt s2/serial.log s2/build.log)
 fi
 if [ "$ARCH_ALL" -eq 1 ]; then
   if [ "$SPOT" -eq 1 ]; then
