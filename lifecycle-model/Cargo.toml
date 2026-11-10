@@ -1,0 +1,13 @@
+[package]
+name = "jasper-lifecycle-model"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Executable LC-0 lifecycle and boot-control model"
+
+[lib]
+name = "jasper_lifecycle_model"
+path = "src/lib.rs"
+
+[dependencies]
+crc32fast = { version = "1.4.2", default-features = false }

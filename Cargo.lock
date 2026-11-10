@@ -705,11 +705,20 @@ version = "0.1.0"
 dependencies = [
  "bootloader_api",
  "ed25519-dalek",
+ "jasper-compat-core",
+ "jasper-compat-loader",
  "kernel-core",
  "noto-sans-mono-bitmap",
  "pic8259",
  "spin",
  "x86_64",
+]
+
+[[package]]
+name = "jasper-lifecycle-model"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
 ]
 
 [[package]]
@@ -1617,6 +1626,13 @@ dependencies = [
  "miniz_oxide",
  "sha2",
  "smoltcp",
+]
+
+[[package]]
+name = "user-linuxprobe"
+version = "0.1.0"
+dependencies = [
+ "kernel-core",
 ]
 
 [[package]]

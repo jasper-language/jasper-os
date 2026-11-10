@@ -10,7 +10,7 @@ manifest=$(mktemp)
 manifest_after=$(mktemp)
 trap 'rm -f "$manifest" "$manifest_after"' EXIT
 manifest_inputs() {
-    find kernel-core kernel abi user verification tools/krn1 .cargo -type d \( -name __pycache__ -o -name target -o -name corpus -o -name artifacts \) -prune -o -type f -print0 | sort -z | xargs -0 sha256sum
+    find kernel-core kernel lifecycle-model abi user verification tools/krn1 .cargo -type d \( -name __pycache__ -o -name target -o -name corpus -o -name artifacts \) -prune -o -type f -print0 | sort -z | xargs -0 sha256sum
     sha256sum Cargo.toml Cargo.lock rust-toolchain.toml
 }
 manifest_inputs > "$manifest"
@@ -26,6 +26,7 @@ cp "$manifest" "$run/inputs.sha256"
 rm -f "$run/PASS"
 {
     date -u +%FT%TZ
+    cargo test --locked -p jasper-lifecycle-model
     cargo test --manifest-path verification/toolbox/Cargo.toml --locked
     bash verification/toolbox/run-negative-transfer.sh
     bash scripts/abi-freeze.sh --check-reservations
