@@ -451,6 +451,12 @@ pub trait Platform {
     /// Kernel stack top currently registered for the executing processor.
     fn kernel_stack() -> u64;
 
+    /// 设置当前任务的用户 TLS 基址；默认架构不支持时返回 `false`。
+    /// Sets the current task's user TLS base where the platform exposes one.
+    fn set_user_fs_base(_base: u64) -> bool {
+        false
+    }
+
     /// 进入用户态执行（永不返回；回到内核只能经中断、异常或系统调用）。
     ///
     /// # Safety
@@ -765,6 +771,10 @@ pub fn set_kernel_stack(top: u64) {
 /// 见 [`Platform::kernel_stack`]。
 pub fn kernel_stack() -> u64 {
     Current::kernel_stack()
+}
+/// 设置当前任务的用户 TLS 基址。
+pub fn set_user_fs_base(base: u64) -> bool {
+    Current::set_user_fs_base(base)
 }
 /// 见 [`Platform::enter_user`]。
 ///

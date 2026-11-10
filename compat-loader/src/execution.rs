@@ -7,9 +7,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{
-    plan_lifecycle_order, ImageLayout, LifecycleCallbacks, LoadPlan, LoaderError,
-};
+use super::{plan_lifecycle_order, ImageLayout, LifecycleCallbacks, LoadPlan, LoaderError};
 
 const MAX_MODULES: usize = 256;
 const MAX_ENTRY_CALLS: usize = 65_536;
@@ -229,9 +227,16 @@ fn append_finalizers(
     output: &mut Vec<EntryCall>,
     module: &RuntimeModule,
 ) -> Result<(), LoaderError> {
-    let count = u32::try_from(module.callbacks.fini_array.len())
-        .map_err(|_| LoaderError::BadExecution)?;
-    for (index, address) in module.callbacks.fini_array.iter().rev().copied().enumerate() {
+    let count =
+        u32::try_from(module.callbacks.fini_array.len()).map_err(|_| LoaderError::BadExecution)?;
+    for (index, address) in module
+        .callbacks
+        .fini_array
+        .iter()
+        .rev()
+        .copied()
+        .enumerate()
+    {
         append_call(
             output,
             module,
@@ -519,8 +524,8 @@ pub fn build_initial_stack(input: InitialStackInput<'_>) -> Result<InitialStackP
         return Err(LoaderError::BadStack);
     }
     let mut bytes = vec![0u8; usize::try_from(total).map_err(|_| LoaderError::BadStack)?];
-    let high_destination = usize::try_from(high_start - stack_pointer)
-        .map_err(|_| LoaderError::BadStack)?;
+    let high_destination =
+        usize::try_from(high_start - stack_pointer).map_err(|_| LoaderError::BadStack)?;
     bytes[high_destination..high_destination + high.len()].copy_from_slice(&high);
 
     let mut cursor = 0usize;
@@ -760,12 +765,77 @@ pub fn stack_input_for_program<'a>(
     })
 }
 
+/// 已完成边界校验的主程序与未修改解释器布局。
+///
+/// Validated layouts for one dynamic executable and its unmodified Linux interpreter.
+/// The compatibility shim maps both images and transfers control to the interpreter; the
+/// interpreter owns dependency loading, runtime relocation, TLS and constructors.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DynamicProgramPlan {
+    /// 可执行主程序布局。/ Layout of the executable.
+    pub executable: ImageLayout,
+    /// 解释器布局。/ Layout of the program interpreter.
+    pub interpreter: ImageLayout,
+    /// 只含解释器入口的受控执行计划。
+    ///
+    /// Controlled execution plan whose only direct entry is the interpreter.
+    pub execution: ExecutionPlan,
+}
+
+/// 为主程序和解释器选择互不重叠的真实运行布局。
+///
+/// Builds disjoint runtime layouts for a dynamic executable and the interpreter named by its
+/// `PT_INTERP`. No relocation is applied and no lifecycle callback is invoked here.
+/// The caller must map both images, build the auxiliary vector with the main program's
+/// `AT_PHDR`/`AT_ENTRY` and the interpreter's `AT_BASE`, then transfer to `execution.entry()`.
+pub fn plan_dynamic_program(
+    executable_plan: &LoadPlan,
+    interpreter_plan: &LoadPlan,
+    executable_base: u64,
+    interpreter_base: u64,
+    page_size: u64,
+) -> Result<DynamicProgramPlan, LoaderError> {
+    if executable_plan.interpreter.is_none()
+        || !executable_plan.position_independent
+        || !interpreter_plan.position_independent
+        || interpreter_plan.interpreter.is_some()
+    {
+        return Err(LoaderError::BadInterpreter);
+    }
+    let executable_bias = super::select_load_bias(executable_plan, executable_base, page_size)?;
+    let interpreter_bias = super::select_load_bias(interpreter_plan, interpreter_base, page_size)?;
+    let executable = ImageLayout::new(executable_plan, executable_bias, page_size)?;
+    let interpreter = ImageLayout::new(interpreter_plan, interpreter_bias, page_size)?;
+    if executable.overlaps(&interpreter) {
+        return Err(LoaderError::OverlappingImages);
+    }
+    let modules = [RuntimeModule {
+        module_id: 1,
+        image: executable.clone(),
+        callbacks: LifecycleCallbacks::default(),
+        requires: Vec::new(),
+        interpreter_required: true,
+    }];
+    let execution = ExecutionPlan::new(&modules, 0, Some(&interpreter))?;
+    if execution.entry_source() != EntrySource::Interpreter
+        || execution.entry() != interpreter.entry
+        || execution.program_entry() != executable.entry
+        || !execution.init_calls().is_empty()
+        || !execution.fini_calls().is_empty()
+    {
+        return Err(LoaderError::BadExecution);
+    }
+    Ok(DynamicProgramPlan {
+        executable,
+        interpreter,
+        execution,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        LifecyclePlan, LoadSegment, TlsSegment, VirtualRange,
-    };
+    use crate::{LifecyclePlan, LoadSegment, TlsSegment, VirtualRange};
     use std::fs;
 
     fn image_with_entry(base: u64, entry: u64) -> ImageLayout {
@@ -1049,7 +1119,10 @@ mod tests {
         assert!(stack.contains(stack.stack_pointer, stack.bytes().len() as u64));
         assert!(!stack.contains(stack.stack_top, 1));
         assert_eq!(read_u64(&stack, stack.stack_pointer), 2);
-        assert_eq!(string_at(&stack, read_u64(&stack, stack.argv_pointer)), arg0);
+        assert_eq!(
+            string_at(&stack, read_u64(&stack, stack.argv_pointer)),
+            arg0
+        );
         assert_eq!(
             string_at(&stack, read_u64(&stack, stack.argv_pointer + 8)),
             arg1
@@ -1060,10 +1133,7 @@ mod tests {
         assert_eq!(stack.random_pointer, Some(read_aux(&stack, AT_RANDOM)));
         assert_eq!(read_aux(&stack, AT_ENTRY), 0x401000);
         assert_eq!(read_aux(&stack, AT_BASE), 0x7000_0000_0000);
-        assert_eq!(
-            string_at(&stack, read_aux(&stack, AT_EXECFN)),
-            b"/bin/true"
-        );
+        assert_eq!(string_at(&stack, read_aux(&stack, AT_EXECFN)), b"/bin/true");
         assert_eq!(read_aux(&stack, AT_NULL), 0);
     }
 
@@ -1211,6 +1281,81 @@ mod tests {
     }
 
     #[test]
+    fn real_dynamic_true_and_ld_linux_form_disjoint_interpreter_plan() {
+        let executable_bytes = fs::read("/usr/bin/true").unwrap();
+        let executable_plan = crate::parse(&executable_bytes).unwrap();
+        let interpreter_bytes = fs::read("/lib64/ld-linux-x86-64.so.2").unwrap();
+        let interpreter_plan = crate::parse(&interpreter_bytes).unwrap();
+        let plan = plan_dynamic_program(
+            &executable_plan,
+            &interpreter_plan,
+            0x1000_0040_0000,
+            0x1000_2000_0000,
+            4096,
+        )
+        .unwrap();
+        assert!(!plan.executable.overlaps(&plan.interpreter));
+        assert_eq!(plan.execution.entry(), plan.interpreter.entry);
+        assert_eq!(plan.execution.program_entry(), plan.executable.entry);
+        assert_eq!(plan.execution.entry_source(), EntrySource::Interpreter);
+        assert!(plan.execution.init_calls().is_empty());
+        assert!(plan.execution.fini_calls().is_empty());
+        assert_eq!(
+            plan.executable.load_bias,
+            super::super::select_load_bias(&executable_plan, 0x1000_0040_0000, 4096).unwrap()
+        );
+        assert_eq!(
+            plan.interpreter.load_bias,
+            super::super::select_load_bias(&interpreter_plan, 0x1000_2000_0000, 4096).unwrap()
+        );
+    }
+
+    #[test]
+    fn dynamic_program_plan_fails_closed_for_static_overlap_and_interpreter_chain() {
+        let executable_bytes = fs::read("/usr/bin/true").unwrap();
+        let mut executable_plan = crate::parse(&executable_bytes).unwrap();
+        let interpreter_bytes = fs::read("/lib64/ld-linux-x86-64.so.2").unwrap();
+        let interpreter_plan = crate::parse(&interpreter_bytes).unwrap();
+
+        assert_eq!(
+            plan_dynamic_program(
+                &executable_plan,
+                &interpreter_plan,
+                0x1000_0040_0000,
+                0x1000_0040_0000,
+                4096,
+            ),
+            Err(LoaderError::OverlappingImages)
+        );
+
+        let static_plan = crate::parse(&executable_bytes).unwrap();
+        executable_plan.interpreter = None;
+        assert_eq!(
+            plan_dynamic_program(
+                &executable_plan,
+                &interpreter_plan,
+                0x1000_0040_0000,
+                0x1000_2000_0000,
+                4096,
+            ),
+            Err(LoaderError::BadInterpreter)
+        );
+
+        let mut nested_interpreter = interpreter_plan;
+        nested_interpreter.interpreter = Some("/lib64/ld-linux-x86-64.so.2".into());
+        assert_eq!(
+            plan_dynamic_program(
+                &static_plan,
+                &nested_interpreter,
+                0x1000_0040_0000,
+                0x1000_2000_0000,
+                4096,
+            ),
+            Err(LoaderError::BadInterpreter)
+        );
+    }
+
+    #[test]
     fn real_bin_true_and_ld_linux_produce_interpreter_entry_frame() {
         let main_bytes = fs::read("/bin/true").unwrap();
         let main_plan = crate::parse(&main_bytes).unwrap();
@@ -1246,7 +1391,10 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(read_aux(&stack, AT_PHDR), 0x400000 + main_plan.program_headers.unwrap().address);
+        assert_eq!(
+            read_aux(&stack, AT_PHDR),
+            0x400000 + main_plan.program_headers.unwrap().address
+        );
         assert_eq!(read_aux(&stack, AT_ENTRY), main_image.entry);
         assert_eq!(read_aux(&stack, AT_BASE), interpreter_image.load_bias);
         let mut backend = RecordingBackend::default();

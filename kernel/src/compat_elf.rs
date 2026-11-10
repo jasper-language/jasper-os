@@ -84,9 +84,7 @@ impl JasperLoaderMemory {
     }
 
     fn transaction_mut(&mut self) -> Result<&mut Transaction, LoaderError> {
-        self.transaction
-            .as_mut()
-            .ok_or(LoaderError::BadTransaction)
+        self.transaction.as_mut().ok_or(LoaderError::BadTransaction)
     }
 }
 
@@ -107,10 +105,7 @@ impl LoaderMemory for JasperLoaderMemory {
     }
 
     fn rollback_transaction(&mut self) -> Result<(), LoaderError> {
-        let transaction = self
-            .transaction
-            .take()
-            .ok_or(LoaderError::BadTransaction)?;
+        let transaction = self.transaction.take().ok_or(LoaderError::BadTransaction)?;
         let mut failed = false;
         for address in transaction.mapped.iter().rev().copied() {
             failed |= proc::unmap_page(self.process, address).is_err();
@@ -218,8 +213,8 @@ impl LoaderMemory for JasperLoaderMemory {
             .map_err(|_| LoaderError::MemoryProtect)?;
         for page in 0..pages {
             let page_address = address + page * FRAME_SIZE;
-            let flags = proc::page_flags(self.process, page_address)
-                .ok_or(LoaderError::MemoryProtect)?;
+            let flags =
+                proc::page_flags(self.process, page_address).ok_or(LoaderError::MemoryProtect)?;
             previous.push(ProtectSnapshot {
                 address: page_address,
                 flags,
@@ -259,6 +254,7 @@ pub struct JasperExecutionBackend {
     process: ObjId,
     name: &'static str,
     task: Option<TaskId>,
+    stack_reserve_bytes: u64,
 }
 
 impl JasperExecutionBackend {
@@ -270,6 +266,24 @@ impl JasperExecutionBackend {
             process,
             name,
             task: None,
+            stack_reserve_bytes: 0,
+        }
+    }
+
+    /// Creates a backend with a fixed writable stack reservation below the initial frame.
+    ///
+    /// 创建在初始栈帧下方预留固定可写栈区的后端。Linux 解释器和 libc 会在进入入口后
+    /// 立即扩展调用栈；预留必须位于 Jasper 私有窗口内并由进程退出统一回收。
+    pub const fn with_stack_reserve(
+        process: ObjId,
+        name: &'static str,
+        stack_reserve_bytes: u64,
+    ) -> Self {
+        Self {
+            process,
+            name,
+            task: None,
+            stack_reserve_bytes,
         }
     }
 
@@ -287,7 +301,23 @@ impl JasperExecutionBackend {
         {
             return Err(LoaderError::BadStack);
         }
-        let start = stack.stack_pointer() - stack.stack_pointer() % FRAME_SIZE;
+        if self.stack_reserve_bytes % FRAME_SIZE != 0 {
+            return Err(LoaderError::BadStack);
+        }
+        let pointer_start = stack.stack_pointer() - stack.stack_pointer() % FRAME_SIZE;
+        let start = if self.stack_reserve_bytes == 0 {
+            pointer_start
+        } else {
+            let reserved_start = stack
+                .stack_top()
+                .checked_sub(self.stack_reserve_bytes)
+                .ok_or(LoaderError::BadStack)?
+                & !(FRAME_SIZE - 1);
+            if reserved_start < crate::arch::USER_WINDOW.0 || reserved_start > pointer_start {
+                return Err(LoaderError::BadStack);
+            }
+            reserved_start
+        };
         let end = stack
             .stack_top()
             .checked_add(FRAME_SIZE - 1)
@@ -300,12 +330,8 @@ impl JasperExecutionBackend {
             .map_err(|_| LoaderError::MemoryMap)?;
         for address in (start..end).step_by(FRAME_SIZE as usize) {
             if proc::page_flags(self.process, address).is_some()
-                || proc::map_new(
-                    self.process,
-                    address,
-                    MapFlags::USER.union(MapFlags::WRITE),
-                )
-                .is_err()
+                || proc::map_new(self.process, address, MapFlags::USER.union(MapFlags::WRITE))
+                    .is_err()
             {
                 for rollback in mapped.iter().rev().copied() {
                     let _ = proc::unmap_page(self.process, rollback);

@@ -100,6 +100,7 @@ impl Platform for X86_64 {
         gdt::init();
         crate::console::write_str("[JSR-GDT] ok\n");
         idt::init();
+        enable_sse();
         crate::console::write_str("[JSR-IDT] ok\n");
         syscall::init(0);
     }
@@ -256,6 +257,14 @@ impl Platform for X86_64 {
         syscall::kernel_stack()
     }
 
+    fn set_user_fs_base(base: u64) -> bool {
+        if base >= Self::USER_WINDOW.1 {
+            return false;
+        }
+        ::x86_64::registers::model_specific::FsBase::write(::x86_64::VirtAddr::new(base));
+        true
+    }
+
     unsafe fn enter_user(entry: u64, stack: u64, arg0: u64, arg1: u64) -> ! {
         user::enter(entry, stack, arg0, arg1)
     }
@@ -352,6 +361,27 @@ impl Platform for X86_64 {
             core::arch::asm!("lfence", "rdtsc", "lfence", out("eax") lo, out("edx") hi, options(nostack));
         }
         (u64::from(hi) << 32) | u64::from(lo)
+    }
+}
+
+/// 启用 x86_64 基线的 x87/SSE 用户状态。
+/// Enables the x87/SSE state required by x86_64 Linux user space.
+pub(super) fn enable_sse() {
+    const CR0_EM: u64 = 1 << 2;
+    const CR0_TS: u64 = 1 << 3;
+    const CR4_OSFXSR: u64 = 1 << 9;
+    const CR4_OSXMMEXCPT: u64 = 1 << 10;
+    // SAFETY: called on the bootstrap processor and every AP before user execution. x86_64
+    // guarantees SSE2/FXSAVE; each CPU must independently clear CR0.EM/TS and set CR4.OSFXSR.
+    unsafe {
+        let mut cr0: u64;
+        core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
+        cr0 &= !(CR0_EM | CR0_TS);
+        core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack, preserves_flags));
+        let mut cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+        cr4 |= CR4_OSFXSR | CR4_OSXMMEXCPT;
+        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
     }
 }
 

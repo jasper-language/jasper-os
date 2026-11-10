@@ -29,10 +29,10 @@ use goblin::elf::sym::{STB_GLOBAL, STB_LOCAL, STB_WEAK};
 use goblin::elf::Elf;
 
 pub use execution::{
-    build_initial_stack, run_preloaded_entry, run_preloaded_exit, run_process_entry,
-    stack_input_for_program, AuxvEntry, EntryCall, EntryCallKind, EntryFrame, EntrySource,
-    ExecutionBackend, ExecutionPlan, InitialStackInput, InitialStackPlan, ProgramStackInput,
-    RuntimeModule,
+    build_initial_stack, plan_dynamic_program, run_preloaded_entry, run_preloaded_exit,
+    run_process_entry, stack_input_for_program, AuxvEntry, DynamicProgramPlan, EntryCall,
+    EntryCallKind, EntryFrame, EntrySource, ExecutionBackend, ExecutionPlan, InitialStackInput,
+    InitialStackPlan, ProgramStackInput, RuntimeModule,
 };
 pub use memory::{
     initialize_tls_block, map_image, protect_relro, select_load_bias, ImageLayout, LoaderMemory,

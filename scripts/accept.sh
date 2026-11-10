@@ -91,6 +91,7 @@ esac
 [ "${JASPER_CHECKS:-}" = "net4runtime" ] && KFEAT+=(--features net4-runtime-verify)
 [ "${JASPER_CHECKS:-}" = "compatelfbackend" ] && KFEAT+=(--features compat-elf-backend-verify)
 [ "${JASPER_CHECKS:-}" = "compatsyscall" ] && KFEAT+=(--features compat-syscall-verify)
+[ "${JASPER_CHECKS:-}" = "compatdynamic" ] && KFEAT+=(--features compat-dynamic-libc-verify)
 [ "${JASPER_CHECKS:-}" = "hwv5-prod" ] && KFEAT+=(--features hwv5-prod-verify)
 HWV4_FEAT=()
 if [ -n "${JSR_LINUX_GUEST_HEADER:-}" ] && [ -n "${JSR_LINUX_GUEST_KERNEL:-}" ]; then
@@ -2973,6 +2974,19 @@ check_compatsyscall() {
     record COMPAT-SYSCALL PASS "真实 CPL3 静态 Linux ET_EXEC 经 flavor 分发执行 fd1/fd2 任意字节 write、getpid/gettid/exit_group；未授权 getppid 返回负 errno，退出与页帧回收通过"
   else
     record COMPAT-SYSCALL FAIL "缺少真实 Linux ET_EXEC 执行、syscall、权限拒绝、退出或资源回收证据"
+  fi
+}
+
+check_compatdynamic() {
+  if has '^\[JSR-COMPAT-DYNAMIC\] fixture=ubuntu-x86_64 executable=true ld_linux=true libc=true mapped=true entry=interpreter true interpreter_syscalls=true syscall_delta=[1-9][0-9]* exit_zero=true frames_before=[0-9]+ resources=true failed=0' \
+     && has '^\[JSR-LINUX-PATH\] kind=openat path=/lib/x86_64-linux-gnu/libc\.so\.6' \
+     && has '^\[JSR-LINUX-SYSCALL\].* nr=158 ' \
+     && has '^\[JSR-LINUX-SYSCALL\].* nr=9 ' \
+     && has '^\[JSR-PROC\] event=system\.process\.exited .*name=ubuntu-dynamic-true code=0 ' \
+     && ! has '^\[JSR-COMPAT-DYNAMIC-FAIL\]'; then
+    record COMPAT-DYNAMIC-LIBC PASS "真实 QEMU 中未修改的 Ubuntu x86_64 PIE 与 ld-linux 进入 Jasper Ring 3；解释器打开真实路径、读取并 mmap 未修改 libc，完成 arch_prctl/TLS 后执行 /usr/bin/true 并以 0 退出；页帧回基线"
+  else
+    record COMPAT-DYNAMIC-LIBC FAIL "缺少未修改 Ubuntu PIE/ld-linux/libc、解释器路径与 syscall、0 退出或资源回收证据"
   fi
 }
 

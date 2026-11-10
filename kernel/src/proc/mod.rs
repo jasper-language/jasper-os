@@ -71,7 +71,10 @@ pub(crate) const LINUX_CONSOLE_HANDLE: u64 = u64::MAX;
 struct LinuxProcessState {
     calls: LinuxSyscallSet,
     fds: FdTable<64>,
+    file_offsets: [u64; 64],
     pid: u32,
+    brk: u64,
+    mmap_next: u64,
 }
 
 /// 进程状态。
@@ -387,6 +390,94 @@ pub(crate) fn linux_fd(pid: ObjId, fd: u32) -> Option<compat_core::fd::FdEntry> 
     })
 }
 
+/// Installs a read-only Linux virtual file and initializes its offset.
+///
+/// 安装只读 Linux 虚拟文件；失败不留下部分 fd 状态。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_file(
+    pid: ObjId,
+    handle: u64,
+    close_on_exec: bool,
+) -> Option<u32> {
+    with_proc(pid, |p| {
+        if handle == 0 {
+            return Err(ProcError::Exited);
+        }
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                kernel_core::object::Rights::READ,
+                compat_core::fd::CompatKind::File,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.file_offsets[fd.fd() as usize] = 0;
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Returns `(handle, offset)` for an open read-only Linux file.
+///
+/// 返回已打开只读 Linux 文件的虚拟句柄与游标。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_file_state(pid: ObjId, fd: u32) -> Option<(u64, u64)> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => {
+            let linux = p.linux.as_ref()?;
+            if (fd as usize) >= linux.file_offsets.len() {
+                return None;
+            }
+            let entry = linux.fds.get_fd(fd)?;
+            (entry.kind == compat_core::fd::CompatKind::File
+                && entry.rights.contains(kernel_core::object::Rights::READ))
+            .then_some((entry.handle, linux.file_offsets[fd as usize]))
+        }
+        _ => None,
+    })
+}
+
+/// Commits a Linux file cursor after a successful operation.
+///
+/// 仅在成功操作后提交文件游标。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_file_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        if (fd as usize) >= linux.file_offsets.len() {
+            return Err(ProcError::Exited);
+        }
+        let entry = linux.fds.get_fd(fd).ok_or(ProcError::NoTaskSlot)?;
+        if entry.kind != compat_core::fd::CompatKind::File {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux.file_offsets[fd as usize] = offset;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Closes one Linux fd and resets its retired cursor.
+///
+/// 关闭 Linux fd；后续访问必须经过新的 fd 世代。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_close_fd(pid: ObjId, fd: u32) -> bool {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux
+            .fds
+            .close_fd(fd)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        if (fd as usize) < linux.file_offsets.len() {
+            linux.file_offsets[fd as usize] = 0;
+        }
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Returns the non-zero Linux pid namespace identity for one compatibility process.
 ///
 /// 返回 Linux 兼容进程在兼容 pid 命名空间中的非零身份。
@@ -396,6 +487,56 @@ pub(crate) fn linux_pid(pid: ObjId) -> Option<u32> {
         Ok(KObject::Process(p)) => p.linux.as_ref().map(|linux| linux.pid),
         _ => None,
     })
+}
+
+/// Returns the Linux compatibility program break.
+///
+/// 返回 Linux 兼容进程当前的 `brk` 地址。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_brk_value(pid: ObjId) -> Option<u64> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p.linux.as_ref().map(|linux| linux.brk),
+        _ => None,
+    })
+}
+
+/// Commits a fully validated Linux `brk` value.
+///
+/// 映射完成后提交 Linux `brk`。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_brk(pid: ObjId, value: u64) -> bool {
+    value != 0
+        && with_proc(pid, |p| {
+            let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+            linux.brk = value;
+            Ok(())
+        })
+        .is_ok()
+}
+
+/// Returns the next candidate address for Linux `mmap`.
+///
+/// 返回 Linux `mmap` 的下一个候选地址，不预留映射。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_mmap_cursor(pid: ObjId) -> Option<u64> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p.linux.as_ref().map(|linux| linux.mmap_next),
+        _ => None,
+    })
+}
+
+/// Advances the Linux `mmap` cursor after all mappings succeed.
+///
+/// 仅在映射全部成功后推进 Linux `mmap` 游标。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_mmap_cursor(pid: ObjId, value: u64) -> bool {
+    value != 0
+        && with_proc(pid, |p| {
+            let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+            linux.mmap_next = value;
+            Ok(())
+        })
+        .is_ok()
 }
 
 pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcError> {
@@ -420,7 +561,14 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         )
         .map_err(|_| ProcError::NoTaskSlot)?;
     }
-    let linux = LinuxProcessState { calls, fds, pid };
+    let linux = LinuxProcessState {
+        calls,
+        fds,
+        file_offsets: [0; 64],
+        pid,
+        brk: arch::USER_WINDOW.0 + 0x1000_0000,
+        mmap_next: arch::USER_WINDOW.0 + 0x4000_0000,
+    };
     create_process(name, SyscallSet::EMPTY, move |process| {
         process.linux = Some(linux);
     })

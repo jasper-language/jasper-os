@@ -1,20 +1,29 @@
 //! Linux x86_64 syscall identification mapped to Jasper compatibility operations.
 
 use linux_raw_sys::general::{
-    __NR_clone, __NR_close, __NR_epoll_create1, __NR_epoll_ctl, __NR_epoll_wait, __NR_execve,
-    __NR_epoll_pwait, __NR_epoll_pwait2, __NR_exit, __NR_exit_group, __NR_futex, __NR_getpid,
-    __NR_getppid, __NR_gettid, __NR_io_uring_enter, __NR_io_uring_register, __NR_io_uring_setup,
-    __NR_mmap, __NR_mprotect, __NR_munmap, __NR_openat, __NR_read, __NR_rt_sigaction,
-    __NR_rt_sigprocmask, __NR_write,
+    __NR_access, __NR_arch_prctl, __NR_brk, __NR_clock_gettime, __NR_clone, __NR_close,
+    __NR_epoll_create1, __NR_epoll_ctl, __NR_epoll_pwait, __NR_epoll_pwait2, __NR_epoll_wait,
+    __NR_execve, __NR_exit, __NR_exit_group, __NR_fstat, __NR_futex, __NR_getpid, __NR_getppid,
+    __NR_gettid, __NR_io_uring_enter, __NR_io_uring_register, __NR_io_uring_setup, __NR_mmap,
+    __NR_mprotect, __NR_munmap, __NR_newfstatat, __NR_openat, __NR_pread64, __NR_read,
+    __NR_rt_sigaction, __NR_rt_sigprocmask, __NR_write, __NR_writev,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum LinuxSyscall {
     Read,
+    Pread64,
     Write,
+    WriteV,
     Close,
     OpenAt,
+    Fstat,
+    NewFstatAt,
+    Brk,
+    Access,
+    ArchPrctl,
+    ClockGettime,
     Mmap,
     Munmap,
     Mprotect,
@@ -53,7 +62,7 @@ pub enum LinuxSyscall {
 /// 一个 Linux 兼容进程可显式发起的 syscall 集合。该集合不是 Jasper 原生
 /// `SyscallSet` 的别名，也不绕过兼容层参数和 Handle/Rights 检查。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LinuxSyscallSet(u32);
+pub struct LinuxSyscallSet(u64);
 
 impl LinuxSyscallSet {
     /// No Linux syscall is authorized.
@@ -63,10 +72,10 @@ impl LinuxSyscallSet {
     /// Builds an explicit set from supported Linux syscall identities.
     /// 从受支持的 Linux syscall 身份构造显式集合。
     pub const fn of(calls: &[LinuxSyscall]) -> Self {
-        let mut bits = 0u32;
+        let mut bits = 0u64;
         let mut index = 0;
         while index < calls.len() {
-            bits |= 1u32 << calls[index] as u8;
+            bits |= 1u64 << calls[index] as u8;
             index += 1;
         }
         Self(bits)
@@ -75,11 +84,11 @@ impl LinuxSyscallSet {
     /// Returns whether the call is authorized.
     /// 判断该 syscall 是否获准。
     pub const fn contains(self, syscall: LinuxSyscall) -> bool {
-        self.0 & (1u32 << syscall as u8) != 0
+        self.0 & (1u64 << syscall as u8) != 0
     }
 }
 
-const _: () = assert!((LinuxSyscall::IoUringRegister as u8) < 32);
+const _: () = assert!((LinuxSyscall::ClockGettime as u8) < 64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LinuxCall {
@@ -128,9 +137,17 @@ pub enum CompatErrno {
 pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
     let syscall = match request.number {
         value if value == u64::from(__NR_read) => LinuxSyscall::Read,
+        value if value == u64::from(__NR_pread64) => LinuxSyscall::Pread64,
         value if value == u64::from(__NR_write) => LinuxSyscall::Write,
+        value if value == u64::from(__NR_writev) => LinuxSyscall::WriteV,
         value if value == u64::from(__NR_close) => LinuxSyscall::Close,
         value if value == u64::from(__NR_openat) => LinuxSyscall::OpenAt,
+        value if value == u64::from(__NR_fstat) => LinuxSyscall::Fstat,
+        value if value == u64::from(__NR_newfstatat) => LinuxSyscall::NewFstatAt,
+        value if value == u64::from(__NR_brk) => LinuxSyscall::Brk,
+        value if value == u64::from(__NR_access) => LinuxSyscall::Access,
+        value if value == u64::from(__NR_arch_prctl) => LinuxSyscall::ArchPrctl,
+        value if value == u64::from(__NR_clock_gettime) => LinuxSyscall::ClockGettime,
         value if value == u64::from(__NR_mmap) => LinuxSyscall::Mmap,
         value if value == u64::from(__NR_munmap) => LinuxSyscall::Munmap,
         value if value == u64::from(__NR_mprotect) => LinuxSyscall::Mprotect,
@@ -176,9 +193,17 @@ mod tests {
     fn core_linux_syscalls_use_target_uapi_numbers() {
         let expected = [
             (__NR_read, LinuxSyscall::Read),
+            (__NR_pread64, LinuxSyscall::Pread64),
             (__NR_write, LinuxSyscall::Write),
+            (__NR_writev, LinuxSyscall::WriteV),
             (__NR_close, LinuxSyscall::Close),
             (__NR_openat, LinuxSyscall::OpenAt),
+            (__NR_fstat, LinuxSyscall::Fstat),
+            (__NR_newfstatat, LinuxSyscall::NewFstatAt),
+            (__NR_brk, LinuxSyscall::Brk),
+            (__NR_access, LinuxSyscall::Access),
+            (__NR_arch_prctl, LinuxSyscall::ArchPrctl),
+            (__NR_clock_gettime, LinuxSyscall::ClockGettime),
             (__NR_getpid, LinuxSyscall::GetPid),
             (__NR_futex, LinuxSyscall::Futex),
             (__NR_epoll_wait, LinuxSyscall::EpollWait),

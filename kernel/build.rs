@@ -207,6 +207,9 @@ fn main() {
             println!("cargo:rustc-env={target}={}", path.display());
         }
     }
+    if std::env::var_os("CARGO_FEATURE_COMPAT_DYNAMIC_LIBC_VERIFY").is_some() {
+        configure_dynamic_libc_fixtures();
+    }
     // AArch64 / LoongArch64 / RISC-V 没有本项目使用的引导器：用本仓库的链接脚本固定装载地址与段布局。
     let script = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("aarch64")
@@ -272,6 +275,66 @@ fn enforce_production_feature_isolation(root: &std::path::Path) {
             "production feature isolation: forbidden features enabled: {}",
             forbidden.join(", ")
         );
+    }
+}
+
+/// 校验真实 Ubuntu 动态用户态 fixture，并把实际文件路径交给内核 `include_bytes!`。
+/// Validates real Ubuntu dynamic fixtures and exposes their paths to the kernel.
+fn configure_dynamic_libc_fixtures() {
+    use goblin::elf::header::{ELFCLASS64, ELFDATA2LSB, EM_X86_64, ET_DYN};
+
+    for (variable, default, description) in [
+        ("JSR_UBUNTU_TRUE", "/usr/bin/true", "Ubuntu executable"),
+        (
+            "JSR_UBUNTU_LD_LINUX",
+            "/lib64/ld-linux-x86-64.so.2",
+            "Ubuntu program interpreter",
+        ),
+        (
+            "JSR_UBUNTU_LIBC",
+            "/lib/x86_64-linux-gnu/libc.so.6",
+            "Ubuntu libc",
+        ),
+    ] {
+        println!("cargo:rerun-if-env-changed={variable}");
+        let path = std::env::var_os(variable)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(default));
+        println!("cargo:rerun-if-changed={}", path.display());
+        let bytes = std::fs::read(&path).unwrap_or_else(|error| {
+            panic!(
+                "{description} fixture 无法读取：{}（{error}）；可设置 {variable} 指向真实文件",
+                path.display()
+            )
+        });
+        let elf = goblin::elf::Elf::parse(&bytes).unwrap_or_else(|error| {
+            panic!(
+                "{description} fixture 不是可解析 ELF：{}（{error}）",
+                path.display()
+            )
+        });
+        assert_eq!(elf.header.e_ident[4], ELFCLASS64, "{description} 必须是 ELF64");
+        assert_eq!(elf.header.e_ident[5], ELFDATA2LSB, "{description} 必须是小端");
+        assert_eq!(elf.header.e_machine, EM_X86_64, "{description} 必须是 x86_64");
+        assert_eq!(elf.header.e_type, ET_DYN, "{description} 必须是 ET_DYN");
+        match variable {
+            "JSR_UBUNTU_TRUE" => assert_eq!(
+                elf.interpreter,
+                Some("/lib64/ld-linux-x86-64.so.2"),
+                "Ubuntu executable 必须声明未修改的 ld-linux"
+            ),
+            "JSR_UBUNTU_LD_LINUX" => {
+                assert!(elf.interpreter.is_none(), "ld-linux 自身不得再声明 PT_INTERP")
+            }
+            "JSR_UBUNTU_LIBC" => assert!(
+                elf.dynsyms.iter().any(|symbol| {
+                    elf.dynstrtab.get_at(symbol.st_name) == Some("__libc_start_main")
+                }),
+                "libc fixture 必须导出 __libc_start_main"
+            ),
+            _ => unreachable!(),
+        }
+        println!("cargo:rustc-env={variable}={}", path.display());
     }
 }
 
