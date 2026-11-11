@@ -1379,6 +1379,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::Read => compat_result(linux_read(pid, call.args)),
         LinuxSyscall::Pread64 => compat_result(linux_pread64(pid, call.args)),
         LinuxSyscall::ReadV => compat_result(linux_readv(pid, call.args)),
+        LinuxSyscall::ReadLinkAt => compat_result(linux_readlinkat(pid, call.args)),
         LinuxSyscall::Close => compat_result(linux_close(pid, call.args[0])),
         LinuxSyscall::OpenAt => compat_result(linux_openat(pid, call.args)),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
@@ -2548,6 +2549,16 @@ fn linux_readlink(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         copy_to_user(args[1], &target[..copied], copied).map_err(|_| CompatErrno::Fault)?;
     }
     Ok(copied as u64)
+}
+
+/// Implements `readlinkat(AT_FDCWD, "/proc/self/exe")`.
+///
+/// 仅支持兼容根下的执行路径查询；其他目录 fd、flags 或路径失败关闭。
+fn linux_readlinkat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if !is_at_fdcwd(args[0]) {
+        return Err(CompatErrno::Invalid);
+    }
+    linux_readlink(pid, [args[1], args[2], args[3], 0, 0, 0])
 }
 
 /// Stores or queries one x86_64 Linux signal action.
