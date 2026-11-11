@@ -50,6 +50,7 @@ struct LinuxThread {
     altstack_sp: u64,
     altstack_size: u64,
     altstack_flags: u32,
+    altstack_depth: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -209,6 +210,7 @@ pub(crate) fn register_linux_thread(
             altstack_sp: 0,
             altstack_size: 0,
             altstack_flags: 2,
+            altstack_depth: 0,
         });
         tid
     };
@@ -324,9 +326,9 @@ fn set_current_signal_mask(process: ObjId, mask: u64) -> bool {
     true
 }
 
-/// Returns the current thread alternate signal stack.
-/// 返回当前线程的备用信号栈。
-fn current_altstack(process: ObjId) -> Option<(u64, u64, u32)> {
+/// Returns the current thread alternate signal stack and active depth.
+/// 返回当前线程的备用信号栈及活动深度。
+fn current_altstack(process: ObjId) -> Option<(u64, u64, u32, u8)> {
     let (task, _) = sched::current();
     COMPAT
         .lock()
@@ -334,7 +336,14 @@ fn current_altstack(process: ObjId) -> Option<(u64, u64, u32)> {
         .iter()
         .flatten()
         .find(|entry| entry.process == process && entry.task == task)
-        .map(|entry| (entry.altstack_sp, entry.altstack_size, entry.altstack_flags))
+        .map(|entry| {
+            (
+                entry.altstack_sp,
+                entry.altstack_size,
+                entry.altstack_flags,
+                entry.altstack_depth,
+            )
+        })
 }
 
 /// Queries or updates the current thread alternate signal stack.
@@ -343,8 +352,22 @@ fn linux_sigaltstack(process: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno>
     const STACK_T_BYTES: usize = 24;
     const SS_DISABLE: u32 = 2;
     const MIN_ALTSTACK: u64 = 2048;
-    let (sp, size, flags) = current_altstack(process).ok_or(CompatErrno::NoSys)?;
+    let (sp, size, configured_flags, active_depth) =
+        current_altstack(process).ok_or(CompatErrno::NoSys)?;
+    let flags = configured_flags
+        | if active_depth != 0 {
+            1
+        } else {
+            0
+        };
     if args[1] != 0 {
+        if active_depth != 0 {
+            crate::kprintln!(
+                "[JSR-LINUX-ALTSTACK] query active=true depth={} flags={:#x}",
+                active_depth,
+                flags
+            );
+        }
         let mut old = [0u8; STACK_T_BYTES];
         old[..8].copy_from_slice(&sp.to_le_bytes());
         old[8..12].copy_from_slice(&flags.to_le_bytes());
@@ -352,6 +375,13 @@ fn linux_sigaltstack(process: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno>
         copy_to_user(args[1], &old, STACK_T_BYTES).map_err(|_| CompatErrno::Fault)?;
     }
     if args[0] != 0 {
+        if active_depth != 0 {
+            crate::kprintln!(
+                "[JSR-LINUX-ALTSTACK] change_denied active=true depth={}",
+                active_depth
+            );
+            return Err(CompatErrno::Perm);
+        }
         let mut value = [0u8; STACK_T_BYTES];
         copy_from_user(&mut value, args[0], STACK_T_BYTES).map_err(|_| CompatErrno::Fault)?;
         let requested_sp = u64::from_le_bytes(value[..8].try_into().unwrap());
@@ -387,6 +417,48 @@ fn linux_sigaltstack(process: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno>
         entry.altstack_flags = new_flags;
     }
     Ok(0)
+}
+
+/// Marks one signal frame as executing on the alternate stack.
+/// 标记一个信号帧正在备用栈上执行。
+fn enter_altstack(process: ObjId) -> bool {
+    let (task, _) = sched::current();
+    let mut state = COMPAT.lock();
+    let Some(entry) = state
+        .threads
+        .iter_mut()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)
+    else {
+        return false;
+    };
+    let Some(next) = entry.altstack_depth.checked_add(1) else {
+        return false;
+    };
+    entry.altstack_depth = next;
+    crate::kprintln!("[JSR-LINUX-ALTSTACK] enter depth={}", next);
+    true
+}
+
+/// Leaves one signal frame that was marked as using the alternate stack.
+/// 离开一个标记为使用备用栈的信号帧。
+fn leave_altstack(process: ObjId) -> bool {
+    let (task, _) = sched::current();
+    let mut state = COMPAT.lock();
+    let Some(entry) = state
+        .threads
+        .iter_mut()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)
+    else {
+        return false;
+    };
+    let Some(next) = entry.altstack_depth.checked_sub(1) else {
+        return false;
+    };
+    entry.altstack_depth = next;
+    crate::kprintln!("[JSR-LINUX-ALTSTACK] leave depth={}", next);
+    true
 }
 
 /// Takes the lowest unmasked pending signal for the current thread.
@@ -427,6 +499,7 @@ const SIGNAL_UC_OFFSET: usize = 8;
 const SIGNAL_UC_GREGS: usize = 40;
 const SIGNAL_UC_SIGMASK: usize = 296;
 const SIGNAL_INFO_OFFSET: usize = SIGNAL_UC_OFFSET + 968;
+const JASPER_UC_FLAG_ALTSTACK: u64 = 1u64 << 63;
 
 fn write_frame_u64(frame: &mut [u8], offset: usize, value: u64) {
     if let Some(field) = frame.get_mut(offset..offset + 8) {
@@ -480,7 +553,7 @@ fn build_signal_frame(
     }
     let old_mask = current_signal_mask(process).ok_or(CompatErrno::Invalid)?;
     let (stack_top, red_zone) = if action[1] & SA_ONSTACK != 0 {
-        let (sp, size, flags) = current_altstack(process).ok_or(CompatErrno::Invalid)?;
+        let (sp, size, flags, _) = current_altstack(process).ok_or(CompatErrno::Invalid)?;
         if flags != 0 || size < SIGNAL_FRAME_BYTES as u64 || !user_register(sp) {
             return Err(CompatErrno::Invalid);
         }
@@ -511,6 +584,10 @@ fn build_signal_frame(
         .ok_or(CompatErrno::Fault)?;
     let mut frame = [0u8; SIGNAL_FRAME_BYTES];
     write_frame_u64(&mut frame, 0, action[2]);
+    let uses_altstack = action[1] & SA_ONSTACK != 0;
+    if uses_altstack {
+        write_frame_u64(&mut frame, SIGNAL_UC_OFFSET, JASPER_UC_FLAG_ALTSTACK);
+    }
     let gregs = SIGNAL_UC_OFFSET + SIGNAL_UC_GREGS;
     let restart_futex = action[1] & SA_RESTART != 0
         && args.id == LINUX_NR_FUTEX
@@ -567,6 +644,10 @@ fn build_signal_frame(
         let _ = set_current_signal_mask(process, old_mask);
         return Err(CompatErrno::Fault);
     }
+    if uses_altstack && !enter_altstack(process) {
+        let _ = set_current_signal_mask(process, old_mask);
+        return Err(CompatErrno::Invalid);
+    }
     crate::kprintln!(
         "[JSR-LINUX-SIGNAL] delivered tid={} signal={} interrupted_result={} restart_futex={} nodefer={} reset_hand={} altstack={} handler={:#x} frame={:#x} info={:#x} context={:#x}",
         linux_tid(process).unwrap_or(0),
@@ -575,7 +656,7 @@ fn build_signal_frame(
         restart_futex,
         nodefer,
         reset_hand,
-        action[1] & SA_ONSTACK != 0,
+        uses_altstack,
         handler,
         frame_address,
         info_address,
@@ -663,6 +744,7 @@ fn linux_rt_sigreturn(process: ObjId, user_rsp: u64) -> Result<UserReturn, Compa
     }
     let mut context = [0u8; 968];
     proc::read(process, user_rsp, &mut context).map_err(|_| CompatErrno::Fault)?;
+    let uc_flags = u64::from_le_bytes(context[..8].try_into().expect("fixed uc_flags field"));
     let greg = |index: usize| {
         u64::from_le_bytes(
             context[SIGNAL_UC_GREGS + index * 8..SIGNAL_UC_GREGS + index * 8 + 8]
@@ -681,6 +763,9 @@ fn linux_rt_sigreturn(process: ObjId, user_rsp: u64) -> Result<UserReturn, Compa
             .expect("fixed signal-mask field"),
     );
     if !set_current_signal_mask(process, old_mask) {
+        return Err(CompatErrno::Invalid);
+    }
+    if uc_flags & JASPER_UC_FLAG_ALTSTACK != 0 && !leave_altstack(process) {
         return Err(CompatErrno::Invalid);
     }
     crate::kprintln!(

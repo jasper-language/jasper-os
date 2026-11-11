@@ -33,6 +33,9 @@ static volatile sig_atomic_t alarm_count;
 static volatile sig_atomic_t term_count;
 static volatile sig_atomic_t prof_count;
 static volatile uintptr_t handler_stack_address;
+static volatile sig_atomic_t altstack_onstack_before;
+static volatile sig_atomic_t altstack_onstack_after;
+static volatile sig_atomic_t altstack_change_denied;
 static unsigned char alternate_stack[64 * 1024] __attribute__((aligned(16)));
 
 static void usr2_handler(int signal, siginfo_t *info, void *context) {
@@ -105,6 +108,28 @@ static void prof_handler(int signal, siginfo_t *info, void *context) {
         _exit(21);
     }
     handler_stack_address = (uintptr_t)&marker;
+    stack_t active;
+    if (sigaltstack(0, &active) != 0 || !(active.ss_flags & SS_ONSTACK)) {
+        _exit(25);
+    }
+    altstack_onstack_before = 1;
+    if (raise(SIGUSR2) != 0) {
+        _exit(26);
+    }
+    if (sigaltstack(0, &active) != 0 || !(active.ss_flags & SS_ONSTACK)) {
+        _exit(27);
+    }
+    altstack_onstack_after = 1;
+    stack_t replacement = {
+        .ss_sp = alternate_stack + 16,
+        .ss_flags = 0,
+        .ss_size = sizeof(alternate_stack) - 16,
+    };
+    errno = 0;
+    if (sigaltstack(&replacement, 0) != -1 || errno != EPERM) {
+        _exit(28);
+    }
+    altstack_change_denied = 1;
     prof_count++;
 }
 
@@ -228,7 +253,9 @@ int main(void) {
     }
     if (raise(SIGPROF) != 0 || prof_count != 1 ||
         handler_stack_address < (uintptr_t)alternate_stack ||
-        handler_stack_address >= (uintptr_t)alternate_stack + sizeof(alternate_stack)) {
+        handler_stack_address >= (uintptr_t)alternate_stack + sizeof(alternate_stack) ||
+        !altstack_onstack_before || !altstack_onstack_after ||
+        !altstack_change_denied || usr2_count != 2) {
         return 22;
     }
     stack_t current_altstack;
