@@ -226,6 +226,16 @@ def main() -> int:
             "docs/native-ecosystem-independence.md",
             ("默认 Jasper Profile", "发行组件卸载", "默认发行退出"),
         )
+        require_anchors(
+            "docs/issue-23-28-constraints.md",
+            (
+                "路径不是 Jasper 原生权限凭证",
+                "不建立无条件超级主体",
+                "唯一权威",
+                "普通进程不能直接争抢 UART",
+                "默认、no-default 和生产 dependency tree",
+            ),
+        )
 
     trees = check_dependency_trees() if args.dependency_tree else 0
     mode = "planning" if planning_present else "code-only"
