@@ -1413,6 +1413,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
             .ok_or(CompatErrno::NoSys)
             .unwrap_or_else(|error| -i64::from(error as i32)),
         LinuxSyscall::GetRandom => compat_result(linux_getrandom(call.args)),
+        LinuxSyscall::Getcwd => compat_result(linux_getcwd(call.args)),
         LinuxSyscall::SetTidAddress => set_clear_child_tid(pid, call.args[0])
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
@@ -1469,6 +1470,22 @@ fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     copy_from_user(&mut bytes, args[1], len).map_err(|_| CompatErrno::Fault)?;
     console::write_bytes(&bytes);
     Ok(len as u64)
+}
+
+/// Returns the compatibility process's current directory.
+///
+/// 返回兼容进程的当前目录；当前装载命名空间只提供 System A 根。
+fn linux_getcwd(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const CWD: &[u8] = b"/\0";
+    let size = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if size == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if size < CWD.len() {
+        return Err(CompatErrno::Range);
+    }
+    copy_to_user(args[0], CWD, CWD.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(CWD.len() as u64)
 }
 
 /// Writes one Linux iovec array to an authorized console descriptor.
