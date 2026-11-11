@@ -58,10 +58,23 @@ const CMOS_DATA: u16 = 0x71;
 const RTC_REG_A: u8 = 0x0A;
 const RTC_REG_B: u8 = 0x0B;
 const RTC_REG_C: u8 = 0x0C;
+const RTC_SECONDS: u8 = 0x00;
+const RTC_MINUTES: u8 = 0x02;
+const RTC_HOURS: u8 = 0x04;
+const RTC_DAY: u8 = 0x07;
+const RTC_MONTH: u8 = 0x08;
+const RTC_YEAR: u8 = 0x09;
+const RTC_CENTURY: u8 = 0x32;
 /// 寄存器 B：周期中断使能。
 const RTC_PIE: u8 = 0x40;
+/// 寄存器 B：字段使用二进制而非 BCD。
+const RTC_BINARY: u8 = 0x04;
+/// 寄存器 B：小时使用 24 小时制。
+const RTC_24_HOUR: u8 = 0x02;
 /// 寄存器 A 的速率选择 3 = 8192 Hz（周期中断的最高频率）。
 const RTC_RATE_8192: u8 = 0x03;
+/// 寄存器 A：更新进行中。
+const RTC_UIP: u8 = 0x80;
 
 /// 一条线在 I/O APIC 上的位置。
 struct Pin {
@@ -273,4 +286,119 @@ fn cmos_write_locked(reg: u8, v: u8) {
         outb(CMOS_INDEX, reg);
         outb(CMOS_DATA, v);
     }
+}
+
+/// Reads the firmware RTC as UTC seconds since the Unix epoch.
+///
+/// 从固件 CMOS RTC 读取 UTC Unix 秒。稳定性、BCD 与 12 小时制转换在这里完成；
+/// 没有可信 RTC 或字段非法时返回 `None`，调用者不得用单调时钟冒充 wall clock。
+pub(crate) fn wall_clock_unix_seconds() -> Option<u64> {
+    let (status_b, fields, century) = without_irq(|| {
+        let _guard = CMOS.lock();
+        let status_b = cmos_read_locked(RTC_REG_B);
+        let mut fields = None;
+        for _ in 0..3 {
+            let first = stable_rtc_fields_locked()?;
+            let second = stable_rtc_fields_locked()?;
+            if first == second {
+                fields = Some(first);
+                break;
+            }
+        }
+        fields.map(|fields| (status_b, fields, cmos_read_locked(RTC_CENTURY)))
+    })?;
+
+    let binary = status_b & RTC_BINARY != 0;
+    let twenty_four_hour = status_b & RTC_24_HOUR != 0;
+    let second = decode_rtc_field(fields[0], binary)?;
+    let minute = decode_rtc_field(fields[1], binary)?;
+    let raw_hour = fields[2];
+    let mut hour = decode_rtc_field(raw_hour & 0x7F, binary)?;
+    if !twenty_four_hour {
+        if raw_hour & 0x80 != 0 && hour < 12 {
+            hour = hour.checked_add(12)?;
+        } else if raw_hour & 0x80 == 0 && hour == 12 {
+            hour = 0;
+        }
+    }
+    let day = decode_rtc_field(fields[3], binary)?;
+    let month = decode_rtc_field(fields[4], binary)?;
+    let short_year = decode_rtc_field(fields[5], binary)?;
+    let century = decode_rtc_field(century, binary).unwrap_or(0);
+    let year = if century == 0 {
+        if short_year < 70 {
+            2000 + u32::from(short_year)
+        } else {
+            1900 + u32::from(short_year)
+        }
+    } else {
+        u32::from(century) * 100 + u32::from(short_year)
+    };
+    if second > 59
+        || minute > 59
+        || hour > 23
+        || day == 0
+        || day > 31
+        || month == 0
+        || month > 12
+        || !(1970..=9999).contains(&year)
+    {
+        return None;
+    }
+    let days = days_from_civil(i64::from(year), i64::from(month), i64::from(day))?;
+    if days < 0 {
+        return None;
+    }
+    (days as u64)
+        .checked_mul(86_400)?
+        .checked_add(u64::from(hour) * 3_600 + u64::from(minute) * 60 + u64::from(second))
+}
+
+fn stable_rtc_fields_locked() -> Option<[u8; 6]> {
+    for _ in 0..1_000_000 {
+        if cmos_read_locked(RTC_REG_A) & RTC_UIP == 0 {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    if cmos_read_locked(RTC_REG_A) & RTC_UIP != 0 {
+        return None;
+    }
+    let fields = [
+        cmos_read_locked(RTC_SECONDS),
+        cmos_read_locked(RTC_MINUTES),
+        cmos_read_locked(RTC_HOURS),
+        cmos_read_locked(RTC_DAY),
+        cmos_read_locked(RTC_MONTH),
+        cmos_read_locked(RTC_YEAR),
+    ];
+    for _ in 0..1_000_000 {
+        if cmos_read_locked(RTC_REG_A) & RTC_UIP == 0 {
+            return Some(fields);
+        }
+        core::hint::spin_loop();
+    }
+    None
+}
+
+fn decode_rtc_field(value: u8, binary: bool) -> Option<u8> {
+    if binary {
+        return Some(value);
+    }
+    let high = value >> 4;
+    let low = value & 0x0F;
+    (high <= 9 && low <= 9).then_some(high * 10 + low)
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || !(1970..=9999).contains(&year) {
+        return None;
+    }
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year - era * 400;
+    let shifted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(era * 146_097 + day_of_era - 719_468)
 }

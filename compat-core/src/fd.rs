@@ -147,6 +147,27 @@ impl<const N: usize> FdTable<N> {
         self.install_at_or_above(min_fd, entry.handle, rights, entry.kind, close_on_exec)
     }
 
+    /// Duplicates the current generation of a descriptor by its numeric fd.
+    ///
+    /// 按当前数字描述符复制其有效世代；失效 fd 不会与复用后的新世代混淆。
+    pub fn duplicate_fd(
+        &mut self,
+        source: u32,
+        min_fd: u32,
+        close_on_exec: bool,
+    ) -> Result<FdHandle, FdTableError> {
+        let entry = self.get_fd(source).ok_or(FdTableError::InvalidFd)?;
+        self.duplicate(
+            FdHandle {
+                fd: source,
+                generation: entry.generation,
+            },
+            min_fd,
+            close_on_exec,
+            None,
+        )
+    }
+
     pub fn get(&self, handle: FdHandle) -> Result<FdEntry, FdTableError> {
         let index = handle.fd as usize;
         let Some(slot) = self.slots.get(index).and_then(|slot| *slot) else {
@@ -388,5 +409,31 @@ mod tests {
             Err(FdTableError::Rights)
         );
         assert_eq!(fds.open_count(), 1);
+    }
+
+    #[test]
+    fn duplicate_fd_uses_the_current_generation_and_minimum() {
+        let mut fds = FdTable::<8>::new();
+        let source = fds
+            .install_at(
+                2,
+                0x55,
+                Rights::READ,
+                CompatKind::Directory,
+                false,
+            )
+            .unwrap();
+        let duplicate = fds.duplicate_fd(2, 4, true).unwrap();
+        assert_eq!(duplicate.fd(), 4);
+        assert_eq!(fds.get(duplicate).unwrap().handle, 0x55);
+        assert!(fds.get(duplicate).unwrap().close_on_exec);
+        assert_eq!(fds.close_fd(2), Ok(0x55));
+        assert_eq!(fds.duplicate_fd(2, 0, false), Err(FdTableError::InvalidFd));
+        let replacement = fds
+            .install_at_or_above(2, 0x66, Rights::READ, CompatKind::File, false)
+            .unwrap();
+        assert_eq!(replacement.fd(), 2);
+        assert_ne!(replacement.generation(), source.generation());
+        assert_eq!(fds.get(duplicate).unwrap().handle, 0x55);
     }
 }

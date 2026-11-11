@@ -399,6 +399,28 @@ pub(crate) fn linux_fd(pid: ObjId, fd: u32) -> Option<compat_core::fd::FdEntry> 
     })
 }
 
+/// Duplicates one current Linux descriptor at or above `minimum`.
+///
+/// 按当前世代复制 Linux 描述符；新描述符继承 Handle、Rights 与兼容类型。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_duplicate_fd(
+    pid: ObjId,
+    fd: u32,
+    minimum: u32,
+    close_on_exec: bool,
+) -> Option<u32> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let duplicate = linux
+            .fds
+            .duplicate_fd(fd, minimum, close_on_exec)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.file_offsets[duplicate.fd() as usize] = linux.file_offsets[fd as usize];
+        Ok(duplicate.fd())
+    })
+    .ok()
+}
+
 /// Installs a read-only Linux virtual file and initializes its offset.
 ///
 /// 安装只读 Linux 虚拟文件；失败不留下部分 fd 状态。

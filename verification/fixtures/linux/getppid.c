@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
+#include <sys/time.h>
 #include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
@@ -112,26 +113,43 @@ int main(void) {
         resolution.tv_nsec >= 1000000000L) {
         return 20;
     }
+    struct timespec realtime_resolution;
+    struct timespec realtime_now;
+    struct timeval realtime_value;
+    if (clock_getres(CLOCK_REALTIME, &realtime_resolution) != 0 ||
+        realtime_resolution.tv_sec != 1 ||
+        realtime_resolution.tv_nsec != 0 ||
+        clock_gettime(CLOCK_REALTIME, &realtime_now) != 0 ||
+        gettimeofday(&realtime_value, NULL) != 0) {
+        return 21;
+    }
+    long realtime_delta =
+        (long)(realtime_value.tv_sec - realtime_now.tv_sec);
+    if (realtime_now.tv_sec < 1600000000LL ||
+        realtime_now.tv_sec > 4102444800LL ||
+        realtime_delta < -2 || realtime_delta > 2) {
+        return 21;
+    }
     struct timespec before_sleep;
     struct timespec after_sleep;
     const struct timespec short_delay = {.tv_sec = 0, .tv_nsec = 20000000};
     if (clock_gettime(CLOCK_MONOTONIC, &before_sleep) != 0) {
         printf("jasper-time-fail stage=before errno=%d\n", errno);
-        return 21;
+        return 22;
     }
     if (nanosleep(&short_delay, NULL) != 0) {
         printf("jasper-time-fail stage=nanosleep errno=%d\n", errno);
-        return 21;
+        return 22;
     }
     if (clock_gettime(CLOCK_MONOTONIC, &after_sleep) != 0) {
         printf("jasper-time-fail stage=after errno=%d\n", errno);
-        return 21;
+        return 22;
     }
     long long relative_elapsed =
         (after_sleep.tv_sec - before_sleep.tv_sec) * 1000000000LL +
         (after_sleep.tv_nsec - before_sleep.tv_nsec);
     if (relative_elapsed < 10000000LL) {
-        return 22;
+        return 23;
     }
     struct timespec absolute_deadline = after_sleep;
     absolute_deadline.tv_nsec += 10000000L;
@@ -142,32 +160,32 @@ int main(void) {
     if (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME,
                         &absolute_deadline, NULL) != 0 ||
         clock_gettime(CLOCK_MONOTONIC, &after_sleep) != 0) {
-        return 23;
+        return 24;
     }
     long long absolute_elapsed =
         (after_sleep.tv_sec - absolute_deadline.tv_sec) * 1000000000LL +
         (after_sleep.tv_nsec - absolute_deadline.tv_nsec);
     if (absolute_elapsed < 0) {
-        return 24;
+        return 25;
     }
     errno = 0;
     if (nanosleep((const struct timespec *)1, NULL) != -1 || errno != EFAULT) {
-        return 25;
+        return 26;
     }
     errno = 0;
     if (syscall(SYS_clock_nanosleep, CLOCK_PROCESS_CPUTIME_ID, 0,
                 &short_delay, NULL) != -1 || errno != EINVAL) {
-        return 26;
+        return 27;
     }
     DIR *root = opendir("/");
     if (root == NULL) {
-        return 27;
+        return 28;
     }
     int root_fd = dirfd(root);
     errno = 0;
     if (syscall(SYS_getdents64, root_fd, (void *)1, 256) != -1 ||
         errno != EFAULT) {
-        return 28;
+        return 29;
     }
     int saw_usr = 0;
     unsigned root_entries = 0;
@@ -184,32 +202,32 @@ int main(void) {
     }
     if (errno != 0 || root_entries < 4 || !saw_usr ||
         first_root_name[0] == '\0') {
-        return 29;
+        return 30;
     }
     rewinddir(root);
     entry = readdir(root);
     if (entry == NULL || strcmp(entry->d_name, first_root_name) != 0) {
-        return 30;
+        return 31;
     }
     int usr_fd = openat(root_fd, "usr", O_RDONLY | O_CLOEXEC | O_DIRECTORY);
     if (usr_fd < 0) {
-        return 31;
+        return 32;
     }
     struct stat usr_stat;
     if (fstat(usr_fd, &usr_stat) != 0 || !S_ISDIR(usr_stat.st_mode)) {
-        return 32;
+        return 33;
     }
     if (fstatat(root_fd, "usr", &usr_stat, 0) != 0 ||
         !S_ISDIR(usr_stat.st_mode)) {
-        return 33;
+        return 34;
     }
     close(usr_fd);
     if (closedir(root) != 0) {
-        return 34;
+        return 35;
     }
     DIR *directory = opendir("/usr/lib/x86_64-linux-gnu");
     if (directory == NULL) {
-        return 35;
+        return 36;
     }
     unsigned library_mask = 0;
     while ((entry = readdir(directory)) != NULL) {
@@ -221,19 +239,19 @@ int main(void) {
         if (strcmp(entry->d_name, "libpcre2-8.so.0") == 0) library_mask |= 1u << 5;
     }
     if (closedir(directory) != 0 || library_mask != 0x3fu) {
-        return 36;
+        return 37;
     }
     errno = 0;
     directory = opendir("/usr/lib/x86_64-linux-gnu/libc.so.6");
     if (directory != NULL || errno != ENOTDIR) {
         if (directory != NULL) closedir(directory);
-        return 37;
+        return 38;
     }
     close(fd);
-    printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld dirent=6\n",
+    printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld wall=%lld dirent=6\n",
            (int)parent, (long long)end, CPU_COUNT(&cpus), cpu, node,
            (long long)info.uptime, (unsigned long long)info.totalram,
            (unsigned long long)info.freeram, (unsigned)info.procs, executable,
-           resolution.tv_nsec, relative_elapsed);
+           resolution.tv_nsec, relative_elapsed, (long long)realtime_now.tv_sec);
     return 0;
 }

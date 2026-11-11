@@ -118,6 +118,23 @@ pub const KERNEL_PROBE_VA: u64 = <Current as Platform>::KERNEL_PROBE_VA;
 /// 超出可用虚拟地址范围的地址，见 [`Platform::INVALID_VA`]。
 pub const INVALID_VA: u64 = <Current as Platform>::INVALID_VA;
 
+/// Returns the current trusted wall-clock value in Unix nanoseconds.
+///
+/// 返回可信实时 wall clock 的 Unix 纳秒值；没有可信 RTC 的平台返回 `None`，
+/// 绝不会退回单调时钟。x86 CMOS RTC 当前只有一秒分辨率。
+#[cfg(target_arch = "x86_64")]
+pub fn wall_clock_ns() -> Option<u64> {
+    self::x86_64::wall_clock_unix_seconds()?.checked_mul(1_000_000_000)
+}
+
+/// Returns `None` when the current platform has no declared trusted wall clock.
+///
+/// 当前平台没有声明可信 wall clock 时返回 `None`。
+#[cfg(not(target_arch = "x86_64"))]
+pub fn wall_clock_ns() -> Option<u64> {
+    None
+}
+
 /// 用户态探针程序（M3.1 验收用的最小用户代码；每个 ISA 各自提供机器码）。
 ///
 /// 约定：进入用户态时第一个参数寄存器 = 用户数据页地址，第二个 = 参数。

@@ -1332,10 +1332,16 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
     let Some(pid) = proc::current_process() else {
         return SyscallOutcome::value(-i64::from(CompatErrno::NoSys as i32));
     };
-    let SyscallDispatch::Mapped(call) = dispatch(SyscallRequest {
+    let dispatched = dispatch(SyscallRequest {
         number: a.id,
         args: a.args,
-    }) else {
+    });
+    let SyscallDispatch::Mapped(call) = dispatched else {
+        #[cfg(any(
+            feature = "compat-dynamic-libc-verify",
+            feature = "lifecycle-root-exec-verify"
+        ))]
+        crate::kprintln!("[JSR-LINUX-UNSUPPORTED] nr={}", a.id);
         return SyscallOutcome::value(-i64::from(CompatErrno::NoSys as i32));
     };
     if !proc::linux_syscall_allowed(pid, call.syscall) {
@@ -1354,6 +1360,13 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
         };
     }
     let value = execute(pid, call, a.user_ip);
+    #[cfg(any(
+        feature = "compat-dynamic-libc-verify",
+        feature = "lifecycle-root-exec-verify"
+    ))]
+    if value == -i64::from(CompatErrno::NoSys as i32) {
+        crate::kprintln!("[JSR-LINUX-ENOSYS] call={:?}", call.syscall);
+    }
     let redirect = deliver_pending_signal(pid, a, a.user_ip, value);
     if proc::current_exiting() {
         proc::thread_exit(0, "linux signal default action");
@@ -1372,6 +1385,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::ReadLinkAt => compat_result(linux_readlinkat(pid, call.args)),
         LinuxSyscall::Close => compat_result(linux_close(pid, call.args[0])),
         LinuxSyscall::OpenAt => compat_result(linux_openat(pid, call.args)),
+        LinuxSyscall::Fchdir => compat_result(linux_fchdir(pid, call.args[0])),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
         LinuxSyscall::NewFstatAt => compat_result(linux_newfstatat(pid, call.args)),
         LinuxSyscall::Fcntl => compat_result(linux_fcntl(pid, call.args)),
@@ -1410,6 +1424,8 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
             .ok_or(CompatErrno::NoSys)
             .unwrap_or_else(|error| -i64::from(error as i32)),
         LinuxSyscall::GetRandom => compat_result(linux_getrandom(call.args)),
+        LinuxSyscall::GetTimeOfDay => compat_result(linux_gettimeofday(call.args)),
+        LinuxSyscall::Time => compat_result(linux_time(call.args)),
         LinuxSyscall::Getcwd => compat_result(linux_getcwd(call.args)),
         LinuxSyscall::GetUid | LinuxSyscall::GetEuid => {
             compat_core::syscall::LINUX_COMPAT_UID as i64
@@ -2391,30 +2407,67 @@ fn linux_arch_prctl(args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(0)
 }
 
-/// Implements `clock_gettime(2)` for the Jasper monotonic clock.
+/// Implements `clock_gettime(2)` for trusted realtime and Jasper monotonic clocks.
 ///
-/// 当前只声明 `CLOCK_MONOTONIC`，使用高精度内核单调时钟；没有可信墙上时钟时不对
-/// `CLOCK_REALTIME` 伪造时间。时间戳以 x86_64 Linux `timespec` 写回用户空间。
+/// `CLOCK_MONOTONIC` 使用高精度内核单调时钟；`CLOCK_REALTIME` 只能取自信任的
+/// 硬件 RTC。没有可信 RTC 时返回 `ENOSYS`，不会用单调时钟伪造时间。
 fn linux_clock_gettime(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const CLOCK_REALTIME: u64 = 0;
     const CLOCK_MONOTONIC: u64 = 1;
-    if args[0] != CLOCK_MONOTONIC {
-        return Err(CompatErrno::Invalid);
-    }
-    write_linux_timespec(args[1], crate::sched::now_ns())
+    let now = match args[0] {
+        CLOCK_MONOTONIC => crate::sched::now_ns(),
+        CLOCK_REALTIME => crate::arch::wall_clock_ns().ok_or(CompatErrno::NoSys)?,
+        _ => return Err(CompatErrno::Invalid),
+    };
+    write_linux_timespec(args[1], now)
 }
 
-/// Reports the compatibility monotonic clock's conservative timer resolution.
+/// Implements the legacy `gettimeofday(2)` view over the trusted RTC.
 ///
-/// 报告兼容单调时钟的保守定时器分辨率；`NULL` 查询合法，当前没有墙上时钟。
-fn linux_clock_getres(args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const CLOCK_MONOTONIC: u64 = 1;
-    if args[0] != CLOCK_MONOTONIC {
+/// 从可信 RTC 写入 x86_64 `struct timeval`；时区参数明确拒绝，不伪造宿主时区。
+fn linux_gettimeofday(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[1] != 0 {
         return Err(CompatErrno::Invalid);
     }
+    let now = crate::arch::wall_clock_ns().ok_or(CompatErrno::NoSys)?;
+    let mut value = [0u8; 16];
+    value[0..8].copy_from_slice(&(now / 1_000_000_000).to_le_bytes());
+    value[8..16].copy_from_slice(&((now % 1_000_000_000) / 1_000).to_le_bytes());
+    copy_to_user(args[0], &value, value.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Implements `time(2)` using the trusted RTC.
+///
+/// 使用可信 RTC 返回 Unix 秒；非空输出指针收到同样的 `time_t`。
+fn linux_time(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let seconds = crate::arch::wall_clock_ns()
+        .ok_or(CompatErrno::NoSys)?
+        / 1_000_000_000;
+    if args[0] != 0 {
+        copy_to_user(args[0], &seconds.to_le_bytes(), 8).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(seconds)
+}
+
+/// Reports the compatibility clock's conservative timer resolution.
+///
+/// 报告兼容时钟的保守定时器分辨率；RTC 当前只有一秒分辨率，`NULL` 查询合法。
+fn linux_clock_getres(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const CLOCK_REALTIME: u64 = 0;
+    const CLOCK_MONOTONIC: u64 = 1;
+    let resolution = match args[0] {
+        CLOCK_MONOTONIC => crate::hrtime::tick_ns().max(1),
+        CLOCK_REALTIME => {
+            crate::arch::wall_clock_ns().ok_or(CompatErrno::NoSys)?;
+            1_000_000_000
+        }
+        _ => return Err(CompatErrno::Invalid),
+    };
     if args[1] == 0 {
         return Ok(0);
     }
-    write_linux_timespec(args[1], crate::hrtime::tick_ns().max(1))
+    write_linux_timespec(args[1], resolution)
 }
 
 /// Sleeps for a relative monotonic duration.
@@ -2437,21 +2490,28 @@ fn linux_nanosleep(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
 }
 
-/// Implements relative realtime/monotonic sleep and monotonic absolute sleep.
+/// Implements relative realtime/monotonic sleep and absolute realtime/monotonic sleep.
 ///
-/// 单调时钟支持相对与 `TIMER_ABSTIME`；实时时钟仅支持不依赖墙上时间的相对睡眠。
+/// 相对等待统一使用单调截止期；绝对 realtime 期限先与可信 RTC 当前值作差，再转换为
+/// 单调截止期，因此 RTC 只在进入等待时读取，不参与调度器计时。
 fn linux_clock_nanosleep(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const CLOCK_REALTIME: u64 = 0;
     const CLOCK_MONOTONIC: u64 = 1;
     const TIMER_ABSTIME: u64 = 1;
     let absolute = args[1] & TIMER_ABSTIME != 0;
-    let supported_clock = args[0] == CLOCK_MONOTONIC || (args[0] == CLOCK_REALTIME && !absolute);
-    if !supported_clock || args[1] & !TIMER_ABSTIME != 0 {
+    if args[0] != CLOCK_MONOTONIC && args[0] != CLOCK_REALTIME
+        || args[1] & !TIMER_ABSTIME != 0
+    {
         return Err(CompatErrno::Invalid);
     }
     let requested = read_linux_timespec(args[2])?;
     let deadline = if absolute {
-        requested
+        if args[0] == CLOCK_REALTIME {
+            let wall = crate::arch::wall_clock_ns().ok_or(CompatErrno::NoSys)?;
+            crate::sched::now_ns().saturating_add(requested.saturating_sub(wall))
+        } else {
+            requested
+        }
     } else {
         crate::sched::now_ns().saturating_add(requested)
     };
@@ -2536,10 +2596,14 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const O_CLOEXEC: u64 = 0x80000;
     const O_DIRECTORY: u64 = 0x10000;
     const O_NONBLOCK: u64 = 0x800;
+    const O_NOCTTY: u64 = 0x100;
+    const O_NOFOLLOW: u64 = 0x20000;
     #[cfg(feature = "compat-dynamic-libc-verify")]
     trace_path_address(pid, "openat-address", args[1]);
     let flags = args[2];
-    if flags & 3 != 0 || flags & !(O_CLOEXEC | O_DIRECTORY | O_NONBLOCK) != 0 {
+    if flags & 3 != 0
+        || flags & !(O_CLOEXEC | O_DIRECTORY | O_NONBLOCK | O_NOCTTY | O_NOFOLLOW) != 0
+    {
         return Err(CompatErrno::Perm);
     }
     let path = linux_c_string(args[1], 4096)?;
@@ -2593,6 +2657,20 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     .ok_or(CompatErrno::NoSpace)?;
     Ok(u64::from(fd))
+}
+
+/// Restores the compatibility working directory to the authorized root directory.
+///
+/// 当前兼容 cwd 只有根视图，因此 `fchdir` 只接受根目录 fd；子目录 cwd 明确返回
+/// `ENOSYS`，不把根路径冒充子目录路径。
+fn linux_fchdir(pid: ObjId, fd: u64) -> Result<u64, CompatErrno> {
+    let fd = u32::try_from(fd).map_err(|_| CompatErrno::BadFd)?;
+    let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if handle == crate::linux_vfs::DirectoryId::Root.handle() {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoSys)
+    }
 }
 
 /// Reads a bounded NUL-terminated Linux path from user memory.
@@ -2710,19 +2788,40 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 ///
 /// 当前支持 `F_GETFD` 与 `F_SETFD`；未知命令和未知 fd 标志失败关闭。
 fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const F_DUPFD: u64 = 0;
+    const F_DUPFD_CLOEXEC: u64 = 1030;
     const F_GETFD: u64 = 1;
     const F_SETFD: u64 = 2;
+    const F_GETFL: u64 = 3;
     const FD_CLOEXEC: u64 = 1;
+    const O_NONBLOCK: u64 = 0x800;
+    const O_DIRECTORY: u64 = 0x10000;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     match args[1] {
         F_GETFD => Ok(u64::from(entry.close_on_exec)),
+        F_GETFL => Ok(if entry.kind == compat_core::fd::CompatKind::Directory {
+            O_NONBLOCK | O_DIRECTORY
+        } else {
+            0
+        }),
         F_SETFD if args[2] & !FD_CLOEXEC == 0 => {
             if proc::linux_set_fd_cloexec(pid, fd, args[2] & FD_CLOEXEC != 0) {
                 Ok(0)
             } else {
                 Err(CompatErrno::BadFd)
             }
+        }
+        F_DUPFD | F_DUPFD_CLOEXEC => {
+            let minimum = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+            let duplicate = proc::linux_duplicate_fd(
+                pid,
+                fd,
+                minimum,
+                args[1] == F_DUPFD_CLOEXEC,
+            )
+            .ok_or(CompatErrno::NoSpace)?;
+            Ok(u64::from(duplicate))
         }
         F_SETFD => Err(CompatErrno::Invalid),
         _ => Err(CompatErrno::NoSys),
