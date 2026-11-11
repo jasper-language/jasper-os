@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/syscall.h>
+#include <sys/sysinfo.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
@@ -75,8 +76,20 @@ int main(void) {
     if (syscall(SYS_getcpu, (void *)1, NULL, NULL) != -1 || errno != EFAULT) {
         return 14;
     }
+    struct sysinfo info;
+    if (sysinfo(&info) != 0 || info.uptime < 0 || info.totalram == 0 ||
+        info.freeram == 0 || info.freeram > info.totalram || info.mem_unit == 0 ||
+        info.procs == 0 || info.totalswap != 0 || info.freeswap != 0) {
+        return 15;
+    }
+    errno = 0;
+    if (syscall(SYS_sysinfo, (void *)1) != -1 || errno != EFAULT) {
+        return 16;
+    }
     close(fd);
-    printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u\n",
-           (int)parent, (long long)end, CPU_COUNT(&cpus), cpu, node);
+    printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u\n",
+           (int)parent, (long long)end, CPU_COUNT(&cpus), cpu, node,
+           (long long)info.uptime, (unsigned long long)info.totalram,
+           (unsigned long long)info.freeram, (unsigned)info.procs);
     return 0;
 }
