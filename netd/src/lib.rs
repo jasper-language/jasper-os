@@ -10,8 +10,8 @@ use std::time::Duration;
 pub use quinn;
 pub use rustls;
 
-pub mod service;
 pub mod jasper_sink;
+pub mod service;
 pub mod wireguard_driver;
 
 /// WireGuard protocol state comes from the same no_std adapter used by the
@@ -157,6 +157,7 @@ pub async fn echo_once(
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     use quinn::{Endpoint, ServerConfig};
     use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -275,6 +276,118 @@ mod tests {
         writer.await.unwrap();
         task.await.unwrap();
         endpoint.wait_idle().await;
+    }
+
+    async fn exchange_stream(connection: &quinn::Connection, payload: &[u8]) {
+        let (mut send, mut recv) = connection.open_bi().await.unwrap();
+        send.write_all(payload).await.unwrap();
+        send.finish().unwrap();
+        assert_eq!(recv.read_to_end(payload.len()).await.unwrap(), payload);
+    }
+
+    #[tokio::test]
+    async fn quic_recovers_from_bidirectional_udp_packet_loss() {
+        let profile = QuicProfile {
+            idle_timeout: Duration::from_secs(10),
+            ..QuicProfile::default()
+        };
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let certificate = certified.cert.der().clone();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certified.signing_key.serialize_der(),
+        ));
+        let mut server = Endpoint::server(
+            server_config(certificate.clone(), key, profile).unwrap(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        )
+        .unwrap();
+        server.set_default_client_config(client_config(certificate.clone(), profile).unwrap());
+        let server_addr = server.local_addr().unwrap();
+        let mut client =
+            Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+        client.set_default_client_config(client_config(certificate, profile).unwrap());
+
+        let proxy_client =
+            tokio::net::UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+                .await
+                .unwrap();
+        let proxy_server =
+            tokio::net::UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+                .await
+                .unwrap();
+        let proxy_addr = proxy_client.local_addr().unwrap();
+        let client_drops = Arc::new(AtomicU32::new(0));
+        let server_drops = Arc::new(AtomicU32::new(0));
+        let task_client_drops = Arc::clone(&client_drops);
+        let task_server_drops = Arc::clone(&server_drops);
+        let proxy = tokio::spawn(async move {
+            let mut client_addr = None;
+            let mut from_client = vec![0u8; 64 * 1024];
+            let mut from_server = vec![0u8; 64 * 1024];
+            loop {
+                tokio::select! {
+                    received = proxy_client.recv_from(&mut from_client) => {
+                        let (len, source) = received.unwrap();
+                        client_addr = Some(source);
+                        let drop = task_client_drops.try_update(
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                            |remaining| remaining.checked_sub(1),
+                        ).is_ok();
+                        if !drop {
+                            proxy_server.send_to(&from_client[..len], server_addr).await.unwrap();
+                        }
+                    }
+                    received = proxy_server.recv_from(&mut from_server) => {
+                        let (len, source) = received.unwrap();
+                        if source != server_addr {
+                            continue;
+                        }
+                        let drop = task_server_drops.try_update(
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                            |remaining| remaining.checked_sub(1),
+                        ).is_ok();
+                        if !drop {
+                            if let Some(client) = client_addr {
+                                proxy_client.send_to(&from_server[..len], client).await.unwrap();
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let server_task = tokio::spawn(async move {
+            let connection = server.accept().await.unwrap().await.unwrap();
+            for payload in [vec![0x31; 16 * 1024], vec![0x72; 32 * 1024]] {
+                let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+                let received = recv.read_to_end(payload.len()).await.unwrap();
+                send.write_all(&received).await.unwrap();
+                send.finish().unwrap();
+            }
+            let stable_id = connection.stable_id();
+            connection.closed().await;
+            stable_id
+        });
+
+        let connection = client
+            .connect(proxy_addr, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+        exchange_stream(&connection, &vec![0x31; 16 * 1024]).await;
+        client_drops.store(8, Ordering::Release);
+        server_drops.store(8, Ordering::Release);
+        exchange_stream(&connection, &vec![0x72; 32 * 1024]).await;
+        assert_eq!(client_drops.load(Ordering::Acquire), 0);
+        assert_eq!(server_drops.load(Ordering::Acquire), 0);
+
+        connection.close(0u32.into(), b"loss test complete");
+        assert_ne!(server_task.await.unwrap(), 0);
+        client.wait_idle().await;
+        proxy.abort();
+        let _ = proxy.await;
     }
 
     #[test]
