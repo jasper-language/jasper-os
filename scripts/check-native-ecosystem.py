@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -71,27 +72,39 @@ def check_dependency_trees() -> int:
             fail(f"dependency tree command failed: {' '.join(command)}: {result.stderr}")
         return result.stdout
 
+    def contains(output: str, component: str) -> bool:
+        return bool(re.search(rf"(?<![\w-]){re.escape(component)} v\d", output))
+
     native = tree(["--no-default-features"])
-    for component in ("jasper-compat-core", "jasper-compat-loader"):
-        if component in native:
-            fail(f"native dependency tree contains {component}")
+    default = tree([])
+    production = tree(["--features", "production"])
+    for profile, output in (
+        ("no-default", native),
+        ("default", default),
+        ("production", production),
+    ):
+        for component in ("jasper-compat-core", "jasper-compat-loader"):
+            if contains(output, component):
+                fail(f"{profile} dependency tree contains {component}")
 
     syscall = tree(["--features", "compat-syscall-verify"])
-    if "jasper-compat-core" not in syscall:
+    if not contains(syscall, "jasper-compat-core"):
         fail("syscall feature tree is missing jasper-compat-core")
-    if "jasper-compat-loader" in syscall:
+    if contains(syscall, "jasper-compat-loader"):
         fail("syscall feature tree unexpectedly contains jasper-compat-loader")
 
     elf = tree(["--features", "compat-elf-backend-verify"])
-    if "jasper-compat-loader" not in elf:
+    if not contains(elf, "jasper-compat-loader"):
         fail("ELF feature tree is missing jasper-compat-loader")
-    if "jasper-compat-core" in elf:
+    if contains(elf, "jasper-compat-core"):
         fail("ELF feature tree unexpectedly contains jasper-compat-core")
 
     dynamic = tree(["--features", "compat-dynamic-libc-verify"])
-    if "jasper-compat-core" not in dynamic or "jasper-compat-loader" not in dynamic:
+    if not contains(dynamic, "jasper-compat-core") or not contains(
+        dynamic, "jasper-compat-loader"
+    ):
         fail("dynamic libc feature tree is missing one or both compatibility services")
-    return 4
+    return 6
 
 
 def main() -> int:
@@ -162,7 +175,14 @@ def main() -> int:
         (
             '#[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]\npub mod linux_abi;',
             '#[cfg(all(feature = "compat-elf", target_arch = "x86_64"))]\npub mod compat_elf;',
-            '#[cfg(all(feature = "compat-dynamic-libc-verify", target_arch = "x86_64"))]\npub mod linux_vfs;',
+            '#[cfg(all(\n'
+            '    any(\n'
+            '        feature = "compat-dynamic-libc-verify",\n'
+            '        feature = "lifecycle-root-exec-verify"\n'
+            '    ),\n'
+            '    target_arch = "x86_64"\n'
+            '))]\n'
+            'pub mod linux_vfs;',
         ),
     )
     require_anchors(
