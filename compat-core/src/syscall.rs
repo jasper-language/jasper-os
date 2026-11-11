@@ -8,8 +8,8 @@ use linux_raw_sys::general::{
     __NR_io_uring_register, __NR_io_uring_setup, __NR_madvise, __NR_mmap, __NR_mprotect,
     __NR_munmap, __NR_newfstatat, __NR_openat, __NR_poll, __NR_pread64, __NR_prlimit64, __NR_read,
     __NR_readlink, __NR_rseq, __NR_rt_sigaction, __NR_rt_sigprocmask, __NR_rt_sigreturn,
-    __NR_sched_yield, __NR_set_robust_list, __NR_set_tid_address, __NR_statfs, __NR_tgkill,
-    __NR_write, __NR_writev,
+    __NR_sched_yield, __NR_set_robust_list, __NR_set_tid_address, __NR_sigaltstack, __NR_statfs,
+    __NR_tgkill, __NR_write, __NR_writev,
 };
 
 /// Linux x86_64 futex syscall number for restart policy.
@@ -58,6 +58,7 @@ pub enum LinuxSyscall {
     RtSigReturn,
     Tgkill,
     SchedYield,
+    Sigaltstack,
     EpollCreate1,
     EpollCtl,
     EpollWait,
@@ -197,6 +198,7 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_rt_sigreturn) => LinuxSyscall::RtSigReturn,
         value if value == u64::from(__NR_tgkill) => LinuxSyscall::Tgkill,
         value if value == u64::from(__NR_sched_yield) => LinuxSyscall::SchedYield,
+        value if value == u64::from(__NR_sigaltstack) => LinuxSyscall::Sigaltstack,
         value if value == u64::from(__NR_epoll_create1) => LinuxSyscall::EpollCreate1,
         value if value == u64::from(__NR_epoll_ctl) => LinuxSyscall::EpollCtl,
         value if value == u64::from(__NR_epoll_wait) => LinuxSyscall::EpollWait,
@@ -257,6 +259,7 @@ mod tests {
             (__NR_tgkill, LinuxSyscall::Tgkill),
             (__NR_rt_sigreturn, LinuxSyscall::RtSigReturn),
             (__NR_sched_yield, LinuxSyscall::SchedYield),
+            (__NR_sigaltstack, LinuxSyscall::Sigaltstack),
             (__NR_epoll_wait, LinuxSyscall::EpollWait),
             (__NR_epoll_pwait, LinuxSyscall::EpollPWait),
             (__NR_epoll_pwait2, LinuxSyscall::EpollPWait2),

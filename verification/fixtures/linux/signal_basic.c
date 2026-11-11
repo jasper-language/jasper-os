@@ -31,6 +31,9 @@ static volatile sig_atomic_t restart_worker_signal;
 static int restart_futex_word;
 static volatile sig_atomic_t alarm_count;
 static volatile sig_atomic_t term_count;
+static volatile sig_atomic_t prof_count;
+static volatile uintptr_t handler_stack_address;
+static unsigned char alternate_stack[64 * 1024] __attribute__((aligned(16)));
 
 static void usr2_handler(int signal, siginfo_t *info, void *context) {
     (void)context;
@@ -92,6 +95,17 @@ static void term_handler(int signal, siginfo_t *info, void *context) {
         _exit(19);
     }
     term_count++;
+}
+
+static void prof_handler(int signal, siginfo_t *info, void *context) {
+    volatile int marker = 0;
+    (void)marker;
+    if (signal != SIGPROF || info == 0 || info->si_signo != signal ||
+        info->si_pid != getpid() || context == 0) {
+        _exit(21);
+    }
+    handler_stack_address = (uintptr_t)&marker;
+    prof_count++;
 }
 
 static void *blocked_worker(void *argument) {
@@ -164,7 +178,8 @@ int main(void) {
     if (install_handler_flags(SIGUSR1, usr1_handler, SA_SIGINFO) != 0 ||
         install_handler_flags(SIGUSR2, usr2_handler, SA_SIGINFO | SA_RESTART) != 0 ||
         install_handler_flags(SIGALRM, alarm_handler, SA_SIGINFO | SA_NODEFER) != 0 ||
-        install_handler_flags(SIGTERM, term_handler, SA_SIGINFO | SA_RESETHAND) != 0) {
+        install_handler_flags(SIGTERM, term_handler, SA_SIGINFO | SA_RESETHAND) != 0 ||
+        install_handler_flags(SIGPROF, prof_handler, SA_SIGINFO | SA_ONSTACK) != 0) {
         return 1;
     }
     if (raise(SIGUSR1) != 0 || usr1_count != 1 || usr2_count != 1 || !nested_ok) {
@@ -201,6 +216,31 @@ int main(void) {
     if (sigaction(SIGTERM, 0, &term_action) != 0 ||
         term_action.sa_handler != SIG_DFL) {
         return 20;
+    }
+
+    stack_t altstack = {
+        .ss_sp = alternate_stack,
+        .ss_flags = 0,
+        .ss_size = sizeof(alternate_stack),
+    };
+    if (sigaltstack(&altstack, 0) != 0) {
+        return 21;
+    }
+    if (raise(SIGPROF) != 0 || prof_count != 1 ||
+        handler_stack_address < (uintptr_t)alternate_stack ||
+        handler_stack_address >= (uintptr_t)alternate_stack + sizeof(alternate_stack)) {
+        return 22;
+    }
+    stack_t current_altstack;
+    if (sigaltstack(0, &current_altstack) != 0 || current_altstack.ss_flags != 0 ||
+        current_altstack.ss_sp != alternate_stack ||
+        current_altstack.ss_size != sizeof(alternate_stack)) {
+        return 23;
+    }
+    stack_t disabled = {.ss_flags = SS_DISABLE};
+    if (sigaltstack(&disabled, 0) != 0 || sigaltstack(0, &current_altstack) != 0 ||
+        current_altstack.ss_flags != SS_DISABLE) {
+        return 24;
     }
 
     pthread_t blocked_thread;

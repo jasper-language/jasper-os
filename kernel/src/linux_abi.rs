@@ -45,6 +45,11 @@ struct LinuxThread {
     /// Standard-signal pending bits for this Linux TID.
     /// 当前 Linux TID 的标准信号 pending 位图。
     pending_signals: u64,
+    /// Per-thread alternate signal stack.
+    /// 当前 Linux 线程的备用信号栈。
+    altstack_sp: u64,
+    altstack_size: u64,
+    altstack_flags: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -201,6 +206,9 @@ pub(crate) fn register_linux_thread(
             rseq_len: 0,
             signal_mask: inherited_mask,
             pending_signals: 0,
+            altstack_sp: 0,
+            altstack_size: 0,
+            altstack_flags: 2,
         });
         tid
     };
@@ -316,6 +324,71 @@ fn set_current_signal_mask(process: ObjId, mask: u64) -> bool {
     true
 }
 
+/// Returns the current thread alternate signal stack.
+/// 返回当前线程的备用信号栈。
+fn current_altstack(process: ObjId) -> Option<(u64, u64, u32)> {
+    let (task, _) = sched::current();
+    COMPAT
+        .lock()
+        .threads
+        .iter()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)
+        .map(|entry| (entry.altstack_sp, entry.altstack_size, entry.altstack_flags))
+}
+
+/// Queries or updates the current thread alternate signal stack.
+/// 查询或更新当前线程的备用信号栈。
+fn linux_sigaltstack(process: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const STACK_T_BYTES: usize = 24;
+    const SS_DISABLE: u32 = 2;
+    const MIN_ALTSTACK: u64 = 2048;
+    let (sp, size, flags) = current_altstack(process).ok_or(CompatErrno::NoSys)?;
+    if args[1] != 0 {
+        let mut old = [0u8; STACK_T_BYTES];
+        old[..8].copy_from_slice(&sp.to_le_bytes());
+        old[8..12].copy_from_slice(&flags.to_le_bytes());
+        old[16..24].copy_from_slice(&size.to_le_bytes());
+        copy_to_user(args[1], &old, STACK_T_BYTES).map_err(|_| CompatErrno::Fault)?;
+    }
+    if args[0] != 0 {
+        let mut value = [0u8; STACK_T_BYTES];
+        copy_from_user(&mut value, args[0], STACK_T_BYTES).map_err(|_| CompatErrno::Fault)?;
+        let requested_sp = u64::from_le_bytes(value[..8].try_into().unwrap());
+        let requested_flags = u32::from_le_bytes(value[8..12].try_into().unwrap());
+        let requested_size = u64::from_le_bytes(value[16..24].try_into().unwrap());
+        let (new_sp, new_size, new_flags) = if requested_flags == SS_DISABLE {
+            (0, 0, SS_DISABLE)
+        } else {
+            if requested_flags != 0
+                || requested_size < MIN_ALTSTACK
+                || requested_sp % 16 != 0
+                || requested_sp < crate::arch::USER_WINDOW.0
+                || requested_sp
+                    .checked_add(requested_size)
+                    .is_none_or(|end| end > crate::arch::USER_WINDOW.1)
+            {
+                return Err(CompatErrno::Invalid);
+            }
+            (requested_sp, requested_size, 0)
+        };
+        let (task, _) = sched::current();
+        let mut state = COMPAT.lock();
+        let Some(entry) = state
+            .threads
+            .iter_mut()
+            .flatten()
+            .find(|entry| entry.process == process && entry.task == task)
+        else {
+            return Err(CompatErrno::NoProcess);
+        };
+        entry.altstack_sp = new_sp;
+        entry.altstack_size = new_size;
+        entry.altstack_flags = new_flags;
+    }
+    Ok(0)
+}
+
 /// Takes the lowest unmasked pending signal for the current thread.
 /// 取出当前线程编号最低且未被屏蔽的 pending 信号。
 fn take_deliverable_signal(process: ObjId) -> Option<u32> {
@@ -383,6 +456,7 @@ fn build_signal_frame(
     const SA_RESTART: u64 = 0x1000_0000;
     const SA_NODEFER: u64 = 0x4000_0000;
     const SA_RESETHAND: u64 = 0x8000_0000;
+    const SA_ONSTACK: u64 = 0x0800_0000;
     const SIG_DFL: u64 = 0;
     const SIG_IGN: u64 = 1;
     let action = proc::linux_signal_action(process, signal).ok_or(CompatErrno::Invalid)?;
@@ -394,7 +468,9 @@ fn build_signal_frame(
         let _ = proc::begin_exit(process, 128 + i64::from(signal));
         return Err(CompatErrno::Interrupted);
     }
-    if action[1] & !(SA_SIGINFO | SA_RESTORER | SA_RESTART | SA_NODEFER | SA_RESETHAND) != 0
+    if action[1]
+        & !(SA_SIGINFO | SA_RESTORER | SA_RESTART | SA_NODEFER | SA_RESETHAND | SA_ONSTACK)
+        != 0
         || !user_register(handler)
         || !user_register(action[2])
         || !user_register(user_ip.0)
@@ -403,9 +479,22 @@ fn build_signal_frame(
         return Err(CompatErrno::Invalid);
     }
     let old_mask = current_signal_mask(process).ok_or(CompatErrno::Invalid)?;
-    let frame_address = user_ip
-        .1
-        .checked_sub(128 + SIGNAL_FRAME_BYTES as u64)
+    let (stack_top, red_zone) = if action[1] & SA_ONSTACK != 0 {
+        let (sp, size, flags) = current_altstack(process).ok_or(CompatErrno::Invalid)?;
+        if flags != 0 || size < SIGNAL_FRAME_BYTES as u64 || !user_register(sp) {
+            return Err(CompatErrno::Invalid);
+        }
+        (
+            sp.checked_add(size)
+                .filter(|top| *top <= crate::arch::USER_WINDOW.1)
+                .ok_or(CompatErrno::Fault)?,
+            0,
+        )
+    } else {
+        (user_ip.1, 128)
+    };
+    let frame_address = stack_top
+        .checked_sub(red_zone + SIGNAL_FRAME_BYTES as u64)
         .map(|value| value & !0xf)
         .filter(|value| {
             *value >= crate::arch::USER_WINDOW.0
@@ -479,13 +568,14 @@ fn build_signal_frame(
         return Err(CompatErrno::Fault);
     }
     crate::kprintln!(
-        "[JSR-LINUX-SIGNAL] delivered tid={} signal={} interrupted_result={} restart_futex={} nodefer={} reset_hand={} handler={:#x} frame={:#x} info={:#x} context={:#x}",
+        "[JSR-LINUX-SIGNAL] delivered tid={} signal={} interrupted_result={} restart_futex={} nodefer={} reset_hand={} altstack={} handler={:#x} frame={:#x} info={:#x} context={:#x}",
         linux_tid(process).unwrap_or(0),
         signal,
         interrupted_result,
         restart_futex,
         nodefer,
         reset_hand,
+        action[1] & SA_ONSTACK != 0,
         handler,
         frame_address,
         info_address,
@@ -980,6 +1070,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
             sched::yield_with_cause(crate::sched::scheduler::Cause::YIELD);
             0
         }
+        LinuxSyscall::Sigaltstack => compat_result(linux_sigaltstack(pid, call.args)),
         LinuxSyscall::GetPid => proc::linux_pid(pid)
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
