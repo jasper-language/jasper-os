@@ -188,13 +188,17 @@ int main(void) {
     if (fstat(usr_fd, &usr_stat) != 0 || !S_ISDIR(usr_stat.st_mode)) {
         return 31;
     }
+    if (fstatat(root_fd, "usr", &usr_stat, 0) != 0 ||
+        !S_ISDIR(usr_stat.st_mode)) {
+        return 32;
+    }
     close(usr_fd);
     if (closedir(root) != 0) {
-        return 32;
+        return 33;
     }
     DIR *directory = opendir("/usr/lib/x86_64-linux-gnu");
     if (directory == NULL) {
-        return 33;
+        return 34;
     }
     unsigned library_mask = 0;
     while ((entry = readdir(directory)) != NULL) {
@@ -206,13 +210,13 @@ int main(void) {
         if (strcmp(entry->d_name, "libpcre2-8.so.0") == 0) library_mask |= 1u << 5;
     }
     if (closedir(directory) != 0 || library_mask != 0x3fu) {
-        return 34;
+        return 35;
     }
     errno = 0;
     directory = opendir("/usr/lib/x86_64-linux-gnu/libc.so.6");
     if (directory != NULL || errno != ENOTDIR) {
         if (directory != NULL) closedir(directory);
-        return 35;
+        return 36;
     }
     close(fd);
     printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld dirent=6\n",

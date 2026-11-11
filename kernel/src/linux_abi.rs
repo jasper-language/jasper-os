@@ -2624,30 +2624,67 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const AT_EMPTY_PATH: u64 = 0x1000;
     const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
     const AT_NO_AUTOMOUNT: u64 = 0x800;
-    let file = if is_at_fdcwd(args[0]) {
-        if args[3] & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT) != 0 {
+    const ALLOWED_FLAGS: u64 = AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT;
+    if args[3] & !ALLOWED_FLAGS != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    #[cfg(feature = "compat-dynamic-libc-verify")]
+    trace_path_address(pid, "newfstatat-address", args[1]);
+    let raw_path = linux_c_string(args[1], 4096);
+    let path = match raw_path {
+        Ok(path) => path,
+        Err(CompatErrno::NoEntry) if args[3] & AT_EMPTY_PATH != 0 => {
+            let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+            let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+            let node = crate::linux_vfs::FileId::from_handle(entry.handle)
+                .map(crate::linux_vfs::Node::File)
+                .or_else(|| {
+                    crate::linux_vfs::DirectoryId::from_handle(entry.handle)
+                        .map(crate::linux_vfs::Node::Directory)
+                })
+                .ok_or(CompatErrno::BadFd)?;
+            write_linux_stat(args[2], node)?;
+            return Ok(0);
+        }
+        Err(error) => return Err(error),
+    };
+    #[cfg(feature = "compat-dynamic-libc-verify")]
+    trace_path("newfstatat", &path);
+    let resolved = if path.starts_with(b"/") {
+        if !is_at_fdcwd(args[0]) {
             return Err(CompatErrno::Invalid);
         }
-        #[cfg(feature = "compat-dynamic-libc-verify")]
-        trace_path_address(pid, "newfstatat-address", args[1]);
-        let path = linux_c_string(args[1], 4096)?;
-        #[cfg(feature = "compat-dynamic-libc-verify")]
-        trace_path("newfstatat", &path);
-        crate::linux_vfs::lookup_node(&path).ok_or(CompatErrno::NoEntry)?
-    } else if args[3] & !(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT) == 0 {
-        let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-        let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
-        crate::linux_vfs::FileId::from_handle(entry.handle)
-            .map(crate::linux_vfs::Node::File)
-            .or_else(|| {
-                crate::linux_vfs::DirectoryId::from_handle(entry.handle)
-                    .map(crate::linux_vfs::Node::Directory)
-            })
-            .ok_or(CompatErrno::BadFd)?
+        path
     } else {
-        return Err(CompatErrno::Invalid);
+        if path == b".."
+            || path.starts_with(b"../")
+            || path.windows(4).any(|window| window == b"/../")
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        let base = if is_at_fdcwd(args[0]) {
+            crate::linux_vfs::DirectoryId::Root.path()
+        } else {
+            let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+            let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
+            crate::linux_vfs::DirectoryId::from_handle(handle)
+                .ok_or(CompatErrno::BadFd)?
+                .path()
+        };
+        if path == b"." {
+            base.to_vec()
+        } else {
+            let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
+            resolved.extend_from_slice(base);
+            if !base.ends_with(b"/") {
+                resolved.push(b'/');
+            }
+            resolved.extend_from_slice(&path);
+            resolved
+        }
     };
-    write_linux_stat(args[2], file)?;
+    let node = crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)?;
+    write_linux_stat(args[2], node)?;
     Ok(0)
 }
 
