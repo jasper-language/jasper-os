@@ -17,6 +17,7 @@ STATUS = ROOT / "docs/ISSUE-19-convergence-status.md"
 
 REQUIRED = {"production", "default", "user-programs"}
 CONFIGURATION_ONLY = {"profile-compact", "sched-rr"}
+PRODUCTION_CAPABILITIES = {"lifecycle-ab-health"}
 
 
 def fail(message: str) -> None:
@@ -43,7 +44,7 @@ def main() -> int:
     }
     if not REQUIRED.issubset(allowed):
         fail(f"production allowlist is missing {sorted(REQUIRED - allowed)}")
-    if allowed != REQUIRED | CONFIGURATION_ONLY:
+    if allowed != REQUIRED | CONFIGURATION_ONLY | PRODUCTION_CAPABILITIES:
         fail(f"production allowlist unexpectedly changed: {sorted(allowed)}")
     unknown = allowed - set(features)
     if unknown:
