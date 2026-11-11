@@ -182,6 +182,7 @@ pub fn syscall_args(x: &[usize; 32]) -> SyscallArgs {
         id: r(17),
         args: [r(10), r(11), r(12), r(13), r(14), r(15)],
         user_ip: None,
+        fxstate: None,
     }
 }
 

@@ -630,11 +630,13 @@ fn current_signal_pending(process: ObjId) -> bool {
             .is_some_and(|entry| entry.pending & !thread.signal_mask != 0)
 }
 
-const SIGNAL_FRAME_BYTES: usize = 8 + 968 + 128;
+const SIGNAL_FRAME_BYTES: usize = 8 + 968 + 128 + 512;
 const SIGNAL_UC_OFFSET: usize = 8;
 const SIGNAL_UC_GREGS: usize = 40;
 const SIGNAL_UC_SIGMASK: usize = 296;
+const SIGNAL_UC_FPREGS: usize = 224;
 const SIGNAL_INFO_OFFSET: usize = SIGNAL_UC_OFFSET + 968;
+const SIGNAL_FPSTATE_OFFSET: usize = SIGNAL_INFO_OFFSET + 128;
 const JASPER_UC_FLAG_ALTSTACK: u64 = 1u64 << 63;
 const JASPER_UC_FLAG_ALTSTACK_AUTODISARM: u64 = 1u64 << 62;
 
@@ -650,6 +652,23 @@ fn user_register(register: u64) -> bool {
         return false;
     };
     register < window.1 && last >= window.0
+}
+
+/// Copies the kernel-owned syscall FXSAVE image into a signal frame.
+/// 把 syscall 入口保存的内核侧 FXSAVE 映像复制到信号帧。
+fn copy_fxstate_to_frame(args: &SyscallArgs, frame: &mut [u8]) -> bool {
+    let Some(source) = args.fxstate else {
+        return false;
+    };
+    let Some(destination) = frame.get_mut(
+        SIGNAL_FPSTATE_OFFSET..SIGNAL_FPSTATE_OFFSET.saturating_add(512),
+    ) else {
+        return false;
+    };
+    // SAFETY: the x86_64 syscall entry owns this 512-byte aligned image for the
+    // duration of dispatch; the frame destination is a separate fixed buffer.
+    destination.copy_from_slice(unsafe { &*source });
+    true
 }
 
 /// Builds the bounded Linux x86_64 signal frame on the interrupted user stack.
@@ -730,8 +749,19 @@ fn build_signal_frame(
     let context_address = frame_address
         .checked_add(SIGNAL_UC_OFFSET as u64)
         .ok_or(CompatErrno::Fault)?;
+    let fpstate_address = frame_address
+        .checked_add(SIGNAL_FPSTATE_OFFSET as u64)
+        .ok_or(CompatErrno::Fault)?;
     let mut frame = [0u8; SIGNAL_FRAME_BYTES];
     write_frame_u64(&mut frame, 0, action[2]);
+    if !copy_fxstate_to_frame(args, &mut frame) {
+        return Err(CompatErrno::Fault);
+    }
+    write_frame_u64(
+        &mut frame,
+        SIGNAL_UC_OFFSET + SIGNAL_UC_FPREGS,
+        fpstate_address,
+    );
     if uses_altstack {
         let mut flags = JASPER_UC_FLAG_ALTSTACK;
         if autodisarm {
@@ -800,7 +830,7 @@ fn build_signal_frame(
         return Err(CompatErrno::Invalid);
     }
     crate::kprintln!(
-        "[JSR-LINUX-SIGNAL] delivered tid={} signal={} interrupted_result={} restart_futex={} nodefer={} reset_hand={} altstack={} autodisarm={} handler={:#x} frame={:#x} info={:#x} context={:#x}",
+        "[JSR-LINUX-SIGNAL] delivered tid={} signal={} interrupted_result={} restart_futex={} nodefer={} reset_hand={} altstack={} autodisarm={} fxstate={} handler={:#x} frame={:#x} info={:#x} context={:#x} fpstate={:#x}",
         linux_tid(process).unwrap_or(0),
         signal,
         interrupted_result,
@@ -809,10 +839,12 @@ fn build_signal_frame(
         reset_hand,
         uses_altstack,
         autodisarm,
+        args.fxstate.is_some(),
         handler,
         frame_address,
         info_address,
-        context_address
+        context_address,
+        fpstate_address
     );
     Ok(UserReturn {
         rax: 0,
@@ -907,7 +939,11 @@ fn linux_kill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
 
 /// Restores the interrupted register and signal-mask context from `rt_sigreturn`.
 /// 从 `rt_sigreturn` 恢复被打断的寄存器和信号屏蔽上下文。
-fn linux_rt_sigreturn(process: ObjId, user_rsp: u64) -> Result<UserReturn, CompatErrno> {
+fn linux_rt_sigreturn(
+    process: ObjId,
+    user_rsp: u64,
+    args: &SyscallArgs,
+) -> Result<UserReturn, CompatErrno> {
     if user_rsp < crate::arch::USER_WINDOW.0
         || user_rsp
             .checked_add(968)
@@ -937,6 +973,28 @@ fn linux_rt_sigreturn(process: ObjId, user_rsp: u64) -> Result<UserReturn, Compa
     );
     if !set_current_signal_mask(process, old_mask) {
         return Err(CompatErrno::Invalid);
+    }
+    let fpstate_address = u64::from_le_bytes(
+        context[SIGNAL_UC_FPREGS..SIGNAL_UC_FPREGS + 8]
+            .try_into()
+            .expect("fixed fpregs field"),
+    );
+    if fpstate_address < crate::arch::USER_WINDOW.0
+        || fpstate_address
+            .checked_add(512)
+            .is_none_or(|end| end > crate::arch::USER_WINDOW.1)
+    {
+        return Err(CompatErrno::Fault);
+    }
+    let mut fxstate = [0u8; 512];
+    proc::read(process, fpstate_address, &mut fxstate).map_err(|_| CompatErrno::Fault)?;
+    let Some(destination) = args.fxstate else {
+        return Err(CompatErrno::Fault);
+    };
+    // SAFETY: the syscall entry owns this aligned FXSAVE buffer until return;
+    // rt_sigreturn can replace it with the validated userspace signal state.
+    unsafe {
+        *destination = fxstate;
     }
     if uc_flags & JASPER_UC_FLAG_ALTSTACK != 0
         && !leave_altstack(
@@ -1295,7 +1353,7 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
         let Some((_, user_rsp)) = a.user_ip else {
             return SyscallOutcome::value(-i64::from(CompatErrno::Fault as i32));
         };
-        return match linux_rt_sigreturn(pid, user_rsp) {
+        return match linux_rt_sigreturn(pid, user_rsp, a) {
             Ok(user) => SyscallOutcome {
                 value: 0,
                 redirect: Some(user),

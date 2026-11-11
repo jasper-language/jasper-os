@@ -50,6 +50,9 @@ pub struct SyscallArgs {
     /// x86_64 `clone` 所需的用户返回地址与栈指针；其他入口可为 `None`。
     /// User return RIP and RSP needed by x86_64 `clone`; other entries may use `None`.
     pub user_ip: Option<(u64, u64)>,
+    /// Kernel-owned 512-byte FXSAVE image for the current x86_64 syscall.
+    /// 当前 x86_64 syscall 在内核栈上的 512 字节 FXSAVE 映像。
+    pub fxstate: Option<*mut [u8; 512]>,
 }
 
 /// Registers to publish instead of the ordinary syscall return path.

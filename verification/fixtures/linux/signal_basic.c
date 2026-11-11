@@ -35,6 +35,7 @@ static volatile sig_atomic_t restart_worker_signal;
 static int restart_futex_word;
 static volatile sig_atomic_t alarm_count;
 static volatile sig_atomic_t term_count;
+static volatile sig_atomic_t fpu_count;
 static volatile sig_atomic_t prof_count;
 static volatile uintptr_t handler_stack_address;
 static volatile sig_atomic_t altstack_onstack_before;
@@ -105,6 +106,21 @@ static void term_handler(int signal, siginfo_t *info, void *context) {
         _exit(19);
     }
     term_count++;
+}
+
+static void fpu_handler(int signal, siginfo_t *info, void *context) {
+    if (signal != SIGVTALRM || info == 0 || info->si_signo != signal ||
+        info->si_pid != getpid() || context == 0) {
+        _exit(30);
+    }
+    const uint64_t clobber = 0xf00df00df00df00dULL;
+    __asm__ volatile(
+        "movq %[value], %%xmm0\n"
+        "movq %[value], %%xmm1\n"
+        :
+        : [value] "r"(clobber)
+        : "xmm0", "xmm1");
+    fpu_count++;
 }
 
 static void prof_handler(int signal, siginfo_t *info, void *context) {
@@ -226,7 +242,8 @@ int main(void) {
         install_handler_flags(SIGALRM, alarm_handler, SA_SIGINFO | SA_NODEFER) != 0 ||
         install_handler_flags(SIGTERM, term_handler, SA_SIGINFO | SA_RESETHAND) != 0 ||
         install_handler_flags(SIGPROF, prof_handler, SA_SIGINFO | SA_ONSTACK) != 0 ||
-        install_handler_flags(SIGWINCH, winch_handler, SA_SIGINFO | SA_ONSTACK) != 0) {
+        install_handler_flags(SIGWINCH, winch_handler, SA_SIGINFO | SA_ONSTACK) != 0 ||
+        install_handler_flags(SIGVTALRM, fpu_handler, SA_SIGINFO) != 0) {
         return 1;
     }
     if (raise(SIGUSR1) != 0 || usr1_count != 1 || usr2_count != 1 || !nested_ok) {
@@ -245,6 +262,28 @@ int main(void) {
     }
     if (sigprocmask(SIG_SETMASK, &old, 0) != 0 || usr1_count != 2) {
         return 5;
+    }
+
+    const uint64_t fpu_magic = 0x123456789abcdef0ULL;
+    uint64_t fpu_after;
+    const int tgid = getpid();
+    const int tid = syscall(SYS_gettid);
+    __asm__ volatile(
+        "movq %[value], %%xmm0\n"
+        "movl $234, %%eax\n"
+        "syscall\n"
+        "movq %%xmm0, %[after]\n"
+        : [after] "=r"(fpu_after)
+        : [value] "r"(fpu_magic), "D"((long)tgid), "S"((long)tid),
+          "d"((long)SIGVTALRM)
+        : "rax", "rcx", "r11", "xmm0", "memory");
+    if (fpu_after != fpu_magic || fpu_count != 1) {
+        return 31;
+    }
+    static const char fpu_message[] = "jasper-fpu-ok\n";
+    if (write(STDOUT_FILENO, fpu_message, sizeof(fpu_message) - 1) !=
+        (ssize_t)(sizeof(fpu_message) - 1)) {
+        return 32;
     }
 
     if (raise(SIGALRM) != 0 || alarm_count != 2) {

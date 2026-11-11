@@ -34,11 +34,19 @@ struct EntryBlock {
     kstack: AtomicU64,
     /// 偏移 8：用户栈指针暂存位（只在入口窗口内、关中断时使用）。
     user_rsp: AtomicU64,
+    /// 偏移 16：返回 RIP 暂存位，只用于 FXSAVE 帧恢复后换回用户栈。
+    return_rip: AtomicU64,
 }
 
 /// 全部处理器的入口块（下标 = 逻辑下标）。
 static BLOCKS: [EntryBlock; MAX_CPUS] =
-    [const { EntryBlock { kstack: AtomicU64::new(0), user_rsp: AtomicU64::new(0) } }; MAX_CPUS];
+    [const {
+        EntryBlock {
+            kstack: AtomicU64::new(0),
+            user_rsp: AtomicU64::new(0),
+            return_rip: AtomicU64::new(0),
+        }
+    }; MAX_CPUS];
 
 /// 入口压栈后的寄存器帧（自低地址向高地址，顺序必须与下方汇编一致）。
 #[repr(C)]
@@ -53,6 +61,7 @@ pub struct RawFrame {
     r11: u64,
     rcx: u64,
     user_rsp: u64,
+    fxstate: [u8; 512],
 }
 
 const MSR_STAR: u32 = 0xC000_0081;
@@ -71,6 +80,9 @@ jsr_syscall_entry:
     swapgs
     mov qword ptr gs:[8], rsp
     mov rsp, qword ptr gs:[0]
+    sub rsp, 512
+    and rsp, -16
+    fxsave64 [rsp]
     push qword ptr gs:[8]
     swapgs
     push rcx
@@ -94,7 +106,13 @@ jsr_syscall_entry:
     pop r9
     pop r11
     pop rcx
-    pop rsp
+    fxrstor64 [rsp + 8]
+    swapgs
+    mov qword ptr gs:[16], rcx
+    mov rcx, qword ptr [rsp]
+    mov rsp, rcx
+    mov rcx, qword ptr gs:[16]
+    swapgs
     sysretq
     "#
 );
@@ -106,6 +124,7 @@ extern "C" fn jsr_syscall_dispatch(frame: &mut RawFrame) -> u64 {
         id: frame.rax,
         args: [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9],
         user_ip: Some((frame.rcx, frame.user_rsp)),
+        fxstate: Some(&mut frame.fxstate),
     };
     let outcome = syscall::on_entry(&args);
     frame.rax = outcome.value as u64;

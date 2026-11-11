@@ -13,7 +13,7 @@ TIMEOUT="${COMPAT_SIGNAL_TIMEOUT:-180}"
 CPUS="${COMPAT_SIGNAL_CPUS:-1}"
 mkdir -p "$OUT" "$TARGET"
 
-gcc -O2 -pthread -fno-stack-protector -mgeneral-regs-only \
+gcc -O2 -pthread -fno-stack-protector \
   verification/fixtures/linux/signal_basic.c \
   -o "$TARGET/signal-basic" >"$OUT/fixture-build.log" 2>&1
 export JSR_UBUNTU_SIGNAL="$TARGET/signal-basic"
@@ -40,6 +40,7 @@ set -e
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
 [ "$rc" -eq 33 ]
 grep -aq '^jasper-signal-ok' "$OUT/serial.log"
+grep -aq '^jasper-fpu-ok' "$OUT/serial.log"
 grep -aq '^\[JSR-COMPAT-SIGNAL\] .*exit_zero=true .*resources=true failed=0' \
   "$OUT/serial.log"
 ! grep -aqE '^\[JSR-(PANIC|COMPAT-DYNAMIC-FAIL|LINUX-ABI-FAIL)\]|panicked at|KERNEL PANIC' \
