@@ -46,17 +46,22 @@ cargo run --locked -p jasper-lifecycle-staging --bin jasper-ext4-provision -- \
   "$IMAGE" 38654705664 >"$OUT/ext4-provision.log" 2>&1
 ROOT_EXEC_PROBE=""
 ROOT_FULL_USERLAND=0
+ROOT_SIGNAL_FIXTURE=""
 if [ "$MODE" = root-exec ]; then
   ROOT_EXEC_PROBE=$(find "$TARGET/x86_64-unknown-none/release/build" \
     -path '*/out/user-target/x86_64-unknown-none/release/user-linuxprobe' \
     -type f -print | sort | tail -n 1)
   [ -n "$ROOT_EXEC_PROBE" ]
   ROOT_FULL_USERLAND=1
+  ROOT_SIGNAL_FIXTURE="$TARGET/root-signal-basic"
+  gcc -O2 -mavx -pthread -fno-stack-protector \
+    verification/fixtures/linux/signal_basic.c \
+    -o "$ROOT_SIGNAL_FIXTURE" >"$OUT/root-signal-build.log" 2>&1
 fi
 bash scripts/issue21-system-root-fixture.sh \
-  "$IMAGE" "$TARGET" 1050624 A 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" >"$OUT/system-root-a.log" 2>&1
+  "$IMAGE" "$TARGET" 1050624 A 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" >"$OUT/system-root-a.log" 2>&1
 bash scripts/issue21-system-root-fixture.sh \
-  "$IMAGE" "$TARGET" 17827840 B 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" >"$OUT/system-root-b.log" 2>&1
+  "$IMAGE" "$TARGET" 17827840 B 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" >"$OUT/system-root-b.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-init -- \
   "$IMAGE" 38654705664 "$KERNEL" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-inspect -- \
@@ -81,7 +86,7 @@ grep -q 'No problems found' "$OUT/sgdisk.log"
 cp /usr/share/OVMF/OVMF_VARS_4M.fd "$OVMF_VARS"
 QEMU_EXTRA=()
 if [ "$MODE" = root-exec ]; then
-  QEMU_EXTRA=(-device isa-debug-exit,iobase=0xf4,iosize=0x04)
+  QEMU_EXTRA=(-cpu max -device isa-debug-exit,iobase=0xf4,iosize=0x04)
 fi
 set +e
 timeout "$LIMIT" qemu-system-x86_64 \
@@ -112,6 +117,9 @@ if [ "$MODE" = root-exec ]; then
     "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/printf path=/usr/bin/printf interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
     "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/jasper-signal-basic path=/usr/bin/jasper-signal-basic interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
+    "$OUT/serial.log"
+  grep -aq '^jasper-signal-ok' "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-ROOT-LIBS\] count=6 bytes=[1-9][0-9]* source=system-ab' \
     "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"

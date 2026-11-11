@@ -10,6 +10,7 @@ SLOT="${4:?A or B}"
 RELEASE="${5:?release}"
 ROOT_EXEC_PROBE="${6:-}"
 FULL_USERLAND="${7:-0}"
+ROOT_SIGNAL_FIXTURE="${8:-}"
 [[ "$SLOT" == A || "$SLOT" == B ]]
 [[ "$RELEASE" =~ ^[1-9][0-9]*$ ]]
 mkdir -p "$WORK"
@@ -83,6 +84,11 @@ if [ "$FULL_USERLAND" = 1 ]; then
     debugfs -w -R "sif $source mode 0100755" "$PARTITION" >/dev/null
   done
 fi
+if [ -n "$ROOT_SIGNAL_FIXTURE" ]; then
+  [[ -x "$ROOT_SIGNAL_FIXTURE" ]]
+  write_file "$ROOT_SIGNAL_FIXTURE" /usr/bin/jasper-signal-basic
+  debugfs -w -R 'sif /usr/bin/jasper-signal-basic mode 0100755' "$PARTITION" >/dev/null
+fi
 e2fsck -fy "$PARTITION"
 e2fsck -fn "$PARTITION"
 
@@ -105,8 +111,11 @@ if [ "$FULL_USERLAND" = 1 ]; then
     verify_payload "$source" "$source"
   done
 fi
+if [ -n "$ROOT_SIGNAL_FIXTURE" ]; then
+  verify_payload /usr/bin/jasper-signal-basic "$ROOT_SIGNAL_FIXTURE"
+fi
 
 dd if="$PARTITION" of="$IMAGE" bs=512 seek="$START_LBA" \
   conv=notrunc,sparse status=none
 sync
-echo "system-root-fixture: PASS slot=$SLOT release=$RELEASE start_lba=$START_LBA files=6 userland=x86_64-linux-elf root_exec_probe=$([ -n "$ROOT_EXEC_PROBE" ] && echo present || echo absent) full_userland=$FULL_USERLAND"
+echo "system-root-fixture: PASS slot=$SLOT release=$RELEASE start_lba=$START_LBA files=6 userland=x86_64-linux-elf root_exec_probe=$([ -n "$ROOT_EXEC_PROBE" ] && echo present || echo absent) full_userland=$FULL_USERLAND signal_fixture=$([ -n "$ROOT_SIGNAL_FIXTURE" ] && echo present || echo absent)"
