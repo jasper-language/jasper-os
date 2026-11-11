@@ -73,6 +73,10 @@ def main() -> int:
         'python3 scripts/check-production-symbols.py "$ELF"',
         'python3 scripts/check-production-footprint.py "$ELF"',
         'tee "$OUT/production-footprint.log"',
+        'python3 scripts/check-production-callgraph.py "$ELF"',
+        '--require-reachable jasper_kernel::kmain::start',
+        '--require-reachable jasper_kernel::first_program::run',
+        'tee "$OUT/production-callgraph.log"',
     ):
         if needle not in check:
             fail(f"production check lost linked-code gate {needle}")

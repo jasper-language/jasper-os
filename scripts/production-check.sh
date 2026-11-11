@@ -25,6 +25,10 @@ CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknow
   || { echo "FAIL 生产内核构建失败"; exit 1; }
 python3 scripts/check-production-symbols.py "$ELF"
 python3 scripts/check-production-footprint.py "$ELF" | tee "$OUT/production-footprint.log"
+python3 scripts/check-production-callgraph.py "$ELF" \
+  --require-reachable jasper_kernel::kmain::start \
+  --require-reachable jasper_kernel::first_program::run \
+  | tee "$OUT/production-callgraph.log"
 
 # 未列入生产清单的特性必须被 build.rs 默认拒绝。
 # The negative case proves the build gate rejects an unlisted verification feature.
