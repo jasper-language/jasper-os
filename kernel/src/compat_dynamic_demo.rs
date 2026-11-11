@@ -33,6 +33,7 @@ const EXECUTABLE_BASE: u64 = arch::USER_WINDOW.0 + 0x40_0000;
 const INTERPRETER_BASE: u64 = arch::USER_WINDOW.0 + 0x20_0000_0000;
 const STACK_TOP: u64 = arch::USER_WINDOW.0 + 0x10_0000_0000;
 const STACK_RESERVE_BYTES: u64 = 64 * kernel_core::frame::FRAME_SIZE;
+const PROGRAM_DEADLINE_TICKS: u64 = 3000;
 
 #[derive(Clone, Copy)]
 struct ProgramResult {
@@ -392,6 +393,7 @@ fn run_program(
     let mut backend = JasperExecutionBackend::with_stack_reserve(pid, name, STACK_RESERVE_BYTES);
     let mut entered = false;
     let mut thread = false;
+    let mut completed = false;
     if let Ok(stack) = stack {
         match run_process_entry(&mut backend, &dynamic.execution, stack) {
             Ok(()) => entered = true,
@@ -404,7 +406,19 @@ fn run_program(
         check(entered, "transfer_interpreter");
         thread = backend.task().is_some();
         check(thread, "thread");
-        sched::run();
+        let deadline = sched::timer_ticks().saturating_add(PROGRAM_DEADLINE_TICKS);
+        completed = sched::run_until(deadline);
+        if !completed {
+            kprintln!(
+                "[JSR-COMPAT-DYNAMIC-FAIL] program={} stage=deadline_exceeded deadline={}",
+                name,
+                deadline
+            );
+            check(false, "deadline");
+            let _ = proc::begin_exit(pid, 124);
+            let cleanup_deadline = sched::timer_ticks().saturating_add(100);
+            let _ = sched::run_until(cleanup_deadline);
+        }
     }
 
     // Drop the complete loader transaction before measuring steady-state heap usage.
@@ -415,7 +429,7 @@ fn run_program(
     drop(interpreter_plan);
     drop(executable_plan);
 
-    let exited_zero = proc::state(pid) == Some(ProcState::Exited { code: 0 });
+    let exited_zero = completed && proc::state(pid) == Some(ProcState::Exited { code: 0 });
     let syscalls = crate::syscall::call_count().saturating_sub(calls_before);
     let interpreter_entered = entered && thread && syscalls > 0;
     check(interpreter_entered, "interpreter_syscall");

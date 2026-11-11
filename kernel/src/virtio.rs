@@ -482,11 +482,12 @@ impl Queue {
     /// 已用环是否已推进；推进时返回 `(描述符号, 写入字节数)` 并移动本地游标。
     /// Takes one used-ring entry when the device has advanced the ring.
     pub fn take_used(&mut self) -> Option<(u16, u32)> {
-        // SAFETY：已用环位于独占队列页内；先读 idx，再按游标读元素。
+        // SAFETY：已用环位于独占队列页内；先读 idx，再用 Acquire 屏障读取元素。
         let index = unsafe { read_u16(self.used.add(2)) };
         if index == self.used_idx {
             return None;
         }
+        fence(Ordering::Acquire);
         let slot = (self.used_idx % self.size) as usize;
         // SAFETY：`slot < size ≤ WANTED_QUEUE_SIZE`，元素布局为 id/len 各 32 位。
         let (id, len) = unsafe {
@@ -494,7 +495,6 @@ impl Queue {
             let len = read_u32(self.used.add(8 + slot * 8));
             (id, len)
         };
-        fence(Ordering::Acquire);
         self.used_idx = self.used_idx.wrapping_add(1);
         Some((id as u16, len))
     }
@@ -539,7 +539,9 @@ impl Queue {
         }
         // SAFETY: the range was checked against the owned scratch page.
         unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.buffers.add(offset), bytes.len());
+            for (index, byte) in bytes.iter().enumerate() {
+                self.buffers.add(offset + index).write_volatile(*byte);
+            }
         }
         true
     }
@@ -557,7 +559,9 @@ impl Queue {
         }
         // SAFETY: the range was checked against the owned scratch page.
         unsafe {
-            core::ptr::copy_nonoverlapping(self.buffers.add(offset), bytes.as_mut_ptr(), bytes.len());
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                *byte = self.buffers.add(offset + index).read_volatile();
+            }
         }
         true
     }
@@ -693,23 +697,25 @@ fn release(base: PhysFrame) {
 }
 
 unsafe fn write_u16(at: *mut u8, value: u16) {
-    core::ptr::write_unaligned(at as *mut u16, value);
+    // These helpers address DMA-shared queue memory; volatile access prevents
+    // the optimiser from caching the device-owned used index. DMA 共享队列访问必须可见。
+    core::ptr::write_volatile(at as *mut u16, value);
 }
 
 unsafe fn write_u32(at: *mut u8, value: u32) {
-    core::ptr::write_unaligned(at as *mut u32, value);
+    core::ptr::write_volatile(at as *mut u32, value);
 }
 
 unsafe fn write_u64(at: *mut u8, value: u64) {
-    core::ptr::write_unaligned(at as *mut u64, value);
+    core::ptr::write_volatile(at as *mut u64, value);
 }
 
 unsafe fn read_u16(at: *const u8) -> u16 {
-    core::ptr::read_unaligned(at as *const u16)
+    core::ptr::read_volatile(at as *const u16)
 }
 
 unsafe fn read_u32(at: *const u8) -> u32 {
-    core::ptr::read_unaligned(at as *const u32)
+    core::ptr::read_volatile(at as *const u32)
 }
 
 impl VirtioPci {

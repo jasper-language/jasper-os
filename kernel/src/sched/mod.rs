@@ -1092,8 +1092,20 @@ pub fn quantum_ticks() -> u32 {
 /// 引导线程是空闲时的落脚点：工作任务全部睡眠时，它开中断休眠到下一个中断；
 /// 抢占开启时由时钟中断直接切到被唤醒的任务，关闭时由这里的循环让出。
 pub fn run() {
+    let _ = run_until(u64::MAX);
+}
+
+/// 从引导线程启动调度，最多运行到指定的单调 tick 时刻。
+///
+/// 返回 `true` 表示全部工作任务已退出并完成最终上下文落定；返回 `false`
+/// 表示截止时刻已到但仍有工作任务存在，调用方必须先终止并回收相关进程。
+/// English: run queued workers until they settle or the monotonic tick deadline.
+pub fn run_until(deadline: u64) -> bool {
     yield_now();
     while !with(|s| s.workers_settled()) {
+        if timer_ticks() >= deadline {
+            return false;
+        }
         if with(|s| s.has_runnable_worker()) {
             yield_now();
         } else {
@@ -1102,6 +1114,7 @@ pub fn run() {
             cpu::irq_restore(was_enabled);
         }
     }
+    true
 }
 
 /// 让当前任务运行在 `space` 上（`None` = 内核空间），并立即切换过去。

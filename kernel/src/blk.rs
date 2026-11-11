@@ -17,7 +17,7 @@ use kernel_core::objtable::ObjId;
 use crate::kobj::{self, DeviceObj, KObject};
 use crate::syscall::SyscallSet;
 use crate::virtio::{self, Queue, VirtioPci};
-use crate::{dma, mm, pci, proc, sched};
+use crate::{arch, dma, hrtime, mm, pci, proc};
 
 const FEATURE_FLUSH: u32 = 1 << 9;
 const FEATURE_BLOCK_SIZE: u32 = 1 << 6;
@@ -396,15 +396,19 @@ impl BlockDevice {
             lifecycle.cancel().map_err(|_| BlkError::Queue)?;
         }
 
-        let start = sched::timer_ticks();
+        // The IRQ spin lock keeps interrupts disabled here, so tick-based timeouts
+        // cannot advance. Poll the device-owned ring with a calibrated counter.
+        // IRQ 自旋锁内中断关闭，tick 超时不会前进；改用已校准的硬件计数器轮询设备环。
+        let start = arch::clock_counter();
+        let timeout_counts = hrtime::tick_counts().saturating_mul(WAIT_TICKS);
         let (completion, _) = loop {
             if let Some(used) = self.queue.take_used() {
                 break used;
             }
-            if sched::timer_ticks().wrapping_sub(start) >= WAIT_TICKS {
+            if arch::clock_counter().wrapping_sub(start) >= timeout_counts {
                 return Err(BlkError::Timeout);
             }
-            sched::pause();
+            core::hint::spin_loop();
         };
         if completion != 0 {
             return Err(BlkError::Queue);
@@ -413,9 +417,10 @@ impl BlockDevice {
         if !self.queue.read_buffer(STATUS_OFFSET, &mut status) {
             return Err(BlkError::Queue);
         }
-        lifecycle
+        let terminal = lifecycle
             .complete(status[0])
-            .map_err(|_| BlkError::Queue)
+            .map_err(|_| BlkError::Queue)?;
+        Ok(terminal)
     }
 }
 
