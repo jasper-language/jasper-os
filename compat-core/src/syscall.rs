@@ -1,12 +1,14 @@
 //! Linux x86_64 syscall identification mapped to Jasper compatibility operations.
 
 use linux_raw_sys::general::{
-    __NR_access, __NR_arch_prctl, __NR_brk, __NR_clock_gettime, __NR_clone, __NR_clone3,
+    __NR_access, __NR_arch_prctl, __NR_brk, __NR_clock_getres, __NR_clock_gettime,
+    __NR_clock_nanosleep, __NR_clone, __NR_clone3,
     __NR_close, __NR_epoll_create1, __NR_epoll_ctl, __NR_epoll_pwait, __NR_epoll_pwait2,
     __NR_epoll_wait, __NR_execve, __NR_exit, __NR_exit_group, __NR_fcntl, __NR_fstat, __NR_futex,
     __NR_getcpu, __NR_getcwd, __NR_getegid, __NR_geteuid, __NR_getgid, __NR_getgroups,
     __NR_getpid, __NR_getppid, __NR_getrandom, __NR_gettid, __NR_getuid, __NR_io_uring_enter,
     __NR_io_uring_register, __NR_io_uring_setup, __NR_kill, __NR_madvise, __NR_mmap,
+    __NR_nanosleep,
     __NR_lseek, __NR_mprotect, __NR_munmap, __NR_newfstatat, __NR_openat, __NR_poll, __NR_pread64,
     __NR_prlimit64, __NR_read, __NR_readlink, __NR_readlinkat, __NR_readv, __NR_rseq,
     __NR_rt_sigaction,
@@ -80,6 +82,9 @@ pub enum LinuxSyscall {
     Access,
     ArchPrctl,
     ClockGettime,
+    ClockGetres,
+    Nanosleep,
+    ClockNanosleep,
     Mmap,
     Munmap,
     Mprotect,
@@ -141,20 +146,26 @@ pub enum LinuxSyscall {
 /// 一个 Linux 兼容进程可显式发起的 syscall 集合。该集合不是 Jasper 原生
 /// `SyscallSet` 的别名，也不绕过兼容层参数和 Handle/Rights 检查。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LinuxSyscallSet(u64);
+pub struct LinuxSyscallSet([u64; 4]);
 
 impl LinuxSyscallSet {
+    const WORDS: usize = 4;
+    const BITS: usize = Self::WORDS * 64;
+
     /// No Linux syscall is authorized.
     /// 不允许任何 Linux syscall。
-    pub const EMPTY: Self = Self(0);
+    pub const EMPTY: Self = Self([0; Self::WORDS]);
 
     /// Builds an explicit set from supported Linux syscall identities.
     /// 从受支持的 Linux syscall 身份构造显式集合。
     pub const fn of(calls: &[LinuxSyscall]) -> Self {
-        let mut bits = 0u64;
+        let mut bits = [0u64; Self::WORDS];
         let mut index = 0;
         while index < calls.len() {
-            bits |= 1u64 << calls[index] as u8;
+            let call = calls[index] as usize;
+            if call < Self::BITS {
+                bits[call / 64] |= 1u64 << (call % 64);
+            }
             index += 1;
         }
         Self(bits)
@@ -163,11 +174,12 @@ impl LinuxSyscallSet {
     /// Returns whether the call is authorized.
     /// 判断该 syscall 是否获准。
     pub const fn contains(self, syscall: LinuxSyscall) -> bool {
-        self.0 & (1u64 << syscall as u8) != 0
+        let call = syscall as usize;
+        call < Self::BITS && self.0[call / 64] & (1u64 << (call % 64)) != 0
     }
 }
 
-const _: () = assert!((LinuxSyscall::ClockGettime as u8) < 64);
+const _: () = assert!((LinuxSyscall::IoUringRegister as usize) < LinuxSyscallSet::BITS);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LinuxCall {
@@ -240,6 +252,9 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_access) => LinuxSyscall::Access,
         value if value == u64::from(__NR_arch_prctl) => LinuxSyscall::ArchPrctl,
         value if value == u64::from(__NR_clock_gettime) => LinuxSyscall::ClockGettime,
+        value if value == u64::from(__NR_clock_getres) => LinuxSyscall::ClockGetres,
+        value if value == u64::from(__NR_nanosleep) => LinuxSyscall::Nanosleep,
+        value if value == u64::from(__NR_clock_nanosleep) => LinuxSyscall::ClockNanosleep,
         value if value == u64::from(__NR_mmap) => LinuxSyscall::Mmap,
         value if value == u64::from(__NR_munmap) => LinuxSyscall::Munmap,
         value if value == u64::from(__NR_mprotect) => LinuxSyscall::Mprotect,
@@ -325,6 +340,9 @@ mod tests {
             (__NR_access, LinuxSyscall::Access),
             (__NR_arch_prctl, LinuxSyscall::ArchPrctl),
             (__NR_clock_gettime, LinuxSyscall::ClockGettime),
+            (__NR_clock_getres, LinuxSyscall::ClockGetres),
+            (__NR_nanosleep, LinuxSyscall::Nanosleep),
+            (__NR_clock_nanosleep, LinuxSyscall::ClockNanosleep),
             (__NR_madvise, LinuxSyscall::Madvise),
             (__NR_set_tid_address, LinuxSyscall::SetTidAddress),
             (__NR_clone3, LinuxSyscall::Clone3),
@@ -411,5 +429,13 @@ mod tests {
         assert!(!set.contains(LinuxSyscall::Read));
         assert!(!set.contains(LinuxSyscall::GetPpid));
         assert!(!LinuxSyscallSet::EMPTY.contains(LinuxSyscall::Write));
+
+        let across_words = LinuxSyscallSet::of(&[
+            LinuxSyscall::ClockGetres,
+            LinuxSyscall::IoUringRegister,
+        ]);
+        assert!(across_words.contains(LinuxSyscall::ClockGetres));
+        assert!(across_words.contains(LinuxSyscall::IoUringRegister));
+        assert!(!across_words.contains(LinuxSyscall::IoUringEnter));
     }
 }

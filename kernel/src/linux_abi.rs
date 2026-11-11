@@ -1398,6 +1398,9 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::Access => compat_result(linux_access(call.args[0])),
         LinuxSyscall::ArchPrctl => compat_result(linux_arch_prctl(call.args)),
         LinuxSyscall::ClockGettime => compat_result(linux_clock_gettime(call.args)),
+        LinuxSyscall::ClockGetres => compat_result(linux_clock_getres(call.args)),
+        LinuxSyscall::Nanosleep => compat_result(linux_nanosleep(pid, call.args)),
+        LinuxSyscall::ClockNanosleep => compat_result(linux_clock_nanosleep(pid, call.args)),
         LinuxSyscall::RtSigAction => compat_result(linux_rt_sigaction(pid, call.args)),
         LinuxSyscall::RtSigProcMask => compat_result(linux_rt_sigprocmask(pid, call.args)),
         LinuxSyscall::Tgkill => compat_result(linux_tgkill(pid, call.args).map(|()| 0)),
@@ -2339,12 +2342,122 @@ fn linux_clock_gettime(args: [u64; 6]) -> Result<u64, CompatErrno> {
     if args[0] != CLOCK_MONOTONIC {
         return Err(CompatErrno::Invalid);
     }
-    let now = crate::sched::now_ns();
+    write_linux_timespec(args[1], crate::sched::now_ns())
+}
+
+/// Reports the compatibility monotonic clock's conservative timer resolution.
+///
+/// 报告兼容单调时钟的保守定时器分辨率；`NULL` 查询合法，当前没有墙上时钟。
+fn linux_clock_getres(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const CLOCK_MONOTONIC: u64 = 1;
+    if args[0] != CLOCK_MONOTONIC {
+        return Err(CompatErrno::Invalid);
+    }
+    if args[1] == 0 {
+        return Ok(0);
+    }
+    write_linux_timespec(args[1], crate::hrtime::tick_ns().max(1))
+}
+
+/// Sleeps for a relative monotonic duration.
+///
+/// 按单调时钟睡眠；被信号或进程终止唤醒时返回 `EINTR` 并写回剩余时间。
+fn linux_nanosleep(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let duration = read_linux_timespec(args[0])?;
+    let deadline = crate::sched::now_ns().saturating_add(duration);
+    let result = sleep_until_with_signal_check(pid, deadline);
+    match result {
+        Ok(()) => Ok(0),
+        Err(CompatErrno::Interrupted) => {
+            if args[1] != 0 {
+                let remaining = deadline.saturating_sub(crate::sched::now_ns());
+                write_linux_timespec(args[1], remaining)?;
+            }
+            Err(CompatErrno::Interrupted)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Implements relative realtime/monotonic sleep and monotonic absolute sleep.
+///
+/// 单调时钟支持相对与 `TIMER_ABSTIME`；实时时钟仅支持不依赖墙上时间的相对睡眠。
+fn linux_clock_nanosleep(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const CLOCK_REALTIME: u64 = 0;
+    const CLOCK_MONOTONIC: u64 = 1;
+    const TIMER_ABSTIME: u64 = 1;
+    let absolute = args[1] & TIMER_ABSTIME != 0;
+    let supported_clock = args[0] == CLOCK_MONOTONIC
+        || (args[0] == CLOCK_REALTIME && !absolute);
+    if !supported_clock || args[1] & !TIMER_ABSTIME != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let requested = read_linux_timespec(args[2])?;
+    let deadline = if absolute {
+        requested
+    } else {
+        crate::sched::now_ns().saturating_add(requested)
+    };
+    match sleep_until_with_signal_check(pid, deadline) {
+        Ok(()) => Ok(0),
+        Err(CompatErrno::Interrupted) if !absolute && args[3] != 0 => {
+            let remaining = deadline.saturating_sub(crate::sched::now_ns());
+            write_linux_timespec(args[3], remaining)?;
+            Err(CompatErrno::Interrupted)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Reads one bounded signed Linux `timespec`.
+///
+/// 读取一个有界 Linux `timespec`；负秒、越界纳秒和溢出均被拒绝。
+fn read_linux_timespec(address: u64) -> Result<u64, CompatErrno> {
+    const TIMESPEC_BYTES: usize = 16;
+    let mut bytes = [0u8; TIMESPEC_BYTES];
+    copy_from_user(&mut bytes, address, TIMESPEC_BYTES).map_err(|_| CompatErrno::Fault)?;
+    let seconds = i64::from_le_bytes(bytes[0..8].try_into().unwrap());
+    let nanos = i64::from_le_bytes(bytes[8..16].try_into().unwrap());
+    if seconds < 0 || !(0..1_000_000_000).contains(&nanos) {
+        return Err(CompatErrno::Invalid);
+    }
+    (seconds as u64)
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(nanos as u64))
+        .ok_or(CompatErrno::Invalid)
+}
+
+/// Writes one Linux `timespec` using an all-or-nothing user copy.
+///
+/// 将纳秒时刻写为 Linux `timespec`；一次固定目标用户区间，失败不产生部分写。
+fn write_linux_timespec(address: u64, nanoseconds: u64) -> Result<u64, CompatErrno> {
     let mut timespec = [0u8; 16];
-    timespec[0..8].copy_from_slice(&(now / 1_000_000_000).to_le_bytes());
-    timespec[8..16].copy_from_slice(&(now % 1_000_000_000).to_le_bytes());
-    copy_to_user(args[1], &timespec, timespec.len()).map_err(|_| CompatErrno::Fault)?;
+    timespec[0..8].copy_from_slice(&(nanoseconds / 1_000_000_000).to_le_bytes());
+    timespec[8..16].copy_from_slice(&(nanoseconds % 1_000_000_000).to_le_bytes());
+    copy_to_user(address, &timespec, timespec.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
+}
+
+/// Blocks until an absolute monotonic deadline and handles wake-up rechecks.
+///
+/// 阻塞到绝对单调期限；每次提前返回都重新检查期限、进程终止和待决信号。
+fn sleep_until_with_signal_check(pid: ObjId, deadline: u64) -> Result<(), CompatErrno> {
+    loop {
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        let now = crate::sched::now_ns();
+        if now >= deadline {
+            return Ok(());
+        }
+        if sched::sleep_until_ns(deadline).is_err() {
+            let ticks = deadline
+                .saturating_sub(now)
+                .div_ceil(crate::hrtime::tick_ns().max(1))
+                .max(1);
+            sched::sleep_until(sched::timer_ticks().saturating_add(ticks));
+        }
+    }
 }
 
 /// Closes a Linux descriptor through the compatibility fd table.
