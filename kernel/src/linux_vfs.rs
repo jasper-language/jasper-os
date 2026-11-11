@@ -35,7 +35,7 @@ static LIBPCRE2: &[u8] = include_bytes!(env!("JSR_UBUNTU_LIBPCRE2"));
 #[cfg(not(feature = "compat-dynamic-libc-verify"))]
 static LIBPCRE2: &[u8] = &[];
 #[cfg(feature = "lifecycle-root-exec-verify")]
-static ROOT_LIBC: Once<Vec<u8>> = Once::new();
+static ROOT_LIBRARIES: [Once<Vec<u8>>; 6] = [const { Once::new() }; 6];
 
 const HANDLE_BASE: u64 = 0xffff_0000_0000_0000;
 
@@ -95,18 +95,28 @@ impl FileId {
         }
     }
 
+    #[cfg(feature = "lifecycle-root-exec-verify")]
+    const fn root_slot(self) -> usize {
+        match self {
+            Self::Libc => 0,
+            Self::LibSystemd => 1,
+            Self::LibSelinux => 2,
+            Self::LibGccS => 3,
+            Self::LibM => 4,
+            Self::LibPcre2 => 5,
+        }
+    }
+
     /// Returns the exact file bytes.
     ///
     /// 返回未修改的真实文件字节。
     pub fn bytes(self) -> &'static [u8] {
+        #[cfg(feature = "lifecycle-root-exec-verify")]
+        if let Some(bytes) = ROOT_LIBRARIES[self.root_slot()].get() {
+            return bytes.as_slice();
+        }
         match self {
-            Self::Libc => {
-                #[cfg(feature = "lifecycle-root-exec-verify")]
-                if let Some(bytes) = ROOT_LIBC.get() {
-                    return bytes.as_slice();
-                }
-                LIBC
-            }
+            Self::Libc => LIBC,
             Self::LibSystemd => LIBSYSTEMD,
             Self::LibSelinux => LIBSELINUX,
             Self::LibGccS => LIBGCC_S,
@@ -149,11 +159,21 @@ pub fn lookup(path: &[u8]) -> Option<FileId> {
 /// 安装从所选 System A/B 根卷读取的 libc 字节。
 #[cfg(feature = "lifecycle-root-exec-verify")]
 pub fn install_root_libc(bytes: Vec<u8>) -> bool {
+    install_root_library(FileId::Libc, bytes)
+}
+
+/// Installs one known library from the selected System A/B root.
+/// 安装一条来自所选 System A/B 根卷的已知共享库。
+#[cfg(feature = "lifecycle-root-exec-verify")]
+pub fn install_root_library(file: FileId, bytes: Vec<u8>) -> bool {
     if bytes.is_empty() {
         return false;
     }
-    ROOT_LIBC.call_once(|| bytes);
-    ROOT_LIBC.get().is_some_and(|installed| !installed.is_empty())
+    let slot = file.root_slot();
+    ROOT_LIBRARIES[slot].call_once(|| bytes);
+    ROOT_LIBRARIES[slot]
+        .get()
+        .is_some_and(|installed| !installed.is_empty())
 }
 
 /// Returns whether the verification slice contains any bytes.

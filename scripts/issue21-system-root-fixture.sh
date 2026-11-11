@@ -9,6 +9,7 @@ START_LBA="${3:?system partition LBA}"
 SLOT="${4:?A or B}"
 RELEASE="${5:?release}"
 ROOT_EXEC_PROBE="${6:-}"
+FULL_USERLAND="${7:-0}"
 [[ "$SLOT" == A || "$SLOT" == B ]]
 [[ "$RELEASE" =~ ^[1-9][0-9]*$ ]]
 mkdir -p "$WORK"
@@ -20,6 +21,13 @@ USERLAND_FILE="$WORK/system-$SLOT.jasper-userland"
 BINARY=/usr/bin/true
 INTERPRETER=/lib64/ld-linux-x86-64.so.2
 LIBC=/usr/lib/x86_64-linux-gnu/libc.so.6
+GETCONF=/usr/bin/getconf
+PRINTF=/usr/bin/printf
+LIBSYSTEMD=/usr/lib/x86_64-linux-gnu/libsystemd.so.0
+LIBSELINUX=/usr/lib/x86_64-linux-gnu/libselinux.so.1
+LIBGCC_S=/usr/lib/x86_64-linux-gnu/libgcc_s.so.1
+LIBM=/usr/lib/x86_64-linux-gnu/libm.so.6
+LIBPCRE2=/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0
 
 [[ -x "$BINARY" && -f "$INTERPRETER" && -f "$LIBC" ]]
 readelf -l "$BINARY" | grep -Fq "interpreter: $INTERPRETER"
@@ -48,7 +56,7 @@ write_file() {
   debugfs -R "stat $destination" "$PARTITION" 2>/dev/null | grep -q '^Inode:'
 }
 
-for directory in /etc /bin /lib64 /usr /usr/lib /usr/lib/x86_64-linux-gnu /usr/libexec /usr/libexec/jasper; do
+for directory in /etc /bin /lib64 /usr /usr/bin /usr/lib /usr/lib/x86_64-linux-gnu /usr/libexec /usr/libexec/jasper; do
   ensure_dir "$directory"
 done
 write_file "$MARKER" /etc/jasper-root
@@ -68,6 +76,13 @@ if [ -n "$ROOT_EXEC_PROBE" ]; then
   write_file "$ROOT_EXEC_PROBE" /usr/libexec/jasper/health-probe
   debugfs -w -R 'sif /usr/libexec/jasper/health-probe mode 0100755' "$PARTITION" >/dev/null
 fi
+if [ "$FULL_USERLAND" = 1 ]; then
+  for source in "$GETCONF" "$PRINTF" "$LIBSYSTEMD" "$LIBSELINUX" "$LIBGCC_S" "$LIBM" "$LIBPCRE2"; do
+    [[ -f "$source" ]]
+    write_file "$source" "$source"
+    debugfs -w -R "sif $source mode 0100755" "$PARTITION" >/dev/null
+  done
+fi
 e2fsck -fy "$PARTITION"
 e2fsck -fn "$PARTITION"
 
@@ -85,8 +100,13 @@ verify_payload "$LIBC" "$LIBC"
 if [ -n "$ROOT_EXEC_PROBE" ]; then
   verify_payload /usr/libexec/jasper/health-probe "$ROOT_EXEC_PROBE"
 fi
+if [ "$FULL_USERLAND" = 1 ]; then
+  for source in "$GETCONF" "$PRINTF" "$LIBSYSTEMD" "$LIBSELINUX" "$LIBGCC_S" "$LIBM" "$LIBPCRE2"; do
+    verify_payload "$source" "$source"
+  done
+fi
 
 dd if="$PARTITION" of="$IMAGE" bs=512 seek="$START_LBA" \
   conv=notrunc,sparse status=none
 sync
-echo "system-root-fixture: PASS slot=$SLOT release=$RELEASE start_lba=$START_LBA files=6 userland=x86_64-linux-elf root_exec_probe=$([ -n "$ROOT_EXEC_PROBE" ] && echo present || echo absent)"
+echo "system-root-fixture: PASS slot=$SLOT release=$RELEASE start_lba=$START_LBA files=6 userland=x86_64-linux-elf root_exec_probe=$([ -n "$ROOT_EXEC_PROBE" ] && echo present || echo absent) full_userland=$FULL_USERLAND"

@@ -412,7 +412,7 @@ fn validate_system_root(
     {
         validate_elf_payload(&root, ROOT_EXEC_PROBE_PATH, true)?;
         execute_root_linux_probe(&root)?;
-        execute_root_dynamic_true(&root)?;
+        execute_root_dynamic_programs(&root)?;
     }
     Ok(())
 }
@@ -511,41 +511,85 @@ fn execute_root_linux_probe(root: &Ext4Reader) -> Result<(), HealthError> {
 }
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
-fn execute_root_dynamic_true(root: &Ext4Reader) -> Result<(), HealthError> {
-    const MAX_EXECUTABLE_BYTES: usize = 8 * 1024 * 1024;
+fn install_root_libraries(root: &Ext4Reader) -> Result<(), HealthError> {
     const MAX_LIBRARY_BYTES: usize = 16 * 1024 * 1024;
+    let libraries = [
+        (
+            "/usr/lib/x86_64-linux-gnu/libc.so.6",
+            crate::linux_vfs::FileId::Libc,
+        ),
+        (
+            "/usr/lib/x86_64-linux-gnu/libsystemd.so.0",
+            crate::linux_vfs::FileId::LibSystemd,
+        ),
+        (
+            "/usr/lib/x86_64-linux-gnu/libselinux.so.1",
+            crate::linux_vfs::FileId::LibSelinux,
+        ),
+        (
+            "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
+            crate::linux_vfs::FileId::LibGccS,
+        ),
+        (
+            "/usr/lib/x86_64-linux-gnu/libm.so.6",
+            crate::linux_vfs::FileId::LibM,
+        ),
+        (
+            "/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0",
+            crate::linux_vfs::FileId::LibPcre2,
+        ),
+    ];
+    let mut total = 0usize;
+    for (path, file) in libraries {
+        let bytes = root
+            .read_file(path, MAX_LIBRARY_BYTES)
+            .map_err(|_| HealthError::RootExecute)?;
+        total = total.saturating_add(bytes.len());
+        if !crate::linux_vfs::install_root_library(file, bytes) {
+            return Err(HealthError::RootExecute);
+        }
+    }
+    crate::kprintln!(
+        "[JSR-LIFE-ROOT-LIBS] count={} bytes={} source=system-ab",
+        libraries.len(),
+        total
+    );
+    Ok(())
+}
+
+#[cfg(feature = "lifecycle-root-exec-verify")]
+fn run_root_program(
+    root: &Ext4Reader,
+    path: &'static str,
+    argv: &[&[u8]],
+) -> Result<(), HealthError> {
+    const MAX_EXECUTABLE_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_INTERPRETER_BYTES: usize = 16 * 1024 * 1024;
     let executable = root
-        .read_file("/bin/true", MAX_EXECUTABLE_BYTES)
+        .read_file(path, MAX_EXECUTABLE_BYTES)
         .map_err(|_| HealthError::RootExecute)?;
     let interpreter = root
-        .read_file("/lib64/ld-linux-x86-64.so.2", MAX_LIBRARY_BYTES)
+        .read_file("/lib64/ld-linux-x86-64.so.2", MAX_INTERPRETER_BYTES)
         .map_err(|_| HealthError::RootExecute)?;
-    let libc = root
-        .read_file("/usr/lib/x86_64-linux-gnu/libc.so.6", MAX_LIBRARY_BYTES)
-        .map_err(|_| HealthError::RootExecute)?;
-    if !crate::linux_vfs::install_root_libc(libc) {
-        return Err(HealthError::RootExecute);
-    }
-    let libc_bytes = crate::linux_vfs::lookup(b"/usr/lib/x86_64-linux-gnu/libc.so.6")
-        .map(|file| file.bytes().len())
-        .unwrap_or(0);
-    crate::kprintln!(
-        "[JSR-LIFE-ROOT-LIBC] path=/usr/lib/x86_64-linux-gnu/libc.so.6 bytes={} source=system-ab",
-        libc_bytes
-    );
     let warm_frames = crate::mm::frame::free_frames();
-    if !crate::compat_dynamic_demo::run_root_dynamic_true(
+    if !crate::compat_dynamic_demo::run_root_dynamic_program(
+        path.trim_start_matches('/'),
+        path,
         &executable,
         &interpreter,
+        argv,
         warm_frames,
         false,
     ) {
         return Err(HealthError::RootExecute);
     }
     let frames_before = crate::mm::frame::free_frames();
-    if crate::compat_dynamic_demo::run_root_dynamic_true(
+    if crate::compat_dynamic_demo::run_root_dynamic_program(
+        path.trim_start_matches('/'),
+        path,
         &executable,
         &interpreter,
+        argv,
         frames_before,
         true,
     ) {
@@ -553,6 +597,17 @@ fn execute_root_dynamic_true(root: &Ext4Reader) -> Result<(), HealthError> {
     } else {
         Err(HealthError::RootExecute)
     }
+}
+
+#[cfg(feature = "lifecycle-root-exec-verify")]
+fn execute_root_dynamic_programs(root: &Ext4Reader) -> Result<(), HealthError> {
+    install_root_libraries(root)?;
+    let true_argv: [&[u8]; 1] = [b"/bin/true"];
+    run_root_program(root, "/bin/true", &true_argv)?;
+    let getconf_argv: [&[u8]; 2] = [b"/usr/bin/getconf", b"GNU_LIBC_VERSION"];
+    run_root_program(root, "/usr/bin/getconf", &getconf_argv)?;
+    let printf_argv: [&[u8]; 3] = [b"/usr/bin/printf", b"jasper-%s\n", b"dynamic"];
+    run_root_program(root, "/usr/bin/printf", &printf_argv)
 }
 
 /// 确认当前 A/B 槽的最小健康集合并持久提交。

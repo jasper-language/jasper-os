@@ -464,21 +464,23 @@ fn run_program(
     }
 }
 
-/// Executes the unmodified Ubuntu `true` image supplied by a System A/B root.
-/// 执行由 System A/B 根卷提供的未修改 Ubuntu `true` 镜像。
+/// Executes one bounded program image through the root-backed dynamic namespace.
+/// 通过根卷动态文件命名空间执行一个有界程序镜像。
 #[cfg(feature = "lifecycle-root-exec-verify")]
-pub(crate) fn run_root_dynamic_true(
+pub(crate) fn run_root_dynamic_program(
+    name: &'static str,
+    path: &'static str,
     executable: &[u8],
     interpreter: &[u8],
+    argv: &[&[u8]],
     frames_before: usize,
     enforce_resources: bool,
 ) -> bool {
-    let argv: [&[u8]; 1] = [b"/bin/true"];
     let result = run_program(
-        "root-dynamic-true",
+        name,
         executable,
         interpreter,
-        &argv,
+        argv,
         frames_before,
         enforce_resources,
     );
@@ -488,7 +490,9 @@ pub(crate) fn run_root_dynamic_true(
         && (!enforce_resources || result.resources)
         && result.syscalls != 0;
     kprintln!(
-        "[JSR-LIFE-ROOT-DYNAMIC] path=/bin/true interpreter=/lib64/ld-linux-x86-64.so.2 mapped={} interpreter_syscalls={} syscalls={} exit_zero={} frames_before={} resources={} failed={}",
+        "[JSR-LIFE-ROOT-DYNAMIC] program={} path={} interpreter=/lib64/ld-linux-x86-64.so.2 mapped={} interpreter_syscalls={} syscalls={} exit_zero={} frames_before={} resources={} failed={}",
+        name,
+        path,
         result.mapped,
         result.interpreter_entered,
         result.syscalls,

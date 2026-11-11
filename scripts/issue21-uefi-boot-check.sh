@@ -45,16 +45,18 @@ cargo run --locked -p jasper-lifecycle-staging --bin jasper-esp-install -- \
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-ext4-provision -- \
   "$IMAGE" 38654705664 >"$OUT/ext4-provision.log" 2>&1
 ROOT_EXEC_PROBE=""
+ROOT_FULL_USERLAND=0
 if [ "$MODE" = root-exec ]; then
   ROOT_EXEC_PROBE=$(find "$TARGET/x86_64-unknown-none/release/build" \
     -path '*/out/user-target/x86_64-unknown-none/release/user-linuxprobe' \
     -type f -print | sort | tail -n 1)
   [ -n "$ROOT_EXEC_PROBE" ]
+  ROOT_FULL_USERLAND=1
 fi
 bash scripts/issue21-system-root-fixture.sh \
-  "$IMAGE" "$TARGET" 1050624 A 1 "$ROOT_EXEC_PROBE" >"$OUT/system-root-a.log" 2>&1
+  "$IMAGE" "$TARGET" 1050624 A 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" >"$OUT/system-root-a.log" 2>&1
 bash scripts/issue21-system-root-fixture.sh \
-  "$IMAGE" "$TARGET" 17827840 B 1 "$ROOT_EXEC_PROBE" >"$OUT/system-root-b.log" 2>&1
+  "$IMAGE" "$TARGET" 17827840 B 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" >"$OUT/system-root-b.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-init -- \
   "$IMAGE" 38654705664 "$KERNEL" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-inspect -- \
@@ -104,9 +106,13 @@ grep -aq 'Jasper-OS boot manager starting' "$OUT/serial.log"
 if [ "$MODE" = root-exec ]; then
   grep -aq '^\[JSR-LIFE-ROOT-EXEC\] path=/usr/libexec/jasper/health-probe .* mapped=true cpl3=true exited=true syscalls=[1-9][0-9]* frames_before=[0-9]* resources=true' \
     "$OUT/serial.log"
-  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] path=/bin/true interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=bin/true path=/bin/true interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
     "$OUT/serial.log"
-  grep -aq '^\[JSR-LIFE-ROOT-LIBC\] path=/usr/lib/x86_64-linux-gnu/libc.so.6 bytes=[1-9][0-9]* source=system-ab' \
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/getconf path=/usr/bin/getconf interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/printf path=/usr/bin/printf interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-LIBS\] count=6 bytes=[1-9][0-9]* source=system-ab' \
     "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
