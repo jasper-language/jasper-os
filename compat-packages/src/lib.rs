@@ -847,9 +847,7 @@ impl ComponentInstaller {
         component: &str,
         candidate: &str,
     ) -> Result<(), PackageError> {
-        if let Some((dependent, required)) =
-            self.active_dependencies_on(component)?.into_iter().next()
-        {
+        for (dependent, required) in self.active_dependencies_on(component)? {
             if !required.matches(candidate) {
                 return Err(PackageError::DependencyVersionInUse {
                     component: component.into(),
@@ -870,7 +868,7 @@ impl ComponentInstaller {
             return Ok(Vec::new());
         }
         let state_dir = self.root.join(STATE_DIR);
-        let mut found = Vec::new();
+        let mut found: Vec<(String, DependencyRequirement)> = Vec::new();
         for entry in fs::read_dir(state_dir)? {
             let path = entry?.path();
             if path.extension().and_then(|value| value.to_str()) != Some("state") {
@@ -893,6 +891,7 @@ impl ComponentInstaller {
                 found.push((dependent.into(), required));
             }
         }
+        found.sort_by(|left, right| left.0.cmp(&right.0));
         Ok(found)
     }
 
@@ -1495,6 +1494,52 @@ mod tests {
         ));
         assert_eq!(installer.current("base-1").unwrap().version, "2.0.0");
         assert_eq!(installer.current("wine").unwrap().version, "2.0.0");
+    }
+
+    #[test]
+    fn every_active_dependent_must_accept_the_candidate_version() {
+        let temp = TestDir::new("dependency-versions-all-dependents");
+        let root = temp.path().join("root");
+        let installer = ComponentInstaller::new(&root);
+        let (base1_archive, base1_digest) = archive(temp.path(), "base-1.0.0");
+        let base1 = component_manifest(temp.path(), "base-1", "1.0.0", &base1_digest, "");
+        let (base2_archive, base2_digest) = archive(temp.path(), "base-2.0.0");
+        let base2 = component_manifest(temp.path(), "base-1", "2.0.0", &base2_digest, "");
+        let (accept_archive, accept_digest) = archive(temp.path(), "accept-1.0.0");
+        let accept = component_manifest(
+            temp.path(),
+            "a-consumer",
+            "1.0.0",
+            &accept_digest,
+            "base-1@>=1.0.0,<3.0.0",
+        );
+        let (reject_archive, reject_digest) = archive(temp.path(), "reject-1.0.0");
+        let reject = component_manifest(
+            temp.path(),
+            "z-consumer",
+            "1.0.0",
+            &reject_digest,
+            "base-1@>=1.0.0,<2.0.0",
+        );
+
+        installer.install(&base1, &base1_archive).unwrap();
+        installer.install(&accept, &accept_archive).unwrap();
+        installer.install(&reject, &reject_archive).unwrap();
+        assert!(matches!(
+            installer.install(&base2, &base2_archive),
+            Err(PackageError::DependencyVersionInUse {
+                component,
+                dependent,
+                requirement,
+                candidate
+            }) if component == "base-1"
+                && dependent == "z-consumer"
+                && requirement == ">=1.0.0,<2.0.0"
+                && candidate == "2.0.0"
+        ));
+        assert_eq!(installer.current("base-1").unwrap().version, "1.0.0");
+        assert_eq!(installer.current("a-consumer").unwrap().version, "1.0.0");
+        assert_eq!(installer.current("z-consumer").unwrap().version, "1.0.0");
     }
 
     #[test]
