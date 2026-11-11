@@ -232,24 +232,34 @@ fn linux_tid_for_task(task: crate::task::TaskId) -> Option<(ObjId, u32)> {
         .map(|entry| (entry.process, entry.tid))
 }
 
-/// Queues one standard signal on the current Linux thread.
-/// 在当前 Linux 线程上登记一个标准信号。
-fn queue_current_thread_signal(process: ObjId, tid: u32, signal: u32) -> bool {
+/// Queues one standard signal on a target Linux thread in the same process.
+/// 在同一进程的目标 Linux 线程上登记一个标准信号。
+fn queue_thread_signal(process: ObjId, tid: u32, signal: u32) -> bool {
     if !(1..=64).contains(&signal) {
         return false;
     }
-    let (task, _) = sched::current();
     let mut state = COMPAT.lock();
     let Some(entry) = state
         .threads
         .iter_mut()
         .flatten()
-        .find(|entry| entry.process == process && entry.task == task && entry.tid == tid)
+        .find(|entry| entry.process == process && entry.tid == tid)
     else {
         return false;
     };
     entry.pending_signals |= 1u64 << (signal - 1);
     true
+}
+
+/// Returns whether a target Linux TID exists in the process.
+/// 判断目标 Linux TID 是否存在于该进程。
+fn has_linux_thread(process: ObjId, tid: u32) -> bool {
+    COMPAT
+        .lock()
+        .threads
+        .iter()
+        .flatten()
+        .any(|entry| entry.process == process && entry.tid == tid)
 }
 
 /// Takes the lowest unmasked pending signal for the current thread.
@@ -370,7 +380,8 @@ fn build_signal_frame(
         return Err(CompatErrno::Fault);
     }
     crate::kprintln!(
-        "[JSR-LINUX-SIGNAL] delivered signal={} handler={:#x} frame={:#x} info={:#x} context={:#x}",
+        "[JSR-LINUX-SIGNAL] delivered tid={} signal={} handler={:#x} frame={:#x} info={:#x} context={:#x}",
+        linux_tid(process).unwrap_or(0),
         signal,
         handler,
         frame_address,
@@ -419,8 +430,8 @@ fn deliver_pending_signal(
     }
 }
 
-/// Validates and queues a current-thread `tgkill` request.
-/// 校验并在当前线程登记 `tgkill` 请求。
+/// Validates and queues a same-process `tgkill` request.
+/// 校验并在同进程目标线程登记 `tgkill` 请求。
 fn linux_tgkill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     let tgid = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
     let tid = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
@@ -428,16 +439,18 @@ fn linux_tgkill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     if tgid == 0 || tid == 0 || signal > 64 {
         return Err(CompatErrno::Invalid);
     }
-    if proc::linux_pid(process) != Some(tgid) || linux_tid(process) != Some(tid) {
+    if proc::linux_pid(process) != Some(tgid) {
         return Err(CompatErrno::NoProcess);
     }
     if signal == 0 {
-        return Ok(());
+        return has_linux_thread(process, tid)
+            .then_some(())
+            .ok_or(CompatErrno::NoProcess);
     }
     if matches!(signal, 9 | 19) {
         return Err(CompatErrno::Invalid);
     }
-    if queue_current_thread_signal(process, tid, signal) {
+    if queue_thread_signal(process, tid, signal) {
         Ok(())
     } else {
         Err(CompatErrno::NoProcess)
@@ -851,6 +864,10 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::RtSigAction => compat_result(linux_rt_sigaction(pid, call.args)),
         LinuxSyscall::RtSigProcMask => compat_result(linux_rt_sigprocmask(pid, call.args)),
         LinuxSyscall::Tgkill => compat_result(linux_tgkill(pid, call.args).map(|()| 0)),
+        LinuxSyscall::SchedYield => {
+            sched::yield_with_cause(crate::sched::scheduler::Cause::YIELD);
+            0
+        }
         LinuxSyscall::GetPid => proc::linux_pid(pid)
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
