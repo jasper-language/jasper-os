@@ -37,6 +37,8 @@ cargo run --locked -p jasper-lifecycle-staging --bin jasper-esp-install -- \
   "$IMAGE" "$TOTAL" "$UEFI_ESP" >"$OUT/esp-install.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-ext4-provision -- \
   "$IMAGE" "$TOTAL" >"$OUT/ext4-provision.log" 2>&1
+bash scripts/issue21-data-fixture.sh \
+  install "$IMAGE" "$TARGET" "$TOTAL" >"$OUT/data-install.log" 2>&1
 bash scripts/issue21-system-root-fixture.sh \
   "$IMAGE" "$TARGET" 1050624 A 1 >"$OUT/system-root-a.log" 2>&1
 bash scripts/issue21-system-root-fixture.sh \
@@ -69,6 +71,8 @@ grep -aq '^\[JSR-LIFE-HEALTH\] result=confirmed slot=B generation=4 release=2 at
   "$OUT/serial-confirmed.log"
 grep -aqE '^\[JSR-PROD\] alive ticks=[1-9][0-9]*' \
   "$OUT/serial-confirmed.log"
+bash scripts/issue21-data-fixture.sh \
+  verify "$IMAGE" "$TARGET" "$TOTAL" >"$OUT/data-after-confirmation.log" 2>&1
 
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-inspect -- \
   "$IMAGE" "$TOTAL" >"$OUT/control-before-corruption.log" 2>&1
@@ -123,5 +127,7 @@ grep -q 'slot=A state=Confirmed generation=1 release=1 attempts=0' \
   "$OUT/control-recovered.log"
 grep -q 'slot=B state=Confirmed generation=4 release=2 attempts=0' \
   "$OUT/control-recovered.log"
+bash scripts/issue21-data-fixture.sh \
+  verify "$IMAGE" "$TARGET" "$TOTAL" >"$OUT/data-after-recovery.log" 2>&1
 
 echo "issue21-confirm-cut: PASS prior_generation=3 reconfirmed_generation=5 evidence=$OUT"
