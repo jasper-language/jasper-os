@@ -7,7 +7,7 @@
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -15,6 +15,7 @@ use std::path::{Component as PathComponent, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
+use semver::{Version, VersionReq};
 use sha2::{Digest, Sha256};
 use tar::Archive;
 
@@ -42,6 +43,35 @@ const SUPPORTED_LICENSES: &[&str] = &[
     "Zlib",
 ];
 
+/// 一项组件依赖及其可选语义版本约束。
+///
+/// One component dependency with an optional semantic-version requirement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DependencyRequirement {
+    /// Dependency component name.
+    /// 依赖组件名。
+    pub name: String,
+    /// Optional semantic-version requirement; empty accepts any safe version token.
+    /// 可选的语义版本约束；空串表示接受任意合法版本名。
+    pub version: String,
+}
+
+impl DependencyRequirement {
+    /// Returns whether the active dependency version satisfies this requirement.
+    /// 判断当前依赖版本是否满足本需求；未声明约束时接受任意合法版本名。
+    pub fn matches(&self, version: &str) -> bool {
+        if self.version.is_empty() {
+            return true;
+        }
+        let Ok(requirement) = VersionReq::parse(&self.version) else {
+            return false;
+        };
+        Version::parse(version)
+            .map(|version| requirement.matches(&version))
+            .unwrap_or(false)
+    }
+}
+
 /// 一个可独立安装的 Linux 兼容组件清单。
 ///
 /// Describes one independently installable Linux compatibility component.
@@ -59,8 +89,8 @@ pub struct ComponentManifest {
     pub license: String,
     /// 相对于组件根目录的可执行入口。
     pub entrypoint: String,
-    /// 组件运行所需的 Jasper 能力或兼容组件。
-    pub requires: Vec<String>,
+    /// 组件运行所需的 Jasper 能力或兼容组件及其可选版本约束。
+    pub requires: Vec<DependencyRequirement>,
 }
 
 impl ComponentManifest {
@@ -93,11 +123,27 @@ impl ComponentManifest {
                 "license" => set_once(&mut license, value, line_no)?,
                 "entrypoint" => set_once(&mut entrypoint, value, line_no)?,
                 "requires" => {
-                    for item in value.split(',').map(str::trim) {
-                        if item.is_empty() || !safe_token(item) {
+                    for item in dependency_items(value) {
+                        let item = item.as_str();
+                        let (dependency, version) = match item.split_once('@') {
+                            Some((name, version)) => (name.trim(), version.trim()),
+                            None => (item, ""),
+                        };
+                        if dependency.is_empty() || !safe_token(dependency) {
                             return Err(PackageError::Manifest(line_no + 1, "非法依赖名".into()));
                         }
-                        requires.push(item.to_string());
+                        if !version.is_empty() {
+                            VersionReq::parse(version).map_err(|error| {
+                                PackageError::Manifest(
+                                    line_no + 1,
+                                    format!("非法版本约束 {version}: {error}"),
+                                )
+                            })?;
+                        }
+                        requires.push(DependencyRequirement {
+                            name: dependency.to_string(),
+                            version: version.to_string(),
+                        });
                     }
                 }
                 _ => return Err(PackageError::Manifest(line_no + 1, format!("未知键 {key}"))),
@@ -149,11 +195,19 @@ impl ComponentManifest {
         if !safe_relative(&self.entrypoint) {
             return Err(PackageError::Manifest(0, "entrypoint 路径非法".into()));
         }
-        let unique: BTreeSet<_> = self.requires.iter().collect();
+        let unique: BTreeSet<_> = self
+            .requires
+            .iter()
+            .map(|required| &required.name)
+            .collect();
         if unique.len() != self.requires.len() {
             return Err(PackageError::Manifest(0, "requires 重复".into()));
         }
-        if self.requires.iter().any(|required| required == &self.name) {
+        if self
+            .requires
+            .iter()
+            .any(|required| required.name == self.name)
+        {
             return Err(PackageError::Manifest(0, "组件不能依赖自身".into()));
         }
         Ok(())
@@ -202,6 +256,30 @@ pub enum PackageError {
         /// 缺失或不可用的直接依赖。Missing or unusable direct dependency.
         required: String,
     },
+    /// An active direct dependency does not satisfy the declared version range.
+    /// 当前直接依赖版本不满足声明的版本范围。
+    DependencyVersion {
+        /// 正在安装的组件。
+        component: String,
+        /// 不满足约束的依赖。
+        required: String,
+        /// 清单声明的版本约束。
+        requirement: String,
+        /// 当前激活的依赖版本。
+        installed: String,
+    },
+    /// Changing a component would violate an active dependent's version range.
+    /// 改变组件版本会破坏活动依赖方的版本范围。
+    DependencyVersionInUse {
+        /// 被阻止变更的组件。
+        component: String,
+        /// 阻止变更的活动依赖方。
+        dependent: String,
+        /// 依赖方声明的版本约束。
+        requirement: String,
+        /// 请求激活的候选版本。
+        candidate: String,
+    },
     /// 仍有活动组件依赖目标组件，因此不能安全卸载。
     /// An active component still depends on the target, so removal would break the closure.
     DependencyInUse {
@@ -236,6 +314,24 @@ impl std::fmt::Display for PackageError {
                 component,
                 required,
             } => write!(formatter, "组件 {component} 缺少可用依赖：{required}"),
+            Self::DependencyVersion {
+                component,
+                required,
+                requirement,
+                installed,
+            } => write!(
+                formatter,
+                "组件 {component} 要求 {required} {requirement}，当前为 {installed}"
+            ),
+            Self::DependencyVersionInUse {
+                component,
+                dependent,
+                requirement,
+                candidate,
+            } => write!(
+                formatter,
+                "组件 {component} 不能切换到 {candidate}：活动组件 {dependent} 要求 {requirement}"
+            ),
             Self::DependencyInUse {
                 component,
                 dependent,
@@ -294,6 +390,7 @@ impl ComponentInstaller {
         let manifest_text = fs::read_to_string(manifest_path)?;
         let manifest = ComponentManifest::parse(&manifest_text)?;
         self.preflight_dependency_closure(&manifest)?;
+        self.ensure_active_dependents_accept(&manifest.name, &manifest.version)?;
         let actual = digest_file(archive_path)?;
         if !actual.eq_ignore_ascii_case(&manifest.archive_sha256) {
             return Err(PackageError::Digest {
@@ -385,33 +482,49 @@ impl ComponentInstaller {
         &self,
         manifest: &ComponentManifest,
     ) -> Result<(), PackageError> {
-        let mut pending: Vec<(String, String)> = manifest
+        let mut pending: Vec<(String, DependencyRequirement)> = manifest
             .requires
             .iter()
-            .map(|required| (manifest.name.clone(), required.clone()))
+            .cloned()
+            .map(|required| (manifest.name.clone(), required))
             .collect();
-        let mut visited = BTreeSet::new();
+        let mut installed: BTreeMap<String, Installed> = BTreeMap::new();
+        let mut expanded = BTreeSet::new();
         while let Some((component, required)) = pending.pop() {
-            if !visited.insert(required.clone()) {
+            let dependency = if let Some(dependency) = installed.get(&required.name) {
+                dependency.clone()
+            } else {
+                let dependency = match self.current(&required.name) {
+                    Ok(dependency) => dependency,
+                    Err(PackageError::NotInstalled(_)) => {
+                        return Err(PackageError::MissingDependency {
+                            component,
+                            required: required.name,
+                        })
+                    }
+                    Err(error) => return Err(error),
+                };
+                installed.insert(required.name.clone(), dependency.clone());
+                dependency
+            };
+            if !required.matches(&dependency.version) {
+                return Err(PackageError::DependencyVersion {
+                    component,
+                    required: required.name,
+                    requirement: required.version,
+                    installed: dependency.version,
+                });
+            }
+            if !expanded.insert(required.name.clone()) {
                 continue;
             }
-            let dependency = match self.current(&required) {
-                Ok(dependency) => dependency,
-                Err(PackageError::NotInstalled(_)) => {
-                    return Err(PackageError::MissingDependency {
-                        component,
-                        required,
-                    })
-                }
-                Err(error) => return Err(error),
-            };
             let dependency_manifest =
                 self.installed_manifest(&dependency.name, &dependency.version)?;
             pending.extend(
                 dependency_manifest
                     .requires
                     .into_iter()
-                    .map(|nested| (required.clone(), nested)),
+                    .map(|nested| (required.name.clone(), nested)),
             );
         }
         Ok(())
@@ -429,6 +542,7 @@ impl ComponentInstaller {
         self.verify_installed(name, &previous)?;
         let previous_manifest = self.installed_manifest(name, &previous)?;
         self.preflight_dependency_closure(&previous_manifest)?;
+        self.ensure_active_dependents_accept(name, &previous)?;
         let pending = self.write_state_temporary_values(name, &previous, Some(&state.current))?;
         if let Err(error) = fs::rename(&pending, self.state_path(name)) {
             let _ = fs::remove_file(pending);
@@ -721,7 +835,40 @@ impl ComponentInstaller {
     }
 
     fn active_dependent(&self, component: &str) -> Result<Option<String>, PackageError> {
+        Ok(self
+            .active_dependencies_on(component)?
+            .into_iter()
+            .next()
+            .map(|(dependent, _)| dependent))
+    }
+
+    fn ensure_active_dependents_accept(
+        &self,
+        component: &str,
+        candidate: &str,
+    ) -> Result<(), PackageError> {
+        for (dependent, required) in self.active_dependencies_on(component)? {
+            if !required.matches(candidate) {
+                return Err(PackageError::DependencyVersionInUse {
+                    component: component.into(),
+                    dependent,
+                    requirement: required.version,
+                    candidate: candidate.into(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn active_dependencies_on(
+        &self,
+        component: &str,
+    ) -> Result<Vec<(String, DependencyRequirement)>, PackageError> {
+        if !self.ensure_existing_layout()? {
+            return Ok(Vec::new());
+        }
         let state_dir = self.root.join(STATE_DIR);
+        let mut found: Vec<(String, DependencyRequirement)> = Vec::new();
         for entry in fs::read_dir(state_dir)? {
             let path = entry?.path();
             if path.extension().and_then(|value| value.to_str()) != Some("state") {
@@ -736,15 +883,16 @@ impl ComponentInstaller {
             }
             let state = self.read_state(dependent)?;
             let manifest = self.installed_manifest(dependent, &state.current)?;
-            if manifest
+            if let Some(required) = manifest
                 .requires
-                .iter()
-                .any(|required| required == component)
+                .into_iter()
+                .find(|required| required.name == component)
             {
-                return Ok(Some(dependent.into()));
+                found.push((dependent.into(), required));
             }
         }
-        Ok(None)
+        found.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(found)
     }
 
     fn ensure_layout(&self) -> Result<(), PackageError> {
@@ -924,6 +1072,29 @@ fn safe_token(value: &str) -> bool {
         .next()
         .is_some_and(|byte| byte.is_ascii_alphanumeric())
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn dependency_items(value: &str) -> Vec<String> {
+    let mut items: Vec<String> = Vec::new();
+    for part in value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        if part.starts_with(['<', '>', '=']) {
+            if let Some(last) = items.last_mut() {
+                if last.contains('@') {
+                    // VersionReq comparators continue the previous constrained dependency.
+                    // 以比较符开头的片段继续前一个带 @ 的依赖约束。
+                    last.push(',');
+                    last.push_str(part);
+                    continue;
+                }
+            }
+        }
+        items.push(part.to_string());
+    }
+    items
 }
 
 fn supported_license(expression: &str) -> bool {
@@ -1244,6 +1415,131 @@ mod tests {
             "a".repeat(64)
         );
         assert!(ComponentManifest::parse(&combined).is_ok());
+    }
+
+    #[test]
+    fn dependency_version_ranges_are_parsed_and_reject_invalid_constraints() {
+        let digest = "a".repeat(64);
+        let constrained = format!(
+            "name=wine\nversion=1.0.0\narch=x86_64\nsha256={digest}\nlicense=MIT\nentrypoint=bin/wine\nrequires=linux-abi-1@>=1.2.0,<2.0.0,vulkan-1\n"
+        );
+        let manifest = ComponentManifest::parse(&constrained).unwrap();
+        assert_eq!(manifest.requires[0].name, "linux-abi-1");
+        assert_eq!(manifest.requires[0].version, ">=1.2.0,<2.0.0");
+        assert!(manifest.requires[0].matches("1.9.0"));
+        assert!(!manifest.requires[0].matches("2.0.0"));
+        assert!(manifest.requires[1].matches("not-semver"));
+
+        let invalid = constrained.replace(">=1.2.0,<2.0.0", "not a range");
+        assert!(ComponentManifest::parse(&invalid).is_err());
+    }
+
+    #[test]
+    fn active_dependents_block_incompatible_upgrade_and_rollback() {
+        let temp = TestDir::new("dependency-versions");
+        let root = temp.path().join("root");
+        let installer = ComponentInstaller::new(&root);
+        let (base1_archive, base1_digest) = archive(temp.path(), "base-1.0.0");
+        let base1 = component_manifest(temp.path(), "base-1", "1.0.0", &base1_digest, "");
+        let (base2_archive, base2_digest) = archive(temp.path(), "base-2.0.0");
+        let base2 = component_manifest(temp.path(), "base-1", "2.0.0", &base2_digest, "");
+        let (wine_archive, wine_digest) = archive(temp.path(), "wine-versioned");
+        let wine1 = component_manifest(
+            temp.path(),
+            "wine",
+            "1.0.0",
+            &wine_digest,
+            "base-1@>=1.0.0,<2.0.0",
+        );
+
+        installer.install(&base1, &base1_archive).unwrap();
+        installer.install(&wine1, &wine_archive).unwrap();
+        assert!(matches!(
+            installer.install(&base2, &base2_archive),
+            Err(PackageError::DependencyVersionInUse {
+                component,
+                dependent,
+                requirement,
+                candidate
+            }) if component == "base-1"
+                && dependent == "wine"
+                && requirement == ">=1.0.0,<2.0.0"
+                && candidate == "2.0.0"
+        ));
+        assert_eq!(installer.current("base-1").unwrap().version, "1.0.0");
+        assert_eq!(installer.current("wine").unwrap().version, "1.0.0");
+        assert!(transient_entries(&root).is_empty());
+
+        installer.uninstall("wine").unwrap();
+        installer.install(&base2, &base2_archive).unwrap();
+        let wine2 = component_manifest(
+            temp.path(),
+            "wine",
+            "2.0.0",
+            &wine_digest,
+            "base-1@>=2.0.0,<3.0.0",
+        );
+        installer.install(&wine2, &wine_archive).unwrap();
+        assert!(matches!(
+            installer.rollback("base-1"),
+            Err(PackageError::DependencyVersionInUse {
+                component,
+                dependent,
+                requirement,
+                candidate
+            }) if component == "base-1"
+                && dependent == "wine"
+                && requirement == ">=2.0.0,<3.0.0"
+                && candidate == "1.0.0"
+        ));
+        assert_eq!(installer.current("base-1").unwrap().version, "2.0.0");
+        assert_eq!(installer.current("wine").unwrap().version, "2.0.0");
+    }
+
+    #[test]
+    fn every_active_dependent_must_accept_the_candidate_version() {
+        let temp = TestDir::new("dependency-versions-all-dependents");
+        let root = temp.path().join("root");
+        let installer = ComponentInstaller::new(&root);
+        let (base1_archive, base1_digest) = archive(temp.path(), "base-1.0.0");
+        let base1 = component_manifest(temp.path(), "base-1", "1.0.0", &base1_digest, "");
+        let (base2_archive, base2_digest) = archive(temp.path(), "base-2.0.0");
+        let base2 = component_manifest(temp.path(), "base-1", "2.0.0", &base2_digest, "");
+        let (accept_archive, accept_digest) = archive(temp.path(), "accept-1.0.0");
+        let accept = component_manifest(
+            temp.path(),
+            "a-consumer",
+            "1.0.0",
+            &accept_digest,
+            "base-1@>=1.0.0,<3.0.0",
+        );
+        let (reject_archive, reject_digest) = archive(temp.path(), "reject-1.0.0");
+        let reject = component_manifest(
+            temp.path(),
+            "z-consumer",
+            "1.0.0",
+            &reject_digest,
+            "base-1@>=1.0.0,<2.0.0",
+        );
+
+        installer.install(&base1, &base1_archive).unwrap();
+        installer.install(&accept, &accept_archive).unwrap();
+        installer.install(&reject, &reject_archive).unwrap();
+        assert!(matches!(
+            installer.install(&base2, &base2_archive),
+            Err(PackageError::DependencyVersionInUse {
+                component,
+                dependent,
+                requirement,
+                candidate
+            }) if component == "base-1"
+                && dependent == "z-consumer"
+                && requirement == ">=1.0.0,<2.0.0"
+                && candidate == "2.0.0"
+        ));
+        assert_eq!(installer.current("base-1").unwrap().version, "1.0.0");
+        assert_eq!(installer.current("a-consumer").unwrap().version, "1.0.0");
+        assert_eq!(installer.current("z-consumer").unwrap().version, "1.0.0");
     }
 
     #[test]

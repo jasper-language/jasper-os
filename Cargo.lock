@@ -801,6 +801,7 @@ name = "jasper-compat-packages"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "semver",
  "sha2",
  "tar",
 ]
