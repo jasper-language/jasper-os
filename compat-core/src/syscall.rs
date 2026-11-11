@@ -18,7 +18,8 @@ use linux_raw_sys::general::{
     __NR_rt_sigprocmask, __NR_rt_sigreturn, __NR_sched_getaffinity, __NR_sched_yield,
     __NR_set_robust_list, __NR_sysinfo,
     __NR_set_tid_address,
-    __NR_sigaltstack, __NR_statfs, __NR_tgkill, __NR_time, __NR_uname, __NR_write, __NR_writev,
+    __NR_sigaltstack, __NR_statfs, __NR_statx, __NR_tgkill, __NR_time, __NR_uname, __NR_write,
+    __NR_writev,
 };
 
 /// Linux x86_64 futex syscall number for restart policy.
@@ -79,6 +80,7 @@ pub enum LinuxSyscall {
     Fchdir,
     Fstat,
     NewFstatAt,
+    Statx,
     Fcntl,
     Poll,
     StatFs,
@@ -259,6 +261,7 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_fchdir) => LinuxSyscall::Fchdir,
         value if value == u64::from(__NR_fstat) => LinuxSyscall::Fstat,
         value if value == u64::from(__NR_newfstatat) => LinuxSyscall::NewFstatAt,
+        value if value == u64::from(__NR_statx) => LinuxSyscall::Statx,
         value if value == u64::from(__NR_fcntl) => LinuxSyscall::Fcntl,
         value if value == u64::from(__NR_poll) => LinuxSyscall::Poll,
         value if value == u64::from(__NR_statfs) => LinuxSyscall::StatFs,
@@ -351,6 +354,7 @@ mod tests {
             (__NR_fchdir, LinuxSyscall::Fchdir),
             (__NR_fstat, LinuxSyscall::Fstat),
             (__NR_newfstatat, LinuxSyscall::NewFstatAt),
+            (__NR_statx, LinuxSyscall::Statx),
             (__NR_fcntl, LinuxSyscall::Fcntl),
             (__NR_poll, LinuxSyscall::Poll),
             (__NR_statfs, LinuxSyscall::StatFs),

@@ -221,13 +221,23 @@ int main(void) {
         !S_ISDIR(usr_stat.st_mode)) {
         return 34;
     }
+    struct statx usr_statx;
+    if (statx(root_fd, "usr", AT_STATX_SYNC_AS_STAT, STATX_TYPE,
+              &usr_statx) != 0 || !S_ISDIR(usr_statx.stx_mode)) {
+        return 35;
+    }
+    errno = 0;
+    if (statx(AT_FDCWD, "/", AT_STATX_SYNC_AS_STAT, STATX_TYPE,
+              (struct statx *)1) != -1 || errno != EFAULT) {
+        return 36;
+    }
     close(usr_fd);
     if (closedir(root) != 0) {
-        return 35;
+        return 37;
     }
     DIR *directory = opendir("/usr/lib/x86_64-linux-gnu");
     if (directory == NULL) {
-        return 36;
+        return 38;
     }
     unsigned library_mask = 0;
     while ((entry = readdir(directory)) != NULL) {
@@ -239,13 +249,13 @@ int main(void) {
         if (strcmp(entry->d_name, "libpcre2-8.so.0") == 0) library_mask |= 1u << 5;
     }
     if (closedir(directory) != 0 || library_mask != 0x3fu) {
-        return 37;
+        return 39;
     }
     errno = 0;
     directory = opendir("/usr/lib/x86_64-linux-gnu/libc.so.6");
     if (directory != NULL || errno != ENOTDIR) {
         if (directory != NULL) closedir(directory);
-        return 38;
+        return 40;
     }
     close(fd);
     printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld wall=%lld dirent=6\n",

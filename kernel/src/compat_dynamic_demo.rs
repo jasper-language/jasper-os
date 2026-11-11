@@ -88,6 +88,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Fchdir,
         LinuxSyscall::Fstat,
         LinuxSyscall::NewFstatAt,
+        LinuxSyscall::Statx,
         LinuxSyscall::Fcntl,
         LinuxSyscall::Poll,
         LinuxSyscall::StatFs,

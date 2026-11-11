@@ -1388,6 +1388,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::Fchdir => compat_result(linux_fchdir(pid, call.args[0])),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
         LinuxSyscall::NewFstatAt => compat_result(linux_newfstatat(pid, call.args)),
+        LinuxSyscall::Statx => compat_result(linux_statx(pid, call.args)),
         LinuxSyscall::Fcntl => compat_result(linux_fcntl(pid, call.args)),
         LinuxSyscall::Poll => compat_result(linux_poll(pid, call.args)),
         LinuxSyscall::StatFs => compat_result(linux_statfs(call.args)),
@@ -2781,6 +2782,109 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     };
     let node = crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)?;
     write_linux_stat(args[2], node)?;
+    Ok(0)
+}
+
+/// Implements bounded `statx(2)` over the virtual Linux namespace.
+///
+/// 返回稳定类型、权限、链接数、身份、inode、大小和块数；不支持的时间、挂载 ID
+/// 和 I/O 对齐字段不会出现在 `stx_mask` 中，而不是写入伪造值。
+fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_NO_AUTOMOUNT: u64 = 0x800;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    const AT_STATX_SYNC_TYPE: u64 = 0x6000;
+    const STATX_BASIC_STATS: u64 = 0x7ff;
+    const STATX_BTIME: u64 = 0x800;
+    const STATX_MNT_ID: u64 = 0x1000;
+    const STATX_DIOALIGN: u64 = 0x2000;
+    const SUPPORTED_MASK: u64 =
+        STATX_BASIC_STATS | STATX_BTIME | STATX_MNT_ID | STATX_DIOALIGN;
+    const RETURNED_MASK: u32 = 0x71f;
+    if args[2] & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH | AT_STATX_SYNC_TYPE) != 0
+        || args[3] & !SUPPORTED_MASK != 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    #[cfg(feature = "compat-dynamic-libc-verify")]
+    trace_path_address(pid, "statx-address", args[1]);
+    let raw_path = linux_c_string(args[1], 4096);
+    let (node, size) = match raw_path {
+        Ok(path) => {
+            #[cfg(feature = "compat-dynamic-libc-verify")]
+            trace_path("statx", &path);
+            let resolved = if path.starts_with(b"/") {
+                if !is_at_fdcwd(args[0]) {
+                    return Err(CompatErrno::Invalid);
+                }
+                path
+            } else {
+                if path == b".."
+                    || path.starts_with(b"../")
+                    || path.windows(4).any(|window| window == b"/../")
+                {
+                    return Err(CompatErrno::Invalid);
+                }
+                let base = if is_at_fdcwd(args[0]) {
+                    crate::linux_vfs::DirectoryId::Root.path()
+                } else {
+                    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+                    let (handle, _) =
+                        proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
+                    crate::linux_vfs::DirectoryId::from_handle(handle)
+                        .ok_or(CompatErrno::BadFd)?
+                        .path()
+                };
+                if path == b"." {
+                    base.to_vec()
+                } else {
+                    let mut resolved =
+                        alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
+                    resolved.extend_from_slice(base);
+                    if !base.ends_with(b"/") {
+                        resolved.push(b'/');
+                    }
+                    resolved.extend_from_slice(&path);
+                    resolved
+                }
+            };
+            let node = crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)?;
+            let size = crate::linux_vfs::lookup(&resolved)
+                .map(|file| file.bytes().len() as u64)
+                .unwrap_or(if node.is_directory() { 4096 } else { 0 });
+            (node, size)
+        }
+        Err(CompatErrno::NoEntry) if args[2] & AT_EMPTY_PATH != 0 => {
+            let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+            let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+            if let Some(file) = crate::linux_vfs::FileId::from_handle(entry.handle) {
+                (
+                    crate::linux_vfs::Node::File(file),
+                    file.bytes().len() as u64,
+                )
+            } else if let Some(directory) =
+                crate::linux_vfs::DirectoryId::from_handle(entry.handle)
+            {
+                (crate::linux_vfs::Node::Directory(directory), 4096)
+            } else {
+                return Err(CompatErrno::BadFd);
+            }
+        }
+        Err(error) => return Err(error),
+    };
+    let mut output = [0u8; 256];
+    output[0..4].copy_from_slice(&RETURNED_MASK.to_le_bytes());
+    output[4..8].copy_from_slice(&4096u32.to_le_bytes());
+    output[16..20].copy_from_slice(&(if node.is_directory() { 2u32 } else { 1 }).to_le_bytes());
+    output[20..24].copy_from_slice(&0u32.to_le_bytes());
+    output[24..28].copy_from_slice(&0u32.to_le_bytes());
+    output[28..30].copy_from_slice(
+        &(if node.is_directory() { 0o040555u16 } else { 0o100444u16 }).to_le_bytes(),
+    );
+    output[32..40].copy_from_slice(&node.inode().to_le_bytes());
+    output[40..48].copy_from_slice(&size.to_le_bytes());
+    output[48..56].copy_from_slice(&size.div_ceil(512).to_le_bytes());
+    copy_to_user(args[4], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
 }
 
