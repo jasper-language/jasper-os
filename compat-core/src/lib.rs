@@ -10,6 +10,7 @@ pub mod fd;
 pub mod native;
 pub mod process;
 pub mod syscall;
+pub mod utsname;
 
 pub use fd::{CompatKind, FdBatch, FdEntry, FdHandle, FdTable, FdTableError};
 pub use native::{
@@ -21,3 +22,4 @@ pub use syscall::{
     compat_result, dispatch, CompatErrno, LinuxCall, LinuxSyscall, LinuxSyscallSet,
     SyscallDispatch, SyscallRequest,
 };
+pub use utsname::{linux_utsname, LINUX_UTSNAME_BYTES, LINUX_UTSNAME_FIELD_BYTES};

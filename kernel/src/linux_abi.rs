@@ -1403,6 +1403,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         }
         LinuxSyscall::Sigaltstack => compat_result(linux_sigaltstack(pid, call.args)),
         LinuxSyscall::Kill => compat_result(linux_kill(pid, call.args).map(|()| 0)),
+        LinuxSyscall::Uname => compat_result(linux_uname(call.args)),
         LinuxSyscall::GetPid => proc::linux_pid(pid)
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
@@ -1444,6 +1445,14 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         }
         _ => -i64::from(CompatErrno::NoSys as i32),
     }
+}
+
+/// Writes the Linux x86_64 `struct utsname` compatibility identity.
+/// 写入 Linux x86_64 `struct utsname` 兼容身份。
+fn linux_uname(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let utsname = compat_core::linux_utsname();
+    copy_to_user(args[0], &utsname, utsname.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
 }
 
 fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
