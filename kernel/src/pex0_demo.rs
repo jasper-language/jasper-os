@@ -234,10 +234,18 @@ fn print_profile(
         resources,
         "PEX-0 parallel workload did not return resources to baseline",
     );
+    if !resources {
+        kprintln!(
+            "[JSR-PEX0-BASE] density={} before={:?} after={:?}",
+            profile.name,
+            before,
+            after
+        );
+    }
     #[cfg(feature = "pex2-verify")]
     {
         kprintln!(
-            "[JSR-PEX2] category=independent-ring density={} processes={} rings={} workers={} ops={} throughput_ops_s={} p50_ns={} p99_ns={} p999_ns={} max={} complete={} resources={}",
+            "[JSR-PEX2] category=independent-ring density={} processes={} rings={} workers={} ops={} throughput_ops_s={} p50_ns={} p99_ns={} p999_ns={} max={} complete={} resources={} frames_before={} frames_after={} objects_before={} objects_after={} pending_before={} pending_after={} pins_before={:?} pins_after={:?}",
             profile.name,
             profile.processes,
             workers,
@@ -249,10 +257,18 @@ fn print_profile(
             p999_ns,
             max,
             complete,
-            resources
+            resources,
+            before.free_frames,
+            after.free_frames,
+            before.objects,
+            after.objects,
+            before.pending,
+            after.pending,
+            before.pins,
+            after.pins
         );
         kprintln!(
-            "[JSR-PEX2] category=cross-process density={} processes={} rings={} ops={} throughput_ops_s={} p50_ns={} p99_ns={} p999_ns={} max={} sched_contended={} sched_spins={} object_contended={} object_spins={} complete={} resources={}",
+            "[JSR-PEX2] category=cross-process density={} processes={} rings={} ops={} throughput_ops_s={} p50_ns={} p99_ns={} p999_ns={} max={} sched_contended={} sched_spins={} object_contended={} object_spins={} complete={} resources={} frames_before={} frames_after={} objects_before={} objects_after={} pending_before={} pending_after={} pins_before={:?} pins_after={:?}",
             profile.name,
             profile.processes,
             workers,
@@ -267,11 +283,19 @@ fn print_profile(
             object_contended,
             object_spins,
             complete,
-            resources
+            resources,
+            before.free_frames,
+            after.free_frames,
+            before.objects,
+            after.objects,
+            before.pending,
+            after.pending,
+            before.pins,
+            after.pins
         );
     }
     kprintln!(
-        "[JSR-PEX0-PAR] density={} vcpus={} processes={} rings={} workers={} ops={} window_cycles={} window_ns={} throughput_ops_s={} per_cpu_ops_s={} p50={} p99={} p999={} max={} p50_ns={} p99_ns={} p999_ns={} sched_contended={} sched_spins={} object_contended={} object_spins={} complete={} resources={}",
+        "[JSR-PEX0-PAR] density={} vcpus={} processes={} rings={} workers={} ops={} window_cycles={} window_ns={} throughput_ops_s={} per_cpu_ops_s={} p50={} p99={} p999={} max={} p50_ns={} p99_ns={} p999_ns={} sched_contended={} sched_spins={} object_contended={} object_spins={} complete={} resources={} frames_before={} frames_after={} objects_before={} objects_after={} pending_before={} pending_after={} pins_before={:?} pins_after={:?}",
         profile.name,
         online,
         profile.processes,
@@ -294,7 +318,15 @@ fn print_profile(
         object_contended,
         object_spins,
         complete,
-        resources
+        resources,
+        before.free_frames,
+        after.free_frames,
+        before.objects,
+        after.objects,
+        before.pending,
+        after.pending,
+        before.pins,
+        after.pins
     );
 }
 
