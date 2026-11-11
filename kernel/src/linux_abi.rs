@@ -1420,6 +1420,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::GetGid | LinuxSyscall::GetEgid => {
             compat_core::syscall::LINUX_COMPAT_GID as i64
         }
+        LinuxSyscall::GetPpid => compat_core::syscall::LINUX_COMPAT_ROOT_PPID as i64,
         // The compatibility identity has no supplementary groups.
         // 兼容身份没有附加组，因此 size 查询和写入都返回 0。
         LinuxSyscall::GetGroups => 0,

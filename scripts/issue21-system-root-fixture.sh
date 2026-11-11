@@ -11,6 +11,7 @@ RELEASE="${5:?release}"
 ROOT_EXEC_PROBE="${6:-}"
 FULL_USERLAND="${7:-0}"
 ROOT_SIGNAL_FIXTURE="${8:-}"
+ROOT_PPID_FIXTURE="${9:-}"
 [[ "$SLOT" == A || "$SLOT" == B ]]
 [[ "$RELEASE" =~ ^[1-9][0-9]*$ ]]
 mkdir -p "$WORK"
@@ -95,6 +96,11 @@ if [ -n "$ROOT_SIGNAL_FIXTURE" ]; then
   write_file "$ROOT_SIGNAL_FIXTURE" /usr/bin/jasper-signal-basic
   debugfs -w -R 'sif /usr/bin/jasper-signal-basic mode 0100755' "$PARTITION" >/dev/null
 fi
+if [ -n "$ROOT_PPID_FIXTURE" ]; then
+  [[ -x "$ROOT_PPID_FIXTURE" ]]
+  write_file "$ROOT_PPID_FIXTURE" /usr/bin/jasper-getppid
+  debugfs -w -R 'sif /usr/bin/jasper-getppid mode 0100755' "$PARTITION" >/dev/null
+fi
 e2fsck -fy "$PARTITION"
 e2fsck -fn "$PARTITION"
 
@@ -120,8 +126,11 @@ fi
 if [ -n "$ROOT_SIGNAL_FIXTURE" ]; then
   verify_payload /usr/bin/jasper-signal-basic "$ROOT_SIGNAL_FIXTURE"
 fi
+if [ -n "$ROOT_PPID_FIXTURE" ]; then
+  verify_payload /usr/bin/jasper-getppid "$ROOT_PPID_FIXTURE"
+fi
 
 dd if="$PARTITION" of="$IMAGE" bs=512 seek="$START_LBA" \
   conv=notrunc,sparse status=none
 sync
-echo "system-root-fixture: PASS slot=$SLOT release=$RELEASE start_lba=$START_LBA files=6 userland=x86_64-linux-elf root_exec_probe=$([ -n "$ROOT_EXEC_PROBE" ] && echo present || echo absent) full_userland=$FULL_USERLAND signal_fixture=$([ -n "$ROOT_SIGNAL_FIXTURE" ] && echo present || echo absent)"
+echo "system-root-fixture: PASS slot=$SLOT release=$RELEASE start_lba=$START_LBA files=6 userland=x86_64-linux-elf root_exec_probe=$([ -n "$ROOT_EXEC_PROBE" ] && echo present || echo absent) full_userland=$FULL_USERLAND signal_fixture=$([ -n "$ROOT_SIGNAL_FIXTURE" ] && echo present || echo absent) ppid_fixture=$([ -n "$ROOT_PPID_FIXTURE" ] && echo present || echo absent)"

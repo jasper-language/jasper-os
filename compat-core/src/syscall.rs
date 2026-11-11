@@ -25,6 +25,10 @@ pub const LINUX_COMPAT_UID: u64 = 0;
 /// 稳定的兼容主组身份。
 pub const LINUX_COMPAT_GID: u64 = 0;
 
+/// Compatibility roots are created by the kernel service and have no Linux parent.
+/// 兼容根进程由内核服务创建，不存在可引用的 Linux 父进程。
+pub const LINUX_COMPAT_ROOT_PPID: u64 = 0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum LinuxSyscall {

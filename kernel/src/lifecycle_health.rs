@@ -623,7 +623,9 @@ fn execute_root_dynamic_programs(root: &Ext4Reader) -> Result<(), HealthError> {
     let printf_argv: [&[u8]; 3] = [b"/usr/bin/printf", b"jasper-%s\n", b"dynamic"];
     run_root_program(root, "/usr/bin/printf", &printf_argv)?;
     let signal_argv: [&[u8]; 1] = [b"/usr/bin/jasper-signal-basic"];
-    run_root_program(root, "/usr/bin/jasper-signal-basic", &signal_argv)
+    run_root_program(root, "/usr/bin/jasper-signal-basic", &signal_argv)?;
+    let ppid_argv: [&[u8]; 1] = [b"/usr/bin/jasper-getppid"];
+    run_root_program(root, "/usr/bin/jasper-getppid", &ppid_argv)
 }
 
 /// 确认当前 A/B 槽的最小健康集合并持久提交。
