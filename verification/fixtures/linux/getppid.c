@@ -9,7 +9,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
 #include <sys/time.h>
@@ -256,6 +258,19 @@ int main(void) {
     if (directory != NULL || errno != ENOTDIR) {
         if (directory != NULL) closedir(directory);
         return 40;
+    }
+    struct statfs compatibility_fs;
+    if (fstatfs(fd, &compatibility_fs) != 0 ||
+        compatibility_fs.f_type != 0xef53 ||
+        compatibility_fs.f_bsize != 4096) {
+        return 41;
+    }
+    errno = 0;
+    if (ioctl(STDOUT_FILENO, 0x802c542aUL, NULL) != -1 || errno != ENOTTY) {
+        return 42;
+    }
+    if (sched_getscheduler(0) != SCHED_OTHER) {
+        return 43;
     }
     close(fd);
     printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld wall=%lld dirent=6\n",

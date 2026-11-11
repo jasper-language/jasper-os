@@ -1387,10 +1387,12 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::OpenAt => compat_result(linux_openat(pid, call.args)),
         LinuxSyscall::Fchdir => compat_result(linux_fchdir(pid, call.args[0])),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
+        LinuxSyscall::Fstatfs => compat_result(linux_fstatfs(pid, call.args)),
         LinuxSyscall::NewFstatAt => compat_result(linux_newfstatat(pid, call.args)),
         LinuxSyscall::Statx => compat_result(linux_statx(pid, call.args)),
         LinuxSyscall::Fcntl => compat_result(linux_fcntl(pid, call.args)),
         LinuxSyscall::Poll => compat_result(linux_poll(pid, call.args)),
+        LinuxSyscall::Ioctl => compat_result(linux_ioctl(pid, call.args)),
         LinuxSyscall::StatFs => compat_result(linux_statfs(call.args)),
         LinuxSyscall::ReadLink => compat_result(linux_readlink(pid, call.args)),
         LinuxSyscall::Mmap => compat_result(linux_mmap(pid, call.args)),
@@ -1442,6 +1444,9 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::GetCpu => compat_result(linux_getcpu(call.args)),
         LinuxSyscall::Sysinfo => compat_result(linux_sysinfo(call.args[0])),
         LinuxSyscall::SchedGetAffinity => compat_result(linux_sched_getaffinity(pid, call.args)),
+        LinuxSyscall::SchedGetScheduler => {
+            compat_result(linux_sched_getscheduler(pid, call.args[0]))
+        }
         LinuxSyscall::SetTidAddress => set_clear_child_tid(pid, call.args[0])
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
@@ -1891,6 +1896,19 @@ fn linux_sched_getaffinity(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
     copy_to_user(args[2], &mask.to_le_bytes(), KERNEL_MASK_BYTES)
         .map_err(|_| CompatErrno::Fault)?;
     Ok(KERNEL_MASK_BYTES as u64)
+}
+
+/// Reports the compatibility scheduling policy for the current Linux process.
+///
+/// 兼容进程没有 Linux RT 策略，因此自身稳定报告 `SCHED_OTHER`；其他 PID 明确
+/// 返回 `ESRCH`，不猜测 Jasper 调度类别与 Linux 策略的等价关系。
+fn linux_sched_getscheduler(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
+    let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
+    if requested == 0 || requested == current {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoProcess)
+    }
 }
 
 fn linux_task_for_tid(process: ObjId, tid: u32) -> Option<crate::task::TaskId> {
@@ -2932,6 +2950,30 @@ fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
 }
 
+/// Implements the terminal-probing subset of `ioctl(2)`.
+///
+/// 当前标准流不是 TerminalSession；常见 TTY 查询明确返回 `ENOTTY`，其他设备
+/// 控制请求返回 `ENOSYS`，不会把普通控制台描述符伪装成终端。
+fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const TCGETS: u64 = 0x5401;
+    const TCSETS: u64 = 0x5402;
+    const TCSETSW: u64 = 0x5403;
+    const TCSETSF: u64 = 0x5404;
+    const TIOCGWINSZ: u64 = 0x5413;
+    const TIOCSWINSZ: u64 = 0x5414;
+    const TCGETS2: u64 = 0x802c_542a;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if matches!(
+        args[1],
+        TCGETS | TCSETS | TCSETSW | TCSETSF | TIOCGWINSZ | TIOCSWINSZ | TCGETS2
+    ) {
+        Err(CompatErrno::NotTty)
+    } else {
+        Err(CompatErrno::NoSys)
+    }
+}
+
 /// Implements a bounded non-blocking `poll(2)` over Jasper compatibility fds.
 ///
 /// 只接受零超时；常规文件按其请求的读写事件就绪，控制台当前无输入。无效 fd
@@ -2975,10 +3017,39 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 ///
 /// 已知虚拟文件返回 ext4 形态的只读统计；未知路径返回 `ENOENT`，不泄漏宿主挂载。
 fn linux_statfs(args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const STATFS_BYTES: usize = 120;
     let path = linux_c_string(args[0], 4096)?;
-    let file = crate::linux_vfs::lookup(&path).ok_or(CompatErrno::NoEntry)?;
-    let blocks = (file.bytes().len() as u64).div_ceil(4096);
+    let node = crate::linux_vfs::lookup_node(&path).ok_or(CompatErrno::NoEntry)?;
+    let size = if node.is_directory() {
+        4096
+    } else {
+        crate::linux_vfs::lookup(&path)
+            .map(|file| file.bytes().len() as u64)
+            .unwrap_or(0)
+    };
+    write_linux_statfs(args[1], size)
+}
+
+/// Implements `fstatfs(2)` over an open virtual file or directory.
+///
+/// 对已校验的兼容 fd 返回同一 ext4 形态统计；控制台和未知对象不被冒充分区。
+fn linux_fstatfs(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let size = match entry.kind {
+        compat_core::fd::CompatKind::File => {
+            let file = crate::linux_vfs::FileId::from_handle(entry.handle)
+                .ok_or(CompatErrno::BadFd)?;
+            file.bytes().len() as u64
+        }
+        compat_core::fd::CompatKind::Directory => 4096,
+        _ => return Err(CompatErrno::BadFd),
+    };
+    write_linux_statfs(args[1], size)
+}
+
+fn write_linux_statfs(address: u64, size: u64) -> Result<u64, CompatErrno> {
+    const STATFS_BYTES: usize = 120;
+    let blocks = size.div_ceil(4096);
     let mut statfs = [0u8; STATFS_BYTES];
     statfs[0..8].copy_from_slice(&0xef53u64.to_le_bytes());
     statfs[8..16].copy_from_slice(&4096u64.to_le_bytes());
@@ -2989,7 +3060,7 @@ fn linux_statfs(args: [u64; 6]) -> Result<u64, CompatErrno> {
     statfs[48..56].copy_from_slice(&1u64.to_le_bytes());
     statfs[64..72].copy_from_slice(&255u64.to_le_bytes());
     statfs[72..80].copy_from_slice(&4096u64.to_le_bytes());
-    copy_to_user(args[1], &statfs, statfs.len()).map_err(|_| CompatErrno::Fault)?;
+    copy_to_user(address, &statfs, statfs.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
 }
 
