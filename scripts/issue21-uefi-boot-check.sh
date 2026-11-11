@@ -10,6 +10,7 @@ export PATH="${HOME}/.cargo/bin:${PATH}"
 OUT="${ISSUE21_UEFI_OUT:-$ROOT/evidence/issue21-uefi-boot-$(date '+%Y%m%d-%H%M%S')}"
 TARGET="${ISSUE21_UEFI_TARGET:-$ROOT/target/issue21-uefi-check}"
 LIMIT="${ISSUE21_UEFI_TIMEOUT:-45}"
+MODE="${ISSUE21_UEFI_MODE:-normal}"
 mkdir "$OUT"
 IMAGE="$TARGET/p0.img"
 ESP_IMAGE="$TARGET/esp.img"
@@ -47,6 +48,14 @@ cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-init -- \
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-inspect -- \
   "$IMAGE" 38654705664 >"$OUT/control-inspect.log" 2>&1
 
+if [ "$MODE" = both-controls-corrupt ]; then
+  CORRUPT="$TARGET/control-unrecoverable.bin"
+  printf 'JASPER-CORRUPT' >"$CORRUPT"
+  dd if="$CORRUPT" of="$IMAGE" bs=1 seek=$((34605056 * 512)) conv=notrunc status=none
+  dd if="$CORRUPT" of="$IMAGE" bs=1 seek=$((34736128 * 512)) conv=notrunc status=none
+  sync
+fi
+
 dd if="$IMAGE" of="$ESP_IMAGE" bs=512 skip=2048 count=1048576 \
   conv=sparse status=none
 fsck.fat -n -v -l "$ESP_IMAGE" >"$OUT/fsck-fat.log" 2>&1
@@ -72,6 +81,16 @@ set -e
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
 [ "$rc" -eq 124 ]
 grep -aq 'Jasper-OS boot manager starting' "$OUT/serial.log"
+if [ "$MODE" = both-controls-corrupt ]; then
+  grep -aFq '[JSR-LIFE-RESCUE] active=none selected=false reason=control_copies_invalid recovery=required' \
+    "$OUT/serial.log"
+  ! grep -aq 'selecting slot=' "$OUT/serial.log"
+  ! grep -aq '^\[JSR-BOOT-STAGE\]' "$OUT/serial.log"
+  ! grep -aq '^\[JSR-PROD\]' "$OUT/serial.log"
+  ! grep -aq '^\[JSR-LIFE-HEALTH\]' "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
 grep -aq 'selecting slot=A reason=ConfirmedRelease attempt=1 release=1' "$OUT/serial.log"
 grep -aq '^\[JSR-BOOT-STAGE\] done stage=user_runtime' "$OUT/serial.log"
 grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"

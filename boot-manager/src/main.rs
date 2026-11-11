@@ -127,15 +127,25 @@ fn open_partition(guid: Guid) -> uefi::Result<boot::ScopedProtocol<BlockIO>> {
     boot::open_protocol_exclusive::<BlockIO>(matches[0])
 }
 
-fn recover_control(io: &mut UefiControlIo) -> Result<ControlBlock, String> {
+enum SelectKernelError {
+    Recovery(BootControlError),
+    Other(String),
+}
+
+impl From<String> for SelectKernelError {
+    fn from(error: String) -> Self {
+        Self::Other(error)
+    }
+}
+
+fn recover_control(io: &mut UefiControlIo) -> Result<ControlBlock, SelectKernelError> {
     let mut first = [0u8; CONTROL_RECORD_BYTES];
     let mut second = [0u8; CONTROL_RECORD_BYTES];
     io.read_copy(0, &mut first)
-        .map_err(|_| String::from("read Control A failed"))?;
+        .map_err(|_| SelectKernelError::Other(String::from("read Control A failed")))?;
     io.read_copy(1, &mut second)
-        .map_err(|_| String::from("read Control B failed"))?;
-    recover(Some(&first), Some(&second))
-        .map_err(|error: BootControlError| format!("control recovery failed: {error:?}"))
+        .map_err(|_| SelectKernelError::Other(String::from("read Control B failed")))?;
+    recover(Some(&first), Some(&second)).map_err(SelectKernelError::Recovery)
 }
 
 fn digest(bytes: &[u8]) -> [u8; 32] {
@@ -145,13 +155,12 @@ fn digest(bytes: &[u8]) -> [u8; 32] {
 fn select_kernel(
     io: &mut UefiControlIo,
     file_system: &mut FileSystem,
-) -> Result<&'static mut [u8], String> {
+) -> Result<&'static mut [u8], SelectKernelError> {
     let mut current = recover_control(io)?;
     let mut next = current;
-    let decision = next
-        .prepare_boot()
-        .map_err(|error| format!("boot decision failed: {error:?}"))?;
-    commit(io, &mut current, next).map_err(|error| format!("decision commit failed: {error:?}"))?;
+    let decision = next.prepare_boot().map_err(SelectKernelError::Recovery)?;
+    commit(io, &mut current, next)
+        .map_err(|error| SelectKernelError::Other(format!("decision commit failed: {error:?}")))?;
 
     let slot = match decision.slot {
         Slot::A => "a",
@@ -163,15 +172,15 @@ fn select_kernel(
         .map_err(|error| format!("invalid slot kernel path: {error:?}"))?;
     let kernel = file_system
         .read(&source)
-        .map_err(|error| format!("read {source} failed: {error:?}"))?;
+        .map_err(|error| SelectKernelError::Other(format!("read {source} failed: {error:?}")))?;
     let expected = current.slot(decision.slot).digest();
     let actual = digest(&kernel);
     if actual != expected {
-        return Err(format!(
+        return Err(SelectKernelError::Other(format!(
             "slot {slot} kernel digest mismatch: expected {}, got {}",
             hex(&expected),
             hex(&actual)
-        ));
+        )));
     }
     let mut kernel = kernel;
     let loader_kernel = allocate_loader_data(kernel.len())?;
@@ -220,7 +229,19 @@ fn main() -> Status {
     };
     let kernel = match select_kernel(&mut io, &mut file_system) {
         Ok(kernel) => kernel,
-        Err(error) => {
+        Err(SelectKernelError::Recovery(error)) => {
+            let reason = match error {
+                BootControlError::CorruptRecord => "control_copies_invalid",
+                BootControlError::EqualGenerationMismatch => "control_generation_conflict",
+                BootControlError::NoSafeSlot => "no_safe_slot",
+                _ => "control_state_invalid",
+            };
+            uefi::println!(
+                "[JSR-LIFE-RESCUE] active=none selected=false reason={reason} recovery=required"
+            );
+            return Status::ABORTED;
+        }
+        Err(SelectKernelError::Other(error)) => {
             uefi::println!("Jasper-OS boot manager failed: {error}");
             return Status::ABORTED;
         }
