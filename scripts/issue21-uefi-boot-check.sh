@@ -90,7 +90,12 @@ grep -q 'No problems found' "$OUT/sgdisk.log"
 cp /usr/share/OVMF/OVMF_VARS_4M.fd "$OVMF_VARS"
 QEMU_EXTRA=()
 if [ "$MODE" = root-exec ]; then
-  QEMU_EXTRA=(-cpu max -device isa-debug-exit,iobase=0xf4,iosize=0x04)
+  CPU=max
+  if [ "${ISSUE21_DISABLE_RDRAND:-0}" = 1 ]; then
+    CPU=max,-rdrand,-rdseed
+  fi
+  QEMU_EXTRA=(-cpu "$CPU" -device virtio-rng-pci
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04)
 fi
 set +e
 timeout "$LIMIT" qemu-system-x86_64 \
@@ -153,6 +158,7 @@ if [ "$MODE" = root-exec ]; then
     "$OUT/serial.log"
   grep -aqE $'^/lib\r?$' "$OUT/serial.log"
   grep -aqE $'^/usr\r?$' "$OUT/serial.log"
+  grep -aqE $'^jasper-random-ok bytes=32\r?$' "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=bin/dash path=/bin/dash interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
     "$OUT/serial.log"
   grep -aqE $'^jasper-shell-ok\r?$' "$OUT/serial.log"

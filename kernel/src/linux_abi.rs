@@ -2402,11 +2402,22 @@ fn linux_getrandom(args: [u64; 6]) -> Result<u64, CompatErrno> {
     let mut output = alloc::vec![0u8; length];
     let mut offset = 0usize;
     while offset < output.len() {
-        let value = crate::arch::x86_64::hardware_random_u64().ok_or(CompatErrno::TryAgain)?;
-        let bytes = value.to_le_bytes();
-        let count = (output.len() - offset).min(bytes.len());
-        output[offset..offset + count].copy_from_slice(&bytes[..count]);
-        offset += count;
+        match crate::arch::x86_64::hardware_random_u64() {
+            Some(value) => {
+                let bytes = value.to_le_bytes();
+                let count = (output.len() - offset).min(bytes.len());
+                output[offset..offset + count].copy_from_slice(&bytes[..count]);
+                offset += count;
+            }
+            None => {
+                #[cfg(feature = "lifecycle-root-exec-verify")]
+                if crate::compat_rng::fill(&mut output[offset..]) {
+                    offset = output.len();
+                    continue;
+                }
+                return Err(CompatErrno::TryAgain);
+            }
+        }
     }
     copy_to_user(args[0], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(length as u64)

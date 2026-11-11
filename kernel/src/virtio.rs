@@ -275,6 +275,22 @@ impl VirtioPci {
     /// 设备报告的队列大小不足 2、回读不一致或拒绝该表项（回读 0xFFFF）时返回结构化错误。
     /// Sets up queue 0, requests an MSI-X table entry index, and returns the device's notify offset.
     pub fn setup_queue(&self, queue: &mut Queue, entry: u16) -> Result<u16, VirtioError> {
+        self.setup_queue_inner(queue, Some(entry))
+    }
+
+    /// Establishes queue 0 for synchronous used-ring polling without programming MSI-X.
+    ///
+    /// 为同步 used-ring 轮询建立队列 0，不写 MSI-X 表项；设备中断保持未启用，
+    /// 完成只从设备写入的 used ring 获取。
+    pub fn setup_queue_polling(&self, queue: &mut Queue) -> Result<u16, VirtioError> {
+        self.setup_queue_inner(queue, None)
+    }
+
+    fn setup_queue_inner(
+        &self,
+        queue: &mut Queue,
+        msix_entry: Option<u16>,
+    ) -> Result<u16, VirtioError> {
         // SAFETY：所有寄存器都在已映射的通用配置窗口内。
         unsafe {
             self.common.write16(COMMON_QUEUE_SELECT, 0);
@@ -297,9 +313,11 @@ impl VirtioPci {
             self.common.write32(COMMON_QUEUE_DRIVER + 4, (driver >> 32) as u32);
             self.common.write32(COMMON_QUEUE_DEVICE, device as u32);
             self.common.write32(COMMON_QUEUE_DEVICE + 4, (device >> 32) as u32);
-            self.common.write16(COMMON_QUEUE_MSIX_ENTRY, entry);
-            if self.common.read16(COMMON_QUEUE_MSIX_ENTRY) == 0xFFFF {
-                return Err(VirtioError::QueueVectorRejected);
+            if let Some(entry) = msix_entry {
+                self.common.write16(COMMON_QUEUE_MSIX_ENTRY, entry);
+                if self.common.read16(COMMON_QUEUE_MSIX_ENTRY) == 0xFFFF {
+                    return Err(VirtioError::QueueVectorRejected);
+                }
             }
             self.common.write16(COMMON_QUEUE_ENABLE, 1);
             queue.set_size(size);

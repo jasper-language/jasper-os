@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/random.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/syscall.h>
@@ -132,26 +133,42 @@ int main(void) {
         realtime_delta < -2 || realtime_delta > 2) {
         return 21;
     }
+    unsigned char random_bytes[32];
+    memset(random_bytes, 0, sizeof(random_bytes));
+    if (getrandom(random_bytes, sizeof(random_bytes), 0) !=
+        (ssize_t)sizeof(random_bytes)) {
+        return 22;
+    }
+    int random_nonzero = 0;
+    for (unsigned i = 0; i < sizeof(random_bytes); i++) {
+        random_nonzero |= random_bytes[i] != 0;
+    }
+    errno = 0;
+    if (!random_nonzero ||
+        getrandom((void *)1, 8, 0) != -1 || errno != EFAULT) {
+        return 23;
+    }
+    printf("jasper-random-ok bytes=%u\n", (unsigned)sizeof(random_bytes));
     struct timespec before_sleep;
     struct timespec after_sleep;
     const struct timespec short_delay = {.tv_sec = 0, .tv_nsec = 20000000};
     if (clock_gettime(CLOCK_MONOTONIC, &before_sleep) != 0) {
         printf("jasper-time-fail stage=before errno=%d\n", errno);
-        return 22;
+        return 24;
     }
     if (nanosleep(&short_delay, NULL) != 0) {
         printf("jasper-time-fail stage=nanosleep errno=%d\n", errno);
-        return 22;
+        return 24;
     }
     if (clock_gettime(CLOCK_MONOTONIC, &after_sleep) != 0) {
         printf("jasper-time-fail stage=after errno=%d\n", errno);
-        return 22;
+        return 24;
     }
     long long relative_elapsed =
         (after_sleep.tv_sec - before_sleep.tv_sec) * 1000000000LL +
         (after_sleep.tv_nsec - before_sleep.tv_nsec);
     if (relative_elapsed < 10000000LL) {
-        return 23;
+        return 25;
     }
     struct timespec absolute_deadline = after_sleep;
     absolute_deadline.tv_nsec += 10000000L;
@@ -162,32 +179,32 @@ int main(void) {
     if (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME,
                         &absolute_deadline, NULL) != 0 ||
         clock_gettime(CLOCK_MONOTONIC, &after_sleep) != 0) {
-        return 24;
+        return 26;
     }
     long long absolute_elapsed =
         (after_sleep.tv_sec - absolute_deadline.tv_sec) * 1000000000LL +
         (after_sleep.tv_nsec - absolute_deadline.tv_nsec);
     if (absolute_elapsed < 0) {
-        return 25;
+        return 27;
     }
     errno = 0;
     if (nanosleep((const struct timespec *)1, NULL) != -1 || errno != EFAULT) {
-        return 26;
+        return 28;
     }
     errno = 0;
     if (syscall(SYS_clock_nanosleep, CLOCK_PROCESS_CPUTIME_ID, 0,
                 &short_delay, NULL) != -1 || errno != EINVAL) {
-        return 27;
+        return 29;
     }
     DIR *root = opendir("/");
     if (root == NULL) {
-        return 28;
+        return 30;
     }
     int root_fd = dirfd(root);
     errno = 0;
     if (syscall(SYS_getdents64, root_fd, (void *)1, 256) != -1 ||
         errno != EFAULT) {
-        return 29;
+        return 31;
     }
     int saw_usr = 0;
     unsigned root_entries = 0;
@@ -204,59 +221,59 @@ int main(void) {
     }
     if (errno != 0 || root_entries < 4 || !saw_usr ||
         first_root_name[0] == '\0') {
-        return 30;
+        return 32;
     }
     rewinddir(root);
     entry = readdir(root);
     if (entry == NULL || strcmp(entry->d_name, first_root_name) != 0) {
-        return 31;
+        return 33;
     }
     int usr_fd = openat(root_fd, "usr", O_RDONLY | O_CLOEXEC | O_DIRECTORY);
     if (usr_fd < 0) {
-        return 32;
+        return 34;
     }
     struct stat usr_stat;
     if (fstat(usr_fd, &usr_stat) != 0 || !S_ISDIR(usr_stat.st_mode)) {
-        return 33;
+        return 35;
     }
     if (fstatat(root_fd, "usr", &usr_stat, 0) != 0 ||
         !S_ISDIR(usr_stat.st_mode)) {
-        return 34;
+        return 36;
     }
     struct statx usr_statx;
     if (statx(root_fd, "usr", AT_STATX_SYNC_AS_STAT, STATX_TYPE,
               &usr_statx) != 0 || !S_ISDIR(usr_statx.stx_mode)) {
-        return 35;
+        return 37;
     }
     errno = 0;
     if (statx(AT_FDCWD, "/", AT_STATX_SYNC_AS_STAT, STATX_TYPE,
               (struct statx *)1) != -1 || errno != EFAULT) {
-        return 36;
+        return 38;
     }
     char cwd_buffer[32];
     if (chdir("/usr") != 0 ||
         getcwd(cwd_buffer, sizeof(cwd_buffer)) == NULL ||
         strcmp(cwd_buffer, "/usr") != 0) {
-        return 37;
+        return 39;
     }
     int relative_lib = openat(AT_FDCWD, "lib",
                               O_RDONLY | O_CLOEXEC | O_DIRECTORY);
     if (relative_lib < 0) {
-        return 38;
+        return 40;
     }
     close(relative_lib);
     if (fchdir(root_fd) != 0 ||
         getcwd(cwd_buffer, sizeof(cwd_buffer)) == NULL ||
         strcmp(cwd_buffer, "/") != 0) {
-        return 39;
+        return 41;
     }
     close(usr_fd);
     if (closedir(root) != 0) {
-        return 40;
+        return 42;
     }
     DIR *directory = opendir("/usr/lib/x86_64-linux-gnu");
     if (directory == NULL) {
-        return 41;
+        return 43;
     }
     unsigned library_mask = 0;
     while ((entry = readdir(directory)) != NULL) {
@@ -268,13 +285,13 @@ int main(void) {
         if (strcmp(entry->d_name, "libpcre2-8.so.0") == 0) library_mask |= 1u << 5;
     }
     if (closedir(directory) != 0 || library_mask != 0x3fu) {
-        return 42;
+        return 44;
     }
     errno = 0;
     directory = opendir("/usr/lib/x86_64-linux-gnu/libc.so.6");
     if (directory != NULL || errno != ENOTDIR) {
         if (directory != NULL) closedir(directory);
-        return 43;
+        return 45;
     }
     struct statfs compatibility_fs;
     if (fstatfs(fd, &compatibility_fs) != 0 ||
