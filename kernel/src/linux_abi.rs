@@ -324,6 +324,19 @@ fn take_deliverable_signal(process: ObjId) -> Option<u32> {
     Some(index + 1)
 }
 
+/// Reports whether the current thread has an unmasked pending signal.
+/// 判断当前线程是否存在未被 mask 的 pending 信号。
+fn current_signal_pending(process: ObjId) -> bool {
+    let (task, _) = sched::current();
+    COMPAT
+        .lock()
+        .threads
+        .iter()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)
+        .is_some_and(|entry| entry.pending_signals & !entry.signal_mask != 0)
+}
+
 const SIGNAL_FRAME_BYTES: usize = 8 + 968 + 128;
 const SIGNAL_UC_OFFSET: usize = 8;
 const SIGNAL_UC_GREGS: usize = 40;
@@ -351,6 +364,7 @@ fn build_signal_frame(
     signal: u32,
     args: &SyscallArgs,
     user_ip: (u64, u64),
+    interrupted_result: i64,
 ) -> Result<UserReturn, CompatErrno> {
     const SA_SIGINFO: u64 = 0x0000_0004;
     const SA_RESTORER: u64 = 0x0400_0000;
@@ -400,7 +414,7 @@ fn build_signal_frame(
     write_frame_u64(&mut frame, gregs + 64, args.args[0]);
     write_frame_u64(&mut frame, gregs + 72, args.args[1]);
     write_frame_u64(&mut frame, gregs + 96, args.args[2]);
-    write_frame_u64(&mut frame, gregs + 104, 0);
+    write_frame_u64(&mut frame, gregs + 104, interrupted_result as u64);
     write_frame_u64(&mut frame, gregs + 112, 0);
     write_frame_u64(&mut frame, gregs + 120, user_ip.1);
     write_frame_u64(&mut frame, gregs + 128, user_ip.0);
@@ -421,9 +435,10 @@ fn build_signal_frame(
         return Err(CompatErrno::Fault);
     }
     crate::kprintln!(
-        "[JSR-LINUX-SIGNAL] delivered tid={} signal={} handler={:#x} frame={:#x} info={:#x} context={:#x}",
+        "[JSR-LINUX-SIGNAL] delivered tid={} signal={} interrupted_result={} handler={:#x} frame={:#x} info={:#x} context={:#x}",
         linux_tid(process).unwrap_or(0),
         signal,
+        interrupted_result,
         handler,
         frame_address,
         info_address,
@@ -449,6 +464,7 @@ fn deliver_pending_signal(
     process: ObjId,
     args: &SyscallArgs,
     user_ip: Option<(u64, u64)>,
+    interrupted_result: i64,
 ) -> Option<UserReturn> {
     let signal = take_deliverable_signal(process)?;
     let action = proc::linux_signal_action(process, signal)?;
@@ -457,7 +473,7 @@ fn deliver_pending_signal(
         return None;
     }
     let user_ip = user_ip?;
-    match build_signal_frame(process, signal, args, user_ip) {
+    match build_signal_frame(process, signal, args, user_ip, interrupted_result) {
         Ok(user) => Some(user),
         Err(error) => {
             crate::kprintln!(
@@ -766,6 +782,14 @@ fn futex_wait(
         if proc::current_exiting() {
             break Err(CompatErrno::Interrupted);
         }
+        if current_signal_pending(process) {
+            crate::kprintln!(
+                "[JSR-LINUX-FUTEX] interrupted process={:#x} address={:#x} signal_pending=true",
+                process.raw(),
+                address
+            );
+            break Err(CompatErrno::Interrupted);
+        }
         if deadline_ns.is_some_and(|deadline| sched::now_ns() >= deadline) {
             break Err(CompatErrno::TimedOut);
         }
@@ -871,7 +895,7 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
         };
     }
     let value = execute(pid, call, a.user_ip);
-    let redirect = deliver_pending_signal(pid, a, a.user_ip);
+    let redirect = deliver_pending_signal(pid, a, a.user_ip, value);
     if proc::current_exiting() {
         proc::thread_exit(0, "linux signal default action");
     }

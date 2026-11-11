@@ -2,6 +2,8 @@
 // 使用未修改的 Ubuntu glibc 验证 sigaction、raise/tgkill、屏蔽与嵌套 rt_sigreturn。
 #define _GNU_SOURCE
 
+#include <errno.h>
+#include <linux/futex.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -19,6 +21,10 @@ static volatile sig_atomic_t blocked_mask_ready;
 static volatile sig_atomic_t release_blocked_worker;
 static volatile sig_atomic_t blocked_worker_signal;
 static volatile sig_atomic_t open_worker_signal;
+static volatile sig_atomic_t futex_worker_tid;
+static volatile sig_atomic_t futex_worker_ready;
+static volatile sig_atomic_t futex_worker_signal;
+static int futex_word;
 
 static void usr2_handler(int signal, siginfo_t *info, void *context) {
     (void)context;
@@ -41,6 +47,10 @@ static void usr1_handler(int signal, siginfo_t *info, void *context) {
     }
     if (syscall(SYS_gettid) == open_worker_tid) {
         open_worker_signal = 1;
+        return;
+    }
+    if (syscall(SYS_gettid) == futex_worker_tid) {
+        futex_worker_signal = 1;
         return;
     }
     if (((ucontext_t *)context)->uc_mcontext.gregs[REG_RIP] == 0) {
@@ -84,6 +94,18 @@ static void *open_worker(void *argument) {
         syscall(SYS_sched_yield);
     }
     return (void *)(intptr_t)open_worker_signal;
+}
+
+static void *futex_worker(void *argument) {
+    (void)argument;
+    futex_worker_tid = syscall(SYS_gettid);
+    __atomic_store_n(&futex_word, 0, __ATOMIC_RELEASE);
+    futex_worker_ready = 1;
+    long result = syscall(SYS_futex, &futex_word, FUTEX_WAIT_PRIVATE, 0, 0, 0, 0);
+    if (result == -1 && errno == EINTR && futex_worker_signal) {
+        return (void *)(intptr_t)1;
+    }
+    return (void *)(intptr_t)-3;
 }
 
 static int install_handler(int signal, void (*handler)(int, siginfo_t *, void *)) {
@@ -154,10 +176,25 @@ int main(void) {
     blocked_worker_tid = 0;
     open_worker_tid = 0;
 
+    pthread_t futex_thread;
+    void *futex_result = 0;
+    if (pthread_create(&futex_thread, 0, futex_worker, 0) != 0) {
+        return 11;
+    }
+    while (!futex_worker_ready) {
+        syscall(SYS_sched_yield);
+    }
+    if (pthread_kill(futex_thread, SIGUSR1) != 0 ||
+        pthread_join(futex_thread, &futex_result) != 0 ||
+        futex_result != (void *)(intptr_t)1) {
+        return 12;
+    }
+    futex_worker_tid = 0;
+
     static const char message[] = "jasper-signal-ok\n";
     if (write(STDOUT_FILENO, message, sizeof(message) - 1) !=
         (ssize_t)(sizeof(message) - 1)) {
-        return 11;
+        return 13;
     }
     return 0;
 }
