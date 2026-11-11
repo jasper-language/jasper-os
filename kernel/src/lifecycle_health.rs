@@ -412,6 +412,7 @@ fn validate_system_root(
     {
         validate_elf_payload(&root, ROOT_EXEC_PROBE_PATH, true)?;
         execute_root_linux_probe(&root)?;
+        execute_root_dynamic_true(&root)?;
     }
     Ok(())
 }
@@ -503,6 +504,51 @@ fn execute_root_linux_probe(root: &Ext4Reader) -> Result<(), HealthError> {
         resources
     );
     if mapped && started && exited && syscalls != 0 && resources {
+        Ok(())
+    } else {
+        Err(HealthError::RootExecute)
+    }
+}
+
+#[cfg(feature = "lifecycle-root-exec-verify")]
+fn execute_root_dynamic_true(root: &Ext4Reader) -> Result<(), HealthError> {
+    const MAX_EXECUTABLE_BYTES: usize = 8 * 1024 * 1024;
+    const MAX_LIBRARY_BYTES: usize = 16 * 1024 * 1024;
+    let executable = root
+        .read_file("/bin/true", MAX_EXECUTABLE_BYTES)
+        .map_err(|_| HealthError::RootExecute)?;
+    let interpreter = root
+        .read_file("/lib64/ld-linux-x86-64.so.2", MAX_LIBRARY_BYTES)
+        .map_err(|_| HealthError::RootExecute)?;
+    let libc = root
+        .read_file("/usr/lib/x86_64-linux-gnu/libc.so.6", MAX_LIBRARY_BYTES)
+        .map_err(|_| HealthError::RootExecute)?;
+    if !crate::linux_vfs::install_root_libc(libc) {
+        return Err(HealthError::RootExecute);
+    }
+    let libc_bytes = crate::linux_vfs::lookup(b"/usr/lib/x86_64-linux-gnu/libc.so.6")
+        .map(|file| file.bytes().len())
+        .unwrap_or(0);
+    crate::kprintln!(
+        "[JSR-LIFE-ROOT-LIBC] path=/usr/lib/x86_64-linux-gnu/libc.so.6 bytes={} source=system-ab",
+        libc_bytes
+    );
+    let warm_frames = crate::mm::frame::free_frames();
+    if !crate::compat_dynamic_demo::run_root_dynamic_true(
+        &executable,
+        &interpreter,
+        warm_frames,
+        false,
+    ) {
+        return Err(HealthError::RootExecute);
+    }
+    let frames_before = crate::mm::frame::free_frames();
+    if crate::compat_dynamic_demo::run_root_dynamic_true(
+        &executable,
+        &interpreter,
+        frames_before,
+        true,
+    ) {
         Ok(())
     } else {
         Err(HealthError::RootExecute)

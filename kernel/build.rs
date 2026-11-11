@@ -207,7 +207,9 @@ fn main() {
             println!("cargo:rustc-env={target}={}", path.display());
         }
     }
-    if std::env::var_os("CARGO_FEATURE_COMPAT_DYNAMIC_LIBC_VERIFY").is_some() {
+    if std::env::var_os("CARGO_FEATURE_COMPAT_DYNAMIC_LIBC_VERIFY").is_some()
+        || std::env::var_os("CARGO_FEATURE_LIFECYCLE_ROOT_EXEC_VERIFY").is_some()
+    {
         configure_dynamic_libc_fixtures();
     }
     // AArch64 / LoongArch64 / RISC-V 没有本项目使用的引导器：用本仓库的链接脚本固定装载地址与段布局。

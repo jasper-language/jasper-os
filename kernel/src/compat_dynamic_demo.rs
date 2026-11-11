@@ -126,6 +126,7 @@ pub fn run() {
     let true_warm = run_program(
         "ubuntu-dynamic-true-warm",
         TRUE,
+        INTERPRETER,
         &true_argv,
         frames_before,
         false,
@@ -135,7 +136,14 @@ pub fn run() {
         "true_warm",
     );
     let true_baseline = free_frames();
-    let true_result = run_program("ubuntu-dynamic-true", TRUE, &true_argv, true_baseline, true);
+    let true_result = run_program(
+        "ubuntu-dynamic-true",
+        TRUE,
+        INTERPRETER,
+        &true_argv,
+        true_baseline,
+        true,
+    );
     kprintln!(
         "[JSR-COMPAT-DYNAMIC] fixture=ubuntu-x86_64 executable=true ld_linux=true libc=true mapped={} entry=interpreter true interpreter_syscalls={} syscall_delta={} exit_zero={} frames_before={} resources={} failed={}",
         true_result.mapped,
@@ -151,6 +159,7 @@ pub fn run() {
     let getconf_result = run_program(
         "ubuntu-dynamic-getconf",
         GETCONF,
+        INTERPRETER,
         &getconf_argv,
         frames_before,
         true,
@@ -169,6 +178,7 @@ pub fn run() {
     let printf_warm = run_program(
         "ubuntu-dynamic-printf-warm",
         PRINTF,
+        INTERPRETER,
         &printf_argv,
         frames_before,
         false,
@@ -181,6 +191,7 @@ pub fn run() {
     let printf_result = run_program(
         "ubuntu-dynamic-printf",
         PRINTF,
+        INTERPRETER,
         &printf_argv,
         printf_baseline,
         true,
@@ -202,6 +213,7 @@ pub fn run() {
         let result = run_program(
             "ubuntu-dynamic-pthread",
             PTHREAD,
+            INTERPRETER,
             &pthread_argv,
             pthread_baseline,
             true,
@@ -225,6 +237,7 @@ pub fn run() {
         let result = run_program(
             "ubuntu-dynamic-signal",
             SIGNAL,
+            INTERPRETER,
             &signal_argv,
             signal_baseline,
             true,
@@ -296,6 +309,7 @@ pub fn run() {
 fn run_program(
     name: &'static str,
     executable: &[u8],
+    interpreter: &[u8],
     argv: &[&[u8]],
     frames_before: usize,
     enforce_resources: bool,
@@ -322,7 +336,7 @@ fn run_program(
             return ProgramResult::FAILED;
         }
     };
-    let interpreter_plan = match jasper_compat_loader::parse(INTERPRETER) {
+    let interpreter_plan = match jasper_compat_loader::parse(interpreter) {
         Ok(plan) => plan,
         Err(_) => {
             check(false, "parse_interpreter");
@@ -351,7 +365,7 @@ fn run_program(
 
     let mut memory = JasperLoaderMemory::new(pid);
     let executable_mapped = map_image(&mut memory, executable, &dynamic.executable).is_ok();
-    let interpreter_mapped = map_image(&mut memory, INTERPRETER, &dynamic.interpreter).is_ok();
+    let interpreter_mapped = map_image(&mut memory, interpreter, &dynamic.interpreter).is_ok();
     check(executable_mapped, "map_executable");
     check(interpreter_mapped, "map_interpreter");
     if !executable_mapped || !interpreter_mapped {
@@ -448,4 +462,40 @@ fn run_program(
         heap_used_before,
         heap_used_after,
     }
+}
+
+/// Executes the unmodified Ubuntu `true` image supplied by a System A/B root.
+/// 执行由 System A/B 根卷提供的未修改 Ubuntu `true` 镜像。
+#[cfg(feature = "lifecycle-root-exec-verify")]
+pub(crate) fn run_root_dynamic_true(
+    executable: &[u8],
+    interpreter: &[u8],
+    frames_before: usize,
+    enforce_resources: bool,
+) -> bool {
+    let argv: [&[u8]; 1] = [b"/bin/true"];
+    let result = run_program(
+        "root-dynamic-true",
+        executable,
+        interpreter,
+        &argv,
+        frames_before,
+        enforce_resources,
+    );
+    let verified = result.mapped
+        && result.interpreter_entered
+        && result.exited_zero
+        && (!enforce_resources || result.resources)
+        && result.syscalls != 0;
+    kprintln!(
+        "[JSR-LIFE-ROOT-DYNAMIC] path=/bin/true interpreter=/lib64/ld-linux-x86-64.so.2 mapped={} interpreter_syscalls={} syscalls={} exit_zero={} frames_before={} resources={} failed={}",
+        result.mapped,
+        result.interpreter_entered,
+        result.syscalls,
+        result.exited_zero,
+        frames_before,
+        result.resources,
+        failed()
+    );
+    verified
 }

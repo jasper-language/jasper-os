@@ -5,6 +5,11 @@
 //! Responsibility: expose the exact unmodified upstream `libc.so.6` bytes and stable virtual
 //! identities needed by the real loader. This is not the production VFS.
 
+#[cfg(feature = "lifecycle-root-exec-verify")]
+use alloc::vec::Vec;
+#[cfg(feature = "lifecycle-root-exec-verify")]
+use spin::Once;
+
 #[cfg(feature = "compat-dynamic-libc-verify")]
 static LIBC: &[u8] = include_bytes!(env!("JSR_UBUNTU_LIBC"));
 #[cfg(not(feature = "compat-dynamic-libc-verify"))]
@@ -29,6 +34,8 @@ static LIBM: &[u8] = &[];
 static LIBPCRE2: &[u8] = include_bytes!(env!("JSR_UBUNTU_LIBPCRE2"));
 #[cfg(not(feature = "compat-dynamic-libc-verify"))]
 static LIBPCRE2: &[u8] = &[];
+#[cfg(feature = "lifecycle-root-exec-verify")]
+static ROOT_LIBC: Once<Vec<u8>> = Once::new();
 
 const HANDLE_BASE: u64 = 0xffff_0000_0000_0000;
 
@@ -91,9 +98,15 @@ impl FileId {
     /// Returns the exact file bytes.
     ///
     /// 返回未修改的真实文件字节。
-    pub const fn bytes(self) -> &'static [u8] {
+    pub fn bytes(self) -> &'static [u8] {
         match self {
-            Self::Libc => LIBC,
+            Self::Libc => {
+                #[cfg(feature = "lifecycle-root-exec-verify")]
+                if let Some(bytes) = ROOT_LIBC.get() {
+                    return bytes.as_slice();
+                }
+                LIBC
+            }
             Self::LibSystemd => LIBSYSTEMD,
             Self::LibSelinux => LIBSELINUX,
             Self::LibGccS => LIBGCC_S,
@@ -108,7 +121,9 @@ impl FileId {
 /// 解析已知绝对路径；其他路径（包括 `/etc/ld.so.cache`）返回 `None`，由调用者产生
 /// `ENOENT`。只接受精确路径，不做前缀匹配或宿主重定向。
 pub fn lookup(path: &[u8]) -> Option<FileId> {
-    if !cfg!(feature = "compat-dynamic-libc-verify") {
+    if !cfg!(feature = "compat-dynamic-libc-verify")
+        && !cfg!(feature = "lifecycle-root-exec-verify")
+    {
         return None;
     }
     match path {
@@ -128,6 +143,17 @@ pub fn lookup(path: &[u8]) -> Option<FileId> {
         | b"/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0" => Some(FileId::LibPcre2),
         _ => None,
     }
+}
+
+/// Installs the libc bytes read from the selected System A/B root.
+/// 安装从所选 System A/B 根卷读取的 libc 字节。
+#[cfg(feature = "lifecycle-root-exec-verify")]
+pub fn install_root_libc(bytes: Vec<u8>) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    ROOT_LIBC.call_once(|| bytes);
+    ROOT_LIBC.get().is_some_and(|installed| !installed.is_empty())
 }
 
 /// Returns whether the verification slice contains any bytes.

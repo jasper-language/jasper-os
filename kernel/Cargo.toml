@@ -155,7 +155,7 @@ lifecycle-ab-health = ["kernel-core/ext4-view"]
 # Dedicated negative acceptance: reach the health gate without enabling production features.
 lifecycle-health-fail-verify = ["lifecycle-ab-health"]
 # Dedicated acceptance: load and execute the static Linux health probe from the selected System root.
-lifecycle-root-exec-verify = ["lifecycle-health-fail-verify", "linux-abi"]
+lifecycle-root-exec-verify = ["lifecycle-health-fail-verify", "linux-abi", "compat-elf"]
 # Pixel 6a (Google Tensor GS101) early-boot probe: Samsung UART only, no scheduler/IRQ start.
 pixel6a-smoke = []
 pixel6a-entry-probe = ["pixel6a-smoke"]
