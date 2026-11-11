@@ -11,6 +11,7 @@
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
 #include <sys/uio.h>
+#include <time.h>
 #include <unistd.h>
 
 int main(void) {
@@ -103,10 +104,64 @@ int main(void) {
     if (syscall(SYS_sysinfo, (void *)1) != -1 || errno != EFAULT) {
         return 19;
     }
+    struct timespec resolution;
+    if (clock_getres(CLOCK_MONOTONIC, &resolution) != 0 ||
+        resolution.tv_sec < 0 || resolution.tv_nsec <= 0 ||
+        resolution.tv_nsec >= 1000000000L) {
+        return 20;
+    }
+    struct timespec before_sleep;
+    struct timespec after_sleep;
+    const struct timespec short_delay = {.tv_sec = 0, .tv_nsec = 20000000};
+    if (clock_gettime(CLOCK_MONOTONIC, &before_sleep) != 0) {
+        printf("jasper-time-fail stage=before errno=%d\n", errno);
+        return 21;
+    }
+    if (nanosleep(&short_delay, NULL) != 0) {
+        printf("jasper-time-fail stage=nanosleep errno=%d\n", errno);
+        return 21;
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &after_sleep) != 0) {
+        printf("jasper-time-fail stage=after errno=%d\n", errno);
+        return 21;
+    }
+    long long relative_elapsed =
+        (after_sleep.tv_sec - before_sleep.tv_sec) * 1000000000LL +
+        (after_sleep.tv_nsec - before_sleep.tv_nsec);
+    if (relative_elapsed < 10000000LL) {
+        return 22;
+    }
+    struct timespec absolute_deadline = after_sleep;
+    absolute_deadline.tv_nsec += 10000000L;
+    if (absolute_deadline.tv_nsec >= 1000000000L) {
+        absolute_deadline.tv_sec += 1;
+        absolute_deadline.tv_nsec -= 1000000000L;
+    }
+    if (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME,
+                        &absolute_deadline, NULL) != 0 ||
+        clock_gettime(CLOCK_MONOTONIC, &after_sleep) != 0) {
+        return 23;
+    }
+    long long absolute_elapsed =
+        (after_sleep.tv_sec - absolute_deadline.tv_sec) * 1000000000LL +
+        (after_sleep.tv_nsec - absolute_deadline.tv_nsec);
+    if (absolute_elapsed < 0) {
+        return 24;
+    }
+    errno = 0;
+    if (nanosleep((const struct timespec *)1, NULL) != -1 || errno != EFAULT) {
+        return 25;
+    }
+    errno = 0;
+    if (syscall(SYS_clock_nanosleep, CLOCK_PROCESS_CPUTIME_ID, 0,
+                &short_delay, NULL) != -1 || errno != EINVAL) {
+        return 26;
+    }
     close(fd);
-    printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s\n",
+    printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld\n",
            (int)parent, (long long)end, CPU_COUNT(&cpus), cpu, node,
            (long long)info.uptime, (unsigned long long)info.totalram,
-           (unsigned long long)info.freeram, (unsigned)info.procs, executable);
+           (unsigned long long)info.freeram, (unsigned)info.procs, executable,
+           resolution.tv_nsec, relative_elapsed);
     return 0;
 }
