@@ -26,6 +26,9 @@ GETCONF=/usr/bin/getconf
 PRINTF=/usr/bin/printf
 UNAME=/usr/bin/uname
 PWD_UTILITY=/usr/bin/pwd
+HOSTNAME=/usr/bin/hostname
+BASENAME=/usr/bin/basename
+DIRNAME=/usr/bin/dirname
 LIBSYSTEMD=/usr/lib/x86_64-linux-gnu/libsystemd.so.0
 LIBSELINUX=/usr/lib/x86_64-linux-gnu/libselinux.so.1
 LIBGCC_S=/usr/lib/x86_64-linux-gnu/libgcc_s.so.1
@@ -80,7 +83,7 @@ if [ -n "$ROOT_EXEC_PROBE" ]; then
   debugfs -w -R 'sif /usr/libexec/jasper/health-probe mode 0100755' "$PARTITION" >/dev/null
 fi
 if [ "$FULL_USERLAND" = 1 ]; then
-  for source in "$GETCONF" "$PRINTF" "$UNAME" "$PWD_UTILITY" "$LIBSYSTEMD" "$LIBSELINUX" "$LIBGCC_S" "$LIBM" "$LIBPCRE2"; do
+  for source in "$GETCONF" "$PRINTF" "$UNAME" "$PWD_UTILITY" "$HOSTNAME" "$BASENAME" "$DIRNAME" "$LIBSYSTEMD" "$LIBSELINUX" "$LIBGCC_S" "$LIBM" "$LIBPCRE2"; do
     [[ -f "$source" ]]
     write_file "$source" "$source"
     debugfs -w -R "sif $source mode 0100755" "$PARTITION" >/dev/null
@@ -109,7 +112,7 @@ if [ -n "$ROOT_EXEC_PROBE" ]; then
   verify_payload /usr/libexec/jasper/health-probe "$ROOT_EXEC_PROBE"
 fi
 if [ "$FULL_USERLAND" = 1 ]; then
-  for source in "$GETCONF" "$PRINTF" "$UNAME" "$PWD_UTILITY" "$LIBSYSTEMD" "$LIBSELINUX" "$LIBGCC_S" "$LIBM" "$LIBPCRE2"; do
+  for source in "$GETCONF" "$PRINTF" "$UNAME" "$PWD_UTILITY" "$HOSTNAME" "$BASENAME" "$DIRNAME" "$LIBSYSTEMD" "$LIBSELINUX" "$LIBGCC_S" "$LIBM" "$LIBPCRE2"; do
     verify_payload "$source" "$source"
   done
 fi

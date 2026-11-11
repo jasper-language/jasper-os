@@ -126,6 +126,15 @@ if [ "$MODE" = root-exec ]; then
   grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/uname path=/usr/bin/uname interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
     "$OUT/serial.log"
   grep -aq '^Linux jasper 0.0.1 Jasper-OS Linux ABI 3.1.0 x86_64 ' "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/hostname path=/usr/bin/hostname interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
+    "$OUT/serial.log"
+  grep -aqE $'^jasper\r?$' "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/basename path=/usr/bin/basename interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
+    "$OUT/serial.log"
+  grep -aqE $'^libc[.]so[.]6\r?$' "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/dirname path=/usr/bin/dirname interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
+    "$OUT/serial.log"
+  grep -aqE $'^/usr/lib/x86_64-linux-gnu\r?$' "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/pwd path=/usr/bin/pwd interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
     "$OUT/serial.log"
   grep -aqE $'^/\r?$' "$OUT/serial.log"
