@@ -1424,6 +1424,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         // The compatibility identity has no supplementary groups.
         // 兼容身份没有附加组，因此 size 查询和写入都返回 0。
         LinuxSyscall::GetGroups => 0,
+        LinuxSyscall::Lseek => compat_result(linux_lseek(pid, call.args)),
         LinuxSyscall::SetTidAddress => set_clear_child_tid(pid, call.args[0])
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
@@ -1600,6 +1601,26 @@ fn linux_pread64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .map_err(|_| CompatErrno::Fault)?;
     }
     Ok(available as u64)
+}
+
+/// Repositions one virtual compatibility file using Linux seek origins.
+///
+/// 按 Linux 的 `SEEK_SET/CUR/END` 更新虚拟文件游标；控制台不是可定位流。
+fn linux_lseek(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.handle == proc::LINUX_CONSOLE_HANDLE {
+        return Err(CompatErrno::Pipe);
+    }
+    let (handle, current) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let file = crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
+    let size = file.bytes().len() as u64;
+    let target = compat_core::syscall::seek_target(current, size, args[1] as i64, args[2])
+        .ok_or(CompatErrno::Invalid)?;
+    if !proc::set_linux_file_offset(pid, fd, target) {
+        return Err(CompatErrno::BadFd);
+    }
+    Ok(target)
 }
 
 /// Maps a bounded file-backed or anonymous private compatibility region.

@@ -7,7 +7,7 @@ use linux_raw_sys::general::{
     __NR_getcwd, __NR_getegid, __NR_geteuid, __NR_getgid, __NR_getgroups, __NR_getpid,
     __NR_getppid, __NR_getrandom, __NR_gettid, __NR_getuid, __NR_io_uring_enter,
     __NR_io_uring_register, __NR_io_uring_setup, __NR_kill, __NR_madvise, __NR_mmap,
-    __NR_mprotect, __NR_munmap, __NR_newfstatat, __NR_openat, __NR_poll, __NR_pread64,
+    __NR_lseek, __NR_mprotect, __NR_munmap, __NR_newfstatat, __NR_openat, __NR_poll, __NR_pread64,
     __NR_prlimit64, __NR_read, __NR_readlink, __NR_rseq, __NR_rt_sigaction, __NR_rt_sigprocmask,
     __NR_rt_sigreturn, __NR_sched_yield, __NR_set_robust_list, __NR_set_tid_address,
     __NR_sigaltstack, __NR_statfs, __NR_tgkill, __NR_uname, __NR_write, __NR_writev,
@@ -28,6 +28,31 @@ pub const LINUX_COMPAT_GID: u64 = 0;
 /// Compatibility roots are created by the kernel service and have no Linux parent.
 /// 兼容根进程由内核服务创建，不存在可引用的 Linux 父进程。
 pub const LINUX_COMPAT_ROOT_PPID: u64 = 0;
+
+/// Linux `SEEK_SET`.
+/// 从文件开头定位。
+pub const LINUX_SEEK_SET: u64 = 0;
+/// Linux `SEEK_CUR`.
+/// 从当前游标定位。
+pub const LINUX_SEEK_CUR: u64 = 1;
+/// Linux `SEEK_END`.
+/// 从文件末尾定位。
+pub const LINUX_SEEK_END: u64 = 2;
+
+/// Computes one bounded signed file cursor update.
+/// 计算一次有界的有符号文件游标更新；负值和 `off_t` 溢出被拒绝。
+pub fn seek_target(current: u64, size: u64, offset: i64, whence: u64) -> Option<u64> {
+    let base = match whence {
+        LINUX_SEEK_SET => 0i128,
+        LINUX_SEEK_CUR => i128::from(current),
+        LINUX_SEEK_END => i128::from(size),
+        _ => return None,
+    };
+    let target = base.checked_add(i128::from(offset))?;
+    (0..=i128::from(i64::MAX))
+        .contains(&target)
+        .then_some(target as u64)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -67,6 +92,7 @@ pub enum LinuxSyscall {
     GetGid,
     GetEgid,
     GetGroups,
+    Lseek,
     SetTidAddress,
     SetRobustList,
     Rseq,
@@ -166,6 +192,9 @@ pub enum CompatErrno {
     /// The destination buffer is too small.
     /// 目标缓冲区容量不足。
     Range = linux_raw_sys::errno::ERANGE,
+    /// Seek is invalid for a pipe or console stream.
+    /// 管道或控制台流不支持定位。
+    Pipe = linux_raw_sys::errno::ESPIPE,
     /// Resource is already owned or waited on.
     /// 资源已被占用或已有等待者。
     Busy = linux_raw_sys::errno::EBUSY,
@@ -218,6 +247,7 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_getgid) => LinuxSyscall::GetGid,
         value if value == u64::from(__NR_getegid) => LinuxSyscall::GetEgid,
         value if value == u64::from(__NR_getgroups) => LinuxSyscall::GetGroups,
+        value if value == u64::from(__NR_lseek) => LinuxSyscall::Lseek,
         value if value == u64::from(__NR_set_tid_address) => LinuxSyscall::SetTidAddress,
         value if value == u64::from(__NR_set_robust_list) => LinuxSyscall::SetRobustList,
         value if value == u64::from(__NR_rseq) => LinuxSyscall::Rseq,
@@ -293,6 +323,7 @@ mod tests {
             (__NR_getgid, LinuxSyscall::GetGid),
             (__NR_getegid, LinuxSyscall::GetEgid),
             (__NR_getgroups, LinuxSyscall::GetGroups),
+            (__NR_lseek, LinuxSyscall::Lseek),
             (__NR_futex, LinuxSyscall::Futex),
             (__NR_tgkill, LinuxSyscall::Tgkill),
             (__NR_rt_sigreturn, LinuxSyscall::RtSigReturn),
@@ -333,7 +364,18 @@ mod tests {
         assert_eq!(compat_result(Ok(7)), 7);
         assert_eq!(compat_result(Err(CompatErrno::BadFd)), -9);
         assert_eq!(compat_result(Err(CompatErrno::Range)), -34);
+        assert_eq!(compat_result(Err(CompatErrno::Pipe)), -29);
         assert_eq!(compat_result(Err(CompatErrno::NoSys)), -38);
+    }
+
+    #[test]
+    fn seek_target_handles_origins_and_rejects_invalid_updates() {
+        assert_eq!(seek_target(10, 20, 5, LINUX_SEEK_SET), Some(5));
+        assert_eq!(seek_target(10, 20, -3, LINUX_SEEK_CUR), Some(7));
+        assert_eq!(seek_target(10, 20, -4, LINUX_SEEK_END), Some(16));
+        assert_eq!(seek_target(10, 20, 5, 3), None);
+        assert_eq!(seek_target(0, 20, -1, LINUX_SEEK_SET), None);
+        assert_eq!(seek_target(i64::MAX as u64, 0, 1, LINUX_SEEK_CUR), None);
     }
 
     #[test]
