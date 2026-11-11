@@ -1,8 +1,10 @@
 // Verify the parent identity of a kernel-created Linux compatibility process.
 // 验证内核创建的 Linux 兼容进程的父身份边界。
+#define _GNU_SOURCE
 
 #include <fcntl.h>
 #include <errno.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -33,7 +35,18 @@ int main(void) {
     if (lseek(STDOUT_FILENO, 0, SEEK_CUR) != -1 || errno != ESPIPE) {
         return 7;
     }
+    cpu_set_t cpus;
+    CPU_ZERO(&cpus);
+    if (sched_getaffinity(0, sizeof(cpus), &cpus) != 0 ||
+        CPU_COUNT(&cpus) < 1 || !CPU_ISSET(0, &cpus)) {
+        return 8;
+    }
+    errno = 0;
+    if (sched_getaffinity(0, 1, &cpus) != -1 || errno != EINVAL) {
+        return 9;
+    }
     close(fd);
-    printf("jasper-ppid=%d lseek=%lld\n", (int)parent, (long long)end);
+    printf("jasper-ppid=%d lseek=%lld affinity=%d\n",
+           (int)parent, (long long)end, CPU_COUNT(&cpus));
     return 0;
 }

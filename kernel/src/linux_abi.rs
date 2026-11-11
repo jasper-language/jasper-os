@@ -1425,6 +1425,9 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         // 兼容身份没有附加组，因此 size 查询和写入都返回 0。
         LinuxSyscall::GetGroups => 0,
         LinuxSyscall::Lseek => compat_result(linux_lseek(pid, call.args)),
+        LinuxSyscall::SchedGetAffinity => {
+            compat_result(linux_sched_getaffinity(pid, call.args))
+        }
         LinuxSyscall::SetTidAddress => set_clear_child_tid(pid, call.args[0])
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
@@ -1621,6 +1624,40 @@ fn linux_lseek(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::BadFd);
     }
     Ok(target)
+}
+
+/// Returns a Linux thread's effective CPU affinity mask.
+///
+/// 查询当前 Linux 进程内线程的实际亲和位图；短缓冲、伪造 TID 和坏用户指针失败关闭。
+fn linux_sched_getaffinity(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const KERNEL_MASK_BYTES: usize = 8;
+    let size = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if size < KERNEL_MASK_BYTES {
+        return Err(CompatErrno::Invalid);
+    }
+    let task = if args[0] == 0 {
+        sched::current().0
+    } else {
+        let tid = u32::try_from(args[0]).map_err(|_| CompatErrno::NoProcess)?;
+        linux_task_for_tid(pid, tid).ok_or(CompatErrno::NoProcess)?
+    };
+    let affinity = sched::task_affinity(task)
+        .ok_or(CompatErrno::NoProcess)?
+        .intersect(sched::online_cpus());
+    let mask = u64::from(affinity.bits());
+    copy_to_user(args[2], &mask.to_le_bytes(), KERNEL_MASK_BYTES)
+        .map_err(|_| CompatErrno::Fault)?;
+    Ok(KERNEL_MASK_BYTES as u64)
+}
+
+fn linux_task_for_tid(process: ObjId, tid: u32) -> Option<crate::task::TaskId> {
+    COMPAT
+        .lock()
+        .threads
+        .iter()
+        .flatten()
+        .find(|entry| entry.process == process && entry.tid == tid)
+        .map(|entry| entry.task)
 }
 
 /// Maps a bounded file-backed or anonymous private compatibility region.

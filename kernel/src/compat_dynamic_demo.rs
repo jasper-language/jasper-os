@@ -120,6 +120,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::GetEgid,
         LinuxSyscall::GetGroups,
         LinuxSyscall::Lseek,
+        LinuxSyscall::SchedGetAffinity,
         LinuxSyscall::SetTidAddress,
         LinuxSyscall::SetRobustList,
         LinuxSyscall::Rseq,

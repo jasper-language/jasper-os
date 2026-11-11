@@ -9,7 +9,8 @@ use linux_raw_sys::general::{
     __NR_io_uring_register, __NR_io_uring_setup, __NR_kill, __NR_madvise, __NR_mmap,
     __NR_lseek, __NR_mprotect, __NR_munmap, __NR_newfstatat, __NR_openat, __NR_poll, __NR_pread64,
     __NR_prlimit64, __NR_read, __NR_readlink, __NR_rseq, __NR_rt_sigaction, __NR_rt_sigprocmask,
-    __NR_rt_sigreturn, __NR_sched_yield, __NR_set_robust_list, __NR_set_tid_address,
+    __NR_rt_sigreturn, __NR_sched_getaffinity, __NR_sched_yield, __NR_set_robust_list,
+    __NR_set_tid_address,
     __NR_sigaltstack, __NR_statfs, __NR_tgkill, __NR_uname, __NR_write, __NR_writev,
 };
 
@@ -93,6 +94,7 @@ pub enum LinuxSyscall {
     GetEgid,
     GetGroups,
     Lseek,
+    SchedGetAffinity,
     SetTidAddress,
     SetRobustList,
     Rseq,
@@ -248,6 +250,7 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_getegid) => LinuxSyscall::GetEgid,
         value if value == u64::from(__NR_getgroups) => LinuxSyscall::GetGroups,
         value if value == u64::from(__NR_lseek) => LinuxSyscall::Lseek,
+        value if value == u64::from(__NR_sched_getaffinity) => LinuxSyscall::SchedGetAffinity,
         value if value == u64::from(__NR_set_tid_address) => LinuxSyscall::SetTidAddress,
         value if value == u64::from(__NR_set_robust_list) => LinuxSyscall::SetRobustList,
         value if value == u64::from(__NR_rseq) => LinuxSyscall::Rseq,
@@ -324,6 +327,7 @@ mod tests {
             (__NR_getegid, LinuxSyscall::GetEgid),
             (__NR_getgroups, LinuxSyscall::GetGroups),
             (__NR_lseek, LinuxSyscall::Lseek),
+            (__NR_sched_getaffinity, LinuxSyscall::SchedGetAffinity),
             (__NR_futex, LinuxSyscall::Futex),
             (__NR_tgkill, LinuxSyscall::Tgkill),
             (__NR_rt_sigreturn, LinuxSyscall::RtSigReturn),
