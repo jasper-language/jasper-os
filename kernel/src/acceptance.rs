@@ -1654,7 +1654,25 @@ mod dedicated {
 
     fn finish(_: &mut BootCtx) {
         crate::scale_demo::run();
-        exit_on(u64::from(crate::scale_demo::failed()));
+        let mut failed = crate::scale_demo::failed();
+        if !crate::pi_demo::run_s4_contracts() {
+            failed = failed.saturating_add(1);
+        }
+        #[cfg(feature = "krn2-observe")]
+        {
+            let (_, work) = crate::sched::pi_work_stats();
+            crate::kprintln!(
+                "[JSR-PI-WORK] scope=churn calls={} slot_visits={} active_visits={} steps={} max_walk={} truncated={} overflow={}",
+                work.calls,
+                work.slots,
+                work.live,
+                work.steps,
+                work.max_walk,
+                work.truncated,
+                work.overflow
+            );
+        }
+        exit_on(u64::from(failed));
     }
 
     pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[PlanItem::Finish(finish)]];
