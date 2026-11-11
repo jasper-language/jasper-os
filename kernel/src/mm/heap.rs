@@ -140,6 +140,45 @@ fn grow(state: &mut HeapState, bytes: u64) -> Result<(), GrowError> {
     grow_in(&mut state.heap, &mut state.mapped_end, HEAP_START + HEAP_MAX, bytes, &mut KernelGrowEnv).map(|_| ())
 }
 
+/// Result of one acceptance-only growth through the real kernel frame and mapping path.
+/// 一次仅验收使用的真实内核页帧与映射扩容结果。
+#[cfg(feature = "pex5-verify")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrowthRecord {
+    /// Requested bytes before step and page rounding.
+    /// 步长与页对齐前的请求字节数。
+    pub requested: u64,
+    /// Bytes committed by this transaction.
+    /// 本次事务实际提交的字节数。
+    pub grown: u64,
+    /// Mapped heap bytes before the transaction.
+    /// 事务前的堆映射字节数。
+    pub mapped_before: u64,
+    /// Mapped heap bytes after the transaction.
+    /// 事务后的堆映射字节数。
+    pub mapped_after: u64,
+}
+
+/// Grow the real kernel heap through `KernelGrowEnv` for the PEX-5 profile.
+/// 在 PEX-5 配置中经 `KernelGrowEnv` 扩展真实内核堆。
+///
+/// The function performs no follow-up allocation, so the measured interval covers
+/// frame allocation, mapping, heap extension and lock wait without test allocations.
+/// 本函数不执行后续分配，因此测量区间包含页帧分配、映射、堆扩展与锁等待，而不含测试分配。
+#[cfg(feature = "pex5-verify")]
+pub fn grow_for_verify(requested: u64) -> Result<GrowthRecord, GrowError> {
+    let mut state = HEAP.lock();
+    let mapped_before = state.mapped_end - HEAP_START;
+    grow(&mut state, requested)?;
+    let mapped_after = state.mapped_end - HEAP_START;
+    Ok(GrowthRecord {
+        requested,
+        grown: mapped_after - mapped_before,
+        mapped_before,
+        mapped_after,
+    })
+}
+
 /// 初始化堆：映射首批页。需在页帧与映射服务就绪之后调用。
 pub fn init() -> Result<(), GrowError> {
     let mut s = HEAP.lock();

@@ -76,6 +76,8 @@ pex1-verify = ["user-programs", "krn2-observe"]
 pex2-verify = []
 # Dedicated central-versus-sharded object-table A/B evaluation.
 pex3-verify = []
+# Dedicated real-kernel heap growth and mapping-tail matrix.
+pex5-verify = []
 # Dedicated SEC-1 identity and metadata substrate.
 sec1-verify = ["kernel-core/sec1-verify"]
 # Dedicated SEC-2 capability-lineage slice; full revocation/in-flight coverage
