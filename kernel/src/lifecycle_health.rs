@@ -633,6 +633,12 @@ fn execute_root_dynamic_programs(root: &Ext4Reader) -> Result<(), HealthError> {
         b"1",
     ];
     run_root_program(root, "/usr/bin/find", &find_argv)?;
+    let dash_argv: [&[u8]; 3] = [
+        b"/bin/dash",
+        b"-c",
+        b"echo jasper-shell-ok\npwd\n",
+    ];
+    run_root_program(root, "/bin/dash", &dash_argv)?;
     let printf_argv: [&[u8]; 3] = [b"/usr/bin/printf", b"jasper-%s\n", b"dynamic"];
     run_root_program(root, "/usr/bin/printf", &printf_argv)?;
     let signal_argv: [&[u8]; 1] = [b"/usr/bin/jasper-signal-basic"];

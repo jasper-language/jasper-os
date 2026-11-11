@@ -21,6 +21,7 @@ MARKER="$WORK/system-$SLOT.jasper-root"
 RELEASE_FILE="$WORK/system-$SLOT.jasper-release"
 USERLAND_FILE="$WORK/system-$SLOT.jasper-userland"
 BINARY=/usr/bin/true
+DASH=/bin/dash
 INTERPRETER=/lib64/ld-linux-x86-64.so.2
 LIBC=/usr/lib/x86_64-linux-gnu/libc.so.6
 GETCONF=/usr/bin/getconf
@@ -74,12 +75,14 @@ write_file "$MARKER" /etc/jasper-root
 write_file "$RELEASE_FILE" /etc/jasper-release
 write_file "$USERLAND_FILE" /etc/jasper-userland
 write_file "$BINARY" /bin/true
+write_file "$DASH" /bin/dash
 write_file "$INTERPRETER" "$INTERPRETER"
 write_file "$LIBC" "$LIBC"
 debugfs -w -R 'sif /etc/jasper-root mode 0100644' "$PARTITION" >/dev/null
 debugfs -w -R 'sif /etc/jasper-release mode 0100644' "$PARTITION" >/dev/null
 debugfs -w -R 'sif /etc/jasper-userland mode 0100644' "$PARTITION" >/dev/null
 debugfs -w -R 'sif /bin/true mode 0100755' "$PARTITION" >/dev/null
+debugfs -w -R 'sif /bin/dash mode 0100755' "$PARTITION" >/dev/null
 debugfs -w -R "sif $INTERPRETER mode 0100755" "$PARTITION" >/dev/null
 debugfs -w -R "sif $LIBC mode 0100755" "$PARTITION" >/dev/null
 if [ -n "$ROOT_EXEC_PROBE" ]; then
@@ -116,6 +119,7 @@ verify_payload() {
 }
 
 verify_payload /bin/true "$BINARY"
+verify_payload /bin/dash "$DASH"
 verify_payload "$INTERPRETER" "$INTERPRETER"
 verify_payload "$LIBC" "$LIBC"
 if [ -n "$ROOT_EXEC_PROBE" ]; then
