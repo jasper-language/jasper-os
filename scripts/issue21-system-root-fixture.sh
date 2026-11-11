@@ -32,6 +32,7 @@ NPROC=/usr/bin/nproc
 SLEEP=/usr/bin/sleep
 FIND=/usr/bin/find
 LS=/usr/bin/ls
+WC=/usr/bin/wc
 HOSTNAME=/usr/bin/hostname
 BASENAME=/usr/bin/basename
 DIRNAME=/usr/bin/dirname
@@ -92,7 +93,7 @@ if [ -n "$ROOT_EXEC_PROBE" ]; then
   debugfs -w -R 'sif /usr/libexec/jasper/health-probe mode 0100755' "$PARTITION" >/dev/null
 fi
 if [ "$FULL_USERLAND" = 1 ]; then
-  for source in "$GETCONF" "$PRINTF" "$UNAME" "$PWD_UTILITY" "$NPROC" "$SLEEP" "$FIND" "$LS" "$HOSTNAME" "$BASENAME" "$DIRNAME" "$ID" "$LIBSYSTEMD" "$LIBSELINUX" "$LIBGCC_S" "$LIBM" "$LIBPCRE2"; do
+  for source in "$GETCONF" "$PRINTF" "$UNAME" "$PWD_UTILITY" "$NPROC" "$SLEEP" "$FIND" "$LS" "$WC" "$HOSTNAME" "$BASENAME" "$DIRNAME" "$ID" "$LIBSYSTEMD" "$LIBSELINUX" "$LIBGCC_S" "$LIBM" "$LIBPCRE2"; do
     [[ -f "$source" ]]
     write_file "$source" "$source"
     debugfs -w -R "sif $source mode 0100755" "$PARTITION" >/dev/null
@@ -127,7 +128,7 @@ if [ -n "$ROOT_EXEC_PROBE" ]; then
   verify_payload /usr/libexec/jasper/health-probe "$ROOT_EXEC_PROBE"
 fi
 if [ "$FULL_USERLAND" = 1 ]; then
-  for source in "$GETCONF" "$PRINTF" "$UNAME" "$PWD_UTILITY" "$NPROC" "$SLEEP" "$FIND" "$LS" "$HOSTNAME" "$BASENAME" "$DIRNAME" "$ID" "$LIBSYSTEMD" "$LIBSELINUX" "$LIBGCC_S" "$LIBM" "$LIBPCRE2"; do
+  for source in "$GETCONF" "$PRINTF" "$UNAME" "$PWD_UTILITY" "$NPROC" "$SLEEP" "$FIND" "$LS" "$WC" "$HOSTNAME" "$BASENAME" "$DIRNAME" "$ID" "$LIBSYSTEMD" "$LIBSELINUX" "$LIBGCC_S" "$LIBM" "$LIBPCRE2"; do
     verify_payload "$source" "$source"
   done
 fi
