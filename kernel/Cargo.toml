@@ -156,6 +156,9 @@ lifecycle-ab-health = ["kernel-core/ext4-view"]
 lifecycle-health-fail-verify = ["lifecycle-ab-health"]
 # Dedicated acceptance: load and execute the static Linux health probe from the selected System root.
 lifecycle-root-exec-verify = ["lifecycle-health-fail-verify", "linux-abi", "compat-elf"]
+# Dedicated negative acceptance: lose the first virtio-blk completion and require
+# the hardware-counter timeout to fail the health gate without hanging silently.
+lifecycle-block-timeout-verify = ["lifecycle-root-exec-verify", "fault-inject"]
 # Pixel 6a (Google Tensor GS101) early-boot probe: Samsung UART only, no scheduler/IRQ start.
 pixel6a-smoke = []
 pixel6a-entry-probe = ["pixel6a-smoke"]

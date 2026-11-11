@@ -15,6 +15,7 @@ use kernel_core::object::{HandleId, ObjectType, Rights};
 use kernel_core::objtable::ObjId;
 
 use crate::kobj::{self, DeviceObj, KObject};
+use crate::kprintln;
 use crate::syscall::SyscallSet;
 use crate::virtio::{self, Queue, VirtioPci};
 use crate::{arch, dma, hrtime, mm, pci, proc};
@@ -26,6 +27,10 @@ const WAIT_TICKS: u64 = 1_000;
 const HEADER_OFFSET: u64 = 0;
 const STATUS_OFFSET: u64 = 16;
 const DISCARD_OFFSET: u64 = 32;
+
+#[cfg(feature = "lifecycle-block-timeout-verify")]
+static DROP_NEXT_COMPLETION: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlkError {
@@ -401,11 +406,26 @@ impl BlockDevice {
         // IRQ 自旋锁内中断关闭，tick 超时不会前进；改用已校准的硬件计数器轮询设备环。
         let start = arch::clock_counter();
         let timeout_counts = hrtime::tick_counts().saturating_mul(WAIT_TICKS);
+        #[cfg(feature = "lifecycle-block-timeout-verify")]
+        let inject_completion_loss = DROP_NEXT_COMPLETION.swap(
+            false,
+            core::sync::atomic::Ordering::SeqCst,
+        );
+        #[cfg(not(feature = "lifecycle-block-timeout-verify"))]
+        let inject_completion_loss = false;
         let (completion, _) = loop {
-            if let Some(used) = self.queue.take_used() {
-                break used;
+            if !inject_completion_loss {
+                if let Some(used) = self.queue.take_used() {
+                    break used;
+                }
             }
-            if arch::clock_counter().wrapping_sub(start) >= timeout_counts {
+            let elapsed = arch::clock_counter().wrapping_sub(start);
+            if elapsed >= timeout_counts {
+                kprintln!(
+                    "[JSR-BLK] result=timeout injected={} elapsed_counts={}",
+                    inject_completion_loss,
+                    elapsed
+                );
                 return Err(BlkError::Timeout);
             }
             core::hint::spin_loop();

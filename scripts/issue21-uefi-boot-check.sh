@@ -21,11 +21,11 @@ KERNEL="$TARGET/x86_64-unknown-none/release/jasper-kernel"
 # Remove only this script's fixed derived files; evidence output must be fresh.
 rm -f -- "$IMAGE" "$ESP_IMAGE" "$UEFI_ESP" "$OVMF_VARS"
 
-if [ "$MODE" = root-exec ]; then
-  KERNEL_FEATURES=lifecycle-root-exec-verify
-else
-  KERNEL_FEATURES=production,lifecycle-ab-health
-fi
+case "$MODE" in
+  root-exec) KERNEL_FEATURES=lifecycle-root-exec-verify ;;
+  block-timeout) KERNEL_FEATURES=lifecycle-block-timeout-verify ;;
+  *) KERNEL_FEATURES=production,lifecycle-ab-health ;;
+esac
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none \
   -p jasper-kernel --features "$KERNEL_FEATURES" >"$OUT/kernel-build.log" 2>&1
 cargo build --locked --release -p xtask >"$OUT/xtask-build.log" 2>&1
@@ -108,6 +108,14 @@ else
   [ "$rc" -eq 124 ]
 fi
 grep -aq 'Jasper-OS boot manager starting' "$OUT/serial.log"
+if [ "$MODE" = block-timeout ]; then
+  grep -aq '^\[JSR-BLK\] result=timeout injected=true' "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-HEALTH\] result=failed reason=block' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \
+    "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
 if [ "$MODE" = root-exec ]; then
   grep -aq '^\[JSR-LIFE-ROOT-EXEC\] path=/usr/libexec/jasper/health-probe .* mapped=true cpl3=true exited=true syscalls=[1-9][0-9]* frames_before=[0-9]* resources=true' \
     "$OUT/serial.log"
