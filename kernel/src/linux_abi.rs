@@ -1428,6 +1428,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         // 兼容身份没有附加组，因此 size 查询和写入都返回 0。
         LinuxSyscall::GetGroups => 0,
         LinuxSyscall::Lseek => compat_result(linux_lseek(pid, call.args)),
+        LinuxSyscall::GetCpu => compat_result(linux_getcpu(call.args)),
         LinuxSyscall::SchedGetAffinity => {
             compat_result(linux_sched_getaffinity(pid, call.args))
         }
@@ -1693,6 +1694,28 @@ fn linux_lseek(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::BadFd);
     }
     Ok(target)
+}
+
+/// Returns the current logical CPU and single compatibility NUMA domain.
+///
+/// 返回当前逻辑 CPU；当前内存模型是单域 UMA，因此兼容节点稳定为 0。
+fn linux_getcpu(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let cpu_bytes = (crate::arch::cpu_index() as u32).to_le_bytes();
+    let node_bytes = 0u32.to_le_bytes();
+    let mut ranges = alloc::vec::Vec::with_capacity(2);
+    if args[0] != 0 {
+        ranges.push((args[0], cpu_bytes.as_slice()));
+    }
+    if args[1] != 0 {
+        ranges.push((args[1], node_bytes.as_slice()));
+    }
+    if !ranges.is_empty() {
+        copy_to_user_vectored(&ranges).map_err(|error| match error {
+            UserPtrError::Quota | UserPtrError::OutOfMemory => CompatErrno::NoMemory,
+            _ => CompatErrno::Fault,
+        })?;
+    }
+    Ok(0)
 }
 
 /// Returns a Linux thread's effective CPU affinity mask.
