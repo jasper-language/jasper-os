@@ -1429,6 +1429,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::GetGroups => 0,
         LinuxSyscall::Lseek => compat_result(linux_lseek(pid, call.args)),
         LinuxSyscall::GetCpu => compat_result(linux_getcpu(call.args)),
+        LinuxSyscall::Sysinfo => compat_result(linux_sysinfo(call.args[0])),
         LinuxSyscall::SchedGetAffinity => {
             compat_result(linux_sched_getaffinity(pid, call.args))
         }
@@ -1715,6 +1716,61 @@ fn linux_getcpu(args: [u64; 6]) -> Result<u64, CompatErrno> {
             _ => CompatErrno::Fault,
         })?;
     }
+    Ok(0)
+}
+
+/// Writes a truthful, bounded Linux `sysinfo(2)` snapshot.
+///
+/// 写入有界且不伪造的 Linux 系统信息快照：时间取真实单调时钟，内存取页帧
+/// 分配器，进程数取对象表中的活动 Process。负载平均值当前不可观测，因此保持 0。
+fn linux_sysinfo(destination: u64) -> Result<u64, CompatErrno> {
+    const SYSINFO_BYTES: usize = 112;
+    const PAGE_BYTES: u64 = kernel_core::frame::FRAME_SIZE as u64;
+
+    let uptime_ns = crate::hrtime::now().unwrap_or_else(|| {
+        sched::timer_ticks().saturating_mul(crate::hrtime::tick_ns())
+    });
+    let uptime = (uptime_ns / 1_000_000_000).min(i64::MAX as u64) as i64;
+    let totalram = u64::try_from(crate::mm::frame::usable_frames())
+        .map_err(|_| CompatErrno::NoMemory)?
+        .checked_mul(PAGE_BYTES)
+        .ok_or(CompatErrno::NoMemory)?;
+    let freeram = u64::try_from(crate::mm::frame::free_frames())
+        .map_err(|_| CompatErrno::NoMemory)?
+        .checked_mul(PAGE_BYTES)
+        .ok_or(CompatErrno::NoMemory)?;
+    if freeram > totalram {
+        return Err(CompatErrno::NoMemory);
+    }
+    let processes = crate::kobj::with(|table| {
+        let mut count = 0u16;
+        table.for_each_live(|_, object| {
+            if matches!(object, crate::kobj::KObject::Process(_)) {
+                count = count.saturating_add(1);
+            }
+            true
+        });
+        count
+    });
+
+    let mut bytes = [0u8; SYSINFO_BYTES];
+    bytes[0..8].copy_from_slice(&uptime.to_le_bytes());
+    for offset in [8usize, 16, 24] {
+        bytes[offset..offset + 8].copy_from_slice(&0u64.to_le_bytes());
+    }
+    bytes[32..40].copy_from_slice(&totalram.to_le_bytes());
+    bytes[40..48].copy_from_slice(&freeram.to_le_bytes());
+    bytes[48..56].copy_from_slice(&0u64.to_le_bytes());
+    bytes[56..64].copy_from_slice(&0u64.to_le_bytes());
+    bytes[64..72].copy_from_slice(&0u64.to_le_bytes());
+    bytes[72..80].copy_from_slice(&0u64.to_le_bytes());
+    bytes[80..82].copy_from_slice(&processes.to_le_bytes());
+    // The x86_64 UAPI aligns totalhigh/freehigh after the two 16-bit fields.
+    // x86_64 UAPI 在两个 16 位字段之后按 8 字节对齐 totalhigh/freehigh。
+    bytes[88..96].copy_from_slice(&0u64.to_le_bytes());
+    bytes[96..104].copy_from_slice(&0u64.to_le_bytes());
+    bytes[104..108].copy_from_slice(&1u32.to_le_bytes());
+    copy_to_user(destination, &bytes, SYSINFO_BYTES).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
 }
 
