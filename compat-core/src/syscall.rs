@@ -218,6 +218,9 @@ pub enum SyscallDispatch {
 #[repr(u32)]
 pub enum CompatErrno {
     Perm = linux_raw_sys::errno::EPERM,
+    /// Permission to access the object was denied.
+    /// 访问对象的权限被拒绝。
+    Access = linux_raw_sys::errno::EACCES,
     NoEntry = linux_raw_sys::errno::ENOENT,
     NoProcess = linux_raw_sys::errno::ESRCH,
     Interrupted = linux_raw_sys::errno::EINTR,

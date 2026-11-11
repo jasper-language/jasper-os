@@ -299,6 +299,54 @@ int main(void) {
         compatibility_fs.f_bsize != 4096) {
         return 44;
     }
+    directory = opendir("/usr/bin");
+    if (directory == NULL) {
+        return 47;
+    }
+    unsigned executable_mask = 0;
+    while ((entry = readdir(directory)) != NULL) {
+        if (strcmp(entry->d_name, "basename") == 0) executable_mask |= 1u << 0;
+        if (strcmp(entry->d_name, "find") == 0) executable_mask |= 1u << 1;
+        if (strcmp(entry->d_name, "ls") == 0) executable_mask |= 1u << 2;
+        if (strcmp(entry->d_name, "wc") == 0) executable_mask |= 1u << 3;
+    }
+    if (closedir(directory) != 0 || executable_mask != 0x0fu) {
+        return 48;
+    }
+    errno = 0;
+    int executable_fd = open("/usr/bin/ls", O_RDONLY | O_CLOEXEC);
+    if (executable_fd != -1 || errno != EACCES) {
+        if (executable_fd >= 0) close(executable_fd);
+        return 49;
+    }
+    errno = 0;
+    executable_fd = open("/usr/bin/ls", O_RDONLY | O_CLOEXEC | O_DIRECTORY);
+    if (executable_fd != -1 || errno != ENOTDIR) {
+        if (executable_fd >= 0) close(executable_fd);
+        return 50;
+    }
+    errno = 0;
+    if (chdir("/usr/bin/ls") != -1 || errno != ENOTDIR) {
+        return 51;
+    }
+    struct stat executable_stat;
+    if (stat("/usr/bin/ls", &executable_stat) != 0 ||
+        !S_ISREG(executable_stat.st_mode)) {
+        return 52;
+    }
+    if ((executable_stat.st_mode & 0111) != 0111 ||
+        executable_stat.st_nlink != 1 || executable_stat.st_size != 0) {
+        return 53;
+    }
+    struct statx executable_statx;
+    if (statx(AT_FDCWD, "/usr/bin/ls", AT_STATX_SYNC_AS_STAT,
+              STATX_BASIC_STATS, &executable_statx) != 0 ||
+        !S_ISREG(executable_statx.stx_mode) ||
+        (executable_statx.stx_mode & 0111) != 0111 ||
+        executable_statx.stx_nlink != 1 ||
+        executable_statx.stx_size != 0) {
+        return 54;
+    }
     errno = 0;
     if (ioctl(STDOUT_FILENO, 0x802c542aUL, NULL) != -1 || errno != ENOTTY) {
         return 45;
@@ -307,7 +355,7 @@ int main(void) {
         return 46;
     }
     close(fd);
-    printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld wall=%lld dirent=6\n",
+    printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld wall=%lld dirent=6 exec_meta=true\n",
            (int)parent, (long long)end, CPU_COUNT(&cpus), cpu, node,
            (long long)info.uptime, (unsigned long long)info.totalram,
            (unsigned long long)info.freeram, (unsigned)info.procs, executable,

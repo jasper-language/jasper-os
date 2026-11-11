@@ -138,6 +138,7 @@ pub enum DirectoryId {
     Usr,
     UsrLib,
     UsrLibX86_64,
+    UsrBin,
 }
 
 impl DirectoryId {
@@ -153,6 +154,7 @@ impl DirectoryId {
                 Self::Usr => 3,
                 Self::UsrLib => 4,
                 Self::UsrLibX86_64 => 5,
+                Self::UsrBin => 6,
             }
     }
 
@@ -168,6 +170,7 @@ impl DirectoryId {
                 Self::Usr => 4,
                 Self::UsrLib => 5,
                 Self::UsrLibX86_64 => 6,
+                Self::UsrBin => 7,
             }
     }
 
@@ -182,6 +185,7 @@ impl DirectoryId {
             value if value == (DIRECTORY_HANDLE_BASE | 4) => Some(Self::Usr),
             value if value == (DIRECTORY_HANDLE_BASE | 5) => Some(Self::UsrLib),
             value if value == (DIRECTORY_HANDLE_BASE | 6) => Some(Self::UsrLibX86_64),
+            value if value == (DIRECTORY_HANDLE_BASE | 7) => Some(Self::UsrBin),
             _ => None,
         }
     }
@@ -195,6 +199,7 @@ impl DirectoryId {
             Self::Lib => b"/lib",
             Self::LibX86_64 => b"/lib/x86_64-linux-gnu",
             Self::Usr => b"/usr",
+            Self::UsrBin => b"/usr/bin",
             Self::UsrLib => b"/usr/lib",
             Self::UsrLibX86_64 => b"/usr/lib/x86_64-linux-gnu",
         }
@@ -207,6 +212,9 @@ impl DirectoryId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Node {
     File(FileId),
+    /// Verification executable metadata without readable content.
+    /// 仅暴露元数据、不提供内容读取的验收可执行文件。
+    Executable(u64),
     Directory(DirectoryId),
 }
 
@@ -224,7 +232,20 @@ impl Node {
     pub const fn inode(self) -> u64 {
         match self {
             Self::File(file) => file.inode(),
+            Self::Executable(inode) => inode,
             Self::Directory(directory) => directory.inode(),
+        }
+    }
+
+    /// Linux `(size, link count, mode)` metadata for this node.
+    ///
+    /// 返回 Linux `(大小, 链接数, 模式)` 元数据。验收可执行文件只暴露稳定的可执行
+    /// 文件属性，不提供可读内容，因此大小固定为 0。
+    pub fn stat_metadata(self) -> (u64, u64, u32) {
+        match self {
+            Self::File(file) => (file.bytes().len() as u64, 1, 0o100444),
+            Self::Executable(_) => (0, 1, 0o100555),
+            Self::Directory(_) => (0, 2, 0o040555),
         }
     }
 }
@@ -280,13 +301,38 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/lib" => Some(DirectoryId::Lib),
         b"/lib/x86_64-linux-gnu" => Some(DirectoryId::LibX86_64),
         b"/usr" => Some(DirectoryId::Usr),
+        b"/usr/bin" => Some(DirectoryId::UsrBin),
         b"/usr/lib" => Some(DirectoryId::UsrLib),
         b"/usr/lib/x86_64-linux-gnu" => Some(DirectoryId::UsrLibX86_64),
         _ => None,
     };
-    directory
+    let exact = directory
         .map(Node::Directory)
-        .or_else(|| lookup(path).map(Node::File))
+        .or_else(|| lookup(path).map(Node::File));
+    if exact.is_some() {
+        return exact;
+    }
+    let separator = path.iter().rposition(|byte| *byte == b'/')?;
+    let parent = if separator == 0 {
+        b"/".as_slice()
+    } else {
+        &path[..separator]
+    };
+    let name = &path[separator + 1..];
+    let directory = match parent {
+        b"/" => Some(DirectoryId::Root),
+        b"/lib" => Some(DirectoryId::Lib),
+        b"/lib/x86_64-linux-gnu" => Some(DirectoryId::LibX86_64),
+        b"/usr" => Some(DirectoryId::Usr),
+        b"/usr/bin" => Some(DirectoryId::UsrBin),
+        b"/usr/lib" => Some(DirectoryId::UsrLib),
+        b"/usr/lib/x86_64-linux-gnu" => Some(DirectoryId::UsrLibX86_64),
+        _ => None,
+    }?;
+    directory_entries(directory)
+        .iter()
+        .find(|entry| entry.name == name)
+        .map(|entry| entry.node)
 }
 
 /// Returns the children of one compatibility directory.
@@ -333,10 +379,86 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
             node: Node::File(FileId::LibPcre2),
         },
     ];
-    const USR: &[DirEntry] = &[DirEntry {
-        name: b"lib",
-        node: Node::Directory(DirectoryId::UsrLib),
-    }];
+    const USR: &[DirEntry] = &[
+        DirEntry {
+            name: b"bin",
+            node: Node::Directory(DirectoryId::UsrBin),
+        },
+        DirEntry {
+            name: b"lib",
+            node: Node::Directory(DirectoryId::UsrLib),
+        },
+    ];
+    const USR_BIN: &[DirEntry] = &[
+        DirEntry {
+            name: b"basename",
+            node: Node::Executable(0x3000),
+        },
+        DirEntry {
+            name: b"dash",
+            node: Node::Executable(0x3001),
+        },
+        DirEntry {
+            name: b"dirname",
+            node: Node::Executable(0x3002),
+        },
+        DirEntry {
+            name: b"find",
+            node: Node::Executable(0x3003),
+        },
+        DirEntry {
+            name: b"getconf",
+            node: Node::Executable(0x3004),
+        },
+        DirEntry {
+            name: b"hostname",
+            node: Node::Executable(0x3005),
+        },
+        DirEntry {
+            name: b"id",
+            node: Node::Executable(0x3006),
+        },
+        DirEntry {
+            name: b"jasper-getppid",
+            node: Node::Executable(0x3007),
+        },
+        DirEntry {
+            name: b"jasper-signal-basic",
+            node: Node::Executable(0x3008),
+        },
+        DirEntry {
+            name: b"ls",
+            node: Node::Executable(0x3009),
+        },
+        DirEntry {
+            name: b"nproc",
+            node: Node::Executable(0x300a),
+        },
+        DirEntry {
+            name: b"printf",
+            node: Node::Executable(0x300b),
+        },
+        DirEntry {
+            name: b"pwd",
+            node: Node::Executable(0x300c),
+        },
+        DirEntry {
+            name: b"sleep",
+            node: Node::Executable(0x300d),
+        },
+        DirEntry {
+            name: b"true",
+            node: Node::Executable(0x300e),
+        },
+        DirEntry {
+            name: b"uname",
+            node: Node::Executable(0x300f),
+        },
+        DirEntry {
+            name: b"wc",
+            node: Node::Executable(0x3010),
+        },
+    ];
     const USR_LIB: &[DirEntry] = &[DirEntry {
         name: b"x86_64-linux-gnu",
         node: Node::Directory(DirectoryId::UsrLibX86_64),
@@ -346,6 +468,7 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirectoryId::Lib => LIB,
         DirectoryId::LibX86_64 | DirectoryId::UsrLibX86_64 => LIB_X86_64,
         DirectoryId::Usr => USR,
+        DirectoryId::UsrBin => USR_BIN,
         DirectoryId::UsrLib => USR_LIB,
     }
 }

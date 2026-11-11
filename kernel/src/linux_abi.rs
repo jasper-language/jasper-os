@@ -2688,6 +2688,19 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         crate::linux_vfs::Node::Directory(directory) => {
             proc::linux_install_dir(pid, directory.handle(), close_on_exec)
         }
+        crate::linux_vfs::Node::Executable(_) => {
+            // The compatibility namespace exposes executable metadata for
+            // directory/stat probes. Its bytes come only from the selected
+            // trusted root and must not become readable through generic VFS
+            // descriptors.
+            // 兼容命名空间只为目录/stat 探测暴露可执行文件元数据。其字节只来自
+            // 选定的可信根卷，不能经通用 VFS 描述符变成任意可读文件。
+            return if flags & O_DIRECTORY != 0 {
+                Err(CompatErrno::NotDirectory)
+            } else {
+                Err(CompatErrno::Access)
+            };
+        }
     }
     .ok_or(CompatErrno::NoSpace)?;
     Ok(u64::from(fd))
@@ -2741,7 +2754,9 @@ fn linux_chdir(pid: ObjId, address: u64) -> Result<u64, CompatErrno> {
     };
     let directory = match crate::linux_vfs::lookup_node(&resolved) {
         Some(crate::linux_vfs::Node::Directory(directory)) => directory,
-        Some(crate::linux_vfs::Node::File(_)) => return Err(CompatErrno::NotDirectory),
+        Some(crate::linux_vfs::Node::File(_) | crate::linux_vfs::Node::Executable(_)) => {
+            return Err(CompatErrno::NotDirectory);
+        }
         None => return Err(CompatErrno::NoEntry),
     };
     if proc::set_linux_cwd(pid, directory) {
@@ -2926,9 +2941,11 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 }
             };
             let node = crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)?;
-            let size = crate::linux_vfs::lookup(&resolved)
-                .map(|file| file.bytes().len() as u64)
-                .unwrap_or(if node.is_directory() { 4096 } else { 0 });
+            let size = if node.is_directory() {
+                4096
+            } else {
+                node.stat_metadata().0
+            };
             (node, size)
         }
         Err(CompatErrno::NoEntry) if args[2] & AT_EMPTY_PATH != 0 => {
@@ -2949,15 +2966,14 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         Err(error) => return Err(error),
     };
+    let (_, links, mode) = node.stat_metadata();
     let mut output = [0u8; 256];
     output[0..4].copy_from_slice(&RETURNED_MASK.to_le_bytes());
     output[4..8].copy_from_slice(&4096u32.to_le_bytes());
-    output[16..20].copy_from_slice(&(if node.is_directory() { 2u32 } else { 1 }).to_le_bytes());
+    output[16..20].copy_from_slice(&(links as u32).to_le_bytes());
     output[20..24].copy_from_slice(&0u32.to_le_bytes());
     output[24..28].copy_from_slice(&0u32.to_le_bytes());
-    output[28..30].copy_from_slice(
-        &(if node.is_directory() { 0o040555u16 } else { 0o100444u16 }).to_le_bytes(),
-    );
+    output[28..30].copy_from_slice(&(mode as u16).to_le_bytes());
     output[32..40].copy_from_slice(&node.inode().to_le_bytes());
     output[40..48].copy_from_slice(&size.to_le_bytes());
     output[48..56].copy_from_slice(&size.div_ceil(512).to_le_bytes());
@@ -3231,10 +3247,7 @@ fn linux_rt_sigprocmask(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
 /// 不伪造宿主设备身份。
 fn write_linux_stat(address: u64, node: crate::linux_vfs::Node) -> Result<(), CompatErrno> {
     const STAT_BYTES: usize = 144;
-    let (size, links, mode) = match node {
-        crate::linux_vfs::Node::File(file) => (file.bytes().len() as u64, 1u64, 0o100444u32),
-        crate::linux_vfs::Node::Directory(_) => (0u64, 2u64, 0o040555u32),
-    };
+    let (size, links, mode) = node.stat_metadata();
     let mut stat = [0u8; STAT_BYTES];
     stat[0..8].copy_from_slice(&1u64.to_le_bytes()); // st_dev
     stat[8..16].copy_from_slice(&node.inode().to_le_bytes()); // st_ino

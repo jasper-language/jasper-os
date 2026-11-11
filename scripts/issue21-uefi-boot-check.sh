@@ -160,6 +160,10 @@ if [ "$MODE" = root-exec ]; then
   grep -aqE $'^/usr\r?$' "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/ls path=/usr/bin/ls interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
     "$OUT/serial.log"
+  grep -aqE $'^basename\r?$' "$OUT/serial.log"
+  grep -aqE $'^find\r?$' "$OUT/serial.log"
+  grep -aqE $'^ls\r?$' "$OUT/serial.log"
+  grep -aqE $'^wc\r?$' "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/wc path=/usr/bin/wc interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
     "$OUT/serial.log"
   grep -aqE $'^2190608 /usr/lib/x86_64-linux-gnu/libc[.]so[.]6\r?$' "$OUT/serial.log"
@@ -175,7 +179,7 @@ if [ "$MODE" = root-exec ]; then
   grep -aq '^jasper-signal-ok' "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/jasper-getppid path=/usr/bin/jasper-getppid interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
     "$OUT/serial.log"
-  grep -aqE $'^jasper-ppid=0 lseek=[1-9][0-9]* affinity=[1-9][0-9]* cpu=[0-9][0-9]* node=0 uptime=[0-9][0-9]* totalram=[1-9][0-9]* freeram=[1-9][0-9]* procs=[1-9][0-9]* exe=/usr/bin/jasper-getppid resolution_ns=[1-9][0-9]* sleep_ns=[1-9][0-9]* wall=[1-9][0-9]* dirent=6\r?$' "$OUT/serial.log"
+  grep -aqE $'^jasper-ppid=0 lseek=[1-9][0-9]* affinity=[1-9][0-9]* cpu=[0-9][0-9]* node=0 uptime=[0-9][0-9]* totalram=[1-9][0-9]* freeram=[1-9][0-9]* procs=[1-9][0-9]* exe=/usr/bin/jasper-getppid resolution_ns=[1-9][0-9]* sleep_ns=[1-9][0-9]* wall=[1-9][0-9]* dirent=6 exec_meta=true\r?$' "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-ROOT-LIBS\] count=6 bytes=[1-9][0-9]* source=system-ab' \
     "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
