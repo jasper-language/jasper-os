@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
 #include <sys/uio.h>
@@ -158,12 +159,44 @@ int main(void) {
                 &short_delay, NULL) != -1 || errno != EINVAL) {
         return 26;
     }
-    DIR *directory = opendir("/usr/lib/x86_64-linux-gnu");
-    if (directory == NULL) {
+    DIR *root = opendir("/");
+    if (root == NULL) {
         return 27;
     }
-    unsigned library_mask = 0;
+    int root_fd = dirfd(root);
+    errno = 0;
+    if (syscall(SYS_getdents64, root_fd, (void *)1, 256) != -1 ||
+        errno != EFAULT) {
+        return 28;
+    }
+    int saw_usr = 0;
+    unsigned root_entries = 0;
     struct dirent *entry;
+    errno = 0;
+    while ((entry = readdir(root)) != NULL) {
+        root_entries++;
+        saw_usr |= strcmp(entry->d_name, "usr") == 0;
+    }
+    if (errno != 0 || root_entries < 4 || !saw_usr) {
+        return 29;
+    }
+    int usr_fd = openat(root_fd, "usr", O_RDONLY | O_CLOEXEC | O_DIRECTORY);
+    if (usr_fd < 0) {
+        return 30;
+    }
+    struct stat usr_stat;
+    if (fstat(usr_fd, &usr_stat) != 0 || !S_ISDIR(usr_stat.st_mode)) {
+        return 31;
+    }
+    close(usr_fd);
+    if (closedir(root) != 0) {
+        return 32;
+    }
+    DIR *directory = opendir("/usr/lib/x86_64-linux-gnu");
+    if (directory == NULL) {
+        return 33;
+    }
+    unsigned library_mask = 0;
     while ((entry = readdir(directory)) != NULL) {
         if (strcmp(entry->d_name, "libc.so.6") == 0) library_mask |= 1u << 0;
         if (strcmp(entry->d_name, "libsystemd.so.0") == 0) library_mask |= 1u << 1;
@@ -173,13 +206,13 @@ int main(void) {
         if (strcmp(entry->d_name, "libpcre2-8.so.0") == 0) library_mask |= 1u << 5;
     }
     if (closedir(directory) != 0 || library_mask != 0x3fu) {
-        return 28;
+        return 34;
     }
     errno = 0;
     directory = opendir("/usr/lib/x86_64-linux-gnu/libc.so.6");
     if (directory != NULL || errno != ENOTDIR) {
         if (directory != NULL) closedir(directory);
-        return 29;
+        return 35;
     }
     close(fd);
     printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld dirent=6\n",

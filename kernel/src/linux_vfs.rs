@@ -185,6 +185,20 @@ impl DirectoryId {
             _ => None,
         }
     }
+
+    /// Canonical path used only to resolve relative entries under this handle.
+    ///
+    /// 仅用于从目录句柄解析相对子项的规范路径；它不是原生授权凭证。
+    pub const fn path(self) -> &'static [u8] {
+        match self {
+            Self::Root => b"/",
+            Self::Lib => b"/lib",
+            Self::LibX86_64 => b"/lib/x86_64-linux-gnu",
+            Self::Usr => b"/usr",
+            Self::UsrLib => b"/usr/lib",
+            Self::UsrLibX86_64 => b"/usr/lib/x86_64-linux-gnu",
+        }
+    }
 }
 
 /// One node in the read-only compatibility namespace.
@@ -238,17 +252,21 @@ pub fn lookup(path: &[u8]) -> Option<FileId> {
         b"/lib/x86_64-linux-gnu/libc.so.6" | b"/usr/lib/x86_64-linux-gnu/libc.so.6" => {
             Some(FileId::Libc)
         }
-        b"/lib/x86_64-linux-gnu/libsystemd.so.0"
-        | b"/usr/lib/x86_64-linux-gnu/libsystemd.so.0" => Some(FileId::LibSystemd),
-        b"/lib/x86_64-linux-gnu/libselinux.so.1"
-        | b"/usr/lib/x86_64-linux-gnu/libselinux.so.1" => Some(FileId::LibSelinux),
-        b"/lib/x86_64-linux-gnu/libgcc_s.so.1"
-        | b"/usr/lib/x86_64-linux-gnu/libgcc_s.so.1" => Some(FileId::LibGccS),
+        b"/lib/x86_64-linux-gnu/libsystemd.so.0" | b"/usr/lib/x86_64-linux-gnu/libsystemd.so.0" => {
+            Some(FileId::LibSystemd)
+        }
+        b"/lib/x86_64-linux-gnu/libselinux.so.1" | b"/usr/lib/x86_64-linux-gnu/libselinux.so.1" => {
+            Some(FileId::LibSelinux)
+        }
+        b"/lib/x86_64-linux-gnu/libgcc_s.so.1" | b"/usr/lib/x86_64-linux-gnu/libgcc_s.so.1" => {
+            Some(FileId::LibGccS)
+        }
         b"/lib/x86_64-linux-gnu/libm.so.6" | b"/usr/lib/x86_64-linux-gnu/libm.so.6" => {
             Some(FileId::LibM)
         }
-        b"/lib/x86_64-linux-gnu/libpcre2-8.so.0"
-        | b"/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0" => Some(FileId::LibPcre2),
+        b"/lib/x86_64-linux-gnu/libpcre2-8.so.0" | b"/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0" => {
+            Some(FileId::LibPcre2)
+        }
         _ => None,
     }
 }

@@ -15,9 +15,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use kernel_core::objtable::ObjId;
 use kernel_core::paging::MapFlags;
 
-use crate::mm::user::{
-    copy_from_user, copy_to_user, copy_to_user_vectored, UserPtrError,
-};
+use crate::mm::user::{copy_from_user, copy_to_user, copy_to_user_vectored, UserPtrError};
 use crate::sync::IrqSpinLock;
 use crate::syscall::{SyscallArgs, SyscallOutcome, UserReturn, CONSOLE_WRITE_MAX};
 use crate::{console, proc, sched};
@@ -468,8 +466,7 @@ fn linux_sigaltstack(process: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno>
         let (new_sp, new_size, new_flags) = if requested_flags == SS_DISABLE {
             (0, 0, SS_DISABLE)
         } else {
-            if requested_flags != 0
-                && requested_flags != SS_AUTODISARM
+            if requested_flags != 0 && requested_flags != SS_AUTODISARM
                 || requested_size < MIN_ALTSTACK
                 || requested_sp % 16 != 0
                 || requested_sp < crate::arch::USER_WINDOW.0
@@ -573,7 +570,10 @@ fn take_deliverable_signal(process: ObjId) -> Option<u32> {
             .iter()
             .flatten()
             .find(|entry| entry.process == process && entry.task == task)?;
-        (entry.signal_mask, entry.pending_signals & !entry.signal_mask)
+        (
+            entry.signal_mask,
+            entry.pending_signals & !entry.signal_mask,
+        )
     };
     let (deliverable, process_directed) = if thread_deliverable != 0 {
         (thread_deliverable, false)
@@ -663,8 +663,7 @@ fn copy_fxstate_to_frame(args: &SyscallArgs, frame: &mut [u8]) -> bool {
         return false;
     };
     let Some(destination) = frame.get_mut(
-        SIGNAL_FPSTATE_OFFSET
-            ..SIGNAL_FPSTATE_OFFSET.saturating_add(crate::syscall::XSAVE_BYTES),
+        SIGNAL_FPSTATE_OFFSET..SIGNAL_FPSTATE_OFFSET.saturating_add(crate::syscall::XSAVE_BYTES),
     ) else {
         return false;
     };
@@ -702,8 +701,7 @@ fn build_signal_frame(
         let _ = proc::begin_exit(process, 128 + i64::from(signal));
         return Err(CompatErrno::Interrupted);
     }
-    if action[1]
-        & !(SA_SIGINFO | SA_RESTORER | SA_RESTART | SA_NODEFER | SA_RESETHAND | SA_ONSTACK)
+    if action[1] & !(SA_SIGINFO | SA_RESTORER | SA_RESTART | SA_NODEFER | SA_RESETHAND | SA_ONSTACK)
         != 0
         || !user_register(handler)
         || !user_register(action[2])
@@ -1000,10 +998,7 @@ fn linux_rt_sigreturn(
         *destination = fxstate;
     }
     if uc_flags & JASPER_UC_FLAG_ALTSTACK != 0
-        && !leave_altstack(
-            process,
-            uc_flags & JASPER_UC_FLAG_ALTSTACK_AUTODISARM != 0,
-        )
+        && !leave_altstack(process, uc_flags & JASPER_UC_FLAG_ALTSTACK_AUTODISARM != 0)
     {
         return Err(CompatErrno::Invalid);
     }
@@ -1040,9 +1035,7 @@ fn set_clear_child_tid(process: ObjId, address: u64) -> Option<u32> {
 }
 
 fn register_robust_list(process: ObjId, address: u64, length: u64) -> bool {
-    if length != 24
-        || address < crate::arch::USER_WINDOW.0
-        || address >= crate::arch::USER_WINDOW.1
+    if length != 24 || address < crate::arch::USER_WINDOW.0 || address >= crate::arch::USER_WINDOW.1
     {
         return false;
     }
@@ -1182,12 +1175,8 @@ fn process_robust_list(process: ObjId, tid: u32, head: u64) -> usize {
                 let mut value = [0u8; 4];
                 if proc::read(process, address, &mut value).is_ok()
                     && u32::from_le_bytes(value) == tid
-                    && proc::write(
-                        process,
-                        address,
-                        &(tid | FUTEX_OWNER_DIED).to_le_bytes(),
-                    )
-                    .is_ok()
+                    && proc::write(process, address, &(tid | FUTEX_OWNER_DIED).to_le_bytes())
+                        .is_ok()
                 {
                     let _ = futex_wake(process, address, 1);
                     handled += 1;
@@ -1435,9 +1424,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::Lseek => compat_result(linux_lseek(pid, call.args)),
         LinuxSyscall::GetCpu => compat_result(linux_getcpu(call.args)),
         LinuxSyscall::Sysinfo => compat_result(linux_sysinfo(call.args[0])),
-        LinuxSyscall::SchedGetAffinity => {
-            compat_result(linux_sched_getaffinity(pid, call.args))
-        }
+        LinuxSyscall::SchedGetAffinity => compat_result(linux_sched_getaffinity(pid, call.args)),
         LinuxSyscall::SetTidAddress => set_clear_child_tid(pid, call.args[0])
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
@@ -1450,13 +1437,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
             }
         }
         LinuxSyscall::Rseq => {
-            if register_rseq(
-                pid,
-                call.args[0],
-                call.args[1],
-                call.args[2],
-                call.args[3],
-            ) {
+            if register_rseq(pid, call.args[0], call.args[1], call.args[2], call.args[3]) {
                 0
             } else {
                 -i64::from(CompatErrno::Invalid as i32)
@@ -1563,8 +1544,7 @@ fn linux_getdents64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Invalid);
     }
     let (handle, start) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::BadFd)?;
-    let directory = crate::linux_vfs::DirectoryId::from_handle(handle)
-        .ok_or(CompatErrno::BadFd)?;
+    let directory = crate::linux_vfs::DirectoryId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
     let children = crate::linux_vfs::directory_entries(directory);
     let count = 2usize
         .checked_add(children.len())
@@ -1585,7 +1565,11 @@ fn linux_getdents64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             (
                 entry.name,
                 entry.node.inode(),
-                if entry.node.is_directory() { DT_DIR } else { DT_REG },
+                if entry.node.is_directory() {
+                    DT_DIR
+                } else {
+                    DT_REG
+                },
             )
         };
         let record_len = align_up(
@@ -1601,10 +1585,8 @@ fn linux_getdents64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         let base = output.len();
         output.resize(base + record_len, 0);
         output[base..base + 8].copy_from_slice(&inode.to_le_bytes());
-        output[base + 8..base + 16]
-            .copy_from_slice(&((index + 1) as i64).to_le_bytes());
-        output[base + 16..base + 18]
-            .copy_from_slice(&(record_len as u16).to_le_bytes());
+        output[base + 8..base + 16].copy_from_slice(&((index + 1) as i64).to_le_bytes());
+        output[base + 16..base + 18].copy_from_slice(&(record_len as u16).to_le_bytes());
         output[base + 18] = kind;
         output[base + 19..base + 19 + name.len()].copy_from_slice(name);
         index += 1;
@@ -1648,9 +1630,9 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         authorize_console(pid, fd, false)?;
         return Ok(0);
     }
-    if proc::linux_fd(pid, fd).is_some_and(|entry| {
-        entry.kind == compat_core::fd::CompatKind::Directory
-    }) {
+    if proc::linux_fd(pid, fd)
+        .is_some_and(|entry| entry.kind == compat_core::fd::CompatKind::Directory)
+    {
         return Err(CompatErrno::IsDirectory);
     }
     let (handle, offset) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
@@ -1806,9 +1788,8 @@ fn linux_sysinfo(destination: u64) -> Result<u64, CompatErrno> {
     const SYSINFO_BYTES: usize = 112;
     const PAGE_BYTES: u64 = kernel_core::frame::FRAME_SIZE as u64;
 
-    let uptime_ns = crate::hrtime::now().unwrap_or_else(|| {
-        sched::timer_ticks().saturating_mul(crate::hrtime::tick_ns())
-    });
+    let uptime_ns = crate::hrtime::now()
+        .unwrap_or_else(|| sched::timer_ticks().saturating_mul(crate::hrtime::tick_ns()));
     let uptime = (uptime_ns / 1_000_000_000).min(i64::MAX as u64) as i64;
     let totalram = u64::try_from(crate::mm::frame::usable_frames())
         .map_err(|_| CompatErrno::NoMemory)?
@@ -1913,12 +1894,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     if args[3] & MAP_PRIVATE == 0
         || args[3]
-            & !(MAP_PRIVATE
-                | MAP_FIXED
-                | MAP_ANONYMOUS
-                | MAP_DENYWRITE
-                | MAP_NORESERVE
-                | MAP_STACK)
+            & !(MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS | MAP_DENYWRITE | MAP_NORESERVE | MAP_STACK)
             != 0
         || args[5] % PAGE != 0
     {
@@ -2134,15 +2110,7 @@ fn linux_clone(
     user_ip: Option<(u64, u64)>,
 ) -> Result<u64, CompatErrno> {
     linux_spawn_clone(
-        pid,
-        args[0],
-        args[1],
-        args[2],
-        args[3],
-        args[4],
-        user_ip,
-        args[2],
-        args[4],
+        pid, args[0], args[1], args[2], args[3], args[4], user_ip, args[2], args[4],
     )
 }
 
@@ -2368,9 +2336,7 @@ fn linux_getrandom(args: [u64; 6]) -> Result<u64, CompatErrno> {
     const GRND_INSECURE: u64 = 4;
     const MAX_RANDOM: usize = 1024 * 1024;
     let length = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
-    if length > MAX_RANDOM
-        || args[2] & !(GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE) != 0
-    {
+    if length > MAX_RANDOM || args[2] & !(GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE) != 0 {
         return Err(CompatErrno::Invalid);
     }
     if length == 0 {
@@ -2379,8 +2345,7 @@ fn linux_getrandom(args: [u64; 6]) -> Result<u64, CompatErrno> {
     let mut output = alloc::vec![0u8; length];
     let mut offset = 0usize;
     while offset < output.len() {
-        let value =
-            crate::arch::x86_64::hardware_random_u64().ok_or(CompatErrno::TryAgain)?;
+        let value = crate::arch::x86_64::hardware_random_u64().ok_or(CompatErrno::TryAgain)?;
         let bytes = value.to_le_bytes();
         let count = (output.len() - offset).min(bytes.len());
         output[offset..offset + count].copy_from_slice(&bytes[..count]);
@@ -2462,8 +2427,7 @@ fn linux_clock_nanosleep(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno>
     const CLOCK_MONOTONIC: u64 = 1;
     const TIMER_ABSTIME: u64 = 1;
     let absolute = args[1] & TIMER_ABSTIME != 0;
-    let supported_clock = args[0] == CLOCK_MONOTONIC
-        || (args[0] == CLOCK_REALTIME && !absolute);
+    let supported_clock = args[0] == CLOCK_MONOTONIC || (args[0] == CLOCK_REALTIME && !absolute);
     if !supported_clock || args[1] & !TIMER_ABSTIME != 0 {
         return Err(CompatErrno::Invalid);
     }
@@ -2554,9 +2518,6 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const O_CLOEXEC: u64 = 0x80000;
     const O_DIRECTORY: u64 = 0x10000;
     const O_NONBLOCK: u64 = 0x800;
-    if !is_at_fdcwd(args[0]) {
-        return Err(CompatErrno::Invalid);
-    }
     #[cfg(feature = "compat-dynamic-libc-verify")]
     trace_path_address(pid, "openat-address", args[1]);
     let flags = args[2];
@@ -2566,10 +2527,40 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let path = linux_c_string(args[1], 4096)?;
     #[cfg(feature = "compat-dynamic-libc-verify")]
     trace_path("openat", &path);
-    if !path.starts_with(b"/") {
-        return Err(CompatErrno::Invalid);
-    }
-    let node = crate::linux_vfs::lookup_node(&path).ok_or(CompatErrno::NoEntry)?;
+    let resolved = if path.starts_with(b"/") {
+        if !is_at_fdcwd(args[0]) {
+            return Err(CompatErrno::Invalid);
+        }
+        path
+    } else {
+        if path == b".."
+            || path.starts_with(b"../")
+            || path.windows(4).any(|window| window == b"/../")
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        let base = if is_at_fdcwd(args[0]) {
+            crate::linux_vfs::DirectoryId::Root.path()
+        } else {
+            let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+            let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
+            crate::linux_vfs::DirectoryId::from_handle(handle)
+                .ok_or(CompatErrno::BadFd)?
+                .path()
+        };
+        if path == b"." {
+            base.to_vec()
+        } else {
+            let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
+            resolved.extend_from_slice(base);
+            if !base.ends_with(b"/") {
+                resolved.push(b'/');
+            }
+            resolved.extend_from_slice(&path);
+            resolved
+        }
+    };
+    let node = crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)?;
     let close_on_exec = flags & O_CLOEXEC != 0;
     let fd = match node {
         crate::linux_vfs::Node::File(file) => {
@@ -2850,15 +2841,10 @@ fn linux_rt_sigprocmask(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
 ///
 /// 写入 144 字节、版本稳定的 x86_64 stat；时间和设备字段只表达当前虚拟快照，
 /// 不伪造宿主设备身份。
-fn write_linux_stat(
-    address: u64,
-    node: crate::linux_vfs::Node,
-) -> Result<(), CompatErrno> {
+fn write_linux_stat(address: u64, node: crate::linux_vfs::Node) -> Result<(), CompatErrno> {
     const STAT_BYTES: usize = 144;
     let (size, links, mode) = match node {
-        crate::linux_vfs::Node::File(file) => {
-            (file.bytes().len() as u64, 1u64, 0o100444u32)
-        }
+        crate::linux_vfs::Node::File(file) => (file.bytes().len() as u64, 1u64, 0o100444u32),
         crate::linux_vfs::Node::Directory(_) => (0u64, 2u64, 0o040555u32),
     };
     let mut stat = [0u8; STAT_BYTES];
