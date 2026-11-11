@@ -1414,6 +1414,15 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
             .unwrap_or_else(|error| -i64::from(error as i32)),
         LinuxSyscall::GetRandom => compat_result(linux_getrandom(call.args)),
         LinuxSyscall::Getcwd => compat_result(linux_getcwd(call.args)),
+        LinuxSyscall::GetUid | LinuxSyscall::GetEuid => {
+            compat_core::syscall::LINUX_COMPAT_UID as i64
+        }
+        LinuxSyscall::GetGid | LinuxSyscall::GetEgid => {
+            compat_core::syscall::LINUX_COMPAT_GID as i64
+        }
+        // The compatibility identity has no supplementary groups.
+        // 兼容身份没有附加组，因此 size 查询和写入都返回 0。
+        LinuxSyscall::GetGroups => 0,
         LinuxSyscall::SetTidAddress => set_clear_child_tid(pid, call.args[0])
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)

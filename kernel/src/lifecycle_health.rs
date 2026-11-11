@@ -616,6 +616,8 @@ fn execute_root_dynamic_programs(root: &Ext4Reader) -> Result<(), HealthError> {
     let dirname_argv: [&[u8]; 2] =
         [b"/usr/bin/dirname", b"/usr/lib/x86_64-linux-gnu/libc.so.6"];
     run_root_program(root, "/usr/bin/dirname", &dirname_argv)?;
+    let id_argv: [&[u8]; 2] = [b"/usr/bin/id", b"-u"];
+    run_root_program(root, "/usr/bin/id", &id_argv)?;
     let pwd_argv: [&[u8]; 1] = [b"/usr/bin/pwd"];
     run_root_program(root, "/usr/bin/pwd", &pwd_argv)?;
     let printf_argv: [&[u8]; 3] = [b"/usr/bin/printf", b"jasper-%s\n", b"dynamic"];

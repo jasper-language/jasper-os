@@ -4,7 +4,8 @@ use linux_raw_sys::general::{
     __NR_access, __NR_arch_prctl, __NR_brk, __NR_clock_gettime, __NR_clone, __NR_clone3,
     __NR_close, __NR_epoll_create1, __NR_epoll_ctl, __NR_epoll_pwait, __NR_epoll_pwait2,
     __NR_epoll_wait, __NR_execve, __NR_exit, __NR_exit_group, __NR_fcntl, __NR_fstat, __NR_futex,
-    __NR_getcwd, __NR_getpid, __NR_getppid, __NR_getrandom, __NR_gettid, __NR_io_uring_enter,
+    __NR_getcwd, __NR_getegid, __NR_geteuid, __NR_getgid, __NR_getgroups, __NR_getpid,
+    __NR_getppid, __NR_getrandom, __NR_gettid, __NR_getuid, __NR_io_uring_enter,
     __NR_io_uring_register, __NR_io_uring_setup, __NR_kill, __NR_madvise, __NR_mmap,
     __NR_mprotect, __NR_munmap, __NR_newfstatat, __NR_openat, __NR_poll, __NR_pread64,
     __NR_prlimit64, __NR_read, __NR_readlink, __NR_rseq, __NR_rt_sigaction, __NR_rt_sigprocmask,
@@ -15,6 +16,14 @@ use linux_raw_sys::general::{
 /// Linux x86_64 futex syscall number for restart policy.
 /// 用于重启策略的 Linux x86_64 futex syscall 编号。
 pub const LINUX_NR_FUTEX: u64 = __NR_futex as u64;
+
+/// Stable compatibility user identity until Jasper exposes Unix accounts.
+/// Jasper 暴露 Unix 账号模型前使用的稳定兼容用户身份。
+pub const LINUX_COMPAT_UID: u64 = 0;
+
+/// Stable compatibility primary group identity.
+/// 稳定的兼容主组身份。
+pub const LINUX_COMPAT_GID: u64 = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -49,6 +58,11 @@ pub enum LinuxSyscall {
     GetTid,
     GetRandom,
     Getcwd,
+    GetUid,
+    GetEuid,
+    GetGid,
+    GetEgid,
+    GetGroups,
     SetTidAddress,
     SetRobustList,
     Rseq,
@@ -195,6 +209,11 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_gettid) => LinuxSyscall::GetTid,
         value if value == u64::from(__NR_getrandom) => LinuxSyscall::GetRandom,
         value if value == u64::from(__NR_getcwd) => LinuxSyscall::Getcwd,
+        value if value == u64::from(__NR_getuid) => LinuxSyscall::GetUid,
+        value if value == u64::from(__NR_geteuid) => LinuxSyscall::GetEuid,
+        value if value == u64::from(__NR_getgid) => LinuxSyscall::GetGid,
+        value if value == u64::from(__NR_getegid) => LinuxSyscall::GetEgid,
+        value if value == u64::from(__NR_getgroups) => LinuxSyscall::GetGroups,
         value if value == u64::from(__NR_set_tid_address) => LinuxSyscall::SetTidAddress,
         value if value == u64::from(__NR_set_robust_list) => LinuxSyscall::SetRobustList,
         value if value == u64::from(__NR_rseq) => LinuxSyscall::Rseq,
@@ -265,6 +284,11 @@ mod tests {
             (__NR_gettid, LinuxSyscall::GetTid),
             (__NR_getrandom, LinuxSyscall::GetRandom),
             (__NR_getcwd, LinuxSyscall::Getcwd),
+            (__NR_getuid, LinuxSyscall::GetUid),
+            (__NR_geteuid, LinuxSyscall::GetEuid),
+            (__NR_getgid, LinuxSyscall::GetGid),
+            (__NR_getegid, LinuxSyscall::GetEgid),
+            (__NR_getgroups, LinuxSyscall::GetGroups),
             (__NR_futex, LinuxSyscall::Futex),
             (__NR_tgkill, LinuxSyscall::Tgkill),
             (__NR_rt_sigreturn, LinuxSyscall::RtSigReturn),
