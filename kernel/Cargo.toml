@@ -78,6 +78,8 @@ pex2-verify = []
 pex3-verify = []
 # Dedicated real-kernel heap growth and mapping-tail matrix.
 pex5-verify = []
+# Dedicated real-kernel frame allocation, cross-CPU release and reclaim matrix.
+pex7-verify = []
 # Dedicated SEC-1 identity and metadata substrate.
 sec1-verify = ["kernel-core/sec1-verify"]
 # Dedicated SEC-2 capability-lineage slice; full revocation/in-flight coverage

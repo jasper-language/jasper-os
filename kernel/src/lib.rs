@@ -161,6 +161,8 @@ pub mod pex0_demo;
 pub mod pex3_demo;
 #[cfg(feature = "pex5-verify")]
 pub mod pex5_demo;
+#[cfg(feature = "pex7-verify")]
+pub mod pex7_demo;
 pub mod balance_demo;
 pub mod pi_demo;
 pub mod sched;
