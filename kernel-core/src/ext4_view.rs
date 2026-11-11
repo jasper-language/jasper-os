@@ -170,6 +170,13 @@ impl Ext4Reader {
         self.fs.read(path).map_err(Ext4FsError::from_view)
     }
 
+    /// Read at most `dst.len()` leading bytes without allocating the entire file.
+    /// 最多读取文件开头的 `dst.len()` 字节，避免为大型用户态文件分配整块内存。
+    pub fn read_file_prefix(&self, path: &str, dst: &mut [u8]) -> Result<usize, Ext4FsError> {
+        let mut file = self.fs.open(path).map_err(Ext4FsError::from_view)?;
+        file.read_bytes(dst).map_err(Ext4FsError::from_view)
+    }
+
     /// Read a directory up to `max_entries`, failing atomically if the bound is
     /// exceeded.
     pub fn read_dir(
@@ -325,6 +332,9 @@ mod tests {
             fs.read_file("/dir/hello.txt", 4096).unwrap(),
             b"hello from Linux ext4\n"
         );
+        let mut prefix = [0u8; 5];
+        assert_eq!(fs.read_file_prefix("/dir/hello.txt", &mut prefix).unwrap(), 5);
+        assert_eq!(&prefix, b"hello");
         let metadata = fs.metadata("/dir/hello.txt").unwrap();
         assert_eq!(metadata.len, 22);
         assert!(!metadata.is_dir);

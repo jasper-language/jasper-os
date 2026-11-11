@@ -10,6 +10,8 @@ export PATH="${HOME}/.cargo/bin:${PATH}"
 OUT="${ISSUE21_AB_OUT:-$ROOT/evidence/issue21-ab-rollback-$(date '+%Y%m%d-%H%M%S')}"
 TARGET="${ISSUE21_AB_TARGET:-$ROOT/target/issue21-ab-rollback}"
 LIMIT="${ISSUE21_AB_TIMEOUT:-30}"
+ROOT_CORRUPT="${ISSUE21_AB_ROOT_CORRUPT:-0}"
+FAIL_REASON="${ISSUE21_AB_FAIL_REASON:-injected_failure}"
 TOTAL=38654705664
 mkdir "$OUT"
 mkdir -p "$TARGET"
@@ -24,10 +26,16 @@ rm -f -- "$IMAGE" "$UEFI_ESP" "$OVMF_VARS"
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none \
   -p jasper-kernel --features production,lifecycle-ab-health >"$OUT/kernel-a-build.log" 2>&1
 cp "$TARGET/x86_64-unknown-none/release/jasper-kernel" "$KERNEL_A"
-CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none \
-  -p jasper-kernel \
-  --features lifecycle-health-fail-verify \
-  >"$OUT/kernel-b-build.log" 2>&1
+if [ "$ROOT_CORRUPT" = 1 ]; then
+  CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none \
+    -p jasper-kernel --features production,lifecycle-ab-health \
+    >"$OUT/kernel-b-build.log" 2>&1
+else
+  CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none \
+    -p jasper-kernel \
+    --features lifecycle-health-fail-verify \
+    >"$OUT/kernel-b-build.log" 2>&1
+fi
 cp "$TARGET/x86_64-unknown-none/release/jasper-kernel" "$KERNEL_B"
 cargo build --locked --release -p xtask >"$OUT/xtask-build.log" 2>&1
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-uefi \
@@ -47,6 +55,21 @@ bash scripts/issue21-system-root-fixture.sh \
   "$IMAGE" "$TARGET" 1050624 A 1 >"$OUT/system-root-a.log" 2>&1
 bash scripts/issue21-system-root-fixture.sh \
   "$IMAGE" "$TARGET" 17827840 B 2 >"$OUT/system-root-b.log" 2>&1
+if [ "$ROOT_CORRUPT" = 1 ]; then
+  B_PARTITION="$TARGET/system-B.img"
+  BAD_BINARY="$TARGET/system-B-bad-true"
+  dd if="$IMAGE" of="$B_PARTITION" bs=512 skip=17827840 count=16777216 \
+    conv=sparse status=none
+  printf 'not-an-x86-64-linux-elf\n' >"$BAD_BINARY"
+  debugfs -w -R 'rm /bin/true' "$B_PARTITION" >"$OUT/root-corrupt.log" 2>&1
+  debugfs -w -R "write $BAD_BINARY /bin/true" "$B_PARTITION" >>"$OUT/root-corrupt.log" 2>&1
+  debugfs -w -R 'sif /bin/true mode 0100755' "$B_PARTITION" >>"$OUT/root-corrupt.log" 2>&1
+  e2fsck -fy "$B_PARTITION" >>"$OUT/root-corrupt.log" 2>&1
+  e2fsck -fn "$B_PARTITION" >>"$OUT/root-corrupt.log" 2>&1
+  dd if="$B_PARTITION" of="$IMAGE" bs=512 seek=17827840 \
+    conv=notrunc,sparse status=none
+  sync
+fi
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-init -- \
   "$IMAGE" "$TOTAL" "$KERNEL_A" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-stage -- \
@@ -85,7 +108,7 @@ run_boot() {
       "$run/serial.log"
     grep -aqE '^\[JSR-PROD\] alive ticks=[1-9][0-9]*' "$run/serial.log"
   else
-    grep -aq '^\[JSR-LIFE-HEALTH\] result=failed reason=injected_failure' \
+    grep -aq "^\\[JSR-LIFE-HEALTH\\] result=failed reason=$FAIL_REASON" \
       "$run/serial.log"
   fi
   ! grep -aqE '^\[JSR-(PANIC|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \

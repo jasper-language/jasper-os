@@ -35,6 +35,10 @@ const GPT_ENTRY_LBA: u64 = 2;
 const GPT_HEADER_BYTES: usize = 92;
 const GPT_ENTRY_BYTES: usize = 128;
 const GPT_REVISION: u32 = 0x0001_0000;
+const ELF_HEADER_BYTES: usize = 64;
+const ROOT_TEXT_FILE_BYTES: usize = 256;
+const ROOT_USERLAND_MANIFEST: &[u8] =
+    b"arch=x86_64\nabi=linux\nentry=/bin/true\ninterpreter=/lib64/ld-linux-x86-64.so.2\nlibrary=/usr/lib/x86_64-linux-gnu/libc.so.6\n";
 
 /// 健康门失败原因。
 /// Health-gate failure reason.
@@ -60,6 +64,13 @@ pub enum HealthError {
     RootFile,
     /// 系统根标识内容不符。The root marker content does not match.
     RootContent,
+    /// 系统发布描述不符。The system release description does not match.
+    RootRelease,
+    /// 用户态入口清单不符。The userland entry manifest does not match.
+    RootUserland,
+    /// 必需用户态 ELF 缺失、不可执行或不是 x86-64 Linux ELF。
+    /// A required userland ELF is missing, non-executable or not an x86-64 Linux ELF.
+    RootPayload,
     /// 两份控制记录不能恢复。The two control records cannot be recovered.
     Recovery(BootControlError),
     /// 健康状态机拒绝当前槽。The health state machine rejected the current slot.
@@ -84,6 +95,9 @@ impl HealthError {
             Self::RootLabel => "root_label",
             Self::RootFile => "root_file",
             Self::RootContent => "root_content",
+            Self::RootRelease => "root_release",
+            Self::RootUserland => "root_userland",
+            Self::RootPayload => "root_payload",
             Self::Recovery(_) => "recovery",
             Self::State(_) => "state",
             Self::Commit(_) => "commit",
@@ -354,7 +368,7 @@ fn validate_system_root(
         return Err(HealthError::RootLabel);
     }
     let marker = root
-        .read_file("/etc/jasper-root", 256)
+        .read_file("/etc/jasper-root", ROOT_TEXT_FILE_BYTES)
         .map_err(|_| HealthError::RootFile)?;
     let expected_slot = match slot {
         Slot::A => b'A',
@@ -366,6 +380,55 @@ fn validate_system_root(
     );
     if marker != expected_prefix.as_bytes() {
         return Err(HealthError::RootContent);
+    }
+    let expected_release = alloc::format!(
+        "name=Jasper-OS\nvariant=p0-x86_64-uefi-ab-v1\nrelease={release}\nschema=1\n"
+    );
+    let release_file = root
+        .read_file("/etc/jasper-release", ROOT_TEXT_FILE_BYTES)
+        .map_err(|_| HealthError::RootFile)?;
+    if release_file != expected_release.as_bytes() {
+        return Err(HealthError::RootRelease);
+    }
+    let userland = root
+        .read_file("/etc/jasper-userland", ROOT_TEXT_FILE_BYTES)
+        .map_err(|_| HealthError::RootFile)?;
+    if userland != ROOT_USERLAND_MANIFEST {
+        return Err(HealthError::RootUserland);
+    }
+    validate_elf_payload(&root, "/bin/true", true)?;
+    validate_elf_payload(&root, "/lib64/ld-linux-x86-64.so.2", true)?;
+    validate_elf_payload(&root, "/usr/lib/x86_64-linux-gnu/libc.so.6", false)?;
+    Ok(())
+}
+
+/// Validates the bounded metadata and ELF identity of a required userland payload.
+/// 校验必需用户态载荷的受限元数据和 ELF 身份。
+fn validate_elf_payload(
+    root: &Ext4Reader,
+    path: &str,
+    executable: bool,
+) -> Result<(), HealthError> {
+    let metadata = root.metadata(path).map_err(|_| HealthError::RootPayload)?;
+    if metadata.is_dir
+        || metadata.is_symlink
+        || metadata.len < ELF_HEADER_BYTES as u64
+        || (executable && metadata.mode & 0o111 == 0)
+    {
+        return Err(HealthError::RootPayload);
+    }
+    let mut header = [0u8; ELF_HEADER_BYTES];
+    if root
+        .read_file_prefix(path, &mut header)
+        .map_err(|_| HealthError::RootPayload)?
+        != ELF_HEADER_BYTES
+        || header[..4] != b"\x7fELF"[..]
+        || header[4] != 2
+        || header[5] != 1
+        || header[6] != 1
+        || u16::from_le_bytes([header[18], header[19]]) != 0x003e
+    {
+        return Err(HealthError::RootPayload);
     }
     Ok(())
 }
@@ -411,6 +474,11 @@ pub fn confirm_minimum_health() -> Result<(), HealthError> {
             .unwrap_or_else(|| current.active_slot());
         let release = current.slot(slot).release();
         validate_system_root(Arc::clone(&device), slot, release)?;
+        kprintln!(
+            "[JSR-LIFE-ROOT] slot={:?} release={} schema=1 userland=x86_64-linux-elf files=6",
+            slot,
+            release
+        );
         let mut next = current;
         next.report_health(slot, true).map_err(HealthError::State)?;
         let mut published = current;

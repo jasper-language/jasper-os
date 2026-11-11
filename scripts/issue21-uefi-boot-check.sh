@@ -77,6 +77,8 @@ grep -aq '^\[JSR-BOOT-STAGE\] done stage=user_runtime' "$OUT/serial.log"
 grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
 grep -aq '^\[JSR-PLAN\] finish plan=production stages=0xffff cases=2' "$OUT/serial.log"
 grep -aqE '^\[JSR-PROD\] alive ticks=[1-9][0-9]*' "$OUT/serial.log"
+grep -aq '^\[JSR-LIFE-ROOT\] slot=A release=1 schema=1 userland=x86_64-linux-elf files=6' \
+  "$OUT/serial.log"
 grep -aq '^\[JSR-LIFE-HEALTH\] result=confirmed slot=A generation=3 release=1 attempts=0 storage=virtio-blk' \
   "$OUT/serial.log"
 ! grep -aqE '^\[JSR-(PANIC|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
