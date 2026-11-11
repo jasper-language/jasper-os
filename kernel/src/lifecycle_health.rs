@@ -620,6 +620,10 @@ fn execute_root_dynamic_programs(root: &Ext4Reader) -> Result<(), HealthError> {
     run_root_program(root, "/usr/bin/id", &id_argv)?;
     let pwd_argv: [&[u8]; 1] = [b"/usr/bin/pwd"];
     run_root_program(root, "/usr/bin/pwd", &pwd_argv)?;
+    let nproc_argv: [&[u8]; 1] = [b"/usr/bin/nproc"];
+    run_root_program(root, "/usr/bin/nproc", &nproc_argv)?;
+    let sleep_argv: [&[u8]; 2] = [b"/usr/bin/sleep", b"0.05"];
+    run_root_program(root, "/usr/bin/sleep", &sleep_argv)?;
     let printf_argv: [&[u8]; 3] = [b"/usr/bin/printf", b"jasper-%s\n", b"dynamic"];
     run_root_program(root, "/usr/bin/printf", &printf_argv)?;
     let signal_argv: [&[u8]; 1] = [b"/usr/bin/jasper-signal-basic"];
