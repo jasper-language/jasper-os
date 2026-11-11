@@ -225,6 +225,30 @@ pub fn copy_to_user(dst: u64, src: &[u8], max: usize) -> Result<(), UserPtrError
     }
 }
 
+/// Copy separate kernel slices into several user ranges after pinning every range.
+/// 先固定全部目标用户区间，再复制各段；任一区间失败时一个字节也不写入。
+pub fn copy_to_user_vectored(ranges: &[(u64, &[u8])]) -> Result<(), UserPtrError> {
+    for (_, src) in ranges {
+        if src.len() > isize::MAX as usize {
+            return Err(UserPtrError::TooLong);
+        }
+    }
+    let Target::Process(pid) = current()? else {
+        return Err(UserPtrError::NotUserTask);
+    };
+    let mut pinned = alloc::vec::Vec::with_capacity(ranges.len());
+    for (dst, src) in ranges {
+        pinned.push(kobj::with(|t| pin_in(t, pid, *dst, src.len(), true))?);
+    }
+    race_window();
+    for (range, (_, src)) in pinned.iter().zip(ranges) {
+        if !range.write_at(0, src) {
+            return Err(UserPtrError::InvalidAddress);
+        }
+    }
+    Ok(())
+}
+
 /// 同 [`copy_to_user`]，供**已经持有对象表锁**的调用者使用：在 `t` 内校验、固定并复制，进程由调用者给出。
 /// Same as [`copy_to_user`] for callers that already hold the object-table lock.
 pub fn copy_to_user_in(t: &mut kobj::Table, pid: ObjId, dst: u64, src: &[u8], max: usize) -> Result<(), UserPtrError> {

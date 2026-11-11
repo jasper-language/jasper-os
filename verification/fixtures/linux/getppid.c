@@ -7,6 +7,7 @@
 #include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 int main(void) {
@@ -23,27 +24,45 @@ int main(void) {
         return 4;
     }
     unsigned char magic[4];
-    if (read(fd, magic, sizeof(magic)) != (ssize_t)sizeof(magic) ||
-        magic[0] != 0x7f || magic[1] != 'E' || magic[2] != 'L' || magic[3] != 'F') {
+    errno = 0;
+    if (readv(fd, (struct iovec *)1, 1) != -1 || errno != EFAULT ||
+        lseek(fd, 0, SEEK_CUR) != 0) {
         return 5;
     }
-    if (lseek(fd, -4, SEEK_END) != end - 4 ||
-        lseek(fd, 0, SEEK_CUR) != end - 4) {
+    struct iovec vectors[2] = {
+        {.iov_base = magic, .iov_len = 2},
+        {.iov_base = magic + 2, .iov_len = 2},
+    };
+    if (readv(fd, vectors, 2) != (ssize_t)sizeof(magic) ||
+        magic[0] != 0x7f || magic[1] != 'E' || magic[2] != 'L' || magic[3] != 'F') {
         return 6;
     }
     errno = 0;
-    if (lseek(STDOUT_FILENO, 0, SEEK_CUR) != -1 || errno != ESPIPE) {
+    if (readv(-1, vectors, 2) != -1 || errno != EBADF) {
         return 7;
+    }
+    struct iovec too_many[17] = {0};
+    errno = 0;
+    if (readv(fd, too_many, 17) != -1 || errno != EINVAL) {
+        return 8;
+    }
+    if (lseek(fd, -4, SEEK_END) != end - 4 ||
+        lseek(fd, 0, SEEK_CUR) != end - 4) {
+        return 9;
+    }
+    errno = 0;
+    if (lseek(STDOUT_FILENO, 0, SEEK_CUR) != -1 || errno != ESPIPE) {
+        return 10;
     }
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
     if (sched_getaffinity(0, sizeof(cpus), &cpus) != 0 ||
         CPU_COUNT(&cpus) < 1 || !CPU_ISSET(0, &cpus)) {
-        return 8;
+        return 11;
     }
     errno = 0;
     if (sched_getaffinity(0, 1, &cpus) != -1 || errno != EINVAL) {
-        return 9;
+        return 12;
     }
     close(fd);
     printf("jasper-ppid=%d lseek=%lld affinity=%d\n",

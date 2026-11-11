@@ -15,7 +15,9 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use kernel_core::objtable::ObjId;
 use kernel_core::paging::MapFlags;
 
-use crate::mm::user::{copy_from_user, copy_to_user};
+use crate::mm::user::{
+    copy_from_user, copy_to_user, copy_to_user_vectored, UserPtrError,
+};
 use crate::sync::IrqSpinLock;
 use crate::syscall::{SyscallArgs, SyscallOutcome, UserReturn, CONSOLE_WRITE_MAX};
 use crate::{console, proc, sched};
@@ -1376,6 +1378,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::WriteV => compat_result(linux_writev(pid, call.args)),
         LinuxSyscall::Read => compat_result(linux_read(pid, call.args)),
         LinuxSyscall::Pread64 => compat_result(linux_pread64(pid, call.args)),
+        LinuxSyscall::ReadV => compat_result(linux_readv(pid, call.args)),
         LinuxSyscall::Close => compat_result(linux_close(pid, call.args[0])),
         LinuxSyscall::OpenAt => compat_result(linux_openat(pid, call.args)),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
@@ -1602,6 +1605,72 @@ fn linux_pread64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if available != 0 {
         copy_to_user(args[1], &source[offset..offset + available], available)
             .map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(available as u64)
+}
+
+/// Implements bounded Linux `readv(2)` with all-or-nothing user-range validation.
+///
+/// 有界读取虚拟文件到多个用户区间；先固定全部目标页，失败时不写入且不推进游标。
+fn linux_readv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MAX_IOVECS: usize = 16;
+    const MAX_READ: usize = 1024 * 1024;
+    const IOVEC_BYTES: usize = 16;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if count > MAX_IOVECS {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut vectors = alloc::vec::Vec::with_capacity(count);
+    let mut total = 0usize;
+    for index in 0..count {
+        let address = args[1]
+            .checked_add((index * IOVEC_BYTES) as u64)
+            .ok_or(CompatErrno::Fault)?;
+        let mut iovec = [0u8; IOVEC_BYTES];
+        copy_from_user(&mut iovec, address, IOVEC_BYTES).map_err(|_| CompatErrno::Fault)?;
+        let base = u64::from_le_bytes(iovec[..8].try_into().unwrap());
+        let len = usize::try_from(u64::from_le_bytes(iovec[8..].try_into().unwrap()))
+            .map_err(|_| CompatErrno::Invalid)?;
+        base.checked_add(u64::try_from(len).map_err(|_| CompatErrno::Invalid)?)
+            .ok_or(CompatErrno::Fault)?;
+        total = total.checked_add(len).ok_or(CompatErrno::Invalid)?;
+        if total > MAX_READ {
+            return Err(CompatErrno::Invalid);
+        }
+        vectors.push((base, len));
+    }
+    if fd == 0 {
+        authorize_console(pid, fd, false)?;
+        return Ok(0);
+    }
+    let (handle, offset) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let file = crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
+    let source = file.bytes();
+    let offset = usize::try_from(offset).map_err(|_| CompatErrno::Invalid)?;
+    let available = source.len().saturating_sub(offset).min(total);
+    let mut source_offset = offset;
+    let mut remaining = available;
+    let mut ranges = alloc::vec::Vec::with_capacity(vectors.len());
+    for (base, len) in vectors {
+        let take = remaining.min(len);
+        if take != 0 {
+            ranges.push((base, &source[source_offset..source_offset + take]));
+            source_offset += take;
+            remaining -= take;
+        }
+        if remaining == 0 {
+            break;
+        }
+    }
+    if !ranges.is_empty() {
+        copy_to_user_vectored(&ranges).map_err(|error| match error {
+            UserPtrError::Quota | UserPtrError::OutOfMemory => CompatErrno::NoMemory,
+            _ => CompatErrno::Fault,
+        })?;
+    }
+    if !proc::set_linux_file_offset(pid, fd, (offset + available) as u64) {
+        return Err(CompatErrno::BadFd);
     }
     Ok(available as u64)
 }
