@@ -13,7 +13,7 @@ TIMEOUT="${COMPAT_SIGNAL_TIMEOUT:-180}"
 CPUS="${COMPAT_SIGNAL_CPUS:-1}"
 mkdir -p "$OUT" "$TARGET"
 
-gcc -O2 -pthread -fno-stack-protector \
+gcc -O2 -mavx -pthread -fno-stack-protector \
   verification/fixtures/linux/signal_basic.c \
   -o "$TARGET/signal-basic" >"$OUT/fixture-build.log" 2>&1
 export JSR_UBUNTU_SIGNAL="$TARGET/signal-basic"

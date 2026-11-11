@@ -128,9 +128,9 @@ impl Platform for X86_64 {
         gdt::init();
         crate::console::write_str("[JSR-GDT] ok\n");
         idt::init();
-        enable_sse();
+        let xsave = enable_sse();
         crate::console::write_str("[JSR-IDT] ok\n");
-        syscall::init(0);
+        syscall::init(0, xsave);
     }
 
     fn timer_stretch(ticks: u32) -> bool {
@@ -394,11 +394,12 @@ impl Platform for X86_64 {
 
 /// 启用 x86_64 基线的 x87/SSE 用户状态。
 /// Enables the x87/SSE state required by x86_64 Linux user space.
-pub(super) fn enable_sse() {
+pub(super) fn enable_sse() -> bool {
     const CR0_EM: u64 = 1 << 2;
     const CR0_TS: u64 = 1 << 3;
     const CR4_OSFXSR: u64 = 1 << 9;
     const CR4_OSXMMEXCPT: u64 = 1 << 10;
+    const CR4_OSXSAVE: u64 = 1 << 18;
     // SAFETY: called on the bootstrap processor and every AP before user execution. x86_64
     // guarantees SSE2/FXSAVE; each CPU must independently clear CR0.EM/TS and set CR4.OSFXSR.
     unsafe {
@@ -411,6 +412,45 @@ pub(super) fn enable_sse() {
         cr4 |= CR4_OSFXSR | CR4_OSXMMEXCPT;
         core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
     }
+    let cpu = core::arch::x86_64::__cpuid(1);
+    let xsave_leaf = core::arch::x86_64::__cpuid_count(0xD, 0);
+    let xsave = cpu.ecx & (1 << 26) != 0;
+    let avx = cpu.ecx & (1 << 28) != 0 && xsave_leaf.eax & 4 != 0;
+    if !xsave {
+        return false;
+    }
+    let avx_size = if avx {
+        core::arch::x86_64::__cpuid_count(0xD, 2).eax as usize
+    } else {
+        0
+    };
+    let use_xsave = avx && avx_size <= crate::syscall::XSAVE_BYTES;
+    unsafe {
+        let mut cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+        cr4 |= CR4_OSXSAVE;
+        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
+        // Do not expose AVX state through XCR0 unless the syscall entry can
+        // preserve the complete area within its fixed kernel-stack buffer.
+        // 只有 syscall 入口能在固定内核栈缓冲区内完整保存时，才通过 XCR0
+        // 向用户态暴露 AVX 状态。
+        let xcr0 = 0x3u64 | if use_xsave { 0x4 } else { 0 };
+        core::arch::asm!(
+            "xsetbv",
+            in("ecx") 0u32,
+            in("eax") xcr0 as u32,
+            in("edx") (xcr0 >> 32) as u32,
+            options(nostack)
+        );
+    }
+    crate::kprintln!(
+        "[JSR-XSAVE] enabled={} avx={} avx_size={} capacity={}",
+        use_xsave,
+        avx,
+        avx_size,
+        crate::syscall::XSAVE_BYTES
+    );
+    use_xsave
 }
 
 /// Poll the exclusively owned test UART between soak rounds.

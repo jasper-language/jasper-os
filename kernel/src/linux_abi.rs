@@ -630,7 +630,7 @@ fn current_signal_pending(process: ObjId) -> bool {
             .is_some_and(|entry| entry.pending & !thread.signal_mask != 0)
 }
 
-const SIGNAL_FRAME_BYTES: usize = 8 + 968 + 128 + 512;
+const SIGNAL_FRAME_BYTES: usize = 8 + 968 + 128 + crate::syscall::XSAVE_BYTES;
 const SIGNAL_UC_OFFSET: usize = 8;
 const SIGNAL_UC_GREGS: usize = 40;
 const SIGNAL_UC_SIGMASK: usize = 296;
@@ -654,18 +654,19 @@ fn user_register(register: u64) -> bool {
     register < window.1 && last >= window.0
 }
 
-/// Copies the kernel-owned syscall FXSAVE image into a signal frame.
-/// 把 syscall 入口保存的内核侧 FXSAVE 映像复制到信号帧。
+/// Copies the kernel-owned syscall FP state image into a signal frame.
+/// 把 syscall 入口保存的内核侧浮点状态映像复制到信号帧。
 fn copy_fxstate_to_frame(args: &SyscallArgs, frame: &mut [u8]) -> bool {
     let Some(source) = args.fxstate else {
         return false;
     };
     let Some(destination) = frame.get_mut(
-        SIGNAL_FPSTATE_OFFSET..SIGNAL_FPSTATE_OFFSET.saturating_add(512),
+        SIGNAL_FPSTATE_OFFSET
+            ..SIGNAL_FPSTATE_OFFSET.saturating_add(crate::syscall::XSAVE_BYTES),
     ) else {
         return false;
     };
-    // SAFETY: the x86_64 syscall entry owns this 512-byte aligned image for the
+    // SAFETY: the x86_64 syscall entry owns this aligned XSAVE image for the
     // duration of dispatch; the frame destination is a separate fixed buffer.
     destination.copy_from_slice(unsafe { &*source });
     true
@@ -981,17 +982,17 @@ fn linux_rt_sigreturn(
     );
     if fpstate_address < crate::arch::USER_WINDOW.0
         || fpstate_address
-            .checked_add(512)
+            .checked_add(crate::syscall::XSAVE_BYTES as u64)
             .is_none_or(|end| end > crate::arch::USER_WINDOW.1)
     {
         return Err(CompatErrno::Fault);
     }
-    let mut fxstate = [0u8; 512];
+    let mut fxstate = [0u8; crate::syscall::XSAVE_BYTES];
     proc::read(process, fpstate_address, &mut fxstate).map_err(|_| CompatErrno::Fault)?;
     let Some(destination) = args.fxstate else {
         return Err(CompatErrno::Fault);
     };
-    // SAFETY: the syscall entry owns this aligned FXSAVE buffer until return;
+    // SAFETY: the syscall entry owns this aligned FP state buffer until return;
     // rt_sigreturn can replace it with the validated userspace signal state.
     unsafe {
         *destination = fxstate;

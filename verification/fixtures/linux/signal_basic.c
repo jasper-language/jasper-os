@@ -113,10 +113,16 @@ static void fpu_handler(int signal, siginfo_t *info, void *context) {
         info->si_pid != getpid() || context == 0) {
         _exit(30);
     }
-    const uint64_t clobber = 0xf00df00df00df00dULL;
+    const uint64_t clobber[4] = {
+        0xf00df00df00df00dULL,
+        0xfeedfacefeedfaceULL,
+        0x1111222233334444ULL,
+        0xaaaabbbbccccddddULL,
+    };
     __asm__ volatile(
-        "movq %[value], %%xmm0\n"
-        "movq %[value], %%xmm1\n"
+        "vmovdqu (%[value]), %%ymm0\n"
+        "vmovdqu (%[value]), %%ymm1\n"
+        "vzeroupper\n"
         :
         : [value] "r"(clobber)
         : "xmm0", "xmm1");
@@ -264,20 +270,26 @@ int main(void) {
         return 5;
     }
 
-    const uint64_t fpu_magic = 0x123456789abcdef0ULL;
-    uint64_t fpu_after;
+    const uint64_t fpu_magic[4] = {
+        0x123456789abcdef0ULL,
+        0x0fedcba987654321ULL,
+        0x55aaaa55deadbeefULL,
+        0xa55aa55afeedc0deULL,
+    };
+    uint64_t fpu_after[4] = {0, 0, 0, 0};
     const int tgid = getpid();
     const int tid = syscall(SYS_gettid);
     __asm__ volatile(
-        "movq %[value], %%xmm0\n"
+        "vmovdqu (%[value]), %%ymm0\n"
         "movl $234, %%eax\n"
         "syscall\n"
-        "movq %%xmm0, %[after]\n"
-        : [after] "=r"(fpu_after)
-        : [value] "r"(fpu_magic), "D"((long)tgid), "S"((long)tid),
+        "vmovdqu %%ymm0, (%[after])\n"
+        "vzeroupper\n"
+        :
+        : [after] "r"(fpu_after), [value] "r"(fpu_magic), "D"((long)tgid), "S"((long)tid),
           "d"((long)SIGVTALRM)
         : "rax", "rcx", "r11", "xmm0", "memory");
-    if (fpu_after != fpu_magic || fpu_count != 1) {
+    if (memcmp(fpu_after, fpu_magic, sizeof(fpu_magic)) != 0 || fpu_count != 1) {
         return 31;
     }
     static const char fpu_message[] = "jasper-fpu-ok\n";

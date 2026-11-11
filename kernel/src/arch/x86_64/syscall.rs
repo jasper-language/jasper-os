@@ -25,7 +25,7 @@ use kernel_core::smp::MAX_CPUS;
 use x86_64::registers::model_specific::{Efer, EferFlags, Msr};
 
 use crate::fault::{self, UserFault, UserFaultKind};
-use crate::syscall::{self, SyscallArgs};
+use crate::syscall::{self, SyscallArgs, XSAVE_BYTES};
 
 /// 每核系统调用入口块（字段偏移必须与下方汇编一致）。
 #[repr(C, align(64))]
@@ -36,6 +36,12 @@ struct EntryBlock {
     user_rsp: AtomicU64,
     /// 偏移 16：返回 RIP 暂存位，只用于 FXSAVE 帧恢复后换回用户栈。
     return_rip: AtomicU64,
+    /// 偏移 24：该 CPU 是否启用了 AVX 所需的 XSAVE/XCR0。
+    xsave: AtomicU64,
+    /// 偏移 32：设置 XSAVE 状态掩码时暂存的用户 RAX。
+    scratch_rax: AtomicU64,
+    /// 偏移 40：设置 XSAVE 状态掩码时暂存的用户 RDX。
+    scratch_rdx: AtomicU64,
 }
 
 /// 全部处理器的入口块（下标 = 逻辑下标）。
@@ -45,6 +51,9 @@ static BLOCKS: [EntryBlock; MAX_CPUS] =
             kstack: AtomicU64::new(0),
             user_rsp: AtomicU64::new(0),
             return_rip: AtomicU64::new(0),
+            xsave: AtomicU64::new(0),
+            scratch_rax: AtomicU64::new(0),
+            scratch_rdx: AtomicU64::new(0),
         }
     }; MAX_CPUS];
 
@@ -61,7 +70,7 @@ pub struct RawFrame {
     r11: u64,
     rcx: u64,
     user_rsp: u64,
-    fxstate: [u8; 512],
+    fxstate: [u8; XSAVE_BYTES],
 }
 
 const MSR_STAR: u32 = 0xC000_0081;
@@ -80,9 +89,28 @@ jsr_syscall_entry:
     swapgs
     mov qword ptr gs:[8], rsp
     mov rsp, qword ptr gs:[0]
-    sub rsp, 512
-    and rsp, -16
+    sub rsp, {xsave_bytes}
+    and rsp, -64
+    cmp qword ptr gs:[24], 0
+    je 1f
+    mov qword ptr gs:[32], rax
+    mov qword ptr gs:[40], rdx
+    // XSAVE preserves XSTATE_BV bits outside the requested mask.  Clear the
+    // standard header so stale kernel-stack data cannot poison XRSTOR.
+    // XSAVE 会保留请求掩码之外的 XSTATE_BV 位；先清零标准头部，避免复用的
+    // 内核栈旧数据使 XRSTOR 拒绝恢复。
+    mov qword ptr [rsp + 512], 0
+    mov qword ptr [rsp + 520], 0
+    mov qword ptr [rsp + 528], 0
+    mov eax, 7
+    xor edx, edx
+    xsave64 [rsp]
+    mov rax, qword ptr gs:[32]
+    mov rdx, qword ptr gs:[40]
+    jmp 2f
+1:
     fxsave64 [rsp]
+2:
     push qword ptr gs:[8]
     swapgs
     push rcx
@@ -106,15 +134,28 @@ jsr_syscall_entry:
     pop r9
     pop r11
     pop rcx
-    fxrstor64 [rsp + 8]
     swapgs
     mov qword ptr gs:[16], rcx
+    cmp qword ptr gs:[24], 0
+    je 3f
+    mov qword ptr gs:[32], rax
+    mov qword ptr gs:[40], rdx
+    mov eax, 7
+    xor edx, edx
+    xrstor64 [rsp + 8]
+    mov rax, qword ptr gs:[32]
+    mov rdx, qword ptr gs:[40]
+    jmp 4f
+3:
+    fxrstor64 [rsp + 8]
+4:
     mov rcx, qword ptr [rsp]
     mov rsp, rcx
     mov rcx, qword ptr gs:[16]
     swapgs
     sysretq
-    "#
+    "#,
+    xsave_bytes = const XSAVE_BYTES,
 );
 
 /// 汇编入口调用的 Rust 分发桥：整理参数 → Core 分发 → 返回前做 RIP 规范性检查。
@@ -153,8 +194,10 @@ extern "C" fn jsr_syscall_dispatch(frame: &mut RawFrame) -> u64 {
 /// STAR：进入时 CS = 内核代码段（0x08），SS = 其后的内核数据段；
 /// 返回时 CS = 基址 0x10 + 16 = 用户代码段（0x20|3），SS = 0x10 + 8 = 用户数据段（0x18|3）。
 /// 这正是 gdt.rs 中「用户数据段排在用户代码段之前」的原因。
-pub fn init(index: usize) {
-    let block = &BLOCKS[index.min(MAX_CPUS - 1)] as *const EntryBlock as u64;
+pub fn init(index: usize, xsave: bool) {
+    let block_ref = &BLOCKS[index.min(MAX_CPUS - 1)];
+    block_ref.xsave.store(u64::from(xsave), Ordering::Relaxed);
+    let block = block_ref as *const EntryBlock as u64;
     let sel = super::gdt::selectors();
     let kernel_cs = sel.kernel_code.0 as u64;
     let sysret_base = (sel.user_data.0 as u64 & !3) - 8;

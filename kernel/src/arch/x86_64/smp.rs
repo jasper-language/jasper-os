@@ -246,8 +246,8 @@ extern "C" fn ap_entry(index: u64) -> ! {
     idt::load();
     // AP 以自己的 CR0/CR4 状态启动，不继承 BSP 的 OSFXSR 设置。
     // APs reset with their own CR0/CR4 state; they do not inherit the BSP OSFXSR setup.
-    super::enable_sse();
-    syscall::init(index);
+    let xsave = super::enable_sse();
+    syscall::init(index, xsave);
     apic::enable_local(false);
     apic::start_periodic(AP_TIMER_HZ.load(Ordering::Relaxed));
     crate::smp::secondary_main(index)
