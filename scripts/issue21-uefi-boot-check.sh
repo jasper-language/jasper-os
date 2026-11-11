@@ -158,6 +158,8 @@ if [ "$MODE" = root-exec ]; then
     "$OUT/serial.log"
   grep -aqE $'^/lib\r?$' "$OUT/serial.log"
   grep -aqE $'^/usr\r?$' "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/ls path=/usr/bin/ls interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
+    "$OUT/serial.log"
   grep -aqE $'^jasper-random-ok bytes=32\r?$' "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=bin/dash path=/bin/dash interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
     "$OUT/serial.log"

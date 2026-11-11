@@ -633,6 +633,8 @@ fn execute_root_dynamic_programs(root: &Ext4Reader) -> Result<(), HealthError> {
         b"1",
     ];
     run_root_program(root, "/usr/bin/find", &find_argv)?;
+    let ls_argv: [&[u8]; 3] = [b"/usr/bin/ls", b"-1", b"/"];
+    run_root_program(root, "/usr/bin/ls", &ls_argv)?;
     let dash_argv: [&[u8]; 3] = [
         b"/bin/dash",
         b"-c",
