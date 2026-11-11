@@ -1,0 +1,35 @@
+schema = 1
+stage = "PEX-4"
+status = "done"
+updated = "2026-11-12"
+evidence = "evidence/pex4-main-2548998-20261112-001800/pex4-matrix.json; evidence/pex4-main-2548998-20261112-001800/environment.json; host KVM CPU 4-11, 1/2/4/8 vCPU x 3 rounds x low/medium/high"
+
+[[acceptance]]
+id = "selection-instrumentation"
+statement = "Every completed scheduler selection records the real run-list traversal and policy-consumed candidate count without adding a new cross-core lock."
+state = "passed"
+evidence = "kernel/src/sched/scheduler.rs pex4_probe::record; kernel/src/sched/pex4_probe.rs"
+
+[[acceptance]]
+id = "candidate-density"
+statement = "The matrix reports average visited entries, candidate density and per-selection maxima for low, medium and high task density."
+state = "passed"
+evidence = "kernel/src/pex4_demo.rs JSR-PEX4 fields; scripts/pex4-matrix.py"
+
+[[acceptance]]
+id = "latency-tail"
+statement = "Selection duration retains p50, p99, p99.9 and maximum cycle samples with bounded per-CPU storage and explicit drop accounting."
+state = "passed"
+evidence = "kernel/src/sched/pex4_probe.rs Snapshot and copy_samples"
+
+[[acceptance]]
+id = "capacity-saturation"
+statement = "The standard profile's boot-reserved slot is excluded; the 8-vCPU high workload saturates all 63 available worker slots instead of submitting an impossible 64th worker."
+state = "passed"
+evidence = "kernel/src/pex4_demo.rs capacity_workers; evidence matrix capacity_workers=63 and tasks=63"
+
+[[acceptance]]
+id = "kvm-matrix"
+statement = "A complete host-KVM matrix covers 1/2/4/8 vCPU, three rounds and three densities with no dropped samples and QEMU exit 33 for every run."
+state = "passed"
+evidence = "evidence/pex4-main-2548998-20261112-001800/pex4-matrix.json coverage.complete=true"
