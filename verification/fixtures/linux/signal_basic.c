@@ -29,6 +29,8 @@ static volatile sig_atomic_t restart_worker_tid;
 static volatile sig_atomic_t restart_worker_ready;
 static volatile sig_atomic_t restart_worker_signal;
 static int restart_futex_word;
+static volatile sig_atomic_t alarm_count;
+static volatile sig_atomic_t term_count;
 
 static void usr2_handler(int signal, siginfo_t *info, void *context) {
     (void)context;
@@ -71,6 +73,25 @@ static void usr1_handler(int signal, siginfo_t *info, void *context) {
         }
         nested_ok = usr2_count == 1;
     }
+}
+
+static void alarm_handler(int signal, siginfo_t *info, void *context) {
+    if (signal != SIGALRM || info == 0 || info->si_signo != signal ||
+        info->si_pid != getpid() || context == 0) {
+        _exit(17);
+    }
+    alarm_count++;
+    if (alarm_count == 1 && raise(SIGALRM) != 0) {
+        _exit(18);
+    }
+}
+
+static void term_handler(int signal, siginfo_t *info, void *context) {
+    if (signal != SIGTERM || info == 0 || info->si_signo != signal ||
+        info->si_pid != getpid() || context == 0) {
+        _exit(19);
+    }
+    term_count++;
 }
 
 static void *blocked_worker(void *argument) {
@@ -141,7 +162,9 @@ static int install_handler_flags(int signal, void (*handler)(int, siginfo_t *, v
 
 int main(void) {
     if (install_handler_flags(SIGUSR1, usr1_handler, SA_SIGINFO) != 0 ||
-        install_handler_flags(SIGUSR2, usr2_handler, SA_SIGINFO | SA_RESTART) != 0) {
+        install_handler_flags(SIGUSR2, usr2_handler, SA_SIGINFO | SA_RESTART) != 0 ||
+        install_handler_flags(SIGALRM, alarm_handler, SA_SIGINFO | SA_NODEFER) != 0 ||
+        install_handler_flags(SIGTERM, term_handler, SA_SIGINFO | SA_RESETHAND) != 0) {
         return 1;
     }
     if (raise(SIGUSR1) != 0 || usr1_count != 1 || usr2_count != 1 || !nested_ok) {
@@ -160,6 +183,24 @@ int main(void) {
     }
     if (sigprocmask(SIG_SETMASK, &old, 0) != 0 || usr1_count != 2) {
         return 5;
+    }
+
+    if (raise(SIGALRM) != 0 || alarm_count != 2) {
+        return 17;
+    }
+    struct sigaction alarm_action;
+    if (sigaction(SIGALRM, 0, &alarm_action) != 0 ||
+        alarm_action.sa_sigaction != alarm_handler) {
+        return 18;
+    }
+
+    if (raise(SIGTERM) != 0 || term_count != 1) {
+        return 19;
+    }
+    struct sigaction term_action;
+    if (sigaction(SIGTERM, 0, &term_action) != 0 ||
+        term_action.sa_handler != SIG_DFL) {
+        return 20;
     }
 
     pthread_t blocked_thread;

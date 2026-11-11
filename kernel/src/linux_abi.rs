@@ -381,6 +381,8 @@ fn build_signal_frame(
     const SA_SIGINFO: u64 = 0x0000_0004;
     const SA_RESTORER: u64 = 0x0400_0000;
     const SA_RESTART: u64 = 0x1000_0000;
+    const SA_NODEFER: u64 = 0x4000_0000;
+    const SA_RESETHAND: u64 = 0x8000_0000;
     const SIG_DFL: u64 = 0;
     const SIG_IGN: u64 = 1;
     let action = proc::linux_signal_action(process, signal).ok_or(CompatErrno::Invalid)?;
@@ -392,7 +394,7 @@ fn build_signal_frame(
         let _ = proc::begin_exit(process, 128 + i64::from(signal));
         return Err(CompatErrno::Interrupted);
     }
-    if action[1] & !(SA_SIGINFO | SA_RESTORER | SA_RESTART) != 0
+    if action[1] & !(SA_SIGINFO | SA_RESTORER | SA_RESTART | SA_NODEFER | SA_RESETHAND) != 0
         || !user_register(handler)
         || !user_register(action[2])
         || !user_register(user_ip.0)
@@ -458,8 +460,18 @@ fn build_signal_frame(
         SIGNAL_INFO_OFFSET + 16,
         u64::from(proc::linux_pid(process).ok_or(CompatErrno::NoProcess)?),
     );
-    let handler_mask = old_mask | action[3] | (1u64 << (signal - 1));
+    let nodefer = action[1] & (SA_NODEFER | SA_RESETHAND) != 0;
+    let reset_hand = action[1] & SA_RESETHAND != 0;
+    let handler_mask = if nodefer {
+        old_mask | action[3]
+    } else {
+        old_mask | action[3] | (1u64 << (signal - 1))
+    };
     if !set_current_signal_mask(process, handler_mask) {
+        return Err(CompatErrno::Invalid);
+    }
+    if reset_hand && !proc::set_linux_signal_action(process, signal, [0; 4]) {
+        let _ = set_current_signal_mask(process, old_mask);
         return Err(CompatErrno::Invalid);
     }
     if proc::write(process, frame_address, &frame).is_err() {
@@ -467,11 +479,13 @@ fn build_signal_frame(
         return Err(CompatErrno::Fault);
     }
     crate::kprintln!(
-        "[JSR-LINUX-SIGNAL] delivered tid={} signal={} interrupted_result={} restart_futex={} handler={:#x} frame={:#x} info={:#x} context={:#x}",
+        "[JSR-LINUX-SIGNAL] delivered tid={} signal={} interrupted_result={} restart_futex={} nodefer={} reset_hand={} handler={:#x} frame={:#x} info={:#x} context={:#x}",
         linux_tid(process).unwrap_or(0),
         signal,
         interrupted_result,
         restart_futex,
+        nodefer,
+        reset_hand,
         handler,
         frame_address,
         info_address,
