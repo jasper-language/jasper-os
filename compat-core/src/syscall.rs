@@ -8,7 +8,8 @@ use linux_raw_sys::general::{
     __NR_getppid, __NR_getrandom, __NR_gettid, __NR_getuid, __NR_io_uring_enter,
     __NR_io_uring_register, __NR_io_uring_setup, __NR_kill, __NR_madvise, __NR_mmap,
     __NR_lseek, __NR_mprotect, __NR_munmap, __NR_newfstatat, __NR_openat, __NR_poll, __NR_pread64,
-    __NR_prlimit64, __NR_read, __NR_readlink, __NR_rseq, __NR_rt_sigaction, __NR_rt_sigprocmask,
+    __NR_prlimit64, __NR_read, __NR_readlink, __NR_readv, __NR_rseq, __NR_rt_sigaction,
+    __NR_rt_sigprocmask,
     __NR_rt_sigreturn, __NR_sched_getaffinity, __NR_sched_yield, __NR_set_robust_list,
     __NR_set_tid_address,
     __NR_sigaltstack, __NR_statfs, __NR_tgkill, __NR_uname, __NR_write, __NR_writev,
@@ -60,6 +61,7 @@ pub fn seek_target(current: u64, size: u64, offset: i64, whence: u64) -> Option<
 pub enum LinuxSyscall {
     Read,
     Pread64,
+    ReadV,
     Write,
     WriteV,
     Close,
@@ -216,6 +218,7 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
     let syscall = match request.number {
         value if value == u64::from(__NR_read) => LinuxSyscall::Read,
         value if value == u64::from(__NR_pread64) => LinuxSyscall::Pread64,
+        value if value == u64::from(__NR_readv) => LinuxSyscall::ReadV,
         value if value == u64::from(__NR_write) => LinuxSyscall::Write,
         value if value == u64::from(__NR_writev) => LinuxSyscall::WriteV,
         value if value == u64::from(__NR_close) => LinuxSyscall::Close,
@@ -297,6 +300,7 @@ mod tests {
         let expected = [
             (__NR_read, LinuxSyscall::Read),
             (__NR_pread64, LinuxSyscall::Pread64),
+            (__NR_readv, LinuxSyscall::ReadV),
             (__NR_write, LinuxSyscall::Write),
             (__NR_writev, LinuxSyscall::WriteV),
             (__NR_close, LinuxSyscall::Close),
