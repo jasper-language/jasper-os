@@ -12,6 +12,10 @@
 #include <ucontext.h>
 #include <unistd.h>
 
+#ifndef SS_AUTODISARM
+#define SS_AUTODISARM (1U << 31)
+#endif
+
 static volatile sig_atomic_t usr1_count;
 static volatile sig_atomic_t usr2_count;
 static volatile sig_atomic_t nested_ok;
@@ -36,6 +40,9 @@ static volatile uintptr_t handler_stack_address;
 static volatile sig_atomic_t altstack_onstack_before;
 static volatile sig_atomic_t altstack_onstack_after;
 static volatile sig_atomic_t altstack_change_denied;
+static volatile sig_atomic_t winch_count;
+static volatile uintptr_t autodisarm_stack_address;
+static volatile sig_atomic_t autodisarm_observed;
 static unsigned char alternate_stack[64 * 1024] __attribute__((aligned(16)));
 
 static void usr2_handler(int signal, siginfo_t *info, void *context) {
@@ -133,6 +140,20 @@ static void prof_handler(int signal, siginfo_t *info, void *context) {
     prof_count++;
 }
 
+static void winch_handler(int signal, siginfo_t *info, void *context) {
+    volatile int marker = 0;
+    (void)marker;
+    stack_t active;
+    if (signal != SIGWINCH || info == 0 || info->si_signo != signal ||
+        info->si_pid != getpid() || context == 0 ||
+        sigaltstack(0, &active) != 0 || active.ss_flags != SS_DISABLE) {
+        _exit(29);
+    }
+    autodisarm_stack_address = (uintptr_t)&marker;
+    autodisarm_observed = 1;
+    winch_count++;
+}
+
 static void *blocked_worker(void *argument) {
     (void)argument;
     sigset_t blocked;
@@ -204,7 +225,8 @@ int main(void) {
         install_handler_flags(SIGUSR2, usr2_handler, SA_SIGINFO | SA_RESTART) != 0 ||
         install_handler_flags(SIGALRM, alarm_handler, SA_SIGINFO | SA_NODEFER) != 0 ||
         install_handler_flags(SIGTERM, term_handler, SA_SIGINFO | SA_RESETHAND) != 0 ||
-        install_handler_flags(SIGPROF, prof_handler, SA_SIGINFO | SA_ONSTACK) != 0) {
+        install_handler_flags(SIGPROF, prof_handler, SA_SIGINFO | SA_ONSTACK) != 0 ||
+        install_handler_flags(SIGWINCH, winch_handler, SA_SIGINFO | SA_ONSTACK) != 0) {
         return 1;
     }
     if (raise(SIGUSR1) != 0 || usr1_count != 1 || usr2_count != 1 || !nested_ok) {
@@ -268,6 +290,21 @@ int main(void) {
     if (sigaltstack(&disabled, 0) != 0 || sigaltstack(0, &current_altstack) != 0 ||
         current_altstack.ss_flags != SS_DISABLE) {
         return 24;
+    }
+
+    altstack.ss_flags = SS_AUTODISARM;
+    if (sigaltstack(&altstack, 0) != 0) {
+        return 25;
+    }
+    if (raise(SIGWINCH) != 0 || winch_count != 1 || !autodisarm_observed ||
+        autodisarm_stack_address < (uintptr_t)alternate_stack ||
+        autodisarm_stack_address >=
+            (uintptr_t)alternate_stack + sizeof(alternate_stack)) {
+        return 26;
+    }
+    if (sigaltstack(0, &current_altstack) != 0 ||
+        current_altstack.ss_flags != (int)SS_AUTODISARM) {
+        return 27;
     }
 
     pthread_t blocked_thread;

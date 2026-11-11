@@ -51,6 +51,7 @@ struct LinuxThread {
     altstack_size: u64,
     altstack_flags: u32,
     altstack_depth: u8,
+    altstack_disarm_depth: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -211,6 +212,7 @@ pub(crate) fn register_linux_thread(
             altstack_size: 0,
             altstack_flags: 2,
             altstack_depth: 0,
+            altstack_disarm_depth: 0,
         });
         tid
     };
@@ -328,7 +330,7 @@ fn set_current_signal_mask(process: ObjId, mask: u64) -> bool {
 
 /// Returns the current thread alternate signal stack and active depth.
 /// 返回当前线程的备用信号栈及活动深度。
-fn current_altstack(process: ObjId) -> Option<(u64, u64, u32, u8)> {
+fn current_altstack(process: ObjId) -> Option<(u64, u64, u32, u8, u8)> {
     let (task, _) = sched::current();
     COMPAT
         .lock()
@@ -342,6 +344,7 @@ fn current_altstack(process: ObjId) -> Option<(u64, u64, u32, u8)> {
                 entry.altstack_size,
                 entry.altstack_flags,
                 entry.altstack_depth,
+                entry.altstack_disarm_depth,
             )
         })
 }
@@ -351,17 +354,19 @@ fn current_altstack(process: ObjId) -> Option<(u64, u64, u32, u8)> {
 fn linux_sigaltstack(process: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const STACK_T_BYTES: usize = 24;
     const SS_DISABLE: u32 = 2;
+    const SS_AUTODISARM: u32 = 0x8000_0000;
     const MIN_ALTSTACK: u64 = 2048;
-    let (sp, size, configured_flags, active_depth) =
+    let (sp, size, configured_flags, active_depth, disarm_depth) =
         current_altstack(process).ok_or(CompatErrno::NoSys)?;
-    let flags = configured_flags
-        | if active_depth != 0 {
-            1
-        } else {
-            0
-        };
+    let flags = if configured_flags & SS_DISABLE != 0 || disarm_depth != 0 {
+        SS_DISABLE
+    } else if active_depth != 0 {
+        1
+    } else {
+        configured_flags
+    };
     if args[1] != 0 {
-        if active_depth != 0 {
+        if active_depth != 0 || disarm_depth != 0 {
             crate::kprintln!(
                 "[JSR-LINUX-ALTSTACK] query active=true depth={} flags={:#x}",
                 active_depth,
@@ -391,6 +396,7 @@ fn linux_sigaltstack(process: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno>
             (0, 0, SS_DISABLE)
         } else {
             if requested_flags != 0
+                && requested_flags != SS_AUTODISARM
                 || requested_size < MIN_ALTSTACK
                 || requested_sp % 16 != 0
                 || requested_sp < crate::arch::USER_WINDOW.0
@@ -400,7 +406,7 @@ fn linux_sigaltstack(process: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno>
             {
                 return Err(CompatErrno::Invalid);
             }
-            (requested_sp, requested_size, 0)
+            (requested_sp, requested_size, requested_flags)
         };
         let (task, _) = sched::current();
         let mut state = COMPAT.lock();
@@ -421,7 +427,7 @@ fn linux_sigaltstack(process: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno>
 
 /// Marks one signal frame as executing on the alternate stack.
 /// 标记一个信号帧正在备用栈上执行。
-fn enter_altstack(process: ObjId) -> bool {
+fn enter_altstack(process: ObjId, autodisarm: bool) -> bool {
     let (task, _) = sched::current();
     let mut state = COMPAT.lock();
     let Some(entry) = state
@@ -436,13 +442,24 @@ fn enter_altstack(process: ObjId) -> bool {
         return false;
     };
     entry.altstack_depth = next;
-    crate::kprintln!("[JSR-LINUX-ALTSTACK] enter depth={}", next);
+    if autodisarm {
+        let Some(disarmed) = entry.altstack_disarm_depth.checked_add(1) else {
+            entry.altstack_depth = next - 1;
+            return false;
+        };
+        entry.altstack_disarm_depth = disarmed;
+    }
+    crate::kprintln!(
+        "[JSR-LINUX-ALTSTACK] enter depth={} autodisarm={}",
+        next,
+        autodisarm
+    );
     true
 }
 
 /// Leaves one signal frame that was marked as using the alternate stack.
 /// 离开一个标记为使用备用栈的信号帧。
-fn leave_altstack(process: ObjId) -> bool {
+fn leave_altstack(process: ObjId, autodisarm: bool) -> bool {
     let (task, _) = sched::current();
     let mut state = COMPAT.lock();
     let Some(entry) = state
@@ -457,7 +474,18 @@ fn leave_altstack(process: ObjId) -> bool {
         return false;
     };
     entry.altstack_depth = next;
-    crate::kprintln!("[JSR-LINUX-ALTSTACK] leave depth={}", next);
+    if autodisarm {
+        let Some(armed) = entry.altstack_disarm_depth.checked_sub(1) else {
+            entry.altstack_depth = next + 1;
+            return false;
+        };
+        entry.altstack_disarm_depth = armed;
+    }
+    crate::kprintln!(
+        "[JSR-LINUX-ALTSTACK] leave depth={} autodisarm={}",
+        next,
+        autodisarm
+    );
     true
 }
 
@@ -500,6 +528,7 @@ const SIGNAL_UC_GREGS: usize = 40;
 const SIGNAL_UC_SIGMASK: usize = 296;
 const SIGNAL_INFO_OFFSET: usize = SIGNAL_UC_OFFSET + 968;
 const JASPER_UC_FLAG_ALTSTACK: u64 = 1u64 << 63;
+const JASPER_UC_FLAG_ALTSTACK_AUTODISARM: u64 = 1u64 << 62;
 
 fn write_frame_u64(frame: &mut [u8], offset: usize, value: u64) {
     if let Some(field) = frame.get_mut(offset..offset + 8) {
@@ -530,6 +559,8 @@ fn build_signal_frame(
     const SA_NODEFER: u64 = 0x4000_0000;
     const SA_RESETHAND: u64 = 0x8000_0000;
     const SA_ONSTACK: u64 = 0x0800_0000;
+    const SS_DISABLE: u32 = 2;
+    const SS_AUTODISARM: u32 = 0x8000_0000;
     const SIG_DFL: u64 = 0;
     const SIG_IGN: u64 = 1;
     let action = proc::linux_signal_action(process, signal).ok_or(CompatErrno::Invalid)?;
@@ -552,13 +583,22 @@ fn build_signal_frame(
         return Err(CompatErrno::Invalid);
     }
     let old_mask = current_signal_mask(process).ok_or(CompatErrno::Invalid)?;
-    let (stack_top, red_zone) = if action[1] & SA_ONSTACK != 0 {
-        let (sp, size, flags, _) = current_altstack(process).ok_or(CompatErrno::Invalid)?;
-        if flags != 0 || size < SIGNAL_FRAME_BYTES as u64 || !user_register(sp) {
-            return Err(CompatErrno::Invalid);
-        }
+    let altstack = if action[1] & SA_ONSTACK != 0 {
+        current_altstack(process).ok_or(CompatErrno::Invalid)?
+    } else {
+        (0, 0, SS_DISABLE, 0, 0)
+    };
+    let uses_altstack = action[1] & SA_ONSTACK != 0
+        && altstack.2 & SS_DISABLE == 0
+        && altstack.4 == 0
+        && altstack.1 >= SIGNAL_FRAME_BYTES as u64
+        && user_register(altstack.0);
+    let autodisarm = uses_altstack && altstack.2 & SS_AUTODISARM != 0;
+    let (stack_top, red_zone) = if uses_altstack {
         (
-            sp.checked_add(size)
+            altstack
+                .0
+                .checked_add(altstack.1)
                 .filter(|top| *top <= crate::arch::USER_WINDOW.1)
                 .ok_or(CompatErrno::Fault)?,
             0,
@@ -584,9 +624,12 @@ fn build_signal_frame(
         .ok_or(CompatErrno::Fault)?;
     let mut frame = [0u8; SIGNAL_FRAME_BYTES];
     write_frame_u64(&mut frame, 0, action[2]);
-    let uses_altstack = action[1] & SA_ONSTACK != 0;
     if uses_altstack {
-        write_frame_u64(&mut frame, SIGNAL_UC_OFFSET, JASPER_UC_FLAG_ALTSTACK);
+        let mut flags = JASPER_UC_FLAG_ALTSTACK;
+        if autodisarm {
+            flags |= JASPER_UC_FLAG_ALTSTACK_AUTODISARM;
+        }
+        write_frame_u64(&mut frame, SIGNAL_UC_OFFSET, flags);
     }
     let gregs = SIGNAL_UC_OFFSET + SIGNAL_UC_GREGS;
     let restart_futex = action[1] & SA_RESTART != 0
@@ -644,12 +687,12 @@ fn build_signal_frame(
         let _ = set_current_signal_mask(process, old_mask);
         return Err(CompatErrno::Fault);
     }
-    if uses_altstack && !enter_altstack(process) {
+    if uses_altstack && !enter_altstack(process, autodisarm) {
         let _ = set_current_signal_mask(process, old_mask);
         return Err(CompatErrno::Invalid);
     }
     crate::kprintln!(
-        "[JSR-LINUX-SIGNAL] delivered tid={} signal={} interrupted_result={} restart_futex={} nodefer={} reset_hand={} altstack={} handler={:#x} frame={:#x} info={:#x} context={:#x}",
+        "[JSR-LINUX-SIGNAL] delivered tid={} signal={} interrupted_result={} restart_futex={} nodefer={} reset_hand={} altstack={} autodisarm={} handler={:#x} frame={:#x} info={:#x} context={:#x}",
         linux_tid(process).unwrap_or(0),
         signal,
         interrupted_result,
@@ -657,6 +700,7 @@ fn build_signal_frame(
         nodefer,
         reset_hand,
         uses_altstack,
+        autodisarm,
         handler,
         frame_address,
         info_address,
@@ -765,7 +809,12 @@ fn linux_rt_sigreturn(process: ObjId, user_rsp: u64) -> Result<UserReturn, Compa
     if !set_current_signal_mask(process, old_mask) {
         return Err(CompatErrno::Invalid);
     }
-    if uc_flags & JASPER_UC_FLAG_ALTSTACK != 0 && !leave_altstack(process) {
+    if uc_flags & JASPER_UC_FLAG_ALTSTACK != 0
+        && !leave_altstack(
+            process,
+            uc_flags & JASPER_UC_FLAG_ALTSTACK_AUTODISARM != 0,
+        )
+    {
         return Err(CompatErrno::Invalid);
     }
     crate::kprintln!(
