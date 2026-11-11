@@ -14,6 +14,7 @@ ALLOWLIST = ROOT / "kernel/production-features.txt"
 BUILD = ROOT / "kernel/build.rs"
 PRODUCTION = ROOT / "kernel/src/production.rs"
 STATUS = ROOT / "docs/ISSUE-19-convergence-status.md"
+PRODUCTION_CHECK = ROOT / "scripts/production-check.sh"
 
 REQUIRED = {"production", "default", "user-programs"}
 CONFIGURATION_ONLY = {"profile-compact", "sched-rr"}
@@ -67,6 +68,14 @@ def main() -> int:
             fail(f"build gate lost {needle}")
     if "compile_error!(" in PRODUCTION.read_text(encoding="utf-8"):
         fail("production.rs must not keep a stale partial compile_error feature list")
+    check = PRODUCTION_CHECK.read_text(encoding="utf-8")
+    for needle in (
+        'python3 scripts/check-production-symbols.py "$ELF"',
+        'python3 scripts/check-production-footprint.py "$ELF"',
+        'tee "$OUT/production-footprint.log"',
+    ):
+        if needle not in check:
+            fail(f"production check lost linked-code gate {needle}")
 
     protected = sorted(set(features) - allowed)
     if STATUS.is_file():
