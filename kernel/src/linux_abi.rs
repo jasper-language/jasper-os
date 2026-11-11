@@ -7,6 +7,7 @@
 
 use compat_core::syscall::{
     compat_result, dispatch, CompatErrno, LinuxCall, LinuxSyscall, SyscallDispatch, SyscallRequest,
+    LINUX_NR_FUTEX,
 };
 
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -249,16 +250,27 @@ fn queue_thread_signal(process: ObjId, tid: u32, signal: u32) -> bool {
     if !(1..=64).contains(&signal) {
         return false;
     }
-    let mut state = COMPAT.lock();
-    let Some(entry) = state
-        .threads
-        .iter_mut()
-        .flatten()
-        .find(|entry| entry.process == process && entry.tid == tid)
-    else {
-        return false;
+    let target = {
+        let mut state = COMPAT.lock();
+        let Some(entry) = state
+            .threads
+            .iter_mut()
+            .flatten()
+            .find(|entry| entry.process == process && entry.tid == tid)
+        else {
+            return false;
+        };
+        entry.pending_signals |= 1u64 << (signal - 1);
+        crate::kprintln!(
+            "[JSR-LINUX-SIGNAL] queued target_tid={} signal={} mask={:#x} pending={:#x}",
+            tid,
+            signal,
+            entry.signal_mask,
+            entry.pending_signals
+        );
+        entry.task
     };
-    entry.pending_signals |= 1u64 << (signal - 1);
+    sched::wake(target);
     true
 }
 
@@ -368,6 +380,7 @@ fn build_signal_frame(
 ) -> Result<UserReturn, CompatErrno> {
     const SA_SIGINFO: u64 = 0x0000_0004;
     const SA_RESTORER: u64 = 0x0400_0000;
+    const SA_RESTART: u64 = 0x1000_0000;
     const SIG_DFL: u64 = 0;
     const SIG_IGN: u64 = 1;
     let action = proc::linux_signal_action(process, signal).ok_or(CompatErrno::Invalid)?;
@@ -379,7 +392,7 @@ fn build_signal_frame(
         let _ = proc::begin_exit(process, 128 + i64::from(signal));
         return Err(CompatErrno::Interrupted);
     }
-    if action[1] & !(SA_SIGINFO | SA_RESTORER) != 0
+    if action[1] & !(SA_SIGINFO | SA_RESTORER | SA_RESTART) != 0
         || !user_register(handler)
         || !user_register(action[2])
         || !user_register(user_ip.0)
@@ -408,16 +421,35 @@ fn build_signal_frame(
     let mut frame = [0u8; SIGNAL_FRAME_BYTES];
     write_frame_u64(&mut frame, 0, action[2]);
     let gregs = SIGNAL_UC_OFFSET + SIGNAL_UC_GREGS;
+    let restart_futex = action[1] & SA_RESTART != 0
+        && args.id == LINUX_NR_FUTEX
+        && interrupted_result == -i64::from(CompatErrno::Interrupted as i32);
+    let resume_rip = if restart_futex {
+        user_ip.0.checked_sub(2).ok_or(CompatErrno::Fault)?
+    } else {
+        user_ip.0
+    };
+    if !user_register(resume_rip) {
+        return Err(CompatErrno::Fault);
+    }
     write_frame_u64(&mut frame, gregs, args.args[4]);
     write_frame_u64(&mut frame, gregs + 8, args.args[5]);
     write_frame_u64(&mut frame, gregs + 16, args.args[3]);
     write_frame_u64(&mut frame, gregs + 64, args.args[0]);
     write_frame_u64(&mut frame, gregs + 72, args.args[1]);
     write_frame_u64(&mut frame, gregs + 96, args.args[2]);
-    write_frame_u64(&mut frame, gregs + 104, interrupted_result as u64);
+    write_frame_u64(
+        &mut frame,
+        gregs + 104,
+        if restart_futex {
+            args.id
+        } else {
+            interrupted_result as u64
+        },
+    );
     write_frame_u64(&mut frame, gregs + 112, 0);
     write_frame_u64(&mut frame, gregs + 120, user_ip.1);
-    write_frame_u64(&mut frame, gregs + 128, user_ip.0);
+    write_frame_u64(&mut frame, gregs + 128, resume_rip);
     write_frame_u64(&mut frame, gregs + 136, 0x202);
     write_frame_u64(&mut frame, SIGNAL_UC_OFFSET + SIGNAL_UC_SIGMASK, old_mask);
     write_frame_u64(&mut frame, SIGNAL_INFO_OFFSET, u64::from(signal));
@@ -435,10 +467,11 @@ fn build_signal_frame(
         return Err(CompatErrno::Fault);
     }
     crate::kprintln!(
-        "[JSR-LINUX-SIGNAL] delivered tid={} signal={} interrupted_result={} handler={:#x} frame={:#x} info={:#x} context={:#x}",
+        "[JSR-LINUX-SIGNAL] delivered tid={} signal={} interrupted_result={} restart_futex={} handler={:#x} frame={:#x} info={:#x} context={:#x}",
         linux_tid(process).unwrap_or(0),
         signal,
         interrupted_result,
+        restart_futex,
         handler,
         frame_address,
         info_address,

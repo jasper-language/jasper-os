@@ -25,12 +25,20 @@ static volatile sig_atomic_t futex_worker_tid;
 static volatile sig_atomic_t futex_worker_ready;
 static volatile sig_atomic_t futex_worker_signal;
 static int futex_word;
+static volatile sig_atomic_t restart_worker_tid;
+static volatile sig_atomic_t restart_worker_ready;
+static volatile sig_atomic_t restart_worker_signal;
+static int restart_futex_word;
 
 static void usr2_handler(int signal, siginfo_t *info, void *context) {
     (void)context;
     if (signal != SIGUSR2 || info == 0 || info->si_signo != signal ||
         info->si_pid != getpid() || context == 0) {
         _exit(11);
+    }
+    if (syscall(SYS_gettid) == restart_worker_tid) {
+        restart_worker_signal = 1;
+        return;
     }
     usr2_count++;
 }
@@ -108,18 +116,32 @@ static void *futex_worker(void *argument) {
     return (void *)(intptr_t)-3;
 }
 
-static int install_handler(int signal, void (*handler)(int, siginfo_t *, void *)) {
+static void *restart_worker(void *argument) {
+    (void)argument;
+    restart_worker_tid = syscall(SYS_gettid);
+    __atomic_store_n(&restart_futex_word, 0, __ATOMIC_RELEASE);
+    restart_worker_ready = 1;
+    long result =
+        syscall(SYS_futex, &restart_futex_word, FUTEX_WAIT_PRIVATE, 0, 0, 0, 0);
+    if (result == 0 && restart_worker_signal == 1) {
+        return (void *)(intptr_t)1;
+    }
+    return (void *)(intptr_t)-4;
+}
+
+static int install_handler_flags(int signal, void (*handler)(int, siginfo_t *, void *),
+                                 int flags) {
     struct sigaction action;
     memset(&action, 0, sizeof(action));
     action.sa_sigaction = handler;
-    action.sa_flags = SA_SIGINFO;
+    action.sa_flags = flags;
     sigemptyset(&action.sa_mask);
     return sigaction(signal, &action, 0);
 }
 
 int main(void) {
-    if (install_handler(SIGUSR1, usr1_handler) != 0 ||
-        install_handler(SIGUSR2, usr2_handler) != 0) {
+    if (install_handler_flags(SIGUSR1, usr1_handler, SA_SIGINFO) != 0 ||
+        install_handler_flags(SIGUSR2, usr2_handler, SA_SIGINFO | SA_RESTART) != 0) {
         return 1;
     }
     if (raise(SIGUSR1) != 0 || usr1_count != 1 || usr2_count != 1 || !nested_ok) {
@@ -191,10 +213,35 @@ int main(void) {
     }
     futex_worker_tid = 0;
 
+    pthread_t restart_thread;
+    void *restart_result = 0;
+    if (pthread_create(&restart_thread, 0, restart_worker, 0) != 0) {
+        return 13;
+    }
+    while (!restart_worker_ready) {
+        syscall(SYS_sched_yield);
+    }
+    if (pthread_kill(restart_thread, SIGUSR2) != 0) {
+        return 14;
+    }
+    while (restart_worker_signal == 0) {
+        syscall(SYS_sched_yield);
+    }
+    for (int attempt = 0; attempt < 1000; attempt++) {
+        syscall(SYS_sched_yield);
+    }
+    __atomic_store_n(&restart_futex_word, 1, __ATOMIC_RELEASE);
+    if (syscall(SYS_futex, &restart_futex_word, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0) < 1 ||
+        pthread_join(restart_thread, &restart_result) != 0 ||
+        restart_result != (void *)(intptr_t)1) {
+        return 15;
+    }
+    restart_worker_tid = 0;
+
     static const char message[] = "jasper-signal-ok\n";
     if (write(STDOUT_FILENO, message, sizeof(message) - 1) !=
         (ssize_t)(sizeof(message) - 1)) {
-        return 13;
+        return 16;
     }
     return 0;
 }

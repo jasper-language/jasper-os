@@ -12,6 +12,10 @@ use linux_raw_sys::general::{
     __NR_write, __NR_writev,
 };
 
+/// Linux x86_64 futex syscall number for restart policy.
+/// 用于重启策略的 Linux x86_64 futex syscall 编号。
+pub const LINUX_NR_FUTEX: u64 = __NR_futex as u64;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum LinuxSyscall {
