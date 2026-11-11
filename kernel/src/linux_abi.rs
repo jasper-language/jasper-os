@@ -38,6 +38,9 @@ struct LinuxThread {
     robust_list_len: u64,
     rseq: u64,
     rseq_len: u32,
+    /// Blocked standard-signal mask for this Linux TID.
+    /// 当前 Linux TID 的标准信号阻塞位图。
+    signal_mask: u64,
     /// Standard-signal pending bits for this Linux TID.
     /// 当前 Linux TID 的标准信号 pending 位图。
     pending_signals: u64,
@@ -162,6 +165,13 @@ pub(crate) fn register_linux_thread(
     };
     let tid = {
         let mut state = COMPAT.lock();
+        let inherited_mask = state
+            .threads
+            .iter()
+            .flatten()
+            .find(|entry| entry.process == process && entry.task == task)
+            .map(|entry| entry.signal_mask)
+            .unwrap_or(0);
         let has_leader = state
             .threads
             .iter()
@@ -188,6 +198,7 @@ pub(crate) fn register_linux_thread(
             robust_list_len: 0,
             rseq: 0,
             rseq_len: 0,
+            signal_mask: inherited_mask,
             pending_signals: 0,
         });
         tid
@@ -262,10 +273,40 @@ fn has_linux_thread(process: ObjId, tid: u32) -> bool {
         .any(|entry| entry.process == process && entry.tid == tid)
 }
 
+/// Returns the blocked signal mask for the current Linux thread.
+/// 返回当前 Linux 线程的信号阻塞位图。
+fn current_signal_mask(process: ObjId) -> Option<u64> {
+    let (task, _) = sched::current();
+    COMPAT
+        .lock()
+        .threads
+        .iter()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)
+        .map(|entry| entry.signal_mask)
+}
+
+/// Updates the current thread mask while preserving unmaskable signals.
+/// 更新当前线程 mask，并强制保持 SIGKILL/SIGSTOP 不可阻塞。
+fn set_current_signal_mask(process: ObjId, mask: u64) -> bool {
+    const UNMASKABLE: u64 = (1u64 << (9 - 1)) | (1u64 << (19 - 1));
+    let (task, _) = sched::current();
+    let mut state = COMPAT.lock();
+    let Some(entry) = state
+        .threads
+        .iter_mut()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)
+    else {
+        return false;
+    };
+    entry.signal_mask = mask & !UNMASKABLE;
+    true
+}
+
 /// Takes the lowest unmasked pending signal for the current thread.
 /// 取出当前线程编号最低且未被屏蔽的 pending 信号。
 fn take_deliverable_signal(process: ObjId) -> Option<u32> {
-    let blocked = proc::linux_signal_mask(process).unwrap_or(u64::MAX);
     let (task, _) = sched::current();
     let mut state = COMPAT.lock();
     let entry = state
@@ -273,7 +314,7 @@ fn take_deliverable_signal(process: ObjId) -> Option<u32> {
         .iter_mut()
         .flatten()
         .find(|entry| entry.process == process && entry.task == task)?;
-    let deliverable = entry.pending_signals & !blocked;
+    let deliverable = entry.pending_signals & !entry.signal_mask;
     if deliverable == 0 {
         return None;
     }
@@ -332,7 +373,7 @@ fn build_signal_frame(
     {
         return Err(CompatErrno::Invalid);
     }
-    let old_mask = proc::linux_signal_mask(process).ok_or(CompatErrno::Invalid)?;
+    let old_mask = current_signal_mask(process).ok_or(CompatErrno::Invalid)?;
     let frame_address = user_ip
         .1
         .checked_sub(128 + SIGNAL_FRAME_BYTES as u64)
@@ -372,11 +413,11 @@ fn build_signal_frame(
         u64::from(proc::linux_pid(process).ok_or(CompatErrno::NoProcess)?),
     );
     let handler_mask = old_mask | action[3] | (1u64 << (signal - 1));
-    if !proc::set_linux_signal_mask(process, handler_mask) {
+    if !set_current_signal_mask(process, handler_mask) {
         return Err(CompatErrno::Invalid);
     }
     if proc::write(process, frame_address, &frame).is_err() {
-        let _ = proc::set_linux_signal_mask(process, old_mask);
+        let _ = set_current_signal_mask(process, old_mask);
         return Err(CompatErrno::Fault);
     }
     crate::kprintln!(
@@ -486,7 +527,7 @@ fn linux_rt_sigreturn(process: ObjId, user_rsp: u64) -> Result<UserReturn, Compa
             .try_into()
             .expect("fixed signal-mask field"),
     );
-    if !proc::set_linux_signal_mask(process, old_mask) {
+    if !set_current_signal_mask(process, old_mask) {
         return Err(CompatErrno::Invalid);
     }
     crate::kprintln!(
@@ -1812,9 +1853,9 @@ fn linux_rt_sigaction(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(0)
 }
 
-/// Queries or updates the process blocked-signal mask.
+/// Queries or updates the current thread blocked-signal mask.
 ///
-/// SIGKILL 和 SIGSTOP 始终保持不可阻塞；信号排队与投递仍明确为 pending。
+/// SIGKILL 和 SIGSTOP 始终保持不可阻塞；mask 是 Linux TID 私有状态。
 fn linux_rt_sigprocmask(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const SIG_BLOCK: u64 = 0;
     const SIG_UNBLOCK: u64 = 1;
@@ -1822,7 +1863,7 @@ fn linux_rt_sigprocmask(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
     if args[3] != 8 || args[0] > SIG_SETMASK {
         return Err(CompatErrno::Invalid);
     }
-    let old = proc::linux_signal_mask(pid).ok_or(CompatErrno::NoSys)?;
+    let old = current_signal_mask(pid).ok_or(CompatErrno::NoSys)?;
     if args[1] != 0 {
         let mut value = [0u8; 8];
         copy_from_user(&mut value, args[1], 8).map_err(|_| CompatErrno::Fault)?;
@@ -1833,7 +1874,7 @@ fn linux_rt_sigprocmask(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
             SIG_SETMASK => requested,
             _ => unreachable!(),
         };
-        if !proc::set_linux_signal_mask(pid, new) {
+        if !set_current_signal_mask(pid, new) {
             return Err(CompatErrno::NoSys);
         }
     }

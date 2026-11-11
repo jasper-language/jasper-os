@@ -13,8 +13,12 @@
 static volatile sig_atomic_t usr1_count;
 static volatile sig_atomic_t usr2_count;
 static volatile sig_atomic_t nested_ok;
-static volatile sig_atomic_t target_tid;
-static volatile sig_atomic_t worker_signal;
+static volatile sig_atomic_t blocked_worker_tid;
+static volatile sig_atomic_t open_worker_tid;
+static volatile sig_atomic_t blocked_mask_ready;
+static volatile sig_atomic_t release_blocked_worker;
+static volatile sig_atomic_t blocked_worker_signal;
+static volatile sig_atomic_t open_worker_signal;
 
 static void usr2_handler(int signal, siginfo_t *info, void *context) {
     (void)context;
@@ -31,8 +35,12 @@ static void usr1_handler(int signal, siginfo_t *info, void *context) {
         info->si_pid != getpid() || context == 0) {
         _exit(12);
     }
-    if (target_tid != 0 && syscall(SYS_gettid) == target_tid) {
-        worker_signal = 1;
+    if (syscall(SYS_gettid) == blocked_worker_tid) {
+        blocked_worker_signal = 1;
+        return;
+    }
+    if (syscall(SYS_gettid) == open_worker_tid) {
+        open_worker_signal = 1;
         return;
     }
     if (((ucontext_t *)context)->uc_mcontext.gregs[REG_RIP] == 0) {
@@ -47,13 +55,35 @@ static void usr1_handler(int signal, siginfo_t *info, void *context) {
     }
 }
 
-static void *cross_thread_worker(void *argument) {
+static void *blocked_worker(void *argument) {
     (void)argument;
-    target_tid = syscall(SYS_gettid);
-    while (!worker_signal) {
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGUSR1);
+    if (pthread_sigmask(SIG_BLOCK, &blocked, 0) != 0) {
+        return (void *)(intptr_t)-1;
+    }
+    blocked_worker_tid = syscall(SYS_gettid);
+    blocked_mask_ready = 1;
+    while (!release_blocked_worker) {
         syscall(SYS_sched_yield);
     }
-    return (void *)(intptr_t)worker_signal;
+    if (pthread_sigmask(SIG_UNBLOCK, &blocked, 0) != 0) {
+        return (void *)(intptr_t)-2;
+    }
+    while (!blocked_worker_signal) {
+        syscall(SYS_sched_yield);
+    }
+    return (void *)(intptr_t)blocked_worker_signal;
+}
+
+static void *open_worker(void *argument) {
+    (void)argument;
+    open_worker_tid = syscall(SYS_gettid);
+    while (!open_worker_signal) {
+        syscall(SYS_sched_yield);
+    }
+    return (void *)(intptr_t)open_worker_signal;
 }
 
 static int install_handler(int signal, void (*handler)(int, siginfo_t *, void *)) {
@@ -88,24 +118,46 @@ int main(void) {
         return 5;
     }
 
-    pthread_t worker;
-    void *worker_result = 0;
-    if (pthread_create(&worker, 0, cross_thread_worker, 0) != 0) {
+    pthread_t blocked_thread;
+    pthread_t open_thread;
+    void *blocked_result = 0;
+    void *open_result = 0;
+    if (pthread_create(&blocked_thread, 0, blocked_worker, 0) != 0 ||
+        pthread_create(&open_thread, 0, open_worker, 0) != 0) {
         return 6;
     }
-    while (target_tid == 0) {
+    while (blocked_worker_tid == 0 || open_worker_tid == 0 || !blocked_mask_ready) {
         syscall(SYS_sched_yield);
     }
-    if (pthread_kill(worker, SIGUSR1) != 0 || pthread_join(worker, &worker_result) != 0 ||
-        worker_result != (void *)(intptr_t)1 || usr1_count != 2) {
+
+    sigset_t main_mask;
+    if (sigprocmask(SIG_SETMASK, 0, &main_mask) != 0 || sigismember(&main_mask, SIGUSR1)) {
         return 7;
     }
-    target_tid = 0;
+    if (pthread_kill(blocked_thread, SIGUSR1) != 0 ||
+        pthread_kill(open_thread, SIGUSR1) != 0) {
+        return 8;
+    }
+    for (int attempt = 0; attempt < 10000 && open_worker_signal == 0; attempt++) {
+        syscall(SYS_sched_yield);
+    }
+    if (open_worker_signal != 1 || blocked_worker_signal != 0) {
+        return 9;
+    }
+    release_blocked_worker = 1;
+    if (pthread_join(blocked_thread, &blocked_result) != 0 ||
+        pthread_join(open_thread, &open_result) != 0 ||
+        blocked_result != (void *)(intptr_t)1 ||
+        open_result != (void *)(intptr_t)1 || usr1_count != 2) {
+        return 10;
+    }
+    blocked_worker_tid = 0;
+    open_worker_tid = 0;
 
     static const char message[] = "jasper-signal-ok\n";
     if (write(STDOUT_FILENO, message, sizeof(message) - 1) !=
         (ssize_t)(sizeof(message) - 1)) {
-        return 8;
+        return 11;
     }
     return 0;
 }

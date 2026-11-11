@@ -75,9 +75,8 @@ struct LinuxProcessState {
     file_offsets: [u64; 64],
     brk: u64,
     mmap_next: u64,
-    /// Linux signal dispositions and blocked mask.
+    /// Linux process-wide signal dispositions.
     signal_actions: [[u64; 4]; 64],
-    signal_mask: u64,
     /// Exact executable path exposed through `/proc/self/exe`.
     exec_path: [u8; 128],
     exec_path_len: usize,
@@ -525,30 +524,6 @@ pub(crate) fn set_linux_signal_action(pid: ObjId, signal: u32, action: [u64; 4])
     .is_ok()
 }
 
-/// Returns the blocked Linux signal mask.
-///
-/// 返回 Linux 兼容进程当前阻塞的信号集合。
-#[cfg(feature = "linux-abi")]
-pub(crate) fn linux_signal_mask(pid: ObjId) -> Option<u64> {
-    crate::kobj::with(|t| match t.get(pid) {
-        Ok(KObject::Process(p)) => Some(p.linux.as_ref()?.signal_mask),
-        _ => None,
-    })
-}
-
-/// Commits a Linux blocked-signal mask while preserving unmaskable signals.
-///
-/// 提交阻塞信号集合，并强制保持 SIGKILL/SIGSTOP 不可阻塞。
-#[cfg(feature = "linux-abi")]
-pub(crate) fn set_linux_signal_mask(pid: ObjId, mask: u64) -> bool {
-    const UNMASKABLE: u64 = (1u64 << (9 - 1)) | (1u64 << (19 - 1));
-    with_proc(pid, |p| {
-        p.linux.as_mut().ok_or(ProcError::Exited)?.signal_mask = mask & !UNMASKABLE;
-        Ok(())
-    })
-    .is_ok()
-}
-
 /// Returns the non-zero Linux pid namespace identity for one compatibility process.
 ///
 /// 返回 Linux 兼容进程在兼容 pid 命名空间中的非零身份。
@@ -690,7 +665,6 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         brk: crate::arch::USER_WINDOW.0 + 0x1000_0000,
         mmap_next: crate::arch::USER_WINDOW.0 + 0x4000_0000,
         signal_actions: [[0; 4]; 64],
-        signal_mask: 0,
         exec_path: [0; 128],
         exec_path_len: 0,
     };
