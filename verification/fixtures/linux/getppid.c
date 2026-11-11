@@ -7,6 +7,7 @@
 #include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/syscall.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
@@ -64,8 +65,18 @@ int main(void) {
     if (sched_getaffinity(0, 1, &cpus) != -1 || errno != EINVAL) {
         return 12;
     }
+    unsigned cpu = UINT32_MAX;
+    unsigned node = UINT32_MAX;
+    if (syscall(SYS_getcpu, &cpu, &node, NULL) != 0 ||
+        cpu >= CPU_SETSIZE || !CPU_ISSET(cpu, &cpus) || node != 0) {
+        return 13;
+    }
+    errno = 0;
+    if (syscall(SYS_getcpu, (void *)1, NULL, NULL) != -1 || errno != EFAULT) {
+        return 14;
+    }
     close(fd);
-    printf("jasper-ppid=%d lseek=%lld affinity=%d\n",
-           (int)parent, (long long)end, CPU_COUNT(&cpus));
+    printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u\n",
+           (int)parent, (long long)end, CPU_COUNT(&cpus), cpu, node);
     return 0;
 }
