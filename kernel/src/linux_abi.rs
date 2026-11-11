@@ -27,6 +27,7 @@ static PATH_TRACE_REMAINING: AtomicU32 = AtomicU32::new(24);
 
 const MAX_LINUX_THREADS: usize = 64;
 const MAX_FUTEX_WORDS: usize = 32;
+const MAX_PROCESS_SIGNAL_SETS: usize = 16;
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
 
 #[derive(Clone, Copy)]
@@ -62,9 +63,16 @@ struct FutexWord {
     waiters: u16,
 }
 
+#[derive(Clone, Copy)]
+struct ProcessSignalSet {
+    process: ObjId,
+    pending: u64,
+}
+
 struct CompatState {
     threads: [Option<LinuxThread>; MAX_LINUX_THREADS],
     futexes: [Option<FutexWord>; MAX_FUTEX_WORDS],
+    process_signals: [Option<ProcessSignalSet>; MAX_PROCESS_SIGNAL_SETS],
 }
 
 impl CompatState {
@@ -72,6 +80,7 @@ impl CompatState {
         Self {
             threads: [None; MAX_LINUX_THREADS],
             futexes: [None; MAX_FUTEX_WORDS],
+            process_signals: [None; MAX_PROCESS_SIGNAL_SETS],
         }
     }
 }
@@ -297,6 +306,68 @@ fn has_linux_thread(process: ObjId, tid: u32) -> bool {
         .any(|entry| entry.process == process && entry.tid == tid)
 }
 
+/// Queues one process-directed standard signal and wakes all eligible threads.
+/// 登记一个进程定向标准信号，并唤醒该进程的全部线程。
+fn queue_process_signal(process: ObjId, signal: u32) -> bool {
+    if !(1..=64).contains(&signal) {
+        return false;
+    }
+    let mut targets = [None; MAX_LINUX_THREADS];
+    let mut target_count = 0usize;
+    {
+        let mut state = COMPAT.lock();
+        let slot = if let Some(slot) = state
+            .process_signals
+            .iter()
+            .position(|entry| entry.is_some_and(|entry| entry.process == process))
+        {
+            slot
+        } else {
+            let Some(slot) = state.process_signals.iter().position(Option::is_none) else {
+                return false;
+            };
+            state.process_signals[slot] = Some(ProcessSignalSet {
+                process,
+                pending: 0,
+            });
+            slot
+        };
+        let Some(entry) = state.process_signals[slot].as_mut() else {
+            return false;
+        };
+        entry.pending |= 1u64 << (signal - 1);
+        crate::kprintln!(
+            "[JSR-LINUX-SIGNAL] queued_process process={:#x} signal={} pending={:#x}",
+            process.raw(),
+            signal,
+            entry.pending
+        );
+        for thread in state.threads.iter().flatten() {
+            if thread.process == process && target_count < targets.len() {
+                targets[target_count] = Some(thread.task);
+                target_count += 1;
+            }
+        }
+    }
+    for task in targets[..target_count].iter().flatten() {
+        sched::wake(*task);
+    }
+    true
+}
+
+/// Removes process-directed pending signals once the last thread exits.
+/// 最后一个线程退出后移除进程定向 pending 信号。
+fn remove_process_signals(process: ObjId) {
+    let mut state = COMPAT.lock();
+    if let Some(slot) = state
+        .process_signals
+        .iter()
+        .position(|entry| entry.is_some_and(|entry| entry.process == process))
+    {
+        state.process_signals[slot] = None;
+    }
+}
+
 /// Returns the blocked signal mask for the current Linux thread.
 /// 返回当前 Linux 线程的信号阻塞位图。
 fn current_signal_mask(process: ObjId) -> Option<u64> {
@@ -494,18 +565,46 @@ fn leave_altstack(process: ObjId, autodisarm: bool) -> bool {
 fn take_deliverable_signal(process: ObjId) -> Option<u32> {
     let (task, _) = sched::current();
     let mut state = COMPAT.lock();
-    let entry = state
-        .threads
-        .iter_mut()
-        .flatten()
-        .find(|entry| entry.process == process && entry.task == task)?;
-    let deliverable = entry.pending_signals & !entry.signal_mask;
+    let (blocked, thread_deliverable) = {
+        let entry = state
+            .threads
+            .iter()
+            .flatten()
+            .find(|entry| entry.process == process && entry.task == task)?;
+        (entry.signal_mask, entry.pending_signals & !entry.signal_mask)
+    };
+    let (deliverable, process_directed) = if thread_deliverable != 0 {
+        (thread_deliverable, false)
+    } else {
+        let process_deliverable = state
+            .process_signals
+            .iter()
+            .flatten()
+            .find(|entry| entry.process == process)
+            .map(|entry| entry.pending & !blocked)
+            .unwrap_or(0);
+        (process_deliverable, true)
+    };
     if deliverable == 0 {
         return None;
     }
     let index = deliverable.trailing_zeros();
     let bit = 1u64 << index;
-    entry.pending_signals &= !bit;
+    if process_directed {
+        let entry = state
+            .process_signals
+            .iter_mut()
+            .flatten()
+            .find(|entry| entry.process == process)?;
+        entry.pending &= !bit;
+    } else {
+        let entry = state
+            .threads
+            .iter_mut()
+            .flatten()
+            .find(|entry| entry.process == process && entry.task == task)?;
+        entry.pending_signals &= !bit;
+    }
     Some(index + 1)
 }
 
@@ -513,13 +612,22 @@ fn take_deliverable_signal(process: ObjId) -> Option<u32> {
 /// 判断当前线程是否存在未被 mask 的 pending 信号。
 fn current_signal_pending(process: ObjId) -> bool {
     let (task, _) = sched::current();
-    COMPAT
-        .lock()
+    let state = COMPAT.lock();
+    let Some(thread) = state
         .threads
         .iter()
         .flatten()
         .find(|entry| entry.process == process && entry.task == task)
-        .is_some_and(|entry| entry.pending_signals & !entry.signal_mask != 0)
+    else {
+        return false;
+    };
+    thread.pending_signals & !thread.signal_mask != 0
+        || state
+            .process_signals
+            .iter()
+            .flatten()
+            .find(|entry| entry.process == process)
+            .is_some_and(|entry| entry.pending & !thread.signal_mask != 0)
 }
 
 const SIGNAL_FRAME_BYTES: usize = 8 + 968 + 128;
@@ -776,6 +884,27 @@ fn linux_tgkill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     }
 }
 
+/// Queues a process-directed `kill` for the current compatibility process.
+/// 为当前兼容进程登记一个进程定向 `kill`。
+fn linux_kill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+    let pid = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let signal = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if pid == 0 || pid != proc::linux_pid(process).ok_or(CompatErrno::NoProcess)? {
+        return Err(CompatErrno::NoProcess);
+    }
+    if signal == 0 {
+        return Ok(());
+    }
+    if signal > 64 || matches!(signal, 9 | 19) {
+        return Err(CompatErrno::Invalid);
+    }
+    if queue_process_signal(process, signal) {
+        Ok(())
+    } else {
+        Err(CompatErrno::NoSpace)
+    }
+}
+
 /// Restores the interrupted register and signal-mask context from `rt_sigreturn`.
 /// 从 `rt_sigreturn` 恢复被打断的寄存器和信号屏蔽上下文。
 fn linux_rt_sigreturn(process: ObjId, user_rsp: u64) -> Result<UserReturn, CompatErrno> {
@@ -913,7 +1042,7 @@ fn register_rseq(process: ObjId, address: u64, length: u64, flags: u64, signatur
 /// 在线程退出时清零 `clear_child_tid` 并唤醒 Linux join 等待者。
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
 pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
-    let (clear, tid, robust_list, rseq, rseq_len) = {
+    let (clear, tid, robust_list, rseq, rseq_len, last_thread) = {
         let mut state = COMPAT.lock();
         let Some(slot) = state
             .threads
@@ -923,12 +1052,18 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
             return;
         };
         let entry = state.threads[slot].take().expect("live Linux thread");
+        let last_thread = !state
+            .threads
+            .iter()
+            .flatten()
+            .any(|entry| entry.process == process);
         (
             entry.clear_child_tid,
             entry.tid,
             entry.robust_list,
             entry.rseq,
             entry.rseq_len,
+            last_thread,
         )
     };
     if robust_list != 0 {
@@ -943,6 +1078,9 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
     if clear != 0 {
         let _ = proc::write(process, clear, &0u32.to_le_bytes());
         let _ = futex_wake(process, clear, usize::MAX);
+    }
+    if last_thread {
+        remove_process_signals(process);
     }
 }
 
@@ -1205,6 +1343,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
             0
         }
         LinuxSyscall::Sigaltstack => compat_result(linux_sigaltstack(pid, call.args)),
+        LinuxSyscall::Kill => compat_result(linux_kill(pid, call.args).map(|()| 0)),
         LinuxSyscall::GetPid => proc::linux_pid(pid)
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)

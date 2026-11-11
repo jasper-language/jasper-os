@@ -323,22 +323,30 @@ int main(void) {
     if (sigprocmask(SIG_SETMASK, 0, &main_mask) != 0 || sigismember(&main_mask, SIGUSR1)) {
         return 7;
     }
-    if (pthread_kill(blocked_thread, SIGUSR1) != 0 ||
-        pthread_kill(open_thread, SIGUSR1) != 0) {
+    sigset_t main_blocked;
+    sigset_t previous_main;
+    sigemptyset(&main_blocked);
+    sigaddset(&main_blocked, SIGUSR1);
+    if (sigprocmask(SIG_BLOCK, &main_blocked, &previous_main) != 0 ||
+        kill(getpid(), SIGUSR1) != 0) {
         return 8;
     }
     for (int attempt = 0; attempt < 10000 && open_worker_signal == 0; attempt++) {
         syscall(SYS_sched_yield);
     }
-    if (open_worker_signal != 1 || blocked_worker_signal != 0) {
+    if (open_worker_signal != 1 || blocked_worker_signal != 0 || usr1_count != 2) {
         return 9;
+    }
+    if (sigprocmask(SIG_SETMASK, &previous_main, 0) != 0 ||
+        pthread_kill(blocked_thread, SIGUSR1) != 0) {
+        return 10;
     }
     release_blocked_worker = 1;
     if (pthread_join(blocked_thread, &blocked_result) != 0 ||
         pthread_join(open_thread, &open_result) != 0 ||
         blocked_result != (void *)(intptr_t)1 ||
         open_result != (void *)(intptr_t)1 || usr1_count != 2) {
-        return 10;
+        return 11;
     }
     blocked_worker_tid = 0;
     open_worker_tid = 0;
@@ -346,7 +354,7 @@ int main(void) {
     pthread_t futex_thread;
     void *futex_result = 0;
     if (pthread_create(&futex_thread, 0, futex_worker, 0) != 0) {
-        return 11;
+        return 12;
     }
     while (!futex_worker_ready) {
         syscall(SYS_sched_yield);
@@ -354,20 +362,20 @@ int main(void) {
     if (pthread_kill(futex_thread, SIGUSR1) != 0 ||
         pthread_join(futex_thread, &futex_result) != 0 ||
         futex_result != (void *)(intptr_t)1) {
-        return 12;
+        return 13;
     }
     futex_worker_tid = 0;
 
     pthread_t restart_thread;
     void *restart_result = 0;
     if (pthread_create(&restart_thread, 0, restart_worker, 0) != 0) {
-        return 13;
+        return 14;
     }
     while (!restart_worker_ready) {
         syscall(SYS_sched_yield);
     }
     if (pthread_kill(restart_thread, SIGUSR2) != 0) {
-        return 14;
+        return 15;
     }
     while (restart_worker_signal == 0) {
         syscall(SYS_sched_yield);
@@ -379,14 +387,14 @@ int main(void) {
     if (syscall(SYS_futex, &restart_futex_word, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0) < 1 ||
         pthread_join(restart_thread, &restart_result) != 0 ||
         restart_result != (void *)(intptr_t)1) {
-        return 15;
+        return 16;
     }
     restart_worker_tid = 0;
 
     static const char message[] = "jasper-signal-ok\n";
     if (write(STDOUT_FILENO, message, sizeof(message) - 1) !=
         (ssize_t)(sizeof(message) - 1)) {
-        return 16;
+        return 17;
     }
     return 0;
 }
