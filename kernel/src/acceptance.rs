@@ -1610,8 +1610,16 @@ mod dedicated {
                 arch::halt_forever()
             }
             Ok(()) => {
-                kprintln!("[JSR-LIFE-HEALTH] result=unexpected_success");
-                exit_on(1);
+                #[cfg(feature = "lifecycle-root-exec-verify")]
+                {
+                    kprintln!("[JSR-LIFE-HEALTH] result=root_execution_complete");
+                    exit_on(0);
+                }
+                #[cfg(not(feature = "lifecycle-root-exec-verify"))]
+                {
+                    kprintln!("[JSR-LIFE-HEALTH] result=unexpected_success");
+                    exit_on(1);
+                }
             }
         }
     }

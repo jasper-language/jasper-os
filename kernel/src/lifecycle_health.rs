@@ -25,7 +25,10 @@ use kernel_core::ext4_view::{Ext4ByteSource, Ext4Reader, Ext4SourceError};
 
 use crate::blk::BlockDevice;
 use crate::sync::IrqSpinLock;
-#[cfg(not(feature = "lifecycle-health-fail-verify"))]
+#[cfg(any(
+    not(feature = "lifecycle-health-fail-verify"),
+    feature = "lifecycle-root-exec-verify"
+))]
 use crate::kprintln;
 use crate::{mmio, pci, virtio};
 
@@ -39,6 +42,8 @@ const ELF_HEADER_BYTES: usize = 64;
 const ROOT_TEXT_FILE_BYTES: usize = 256;
 const ROOT_USERLAND_MANIFEST: &[u8] =
     b"arch=x86_64\nabi=linux\nentry=/bin/true\ninterpreter=/lib64/ld-linux-x86-64.so.2\nlibrary=/usr/lib/x86_64-linux-gnu/libc.so.6\n";
+#[cfg(feature = "lifecycle-root-exec-verify")]
+const ROOT_EXEC_PROBE_PATH: &str = "/usr/libexec/jasper/health-probe";
 
 /// 健康门失败原因。
 /// Health-gate failure reason.
@@ -71,6 +76,9 @@ pub enum HealthError {
     /// 必需用户态 ELF 缺失、不可执行或不是 x86-64 Linux ELF。
     /// A required userland ELF is missing, non-executable or not an x86-64 Linux ELF.
     RootPayload,
+    /// 根卷 Linux 健康探针未能完成真实执行或资源回收。
+    /// The root-backed Linux health probe failed execution or resource reclamation.
+    RootExecute,
     /// 两份控制记录不能恢复。The two control records cannot be recovered.
     Recovery(BootControlError),
     /// 健康状态机拒绝当前槽。The health state machine rejected the current slot.
@@ -98,6 +106,7 @@ impl HealthError {
             Self::RootRelease => "root_release",
             Self::RootUserland => "root_userland",
             Self::RootPayload => "root_payload",
+            Self::RootExecute => "root_execute",
             Self::Recovery(_) => "recovery",
             Self::State(_) => "state",
             Self::Commit(_) => "commit",
@@ -399,6 +408,11 @@ fn validate_system_root(
     validate_elf_payload(&root, "/bin/true", true)?;
     validate_elf_payload(&root, "/lib64/ld-linux-x86-64.so.2", true)?;
     validate_elf_payload(&root, "/usr/lib/x86_64-linux-gnu/libc.so.6", false)?;
+    #[cfg(feature = "lifecycle-root-exec-verify")]
+    {
+        validate_elf_payload(&root, ROOT_EXEC_PROBE_PATH, true)?;
+        execute_root_linux_probe(&root)?;
+    }
     Ok(())
 }
 
@@ -433,6 +447,68 @@ fn validate_elf_payload(
     Ok(())
 }
 
+#[cfg(feature = "lifecycle-root-exec-verify")]
+fn execute_root_linux_probe(root: &Ext4Reader) -> Result<(), HealthError> {
+    const MAX_PROBE_BYTES: usize = 1024 * 1024;
+    let image = root
+        .read_file(ROOT_EXEC_PROBE_PATH, MAX_PROBE_BYTES)
+        .map_err(|_| HealthError::RootExecute)?;
+    let frames_before = crate::mm::frame::free_frames();
+    let calls_before = crate::syscall::call_count();
+    let calls = compat_core::syscall::LinuxSyscallSet::of(&[
+        compat_core::syscall::LinuxSyscall::Write,
+        compat_core::syscall::LinuxSyscall::GetPid,
+        compat_core::syscall::LinuxSyscall::GetTid,
+        compat_core::syscall::LinuxSyscall::ExitGroup,
+    ]);
+    let pid = crate::proc::create_linux("root-linux-probe", calls)
+        .map_err(|_| HealthError::RootExecute)?;
+    let entry = match crate::proc::load_linux_elf(pid, &image) {
+        Ok(entry) => entry,
+        Err(_) => {
+            crate::proc::exit_idle(pid, -1);
+            let _ = crate::proc::reap(pid);
+            crate::kobj::run_cleanup(usize::MAX);
+            return Err(HealthError::RootExecute);
+        }
+    };
+    let stack = crate::arch::USER_WINDOW.0 + 0xC0_0000;
+    let mapped = crate::proc::map_new(
+        pid,
+        stack - kernel_core::frame::FRAME_SIZE,
+        kernel_core::paging::MapFlags::USER | kernel_core::paging::MapFlags::WRITE,
+    )
+    .is_ok();
+    let started = mapped
+        && crate::proc::spawn_thread(pid, "root-linux-probe", entry, stack, 0, 0).is_ok();
+    if started {
+        crate::sched::run();
+    }
+    let state = crate::proc::state(pid);
+    let _ = crate::proc::reap(pid);
+    crate::kobj::run_cleanup(usize::MAX);
+    let frames_after = crate::mm::frame::free_frames();
+    let syscalls = crate::syscall::call_count().saturating_sub(calls_before);
+    let exited = state == Some(crate::proc::ProcState::Exited { code: 0 });
+    let resources = frames_after == frames_before;
+    crate::kprintln!(
+        "[JSR-LIFE-ROOT-EXEC] path={} bytes={} mapped={} cpl3={} exited={} syscalls={} frames_before={} resources={}",
+        ROOT_EXEC_PROBE_PATH,
+        image.len(),
+        mapped,
+        started,
+        exited,
+        syscalls,
+        frames_before,
+        resources
+    );
+    if mapped && started && exited && syscalls != 0 && resources {
+        Ok(())
+    } else {
+        Err(HealthError::RootExecute)
+    }
+}
+
 /// 确认当前 A/B 槽的最小健康集合并持久提交。
 /// Confirms the minimum health set for the current A/B slot and commits it durably.
 pub fn confirm_minimum_health() -> Result<(), HealthError> {
@@ -461,10 +537,28 @@ pub fn confirm_minimum_health() -> Result<(), HealthError> {
         .map_err(|_| HealthError::Block)?;
     let current = recover(Some(&first), Some(&second)).map_err(HealthError::Recovery)?;
 
-#[cfg(feature = "lifecycle-health-fail-verify")]
+#[cfg(all(
+    feature = "lifecycle-health-fail-verify",
+    not(feature = "lifecycle-root-exec-verify")
+))]
     {
         let _ = current;
         Err(HealthError::InjectedFailure)
+    }
+#[cfg(feature = "lifecycle-root-exec-verify")]
+    {
+        let slot = current
+            .candidate()
+            .map(|(slot, _)| slot)
+            .unwrap_or_else(|| current.active_slot());
+        let release = current.slot(slot).release();
+        validate_system_root(Arc::clone(&device), slot, release)?;
+        kprintln!(
+            "[JSR-LIFE-ROOT] slot={:?} release={} schema=1 userland=x86_64-linux-elf files=6",
+            slot,
+            release
+        );
+        Ok(())
     }
 #[cfg(not(feature = "lifecycle-health-fail-verify"))]
     {

@@ -21,8 +21,13 @@ KERNEL="$TARGET/x86_64-unknown-none/release/jasper-kernel"
 # Remove only this script's fixed derived files; evidence output must be fresh.
 rm -f -- "$IMAGE" "$ESP_IMAGE" "$UEFI_ESP" "$OVMF_VARS"
 
+if [ "$MODE" = root-exec ]; then
+  KERNEL_FEATURES=lifecycle-root-exec-verify
+else
+  KERNEL_FEATURES=production,lifecycle-ab-health
+fi
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none \
-  -p jasper-kernel --features production,lifecycle-ab-health >"$OUT/kernel-build.log" 2>&1
+  -p jasper-kernel --features "$KERNEL_FEATURES" >"$OUT/kernel-build.log" 2>&1
 cargo build --locked --release -p xtask >"$OUT/xtask-build.log" 2>&1
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-uefi \
   -p jasper-boot-manager >"$OUT/boot-manager-build.log" 2>&1
@@ -39,10 +44,17 @@ cargo run --locked -p jasper-lifecycle-staging --bin jasper-esp-install -- \
   "$IMAGE" 38654705664 "$UEFI_ESP" >"$OUT/esp-install.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-ext4-provision -- \
   "$IMAGE" 38654705664 >"$OUT/ext4-provision.log" 2>&1
+ROOT_EXEC_PROBE=""
+if [ "$MODE" = root-exec ]; then
+  ROOT_EXEC_PROBE=$(find "$TARGET/x86_64-unknown-none/release/build" \
+    -path '*/out/user-target/x86_64-unknown-none/release/user-linuxprobe' \
+    -type f -print | sort | tail -n 1)
+  [ -n "$ROOT_EXEC_PROBE" ]
+fi
 bash scripts/issue21-system-root-fixture.sh \
-  "$IMAGE" "$TARGET" 1050624 A 1 >"$OUT/system-root-a.log" 2>&1
+  "$IMAGE" "$TARGET" 1050624 A 1 "$ROOT_EXEC_PROBE" >"$OUT/system-root-a.log" 2>&1
 bash scripts/issue21-system-root-fixture.sh \
-  "$IMAGE" "$TARGET" 17827840 B 1 >"$OUT/system-root-b.log" 2>&1
+  "$IMAGE" "$TARGET" 17827840 B 1 "$ROOT_EXEC_PROBE" >"$OUT/system-root-b.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-init -- \
   "$IMAGE" 38654705664 "$KERNEL" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
 cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-inspect -- \
@@ -65,6 +77,10 @@ sgdisk -v "$IMAGE" >"$OUT/sgdisk.log" 2>&1
 grep -q 'No problems found' "$OUT/sgdisk.log"
 
 cp /usr/share/OVMF/OVMF_VARS_4M.fd "$OVMF_VARS"
+QEMU_EXTRA=()
+if [ "$MODE" = root-exec ]; then
+  QEMU_EXTRA=(-device isa-debug-exit,iobase=0xf4,iosize=0x04)
+fi
 set +e
 timeout "$LIMIT" qemu-system-x86_64 \
   -accel tcg \
@@ -75,12 +91,24 @@ timeout "$LIMIT" qemu-system-x86_64 \
   -drive if=pflash,format=raw,file="$OVMF_VARS" \
   -drive file="$IMAGE",format=raw,if=virtio \
   -serial "file:$OUT/serial.log" \
-  -display none -monitor none -no-reboot
+  -display none -monitor none -no-reboot "${QEMU_EXTRA[@]}"
 rc=$?
 set -e
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
-[ "$rc" -eq 124 ]
+if [ "$MODE" = root-exec ]; then
+  [ "$rc" -eq 33 ]
+else
+  [ "$rc" -eq 124 ]
+fi
 grep -aq 'Jasper-OS boot manager starting' "$OUT/serial.log"
+if [ "$MODE" = root-exec ]; then
+  grep -aq '^\[JSR-LIFE-ROOT-EXEC\] path=/usr/libexec/jasper/health-probe .* mapped=true cpl3=true exited=true syscalls=[1-9][0-9]* frames_before=[0-9]* resources=true' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
 if [ "$MODE" = both-controls-corrupt ]; then
   grep -aFq '[JSR-LIFE-RESCUE] active=none selected=false reason=control_copies_invalid recovery=required' \
     "$OUT/serial.log"

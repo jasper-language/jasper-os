@@ -8,6 +8,7 @@ WORK="${2:?work directory}"
 START_LBA="${3:?system partition LBA}"
 SLOT="${4:?A or B}"
 RELEASE="${5:?release}"
+ROOT_EXEC_PROBE="${6:-}"
 [[ "$SLOT" == A || "$SLOT" == B ]]
 [[ "$RELEASE" =~ ^[1-9][0-9]*$ ]]
 mkdir -p "$WORK"
@@ -47,7 +48,7 @@ write_file() {
   debugfs -R "stat $destination" "$PARTITION" 2>/dev/null | grep -q '^Inode:'
 }
 
-for directory in /etc /bin /lib64 /usr /usr/lib /usr/lib/x86_64-linux-gnu; do
+for directory in /etc /bin /lib64 /usr /usr/lib /usr/lib/x86_64-linux-gnu /usr/libexec /usr/libexec/jasper; do
   ensure_dir "$directory"
 done
 write_file "$MARKER" /etc/jasper-root
@@ -62,6 +63,11 @@ debugfs -w -R 'sif /etc/jasper-userland mode 0100644' "$PARTITION" >/dev/null
 debugfs -w -R 'sif /bin/true mode 0100755' "$PARTITION" >/dev/null
 debugfs -w -R "sif $INTERPRETER mode 0100755" "$PARTITION" >/dev/null
 debugfs -w -R "sif $LIBC mode 0100755" "$PARTITION" >/dev/null
+if [ -n "$ROOT_EXEC_PROBE" ]; then
+  [[ -x "$ROOT_EXEC_PROBE" ]]
+  write_file "$ROOT_EXEC_PROBE" /usr/libexec/jasper/health-probe
+  debugfs -w -R 'sif /usr/libexec/jasper/health-probe mode 0100755' "$PARTITION" >/dev/null
+fi
 e2fsck -fy "$PARTITION"
 e2fsck -fn "$PARTITION"
 
@@ -76,8 +82,11 @@ verify_payload() {
 verify_payload /bin/true "$BINARY"
 verify_payload "$INTERPRETER" "$INTERPRETER"
 verify_payload "$LIBC" "$LIBC"
+if [ -n "$ROOT_EXEC_PROBE" ]; then
+  verify_payload /usr/libexec/jasper/health-probe "$ROOT_EXEC_PROBE"
+fi
 
 dd if="$PARTITION" of="$IMAGE" bs=512 seek="$START_LBA" \
   conv=notrunc,sparse status=none
 sync
-echo "system-root-fixture: PASS slot=$SLOT release=$RELEASE start_lba=$START_LBA files=6 userland=x86_64-linux-elf"
+echo "system-root-fixture: PASS slot=$SLOT release=$RELEASE start_lba=$START_LBA files=6 userland=x86_64-linux-elf root_exec_probe=$([ -n "$ROOT_EXEC_PROBE" ] && echo present || echo absent)"
