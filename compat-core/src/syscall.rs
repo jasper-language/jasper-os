@@ -19,8 +19,10 @@ use linux_raw_sys::general::{
 /// 用于重启策略的 Linux x86_64 futex syscall 编号。
 pub const LINUX_NR_FUTEX: u64 = __NR_futex as u64;
 
-/// Stable compatibility user identity until Jasper exposes Unix accounts.
-/// Jasper 暴露 Unix 账号模型前使用的稳定兼容用户身份。
+/// Stable Linux compatibility identity until Jasper exposes Unix accounts.
+/// This is only an ABI-visible UID and never grants Jasper administrator authority.
+/// Jasper 暴露 Unix 账号模型前使用的稳定 Linux 兼容身份；它只用于 ABI 视图，
+/// 不授予 Jasper 管理员、绕过 PEP 或访问原生受保护资源的能力。
 pub const LINUX_COMPAT_UID: u64 = 0;
 
 /// Stable compatibility primary group identity.
