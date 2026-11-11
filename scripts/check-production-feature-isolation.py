@@ -77,6 +77,12 @@ def main() -> int:
         '--require-reachable jasper_kernel::kmain::start',
         '--require-reachable jasper_kernel::first_program::run',
         'tee "$OUT/production-callgraph.log"',
+        "check-production-coverage.py",
+        "--in-asm-log",
+        "--require-executed jasper_kernel::kmain::start",
+        "--require-executed jasper_kernel::first_program::run",
+        "--require-executed jasper_kernel::production::wait_for_services",
+        "--require-executed jsr_syscall_entry",
     ):
         if needle not in check:
             fail(f"production check lost linked-code gate {needle}")

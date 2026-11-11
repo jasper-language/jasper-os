@@ -40,9 +40,13 @@ def symbols(elf: Path, nm: str) -> dict[int, tuple[int, str]]:
     result: dict[int, tuple[int, str]] = {}
     for line in output.splitlines():
         fields = line.split(maxsplit=3)
-        if len(fields) != 4:
+        if len(fields) == 4:
+            address, size, kind, name = fields
+        elif len(fields) == 3:
+            address, kind, name = fields
+            size = "0"
+        else:
             continue
-        address, size, kind, name = fields
         if kind.lower() not in {"t", "w"}:
             continue
         try:

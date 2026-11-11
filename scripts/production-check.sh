@@ -47,8 +47,27 @@ target/release/xtask bootcap "$ELF" "$OUT/caprej.elf" record=corrupt >> "$OUT/bu
 for n in $CPUS; do
   cp "$OUT/kernel.img" "$OUT/k$n.img"
   rm -f "$OUT/p$n.result" "$OUT/p$n.serial"
+  TRACE_EXTRA=()
+  if [ "${JASPER_ACCEL:-kvm}" = tcg ]; then
+    rm -f "$OUT/p$n.asm"
+    TRACE_EXTRA=(--in-asm-log "$OUT/p$n.asm")
+  fi
   python3 scripts/boot-trace.py --img "$OUT/k$n.img" --out "$OUT/p$n" --timeout "$LIMIT" --nice 10 --io-class 2 --smp "$n" \
+    "${TRACE_EXTRA[@]}" \
     > "$OUT/p$n.result" 2>&1
+  if [ "${JASPER_ACCEL:-kvm}" = tcg ]; then
+    python3 scripts/check-production-coverage.py "$ELF" "$OUT/p$n.asm" \
+      --require-executed jasper_kernel::kmain::start \
+      --require-executed jasper_kernel::first_program::run \
+      --require-executed jasper_kernel::production::wait_for_services \
+      --require-executed jsr_syscall_entry \
+      > "$OUT/p$n.coverage" 2>&1 || {
+        echo "FAIL cpus=$n production runtime coverage"
+        cat "$OUT/p$n.coverage"
+        exit 1
+      }
+    cat "$OUT/p$n.coverage"
+  fi
 done
 rm -f "$OUT/caprej.result" "$OUT/caprej.serial"
 python3 scripts/boot-trace.py --img "$OUT/caprej.img" --out "$OUT/caprej" --timeout "$LIMIT" --nice 10 --io-class 2 \

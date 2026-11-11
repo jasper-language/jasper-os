@@ -38,6 +38,7 @@ ap.add_argument("--icount", type=int)
 ap.add_argument("--accel", default=os.environ.get("JASPER_ACCEL", "kvm"),
                 choices=("kvm", "tcg"))
 ap.add_argument("--cpus", default=os.environ.get("JASPER_CORES", ""))
+ap.add_argument("--in-asm-log")
 args = ap.parse_args()
 
 TICK = os.sysconf("SC_CLK_TCK")
@@ -125,6 +126,10 @@ if args.icount is not None:
     cmd += ["-icount", f"shift={args.icount},sleep=off"]
 if args.q35:
     cmd += ["-M", "q35"]
+if args.in_asm_log:
+    if args.accel != "tcg":
+        raise SystemExit("boot-trace: --in-asm-log requires TCG")
+    cmd += ["-d", "in_asm", "-D", args.in_asm_log]
 
 start = time.monotonic()
 with open(serial_path, "wb") as serial:
