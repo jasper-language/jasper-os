@@ -3,6 +3,11 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 
+use jasper_kernel_core::net4_runtime::{
+    UdpAddress, UdpHandle, UdpQuota, UdpRights, UdpRuntimeError, UdpSocketRuntime, UdpStats,
+};
+
+use crate::jasper_sink::JasperUdpSink;
 use crate::wireguard::{self, Encapsulated, EntropySource, Now, PollOutput, Received, Tunnel};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,7 +17,7 @@ pub enum PeerState {
     Failed,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum WireGuardAction {
     Transport,
     HandshakeInitiation,
@@ -214,7 +219,7 @@ impl WireGuardRouter {
         out: &mut [u8],
         rng: &mut dyn EntropySource,
         sink: &mut dyn DatagramSink,
-    ) -> Result<(PeerId, WireGuardAction), WireGuardRouterError> {
+    ) -> Result<(PeerId, WireGuardAction, usize), WireGuardRouterError> {
         let index = self
             .route_index(destination)
             .ok_or(WireGuardRouterError::NotFound)?;
@@ -231,12 +236,12 @@ impl WireGuardRouter {
             self.rate_limited = self.rate_limited.saturating_add(1);
             return Err(WireGuardRouterError::RateLimited);
         }
-        let action = routed
+        let (action, wire_len) = routed
             .peer
-            .encapsulate_to(now, payload, out, rng, sink)
+            .encapsulate_to_buf(now, payload, out, rng, sink)
             .map_err(WireGuardRouterError::Driver)?;
         self.sent_datagrams = self.sent_datagrams.saturating_add(1);
-        Ok((routed.id, action))
+        Ok((routed.id, action, wire_len))
     }
 
     pub fn decapsulate_from(
@@ -248,7 +253,7 @@ impl WireGuardRouter {
         out: &mut [u8],
         rng: &mut dyn EntropySource,
         sink: &mut dyn DatagramSink,
-    ) -> Result<(PeerId, WireGuardAction), WireGuardRouterError> {
+    ) -> Result<(PeerId, WireGuardAction, usize), WireGuardRouterError> {
         let routed = self
             .peers
             .iter_mut()
@@ -258,11 +263,11 @@ impl WireGuardRouter {
             std::net::IpAddr::V4(address) => address.octets().to_vec(),
             std::net::IpAddr::V6(address) => address.octets().to_vec(),
         };
-        let action = routed
+        let (action, wire_len) = routed
             .peer
-            .decapsulate_from(now, &remote, under_load, datagram, out, rng, sink)
+            .decapsulate_from_buf(now, &remote, under_load, datagram, out, rng, sink)
             .map_err(WireGuardRouterError::Driver)?;
-        Ok((routed.id, action))
+        Ok((routed.id, action, wire_len))
     }
 
     pub fn peer_state(&self, id: PeerId) -> Option<PeerState> {
@@ -270,6 +275,19 @@ impl WireGuardRouter {
             .iter()
             .find(|peer| peer.id == id)
             .map(|peer| peer.peer.state())
+    }
+
+    /// Returns the bound remote endpoint selected for an outbound destination.
+    /// 返回某个出站目的地址所选择的已绑定远端 endpoint。
+    pub fn endpoint_for(&self, destination: Ipv4Addr) -> Option<SocketAddr> {
+        self.route_index(destination)
+            .map(|index| self.peers[index].endpoint)
+    }
+
+    /// Returns whether an endpoint is bound to exactly one peer.
+    /// 返回某个 endpoint 是否已绑定到唯一的 peer。
+    pub fn accepts_endpoint(&self, endpoint: SocketAddr) -> bool {
+        self.peers.iter().any(|peer| peer.endpoint == endpoint)
     }
 
     /// Returns the earliest protocol timer across all bound peers.
@@ -339,6 +357,174 @@ impl WireGuardRouter {
     }
 }
 
+/// Failure from the bounded multi-peer service over one Jasper UDP socket.
+/// 单个 Jasper UDP socket 上有界多 peer 服务的失败原因。
+#[derive(Debug)]
+pub enum WireGuardMultipeerServiceError {
+    Udp(UdpRuntimeError),
+    Router(WireGuardRouterError),
+    InvalidEndpoint,
+    Inactive,
+}
+
+impl From<UdpRuntimeError> for WireGuardMultipeerServiceError {
+    fn from(error: UdpRuntimeError) -> Self {
+        Self::Udp(error)
+    }
+}
+
+impl From<WireGuardRouterError> for WireGuardMultipeerServiceError {
+    fn from(error: WireGuardRouterError) -> Self {
+        Self::Router(error)
+    }
+}
+
+/// Multi-peer WireGuard service over the bounded Jasper UDP runtime.
+/// 基于有界 Jasper UDP runtime 的多 peer WireGuard 服务。
+pub struct WireGuardMultipeerService<const S: usize, const Q: usize> {
+    runtime: UdpSocketRuntime<S, Q>,
+    socket: UdpHandle,
+    local: UdpAddress,
+    router: WireGuardRouter,
+    active: bool,
+}
+
+impl<const S: usize, const Q: usize> WireGuardMultipeerService<S, Q> {
+    pub fn new(
+        local: UdpAddress,
+        quota: UdpQuota,
+        max_peers: usize,
+        max_routes: usize,
+        max_buckets_per_peer: usize,
+    ) -> Result<Self, WireGuardMultipeerServiceError> {
+        let mut runtime = UdpSocketRuntime::new(quota);
+        let socket = runtime.bind(local, UdpRights::SERVICE)?;
+        let router = WireGuardRouter::new(max_peers, max_routes, max_buckets_per_peer)?;
+        Ok(Self {
+            runtime,
+            socket,
+            local,
+            router,
+            active: true,
+        })
+    }
+
+    pub fn add_peer(
+        &mut self,
+        config: wireguard::Config,
+        endpoint: SocketAddr,
+        routes: &[WireGuardRoute],
+        rate_per_second: u32,
+        burst: u64,
+    ) -> Result<PeerId, WireGuardMultipeerServiceError> {
+        if !self.active {
+            return Err(WireGuardMultipeerServiceError::Inactive);
+        }
+        self.router
+            .add_peer(config, endpoint, routes, rate_per_second, burst)
+            .map_err(WireGuardMultipeerServiceError::Router)
+    }
+
+    pub fn encapsulate(
+        &mut self,
+        now: Now,
+        destination: Ipv4Addr,
+        payload: &[u8],
+        output: &mut [u8],
+        rng: &mut dyn EntropySource,
+    ) -> Result<(PeerId, WireGuardAction, usize), WireGuardMultipeerServiceError> {
+        if !self.active {
+            return Err(WireGuardMultipeerServiceError::Inactive);
+        }
+        let endpoint = self
+            .router
+            .endpoint_for(destination)
+            .ok_or(WireGuardRouterError::NotFound)?;
+        let remote = udp_address(endpoint)?;
+        let mut sink = JasperUdpSink::new(&mut self.runtime, self.socket, remote);
+        Ok(self
+            .router
+            .encapsulate_to(now, destination, payload, output, rng, &mut sink)?)
+    }
+
+    pub fn deliver(
+        &mut self,
+        source: UdpAddress,
+        datagram: &[u8],
+    ) -> Result<(), WireGuardMultipeerServiceError> {
+        if !self.active {
+            return Err(WireGuardMultipeerServiceError::Inactive);
+        }
+        if !self.router.accepts_endpoint(socket_address(source)?) {
+            return Err(WireGuardRouterError::UnknownEndpoint.into());
+        }
+        self.runtime.receive(source, self.local, datagram)?;
+        Ok(())
+    }
+
+    pub fn receive(
+        &mut self,
+        now: Now,
+        output: &mut [u8],
+        rng: &mut dyn EntropySource,
+    ) -> Result<(PeerId, WireGuardAction, usize), WireGuardMultipeerServiceError> {
+        if !self.active {
+            return Err(WireGuardMultipeerServiceError::Inactive);
+        }
+        let mut wire = [0u8; jasper_kernel_core::net4_runtime::MAX_UDP_DATAGRAM_BYTES];
+        let (source, len) = self.runtime.recv(self.socket, &mut wire)?;
+        let mut sink = JasperUdpSink::new(&mut self.runtime, self.socket, source);
+        Ok(self.router.decapsulate_from(
+            now,
+            socket_address(source)?,
+            false,
+            &wire[..len],
+            output,
+            rng,
+            &mut sink,
+        )?)
+    }
+
+    pub fn next_wake(&self) -> Option<wireguard::Ticks> {
+        self.router.next_wake()
+    }
+
+    pub fn local(&self) -> UdpAddress {
+        self.local
+    }
+
+    pub fn udp_stats(&self) -> UdpStats {
+        self.runtime.stats()
+    }
+
+    pub fn quota(&self) -> UdpQuota {
+        self.runtime.quota()
+    }
+
+    pub fn close(&mut self) -> Result<(), WireGuardMultipeerServiceError> {
+        if !self.active {
+            return Err(WireGuardMultipeerServiceError::Inactive);
+        }
+        self.runtime.close(self.socket)?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+fn udp_address(address: SocketAddr) -> Result<UdpAddress, WireGuardMultipeerServiceError> {
+    match address.ip() {
+        std::net::IpAddr::V4(ip) => Ok(UdpAddress::new(ip.octets(), address.port())),
+        std::net::IpAddr::V6(_) => Err(WireGuardMultipeerServiceError::InvalidEndpoint),
+    }
+}
+
+fn socket_address(address: UdpAddress) -> Result<SocketAddr, WireGuardMultipeerServiceError> {
+    Ok(SocketAddr::new(
+        std::net::IpAddr::V4(Ipv4Addr::from(address.ip)),
+        address.port,
+    ))
+}
+
 impl WireGuardPeer {
     pub fn new(config: wireguard::Config) -> Result<Self, wireguard::Error> {
         Ok(Self {
@@ -377,26 +563,40 @@ impl WireGuardPeer {
         rng: &mut dyn EntropySource,
         sink: &mut dyn DatagramSink,
     ) -> Result<WireGuardAction, WireGuardDriverError> {
+        self.encapsulate_to_buf(now, payload, out, rng, sink)
+            .map(|(action, _)| action)
+    }
+
+    fn encapsulate_to_buf(
+        &mut self,
+        now: Now,
+        payload: &[u8],
+        out: &mut [u8],
+        rng: &mut dyn EntropySource,
+        sink: &mut dyn DatagramSink,
+    ) -> Result<(WireGuardAction, usize), WireGuardDriverError> {
         if self.state != PeerState::Active {
             return Err(WireGuardDriverError::Sink("peer is not active"));
         }
-        let action = match self
+        let (action, wire_len) = match self
             .tunnel
             .encapsulate(now, payload, out, rng)
             .map_err(WireGuardDriverError::Tunnel)?
         {
             Encapsulated::Transport(wire) => {
+                let wire_len = wire.len();
                 sink.send(wire).map_err(WireGuardDriverError::Sink)?;
                 self.sent_datagrams = self.sent_datagrams.saturating_add(1);
-                WireGuardAction::Transport
+                (WireGuardAction::Transport, wire_len)
             }
             Encapsulated::HandshakeInitiation(wire) => {
+                let wire_len = wire.len();
                 sink.send(wire).map_err(WireGuardDriverError::Sink)?;
                 self.sent_datagrams = self.sent_datagrams.saturating_add(1);
-                WireGuardAction::HandshakeInitiation
+                (WireGuardAction::HandshakeInitiation, wire_len)
             }
         };
-        Ok(action)
+        Ok((action, wire_len))
     }
 
     pub fn decapsulate_from(
@@ -409,6 +609,20 @@ impl WireGuardPeer {
         rng: &mut dyn EntropySource,
         sink: &mut dyn DatagramSink,
     ) -> Result<WireGuardAction, WireGuardDriverError> {
+        self.decapsulate_from_buf(now, remote, under_load, datagram, out, rng, sink)
+            .map(|(action, _)| action)
+    }
+
+    fn decapsulate_from_buf(
+        &mut self,
+        now: Now,
+        remote: &[u8],
+        under_load: bool,
+        datagram: &[u8],
+        out: &mut [u8],
+        rng: &mut dyn EntropySource,
+        sink: &mut dyn DatagramSink,
+    ) -> Result<(WireGuardAction, usize), WireGuardDriverError> {
         if self.state != PeerState::Active {
             return Err(WireGuardDriverError::Sink("peer is not active"));
         }
@@ -418,15 +632,19 @@ impl WireGuardPeer {
             .decapsulate(now, remote, under_load, datagram, out, rng)
             .map_err(WireGuardDriverError::Tunnel)?
         {
-            Received::Data(bytes) => Ok(WireGuardAction::Data(bytes.to_vec())),
-            Received::Keepalive => Ok(WireGuardAction::Keepalive),
+            Received::Data(bytes) => {
+                let len = bytes.len();
+                Ok((WireGuardAction::Data(bytes.to_vec()), len))
+            }
+            Received::Keepalive => Ok((WireGuardAction::Keepalive, 0)),
             Received::Reply(wire) => {
+                let wire_len = wire.len();
                 sink.send(wire).map_err(WireGuardDriverError::Sink)?;
                 self.sent_datagrams = self.sent_datagrams.saturating_add(1);
-                Ok(WireGuardAction::Reply)
+                Ok((WireGuardAction::Reply, wire_len))
             }
-            Received::HandshakeComplete => Ok(WireGuardAction::HandshakeComplete),
-            Received::CookieStored => Ok(WireGuardAction::CookieStored),
+            Received::HandshakeComplete => Ok((WireGuardAction::HandshakeComplete, 0)),
+            Received::CookieStored => Ok((WireGuardAction::CookieStored, 0)),
         }
     }
 
@@ -697,5 +915,81 @@ mod tests {
         assert_eq!(router.peer_rate_limited(first), Some(1));
         assert_eq!(router.stats(), (2, 2, 2, 1));
         assert_eq!(router.peer_state(first), Some(PeerState::Active));
+    }
+
+    #[test]
+    fn multipeer_service_uses_one_jasper_socket_and_reclaims_quota() {
+        let mut key_rng = DeterministicRng::new(0x4d55_4c54_4950_4545);
+        let a_key = StaticSecret::generate(&mut key_rng).unwrap();
+        let b_key = StaticSecret::generate(&mut key_rng).unwrap();
+        let a_public = a_key.public_key();
+        let b_public = b_key.public_key();
+        let a_address = UdpAddress::new([10, 0, 0, 1], 51820);
+        let b_address = UdpAddress::new([10, 0, 0, 2], 51820);
+        let quota = UdpQuota::new(2, 8, 4096);
+        let mut a = WireGuardMultipeerService::<2, 8>::new(a_address, quota, 2, 2, 2).unwrap();
+        let mut b = WireGuardMultipeerService::<2, 8>::new(b_address, quota, 2, 2, 2).unwrap();
+        a.add_peer(
+            Config::new(a_key, b_public),
+            "10.0.0.2:51820".parse().unwrap(),
+            &[WireGuardRoute::new(Ipv4Addr::new(10, 0, 0, 2), 32).unwrap()],
+            8,
+            4,
+        )
+        .unwrap();
+        b.add_peer(
+            Config::new(b_key, a_public),
+            "10.0.0.1:51820".parse().unwrap(),
+            &[WireGuardRoute::new(Ipv4Addr::new(10, 0, 0, 1), 32).unwrap()],
+            8,
+            4,
+        )
+        .unwrap();
+
+        let now = Now::new(0, 1_700_000_000, 0);
+        let mut rng = DeterministicRng::new(29);
+        let mut a_wire = [0u8; 2048];
+        let mut b_wire = [0u8; 2048];
+        let (_, action, initiation_len) = a
+            .encapsulate(
+                now,
+                Ipv4Addr::new(10, 0, 0, 2),
+                b"service",
+                &mut a_wire,
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(action, WireGuardAction::HandshakeInitiation);
+        b.deliver(a.local(), &a_wire[..initiation_len]).unwrap();
+        let (_, action, reply_len) = b.receive(now, &mut b_wire, &mut rng).unwrap();
+        assert_eq!(action, WireGuardAction::Reply);
+        a.deliver(b.local(), &b_wire[..reply_len]).unwrap();
+        assert_eq!(
+            a.receive(now, &mut a_wire, &mut rng).unwrap().1,
+            WireGuardAction::HandshakeComplete
+        );
+
+        let (_, action, transport_len) = a
+            .encapsulate(
+                now,
+                Ipv4Addr::new(10, 0, 0, 2),
+                b"payload",
+                &mut a_wire,
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(action, WireGuardAction::Transport);
+        b.deliver(a.local(), &a_wire[..transport_len]).unwrap();
+        let (_, action, data_len) = b.receive(now, &mut b_wire, &mut rng).unwrap();
+        assert!(matches!(action, WireGuardAction::Data(_)));
+        assert!(data_len >= b"payload".len());
+
+        a.close().unwrap();
+        b.close().unwrap();
+        for service in [&a, &b] {
+            assert_eq!(service.quota().sockets, 0);
+            assert_eq!(service.quota().datagrams, 0);
+            assert_eq!(service.quota().bytes, 0);
+        }
     }
 }
