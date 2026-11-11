@@ -2,6 +2,7 @@
 // 验证内核创建的 Linux 兼容进程的父身份边界。
 #define _GNU_SOURCE
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <sched.h>
@@ -157,8 +158,31 @@ int main(void) {
                 &short_delay, NULL) != -1 || errno != EINVAL) {
         return 26;
     }
+    DIR *directory = opendir("/usr/lib/x86_64-linux-gnu");
+    if (directory == NULL) {
+        return 27;
+    }
+    unsigned library_mask = 0;
+    struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL) {
+        if (strcmp(entry->d_name, "libc.so.6") == 0) library_mask |= 1u << 0;
+        if (strcmp(entry->d_name, "libsystemd.so.0") == 0) library_mask |= 1u << 1;
+        if (strcmp(entry->d_name, "libselinux.so.1") == 0) library_mask |= 1u << 2;
+        if (strcmp(entry->d_name, "libgcc_s.so.1") == 0) library_mask |= 1u << 3;
+        if (strcmp(entry->d_name, "libm.so.6") == 0) library_mask |= 1u << 4;
+        if (strcmp(entry->d_name, "libpcre2-8.so.0") == 0) library_mask |= 1u << 5;
+    }
+    if (closedir(directory) != 0 || library_mask != 0x3fu) {
+        return 28;
+    }
+    errno = 0;
+    directory = opendir("/usr/lib/x86_64-linux-gnu/libc.so.6");
+    if (directory != NULL || errno != ENOTDIR) {
+        if (directory != NULL) closedir(directory);
+        return 29;
+    }
     close(fd);
-    printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld\n",
+    printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld dirent=6\n",
            (int)parent, (long long)end, CPU_COUNT(&cpus), cpu, node,
            (long long)info.uptime, (unsigned long long)info.totalram,
            (unsigned long long)info.freeram, (unsigned)info.procs, executable,

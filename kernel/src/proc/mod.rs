@@ -424,6 +424,31 @@ pub(crate) fn linux_install_file(pid: ObjId, handle: u64, close_on_exec: bool) -
     .ok()
 }
 
+/// Installs a read-only Linux directory and initializes its entry cursor.
+///
+/// 安装只读 Linux 目录；失败不留下部分 fd 状态。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_dir(pid: ObjId, handle: u64, close_on_exec: bool) -> Option<u32> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        if handle == 0 {
+            return Err(ProcError::Exited);
+        }
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                kernel_core::object::Rights::READ,
+                compat_core::fd::CompatKind::Directory,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.file_offsets[fd.fd() as usize] = 0;
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
 /// Returns `(handle, offset)` for an open read-only Linux file.
 ///
 /// 返回已打开只读 Linux 文件的虚拟句柄与游标。
@@ -456,6 +481,46 @@ pub(crate) fn set_linux_file_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
         }
         let entry = linux.fds.get_fd(fd).ok_or(ProcError::NoTaskSlot)?;
         if entry.kind != compat_core::fd::CompatKind::File {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux.file_offsets[fd as usize] = offset;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Returns `(handle, next_entry)` for an open compatibility directory.
+///
+/// 返回已打开兼容目录的虚拟句柄与下一个目录项序号。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_dir_state(pid: ObjId, fd: u32) -> Option<(u64, u64)> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => {
+            let linux = p.linux.as_ref()?;
+            if (fd as usize) >= linux.file_offsets.len() {
+                return None;
+            }
+            let entry = linux.fds.get_fd(fd)?;
+            (entry.kind == compat_core::fd::CompatKind::Directory
+                && entry.rights.contains(kernel_core::object::Rights::READ))
+            .then_some((entry.handle, linux.file_offsets[fd as usize]))
+        }
+        _ => None,
+    })
+}
+
+/// Commits a directory entry cursor after a successful `getdents64`.
+///
+/// 仅在成功返回目录项后提交目录游标。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_dir_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        if (fd as usize) >= linux.file_offsets.len() {
+            return Err(ProcError::Exited);
+        }
+        let entry = linux.fds.get_fd(fd).ok_or(ProcError::NoTaskSlot)?;
+        if entry.kind != compat_core::fd::CompatKind::Directory {
             return Err(ProcError::NoTaskSlot);
         }
         linux.file_offsets[fd as usize] = offset;

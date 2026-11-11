@@ -5,8 +5,9 @@ use linux_raw_sys::general::{
     __NR_clock_nanosleep, __NR_clone, __NR_clone3,
     __NR_close, __NR_epoll_create1, __NR_epoll_ctl, __NR_epoll_pwait, __NR_epoll_pwait2,
     __NR_epoll_wait, __NR_execve, __NR_exit, __NR_exit_group, __NR_fcntl, __NR_fstat, __NR_futex,
-    __NR_getcpu, __NR_getcwd, __NR_getegid, __NR_geteuid, __NR_getgid, __NR_getgroups,
-    __NR_getpid, __NR_getppid, __NR_getrandom, __NR_gettid, __NR_getuid, __NR_io_uring_enter,
+    __NR_getcpu, __NR_getcwd, __NR_getdents64, __NR_getegid, __NR_geteuid, __NR_getgid,
+    __NR_getgroups, __NR_getpid, __NR_getppid, __NR_getrandom, __NR_gettid, __NR_getuid,
+    __NR_io_uring_enter,
     __NR_io_uring_register, __NR_io_uring_setup, __NR_kill, __NR_madvise, __NR_mmap,
     __NR_nanosleep,
     __NR_lseek, __NR_mprotect, __NR_munmap, __NR_newfstatat, __NR_openat, __NR_poll, __NR_pread64,
@@ -70,6 +71,7 @@ pub enum LinuxSyscall {
     ReadLinkAt,
     Write,
     WriteV,
+    GetDents64,
     Close,
     OpenAt,
     Fstat,
@@ -214,6 +216,12 @@ pub enum CompatErrno {
     /// The destination buffer is too small.
     /// 目标缓冲区容量不足。
     Range = linux_raw_sys::errno::ERANGE,
+    /// A path names a regular file where a directory is required.
+    /// 需要目录但路径指向普通文件。
+    NotDirectory = linux_raw_sys::errno::ENOTDIR,
+    /// A non-directory operation encountered a directory.
+    /// 非目录操作遇到了目录。
+    IsDirectory = linux_raw_sys::errno::EISDIR,
     /// Seek is invalid for a pipe or console stream.
     /// 管道或控制台流不支持定位。
     Pipe = linux_raw_sys::errno::ESPIPE,
@@ -240,6 +248,7 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_readlinkat) => LinuxSyscall::ReadLinkAt,
         value if value == u64::from(__NR_write) => LinuxSyscall::Write,
         value if value == u64::from(__NR_writev) => LinuxSyscall::WriteV,
+        value if value == u64::from(__NR_getdents64) => LinuxSyscall::GetDents64,
         value if value == u64::from(__NR_close) => LinuxSyscall::Close,
         value if value == u64::from(__NR_openat) => LinuxSyscall::OpenAt,
         value if value == u64::from(__NR_fstat) => LinuxSyscall::Fstat,
@@ -328,6 +337,7 @@ mod tests {
             (__NR_readlinkat, LinuxSyscall::ReadLinkAt),
             (__NR_write, LinuxSyscall::Write),
             (__NR_writev, LinuxSyscall::WriteV),
+            (__NR_getdents64, LinuxSyscall::GetDents64),
             (__NR_close, LinuxSyscall::Close),
             (__NR_openat, LinuxSyscall::OpenAt),
             (__NR_fstat, LinuxSyscall::Fstat),

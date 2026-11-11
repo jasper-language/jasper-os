@@ -1376,6 +1376,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
     match call.syscall {
         LinuxSyscall::Write => compat_result(linux_write(pid, call.args)),
         LinuxSyscall::WriteV => compat_result(linux_writev(pid, call.args)),
+        LinuxSyscall::GetDents64 => compat_result(linux_getdents64(pid, call.args)),
         LinuxSyscall::Read => compat_result(linux_read(pid, call.args)),
         LinuxSyscall::Pread64 => compat_result(linux_pread64(pid, call.args)),
         LinuxSyscall::ReadV => compat_result(linux_readv(pid, call.args)),
@@ -1548,6 +1549,75 @@ fn linux_writev(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(total as u64)
 }
 
+/// Reads bounded `linux_dirent64` records from one compatibility directory.
+///
+/// 从兼容目录读取有界 `linux_dirent64`；`.` 与 `..` 动态生成，游标只在全部记录
+/// 成功写入用户缓冲区后推进。过小缓冲区不会返回半条记录。
+fn linux_getdents64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MAX_GETDENTS: usize = 64 * 1024;
+    const DT_DIR: u8 = 4;
+    const DT_REG: u8 = 8;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if capacity > MAX_GETDENTS {
+        return Err(CompatErrno::Invalid);
+    }
+    let (handle, start) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let directory = crate::linux_vfs::DirectoryId::from_handle(handle)
+        .ok_or(CompatErrno::BadFd)?;
+    let children = crate::linux_vfs::directory_entries(directory);
+    let count = 2usize
+        .checked_add(children.len())
+        .ok_or(CompatErrno::Invalid)?;
+    let start = usize::try_from(start).map_err(|_| CompatErrno::Invalid)?;
+    if start > count {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut output = alloc::vec::Vec::new();
+    let mut index = start;
+    while index < count {
+        let (name, inode, kind) = if index == 0 {
+            (b".".as_slice(), directory.inode(), DT_DIR)
+        } else if index == 1 {
+            (b"..".as_slice(), directory.inode(), DT_DIR)
+        } else {
+            let entry = &children[index - 2];
+            (
+                entry.name,
+                entry.node.inode(),
+                if entry.node.is_directory() { DT_DIR } else { DT_REG },
+            )
+        };
+        let record_len = align_up(
+            19usize.saturating_add(name.len()).saturating_add(1) as u64,
+            8,
+        ) as usize;
+        if output.len().saturating_add(record_len) > capacity {
+            if output.is_empty() {
+                return Err(CompatErrno::Invalid);
+            }
+            break;
+        }
+        let base = output.len();
+        output.resize(base + record_len, 0);
+        output[base..base + 8].copy_from_slice(&inode.to_le_bytes());
+        output[base + 8..base + 16]
+            .copy_from_slice(&((index + 1) as i64).to_le_bytes());
+        output[base + 16..base + 18]
+            .copy_from_slice(&(record_len as u16).to_le_bytes());
+        output[base + 18] = kind;
+        output[base + 19..base + 19 + name.len()].copy_from_slice(name);
+        index += 1;
+    }
+    if !output.is_empty() {
+        copy_to_user(args[1], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    }
+    if !proc::set_linux_dir_offset(pid, fd, index as u64) {
+        return Err(CompatErrno::BadFd);
+    }
+    Ok(output.len() as u64)
+}
+
 fn authorize_console(pid: ObjId, fd: u32, write: bool) -> Result<(), CompatErrno> {
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     let rights = if write {
@@ -1577,6 +1647,11 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if fd == 0 {
         authorize_console(pid, fd, false)?;
         return Ok(0);
+    }
+    if proc::linux_fd(pid, fd).is_some_and(|entry| {
+        entry.kind == compat_core::fd::CompatKind::Directory
+    }) {
+        return Err(CompatErrno::IsDirectory);
     }
     let (handle, offset) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
     let file = crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
@@ -2477,13 +2552,15 @@ fn linux_close(pid: ObjId, fd: u64) -> Result<u64, CompatErrno> {
 /// 仅接受绝对路径与只读标志；`O_CLOEXEC` 被保留，写模式、路径穿越和未知路径失败关闭。
 fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const O_CLOEXEC: u64 = 0x80000;
+    const O_DIRECTORY: u64 = 0x10000;
+    const O_NONBLOCK: u64 = 0x800;
     if !is_at_fdcwd(args[0]) {
         return Err(CompatErrno::Invalid);
     }
     #[cfg(feature = "compat-dynamic-libc-verify")]
     trace_path_address(pid, "openat-address", args[1]);
     let flags = args[2];
-    if flags & 3 != 0 || flags & !O_CLOEXEC != 0 {
+    if flags & 3 != 0 || flags & !(O_CLOEXEC | O_DIRECTORY | O_NONBLOCK) != 0 {
         return Err(CompatErrno::Perm);
     }
     let path = linux_c_string(args[1], 4096)?;
@@ -2492,9 +2569,20 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if !path.starts_with(b"/") {
         return Err(CompatErrno::Invalid);
     }
-    let file = crate::linux_vfs::lookup(&path).ok_or(CompatErrno::NoEntry)?;
-    let fd = proc::linux_install_file(pid, file.handle(), flags & O_CLOEXEC != 0)
-        .ok_or(CompatErrno::NoSpace)?;
+    let node = crate::linux_vfs::lookup_node(&path).ok_or(CompatErrno::NoEntry)?;
+    let close_on_exec = flags & O_CLOEXEC != 0;
+    let fd = match node {
+        crate::linux_vfs::Node::File(file) => {
+            if flags & O_DIRECTORY != 0 {
+                return Err(CompatErrno::NotDirectory);
+            }
+            proc::linux_install_file(pid, file.handle(), close_on_exec)
+        }
+        crate::linux_vfs::Node::Directory(directory) => {
+            proc::linux_install_dir(pid, directory.handle(), close_on_exec)
+        }
+    }
+    .ok_or(CompatErrno::NoSpace)?;
     Ok(u64::from(fd))
 }
 
@@ -2526,9 +2614,15 @@ fn linux_c_string(address: u64, max: usize) -> Result<alloc::vec::Vec<u8>, Compa
 /// 填充 x86_64 Linux `struct stat`，只报告普通只读文件；控制台和其他 fd 不属于本切片。
 fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-    let (handle, _) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
-    let file = crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
-    write_linux_stat(args[1], file)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let node = crate::linux_vfs::FileId::from_handle(entry.handle)
+        .map(crate::linux_vfs::Node::File)
+        .or_else(|| {
+            crate::linux_vfs::DirectoryId::from_handle(entry.handle)
+                .map(crate::linux_vfs::Node::Directory)
+        })
+        .ok_or(CompatErrno::BadFd)?;
+    write_linux_stat(args[1], node)?;
     Ok(0)
 }
 
@@ -2537,8 +2631,10 @@ fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 /// 支持精确虚拟路径和 `AT_EMPTY_PATH` 下的已打开文件；其他目录 fd、路径和 flags 失败关闭。
 fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const AT_EMPTY_PATH: u64 = 0x1000;
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_NO_AUTOMOUNT: u64 = 0x800;
     let file = if is_at_fdcwd(args[0]) {
-        if args[3] != 0 {
+        if args[3] & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT) != 0 {
             return Err(CompatErrno::Invalid);
         }
         #[cfg(feature = "compat-dynamic-libc-verify")]
@@ -2546,11 +2642,17 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         let path = linux_c_string(args[1], 4096)?;
         #[cfg(feature = "compat-dynamic-libc-verify")]
         trace_path("newfstatat", &path);
-        crate::linux_vfs::lookup(&path).ok_or(CompatErrno::NoEntry)?
-    } else if args[3] & !AT_EMPTY_PATH == 0 {
+        crate::linux_vfs::lookup_node(&path).ok_or(CompatErrno::NoEntry)?
+    } else if args[3] & !(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT) == 0 {
         let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-        let (handle, _) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
-        crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?
+        let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+        crate::linux_vfs::FileId::from_handle(entry.handle)
+            .map(crate::linux_vfs::Node::File)
+            .or_else(|| {
+                crate::linux_vfs::DirectoryId::from_handle(entry.handle)
+                    .map(crate::linux_vfs::Node::Directory)
+            })
+            .ok_or(CompatErrno::BadFd)?
     } else {
         return Err(CompatErrno::Invalid);
     };
@@ -2748,14 +2850,22 @@ fn linux_rt_sigprocmask(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
 ///
 /// 写入 144 字节、版本稳定的 x86_64 stat；时间和设备字段只表达当前虚拟快照，
 /// 不伪造宿主设备身份。
-fn write_linux_stat(address: u64, file: crate::linux_vfs::FileId) -> Result<(), CompatErrno> {
+fn write_linux_stat(
+    address: u64,
+    node: crate::linux_vfs::Node,
+) -> Result<(), CompatErrno> {
     const STAT_BYTES: usize = 144;
-    let size = file.bytes().len() as u64;
+    let (size, links, mode) = match node {
+        crate::linux_vfs::Node::File(file) => {
+            (file.bytes().len() as u64, 1u64, 0o100444u32)
+        }
+        crate::linux_vfs::Node::Directory(_) => (0u64, 2u64, 0o040555u32),
+    };
     let mut stat = [0u8; STAT_BYTES];
     stat[0..8].copy_from_slice(&1u64.to_le_bytes()); // st_dev
-    stat[8..16].copy_from_slice(&file.inode().to_le_bytes()); // st_ino
-    stat[16..24].copy_from_slice(&1u64.to_le_bytes());
-    stat[24..28].copy_from_slice(&0o100444u32.to_le_bytes());
+    stat[8..16].copy_from_slice(&node.inode().to_le_bytes()); // st_ino
+    stat[16..24].copy_from_slice(&links.to_le_bytes());
+    stat[24..28].copy_from_slice(&mode.to_le_bytes());
     stat[48..56].copy_from_slice(&size.to_le_bytes());
     stat[56..64].copy_from_slice(&4096i64.to_le_bytes());
     let blocks = size.div_ceil(512) as i64;
@@ -2824,7 +2934,7 @@ fn linux_access(path: u64) -> Result<u64, CompatErrno> {
     let bytes = linux_c_string(path, 4096)?;
     #[cfg(feature = "compat-dynamic-libc-verify")]
     trace_path("access", &bytes);
-    if crate::linux_vfs::lookup(&bytes).is_some() {
+    if crate::linux_vfs::lookup_node(&bytes).is_some() {
         Ok(0)
     } else {
         Err(CompatErrno::NoEntry)

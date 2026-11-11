@@ -82,6 +82,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::ReadLinkAt,
         LinuxSyscall::Write,
         LinuxSyscall::WriteV,
+        LinuxSyscall::GetDents64,
         LinuxSyscall::Close,
         LinuxSyscall::OpenAt,
         LinuxSyscall::Fstat,
