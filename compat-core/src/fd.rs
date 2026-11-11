@@ -85,6 +85,7 @@ impl<const N: usize> FdBatch<N> {
     }
 }
 
+#[derive(Clone)]
 pub struct FdTable<const N: usize = MAX_FDS> {
     slots: [Option<Slot>; N],
     generations: [u32; N],

@@ -19,7 +19,7 @@ use linux_raw_sys::general::{
     __NR_rt_sigprocmask, __NR_rt_sigreturn, __NR_sched_getaffinity, __NR_sched_getscheduler,
     __NR_sched_yield,
     __NR_set_robust_list, __NR_sysinfo,
-    __NR_set_tid_address,
+    __NR_set_tid_address, __NR_wait4,
     __NR_sigaltstack, __NR_statfs, __NR_statx, __NR_tgkill, __NR_time, __NR_uname, __NR_write,
     __NR_writev,
 };
@@ -154,6 +154,9 @@ pub enum LinuxSyscall {
     /// io_uring buffer/file registration.
     /// io_uring 缓冲与文件注册。
     IoUringRegister,
+    /// Wait for one Linux child process.
+    /// 等待一个 Linux 子进程。
+    Wait4,
 }
 
 /// Explicit Linux syscall authority for one compatibility process.
@@ -194,7 +197,7 @@ impl LinuxSyscallSet {
     }
 }
 
-const _: () = assert!((LinuxSyscall::IoUringRegister as usize) < LinuxSyscallSet::BITS);
+const _: () = assert!((LinuxSyscall::Wait4 as usize) < LinuxSyscallSet::BITS);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LinuxCall {
@@ -223,6 +226,9 @@ pub enum CompatErrno {
     Access = linux_raw_sys::errno::EACCES,
     NoEntry = linux_raw_sys::errno::ENOENT,
     NoProcess = linux_raw_sys::errno::ESRCH,
+    /// No waitable child process exists.
+    /// 不存在可等待的子进程。
+    NoChild = linux_raw_sys::errno::ECHILD,
     Interrupted = linux_raw_sys::errno::EINTR,
     BadFd = linux_raw_sys::errno::EBADF,
     TryAgain = linux_raw_sys::errno::EAGAIN,
@@ -335,6 +341,7 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_io_uring_setup) => LinuxSyscall::IoUringSetup,
         value if value == u64::from(__NR_io_uring_enter) => LinuxSyscall::IoUringEnter,
         value if value == u64::from(__NR_io_uring_register) => LinuxSyscall::IoUringRegister,
+        value if value == u64::from(__NR_wait4) => LinuxSyscall::Wait4,
         number => return SyscallDispatch::Unsupported { number },
     };
     SyscallDispatch::Mapped(LinuxCall {
@@ -420,6 +427,7 @@ mod tests {
             (__NR_io_uring_setup, LinuxSyscall::IoUringSetup),
             (__NR_io_uring_enter, LinuxSyscall::IoUringEnter),
             (__NR_io_uring_register, LinuxSyscall::IoUringRegister),
+            (__NR_wait4, LinuxSyscall::Wait4),
         ];
         for (number, syscall) in expected {
             assert_eq!(
@@ -446,6 +454,7 @@ mod tests {
         );
         assert_eq!(compat_result(Ok(7)), 7);
         assert_eq!(compat_result(Err(CompatErrno::BadFd)), -9);
+        assert_eq!(compat_result(Err(CompatErrno::NoChild)), -10);
         assert_eq!(compat_result(Err(CompatErrno::Range)), -34);
         assert_eq!(compat_result(Err(CompatErrno::Pipe)), -29);
         assert_eq!(compat_result(Err(CompatErrno::NoSys)), -38);

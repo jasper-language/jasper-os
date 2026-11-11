@@ -17,6 +17,7 @@
 #include <sys/sysinfo.h>
 #include <sys/time.h>
 #include <sys/uio.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -354,8 +355,46 @@ int main(void) {
     if (sched_getscheduler(0) != SCHED_OTHER) {
         return 46;
     }
+    pid_t fork_parent_pid = getpid();
+    volatile int fork_private = 0x1234;
+    pid_t first_child = fork();
+    if (first_child < 0) {
+        return 59;
+    }
+    if (first_child == 0) {
+        _exit(6);
+    }
+    pid_t child = fork();
+    if (child < 0) {
+        printf("jasper-fork-fail errno=%d\n", errno);
+        return 55;
+    }
+    if (child == 0) {
+        if (getppid() != fork_parent_pid) {
+            _exit(8);
+        }
+        fork_private = 0x5678;
+        _exit(7);
+    }
+    int child_status = 0;
+    if (waitpid(child, &child_status, 0) != child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 7) {
+        return 56;
+    }
+    if (fork_private != 0x1234) {
+        return 57;
+    }
+    child_status = 0;
+    if (waitpid(first_child, &child_status, 0) != first_child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 6) {
+        return 60;
+    }
+    errno = 0;
+    if (waitpid(child, &child_status, 0) != -1 || errno != ECHILD) {
+        return 58;
+    }
     close(fd);
-    printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld wall=%lld dirent=6 exec_meta=true\n",
+    printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld wall=%lld dirent=6 exec_meta=true fork=true\n",
            (int)parent, (long long)end, CPU_COUNT(&cpus), cpu, node,
            (long long)info.uptime, (unsigned long long)info.totalram,
            (unsigned long long)info.freeram, (unsigned)info.procs, executable,

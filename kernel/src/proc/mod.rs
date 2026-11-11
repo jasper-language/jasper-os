@@ -67,11 +67,13 @@ pub(crate) const LINUX_CONSOLE_HANDLE: u64 = u64::MAX;
 ///
 /// 可选 Linux 服务安装的进程兼容状态。原生 Jasper 进程不携带 fd 表、
 /// Linux pid 或 Linux syscall 权限位。
+#[derive(Clone)]
 #[cfg(feature = "linux-abi")]
 struct LinuxProcessState {
     calls: LinuxSyscallSet,
     fds: FdTable<64>,
     pid: u32,
+    ppid: u32,
     file_offsets: [u64; 64],
     /// Authorized directory view used for relative AT_FDCWD resolution.
     cwd: crate::linux_vfs::DirectoryId,
@@ -82,6 +84,14 @@ struct LinuxProcessState {
     /// Exact executable path exposed through `/proc/self/exe`.
     exec_path: [u8; 128],
     exec_path_len: usize,
+    mappings: Vec<LinuxMapping>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+struct LinuxMapping {
+    va: u64,
+    flags: MapFlags,
 }
 
 /// 进程状态。
@@ -211,6 +221,7 @@ struct ThreadStart {
     arg1: u64,
     linux_clone: bool,
     fs_base: Option<u64>,
+    linux_fork_regs: Option<[u64; 6]>,
     clone_rdx: u64,
     clone_r8: u64,
 }
@@ -648,6 +659,16 @@ pub(crate) fn linux_pid(pid: ObjId) -> Option<u32> {
     })
 }
 
+/// Returns the Linux parent identity for this compatibility process.
+/// 返回兼容进程的 Linux 父身份；内核创建的根进程没有父进程。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ppid(pid: ObjId) -> Option<u32> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p.linux.as_ref().map(|linux| linux.ppid),
+        _ => None,
+    })
+}
+
 /// Records the exact executable path used for Linux `/proc/self/exe`.
 ///
 /// 记录 Linux 程序的实际执行路径；超长、空或带 NUL 的路径失败关闭。
@@ -774,6 +795,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         calls,
         fds,
         pid,
+        ppid: compat_core::syscall::LINUX_COMPAT_ROOT_PPID as u32,
         file_offsets: [0; 64],
         cwd: crate::linux_vfs::DirectoryId::Root,
         brk: crate::arch::USER_WINDOW.0 + 0x1000_0000,
@@ -781,6 +803,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         signal_actions: [[0; 4]; 64],
         exec_path: [0; 128],
         exec_path_len: 0,
+        mappings: Vec::new(),
     };
     create_process(name, SyscallSet::EMPTY, move |process| {
         process.linux = Some(linux);
@@ -907,6 +930,13 @@ pub fn map_new(id: ObjId, va: u64, flags: MapFlags) -> Result<PhysFrame, ProcErr
         p.frames
             .try_reserve(1)
             .map_err(|_| ProcError::OutOfFrames)?;
+        #[cfg(feature = "linux-abi")]
+        if let Some(linux) = p.linux.as_mut() {
+            linux
+                .mappings
+                .try_reserve(1)
+                .map_err(|_| ProcError::OutOfFrames)?;
+        }
         p.space
             .map(VirtPage::containing(va), f, flags)
             .map_err(ProcError::Map)?;
@@ -934,6 +964,10 @@ pub fn map_new(id: ObjId, va: u64, flags: MapFlags) -> Result<PhysFrame, ProcErr
             let _ = p.space.unmap_raw(VirtPage::containing(va));
             return Err(ProcError::MemoryQuota);
         }
+        #[cfg(feature = "linux-abi")]
+        if let Some(linux) = p.linux.as_mut() {
+            linux.mappings.push(LinuxMapping { va, flags });
+        }
         p.frames.push(Arc::clone(&page));
         Ok(f)
     })
@@ -952,6 +986,10 @@ pub fn unmap_page(id: ObjId, va: u64) -> Result<(), ProcError> {
         match p.space.unmap_raw(VirtPage::containing(va)) {
             Ok(f) => {
                 let _ = p.memory_caps.revoke_range(va, 1);
+                #[cfg(feature = "linux-abi")]
+                if let Some(linux) = p.linux.as_mut() {
+                    linux.mappings.retain(|mapping| mapping.va != va);
+                }
                 Ok(f)
             }
             Err(e) => {
@@ -2121,7 +2159,15 @@ fn thread_entry() {
     #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
     if s.linux_clone {
         // SAFETY：clone 的 RIP/RSP 已由 spawn_linux_clone 校验在用户私有窗口内。
-        unsafe { crate::arch::x86_64::enter_syscall_return(s.entry, s.stack, s.clone_rdx, s.clone_r8) }
+        unsafe {
+            crate::arch::x86_64::enter_syscall_return(
+                s.entry,
+                s.stack,
+                s.linux_fork_regs.unwrap_or([0; 6]),
+                s.clone_rdx,
+                s.clone_r8,
+            )
+        }
     }
     // SAFETY：entry/stack 已校验位于私有窗口，代码与栈页由创建方映射；内核栈顶由调度器设置。
     unsafe { arch::enter_user(s.entry, s.stack, s.arg0, s.arg1) }
@@ -2138,7 +2184,21 @@ pub fn spawn_thread(
     arg0: u64,
     arg1: u64,
 ) -> Result<(TaskId, ObjId), ProcError> {
-    spawn_thread_mode(id, name, entry, stack, arg0, arg1, None, false, None, 0, 0, 0)
+    spawn_thread_mode(
+        id,
+        name,
+        entry,
+        stack,
+        arg0,
+        arg1,
+        None,
+        false,
+        None,
+        None,
+        0,
+        0,
+        0,
+    )
 }
 
 /// Author: chatgpt. Install affinity before publishing the runnable thread.
@@ -2152,7 +2212,21 @@ pub(crate) fn spawn_thread_affinity(
     arg1: u64,
     affinity: Option<kernel_core::smp::CpuSet>,
 ) -> Result<(TaskId, ObjId), ProcError> {
-    spawn_thread_mode(id, name, entry, stack, arg0, arg1, affinity, false, None, 0, 0, 0)
+    spawn_thread_mode(
+        id,
+        name,
+        entry,
+        stack,
+        arg0,
+        arg1,
+        affinity,
+        false,
+        None,
+        None,
+        0,
+        0,
+        0,
+    )
 }
 
 /// Creates a Linux clone child that resumes at the syscall return address with `rax=0`.
@@ -2165,6 +2239,7 @@ pub fn spawn_linux_clone(
     user_rip: u64,
     user_stack: u64,
     fs_base: Option<u64>,
+    preserved_regs: Option<[u64; 6]>,
     clear_child_tid: u64,
     clone_rdx: u64,
     clone_r8: u64,
@@ -2179,10 +2254,238 @@ pub fn spawn_linux_clone(
         None,
         true,
         fs_base,
+        preserved_regs,
         clear_child_tid,
         clone_rdx,
         clone_r8,
     )
+}
+
+/// Creates one bounded Linux fork child with a private copy of the parent address space.
+///
+/// 创建有界 Linux fork 子进程并复制父进程的私有地址空间。共享映射、设备映射和
+/// 击落隔离帧不属于当前 fork 子集，调用会失败关闭而不是错误共享父页。
+#[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+pub fn fork_linux_process(
+    parent: ObjId,
+    user_rip: u64,
+    user_stack: u64,
+    fs_base: u64,
+    preserved_regs: [u64; 6],
+    clear_child_tid: u64,
+) -> Result<ObjId, ProcError> {
+    let (parent_linux_pid, calls, state, mappings) = kobj::with(|t| match t.get(parent) {
+        Ok(KObject::Process(p)) if p.state == ProcState::Running => {
+            let linux = p.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
+            if !p.shared_maps.is_empty()
+                || !p.device_maps.is_empty()
+                || !p.quarantined.is_empty()
+            {
+                return Err(ProcError::NotTransferable);
+            }
+            let mappings = linux
+                .mappings
+                .iter()
+                .copied()
+                .filter(|mapping| mapping.flags.contains(MapFlags::USER))
+                .collect::<Vec<_>>();
+            Ok((linux.pid, linux.calls, linux.clone(), mappings))
+        }
+        _ => Err(ProcError::NoSuchProcess),
+    })?;
+
+    let child = create_linux("linux-fork", calls)?;
+    let rollback = |child: ObjId, adopted: bool| {
+        if adopted {
+            let _ = release_child(parent, child);
+        }
+        let _ = exit_idle(child, -1);
+        let _ = reap(child);
+    };
+    let child_pid = match linux_pid(child) {
+        Some(pid) => pid,
+        None => {
+            rollback(child, false);
+            return Err(ProcError::NoSuchProcess);
+        }
+    };
+    let prepared = with_proc(child, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::NoSuchProcess)?;
+        *linux = state;
+        linux.pid = child_pid;
+        linux.ppid = parent_linux_pid;
+        linux.mappings.clear();
+        Ok(())
+    });
+    if prepared.is_err() || inherit_application(parent, child).is_err() {
+        rollback(child, false);
+        return Err(ProcError::NoSuchProcess);
+    }
+    for mapping in mappings {
+        if let Err(error) = copy_linux_mapping(parent, child, mapping) {
+            kprintln!(
+                "[JSR-LINUX-FORK-PAGE-FAIL] va={:#x} flags={:?} error={:?}",
+                mapping.va,
+                mapping.flags,
+                error
+            );
+            rollback(child, false);
+            return Err(error);
+        }
+    }
+    if adopt(parent, child).is_err() {
+        rollback(child, false);
+        return Err(ProcError::NoSuchProcess);
+    }
+    if spawn_linux_clone(
+        child,
+        "linux-fork",
+        user_rip,
+        user_stack,
+        Some(fs_base),
+        Some(preserved_regs),
+        clear_child_tid,
+        0,
+        0,
+    )
+    .is_err()
+    {
+        rollback(child, true);
+        return Err(ProcError::NoTaskSlot);
+    }
+    Ok(child)
+}
+
+#[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+fn copy_linux_mapping(parent: ObjId, child: ObjId, mapping: LinuxMapping) -> Result<(), ProcError> {
+    let (source, current_flags) = with_proc(parent, |p| {
+        let (frame, current_flags) = p
+            .space
+            .translate(VirtPage::containing(mapping.va))
+            .ok_or(ProcError::Map(MapError::NotMapped))?;
+        let page = p
+            .frames
+            .iter()
+            .find(|page| page.frame() == frame)
+            .cloned()
+            .ok_or(ProcError::Map(MapError::NotMapped))?;
+        Ok((page, current_flags))
+    })?;
+    let source_frame = source.frame();
+    let charge = kobj::with(|t| {
+        let p = receiver(t, child)?;
+        p.memory_account
+            .reserve(1, 0, p.memory_owned_limit, p.memory_pin_limit)
+            .ok_or(ProcError::MemoryQuota)
+    })?;
+    let page =
+        crate::mm::memory_object::Page::zeroed(charge).ok_or(ProcError::OutOfFrames)?;
+    let destination_frame = page.frame();
+    let source_ptr = phys_to_virt(source_frame.start())
+        .ok_or(ProcError::Map(MapError::NotMapped))? as *const u8;
+    let destination_ptr = phys_to_virt(destination_frame.start())
+        .ok_or(ProcError::Map(MapError::NotMapped))? as *mut u8;
+    // SAFETY: both aliases cover one live private data frame. `source` keeps the
+    // parent frame retained while the child frame is exclusively new.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            source_ptr,
+            destination_ptr,
+            kernel_core::frame::FRAME_SIZE as usize,
+        );
+    }
+    with_proc(child, |p| {
+        if p.frames.len() + p.shared_maps.len() >= MAX_PROCESS_FRAMES {
+            return Err(ProcError::MemoryQuota);
+        }
+        p.frames
+            .try_reserve(1)
+            .map_err(|_| ProcError::OutOfFrames)?;
+        let linux = p.linux.as_mut().ok_or(ProcError::NoSuchProcess)?;
+        linux
+            .mappings
+            .try_reserve(1)
+            .map_err(|_| ProcError::OutOfFrames)?;
+        p.space
+            .map(
+                VirtPage::containing(mapping.va),
+                destination_frame,
+                current_flags,
+            )
+            .map_err(ProcError::Map)?;
+        let rights = MemoryRights::READ
+            .union(if current_flags.contains(MapFlags::WRITE) {
+                MemoryRights::WRITE
+            } else {
+                MemoryRights::NONE
+            })
+            .union(if current_flags.contains(MapFlags::EXECUTE) {
+                MemoryRights::EXECUTE
+            } else {
+                MemoryRights::NONE
+            });
+        if p.memory_caps
+            .grant(
+                mapping.va,
+                1,
+                rights,
+                MemoryKind::Image,
+                BackingIdentity::new(0, 1).expect("fixed valid generation"),
+            )
+            .is_err()
+        {
+            let _ = p.space.unmap_raw(VirtPage::containing(mapping.va));
+            return Err(ProcError::MemoryQuota);
+        }
+        linux.mappings.push(LinuxMapping {
+            va: mapping.va,
+            flags: current_flags,
+        });
+        p.frames.push(Arc::clone(&page));
+        Ok(())
+    })
+}
+
+/// Takes one exited Linux child's status and releases its object ownership.
+/// 取得一个已退出 Linux 子进程的状态，并释放父进程和创建者持有的引用。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn take_linux_child_exit(
+    parent: ObjId,
+    target_pid: u32,
+) -> Result<Option<(u32, i32)>, ProcError> {
+    let child = kobj::with(|t| match t.get(parent) {
+        Ok(KObject::Process(p)) => Ok(p.children.clone()),
+        _ => Err(ProcError::NoSuchProcess),
+    })?;
+    let mut matching = false;
+    for candidate in child {
+        let state = kobj::with(|t| match t.get(candidate) {
+            Ok(KObject::Process(p)) => {
+                let linux = p.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
+                if linux.pid != target_pid {
+                    return Ok(None);
+                }
+                matching = true;
+                Ok(Some(p.state))
+            }
+            _ => Err(ProcError::NoSuchProcess),
+        })?;
+        let Some(state) = state else {
+            continue;
+        };
+        let ProcState::Exited { code } = state else {
+            return Ok(None);
+        };
+        let status = (((code as u32) & 0xff) << 8) as i32;
+        let _ = reap(candidate);
+        let _ = release_child(parent, candidate);
+        return Ok(Some((target_pid, status)));
+    }
+    if matching {
+        Ok(None)
+    } else {
+        Err(ProcError::NoSuchProcess)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2196,6 +2499,7 @@ fn spawn_thread_mode(
     affinity: Option<kernel_core::smp::CpuSet>,
     linux_clone: bool,
     fs_base: Option<u64>,
+    linux_fork_regs: Option<[u64; 6]>,
     linux_clear_child_tid: u64,
     clone_rdx: u64,
     clone_r8: u64,
@@ -2257,6 +2561,7 @@ fn spawn_thread_mode(
             arg1,
             linux_clone,
             fs_base,
+            linux_fork_regs,
             clone_rdx,
             clone_r8,
         });

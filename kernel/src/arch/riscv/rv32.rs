@@ -189,6 +189,7 @@ pub fn syscall_args(x: &[usize; 32]) -> SyscallArgs {
         id: x[17] as u32 as u64,
         args: [pair(10, 13), pair(11, 14), pair(12, 15), 0, 0, 0],
         user_ip: None,
+        user_preserved: [0; 6],
         fxstate: None,
     }
 }

@@ -474,6 +474,12 @@ pub trait Platform {
         false
     }
 
+    /// Returns the current task's user TLS base where the platform exposes one.
+    /// 返回当前任务用户 TLS 基址；平台不支持时返回 0。
+    fn user_fs_base() -> u64 {
+        0
+    }
+
     /// 进入用户态执行（永不返回；回到内核只能经中断、异常或系统调用）。
     ///
     /// # Safety
@@ -792,6 +798,10 @@ pub fn kernel_stack() -> u64 {
 /// 设置当前任务的用户 TLS 基址。
 pub fn set_user_fs_base(base: u64) -> bool {
     Current::set_user_fs_base(base)
+}
+/// 读取当前任务用户 TLS 基址。
+pub fn user_fs_base() -> u64 {
+    Current::user_fs_base()
 }
 /// 见 [`Platform::enter_user`]。
 ///

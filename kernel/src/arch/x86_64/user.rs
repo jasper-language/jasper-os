@@ -45,33 +45,72 @@ pub unsafe fn enter(entry: u64, stack: u64, arg0: u64, arg1: u64) -> ! {
 
 /// 进入克隆子线程：用户 RIP/栈取自 `clone`，`rax=0` 表示 syscall 子进程返回。
 /// Enters a cloned child with `rax=0`, the Linux syscall child-return convention.
-pub unsafe fn enter_syscall_return(entry: u64, stack: u64, clone_rdx: u64, clone_r8: u64) -> ! {
+pub unsafe fn enter_syscall_return(
+    entry: u64,
+    stack: u64,
+    preserved: [u64; 6],
+    clone_rdx: u64,
+    clone_r8: u64,
+) -> ! {
     let sel = gdt::selectors();
     let cs = sel.user_code.0 as u64;
     let ss = sel.user_data.0 as u64;
     let rflags: u64 = 0x202;
-    asm!(
-        "push {ss}",
-        "push {stack}",
-        "push {rflags}",
-        "push {cs}",
-        "push {entry}",
-        "iretq",
-        ss = in(reg) ss,
-        stack = in(reg) stack,
-        rflags = in(reg) rflags,
-        cs = in(reg) cs,
-        entry = in(reg) entry,
-        in("rax") 0u64,
-        in("rdi") 0u64,
-        in("rsi") 0u64,
-        in("rdx") clone_rdx,
-        in("r10") 0u64,
-        in("r8") clone_r8,
-        in("r9") 0u64,
-        options(noreturn)
-    );
+    let frame = SyscallReturnFrame {
+        entry,
+        stack,
+        cs,
+        ss,
+        rflags,
+        clone_rdx,
+        clone_r8,
+        preserved,
+    };
+    jsr_enter_syscall_return_regs(&frame)
 }
+
+#[repr(C)]
+struct SyscallReturnFrame {
+    entry: u64,
+    stack: u64,
+    cs: u64,
+    ss: u64,
+    rflags: u64,
+    clone_rdx: u64,
+    clone_r8: u64,
+    preserved: [u64; 6],
+}
+
+extern "C" {
+    fn jsr_enter_syscall_return_regs(frame: *const SyscallReturnFrame) -> !;
+}
+
+global_asm!(
+    r#"
+    .global jsr_enter_syscall_return_regs
+jsr_enter_syscall_return_regs:
+    mov r9, rdi
+    mov rdx, qword ptr [r9 + 40]
+    mov r8, qword ptr [r9 + 48]
+    mov rbx, qword ptr [r9 + 56]
+    mov rbp, qword ptr [r9 + 64]
+    mov r12, qword ptr [r9 + 72]
+    mov r13, qword ptr [r9 + 80]
+    mov r14, qword ptr [r9 + 88]
+    mov r15, qword ptr [r9 + 96]
+    push qword ptr [r9 + 24]
+    push qword ptr [r9 + 8]
+    push qword ptr [r9 + 32]
+    push qword ptr [r9 + 16]
+    push qword ptr [r9]
+    xor eax, eax
+    xor edi, edi
+    xor esi, esi
+    xor r10d, r10d
+    xor r9d, r9d
+    iretq
+    "#
+);
 
 // 探针机器码（只读数据，不在内核态执行）。
 global_asm!(

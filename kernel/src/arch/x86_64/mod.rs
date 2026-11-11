@@ -294,6 +294,10 @@ impl Platform for X86_64 {
         true
     }
 
+    fn user_fs_base() -> u64 {
+        ::x86_64::registers::model_specific::FsBase::read().as_u64()
+    }
+
     unsafe fn enter_user(entry: u64, stack: u64, arg0: u64, arg1: u64) -> ! {
         user::enter(entry, stack, arg0, arg1)
     }

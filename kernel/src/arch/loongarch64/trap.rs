@@ -222,6 +222,7 @@ extern "C" fn jsr_loongarch64_trap(frame: &mut TrapFrame) {
             id: frame.x[11],
             args: [frame.x[4], frame.x[5], frame.x[6], frame.x[7], frame.x[8], frame.x[9]],
             user_ip: None,
+            user_preserved: [0; 6],
             fxstate: None,
         };
         frame.era += 4;

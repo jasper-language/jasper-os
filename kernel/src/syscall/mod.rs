@@ -53,6 +53,9 @@ pub struct SyscallArgs {
     /// x86_64 `clone` 所需的用户返回地址与栈指针；其他入口可为 `None`。
     /// User return RIP and RSP needed by x86_64 `clone`; other entries may use `None`.
     pub user_ip: Option<(u64, u64)>,
+    /// SysV callee-saved registers needed when resuming a forked user flow.
+    /// fork 用户流恢复所需的 SysV callee-saved 寄存器。
+    pub user_preserved: [u64; 6],
     /// Kernel-owned XSAVE image for the current x86_64 syscall.
     /// 当前 x86_64 syscall 在内核栈上的 XSAVE 映像。
     pub fxstate: Option<*mut [u8; XSAVE_BYTES]>,

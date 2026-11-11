@@ -221,6 +221,7 @@ fn handle_user_sync(frame: &mut TrapFrame) {
             id: x[8],
             args: [x[0], x[1], x[2], x[3], x[4], x[5]],
             user_ip: None,
+            user_preserved: [0; 6],
             fxstate: None,
         };
         frame.x[0] = syscall::on_syscall(&args) as u64;

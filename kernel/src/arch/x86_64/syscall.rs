@@ -60,6 +60,12 @@ static BLOCKS: [EntryBlock; MAX_CPUS] =
 /// 入口压栈后的寄存器帧（自低地址向高地址，顺序必须与下方汇编一致）。
 #[repr(C)]
 pub struct RawFrame {
+    rbx: u64,
+    rbp: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
     rax: u64,
     rdi: u64,
     rsi: u64,
@@ -122,8 +128,20 @@ jsr_syscall_entry:
     push rsi
     push rdi
     push rax
+    push r15
+    push r14
+    push r13
+    push r12
+    push rbp
+    push rbx
     mov rdi, rsp
     call jsr_syscall_dispatch
+    pop rbx
+    pop rbp
+    pop r12
+    pop r13
+    pop r14
+    pop r15
     mov rax, qword ptr [rsp]
     add rsp, 8
     pop rdi
@@ -165,6 +183,7 @@ extern "C" fn jsr_syscall_dispatch(frame: &mut RawFrame) -> u64 {
         id: frame.rax,
         args: [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9],
         user_ip: Some((frame.rcx, frame.user_rsp)),
+        user_preserved: [frame.rbx, frame.rbp, frame.r12, frame.r13, frame.r14, frame.r15],
         fxstate: Some(&mut frame.fxstate),
     };
     let outcome = syscall::on_entry(&args);

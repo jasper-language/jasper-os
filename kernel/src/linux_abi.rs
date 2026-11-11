@@ -1359,7 +1359,7 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
             Err(error) => SyscallOutcome::value(-i64::from(error as i32)),
         };
     }
-    let value = execute(pid, call, a.user_ip);
+    let value = execute(pid, call, a.user_ip, a.user_preserved);
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
         feature = "lifecycle-root-exec-verify"
@@ -1374,7 +1374,12 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
     SyscallOutcome { value, redirect }
 }
 
-fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
+fn execute(
+    pid: ObjId,
+    call: LinuxCall,
+    user_ip: Option<(u64, u64)>,
+    user_preserved: [u64; 6],
+) -> i64 {
     match call.syscall {
         LinuxSyscall::Write => compat_result(linux_write(pid, call.args)),
         LinuxSyscall::WriteV => compat_result(linux_writev(pid, call.args)),
@@ -1400,8 +1405,12 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
         LinuxSyscall::Madvise => compat_result(linux_madvise(pid, call.args)),
-        LinuxSyscall::Clone => compat_result(linux_clone(pid, call.args, user_ip)),
-        LinuxSyscall::Clone3 => compat_result(linux_clone3(pid, call.args, user_ip)),
+        LinuxSyscall::Clone => {
+            compat_result(linux_clone(pid, call.args, user_ip, user_preserved))
+        }
+        LinuxSyscall::Clone3 => {
+            compat_result(linux_clone3(pid, call.args, user_ip, user_preserved))
+        }
         LinuxSyscall::Brk => compat_result(linux_brk(pid, call.args[0])),
         LinuxSyscall::Access => compat_result(linux_access(call.args[0])),
         LinuxSyscall::ArchPrctl => compat_result(linux_arch_prctl(call.args)),
@@ -1437,7 +1446,10 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::GetGid | LinuxSyscall::GetEgid => {
             compat_core::syscall::LINUX_COMPAT_GID as i64
         }
-        LinuxSyscall::GetPpid => compat_core::syscall::LINUX_COMPAT_ROOT_PPID as i64,
+        LinuxSyscall::GetPpid => proc::linux_ppid(pid)
+            .map(i64::from)
+            .ok_or(CompatErrno::NoSys)
+            .unwrap_or_else(|error| -i64::from(error as i32)),
         // The compatibility identity has no supplementary groups.
         // 兼容身份没有附加组，因此 size 查询和写入都返回 0。
         LinuxSyscall::GetGroups => 0,
@@ -1472,6 +1484,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
             let code = call.args[0] as i64;
             proc::thread_exit(code, "linux process exit")
         }
+        LinuxSyscall::Wait4 => compat_result(linux_wait4(pid, call.args)),
         _ => -i64::from(CompatErrno::NoSys as i32),
     }
 }
@@ -2165,10 +2178,81 @@ fn linux_clone(
     pid: ObjId,
     args: [u64; 6],
     user_ip: Option<(u64, u64)>,
+    user_preserved: [u64; 6],
 ) -> Result<u64, CompatErrno> {
+    const CLONE_VM: u64 = 0x0000_0100;
+    if args[0] & CLONE_VM == 0 {
+        return linux_fork_clone(pid, args, user_ip, user_preserved);
+    }
     linux_spawn_clone(
         pid, args[0], args[1], args[2], args[3], args[4], user_ip, args[2], args[4],
     )
+}
+
+/// Implements the glibc `fork()` clone subset with a private copied address space.
+/// 实现 glibc `fork()` 使用的独立地址空间复制子集。
+fn linux_fork_clone(
+    pid: ObjId,
+    args: [u64; 6],
+    user_ip: Option<(u64, u64)>,
+    preserved_regs: [u64; 6],
+) -> Result<u64, CompatErrno> {
+    const SIGCHLD: u64 = 17;
+    const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
+    const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+    const CLONE_FLAGS: u64 = CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID;
+    let flags = args[0];
+    let signal = flags & 0xff;
+    if args[1] != 0
+        || signal != SIGCHLD
+        || flags & !(CLONE_FLAGS | 0xff) != 0
+        || args[2] != 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let (user_rip, user_stack) = user_ip.ok_or(CompatErrno::NoSys)?;
+    let clear_child_tid = if flags & CLONE_CHILD_CLEARTID != 0 {
+        args[3]
+    } else {
+        0
+    };
+    let child = proc::fork_linux_process(
+        pid,
+        user_rip,
+        user_stack,
+        crate::arch::user_fs_base(),
+        preserved_regs,
+        clear_child_tid,
+    )
+    .map_err(|error| match error {
+        proc::ProcError::NotTransferable => CompatErrno::NoSys,
+        _ => CompatErrno::NoMemory,
+    })?;
+    proc::linux_pid(child)
+        .map(u64::from)
+        .ok_or(CompatErrno::NoSys)
+}
+
+/// Blocks until one specific Linux child exits, then writes its encoded wait status.
+/// 阻塞到一个指定 Linux 子进程退出，再写入编码后的 wait 状态。
+fn linux_wait4(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let target = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    if target == 0 || args[2] != 0 || args[3] != 0 {
+        return Err(CompatErrno::NoSys);
+    }
+    loop {
+        match proc::take_linux_child_exit(_pid, target) {
+            Ok(Some((child_pid, status))) => {
+                if args[1] != 0 {
+                    copy_to_user(args[1], &status.to_le_bytes(), 4)
+                        .map_err(|_| CompatErrno::Fault)?;
+                }
+                return Ok(u64::from(child_pid));
+            }
+            Ok(None) => proc::block_step().map_err(|_| CompatErrno::Interrupted)?,
+            Err(_) => return Err(CompatErrno::NoChild),
+        }
+    }
 }
 
 /// Implements the structured `clone3(2)` layout used by modern glibc.
@@ -2178,6 +2262,7 @@ fn linux_clone3(
     pid: ObjId,
     args: [u64; 6],
     user_ip: Option<(u64, u64)>,
+    _user_preserved: [u64; 6],
 ) -> Result<u64, CompatErrno> {
     const CLONE_ARGS_BYTES: usize = 88;
     let size = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
@@ -2305,6 +2390,7 @@ fn linux_spawn_clone(
         user_rip,
         child_stack,
         fs_base,
+        None,
         clear_child_tid,
         clone_rdx,
         clone_r8,
