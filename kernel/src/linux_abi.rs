@@ -1738,14 +1738,32 @@ fn linux_readv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(available as u64)
 }
 
-/// Repositions one virtual compatibility file using Linux seek origins.
+/// Repositions one virtual compatibility file or directory using Linux seek origins.
 ///
-/// 按 Linux 的 `SEEK_SET/CUR/END` 更新虚拟文件游标；控制台不是可定位流。
+/// 按 Linux 的 `SEEK_SET/CUR/END` 更新虚拟文件或目录游标；控制台不是可定位流。
 fn linux_lseek(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if entry.handle == proc::LINUX_CONSOLE_HANDLE {
         return Err(CompatErrno::Pipe);
+    }
+    if entry.kind == compat_core::fd::CompatKind::Directory {
+        let (handle, current) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::BadFd)?;
+        let directory = crate::linux_vfs::DirectoryId::from_handle(handle)
+            .ok_or(CompatErrno::BadFd)?;
+        let count = 2usize
+            .checked_add(crate::linux_vfs::directory_entries(directory).len())
+            .ok_or(CompatErrno::Invalid)?;
+        let target =
+            compat_core::syscall::seek_target(current, count as u64, args[1] as i64, args[2])
+                .ok_or(CompatErrno::Invalid)?;
+        if target > count as u64 {
+            return Err(CompatErrno::Invalid);
+        }
+        if !proc::set_linux_dir_offset(pid, fd, target) {
+            return Err(CompatErrno::BadFd);
+        }
+        return Ok(target);
     }
     let (handle, current) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
     let file = crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?;

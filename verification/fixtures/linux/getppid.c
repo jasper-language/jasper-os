@@ -171,34 +171,45 @@ int main(void) {
     }
     int saw_usr = 0;
     unsigned root_entries = 0;
+    char first_root_name[256] = {0};
     struct dirent *entry;
     errno = 0;
     while ((entry = readdir(root)) != NULL) {
+        if (root_entries == 0) {
+            snprintf(first_root_name, sizeof(first_root_name), "%s",
+                     entry->d_name);
+        }
         root_entries++;
         saw_usr |= strcmp(entry->d_name, "usr") == 0;
     }
-    if (errno != 0 || root_entries < 4 || !saw_usr) {
+    if (errno != 0 || root_entries < 4 || !saw_usr ||
+        first_root_name[0] == '\0') {
         return 29;
+    }
+    rewinddir(root);
+    entry = readdir(root);
+    if (entry == NULL || strcmp(entry->d_name, first_root_name) != 0) {
+        return 30;
     }
     int usr_fd = openat(root_fd, "usr", O_RDONLY | O_CLOEXEC | O_DIRECTORY);
     if (usr_fd < 0) {
-        return 30;
+        return 31;
     }
     struct stat usr_stat;
     if (fstat(usr_fd, &usr_stat) != 0 || !S_ISDIR(usr_stat.st_mode)) {
-        return 31;
+        return 32;
     }
     if (fstatat(root_fd, "usr", &usr_stat, 0) != 0 ||
         !S_ISDIR(usr_stat.st_mode)) {
-        return 32;
+        return 33;
     }
     close(usr_fd);
     if (closedir(root) != 0) {
-        return 33;
+        return 34;
     }
     DIR *directory = opendir("/usr/lib/x86_64-linux-gnu");
     if (directory == NULL) {
-        return 34;
+        return 35;
     }
     unsigned library_mask = 0;
     while ((entry = readdir(directory)) != NULL) {
@@ -210,13 +221,13 @@ int main(void) {
         if (strcmp(entry->d_name, "libpcre2-8.so.0") == 0) library_mask |= 1u << 5;
     }
     if (closedir(directory) != 0 || library_mask != 0x3fu) {
-        return 35;
+        return 36;
     }
     errno = 0;
     directory = opendir("/usr/lib/x86_64-linux-gnu/libc.so.6");
     if (directory != NULL || errno != ENOTDIR) {
         if (directory != NULL) closedir(directory);
-        return 36;
+        return 37;
     }
     close(fd);
     printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld dirent=6\n",
