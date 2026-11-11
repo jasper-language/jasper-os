@@ -76,6 +76,8 @@ pex1-verify = ["user-programs", "krn2-observe"]
 pex2-verify = []
 # Dedicated central-versus-sharded object-table A/B evaluation.
 pex3-verify = []
+# Dedicated local selection-path density and latency probe.
+pex4-verify = []
 # Dedicated real-kernel heap growth and mapping-tail matrix.
 pex5-verify = []
 # Dedicated real-kernel frame allocation, cross-CPU release and reclaim matrix.

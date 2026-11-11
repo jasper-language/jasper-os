@@ -29,6 +29,8 @@
 //! （协作式调度演示）在演练期间临时关闭，结束后用 [`set_preemption`] 的返回值恢复。
 
 pub mod demo;
+#[cfg(feature = "pex4-verify")]
+pub mod pex4_probe;
 pub mod policy;
 pub mod scheduler;
 pub mod slots;

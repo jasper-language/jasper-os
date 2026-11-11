@@ -3584,6 +3584,10 @@ impl Scheduler {
             }
         }
 
+        #[cfg(feature = "pex4-verify")]
+        let pex4_start = crate::arch::cycles();
+        #[cfg(feature = "pex4-verify")]
+        let mut pex4_candidates = 0u32;
         // 类别仲裁在借用 tasks 之前完成（它会修改仲裁器状态）。
         let wanted = self.pick_arb_class(c, prev);
         // 只遍历本处理器的运行列表（与任务表容量无关）；记下遍历长度供验收核对
@@ -3620,7 +3624,13 @@ impl Scheduler {
                             .then_some((i, &owner.sched))
                     })
                 };
-                let mut it = runnable(yielding);
+                let it = runnable(yielding);
+                #[cfg(feature = "pex4-verify")]
+                let mut it = it.inspect(|_| {
+                    pex4_candidates = pex4_candidates.saturating_add(1);
+                });
+                #[cfg(not(feature = "pex4-verify"))]
+                let mut it = it;
                 let mut ch = queue.choose(&mut it);
                 if yielding && prev_runnable {
                     let prev_qos = epochs.get(prev).and_then(SlotLifecycle::history)
@@ -3632,13 +3642,26 @@ impl Scheduler {
                         _ => false,
                     };
                     if ch.is_none_or(|x| !x.rescued && worse(x.slot)) {
-                        let mut only_prev = runnable(false).filter(|(i, _)| *i == prev);
+                        let only_prev = runnable(false).filter(|(i, _)| *i == prev);
+                        #[cfg(feature = "pex4-verify")]
+                        let mut only_prev = only_prev.inspect(|_| {
+                            pex4_candidates = pex4_candidates.saturating_add(1);
+                        });
+                        #[cfg(not(feature = "pex4-verify"))]
+                        let mut only_prev = only_prev;
                         ch = queue.choose(&mut only_prev);
                     }
                 }
                 ch
             })
         };
+        #[cfg(feature = "pex4-verify")]
+        crate::sched::pex4_probe::record(
+            c,
+            visited,
+            pex4_candidates,
+            crate::arch::cycles().wrapping_sub(pex4_start),
+        );
 
         let next = match choice {
             Some(ch) => {
