@@ -1384,6 +1384,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::ReadV => compat_result(linux_readv(pid, call.args)),
         LinuxSyscall::ReadLinkAt => compat_result(linux_readlinkat(pid, call.args)),
         LinuxSyscall::Close => compat_result(linux_close(pid, call.args[0])),
+        LinuxSyscall::Chdir => compat_result(linux_chdir(pid, call.args[0])),
         LinuxSyscall::OpenAt => compat_result(linux_openat(pid, call.args)),
         LinuxSyscall::Fchdir => compat_result(linux_fchdir(pid, call.args[0])),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
@@ -1429,7 +1430,7 @@ fn execute(pid: ObjId, call: LinuxCall, user_ip: Option<(u64, u64)>) -> i64 {
         LinuxSyscall::GetRandom => compat_result(linux_getrandom(call.args)),
         LinuxSyscall::GetTimeOfDay => compat_result(linux_gettimeofday(call.args)),
         LinuxSyscall::Time => compat_result(linux_time(call.args)),
-        LinuxSyscall::Getcwd => compat_result(linux_getcwd(call.args)),
+        LinuxSyscall::Getcwd => compat_result(linux_getcwd(pid, call.args)),
         LinuxSyscall::GetUid | LinuxSyscall::GetEuid => {
             compat_core::syscall::LINUX_COMPAT_UID as i64
         }
@@ -1502,17 +1503,20 @@ fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 /// Returns the compatibility process's current directory.
 ///
 /// 返回兼容进程的当前目录；当前装载命名空间只提供 System A 根。
-fn linux_getcwd(args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const CWD: &[u8] = b"/\0";
+fn linux_getcwd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let cwd = proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?;
+    let mut output = alloc::vec::Vec::with_capacity(cwd.path().len() + 1);
+    output.extend_from_slice(cwd.path());
+    output.push(0);
     let size = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
     if size == 0 {
         return Err(CompatErrno::Invalid);
     }
-    if size < CWD.len() {
+    if size < output.len() {
         return Err(CompatErrno::Range);
     }
-    copy_to_user(args[0], CWD, CWD.len()).map_err(|_| CompatErrno::Fault)?;
-    Ok(CWD.len() as u64)
+    copy_to_user(args[0], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(output.len() as u64)
 }
 
 /// Writes one Linux iovec array to an authorized console descriptor.
@@ -2641,7 +2645,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             return Err(CompatErrno::Invalid);
         }
         let base = if is_at_fdcwd(args[0]) {
-            crate::linux_vfs::DirectoryId::Root.path()
+            proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path()
         } else {
             let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
             let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
@@ -2678,14 +2682,58 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(u64::from(fd))
 }
 
-/// Restores the compatibility working directory to the authorized root directory.
+/// Changes the compatibility working directory to one authorized directory.
 ///
-/// 当前兼容 cwd 只有根视图，因此 `fchdir` 只接受根目录 fd；子目录 cwd 明确返回
-/// `ENOSYS`，不把根路径冒充子目录路径。
+/// `fchdir` 只接受已验证的目录 fd，并把同一目录身份提交为进程 cwd。
 fn linux_fchdir(pid: ObjId, fd: u64) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(fd).map_err(|_| CompatErrno::BadFd)?;
     let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::BadFd)?;
-    if handle == crate::linux_vfs::DirectoryId::Root.handle() {
+    let directory =
+        crate::linux_vfs::DirectoryId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
+    if proc::set_linux_cwd(pid, directory) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoSys)
+    }
+}
+
+/// Changes the Linux compatibility current directory within the static namespace.
+///
+/// 绝对路径从兼容根解析，相对路径从进程当前目录解析；仅目录节点可提交为 cwd。
+fn linux_chdir(pid: ObjId, address: u64) -> Result<u64, CompatErrno> {
+    let path = linux_c_string(address, 4096)?;
+    let resolved = if path.starts_with(b"/") {
+        path
+    } else {
+        if path == b".."
+            || path.starts_with(b"../")
+            || path.windows(4).any(|window| window == b"/../")
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        let current = proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?;
+        if path == b"." {
+            return if proc::set_linux_cwd(pid, current) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::NoSys)
+            };
+        }
+        let base = current.path();
+        let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
+        resolved.extend_from_slice(base);
+        if !base.ends_with(b"/") {
+            resolved.push(b'/');
+        }
+        resolved.extend_from_slice(&path);
+        resolved
+    };
+    let directory = match crate::linux_vfs::lookup_node(&resolved) {
+        Some(crate::linux_vfs::Node::Directory(directory)) => directory,
+        Some(crate::linux_vfs::Node::File(_)) => return Err(CompatErrno::NotDirectory),
+        None => return Err(CompatErrno::NoEntry),
+    };
+    if proc::set_linux_cwd(pid, directory) {
         Ok(0)
     } else {
         Err(CompatErrno::NoSys)
@@ -2778,7 +2826,7 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             return Err(CompatErrno::Invalid);
         }
         let base = if is_at_fdcwd(args[0]) {
-            crate::linux_vfs::DirectoryId::Root.path()
+            proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path()
         } else {
             let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
             let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
@@ -2844,7 +2892,7 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     return Err(CompatErrno::Invalid);
                 }
                 let base = if is_at_fdcwd(args[0]) {
-                    crate::linux_vfs::DirectoryId::Root.path()
+                    proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path()
                 } else {
                     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
                     let (handle, _) =

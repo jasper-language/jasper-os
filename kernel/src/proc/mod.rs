@@ -73,6 +73,8 @@ struct LinuxProcessState {
     fds: FdTable<64>,
     pid: u32,
     file_offsets: [u64; 64],
+    /// Authorized directory view used for relative AT_FDCWD resolution.
+    cwd: crate::linux_vfs::DirectoryId,
     brk: u64,
     mmap_next: u64,
     /// Linux process-wide signal dispositions.
@@ -397,6 +399,30 @@ pub(crate) fn linux_fd(pid: ObjId, fd: u32) -> Option<compat_core::fd::FdEntry> 
         Ok(KObject::Process(p)) => p.linux.as_ref()?.fds.get_fd(fd),
         _ => None,
     })
+}
+
+/// Returns the process-local Linux current directory view.
+///
+/// 返回进程级 Linux cwd 视图；它只是可选兼容 namespace 中的目录身份。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_cwd(pid: ObjId) -> Option<crate::linux_vfs::DirectoryId> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p.linux.as_ref().map(|linux| linux.cwd),
+        _ => None,
+    })
+}
+
+/// Commits a validated Linux current directory.
+///
+/// 仅提交已解析到兼容 namespace 的目录身份；进程退出后不存在可更新状态。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_cwd(pid: ObjId, cwd: crate::linux_vfs::DirectoryId) -> bool {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux.cwd = cwd;
+        Ok(())
+    })
+    .is_ok()
 }
 
 /// Duplicates one current Linux descriptor at or above `minimum`.
@@ -749,6 +775,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         fds,
         pid,
         file_offsets: [0; 64],
+        cwd: crate::linux_vfs::DirectoryId::Root,
         brk: crate::arch::USER_WINDOW.0 + 0x1000_0000,
         mmap_next: crate::arch::USER_WINDOW.0 + 0x4000_0000,
         signal_actions: [[0; 4]; 64],

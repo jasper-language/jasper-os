@@ -636,7 +636,7 @@ fn execute_root_dynamic_programs(root: &Ext4Reader) -> Result<(), HealthError> {
     let dash_argv: [&[u8]; 3] = [
         b"/bin/dash",
         b"-c",
-        b"echo jasper-shell-ok\npwd\n",
+        b"echo jasper-shell-ok\ncd /usr\npwd\n",
     ];
     run_root_program(root, "/bin/dash", &dash_argv)?;
     let printf_argv: [&[u8]; 3] = [b"/usr/bin/printf", b"jasper-%s\n", b"dynamic"];

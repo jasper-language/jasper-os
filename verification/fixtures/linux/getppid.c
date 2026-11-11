@@ -233,13 +233,30 @@ int main(void) {
               (struct statx *)1) != -1 || errno != EFAULT) {
         return 36;
     }
+    char cwd_buffer[32];
+    if (chdir("/usr") != 0 ||
+        getcwd(cwd_buffer, sizeof(cwd_buffer)) == NULL ||
+        strcmp(cwd_buffer, "/usr") != 0) {
+        return 37;
+    }
+    int relative_lib = openat(AT_FDCWD, "lib",
+                              O_RDONLY | O_CLOEXEC | O_DIRECTORY);
+    if (relative_lib < 0) {
+        return 38;
+    }
+    close(relative_lib);
+    if (fchdir(root_fd) != 0 ||
+        getcwd(cwd_buffer, sizeof(cwd_buffer)) == NULL ||
+        strcmp(cwd_buffer, "/") != 0) {
+        return 39;
+    }
     close(usr_fd);
     if (closedir(root) != 0) {
-        return 37;
+        return 40;
     }
     DIR *directory = opendir("/usr/lib/x86_64-linux-gnu");
     if (directory == NULL) {
-        return 38;
+        return 41;
     }
     unsigned library_mask = 0;
     while ((entry = readdir(directory)) != NULL) {
@@ -251,26 +268,26 @@ int main(void) {
         if (strcmp(entry->d_name, "libpcre2-8.so.0") == 0) library_mask |= 1u << 5;
     }
     if (closedir(directory) != 0 || library_mask != 0x3fu) {
-        return 39;
+        return 42;
     }
     errno = 0;
     directory = opendir("/usr/lib/x86_64-linux-gnu/libc.so.6");
     if (directory != NULL || errno != ENOTDIR) {
         if (directory != NULL) closedir(directory);
-        return 40;
+        return 43;
     }
     struct statfs compatibility_fs;
     if (fstatfs(fd, &compatibility_fs) != 0 ||
         compatibility_fs.f_type != 0xef53 ||
         compatibility_fs.f_bsize != 4096) {
-        return 41;
+        return 44;
     }
     errno = 0;
     if (ioctl(STDOUT_FILENO, 0x802c542aUL, NULL) != -1 || errno != ENOTTY) {
-        return 42;
+        return 45;
     }
     if (sched_getscheduler(0) != SCHED_OTHER) {
-        return 43;
+        return 46;
     }
     close(fd);
     printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld wall=%lld dirent=6\n",
