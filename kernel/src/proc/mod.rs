@@ -155,6 +155,7 @@ struct LinuxControlMessage {
     credentials: bool,
 }
 
+#[cfg(feature = "linux-abi")]
 #[derive(Default)]
 pub(crate) struct LinuxControlDelivery {
     pub fds: Vec<LinuxFdTransfer>,
