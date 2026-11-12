@@ -19,11 +19,16 @@
 //! [`destroy_task_object`]：销毁地址空间、归还帧、释放线程表引用（级联）。
 
 use alloc::boxed::Box;
+#[cfg(feature = "linux-abi")]
 use alloc::collections::VecDeque;
-use alloc::sync::{Arc, Weak};
+#[cfg(feature = "linux-abi")]
+use alloc::sync::Weak;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+#[cfg(feature = "linux-abi")]
+use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::capability::{CapabilityId, CapabilityLink};
 use kernel_core::frame::{PhysFrame, FRAME_SIZE};
@@ -38,6 +43,7 @@ use kernel_core::objtable::ObjId;
 use kernel_core::paging::{MapError, MapFlags, VirtPage};
 use kernel_core::security::{ApplicationIdentity, IdentityClass};
 use kernel_core::security_domain::DomainKey;
+#[cfg(feature = "linux-abi")]
 use kernel_core::sync::SpinLock;
 use kernel_core::usi_request::{Begin as UsiRequestBegin, Ledger as UsiRequestLedger};
 
@@ -125,11 +131,13 @@ struct LinuxSocketHandle {
     controls: Arc<LinuxSocketControls>,
 }
 
+#[cfg(feature = "linux-abi")]
 pub(crate) struct LinuxFdTransfer {
     description: compat_core::FdDescription,
     resource: LinuxFdResource,
 }
 
+#[cfg(feature = "linux-abi")]
 enum LinuxFdResource {
     Generic,
     Pipe(Arc<compat_core::PipeEndpoint>),
@@ -140,23 +148,27 @@ enum LinuxFdResource {
     },
 }
 
+#[cfg(feature = "linux-abi")]
 struct LinuxControlMessage {
     start: usize,
     fds: Vec<LinuxFdTransfer>,
 }
 
+#[cfg(feature = "linux-abi")]
 struct LinuxSocketControlQueue {
     messages: SpinLock<VecDeque<LinuxControlMessage>>,
     written: AtomicUsize,
     read: AtomicUsize,
 }
 
+#[cfg(feature = "linux-abi")]
 struct LinuxSocketControls {
     rx: SpinLock<Option<Arc<LinuxSocketControlQueue>>>,
     tx: SpinLock<Option<Arc<LinuxSocketControlQueue>>>,
     flags: AtomicU32,
 }
 
+#[cfg(feature = "linux-abi")]
 impl LinuxSocketControls {
     fn empty() -> Arc<Self> {
         Arc::new(Self {
@@ -211,6 +223,7 @@ impl LinuxSocketControls {
     }
 }
 
+#[cfg(feature = "linux-abi")]
 struct PendingSocketConnection {
     endpoint: Arc<compat_core::UnixSocketEndpoint>,
     controls: Arc<LinuxSocketControls>,
