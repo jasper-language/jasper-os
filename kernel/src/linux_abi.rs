@@ -1442,7 +1442,20 @@ fn execute(
         LinuxSyscall::GetDents64 => compat_result(linux_getdents64(pid, call.args)),
         LinuxSyscall::Read => compat_result(linux_read(pid, call.args)),
         LinuxSyscall::Pread64 => compat_result(linux_pread64(pid, call.args)),
+        LinuxSyscall::Pwrite64 => compat_result(linux_pwrite64(pid, call.args)),
         LinuxSyscall::ReadV => compat_result(linux_readv(pid, call.args)),
+        LinuxSyscall::PreadV => {
+            compat_result(linux_vectored_file_io(pid, call.args, false, true, false))
+        }
+        LinuxSyscall::PwriteV => {
+            compat_result(linux_vectored_file_io(pid, call.args, true, true, false))
+        }
+        LinuxSyscall::PreadV2 => {
+            compat_result(linux_vectored_file_io(pid, call.args, false, true, true))
+        }
+        LinuxSyscall::PwriteV2 => {
+            compat_result(linux_vectored_file_io(pid, call.args, true, true, true))
+        }
         LinuxSyscall::ReadLinkAt => compat_result(linux_readlinkat(pid, call.args)),
         LinuxSyscall::Close => compat_result(linux_close(pid, call.args[0])),
         LinuxSyscall::CloseRange => compat_result(linux_close_range(pid, call.args)),
@@ -1633,8 +1646,12 @@ fn linux_uname(args: [u64; 6]) -> Result<u64, CompatErrno> {
 }
 
 fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MAX_WRITE: usize = 1024 * 1024;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let len = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if len > MAX_WRITE {
+        return Err(CompatErrno::Invalid);
+    }
     if let Some(entry) = proc::linux_fd(pid, fd) {
         if entry.kind == compat_core::fd::CompatKind::Pipe {
             if !entry.rights.contains(kernel_core::object::Rights::WRITE) {
@@ -1650,6 +1667,26 @@ fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 return Err(CompatErrno::BadFd);
             }
             return linux_socket_write(pid, fd, entry.handle, args[1], len, false, false);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Device
+            && proc::linux_ashmem_is_regular(pid, entry.handle) == Some(true)
+        {
+            if !entry.rights.contains(kernel_core::object::Rights::WRITE) {
+                return Err(CompatErrno::BadFd);
+            }
+            let offset = proc::linux_fd_offset(pid, fd).ok_or(CompatErrno::BadFd)?;
+            if len == 0 {
+                return Ok(0);
+            }
+            let mut bytes = alloc::vec![0u8; len];
+            copy_from_user(&mut bytes, args[1], len).map_err(|_| CompatErrno::Fault)?;
+            let written =
+                proc::linux_ashmem_write_from(pid, entry.handle, offset, &bytes)
+                    .map_err(ashmem_compat_error)?;
+            if written != 0 && !proc::set_linux_fd_offset(pid, fd, offset + written as u64) {
+                return Err(CompatErrno::BadFd);
+            }
+            return Ok(written as u64);
         }
     }
     authorize_console(pid, fd, true)?;
@@ -1696,6 +1733,12 @@ fn linux_writev(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
     if count > MAX_IOVECS {
         return Err(CompatErrno::Invalid);
+    }
+    if proc::linux_fd(pid, fd).is_some_and(|entry| {
+        entry.kind == compat_core::fd::CompatKind::Device
+            && proc::linux_ashmem_is_regular(pid, entry.handle) == Some(true)
+    }) {
+        return linux_vectored_file_io(pid, args, true, false, false);
     }
     authorize_console(pid, fd, true)?;
     let mut total = 0usize;
@@ -1869,6 +1912,28 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             }
             return linux_socket_read(pid, fd, entry.handle, args[1], len, false);
         }
+        if entry.kind == compat_core::fd::CompatKind::Device
+            && proc::linux_ashmem_is_regular(pid, entry.handle) == Some(true)
+        {
+            if !entry.rights.contains(kernel_core::object::Rights::READ) {
+                return Err(CompatErrno::BadFd);
+            }
+            let offset = proc::linux_fd_offset(pid, fd).ok_or(CompatErrno::BadFd)?;
+            if len == 0 {
+                return Ok(0);
+            }
+            let mut bytes = alloc::vec![0u8; len];
+            let read = proc::linux_ashmem_read_from(pid, entry.handle, offset, &mut bytes)
+                .map_err(ashmem_compat_error)?;
+            if read != 0 {
+                copy_to_user(args[1], &bytes[..read], read)
+                    .map_err(|_| CompatErrno::Fault)?;
+                if !proc::set_linux_fd_offset(pid, fd, offset + read as u64) {
+                    return Err(CompatErrno::BadFd);
+                }
+            }
+            return Ok(read as u64);
+        }
     }
     if fd == 0 {
         authorize_console(pid, fd, false)?;
@@ -1925,6 +1990,24 @@ fn linux_pread64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if len > MAX_READ {
         return Err(CompatErrno::Invalid);
     }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind == compat_core::fd::CompatKind::Device
+        && proc::linux_ashmem_is_regular(pid, entry.handle) == Some(true)
+    {
+        if !entry.rights.contains(kernel_core::object::Rights::READ) {
+            return Err(CompatErrno::BadFd);
+        }
+        let mut bytes = alloc::vec![0u8; len];
+        let read = proc::linux_ashmem_read_from(pid, entry.handle, args[3], &mut bytes)
+            .map_err(ashmem_compat_error)?;
+        let io = admit_process_io(pid, read as u64, 1)?;
+        if read != 0 {
+            copy_to_user(args[1], &bytes[..read], read)
+                .map_err(|_| CompatErrno::Fault)?;
+        }
+        io.commit();
+        return Ok(read as u64);
+    }
     let (handle, _) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
     let file = crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
     let offset = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
@@ -1939,6 +2022,158 @@ fn linux_pread64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(available as u64)
 }
 
+/// Implements bounded `pwrite64(2)` for a memfd regular file.
+fn linux_pwrite64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MAX_WRITE: usize = 1024 * 1024;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let len = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if len > MAX_WRITE {
+        return Err(CompatErrno::Invalid);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Device
+        || proc::linux_ashmem_is_regular(pid, entry.handle) != Some(true)
+        || !entry.rights.contains(kernel_core::object::Rights::WRITE)
+    {
+        return Err(CompatErrno::BadFd);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+    let mut bytes = alloc::vec![0u8; len];
+    copy_from_user(&mut bytes, args[1], len).map_err(|_| CompatErrno::Fault)?;
+    let written = proc::linux_ashmem_write_from(pid, entry.handle, args[3], &bytes)
+        .map_err(ashmem_compat_error)?;
+    Ok(written as u64)
+}
+
+/// Implements `preadv(2)`, `pwritev(2)`, `preadv2(2)` and `pwritev2(2)` for a
+/// memfd regular file. All iovec metadata and user ranges are validated before
+/// the backing bytes or descriptor cursor can change.
+fn linux_vectored_file_io(
+    pid: ObjId,
+    args: [u64; 6],
+    write: bool,
+    positioned: bool,
+    version_two: bool,
+) -> Result<u64, CompatErrno> {
+    const MAX_IOVECS: usize = 16;
+    const MAX_BYTES: usize = 1024 * 1024;
+    const IOVEC_BYTES: usize = 16;
+    const RWF_SUPPORTED: u64 = 0x1 | 0x2 | 0x4 | 0x8;
+
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if count > MAX_IOVECS {
+        return Err(CompatErrno::Invalid);
+    }
+    let flags = if version_two { args[4] } else { 0 };
+    if flags & !RWF_SUPPORTED != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Device
+        || proc::linux_ashmem_is_regular(pid, entry.handle) != Some(true)
+    {
+        return Err(CompatErrno::BadFd);
+    }
+    let required = if write {
+        kernel_core::object::Rights::WRITE
+    } else {
+        kernel_core::object::Rights::READ
+    };
+    if !entry.rights.contains(required) {
+        return Err(CompatErrno::BadFd);
+    }
+    let mut vectors = alloc::vec::Vec::with_capacity(count);
+    let mut total = 0usize;
+    for index in 0..count {
+        let address = args[1]
+            .checked_add((index * IOVEC_BYTES) as u64)
+            .ok_or(CompatErrno::Fault)?;
+        let mut iovec = [0u8; IOVEC_BYTES];
+        copy_from_user(&mut iovec, address, IOVEC_BYTES).map_err(|_| CompatErrno::Fault)?;
+        let base = u64::from_le_bytes(iovec[..8].try_into().unwrap());
+        let len = usize::try_from(u64::from_le_bytes(iovec[8..].try_into().unwrap()))
+            .map_err(|_| CompatErrno::Invalid)?;
+        base.checked_add(u64::try_from(len).map_err(|_| CompatErrno::Invalid)?)
+            .ok_or(CompatErrno::Fault)?;
+        total = total.checked_add(len).ok_or(CompatErrno::Invalid)?;
+        if total > MAX_BYTES {
+            return Err(CompatErrno::Invalid);
+        }
+        vectors.push((base, len));
+    }
+    let signed_offset = if positioned { args[3] as i64 } else { -1 };
+    let uses_cursor = !positioned || signed_offset == -1;
+    if positioned && signed_offset == -1 && !version_two {
+        return Err(CompatErrno::Invalid);
+    }
+    let offset = if uses_cursor {
+        proc::linux_fd_offset(pid, fd).ok_or(CompatErrno::BadFd)?
+    } else if signed_offset < 0 {
+        return Err(CompatErrno::Invalid);
+    } else {
+        args[3]
+    };
+    if total == 0 {
+        return Ok(0);
+    }
+    if write {
+        let mut bytes = alloc::vec![0u8; total];
+        let mut input_offset = 0usize;
+        for (base, len) in vectors {
+            copy_from_user(&mut bytes[input_offset..input_offset + len], base, len)
+                .map_err(|_| CompatErrno::Fault)?;
+            input_offset += len;
+        }
+        let io = admit_process_io(pid, total as u64, 1)?;
+        let written = proc::linux_ashmem_write_from(pid, entry.handle, offset, &bytes)
+            .map_err(ashmem_compat_error)?;
+        io.commit();
+        if uses_cursor
+            && written != 0
+            && !proc::set_linux_fd_offset(pid, fd, offset + written as u64)
+        {
+            return Err(CompatErrno::BadFd);
+        }
+        return Ok(written as u64);
+    }
+
+    let mut bytes = alloc::vec![0u8; total];
+    let read = proc::linux_ashmem_read_from(pid, entry.handle, offset, &mut bytes)
+        .map_err(ashmem_compat_error)?;
+    let io = admit_process_io(pid, read as u64, 1)?;
+    let mut input_offset = 0usize;
+    let mut remaining = read;
+    let mut ranges = alloc::vec::Vec::with_capacity(vectors.len());
+    for (base, len) in vectors {
+        let take = remaining.min(len);
+        if take != 0 {
+            ranges.push((base, &bytes[input_offset..input_offset + take]));
+            input_offset += take;
+            remaining -= take;
+        }
+        if remaining == 0 {
+            break;
+        }
+    }
+    if !ranges.is_empty() {
+        copy_to_user_vectored(&ranges).map_err(|error| match error {
+            UserPtrError::Quota | UserPtrError::OutOfMemory => CompatErrno::NoMemory,
+            _ => CompatErrno::Fault,
+        })?;
+    }
+    io.commit();
+    if uses_cursor
+        && read != 0
+        && !proc::set_linux_fd_offset(pid, fd, offset + read as u64)
+    {
+        return Err(CompatErrno::BadFd);
+    }
+    Ok(read as u64)
+}
+
 /// Implements bounded Linux `readv(2)` with all-or-nothing user-range validation.
 ///
 /// 有界读取虚拟文件到多个用户区间；先固定全部目标页，失败时不写入且不推进游标。
@@ -1950,6 +2185,12 @@ fn linux_readv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
     if count > MAX_IOVECS {
         return Err(CompatErrno::Invalid);
+    }
+    if proc::linux_fd(pid, fd).is_some_and(|entry| {
+        entry.kind == compat_core::fd::CompatKind::Device
+            && proc::linux_ashmem_is_regular(pid, entry.handle) == Some(true)
+    }) {
+        return linux_vectored_file_io(pid, args, false, false, false);
     }
     let mut vectors = alloc::vec::Vec::with_capacity(count);
     let mut total = 0usize;
@@ -2060,6 +2301,20 @@ fn linux_lseek(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             return Err(CompatErrno::Invalid);
         }
         if !proc::set_linux_dir_offset(pid, fd, target) {
+            return Err(CompatErrno::BadFd);
+        }
+        return Ok(target);
+    }
+    if entry.kind == compat_core::fd::CompatKind::Device
+        && proc::linux_ashmem_is_regular(pid, entry.handle) == Some(true)
+    {
+        let current = proc::linux_fd_offset(pid, fd).ok_or(CompatErrno::BadFd)?;
+        let (size, _, _) =
+            proc::linux_ashmem_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+        let target =
+            compat_core::syscall::seek_target(current, size, args[1] as i64, args[2])
+                .ok_or(CompatErrno::Invalid)?;
+        if !proc::set_linux_fd_offset(pid, fd, target) {
             return Err(CompatErrno::BadFd);
         }
         return Ok(target);
@@ -3522,9 +3777,6 @@ fn linux_ftruncate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     if current == size {
         return Ok(0);
-    }
-    if current != 0 {
-        return Err(CompatErrno::Invalid);
     }
     proc::linux_ashmem_set_size(pid, entry.handle, size)
         .map_err(ashmem_compat_error)?;

@@ -2179,8 +2179,9 @@ pub(crate) fn linux_free_transaction_buffer(pid: ObjId, address: u64, length: us
     true
 }
 
-/// Resizes one empty ashmem buffer and commits its zeroed page backing
-/// all-or-nothing.
+/// Resizes one shared-page buffer and commits its page accounting
+/// all-or-nothing. Growing allocates zeroed pages; shrinking retains pages
+/// through any existing mappings before releasing their buffer references.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_ashmem_set_size(
     pid: ObjId,
@@ -2189,7 +2190,7 @@ pub(crate) fn linux_ashmem_set_size(
 ) -> Result<(), LinuxAshmemError> {
     const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
     const MAX_BYTES: u64 = 16 * 1024 * 1024;
-    if size == 0 || size > MAX_BYTES {
+    if size > MAX_BYTES {
         return Err(LinuxAshmemError::Invalid);
     }
     let pages_count = size.div_ceil(PAGE);
@@ -2201,34 +2202,174 @@ pub(crate) fn linux_ashmem_set_size(
             .find(|ashmem| ashmem.handle == handle)
             .map(|ashmem| Arc::clone(&ashmem.buffer))
             .ok_or(ProcError::NoTaskSlot)?;
-        if buffer.size.load(Ordering::Acquire) != 0 {
+        if !buffer.regular_file && buffer.size.load(Ordering::Acquire) != 0 {
             return Err(ProcError::NoTaskSlot);
         }
-        let mut charge = p
-            .memory_account
-            .reserve(
-                pages_count,
-                0,
-                p.memory_owned_limit,
-                p.memory_pin_limit,
-            )
-            .ok_or(ProcError::MemoryQuota)?;
-        let mut pages = Vec::new();
-        pages
-            .try_reserve_exact(pages_count as usize)
-            .map_err(|_| ProcError::OutOfFrames)?;
-        for _ in 0..pages_count {
-            let page_charge = charge.take_page().ok_or(ProcError::OutOfFrames)?;
-            pages.push(
-                crate::mm::memory_object::Page::zeroed(page_charge)
-                    .ok_or(ProcError::OutOfFrames)?,
-            );
+        let mut pages = buffer.pages.lock();
+        let current_pages = pages.len() as u64;
+        if pages_count > current_pages {
+            let additional = pages_count - current_pages;
+            let mut charge = p
+                .memory_account
+                .reserve(
+                    additional,
+                    0,
+                    p.memory_owned_limit,
+                    p.memory_pin_limit,
+                )
+                .ok_or(ProcError::MemoryQuota)?;
+            let mut allocated = Vec::new();
+            allocated
+                .try_reserve_exact(additional as usize)
+                .map_err(|_| ProcError::OutOfFrames)?;
+            for _ in 0..additional {
+                let page_charge = charge.take_page().ok_or(ProcError::OutOfFrames)?;
+                allocated.push(
+                    crate::mm::memory_object::Page::zeroed(page_charge)
+                        .ok_or(ProcError::OutOfFrames)?,
+                );
+            }
+            pages
+                .try_reserve_exact(additional as usize)
+                .map_err(|_| ProcError::OutOfFrames)?;
+            pages.append(&mut allocated);
+        } else {
+            pages.truncate(pages_count as usize);
         }
-        *buffer.pages.lock() = pages;
         buffer.size.store(size, Ordering::Release);
         Ok(())
     })
     .map_err(|_| LinuxAshmemError::NoMemory)
+}
+
+/// Copies a byte range out of one memfd backing object without changing its
+/// logical size or descriptor cursor.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_read_from(
+    pid: ObjId,
+    handle: u64,
+    offset: u64,
+    output: &mut [u8],
+) -> Result<usize, LinuxAshmemError> {
+    let buffer = crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .ashmem
+            .iter()
+            .find(|ashmem| ashmem.handle == handle)
+            .map(|ashmem| Arc::clone(&ashmem.buffer)),
+        _ => None,
+    })
+    .ok_or(LinuxAshmemError::NotAshmem)?;
+    let size = buffer.size.load(Ordering::Acquire);
+    if offset >= size || output.is_empty() {
+        return Ok(0);
+    }
+    let available = usize::try_from(size - offset)
+        .map_err(|_| LinuxAshmemError::Invalid)?
+        .min(output.len());
+    let page_bytes = kernel_core::frame::FRAME_SIZE as usize;
+    let pages = buffer.pages.lock();
+    let mut copied = 0usize;
+    while copied < available {
+        let absolute = offset
+            .checked_add(copied as u64)
+            .ok_or(LinuxAshmemError::Invalid)?;
+        let index = usize::try_from(absolute / page_bytes as u64)
+            .map_err(|_| LinuxAshmemError::Invalid)?;
+        let inner = (absolute % page_bytes as u64) as usize;
+        let take = (available - copied).min(page_bytes - inner);
+        let page = pages.get(index).ok_or(LinuxAshmemError::Invalid)?;
+        let pointer = crate::mm::phys_to_virt(page.frame().start() + inner as u64)
+            .ok_or(LinuxAshmemError::NoMemory)?;
+        // SAFETY: the retained Page owns this live frame and the range is
+        // bounded to one page. The caller-side buffer is a distinct allocation.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                pointer as *const u8,
+                output[copied..].as_mut_ptr(),
+                take,
+            )
+        };
+        copied += take;
+    }
+    Ok(available)
+}
+
+/// Writes bytes into one memfd backing object. A write past EOF grows the
+/// logical file by allocating every additional page before publishing the new
+/// size. Seal checks are performed before any observable size change.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_write_from(
+    pid: ObjId,
+    handle: u64,
+    offset: u64,
+    input: &[u8],
+) -> Result<usize, LinuxAshmemError> {
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    if input.is_empty() {
+        return Ok(0);
+    }
+    let buffer = crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .ashmem
+            .iter()
+            .find(|ashmem| ashmem.handle == handle)
+            .map(|ashmem| {
+                (
+                    Arc::clone(&ashmem.buffer),
+                    ashmem.buffer.seals.load(Ordering::Acquire),
+                )
+            }),
+        _ => None,
+    })
+    .ok_or(LinuxAshmemError::NotAshmem)?;
+    let (buffer, seals) = buffer;
+    if seals & (8 | 16) != 0 {
+        return Err(LinuxAshmemError::Permission);
+    }
+    let length = u64::try_from(input.len()).map_err(|_| LinuxAshmemError::Invalid)?;
+    let end = offset
+        .checked_add(length)
+        .ok_or(LinuxAshmemError::Invalid)?;
+    if end > MAX_BYTES {
+        return Err(LinuxAshmemError::NoMemory);
+    }
+    if end > buffer.size.load(Ordering::Acquire) {
+        if seals & 4 != 0 {
+            return Err(LinuxAshmemError::Permission);
+        }
+        linux_ashmem_set_size(pid, handle, end)?;
+    }
+    let page_bytes = kernel_core::frame::FRAME_SIZE as usize;
+    let pages = buffer.pages.lock();
+    let mut copied = 0usize;
+    while copied < input.len() {
+        let absolute = offset
+            .checked_add(copied as u64)
+            .ok_or(LinuxAshmemError::Invalid)?;
+        let index = usize::try_from(absolute / page_bytes as u64)
+            .map_err(|_| LinuxAshmemError::Invalid)?;
+        let inner = (absolute % page_bytes as u64) as usize;
+        let take = (input.len() - copied).min(page_bytes - inner);
+        let page = pages.get(index).ok_or(LinuxAshmemError::Invalid)?;
+        let pointer = crate::mm::phys_to_virt(page.frame().start() + inner as u64)
+            .ok_or(LinuxAshmemError::NoMemory)?;
+        // SAFETY: the retained Page owns this live frame and the range is
+        // bounded to one page. The source allocation cannot alias the frame.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                input[copied..].as_ptr(),
+                pointer,
+                take,
+            )
+        };
+        copied += take;
+    }
+    Ok(input.len())
 }
 
 /// Returns one ashmem buffer's size, protection and pin count.
@@ -2670,6 +2811,31 @@ pub(crate) fn set_linux_file_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
             return Err(ProcError::NoTaskSlot);
         }
         Ok(())
+    })
+    .is_ok()
+}
+
+/// Returns the shared open-file cursor for any Linux descriptor kind.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_fd_offset(pid: ObjId, fd: u32) -> Option<u64> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process.linux.as_ref()?.fds.fd_offset(fd),
+        _ => None,
+    })
+}
+
+/// Commits a shared open-file cursor for any Linux descriptor kind.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_fd_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
+    with_proc(pid, |process| {
+        process
+            .linux
+            .as_mut()
+            .ok_or(ProcError::Exited)?
+            .fds
+            .set_fd_offset(fd, offset)
+            .then_some(())
+            .ok_or(ProcError::NoTaskSlot)
     })
     .is_ok()
 }
