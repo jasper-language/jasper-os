@@ -1503,6 +1503,13 @@ fn execute(
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
             .unwrap_or_else(|error| -i64::from(error as i32)),
+        LinuxSyscall::GetPgid => compat_result(linux_process_group(pid, call.args[0])),
+        LinuxSyscall::GetPgrp | LinuxSyscall::SetSid => compat_result(
+            proc::linux_pid(pid)
+                .map(u64::from)
+                .ok_or(CompatErrno::NoProcess),
+        ),
+        LinuxSyscall::GetSid => compat_result(linux_process_group(pid, call.args[0])),
         // The compatibility identity has no supplementary groups.
         // 兼容身份没有附加组，因此 size 查询和写入都返回 0。
         LinuxSyscall::GetGroups => 0,
@@ -1559,6 +1566,15 @@ fn linux_getres(args: [u64; 6], _gid: bool) -> Result<u64, CompatErrno> {
         }
     }
     Ok(0)
+}
+
+fn linux_process_group(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
+    let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
+    if requested == 0 || requested == current {
+        Ok(current)
+    } else {
+        Err(CompatErrno::NoProcess)
+    }
 }
 
 fn linux_uname(args: [u64; 6]) -> Result<u64, CompatErrno> {

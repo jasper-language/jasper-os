@@ -1638,7 +1638,10 @@ int main(void) {
     gid_t real_gid = (gid_t)-1;
     gid_t effective_gid = (gid_t)-1;
     gid_t saved_gid = (gid_t)-1;
-    if (getresuid(&real_uid, &effective_uid, &saved_uid) != 0 ||
+    pid_t process_id = getpid();
+    if (getpgrp() != process_id || getpgid(0) != process_id ||
+        getsid(0) != process_id || setsid() != process_id ||
+        getresuid(&real_uid, &effective_uid, &saved_uid) != 0 ||
         real_uid != 0 || effective_uid != 0 || saved_uid != 0 ||
         getresgid(&real_gid, &effective_gid, &saved_gid) != 0 ||
         real_gid != 0 || effective_gid != 0 || saved_gid != 0) {
