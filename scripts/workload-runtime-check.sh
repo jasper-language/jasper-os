@@ -13,6 +13,13 @@ LIMIT="${WORKLOAD_QEMU_TIMEOUT:-90}"
 QEMU_CPUS="${WORKLOAD_QEMU_CPUS:-0-1}"
 mkdir -p "$OUT"
 
+# Serialize the complete build-and-run sequence with all other Jasper VM users.
+exec 9>/tmp/jasper-os-qemu.lock
+if ! flock -w 900 9; then
+  echo "FAIL Jasper QEMU lock busy for 900s" >&2
+  exit 75
+fi
+
 cleanup() {
   rm -f -- "$IMAGE"
 }
@@ -33,7 +40,18 @@ awk -v load="$load1" 'BEGIN { exit !(load <= 8.0) }' || {
   echo "FAIL host one-minute load $load1 is too high" >&2
   exit 75
 }
-if pgrep -f '[q]emu-system|[V]BoxHeadless' >/dev/null 2>&1; then
+runtime_active() {
+  local comm
+  for comm in /proc/[0-9]*/comm; do
+    [ -r "$comm" ] || continue
+    IFS= read -r name <"$comm" 2>/dev/null || continue
+    case "$name" in
+      qemu-system*|VBoxHeadless) return 0 ;;
+    esac
+  done
+  return 1
+}
+if runtime_active; then
     echo "FAIL another QEMU/VBox workload is already running" >&2
   exit 75
 fi
@@ -54,7 +72,7 @@ for round in 1 2; do
   serial="$OUT/round-$round.serial"
   rc_file="$OUT/round-$round.rc"
   set +e
-  flock -n /tmp/jasper-os-qemu.lock nice -n 15 taskset -c "$QEMU_CPUS" \
+  nice -n 15 taskset -c "$QEMU_CPUS" \
     timeout "$LIMIT" qemu-system-x86_64 \
       -accel tcg -icount shift=5 \
       -drive format=raw,file="$IMAGE" \
