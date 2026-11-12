@@ -84,6 +84,8 @@ const LINUX_BINDER_HANDLE_BASE: u64 = 0x0000_8300_0000_0000;
 const LINUX_ION_DEVICE_HANDLE_BASE: u64 = 0x0000_8400_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_EVENTFD_HANDLE_BASE: u64 = 0x0000_8500_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_EPOLL_HANDLE_BASE: u64 = 0x0000_8600_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -120,6 +122,8 @@ struct LinuxProcessState {
     next_ion_user_handle: u32,
     eventfds: Vec<LinuxEventFdHandle>,
     next_eventfd_handle: u64,
+    epolls: Vec<LinuxEpollHandle>,
+    next_epoll_handle: u64,
     /// Set only on the child side of vfork. The parent task sleeps until the
     /// child commits exec or leaves `Running`.
     /// 仅 vfork 子进程携带；父任务睡眠到子进程提交 exec 或离开 Running。
@@ -188,6 +192,25 @@ struct LinuxEventFdHandle {
     handle: u64,
     counter: Arc<SpinLock<u64>>,
     semaphore: bool,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxEpollHandle {
+    handle: u64,
+    registrations: Arc<SpinLock<Vec<LinuxEpollRegistration>>>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxEpollRegistration {
+    pub(crate) handle: u64,
+    pub(crate) kind: compat_core::fd::CompatKind,
+    pub(crate) rights: kernel_core::object::Rights,
+    pub(crate) events: u32,
+    pub(crate) data: u64,
+    pub(crate) armed: bool,
+    pub(crate) edge_seen: u32,
 }
 
 pub(crate) struct LinuxFdTransfer {
@@ -1709,6 +1732,9 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     if handle >= LINUX_EVENTFD_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.eventfds.retain(|eventfd| eventfd.handle != handle);
     }
+    if handle >= LINUX_EPOLL_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+        linux.epolls.retain(|epoll| epoll.handle != handle);
+    }
 }
 
 /// Opens one anonymous ashmem buffer descriptor.
@@ -1884,6 +1910,68 @@ pub(crate) fn linux_eventfd_state(
             .find(|eventfd| eventfd.handle == handle)
             .map(|eventfd| (Arc::clone(&eventfd.counter), eventfd.semaphore)),
         _ => None,
+    })
+}
+
+/// Creates one epoll instance backed by a bounded per-instance registration set.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_epoll_create(pid: ObjId, close_on_exec: bool) -> Option<u32> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.epolls.len() >= 8 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .epolls
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_epoll_handle;
+        linux.next_epoll_handle = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ.union(Rights::WRITE),
+                compat_core::fd::CompatKind::Other,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.epolls.push(LinuxEpollHandle {
+            handle,
+            registrations: Arc::new(SpinLock::new(Vec::new())),
+        });
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Returns the registration set for one live epoll instance.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_epoll_registrations(
+    pid: ObjId,
+    handle: u64,
+) -> Option<Arc<SpinLock<Vec<LinuxEpollRegistration>>>> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .epolls
+            .iter()
+            .find(|epoll| epoll.handle == handle)
+            .map(|epoll| Arc::clone(&epoll.registrations)),
+        _ => None,
+    })
+}
+
+/// Returns true when a compatibility handle identifies an epoll instance.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_is_epoll(pid: ObjId, handle: u64) -> bool {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()
+            .is_some_and(|linux| linux.epolls.iter().any(|epoll| epoll.handle == handle)),
+        _ => false,
     })
 }
 
@@ -2824,6 +2912,19 @@ pub(crate) fn linux_fd_offset(pid: ObjId, fd: u32) -> Option<u64> {
     })
 }
 
+/// Returns how many live descriptors in this process reference a handle.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_handle_fd_count(pid: ObjId, handle: u64) -> usize {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()
+            .map(|linux| linux.fds.handle_fd_count(handle))
+            .unwrap_or(0),
+        _ => 0,
+    })
+}
+
 /// Commits a shared open-file cursor for any Linux descriptor kind.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn set_linux_fd_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
@@ -2981,6 +3082,28 @@ pub(crate) fn linux_pid(pid: ObjId) -> Option<u32> {
     crate::kobj::with(|t| match t.get(pid) {
         Ok(KObject::Process(p)) => p.linux.as_ref().map(|linux| linux.pid),
         _ => None,
+    })
+}
+
+/// Resolves one ABI-visible Linux PID to the owning Jasper process object.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_process_for_pid(linux_pid: u32) -> Option<ObjId> {
+    crate::kobj::with(|table| {
+        let mut found = None;
+        table.for_each_live(|id, object| {
+            if let KObject::Process(process) = object {
+                if process
+                    .linux
+                    .as_ref()
+                    .is_some_and(|linux| linux.pid == linux_pid)
+                {
+                    found = Some(id);
+                    return false;
+                }
+            }
+            true
+        });
+        found
     })
 }
 
@@ -3142,6 +3265,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         next_ion_user_handle: 1,
         eventfds: Vec::new(),
         next_eventfd_handle: LINUX_EVENTFD_HANDLE_BASE,
+        epolls: Vec::new(),
+        next_epoll_handle: LINUX_EPOLL_HANDLE_BASE,
         vfork_parent: None,
     };
     create_process(name, SyscallSet::EMPTY, move |process| {

@@ -14,6 +14,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/eventfd.h>
+#include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/random.h>
 #include <sys/socket.h>
@@ -984,6 +985,123 @@ int main(void) {
     if (memfd_map == MAP_FAILED || memfd_map[0] != 'M' ||
         munmap(memfd_map, 4096) != 0 || close(memfd) != 0) {
         return 214;
+    }
+    int epfd = epoll_create1(EPOLL_CLOEXEC);
+    int epoll_pipe[2];
+    struct epoll_event epoll_ready = {0};
+    if (epfd < 0 || (fcntl(epfd, F_GETFD) & FD_CLOEXEC) == 0 ||
+        pipe2(epoll_pipe, 0) != 0 ||
+        epoll_wait(epfd, &epoll_ready, 1, 20) != 0) {
+        return 250;
+    }
+    struct epoll_event epoll_interest = {
+        .events = EPOLLIN,
+        .data.u64 = 0x4a5345504f4c4cULL,
+    };
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, epoll_pipe[0],
+                  &epoll_interest) != 0) {
+        return 251;
+    }
+    pid_t epoll_child = fork();
+    if (epoll_child < 0) {
+        return 252;
+    }
+    if (epoll_child == 0) {
+        struct timespec delay = {.tv_sec = 0, .tv_nsec = 20000000};
+        nanosleep(&delay, NULL);
+        _exit(write(epoll_pipe[1], "E", 1) == 1 ? 0 : 1);
+    }
+    memset(&epoll_ready, 0, sizeof(epoll_ready));
+    if (epoll_wait(epfd, &epoll_ready, 1, 300) != 1 ||
+        (epoll_ready.events & EPOLLIN) == 0 ||
+        epoll_ready.data.u64 != 0x4a5345504f4c4cULL ||
+        read(epoll_pipe[0], memfd_io, 1) != 1 ||
+        memfd_io[0] != 'E') {
+        return 253;
+    }
+    int epoll_child_status = 0;
+    if (waitpid(epoll_child, &epoll_child_status, 0) != epoll_child ||
+        !WIFEXITED(epoll_child_status) || WEXITSTATUS(epoll_child_status) != 0 ||
+        epoll_ctl(epfd, EPOLL_CTL_DEL, epoll_pipe[0], NULL) != 0 ||
+        close(epoll_pipe[0]) != 0 || close(epoll_pipe[1]) != 0) {
+        return 254;
+    }
+    int epoll_event_fd = eventfd(0, EFD_NONBLOCK);
+    uint64_t epoll_counter = 1;
+    epoll_interest.events = EPOLLIN | EPOLLET;
+    epoll_interest.data.u64 = 0x45504f4c4c4554ULL;
+    if (epoll_event_fd < 0 ||
+        epoll_ctl(epfd, EPOLL_CTL_ADD, epoll_event_fd,
+                  &epoll_interest) != 0 ||
+        write(epoll_event_fd, &epoll_counter, sizeof(epoll_counter)) !=
+            sizeof(epoll_counter) ||
+        epoll_wait(epfd, &epoll_ready, 1, 30) != 1 ||
+        epoll_ready.data.u64 != 0x45504f4c4c4554ULL ||
+        epoll_wait(epfd, &epoll_ready, 1, 0) != 0 ||
+        read(epoll_event_fd, &epoll_counter, sizeof(epoll_counter)) !=
+            sizeof(epoll_counter)) {
+        return 255;
+    }
+    epoll_interest.events = EPOLLIN | EPOLLONESHOT;
+    epoll_interest.data.u64 = 0x4f4e4553484f54ULL;
+    if (epoll_ctl(epfd, EPOLL_CTL_MOD, epoll_event_fd,
+                  &epoll_interest) != 0) {
+        return 256;
+    }
+    epoll_counter = 1;
+    if (write(epoll_event_fd, &epoll_counter, sizeof(epoll_counter)) !=
+            sizeof(epoll_counter) ||
+        epoll_wait(epfd, &epoll_ready, 1, 30) != 1 ||
+        epoll_ready.data.u64 != 0x4f4e4553484f54ULL ||
+        epoll_wait(epfd, &epoll_ready, 1, 0) != 0 ||
+        epoll_ctl(epfd, EPOLL_CTL_MOD, epoll_event_fd,
+                  &epoll_interest) != 0 ||
+        epoll_wait(epfd, &epoll_ready, 1, 0) != 1 ||
+        read(epoll_event_fd, &epoll_counter, sizeof(epoll_counter)) !=
+            sizeof(epoll_counter)) {
+        return 257;
+    }
+    struct timespec epoll_timeout = {.tv_sec = 0, .tv_nsec = 20000000};
+    if (epoll_ctl(epfd, EPOLL_CTL_DEL, epoll_event_fd, NULL) != 0 ||
+        syscall(SYS_epoll_pwait2, epfd, &epoll_ready, 1,
+                &epoll_timeout, NULL, 0) != 0 ||
+        close(epoll_event_fd) != 0) {
+        return 258;
+    }
+    sigset_t epoll_old_mask;
+    sigset_t epoll_blocked_mask;
+    sigset_t epoll_empty_mask;
+    sigemptyset(&epoll_blocked_mask);
+    sigaddset(&epoll_blocked_mask, SIGUSR2);
+    sigemptyset(&epoll_empty_mask);
+    if (signal(SIGUSR2, signal_noop) == SIG_ERR ||
+        sigprocmask(SIG_BLOCK, &epoll_blocked_mask, &epoll_old_mask) != 0) {
+        return 259;
+    }
+    pid_t epoll_signal_child = fork();
+    if (epoll_signal_child < 0) {
+        return 260;
+    }
+    if (epoll_signal_child == 0) {
+        struct timespec delay = {.tv_sec = 0, .tv_nsec = 20000000};
+        nanosleep(&delay, NULL);
+        _exit(kill(getppid(), SIGUSR2) == 0 ? 0 : 1);
+    }
+    errno = 0;
+    long epoll_signal_result = syscall(SYS_epoll_pwait, epfd, &epoll_ready, 1,
+                                      100, &epoll_empty_mask,
+                                      sizeof(uint64_t));
+    int epoll_signal_errno = errno;
+    if (epoll_signal_result != -1 || epoll_signal_errno != EINTR ||
+        sigprocmask(SIG_SETMASK, &epoll_old_mask, NULL) != 0) {
+        printf("epoll-pwait-signal-fail result=%ld errno=%d\n",
+               epoll_signal_result, epoll_signal_errno);
+        return 261;
+    }
+    waitpid(epoll_signal_child, &epoll_child_status, 0);
+    if (!WIFEXITED(epoll_child_status) || WEXITSTATUS(epoll_child_status) != 0 ||
+        close(epfd) != 0) {
+        return 262;
     }
     int binder_fd = open("/dev/binder", O_RDWR | O_CLOEXEC);
     struct binder_version binder_version = {0};
