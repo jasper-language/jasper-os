@@ -2,6 +2,8 @@
 //!
 //! 内核持有的原生 Workload 注册表与准入门面。
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use kernel_core::security_domain::DomainKey;
 use kernel_core::workload::{
     MembershipError, ResourceLimits, ResourceUsage, WorkloadError, WorkloadKey, WorkloadMembers,
@@ -20,6 +22,7 @@ static MEMBERS: IrqSpinLock<WorkloadMembers<MAX_WORKLOAD_MEMBERS>> =
     IrqSpinLock::new(WorkloadMembers::new());
 static CPU_GROUPS: IrqSpinLock<[Option<(WorkloadKey, CpuGroupId)>; MAX_WORKLOADS]> =
     IrqSpinLock::new([None; MAX_WORKLOADS]);
+static MEMORY_RELEASE_FAILURES: AtomicU32 = AtomicU32::new(0);
 
 pub fn create(domain: DomainKey, limits: ResourceLimits) -> Result<WorkloadKey, WorkloadError> {
     WORKLOADS.lock().create(domain, limits)
@@ -143,7 +146,7 @@ pub fn reserve_ring_entries(key: WorkloadKey, entries: u32) -> Result<(), Worklo
 }
 
 pub fn release_memory(key: WorkloadKey, bytes: u64) {
-    let _ = WORKLOADS.lock().release(
+    let released = WORKLOADS.lock().release(
         key,
         ResourceUsage {
             memory_bytes: bytes,
@@ -151,6 +154,38 @@ pub fn release_memory(key: WorkloadKey, bytes: u64) {
             ring_entries: 0,
         },
     );
+    if released.is_err() {
+        // Cleanup cannot recover from a stale/underflowed counter, but silently
+        // pretending it succeeded would let a terminal workload look healthy.
+        MEMORY_RELEASE_FAILURES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Number of memory-credit releases rejected by the Workload registry.
+pub fn memory_release_failures() -> u32 {
+    MEMORY_RELEASE_FAILURES.load(Ordering::Acquire)
+}
+
+/// RAII ownership for ordinary Memory-object backing bytes.
+///
+/// The transferable handle may outlive its creating Process, so the charge is
+/// released by the final MemoryObject rather than by Process destruction.
+pub struct MemoryCharge {
+    workload: WorkloadKey,
+    bytes: u64,
+}
+
+impl MemoryCharge {
+    pub fn reserve(workload: WorkloadKey, bytes: u64) -> Result<Self, WorkloadError> {
+        reserve_memory(workload, bytes)?;
+        Ok(Self { workload, bytes })
+    }
+}
+
+impl Drop for MemoryCharge {
+    fn drop(&mut self) {
+        release_memory(self.workload, self.bytes);
+    }
 }
 
 pub fn release_ring_entries(key: WorkloadKey, entries: u32) {

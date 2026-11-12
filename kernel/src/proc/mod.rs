@@ -355,10 +355,11 @@ pub fn set_application(pid: ObjId, application: ApplicationIdentity) -> Result<(
     }
     crate::kobj::with(|t| {
         match t.get(pid) {
-            Ok(crate::kobj::KObject::Process(p)) if p.app == 0
-                && t.security(pid)
-                    .ok()
-                    .is_some_and(|context| context.application.is_none()) => {}
+            Ok(crate::kobj::KObject::Process(p))
+                if p.app == 0
+                    && t.security(pid)
+                        .ok()
+                        .is_some_and(|context| context.application.is_none()) => {}
             Ok(crate::kobj::KObject::Process(_)) => return Err(ProcError::BadApp),
             _ => return Err(ProcError::NoSuchProcess),
         }
@@ -833,14 +834,11 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
 #[cfg(feature = "linux-abi")]
 pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, ProcError> {
     let space = VmSpace::new().map_err(ProcError::Map)?;
-    let memory_account =
-        crate::mm::memory_quota::Account::new().ok_or(ProcError::OutOfFrames)?;
+    let memory_account = crate::mm::memory_quota::Account::new().ok_or(ProcError::OutOfFrames)?;
     crate::mm::space::activate_kernel();
     kobj::with(|t| match t.get_mut(pid) {
         Ok(KObject::Process(p))
-            if p.state == ProcState::Running
-                && p.threads_live == 1
-                && p.linux.is_some() =>
+            if p.state == ProcState::Running && p.threads_live == 1 && p.linux.is_some() =>
         {
             revoke_all_device_mappings(p);
             let linux = p.linux.as_mut().expect("checked Linux process");
@@ -856,10 +854,7 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
                 space: core::mem::replace(&mut p.space, space),
                 frames: core::mem::take(&mut p.frames),
                 shared_maps: core::mem::take(&mut p.shared_maps),
-                memory_caps: core::mem::replace(
-                    &mut p.memory_caps,
-                    MemoryCapabilityTable::new(),
-                ),
+                memory_caps: core::mem::replace(&mut p.memory_caps, MemoryCapabilityTable::new()),
                 memory_account: core::mem::replace(&mut p.memory_account, memory_account),
                 device_maps: core::mem::take(&mut p.device_maps),
             })
@@ -884,10 +879,7 @@ pub(crate) fn rollback_exec_address_space(
                 frames: core::mem::replace(&mut p.frames, saved.frames),
                 shared_maps: core::mem::replace(&mut p.shared_maps, saved.shared_maps),
                 memory_caps: core::mem::replace(&mut p.memory_caps, saved.memory_caps),
-                memory_account: core::mem::replace(
-                    &mut p.memory_account,
-                    saved.memory_account,
-                ),
+                memory_account: core::mem::replace(&mut p.memory_account, saved.memory_account),
                 device_maps: core::mem::replace(&mut p.device_maps, saved.device_maps),
             })
         }
@@ -1222,7 +1214,20 @@ fn checked_range(va: u64, pages: u64) -> Result<(), MemError> {
 pub fn map_anon(pid: ObjId, va: u64, pages: u64, writable: bool) -> Result<(), MemError> {
     checked_range(va, pages)?;
     let n = pages as usize;
-    let charge = kobj::with(|t| {
+    let requested_workload = kobj::with(|t| {
+        let p = receiver(t, pid).map_err(|_| MemError::NoSuchProcess)?;
+        let bytes = pages
+            .checked_mul(FRAME_SIZE)
+            .ok_or(MemError::InvalidRange)?;
+        Ok(p.workload.map(|workload| (workload, bytes)))
+    })?;
+    let workload_charge = if let Some((workload, bytes)) = requested_workload {
+        crate::workload::reserve_memory(workload, bytes).map_err(|_| MemError::Quota)?;
+        Some((workload, bytes))
+    } else {
+        None
+    };
+    let charge = match kobj::with(|t| {
         let p = receiver(t, pid).map_err(|_| MemError::NoSuchProcess)?;
         if p.frames.len() + p.shared_maps.len() + n > MAX_PROCESS_FRAMES {
             return Err(MemError::Quota);
@@ -1230,19 +1235,49 @@ pub fn map_anon(pid: ObjId, va: u64, pages: u64, writable: bool) -> Result<(), M
         p.memory_account
             .reserve(pages, 0, p.memory_owned_limit, p.memory_pin_limit)
             .ok_or(MemError::Quota)
-    })?;
-    crate::mm::pressure::admit(sched::current_effective_qos(), n)
-        .map_err(|_| MemError::Pressure)?;
-    let backing =
-        crate::mm::memory_object::MemoryObject::zeroed(pages, MAX_PROCESS_FRAMES as u64, charge)
-            .ok_or(MemError::OutOfMemory)?;
+    }) {
+        Ok(charge) => charge,
+        Err(error) => {
+            if let Some((workload, bytes)) = workload_charge {
+                crate::workload::release_memory(workload, bytes);
+            }
+            return Err(error);
+        }
+    };
+    if crate::mm::pressure::admit(sched::current_effective_qos(), n).is_err() {
+        if let Some((workload, bytes)) = workload_charge {
+            crate::workload::release_memory(workload, bytes);
+        }
+        return Err(MemError::Pressure);
+    }
+    let backing = match crate::mm::memory_object::MemoryObject::zeroed(
+        pages,
+        MAX_PROCESS_FRAMES as u64,
+        charge,
+    ) {
+        Some(backing) => backing,
+        None => {
+            if let Some((workload, bytes)) = workload_charge {
+                crate::workload::release_memory(workload, bytes);
+            }
+            return Err(MemError::OutOfMemory);
+        }
+    };
     let range = kernel_core::memory_object::MapRange {
         offset_pages: 0,
         pages,
         va,
         end: va + pages * FRAME_SIZE,
     };
-    let fresh = backing.retain_range(range).ok_or(MemError::OutOfMemory)?;
+    let fresh = match backing.retain_range(range) {
+        Some(fresh) => fresh,
+        None => {
+            if let Some((workload, bytes)) = workload_charge {
+                crate::workload::release_memory(workload, bytes);
+            }
+            return Err(MemError::OutOfMemory);
+        }
+    };
     let flags = if writable {
         MapFlags::USER.union(MapFlags::WRITE)
     } else {
@@ -1313,17 +1348,23 @@ pub fn map_anon(pid: ObjId, va: u64, pages: u64, writable: bool) -> Result<(), M
         p.space.end_shootdown();
         Ok(())
     });
-    if result.is_err() && published > 0 {
-        if crate::smp::tlb_shootdown_on(active, va, published).is_err() || rollback_uncertain {
-            for page in fresh.iter().take(published as usize) {
-                page.quarantine();
+    if result.is_err() {
+        if published > 0 {
+            if crate::smp::tlb_shootdown_on(active, va, published).is_err() || rollback_uncertain {
+                for page in fresh.iter().take(published as usize) {
+                    page.quarantine();
+                }
+                // Quarantined pages remain physically charged, so retain the Workload charge too.
+                return Err(MemError::Busy);
             }
-            return Err(MemError::Busy);
+            let _ = with_proc(pid, |p| {
+                p.space.end_shootdown();
+                Ok(())
+            });
         }
-        let _ = with_proc(pid, |p| {
-            p.space.end_shootdown();
-            Ok(())
-        });
+        if let Some((workload, bytes)) = workload_charge {
+            crate::workload::release_memory(workload, bytes);
+        }
     }
     result
 }
@@ -1350,6 +1391,25 @@ fn create_accounted_memory(pid: ObjId, pages: u64, guest: bool) -> Result<Handle
     if pages > limit {
         return Err(ProcError::MemoryQuota);
     }
+    let requested_workload = if guest {
+        None
+    } else {
+        kobj::with(|t| {
+            let p = receiver(t, pid)?;
+            let bytes = pages
+                .checked_mul(kernel_core::frame::FRAME_SIZE as u64)
+                .ok_or(ProcError::MemoryQuota)?;
+            Ok(p.workload.map(|workload| (workload, bytes)))
+        })?
+    };
+    let workload_owner = if let Some((workload, bytes)) = requested_workload {
+        Some(
+            crate::workload::MemoryCharge::reserve(workload, bytes)
+                .map_err(|_| ProcError::MemoryQuota)?,
+        )
+    } else {
+        None
+    };
     let charge = kobj::with(|t| {
         let p = receiver(t, pid)?;
         if guest {
@@ -1362,10 +1422,16 @@ fn create_accounted_memory(pid: ObjId, pages: u64, guest: bool) -> Result<Handle
                 .ok_or(ProcError::MemoryQuota)
         }
     })?;
-    crate::mm::pressure::admit(sched::current_effective_qos(), pages as usize)
-        .map_err(|_| ProcError::OutOfFrames)?;
-    let backing = crate::mm::memory_object::MemoryObject::zeroed(pages, limit, charge)
-        .ok_or(ProcError::OutOfFrames)?;
+    if crate::mm::pressure::admit(sched::current_effective_qos(), pages as usize).is_err() {
+        return Err(ProcError::OutOfFrames);
+    }
+    let backing = crate::mm::memory_object::MemoryObject::zeroed_with_workload(
+        pages,
+        limit,
+        charge,
+        workload_owner,
+    )
+    .ok_or(ProcError::OutOfFrames)?;
     grant_new(
         pid,
         KObject::Memory(backing),
@@ -1745,7 +1811,9 @@ pub fn map_device_bar(
 /// Revokes one device mapping (page tables only; no data frames are returned).
 fn unmap_device_mapping(p: &mut Process, mapping: &DeviceMapping) {
     for i in 0..mapping.pages {
-        let _ = p.space.unmap(VirtPage::containing(mapping.va + i * FRAME_SIZE));
+        let _ = p
+            .space
+            .unmap(VirtPage::containing(mapping.va + i * FRAME_SIZE));
     }
     let _ = p.memory_caps.revoke_range(mapping.va, mapping.pages);
 }
@@ -1766,7 +1834,7 @@ fn revoke_device_mappings_for_handle(p: &mut Process, handle: HandleId) {
     while i < p.device_maps.len() {
         if p.device_maps[i].handle == handle {
             let mapping = p.device_maps.swap_remove(i);
-        unmap_device_mapping(p, &mapping);
+            unmap_device_mapping(p, &mapping);
         } else {
             i += 1;
         }
@@ -2020,12 +2088,8 @@ pub(crate) fn reserve_memory_pins_in(
     pages: u64,
 ) -> Option<crate::mm::memory_quota::Charge> {
     let p = receiver(t, pid).ok()?;
-    p.memory_account.reserve(
-        0,
-        pages,
-        p.memory_owned_limit,
-        p.memory_pin_limit,
-    )
+    p.memory_account
+        .reserve(0, pages, p.memory_owned_limit, p.memory_pin_limit)
 }
 
 /// Set optional hard limits for the ordinary process account; the default is no fixed cap.
@@ -2060,7 +2124,10 @@ pub fn device_map_count(pid: ObjId) -> Option<usize> {
 
 /// SEC-6 diagnostic: active software memory capabilities and revocation count.
 pub fn memory_capability_stats(pid: ObjId) -> Option<(usize, u64)> {
-    with_proc(pid, |p| Ok((p.memory_caps.active(), p.memory_caps.revoked()))).ok()
+    with_proc(pid, |p| {
+        Ok((p.memory_caps.active(), p.memory_caps.revoked()))
+    })
+    .ok()
 }
 
 /// 在锁内固定进程 `pid` 的用户区间 `[va, va+len)`：区间须位于私有窗口、每页已映射且带用户权限（`write` 时还须可写）。
@@ -2256,9 +2323,7 @@ fn load_static_elf(id: ObjId, image: &[u8], require_jasper_abi: bool) -> Result<
         {
             return Err(LoadError::Capability);
         }
-    } else if elf.abi().is_some()
-        || elf.required_capabilities().iter().next().is_some()
-    {
+    } else if elf.abi().is_some() || elf.required_capabilities().iter().next().is_some() {
         return Err(LoadError::UnexpectedMetadata);
     }
     for seg in elf.segments() {
@@ -2354,20 +2419,7 @@ pub fn spawn_thread(
     arg1: u64,
 ) -> Result<(TaskId, ObjId), ProcError> {
     spawn_thread_mode(
-        id,
-        name,
-        entry,
-        stack,
-        arg0,
-        arg1,
-        None,
-        false,
-        None,
-        None,
-        None,
-        0,
-        0,
-        0,
+        id, name, entry, stack, arg0, arg1, None, false, None, None, None, 0, 0, 0,
     )
 }
 
@@ -2383,20 +2435,7 @@ pub(crate) fn spawn_thread_affinity(
     affinity: Option<kernel_core::smp::CpuSet>,
 ) -> Result<(TaskId, ObjId), ProcError> {
     spawn_thread_mode(
-        id,
-        name,
-        entry,
-        stack,
-        arg0,
-        arg1,
-        affinity,
-        false,
-        None,
-        None,
-        None,
-        0,
-        0,
-        0,
+        id, name, entry, stack, arg0, arg1, affinity, false, None, None, None, 0, 0, 0,
     )
 }
 
@@ -2451,10 +2490,7 @@ pub fn fork_linux_process(
     let (parent_linux_pid, calls, state, mappings) = kobj::with(|t| match t.get(parent) {
         Ok(KObject::Process(p)) if p.state == ProcState::Running => {
             let linux = p.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
-            if !p.shared_maps.is_empty()
-                || !p.device_maps.is_empty()
-                || !p.quarantined.is_empty()
-            {
+            if !p.shared_maps.is_empty() || !p.device_maps.is_empty() || !p.quarantined.is_empty() {
                 return Err(ProcError::NotTransferable);
             }
             let mappings = linux
@@ -2553,11 +2589,10 @@ fn copy_linux_mapping(parent: ObjId, child: ObjId, mapping: LinuxMapping) -> Res
             .reserve(1, 0, p.memory_owned_limit, p.memory_pin_limit)
             .ok_or(ProcError::MemoryQuota)
     })?;
-    let page =
-        crate::mm::memory_object::Page::zeroed(charge).ok_or(ProcError::OutOfFrames)?;
+    let page = crate::mm::memory_object::Page::zeroed(charge).ok_or(ProcError::OutOfFrames)?;
     let destination_frame = page.frame();
-    let source_ptr = phys_to_virt(source_frame.start())
-        .ok_or(ProcError::Map(MapError::NotMapped))? as *const u8;
+    let source_ptr =
+        phys_to_virt(source_frame.start()).ok_or(ProcError::Map(MapError::NotMapped))? as *const u8;
     let destination_ptr = phys_to_virt(destination_frame.start())
         .ok_or(ProcError::Map(MapError::NotMapped))? as *mut u8;
     // SAFETY: both aliases cover one live private data frame. `source` keeps the
@@ -2767,31 +2802,32 @@ fn spawn_thread_mode(
         }
         Ok(())
     });
-    let rollback = |reason: ProcError,
-                    accounted: bool,
-                    charged_workload: Option<kernel_core::workload::WorkloadKey>| {
-        {
-            let mut reg = REG.lock();
-            reg.starts.retain(|s| s.task != task);
-            reg.members.retain(|m| m.task != task);
-        }
-        kobj::with(|t| {
-            if accounted {
-                if let Ok(KObject::Process(p)) = t.get_mut(id) {
-                    p.threads_live -= 1;
-                    p.threads_total -= 1;
-                    p.threads.retain(|x| *x != task_obj);
-                }
-                let _ = t.release_internal(id);
+    let rollback =
+        |reason: ProcError,
+         accounted: bool,
+         charged_workload: Option<kernel_core::workload::WorkloadKey>| {
+            {
+                let mut reg = REG.lock();
+                reg.starts.retain(|s| s.task != task);
+                reg.members.retain(|m| m.task != task);
             }
-            let _ = t.release_internal(task_obj);
-            let _ = t.release_internal(task_obj);
-        });
-        if let Some(workload) = charged_workload {
-            crate::workload::release_thread(workload);
-        }
-        reason
-    };
+            kobj::with(|t| {
+                if accounted {
+                    if let Ok(KObject::Process(p)) = t.get_mut(id) {
+                        p.threads_live -= 1;
+                        p.threads_total -= 1;
+                        p.threads.retain(|x| *x != task_obj);
+                    }
+                    let _ = t.release_internal(id);
+                }
+                let _ = t.release_internal(task_obj);
+                let _ = t.release_internal(task_obj);
+            });
+            if let Some(workload) = charged_workload {
+                crate::workload::release_thread(workload);
+            }
+            reason
+        };
     if let Err(e) = accounted {
         return Err(rollback(e, false, None));
     }
@@ -2970,12 +3006,7 @@ pub(crate) fn begin_usi_request(
 }
 
 /// Mark a successfully executed (possibly replayable read-only) request complete.
-pub(crate) fn complete_usi_request(
-    pid: ObjId,
-    slot: usize,
-    request_id: u64,
-    service: u16,
-) {
+pub(crate) fn complete_usi_request(pid: ObjId, slot: usize, request_id: u64, service: u16) {
     kobj::with(|t| {
         if let Ok(KObject::Process(p)) = t.get_mut(pid) {
             p.usi_requests.complete(slot, request_id, service);
@@ -3128,8 +3159,7 @@ pub(crate) fn grant_new_in(
         return Err(ProcError::Handle(HandleError::TableFull));
     }
     admit_handle(obj.kind(), ty, rights)?; // 不合法则根本不创建对象
-    let id = kobj::insert_for_process_in(t, pid, obj, 1, 0)
-        .map_err(|_| ProcError::NoTaskSlot)?;
+    let id = kobj::insert_for_process_in(t, pid, obj, 1, 0).map_err(|_| ProcError::NoTaskSlot)?;
     let r = receiver(t, pid).and_then(|p| {
         p.handles
             .put(
@@ -3289,10 +3319,7 @@ pub fn handle_info(pid: ObjId, h: HandleId) -> Option<(ObjectRef, Rights)> {
 
 /// SEC-2 lineage diagnostics. This does not expose a user-callable token.
 pub fn capability_info(pid: ObjId, h: HandleId) -> Option<CapabilityLink> {
-    with_proc(pid, |p| {
-        p.handles.capability(h).map_err(ProcError::Handle)
-    })
-    .ok()
+    with_proc(pid, |p| p.handles.capability(h).map_err(ProcError::Handle)).ok()
 }
 
 /// 进程 `pid` 的句柄表还能容纳的句柄数。
@@ -3398,11 +3425,7 @@ pub fn restrict_current(h: HandleId, rights: Rights) -> Result<(), ProcError> {
 
 /// Explicit-process rights decay. It changes handle rights only and cannot
 /// rewrite the object's security context.
-pub(crate) fn restrict_for(
-    pid: ObjId,
-    h: HandleId,
-    rights: Rights,
-) -> Result<(), ProcError> {
+pub(crate) fn restrict_for(pid: ObjId, h: HandleId, rights: Rights) -> Result<(), ProcError> {
     with_proc(pid, |p| {
         p.handles
             .reduce_rights(h, rights)
@@ -3745,11 +3768,7 @@ pub(crate) fn revoke_for(pid: ObjId, h: HandleId) -> Result<usize, ProcError> {
 pub(crate) fn revoke_global_for(pid: ObjId, h: HandleId) -> Result<usize, ProcError> {
     kobj::with(|t| {
         let root = match t.get(pid) {
-            Ok(KObject::Process(p)) => p
-                .handles
-                .capability(h)
-                .map_err(ProcError::Handle)?
-                .id,
+            Ok(KObject::Process(p)) => p.handles.capability(h).map_err(ProcError::Handle)?.id,
             _ => return Err(ProcError::NoSuchProcess),
         };
         let mut processes = Vec::new();
@@ -3817,8 +3836,7 @@ pub(crate) fn revoke_global_for(pid: ObjId, h: HandleId) -> Result<usize, ProcEr
             }
         }
         #[cfg(feature = "sec2-verify")]
-        crate::sec2_notices::publish_in(t, affected)
-            .map_err(|_| ProcError::CapabilityNotice)?;
+        crate::sec2_notices::publish_in(t, affected).map_err(|_| ProcError::CapabilityNotice)?;
         Ok(affected)
     })
 }

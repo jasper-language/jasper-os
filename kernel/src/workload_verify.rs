@@ -14,6 +14,7 @@ use crate::{kprintln, sched};
 
 const CODE_OFF: u64 = 0x40_0000;
 const EXTRA_OFF: u64 = 0x80_0000;
+const ANON_OFF: u64 = 0x100_0000;
 const STACK_OFF: u64 = 0xC0_0000;
 
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -45,13 +46,14 @@ pub fn run() {
     let page = kernel_core::frame::FRAME_SIZE as u64;
     let groups_before = sched::live_cpu_groups();
     let frames_before = crate::mm::frame::free_frames();
+    let release_failures_before = crate::workload::memory_release_failures();
     let domain = DomainKey {
         id: 0x574f,
         generation: 1,
     };
     let limits = ResourceLimits {
         cpu_permille: 500,
-        memory_bytes: 3 * page,
+        memory_bytes: 6 * page,
         threads: 1,
         ring_entries: 4,
     };
@@ -88,25 +90,72 @@ pub fn run() {
         "map code",
     );
     check(
-        proc::map_new(pid, base + STACK_OFF - page, MapFlags::USER | MapFlags::WRITE).is_ok(),
+        proc::map_new(
+            pid,
+            base + STACK_OFF - page,
+            MapFlags::USER | MapFlags::WRITE,
+        )
+        .is_ok(),
         "map stack",
     );
     check(
         proc::map_new(pid, base + EXTRA_OFF, MapFlags::USER | MapFlags::WRITE).is_ok(),
         "map third page",
     );
+    check(
+        proc::map_anon(pid, base + ANON_OFF, 1, true).is_ok(),
+        "map anonymous page",
+    );
+    let _memory_object = proc::create_memory(pid, 2);
+    check(_memory_object.is_ok(), "direct memory object fits");
+    check(
+        crate::workload::usage(workload).is_some_and(|usage| usage.memory_bytes == 6 * page),
+        "direct memory object memory usage",
+    );
+    let _guest_memory = proc::create_guest_memory(pid, 1);
+    check(
+        _guest_memory.is_ok(),
+        "guest memory object fits its separate budget",
+    );
+    check(
+        proc::vm_guest_memory_quota(pid).is_some_and(|usage| usage.mapped == 1),
+        "guest memory uses its separate account",
+    );
+    check(
+        crate::workload::usage(workload).is_some_and(|usage| usage.memory_bytes == 6 * page),
+        "guest memory must not consume ordinary workload bytes",
+    );
     let before_reject = crate::workload::usage(workload).unwrap_or_default();
-    let fourth = proc::map_new(pid, base + EXTRA_OFF + page, MapFlags::USER | MapFlags::WRITE);
+    let fourth = proc::map_new(
+        pid,
+        base + EXTRA_OFF + page,
+        MapFlags::USER | MapFlags::WRITE,
+    );
     check(fourth.is_err(), "fourth page must exceed memory quota");
+    let second_memory_object = proc::create_memory(pid, 2);
+    check(
+        second_memory_object.is_err(),
+        "second memory object must exceed memory quota",
+    );
+    check(
+        proc::map_anon(pid, base + ANON_OFF + page, 1, true).is_err(),
+        "anonymous page must exceed memory quota",
+    );
     check(
         crate::workload::usage(workload) == Some(before_reject),
         "memory rejection must be atomic",
     );
-    check(proc::write(pid, base + CODE_OFF, &exit_code()).is_ok(), "write exit code");
+    check(
+        proc::write(pid, base + CODE_OFF, &exit_code()).is_ok(),
+        "write exit code",
+    );
 
     let ring = crate::ring::create_for(pid, 4);
     check(ring.is_ok(), "first ring fits");
-    check(crate::ring::create_for(pid, 1).is_err(), "second ring exceeds quota");
+    check(
+        crate::ring::create_for(pid, 1).is_err(),
+        "second ring exceeds quota",
+    );
     check(
         crate::workload::usage(workload).is_some_and(|usage| usage.ring_entries == 4),
         "ring usage",
@@ -147,6 +196,10 @@ pub fn run() {
         "all workload usage returns to zero",
     );
     check(
+        crate::workload::memory_release_failures() == release_failures_before,
+        "workload memory releases never underflow",
+    );
+    check(
         crate::workload::transition(workload, WorkloadState::Stopping).is_ok(),
         "workload stopping",
     );
@@ -154,7 +207,10 @@ pub fn run() {
         crate::workload::transition(workload, WorkloadState::Stopped).is_ok(),
         "workload stopped",
     );
-    check(crate::workload::destroy(workload).is_ok(), "workload destroy with member unbound");
+    check(
+        crate::workload::destroy(workload).is_ok(),
+        "workload destroy with member unbound",
+    );
     check(
         crate::mm::frame::free_frames() == frames_before,
         "frame baseline",
