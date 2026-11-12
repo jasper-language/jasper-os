@@ -3016,9 +3016,15 @@ fn linux_pipe_write(
     let mut written = 0usize;
     while written < input.len() {
         match endpoint.write(&input[written..]) {
-            compat_core::PipeWrite::Data(0) => return Err(CompatErrno::BrokenPipe),
+            compat_core::PipeWrite::Data(0) => {
+                raise_sigpipe(pid);
+                return Err(CompatErrno::BrokenPipe);
+            }
             compat_core::PipeWrite::Data(count) => written += count,
-            compat_core::PipeWrite::Broken => return Err(CompatErrno::BrokenPipe),
+            compat_core::PipeWrite::Broken => {
+                raise_sigpipe(pid);
+                return Err(CompatErrno::BrokenPipe);
+            }
             compat_core::PipeWrite::WouldBlock if nonblocking => {
                 return if written == 0 {
                     Err(CompatErrno::TryAgain)
@@ -3039,6 +3045,25 @@ fn linux_pipe_write(
         }
     }
     Ok(written as u64)
+}
+
+/// Applies the process's disposition for SIGPIPE after a broken pipe write.
+fn raise_sigpipe(pid: ObjId) {
+    const SIGPIPE: u32 = 13;
+    let Some(action) = proc::linux_signal_action(pid, SIGPIPE) else {
+        return;
+    };
+    match action[0] {
+        1 => {}
+        0 => {
+            let _ = proc::begin_exit(pid, 128 + i64::from(SIGPIPE));
+        }
+        _ => {
+            if let Some(tid) = linux_tid(pid) {
+                let _ = queue_thread_signal(pid, tid, SIGPIPE);
+            }
+        }
+    }
 }
 
 /// Opens one exact virtual read-only path through `openat(2)`.

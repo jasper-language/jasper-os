@@ -181,6 +181,17 @@ int main(void) {
     if (close(blocking_pipe[0]) != 0 || close(blocking_pipe[1]) != 0) {
         return 98;
     }
+    int broken_pipe[2];
+    if (pipe2(broken_pipe, O_NONBLOCK) != 0 ||
+        signal(SIGPIPE, SIG_IGN) == SIG_ERR ||
+        close(broken_pipe[0]) != 0) {
+        return 99;
+    }
+    errno = 0;
+    if (write(broken_pipe[1], "x", 1) != -1 || errno != EPIPE ||
+        close(broken_pipe[1]) != 0) {
+        return 100;
+    }
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
     if (sched_getaffinity(0, sizeof(cpus), &cpus) != 0 ||
