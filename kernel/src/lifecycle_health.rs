@@ -576,6 +576,11 @@ fn run_root_program(
     let interpreter = root
         .read_file("/lib64/ld-linux-x86-64.so.2", MAX_INTERPRETER_BYTES)
         .map_err(|_| HealthError::RootExecute)?;
+    // Keep the verification registry bounded to executables that the health
+    // chain intentionally launches by name. The bytes still come from the
+    // selected, validated System A/B root and repeated paths must match exactly.
+    // 注册表只保留健康链明确按名称启动的映像；字节仍来自已验证 System A/B 根卷，
+    // 同路径重复注册必须完全一致。路径是查找键，不是权限凭证。
     if matches!(path, "/usr/bin/printf" | "/usr/bin/jasper-getppid")
         && !crate::linux_vfs::install_root_program(
             origin,
@@ -675,7 +680,7 @@ fn execute_root_dynamic_programs(
     let dash_argv: [&[u8]; 3] = [
         b"/bin/dash",
         b"-c",
-        b"echo jasper-shell-ok\ncd /usr\npwd\n",
+        b"echo jasper-shell-ok\ncd /usr\npwd\n/usr/bin/printf 'external-%s\\n' ok\n",
     ];
     run_root_program(root, origin, "/bin/dash", &dash_argv)?;
     let signal_argv: [&[u8]; 1] = [b"/usr/bin/jasper-signal-basic"];

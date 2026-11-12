@@ -84,6 +84,9 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::WriteV,
         LinuxSyscall::GetDents64,
         LinuxSyscall::Close,
+        LinuxSyscall::Dup,
+        LinuxSyscall::Dup2,
+        LinuxSyscall::Dup3,
         LinuxSyscall::Chdir,
         LinuxSyscall::OpenAt,
         LinuxSyscall::Fchdir,
@@ -117,6 +120,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Madvise,
         LinuxSyscall::Clone,
         LinuxSyscall::Clone3,
+        LinuxSyscall::Vfork,
         LinuxSyscall::Execve,
         LinuxSyscall::Futex,
         LinuxSyscall::Exit,
@@ -661,6 +665,10 @@ pub(crate) fn exec_dynamic_program(
     let Some(space) = proc::current_space_root(pid) else {
         return None;
     };
+    // The replacement image is fully built at this point. Publish vfork exec
+    // completion before switching CR3 so the suspended parent does not resume
+    // across the child's address-space activation boundary.
+    let _ = proc::vfork_commit_exec(pid);
     sched::set_current_space(Some(space));
     drop(saved);
     drop(argv);

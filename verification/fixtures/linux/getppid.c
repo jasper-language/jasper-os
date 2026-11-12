@@ -75,6 +75,50 @@ int main(void) {
     if (lseek(STDOUT_FILENO, 0, SEEK_CUR) != -1 || errno != ESPIPE) {
         return 10;
     }
+    if (lseek(fd, 4, SEEK_SET) != 4) {
+        return 71;
+    }
+    int dup_fd = dup(fd);
+    if (dup_fd < 0 || lseek(dup_fd, 0, SEEK_CUR) != 4 ||
+        fcntl(dup_fd, F_GETFD) != 0) {
+        return 72;
+    }
+    if (lseek(dup_fd, 8, SEEK_SET) != 8 ||
+        lseek(fd, 0, SEEK_CUR) != 8 ||
+        dup2(fd, fd) != fd ||
+        (fcntl(fd, F_GETFD) & FD_CLOEXEC) == 0) {
+        return 73;
+    }
+    int dup2_fd = dup2(fd, 20);
+    if (dup2_fd != 20 || fcntl(20, F_GETFD) != 0 ||
+        lseek(20, 0, SEEK_CUR) != 8) {
+        return 74;
+    }
+    int dup3_fd = dup3(fd, 21, O_CLOEXEC);
+    if (dup3_fd != 21 || fcntl(21, F_GETFD) != FD_CLOEXEC ||
+        lseek(21, 0, SEEK_CUR) != 8) {
+        return 75;
+    }
+    errno = 0;
+    if (dup3(fd, fd, O_CLOEXEC) != -1 || errno != EINVAL) {
+        return 76;
+    }
+    errno = 0;
+    if (dup3(fd, 22, 0x40000000) != -1 || errno != EINVAL) {
+        return 77;
+    }
+    errno = 0;
+    if (dup3(63, 63, 0) != -1 || errno != EBADF) {
+        return 80;
+    }
+    errno = 0;
+    if (dup2(fd, 64) != -1 || errno != EBADF) {
+        return 78;
+    }
+    if (close(dup_fd) != 0 || close(dup2_fd) != 0 || close(dup3_fd) != 0 ||
+        lseek(fd, 0, SEEK_SET) != 0) {
+        return 79;
+    }
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
     if (sched_getaffinity(0, sizeof(cpus), &cpus) != 0 ||
@@ -438,6 +482,28 @@ int main(void) {
     errno = 0;
     if (waitpid(-1, &child_status, WNOHANG) != -1 || errno != ECHILD) {
         return 67;
+    }
+    pid_t vfork_child = vfork();
+    if (vfork_child < 0) {
+        return 68;
+    }
+    if (vfork_child == 0) {
+        char *vfork_argv[] = {
+            "/usr/bin/printf",
+            "jasper-vfork-%s\n",
+            "ok",
+            NULL,
+        };
+        char *vfork_envp[] = {NULL};
+        execve(vfork_argv[0], vfork_argv, vfork_envp);
+        printf("jasper-vfork-exec-fail errno=%d\n", errno);
+        fflush(stdout);
+        _exit(69);
+    }
+    child_status = 0;
+    if (waitpid(vfork_child, &child_status, 0) != vfork_child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+        return 70;
     }
     close(fd);
     printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld wall=%lld dirent=6 exec_meta=true fork=true\n",
