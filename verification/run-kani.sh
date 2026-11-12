@@ -12,7 +12,9 @@ sha256sum kernel-core/src/fv1.rs kernel-core/src/object.rs kernel-core/src/objta
   kernel-core/src/memory_object.rs kernel-core/src/cpu_time.rs kernel-core/src/subscription.rs kernel-core/src/async_ring.rs kernel/src/proc/mod.rs kernel-core/src/quota.rs kernel/src/ring.rs kernel/src/ipc.rs kernel-core/Cargo.toml Cargo.lock > evidence/fv1/source.sha256
 sha256sum kernel-core/src/percpu_migration.rs verification/FV1.toml \
   verification/check-kani-assumptions.py >> evidence/fv1/source.sha256
-cargo kani -p kernel-core > evidence/fv1/kani.log 2>&1
-# Do not use a grep result to mask cargo kani failure; set -e above is decisive.
+if ! cargo kani -p kernel-core > evidence/fv1/kani.log 2>&1; then
+  tail -120 evidence/fv1/kani.log
+  exit 1
+fi
 tail -18 evidence/fv1/kani.log
 python3 verification/check-fv1.py
