@@ -40,7 +40,7 @@ if awk -v load="$load1" 'BEGIN { exit !(load > 8.0) }'; then
   echo "FAIL host one-minute load $load1 is too high for another VM" >&2
   exit 75
 fi
-if pgrep -x qemu-system-x86_64 >/dev/null 2>&1; then
+if pgrep -f '[q]emu-system-x86_64' >/dev/null 2>&1; then
   echo "FAIL another qemu-system-x86_64 process is already running" >&2
   exit 75
 fi
