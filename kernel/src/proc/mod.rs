@@ -2557,18 +2557,18 @@ fn copy_linux_mapping(parent: ObjId, child: ObjId, mapping: LinuxMapping) -> Res
 #[cfg(feature = "linux-abi")]
 pub(crate) fn take_linux_child_exit(
     parent: ObjId,
-    target_pid: u32,
+    target_pid: Option<u32>,
 ) -> Result<Option<(u32, i32)>, ProcError> {
     let child = kobj::with(|t| match t.get(parent) {
         Ok(KObject::Process(p)) => Ok(p.children.clone()),
         _ => Err(ProcError::NoSuchProcess),
     })?;
-    let mut matching = false;
+    let mut matching = target_pid.is_none() && !child.is_empty();
     for candidate in child {
         let found = kobj::with(|t| match t.get(candidate) {
             Ok(KObject::Process(p)) => {
                 let linux = p.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
-                if linux.pid != target_pid {
+                if target_pid.is_some_and(|target| linux.pid != target) {
                     return Ok(None);
                 }
                 matching = true;

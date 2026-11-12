@@ -398,6 +398,42 @@ int main(void) {
     if (waitpid(child, &child_status, 0) != -1 || errno != ECHILD) {
         return 58;
     }
+    pid_t any_a = fork();
+    if (any_a < 0) {
+        return 62;
+    }
+    if (any_a == 0) {
+        _exit(9);
+    }
+    pid_t any_b = fork();
+    if (any_b < 0) {
+        return 63;
+    }
+    if (any_b == 0) {
+        _exit(10);
+    }
+    int saw_nine = 0;
+    int saw_ten = 0;
+    for (int i = 0; i < 2; i++) {
+        child_status = 0;
+        pid_t reaped = waitpid(-1, &child_status, 0);
+        if (reaped != any_a && reaped != any_b) {
+            return 64;
+        }
+        if (!WIFEXITED(child_status)) {
+            return 65;
+        }
+        int code = WEXITSTATUS(child_status);
+        saw_nine |= code == 9;
+        saw_ten |= code == 10;
+    }
+    if (!saw_nine || !saw_ten) {
+        return 66;
+    }
+    errno = 0;
+    if (waitpid(-1, &child_status, WNOHANG) != -1 || errno != ECHILD) {
+        return 67;
+    }
     close(fd);
     printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld wall=%lld dirent=6 exec_meta=true fork=true\n",
            (int)parent, (long long)end, CPU_COUNT(&cpus), cpu, node,

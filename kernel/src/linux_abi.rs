@@ -2325,8 +2325,14 @@ fn linux_fork_clone(
 /// Blocks until one specific Linux child exits, then writes its encoded wait status.
 /// 阻塞到一个指定 Linux 子进程退出，再写入编码后的 wait 状态。
 fn linux_wait4(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    let target = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
-    if target == 0 || args[2] != 0 || args[3] != 0 {
+    const WNOHANG: u64 = 1;
+    let target = args[0] as i32;
+    let target = match target {
+        -1 => None,
+        value if value > 0 => Some(value as u32),
+        _ => return Err(CompatErrno::Invalid),
+    };
+    if args[2] & !WNOHANG != 0 || args[3] != 0 {
         return Err(CompatErrno::NoSys);
     }
     loop {
@@ -2338,6 +2344,7 @@ fn linux_wait4(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 }
                 return Ok(u64::from(child_pid));
             }
+            Ok(None) if args[2] & WNOHANG != 0 => return Ok(0),
             Ok(None) => proc::block_step().map_err(|_| CompatErrno::Interrupted)?,
             Err(_) => return Err(CompatErrno::NoChild),
         }
