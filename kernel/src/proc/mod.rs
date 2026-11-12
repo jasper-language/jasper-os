@@ -2859,6 +2859,12 @@ pub fn bind_workload(pid: ObjId, workload: kernel_core::workload::WorkloadKey) -
             || !process.frames.is_empty()
             || !process.shared_maps.is_empty()
             || !process.device_maps.is_empty()
+            || !process.quarantined.is_empty()
+            || process.ring_quota != ResourceQuota::default()
+            || process.memory_account.snapshot().mapped != 0
+            || process.memory_account.snapshot().pinned != 0
+            || process.vm_guest_account.snapshot().mapped != 0
+            || process.subscription_account.snapshot().mapped != 0
         {
             return Err(ProcError::Exited);
         }
