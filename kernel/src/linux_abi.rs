@@ -1437,6 +1437,8 @@ fn execute(
         LinuxSyscall::Fstatfs => compat_result(linux_fstatfs(pid, call.args)),
         LinuxSyscall::Fsync => compat_result(linux_sync_fd(pid, call.args[0], false)),
         LinuxSyscall::Fdatasync => compat_result(linux_sync_fd(pid, call.args[0], true)),
+        LinuxSyscall::Ftruncate => compat_result(linux_ftruncate(pid, call.args)),
+        LinuxSyscall::MemfdCreate => compat_result(linux_memfd_create(pid, call.args)),
         LinuxSyscall::Sync => 0,
         LinuxSyscall::Syncfs => compat_result(linux_syncfs(pid, call.args[0])),
         LinuxSyscall::NewFstatAt => compat_result(linux_newfstatat(pid, call.args)),
@@ -3076,6 +3078,40 @@ fn linux_pipe2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         let _ = proc::linux_close_fd(pid, writer);
         return Err(CompatErrno::Fault);
     }
+    Ok(0)
+}
+
+fn linux_memfd_create(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MFD_CLOEXEC: u64 = 0x1;
+    const MFD_ALLOW_SEALING: u64 = 0x2;
+    if args[1] & MFD_ALLOW_SEALING != 0 || args[1] & !MFD_CLOEXEC != 0 {
+        return Err(CompatErrno::NoSys);
+    }
+    let name = linux_c_string(args[0], 249)?;
+    let fd = proc::linux_open_ashmem(pid, args[1] & MFD_CLOEXEC != 0)
+        .ok_or(CompatErrno::NoSpace)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if proc::linux_ashmem_set_name(pid, entry.handle, &name).is_err() {
+        let _ = proc::linux_close_fd(pid, fd);
+        return Err(CompatErrno::NoMemory);
+    }
+    Ok(u64::from(fd))
+}
+
+fn linux_ftruncate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let size = args[1];
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let (current, _, _) =
+        proc::linux_ashmem_state(pid, entry.handle).ok_or(CompatErrno::Invalid)?;
+    if current == size {
+        return Ok(0);
+    }
+    if current != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    proc::linux_ashmem_set_size(pid, entry.handle, size)
+        .map_err(ashmem_compat_error)?;
     Ok(0)
 }
 
