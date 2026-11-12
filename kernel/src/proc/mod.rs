@@ -86,6 +86,8 @@ const LINUX_ION_DEVICE_HANDLE_BASE: u64 = 0x0000_8400_0000_0000;
 const LINUX_EVENTFD_HANDLE_BASE: u64 = 0x0000_8500_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_EPOLL_HANDLE_BASE: u64 = 0x0000_8600_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_DMA_HEAP_HANDLE_BASE: u64 = 0x0000_8700_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -125,6 +127,9 @@ struct LinuxProcessState {
     epolls: Vec<LinuxEpollHandle>,
     next_epoll_handle: u64,
     iourings: Vec<LinuxIoUringHandle>,
+    dma_heaps: Vec<u64>,
+    next_dma_heap_handle: u64,
+    dmabufs: Vec<u64>,
     /// Set only on the child side of vfork. The parent task sleeps until the
     /// child commits exec or leaves `Running`.
     /// 仅 vfork 子进程携带；父任务睡眠到子进程提交 exec 或离开 Running。
@@ -1748,6 +1753,10 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     if linux.fds.handle_fd_count(handle) == 0 {
         linux.iourings.retain(|ring| ring.handle != handle);
     }
+    if linux.fds.handle_fd_count(handle) == 0 {
+        linux.dma_heaps.retain(|heap| *heap != handle);
+        linux.dmabufs.retain(|buffer| *buffer != handle);
+    }
 }
 
 /// Opens one anonymous ashmem buffer descriptor.
@@ -2113,6 +2122,78 @@ pub(crate) fn linux_is_ion_device(pid: ObjId, handle: u64) -> bool {
             .linux
             .as_ref()
             .is_some_and(|linux| linux.ion_devices.contains(&handle)),
+        _ => false,
+    })
+}
+
+/// Opens one modern Android dma-heap control descriptor.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_open_dma_heap(pid: ObjId, close_on_exec: bool) -> Option<u32> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.dma_heaps.len() >= 8 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .dma_heaps
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_dma_heap_handle;
+        linux.next_dma_heap_handle =
+            handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ.union(Rights::WRITE),
+                compat_core::fd::CompatKind::Device,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.dma_heaps.push(handle);
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Reports whether a descriptor is an Android dma-heap control device.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_is_dma_heap(pid: ObjId, handle: u64) -> bool {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()
+            .is_some_and(|linux| linux.dma_heaps.contains(&handle)),
+        _ => false,
+    })
+}
+
+/// Associates one shared-page memfd with the Android dma-buf ioctl surface.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_register_dmabuf(pid: ObjId, handle: u64) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.dmabufs.len() >= 32 || linux.dmabufs.contains(&handle) {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .dmabufs
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.dmabufs.push(handle);
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Reports whether a descriptor exposes the Android dma-buf ioctl surface.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_is_dmabuf(pid: ObjId, handle: u64) -> bool {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()
+            .is_some_and(|linux| linux.dmabufs.contains(&handle)),
         _ => false,
     })
 }
@@ -3343,6 +3424,9 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         epolls: Vec::new(),
         next_epoll_handle: LINUX_EPOLL_HANDLE_BASE,
         iourings: Vec::new(),
+        dma_heaps: Vec::new(),
+        next_dma_heap_handle: LINUX_DMA_HEAP_HANDLE_BASE,
+        dmabufs: Vec::new(),
         vfork_parent: None,
     };
     create_process(name, SyscallSet::EMPTY, move |process| {
