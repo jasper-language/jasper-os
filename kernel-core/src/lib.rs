@@ -203,6 +203,7 @@ pub mod sandbox_launch;
 pub mod sandbox_store;
 
 pub mod native_install;
+pub mod persistent_install;
 
 // issue #3：统一定时事件契约。 / Unified timer-event contract.
 pub mod timer_event;

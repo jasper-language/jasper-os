@@ -423,50 +423,30 @@ pub struct DataSnapshot {
     pub kind: DataOwnerKind,
 }
 
+/// Complete bounded installation state suitable for a transactional store.
 #[derive(Clone, Copy)]
-struct PackageRecord {
-    key: PackageKey,
-    spec: PackageSpec,
-}
-
-#[derive(Clone, Copy)]
-struct InstallationRecord {
-    key: InstallationKey,
-    package: PackageKey,
-    scope: OwnerScope,
-    source: PackageSource,
-    update_authority: UpdateAuthority,
-    enabled: bool,
-}
-
-#[derive(Clone, Copy)]
-struct GrantRecord {
-    key: GrantKey,
-    installation: InstallationKey,
-    subject: Subject,
-    rights: GrantRights,
-    expires_at: Option<u64>,
-    active: bool,
-}
-
-#[derive(Clone, Copy)]
-struct RuntimeRecord {
-    key: RuntimeKey,
-    installation: InstallationKey,
-    principal: RuntimePrincipal,
-    started_at: u64,
-}
-
-#[derive(Clone, Copy)]
-struct DataRecord {
-    key: DataKey,
-    package: PackageKey,
-    owner: Subject,
-    kind: DataOwnerKind,
+pub struct InstallStateSnapshot<
+    const P: usize,
+    const I: usize,
+    const G: usize,
+    const R: usize,
+    const D: usize,
+> {
+    pub packages: [Option<PackageSnapshot>; P],
+    pub package_generations: [u32; P],
+    pub installations: [Option<InstallationSnapshot>; I],
+    pub installation_generations: [u32; I],
+    pub grants: [Option<GrantSnapshot>; G],
+    pub grant_generations: [u32; G],
+    pub runtimes: [Option<RuntimeSnapshot>; R],
+    pub runtime_generations: [u32; R],
+    pub data: [Option<DataSnapshot>; D],
+    pub data_generations: [u32; D],
 }
 
 /// Fixed-capacity registry. Every key is generation-safe and every rejection
 /// leaves package, installation, grant, runtime and data tables unchanged.
+#[derive(Clone)]
 pub struct InstallModel<
     const P: usize,
     const I: usize,
@@ -474,15 +454,15 @@ pub struct InstallModel<
     const R: usize,
     const D: usize,
 > {
-    packages: [Option<PackageRecord>; P],
+    packages: [Option<PackageSnapshot>; P],
     package_generations: [u32; P],
-    installations: [Option<InstallationRecord>; I],
+    installations: [Option<InstallationSnapshot>; I],
     installation_generations: [u32; I],
-    grants: [Option<GrantRecord>; G],
+    grants: [Option<GrantSnapshot>; G],
     grant_generations: [u32; G],
-    runtimes: [Option<RuntimeRecord>; R],
+    runtimes: [Option<RuntimeSnapshot>; R],
     runtime_generations: [u32; R],
-    data: [Option<DataRecord>; D],
+    data: [Option<DataSnapshot>; D],
     data_generations: [u32; D],
 }
 
@@ -504,21 +484,191 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
         }
     }
 
+    /// Copy the complete public state for transactional persistence.
+    pub fn snapshot_state(&self) -> InstallStateSnapshot<P, I, G, R, D> {
+        InstallStateSnapshot {
+            packages: self.packages,
+            package_generations: self.package_generations,
+            installations: self.installations,
+            installation_generations: self.installation_generations,
+            grants: self.grants,
+            grant_generations: self.grant_generations,
+            runtimes: self.runtimes,
+            runtime_generations: self.runtime_generations,
+            data: self.data,
+            data_generations: self.data_generations,
+        }
+    }
+
+    /// Restore a complete state only after validating keys and every reference.
+    pub fn restore_state(
+        snapshot: InstallStateSnapshot<P, I, G, R, D>,
+    ) -> Result<Self, InstallError> {
+        let model = Self {
+            packages: snapshot.packages,
+            package_generations: snapshot.package_generations,
+            installations: snapshot.installations,
+            installation_generations: snapshot.installation_generations,
+            grants: snapshot.grants,
+            grant_generations: snapshot.grant_generations,
+            runtimes: snapshot.runtimes,
+            runtime_generations: snapshot.runtime_generations,
+            data: snapshot.data,
+            data_generations: snapshot.data_generations,
+        };
+        for (slot, record) in model.packages.iter().enumerate() {
+            if let Some(record) = record {
+                if record.key.slot as usize != slot
+                    || record.key.generation == 0
+                    || model.package_generations[slot] != record.key.generation
+                    || !record.spec.valid()
+                {
+                    return Err(InstallError::StaleKey);
+                }
+            }
+        }
+        for (slot, record) in model.installations.iter().enumerate() {
+            if let Some(record) = record {
+                if record.key.slot as usize != slot
+                    || record.key.generation == 0
+                    || model.installation_generations[slot] != record.key.generation
+                    || !record.scope.is_valid()
+                    || !record.update_authority.subject.is_valid()
+                    || model.package_record(record.package).is_err()
+                {
+                    return Err(InstallError::StaleKey);
+                }
+                if model.installations[..slot]
+                    .iter()
+                    .flatten()
+                    .any(|other| other.package == record.package && other.scope == record.scope)
+                {
+                    return Err(InstallError::Duplicate);
+                }
+            }
+        }
+        for (slot, record) in model.grants.iter().enumerate() {
+            if let Some(record) = record {
+                if record.key.slot as usize != slot
+                    || record.key.generation == 0
+                    || model.grant_generations[slot] != record.key.generation
+                    || !record.subject.is_valid()
+                    || !record.rights.valid()
+                    || model.installation_record(record.installation).is_err()
+                {
+                    return Err(InstallError::StaleKey);
+                }
+            }
+        }
+        for (slot, record) in model.runtimes.iter().enumerate() {
+            if let Some(record) = record {
+                let principal = record.principal;
+                if record.key.slot as usize != slot
+                    || record.key.generation == 0
+                    || model.runtime_generations[slot] != record.key.generation
+                    || !principal.subject.is_valid()
+                    || principal.generation == 0
+                    || !principal.domain.is_valid()
+                    || !principal.rights.valid()
+                    || !matches!(
+                        (principal.kind, principal.subject),
+                        (PrincipalKind::User, Subject::User(_))
+                            | (PrincipalKind::Service, Subject::Service(_))
+                            | (
+                                PrincipalKind::Workload | PrincipalKind::Sandbox,
+                                Subject::Workload(_)
+                            )
+                    )
+                    || model.installation_record(record.installation).is_err()
+                {
+                    return Err(InstallError::StaleKey);
+                }
+            }
+        }
+        for (slot, record) in model.data.iter().enumerate() {
+            if let Some(record) = record {
+                if record.key.slot as usize != slot
+                    || record.key.generation == 0
+                    || model.data_generations[slot] != record.key.generation
+                    || !record.owner.is_valid()
+                    || model.package_record(record.package).is_err()
+                {
+                    return Err(InstallError::StaleKey);
+                }
+            }
+        }
+        Ok(model)
+    }
+
+    pub fn find_package(&self, spec: PackageSpec) -> Option<PackageKey> {
+        self.packages
+            .iter()
+            .flatten()
+            .find(|record| record.spec == spec)
+            .map(|record| record.key)
+    }
+
+    pub fn find_installation(&self, spec: InstallSpec) -> Option<InstallationKey> {
+        self.installations
+            .iter()
+            .flatten()
+            .find(|record| {
+                record.package == spec.package
+                    && record.scope == spec.scope
+                    && record.source == spec.source
+                    && record.update_authority == spec.update_authority
+            })
+            .map(|record| record.key)
+    }
+
+    pub fn find_grant(&self, spec: GrantSpec) -> Option<GrantKey> {
+        self.grants
+            .iter()
+            .flatten()
+            .find(|record| {
+                record.active
+                    && record.installation == spec.installation
+                    && record.subject == spec.subject
+                    && record.rights == spec.rights
+                    && record.expires_at == spec.expires_at
+            })
+            .map(|record| record.key)
+    }
+
+    pub fn find_data(
+        &self,
+        package: PackageKey,
+        owner: Subject,
+        kind: DataOwnerKind,
+    ) -> Option<DataKey> {
+        self.data
+            .iter()
+            .flatten()
+            .find(|record| {
+                record.package == package && record.owner == owner && record.kind == kind
+            })
+            .map(|record| record.key)
+    }
+
+    pub fn content_referenced(&self, content: [u8; CONTENT_BYTES]) -> bool {
+        self.packages
+            .iter()
+            .flatten()
+            .any(|record| record.spec.content == content)
+    }
+
     pub fn add_package(&mut self, spec: PackageSpec) -> Result<PackageKey, InstallError> {
         if !spec.valid() {
             return Err(InstallError::InvalidPackage);
         }
         let (slot, generation) = vacant(&self.packages, &mut self.package_generations)?;
         let key = PackageKey { slot, generation };
-        self.packages[slot as usize] = Some(PackageRecord { key, spec });
+        self.packages[slot as usize] = Some(PackageSnapshot { key, spec });
         Ok(key)
     }
 
     pub fn package(&self, key: PackageKey) -> Result<PackageSnapshot, InstallError> {
-        self.package_record(key).map(|record| PackageSnapshot {
-            key,
-            spec: record.spec,
-        })
+        self.package_record(key)
     }
 
     pub fn install(&mut self, spec: InstallSpec) -> Result<InstallationKey, InstallError> {
@@ -536,7 +686,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
         }
         let (slot, generation) = vacant(&self.installations, &mut self.installation_generations)?;
         let key = InstallationKey { slot, generation };
-        self.installations[slot as usize] = Some(InstallationRecord {
+        self.installations[slot as usize] = Some(InstallationSnapshot {
             key,
             package: spec.package,
             scope: spec.scope,
@@ -549,14 +699,6 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
 
     pub fn installation(&self, key: InstallationKey) -> Result<InstallationSnapshot, InstallError> {
         self.installation_record(key)
-            .map(|record| InstallationSnapshot {
-                key,
-                package: record.package,
-                scope: record.scope,
-                source: record.source,
-                update_authority: record.update_authority,
-                enabled: record.enabled,
-            })
     }
 
     pub fn add_grant(&mut self, spec: GrantSpec) -> Result<GrantKey, InstallError> {
@@ -566,7 +708,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
         }
         let (slot, generation) = vacant(&self.grants, &mut self.grant_generations)?;
         let key = GrantKey { slot, generation };
-        self.grants[slot as usize] = Some(GrantRecord {
+        self.grants[slot as usize] = Some(GrantSnapshot {
             key,
             installation: spec.installation,
             subject: spec.subject,
@@ -578,14 +720,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
     }
 
     pub fn grant(&self, key: GrantKey) -> Result<GrantSnapshot, InstallError> {
-        self.grant_record(key).map(|record| GrantSnapshot {
-            key,
-            installation: record.installation,
-            subject: record.subject,
-            rights: record.rights,
-            expires_at: record.expires_at,
-            active: record.active,
-        })
+        self.grant_record(key)
     }
 
     pub fn revoke_grant(&mut self, key: GrantKey) -> Result<(), InstallError> {
@@ -662,7 +797,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
         }
         let (slot, generation) = vacant(&self.runtimes, &mut self.runtime_generations)?;
         let key = RuntimeKey { slot, generation };
-        self.runtimes[slot as usize] = Some(RuntimeRecord {
+        self.runtimes[slot as usize] = Some(RuntimeSnapshot {
             key,
             installation,
             principal: RuntimePrincipal {
@@ -679,13 +814,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
 
     pub fn runtime(&self, key: RuntimeKey) -> Result<RuntimeSnapshot, InstallError> {
         let slot = self.runtime_slot(key)?;
-        let record = self.runtimes[slot].ok_or(InstallError::StaleKey)?;
-        Ok(RuntimeSnapshot {
-            key,
-            installation: record.installation,
-            principal: record.principal,
-            started_at: record.started_at,
-        })
+        self.runtimes[slot].ok_or(InstallError::StaleKey)
     }
 
     pub fn stop_runtime(&mut self, key: RuntimeKey) -> Result<(), InstallError> {
@@ -717,7 +846,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
         }
         let (slot, generation) = vacant(&self.data, &mut self.data_generations)?;
         let key = DataKey { slot, generation };
-        self.data[slot as usize] = Some(DataRecord {
+        self.data[slot as usize] = Some(DataSnapshot {
             key,
             package,
             owner,
@@ -840,7 +969,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
         (rights.0 != 0).then_some(rights)
     }
 
-    fn package_record(&self, key: PackageKey) -> Result<PackageRecord, InstallError> {
+    fn package_record(&self, key: PackageKey) -> Result<PackageSnapshot, InstallError> {
         self.packages
             .get(key.slot as usize)
             .and_then(|record| *record)
@@ -851,7 +980,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
     fn installation_record(
         &self,
         key: InstallationKey,
-    ) -> Result<InstallationRecord, InstallError> {
+    ) -> Result<InstallationSnapshot, InstallError> {
         self.installations
             .get(key.slot as usize)
             .and_then(|record| *record)
@@ -859,7 +988,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
             .ok_or(InstallError::StaleKey)
     }
 
-    fn grant_record(&self, key: GrantKey) -> Result<GrantRecord, InstallError> {
+    fn grant_record(&self, key: GrantKey) -> Result<GrantSnapshot, InstallError> {
         self.grants
             .get(key.slot as usize)
             .and_then(|record| *record)
