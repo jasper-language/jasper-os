@@ -5978,10 +5978,13 @@ fn linux_epoll_wait(
     const MAX_EVENTS: usize = 64;
 
     let epfd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-    let max_events = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if max_events == 0 || max_events > MAX_EVENTS {
+    let requested_events = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if requested_events == 0 {
         return Err(CompatErrno::Invalid);
     }
+    // The kernel ring and user copy are bounded. Accept every Linux-valid
+    // positive maxevents value and report at most the capacity in one call.
+    let max_events = requested_events.min(MAX_EVENTS);
     let deadline = linux_epoll_deadline(args, pwait2)?;
     let old_mask = current_signal_mask(pid).ok_or(CompatErrno::NoSys)?;
     let mut restore_mask = false;

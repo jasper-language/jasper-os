@@ -991,7 +991,7 @@ int main(void) {
     struct epoll_event epoll_ready = {0};
     if (epfd < 0 || (fcntl(epfd, F_GETFD) & FD_CLOEXEC) == 0 ||
         pipe2(epoll_pipe, 0) != 0 ||
-        epoll_wait(epfd, &epoll_ready, 1, 20) != 0) {
+        epoll_wait(epfd, &epoll_ready, 128, 20) != 0) {
         return 250;
     }
     struct epoll_event epoll_interest = {
