@@ -5922,6 +5922,23 @@ fn linux_io_uring_enter(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
         return Err(CompatErrno::Invalid);
     }
     let submit = to_submit.min(pending as usize);
+    let mut completion = [0u8; 8];
+    io_uring_read(pid, entry.handle, IO_URING_CQ_HEAD, &mut completion)?;
+    let cq_head = u32::from_le_bytes(completion[..4].try_into().unwrap());
+    let mut cq_tail = u32::from_le_bytes(completion[4..].try_into().unwrap());
+    let queued = cq_tail.wrapping_sub(cq_head);
+    if queued > cq_entries
+        || queued
+            .checked_add(submit as u32)
+            .is_none_or(|total| total > cq_entries)
+    {
+        return Err(CompatErrno::NoSpace);
+    }
+    if args[2] != 0 && queued == 0 && submit == 0 {
+        // There is no independent asynchronous producer yet. Do not report
+        // completion for a request that would have blocked in Linux.
+        return Err(CompatErrno::NoSys);
+    }
     for index in 0..submit {
         let position = sq_head.wrapping_add(index as u32);
         let mut array = [0u8; 4];
@@ -5954,6 +5971,7 @@ fn linux_io_uring_enter(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
         };
         let result = if sqe_flags != 0
             || invalid_operation_flags
+            || sqe_index >= entries
             || target_fd < 0 && opcode != IORING_OP_NOP
         {
             Err(CompatErrno::Invalid)
@@ -5988,13 +6006,6 @@ fn linux_io_uring_enter(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
             Ok(value) => value.min(i64::MAX as u64) as i64,
             Err(error) => -i64::from(error as i32),
         };
-        let mut cq = [0u8; 8];
-        io_uring_read(pid, entry.handle, IO_URING_CQ_HEAD, &mut cq)?;
-        let cq_head = u32::from_le_bytes(cq[..4].try_into().unwrap());
-        let cq_tail = u32::from_le_bytes(cq[4..8].try_into().unwrap());
-        if cq_tail.wrapping_sub(cq_head) >= cq_entries {
-            return Err(CompatErrno::NoSpace);
-        }
         let mut cqe = [0u8; 16];
         cqe[..8].copy_from_slice(&user_data.to_le_bytes());
         cqe[8..12].copy_from_slice(&(result as i32).to_le_bytes());
@@ -6004,11 +6015,12 @@ fn linux_io_uring_enter(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
             IO_URING_CQES + u64::from(cq_tail & cq_mask) * 16,
             &cqe,
         )?;
+        cq_tail = cq_tail.wrapping_add(1);
         io_uring_write(
             pid,
             entry.handle,
             IO_URING_CQ_TAIL,
-            &cq_tail.wrapping_add(1).to_le_bytes(),
+            &cq_tail.to_le_bytes(),
         )?;
     }
     sq_head = sq_head.wrapping_add(submit as u32);
