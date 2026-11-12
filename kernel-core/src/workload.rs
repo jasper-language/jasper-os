@@ -343,13 +343,18 @@ impl<const N: usize> WorkloadTable<N> {
         if record.children != 0 {
             return Err(WorkloadError::InvalidState);
         }
+        if let Some(parent) = record.parent {
+            if self.record(parent)?.children == 0 {
+                return Err(WorkloadError::InvalidState);
+            }
+        }
         self.slots[index] = None;
         if let Some(parent) = record.parent {
             let parent = self.record_mut(parent)?;
             parent.children = parent
                 .children
                 .checked_sub(1)
-                .ok_or(WorkloadError::InvalidState)?;
+                .expect("preflighted parent child count");
         }
         Ok(())
     }
