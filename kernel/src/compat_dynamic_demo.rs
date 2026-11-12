@@ -171,6 +171,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::GetCpu,
         LinuxSyscall::Sysinfo,
         LinuxSyscall::SchedGetAffinity,
+        LinuxSyscall::SchedSetAffinity,
         LinuxSyscall::SchedGetScheduler,
         LinuxSyscall::SetTidAddress,
         LinuxSyscall::SetRobustList,
