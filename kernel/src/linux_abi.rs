@@ -613,6 +613,10 @@ fn take_deliverable_signal(process: ObjId) -> Option<u32> {
 /// Reports whether the current thread has an unmasked pending signal.
 /// 判断当前线程是否存在未被 mask 的 pending 信号。
 pub(crate) fn current_signal_pending(process: ObjId) -> bool {
+    pending_signal_mask(process) != 0
+}
+
+pub(crate) fn pending_signal_mask(process: ObjId) -> u64 {
     let (task, _) = sched::current();
     let state = COMPAT.lock();
     let Some(thread) = state
@@ -621,15 +625,37 @@ pub(crate) fn current_signal_pending(process: ObjId) -> bool {
         .flatten()
         .find(|entry| entry.process == process && entry.task == task)
     else {
-        return false;
+        return 0;
     };
-    thread.pending_signals & !thread.signal_mask != 0
-        || state
-            .process_signals
-            .iter()
-            .flatten()
-            .find(|entry| entry.process == process)
-            .is_some_and(|entry| entry.pending & !thread.signal_mask != 0)
+    let shared = state
+        .process_signals
+        .iter()
+        .flatten()
+        .find(|entry| entry.process == process)
+        .map(|entry| entry.pending)
+        .unwrap_or(0);
+    (thread.pending_signals | shared) & !thread.signal_mask
+}
+
+fn blocked_pending_signal_mask(process: ObjId) -> u64 {
+    let (task, _) = sched::current();
+    let state = COMPAT.lock();
+    let Some(thread) = state
+        .threads
+        .iter()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)
+    else {
+        return 0;
+    };
+    let shared = state
+        .process_signals
+        .iter()
+        .flatten()
+        .find(|entry| entry.process == process)
+        .map(|entry| entry.pending)
+        .unwrap_or(0);
+    (thread.pending_signals | shared) & thread.signal_mask
 }
 
 const SIGNAL_FRAME_BYTES: usize = 8 + 968 + 128 + crate::syscall::XSAVE_BYTES;
@@ -1482,6 +1508,7 @@ fn execute(
         LinuxSyscall::Nanosleep => compat_result(linux_nanosleep(pid, call.args)),
         LinuxSyscall::ClockNanosleep => compat_result(linux_clock_nanosleep(pid, call.args)),
         LinuxSyscall::RtSigAction => compat_result(linux_rt_sigaction(pid, call.args)),
+        LinuxSyscall::RtSigPending => compat_result(linux_rt_sigpending(pid, call.args)),
         LinuxSyscall::RtSigProcMask => compat_result(linux_rt_sigprocmask(pid, call.args)),
         LinuxSyscall::Tgkill => compat_result(linux_tgkill(pid, call.args).map(|()| 0)),
         LinuxSyscall::SchedYield => {
@@ -5668,6 +5695,15 @@ fn linux_rt_sigaction(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         copy_to_user(args[2], &action, SIGACTION_BYTES).map_err(|_| CompatErrno::Fault)?;
     }
+    Ok(0)
+}
+
+fn linux_rt_sigpending(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[1] != 8 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mask = blocked_pending_signal_mask(pid);
+    copy_to_user(args[0], &mask.to_le_bytes(), 8).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
 }
 

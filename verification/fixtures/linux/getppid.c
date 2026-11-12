@@ -62,6 +62,10 @@ struct jasper_ion_handle_data {
     int handle;
 };
 
+static void signal_noop(int signal) {
+    (void)signal;
+}
+
 int main(void) {
     if (getenv("JASPER_EXEC_CHILD") != NULL) {
         printf("jasper-exec-child pid=%d ppid=%d\n", getpid(), getppid());
@@ -75,6 +79,18 @@ int main(void) {
     pid_t parent = getppid();
     if (parent != 0) {
         return 2;
+    }
+    sigset_t blocked_signal;
+    sigset_t pending_signal;
+    sigemptyset(&blocked_signal);
+    sigaddset(&blocked_signal, SIGUSR1);
+    if (signal(SIGUSR1, signal_noop) == SIG_ERR ||
+        sigprocmask(SIG_BLOCK, &blocked_signal, NULL) != 0 ||
+        raise(SIGUSR1) != 0 ||
+        sigpending(&pending_signal) != 0 ||
+        !sigismember(&pending_signal, SIGUSR1) ||
+        sigprocmask(SIG_UNBLOCK, &blocked_signal, NULL) != 0) {
+        return 238;
     }
     int fd = open("/usr/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
