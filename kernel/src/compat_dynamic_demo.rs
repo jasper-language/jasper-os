@@ -110,6 +110,8 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Fchmod,
         LinuxSyscall::FchmodAt,
         LinuxSyscall::FchmodAt2,
+        LinuxSyscall::Fchown,
+        LinuxSyscall::FchownAt,
         LinuxSyscall::Fstat,
         LinuxSyscall::Fstatfs,
         LinuxSyscall::Fsync,
