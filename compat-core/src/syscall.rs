@@ -300,6 +300,9 @@ pub enum CompatErrno {
     /// 访问对象的权限被拒绝。
     Access = linux_raw_sys::errno::EACCES,
     NoEntry = linux_raw_sys::errno::ENOENT,
+    /// The requested object already exists.
+    /// 请求的对象已经存在。
+    Exists = linux_raw_sys::errno::EEXIST,
     NoProcess = linux_raw_sys::errno::ESRCH,
     /// No waitable child process exists.
     /// 不存在可等待的子进程。

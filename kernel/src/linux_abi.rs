@@ -949,21 +949,22 @@ fn linux_tgkill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     }
 }
 
-/// Queues a process-directed `kill` for the current compatibility process.
-/// 为当前兼容进程登记一个进程定向 `kill`。
-fn linux_kill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+/// Queues a process-directed `kill` for a live compatibility process.
+/// 为存活的兼容进程登记一个进程定向 `kill`。
+fn linux_kill(_process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     let pid = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
     let signal = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
-    if pid == 0 || pid != proc::linux_pid(process).ok_or(CompatErrno::NoProcess)? {
+    if pid == 0 {
         return Err(CompatErrno::NoProcess);
     }
+    let target = proc::linux_process_for_pid(pid).ok_or(CompatErrno::NoProcess)?;
     if signal == 0 {
         return Ok(());
     }
     if signal > 64 || matches!(signal, 9 | 19) {
         return Err(CompatErrno::Invalid);
     }
-    if queue_process_signal(process, signal) {
+    if queue_process_signal(target, signal) {
         Ok(())
     } else {
         Err(CompatErrno::NoSpace)
@@ -1609,6 +1610,11 @@ fn execute(
         }
         LinuxSyscall::Prlimit64 => compat_result(linux_prlimit(pid, call.args)),
         LinuxSyscall::Futex => compat_result(linux_futex(pid, call.args)),
+        LinuxSyscall::EpollCreate1 => compat_result(linux_epoll_create1(pid, call.args)),
+        LinuxSyscall::EpollCtl => compat_result(linux_epoll_ctl(pid, call.args)),
+        LinuxSyscall::EpollWait => compat_result(linux_epoll_wait(pid, call.args, false, false)),
+        LinuxSyscall::EpollPWait => compat_result(linux_epoll_wait(pid, call.args, true, false)),
+        LinuxSyscall::EpollPWait2 => compat_result(linux_epoll_wait(pid, call.args, true, true)),
         LinuxSyscall::Exit | LinuxSyscall::ExitGroup => {
             let code = call.args[0] as i64;
             proc::thread_exit(code, "linux process exit")
@@ -5700,6 +5706,365 @@ fn ashmem_compat_error(error: proc::LinuxAshmemError) -> CompatErrno {
         proc::LinuxAshmemError::NoMemory => CompatErrno::NoMemory,
         proc::LinuxAshmemError::NotAshmem => CompatErrno::NotTty,
     }
+}
+
+/// Creates a bounded Linux epoll instance.
+fn linux_epoll_create1(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const EPOLL_CLOEXEC: u64 = 0x80000;
+    if args[0] & !EPOLL_CLOEXEC != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    proc::linux_epoll_create(pid, args[0] & EPOLL_CLOEXEC != 0)
+        .map(u64::from)
+        .ok_or(CompatErrno::NoSpace)
+}
+
+/// Adds, removes or modifies one epoll interest by the target open-file handle.
+fn linux_epoll_ctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const EPOLL_CTL_ADD: u64 = 1;
+    const EPOLL_CTL_DEL: u64 = 2;
+    const EPOLL_CTL_MOD: u64 = 3;
+    const EPOLLIN: u32 = 0x001;
+    const EPOLLOUT: u32 = 0x004;
+    const EPOLLERR: u32 = 0x008;
+    const EPOLLHUP: u32 = 0x010;
+    const EPOLLRDHUP: u32 = 0x2000;
+    const EPOLLONESHOT: u32 = 1 << 30;
+    const EPOLLET: u32 = 1 << 31;
+    const EVENT_BYTES: usize = 12;
+    const MAX_REGISTRATIONS: usize = 64;
+
+    let epfd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let target_fd = u32::try_from(args[2]).map_err(|_| CompatErrno::BadFd)?;
+    if !matches!(args[1], EPOLL_CTL_ADD | EPOLL_CTL_DEL | EPOLL_CTL_MOD) {
+        return Err(CompatErrno::Invalid);
+    }
+    let epoll_entry = proc::linux_fd(pid, epfd).ok_or(CompatErrno::BadFd)?;
+    let registrations = proc::linux_epoll_registrations(pid, epoll_entry.handle)
+        .ok_or(CompatErrno::BadFd)?;
+    let target = proc::linux_fd(pid, target_fd).ok_or(CompatErrno::BadFd)?;
+    if target.handle == epoll_entry.handle || proc::linux_is_epoll(pid, target.handle) {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut registrations = registrations.lock();
+    let existing = registrations
+        .iter()
+        .position(|registration| registration.handle == target.handle);
+    if args[1] == EPOLL_CTL_DEL {
+        let index = existing.ok_or(CompatErrno::NoEntry)?;
+        registrations.remove(index);
+        return Ok(0);
+    }
+    if args[1] == EPOLL_CTL_ADD && existing.is_some() {
+        return Err(CompatErrno::Exists);
+    }
+    if args[1] == EPOLL_CTL_MOD && existing.is_none() {
+        return Err(CompatErrno::NoEntry);
+    }
+    let mut raw = [0u8; EVENT_BYTES];
+    copy_from_user(&mut raw, args[3], EVENT_BYTES).map_err(|_| CompatErrno::Fault)?;
+    let events = u32::from_le_bytes(raw[..4].try_into().unwrap());
+    let supported =
+        EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP | EPOLLRDHUP | EPOLLONESHOT | EPOLLET;
+    if events & supported == 0 || events & !supported != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let data = u64::from_le_bytes(raw[4..12].try_into().unwrap());
+    let registration = proc::LinuxEpollRegistration {
+        handle: target.handle,
+        kind: target.kind,
+        rights: target.rights,
+        events,
+        data,
+        armed: true,
+        edge_seen: 0,
+    };
+    if let Some(index) = existing {
+        registrations[index] = registration;
+        return Ok(0);
+    }
+    if registrations.len() >= MAX_REGISTRATIONS {
+        return Err(CompatErrno::NoSpace);
+    }
+    registrations
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoSpace)?;
+    registrations.push(registration);
+    Ok(0)
+}
+
+/// Evaluates one registered source without taking the epoll set lock again.
+fn linux_epoll_readiness(
+    pid: ObjId,
+    registration: proc::LinuxEpollRegistration,
+) -> Option<u32> {
+    const EPOLLIN: u32 = 0x001;
+    const EPOLLOUT: u32 = 0x004;
+    const EPOLLERR: u32 = 0x008;
+    const EPOLLHUP: u32 = 0x010;
+    const EPOLLRDHUP: u32 = 0x2000;
+
+    if proc::linux_handle_fd_count(pid, registration.handle) == 0 {
+        return None;
+    }
+    let requested = registration.events & (EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP | EPOLLRDHUP);
+    let ready = match registration.kind {
+        compat_core::fd::CompatKind::Other
+            if registration.handle == proc::LINUX_CONSOLE_HANDLE =>
+        {
+            let (pending, ended, failed) = crate::terminal::input_status();
+            let mut ready = 0;
+            if requested & EPOLLIN != 0 && (pending || ended) {
+                ready |= EPOLLIN;
+            }
+            if requested & EPOLLOUT != 0 {
+                ready |= EPOLLOUT;
+            }
+            if ended {
+                ready |= EPOLLHUP;
+            }
+            if failed {
+                ready |= EPOLLERR;
+            }
+            ready
+        }
+        compat_core::fd::CompatKind::Event => {
+            let (counter, _) = proc::linux_eventfd_state(pid, registration.handle)?;
+            let value = *counter.lock();
+            let mut ready = 0;
+            if requested & EPOLLIN != 0 && value != 0 {
+                ready |= EPOLLIN;
+            }
+            if requested & EPOLLOUT != 0 && value < u64::MAX - 1 {
+                ready |= EPOLLOUT;
+            }
+            ready
+        }
+        compat_core::fd::CompatKind::Pipe => {
+            let pipe = proc::linux_pipe_endpoint(pid, registration.handle)?;
+            let mut ready = 0;
+            if requested & EPOLLIN != 0
+                && registration
+                    .rights
+                    .contains(kernel_core::object::Rights::READ)
+                && pipe.is_readable()
+            {
+                ready |= EPOLLIN;
+            }
+            if requested & EPOLLOUT != 0
+                && registration
+                    .rights
+                    .contains(kernel_core::object::Rights::WRITE)
+                && pipe.is_writable()
+            {
+                ready |= EPOLLOUT;
+            }
+            if pipe.readers_gone() {
+                ready |= EPOLLERR;
+            }
+            if pipe.writers_gone() {
+                ready |= EPOLLHUP | EPOLLRDHUP;
+            }
+            ready
+        }
+        compat_core::fd::CompatKind::Socket => {
+            let socket = proc::linux_socket_endpoint(pid, registration.handle)?;
+            let mut ready = 0;
+            if requested & EPOLLIN != 0
+                && registration
+                    .rights
+                    .contains(kernel_core::object::Rights::READ)
+                && socket.is_readable()
+            {
+                ready |= EPOLLIN;
+            }
+            if requested & EPOLLOUT != 0
+                && registration
+                    .rights
+                    .contains(kernel_core::object::Rights::WRITE)
+                && socket.is_writable()
+            {
+                ready |= EPOLLOUT;
+            }
+            if socket.peer_read_gone() {
+                ready |= EPOLLERR;
+            }
+            if socket.peer_write_gone() {
+                ready |= EPOLLHUP | EPOLLRDHUP;
+            }
+            ready
+        }
+        compat_core::fd::CompatKind::File => {
+            let mut ready = 0;
+            if requested & EPOLLIN != 0
+                && registration
+                    .rights
+                    .contains(kernel_core::object::Rights::READ)
+            {
+                ready |= EPOLLIN;
+            }
+            if requested & EPOLLOUT != 0
+                && registration
+                    .rights
+                    .contains(kernel_core::object::Rights::WRITE)
+            {
+                ready |= EPOLLOUT;
+            }
+            ready
+        }
+        compat_core::fd::CompatKind::Device
+            if proc::linux_ashmem_is_regular(pid, registration.handle) == Some(true) =>
+        {
+            let mut ready = 0;
+            if requested & EPOLLIN != 0
+                && registration
+                    .rights
+                    .contains(kernel_core::object::Rights::READ)
+            {
+                ready |= EPOLLIN;
+            }
+            if requested & EPOLLOUT != 0
+                && registration
+                    .rights
+                    .contains(kernel_core::object::Rights::WRITE)
+            {
+                ready |= EPOLLOUT;
+            }
+            ready
+        }
+        _ => 0,
+    };
+    Some(ready)
+}
+
+/// Parses an epoll wait timeout without allowing overflow or negative nanos.
+fn linux_epoll_deadline(args: [u64; 6], pwait2: bool) -> Result<Option<u64>, CompatErrno> {
+    let timeout_ns = if pwait2 {
+        if args[3] == 0 {
+            None
+        } else {
+            let mut raw = [0u8; 16];
+            copy_from_user(&mut raw, args[3], 16).map_err(|_| CompatErrno::Fault)?;
+            let seconds = i64::from_le_bytes(raw[..8].try_into().unwrap());
+            let nanos = i64::from_le_bytes(raw[8..].try_into().unwrap());
+            if seconds < 0 || !(0..1_000_000_000).contains(&nanos) {
+                return Err(CompatErrno::Invalid);
+            }
+            Some(
+                (seconds as u64)
+                    .checked_mul(1_000_000_000)
+                    .and_then(|value| value.checked_add(nanos as u64))
+                    .ok_or(CompatErrno::Invalid)?,
+            )
+        }
+    } else {
+        let timeout = args[3] as u32 as i32;
+        (timeout >= 0).then_some((timeout as u64).saturating_mul(1_000_000))
+    };
+    Ok(timeout_ns.map(|duration| sched::now_ns().saturating_add(duration)))
+}
+
+/// Waits on one epoll set with level, edge and oneshot semantics.
+fn linux_epoll_wait(
+    pid: ObjId,
+    args: [u64; 6],
+    pwait: bool,
+    pwait2: bool,
+) -> Result<u64, CompatErrno> {
+    const EPOLLERR: u32 = 0x008;
+    const EPOLLHUP: u32 = 0x010;
+    const EPOLLONESHOT: u32 = 1 << 30;
+    const EPOLLET: u32 = 1 << 31;
+    const MAX_EVENTS: usize = 64;
+
+    let epfd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let max_events = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if max_events == 0 || max_events > MAX_EVENTS {
+        return Err(CompatErrno::Invalid);
+    }
+    let deadline = linux_epoll_deadline(args, pwait2)?;
+    let old_mask = current_signal_mask(pid).ok_or(CompatErrno::NoSys)?;
+    let mut restore_mask = false;
+    if pwait && args[4] != 0 {
+        if args[5] != 8 {
+            return Err(CompatErrno::Invalid);
+        }
+        let mut raw = [0u8; 8];
+        copy_from_user(&mut raw, args[4], 8).map_err(|_| CompatErrno::Fault)?;
+        if !set_current_signal_mask(pid, u64::from_le_bytes(raw)) {
+            return Err(CompatErrno::NoSys);
+        }
+        restore_mask = true;
+    }
+    let result = (|| {
+        let epoll_entry = proc::linux_fd(pid, epfd).ok_or(CompatErrno::BadFd)?;
+        let registrations = proc::linux_epoll_registrations(pid, epoll_entry.handle)
+            .ok_or(CompatErrno::BadFd)?;
+        loop {
+            let mut output = [0u8; MAX_EVENTS * 12];
+            let mut ready = 0usize;
+            {
+                let mut registrations = registrations.lock();
+                registrations.retain(|registration| {
+                    proc::linux_handle_fd_count(pid, registration.handle) != 0
+                });
+                for registration in registrations.iter_mut() {
+                    if !registration.armed || ready == max_events {
+                        continue;
+                    }
+                    let Some(selected) = linux_epoll_readiness(pid, *registration) else {
+                        registration.armed = false;
+                        continue;
+                    };
+                    let always = selected & (EPOLLERR | EPOLLHUP);
+                    let relevant = selected & registration.events & !(EPOLLONESHOT | EPOLLET);
+                    let selected = relevant | always;
+                    let deliver = if registration.events & EPOLLET != 0 {
+                        selected & !registration.edge_seen != 0
+                    } else {
+                        selected != 0
+                    };
+                    if deliver {
+                        let base = ready * 12;
+                        output[base..base + 4]
+                            .copy_from_slice(&selected.to_le_bytes());
+                        output[base + 4..base + 12]
+                            .copy_from_slice(&registration.data.to_le_bytes());
+                        ready += 1;
+                        registration.edge_seen |= selected;
+                        if registration.events & EPOLLONESHOT != 0 {
+                            registration.armed = false;
+                        }
+                    } else if selected == 0 {
+                        registration.edge_seen = 0;
+                    }
+                }
+            }
+            if ready != 0 {
+                copy_to_user(args[1], &output[..ready * 12], ready * 12)
+                    .map_err(|_| CompatErrno::Fault)?;
+                return Ok(ready as u64);
+            }
+            if proc::current_exiting() || current_signal_pending(pid) {
+                return Err(CompatErrno::Interrupted);
+            }
+            if let Some(deadline) = deadline {
+                if sched::now_ns() >= deadline {
+                    return Ok(0);
+                }
+                let wake = deadline.min(sched::now_ns().saturating_add(10_000_000));
+                if sched::sleep_until_ns(wake).is_err() {
+                    sched::pause();
+                }
+            } else {
+                sched::pause();
+            }
+        }
+    })();
+    if restore_mask && !set_current_signal_mask(pid, old_mask) {
+        return Err(CompatErrno::NoSys);
+    }
+    result
 }
 
 /// Implements bounded blocking and timeout `poll(2)` over compatibility fds.
