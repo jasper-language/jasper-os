@@ -152,6 +152,13 @@ enum LinuxFdResource {
 struct LinuxControlMessage {
     start: usize,
     fds: Vec<LinuxFdTransfer>,
+    credentials: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct LinuxControlDelivery {
+    pub fds: Vec<LinuxFdTransfer>,
+    pub credentials: bool,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -1326,8 +1333,9 @@ pub(crate) fn linux_socket_queue_control(
     handle: u64,
     bytes: usize,
     fds: Vec<LinuxFdTransfer>,
+    credentials: bool,
 ) -> Result<(), LinuxSocketError> {
-    if bytes == 0 || fds.is_empty() {
+    if bytes == 0 || (fds.is_empty() && !credentials) {
         return Err(LinuxSocketError::Invalid);
     }
     let controls = crate::kobj::with(|t| match t.get(pid) {
@@ -1352,7 +1360,11 @@ pub(crate) fn linux_socket_queue_control(
         .try_reserve(1)
         .map_err(|_| LinuxSocketError::NoSpace)?;
     let start = queue.written.fetch_add(bytes, Ordering::AcqRel);
-    messages.push_back(LinuxControlMessage { start, fds });
+    messages.push_back(LinuxControlMessage {
+        start,
+        fds,
+        credentials,
+    });
     Ok(())
 }
 
@@ -1390,9 +1402,9 @@ pub(crate) fn linux_socket_consume_control(
     handle: u64,
     bytes: usize,
     capture: bool,
-) -> Vec<LinuxFdTransfer> {
+) -> LinuxControlDelivery {
     if bytes == 0 {
-        return Vec::new();
+        return LinuxControlDelivery::default();
     }
     let Some(controls) = crate::kobj::with(|t| match t.get(pid) {
         Ok(KObject::Process(p)) => p
@@ -1404,10 +1416,10 @@ pub(crate) fn linux_socket_consume_control(
             .map(|socket| Arc::clone(&socket.controls)),
         _ => None,
     }) else {
-        return Vec::new();
+        return LinuxControlDelivery::default();
     };
     let Some(queue) = controls.rx.lock().as_ref().map(Arc::clone) else {
-        return Vec::new();
+        return LinuxControlDelivery::default();
     };
     let end = queue
         .read
@@ -1418,16 +1430,19 @@ pub(crate) fn linux_socket_consume_control(
         return if messages.front().is_some_and(|message| message.start < end) {
             messages
                 .pop_front()
-                .map(|message| message.fds)
+                .map(|message| LinuxControlDelivery {
+                    fds: message.fds,
+                    credentials: message.credentials,
+                })
                 .unwrap_or_default()
         } else {
-            Vec::new()
+            LinuxControlDelivery::default()
         };
     }
     while messages.front().is_some_and(|message| message.start < end) {
         let _ = messages.pop_front();
     }
-    Vec::new()
+    LinuxControlDelivery::default()
 }
 
 /// Returns the shared status flags for one Linux descriptor.

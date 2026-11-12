@@ -3335,18 +3335,28 @@ fn read_message_iovecs(
     Ok(vectors)
 }
 
-/// Parses and captures SCM_RIGHTS descriptors from one bounded control buffer.
-fn capture_scm_rights(
+struct ScmControl {
+    transfers: alloc::vec::Vec<proc::LinuxFdTransfer>,
+    credentials: bool,
+}
+
+/// Parses SCM_RIGHTS descriptors and SCM_CREDENTIALS markers from one bounded
+/// control buffer.
+fn capture_scm_control(
     pid: ObjId,
     header: &LinuxMessageHeader,
-) -> Result<alloc::vec::Vec<proc::LinuxFdTransfer>, CompatErrno> {
+) -> Result<ScmControl, CompatErrno> {
     const CMSG_HEADER_BYTES: usize = 16;
     const MAX_CONTROL_BYTES: usize = 16 * 1024;
     const MAX_SCM_FDS: usize = 32;
     const SOL_SOCKET: i32 = 1;
     const SCM_RIGHTS: i32 = 1;
+    const SCM_CREDENTIALS: i32 = 2;
     if header.control == 0 || header.control_len == 0 {
-        return Ok(alloc::vec::Vec::new());
+        return Ok(ScmControl {
+            transfers: alloc::vec::Vec::new(),
+            credentials: false,
+        });
     }
     if header.control_len > MAX_CONTROL_BYTES {
         return Err(CompatErrno::Invalid);
@@ -3355,6 +3365,7 @@ fn capture_scm_rights(
     proc::read(pid, header.control, &mut control).map_err(|_| CompatErrno::Fault)?;
     let mut offset = 0usize;
     let mut transfers = alloc::vec::Vec::new();
+    let mut credentials = false;
     while offset < control.len() {
         if control.len() - offset < CMSG_HEADER_BYTES {
             return Err(CompatErrno::Invalid);
@@ -3368,34 +3379,54 @@ fn capture_scm_rights(
         }
         let level = i32::from_le_bytes(control[offset + 8..offset + 12].try_into().unwrap());
         let kind = i32::from_le_bytes(control[offset + 12..offset + 16].try_into().unwrap());
-        if level != SOL_SOCKET || kind != SCM_RIGHTS {
+        if level != SOL_SOCKET {
             return Err(CompatErrno::NoSys);
         }
         let payload = length - CMSG_HEADER_BYTES;
-        if payload == 0 || payload % 4 != 0 {
-            return Err(CompatErrno::Invalid);
-        }
         let start = offset + CMSG_HEADER_BYTES;
-        for raw_fd in control[start..start + payload].chunks_exact(4) {
-            if transfers.len() >= MAX_SCM_FDS {
-                return Err(CompatErrno::Invalid);
+        match kind {
+            SCM_RIGHTS => {
+                if payload == 0 || payload % 4 != 0 {
+                    return Err(CompatErrno::Invalid);
+                }
+                for raw_fd in control[start..start + payload].chunks_exact(4) {
+                    if transfers.len() >= MAX_SCM_FDS {
+                        return Err(CompatErrno::Invalid);
+                    }
+                    let fd = i32::from_le_bytes(raw_fd.try_into().unwrap());
+                    if fd < 0 {
+                        return Err(CompatErrno::BadFd);
+                    }
+                    let transfer = proc::linux_capture_fd_transfer(pid, fd as u32).map_err(
+                        |error| match error {
+                            proc::LinuxFdTransferError::Invalid => CompatErrno::BadFd,
+                            proc::LinuxFdTransferError::NoSpace => CompatErrno::NoSpace,
+                        },
+                    )?;
+                    transfers.push(transfer);
+                }
             }
-            let fd = i32::from_le_bytes(raw_fd.try_into().unwrap());
-            if fd < 0 {
-                return Err(CompatErrno::BadFd);
+            SCM_CREDENTIALS => {
+                if payload != 12 {
+                    return Err(CompatErrno::Invalid);
+                }
+                credentials = true;
             }
-            let transfer =
-                proc::linux_capture_fd_transfer(pid, fd as u32).map_err(|error| match error {
-                    proc::LinuxFdTransferError::Invalid => CompatErrno::BadFd,
-                    proc::LinuxFdTransferError::NoSpace => CompatErrno::NoSpace,
-                })?;
-            transfers.push(transfer);
+            _ => {
+                return Err(CompatErrno::NoSys);
+            }
+        }
+        if payload == 0 {
+            return Err(CompatErrno::Invalid);
         }
         offset = offset
             .checked_add((length + 7) & !7)
             .ok_or(CompatErrno::Invalid)?;
     }
-    Ok(transfers)
+    Ok(ScmControl {
+        transfers,
+        credentials,
+    })
 }
 
 /// Implements `sendmsg(2)` on a connected AF_UNIX stream, including
@@ -3414,7 +3445,7 @@ fn linux_sendmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if header.name != 0 || header.name_len != 0 {
         return Err(CompatErrno::IsConnected);
     }
-    let transfers = capture_scm_rights(pid, &header)?;
+    let control = capture_scm_control(pid, &header)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if entry.kind != compat_core::fd::CompatKind::Socket
         || !entry
@@ -3434,6 +3465,7 @@ fn linux_sendmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         bytes.resize(start + len, 0);
         proc::read(pid, base, &mut bytes[start..]).map_err(|_| CompatErrno::Fault)?;
     }
+    let has_control = !control.transfers.is_empty() || control.credentials;
     let written = linux_socket_write_buffer(
         pid,
         fd,
@@ -3441,9 +3473,9 @@ fn linux_sendmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         &bytes,
         flags & MSG_DONTWAIT != 0,
         flags & MSG_NOSIGNAL != 0,
-        transfers.is_empty(),
+        !has_control,
     )?;
-    if !transfers.is_empty() {
+    if has_control {
         if written == 0 {
             return Err(CompatErrno::Invalid);
         }
@@ -3451,15 +3483,40 @@ fn linux_sendmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             pid,
             entry.handle,
             written as usize,
-            transfers,
+            control.transfers,
+            control.credentials,
         )
         .map_err(socket_compat_error)?;
     }
     Ok(written)
 }
 
-/// Installs received SCM_RIGHTS descriptors and writes their control message.
-fn receive_scm_rights(
+fn write_control_message(
+    control: &mut [u8],
+    offset: &mut usize,
+    kind: i32,
+    payload: &[u8],
+) -> Result<(), CompatErrno> {
+    const CMSG_HEADER_BYTES: usize = 16;
+    let cmsg_len = CMSG_HEADER_BYTES
+        .checked_add(payload.len())
+        .ok_or(CompatErrno::Invalid)?;
+    let space = (cmsg_len + 7) & !7;
+    let end = offset
+        .checked_add(space)
+        .filter(|end| *end <= control.len())
+        .ok_or(CompatErrno::Invalid)?;
+    control[*offset..*offset + 8].copy_from_slice(&(cmsg_len as u64).to_le_bytes());
+    control[*offset + 8..*offset + 12].copy_from_slice(&1i32.to_le_bytes());
+    control[*offset + 12..*offset + 16].copy_from_slice(&kind.to_le_bytes());
+    control[*offset + CMSG_HEADER_BYTES..*offset + cmsg_len].copy_from_slice(payload);
+    *offset = end;
+    Ok(())
+}
+
+/// Installs received SCM_RIGHTS descriptors and writes SCM_RIGHTS and
+/// SCM_CREDENTIALS control records.
+fn receive_socket_control(
     pid: ObjId,
     handle: u64,
     header: &LinuxMessageHeader,
@@ -3468,26 +3525,47 @@ fn receive_scm_rights(
 ) -> Result<(usize, u64), CompatErrno> {
     const MSG_CTRUNC: u64 = 0x20;
     const CMSG_HEADER_BYTES: usize = 16;
+    const SO_PASSCRED_ENABLED: u32 = 1;
+    const SCM_RIGHTS: i32 = 1;
+    const SCM_CREDENTIALS: i32 = 2;
     if header.control == 0 || header.control_len == 0 {
         return Ok((0, 0));
     }
-    let transfers = proc::linux_socket_consume_control(pid, handle, data_bytes, true);
-    if transfers.is_empty() {
+    let delivery = proc::linux_socket_consume_control(pid, handle, data_bytes, true);
+    let endpoint =
+        proc::linux_socket_endpoint(pid, handle).ok_or(CompatErrno::NotConnected)?;
+    let passcred = proc::linux_socket_option_flags(pid, handle)
+        .is_some_and(|flags| flags & SO_PASSCRED_ENABLED != 0);
+    let include_credentials = passcred && (delivery.credentials || !delivery.fds.is_empty());
+    if delivery.fds.is_empty() && !include_credentials {
         return Ok((0, 0));
     }
-    let payload = transfers
+    let rights_payload = delivery
+        .fds
         .len()
         .checked_mul(4)
         .ok_or(CompatErrno::Invalid)?;
-    let required = (CMSG_HEADER_BYTES + payload + 7) & !7;
+    let rights_space = if rights_payload == 0 {
+        0
+    } else {
+        (CMSG_HEADER_BYTES + rights_payload + 7) & !7
+    };
+    let credentials_space = if include_credentials {
+        (CMSG_HEADER_BYTES + 12 + 7) & !7
+    } else {
+        0
+    };
+    let required = rights_space
+        .checked_add(credentials_space)
+        .ok_or(CompatErrno::Invalid)?;
     if required > header.control_len {
         return Ok((0, MSG_CTRUNC));
     }
     let mut installed = alloc::vec::Vec::new();
     installed
-        .try_reserve(transfers.len())
+        .try_reserve(delivery.fds.len())
         .map_err(|_| CompatErrno::NoMemory)?;
-    for transfer in transfers {
+    for transfer in delivery.fds {
         match proc::linux_install_fd_transfer(pid, transfer, close_on_exec) {
             Ok(fd) => installed.push(fd),
             Err(_) => {
@@ -3499,14 +3577,36 @@ fn receive_scm_rights(
         }
     }
     let mut control = alloc::vec![0u8; required];
-    let cmsg_len = CMSG_HEADER_BYTES + payload;
-    control[0..8].copy_from_slice(&(cmsg_len as u64).to_le_bytes());
-    control[8..12].copy_from_slice(&1i32.to_le_bytes());
-    control[12..16].copy_from_slice(&1i32.to_le_bytes());
-    for (index, fd) in installed.iter().enumerate() {
-        let start = CMSG_HEADER_BYTES + index * 4;
-        control[start..start + 4]
-            .copy_from_slice(&(*fd as i32).to_le_bytes());
+    let mut control_offset = 0usize;
+    if !installed.is_empty() {
+        let mut payload = alloc::vec::Vec::new();
+        payload
+            .try_reserve(installed.len() * 4)
+            .map_err(|_| CompatErrno::NoMemory)?;
+        for fd in &installed {
+            payload.extend_from_slice(&(*fd as i32).to_le_bytes());
+        }
+        write_control_message(
+            &mut control,
+            &mut control_offset,
+            SCM_RIGHTS,
+            &payload,
+        )?;
+    }
+    if include_credentials {
+        let credentials = endpoint
+            .peer_credentials()
+            .ok_or(CompatErrno::NotConnected)?;
+        let mut payload = [0u8; 12];
+        payload[0..4].copy_from_slice(&(credentials.pid as i32).to_le_bytes());
+        payload[4..8].copy_from_slice(&credentials.uid.to_le_bytes());
+        payload[8..12].copy_from_slice(&credentials.gid.to_le_bytes());
+        write_control_message(
+            &mut control,
+            &mut control_offset,
+            SCM_CREDENTIALS,
+            &payload,
+        )?;
     }
     proc::write(pid, header.control, &control).map_err(|_| CompatErrno::Fault)?;
     Ok((required, 0))
@@ -3561,7 +3661,7 @@ fn linux_recvmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         name_len = 2 + name.as_bytes().len();
         write_unix_sockaddr_with_capacity(header.name, header.name_len, name)?;
     }
-    let (control_len, message_flags) = receive_scm_rights(
+    let (control_len, message_flags) = receive_socket_control(
         pid,
         entry.handle,
         &header,
