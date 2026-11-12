@@ -612,7 +612,7 @@ fn take_deliverable_signal(process: ObjId) -> Option<u32> {
 
 /// Reports whether the current thread has an unmasked pending signal.
 /// 判断当前线程是否存在未被 mask 的 pending 信号。
-fn current_signal_pending(process: ObjId) -> bool {
+pub(crate) fn current_signal_pending(process: ObjId) -> bool {
     let (task, _) = sched::current();
     let state = COMPAT.lock();
     let Some(thread) = state
@@ -4555,6 +4555,7 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const ASHMEM_GET_PIN_STATUS: u64 = 0x6109;
     const ASHMEM_PURGE_ALL_CACHES: u64 = 0x610a;
     const BINDER_SET_MAX_THREADS: u64 = 0x4004_6205;
+    const BINDER_SET_CONTEXT_MGR: u64 = 0x4004_6207;
     const BINDER_THREAD_EXIT: u64 = 0x4004_6208;
     const BINDER_VERSION: u64 = 0xc004_6209;
     const BINDER_WRITE_READ: u64 = 0xc030_6201;
@@ -4606,8 +4607,15 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     Err(CompatErrno::BadFd)
                 }
             }
+            BINDER_SET_CONTEXT_MGR => {
+                if crate::binder::set_context_manager(pid) {
+                    Ok(0)
+                } else {
+                    Err(CompatErrno::Busy)
+                }
+            }
             BINDER_THREAD_EXIT => Ok(0),
-            BINDER_WRITE_READ => Err(CompatErrno::NoSys),
+            BINDER_WRITE_READ => crate::binder::write_read(pid, fd, args),
             _ => Err(CompatErrno::NoSys),
         };
     }

@@ -63,6 +63,8 @@ pub mod fault;
 #[cfg(feature = "user-programs")]
 pub(crate) mod first_program;
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+pub(crate) mod binder;
+#[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
 pub mod linux_abi;
 #[cfg(all(
     any(
