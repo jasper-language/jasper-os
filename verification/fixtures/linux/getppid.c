@@ -155,6 +155,18 @@ int main(void) {
     if (syscall(SYS_close_range, 50, 49, 0) != -1 || errno != EINVAL) {
         return 228;
     }
+    if (dup2(fd, 43) != 43 ||
+        syscall(SYS_close_range, 43, 43, 2) != 0) {
+        return 229;
+    }
+    errno = 0;
+    if (fcntl(43, F_GETFD) != -1 || errno != EBADF) {
+        return 230;
+    }
+    errno = 0;
+    if (syscall(SYS_close_range, 44, 44, 8) != -1 || errno != EINVAL) {
+        return 231;
+    }
     errno = 0;
     if (dup3(fd, fd, O_CLOEXEC) != -1 || errno != EINVAL) {
         return 76;

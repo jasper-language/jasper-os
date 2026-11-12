@@ -2512,20 +2512,29 @@ pub(crate) fn linux_close_range(
     first: u32,
     last: u32,
     close_on_exec: bool,
+    unshare: bool,
 ) -> bool {
     if first > last {
         return false;
     }
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        if unshare {
+            let fds = linux.fds.clone();
+            linux.fds = fds;
+        }
+        let mut released = Vec::new();
         for fd in first..=last.min(63) {
             if close_on_exec {
                 let _ = linux.fds.set_close_on_exec_fd(fd, true);
             } else if let Some(handle) = linux.fds.get_fd(fd).map(|entry| entry.handle) {
                 if linux.fds.close_fd(fd).is_ok() {
-                    release_unreferenced_pipe(linux, handle);
+                    released.push(handle);
                 }
             }
+        }
+        for handle in released {
+            release_unreferenced_pipe(linux, handle);
         }
         Ok(())
     })
