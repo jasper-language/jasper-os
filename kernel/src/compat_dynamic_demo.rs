@@ -145,6 +145,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Nanosleep,
         LinuxSyscall::ClockNanosleep,
         LinuxSyscall::RtSigAction,
+        LinuxSyscall::RtSigPending,
         LinuxSyscall::RtSigProcMask,
         LinuxSyscall::RtSigReturn,
         LinuxSyscall::Tgkill,
