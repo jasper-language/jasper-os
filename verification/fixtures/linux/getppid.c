@@ -138,6 +138,23 @@ int main(void) {
         lseek(21, 0, SEEK_CUR) != 8) {
         return 75;
     }
+    if (dup2(fd, 40) != 40 || dup2(fd, 41) != 41 ||
+        syscall(SYS_close_range, 40, 41, 0) != 0) {
+        return 225;
+    }
+    errno = 0;
+    if (fcntl(40, F_GETFD) != -1 || errno != EBADF) {
+        return 226;
+    }
+    if (dup2(fd, 42) != 42 ||
+        syscall(SYS_close_range, 42, 42, 4) != 0 ||
+        fcntl(42, F_GETFD) != FD_CLOEXEC || close(42) != 0) {
+        return 227;
+    }
+    errno = 0;
+    if (syscall(SYS_close_range, 50, 49, 0) != -1 || errno != EINVAL) {
+        return 228;
+    }
     errno = 0;
     if (dup3(fd, fd, O_CLOEXEC) != -1 || errno != EINVAL) {
         return 76;

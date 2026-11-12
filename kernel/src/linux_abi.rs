@@ -1419,6 +1419,7 @@ fn execute(
         LinuxSyscall::ReadV => compat_result(linux_readv(pid, call.args)),
         LinuxSyscall::ReadLinkAt => compat_result(linux_readlinkat(pid, call.args)),
         LinuxSyscall::Close => compat_result(linux_close(pid, call.args[0])),
+        LinuxSyscall::CloseRange => compat_result(linux_close_range(pid, call.args)),
         LinuxSyscall::Dup => compat_result(linux_dup(pid, call.args)),
         LinuxSyscall::Dup2 => compat_result(linux_dup2(pid, call.args)),
         LinuxSyscall::Dup3 => compat_result(linux_dup3(pid, call.args)),
@@ -3241,6 +3242,23 @@ fn sleep_until_with_signal_check(pid: ObjId, deadline: u64) -> Result<(), Compat
 fn linux_close(pid: ObjId, fd: u64) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(fd).map_err(|_| CompatErrno::BadFd)?;
     if proc::linux_close_fd(pid, fd) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::BadFd)
+    }
+}
+
+fn linux_close_range(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const CLOSE_RANGE_CLOEXEC: u64 = 0x4;
+    let first = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let last = u32::try_from(args[1]).map_err(|_| CompatErrno::BadFd)?;
+    if first > last {
+        return Err(CompatErrno::Invalid);
+    }
+    if args[2] & !CLOSE_RANGE_CLOEXEC != 0 {
+        return Err(CompatErrno::NoSys);
+    }
+    if proc::linux_close_range(pid, first, last, args[2] & CLOSE_RANGE_CLOEXEC != 0) {
         Ok(0)
     } else {
         Err(CompatErrno::BadFd)
