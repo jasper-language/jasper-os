@@ -1471,6 +1471,9 @@ fn execute(
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
         LinuxSyscall::Fstatfs => compat_result(linux_fstatfs(pid, call.args)),
         LinuxSyscall::Fsync => compat_result(linux_sync_fd(pid, call.args[0], false)),
+        LinuxSyscall::Utime => compat_result(linux_utime(pid, call.args[0])),
+        LinuxSyscall::Utimes => compat_result(linux_utime(pid, call.args[0])),
+        LinuxSyscall::UtimensAt => compat_result(linux_utimensat(pid, call.args, true)),
         LinuxSyscall::Fdatasync => compat_result(linux_sync_fd(pid, call.args[0], true)),
         LinuxSyscall::Ftruncate => compat_result(linux_ftruncate(pid, call.args)),
         LinuxSyscall::Truncate => compat_result(linux_truncate(pid, call.args)),
@@ -3409,6 +3412,34 @@ fn linux_truncate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         [(-100i64) as u64, args[0], 0, 0, 0, 0],
         false,
     )?;
+    Err(CompatErrno::ReadOnly)
+}
+
+fn linux_utime(pid: ObjId, path: u64) -> Result<u64, CompatErrno> {
+    linux_faccessat(
+        pid,
+        [(-100i64) as u64, path, 0, 0, 0, 0],
+        false,
+    )?;
+    Err(CompatErrno::ReadOnly)
+}
+
+fn linux_utimensat(
+    pid: ObjId,
+    args: [u64; 6],
+    has_flags: bool,
+) -> Result<u64, CompatErrno> {
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    let flags = if has_flags { args[3] } else { 0 };
+    if args[1] == 0 {
+        if has_flags && flags & AT_EMPTY_PATH == 0 {
+            return Err(CompatErrno::Fault);
+        }
+        let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+        proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+        return Err(CompatErrno::ReadOnly);
+    }
+    linux_faccessat(pid, [args[0], args[1], 0, flags, 0, 0], has_flags)?;
     Err(CompatErrno::ReadOnly)
 }
 
