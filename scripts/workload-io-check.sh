@@ -121,6 +121,10 @@ for round in 1 2; do
         echo "workload-io: round $round lacks Linux I/O success evidence" >&2
         exit 1
     }
+    grep -aq '^\[JSR-WORKLOAD-IO-RATE\] runtime=true window_elapsed_recovery=true lifetime_enforced=true bytes=4 ops=3 window_bytes=2 window_ops=2 failed=0' "$serial" || {
+        echo "workload-io: round $round lacks rate-window recovery evidence" >&2
+        exit 1
+    }
     grep -aq '^JQ' "$serial" && grep -aq '^x\[JSR-LINUX-SYSCALL\]' "$serial" || {
         echo "workload-io: round $round lacks the two real console writes" >&2
         exit 1
