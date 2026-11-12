@@ -155,6 +155,7 @@ struct LinuxAshmemHandle {
 #[cfg(feature = "linux-abi")]
 struct AshmemBuffer {
     id: u64,
+    regular_file: bool,
     size: AtomicU64,
     protection: AtomicU32,
     pins: AtomicU32,
@@ -1655,6 +1656,22 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
 /// Opens one anonymous ashmem buffer descriptor.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_open_ashmem(pid: ObjId, close_on_exec: bool) -> Option<u32> {
+    linux_open_ashmem_kind(pid, close_on_exec, false)
+}
+
+/// Creates one anonymous regular-file descriptor backed by the same bounded
+/// shared-page mechanism used by ashmem.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_create_memfd(pid: ObjId, close_on_exec: bool) -> Option<u32> {
+    linux_open_ashmem_kind(pid, close_on_exec, true)
+}
+
+#[cfg(feature = "linux-abi")]
+fn linux_open_ashmem_kind(
+    pid: ObjId,
+    close_on_exec: bool,
+    regular_file: bool,
+) -> Option<u32> {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
         if linux.ashmem.len() >= 32 {
@@ -1680,6 +1697,7 @@ pub(crate) fn linux_open_ashmem(pid: ObjId, close_on_exec: bool) -> Option<u32> 
             handle,
             buffer: Arc::new(AshmemBuffer {
                 id: handle,
+                regular_file,
                 size: AtomicU64::new(0),
                 protection: AtomicU32::new(3),
                 pins: AtomicU32::new(0),
@@ -1690,6 +1708,22 @@ pub(crate) fn linux_open_ashmem(pid: ObjId, close_on_exec: bool) -> Option<u32> 
         Ok(fd.fd())
     })
     .ok()
+}
+
+/// Reports whether one shared-page device descriptor represents a regular
+/// memfd rather than the char-device ashmem ABI.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_is_regular(pid: ObjId, handle: u64) -> Option<bool> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .ashmem
+            .iter()
+            .find(|ashmem| ashmem.handle == handle)
+            .map(|ashmem| ashmem.buffer.regular_file),
+        _ => None,
+    })
 }
 
 /// Opens one bounded Android binder device descriptor.
@@ -1850,6 +1884,7 @@ pub(crate) fn linux_ion_alloc(
         }
         let buffer = Arc::new(AshmemBuffer {
             id: (u64::from(current) << 32) | u64::from(linux_pid),
+            regular_file: false,
             size: AtomicU64::new(size),
             protection: AtomicU32::new(3),
             pins: AtomicU32::new(0),

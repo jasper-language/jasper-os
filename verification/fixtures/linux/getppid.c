@@ -777,7 +777,8 @@ int main(void) {
         return 207;
     }
     struct stat memfd_stat;
-    if (fstat(memfd, &memfd_stat) != 0 || memfd_stat.st_size != 4096) {
+    if (fstat(memfd, &memfd_stat) != 0 || !S_ISREG(memfd_stat.st_mode) ||
+        memfd_stat.st_size != 4096) {
         return 208;
     }
     unsigned char *memfd_map = mmap(NULL, 4096, PROT_READ | PROT_WRITE,

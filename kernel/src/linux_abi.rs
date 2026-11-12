@@ -3142,7 +3142,7 @@ fn linux_memfd_create(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::NoSys);
     }
     let name = linux_c_string(args[0], 249)?;
-    let fd = proc::linux_open_ashmem(pid, args[1] & MFD_CLOEXEC != 0)
+    let fd = proc::linux_create_memfd(pid, args[1] & MFD_CLOEXEC != 0)
         .ok_or(CompatErrno::NoSpace)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if proc::linux_ashmem_set_name(pid, entry.handle, &name).is_err() {
@@ -4459,10 +4459,21 @@ fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if entry.kind == compat_core::fd::CompatKind::Device {
-        let size = proc::linux_ashmem_state(pid, entry.handle)
-            .map(|(size, _, _)| size)
-            .unwrap_or(0);
-        write_synthetic_stat(args[1], entry.handle, 1, size, 0o020666)?;
+        let (size, regular) = proc::linux_ashmem_state(pid, entry.handle)
+            .map(|(size, _, _)| {
+                (
+                    size,
+                    proc::linux_ashmem_is_regular(pid, entry.handle).unwrap_or(false),
+                )
+            })
+            .unwrap_or((0, false));
+        write_synthetic_stat(
+            args[1],
+            entry.handle,
+            1,
+            size,
+            if regular { 0o100600 } else { 0o020666 },
+        )?;
         return Ok(0);
     }
     let node = crate::linux_vfs::FileId::from_handle(entry.handle)
@@ -4496,10 +4507,21 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
             let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
             if entry.kind == compat_core::fd::CompatKind::Device {
-                let size = proc::linux_ashmem_state(pid, entry.handle)
-                    .map(|(size, _, _)| size)
-                    .unwrap_or(0);
-                write_synthetic_stat(args[2], entry.handle, 1, size, 0o020666)?;
+                let (size, regular) = proc::linux_ashmem_state(pid, entry.handle)
+                    .map(|(size, _, _)| {
+                        (
+                            size,
+                            proc::linux_ashmem_is_regular(pid, entry.handle).unwrap_or(false),
+                        )
+                    })
+                    .unwrap_or((0, false));
+                write_synthetic_stat(
+                    args[2],
+                    entry.handle,
+                    1,
+                    size,
+                    if regular { 0o100600 } else { 0o020666 },
+                )?;
                 return Ok(0);
             }
             let node = crate::linux_vfs::FileId::from_handle(entry.handle)
@@ -4627,10 +4649,21 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
             let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
             if entry.kind == compat_core::fd::CompatKind::Device {
-                let size = proc::linux_ashmem_state(pid, entry.handle)
-                    .map(|(size, _, _)| size)
-                    .unwrap_or(0);
-                write_synthetic_statx(args[4], entry.handle, 1, size, 0o020666)?;
+                let (size, regular) = proc::linux_ashmem_state(pid, entry.handle)
+                    .map(|(size, _, _)| {
+                        (
+                            size,
+                            proc::linux_ashmem_is_regular(pid, entry.handle).unwrap_or(false),
+                        )
+                    })
+                    .unwrap_or((0, false));
+                write_synthetic_statx(
+                    args[4],
+                    entry.handle,
+                    1,
+                    size,
+                    if regular { 0o100600 } else { 0o020666 },
+                )?;
                 return Ok(0);
             }
             if let Some(file) = crate::linux_vfs::FileId::from_handle(entry.handle) {
@@ -4858,6 +4891,7 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     if entry.kind == compat_core::fd::CompatKind::Device
         && proc::linux_ashmem_state(pid, entry.handle).is_some()
+        && !proc::linux_ashmem_is_regular(pid, entry.handle).unwrap_or(false)
     {
         match args[1] {
             ASHMEM_SET_NAME => {
@@ -5288,6 +5322,11 @@ fn linux_sync_fd(pid: ObjId, raw_fd: u64, _data_only: bool) -> Result<u64, Compa
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     match entry.kind {
         compat_core::fd::CompatKind::File | compat_core::fd::CompatKind::Directory => Ok(0),
+        compat_core::fd::CompatKind::Device
+            if proc::linux_ashmem_is_regular(pid, entry.handle).unwrap_or(false) =>
+        {
+            Ok(0)
+        }
         _ => Err(CompatErrno::Invalid),
     }
 }
