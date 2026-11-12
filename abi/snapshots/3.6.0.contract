@@ -145,6 +145,8 @@ iface|78|op|system.workload.spawn|1|write
 op|system.workload.spawn|args=u64:workload_key,u64:spawn_desc_ptr|result=0_or_error
 iface|79|op|system.workload.kill|1|write
 op|system.workload.kill|args=u64:workload_key|result=0_or_error
+iface|80|op|system.workload.member.query|1|read
+op|system.workload.member.query|args=u64:workload_key|result=i64:member_count_or_error
 iface|4097|error|system.error.unsupported|1|none
 iface|4098|error|system.error.rights_denied|1|none
 iface|4099|error|system.error.invalid_argument|1|none
@@ -270,3 +272,4 @@ semantics|workload.stop|running_to_stopping;stopped_requires_zero_usage_and_chil
 semantics|workload.destroy|same_domain_only;terminal_only;zero_usage_and_children
 semantics|workload.spawn|same_domain_running_only;bind_before_pages_and_threads;spawn_v2_descriptor;workload_owns_cpu_limit
 semantics|workload.kill|same_domain_running_or_stopping;begin_exit_all_members;resources_cleaned_by_normal_exit
+semantics|workload.member.query|same_domain_only;counts_current_process_members;closed_members_are_not_observable
