@@ -5,7 +5,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-export PATH="${HOME}/.cargo/bin:${PATH}"
 
 OUT="${WORKLOAD_OUT:-$ROOT/evidence/workload-runtime-$(date '+%Y%m%d-%H%M%S')}"
 CARGO_TARGET="${WORKLOAD_CARGO_TARGET:-$ROOT/target}"
@@ -20,8 +19,8 @@ cleanup() {
 trap cleanup EXIT
 
 free_kib=$(df -Pk "$OUT" | awk 'NR == 2 { print $4 }')
-[ "${free_kib:-0}" -ge 4194304 ] || {
-  echo "FAIL less than 4 GiB free for Workload image" >&2
+[ "${free_kib:-0}" -ge 12582912 ] || {
+    echo "FAIL less than 12 GiB free for Workload image" >&2
   exit 75
 }
 available_kib=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
@@ -34,16 +33,18 @@ awk -v load="$load1" 'BEGIN { exit !(load <= 8.0) }' || {
   echo "FAIL host one-minute load $load1 is too high" >&2
   exit 75
 }
-if pgrep -f '[q]emu-system-x86_64' >/dev/null 2>&1; then
-  echo "FAIL another qemu-system-x86_64 is already running" >&2
+if pgrep -f '[q]emu-system|[V]BoxHeadless' >/dev/null 2>&1; then
+    echo "FAIL another QEMU/VBox workload is already running" >&2
   exit 75
 fi
 
-CARGO_TARGET_DIR="$CARGO_TARGET" nice -n 10 cargo build --locked --release -p xtask \
+env -u CARGO_TARGET_DIR "$ROOT/scripts/guarded-cargo.sh" \
+    build --locked --release --target-dir "$CARGO_TARGET" -p xtask \
   >"$OUT/build.log" 2>&1
-CARGO_TARGET_DIR="$CARGO_TARGET" nice -n 10 cargo build --locked --release \
-  --target x86_64-unknown-none -p jasper-kernel --features workload-verify \
-  >>"$OUT/build.log" 2>&1
+env -u CARGO_TARGET_DIR "$ROOT/scripts/guarded-cargo.sh" \
+    build --locked --release --target-dir "$CARGO_TARGET" \
+    --target x86_64-unknown-none -p jasper-kernel --features workload-verify \
+    >>"$OUT/build.log" 2>&1
 "$CARGO_TARGET/release/xtask" \
   "$CARGO_TARGET/x86_64-unknown-none/release/jasper-kernel" "$IMAGE" \
   >"$OUT/image.log" 2>&1

@@ -639,6 +639,17 @@ pub fn create_cpu_group(limit_permille: u32) -> Result<CpuGroupId, GroupError> {
     with_mut(|s| s.create_group(limit_permille, policy::CPU_BURST_TICKS))
 }
 
+/// 创建受现有父组共同约束的子 CPU 组。
+/// Creates a hierarchical CPU group constrained by an existing parent.
+pub fn create_child_cpu_group(
+    parent: CpuGroupId,
+    limit_permille: u32,
+) -> Result<CpuGroupId, GroupError> {
+    with_mut(|s| {
+        s.create_group_with_parent(limit_permille, policy::CPU_BURST_TICKS, Some(parent))
+    })
+}
+
 /// 归还 CPU 组的持有者引用（成员全部退出后组释放）。
 pub fn release_cpu_group(g: CpuGroupId) -> Result<(), GroupError> {
     with_mut(|s| s.release_group(g))

@@ -81,12 +81,21 @@ pub fn destroy(key: WorkloadKey) -> Result<(), WorkloadError> {
 }
 
 pub fn cpu_group(key: WorkloadKey) -> Result<CpuGroupId, WorkloadError> {
-    let workloads = WORKLOADS.lock();
-    let state = workloads.snapshot(key)?;
+    let state = WORKLOADS.lock().snapshot(key)?;
     if state.state != WorkloadState::Running {
         return Err(WorkloadError::InvalidState);
     }
     let limits = state.limits;
+    {
+        let groups = CPU_GROUPS.lock();
+        if let Some((_, group)) = groups.iter().flatten().find(|(owner, _)| *owner == key) {
+            return Ok(*group);
+        }
+    }
+    let parent_group = match state.parent {
+        Some(parent) => Some(cpu_group(parent)?),
+        None => None,
+    };
     let mut groups = CPU_GROUPS.lock();
     if let Some((_, group)) = groups.iter().flatten().find(|(owner, _)| *owner == key) {
         return Ok(*group);
@@ -95,8 +104,11 @@ pub fn cpu_group(key: WorkloadKey) -> Result<CpuGroupId, WorkloadError> {
         .iter()
         .position(Option::is_none)
         .ok_or(WorkloadError::Capacity)?;
-    let group =
-        crate::sched::create_cpu_group(limits.cpu_permille).map_err(|_| WorkloadError::Capacity)?;
+    let group = match parent_group {
+        Some(parent) => crate::sched::create_child_cpu_group(parent, limits.cpu_permille),
+        None => crate::sched::create_cpu_group(limits.cpu_permille),
+    }
+    .map_err(|_| WorkloadError::Capacity)?;
     groups[slot] = Some((key, group));
     Ok(group)
 }

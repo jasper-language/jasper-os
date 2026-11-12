@@ -735,6 +735,8 @@ pub enum GroupError {
 struct CpuGroup {
     gen: u32,
     limit: CpuLimit,
+    parent: Option<CpuGroupId>,
+    children: u32,
     refs: u32,
     // Scratch only while the global guard publishes; zero outside that call.
     publication_credit: kernel_core::publication_credit::PublicationCredit,
@@ -2547,6 +2549,11 @@ impl Scheduler {
             let Some(token) = self.epochs.get(slot).and_then(SlotLifecycle::history).map(|r| r.token()) else { continue };
             if let Some(group) = group {
                 let Some(grp) = self.groups[group].as_mut() else { continue };
+                // Hierarchical groups use the locked eligibility path so the
+                // parent bucket cannot be oversubscribed by per-CPU leases.
+                if grp.parent.is_some() || grp.children != 0 {
+                    continue;
+                }
                 let allowance = grp.limit.deferred_tick_credits(MAX_CPUS as u32);
                 if !grp.publication_credit.grant(allowance) { continue; }
                 if grp.publication_credit.count() == 1 {
@@ -3196,7 +3203,19 @@ impl Scheduler {
             // 事件被推迟（中断晚到、vCPU 被宿主换下）时一次交付多个 tick：组按批计费，迟到部分单独计数
             for _ in 0..credits {self.account(c);}
             let cur=leaf_current(c);
-            if let Some(g)=self.task(cur).filter(|t|t.state==TaskState::Running).and_then(|t|t.cpu_group).and_then(|g|self.groups[g].as_mut()){g.limit.charge_batch(credits);}
+            if let Some(group) = self
+                .task(cur)
+                .filter(|task| task.state == TaskState::Running)
+                .and_then(|task| task.cpu_group)
+                .and_then(|slot| {
+                    self.groups[slot].as_ref().map(|group| CpuGroupId {
+                        slot,
+                        gen: group.gen,
+                    })
+                })
+            {
+                self.charge_group_chain(group, credits, true);
+            }
         }
         let woke=self.wake_due(c,self.now);
         let cause=self.decide(c).or(woke.then_some(Cause::WAKE));
@@ -3330,10 +3349,47 @@ impl Scheduler {
         let group = match self.task(cur) {
             Some(t) if is_worker(cur) && t.state == TaskState::Running => t.cpu_group,
             _ => None,
-        };
-        if let Some(grp) = group.and_then(|g| self.groups[g].as_mut()) {
-            grp.limit.charge();
+        }
+        .and_then(|slot| {
+            self.groups[slot].as_ref().map(|group| CpuGroupId {
+                slot,
+                gen: group.gen,
+            })
+        });
+        if let Some(group) = group {
+            self.charge_group_chain(group, 1, false);
             self.budget_tick_charges[1] = self.budget_tick_charges[1].wrapping_add(1);
+        }
+    }
+
+    /// Charge one running task against its group and every ancestor.
+    ///
+    /// 将一次实际运行同时记入任务所属组及其全部父组。
+    fn charge_group_chain(&mut self, group: CpuGroupId, ticks: u64, batch: bool) {
+        let mut current = Some(group);
+        let mut depth = 0usize;
+        while let Some(group) = current {
+            if depth >= self.groups.len() {
+                return;
+            }
+            let Some(slot) = self.group_slot(group) else {
+                return;
+            };
+            let parent = self.groups[slot]
+                .as_ref()
+                .and_then(|group| group.parent);
+            let Some(group) = self.groups[slot].as_mut() else {
+                return;
+            };
+            if batch {
+                let _ = group.limit.charge_batch(ticks);
+            } else {
+                for _ in 0..ticks {
+                    group.limit.charge();
+                }
+            }
+            current = parent;
+            depth += 1;
         }
     }
 
@@ -3917,8 +3973,14 @@ impl Scheduler {
         if let Some(grp) = self.groups[slot].as_mut() {
             grp.refs = grp.refs.saturating_sub(1);
             if grp.refs == 0 {
+                let parent = grp.parent;
                 self.group_runs.remove(&mut self.group_links, slot).expect("live group indexed");
                 self.groups[slot] = None;
+                if let Some(parent_slot) = parent.and_then(|parent| self.group_slot(parent)) {
+                    if let Some(parent) = self.groups[parent_slot].as_mut() {
+                        parent.children = parent.children.saturating_sub(1);
+                    }
+                }
             }
         }
     }
@@ -3926,14 +3988,43 @@ impl Scheduler {
     /// 新建 CPU 组（上限千分比、桶容量 tick），调用者持有一份引用，用完以 [`Scheduler::release_group`] 归还。
     /// Creates a CPU group; the caller holds one reference.
     pub fn create_group(&mut self, limit_permille: u32, burst_ticks: u32) -> Result<CpuGroupId, GroupError> {
+        self.create_group_with_parent(limit_permille, burst_ticks, None)
+    }
+
+    /// Creates a group whose members are also chargeable against every ancestor.
+    ///
+    /// 创建带父级的 CPU 组；成员运行会同时扣减自身及所有祖先的额度。
+    pub fn create_group_with_parent(
+        &mut self,
+        limit_permille: u32,
+        burst_ticks: u32,
+        parent: Option<CpuGroupId>,
+    ) -> Result<CpuGroupId, GroupError> {
         let limit = CpuLimit::new(limit_permille, burst_ticks).map_err(GroupError::Limit)?;
+        if let Some(parent) = parent {
+            self.group_slot(parent).ok_or(GroupError::Stale)?;
+        }
         // 代次用尽的槽位永久退役，不回绕（否则旧的组标识会在槽位复用后「复活」，指向新组）
         let slot = (0..self.groups.len())
             .find(|&i| self.groups[i].is_none() && self.group_gen[i] != GENERATION_RETIRED)
             .ok_or(GroupError::NoFreeGroup)?;
         let gen = self.group_gen[slot];
         self.group_gen[slot] = advance_generation(gen);
-        self.groups[slot] = Some(CpuGroup { gen, limit, refs: 1, publication_credit: kernel_core::publication_credit::PublicationCredit::new() });
+        self.groups[slot] = Some(CpuGroup {
+            gen,
+            limit,
+            parent,
+            children: 0,
+            refs: 1,
+            publication_credit: kernel_core::publication_credit::PublicationCredit::new(),
+        });
+        if let Some(parent) = parent {
+            let parent_slot = self.group_slot(parent).ok_or(GroupError::Stale)?;
+            let parent = self.groups[parent_slot]
+                .as_mut()
+                .ok_or(GroupError::Stale)?;
+            parent.children = parent.children.saturating_add(1);
+        }
         self.group_runs.place(&mut self.group_links, slot, Some(0)).expect("new group slot unlisted");
         Ok(CpuGroupId { slot, gen })
     }
@@ -4008,23 +4099,80 @@ impl Scheduler {
         let ran_group = match self.task(cur) {
             Some(t) if is_worker(cur) && t.state == TaskState::Running => t.cpu_group,
             _ => None,
-        };
-        let wants = &mut self.scratch_wants;
-        for slot in self.group_runs.iter(&self.group_links, 0) { wants[slot] = false; }
+        }
+        .and_then(|slot| {
+            self.groups[slot].as_ref().map(|group| CpuGroupId {
+                slot,
+                gen: group.gen,
+            })
+        });
+        for slot in self.group_runs.iter(&self.group_links, 0) {
+            self.scratch_wants[slot] = false;
+        }
         // 可运行或运行中的任务一定在某个运行列表上：只遍历列表
         for q in 0..MAX_CPUS {
             for i in LeafSlots::new(q) {
                 if let Some(t) = self.tasks.get(i).and_then(|t| t.as_ref()) {
                     if let (Some(g), TaskState::Runnable | TaskState::Running) = (t.cpu_group, t.state) {
-                        wants[g] = true;
+                        self.scratch_wants[g] = true;
                     }
                 }
             }
         }
+        // A runnable descendant keeps every ancestor's throttle diagnostics live.
         for slot in self.group_runs.iter(&self.group_links, 0) {
-            let grp = self.groups[slot].as_mut().expect("indexed group remains live");
-            grp.limit.on_tick(ran_group == Some(slot), wants[slot]);
+            if !self.scratch_wants[slot] {
+                continue;
+            }
+            let mut current = self.groups[slot].as_ref().and_then(|group| group.parent);
+            while let Some(parent) = current {
+                let Some(parent_slot) = self.group_slot(parent) else {
+                    break;
+                };
+                if self.scratch_wants[parent_slot] {
+                    break;
+                }
+                self.scratch_wants[parent_slot] = true;
+                current = self.groups[parent_slot]
+                    .as_ref()
+                    .and_then(|group| group.parent);
+            }
         }
+        for slot in self.group_runs.iter(&self.group_links, 0) {
+            let group = self.groups[slot]
+                .as_ref()
+                .map(|group| CpuGroupId {
+                    slot,
+                    gen: group.gen,
+                })
+                .expect("indexed group remains live");
+            let ran = ran_group.is_some_and(|ran| self.group_in_chain(ran, group));
+            let wants = self.scratch_wants[slot];
+            let grp = self.groups[slot].as_mut().expect("indexed group remains live");
+            grp.limit.on_tick(ran, wants);
+        }
+    }
+
+    /// Whether `group` is `ancestor` or one of its descendants.
+    fn group_in_chain(&self, group: CpuGroupId, ancestor: CpuGroupId) -> bool {
+        let mut current = Some(group);
+        let mut depth = 0usize;
+        while let Some(group) = current {
+            if group == ancestor {
+                return true;
+            }
+            if depth >= self.groups.len() {
+                return false;
+            }
+            let Some(slot) = self.group_slot(group) else {
+                return false;
+            };
+            current = self.groups[slot]
+                .as_ref()
+                .and_then(|group| group.parent);
+            depth += 1;
+        }
+        false
     }
 
     // -----------------------------------------------------------------------
@@ -4101,6 +4249,36 @@ fn eligible_in(groups: &[Option<CpuGroup>], t: &Task) -> bool {
     }
     match t.cpu_group {
         None => true,
-        Some(g) => t.sched.qos != t.base_qos || groups[g].as_ref().is_none_or(|grp| grp.limit.eligible()),
+        Some(g) => t.sched.qos != t.base_qos || group_eligible(groups, g),
     }
+}
+
+/// A hierarchical group is eligible only while its own and every ancestor's
+/// token bucket has capacity. A stale parent fails closed.
+fn group_eligible(groups: &[Option<CpuGroup>], slot: usize) -> bool {
+    let Some(group) = groups.get(slot).and_then(Option::as_ref) else {
+        return false;
+    };
+    let mut current = Some(CpuGroupId {
+        slot,
+        gen: group.gen,
+    });
+    let mut depth = 0usize;
+    while let Some(group) = current {
+        if depth >= groups.len() {
+            return false;
+        }
+        let Some(slot) = groups.get(group.slot) else {
+            return false;
+        };
+        let Some(current_group) = slot else {
+            return false;
+        };
+        if current_group.gen != group.gen || !current_group.limit.eligible() {
+            return false;
+        }
+        current = current_group.parent;
+        depth += 1;
+    }
+    true
 }

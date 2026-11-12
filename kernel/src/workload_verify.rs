@@ -2,14 +2,16 @@
 //!
 //! 原生 Workload 运行时验收：真实 Process/Task、私有页、CPU group 和 Ring。
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use kernel_core::paging::MapFlags;
 use kernel_core::security_domain::DomainKey;
+use kernel_core::smp::CpuSet;
 use kernel_core::workload::{ResourceLimits, ResourceUsage, WorkloadState};
 
 use crate::proc::{self, ProcState};
 use crate::syscall::{table as abi, SyscallSet};
+use crate::task::TaskId;
 use crate::{kprintln, sched};
 
 const CODE_OFF: u64 = 0x40_0000;
@@ -18,6 +20,17 @@ const ANON_OFF: u64 = 0x100_0000;
 const STACK_OFF: u64 = 0xC0_0000;
 
 static FAILED: AtomicU32 = AtomicU32::new(0);
+static HIERARCHY_STOP: AtomicBool = AtomicBool::new(false);
+static HIERARCHY_DONE: AtomicBool = AtomicBool::new(false);
+
+const HIERARCHY_TASK: u64 = 0x574f_0001;
+
+fn hierarchy_worker() {
+    while !HIERARCHY_STOP.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+    HIERARCHY_DONE.store(true, Ordering::Release);
+}
 
 fn check(ok: bool, message: &str) {
     if !ok {
@@ -39,6 +52,120 @@ fn exit_code() -> [u8; 11] {
     code[7..9].copy_from_slice(&[0x0f, 0x05]);
     code[9..11].copy_from_slice(&[0x0f, 0x0b]);
     code
+}
+
+fn verify_hierarchical_cpu(domain: DomainKey) {
+    let page = kernel_core::frame::FRAME_SIZE as u64;
+    let parent_limits = ResourceLimits {
+        cpu_permille: 500,
+        memory_bytes: page,
+        threads: 1,
+        ring_entries: 1,
+    };
+    let child_limits = ResourceLimits {
+        cpu_permille: 100,
+        ..parent_limits
+    };
+    let parent = match crate::workload::create(domain, parent_limits) {
+        Ok(parent) => parent,
+        Err(error) => {
+            check(false, error.name());
+            return;
+        }
+    };
+    check(
+        crate::workload::transition(parent, WorkloadState::Ready).is_ok(),
+        "cpu parent ready",
+    );
+    check(
+        crate::workload::transition(parent, WorkloadState::Running).is_ok(),
+        "cpu parent running",
+    );
+    let child = match crate::workload::create_child(parent, child_limits) {
+        Ok(child) => child,
+        Err(error) => {
+            check(false, error.name());
+            return;
+        }
+    };
+    check(
+        crate::workload::transition(child, WorkloadState::Ready).is_ok(),
+        "cpu child ready",
+    );
+    check(
+        crate::workload::transition(child, WorkloadState::Running).is_ok(),
+        "cpu child running",
+    );
+    let parent_group = match crate::workload::cpu_group(parent) {
+        Ok(group) => group,
+        Err(error) => {
+            check(false, error.name());
+            return;
+        }
+    };
+    let child_group = match crate::workload::cpu_group(child) {
+        Ok(group) => group,
+        Err(error) => {
+            check(false, error.name());
+            return;
+        }
+    };
+
+    HIERARCHY_STOP.store(false, Ordering::Release);
+    HIERARCHY_DONE.store(false, Ordering::Release);
+    let spawned = sched::spawn_on(
+        TaskId(HIERARCHY_TASK),
+        "workload-cpu-child",
+        hierarchy_worker,
+        Some(child_group),
+        CpuSet::first(1),
+    );
+    check(spawned.is_ok(), "hierarchical CPU worker starts");
+    let _ = sched::run_until(sched::timer_ticks().saturating_add(250));
+    let parent_stats = sched::cpu_group_stats(parent_group).unwrap_or_default();
+    let child_stats = sched::cpu_group_stats(child_group).unwrap_or_default();
+    check(
+        child_stats.used_ticks > 0 && parent_stats.used_ticks == child_stats.used_ticks,
+        "child execution charges the whole ancestor chain",
+    );
+    check(
+        child_stats.throttle_events > 0,
+        "child CPU quota throttles real execution",
+    );
+
+    HIERARCHY_STOP.store(true, Ordering::Release);
+    check(
+        sched::run_until(sched::timer_ticks().saturating_add(100)),
+        "hierarchical CPU worker settles",
+    );
+    check(
+        HIERARCHY_DONE.load(Ordering::Acquire),
+        "hierarchical CPU worker observes stop",
+    );
+    check(
+        crate::workload::transition(child, WorkloadState::Stopping).is_ok(),
+        "cpu child stopping",
+    );
+    check(
+        crate::workload::transition(child, WorkloadState::Stopped).is_ok(),
+        "cpu child stopped",
+    );
+    check(
+        crate::workload::destroy(child).is_ok(),
+        "cpu child destroyed",
+    );
+    check(
+        crate::workload::transition(parent, WorkloadState::Stopping).is_ok(),
+        "cpu parent stopping",
+    );
+    check(
+        crate::workload::transition(parent, WorkloadState::Stopped).is_ok(),
+        "cpu parent stopped",
+    );
+    check(
+        crate::workload::destroy(parent).is_ok(),
+        "cpu parent destroyed",
+    );
 }
 
 pub fn run() {
@@ -211,6 +338,7 @@ pub fn run() {
         crate::workload::destroy(workload).is_ok(),
         "workload destroy with member unbound",
     );
+    verify_hierarchical_cpu(domain);
     check(
         crate::mm::frame::free_frames() == frames_before,
         "frame baseline",
