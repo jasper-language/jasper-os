@@ -1462,6 +1462,8 @@ fn execute(
         LinuxSyscall::Vfork => compat_result(linux_vfork(pid, call.args, user_ip, user_preserved)),
         LinuxSyscall::Brk => compat_result(linux_brk(pid, call.args[0])),
         LinuxSyscall::Access => compat_result(linux_access(call.args[0])),
+        LinuxSyscall::FaccessAt => compat_result(linux_faccessat(pid, call.args, false)),
+        LinuxSyscall::FaccessAt2 => compat_result(linux_faccessat(pid, call.args, true)),
         LinuxSyscall::ArchPrctl => compat_result(linux_arch_prctl(call.args)),
         LinuxSyscall::ClockGettime => compat_result(linux_clock_gettime(call.args)),
         LinuxSyscall::ClockGetres => compat_result(linux_clock_getres(call.args)),
@@ -5419,6 +5421,81 @@ fn linux_access(path: u64) -> Result<u64, CompatErrno> {
     } else {
         Err(CompatErrno::NoEntry)
     }
+}
+
+fn linux_faccessat(
+    pid: ObjId,
+    args: [u64; 6],
+    faccessat2: bool,
+) -> Result<u64, CompatErrno> {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_EACCESS: u64 = 0x200;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    let flags = if faccessat2 { args[3] } else { 0 };
+    let mode = args[2];
+    if mode & !7 != 0
+        || flags & !(AT_SYMLINK_NOFOLLOW | AT_EACCESS | AT_EMPTY_PATH) != 0
+        || mode & 2 != 0
+    {
+        return Err(if mode & 2 != 0 {
+            CompatErrno::Access
+        } else {
+            CompatErrno::Invalid
+        });
+    }
+    let path = linux_c_string(args[1], 4096);
+    let node = match path {
+        Ok(path) => {
+            let resolved = if path.starts_with(b"/") {
+                if !is_at_fdcwd(args[0]) {
+                    return Err(CompatErrno::Invalid);
+                }
+                path
+            } else {
+                if path == b".."
+                    || path.starts_with(b"../")
+                    || path.windows(4).any(|window| window == b"/../")
+                {
+                    return Err(CompatErrno::Invalid);
+                }
+                let base = if is_at_fdcwd(args[0]) {
+                    proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path()
+                } else {
+                    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+                    let (handle, _) =
+                        proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
+                    crate::linux_vfs::DirectoryId::from_handle(handle)
+                        .ok_or(CompatErrno::BadFd)?
+                        .path()
+                };
+                if path == b"." {
+                    base.to_vec()
+                } else {
+                    let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
+                    resolved.extend_from_slice(base);
+                    if !base.ends_with(b"/") {
+                        resolved.push(b'/');
+                    }
+                    resolved.extend_from_slice(&path);
+                    resolved
+                }
+            };
+            crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)?
+        }
+        Err(CompatErrno::NoEntry) if flags & AT_EMPTY_PATH != 0 => {
+            let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+            let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::BadFd)?;
+            crate::linux_vfs::Node::Directory(
+                crate::linux_vfs::DirectoryId::from_handle(handle)
+                    .ok_or(CompatErrno::BadFd)?,
+            )
+        }
+        Err(error) => return Err(error),
+    };
+    if mode & 1 != 0 && matches!(node, crate::linux_vfs::Node::Executable(_)) {
+        return Err(CompatErrno::Access);
+    }
+    Ok(0)
 }
 
 const fn align_up(value: u64, align: u64) -> u64 {

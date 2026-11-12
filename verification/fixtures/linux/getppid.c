@@ -1183,6 +1183,21 @@ int main(void) {
     if (strcmp(executable, "/usr/bin/jasper-getppid") != 0) {
         return 16;
     }
+    if (syscall(SYS_faccessat2, AT_FDCWD,
+                "/usr/lib/x86_64-linux-gnu/libc.so.6", R_OK, 0) != 0) {
+        return 204;
+    }
+    errno = 0;
+    if (syscall(SYS_faccessat2, AT_FDCWD,
+                "/usr/lib/x86_64-linux-gnu/libc.so.6", W_OK, 0) != -1 ||
+        errno != EACCES) {
+        return 205;
+    }
+    errno = 0;
+    if (syscall(SYS_faccessat2, AT_FDCWD, "/missing-access", F_OK, 0) != -1 ||
+        errno != ENOENT) {
+        return 206;
+    }
     errno = 0;
     if (readlinkat(AT_FDCWD, "/not-in-compat-root",
                    executable, sizeof(executable)) != -1 || errno != ENOENT) {
