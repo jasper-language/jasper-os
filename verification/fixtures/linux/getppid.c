@@ -1198,6 +1198,9 @@ int main(void) {
         errno != ENOENT) {
         return 206;
     }
+    if (syscall(SYS_faccessat2, fd, "", R_OK, AT_EMPTY_PATH) != 0) {
+        return 207;
+    }
     errno = 0;
     if (readlinkat(AT_FDCWD, "/not-in-compat-root",
                    executable, sizeof(executable)) != -1 || errno != ENOENT) {

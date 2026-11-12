@@ -5501,6 +5501,9 @@ fn linux_faccessat(
     }
     let path = linux_c_string(args[1], 4096);
     let node = match path {
+        Ok(path) if path.is_empty() && flags & AT_EMPTY_PATH != 0 => {
+            linux_node_from_fd(pid, args[0])?
+        }
         Ok(path) => {
             let resolved = if path.starts_with(b"/") {
                 if !is_at_fdcwd(args[0]) {
@@ -5552,6 +5555,22 @@ fn linux_faccessat(
         return Err(CompatErrno::Access);
     }
     Ok(0)
+}
+
+fn linux_node_from_fd(pid: ObjId, raw_fd: u64) -> Result<crate::linux_vfs::Node, CompatErrno> {
+    let fd = u32::try_from(raw_fd).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    match entry.kind {
+        compat_core::fd::CompatKind::File => crate::linux_vfs::FileId::from_handle(entry.handle)
+            .map(crate::linux_vfs::Node::File)
+            .ok_or(CompatErrno::BadFd),
+        compat_core::fd::CompatKind::Directory => {
+            crate::linux_vfs::DirectoryId::from_handle(entry.handle)
+                .map(crate::linux_vfs::Node::Directory)
+                .ok_or(CompatErrno::BadFd)
+        }
+        _ => Err(CompatErrno::Access),
+    }
 }
 
 const fn align_up(value: u64, align: u64) -> u64 {
