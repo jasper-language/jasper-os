@@ -297,7 +297,10 @@ impl<const N: usize> WorkloadTable<N> {
         let (path, len) = self.path(key)?;
         if !matches!(
             self.record(key)?.state,
-            WorkloadState::Running | WorkloadState::Stopping
+            WorkloadState::Running
+                | WorkloadState::Stopping
+                | WorkloadState::Stopped
+                | WorkloadState::Failed
         ) {
             return Err(WorkloadError::InvalidState);
         }
@@ -782,5 +785,24 @@ mod tests {
             Err(MembershipError::NotRunning)
         );
         assert_eq!(members.get(99).unwrap().workload, running);
+    }
+
+    #[test]
+    fn failed_workload_can_release_resources_before_destroy() {
+        let mut table = WorkloadTable::<1>::new();
+        let key = table.create(DOMAIN, LIMITS).unwrap();
+        table.transition(key, WorkloadState::Ready).unwrap();
+        table.transition(key, WorkloadState::Running).unwrap();
+        let usage = ResourceUsage {
+            memory_bytes: 4096,
+            threads: 2,
+            ring_entries: 1,
+        };
+        table.charge(key, usage).unwrap();
+        table.transition(key, WorkloadState::Failed).unwrap();
+        table.release(key, usage).unwrap();
+        assert_eq!(table.snapshot(key).unwrap().usage, ResourceUsage::default());
+        table.destroy(key).unwrap();
+        assert!(table.is_empty());
     }
 }
