@@ -73,6 +73,7 @@ pub mod capacity;
 pub mod capability;
 pub mod config;
 pub mod device;
+pub mod display_input;
 pub mod deadline;
 pub mod drill;
 pub mod deadline_forest;

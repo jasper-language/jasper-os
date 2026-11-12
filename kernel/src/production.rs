@@ -110,6 +110,7 @@ fn wait_for_services(_ctx: &mut BootCtx) {
     loop {
         arch::wait_for_interrupt();
         irq::poll_and_handle();
+        crate::display::poll_input();
         if !alive_reported && clock::ticks().wrapping_sub(start) >= ALIVE_AFTER_TICKS {
             alive_reported = true;
             kprintln!("[JSR-PROD] alive ticks={}", clock::ticks());

@@ -76,11 +76,13 @@ pub const TRACE: LockClass = LockClass::new(20, "system.trace");
 /// 系统服务的分片队列（每个分片一把，同级，彼此从不嵌套）。
 /// Shard queues of sharded system services.
 pub const SERVICE_SHARD: LockClass = LockClass::new(22, "system.service.shard");
+/// Native display and keyboard session.
+pub const DISPLAY: LockClass = LockClass::new(23, "system.display.session");
 /// Native terminal session input/output rings.
-pub const TERMINAL: LockClass = LockClass::new(23, "system.terminal.session");
+pub const TERMINAL: LockClass = LockClass::new(24, "system.terminal.session");
 /// 控制台输出（最内层：持有它时不再获取任何锁）。
 /// Console output (innermost).
-pub const CONSOLE: LockClass = LockClass::new(24, "system.console");
+pub const CONSOLE: LockClass = LockClass::new(25, "system.console");
 
 /// 登记表（按级别递增）。
 /// The registry, in ascending rank order.
@@ -106,6 +108,7 @@ pub const REGISTRY: &[LockClass] = &[
     IRQ_QUOTA,
     TRACE,
     SERVICE_SHARD,
+    DISPLAY,
     TERMINAL,
     CONSOLE,
 ];

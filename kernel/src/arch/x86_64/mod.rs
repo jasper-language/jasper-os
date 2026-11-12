@@ -38,6 +38,7 @@ mod paging;
 mod gdt;
 mod idt;
 mod ioapic;
+pub(crate) mod keyboard;
 pub(crate) use ioapic::wall_clock_unix_seconds;
 mod msi;
 mod pci;

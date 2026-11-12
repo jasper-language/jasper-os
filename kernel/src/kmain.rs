@@ -211,6 +211,7 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         // 只读设备表属于 `devices` 模块激活；平台没有 PCI 时激活出空表，不算失败。
         Stage::Devices => stage(ctx, s, |ctx| {
             pci::prepare(ctx.boot);
+            crate::display::report();
             Some(())
         }),
         // POL-2：系统 Profile（模块面 + 参数档）在堆就绪后立刻校验；不合法就拒绝启动，

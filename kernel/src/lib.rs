@@ -57,6 +57,7 @@ pub mod dma;
 pub mod drv3_demo;
 #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
 pub mod device_demo;
+pub mod display;
 pub mod interrupt;
 pub mod exit_state;
 pub mod fault;
