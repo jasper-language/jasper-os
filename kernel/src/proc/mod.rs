@@ -3995,6 +3995,7 @@ fn release_resources_in(t: &mut kobj::Table, pid: ObjId) -> usize {
             let n = p.handles.close_all(|r| closed.push(r));
             // 进程进入退出流程后它的设备窗口一律撤销；BAR 不是 RAM，这里只改页表。
             revoke_all_device_mappings(p);
+            #[cfg(feature = "linux-abi")]
             if let Some(linux) = p.linux.as_mut() {
                 let _ = linux.fds.take_all();
                 linux.pipes.clear();
