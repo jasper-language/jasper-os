@@ -16,6 +16,14 @@ const BINDER_READ_PACKET_BYTES: usize = 4 + BINDER_TRANSACTION_BYTES;
 const MAX_TRANSACTION_BYTES: usize = 64 * 1024;
 const MAX_OFFSET_BYTES: usize = 4096;
 const MAX_QUEUE: usize = 64;
+const MAX_NODES: usize = 128;
+const MAX_HANDLES: usize = 512;
+
+const BINDER_TYPE_BINDER: u32 = 0x7362_2a85;
+const BINDER_TYPE_WEAK_BINDER: u32 = 0x7762_2a85;
+const BINDER_TYPE_HANDLE: u32 = 0x7368_2a85;
+const BINDER_TYPE_WEAK_HANDLE: u32 = 0x7768_2a85;
+const FLAT_BINDER_OBJECT_BYTES: usize = 24;
 
 const BC_TRANSACTION: u32 = 0x4040_6300;
 const BC_REPLY: u32 = 0x4040_6301;
@@ -56,11 +64,30 @@ struct TransactionBuffer {
     length: usize,
 }
 
+#[derive(Clone, Copy)]
+struct Node {
+    id: u64,
+    owner: ObjId,
+    pointer: u64,
+    cookie: u64,
+}
+
+#[derive(Clone, Copy)]
+struct LocalHandle {
+    recipient: ObjId,
+    node: u64,
+    handle: u32,
+}
+
 struct State {
     context_manager: Option<ObjId>,
     queue: VecDeque<(ObjId, QueuedCommand)>,
     active: Vec<ActiveTransaction>,
     buffers: Vec<TransactionBuffer>,
+    nodes: Vec<Node>,
+    handles: Vec<LocalHandle>,
+    next_node: u64,
+    next_handle: u32,
 }
 
 impl State {
@@ -70,6 +97,10 @@ impl State {
             queue: VecDeque::new(),
             active: Vec::new(),
             buffers: Vec::new(),
+            nodes: Vec::new(),
+            handles: Vec::new(),
+            next_node: 1,
+            next_handle: 1,
         }
     }
 }
@@ -93,6 +124,23 @@ pub(crate) fn set_context_manager(pid: ObjId) -> bool {
     }
     state.context_manager = Some(pid);
     true
+}
+
+/// Releases every Binder node, local handle and queued state owned by one
+/// compatibility process. Called after its final Linux thread exits.
+pub(crate) fn release_process(pid: ObjId) {
+    let mut state = BINDER.lock();
+    if state.context_manager == Some(pid) {
+        state.context_manager = None;
+    }
+    state.nodes.retain(|node| node.owner != pid);
+    state.handles.retain(|binding| binding.recipient != pid);
+    state.active.retain(|active| active.target != pid && active.sender != pid);
+    state.buffers.retain(|buffer| buffer.process != pid);
+    state.queue.retain(|(target, command)| {
+        *target != pid
+            && !matches!(command, QueuedCommand::Transaction { sender, .. } if *sender == pid)
+    });
 }
 
 pub(crate) fn write_read(pid: ObjId, fd: u32, args: [u64; 6]) -> Result<u64, CompatErrno> {
@@ -205,6 +253,167 @@ fn process_write(pid: ObjId, address: u64, size: usize) -> Result<usize, CompatE
     Ok(offset)
 }
 
+fn resolve_transaction_target(pid: ObjId, handle: u32) -> Result<ObjId, CompatErrno> {
+    let state = BINDER.lock();
+    if handle == 0 {
+        return state.context_manager.ok_or(CompatErrno::NoEntry);
+    }
+    let binding = state
+        .handles
+        .iter()
+        .find(|binding| binding.recipient == pid && binding.handle == handle)
+        .ok_or(CompatErrno::NoEntry)?;
+    state
+        .nodes
+        .iter()
+        .find(|node| node.id == binding.node)
+        .map(|node| node.owner)
+        .ok_or(CompatErrno::NoEntry)
+}
+
+/// Translates flat binder objects in one transaction. Binder definitions become
+/// receiver-local handles; outgoing handles are translated back to the node
+/// owner's binder object.
+fn translate_objects(
+    sender: ObjId,
+    recipient: ObjId,
+    data: &mut [u8],
+    offsets: &[u8],
+) -> Result<(), CompatErrno> {
+    if offsets.is_empty() {
+        return Ok(());
+    }
+    if offsets.len() % 8 != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut objects = Vec::new();
+    objects
+        .try_reserve(offsets.len() / 8)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    for chunk in offsets.chunks_exact(8) {
+        let offset = usize::try_from(u64::from_le_bytes(chunk.try_into().unwrap()))
+            .map_err(|_| CompatErrno::Invalid)?;
+        let end = offset
+            .checked_add(FLAT_BINDER_OBJECT_BYTES)
+            .ok_or(CompatErrno::Invalid)?;
+        let object = data.get(offset..end).ok_or(CompatErrno::Invalid)?;
+        let object_type = u32::from_le_bytes(object[..4].try_into().unwrap());
+        let value = u64::from_le_bytes(object[8..16].try_into().unwrap());
+        let cookie = u64::from_le_bytes(object[16..24].try_into().unwrap());
+        if !matches!(
+            object_type,
+            BINDER_TYPE_BINDER
+                | BINDER_TYPE_WEAK_BINDER
+                | BINDER_TYPE_HANDLE
+                | BINDER_TYPE_WEAK_HANDLE
+        ) {
+            return Err(CompatErrno::NoSys);
+        }
+        objects.push((offset, value, cookie, object_type));
+    }
+
+    let mut state = BINDER.lock();
+    state
+        .nodes
+        .try_reserve(objects.len())
+        .map_err(|_| CompatErrno::NoMemory)?;
+    state
+        .handles
+        .try_reserve(objects.len())
+        .map_err(|_| CompatErrno::NoMemory)?;
+    for (offset, value, cookie, object_type) in objects {
+        let weak = matches!(
+            object_type,
+            BINDER_TYPE_WEAK_BINDER | BINDER_TYPE_WEAK_HANDLE
+        );
+        let node_id = match object_type {
+            BINDER_TYPE_BINDER | BINDER_TYPE_WEAK_BINDER => {
+                if let Some(node) = state
+                    .nodes
+                    .iter()
+                    .find(|node| node.owner == sender && node.pointer == value)
+                {
+                    node.id
+                } else {
+                    if state.nodes.len() >= MAX_NODES {
+                        return Err(CompatErrno::NoSpace);
+                    }
+                    let id = state.next_node;
+                    state.next_node = id.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+                    state.nodes.push(Node {
+                        id,
+                        owner: sender,
+                        pointer: value,
+                        cookie,
+                    });
+                    id
+                }
+            }
+            BINDER_TYPE_HANDLE | BINDER_TYPE_WEAK_HANDLE => {
+                let handle = u32::try_from(value).map_err(|_| CompatErrno::Invalid)?;
+                let binding = state
+                    .handles
+                    .iter()
+                    .find(|binding| {
+                        binding.recipient == sender && binding.handle == handle
+                    })
+                    .ok_or(CompatErrno::NoEntry)?;
+                binding.node
+            }
+            _ => unreachable!(),
+        };
+        let node = *state
+            .nodes
+            .iter()
+            .find(|node| node.id == node_id)
+            .ok_or(CompatErrno::NoEntry)?;
+        let (translated, translated_cookie, translated_type) =
+            if recipient == node.owner {
+                (
+                    node.pointer,
+                    node.cookie,
+                    if weak {
+                        BINDER_TYPE_WEAK_BINDER
+                    } else {
+                        BINDER_TYPE_BINDER
+                    },
+                )
+            } else {
+                let handle = if let Some(binding) = state.handles.iter().find(|binding| {
+                    binding.recipient == recipient && binding.node == node_id
+                }) {
+                    binding.handle
+                } else {
+                    if state.handles.len() >= MAX_HANDLES {
+                        return Err(CompatErrno::NoSpace);
+                    }
+                    let handle = state.next_handle;
+                    state.next_handle = handle.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+                    state.handles.push(LocalHandle {
+                        recipient,
+                        node: node_id,
+                        handle,
+                    });
+                    handle
+                };
+                (
+                    u64::from(handle),
+                    0,
+                    if weak {
+                        BINDER_TYPE_WEAK_HANDLE
+                    } else {
+                        BINDER_TYPE_HANDLE
+                    },
+                )
+            };
+        let object = &mut data[offset..offset + FLAT_BINDER_OBJECT_BYTES];
+        object[..4].copy_from_slice(&translated_type.to_le_bytes());
+        object[8..16].copy_from_slice(&translated.to_le_bytes());
+        object[16..24].copy_from_slice(&translated_cookie.to_le_bytes());
+    }
+    Ok(())
+}
+
 fn enqueue_transaction(
     pid: ObjId,
     command: u32,
@@ -237,21 +446,19 @@ fn enqueue_transaction(
 
     if command == BC_TRANSACTION {
         let handle = u32::from_le_bytes(transaction[0..4].try_into().unwrap());
-        if handle != 0 {
-            return Err(CompatErrno::Invalid);
-        }
-        let target = {
-            let state = BINDER.lock();
-            state.context_manager.ok_or(CompatErrno::NoEntry)?
-        };
+        let target = resolve_transaction_target(pid, handle)?;
         if target == pid {
             return Err(CompatErrno::Invalid);
         }
+        translate_objects(pid, target, &mut data, &offsets)?;
         let mut state = BINDER.lock();
         if state.queue.len() >= MAX_QUEUE {
             return Err(CompatErrno::TryAgain);
         }
         state.queue.try_reserve(2).map_err(|_| CompatErrno::NoMemory)?;
+        if flags & TF_ONE_WAY == 0 {
+            state.active.try_reserve(1).map_err(|_| CompatErrno::NoMemory)?;
+        }
         state.queue.push_back((pid, QueuedCommand::Complete));
         state.queue.push_back((
             target,
@@ -265,7 +472,6 @@ fn enqueue_transaction(
             },
         ));
         if flags & TF_ONE_WAY == 0 {
-            state.active.try_reserve(1).map_err(|_| CompatErrno::NoMemory)?;
             state.active.push(ActiveTransaction {
                 target,
                 sender: pid,
@@ -275,29 +481,35 @@ fn enqueue_transaction(
     }
 
     let sender = {
-        let mut state = BINDER.lock();
-        let index = state
+        let state = BINDER.lock();
+        state
             .active
             .iter()
-            .rposition(|active| active.target == pid)
-            .ok_or(CompatErrno::Invalid)?;
-        let sender = state.active.remove(index).sender;
-        state.queue.try_reserve(2).map_err(|_| CompatErrno::NoMemory)?;
-        state.queue.push_back((pid, QueuedCommand::Complete));
-        state.queue.push_back((
-            sender,
-            QueuedCommand::Transaction {
-                command: BR_REPLY,
-                sender: pid,
-                code,
-                flags: 0,
-                data,
-                offsets,
-            },
-        ));
-        sender
+            .rfind(|active| active.target == pid)
+            .map(|active| active.sender)
+            .ok_or(CompatErrno::Invalid)?
     };
-    let _ = sender;
+    translate_objects(pid, sender, &mut data, &offsets)?;
+    let mut state = BINDER.lock();
+    let index = state
+        .active
+        .iter()
+        .rposition(|active| active.target == pid)
+        .ok_or(CompatErrno::Invalid)?;
+    state.active.remove(index);
+    state.queue.try_reserve(2).map_err(|_| CompatErrno::NoMemory)?;
+    state.queue.push_back((pid, QueuedCommand::Complete));
+    state.queue.push_back((
+        sender,
+        QueuedCommand::Transaction {
+            command: BR_REPLY,
+            sender: pid,
+            code,
+            flags: 0,
+            data,
+            offsets,
+        },
+    ));
     Ok(())
 }
 
