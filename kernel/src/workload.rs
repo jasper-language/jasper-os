@@ -7,13 +7,13 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use kernel_core::objtable::ObjId;
 use kernel_core::security_domain::DomainKey;
 use kernel_core::workload::{
-    IoUsage, MembershipError, ResourceLimits, ResourceUsage, WorkloadError, WorkloadKey,
-    WorkloadMembers, WorkloadSnapshot, WorkloadState, WorkloadTable,
+    IoRateLimits, IoRateSnapshot, IoUsage, MembershipError, ResourceLimits, ResourceUsage,
+    WorkloadError, WorkloadKey, WorkloadMembers, WorkloadSnapshot, WorkloadState, WorkloadTable,
 };
 
+use crate::proc;
 use crate::sched::scheduler::CpuGroupId;
 use crate::sync::IrqSpinLock;
-use crate::proc;
 
 pub const MAX_WORKLOADS: usize = 64;
 pub const MAX_WORKLOAD_MEMBERS: usize = 256;
@@ -60,8 +60,8 @@ pub fn create_in_domain(
             create_child(parent, limits)?
         }
     };
-    if let Err(error) = transition(key, WorkloadState::Ready)
-        .and_then(|()| transition(key, WorkloadState::Running))
+    if let Err(error) =
+        transition(key, WorkloadState::Ready).and_then(|()| transition(key, WorkloadState::Running))
     {
         let _ = transition(key, WorkloadState::Failed);
         let _ = destroy(key);
@@ -264,17 +264,27 @@ pub fn reserve_ring_entries(key: WorkloadKey, entries: u32) -> Result<(), Worklo
     )
 }
 
+/// Configure fixed-window I/O rates before a Workload starts.
+///
+/// 在 Workload 启动前配置固定窗口 I/O 速率。
+pub fn configure_io_rate(key: WorkloadKey, limits: IoRateLimits) -> Result<(), WorkloadError> {
+    WORKLOADS.lock().configure_io_rate(key, limits)
+}
+
+/// Return the current bounded rate policy and window consumption.
+pub fn io_rate_snapshot(key: WorkloadKey) -> Result<IoRateSnapshot, WorkloadError> {
+    WORKLOADS.lock().io_rate_snapshot(key)
+}
+
 /// Atomically admits file/block I/O against the Workload of the calling
 /// Process. The device is not an identity: an unbound process remains
 /// explicitly untracked instead of borrowing an internal service identity.
-pub fn begin_process_io(
-    pid: ObjId,
-    bytes: u64,
-    ops: u64,
-) -> Result<IoPermit, WorkloadError> {
+pub fn begin_process_io(pid: ObjId, bytes: u64, ops: u64) -> Result<IoPermit, WorkloadError> {
     let workload = proc::workload_key(pid);
     if let Some(workload) = workload {
-        WORKLOADS.lock().charge_io(workload, IoUsage { bytes, ops })?;
+        WORKLOADS
+            .lock()
+            .charge_io_at(workload, IoUsage { bytes, ops }, crate::sched::now_ns())?;
     }
     Ok(IoPermit {
         workload,
@@ -310,7 +320,11 @@ impl Drop for IoPermit {
         let Some(workload) = self.workload else {
             return;
         };
-        if WORKLOADS.lock().refund_io(workload, self.usage).is_err() {
+        if WORKLOADS
+            .lock()
+            .refund_io_at(workload, self.usage, crate::sched::now_ns())
+            .is_err()
+        {
             IO_ROLLBACK_FAILURES.fetch_add(1, Ordering::Relaxed);
         }
     }
