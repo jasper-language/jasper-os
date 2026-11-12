@@ -211,3 +211,60 @@ bounds = "任意u64版本/当前值/新值，单次发布，无循环"
 assumptions_and_uncovered = "无assume/stub；不证明队列/锁/广播/内核对象生命周期"
 reproduce = "cargo kani -p kernel-core --harness snapshot_publish_never_wraps"
 latest_pass = "evidence/evt1/subscription-tools/kani.log: 1 harness/120checks/0failures; merged suite pending"
+
+# Reviewed symbolic input-domain restrictions. The source may not add another
+# occurrence or change these counts without an explicit FV-1 review update.
+[[reviewed_kani_assumption]]
+path = "kernel-core/src/kobj_type.rs"
+count = 2
+review = "Bounded kind-count and path-frame harness domains; production rejection branches remain covered by unit/property tests."
+
+[[reviewed_kani_assumption]]
+path = "kernel-core/src/elf.rs"
+count = 2
+review = "Parser proofs operate on in-bounds slices after explicit length preconditions; malformed-length behavior is covered by mutation tests."
+
+[[reviewed_kani_assumption]]
+path = "kernel-core/src/deadline_forest.rs"
+count = 1
+review = "Generation-advance proof constrains the symbolic successor to differ from the old generation; production generation behavior is unit-tested."
+
+[[reviewed_kani_assumption]]
+path = "kernel-core/src/timer_event.rs"
+count = 1
+review = "Periodic proof excludes a zero period because construction rejects it; invalid construction is covered by unit tests."
+
+[[reviewed_kani_assumption]]
+path = "kernel-core/src/ring_backend.rs"
+count = 4
+review = "Bounded table-routing proofs restrict symbolic indices to constructed route ranges; malformed and out-of-range routes are separately tested."
+
+[[reviewed_kani_assumption]]
+path = "kernel-core/src/raw_timing.rs"
+count = 2
+review = "Timeline proofs constrain ordered timestamps and reversed-clock specimens explicitly; production validation remains unit-tested."
+
+[[reviewed_kani_assumption]]
+path = "kernel-core/src/drill.rs"
+count = 1
+review = "Bounded coverage proof limits the symbolic slice to the supported drill width; larger inputs are handled by production bounds checks."
+
+[[reviewed_kani_assumption]]
+path = "kernel-core/src/boot_stage.rs"
+count = 1
+review = "Closure proof bounds the symbolic graph size while preserving all reachability transitions; full graph validity is const-checked."
+
+[[reviewed_kani_assumption]]
+path = "kernel-core/src/assembly.rs"
+count = 1
+review = "Mutation proof requires a non-zero flip index so the target always exists; invalid flip handling is covered by property tests."
+
+[[reviewed_kani_assumption]]
+path = "kernel-core/src/timer_units.rs"
+count = 3
+review = "Timer proofs exclude zero frequency/period and require representable borrow boundaries; production constructors reject invalid values."
+
+[[reviewed_kani_assumption]]
+path = "kernel-core/src/sched/limit.rs"
+count = 3
+review = "Batch proofs restrict limits, credit bounds and tick counts to their validated finite ranges; overflow and unlimited paths have dedicated tests."
