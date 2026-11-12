@@ -190,6 +190,7 @@ pub mod timer_units;
 pub mod sandbox;
 pub mod sandbox_image;
 pub mod sandbox_abi;
+pub mod sandbox_storage_abi;
 
 // issue #3：统一定时事件契约。 / Unified timer-event contract.
 pub mod timer_event;

@@ -29,6 +29,12 @@ const MEMBER_KEY_OFF: u64 = 0x300_0000;
 const SANDBOX_CODE_OFF: u64 = 0x340_0000;
 const SANDBOX_DESC_OFF: u64 = 0x380_0000;
 const SANDBOX_INFO_OFF: u64 = 0x3c0_0000;
+const SANDBOX_IMAGE_DESC_OFF: u64 = 0x400_0000;
+const SANDBOX_VOLUME_DESC_OFF: u64 = 0x440_0000;
+const SANDBOX_CLONE_DESC_OFF: u64 = 0x480_0000;
+const SANDBOX_IMAGE_INFO_OFF: u64 = 0x4c0_0000;
+const SANDBOX_LAYER_INFO_OFF: u64 = 0x500_0000;
+const SANDBOX_VOLUME_INFO_OFF: u64 = 0x540_0000;
 const STACK_OFF: u64 = 0xC0_0000;
 
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -280,6 +286,14 @@ fn sandbox_abi_code(base: u64, foreign_key: u64) -> Vec<u8> {
         code.extend_from_slice(&[0x48, opcode]);
         code.extend_from_slice(&value.to_le_bytes());
     }
+    fn imm64_r10(code: &mut Vec<u8>, value: u64) {
+        code.extend_from_slice(&[0x49, 0xba]);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+    fn imm64_r8(code: &mut Vec<u8>, value: u64) {
+        code.extend_from_slice(&[0x49, 0xb8]);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
     fn syscall(code: &mut Vec<u8>) {
         code.extend_from_slice(&[0x0f, 0x05]);
     }
@@ -321,11 +335,7 @@ fn sandbox_abi_code(base: u64, foreign_key: u64) -> Vec<u8> {
     imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_QUERY);
     code.extend_from_slice(&[0x48, 0x89, 0xdf]); // mov rdi, rbx
     imm64(&mut code, 0xbe, base + SANDBOX_INFO_OFF);
-    imm64(
-        &mut code,
-        0xba,
-        kernel_core::sandbox_abi::INFO_BYTES as u64,
-    );
+    imm64(&mut code, 0xba, kernel_core::sandbox_abi::INFO_BYTES as u64);
     syscall(&mut code);
     test_rax(&mut code);
     jle_error(&mut code, &mut patches);
@@ -334,11 +344,7 @@ fn sandbox_abi_code(base: u64, foreign_key: u64) -> Vec<u8> {
     imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_QUERY);
     imm64(&mut code, 0xbf, foreign_key);
     imm64(&mut code, 0xbe, base + SANDBOX_INFO_OFF);
-    imm64(
-        &mut code,
-        0xba,
-        kernel_core::sandbox_abi::INFO_BYTES as u64,
-    );
+    imm64(&mut code, 0xba, kernel_core::sandbox_abi::INFO_BYTES as u64);
     syscall(&mut code);
     cmp_rax(&mut code, -(abi::SYSTEM_SANDBOX_ERROR_NOT_FOUND as i32));
     jne_error(&mut code, &mut patches);
@@ -351,6 +357,168 @@ fn sandbox_abi_code(base: u64, foreign_key: u64) -> Vec<u8> {
     cmp_rax(
         &mut code,
         -(abi::SYSTEM_SANDBOX_ERROR_BUFFER_TOO_SMALL as i32),
+    );
+    jne_error(&mut code, &mut patches);
+
+    // Bind the kernel-issued sandbox key into all storage descriptors.
+    imm64(&mut code, 0xbf, base + SANDBOX_IMAGE_DESC_OFF + 8);
+    code.extend_from_slice(&[0x48, 0x89, 0x1f]); // mov [rdi], rbx
+    imm64(&mut code, 0xbf, base + SANDBOX_VOLUME_DESC_OFF + 8);
+    code.extend_from_slice(&[0x48, 0x89, 0x1f]);
+    imm64(&mut code, 0xbf, base + SANDBOX_CLONE_DESC_OFF + 8);
+    code.extend_from_slice(&[0x48, 0x89, 0x1f]);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_IMAGE_LOAD);
+    imm64(&mut code, 0xbf, base + SANDBOX_IMAGE_DESC_OFF);
+    syscall(&mut code);
+    test_rax(&mut code);
+    jle_error(&mut code, &mut patches);
+    code.extend_from_slice(&[0x49, 0x89, 0xc5]); // mov r13, rax
+    imm64(&mut code, 0xbf, base + SANDBOX_VOLUME_DESC_OFF + 16);
+    code.extend_from_slice(&[0x4c, 0x89, 0x2f]); // mov [rdi], r13
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_IMAGE_QUERY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]); // mov rdi, rbx
+    code.extend_from_slice(&[0x4c, 0x89, 0xee]); // mov rsi, r13
+    imm64(&mut code, 0xba, base + SANDBOX_IMAGE_INFO_OFF);
+    imm64_r10(
+        &mut code,
+        kernel_core::sandbox_storage_abi::IMAGE_INFO_BYTES as u64,
+    );
+    syscall(&mut code);
+    test_rax(&mut code);
+    jle_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_IMAGE_LAYER_QUERY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    code.extend_from_slice(&[0x4c, 0x89, 0xee]);
+    code.extend_from_slice(&[0x31, 0xd2]); // xor edx, edx
+    imm64_r10(&mut code, base + SANDBOX_LAYER_INFO_OFF);
+    imm64_r8(
+        &mut code,
+        kernel_core::sandbox_storage_abi::LAYER_INFO_BYTES as u64,
+    );
+    syscall(&mut code);
+    test_rax(&mut code);
+    jle_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_VOLUME_CREATE);
+    imm64(&mut code, 0xbf, base + SANDBOX_VOLUME_DESC_OFF);
+    syscall(&mut code);
+    test_rax(&mut code);
+    jle_error(&mut code, &mut patches);
+    code.extend_from_slice(&[0x49, 0x89, 0xc6]); // mov r14, rax
+    imm64(&mut code, 0xbf, base + SANDBOX_CLONE_DESC_OFF + 16);
+    code.extend_from_slice(&[0x4c, 0x89, 0x37]); // mov [rdi], r14
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_VOLUME_DUPLICATE);
+    imm64(&mut code, 0xbf, base + SANDBOX_CLONE_DESC_OFF);
+    syscall(&mut code);
+    test_rax(&mut code);
+    jle_error(&mut code, &mut patches);
+    code.extend_from_slice(&[0x49, 0x89, 0xc7]); // mov r15, rax
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_IMAGE_QUERY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    code.extend_from_slice(&[0x4c, 0x89, 0xee]);
+    imm64(&mut code, 0xba, base + SANDBOX_IMAGE_INFO_OFF);
+    imm64_r10(
+        &mut code,
+        kernel_core::sandbox_storage_abi::IMAGE_INFO_BYTES as u64,
+    );
+    syscall(&mut code);
+    test_rax(&mut code);
+    jle_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_VOLUME_WRITE);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    code.extend_from_slice(&[0x4c, 0x89, 0xf6]);
+    imm32(&mut code, 0xba, 7);
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_VOLUME_WRITE);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    code.extend_from_slice(&[0x4c, 0x89, 0xfe]);
+    imm32(&mut code, 0xba, 3);
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_VOLUME_QUERY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    code.extend_from_slice(&[0x4c, 0x89, 0xf6]);
+    imm64(&mut code, 0xba, base + SANDBOX_VOLUME_INFO_OFF);
+    imm64_r10(
+        &mut code,
+        kernel_core::sandbox_storage_abi::VOLUME_INFO_BYTES as u64,
+    );
+    syscall(&mut code);
+    test_rax(&mut code);
+    jle_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_IMAGE_DESTROY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    code.extend_from_slice(&[0x4c, 0x89, 0xee]);
+    syscall(&mut code);
+    cmp_rax(
+        &mut code,
+        -(abi::SYSTEM_SANDBOX_STORAGE_ERROR_IN_USE as i32),
+    );
+    jne_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_VOLUME_DESTROY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    code.extend_from_slice(&[0x4c, 0x89, 0xf6]);
+    syscall(&mut code);
+    cmp_rax(
+        &mut code,
+        -(abi::SYSTEM_SANDBOX_STORAGE_ERROR_IN_USE as i32),
+    );
+    jne_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_VOLUME_DESTROY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    code.extend_from_slice(&[0x4c, 0x89, 0xfe]);
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_VOLUME_RELEASE);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    code.extend_from_slice(&[0x4c, 0x89, 0xf6]);
+    imm32(&mut code, 0xba, 7);
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_VOLUME_DESTROY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    code.extend_from_slice(&[0x4c, 0x89, 0xf6]);
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_IMAGE_DESTROY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    code.extend_from_slice(&[0x4c, 0x89, 0xee]);
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_IMAGE_QUERY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    code.extend_from_slice(&[0x4c, 0x89, 0xee]);
+    imm64(&mut code, 0xba, base + SANDBOX_IMAGE_INFO_OFF);
+    imm64_r10(
+        &mut code,
+        kernel_core::sandbox_storage_abi::IMAGE_INFO_BYTES as u64,
+    );
+    syscall(&mut code);
+    cmp_rax(
+        &mut code,
+        -(abi::SYSTEM_SANDBOX_IMAGE_ERROR_NOT_FOUND as i32),
     );
     jne_error(&mut code, &mut patches);
 
@@ -373,11 +541,7 @@ fn sandbox_abi_code(base: u64, foreign_key: u64) -> Vec<u8> {
     imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_QUERY);
     code.extend_from_slice(&[0x48, 0x89, 0xdf]);
     imm64(&mut code, 0xbe, base + SANDBOX_INFO_OFF);
-    imm64(
-        &mut code,
-        0xba,
-        kernel_core::sandbox_abi::INFO_BYTES as u64,
-    );
+    imm64(&mut code, 0xba, kernel_core::sandbox_abi::INFO_BYTES as u64);
     syscall(&mut code);
     cmp_rax(&mut code, -(abi::SYSTEM_SANDBOX_ERROR_NOT_FOUND as i32));
     jne_error(&mut code, &mut patches);
@@ -425,6 +589,16 @@ fn verify_sandbox_abi(base: u64) {
         abi::SYSTEM_SANDBOX_QUERY,
         abi::SYSTEM_SANDBOX_STOP,
         abi::SYSTEM_SANDBOX_DESTROY,
+        abi::SYSTEM_SANDBOX_IMAGE_LOAD,
+        abi::SYSTEM_SANDBOX_IMAGE_QUERY,
+        abi::SYSTEM_SANDBOX_IMAGE_LAYER_QUERY,
+        abi::SYSTEM_SANDBOX_IMAGE_DESTROY,
+        abi::SYSTEM_SANDBOX_VOLUME_CREATE,
+        abi::SYSTEM_SANDBOX_VOLUME_DUPLICATE,
+        abi::SYSTEM_SANDBOX_VOLUME_QUERY,
+        abi::SYSTEM_SANDBOX_VOLUME_WRITE,
+        abi::SYSTEM_SANDBOX_VOLUME_RELEASE,
+        abi::SYSTEM_SANDBOX_VOLUME_DESTROY,
     ]);
     let pid = match proc::create("sandbox-user-abi", calls) {
         Ok(pid) => pid,
@@ -437,6 +611,53 @@ fn verify_sandbox_abi(base: u64) {
     let args = kernel_core::workload_abi::CreateArgs {
         parent: None,
         limits,
+    }
+    .encode();
+    let dummy_sandbox =
+        kernel_core::sandbox::SandboxKey::from_raw((1 << 16) | 1).expect("valid key");
+    let content = kernel_core::sandbox_image::ContentDigest::new([0x11; 32]).unwrap();
+    let signature = kernel_core::sandbox_image::ContentDigest::new([0x22; 32]).unwrap();
+    let mut layers = [kernel_core::sandbox_image::ImageLayerSpec::default();
+        kernel_core::sandbox_image::MAX_IMAGE_LAYERS];
+    layers[0] = kernel_core::sandbox_image::ImageLayerSpec { content, bytes: 5 };
+    layers[1] = kernel_core::sandbox_image::ImageLayerSpec {
+        content: signature,
+        bytes: 7,
+    };
+    let image_add = kernel_core::sandbox_storage_abi::ImageAddArgs {
+        sandbox: dummy_sandbox,
+        spec: kernel_core::sandbox_image::ImageSpec {
+            image: kernel_core::sandbox_image::SignedImage {
+                content,
+                signer: 7,
+                signature,
+                version: kernel_core::sandbox_image::ImageVersion {
+                    major: 1,
+                    minor: 0,
+                    patch: 0,
+                },
+            },
+            rootfs_bytes: 12,
+            writable_bytes: 64,
+            max_volumes: 2,
+        },
+        layer_count: 2,
+        layers,
+    }
+    .encode()
+    .expect("bounded image descriptor");
+    let volume_create = kernel_core::sandbox_storage_abi::VolumeCreateArgs {
+        sandbox: dummy_sandbox,
+        image: kernel_core::sandbox_image::ImageKey::from_raw((1 << 16) | 1)
+            .expect("valid image key"),
+        capacity_bytes: 32,
+    }
+    .encode();
+    let volume_clone = kernel_core::sandbox_storage_abi::VolumeCloneArgs {
+        sandbox: dummy_sandbox,
+        parent: kernel_core::sandbox_image::VolumeKey::from_raw((1 << 16) | 1)
+            .expect("valid volume key"),
+        capacity_bytes: 16,
     }
     .encode();
     let code = sandbox_abi_code(base, foreign.to_raw());
@@ -459,6 +680,18 @@ fn verify_sandbox_abi(base: u64) {
                 MapFlags::USER | MapFlags::WRITE,
             )
             .is_ok()
+            && [
+                SANDBOX_IMAGE_DESC_OFF,
+                SANDBOX_VOLUME_DESC_OFF,
+                SANDBOX_CLONE_DESC_OFF,
+                SANDBOX_IMAGE_INFO_OFF,
+                SANDBOX_LAYER_INFO_OFF,
+                SANDBOX_VOLUME_INFO_OFF,
+            ]
+            .iter()
+            .all(|offset| {
+                proc::map_new(pid, base + offset, MapFlags::USER | MapFlags::WRITE).is_ok()
+            })
             && proc::map_new(
                 pid,
                 base + STACK_OFF - page,
@@ -469,7 +702,10 @@ fn verify_sandbox_abi(base: u64) {
     );
     check(
         proc::write(pid, base + SANDBOX_CODE_OFF, &code).is_ok()
-            && proc::write(pid, base + SANDBOX_DESC_OFF, &args).is_ok(),
+            && proc::write(pid, base + SANDBOX_DESC_OFF, &args).is_ok()
+            && proc::write(pid, base + SANDBOX_IMAGE_DESC_OFF, &image_add).is_ok()
+            && proc::write(pid, base + SANDBOX_VOLUME_DESC_OFF, &volume_create).is_ok()
+            && proc::write(pid, base + SANDBOX_CLONE_DESC_OFF, &volume_clone).is_ok(),
         "sandbox user ABI inputs install",
     );
     let task = proc::spawn_thread(
@@ -500,6 +736,30 @@ fn verify_sandbox_abi(base: u64) {
         "sandbox query version",
     );
     check(info[6] == 3, "sandbox query reports Running");
+    let mut image_info = [0u8; kernel_core::sandbox_storage_abi::IMAGE_INFO_BYTES];
+    let mut layer_info = [0u8; kernel_core::sandbox_storage_abi::LAYER_INFO_BYTES];
+    let mut volume_info = [0u8; kernel_core::sandbox_storage_abi::VOLUME_INFO_BYTES];
+    check(
+        proc::read(pid, base + SANDBOX_IMAGE_INFO_OFF, &mut image_info).is_ok()
+            && proc::read(pid, base + SANDBOX_LAYER_INFO_OFF, &mut layer_info).is_ok()
+            && proc::read(pid, base + SANDBOX_VOLUME_INFO_OFF, &mut volume_info).is_ok(),
+        "sandbox storage query outputs readable",
+    );
+    check(&image_info[0..4] == b"JSI1", "sandbox image info magic");
+    check(
+        u16::from_le_bytes([image_info[114], image_info[115]]) == 2,
+        "sandbox image reports two volumes",
+    );
+    check(&layer_info[0..4] == b"JSI1", "sandbox layer info magic");
+    check(
+        u64::from_le_bytes(layer_info[40..48].try_into().expect("layer bytes")) == 5,
+        "sandbox layer bytes",
+    );
+    check(&volume_info[0..4] == b"JSV1", "sandbox volume info magic");
+    check(
+        u64::from_le_bytes(volume_info[40..48].try_into().expect("used bytes")) == 7,
+        "sandbox parent volume usage",
+    );
     let _ = proc::reap(pid);
     crate::kobj::run_cleanup(usize::MAX);
     check(
@@ -760,11 +1020,24 @@ fn verify_workload_spawn(base: u64, terminate: bool) {
     .encode();
     let code = member_spawn_code(base, terminate);
     check(
-        proc::map_new(pid, base + MEMBER_CODE_OFF, MapFlags::USER | MapFlags::EXECUTE).is_ok()
-            && proc::map_new(pid, base + MEMBER_CREATE_OFF, MapFlags::USER | MapFlags::WRITE)
-                .is_ok()
-            && proc::map_new(pid, base + MEMBER_SPAWN_OFF, MapFlags::USER | MapFlags::WRITE)
-                .is_ok()
+        proc::map_new(
+            pid,
+            base + MEMBER_CODE_OFF,
+            MapFlags::USER | MapFlags::EXECUTE,
+        )
+        .is_ok()
+            && proc::map_new(
+                pid,
+                base + MEMBER_CREATE_OFF,
+                MapFlags::USER | MapFlags::WRITE,
+            )
+            .is_ok()
+            && proc::map_new(
+                pid,
+                base + MEMBER_SPAWN_OFF,
+                MapFlags::USER | MapFlags::WRITE,
+            )
+            .is_ok()
             && proc::map_new(pid, base + MEMBER_ELF_OFF, MapFlags::USER | MapFlags::WRITE).is_ok()
             && proc::map_new(pid, base + MEMBER_ELF_OFF + page, MapFlags::USER).is_ok()
             && proc::map_new(pid, base + MEMBER_KEY_OFF, MapFlags::USER | MapFlags::WRITE).is_ok()
@@ -834,17 +1107,16 @@ fn check(ok: bool, message: &str) {
 }
 
 pub fn failed() -> u32 {
-    FAILED.load(Ordering::Relaxed)
-        + {
-            #[cfg(feature = "workload-io-verify")]
-            {
-                crate::workload_io_verify::failed()
-            }
-            #[cfg(not(feature = "workload-io-verify"))]
-            {
-                0
-            }
+    FAILED.load(Ordering::Relaxed) + {
+        #[cfg(feature = "workload-io-verify")]
+        {
+            crate::workload_io_verify::failed()
         }
+        #[cfg(not(feature = "workload-io-verify"))]
+        {
+            0
+        }
+    }
 }
 
 fn exit_code() -> [u8; 11] {

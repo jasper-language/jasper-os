@@ -33,6 +33,12 @@ impl ContentDigest {
     }
 }
 
+impl Default for ContentDigest {
+    fn default() -> Self {
+        Self([0; DIGEST_BYTES])
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImageVersion {
     pub major: u16,
@@ -86,6 +92,15 @@ impl ImageSpec {
 pub struct ImageLayerSpec {
     pub content: ContentDigest,
     pub bytes: u64,
+}
+
+impl Default for ImageLayerSpec {
+    fn default() -> Self {
+        Self {
+            content: ContentDigest::default(),
+            bytes: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,19 +279,13 @@ impl<const I: usize, const L: usize, const V: usize> SandboxStorageTable<I, L, V
         }
 
         let (slot, generation) = self.vacant_image()?;
+        let layer_count = u16::try_from(layers.len()).map_err(|_| SandboxStorageError::Capacity)?;
         let start = self
             .layers
-            .iter()
-            .position(Option::is_none)
+            .windows(layers.len())
+            .position(|window| window.iter().all(Option::is_none))
             .ok_or(SandboxStorageError::Capacity)?;
-        let free_layers = self.layers.iter().filter(|entry| entry.is_none()).count();
-        let layer_count = u16::try_from(layers.len()).map_err(|_| SandboxStorageError::Capacity)?;
-        if free_layers < layers.len()
-            || start
-                .checked_add(layers.len())
-                .is_none_or(|end| end > self.layers.len())
-            || start > u16::MAX as usize
-        {
+        if start > u16::MAX as usize {
             return Err(SandboxStorageError::Capacity);
         }
 
@@ -298,6 +307,32 @@ impl<const I: usize, const L: usize, const V: usize> SandboxStorageTable<I, L, V
             volumes: 0,
         });
         Ok(key)
+    }
+
+    /// Remove an immutable image after all of its volumes are gone.
+    ///
+    /// 所有卷销毁后删除不可变镜像及其层；旧 key 永不复活。
+    pub fn destroy_image(
+        &mut self,
+        domain: DomainKey,
+        sandbox: SandboxKey,
+        key: ImageKey,
+    ) -> Result<(), SandboxStorageError> {
+        let slot = self.image_slot(domain, sandbox, key)?;
+        let record = self.images[slot].ok_or(SandboxStorageError::InvalidImage)?;
+        if record.volumes != 0 {
+            return Err(SandboxStorageError::InUse);
+        }
+        let start = record.layer_start as usize;
+        let end = start + record.layer_count as usize;
+        if self.layers.get(start..end).is_none() {
+            return Err(SandboxStorageError::InvalidImage);
+        }
+        for layer in &mut self.layers[start..end] {
+            *layer = None;
+        }
+        self.images[slot] = None;
+        Ok(())
     }
 
     /// Query an image only through its owning domain and Sandbox.
@@ -538,6 +573,19 @@ impl<const I: usize, const L: usize, const V: usize> SandboxStorageTable<I, L, V
 
     pub fn volume_count(&self) -> usize {
         self.volumes.iter().flatten().count()
+    }
+
+    /// True when destroying this Sandbox identity would orphan storage.
+    pub fn has_storage_for(&self, sandbox: SandboxKey) -> bool {
+        self.images
+            .iter()
+            .flatten()
+            .any(|image| image.sandbox == sandbox)
+            || self
+                .volumes
+                .iter()
+                .flatten()
+                .any(|volume| volume.sandbox == sandbox)
     }
 
     fn image_record(
@@ -871,5 +919,37 @@ mod tests {
         );
         assert_eq!(storage.image_count(), 1);
         assert_eq!(storage.image(domain, sandbox, image).unwrap().layers, 2);
+    }
+
+    #[test]
+    fn image_destroy_requires_volume_drain_and_reclaims_layers() {
+        let domain = domain(1);
+        let mut workloads = WorkloadTable::<2>::new();
+        let sandbox = sandbox(domain, &mut workloads);
+        let mut storage = SandboxStorageTable::<2, 4, 1>::new();
+        let image = storage
+            .add_image(domain, sandbox, spec(1), &layers())
+            .unwrap();
+        let volume = storage.create_volume(domain, sandbox, image, 8).unwrap();
+        assert_eq!(
+            storage.destroy_image(domain, sandbox, image),
+            Err(SandboxStorageError::InUse)
+        );
+        storage.destroy_volume(domain, sandbox, volume).unwrap();
+        storage.destroy_image(domain, sandbox, image).unwrap();
+        assert_eq!(storage.image_count(), 0);
+        assert_eq!(
+            storage.image(domain, sandbox, image),
+            Err(SandboxStorageError::InvalidImage)
+        );
+        assert!(!storage.has_storage_for(sandbox));
+
+        let replacement = storage
+            .add_image(domain, sandbox, spec(1), &layers())
+            .unwrap();
+        assert_eq!(
+            storage.image(domain, sandbox, replacement).unwrap().layers,
+            2
+        );
     }
 }
