@@ -82,6 +82,14 @@ pub fn snapshot_in_domain(
     Ok(snapshot)
 }
 
+/// Return the number of Process members bound to one same-domain Workload.
+///
+/// 返回同域 Workload 当前绑定的 Process 成员数。
+pub fn member_count_in_domain(domain: DomainKey, key: WorkloadKey) -> Result<u32, WorkloadError> {
+    let _ = snapshot_in_domain(domain, key)?;
+    Ok(MEMBERS.lock().count_for(key) as u32)
+}
+
 /// Request a same-domain Workload to stop. The resource-draining `Stopped`
 /// transition remains a separate lifecycle fact.
 ///

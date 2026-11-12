@@ -678,6 +678,9 @@ syscall_dispatch! {
     SYSTEM_WORKLOAD_KILL => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         workload_kill(a.args[0])
     },
+    SYSTEM_WORKLOAD_MEMBER_QUERY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        workload_member_query(a.args[0])
+    },
 }
 
 // 编译期证明：分发表在登记表之内，且两者基数相同 ⇒ 两个集合完全相等。
@@ -1078,6 +1081,23 @@ fn workload_kill(raw_key: u64) -> i64 {
     };
     match crate::workload::terminate_in_domain(domain, key) {
         Ok(()) => 0,
+        Err(error) => workload_error(error),
+    }
+}
+
+/// Return the current member count for one same-domain Workload.
+fn workload_member_query(raw_key: u64) -> i64 {
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(domain) = proc::workload_domain(pid) else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(key) = kernel_core::workload::WorkloadKey::from_raw(raw_key) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    match crate::workload::member_count_in_domain(domain, key) {
+        Ok(count) => i64::from(count),
         Err(error) => workload_error(error),
     }
 }

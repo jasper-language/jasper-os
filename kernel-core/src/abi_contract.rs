@@ -1353,6 +1353,11 @@ pub const OPERATIONS: &[OperationContract] = &[
         args: "u64:workload_key",
         result: "0_or_error",
     },
+    OperationContract {
+        name: "system.workload.member.query",
+        args: "u64:workload_key",
+        result: "i64:member_count_or_error",
+    },
 ];
 
 /// Rights 位是外部 ABI；位值变化必须产生新快照并随 ABI 版本裁决。
@@ -1507,6 +1512,10 @@ pub const SEMANTICS: &[(&str, &str)] = &[
     (
         "workload.kill",
         "same_domain_running_or_stopping;begin_exit_all_members;resources_cleaned_by_normal_exit",
+    ),
+    (
+        "workload.member.query",
+        "same_domain_only;counts_current_process_members;closed_members_are_not_observable",
     ),
 ];
 

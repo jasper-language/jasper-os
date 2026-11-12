@@ -398,6 +398,12 @@ fn member_spawn_code(base: u64, terminate: bool) -> Vec<u8> {
     test_rax(&mut code);
     js_error(&mut code, &mut patches);
 
+    imm32(&mut code, 0xb8, abi::SYSTEM_WORKLOAD_MEMBER_QUERY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    syscall(&mut code);
+    cmp_rax(&mut code, 1);
+    jne_error(&mut code, &mut patches);
+
     if terminate {
         imm32(&mut code, 0xb8, abi::SYSTEM_WORKLOAD_KILL);
         code.extend_from_slice(&[0x48, 0x89, 0xdf]);
@@ -432,6 +438,11 @@ fn member_spawn_code(base: u64, terminate: bool) -> Vec<u8> {
     syscall(&mut code);
     test_rax(&mut code);
     js_error(&mut code, &mut patches);
+    imm32(&mut code, 0xb8, abi::SYSTEM_WORKLOAD_MEMBER_QUERY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    syscall(&mut code);
+    cmp_rax(&mut code, 0);
+    jne_error(&mut code, &mut patches);
     exit(&mut code, 0);
 
     let error = code.len();
@@ -455,6 +466,7 @@ fn verify_workload_spawn(base: u64, terminate: bool) {
             abi::SYSTEM_WORKLOAD_CREATE,
             abi::SYSTEM_WORKLOAD_SPAWN,
             abi::SYSTEM_WORKLOAD_KILL,
+            abi::SYSTEM_WORKLOAD_MEMBER_QUERY,
         ])
     } else {
         SyscallSet::of(&[
@@ -463,6 +475,7 @@ fn verify_workload_spawn(base: u64, terminate: bool) {
             abi::SYSTEM_HANDLE_CLOSE,
             abi::SYSTEM_WORKLOAD_CREATE,
             abi::SYSTEM_WORKLOAD_SPAWN,
+            abi::SYSTEM_WORKLOAD_MEMBER_QUERY,
         ])
     };
     let pid = match proc::create("workload-member-spawn", calls) {
