@@ -18,7 +18,7 @@ use crate::proc;
 pub const MAX_WORKLOADS: usize = 64;
 pub const MAX_WORKLOAD_MEMBERS: usize = 256;
 
-static WORKLOADS: IrqSpinLock<WorkloadTable<MAX_WORKLOADS>> =
+pub(crate) static WORKLOADS: IrqSpinLock<WorkloadTable<MAX_WORKLOADS>> =
     IrqSpinLock::new(WorkloadTable::new());
 static MEMBERS: IrqSpinLock<WorkloadMembers<MAX_WORKLOAD_MEMBERS>> =
     IrqSpinLock::new(WorkloadMembers::new());
@@ -151,6 +151,16 @@ pub fn unbind_member(key: WorkloadKey, member: u64) -> Result<(), MembershipErro
 
 pub fn destroy(key: WorkloadKey) -> Result<(), WorkloadError> {
     let mut workloads = WORKLOADS.lock();
+    destroy_locked(&mut workloads, key)
+}
+
+/// Destroy a Workload while the caller owns the Workload table lock.
+///
+/// 调用方已持有 Workload 表锁时，执行完整的成员、资源与 CPU group 回收。
+pub(crate) fn destroy_locked(
+    workloads: &mut WorkloadTable<MAX_WORKLOADS>,
+    key: WorkloadKey,
+) -> Result<(), WorkloadError> {
     let state = workloads.snapshot(key)?;
     if !state.state.terminal() {
         return Err(WorkloadError::InvalidState);
