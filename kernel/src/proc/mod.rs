@@ -158,6 +158,9 @@ pub struct Process {
     state: ProcState,
     /// CPU 组（设置过 CPU 上限时有值；进程的全部线程受同一份上限约束，进程销毁时归还）。
     cpu_group: Option<sched::scheduler::CpuGroupId>,
+    /// Workload-bound processes borrow the group owned by the workload registry.
+    /// 绑定 Workload 的进程借用工作负载注册表持有的 CPU 组。
+    cpu_group_owned: bool,
     /// Native workload membership; quota is charged before each Task is created.
     /// 原生 Workload 归属；创建每个 Task 前先申请配额。
     workload: Option<kernel_core::workload::WorkloadKey>,
@@ -952,6 +955,7 @@ fn create_process(
         threads_total: 0,
         state: ProcState::Running,
         cpu_group: None,
+        cpu_group_owned: false,
         workload: None,
         workload_member: None,
         kill_on_release: false,
@@ -2802,6 +2806,9 @@ fn spawn_thread_mode(
 pub enum CpuLimitError {
     /// 进程不存在或已不在运行。
     NoSuchProcess,
+    /// CPU authority is owned by the bound native workload.
+    /// CPU 权限由绑定的原生 Workload 持有。
+    ManagedByWorkload,
     /// 上限不在 `1..=1000` 千分比之内，或 CPU 组表已满。
     Refused(sched::scheduler::GroupError),
 }
@@ -2813,12 +2820,21 @@ pub enum CpuLimitError {
 pub fn set_cpu_limit(pid: ObjId, limit_permille: u32) -> Result<(), CpuLimitError> {
     let existing = with_proc(pid, |p| {
         if p.state == ProcState::Running {
+            if p.workload.is_some() {
+                return Err(ProcError::Exited);
+            }
             Ok(p.cpu_group)
         } else {
             Err(ProcError::Exited)
         }
     })
-    .map_err(|_| CpuLimitError::NoSuchProcess)?;
+    .map_err(|_| {
+        if with_proc(pid, |p| Ok(p.workload.is_some())).unwrap_or(false) {
+            CpuLimitError::ManagedByWorkload
+        } else {
+            CpuLimitError::NoSuchProcess
+        }
+    })?;
     if let Some(g) = existing {
         return sched::set_cpu_group_limit(g, limit_permille).map_err(CpuLimitError::Refused);
     }
@@ -2826,6 +2842,7 @@ pub fn set_cpu_limit(pid: ObjId, limit_permille: u32) -> Result<(), CpuLimitErro
     let stored = with_proc(pid, |p| {
         if p.state == ProcState::Running && p.cpu_group.is_none() {
             p.cpu_group = Some(g);
+            p.cpu_group_owned = true;
             Ok(())
         } else {
             Err(ProcError::Exited)
@@ -2853,8 +2870,12 @@ pub fn set_cpu_limit(pid: ObjId, limit_permille: u32) -> Result<(), CpuLimitErro
 /// 将尚未创建线程的进程绑定到一个 Running 原生 Workload；成员关系和进程字段
 /// 只在两侧都成功后提交。
 pub fn bind_workload(pid: ObjId, workload: kernel_core::workload::WorkloadKey) -> bool {
+    let Ok(cpu_group) = crate::workload::cpu_group(workload) else {
+        return false;
+    };
     with_proc(pid, |process| {
         if process.workload.is_some()
+            || process.cpu_group.is_some()
             || process.threads_live != 0
             || !process.frames.is_empty()
             || !process.shared_maps.is_empty()
@@ -2872,6 +2893,8 @@ pub fn bind_workload(pid: ObjId, workload: kernel_core::workload::WorkloadKey) -
         crate::workload::bind_member(workload, pid.raw()).map_err(|_| ProcError::NoSuchProcess)?;
         process.workload = Some(workload);
         process.workload_member = Some(pid.raw());
+        process.cpu_group = Some(cpu_group);
+        process.cpu_group_owned = false;
         Ok(())
     })
     .is_ok()
@@ -3945,11 +3968,12 @@ fn destroy_process(p: Box<Process>) {
         exit_state,
         children,
         cpu_group,
+        cpu_group_owned,
         workload,
         workload_member,
         ..
     } = *p;
-    if let Some(g) = cpu_group {
+    if let Some(g) = cpu_group.filter(|_| cpu_group_owned) {
         let _ = sched::release_cpu_group(g); // 持有者引用；线程早已全部退出，组随之释放
     }
     if let Some(workload) = workload {

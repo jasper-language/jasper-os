@@ -8,6 +8,7 @@ use kernel_core::workload::{
     WorkloadSnapshot, WorkloadState, WorkloadTable,
 };
 
+use crate::sched::scheduler::CpuGroupId;
 use crate::sync::IrqSpinLock;
 
 pub const MAX_WORKLOADS: usize = 64;
@@ -17,6 +18,8 @@ static WORKLOADS: IrqSpinLock<WorkloadTable<MAX_WORKLOADS>> =
     IrqSpinLock::new(WorkloadTable::new());
 static MEMBERS: IrqSpinLock<WorkloadMembers<MAX_WORKLOAD_MEMBERS>> =
     IrqSpinLock::new(WorkloadMembers::new());
+static CPU_GROUPS: IrqSpinLock<[Option<(WorkloadKey, CpuGroupId)>; MAX_WORKLOADS]> =
+    IrqSpinLock::new([None; MAX_WORKLOADS]);
 
 pub fn create(domain: DomainKey, limits: ResourceLimits) -> Result<WorkloadKey, WorkloadError> {
     WORKLOADS.lock().create(domain, limits)
@@ -51,7 +54,33 @@ pub fn destroy(key: WorkloadKey) -> Result<(), WorkloadError> {
     if MEMBERS.lock().count_for(key) != 0 {
         return Err(WorkloadError::InvalidState);
     }
-    workloads.destroy(key)
+    let mut groups = CPU_GROUPS.lock();
+    workloads.destroy(key)?;
+    if let Some(slot) = groups
+        .iter()
+        .position(|entry| entry.is_some_and(|(owner, _)| owner == key))
+    {
+        let (_, group) = groups[slot].take().expect("checked group entry");
+        let _ = crate::sched::release_cpu_group(group);
+    }
+    Ok(())
+}
+
+pub fn cpu_group(key: WorkloadKey) -> Result<CpuGroupId, WorkloadError> {
+    let workloads = WORKLOADS.lock();
+    let limits = workloads.snapshot(key)?.limits;
+    let mut groups = CPU_GROUPS.lock();
+    if let Some((_, group)) = groups.iter().flatten().find(|(owner, _)| *owner == key) {
+        return Ok(*group);
+    }
+    let slot = groups
+        .iter()
+        .position(Option::is_none)
+        .ok_or(WorkloadError::Capacity)?;
+    let group =
+        crate::sched::create_cpu_group(limits.cpu_permille).map_err(|_| WorkloadError::Capacity)?;
+    groups[slot] = Some((key, group));
+    Ok(group)
 }
 
 pub fn reserve_thread(key: WorkloadKey) -> Result<(), WorkloadError> {
