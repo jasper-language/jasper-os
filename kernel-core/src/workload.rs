@@ -274,11 +274,18 @@ impl<const N: usize> WorkloadTable<N> {
         key: WorkloadKey,
         next: WorkloadState,
     ) -> Result<(), WorkloadError> {
-        let record = self.record_mut(key)?;
+        let record = self.record(key)?;
         if !record.state.can_transition(next) {
             return Err(WorkloadError::InvalidState);
         }
-        record.state = next;
+        // "Stopped" is an observable completion fact, not merely a request to
+        // stop. It cannot become true while resources or child workloads remain.
+        if next == WorkloadState::Stopped
+            && (record.usage != ResourceUsage::default() || record.children != 0)
+        {
+            return Err(WorkloadError::InvalidState);
+        }
+        self.record_mut(key)?.state = next;
         Ok(())
     }
 
@@ -889,6 +896,48 @@ mod tests {
         assert_eq!(table.snapshot(key).unwrap().usage, ResourceUsage::default());
         table.destroy(key).unwrap();
         assert!(table.is_empty());
+    }
+
+    #[test]
+    fn stopped_requires_resources_and_children_to_be_gone() {
+        let mut table = WorkloadTable::<2>::new();
+        let parent = table.create(DOMAIN, LIMITS).unwrap();
+        table.transition(parent, WorkloadState::Ready).unwrap();
+        table.transition(parent, WorkloadState::Running).unwrap();
+        let usage = ResourceUsage {
+            memory_bytes: 4096,
+            threads: 1,
+            ring_entries: 0,
+        };
+        table.charge(parent, usage).unwrap();
+        let child = table.create_child(parent, LIMITS).unwrap();
+        table.transition(parent, WorkloadState::Stopping).unwrap();
+
+        let before = table.snapshot(parent).unwrap();
+        assert_eq!(
+            table.transition(parent, WorkloadState::Stopped),
+            Err(WorkloadError::InvalidState)
+        );
+        assert_eq!(table.snapshot(parent).unwrap(), before);
+
+        table.release(parent, usage).unwrap();
+        assert_eq!(table.snapshot(parent).unwrap().children, 1);
+        assert_eq!(
+            table.transition(parent, WorkloadState::Stopped),
+            Err(WorkloadError::InvalidState)
+        );
+        assert_eq!(
+            table.snapshot(parent).unwrap().state,
+            WorkloadState::Stopping
+        );
+
+        table.transition(child, WorkloadState::Failed).unwrap();
+        table.destroy(child).unwrap();
+        table.transition(parent, WorkloadState::Stopped).unwrap();
+        assert_eq!(
+            table.snapshot(parent).unwrap().state,
+            WorkloadState::Stopped
+        );
     }
 
     #[test]
