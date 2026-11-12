@@ -4350,6 +4350,13 @@ fn linux_c_string(address: u64, max: usize) -> Result<alloc::vec::Vec<u8>, Compa
 fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind == compat_core::fd::CompatKind::Device {
+        let size = proc::linux_ashmem_state(pid, entry.handle)
+            .map(|(size, _, _)| size)
+            .unwrap_or(0);
+        write_synthetic_stat(args[1], entry.handle, size, 0o020666)?;
+        return Ok(0);
+    }
     let node = crate::linux_vfs::FileId::from_handle(entry.handle)
         .map(crate::linux_vfs::Node::File)
         .or_else(|| {
@@ -4380,6 +4387,13 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         Err(CompatErrno::NoEntry) if args[3] & AT_EMPTY_PATH != 0 => {
             let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
             let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+            if entry.kind == compat_core::fd::CompatKind::Device {
+                let size = proc::linux_ashmem_state(pid, entry.handle)
+                    .map(|(size, _, _)| size)
+                    .unwrap_or(0);
+                write_synthetic_stat(args[2], entry.handle, size, 0o020666)?;
+                return Ok(0);
+            }
             let node = crate::linux_vfs::FileId::from_handle(entry.handle)
                 .map(crate::linux_vfs::Node::File)
                 .or_else(|| {
@@ -4504,6 +4518,13 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         Err(CompatErrno::NoEntry) if args[2] & AT_EMPTY_PATH != 0 => {
             let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
             let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+            if entry.kind == compat_core::fd::CompatKind::Device {
+                let size = proc::linux_ashmem_state(pid, entry.handle)
+                    .map(|(size, _, _)| size)
+                    .unwrap_or(0);
+                write_synthetic_statx(args[4], entry.handle, size, 0o020666)?;
+                return Ok(0);
+            }
             if let Some(file) = crate::linux_vfs::FileId::from_handle(entry.handle) {
                 (
                     crate::linux_vfs::Node::File(file),
@@ -5060,18 +5081,46 @@ fn linux_rt_sigprocmask(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
 /// 写入 144 字节、版本稳定的 x86_64 stat；时间和设备字段只表达当前虚拟快照，
 /// 不伪造宿主设备身份。
 fn write_linux_stat(address: u64, node: crate::linux_vfs::Node) -> Result<(), CompatErrno> {
+    let (size, _, mode) = node.stat_metadata();
+    write_synthetic_stat(address, node.inode(), size, mode)?;
+    Ok(())
+}
+
+/// Writes x86_64 `stat` for one synthetic file or device identity.
+fn write_synthetic_stat(
+    address: u64,
+    inode: u64,
+    size: u64,
+    mode: u32,
+) -> Result<(), CompatErrno> {
     const STAT_BYTES: usize = 144;
-    let (size, links, mode) = node.stat_metadata();
     let mut stat = [0u8; STAT_BYTES];
     stat[0..8].copy_from_slice(&1u64.to_le_bytes()); // st_dev
-    stat[8..16].copy_from_slice(&node.inode().to_le_bytes()); // st_ino
-    stat[16..24].copy_from_slice(&links.to_le_bytes());
+    stat[8..16].copy_from_slice(&inode.to_le_bytes()); // st_ino
+    stat[16..24].copy_from_slice(&1u64.to_le_bytes());
     stat[24..28].copy_from_slice(&mode.to_le_bytes());
     stat[48..56].copy_from_slice(&size.to_le_bytes());
     stat[56..64].copy_from_slice(&4096i64.to_le_bytes());
     let blocks = size.div_ceil(512) as i64;
     stat[64..72].copy_from_slice(&blocks.to_le_bytes());
     copy_to_user(address, &stat, STAT_BYTES).map_err(|_| CompatErrno::Fault)
+}
+
+fn write_synthetic_statx(
+    address: u64,
+    inode: u64,
+    size: u64,
+    mode: u32,
+) -> Result<(), CompatErrno> {
+    let mut output = [0u8; 256];
+    output[0..4].copy_from_slice(&0x71fu32.to_le_bytes());
+    output[4..8].copy_from_slice(&4096u32.to_le_bytes());
+    output[16..20].copy_from_slice(&1u32.to_le_bytes());
+    output[28..30].copy_from_slice(&(mode as u16).to_le_bytes());
+    output[32..40].copy_from_slice(&inode.to_le_bytes());
+    output[40..48].copy_from_slice(&size.to_le_bytes());
+    output[48..56].copy_from_slice(&size.div_ceil(512).to_le_bytes());
+    copy_to_user(address, &output, output.len()).map_err(|_| CompatErrno::Fault)
 }
 
 /// Applies Linux `brk(2)` to the process compatibility heap.
