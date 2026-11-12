@@ -102,6 +102,8 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Shutdown,
         LinuxSyscall::GetSockName,
         LinuxSyscall::GetPeerName,
+        LinuxSyscall::GetSockOpt,
+        LinuxSyscall::SetSockOpt,
         LinuxSyscall::Chdir,
         LinuxSyscall::OpenAt,
         LinuxSyscall::Fchdir,

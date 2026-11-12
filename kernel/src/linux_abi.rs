@@ -1428,6 +1428,8 @@ fn execute(
         LinuxSyscall::Shutdown => compat_result(linux_shutdown(pid, call.args)),
         LinuxSyscall::GetSockName => compat_result(linux_sockname(pid, call.args, false)),
         LinuxSyscall::GetPeerName => compat_result(linux_sockname(pid, call.args, true)),
+        LinuxSyscall::GetSockOpt => compat_result(linux_getsockopt(pid, call.args)),
+        LinuxSyscall::SetSockOpt => compat_result(linux_setsockopt(pid, call.args)),
         LinuxSyscall::Chdir => compat_result(linux_chdir(pid, call.args[0])),
         LinuxSyscall::OpenAt => compat_result(linux_openat(pid, call.args)),
         LinuxSyscall::Fchdir => compat_result(linux_fchdir(pid, call.args[0])),
@@ -3605,6 +3607,103 @@ fn linux_sockname(pid: ObjId, args: [u64; 6], peer: bool) -> Result<u64, CompatE
             .unwrap_or_else(compat_core::UnixSocketName::empty)
     };
     write_unix_sockaddr(args[1], args[2], name)?;
+    Ok(0)
+}
+
+/// Implements the bounded SOL_SOCKET `getsockopt(2)` identity surface.
+fn linux_getsockopt(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SOL_SOCKET: u64 = 1;
+    const SO_TYPE: u64 = 3;
+    const SO_ERROR: u64 = 4;
+    const SO_PASSCRED: u64 = 16;
+    const SO_PEERCRED: u64 = 17;
+    const SO_ACCEPTCONN: u64 = 30;
+    const SO_PROTOCOL: u64 = 38;
+    const SO_DOMAIN: u64 = 39;
+    const SO_PASSCRED_ENABLED: u32 = 1;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    if args[1] != SOL_SOCKET {
+        return Err(CompatErrno::NoProtocolOption);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Socket {
+        return Err(CompatErrno::NotSocket);
+    }
+    let value = match args[2] {
+        SO_TYPE => (1i32).to_le_bytes().to_vec(),
+        SO_ERROR => (0i32).to_le_bytes().to_vec(),
+        SO_PASSCRED => {
+            let flags = proc::linux_socket_option_flags(pid, entry.handle)
+                .ok_or(CompatErrno::NotSocket)?;
+            (i32::from(flags & SO_PASSCRED_ENABLED != 0)).to_le_bytes().to_vec()
+        }
+        SO_PEERCRED => {
+            let endpoint = proc::linux_socket_endpoint(pid, entry.handle)
+                .ok_or(CompatErrno::NotSocket)?;
+            if !endpoint.is_connected() {
+                return Err(CompatErrno::NotConnected);
+            }
+            let credentials = endpoint.peer_credentials().ok_or(CompatErrno::NotConnected)?;
+            let mut output = [0u8; 12];
+            output[0..4].copy_from_slice(&(credentials.pid as i32).to_le_bytes());
+            output[4..8].copy_from_slice(&credentials.uid.to_le_bytes());
+            output[8..12].copy_from_slice(&credentials.gid.to_le_bytes());
+            output.to_vec()
+        }
+        SO_ACCEPTCONN => {
+            let listening =
+                proc::linux_socket_is_listening(pid, entry.handle).ok_or(CompatErrno::NotSocket)?;
+            (i32::from(listening)).to_le_bytes().to_vec()
+        }
+        SO_PROTOCOL => (0i32).to_le_bytes().to_vec(),
+        SO_DOMAIN => (1i32).to_le_bytes().to_vec(),
+        _ => return Err(CompatErrno::NoProtocolOption),
+    };
+    let mut raw_length = [0u8; 4];
+    copy_from_user(&mut raw_length, args[4], 4).map_err(|_| CompatErrno::Fault)?;
+    let capacity = u32::from_le_bytes(raw_length) as usize;
+    let copied = capacity.min(value.len());
+    if copied != 0 {
+        copy_to_user(args[3], &value[..copied], copied).map_err(|_| CompatErrno::Fault)?;
+    }
+    copy_to_user(args[4], &(value.len() as u32).to_le_bytes(), 4)
+        .map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Implements the currently supported SOL_SOCKET `setsockopt(2)` options.
+fn linux_setsockopt(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SOL_SOCKET: u64 = 1;
+    const SO_PASSCRED: u64 = 16;
+    const SO_PASSCRED_ENABLED: u32 = 1;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    if args[1] != SOL_SOCKET || args[2] != SO_PASSCRED {
+        return Err(CompatErrno::NoProtocolOption);
+    }
+    let length = usize::try_from(args[4]).map_err(|_| CompatErrno::Invalid)?;
+    if length < 4 {
+        return Err(CompatErrno::Invalid);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Socket {
+        return Err(CompatErrno::NotSocket);
+    }
+    let mut raw = [0u8; 4];
+    copy_from_user(&mut raw, args[3], 4).map_err(|_| CompatErrno::Fault)?;
+    let enabled = i32::from_le_bytes(raw);
+    if !matches!(enabled, 0 | 1) {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut flags =
+        proc::linux_socket_option_flags(pid, entry.handle).ok_or(CompatErrno::NotSocket)?;
+    if enabled != 0 {
+        flags |= SO_PASSCRED_ENABLED;
+    } else {
+        flags &= !SO_PASSCRED_ENABLED;
+    }
+    if !proc::linux_set_socket_option_flags(pid, entry.handle, flags) {
+        return Err(CompatErrno::NotSocket);
+    }
     Ok(0)
 }
 

@@ -152,6 +152,7 @@ struct LinuxSocketControlQueue {
 struct LinuxSocketControls {
     rx: SpinLock<Option<Arc<LinuxSocketControlQueue>>>,
     tx: SpinLock<Option<Arc<LinuxSocketControlQueue>>>,
+    flags: AtomicU32,
 }
 
 impl LinuxSocketControls {
@@ -159,6 +160,7 @@ impl LinuxSocketControls {
         Arc::new(Self {
             rx: SpinLock::new(None),
             tx: SpinLock::new(None),
+            flags: AtomicU32::new(0),
         })
     }
 
@@ -215,6 +217,7 @@ struct PendingSocketConnection {
 #[cfg(feature = "linux-abi")]
 struct UnixListener {
     name: compat_core::UnixSocketName,
+    owner: compat_core::UnixCredentials,
     listening: AtomicU32,
     backlog: AtomicU32,
     pending: SpinLock<VecDeque<PendingSocketConnection>>,
@@ -727,6 +730,13 @@ pub(crate) fn linux_socketpair(
         let second_handle = first_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
         linux.next_socket_handle = second_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
         let (first, second) = compat_core::UnixSocketEndpoint::pair();
+        let credentials = compat_core::UnixCredentials {
+            pid: linux.pid,
+            uid: compat_core::syscall::LINUX_COMPAT_UID as u32,
+            gid: compat_core::syscall::LINUX_COMPAT_GID as u32,
+        };
+        let _ = first.set_credentials(credentials, credentials);
+        let _ = second.set_credentials(credentials, credentials);
         let (first_controls, second_controls) = LinuxSocketControls::pair();
         let rights = kernel_core::object::Rights::READ.union(kernel_core::object::Rights::WRITE);
         let first_fd = linux
@@ -860,6 +870,11 @@ pub(crate) fn linux_socket_bind(
                 .map_err(|_| LinuxSocketError::NoSpace)?;
             let listener = Arc::new(UnixListener {
                 name,
+                owner: compat_core::UnixCredentials {
+                    pid: linux.pid,
+                    uid: compat_core::syscall::LINUX_COMPAT_UID as u32,
+                    gid: compat_core::syscall::LINUX_COMPAT_GID as u32,
+                },
                 listening: AtomicU32::new(0),
                 backlog: AtomicU32::new(1),
                 pending: SpinLock::new(VecDeque::new()),
@@ -959,6 +974,18 @@ pub(crate) fn linux_socket_connect(
                 return Err(LinuxSocketError::Invalid);
             }
             if !socket.endpoint.set_names(local_name, name) || !accepted.set_names(name, local_name)
+            {
+                return Err(LinuxSocketError::Invalid);
+            }
+            let client_credentials = compat_core::UnixCredentials {
+                pid: linux.pid,
+                uid: compat_core::syscall::LINUX_COMPAT_UID as u32,
+                gid: compat_core::syscall::LINUX_COMPAT_GID as u32,
+            };
+            if !socket
+                .endpoint
+                .set_credentials(client_credentials, listener.owner)
+                || !accepted.set_credentials(listener.owner, client_credentials)
             {
                 return Err(LinuxSocketError::Invalid);
             }
@@ -1080,6 +1107,62 @@ pub(crate) fn linux_socket_endpoint(
             .iter()
             .find(|socket| socket.handle == handle)
             .map(|socket| Arc::clone(&socket.endpoint)),
+        _ => None,
+    })
+}
+
+/// Returns the per-socket compatibility option flags.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_option_flags(pid: ObjId, handle: u64) -> Option<u32> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .sockets
+            .iter()
+            .find(|socket| socket.handle == handle)
+            .map(|socket| socket.controls.flags.load(Ordering::Acquire)),
+        _ => None,
+    })
+}
+
+/// Updates the per-socket compatibility option flags.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_set_socket_option_flags(pid: ObjId, handle: u64, flags: u32) -> bool {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()
+            .and_then(|linux| {
+                linux
+                    .sockets
+                    .iter()
+                    .find(|socket| socket.handle == handle)
+            })
+            .is_some_and(|socket| {
+                socket.controls.flags.store(flags, Ordering::Release);
+                true
+            }),
+        _ => false,
+    })
+}
+
+/// Reports whether one socket accepts connections.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_is_listening(pid: ObjId, handle: u64) -> Option<bool> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .sockets
+            .iter()
+            .find(|socket| socket.handle == handle)
+            .map(|socket| {
+                socket
+                    .listener
+                    .as_ref()
+                    .is_some_and(|listener| listener.listening.load(Ordering::Acquire) != 0)
+            }),
         _ => None,
     })
 }

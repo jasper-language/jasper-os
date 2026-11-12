@@ -10,6 +10,13 @@ pub const PIPE_CAPACITY: usize = 64 * 1024;
 pub const PIPE_BUF: usize = 4096;
 pub const UNIX_SOCKET_NAME_MAX: usize = 108;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UnixCredentials {
+    pub pid: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeRead {
     Data(usize),
@@ -83,6 +90,7 @@ struct SocketLink {
 
 struct SocketIdentity {
     names: SpinLock<SocketNames>,
+    credentials: SpinLock<[UnixCredentials; 2]>,
     first: AtomicU32,
     second: AtomicU32,
 }
@@ -196,6 +204,31 @@ impl UnixSocketEndpoint {
             names.second
         } else {
             names.first
+        })
+    }
+
+    pub fn set_credentials(&self, local: UnixCredentials, peer: UnixCredentials) -> bool {
+        let Some(identity) = self.identity() else {
+            return false;
+        };
+        let mut credentials = identity.credentials.lock();
+        if self.is_first() {
+            credentials[0] = local;
+            credentials[1] = peer;
+        } else {
+            credentials[1] = local;
+            credentials[0] = peer;
+        }
+        true
+    }
+
+    pub fn peer_credentials(&self) -> Option<UnixCredentials> {
+        let identity = self.identity()?;
+        let credentials = identity.credentials.lock();
+        Some(if self.is_first() {
+            credentials[1]
+        } else {
+            credentials[0]
         })
     }
 
@@ -329,6 +362,7 @@ impl SocketIdentity {
                 first: UnixSocketName::empty(),
                 second: UnixSocketName::empty(),
             }),
+            credentials: SpinLock::new([UnixCredentials::default(); 2]),
             first: AtomicU32::new(0),
             second: AtomicU32::new(0),
         }
@@ -530,6 +564,20 @@ mod tests {
         ));
         assert_eq!(client.peer_name().unwrap().as_bytes(), b"srv");
         assert_eq!(server.local_name().unwrap().as_bytes(), b"srv");
+        let client_cred = UnixCredentials {
+            pid: 11,
+            uid: 12,
+            gid: 13,
+        };
+        let server_cred = UnixCredentials {
+            pid: 21,
+            uid: 22,
+            gid: 23,
+        };
+        assert!(client.set_credentials(client_cred, server_cred));
+        assert!(server.set_credentials(server_cred, client_cred));
+        assert_eq!(client.peer_credentials(), Some(server_cred));
+        assert_eq!(server.peer_credentials(), Some(client_cred));
         assert_eq!(client.write(b"x"), PipeWrite::Data(1));
         assert_eq!(server.read(&mut [0; 1]), PipeRead::Data(1));
     }

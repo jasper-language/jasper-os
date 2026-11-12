@@ -253,6 +253,7 @@ int main(void) {
         listen(listener, 2) != 0) {
         return 107;
     }
+    pid_t named_parent_pid = getpid();
     pid_t named_child = fork();
     if (named_child < 0) {
         return 108;
@@ -261,7 +262,32 @@ int main(void) {
         int client = socket(AF_UNIX, SOCK_STREAM, 0);
         if (client < 0 ||
             connect(client, (struct sockaddr *)&named_address,
-                    named_length) != 0 ||
+                    named_length) != 0) {
+            _exit(134);
+        }
+        struct ucred peer_cred;
+        socklen_t peer_cred_len = sizeof(peer_cred);
+        int socket_type = 0;
+        socklen_t socket_type_len = sizeof(socket_type);
+        int passcred = 1;
+        int passcred_result = 0;
+        socklen_t passcred_result_len = sizeof(passcred_result);
+        if (getsockopt(client, SOL_SOCKET, SO_PEERCRED, &peer_cred,
+                       &peer_cred_len) != 0 ||
+            peer_cred_len != sizeof(peer_cred) ||
+            peer_cred.pid != named_parent_pid || peer_cred.uid != 0 ||
+            peer_cred.gid != 0 ||
+            getsockopt(client, SOL_SOCKET, SO_TYPE, &socket_type,
+                       &socket_type_len) != 0 ||
+            socket_type != SOCK_STREAM ||
+            setsockopt(client, SOL_SOCKET, SO_PASSCRED, &passcred,
+                       sizeof(passcred)) != 0 ||
+            getsockopt(client, SOL_SOCKET, SO_PASSCRED, &passcred_result,
+                       &passcred_result_len) != 0 ||
+            passcred_result != 1) {
+            _exit(135);
+        }
+        if (
             send(client, "hello", 5, MSG_NOSIGNAL) != 5 ||
             recv(client, blocking_bytes, 5, 0) != 5 ||
             memcmp(blocking_bytes, "world", 5) != 0) {
@@ -296,6 +322,16 @@ int main(void) {
         memcmp(blocking_bytes, "hello", 5) != 0 ||
         send(accepted, "world", 5, MSG_NOSIGNAL) != 5) {
         return 112;
+    }
+    struct ucred accepted_peer_cred;
+    socklen_t accepted_peer_cred_len = sizeof(accepted_peer_cred);
+    if (
+        getsockopt(accepted, SOL_SOCKET, SO_PEERCRED, &accepted_peer_cred,
+                   &accepted_peer_cred_len) != 0 ||
+        accepted_peer_cred_len != sizeof(accepted_peer_cred) ||
+        accepted_peer_cred.pid != named_child ||
+        accepted_peer_cred.uid != 0 || accepted_peer_cred.gid != 0) {
+        return 136;
     }
     socklen_t accepted_name_length = sizeof(peer_address);
     if (getsockname(accepted, (struct sockaddr *)&peer_address,
