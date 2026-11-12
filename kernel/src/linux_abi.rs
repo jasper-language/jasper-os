@@ -1444,6 +1444,10 @@ fn execute(
         LinuxSyscall::Fchdir => compat_result(linux_fchdir(pid, call.args[0])),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
         LinuxSyscall::Fstatfs => compat_result(linux_fstatfs(pid, call.args)),
+        LinuxSyscall::Fsync => compat_result(linux_sync_fd(pid, call.args[0], false)),
+        LinuxSyscall::Fdatasync => compat_result(linux_sync_fd(pid, call.args[0], true)),
+        LinuxSyscall::Sync => 0,
+        LinuxSyscall::Syncfs => compat_result(linux_syncfs(pid, call.args[0])),
         LinuxSyscall::NewFstatAt => compat_result(linux_newfstatat(pid, call.args)),
         LinuxSyscall::Statx => compat_result(linux_statx(pid, call.args)),
         LinuxSyscall::Fcntl => compat_result(linux_fcntl(pid, call.args)),
@@ -1457,6 +1461,8 @@ fn execute(
         LinuxSyscall::Mmap => compat_result(linux_mmap(pid, call.args)),
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
+        LinuxSyscall::Msync => compat_result(linux_msync(pid, call.args)),
+        LinuxSyscall::MinCore => compat_result(linux_mincore(pid, call.args)),
         LinuxSyscall::Madvise => compat_result(linux_madvise(pid, call.args)),
         LinuxSyscall::Clone => compat_result(linux_clone(pid, call.args, user_ip, user_preserved)),
         LinuxSyscall::Clone3 => {
@@ -2278,6 +2284,67 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         args[2] & PROT_EXEC != 0,
     )
     .map_err(|_| CompatErrno::NoMemory)?;
+    Ok(0)
+}
+
+fn linux_msync(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    const MS_ASYNC: u64 = 0x1;
+    const MS_INVALIDATE: u64 = 0x2;
+    const MS_SYNC: u64 = 0x4;
+    let address = args[0];
+    let length = args[1];
+    let flags = args[2];
+    let mode = flags & (MS_ASYNC | MS_SYNC);
+    if address % PAGE != 0
+        || length == 0
+        || flags & !(MS_ASYNC | MS_INVALIDATE | MS_SYNC) != 0
+        || (mode != MS_ASYNC && mode != MS_SYNC)
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let end = address.checked_add(length).ok_or(CompatErrno::Invalid)?;
+    if address < crate::arch::USER_WINDOW.0 || end > crate::arch::USER_WINDOW.1 {
+        return Err(CompatErrno::NoMemory);
+    }
+    let rounded = length.checked_add(PAGE - 1).ok_or(CompatErrno::Invalid)? & !(PAGE - 1);
+    let end = address.checked_add(rounded).ok_or(CompatErrno::Invalid)?;
+    let mut page = address;
+    while page < end {
+        if proc::page_flags(pid, page).is_none() {
+            return Err(CompatErrno::NoMemory);
+        }
+        page += PAGE;
+    }
+    Ok(0)
+}
+
+fn linux_mincore(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    let address = args[0];
+    let length = args[1];
+    if address % PAGE != 0 || length == 0 || args[2] == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let rounded = length.checked_add(PAGE - 1).ok_or(CompatErrno::Invalid)? & !(PAGE - 1);
+    let end = address
+        .checked_add(rounded)
+        .filter(|end| address >= crate::arch::USER_WINDOW.0 && *end <= crate::arch::USER_WINDOW.1)
+        .ok_or(CompatErrno::NoMemory)?;
+    let pages = rounded / PAGE;
+    let mut residency = alloc::vec::Vec::new();
+    residency
+        .try_reserve(pages as usize)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    let mut page = address;
+    while page < end {
+        if proc::page_flags(pid, page).is_none() {
+            return Err(CompatErrno::NoMemory);
+        }
+        residency.push(1);
+        page += PAGE;
+    }
+    copy_to_user(args[2], &residency, residency.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
 }
 
@@ -5153,6 +5220,9 @@ fn linux_fstatfs(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             file.bytes().len() as u64
         }
         compat_core::fd::CompatKind::Directory => 4096,
+        compat_core::fd::CompatKind::Device => proc::linux_ashmem_state(pid, entry.handle)
+            .map(|(size, _, _)| size)
+            .unwrap_or(0),
         _ => return Err(CompatErrno::BadFd),
     };
     write_linux_statfs(args[1], size)
@@ -5173,6 +5243,19 @@ fn write_linux_statfs(address: u64, size: u64) -> Result<u64, CompatErrno> {
     statfs[72..80].copy_from_slice(&4096u64.to_le_bytes());
     copy_to_user(address, &statfs, statfs.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
+}
+
+fn linux_sync_fd(pid: ObjId, raw_fd: u64, _data_only: bool) -> Result<u64, CompatErrno> {
+    let fd = u32::try_from(raw_fd).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    match entry.kind {
+        compat_core::fd::CompatKind::File | compat_core::fd::CompatKind::Directory => Ok(0),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+fn linux_syncfs(pid: ObjId, raw_fd: u64) -> Result<u64, CompatErrno> {
+    linux_sync_fd(pid, raw_fd, false)
 }
 
 /// Implements `readlink(2)` for `/proc/self/exe`.
