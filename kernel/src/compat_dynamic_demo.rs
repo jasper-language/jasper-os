@@ -88,6 +88,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Dup2,
         LinuxSyscall::Dup3,
         LinuxSyscall::Pipe2,
+        LinuxSyscall::SocketPair,
         LinuxSyscall::Chdir,
         LinuxSyscall::OpenAt,
         LinuxSyscall::Fchdir,

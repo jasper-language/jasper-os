@@ -64,6 +64,8 @@ static LINUX_PID_NEXT: AtomicU32 = AtomicU32::new(1);
 pub(crate) const LINUX_CONSOLE_HANDLE: u64 = u64::MAX;
 #[cfg(feature = "linux-abi")]
 const LINUX_PIPE_HANDLE_BASE: u64 = 0x0000_8000_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_SOCKET_HANDLE_BASE: u64 = 0x0000_8100_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -88,6 +90,8 @@ struct LinuxProcessState {
     mappings: Vec<LinuxMapping>,
     pipes: Vec<LinuxPipeHandle>,
     next_pipe_handle: u64,
+    sockets: Vec<LinuxSocketHandle>,
+    next_socket_handle: u64,
     /// Set only on the child side of vfork. The parent task sleeps until the
     /// child commits exec or leaves `Running`.
     /// 仅 vfork 子进程携带；父任务睡眠到子进程提交 exec 或离开 Running。
@@ -106,6 +110,13 @@ struct LinuxMapping {
 struct LinuxPipeHandle {
     handle: u64,
     endpoint: Arc<compat_core::PipeEndpoint>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxSocketHandle {
+    handle: u64,
+    endpoint: Arc<compat_core::UnixSocketEndpoint>,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -574,6 +585,68 @@ pub(crate) fn linux_pipe2(
     .ok()
 }
 
+/// Creates a connected AF_UNIX stream pair with two socket descriptors.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socketpair(
+    pid: ObjId,
+    close_on_exec: bool,
+    nonblocking: bool,
+) -> Option<(u32, u32)> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.sockets.len() >= 32 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        let first_handle = linux.next_socket_handle;
+        let second_handle = first_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        linux.next_socket_handle =
+            second_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let (first, second) = compat_core::UnixSocketEndpoint::pair();
+        let rights = kernel_core::object::Rights::READ.union(kernel_core::object::Rights::WRITE);
+        let first_fd = linux
+            .fds
+            .install(
+                first_handle,
+                rights,
+                compat_core::fd::CompatKind::Socket,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let second_fd = match linux.fds.install(
+            second_handle,
+            rights,
+            compat_core::fd::CompatKind::Socket,
+            close_on_exec,
+        ) {
+            Ok(fd) => fd,
+            Err(_) => {
+                let _ = linux.fds.close(first_fd);
+                return Err(ProcError::NoTaskSlot);
+            }
+        };
+        if nonblocking {
+            const O_NONBLOCK: u32 = 0x800;
+            if !linux.fds.set_fd_status_flags(first_fd.fd(), O_NONBLOCK)
+                || !linux.fds.set_fd_status_flags(second_fd.fd(), O_NONBLOCK)
+            {
+                let _ = linux.fds.close(first_fd);
+                let _ = linux.fds.close(second_fd);
+                return Err(ProcError::NoTaskSlot);
+            }
+        }
+        linux.sockets.push(LinuxSocketHandle {
+            handle: first_handle,
+            endpoint: Arc::new(first),
+        });
+        linux.sockets.push(LinuxSocketHandle {
+            handle: second_handle,
+            endpoint: Arc::new(second),
+        });
+        Ok((first_fd.fd(), second_fd.fd()))
+    })
+    .ok()
+}
+
 /// Resolves one pipe endpoint without incrementing its process-lifetime reference.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_pipe_endpoint(
@@ -588,6 +661,24 @@ pub(crate) fn linux_pipe_endpoint(
             .iter()
             .find(|pipe| pipe.handle == handle)
             .map(|pipe| Arc::clone(&pipe.endpoint)),
+        _ => None,
+    })
+}
+
+/// Resolves one AF_UNIX stream endpoint without changing its lifetime.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_endpoint(
+    pid: ObjId,
+    handle: u64,
+) -> Option<Arc<compat_core::UnixSocketEndpoint>> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .sockets
+            .iter()
+            .find(|socket| socket.handle == handle)
+            .map(|socket| Arc::clone(&socket.endpoint)),
         _ => None,
     })
 }
@@ -619,6 +710,9 @@ pub(crate) fn linux_set_fd_status_flags(pid: ObjId, fd: u32, flags: u32) -> bool
 fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     if handle >= LINUX_PIPE_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.pipes.retain(|pipe| pipe.handle != handle);
+    }
+    if handle >= LINUX_SOCKET_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+        linux.sockets.retain(|socket| socket.handle != handle);
     }
 }
 
@@ -962,6 +1056,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         mappings: Vec::new(),
         pipes: Vec::new(),
         next_pipe_handle: LINUX_PIPE_HANDLE_BASE,
+        sockets: Vec::new(),
+        next_socket_handle: LINUX_SOCKET_HANDLE_BASE,
         vfork_parent: None,
     };
     create_process(name, SyscallSet::EMPTY, move |process| {
@@ -989,6 +1085,9 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
             linux
                 .pipes
                 .retain(|pipe| linux.fds.handle_fd_count(pipe.handle) != 0);
+            linux
+                .sockets
+                .retain(|socket| linux.fds.handle_fd_count(socket.handle) != 0);
             linux.mappings.clear();
             linux.brk = crate::arch::USER_WINDOW.0 + 0x1000_0000;
             linux.mmap_next = crate::arch::USER_WINDOW.0 + 0x4000_0000;
@@ -3701,6 +3800,7 @@ fn release_resources_in(t: &mut kobj::Table, pid: ObjId) -> usize {
             if let Some(linux) = p.linux.as_mut() {
                 let _ = linux.fds.take_all();
                 linux.pipes.clear();
+                linux.sockets.clear();
             }
             n
         }

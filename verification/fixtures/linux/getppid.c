@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/random.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/syscall.h>
@@ -191,6 +192,30 @@ int main(void) {
     if (write(broken_pipe[1], "x", 1) != -1 || errno != EPIPE ||
         close(broken_pipe[1]) != 0) {
         return 100;
+    }
+    int socket_fds[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+                   0, socket_fds) != 0 ||
+        (fcntl(socket_fds[0], F_GETFL) & O_NONBLOCK) == 0 ||
+        (fcntl(socket_fds[1], F_GETFL) & O_NONBLOCK) == 0) {
+        return 101;
+    }
+    if (write(socket_fds[0], "a2b", 3) != 3 ||
+        read(socket_fds[1], blocking_bytes, 3) != 3 ||
+        memcmp(blocking_bytes, "a2b", 3) != 0 ||
+        write(socket_fds[1], "b2a", 3) != 3 ||
+        read(socket_fds[0], blocking_bytes, 3) != 3 ||
+        memcmp(blocking_bytes, "b2a", 3) != 0) {
+        return 102;
+    }
+    if (close(socket_fds[1]) != 0 ||
+        read(socket_fds[0], blocking_bytes, 1) != 0) {
+        return 103;
+    }
+    errno = 0;
+    if (write(socket_fds[0], "x", 1) != -1 || errno != EPIPE ||
+        close(socket_fds[0]) != 0) {
+        return 104;
     }
     cpu_set_t cpus;
     CPU_ZERO(&cpus);

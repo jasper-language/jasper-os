@@ -1414,6 +1414,7 @@ fn execute(
         LinuxSyscall::Dup2 => compat_result(linux_dup2(pid, call.args)),
         LinuxSyscall::Dup3 => compat_result(linux_dup3(pid, call.args)),
         LinuxSyscall::Pipe2 => compat_result(linux_pipe2(pid, call.args)),
+        LinuxSyscall::SocketPair => compat_result(linux_socketpair(pid, call.args)),
         LinuxSyscall::Chdir => compat_result(linux_chdir(pid, call.args[0])),
         LinuxSyscall::OpenAt => compat_result(linux_openat(pid, call.args)),
         LinuxSyscall::Fchdir => compat_result(linux_fchdir(pid, call.args[0])),
@@ -1532,6 +1533,12 @@ fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 return Err(CompatErrno::BadFd);
             }
             return linux_pipe_write(pid, fd, entry.handle, args[1], len);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Socket {
+            if !entry.rights.contains(kernel_core::object::Rights::WRITE) {
+                return Err(CompatErrno::BadFd);
+            }
+            return linux_socket_write(pid, fd, entry.handle, args[1], len);
         }
     }
     authorize_console(pid, fd, true)?;
@@ -1705,6 +1712,12 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 return Err(CompatErrno::BadFd);
             }
             return linux_pipe_read(pid, fd, entry.handle, args[1], len);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Socket {
+            if !entry.rights.contains(kernel_core::object::Rights::READ) {
+                return Err(CompatErrno::BadFd);
+            }
+            return linux_socket_read(pid, fd, entry.handle, args[1], len);
         }
     }
     if fd == 0 {
@@ -2957,6 +2970,39 @@ fn linux_pipe2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(0)
 }
 
+/// Implements the x86_64 `socketpair(2)` AF_UNIX stream subset.
+fn linux_socketpair(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const AF_UNIX: u64 = 1;
+    const SOCK_STREAM: u64 = 1;
+    const SOCK_NONBLOCK: u64 = 0x800;
+    const SOCK_CLOEXEC: u64 = 0x80000;
+    let domain = args[0];
+    let socket_type = args[1];
+    let protocol = args[2];
+    if domain != AF_UNIX
+        || socket_type & 0xf != SOCK_STREAM
+        || socket_type & !(0xf | SOCK_NONBLOCK | SOCK_CLOEXEC) != 0
+        || protocol != 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let (first, second) = proc::linux_socketpair(
+        pid,
+        socket_type & SOCK_CLOEXEC != 0,
+        socket_type & SOCK_NONBLOCK != 0,
+    )
+    .ok_or(CompatErrno::NoSpace)?;
+    let mut output = [0u8; 8];
+    output[0..4].copy_from_slice(&first.to_le_bytes());
+    output[4..8].copy_from_slice(&second.to_le_bytes());
+    if copy_to_user(args[3], &output, output.len()).is_err() {
+        let _ = proc::linux_close_fd(pid, first);
+        let _ = proc::linux_close_fd(pid, second);
+        return Err(CompatErrno::Fault);
+    }
+    Ok(0)
+}
+
 /// Reads a pipe using blocking or nonblocking descriptior status.
 fn linux_pipe_read(
     pid: ObjId,
@@ -3020,6 +3066,91 @@ fn linux_pipe_write(
                 raise_sigpipe(pid);
                 return Err(CompatErrno::BrokenPipe);
             }
+            compat_core::PipeWrite::Data(count) => written += count,
+            compat_core::PipeWrite::Broken => {
+                raise_sigpipe(pid);
+                return Err(CompatErrno::BrokenPipe);
+            }
+            compat_core::PipeWrite::WouldBlock if nonblocking => {
+                return if written == 0 {
+                    Err(CompatErrno::TryAgain)
+                } else {
+                    Ok(written as u64)
+                }
+            }
+            compat_core::PipeWrite::WouldBlock => {
+                if proc::current_exiting() || current_signal_pending(pid) {
+                    return if written == 0 {
+                        Err(CompatErrno::Interrupted)
+                    } else {
+                        Ok(written as u64)
+                    };
+                }
+                sched::pause();
+            }
+        }
+    }
+    Ok(written as u64)
+}
+
+/// Reads one connected AF_UNIX stream endpoint.
+fn linux_socket_read(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    address: u64,
+    len: usize,
+) -> Result<u64, CompatErrno> {
+    if len == 0 {
+        return Ok(0);
+    }
+    let endpoint = proc::linux_socket_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking =
+        proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    let mut output = alloc::vec![0u8; len];
+    loop {
+        match endpoint.read(&mut output) {
+            compat_core::PipeRead::Data(count) => {
+                copy_to_user(address, &output[..count], count)
+                    .map_err(|_| CompatErrno::Fault)?;
+                return Ok(count as u64);
+            }
+            compat_core::PipeRead::Eof => return Ok(0),
+            compat_core::PipeRead::WouldBlock if nonblocking => {
+                return Err(CompatErrno::TryAgain)
+            }
+            compat_core::PipeRead::WouldBlock => {
+                if proc::current_exiting() || current_signal_pending(pid) {
+                    return Err(CompatErrno::Interrupted);
+                }
+                sched::pause();
+            }
+        }
+    }
+}
+
+/// Writes one connected AF_UNIX stream endpoint.
+fn linux_socket_write(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    address: u64,
+    len: usize,
+) -> Result<u64, CompatErrno> {
+    if len == 0 {
+        return Ok(0);
+    }
+    if len > compat_core::PIPE_CAPACITY {
+        return Err(CompatErrno::Invalid);
+    }
+    let endpoint = proc::linux_socket_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking =
+        proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    let mut input = alloc::vec![0u8; len];
+    copy_from_user(&mut input, address, len).map_err(|_| CompatErrno::Fault)?;
+    let mut written = 0usize;
+    while written < input.len() {
+        match endpoint.write(&input[written..]) {
             compat_core::PipeWrite::Data(count) => written += count,
             compat_core::PipeWrite::Broken => {
                 raise_sigpipe(pid);
@@ -3504,6 +3635,15 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         copy_to_user(args[2], &available.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
         return Ok(0);
     }
+    if args[1] == FIONREAD && entry.kind == compat_core::fd::CompatKind::Socket {
+        if !entry.rights.contains(kernel_core::object::Rights::READ) {
+            return Err(CompatErrno::BadFd);
+        }
+        let socket = proc::linux_socket_endpoint(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+        let available = i32::try_from(socket.buffered_bytes()).unwrap_or(i32::MAX);
+        copy_to_user(args[2], &available.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+        return Ok(0);
+    }
     if matches!(
         args[1],
         TCGETS | TCSETS | TCSETSW | TCSETSF | TIOCGWINSZ | TIOCSWINSZ | TCGETS2
@@ -3565,6 +3705,31 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     if pipe.writers_gone()
                         && entry.rights.contains(kernel_core::object::Rights::READ)
                     {
+                        ready |= POLLHUP;
+                    }
+                    ready
+                }
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::Socket => {
+                    let Some(socket) = proc::linux_socket_endpoint(pid, entry.handle) else {
+                        continue;
+                    };
+                    let mut ready = 0;
+                    if events & POLLIN != 0
+                        && entry.rights.contains(kernel_core::object::Rights::READ)
+                        && socket.is_readable()
+                    {
+                        ready |= POLLIN;
+                    }
+                    if events & POLLOUT != 0
+                        && entry.rights.contains(kernel_core::object::Rights::WRITE)
+                        && socket.is_writable()
+                    {
+                        ready |= POLLOUT;
+                    }
+                    if socket.peer_read_gone() {
+                        ready |= POLLERR;
+                    }
+                    if socket.peer_write_gone() {
                         ready |= POLLHUP;
                     }
                     ready

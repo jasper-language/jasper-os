@@ -34,6 +34,57 @@ pub struct PipeEndpoint {
     reader: bool,
 }
 
+/// One endpoint of a bounded bidirectional Unix stream socket.
+pub struct UnixSocketEndpoint {
+    rx: PipeEndpoint,
+    tx: PipeEndpoint,
+}
+
+impl UnixSocketEndpoint {
+    pub fn pair() -> (Self, Self) {
+        let (a_to_b_rx, a_to_b_tx) = PipeEndpoint::pair();
+        let (b_to_a_rx, b_to_a_tx) = PipeEndpoint::pair();
+        (
+            Self {
+                rx: b_to_a_rx,
+                tx: a_to_b_tx,
+            },
+            Self {
+                rx: a_to_b_rx,
+                tx: b_to_a_tx,
+            },
+        )
+    }
+
+    pub fn read(&self, output: &mut [u8]) -> PipeRead {
+        self.rx.read(output)
+    }
+
+    pub fn write(&self, input: &[u8]) -> PipeWrite {
+        self.tx.write(input)
+    }
+
+    pub fn buffered_bytes(&self) -> usize {
+        self.rx.buffered_bytes()
+    }
+
+    pub fn is_readable(&self) -> bool {
+        self.rx.is_readable()
+    }
+
+    pub fn is_writable(&self) -> bool {
+        self.tx.is_writable()
+    }
+
+    pub fn peer_read_gone(&self) -> bool {
+        self.tx.readers_gone()
+    }
+
+    pub fn peer_write_gone(&self) -> bool {
+        self.rx.writers_gone()
+    }
+}
+
 impl PipeEndpoint {
     pub fn pair() -> (Self, Self) {
         let state = Arc::new(SpinLock::new(PipeState {
@@ -178,5 +229,21 @@ mod tests {
         drop(inherited);
         let mut byte = [0];
         assert_eq!(reader.read(&mut byte), PipeRead::Data(1));
+    }
+
+    #[test]
+    fn unix_socket_pair_is_bidirectional_and_reports_peer_close() {
+        let (a, b) = UnixSocketEndpoint::pair();
+        assert_eq!(a.write(b"ab"), PipeWrite::Data(2));
+        let mut bytes = [0; 2];
+        assert_eq!(b.read(&mut bytes), PipeRead::Data(2));
+        assert_eq!(&bytes, b"ab");
+        assert_eq!(b.write(b"cd"), PipeWrite::Data(2));
+        assert_eq!(a.read(&mut bytes), PipeRead::Data(2));
+        assert_eq!(&bytes, b"cd");
+        drop(b);
+        assert!(a.peer_read_gone());
+        assert!(a.peer_write_gone());
+        assert_eq!(a.write(b"x"), PipeWrite::Broken);
     }
 }
