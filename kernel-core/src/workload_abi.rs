@@ -4,13 +4,13 @@
 //! 内核从调用者身份取得权威域并插入由内核管理的 Workload 对象。
 
 use crate::workload::{
-    ResourceLimits, ResourceUsage, WorkloadKey, WorkloadSnapshot, WorkloadState,
+    IoUsage, ResourceLimits, ResourceUsage, WorkloadKey, WorkloadSnapshot, WorkloadState,
 };
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"JWL1");
-pub const VERSION: u16 = 1;
-pub const CREATE_BYTES: usize = 40;
-pub const INFO_BYTES: usize = 64;
+pub const VERSION: u16 = 2;
+pub const CREATE_BYTES: usize = 56;
+pub const INFO_BYTES: usize = 96;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CreateArgs {
@@ -28,6 +28,8 @@ impl CreateArgs {
         out[20..24].copy_from_slice(&self.limits.threads.to_le_bytes());
         out[24..32].copy_from_slice(&self.limits.memory_bytes.to_le_bytes());
         out[32..36].copy_from_slice(&self.limits.ring_entries.to_le_bytes());
+        out[40..48].copy_from_slice(&self.limits.io_bytes.to_le_bytes());
+        out[48..56].copy_from_slice(&self.limits.io_ops.to_le_bytes());
         out
     }
 
@@ -52,6 +54,8 @@ impl CreateArgs {
                 threads: read_u32(raw, 20)?,
                 memory_bytes: read_u64(raw, 24)?,
                 ring_entries: read_u32(raw, 32)?,
+                io_bytes: read_u64(raw, 40)?,
+                io_ops: read_u64(raw, 48)?,
             },
         })
     }
@@ -64,6 +68,7 @@ pub struct WorkloadInfo {
     pub state: WorkloadState,
     pub limits: ResourceLimits,
     pub usage: ResourceUsage,
+    pub io_usage: IoUsage,
     pub children: u16,
 }
 
@@ -75,6 +80,7 @@ impl WorkloadInfo {
             state: snapshot.state,
             limits: snapshot.limits,
             usage: snapshot.usage,
+            io_usage: snapshot.io_usage,
             children: snapshot.children,
         }
     }
@@ -94,6 +100,10 @@ impl WorkloadInfo {
         out[48..56].copy_from_slice(&self.usage.memory_bytes.to_le_bytes());
         out[56..60].copy_from_slice(&self.usage.threads.to_le_bytes());
         out[60..64].copy_from_slice(&self.usage.ring_entries.to_le_bytes());
+        out[64..72].copy_from_slice(&self.limits.io_bytes.to_le_bytes());
+        out[72..80].copy_from_slice(&self.limits.io_ops.to_le_bytes());
+        out[80..88].copy_from_slice(&self.io_usage.bytes.to_le_bytes());
+        out[88..96].copy_from_slice(&self.io_usage.ops.to_le_bytes());
         out
     }
 }
@@ -138,6 +148,8 @@ mod tests {
         memory_bytes: 16 * 1024,
         threads: 4,
         ring_entries: 8,
+        io_bytes: 64 * 1024,
+        io_ops: 32,
     };
 
     #[test]

@@ -1532,9 +1532,11 @@ fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if len == 0 {
         return Ok(0);
     }
+    let io = admit_process_io(pid, len as u64, 1)?;
     let mut bytes = alloc::vec![0u8; len];
     copy_from_user(&mut bytes, args[1], len).map_err(|_| CompatErrno::Fault)?;
     console::write_bytes(&bytes);
+    io.commit();
     Ok(len as u64)
 }
 
@@ -1588,9 +1590,11 @@ fn linux_writev(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         bytes.resize(start + len, 0);
         copy_from_user(&mut bytes[start..], base, len).map_err(|_| CompatErrno::Fault)?;
     }
+    let io = admit_process_io(pid, total as u64, 1)?;
     if !bytes.is_empty() {
         console::write_bytes(&bytes);
     }
+    io.commit();
     Ok(total as u64)
 }
 
@@ -1655,9 +1659,11 @@ fn linux_getdents64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         output[base + 19..base + 19 + name.len()].copy_from_slice(name);
         index += 1;
     }
+    let io = admit_process_io(pid, output.len() as u64, 1)?;
     if !output.is_empty() {
         copy_to_user(args[1], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
     }
+    io.commit();
     if !proc::set_linux_dir_offset(pid, fd, index as u64) {
         return Err(CompatErrno::BadFd);
     }
@@ -1678,6 +1684,15 @@ fn authorize_console(pid: ObjId, fd: u32, write: bool) -> Result<(), CompatErrno
         return Err(CompatErrno::BadFd);
     }
     Ok(())
+}
+
+fn admit_process_io(pid: ObjId, bytes: u64, ops: u64) -> Result<crate::workload::IoPermit, CompatErrno> {
+    crate::workload::begin_process_io(pid, bytes, ops).map_err(|error| match error {
+        kernel_core::workload::WorkloadError::Quota
+        | kernel_core::workload::WorkloadError::InvalidState => CompatErrno::NoSpace,
+        kernel_core::workload::WorkloadError::InvalidKey => CompatErrno::NoProcess,
+        _ => CompatErrno::Perm,
+    })
 }
 
 /// Implements bounded Linux `read(2)` for stdin and virtual read-only files.
@@ -1704,10 +1719,12 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let source = file.bytes();
     let offset = usize::try_from(offset).map_err(|_| CompatErrno::Invalid)?;
     let available = source.len().saturating_sub(offset).min(len);
+    let io = admit_process_io(pid, available as u64, 1)?;
     if available != 0 {
         copy_to_user(args[1], &source[offset..offset + available], available)
             .map_err(|_| CompatErrno::Fault)?;
     }
+    io.commit();
     if !proc::set_linux_file_offset(pid, fd, (offset + available) as u64) {
         return Err(CompatErrno::BadFd);
     }
@@ -1729,10 +1746,12 @@ fn linux_pread64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let offset = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
     let source = file.bytes();
     let available = source.len().saturating_sub(offset).min(len);
+    let io = admit_process_io(pid, available as u64, 1)?;
     if available != 0 {
         copy_to_user(args[1], &source[offset..offset + available], available)
             .map_err(|_| CompatErrno::Fault)?;
     }
+    io.commit();
     Ok(available as u64)
 }
 
@@ -1776,6 +1795,7 @@ fn linux_readv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let source = file.bytes();
     let offset = usize::try_from(offset).map_err(|_| CompatErrno::Invalid)?;
     let available = source.len().saturating_sub(offset).min(total);
+    let io = admit_process_io(pid, available as u64, 1)?;
     let mut source_offset = offset;
     let mut remaining = available;
     let mut ranges = alloc::vec::Vec::with_capacity(vectors.len());
@@ -1796,6 +1816,7 @@ fn linux_readv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             _ => CompatErrno::Fault,
         })?;
     }
+    io.commit();
     if !proc::set_linux_file_offset(pid, fd, (offset + available) as u64) {
         return Err(CompatErrno::BadFd);
     }
@@ -2004,6 +2025,18 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         let (handle, _) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
         Some(crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?)
     };
+    let io = if let Some(file) = file {
+        let offset = usize::try_from(args[5]).map_err(|_| CompatErrno::Invalid)?;
+        let requested_bytes = usize::try_from(bytes).map_err(|_| CompatErrno::Invalid)?;
+        let available = file
+            .bytes()
+            .len()
+            .saturating_sub(offset)
+            .min(requested_bytes);
+        Some(admit_process_io(pid, available as u64, 1)?)
+    } else {
+        None
+    };
     let rounded = bytes.checked_add(PAGE - 1).ok_or(CompatErrno::Invalid)? & !(PAGE - 1);
     let cursor = proc::linux_mmap_cursor(pid).ok_or(CompatErrno::NoSys)?;
     let requested = if args[0] == 0 {
@@ -2100,6 +2133,9 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             let _ = proc::unmap_page(pid, address);
         }
         return Err(CompatErrno::NoSys);
+    }
+    if let Some(io) = io {
+        io.commit();
     }
     Ok(start)
 }
@@ -2239,8 +2275,13 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
     drop(path);
     let argv = linux_string_vector(args[1], 64, 64 * 1024)?;
     let envp = linux_string_vector(args[2], 64, 64 * 1024)?;
-    let (executable, interpreter) =
-        crate::linux_vfs::root_executable(&resolved).ok_or(CompatErrno::NoEntry)?;
+    let (executable, interpreter) = crate::linux_vfs::root_executable(pid, &resolved).map_err(
+        |error| match error {
+            crate::linux_vfs::RootExecutableError::NotFound => CompatErrno::NoEntry,
+            crate::linux_vfs::RootExecutableError::Quota => CompatErrno::NoSpace,
+            crate::linux_vfs::RootExecutableError::Io => CompatErrno::Invalid,
+        },
+    )?;
     #[cfg(all(
         feature = "lifecycle-root-exec-verify",
         target_arch = "x86_64"

@@ -7,12 +7,13 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use kernel_core::objtable::ObjId;
 use kernel_core::security_domain::DomainKey;
 use kernel_core::workload::{
-    MembershipError, ResourceLimits, ResourceUsage, WorkloadError, WorkloadKey, WorkloadMembers,
-    WorkloadSnapshot, WorkloadState, WorkloadTable,
+    IoUsage, MembershipError, ResourceLimits, ResourceUsage, WorkloadError, WorkloadKey,
+    WorkloadMembers, WorkloadSnapshot, WorkloadState, WorkloadTable,
 };
 
 use crate::sched::scheduler::CpuGroupId;
 use crate::sync::IrqSpinLock;
+use crate::proc;
 
 pub const MAX_WORKLOADS: usize = 64;
 pub const MAX_WORKLOAD_MEMBERS: usize = 256;
@@ -24,6 +25,7 @@ static MEMBERS: IrqSpinLock<WorkloadMembers<MAX_WORKLOAD_MEMBERS>> =
 static CPU_GROUPS: IrqSpinLock<[Option<(WorkloadKey, CpuGroupId)>; MAX_WORKLOADS]> =
     IrqSpinLock::new([None; MAX_WORKLOADS]);
 static MEMORY_RELEASE_FAILURES: AtomicU32 = AtomicU32::new(0);
+static IO_ROLLBACK_FAILURES: AtomicU32 = AtomicU32::new(0);
 pub const WORKLOAD_TERMINATED_CODE: i64 = -3;
 
 pub fn create(domain: DomainKey, limits: ResourceLimits) -> Result<WorkloadKey, WorkloadError> {
@@ -244,6 +246,58 @@ pub fn reserve_ring_entries(key: WorkloadKey, entries: u32) -> Result<(), Worklo
     )
 }
 
+/// Atomically admits file/block I/O against the Workload of the calling
+/// Process. The device is not an identity: an unbound process remains
+/// explicitly untracked instead of borrowing an internal service identity.
+pub fn begin_process_io(
+    pid: ObjId,
+    bytes: u64,
+    ops: u64,
+) -> Result<IoPermit, WorkloadError> {
+    let workload = proc::workload_key(pid);
+    if let Some(workload) = workload {
+        WORKLOADS.lock().charge_io(workload, IoUsage { bytes, ops })?;
+    }
+    Ok(IoPermit {
+        workload,
+        usage: IoUsage { bytes, ops },
+        committed: false,
+    })
+}
+
+/// Admission token for one request. Dropping an uncommitted token reverses the
+/// reservation, so a failed copy, mapping or block read leaves no budget
+/// consumption behind.
+pub struct IoPermit {
+    workload: Option<WorkloadKey>,
+    usage: IoUsage,
+    committed: bool,
+}
+
+impl IoPermit {
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+
+    pub const fn workload(&self) -> Option<WorkloadKey> {
+        self.workload
+    }
+}
+
+impl Drop for IoPermit {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let Some(workload) = self.workload else {
+            return;
+        };
+        if WORKLOADS.lock().refund_io(workload, self.usage).is_err() {
+            IO_ROLLBACK_FAILURES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 pub fn release_memory(key: WorkloadKey, bytes: u64) {
     let released = WORKLOADS.lock().release(
         key,
@@ -263,6 +317,12 @@ pub fn release_memory(key: WorkloadKey, bytes: u64) {
 /// Number of memory-credit releases rejected by the Workload registry.
 pub fn memory_release_failures() -> u32 {
     MEMORY_RELEASE_FAILURES.load(Ordering::Acquire)
+}
+
+/// Number of failed I/O reservation reversals. Non-zero indicates an internal
+/// accounting error and is surfaced by verification rather than hidden.
+pub fn io_rollback_failures() -> u32 {
+    IO_ROLLBACK_FAILURES.load(Ordering::Acquire)
 }
 
 /// RAII ownership for ordinary Memory-object backing bytes.

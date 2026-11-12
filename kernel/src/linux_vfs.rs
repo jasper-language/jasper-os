@@ -618,32 +618,64 @@ pub fn install_root_program(
     }
 }
 
+#[cfg(feature = "lifecycle-root-exec-verify")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootExecutableError {
+    NotFound,
+    Quota,
+    Io,
+}
+
 /// Reads one declared image pair from the selected System root on demand.
 ///
 /// 从所选 System 根按需读取已声明映像；成功解析不是 Jasper 执行授权。
 #[cfg(feature = "lifecycle-root-exec-verify")]
-pub fn root_executable(path: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-    let origin = (*ROOT_ORIGIN.lock())?;
+pub fn root_executable(
+    pid: kernel_core::objtable::ObjId,
+    path: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), RootExecutableError> {
+    let origin = (*ROOT_ORIGIN.lock()).ok_or(RootExecutableError::NotFound)?;
     let (logical_path, executable_len, interpreter_len) = {
         let executables = ROOT_EXECUTABLES.lock();
-        let resolved = executables.resolve(origin, path).ok()?;
+        let resolved = executables
+            .resolve(origin, path)
+            .map_err(|_| RootExecutableError::NotFound)?;
         (
             resolved.path,
             resolved.executable_len,
             resolved.interpreter_len,
         )
     };
-    let source = ROOT_SOURCE.lock().as_ref()?.clone();
-    let root = Ext4Reader::open(source).ok()?;
-    let logical_path = core::str::from_utf8(logical_path.as_bytes()).ok()?;
-    let executable = root.read_file(logical_path, executable_len).ok()?;
+    let bytes = u64::try_from(executable_len)
+        .map_err(|_| RootExecutableError::Io)?
+        .checked_add(
+            u64::try_from(interpreter_len).map_err(|_| RootExecutableError::Io)?,
+        )
+        .ok_or(RootExecutableError::Io)?;
+    let io = crate::workload::begin_process_io(pid, bytes, 2).map_err(|error| match error {
+        kernel_core::workload::WorkloadError::Quota
+        | kernel_core::workload::WorkloadError::InvalidState => RootExecutableError::Quota,
+        _ => RootExecutableError::Io,
+    })?;
+    let source = ROOT_SOURCE
+        .lock()
+        .as_ref()
+        .cloned()
+        .ok_or(RootExecutableError::NotFound)?;
+    let root = Ext4Reader::open(source).map_err(|_| RootExecutableError::Io)?;
+    let logical_path =
+        core::str::from_utf8(logical_path.as_bytes()).map_err(|_| RootExecutableError::Io)?;
+    let executable = root
+        .read_file(logical_path, executable_len)
+        .map_err(|_| RootExecutableError::Io)?;
     let interpreter = root
         .read_file(ROOT_INTERPRETER_PATH, interpreter_len)
-        .ok()?;
+        .map_err(|_| RootExecutableError::Io)?;
     if executable.len() != executable_len || interpreter.len() != interpreter_len {
-        return None;
+        return Err(RootExecutableError::Io);
     }
-    Some((executable, interpreter))
+    io.commit();
+    Ok((executable, interpreter))
 }
 
 /// Returns whether the verification slice contains any bytes.

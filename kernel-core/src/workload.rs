@@ -51,6 +51,10 @@ pub struct ResourceLimits {
     pub memory_bytes: u64,
     pub threads: u32,
     pub ring_entries: u32,
+    /// Cumulative file/block bytes admitted for this workload lifetime.
+    pub io_bytes: u64,
+    /// Cumulative file/block operations admitted for this workload lifetime.
+    pub io_ops: u64,
 }
 
 impl ResourceLimits {
@@ -60,6 +64,8 @@ impl ResourceLimits {
             || self.memory_bytes == 0
             || self.threads == 0
             || self.ring_entries == 0
+            || self.io_bytes == 0
+            || self.io_ops == 0
         {
             Err(WorkloadError::InvalidLimit)
         } else {
@@ -72,6 +78,8 @@ impl ResourceLimits {
             && self.memory_bytes <= parent.memory_bytes
             && self.threads <= parent.threads
             && self.ring_entries <= parent.ring_entries
+            && self.io_bytes <= parent.io_bytes
+            && self.io_ops <= parent.io_ops
     }
 }
 
@@ -103,6 +111,32 @@ impl ResourceUsage {
         self.memory_bytes <= limits.memory_bytes
             && self.threads <= limits.threads
             && self.ring_entries <= limits.ring_entries
+    }
+}
+
+/// Monotonic I/O consumption. Unlike held resources these counters are not
+/// returned when a process exits; they describe what the Workload consumed.
+///
+/// 单调 I/O 消耗量；进程退出不会归还，因为它记录 Workload 实际消费的预算。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IoUsage {
+    pub bytes: u64,
+    pub ops: u64,
+}
+
+impl IoUsage {
+    fn checked_add(self, other: Self) -> Option<Self> {
+        Some(Self {
+            bytes: self.bytes.checked_add(other.bytes)?,
+            ops: self.ops.checked_add(other.ops)?,
+        })
+    }
+
+    fn checked_sub(self, other: Self) -> Option<Self> {
+        Some(Self {
+            bytes: self.bytes.checked_sub(other.bytes)?,
+            ops: self.ops.checked_sub(other.ops)?,
+        })
     }
 }
 
@@ -144,6 +178,7 @@ pub struct WorkloadSnapshot {
     pub state: WorkloadState,
     pub limits: ResourceLimits,
     pub usage: ResourceUsage,
+    pub io_usage: IoUsage,
     pub children: u16,
     pub child_cpu_permille: u32,
 }
@@ -181,6 +216,7 @@ struct Record {
     state: WorkloadState,
     limits: ResourceLimits,
     usage: ResourceUsage,
+    io_usage: IoUsage,
     children: u16,
     child_cpu_permille: u32,
 }
@@ -273,6 +309,7 @@ impl<const N: usize> WorkloadTable<N> {
             state: WorkloadState::Created,
             limits,
             usage: ResourceUsage::default(),
+            io_usage: IoUsage::default(),
             children: 0,
             child_cpu_permille: 0,
         });
@@ -360,6 +397,57 @@ impl<const N: usize> WorkloadTable<N> {
         Ok(())
     }
 
+    /// Admits one cumulative file/block operation only if every ancestor has
+    /// enough remaining bytes and ops. All records are checked before any is
+    /// changed, so rejection is atomic and leaves no partial consumption.
+    pub fn charge_io(&mut self, key: WorkloadKey, delta: IoUsage) -> Result<(), WorkloadError> {
+        let (path, len) = self.path(key)?;
+        if self.record(key)?.state != WorkloadState::Running {
+            return Err(WorkloadError::InvalidState);
+        }
+        for current in path.iter().take(len) {
+            let record = self.record(*current)?;
+            let next = record
+                .io_usage
+                .checked_add(delta)
+                .ok_or(WorkloadError::Quota)?;
+            if next.bytes > record.limits.io_bytes || next.ops > record.limits.io_ops {
+                return Err(WorkloadError::Quota);
+            }
+        }
+        for current in path.iter().take(len) {
+            let record = self.record_mut(*current)?;
+            record.io_usage = record
+                .io_usage
+                .checked_add(delta)
+                .ok_or(WorkloadError::Quota)?;
+        }
+        Ok(())
+    }
+
+    /// Reverses an admitted request whose external effect was not committed.
+    pub fn refund_io(&mut self, key: WorkloadKey, delta: IoUsage) -> Result<(), WorkloadError> {
+        let (path, len) = self.path(key)?;
+        if self.record(key)?.state == WorkloadState::Created {
+            return Err(WorkloadError::InvalidState);
+        }
+        for current in path.iter().take(len) {
+            let record = self.record(*current)?;
+            record
+                .io_usage
+                .checked_sub(delta)
+                .ok_or(WorkloadError::Quota)?;
+        }
+        for current in path.iter().take(len) {
+            let record = self.record_mut(*current)?;
+            record.io_usage = record
+                .io_usage
+                .checked_sub(delta)
+                .ok_or(WorkloadError::Quota)?;
+        }
+        Ok(())
+    }
+
     pub fn snapshot(&self, key: WorkloadKey) -> Result<WorkloadSnapshot, WorkloadError> {
         let record = self.record(key)?;
         Ok(WorkloadSnapshot {
@@ -369,6 +457,7 @@ impl<const N: usize> WorkloadTable<N> {
             state: record.state,
             limits: record.limits,
             usage: record.usage,
+            io_usage: record.io_usage,
             children: record.children,
             child_cpu_permille: record.child_cpu_permille,
         })
@@ -628,6 +717,8 @@ mod tests {
         memory_bytes: 4096,
         threads: 4,
         ring_entries: 8,
+        io_bytes: 64 * 1024,
+        io_ops: 32,
     };
 
     #[test]
@@ -710,6 +801,72 @@ mod tests {
             )
             .unwrap();
         table.release(key, first).unwrap();
+    }
+
+    #[test]
+    fn io_budget_rolls_up_and_rejection_or_refund_is_atomic() {
+        let mut table = WorkloadTable::<2>::new();
+        let limits = ResourceLimits {
+            io_bytes: 10,
+            io_ops: 2,
+            ..LIMITS
+        };
+        let parent = table.create(DOMAIN, limits).unwrap();
+        table.transition(parent, WorkloadState::Ready).unwrap();
+        table.transition(parent, WorkloadState::Running).unwrap();
+        let child = table.create_child(parent, limits).unwrap();
+        table.transition(child, WorkloadState::Ready).unwrap();
+        table.transition(child, WorkloadState::Running).unwrap();
+
+        let first = IoUsage { bytes: 6, ops: 1 };
+        table.charge_io(child, first).unwrap();
+        assert_eq!(table.snapshot(child).unwrap().io_usage, first);
+        assert_eq!(table.snapshot(parent).unwrap().io_usage, first);
+
+        let before = table.snapshot(parent).unwrap();
+        assert_eq!(
+            table.charge_io(parent, IoUsage { bytes: 5, ops: 1 }),
+            Err(WorkloadError::Quota)
+        );
+        assert_eq!(table.snapshot(parent).unwrap(), before);
+        assert_eq!(table.snapshot(child).unwrap().io_usage, first);
+
+        table.refund_io(child, first).unwrap();
+        assert_eq!(table.snapshot(child).unwrap().io_usage, IoUsage::default());
+        assert_eq!(table.snapshot(parent).unwrap().io_usage, IoUsage::default());
+        assert_eq!(
+            table.refund_io(child, first),
+            Err(WorkloadError::Quota)
+        );
+    }
+
+    #[test]
+    fn io_limits_must_validate_and_cannot_expand_parent_authority() {
+        let mut table = WorkloadTable::<2>::new();
+        assert_eq!(
+            table.create(
+                DOMAIN,
+                ResourceLimits {
+                    io_ops: 0,
+                    ..LIMITS
+                }
+            ),
+            Err(WorkloadError::InvalidLimit)
+        );
+        let parent = table.create(DOMAIN, LIMITS).unwrap();
+        table.transition(parent, WorkloadState::Ready).unwrap();
+        table.transition(parent, WorkloadState::Running).unwrap();
+        assert_eq!(
+            table.create_child(
+                parent,
+                ResourceLimits {
+                    io_bytes: LIMITS.io_bytes + 1,
+                    ..LIMITS
+                }
+            ),
+            Err(WorkloadError::Quota)
+        );
+        assert_eq!(table.snapshot(parent).unwrap().children, 0);
     }
 
     #[test]

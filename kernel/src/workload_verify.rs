@@ -166,6 +166,8 @@ fn verify_user_workload_abi(base: u64) {
             memory_bytes: page,
             threads: 1,
             ring_entries: 1,
+            io_bytes: 64 * 1024,
+            io_ops: 16,
         },
     ) {
         Ok(foreign) => foreign,
@@ -201,6 +203,8 @@ fn verify_user_workload_abi(base: u64) {
             memory_bytes: 2 * page,
             threads: 1,
             ring_entries: 1,
+            io_bytes: 64 * 1024,
+            io_ops: 16,
         },
     }
     .encode();
@@ -480,6 +484,8 @@ fn verify_workload_spawn(base: u64, terminate: bool) {
             memory_bytes: 8 * page,
             threads: 1,
             ring_entries: 1,
+            io_bytes: 64 * 1024,
+            io_ops: 16,
         },
     }
     .encode();
@@ -594,6 +600,8 @@ fn verify_hierarchical_cpu(domain: DomainKey) {
         memory_bytes: page,
         threads: 1,
         ring_entries: 1,
+        io_bytes: 64 * 1024,
+        io_ops: 16,
     };
     let child_limits = ResourceLimits {
         cpu_permille: 100,
@@ -716,6 +724,8 @@ pub fn run() {
         memory_bytes: 6 * page,
         threads: 1,
         ring_entries: 4,
+        io_bytes: 1,
+        io_ops: 1,
     };
     let workload = match crate::workload::create(domain, limits) {
         Ok(key) => key,
@@ -745,6 +755,15 @@ pub fn run() {
         }
     };
     check(proc::bind_workload(pid, workload), "bind workload");
+    let io = crate::workload::begin_process_io(pid, 1, 1);
+    check(io.is_ok(), "process I/O admission");
+    if let Ok(io) = io {
+        io.commit();
+    }
+    check(
+        crate::workload::begin_process_io(pid, 1, 1).is_err(),
+        "second I/O request exceeds lifetime quota",
+    );
     check(
         proc::map_new(pid, base + CODE_OFF, MapFlags::USER | MapFlags::EXECUTE).is_ok(),
         "map code",

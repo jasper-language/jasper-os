@@ -14,6 +14,8 @@ fn child_ring_entries_are_bounded_by_the_whole_ancestor_chain() {
         memory_bytes: 4096,
         threads: 1,
         ring_entries: 8,
+        io_bytes: 64 * 1024,
+        io_ops: 32,
     };
     let mut table = WorkloadTable::<2>::new();
     let parent = table.create(domain, limits).unwrap();

@@ -921,7 +921,7 @@ pub const LAYOUTS: &[LayoutContract] = &[
     LayoutContract {
         name: "workload.create_args",
         version: 1,
-        size: crate::workload_abi::CREATE_BYTES as u32,
+        size: 40,
         magic: crate::workload_abi::MAGIC,
         fields: &[
             LayoutField {
@@ -952,8 +952,89 @@ pub const LAYOUTS: &[LayoutContract] = &[
         ],
     },
     LayoutContract {
+        name: "workload.create_args",
+        version: crate::workload_abi::VERSION as u32,
+        size: crate::workload_abi::CREATE_BYTES as u32,
+        magic: crate::workload_abi::MAGIC,
+        fields: &[
+            LayoutField {
+                name: "parent",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "cpu_permille",
+                offset: 16,
+                width: 4,
+            },
+            LayoutField {
+                name: "threads",
+                offset: 20,
+                width: 4,
+            },
+            LayoutField {
+                name: "memory_bytes",
+                offset: 24,
+                width: 8,
+            },
+            LayoutField {
+                name: "ring_entries",
+                offset: 32,
+                width: 4,
+            },
+            LayoutField {
+                name: "io_bytes",
+                offset: 40,
+                width: 8,
+            },
+            LayoutField {
+                name: "io_ops",
+                offset: 48,
+                width: 8,
+            },
+        ],
+    },
+    LayoutContract {
         name: "workload.info",
         version: 1,
+        size: 64,
+        magic: crate::workload_abi::MAGIC,
+        fields: &[
+            LayoutField {
+                name: "state",
+                offset: 6,
+                width: 1,
+            },
+            LayoutField {
+                name: "key",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "parent",
+                offset: 16,
+                width: 8,
+            },
+            LayoutField {
+                name: "limits",
+                offset: 24,
+                width: 20,
+            },
+            LayoutField {
+                name: "children",
+                offset: 44,
+                width: 4,
+            },
+            LayoutField {
+                name: "usage",
+                offset: 48,
+                width: 16,
+            },
+        ],
+    },
+    LayoutContract {
+        name: "workload.info",
+        version: crate::workload_abi::VERSION as u32,
         size: crate::workload_abi::INFO_BYTES as u32,
         magic: crate::workload_abi::MAGIC,
         fields: &[
@@ -985,6 +1066,16 @@ pub const LAYOUTS: &[LayoutContract] = &[
             LayoutField {
                 name: "usage",
                 offset: 48,
+                width: 16,
+            },
+            LayoutField {
+                name: "io_limits",
+                offset: 64,
+                width: 16,
+            },
+            LayoutField {
+                name: "io_usage",
+                offset: 80,
                 width: 16,
             },
         ],
