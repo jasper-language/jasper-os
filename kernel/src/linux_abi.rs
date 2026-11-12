@@ -5672,9 +5672,6 @@ fn linux_faccessat(
     }
     let path = linux_c_string(args[1], 4096);
     let node = match path {
-        Ok(path) if path.is_empty() && flags & AT_EMPTY_PATH != 0 => {
-            linux_node_from_fd(pid, args[0])?
-        }
         Ok(path) => {
             let resolved = if path.starts_with(b"/") {
                 if !is_at_fdcwd(args[0]) {
@@ -5713,12 +5710,7 @@ fn linux_faccessat(
             crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)?
         }
         Err(CompatErrno::NoEntry) if flags & AT_EMPTY_PATH != 0 => {
-            let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-            let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::BadFd)?;
-            crate::linux_vfs::Node::Directory(
-                crate::linux_vfs::DirectoryId::from_handle(handle)
-                    .ok_or(CompatErrno::BadFd)?,
-            )
+            linux_node_from_fd(pid, args[0])?
         }
         Err(error) => return Err(error),
     };
