@@ -1554,12 +1554,19 @@ int main(void) {
         struct binder_transaction_data reply;
         memcpy(&reply, read_buffer + 4, sizeof(reply));
         if (reply.code != 0x4321 || reply.sender_pid != binder_server_pid ||
-            reply.data_size != 4) {
+            reply.data_size != sizeof(struct flat_binder_object) ||
+            reply.offsets_size != sizeof(binder_size_t)) {
             _exit(170);
         }
-        char response[4] = {0};
-        memcpy(response, (void *)reply.data.ptr.buffer, 4);
-        if (memcmp(response, "PONG", 4) != 0) {
+        struct flat_binder_object returned_object;
+        binder_size_t returned_offset = UINT64_MAX;
+        memcpy(&returned_object, (void *)reply.data.ptr.buffer,
+               sizeof(returned_object));
+        memcpy(&returned_offset,
+               (void *)reply.data.ptr.offsets, sizeof(returned_offset));
+        if (returned_offset != 0 ||
+            returned_object.hdr.type != BINDER_TYPE_HANDLE ||
+            returned_object.handle == 0) {
             _exit(171);
         }
         unsigned char free_buffer[4 + sizeof(binder_uintptr_t)];
@@ -1573,6 +1580,53 @@ int main(void) {
         if (ioctl(client, BINDER_WRITE_READ, &cleanup) != 0 ||
             cleanup.write_consumed != sizeof(free_buffer)) {
             _exit(172);
+        }
+        char response[4] = {0};
+        char second_data[6] = "SECOND";
+        struct binder_transaction_data second_request = {
+            .target.handle = returned_object.handle,
+            .code = 0x5678,
+            .flags = 0,
+            .data_size = sizeof(second_data),
+            .offsets_size = 0,
+            .data.ptr.buffer = (binder_uintptr_t)second_data,
+        };
+        memcpy(write_buffer, &(uint32_t){BC_TRANSACTION}, 4);
+        memcpy(write_buffer + 4, &second_request, sizeof(second_request));
+        memset(&exchange, 0, sizeof(exchange));
+        exchange.write_size = sizeof(write_buffer);
+        exchange.write_buffer = (binder_uintptr_t)write_buffer;
+        exchange.read_size = sizeof(read_buffer);
+        exchange.read_buffer = (binder_uintptr_t)read_buffer;
+        if (ioctl(client, BINDER_WRITE_READ, &exchange) != 0 ||
+            exchange.read_consumed != 4 ||
+            *(uint32_t *)read_buffer != BR_TRANSACTION_COMPLETE) {
+            _exit(173);
+        }
+        memset(&exchange, 0, sizeof(exchange));
+        exchange.read_size = sizeof(read_buffer);
+        exchange.read_buffer = (binder_uintptr_t)read_buffer;
+        if (ioctl(client, BINDER_WRITE_READ, &exchange) != 0 ||
+            exchange.read_consumed != 68 ||
+            *(uint32_t *)read_buffer != BR_REPLY) {
+            _exit(174);
+        }
+        memcpy(&reply, read_buffer + 4, sizeof(reply));
+        if (reply.code != 0x8765 || reply.data_size != 4) {
+            _exit(175);
+        }
+        memcpy(response, (void *)reply.data.ptr.buffer, 4);
+        if (memcmp(response, "DONE", 4) != 0) {
+            _exit(176);
+        }
+        free_pointer = reply.data.ptr.buffer;
+        memcpy(free_buffer + 4, &free_pointer, sizeof(free_pointer));
+        memset(&cleanup, 0, sizeof(cleanup));
+        cleanup.write_size = sizeof(free_buffer);
+        cleanup.write_buffer = (binder_uintptr_t)free_buffer;
+        if (ioctl(client, BINDER_WRITE_READ, &cleanup) != 0 ||
+            cleanup.write_consumed != sizeof(free_buffer)) {
+            _exit(177);
         }
         close(client);
         close(binder_ready[0]);
@@ -1615,13 +1669,20 @@ int main(void) {
         memcmp(received_data, "PING", 4) != 0) {
         return 174;
     }
-    char response_data[4] = "PONG";
+    struct flat_binder_object response_object = {
+        .hdr.type = BINDER_TYPE_BINDER,
+        .flags = 0x7f,
+        .binder = (binder_uintptr_t)(uintptr_t)&response_object,
+        .cookie = 0x7777,
+    };
+    binder_size_t response_offset = 0;
     struct binder_transaction_data response = {
         .code = 0x4321,
         .flags = 0,
-        .data_size = sizeof(response_data),
-        .offsets_size = 0,
-        .data.ptr.buffer = (binder_uintptr_t)response_data,
+        .data_size = sizeof(response_object),
+        .offsets_size = sizeof(response_offset),
+        .data.ptr.buffer = (binder_uintptr_t)&response_object,
+        .data.ptr.offsets = (binder_uintptr_t)&response_offset,
     };
     unsigned char server_write[12 + 4 + sizeof(response)];
     size_t server_offset = 0;
@@ -1645,6 +1706,54 @@ int main(void) {
         server_exchange.read_consumed != 4 ||
         *(uint32_t *)server_read != BR_TRANSACTION_COMPLETE) {
         return 175;
+    }
+    memset(&server_exchange, 0, sizeof(server_exchange));
+    server_exchange.read_size = sizeof(server_read);
+    server_exchange.read_buffer = (binder_uintptr_t)server_read;
+    if (ioctl(server, BINDER_WRITE_READ, &server_exchange) != 0 ||
+        server_exchange.read_consumed != 68 ||
+        *(uint32_t *)server_read != BR_TRANSACTION) {
+        return 177;
+    }
+    struct binder_transaction_data second_received;
+    memcpy(&second_received, server_read + 4, sizeof(second_received));
+    char second_received_data[6] = {0};
+    memcpy(second_received_data, (void *)second_received.data.ptr.buffer, 6);
+    if (second_received.code != 0x5678 ||
+        second_received.sender_pid != binder_child ||
+        second_received.data_size != 6 ||
+        memcmp(second_received_data, "SECOND", 6) != 0) {
+        return 178;
+    }
+    char done_data[4] = "DONE";
+    struct binder_transaction_data done = {
+        .code = 0x8765,
+        .flags = 0,
+        .data_size = sizeof(done_data),
+        .offsets_size = 0,
+        .data.ptr.buffer = (binder_uintptr_t)done_data,
+    };
+    server_offset = 0;
+    memcpy(server_write + server_offset, &(uint32_t){BC_FREE_BUFFER}, 4);
+    server_offset += 4;
+    binder_uintptr_t second_pointer = second_received.data.ptr.buffer;
+    memcpy(server_write + server_offset, &second_pointer,
+           sizeof(second_pointer));
+    server_offset += sizeof(second_pointer);
+    memcpy(server_write + server_offset, &(uint32_t){BC_REPLY}, 4);
+    server_offset += 4;
+    memcpy(server_write + server_offset, &done, sizeof(done));
+    server_offset += sizeof(done);
+    memset(&server_exchange, 0, sizeof(server_exchange));
+    server_exchange.write_size = server_offset;
+    server_exchange.write_buffer = (binder_uintptr_t)server_write;
+    server_exchange.read_size = 4;
+    server_exchange.read_buffer = (binder_uintptr_t)server_read;
+    if (ioctl(server, BINDER_WRITE_READ, &server_exchange) != 0 ||
+        server_exchange.write_consumed != server_offset ||
+        server_exchange.read_consumed != 4 ||
+        *(uint32_t *)server_read != BR_TRANSACTION_COMPLETE) {
+        return 179;
     }
     int binder_status = 0;
     if (waitpid(binder_child, &binder_status, 0) != binder_child ||

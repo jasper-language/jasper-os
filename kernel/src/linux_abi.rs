@@ -1168,6 +1168,7 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
     }
     if last_thread {
         remove_process_signals(process);
+        crate::binder::release_process(process);
     }
 }
 
