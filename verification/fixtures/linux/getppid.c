@@ -689,9 +689,12 @@ int main(void) {
         return 146;
     }
     struct stat ashmem_stat;
+    struct statfs ashmem_statfs;
     if (fstat(ashmem_fd, &ashmem_stat) != 0 ||
         !S_ISCHR(ashmem_stat.st_mode) ||
-        ashmem_stat.st_size != (off_t)ashmem_size) {
+        ashmem_stat.st_size != (off_t)ashmem_size ||
+        fstatfs(ashmem_fd, &ashmem_statfs) != 0 ||
+        ashmem_statfs.f_bsize != 4096) {
         return 177;
     }
     size_t pin_length = ashmem_size;
@@ -772,8 +775,12 @@ int main(void) {
         return 155;
     }
     struct stat binder_stat;
+    struct statfs binder_statfs;
     if (fstat(binder_fd, &binder_stat) != 0 ||
-        !S_ISCHR(binder_stat.st_mode) || close(binder_fd) != 0) {
+        !S_ISCHR(binder_stat.st_mode) ||
+        fstatfs(binder_fd, &binder_statfs) != 0 ||
+        binder_statfs.f_bsize != 4096 ||
+        close(binder_fd) != 0) {
         return 178;
     }
     int ion_fd = open("/dev/ion", O_RDWR | O_CLOEXEC);
@@ -799,9 +806,12 @@ int main(void) {
         return 157;
     }
     struct stat ion_stat;
+    struct statfs ion_statfs;
     if (fstat(ion_share.fd, &ion_stat) != 0 ||
         !S_ISCHR(ion_stat.st_mode) ||
-        ion_stat.st_size != (off_t)ion_allocation.len) {
+        ion_stat.st_size != (off_t)ion_allocation.len ||
+        fstatfs(ion_share.fd, &ion_statfs) != 0 ||
+        ion_statfs.f_bsize != 4096) {
         return 179;
     }
     unsigned char *ion_first = mmap(NULL, ion_allocation.len,
