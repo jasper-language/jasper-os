@@ -131,6 +131,8 @@ arch2-verify = ["user-programs"]
 blk1-verify = []
 # FS-0 journal-to-virtio-blk integration and same-disk power-cut drill.
 fs0-journal-verify = []
+# Real virtio-blk persistence of package bytes and installation state across reboot.
+native-install-block-verify = []
 # FS-1 real ext4 VFS read/write/fsync/rename over virtio-blk.
 fs1-ext4-verify = ["kernel-core/ext4-write"]
 # Dedicated MOD-1 contract: assembly ordering, publication and runtime stop/health.
