@@ -772,9 +772,22 @@ int main(void) {
     }
     int memfd = memfd_create("jasper-memfd",
                              MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (memfd < 0 ||
-        (fcntl(memfd, F_GETFD) & FD_CLOEXEC) == 0 ||
-        ftruncate(memfd, 4096) != 0) {
+    if (memfd < 0) {
+        printf("memfd-create-fail fd=%d errno=%d\n", memfd, errno);
+        return 207;
+    }
+    int memfd_flags = fcntl(memfd, F_GETFD);
+    if (memfd_flags < 0) {
+        printf("memfd-fcntl-fail fd=%d errno=%d\n", memfd, errno);
+        return 207;
+    }
+    if ((memfd_flags & FD_CLOEXEC) == 0) {
+        printf("memfd-cloexec-fail fd=%d flags=%d\n", memfd, memfd_flags);
+        return 207;
+    }
+    errno = 0;
+    if (ftruncate(memfd, 4096) != 0) {
+        printf("memfd-truncate-fail fd=%d errno=%d\n", memfd, errno);
         return 207;
     }
     struct stat memfd_stat;
@@ -1262,7 +1275,12 @@ int main(void) {
         errno != ENOENT) {
         return 206;
     }
-    if (syscall(SYS_faccessat2, fd, "", R_OK, AT_EMPTY_PATH) != 0) {
+    errno = 0;
+    long empty_access =
+        syscall(SYS_faccessat2, fd, "", R_OK, AT_EMPTY_PATH);
+    if (empty_access != 0) {
+        printf("faccessat2-empty-fail fd=%d result=%ld errno=%d\n",
+               fd, empty_access, errno);
         return 207;
     }
     errno = 0;
