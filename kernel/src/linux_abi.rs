@@ -1445,6 +1445,8 @@ fn execute(
         LinuxSyscall::Fchmod => compat_result(linux_fchmod(pid, call.args)),
         LinuxSyscall::FchmodAt => compat_result(linux_fchmodat(pid, call.args, false)),
         LinuxSyscall::FchmodAt2 => compat_result(linux_fchmodat(pid, call.args, true)),
+        LinuxSyscall::Fchown => compat_result(linux_fchown(pid, call.args)),
+        LinuxSyscall::FchownAt => compat_result(linux_fchownat(pid, call.args)),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
         LinuxSyscall::Fstatfs => compat_result(linux_fstatfs(pid, call.args)),
         LinuxSyscall::Fsync => compat_result(linux_sync_fd(pid, call.args[0], false)),
@@ -4589,6 +4591,31 @@ fn linux_fchmodat(
         pid,
         [args[0], args[1], 0, if fchmodat2 { args[3] } else { 0 }, 0, 0],
         fchmodat2,
+    )?;
+    Err(CompatErrno::ReadOnly)
+}
+
+fn valid_compat_owner(owner: u64) -> bool {
+    owner == 0 || owner == u32::MAX as u64
+}
+
+fn linux_fchown(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if !valid_compat_owner(args[1]) || !valid_compat_owner(args[2]) {
+        return Err(CompatErrno::Perm);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    Err(CompatErrno::ReadOnly)
+}
+
+fn linux_fchownat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if !valid_compat_owner(args[2]) || !valid_compat_owner(args[3]) {
+        return Err(CompatErrno::Perm);
+    }
+    linux_faccessat(
+        pid,
+        [args[0], args[1], 0, args[4], 0, 0],
+        true,
     )?;
     Err(CompatErrno::ReadOnly)
 }

@@ -1303,6 +1303,22 @@ int main(void) {
         return 220;
     }
     errno = 0;
+    if (fchown(fd, 0, 0) != -1 || errno != EROFS) {
+        return 221;
+    }
+    errno = 0;
+    if (fchownat(AT_FDCWD, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                 0, 0, 0) != -1 ||
+        errno != EROFS) {
+        return 222;
+    }
+    errno = 0;
+    if (fchownat(AT_FDCWD, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                 123, 0, 0) != -1 ||
+        errno != EPERM) {
+        return 224;
+    }
+    errno = 0;
     if (readlinkat(AT_FDCWD, "/not-in-compat-root",
                    executable, sizeof(executable)) != -1 || errno != ENOENT) {
         return 17;
