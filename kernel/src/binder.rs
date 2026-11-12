@@ -80,7 +80,7 @@ static BINDER: IrqSpinLock<State> =
 pub(crate) fn set_context_manager(pid: ObjId) -> bool {
     let current = BINDER.lock().context_manager;
     if let Some(owner) = current {
-        if owner != pid && proc::is_linux_process(owner) {
+        if owner != pid && proc::state(owner) == Some(proc::ProcState::Running) {
             return false;
         }
     }
@@ -345,10 +345,15 @@ fn deliver(
                 .ok_or(CompatErrno::NoMemory)?;
             {
                 let mut state = BINDER.lock();
-                state
-                    .buffers
-                    .try_reserve(1)
-                    .map_err(|_| CompatErrno::NoMemory)?;
+                if state.buffers.try_reserve(1).is_err() {
+                    drop(state);
+                    let _ = proc::linux_free_transaction_buffer(
+                        recipient,
+                        buffer,
+                        combined_length,
+                    );
+                    return Err(CompatErrno::NoMemory);
+                }
                 state.buffers.push(TransactionBuffer {
                     process: recipient,
                     address: buffer,
