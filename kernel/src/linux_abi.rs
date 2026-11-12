@@ -1414,7 +1414,14 @@ fn execute(
         LinuxSyscall::Dup2 => compat_result(linux_dup2(pid, call.args)),
         LinuxSyscall::Dup3 => compat_result(linux_dup3(pid, call.args)),
         LinuxSyscall::Pipe2 => compat_result(linux_pipe2(pid, call.args)),
+        LinuxSyscall::Socket => compat_result(linux_socket(pid, call.args)),
+        LinuxSyscall::Bind => compat_result(linux_bind(pid, call.args)),
+        LinuxSyscall::Listen => compat_result(linux_listen(pid, call.args)),
+        LinuxSyscall::Connect => compat_result(linux_connect(pid, call.args)),
+        LinuxSyscall::Accept => compat_result(linux_accept(pid, call.args, false)),
+        LinuxSyscall::Accept4 => compat_result(linux_accept(pid, call.args, true)),
         LinuxSyscall::SocketPair => compat_result(linux_socketpair(pid, call.args)),
+        LinuxSyscall::SendMsg | LinuxSyscall::RecvMsg => compat_result(Err(CompatErrno::NoSys)),
         LinuxSyscall::SendTo => compat_result(linux_sendto(pid, call.args)),
         LinuxSyscall::RecvFrom => compat_result(linux_recvfrom(pid, call.args)),
         LinuxSyscall::Shutdown => compat_result(linux_shutdown(pid, call.args)),
@@ -1436,9 +1443,7 @@ fn execute(
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
         LinuxSyscall::Madvise => compat_result(linux_madvise(pid, call.args)),
-        LinuxSyscall::Clone => {
-            compat_result(linux_clone(pid, call.args, user_ip, user_preserved))
-        }
+        LinuxSyscall::Clone => compat_result(linux_clone(pid, call.args, user_ip, user_preserved)),
         LinuxSyscall::Clone3 => {
             compat_result(linux_clone3(pid, call.args, user_ip, user_preserved))
         }
@@ -1869,8 +1874,8 @@ fn linux_lseek(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     if entry.kind == compat_core::fd::CompatKind::Directory {
         let (handle, current) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::BadFd)?;
-        let directory = crate::linux_vfs::DirectoryId::from_handle(handle)
-            .ok_or(CompatErrno::BadFd)?;
+        let directory =
+            crate::linux_vfs::DirectoryId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
         let count = 2usize
             .checked_add(crate::linux_vfs::directory_entries(directory).len())
             .ok_or(CompatErrno::Invalid)?;
@@ -2334,10 +2339,7 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
             None => Err(CompatErrno::NoSys),
         }
     }
-    #[cfg(not(all(
-        feature = "lifecycle-root-exec-verify",
-        target_arch = "x86_64"
-    )))]
+    #[cfg(not(all(feature = "lifecycle-root-exec-verify", target_arch = "x86_64")))]
     {
         let _ = (executable, interpreter, argv, envp);
         Err(CompatErrno::NoSys)
@@ -2367,7 +2369,9 @@ fn linux_string_vector(
             return Ok(output);
         }
         let string = linux_c_string(string_address, 4096)?;
-        total = total.checked_add(string.len() + 1).ok_or(CompatErrno::Invalid)?;
+        total = total
+            .checked_add(string.len() + 1)
+            .ok_or(CompatErrno::Invalid)?;
         if total > max_bytes {
             return Err(CompatErrno::Invalid);
         }
@@ -2390,11 +2394,7 @@ fn linux_fork_clone(
     const CLONE_FLAGS: u64 = CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID;
     let flags = args[0];
     let signal = flags & 0xff;
-    if args[1] != 0
-        || signal != SIGCHLD
-        || flags & !(CLONE_FLAGS | 0xff) != 0
-        || args[2] != 0
-    {
+    if args[1] != 0 || signal != SIGCHLD || flags & !(CLONE_FLAGS | 0xff) != 0 || args[2] != 0 {
         return Err(CompatErrno::Invalid);
     }
     let (user_rip, user_stack) = user_ip.ok_or(CompatErrno::NoSys)?;
@@ -2798,9 +2798,7 @@ fn linux_gettimeofday(args: [u64; 6]) -> Result<u64, CompatErrno> {
 ///
 /// 使用可信 RTC 返回 Unix 秒；非空输出指针收到同样的 `time_t`。
 fn linux_time(args: [u64; 6]) -> Result<u64, CompatErrno> {
-    let seconds = crate::arch::wall_clock_ns()
-        .ok_or(CompatErrno::NoSys)?
-        / 1_000_000_000;
+    let seconds = crate::arch::wall_clock_ns().ok_or(CompatErrno::NoSys)? / 1_000_000_000;
     if args[0] != 0 {
         copy_to_user(args[0], &seconds.to_le_bytes(), 8).map_err(|_| CompatErrno::Fault)?;
     }
@@ -2856,9 +2854,7 @@ fn linux_clock_nanosleep(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno>
     const CLOCK_MONOTONIC: u64 = 1;
     const TIMER_ABSTIME: u64 = 1;
     let absolute = args[1] & TIMER_ABSTIME != 0;
-    if args[0] != CLOCK_MONOTONIC && args[0] != CLOCK_REALTIME
-        || args[1] & !TIMER_ABSTIME != 0
-    {
+    if args[0] != CLOCK_MONOTONIC && args[0] != CLOCK_REALTIME || args[1] & !TIMER_ABSTIME != 0 {
         return Err(CompatErrno::Invalid);
     }
     let requested = read_linux_timespec(args[2])?;
@@ -2999,12 +2995,8 @@ fn linux_pipe2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if flags & !(O_NONBLOCK | O_CLOEXEC) != 0 {
         return Err(CompatErrno::Invalid);
     }
-    let (reader, writer) = proc::linux_pipe2(
-        pid,
-        flags & O_CLOEXEC != 0,
-        flags & O_NONBLOCK != 0,
-    )
-    .ok_or(CompatErrno::NoSpace)?;
+    let (reader, writer) = proc::linux_pipe2(pid, flags & O_CLOEXEC != 0, flags & O_NONBLOCK != 0)
+        .ok_or(CompatErrno::NoSpace)?;
     let mut output = [0u8; 8];
     output[0..4].copy_from_slice(&reader.to_le_bytes());
     output[4..8].copy_from_slice(&writer.to_le_bytes());
@@ -3014,6 +3006,166 @@ fn linux_pipe2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Fault);
     }
     Ok(0)
+}
+
+/// Creates one unconnected AF_UNIX stream socket.
+fn linux_socket(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const AF_UNIX: u64 = 1;
+    const SOCK_STREAM: u64 = 1;
+    const SOCK_NONBLOCK: u64 = 0x800;
+    const SOCK_CLOEXEC: u64 = 0x80000;
+    let socket_type = args[1];
+    if args[0] != AF_UNIX
+        || socket_type & 0xf != SOCK_STREAM
+        || socket_type & !(0xf | SOCK_NONBLOCK | SOCK_CLOEXEC) != 0
+        || args[2] != 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    proc::linux_socket_create(
+        pid,
+        socket_type & SOCK_CLOEXEC != 0,
+        socket_type & SOCK_NONBLOCK != 0,
+    )
+    .map(u64::from)
+    .map_err(socket_compat_error)
+}
+
+/// Binds one AF_UNIX stream socket to an abstract or pathname address.
+fn linux_bind(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Socket {
+        return Err(CompatErrno::NotConnected);
+    }
+    let name = read_unix_socket_name(pid, args[1], args[2])?;
+    proc::linux_socket_bind(pid, entry.handle, name).map_err(socket_compat_error)?;
+    Ok(0)
+}
+
+/// Marks a bound AF_UNIX stream socket as accepting connections.
+fn linux_listen(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Socket {
+        return Err(CompatErrno::NotConnected);
+    }
+    let backlog = i64::from(args[1] as i32);
+    proc::linux_socket_listen(pid, entry.handle, backlog.max(0) as usize)
+        .map_err(socket_compat_error)?;
+    Ok(0)
+}
+
+/// Connects one AF_UNIX stream socket to a bound listener.
+fn linux_connect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Socket {
+        return Err(CompatErrno::NotConnected);
+    }
+    let name = read_unix_socket_name(pid, args[1], args[2])?;
+    proc::linux_socket_connect(pid, entry.handle, name).map_err(socket_compat_error)?;
+    Ok(0)
+}
+
+/// Accepts one AF_UNIX stream connection, blocking unless the listening
+/// descriptor is nonblocking.
+fn linux_accept(pid: ObjId, args: [u64; 6], accept4: bool) -> Result<u64, CompatErrno> {
+    const SOCK_NONBLOCK: u32 = 0x800;
+    const SOCK_CLOEXEC: u32 = 0x80000;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Socket {
+        return Err(CompatErrno::NotConnected);
+    }
+    let flags = if accept4 {
+        u32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?
+    } else {
+        0
+    };
+    if flags & !(SOCK_NONBLOCK | SOCK_CLOEXEC) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let listener_nonblocking =
+        proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    loop {
+        match proc::linux_socket_accept(
+            pid,
+            entry.handle,
+            flags & SOCK_CLOEXEC != 0,
+            flags & SOCK_NONBLOCK != 0,
+        ) {
+            Ok(accepted) => {
+                if args[1] != 0 {
+                    let accepted_entry = proc::linux_fd(pid, accepted).ok_or(CompatErrno::BadFd)?;
+                    let endpoint = proc::linux_socket_endpoint(pid, accepted_entry.handle)
+                        .ok_or(CompatErrno::BadFd)?;
+                    let peer = endpoint
+                        .peer_name()
+                        .unwrap_or_else(compat_core::UnixSocketName::empty);
+                    if write_unix_sockaddr(args[1], args[2], peer).is_err() {
+                        let _ = proc::linux_close_fd(pid, accepted);
+                        return Err(CompatErrno::Fault);
+                    }
+                }
+                return Ok(u64::from(accepted));
+            }
+            Err(proc::LinuxSocketError::WouldBlock) if listener_nonblocking => {
+                return Err(CompatErrno::TryAgain)
+            }
+            Err(proc::LinuxSocketError::WouldBlock) => {
+                if proc::current_exiting() || current_signal_pending(pid) {
+                    return Err(CompatErrno::Interrupted);
+                }
+                sched::pause();
+            }
+            Err(error) => return Err(socket_compat_error(error)),
+        }
+    }
+}
+
+/// Maps bounded socket-state failures to Linux x86_64 errno values.
+fn socket_compat_error(error: proc::LinuxSocketError) -> CompatErrno {
+    match error {
+        proc::LinuxSocketError::Invalid => CompatErrno::Invalid,
+        proc::LinuxSocketError::IsConnected => CompatErrno::IsConnected,
+        proc::LinuxSocketError::AddressInUse => CompatErrno::AddressInUse,
+        proc::LinuxSocketError::NotBound => CompatErrno::Invalid,
+        proc::LinuxSocketError::NotConnected => CompatErrno::NotConnected,
+        proc::LinuxSocketError::ConnectionRefused => CompatErrno::ConnectionRefused,
+        proc::LinuxSocketError::WouldBlock => CompatErrno::TryAgain,
+        proc::LinuxSocketError::NoSpace => CompatErrno::NoSpace,
+    }
+}
+
+/// Reads one bounded `sockaddr_un`, trimming the pathname terminator while
+/// preserving all bytes of an abstract name.
+fn read_unix_socket_name(
+    pid: ObjId,
+    address: u64,
+    length: u64,
+) -> Result<compat_core::UnixSocketName, CompatErrno> {
+    let length = usize::try_from(length).map_err(|_| CompatErrno::Invalid)?;
+    if !(3..=110).contains(&length) {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut raw = [0u8; 110];
+    proc::read(pid, address, &mut raw[..length]).map_err(|_| CompatErrno::Fault)?;
+    if u16::from_le_bytes(raw[..2].try_into().unwrap()) != 1 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut name = &raw[2..length];
+    if name[0] != 0 {
+        let end = name
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(name.len());
+        if end == 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        name = &name[..end];
+    }
+    compat_core::UnixSocketName::new(name).ok_or(CompatErrno::Invalid)
 }
 
 /// Implements the x86_64 `socketpair(2)` AF_UNIX stream subset.
@@ -3103,7 +3255,7 @@ fn linux_recvfrom(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         flags & MSG_DONTWAIT != 0,
     )?;
     if args[4] != 0 {
-        write_unix_sockaddr(args[4], args[5], 2)?;
+        write_unix_sockaddr(args[4], args[5], compat_core::UnixSocketName::empty())?;
     }
     Ok(received)
 }
@@ -3117,6 +3269,9 @@ fn linux_shutdown(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::NotConnected);
     }
     let socket = proc::linux_socket_endpoint(pid, entry.handle).ok_or(CompatErrno::NotConnected)?;
+    if !socket.is_connected() {
+        return Err(CompatErrno::NotConnected);
+    }
     if socket.shutdown(how) {
         Ok(0)
     } else {
@@ -3124,30 +3279,52 @@ fn linux_shutdown(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
 }
 
-/// Writes an unnamed AF_UNIX address and updates its caller length.
-fn write_unix_sockaddr(address: u64, length_address: u64, actual: u32) -> Result<(), CompatErrno> {
+/// Writes one AF_UNIX address and updates its caller length.
+fn write_unix_sockaddr(
+    address: u64,
+    length_address: u64,
+    name: compat_core::UnixSocketName,
+) -> Result<(), CompatErrno> {
+    if address == 0 || length_address == 0 {
+        return Err(CompatErrno::Fault);
+    }
     let mut raw_len = [0u8; 4];
     copy_from_user(&mut raw_len, length_address, 4).map_err(|_| CompatErrno::Fault)?;
     let capacity = u32::from_le_bytes(raw_len) as usize;
     let mut sockaddr = [0u8; 110];
     sockaddr[0..2].copy_from_slice(&1u16.to_le_bytes());
-    let copied = capacity.min(actual as usize);
+    let name = name.as_bytes();
+    sockaddr[2..2 + name.len()].copy_from_slice(name);
+    let actual = 2 + name.len();
+    let copied = capacity.min(actual);
     if copied != 0 {
         copy_to_user(address, &sockaddr[..copied], copied).map_err(|_| CompatErrno::Fault)?;
     }
-    copy_to_user(length_address, &actual.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+    copy_to_user(length_address, &(actual as u32).to_le_bytes(), 4)
+        .map_err(|_| CompatErrno::Fault)?;
     Ok(())
 }
 
-/// Implements `getsockname(2)` and `getpeername(2)` for connected Unix streams.
-fn linux_sockname(pid: ObjId, args: [u64; 6], _peer: bool) -> Result<u64, CompatErrno> {
+/// Implements `getsockname(2)` and `getpeername(2)` for Unix streams.
+fn linux_sockname(pid: ObjId, args: [u64; 6], peer: bool) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if entry.kind != compat_core::fd::CompatKind::Socket {
         return Err(CompatErrno::NotConnected);
     }
-    let _ = proc::linux_socket_endpoint(pid, entry.handle).ok_or(CompatErrno::NotConnected)?;
-    write_unix_sockaddr(args[1], args[2], 2)?;
+    let endpoint =
+        proc::linux_socket_endpoint(pid, entry.handle).ok_or(CompatErrno::NotConnected)?;
+    let name = if peer {
+        if !endpoint.is_connected() {
+            return Err(CompatErrno::NotConnected);
+        }
+        endpoint.peer_name().ok_or(CompatErrno::NotConnected)?
+    } else {
+        endpoint
+            .local_name()
+            .unwrap_or_else(compat_core::UnixSocketName::empty)
+    };
+    write_unix_sockaddr(args[1], args[2], name)?;
     Ok(0)
 }
 
@@ -3163,21 +3340,17 @@ fn linux_pipe_read(
         return Ok(0);
     }
     let endpoint = proc::linux_pipe_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
-    let nonblocking =
-        proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
     let mut output = alloc::vec![0u8; len];
     loop {
         match endpoint.read(&mut output) {
             compat_core::PipeRead::Data(0) => return Ok(0),
             compat_core::PipeRead::Data(count) => {
-                copy_to_user(address, &output[..count], count)
-                    .map_err(|_| CompatErrno::Fault)?;
+                copy_to_user(address, &output[..count], count).map_err(|_| CompatErrno::Fault)?;
                 return Ok(count as u64);
             }
             compat_core::PipeRead::Eof => return Ok(0),
-            compat_core::PipeRead::WouldBlock if nonblocking => {
-                return Err(CompatErrno::TryAgain)
-            }
+            compat_core::PipeRead::WouldBlock if nonblocking => return Err(CompatErrno::TryAgain),
             compat_core::PipeRead::WouldBlock => {
                 if proc::current_exiting() || current_signal_pending(pid) {
                     return Err(CompatErrno::Interrupted);
@@ -3203,8 +3376,7 @@ fn linux_pipe_write(
         return Err(CompatErrno::Invalid);
     }
     let endpoint = proc::linux_pipe_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
-    let nonblocking =
-        proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
     let mut input = alloc::vec![0u8; len];
     copy_from_user(&mut input, address, len).map_err(|_| CompatErrno::Fault)?;
     let mut written = 0usize;
@@ -3254,20 +3426,20 @@ fn linux_socket_read(
         return Ok(0);
     }
     let endpoint = proc::linux_socket_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
-    let nonblocking = force_nonblocking ||
-        proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    if !endpoint.is_connected() {
+        return Err(CompatErrno::NotConnected);
+    }
+    let nonblocking = force_nonblocking
+        || proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
     let mut output = alloc::vec![0u8; len];
     loop {
         match endpoint.read(&mut output) {
             compat_core::PipeRead::Data(count) => {
-                copy_to_user(address, &output[..count], count)
-                    .map_err(|_| CompatErrno::Fault)?;
+                copy_to_user(address, &output[..count], count).map_err(|_| CompatErrno::Fault)?;
                 return Ok(count as u64);
             }
             compat_core::PipeRead::Eof => return Ok(0),
-            compat_core::PipeRead::WouldBlock if nonblocking => {
-                return Err(CompatErrno::TryAgain)
-            }
+            compat_core::PipeRead::WouldBlock if nonblocking => return Err(CompatErrno::TryAgain),
             compat_core::PipeRead::WouldBlock => {
                 if proc::current_exiting() || current_signal_pending(pid) {
                     return Err(CompatErrno::Interrupted);
@@ -3295,8 +3467,11 @@ fn linux_socket_write(
         return Err(CompatErrno::Invalid);
     }
     let endpoint = proc::linux_socket_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
-    let nonblocking = force_nonblocking ||
-        proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    if !endpoint.is_connected() {
+        return Err(CompatErrno::NotConnected);
+    }
+    let nonblocking = force_nonblocking
+        || proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
     let mut input = alloc::vec![0u8; len];
     copy_from_user(&mut input, address, len).map_err(|_| CompatErrno::Fault)?;
     let mut written = 0usize;
@@ -3439,8 +3614,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn linux_fchdir(pid: ObjId, fd: u64) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(fd).map_err(|_| CompatErrno::BadFd)?;
     let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::BadFd)?;
-    let directory =
-        crate::linux_vfs::DirectoryId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
+    let directory = crate::linux_vfs::DirectoryId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
     if proc::set_linux_cwd(pid, directory) {
         Ok(0)
     } else {
@@ -3617,8 +3791,7 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const STATX_BTIME: u64 = 0x800;
     const STATX_MNT_ID: u64 = 0x1000;
     const STATX_DIOALIGN: u64 = 0x2000;
-    const SUPPORTED_MASK: u64 =
-        STATX_BASIC_STATS | STATX_BTIME | STATX_MNT_ID | STATX_DIOALIGN;
+    const SUPPORTED_MASK: u64 = STATX_BASIC_STATS | STATX_BTIME | STATX_MNT_ID | STATX_DIOALIGN;
     const RETURNED_MASK: u32 = 0x71f;
     if args[2] & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH | AT_STATX_SYNC_TYPE) != 0
         || args[3] & !SUPPORTED_MASK != 0
@@ -3657,8 +3830,7 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 if path == b"." {
                     base.to_vec()
                 } else {
-                    let mut resolved =
-                        alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
+                    let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
                     resolved.extend_from_slice(base);
                     if !base.ends_with(b"/") {
                         resolved.push(b'/');
@@ -3683,8 +3855,7 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     crate::linux_vfs::Node::File(file),
                     file.bytes().len() as u64,
                 )
-            } else if let Some(directory) =
-                crate::linux_vfs::DirectoryId::from_handle(entry.handle)
+            } else if let Some(directory) = crate::linux_vfs::DirectoryId::from_handle(entry.handle)
             {
                 (crate::linux_vfs::Node::Directory(directory), 4096)
             } else {
@@ -3750,13 +3921,8 @@ fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         F_DUPFD | F_DUPFD_CLOEXEC => {
             let minimum = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-            let duplicate = proc::linux_duplicate_fd(
-                pid,
-                fd,
-                minimum,
-                args[1] == F_DUPFD_CLOEXEC,
-            )
-            .ok_or(CompatErrno::NoSpace)?;
+            let duplicate = proc::linux_duplicate_fd(pid, fd, minimum, args[1] == F_DUPFD_CLOEXEC)
+                .ok_or(CompatErrno::NoSpace)?;
             Ok(u64::from(duplicate))
         }
         F_SETFD | F_SETFL => Err(CompatErrno::Invalid),
@@ -3920,8 +4086,8 @@ fn linux_fstatfs(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     let size = match entry.kind {
         compat_core::fd::CompatKind::File => {
-            let file = crate::linux_vfs::FileId::from_handle(entry.handle)
-                .ok_or(CompatErrno::BadFd)?;
+            let file =
+                crate::linux_vfs::FileId::from_handle(entry.handle).ok_or(CompatErrno::BadFd)?;
             file.bytes().len() as u64
         }
         compat_core::fd::CompatKind::Directory => 4096,

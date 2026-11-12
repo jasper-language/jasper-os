@@ -19,7 +19,8 @@
 //! [`destroy_task_object`]：销毁地址空间、归还帧、释放线程表引用（级联）。
 
 use alloc::boxed::Box;
-use alloc::sync::Arc;
+use alloc::collections::VecDeque;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -37,6 +38,7 @@ use kernel_core::objtable::ObjId;
 use kernel_core::paging::{MapError, MapFlags, VirtPage};
 use kernel_core::security::{ApplicationIdentity, IdentityClass};
 use kernel_core::security_domain::DomainKey;
+use kernel_core::sync::SpinLock;
 use kernel_core::usi_request::{Begin as UsiRequestBegin, Ledger as UsiRequestLedger};
 
 use crate::kobj::{self, KObject, TaskObj};
@@ -119,6 +121,32 @@ struct LinuxPipeHandle {
 struct LinuxSocketHandle {
     handle: u64,
     endpoint: Arc<compat_core::UnixSocketEndpoint>,
+    listener: Option<Arc<UnixListener>>,
+}
+
+#[cfg(feature = "linux-abi")]
+struct UnixListener {
+    name: compat_core::UnixSocketName,
+    listening: AtomicU32,
+    backlog: AtomicU32,
+    pending: SpinLock<VecDeque<Arc<compat_core::UnixSocketEndpoint>>>,
+}
+
+#[cfg(feature = "linux-abi")]
+static UNIX_LISTENERS: IrqSpinLock<Vec<Weak<UnixListener>>> =
+    IrqSpinLock::ranked(crate::lockorder::LINUX_SOCKET, Vec::new());
+
+#[cfg(feature = "linux-abi")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinuxSocketError {
+    Invalid,
+    IsConnected,
+    AddressInUse,
+    NotBound,
+    NotConnected,
+    ConnectionRefused,
+    WouldBlock,
+    NoSpace,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -612,8 +640,7 @@ pub(crate) fn linux_socketpair(
         }
         let first_handle = linux.next_socket_handle;
         let second_handle = first_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
-        linux.next_socket_handle =
-            second_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        linux.next_socket_handle = second_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
         let (first, second) = compat_core::UnixSocketEndpoint::pair();
         let rights = kernel_core::object::Rights::READ.union(kernel_core::object::Rights::WRITE);
         let first_fd = linux
@@ -650,14 +677,275 @@ pub(crate) fn linux_socketpair(
         linux.sockets.push(LinuxSocketHandle {
             handle: first_handle,
             endpoint: Arc::new(first),
+            listener: None,
         });
         linux.sockets.push(LinuxSocketHandle {
             handle: second_handle,
             endpoint: Arc::new(second),
+            listener: None,
         });
         Ok((first_fd.fd(), second_fd.fd()))
     })
     .ok()
+}
+
+/// Creates one unconnected AF_UNIX stream endpoint.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_create(
+    pid: ObjId,
+    close_on_exec: bool,
+    nonblocking: bool,
+) -> Result<u32, LinuxSocketError> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.sockets.len() >= 32 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .sockets
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_socket_handle;
+        linux.next_socket_handle = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let endpoint = Arc::new(compat_core::UnixSocketEndpoint::unconnected());
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ.union(Rights::WRITE),
+                compat_core::fd::CompatKind::Socket,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        if nonblocking
+            && !linux
+                .fds
+                .set_fd_status_flags(fd.fd(), compat_core::syscall::LINUX_O_NONBLOCK)
+        {
+            let _ = linux.fds.close(fd);
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux.sockets.push(LinuxSocketHandle {
+            handle,
+            endpoint,
+            listener: None,
+        });
+        Ok(fd.fd())
+    })
+    .map_err(|_| LinuxSocketError::NoSpace)
+}
+
+/// Binds one unconnected AF_UNIX endpoint to a bounded abstract or pathname
+/// identity in the Linux compatibility namespace.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_bind(
+    pid: ObjId,
+    handle: u64,
+    name: compat_core::UnixSocketName,
+) -> Result<(), LinuxSocketError> {
+    crate::kobj::with(|t| match t.get_mut(pid) {
+        Ok(KObject::Process(p)) => {
+            let linux = p.linux.as_mut().ok_or(LinuxSocketError::Invalid)?;
+            let socket = linux
+                .sockets
+                .iter_mut()
+                .find(|socket| socket.handle == handle)
+                .ok_or(LinuxSocketError::NotConnected)?;
+            if socket.listener.is_some() {
+                return Err(LinuxSocketError::Invalid);
+            }
+            if socket.endpoint.is_connected() {
+                return Err(LinuxSocketError::IsConnected);
+            }
+            let mut listeners = UNIX_LISTENERS.lock();
+            listeners.retain(|listener| listener.strong_count() != 0);
+            if listeners
+                .iter()
+                .filter_map(Weak::upgrade)
+                .any(|listener| listener.name == name)
+            {
+                return Err(LinuxSocketError::AddressInUse);
+            }
+            listeners
+                .try_reserve(1)
+                .map_err(|_| LinuxSocketError::NoSpace)?;
+            let listener = Arc::new(UnixListener {
+                name,
+                listening: AtomicU32::new(0),
+                backlog: AtomicU32::new(1),
+                pending: SpinLock::new(VecDeque::new()),
+            });
+            listeners.push(Arc::downgrade(&listener));
+            socket.listener = Some(listener);
+            Ok(())
+        }
+        _ => Err(LinuxSocketError::Invalid),
+    })
+}
+
+/// Enables accept processing for one bound AF_UNIX endpoint.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_listen(
+    pid: ObjId,
+    handle: u64,
+    backlog: usize,
+) -> Result<(), LinuxSocketError> {
+    crate::kobj::with(|t| match t.get_mut(pid) {
+        Ok(KObject::Process(p)) => {
+            let linux = p.linux.as_mut().ok_or(LinuxSocketError::Invalid)?;
+            let socket = linux
+                .sockets
+                .iter()
+                .find(|socket| socket.handle == handle)
+                .ok_or(LinuxSocketError::NotConnected)?;
+            if socket.endpoint.is_connected() {
+                return Err(LinuxSocketError::IsConnected);
+            }
+            let listener = socket.listener.as_ref().ok_or(LinuxSocketError::NotBound)?;
+            let backlog = backlog.clamp(1, 128);
+            listener
+                .pending
+                .lock()
+                .try_reserve(backlog)
+                .map_err(|_| LinuxSocketError::NoSpace)?;
+            listener.backlog.store(backlog as u32, Ordering::Release);
+            listener.listening.store(1, Ordering::Release);
+            Ok(())
+        }
+        _ => Err(LinuxSocketError::Invalid),
+    })
+}
+
+/// Connects one unconnected client endpoint to a bound listing endpoint.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_connect(
+    pid: ObjId,
+    handle: u64,
+    name: compat_core::UnixSocketName,
+) -> Result<(), LinuxSocketError> {
+    crate::kobj::with(|t| match t.get_mut(pid) {
+        Ok(KObject::Process(p)) => {
+            let linux = p.linux.as_mut().ok_or(LinuxSocketError::Invalid)?;
+            let socket = linux
+                .sockets
+                .iter()
+                .find(|socket| socket.handle == handle)
+                .ok_or(LinuxSocketError::NotConnected)?;
+            if socket.endpoint.is_connected() {
+                return Err(LinuxSocketError::IsConnected);
+            }
+            if socket
+                .listener
+                .as_ref()
+                .is_some_and(|listener| listener.listening.load(Ordering::Acquire) != 0)
+            {
+                return Err(LinuxSocketError::Invalid);
+            }
+            let local_name = socket
+                .listener
+                .as_ref()
+                .map(|listener| listener.name)
+                .unwrap_or_else(compat_core::UnixSocketName::empty);
+            let listener = {
+                let mut listeners = UNIX_LISTENERS.lock();
+                listeners.retain(|listener| listener.strong_count() != 0);
+                listeners
+                    .iter()
+                    .filter_map(Weak::upgrade)
+                    .find(|listener| listener.name == name)
+            }
+            .ok_or(LinuxSocketError::ConnectionRefused)?;
+            if listener.listening.load(Ordering::Acquire) == 0 {
+                return Err(LinuxSocketError::ConnectionRefused);
+            }
+            let mut pending = listener.pending.lock();
+            if pending.len() >= listener.backlog.load(Ordering::Acquire) as usize {
+                return Err(LinuxSocketError::ConnectionRefused);
+            }
+            pending
+                .try_reserve(1)
+                .map_err(|_| LinuxSocketError::NoSpace)?;
+            let accepted = Arc::new(compat_core::UnixSocketEndpoint::unconnected());
+            if !compat_core::UnixSocketEndpoint::connect_pair(&socket.endpoint, &accepted) {
+                return Err(LinuxSocketError::Invalid);
+            }
+            if !socket.endpoint.set_names(local_name, name) || !accepted.set_names(name, local_name)
+            {
+                return Err(LinuxSocketError::Invalid);
+            }
+            pending.push_back(accepted);
+            Ok(())
+        }
+        _ => Err(LinuxSocketError::Invalid),
+    })
+}
+
+/// Removes one completed connection from a listening socket and installs the
+/// server endpoint as a new descriptor.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_accept(
+    pid: ObjId,
+    handle: u64,
+    close_on_exec: bool,
+    nonblocking: bool,
+) -> Result<u32, LinuxSocketError> {
+    crate::kobj::with(|t| match t.get_mut(pid) {
+        Ok(KObject::Process(p)) => {
+            let linux = p.linux.as_mut().ok_or(LinuxSocketError::Invalid)?;
+            if linux.sockets.len() >= 32 {
+                return Err(LinuxSocketError::NoSpace);
+            }
+            let listener = linux
+                .sockets
+                .iter()
+                .find(|socket| socket.handle == handle)
+                .and_then(|socket| socket.listener.as_ref())
+                .cloned()
+                .ok_or(LinuxSocketError::NotBound)?;
+            if listener.listening.load(Ordering::Acquire) == 0 {
+                return Err(LinuxSocketError::Invalid);
+            }
+            let accepted = listener
+                .pending
+                .lock()
+                .pop_front()
+                .ok_or(LinuxSocketError::WouldBlock)?;
+            linux
+                .sockets
+                .try_reserve(1)
+                .map_err(|_| LinuxSocketError::NoSpace)?;
+            let handle = linux
+                .next_socket_handle
+                .checked_add(1)
+                .ok_or(LinuxSocketError::NoSpace)?;
+            let installed_handle = linux.next_socket_handle;
+            let fd = linux
+                .fds
+                .install(
+                    installed_handle,
+                    Rights::READ.union(Rights::WRITE),
+                    compat_core::fd::CompatKind::Socket,
+                    close_on_exec,
+                )
+                .map_err(|_| LinuxSocketError::NoSpace)?;
+            if nonblocking
+                && !linux
+                    .fds
+                    .set_fd_status_flags(fd.fd(), compat_core::syscall::LINUX_O_NONBLOCK)
+            {
+                let _ = linux.fds.close(fd);
+                return Err(LinuxSocketError::NoSpace);
+            }
+            linux.next_socket_handle = handle;
+            linux.sockets.push(LinuxSocketHandle {
+                handle: installed_handle,
+                endpoint: accepted,
+                listener: None,
+            });
+            Ok(fd.fd())
+        }
+        _ => Err(LinuxSocketError::Invalid),
+    })
 }
 
 /// Resolves one pipe endpoint without incrementing its process-lifetime reference.
@@ -2839,33 +3127,31 @@ pub fn vfork_linux_process(
     let parent_stack_top = crate::arch::kernel_stack();
     let (parent_linux_pid, calls, state, parent_root, frames, memory_caps) =
         kobj::with(|t| match t.get(parent) {
-        Ok(KObject::Process(p))
-            if p.state == ProcState::Running && p.threads_live == 1 =>
-        {
-            let linux = p.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
-            if !p.shared_maps.is_empty()
-                || !p.device_maps.is_empty()
-                || !p.quarantined.is_empty()
-            {
-                return Err(ProcError::NotTransferable);
+            Ok(KObject::Process(p)) if p.state == ProcState::Running && p.threads_live == 1 => {
+                let linux = p.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
+                if !p.shared_maps.is_empty()
+                    || !p.device_maps.is_empty()
+                    || !p.quarantined.is_empty()
+                {
+                    return Err(ProcError::NotTransferable);
+                }
+                let mut frames = Vec::new();
+                frames
+                    .try_reserve(p.frames.len())
+                    .map_err(|_| ProcError::OutOfFrames)?;
+                frames.extend(p.frames.iter().cloned());
+                Ok((
+                    linux.pid,
+                    linux.calls,
+                    linux.clone(),
+                    p.space.root(),
+                    frames,
+                    p.memory_caps.clone(),
+                ))
             }
-            let mut frames = Vec::new();
-            frames
-                .try_reserve(p.frames.len())
-                .map_err(|_| ProcError::OutOfFrames)?;
-            frames.extend(p.frames.iter().cloned());
-            Ok((
-                linux.pid,
-                linux.calls,
-                linux.clone(),
-                p.space.root(),
-                frames,
-                p.memory_caps.clone(),
-            ))
-        }
-        Ok(KObject::Process(_)) => Err(ProcError::Exited),
-        _ => Err(ProcError::NoSuchProcess),
-    })?;
+            Ok(KObject::Process(_)) => Err(ProcError::Exited),
+            _ => Err(ProcError::NoSuchProcess),
+        })?;
     let phys_offset = crate::boot::get()
         .and_then(|boot| boot.phys_offset)
         .ok_or(ProcError::Map(MapError::NotMapped))?;
@@ -2877,10 +3163,7 @@ pub fn vfork_linux_process(
         let parent_stack_frame = unsafe { crate::arch::translate_in(parent_root, phys_offset, va) }
             .map(|(frame, _)| frame)
             .ok_or(ProcError::Map(MapError::NotMapped))?;
-        if frames
-            .iter()
-            .any(|page| page.frame() == parent_stack_frame)
-        {
+        if frames.iter().any(|page| page.frame() == parent_stack_frame) {
             return Err(ProcError::NotTransferable);
         }
     }
@@ -2911,8 +3194,7 @@ pub fn vfork_linux_process(
         });
         p.frames = frames;
         p.memory_caps = memory_caps;
-        let borrowed =
-            crate::mm::space::VmSpace::borrowed(parent_root).map_err(ProcError::Map)?;
+        let borrowed = crate::mm::space::VmSpace::borrowed(parent_root).map_err(ProcError::Map)?;
         let old = core::mem::replace(&mut p.space, borrowed);
         drop(old);
         Ok(())

@@ -2,12 +2,13 @@
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use kernel_core::sync::SpinLock;
 
 pub const PIPE_CAPACITY: usize = 64 * 1024;
 pub const PIPE_BUF: usize = 4096;
+pub const UNIX_SOCKET_NAME_MAX: usize = 108;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeRead {
@@ -35,41 +36,167 @@ pub struct PipeEndpoint {
     reader: bool,
 }
 
-/// One endpoint of a bounded bidirectional Unix stream socket.
-pub struct UnixSocketEndpoint {
-    rx: PipeEndpoint,
-    tx: PipeEndpoint,
-    shutdown: Arc<SocketShutdownState>,
-    first: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnixSocketName {
+    bytes: [u8; UNIX_SOCKET_NAME_MAX],
+    len: u8,
 }
 
-struct SocketShutdownState {
+impl UnixSocketName {
+    pub const fn empty() -> Self {
+        Self {
+            bytes: [0; UNIX_SOCKET_NAME_MAX],
+            len: 0,
+        }
+    }
+
+    pub fn new(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() > UNIX_SOCKET_NAME_MAX {
+            return None;
+        }
+        let mut name = Self::empty();
+        name.bytes[..bytes.len()].copy_from_slice(bytes);
+        name.len = bytes.len() as u8;
+        Some(name)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+/// One endpoint of a bounded bidirectional Unix stream socket.
+pub struct UnixSocketEndpoint {
+    link: SpinLock<Option<SocketLink>>,
+    identity: SpinLock<Option<Arc<SocketIdentity>>>,
+    side: AtomicU8,
+}
+
+struct SocketLink {
+    rx: PipeEndpoint,
+    tx: PipeEndpoint,
+}
+
+struct SocketIdentity {
+    names: SpinLock<SocketNames>,
     first: AtomicU32,
     second: AtomicU32,
 }
 
+struct SocketNames {
+    first: UnixSocketName,
+    second: UnixSocketName,
+}
+
 impl UnixSocketEndpoint {
     pub fn pair() -> (Self, Self) {
+        Self::connected_pair()
+    }
+
+    fn connected_pair() -> (Self, Self) {
+        let identity = Arc::new(SocketIdentity::new());
         let (a_to_b_rx, a_to_b_tx) = PipeEndpoint::pair();
         let (b_to_a_rx, b_to_a_tx) = PipeEndpoint::pair();
-        let shutdown = Arc::new(SocketShutdownState {
-            first: AtomicU32::new(0),
-            second: AtomicU32::new(0),
-        });
         (
             Self {
-                rx: b_to_a_rx,
-                tx: a_to_b_tx,
-                shutdown: Arc::clone(&shutdown),
-                first: true,
+                link: SpinLock::new(Some(SocketLink {
+                    rx: b_to_a_rx,
+                    tx: a_to_b_tx,
+                })),
+                identity: SpinLock::new(Some(Arc::clone(&identity))),
+                side: AtomicU8::new(0),
             },
             Self {
-                rx: a_to_b_rx,
-                tx: b_to_a_tx,
-                shutdown,
-                first: false,
+                link: SpinLock::new(Some(SocketLink {
+                    rx: a_to_b_rx,
+                    tx: b_to_a_tx,
+                })),
+                identity: SpinLock::new(Some(identity)),
+                side: AtomicU8::new(1),
             },
         )
+    }
+
+    /// Creates a socket placeholder that may later be connected without
+    /// replacing its fd handle. Fork inheritance shares this transition.
+    pub fn unconnected() -> Self {
+        Self {
+            link: SpinLock::new(None),
+            identity: SpinLock::new(None),
+            side: AtomicU8::new(0),
+        }
+    }
+
+    /// Atomically joins two unconnected endpoints as opposite sides of one
+    /// bidirectional stream. The operation has no partial result.
+    pub fn connect_pair(client: &Self, server: &Self) -> bool {
+        if core::ptr::eq(client, server) {
+            return false;
+        }
+        let mut client_link = client.link.lock();
+        let mut server_link = server.link.lock();
+        if client_link.is_some() || server_link.is_some() {
+            return false;
+        }
+        let identity = Arc::new(SocketIdentity::new());
+        let (a_to_b_rx, a_to_b_tx) = PipeEndpoint::pair();
+        let (b_to_a_rx, b_to_a_tx) = PipeEndpoint::pair();
+        client.side.store(0, Ordering::Release);
+        server.side.store(1, Ordering::Release);
+        *client_link = Some(SocketLink {
+            rx: b_to_a_rx,
+            tx: a_to_b_tx,
+        });
+        *server_link = Some(SocketLink {
+            rx: a_to_b_rx,
+            tx: b_to_a_tx,
+        });
+        *client.identity.lock() = Some(Arc::clone(&identity));
+        *server.identity.lock() = Some(identity);
+        true
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.link.lock().is_some()
+    }
+
+    pub fn set_names(&self, local: UnixSocketName, peer: UnixSocketName) -> bool {
+        let Some(identity) = self.identity() else {
+            return false;
+        };
+        let mut names = identity.names.lock();
+        if self.is_first() {
+            names.first = local;
+            names.second = peer;
+        } else {
+            names.second = local;
+            names.first = peer;
+        }
+        true
+    }
+
+    pub fn local_name(&self) -> Option<UnixSocketName> {
+        let identity = self.identity()?;
+        let names = identity.names.lock();
+        Some(if self.is_first() {
+            names.first
+        } else {
+            names.second
+        })
+    }
+
+    pub fn peer_name(&self) -> Option<UnixSocketName> {
+        let identity = self.identity()?;
+        let names = identity.names.lock();
+        Some(if self.is_first() {
+            names.second
+        } else {
+            names.first
+        })
     }
 
     pub fn read(&self, output: &mut [u8]) -> PipeRead {
@@ -78,7 +205,11 @@ impl UnixSocketEndpoint {
         if self.flags() & SHUT_RD != 0 {
             return PipeRead::Eof;
         }
-        match self.rx.read(output) {
+        let link = self.link.lock();
+        let Some(link) = link.as_ref() else {
+            return PipeRead::Eof;
+        };
+        match link.rx.read(output) {
             PipeRead::WouldBlock if self.peer_flags() & SHUT_WR != 0 => PipeRead::Eof,
             result => result,
         }
@@ -90,27 +221,55 @@ impl UnixSocketEndpoint {
         if self.flags() & SHUT_WR != 0 || self.peer_flags() & SHUT_RD != 0 {
             return PipeWrite::Broken;
         }
-        self.tx.write(input)
+        let link = self.link.lock();
+        let Some(link) = link.as_ref() else {
+            return PipeWrite::Broken;
+        };
+        link.tx.write(input)
     }
 
     pub fn buffered_bytes(&self) -> usize {
-        self.rx.buffered_bytes()
+        self.link
+            .lock()
+            .as_ref()
+            .map(|link| link.rx.buffered_bytes())
+            .unwrap_or(0)
     }
 
     pub fn is_readable(&self) -> bool {
-        self.flags() & 1 != 0 || self.peer_flags() & 2 != 0 || self.rx.is_readable()
+        self.flags() & 1 != 0
+            || self.peer_flags() & 2 != 0
+            || self
+                .link
+                .lock()
+                .as_ref()
+                .is_none_or(|link| link.rx.is_readable())
     }
 
     pub fn is_writable(&self) -> bool {
-        self.flags() & 2 == 0 && self.peer_flags() & 1 == 0 && self.tx.is_writable()
+        self.flags() & 2 == 0
+            && self.peer_flags() & 1 == 0
+            && self
+                .link
+                .lock()
+                .as_ref()
+                .is_some_and(|link| link.tx.is_writable())
     }
 
     pub fn peer_read_gone(&self) -> bool {
-        self.tx.readers_gone() || self.peer_flags() & 1 != 0
+        self.link
+            .lock()
+            .as_ref()
+            .is_none_or(|link| link.tx.readers_gone())
+            || self.peer_flags() & 1 != 0
     }
 
     pub fn peer_write_gone(&self) -> bool {
-        self.rx.writers_gone() || self.peer_flags() & 2 != 0
+        self.link
+            .lock()
+            .as_ref()
+            .is_none_or(|link| link.rx.writers_gone())
+            || self.peer_flags() & 2 != 0
     }
 
     pub fn shutdown(&self, how: u32) -> bool {
@@ -120,28 +279,58 @@ impl UnixSocketEndpoint {
             2 => 3,
             _ => return false,
         };
-        let state = if self.first {
-            &self.shutdown.first
+        let Some(identity) = self.identity() else {
+            return false;
+        };
+        let state = if self.is_first() {
+            &identity.first
         } else {
-            &self.shutdown.second
+            &identity.second
         };
         state.fetch_or(bits, Ordering::AcqRel);
         true
     }
 
+    fn identity(&self) -> Option<Arc<SocketIdentity>> {
+        self.identity.lock().as_ref().map(Arc::clone)
+    }
+
+    fn is_first(&self) -> bool {
+        self.side.load(Ordering::Acquire) == 0
+    }
+
     fn flags(&self) -> u32 {
-        if self.first {
-            self.shutdown.first.load(Ordering::Acquire)
+        let Some(identity) = self.identity() else {
+            return 0;
+        };
+        if self.is_first() {
+            identity.first.load(Ordering::Acquire)
         } else {
-            self.shutdown.second.load(Ordering::Acquire)
+            identity.second.load(Ordering::Acquire)
         }
     }
 
     fn peer_flags(&self) -> u32 {
-        if self.first {
-            self.shutdown.second.load(Ordering::Acquire)
+        let Some(identity) = self.identity() else {
+            return 0;
+        };
+        if self.is_first() {
+            identity.second.load(Ordering::Acquire)
         } else {
-            self.shutdown.first.load(Ordering::Acquire)
+            identity.first.load(Ordering::Acquire)
+        }
+    }
+}
+
+impl SocketIdentity {
+    fn new() -> Self {
+        Self {
+            names: SpinLock::new(SocketNames {
+                first: UnixSocketName::empty(),
+                second: UnixSocketName::empty(),
+            }),
+            first: AtomicU32::new(0),
+            second: AtomicU32::new(0),
         }
     }
 }
@@ -317,5 +506,31 @@ mod tests {
         assert_eq!(b.write(b"x"), PipeWrite::Broken);
         assert_eq!(a.read(&mut [0; 1]), PipeRead::Eof);
         assert!(!a.shutdown(3));
+    }
+
+    #[test]
+    fn unconnected_endpoints_can_be_joined_once_and_carry_names() {
+        let client = UnixSocketEndpoint::unconnected();
+        let server = UnixSocketEndpoint::unconnected();
+        assert!(!client.is_connected());
+        assert!(UnixSocketEndpoint::connect_pair(&client, &server));
+        assert!(client.is_connected());
+        assert!(server.is_connected());
+        assert!(!UnixSocketEndpoint::connect_pair(
+            &client,
+            &UnixSocketEndpoint::unconnected()
+        ));
+        assert!(client.set_names(
+            UnixSocketName::empty(),
+            UnixSocketName::new(b"srv").unwrap()
+        ));
+        assert!(server.set_names(
+            UnixSocketName::new(b"srv").unwrap(),
+            UnixSocketName::empty()
+        ));
+        assert_eq!(client.peer_name().unwrap().as_bytes(), b"srv");
+        assert_eq!(server.local_name().unwrap().as_bytes(), b"srv");
+        assert_eq!(client.write(b"x"), PipeWrite::Data(1));
+        assert_eq!(server.read(&mut [0; 1]), PipeRead::Data(1));
     }
 }

@@ -24,7 +24,10 @@ pub use native::{
     Epoll, EpollEvent, EpollInterest, EventSourceTable, Futex, FutexWake, MemoryMapping,
     NativeError, NativeHandle, NativeMemory, NativeWait, Uring,
 };
-pub use pipe::{PipeEndpoint, PipeRead, PipeWrite, UnixSocketEndpoint, PIPE_BUF, PIPE_CAPACITY};
+pub use pipe::{
+    PipeEndpoint, PipeRead, PipeWrite, UnixSocketEndpoint, UnixSocketName, PIPE_BUF, PIPE_CAPACITY,
+    UNIX_SOCKET_NAME_MAX,
+};
 pub use process::{LinuxPid, ProcessEntry, ProcessTable, ProcessTableError, ProcessToken};
 pub use syscall::{
     compat_result, dispatch, CompatErrno, LinuxCall, LinuxSyscall, LinuxSyscallSet,

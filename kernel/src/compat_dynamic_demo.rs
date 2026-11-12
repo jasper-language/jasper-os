@@ -88,7 +88,15 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Dup2,
         LinuxSyscall::Dup3,
         LinuxSyscall::Pipe2,
+        LinuxSyscall::Socket,
+        LinuxSyscall::Bind,
+        LinuxSyscall::Listen,
+        LinuxSyscall::Connect,
+        LinuxSyscall::Accept,
+        LinuxSyscall::Accept4,
         LinuxSyscall::SocketPair,
+        LinuxSyscall::SendMsg,
+        LinuxSyscall::RecvMsg,
         LinuxSyscall::SendTo,
         LinuxSyscall::RecvFrom,
         LinuxSyscall::Shutdown,
@@ -528,7 +536,8 @@ fn prepare_exec_image(
     argv: &[&[u8]],
     envp: &[&[u8]],
 ) -> Result<(u64, u64), &'static str> {
-    let executable_plan = jasper_compat_loader::parse(executable).map_err(|_| "parse_executable")?;
+    let executable_plan =
+        jasper_compat_loader::parse(executable).map_err(|_| "parse_executable")?;
     let interpreter_plan =
         jasper_compat_loader::parse(interpreter).map_err(|_| "parse_interpreter")?;
     if executable_plan.interpreter.as_deref() != Some("/lib64/ld-linux-x86-64.so.2") {
@@ -595,13 +604,7 @@ fn map_exec_stack(
         & !(FRAME_SIZE - 1);
     let mut mapped = alloc::vec::Vec::new();
     for address in (start..end).step_by(FRAME_SIZE as usize) {
-        if proc::map_new(
-            pid,
-            address,
-            MapFlags::USER.union(MapFlags::WRITE),
-        )
-        .is_err()
-        {
+        if proc::map_new(pid, address, MapFlags::USER.union(MapFlags::WRITE)).is_err() {
             for rollback in mapped.iter().rev().copied() {
                 let _ = proc::unmap_page(pid, rollback);
             }
@@ -636,7 +639,10 @@ pub(crate) fn exec_dynamic_program(
     let saved = match proc::begin_exec_address_space(pid) {
         Ok(saved) => saved,
         Err(error) => {
-            kprintln!("[JSR-LINUX-EXEC-FAIL] stage=address_space error={:?}", error);
+            kprintln!(
+                "[JSR-LINUX-EXEC-FAIL] stage=address_space error={:?}",
+                error
+            );
             return None;
         }
     };
@@ -653,13 +659,7 @@ pub(crate) fn exec_dynamic_program(
             .iter()
             .map(|value| value.as_slice())
             .collect::<alloc::vec::Vec<_>>();
-        prepare_exec_image(
-            pid,
-            &executable,
-            &interpreter,
-            &argv_refs,
-            &envp_refs,
-        )
+        prepare_exec_image(pid, &executable, &interpreter, &argv_refs, &envp_refs)
     };
     let (entry, stack) = match prepared {
         Ok(prepared) => prepared,

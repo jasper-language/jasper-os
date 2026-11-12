@@ -49,6 +49,8 @@ pub const FAULT_LAST: LockClass = LockClass::new(10, "system.fault.last");
 /// 最近一次线程退出记录。
 /// Last thread exit record.
 pub const SYSCALL_LAST_EXIT: LockClass = LockClass::new(11, "system.syscall.last_exit");
+/// Linux AF_UNIX bound-name namespace.
+pub const LINUX_SOCKET: LockClass = LockClass::new(12, "system.compat.linux.socket");
 /// 内存压力参数与统计。
 /// Memory-pressure state.
 pub const MEMORY_PRESSURE: LockClass = LockClass::new(13, "system.memory.pressure");
@@ -88,6 +90,7 @@ pub const REGISTRY: &[LockClass] = &[
     LINUX_COMPAT,
     FAULT_LAST,
     SYSCALL_LAST_EXIT,
+    LINUX_SOCKET,
     MEMORY_PRESSURE,
     MEMORY_HEAP,
     MEMORY_FRAME,
@@ -104,5 +107,9 @@ const _: () = assert!(validate_registry(REGISTRY).is_ok(), "锁顺序登记表�
 /// 级别 `rank` 对应的登记名称（未登记时 `"unregistered"`）。
 /// Registered name of `rank`.
 pub fn name_of(rank: u8) -> &'static str {
-    REGISTRY.iter().find(|c| c.rank == rank).map(|c| c.name).unwrap_or("unregistered")
+    REGISTRY
+        .iter()
+        .find(|c| c.rank == rank)
+        .map(|c| c.name)
+        .unwrap_or("unregistered")
 }
