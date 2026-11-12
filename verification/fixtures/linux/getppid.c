@@ -770,6 +770,26 @@ int main(void) {
         close(ashmem_fd) != 0) {
         return 154;
     }
+    int memfd = memfd_create("jasper-memfd", MFD_CLOEXEC);
+    if (memfd < 0 ||
+        (fcntl(memfd, F_GETFD) & FD_CLOEXEC) == 0 ||
+        ftruncate(memfd, 4096) != 0) {
+        return 207;
+    }
+    struct stat memfd_stat;
+    if (fstat(memfd, &memfd_stat) != 0 || memfd_stat.st_size != 4096) {
+        return 208;
+    }
+    unsigned char *memfd_map = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                    MAP_SHARED, memfd, 0);
+    if (memfd_map == MAP_FAILED || memfd_map[0] != 0) {
+        return 209;
+    }
+    memfd_map[0] = 'M';
+    if (msync(memfd_map, 4096, MS_SYNC) != 0 ||
+        munmap(memfd_map, 4096) != 0 || close(memfd) != 0) {
+        return 210;
+    }
     int binder_fd = open("/dev/binder", O_RDWR | O_CLOEXEC);
     struct binder_version binder_version = {0};
     uint32_t binder_threads = 4;

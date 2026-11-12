@@ -111,6 +111,8 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Fstatfs,
         LinuxSyscall::Fsync,
         LinuxSyscall::Fdatasync,
+        LinuxSyscall::Ftruncate,
+        LinuxSyscall::MemfdCreate,
         LinuxSyscall::Sync,
         LinuxSyscall::Syncfs,
         LinuxSyscall::NewFstatAt,
