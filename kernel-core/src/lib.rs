@@ -38,6 +38,7 @@
 //! * [`acpi`]   —— ACPI 表只读解析（处理器枚举：RSDP → RSDT/XSDT → MADT；固件输入按不可信处理）
 //! * [`user_layout`] —— 各指令集的用户私有窗口起点与用户程序装载地址（内核、运行时与构建脚本共用）
 //! * [`workload`] —— 原生 Workload 身份、父子资源域、生命周期和成员归属契约（issue #23）
+//! * [`sandbox_image`] —— Sandbox 镜像、不可变层、CoW 卷与存储所有权契约
 //!
 //! # 边界（为什么这样分）
 //! * 只依赖 `core`：`#![no_std]`，测试时才链接 `std`（`cfg_attr(not(test), no_std)`），
@@ -187,6 +188,7 @@ pub mod rt_abi;
 
 pub mod timer_units;
 pub mod sandbox;
+pub mod sandbox_image;
 pub mod sandbox_abi;
 
 // issue #3：统一定时事件契约。 / Unified timer-event contract.
