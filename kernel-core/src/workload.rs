@@ -395,6 +395,145 @@ impl<const N: usize> WorkloadTable<N> {
     }
 }
 
+/// One process/task object assigned to a native workload.
+///
+/// 一个绑定到原生 Workload 的进程或任务对象。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkloadMember {
+    pub id: u64,
+    pub workload: WorkloadKey,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MembershipError {
+    InvalidMember,
+    AlreadyAttached,
+    NotRunning,
+    InvalidKey,
+    Capacity,
+}
+
+impl MembershipError {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::InvalidMember => "system.workload.member.error.invalid",
+            Self::AlreadyAttached => "system.workload.member.error.attached",
+            Self::NotRunning => "system.workload.member.error.not_running",
+            Self::InvalidKey => "system.workload.member.error.stale",
+            Self::Capacity => "system.workload.member.error.capacity",
+        }
+    }
+}
+
+/// Fixed-capacity member mapping. One member has at most one workload.
+///
+/// 固定容量成员映射；一个成员最多属于一个 Workload。
+pub struct WorkloadMembers<const N: usize> {
+    slots: [Option<WorkloadMember>; N],
+}
+
+impl<const N: usize> WorkloadMembers<N> {
+    pub const fn new() -> Self {
+        Self { slots: [None; N] }
+    }
+
+    pub fn attach<const W: usize>(
+        &mut self,
+        table: &WorkloadTable<W>,
+        workload: WorkloadKey,
+        member: u64,
+    ) -> Result<(), MembershipError> {
+        if member == 0 {
+            return Err(MembershipError::InvalidMember);
+        }
+        if self.find(member).is_some() {
+            return Err(MembershipError::AlreadyAttached);
+        }
+        if table
+            .snapshot(workload)
+            .map_err(|_| MembershipError::InvalidKey)?
+            .state
+            != WorkloadState::Running
+        {
+            return Err(MembershipError::NotRunning);
+        }
+        let slot = self
+            .slots
+            .iter()
+            .position(Option::is_none)
+            .ok_or(MembershipError::Capacity)?;
+        self.slots[slot] = Some(WorkloadMember {
+            id: member,
+            workload,
+        });
+        Ok(())
+    }
+
+    pub fn detach(&mut self, workload: WorkloadKey, member: u64) -> Result<(), MembershipError> {
+        let slot = self
+            .slots
+            .iter()
+            .position(|entry| {
+                entry.is_some_and(|entry| entry.id == member && entry.workload == workload)
+            })
+            .ok_or(MembershipError::InvalidMember)?;
+        self.slots[slot] = None;
+        Ok(())
+    }
+
+    /// Explicitly moves a member after validating the destination is Running.
+    ///
+    /// 目标 Workload 处于 Running 时显式迁移成员；失败不改动原绑定。
+    pub fn reassign<const W: usize>(
+        &mut self,
+        table: &WorkloadTable<W>,
+        member: u64,
+        destination: WorkloadKey,
+    ) -> Result<(), MembershipError> {
+        let slot = self.find(member).ok_or(MembershipError::InvalidMember)?;
+        if self.slots[slot].is_some_and(|entry| entry.workload == destination) {
+            return Ok(());
+        }
+        if table
+            .snapshot(destination)
+            .map_err(|_| MembershipError::InvalidKey)?
+            .state
+            != WorkloadState::Running
+        {
+            return Err(MembershipError::NotRunning);
+        }
+        self.slots[slot] = Some(WorkloadMember {
+            id: member,
+            workload: destination,
+        });
+        Ok(())
+    }
+
+    pub fn get(&self, member: u64) -> Option<WorkloadMember> {
+        self.find(member).and_then(|slot| self.slots[slot])
+    }
+
+    pub fn len(&self) -> usize {
+        self.slots.iter().filter(|slot| slot.is_some()).count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn find(&self, member: u64) -> Option<usize> {
+        self.slots
+            .iter()
+            .position(|entry| entry.is_some_and(|entry| entry.id == member))
+    }
+}
+
+impl<const N: usize> Default for WorkloadMembers<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const N: usize> Default for WorkloadTable<N> {
     fn default() -> Self {
         Self::new()
@@ -597,5 +736,51 @@ mod tests {
         );
         let child = table.create_child(parent, LIMITS).unwrap();
         assert_eq!(table.snapshot(child).unwrap().domain, DOMAIN);
+    }
+
+    #[test]
+    fn member_assignment_is_exclusive_and_requires_running_workloads() {
+        let mut table = WorkloadTable::<2>::new();
+        let first = table.create(DOMAIN, LIMITS).unwrap();
+        let second = table.create(DOMAIN, LIMITS).unwrap();
+        let mut members = WorkloadMembers::<2>::new();
+        assert_eq!(
+            members.attach(&table, first, 41),
+            Err(MembershipError::NotRunning)
+        );
+        assert_eq!(
+            members.attach(&table, first, 0),
+            Err(MembershipError::InvalidMember)
+        );
+        for key in [first, second] {
+            table.transition(key, WorkloadState::Ready).unwrap();
+            table.transition(key, WorkloadState::Running).unwrap();
+        }
+        members.attach(&table, first, 41).unwrap();
+        assert_eq!(
+            members.attach(&table, second, 41),
+            Err(MembershipError::AlreadyAttached)
+        );
+        assert_eq!(members.get(41).unwrap().workload, first);
+        members.reassign(&table, 41, second).unwrap();
+        assert_eq!(members.get(41).unwrap().workload, second);
+        members.detach(second, 41).unwrap();
+        assert!(members.is_empty());
+    }
+
+    #[test]
+    fn failed_member_reassignment_keeps_the_original_binding() {
+        let mut table = WorkloadTable::<2>::new();
+        let running = table.create(DOMAIN, LIMITS).unwrap();
+        let created = table.create(DOMAIN, LIMITS).unwrap();
+        table.transition(running, WorkloadState::Ready).unwrap();
+        table.transition(running, WorkloadState::Running).unwrap();
+        let mut members = WorkloadMembers::<1>::new();
+        members.attach(&table, running, 99).unwrap();
+        assert_eq!(
+            members.reassign(&table, 99, created),
+            Err(MembershipError::NotRunning)
+        );
+        assert_eq!(members.get(99).unwrap().workload, running);
     }
 }
