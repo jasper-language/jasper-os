@@ -6,6 +6,8 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <linux/android/binder.h>
+#include <linux/dma-buf.h>
+#include <linux/dma-heap.h>
 #include <linux/io_uring.h>
 #include <poll.h>
 #include <sched.h>
@@ -1342,6 +1344,58 @@ int main(void) {
         close(ion_share_imported.fd) != 0 ||
         close(ion_fd) != 0) {
         return 164;
+    }
+    int dma_heap_fd = open("/dev/dma_heap/system", O_RDWR | O_CLOEXEC);
+    struct dma_heap_allocation_data dma_allocation = {
+        .len = 4096,
+        .fd = 0,
+        .fd_flags = O_RDWR | O_CLOEXEC,
+        .heap_flags = 0,
+    };
+    if (dma_heap_fd < 0 ||
+        (fcntl(dma_heap_fd, F_GETFD) & FD_CLOEXEC) == 0 ||
+        ioctl(dma_heap_fd, DMA_HEAP_IOCTL_ALLOC, &dma_allocation) != 0 ||
+        dma_allocation.fd < 0 ||
+        (fcntl(dma_allocation.fd, F_GETFD) & FD_CLOEXEC) == 0) {
+        return 280;
+    }
+    struct stat dma_stat;
+    if (fstat(dma_allocation.fd, &dma_stat) != 0 ||
+        !S_ISREG(dma_stat.st_mode) || dma_stat.st_size != 4096) {
+        return 281;
+    }
+    struct dma_buf_sync dma_sync = {
+        .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW,
+    };
+    if (ioctl(dma_allocation.fd, DMA_BUF_IOCTL_SYNC, &dma_sync) != 0) {
+        return 282;
+    }
+    dma_sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW;
+    if (ioctl(dma_allocation.fd, DMA_BUF_IOCTL_SYNC, &dma_sync) != 0 ||
+        ioctl(dma_allocation.fd, DMA_BUF_SET_NAME,
+              (unsigned long)"jasper-dmabuf") != 0 ||
+        pwrite(dma_allocation.fd, "DMA", 3, 0) != 3) {
+        return 283;
+    }
+    unsigned char *dma_map = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                  MAP_SHARED, dma_allocation.fd, 0);
+    if (dma_map == MAP_FAILED || memcmp(dma_map, "DMA", 3) != 0) {
+        return 284;
+    }
+    dma_map[3] = '!';
+    if (msync(dma_map, 4096, MS_SYNC) != 0 ||
+        munmap(dma_map, 4096) != 0) {
+        return 285;
+    }
+    struct dma_heap_allocation_data dma_invalid = {
+        .len = 4095,
+        .fd_flags = O_RDWR | O_CLOEXEC,
+    };
+    errno = 0;
+    if (ioctl(dma_heap_fd, DMA_HEAP_IOCTL_ALLOC, &dma_invalid) != -1 ||
+        errno != EINVAL || close(dma_allocation.fd) != 0 ||
+        close(dma_heap_fd) != 0) {
+        return 286;
     }
     int binder_ready[2];
     if (pipe2(binder_ready, 0) != 0) {

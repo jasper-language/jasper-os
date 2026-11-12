@@ -5073,6 +5073,14 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .map(u64::from)
             .ok_or(CompatErrno::NoSpace);
     }
+    if resolved == b"/dev/dma_heap/system" {
+        if flags & 3 != 2 {
+            return Err(CompatErrno::Perm);
+        }
+        return proc::linux_open_dma_heap(pid, flags & O_CLOEXEC != 0)
+            .map(u64::from)
+            .ok_or(CompatErrno::NoSpace);
+    }
     if flags & 3 != 0 {
         return Err(CompatErrno::Perm);
     }
@@ -5589,6 +5597,9 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const ION_IOC_SHARE: u64 = 0xc008_4904;
     const ION_IOC_IMPORT: u64 = 0xc008_4905;
     const ION_IOC_SYNC: u64 = 0xc008_4907;
+    const DMA_HEAP_IOCTL_ALLOC: u64 = 0xc018_4800;
+    const DMA_BUF_IOCTL_SYNC: u64 = 0x4008_6200;
+    const DMA_BUF_SET_NAME: u64 = 0x4008_6201;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if args[1] == FIONREAD && entry.kind == compat_core::fd::CompatKind::Pipe {
@@ -5644,6 +5655,45 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         };
     }
     if entry.kind == compat_core::fd::CompatKind::Device
+        && proc::linux_is_dma_heap(pid, entry.handle)
+    {
+        if args[1] != DMA_HEAP_IOCTL_ALLOC {
+            return Err(CompatErrno::NoSys);
+        }
+        let mut raw = [0u8; 24];
+        copy_from_user(&mut raw, args[2], 24).map_err(|_| CompatErrno::Fault)?;
+        let size = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+        let fd_flags = u32::from_le_bytes(raw[12..16].try_into().unwrap());
+        let heap_flags = u64::from_le_bytes(raw[16..24].try_into().unwrap());
+        if size == 0
+            || size % kernel_core::frame::FRAME_SIZE != 0
+            || fd_flags & !(0x3 | 0x80000) != 0
+            || heap_flags != 0
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        let buffer_fd = proc::linux_create_memfd(pid, fd_flags & 0x80000 != 0, false)
+            .ok_or(CompatErrno::NoSpace)?;
+        let result = (|| {
+            let buffer = proc::linux_fd(pid, buffer_fd).ok_or(CompatErrno::BadFd)?;
+            proc::linux_ashmem_set_size(pid, buffer.handle, size)
+                .map_err(ashmem_compat_error)?;
+            if !proc::linux_register_dmabuf(pid, buffer.handle)
+                || proc::linux_ashmem_set_name(pid, buffer.handle, b"dma_heap_system")
+                    .is_err()
+            {
+                return Err(CompatErrno::NoSpace);
+            }
+            raw[8..12].copy_from_slice(&buffer_fd.to_le_bytes());
+            copy_to_user(args[2], &raw, raw.len()).map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        })();
+        if result.is_err() {
+            let _ = proc::linux_close_fd(pid, buffer_fd);
+        }
+        return result;
+    }
+    if entry.kind == compat_core::fd::CompatKind::Device
         && proc::linux_is_ion_device(pid, entry.handle)
     {
         return match args[1] {
@@ -5695,6 +5745,28 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 Ok(0)
             }
             ION_IOC_SYNC => Ok(0),
+            _ => Err(CompatErrno::NoSys),
+        };
+    }
+    if entry.kind == compat_core::fd::CompatKind::Device
+        && proc::linux_is_dmabuf(pid, entry.handle)
+    {
+        return match args[1] {
+            DMA_BUF_IOCTL_SYNC => {
+                let mut raw = [0u8; 8];
+                copy_from_user(&mut raw, args[2], 8).map_err(|_| CompatErrno::Fault)?;
+                let flags = u32::from_le_bytes(raw[..4].try_into().unwrap());
+                if flags & !0xf != 0 {
+                    return Err(CompatErrno::Invalid);
+                }
+                Ok(0)
+            }
+            DMA_BUF_SET_NAME => {
+                let name = linux_c_string(args[2], 32)?;
+                proc::linux_ashmem_set_name(pid, entry.handle, &name)
+                    .map_err(ashmem_compat_error)?;
+                Ok(0)
+            }
             _ => Err(CompatErrno::NoSys),
         };
     }
