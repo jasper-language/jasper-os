@@ -287,13 +287,18 @@ impl<const N: usize> SandboxLaunchTable<N> {
         if !spec.capabilities.attenuates(spec.root_capabilities) {
             return Err(LaunchError::Capability);
         }
+        if !spec.capabilities.contains(CapabilitySet::EXECUTE)
+            || (spec.volume.is_some() && !spec.capabilities.contains(CapabilitySet::DATA_WRITE))
+        {
+            return Err(LaunchError::Capability);
+        }
         validate_rate(
             workloads.io_rate_snapshot(spec.root)?,
             spec.resources.io_rate,
         )?;
-        if spec.network_policy.is_some_and(|policy| {
-            !policy.is_valid() || !spec.capabilities.contains(CapabilitySet::NETWORK)
-        }) {
+        if spec.capabilities.contains(CapabilitySet::NETWORK) != spec.network_policy.is_some()
+            || spec.network_policy.is_some_and(|policy| !policy.is_valid())
+        {
             return Err(LaunchError::InvalidNetwork);
         }
         validate_devices(domain, spec.capabilities, spec.devices)?;
@@ -871,11 +876,11 @@ mod tests {
             sandbox,
             root,
             image,
-            Some(volume),
+            None,
             &[],
             &writable_without_capability,
         );
-        no_write.capabilities = CapabilitySet::DATA_READ;
+        no_write.capabilities = CapabilitySet::EXECUTE.union(CapabilitySet::DATA_READ);
         no_write.root_capabilities = CapabilitySet::ALL;
         no_write.network_policy = None;
         assert_eq!(
@@ -883,11 +888,39 @@ mod tests {
             Err(LaunchError::InvalidData)
         );
 
-        let mut no_network = launch_spec(sandbox, root, image, Some(volume), &[], &[]);
+        let mut no_network = launch_spec(sandbox, root, image, None, &[], &[]);
         no_network.capabilities = CapabilitySet::EXECUTE;
         assert_eq!(
             plans.create(DOMAIN, &workloads, &sandboxes, &storage, no_network),
             Err(LaunchError::InvalidNetwork)
+        );
+
+        let mut network_without_policy = launch_spec(sandbox, root, image, Some(volume), &[], &[]);
+        network_without_policy.network_policy = None;
+        assert_eq!(
+            plans.create(
+                DOMAIN,
+                &workloads,
+                &sandboxes,
+                &storage,
+                network_without_policy,
+            ),
+            Err(LaunchError::InvalidNetwork)
+        );
+
+        let mut volume_without_write = launch_spec(sandbox, root, image, Some(volume), &[], &[]);
+        volume_without_write.capabilities = CapabilitySet::EXECUTE
+            .union(CapabilitySet::NETWORK)
+            .union(CapabilitySet::DATA_READ);
+        assert_eq!(
+            plans.create(
+                DOMAIN,
+                &workloads,
+                &sandboxes,
+                &storage,
+                volume_without_write,
+            ),
+            Err(LaunchError::Capability)
         );
         assert_eq!(plans.count(), 0);
     }
