@@ -731,7 +731,8 @@ int main(void) {
             _exit(150);
         }
         shared[4096] = 'B';
-        if (write(to_parent[1], "K", 1) != 1 ||
+        if (msync(shared, ashmem_size, MS_SYNC) != 0 ||
+            write(to_parent[1], "K", 1) != 1 ||
             munmap(shared, ashmem_size) != 0) {
             _exit(151);
         }
@@ -749,6 +750,9 @@ int main(void) {
         return 152;
     }
     shared[0] = 'A';
+    if (msync(shared, ashmem_size, MS_SYNC) != 0) {
+        return 201;
+    }
     char token[2] = {0};
     if (write(to_child[1], "M", 1) != 1 ||
         read(to_parent[0], token, 1) != 1 || token[0] != 'K' ||
@@ -852,7 +856,8 @@ int main(void) {
         return 162;
     }
     ion_second[4096] = 'O';
-    if (munmap(ion_second, ion_allocation.len) != 0) {
+    if (msync(ion_second, ion_allocation.len, MS_SYNC) != 0 ||
+        munmap(ion_second, ion_allocation.len) != 0) {
         return 163;
     }
     ion_free.handle = ion_import.handle;

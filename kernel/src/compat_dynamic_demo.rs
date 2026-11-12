@@ -141,6 +141,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Mmap,
         LinuxSyscall::Munmap,
         LinuxSyscall::Mprotect,
+        LinuxSyscall::Msync,
         LinuxSyscall::Madvise,
         LinuxSyscall::Clone,
         LinuxSyscall::Clone3,
