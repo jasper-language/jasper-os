@@ -51,24 +51,39 @@ pub fn unbind_member(key: WorkloadKey, member: u64) -> Result<(), MembershipErro
 
 pub fn destroy(key: WorkloadKey) -> Result<(), WorkloadError> {
     let mut workloads = WORKLOADS.lock();
+    let state = workloads.snapshot(key)?;
+    if !state.state.terminal() {
+        return Err(WorkloadError::InvalidState);
+    }
+    if state.usage != ResourceUsage::default() {
+        return Err(WorkloadError::Quota);
+    }
+    if state.children != 0 {
+        return Err(WorkloadError::InvalidState);
+    }
     if MEMBERS.lock().count_for(key) != 0 {
         return Err(WorkloadError::InvalidState);
     }
     let mut groups = CPU_GROUPS.lock();
-    workloads.destroy(key)?;
     if let Some(slot) = groups
         .iter()
         .position(|entry| entry.is_some_and(|(owner, _)| owner == key))
     {
-        let (_, group) = groups[slot].take().expect("checked group entry");
-        let _ = crate::sched::release_cpu_group(group);
+        let (_, group) = groups[slot].ok_or(WorkloadError::InvalidState)?;
+        crate::sched::release_cpu_group(group).map_err(|_| WorkloadError::Capacity)?;
+        groups[slot] = None;
     }
+    workloads.destroy(key)?;
     Ok(())
 }
 
 pub fn cpu_group(key: WorkloadKey) -> Result<CpuGroupId, WorkloadError> {
     let workloads = WORKLOADS.lock();
-    let limits = workloads.snapshot(key)?.limits;
+    let state = workloads.snapshot(key)?;
+    if state.state != WorkloadState::Running {
+        return Err(WorkloadError::InvalidState);
+    }
+    let limits = state.limits;
     let mut groups = CPU_GROUPS.lock();
     if let Some((_, group)) = groups.iter().flatten().find(|(owner, _)| *owner == key) {
         return Ok(*group);
