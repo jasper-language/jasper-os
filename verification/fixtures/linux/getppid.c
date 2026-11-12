@@ -1632,6 +1632,18 @@ int main(void) {
         !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
         return 70;
     }
+    uid_t real_uid = (uid_t)-1;
+    uid_t effective_uid = (uid_t)-1;
+    uid_t saved_uid = (uid_t)-1;
+    gid_t real_gid = (gid_t)-1;
+    gid_t effective_gid = (gid_t)-1;
+    gid_t saved_gid = (gid_t)-1;
+    if (getresuid(&real_uid, &effective_uid, &saved_uid) != 0 ||
+        real_uid != 0 || effective_uid != 0 || saved_uid != 0 ||
+        getresgid(&real_gid, &effective_gid, &saved_gid) != 0 ||
+        real_gid != 0 || effective_gid != 0 || saved_gid != 0) {
+        return 217;
+    }
     close(fd);
     printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld wall=%lld dirent=6 exec_meta=true fork=true\n",
            (int)parent, (long long)end, CPU_COUNT(&cpus), cpu, node,
