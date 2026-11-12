@@ -213,7 +213,7 @@ fn error_name(ret: i64) -> &'static str {
 /// 每次系统调用返回前最多销毁的死亡对象数（见 [`on_syscall`] 的出口清理点）。
 const CLEANUP_PER_CALL: usize = 16;
 /// 创建对象前先回收死亡对象的调用（进程创建在 `spawn_child` 里自带回收）。
-const RECLAIM_BEFORE: [u32; 10] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, SYSTEM_CHANNEL_CREATE, SYSTEM_MEMORY_OBJECT_CREATE,SYSTEM_EVENT_SOURCE_CREATE,SYSTEM_EVENT_SUBSCRIPTION_CREATE,SYSTEM_SYNC_MUTEX_CREATE,SYSTEM_TIME_TIMER_CREATE,SYSTEM_MEMORY_DMA_MAP,SYSTEM_WORKLOAD_CREATE];
+const RECLAIM_BEFORE: [u32; 11] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, SYSTEM_CHANNEL_CREATE, SYSTEM_MEMORY_OBJECT_CREATE,SYSTEM_EVENT_SOURCE_CREATE,SYSTEM_EVENT_SUBSCRIPTION_CREATE,SYSTEM_SYNC_MUTEX_CREATE,SYSTEM_TIME_TIMER_CREATE,SYSTEM_MEMORY_DMA_MAP,SYSTEM_WORKLOAD_CREATE,SYSTEM_SANDBOX_CREATE];
 
 /// Selects the syscall ABI only when the optional Linux service is installed.
 ///
@@ -681,6 +681,18 @@ syscall_dispatch! {
     SYSTEM_WORKLOAD_MEMBER_QUERY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         workload_member_query(a.args[0])
     },
+    SYSTEM_SANDBOX_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_create(a.args[0])
+    },
+    SYSTEM_SANDBOX_QUERY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_query(a.args[0], a.args[1], a.args[2])
+    },
+    SYSTEM_SANDBOX_STOP => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_stop(a.args[0])
+    },
+    SYSTEM_SANDBOX_DESTROY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_destroy(a.args[0])
+    },
 }
 
 // 编译期证明：分发表在登记表之内，且两者基数相同 ⇒ 两个集合完全相等。
@@ -1108,6 +1120,126 @@ fn workload_member_query(raw_key: u64) -> i64 {
     match crate::workload::member_count_in_domain(domain, key) {
         Ok(count) => i64::from(count),
         Err(error) => workload_error(error),
+    }
+}
+
+fn sandbox_error(error: kernel_core::sandbox::SandboxError) -> i64 {
+    use kernel_core::sandbox::SandboxError;
+    match error {
+        SandboxError::InvalidKey => err(SYSTEM_SANDBOX_ERROR_NOT_FOUND),
+        SandboxError::InvalidRoot | SandboxError::RootAlreadyBound => {
+            err(SYSTEM_SANDBOX_ERROR_STATE)
+        }
+        SandboxError::Capacity | SandboxError::IdExhausted => {
+            err(SYSTEM_SANDBOX_ERROR_CAPACITY)
+        }
+        SandboxError::Workload(error) => workload_error(error),
+    }
+}
+
+/// Create a root Workload plus its stable Sandbox identity and start it.
+///
+/// The descriptor is the existing Workload create record. A parent is rejected
+/// because a Sandbox always owns exactly one root Workload.
+fn sandbox_create(desc_ptr: u64) -> i64 {
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(domain) = proc::workload_domain(pid) else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let mut header = [0u8; 8];
+    let header_len = header.len();
+    if let Err(error) = copy_from_user(&mut header, desc_ptr, header_len) {
+        return user_ptr_err(error);
+    }
+    let version = u16::from_le_bytes([header[4], header[5]]);
+    let size = match version {
+        kernel_core::workload_abi::VERSION_V1 => kernel_core::workload_abi::CREATE_BYTES_V1,
+        kernel_core::workload_abi::VERSION => kernel_core::workload_abi::CREATE_BYTES,
+        _ => return err(SYSTEM_ERROR_INVALID_ARGUMENT),
+    };
+    let mut raw = [0u8; kernel_core::workload_abi::CREATE_BYTES];
+    if let Err(error) = copy_from_user(&mut raw[..size], desc_ptr, size) {
+        return user_ptr_err(error);
+    }
+    let Some(args) = kernel_core::workload_abi::CreateArgs::decode(&raw[..size]) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    if args.parent.is_some() {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    }
+    let key = match crate::sandbox::create_sandbox(domain, args.limits) {
+        Ok(key) => key,
+        Err(error) => return sandbox_error(error),
+    };
+    if let Err(error) = crate::sandbox::mark_ready(domain, key)
+        .and_then(|()| crate::sandbox::start(domain, key))
+    {
+        let _ = crate::sandbox::fail(domain, key);
+        let _ = crate::sandbox::destroy(domain, key);
+        return sandbox_error(error);
+    }
+    key.to_raw() as i64
+}
+
+/// Return a fixed-size Sandbox record only to a same-domain caller.
+fn sandbox_query(raw_key: u64, ptr: u64, cap: u64) -> i64 {
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(domain) = proc::workload_domain(pid) else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(key) = kernel_core::sandbox::SandboxKey::from_raw(raw_key) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let snapshot = match crate::sandbox::snapshot(domain, key) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return sandbox_error(error),
+    };
+    if cap < kernel_core::sandbox_abi::INFO_BYTES as u64 {
+        return err(SYSTEM_SANDBOX_ERROR_BUFFER_TOO_SMALL);
+    }
+    let encoded = kernel_core::sandbox_abi::SandboxInfo::from_snapshot(snapshot).encode();
+    if let Err(error) = copy_to_user(ptr, &encoded, kernel_core::sandbox_abi::INFO_BYTES) {
+        return user_ptr_err(error);
+    }
+    kernel_core::sandbox_abi::INFO_BYTES as i64
+}
+
+/// Request Sandbox shutdown, completing it once root resources and children
+/// have drained.
+fn sandbox_stop(raw_key: u64) -> i64 {
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(domain) = proc::workload_domain(pid) else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(key) = kernel_core::sandbox::SandboxKey::from_raw(raw_key) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    match crate::sandbox::stop(domain, key) {
+        Ok(()) => 0,
+        Err(error) => sandbox_error(error),
+    }
+}
+
+/// Destroy a terminal Sandbox after its root Workload is fully drained.
+fn sandbox_destroy(raw_key: u64) -> i64 {
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(domain) = proc::workload_domain(pid) else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(key) = kernel_core::sandbox::SandboxKey::from_raw(raw_key) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    match crate::sandbox::destroy(domain, key) {
+        Ok(()) => 0,
+        Err(error) => sandbox_error(error),
     }
 }
 

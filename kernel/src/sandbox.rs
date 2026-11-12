@@ -67,6 +67,28 @@ pub fn request_stop(domain: DomainKey, key: SandboxKey) -> Result<(), SandboxErr
     sandboxes.request_stop(&mut workloads, key)
 }
 
+/// Request shutdown, then complete it on the next call once the root Workload
+/// has no members, resources or children.
+///
+/// 首次调用请求关闭；当 root Workload 已无成员、资源和子级时，再次调用完成
+/// 关闭。两个阶段均委托 Workload 的权威生命周期与清理检查。
+pub fn stop(domain: DomainKey, key: SandboxKey) -> Result<(), SandboxError> {
+    let sandboxes = SANDBOXES.lock();
+    let mut workloads = WORKLOADS.lock();
+    let root = checked_root(&sandboxes, &workloads, domain, key)?;
+    match workloads.snapshot(root)?.state {
+        kernel_core::workload::WorkloadState::Running => {
+            sandboxes.request_stop(&mut workloads, key)
+        }
+        kernel_core::workload::WorkloadState::Stopping => {
+            sandboxes.complete_stop(&mut workloads, key)
+        }
+        _ => Err(SandboxError::Workload(
+            kernel_core::workload::WorkloadError::InvalidState,
+        )),
+    }
+}
+
 /// Complete shutdown only after Workload usage and children are zero.
 ///
 /// 仅当 Workload 使用量和子级归零后进入 `Stopped`。

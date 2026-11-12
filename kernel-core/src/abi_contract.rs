@@ -1080,6 +1080,24 @@ pub const LAYOUTS: &[LayoutContract] = &[
             },
         ],
     },
+    LayoutContract {
+        name: "sandbox.info",
+        version: crate::sandbox_abi::VERSION as u32,
+        size: crate::sandbox_abi::INFO_BYTES as u32,
+        magic: crate::sandbox_abi::MAGIC,
+        fields: &[
+            LayoutField {
+                name: "state",
+                offset: 6,
+                width: 1,
+            },
+            LayoutField {
+                name: "key",
+                offset: 8,
+                width: 8,
+            },
+        ],
+    },
 ];
 
 /// 可调用操作的逐个寄存器契约。名字必须与 `abi/system-ids.txt` 的操作集合完全相等。
@@ -1449,6 +1467,26 @@ pub const OPERATIONS: &[OperationContract] = &[
         args: "u64:workload_key",
         result: "i64:member_count_or_error",
     },
+    OperationContract {
+        name: "system.sandbox.create",
+        args: "u64:workload_create_desc_ptr",
+        result: "sandbox_key_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.query",
+        args: "u64:sandbox_key,u64:buf,u64:cap",
+        result: "i64:bytes_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.stop",
+        args: "u64:sandbox_key",
+        result: "0_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.destroy",
+        args: "u64:sandbox_key",
+        result: "0_or_error",
+    },
 ];
 
 /// Rights 位是外部 ABI；位值变化必须产生新快照并随 ABI 版本裁决。
@@ -1607,6 +1645,22 @@ pub const SEMANTICS: &[(&str, &str)] = &[
     (
         "workload.member.query",
         "same_domain_only;counts_current_process_members;closed_members_are_not_observable",
+    ),
+    (
+        "sandbox.identity",
+        "kernel_issued_same_domain_key;one_root_workload;root_key_not_disclosed",
+    ),
+    (
+        "sandbox.lifecycle",
+        "state_delegated_to_root_workload;no_copied_limits_usage_or_membership",
+    ),
+    (
+        "sandbox.lifecycle.transition",
+        "create_starts_root;stop_requests_then_completes_only_after_workload_cleanup",
+    ),
+    (
+        "sandbox.destroy",
+        "same_domain_only;terminal_only;root_usage_children_and_members_must_be_zero",
     ),
 ];
 

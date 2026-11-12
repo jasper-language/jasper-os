@@ -123,3 +123,11 @@
 4144	error	system.workload.error.not_found	1	none	工作负载不存在或无权查看	Workload not found
 4145	error	system.workload.error.state	1	none	工作负载状态转换非法	Invalid workload state
 4146	error	system.workload.error.capacity	1	none	工作负载容量或标识已耗尽	Workload capacity exhausted
+81	op	system.sandbox.create	1	write	沙箱·创建	Create native sandbox
+82	op	system.sandbox.query	1	read	沙箱·查询	Query native sandbox
+83	op	system.sandbox.stop	1	write	沙箱·请求并完成停止	Stop native sandbox
+84	op	system.sandbox.destroy	1	write	沙箱·销毁	Destroy native sandbox
+4147	error	system.sandbox.error.buffer_too_small	1	none	沙箱·查询缓冲区不足	Sandbox query buffer too small
+4148	error	system.sandbox.error.not_found	1	none	沙箱不存在或无权查看	Sandbox not found
+4149	error	system.sandbox.error.state	1	none	沙箱状态转换非法	Invalid sandbox state
+4150	error	system.sandbox.error.capacity	1	none	沙箱容量或标识已耗尽	Sandbox capacity exhausted
