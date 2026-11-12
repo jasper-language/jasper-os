@@ -74,7 +74,6 @@ struct LinuxProcessState {
     fds: FdTable<64>,
     pid: u32,
     ppid: u32,
-    file_offsets: [u64; 64],
     /// Authorized directory view used for relative AT_FDCWD resolution.
     cwd: crate::linux_vfs::DirectoryId,
     brk: u64,
@@ -474,7 +473,6 @@ pub(crate) fn linux_duplicate_fd(
             .fds
             .duplicate_fd(fd, minimum, close_on_exec)
             .map_err(|_| ProcError::NoTaskSlot)?;
-        linux.file_offsets[duplicate.fd() as usize] = linux.file_offsets[fd as usize];
         Ok(duplicate.fd())
     })
     .ok()
@@ -496,7 +494,6 @@ pub(crate) fn linux_duplicate_fd_to(
             .fds
             .duplicate_fd_to(fd, target, close_on_exec)
             .map_err(|_| ProcError::NoTaskSlot)?;
-        linux.file_offsets[target as usize] = linux.file_offsets[fd as usize];
         Ok(duplicate.fd())
     })
     .ok()
@@ -521,7 +518,6 @@ pub(crate) fn linux_install_file(pid: ObjId, handle: u64, close_on_exec: bool) -
                 close_on_exec,
             )
             .map_err(|_| ProcError::NoTaskSlot)?;
-        linux.file_offsets[fd.fd() as usize] = 0;
         Ok(fd.fd())
     })
     .ok()
@@ -546,7 +542,6 @@ pub(crate) fn linux_install_dir(pid: ObjId, handle: u64, close_on_exec: bool) ->
                 close_on_exec,
             )
             .map_err(|_| ProcError::NoTaskSlot)?;
-        linux.file_offsets[fd.fd() as usize] = 0;
         Ok(fd.fd())
     })
     .ok()
@@ -560,13 +555,11 @@ pub(crate) fn linux_file_state(pid: ObjId, fd: u32) -> Option<(u64, u64)> {
     crate::kobj::with(|t| match t.get(pid) {
         Ok(KObject::Process(p)) => {
             let linux = p.linux.as_ref()?;
-            if (fd as usize) >= linux.file_offsets.len() {
-                return None;
-            }
             let entry = linux.fds.get_fd(fd)?;
+            let offset = linux.fds.fd_offset(fd)?;
             (entry.kind == compat_core::fd::CompatKind::File
                 && entry.rights.contains(kernel_core::object::Rights::READ))
-            .then_some((entry.handle, linux.file_offsets[fd as usize]))
+            .then_some((entry.handle, offset))
         }
         _ => None,
     })
@@ -579,21 +572,12 @@ pub(crate) fn linux_file_state(pid: ObjId, fd: u32) -> Option<(u64, u64)> {
 pub(crate) fn set_linux_file_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
-        if (fd as usize) >= linux.file_offsets.len() {
-            return Err(ProcError::Exited);
-        }
         let entry = linux.fds.get_fd(fd).ok_or(ProcError::NoTaskSlot)?;
         if entry.kind != compat_core::fd::CompatKind::File {
             return Err(ProcError::NoTaskSlot);
         }
-        // Descriptors duplicated by dup/dup2/dup3 share one open-file offset.
-        for index in 0..linux.file_offsets.len() {
-            if linux.fds.get_fd(index as u32).is_some_and(|candidate| {
-                candidate.kind == compat_core::fd::CompatKind::File
-                    && candidate.handle == entry.handle
-            }) {
-                linux.file_offsets[index] = offset;
-            }
+        if !linux.fds.set_fd_offset(fd, offset) {
+            return Err(ProcError::NoTaskSlot);
         }
         Ok(())
     })
@@ -608,13 +592,11 @@ pub(crate) fn linux_dir_state(pid: ObjId, fd: u32) -> Option<(u64, u64)> {
     crate::kobj::with(|t| match t.get(pid) {
         Ok(KObject::Process(p)) => {
             let linux = p.linux.as_ref()?;
-            if (fd as usize) >= linux.file_offsets.len() {
-                return None;
-            }
             let entry = linux.fds.get_fd(fd)?;
+            let offset = linux.fds.fd_offset(fd)?;
             (entry.kind == compat_core::fd::CompatKind::Directory
                 && entry.rights.contains(kernel_core::object::Rights::READ))
-            .then_some((entry.handle, linux.file_offsets[fd as usize]))
+            .then_some((entry.handle, offset))
         }
         _ => None,
     })
@@ -627,21 +609,12 @@ pub(crate) fn linux_dir_state(pid: ObjId, fd: u32) -> Option<(u64, u64)> {
 pub(crate) fn set_linux_dir_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
-        if (fd as usize) >= linux.file_offsets.len() {
-            return Err(ProcError::Exited);
-        }
         let entry = linux.fds.get_fd(fd).ok_or(ProcError::NoTaskSlot)?;
         if entry.kind != compat_core::fd::CompatKind::Directory {
             return Err(ProcError::NoTaskSlot);
         }
-        // Duplicated directory descriptors also share one directory cursor.
-        for index in 0..linux.file_offsets.len() {
-            if linux.fds.get_fd(index as u32).is_some_and(|candidate| {
-                candidate.kind == compat_core::fd::CompatKind::Directory
-                    && candidate.handle == entry.handle
-            }) {
-                linux.file_offsets[index] = offset;
-            }
+        if !linux.fds.set_fd_offset(fd, offset) {
+            return Err(ProcError::NoTaskSlot);
         }
         Ok(())
     })
@@ -656,9 +629,6 @@ pub(crate) fn linux_close_fd(pid: ObjId, fd: u32) -> bool {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
         linux.fds.close_fd(fd).map_err(|_| ProcError::NoTaskSlot)?;
-        if (fd as usize) < linux.file_offsets.len() {
-            linux.file_offsets[fd as usize] = 0;
-        }
         Ok(())
     })
     .is_ok()
@@ -856,7 +826,6 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         fds,
         pid,
         ppid: compat_core::syscall::LINUX_COMPAT_ROOT_PPID as u32,
-        file_offsets: [0; 64],
         cwd: crate::linux_vfs::DirectoryId::Root,
         brk: crate::arch::USER_WINDOW.0 + 0x1000_0000,
         mmap_next: crate::arch::USER_WINDOW.0 + 0x4000_0000,
@@ -888,7 +857,6 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
             revoke_all_device_mappings(p);
             let linux = p.linux.as_mut().expect("checked Linux process");
             let _ = linux.fds.take_close_on_exec();
-            linux.file_offsets.fill(0);
             linux.mappings.clear();
             linux.brk = crate::arch::USER_WINDOW.0 + 0x1000_0000;
             linux.mmap_next = crate::arch::USER_WINDOW.0 + 0x4000_0000;

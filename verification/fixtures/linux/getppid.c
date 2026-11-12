@@ -483,6 +483,25 @@ int main(void) {
     if (waitpid(-1, &child_status, WNOHANG) != -1 || errno != ECHILD) {
         return 67;
     }
+    if (lseek(fd, 0, SEEK_SET) != 0) {
+        return 81;
+    }
+    pid_t ofd_child = fork();
+    if (ofd_child < 0) {
+        return 82;
+    }
+    if (ofd_child == 0) {
+        _exit(lseek(fd, 12, SEEK_SET) == 12 ? 0 : 83);
+    }
+    child_status = 0;
+    if (waitpid(ofd_child, &child_status, 0) != ofd_child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0 ||
+        lseek(fd, 0, SEEK_CUR) != 12) {
+        return 84;
+    }
+    if (lseek(fd, 0, SEEK_SET) != 0) {
+        return 85;
+    }
     pid_t vfork_child = vfork();
     if (vfork_child < 0) {
         return 68;

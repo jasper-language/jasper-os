@@ -1,6 +1,8 @@
 //! Linux file descriptor table mapped to Jasper handles and rights.
 
+use alloc::sync::Arc;
 use kernel_core::object::Rights;
+use kernel_core::sync::Atomic64;
 
 pub const MAX_FDS: usize = 1024;
 
@@ -89,6 +91,9 @@ impl<const N: usize> FdBatch<N> {
 pub struct FdTable<const N: usize = MAX_FDS> {
     slots: [Option<Slot>; N],
     generations: [u32; N],
+    /// One open-file description per fd slot. Duplicates and fork clones share
+    /// the same atomic cursor; replacing or closing an fd drops only its reference.
+    open_files: [Option<Arc<Atomic64>>; N],
     open: usize,
 }
 
@@ -97,6 +102,7 @@ impl<const N: usize> FdTable<N> {
         Self {
             slots: [None; N],
             generations: [0; N],
+            open_files: [const { None }; N],
             open: 0,
         }
     }
@@ -145,7 +151,7 @@ impl<const N: usize> FdTable<N> {
         if !entry.rights.contains(rights) {
             return Err(FdTableError::Rights);
         }
-        self.install_at_or_above(min_fd, entry.handle, rights, entry.kind, close_on_exec)
+        self.install_shared_at_or_above(source, min_fd, close_on_exec)
     }
 
     /// Duplicates the current generation of a descriptor by its numeric fd.
@@ -183,6 +189,11 @@ impl<const N: usize> FdTable<N> {
         if index >= N {
             return Err(FdTableError::InvalidFd);
         }
+        let cursor = Arc::clone(
+            self.open_files[source as usize]
+                .as_ref()
+                .ok_or(FdTableError::InvalidHandle)?,
+        );
         let generation = self.generations[index]
             .checked_add(1)
             .ok_or(FdTableError::GenerationExhausted)?;
@@ -190,6 +201,7 @@ impl<const N: usize> FdTable<N> {
         if !self.slots[index].is_some_and(|slot| slot.active) {
             self.open += 1;
         }
+        self.open_files[index] = Some(cursor);
         self.slots[index] = Some(Slot {
             entry: FdEntry {
                 fd: target,
@@ -205,6 +217,32 @@ impl<const N: usize> FdTable<N> {
             fd: target,
             generation,
         })
+    }
+
+    /// Returns the shared open-file cursor for the current fd generation.
+    pub fn fd_offset(&self, fd: u32) -> Option<u64> {
+        let entry = self.get_fd(fd)?;
+        if entry.fd != fd {
+            return None;
+        }
+        self.open_files[fd as usize]
+            .as_ref()
+            .map(|offset| offset.load(core::sync::atomic::Ordering::Acquire))
+    }
+
+    /// Updates every fd sharing the current open-file description.
+    pub fn set_fd_offset(&self, fd: u32, offset: u64) -> bool {
+        let Some(entry) = self.get_fd(fd) else {
+            return false;
+        };
+        if entry.fd != fd {
+            return false;
+        }
+        let Some(cursor) = self.open_files[fd as usize].as_ref() else {
+            return false;
+        };
+        cursor.store(offset, core::sync::atomic::Ordering::Release);
+        true
     }
 
     pub fn get(&self, handle: FdHandle) -> Result<FdEntry, FdTableError> {
@@ -265,6 +303,7 @@ impl<const N: usize> FdTable<N> {
             .as_mut()
             .ok_or(FdTableError::InvalidHandle)?;
         slot.active = false;
+        self.open_files[handle.fd as usize] = None;
         self.open -= 1;
         Ok(entry.handle)
     }
@@ -289,6 +328,7 @@ impl<const N: usize> FdTable<N> {
                     .map(|slot| slot.entry.handle)
                     .unwrap_or(0);
                 self.slots[index].as_mut().unwrap().active = false;
+                self.open_files[index] = None;
                 self.open -= 1;
                 batch.handles[batch.len] = handle;
                 batch.len += 1;
@@ -307,6 +347,7 @@ impl<const N: usize> FdTable<N> {
                     .map(|slot| slot.entry.handle)
                     .unwrap_or(0);
                 self.slots[index].as_mut().unwrap().active = false;
+                self.open_files[index] = None;
                 self.open -= 1;
                 batch.handles[batch.len] = handle;
                 batch.len += 1;
@@ -336,6 +377,48 @@ impl<const N: usize> FdTable<N> {
         self.install_slot(index, handle, rights, kind, close_on_exec)
     }
 
+    fn install_shared_at_or_above(
+        &mut self,
+        source: FdHandle,
+        min_fd: u32,
+        close_on_exec: bool,
+    ) -> Result<FdHandle, FdTableError> {
+        let entry = self.get(source)?;
+        let start = min_fd as usize;
+        if start >= N {
+            return Err(FdTableError::NoSpace);
+        }
+        let index = (start..N)
+            .find(|&index| self.slots[index].is_none_or(|slot| !slot.active))
+            .ok_or(FdTableError::NoSpace)?;
+        let generation = self.generations[index]
+            .checked_add(1)
+            .ok_or(FdTableError::GenerationExhausted)?;
+        let cursor = Arc::clone(
+            self.open_files[source.fd as usize]
+                .as_ref()
+                .ok_or(FdTableError::InvalidHandle)?,
+        );
+        self.generations[index] = generation;
+        self.open_files[index] = Some(cursor);
+        self.slots[index] = Some(Slot {
+            entry: FdEntry {
+                fd: index as u32,
+                generation,
+                handle: entry.handle,
+                rights: entry.rights,
+                kind: entry.kind,
+                close_on_exec,
+            },
+            active: true,
+        });
+        self.open += 1;
+        Ok(FdHandle {
+            fd: index as u32,
+            generation,
+        })
+    }
+
     fn install_slot(
         &mut self,
         index: usize,
@@ -351,6 +434,7 @@ impl<const N: usize> FdTable<N> {
             .checked_add(1)
             .ok_or(FdTableError::GenerationExhausted)?;
         self.generations[index] = generation;
+        self.open_files[index] = Some(Arc::new(Atomic64::new(0)));
         self.slots[index] = Some(Slot {
             entry: FdEntry {
                 fd: index as u32,
@@ -493,5 +577,41 @@ mod tests {
         assert_eq!(fds.duplicate_fd_to(1, 8, false), Err(FdTableError::InvalidFd));
         assert_eq!(fds.duplicate_fd_to(7, 4, false), Err(FdTableError::InvalidFd));
         assert_eq!(fds.open_count(), 2);
+    }
+
+    #[test]
+    fn duplicate_and_fork_clone_share_open_file_offset() {
+        let mut parent = FdTable::<8>::new();
+        let source = parent
+            .install(0x11, Rights::READ, CompatKind::File, false)
+            .unwrap();
+        let duplicate = parent.duplicate(source, 0, false, None).unwrap();
+        assert!(parent.set_fd_offset(source.fd(), 17));
+        assert_eq!(parent.fd_offset(duplicate.fd()), Some(17));
+
+        let child = parent.clone();
+        assert!(child.set_fd_offset(duplicate.fd(), 29));
+        assert_eq!(parent.fd_offset(source.fd()), Some(29));
+        assert_eq!(
+            parent.close_fd(source.fd()),
+            Ok(0x11),
+            "closing one fd must not destroy the shared description"
+        );
+        assert_eq!(child.fd_offset(duplicate.fd()), Some(29));
+    }
+
+    #[test]
+    fn separate_opens_of_same_handle_have_independent_descriptions() {
+        let mut fds = FdTable::<8>::new();
+        let first = fds
+            .install(0x11, Rights::READ, CompatKind::File, false)
+            .unwrap();
+        let second = fds
+            .install(0x11, Rights::READ, CompatKind::File, false)
+            .unwrap();
+        assert!(fds.set_fd_offset(first.fd(), 5));
+        assert_eq!(fds.fd_offset(second.fd()), Some(0));
+        assert!(fds.set_fd_offset(second.fd(), 9));
+        assert_eq!(fds.fd_offset(first.fd()), Some(5));
     }
 }
