@@ -1901,24 +1901,32 @@ fn linux_readv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         if total == 0 {
             return Ok(0);
         }
+        let mut pinned = alloc::vec::Vec::with_capacity(vectors.len());
+        for (base, len) in &vectors {
+            let range = crate::kobj::with(|table| {
+                proc::pin_user_in(table, pid, *base, *len, true)
+            })
+            .map_err(|error| match error {
+                proc::ProcError::OutOfFrames | proc::ProcError::MemoryQuota => {
+                    CompatErrno::NoMemory
+                }
+                _ => CompatErrno::Fault,
+            })?;
+            pinned.push((range, *len));
+        }
         let (input, read_count) = read_console_input(pid, total)?;
         let mut input_offset = 0usize;
-        let mut ranges = alloc::vec::Vec::new();
-        for (base, len) in &vectors {
+        for (range, len) in &pinned {
             let take = (read_count - input_offset).min(*len);
             if take != 0 {
-                ranges.push((*base, &input[input_offset..input_offset + take]));
+                if !range.write_at(0, &input[input_offset..input_offset + take]) {
+                    return Err(CompatErrno::Fault);
+                }
                 input_offset += take;
             }
             if input_offset == read_count {
                 break;
             }
-        }
-        if !ranges.is_empty() {
-            copy_to_user_vectored(&ranges).map_err(|error| match error {
-                UserPtrError::Quota | UserPtrError::OutOfMemory => CompatErrno::NoMemory,
-                _ => CompatErrno::Fault,
-            })?;
         }
         return Ok(read_count as u64);
     }
