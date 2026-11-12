@@ -4213,6 +4213,14 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .map(u64::from)
             .ok_or(CompatErrno::NoSpace);
     }
+    if resolved == b"/dev/binder" {
+        if flags & 3 != 2 {
+            return Err(CompatErrno::Perm);
+        }
+        return proc::linux_open_binder(pid, flags & O_CLOEXEC != 0)
+            .map(u64::from)
+            .ok_or(CompatErrno::NoSpace);
+    }
     if flags & 3 != 0 {
         return Err(CompatErrno::Perm);
     }
@@ -4591,6 +4599,10 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const ASHMEM_GET_PROT_MASK: u64 = 0x8008_6108;
     const ASHMEM_GET_PIN_STATUS: u64 = 0x6109;
     const ASHMEM_PURGE_ALL_CACHES: u64 = 0x610a;
+    const BINDER_SET_MAX_THREADS: u64 = 0x4004_6205;
+    const BINDER_THREAD_EXIT: u64 = 0x4004_6208;
+    const BINDER_VERSION: u64 = 0xc004_6209;
+    const BINDER_WRITE_READ: u64 = 0xc030_6201;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if args[1] == FIONREAD && entry.kind == compat_core::fd::CompatKind::Pipe {
@@ -4610,6 +4622,33 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         let available = i32::try_from(socket.buffered_bytes()).unwrap_or(i32::MAX);
         copy_to_user(args[2], &available.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
         return Ok(0);
+    }
+    if entry.kind == compat_core::fd::CompatKind::Device
+        && proc::linux_is_binder(pid, entry.handle)
+    {
+        return match args[1] {
+            BINDER_VERSION => {
+                copy_to_user(args[2], &8i32.to_le_bytes(), 4)
+                    .map_err(|_| CompatErrno::Fault)?;
+                Ok(0)
+            }
+            BINDER_SET_MAX_THREADS => {
+                let mut raw = [0u8; 4];
+                copy_from_user(&mut raw, args[2], 4).map_err(|_| CompatErrno::Fault)?;
+                let value = u32::from_le_bytes(raw);
+                if value == 0 || value > 64 {
+                    return Err(CompatErrno::Invalid);
+                }
+                if proc::linux_set_binder_max_threads(pid, entry.handle, value) {
+                    Ok(0)
+                } else {
+                    Err(CompatErrno::BadFd)
+                }
+            }
+            BINDER_THREAD_EXIT => Ok(0),
+            BINDER_WRITE_READ => Err(CompatErrno::NoSys),
+            _ => Err(CompatErrno::NoSys),
+        };
     }
     if entry.kind == compat_core::fd::CompatKind::Device
         && proc::linux_ashmem_state(pid, entry.handle).is_some()

@@ -78,6 +78,8 @@ const LINUX_PIPE_HANDLE_BASE: u64 = 0x0000_8000_0000_0000;
 const LINUX_SOCKET_HANDLE_BASE: u64 = 0x0000_8100_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_ASHMEM_HANDLE_BASE: u64 = 0x0000_8200_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_BINDER_HANDLE_BASE: u64 = 0x0000_8300_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -106,6 +108,8 @@ struct LinuxProcessState {
     next_socket_handle: u64,
     ashmem: Vec<LinuxAshmemHandle>,
     next_ashmem_handle: u64,
+    binder: Vec<Arc<LinuxBinderHandle>>,
+    next_binder_handle: u64,
     /// Set only on the child side of vfork. The parent task sleeps until the
     /// child commits exec or leaves `Running`.
     /// 仅 vfork 子进程携带；父任务睡眠到子进程提交 exec 或离开 Running。
@@ -153,6 +157,12 @@ struct AshmemBuffer {
 }
 
 #[cfg(feature = "linux-abi")]
+struct LinuxBinderHandle {
+    handle: u64,
+    max_threads: AtomicU32,
+}
+
+#[cfg(feature = "linux-abi")]
 pub(crate) struct LinuxFdTransfer {
     description: compat_core::FdDescription,
     resource: LinuxFdResource,
@@ -163,6 +173,7 @@ enum LinuxFdResource {
     Generic,
     Pipe(Arc<compat_core::PipeEndpoint>),
     Ashmem(Arc<AshmemBuffer>),
+    Binder(Arc<LinuxBinderHandle>),
     Socket {
         endpoint: Arc<compat_core::UnixSocketEndpoint>,
         listener: Option<Arc<UnixListener>>,
@@ -1281,6 +1292,17 @@ pub(crate) fn linux_capture_fd_transfer(
                         .ok_or(LinuxFdTransferError::Invalid)?;
                     LinuxFdResource::Ashmem(buffer)
                 }
+                compat_core::fd::CompatKind::Device
+                    if entry.handle >= LINUX_BINDER_HANDLE_BASE =>
+                {
+                    let binder = linux
+                        .binder
+                        .iter()
+                        .find(|binder| binder.handle == entry.handle)
+                        .map(Arc::clone)
+                        .ok_or(LinuxFdTransferError::Invalid)?;
+                    LinuxFdResource::Binder(binder)
+                }
                 _ => LinuxFdResource::Generic,
             };
             Ok(LinuxFdTransfer {
@@ -1307,8 +1329,9 @@ pub(crate) fn linux_install_fd_transfer(
                 description,
                 resource,
             } = transfer;
-            let (handle, pending_pipe, pending_ashmem, pending_socket) = match resource {
-                LinuxFdResource::Generic => (description.entry.handle, None, None, None),
+            let (handle, pending_pipe, pending_ashmem, pending_binder, pending_socket) =
+                match resource {
+                LinuxFdResource::Generic => (description.entry.handle, None, None, None, None),
                 LinuxFdResource::Pipe(endpoint) => {
                     linux
                         .pipes
@@ -1317,6 +1340,7 @@ pub(crate) fn linux_install_fd_transfer(
                     (
                         linux.next_pipe_handle,
                         Some(endpoint),
+                        None,
                         None,
                         None,
                     )
@@ -1331,6 +1355,20 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         Some(buffer),
                         None,
+                        None,
+                    )
+                }
+                LinuxFdResource::Binder(binder) => {
+                    linux
+                        .binder
+                        .try_reserve(1)
+                        .map_err(|_| LinuxFdTransferError::NoSpace)?;
+                    (
+                        linux.next_binder_handle,
+                        None,
+                        None,
+                        Some(binder),
+                        None,
                     )
                 }
                 LinuxFdResource::Socket {
@@ -1344,6 +1382,7 @@ pub(crate) fn linux_install_fd_transfer(
                         .map_err(|_| LinuxFdTransferError::NoSpace)?;
                     (
                         linux.next_socket_handle,
+                        None,
                         None,
                         None,
                         Some((endpoint, listener, controls)),
@@ -1370,6 +1409,16 @@ pub(crate) fn linux_install_fd_transfer(
                     .ok_or(LinuxFdTransferError::NoSpace)?;
                 linux.next_ashmem_handle = next;
                 linux.ashmem.push(LinuxAshmemHandle { handle, buffer });
+            }
+            if let Some(binder) = pending_binder {
+                let next = handle
+                    .checked_add(1)
+                    .ok_or(LinuxFdTransferError::NoSpace)?;
+                linux.next_binder_handle = next;
+                linux.binder.push(Arc::new(LinuxBinderHandle {
+                    handle,
+                    max_threads: AtomicU32::new(binder.max_threads.load(Ordering::Acquire)),
+                }));
             }
             if let Some((endpoint, listener, controls)) = pending_socket {
                 let next = handle
@@ -1542,6 +1591,9 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     if handle >= LINUX_ASHMEM_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.ashmem.retain(|ashmem| ashmem.handle != handle);
     }
+    if handle >= LINUX_BINDER_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+        linux.binder.retain(|binder| binder.handle != handle);
+    }
 }
 
 /// Opens one anonymous ashmem buffer descriptor.
@@ -1582,6 +1634,65 @@ pub(crate) fn linux_open_ashmem(pid: ObjId, close_on_exec: bool) -> Option<u32> 
         Ok(fd.fd())
     })
     .ok()
+}
+
+/// Opens one bounded Android binder device descriptor.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_open_binder(pid: ObjId, close_on_exec: bool) -> Option<u32> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.binder.len() >= 8 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .binder
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_binder_handle;
+        let next = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ.union(Rights::WRITE),
+                compat_core::fd::CompatKind::Device,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.next_binder_handle = next;
+        linux.binder.push(Arc::new(LinuxBinderHandle {
+            handle,
+            max_threads: AtomicU32::new(0),
+        }));
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_set_binder_max_threads(pid: ObjId, handle: u64, value: u32) -> bool {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()
+            .and_then(|linux| linux.binder.iter().find(|binder| binder.handle == handle))
+            .is_some_and(|binder| {
+                binder.max_threads.store(value, Ordering::Release);
+                true
+            }),
+        _ => false,
+    })
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_is_binder(pid: ObjId, handle: u64) -> bool {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()
+            .is_some_and(|linux| linux.binder.iter().any(|binder| binder.handle == handle)),
+        _ => false,
+    })
 }
 
 /// Resizes one empty ashmem buffer and commits its zeroed page backing
@@ -2269,6 +2380,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         next_socket_handle: LINUX_SOCKET_HANDLE_BASE,
         ashmem: Vec::new(),
         next_ashmem_handle: LINUX_ASHMEM_HANDLE_BASE,
+        binder: Vec::new(),
+        next_binder_handle: LINUX_BINDER_HANDLE_BASE,
         vfork_parent: None,
     };
     create_process(name, SyscallSet::EMPTY, move |process| {
@@ -2299,6 +2412,9 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
             linux
                 .ashmem
                 .retain(|ashmem| linux.fds.handle_fd_count(ashmem.handle) != 0);
+            linux
+                .binder
+                .retain(|binder| linux.fds.handle_fd_count(binder.handle) != 0);
             linux.mappings.clear();
             linux.brk = crate::arch::USER_WINDOW.0 + 0x1000_0000;
             linux.mmap_next = crate::arch::USER_WINDOW.0 + 0x4000_0000;
