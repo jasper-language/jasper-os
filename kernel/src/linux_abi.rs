@@ -2294,10 +2294,11 @@ fn linux_msync(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let address = args[0];
     let length = args[1];
     let flags = args[2];
+    let mode = flags & (MS_ASYNC | MS_SYNC);
     if address % PAGE != 0
         || length == 0
         || flags & !(MS_ASYNC | MS_INVALIDATE | MS_SYNC) != 0
-        || flags & (MS_ASYNC | MS_SYNC) == (MS_ASYNC | MS_SYNC)
+        || (mode != MS_ASYNC && mode != MS_SYNC)
     {
         return Err(CompatErrno::Invalid);
     }
