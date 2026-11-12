@@ -123,6 +123,9 @@ pub enum FileId {
     LibGccS,
     LibM,
     LibPcre2,
+    /// Synthetic, non-empty data used only to exercise the real Linux read
+    /// syscall path from a Workload-bound guest.
+    IoProbe,
 }
 
 impl FileId {
@@ -137,6 +140,7 @@ impl FileId {
             Self::LibGccS => 4,
             Self::LibM => 5,
             Self::LibPcre2 => 6,
+            Self::IoProbe => 7,
         }
     }
 
@@ -152,6 +156,7 @@ impl FileId {
                 Self::LibGccS => 4,
                 Self::LibM => 5,
                 Self::LibPcre2 => 6,
+                Self::IoProbe => 7,
             }
     }
 
@@ -166,20 +171,22 @@ impl FileId {
             value if value == (HANDLE_BASE | 4) => Some(Self::LibGccS),
             value if value == (HANDLE_BASE | 5) => Some(Self::LibM),
             value if value == (HANDLE_BASE | 6) => Some(Self::LibPcre2),
+            value if value == (HANDLE_BASE | 7) => Some(Self::IoProbe),
             _ => None,
         }
     }
 
     #[cfg(feature = "lifecycle-root-exec-verify")]
-    const fn root_slot(self) -> usize {
-        match self {
+    const fn root_slot(self) -> Option<usize> {
+        Some(match self {
             Self::Libc => 0,
             Self::LibSystemd => 1,
             Self::LibSelinux => 2,
             Self::LibGccS => 3,
             Self::LibM => 4,
             Self::LibPcre2 => 5,
-        }
+            Self::IoProbe => return None,
+        })
     }
 
     /// Returns the exact file bytes.
@@ -187,8 +194,10 @@ impl FileId {
     /// 返回未修改的真实文件字节。
     pub fn bytes(self) -> &'static [u8] {
         #[cfg(feature = "lifecycle-root-exec-verify")]
-        if let Some(bytes) = ROOT_LIBRARIES[self.root_slot()].get() {
-            return bytes.as_slice();
+        if let Some(slot) = self.root_slot() {
+            if let Some(bytes) = ROOT_LIBRARIES[slot].get() {
+                return bytes.as_slice();
+            }
         }
         match self {
             Self::Libc => LIBC,
@@ -197,6 +206,16 @@ impl FileId {
             Self::LibGccS => LIBGCC_S,
             Self::LibM => LIBM,
             Self::LibPcre2 => LIBPCRE2,
+            Self::IoProbe => {
+                #[cfg(feature = "workload-io-verify")]
+                {
+                    b"JASPERIO01234567"
+                }
+                #[cfg(not(feature = "workload-io-verify"))]
+                {
+                    &[]
+                }
+            }
         }
     }
 }
@@ -340,6 +359,7 @@ pub struct DirEntry {
 pub fn lookup(path: &[u8]) -> Option<FileId> {
     if !cfg!(feature = "compat-dynamic-libc-verify")
         && !cfg!(feature = "lifecycle-root-exec-verify")
+        && !cfg!(feature = "workload-io-verify")
     {
         return None;
     }
@@ -362,6 +382,8 @@ pub fn lookup(path: &[u8]) -> Option<FileId> {
         b"/lib/x86_64-linux-gnu/libpcre2-8.so.0" | b"/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0" => {
             Some(FileId::LibPcre2)
         }
+        #[cfg(feature = "workload-io-verify")]
+        b"/io-probe" => Some(FileId::IoProbe),
         _ => None,
     }
 }
@@ -561,7 +583,9 @@ pub fn install_root_library(file: FileId, bytes: Vec<u8>) -> bool {
     if bytes.is_empty() {
         return false;
     }
-    let slot = file.root_slot();
+    let Some(slot) = file.root_slot() else {
+        return false;
+    };
     ROOT_LIBRARIES[slot].call_once(|| bytes);
     ROOT_LIBRARIES[slot]
         .get()

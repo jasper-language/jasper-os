@@ -835,6 +835,16 @@ fn check(ok: bool, message: &str) {
 
 pub fn failed() -> u32 {
     FAILED.load(Ordering::Relaxed)
+        + {
+            #[cfg(feature = "workload-io-verify")]
+            {
+                crate::workload_io_verify::failed()
+            }
+            #[cfg(not(feature = "workload-io-verify"))]
+            {
+                0
+            }
+        }
 }
 
 fn exit_code() -> [u8; 11] {
@@ -1158,6 +1168,8 @@ pub fn run() {
         sched::live_cpu_groups() == groups_before,
         "CPU group baseline",
     );
+    #[cfg(feature = "workload-io-verify")]
+    crate::workload_io_verify::run();
     kprintln!(
         "[JSR-WORKLOAD] runtime=true checks_failed={} ring={} task={}",
         failed(),
