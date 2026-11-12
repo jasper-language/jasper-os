@@ -20,7 +20,10 @@ use crate::sync::IrqSpinLock;
 use crate::syscall::{ExecReturn, SyscallArgs, SyscallOutcome, UserReturn, CONSOLE_WRITE_MAX};
 use crate::{console, proc, sched};
 
-#[cfg(feature = "compat-dynamic-libc-verify")]
+#[cfg(any(
+    feature = "compat-dynamic-libc-verify",
+    feature = "workload-io-verify"
+))]
 static SYSCALL_TRACE_REMAINING: AtomicU32 = AtomicU32::new(512);
 #[cfg(feature = "compat-dynamic-libc-verify")]
 static PATH_TRACE_REMAINING: AtomicU32 = AtomicU32::new(24);
@@ -88,7 +91,10 @@ impl CompatState {
 static COMPAT: IrqSpinLock<CompatState> =
     IrqSpinLock::ranked(crate::lockorder::LINUX_COMPAT, CompatState::new());
 
-#[cfg(feature = "compat-dynamic-libc-verify")]
+#[cfg(any(
+    feature = "compat-dynamic-libc-verify",
+    feature = "workload-io-verify"
+))]
 fn trace_request(args: &SyscallArgs) {
     let remaining = SYSCALL_TRACE_REMAINING.load(Ordering::Relaxed);
     if remaining == 0 {
@@ -1327,7 +1333,10 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
     if proc::current_exiting() {
         proc::thread_exit(0, "killed linux process");
     }
-    #[cfg(feature = "compat-dynamic-libc-verify")]
+    #[cfg(any(
+        feature = "compat-dynamic-libc-verify",
+        feature = "workload-io-verify"
+    ))]
     trace_request(a);
     let Some(pid) = proc::current_process() else {
         return SyscallOutcome::value(-i64::from(CompatErrno::NoSys as i32));
@@ -2275,18 +2284,18 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
     drop(path);
     let argv = linux_string_vector(args[1], 64, 64 * 1024)?;
     let envp = linux_string_vector(args[2], 64, 64 * 1024)?;
-    let (executable, interpreter) = crate::linux_vfs::root_executable(pid, &resolved).map_err(
-        |error| match error {
-            crate::linux_vfs::RootExecutableError::NotFound => CompatErrno::NoEntry,
-            crate::linux_vfs::RootExecutableError::Quota => CompatErrno::NoSpace,
-            crate::linux_vfs::RootExecutableError::Io => CompatErrno::Invalid,
-        },
-    )?;
     #[cfg(all(
         feature = "lifecycle-root-exec-verify",
         target_arch = "x86_64"
     ))]
     {
+        let (executable, interpreter) = crate::linux_vfs::root_executable(pid, &resolved).map_err(
+            |error| match error {
+                crate::linux_vfs::RootExecutableError::NotFound => CompatErrno::NoEntry,
+                crate::linux_vfs::RootExecutableError::Quota => CompatErrno::NoSpace,
+                crate::linux_vfs::RootExecutableError::Io => CompatErrno::Invalid,
+            },
+        )?;
         match crate::compat_dynamic_demo::exec_dynamic_program(
             pid,
             resolved,
@@ -2304,7 +2313,7 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
         target_arch = "x86_64"
     )))]
     {
-        let _ = (executable, interpreter, argv, envp);
+        let _ = (resolved, argv, envp);
         Err(CompatErrno::NoSys)
     }
 }

@@ -31,7 +31,17 @@ if ! flock -w 900 9; then
     exit 75
 fi
 
-if pgrep -f '[q]emu-system|[V]BoxHeadless' >/dev/null 2>&1; then
+runtime_active() {
+    local comm
+    for comm in /proc/[0-9]*/comm; do
+        IFS= read -r name <"$comm" 2>/dev/null || continue
+        case "$name" in
+            qemu-system*|VBoxHeadless) return 0 ;;
+        esac
+    done
+    return 1
+}
+if runtime_active; then
     echo "guarded-cargo: VM/QEMU is running; refusing to stack a host build" >&2
     exit 75
 fi

@@ -67,7 +67,8 @@ pub mod linux_abi;
 #[cfg(all(
     any(
         feature = "compat-dynamic-libc-verify",
-        feature = "lifecycle-root-exec-verify"
+        feature = "lifecycle-root-exec-verify",
+        feature = "workload-io-verify"
     ),
     target_arch = "x86_64"
 ))]
@@ -200,6 +201,8 @@ pub mod usi;
 pub mod workload;
 #[cfg(all(feature = "workload-verify", target_arch = "x86_64"))]
 pub mod workload_verify;
+#[cfg(all(feature = "workload-io-verify", target_arch = "x86_64"))]
+pub mod workload_io_verify;
 #[cfg(feature = "user-programs")]
 pub mod usi1_demo;
 #[cfg(feature = "usi2-verify")]
