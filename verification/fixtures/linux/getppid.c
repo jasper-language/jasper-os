@@ -1066,6 +1066,49 @@ int main(void) {
         close(ppoll_pipe[0]) != 0 || close(ppoll_pipe[1]) != 0) {
         return 191;
     }
+    int select_pipe[2];
+    if (pipe2(select_pipe, 0) != 0) {
+        return 192;
+    }
+    pid_t select_child = fork();
+    if (select_child < 0) {
+        return 193;
+    }
+    if (select_child == 0) {
+        struct timespec delay = {.tv_sec = 0, .tv_nsec = 20000000};
+        nanosleep(&delay, NULL);
+        _exit(write(select_pipe[1], "S", 1) == 1 ? 0 : 194);
+    }
+    fd_set select_read;
+    FD_ZERO(&select_read);
+    FD_SET(select_pipe[0], &select_read);
+    struct timeval select_timeout = {.tv_sec = 0, .tv_usec = 300000};
+    if (select(select_pipe[0] + 1, &select_read, NULL, NULL,
+               &select_timeout) != 1 ||
+        !FD_ISSET(select_pipe[0], &select_read) ||
+        read(select_pipe[0], blocking_bytes, 1) != 1 ||
+        blocking_bytes[0] != 'S') {
+        return 195;
+    }
+    int select_status = 0;
+    if (waitpid(select_child, &select_status, 0) != select_child ||
+        !WIFEXITED(select_status) || WEXITSTATUS(select_status) != 0 ||
+        close(select_pipe[0]) != 0 || close(select_pipe[1]) != 0) {
+        return 196;
+    }
+    int pselect_pipe[2];
+    if (pipe2(pselect_pipe, 0) != 0) {
+        return 197;
+    }
+    FD_ZERO(&select_read);
+    FD_SET(pselect_pipe[0], &select_read);
+    struct timespec pselect_timeout = {.tv_sec = 0, .tv_nsec = 30000000};
+    if (pselect(pselect_pipe[0] + 1, &select_read, NULL, NULL,
+                &pselect_timeout, NULL) != 0 ||
+        FD_ISSET(pselect_pipe[0], &select_read) ||
+        close(pselect_pipe[0]) != 0 || close(pselect_pipe[1]) != 0) {
+        return 198;
+    }
     int timeout_pipe[2];
     if (pipe2(timeout_pipe, 0) != 0) {
         return 185;

@@ -114,6 +114,8 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Fcntl,
         LinuxSyscall::Poll,
         LinuxSyscall::PPoll,
+        LinuxSyscall::Select,
+        LinuxSyscall::PSelect6,
         LinuxSyscall::Ioctl,
         LinuxSyscall::StatFs,
         LinuxSyscall::ReadLink,
