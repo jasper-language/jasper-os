@@ -1343,6 +1343,11 @@ pub const OPERATIONS: &[OperationContract] = &[
         args: "u64:workload_key",
         result: "0_or_error",
     },
+    OperationContract {
+        name: "system.workload.spawn",
+        args: "u64:workload_key,u64:spawn_desc_ptr",
+        result: "0_or_error",
+    },
 ];
 
 /// Rights 位是外部 ABI；位值变化必须产生新快照并随 ABI 版本裁决。
@@ -1489,6 +1494,10 @@ pub const SEMANTICS: &[(&str, &str)] = &[
     (
         "workload.destroy",
         "same_domain_only;terminal_only;zero_usage_and_children",
+    ),
+    (
+        "workload.spawn",
+        "same_domain_running_only;bind_before_pages_and_threads;spawn_v2_descriptor;workload_owns_cpu_limit",
     ),
 ];
 

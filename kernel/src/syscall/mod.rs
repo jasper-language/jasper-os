@@ -672,6 +672,9 @@ syscall_dispatch! {
     SYSTEM_WORKLOAD_DESTROY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         workload_destroy(a.args[0])
     },
+    SYSTEM_WORKLOAD_SPAWN => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        crate::proc::spawn::sys_workload_spawn(a.args[0], a.args[1])
+    },
 }
 
 // 编译期证明：分发表在登记表之内，且两者基数相同 ⇒ 两个集合完全相等。

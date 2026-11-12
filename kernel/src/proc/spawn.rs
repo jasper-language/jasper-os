@@ -119,6 +119,20 @@ fn discard(child: ObjId) {
 /// 为父进程 `parent` 从 `image` 创建子进程（见模块文档）。`calls` 须已通过无状态检查。
 /// Creates a child of `parent` from an ELF image; all-or-nothing.
 pub fn spawn_child(parent: ObjId, image: &[u8], calls: SyscallSet, arg: u64, cpu_limit: u32) -> Result<Spawned, SpawnError> {
+    spawn_child_with_workload(parent, image, calls, arg, cpu_limit, None)
+}
+
+/// Spawn a child that is bound to a native Workload before any pages or tasks
+/// are created. CPU quota is then owned by the Workload, so `cpu_limit` must be
+/// unlimited for this path.
+pub fn spawn_child_with_workload(
+    parent: ObjId,
+    image: &[u8],
+    calls: SyscallSet,
+    arg: u64,
+    cpu_limit: u32,
+    workload: Option<kernel_core::workload::WorkloadKey>,
+) -> Result<Spawned, SpawnError> {
     // 先回收已死亡的对象（有界）：销毁发生在清理过程里——不在这里推进，
     // 父进程关闭了句柄、已经退出的子进程会一直占着内存
     kobj::run_cleanup(RECLAIM_BUDGET);
@@ -139,6 +153,10 @@ pub fn spawn_child(parent: ObjId, image: &[u8], calls: SyscallSet, arg: u64, cpu
     if let Err(error) = super::inherit_application(parent, child) {
         discard(child);
         return Err(SpawnError::Proc(error));
+    }
+    if workload.is_some_and(|workload| !super::bind_workload(child, workload)) {
+        discard(child);
+        return Err(SpawnError::Proc(ProcError::NoSuchProcess));
     }
     let base = arch::USER_WINDOW.0;
     let prepared = (|| {
@@ -218,9 +236,10 @@ pub fn spawn_child(parent: ObjId, image: &[u8], calls: SyscallSet, arg: u64, cpu
         return Err(SpawnError::Proc(e));
     }
     kprintln!(
-        "[JSR-PROC] event=system.process.spawned parent={:#x} child={:#x} calls={:x?} cpu_limit={} image_bytes={}",
+        "[JSR-PROC] event=system.process.spawned parent={:#x} child={:#x} workload={:?} calls={:x?} cpu_limit={} image_bytes={}",
         parent.raw(),
         child.raw(),
+        workload,
         calls.words(),
         cpu_limit,
         image.len()
@@ -247,6 +266,40 @@ fn spawn_err(e: SpawnError) -> i64 {
 /// 参数块的输出位置在创建之前先确认可写：不会出现「子进程建了却交不回句柄」。
 /// System call entry of `system.process.spawn`.
 pub fn sys_spawn(desc_ptr: u64) -> i64 {
+    spawn_from_desc(desc_ptr, None)
+}
+
+/// `system.workload.spawn(workload_key, spawn_desc_ptr)`.
+///
+/// Validates that the caller owns a Running same-domain Workload, then creates
+/// the child inside that Workload from the conventional spawn v2 descriptor.
+pub fn sys_workload_spawn(raw_workload: u64, desc_ptr: u64) -> i64 {
+    let Some(pid) = super::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(domain) = super::workload_domain(pid) else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(workload) = kernel_core::workload::WorkloadKey::from_raw(raw_workload) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let snapshot = match crate::workload::snapshot_in_domain(domain, workload) {
+        Ok(snapshot) => snapshot,
+        Err(kernel_core::workload::WorkloadError::InvalidKey) => {
+            return err(SYSTEM_WORKLOAD_ERROR_NOT_FOUND)
+        }
+        Err(kernel_core::workload::WorkloadError::InvalidDomain) => {
+            return err(SYSTEM_ERROR_RIGHTS_DENIED)
+        }
+        Err(_) => return err(SYSTEM_WORKLOAD_ERROR_STATE),
+    };
+    if snapshot.state != kernel_core::workload::WorkloadState::Running {
+        return err(SYSTEM_WORKLOAD_ERROR_STATE);
+    }
+    spawn_from_desc(desc_ptr, Some(workload))
+}
+
+fn spawn_from_desc(desc_ptr: u64, workload: Option<kernel_core::workload::WorkloadKey>) -> i64 {
     let Some(pid) = super::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
     let mut raw = [0u8; SPAWN_DESC_SIZE];
     if let Err(e) = crate::mm::user::copy_from_user(&mut raw, desc_ptr, SPAWN_DESC_SIZE) {
@@ -259,6 +312,9 @@ pub fn sys_spawn(desc_ptr: u64) -> i64 {
     if let Err(r) = spawn_abi::check(&d, crate::sched::current_syscalls(), known_calls()) {
         return spawn_err(SpawnError::Rejected(r));
     }
+    if workload.is_some() && d.cpu_limit_permille != CPU_UNLIMITED {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    }
     if let Err(e) = crate::mm::user::copy_to_user(desc_ptr, &raw, SPAWN_DESC_SIZE) {
         return crate::ring::user_err(e);
     }
@@ -267,7 +323,14 @@ pub fn sys_spawn(desc_ptr: u64) -> i64 {
     if let Err(e) = crate::mm::user::copy_from_user(&mut image, d.image_ptr, len) {
         return crate::ring::user_err(e);
     }
-    match spawn_child(pid, &image, d.calls, d.arg, d.cpu_limit_permille) {
+    match spawn_child_with_workload(
+        pid,
+        &image,
+        d.calls,
+        d.arg,
+        d.cpu_limit_permille,
+        workload,
+    ) {
         Ok(s) => {
             let out = d.with_outputs(s.process.raw(), s.channel.raw());
             match crate::mm::user::copy_to_user(desc_ptr, &out, SPAWN_DESC_SIZE) {

@@ -116,6 +116,7 @@
 75	op	system.workload.query	1	read	工作负载·查询	Query native workload
 76	op	system.workload.stop	1	write	工作负载·请求停止	Stop native workload
 77	op	system.workload.destroy	1	write	工作负载·销毁	Destroy native workload
+78	op	system.workload.spawn	1	write	工作负载·创建成员进程	Spawn process into native workload
 4143	error	system.workload.error.buffer_too_small	1	none	工作负载·查询缓冲区不足	Workload query buffer too small
 4144	error	system.workload.error.not_found	1	none	工作负载不存在或无权查看	Workload not found
 4145	error	system.workload.error.state	1	none	工作负载状态转换非法	Invalid workload state

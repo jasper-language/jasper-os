@@ -21,6 +21,11 @@ const ANON_OFF: u64 = 0x100_0000;
 const API_CODE_OFF: u64 = 0x140_0000;
 const API_DESC_OFF: u64 = 0x180_0000;
 const API_INFO_OFF: u64 = 0x1c0_0000;
+const MEMBER_CODE_OFF: u64 = 0x200_0000;
+const MEMBER_CREATE_OFF: u64 = 0x240_0000;
+const MEMBER_SPAWN_OFF: u64 = 0x280_0000;
+const MEMBER_ELF_OFF: u64 = 0x2c0_0000;
+const MEMBER_KEY_OFF: u64 = 0x300_0000;
 const STACK_OFF: u64 = 0xC0_0000;
 
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -257,6 +262,256 @@ fn verify_user_workload_abi(base: u64) {
         "foreign workload cleanup",
     );
     let _ = key;
+}
+
+fn member_elf(base: u64) -> Vec<u8> {
+    fn section(
+        image: &mut [u8],
+        shoff: usize,
+        index: usize,
+        name: u32,
+        kind: u32,
+        offset: usize,
+        size: usize,
+        align: u64,
+    ) {
+        let at = shoff + index * 64;
+        image[at..at + 4].copy_from_slice(&name.to_le_bytes());
+        image[at + 4..at + 8].copy_from_slice(&kind.to_le_bytes());
+        image[at + 24..at + 32].copy_from_slice(&(offset as u64).to_le_bytes());
+        image[at + 32..at + 40].copy_from_slice(&(size as u64).to_le_bytes());
+        image[at + 48..at + 56].copy_from_slice(&align.to_le_bytes());
+    }
+
+    let note_offset = 4096 + 26;
+    let names = b"\0.shstrtab\0.note.jasper.abi\0";
+    let names_offset = note_offset + kernel_core::abi_version::NOTE_BYTES;
+    let shoff = names_offset + names.len();
+    let mut image = Vec::new();
+    image.resize(shoff + 3 * 64, 0);
+    image[..7].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1]);
+    image[16..18].copy_from_slice(&2u16.to_le_bytes());
+    image[18..20].copy_from_slice(&62u16.to_le_bytes());
+    image[20..24].copy_from_slice(&1u32.to_le_bytes());
+    image[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
+    image[58..60].copy_from_slice(&64u16.to_le_bytes());
+    image[60..62].copy_from_slice(&3u16.to_le_bytes());
+    image[62..64].copy_from_slice(&1u16.to_le_bytes());
+    let entry = base + 0x20_0000;
+    image[24..32].copy_from_slice(&entry.to_le_bytes());
+    image[32..40].copy_from_slice(&64u64.to_le_bytes());
+    image[52..54].copy_from_slice(&64u16.to_le_bytes());
+    image[54..56].copy_from_slice(&56u16.to_le_bytes());
+    image[56..58].copy_from_slice(&1u16.to_le_bytes());
+    image[64..68].copy_from_slice(&1u32.to_le_bytes());
+    image[68..72].copy_from_slice(&5u32.to_le_bytes());
+    image[72..80].copy_from_slice(&4096u64.to_le_bytes());
+    image[80..88].copy_from_slice(&entry.to_le_bytes());
+    image[96..104].copy_from_slice(&26u64.to_le_bytes());
+    image[104..112].copy_from_slice(&26u64.to_le_bytes());
+    image[112..120].copy_from_slice(&4096u64.to_le_bytes());
+    let code = &mut image[4096..];
+    code[..5].copy_from_slice(&[0xb8, 0, 0, 0, 0]);
+    code[1..5].copy_from_slice(&abi::SYSTEM_PROCESS_EXIT.to_le_bytes());
+    code[5..10].copy_from_slice(&[0xbf, 51, 0, 0, 0]);
+    code[10..14].copy_from_slice(&[0x0f, 0x05, 0x0f, 0x0b]);
+    let note = kernel_core::abi_version::encode_note(
+        kernel_core::abi_version::ProgramAbi::native_requirement(),
+    );
+    image[note_offset..note_offset + note.len()].copy_from_slice(&note);
+    image[names_offset..shoff].copy_from_slice(names);
+    section(&mut image, shoff, 1, 1, 3, names_offset, names.len(), 1);
+    section(&mut image, shoff, 2, 11, 7, note_offset, note.len(), 4);
+    image
+}
+
+fn member_spawn_code(base: u64) -> Vec<u8> {
+    fn imm32(code: &mut Vec<u8>, opcode: u8, value: u32) {
+        code.push(opcode);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+    fn imm64(code: &mut Vec<u8>, opcode: u8, value: u64) {
+        code.extend_from_slice(&[0x48, opcode]);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+    fn syscall(code: &mut Vec<u8>) {
+        code.extend_from_slice(&[0x0f, 0x05]);
+    }
+    fn test_rax(code: &mut Vec<u8>) {
+        code.extend_from_slice(&[0x48, 0x85, 0xc0]);
+    }
+    fn js_error(code: &mut Vec<u8>, patches: &mut Vec<usize>) {
+        code.extend_from_slice(&[0x0f, 0x88, 0, 0, 0, 0]);
+        patches.push(code.len() - 4);
+    }
+    fn jle_error(code: &mut Vec<u8>, patches: &mut Vec<usize>) {
+        code.extend_from_slice(&[0x0f, 0x8e, 0, 0, 0, 0]);
+        patches.push(code.len() - 4);
+    }
+    fn cmp_rax(code: &mut Vec<u8>, value: i32) {
+        code.extend_from_slice(&[0x48, 0x3d]);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+    fn jne_error(code: &mut Vec<u8>, patches: &mut Vec<usize>) {
+        code.extend_from_slice(&[0x0f, 0x85, 0, 0, 0, 0]);
+        patches.push(code.len() - 4);
+    }
+    fn exit(code: &mut Vec<u8>, status: u32) {
+        imm32(code, 0xb8, abi::SYSTEM_PROCESS_EXIT);
+        imm32(code, 0xbf, status);
+        syscall(code);
+        code.extend_from_slice(&[0x0f, 0x0b]);
+    }
+
+    let mut code = Vec::new();
+    let mut patches = Vec::new();
+    imm32(&mut code, 0xb8, abi::SYSTEM_WORKLOAD_CREATE);
+    imm64(&mut code, 0xbf, base + MEMBER_CREATE_OFF);
+    syscall(&mut code);
+    test_rax(&mut code);
+    jle_error(&mut code, &mut patches);
+    code.extend_from_slice(&[0x48, 0x89, 0xc3]); // mov rbx, rax
+    imm64(&mut code, 0xbf, base + MEMBER_KEY_OFF);
+    code.extend_from_slice(&[0x48, 0x89, 0x1f]); // mov [rdi], rbx
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_WORKLOAD_SPAWN);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]); // mov rdi, rbx
+    imm64(&mut code, 0xbe, base + MEMBER_SPAWN_OFF);
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+
+    imm64(&mut code, 0xbf, base + MEMBER_SPAWN_OFF + 72);
+    code.extend_from_slice(&[0x48, 0x8b, 0x3f]); // mov rdi, [rdi]
+    imm32(&mut code, 0xb8, abi::SYSTEM_PROCESS_WAIT);
+    syscall(&mut code);
+    cmp_rax(&mut code, 51);
+    jne_error(&mut code, &mut patches);
+
+    imm64(&mut code, 0xbf, base + MEMBER_SPAWN_OFF + 72);
+    code.extend_from_slice(&[0x48, 0x8b, 0x3f]);
+    imm32(&mut code, 0xb8, abi::SYSTEM_HANDLE_CLOSE);
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+    imm64(&mut code, 0xbf, base + MEMBER_SPAWN_OFF + 80);
+    code.extend_from_slice(&[0x48, 0x8b, 0x3f]);
+    imm32(&mut code, 0xb8, abi::SYSTEM_HANDLE_CLOSE);
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+    exit(&mut code, 0);
+
+    let error = code.len();
+    for patch in patches {
+        let end = patch + 4;
+        let displacement = (error as i64 - end as i64) as i32;
+        code[patch..end].copy_from_slice(&displacement.to_le_bytes());
+    }
+    exit(&mut code, 1);
+    code
+}
+
+fn verify_workload_spawn(base: u64) {
+    let page = kernel_core::frame::FRAME_SIZE as u64;
+    let calls = SyscallSet::of(&[
+        abi::SYSTEM_PROCESS_EXIT,
+        abi::SYSTEM_PROCESS_WAIT,
+        abi::SYSTEM_HANDLE_CLOSE,
+        abi::SYSTEM_WORKLOAD_CREATE,
+        abi::SYSTEM_WORKLOAD_SPAWN,
+    ]);
+    let pid = match proc::create("workload-member-spawn", calls) {
+        Ok(pid) => pid,
+        Err(error) => {
+            kprintln!("[JSR-WORKLOAD] member spawn process failed: {:?}", error);
+            check(false, "member spawn process");
+            return;
+        }
+    };
+    let create = kernel_core::workload_abi::CreateArgs {
+        parent: None,
+        limits: ResourceLimits {
+            cpu_permille: 100,
+            memory_bytes: 8 * page,
+            threads: 1,
+            ring_entries: 1,
+        },
+    }
+    .encode();
+    let elf = member_elf(base);
+    let spawn = kernel_core::spawn_abi::SpawnDesc {
+        image_ptr: base + MEMBER_ELF_OFF,
+        image_len: elf.len() as u64,
+        calls: SyscallSet::of(&[abi::SYSTEM_PROCESS_EXIT]),
+        arg: 0,
+        cpu_limit_permille: kernel_core::spawn_abi::CPU_UNLIMITED,
+        ..Default::default()
+    }
+    .encode();
+    let code = member_spawn_code(base);
+    check(
+        proc::map_new(pid, base + MEMBER_CODE_OFF, MapFlags::USER | MapFlags::EXECUTE).is_ok()
+            && proc::map_new(pid, base + MEMBER_CREATE_OFF, MapFlags::USER | MapFlags::WRITE)
+                .is_ok()
+            && proc::map_new(pid, base + MEMBER_SPAWN_OFF, MapFlags::USER | MapFlags::WRITE)
+                .is_ok()
+            && proc::map_new(pid, base + MEMBER_ELF_OFF, MapFlags::USER | MapFlags::WRITE).is_ok()
+            && proc::map_new(pid, base + MEMBER_ELF_OFF + page, MapFlags::USER).is_ok()
+            && proc::map_new(pid, base + MEMBER_KEY_OFF, MapFlags::USER | MapFlags::WRITE).is_ok()
+            && proc::map_new(
+                pid,
+                base + STACK_OFF - page,
+                MapFlags::USER | MapFlags::WRITE,
+            )
+            .is_ok(),
+        "member spawn pages map",
+    );
+    check(
+        proc::write(pid, base + MEMBER_CODE_OFF, &code).is_ok()
+            && proc::write(pid, base + MEMBER_CREATE_OFF, &create).is_ok()
+            && proc::write(pid, base + MEMBER_SPAWN_OFF, &spawn).is_ok()
+            && proc::write(pid, base + MEMBER_ELF_OFF, &elf).is_ok(),
+        "member spawn inputs install",
+    );
+    let task = proc::spawn_thread(
+        pid,
+        "workload-member-spawn",
+        base + MEMBER_CODE_OFF,
+        base + STACK_OFF,
+        0,
+        0,
+    );
+    check(task.is_ok(), "member spawn task starts");
+    if task.is_err() || !sched::run_until(sched::timer_ticks().saturating_add(1000)) {
+        check(false, "member spawn task settles");
+        return;
+    }
+    check(
+        matches!(proc::state(pid), Some(ProcState::Exited { code: 0 })),
+        "member spawn task exits zero",
+    );
+    let mut raw = [0u8; 8];
+    if proc::read(pid, base + MEMBER_KEY_OFF, &mut raw).is_err() {
+        check(false, "member workload key readable");
+        return;
+    }
+    let key = kernel_core::workload::WorkloadKey::from_raw(u64::from_le_bytes(raw));
+    check(key.is_some(), "member workload key valid");
+    let _ = proc::reap(pid);
+    crate::kobj::run_cleanup(usize::MAX);
+    if let Some(key) = key {
+        check(
+            crate::workload::usage(key) == Some(ResourceUsage::default()),
+            "member process releases workload resources",
+        );
+        check(
+            crate::workload::transition(key, WorkloadState::Stopping).is_ok()
+                && crate::workload::transition(key, WorkloadState::Stopped).is_ok()
+                && crate::workload::destroy(key).is_ok(),
+            "member workload cleanup",
+        );
+    }
 }
 
 fn check(ok: bool, message: &str) {
@@ -567,6 +822,7 @@ pub fn run() {
     );
     verify_hierarchical_cpu(domain);
     verify_user_workload_abi(base);
+    verify_workload_spawn(base);
     check(
         crate::mm::frame::free_frames() == frames_before,
         "frame baseline",
