@@ -1441,7 +1441,10 @@ fn sandbox_wait(raw_key: u64, timeout_ns: u64) -> i64 {
         let wake_at = deadline
             .map(|deadline| deadline.min(now.saturating_add(POLL_INTERVAL_NS)))
             .unwrap_or_else(|| now.saturating_add(POLL_INTERVAL_NS));
-        if proc::block_until(wake_at).is_err() {
+        if sched::sleep_until_ns(wake_at).is_err() {
+            sched::pause();
+        }
+        if proc::current_exiting() {
             return err(SYSTEM_ASYNC_ERROR_CANCELLED);
         }
     }

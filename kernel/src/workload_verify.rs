@@ -370,6 +370,13 @@ fn sandbox_abi_code(base: u64, foreign_key: u64) -> Vec<u8> {
     jne_error(&mut code, &mut patches);
 
     imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_WAIT);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    imm64(&mut code, 0xbe, 2_000_000);
+    syscall(&mut code);
+    cmp_rax(&mut code, -(abi::SYSTEM_SANDBOX_ERROR_TIMEOUT as i32));
+    jne_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_WAIT);
     imm64(&mut code, 0xbf, foreign_key);
     imm64(&mut code, 0xbe, 0);
     syscall(&mut code);
