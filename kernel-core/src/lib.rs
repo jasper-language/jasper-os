@@ -39,6 +39,7 @@
 //! * [`user_layout`] —— 各指令集的用户私有窗口起点与用户程序装载地址（内核、运行时与构建脚本共用）
 //! * [`workload`] —— 原生 Workload 身份、父子资源域、生命周期和成员归属契约（issue #23）
 //! * [`sandbox_image`] —— Sandbox 镜像、不可变层、CoW 卷与存储所有权契约
+//! * [`native_install`] —— 原生包、安装登记、授权、运行主体、数据与更新权分离契约
 //!
 //! # 边界（为什么这样分）
 //! * 只依赖 `core`：`#![no_std]`，测试时才链接 `std`（`cfg_attr(not(test), no_std)`），
@@ -191,6 +192,8 @@ pub mod sandbox;
 pub mod sandbox_image;
 pub mod sandbox_abi;
 pub mod sandbox_storage_abi;
+
+pub mod native_install;
 
 // issue #3：统一定时事件契约。 / Unified timer-event contract.
 pub mod timer_event;
