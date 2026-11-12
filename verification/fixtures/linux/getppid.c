@@ -1036,6 +1036,36 @@ int main(void) {
         !WIFEXITED(poll_status) || WEXITSTATUS(poll_status) != 0) {
         return 184;
     }
+    int ppoll_pipe[2];
+    if (pipe2(ppoll_pipe, 0) != 0) {
+        return 187;
+    }
+    pid_t ppoll_child = fork();
+    if (ppoll_child < 0) {
+        return 188;
+    }
+    if (ppoll_child == 0) {
+        struct timespec delay = {.tv_sec = 0, .tv_nsec = 20000000};
+        nanosleep(&delay, NULL);
+        _exit(write(ppoll_pipe[1], "P", 1) == 1 ? 0 : 189);
+    }
+    struct pollfd ppoll_read = {
+        .fd = ppoll_pipe[0],
+        .events = POLLIN,
+    };
+    struct timespec ppoll_timeout = {.tv_sec = 0, .tv_nsec = 300000000};
+    if (ppoll(&ppoll_read, 1, &ppoll_timeout, NULL) != 1 ||
+        (ppoll_read.revents & POLLIN) == 0 ||
+        read(ppoll_pipe[0], blocking_bytes, 1) != 1 ||
+        blocking_bytes[0] != 'P') {
+        return 190;
+    }
+    int ppoll_status = 0;
+    if (waitpid(ppoll_child, &ppoll_status, 0) != ppoll_child ||
+        !WIFEXITED(ppoll_status) || WEXITSTATUS(ppoll_status) != 0 ||
+        close(ppoll_pipe[0]) != 0 || close(ppoll_pipe[1]) != 0) {
+        return 191;
+    }
     int timeout_pipe[2];
     if (pipe2(timeout_pipe, 0) != 0) {
         return 185;

@@ -1448,6 +1448,7 @@ fn execute(
         LinuxSyscall::Statx => compat_result(linux_statx(pid, call.args)),
         LinuxSyscall::Fcntl => compat_result(linux_fcntl(pid, call.args)),
         LinuxSyscall::Poll => compat_result(linux_poll(pid, call.args)),
+        LinuxSyscall::PPoll => compat_result(linux_ppoll(pid, call.args)),
         LinuxSyscall::Ioctl => compat_result(linux_ioctl(pid, call.args)),
         LinuxSyscall::StatFs => compat_result(linux_statfs(call.args)),
         LinuxSyscall::ReadLink => compat_result(linux_readlink(pid, call.args)),
@@ -4946,6 +4947,36 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             sched::pause();
         }
     }
+}
+
+/// Implements `ppoll(2)` with a bounded timespec timeout and a NULL signal
+/// mask. Atomic signal-mask replacement remains explicitly unsupported.
+fn linux_ppoll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[3] != 0 || (args[4] != 0 && args[4] != 8) {
+        return Err(CompatErrno::NoSys);
+    }
+    let timeout = if args[2] == 0 {
+        u32::MAX as u64
+    } else {
+        let mut raw = [0u8; 16];
+        copy_from_user(&mut raw, args[2], 16).map_err(|_| CompatErrno::Fault)?;
+        let seconds = i64::from_le_bytes(raw[0..8].try_into().unwrap());
+        let nanos = i64::from_le_bytes(raw[8..16].try_into().unwrap());
+        if seconds < 0 || !(0..1_000_000_000).contains(&nanos) {
+            return Err(CompatErrno::Invalid);
+        }
+        (seconds as u64)
+            .checked_mul(1_000)
+            .and_then(|millis| {
+                millis.checked_add((nanos as u64).div_ceil(1_000_000))
+            })
+            .filter(|millis| *millis <= i32::MAX as u64)
+            .ok_or(CompatErrno::Invalid)?
+    };
+    linux_poll(
+        pid,
+        [args[0], args[1], timeout, 0, 0, 0],
+    )
 }
 
 /// Implements `statfs(2)` over the exact read-only verification namespace.
