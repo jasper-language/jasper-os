@@ -82,6 +82,8 @@ const LINUX_ASHMEM_HANDLE_BASE: u64 = 0x0000_8200_0000_0000;
 const LINUX_BINDER_HANDLE_BASE: u64 = 0x0000_8300_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_ION_DEVICE_HANDLE_BASE: u64 = 0x0000_8400_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_EVENTFD_HANDLE_BASE: u64 = 0x0000_8500_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -116,6 +118,8 @@ struct LinuxProcessState {
     next_ion_device_handle: u64,
     ion_allocations: Vec<LinuxIonAllocation>,
     next_ion_user_handle: u32,
+    eventfds: Vec<LinuxEventFdHandle>,
+    next_eventfd_handle: u64,
     /// Set only on the child side of vfork. The parent task sleeps until the
     /// child commits exec or leaves `Running`.
     /// 仅 vfork 子进程携带；父任务睡眠到子进程提交 exec 或离开 Running。
@@ -179,6 +183,13 @@ struct LinuxIonAllocation {
 }
 
 #[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxEventFdHandle {
+    handle: u64,
+    counter: Arc<SpinLock<u64>>,
+    semaphore: bool,
+}
+
 pub(crate) struct LinuxFdTransfer {
     description: compat_core::FdDescription,
     resource: LinuxFdResource,
@@ -191,6 +202,7 @@ enum LinuxFdResource {
     Ashmem(Arc<AshmemBuffer>),
     Binder(Arc<LinuxBinderHandle>),
     IonDevice,
+    EventFd(LinuxEventFdHandle),
     Socket {
         endpoint: Arc<compat_core::UnixSocketEndpoint>,
         listener: Option<Arc<UnixListener>>,
@@ -1301,6 +1313,15 @@ pub(crate) fn linux_capture_fd_transfer(
                         controls: Arc::clone(&socket.controls),
                     }
                 }
+                compat_core::fd::CompatKind::Event => {
+                    let eventfd = linux
+                        .eventfds
+                        .iter()
+                        .find(|eventfd| eventfd.handle == entry.handle)
+                        .cloned()
+                        .ok_or(LinuxFdTransferError::Invalid)?;
+                    LinuxFdResource::EventFd(eventfd)
+                }
                 compat_core::fd::CompatKind::Device
                     if entry.handle >= LINUX_ASHMEM_HANDLE_BASE =>
                 {
@@ -1361,10 +1382,11 @@ pub(crate) fn linux_install_fd_transfer(
                 pending_ashmem,
                 pending_binder,
                 pending_ion_device,
+                pending_eventfd,
                 pending_socket,
             ) = match resource {
                 LinuxFdResource::Generic => {
-                    (description.entry.handle, None, None, None, false, None)
+                    (description.entry.handle, None, None, None, false, None, None)
                 }
                 LinuxFdResource::Pipe(endpoint) => {
                     linux
@@ -1377,6 +1399,7 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         None,
                         false,
+                        None,
                         None,
                     )
                 }
@@ -1392,6 +1415,7 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         false,
                         None,
+                        None,
                     )
                 }
                 LinuxFdResource::Binder(binder) => {
@@ -1406,6 +1430,7 @@ pub(crate) fn linux_install_fd_transfer(
                         Some(binder),
                         false,
                         None,
+                        None,
                     )
                 }
                 LinuxFdResource::IonDevice => {
@@ -1419,6 +1444,22 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         None,
                         true,
+                        None,
+                        None,
+                    )
+                }
+                LinuxFdResource::EventFd(eventfd) => {
+                    linux
+                        .eventfds
+                        .try_reserve(1)
+                        .map_err(|_| LinuxFdTransferError::NoSpace)?;
+                    (
+                        linux.next_eventfd_handle,
+                        None,
+                        None,
+                        None,
+                        false,
+                        Some(eventfd),
                         None,
                     )
                 }
@@ -1437,6 +1478,7 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         None,
                         false,
+                        None,
                         Some((endpoint, listener, controls)),
                     )
                 }
@@ -1478,6 +1520,14 @@ pub(crate) fn linux_install_fd_transfer(
                     .ok_or(LinuxFdTransferError::NoSpace)?;
                 linux.next_ion_device_handle = next;
                 linux.ion_devices.push(handle);
+            }
+            if let Some(mut eventfd) = pending_eventfd {
+                let next = handle
+                    .checked_add(1)
+                    .ok_or(LinuxFdTransferError::NoSpace)?;
+                eventfd.handle = handle;
+                linux.next_eventfd_handle = next;
+                linux.eventfds.push(eventfd);
             }
             if let Some((endpoint, listener, controls)) = pending_socket {
                 let next = handle
@@ -1656,6 +1706,9 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     if handle >= LINUX_ION_DEVICE_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.ion_devices.retain(|device| *device != handle);
     }
+    if handle >= LINUX_EVENTFD_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+        linux.eventfds.retain(|eventfd| eventfd.handle != handle);
+    }
 }
 
 /// Opens one anonymous ashmem buffer descriptor.
@@ -1769,6 +1822,69 @@ pub(crate) fn linux_open_binder(pid: ObjId, close_on_exec: bool) -> Option<u32> 
         Ok(fd.fd())
     })
     .ok()
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_eventfd_create(
+    pid: ObjId,
+    initial: u32,
+    close_on_exec: bool,
+    nonblocking: bool,
+    semaphore: bool,
+) -> Option<u32> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.eventfds.len() >= 32 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .eventfds
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_eventfd_handle;
+        linux.next_eventfd_handle = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ.union(Rights::WRITE),
+                compat_core::fd::CompatKind::Event,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        if nonblocking
+            && !linux
+                .fds
+                .set_fd_status_flags(fd.fd(), compat_core::syscall::LINUX_O_NONBLOCK)
+        {
+            let _ = linux.fds.close(fd);
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux.eventfds.push(LinuxEventFdHandle {
+            handle,
+            counter: Arc::new(SpinLock::new(u64::from(initial))),
+            semaphore,
+        });
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_eventfd_state(
+    pid: ObjId,
+    handle: u64,
+) -> Option<(Arc<SpinLock<u64>>, bool)> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .eventfds
+            .iter()
+            .find(|eventfd| eventfd.handle == handle)
+            .map(|eventfd| (Arc::clone(&eventfd.counter), eventfd.semaphore)),
+        _ => None,
+    })
 }
 
 #[cfg(feature = "linux-abi")]
@@ -2858,6 +2974,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         next_ion_device_handle: LINUX_ION_DEVICE_HANDLE_BASE,
         ion_allocations: Vec::new(),
         next_ion_user_handle: 1,
+        eventfds: Vec::new(),
+        next_eventfd_handle: LINUX_EVENTFD_HANDLE_BASE,
         vfork_parent: None,
     };
     create_process(name, SyscallSet::EMPTY, move |process| {
@@ -2894,6 +3012,9 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
             linux
                 .ion_devices
                 .retain(|device| linux.fds.handle_fd_count(*device) != 0);
+            linux
+                .eventfds
+                .retain(|eventfd| linux.fds.handle_fd_count(eventfd.handle) != 0);
             linux.mappings.clear();
             linux.brk = crate::arch::USER_WINDOW.0 + 0x1000_0000;
             linux.mmap_next = crate::arch::USER_WINDOW.0 + 0x4000_0000;
