@@ -140,6 +140,50 @@ impl IoUsage {
     }
 }
 
+/// Bounded admission rates for file/block I/O.
+///
+/// Windows are fixed, monotonic-clock windows. A window starts with the first
+/// admitted request after the previous window has elapsed. Bytes and operations
+/// share the same window boundary, while lifetime [`ResourceLimits`] remain an
+/// independent cumulative constraint.
+///
+/// 文件/块 I/O 的有界准入速率。窗口由单调时钟的固定长度区间组成，字节与
+/// 操作数共用边界；生命周期 [`ResourceLimits`] 仍是独立的累计约束。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IoRateLimits {
+    pub bytes_per_window: u64,
+    pub ops_per_window: u64,
+    pub window_ns: u64,
+}
+
+impl IoRateLimits {
+    pub const fn validate(self) -> Result<(), WorkloadError> {
+        if self.bytes_per_window == 0 || self.ops_per_window == 0 || self.window_ns == 0 {
+            Err(WorkloadError::InvalidLimit)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Current fixed-window consumption. `window_start_ns` is meaningful only
+/// while a rate limit is configured.
+///
+/// 当前固定窗口的消耗；只有配置速率限制时 `window_start_ns` 才有意义。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IoRateUsage {
+    pub window_start_ns: u64,
+    pub bytes: u64,
+    pub ops: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IoRateSnapshot {
+    pub limits: Option<IoRateLimits>,
+    pub usage: IoRateUsage,
+    pub window_active: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkloadState {
     Created,
@@ -217,6 +261,9 @@ struct Record {
     limits: ResourceLimits,
     usage: ResourceUsage,
     io_usage: IoUsage,
+    io_rate_limits: Option<IoRateLimits>,
+    io_rate_usage: IoRateUsage,
+    io_rate_window_active: bool,
     children: u16,
     child_cpu_permille: u32,
 }
@@ -310,6 +357,9 @@ impl<const N: usize> WorkloadTable<N> {
             limits,
             usage: ResourceUsage::default(),
             io_usage: IoUsage::default(),
+            io_rate_limits: None,
+            io_rate_usage: IoRateUsage::default(),
+            io_rate_window_active: false,
             children: 0,
             child_cpu_permille: 0,
         });
@@ -401,18 +451,89 @@ impl<const N: usize> WorkloadTable<N> {
     /// enough remaining bytes and ops. All records are checked before any is
     /// changed, so rejection is atomic and leaves no partial consumption.
     pub fn charge_io(&mut self, key: WorkloadKey, delta: IoUsage) -> Result<(), WorkloadError> {
+        self.charge_io_until(key, delta, None)
+    }
+
+    /// Configure bounded I/O rates before the Workload starts. Replacing a
+    /// pending pre-run policy is allowed; changing policy while running is not.
+    ///
+    /// 在 Workload 启动前配置有界 I/O 速率；运行期间禁止变更策略。
+    pub fn configure_io_rate(
+        &mut self,
+        key: WorkloadKey,
+        limits: IoRateLimits,
+    ) -> Result<(), WorkloadError> {
+        limits.validate()?;
+        let record = self.record_mut(key)?;
+        if !matches!(record.state, WorkloadState::Created | WorkloadState::Ready) {
+            return Err(WorkloadError::InvalidState);
+        }
+        record.io_rate_limits = Some(limits);
+        record.io_rate_usage = IoRateUsage::default();
+        record.io_rate_window_active = false;
+        Ok(())
+    }
+
+    /// Admit cumulative and fixed-window I/O together at a monotonic timestamp.
+    ///
+    /// Every ancestor is checked before any record changes. A rejected request
+    /// therefore consumes neither lifetime budget nor window capacity.
+    ///
+    /// 在单调时间戳上同时执行累计与固定窗口准入。所有祖先先检查、后提交，
+    /// 因此拒绝不会产生任何部分扣费。
+    pub fn charge_io_at(
+        &mut self,
+        key: WorkloadKey,
+        delta: IoUsage,
+        now_ns: u64,
+    ) -> Result<(), WorkloadError> {
+        self.charge_io_until(key, delta, Some(now_ns))
+    }
+
+    fn charge_io_until(
+        &mut self,
+        key: WorkloadKey,
+        delta: IoUsage,
+        now_ns: Option<u64>,
+    ) -> Result<(), WorkloadError> {
         let (path, len) = self.path(key)?;
         if self.record(key)?.state != WorkloadState::Running {
             return Err(WorkloadError::InvalidState);
         }
         for current in path.iter().take(len) {
             let record = self.record(*current)?;
+            if now_ns.is_none() && record.io_rate_limits.is_some() {
+                return Err(WorkloadError::InvalidState);
+            }
             let next = record
                 .io_usage
                 .checked_add(delta)
                 .ok_or(WorkloadError::Quota)?;
             if next.bytes > record.limits.io_bytes || next.ops > record.limits.io_ops {
                 return Err(WorkloadError::Quota);
+            }
+            if let (Some(now_ns), Some(limits)) = (now_ns, record.io_rate_limits) {
+                let usage = if !record.io_rate_window_active
+                    || window_elapsed(record.io_rate_usage, limits.window_ns, now_ns)
+                {
+                    IoRateUsage {
+                        window_start_ns: now_ns,
+                        ..IoRateUsage::default()
+                    }
+                } else {
+                    record.io_rate_usage
+                };
+                let next_bytes = usage
+                    .bytes
+                    .checked_add(delta.bytes)
+                    .ok_or(WorkloadError::Quota)?;
+                let next_ops = usage
+                    .ops
+                    .checked_add(delta.ops)
+                    .ok_or(WorkloadError::Quota)?;
+                if next_bytes > limits.bytes_per_window || next_ops > limits.ops_per_window {
+                    return Err(WorkloadError::Quota);
+                }
             }
         }
         for current in path.iter().take(len) {
@@ -421,11 +542,37 @@ impl<const N: usize> WorkloadTable<N> {
                 .io_usage
                 .checked_add(delta)
                 .ok_or(WorkloadError::Quota)?;
+            if let (Some(now_ns), Some(limits)) = (now_ns, record.io_rate_limits) {
+                if !record.io_rate_window_active
+                    || window_elapsed(record.io_rate_usage, limits.window_ns, now_ns)
+                {
+                    record.io_rate_usage = IoRateUsage {
+                        window_start_ns: now_ns,
+                        ..IoRateUsage::default()
+                    };
+                    record.io_rate_window_active = true;
+                }
+                record.io_rate_usage.bytes = record
+                    .io_rate_usage
+                    .bytes
+                    .checked_add(delta.bytes)
+                    .ok_or(WorkloadError::Quota)?;
+                record.io_rate_usage.ops = record
+                    .io_rate_usage
+                    .ops
+                    .checked_add(delta.ops)
+                    .ok_or(WorkloadError::Quota)?;
+            }
         }
         Ok(())
     }
 
-    /// Reverses an admitted request whose external effect was not committed.
+    /// Reverses lifetime consumption for an admitted request whose external
+    /// effect was not committed. Fixed-window consumption is intentionally not
+    /// reopened here because this API has no timestamp.
+    ///
+    /// 撤销未产生外部效果的累计消耗；本接口没有时间戳，因此不会重新开放
+    /// 固定窗口容量。
     pub fn refund_io(&mut self, key: WorkloadKey, delta: IoUsage) -> Result<(), WorkloadError> {
         let (path, len) = self.path(key)?;
         if self.record(key)?.state == WorkloadState::Created {
@@ -446,6 +593,78 @@ impl<const N: usize> WorkloadTable<N> {
                 .ok_or(WorkloadError::Quota)?;
         }
         Ok(())
+    }
+
+    /// Reverses both lifetime and current-window consumption. An expired window
+    /// is not refilled by a late rollback, so rollback cannot mint rate budget.
+    ///
+    /// 同时撤销累计与当前窗口消耗；过期窗口不会被迟到的回滚重新注满。
+    pub fn refund_io_at(
+        &mut self,
+        key: WorkloadKey,
+        delta: IoUsage,
+        now_ns: u64,
+    ) -> Result<(), WorkloadError> {
+        let (path, len) = self.path(key)?;
+        if self.record(key)?.state == WorkloadState::Created {
+            return Err(WorkloadError::InvalidState);
+        }
+        for current in path.iter().take(len) {
+            let record = self.record(*current)?;
+            record
+                .io_usage
+                .checked_sub(delta)
+                .ok_or(WorkloadError::Quota)?;
+            if let Some(limits) = record.io_rate_limits {
+                if record.io_rate_window_active
+                    && !window_elapsed(record.io_rate_usage, limits.window_ns, now_ns)
+                {
+                    record
+                        .io_rate_usage
+                        .bytes
+                        .checked_sub(delta.bytes)
+                        .ok_or(WorkloadError::Quota)?;
+                    record
+                        .io_rate_usage
+                        .ops
+                        .checked_sub(delta.ops)
+                        .ok_or(WorkloadError::Quota)?;
+                }
+            }
+        }
+        for current in path.iter().take(len) {
+            let record = self.record_mut(*current)?;
+            record.io_usage = record
+                .io_usage
+                .checked_sub(delta)
+                .ok_or(WorkloadError::Quota)?;
+            if let Some(limits) = record.io_rate_limits {
+                if record.io_rate_window_active
+                    && !window_elapsed(record.io_rate_usage, limits.window_ns, now_ns)
+                {
+                    record.io_rate_usage.bytes = record
+                        .io_rate_usage
+                        .bytes
+                        .checked_sub(delta.bytes)
+                        .ok_or(WorkloadError::Quota)?;
+                    record.io_rate_usage.ops = record
+                        .io_rate_usage
+                        .ops
+                        .checked_sub(delta.ops)
+                        .ok_or(WorkloadError::Quota)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn io_rate_snapshot(&self, key: WorkloadKey) -> Result<IoRateSnapshot, WorkloadError> {
+        let record = self.record(key)?;
+        Ok(IoRateSnapshot {
+            limits: record.io_rate_limits,
+            usage: record.io_rate_usage,
+            window_active: record.io_rate_window_active,
+        })
     }
 
     pub fn snapshot(&self, key: WorkloadKey) -> Result<WorkloadSnapshot, WorkloadError> {
@@ -537,6 +756,11 @@ impl<const N: usize> WorkloadTable<N> {
         }
         Ok((path, len))
     }
+}
+
+fn window_elapsed(usage: IoRateUsage, window_ns: u64, now_ns: u64) -> bool {
+    // A clock regression must fail closed: it cannot reset or enlarge a window.
+    now_ns >= usage.window_start_ns && now_ns.saturating_sub(usage.window_start_ns) >= window_ns
 }
 
 /// One process/task object assigned to a native workload.
