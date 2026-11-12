@@ -1202,6 +1202,15 @@ int main(void) {
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
     CPU_SET(0, &cpus);
+    struct sched_param scheduler_parameter = {.sched_priority = 0};
+    if (sched_setscheduler(0, SCHED_OTHER, &scheduler_parameter) != 0) {
+        return 215;
+    }
+    errno = 0;
+    if (sched_setscheduler(0, SCHED_FIFO, &scheduler_parameter) != -1 ||
+        errno != EPERM) {
+        return 216;
+    }
     if (sched_setaffinity(0, sizeof(cpus), &cpus) != 0) {
         return 214;
     }
