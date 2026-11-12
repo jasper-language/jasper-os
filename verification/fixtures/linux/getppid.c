@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <linux/android/binder.h>
+#include <poll.h>
 #include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1006,6 +1007,48 @@ int main(void) {
         !WIFEXITED(binder_status) || WEXITSTATUS(binder_status) != 0 ||
         close(binder_ready[1]) != 0 || close(server) != 0) {
         return 176;
+    }
+    int poll_pipe[2];
+    if (pipe2(poll_pipe, 0) != 0) {
+        return 180;
+    }
+    pid_t poll_child = fork();
+    if (poll_child < 0) {
+        return 181;
+    }
+    if (poll_child == 0) {
+        struct timespec delay = {.tv_sec = 0, .tv_nsec = 20000000};
+        nanosleep(&delay, NULL);
+        _exit(write(poll_pipe[1], "Q", 1) == 1 ? 0 : 182);
+    }
+    struct pollfd poll_read = {
+        .fd = poll_pipe[0],
+        .events = POLLIN,
+    };
+    if (poll(&poll_read, 1, 300) != 1 ||
+        (poll_read.revents & POLLIN) == 0 ||
+        read(poll_pipe[0], blocking_bytes, 1) != 1 ||
+        blocking_bytes[0] != 'Q') {
+        return 183;
+    }
+    int poll_status = 0;
+    if (waitpid(poll_child, &poll_status, 0) != poll_child ||
+        !WIFEXITED(poll_status) || WEXITSTATUS(poll_status) != 0) {
+        return 184;
+    }
+    int timeout_pipe[2];
+    if (pipe2(timeout_pipe, 0) != 0) {
+        return 185;
+    }
+    struct pollfd poll_timeout = {
+        .fd = timeout_pipe[0],
+        .events = POLLIN,
+    };
+    if (poll(&poll_timeout, 1, 30) != 0 ||
+        poll_timeout.revents != 0 ||
+        close(timeout_pipe[0]) != 0 || close(timeout_pipe[1]) != 0 ||
+        close(poll_pipe[0]) != 0 || close(poll_pipe[1]) != 0) {
+        return 186;
     }
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
