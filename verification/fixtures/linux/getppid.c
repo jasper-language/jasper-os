@@ -1348,6 +1348,28 @@ int main(void) {
         return 224;
     }
     errno = 0;
+    if (lchown("/usr/lib/x86_64-linux-gnu/libc.so.6", 0, 0) != -1 ||
+        errno != EROFS) {
+        return 235;
+    }
+    errno = 0;
+    if (ftruncate(fd, 0) != -1 || errno != EROFS) {
+        return 232;
+    }
+    errno = 0;
+    int truncate_result =
+        truncate("/usr/lib/x86_64-linux-gnu/libc.so.6", 0);
+    int truncate_errno = errno;
+    if (truncate_result != -1 || truncate_errno != EROFS) {
+        printf("truncate-fail result=%d errno=%d\n",
+               truncate_result, truncate_errno);
+        return 233;
+    }
+    errno = 0;
+    if (truncate("/missing-truncate", 0) != -1 || errno != ENOENT) {
+        return 234;
+    }
+    errno = 0;
     if (readlinkat(AT_FDCWD, "/not-in-compat-root",
                    executable, sizeof(executable)) != -1 || errno != ENOENT) {
         return 17;
