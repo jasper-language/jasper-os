@@ -1284,6 +1284,25 @@ int main(void) {
         return 207;
     }
     errno = 0;
+    if (fchmod(fd, 0600) != -1 || errno != EROFS) {
+        return 218;
+    }
+    errno = 0;
+    int fchmodat_result =
+        fchmodat(AT_FDCWD, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                 0600, 0);
+    int fchmodat_errno = errno;
+    if (fchmodat_result != -1 || fchmodat_errno != EROFS) {
+        printf("fchmodat-fail result=%d errno=%d\n",
+               fchmodat_result, fchmodat_errno);
+        return 219;
+    }
+    errno = 0;
+    if (fchmodat(AT_FDCWD, "/missing-chmod", 0600, 0) != -1 ||
+        errno != ENOENT) {
+        return 220;
+    }
+    errno = 0;
     if (readlinkat(AT_FDCWD, "/not-in-compat-root",
                    executable, sizeof(executable)) != -1 || errno != ENOENT) {
         return 17;

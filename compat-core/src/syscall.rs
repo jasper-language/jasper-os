@@ -6,7 +6,8 @@ use linux_raw_sys::general::{
     __NR_clock_getres, __NR_clock_gettime, __NR_clock_nanosleep, __NR_clone, __NR_clone3,
     __NR_close, __NR_connect, __NR_dup, __NR_dup2, __NR_dup3, __NR_epoll_create1, __NR_epoll_ctl,
     __NR_epoll_pwait, __NR_epoll_pwait2, __NR_epoll_wait, __NR_execve, __NR_exit, __NR_exit_group,
-    __NR_fchdir, __NR_fcntl, __NR_fdatasync, __NR_fstat, __NR_fstatfs, __NR_fsync,
+    __NR_fchdir, __NR_fchmod, __NR_fchmodat, __NR_fchmodat2, __NR_fcntl, __NR_fdatasync,
+    __NR_fstat, __NR_fstatfs, __NR_fsync,
     __NR_ftruncate, __NR_futex, __NR_getcpu, __NR_getcwd,
     __NR_getdents64, __NR_getegid, __NR_geteuid, __NR_getgid, __NR_getgroups, __NR_getpeername,
     __NR_getresgid, __NR_getresuid,
@@ -107,6 +108,9 @@ pub enum LinuxSyscall {
     Chdir,
     OpenAt,
     Fchdir,
+    Fchmod,
+    FchmodAt,
+    FchmodAt2,
     Fstat,
     Fstatfs,
     Fsync,
@@ -314,6 +318,8 @@ pub enum CompatErrno {
     /// The descriptor is not a terminal.
     /// 描述符不是终端。
     NotTty = linux_raw_sys::errno::ENOTTY,
+    /// The compatibility root is read-only.
+    ReadOnly = linux_raw_sys::errno::EROFS,
     /// Resource is already owned or waited on.
     /// 资源已被占用或已有等待者。
     Busy = linux_raw_sys::errno::EBUSY,
@@ -362,6 +368,9 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_chdir) => LinuxSyscall::Chdir,
         value if value == u64::from(__NR_openat) => LinuxSyscall::OpenAt,
         value if value == u64::from(__NR_fchdir) => LinuxSyscall::Fchdir,
+        value if value == u64::from(__NR_fchmod) => LinuxSyscall::Fchmod,
+        value if value == u64::from(__NR_fchmodat) => LinuxSyscall::FchmodAt,
+        value if value == u64::from(__NR_fchmodat2) => LinuxSyscall::FchmodAt2,
         value if value == u64::from(__NR_fstat) => LinuxSyscall::Fstat,
         value if value == u64::from(__NR_fstatfs) => LinuxSyscall::Fstatfs,
         value if value == u64::from(__NR_fsync) => LinuxSyscall::Fsync,
@@ -503,6 +512,9 @@ mod tests {
             (__NR_chdir, LinuxSyscall::Chdir),
             (__NR_openat, LinuxSyscall::OpenAt),
             (__NR_fchdir, LinuxSyscall::Fchdir),
+            (__NR_fchmod, LinuxSyscall::Fchmod),
+            (__NR_fchmodat, LinuxSyscall::FchmodAt),
+            (__NR_fchmodat2, LinuxSyscall::FchmodAt2),
             (__NR_fstat, LinuxSyscall::Fstat),
             (__NR_fstatfs, LinuxSyscall::Fstatfs),
             (__NR_fsync, LinuxSyscall::Fsync),
