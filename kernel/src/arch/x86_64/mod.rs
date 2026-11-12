@@ -157,6 +157,9 @@ impl Platform for X86_64 {
         #[cfg(feature = "bm1-vm")]
         bm1::write_byte(byte);
     }
+    fn console_try_read_byte() -> Option<u8> {
+        uart::try_read_byte()
+    }
 
     #[inline(always)]
     fn irq_save_disable() -> bool {

@@ -349,6 +349,12 @@ pub trait Platform {
 
     /// 向控制台输出一个字节（阻塞直到设备可写）。调用者负责中断临界区。
     fn console_write_byte(byte: u8);
+    /// Poll one console input byte without blocking; unsupported platforms return `None`.
+    ///
+    /// 非阻塞读取一个控制台输入字节；不支持的平台返回 `None`。
+    fn console_try_read_byte() -> Option<u8> {
+        None
+    }
 
     /// 关中断并返回之前是否开着。
     fn irq_save_disable() -> bool;
@@ -646,6 +652,12 @@ pub fn irq_init(timer_hz: u32) {
 /// 见 [`Platform::console_write_byte`]。
 pub fn console_write_byte(byte: u8) {
     Current::console_write_byte(byte)
+}
+/// Nonblocking read from the active console input backend.
+///
+/// 从当前控制台输入后端非阻塞读取一个字节。
+pub fn console_try_read_byte() -> Option<u8> {
+    Current::console_try_read_byte()
 }
 /// 见 [`Platform::irq_save_disable`]。
 #[inline(always)]

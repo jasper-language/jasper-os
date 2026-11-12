@@ -1367,6 +1367,16 @@ pub const OPERATIONS: &[OperationContract] = &[
         result: "i64:bytes_or_error",
     },
     OperationContract {
+        name: "system.terminal.read",
+        args: "u64:user_ptr,u64:len,u32:flags",
+        result: "i64:bytes_or_error",
+    },
+    OperationContract {
+        name: "system.terminal.write",
+        args: "u64:user_ptr,u64:len",
+        result: "i64:bytes_or_error",
+    },
+    OperationContract {
         name: "system.task.spawn",
         args: "u64:entry,u64:stack,u64:arg",
         result: "handle_or_error",
@@ -1989,6 +1999,14 @@ pub const SEMANTICS: &[(&str, &str)] = &[
     (
         "sandbox.kill",
         "same_domain_only;root_workload_begin_exit_members;stopped_requires_normal_resource_drain",
+    ),
+    (
+        "terminal.input",
+        "bounded_byte_ring;nonblocking_flag_1;eof_only_after_input_close;no_partial_user_copy",
+    ),
+    (
+        "terminal.output",
+        "bounded_bytes;complete_user_copy_before_write;closed_or_failed_session_rejected",
     ),
 ];
 

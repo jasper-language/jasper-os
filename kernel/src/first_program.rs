@@ -22,16 +22,36 @@ const STACK_OFF: u64 = 0xC0_0000;
 /// Embedded `user-hello` ELF built from its standalone user crate by `kernel/build.rs`.
 static USER_HELLO: &[u8] = include_bytes!(env!("JSR_USER_HELLO"));
 
+/// 内嵌 Jasper 原生 CLI 映像。 Embedded Jasper native CLI image.
+#[cfg(feature = "terminal-session-verify")]
+static USER_CLI: &[u8] = include_bytes!(env!("JSR_USER_CLI"));
+
 /// 返回生产首程序使用的同一份不可变 ELF 镜像。
 /// Returns the same immutable ELF image used by the production first program.
 pub(crate) fn image() -> &'static [u8] {
-    USER_HELLO
+    #[cfg(feature = "terminal-session-verify")]
+    {
+        USER_CLI
+    }
+    #[cfg(not(feature = "terminal-session-verify"))]
+    {
+        USER_HELLO
+    }
 }
 
 /// 装载并运行生产首程序，要求退出码为 0 且页帧全部归还。
 /// Loads and runs the production first program; requires exit code zero and full frame reclamation.
 pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
     let free_before = frame::free_frames();
+    #[cfg(feature = "terminal-session-verify")]
+    let allowed = SyscallSet::of(&[
+        abi::SYSTEM_CONSOLE_WRITE,
+        abi::SYSTEM_TERMINAL_READ,
+        abi::SYSTEM_TERMINAL_WRITE,
+        abi::SYSTEM_MEMORY_MAP,
+        abi::SYSTEM_PROCESS_EXIT,
+    ]);
+    #[cfg(not(feature = "terminal-session-verify"))]
     let allowed = SyscallSet::of(&[
         abi::SYSTEM_CONSOLE_WRITE,
         abi::SYSTEM_ABI_GET,
@@ -41,7 +61,7 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         return (None, false);
     };
     let base = arch::USER_WINDOW.0;
-    let started = match proc::load_elf(pid, USER_HELLO) {
+    let started = match proc::load_elf(pid, image()) {
         Ok(entry) => {
             proc::map_new(
                 pid,

@@ -1751,11 +1751,32 @@ fn admit_process_io(pid: ObjId, bytes: u64, ops: u64) -> Result<crate::workload:
     })
 }
 
+fn read_console_input(pid: ObjId, len: usize) -> Result<([u8; 4096], usize), CompatErrno> {
+    const O_NONBLOCK: u64 = 0x800;
+    let nonblocking = proc::linux_fd_status_flags(pid, 0)
+        .is_some_and(|flags| u64::from(flags) & O_NONBLOCK != 0);
+    let mut input = [0u8; 4096];
+    let requested = len.min(input.len());
+    match crate::terminal::read_input(&mut input[..requested], nonblocking) {
+        Ok(count) => Ok((input, count)),
+        Err(kernel_core::terminal_session::TerminalError::Eof) => Ok((input, 0)),
+        Err(kernel_core::terminal_session::TerminalError::WouldBlock) => {
+            Err(CompatErrno::TryAgain)
+        }
+        Err(kernel_core::terminal_session::TerminalError::Closed)
+        | Err(kernel_core::terminal_session::TerminalError::Failed) => {
+            Err(CompatErrno::Canceled)
+        }
+        Err(_) => Err(CompatErrno::Invalid),
+    }
+}
+
 /// Implements bounded Linux `read(2)` for stdin and virtual read-only files.
 ///
-/// 标准输入当前没有数据源并返回 EOF；文件读取在全部用户页校验通过后才提交游标。
+/// 标准输入来自有界原生终端会话；文件读取在全部用户页校验通过后才提交游标。
 fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MAX_READ: usize = 1024 * 1024;
+    const TERMINAL_READ: usize = 4096;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let len = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
     if len > MAX_READ {
@@ -1777,7 +1798,26 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     if fd == 0 {
         authorize_console(pid, fd, false)?;
-        return Ok(0);
+        if len == 0 {
+            return Ok(0);
+        }
+        let requested = len.min(TERMINAL_READ);
+        let destination = crate::kobj::with(|table| {
+            proc::pin_user_in(table, pid, args[1], requested, true)
+        })
+        .map_err(|error| match error {
+            proc::ProcError::OutOfFrames | proc::ProcError::MemoryQuota => {
+                CompatErrno::NoMemory
+            }
+            _ => CompatErrno::Fault,
+        })?;
+        let (input, count) = read_console_input(pid, requested)?;
+        if count != 0 {
+            if !destination.write_at(0, &input[..count]) {
+                return Err(CompatErrno::Fault);
+            }
+        }
+        return Ok(count as u64);
     }
     if proc::linux_fd(pid, fd)
         .is_some_and(|entry| entry.kind == compat_core::fd::CompatKind::Directory)
@@ -1858,7 +1898,29 @@ fn linux_readv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     if fd == 0 {
         authorize_console(pid, fd, false)?;
-        return Ok(0);
+        if total == 0 {
+            return Ok(0);
+        }
+        let (input, read_count) = read_console_input(pid, total)?;
+        let mut input_offset = 0usize;
+        let mut ranges = alloc::vec::Vec::new();
+        for (base, len) in &vectors {
+            let take = (read_count - input_offset).min(*len);
+            if take != 0 {
+                ranges.push((*base, &input[input_offset..input_offset + take]));
+                input_offset += take;
+            }
+            if input_offset == read_count {
+                break;
+            }
+        }
+        if !ranges.is_empty() {
+            copy_to_user_vectored(&ranges).map_err(|error| match error {
+                UserPtrError::Quota | UserPtrError::OutOfMemory => CompatErrno::NoMemory,
+                _ => CompatErrno::Fault,
+            })?;
+        }
+        return Ok(read_count as u64);
     }
     let (handle, offset) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
     let file = crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
@@ -5109,6 +5171,23 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 None => POLLNVAL,
                 Some(entry) if entry.kind == compat_core::fd::CompatKind::File => {
                     events & (POLLIN | POLLOUT)
+                }
+                Some(entry) if entry.handle == proc::LINUX_CONSOLE_HANDLE => {
+                    let (pending, ended, failed) = crate::terminal::input_status();
+                    let mut ready = 0;
+                    if events & POLLIN != 0 && (pending || ended) {
+                        ready |= POLLIN;
+                    }
+                    if events & POLLOUT != 0 {
+                        ready |= POLLOUT;
+                    }
+                    if ended {
+                        ready |= POLLHUP;
+                    }
+                    if failed {
+                        ready |= POLLERR;
+                    }
+                    ready
                 }
                 Some(entry) if entry.kind == compat_core::fd::CompatKind::Pipe => {
                     let Some(pipe) = proc::linux_pipe_endpoint(pid, entry.handle) else {

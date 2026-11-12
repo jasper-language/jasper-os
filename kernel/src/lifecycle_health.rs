@@ -675,8 +675,11 @@ fn execute_root_dynamic_programs(
     run_root_program(root, origin, "/usr/bin/wc", &wc_argv)?;
     let printf_argv: [&[u8]; 3] = [b"/usr/bin/printf", b"jasper-%s\n", b"dynamic"];
     run_root_program(root, origin, "/usr/bin/printf", &printf_argv)?;
-    let ppid_argv: [&[u8]; 1] = [b"/usr/bin/jasper-getppid"];
-    run_root_program(root, origin, "/usr/bin/jasper-getppid", &ppid_argv)?;
+    #[cfg(not(feature = "terminal-session-verify"))]
+    {
+        let ppid_argv: [&[u8]; 1] = [b"/usr/bin/jasper-getppid"];
+        run_root_program(root, origin, "/usr/bin/jasper-getppid", &ppid_argv)?;
+    }
     let dash_argv: [&[u8]; 3] = [
         b"/bin/dash",
         b"-c",

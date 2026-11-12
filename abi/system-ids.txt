@@ -164,6 +164,8 @@
 94	op	system.sandbox.volume.destroy	1	write	沙箱卷·销毁	Destroy sandbox volume
 95	op	system.sandbox.wait	1	read	沙箱·等待终态	Wait for sandbox terminal state
 96	op	system.sandbox.kill	1	write	沙箱·终止成员	Kill sandbox members
+97	op	system.terminal.read	1	read	终端·读取输入字节	Read terminal input bytes
+98	op	system.terminal.write	1	write	终端·写入输出字节	Write terminal output bytes
 4151	error	system.sandbox.error.in_use	1	none	沙箱仍持有镜像或卷	Sandbox storage still in use
 4152	error	system.sandbox.image.error.not_found	1	none	沙箱镜像不存在或无权查看	Sandbox image not found
 4153	error	system.sandbox.image.error.layer	1	none	沙箱镜像层非法	Sandbox image layer invalid
@@ -174,3 +176,6 @@
 4158	error	system.sandbox.volume.error.quota	1	none	沙箱卷容量不足	Sandbox volume quota exceeded
 4159	error	system.sandbox.storage.error.in_use	1	none	沙箱存储仍被引用	Sandbox storage still referenced
 4160	error	system.sandbox.error.timeout	1	none	沙箱终态等待超时	Sandbox wait timeout
+4161	error	system.terminal.error.would_block	1	none	终端·当前没有输入且要求非阻塞	Terminal input would block
+4162	error	system.terminal.error.closed	1	none	终端·会话已关闭	Terminal session closed
+4163	error	system.terminal.error.failed	1	none	终端·会话发生故障	Terminal session failed

@@ -31,7 +31,7 @@ use crate::kobj::{self, DeviceObj, KObject};
 use crate::mm::user::{copy_from_user, copy_to_user, UserPtrError};
 use crate::proc::{self, ProcError};
 use crate::sync::IrqSpinLock;
-use crate::{kprintln, profile, sched};
+use crate::{console, kprintln, profile, sched};
 
 /// `system.console.write` 单次最多写入的字节数。
 pub const CONSOLE_WRITE_MAX: usize = 4096;
@@ -428,6 +428,50 @@ pub(crate) fn console_write(ptr: u64, len: u64) -> i64 {
     }
 }
 
+/// Reads bytes from the native terminal session into one user buffer.
+///
+/// 从原生终端会话读取字节；阻塞读取等待期间不持有会话锁。
+pub(crate) fn terminal_read(ptr: u64, len: u64, flags: u64) -> i64 {
+    const NONBLOCK: u64 = 1;
+    if len as usize > CONSOLE_WRITE_MAX || flags & !NONBLOCK != 0 {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    }
+    let mut bytes = vec![0u8; len as usize];
+    let count = match crate::terminal::read_input(&mut bytes, flags & NONBLOCK != 0) {
+        Ok(count) => count,
+        Err(kernel_core::terminal_session::TerminalError::Eof)
+        | Err(kernel_core::terminal_session::TerminalError::Closed) => 0,
+        Err(kernel_core::terminal_session::TerminalError::WouldBlock) => {
+            return err(SYSTEM_TERMINAL_ERROR_WOULD_BLOCK);
+        }
+        Err(kernel_core::terminal_session::TerminalError::Failed) => {
+            return err(SYSTEM_TERMINAL_ERROR_FAILED);
+        }
+        Err(_) => return err(SYSTEM_ERROR_INVALID_ARGUMENT),
+    };
+    if count != 0 {
+        if let Err(error) = copy_to_user(ptr, &bytes[..count], count) {
+            return user_ptr_err(error);
+        }
+    }
+    count as i64
+}
+
+/// Writes bytes to the native terminal frontend.
+///
+/// 向原生终端前端写入字节；完整复制用户缓冲后再输出。
+pub(crate) fn terminal_write(ptr: u64, len: u64) -> i64 {
+    if len as usize > CONSOLE_WRITE_MAX {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    }
+    let mut bytes = vec![0u8; len as usize];
+    if let Err(error) = copy_from_user(&mut bytes, ptr, len as usize) {
+        return user_ptr_err(error);
+    }
+    console::write_bytes(&bytes);
+    len as i64
+}
+
 /// 进程层错误 → 系统调用错误码。
 pub(crate) fn proc_err(e: ProcError) -> i64 {
     match e {
@@ -649,6 +693,12 @@ syscall_dispatch! {
     },
     SYSTEM_TIME_NOW => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { sched::timer_ticks() as i64 },
     SYSTEM_CONSOLE_WRITE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { console_write(a.args[0], a.args[1]) },
+    SYSTEM_TERMINAL_READ => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        terminal_read(a.args[0], a.args[1], a.args[2])
+    },
+    SYSTEM_TERMINAL_WRITE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        terminal_write(a.args[0], a.args[1])
+    },
     SYSTEM_TASK_SPAWN => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { task_spawn(a.args[0], a.args[1], a.args[2]) },
     SYSTEM_HANDLE_CLOSE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         match proc::close_handle(handle_arg(a.args[0])) {

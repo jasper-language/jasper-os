@@ -89,6 +89,8 @@ pub mod ticket;
 pub mod task_index;
 pub mod task_hot;
 pub mod task_lifecycle;
+/// Bounded native terminal session queues and close semantics.
+pub mod terminal_session;
 pub mod tick_lease;
 pub mod wake_mailbox;
 pub mod fdt;
