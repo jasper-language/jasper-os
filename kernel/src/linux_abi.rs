@@ -1510,6 +1510,7 @@ fn execute(
         LinuxSyscall::GetCpu => compat_result(linux_getcpu(call.args)),
         LinuxSyscall::Sysinfo => compat_result(linux_sysinfo(call.args[0])),
         LinuxSyscall::SchedGetAffinity => compat_result(linux_sched_getaffinity(pid, call.args)),
+        LinuxSyscall::SchedGetParam => compat_result(linux_sched_getparam(pid, call.args)),
         LinuxSyscall::SchedSetAffinity => compat_result(linux_sched_setaffinity(pid, call.args)),
         LinuxSyscall::SchedSetScheduler => {
             compat_result(linux_sched_setscheduler(pid, call.args))
@@ -2044,6 +2045,15 @@ fn linux_sched_getscheduler(pid: ObjId, requested: u64) -> Result<u64, CompatErr
     } else {
         Err(CompatErrno::NoProcess)
     }
+}
+
+fn linux_sched_getparam(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
+    if args[0] != 0 && args[0] != current {
+        return Err(CompatErrno::NoProcess);
+    }
+    copy_to_user(args[1], &0i32.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
 }
 
 fn linux_sched_setscheduler(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
