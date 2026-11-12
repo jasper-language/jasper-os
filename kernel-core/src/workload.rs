@@ -124,6 +124,7 @@ pub struct WorkloadSnapshot {
     pub limits: ResourceLimits,
     pub usage: ResourceUsage,
     pub children: u16,
+    pub child_cpu_permille: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,6 +161,7 @@ struct Record {
     limits: ResourceLimits,
     usage: ResourceUsage,
     children: u16,
+    child_cpu_permille: u32,
 }
 
 /// Fixed-capacity table. Every rejection leaves all records unchanged.
@@ -220,8 +222,15 @@ impl<const N: usize> WorkloadTable<N> {
             return Err(WorkloadError::InvalidDomain);
         }
         limits.validate()?;
-        if parent.is_some_and(|key| self.record(key).is_err()) {
-            return Err(WorkloadError::InvalidKey);
+        if let Some(parent) = parent {
+            let record = self.record(parent)?;
+            if record
+                .child_cpu_permille
+                .checked_add(limits.cpu_permille)
+                .is_none_or(|committed| committed > record.limits.cpu_permille)
+            {
+                return Err(WorkloadError::Quota);
+            }
         }
         let slot = self
             .slots
@@ -244,6 +253,7 @@ impl<const N: usize> WorkloadTable<N> {
             limits,
             usage: ResourceUsage::default(),
             children: 0,
+            child_cpu_permille: 0,
         });
         if let Some(parent) = parent {
             let parent = self.record_mut(parent)?;
@@ -251,6 +261,10 @@ impl<const N: usize> WorkloadTable<N> {
                 .children
                 .checked_add(1)
                 .ok_or(WorkloadError::IdExhausted)?;
+            parent.child_cpu_permille = parent
+                .child_cpu_permille
+                .checked_add(limits.cpu_permille)
+                .expect("preflighted parent CPU commitment");
         }
         Ok(key)
     }
@@ -328,6 +342,7 @@ impl<const N: usize> WorkloadTable<N> {
             limits: record.limits,
             usage: record.usage,
             children: record.children,
+            child_cpu_permille: record.child_cpu_permille,
         })
     }
 
@@ -347,6 +362,9 @@ impl<const N: usize> WorkloadTable<N> {
             if self.record(parent)?.children == 0 {
                 return Err(WorkloadError::InvalidState);
             }
+            if self.record(parent)?.child_cpu_permille < record.limits.cpu_permille {
+                return Err(WorkloadError::InvalidState);
+            }
         }
         self.slots[index] = None;
         if let Some(parent) = record.parent {
@@ -355,6 +373,10 @@ impl<const N: usize> WorkloadTable<N> {
                 .children
                 .checked_sub(1)
                 .expect("preflighted parent child count");
+            parent.child_cpu_permille = parent
+                .child_cpu_permille
+                .checked_sub(record.limits.cpu_permille)
+                .expect("preflighted parent CPU commitment");
         }
         Ok(())
     }
@@ -749,6 +771,59 @@ mod tests {
         );
         let child = table.create_child(parent, LIMITS).unwrap();
         assert_eq!(table.snapshot(child).unwrap().domain, DOMAIN);
+    }
+
+    #[test]
+    fn child_cpu_limits_are_admitted_across_direct_siblings() {
+        let mut table = WorkloadTable::<4>::new();
+        let parent = table
+            .create(
+                DOMAIN,
+                ResourceLimits {
+                    cpu_permille: 500,
+                    ..LIMITS
+                },
+            )
+            .unwrap();
+        table.transition(parent, WorkloadState::Ready).unwrap();
+        table.transition(parent, WorkloadState::Running).unwrap();
+        let first = table
+            .create_child(
+                parent,
+                ResourceLimits {
+                    cpu_permille: 300,
+                    ..LIMITS
+                },
+            )
+            .unwrap();
+        let before = table.snapshot(parent).unwrap();
+        assert_eq!(
+            table.create_child(
+                parent,
+                ResourceLimits {
+                    cpu_permille: 201,
+                    ..LIMITS
+                }
+            ),
+            Err(WorkloadError::Quota)
+        );
+        assert_eq!(table.snapshot(parent).unwrap(), before);
+        let second = table
+            .create_child(
+                parent,
+                ResourceLimits {
+                    cpu_permille: 200,
+                    ..LIMITS
+                },
+            )
+            .unwrap();
+        assert_eq!(table.snapshot(parent).unwrap().child_cpu_permille, 500);
+        table.transition(first, WorkloadState::Failed).unwrap();
+        table.destroy(first).unwrap();
+        assert_eq!(table.snapshot(parent).unwrap().child_cpu_permille, 200);
+        table.transition(second, WorkloadState::Failed).unwrap();
+        table.destroy(second).unwrap();
+        assert_eq!(table.snapshot(parent).unwrap().child_cpu_permille, 0);
     }
 
     #[test]
