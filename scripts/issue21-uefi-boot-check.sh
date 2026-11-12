@@ -130,6 +130,9 @@ fi
 if [ "${ISSUE21_QEMU_TRACE:-0}" = 1 ]; then
   QEMU_EXTRA+=(-d int -D "$OUT/qemu-int.log")
 fi
+if [ "${ISSUE21_QEMU_GDB:-0}" = 1 ]; then
+  QEMU_EXTRA+=(-s -S)
+fi
 exec 9>"$QEMU_LOCK"
 if ! flock -n 9; then
   echo "FAIL another Jasper-OS QEMU run holds $QEMU_LOCK" >&2

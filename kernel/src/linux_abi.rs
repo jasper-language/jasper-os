@@ -2355,6 +2355,16 @@ fn linux_vfork(
 ) -> Result<u64, CompatErrno> {
     let (user_rip, user_stack) = user_ip.ok_or(CompatErrno::NoSys)?;
     let parent_space = proc::current_space_root(pid).ok_or(CompatErrno::NoSys)?;
+    let parent_phys = crate::boot::get()
+        .and_then(|boot| boot.phys_offset)
+        .ok_or(CompatErrno::NoSys)?;
+    let parent_pages = [
+        kernel_core::paging::VirtPage::containing(user_rip),
+        kernel_core::paging::VirtPage::containing(user_stack.saturating_sub(1)),
+    ];
+    let parent_mappings = parent_pages.map(|page| {
+        unsafe { crate::arch::translate_in(parent_space, parent_phys, page.start()) }
+    });
     let (parent_task, _) = sched::current();
     let child = proc::vfork_linux_process(
         pid,
@@ -2372,6 +2382,16 @@ fn linux_vfork(
     let child_pid = proc::linux_pid(child).ok_or(CompatErrno::NoSys)?;
     loop {
         if proc::vfork_parent_may_resume(child) {
+            let after = parent_pages.map(|page| {
+                unsafe { crate::arch::translate_in(parent_space, parent_phys, page.start()) }
+            });
+            if after != parent_mappings {
+                crate::kprintln!(
+                    "[JSR-VFORK-ROOT-CHANGED] before={:?} after={:?}",
+                    parent_mappings,
+                    after
+                );
+            }
             sched::set_current_space(Some(parent_space));
             return Ok(u64::from(child_pid));
         }

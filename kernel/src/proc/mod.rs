@@ -2621,14 +2621,7 @@ pub(crate) fn vfork_commit_exec(child: ObjId) -> bool {
 #[cfg(feature = "linux-abi")]
 pub(crate) fn vfork_parent_may_resume(child: ObjId) -> bool {
     kobj::with(|t| match t.get(child) {
-        Ok(KObject::Process(p)) => {
-            let committed = p
-                .linux
-                .as_ref()
-                .and_then(|linux| linux.vfork_parent)
-                .is_some_and(|parent| parent.exec_committed);
-            p.state != ProcState::Running || committed
-        }
+        Ok(KObject::Process(p)) => p.state != ProcState::Running,
         _ => true,
     })
 }
