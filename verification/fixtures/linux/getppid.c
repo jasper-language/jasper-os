@@ -9,6 +9,7 @@
 #include <linux/dma-buf.h>
 #include <linux/dma-heap.h>
 #include <linux/io_uring.h>
+#include <linux/sync_file.h>
 #include <poll.h>
 #include <sched.h>
 #include <stdint.h>
@@ -1386,6 +1387,59 @@ int main(void) {
     if (msync(dma_map, 4096, MS_SYNC) != 0 ||
         munmap(dma_map, 4096) != 0) {
         return 285;
+    }
+    struct dma_buf_export_sync_file dma_export = {
+        .flags = DMA_BUF_SYNC_WRITE,
+        .fd = -1,
+    };
+    if (ioctl(dma_allocation.fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE,
+              &dma_export) != 0 || dma_export.fd < 0) {
+        return 287;
+    }
+    struct pollfd sync_poll = {
+        .fd = dma_export.fd,
+        .events = POLLIN,
+    };
+    if (poll(&sync_poll, 1, 0) != 1 || (sync_poll.revents & POLLIN) == 0) {
+        return 288;
+    }
+    struct sync_file_info sync_info = {0};
+    if (ioctl(dma_export.fd, SYNC_IOC_FILE_INFO, &sync_info) != 0 ||
+        sync_info.status != 1 || sync_info.num_fences != 1 ||
+        strcmp(sync_info.name, "dma-buf-export") != 0) {
+        return 289;
+    }
+    struct sync_fence_info sync_fence = {0};
+    sync_info.num_fences = 1;
+    sync_info.sync_fence_info = (uint64_t)(uintptr_t)&sync_fence;
+    if (ioctl(dma_export.fd, SYNC_IOC_FILE_INFO, &sync_info) != 0 ||
+        sync_fence.status != 1 ||
+        strcmp(sync_fence.driver_name, "jasper-sync-file") != 0) {
+        return 290;
+    }
+    struct sync_merge_data sync_merge = {
+        .fd2 = dma_export.fd,
+        .fence = -1,
+    };
+    memcpy(sync_merge.name, "merged-fence", sizeof("merged-fence"));
+    if (ioctl(dma_export.fd, SYNC_IOC_MERGE, &sync_merge) != 0 ||
+        sync_merge.fence < 0) {
+        return 291;
+    }
+    struct sync_set_deadline sync_deadline = {
+        .deadline_ns = (uint64_t)time(NULL) * 1000000000ULL,
+    };
+    if (ioctl(sync_merge.fence, SYNC_IOC_SET_DEADLINE, &sync_deadline) != 0) {
+        return 292;
+    }
+    struct dma_buf_import_sync_file dma_import = {
+        .flags = DMA_BUF_SYNC_READ,
+        .fd = sync_merge.fence,
+    };
+    if (ioctl(dma_allocation.fd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE,
+              &dma_import) != 0 ||
+        close(sync_merge.fence) != 0 || close(dma_export.fd) != 0) {
+        return 293;
     }
     struct dma_heap_allocation_data dma_invalid = {
         .len = 4095,

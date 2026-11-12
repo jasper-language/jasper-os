@@ -88,6 +88,8 @@ const LINUX_EVENTFD_HANDLE_BASE: u64 = 0x0000_8500_0000_0000;
 const LINUX_EPOLL_HANDLE_BASE: u64 = 0x0000_8600_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_DMA_HEAP_HANDLE_BASE: u64 = 0x0000_8700_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_SYNC_FILE_HANDLE_BASE: u64 = 0x0000_8800_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -130,6 +132,8 @@ struct LinuxProcessState {
     dma_heaps: Vec<u64>,
     next_dma_heap_handle: u64,
     dmabufs: Vec<u64>,
+    sync_files: Vec<LinuxSyncFileHandle>,
+    next_sync_file_handle: u64,
     /// Set only on the child side of vfork. The parent task sleeps until the
     /// child commits exec or leaves `Running`.
     /// 仅 vfork 子进程携带；父任务睡眠到子进程提交 exec 或离开 Running。
@@ -225,6 +229,14 @@ struct LinuxIoUringHandle {
     handle: u64,
     entries: u32,
     cq_entries: u32,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxSyncFileHandle {
+    handle: u64,
+    name: [u8; 32],
+    name_len: usize,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -1756,6 +1768,7 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     if linux.fds.handle_fd_count(handle) == 0 {
         linux.dma_heaps.retain(|heap| *heap != handle);
         linux.dmabufs.retain(|buffer| *buffer != handle);
+        linux.sync_files.retain(|file| file.handle != handle);
     }
 }
 
@@ -2195,6 +2208,83 @@ pub(crate) fn linux_is_dmabuf(pid: ObjId, handle: u64) -> bool {
             .as_ref()
             .is_some_and(|linux| linux.dmabufs.contains(&handle)),
         _ => false,
+    })
+}
+
+/// Creates one immediate-signaled Android sync_file compatible descriptor.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_create_sync_file(
+    pid: ObjId,
+    name: &[u8],
+    close_on_exec: bool,
+) -> Option<u32> {
+    if name.len() > 32 {
+        return None;
+    }
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.sync_files.len() >= 32 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .sync_files
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_sync_file_handle;
+        linux.next_sync_file_handle =
+            handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ.union(Rights::WRITE),
+                compat_core::fd::CompatKind::Other,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let mut stored = [0u8; 32];
+        stored[..name.len()].copy_from_slice(name);
+        linux.sync_files.push(LinuxSyncFileHandle {
+            handle,
+            name: stored,
+            name_len: name.len(),
+        });
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Reports whether a descriptor is an Android sync_file.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_is_sync_file(pid: ObjId, handle: u64) -> bool {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()
+            .is_some_and(|linux| linux.sync_files.iter().any(|file| file.handle == handle)),
+        _ => false,
+    })
+}
+
+/// Copies the bounded sync_file name into the caller's fixed-size buffer.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_sync_file_name(
+    pid: ObjId,
+    handle: u64,
+    output: &mut [u8; 32],
+) -> Option<usize> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => {
+            let file = process
+                .linux
+                .as_ref()?
+                .sync_files
+                .iter()
+                .find(|file| file.handle == handle)?;
+            *output = file.name;
+            Some(file.name_len)
+        }
+        _ => None,
     })
 }
 
@@ -3427,6 +3517,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         dma_heaps: Vec::new(),
         next_dma_heap_handle: LINUX_DMA_HEAP_HANDLE_BASE,
         dmabufs: Vec::new(),
+        sync_files: Vec::new(),
+        next_sync_file_handle: LINUX_SYNC_FILE_HANDLE_BASE,
         vfork_parent: None,
     };
     create_process(name, SyscallSet::EMPTY, move |process| {
