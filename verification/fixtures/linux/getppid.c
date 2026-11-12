@@ -853,9 +853,87 @@ int main(void) {
         return 207;
     }
     errno = 0;
-    if (ftruncate(memfd, 4096) != 0) {
+    if (ftruncate(memfd, 16) != 0) {
         printf("memfd-truncate-fail fd=%d errno=%d\n", memfd, errno);
         return 207;
+    }
+    unsigned char memfd_io[64] = {0};
+    unsigned char memfd_pread[4] = {0};
+    int memfd_seals_before_write = fcntl(memfd, F_GET_SEALS);
+    errno = 0;
+    ssize_t memfd_pwrite_result = pwrite(memfd, "WXYZ", 4, 4);
+    int memfd_pwrite_errno = errno;
+    errno = 0;
+    ssize_t memfd_pread_result =
+        pread(memfd, memfd_pread, sizeof(memfd_pread), 4);
+    int memfd_pread_errno = errno;
+    errno = 0;
+    off_t memfd_seek_result = lseek(memfd, 16, SEEK_SET);
+    int memfd_seek_errno = errno;
+    errno = 0;
+    ssize_t memfd_write_result = write(memfd, "!", 1);
+    int memfd_write_errno = errno;
+    if (memfd_pwrite_result != 4 || memfd_pwrite_errno != 0 ||
+        memfd_pread_result != 4 || memfd_pread_errno != 0 ||
+        memcmp(memfd_pread, "WXYZ", 4) != 0 ||
+        memfd_seek_result != 16 || memfd_seek_errno != 0 ||
+        memfd_write_result != 1 || memfd_write_errno != 0) {
+        printf("memfd-positioned-io-fail seals=%d write=%zd/%d read=%zd/%d "
+               "data=%02x%02x%02x%02x seek=%lld/%d append=%zd/%d\n",
+               memfd_seals_before_write,
+               memfd_pwrite_result, memfd_pwrite_errno,
+               memfd_pread_result, memfd_pread_errno,
+               memfd_pread[0], memfd_pread[1],
+               memfd_pread[2], memfd_pread[3],
+               (long long)memfd_seek_result, memfd_seek_errno,
+               memfd_write_result, memfd_write_errno);
+        return 244;
+    }
+    struct iovec memfd_vectors[2] = {
+        {.iov_base = "EN", .iov_len = 2},
+        {.iov_base = "D!", .iov_len = 2},
+    };
+    if (lseek(memfd, 17, SEEK_SET) != 17 ||
+        writev(memfd, memfd_vectors, 2) != 4 ||
+        lseek(memfd, 0, SEEK_SET) != 0) {
+        printf("memfd-writev-fail errno=%d\n", errno);
+        return 245;
+    }
+    struct iovec memfd_read_vectors[2] = {
+        {.iov_base = memfd_io, .iov_len = 8},
+        {.iov_base = memfd_io + 8, .iov_len = 13},
+    };
+    if (readv(memfd, memfd_read_vectors, 2) != 21 ||
+        memcmp(memfd_io + 4, "WXYZ", 4) != 0 ||
+        memcmp(memfd_io + 16, "!END!", 5) != 0) {
+        printf("memfd-readv-fail errno=%d\n", errno);
+        return 246;
+    }
+    struct iovec positioned_write_vectors[2] = {
+        {.iov_base = "PV", .iov_len = 2},
+        {.iov_base = "2", .iov_len = 1},
+    };
+    struct iovec positioned_read_vectors[2] = {
+        {.iov_base = memfd_io + 32, .iov_len = 2},
+        {.iov_base = memfd_io + 34, .iov_len = 1},
+    };
+    if (syscall(SYS_pwritev, memfd, positioned_write_vectors, 2, 32) != 3 ||
+        syscall(SYS_preadv, memfd, positioned_read_vectors, 2, 32) != 3 ||
+        memcmp(memfd_io + 32, "PV2", 3) != 0) {
+        printf("memfd-positioned-vector-fail errno=%d\n", errno);
+        return 247;
+    }
+    positioned_write_vectors[0].iov_base = "V2";
+    positioned_write_vectors[1].iov_len = 0;
+    positioned_read_vectors[0].iov_base = memfd_io + 40;
+    positioned_read_vectors[0].iov_len = 2;
+    positioned_read_vectors[1].iov_len = 0;
+    if (syscall(SYS_pwritev2, memfd, positioned_write_vectors, 2, 40, 0) != 2 ||
+        syscall(SYS_preadv2, memfd, positioned_read_vectors, 2, 40, 0) != 2 ||
+        memcmp(memfd_io + 40, "V2", 2) != 0 ||
+        ftruncate(memfd, 4096) != 0) {
+        printf("memfd-vector2-fail errno=%d\n", errno);
+        return 248;
     }
     struct stat memfd_stat;
     if (fstat(memfd, &memfd_stat) != 0 || !S_ISREG(memfd_stat.st_mode) ||
@@ -864,7 +942,9 @@ int main(void) {
     }
     unsigned char *memfd_map = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
                                     MAP_SHARED, memfd, 0);
-    if (memfd_map == MAP_FAILED || memfd_map[0] != 0) {
+    if (memfd_map == MAP_FAILED || memfd_map[0] != 0 ||
+        memcmp(memfd_map + 4, "WXYZ", 4) != 0 ||
+        memcmp(memfd_map + 16, "!END!", 5) != 0) {
         return 209;
     }
     memfd_map[0] = 'M';
@@ -883,6 +963,14 @@ int main(void) {
         fcntl(memfd, F_ADD_SEALS, F_SEAL_WRITE) != 0 ||
         fcntl(memfd, F_GET_SEALS) != (F_SEAL_GROW | F_SEAL_WRITE)) {
         return 212;
+    }
+    errno = 0;
+    ssize_t memfd_sealed_write = pwrite(memfd, "S", 1, 0);
+    int memfd_sealed_write_errno = errno;
+    if (memfd_sealed_write != -1 || memfd_sealed_write_errno != EPERM) {
+        printf("memfd-sealed-pwrite-fail result=%zd errno=%d\n",
+               memfd_sealed_write, memfd_sealed_write_errno);
+        return 249;
     }
     errno = 0;
     memfd_map = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
