@@ -1485,18 +1485,33 @@ fn execute(
         LinuxSyscall::Chdir => compat_result(linux_chdir(pid, call.args[0])),
         LinuxSyscall::OpenAt => compat_result(linux_openat(pid, call.args)),
         LinuxSyscall::Fchdir => compat_result(linux_fchdir(pid, call.args[0])),
+        LinuxSyscall::Chmod => {
+            compat_result(linux_fchmodat(pid, legacy_chmod_args(call.args), false))
+        }
         LinuxSyscall::Fchmod => compat_result(linux_fchmod(pid, call.args)),
         LinuxSyscall::FchmodAt => compat_result(linux_fchmodat(pid, call.args, false)),
         LinuxSyscall::FchmodAt2 => compat_result(linux_fchmodat(pid, call.args, true)),
         LinuxSyscall::Fchown => compat_result(linux_fchown(pid, call.args)),
+        LinuxSyscall::Chown => {
+            compat_result(linux_fchownat(pid, legacy_chown_args(call.args)))
+        }
         LinuxSyscall::FchownAt => compat_result(linux_fchownat(pid, call.args)),
         LinuxSyscall::Lchown => compat_result(linux_lchown(pid, call.args)),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
+        LinuxSyscall::Stat => {
+            compat_result(linux_newfstatat(pid, legacy_stat_args(call.args, false)))
+        }
+        LinuxSyscall::Lstat => {
+            compat_result(linux_newfstatat(pid, legacy_stat_args(call.args, true)))
+        }
         LinuxSyscall::Fstatfs => compat_result(linux_fstatfs(pid, call.args)),
         LinuxSyscall::Fsync => compat_result(linux_sync_fd(pid, call.args[0], false)),
         LinuxSyscall::Utime => compat_result(linux_utime(pid, call.args[0])),
         LinuxSyscall::Utimes => compat_result(linux_utime(pid, call.args[0])),
         LinuxSyscall::UtimensAt => compat_result(linux_utimensat(pid, call.args, true)),
+        LinuxSyscall::FutimesAt => {
+            compat_result(linux_utimensat(pid, legacy_futimesat_args(call.args), false))
+        }
         LinuxSyscall::Fdatasync => compat_result(linux_sync_fd(pid, call.args[0], true)),
         LinuxSyscall::Ftruncate => compat_result(linux_ftruncate(pid, call.args)),
         LinuxSyscall::Truncate => compat_result(linux_truncate(pid, call.args)),
@@ -1609,6 +1624,8 @@ fn execute(
             }
         }
         LinuxSyscall::Prlimit64 => compat_result(linux_prlimit(pid, call.args)),
+        LinuxSyscall::Getrlimit => compat_result(linux_getrlimit(pid, call.args)),
+        LinuxSyscall::Setrlimit => compat_result(linux_setrlimit(pid, call.args)),
         LinuxSyscall::Futex => compat_result(linux_futex(pid, call.args)),
         LinuxSyscall::EpollCreate1 => compat_result(linux_epoll_create1(pid, call.args)),
         LinuxSyscall::EpollCtl => compat_result(linux_epoll_ctl(pid, call.args)),
@@ -1643,6 +1660,29 @@ fn linux_process_group(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
     } else {
         Err(CompatErrno::NoProcess)
     }
+}
+
+fn legacy_chmod_args(args: [u64; 6]) -> [u64; 6] {
+    [(-100i64) as u64, args[0], args[1], 0, 0, 0]
+}
+
+fn legacy_chown_args(args: [u64; 6]) -> [u64; 6] {
+    [(-100i64) as u64, args[0], args[1], args[2], 0, 0]
+}
+
+fn legacy_stat_args(args: [u64; 6], nofollow: bool) -> [u64; 6] {
+    [
+        (-100i64) as u64,
+        args[0],
+        args[1],
+        if nofollow { 0x100 } else { 0 },
+        0,
+        0,
+    ]
+}
+
+fn legacy_futimesat_args(args: [u64; 6]) -> [u64; 6] {
+    [args[0], args[1], args[2], 0, 0, 0]
 }
 
 fn linux_uname(args: [u64; 6]) -> Result<u64, CompatErrno> {
@@ -3294,17 +3334,10 @@ fn linux_futex(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 ///
 /// 返回兼容服务的只读资源上限；本切片不伪造 `prlimit64` 写操作。
 fn linux_prlimit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const RLIMIT_STACK: u64 = 3;
-    const RLIMIT_NOFILE: u64 = 7;
-    const RLIM_INFINITY: u64 = u64::MAX;
     if args[1] != 0 || args[2] != 0 || proc::linux_pid(pid).is_none() {
         return Err(CompatErrno::Invalid);
     }
-    let (current, maximum): (u64, u64) = match args[0] {
-        RLIMIT_STACK => (8 * 1024 * 1024, RLIM_INFINITY),
-        RLIMIT_NOFILE => (64, 64),
-        _ => return Err(CompatErrno::Invalid),
-    };
+    let (current, maximum) = linux_limit(pid, args[0])?;
     if args[3] != 0 {
         let mut bytes = [0u8; 16];
         bytes[..8].copy_from_slice(&current.to_le_bytes());
@@ -3312,6 +3345,36 @@ fn linux_prlimit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         copy_to_user(args[3], &bytes, bytes.len()).map_err(|_| CompatErrno::Fault)?;
     }
     Ok(0)
+}
+
+fn linux_limit(pid: ObjId, resource: u64) -> Result<(u64, u64), CompatErrno> {
+    const RLIMIT_STACK: u64 = 3;
+    const RLIMIT_NOFILE: u64 = 7;
+    const RLIM_INFINITY: u64 = u64::MAX;
+    if proc::linux_pid(pid).is_none() {
+        return Err(CompatErrno::Invalid);
+    }
+    match resource {
+        RLIMIT_STACK => Ok((8 * 1024 * 1024, RLIM_INFINITY)),
+        RLIMIT_NOFILE => Ok((64, 64)),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+fn linux_getrlimit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let (current, maximum) = linux_limit(pid, args[0])?;
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&current.to_le_bytes());
+    bytes[8..].copy_from_slice(&maximum.to_le_bytes());
+    copy_to_user(args[1], &bytes, bytes.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+fn linux_setrlimit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let _ = linux_limit(pid, args[0])?;
+    let mut bytes = [0u8; 16];
+    copy_from_user(&mut bytes, args[1], 16).map_err(|_| CompatErrno::Fault)?;
+    Err(CompatErrno::Perm)
 }
 
 /// Fills a bounded userspace buffer from x86_64 RDRAND.

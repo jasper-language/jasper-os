@@ -17,6 +17,7 @@
 #include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/random.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
@@ -1547,6 +1548,38 @@ int main(void) {
     if (syscall(SYS_faccessat2, AT_FDCWD, "/missing-access", F_OK, 0) != -1 ||
         errno != ENOENT) {
         return 206;
+    }
+    struct stat legacy_stat;
+    const char *legacy_libc = "/usr/lib/x86_64-linux-gnu/libc.so.6";
+    if (syscall(SYS_stat, legacy_libc, &legacy_stat) != 0 ||
+        !S_ISREG(legacy_stat.st_mode) || legacy_stat.st_size <= 0 ||
+        syscall(SYS_lstat, legacy_libc, &legacy_stat) != 0 ||
+        !S_ISREG(legacy_stat.st_mode)) {
+        return 263;
+    }
+    errno = 0;
+    if (syscall(SYS_stat, "/missing-legacy-stat", &legacy_stat) != -1 ||
+        errno != ENOENT || syscall(SYS_lstat, "/missing-legacy-stat",
+                                   &legacy_stat) != -1 ||
+        errno != ENOENT) {
+        return 264;
+    }
+    errno = 0;
+    if (syscall(SYS_chmod, legacy_libc, 0600) != -1 || errno != EROFS ||
+        syscall(SYS_chown, legacy_libc, 0, 0) != -1 || errno != EROFS ||
+        syscall(SYS_futimesat, AT_FDCWD, legacy_libc, NULL) != -1 ||
+        errno != EROFS) {
+        return 265;
+    }
+    struct rlimit legacy_limit;
+    if (syscall(SYS_getrlimit, RLIMIT_NOFILE, &legacy_limit) != 0 ||
+        legacy_limit.rlim_cur != 64 || legacy_limit.rlim_max != 64) {
+        return 266;
+    }
+    errno = 0;
+    if (syscall(SYS_setrlimit, RLIMIT_NOFILE, &legacy_limit) != -1 ||
+        errno != EPERM) {
+        return 267;
     }
     errno = 0;
     long empty_access =
