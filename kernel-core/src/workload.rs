@@ -45,6 +45,13 @@ impl ResourceLimits {
             Ok(())
         }
     }
+
+    fn attenuates(self, parent: Self) -> bool {
+        self.cpu_permille <= parent.cpu_permille
+            && self.memory_bytes <= parent.memory_bytes
+            && self.threads <= parent.threads
+            && self.ring_entries <= parent.ring_entries
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -111,10 +118,12 @@ impl WorkloadState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkloadSnapshot {
     pub key: WorkloadKey,
+    pub parent: Option<WorkloadKey>,
     pub domain: DomainKey,
     pub state: WorkloadState,
     pub limits: ResourceLimits,
     pub usage: ResourceUsage,
+    pub children: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,10 +154,12 @@ impl WorkloadError {
 #[derive(Clone, Copy)]
 struct Record {
     key: WorkloadKey,
+    parent: Option<WorkloadKey>,
     domain: DomainKey,
     state: WorkloadState,
     limits: ResourceLimits,
     usage: ResourceUsage,
+    children: u16,
 }
 
 /// Fixed-capacity table. Every rejection leaves all records unchanged.
@@ -175,7 +186,43 @@ impl<const N: usize> WorkloadTable<N> {
         if !domain.is_valid() {
             return Err(WorkloadError::InvalidDomain);
         }
+        self.create_record(domain, limits, None)
+    }
+
+    /// Creates a child with an attenuated subset of a running parent's authority.
+    ///
+    /// 在运行中的父 Workload 下创建子对象；子安全域与父相同且资源上限不能放大。
+    pub fn create_child(
+        &mut self,
+        parent: WorkloadKey,
+        limits: ResourceLimits,
+    ) -> Result<WorkloadKey, WorkloadError> {
+        let parent_record = self.record(parent)?;
+        if parent_record.state != WorkloadState::Running {
+            return Err(WorkloadError::InvalidState);
+        }
+        if !limits.attenuates(parent_record.limits) {
+            return Err(WorkloadError::Quota);
+        }
+        if parent_record.children == u16::MAX {
+            return Err(WorkloadError::IdExhausted);
+        }
+        self.create_record(parent_record.domain, limits, Some(parent))
+    }
+
+    fn create_record(
+        &mut self,
+        domain: DomainKey,
+        limits: ResourceLimits,
+        parent: Option<WorkloadKey>,
+    ) -> Result<WorkloadKey, WorkloadError> {
+        if !domain.is_valid() {
+            return Err(WorkloadError::InvalidDomain);
+        }
         limits.validate()?;
+        if parent.is_some_and(|key| self.record(key).is_err()) {
+            return Err(WorkloadError::InvalidKey);
+        }
         let slot = self
             .slots
             .iter()
@@ -191,11 +238,20 @@ impl<const N: usize> WorkloadTable<N> {
         self.generations[slot] = generation;
         self.slots[slot] = Some(Record {
             key,
+            parent,
             domain,
             state: WorkloadState::Created,
             limits,
             usage: ResourceUsage::default(),
+            children: 0,
         });
+        if let Some(parent) = parent {
+            let parent = self.record_mut(parent)?;
+            parent.children = parent
+                .children
+                .checked_add(1)
+                .ok_or(WorkloadError::IdExhausted)?;
+        }
         Ok(key)
     }
 
@@ -213,33 +269,52 @@ impl<const N: usize> WorkloadTable<N> {
     }
 
     pub fn charge(&mut self, key: WorkloadKey, delta: ResourceUsage) -> Result<(), WorkloadError> {
-        let record = self.record_mut(key)?;
-        if record.state != WorkloadState::Running {
+        let (path, len) = self.path(key)?;
+        if self.record(key)?.state != WorkloadState::Running {
             return Err(WorkloadError::InvalidState);
         }
-        let next = record
-            .usage
-            .checked_add(delta)
-            .ok_or(WorkloadError::Quota)?;
-        if !next.within(record.limits) {
-            return Err(WorkloadError::Quota);
+        for current in path.iter().take(len) {
+            let record = self.record(*current)?;
+            let next = record
+                .usage
+                .checked_add(delta)
+                .ok_or(WorkloadError::Quota)?;
+            if !next.within(record.limits) {
+                return Err(WorkloadError::Quota);
+            }
         }
-        record.usage = next;
+        for current in path.iter().take(len) {
+            let record = self.record_mut(*current)?;
+            record.usage = record
+                .usage
+                .checked_add(delta)
+                .ok_or(WorkloadError::Quota)?;
+        }
         Ok(())
     }
 
     pub fn release(&mut self, key: WorkloadKey, delta: ResourceUsage) -> Result<(), WorkloadError> {
-        let record = self.record_mut(key)?;
+        let (path, len) = self.path(key)?;
         if !matches!(
-            record.state,
+            self.record(key)?.state,
             WorkloadState::Running | WorkloadState::Stopping
         ) {
             return Err(WorkloadError::InvalidState);
         }
-        record.usage = record
-            .usage
-            .checked_sub(delta)
-            .ok_or(WorkloadError::Quota)?;
+        for current in path.iter().take(len) {
+            let record = self.record(*current)?;
+            record
+                .usage
+                .checked_sub(delta)
+                .ok_or(WorkloadError::Quota)?;
+        }
+        for current in path.iter().take(len) {
+            let record = self.record_mut(*current)?;
+            record.usage = record
+                .usage
+                .checked_sub(delta)
+                .ok_or(WorkloadError::Quota)?;
+        }
         Ok(())
     }
 
@@ -247,10 +322,12 @@ impl<const N: usize> WorkloadTable<N> {
         let record = self.record(key)?;
         Ok(WorkloadSnapshot {
             key: record.key,
+            parent: record.parent,
             domain: record.domain,
             state: record.state,
             limits: record.limits,
             usage: record.usage,
+            children: record.children,
         })
     }
 
@@ -263,7 +340,17 @@ impl<const N: usize> WorkloadTable<N> {
         if record.usage != ResourceUsage::default() {
             return Err(WorkloadError::Quota);
         }
+        if record.children != 0 {
+            return Err(WorkloadError::InvalidState);
+        }
         self.slots[index] = None;
+        if let Some(parent) = record.parent {
+            let parent = self.record_mut(parent)?;
+            parent.children = parent
+                .children
+                .checked_sub(1)
+                .ok_or(WorkloadError::InvalidState)?;
+        }
         Ok(())
     }
 
@@ -289,6 +376,22 @@ impl<const N: usize> WorkloadTable<N> {
             .and_then(Option::as_mut)
             .filter(|record| record.key == key)
             .ok_or(WorkloadError::InvalidKey)
+    }
+
+    fn path(&self, key: WorkloadKey) -> Result<([WorkloadKey; N], usize), WorkloadError> {
+        let mut path = [key; N];
+        let mut len = 0usize;
+        let mut current = Some(key);
+        while let Some(key) = current {
+            if len == N {
+                return Err(WorkloadError::InvalidState);
+            }
+            let record = self.record(key)?;
+            path[len] = key;
+            len += 1;
+            current = record.parent;
+        }
+        Ok((path, len))
     }
 }
 
@@ -424,5 +527,75 @@ mod tests {
             )
             .unwrap();
         assert_eq!(table.snapshot(b).unwrap().usage, ResourceUsage::default());
+    }
+
+    #[test]
+    fn child_resources_roll_up_and_require_ordered_destruction() {
+        let mut table = WorkloadTable::<4>::new();
+        let parent = table.create(DOMAIN, LIMITS).unwrap();
+        table.transition(parent, WorkloadState::Ready).unwrap();
+        table.transition(parent, WorkloadState::Running).unwrap();
+        let child = table.create_child(parent, LIMITS).unwrap();
+        table.transition(child, WorkloadState::Ready).unwrap();
+        table.transition(child, WorkloadState::Running).unwrap();
+        assert_eq!(table.snapshot(child).unwrap().parent, Some(parent));
+        assert_eq!(table.snapshot(parent).unwrap().children, 1);
+
+        let child_usage = ResourceUsage {
+            memory_bytes: 4096,
+            threads: 4,
+            ring_entries: 8,
+        };
+        table.charge(child, child_usage).unwrap();
+        assert_eq!(table.snapshot(child).unwrap().usage, child_usage);
+        assert_eq!(table.snapshot(parent).unwrap().usage, child_usage);
+        let snapshot = table.snapshot(parent).unwrap();
+        assert_eq!(
+            table.charge(
+                parent,
+                ResourceUsage {
+                    memory_bytes: 1,
+                    threads: 0,
+                    ring_entries: 0,
+                }
+            ),
+            Err(WorkloadError::Quota)
+        );
+        assert_eq!(table.snapshot(parent).unwrap(), snapshot);
+
+        table.transition(child, WorkloadState::Stopping).unwrap();
+        table.release(child, child_usage).unwrap();
+        table.transition(child, WorkloadState::Stopped).unwrap();
+        assert_eq!(table.destroy(parent), Err(WorkloadError::InvalidState));
+        table.destroy(child).unwrap();
+        assert_eq!(table.snapshot(parent).unwrap().children, 0);
+        table.transition(parent, WorkloadState::Stopping).unwrap();
+        table.transition(parent, WorkloadState::Stopped).unwrap();
+        table.destroy(parent).unwrap();
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn child_cannot_expand_parent_limits_or_cross_domain() {
+        let mut table = WorkloadTable::<2>::new();
+        let parent = table.create(DOMAIN, LIMITS).unwrap();
+        assert_eq!(
+            table.create_child(parent, LIMITS),
+            Err(WorkloadError::InvalidState)
+        );
+        table.transition(parent, WorkloadState::Ready).unwrap();
+        table.transition(parent, WorkloadState::Running).unwrap();
+        assert_eq!(
+            table.create_child(
+                parent,
+                ResourceLimits {
+                    memory_bytes: LIMITS.memory_bytes + 1,
+                    ..LIMITS
+                }
+            ),
+            Err(WorkloadError::Quota)
+        );
+        let child = table.create_child(parent, LIMITS).unwrap();
+        assert_eq!(table.snapshot(child).unwrap().domain, DOMAIN);
     }
 }
