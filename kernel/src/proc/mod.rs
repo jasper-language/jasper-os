@@ -1392,6 +1392,7 @@ pub fn map_memory(
 ) -> Result<(), MemError> {
     let mut retained = Vec::new();
     let mut published = 0u64;
+    let mut workload_charge = None;
     let mut rollback_uncertain = false;
     let mut active = kernel_core::smp::CpuSet::EMPTY;
     let result = kobj::with(|t| {
@@ -1439,6 +1440,14 @@ pub fn map_memory(
             .is_none()
         {
             return Err(MemError::Quota);
+        }
+        let workload_bytes = pages
+            .checked_mul(FRAME_SIZE)
+            .ok_or(MemError::InvalidRange)?;
+        if let Some(workload) = p.workload {
+            crate::workload::reserve_memory(workload, workload_bytes)
+                .map_err(|_| MemError::Quota)?;
+            workload_charge = Some((workload, workload_bytes));
         }
         p.shared_maps
             .try_reserve(retained.len())
@@ -1510,6 +1519,11 @@ pub fn map_memory(
         p.space.end_shootdown();
         Ok(())
     });
+    if result.is_err() {
+        if let Some((workload, bytes)) = workload_charge {
+            crate::workload::release_memory(workload, bytes);
+        }
+    }
     if result.is_err() && published > 0 {
         #[cfg(feature = "shm1-verify")]
         crate::shm_demo::record_mapping_rollback(published);
@@ -1566,7 +1580,7 @@ pub fn unmap_memory(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
     #[cfg(feature = "shm1-verify")]
     crate::shm_demo::record_revoke_targets(active);
     let confirmed = crate::smp::tlb_shootdown_on(active, va, pages).is_ok();
-    kobj::with(|t| {
+    let workload = kobj::with(|t| {
         let Ok(KObject::Process(p)) = t.get_mut(pid) else {
             return Err(MemError::NoSuchProcess);
         };
@@ -1581,8 +1595,19 @@ pub fn unmap_memory(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
         }
         p.shared_maps.retain(|m| m.va < va || m.va >= end);
         p.space.end_shootdown();
-        Ok(())
-    })
+        Ok(p.workload.map(|workload| {
+            (
+                workload,
+                pages
+                    .checked_mul(FRAME_SIZE)
+                    .expect("validated page range cannot overflow"),
+            )
+        }))
+    })?;
+    if let Some((workload, bytes)) = workload {
+        crate::workload::release_memory(workload, bytes);
+    }
+    Ok(())
 }
 
 /// 在进程 `pid` 的 `[va, va + size)` 建立设备 BAR 映射（`phys` 为 BAR 物理基址）。
@@ -3977,8 +4002,8 @@ fn destroy_process(p: Box<Process>) {
         let _ = sched::release_cpu_group(g); // 持有者引用；线程早已全部退出，组随之释放
     }
     if let Some(workload) = workload {
-        let bytes =
-            (frames.len() + quarantined.len()) as u64 * kernel_core::frame::FRAME_SIZE as u64;
+        let bytes = (frames.len() + shared_maps.len() + quarantined.len()) as u64
+            * kernel_core::frame::FRAME_SIZE as u64;
         crate::workload::release_memory(workload, bytes);
         if let Some(member) = workload_member {
             let _ = crate::workload::unbind_member(workload, member);

@@ -834,4 +834,33 @@ mod tests {
         members.detach(first, 1).unwrap();
         assert_eq!(members.count_for(first), 1);
     }
+
+    #[test]
+    fn shared_mapping_aliases_consume_independent_admitted_bytes() {
+        let mut table = WorkloadTable::<1>::new();
+        let key = table
+            .create(
+                DOMAIN,
+                ResourceLimits {
+                    memory_bytes: 8192,
+                    ..LIMITS
+                },
+            )
+            .unwrap();
+        table.transition(key, WorkloadState::Ready).unwrap();
+        table.transition(key, WorkloadState::Running).unwrap();
+        let one_page = ResourceUsage {
+            memory_bytes: crate::frame::FRAME_SIZE as u64,
+            threads: 0,
+            ring_entries: 0,
+        };
+        table.charge(key, one_page).unwrap();
+        table.charge(key, one_page).unwrap();
+        let before = table.snapshot(key).unwrap().usage;
+        assert_eq!(table.charge(key, one_page), Err(WorkloadError::Quota));
+        assert_eq!(table.snapshot(key).unwrap().usage, before);
+        table.release(key, one_page).unwrap();
+        table.release(key, one_page).unwrap();
+        assert_eq!(table.snapshot(key).unwrap().usage, ResourceUsage::default());
+    }
 }
