@@ -159,6 +159,8 @@ struct AshmemBuffer {
     size: AtomicU64,
     protection: AtomicU32,
     pins: AtomicU32,
+    allow_sealing: AtomicU32,
+    seals: AtomicU32,
     name: SpinLock<([u8; 256], usize)>,
     pages: SpinLock<Vec<Arc<crate::mm::memory_object::Page>>>,
 }
@@ -322,6 +324,8 @@ pub(crate) enum LinuxFdTransferError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LinuxAshmemError {
     Invalid,
+    Permission,
+    Busy,
     NoMemory,
     NotAshmem,
 }
@@ -439,6 +443,7 @@ struct SharedMapping {
     va: u64,
     page: Arc<crate::mm::memory_object::Page>,
     source: BackingIdentity,
+    writable: bool,
 }
 
 /// 一次成功的设备 BAR 映射：把创建它的句柄、虚拟区间与物理 BAR 起始地址记在一起。
@@ -1656,14 +1661,18 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
 /// Opens one anonymous ashmem buffer descriptor.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_open_ashmem(pid: ObjId, close_on_exec: bool) -> Option<u32> {
-    linux_open_ashmem_kind(pid, close_on_exec, false)
+    linux_open_ashmem_kind(pid, close_on_exec, false, false)
 }
 
 /// Creates one anonymous regular-file descriptor backed by the same bounded
 /// shared-page mechanism used by ashmem.
 #[cfg(feature = "linux-abi")]
-pub(crate) fn linux_create_memfd(pid: ObjId, close_on_exec: bool) -> Option<u32> {
-    linux_open_ashmem_kind(pid, close_on_exec, true)
+pub(crate) fn linux_create_memfd(
+    pid: ObjId,
+    close_on_exec: bool,
+    allow_sealing: bool,
+) -> Option<u32> {
+    linux_open_ashmem_kind(pid, close_on_exec, true, allow_sealing)
 }
 
 #[cfg(feature = "linux-abi")]
@@ -1671,6 +1680,7 @@ fn linux_open_ashmem_kind(
     pid: ObjId,
     close_on_exec: bool,
     regular_file: bool,
+    allow_sealing: bool,
 ) -> Option<u32> {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
@@ -1701,6 +1711,8 @@ fn linux_open_ashmem_kind(
                 size: AtomicU64::new(0),
                 protection: AtomicU32::new(3),
                 pins: AtomicU32::new(0),
+                allow_sealing: AtomicU32::new(u32::from(allow_sealing)),
+                seals: AtomicU32::new(0),
                 name: SpinLock::new(([0; 256], 0)),
                 pages: SpinLock::new(Vec::new()),
             }),
@@ -1888,6 +1900,8 @@ pub(crate) fn linux_ion_alloc(
             size: AtomicU64::new(size),
             protection: AtomicU32::new(3),
             pins: AtomicU32::new(0),
+            allow_sealing: AtomicU32::new(0),
+            seals: AtomicU32::new(0),
             name: SpinLock::new(([0; 256], 0)),
             pages: SpinLock::new(pages),
         });
@@ -2125,6 +2139,66 @@ pub(crate) fn linux_ashmem_state(
     })
 }
 
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_add_seals(
+    pid: ObjId,
+    handle: u64,
+    seals: u32,
+) -> Result<u32, LinuxAshmemError> {
+    if seals == 0 || seals & !0x1f != 0 {
+        return Err(LinuxAshmemError::Invalid);
+    }
+    with_proc(pid, |p| {
+        let linux = p.linux.as_ref().ok_or(ProcError::Exited)?;
+        let buffer = linux
+            .ashmem
+            .iter()
+            .find(|ashmem| ashmem.handle == handle)
+            .map(|ashmem| Arc::clone(&ashmem.buffer))
+            .ok_or(ProcError::NoTaskSlot)?;
+        if buffer.allow_sealing.load(Ordering::Acquire) == 0 {
+            return Err(ProcError::Handle(HandleError::RightsDenied));
+        }
+        let current = buffer.seals.load(Ordering::Acquire);
+        if current & 1 != 0 {
+            return Err(ProcError::Handle(HandleError::RightsDenied));
+        }
+        if seals & 8 != 0
+            && p.shared_maps
+                .iter()
+                .any(|mapping| mapping.source.object_id == buffer.id && mapping.writable)
+        {
+            return Err(ProcError::Map(MapError::Busy));
+        }
+        let next = current | seals;
+        buffer.seals.store(next, Ordering::Release);
+        Ok(next)
+    })
+    .map_err(|error| match error {
+        ProcError::Handle(HandleError::RightsDenied) => LinuxAshmemError::Permission,
+        ProcError::Map(MapError::Busy) => LinuxAshmemError::Busy,
+        ProcError::NoTaskSlot => LinuxAshmemError::NotAshmem,
+        _ => LinuxAshmemError::NoMemory,
+    })
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_get_seals(
+    pid: ObjId,
+    handle: u64,
+) -> Option<u32> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .ashmem
+            .iter()
+            .find(|ashmem| ashmem.handle == handle)
+            .map(|ashmem| ashmem.buffer.seals.load(Ordering::Acquire)),
+        _ => None,
+    })
+}
+
 /// Sets an ashmem name and returns the bounded diagnostic name.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_ashmem_set_name(
@@ -2290,6 +2364,8 @@ pub(crate) fn linux_ashmem_map(
             let end = offset.checked_add(length)?;
             if end > size.div_ceil(PAGE) * PAGE
                 || ashmem.buffer.protection.load(Ordering::Acquire) & protection != protection
+                || (protection & 2 != 0
+                    && ashmem.buffer.seals.load(Ordering::Acquire) & (8 | 16) != 0)
             {
                 return None;
             }
@@ -2309,6 +2385,9 @@ pub(crate) fn linux_ashmem_map(
     let backing = kernel_core::memory_capability::BackingIdentity::new(buffer.id, 1)
         .ok_or(LinuxAshmemError::Invalid)?;
     with_proc(pid, |p| {
+        if protection & 2 != 0 && buffer.seals.load(Ordering::Acquire) & (8 | 16) != 0 {
+            return Err(ProcError::Handle(HandleError::RightsDenied));
+        }
         if p.frames
             .len()
             .checked_add(p.shared_maps.len())
@@ -2382,12 +2461,16 @@ pub(crate) fn linux_ashmem_map(
                 va: address + index as u64 * PAGE,
                 page: Arc::clone(page),
                 source: backing,
+                writable: protection & 2 != 0,
             });
         }
         p.space.end_shootdown();
         Ok(())
     })
-    .map_err(|_| LinuxAshmemError::NoMemory)
+    .map_err(|error| match error {
+        ProcError::Handle(HandleError::RightsDenied) => LinuxAshmemError::Permission,
+        _ => LinuxAshmemError::NoMemory,
+    })
 }
 
 /// Installs a read-only Linux virtual file and initializes its offset.
@@ -3534,6 +3617,7 @@ pub fn map_memory(
                 page: Arc::clone(page),
                 source: BackingIdentity::new(id.raw(), id.generation())
                     .expect("live object has a valid generation"),
+                writable,
             });
         }
         p.memory_caps

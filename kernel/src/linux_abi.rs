@@ -2181,6 +2181,12 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         flags = flags.union(kernel_core::paging::MapFlags::EXECUTE);
     }
     if let Some(handle) = ashmem_handle {
+        if args[2] & PROT_WRITE != 0
+            && proc::linux_ashmem_get_seals(pid, handle)
+                .is_some_and(|seals| seals & (8 | 16) != 0)
+        {
+            return Err(CompatErrno::Perm);
+        }
         proc::linux_ashmem_map(
             pid,
             handle,
@@ -2189,7 +2195,13 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             args[2] as u32,
             args[5],
         )
-        .map_err(|_| CompatErrno::NoMemory)?;
+        .map_err(|error| match error {
+            proc::LinuxAshmemError::Permission => CompatErrno::Perm,
+            proc::LinuxAshmemError::Busy => CompatErrno::Busy,
+            proc::LinuxAshmemError::Invalid => CompatErrno::Invalid,
+            proc::LinuxAshmemError::NoMemory => CompatErrno::NoMemory,
+            proc::LinuxAshmemError::NotAshmem => CompatErrno::BadFd,
+        })?;
         if !proc::set_linux_mmap_cursor(pid, start + rounded) {
             return Err(CompatErrno::NoSys);
         }
@@ -3138,12 +3150,16 @@ fn linux_pipe2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn linux_memfd_create(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MFD_CLOEXEC: u64 = 0x1;
     const MFD_ALLOW_SEALING: u64 = 0x2;
-    if args[1] & MFD_ALLOW_SEALING != 0 || args[1] & !MFD_CLOEXEC != 0 {
+    if args[1] & !(MFD_CLOEXEC | MFD_ALLOW_SEALING) != 0 {
         return Err(CompatErrno::NoSys);
     }
     let name = linux_c_string(args[0], 249)?;
-    let fd = proc::linux_create_memfd(pid, args[1] & MFD_CLOEXEC != 0)
-        .ok_or(CompatErrno::NoSpace)?;
+    let fd = proc::linux_create_memfd(
+        pid,
+        args[1] & MFD_CLOEXEC != 0,
+        args[1] & MFD_ALLOW_SEALING != 0,
+    )
+    .ok_or(CompatErrno::NoSpace)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if proc::linux_ashmem_set_name(pid, entry.handle, &name).is_err() {
         let _ = proc::linux_close_fd(pid, fd);
@@ -3158,6 +3174,10 @@ fn linux_ftruncate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     let (current, _, _) =
         proc::linux_ashmem_state(pid, entry.handle).ok_or(CompatErrno::Invalid)?;
+    let seals = proc::linux_ashmem_get_seals(pid, entry.handle).ok_or(CompatErrno::Invalid)?;
+    if (size > current && seals & 4 != 0) || (size < current && seals & 2 != 0) {
+        return Err(CompatErrno::Perm);
+    }
     if current == size {
         return Ok(0);
     }
@@ -4701,6 +4721,8 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const F_DUPFD: u64 = 0;
     const F_DUPFD_CLOEXEC: u64 = 1030;
+    const F_ADD_SEALS: u64 = 1033;
+    const F_GET_SEALS: u64 = 1034;
     const F_GETFD: u64 = 1;
     const F_SETFD: u64 = 2;
     const F_GETFL: u64 = 3;
@@ -4741,6 +4763,15 @@ fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 .ok_or(CompatErrno::NoSpace)?;
             Ok(u64::from(duplicate))
         }
+        F_ADD_SEALS => {
+            let seals = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+            proc::linux_ashmem_add_seals(pid, entry.handle, seals)
+                .map(|_| 0)
+                .map_err(ashmem_compat_error)
+        }
+        F_GET_SEALS => proc::linux_ashmem_get_seals(pid, entry.handle)
+            .map(u64::from)
+            .ok_or(CompatErrno::Invalid),
         F_SETFD | F_SETFL => Err(CompatErrno::Invalid),
         _ => Err(CompatErrno::NoSys),
     }
@@ -4971,6 +5002,8 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn ashmem_compat_error(error: proc::LinuxAshmemError) -> CompatErrno {
     match error {
         proc::LinuxAshmemError::Invalid => CompatErrno::Invalid,
+        proc::LinuxAshmemError::Permission => CompatErrno::Perm,
+        proc::LinuxAshmemError::Busy => CompatErrno::Busy,
         proc::LinuxAshmemError::NoMemory => CompatErrno::NoMemory,
         proc::LinuxAshmemError::NotAshmem => CompatErrno::NotTty,
     }
