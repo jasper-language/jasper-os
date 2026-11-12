@@ -1203,7 +1203,10 @@ int main(void) {
     CPU_ZERO(&cpus);
     CPU_SET(0, &cpus);
     struct sched_param scheduler_parameter = {.sched_priority = 0};
-    if (sched_setscheduler(0, SCHED_OTHER, &scheduler_parameter) != 0) {
+    struct sched_param scheduler_current = {.sched_priority = -1};
+    if (sched_setscheduler(0, SCHED_OTHER, &scheduler_parameter) != 0 ||
+        sched_getparam(0, &scheduler_current) != 0 ||
+        scheduler_current.sched_priority != 0) {
         return 215;
     }
     errno = 0;
