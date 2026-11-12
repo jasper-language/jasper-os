@@ -4,10 +4,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-if [ "${GRAPHICAL_TERMINAL_GUARDED:-0}" != 1 ]; then
+if [ "${GRAPHICAL_TERMINAL_CPUSET:-0}" != 1 ]; then
   exec taskset -c "${GRAPHICAL_TERMINAL_CPUS:-4-5}" \
-    flock -w 900 "/tmp/jasper-os-cargo-$(id -u).lock" \
-    env GRAPHICAL_TERMINAL_GUARDED=1 bash "$ROOT/scripts/graphical-terminal-check.sh" "$@"
+    env GRAPHICAL_TERMINAL_CPUSET=1 bash "$ROOT/scripts/graphical-terminal-check.sh" "$@"
 fi
 
 OUT="${GRAPHICAL_TERMINAL_OUT:-$ROOT/evidence/graphical-terminal-$(date '+%Y%m%d-%H%M%S')}"
