@@ -828,6 +828,166 @@ int main(void) {
         close(ion_fd) != 0) {
         return 164;
     }
+    int binder_ready[2];
+    if (pipe2(binder_ready, 0) != 0) {
+        return 165;
+    }
+    pid_t binder_server_pid = getpid();
+    pid_t binder_child = fork();
+    if (binder_child < 0) {
+        return 166;
+    }
+    if (binder_child == 0) {
+        close(binder_ready[1]);
+        char ready = 0;
+        if (read(binder_ready[0], &ready, 1) != 1 || ready != 'R') {
+            _exit(167);
+        }
+        int client = open("/dev/binder", O_RDWR | O_CLOEXEC);
+        char request_data[4] = "PING";
+        struct binder_transaction_data request = {
+            .target.handle = 0,
+            .code = 0x1234,
+            .flags = 0,
+            .data_size = sizeof(request_data),
+            .offsets_size = 0,
+            .data.ptr.buffer = (binder_uintptr_t)request_data,
+            .data.ptr.offsets = 0,
+        };
+        unsigned char write_buffer[4 + sizeof(request)];
+        memcpy(write_buffer, &(uint32_t){BC_TRANSACTION}, 4);
+        memcpy(write_buffer + 4, &request, sizeof(request));
+        unsigned char read_buffer[68];
+        struct binder_write_read exchange = {
+            .write_size = sizeof(write_buffer),
+            .write_buffer = (binder_uintptr_t)write_buffer,
+            .read_size = sizeof(read_buffer),
+            .read_buffer = (binder_uintptr_t)read_buffer,
+        };
+        if (client < 0) {
+            printf("binder-client-fail stage=open errno=%d\n", errno);
+            _exit(168);
+        }
+        int binder_ioctl_result =
+            ioctl(client, BINDER_WRITE_READ, &exchange);
+        if (binder_ioctl_result != 0 ||
+            exchange.write_consumed != sizeof(write_buffer) ||
+            exchange.read_consumed != 4 ||
+            *(uint32_t *)read_buffer != BR_TRANSACTION_COMPLETE) {
+            printf("binder-client-fail stage=transaction rc=%d errno=%d "
+                   "write_consumed=%zu read_consumed=%zu command=%#x\n",
+                   binder_ioctl_result, errno, exchange.write_consumed,
+                   exchange.read_consumed, *(uint32_t *)read_buffer);
+            _exit(168);
+        }
+        memset(&exchange, 0, sizeof(exchange));
+        exchange.read_size = sizeof(read_buffer);
+        exchange.read_buffer = (binder_uintptr_t)read_buffer;
+        if (ioctl(client, BINDER_WRITE_READ, &exchange) != 0 ||
+            exchange.read_consumed != 68 ||
+            *(uint32_t *)read_buffer != BR_REPLY) {
+            _exit(169);
+        }
+        struct binder_transaction_data reply;
+        memcpy(&reply, read_buffer + 4, sizeof(reply));
+        if (reply.code != 0x4321 || reply.sender_pid != binder_server_pid ||
+            reply.data_size != 4) {
+            _exit(170);
+        }
+        char response[4] = {0};
+        memcpy(response, (void *)reply.data.ptr.buffer, 4);
+        if (memcmp(response, "PONG", 4) != 0) {
+            _exit(171);
+        }
+        unsigned char free_buffer[4 + sizeof(binder_uintptr_t)];
+        memcpy(free_buffer, &(uint32_t){BC_FREE_BUFFER}, 4);
+        binder_uintptr_t free_pointer = reply.data.ptr.buffer;
+        memcpy(free_buffer + 4, &free_pointer, sizeof(free_pointer));
+        struct binder_write_read cleanup = {
+            .write_size = sizeof(free_buffer),
+            .write_buffer = (binder_uintptr_t)free_buffer,
+        };
+        if (ioctl(client, BINDER_WRITE_READ, &cleanup) != 0 ||
+            cleanup.write_consumed != sizeof(free_buffer)) {
+            _exit(172);
+        }
+        close(client);
+        close(binder_ready[0]);
+        _exit(0);
+    }
+    close(binder_ready[0]);
+    int server = open("/dev/binder", O_RDWR | O_CLOEXEC);
+    unsigned char server_read[68];
+    struct binder_write_read server_exchange = {
+        .read_size = sizeof(server_read),
+        .read_buffer = (binder_uintptr_t)server_read,
+    };
+    if (server < 0) {
+        printf("binder-server-fail stage=open errno=%d\n", errno);
+        return 173;
+    }
+    int context_result = ioctl(server, BINDER_SET_CONTEXT_MGR, 0);
+    if (context_result != 0 || write(binder_ready[1], "R", 1) != 1) {
+        printf("binder-server-fail stage=context rc=%d errno=%d\n",
+               context_result, errno);
+        return 173;
+    }
+    int server_receive_result =
+        ioctl(server, BINDER_WRITE_READ, &server_exchange);
+    if (server_receive_result != 0 || server_exchange.read_consumed != 68 ||
+        *(uint32_t *)server_read != BR_TRANSACTION) {
+        printf("binder-server-fail stage=receive rc=%d errno=%d "
+               "read_consumed=%zu command=%#x\n",
+               server_receive_result, errno, server_exchange.read_consumed,
+               *(uint32_t *)server_read);
+        return 173;
+    }
+    struct binder_transaction_data received;
+    memcpy(&received, server_read + 4, sizeof(received));
+    char received_data[4] = {0};
+    memcpy(received_data, (void *)received.data.ptr.buffer, 4);
+    if (received.code != 0x1234 || received.sender_pid != binder_child ||
+        received.data_size != 4 ||
+        memcmp(received_data, "PING", 4) != 0) {
+        return 174;
+    }
+    char response_data[4] = "PONG";
+    struct binder_transaction_data response = {
+        .code = 0x4321,
+        .flags = 0,
+        .data_size = sizeof(response_data),
+        .offsets_size = 0,
+        .data.ptr.buffer = (binder_uintptr_t)response_data,
+    };
+    unsigned char server_write[12 + 4 + sizeof(response)];
+    size_t server_offset = 0;
+    memcpy(server_write + server_offset, &(uint32_t){BC_FREE_BUFFER}, 4);
+    server_offset += 4;
+    binder_uintptr_t received_pointer = received.data.ptr.buffer;
+    memcpy(server_write + server_offset, &received_pointer,
+           sizeof(received_pointer));
+    server_offset += sizeof(received_pointer);
+    memcpy(server_write + server_offset, &(uint32_t){BC_REPLY}, 4);
+    server_offset += 4;
+    memcpy(server_write + server_offset, &response, sizeof(response));
+    server_offset += sizeof(response);
+    memset(&server_exchange, 0, sizeof(server_exchange));
+    server_exchange.write_size = server_offset;
+    server_exchange.write_buffer = (binder_uintptr_t)server_write;
+    server_exchange.read_size = 4;
+    server_exchange.read_buffer = (binder_uintptr_t)server_read;
+    if (ioctl(server, BINDER_WRITE_READ, &server_exchange) != 0 ||
+        server_exchange.write_consumed != server_offset ||
+        server_exchange.read_consumed != 4 ||
+        *(uint32_t *)server_read != BR_TRANSACTION_COMPLETE) {
+        return 175;
+    }
+    int binder_status = 0;
+    if (waitpid(binder_child, &binder_status, 0) != binder_child ||
+        !WIFEXITED(binder_status) || WEXITSTATUS(binder_status) != 0 ||
+        close(binder_ready[1]) != 0 || close(server) != 0) {
+        return 176;
+    }
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
     if (sched_getaffinity(0, sizeof(cpus), &cpus) != 0 ||

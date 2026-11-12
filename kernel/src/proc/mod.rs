@@ -1946,6 +1946,74 @@ pub(crate) fn linux_ion_free(pid: ObjId, user_handle: u32) -> Result<(), LinuxAs
     .map_err(|_| LinuxAshmemError::Invalid)
 }
 
+/// Allocates a private transaction buffer in the recipient's user address space
+/// and returns its page-aligned address.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_alloc_transaction_buffer(pid: ObjId, data: &[u8]) -> Option<u64> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    let length = u64::try_from(data.len()).ok()?;
+    let rounded = length.checked_add(PAGE - 1)? & !(PAGE - 1);
+    let start = linux_mmap_cursor(pid)?;
+    if start < crate::arch::USER_WINDOW.0
+        || start.checked_add(rounded)? > crate::arch::USER_WINDOW.1
+    {
+        return None;
+    }
+    let flags = MapFlags::USER.union(MapFlags::WRITE);
+    let mut mapped = Vec::new();
+    let mut page = start;
+    while page < start + rounded {
+        if map_new(
+            pid,
+            page,
+            flags,
+        )
+        .is_err()
+        {
+            for address in mapped.iter().rev().copied() {
+                let _ = unmap_page(pid, address);
+            }
+            return None;
+        }
+        mapped.push(page);
+        page += PAGE;
+    }
+    if !data.is_empty() && write(pid, start, data).is_err() {
+        for address in mapped.iter().rev().copied() {
+            let _ = unmap_page(pid, address);
+        }
+        return None;
+    }
+    if !set_linux_mmap_cursor(pid, start + rounded) {
+        for address in mapped.iter().rev().copied() {
+            let _ = unmap_page(pid, address);
+        }
+        return None;
+    }
+    Some(start)
+}
+
+/// Releases one private binder transaction buffer.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_free_transaction_buffer(pid: ObjId, address: u64, length: usize) -> bool {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    let Some(rounded) = u64::try_from(length)
+        .ok()
+        .and_then(|length| length.checked_add(PAGE - 1))
+        .map(|length| length & !(PAGE - 1))
+    else {
+        return false;
+    };
+    let mut page = address;
+    while page < address.saturating_add(rounded) {
+        if unmap_page(pid, page).is_err() {
+            return false;
+        }
+        page += PAGE;
+    }
+    true
+}
+
 /// Resizes one empty ashmem buffer and commits its zeroed page backing
 /// all-or-nothing.
 #[cfg(feature = "linux-abi")]

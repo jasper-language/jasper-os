@@ -54,6 +54,8 @@ pub const LINUX_SOCKET: LockClass = LockClass::new(12, "system.compat.linux.sock
 /// 内存压力参数与统计。
 /// Memory-pressure state.
 pub const MEMORY_PRESSURE: LockClass = LockClass::new(13, "system.memory.pressure");
+/// Android binder transaction and context-manager state.
+pub const BINDER: LockClass = LockClass::new(14, "system.compat.android.binder");
 /// 内核堆。
 /// Kernel heap.
 pub const MEMORY_HEAP: LockClass = LockClass::new(15, "system.memory.heap");
@@ -94,6 +96,7 @@ pub const REGISTRY: &[LockClass] = &[
     SYSCALL_LAST_EXIT,
     LINUX_SOCKET,
     MEMORY_PRESSURE,
+    BINDER,
     MEMORY_HEAP,
     SANDBOX_STORAGE,
     MEMORY_FRAME,
