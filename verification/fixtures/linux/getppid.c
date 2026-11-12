@@ -1201,6 +1201,11 @@ int main(void) {
     }
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
+    CPU_SET(0, &cpus);
+    if (sched_setaffinity(0, sizeof(cpus), &cpus) != 0) {
+        return 214;
+    }
+    CPU_ZERO(&cpus);
     if (sched_getaffinity(0, sizeof(cpus), &cpus) != 0 ||
         CPU_COUNT(&cpus) < 1 || !CPU_ISSET(0, &cpus)) {
         return 11;

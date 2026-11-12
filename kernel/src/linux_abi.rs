@@ -1519,6 +1519,7 @@ fn execute(
         LinuxSyscall::GetCpu => compat_result(linux_getcpu(call.args)),
         LinuxSyscall::Sysinfo => compat_result(linux_sysinfo(call.args[0])),
         LinuxSyscall::SchedGetAffinity => compat_result(linux_sched_getaffinity(pid, call.args)),
+        LinuxSyscall::SchedSetAffinity => compat_result(linux_sched_setaffinity(pid, call.args)),
         LinuxSyscall::SchedGetScheduler => {
             compat_result(linux_sched_getscheduler(pid, call.args[0]))
         }
@@ -2024,6 +2025,39 @@ fn linux_sched_getaffinity(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
     copy_to_user(args[2], &mask.to_le_bytes(), KERNEL_MASK_BYTES)
         .map_err(|_| CompatErrno::Fault)?;
     Ok(KERNEL_MASK_BYTES as u64)
+}
+
+fn linux_sched_setaffinity(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const KERNEL_MASK_BYTES: usize = 8;
+    let size = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if size < KERNEL_MASK_BYTES {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut raw = [0u8; KERNEL_MASK_BYTES];
+    copy_from_user(&mut raw, args[2], KERNEL_MASK_BYTES)
+        .map_err(|_| CompatErrno::Fault)?;
+    let mask = u64::from_le_bytes(raw);
+    let online = sched::online_cpus();
+    let mut set = kernel_core::smp::CpuSet::EMPTY;
+    for cpu in 0..64 {
+        if mask & (1u64 << cpu) == 0 {
+            continue;
+        }
+        if cpu >= kernel_core::smp::MAX_CPUS || !online.contains(cpu) || !set.insert(cpu) {
+            return Err(CompatErrno::Invalid);
+        }
+    }
+    if set.is_empty() {
+        return Err(CompatErrno::Invalid);
+    }
+    let task = if args[0] == 0 {
+        sched::current().0
+    } else {
+        let tid = u32::try_from(args[0]).map_err(|_| CompatErrno::NoProcess)?;
+        linux_task_for_tid(pid, tid).ok_or(CompatErrno::NoProcess)?
+    };
+    sched::set_affinity(task, set).map_err(|_| CompatErrno::Invalid)?;
+    Ok(0)
 }
 
 /// Reports the compatibility scheduling policy for the current Linux process.
