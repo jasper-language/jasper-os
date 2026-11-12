@@ -20,7 +20,7 @@ pub const MAX_LAYERS: usize = 256;
 pub const MAX_VOLUMES: usize = 64;
 
 /// Lock order: `SANDBOX -> SANDBOX_STORAGE -> WORKLOADS`.
-static STORAGE: IrqSpinLock<SandboxStorageTable<MAX_IMAGES, MAX_LAYERS, MAX_VOLUMES>> =
+pub(crate) static STORAGE: IrqSpinLock<SandboxStorageTable<MAX_IMAGES, MAX_LAYERS, MAX_VOLUMES>> =
     IrqSpinLock::ranked(
         crate::lockorder::SANDBOX_STORAGE,
         SandboxStorageTable::new(),

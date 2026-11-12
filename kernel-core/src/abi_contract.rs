@@ -1801,6 +1801,21 @@ pub const OPERATIONS: &[OperationContract] = &[
         args: "u64:sandbox_key",
         result: "0_or_error",
     },
+    OperationContract {
+        name: "system.sandbox.launch.create",
+        args: "launch_create_record",
+        result: "launch_plan_key_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.launch.query",
+        args: "u64:plan_key,u64:user_ptr,u64:capacity",
+        result: "i64:bytes_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.launch.destroy",
+        args: "u64:plan_key",
+        result: "0_or_error",
+    },
 ];
 
 /// Rights 位是外部 ABI；位值变化必须产生新快照并随 ABI 版本裁决。
@@ -1999,6 +2014,18 @@ pub const SEMANTICS: &[(&str, &str)] = &[
     (
         "sandbox.kill",
         "same_domain_only;root_workload_begin_exit_members;stopped_requires_normal_resource_drain",
+    ),
+    (
+        "sandbox.launch.authority",
+        "kernel_supplied_domain;revalidate_sandbox_root_workload_image_volume_and_root_capability_at_create_and_query",
+    ),
+    (
+        "sandbox.launch.external_grants",
+        "device_data_and_net_policy_must_be_live_in_their_authority;unavailable_or_revoked_fails_closed",
+    ),
+    (
+        "sandbox.launch.record",
+        "stable_keys_and_immutable_policy_only;no_domain_or_logical_path;old_generation_never_revives",
     ),
     (
         "terminal.input",

@@ -73,6 +73,8 @@ pub const IRQ_QUOTA: LockClass = LockClass::new(19, "system.irq.quota");
 /// 内核跟踪缓冲。
 /// Kernel trace buffer.
 pub const TRACE: LockClass = LockClass::new(20, "system.trace");
+/// Bounded Sandbox launch-plan registry.
+pub const SANDBOX_LAUNCH: LockClass = LockClass::new(21, "system.sandbox.launch");
 /// 系统服务的分片队列（每个分片一把，同级，彼此从不嵌套）。
 /// Shard queues of sharded system services.
 pub const SERVICE_SHARD: LockClass = LockClass::new(22, "system.service.shard");
@@ -107,6 +109,7 @@ pub const REGISTRY: &[LockClass] = &[
     IRQ_ROUTING,
     IRQ_QUOTA,
     TRACE,
+    SANDBOX_LAUNCH,
     SERVICE_SHARD,
     DISPLAY,
     TERMINAL,

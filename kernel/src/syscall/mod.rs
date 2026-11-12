@@ -835,6 +835,15 @@ syscall_dispatch! {
     SYSTEM_SANDBOX_DESTROY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         sandbox_destroy(a.args[0])
     },
+    SYSTEM_SANDBOX_LAUNCH_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_launch_create(a.args[0])
+    },
+    SYSTEM_SANDBOX_LAUNCH_QUERY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_launch_query(a.args[0], a.args[1], a.args[2])
+    },
+    SYSTEM_SANDBOX_LAUNCH_DESTROY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_launch_destroy(a.args[0])
+    },
     SYSTEM_SANDBOX_WAIT => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         sandbox_wait(a.args[0], a.args[1])
     },
@@ -1455,6 +1464,94 @@ fn sandbox_destroy(raw_key: u64) -> i64 {
     match crate::sandbox::destroy(domain, key) {
         Ok(()) => 0,
         Err(error) => sandbox_error(error),
+    }
+}
+
+fn sandbox_launch_create(desc_ptr: u64) -> i64 {
+    let domain = match current_domain() {
+        Ok(domain) => domain,
+        Err(error) => return error,
+    };
+    let mut raw = [0u8; kernel_core::sandbox_launch_abi::CREATE_BYTES];
+    let raw_len = raw.len();
+    if let Err(error) = copy_from_user(&mut raw, desc_ptr, raw_len) {
+        return user_ptr_err(error);
+    }
+    let Some(args) = kernel_core::sandbox_launch_abi::LaunchCreateArgs::decode(&raw) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let spec = kernel_core::sandbox_launch::LaunchSpec {
+        sandbox: args.sandbox,
+        root: args.root,
+        image: args.image,
+        volume: args.volume,
+        root_capabilities: args.root_capabilities,
+        capabilities: args.capabilities,
+        resources: args.resources,
+        network_policy: args.network_policy,
+        devices: args.used_devices(),
+        data: args.used_data(),
+    };
+    match crate::sandbox_launch::create(domain, spec) {
+        Ok(key) => key.to_raw() as i64,
+        Err(error) => sandbox_launch_error(error),
+    }
+}
+
+fn sandbox_launch_query(raw_key: u64, ptr: u64, cap: u64) -> i64 {
+    let domain = match current_domain() {
+        Ok(domain) => domain,
+        Err(error) => return error,
+    };
+    let Some(key) = kernel_core::sandbox_launch::LaunchPlanKey::from_raw(raw_key) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let plan = match crate::sandbox_launch::query(domain, key) {
+        Ok(plan) => plan,
+        Err(error) => return sandbox_launch_error(error),
+    };
+    if cap < kernel_core::sandbox_launch_abi::INFO_BYTES as u64 {
+        return err(SYSTEM_SANDBOX_ERROR_BUFFER_TOO_SMALL);
+    }
+    let encoded = kernel_core::sandbox_launch_abi::LaunchPlanInfo::from_snapshot(plan).encode();
+    if let Err(error) = copy_to_user(ptr, &encoded, encoded.len()) {
+        return user_ptr_err(error);
+    }
+    encoded.len() as i64
+}
+
+fn sandbox_launch_destroy(raw_key: u64) -> i64 {
+    let domain = match current_domain() {
+        Ok(domain) => domain,
+        Err(error) => return error,
+    };
+    let Some(key) = kernel_core::sandbox_launch::LaunchPlanKey::from_raw(raw_key) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    match crate::sandbox_launch::destroy(domain, key) {
+        Ok(()) => 0,
+        Err(error) => sandbox_launch_error(error),
+    }
+}
+
+fn sandbox_launch_error(error: kernel_core::sandbox_launch::LaunchError) -> i64 {
+    use kernel_core::sandbox_launch::LaunchError;
+    match error {
+        LaunchError::InvalidDomain | LaunchError::InvalidRoot | LaunchError::InvalidSandbox => {
+            err(SYSTEM_SANDBOX_ERROR_NOT_FOUND)
+        }
+        LaunchError::NotRunning => err(SYSTEM_SANDBOX_ERROR_STATE),
+        LaunchError::Ownership
+        | LaunchError::Capability
+        | LaunchError::InvalidNetwork
+        | LaunchError::InvalidDevice
+        | LaunchError::InvalidData
+        | LaunchError::DuplicateGrant => err(SYSTEM_ERROR_RIGHTS_DENIED),
+        LaunchError::InvalidLimit | LaunchError::InvalidView => err(SYSTEM_ERROR_INVALID_ARGUMENT),
+        LaunchError::Capacity | LaunchError::IdExhausted => err(SYSTEM_SANDBOX_ERROR_CAPACITY),
+        LaunchError::Sandbox(error) => sandbox_error(error),
+        LaunchError::Workload(error) => workload_error(error),
+        LaunchError::Storage(error) => sandbox_storage_error(error),
     }
 }
 
