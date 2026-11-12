@@ -4168,6 +4168,14 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .map(u64::from)
             .ok_or(CompatErrno::NoSpace);
     }
+    if resolved == b"/dev/ion" {
+        if flags & 3 != 2 {
+            return Err(CompatErrno::Perm);
+        }
+        return proc::linux_open_ion(pid, flags & O_CLOEXEC != 0)
+            .map(u64::from)
+            .ok_or(CompatErrno::NoSpace);
+    }
     if flags & 3 != 0 {
         return Err(CompatErrno::Perm);
     }
@@ -4550,6 +4558,12 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const BINDER_THREAD_EXIT: u64 = 0x4004_6208;
     const BINDER_VERSION: u64 = 0xc004_6209;
     const BINDER_WRITE_READ: u64 = 0xc030_6201;
+    const ION_IOC_ALLOC: u64 = 0xc020_4900;
+    const ION_IOC_FREE: u64 = 0xc004_4901;
+    const ION_IOC_MAP: u64 = 0xc008_4902;
+    const ION_IOC_SHARE: u64 = 0xc008_4904;
+    const ION_IOC_IMPORT: u64 = 0xc008_4905;
+    const ION_IOC_SYNC: u64 = 0xc008_4907;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if args[1] == FIONREAD && entry.kind == compat_core::fd::CompatKind::Pipe {
@@ -4594,6 +4608,61 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             }
             BINDER_THREAD_EXIT => Ok(0),
             BINDER_WRITE_READ => Err(CompatErrno::NoSys),
+            _ => Err(CompatErrno::NoSys),
+        };
+    }
+    if entry.kind == compat_core::fd::CompatKind::Device
+        && proc::linux_is_ion_device(pid, entry.handle)
+    {
+        return match args[1] {
+            ION_IOC_ALLOC => {
+                let mut raw = [0u8; 32];
+                copy_from_user(&mut raw, args[2], 32)
+                    .map_err(|_| CompatErrno::Fault)?;
+                let size = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+                let alignment = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+                let heap_mask = u32::from_le_bytes(raw[16..20].try_into().unwrap());
+                let flags = u32::from_le_bytes(raw[20..24].try_into().unwrap());
+                let handle =
+                    proc::linux_ion_alloc(pid, size, alignment, heap_mask, flags)
+                        .map_err(ashmem_compat_error)?;
+                copy_to_user(args[2] + 24, &handle.to_le_bytes(), 4)
+                    .map_err(|_| CompatErrno::Fault)?;
+                Ok(0)
+            }
+            ION_IOC_FREE => {
+                let mut raw = [0u8; 4];
+                copy_from_user(&mut raw, args[2], 4).map_err(|_| CompatErrno::Fault)?;
+                proc::linux_ion_free(pid, u32::from_le_bytes(raw))
+                    .map_err(ashmem_compat_error)?;
+                Ok(0)
+            }
+            ION_IOC_MAP | ION_IOC_SHARE => {
+                let mut raw = [0u8; 8];
+                copy_from_user(&mut raw, args[2], 8)
+                    .map_err(|_| CompatErrno::Fault)?;
+                let handle = u32::from_le_bytes(raw[0..4].try_into().unwrap());
+                let fd = proc::linux_ion_share(pid, handle, false)
+                    .map_err(ashmem_compat_error)?;
+                copy_to_user(args[2] + 4, &(fd as i32).to_le_bytes(), 4)
+                    .map_err(|_| CompatErrno::Fault)?;
+                Ok(0)
+            }
+            ION_IOC_IMPORT => {
+                let mut raw = [0u8; 8];
+                copy_from_user(&mut raw, args[2], 8)
+                    .map_err(|_| CompatErrno::Fault)?;
+                let fd = i32::from_le_bytes(raw[4..8].try_into().unwrap());
+                if fd < 0 {
+                    return Err(CompatErrno::BadFd);
+                }
+                let handle =
+                    proc::linux_ion_import(pid, fd as u32).map_err(ashmem_compat_error)?;
+                copy_to_user(args[2], &handle.to_le_bytes(), 4)
+                    .map_err(|_| CompatErrno::Fault)?;
+                Ok(0)
+            }
+            ION_IOC_SYNC => Ok(0),
             _ => Err(CompatErrno::NoSys),
         };
     }

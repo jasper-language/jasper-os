@@ -35,6 +35,30 @@
 #define JASPER_ASHMEM_GET_NAME 0x81006107UL
 #define JASPER_ASHMEM_GET_PROT_MASK 0x80086108UL
 #define JASPER_ASHMEM_GET_PIN_STATUS 0x6109UL
+#define JASPER_ION_IOC_ALLOC 0xc0204900UL
+#define JASPER_ION_IOC_FREE 0xc0044901UL
+#define JASPER_ION_IOC_MAP 0xc0084902UL
+#define JASPER_ION_IOC_SHARE 0xc0084904UL
+#define JASPER_ION_IOC_IMPORT 0xc0084905UL
+#define JASPER_ION_IOC_SYNC 0xc0084907UL
+#define JASPER_ION_HEAP_SYSTEM_MASK 1U
+
+struct jasper_ion_allocation_data {
+    size_t len;
+    size_t align;
+    unsigned int heap_id_mask;
+    unsigned int flags;
+    int handle;
+};
+
+struct jasper_ion_fd_data {
+    int handle;
+    int fd;
+};
+
+struct jasper_ion_handle_data {
+    int handle;
+};
 
 int main(void) {
     if (getenv("JASPER_EXEC_CHILD") != NULL) {
@@ -732,6 +756,77 @@ int main(void) {
         ioctl(binder_fd, BINDER_THREAD_EXIT, 0) != 0 ||
         close(binder_fd) != 0) {
         return 155;
+    }
+    int ion_fd = open("/dev/ion", O_RDWR | O_CLOEXEC);
+    struct jasper_ion_allocation_data ion_allocation = {
+        .len = 8192,
+        .align = 4096,
+        .heap_id_mask = JASPER_ION_HEAP_SYSTEM_MASK,
+        .flags = 0,
+        .handle = -1,
+    };
+    if (ion_fd < 0 ||
+        (fcntl(ion_fd, F_GETFD) & FD_CLOEXEC) == 0 ||
+        ioctl(ion_fd, JASPER_ION_IOC_ALLOC, &ion_allocation) != 0 ||
+        ion_allocation.handle < 0) {
+        return 156;
+    }
+    struct jasper_ion_fd_data ion_share = {
+        .handle = ion_allocation.handle,
+        .fd = -1,
+    };
+    if (ioctl(ion_fd, JASPER_ION_IOC_SHARE, &ion_share) != 0 ||
+        ion_share.fd < 0) {
+        return 157;
+    }
+    unsigned char *ion_first = mmap(NULL, ion_allocation.len,
+                                    PROT_READ | PROT_WRITE, MAP_SHARED,
+                                    ion_share.fd, 0);
+    if (ion_first == MAP_FAILED) {
+        return 158;
+    }
+    ion_first[0] = 'I';
+    struct jasper_ion_handle_data ion_free = {
+        .handle = ion_allocation.handle,
+    };
+    if (ioctl(ion_fd, JASPER_ION_IOC_SYNC, &ion_free) != 0 ||
+        ioctl(ion_fd, JASPER_ION_IOC_FREE, &ion_free) != 0 ||
+        ion_first[0] != 'I') {
+        return 159;
+    }
+    struct jasper_ion_fd_data ion_import = {
+        .handle = -1,
+        .fd = ion_share.fd,
+    };
+    if (ioctl(ion_fd, JASPER_ION_IOC_IMPORT, &ion_import) != 0 ||
+        ion_import.handle < 0) {
+        return 160;
+    }
+    struct jasper_ion_fd_data ion_share_imported = {
+        .handle = ion_import.handle,
+        .fd = -1,
+    };
+    if (ioctl(ion_fd, JASPER_ION_IOC_MAP, &ion_share_imported) != 0 ||
+        ion_share_imported.fd < 0) {
+        return 161;
+    }
+    unsigned char *ion_second = mmap(NULL, ion_allocation.len,
+                                     PROT_READ | PROT_WRITE, MAP_SHARED,
+                                     ion_share_imported.fd, 0);
+    if (ion_second == MAP_FAILED || ion_second[0] != 'I') {
+        return 162;
+    }
+    ion_second[4096] = 'O';
+    if (munmap(ion_second, ion_allocation.len) != 0) {
+        return 163;
+    }
+    ion_free.handle = ion_import.handle;
+    if (ioctl(ion_fd, JASPER_ION_IOC_FREE, &ion_free) != 0 ||
+        munmap(ion_first, ion_allocation.len) != 0 ||
+        close(ion_share.fd) != 0 ||
+        close(ion_share_imported.fd) != 0 ||
+        close(ion_fd) != 0) {
+        return 164;
     }
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
