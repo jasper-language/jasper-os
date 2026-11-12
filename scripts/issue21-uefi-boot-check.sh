@@ -34,7 +34,13 @@ cleanup() {
     "$TARGET/system-A.img" "$TARGET/system-B.img" \
     "$OUT/serial.in" "$OUT/serial.out"
 }
-trap cleanup EXIT
+on_exit() {
+  status=$?
+  trap - EXIT
+  cleanup
+  exit "$status"
+}
+trap on_exit EXIT
 
 free_kib=$(df -Pk "$TARGET" | awk 'NR == 2 { print $4 }')
 if [ "${free_kib:-0}" -lt 4194304 ]; then
