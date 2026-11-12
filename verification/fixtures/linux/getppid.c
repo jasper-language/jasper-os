@@ -239,6 +239,84 @@ int main(void) {
         close(socket_fds[0]) != 0) {
         return 104;
     }
+    static const char abstract_suffix[] = "jasper-abi-named";
+    struct sockaddr_un named_address;
+    memset(&named_address, 0, sizeof(named_address));
+    named_address.sun_family = AF_UNIX;
+    memcpy(&named_address.sun_path[1], abstract_suffix,
+           sizeof(abstract_suffix));
+    socklen_t named_length =
+        offsetof(struct sockaddr_un, sun_path) + 1 + sizeof(abstract_suffix);
+    int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (listener < 0 ||
+        bind(listener, (struct sockaddr *)&named_address, named_length) != 0 ||
+        listen(listener, 2) != 0) {
+        return 107;
+    }
+    pid_t named_child = fork();
+    if (named_child < 0) {
+        return 108;
+    }
+    if (named_child == 0) {
+        int client = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (client < 0 ||
+            connect(client, (struct sockaddr *)&named_address,
+                    named_length) != 0 ||
+            send(client, "hello", 5, MSG_NOSIGNAL) != 5 ||
+            recv(client, blocking_bytes, 5, 0) != 5 ||
+            memcmp(blocking_bytes, "world", 5) != 0) {
+            _exit(109);
+        }
+        socklen_t local_length = sizeof(named_address);
+        if (getsockname(client, (struct sockaddr *)&named_address,
+                        &local_length) != 0 ||
+            local_length != sizeof(sa_family_t)) {
+            _exit(110);
+        }
+        socklen_t peer_length = sizeof(named_address);
+        if (getpeername(client, (struct sockaddr *)&named_address,
+                        &peer_length) != 0 ||
+            peer_length != named_length ||
+            memcmp(&named_address.sun_path[1], abstract_suffix,
+                   sizeof(abstract_suffix)) != 0) {
+            _exit(111);
+        }
+        close(client);
+        close(listener);
+        _exit(0);
+    }
+    struct sockaddr_un peer_address;
+    socklen_t peer_length = sizeof(peer_address);
+    int accepted = accept4(listener, (struct sockaddr *)&peer_address,
+                           &peer_length, SOCK_CLOEXEC);
+    if (accepted < 0 ||
+        (fcntl(accepted, F_GETFD) & FD_CLOEXEC) == 0 ||
+        peer_length != sizeof(sa_family_t) ||
+        recv(accepted, blocking_bytes, 5, 0) != 5 ||
+        memcmp(blocking_bytes, "hello", 5) != 0 ||
+        send(accepted, "world", 5, MSG_NOSIGNAL) != 5) {
+        return 112;
+    }
+    socklen_t accepted_name_length = sizeof(peer_address);
+    if (getsockname(accepted, (struct sockaddr *)&peer_address,
+                    &accepted_name_length) != 0 ||
+        accepted_name_length != named_length ||
+        memcmp(&peer_address.sun_path[1], abstract_suffix,
+               sizeof(abstract_suffix)) != 0) {
+        return 113;
+    }
+    int named_status = 0;
+    if (waitpid(named_child, &named_status, 0) != named_child ||
+        !WIFEXITED(named_status) || WEXITSTATUS(named_status) != 0 ||
+        close(accepted) != 0 || close(listener) != 0) {
+        return 114;
+    }
+    int rebound = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (rebound < 0 ||
+        bind(rebound, (struct sockaddr *)&named_address, named_length) != 0 ||
+        close(rebound) != 0) {
+        return 115;
+    }
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
     if (sched_getaffinity(0, sizeof(cpus), &cpus) != 0 ||
