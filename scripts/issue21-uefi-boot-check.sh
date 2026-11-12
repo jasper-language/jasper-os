@@ -11,12 +11,31 @@ OUT="${ISSUE21_UEFI_OUT:-$ROOT/evidence/issue21-uefi-boot-$(date '+%Y%m%d-%H%M%S
 TARGET="${ISSUE21_UEFI_TARGET:-$ROOT/target/issue21-uefi-check}"
 LIMIT="${ISSUE21_UEFI_TIMEOUT:-45}"
 MODE="${ISSUE21_UEFI_MODE:-normal}"
+QEMU_LOCK="${ISSUE21_QEMU_LOCK:-/tmp/jasper-os-qemu.lock}"
+QEMU_CPUS="${ISSUE21_QEMU_CPUS:-0-1}"
 mkdir -p "$OUT"
 IMAGE="$TARGET/p0.img"
 ESP_IMAGE="$TARGET/esp.img"
 UEFI_ESP="$TARGET/uefi-esp.img"
 OVMF_VARS="$TARGET/OVMF_VARS.fd"
 KERNEL="$TARGET/x86_64-unknown-none/release/jasper-kernel"
+
+cleanup() {
+  rm -f -- "$IMAGE" "$ESP_IMAGE" "$UEFI_ESP" "$OVMF_VARS"
+}
+trap cleanup EXIT
+
+free_kib=$(df -Pk "$TARGET" | awk 'NR == 2 { print $4 }')
+if [ "${free_kib:-0}" -lt 4194304 ]; then
+  echo "FAIL QEMU target filesystem has less than 4 GiB free: $TARGET" >&2
+  exit 75
+fi
+available_kib=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
+if [ "${available_kib:-0}" -lt 2097152 ]; then
+  echo "FAIL less than 2 GiB host memory available" >&2
+  exit 75
+fi
+
 # 仅清理本脚本固定命名的派生产物；证据目录必须独占，防止陈旧日志混入。
 # Remove only this script's fixed derived files; evidence output must be fresh.
 rm -f -- "$IMAGE" "$ESP_IMAGE" "$UEFI_ESP" "$OVMF_VARS"
@@ -97,8 +116,13 @@ if [ "$MODE" = root-exec ]; then
   QEMU_EXTRA=(-cpu "$CPU" -device virtio-rng-pci
     -device isa-debug-exit,iobase=0xf4,iosize=0x04)
 fi
+exec 9>"$QEMU_LOCK"
+if ! flock -n 9; then
+  echo "FAIL another Jasper-OS QEMU run holds $QEMU_LOCK" >&2
+  exit 75
+fi
 set +e
-timeout "$LIMIT" qemu-system-x86_64 \
+nice -n 15 taskset -c "$QEMU_CPUS" timeout "$LIMIT" qemu-system-x86_64 \
   -accel tcg \
   -machine q35 \
   -m 512M \
@@ -110,6 +134,7 @@ timeout "$LIMIT" qemu-system-x86_64 \
   -display none -monitor none -no-reboot "${QEMU_EXTRA[@]}"
 rc=$?
 set -e
+exec 9>&-
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
 if [ "$MODE" = root-exec ]; then
   [ "$rc" -eq 33 ]
