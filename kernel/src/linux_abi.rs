@@ -1632,6 +1632,11 @@ fn execute(
         LinuxSyscall::EpollWait => compat_result(linux_epoll_wait(pid, call.args, false, false)),
         LinuxSyscall::EpollPWait => compat_result(linux_epoll_wait(pid, call.args, true, false)),
         LinuxSyscall::EpollPWait2 => compat_result(linux_epoll_wait(pid, call.args, true, true)),
+        LinuxSyscall::IoUringSetup => compat_result(linux_io_uring_setup(pid, call.args)),
+        LinuxSyscall::IoUringEnter => compat_result(linux_io_uring_enter(pid, call.args)),
+        LinuxSyscall::IoUringRegister => {
+            compat_result(linux_io_uring_register(pid, call.args))
+        }
         LinuxSyscall::Exit | LinuxSyscall::ExitGroup => {
             let code = call.args[0] as i64;
             proc::thread_exit(code, "linux process exit")
@@ -2695,13 +2700,20 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         {
             return Err(CompatErrno::Perm);
         }
+        let backing_offset =
+            if proc::linux_io_uring_state(pid, handle).is_some() {
+                proc::linux_io_uring_mmap_offset(pid, handle, args[5])
+                    .ok_or(CompatErrno::Invalid)?
+            } else {
+                args[5]
+            };
         proc::linux_ashmem_map(
             pid,
             handle,
             start,
             rounded,
             args[2] as u32,
-            args[5],
+            backing_offset,
         )
         .map_err(|error| match error {
             proc::LinuxAshmemError::Permission => CompatErrno::Perm,
@@ -2766,10 +2778,14 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 
 fn linux_munmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
-    if args[0] % PAGE != 0 || args[1] == 0 || args[1] % PAGE != 0 {
+    if args[0] % PAGE != 0 || args[1] == 0 {
         return Err(CompatErrno::Invalid);
     }
-    let end = args[0].checked_add(args[1]).ok_or(CompatErrno::Invalid)?;
+    let rounded = args[1]
+        .checked_add(PAGE - 1)
+        .ok_or(CompatErrno::Invalid)?
+        & !(PAGE - 1);
+    let end = args[0].checked_add(rounded).ok_or(CompatErrno::Invalid)?;
     if end > crate::arch::USER_WINDOW.1 {
         return Err(CompatErrno::Invalid);
     }
@@ -5769,6 +5785,244 @@ fn ashmem_compat_error(error: proc::LinuxAshmemError) -> CompatErrno {
         proc::LinuxAshmemError::NoMemory => CompatErrno::NoMemory,
         proc::LinuxAshmemError::NotAshmem => CompatErrno::NotTty,
     }
+}
+
+const IO_URING_RING_BYTES: u64 = 3 * 4096;
+const IO_URING_SQ_ARRAY: u64 = 0x80;
+const IO_URING_CQ_HEAD: u64 = 0x100;
+const IO_URING_CQ_TAIL: u64 = 0x104;
+const IO_URING_CQ_MASK: u64 = 0x108;
+const IO_URING_CQ_ENTRIES: u64 = 0x10c;
+const IO_URING_CQES: u64 = 0x1000;
+const IO_URING_SQES: u64 = 0x2000;
+
+fn io_uring_read(
+    pid: ObjId,
+    handle: u64,
+    offset: u64,
+    output: &mut [u8],
+) -> Result<(), CompatErrno> {
+    proc::linux_ashmem_read_from(pid, handle, offset, output)
+        .map(|_| ())
+        .map_err(ashmem_compat_error)
+}
+
+fn io_uring_write(
+    pid: ObjId,
+    handle: u64,
+    offset: u64,
+    input: &[u8],
+) -> Result<(), CompatErrno> {
+    proc::linux_ashmem_write_from(pid, handle, offset, input)
+        .map(|_| ())
+        .map_err(ashmem_compat_error)
+}
+
+/// Creates a shared SQ/CQ/SQE backing object and publishes the Linux
+/// `io_uring_params` geometry with single-mmap support.
+fn linux_io_uring_setup(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PARAMS_BYTES: usize = 120;
+    const IORING_SETUP_CLAMP: u32 = 1 << 4;
+    const IORING_SETUP_SINGLE_ISSUER: u32 = 1 << 12;
+    const IORING_FEAT_SINGLE_MMAP: u32 = 1;
+    const MAX_ENTRIES: u32 = 64;
+
+    let requested = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    if requested == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut input = [0u8; PARAMS_BYTES];
+    copy_from_user(&mut input, args[1], PARAMS_BYTES).map_err(|_| CompatErrno::Fault)?;
+    let flags = u32::from_le_bytes(input[8..12].try_into().unwrap());
+    if flags & !(IORING_SETUP_CLAMP | IORING_SETUP_SINGLE_ISSUER) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let entries = requested
+        .next_power_of_two()
+        .clamp(1, MAX_ENTRIES);
+    let cq_entries = entries
+        .checked_mul(2)
+        .ok_or(CompatErrno::Invalid)?;
+    let fd = proc::linux_create_memfd(pid, false, false).ok_or(CompatErrno::NoSpace)?;
+    let result = (|| {
+        let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+        proc::linux_ashmem_set_size(pid, entry.handle, IO_URING_RING_BYTES)
+            .map_err(ashmem_compat_error)?;
+        if !proc::linux_io_uring_register(pid, entry.handle, entries, cq_entries) {
+            return Err(CompatErrno::NoSpace);
+        }
+        let mut ring = alloc::vec![0u8; IO_URING_RING_BYTES as usize];
+        let put_u32 = |ring: &mut [u8], offset: usize, value: u32| {
+            ring[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        put_u32(&mut ring, 0x08, entries - 1);
+        put_u32(&mut ring, 0x0c, entries);
+        put_u32(&mut ring, IO_URING_SQ_ARRAY as usize - 8, 0);
+        put_u32(&mut ring, IO_URING_CQ_MASK as usize, cq_entries - 1);
+        put_u32(&mut ring, IO_URING_CQ_ENTRIES as usize, cq_entries);
+        io_uring_write(pid, entry.handle, 0, &ring)?;
+
+        let mut params = [0u8; PARAMS_BYTES];
+        params[0..4].copy_from_slice(&entries.to_le_bytes());
+        params[4..8].copy_from_slice(&cq_entries.to_le_bytes());
+        params[8..12].copy_from_slice(&flags.to_le_bytes());
+        params[20..24].copy_from_slice(&IORING_FEAT_SINGLE_MMAP.to_le_bytes());
+        // struct io_sqring_offsets
+        params[40..44].copy_from_slice(&0u32.to_le_bytes());
+        params[44..48].copy_from_slice(&4u32.to_le_bytes());
+        params[48..52].copy_from_slice(&8u32.to_le_bytes());
+        params[52..56].copy_from_slice(&12u32.to_le_bytes());
+        params[56..60].copy_from_slice(&16u32.to_le_bytes());
+        params[60..64].copy_from_slice(&20u32.to_le_bytes());
+        params[64..68].copy_from_slice(&(IO_URING_SQ_ARRAY as u32).to_le_bytes());
+        // struct io_cqring_offsets
+        params[80..84].copy_from_slice(&(IO_URING_CQ_HEAD as u32).to_le_bytes());
+        params[84..88].copy_from_slice(&(IO_URING_CQ_TAIL as u32).to_le_bytes());
+        params[88..92].copy_from_slice(&(IO_URING_CQ_MASK as u32).to_le_bytes());
+        params[92..96].copy_from_slice(&(IO_URING_CQ_ENTRIES as u32).to_le_bytes());
+        params[96..100].copy_from_slice(&0x110u32.to_le_bytes());
+        params[100..104].copy_from_slice(&(IO_URING_CQES as u32).to_le_bytes());
+        copy_to_user(args[1], &params, PARAMS_BYTES).map_err(|_| CompatErrno::Fault)?;
+        Ok(u64::from(fd))
+    })();
+    if result.is_err() {
+        let _ = proc::linux_close_fd(pid, fd);
+    }
+    result
+}
+
+/// Consumes ring SQEs and posts synchronous completions into the shared CQ.
+fn linux_io_uring_enter(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const IORING_ENTER_GETEVENTS: u64 = 1;
+    const IORING_ENTER_SQ_WAKEUP: u64 = 2;
+    const IORING_OP_NOP: u8 = 0;
+    const IORING_OP_FSYNC: u8 = 3;
+    const IORING_OP_READ: u8 = 22;
+    const IORING_OP_WRITE: u8 = 23;
+
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let to_submit = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let flags = args[3];
+    if flags & !(IORING_ENTER_GETEVENTS | IORING_ENTER_SQ_WAKEUP) != 0
+        || args[4] != 0
+    {
+        return Err(CompatErrno::NoSys);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let (entries, cq_entries) =
+        proc::linux_io_uring_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let mask = entries - 1;
+    let cq_mask = cq_entries - 1;
+    let mut bytes = [0u8; 8];
+    io_uring_read(pid, entry.handle, 0, &mut bytes)?;
+    let mut sq_head = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+    let sq_tail = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    let pending = sq_tail.wrapping_sub(sq_head);
+    if pending > entries {
+        return Err(CompatErrno::Invalid);
+    }
+    let submit = to_submit.min(pending as usize);
+    for index in 0..submit {
+        let position = sq_head.wrapping_add(index as u32);
+        let mut array = [0u8; 4];
+        io_uring_read(
+            pid,
+            entry.handle,
+            IO_URING_SQ_ARRAY + u64::from(position & mask) * 4,
+            &mut array,
+        )?;
+        let sqe_index = u32::from_le_bytes(array);
+        let mut sqe = [0u8; 64];
+        io_uring_read(
+            pid,
+            entry.handle,
+            IO_URING_SQES + u64::from(sqe_index & mask) * 64,
+            &mut sqe,
+        )?;
+        let opcode = sqe[0];
+        let sqe_flags = sqe[1];
+        let target_fd = i32::from_le_bytes(sqe[4..8].try_into().unwrap());
+        let offset = u64::from_le_bytes(sqe[8..16].try_into().unwrap());
+        let address = u64::from_le_bytes(sqe[16..24].try_into().unwrap());
+        let length = u32::from_le_bytes(sqe[24..28].try_into().unwrap());
+        let operation_flags = u32::from_le_bytes(sqe[28..32].try_into().unwrap());
+        let user_data = u64::from_le_bytes(sqe[32..40].try_into().unwrap());
+        let invalid_operation_flags = if opcode == IORING_OP_FSYNC {
+            operation_flags & !1 != 0
+        } else {
+            operation_flags != 0
+        };
+        let result = if sqe_flags != 0
+            || invalid_operation_flags
+            || target_fd < 0 && opcode != IORING_OP_NOP
+        {
+            Err(CompatErrno::Invalid)
+        } else {
+            match opcode {
+                IORING_OP_NOP => Ok(0),
+                IORING_OP_FSYNC => linux_sync_fd(
+                    pid,
+                    u64::from(target_fd as u32),
+                    operation_flags & 1 != 0,
+                ),
+                IORING_OP_READ => {
+                    let call = [target_fd as u64, address, u64::from(length), offset, 0, 0];
+                    if offset == u64::MAX {
+                        linux_read(pid, call)
+                    } else {
+                        linux_pread64(pid, call)
+                    }
+                }
+                IORING_OP_WRITE => {
+                    let call = [target_fd as u64, address, u64::from(length), offset, 0, 0];
+                    if offset == u64::MAX {
+                        linux_write(pid, call)
+                    } else {
+                        linux_pwrite64(pid, call)
+                    }
+                }
+                _ => Err(CompatErrno::NoSys),
+            }
+        };
+        let result = match result {
+            Ok(value) => value.min(i64::MAX as u64) as i64,
+            Err(error) => -i64::from(error as i32),
+        };
+        let mut cq = [0u8; 8];
+        io_uring_read(pid, entry.handle, IO_URING_CQ_HEAD, &mut cq)?;
+        let cq_head = u32::from_le_bytes(cq[..4].try_into().unwrap());
+        let cq_tail = u32::from_le_bytes(cq[4..8].try_into().unwrap());
+        if cq_tail.wrapping_sub(cq_head) >= cq_entries {
+            return Err(CompatErrno::NoSpace);
+        }
+        let mut cqe = [0u8; 16];
+        cqe[..8].copy_from_slice(&user_data.to_le_bytes());
+        cqe[8..12].copy_from_slice(&(result as i32).to_le_bytes());
+        io_uring_write(
+            pid,
+            entry.handle,
+            IO_URING_CQES + u64::from(cq_tail & cq_mask) * 16,
+            &cqe,
+        )?;
+        io_uring_write(
+            pid,
+            entry.handle,
+            IO_URING_CQ_TAIL,
+            &cq_tail.wrapping_add(1).to_le_bytes(),
+        )?;
+    }
+    sq_head = sq_head.wrapping_add(submit as u32);
+    io_uring_write(pid, entry.handle, 0, &sq_head.to_le_bytes())?;
+    Ok(submit as u64)
+}
+
+/// io_uring registration is returned as unsupported until fixed files and
+/// buffers have real object-lifetime tracking.
+fn linux_io_uring_register(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let _ = proc::linux_io_uring_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    Err(CompatErrno::NoSys)
 }
 
 /// Creates a bounded Linux epoll instance.

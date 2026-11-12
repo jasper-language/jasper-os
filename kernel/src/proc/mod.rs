@@ -124,6 +124,7 @@ struct LinuxProcessState {
     next_eventfd_handle: u64,
     epolls: Vec<LinuxEpollHandle>,
     next_epoll_handle: u64,
+    iourings: Vec<LinuxIoUringHandle>,
     /// Set only on the child side of vfork. The parent task sleeps until the
     /// child commits exec or leaves `Running`.
     /// 仅 vfork 子进程携带；父任务睡眠到子进程提交 exec 或离开 Running。
@@ -211,6 +212,14 @@ pub(crate) struct LinuxEpollRegistration {
     pub(crate) data: u64,
     pub(crate) armed: bool,
     pub(crate) edge_seen: u32,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+struct LinuxIoUringHandle {
+    handle: u64,
+    entries: u32,
+    cq_entries: u32,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -1736,6 +1745,9 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     if handle >= LINUX_EPOLL_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.epolls.retain(|epoll| epoll.handle != handle);
     }
+    if linux.fds.handle_fd_count(handle) == 0 {
+        linux.iourings.retain(|ring| ring.handle != handle);
+    }
 }
 
 /// Opens one anonymous ashmem buffer descriptor.
@@ -1974,6 +1986,68 @@ pub(crate) fn linux_is_epoll(pid: ObjId, handle: u64) -> bool {
             .is_some_and(|linux| linux.epolls.iter().any(|epoll| epoll.handle == handle)),
         _ => false,
     })
+}
+
+/// Associates one regular memfd descriptor with a bounded io_uring ring.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_io_uring_register(
+    pid: ObjId,
+    handle: u64,
+    entries: u32,
+    cq_entries: u32,
+) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.iourings.len() >= 8
+            || linux
+                .iourings
+                .iter()
+                .any(|ring| ring.handle == handle)
+        {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .iourings
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.iourings.push(LinuxIoUringHandle {
+            handle,
+            entries,
+            cq_entries,
+        });
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Returns the fixed queue geometry of one io_uring instance.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_io_uring_state(pid: ObjId, handle: u64) -> Option<(u32, u32)> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .iourings
+            .iter()
+            .find(|ring| ring.handle == handle)
+            .map(|ring| (ring.entries, ring.cq_entries)),
+        _ => None,
+    })
+}
+
+/// Translates the three Linux io_uring mmap pseudo-offsets to backing offsets.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_io_uring_mmap_offset(
+    pid: ObjId,
+    handle: u64,
+    requested: u64,
+) -> Option<u64> {
+    let _ = linux_io_uring_state(pid, handle)?;
+    match requested {
+        0x0000_0000 | 0x0800_0000 => Some(0),
+        0x1000_0000 => Some(0x2000),
+        _ => None,
+    }
 }
 
 #[cfg(feature = "linux-abi")]
@@ -3268,6 +3342,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         next_eventfd_handle: LINUX_EVENTFD_HANDLE_BASE,
         epolls: Vec::new(),
         next_epoll_handle: LINUX_EPOLL_HANDLE_BASE,
+        iourings: Vec::new(),
         vfork_parent: None,
     };
     create_process(name, SyscallSet::EMPTY, move |process| {
