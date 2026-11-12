@@ -3249,16 +3249,23 @@ fn linux_close(pid: ObjId, fd: u64) -> Result<u64, CompatErrno> {
 }
 
 fn linux_close_range(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const CLOSE_RANGE_UNSHARE: u64 = 0x2;
     const CLOSE_RANGE_CLOEXEC: u64 = 0x4;
     let first = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let last = u32::try_from(args[1]).map_err(|_| CompatErrno::BadFd)?;
     if first > last {
         return Err(CompatErrno::Invalid);
     }
-    if args[2] & !CLOSE_RANGE_CLOEXEC != 0 {
-        return Err(CompatErrno::NoSys);
+    if args[2] & !(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC) != 0 {
+        return Err(CompatErrno::Invalid);
     }
-    if proc::linux_close_range(pid, first, last, args[2] & CLOSE_RANGE_CLOEXEC != 0) {
+    if proc::linux_close_range(
+        pid,
+        first,
+        last,
+        args[2] & CLOSE_RANGE_CLOEXEC != 0,
+        args[2] & CLOSE_RANGE_UNSHARE != 0,
+    ) {
         Ok(0)
     } else {
         Err(CompatErrno::BadFd)
