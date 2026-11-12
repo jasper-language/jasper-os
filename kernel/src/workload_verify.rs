@@ -264,7 +264,7 @@ fn verify_user_workload_abi(base: u64) {
     let _ = key;
 }
 
-fn member_elf(base: u64) -> Vec<u8> {
+fn member_elf(base: u64, wait_ticks: u32) -> Vec<u8> {
     fn section(
         image: &mut [u8],
         shoff: usize,
@@ -311,10 +311,22 @@ fn member_elf(base: u64) -> Vec<u8> {
     image[104..112].copy_from_slice(&26u64.to_le_bytes());
     image[112..120].copy_from_slice(&4096u64.to_le_bytes());
     let code = &mut image[4096..];
-    code[..5].copy_from_slice(&[0xb8, 0, 0, 0, 0]);
-    code[1..5].copy_from_slice(&abi::SYSTEM_PROCESS_EXIT.to_le_bytes());
-    code[5..10].copy_from_slice(&[0xbf, 51, 0, 0, 0]);
-    code[10..14].copy_from_slice(&[0x0f, 0x05, 0x0f, 0x0b]);
+    if wait_ticks == 0 {
+        code[..5].copy_from_slice(&[0xb8, 0, 0, 0, 0]);
+        code[1..5].copy_from_slice(&abi::SYSTEM_PROCESS_EXIT.to_le_bytes());
+        code[5..10].copy_from_slice(&[0xbf, 51, 0, 0, 0]);
+        code[10..14].copy_from_slice(&[0x0f, 0x05, 0x0f, 0x0b]);
+    } else {
+        code[..5].copy_from_slice(&[0xb8, 0, 0, 0, 0]);
+        code[1..5].copy_from_slice(&abi::SYSTEM_TIME_WAIT.to_le_bytes());
+        code[5..10].copy_from_slice(&[0xbf, 0, 0, 0, 0]);
+        code[6..10].copy_from_slice(&wait_ticks.to_le_bytes());
+        code[10..12].copy_from_slice(&[0x0f, 0x05]);
+        code[12..17].copy_from_slice(&[0xb8, 0, 0, 0, 0]);
+        code[13..17].copy_from_slice(&abi::SYSTEM_PROCESS_EXIT.to_le_bytes());
+        code[17..22].copy_from_slice(&[0xbf, 51, 0, 0, 0]);
+        code[22..26].copy_from_slice(&[0x0f, 0x05, 0x0f, 0x0b]);
+    }
     let note = kernel_core::abi_version::encode_note(
         kernel_core::abi_version::ProgramAbi::native_requirement(),
     );
@@ -325,7 +337,7 @@ fn member_elf(base: u64) -> Vec<u8> {
     image
 }
 
-fn member_spawn_code(base: u64) -> Vec<u8> {
+fn member_spawn_code(base: u64, terminate: bool) -> Vec<u8> {
     fn imm32(code: &mut Vec<u8>, opcode: u8, value: u32) {
         code.push(opcode);
         code.extend_from_slice(&value.to_le_bytes());
@@ -351,6 +363,11 @@ fn member_spawn_code(base: u64) -> Vec<u8> {
     fn cmp_rax(code: &mut Vec<u8>, value: i32) {
         code.extend_from_slice(&[0x48, 0x3d]);
         code.extend_from_slice(&value.to_le_bytes());
+    }
+    fn cmp_rax_u64(code: &mut Vec<u8>, value: u64) {
+        code.extend_from_slice(&[0x48, 0xb9]);
+        code.extend_from_slice(&value.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0x39, 0xc8]);
     }
     fn jne_error(code: &mut Vec<u8>, patches: &mut Vec<usize>) {
         code.extend_from_slice(&[0x0f, 0x85, 0, 0, 0, 0]);
@@ -381,11 +398,26 @@ fn member_spawn_code(base: u64) -> Vec<u8> {
     test_rax(&mut code);
     js_error(&mut code, &mut patches);
 
+    if terminate {
+        imm32(&mut code, 0xb8, abi::SYSTEM_WORKLOAD_KILL);
+        code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+        syscall(&mut code);
+        test_rax(&mut code);
+        js_error(&mut code, &mut patches);
+    }
+
     imm64(&mut code, 0xbf, base + MEMBER_SPAWN_OFF + 72);
     code.extend_from_slice(&[0x48, 0x8b, 0x3f]); // mov rdi, [rdi]
     imm32(&mut code, 0xb8, abi::SYSTEM_PROCESS_WAIT);
     syscall(&mut code);
-    cmp_rax(&mut code, 51);
+    if terminate {
+        cmp_rax_u64(
+            &mut code,
+            (crate::workload::WORKLOAD_TERMINATED_CODE as u32) as u64,
+        );
+    } else {
+        cmp_rax(&mut code, 51);
+    }
     jne_error(&mut code, &mut patches);
 
     imm64(&mut code, 0xbf, base + MEMBER_SPAWN_OFF + 72);
@@ -412,15 +444,27 @@ fn member_spawn_code(base: u64) -> Vec<u8> {
     code
 }
 
-fn verify_workload_spawn(base: u64) {
+fn verify_workload_spawn(base: u64, terminate: bool) {
     let page = kernel_core::frame::FRAME_SIZE as u64;
-    let calls = SyscallSet::of(&[
-        abi::SYSTEM_PROCESS_EXIT,
-        abi::SYSTEM_PROCESS_WAIT,
-        abi::SYSTEM_HANDLE_CLOSE,
-        abi::SYSTEM_WORKLOAD_CREATE,
-        abi::SYSTEM_WORKLOAD_SPAWN,
-    ]);
+    let calls = if terminate {
+        SyscallSet::of(&[
+            abi::SYSTEM_PROCESS_EXIT,
+            abi::SYSTEM_PROCESS_WAIT,
+            abi::SYSTEM_HANDLE_CLOSE,
+            abi::SYSTEM_TIME_WAIT,
+            abi::SYSTEM_WORKLOAD_CREATE,
+            abi::SYSTEM_WORKLOAD_SPAWN,
+            abi::SYSTEM_WORKLOAD_KILL,
+        ])
+    } else {
+        SyscallSet::of(&[
+            abi::SYSTEM_PROCESS_EXIT,
+            abi::SYSTEM_PROCESS_WAIT,
+            abi::SYSTEM_HANDLE_CLOSE,
+            abi::SYSTEM_WORKLOAD_CREATE,
+            abi::SYSTEM_WORKLOAD_SPAWN,
+        ])
+    };
     let pid = match proc::create("workload-member-spawn", calls) {
         Ok(pid) => pid,
         Err(error) => {
@@ -439,17 +483,21 @@ fn verify_workload_spawn(base: u64) {
         },
     }
     .encode();
-    let elf = member_elf(base);
+    let elf = member_elf(base, if terminate { 20 } else { 0 });
     let spawn = kernel_core::spawn_abi::SpawnDesc {
         image_ptr: base + MEMBER_ELF_OFF,
         image_len: elf.len() as u64,
-        calls: SyscallSet::of(&[abi::SYSTEM_PROCESS_EXIT]),
+        calls: if terminate {
+            SyscallSet::of(&[abi::SYSTEM_PROCESS_EXIT, abi::SYSTEM_TIME_WAIT])
+        } else {
+            SyscallSet::of(&[abi::SYSTEM_PROCESS_EXIT])
+        },
         arg: 0,
         cpu_limit_permille: kernel_core::spawn_abi::CPU_UNLIMITED,
         ..Default::default()
     }
     .encode();
-    let code = member_spawn_code(base);
+    let code = member_spawn_code(base, terminate);
     check(
         proc::map_new(pid, base + MEMBER_CODE_OFF, MapFlags::USER | MapFlags::EXECUTE).is_ok()
             && proc::map_new(pid, base + MEMBER_CREATE_OFF, MapFlags::USER | MapFlags::WRITE)
@@ -505,8 +553,11 @@ fn verify_workload_spawn(base: u64) {
             crate::workload::usage(key) == Some(ResourceUsage::default()),
             "member process releases workload resources",
         );
+        let stopping = crate::workload::snapshot(key)
+            .is_ok_and(|snapshot| snapshot.state == WorkloadState::Stopping)
+            || crate::workload::transition(key, WorkloadState::Stopping).is_ok();
         check(
-            crate::workload::transition(key, WorkloadState::Stopping).is_ok()
+            stopping
                 && crate::workload::transition(key, WorkloadState::Stopped).is_ok()
                 && crate::workload::destroy(key).is_ok(),
             "member workload cleanup",
@@ -822,7 +873,8 @@ pub fn run() {
     );
     verify_hierarchical_cpu(domain);
     verify_user_workload_abi(base);
-    verify_workload_spawn(base);
+    verify_workload_spawn(base, false);
+    verify_workload_spawn(base, true);
     check(
         crate::mm::frame::free_frames() == frames_before,
         "frame baseline",

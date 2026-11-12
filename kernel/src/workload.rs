@@ -4,6 +4,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use kernel_core::objtable::ObjId;
 use kernel_core::security_domain::DomainKey;
 use kernel_core::workload::{
     MembershipError, ResourceLimits, ResourceUsage, WorkloadError, WorkloadKey, WorkloadMembers,
@@ -23,6 +24,7 @@ static MEMBERS: IrqSpinLock<WorkloadMembers<MAX_WORKLOAD_MEMBERS>> =
 static CPU_GROUPS: IrqSpinLock<[Option<(WorkloadKey, CpuGroupId)>; MAX_WORKLOADS]> =
     IrqSpinLock::new([None; MAX_WORKLOADS]);
 static MEMORY_RELEASE_FAILURES: AtomicU32 = AtomicU32::new(0);
+pub const WORKLOAD_TERMINATED_CODE: i64 = -3;
 
 pub fn create(domain: DomainKey, limits: ResourceLimits) -> Result<WorkloadKey, WorkloadError> {
     WORKLOADS.lock().create(domain, limits)
@@ -91,6 +93,27 @@ pub fn stop_in_domain(domain: DomainKey, key: WorkloadKey) -> Result<(), Workloa
         WorkloadState::Stopping => transition(key, WorkloadState::Stopped),
         _ => Err(WorkloadError::InvalidState),
     }
+}
+
+/// Force every same-domain member Process to exit through the normal process
+/// cleanup path, after preventing new Workload resource admission.
+///
+/// 终止同域 Workload 的所有成员 Process；资源仍由正常退出清理归还，不伪造归零。
+pub fn terminate_in_domain(domain: DomainKey, key: WorkloadKey) -> Result<(), WorkloadError> {
+    let snapshot = snapshot_in_domain(domain, key)?;
+    match snapshot.state {
+        WorkloadState::Running => transition(key, WorkloadState::Stopping)?,
+        WorkloadState::Stopping => {}
+        _ => return Err(WorkloadError::InvalidState),
+    }
+    let members = MEMBERS.lock().count_for(key);
+    for index in 0..members {
+        let member = MEMBERS.lock().id_at_for(key, index);
+        if let Some(pid) = member.and_then(ObjId::from_raw) {
+            let _ = crate::proc::begin_exit(pid, WORKLOAD_TERMINATED_CODE);
+        }
+    }
+    Ok(())
 }
 
 /// Destroy a same-domain terminal Workload after all resources are gone.

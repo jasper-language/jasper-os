@@ -580,6 +580,18 @@ impl<const N: usize> WorkloadMembers<N> {
             .count()
     }
 
+    /// Return the n-th current member of one Workload in slot order.
+    ///
+    /// 按槽位顺序返回指定 Workload 的第 n 个当前成员，供有界终止遍历使用。
+    pub fn id_at_for(&self, workload: WorkloadKey, index: usize) -> Option<u64> {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|member| member.workload == workload)
+            .nth(index)
+            .map(|member| member.id)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -980,8 +992,12 @@ mod tests {
         members.attach(&table, second, 3).unwrap();
         assert_eq!(members.count_for(first), 2);
         assert_eq!(members.count_for(second), 1);
+        assert_eq!(members.id_at_for(first, 0), Some(1));
+        assert_eq!(members.id_at_for(first, 1), Some(2));
+        assert_eq!(members.id_at_for(first, 2), None);
         members.detach(first, 1).unwrap();
         assert_eq!(members.count_for(first), 1);
+        assert_eq!(members.id_at_for(first, 0), Some(2));
     }
 
     #[test]
