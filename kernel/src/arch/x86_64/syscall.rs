@@ -179,6 +179,10 @@ jsr_syscall_entry:
 /// 汇编入口调用的 Rust 分发桥：整理参数 → Core 分发 → 返回前做 RIP 规范性检查。
 #[no_mangle]
 extern "C" fn jsr_syscall_dispatch(frame: &mut RawFrame) -> u64 {
+    let return_slot = frame as *mut RawFrame as *mut u64;
+    // SAFETY: the assembly entry calls this function immediately after pushing
+    // the return address directly below the `RawFrame`.
+    let expected_return = unsafe { return_slot.sub(1).read() };
     let args = SyscallArgs {
         id: frame.rax,
         args: [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9],
@@ -217,6 +221,17 @@ extern "C" fn jsr_syscall_dispatch(frame: &mut RawFrame) -> u64 {
         frame.r11 = 0x202;
         frame.rcx = exec.entry;
         frame.user_rsp = exec.user_rsp;
+    }
+    // SAFETY: as above; the return slot belongs to this call until `ret`.
+    let actual_return = unsafe { return_slot.sub(1).read() };
+    if actual_return != expected_return {
+        crate::kprintln!(
+            "[JSR-SYSCALL-STACK] return_slot={:#x} expected={:#x} actual={:#x}",
+            return_slot as u64 - 8,
+            expected_return,
+            actual_return
+        );
+        unsafe { return_slot.sub(1).write(expected_return) };
     }
     let rip = frame.rcx;
     if ((rip << 16) as i64 >> 16) as u64 != rip {
