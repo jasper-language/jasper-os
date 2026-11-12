@@ -4354,7 +4354,7 @@ fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         let size = proc::linux_ashmem_state(pid, entry.handle)
             .map(|(size, _, _)| size)
             .unwrap_or(0);
-        write_synthetic_stat(args[1], entry.handle, size, 0o020666)?;
+        write_synthetic_stat(args[1], entry.handle, 1, size, 0o020666)?;
         return Ok(0);
     }
     let node = crate::linux_vfs::FileId::from_handle(entry.handle)
@@ -4391,7 +4391,7 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 let size = proc::linux_ashmem_state(pid, entry.handle)
                     .map(|(size, _, _)| size)
                     .unwrap_or(0);
-                write_synthetic_stat(args[2], entry.handle, size, 0o020666)?;
+                write_synthetic_stat(args[2], entry.handle, 1, size, 0o020666)?;
                 return Ok(0);
             }
             let node = crate::linux_vfs::FileId::from_handle(entry.handle)
@@ -4522,7 +4522,7 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 let size = proc::linux_ashmem_state(pid, entry.handle)
                     .map(|(size, _, _)| size)
                     .unwrap_or(0);
-                write_synthetic_statx(args[4], entry.handle, size, 0o020666)?;
+                write_synthetic_statx(args[4], entry.handle, 1, size, 0o020666)?;
                 return Ok(0);
             }
             if let Some(file) = crate::linux_vfs::FileId::from_handle(entry.handle) {
@@ -5081,8 +5081,8 @@ fn linux_rt_sigprocmask(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
 /// 写入 144 字节、版本稳定的 x86_64 stat；时间和设备字段只表达当前虚拟快照，
 /// 不伪造宿主设备身份。
 fn write_linux_stat(address: u64, node: crate::linux_vfs::Node) -> Result<(), CompatErrno> {
-    let (size, _, mode) = node.stat_metadata();
-    write_synthetic_stat(address, node.inode(), size, mode)?;
+    let (size, links, mode) = node.stat_metadata();
+    write_synthetic_stat(address, node.inode(), links, size, mode)?;
     Ok(())
 }
 
@@ -5090,6 +5090,7 @@ fn write_linux_stat(address: u64, node: crate::linux_vfs::Node) -> Result<(), Co
 fn write_synthetic_stat(
     address: u64,
     inode: u64,
+    links: u64,
     size: u64,
     mode: u32,
 ) -> Result<(), CompatErrno> {
@@ -5097,7 +5098,7 @@ fn write_synthetic_stat(
     let mut stat = [0u8; STAT_BYTES];
     stat[0..8].copy_from_slice(&1u64.to_le_bytes()); // st_dev
     stat[8..16].copy_from_slice(&inode.to_le_bytes()); // st_ino
-    stat[16..24].copy_from_slice(&1u64.to_le_bytes());
+    stat[16..24].copy_from_slice(&links.to_le_bytes());
     stat[24..28].copy_from_slice(&mode.to_le_bytes());
     stat[48..56].copy_from_slice(&size.to_le_bytes());
     stat[56..64].copy_from_slice(&4096i64.to_le_bytes());
@@ -5109,13 +5110,14 @@ fn write_synthetic_stat(
 fn write_synthetic_statx(
     address: u64,
     inode: u64,
+    links: u32,
     size: u64,
     mode: u32,
 ) -> Result<(), CompatErrno> {
     let mut output = [0u8; 256];
     output[0..4].copy_from_slice(&0x71fu32.to_le_bytes());
     output[4..8].copy_from_slice(&4096u32.to_le_bytes());
-    output[16..20].copy_from_slice(&1u32.to_le_bytes());
+    output[16..20].copy_from_slice(&links.to_le_bytes());
     output[28..30].copy_from_slice(&(mode as u16).to_le_bytes());
     output[32..40].copy_from_slice(&inode.to_le_bytes());
     output[40..48].copy_from_slice(&size.to_le_bytes());
