@@ -1587,20 +1587,34 @@ int main(void) {
             lseek(binder_fd, 0, SEEK_SET) != 0) {
             _exit(173);
         }
-        struct binder_fd_object second_object = {
-            .hdr.type = BINDER_TYPE_FD,
-            .fd = binder_fd,
-            .cookie = 0x4444,
+        struct {
+            struct binder_fd_object fd;
+            struct flat_binder_object binder;
+        } second_objects = {
+            .fd = {
+                .hdr.type = BINDER_TYPE_FD,
+                .fd = binder_fd,
+                .cookie = 0x4444,
+            },
+            .binder = {
+                .hdr.type = BINDER_TYPE_BINDER,
+                .flags = 0x7f,
+                .binder = (binder_uintptr_t)(uintptr_t)&second_objects.binder,
+                .cookie = 0x5555,
+            },
         };
-        binder_size_t second_offset = 0;
+        binder_size_t second_offsets[2] = {
+            0,
+            sizeof(struct binder_fd_object),
+        };
         struct binder_transaction_data second_request = {
             .target.handle = returned_object.handle,
             .code = 0x5678,
             .flags = 0,
-            .data_size = sizeof(second_object),
-            .offsets_size = sizeof(second_offset),
-            .data.ptr.buffer = (binder_uintptr_t)&second_object,
-            .data.ptr.offsets = (binder_uintptr_t)&second_offset,
+            .data_size = sizeof(second_objects),
+            .offsets_size = sizeof(second_offsets),
+            .data.ptr.buffer = (binder_uintptr_t)&second_objects,
+            .data.ptr.offsets = (binder_uintptr_t)&second_offsets,
         };
         memcpy(write_buffer, &(uint32_t){BC_TRANSACTION}, 4);
         memcpy(write_buffer + 4, &second_request, sizeof(second_request));
@@ -1696,7 +1710,7 @@ int main(void) {
         .data.ptr.buffer = (binder_uintptr_t)&response_object,
         .data.ptr.offsets = (binder_uintptr_t)&response_offset,
     };
-    unsigned char server_write[12 + 4 + sizeof(response)];
+    unsigned char server_write[128];
     size_t server_offset = 0;
     memcpy(server_write + server_offset, &(uint32_t){BC_FREE_BUFFER}, 4);
     server_offset += 4;
@@ -1729,27 +1743,33 @@ int main(void) {
     }
     struct binder_transaction_data second_received;
     memcpy(&second_received, server_read + 4, sizeof(second_received));
-    struct binder_fd_object received_fd_object;
-    binder_size_t received_fd_offset = UINT64_MAX;
-    memcpy(&received_fd_object, (void *)second_received.data.ptr.buffer,
-           sizeof(received_fd_object));
-    memcpy(&received_fd_offset,
-           (void *)second_received.data.ptr.offsets,
-           sizeof(received_fd_offset));
+    struct {
+        struct binder_fd_object fd;
+        struct flat_binder_object binder;
+    } received_objects;
+    binder_size_t received_offsets[2] = {UINT64_MAX, UINT64_MAX};
+    memcpy(&received_objects, (void *)second_received.data.ptr.buffer,
+           sizeof(received_objects));
+    memcpy(received_offsets, (void *)second_received.data.ptr.offsets,
+           sizeof(received_offsets));
     if (second_received.code != 0x5678 ||
         second_received.sender_pid != binder_child ||
-        second_received.data_size != sizeof(received_fd_object) ||
-        second_received.offsets_size != sizeof(received_fd_offset) ||
-        received_fd_offset != 0 ||
-        received_fd_object.hdr.type != BINDER_TYPE_FD ||
-        received_fd_object.fd < 0 ||
-        received_fd_object.cookie != 0x4444) {
+        second_received.data_size != sizeof(received_objects) ||
+        second_received.offsets_size != sizeof(received_offsets) ||
+        received_offsets[0] != 0 ||
+        received_offsets[1] != sizeof(struct binder_fd_object) ||
+        received_objects.fd.hdr.type != BINDER_TYPE_FD ||
+        received_objects.fd.fd < 0 ||
+        received_objects.fd.cookie != 0x4444 ||
+        received_objects.binder.hdr.type != BINDER_TYPE_HANDLE ||
+        received_objects.binder.handle == 0 ||
+        received_objects.binder.cookie != 0) {
         return 178;
     }
     char received_fd_data[4] = {0};
-    if (read(received_fd_object.fd, received_fd_data, 4) != 4 ||
+    if (read(received_objects.fd.fd, received_fd_data, 4) != 4 ||
         memcmp(received_fd_data, "FDOK", 4) != 0 ||
-        close(received_fd_object.fd) != 0) {
+        close(received_objects.fd.fd) != 0) {
         return 179;
     }
     char done_data[4] = "DONE";
@@ -1767,6 +1787,23 @@ int main(void) {
     memcpy(server_write + server_offset, &second_pointer,
            sizeof(second_pointer));
     server_offset += sizeof(second_pointer);
+    uint32_t death_handle = received_objects.binder.handle;
+    memcpy(server_write + server_offset, &(uint32_t){BC_ACQUIRE}, 4);
+    server_offset += 4;
+    memcpy(server_write + server_offset, &death_handle, sizeof(death_handle));
+    server_offset += sizeof(death_handle);
+    memcpy(server_write + server_offset, &(uint32_t){BC_RELEASE}, 4);
+    server_offset += 4;
+    memcpy(server_write + server_offset, &death_handle, sizeof(death_handle));
+    server_offset += sizeof(death_handle);
+    memcpy(server_write + server_offset,
+           &(uint32_t){BC_REQUEST_DEATH_NOTIFICATION}, 4);
+    server_offset += 4;
+    uint64_t death_cookie = 0x9999;
+    memcpy(server_write + server_offset, &death_handle, sizeof(death_handle));
+    server_offset += sizeof(death_handle);
+    memcpy(server_write + server_offset, &death_cookie, sizeof(death_cookie));
+    server_offset += sizeof(death_cookie);
     memcpy(server_write + server_offset, &(uint32_t){BC_REPLY}, 4);
     server_offset += 4;
     memcpy(server_write + server_offset, &done, sizeof(done));
@@ -1784,9 +1821,32 @@ int main(void) {
     }
     int binder_status = 0;
     if (waitpid(binder_child, &binder_status, 0) != binder_child ||
-        !WIFEXITED(binder_status) || WEXITSTATUS(binder_status) != 0 ||
-        close(binder_ready[1]) != 0 || close(server) != 0) {
+        !WIFEXITED(binder_status) || WEXITSTATUS(binder_status) != 0) {
         return 176;
+    }
+    memset(&server_exchange, 0, sizeof(server_exchange));
+    server_exchange.read_size = 12;
+    server_exchange.read_buffer = (binder_uintptr_t)server_read;
+    if (ioctl(server, BINDER_WRITE_READ, &server_exchange) != 0 ||
+        server_exchange.read_consumed != 12 ||
+        *(uint32_t *)server_read != BR_DEAD_BINDER) {
+        return 180;
+    }
+    uint64_t received_death_cookie = 0;
+    memcpy(&received_death_cookie, server_read + 4, sizeof(received_death_cookie));
+    if (received_death_cookie != death_cookie) {
+        return 181;
+    }
+    unsigned char death_done[12];
+    memcpy(death_done, &(uint32_t){BC_DEAD_BINDER_DONE}, 4);
+    memcpy(death_done + 4, &received_death_cookie, sizeof(received_death_cookie));
+    memset(&server_exchange, 0, sizeof(server_exchange));
+    server_exchange.write_size = sizeof(death_done);
+    server_exchange.write_buffer = (binder_uintptr_t)death_done;
+    if (ioctl(server, BINDER_WRITE_READ, &server_exchange) != 0 ||
+        server_exchange.write_consumed != sizeof(death_done) ||
+        close(binder_ready[1]) != 0 || close(server) != 0) {
+        return 182;
     }
     int poll_pipe[2];
     if (pipe2(poll_pipe, 0) != 0) {

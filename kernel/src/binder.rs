@@ -33,6 +33,9 @@ const BC_INCREFS: u32 = 0x4004_6304;
 const BC_ACQUIRE: u32 = 0x4004_6305;
 const BC_RELEASE: u32 = 0x4004_6306;
 const BC_DECREFS: u32 = 0x4004_6307;
+const BC_REQUEST_DEATH_NOTIFICATION: u32 = 0x400c_630e;
+const BC_CLEAR_DEATH_NOTIFICATION: u32 = 0x400c_630f;
+const BC_DEAD_BINDER_DONE: u32 = 0x4008_6310;
 const BC_ENTER_LOOPER: u32 = 0x630c;
 const BC_EXIT_LOOPER: u32 = 0x630d;
 const BC_REGISTER_LOOPER: u32 = 0x630b;
@@ -40,10 +43,16 @@ const BC_REGISTER_LOOPER: u32 = 0x630b;
 const BR_TRANSACTION: u32 = 0x8040_7202;
 const BR_REPLY: u32 = 0x8040_7203;
 const BR_TRANSACTION_COMPLETE: u32 = 0x7206;
+const BR_DEAD_BINDER: u32 = 0x8008_720f;
+const BR_CLEAR_DEATH_NOTIFICATION_DONE: u32 = 0x8008_7210;
 const TF_ONE_WAY: u32 = 0x01;
 
 enum QueuedCommand {
     Complete,
+    DeathNotification {
+        command: u32,
+        cookie: u64,
+    },
     Transaction {
         command: u32,
         sender: ObjId,
@@ -71,6 +80,8 @@ struct Node {
     owner: ObjId,
     pointer: u64,
     cookie: u64,
+    strong_refs: u32,
+    weak_refs: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -78,6 +89,13 @@ struct LocalHandle {
     recipient: ObjId,
     node: u64,
     handle: u32,
+}
+
+#[derive(Clone, Copy)]
+struct DeathRequest {
+    recipient: ObjId,
+    node: u64,
+    cookie: u64,
 }
 
 struct State {
@@ -89,6 +107,7 @@ struct State {
     handles: Vec<LocalHandle>,
     next_node: u64,
     next_handle: u32,
+    death_requests: Vec<DeathRequest>,
 }
 
 impl State {
@@ -102,6 +121,7 @@ impl State {
             handles: Vec::new(),
             next_node: 1,
             next_handle: 1,
+            death_requests: Vec::new(),
         }
     }
 }
@@ -134,8 +154,38 @@ pub(crate) fn release_process(pid: ObjId) {
     if state.context_manager == Some(pid) {
         state.context_manager = None;
     }
+    let mut dead_nodes = [0u64; MAX_NODES];
+    let mut dead_count = 0usize;
+    for node in state.nodes.iter().filter(|node| node.owner == pid) {
+        dead_nodes[dead_count] = node.id;
+        dead_count += 1;
+    }
+    let notifications = state
+        .death_requests
+        .iter()
+        .filter(|request| dead_nodes[..dead_count].contains(&request.node))
+        .count();
+    if state.queue.try_reserve(notifications).is_ok() {
+        for node in dead_nodes[..dead_count].iter().copied() {
+            for index in 0..state.death_requests.len() {
+                let request = state.death_requests[index];
+                if request.node == node {
+                    state.queue.push_back((
+                        request.recipient,
+                        QueuedCommand::DeathNotification {
+                            command: BR_DEAD_BINDER,
+                            cookie: request.cookie,
+                        },
+                    ));
+                }
+            }
+        }
+    }
     state.nodes.retain(|node| node.owner != pid);
     state.handles.retain(|binding| binding.recipient != pid);
+    state
+        .death_requests
+        .retain(|request| request.recipient != pid);
     state.active.retain(|active| active.target != pid && active.sender != pid);
     state.buffers.retain(|buffer| buffer.process != pid);
     state.queue.retain(|(target, command)| {
@@ -243,7 +293,41 @@ fn process_write(pid: ObjId, address: u64, size: usize) -> Result<usize, CompatE
                 if bytes.len() - offset < 8 {
                     return Err(CompatErrno::Invalid);
                 }
+                let handle =
+                    u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
+                process_reference(pid, command, handle)?;
                 offset += 8;
+            }
+            BC_REQUEST_DEATH_NOTIFICATION | BC_CLEAR_DEATH_NOTIFICATION => {
+                if bytes.len() - offset < 16 {
+                    return Err(CompatErrno::Invalid);
+                }
+                let handle =
+                    u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
+                let cookie = u64::from_le_bytes(
+                    bytes[offset + 8..offset + 16].try_into().unwrap(),
+                );
+                if command == BC_REQUEST_DEATH_NOTIFICATION {
+                    request_death(pid, handle, cookie)?;
+                } else {
+                    clear_death(pid, handle, cookie)?;
+                }
+                offset += 16;
+            }
+            BC_DEAD_BINDER_DONE => {
+                if bytes.len() - offset < 12 {
+                    return Err(CompatErrno::Invalid);
+                }
+                let cookie = u64::from_le_bytes(
+                    bytes[offset + 4..offset + 12].try_into().unwrap(),
+                );
+                BINDER
+                    .lock()
+                    .death_requests
+                    .retain(|request| {
+                        request.recipient != pid || request.cookie != cookie
+                    });
+                offset += 12;
             }
             BC_ENTER_LOOPER | BC_EXIT_LOOPER | BC_REGISTER_LOOPER => {
                 offset += 4;
@@ -252,6 +336,96 @@ fn process_write(pid: ObjId, address: u64, size: usize) -> Result<usize, CompatE
         }
     }
     Ok(offset)
+}
+
+fn process_reference(
+    recipient: ObjId,
+    command: u32,
+    handle: u32,
+) -> Result<(), CompatErrno> {
+    let mut state = BINDER.lock();
+    let node_id = state
+        .handles
+        .iter()
+        .find(|binding| binding.recipient == recipient && binding.handle == handle)
+        .map(|binding| binding.node)
+        .ok_or(CompatErrno::NoEntry)?;
+    let node = state
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == node_id)
+        .ok_or(CompatErrno::NoEntry)?;
+    match command {
+        BC_ACQUIRE => {
+            node.strong_refs = node.strong_refs.checked_add(1).ok_or(CompatErrno::NoSpace)?
+        }
+        BC_RELEASE => {
+            node.strong_refs = node.strong_refs.checked_sub(1).ok_or(CompatErrno::Invalid)?
+        }
+        BC_INCREFS => {
+            node.weak_refs = node.weak_refs.checked_add(1).ok_or(CompatErrno::NoSpace)?
+        }
+        BC_DECREFS => {
+            node.weak_refs = node.weak_refs.checked_sub(1).ok_or(CompatErrno::Invalid)?
+        }
+        _ => return Err(CompatErrno::Invalid),
+    }
+    Ok(())
+}
+
+fn request_death(recipient: ObjId, handle: u32, cookie: u64) -> Result<(), CompatErrno> {
+    let mut state = BINDER.lock();
+    let node = state
+        .handles
+        .iter()
+        .find(|binding| binding.recipient == recipient && binding.handle == handle)
+        .map(|binding| binding.node)
+        .ok_or(CompatErrno::NoEntry)?;
+    state
+        .death_requests
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    if let Some(request) = state
+        .death_requests
+        .iter_mut()
+        .find(|request| request.recipient == recipient && request.node == node)
+    {
+        request.cookie = cookie;
+    } else {
+        state.death_requests.push(DeathRequest {
+            recipient,
+            node,
+            cookie,
+        });
+    }
+    Ok(())
+}
+
+fn clear_death(recipient: ObjId, handle: u32, cookie: u64) -> Result<(), CompatErrno> {
+    let mut state = BINDER.lock();
+    let node = state
+        .handles
+        .iter()
+        .find(|binding| binding.recipient == recipient && binding.handle == handle)
+        .map(|binding| binding.node)
+        .ok_or(CompatErrno::NoEntry)?;
+    let index = state
+        .death_requests
+        .iter()
+        .position(|request| {
+            request.recipient == recipient && request.node == node && request.cookie == cookie
+        })
+        .ok_or(CompatErrno::NoEntry)?;
+    state.queue.try_reserve(1).map_err(|_| CompatErrno::NoMemory)?;
+    state.death_requests.remove(index);
+    state.queue.push_back((
+        recipient,
+        QueuedCommand::DeathNotification {
+            command: BR_CLEAR_DEATH_NOTIFICATION_DONE,
+            cookie,
+        },
+    ));
+    Ok(())
 }
 
 fn resolve_transaction_target(pid: ObjId, handle: u32) -> Result<ObjId, CompatErrno> {
@@ -385,6 +559,8 @@ fn translate_objects(
                         owner: sender,
                         pointer: value,
                         cookie,
+                        strong_refs: u32::from(!weak),
+                        weak_refs: u32::from(weak),
                     });
                     id
                 }
@@ -578,6 +754,16 @@ fn deliver(
             )
             .map_err(|_| CompatErrno::Fault)?;
             Ok(4)
+        }
+        QueuedCommand::DeathNotification { command, cookie } => {
+            if capacity < 12 {
+                return Err(CompatErrno::Range);
+            }
+            let mut packet = [0u8; 12];
+            packet[..4].copy_from_slice(&command.to_le_bytes());
+            packet[4..12].copy_from_slice(&cookie.to_le_bytes());
+            copy_to_user(address, &packet, packet.len()).map_err(|_| CompatErrno::Fault)?;
+            Ok(packet.len())
         }
         QueuedCommand::Transaction {
             command,
