@@ -5157,6 +5157,9 @@ fn linux_fstatfs(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             file.bytes().len() as u64
         }
         compat_core::fd::CompatKind::Directory => 4096,
+        compat_core::fd::CompatKind::Device => proc::linux_ashmem_state(pid, entry.handle)
+            .map(|(size, _, _)| size)
+            .unwrap_or(0),
         _ => return Err(CompatErrno::BadFd),
     };
     write_linux_statfs(args[1], size)
