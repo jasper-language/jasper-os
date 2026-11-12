@@ -295,12 +295,9 @@ impl<const N: usize> WorkloadTable<N> {
 
     pub fn release(&mut self, key: WorkloadKey, delta: ResourceUsage) -> Result<(), WorkloadError> {
         let (path, len) = self.path(key)?;
-        if !matches!(
+        if matches!(
             self.record(key)?.state,
-            WorkloadState::Running
-                | WorkloadState::Stopping
-                | WorkloadState::Stopped
-                | WorkloadState::Failed
+            WorkloadState::Created | WorkloadState::Ready
         ) {
             return Err(WorkloadError::InvalidState);
         }

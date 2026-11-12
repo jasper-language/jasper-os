@@ -76,6 +76,28 @@ pub fn release_thread(key: WorkloadKey) {
     );
 }
 
+pub fn reserve_memory(key: WorkloadKey, bytes: u64) -> Result<(), WorkloadError> {
+    WORKLOADS.lock().charge(
+        key,
+        ResourceUsage {
+            memory_bytes: bytes,
+            threads: 0,
+            ring_entries: 0,
+        },
+    )
+}
+
+pub fn release_memory(key: WorkloadKey, bytes: u64) {
+    let _ = WORKLOADS.lock().release(
+        key,
+        ResourceUsage {
+            memory_bytes: bytes,
+            threads: 0,
+            ring_entries: 0,
+        },
+    );
+}
+
 pub fn usage(key: WorkloadKey) -> Option<ResourceUsage> {
     WORKLOADS.lock().snapshot(key).ok().map(|state| state.usage)
 }

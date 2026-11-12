@@ -1007,15 +1007,37 @@ fn with_proc<R>(
 
 /// Create a private mapping of a zeroed Memory page (ELF/stack loader path).
 pub fn map_new(id: ObjId, va: u64, flags: MapFlags) -> Result<PhysFrame, ProcError> {
-    let charge = kobj::with(|t| {
+    const PAGE_BYTES: u64 = kernel_core::frame::FRAME_SIZE as u64;
+    let workload = kobj::with(|t| Ok(receiver(t, id)?.workload))?;
+    if let Some(workload) = workload {
+        crate::workload::reserve_memory(workload, PAGE_BYTES)
+            .map_err(|_| ProcError::MemoryQuota)?;
+    }
+    let charge = match kobj::with(|t| {
         let p = receiver(t, id)?;
         p.memory_account
             .reserve(1, 0, p.memory_owned_limit, p.memory_pin_limit)
             .ok_or(ProcError::MemoryQuota)
-    })?;
-    let page = crate::mm::memory_object::Page::zeroed(charge).ok_or(ProcError::OutOfFrames)?;
+    }) {
+        Ok(charge) => charge,
+        Err(error) => {
+            if let Some(workload) = workload {
+                crate::workload::release_memory(workload, PAGE_BYTES);
+            }
+            return Err(error);
+        }
+    };
+    let page = match crate::mm::memory_object::Page::zeroed(charge) {
+        Some(page) => page,
+        None => {
+            if let Some(workload) = workload {
+                crate::workload::release_memory(workload, PAGE_BYTES);
+            }
+            return Err(ProcError::OutOfFrames);
+        }
+    };
     let f = page.frame();
-    with_proc(id, |p| {
+    let result = with_proc(id, |p| {
         if p.state != ProcState::Running {
             return Err(ProcError::Exited);
         }
@@ -1068,7 +1090,13 @@ pub fn map_new(id: ObjId, va: u64, flags: MapFlags) -> Result<PhysFrame, ProcErr
         }
         p.frames.push(Arc::clone(&page));
         Ok(f)
-    })
+    });
+    if result.is_err() {
+        if let Some(workload) = workload {
+            crate::workload::release_memory(workload, PAGE_BYTES);
+        }
+    }
+    result
 }
 
 /// 取消进程中一页的映射并放弃该页的数据帧（仍被在飞请求固定时，帧延后到最后一次解除固定才归还）。
@@ -1111,12 +1139,15 @@ pub fn unmap_page(id: ObjId, va: u64) -> Result<(), ProcError> {
         .ok();
         return Err(ProcError::Map(MapError::Busy));
     }
-    with_proc(id, |p| {
+    let workload = with_proc(id, |p| {
         crate::mm::pin::mapping_released(frame);
         p.frames.retain(|x| x.frame() != frame);
         p.space.end_shootdown();
-        Ok(())
+        Ok(p.workload)
     })?;
+    if let Some(workload) = workload {
+        crate::workload::release_memory(workload, kernel_core::frame::FRAME_SIZE as u64);
+    }
     Ok(())
 }
 
@@ -2823,7 +2854,12 @@ pub fn set_cpu_limit(pid: ObjId, limit_permille: u32) -> Result<(), CpuLimitErro
 /// 只在两侧都成功后提交。
 pub fn bind_workload(pid: ObjId, workload: kernel_core::workload::WorkloadKey) -> bool {
     with_proc(pid, |process| {
-        if process.workload.is_some() || process.threads_live != 0 {
+        if process.workload.is_some()
+            || process.threads_live != 0
+            || !process.frames.is_empty()
+            || !process.shared_maps.is_empty()
+            || !process.device_maps.is_empty()
+        {
             return Err(ProcError::Exited);
         }
         crate::workload::snapshot(workload).map_err(|_| ProcError::NoSuchProcess)?;
@@ -3900,8 +3936,13 @@ fn destroy_process(p: Box<Process>) {
     if let Some(g) = cpu_group {
         let _ = sched::release_cpu_group(g); // 持有者引用；线程早已全部退出，组随之释放
     }
-    if let (Some(workload), Some(member)) = (workload, workload_member) {
-        let _ = crate::workload::unbind_member(workload, member);
+    if let Some(workload) = workload {
+        let bytes =
+            (frames.len() + quarantined.len()) as u64 * kernel_core::frame::FRAME_SIZE as u64;
+        crate::workload::release_memory(workload, bytes);
+        if let Some(member) = workload_member {
+            let _ = crate::workload::unbind_member(workload, member);
+        }
     }
     // 防御：正常路径已在 exiting / exited 时撤销；这里再撤销一次，且不触碰页帧分配器。
     // Device mappings are revoked while the process is still addressable;
