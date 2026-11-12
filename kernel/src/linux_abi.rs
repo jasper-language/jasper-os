@@ -1515,6 +1515,8 @@ fn execute(
         // The compatibility identity has no supplementary groups.
         // 兼容身份没有附加组，因此 size 查询和写入都返回 0。
         LinuxSyscall::GetGroups => 0,
+        LinuxSyscall::GetResUid => compat_result(linux_getres(call.args, false)),
+        LinuxSyscall::GetResGid => compat_result(linux_getres(call.args, true)),
         LinuxSyscall::Lseek => compat_result(linux_lseek(pid, call.args)),
         LinuxSyscall::GetCpu => compat_result(linux_getcpu(call.args)),
         LinuxSyscall::Sysinfo => compat_result(linux_sysinfo(call.args[0])),
@@ -1558,6 +1560,16 @@ fn execute(
 
 /// Writes the Linux x86_64 `struct utsname` compatibility identity.
 /// 写入 Linux x86_64 `struct utsname` 兼容身份。
+fn linux_getres(args: [u64; 6], _gid: bool) -> Result<u64, CompatErrno> {
+    for pointer in [args[0], args[1], args[2]] {
+        if pointer != 0 {
+            copy_to_user(pointer, &0u32.to_le_bytes(), 4)
+                .map_err(|_| CompatErrno::Fault)?;
+        }
+    }
+    Ok(0)
+}
+
 fn linux_uname(args: [u64; 6]) -> Result<u64, CompatErrno> {
     let utsname = compat_core::linux_utsname();
     copy_to_user(args[0], &utsname, utsname.len()).map_err(|_| CompatErrno::Fault)?;
