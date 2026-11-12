@@ -2,6 +2,7 @@
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::sync::SpinLock;
 
@@ -38,29 +39,57 @@ pub struct PipeEndpoint {
 pub struct UnixSocketEndpoint {
     rx: PipeEndpoint,
     tx: PipeEndpoint,
+    shutdown: Arc<SocketShutdownState>,
+    first: bool,
+}
+
+struct SocketShutdownState {
+    first: AtomicU32,
+    second: AtomicU32,
 }
 
 impl UnixSocketEndpoint {
     pub fn pair() -> (Self, Self) {
         let (a_to_b_rx, a_to_b_tx) = PipeEndpoint::pair();
         let (b_to_a_rx, b_to_a_tx) = PipeEndpoint::pair();
+        let shutdown = Arc::new(SocketShutdownState {
+            first: AtomicU32::new(0),
+            second: AtomicU32::new(0),
+        });
         (
             Self {
                 rx: b_to_a_rx,
                 tx: a_to_b_tx,
+                shutdown: Arc::clone(&shutdown),
+                first: true,
             },
             Self {
                 rx: a_to_b_rx,
                 tx: b_to_a_tx,
+                shutdown,
+                first: false,
             },
         )
     }
 
     pub fn read(&self, output: &mut [u8]) -> PipeRead {
-        self.rx.read(output)
+        const SHUT_RD: u32 = 1;
+        const SHUT_WR: u32 = 2;
+        if self.flags() & SHUT_RD != 0 {
+            return PipeRead::Eof;
+        }
+        match self.rx.read(output) {
+            PipeRead::WouldBlock if self.peer_flags() & SHUT_WR != 0 => PipeRead::Eof,
+            result => result,
+        }
     }
 
     pub fn write(&self, input: &[u8]) -> PipeWrite {
+        const SHUT_RD: u32 = 1;
+        const SHUT_WR: u32 = 2;
+        if self.flags() & SHUT_WR != 0 || self.peer_flags() & SHUT_RD != 0 {
+            return PipeWrite::Broken;
+        }
         self.tx.write(input)
     }
 
@@ -69,19 +98,51 @@ impl UnixSocketEndpoint {
     }
 
     pub fn is_readable(&self) -> bool {
-        self.rx.is_readable()
+        self.flags() & 1 != 0 || self.peer_flags() & 2 != 0 || self.rx.is_readable()
     }
 
     pub fn is_writable(&self) -> bool {
-        self.tx.is_writable()
+        self.flags() & 2 == 0 && self.peer_flags() & 1 == 0 && self.tx.is_writable()
     }
 
     pub fn peer_read_gone(&self) -> bool {
-        self.tx.readers_gone()
+        self.tx.readers_gone() || self.peer_flags() & 1 != 0
     }
 
     pub fn peer_write_gone(&self) -> bool {
-        self.rx.writers_gone()
+        self.rx.writers_gone() || self.peer_flags() & 2 != 0
+    }
+
+    pub fn shutdown(&self, how: u32) -> bool {
+        let bits = match how {
+            0 => 1,
+            1 => 2,
+            2 => 3,
+            _ => return false,
+        };
+        let state = if self.first {
+            &self.shutdown.first
+        } else {
+            &self.shutdown.second
+        };
+        state.fetch_or(bits, Ordering::AcqRel);
+        true
+    }
+
+    fn flags(&self) -> u32 {
+        if self.first {
+            self.shutdown.first.load(Ordering::Acquire)
+        } else {
+            self.shutdown.second.load(Ordering::Acquire)
+        }
+    }
+
+    fn peer_flags(&self) -> u32 {
+        if self.first {
+            self.shutdown.second.load(Ordering::Acquire)
+        } else {
+            self.shutdown.first.load(Ordering::Acquire)
+        }
     }
 }
 
@@ -245,5 +306,16 @@ mod tests {
         assert!(a.peer_read_gone());
         assert!(a.peer_write_gone());
         assert_eq!(a.write(b"x"), PipeWrite::Broken);
+    }
+
+    #[test]
+    fn unix_socket_shutdown_is_directional() {
+        let (a, b) = UnixSocketEndpoint::pair();
+        assert!(a.shutdown(0));
+        assert_eq!(a.write(b"ok"), PipeWrite::Data(2));
+        assert_eq!(b.read(&mut [0; 2]), PipeRead::Data(2));
+        assert_eq!(b.write(b"x"), PipeWrite::Broken);
+        assert_eq!(a.read(&mut [0; 1]), PipeRead::Eof);
+        assert!(!a.shutdown(3));
     }
 }

@@ -19,6 +19,7 @@
 #include <sys/sysinfo.h>
 #include <sys/time.h>
 #include <sys/uio.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -207,6 +208,27 @@ int main(void) {
         read(socket_fds[0], blocking_bytes, 3) != 3 ||
         memcmp(blocking_bytes, "b2a", 3) != 0) {
         return 102;
+    }
+    struct sockaddr_un socket_name;
+    socklen_t socket_name_len = sizeof(socket_name);
+    if (getsockname(socket_fds[0], (struct sockaddr *)&socket_name,
+                    &socket_name_len) != 0 ||
+        socket_name_len < sizeof(sa_family_t) ||
+        socket_name.sun_family != AF_UNIX ||
+        getpeername(socket_fds[0], (struct sockaddr *)&socket_name,
+                    &socket_name_len) != 0 ||
+        socket_name.sun_family != AF_UNIX ||
+        send(socket_fds[0], "send", 4, MSG_NOSIGNAL) != 4 ||
+        recv(socket_fds[1], blocking_bytes, 4, 0) != 4 ||
+        memcmp(blocking_bytes, "send", 4) != 0) {
+        return 105;
+    }
+    if (shutdown(socket_fds[0], SHUT_WR) != 0 ||
+        read(socket_fds[1], blocking_bytes, 1) != 0 ||
+        write(socket_fds[1], "z", 1) != 1 ||
+        read(socket_fds[0], blocking_bytes, 1) != 1 ||
+        blocking_bytes[0] != 'z') {
+        return 106;
     }
     if (close(socket_fds[1]) != 0 ||
         read(socket_fds[0], blocking_bytes, 1) != 0) {
