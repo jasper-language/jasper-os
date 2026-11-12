@@ -439,6 +439,28 @@ int main(void) {
     if (waitpid(-1, &child_status, WNOHANG) != -1 || errno != ECHILD) {
         return 67;
     }
+    pid_t vfork_child = vfork();
+    if (vfork_child < 0) {
+        return 68;
+    }
+    if (vfork_child == 0) {
+        char *vfork_argv[] = {
+            "/usr/bin/printf",
+            "jasper-vfork-%s\n",
+            "ok",
+            NULL,
+        };
+        char *vfork_envp[] = {NULL};
+        execve(vfork_argv[0], vfork_argv, vfork_envp);
+        printf("jasper-vfork-exec-fail errno=%d\n", errno);
+        fflush(stdout);
+        _exit(69);
+    }
+    child_status = 0;
+    if (waitpid(vfork_child, &child_status, 0) != vfork_child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+        return 70;
+    }
     close(fd);
     printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld wall=%lld dirent=6 exec_meta=true fork=true\n",
            (int)parent, (long long)end, CPU_COUNT(&cpus), cpu, node,

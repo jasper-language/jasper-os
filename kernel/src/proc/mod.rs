@@ -85,6 +85,10 @@ struct LinuxProcessState {
     exec_path: [u8; 128],
     exec_path_len: usize,
     mappings: Vec<LinuxMapping>,
+    /// Set only on the child side of vfork. The parent task sleeps until the
+    /// child commits exec or leaves `Running`.
+    /// 仅 vfork 子进程携带；父任务睡眠到子进程提交 exec 或离开 Running。
+    vfork_parent: Option<VforkParent>,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -92,6 +96,13 @@ struct LinuxProcessState {
 struct LinuxMapping {
     va: u64,
     flags: MapFlags,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+struct VforkParent {
+    task: TaskId,
+    exec_committed: bool,
 }
 
 /// 进程状态。
@@ -815,6 +826,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         exec_path: [0; 128],
         exec_path_len: 0,
         mappings: Vec::new(),
+        vfork_parent: None,
     };
     create_process(name, SyscallSet::EMPTY, move |process| {
         process.linux = Some(linux);
@@ -2256,6 +2268,22 @@ fn thread_entry() {
     }
     #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
     if s.linux_clone {
+        let vfork = with_proc(m.process, |p| {
+            Ok(p.linux
+                .as_ref()
+                .is_some_and(|linux| linux.vfork_parent.is_some()))
+        })
+        .unwrap_or(false);
+        if vfork {
+            crate::kprintln!(
+                "[JSR-VFORK-START] task={} pid={} entry={:#x} stack={:#x} rdi={:#x}",
+                me.0,
+                linux_pid(m.process).unwrap_or(0),
+                s.entry,
+                s.stack,
+                s.linux_fork_args.unwrap_or([0; 6])[0]
+            );
+        }
         // SAFETY：clone 的 RIP/RSP 已由 spawn_linux_clone 校验在用户私有窗口内。
         unsafe {
             crate::arch::x86_64::enter_syscall_return(
@@ -2460,6 +2488,226 @@ pub fn fork_linux_process(
         return Err(ProcError::NoTaskSlot);
     }
     Ok(child)
+}
+
+/// Creates a Linux vfork child without copying its pages.
+///
+/// 创建 Linux vfork 子进程但不复制页面：子进程映射父进程相同的物理帧，父线程
+/// 由调用者休眠等待。共享映射、设备映射和隔离帧不在当前有界切片内，失败关闭。
+#[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+pub fn vfork_linux_process(
+    parent: ObjId,
+    user_rip: u64,
+    user_stack: u64,
+    fs_base: u64,
+    preserved_regs: [u64; 6],
+    syscall_args: [u64; 6],
+    parent_task: TaskId,
+) -> Result<ObjId, ProcError> {
+    let (parent_linux_pid, calls, state, mappings) = kobj::with(|t| match t.get(parent) {
+        Ok(KObject::Process(p))
+            if p.state == ProcState::Running && p.threads_live == 1 =>
+        {
+            let linux = p.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
+            if !p.shared_maps.is_empty()
+                || !p.device_maps.is_empty()
+                || !p.quarantined.is_empty()
+            {
+                return Err(ProcError::NotTransferable);
+            }
+            let mut mappings = Vec::new();
+            mappings
+                .try_reserve(linux.mappings.len())
+                .map_err(|_| ProcError::OutOfFrames)?;
+            for mapping in linux
+                .mappings
+                .iter()
+                .copied()
+                .filter(|mapping| mapping.flags.contains(MapFlags::USER))
+            {
+                let (frame, _) = p
+                    .space
+                    .translate(VirtPage::containing(mapping.va))
+                    .ok_or(ProcError::Map(MapError::NotMapped))?;
+                let page = p
+                    .frames
+                    .iter()
+                    .find(|page| page.frame() == frame)
+                    .cloned()
+                    .ok_or(ProcError::Map(MapError::NotMapped))?;
+                mappings.push((mapping, page));
+            }
+            Ok((linux.pid, linux.calls, linux.clone(), mappings))
+        }
+        Ok(KObject::Process(_)) => Err(ProcError::Exited),
+        _ => Err(ProcError::NoSuchProcess),
+    })?;
+
+    let child = create_linux("linux-vfork", calls)?;
+    let rollback = |child: ObjId, adopted: bool| {
+        if adopted {
+            let _ = release_child(parent, child);
+        }
+        let _ = exit_idle(child, -1);
+        let _ = reap(child);
+    };
+    let child_pid = match linux_pid(child) {
+        Some(pid) => pid,
+        None => {
+            rollback(child, false);
+            return Err(ProcError::NoSuchProcess);
+        }
+    };
+    let prepared = with_proc(child, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::NoSuchProcess)?;
+        *linux = state;
+        linux.pid = child_pid;
+        linux.ppid = parent_linux_pid;
+        linux.mappings.clear();
+        linux.vfork_parent = Some(VforkParent {
+            task: parent_task,
+            exec_committed: false,
+        });
+        Ok(())
+    });
+    if prepared.is_err() || inherit_application(parent, child).is_err() {
+        rollback(child, false);
+        return Err(ProcError::NoSuchProcess);
+    }
+    for (mapping, page) in mappings {
+        if let Err(error) = share_vfork_mapping(child, mapping, page) {
+            rollback(child, false);
+            return Err(error);
+        }
+    }
+    if adopt(parent, child).is_err() {
+        rollback(child, false);
+        return Err(ProcError::NoSuchProcess);
+    }
+    if spawn_linux_clone(
+        child,
+        "linux-vfork",
+        user_rip,
+        user_stack,
+        Some(fs_base),
+        Some(preserved_regs),
+        Some(syscall_args),
+        0,
+        0,
+        0,
+    )
+    .is_err()
+    {
+        rollback(child, true);
+        return Err(ProcError::NoTaskSlot);
+    }
+    Ok(child)
+}
+
+/// Maps one already-owned physical page into a vfork child.
+/// 把一个已拥有的物理页映射到 vfork 子进程；不复制页面或增加内存配额。
+#[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+fn share_vfork_mapping(
+    child: ObjId,
+    mapping: LinuxMapping,
+    page: Arc<crate::mm::memory_object::Page>,
+) -> Result<(), ProcError> {
+    with_proc(child, |p| {
+        if p.frames.len() + p.shared_maps.len() >= MAX_PROCESS_FRAMES {
+            return Err(ProcError::MemoryQuota);
+        }
+        p.frames
+            .try_reserve(1)
+            .map_err(|_| ProcError::OutOfFrames)?;
+        let linux = p.linux.as_mut().ok_or(ProcError::NoSuchProcess)?;
+        linux
+            .mappings
+            .try_reserve(1)
+            .map_err(|_| ProcError::OutOfFrames)?;
+        p.space
+            .map(
+                VirtPage::containing(mapping.va),
+                page.frame(),
+                mapping.flags,
+            )
+            .map_err(ProcError::Map)?;
+        let rights = MemoryRights::READ
+            .union(if mapping.flags.contains(MapFlags::WRITE) {
+                MemoryRights::WRITE
+            } else {
+                MemoryRights::NONE
+            })
+            .union(if mapping.flags.contains(MapFlags::EXECUTE) {
+                MemoryRights::EXECUTE
+            } else {
+                MemoryRights::NONE
+            });
+        if p.memory_caps
+            .grant(
+                mapping.va,
+                1,
+                rights,
+                MemoryKind::Image,
+                BackingIdentity::new(0, 1).expect("fixed valid generation"),
+            )
+            .is_err()
+        {
+            let _ = p.space.unmap_raw(VirtPage::containing(mapping.va));
+            return Err(ProcError::MemoryQuota);
+        }
+        linux.mappings.push(mapping);
+        p.frames.push(page);
+        Ok(())
+    })
+}
+
+/// Commits successful exec as the child-side vfork terminal transition.
+/// 把成功 exec 作为 vfork 子侧终态迁移；重复提交或非 vfork 子进程无副作用。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn vfork_commit_exec(child: ObjId) -> bool {
+    with_proc(child, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::NoSuchProcess)?;
+        let Some(parent) = linux.vfork_parent.as_mut() else {
+            return Ok(false);
+        };
+        parent.exec_committed = true;
+        Ok(true)
+    })
+    .ok()
+    .unwrap_or(false)
+}
+
+/// Returns whether a vfork parent may resume.
+///
+/// 子进程提交 exec 或已离开 Running 后父线程可恢复；不存在的子进程也视为终止，
+/// 调用者随后会按正常 Linux 子进程错误路径失败关闭。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn vfork_parent_may_resume(child: ObjId) -> bool {
+    let result = kobj::with(|t| match t.get(child) {
+        Ok(KObject::Process(p)) => {
+            let committed = p
+                .linux
+                .as_ref()
+                .and_then(|linux| linux.vfork_parent)
+                .is_some_and(|parent| parent.exec_committed);
+            (
+                p.state != ProcState::Running || committed,
+                matches!(p.state, ProcState::Running),
+                committed,
+            )
+        }
+        _ => (true, false, false),
+    });
+    if result.0 {
+        crate::kprintln!(
+            "[JSR-VFORK-RESUME] child={:#x} parent={:#x} running={} committed={}",
+            child.raw(),
+            current_process().map_or(0, ObjId::raw),
+            result.1,
+            result.2
+        );
+    }
+    result.0
 }
 
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]

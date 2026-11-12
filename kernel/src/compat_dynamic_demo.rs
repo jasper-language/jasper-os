@@ -117,6 +117,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Madvise,
         LinuxSyscall::Clone,
         LinuxSyscall::Clone3,
+        LinuxSyscall::Vfork,
         LinuxSyscall::Execve,
         LinuxSyscall::Futex,
         LinuxSyscall::Exit,

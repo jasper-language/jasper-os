@@ -1349,11 +1349,14 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
     }
     if call.syscall == LinuxSyscall::Execve {
         return match linux_execve(pid, call.args) {
-            Ok((entry, user_rsp)) => SyscallOutcome {
-                value: 0,
-                redirect: None,
-                exec_redirect: Some(ExecReturn { entry, user_rsp }),
-            },
+            Ok((entry, user_rsp)) => {
+                let _ = proc::vfork_commit_exec(pid);
+                SyscallOutcome {
+                    value: 0,
+                    redirect: None,
+                    exec_redirect: Some(ExecReturn { entry, user_rsp }),
+                }
+            }
             Err(error) => SyscallOutcome::value(-i64::from(error as i32)),
         };
     }
@@ -1371,6 +1374,9 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
         };
     }
     let value = execute(pid, call, a.user_ip, a.user_preserved);
+    if call.syscall == LinuxSyscall::Vfork {
+        crate::kprintln!("[JSR-VFORK-DISPATCH-RETURN] value={value}");
+    }
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
         feature = "lifecycle-root-exec-verify"
@@ -1426,6 +1432,7 @@ fn execute(
         LinuxSyscall::Clone3 => {
             compat_result(linux_clone3(pid, call.args, user_ip, user_preserved))
         }
+        LinuxSyscall::Vfork => compat_result(linux_vfork(pid, call.args, user_ip, user_preserved)),
         LinuxSyscall::Brk => compat_result(linux_brk(pid, call.args[0])),
         LinuxSyscall::Access => compat_result(linux_access(call.args[0])),
         LinuxSyscall::ArchPrctl => compat_result(linux_arch_prctl(call.args)),
@@ -2333,6 +2340,80 @@ fn linux_fork_clone(
     proc::linux_pid(child)
         .map(u64::from)
         .ok_or(CompatErrno::NoSys)
+}
+
+/// Implements `vfork(2)` as shared-memory execution with a suspended parent.
+///
+/// 实现 `vfork(2)`：子进程共享父进程物理页；父线程睡眠到子进程成功 exec
+/// 或退出。参数寄存器必须原样恢复给子进程，glibc 在 `syscall` 前暂存返回地址
+/// 到 `rdi`，调用后再压回栈。
+fn linux_vfork(
+    pid: ObjId,
+    args: [u64; 6],
+    user_ip: Option<(u64, u64)>,
+    preserved_regs: [u64; 6],
+) -> Result<u64, CompatErrno> {
+    let (user_rip, user_stack) = user_ip.ok_or(CompatErrno::NoSys)?;
+    crate::kprintln!(
+        "[JSR-VFORK-TRAP] rdi={:#x} rip={:#x} rsp={:#x}",
+        args[0],
+        user_rip,
+        user_stack
+    );
+    let parent_space = proc::current_space_root(pid).ok_or(CompatErrno::NoSys)?;
+    let (parent_task, parent_name) = sched::current();
+    let parent_stack_top = crate::arch::kernel_stack();
+    let parent_stack_page = kernel_core::paging::VirtPage::containing(parent_stack_top - 1);
+    let parent_stack_frame = unsafe { crate::arch::translate_in(parent_space, parent_stack_page) }
+        .map(|(frame, _)| frame.start());
+    crate::kprintln!(
+        "[JSR-VFORK-PARENT-CONTEXT] task={} name={} kstack={:#x} stack_frame={:?}",
+        parent_task.0,
+        parent_name,
+        parent_stack_top,
+        parent_stack_frame
+    );
+    let child = proc::vfork_linux_process(
+        pid,
+        user_rip,
+        user_stack,
+        crate::arch::user_fs_base(),
+        preserved_regs,
+        args,
+        parent_task,
+    )
+    .map_err(|error| match error {
+        proc::ProcError::NotTransferable => CompatErrno::NoSys,
+        _ => CompatErrno::NoMemory,
+    })?;
+    let child_pid = proc::linux_pid(child).ok_or(CompatErrno::NoSys)?;
+    let mut steps = 0u32;
+    loop {
+        if proc::vfork_parent_may_resume(child) {
+            sched::set_current_space(Some(parent_space));
+            crate::kprintln!(
+                "[JSR-VFORK-SPACE] parent={:#x} current={:?} stack_frame={:?}",
+                parent_space.0,
+                sched::current_space(),
+                unsafe { crate::arch::translate_in(parent_space, parent_stack_page) }
+                    .map(|(frame, _)| frame.start())
+            );
+            crate::kprintln!("[JSR-VFORK-LINUX-RETURN] child_pid={child_pid}");
+            return Ok(u64::from(child_pid));
+        }
+        if steps < 4 {
+            crate::kprintln!("[JSR-VFORK-PARENT] child={:#x} step={} before", child.raw(), steps);
+        }
+        let blocked = proc::block_step();
+        if steps < 4 {
+            crate::kprintln!("[JSR-VFORK-PARENT] child={:#x} step={} after", child.raw(), steps);
+            steps += 1;
+        }
+        if blocked.is_err() {
+            let _ = proc::begin_exit(child, -1);
+            return Err(CompatErrno::Interrupted);
+        }
+    }
 }
 
 /// Blocks until one specific Linux child exits, then writes its encoded wait status.

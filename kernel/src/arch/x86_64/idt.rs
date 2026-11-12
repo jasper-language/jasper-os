@@ -80,7 +80,27 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, _code: 
     if from_user(&frame) {
         fault::on_user_fault(UserFault { kind: UserFaultKind::PageFault, ip: frame.instruction_pointer.as_u64(), addr });
     }
-    console::_print(format_args!("[JSR-EXC] page fault ip={:#x} addr={:#x}\n", frame.instruction_pointer.as_u64(), addr));
+    let (task, task_name) = crate::sched::current();
+    console::_print(format_args!(
+        "[JSR-EXC] page fault ip={:#x} addr={:#x} cs={:#x} rsp={:#x} task={} name={} kstack={:#x} pid={:?} linux_pid={:?}\n",
+        frame.instruction_pointer.as_u64(),
+        addr,
+        frame.code_segment.0,
+        frame.stack_pointer.as_u64(),
+        task.0,
+        task_name,
+        crate::arch::kernel_stack(),
+        crate::proc::current_process(),
+        crate::proc::current_process().and_then(crate::proc::linux_pid)
+    ));
+    let stack = frame.stack_pointer.as_u64() as *const u64;
+    let mut slots = [0u64; 16];
+    // SAFETY: the fault frame was captured on the live kernel stack. This
+    // diagnostic path halts immediately after printing the retained words.
+    unsafe {
+        core::ptr::copy_nonoverlapping(stack, slots.as_mut_ptr(), slots.len());
+    }
+    console::_print(format_args!("[JSR-EXC] stack={:x?}\n", slots));
     crate::arch::halt_forever()
 }
 

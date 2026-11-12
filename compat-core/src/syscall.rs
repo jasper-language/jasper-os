@@ -19,7 +19,7 @@ use linux_raw_sys::general::{
     __NR_rt_sigprocmask, __NR_rt_sigreturn, __NR_sched_getaffinity, __NR_sched_getscheduler,
     __NR_sched_yield,
     __NR_set_robust_list, __NR_sysinfo,
-    __NR_set_tid_address, __NR_wait4,
+    __NR_set_tid_address, __NR_vfork, __NR_wait4,
     __NR_sigaltstack, __NR_statfs, __NR_statx, __NR_tgkill, __NR_time, __NR_uname, __NR_write,
     __NR_writev,
 };
@@ -157,6 +157,9 @@ pub enum LinuxSyscall {
     /// Wait for one Linux child process.
     /// 等待一个 Linux 子进程。
     Wait4,
+    /// Create a child that shares the parent's address space while the parent waits.
+    /// 创建共享父地址空间的子进程；父进程在子进程 exec 或退出前保持暂停。
+    Vfork,
 }
 
 /// Explicit Linux syscall authority for one compatibility process.
@@ -342,6 +345,7 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_io_uring_enter) => LinuxSyscall::IoUringEnter,
         value if value == u64::from(__NR_io_uring_register) => LinuxSyscall::IoUringRegister,
         value if value == u64::from(__NR_wait4) => LinuxSyscall::Wait4,
+        value if value == u64::from(__NR_vfork) => LinuxSyscall::Vfork,
         number => return SyscallDispatch::Unsupported { number },
     };
     SyscallDispatch::Mapped(LinuxCall {
@@ -428,6 +432,7 @@ mod tests {
             (__NR_io_uring_enter, LinuxSyscall::IoUringEnter),
             (__NR_io_uring_register, LinuxSyscall::IoUringRegister),
             (__NR_wait4, LinuxSyscall::Wait4),
+            (__NR_vfork, LinuxSyscall::Vfork),
         ];
         for (number, syscall) in expected {
             assert_eq!(
