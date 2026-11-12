@@ -204,7 +204,7 @@ impl<'a> Actor<'a> {
 
     fn matches_scope(self, scope: OwnerScope) -> bool {
         match scope {
-            OwnerScope::System => !self.subjects.is_empty(),
+            OwnerScope::System => self.contains(Subject::System),
             OwnerScope::Device(id) => self.contains(Subject::Device(id)),
             OwnerScope::User(id) => self.contains(Subject::User(id)),
             OwnerScope::Group(id) => self.contains(Subject::Group(id)),
@@ -1186,6 +1186,29 @@ mod tests {
         assert!(model.can_update(Actor::new(&administrator), installation));
         assert!(!model.can_discover(Actor::new(&administrator), installation, 0));
         assert!(!model.can_start(Actor::new(&administrator), installation, 0));
+    }
+
+    #[test]
+    fn system_scope_requires_a_system_actor() {
+        let mut model = InstallModel::<1, 1, 1, 1, 1>::new();
+        let package = model.add_package(package_spec(9)).unwrap();
+        let installation = model
+            .install(InstallSpec {
+                package,
+                scope: OwnerScope::System,
+                source: PackageSource::SystemBuiltin,
+                update_authority: authority_group(110),
+            })
+            .unwrap();
+        let user = [Subject::User(1)];
+        let administrator = [Subject::Group(110)];
+        assert_eq!(
+            model.uninstall(Actor::new(&user), installation),
+            Err(InstallError::NotAuthorized)
+        );
+        model
+            .uninstall(Actor::new(&administrator), installation)
+            .unwrap();
     }
 
     #[test]
