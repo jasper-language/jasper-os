@@ -80,14 +80,7 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, _code: 
     if from_user(&frame) {
         fault::on_user_fault(UserFault { kind: UserFaultKind::PageFault, ip: frame.instruction_pointer.as_u64(), addr });
     }
-    console::_print(format_args!(
-        "[JSR-EXC] page fault ip={:#x} addr={:#x} cs={:#x} rsp={:#x} linux_pid={:?}\n",
-        frame.instruction_pointer.as_u64(),
-        addr,
-        frame.code_segment.0,
-        frame.stack_pointer.as_u64(),
-        crate::proc::current_process().and_then(crate::proc::linux_pid)
-    ));
+    console::_print(format_args!("[JSR-EXC] page fault ip={:#x} addr={:#x}\n", frame.instruction_pointer.as_u64(), addr));
     crate::arch::halt_forever()
 }
 
@@ -97,12 +90,9 @@ extern "x86-interrupt" fn general_protection_handler(frame: InterruptStackFrame,
         fault::on_user_fault(UserFault { kind: UserFaultKind::ProtectionFault, ip: frame.instruction_pointer.as_u64(), addr: 0 });
     }
     console::_print(format_args!(
-        "[JSR-EXC] general protection ip={:#x} code={:#x} cs={:#x} rsp={:#x} linux_pid={:?}\n",
+        "[JSR-EXC] general protection ip={:#x} code={:#x}\n",
         frame.instruction_pointer.as_u64(),
-        code,
-        frame.code_segment.0,
-        frame.stack_pointer.as_u64(),
-        crate::proc::current_process().and_then(crate::proc::linux_pid)
+        code
     ));
     crate::arch::halt_forever()
 }

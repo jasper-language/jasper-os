@@ -169,6 +169,44 @@ impl<const N: usize> FdTable<N> {
         )
     }
 
+    /// Duplicates the current generation of `source` onto an exact descriptor.
+    ///
+    /// 把 `source` 当前世代精确复制到 `target`；目标已占用时原子替换。
+    pub fn duplicate_fd_to(
+        &mut self,
+        source: u32,
+        target: u32,
+        close_on_exec: bool,
+    ) -> Result<FdHandle, FdTableError> {
+        let entry = self.get_fd(source).ok_or(FdTableError::InvalidFd)?;
+        let index = target as usize;
+        if index >= N {
+            return Err(FdTableError::InvalidFd);
+        }
+        let generation = self.generations[index]
+            .checked_add(1)
+            .ok_or(FdTableError::GenerationExhausted)?;
+        self.generations[index] = generation;
+        if !self.slots[index].is_some_and(|slot| slot.active) {
+            self.open += 1;
+        }
+        self.slots[index] = Some(Slot {
+            entry: FdEntry {
+                fd: target,
+                generation,
+                handle: entry.handle,
+                rights: entry.rights,
+                kind: entry.kind,
+                close_on_exec,
+            },
+            active: true,
+        });
+        Ok(FdHandle {
+            fd: target,
+            generation,
+        })
+    }
+
     pub fn get(&self, handle: FdHandle) -> Result<FdEntry, FdTableError> {
         let index = handle.fd as usize;
         let Some(slot) = self.slots.get(index).and_then(|slot| *slot) else {
@@ -436,5 +474,24 @@ mod tests {
         assert_eq!(replacement.fd(), 2);
         assert_ne!(replacement.generation(), source.generation());
         assert_eq!(fds.get(duplicate).unwrap().handle, 0x55);
+    }
+
+    #[test]
+    fn duplicate_to_replaces_target_and_preserves_open_count() {
+        let mut fds = FdTable::<8>::new();
+        fds.install_at(1, 0x11, Rights::READ, CompatKind::File, false)
+            .unwrap();
+        fds.install_at(5, 0x55, Rights::WRITE, CompatKind::File, true)
+            .unwrap();
+        let duplicate = fds.duplicate_fd_to(1, 5, false).unwrap();
+        assert_eq!(duplicate.fd(), 5);
+        assert_eq!(fds.open_count(), 2);
+        let entry = fds.get(duplicate).unwrap();
+        assert_eq!(entry.handle, 0x11);
+        assert_eq!(entry.rights, Rights::READ);
+        assert!(!entry.close_on_exec);
+        assert_eq!(fds.duplicate_fd_to(1, 8, false), Err(FdTableError::InvalidFd));
+        assert_eq!(fds.duplicate_fd_to(7, 4, false), Err(FdTableError::InvalidFd));
+        assert_eq!(fds.open_count(), 2);
     }
 }

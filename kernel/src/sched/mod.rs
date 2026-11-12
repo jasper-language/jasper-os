@@ -958,19 +958,6 @@ pub fn pause() {
     sleep_until(timer_ticks() + 1);
 }
 
-/// Parks the current worker until an explicit [`wake`].
-///
-/// 将当前工作任务显式阻塞，直到另一执行流调用 [`wake`]。
-pub fn park_current() -> bool {
-    let irq = cpu::irq_save_disable();
-    let blocked = with_mut(|scheduler| scheduler.block_current(None));
-    if blocked {
-        yield_with_cause(Cause::BLOCK);
-    }
-    cpu::irq_restore(irq);
-    blocked
-}
-
 /// 「等任务退出」这一等待对象的标识（锁以自身地址为标识，地址按字对齐，不会与它重合）。
 const JOIN_KEY: u64 = 1;
 

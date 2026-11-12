@@ -1410,6 +1410,9 @@ fn execute(
         LinuxSyscall::ReadV => compat_result(linux_readv(pid, call.args)),
         LinuxSyscall::ReadLinkAt => compat_result(linux_readlinkat(pid, call.args)),
         LinuxSyscall::Close => compat_result(linux_close(pid, call.args[0])),
+        LinuxSyscall::Dup => compat_result(linux_dup(pid, call.args)),
+        LinuxSyscall::Dup2 => compat_result(linux_dup2(pid, call.args)),
+        LinuxSyscall::Dup3 => compat_result(linux_dup3(pid, call.args)),
         LinuxSyscall::Chdir => compat_result(linux_chdir(pid, call.args[0])),
         LinuxSyscall::OpenAt => compat_result(linux_openat(pid, call.args)),
         LinuxSyscall::Fchdir => compat_result(linux_fchdir(pid, call.args[0])),
@@ -2355,16 +2358,6 @@ fn linux_vfork(
 ) -> Result<u64, CompatErrno> {
     let (user_rip, user_stack) = user_ip.ok_or(CompatErrno::NoSys)?;
     let parent_space = proc::current_space_root(pid).ok_or(CompatErrno::NoSys)?;
-    let parent_phys = crate::boot::get()
-        .and_then(|boot| boot.phys_offset)
-        .ok_or(CompatErrno::NoSys)?;
-    let parent_pages = [
-        kernel_core::paging::VirtPage::containing(user_rip),
-        kernel_core::paging::VirtPage::containing(user_stack.saturating_sub(1)),
-    ];
-    let parent_mappings = parent_pages.map(|page| {
-        unsafe { crate::arch::translate_in(parent_space, parent_phys, page.start()) }
-    });
     let (parent_task, _) = sched::current();
     let child = proc::vfork_linux_process(
         pid,
@@ -2382,16 +2375,6 @@ fn linux_vfork(
     let child_pid = proc::linux_pid(child).ok_or(CompatErrno::NoSys)?;
     loop {
         if proc::vfork_parent_may_resume(child) {
-            let after = parent_pages.map(|page| {
-                unsafe { crate::arch::translate_in(parent_space, parent_phys, page.start()) }
-            });
-            if after != parent_mappings {
-                crate::kprintln!(
-                    "[JSR-VFORK-ROOT-CHANGED] before={:?} after={:?}",
-                    parent_mappings,
-                    after
-                );
-            }
             sched::set_current_space(Some(parent_space));
             return Ok(u64::from(child_pid));
         }
@@ -2885,6 +2868,49 @@ fn linux_close(pid: ObjId, fd: u64) -> Result<u64, CompatErrno> {
     } else {
         Err(CompatErrno::BadFd)
     }
+}
+
+/// Implements `dup(2)` by selecting the lowest free descriptor.
+///
+/// 复制一个描述符到最低可用 fd，并保留共享的文件游标。
+fn linux_dup(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let source = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    proc::linux_fd(pid, source).ok_or(CompatErrno::BadFd)?;
+    proc::linux_duplicate_fd(pid, source, 0, false)
+        .map(u64::from)
+        .ok_or(CompatErrno::NoSpace)
+}
+
+/// Implements `dup2(2)`, including same-fd and exact-target replacement semantics.
+///
+/// 实现精确目标 fd 的复制；同一 fd 成功返回，目标已占用时原子替换且清除 CLOEXEC。
+fn linux_dup2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let source = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let target = u32::try_from(args[1]).map_err(|_| CompatErrno::BadFd)?;
+    proc::linux_fd(pid, source).ok_or(CompatErrno::BadFd)?;
+    if source == target {
+        return Ok(u64::from(target));
+    }
+    proc::linux_duplicate_fd_to(pid, source, target, false)
+        .map(u64::from)
+        .ok_or(CompatErrno::BadFd)
+}
+
+/// Implements `dup3(2)` with only the Linux `O_CLOEXEC` flag accepted.
+///
+/// 实现 `dup3(2)`；只接受 `O_CLOEXEC`，同一 fd 和未知标志均返回 EINVAL。
+fn linux_dup3(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const O_CLOEXEC: u64 = 0x80000;
+    let source = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let target = u32::try_from(args[1]).map_err(|_| CompatErrno::BadFd)?;
+    let flags = args[2];
+    proc::linux_fd(pid, source).ok_or(CompatErrno::BadFd)?;
+    if source == target || flags & !O_CLOEXEC != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    proc::linux_duplicate_fd_to(pid, source, target, flags & O_CLOEXEC != 0)
+        .map(u64::from)
+        .ok_or(CompatErrno::BadFd)
 }
 
 /// Opens one exact virtual read-only path through `openat(2)`.

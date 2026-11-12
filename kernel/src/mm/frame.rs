@@ -10,7 +10,6 @@
 //! * 分配策略可替换（`FrameAllocator` trait）；这里只是选定位图实现并管理它的生命周期。
 
 use core::ptr::addr_of_mut;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use kernel_core::frame::{BitmapFrameAllocator, FrameAllocator, FrameError, PhysFrame};
 use spin::Once;
@@ -27,35 +26,6 @@ static mut BITMAP: [u64; BITMAP_WORDS] = [0; BITMAP_WORDS];
 
 /// 全局分配器（初始化一次）。
 static ALLOCATOR: Once<IrqSpinLock<BitmapFrameAllocator<'static>>> = Once::new();
-static WATCHED_STACK_FRAMES: [AtomicU64; 16] = [const { AtomicU64::new(u64::MAX) }; 16];
-
-/// Arms a diagnostic watch for frames backing a sleeping vfork parent stack.
-pub(crate) fn watch_stack(frames: &[PhysFrame]) {
-    for frame in frames {
-        for slot in &WATCHED_STACK_FRAMES {
-            if slot
-                .compare_exchange(
-                    u64::MAX,
-                    frame.start(),
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                break;
-            }
-        }
-    }
-}
-
-fn report_watched(frame: PhysFrame) {
-    if WATCHED_STACK_FRAMES
-        .iter()
-        .any(|watched| watched.load(Ordering::Acquire) == frame.start())
-    {
-        crate::kprintln!("[JSR-VFORK-STACK-REUSED] frame={:#x}", frame.start());
-    }
-}
 
 /// 初始化统计（供启动日志与验收使用）。
 #[derive(Debug, Clone, Copy)]
@@ -95,10 +65,7 @@ pub fn allocate() -> Result<PhysFrame, FrameError> {
     #[cfg(feature = "fault-inject")]
     if crate::fault_inject::FRAME.hit() { return Err(FrameError::OutOfFrames); }
     let result=ALLOCATOR.get().ok_or(FrameError::OutOfFrames)?.lock().allocate();
-    if let Ok(frame) = result {
-        report_watched(frame);
-        crate::mm::pressure::note_frame_change();
-    }
+    if result.is_ok() {crate::mm::pressure::note_frame_change();}
     result
 }
 
@@ -108,10 +75,7 @@ pub fn allocate_below(limit: u64) -> Result<PhysFrame, FrameError> {
     #[cfg(feature = "fault-inject")]
     if crate::fault_inject::FRAME.hit() { return Err(FrameError::OutOfFrames); }
     let result=ALLOCATOR.get().ok_or(FrameError::OutOfFrames)?.lock().allocate_below(limit);
-    if let Ok(frame) = result {
-        report_watched(frame);
-        crate::mm::pressure::note_frame_change();
-    }
+    if result.is_ok() {crate::mm::pressure::note_frame_change();}
     result
 }
 
@@ -121,10 +85,7 @@ pub fn allocate_contiguous(count: usize) -> Result<PhysFrame, FrameError> {
     #[cfg(feature = "fault-inject")]
     if crate::fault_inject::FRAME.hit() { return Err(FrameError::OutOfFrames); }
     let result=ALLOCATOR.get().ok_or(FrameError::OutOfFrames)?.lock().allocate_contiguous(count);
-    if let Ok(frame) = result {
-        report_watched(frame);
-        crate::mm::pressure::note_frame_change();
-    }
+    if result.is_ok() {crate::mm::pressure::note_frame_change();}
     result
 }
 

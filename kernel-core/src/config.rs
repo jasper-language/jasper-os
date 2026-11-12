@@ -241,7 +241,7 @@ pub mod bounds {
 }
 
 impl KernelConfig {
-    /// 默认配置档：100 Hz；时间片 2/2/4/4 tick；64 个任务槽位；64 KiB 内核栈；堆上限 64 MiB、
+    /// 默认配置档：100 Hz；时间片 2/2/4/4 tick；64 个任务槽位；128 KiB 内核栈；堆上限 64 MiB、
     /// 每次增长 64 KiB；1024 个内核对象；每进程 64 个句柄。
     pub const STANDARD: KernelConfig = KernelConfig {
         name: "standard",
@@ -253,7 +253,7 @@ impl KernelConfig {
             qos: QosParams::DEFAULT,
             max_tasks: 64,
             max_rt: 8,
-            kernel_stack_bytes: 64 * 1024,
+            kernel_stack_bytes: 128 * 1024,
             watchdog_ticks: 50,
             watchdog_log: 16,
             cpu_burst_ticks: 4,
@@ -312,7 +312,7 @@ impl KernelConfig {
             },
             max_tasks: 32,
             max_rt: 8,
-            kernel_stack_bytes: 64 * 1024,
+            kernel_stack_bytes: 128 * 1024,
             watchdog_ticks: 125,
             watchdog_log: 8,
             cpu_burst_ticks: 4,
@@ -595,7 +595,7 @@ mod tests {
 
     #[test]
     fn standard_matches_previous_constants() {
-        // 默认档必须与参数化之前的取值一致：换成配置模块不得改变默认行为。
+        // 默认档保持既有调度参数；兼容 exec 路径实测需要 128 KiB 内核栈。
         let s = KernelConfig::STANDARD;
         assert_eq!((s.clock.timer_hz, s.clock.boot_ticks), (100, 25));
         assert_eq!(s.sched.qos, QosParams::DEFAULT);
@@ -605,7 +605,7 @@ mod tests {
                 s.sched.kernel_stack_bytes,
                 s.sched.watchdog_ticks
             ),
-            (64, 64 * 1024, 50)
+            (64, 128 * 1024, 50)
         );
         assert_eq!(s.memory.pressure, PressureParams::DEFAULT);
         assert_eq!(
@@ -704,7 +704,7 @@ mod tests {
             c.sched.kernel_stack_bytes = 16 * 1024
         });
         rejects("kernel_stack_bytes", |c| {
-            c.sched.kernel_stack_bytes = 64 * 1024 + 8
+            c.sched.kernel_stack_bytes = 128 * 1024 + 8
         });
         rejects("watchdog_ticks", |c| c.sched.watchdog_ticks = 4);
         rejects("watchdog_log", |c| c.sched.watchdog_log = 0);

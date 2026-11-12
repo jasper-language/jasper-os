@@ -480,6 +480,28 @@ pub(crate) fn linux_duplicate_fd(
     .ok()
 }
 
+/// Duplicates one current Linux descriptor onto an exact target descriptor.
+///
+/// 把当前世代描述符精确复制到目标 fd；目标已占用时原子替换。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_duplicate_fd_to(
+    pid: ObjId,
+    fd: u32,
+    target: u32,
+    close_on_exec: bool,
+) -> Option<u32> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let duplicate = linux
+            .fds
+            .duplicate_fd_to(fd, target, close_on_exec)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.file_offsets[target as usize] = linux.file_offsets[fd as usize];
+        Ok(duplicate.fd())
+    })
+    .ok()
+}
+
 /// Installs a read-only Linux virtual file and initializes its offset.
 ///
 /// 安装只读 Linux 虚拟文件；失败不留下部分 fd 状态。
@@ -564,7 +586,15 @@ pub(crate) fn set_linux_file_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
         if entry.kind != compat_core::fd::CompatKind::File {
             return Err(ProcError::NoTaskSlot);
         }
-        linux.file_offsets[fd as usize] = offset;
+        // Descriptors duplicated by dup/dup2/dup3 share one open-file offset.
+        for index in 0..linux.file_offsets.len() {
+            if linux.fds.get_fd(index as u32).is_some_and(|candidate| {
+                candidate.kind == compat_core::fd::CompatKind::File
+                    && candidate.handle == entry.handle
+            }) {
+                linux.file_offsets[index] = offset;
+            }
+        }
         Ok(())
     })
     .is_ok()
@@ -604,7 +634,15 @@ pub(crate) fn set_linux_dir_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
         if entry.kind != compat_core::fd::CompatKind::Directory {
             return Err(ProcError::NoTaskSlot);
         }
-        linux.file_offsets[fd as usize] = offset;
+        // Duplicated directory descriptors also share one directory cursor.
+        for index in 0..linux.file_offsets.len() {
+            if linux.fds.get_fd(index as u32).is_some_and(|candidate| {
+                candidate.kind == compat_core::fd::CompatKind::Directory
+                    && candidate.handle == entry.handle
+            }) {
+                linux.file_offsets[index] = offset;
+            }
+        }
         Ok(())
     })
     .is_ok()
@@ -2535,7 +2573,6 @@ pub fn vfork_linux_process(
         {
             return Err(ProcError::NotTransferable);
         }
-        crate::mm::frame::watch_stack(&[parent_stack_frame]);
     }
 
     let child = create_linux("linux-vfork", calls)?;
@@ -2602,16 +2639,25 @@ pub fn vfork_linux_process(
 /// 把成功 exec 作为 vfork 子侧终态迁移；重复提交或非 vfork 子进程无副作用。
 #[cfg(feature = "linux-abi")]
 pub(crate) fn vfork_commit_exec(child: ObjId) -> bool {
-    with_proc(child, |p| {
+    let parent = with_proc(child, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::NoSuchProcess)?;
         let Some(parent) = linux.vfork_parent.as_mut() else {
-            return Ok(false);
+            return Ok(None);
         };
+        if parent.exec_committed {
+            return Ok(None);
+        }
         parent.exec_committed = true;
-        Ok(true)
+        Ok(Some(parent.task))
     })
     .ok()
-    .unwrap_or(false)
+    .flatten();
+    if let Some(task) = parent {
+        sched::wake(task);
+        true
+    } else {
+        false
+    }
 }
 
 /// Returns whether a vfork parent may resume.
@@ -2621,7 +2667,13 @@ pub(crate) fn vfork_commit_exec(child: ObjId) -> bool {
 #[cfg(feature = "linux-abi")]
 pub(crate) fn vfork_parent_may_resume(child: ObjId) -> bool {
     kobj::with(|t| match t.get(child) {
-        Ok(KObject::Process(p)) => p.state != ProcState::Running,
+        Ok(KObject::Process(p)) => {
+            p.state != ProcState::Running
+                || p.linux
+                    .as_ref()
+                    .and_then(|linux| linux.vfork_parent)
+                    .is_some_and(|parent| parent.exec_committed)
+        }
         _ => true,
     })
 }
