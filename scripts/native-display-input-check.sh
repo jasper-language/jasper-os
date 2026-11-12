@@ -23,7 +23,8 @@ rm -f -- "$SOCKET" "$IMAGE" "$OUT/frame-before.ppm" "$OUT/frame-after.ppm"
 export PATH="${HOME}/.cargo/bin:${PATH}"
 CARGO_TARGET_DIR="$TARGET" CARGO_BUILD_JOBS=2 \
   cargo build --locked --release --target x86_64-unknown-none \
-  -p jasper-kernel --features production >"$OUT/kernel-build.log" 2>&1
+  -p jasper-kernel --features production,user-programs,terminal-session-verify \
+  >"$OUT/kernel-build.log" 2>&1
 env -u CARGO_TARGET_DIR CARGO_BUILD_JOBS=2 \
   cargo build --locked --release -p xtask >"$OUT/xtask-build.log" 2>&1
 "$XTASK" "$KERNEL" "$IMAGE" >"$OUT/image.log" 2>&1
@@ -70,11 +71,27 @@ for _ in $(seq 1 "$TIMEOUT_SECONDS"); do
 done
 grep -aq '^\[JSR-DISPLAY\] backend=framebuffer keyboard=true ' "$OUT/serial.log"
 
+for _ in $(seq 1 "$TIMEOUT_SECONDS"); do
+  grep -aq '^\[JSR-GTERM\] prompt=visible' "$OUT/serial.log" 2>/dev/null && break
+  sleep 1
+done
+grep -aq '^\[JSR-GTERM\] prompt=visible' "$OUT/serial.log"
+
 printf 'screendump %s\n' "$OUT/frame-before.ppm" |
   timeout 10 socat - "UNIX-CONNECT:$SOCKET" >"$OUT/monitor-before.log" 2>&1
-printf 'sendkey a 500\n' |
-  timeout 10 socat - "UNIX-CONNECT:$SOCKET" >"$OUT/monitor-key.log" 2>&1
-sleep 1
+
+for key in e c h o spc h e l l o ret; do
+  printf 'sendkey %s 120\n' "$key" |
+    timeout 10 socat - "UNIX-CONNECT:$SOCKET" >>"$OUT/monitor-key.log" 2>&1
+  sleep 0.2
+done
+
+for _ in $(seq 1 30); do
+  grep -aq '^\[JSR-GTERM\] output=echo-ok visible=true' "$OUT/serial.log" && break
+  sleep 1
+done
+grep -aq '^\[JSR-GTERM\] output=echo-ok visible=true' "$OUT/serial.log"
+
 printf 'screendump %s\n' "$OUT/frame-after.ppm" |
   timeout 10 socat - "UNIX-CONNECT:$SOCKET" >"$OUT/monitor-after.log" 2>&1
 
@@ -85,6 +102,10 @@ done
 grep -aq '^\[JSR-DISPLAY\].*pressed=[1-9][0-9]* ' "$OUT/serial.log"
 test -s "$OUT/frame-before.ppm"
 test -s "$OUT/frame-after.ppm"
+cmp -s "$OUT/frame-before.ppm" "$OUT/frame-after.ppm" && {
+  echo "native-display-input: framebuffer did not change" >&2
+  exit 1
+}
 
 kill "$runner" 2>/dev/null || true
 wait "$runner" 2>/dev/null || true

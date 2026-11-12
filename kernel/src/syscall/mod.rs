@@ -31,7 +31,7 @@ use crate::kobj::{self, DeviceObj, KObject};
 use crate::mm::user::{copy_from_user, copy_to_user, UserPtrError};
 use crate::proc::{self, ProcError};
 use crate::sync::IrqSpinLock;
-use crate::{console, kprintln, profile, sched};
+use crate::{kprintln, profile, sched};
 
 /// `system.console.write` 单次最多写入的字节数。
 pub const CONSOLE_WRITE_MAX: usize = 4096;
@@ -468,7 +468,7 @@ pub(crate) fn terminal_write(ptr: u64, len: u64) -> i64 {
     if let Err(error) = copy_from_user(&mut bytes, ptr, len as usize) {
         return user_ptr_err(error);
     }
-    console::write_bytes(&bytes);
+    crate::terminal::write_output(&bytes);
     len as i64
 }
 

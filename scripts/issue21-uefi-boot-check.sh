@@ -73,8 +73,8 @@ if runtime_active; then
   exit 75
 fi
 exec 9>"$QEMU_LOCK"
-if ! flock -n 9; then
-  echo "FAIL another Jasper-OS QEMU run holds $QEMU_LOCK" >&2
+if ! flock -w 900 9; then
+  echo "FAIL Jasper-OS QEMU lock remained busy for 900s: $QEMU_LOCK" >&2
   exit 75
 fi
 
@@ -150,17 +150,20 @@ sgdisk -v "$IMAGE" >"$OUT/sgdisk.log" 2>&1
 grep -q 'No problems found' "$OUT/sgdisk.log"
 
 cp /usr/share/OVMF/OVMF_VARS_4M.fd "$OVMF_VARS"
-QEMU_EXTRA=()
+QEMU_EXTRA=(-monitor none)
+if [ -n "${ISSUE21_MONITOR_SOCKET:-}" ]; then
+  QEMU_EXTRA=(-monitor "unix:$ISSUE21_MONITOR_SOCKET,server=on,wait=off")
+fi
 if [ "$MODE" = root-exec ] || [ "$MODE" = terminal-session ]; then
   CPU=max
   if [ "${ISSUE21_DISABLE_RDRAND:-0}" = 1 ]; then
     CPU=max,-rdrand,-rdseed
   fi
-  QEMU_EXTRA=(-cpu "$CPU" -device virtio-rng-pci
+  QEMU_EXTRA+=(-cpu "$CPU" -device virtio-rng-pci
     -device isa-debug-exit,iobase=0xf4,iosize=0x04)
 fi
 SERIAL_ARGS=(-serial "file:$OUT/serial.log")
-if [ "$MODE" = terminal-session ]; then
+if [ "$MODE" = terminal-session ] && [ "${ISSUE21_MANUAL_INPUT:-0}" != 1 ]; then
   rm -f -- "$OUT/serial.in" "$OUT/serial.out"
   mkfifo "$OUT/serial.in" "$OUT/serial.out"
   cat "$OUT/serial.out" >"$OUT/serial.log" &
@@ -191,7 +194,7 @@ nice -n 15 taskset -c "$QEMU_CPUS" timeout "$LIMIT" qemu-system-x86_64 \
   -drive if=pflash,format=raw,file="$OVMF_VARS" \
   -drive file="$IMAGE",format=raw,if=virtio \
   "${SERIAL_ARGS[@]}" \
-  -display none -monitor none -no-reboot "${QEMU_EXTRA[@]}"
+  -display none -no-reboot "${QEMU_EXTRA[@]}"
 rc=$?
 set -e
 exec 9>&-

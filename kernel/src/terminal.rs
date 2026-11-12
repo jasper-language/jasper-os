@@ -1,18 +1,17 @@
 //! Native console-backed terminal session.
 //!
-//! This is the first real transport slice for issue #27: serial input is polled
-//! into a bounded session ring and Linux standard input consumes it. The kernel
-//! does not claim PTY, termios, line editing, job control, or a graphical
-//! terminal frontend.
+//! Serial and framebuffer/PS-2 frontends feed the same bounded session ring.
+//! Input is echoed to the diagnostic console and native graphical terminal.
+//! The kernel does not claim PTY, termios, line editing, or job control.
 //!
-//! 原生控制台终端会话的首个真实传输切片：串口输入进入有界会话环，Linux
-//! 标准输入从中读取；不宣称已实现 PTY、termios、行编辑、作业控制或图形前端。
+//! 串口与 framebuffer/PS-2 前端共用有界会话环，输入同时回显到串口与原生
+//! 图形终端；不宣称已实现 PTY、termios、行编辑或作业控制。
 
 use kernel_core::terminal_session::{TerminalError, TerminalSession, TerminalState};
 
 use crate::proc;
 use crate::sync::IrqSpinLock;
-use crate::{arch, console, sched};
+use crate::{arch, console, display, sched};
 
 const INPUT_CAPACITY: usize = 4096;
 const OUTPUT_CAPACITY: usize = 4096;
@@ -30,6 +29,7 @@ pub fn read_input(destination: &mut [u8], nonblocking: bool) -> Result<usize, Te
     }
     loop {
         pump_serial_input();
+        pump_display_input();
         let result = {
             let mut terminal = TERMINAL.lock();
             terminal.read_input(destination)
@@ -44,6 +44,13 @@ pub fn read_input(destination: &mut [u8], nonblocking: bool) -> Result<usize, Te
             result => return result,
         }
     }
+}
+
+/// Writes process output to the terminal frontend and diagnostic console.
+///
+/// 将进程输出写入终端前端，同时保留串口诊断副本。
+pub fn write_output(bytes: &[u8]) {
+    emit(bytes);
 }
 
 /// Poll whether input bytes are pending and whether a stable hangup is visible.
@@ -71,20 +78,56 @@ fn pump_serial_input() {
         if received == 0x04 {
             let closed = TERMINAL.lock().close_input().is_ok();
             if closed {
-                console::write_bytes(b"\r\n");
+                emit(b"\n");
             }
             return;
         }
         let byte = if received == b'\r' { b'\n' } else { received };
         let accepted = TERMINAL.lock().enqueue_input(&[byte]).is_ok();
         if !accepted {
-            console::write_str("\n[JSR-TERM] input_full=true drop=true\n");
+            emit(b"\n[JSR-TERM] input_full=true drop=true\n");
             return;
         }
-        if byte == b'\n' {
-            console::write_bytes(b"\n");
-        } else {
-            console::write_bytes(&[byte]);
-        }
+        emit(&[byte]);
     }
+}
+
+fn pump_display_input() {
+    display::poll_input();
+    while let Some(key) = display::next_key() {
+        let Some(byte) = key_to_byte(key) else {
+            continue;
+        };
+        let accepted = TERMINAL.lock().enqueue_input(&[byte]).is_ok();
+        if !accepted {
+            emit(b"\n[JSR-TERM] input_full=true drop=true\n");
+            return;
+        }
+        emit(&[byte]);
+    }
+}
+
+fn key_to_byte(key: kernel_core::display_input::KeyInput) -> Option<u8> {
+    if !key.pressed {
+        return None;
+    }
+    match key.code {
+        0x0101 => Some(0x08),
+        0x0102 => Some(b'\t'),
+        0x0103 => Some(b'\n'),
+        0x20..=0x7e => {
+            let byte = key.code as u8;
+            if byte.is_ascii_uppercase() && key.modifiers & 1 == 0 {
+                Some(byte.to_ascii_lowercase())
+            } else {
+                Some(byte)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn emit(bytes: &[u8]) {
+    console::write_bytes(bytes);
+    display::terminal_write(bytes);
 }
