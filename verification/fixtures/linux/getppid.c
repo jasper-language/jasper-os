@@ -12,12 +12,14 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/random.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
 #include <sys/time.h>
 #include <sys/uio.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -118,6 +120,124 @@ int main(void) {
     if (close(dup_fd) != 0 || close(dup2_fd) != 0 || close(dup3_fd) != 0 ||
         lseek(fd, 0, SEEK_SET) != 0) {
         return 79;
+    }
+    int pipe_fds[2];
+    int pipe_flags = O_CLOEXEC | O_NONBLOCK;
+    if (pipe2(pipe_fds, pipe_flags) != 0) {
+        printf("jasper-pipe2-fail stage=create flags=%#x errno=%d\n",
+               pipe_flags, errno);
+        return 86;
+    }
+    int reader_flags = fcntl(pipe_fds[0], F_GETFL);
+    int writer_flags = fcntl(pipe_fds[1], F_GETFL);
+    if ((reader_flags & O_NONBLOCK) == 0 || (writer_flags & O_NONBLOCK) == 0) {
+        printf("jasper-pipe2-fail stage=flags reader=%d writer=%d errno=%d\n",
+               reader_flags, writer_flags, errno);
+        return 86;
+    }
+    if (write(pipe_fds[1], "pipe", 4) != 4) {
+        return 87;
+    }
+    char pipe_bytes[4];
+    if (read(pipe_fds[0], pipe_bytes, sizeof(pipe_bytes)) != 4 ||
+        memcmp(pipe_bytes, "pipe", 4) != 0) {
+        return 88;
+    }
+    errno = 0;
+    if (read(pipe_fds[0], pipe_bytes, sizeof(pipe_bytes)) != -1 ||
+        errno != EAGAIN) {
+        return 89;
+    }
+    if (close(pipe_fds[1]) != 0 ||
+        read(pipe_fds[0], pipe_bytes, sizeof(pipe_bytes)) != 0) {
+        return 90;
+    }
+    errno = 0;
+    if (write(pipe_fds[1], "x", 1) != -1 || errno != EBADF) {
+        return 91;
+    }
+    if (close(pipe_fds[0]) != 0) {
+        return 92;
+    }
+    int blocking_pipe[2];
+    if (pipe2(blocking_pipe, 0) != 0) {
+        return 93;
+    }
+    pid_t pipe_child = fork();
+    if (pipe_child < 0) {
+        return 94;
+    }
+    if (pipe_child == 0) {
+        _exit(write(blocking_pipe[1], "block", 5) == 5 ? 0 : 95);
+    }
+    char blocking_bytes[8] = {0};
+    if (read(blocking_pipe[0], blocking_bytes, 5) != 5 ||
+        memcmp(blocking_bytes, "block", 5) != 0) {
+        return 96;
+    }
+    int pipe_status = 0;
+    if (waitpid(pipe_child, &pipe_status, 0) != pipe_child ||
+        !WIFEXITED(pipe_status) || WEXITSTATUS(pipe_status) != 0) {
+        return 97;
+    }
+    if (close(blocking_pipe[0]) != 0 || close(blocking_pipe[1]) != 0) {
+        return 98;
+    }
+    int broken_pipe[2];
+    if (pipe2(broken_pipe, O_NONBLOCK) != 0 ||
+        signal(SIGPIPE, SIG_IGN) == SIG_ERR ||
+        close(broken_pipe[0]) != 0) {
+        return 99;
+    }
+    errno = 0;
+    if (write(broken_pipe[1], "x", 1) != -1 || errno != EPIPE ||
+        close(broken_pipe[1]) != 0) {
+        return 100;
+    }
+    int socket_fds[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+                   0, socket_fds) != 0 ||
+        (fcntl(socket_fds[0], F_GETFL) & O_NONBLOCK) == 0 ||
+        (fcntl(socket_fds[1], F_GETFL) & O_NONBLOCK) == 0) {
+        return 101;
+    }
+    if (write(socket_fds[0], "a2b", 3) != 3 ||
+        read(socket_fds[1], blocking_bytes, 3) != 3 ||
+        memcmp(blocking_bytes, "a2b", 3) != 0 ||
+        write(socket_fds[1], "b2a", 3) != 3 ||
+        read(socket_fds[0], blocking_bytes, 3) != 3 ||
+        memcmp(blocking_bytes, "b2a", 3) != 0) {
+        return 102;
+    }
+    struct sockaddr_un socket_name;
+    socklen_t socket_name_len = sizeof(socket_name);
+    if (getsockname(socket_fds[0], (struct sockaddr *)&socket_name,
+                    &socket_name_len) != 0 ||
+        socket_name_len < sizeof(sa_family_t) ||
+        socket_name.sun_family != AF_UNIX ||
+        getpeername(socket_fds[0], (struct sockaddr *)&socket_name,
+                    &socket_name_len) != 0 ||
+        socket_name.sun_family != AF_UNIX ||
+        send(socket_fds[0], "send", 4, MSG_NOSIGNAL) != 4 ||
+        recv(socket_fds[1], blocking_bytes, 4, 0) != 4 ||
+        memcmp(blocking_bytes, "send", 4) != 0) {
+        return 105;
+    }
+    if (shutdown(socket_fds[0], SHUT_WR) != 0 ||
+        read(socket_fds[1], blocking_bytes, 1) != 0 ||
+        write(socket_fds[1], "z", 1) != 1 ||
+        read(socket_fds[0], blocking_bytes, 1) != 1 ||
+        blocking_bytes[0] != 'z') {
+        return 106;
+    }
+    if (close(socket_fds[1]) != 0 ||
+        read(socket_fds[0], blocking_bytes, 1) != 0) {
+        return 103;
+    }
+    errno = 0;
+    if (write(socket_fds[0], "x", 1) != -1 || errno != EPIPE ||
+        close(socket_fds[0]) != 0) {
+        return 104;
     }
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
@@ -413,6 +533,7 @@ int main(void) {
     volatile int fork_private = 0x1234;
     pid_t first_child = fork();
     if (first_child < 0) {
+        printf("jasper-fork-fail stage=first errno=%d\n", errno);
         return 59;
     }
     if (first_child == 0) {
@@ -482,6 +603,25 @@ int main(void) {
     errno = 0;
     if (waitpid(-1, &child_status, WNOHANG) != -1 || errno != ECHILD) {
         return 67;
+    }
+    if (lseek(fd, 0, SEEK_SET) != 0) {
+        return 81;
+    }
+    pid_t ofd_child = fork();
+    if (ofd_child < 0) {
+        return 82;
+    }
+    if (ofd_child == 0) {
+        _exit(lseek(fd, 12, SEEK_SET) == 12 ? 0 : 83);
+    }
+    child_status = 0;
+    if (waitpid(ofd_child, &child_status, 0) != ofd_child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0 ||
+        lseek(fd, 0, SEEK_CUR) != 12) {
+        return 84;
+    }
+    if (lseek(fd, 0, SEEK_SET) != 0) {
+        return 85;
     }
     pid_t vfork_child = vfork();
     if (vfork_child < 0) {

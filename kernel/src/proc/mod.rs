@@ -64,6 +64,10 @@ static NEXT_WORKLOAD_DOMAIN: AtomicU32 = AtomicU32::new(1);
 /// 仅用于 Linux 标准流兼容表的受控控制台哨兵；它不是可解析的 Jasper 句柄。
 #[cfg(feature = "linux-abi")]
 pub(crate) const LINUX_CONSOLE_HANDLE: u64 = u64::MAX;
+#[cfg(feature = "linux-abi")]
+const LINUX_PIPE_HANDLE_BASE: u64 = 0x0000_8000_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_SOCKET_HANDLE_BASE: u64 = 0x0000_8100_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -76,7 +80,6 @@ struct LinuxProcessState {
     fds: FdTable<64>,
     pid: u32,
     ppid: u32,
-    file_offsets: [u64; 64],
     /// Authorized directory view used for relative AT_FDCWD resolution.
     cwd: crate::linux_vfs::DirectoryId,
     brk: u64,
@@ -87,6 +90,10 @@ struct LinuxProcessState {
     exec_path: [u8; 128],
     exec_path_len: usize,
     mappings: Vec<LinuxMapping>,
+    pipes: Vec<LinuxPipeHandle>,
+    next_pipe_handle: u64,
+    sockets: Vec<LinuxSocketHandle>,
+    next_socket_handle: u64,
     /// Set only on the child side of vfork. The parent task sleeps until the
     /// child commits exec or leaves `Running`.
     /// 仅 vfork 子进程携带；父任务睡眠到子进程提交 exec 或离开 Running。
@@ -98,6 +105,20 @@ struct LinuxProcessState {
 struct LinuxMapping {
     va: u64,
     flags: MapFlags,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxPipeHandle {
+    handle: u64,
+    endpoint: Arc<compat_core::PipeEndpoint>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxSocketHandle {
+    handle: u64,
+    endpoint: Arc<compat_core::UnixSocketEndpoint>,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -487,7 +508,6 @@ pub(crate) fn linux_duplicate_fd(
             .fds
             .duplicate_fd(fd, minimum, close_on_exec)
             .map_err(|_| ProcError::NoTaskSlot)?;
-        linux.file_offsets[duplicate.fd() as usize] = linux.file_offsets[fd as usize];
         Ok(duplicate.fd())
     })
     .ok()
@@ -505,14 +525,208 @@ pub(crate) fn linux_duplicate_fd_to(
 ) -> Option<u32> {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let old_target_handle = linux.fds.get_fd(target).map(|entry| entry.handle);
         let duplicate = linux
             .fds
             .duplicate_fd_to(fd, target, close_on_exec)
             .map_err(|_| ProcError::NoTaskSlot)?;
-        linux.file_offsets[target as usize] = linux.file_offsets[fd as usize];
+        if let Some(handle) = old_target_handle {
+            release_unreferenced_pipe(linux, handle);
+        }
         Ok(duplicate.fd())
     })
     .ok()
+}
+
+/// Creates a bounded Linux pipe with independently addressable endpoints.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_pipe2(
+    pid: ObjId,
+    close_on_exec: bool,
+    nonblocking: bool,
+) -> Option<(u32, u32)> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.pipes.len() >= 32 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        let reader_handle = linux.next_pipe_handle;
+        let writer_handle = reader_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        linux.next_pipe_handle = writer_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let (reader, writer) = compat_core::PipeEndpoint::pair();
+        let reader_fd = linux
+            .fds
+            .install(
+                reader_handle,
+                kernel_core::object::Rights::READ,
+                compat_core::fd::CompatKind::Pipe,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let writer_fd = match linux.fds.install(
+            writer_handle,
+            kernel_core::object::Rights::WRITE,
+            compat_core::fd::CompatKind::Pipe,
+            close_on_exec,
+        ) {
+            Ok(fd) => fd,
+            Err(_) => {
+                let _ = linux.fds.close(reader_fd);
+                return Err(ProcError::NoTaskSlot);
+            }
+        };
+        if nonblocking {
+            const O_NONBLOCK: u32 = 0x800;
+            if !linux.fds.set_fd_status_flags(reader_fd.fd(), O_NONBLOCK)
+                || !linux.fds.set_fd_status_flags(writer_fd.fd(), O_NONBLOCK)
+            {
+                let _ = linux.fds.close(reader_fd);
+                let _ = linux.fds.close(writer_fd);
+                return Err(ProcError::NoTaskSlot);
+            }
+        }
+        linux.pipes.push(LinuxPipeHandle {
+            handle: reader_handle,
+            endpoint: Arc::new(reader),
+        });
+        linux.pipes.push(LinuxPipeHandle {
+            handle: writer_handle,
+            endpoint: Arc::new(writer),
+        });
+        Ok((reader_fd.fd(), writer_fd.fd()))
+    })
+    .ok()
+}
+
+/// Creates a connected AF_UNIX stream pair with two socket descriptors.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socketpair(
+    pid: ObjId,
+    close_on_exec: bool,
+    nonblocking: bool,
+) -> Option<(u32, u32)> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.sockets.len() >= 32 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        let first_handle = linux.next_socket_handle;
+        let second_handle = first_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        linux.next_socket_handle =
+            second_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let (first, second) = compat_core::UnixSocketEndpoint::pair();
+        let rights = kernel_core::object::Rights::READ.union(kernel_core::object::Rights::WRITE);
+        let first_fd = linux
+            .fds
+            .install(
+                first_handle,
+                rights,
+                compat_core::fd::CompatKind::Socket,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let second_fd = match linux.fds.install(
+            second_handle,
+            rights,
+            compat_core::fd::CompatKind::Socket,
+            close_on_exec,
+        ) {
+            Ok(fd) => fd,
+            Err(_) => {
+                let _ = linux.fds.close(first_fd);
+                return Err(ProcError::NoTaskSlot);
+            }
+        };
+        if nonblocking {
+            const O_NONBLOCK: u32 = 0x800;
+            if !linux.fds.set_fd_status_flags(first_fd.fd(), O_NONBLOCK)
+                || !linux.fds.set_fd_status_flags(second_fd.fd(), O_NONBLOCK)
+            {
+                let _ = linux.fds.close(first_fd);
+                let _ = linux.fds.close(second_fd);
+                return Err(ProcError::NoTaskSlot);
+            }
+        }
+        linux.sockets.push(LinuxSocketHandle {
+            handle: first_handle,
+            endpoint: Arc::new(first),
+        });
+        linux.sockets.push(LinuxSocketHandle {
+            handle: second_handle,
+            endpoint: Arc::new(second),
+        });
+        Ok((first_fd.fd(), second_fd.fd()))
+    })
+    .ok()
+}
+
+/// Resolves one pipe endpoint without incrementing its process-lifetime reference.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_pipe_endpoint(
+    pid: ObjId,
+    handle: u64,
+) -> Option<Arc<compat_core::PipeEndpoint>> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .pipes
+            .iter()
+            .find(|pipe| pipe.handle == handle)
+            .map(|pipe| Arc::clone(&pipe.endpoint)),
+        _ => None,
+    })
+}
+
+/// Resolves one AF_UNIX stream endpoint without changing its lifetime.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_endpoint(
+    pid: ObjId,
+    handle: u64,
+) -> Option<Arc<compat_core::UnixSocketEndpoint>> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .sockets
+            .iter()
+            .find(|socket| socket.handle == handle)
+            .map(|socket| Arc::clone(&socket.endpoint)),
+        _ => None,
+    })
+}
+
+/// Returns the shared status flags for one Linux descriptor.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_fd_status_flags(pid: ObjId, fd: u32) -> Option<u32> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p.linux.as_ref()?.fds.fd_status_flags(fd),
+        _ => None,
+    })
+}
+
+/// Updates shared Linux status flags for one descriptor generation.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_set_fd_status_flags(pid: ObjId, fd: u32, flags: u32) -> bool {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_ref().ok_or(ProcError::Exited)?;
+        if linux.fds.set_fd_status_flags(fd, flags) {
+            Ok(())
+        } else {
+            Err(ProcError::NoTaskSlot)
+        }
+    })
+    .is_ok()
+}
+
+#[cfg(feature = "linux-abi")]
+fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
+    if handle >= LINUX_PIPE_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+        linux.pipes.retain(|pipe| pipe.handle != handle);
+    }
+    if handle >= LINUX_SOCKET_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+        linux.sockets.retain(|socket| socket.handle != handle);
+    }
 }
 
 /// Installs a read-only Linux virtual file and initializes its offset.
@@ -534,7 +748,6 @@ pub(crate) fn linux_install_file(pid: ObjId, handle: u64, close_on_exec: bool) -
                 close_on_exec,
             )
             .map_err(|_| ProcError::NoTaskSlot)?;
-        linux.file_offsets[fd.fd() as usize] = 0;
         Ok(fd.fd())
     })
     .ok()
@@ -559,7 +772,6 @@ pub(crate) fn linux_install_dir(pid: ObjId, handle: u64, close_on_exec: bool) ->
                 close_on_exec,
             )
             .map_err(|_| ProcError::NoTaskSlot)?;
-        linux.file_offsets[fd.fd() as usize] = 0;
         Ok(fd.fd())
     })
     .ok()
@@ -573,13 +785,11 @@ pub(crate) fn linux_file_state(pid: ObjId, fd: u32) -> Option<(u64, u64)> {
     crate::kobj::with(|t| match t.get(pid) {
         Ok(KObject::Process(p)) => {
             let linux = p.linux.as_ref()?;
-            if (fd as usize) >= linux.file_offsets.len() {
-                return None;
-            }
             let entry = linux.fds.get_fd(fd)?;
+            let offset = linux.fds.fd_offset(fd)?;
             (entry.kind == compat_core::fd::CompatKind::File
                 && entry.rights.contains(kernel_core::object::Rights::READ))
-            .then_some((entry.handle, linux.file_offsets[fd as usize]))
+            .then_some((entry.handle, offset))
         }
         _ => None,
     })
@@ -592,21 +802,12 @@ pub(crate) fn linux_file_state(pid: ObjId, fd: u32) -> Option<(u64, u64)> {
 pub(crate) fn set_linux_file_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
-        if (fd as usize) >= linux.file_offsets.len() {
-            return Err(ProcError::Exited);
-        }
         let entry = linux.fds.get_fd(fd).ok_or(ProcError::NoTaskSlot)?;
         if entry.kind != compat_core::fd::CompatKind::File {
             return Err(ProcError::NoTaskSlot);
         }
-        // Descriptors duplicated by dup/dup2/dup3 share one open-file offset.
-        for index in 0..linux.file_offsets.len() {
-            if linux.fds.get_fd(index as u32).is_some_and(|candidate| {
-                candidate.kind == compat_core::fd::CompatKind::File
-                    && candidate.handle == entry.handle
-            }) {
-                linux.file_offsets[index] = offset;
-            }
+        if !linux.fds.set_fd_offset(fd, offset) {
+            return Err(ProcError::NoTaskSlot);
         }
         Ok(())
     })
@@ -621,13 +822,11 @@ pub(crate) fn linux_dir_state(pid: ObjId, fd: u32) -> Option<(u64, u64)> {
     crate::kobj::with(|t| match t.get(pid) {
         Ok(KObject::Process(p)) => {
             let linux = p.linux.as_ref()?;
-            if (fd as usize) >= linux.file_offsets.len() {
-                return None;
-            }
             let entry = linux.fds.get_fd(fd)?;
+            let offset = linux.fds.fd_offset(fd)?;
             (entry.kind == compat_core::fd::CompatKind::Directory
                 && entry.rights.contains(kernel_core::object::Rights::READ))
-            .then_some((entry.handle, linux.file_offsets[fd as usize]))
+            .then_some((entry.handle, offset))
         }
         _ => None,
     })
@@ -640,21 +839,12 @@ pub(crate) fn linux_dir_state(pid: ObjId, fd: u32) -> Option<(u64, u64)> {
 pub(crate) fn set_linux_dir_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
-        if (fd as usize) >= linux.file_offsets.len() {
-            return Err(ProcError::Exited);
-        }
         let entry = linux.fds.get_fd(fd).ok_or(ProcError::NoTaskSlot)?;
         if entry.kind != compat_core::fd::CompatKind::Directory {
             return Err(ProcError::NoTaskSlot);
         }
-        // Duplicated directory descriptors also share one directory cursor.
-        for index in 0..linux.file_offsets.len() {
-            if linux.fds.get_fd(index as u32).is_some_and(|candidate| {
-                candidate.kind == compat_core::fd::CompatKind::Directory
-                    && candidate.handle == entry.handle
-            }) {
-                linux.file_offsets[index] = offset;
-            }
+        if !linux.fds.set_fd_offset(fd, offset) {
+            return Err(ProcError::NoTaskSlot);
         }
         Ok(())
     })
@@ -668,9 +858,10 @@ pub(crate) fn set_linux_dir_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
 pub(crate) fn linux_close_fd(pid: ObjId, fd: u32) -> bool {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let handle = linux.fds.get_fd(fd).map(|entry| entry.handle);
         linux.fds.close_fd(fd).map_err(|_| ProcError::NoTaskSlot)?;
-        if (fd as usize) < linux.file_offsets.len() {
-            linux.file_offsets[fd as usize] = 0;
+        if let Some(handle) = handle {
+            release_unreferenced_pipe(linux, handle);
         }
         Ok(())
     })
@@ -869,7 +1060,6 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         fds,
         pid,
         ppid: compat_core::syscall::LINUX_COMPAT_ROOT_PPID as u32,
-        file_offsets: [0; 64],
         cwd: crate::linux_vfs::DirectoryId::Root,
         brk: crate::arch::USER_WINDOW.0 + 0x1000_0000,
         mmap_next: crate::arch::USER_WINDOW.0 + 0x4000_0000,
@@ -877,6 +1067,10 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         exec_path: [0; 128],
         exec_path_len: 0,
         mappings: Vec::new(),
+        pipes: Vec::new(),
+        next_pipe_handle: LINUX_PIPE_HANDLE_BASE,
+        sockets: Vec::new(),
+        next_socket_handle: LINUX_SOCKET_HANDLE_BASE,
         vfork_parent: None,
     };
     create_process(name, SyscallSet::EMPTY, move |process| {
@@ -898,7 +1092,12 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
             revoke_all_device_mappings(p);
             let linux = p.linux.as_mut().expect("checked Linux process");
             let _ = linux.fds.take_close_on_exec();
-            linux.file_offsets.fill(0);
+            linux
+                .pipes
+                .retain(|pipe| linux.fds.handle_fd_count(pipe.handle) != 0);
+            linux
+                .sockets
+                .retain(|socket| linux.fds.handle_fd_count(socket.handle) != 0);
             linux.mappings.clear();
             linux.brk = crate::arch::USER_WINDOW.0 + 0x1000_0000;
             linux.mmap_next = crate::arch::USER_WINDOW.0 + 0x4000_0000;
@@ -3796,6 +3995,11 @@ fn release_resources_in(t: &mut kobj::Table, pid: ObjId) -> usize {
             let n = p.handles.close_all(|r| closed.push(r));
             // 进程进入退出流程后它的设备窗口一律撤销；BAR 不是 RAM，这里只改页表。
             revoke_all_device_mappings(p);
+            if let Some(linux) = p.linux.as_mut() {
+                let _ = linux.fds.take_all();
+                linux.pipes.clear();
+                linux.sockets.clear();
+            }
             n
         }
         _ => 0,

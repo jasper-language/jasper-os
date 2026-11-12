@@ -13,13 +13,14 @@ use linux_raw_sys::general::{
     __NR_io_uring_enter,
     __NR_io_uring_register, __NR_io_uring_setup, __NR_ioctl, __NR_kill, __NR_madvise, __NR_mmap,
     __NR_nanosleep,
-    __NR_lseek, __NR_mprotect, __NR_munmap, __NR_newfstatat, __NR_openat, __NR_poll, __NR_pread64,
+    __NR_lseek, __NR_mprotect, __NR_munmap, __NR_newfstatat, __NR_openat, __NR_pipe2, __NR_poll, __NR_pread64,
     __NR_prlimit64, __NR_read, __NR_readlink, __NR_readlinkat, __NR_readv, __NR_rseq,
     __NR_rt_sigaction,
     __NR_rt_sigprocmask, __NR_rt_sigreturn, __NR_sched_getaffinity, __NR_sched_getscheduler,
     __NR_sched_yield,
     __NR_set_robust_list, __NR_sysinfo,
-    __NR_set_tid_address, __NR_vfork, __NR_wait4,
+    __NR_getpeername, __NR_getsockname, __NR_recvfrom, __NR_sendto, __NR_set_tid_address,
+    __NR_shutdown, __NR_socketpair, __NR_vfork, __NR_wait4,
     __NR_sigaltstack, __NR_statfs, __NR_statx, __NR_tgkill, __NR_time, __NR_uname, __NR_write,
     __NR_writev,
 };
@@ -81,6 +82,13 @@ pub enum LinuxSyscall {
     Dup,
     Dup2,
     Dup3,
+    Pipe2,
+    SocketPair,
+    SendTo,
+    RecvFrom,
+    Shutdown,
+    GetSockName,
+    GetPeerName,
     Chdir,
     OpenAt,
     Fchdir,
@@ -235,6 +243,10 @@ pub enum CompatErrno {
     /// No waitable child process exists.
     /// 不存在可等待的子进程。
     NoChild = linux_raw_sys::errno::ECHILD,
+    /// A destination was supplied on an already connected socket.
+    IsConnected = linux_raw_sys::errno::EISCONN,
+    /// The socket has no connected peer.
+    NotConnected = linux_raw_sys::errno::ENOTCONN,
     Interrupted = linux_raw_sys::errno::EINTR,
     BadFd = linux_raw_sys::errno::EBADF,
     TryAgain = linux_raw_sys::errno::EAGAIN,
@@ -253,6 +265,9 @@ pub enum CompatErrno {
     /// Seek is invalid for a pipe or console stream.
     /// 管道或控制台流不支持定位。
     Pipe = linux_raw_sys::errno::ESPIPE,
+    /// The pipe reader has closed.
+    /// 管道读端已关闭。
+    BrokenPipe = linux_raw_sys::errno::EPIPE,
     /// The descriptor is not a terminal.
     /// 描述符不是终端。
     NotTty = linux_raw_sys::errno::ENOTTY,
@@ -284,6 +299,13 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_dup) => LinuxSyscall::Dup,
         value if value == u64::from(__NR_dup2) => LinuxSyscall::Dup2,
         value if value == u64::from(__NR_dup3) => LinuxSyscall::Dup3,
+        value if value == u64::from(__NR_pipe2) => LinuxSyscall::Pipe2,
+        value if value == u64::from(__NR_socketpair) => LinuxSyscall::SocketPair,
+        value if value == u64::from(__NR_sendto) => LinuxSyscall::SendTo,
+        value if value == u64::from(__NR_recvfrom) => LinuxSyscall::RecvFrom,
+        value if value == u64::from(__NR_shutdown) => LinuxSyscall::Shutdown,
+        value if value == u64::from(__NR_getsockname) => LinuxSyscall::GetSockName,
+        value if value == u64::from(__NR_getpeername) => LinuxSyscall::GetPeerName,
         value if value == u64::from(__NR_chdir) => LinuxSyscall::Chdir,
         value if value == u64::from(__NR_openat) => LinuxSyscall::OpenAt,
         value if value == u64::from(__NR_fchdir) => LinuxSyscall::Fchdir,
@@ -386,6 +408,13 @@ mod tests {
             (__NR_dup, LinuxSyscall::Dup),
             (__NR_dup2, LinuxSyscall::Dup2),
             (__NR_dup3, LinuxSyscall::Dup3),
+            (__NR_pipe2, LinuxSyscall::Pipe2),
+            (__NR_socketpair, LinuxSyscall::SocketPair),
+            (__NR_sendto, LinuxSyscall::SendTo),
+            (__NR_recvfrom, LinuxSyscall::RecvFrom),
+            (__NR_shutdown, LinuxSyscall::Shutdown),
+            (__NR_getsockname, LinuxSyscall::GetSockName),
+            (__NR_getpeername, LinuxSyscall::GetPeerName),
             (__NR_chdir, LinuxSyscall::Chdir),
             (__NR_openat, LinuxSyscall::OpenAt),
             (__NR_fchdir, LinuxSyscall::Fchdir),

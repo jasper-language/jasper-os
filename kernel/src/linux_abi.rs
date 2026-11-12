@@ -1413,6 +1413,13 @@ fn execute(
         LinuxSyscall::Dup => compat_result(linux_dup(pid, call.args)),
         LinuxSyscall::Dup2 => compat_result(linux_dup2(pid, call.args)),
         LinuxSyscall::Dup3 => compat_result(linux_dup3(pid, call.args)),
+        LinuxSyscall::Pipe2 => compat_result(linux_pipe2(pid, call.args)),
+        LinuxSyscall::SocketPair => compat_result(linux_socketpair(pid, call.args)),
+        LinuxSyscall::SendTo => compat_result(linux_sendto(pid, call.args)),
+        LinuxSyscall::RecvFrom => compat_result(linux_recvfrom(pid, call.args)),
+        LinuxSyscall::Shutdown => compat_result(linux_shutdown(pid, call.args)),
+        LinuxSyscall::GetSockName => compat_result(linux_sockname(pid, call.args, false)),
+        LinuxSyscall::GetPeerName => compat_result(linux_sockname(pid, call.args, true)),
         LinuxSyscall::Chdir => compat_result(linux_chdir(pid, call.args[0])),
         LinuxSyscall::OpenAt => compat_result(linux_openat(pid, call.args)),
         LinuxSyscall::Fchdir => compat_result(linux_fchdir(pid, call.args[0])),
@@ -1525,6 +1532,20 @@ fn linux_uname(args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let len = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if let Some(entry) = proc::linux_fd(pid, fd) {
+        if entry.kind == compat_core::fd::CompatKind::Pipe {
+            if !entry.rights.contains(kernel_core::object::Rights::WRITE) {
+                return Err(CompatErrno::BadFd);
+            }
+            return linux_pipe_write(pid, fd, entry.handle, args[1], len);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Socket {
+            if !entry.rights.contains(kernel_core::object::Rights::WRITE) {
+                return Err(CompatErrno::BadFd);
+            }
+            return linux_socket_write(pid, fd, entry.handle, args[1], len, false, false);
+        }
+    }
     authorize_console(pid, fd, true)?;
     if len > CONSOLE_WRITE_MAX {
         return Err(CompatErrno::Invalid);
@@ -1704,6 +1725,20 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let len = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
     if len > MAX_READ {
         return Err(CompatErrno::Invalid);
+    }
+    if let Some(entry) = proc::linux_fd(pid, fd) {
+        if entry.kind == compat_core::fd::CompatKind::Pipe {
+            if !entry.rights.contains(kernel_core::object::Rights::READ) {
+                return Err(CompatErrno::BadFd);
+            }
+            return linux_pipe_read(pid, fd, entry.handle, args[1], len);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Socket {
+            if !entry.rights.contains(kernel_core::object::Rights::READ) {
+                return Err(CompatErrno::BadFd);
+            }
+            return linux_socket_read(pid, fd, entry.handle, args[1], len, false);
+        }
     }
     if fd == 0 {
         authorize_console(pid, fd, false)?;
@@ -2954,6 +2989,367 @@ fn linux_dup3(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         .ok_or(CompatErrno::BadFd)
 }
 
+/// Implements `pipe2(2)` with CLOEXEC and nonblocking status flags.
+///
+/// 创建有界匿名管道，并以 all-or-nothing 方式返回两个 fd。
+fn linux_pipe2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const O_NONBLOCK: u64 = 0x800;
+    const O_CLOEXEC: u64 = 0x80000;
+    let flags = args[1];
+    if flags & !(O_NONBLOCK | O_CLOEXEC) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let (reader, writer) = proc::linux_pipe2(
+        pid,
+        flags & O_CLOEXEC != 0,
+        flags & O_NONBLOCK != 0,
+    )
+    .ok_or(CompatErrno::NoSpace)?;
+    let mut output = [0u8; 8];
+    output[0..4].copy_from_slice(&reader.to_le_bytes());
+    output[4..8].copy_from_slice(&writer.to_le_bytes());
+    if copy_to_user(args[0], &output, output.len()).is_err() {
+        let _ = proc::linux_close_fd(pid, reader);
+        let _ = proc::linux_close_fd(pid, writer);
+        return Err(CompatErrno::Fault);
+    }
+    Ok(0)
+}
+
+/// Implements the x86_64 `socketpair(2)` AF_UNIX stream subset.
+fn linux_socketpair(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const AF_UNIX: u64 = 1;
+    const SOCK_STREAM: u64 = 1;
+    const SOCK_NONBLOCK: u64 = 0x800;
+    const SOCK_CLOEXEC: u64 = 0x80000;
+    let domain = args[0];
+    let socket_type = args[1];
+    let protocol = args[2];
+    if domain != AF_UNIX
+        || socket_type & 0xf != SOCK_STREAM
+        || socket_type & !(0xf | SOCK_NONBLOCK | SOCK_CLOEXEC) != 0
+        || protocol != 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let (first, second) = proc::linux_socketpair(
+        pid,
+        socket_type & SOCK_CLOEXEC != 0,
+        socket_type & SOCK_NONBLOCK != 0,
+    )
+    .ok_or(CompatErrno::NoSpace)?;
+    let mut output = [0u8; 8];
+    output[0..4].copy_from_slice(&first.to_le_bytes());
+    output[4..8].copy_from_slice(&second.to_le_bytes());
+    if copy_to_user(args[3], &output, output.len()).is_err() {
+        let _ = proc::linux_close_fd(pid, first);
+        let _ = proc::linux_close_fd(pid, second);
+        return Err(CompatErrno::Fault);
+    }
+    Ok(0)
+}
+
+/// Implements `sendto(2)` on an already connected AF_UNIX stream.
+fn linux_sendto(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MSG_DONTWAIT: u64 = 0x40;
+    const MSG_NOSIGNAL: u64 = 0x4000;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let len = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let flags = args[3];
+    if flags & !(MSG_DONTWAIT | MSG_NOSIGNAL) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if args[4] != 0 || args[5] != 0 {
+        return Err(CompatErrno::IsConnected);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Socket
+        || !entry.rights.contains(kernel_core::object::Rights::WRITE)
+    {
+        return Err(CompatErrno::NotConnected);
+    }
+    linux_socket_write(
+        pid,
+        fd,
+        entry.handle,
+        args[1],
+        len,
+        flags & MSG_DONTWAIT != 0,
+        flags & MSG_NOSIGNAL != 0,
+    )
+}
+
+/// Implements `recvfrom(2)` on an already connected AF_UNIX stream.
+fn linux_recvfrom(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MSG_DONTWAIT: u64 = 0x40;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let len = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let flags = args[3];
+    if flags & !MSG_DONTWAIT != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Socket
+        || !entry.rights.contains(kernel_core::object::Rights::READ)
+    {
+        return Err(CompatErrno::NotConnected);
+    }
+    let received = linux_socket_read(
+        pid,
+        fd,
+        entry.handle,
+        args[1],
+        len,
+        flags & MSG_DONTWAIT != 0,
+    )?;
+    if args[4] != 0 {
+        write_unix_sockaddr(args[4], args[5], 2)?;
+    }
+    Ok(received)
+}
+
+/// Applies one directional AF_UNIX stream shutdown.
+fn linux_shutdown(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let how = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Socket {
+        return Err(CompatErrno::NotConnected);
+    }
+    let socket = proc::linux_socket_endpoint(pid, entry.handle).ok_or(CompatErrno::NotConnected)?;
+    if socket.shutdown(how) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::Invalid)
+    }
+}
+
+/// Writes an unnamed AF_UNIX address and updates its caller length.
+fn write_unix_sockaddr(address: u64, length_address: u64, actual: u32) -> Result<(), CompatErrno> {
+    let mut raw_len = [0u8; 4];
+    copy_from_user(&mut raw_len, length_address, 4).map_err(|_| CompatErrno::Fault)?;
+    let capacity = u32::from_le_bytes(raw_len) as usize;
+    let mut sockaddr = [0u8; 110];
+    sockaddr[0..2].copy_from_slice(&1u16.to_le_bytes());
+    let copied = capacity.min(actual as usize);
+    if copied != 0 {
+        copy_to_user(address, &sockaddr[..copied], copied).map_err(|_| CompatErrno::Fault)?;
+    }
+    copy_to_user(length_address, &actual.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+    Ok(())
+}
+
+/// Implements `getsockname(2)` and `getpeername(2)` for connected Unix streams.
+fn linux_sockname(pid: ObjId, args: [u64; 6], _peer: bool) -> Result<u64, CompatErrno> {
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Socket {
+        return Err(CompatErrno::NotConnected);
+    }
+    let _ = proc::linux_socket_endpoint(pid, entry.handle).ok_or(CompatErrno::NotConnected)?;
+    write_unix_sockaddr(args[1], args[2], 2)?;
+    Ok(0)
+}
+
+/// Reads a pipe using blocking or nonblocking descriptior status.
+fn linux_pipe_read(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    address: u64,
+    len: usize,
+) -> Result<u64, CompatErrno> {
+    if len == 0 {
+        return Ok(0);
+    }
+    let endpoint = proc::linux_pipe_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking =
+        proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    let mut output = alloc::vec![0u8; len];
+    loop {
+        match endpoint.read(&mut output) {
+            compat_core::PipeRead::Data(0) => return Ok(0),
+            compat_core::PipeRead::Data(count) => {
+                copy_to_user(address, &output[..count], count)
+                    .map_err(|_| CompatErrno::Fault)?;
+                return Ok(count as u64);
+            }
+            compat_core::PipeRead::Eof => return Ok(0),
+            compat_core::PipeRead::WouldBlock if nonblocking => {
+                return Err(CompatErrno::TryAgain)
+            }
+            compat_core::PipeRead::WouldBlock => {
+                if proc::current_exiting() || current_signal_pending(pid) {
+                    return Err(CompatErrno::Interrupted);
+                }
+                sched::pause();
+            }
+        }
+    }
+}
+
+/// Writes a bounded pipe byte stream and preserves `PIPE_BUF` atomic writes.
+fn linux_pipe_write(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    address: u64,
+    len: usize,
+) -> Result<u64, CompatErrno> {
+    if len == 0 {
+        return Ok(0);
+    }
+    if len > compat_core::PIPE_CAPACITY {
+        return Err(CompatErrno::Invalid);
+    }
+    let endpoint = proc::linux_pipe_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking =
+        proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    let mut input = alloc::vec![0u8; len];
+    copy_from_user(&mut input, address, len).map_err(|_| CompatErrno::Fault)?;
+    let mut written = 0usize;
+    while written < input.len() {
+        match endpoint.write(&input[written..]) {
+            compat_core::PipeWrite::Data(0) => {
+                raise_sigpipe(pid);
+                return Err(CompatErrno::BrokenPipe);
+            }
+            compat_core::PipeWrite::Data(count) => written += count,
+            compat_core::PipeWrite::Broken => {
+                raise_sigpipe(pid);
+                return Err(CompatErrno::BrokenPipe);
+            }
+            compat_core::PipeWrite::WouldBlock if nonblocking => {
+                return if written == 0 {
+                    Err(CompatErrno::TryAgain)
+                } else {
+                    Ok(written as u64)
+                }
+            }
+            compat_core::PipeWrite::WouldBlock => {
+                if proc::current_exiting() || current_signal_pending(pid) {
+                    return if written == 0 {
+                        Err(CompatErrno::Interrupted)
+                    } else {
+                        Ok(written as u64)
+                    };
+                }
+                sched::pause();
+            }
+        }
+    }
+    Ok(written as u64)
+}
+
+/// Reads one connected AF_UNIX stream endpoint.
+fn linux_socket_read(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    address: u64,
+    len: usize,
+    force_nonblocking: bool,
+) -> Result<u64, CompatErrno> {
+    if len == 0 {
+        return Ok(0);
+    }
+    let endpoint = proc::linux_socket_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking = force_nonblocking ||
+        proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    let mut output = alloc::vec![0u8; len];
+    loop {
+        match endpoint.read(&mut output) {
+            compat_core::PipeRead::Data(count) => {
+                copy_to_user(address, &output[..count], count)
+                    .map_err(|_| CompatErrno::Fault)?;
+                return Ok(count as u64);
+            }
+            compat_core::PipeRead::Eof => return Ok(0),
+            compat_core::PipeRead::WouldBlock if nonblocking => {
+                return Err(CompatErrno::TryAgain)
+            }
+            compat_core::PipeRead::WouldBlock => {
+                if proc::current_exiting() || current_signal_pending(pid) {
+                    return Err(CompatErrno::Interrupted);
+                }
+                sched::pause();
+            }
+        }
+    }
+}
+
+/// Writes one connected AF_UNIX stream endpoint.
+fn linux_socket_write(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    address: u64,
+    len: usize,
+    force_nonblocking: bool,
+    suppress_sigpipe: bool,
+) -> Result<u64, CompatErrno> {
+    if len == 0 {
+        return Ok(0);
+    }
+    if len > compat_core::PIPE_CAPACITY {
+        return Err(CompatErrno::Invalid);
+    }
+    let endpoint = proc::linux_socket_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking = force_nonblocking ||
+        proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    let mut input = alloc::vec![0u8; len];
+    copy_from_user(&mut input, address, len).map_err(|_| CompatErrno::Fault)?;
+    let mut written = 0usize;
+    while written < input.len() {
+        match endpoint.write(&input[written..]) {
+            compat_core::PipeWrite::Data(count) => written += count,
+            compat_core::PipeWrite::Broken => {
+                if !suppress_sigpipe {
+                    raise_sigpipe(pid);
+                }
+                return Err(CompatErrno::BrokenPipe);
+            }
+            compat_core::PipeWrite::WouldBlock if nonblocking => {
+                return if written == 0 {
+                    Err(CompatErrno::TryAgain)
+                } else {
+                    Ok(written as u64)
+                }
+            }
+            compat_core::PipeWrite::WouldBlock => {
+                if proc::current_exiting() || current_signal_pending(pid) {
+                    return if written == 0 {
+                        Err(CompatErrno::Interrupted)
+                    } else {
+                        Ok(written as u64)
+                    };
+                }
+                sched::pause();
+            }
+        }
+    }
+    Ok(written as u64)
+}
+
+/// Applies the process's disposition for SIGPIPE after a broken pipe write.
+fn raise_sigpipe(pid: ObjId) {
+    const SIGPIPE: u32 = 13;
+    let Some(action) = proc::linux_signal_action(pid, SIGPIPE) else {
+        return;
+    };
+    match action[0] {
+        1 => {}
+        0 => {
+            let _ = proc::begin_exit(pid, 128 + i64::from(SIGPIPE));
+        }
+        _ => {
+            if let Some(tid) = linux_tid(pid) {
+                let _ = queue_thread_signal(pid, tid, SIGPIPE);
+            }
+        }
+    }
+}
+
 /// Opens one exact virtual read-only path through `openat(2)`.
 ///
 /// 仅接受绝对路径与只读标志；`O_CLOEXEC` 被保留，写模式、路径穿越和未知路径失败关闭。
@@ -3321,6 +3717,7 @@ fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const F_GETFD: u64 = 1;
     const F_SETFD: u64 = 2;
     const F_GETFL: u64 = 3;
+    const F_SETFL: u64 = 4;
     const FD_CLOEXEC: u64 = 1;
     const O_NONBLOCK: u64 = 0x800;
     const O_DIRECTORY: u64 = 0x10000;
@@ -3328,11 +3725,22 @@ fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     match args[1] {
         F_GETFD => Ok(u64::from(entry.close_on_exec)),
-        F_GETFL => Ok(if entry.kind == compat_core::fd::CompatKind::Directory {
-            O_NONBLOCK | O_DIRECTORY
-        } else {
-            0
-        }),
+        F_GETFL => {
+            let status = u64::from(proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)?);
+            Ok(status
+                | if entry.kind == compat_core::fd::CompatKind::Directory {
+                    O_DIRECTORY
+                } else {
+                    0
+                })
+        }
+        F_SETFL if args[2] & !O_NONBLOCK == 0 => {
+            if proc::linux_set_fd_status_flags(pid, fd, args[2] as u32) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::BadFd)
+            }
+        }
         F_SETFD if args[2] & !FD_CLOEXEC == 0 => {
             if proc::linux_set_fd_cloexec(pid, fd, args[2] & FD_CLOEXEC != 0) {
                 Ok(0)
@@ -3351,7 +3759,7 @@ fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .ok_or(CompatErrno::NoSpace)?;
             Ok(u64::from(duplicate))
         }
-        F_SETFD => Err(CompatErrno::Invalid),
+        F_SETFD | F_SETFL => Err(CompatErrno::Invalid),
         _ => Err(CompatErrno::NoSys),
     }
 }
@@ -3367,9 +3775,28 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const TCSETSF: u64 = 0x5404;
     const TIOCGWINSZ: u64 = 0x5413;
     const TIOCSWINSZ: u64 = 0x5414;
+    const FIONREAD: u64 = 0x541b;
     const TCGETS2: u64 = 0x802c_542a;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-    proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if args[1] == FIONREAD && entry.kind == compat_core::fd::CompatKind::Pipe {
+        if !entry.rights.contains(kernel_core::object::Rights::READ) {
+            return Err(CompatErrno::BadFd);
+        }
+        let pipe = proc::linux_pipe_endpoint(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+        let available = i32::try_from(pipe.buffered_bytes()).unwrap_or(i32::MAX);
+        copy_to_user(args[2], &available.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+        return Ok(0);
+    }
+    if args[1] == FIONREAD && entry.kind == compat_core::fd::CompatKind::Socket {
+        if !entry.rights.contains(kernel_core::object::Rights::READ) {
+            return Err(CompatErrno::BadFd);
+        }
+        let socket = proc::linux_socket_endpoint(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+        let available = i32::try_from(socket.buffered_bytes()).unwrap_or(i32::MAX);
+        copy_to_user(args[2], &available.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+        return Ok(0);
+    }
     if matches!(
         args[1],
         TCGETS | TCSETS | TCSETSW | TCSETSF | TIOCGWINSZ | TIOCSWINSZ | TCGETS2
@@ -3387,6 +3814,8 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const POLLIN: u16 = 0x001;
     const POLLOUT: u16 = 0x004;
+    const POLLERR: u16 = 0x008;
+    const POLLHUP: u16 = 0x010;
     const POLLNVAL: u16 = 0x020;
     const MAX_POLLFDS: usize = 64;
     let count = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
@@ -3409,6 +3838,54 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 None => POLLNVAL,
                 Some(entry) if entry.kind == compat_core::fd::CompatKind::File => {
                     events & (POLLIN | POLLOUT)
+                }
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::Pipe => {
+                    let Some(pipe) = proc::linux_pipe_endpoint(pid, entry.handle) else {
+                        continue;
+                    };
+                    let mut ready = 0;
+                    if events & POLLIN != 0 && pipe.is_readable() {
+                        ready |= POLLIN;
+                    }
+                    if events & POLLOUT != 0 && pipe.is_writable() {
+                        ready |= POLLOUT;
+                    }
+                    if pipe.readers_gone()
+                        && entry.rights.contains(kernel_core::object::Rights::WRITE)
+                    {
+                        ready |= POLLERR;
+                    }
+                    if pipe.writers_gone()
+                        && entry.rights.contains(kernel_core::object::Rights::READ)
+                    {
+                        ready |= POLLHUP;
+                    }
+                    ready
+                }
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::Socket => {
+                    let Some(socket) = proc::linux_socket_endpoint(pid, entry.handle) else {
+                        continue;
+                    };
+                    let mut ready = 0;
+                    if events & POLLIN != 0
+                        && entry.rights.contains(kernel_core::object::Rights::READ)
+                        && socket.is_readable()
+                    {
+                        ready |= POLLIN;
+                    }
+                    if events & POLLOUT != 0
+                        && entry.rights.contains(kernel_core::object::Rights::WRITE)
+                        && socket.is_writable()
+                    {
+                        ready |= POLLOUT;
+                    }
+                    if socket.peer_read_gone() {
+                        ready |= POLLERR;
+                    }
+                    if socket.peer_write_gone() {
+                        ready |= POLLHUP;
+                    }
+                    ready
                 }
                 Some(_) => 0,
             }

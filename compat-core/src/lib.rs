@@ -6,9 +6,12 @@
 
 #![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
 pub mod executable;
 pub mod fd;
 pub mod native;
+pub mod pipe;
 pub mod process;
 pub mod syscall;
 pub mod utsname;
@@ -21,6 +24,7 @@ pub use native::{
     Epoll, EpollEvent, EpollInterest, EventSourceTable, Futex, FutexWake, MemoryMapping,
     NativeError, NativeHandle, NativeMemory, NativeWait, Uring,
 };
+pub use pipe::{PipeEndpoint, PipeRead, PipeWrite, UnixSocketEndpoint, PIPE_BUF, PIPE_CAPACITY};
 pub use process::{LinuxPid, ProcessEntry, ProcessTable, ProcessTableError, ProcessToken};
 pub use syscall::{
     compat_result, dispatch, CompatErrno, LinuxCall, LinuxSyscall, LinuxSyscallSet,

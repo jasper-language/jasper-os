@@ -46,6 +46,11 @@ if pgrep -f '[q]emu-system-x86_64' >/dev/null 2>&1; then
   echo "FAIL another qemu-system-x86_64 process is already running" >&2
   exit 75
 fi
+exec 9>"$QEMU_LOCK"
+if ! flock -n 9; then
+  echo "FAIL another Jasper-OS QEMU run holds $QEMU_LOCK" >&2
+  exit 75
+fi
 
 # 仅清理本脚本固定命名的派生产物；证据目录必须独占，防止陈旧日志混入。
 # Remove only this script's fixed derived files; evidence output must be fresh.
@@ -132,11 +137,6 @@ if [ "${ISSUE21_QEMU_TRACE:-0}" = 1 ]; then
 fi
 if [ "${ISSUE21_QEMU_GDB:-0}" = 1 ]; then
   QEMU_EXTRA+=(-s -S)
-fi
-exec 9>"$QEMU_LOCK"
-if ! flock -n 9; then
-  echo "FAIL another Jasper-OS QEMU run holds $QEMU_LOCK" >&2
-  exit 75
 fi
 set +e
 nice -n 15 taskset -c "$QEMU_CPUS" timeout "$LIMIT" qemu-system-x86_64 \
