@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/random.h>
 #include <sys/socket.h>
@@ -256,6 +257,26 @@ int main(void) {
     }
     if (close(blocking_pipe[0]) != 0 || close(blocking_pipe[1]) != 0) {
         return 98;
+    }
+    int event_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    uint64_t event_value = 3;
+    uint64_t event_read = 0;
+    struct pollfd event_poll = {.fd = event_fd, .events = POLLIN};
+    if (event_fd < 0 ||
+        (fcntl(event_fd, F_GETFD) & FD_CLOEXEC) == 0 ||
+        write(event_fd, &event_value, sizeof(event_value)) !=
+            (ssize_t)sizeof(event_value) ||
+        poll(&event_poll, 1, 0) != 1 ||
+        (event_poll.revents & POLLIN) == 0 ||
+        read(event_fd, &event_read, sizeof(event_read)) !=
+            (ssize_t)sizeof(event_read) ||
+        event_read != 3) {
+        return 236;
+    }
+    errno = 0;
+    if (read(event_fd, &event_read, sizeof(event_read)) != -1 ||
+        errno != EAGAIN || close(event_fd) != 0) {
+        return 237;
     }
     int broken_pipe[2];
     if (pipe2(broken_pipe, O_NONBLOCK) != 0 ||

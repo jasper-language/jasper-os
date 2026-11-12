@@ -96,6 +96,8 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Accept,
         LinuxSyscall::Accept4,
         LinuxSyscall::SocketPair,
+        LinuxSyscall::EventFd,
+        LinuxSyscall::EventFd2,
         LinuxSyscall::SendMsg,
         LinuxSyscall::RecvMsg,
         LinuxSyscall::SendTo,

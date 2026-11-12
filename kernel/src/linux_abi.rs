@@ -1422,6 +1422,8 @@ fn execute(
         LinuxSyscall::Accept => compat_result(linux_accept(pid, call.args, false)),
         LinuxSyscall::Accept4 => compat_result(linux_accept(pid, call.args, true)),
         LinuxSyscall::SocketPair => compat_result(linux_socketpair(pid, call.args)),
+        LinuxSyscall::EventFd => compat_result(linux_eventfd(pid, call.args, false)),
+        LinuxSyscall::EventFd2 => compat_result(linux_eventfd(pid, call.args, true)),
         LinuxSyscall::SendMsg => compat_result(linux_sendmsg(pid, call.args)),
         LinuxSyscall::RecvMsg => compat_result(linux_recvmsg(pid, call.args)),
         LinuxSyscall::SendTo => compat_result(linux_sendto(pid, call.args)),
@@ -1601,6 +1603,9 @@ fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             }
             return linux_pipe_write(pid, fd, entry.handle, args[1], len);
         }
+        if entry.kind == compat_core::fd::CompatKind::Event {
+            return linux_eventfd_write(pid, fd, entry.handle, args[1], len);
+        }
         if entry.kind == compat_core::fd::CompatKind::Socket {
             if !entry.rights.contains(kernel_core::object::Rights::WRITE) {
                 return Err(CompatErrno::BadFd);
@@ -1779,6 +1784,9 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 return Err(CompatErrno::BadFd);
             }
             return linux_pipe_read(pid, fd, entry.handle, args[1], len);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Event {
+            return linux_eventfd_read(pid, fd, entry.handle, args[1], len);
         }
         if entry.kind == compat_core::fd::CompatKind::Socket {
             if !entry.rights.contains(kernel_core::object::Rights::READ) {
@@ -3234,6 +3242,111 @@ fn linux_memfd_create(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::NoMemory);
     }
     Ok(u64::from(fd))
+}
+
+fn linux_eventfd(pid: ObjId, args: [u64; 6], eventfd2: bool) -> Result<u64, CompatErrno> {
+    const EFD_SEMAPHORE: u64 = 0x1;
+    const EFD_NONBLOCK: u64 = 0x800;
+    const EFD_CLOEXEC: u64 = 0x80000;
+    let initial = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let flags = if eventfd2 {
+        if args[1] & !(EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC) != 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        args[1]
+    } else {
+        0
+    };
+    proc::linux_eventfd_create(
+        pid,
+        initial,
+        flags & EFD_CLOEXEC != 0,
+        flags & EFD_NONBLOCK != 0,
+        flags & EFD_SEMAPHORE != 0,
+    )
+    .map(u64::from)
+    .ok_or(CompatErrno::NoSpace)
+}
+
+fn linux_eventfd_read(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    address: u64,
+    len: usize,
+) -> Result<u64, CompatErrno> {
+    if len < 8 {
+        return Err(CompatErrno::Invalid);
+    }
+    let (counter, semaphore) =
+        proc::linux_eventfd_state(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    loop {
+        let value = {
+            let mut value = counter.lock();
+            if *value == 0 {
+                None
+            } else if semaphore {
+                *value -= 1;
+                Some(1)
+            } else {
+                Some(core::mem::replace(&mut *value, 0))
+            }
+        };
+        if let Some(value) = value {
+            copy_to_user(address, &value.to_le_bytes(), 8).map_err(|_| CompatErrno::Fault)?;
+            return Ok(8);
+        }
+        if nonblocking {
+            return Err(CompatErrno::TryAgain);
+        }
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        sched::pause();
+    }
+}
+
+fn linux_eventfd_write(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    address: u64,
+    len: usize,
+) -> Result<u64, CompatErrno> {
+    const MAX_COUNTER: u64 = u64::MAX - 1;
+    if len < 8 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut raw = [0u8; 8];
+    copy_from_user(&mut raw, address, 8).map_err(|_| CompatErrno::Fault)?;
+    let increment = u64::from_le_bytes(raw);
+    if increment == 0 || increment == u64::MAX {
+        return Err(CompatErrno::Invalid);
+    }
+    let (counter, _) = proc::linux_eventfd_state(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    loop {
+        let available = {
+            let mut value = counter.lock();
+            if *value > MAX_COUNTER - increment {
+                None
+            } else {
+                *value += increment;
+                Some(())
+            }
+        };
+        if available.is_some() {
+            return Ok(8);
+        }
+        if nonblocking {
+            return Err(CompatErrno::TryAgain);
+        }
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        sched::pause();
+    }
 }
 
 fn linux_ftruncate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
@@ -5156,6 +5269,20 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 None => POLLNVAL,
                 Some(entry) if entry.kind == compat_core::fd::CompatKind::File => {
                     events & (POLLIN | POLLOUT)
+                }
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::Event => {
+                    let Some((counter, _)) = proc::linux_eventfd_state(pid, entry.handle) else {
+                        continue;
+                    };
+                    let value = *counter.lock();
+                    let mut ready = 0;
+                    if events & POLLIN != 0 && value != 0 {
+                        ready |= POLLIN;
+                    }
+                    if events & POLLOUT != 0 && value < u64::MAX - 1 {
+                        ready |= POLLOUT;
+                    }
+                    ready
                 }
                 Some(entry) if entry.kind == compat_core::fd::CompatKind::Pipe => {
                     let Some(pipe) = proc::linux_pipe_endpoint(pid, entry.handle) else {
