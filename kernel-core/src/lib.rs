@@ -152,6 +152,7 @@ pub mod virtio_fs;
 pub mod virtio_gpu;
 pub mod virtio_net;
 pub mod wait;
+pub mod workload;
 pub mod wireguard;
 
 #[cfg(test)]
