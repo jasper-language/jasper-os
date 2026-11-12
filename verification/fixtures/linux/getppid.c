@@ -679,6 +679,12 @@ int main(void) {
         ashmem_protection != (PROT_READ | PROT_WRITE)) {
         return 146;
     }
+    struct stat ashmem_stat;
+    if (fstat(ashmem_fd, &ashmem_stat) != 0 ||
+        !S_ISCHR(ashmem_stat.st_mode) ||
+        ashmem_stat.st_size != (off_t)ashmem_size) {
+        return 177;
+    }
     size_t pin_length = ashmem_size;
     unsigned int pin_status = 0;
     if (ioctl(ashmem_fd, JASPER_ASHMEM_PIN, &pin_length) < 0 ||
@@ -753,9 +759,13 @@ int main(void) {
         ioctl(binder_fd, BINDER_VERSION, &binder_version) != 0 ||
         binder_version.protocol_version != BINDER_CURRENT_PROTOCOL_VERSION ||
         ioctl(binder_fd, BINDER_SET_MAX_THREADS, &binder_threads) != 0 ||
-        ioctl(binder_fd, BINDER_THREAD_EXIT, 0) != 0 ||
-        close(binder_fd) != 0) {
+        ioctl(binder_fd, BINDER_THREAD_EXIT, 0) != 0) {
         return 155;
+    }
+    struct stat binder_stat;
+    if (fstat(binder_fd, &binder_stat) != 0 ||
+        !S_ISCHR(binder_stat.st_mode) || close(binder_fd) != 0) {
+        return 178;
     }
     int ion_fd = open("/dev/ion", O_RDWR | O_CLOEXEC);
     struct jasper_ion_allocation_data ion_allocation = {
@@ -778,6 +788,12 @@ int main(void) {
     if (ioctl(ion_fd, JASPER_ION_IOC_SHARE, &ion_share) != 0 ||
         ion_share.fd < 0) {
         return 157;
+    }
+    struct stat ion_stat;
+    if (fstat(ion_share.fd, &ion_stat) != 0 ||
+        !S_ISCHR(ion_stat.st_mode) ||
+        ion_stat.st_size != (off_t)ion_allocation.len) {
+        return 179;
     }
     unsigned char *ion_first = mmap(NULL, ion_allocation.len,
                                     PROT_READ | PROT_WRITE, MAP_SHARED,
@@ -875,9 +891,11 @@ int main(void) {
             exchange.read_consumed != 4 ||
             *(uint32_t *)read_buffer != BR_TRANSACTION_COMPLETE) {
             printf("binder-client-fail stage=transaction rc=%d errno=%d "
-                   "write_consumed=%zu read_consumed=%zu command=%#x\n",
-                   binder_ioctl_result, errno, exchange.write_consumed,
-                   exchange.read_consumed, *(uint32_t *)read_buffer);
+                   "write_consumed=%llu read_consumed=%llu command=%#x\n",
+                   binder_ioctl_result, errno,
+                   (unsigned long long)exchange.write_consumed,
+                   (unsigned long long)exchange.read_consumed,
+                   *(uint32_t *)read_buffer);
             _exit(168);
         }
         memset(&exchange, 0, sizeof(exchange));
@@ -937,8 +955,9 @@ int main(void) {
     if (server_receive_result != 0 || server_exchange.read_consumed != 68 ||
         *(uint32_t *)server_read != BR_TRANSACTION) {
         printf("binder-server-fail stage=receive rc=%d errno=%d "
-               "read_consumed=%zu command=%#x\n",
-               server_receive_result, errno, server_exchange.read_consumed,
+               "read_consumed=%llu command=%#x\n",
+               server_receive_result, errno,
+               (unsigned long long)server_exchange.read_consumed,
                *(uint32_t *)server_read);
         return 173;
     }
