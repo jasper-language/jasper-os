@@ -101,8 +101,7 @@ struct LinuxMapping {
 #[cfg(feature = "linux-abi")]
 #[derive(Clone, Copy)]
 struct VforkParent {
-    task: TaskId,
-    exec_committed: bool,
+    exec_committed_at: Option<u64>,
 }
 
 /// 进程状态。
@@ -2486,9 +2485,10 @@ pub fn vfork_linux_process(
     fs_base: u64,
     preserved_regs: [u64; 6],
     syscall_args: [u64; 6],
-    parent_task: TaskId,
 ) -> Result<ObjId, ProcError> {
-    let (parent_linux_pid, calls, state, parent_root) = kobj::with(|t| match t.get(parent) {
+    let parent_stack_top = crate::arch::kernel_stack();
+    let (parent_linux_pid, calls, state, parent_root, frames, memory_caps) =
+        kobj::with(|t| match t.get(parent) {
         Ok(KObject::Process(p))
             if p.state == ProcState::Running && p.threads_live == 1 =>
         {
@@ -2499,11 +2499,41 @@ pub fn vfork_linux_process(
             {
                 return Err(ProcError::NotTransferable);
             }
-            Ok((linux.pid, linux.calls, linux.clone(), p.space.root()))
+            let mut frames = Vec::new();
+            frames
+                .try_reserve(p.frames.len())
+                .map_err(|_| ProcError::OutOfFrames)?;
+            frames.extend(p.frames.iter().cloned());
+            Ok((
+                linux.pid,
+                linux.calls,
+                linux.clone(),
+                p.space.root(),
+                frames,
+                p.memory_caps.clone(),
+            ))
         }
         Ok(KObject::Process(_)) => Err(ProcError::Exited),
         _ => Err(ProcError::NoSuchProcess),
     })?;
+    let phys_offset = crate::boot::get()
+        .and_then(|boot| boot.phys_offset)
+        .ok_or(ProcError::Map(MapError::NotMapped))?;
+    let parent_stack_frame = unsafe {
+        crate::arch::translate_in(
+            parent_root,
+            phys_offset,
+            parent_stack_top.saturating_sub(1),
+        )
+    }
+    .map(|(frame, _)| frame)
+    .ok_or(ProcError::Map(MapError::NotMapped))?;
+    if frames
+        .iter()
+        .any(|page| page.frame() == parent_stack_frame)
+    {
+        return Err(ProcError::NotTransferable);
+    }
 
     let child = create_linux("linux-vfork", calls)?;
     let rollback = |child: ObjId, adopted: bool| {
@@ -2525,11 +2555,11 @@ pub fn vfork_linux_process(
         *linux = state;
         linux.pid = child_pid;
         linux.ppid = parent_linux_pid;
-        linux.mappings.clear();
         linux.vfork_parent = Some(VforkParent {
-            task: parent_task,
-            exec_committed: false,
+            exec_committed_at: None,
         });
+        p.frames = frames;
+        p.memory_caps = memory_caps;
         let borrowed =
             crate::mm::space::VmSpace::borrowed(parent_root).map_err(ProcError::Map)?;
         let old = core::mem::replace(&mut p.space, borrowed);
@@ -2573,7 +2603,7 @@ pub(crate) fn vfork_commit_exec(child: ObjId) -> bool {
         let Some(parent) = linux.vfork_parent.as_mut() else {
             return Ok(false);
         };
-        parent.exec_committed = true;
+        parent.exec_committed_at = Some(sched::timer_ticks());
         Ok(true)
     })
     .ok()
@@ -2592,7 +2622,8 @@ pub(crate) fn vfork_parent_may_resume(child: ObjId) -> bool {
                 .linux
                 .as_ref()
                 .and_then(|linux| linux.vfork_parent)
-                .is_some_and(|parent| parent.exec_committed);
+                .and_then(|parent| parent.exec_committed_at)
+                .is_some_and(|tick| sched::timer_ticks() > tick);
             p.state != ProcState::Running || committed
         }
         _ => true,

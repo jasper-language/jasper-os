@@ -2355,7 +2355,6 @@ fn linux_vfork(
 ) -> Result<u64, CompatErrno> {
     let (user_rip, user_stack) = user_ip.ok_or(CompatErrno::NoSys)?;
     let parent_space = proc::current_space_root(pid).ok_or(CompatErrno::NoSys)?;
-    let (parent_task, _) = sched::current();
     let child = proc::vfork_linux_process(
         pid,
         user_rip,
@@ -2363,7 +2362,6 @@ fn linux_vfork(
         crate::arch::user_fs_base(),
         preserved_regs,
         args,
-        parent_task,
     )
     .map_err(|error| match error {
         proc::ProcError::NotTransferable => CompatErrno::NoSys,

@@ -146,6 +146,7 @@ pub struct MemoryCapabilityUse {
 }
 
 /// Fixed-capacity provenance table.  Operations are all-or-nothing.
+#[derive(Clone)]
 pub struct MemoryCapabilityTable<const N: usize> {
     slots: [Option<MemoryCapability>; N],
     next_id: u64,

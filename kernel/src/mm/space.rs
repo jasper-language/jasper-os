@@ -249,10 +249,10 @@ impl Drop for VmSpace {
         if self.is_active() {
             activate_kernel();
         }
-        crate::smp::percpu::this().set_space(None);
         if !self.owned {
             return;
         }
+        crate::smp::percpu::this().set_space(None);
         // SAFETY：已确保不是活动空间；此后不再使用 root。
         unsafe { arch::destroy_space(self.root, self.phys_offset, &mut GlobalFrames) };
     }
