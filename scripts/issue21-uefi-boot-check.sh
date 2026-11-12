@@ -68,13 +68,13 @@ runtime_active() {
   done
   return 1
 }
-if runtime_active; then
-  echo "FAIL another qemu-system-x86_64 process is already running" >&2
-  exit 75
-fi
 exec 9>"$QEMU_LOCK"
 if ! flock -w 900 9; then
   echo "FAIL Jasper-OS QEMU lock remained busy for 900s: $QEMU_LOCK" >&2
+  exit 75
+fi
+if runtime_active; then
+  echo "FAIL another qemu-system-x86_64 process is already running" >&2
   exit 75
 fi
 
@@ -265,7 +265,9 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = terminal-session ]; then
   if [ "$MODE" = terminal-session ]; then
     grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
     grep -aqE $'^Jasper-OS native CLI\r?$' "$OUT/serial.log"
-    grep -aqE $'^native-help-ok\r?$' "$OUT/serial.log"
+    if [ "${ISSUE21_MANUAL_INPUT:-0}" != 1 ]; then
+      grep -aqE $'^native-help-ok\r?$' "$OUT/serial.log"
+    fi
     grep -aqE $'^native-echo-ok\r?$' "$OUT/serial.log"
     grep -aqE $'^native-bye\r?$' "$OUT/serial.log"
   fi

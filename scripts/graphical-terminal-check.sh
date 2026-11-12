@@ -67,6 +67,17 @@ printf 'screendump %s\n' "$OUT/frame-prompt.ppm" |
   timeout 10 socat - "UNIX-CONNECT:$SOCKET" >"$OUT/monitor-prompt.log" 2>&1
 
 printf '%s\n' \
+  'sendkey h 30' 'sendkey e 30' 'sendkey l 30' 'sendkey p 30' \
+  'sendkey ret 30' |
+  timeout 10 socat - "UNIX-CONNECT:$SOCKET" >"$OUT/monitor-help.log" 2>&1
+
+for _ in $(seq 1 120); do
+  grep -aq '^native-help-ok' "$OUT/serial.log" 2>/dev/null && break
+  sleep 1
+done
+grep -aq '^native-help-ok' "$OUT/serial.log"
+
+printf '%s\n' \
   'sendkey e 30' 'sendkey c 30' 'sendkey h 30' 'sendkey o 30' \
   'sendkey spc 30' 'sendkey h 30' 'sendkey e 30' 'sendkey l 30' \
   'sendkey l 30' 'sendkey o 30' 'sendkey ret 30' |
