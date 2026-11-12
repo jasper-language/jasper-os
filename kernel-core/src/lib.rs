@@ -160,6 +160,7 @@ pub mod virtio_gpu;
 pub mod virtio_net;
 pub mod wait;
 pub mod workload;
+pub mod workload_recovery;
 pub mod workload_abi;
 pub mod wireguard;
 
