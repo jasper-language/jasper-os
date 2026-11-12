@@ -1836,6 +1836,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "user-cli"
+version = "0.1.0"
+dependencies = [
+ "jasper-rt",
+ "kernel-core",
+]
+
+[[package]]
 name = "user-devprobe"
 version = "0.1.0"
 dependencies = [

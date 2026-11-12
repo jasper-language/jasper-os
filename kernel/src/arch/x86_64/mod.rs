@@ -38,6 +38,7 @@ mod paging;
 mod gdt;
 mod idt;
 mod ioapic;
+pub(crate) mod keyboard;
 pub(crate) use ioapic::wall_clock_unix_seconds;
 mod msi;
 mod pci;
@@ -156,6 +157,9 @@ impl Platform for X86_64 {
         uart::write_byte(byte);
         #[cfg(feature = "bm1-vm")]
         bm1::write_byte(byte);
+    }
+    fn console_try_read_byte() -> Option<u8> {
+        uart::try_read_byte()
     }
 
     #[inline(always)]

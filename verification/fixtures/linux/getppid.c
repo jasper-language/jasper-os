@@ -839,13 +839,27 @@ int main(void) {
     }
     int memfd = memfd_create("jasper-memfd",
                              MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (memfd < 0 ||
-        (fcntl(memfd, F_GETFD) & FD_CLOEXEC) == 0 ||
-        ftruncate(memfd, 4096) != 0) {
+    if (memfd < 0) {
+        printf("memfd-create-fail fd=%d errno=%d\n", memfd, errno);
+        return 207;
+    }
+    int memfd_flags = fcntl(memfd, F_GETFD);
+    if (memfd_flags < 0) {
+        printf("memfd-fcntl-fail fd=%d errno=%d\n", memfd, errno);
+        return 207;
+    }
+    if ((memfd_flags & FD_CLOEXEC) == 0) {
+        printf("memfd-cloexec-fail fd=%d flags=%d\n", memfd, memfd_flags);
+        return 207;
+    }
+    errno = 0;
+    if (ftruncate(memfd, 4096) != 0) {
+        printf("memfd-truncate-fail fd=%d errno=%d\n", memfd, errno);
         return 207;
     }
     struct stat memfd_stat;
-    if (fstat(memfd, &memfd_stat) != 0 || memfd_stat.st_size != 4096) {
+    if (fstat(memfd, &memfd_stat) != 0 || !S_ISREG(memfd_stat.st_mode) ||
+        memfd_stat.st_size != 4096) {
         return 208;
     }
     unsigned char *memfd_map = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
@@ -855,16 +869,20 @@ int main(void) {
     }
     memfd_map[0] = 'M';
     if (msync(memfd_map, 4096, MS_SYNC) != 0 ||
-        munmap(memfd_map, 4096) != 0 ||
         fcntl(memfd, F_ADD_SEALS, F_SEAL_GROW) != 0 ||
         fcntl(memfd, F_GET_SEALS) != F_SEAL_GROW) {
         return 210;
     }
     errno = 0;
-    if (ftruncate(memfd, 8192) != -1 || errno != EPERM ||
+    if (ftruncate(memfd, 8192) != -1 || errno != EPERM) {
+        return 211;
+    }
+    errno = 0;
+    if (fcntl(memfd, F_ADD_SEALS, F_SEAL_WRITE) != -1 || errno != EBUSY ||
+        munmap(memfd_map, 4096) != 0 ||
         fcntl(memfd, F_ADD_SEALS, F_SEAL_WRITE) != 0 ||
         fcntl(memfd, F_GET_SEALS) != (F_SEAL_GROW | F_SEAL_WRITE)) {
-        return 211;
+        return 212;
     }
     errno = 0;
     memfd_map = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
@@ -872,12 +890,12 @@ int main(void) {
     if (memfd_map != MAP_FAILED || errno != EPERM) {
         printf("memfd-seal-map-fail result=%p errno=%d\n",
                (void *)memfd_map, errno);
-        return 212;
+        return 213;
     }
     memfd_map = mmap(NULL, 4096, PROT_READ, MAP_SHARED, memfd, 0);
     if (memfd_map == MAP_FAILED || memfd_map[0] != 'M' ||
         munmap(memfd_map, 4096) != 0 || close(memfd) != 0) {
-        return 213;
+        return 214;
     }
     int binder_fd = open("/dev/binder", O_RDWR | O_CLOEXEC);
     struct binder_version binder_version = {0};
@@ -1401,6 +1419,14 @@ int main(void) {
     if (utimensat(AT_FDCWD, "/missing-time", NULL, 0) != -1 ||
         errno != ENOENT) {
         return 243;
+    }
+    errno = 0;
+    long empty_access =
+        syscall(SYS_faccessat2, fd, "", R_OK, AT_EMPTY_PATH);
+    if (empty_access != 0) {
+        printf("faccessat2-empty-fail fd=%d result=%ld errno=%d\n",
+               fd, empty_access, errno);
+        return 207;
     }
     errno = 0;
     if (readlinkat(AT_FDCWD, "/not-in-compat-root",

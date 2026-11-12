@@ -74,7 +74,7 @@ mod proofs {
  fn running_checkpoint_uses_quota_or_period_boundary() {
   let now:u8=kani::any();let quota:u8=kani::any();let extra:u8=kani::any();let start:u8=kani::any();
   let quota=quota.max(1);let period=quota.saturating_add(extra);
-  let Some(b)=Budget::new(u64::from(now),u64::from(quota),u64::from(period)) else{return;};
+  let Ok(b)=Budget::new(u64::from(now),u64::from(quota),u64::from(period)) else{return;};
   let at=b.running_settle_at(u64::from(start)).unwrap();
   assert!(at<=b.next);
   if b.remaining>0 {assert!(at<=u64::from(start).saturating_add(b.remaining));}

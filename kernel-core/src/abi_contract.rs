@@ -723,15 +723,51 @@ pub const LAYOUTS: &[LayoutContract] = &[
         size: crate::program_caps::CAPS_NOTE_MAX_BYTES as u32,
         magic: 0,
         fields: &[
-            LayoutField { name: "namesz", offset: 0, width: 4 },
-            LayoutField { name: "descsz", offset: 4, width: 4 },
-            LayoutField { name: "type", offset: 8, width: 4 },
-            LayoutField { name: "name", offset: 12, width: 8 },
-            LayoutField { name: "version", offset: 20, width: 2 },
-            LayoutField { name: "flags", offset: 22, width: 2 },
-            LayoutField { name: "count", offset: 24, width: 2 },
-            LayoutField { name: "reserved", offset: 26, width: 2 },
-            LayoutField { name: "names", offset: 28, width: 64 },
+            LayoutField {
+                name: "namesz",
+                offset: 0,
+                width: 4,
+            },
+            LayoutField {
+                name: "descsz",
+                offset: 4,
+                width: 4,
+            },
+            LayoutField {
+                name: "type",
+                offset: 8,
+                width: 4,
+            },
+            LayoutField {
+                name: "name",
+                offset: 12,
+                width: 8,
+            },
+            LayoutField {
+                name: "version",
+                offset: 20,
+                width: 2,
+            },
+            LayoutField {
+                name: "flags",
+                offset: 22,
+                width: 2,
+            },
+            LayoutField {
+                name: "count",
+                offset: 24,
+                width: 2,
+            },
+            LayoutField {
+                name: "reserved",
+                offset: 26,
+                width: 2,
+            },
+            LayoutField {
+                name: "names",
+                offset: 28,
+                width: 64,
+            },
         ],
     },
     LayoutContract {
@@ -918,6 +954,394 @@ pub const LAYOUTS: &[LayoutContract] = &[
             width: device::CAP_RECORD_SIZE as u16,
         }],
     },
+    LayoutContract {
+        name: "workload.create_args",
+        version: 1,
+        size: 40,
+        magic: crate::workload_abi::MAGIC,
+        fields: &[
+            LayoutField {
+                name: "parent",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "cpu_permille",
+                offset: 16,
+                width: 4,
+            },
+            LayoutField {
+                name: "threads",
+                offset: 20,
+                width: 4,
+            },
+            LayoutField {
+                name: "memory_bytes",
+                offset: 24,
+                width: 8,
+            },
+            LayoutField {
+                name: "ring_entries",
+                offset: 32,
+                width: 4,
+            },
+        ],
+    },
+    LayoutContract {
+        name: "workload.create_args",
+        version: crate::workload_abi::VERSION as u32,
+        size: crate::workload_abi::CREATE_BYTES as u32,
+        magic: crate::workload_abi::MAGIC,
+        fields: &[
+            LayoutField {
+                name: "parent",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "cpu_permille",
+                offset: 16,
+                width: 4,
+            },
+            LayoutField {
+                name: "threads",
+                offset: 20,
+                width: 4,
+            },
+            LayoutField {
+                name: "memory_bytes",
+                offset: 24,
+                width: 8,
+            },
+            LayoutField {
+                name: "ring_entries",
+                offset: 32,
+                width: 4,
+            },
+            LayoutField {
+                name: "io_bytes",
+                offset: 40,
+                width: 8,
+            },
+            LayoutField {
+                name: "io_ops",
+                offset: 48,
+                width: 8,
+            },
+        ],
+    },
+    LayoutContract {
+        name: "workload.info",
+        version: 1,
+        size: 64,
+        magic: crate::workload_abi::MAGIC,
+        fields: &[
+            LayoutField {
+                name: "state",
+                offset: 6,
+                width: 1,
+            },
+            LayoutField {
+                name: "key",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "parent",
+                offset: 16,
+                width: 8,
+            },
+            LayoutField {
+                name: "limits",
+                offset: 24,
+                width: 20,
+            },
+            LayoutField {
+                name: "children",
+                offset: 44,
+                width: 4,
+            },
+            LayoutField {
+                name: "usage",
+                offset: 48,
+                width: 16,
+            },
+        ],
+    },
+    LayoutContract {
+        name: "workload.info",
+        version: crate::workload_abi::VERSION as u32,
+        size: crate::workload_abi::INFO_BYTES as u32,
+        magic: crate::workload_abi::MAGIC,
+        fields: &[
+            LayoutField {
+                name: "state",
+                offset: 6,
+                width: 1,
+            },
+            LayoutField {
+                name: "key",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "parent",
+                offset: 16,
+                width: 8,
+            },
+            LayoutField {
+                name: "limits",
+                offset: 24,
+                width: 20,
+            },
+            LayoutField {
+                name: "children",
+                offset: 44,
+                width: 4,
+            },
+            LayoutField {
+                name: "usage",
+                offset: 48,
+                width: 16,
+            },
+            LayoutField {
+                name: "io_limits",
+                offset: 64,
+                width: 16,
+            },
+            LayoutField {
+                name: "io_usage",
+                offset: 80,
+                width: 16,
+            },
+        ],
+    },
+    LayoutContract {
+        name: "sandbox.info",
+        version: crate::sandbox_abi::VERSION as u32,
+        size: crate::sandbox_abi::INFO_BYTES as u32,
+        magic: crate::sandbox_abi::MAGIC,
+        fields: &[
+            LayoutField {
+                name: "state",
+                offset: 6,
+                width: 1,
+            },
+            LayoutField {
+                name: "key",
+                offset: 8,
+                width: 8,
+            },
+        ],
+    },
+    LayoutContract {
+        name: "sandbox.image.add_args",
+        version: crate::sandbox_storage_abi::VERSION as u32,
+        size: crate::sandbox_storage_abi::IMAGE_ADD_BYTES as u32,
+        magic: crate::sandbox_storage_abi::IMAGE_MAGIC,
+        fields: &[
+            LayoutField {
+                name: "sandbox",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "content",
+                offset: 16,
+                width: 32,
+            },
+            LayoutField {
+                name: "signer",
+                offset: 48,
+                width: 8,
+            },
+            LayoutField {
+                name: "signature",
+                offset: 56,
+                width: 32,
+            },
+            LayoutField {
+                name: "image_version",
+                offset: 88,
+                width: 6,
+            },
+            LayoutField {
+                name: "rootfs_bytes",
+                offset: 96,
+                width: 8,
+            },
+            LayoutField {
+                name: "writable_bytes",
+                offset: 104,
+                width: 8,
+            },
+            LayoutField {
+                name: "max_volumes",
+                offset: 112,
+                width: 2,
+            },
+            LayoutField {
+                name: "layer_count",
+                offset: 114,
+                width: 2,
+            },
+        ],
+    },
+    LayoutContract {
+        name: "sandbox.image.info",
+        version: crate::sandbox_storage_abi::VERSION as u32,
+        size: crate::sandbox_storage_abi::IMAGE_INFO_BYTES as u32,
+        magic: crate::sandbox_storage_abi::IMAGE_MAGIC,
+        fields: &[
+            LayoutField {
+                name: "image_key",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "content",
+                offset: 16,
+                width: 32,
+            },
+            LayoutField {
+                name: "signer",
+                offset: 48,
+                width: 8,
+            },
+            LayoutField {
+                name: "signature",
+                offset: 56,
+                width: 32,
+            },
+            LayoutField {
+                name: "image_version",
+                offset: 88,
+                width: 6,
+            },
+            LayoutField {
+                name: "rootfs_bytes",
+                offset: 96,
+                width: 8,
+            },
+            LayoutField {
+                name: "writable_bytes",
+                offset: 104,
+                width: 8,
+            },
+            LayoutField {
+                name: "max_volumes",
+                offset: 112,
+                width: 2,
+            },
+            LayoutField {
+                name: "volumes",
+                offset: 114,
+                width: 2,
+            },
+            LayoutField {
+                name: "layers",
+                offset: 116,
+                width: 2,
+            },
+        ],
+    },
+    LayoutContract {
+        name: "sandbox.image.layer_info",
+        version: crate::sandbox_storage_abi::VERSION as u32,
+        size: crate::sandbox_storage_abi::LAYER_INFO_BYTES as u32,
+        magic: crate::sandbox_storage_abi::IMAGE_MAGIC,
+        fields: &[
+            LayoutField {
+                name: "content",
+                offset: 8,
+                width: 32,
+            },
+            LayoutField {
+                name: "bytes",
+                offset: 40,
+                width: 8,
+            },
+        ],
+    },
+    LayoutContract {
+        name: "sandbox.volume.create_args",
+        version: crate::sandbox_storage_abi::VERSION as u32,
+        size: crate::sandbox_storage_abi::VOLUME_CREATE_BYTES as u32,
+        magic: crate::sandbox_storage_abi::VOLUME_MAGIC,
+        fields: &[
+            LayoutField {
+                name: "sandbox",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "image",
+                offset: 16,
+                width: 8,
+            },
+            LayoutField {
+                name: "capacity_bytes",
+                offset: 24,
+                width: 8,
+            },
+        ],
+    },
+    LayoutContract {
+        name: "sandbox.volume.clone_args",
+        version: crate::sandbox_storage_abi::VERSION as u32,
+        size: crate::sandbox_storage_abi::VOLUME_CREATE_BYTES as u32,
+        magic: crate::sandbox_storage_abi::VOLUME_MAGIC,
+        fields: &[
+            LayoutField {
+                name: "sandbox",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "parent",
+                offset: 16,
+                width: 8,
+            },
+            LayoutField {
+                name: "capacity_bytes",
+                offset: 24,
+                width: 8,
+            },
+        ],
+    },
+    LayoutContract {
+        name: "sandbox.volume.info",
+        version: crate::sandbox_storage_abi::VERSION as u32,
+        size: crate::sandbox_storage_abi::VOLUME_INFO_BYTES as u32,
+        magic: crate::sandbox_storage_abi::VOLUME_MAGIC,
+        fields: &[
+            LayoutField {
+                name: "volume_key",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "image",
+                offset: 16,
+                width: 8,
+            },
+            LayoutField {
+                name: "parent",
+                offset: 24,
+                width: 8,
+            },
+            LayoutField {
+                name: "capacity_bytes",
+                offset: 32,
+                width: 8,
+            },
+            LayoutField {
+                name: "used_bytes",
+                offset: 40,
+                width: 8,
+            },
+        ],
+    },
 ];
 
 /// 可调用操作的逐个寄存器契约。名字必须与 `abi/system-ids.txt` 的操作集合完全相等。
@@ -939,6 +1363,16 @@ pub const OPERATIONS: &[OperationContract] = &[
     },
     OperationContract {
         name: "system.console.write",
+        args: "u64:user_ptr,u64:len",
+        result: "i64:bytes_or_error",
+    },
+    OperationContract {
+        name: "system.terminal.read",
+        args: "u64:user_ptr,u64:len,u32:flags",
+        result: "i64:bytes_or_error",
+    },
+    OperationContract {
+        name: "system.terminal.write",
         args: "u64:user_ptr,u64:len",
         result: "i64:bytes_or_error",
     },
@@ -1252,6 +1686,121 @@ pub const OPERATIONS: &[OperationContract] = &[
         args: "u64:request_id,u64:buf,u64:cap",
         result: "bytes_or_required",
     },
+    OperationContract {
+        name: "system.workload.create",
+        args: "u64:create_desc_ptr",
+        result: "workload_key_or_error",
+    },
+    OperationContract {
+        name: "system.workload.query",
+        args: "u64:workload_key,u64:buf,u64:cap",
+        result: "i64:bytes_or_error",
+    },
+    OperationContract {
+        name: "system.workload.stop",
+        args: "u64:workload_key",
+        result: "0_or_error",
+    },
+    OperationContract {
+        name: "system.workload.destroy",
+        args: "u64:workload_key",
+        result: "0_or_error",
+    },
+    OperationContract {
+        name: "system.workload.spawn",
+        args: "u64:workload_key,u64:spawn_desc_ptr",
+        result: "0_or_error",
+    },
+    OperationContract {
+        name: "system.workload.kill",
+        args: "u64:workload_key",
+        result: "0_or_error",
+    },
+    OperationContract {
+        name: "system.workload.member.query",
+        args: "u64:workload_key",
+        result: "i64:member_count_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.create",
+        args: "u64:workload_create_desc_ptr",
+        result: "sandbox_key_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.query",
+        args: "u64:sandbox_key,u64:buf,u64:cap",
+        result: "i64:bytes_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.stop",
+        args: "u64:sandbox_key",
+        result: "0_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.destroy",
+        args: "u64:sandbox_key",
+        result: "0_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.image.load",
+        args: "u64:image_add_desc_ptr",
+        result: "image_key_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.image.query",
+        args: "u64:sandbox_key,u64:image_key,u64:buf,u64:cap",
+        result: "i64:bytes_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.image.layer.query",
+        args: "u64:sandbox_key,u64:image_key,u64:index,u64:buf,u64:cap",
+        result: "i64:bytes_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.image.destroy",
+        args: "u64:sandbox_key,u64:image_key",
+        result: "0_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.volume.create",
+        args: "u64:volume_create_desc_ptr",
+        result: "volume_key_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.volume.duplicate",
+        args: "u64:volume_clone_desc_ptr",
+        result: "volume_key_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.volume.query",
+        args: "u64:sandbox_key,u64:volume_key,u64:buf,u64:cap",
+        result: "i64:bytes_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.volume.write",
+        args: "u64:sandbox_key,u64:volume_key,u64:bytes",
+        result: "0_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.volume.release",
+        args: "u64:sandbox_key,u64:volume_key,u64:bytes",
+        result: "0_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.volume.destroy",
+        args: "u64:sandbox_key,u64:volume_key",
+        result: "0_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.wait",
+        args: "u64:sandbox_key,u64:timeout_ns",
+        result: "0_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.kill",
+        args: "u64:sandbox_key",
+        result: "0_or_error",
+    },
 ];
 
 /// Rights 位是外部 ABI；位值变化必须产生新快照并随 ABI 版本裁决。
@@ -1382,6 +1931,82 @@ pub const SEMANTICS: &[(&str, &str)] = &[
     (
         "timer.coalescing",
         "shared_timer_irq_may_wake_after_at_and_never_after_latest",
+    ),
+    (
+        "workload.domain",
+        "kernel_issued_caller_domain;descriptor_cannot_select_domain",
+    ),
+    (
+        "workload.query",
+        "same_domain_only;fixed_64_byte_record;domain_not_disclosed",
+    ),
+    (
+        "workload.stop",
+        "running_to_stopping;stopped_requires_zero_usage_and_children",
+    ),
+    (
+        "workload.destroy",
+        "same_domain_only;terminal_only;zero_usage_and_children",
+    ),
+    (
+        "workload.spawn",
+        "same_domain_running_only;bind_before_pages_and_threads;spawn_v2_descriptor;workload_owns_cpu_limit",
+    ),
+    (
+        "workload.kill",
+        "same_domain_running_or_stopping;begin_exit_all_members;resources_cleaned_by_normal_exit",
+    ),
+    (
+        "workload.member.query",
+        "same_domain_only;counts_current_process_members;closed_members_are_not_observable",
+    ),
+    (
+        "sandbox.identity",
+        "kernel_issued_same_domain_key;one_root_workload;root_key_not_disclosed",
+    ),
+    (
+        "sandbox.lifecycle",
+        "state_delegated_to_root_workload;no_copied_limits_usage_or_membership",
+    ),
+    (
+        "sandbox.lifecycle.transition",
+        "create_starts_root;stop_requests_then_completes_only_after_workload_cleanup",
+    ),
+    (
+        "sandbox.destroy",
+        "same_domain_only;terminal_only;root_usage_children_and_members_must_be_zero",
+    ),
+    (
+        "sandbox.storage.ownership",
+        "kernel_issued_domain;sandbox_must_be_live;path_is_not_authority",
+    ),
+    (
+        "sandbox.storage.lifecycle",
+        "image_requires_no_volumes_before_destroy;volume_requires_no_cow_children",
+    ),
+    (
+        "sandbox.storage.layer",
+        "bounded_immutable_layers;content_digest_identity;no_writable_lower_layer",
+    ),
+    (
+        "sandbox.storage.volume",
+        "writable_upper_separate_from_image;child_clone_has_independent_usage",
+    ),
+    (
+        "sandbox.wait",
+        "observes_root_terminal_state_only;zero_timeout_is_nonblocking;max_timeout_is_wait_forever;kernel_monotonic_clock",
+    ),
+    (
+        "sandbox.kill",
+        "same_domain_only;root_workload_begin_exit_members;stopped_requires_normal_resource_drain",
+    ),
+    (
+        "terminal.input",
+        "bounded_byte_ring;nonblocking_flag_1;eof_only_after_input_close;no_partial_user_copy",
+    ),
+    (
+        "terminal.output",
+        "bounded_bytes;complete_user_copy_before_write;closed_or_failed_session_rejected",
     ),
 ];
 
@@ -1793,13 +2418,7 @@ mod tests {
         let version = AbiVersion::new(next_major, 0, 0);
         let old = render();
         assert_eq!(
-            check_snapshot_set(
-                &current,
-                &[
-                    snap(native, &old),
-                    snap(version, &current)
-                ]
-            ),
+            check_snapshot_set(&current, &[snap(native, &old), snap(version, &current)]),
             Ok(())
         );
     }

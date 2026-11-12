@@ -112,3 +112,22 @@
 4140	error	system.usi.error.buffer_too_small	1	none	USI·缓冲区不足	USI buffer too small
 4141	error	system.usi.error.schema	1	none	USI·Schema 或版本不支持	Unsupported USI schema or version
 4142	error	system.usi.error.request_id	1	none	USI·请求标识非法	Invalid USI request identifier
+74	op	system.workload.create	1	write	工作负载·创建	Create native workload
+75	op	system.workload.query	1	read	工作负载·查询	Query native workload
+76	op	system.workload.stop	1	write	工作负载·请求停止	Stop native workload
+77	op	system.workload.destroy	1	write	工作负载·销毁	Destroy native workload
+78	op	system.workload.spawn	1	write	工作负载·创建成员进程	Spawn process into native workload
+79	op	system.workload.kill	1	write	工作负载·强制终止成员	Kill native workload members
+80	op	system.workload.member.query	1	read	工作负载·查询成员数量	Query native workload member count
+4143	error	system.workload.error.buffer_too_small	1	none	工作负载·查询缓冲区不足	Workload query buffer too small
+4144	error	system.workload.error.not_found	1	none	工作负载不存在或无权查看	Workload not found
+4145	error	system.workload.error.state	1	none	工作负载状态转换非法	Invalid workload state
+4146	error	system.workload.error.capacity	1	none	工作负载容量或标识已耗尽	Workload capacity exhausted
+81	op	system.sandbox.create	1	write	沙箱·创建	Create native sandbox
+82	op	system.sandbox.query	1	read	沙箱·查询	Query native sandbox
+83	op	system.sandbox.stop	1	write	沙箱·请求并完成停止	Stop native sandbox
+84	op	system.sandbox.destroy	1	write	沙箱·销毁	Destroy native sandbox
+4147	error	system.sandbox.error.buffer_too_small	1	none	沙箱·查询缓冲区不足	Sandbox query buffer too small
+4148	error	system.sandbox.error.not_found	1	none	沙箱不存在或无权查看	Sandbox not found
+4149	error	system.sandbox.error.state	1	none	沙箱状态转换非法	Invalid sandbox state
+4150	error	system.sandbox.error.capacity	1	none	沙箱容量或标识已耗尽	Sandbox capacity exhausted

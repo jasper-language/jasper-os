@@ -57,6 +57,7 @@ pub mod dma;
 pub mod drv3_demo;
 #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
 pub mod device_demo;
+pub mod display;
 pub mod interrupt;
 pub mod exit_state;
 pub mod fault;
@@ -69,7 +70,8 @@ pub mod linux_abi;
 #[cfg(all(
     any(
         feature = "compat-dynamic-libc-verify",
-        feature = "lifecycle-root-exec-verify"
+        feature = "lifecycle-root-exec-verify",
+        feature = "workload-io-verify"
     ),
     target_arch = "x86_64"
 ))]
@@ -122,6 +124,9 @@ pub mod prog_demo;
 pub mod ring;
 pub mod rt;
 pub mod rtclass_demo;
+pub mod sandbox;
+pub mod sandbox_storage;
+pub mod terminal;
 #[cfg(feature = "user-programs")]
 pub mod robust_demo;
 #[cfg(feature = "user-programs")]
@@ -199,6 +204,11 @@ pub mod sync;
 pub mod syscall;
 pub mod task;
 pub mod usi;
+pub mod workload;
+#[cfg(all(feature = "workload-verify", target_arch = "x86_64"))]
+pub mod workload_verify;
+#[cfg(all(feature = "workload-io-verify", target_arch = "x86_64"))]
+pub mod workload_io_verify;
 #[cfg(feature = "user-programs")]
 pub mod usi1_demo;
 #[cfg(feature = "usi2-verify")]

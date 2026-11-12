@@ -232,6 +232,7 @@ impl Work {
 pub struct RingObj {
     /// 所属进程（弱回指：只用于配额记账，不计引用）。
     owner: ObjId,
+    workload_charge: Option<(kernel_core::workload::WorkloadKey, u32)>,
     sm: StateMachine,
     /// 正在执行的请求及其后端（请求静止后移除）。
     running: Vec<BackendEntry>,
@@ -782,6 +783,9 @@ pub(crate) fn destroy_object(object: KObject) {
             q.rings = q.rings.saturating_sub(1);
         }
     });
+    if let Some((workload, entries)) = r.workload_charge {
+        crate::workload::release_ring_entries(workload, entries);
+    }
 }
 
 /// 进程层错误 → 返回值。
@@ -832,34 +836,53 @@ pub fn create_for(pid: ObjId, capacity: u64) -> Result<HandleId, i64> {
     if capacity == 0 || capacity > CQ_CAPACITY as u64 {
         return Err(err(SYSTEM_ERROR_INVALID_ARGUMENT));
     }
+    let workload_entries =
+        u32::try_from(capacity).map_err(|_| err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
     let sm = StateMachine::new(capacity as usize).ok_or(err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
-    let obj = KObject::Ring(Box::new(RingObj {
-        owner: pid,
-        sm,
-        running: Vec::new(),
-        backends_created: 0,
-        backends_started: 0,
-        backends_released: 0,
-        started_backends_released: 0,
-        backends_in_call: 0,
-        event_waiters: Vec::new(),
-        wait_timers: TimerTable::new(),
-        wait_budget: OwnerBudget::new(BLOCKS_PER_RING as u32),
-        wait_heap: DeadlineHeap::new(),
-        wait_entries: [Deadline::EMPTY; BLOCKS_PER_RING],
-        wait_positions: [ABSENT; BLOCKS_PER_RING],
-        wait_running: [None; BLOCKS_PER_RING],
-        wait_scan_slots: 0,
-        wait_heap_ops: 0,
-        pinned: false,
-    }));
     kobj::with(|t| {
         proc::syscalls_in(t, pid).map_err(perr)?;
         if proc::ring_quota_in(t, pid).and_then(|q|
             kernel_core::quota::reserve_u32(q.rings, 1, MAX_RINGS_PER_PROCESS)).is_none() {
             return Err(err(SYSTEM_ERROR_QUOTA_EXCEEDED));
         }
-        let (h, _id) = proc::grant_new_in(t, pid, obj, ObjectType::Ring, RING_RIGHTS).map_err(perr)?;
+        let workload_charge = match proc::workload_key_in(t, pid) {
+            Some(workload) => {
+                crate::workload::reserve_ring_entries(workload, workload_entries)
+                    .map_err(|_| err(SYSTEM_ERROR_QUOTA_EXCEEDED))?;
+                Some((workload, workload_entries))
+            }
+            None => None,
+        };
+        let obj = KObject::Ring(Box::new(RingObj {
+            owner: pid,
+            workload_charge,
+            sm,
+            running: Vec::new(),
+            backends_created: 0,
+            backends_started: 0,
+            backends_released: 0,
+            started_backends_released: 0,
+            backends_in_call: 0,
+            event_waiters: Vec::new(),
+            wait_timers: TimerTable::new(),
+            wait_budget: OwnerBudget::new(BLOCKS_PER_RING as u32),
+            wait_heap: DeadlineHeap::new(),
+            wait_entries: [Deadline::EMPTY; BLOCKS_PER_RING],
+            wait_positions: [ABSENT; BLOCKS_PER_RING],
+            wait_running: [None; BLOCKS_PER_RING],
+            wait_scan_slots: 0,
+            wait_heap_ops: 0,
+            pinned: false,
+        }));
+        let (h, _id) = match proc::grant_new_in(t, pid, obj, ObjectType::Ring, RING_RIGHTS) {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some((workload, entries)) = workload_charge {
+                    crate::workload::release_ring_entries(workload, entries);
+                }
+                return Err(perr(error));
+            }
+        };
         if let Some(q) = proc::ring_quota_in(t, pid) {
             q.rings += 1;
         }

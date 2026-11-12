@@ -37,6 +37,10 @@
 //! * [`smp`]    —— 多处理器：处理器集合与拓扑、启动状态机、核间中断种类、TLB 击落与跨核调用协议
 //! * [`acpi`]   —— ACPI 表只读解析（处理器枚举：RSDP → RSDT/XSDT → MADT；固件输入按不可信处理）
 //! * [`user_layout`] —— 各指令集的用户私有窗口起点与用户程序装载地址（内核、运行时与构建脚本共用）
+//! * [`workload`] —— 原生 Workload 身份、父子资源域、生命周期和成员归属契约（issue #23）
+//! * [`sandbox_image`] —— Sandbox 镜像、不可变层、CoW 卷与存储所有权契约
+//! * [`sandbox_launch`] —— Sandbox 启动计划、能力衰减与展示专用逻辑视图
+//! * [`native_install`] —— 原生包、安装登记、授权、运行主体、数据与更新权分离契约
 //!
 //! # 边界（为什么这样分）
 //! * 只依赖 `core`：`#![no_std]`，测试时才链接 `std`（`cfg_attr(not(test), no_std)`），
@@ -69,6 +73,7 @@ pub mod capacity;
 pub mod capability;
 pub mod config;
 pub mod device;
+pub mod display_input;
 pub mod deadline;
 pub mod drill;
 pub mod deadline_forest;
@@ -85,6 +90,8 @@ pub mod ticket;
 pub mod task_index;
 pub mod task_hot;
 pub mod task_lifecycle;
+/// Bounded native terminal session queues and close semantics.
+pub mod terminal_session;
 pub mod tick_lease;
 pub mod wake_mailbox;
 pub mod fdt;
@@ -152,6 +159,8 @@ pub mod virtio_fs;
 pub mod virtio_gpu;
 pub mod virtio_net;
 pub mod wait;
+pub mod workload;
+pub mod workload_abi;
 pub mod wireguard;
 
 #[cfg(test)]
@@ -183,6 +192,14 @@ pub mod rt_partition;
 pub mod rt_abi;
 
 pub mod timer_units;
+pub mod sandbox;
+pub mod sandbox_image;
+pub mod sandbox_abi;
+pub mod sandbox_storage_abi;
+pub mod sandbox_launch;
+pub mod sandbox_store;
+
+pub mod native_install;
 
 // issue #3：统一定时事件契约。 / Unified timer-event contract.
 pub mod timer_event;

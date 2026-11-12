@@ -28,6 +28,8 @@ use crate::{
 use crate::{abi_demo, bench_demo, ipc_demo, longrun_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo, uptr_demo};
 #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
 use crate::device_demo;
+#[cfg(all(feature = "workload-verify", target_arch = "x86_64"))]
+use crate::workload_verify;
 
 /// 验收构建的启动失败：退出模拟器，由退出码和标记报告原因。
 /// An acceptance boot failure exits the emulator; the code and markers report why.
@@ -683,7 +685,7 @@ const HIGHRES: &[Step] = &[st(Stage::HighRes)];
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "hwv5-prod-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "net2-verify", feature = "net3-verify", feature = "net4-runtime-verify", feature = "compat-elf-backend-verify", feature = "compat-syscall-verify", feature = "compat-dynamic-libc-verify", feature = "lifecycle-health-fail-verify", feature = "pex1-verify", feature = "pex2-verify", feature = "pex3-verify", feature = "pex4-verify", feature = "pex5-verify", feature = "pex7-verify", feature = "sec6-verify",
-    feature = "s2-only", feature = "s4-soak",
+    feature = "s2-only", feature = "s4-soak", feature = "workload-verify",
 )))]
 const FULL: &[Step] = &[
     case("krn0-tlb", Stage::Smp, "", krn0_tlb),
@@ -767,7 +769,7 @@ const FULL: &[Step] = &[
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "hwv5-prod-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "net2-verify", feature = "net3-verify", feature = "net4-runtime-verify", feature = "compat-elf-backend-verify", feature = "compat-syscall-verify", feature = "compat-dynamic-libc-verify", feature = "lifecycle-health-fail-verify", feature = "pex1-verify", feature = "pex2-verify", feature = "pex3-verify", feature = "pex4-verify", feature = "pex5-verify", feature = "pex7-verify", feature = "sec6-verify",
-    feature = "s2-only", feature = "s4-soak",
+    feature = "s2-only", feature = "s4-soak", feature = "workload-verify",
 )))]
 pub use full_selected::{NAME, PLAN};
 
@@ -776,7 +778,7 @@ pub use full_selected::{NAME, PLAN};
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "hwv5-prod-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "net2-verify", feature = "net3-verify", feature = "net4-runtime-verify", feature = "compat-elf-backend-verify", feature = "compat-syscall-verify", feature = "compat-dynamic-libc-verify", feature = "lifecycle-health-fail-verify", feature = "pex1-verify", feature = "pex2-verify", feature = "pex3-verify", feature = "pex4-verify", feature = "pex5-verify", feature = "pex7-verify", feature = "sec6-verify",
-    feature = "s2-only", feature = "s4-soak",
+    feature = "s2-only", feature = "s4-soak", feature = "workload-verify",
 )))]
 mod full_selected {
     use super::*;
@@ -835,6 +837,7 @@ const DEDICATED_SELECTED: usize = cfg!(feature = "rt1-verify") as usize
     + cfg!(feature = "pex5-verify") as usize
     + cfg!(feature = "pex7-verify") as usize
     + cfg!(feature = "sec6-verify") as usize
+    + cfg!(feature = "workload-verify") as usize
     + cfg!(feature = "s2-only") as usize
     + cfg!(feature = "s4-soak") as usize;
 const _: () = assert!(DEDICATED_SELECTED <= 1, "专项验收特性只能选一个");
@@ -1775,11 +1778,26 @@ mod dedicated {
     pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[PlanItem::Finish(finish)]];
 }
 
+#[cfg(all(feature = "workload-verify", target_arch = "x86_64"))]
+mod dedicated {
+    use super::*;
+
+    pub const NAME: &str = "workload";
+
+    fn finish(_: &mut BootCtx) {
+        workload_verify::run();
+        exit_on(u64::from(workload_verify::failed()));
+    }
+
+    pub const PLAN: &[&[Step]] =
+        &[PREFIX, SMP_UP, &[st(Stage::UserRuntime), PlanItem::Finish(finish)]];
+}
+
 #[cfg(any(
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "hwv5-prod-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "net2-verify", feature = "net3-verify", feature = "net4-runtime-verify", feature = "compat-elf-backend-verify", feature = "compat-syscall-verify", feature = "compat-dynamic-libc-verify", feature = "lifecycle-health-fail-verify", feature = "pex1-verify", feature = "pex2-verify", feature = "pex3-verify", feature = "pex4-verify", feature = "pex5-verify", feature = "pex7-verify", feature = "sec6-verify",
-    feature = "s2-only", feature = "s4-soak",
+    feature = "s2-only", feature = "s4-soak", feature = "workload-verify",
 ))]
 pub use dedicated::{NAME, PLAN};

@@ -22,10 +22,12 @@ arms=re.findall(r'((?:SYSTEM_[A-Z0-9_]+\s*\|\s*)*SYSTEM_[A-Z0-9_]+)\s*=>[^\n]*?e
 unsupported={name.strip() for arm in arms for name in arm.split('|')}
 # ID 43 crossed the ABI 2.0.0 boundary from a stable reserved slot to an
 # executable operation. The remaining reserved IDs must still fail closed.
+assert reg[41][2]=='system.memory.dma.map' and reg[41][3]=='1'
 assert reg[43][3]=='3', 'ID 43 must use the executable v3 contract'
-for num in range(37,43):
+for num in [37, 38, 39, 40, 42]:
     constant=reg[num][2].upper().replace('.','_')
     assert constant in unsupported, f'reserved handler must explicitly return unsupported: {constant}'
+assert 'SYSTEM_MEMORY_DMA_MAP => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64|' in source
 assert 'SYSTEM_TASK_SYSCALLS_SET => |_e: &AbiEntry, a: &SyscallArgs, task_id: u64|' in source
 ring=(root/'kernel/src/ring.rs').read_text()
 assert 'extension_abi::check_sqe_flags(sqe.flags)' in ring

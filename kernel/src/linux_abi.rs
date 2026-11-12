@@ -20,7 +20,10 @@ use crate::sync::IrqSpinLock;
 use crate::syscall::{ExecReturn, SyscallArgs, SyscallOutcome, UserReturn, CONSOLE_WRITE_MAX};
 use crate::{console, proc, sched};
 
-#[cfg(feature = "compat-dynamic-libc-verify")]
+#[cfg(any(
+    feature = "compat-dynamic-libc-verify",
+    feature = "workload-io-verify"
+))]
 static SYSCALL_TRACE_REMAINING: AtomicU32 = AtomicU32::new(512);
 #[cfg(feature = "compat-dynamic-libc-verify")]
 static PATH_TRACE_REMAINING: AtomicU32 = AtomicU32::new(24);
@@ -88,7 +91,10 @@ impl CompatState {
 static COMPAT: IrqSpinLock<CompatState> =
     IrqSpinLock::ranked(crate::lockorder::LINUX_COMPAT, CompatState::new());
 
-#[cfg(feature = "compat-dynamic-libc-verify")]
+#[cfg(any(
+    feature = "compat-dynamic-libc-verify",
+    feature = "workload-io-verify"
+))]
 fn trace_request(args: &SyscallArgs) {
     let remaining = SYSCALL_TRACE_REMAINING.load(Ordering::Relaxed);
     if remaining == 0 {
@@ -1353,7 +1359,10 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
     if proc::current_exiting() {
         proc::thread_exit(0, "killed linux process");
     }
-    #[cfg(feature = "compat-dynamic-libc-verify")]
+    #[cfg(any(
+        feature = "compat-dynamic-libc-verify",
+        feature = "workload-io-verify"
+    ))]
     trace_request(a);
     let Some(pid) = proc::current_process() else {
         return SyscallOutcome::value(-i64::from(CompatErrno::NoSys as i32));
@@ -1650,9 +1659,11 @@ fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if len == 0 {
         return Ok(0);
     }
+    let io = admit_process_io(pid, len as u64, 1)?;
     let mut bytes = alloc::vec![0u8; len];
     copy_from_user(&mut bytes, args[1], len).map_err(|_| CompatErrno::Fault)?;
     console::write_bytes(&bytes);
+    io.commit();
     Ok(len as u64)
 }
 
@@ -1706,9 +1717,11 @@ fn linux_writev(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         bytes.resize(start + len, 0);
         copy_from_user(&mut bytes[start..], base, len).map_err(|_| CompatErrno::Fault)?;
     }
+    let io = admit_process_io(pid, total as u64, 1)?;
     if !bytes.is_empty() {
         console::write_bytes(&bytes);
     }
+    io.commit();
     Ok(total as u64)
 }
 
@@ -1773,9 +1786,11 @@ fn linux_getdents64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         output[base + 19..base + 19 + name.len()].copy_from_slice(name);
         index += 1;
     }
+    let io = admit_process_io(pid, output.len() as u64, 1)?;
     if !output.is_empty() {
         copy_to_user(args[1], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
     }
+    io.commit();
     if !proc::set_linux_dir_offset(pid, fd, index as u64) {
         return Err(CompatErrno::BadFd);
     }
@@ -1798,11 +1813,41 @@ fn authorize_console(pid: ObjId, fd: u32, write: bool) -> Result<(), CompatErrno
     Ok(())
 }
 
+fn admit_process_io(pid: ObjId, bytes: u64, ops: u64) -> Result<crate::workload::IoPermit, CompatErrno> {
+    crate::workload::begin_process_io(pid, bytes, ops).map_err(|error| match error {
+        kernel_core::workload::WorkloadError::Quota
+        | kernel_core::workload::WorkloadError::InvalidState => CompatErrno::NoSpace,
+        kernel_core::workload::WorkloadError::InvalidKey => CompatErrno::NoProcess,
+        _ => CompatErrno::Perm,
+    })
+}
+
+fn read_console_input(pid: ObjId, len: usize) -> Result<([u8; 4096], usize), CompatErrno> {
+    const O_NONBLOCK: u64 = 0x800;
+    let nonblocking = proc::linux_fd_status_flags(pid, 0)
+        .is_some_and(|flags| u64::from(flags) & O_NONBLOCK != 0);
+    let mut input = [0u8; 4096];
+    let requested = len.min(input.len());
+    match crate::terminal::read_input(&mut input[..requested], nonblocking) {
+        Ok(count) => Ok((input, count)),
+        Err(kernel_core::terminal_session::TerminalError::Eof) => Ok((input, 0)),
+        Err(kernel_core::terminal_session::TerminalError::WouldBlock) => {
+            Err(CompatErrno::TryAgain)
+        }
+        Err(kernel_core::terminal_session::TerminalError::Closed)
+        | Err(kernel_core::terminal_session::TerminalError::Failed) => {
+            Err(CompatErrno::Canceled)
+        }
+        Err(_) => Err(CompatErrno::Invalid),
+    }
+}
+
 /// Implements bounded Linux `read(2)` for stdin and virtual read-only files.
 ///
-/// 标准输入当前没有数据源并返回 EOF；文件读取在全部用户页校验通过后才提交游标。
+/// 标准输入来自有界原生终端会话；文件读取在全部用户页校验通过后才提交游标。
 fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MAX_READ: usize = 1024 * 1024;
+    const TERMINAL_READ: usize = 4096;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let len = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
     if len > MAX_READ {
@@ -1827,7 +1872,26 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     if fd == 0 {
         authorize_console(pid, fd, false)?;
-        return Ok(0);
+        if len == 0 {
+            return Ok(0);
+        }
+        let requested = len.min(TERMINAL_READ);
+        let destination = crate::kobj::with(|table| {
+            proc::pin_user_in(table, pid, args[1], requested, true)
+        })
+        .map_err(|error| match error {
+            proc::ProcError::OutOfFrames | proc::ProcError::MemoryQuota => {
+                CompatErrno::NoMemory
+            }
+            _ => CompatErrno::Fault,
+        })?;
+        let (input, count) = read_console_input(pid, requested)?;
+        if count != 0 {
+            if !destination.write_at(0, &input[..count]) {
+                return Err(CompatErrno::Fault);
+            }
+        }
+        return Ok(count as u64);
     }
     if proc::linux_fd(pid, fd)
         .is_some_and(|entry| entry.kind == compat_core::fd::CompatKind::Directory)
@@ -1839,10 +1903,12 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let source = file.bytes();
     let offset = usize::try_from(offset).map_err(|_| CompatErrno::Invalid)?;
     let available = source.len().saturating_sub(offset).min(len);
+    let io = admit_process_io(pid, available as u64, 1)?;
     if available != 0 {
         copy_to_user(args[1], &source[offset..offset + available], available)
             .map_err(|_| CompatErrno::Fault)?;
     }
+    io.commit();
     if !proc::set_linux_file_offset(pid, fd, (offset + available) as u64) {
         return Err(CompatErrno::BadFd);
     }
@@ -1864,10 +1930,12 @@ fn linux_pread64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let offset = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
     let source = file.bytes();
     let available = source.len().saturating_sub(offset).min(len);
+    let io = admit_process_io(pid, available as u64, 1)?;
     if available != 0 {
         copy_to_user(args[1], &source[offset..offset + available], available)
             .map_err(|_| CompatErrno::Fault)?;
     }
+    io.commit();
     Ok(available as u64)
 }
 
@@ -1904,13 +1972,44 @@ fn linux_readv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     if fd == 0 {
         authorize_console(pid, fd, false)?;
-        return Ok(0);
+        if total == 0 {
+            return Ok(0);
+        }
+        let mut pinned = alloc::vec::Vec::with_capacity(vectors.len());
+        for (base, len) in &vectors {
+            let range = crate::kobj::with(|table| {
+                proc::pin_user_in(table, pid, *base, *len, true)
+            })
+            .map_err(|error| match error {
+                proc::ProcError::OutOfFrames | proc::ProcError::MemoryQuota => {
+                    CompatErrno::NoMemory
+                }
+                _ => CompatErrno::Fault,
+            })?;
+            pinned.push((range, *len));
+        }
+        let (input, read_count) = read_console_input(pid, total)?;
+        let mut input_offset = 0usize;
+        for (range, len) in &pinned {
+            let take = (read_count - input_offset).min(*len);
+            if take != 0 {
+                if !range.write_at(0, &input[input_offset..input_offset + take]) {
+                    return Err(CompatErrno::Fault);
+                }
+                input_offset += take;
+            }
+            if input_offset == read_count {
+                break;
+            }
+        }
+        return Ok(read_count as u64);
     }
     let (handle, offset) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
     let file = crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
     let source = file.bytes();
     let offset = usize::try_from(offset).map_err(|_| CompatErrno::Invalid)?;
     let available = source.len().saturating_sub(offset).min(total);
+    let io = admit_process_io(pid, available as u64, 1)?;
     let mut source_offset = offset;
     let mut remaining = available;
     let mut ranges = alloc::vec::Vec::with_capacity(vectors.len());
@@ -1931,6 +2030,7 @@ fn linux_readv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             _ => CompatErrno::Fault,
         })?;
     }
+    io.commit();
     if !proc::set_linux_file_offset(pid, fd, (offset + available) as u64) {
         return Err(CompatErrno::BadFd);
     }
@@ -2221,6 +2321,18 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if ashmem_handle.is_none() && args[3] & MAP_PRIVATE == 0 {
         return Err(CompatErrno::Invalid);
     }
+    let io = if let Some(file) = file {
+        let offset = usize::try_from(args[5]).map_err(|_| CompatErrno::Invalid)?;
+        let requested_bytes = usize::try_from(bytes).map_err(|_| CompatErrno::Invalid)?;
+        let available = file
+            .bytes()
+            .len()
+            .saturating_sub(offset)
+            .min(requested_bytes);
+        Some(admit_process_io(pid, available as u64, 1)?)
+    } else {
+        None
+    };
     let rounded = bytes.checked_add(PAGE - 1).ok_or(CompatErrno::Invalid)? & !(PAGE - 1);
     let cursor = proc::linux_mmap_cursor(pid).ok_or(CompatErrno::NoSys)?;
     let requested = if args[0] == 0 {
@@ -2292,6 +2404,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         )
         .map_err(|error| match error {
             proc::LinuxAshmemError::Permission => CompatErrno::Perm,
+            proc::LinuxAshmemError::Busy => CompatErrno::Busy,
             proc::LinuxAshmemError::Invalid => CompatErrno::Invalid,
             proc::LinuxAshmemError::NoMemory => CompatErrno::NoMemory,
             proc::LinuxAshmemError::NotAshmem => CompatErrno::BadFd,
@@ -2343,6 +2456,9 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             let _ = proc::unmap_page(pid, address);
         }
         return Err(CompatErrno::NoSys);
+    }
+    if let Some(io) = io {
+        io.commit();
     }
     Ok(start)
 }
@@ -2402,10 +2518,11 @@ fn linux_msync(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let address = args[0];
     let length = args[1];
     let flags = args[2];
+    let mode = flags & (MS_ASYNC | MS_SYNC);
     if address % PAGE != 0
         || length == 0
         || flags & !(MS_ASYNC | MS_INVALIDATE | MS_SYNC) != 0
-        || flags & (MS_ASYNC | MS_SYNC) == (MS_ASYNC | MS_SYNC)
+        || (mode != MS_ASYNC && mode != MS_SYNC)
     {
         return Err(CompatErrno::Invalid);
     }
@@ -2544,10 +2661,18 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
     drop(path);
     let argv = linux_string_vector(args[1], 64, 64 * 1024)?;
     let envp = linux_string_vector(args[2], 64, 64 * 1024)?;
-    let (executable, interpreter) =
-        crate::linux_vfs::root_executable(&resolved).ok_or(CompatErrno::NoEntry)?;
-    #[cfg(all(feature = "lifecycle-root-exec-verify", target_arch = "x86_64"))]
+    #[cfg(all(
+        feature = "lifecycle-root-exec-verify",
+        target_arch = "x86_64"
+    ))]
     {
+        let (executable, interpreter) = crate::linux_vfs::root_executable(pid, &resolved).map_err(
+            |error| match error {
+                crate::linux_vfs::RootExecutableError::NotFound => CompatErrno::NoEntry,
+                crate::linux_vfs::RootExecutableError::Quota => CompatErrno::NoSpace,
+                crate::linux_vfs::RootExecutableError::Io => CompatErrno::Invalid,
+            },
+        )?;
         match crate::compat_dynamic_demo::exec_dynamic_program(
             pid,
             resolved,
@@ -2562,7 +2687,7 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
     }
     #[cfg(not(all(feature = "lifecycle-root-exec-verify", target_arch = "x86_64")))]
     {
-        let _ = (executable, interpreter, argv, envp);
+        let _ = (resolved, argv, envp);
         Err(CompatErrno::NoSys)
     }
 }
@@ -3260,12 +3385,12 @@ fn linux_memfd_create(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::NoSys);
     }
     let name = linux_c_string(args[0], 249)?;
-    let fd = proc::linux_open_ashmem(
+    let fd = proc::linux_create_memfd(
         pid,
         args[1] & MFD_CLOEXEC != 0,
         args[1] & MFD_ALLOW_SEALING != 0,
     )
-        .ok_or(CompatErrno::NoSpace)?;
+    .ok_or(CompatErrno::NoSpace)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if proc::linux_ashmem_set_name(pid, entry.handle, &name).is_err() {
         let _ = proc::linux_close_fd(pid, fd);
@@ -4591,7 +4716,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         if flags & 3 != 2 {
             return Err(CompatErrno::Perm);
         }
-        return proc::linux_open_ashmem(pid, flags & O_CLOEXEC != 0, false)
+        return proc::linux_open_ashmem(pid, flags & O_CLOEXEC != 0)
             .map(u64::from)
             .ok_or(CompatErrno::NoSpace);
     }
@@ -4795,10 +4920,21 @@ fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if entry.kind == compat_core::fd::CompatKind::Device {
-        let size = proc::linux_ashmem_state(pid, entry.handle)
-            .map(|(size, _, _)| size)
-            .unwrap_or(0);
-        write_synthetic_stat(args[1], entry.handle, size, 0o020666)?;
+        let (size, regular) = proc::linux_ashmem_state(pid, entry.handle)
+            .map(|(size, _, _)| {
+                (
+                    size,
+                    proc::linux_ashmem_is_regular(pid, entry.handle).unwrap_or(false),
+                )
+            })
+            .unwrap_or((0, false));
+        write_synthetic_stat(
+            args[1],
+            entry.handle,
+            1,
+            size,
+            if regular { 0o100600 } else { 0o020666 },
+        )?;
         return Ok(0);
     }
     let node = crate::linux_vfs::FileId::from_handle(entry.handle)
@@ -4832,10 +4968,21 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
             let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
             if entry.kind == compat_core::fd::CompatKind::Device {
-                let size = proc::linux_ashmem_state(pid, entry.handle)
-                    .map(|(size, _, _)| size)
-                    .unwrap_or(0);
-                write_synthetic_stat(args[2], entry.handle, size, 0o020666)?;
+                let (size, regular) = proc::linux_ashmem_state(pid, entry.handle)
+                    .map(|(size, _, _)| {
+                        (
+                            size,
+                            proc::linux_ashmem_is_regular(pid, entry.handle).unwrap_or(false),
+                        )
+                    })
+                    .unwrap_or((0, false));
+                write_synthetic_stat(
+                    args[2],
+                    entry.handle,
+                    1,
+                    size,
+                    if regular { 0o100600 } else { 0o020666 },
+                )?;
                 return Ok(0);
             }
             let node = crate::linux_vfs::FileId::from_handle(entry.handle)
@@ -4963,10 +5110,21 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
             let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
             if entry.kind == compat_core::fd::CompatKind::Device {
-                let size = proc::linux_ashmem_state(pid, entry.handle)
-                    .map(|(size, _, _)| size)
-                    .unwrap_or(0);
-                write_synthetic_statx(args[4], entry.handle, size, 0o020666)?;
+                let (size, regular) = proc::linux_ashmem_state(pid, entry.handle)
+                    .map(|(size, _, _)| {
+                        (
+                            size,
+                            proc::linux_ashmem_is_regular(pid, entry.handle).unwrap_or(false),
+                        )
+                    })
+                    .unwrap_or((0, false));
+                write_synthetic_statx(
+                    args[4],
+                    entry.handle,
+                    1,
+                    size,
+                    if regular { 0o100600 } else { 0o020666 },
+                )?;
                 return Ok(0);
             }
             if let Some(file) = crate::linux_vfs::FileId::from_handle(entry.handle) {
@@ -5205,6 +5363,7 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     if entry.kind == compat_core::fd::CompatKind::Device
         && proc::linux_ashmem_state(pid, entry.handle).is_some()
+        && !proc::linux_ashmem_is_regular(pid, entry.handle).unwrap_or(false)
     {
         match args[1] {
             ASHMEM_SET_NAME => {
@@ -5256,7 +5415,7 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             ASHMEM_GET_PROT_MASK => {
                 let (_, protection, _) = proc::linux_ashmem_state(pid, entry.handle)
                     .ok_or(CompatErrno::NotSocket)?;
-                copy_to_user(args[2], &u64::from(protection).to_le_bytes(), 8)
+                copy_to_user(args[2], &protection.to_le_bytes(), 4)
                     .map_err(|_| CompatErrno::Fault)?;
                 return Ok(0);
             }
@@ -5285,6 +5444,7 @@ fn ashmem_compat_error(error: proc::LinuxAshmemError) -> CompatErrno {
     match error {
         proc::LinuxAshmemError::Invalid => CompatErrno::Invalid,
         proc::LinuxAshmemError::Permission => CompatErrno::Perm,
+        proc::LinuxAshmemError::Busy => CompatErrno::Busy,
         proc::LinuxAshmemError::NoMemory => CompatErrno::NoMemory,
         proc::LinuxAshmemError::NotAshmem => CompatErrno::NotTty,
     }
@@ -5339,6 +5499,23 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     }
                     if events & POLLOUT != 0 && value < u64::MAX - 1 {
                         ready |= POLLOUT;
+                    }
+                    ready
+                }
+                Some(entry) if entry.handle == proc::LINUX_CONSOLE_HANDLE => {
+                    let (pending, ended, failed) = crate::terminal::input_status();
+                    let mut ready = 0;
+                    if events & POLLIN != 0 && (pending || ended) {
+                        ready |= POLLIN;
+                    }
+                    if events & POLLOUT != 0 {
+                        ready |= POLLOUT;
+                    }
+                    if ended {
+                        ready |= POLLHUP;
+                    }
+                    if failed {
+                        ready |= POLLERR;
                     }
                     ready
                 }
@@ -5650,6 +5827,11 @@ fn linux_sync_fd(pid: ObjId, raw_fd: u64, _data_only: bool) -> Result<u64, Compa
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     match entry.kind {
         compat_core::fd::CompatKind::File | compat_core::fd::CompatKind::Directory => Ok(0),
+        compat_core::fd::CompatKind::Device
+            if proc::linux_ashmem_is_regular(pid, entry.handle).unwrap_or(false) =>
+        {
+            Ok(0)
+        }
         _ => Err(CompatErrno::Invalid),
     }
 }
@@ -5774,8 +5956,8 @@ fn linux_rt_sigprocmask(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
 /// 写入 144 字节、版本稳定的 x86_64 stat；时间和设备字段只表达当前虚拟快照，
 /// 不伪造宿主设备身份。
 fn write_linux_stat(address: u64, node: crate::linux_vfs::Node) -> Result<(), CompatErrno> {
-    let (size, _, mode) = node.stat_metadata();
-    write_synthetic_stat(address, node.inode(), size, mode)?;
+    let (size, links, mode) = node.stat_metadata();
+    write_synthetic_stat(address, node.inode(), links, size, mode)?;
     Ok(())
 }
 
@@ -5783,6 +5965,7 @@ fn write_linux_stat(address: u64, node: crate::linux_vfs::Node) -> Result<(), Co
 fn write_synthetic_stat(
     address: u64,
     inode: u64,
+    links: u64,
     size: u64,
     mode: u32,
 ) -> Result<(), CompatErrno> {
@@ -5790,7 +5973,7 @@ fn write_synthetic_stat(
     let mut stat = [0u8; STAT_BYTES];
     stat[0..8].copy_from_slice(&1u64.to_le_bytes()); // st_dev
     stat[8..16].copy_from_slice(&inode.to_le_bytes()); // st_ino
-    stat[16..24].copy_from_slice(&1u64.to_le_bytes());
+    stat[16..24].copy_from_slice(&links.to_le_bytes());
     stat[24..28].copy_from_slice(&mode.to_le_bytes());
     stat[48..56].copy_from_slice(&size.to_le_bytes());
     stat[56..64].copy_from_slice(&4096i64.to_le_bytes());
@@ -5802,13 +5985,14 @@ fn write_synthetic_stat(
 fn write_synthetic_statx(
     address: u64,
     inode: u64,
+    links: u32,
     size: u64,
     mode: u32,
 ) -> Result<(), CompatErrno> {
     let mut output = [0u8; 256];
     output[0..4].copy_from_slice(&0x71fu32.to_le_bytes());
     output[4..8].copy_from_slice(&4096u32.to_le_bytes());
-    output[16..20].copy_from_slice(&1u32.to_le_bytes());
+    output[16..20].copy_from_slice(&links.to_le_bytes());
     output[28..30].copy_from_slice(&(mode as u16).to_le_bytes());
     output[32..40].copy_from_slice(&inode.to_le_bytes());
     output[40..48].copy_from_slice(&size.to_le_bytes());
@@ -5944,12 +6128,7 @@ fn linux_faccessat(
             crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)?
         }
         Err(CompatErrno::NoEntry) if flags & AT_EMPTY_PATH != 0 => {
-            let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-            let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::BadFd)?;
-            crate::linux_vfs::Node::Directory(
-                crate::linux_vfs::DirectoryId::from_handle(handle)
-                    .ok_or(CompatErrno::BadFd)?,
-            )
+            linux_node_from_fd(pid, args[0])?
         }
         Err(error) => return Err(error),
     };
@@ -5957,6 +6136,22 @@ fn linux_faccessat(
         return Err(CompatErrno::Access);
     }
     Ok(0)
+}
+
+fn linux_node_from_fd(pid: ObjId, raw_fd: u64) -> Result<crate::linux_vfs::Node, CompatErrno> {
+    let fd = u32::try_from(raw_fd).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    match entry.kind {
+        compat_core::fd::CompatKind::File => crate::linux_vfs::FileId::from_handle(entry.handle)
+            .map(crate::linux_vfs::Node::File)
+            .ok_or(CompatErrno::BadFd),
+        compat_core::fd::CompatKind::Directory => {
+            crate::linux_vfs::DirectoryId::from_handle(entry.handle)
+                .map(crate::linux_vfs::Node::Directory)
+                .ok_or(CompatErrno::BadFd)
+        }
+        _ => Err(CompatErrno::Access),
+    }
 }
 
 const fn align_up(value: u64, align: u64) -> u64 {

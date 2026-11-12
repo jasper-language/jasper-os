@@ -133,3 +133,49 @@
 4140	error	system.usi.error.buffer_too_small	1	none	USI·缓冲区不足	USI buffer too small
 4141	error	system.usi.error.schema	1	none	USI·Schema 或版本不支持	Unsupported USI schema or version
 4142	error	system.usi.error.request_id	1	none	USI·请求标识非法	Invalid USI request identifier
+74	op	system.workload.create	1	write	工作负载·创建	Create native workload
+75	op	system.workload.query	1	read	工作负载·查询	Query native workload
+76	op	system.workload.stop	1	write	工作负载·请求停止	Stop native workload
+77	op	system.workload.destroy	1	write	工作负载·销毁	Destroy native workload
+78	op	system.workload.spawn	1	write	工作负载·创建成员进程	Spawn process into native workload
+79	op	system.workload.kill	1	write	工作负载·强制终止成员	Kill native workload members
+80	op	system.workload.member.query	1	read	工作负载·查询成员数量	Query native workload member count
+4143	error	system.workload.error.buffer_too_small	1	none	工作负载·查询缓冲区不足	Workload query buffer too small
+4144	error	system.workload.error.not_found	1	none	工作负载不存在或无权查看	Workload not found
+4145	error	system.workload.error.state	1	none	工作负载状态转换非法	Invalid workload state
+4146	error	system.workload.error.capacity	1	none	工作负载容量或标识已耗尽	Workload capacity exhausted
+81	op	system.sandbox.create	1	write	沙箱·创建	Create native sandbox
+82	op	system.sandbox.query	1	read	沙箱·查询	Query native sandbox
+83	op	system.sandbox.stop	1	write	沙箱·请求并完成停止	Stop native sandbox
+84	op	system.sandbox.destroy	1	write	沙箱·销毁	Destroy native sandbox
+4147	error	system.sandbox.error.buffer_too_small	1	none	沙箱·查询缓冲区不足	Sandbox query buffer too small
+4148	error	system.sandbox.error.not_found	1	none	沙箱不存在或无权查看	Sandbox not found
+4149	error	system.sandbox.error.state	1	none	沙箱状态转换非法	Invalid sandbox state
+4150	error	system.sandbox.error.capacity	1	none	沙箱容量或标识已耗尽	Sandbox capacity exhausted
+85	op	system.sandbox.image.load	1	write	沙箱镜像·登记	Load sandbox image
+86	op	system.sandbox.image.query	1	read	沙箱镜像·查询	Query sandbox image
+87	op	system.sandbox.image.layer.query	1	read	沙箱镜像·查询只读层	Query sandbox image layer
+88	op	system.sandbox.image.destroy	1	write	沙箱镜像·销毁	Destroy sandbox image
+89	op	system.sandbox.volume.create	1	write	沙箱卷·创建	Create sandbox volume
+90	op	system.sandbox.volume.duplicate	1	write	沙箱卷·派生 CoW 卷	Clone sandbox CoW volume
+91	op	system.sandbox.volume.query	1	read	沙箱卷·查询	Query sandbox volume
+92	op	system.sandbox.volume.write	1	write	沙箱卷·计入可写字节	Charge sandbox volume bytes
+93	op	system.sandbox.volume.release	1	write	沙箱卷·归还可写字节	Release sandbox volume bytes
+94	op	system.sandbox.volume.destroy	1	write	沙箱卷·销毁	Destroy sandbox volume
+95	op	system.sandbox.wait	1	read	沙箱·等待终态	Wait for sandbox terminal state
+96	op	system.sandbox.kill	1	write	沙箱·终止成员	Kill sandbox members
+97	op	system.terminal.read	1	read	终端·读取输入字节	Read terminal input bytes
+98	op	system.terminal.write	1	write	终端·写入输出字节	Write terminal output bytes
+4151	error	system.sandbox.error.in_use	1	none	沙箱仍持有镜像或卷	Sandbox storage still in use
+4152	error	system.sandbox.image.error.not_found	1	none	沙箱镜像不存在或无权查看	Sandbox image not found
+4153	error	system.sandbox.image.error.layer	1	none	沙箱镜像层非法	Sandbox image layer invalid
+4154	error	system.sandbox.storage.error.limit	1	none	沙箱存储限额非法	Sandbox storage limit invalid
+4155	error	system.sandbox.storage.error.capacity	1	none	沙箱存储容量已耗尽	Sandbox storage capacity exhausted
+4156	error	system.sandbox.storage.error.ids_exhausted	1	none	沙箱存储标识已耗尽	Sandbox storage IDs exhausted
+4157	error	system.sandbox.volume.error.not_found	1	none	沙箱卷不存在或无权查看	Sandbox volume not found
+4158	error	system.sandbox.volume.error.quota	1	none	沙箱卷容量不足	Sandbox volume quota exceeded
+4159	error	system.sandbox.storage.error.in_use	1	none	沙箱存储仍被引用	Sandbox storage still referenced
+4160	error	system.sandbox.error.timeout	1	none	沙箱终态等待超时	Sandbox wait timeout
+4161	error	system.terminal.error.would_block	1	none	终端·当前没有输入且要求非阻塞	Terminal input would block
+4162	error	system.terminal.error.closed	1	none	终端·会话已关闭	Terminal session closed
+4163	error	system.terminal.error.failed	1	none	终端·会话发生故障	Terminal session failed

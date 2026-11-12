@@ -19,11 +19,16 @@
 //! [`destroy_task_object`]：销毁地址空间、归还帧、释放线程表引用（级联）。
 
 use alloc::boxed::Box;
+#[cfg(feature = "linux-abi")]
 use alloc::collections::VecDeque;
-use alloc::sync::{Arc, Weak};
+#[cfg(feature = "linux-abi")]
+use alloc::sync::Weak;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+#[cfg(feature = "linux-abi")]
+use core::sync::atomic::{AtomicU64, AtomicUsize};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::capability::{CapabilityId, CapabilityLink};
 use kernel_core::frame::{PhysFrame, FRAME_SIZE};
@@ -37,6 +42,8 @@ use kernel_core::object::{
 use kernel_core::objtable::ObjId;
 use kernel_core::paging::{MapError, MapFlags, VirtPage};
 use kernel_core::security::{ApplicationIdentity, IdentityClass};
+use kernel_core::security_domain::DomainKey;
+#[cfg(feature = "linux-abi")]
 use kernel_core::sync::SpinLock;
 use kernel_core::usi_request::{Begin as UsiRequestBegin, Ledger as UsiRequestLedger};
 
@@ -59,6 +66,7 @@ pub const HANDLES_PER_PROCESS: usize = crate::config::ACTIVE.objects.handles_per
 const USI_REQUEST_SLOTS: usize = 16;
 #[cfg(feature = "linux-abi")]
 static LINUX_PID_NEXT: AtomicU32 = AtomicU32::new(1);
+static NEXT_WORKLOAD_DOMAIN: AtomicU32 = AtomicU32::new(1);
 /// Opaque sentinel used only by the Linux standard-stream compatibility table.
 ///
 /// 仅用于 Linux 标准流兼容表的受控控制台哨兵；它不是可解析的 Jasper 句柄。
@@ -151,6 +159,7 @@ struct LinuxAshmemHandle {
 #[cfg(feature = "linux-abi")]
 struct AshmemBuffer {
     id: u64,
+    regular_file: bool,
     size: AtomicU64,
     protection: AtomicU32,
     pins: AtomicU32,
@@ -186,6 +195,7 @@ pub(crate) struct LinuxFdTransfer {
     resource: LinuxFdResource,
 }
 
+#[cfg(feature = "linux-abi")]
 enum LinuxFdResource {
     Generic,
     Pipe(Arc<compat_core::PipeEndpoint>),
@@ -200,30 +210,35 @@ enum LinuxFdResource {
     },
 }
 
+#[cfg(feature = "linux-abi")]
 struct LinuxControlMessage {
     start: usize,
     fds: Vec<LinuxFdTransfer>,
     credentials: bool,
 }
 
+#[cfg(feature = "linux-abi")]
 #[derive(Default)]
 pub(crate) struct LinuxControlDelivery {
     pub fds: Vec<LinuxFdTransfer>,
     pub credentials: bool,
 }
 
+#[cfg(feature = "linux-abi")]
 struct LinuxSocketControlQueue {
     messages: SpinLock<VecDeque<LinuxControlMessage>>,
     written: AtomicUsize,
     read: AtomicUsize,
 }
 
+#[cfg(feature = "linux-abi")]
 struct LinuxSocketControls {
     rx: SpinLock<Option<Arc<LinuxSocketControlQueue>>>,
     tx: SpinLock<Option<Arc<LinuxSocketControlQueue>>>,
     flags: AtomicU32,
 }
 
+#[cfg(feature = "linux-abi")]
 impl LinuxSocketControls {
     fn empty() -> Arc<Self> {
         Arc::new(Self {
@@ -278,6 +293,7 @@ impl LinuxSocketControls {
     }
 }
 
+#[cfg(feature = "linux-abi")]
 struct PendingSocketConnection {
     endpoint: Arc<compat_core::UnixSocketEndpoint>,
     controls: Arc<LinuxSocketControls>,
@@ -321,6 +337,7 @@ pub(crate) enum LinuxFdTransferError {
 pub(crate) enum LinuxAshmemError {
     Invalid,
     Permission,
+    Busy,
     NoMemory,
     NotAshmem,
 }
@@ -396,6 +413,16 @@ pub struct Process {
     state: ProcState,
     /// CPU 组（设置过 CPU 上限时有值；进程的全部线程受同一份上限约束，进程销毁时归还）。
     cpu_group: Option<sched::scheduler::CpuGroupId>,
+    /// Workload-bound processes borrow the group owned by the workload registry.
+    /// 绑定 Workload 的进程借用工作负载注册表持有的 CPU 组。
+    cpu_group_owned: bool,
+    /// Native workload membership; quota is charged before each Task is created.
+    /// 原生 Workload 归属；创建每个 Task 前先申请配额。
+    workload: Option<kernel_core::workload::WorkloadKey>,
+    workload_member: Option<u64>,
+    /// Authority boundary for user-created native Workload objects. It is
+    /// assigned by the kernel and never accepted from the user ABI.
+    workload_domain: Option<DomainKey>,
     /// 由用户进程经 `system.process.spawn` 创建：最后一份外部所有权（父进程中的句柄）释放时若仍在运行即被终止。
     kill_on_release: bool,
     /// 创建它的父进程（弱回指，仅用于父进程释放句柄时归还其子进程配额；归还后清空）。
@@ -428,6 +455,7 @@ struct SharedMapping {
     va: u64,
     page: Arc<crate::mm::memory_object::Page>,
     source: BackingIdentity,
+    writable: bool,
 }
 
 /// 一次成功的设备 BAR 映射：把创建它的句柄、虚拟区间与物理 BAR 起始地址记在一起。
@@ -1685,9 +1713,26 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
 
 /// Opens one anonymous ashmem buffer descriptor.
 #[cfg(feature = "linux-abi")]
-pub(crate) fn linux_open_ashmem(
+pub(crate) fn linux_open_ashmem(pid: ObjId, close_on_exec: bool) -> Option<u32> {
+    linux_open_ashmem_kind(pid, close_on_exec, false, false)
+}
+
+/// Creates one anonymous regular-file descriptor backed by the same bounded
+/// shared-page mechanism used by ashmem.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_create_memfd(
     pid: ObjId,
     close_on_exec: bool,
+    allow_sealing: bool,
+) -> Option<u32> {
+    linux_open_ashmem_kind(pid, close_on_exec, true, allow_sealing)
+}
+
+#[cfg(feature = "linux-abi")]
+fn linux_open_ashmem_kind(
+    pid: ObjId,
+    close_on_exec: bool,
+    regular_file: bool,
     allow_sealing: bool,
 ) -> Option<u32> {
     with_proc(pid, |p| {
@@ -1715,6 +1760,7 @@ pub(crate) fn linux_open_ashmem(
             handle,
             buffer: Arc::new(AshmemBuffer {
                 id: handle,
+                regular_file,
                 size: AtomicU64::new(0),
                 protection: AtomicU32::new(3),
                 pins: AtomicU32::new(0),
@@ -1727,6 +1773,22 @@ pub(crate) fn linux_open_ashmem(
         Ok(fd.fd())
     })
     .ok()
+}
+
+/// Reports whether one shared-page device descriptor represents a regular
+/// memfd rather than the char-device ashmem ABI.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_is_regular(pid: ObjId, handle: u64) -> Option<bool> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .ashmem
+            .iter()
+            .find(|ashmem| ashmem.handle == handle)
+            .map(|ashmem| ashmem.buffer.regular_file),
+        _ => None,
+    })
 }
 
 /// Opens one bounded Android binder device descriptor.
@@ -1950,6 +2012,7 @@ pub(crate) fn linux_ion_alloc(
         }
         let buffer = Arc::new(AshmemBuffer {
             id: (u64::from(current) << 32) | u64::from(linux_pid),
+            regular_file: false,
             size: AtomicU64::new(size),
             protection: AtomicU32::new(3),
             pins: AtomicU32::new(0),
@@ -2201,27 +2264,38 @@ pub(crate) fn linux_ashmem_add_seals(
     if seals == 0 || seals & !0x1f != 0 {
         return Err(LinuxAshmemError::Invalid);
     }
-    let buffer = crate::kobj::with(|t| match t.get(pid) {
-        Ok(KObject::Process(p)) => p
-            .linux
-            .as_ref()?
+    with_proc(pid, |p| {
+        let linux = p.linux.as_ref().ok_or(ProcError::Exited)?;
+        let buffer = linux
             .ashmem
             .iter()
             .find(|ashmem| ashmem.handle == handle)
-            .map(|ashmem| Arc::clone(&ashmem.buffer)),
-        _ => None,
+            .map(|ashmem| Arc::clone(&ashmem.buffer))
+            .ok_or(ProcError::NoTaskSlot)?;
+        if buffer.allow_sealing.load(Ordering::Acquire) == 0 {
+            return Err(ProcError::Handle(HandleError::RightsDenied));
+        }
+        let current = buffer.seals.load(Ordering::Acquire);
+        if current & 1 != 0 {
+            return Err(ProcError::Handle(HandleError::RightsDenied));
+        }
+        if seals & 8 != 0
+            && p.shared_maps
+                .iter()
+                .any(|mapping| mapping.source.object_id == buffer.id && mapping.writable)
+        {
+            return Err(ProcError::Map(MapError::Busy));
+        }
+        let next = current | seals;
+        buffer.seals.store(next, Ordering::Release);
+        Ok(next)
     })
-    .ok_or(LinuxAshmemError::NotAshmem)?;
-    if buffer.allow_sealing.load(Ordering::Acquire) == 0 {
-        return Err(LinuxAshmemError::Permission);
-    }
-    let current = buffer.seals.load(Ordering::Acquire);
-    if current & 1 != 0 {
-        return Err(LinuxAshmemError::Permission);
-    }
-    let next = current | seals;
-    buffer.seals.store(next, Ordering::Release);
-    Ok(next)
+    .map_err(|error| match error {
+        ProcError::Handle(HandleError::RightsDenied) => LinuxAshmemError::Permission,
+        ProcError::Map(MapError::Busy) => LinuxAshmemError::Busy,
+        ProcError::NoTaskSlot => LinuxAshmemError::NotAshmem,
+        _ => LinuxAshmemError::NoMemory,
+    })
 }
 
 #[cfg(feature = "linux-abi")]
@@ -2315,13 +2389,37 @@ pub(crate) fn linux_ashmem_pin(
         return Err(LinuxAshmemError::Invalid);
     }
     if pin {
-        Ok(buffer.pins.fetch_add(1, Ordering::AcqRel).saturating_add(1))
-    } else {
-        let current = buffer.pins.load(Ordering::Acquire);
-        if current == 0 {
-            return Err(LinuxAshmemError::Invalid);
+        let mut current = buffer.pins.load(Ordering::Acquire);
+        loop {
+            let next = current
+                .checked_add(1)
+                .ok_or(LinuxAshmemError::Invalid)?;
+            match buffer.pins.compare_exchange(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(next),
+                Err(observed) => current = observed,
+            }
         }
-        Ok(buffer.pins.fetch_sub(1, Ordering::AcqRel).saturating_sub(1))
+    } else {
+        let mut current = buffer.pins.load(Ordering::Acquire);
+        loop {
+            let next = current
+                .checked_sub(1)
+                .ok_or(LinuxAshmemError::Invalid)?;
+            match buffer.pins.compare_exchange(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(next),
+                Err(observed) => current = observed,
+            }
+        }
     }
 }
 
@@ -2403,6 +2501,9 @@ pub(crate) fn linux_ashmem_map(
     let backing = kernel_core::memory_capability::BackingIdentity::new(buffer.id, 1)
         .ok_or(LinuxAshmemError::Invalid)?;
     with_proc(pid, |p| {
+        if protection & 2 != 0 && buffer.seals.load(Ordering::Acquire) & (8 | 16) != 0 {
+            return Err(ProcError::Handle(HandleError::RightsDenied));
+        }
         if p.frames
             .len()
             .checked_add(p.shared_maps.len())
@@ -2476,12 +2577,16 @@ pub(crate) fn linux_ashmem_map(
                 va: address + index as u64 * PAGE,
                 page: Arc::clone(page),
                 source: backing,
+                writable: protection & 2 != 0,
             });
         }
         p.space.end_shootdown();
         Ok(())
     })
-    .map_err(|_| LinuxAshmemError::NoMemory)
+    .map_err(|error| match error {
+        ProcError::Handle(HandleError::RightsDenied) => LinuxAshmemError::Permission,
+        _ => LinuxAshmemError::NoMemory,
+    })
 }
 
 /// Installs a read-only Linux virtual file and initializes its offset.
@@ -3013,6 +3118,10 @@ fn create_process(
         threads_total: 0,
         state: ProcState::Running,
         cpu_group: None,
+        cpu_group_owned: false,
+        workload: None,
+        workload_member: None,
+        workload_domain: None,
         kill_on_release: false,
         spawned_by: None,
         spawned_live: 0,
@@ -3066,15 +3175,37 @@ fn with_proc<R>(
 
 /// Create a private mapping of a zeroed Memory page (ELF/stack loader path).
 pub fn map_new(id: ObjId, va: u64, flags: MapFlags) -> Result<PhysFrame, ProcError> {
-    let charge = kobj::with(|t| {
+    const PAGE_BYTES: u64 = kernel_core::frame::FRAME_SIZE as u64;
+    let workload = kobj::with(|t| Ok(receiver(t, id)?.workload))?;
+    if let Some(workload) = workload {
+        crate::workload::reserve_memory(workload, PAGE_BYTES)
+            .map_err(|_| ProcError::MemoryQuota)?;
+    }
+    let charge = match kobj::with(|t| {
         let p = receiver(t, id)?;
         p.memory_account
             .reserve(1, 0, p.memory_owned_limit, p.memory_pin_limit)
             .ok_or(ProcError::MemoryQuota)
-    })?;
-    let page = crate::mm::memory_object::Page::zeroed(charge).ok_or(ProcError::OutOfFrames)?;
+    }) {
+        Ok(charge) => charge,
+        Err(error) => {
+            if let Some(workload) = workload {
+                crate::workload::release_memory(workload, PAGE_BYTES);
+            }
+            return Err(error);
+        }
+    };
+    let page = match crate::mm::memory_object::Page::zeroed(charge) {
+        Some(page) => page,
+        None => {
+            if let Some(workload) = workload {
+                crate::workload::release_memory(workload, PAGE_BYTES);
+            }
+            return Err(ProcError::OutOfFrames);
+        }
+    };
     let f = page.frame();
-    with_proc(id, |p| {
+    let result = with_proc(id, |p| {
         if p.state != ProcState::Running {
             return Err(ProcError::Exited);
         }
@@ -3127,7 +3258,13 @@ pub fn map_new(id: ObjId, va: u64, flags: MapFlags) -> Result<PhysFrame, ProcErr
         }
         p.frames.push(Arc::clone(&page));
         Ok(f)
-    })
+    });
+    if result.is_err() {
+        if let Some(workload) = workload {
+            crate::workload::release_memory(workload, PAGE_BYTES);
+        }
+    }
+    result
 }
 
 /// 取消进程中一页的映射并放弃该页的数据帧（仍被在飞请求固定时，帧延后到最后一次解除固定才归还）。
@@ -3170,12 +3307,15 @@ pub fn unmap_page(id: ObjId, va: u64) -> Result<(), ProcError> {
         .ok();
         return Err(ProcError::Map(MapError::Busy));
     }
-    with_proc(id, |p| {
+    let workload = with_proc(id, |p| {
         crate::mm::pin::mapping_released(frame);
         p.frames.retain(|x| x.frame() != frame);
         p.space.end_shootdown();
-        Ok(())
+        Ok(p.workload)
     })?;
+    if let Some(workload) = workload {
+        crate::workload::release_memory(workload, kernel_core::frame::FRAME_SIZE as u64);
+    }
     Ok(())
 }
 
@@ -3283,7 +3423,20 @@ fn checked_range(va: u64, pages: u64) -> Result<(), MemError> {
 pub fn map_anon(pid: ObjId, va: u64, pages: u64, writable: bool) -> Result<(), MemError> {
     checked_range(va, pages)?;
     let n = pages as usize;
-    let charge = kobj::with(|t| {
+    let requested_workload = kobj::with(|t| {
+        let p = receiver(t, pid).map_err(|_| MemError::NoSuchProcess)?;
+        let bytes = pages
+            .checked_mul(FRAME_SIZE)
+            .ok_or(MemError::InvalidRange)?;
+        Ok(p.workload.map(|workload| (workload, bytes)))
+    })?;
+    let workload_charge = if let Some((workload, bytes)) = requested_workload {
+        crate::workload::reserve_memory(workload, bytes).map_err(|_| MemError::Quota)?;
+        Some((workload, bytes))
+    } else {
+        None
+    };
+    let charge = match kobj::with(|t| {
         let p = receiver(t, pid).map_err(|_| MemError::NoSuchProcess)?;
         if p.frames.len() + p.shared_maps.len() + n > MAX_PROCESS_FRAMES {
             return Err(MemError::Quota);
@@ -3291,19 +3444,49 @@ pub fn map_anon(pid: ObjId, va: u64, pages: u64, writable: bool) -> Result<(), M
         p.memory_account
             .reserve(pages, 0, p.memory_owned_limit, p.memory_pin_limit)
             .ok_or(MemError::Quota)
-    })?;
-    crate::mm::pressure::admit(sched::current_effective_qos(), n)
-        .map_err(|_| MemError::Pressure)?;
-    let backing =
-        crate::mm::memory_object::MemoryObject::zeroed(pages, MAX_PROCESS_FRAMES as u64, charge)
-            .ok_or(MemError::OutOfMemory)?;
+    }) {
+        Ok(charge) => charge,
+        Err(error) => {
+            if let Some((workload, bytes)) = workload_charge {
+                crate::workload::release_memory(workload, bytes);
+            }
+            return Err(error);
+        }
+    };
+    if crate::mm::pressure::admit(sched::current_effective_qos(), n).is_err() {
+        if let Some((workload, bytes)) = workload_charge {
+            crate::workload::release_memory(workload, bytes);
+        }
+        return Err(MemError::Pressure);
+    }
+    let backing = match crate::mm::memory_object::MemoryObject::zeroed(
+        pages,
+        MAX_PROCESS_FRAMES as u64,
+        charge,
+    ) {
+        Some(backing) => backing,
+        None => {
+            if let Some((workload, bytes)) = workload_charge {
+                crate::workload::release_memory(workload, bytes);
+            }
+            return Err(MemError::OutOfMemory);
+        }
+    };
     let range = kernel_core::memory_object::MapRange {
         offset_pages: 0,
         pages,
         va,
         end: va + pages * FRAME_SIZE,
     };
-    let fresh = backing.retain_range(range).ok_or(MemError::OutOfMemory)?;
+    let fresh = match backing.retain_range(range) {
+        Some(fresh) => fresh,
+        None => {
+            if let Some((workload, bytes)) = workload_charge {
+                crate::workload::release_memory(workload, bytes);
+            }
+            return Err(MemError::OutOfMemory);
+        }
+    };
     let flags = if writable {
         MapFlags::USER.union(MapFlags::WRITE)
     } else {
@@ -3374,17 +3557,23 @@ pub fn map_anon(pid: ObjId, va: u64, pages: u64, writable: bool) -> Result<(), M
         p.space.end_shootdown();
         Ok(())
     });
-    if result.is_err() && published > 0 {
-        if crate::smp::tlb_shootdown_on(active, va, published).is_err() || rollback_uncertain {
-            for page in fresh.iter().take(published as usize) {
-                page.quarantine();
+    if result.is_err() {
+        if published > 0 {
+            if crate::smp::tlb_shootdown_on(active, va, published).is_err() || rollback_uncertain {
+                for page in fresh.iter().take(published as usize) {
+                    page.quarantine();
+                }
+                // Quarantined pages remain physically charged, so retain the Workload charge too.
+                return Err(MemError::Busy);
             }
-            return Err(MemError::Busy);
+            let _ = with_proc(pid, |p| {
+                p.space.end_shootdown();
+                Ok(())
+            });
         }
-        let _ = with_proc(pid, |p| {
-            p.space.end_shootdown();
-            Ok(())
-        });
+        if let Some((workload, bytes)) = workload_charge {
+            crate::workload::release_memory(workload, bytes);
+        }
     }
     result
 }
@@ -3411,6 +3600,25 @@ fn create_accounted_memory(pid: ObjId, pages: u64, guest: bool) -> Result<Handle
     if pages > limit {
         return Err(ProcError::MemoryQuota);
     }
+    let requested_workload = if guest {
+        None
+    } else {
+        kobj::with(|t| {
+            let p = receiver(t, pid)?;
+            let bytes = pages
+                .checked_mul(kernel_core::frame::FRAME_SIZE as u64)
+                .ok_or(ProcError::MemoryQuota)?;
+            Ok(p.workload.map(|workload| (workload, bytes)))
+        })?
+    };
+    let workload_owner = if let Some((workload, bytes)) = requested_workload {
+        Some(
+            crate::workload::MemoryCharge::reserve(workload, bytes)
+                .map_err(|_| ProcError::MemoryQuota)?,
+        )
+    } else {
+        None
+    };
     let charge = kobj::with(|t| {
         let p = receiver(t, pid)?;
         if guest {
@@ -3423,10 +3631,16 @@ fn create_accounted_memory(pid: ObjId, pages: u64, guest: bool) -> Result<Handle
                 .ok_or(ProcError::MemoryQuota)
         }
     })?;
-    crate::mm::pressure::admit(sched::current_effective_qos(), pages as usize)
-        .map_err(|_| ProcError::OutOfFrames)?;
-    let backing = crate::mm::memory_object::MemoryObject::zeroed(pages, limit, charge)
-        .ok_or(ProcError::OutOfFrames)?;
+    if crate::mm::pressure::admit(sched::current_effective_qos(), pages as usize).is_err() {
+        return Err(ProcError::OutOfFrames);
+    }
+    let backing = crate::mm::memory_object::MemoryObject::zeroed_with_workload(
+        pages,
+        limit,
+        charge,
+        workload_owner,
+    )
+    .ok_or(ProcError::OutOfFrames)?;
     grant_new(
         pid,
         KObject::Memory(backing),
@@ -3453,6 +3667,7 @@ pub fn map_memory(
 ) -> Result<(), MemError> {
     let mut retained = Vec::new();
     let mut published = 0u64;
+    let mut workload_charge = None;
     let mut rollback_uncertain = false;
     let mut active = kernel_core::smp::CpuSet::EMPTY;
     let result = kobj::with(|t| {
@@ -3500,6 +3715,14 @@ pub fn map_memory(
             .is_none()
         {
             return Err(MemError::Quota);
+        }
+        let workload_bytes = pages
+            .checked_mul(FRAME_SIZE)
+            .ok_or(MemError::InvalidRange)?;
+        if let Some(workload) = p.workload {
+            crate::workload::reserve_memory(workload, workload_bytes)
+                .map_err(|_| MemError::Quota)?;
+            workload_charge = Some((workload, workload_bytes));
         }
         p.shared_maps
             .try_reserve(retained.len())
@@ -3550,6 +3773,7 @@ pub fn map_memory(
                 page: Arc::clone(page),
                 source: BackingIdentity::new(id.raw(), id.generation())
                     .expect("live object has a valid generation"),
+                writable,
             });
         }
         p.memory_caps
@@ -3571,6 +3795,11 @@ pub fn map_memory(
         p.space.end_shootdown();
         Ok(())
     });
+    if result.is_err() {
+        if let Some((workload, bytes)) = workload_charge {
+            crate::workload::release_memory(workload, bytes);
+        }
+    }
     if result.is_err() && published > 0 {
         #[cfg(feature = "shm1-verify")]
         crate::shm_demo::record_mapping_rollback(published);
@@ -3627,7 +3856,7 @@ pub fn unmap_memory(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
     #[cfg(feature = "shm1-verify")]
     crate::shm_demo::record_revoke_targets(active);
     let confirmed = crate::smp::tlb_shootdown_on(active, va, pages).is_ok();
-    kobj::with(|t| {
+    let workload = kobj::with(|t| {
         let Ok(KObject::Process(p)) = t.get_mut(pid) else {
             return Err(MemError::NoSuchProcess);
         };
@@ -3642,8 +3871,19 @@ pub fn unmap_memory(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
         }
         p.shared_maps.retain(|m| m.va < va || m.va >= end);
         p.space.end_shootdown();
-        Ok(())
-    })
+        Ok(p.workload.map(|workload| {
+            (
+                workload,
+                pages
+                    .checked_mul(FRAME_SIZE)
+                    .expect("validated page range cannot overflow"),
+            )
+        }))
+    })?;
+    if let Some((workload, bytes)) = workload {
+        crate::workload::release_memory(workload, bytes);
+    }
+    Ok(())
 }
 
 /// 在进程 `pid` 的 `[va, va + size)` 建立设备 BAR 映射（`phys` 为 BAR 物理基址）。
@@ -3662,6 +3902,9 @@ pub fn map_device_bar(
     phys: u64,
     size: u64,
 ) -> Result<(), MemError> {
+    // MMIO is device-address space, not owned RAM: it is governed by device
+    // capabilities, IOMMU/DMA rules and memory_caps, never by memory_bytes.
+    // 设备 MMIO 属于设备地址空间而非自有 RAM；不得伪装成普通内存额度。
     if va % FRAME_SIZE != 0 || size == 0 || size % FRAME_SIZE != 0 || phys % FRAME_SIZE != 0 {
         return Err(MemError::InvalidRange);
     }
@@ -4910,6 +5153,7 @@ fn spawn_thread_mode(
             task_obj,
         });
     }
+    let workload = with_proc(id, |p| Ok(p.workload)).ok().flatten();
     // 先完成全部记账（执行上下文 → Process、线程表 → Task），再交给调度器：
     // 否则新线程可能在记账完成前就运行并退出。
     // 先确认进程仍在运行，再取内部引用：两步在同一次对象表访问内完成，失败时不留下半份记账
@@ -4928,32 +5172,41 @@ fn spawn_thread_mode(
         }
         Ok(())
     });
-    let rollback = |reason: ProcError, accounted: bool| {
-        {
-            let mut reg = REG.lock();
-            reg.starts.retain(|s| s.task != task);
-            reg.members.retain(|m| m.task != task);
-        }
-        kobj::with(|t| {
-            if accounted {
-                if let Ok(KObject::Process(p)) = t.get_mut(id) {
-                    p.threads_live -= 1;
-                    p.threads_total -= 1;
-                    p.threads.retain(|x| *x != task_obj);
-                }
-                let _ = t.release_internal(id);
+    let rollback =
+        |reason: ProcError,
+         accounted: bool,
+         charged_workload: Option<kernel_core::workload::WorkloadKey>| {
+            {
+                let mut reg = REG.lock();
+                reg.starts.retain(|s| s.task != task);
+                reg.members.retain(|m| m.task != task);
             }
-            let _ = t.release_internal(task_obj);
-            let _ = t.release_internal(task_obj);
-        });
-        reason
-    };
+            kobj::with(|t| {
+                if accounted {
+                    if let Ok(KObject::Process(p)) = t.get_mut(id) {
+                        p.threads_live -= 1;
+                        p.threads_total -= 1;
+                        p.threads.retain(|x| *x != task_obj);
+                    }
+                    let _ = t.release_internal(id);
+                }
+                let _ = t.release_internal(task_obj);
+                let _ = t.release_internal(task_obj);
+            });
+            if let Some(workload) = charged_workload {
+                crate::workload::release_thread(workload);
+            }
+            reason
+        };
     if let Err(e) = accounted {
-        return Err(rollback(e, false));
+        return Err(rollback(e, false, None));
+    }
+    if workload.is_some_and(|key| crate::workload::reserve_thread(key).is_err()) {
+        return Err(rollback(ProcError::MemoryQuota, true, None));
     }
     #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
     if !crate::linux_abi::register_linux_thread(id, task, linux_clear_child_tid) {
-        return Err(rollback(ProcError::NoTaskSlot, true));
+        return Err(rollback(ProcError::NoTaskSlot, true, workload));
     }
     // 新线程与进程的其它线程同属一个 CPU 组。交给调度器之后再核对一次：设置上限与创建线程并发时，
     // 两边总有一边把新线程放进组里。
@@ -4966,7 +5219,7 @@ fn spawn_thread_mode(
     if spawned.is_err() {
         #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
         crate::linux_abi::unregister_linux_thread(task);
-        return Err(rollback(ProcError::NoTaskSlot, true));
+        return Err(rollback(ProcError::NoTaskSlot, true, workload));
     }
     if let Some(g) = with_proc(id, |p| Ok(p.cpu_group)).ok().flatten() {
         let _ = sched::assign_cpu_group(task, Some(g));
@@ -4987,6 +5240,9 @@ fn spawn_thread_mode(
 pub enum CpuLimitError {
     /// 进程不存在或已不在运行。
     NoSuchProcess,
+    /// CPU authority is owned by the bound native workload.
+    /// CPU 权限由绑定的原生 Workload 持有。
+    ManagedByWorkload,
     /// 上限不在 `1..=1000` 千分比之内，或 CPU 组表已满。
     Refused(sched::scheduler::GroupError),
 }
@@ -4998,12 +5254,21 @@ pub enum CpuLimitError {
 pub fn set_cpu_limit(pid: ObjId, limit_permille: u32) -> Result<(), CpuLimitError> {
     let existing = with_proc(pid, |p| {
         if p.state == ProcState::Running {
+            if p.workload.is_some() {
+                return Err(ProcError::Exited);
+            }
             Ok(p.cpu_group)
         } else {
             Err(ProcError::Exited)
         }
     })
-    .map_err(|_| CpuLimitError::NoSuchProcess)?;
+    .map_err(|_| {
+        if with_proc(pid, |p| Ok(p.workload.is_some())).unwrap_or(false) {
+            CpuLimitError::ManagedByWorkload
+        } else {
+            CpuLimitError::NoSuchProcess
+        }
+    })?;
     if let Some(g) = existing {
         return sched::set_cpu_group_limit(g, limit_permille).map_err(CpuLimitError::Refused);
     }
@@ -5011,6 +5276,7 @@ pub fn set_cpu_limit(pid: ObjId, limit_permille: u32) -> Result<(), CpuLimitErro
     let stored = with_proc(pid, |p| {
         if p.state == ProcState::Running && p.cpu_group.is_none() {
             p.cpu_group = Some(g);
+            p.cpu_group_owned = true;
             Ok(())
         } else {
             Err(ProcError::Exited)
@@ -5031,6 +5297,84 @@ pub fn set_cpu_limit(pid: ObjId, limit_permille: u32) -> Result<(), CpuLimitErro
         let _ = sched::assign_cpu_group(t, Some(g)); // 已退出的线程无需加入
     }
     Ok(())
+}
+
+/// Binds a thread-less process to one running native workload.
+///
+/// 将尚未创建线程的进程绑定到一个 Running 原生 Workload；成员关系和进程字段
+/// 只在两侧都成功后提交。
+pub fn bind_workload(pid: ObjId, workload: kernel_core::workload::WorkloadKey) -> bool {
+    let Ok(cpu_group) = crate::workload::cpu_group(workload) else {
+        return false;
+    };
+    with_proc(pid, |process| {
+        if process.workload.is_some()
+            || process.cpu_group.is_some()
+            || process.threads_live != 0
+            || !process.frames.is_empty()
+            || !process.shared_maps.is_empty()
+            || !process.device_maps.is_empty()
+            || !process.quarantined.is_empty()
+            || process.ring_quota != ResourceQuota::default()
+            || process.memory_account.snapshot().mapped != 0
+            || process.memory_account.snapshot().pinned != 0
+            || process.vm_guest_account.snapshot().mapped != 0
+            || process.subscription_account.snapshot().mapped != 0
+        {
+            return Err(ProcError::Exited);
+        }
+        crate::workload::snapshot(workload).map_err(|_| ProcError::NoSuchProcess)?;
+        crate::workload::bind_member(workload, pid.raw()).map_err(|_| ProcError::NoSuchProcess)?;
+        process.workload = Some(workload);
+        process.workload_member = Some(pid.raw());
+        process.cpu_group = Some(cpu_group);
+        process.cpu_group_owned = false;
+        Ok(())
+    })
+    .is_ok()
+}
+
+pub fn workload_key(pid: ObjId) -> Option<kernel_core::workload::WorkloadKey> {
+    with_proc(pid, |process| Ok(process.workload))
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn workload_key_in(
+    table: &kobj::Table,
+    pid: ObjId,
+) -> Option<kernel_core::workload::WorkloadKey> {
+    match table.get(pid) {
+        Ok(KObject::Process(process)) => process.workload,
+        _ => None,
+    }
+}
+
+/// Return the kernel-issued Workload authority domain for a process.
+///
+/// Domains are allocated monotonically and never reused, so a stale domain
+/// cannot become valid after process-object slot reuse.
+pub fn workload_domain(pid: ObjId) -> Option<DomainKey> {
+    with_proc(pid, |process| {
+        if let Some(domain) = process.workload_domain {
+            return Ok(domain);
+        }
+        let Some(id) = NEXT_WORKLOAD_DOMAIN
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |id| {
+                (id != u32::MAX).then_some(id + 1)
+            })
+            .ok()
+        else {
+            return Err(ProcError::NoTaskSlot);
+        };
+        let domain = DomainKey {
+            id,
+            generation: 1,
+        };
+        process.workload_domain = Some(domain);
+        Ok(domain)
+    })
+    .ok()
 }
 
 /// 进程 `pid` 的 CPU 记账（设置过上限时有值；进程销毁后 `None`）。
@@ -5600,6 +5944,7 @@ fn release_resources_in(t: &mut kobj::Table, pid: ObjId) -> usize {
             let n = p.handles.close_all(|r| closed.push(r));
             // 进程进入退出流程后它的设备窗口一律撤销；BAR 不是 RAM，这里只改页表。
             revoke_all_device_mappings(p);
+            #[cfg(feature = "linux-abi")]
             if let Some(linux) = p.linux.as_mut() {
                 let _ = linux.fds.take_all();
                 linux.pipes.clear();
@@ -5641,6 +5986,7 @@ pub fn begin_exit(pid: ObjId, code: i64) -> bool {
     let started = begin_exit_in_table(pid, code);
     if started {
         wake_threads(pid);
+        #[cfg(feature = "linux-abi")]
         if let Some(task) = vfork_parent_task(pid) {
             sched::wake(task);
         }
@@ -5648,6 +5994,7 @@ pub fn begin_exit(pid: ObjId, code: i64) -> bool {
     started
 }
 
+#[cfg(feature = "linux-abi")]
 fn vfork_parent_task(pid: ObjId) -> Option<TaskId> {
     with_proc(pid, |process| {
         Ok(process
@@ -5930,6 +6277,7 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
     if let Some(m) = member {
         #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
         crate::linux_abi::linux_thread_exit(m.process, m.task);
+        let mut exiting_workload = None;
         let exited = kobj::with(|t| {
             // 线程自己的退出状态：写入本线程的退出码
             if let Ok(KObject::Task(task)) = t.get(m.task_obj) {
@@ -5943,6 +6291,7 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
             let mut left_table = false;
             let last = match t.get_mut(m.process) {
                 Ok(KObject::Process(p)) => {
+                    exiting_workload = p.workload;
                     if let Some(i) = p.threads.iter().position(|x| *x == m.task_obj) {
                         p.threads.swap_remove(i);
                         left_table = true;
@@ -5969,6 +6318,9 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
             let _ = t.release_internal(m.process); // 执行上下文 → Process
             out
         });
+        if let Some(workload) = exiting_workload {
+            crate::workload::release_thread(workload);
+        }
         if let Some((name, threads, handles, code)) = exited {
             kprintln!(
                 "[JSR-PROC] event=system.process.exited id={:#x} name={} code={} threads={} handles_closed={}",
@@ -6082,10 +6434,21 @@ fn destroy_process(p: Box<Process>) {
         exit_state,
         children,
         cpu_group,
+        cpu_group_owned,
+        workload,
+        workload_member,
         ..
     } = *p;
-    if let Some(g) = cpu_group {
+    if let Some(g) = cpu_group.filter(|_| cpu_group_owned) {
         let _ = sched::release_cpu_group(g); // 持有者引用；线程早已全部退出，组随之释放
+    }
+    if let Some(workload) = workload {
+        let bytes = (frames.len() + shared_maps.len() + quarantined.len()) as u64
+            * kernel_core::frame::FRAME_SIZE as u64;
+        crate::workload::release_memory(workload, bytes);
+        if let Some(member) = workload_member {
+            let _ = crate::workload::unbind_member(workload, member);
+        }
     }
     // 防御：正常路径已在 exiting / exited 时撤销；这里再撤销一次，且不触碰页帧分配器。
     // Device mappings are revoked while the process is still addressable;

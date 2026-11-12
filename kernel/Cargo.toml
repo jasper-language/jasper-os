@@ -82,6 +82,9 @@ pex4-verify = []
 pex5-verify = []
 # Dedicated real-kernel frame allocation, cross-CPU release and reclaim matrix.
 pex7-verify = []
+workload-verify = []
+# Real CPL3 Linux file/console I/O through a Workload-bound Process.
+workload-io-verify = ["workload-verify", "linux-abi"]
 # Dedicated SEC-1 identity and metadata substrate.
 sec1-verify = ["kernel-core/sec1-verify"]
 # Dedicated SEC-2 capability-lineage slice; full revocation/in-flight coverage
@@ -167,6 +170,9 @@ lifecycle-root-exec-verify = ["lifecycle-health-fail-verify", "linux-abi", "comp
 # Dedicated negative acceptance: lose the first virtio-blk completion and require
 # the hardware-counter timeout to fail the health gate without hanging silently.
 lifecycle-block-timeout-verify = ["lifecycle-root-exec-verify", "fault-inject"]
+# Dedicated console-input acceptance: a dynamic Linux program consumes serial
+# bytes through the bounded native terminal session.
+terminal-session-verify = ["lifecycle-root-exec-verify"]
 # Pixel 6a (Google Tensor GS101) early-boot probe: Samsung UART only, no scheduler/IRQ start.
 pixel6a-smoke = []
 pixel6a-entry-probe = ["pixel6a-smoke"]

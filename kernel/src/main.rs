@@ -29,6 +29,10 @@ mod bios {
     fn kernel_main(info: &'static mut BootInfo) -> ! {
         #[cfg(feature = "bm1-vm")]
         jasper_kernel::arch::bm1_init(info.framebuffer.take());
+        #[cfg(not(feature = "bm1-vm"))]
+        if let Some(framebuffer) = info.framebuffer.take() {
+            let _ = jasper_kernel::display::init(framebuffer);
+        }
         let mut spec = BootSpec::new();
         for r in info.memory_regions.iter() {
             // 只有 Usable 可自由使用；引导器自身的页表/数据、固件未知类型一律视为保留。

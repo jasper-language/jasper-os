@@ -182,8 +182,14 @@ mod proofs {
     #[kani::proof]
     fn ordered_pair_is_strict_and_migration_has_one_owner() {
         let source: u16 = kani::any(); let destination: u16 = kani::any();
-        kani::assume(source != destination);
         let token = TaskToken { slot: kani::any(), generation: kani::any() };
+        if source == destination {
+            assert_eq!(
+                Migration::begin(token, Owner::Cpu(source), destination),
+                Err(MigrationError::SameCpu)
+            );
+            return;
+        }
         let mut m = Migration::begin(token, Owner::Cpu(source), destination).unwrap();
         let pair = m.locks(); assert!(pair.first < pair.second);
         m.detach().unwrap(); assert_eq!(m.owner(), Owner::Transit);
