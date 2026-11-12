@@ -1626,6 +1626,9 @@ pub fn map_device_bar(
     phys: u64,
     size: u64,
 ) -> Result<(), MemError> {
+    // MMIO is device-address space, not owned RAM: it is governed by device
+    // capabilities, IOMMU/DMA rules and memory_caps, never by memory_bytes.
+    // 设备 MMIO 属于设备地址空间而非自有 RAM；不得伪装成普通内存额度。
     if va % FRAME_SIZE != 0 || size == 0 || size % FRAME_SIZE != 0 || phys % FRAME_SIZE != 0 {
         return Err(MemError::InvalidRange);
     }
