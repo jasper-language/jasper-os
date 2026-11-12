@@ -213,7 +213,7 @@ fn error_name(ret: i64) -> &'static str {
 /// 每次系统调用返回前最多销毁的死亡对象数（见 [`on_syscall`] 的出口清理点）。
 const CLEANUP_PER_CALL: usize = 16;
 /// 创建对象前先回收死亡对象的调用（进程创建在 `spawn_child` 里自带回收）。
-const RECLAIM_BEFORE: [u32; 9] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, SYSTEM_CHANNEL_CREATE, SYSTEM_MEMORY_OBJECT_CREATE,SYSTEM_EVENT_SOURCE_CREATE,SYSTEM_EVENT_SUBSCRIPTION_CREATE,SYSTEM_SYNC_MUTEX_CREATE,SYSTEM_TIME_TIMER_CREATE,SYSTEM_MEMORY_DMA_MAP];
+const RECLAIM_BEFORE: [u32; 10] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, SYSTEM_CHANNEL_CREATE, SYSTEM_MEMORY_OBJECT_CREATE,SYSTEM_EVENT_SOURCE_CREATE,SYSTEM_EVENT_SUBSCRIPTION_CREATE,SYSTEM_SYNC_MUTEX_CREATE,SYSTEM_TIME_TIMER_CREATE,SYSTEM_MEMORY_DMA_MAP,SYSTEM_WORKLOAD_CREATE];
 
 /// Selects the syscall ABI only when the optional Linux service is installed.
 ///
@@ -660,6 +660,18 @@ syscall_dispatch! {
     SYSTEM_MODULE_LIFECYCLE_GET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         crate::usi::module_lifecycle(a.args[0], a.args[1], a.args[2])
     },
+    SYSTEM_WORKLOAD_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        workload_create(a.args[0])
+    },
+    SYSTEM_WORKLOAD_QUERY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        workload_query(a.args[0], a.args[1], a.args[2])
+    },
+    SYSTEM_WORKLOAD_STOP => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        workload_stop(a.args[0])
+    },
+    SYSTEM_WORKLOAD_DESTROY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        workload_destroy(a.args[0])
+    },
 }
 
 // 编译期证明：分发表在登记表之内，且两者基数相同 ⇒ 两个集合完全相等。
@@ -942,6 +954,109 @@ fn memory_object_map(raw:u64,ptr:u64) -> i64 {
 fn memory_object_unmap(address:u64,pages:u64) -> i64 {
     let Some(pid)=proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
     match proc::unmap_memory(pid,address,pages) { Ok(())=>0, Err(e)=>mem_err(e) }
+}
+
+fn workload_error(error: kernel_core::workload::WorkloadError) -> i64 {
+    use kernel_core::workload::WorkloadError;
+    match error {
+        WorkloadError::InvalidDomain => err(SYSTEM_ERROR_RIGHTS_DENIED),
+        WorkloadError::InvalidKey => err(SYSTEM_WORKLOAD_ERROR_NOT_FOUND),
+        WorkloadError::InvalidLimit => err(SYSTEM_ERROR_INVALID_ARGUMENT),
+        WorkloadError::InvalidState => err(SYSTEM_WORKLOAD_ERROR_STATE),
+        WorkloadError::Quota => err(SYSTEM_ERROR_QUOTA_EXCEEDED),
+        WorkloadError::Capacity | WorkloadError::IdExhausted => {
+            err(SYSTEM_WORKLOAD_ERROR_CAPACITY)
+        }
+    }
+}
+
+/// Create a native Workload in the kernel-issued domain of the current process.
+fn workload_create(desc_ptr: u64) -> i64 {
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(domain) = proc::workload_domain(pid) else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let mut raw = [0u8; kernel_core::workload_abi::CREATE_BYTES];
+    if let Err(error) = copy_from_user(
+        &mut raw,
+        desc_ptr,
+        kernel_core::workload_abi::CREATE_BYTES,
+    ) {
+        return user_ptr_err(error);
+    }
+    let Some(args) = kernel_core::workload_abi::CreateArgs::decode(&raw) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    match crate::workload::create_in_domain(domain, args.parent, args.limits) {
+        Ok(key) => key.to_raw() as i64,
+        Err(error) => workload_error(error),
+    }
+}
+
+/// Return one fixed-size Workload record only to a same-domain caller.
+fn workload_query(raw_key: u64, ptr: u64, cap: u64) -> i64 {
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(domain) = proc::workload_domain(pid) else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(key) = kernel_core::workload::WorkloadKey::from_raw(raw_key) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    if cap < kernel_core::workload_abi::INFO_BYTES as u64 {
+        return err(SYSTEM_WORKLOAD_ERROR_BUFFER_TOO_SMALL);
+    }
+    let snapshot = match crate::workload::snapshot_in_domain(domain, key) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return workload_error(error),
+    };
+    let encoded =
+        kernel_core::workload_abi::WorkloadInfo::from_snapshot(snapshot).encode();
+    if let Err(error) = copy_to_user(
+        ptr,
+        &encoded,
+        kernel_core::workload_abi::INFO_BYTES,
+    ) {
+        return user_ptr_err(error);
+    }
+    kernel_core::workload_abi::INFO_BYTES as i64
+}
+
+/// Request a same-domain Workload to enter `Stopping`.
+fn workload_stop(raw_key: u64) -> i64 {
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(domain) = proc::workload_domain(pid) else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(key) = kernel_core::workload::WorkloadKey::from_raw(raw_key) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    match crate::workload::stop_in_domain(domain, key) {
+        Ok(()) => 0,
+        Err(error) => workload_error(error),
+    }
+}
+
+/// Destroy one terminal same-domain Workload after its resources are gone.
+fn workload_destroy(raw_key: u64) -> i64 {
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(domain) = proc::workload_domain(pid) else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(key) = kernel_core::workload::WorkloadKey::from_raw(raw_key) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    match crate::workload::destroy_in_domain(domain, key) {
+        Ok(()) => 0,
+        Err(error) => workload_error(error),
+    }
 }
 
 /// DRV-3: map a validated Memory range to an opaque device IOVA.

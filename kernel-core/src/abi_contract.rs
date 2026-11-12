@@ -918,6 +918,77 @@ pub const LAYOUTS: &[LayoutContract] = &[
             width: device::CAP_RECORD_SIZE as u16,
         }],
     },
+    LayoutContract {
+        name: "workload.create_args",
+        version: 1,
+        size: crate::workload_abi::CREATE_BYTES as u32,
+        magic: crate::workload_abi::MAGIC,
+        fields: &[
+            LayoutField {
+                name: "parent",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "cpu_permille",
+                offset: 16,
+                width: 4,
+            },
+            LayoutField {
+                name: "threads",
+                offset: 20,
+                width: 4,
+            },
+            LayoutField {
+                name: "memory_bytes",
+                offset: 24,
+                width: 8,
+            },
+            LayoutField {
+                name: "ring_entries",
+                offset: 32,
+                width: 4,
+            },
+        ],
+    },
+    LayoutContract {
+        name: "workload.info",
+        version: 1,
+        size: crate::workload_abi::INFO_BYTES as u32,
+        magic: crate::workload_abi::MAGIC,
+        fields: &[
+            LayoutField {
+                name: "state",
+                offset: 6,
+                width: 1,
+            },
+            LayoutField {
+                name: "key",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "parent",
+                offset: 16,
+                width: 8,
+            },
+            LayoutField {
+                name: "limits",
+                offset: 24,
+                width: 20,
+            },
+            LayoutField {
+                name: "children",
+                offset: 44,
+                width: 4,
+            },
+            LayoutField {
+                name: "usage",
+                offset: 48,
+                width: 16,
+            },
+        ],
+    },
 ];
 
 /// 可调用操作的逐个寄存器契约。名字必须与 `abi/system-ids.txt` 的操作集合完全相等。
@@ -1252,6 +1323,26 @@ pub const OPERATIONS: &[OperationContract] = &[
         args: "u64:request_id,u64:buf,u64:cap",
         result: "bytes_or_required",
     },
+    OperationContract {
+        name: "system.workload.create",
+        args: "u64:create_desc_ptr",
+        result: "workload_key_or_error",
+    },
+    OperationContract {
+        name: "system.workload.query",
+        args: "u64:workload_key,u64:buf,u64:cap",
+        result: "i64:bytes_or_error",
+    },
+    OperationContract {
+        name: "system.workload.stop",
+        args: "u64:workload_key",
+        result: "0_or_error",
+    },
+    OperationContract {
+        name: "system.workload.destroy",
+        args: "u64:workload_key",
+        result: "0_or_error",
+    },
 ];
 
 /// Rights 位是外部 ABI；位值变化必须产生新快照并随 ABI 版本裁决。
@@ -1382,6 +1473,22 @@ pub const SEMANTICS: &[(&str, &str)] = &[
     (
         "timer.coalescing",
         "shared_timer_irq_may_wake_after_at_and_never_after_latest",
+    ),
+    (
+        "workload.domain",
+        "kernel_issued_caller_domain;descriptor_cannot_select_domain",
+    ),
+    (
+        "workload.query",
+        "same_domain_only;fixed_64_byte_record;domain_not_disclosed",
+    ),
+    (
+        "workload.stop",
+        "running_to_stopping;stopped_requires_zero_usage_and_children",
+    ),
+    (
+        "workload.destroy",
+        "same_domain_only;terminal_only;zero_usage_and_children",
     ),
 ];
 

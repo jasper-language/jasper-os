@@ -35,6 +35,70 @@ pub fn create_child(
     WORKLOADS.lock().create_child(parent, limits)
 }
 
+/// Create a root or child Workload only inside the caller's authority domain.
+///
+/// 只允许在调用者权威域内创建根或子 Workload；父级域不匹配时拒绝。
+pub fn create_in_domain(
+    domain: DomainKey,
+    parent: Option<WorkloadKey>,
+    limits: ResourceLimits,
+) -> Result<WorkloadKey, WorkloadError> {
+    let key = match parent {
+        None => create(domain, limits)?,
+        Some(parent) => {
+            let snapshot = WORKLOADS.lock().snapshot(parent)?;
+            if snapshot.domain != domain {
+                return Err(WorkloadError::InvalidDomain);
+            }
+            if snapshot.state != WorkloadState::Running {
+                return Err(WorkloadError::InvalidState);
+            }
+            create_child(parent, limits)?
+        }
+    };
+    if let Err(error) = transition(key, WorkloadState::Ready)
+        .and_then(|()| transition(key, WorkloadState::Running))
+    {
+        let _ = transition(key, WorkloadState::Failed);
+        let _ = destroy(key);
+        return Err(error);
+    }
+    Ok(key)
+}
+
+/// Query one Workload only when it belongs to the caller's domain.
+///
+/// 仅查询与调用者同域的 Workload，跨域标识按不存在处理以免泄露对象信息。
+pub fn snapshot_in_domain(
+    domain: DomainKey,
+    key: WorkloadKey,
+) -> Result<WorkloadSnapshot, WorkloadError> {
+    let snapshot = WORKLOADS.lock().snapshot(key)?;
+    if snapshot.domain != domain {
+        return Err(WorkloadError::InvalidKey);
+    }
+    Ok(snapshot)
+}
+
+/// Request a same-domain Workload to stop. The resource-draining `Stopped`
+/// transition remains a separate lifecycle fact.
+///
+/// 请求同域 Workload 停止；真正进入 `Stopped` 仍必须满足资源与子级归零。
+pub fn stop_in_domain(domain: DomainKey, key: WorkloadKey) -> Result<(), WorkloadError> {
+    let snapshot = snapshot_in_domain(domain, key)?;
+    match snapshot.state {
+        WorkloadState::Running => transition(key, WorkloadState::Stopping),
+        WorkloadState::Stopping => transition(key, WorkloadState::Stopped),
+        _ => Err(WorkloadError::InvalidState),
+    }
+}
+
+/// Destroy a same-domain terminal Workload after all resources are gone.
+pub fn destroy_in_domain(domain: DomainKey, key: WorkloadKey) -> Result<(), WorkloadError> {
+    let _ = snapshot_in_domain(domain, key)?;
+    destroy(key)
+}
+
 pub fn transition(key: WorkloadKey, next: WorkloadState) -> Result<(), WorkloadError> {
     WORKLOADS.lock().transition(key, next)
 }

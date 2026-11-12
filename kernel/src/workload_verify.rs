@@ -2,6 +2,7 @@
 //!
 //! 原生 Workload 运行时验收：真实 Process/Task、私有页、CPU group 和 Ring。
 
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use kernel_core::paging::MapFlags;
@@ -17,6 +18,9 @@ use crate::{kprintln, sched};
 const CODE_OFF: u64 = 0x40_0000;
 const EXTRA_OFF: u64 = 0x80_0000;
 const ANON_OFF: u64 = 0x100_0000;
+const API_CODE_OFF: u64 = 0x140_0000;
+const API_DESC_OFF: u64 = 0x180_0000;
+const API_INFO_OFF: u64 = 0x1c0_0000;
 const STACK_OFF: u64 = 0xC0_0000;
 
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -30,6 +34,229 @@ fn hierarchy_worker() {
         core::hint::spin_loop();
     }
     HIERARCHY_DONE.store(true, Ordering::Release);
+}
+
+fn api_code(base: u64, foreign_key: u64) -> Vec<u8> {
+    fn imm32(code: &mut Vec<u8>, opcode: u8, value: u32) {
+        code.push(opcode);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+    fn imm64(code: &mut Vec<u8>, opcode: u8, value: u64) {
+        code.extend_from_slice(&[0x48, opcode]);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+    fn syscall(code: &mut Vec<u8>) {
+        code.extend_from_slice(&[0x0f, 0x05]);
+    }
+    fn test_rax(code: &mut Vec<u8>) {
+        code.extend_from_slice(&[0x48, 0x85, 0xc0]);
+    }
+    fn jle_error(code: &mut Vec<u8>, patches: &mut Vec<usize>) {
+        code.extend_from_slice(&[0x0f, 0x8e, 0, 0, 0, 0]);
+        patches.push(code.len() - 4);
+    }
+    fn js_error(code: &mut Vec<u8>, patches: &mut Vec<usize>) {
+        code.extend_from_slice(&[0x0f, 0x88, 0, 0, 0, 0]);
+        patches.push(code.len() - 4);
+    }
+    fn jne_error(code: &mut Vec<u8>, patches: &mut Vec<usize>) {
+        code.extend_from_slice(&[0x0f, 0x85, 0, 0, 0, 0]);
+        patches.push(code.len() - 4);
+    }
+    fn exit(code: &mut Vec<u8>, status: u32) {
+        imm32(code, 0xb8, abi::SYSTEM_PROCESS_EXIT);
+        imm32(code, 0xbf, status);
+        syscall(code);
+        code.extend_from_slice(&[0x0f, 0x0b]);
+    }
+
+    let mut code = Vec::new();
+    let mut patches = Vec::new();
+    imm32(&mut code, 0xb8, abi::SYSTEM_WORKLOAD_CREATE);
+    imm64(&mut code, 0xbf, base + API_DESC_OFF);
+    syscall(&mut code);
+    test_rax(&mut code);
+    jle_error(&mut code, &mut patches);
+    code.extend_from_slice(&[0x48, 0x89, 0xc3]); // mov rbx, rax
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_WORKLOAD_QUERY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]); // mov rdi, rbx
+    imm64(&mut code, 0xbe, base + API_INFO_OFF);
+    imm64(
+        &mut code,
+        0xba,
+        kernel_core::workload_abi::INFO_BYTES as u64,
+    );
+    syscall(&mut code);
+    test_rax(&mut code);
+    jle_error(&mut code, &mut patches);
+
+    // A foreign-domain key must be indistinguishable from a missing object.
+    imm32(&mut code, 0xb8, abi::SYSTEM_WORKLOAD_QUERY);
+    imm64(&mut code, 0xbf, foreign_key);
+    imm64(&mut code, 0xbe, base + API_INFO_OFF);
+    imm64(
+        &mut code,
+        0xba,
+        kernel_core::workload_abi::INFO_BYTES as u64,
+    );
+    syscall(&mut code);
+    code.extend_from_slice(&[0x48, 0x3d]); // cmp rax, sign-extended imm32
+    code.extend_from_slice(&(-(abi::SYSTEM_WORKLOAD_ERROR_NOT_FOUND as i32)).to_le_bytes());
+    jne_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_WORKLOAD_STOP);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]); // mov rdi, rbx
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+
+    // A second stop completes Stopped only because this Workload has no
+    // resources or children. Destroy then removes the terminal registry entry.
+    imm32(&mut code, 0xb8, abi::SYSTEM_WORKLOAD_STOP);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+    imm32(&mut code, 0xb8, abi::SYSTEM_WORKLOAD_DESTROY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_WORKLOAD_QUERY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    imm64(&mut code, 0xbe, base + API_INFO_OFF);
+    imm64(
+        &mut code,
+        0xba,
+        kernel_core::workload_abi::INFO_BYTES as u64,
+    );
+    syscall(&mut code);
+    code.extend_from_slice(&[0x48, 0x3d]);
+    code.extend_from_slice(&(-(abi::SYSTEM_WORKLOAD_ERROR_NOT_FOUND as i32)).to_le_bytes());
+    jne_error(&mut code, &mut patches);
+    exit(&mut code, 0);
+
+    let error = code.len();
+    for patch in patches {
+        let end = patch + 4;
+        let displacement = (error as i64 - end as i64) as i32;
+        code[patch..end].copy_from_slice(&displacement.to_le_bytes());
+    }
+    exit(&mut code, 1);
+    code
+}
+
+fn verify_user_workload_abi(base: u64) {
+    let page = kernel_core::frame::FRAME_SIZE as u64;
+    let foreign_domain = DomainKey {
+        id: 0x574f_9001,
+        generation: 1,
+    };
+    let foreign = match crate::workload::create(
+        foreign_domain,
+        ResourceLimits {
+            cpu_permille: 100,
+            memory_bytes: page,
+            threads: 1,
+            ring_entries: 1,
+        },
+    ) {
+        Ok(foreign) => foreign,
+        Err(error) => {
+            check(false, error.name());
+            return;
+        }
+    };
+    check(
+        crate::workload::transition(foreign, WorkloadState::Ready).is_ok()
+            && crate::workload::transition(foreign, WorkloadState::Running).is_ok(),
+        "foreign workload starts",
+    );
+    let calls = SyscallSet::of(&[
+        abi::SYSTEM_PROCESS_EXIT,
+        abi::SYSTEM_WORKLOAD_CREATE,
+        abi::SYSTEM_WORKLOAD_QUERY,
+        abi::SYSTEM_WORKLOAD_STOP,
+        abi::SYSTEM_WORKLOAD_DESTROY,
+    ]);
+    let pid = match proc::create("workload-user-abi", calls) {
+        Ok(pid) => pid,
+        Err(error) => {
+            kprintln!("[JSR-WORKLOAD] user ABI process create failed: {:?}", error);
+            check(false, "user ABI process create");
+            return;
+        }
+    };
+    let args = kernel_core::workload_abi::CreateArgs {
+        parent: None,
+        limits: ResourceLimits {
+            cpu_permille: 100,
+            memory_bytes: 2 * page,
+            threads: 1,
+            ring_entries: 1,
+        },
+    }
+    .encode();
+    check(
+        proc::map_new(pid, base + API_CODE_OFF, MapFlags::USER | MapFlags::EXECUTE).is_ok()
+            && proc::map_new(pid, base + API_DESC_OFF, MapFlags::USER | MapFlags::WRITE).is_ok()
+            && proc::map_new(pid, base + API_INFO_OFF, MapFlags::USER | MapFlags::WRITE).is_ok()
+            && proc::map_new(
+                pid,
+                base + STACK_OFF - page,
+                MapFlags::USER | MapFlags::WRITE,
+            )
+            .is_ok(),
+        "user ABI pages map",
+    );
+    let code = api_code(base, foreign.to_raw());
+    check(
+        proc::write(pid, base + API_CODE_OFF, &code).is_ok()
+            && proc::write(pid, base + API_DESC_OFF, &args).is_ok(),
+        "user ABI code and descriptor install",
+    );
+    let task = proc::spawn_thread(
+        pid,
+        "workload-user-abi",
+        base + API_CODE_OFF,
+        base + STACK_OFF,
+        0,
+        0,
+    );
+    check(task.is_ok(), "user ABI task starts");
+    if task.is_err() || !sched::run_until(sched::timer_ticks().saturating_add(1000)) {
+        check(false, "user ABI task settles");
+        return;
+    }
+    check(
+        matches!(proc::state(pid), Some(ProcState::Exited { code: 0 })),
+        "user ABI task exits zero",
+    );
+    let mut info = [0u8; kernel_core::workload_abi::INFO_BYTES];
+    if proc::read(pid, base + API_INFO_OFF, &mut info).is_err() {
+        check(false, "user ABI query output readable");
+        return;
+    }
+    let key = kernel_core::workload::WorkloadKey::from_raw(u64::from_le_bytes(
+        info[8..16].try_into().expect("fixed key field"),
+    ));
+    check(key.is_some(), "user ABI returns a workload key");
+    check(info[6] == 3, "user ABI query reports Running");
+    check(
+        u64::from_le_bytes(info[48..56].try_into().expect("fixed usage field")) == 0,
+        "user ABI workload starts with zero usage",
+    );
+    let _ = proc::reap(pid);
+    crate::kobj::run_cleanup(usize::MAX);
+    check(
+        crate::workload::transition(foreign, WorkloadState::Stopping).is_ok()
+            && crate::workload::transition(foreign, WorkloadState::Stopped).is_ok()
+            && crate::workload::destroy(foreign).is_ok(),
+        "foreign workload cleanup",
+    );
+    let _ = key;
 }
 
 fn check(ok: bool, message: &str) {
@@ -339,6 +566,7 @@ pub fn run() {
         "workload destroy with member unbound",
     );
     verify_hierarchical_cpu(domain);
+    verify_user_workload_abi(base);
     check(
         crate::mm::frame::free_frames() == frames_before,
         "frame baseline",

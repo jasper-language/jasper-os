@@ -22,6 +22,27 @@ impl WorkloadKey {
     pub const fn generation(self) -> u32 {
         self.generation
     }
+
+    /// Pack the generation and slot into a non-zero ABI scalar.
+    ///
+    /// 将世代和槽位打包为非零 ABI 标量；系统调用返回值不能携带引用。
+    pub const fn to_raw(self) -> u64 {
+        ((self.generation as u64) << 16) | self.slot as u64
+    }
+
+    /// Decode a scalar candidate. Table lookup remains the authority for
+    /// liveness and generation validity.
+    ///
+    /// 解码候选标识；是否仍存活与世代是否有效仍以 Workload 表为准。
+    pub const fn from_raw(raw: u64) -> Option<Self> {
+        if raw == 0 || raw >> 48 != 0 || (raw >> 16) as u32 == 0 {
+            return None;
+        }
+        Some(Self {
+            slot: raw as u16,
+            generation: (raw >> 16) as u32,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -617,6 +638,10 @@ mod tests {
         assert!(table.is_empty());
         let key = table.create(DOMAIN, LIMITS).unwrap();
         assert_eq!(table.snapshot(key).unwrap().state, WorkloadState::Created);
+        assert_eq!(WorkloadKey::from_raw(key.to_raw()), Some(key));
+        assert_eq!(WorkloadKey::from_raw(0), None);
+        assert_eq!(WorkloadKey::from_raw(1 << 48), None);
+        assert_eq!(WorkloadKey::from_raw(1), None);
     }
 
     #[test]

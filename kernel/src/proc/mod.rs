@@ -36,6 +36,7 @@ use kernel_core::object::{
 use kernel_core::objtable::ObjId;
 use kernel_core::paging::{MapError, MapFlags, VirtPage};
 use kernel_core::security::{ApplicationIdentity, IdentityClass};
+use kernel_core::security_domain::DomainKey;
 use kernel_core::usi_request::{Begin as UsiRequestBegin, Ledger as UsiRequestLedger};
 
 use crate::kobj::{self, KObject, TaskObj};
@@ -57,6 +58,7 @@ pub const HANDLES_PER_PROCESS: usize = crate::config::ACTIVE.objects.handles_per
 const USI_REQUEST_SLOTS: usize = 16;
 #[cfg(feature = "linux-abi")]
 static LINUX_PID_NEXT: AtomicU32 = AtomicU32::new(1);
+static NEXT_WORKLOAD_DOMAIN: AtomicU32 = AtomicU32::new(1);
 /// Opaque sentinel used only by the Linux standard-stream compatibility table.
 ///
 /// 仅用于 Linux 标准流兼容表的受控控制台哨兵；它不是可解析的 Jasper 句柄。
@@ -165,6 +167,9 @@ pub struct Process {
     /// 原生 Workload 归属；创建每个 Task 前先申请配额。
     workload: Option<kernel_core::workload::WorkloadKey>,
     workload_member: Option<u64>,
+    /// Authority boundary for user-created native Workload objects. It is
+    /// assigned by the kernel and never accepted from the user ABI.
+    workload_domain: Option<DomainKey>,
     /// 由用户进程经 `system.process.spawn` 创建：最后一份外部所有权（父进程中的句柄）释放时若仍在运行即被终止。
     kill_on_release: bool,
     /// 创建它的父进程（弱回指，仅用于父进程释放句柄时归还其子进程配额；归还后清空）。
@@ -950,6 +955,7 @@ fn create_process(
         cpu_group_owned: false,
         workload: None,
         workload_member: None,
+        workload_domain: None,
         kill_on_release: false,
         spawned_by: None,
         spawned_live: 0,
@@ -2978,6 +2984,33 @@ pub(crate) fn workload_key_in(
         Ok(KObject::Process(process)) => process.workload,
         _ => None,
     }
+}
+
+/// Return the kernel-issued Workload authority domain for a process.
+///
+/// Domains are allocated monotonically and never reused, so a stale domain
+/// cannot become valid after process-object slot reuse.
+pub fn workload_domain(pid: ObjId) -> Option<DomainKey> {
+    with_proc(pid, |process| {
+        if let Some(domain) = process.workload_domain {
+            return Ok(domain);
+        }
+        let Some(id) = NEXT_WORKLOAD_DOMAIN
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |id| {
+                (id != u32::MAX).then_some(id + 1)
+            })
+            .ok()
+        else {
+            return Err(ProcError::NoTaskSlot);
+        };
+        let domain = DomainKey {
+            id,
+            generation: 1,
+        };
+        process.workload_domain = Some(domain);
+        Ok(domain)
+    })
+    .ok()
 }
 
 /// 进程 `pid` 的 CPU 记账（设置过上限时有值；进程销毁后 `None`）。
