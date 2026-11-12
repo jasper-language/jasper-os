@@ -26,6 +26,9 @@ const MEMBER_CREATE_OFF: u64 = 0x240_0000;
 const MEMBER_SPAWN_OFF: u64 = 0x280_0000;
 const MEMBER_ELF_OFF: u64 = 0x2c0_0000;
 const MEMBER_KEY_OFF: u64 = 0x300_0000;
+const SANDBOX_CODE_OFF: u64 = 0x340_0000;
+const SANDBOX_DESC_OFF: u64 = 0x380_0000;
+const SANDBOX_INFO_OFF: u64 = 0x3c0_0000;
 const STACK_OFF: u64 = 0xC0_0000;
 
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -266,6 +269,245 @@ fn verify_user_workload_abi(base: u64) {
         "foreign workload cleanup",
     );
     let _ = key;
+}
+
+fn sandbox_abi_code(base: u64, foreign_key: u64) -> Vec<u8> {
+    fn imm32(code: &mut Vec<u8>, opcode: u8, value: u32) {
+        code.push(opcode);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+    fn imm64(code: &mut Vec<u8>, opcode: u8, value: u64) {
+        code.extend_from_slice(&[0x48, opcode]);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+    fn syscall(code: &mut Vec<u8>) {
+        code.extend_from_slice(&[0x0f, 0x05]);
+    }
+    fn test_rax(code: &mut Vec<u8>) {
+        code.extend_from_slice(&[0x48, 0x85, 0xc0]);
+    }
+    fn jle_error(code: &mut Vec<u8>, patches: &mut Vec<usize>) {
+        code.extend_from_slice(&[0x0f, 0x8e, 0, 0, 0, 0]);
+        patches.push(code.len() - 4);
+    }
+    fn js_error(code: &mut Vec<u8>, patches: &mut Vec<usize>) {
+        code.extend_from_slice(&[0x0f, 0x88, 0, 0, 0, 0]);
+        patches.push(code.len() - 4);
+    }
+    fn cmp_rax(code: &mut Vec<u8>, value: i32) {
+        code.extend_from_slice(&[0x48, 0x3d]);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+    fn jne_error(code: &mut Vec<u8>, patches: &mut Vec<usize>) {
+        code.extend_from_slice(&[0x0f, 0x85, 0, 0, 0, 0]);
+        patches.push(code.len() - 4);
+    }
+    fn exit(code: &mut Vec<u8>, status: u32) {
+        imm32(code, 0xb8, abi::SYSTEM_PROCESS_EXIT);
+        imm32(code, 0xbf, status);
+        syscall(code);
+        code.extend_from_slice(&[0x0f, 0x0b]);
+    }
+
+    let mut code = Vec::new();
+    let mut patches = Vec::new();
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_CREATE);
+    imm64(&mut code, 0xbf, base + SANDBOX_DESC_OFF);
+    syscall(&mut code);
+    test_rax(&mut code);
+    jle_error(&mut code, &mut patches);
+    code.extend_from_slice(&[0x48, 0x89, 0xc3]); // mov rbx, rax
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_QUERY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]); // mov rdi, rbx
+    imm64(&mut code, 0xbe, base + SANDBOX_INFO_OFF);
+    imm64(
+        &mut code,
+        0xba,
+        kernel_core::sandbox_abi::INFO_BYTES as u64,
+    );
+    syscall(&mut code);
+    test_rax(&mut code);
+    jle_error(&mut code, &mut patches);
+
+    // A foreign-domain key is indistinguishable from a missing object.
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_QUERY);
+    imm64(&mut code, 0xbf, foreign_key);
+    imm64(&mut code, 0xbe, base + SANDBOX_INFO_OFF);
+    imm64(
+        &mut code,
+        0xba,
+        kernel_core::sandbox_abi::INFO_BYTES as u64,
+    );
+    syscall(&mut code);
+    cmp_rax(&mut code, -(abi::SYSTEM_SANDBOX_ERROR_NOT_FOUND as i32));
+    jne_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_QUERY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    imm64(&mut code, 0xbe, base + SANDBOX_INFO_OFF);
+    imm32(&mut code, 0xba, 0);
+    syscall(&mut code);
+    cmp_rax(
+        &mut code,
+        -(abi::SYSTEM_SANDBOX_ERROR_BUFFER_TOO_SMALL as i32),
+    );
+    jne_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_STOP);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_STOP);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_DESTROY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_QUERY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    imm64(&mut code, 0xbe, base + SANDBOX_INFO_OFF);
+    imm64(
+        &mut code,
+        0xba,
+        kernel_core::sandbox_abi::INFO_BYTES as u64,
+    );
+    syscall(&mut code);
+    cmp_rax(&mut code, -(abi::SYSTEM_SANDBOX_ERROR_NOT_FOUND as i32));
+    jne_error(&mut code, &mut patches);
+    exit(&mut code, 0);
+
+    let error = code.len();
+    for patch in patches {
+        let end = patch + 4;
+        let displacement = (error as i64 - end as i64) as i32;
+        code[patch..end].copy_from_slice(&displacement.to_le_bytes());
+    }
+    exit(&mut code, 1);
+    code
+}
+
+fn verify_sandbox_abi(base: u64) {
+    let page = kernel_core::frame::FRAME_SIZE as u64;
+    let foreign_domain = DomainKey {
+        id: 0x574f_9002,
+        generation: 1,
+    };
+    let limits = ResourceLimits {
+        cpu_permille: 100,
+        memory_bytes: 2 * page,
+        threads: 1,
+        ring_entries: 1,
+        io_bytes: 64 * 1024,
+        io_ops: 16,
+    };
+    let foreign = match crate::sandbox::create_sandbox(foreign_domain, limits) {
+        Ok(key) => key,
+        Err(error) => {
+            check(false, error.name());
+            return;
+        }
+    };
+    check(
+        crate::sandbox::mark_ready(foreign_domain, foreign).is_ok()
+            && crate::sandbox::start(foreign_domain, foreign).is_ok(),
+        "foreign sandbox starts",
+    );
+    let calls = SyscallSet::of(&[
+        abi::SYSTEM_PROCESS_EXIT,
+        abi::SYSTEM_SANDBOX_CREATE,
+        abi::SYSTEM_SANDBOX_QUERY,
+        abi::SYSTEM_SANDBOX_STOP,
+        abi::SYSTEM_SANDBOX_DESTROY,
+    ]);
+    let pid = match proc::create("sandbox-user-abi", calls) {
+        Ok(pid) => pid,
+        Err(error) => {
+            kprintln!("[JSR-SANDBOX] user ABI process create failed: {:?}", error);
+            check(false, "sandbox user ABI process create");
+            return;
+        }
+    };
+    let args = kernel_core::workload_abi::CreateArgs {
+        parent: None,
+        limits,
+    }
+    .encode();
+    let code = sandbox_abi_code(base, foreign.to_raw());
+    check(
+        proc::map_new(
+            pid,
+            base + SANDBOX_CODE_OFF,
+            MapFlags::USER | MapFlags::EXECUTE,
+        )
+        .is_ok()
+            && proc::map_new(
+                pid,
+                base + SANDBOX_DESC_OFF,
+                MapFlags::USER | MapFlags::WRITE,
+            )
+            .is_ok()
+            && proc::map_new(
+                pid,
+                base + SANDBOX_INFO_OFF,
+                MapFlags::USER | MapFlags::WRITE,
+            )
+            .is_ok()
+            && proc::map_new(
+                pid,
+                base + STACK_OFF - page,
+                MapFlags::USER | MapFlags::WRITE,
+            )
+            .is_ok(),
+        "sandbox user ABI pages map",
+    );
+    check(
+        proc::write(pid, base + SANDBOX_CODE_OFF, &code).is_ok()
+            && proc::write(pid, base + SANDBOX_DESC_OFF, &args).is_ok(),
+        "sandbox user ABI inputs install",
+    );
+    let task = proc::spawn_thread(
+        pid,
+        "sandbox-user-abi",
+        base + SANDBOX_CODE_OFF,
+        base + STACK_OFF,
+        0,
+        0,
+    );
+    check(task.is_ok(), "sandbox user ABI task starts");
+    if task.is_err() || !sched::run_until(sched::timer_ticks().saturating_add(1000)) {
+        check(false, "sandbox user ABI task settles");
+        return;
+    }
+    check(
+        matches!(proc::state(pid), Some(ProcState::Exited { code: 0 })),
+        "sandbox user ABI exits zero",
+    );
+    let mut info = [0u8; kernel_core::sandbox_abi::INFO_BYTES];
+    check(
+        proc::read(pid, base + SANDBOX_INFO_OFF, &mut info).is_ok(),
+        "sandbox query output readable",
+    );
+    check(&info[0..4] == b"JSB1", "sandbox query magic");
+    check(
+        u16::from_le_bytes([info[4], info[5]]) == kernel_core::sandbox_abi::VERSION,
+        "sandbox query version",
+    );
+    check(info[6] == 3, "sandbox query reports Running");
+    let _ = proc::reap(pid);
+    crate::kobj::run_cleanup(usize::MAX);
+    check(
+        crate::sandbox::stop(foreign_domain, foreign).is_ok()
+            && crate::sandbox::stop(foreign_domain, foreign).is_ok()
+            && crate::sandbox::destroy(foreign_domain, foreign).is_ok(),
+        "foreign sandbox cleanup",
+    );
 }
 
 fn member_elf(base: u64, wait_ticks: u32) -> Vec<u8> {
@@ -905,6 +1147,7 @@ pub fn run() {
     );
     verify_hierarchical_cpu(domain);
     verify_user_workload_abi(base);
+    verify_sandbox_abi(base);
     verify_workload_spawn(base, false);
     verify_workload_spawn(base, true);
     check(
