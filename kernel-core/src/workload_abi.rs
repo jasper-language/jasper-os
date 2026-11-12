@@ -8,9 +8,13 @@ use crate::workload::{
 };
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"JWL1");
+pub const VERSION_V1: u16 = 1;
 pub const VERSION: u16 = 2;
+pub const CREATE_BYTES_V1: usize = 40;
 pub const CREATE_BYTES: usize = 56;
+pub const INFO_BYTES_V1: usize = 64;
 pub const INFO_BYTES: usize = 96;
+pub const LEGACY_UNLIMITED_IO: u64 = u64::MAX;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CreateArgs {
@@ -33,12 +37,23 @@ impl CreateArgs {
         out
     }
 
-    pub fn decode(raw: &[u8; CREATE_BYTES]) -> Option<Self> {
+    pub fn decode(raw: &[u8]) -> Option<Self> {
         if read_u32(raw, 0)? != MAGIC
-            || read_u16(raw, 4)? != VERSION
             || read_u16(raw, 6)? != 0
             || read_u32(raw, 36)? != 0
         {
+            return None;
+        }
+        let version = read_u16(raw, 4)?;
+        if !matches!(version, VERSION_V1 | VERSION) {
+            return None;
+        }
+        let expected = if version == VERSION_V1 {
+            CREATE_BYTES_V1
+        } else {
+            CREATE_BYTES
+        };
+        if raw.len() != expected {
             return None;
         }
         let parent_raw = read_u64(raw, 8)?;
@@ -54,8 +69,16 @@ impl CreateArgs {
                 threads: read_u32(raw, 20)?,
                 memory_bytes: read_u64(raw, 24)?,
                 ring_entries: read_u32(raw, 32)?,
-                io_bytes: read_u64(raw, 40)?,
-                io_ops: read_u64(raw, 48)?,
+                io_bytes: if version == VERSION_V1 {
+                    LEGACY_UNLIMITED_IO
+                } else {
+                    read_u64(raw, 40)?
+                },
+                io_ops: if version == VERSION_V1 {
+                    LEGACY_UNLIMITED_IO
+                } else {
+                    read_u64(raw, 48)?
+                },
             },
         })
     }
@@ -104,6 +127,26 @@ impl WorkloadInfo {
         out[72..80].copy_from_slice(&self.limits.io_ops.to_le_bytes());
         out[80..88].copy_from_slice(&self.io_usage.bytes.to_le_bytes());
         out[88..96].copy_from_slice(&self.io_usage.ops.to_le_bytes());
+        out
+    }
+
+    /// Encode the legacy 64-byte query record. I/O fields are omitted rather
+    /// than fabricated for callers that only supplied the v1 buffer.
+    pub fn encode_v1(self) -> [u8; INFO_BYTES_V1] {
+        let mut out = [0u8; INFO_BYTES_V1];
+        out[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+        out[4..6].copy_from_slice(&VERSION_V1.to_le_bytes());
+        out[6] = encode_state(self.state);
+        out[8..16].copy_from_slice(&self.key.to_raw().to_le_bytes());
+        out[16..24].copy_from_slice(&self.parent.map_or(0, WorkloadKey::to_raw).to_le_bytes());
+        out[24..28].copy_from_slice(&self.limits.cpu_permille.to_le_bytes());
+        out[28..32].copy_from_slice(&self.limits.threads.to_le_bytes());
+        out[32..40].copy_from_slice(&self.limits.memory_bytes.to_le_bytes());
+        out[40..44].copy_from_slice(&self.limits.ring_entries.to_le_bytes());
+        out[44..48].copy_from_slice(&(self.children as u32).to_le_bytes());
+        out[48..56].copy_from_slice(&self.usage.memory_bytes.to_le_bytes());
+        out[56..60].copy_from_slice(&self.usage.threads.to_le_bytes());
+        out[60..64].copy_from_slice(&self.usage.ring_entries.to_le_bytes());
         out
     }
 }
@@ -176,6 +219,36 @@ mod tests {
             invalid[offset] ^= 0x80;
             assert_eq!(CreateArgs::decode(&invalid), None);
         }
+    }
+
+    #[test]
+    fn legacy_v1_descriptor_and_info_remain_supported() {
+        let mut raw = [0u8; CREATE_BYTES_V1];
+        raw[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+        raw[4..6].copy_from_slice(&VERSION_V1.to_le_bytes());
+        raw[16..20].copy_from_slice(&LIMITS.cpu_permille.to_le_bytes());
+        raw[20..24].copy_from_slice(&LIMITS.threads.to_le_bytes());
+        raw[24..32].copy_from_slice(&LIMITS.memory_bytes.to_le_bytes());
+        raw[32..36].copy_from_slice(&LIMITS.ring_entries.to_le_bytes());
+        let decoded = CreateArgs::decode(&raw).expect("legacy descriptor");
+        assert_eq!(decoded.parent, None);
+        assert_eq!(decoded.limits.io_bytes, LEGACY_UNLIMITED_IO);
+        assert_eq!(decoded.limits.io_ops, LEGACY_UNLIMITED_IO);
+
+        let mut table = WorkloadTable::<1>::new();
+        let key = table
+            .create(
+                DomainKey {
+                    id: 9,
+                    generation: 2,
+                },
+                LIMITS,
+            )
+            .unwrap();
+        let info = WorkloadInfo::from_snapshot(table.snapshot(key).unwrap()).encode_v1();
+        assert_eq!(info.len(), INFO_BYTES_V1);
+        assert_eq!(read_u16(&info, 4), Some(VERSION_V1));
+        assert_eq!(read_u64(&info, 8), Some(key.to_raw()));
     }
 
     #[test]

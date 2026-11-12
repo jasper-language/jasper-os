@@ -987,15 +987,21 @@ fn workload_create(desc_ptr: u64) -> i64 {
     let Some(domain) = proc::workload_domain(pid) else {
         return err(SYSTEM_ERROR_RIGHTS_DENIED);
     };
-    let mut raw = [0u8; kernel_core::workload_abi::CREATE_BYTES];
-    if let Err(error) = copy_from_user(
-        &mut raw,
-        desc_ptr,
-        kernel_core::workload_abi::CREATE_BYTES,
-    ) {
+    let mut header = [0u8; 8];
+    if let Err(error) = copy_from_user(&mut header, desc_ptr, 8) {
         return user_ptr_err(error);
     }
-    let Some(args) = kernel_core::workload_abi::CreateArgs::decode(&raw) else {
+    let version = u16::from_le_bytes([header[4], header[5]]);
+    let size = match version {
+        kernel_core::workload_abi::VERSION_V1 => kernel_core::workload_abi::CREATE_BYTES_V1,
+        kernel_core::workload_abi::VERSION => kernel_core::workload_abi::CREATE_BYTES,
+        _ => return err(SYSTEM_ERROR_INVALID_ARGUMENT),
+    };
+    let mut raw = [0u8; kernel_core::workload_abi::CREATE_BYTES];
+    if let Err(error) = copy_from_user(&mut raw[..size], desc_ptr, size) {
+        return user_ptr_err(error);
+    }
+    let Some(args) = kernel_core::workload_abi::CreateArgs::decode(&raw[..size]) else {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     };
     match crate::workload::create_in_domain(domain, args.parent, args.limits) {
@@ -1015,23 +1021,26 @@ fn workload_query(raw_key: u64, ptr: u64, cap: u64) -> i64 {
     let Some(key) = kernel_core::workload::WorkloadKey::from_raw(raw_key) else {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     };
-    if cap < kernel_core::workload_abi::INFO_BYTES as u64 {
-        return err(SYSTEM_WORKLOAD_ERROR_BUFFER_TOO_SMALL);
-    }
     let snapshot = match crate::workload::snapshot_in_domain(domain, key) {
         Ok(snapshot) => snapshot,
         Err(error) => return workload_error(error),
     };
-    let encoded =
-        kernel_core::workload_abi::WorkloadInfo::from_snapshot(snapshot).encode();
-    if let Err(error) = copy_to_user(
-        ptr,
-        &encoded,
-        kernel_core::workload_abi::INFO_BYTES,
-    ) {
-        return user_ptr_err(error);
+    let info = kernel_core::workload_abi::WorkloadInfo::from_snapshot(snapshot);
+    if cap >= kernel_core::workload_abi::INFO_BYTES as u64 {
+        let encoded = info.encode();
+        if let Err(error) = copy_to_user(ptr, &encoded, kernel_core::workload_abi::INFO_BYTES) {
+            return user_ptr_err(error);
+        }
+        return kernel_core::workload_abi::INFO_BYTES as i64;
     }
-    kernel_core::workload_abi::INFO_BYTES as i64
+    if cap >= kernel_core::workload_abi::INFO_BYTES_V1 as u64 {
+        let encoded = info.encode_v1();
+        if let Err(error) = copy_to_user(ptr, &encoded, kernel_core::workload_abi::INFO_BYTES_V1) {
+            return user_ptr_err(error);
+        }
+        return kernel_core::workload_abi::INFO_BYTES_V1 as i64;
+    }
+    err(SYSTEM_WORKLOAD_ERROR_BUFFER_TOO_SMALL)
 }
 
 /// Request a same-domain Workload to enter `Stopping`.
