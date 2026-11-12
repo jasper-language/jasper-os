@@ -520,6 +520,14 @@ impl<const N: usize> WorkloadMembers<N> {
         self.slots.iter().filter(|slot| slot.is_some()).count()
     }
 
+    pub fn count_for(&self, workload: WorkloadKey) -> usize {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|member| member.workload == workload)
+            .count()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -804,5 +812,24 @@ mod tests {
         assert_eq!(table.snapshot(key).unwrap().usage, ResourceUsage::default());
         table.destroy(key).unwrap();
         assert!(table.is_empty());
+    }
+
+    #[test]
+    fn member_counts_are_scoped_per_workload() {
+        let mut table = WorkloadTable::<2>::new();
+        let first = table.create(DOMAIN, LIMITS).unwrap();
+        let second = table.create(DOMAIN, LIMITS).unwrap();
+        for key in [first, second] {
+            table.transition(key, WorkloadState::Ready).unwrap();
+            table.transition(key, WorkloadState::Running).unwrap();
+        }
+        let mut members = WorkloadMembers::<3>::new();
+        members.attach(&table, first, 1).unwrap();
+        members.attach(&table, first, 2).unwrap();
+        members.attach(&table, second, 3).unwrap();
+        assert_eq!(members.count_for(first), 2);
+        assert_eq!(members.count_for(second), 1);
+        members.detach(first, 1).unwrap();
+        assert_eq!(members.count_for(first), 1);
     }
 }
