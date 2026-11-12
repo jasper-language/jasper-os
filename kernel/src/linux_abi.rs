@@ -1531,6 +1531,7 @@ fn execute(
         LinuxSyscall::Mmap => compat_result(linux_mmap(pid, call.args)),
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
+        LinuxSyscall::Mremap => compat_result(linux_mremap(pid, call.args)),
         LinuxSyscall::Msync => compat_result(linux_msync(pid, call.args)),
         LinuxSyscall::MinCore => compat_result(linux_mincore(pid, call.args)),
         LinuxSyscall::Madvise => compat_result(linux_madvise(pid, call.args)),
@@ -2797,6 +2798,181 @@ fn linux_munmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         page += PAGE;
     }
     Ok(0)
+}
+
+/// Resizes or moves one anonymous private Linux mapping. Shared/device
+/// mappings and MREMAP_DONTUNMAP require backing-specific semantics and fail
+/// closed until those paths are implemented.
+fn linux_mremap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    const MREMAP_MAYMOVE: u64 = 0x1;
+    const MREMAP_FIXED: u64 = 0x2;
+    const MREMAP_DONTUNMAP: u64 = 0x4;
+
+    let old_address = args[0];
+    let old_size = args[1];
+    let new_size = args[2];
+    let flags = args[3];
+    let new_address = args[4];
+    if old_address % PAGE != 0
+        || old_size == 0
+        || new_size == 0
+        || flags & !(MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP) != 0
+        || flags & MREMAP_DONTUNMAP != 0
+        || flags & MREMAP_FIXED != 0
+            && (flags & MREMAP_MAYMOVE == 0 || new_address % PAGE != 0)
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let old_rounded = old_size
+        .checked_add(PAGE - 1)
+        .ok_or(CompatErrno::Invalid)?
+        & !(PAGE - 1);
+    let new_rounded = new_size
+        .checked_add(PAGE - 1)
+        .ok_or(CompatErrno::Invalid)?
+        & !(PAGE - 1);
+    let old_end = old_address
+        .checked_add(old_rounded)
+        .ok_or(CompatErrno::Invalid)?;
+    let new_end = old_address
+        .checked_add(new_rounded)
+        .ok_or(CompatErrno::Invalid)?;
+    if old_address < crate::arch::USER_WINDOW.0
+        || new_end > crate::arch::USER_WINDOW.1
+        || proc::linux_page_is_shared(pid, old_address)
+    {
+        return Err(CompatErrno::NoMemory);
+    }
+    let mapping_flags =
+        proc::linux_mapping_flags(pid, old_address).ok_or(CompatErrno::Invalid)?;
+    let mut page = old_address;
+    while page < old_end {
+        if proc::page_flags(pid, page).is_none()
+            || proc::linux_page_is_shared(pid, page)
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        page += PAGE;
+    }
+
+    let in_place = new_address == 0 || new_address == old_address;
+    if in_place {
+        if new_rounded <= old_rounded {
+            let mut page = old_address + new_rounded;
+            while page < old_end {
+                proc::unmap_page(pid, page).map_err(|_| CompatErrno::NoMemory)?;
+                page += PAGE;
+            }
+            return Ok(old_address);
+        }
+        let mut free = true;
+        let mut page = old_end;
+        while page < new_end {
+            if proc::page_flags(pid, page).is_some() {
+                free = false;
+                break;
+            }
+            page += PAGE;
+        }
+        if free {
+            let mut mapped = alloc::vec::Vec::new();
+            let mut page = old_end;
+            while page < new_end {
+                if proc::map_new(pid, page, mapping_flags).is_err() {
+                    for address in mapped.into_iter().rev() {
+                        let _ = proc::unmap_page(pid, address);
+                    }
+                    return Err(CompatErrno::NoMemory);
+                }
+                mapped.push(page);
+                page += PAGE;
+            }
+            let _ = proc::set_linux_mmap_cursor(pid, new_end.max(proc::linux_mmap_cursor(pid).unwrap_or(0)));
+            return Ok(old_address);
+        }
+        if flags & MREMAP_MAYMOVE == 0 {
+            return Err(CompatErrno::NoMemory);
+        }
+    }
+
+    let mut target = if flags & MREMAP_FIXED != 0 {
+        new_address
+    } else if new_address != 0 {
+        align_down(new_address, PAGE)
+    } else {
+        proc::linux_mmap_cursor(pid).ok_or(CompatErrno::NoSys)?
+    };
+    loop {
+        let target_end = target
+            .checked_add(new_rounded)
+            .ok_or(CompatErrno::NoMemory)?;
+        let overlaps_old = target < old_end && old_address < target_end;
+        if target >= crate::arch::USER_WINDOW.0
+            && target_end <= crate::arch::USER_WINDOW.1
+            && !overlaps_old
+        {
+            let mut free = true;
+            let mut page = target;
+            while page < target_end {
+                if proc::page_flags(pid, page).is_some() {
+                    free = false;
+                    break;
+                }
+                page += PAGE;
+            }
+            if free {
+                break;
+            }
+        }
+        if flags & MREMAP_FIXED != 0 {
+            return Err(CompatErrno::NoMemory);
+        }
+        target = target.checked_add(new_rounded).ok_or(CompatErrno::NoMemory)?;
+    }
+
+    let mut mapped = alloc::vec::Vec::new();
+    let mut page = target;
+    while page < target + new_rounded {
+        if proc::map_new(pid, page, mapping_flags).is_err() {
+            for address in mapped.into_iter().rev() {
+                let _ = proc::unmap_page(pid, address);
+            }
+            return Err(CompatErrno::NoMemory);
+        }
+        mapped.push(page);
+        page += PAGE;
+    }
+    let copy_size = old_rounded.min(new_rounded);
+    let mut copied = 0u64;
+    let mut buffer = [0u8; 4096];
+    while copied < copy_size {
+        let chunk = (copy_size - copied).min(4096) as usize;
+        if proc::read(pid, old_address + copied, &mut buffer[..chunk]).is_err()
+            || proc::write(pid, target + copied, &buffer[..chunk]).is_err()
+        {
+            for address in mapped.into_iter().rev() {
+                let _ = proc::unmap_page(pid, address);
+            }
+            return Err(CompatErrno::Fault);
+        }
+        copied += chunk as u64;
+    }
+    let mut page = old_address;
+    while page < old_end {
+        if proc::unmap_page(pid, page).is_err() {
+            for address in mapped.into_iter().rev() {
+                let _ = proc::unmap_page(pid, address);
+            }
+            return Err(CompatErrno::NoMemory);
+        }
+        page += PAGE;
+    }
+    let _ = proc::set_linux_mmap_cursor(
+        pid,
+        (target + new_rounded).max(proc::linux_mmap_cursor(pid).unwrap_or(0)),
+    );
+    Ok(target)
 }
 
 fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {

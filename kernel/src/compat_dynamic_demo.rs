@@ -157,6 +157,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::ClockGetres,
         LinuxSyscall::Nanosleep,
         LinuxSyscall::ClockNanosleep,
+        LinuxSyscall::Mremap,
         LinuxSyscall::Getrlimit,
         LinuxSyscall::Setrlimit,
         LinuxSyscall::EpollCreate1,

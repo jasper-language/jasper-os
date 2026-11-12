@@ -991,6 +991,44 @@ int main(void) {
         munmap(memfd_map, 4096) != 0 || close(memfd) != 0) {
         return 214;
     }
+    unsigned char *remap_pages = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (remap_pages == MAP_FAILED) {
+        return 294;
+    }
+    memcpy(remap_pages, "GROW", 4);
+    remap_pages = mremap(remap_pages, 4096, 8192, 0);
+    if (remap_pages == MAP_FAILED ||
+        memcmp(remap_pages, "GROW", 4) != 0 || remap_pages[4096] != 0) {
+        return 295;
+    }
+    remap_pages[4096] = 'N';
+    remap_pages = mremap(remap_pages, 8192, 4096, 0);
+    if (remap_pages == MAP_FAILED ||
+        memcmp(remap_pages, "GROW", 4) != 0 ||
+        munmap(remap_pages, 4096) != 0) {
+        return 296;
+    }
+    unsigned char *remap_target =
+        mmap(NULL, 8192, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (remap_target == MAP_FAILED || munmap(remap_target, 8192) != 0) {
+        return 297;
+    }
+    unsigned char *remap_source = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (remap_source == MAP_FAILED) {
+        return 298;
+    }
+    strcpy((char *)remap_source, "MOVE");
+    unsigned char *remap_moved =
+        mremap(remap_source, 4096, 8192, MREMAP_MAYMOVE | MREMAP_FIXED,
+               remap_target);
+    if (remap_moved != remap_target ||
+        memcmp(remap_moved, "MOVE", 5) != 0 ||
+        munmap(remap_moved, 8192) != 0) {
+        return 299;
+    }
     int epfd = epoll_create1(EPOLL_CLOEXEC);
     int epoll_pipe[2];
     struct epoll_event epoll_ready[128] = {0};
