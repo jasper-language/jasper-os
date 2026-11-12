@@ -57,6 +57,8 @@ pub const MEMORY_PRESSURE: LockClass = LockClass::new(13, "system.memory.pressur
 /// 内核堆。
 /// Kernel heap.
 pub const MEMORY_HEAP: LockClass = LockClass::new(15, "system.memory.heap");
+/// Sandbox image and CoW volume registry.
+pub const SANDBOX_STORAGE: LockClass = LockClass::new(16, "system.sandbox.storage");
 /// 物理页帧分配器。
 /// Physical frame allocator.
 pub const MEMORY_FRAME: LockClass = LockClass::new(17, "system.memory.frame");
@@ -93,6 +95,7 @@ pub const REGISTRY: &[LockClass] = &[
     LINUX_SOCKET,
     MEMORY_PRESSURE,
     MEMORY_HEAP,
+    SANDBOX_STORAGE,
     MEMORY_FRAME,
     IRQ_ROUTING,
     IRQ_QUOTA,

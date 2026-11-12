@@ -130,7 +130,8 @@ pub const fn err(id: u32) -> i64 {
 pub use kernel_core::syscall_set::SyscallSet;
 
 /// 最近一次 `system.task.exit` 的 (任务 ID, 退出码) 与累计次数。
-static LAST_EXIT: IrqSpinLock<(Option<(u64, i64)>, u32)> = IrqSpinLock::ranked(crate::lockorder::SYSCALL_LAST_EXIT, (None, 0));
+static LAST_EXIT: IrqSpinLock<(Option<(u64, i64)>, u32)> =
+    IrqSpinLock::ranked(crate::lockorder::SYSCALL_LAST_EXIT, (None, 0));
 /// 累计系统调用次数（诊断）。
 static CALLS: AtomicU32 = AtomicU32::new(0);
 
@@ -191,7 +192,8 @@ pub fn self_check() -> Result<usize, &'static str> {
         if !IMPLEMENTED.contains(e.id as u64) {
             return Err(e.name);
         }
-        if kernel_core::assembly::operation_route(&kernel_core::profile::HEADLESS, e.name).is_none() {
+        if kernel_core::assembly::operation_route(&kernel_core::profile::HEADLESS, e.name).is_none()
+        {
             return Err(e.name);
         }
         n += 1;
@@ -207,13 +209,30 @@ fn error_name(ret: i64) -> &'static str {
     if ret >= 0 {
         return "OK";
     }
-    entry((-ret) as u32).map(|e| e.name).unwrap_or("system.error.unknown")
+    entry((-ret) as u32)
+        .map(|e| e.name)
+        .unwrap_or("system.error.unknown")
 }
 
 /// 每次系统调用返回前最多销毁的死亡对象数（见 [`on_syscall`] 的出口清理点）。
 const CLEANUP_PER_CALL: usize = 16;
 /// 创建对象前先回收死亡对象的调用（进程创建在 `spawn_child` 里自带回收）。
-const RECLAIM_BEFORE: [u32; 11] = [SYSTEM_TASK_SPAWN, SYSTEM_ASYNC_RING_CREATE, SYSTEM_CHANNEL_CREATE, SYSTEM_MEMORY_OBJECT_CREATE,SYSTEM_EVENT_SOURCE_CREATE,SYSTEM_EVENT_SUBSCRIPTION_CREATE,SYSTEM_SYNC_MUTEX_CREATE,SYSTEM_TIME_TIMER_CREATE,SYSTEM_MEMORY_DMA_MAP,SYSTEM_WORKLOAD_CREATE,SYSTEM_SANDBOX_CREATE];
+const RECLAIM_BEFORE: [u32; 14] = [
+    SYSTEM_TASK_SPAWN,
+    SYSTEM_ASYNC_RING_CREATE,
+    SYSTEM_CHANNEL_CREATE,
+    SYSTEM_MEMORY_OBJECT_CREATE,
+    SYSTEM_EVENT_SOURCE_CREATE,
+    SYSTEM_EVENT_SUBSCRIPTION_CREATE,
+    SYSTEM_SYNC_MUTEX_CREATE,
+    SYSTEM_TIME_TIMER_CREATE,
+    SYSTEM_MEMORY_DMA_MAP,
+    SYSTEM_WORKLOAD_CREATE,
+    SYSTEM_SANDBOX_CREATE,
+    SYSTEM_SANDBOX_IMAGE_LOAD,
+    SYSTEM_SANDBOX_VOLUME_CREATE,
+    SYSTEM_SANDBOX_VOLUME_DUPLICATE,
+];
 
 /// Selects the syscall ABI only when the optional Linux service is installed.
 ///
@@ -241,21 +260,37 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
     let Some(e) = op(a.id) else {
         let ret = err(SYSTEM_ERROR_UNSUPPORTED);
         if tracing() {
-            kprintln!("[JSR-SYSCALL] reject id={} task={} ret={}", a.id, task_name, error_name(ret));
+            kprintln!(
+                "[JSR-SYSCALL] reject id={} task={} ret={}",
+                a.id,
+                task_name,
+                error_name(ret)
+            );
         }
         return ret;
     };
     if !sched::current_syscalls().contains(a.id) {
         let ret = err(SYSTEM_ERROR_RIGHTS_DENIED);
         if tracing() {
-            kprintln!("[JSR-SYSCALL] deny name={} id={} task={} ret={}", e.name, e.id, task_name, error_name(ret));
+            kprintln!(
+                "[JSR-SYSCALL] deny name={} id={} task={} ret={}",
+                e.name,
+                e.id,
+                task_name,
+                error_name(ret)
+            );
         }
         return ret;
     }
     let Some(service) = crate::assembly::enter_service(e.name) else {
         let ret = err(SYSTEM_ERROR_UNSUPPORTED);
         if tracing() {
-            kprintln!("[JSR-SYSCALL] unavailable name={} task={} ret={}", e.name, task_name, error_name(ret));
+            kprintln!(
+                "[JSR-SYSCALL] unavailable name={} task={} ret={}",
+                e.name,
+                task_name,
+                error_name(ret)
+            );
         }
         return ret;
     };
@@ -296,7 +331,13 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
     crate::security::flush_audit();
     let trace = tracing();
     if trace {
-        kprintln!("[JSR-SYSCALL] enter name={} id={} task={} effects={}", e.name, e.id, task_name, e.effects.as_str());
+        kprintln!(
+            "[JSR-SYSCALL] enter name={} id={} task={} effects={}",
+            e.name,
+            e.id,
+            task_name,
+            e.effects.as_str()
+        );
     }
     // WCET 证据：只测真正执行的时间，不含查表与权限检查（那两项是常数级）。
     // 创建对象的调用先回收一轮：死亡对象占着的槽位与配额在新对象申请之前归还，
@@ -316,7 +357,13 @@ pub fn on_syscall(a: &SyscallArgs) -> i64 {
     let ret = execute(e, a, task_id.0);
     crate::wcet::record_syscall(crate::arch::cycles().wrapping_sub(started));
     if trace {
-        kprintln!("[JSR-SYSCALL] exit name={} id={} ret={} status={}", e.name, e.id, ret, error_name(ret));
+        kprintln!(
+            "[JSR-SYSCALL] exit name={} id={} ret={} status={}",
+            e.name,
+            e.id,
+            ret,
+            error_name(ret)
+        );
     }
     // 出口清理点：本次调用让对象死亡（关闭句柄、进程退出……）时，由它自己付清理的代价。死亡对象只进入清理队列；
     // 若没有任何路径执行清理过程，长期运行的进程会把死亡对象一直堆在队列里——配额不归还、槽位不释放，
@@ -348,7 +395,9 @@ pub(crate) fn user_ptr_err(e: UserPtrError) -> i64 {
         UserPtrError::OutOfMemory => err(SYSTEM_MEMORY_ERROR_OUT_OF_MEMORY),
         UserPtrError::Quota => err(SYSTEM_ERROR_QUOTA_EXCEEDED),
         UserPtrError::TooLong => err(SYSTEM_ERROR_INVALID_ARGUMENT),
-        UserPtrError::InvalidAddress | UserPtrError::NotUserTask => err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS),
+        UserPtrError::InvalidAddress | UserPtrError::NotUserTask => {
+            err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS)
+        }
     }
 }
 
@@ -367,7 +416,12 @@ pub(crate) fn console_write(ptr: u64, len: u64) -> i64 {
     match core::str::from_utf8(&buf) {
         Ok(text) => {
             let (_, name) = sched::current();
-            kprintln!("[JSR-USERTEXT] task={} bytes={} text={}", name, buf.len(), text);
+            kprintln!(
+                "[JSR-USERTEXT] task={} bytes={} text={}",
+                name,
+                buf.len(),
+                text
+            );
             buf.len() as i64
         }
         Err(_) => err(SYSTEM_ERROR_INVALID_ARGUMENT),
@@ -382,7 +436,9 @@ pub(crate) fn proc_err(e: ProcError) -> i64 {
         ProcError::Handle(HandleError::TableFull) => err(SYSTEM_HANDLE_ERROR_TABLE_FULL),
         ProcError::MemoryQuota => err(SYSTEM_ERROR_QUOTA_EXCEEDED),
         ProcError::NotTransferable => err(SYSTEM_HANDLE_ERROR_NOT_TRANSFERABLE),
-        ProcError::NoSuchProcess | ProcError::Exited | ProcError::BadApp => err(SYSTEM_ERROR_RIGHTS_DENIED),
+        ProcError::NoSuchProcess | ProcError::Exited | ProcError::BadApp => {
+            err(SYSTEM_ERROR_RIGHTS_DENIED)
+        }
         ProcError::Map(_) => err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS),
         ProcError::OutOfFrames | ProcError::NoTaskSlot => err(SYSTEM_ERROR_INVALID_ARGUMENT),
         ProcError::CapabilityNotice => err(SYSTEM_HANDLE_ERROR_INVALID),
@@ -404,7 +460,11 @@ fn task_spawn(entry: u64, stack: u64, arg: u64) -> i64 {
         // 线程对象是叶子：句柄带 DUPLICATE 与 TRANSFER，持有者可以复制或（经 Channel）传递它。
         Ok((_, task_obj)) => match proc::put_task_handle(
             task_obj,
-            Rights::WAIT.union(Rights::CONTROL).union(Rights::DUPLICATE).union(Rights::TRANSFER).union(Rights::SUBSCRIBE),
+            Rights::WAIT
+                .union(Rights::CONTROL)
+                .union(Rights::DUPLICATE)
+                .union(Rights::TRANSFER)
+                .union(Rights::SUBSCRIBE),
         ) {
             Ok(h) => h.raw() as i64,
             Err(e) => proc_err(e),
@@ -461,7 +521,9 @@ fn memory_map(va: u64, pages: u64, flags: u64) -> i64 {
     if flags & !MAP_WRITE != 0 {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     }
-    let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
     match proc::map_anon(pid, va, pages, flags & MAP_WRITE != 0) {
         Ok(()) => 0,
         Err(e) => mem_err(e),
@@ -471,7 +533,9 @@ fn memory_map(va: u64, pages: u64, flags: u64) -> i64 {
 /// `system.memory.unmap(va, pages)`：取消调用者进程中 `[va, va + pages 页)` 的映射，成功返回 0。
 /// 全有或全无；区间内有未映射的页 ⇒ `invalid_address`，什么也不改。
 fn memory_unmap(va: u64, pages: u64) -> i64 {
-    let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
     match proc::unmap_range(pid, va, pages) {
         Ok(()) => 0,
         Err(e) => mem_err(e),
@@ -485,8 +549,16 @@ fn memory_protect(va: u64, pages: u64, flags: u64) -> i64 {
     if flags & !(MAP_WRITE | MAP_EXEC) != 0 || flags == MAP_WRITE | MAP_EXEC {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     }
-    let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
-    match proc::protect_range(pid, va, pages, flags & MAP_WRITE != 0, flags & MAP_EXEC != 0) {
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    match proc::protect_range(
+        pid,
+        va,
+        pages,
+        flags & MAP_WRITE != 0,
+        flags & MAP_EXEC != 0,
+    ) {
         Ok(()) => 0,
         Err(e) => mem_err(e),
     }
@@ -507,16 +579,36 @@ fn time_wait(ticks: u64) -> i64 {
 }
 
 /// New absolute-ns contract; the legacy time.wait operation stays tick-based.
-fn time_wait_ns(deadline:u64)->i64 {
- if !crate::hrtime::enabled(){return err(SYSTEM_ERROR_UNSUPPORTED);}
- let Some(pid)=proc::current_process() else{return err(SYSTEM_ERROR_RIGHTS_DENIED);};
- if deadline>i64::MAX as u64{return err(SYSTEM_ERROR_INVALID_ARGUMENT);}
- loop {
-  if proc::current_exiting(){return err(SYSTEM_ASYNC_ERROR_CANCELLED);}
-  if crate::hrtime::now().expect("active clock")>=deadline{return 0;}
-  let blocked=kobj::with(|t|if proc::running_in(t,pid){Ok(sched::reserve_sleep_ns(deadline))}else{Err(())});
-  match blocked {Ok(true)=>sched::yield_with_cause(sched::scheduler::Cause::SLEEP),Ok(false)=>{},Err(())=>return err(SYSTEM_ASYNC_ERROR_CANCELLED)}
- }
+fn time_wait_ns(deadline: u64) -> i64 {
+    if !crate::hrtime::enabled() {
+        return err(SYSTEM_ERROR_UNSUPPORTED);
+    }
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    if deadline > i64::MAX as u64 {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    }
+    loop {
+        if proc::current_exiting() {
+            return err(SYSTEM_ASYNC_ERROR_CANCELLED);
+        }
+        if crate::hrtime::now().expect("active clock") >= deadline {
+            return 0;
+        }
+        let blocked = kobj::with(|t| {
+            if proc::running_in(t, pid) {
+                Ok(sched::reserve_sleep_ns(deadline))
+            } else {
+                Err(())
+            }
+        });
+        match blocked {
+            Ok(true) => sched::yield_with_cause(sched::scheduler::Cause::SLEEP),
+            Ok(false) => {}
+            Err(()) => return err(SYSTEM_ASYNC_ERROR_CANCELLED),
+        }
+    }
 }
 
 /// 按 ID 分派到真实实现。
@@ -693,6 +785,36 @@ syscall_dispatch! {
     SYSTEM_SANDBOX_DESTROY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         sandbox_destroy(a.args[0])
     },
+    SYSTEM_SANDBOX_IMAGE_LOAD => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_image_add(a.args[0])
+    },
+    SYSTEM_SANDBOX_IMAGE_QUERY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_image_query(a.args[0], a.args[1], a.args[2], a.args[3])
+    },
+    SYSTEM_SANDBOX_IMAGE_LAYER_QUERY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_image_layer_query(a.args[0], a.args[1], a.args[2], a.args[3], a.args[4])
+    },
+    SYSTEM_SANDBOX_IMAGE_DESTROY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_image_destroy(a.args[0], a.args[1])
+    },
+    SYSTEM_SANDBOX_VOLUME_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_volume_create(a.args[0])
+    },
+    SYSTEM_SANDBOX_VOLUME_DUPLICATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_volume_clone(a.args[0])
+    },
+    SYSTEM_SANDBOX_VOLUME_QUERY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_volume_query(a.args[0], a.args[1], a.args[2], a.args[3])
+    },
+    SYSTEM_SANDBOX_VOLUME_WRITE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_volume_charge(a.args[0], a.args[1], a.args[2])
+    },
+    SYSTEM_SANDBOX_VOLUME_RELEASE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_volume_release(a.args[0], a.args[1], a.args[2])
+    },
+    SYSTEM_SANDBOX_VOLUME_DESTROY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_volume_destroy(a.args[0], a.args[1])
+    },
 }
 
 // 编译期证明：分发表在登记表之内，且两者基数相同 ⇒ 两个集合完全相等。
@@ -719,7 +841,11 @@ fn profile_get(index: u64, ptr: u64, cap: u64, task_id: u64) -> i64 {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     }
     let mut buf = [0u8; PROFILE_TEXT_MAX];
-    let calls = if task_id == 0 { SyscallSet::EMPTY } else { sched::current_syscalls() };
+    let calls = if task_id == 0 {
+        SyscallSet::EMPTY
+    } else {
+        sched::current_syscalls()
+    };
     let Some(len) = profile::render_for_caller(index as usize, &mut buf, calls) else {
         return err(SYSTEM_PROFILE_ERROR_BUFFER_TOO_SMALL);
     };
@@ -753,7 +879,10 @@ fn device_list(filter: u64, ptr: u64, cap: u64) -> i64 {
     let Ok(capacity) = usize::try_from(cap) else {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     };
-    let matching = crate::pci::table().devices().filter(|device| filter.matches(&device.header)).count();
+    let matching = crate::pci::table()
+        .devices()
+        .filter(|device| filter.matches(&device.header))
+        .count();
     let required = matching * devabi::RECORD_SIZE;
     if required > capacity {
         return required as i64;
@@ -802,7 +931,12 @@ fn device_open(bdf: u64, rights: u64) -> i64 {
     let Some(pid) = proc::current_process() else {
         return err(SYSTEM_ERROR_RIGHTS_DENIED);
     };
-    match proc::grant_new(pid, KObject::Device(DeviceObj { bdf }), ObjectType::Device, rights) {
+    match proc::grant_new(
+        pid,
+        KObject::Device(DeviceObj { bdf }),
+        ObjectType::Device,
+        rights,
+    ) {
         Ok(h) => h.raw() as i64,
         Err(e) => proc_err(e),
     }
@@ -957,24 +1091,52 @@ fn device_map(handle: u64, bar_index: u64, va: u64) -> i64 {
 }
 
 /// SHM-1: create zeroed backing; creator allocation quota follows pages, not transferable handles.
-fn memory_object_create(pages:u64) -> i64 {
-    let Some(pid)=proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
-    if pages==0 { return err(SYSTEM_ERROR_INVALID_ARGUMENT); }
-    match proc::create_memory(pid,pages) { Ok(h)=>h.raw() as i64, Err(ProcError::OutOfFrames)=>err(SYSTEM_MEMORY_ERROR_OUT_OF_MEMORY), Err(e)=>proc_err(e) }
+fn memory_object_create(pages: u64) -> i64 {
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    if pages == 0 {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    }
+    match proc::create_memory(pid, pages) {
+        Ok(h) => h.raw() as i64,
+        Err(ProcError::OutOfFrames) => err(SYSTEM_MEMORY_ERROR_OUT_OF_MEMORY),
+        Err(e) => proc_err(e),
+    }
 }
 /// New versioned descriptor; never reads beyond its fixed 40 bytes or reuses old map flags.
-fn memory_object_map(raw:u64,ptr:u64) -> i64 {
-    let Some(pid)=proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
-    let mut bytes=[0u8;kernel_core::memory_abi::MAP_ARGS_BYTES];
-    if let Err(e)=copy_from_user(&mut bytes,ptr,kernel_core::memory_abi::MAP_ARGS_BYTES) { return user_ptr_err(e); }
-    let Some(args)=kernel_core::memory_abi::MapArgs::decode(&bytes) else { return err(SYSTEM_ERROR_INVALID_ARGUMENT) };
-    match proc::map_memory(pid,handle_arg(raw),args.address,args.offset_pages,args.pages,
-        args.flags & kernel_core::memory_abi::WRITE != 0) { Ok(())=>0, Err(e)=>mem_err(e) }
+fn memory_object_map(raw: u64, ptr: u64) -> i64 {
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let mut bytes = [0u8; kernel_core::memory_abi::MAP_ARGS_BYTES];
+    if let Err(e) = copy_from_user(&mut bytes, ptr, kernel_core::memory_abi::MAP_ARGS_BYTES) {
+        return user_ptr_err(e);
+    }
+    let Some(args) = kernel_core::memory_abi::MapArgs::decode(&bytes) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    match proc::map_memory(
+        pid,
+        handle_arg(raw),
+        args.address,
+        args.offset_pages,
+        args.pages,
+        args.flags & kernel_core::memory_abi::WRITE != 0,
+    ) {
+        Ok(()) => 0,
+        Err(e) => mem_err(e),
+    }
 }
 /// Removes only caller-owned SHM views. Does not invalidate other processes' mappings.
-fn memory_object_unmap(address:u64,pages:u64) -> i64 {
-    let Some(pid)=proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
-    match proc::unmap_memory(pid,address,pages) { Ok(())=>0, Err(e)=>mem_err(e) }
+fn memory_object_unmap(address: u64, pages: u64) -> i64 {
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    match proc::unmap_memory(pid, address, pages) {
+        Ok(()) => 0,
+        Err(e) => mem_err(e),
+    }
 }
 
 fn workload_error(error: kernel_core::workload::WorkloadError) -> i64 {
@@ -985,9 +1147,7 @@ fn workload_error(error: kernel_core::workload::WorkloadError) -> i64 {
         WorkloadError::InvalidLimit => err(SYSTEM_ERROR_INVALID_ARGUMENT),
         WorkloadError::InvalidState => err(SYSTEM_WORKLOAD_ERROR_STATE),
         WorkloadError::Quota => err(SYSTEM_ERROR_QUOTA_EXCEEDED),
-        WorkloadError::Capacity | WorkloadError::IdExhausted => {
-            err(SYSTEM_WORKLOAD_ERROR_CAPACITY)
-        }
+        WorkloadError::Capacity | WorkloadError::IdExhausted => err(SYSTEM_WORKLOAD_ERROR_CAPACITY),
     }
 }
 
@@ -1130,9 +1290,8 @@ fn sandbox_error(error: kernel_core::sandbox::SandboxError) -> i64 {
         SandboxError::InvalidRoot | SandboxError::RootAlreadyBound => {
             err(SYSTEM_SANDBOX_ERROR_STATE)
         }
-        SandboxError::Capacity | SandboxError::IdExhausted => {
-            err(SYSTEM_SANDBOX_ERROR_CAPACITY)
-        }
+        SandboxError::StorageInUse => err(SYSTEM_SANDBOX_ERROR_IN_USE),
+        SandboxError::Capacity | SandboxError::IdExhausted => err(SYSTEM_SANDBOX_ERROR_CAPACITY),
         SandboxError::Workload(error) => workload_error(error),
     }
 }
@@ -1173,8 +1332,8 @@ fn sandbox_create(desc_ptr: u64) -> i64 {
         Ok(key) => key,
         Err(error) => return sandbox_error(error),
     };
-    if let Err(error) = crate::sandbox::mark_ready(domain, key)
-        .and_then(|()| crate::sandbox::start(domain, key))
+    if let Err(error) =
+        crate::sandbox::mark_ready(domain, key).and_then(|()| crate::sandbox::start(domain, key))
     {
         let _ = crate::sandbox::fail(domain, key);
         let _ = crate::sandbox::destroy(domain, key);
@@ -1240,6 +1399,244 @@ fn sandbox_destroy(raw_key: u64) -> i64 {
     match crate::sandbox::destroy(domain, key) {
         Ok(()) => 0,
         Err(error) => sandbox_error(error),
+    }
+}
+
+fn sandbox_storage_error(error: kernel_core::sandbox_image::SandboxStorageError) -> i64 {
+    use kernel_core::sandbox_image::SandboxStorageError;
+    match error {
+        SandboxStorageError::InvalidImage => err(SYSTEM_SANDBOX_IMAGE_ERROR_NOT_FOUND),
+        SandboxStorageError::InvalidVolume => err(SYSTEM_SANDBOX_VOLUME_ERROR_NOT_FOUND),
+        SandboxStorageError::InvalidLayer => err(SYSTEM_SANDBOX_IMAGE_ERROR_LAYER),
+        SandboxStorageError::InvalidLimit => err(SYSTEM_SANDBOX_STORAGE_ERROR_LIMIT),
+        SandboxStorageError::Capacity => err(SYSTEM_SANDBOX_STORAGE_ERROR_CAPACITY),
+        SandboxStorageError::IdExhausted => err(SYSTEM_SANDBOX_STORAGE_ERROR_IDS_EXHAUSTED),
+        SandboxStorageError::Quota => err(SYSTEM_SANDBOX_VOLUME_ERROR_QUOTA),
+        SandboxStorageError::InUse => err(SYSTEM_SANDBOX_STORAGE_ERROR_IN_USE),
+    }
+}
+
+fn current_domain() -> Result<kernel_core::security_domain::DomainKey, i64> {
+    let pid = proc::current_process().ok_or_else(|| err(SYSTEM_ERROR_RIGHTS_DENIED))?;
+    proc::workload_domain(pid).ok_or_else(|| err(SYSTEM_ERROR_RIGHTS_DENIED))
+}
+
+fn sandbox_image_add(desc_ptr: u64) -> i64 {
+    let domain = match current_domain() {
+        Ok(domain) => domain,
+        Err(error) => return error,
+    };
+    let mut raw = [0u8; kernel_core::sandbox_storage_abi::IMAGE_ADD_BYTES];
+    let raw_len = raw.len();
+    if let Err(error) = copy_from_user(&mut raw, desc_ptr, raw_len) {
+        return user_ptr_err(error);
+    }
+    let Some(args) = kernel_core::sandbox_storage_abi::ImageAddArgs::decode(&raw) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    match crate::sandbox_storage::add_image(domain, args.sandbox, args.spec, args.used_layers()) {
+        Ok(key) => key.to_raw() as i64,
+        Err(error) => sandbox_storage_error(error),
+    }
+}
+
+fn sandbox_image_query(raw_sandbox: u64, raw_image: u64, ptr: u64, cap: u64) -> i64 {
+    let domain = match current_domain() {
+        Ok(domain) => domain,
+        Err(error) => return error,
+    };
+    let Some(sandbox) = kernel_core::sandbox::SandboxKey::from_raw(raw_sandbox) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let Some(image) = kernel_core::sandbox_image::ImageKey::from_raw(raw_image) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let snapshot = match crate::sandbox_storage::image(domain, sandbox, image) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return sandbox_storage_error(error),
+    };
+    if cap < kernel_core::sandbox_storage_abi::IMAGE_INFO_BYTES as u64 {
+        return err(SYSTEM_SANDBOX_ERROR_BUFFER_TOO_SMALL);
+    }
+    let encoded = kernel_core::sandbox_storage_abi::ImageInfo::from_snapshot(snapshot).encode();
+    if let Err(error) = copy_to_user(ptr, &encoded, encoded.len()) {
+        return user_ptr_err(error);
+    }
+    encoded.len() as i64
+}
+
+fn sandbox_image_layer_query(
+    raw_sandbox: u64,
+    raw_image: u64,
+    index: u64,
+    ptr: u64,
+    cap: u64,
+) -> i64 {
+    let domain = match current_domain() {
+        Ok(domain) => domain,
+        Err(error) => return error,
+    };
+    let Some(sandbox) = kernel_core::sandbox::SandboxKey::from_raw(raw_sandbox) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let Some(image) = kernel_core::sandbox_image::ImageKey::from_raw(raw_image) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let Ok(index) = u16::try_from(index) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let snapshot = match crate::sandbox_storage::image_layer(domain, sandbox, image, index) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return sandbox_storage_error(error),
+    };
+    if cap < kernel_core::sandbox_storage_abi::LAYER_INFO_BYTES as u64 {
+        return err(SYSTEM_SANDBOX_ERROR_BUFFER_TOO_SMALL);
+    }
+    let encoded = kernel_core::sandbox_storage_abi::LayerInfo::from_snapshot(snapshot).encode();
+    if let Err(error) = copy_to_user(ptr, &encoded, encoded.len()) {
+        return user_ptr_err(error);
+    }
+    encoded.len() as i64
+}
+
+fn sandbox_image_destroy(raw_sandbox: u64, raw_image: u64) -> i64 {
+    let domain = match current_domain() {
+        Ok(domain) => domain,
+        Err(error) => return error,
+    };
+    let Some(sandbox) = kernel_core::sandbox::SandboxKey::from_raw(raw_sandbox) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let Some(image) = kernel_core::sandbox_image::ImageKey::from_raw(raw_image) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    match crate::sandbox_storage::destroy_image(domain, sandbox, image) {
+        Ok(()) => 0,
+        Err(error) => sandbox_storage_error(error),
+    }
+}
+
+fn sandbox_volume_create(desc_ptr: u64) -> i64 {
+    let domain = match current_domain() {
+        Ok(domain) => domain,
+        Err(error) => return error,
+    };
+    let mut raw = [0u8; kernel_core::sandbox_storage_abi::VOLUME_CREATE_BYTES];
+    let raw_len = raw.len();
+    if let Err(error) = copy_from_user(&mut raw, desc_ptr, raw_len) {
+        return user_ptr_err(error);
+    }
+    let Some(args) = kernel_core::sandbox_storage_abi::VolumeCreateArgs::decode(&raw) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    match crate::sandbox_storage::create_volume(
+        domain,
+        args.sandbox,
+        args.image,
+        args.capacity_bytes,
+    ) {
+        Ok(key) => key.to_raw() as i64,
+        Err(error) => sandbox_storage_error(error),
+    }
+}
+
+fn sandbox_volume_clone(desc_ptr: u64) -> i64 {
+    let domain = match current_domain() {
+        Ok(domain) => domain,
+        Err(error) => return error,
+    };
+    let mut raw = [0u8; kernel_core::sandbox_storage_abi::VOLUME_CREATE_BYTES];
+    let raw_len = raw.len();
+    if let Err(error) = copy_from_user(&mut raw, desc_ptr, raw_len) {
+        return user_ptr_err(error);
+    }
+    let Some(args) = kernel_core::sandbox_storage_abi::VolumeCloneArgs::decode(&raw) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    match crate::sandbox_storage::clone_volume(
+        domain,
+        args.sandbox,
+        args.parent,
+        args.capacity_bytes,
+    ) {
+        Ok(key) => key.to_raw() as i64,
+        Err(error) => sandbox_storage_error(error),
+    }
+}
+
+fn sandbox_volume_query(raw_sandbox: u64, raw_volume: u64, ptr: u64, cap: u64) -> i64 {
+    let domain = match current_domain() {
+        Ok(domain) => domain,
+        Err(error) => return error,
+    };
+    let Some(sandbox) = kernel_core::sandbox::SandboxKey::from_raw(raw_sandbox) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let Some(volume) = kernel_core::sandbox_image::VolumeKey::from_raw(raw_volume) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let snapshot = match crate::sandbox_storage::volume(domain, sandbox, volume) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return sandbox_storage_error(error),
+    };
+    if cap < kernel_core::sandbox_storage_abi::VOLUME_INFO_BYTES as u64 {
+        return err(SYSTEM_SANDBOX_ERROR_BUFFER_TOO_SMALL);
+    }
+    let encoded = kernel_core::sandbox_storage_abi::VolumeInfo::from_snapshot(snapshot).encode();
+    if let Err(error) = copy_to_user(ptr, &encoded, encoded.len()) {
+        return user_ptr_err(error);
+    }
+    encoded.len() as i64
+}
+
+fn sandbox_volume_charge(raw_sandbox: u64, raw_volume: u64, bytes: u64) -> i64 {
+    let domain = match current_domain() {
+        Ok(domain) => domain,
+        Err(error) => return error,
+    };
+    let Some(sandbox) = kernel_core::sandbox::SandboxKey::from_raw(raw_sandbox) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let Some(volume) = kernel_core::sandbox_image::VolumeKey::from_raw(raw_volume) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    match crate::sandbox_storage::charge_volume(domain, sandbox, volume, bytes) {
+        Ok(_) => 0,
+        Err(error) => sandbox_storage_error(error),
+    }
+}
+
+fn sandbox_volume_release(raw_sandbox: u64, raw_volume: u64, bytes: u64) -> i64 {
+    let domain = match current_domain() {
+        Ok(domain) => domain,
+        Err(error) => return error,
+    };
+    let Some(sandbox) = kernel_core::sandbox::SandboxKey::from_raw(raw_sandbox) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let Some(volume) = kernel_core::sandbox_image::VolumeKey::from_raw(raw_volume) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    match crate::sandbox_storage::release_volume(domain, sandbox, volume, bytes) {
+        Ok(_) => 0,
+        Err(error) => sandbox_storage_error(error),
+    }
+}
+
+fn sandbox_volume_destroy(raw_sandbox: u64, raw_volume: u64) -> i64 {
+    let domain = match current_domain() {
+        Ok(domain) => domain,
+        Err(error) => return error,
+    };
+    let Some(sandbox) = kernel_core::sandbox::SandboxKey::from_raw(raw_sandbox) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let Some(volume) = kernel_core::sandbox_image::VolumeKey::from_raw(raw_volume) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    match crate::sandbox_storage::destroy_volume(domain, sandbox, volume) {
+        Ok(()) => 0,
+        Err(error) => sandbox_storage_error(error),
     }
 }
 

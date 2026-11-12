@@ -25,7 +25,7 @@ use crate::workload::{MAX_WORKLOADS, WORKLOADS};
 
 pub const MAX_SANDBOXES: usize = 64;
 
-static SANDBOXES: IrqSpinLock<SandboxTable<MAX_SANDBOXES>> =
+pub(crate) static SANDBOXES: IrqSpinLock<SandboxTable<MAX_SANDBOXES>> =
     IrqSpinLock::ranked(crate::lockorder::SANDBOX, SandboxTable::new());
 
 /// Atomically create a root Workload and its stable Sandbox identity.
@@ -136,6 +136,9 @@ pub fn root_snapshot(domain: DomainKey, key: SandboxKey) -> Result<WorkloadSnaps
 /// 成功后删除 Sandbox 身份。
 pub fn destroy(domain: DomainKey, key: SandboxKey) -> Result<(), SandboxError> {
     let mut sandboxes = SANDBOXES.lock();
+    if crate::sandbox_storage::blocks_destroy(key) {
+        return Err(SandboxError::StorageInUse);
+    }
     let mut workloads = WORKLOADS.lock();
     let _ = checked_root(&sandboxes, &workloads, domain, key)?;
     sandboxes.destroy_with(&mut workloads, key, |workloads, root| {
