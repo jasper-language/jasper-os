@@ -1435,6 +1435,10 @@ fn execute(
         LinuxSyscall::Fchdir => compat_result(linux_fchdir(pid, call.args[0])),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
         LinuxSyscall::Fstatfs => compat_result(linux_fstatfs(pid, call.args)),
+        LinuxSyscall::Fsync => compat_result(linux_sync_fd(pid, call.args[0], false)),
+        LinuxSyscall::Fdatasync => compat_result(linux_sync_fd(pid, call.args[0], true)),
+        LinuxSyscall::Sync => 0,
+        LinuxSyscall::Syncfs => compat_result(linux_syncfs(pid, call.args[0])),
         LinuxSyscall::NewFstatAt => compat_result(linux_newfstatat(pid, call.args)),
         LinuxSyscall::Statx => compat_result(linux_statx(pid, call.args)),
         LinuxSyscall::Fcntl => compat_result(linux_fcntl(pid, call.args)),
@@ -5120,6 +5124,19 @@ fn write_linux_statfs(address: u64, size: u64) -> Result<u64, CompatErrno> {
     statfs[72..80].copy_from_slice(&4096u64.to_le_bytes());
     copy_to_user(address, &statfs, statfs.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
+}
+
+fn linux_sync_fd(pid: ObjId, raw_fd: u64, _data_only: bool) -> Result<u64, CompatErrno> {
+    let fd = u32::try_from(raw_fd).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    match entry.kind {
+        compat_core::fd::CompatKind::File | compat_core::fd::CompatKind::Directory => Ok(0),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+fn linux_syncfs(pid: ObjId, raw_fd: u64) -> Result<u64, CompatErrno> {
+    linux_sync_fd(pid, raw_fd, false)
 }
 
 /// Implements `readlink(2)` for `/proc/self/exe`.

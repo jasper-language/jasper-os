@@ -165,6 +165,14 @@ int main(void) {
                pipe_flags, errno);
         return 86;
     }
+    if (fsync(fd) != 0 || fdatasync(fd) != 0 || syncfs(fd) != 0) {
+        return 199;
+    }
+    sync();
+    errno = 0;
+    if (fsync(pipe_fds[0]) != -1 || errno != EINVAL) {
+        return 200;
+    }
     int reader_flags = fcntl(pipe_fds[0], F_GETFL);
     int writer_flags = fcntl(pipe_fds[1], F_GETFL);
     if ((reader_flags & O_NONBLOCK) == 0 || (writer_flags & O_NONBLOCK) == 0) {
