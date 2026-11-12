@@ -2043,6 +2043,7 @@ fn linux_task_for_tid(process: ObjId, tid: u32) -> Option<crate::task::TaskId> {
 fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
     const MAX_MAP_BYTES: u64 = 64 * 1024 * 1024;
+    const MAP_SHARED: u64 = 0x01;
     const MAP_PRIVATE: u64 = 0x02;
     const MAP_FIXED: u64 = 0x10;
     const MAP_ANONYMOUS: u64 = 0x20;
@@ -2060,9 +2061,17 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if args[2] & PROT_WRITE != 0 && args[2] & PROT_EXEC != 0 {
         return Err(CompatErrno::Perm);
     }
-    if args[3] & MAP_PRIVATE == 0
+    let sharing = args[3] & (MAP_SHARED | MAP_PRIVATE);
+    if sharing == 0
+        || sharing == (MAP_SHARED | MAP_PRIVATE)
         || args[3]
-            & !(MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS | MAP_DENYWRITE | MAP_NORESERVE | MAP_STACK)
+            & !(MAP_SHARED
+                | MAP_PRIVATE
+                | MAP_FIXED
+                | MAP_ANONYMOUS
+                | MAP_DENYWRITE
+                | MAP_NORESERVE
+                | MAP_STACK)
             != 0
         || args[5] % PAGE != 0
     {
@@ -2070,13 +2079,28 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
 
     let anonymous = args[3] & MAP_ANONYMOUS != 0;
+    let mut ashmem_handle = None;
     let file = if anonymous {
         None
     } else {
         let fd = u32::try_from(args[4]).map_err(|_| CompatErrno::BadFd)?;
+        let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+        if entry.kind == compat_core::fd::CompatKind::Device
+            && proc::linux_ashmem_state(pid, entry.handle).is_some()
+        {
+            ashmem_handle = Some(entry.handle);
+            None
+        } else {
         let (handle, _) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
-        Some(crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?)
+            Some(crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?)
+        }
     };
+    if ashmem_handle.is_some() && args[3] & MAP_SHARED == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if ashmem_handle.is_none() && args[3] & MAP_PRIVATE == 0 {
+        return Err(CompatErrno::Invalid);
+    }
     let io = if let Some(file) = file {
         let offset = usize::try_from(args[5]).map_err(|_| CompatErrno::Invalid)?;
         let requested_bytes = usize::try_from(bytes).map_err(|_| CompatErrno::Invalid)?;
@@ -2143,6 +2167,21 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if executable {
         flags = flags.union(kernel_core::paging::MapFlags::EXECUTE);
     }
+    if let Some(handle) = ashmem_handle {
+        proc::linux_ashmem_map(
+            pid,
+            handle,
+            start,
+            rounded,
+            args[2] as u32,
+            args[5],
+        )
+        .map_err(|_| CompatErrno::NoMemory)?;
+        if !proc::set_linux_mmap_cursor(pid, start + rounded) {
+            return Err(CompatErrno::NoSys);
+        }
+        return Ok(start);
+    }
     let mut mapped = alloc::vec::Vec::new();
     let mut page = start;
     while page < start + rounded {
@@ -2203,7 +2242,9 @@ fn linux_munmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     let mut page = args[0];
     while page < end {
-        proc::unmap_page(pid, page).map_err(|_| CompatErrno::NoMemory)?;
+        if !proc::unmap_shared_page(pid, page).map_err(|_| CompatErrno::NoMemory)? {
+            proc::unmap_page(pid, page).map_err(|_| CompatErrno::NoMemory)?;
+        }
         page += PAGE;
     }
     Ok(0)
@@ -4123,8 +4164,8 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     #[cfg(feature = "compat-dynamic-libc-verify")]
     trace_path_address(pid, "openat-address", args[1]);
     let flags = args[2];
-    if flags & 3 != 0
-        || flags & !(O_CLOEXEC | O_DIRECTORY | O_NONBLOCK | O_NOCTTY | O_NOFOLLOW) != 0
+    if flags & 3 == 3
+        || flags & !(3 | O_CLOEXEC | O_DIRECTORY | O_NONBLOCK | O_NOCTTY | O_NOFOLLOW) != 0
     {
         return Err(CompatErrno::Perm);
     }
@@ -4164,6 +4205,17 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             resolved
         }
     };
+    if resolved == b"/dev/ashmem" {
+        if flags & 3 != 2 {
+            return Err(CompatErrno::Perm);
+        }
+        return proc::linux_open_ashmem(pid, flags & O_CLOEXEC != 0)
+            .map(u64::from)
+            .ok_or(CompatErrno::NoSpace);
+    }
+    if flags & 3 != 0 {
+        return Err(CompatErrno::Perm);
+    }
     let node = crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)?;
     let close_on_exec = flags & O_CLOEXEC != 0;
     let fd = match node {
@@ -4529,6 +4581,16 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const TIOCSWINSZ: u64 = 0x5414;
     const FIONREAD: u64 = 0x541b;
     const TCGETS2: u64 = 0x802c_542a;
+    const ASHMEM_SET_NAME: u64 = 0x4100_6101;
+    const ASHMEM_SET_PROT_MASK: u64 = 0x4004_6102;
+    const ASHMEM_SET_SIZE: u64 = 0x4008_6103;
+    const ASHMEM_GET_SIZE: u64 = 0x8008_6104;
+    const ASHMEM_PIN: u64 = 0x4008_6105;
+    const ASHMEM_UNPIN: u64 = 0x4008_6106;
+    const ASHMEM_GET_NAME: u64 = 0x8100_6107;
+    const ASHMEM_GET_PROT_MASK: u64 = 0x8008_6108;
+    const ASHMEM_GET_PIN_STATUS: u64 = 0x6109;
+    const ASHMEM_PURGE_ALL_CACHES: u64 = 0x610a;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if args[1] == FIONREAD && entry.kind == compat_core::fd::CompatKind::Pipe {
@@ -4549,6 +4611,74 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         copy_to_user(args[2], &available.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
         return Ok(0);
     }
+    if entry.kind == compat_core::fd::CompatKind::Device
+        && proc::linux_ashmem_state(pid, entry.handle).is_some()
+    {
+        match args[1] {
+            ASHMEM_SET_NAME => {
+                let name = linux_c_string(args[2], 256)?;
+                proc::linux_ashmem_set_name(pid, entry.handle, &name)
+                    .map_err(ashmem_compat_error)?;
+                return Ok(0);
+            }
+            ASHMEM_SET_PROT_MASK => {
+                let mut protection = [0u8; 4];
+                copy_from_user(&mut protection, args[2], 4)
+                    .map_err(|_| CompatErrno::Fault)?;
+                proc::linux_ashmem_set_protection(
+                    pid,
+                    entry.handle,
+                    u32::from_le_bytes(protection),
+                )
+                .map_err(ashmem_compat_error)?;
+                return Ok(0);
+            }
+            ASHMEM_SET_SIZE => {
+                let mut size = [0u8; 8];
+                copy_from_user(&mut size, args[2], 8).map_err(|_| CompatErrno::Fault)?;
+                proc::linux_ashmem_set_size(pid, entry.handle, u64::from_le_bytes(size))
+                    .map_err(ashmem_compat_error)?;
+                return Ok(0);
+            }
+            ASHMEM_PIN | ASHMEM_UNPIN => {
+                let mut pin = [0u8; 8];
+                copy_from_user(&mut pin, args[2], 8).map_err(|_| CompatErrno::Fault)?;
+                let pins =
+                    proc::linux_ashmem_pin(pid, entry.handle, args[1] == ASHMEM_PIN)
+                        .map_err(ashmem_compat_error)?;
+                return Ok(u64::from(pins));
+            }
+            ASHMEM_GET_SIZE => {
+                let (size, _, _) = proc::linux_ashmem_state(pid, entry.handle)
+                    .ok_or(CompatErrno::NotSocket)?;
+                copy_to_user(args[2], &size.to_le_bytes(), 8)
+                    .map_err(|_| CompatErrno::Fault)?;
+                return Ok(0);
+            }
+            ASHMEM_GET_NAME => {
+                let name = proc::linux_ashmem_name(pid, entry.handle)
+                    .map_err(ashmem_compat_error)?;
+                copy_to_user(args[2], &name, name.len()).map_err(|_| CompatErrno::Fault)?;
+                return Ok(0);
+            }
+            ASHMEM_GET_PROT_MASK => {
+                let (_, protection, _) = proc::linux_ashmem_state(pid, entry.handle)
+                    .ok_or(CompatErrno::NotSocket)?;
+                copy_to_user(args[2], &protection.to_le_bytes(), 4)
+                    .map_err(|_| CompatErrno::Fault)?;
+                return Ok(0);
+            }
+            ASHMEM_GET_PIN_STATUS => {
+                let (_, _, pins) = proc::linux_ashmem_state(pid, entry.handle)
+                    .ok_or(CompatErrno::NotSocket)?;
+                copy_to_user(args[2], &pins.to_le_bytes(), 4)
+                    .map_err(|_| CompatErrno::Fault)?;
+                return Ok(0);
+            }
+            ASHMEM_PURGE_ALL_CACHES => return Ok(0),
+            _ => return Err(CompatErrno::NotTty),
+        }
+    }
     if matches!(
         args[1],
         TCGETS | TCSETS | TCSETSW | TCSETSF | TIOCGWINSZ | TIOCSWINSZ | TCGETS2
@@ -4556,6 +4686,14 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         Err(CompatErrno::NotTty)
     } else {
         Err(CompatErrno::NoSys)
+    }
+}
+
+fn ashmem_compat_error(error: proc::LinuxAshmemError) -> CompatErrno {
+    match error {
+        proc::LinuxAshmemError::Invalid => CompatErrno::Invalid,
+        proc::LinuxAshmemError::NoMemory => CompatErrno::NoMemory,
+        proc::LinuxAshmemError::NotAshmem => CompatErrno::NotTty,
     }
 }
 

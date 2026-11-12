@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -23,6 +24,16 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#define JASPER_ASHMEM_SET_NAME 0x41006101UL
+#define JASPER_ASHMEM_SET_PROT_MASK 0x40046102UL
+#define JASPER_ASHMEM_SET_SIZE 0x40086103UL
+#define JASPER_ASHMEM_GET_SIZE 0x80086104UL
+#define JASPER_ASHMEM_PIN 0x40086105UL
+#define JASPER_ASHMEM_UNPIN 0x40086106UL
+#define JASPER_ASHMEM_GET_NAME 0x81006107UL
+#define JASPER_ASHMEM_GET_PROT_MASK 0x80086108UL
+#define JASPER_ASHMEM_GET_PIN_STATUS 0x6109UL
 
 int main(void) {
     if (getenv("JASPER_EXEC_CHILD") != NULL) {
@@ -619,6 +630,95 @@ int main(void) {
         !WIFEXITED(credential_status) ||
         WEXITSTATUS(credential_status) != 0) {
         return 144;
+    }
+    int ashmem_fd = open("/dev/ashmem", O_RDWR | O_CLOEXEC);
+    char ashmem_name[256] = "jasper-ashmem";
+    size_t ashmem_size = 8192;
+    size_t ashmem_requested = 0;
+    size_t ashmem_protection = PROT_READ | PROT_WRITE;
+    if (ashmem_fd < 0 ||
+        (fcntl(ashmem_fd, F_GETFD) & FD_CLOEXEC) == 0 ||
+        ioctl(ashmem_fd, JASPER_ASHMEM_SET_NAME, ashmem_name) != 0 ||
+        ioctl(ashmem_fd, JASPER_ASHMEM_SET_PROT_MASK,
+              &ashmem_protection) != 0) {
+        return 145;
+    }
+    memset(ashmem_name, 0, sizeof(ashmem_name));
+    if (ioctl(ashmem_fd, JASPER_ASHMEM_GET_NAME, ashmem_name) != 0 ||
+        strcmp(ashmem_name, "jasper-ashmem") != 0 ||
+        ioctl(ashmem_fd, JASPER_ASHMEM_SET_SIZE, &ashmem_size) != 0 ||
+        ioctl(ashmem_fd, JASPER_ASHMEM_GET_SIZE, &ashmem_requested) != 0 ||
+        ashmem_requested != ashmem_size ||
+        ioctl(ashmem_fd, JASPER_ASHMEM_GET_PROT_MASK,
+              &ashmem_protection) != 0 ||
+        ashmem_protection != (PROT_READ | PROT_WRITE)) {
+        return 146;
+    }
+    size_t pin_length = ashmem_size;
+    unsigned int pin_status = 0;
+    if (ioctl(ashmem_fd, JASPER_ASHMEM_PIN, &pin_length) < 0 ||
+        ioctl(ashmem_fd, JASPER_ASHMEM_PIN, &pin_length) < 0 ||
+        ioctl(ashmem_fd, JASPER_ASHMEM_GET_PIN_STATUS, &pin_status) != 0 ||
+        pin_status != 2 ||
+        ioctl(ashmem_fd, JASPER_ASHMEM_UNPIN, &pin_length) < 0 ||
+        ioctl(ashmem_fd, JASPER_ASHMEM_UNPIN, &pin_length) < 0 ||
+        ioctl(ashmem_fd, JASPER_ASHMEM_GET_PIN_STATUS, &pin_status) != 0 ||
+        pin_status != 0) {
+        return 147;
+    }
+    int to_child[2];
+    int to_parent[2];
+    if (pipe2(to_child, 0) != 0 || pipe2(to_parent, 0) != 0) {
+        return 148;
+    }
+    pid_t ashmem_child = fork();
+    if (ashmem_child < 0) {
+        return 149;
+    }
+    if (ashmem_child == 0) {
+        close(to_child[1]);
+        close(to_parent[0]);
+        unsigned char *shared = mmap(NULL, ashmem_size,
+                                     PROT_READ | PROT_WRITE, MAP_SHARED,
+                                     ashmem_fd, 0);
+        char token = 0;
+        if (shared == MAP_FAILED ||
+            read(to_child[0], &token, 1) != 1 || token != 'M' ||
+            shared[0] != 'A') {
+            _exit(150);
+        }
+        shared[4096] = 'B';
+        if (write(to_parent[1], "K", 1) != 1 ||
+            munmap(shared, ashmem_size) != 0) {
+            _exit(151);
+        }
+        close(to_child[0]);
+        close(to_parent[1]);
+        close(ashmem_fd);
+        _exit(0);
+    }
+    close(to_child[0]);
+    close(to_parent[1]);
+    unsigned char *shared = mmap(NULL, ashmem_size,
+                                 PROT_READ | PROT_WRITE, MAP_SHARED,
+                                 ashmem_fd, 0);
+    if (shared == MAP_FAILED || shared[0] != 0 || shared[4096] != 0) {
+        return 152;
+    }
+    shared[0] = 'A';
+    char token[2] = {0};
+    if (write(to_child[1], "M", 1) != 1 ||
+        read(to_parent[0], token, 1) != 1 || token[0] != 'K' ||
+        shared[4096] != 'B' ||
+        munmap(shared, ashmem_size) != 0) {
+        return 153;
+    }
+    int ashmem_status = 0;
+    if (waitpid(ashmem_child, &ashmem_status, 0) != ashmem_child ||
+        !WIFEXITED(ashmem_status) || WEXITSTATUS(ashmem_status) != 0 ||
+        close(to_child[1]) != 0 || close(to_parent[0]) != 0 ||
+        close(ashmem_fd) != 0) {
+        return 154;
     }
     cpu_set_t cpus;
     CPU_ZERO(&cpus);

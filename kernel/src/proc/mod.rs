@@ -27,7 +27,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 #[cfg(feature = "linux-abi")]
-use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicU64, AtomicUsize};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::capability::{CapabilityId, CapabilityLink};
@@ -76,6 +76,8 @@ pub(crate) const LINUX_CONSOLE_HANDLE: u64 = u64::MAX;
 const LINUX_PIPE_HANDLE_BASE: u64 = 0x0000_8000_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_SOCKET_HANDLE_BASE: u64 = 0x0000_8100_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_ASHMEM_HANDLE_BASE: u64 = 0x0000_8200_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -102,6 +104,8 @@ struct LinuxProcessState {
     next_pipe_handle: u64,
     sockets: Vec<LinuxSocketHandle>,
     next_socket_handle: u64,
+    ashmem: Vec<LinuxAshmemHandle>,
+    next_ashmem_handle: u64,
     /// Set only on the child side of vfork. The parent task sleeps until the
     /// child commits exec or leaves `Running`.
     /// 仅 vfork 子进程携带；父任务睡眠到子进程提交 exec 或离开 Running。
@@ -132,6 +136,23 @@ struct LinuxSocketHandle {
 }
 
 #[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxAshmemHandle {
+    handle: u64,
+    buffer: Arc<AshmemBuffer>,
+}
+
+#[cfg(feature = "linux-abi")]
+struct AshmemBuffer {
+    id: u64,
+    size: AtomicU64,
+    protection: AtomicU32,
+    pins: AtomicU32,
+    name: SpinLock<([u8; 256], usize)>,
+    pages: SpinLock<Vec<Arc<crate::mm::memory_object::Page>>>,
+}
+
+#[cfg(feature = "linux-abi")]
 pub(crate) struct LinuxFdTransfer {
     description: compat_core::FdDescription,
     resource: LinuxFdResource,
@@ -141,6 +162,7 @@ pub(crate) struct LinuxFdTransfer {
 enum LinuxFdResource {
     Generic,
     Pipe(Arc<compat_core::PipeEndpoint>),
+    Ashmem(Arc<AshmemBuffer>),
     Socket {
         endpoint: Arc<compat_core::UnixSocketEndpoint>,
         listener: Option<Arc<UnixListener>>,
@@ -268,6 +290,14 @@ pub(crate) enum LinuxSocketError {
 pub(crate) enum LinuxFdTransferError {
     Invalid,
     NoSpace,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinuxAshmemError {
+    Invalid,
+    NoMemory,
+    NotAshmem,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -1240,6 +1270,17 @@ pub(crate) fn linux_capture_fd_transfer(
                         controls: Arc::clone(&socket.controls),
                     }
                 }
+                compat_core::fd::CompatKind::Device
+                    if entry.handle >= LINUX_ASHMEM_HANDLE_BASE =>
+                {
+                    let buffer = linux
+                        .ashmem
+                        .iter()
+                        .find(|ashmem| ashmem.handle == entry.handle)
+                        .map(|ashmem| Arc::clone(&ashmem.buffer))
+                        .ok_or(LinuxFdTransferError::Invalid)?;
+                    LinuxFdResource::Ashmem(buffer)
+                }
                 _ => LinuxFdResource::Generic,
             };
             Ok(LinuxFdTransfer {
@@ -1266,8 +1307,8 @@ pub(crate) fn linux_install_fd_transfer(
                 description,
                 resource,
             } = transfer;
-            let (handle, pending_pipe, pending_socket) = match resource {
-                LinuxFdResource::Generic => (description.entry.handle, None, None),
+            let (handle, pending_pipe, pending_ashmem, pending_socket) = match resource {
+                LinuxFdResource::Generic => (description.entry.handle, None, None, None),
                 LinuxFdResource::Pipe(endpoint) => {
                     linux
                         .pipes
@@ -1276,6 +1317,19 @@ pub(crate) fn linux_install_fd_transfer(
                     (
                         linux.next_pipe_handle,
                         Some(endpoint),
+                        None,
+                        None,
+                    )
+                }
+                LinuxFdResource::Ashmem(buffer) => {
+                    linux
+                        .ashmem
+                        .try_reserve(1)
+                        .map_err(|_| LinuxFdTransferError::NoSpace)?;
+                    (
+                        linux.next_ashmem_handle,
+                        None,
+                        Some(buffer),
                         None,
                     )
                 }
@@ -1290,6 +1344,7 @@ pub(crate) fn linux_install_fd_transfer(
                         .map_err(|_| LinuxFdTransferError::NoSpace)?;
                     (
                         linux.next_socket_handle,
+                        None,
                         None,
                         Some((endpoint, listener, controls)),
                     )
@@ -1308,6 +1363,13 @@ pub(crate) fn linux_install_fd_transfer(
                     .ok_or(LinuxFdTransferError::NoSpace)?;
                 linux.next_pipe_handle = next;
                 linux.pipes.push(LinuxPipeHandle { handle, endpoint });
+            }
+            if let Some(buffer) = pending_ashmem {
+                let next = handle
+                    .checked_add(1)
+                    .ok_or(LinuxFdTransferError::NoSpace)?;
+                linux.next_ashmem_handle = next;
+                linux.ashmem.push(LinuxAshmemHandle { handle, buffer });
             }
             if let Some((endpoint, listener, controls)) = pending_socket {
                 let next = handle
@@ -1477,6 +1539,390 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     if handle >= LINUX_SOCKET_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.sockets.retain(|socket| socket.handle != handle);
     }
+    if handle >= LINUX_ASHMEM_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+        linux.ashmem.retain(|ashmem| ashmem.handle != handle);
+    }
+}
+
+/// Opens one anonymous ashmem buffer descriptor.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_open_ashmem(pid: ObjId, close_on_exec: bool) -> Option<u32> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.ashmem.len() >= 32 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .ashmem
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_ashmem_handle;
+        let next = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ.union(Rights::WRITE),
+                compat_core::fd::CompatKind::Device,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.next_ashmem_handle = next;
+        linux.ashmem.push(LinuxAshmemHandle {
+            handle,
+            buffer: Arc::new(AshmemBuffer {
+                id: handle,
+                size: AtomicU64::new(0),
+                protection: AtomicU32::new(3),
+                pins: AtomicU32::new(0),
+                name: SpinLock::new(([0; 256], 0)),
+                pages: SpinLock::new(Vec::new()),
+            }),
+        });
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Resizes one empty ashmem buffer and commits its zeroed page backing
+/// all-or-nothing.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_set_size(
+    pid: ObjId,
+    handle: u64,
+    size: u64,
+) -> Result<(), LinuxAshmemError> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    if size == 0 || size > MAX_BYTES {
+        return Err(LinuxAshmemError::Invalid);
+    }
+    let pages_count = size.div_ceil(PAGE);
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let buffer = linux
+            .ashmem
+            .iter()
+            .find(|ashmem| ashmem.handle == handle)
+            .map(|ashmem| Arc::clone(&ashmem.buffer))
+            .ok_or(ProcError::NoTaskSlot)?;
+        if buffer.size.load(Ordering::Acquire) != 0 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        let mut charge = p
+            .memory_account
+            .reserve(
+                pages_count,
+                0,
+                p.memory_owned_limit,
+                p.memory_pin_limit,
+            )
+            .ok_or(ProcError::MemoryQuota)?;
+        let mut pages = Vec::new();
+        pages
+            .try_reserve_exact(pages_count as usize)
+            .map_err(|_| ProcError::OutOfFrames)?;
+        for _ in 0..pages_count {
+            let page_charge = charge.take_page().ok_or(ProcError::OutOfFrames)?;
+            pages.push(
+                crate::mm::memory_object::Page::zeroed(page_charge)
+                    .ok_or(ProcError::OutOfFrames)?,
+            );
+        }
+        *buffer.pages.lock() = pages;
+        buffer.size.store(size, Ordering::Release);
+        Ok(())
+    })
+    .map_err(|_| LinuxAshmemError::NoMemory)
+}
+
+/// Returns one ashmem buffer's size, protection and pin count.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_state(
+    pid: ObjId,
+    handle: u64,
+) -> Option<(u64, u32, u32)> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .ashmem
+            .iter()
+            .find(|ashmem| ashmem.handle == handle)
+            .map(|ashmem| {
+                (
+                    ashmem.buffer.size.load(Ordering::Acquire),
+                    ashmem.buffer.protection.load(Ordering::Acquire),
+                    ashmem.buffer.pins.load(Ordering::Acquire),
+                )
+            }),
+        _ => None,
+    })
+}
+
+/// Sets an ashmem name and returns the bounded diagnostic name.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_set_name(
+    pid: ObjId,
+    handle: u64,
+    name: &[u8],
+) -> Result<(), LinuxAshmemError> {
+    if name.len() > 256 {
+        return Err(LinuxAshmemError::Invalid);
+    }
+    let buffer = crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .ashmem
+            .iter()
+            .find(|ashmem| ashmem.handle == handle)
+            .map(|ashmem| Arc::clone(&ashmem.buffer)),
+        _ => None,
+    })
+    .ok_or(LinuxAshmemError::NotAshmem)?;
+    let mut stored = buffer.name.lock();
+    stored.0.fill(0);
+    stored.0[..name.len()].copy_from_slice(name);
+    stored.1 = name.len();
+    Ok(())
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_name(
+    pid: ObjId,
+    handle: u64,
+) -> Result<alloc::vec::Vec<u8>, LinuxAshmemError> {
+    let buffer = crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .ashmem
+            .iter()
+            .find(|ashmem| ashmem.handle == handle)
+            .map(|ashmem| Arc::clone(&ashmem.buffer)),
+        _ => None,
+    })
+    .ok_or(LinuxAshmemError::NotAshmem)?;
+    let stored = buffer.name.lock();
+    let mut name = alloc::vec::Vec::new();
+    name.try_reserve(stored.1 + 1)
+        .map_err(|_| LinuxAshmemError::NoMemory)?;
+    name.extend_from_slice(&stored.0[..stored.1]);
+    name.push(0);
+    Ok(name)
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_pin(
+    pid: ObjId,
+    handle: u64,
+    pin: bool,
+) -> Result<u32, LinuxAshmemError> {
+    let buffer = crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .ashmem
+            .iter()
+            .find(|ashmem| ashmem.handle == handle)
+            .map(|ashmem| Arc::clone(&ashmem.buffer)),
+        _ => None,
+    })
+    .ok_or(LinuxAshmemError::NotAshmem)?;
+    if buffer.size.load(Ordering::Acquire) == 0 {
+        return Err(LinuxAshmemError::Invalid);
+    }
+    if pin {
+        let mut current = buffer.pins.load(Ordering::Acquire);
+        loop {
+            let next = current
+                .checked_add(1)
+                .ok_or(LinuxAshmemError::Invalid)?;
+            match buffer.pins.compare_exchange(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(next),
+                Err(observed) => current = observed,
+            }
+        }
+    } else {
+        let mut current = buffer.pins.load(Ordering::Acquire);
+        loop {
+            let next = current
+                .checked_sub(1)
+                .ok_or(LinuxAshmemError::Invalid)?;
+            match buffer.pins.compare_exchange(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(next),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_set_protection(
+    pid: ObjId,
+    handle: u64,
+    protection: u32,
+) -> Result<(), LinuxAshmemError> {
+    if protection == 0 || protection & !3 != 0 {
+        return Err(LinuxAshmemError::Invalid);
+    }
+    let buffer = crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .ashmem
+            .iter()
+            .find(|ashmem| ashmem.handle == handle)
+            .map(|ashmem| Arc::clone(&ashmem.buffer)),
+        _ => None,
+    })
+    .ok_or(LinuxAshmemError::NotAshmem)?;
+    buffer.protection.store(protection, Ordering::Release);
+    Ok(())
+}
+
+/// Maps an ashmem buffer range into a Linux process with retained page
+/// references and a shared-memory capability at the exact virtual range.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_map(
+    pid: ObjId,
+    handle: u64,
+    address: u64,
+    length: u64,
+    protection: u32,
+    offset: u64,
+) -> Result<(), LinuxAshmemError> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    if address % PAGE != 0
+        || length == 0
+        || length % PAGE != 0
+        || offset % PAGE != 0
+        || protection == 0
+        || protection & !3 != 0
+    {
+        return Err(LinuxAshmemError::Invalid);
+    }
+    let (buffer, pages) = crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => {
+            let ashmem = p
+                .linux
+                .as_ref()?
+                .ashmem
+                .iter()
+                .find(|ashmem| ashmem.handle == handle)?;
+            let size = ashmem.buffer.size.load(Ordering::Acquire);
+            let end = offset.checked_add(length)?;
+            if end > size.div_ceil(PAGE) * PAGE
+                || ashmem.buffer.protection.load(Ordering::Acquire) & protection != protection
+            {
+                return None;
+            }
+            let start = usize::try_from(offset / PAGE).ok()?;
+            let count = usize::try_from(length / PAGE).ok()?;
+            let guard = ashmem.buffer.pages.lock();
+            let source = guard.get(start..start.checked_add(count)?)?;
+            let mut retained = Vec::new();
+            retained.try_reserve_exact(count).ok()?;
+            retained.extend(source.iter().cloned());
+            Some((Arc::clone(&ashmem.buffer), retained))
+        }
+        _ => None,
+    })
+    .ok_or(LinuxAshmemError::Invalid)?;
+    let pages_count = length / PAGE;
+    let backing = kernel_core::memory_capability::BackingIdentity::new(buffer.id, 1)
+        .ok_or(LinuxAshmemError::Invalid)?;
+    with_proc(pid, |p| {
+        if p.frames
+            .len()
+            .checked_add(p.shared_maps.len())
+            .and_then(|count| count.checked_add(pages.len()))
+            .is_none_or(|count| count > MAX_PROCESS_FRAMES)
+        {
+            return Err(ProcError::MemoryQuota);
+        }
+        p.shared_maps
+            .try_reserve(pages.len())
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        if !p.memory_caps.can_grant(address, pages_count, MemoryKind::Shared) {
+            return Err(ProcError::MemoryQuota);
+        }
+        for index in 0..pages_count {
+            if p.space
+                .translate(VirtPage::containing(address + index * PAGE))
+                .is_some()
+            {
+                return Err(ProcError::Map(MapError::InvalidAddress));
+            }
+        }
+        if !p.space.begin_shootdown() {
+            return Err(ProcError::Map(MapError::Busy));
+        }
+        let mut flags = MapFlags::USER;
+        if protection & 2 != 0 {
+            flags = flags.union(MapFlags::WRITE);
+        }
+        let mut published = 0u64;
+        for page in &pages {
+            if p.space
+                .map_raw(
+                    VirtPage::containing(address + published * PAGE),
+                    page.frame(),
+                    flags,
+                )
+                .is_err()
+            {
+                for index in 0..published {
+                    let _ = p
+                        .space
+                        .unmap_raw(VirtPage::containing(address + index * PAGE));
+                }
+                p.space.end_shootdown();
+                return Err(ProcError::Map(MapError::NotMapped));
+            }
+            published += 1;
+        }
+        let rights = MemoryRights::READ
+            .union(MemoryRights::MAP)
+            .union(if protection & 2 != 0 {
+                MemoryRights::WRITE
+            } else {
+                MemoryRights::NONE
+            });
+        if p.memory_caps
+            .grant(address, pages_count, rights, MemoryKind::Shared, backing)
+            .is_err()
+        {
+            for index in 0..published {
+                let _ = p
+                    .space
+                    .unmap_raw(VirtPage::containing(address + index * PAGE));
+            }
+            p.space.end_shootdown();
+            return Err(ProcError::MemoryQuota);
+        }
+        for (index, page) in pages.iter().enumerate() {
+            p.shared_maps.push(SharedMapping {
+                va: address + index as u64 * PAGE,
+                page: Arc::clone(page),
+                source: backing,
+            });
+        }
+        p.space.end_shootdown();
+        Ok(())
+    })
+    .map_err(|_| LinuxAshmemError::NoMemory)
 }
 
 /// Installs a read-only Linux virtual file and initializes its offset.
@@ -1821,6 +2267,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         next_pipe_handle: LINUX_PIPE_HANDLE_BASE,
         sockets: Vec::new(),
         next_socket_handle: LINUX_SOCKET_HANDLE_BASE,
+        ashmem: Vec::new(),
+        next_ashmem_handle: LINUX_ASHMEM_HANDLE_BASE,
         vfork_parent: None,
     };
     create_process(name, SyscallSet::EMPTY, move |process| {
@@ -1848,6 +2296,9 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
             linux
                 .sockets
                 .retain(|socket| linux.fds.handle_fd_count(socket.handle) != 0);
+            linux
+                .ashmem
+                .retain(|ashmem| linux.fds.handle_fd_count(ashmem.handle) != 0);
             linux.mappings.clear();
             linux.brk = crate::arch::USER_WINDOW.0 + 0x1000_0000;
             linux.mmap_next = crate::arch::USER_WINDOW.0 + 0x4000_0000;
@@ -2150,6 +2601,43 @@ pub fn unmap_page(id: ObjId, va: u64) -> Result<(), ProcError> {
         crate::workload::release_memory(workload, kernel_core::frame::FRAME_SIZE as u64);
     }
     Ok(())
+}
+
+/// Unmaps one Linux shared-backing page without releasing the backing page.
+/// Returns `false` when the address is not a shared mapping.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn unmap_shared_page(id: ObjId, va: u64) -> Result<bool, ProcError> {
+    let active = kobj::with(|t| match t.get_mut(id) {
+        Ok(KObject::Process(p)) => {
+            if !p.shared_maps.iter().any(|mapping| mapping.va == va) {
+                return Ok(None);
+            }
+            if !p.space.begin_shootdown() {
+                return Err(ProcError::Map(MapError::Busy));
+            }
+            if let Err(error) = p.space.unmap_raw(VirtPage::containing(va)) {
+                p.space.end_shootdown();
+                return Err(ProcError::Map(error));
+            }
+            let _ = p.memory_caps.revoke_range(va, 1);
+            p.shared_maps.retain(|mapping| mapping.va != va);
+            let active = p.space.active_cpus();
+            Ok(Some(active))
+        }
+        _ => Err(ProcError::NoSuchProcess),
+    })?;
+    let Some(active) = active else {
+        return Ok(false);
+    };
+    let shootdown = crate::smp::tlb_shootdown_on(active, va, 1);
+    with_proc(id, |p| {
+        p.space.end_shootdown();
+        Ok(())
+    })?;
+    if shootdown.is_err() {
+        return Err(ProcError::Map(MapError::Busy));
+    }
+    Ok(true)
 }
 
 /// 每个进程最多拥有的数据帧数（ELF 段、栈与匿名映射合计）。
