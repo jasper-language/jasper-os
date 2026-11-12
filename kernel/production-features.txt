@@ -6,3 +6,4 @@ user-programs
 profile-compact
 sched-rr
 lifecycle-ab-health
+terminal-session-verify

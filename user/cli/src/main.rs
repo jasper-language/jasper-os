@@ -8,6 +8,7 @@
 #![no_main]
 
 use jasper_rt::{entry, ids, sys};
+use kernel_core::terminal_editor::{EditEvent, LineEditor};
 
 const PROMPT: &[u8] = b"jasper> ";
 const HELP: &[u8] = b"commands: help, echo <text>, exit\n";
@@ -24,63 +25,91 @@ fn write(bytes: &[u8]) -> bool {
     result == bytes.len() as i64
 }
 
-fn read_line(buffer: &mut [u8]) -> Option<usize> {
-    let mut used = 0usize;
-    while used < buffer.len() {
-        let count = unsafe {
-            sys::call3(
-                ids::SYSTEM_TERMINAL_READ,
-                buffer[used..].as_mut_ptr() as u64,
-                1,
-                0,
-            )
-        };
-        if count < 0 {
-            return None;
-        }
-        if count == 0 {
-            return Some(used);
-        }
-        if count != 1 {
-            return None;
-        }
-        used += 1;
-        if buffer[used - 1] == b'\n' {
-            return Some(used);
-        }
+fn read_byte() -> Result<u8, ()> {
+    let mut byte = 0u8;
+    let count = unsafe {
+        sys::call3(
+            ids::SYSTEM_TERMINAL_READ,
+            (&mut byte as *mut u8) as u64,
+            1,
+            0,
+        )
+    };
+    match count {
+        1 => Ok(byte),
+        0 => Err(()),
+        _ => Err(()),
     }
-    Some(used)
 }
 
-fn trimmed(line: &[u8]) -> &[u8] {
-    let mut end = line.len();
-    while end != 0 && matches!(line[end - 1], b'\r' | b'\n') {
-        end -= 1;
+fn redraw(editor: &LineEditor<256, 16, 256>) -> bool {
+    if !write(b"\r") || !write(PROMPT) {
+        return false;
     }
-    &line[..end]
+    let line = editor.line();
+    line.is_empty() || write(line)
+}
+
+fn write_echo(text: &[u8]) -> bool {
+    const PREFIX: &[u8] = b"native-echo=";
+    const SUFFIX: &[u8] = b"\nnative-echo-ok\n";
+    let mut output = [0u8; 300];
+    let length = PREFIX.len() + text.len() + SUFFIX.len();
+    if text.len() > 256 || length > output.len() {
+        return false;
+    }
+    output[..PREFIX.len()].copy_from_slice(PREFIX);
+    output[PREFIX.len()..PREFIX.len() + text.len()].copy_from_slice(text);
+    output[PREFIX.len() + text.len()..length].copy_from_slice(SUFFIX);
+    write(&output[..length])
 }
 
 fn main(_: u64, _: u64) -> i32 {
     if !write(b"Jasper-OS native CLI\n") {
         return 1;
     }
-    let mut buffer = [0u8; 256];
+    let mut editor = LineEditor::<256, 16, 256>::new();
     loop {
         if !write(PROMPT) {
             return 1;
         }
-        let count = match read_line(&mut buffer) {
-            Some(count) => count,
-            None => {
-                let _ = write(b"terminal read failed\n");
-                return 2;
+        editor.begin_line();
+        loop {
+            let byte = match read_byte() {
+                Ok(byte) => byte,
+                Err(()) => {
+                    let _ = write(b"native-bye\n");
+                    return 0;
+                }
+            };
+            match editor.input(byte) {
+                EditEvent::Pending => {}
+                EditEvent::Rejected => {
+                    if !write(b"\x08 \x08") {
+                        return 3;
+                    }
+                }
+                EditEvent::Redraw => {
+                    if !redraw(&editor) {
+                        return 3;
+                    }
+                }
+                EditEvent::Cancel => {
+                    if !write(b"^C\n") {
+                        return 3;
+                    }
+                    break;
+                }
+                EditEvent::Eof => {
+                    if !write(b"native-bye\n") {
+                        return 3;
+                    }
+                    return 0;
+                }
+                EditEvent::Submit => break,
             }
-        };
-        if count == 0 {
-            let _ = write(b"native-bye\n");
-            return 0;
         }
-        let command = trimmed(&buffer[..count]);
+        let command = editor.line();
         if command == b"help" {
             if !write(HELP) || !write(b"native-help-ok\n") {
                 return 3;
@@ -91,20 +120,18 @@ fn main(_: u64, _: u64) -> i32 {
             }
             return 0;
         } else if let Some(text) = command.strip_prefix(b"echo ") {
-            if !write(b"native-echo=")
-                || !write(text)
-                || !write(b"\n")
-                || !write(b"native-echo-ok\n")
-            {
+            if !write_echo(text) {
                 return 3;
             }
         } else if command.is_empty() {
+            editor.finish_submit();
             continue;
         } else {
             if !write(b"unknown command; use help\n") {
                 return 3;
             }
         }
+        editor.finish_submit();
     }
 }
 

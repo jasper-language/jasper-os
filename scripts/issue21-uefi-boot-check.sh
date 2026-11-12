@@ -7,6 +7,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export PATH="${HOME}/.cargo/bin:${PATH}"
 
+guarded_cargo() {
+  "$ROOT/scripts/guarded-cargo.sh" "$@"
+}
+
 OUT="${ISSUE21_UEFI_OUT:-$ROOT/evidence/issue21-uefi-boot-$(date '+%Y%m%d-%H%M%S')}"
 TARGET="${ISSUE21_UEFI_TARGET:-$ROOT/target/issue21-uefi-check}"
 LIMIT="${ISSUE21_UEFI_TIMEOUT:-45}"
@@ -68,13 +72,13 @@ runtime_active() {
   done
   return 1
 }
-if runtime_active; then
-  echo "FAIL another qemu-system-x86_64 process is already running" >&2
+exec 9>"$QEMU_LOCK"
+if ! flock -w 900 9; then
+  echo "FAIL Jasper-OS QEMU lock remained busy for 900s: $QEMU_LOCK" >&2
   exit 75
 fi
-exec 9>"$QEMU_LOCK"
-if ! flock -n 9; then
-  echo "FAIL another Jasper-OS QEMU run holds $QEMU_LOCK" >&2
+if runtime_active; then
+  echo "FAIL another qemu-system-x86_64 process is already running" >&2
   exit 75
 fi
 
@@ -88,23 +92,23 @@ case "$MODE" in
   block-timeout) KERNEL_FEATURES=lifecycle-block-timeout-verify ;;
   *) KERNEL_FEATURES=production,lifecycle-ab-health ;;
 esac
-CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none \
+CARGO_TARGET_DIR="$TARGET" guarded_cargo build --locked --release --target x86_64-unknown-none \
   -p jasper-kernel --features "$KERNEL_FEATURES" >"$OUT/kernel-build.log" 2>&1
-cargo build --locked --release -p xtask >"$OUT/xtask-build.log" 2>&1
-CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-uefi \
+guarded_cargo build --locked --release -p xtask >"$OUT/xtask-build.log" 2>&1
+CARGO_TARGET_DIR="$TARGET" guarded_cargo build --locked --release --target x86_64-unknown-uefi \
   -p jasper-boot-manager >"$OUT/boot-manager-build.log" 2>&1
 
-cargo run --locked -p jasper-lifecycle-staging --bin jasper-gpt-image -- \
+guarded_cargo run --locked -p jasper-lifecycle-staging --bin jasper-gpt-image -- \
   "$IMAGE" 38654705664 >"$OUT/gpt.log" 2>&1
-cargo run --locked -p jasper-lifecycle-staging --bin jasper-esp-format -- \
+guarded_cargo run --locked -p jasper-lifecycle-staging --bin jasper-esp-format -- \
   "$IMAGE" 38654705664 >"$OUT/esp-format.log" 2>&1
 target/release/xtask uefi-managed-esp \
   "$KERNEL" "$KERNEL" \
   "$TARGET/x86_64-unknown-uefi/release/jasper-boot-manager.efi" \
   "$UEFI_ESP" >"$OUT/uefi-esp.log" 2>&1
-cargo run --locked -p jasper-lifecycle-staging --bin jasper-esp-install -- \
+guarded_cargo run --locked -p jasper-lifecycle-staging --bin jasper-esp-install -- \
   "$IMAGE" 38654705664 "$UEFI_ESP" >"$OUT/esp-install.log" 2>&1
-cargo run --locked -p jasper-lifecycle-staging --bin jasper-ext4-provision -- \
+guarded_cargo run --locked -p jasper-lifecycle-staging --bin jasper-ext4-provision -- \
   "$IMAGE" 38654705664 >"$OUT/ext4-provision.log" 2>&1
 ROOT_EXEC_PROBE=""
 ROOT_FULL_USERLAND=0
@@ -128,9 +132,9 @@ bash scripts/issue21-system-root-fixture.sh \
   "$IMAGE" "$TARGET" 1050624 A 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" >"$OUT/system-root-a.log" 2>&1
 bash scripts/issue21-system-root-fixture.sh \
   "$IMAGE" "$TARGET" 17827840 B 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" >"$OUT/system-root-b.log" 2>&1
-cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-init -- \
+guarded_cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-init -- \
   "$IMAGE" 38654705664 "$KERNEL" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
-cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-inspect -- \
+guarded_cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-inspect -- \
   "$IMAGE" 38654705664 >"$OUT/control-inspect.log" 2>&1
 
 if [ "$MODE" = both-controls-corrupt ]; then
@@ -150,17 +154,20 @@ sgdisk -v "$IMAGE" >"$OUT/sgdisk.log" 2>&1
 grep -q 'No problems found' "$OUT/sgdisk.log"
 
 cp /usr/share/OVMF/OVMF_VARS_4M.fd "$OVMF_VARS"
-QEMU_EXTRA=()
+QEMU_EXTRA=(-monitor none)
+if [ -n "${ISSUE21_MONITOR_SOCKET:-}" ]; then
+  QEMU_EXTRA=(-monitor "unix:$ISSUE21_MONITOR_SOCKET,server=on,wait=off")
+fi
 if [ "$MODE" = root-exec ] || [ "$MODE" = terminal-session ]; then
   CPU=max
   if [ "${ISSUE21_DISABLE_RDRAND:-0}" = 1 ]; then
     CPU=max,-rdrand,-rdseed
   fi
-  QEMU_EXTRA=(-cpu "$CPU" -device virtio-rng-pci
+  QEMU_EXTRA+=(-cpu "$CPU" -device virtio-rng-pci
     -device isa-debug-exit,iobase=0xf4,iosize=0x04)
 fi
 SERIAL_ARGS=(-serial "file:$OUT/serial.log")
-if [ "$MODE" = terminal-session ]; then
+if [ "$MODE" = terminal-session ] && [ "${ISSUE21_MANUAL_INPUT:-0}" != 1 ]; then
   rm -f -- "$OUT/serial.in" "$OUT/serial.out"
   mkfifo "$OUT/serial.in" "$OUT/serial.out"
   cat "$OUT/serial.out" >"$OUT/serial.log" &
@@ -170,7 +177,7 @@ if [ "$MODE" = terminal-session ]; then
     while ! grep -aq '^jasper> ' "$OUT/serial.log"; do
       sleep 1
     done
-    printf 'help\necho hello\nexit\n' >&8
+    printf 'help\necho history\n\016\n\003\004' >&8
   ) &
   SERIAL_FEEDER=$!
   SERIAL_ARGS=(-serial "pipe:$OUT/serial")
@@ -191,7 +198,7 @@ nice -n 15 taskset -c "$QEMU_CPUS" timeout "$LIMIT" qemu-system-x86_64 \
   -drive if=pflash,format=raw,file="$OVMF_VARS" \
   -drive file="$IMAGE",format=raw,if=virtio \
   "${SERIAL_ARGS[@]}" \
-  -display none -monitor none -no-reboot "${QEMU_EXTRA[@]}"
+  -display none -no-reboot "${QEMU_EXTRA[@]}"
 rc=$?
 set -e
 exec 9>&-
@@ -262,7 +269,11 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = terminal-session ]; then
   if [ "$MODE" = terminal-session ]; then
     grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
     grep -aqE $'^Jasper-OS native CLI\r?$' "$OUT/serial.log"
-    grep -aqE $'^native-help-ok\r?$' "$OUT/serial.log"
+    if [ "${ISSUE21_MANUAL_INPUT:-0}" != 1 ]; then
+      grep -aqE $'^native-help-ok\r?$' "$OUT/serial.log"
+      [ "$(grep -acE $'^native-echo=history\r?$' "$OUT/serial.log")" -ge 2 ]
+      grep -aqE $'^\^C\r?$' "$OUT/serial.log"
+    fi
     grep -aqE $'^native-echo-ok\r?$' "$OUT/serial.log"
     grep -aqE $'^native-bye\r?$' "$OUT/serial.log"
   fi
@@ -307,7 +318,7 @@ grep -aq '^\[JSR-LIFE-ROOT\] slot=A release=1 schema=1 userland=x86_64-linux-elf
 grep -aq '^\[JSR-LIFE-HEALTH\] result=confirmed slot=A generation=3 release=1 attempts=0 storage=virtio-blk' \
   "$OUT/serial.log"
 ! grep -aqE '^\[JSR-(PANIC|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
-cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-inspect -- \
+guarded_cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-inspect -- \
   "$IMAGE" 38654705664 >"$OUT/control-postboot.log" 2>&1
 grep -q 'generation=3 ' "$OUT/control-postboot.log"
 grep -q 'slot=A state=Confirmed generation=3 release=1 attempts=0' \

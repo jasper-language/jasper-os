@@ -1,12 +1,14 @@
 //! Native framebuffer and keyboard session integration.
 //!
 //! Responsibility: bind one firmware framebuffer and the real x86 keyboard to
-//! the bounded mechanism in `kernel-core`. It draws a deterministic first frame
-//! and records key transitions; it does not claim a compositor or window system.
+//! the bounded mechanism in `kernel-core`. It draws a deterministic first frame,
+//! renders terminal bytes with a built-in ASCII font and forwards real key
+//! transitions to the native terminal session. It does not claim a compositor
+//! or window system.
 //!
 //! 原生帧缓冲与键盘会话集成。把固件 framebuffer 和真实 x86 键盘绑定到
-//! `kernel-core` 的有界机制，绘制确定性的首帧并记录按键；不宣称 compositor
-//! 或窗口系统已经完成。
+//! `kernel-core` 的有界机制，绘制首帧、用内建 ASCII 字体呈现终端字节并把真实
+//! 按键送入原生终端会话；不宣称 compositor 或窗口系统已经完成。
 
 use bootloader_api::info::{FrameBuffer, PixelFormat};
 use kernel_core::display_input::{
@@ -18,6 +20,9 @@ use crate::kprintln;
 use crate::sync::IrqSpinLock;
 
 const KEY_CAPACITY: usize = 64;
+const TEXT_COLUMNS: usize = 96;
+const TEXT_ROWS: usize = 32;
+const TEXT_CELLS: usize = TEXT_COLUMNS * TEXT_ROWS;
 
 struct Runtime {
     base: usize,
@@ -26,6 +31,10 @@ struct Runtime {
     session: DisplayInputSession<KEY_CAPACITY>,
     pressed: u32,
     released: u32,
+    text: [u8; TEXT_CELLS],
+    cursor: usize,
+    prompt_reported: bool,
+    echo_reported: bool,
 }
 
 static DISPLAY: IrqSpinLock<Option<Runtime>> = IrqSpinLock::ranked(crate::lockorder::DISPLAY, None);
@@ -74,7 +83,12 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
         session,
         pressed: 0,
         released: 0,
+        text: [b' '; TEXT_CELLS],
+        cursor: 0,
+        prompt_reported: false,
+        echo_reported: false,
     };
+    runtime.append_text(b"JASPER-OS NATIVE TERMINAL\n\n");
     runtime.paint_boot_frame()?;
     *DISPLAY.lock() = Some(runtime);
     Ok(())
@@ -125,6 +139,18 @@ pub fn next_key() -> Option<KeyInput> {
         .lock()
         .as_mut()
         .and_then(|runtime| runtime.session.pop_key().ok())
+}
+
+/// Render bytes emitted by the native terminal into the framebuffer text view.
+///
+/// 将原生终端输出绘制到 framebuffer 文本视图；无显示后端时安全忽略。
+pub fn terminal_write(bytes: &[u8]) {
+    let mut guard = DISPLAY.lock();
+    let Some(runtime) = guard.as_mut() else {
+        return;
+    };
+    runtime.append_text(bytes);
+    let _ = runtime.paint_text_frame();
 }
 
 /// Report the real backend state without holding the display lock across output.
@@ -194,9 +220,96 @@ impl Runtime {
             0x40,
             0x59,
         );
+        self.paint_text();
         let ticket = self.session.prepare_frame(self.required_bytes()?)?;
         self.session.commit_frame(ticket)?;
         Ok(())
+    }
+
+    fn paint_text_frame(&mut self) -> Result<(), DisplayInputError> {
+        self.fill(0x08, 0x11, 0x18);
+        self.rect(0, 0, self.surface.width, 6, 0x29, 0xd3, 0xb6);
+        self.paint_text();
+        let ticket = self.session.prepare_frame(self.required_bytes()?)?;
+        self.session.commit_frame(ticket)?;
+        Ok(())
+    }
+
+    fn append_text(&mut self, bytes: &[u8]) {
+        for byte in bytes.iter().copied() {
+            match byte {
+                b'\r' => self.cursor -= self.cursor % TEXT_COLUMNS,
+                b'\n' => self.newline(),
+                0x08 => {
+                    if self.cursor % TEXT_COLUMNS != 0 {
+                        self.cursor -= 1;
+                        self.text[self.cursor] = b' ';
+                    }
+                }
+                0x20..=0x7e => {
+                    self.text[self.cursor] = byte.to_ascii_uppercase();
+                    self.cursor += 1;
+                    if self.cursor % TEXT_COLUMNS == 0 {
+                        self.newline();
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !self.prompt_reported && self.contains_text(b"JASPER> ") {
+            self.prompt_reported = true;
+            kprintln!("[JSR-GTERM] prompt=visible");
+        }
+        if !self.echo_reported && self.contains_text(b"NATIVE-ECHO-OK") {
+            self.echo_reported = true;
+            kprintln!("[JSR-GTERM] output=echo-ok visible=true");
+        }
+    }
+
+    fn newline(&mut self) {
+        let row = self.cursor / TEXT_COLUMNS;
+        if row + 1 == TEXT_ROWS {
+            self.text.copy_within(TEXT_COLUMNS.., 0);
+            self.text[TEXT_CELLS - TEXT_COLUMNS..].fill(b' ');
+            self.cursor = TEXT_CELLS - TEXT_COLUMNS;
+        } else {
+            self.cursor = (row + 1) * TEXT_COLUMNS;
+        }
+    }
+
+    fn contains_text(&self, needle: &[u8]) -> bool {
+        if needle.is_empty() || needle.len() > TEXT_CELLS {
+            return false;
+        }
+        self.text
+            .windows(needle.len())
+            .any(|window| window == needle)
+    }
+
+    fn paint_text(&mut self) {
+        let origin_x = 16u32;
+        let origin_y = 16u32;
+        let cell_width = 12u32;
+        let cell_height = 20u32;
+        for row in 0..TEXT_ROWS {
+            for column in 0..TEXT_COLUMNS {
+                let character = self.text[row * TEXT_COLUMNS + column];
+                if character == b' ' || character == 0 {
+                    continue;
+                }
+                let glyph = glyph(character);
+                for (glyph_row, bits) in glyph.iter().copied().enumerate() {
+                    for glyph_column in 0..5u32 {
+                        if bits & (1u8 << (4 - glyph_column as u8)) == 0 {
+                            continue;
+                        }
+                        let x = origin_x + column as u32 * cell_width + glyph_column * 2;
+                        let y = origin_y + row as u32 * cell_height + glyph_row as u32 * 2;
+                        self.rect(x, y, 2, 2, 0xd8, 0xf3, 0xea);
+                    }
+                }
+            }
+        }
     }
 
     fn paint_input_indicator(&mut self) {
@@ -270,5 +383,61 @@ impl Runtime {
                 }
             }
         }
+    }
+}
+
+/// Minimal 5x7 glyph set for the native text frontend.
+///
+/// 原生文本前端使用的最小 5x7 字形集；未知字符绘制为问号。
+fn glyph(character: u8) -> [u8; 7] {
+    match character.to_ascii_uppercase() {
+        b'A' => [0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11],
+        b'B' => [0x1e, 0x11, 0x11, 0x1e, 0x11, 0x11, 0x1e],
+        b'C' => [0x0f, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0f],
+        b'D' => [0x1e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1e],
+        b'E' => [0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x1f],
+        b'F' => [0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x10],
+        b'G' => [0x0f, 0x10, 0x10, 0x13, 0x11, 0x11, 0x0f],
+        b'H' => [0x11, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11],
+        b'I' => [0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1f],
+        b'J' => [0x01, 0x01, 0x01, 0x01, 0x11, 0x11, 0x0e],
+        b'K' => [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
+        b'L' => [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1f],
+        b'M' => [0x11, 0x1b, 0x15, 0x15, 0x11, 0x11, 0x11],
+        b'N' => [0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11],
+        b'O' => [0x0e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e],
+        b'P' => [0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10],
+        b'Q' => [0x0e, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0d],
+        b'R' => [0x1e, 0x11, 0x11, 0x1e, 0x14, 0x12, 0x11],
+        b'S' => [0x0f, 0x10, 0x10, 0x0e, 0x01, 0x01, 0x1e],
+        b'T' => [0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+        b'U' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e],
+        b'V' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x0a, 0x04],
+        b'W' => [0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0a],
+        b'X' => [0x11, 0x11, 0x0a, 0x04, 0x0a, 0x11, 0x11],
+        b'Y' => [0x11, 0x11, 0x0a, 0x04, 0x04, 0x04, 0x04],
+        b'Z' => [0x1f, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1f],
+        b'0' => [0x0e, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0e],
+        b'1' => [0x04, 0x0c, 0x04, 0x04, 0x04, 0x04, 0x0e],
+        b'2' => [0x0e, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1f],
+        b'3' => [0x1e, 0x01, 0x01, 0x0e, 0x01, 0x01, 0x1e],
+        b'4' => [0x02, 0x06, 0x0a, 0x12, 0x1f, 0x02, 0x02],
+        b'5' => [0x1f, 0x10, 0x10, 0x1e, 0x01, 0x01, 0x1e],
+        b'6' => [0x0e, 0x10, 0x10, 0x1e, 0x11, 0x11, 0x0e],
+        b'7' => [0x1f, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
+        b'8' => [0x0e, 0x11, 0x11, 0x0e, 0x11, 0x11, 0x0e],
+        b'9' => [0x0e, 0x11, 0x11, 0x0f, 0x01, 0x01, 0x0e],
+        b'>' => [0x10, 0x08, 0x04, 0x02, 0x04, 0x08, 0x10],
+        b'<' => [0x01, 0x02, 0x04, 0x08, 0x04, 0x02, 0x01],
+        b':' => [0x00, 0x04, 0x04, 0x00, 0x04, 0x04, 0x00],
+        b'-' => [0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00],
+        b'=' => [0x00, 0x00, 0x1f, 0x00, 0x1f, 0x00, 0x00],
+        b',' => [0x00, 0x00, 0x00, 0x00, 0x04, 0x04, 0x08],
+        b'.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x0c],
+        b'/' => [0x01, 0x02, 0x02, 0x04, 0x08, 0x08, 0x10],
+        b'_' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f],
+        b'!' => [0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04],
+        b'?' => [0x0e, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04],
+        _ => [0x0e, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04],
     }
 }

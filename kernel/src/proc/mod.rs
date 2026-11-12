@@ -213,6 +213,7 @@ pub(crate) struct LinuxEpollRegistration {
     pub(crate) edge_seen: u32,
 }
 
+#[cfg(feature = "linux-abi")]
 pub(crate) struct LinuxFdTransfer {
     description: compat_core::FdDescription,
     resource: LinuxFdResource,

@@ -992,7 +992,7 @@ int main(void) {
     struct epoll_event epoll_ready = {0};
     if (epfd < 0 || (fcntl(epfd, F_GETFD) & FD_CLOEXEC) == 0 ||
         pipe2(epoll_pipe, 0) != 0 ||
-        epoll_wait(epfd, &epoll_ready, 1, 20) != 0) {
+        epoll_wait(epfd, &epoll_ready, 128, 20) != 0) {
         return 250;
     }
     struct epoll_event epoll_interest = {
@@ -1666,6 +1666,84 @@ int main(void) {
         printf("faccessat2-empty-fail fd=%d result=%ld errno=%d\n",
                fd, empty_access, errno);
         return 207;
+    }
+    errno = 0;
+    if (fchmod(fd, 0600) != -1 || errno != EROFS) {
+        return 218;
+    }
+    errno = 0;
+    int fchmodat_result =
+        fchmodat(AT_FDCWD, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                 0600, 0);
+    int fchmodat_errno = errno;
+    if (fchmodat_result != -1 || fchmodat_errno != EROFS) {
+        printf("fchmodat-fail result=%d errno=%d\n",
+               fchmodat_result, fchmodat_errno);
+        return 219;
+    }
+    errno = 0;
+    if (fchmodat(AT_FDCWD, "/missing-chmod", 0600, 0) != -1 ||
+        errno != ENOENT) {
+        return 220;
+    }
+    errno = 0;
+    if (fchown(fd, 0, 0) != -1 || errno != EROFS) {
+        return 221;
+    }
+    errno = 0;
+    if (fchownat(AT_FDCWD, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                 0, 0, 0) != -1 ||
+        errno != EROFS) {
+        return 222;
+    }
+    errno = 0;
+    if (fchownat(AT_FDCWD, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                 123, 0, 0) != -1 ||
+        errno != EPERM) {
+        return 224;
+    }
+    errno = 0;
+    if (lchown("/usr/lib/x86_64-linux-gnu/libc.so.6", 0, 0) != -1 ||
+        errno != EROFS) {
+        return 235;
+    }
+    errno = 0;
+    if (ftruncate(fd, 0) != -1 || errno != EROFS) {
+        return 232;
+    }
+    errno = 0;
+    int truncate_result =
+        truncate("/usr/lib/x86_64-linux-gnu/libc.so.6", 0);
+    int truncate_errno = errno;
+    if (truncate_result != -1 || truncate_errno != EROFS) {
+        printf("truncate-fail result=%d errno=%d\n",
+               truncate_result, truncate_errno);
+        return 233;
+    }
+    errno = 0;
+    if (truncate("/missing-truncate", 0) != -1 || errno != ENOENT) {
+        return 234;
+    }
+    errno = 0;
+    if (utime("/usr/lib/x86_64-linux-gnu/libc.so.6", NULL) != -1 ||
+        errno != EROFS) {
+        return 239;
+    }
+    errno = 0;
+    if (utimes("/usr/lib/x86_64-linux-gnu/libc.so.6", NULL) != -1 ||
+        errno != EROFS) {
+        return 240;
+    }
+    errno = 0;
+    if (utimensat(AT_FDCWD, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                  NULL, 0) != -1 ||
+        errno != EROFS) {
+        return 242;
+    }
+    errno = 0;
+    if (utimensat(AT_FDCWD, "/missing-time", NULL, 0) != -1 ||
+        errno != ENOENT) {
+        return 243;
     }
     errno = 0;
     if (readlinkat(AT_FDCWD, "/not-in-compat-root",

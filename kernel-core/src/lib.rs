@@ -92,6 +92,8 @@ pub mod task_hot;
 pub mod task_lifecycle;
 /// Bounded native terminal session queues and close semantics.
 pub mod terminal_session;
+/// Bounded terminal line editing and command history.
+pub mod terminal_editor;
 pub mod tick_lease;
 pub mod wake_mailbox;
 pub mod fdt;
@@ -160,6 +162,7 @@ pub mod virtio_gpu;
 pub mod virtio_net;
 pub mod wait;
 pub mod workload;
+pub mod workload_recovery;
 pub mod workload_abi;
 pub mod wireguard;
 
@@ -200,6 +203,7 @@ pub mod sandbox_launch;
 pub mod sandbox_store;
 
 pub mod native_install;
+pub mod persistent_install;
 
 // issue #3：统一定时事件契约。 / Unified timer-event contract.
 pub mod timer_event;
