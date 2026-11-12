@@ -317,6 +317,38 @@ int main(void) {
         close(rebound) != 0) {
         return 115;
     }
+    int message_fds[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, message_fds) != 0) {
+        return 116;
+    }
+    struct iovec send_vectors[2] = {
+        {.iov_base = "mes", .iov_len = 3},
+        {.iov_base = "sage", .iov_len = 4},
+    };
+    struct msghdr send_message = {
+        .msg_iov = send_vectors,
+        .msg_iovlen = 2,
+    };
+    if (sendmsg(message_fds[0], &send_message,
+                MSG_NOSIGNAL | MSG_DONTWAIT) != 7) {
+        return 117;
+    }
+    char message_first[4] = {0};
+    char message_second[4] = {0};
+    struct iovec receive_vectors[2] = {
+        {.iov_base = message_first, .iov_len = 3},
+        {.iov_base = message_second, .iov_len = 4},
+    };
+    struct msghdr receive_message = {
+        .msg_iov = receive_vectors,
+        .msg_iovlen = 2,
+    };
+    if (recvmsg(message_fds[1], &receive_message, 0) != 7 ||
+        memcmp(message_first, "mes", 3) != 0 ||
+        memcmp(message_second, "sage", 4) != 0 ||
+        close(message_fds[0]) != 0 || close(message_fds[1]) != 0) {
+        return 118;
+    }
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
     if (sched_getaffinity(0, sizeof(cpus), &cpus) != 0 ||
