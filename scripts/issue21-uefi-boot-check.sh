@@ -127,6 +127,12 @@ if [ "$MODE" = root-exec ]; then
   QEMU_EXTRA=(-cpu "$CPU" -device virtio-rng-pci
     -device isa-debug-exit,iobase=0xf4,iosize=0x04)
 fi
+if [ "${ISSUE21_QEMU_TRACE:-0}" = 1 ]; then
+  QEMU_EXTRA+=(-d int -D "$OUT/qemu-int.log")
+fi
+if [ "${ISSUE21_QEMU_GDB:-0}" = 1 ]; then
+  QEMU_EXTRA+=(-s -S)
+fi
 exec 9>"$QEMU_LOCK"
 if ! flock -n 9; then
   echo "FAIL another Jasper-OS QEMU run holds $QEMU_LOCK" >&2
@@ -209,6 +215,7 @@ if [ "$MODE" = root-exec ]; then
   grep -aqE $'^jasper-shell-ok\r?$' "$OUT/serial.log"
   grep -aqE $'^/usr\r?$' "$OUT/serial.log"
   grep -aqE $'^jasper-registry-ok\r?$' "$OUT/serial.log"
+  grep -aqE $'^external-ok\r?$' "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/printf path=/usr/bin/printf interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
     "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/jasper-signal-basic path=/usr/bin/jasper-signal-basic interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \

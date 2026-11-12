@@ -17,7 +17,8 @@ use core::ptr::{addr_of, addr_of_mut, null_mut};
 
 use crate::arch::TaskContext;
 
-/// 单个任务内核栈大小（取自配置档，默认 64 KiB）：系统调用路径上会临时构造较大的内核对象（例如异步环约 12 KiB），
+/// 单个任务内核栈大小（取自配置档，默认 128 KiB）：系统调用与 exec 路径会临时构造较大的内核对象
+/// （例如异步环约 12 KiB；真实内核中的 Linux exec 事务实测峰值超过 64 KiB），
 /// 在移入堆之前可能先位于栈上。
 /// Per-task kernel stack size (large kernel objects may be built on the stack before moving to the heap).
 pub const STACK_SIZE: usize = crate::config::ACTIVE.sched.kernel_stack_bytes;
@@ -63,7 +64,7 @@ impl StackPool {
     /// 堆就绪后为 `slots` 个槽位中的非静态槽位分配栈（幂等：已分配的槽位跳过；只增不减）。返回可用槽位总数。
     ///
     /// 用 `alloc_zeroed` 直接在堆上得到清零的栈：`Box::new(Stack::zeroed())` 会先在当前栈上
-    /// 构造一个 64 KiB 的临时值，而当前栈本身也只有 64 KiB。
+    /// 构造一个栈大小的临时值，而当前栈本身也只有同样大小。
     pub fn reserve(&mut self, slots: usize) -> Result<usize, ReserveError> {
         if slots > self.heap.len() {
             if self.heap.try_reserve_exact(slots - self.heap.len()).is_err() {

@@ -87,6 +87,10 @@ struct LinuxProcessState {
     exec_path: [u8; 128],
     exec_path_len: usize,
     mappings: Vec<LinuxMapping>,
+    /// Set only on the child side of vfork. The parent task sleeps until the
+    /// child commits exec or leaves `Running`.
+    /// 仅 vfork 子进程携带；父任务睡眠到子进程提交 exec 或离开 Running。
+    vfork_parent: Option<VforkParent>,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -94,6 +98,13 @@ struct LinuxProcessState {
 struct LinuxMapping {
     va: u64,
     flags: MapFlags,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+struct VforkParent {
+    task: TaskId,
+    exec_committed: bool,
 }
 
 /// 进程状态。
@@ -482,6 +493,28 @@ pub(crate) fn linux_duplicate_fd(
     .ok()
 }
 
+/// Duplicates one current Linux descriptor onto an exact target descriptor.
+///
+/// 把当前世代描述符精确复制到目标 fd；目标已占用时原子替换。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_duplicate_fd_to(
+    pid: ObjId,
+    fd: u32,
+    target: u32,
+    close_on_exec: bool,
+) -> Option<u32> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let duplicate = linux
+            .fds
+            .duplicate_fd_to(fd, target, close_on_exec)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.file_offsets[target as usize] = linux.file_offsets[fd as usize];
+        Ok(duplicate.fd())
+    })
+    .ok()
+}
+
 /// Installs a read-only Linux virtual file and initializes its offset.
 ///
 /// 安装只读 Linux 虚拟文件；失败不留下部分 fd 状态。
@@ -566,7 +599,15 @@ pub(crate) fn set_linux_file_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
         if entry.kind != compat_core::fd::CompatKind::File {
             return Err(ProcError::NoTaskSlot);
         }
-        linux.file_offsets[fd as usize] = offset;
+        // Descriptors duplicated by dup/dup2/dup3 share one open-file offset.
+        for index in 0..linux.file_offsets.len() {
+            if linux.fds.get_fd(index as u32).is_some_and(|candidate| {
+                candidate.kind == compat_core::fd::CompatKind::File
+                    && candidate.handle == entry.handle
+            }) {
+                linux.file_offsets[index] = offset;
+            }
+        }
         Ok(())
     })
     .is_ok()
@@ -606,7 +647,15 @@ pub(crate) fn set_linux_dir_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
         if entry.kind != compat_core::fd::CompatKind::Directory {
             return Err(ProcError::NoTaskSlot);
         }
-        linux.file_offsets[fd as usize] = offset;
+        // Duplicated directory descriptors also share one directory cursor.
+        for index in 0..linux.file_offsets.len() {
+            if linux.fds.get_fd(index as u32).is_some_and(|candidate| {
+                candidate.kind == compat_core::fd::CompatKind::Directory
+                    && candidate.handle == entry.handle
+            }) {
+                linux.file_offsets[index] = offset;
+            }
+        }
         Ok(())
     })
     .is_ok()
@@ -828,6 +877,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         exec_path: [0; 128],
         exec_path_len: 0,
         mappings: Vec::new(),
+        vfork_parent: None,
     };
     create_process(name, SyscallSet::EMPTY, move |process| {
         process.linux = Some(linux);
@@ -2573,6 +2623,172 @@ pub fn fork_linux_process(
     Ok(child)
 }
 
+/// Creates a Linux vfork child without copying its pages.
+///
+/// 创建 Linux vfork 子进程但不复制页面：子进程映射父进程相同的物理帧，父线程
+/// 由调用者休眠等待。共享映射、设备映射和隔离帧不在当前有界切片内，失败关闭。
+#[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+pub fn vfork_linux_process(
+    parent: ObjId,
+    user_rip: u64,
+    user_stack: u64,
+    fs_base: u64,
+    preserved_regs: [u64; 6],
+    syscall_args: [u64; 6],
+    parent_task: TaskId,
+) -> Result<ObjId, ProcError> {
+    let parent_stack_top = crate::arch::kernel_stack();
+    let (parent_linux_pid, calls, state, parent_root, frames, memory_caps) =
+        kobj::with(|t| match t.get(parent) {
+        Ok(KObject::Process(p))
+            if p.state == ProcState::Running && p.threads_live == 1 =>
+        {
+            let linux = p.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
+            if !p.shared_maps.is_empty()
+                || !p.device_maps.is_empty()
+                || !p.quarantined.is_empty()
+            {
+                return Err(ProcError::NotTransferable);
+            }
+            let mut frames = Vec::new();
+            frames
+                .try_reserve(p.frames.len())
+                .map_err(|_| ProcError::OutOfFrames)?;
+            frames.extend(p.frames.iter().cloned());
+            Ok((
+                linux.pid,
+                linux.calls,
+                linux.clone(),
+                p.space.root(),
+                frames,
+                p.memory_caps.clone(),
+            ))
+        }
+        Ok(KObject::Process(_)) => Err(ProcError::Exited),
+        _ => Err(ProcError::NoSuchProcess),
+    })?;
+    let phys_offset = crate::boot::get()
+        .and_then(|boot| boot.phys_offset)
+        .ok_or(ProcError::Map(MapError::NotMapped))?;
+    let parent_stack_base = parent_stack_top
+        .checked_sub(crate::sched::stack::STACK_SIZE as u64)
+        .ok_or(ProcError::Map(MapError::InvalidAddress))?;
+    for va in (parent_stack_base..parent_stack_top).step_by(kernel_core::frame::FRAME_SIZE as usize)
+    {
+        let parent_stack_frame = unsafe { crate::arch::translate_in(parent_root, phys_offset, va) }
+            .map(|(frame, _)| frame)
+            .ok_or(ProcError::Map(MapError::NotMapped))?;
+        if frames
+            .iter()
+            .any(|page| page.frame() == parent_stack_frame)
+        {
+            return Err(ProcError::NotTransferable);
+        }
+    }
+
+    let child = create_linux("linux-vfork", calls)?;
+    let rollback = |child: ObjId, adopted: bool| {
+        if adopted {
+            let _ = release_child(parent, child);
+        }
+        let _ = exit_idle(child, -1);
+        let _ = reap(child);
+    };
+    let child_pid = match linux_pid(child) {
+        Some(pid) => pid,
+        None => {
+            rollback(child, false);
+            return Err(ProcError::NoSuchProcess);
+        }
+    };
+    let prepared = with_proc(child, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::NoSuchProcess)?;
+        *linux = state;
+        linux.pid = child_pid;
+        linux.ppid = parent_linux_pid;
+        linux.vfork_parent = Some(VforkParent {
+            task: parent_task,
+            exec_committed: false,
+        });
+        p.frames = frames;
+        p.memory_caps = memory_caps;
+        let borrowed =
+            crate::mm::space::VmSpace::borrowed(parent_root).map_err(ProcError::Map)?;
+        let old = core::mem::replace(&mut p.space, borrowed);
+        drop(old);
+        Ok(())
+    });
+    if prepared.is_err() || inherit_application(parent, child).is_err() {
+        rollback(child, false);
+        return Err(ProcError::NoSuchProcess);
+    }
+    if adopt(parent, child).is_err() {
+        rollback(child, false);
+        return Err(ProcError::NoSuchProcess);
+    }
+    if spawn_linux_clone(
+        child,
+        "linux-vfork",
+        user_rip,
+        user_stack,
+        Some(fs_base),
+        Some(preserved_regs),
+        Some(syscall_args),
+        0,
+        0,
+        0,
+    )
+    .is_err()
+    {
+        rollback(child, true);
+        return Err(ProcError::NoTaskSlot);
+    }
+    Ok(child)
+}
+
+/// Commits successful exec as the child-side vfork terminal transition.
+/// 把成功 exec 作为 vfork 子侧终态迁移；重复提交或非 vfork 子进程无副作用。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn vfork_commit_exec(child: ObjId) -> bool {
+    let parent = with_proc(child, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::NoSuchProcess)?;
+        let Some(parent) = linux.vfork_parent.as_mut() else {
+            return Ok(None);
+        };
+        if parent.exec_committed {
+            return Ok(None);
+        }
+        parent.exec_committed = true;
+        Ok(Some(parent.task))
+    })
+    .ok()
+    .flatten();
+    if let Some(task) = parent {
+        sched::wake(task);
+        true
+    } else {
+        false
+    }
+}
+
+/// Returns whether a vfork parent may resume.
+///
+/// 子进程提交 exec 或已离开 Running 后父线程可恢复；不存在的子进程也视为终止，
+/// 调用者随后会按正常 Linux 子进程错误路径失败关闭。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn vfork_parent_may_resume(child: ObjId) -> bool {
+    kobj::with(|t| match t.get(child) {
+        Ok(KObject::Process(p)) => {
+            p.state != ProcState::Running
+                || p.linux
+                    .as_ref()
+                    .and_then(|linux| linux.vfork_parent)
+                    .is_some_and(|parent| parent.exec_committed)
+        }
+        _ => true,
+    })
+}
+
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
 fn copy_linux_mapping(parent: ObjId, child: ObjId, mapping: LinuxMapping) -> Result<(), ProcError> {
     let (source, current_flags) = with_proc(parent, |p| {
@@ -3616,8 +3832,23 @@ pub fn begin_exit(pid: ObjId, code: i64) -> bool {
     let started = begin_exit_in_table(pid, code);
     if started {
         wake_threads(pid);
+        if let Some(task) = vfork_parent_task(pid) {
+            sched::wake(task);
+        }
     }
     started
+}
+
+fn vfork_parent_task(pid: ObjId) -> Option<TaskId> {
+    with_proc(pid, |process| {
+        Ok(process
+            .linux
+            .as_ref()
+            .and_then(|linux| linux.vfork_parent)
+            .map(|parent| parent.task))
+    })
+    .ok()
+    .flatten()
 }
 
 /// 唤醒进程 `pid` 的全部睡眠线程（不在睡眠的线程不受影响）。调度器不持锁，可在登记表锁内调用。

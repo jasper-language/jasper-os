@@ -3,7 +3,7 @@
 use linux_raw_sys::general::{
     __NR_access, __NR_arch_prctl, __NR_brk, __NR_clock_getres, __NR_clock_gettime,
     __NR_clock_nanosleep, __NR_clone, __NR_clone3,
-    __NR_chdir, __NR_close, __NR_epoll_create1, __NR_epoll_ctl, __NR_epoll_pwait,
+    __NR_chdir, __NR_close, __NR_dup, __NR_dup2, __NR_dup3, __NR_epoll_create1, __NR_epoll_ctl, __NR_epoll_pwait,
     __NR_epoll_pwait2,
     __NR_epoll_wait, __NR_execve, __NR_exit, __NR_exit_group, __NR_fchdir, __NR_fcntl, __NR_fstat,
     __NR_fstatfs, __NR_futex,
@@ -19,7 +19,7 @@ use linux_raw_sys::general::{
     __NR_rt_sigprocmask, __NR_rt_sigreturn, __NR_sched_getaffinity, __NR_sched_getscheduler,
     __NR_sched_yield,
     __NR_set_robust_list, __NR_sysinfo,
-    __NR_set_tid_address, __NR_wait4,
+    __NR_set_tid_address, __NR_vfork, __NR_wait4,
     __NR_sigaltstack, __NR_statfs, __NR_statx, __NR_tgkill, __NR_time, __NR_uname, __NR_write,
     __NR_writev,
 };
@@ -78,6 +78,9 @@ pub enum LinuxSyscall {
     WriteV,
     GetDents64,
     Close,
+    Dup,
+    Dup2,
+    Dup3,
     Chdir,
     OpenAt,
     Fchdir,
@@ -157,6 +160,9 @@ pub enum LinuxSyscall {
     /// Wait for one Linux child process.
     /// 等待一个 Linux 子进程。
     Wait4,
+    /// Create a child that shares the parent's address space while the parent waits.
+    /// 创建共享父地址空间的子进程；父进程在子进程 exec 或退出前保持暂停。
+    Vfork,
 }
 
 /// Explicit Linux syscall authority for one compatibility process.
@@ -275,6 +281,9 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_writev) => LinuxSyscall::WriteV,
         value if value == u64::from(__NR_getdents64) => LinuxSyscall::GetDents64,
         value if value == u64::from(__NR_close) => LinuxSyscall::Close,
+        value if value == u64::from(__NR_dup) => LinuxSyscall::Dup,
+        value if value == u64::from(__NR_dup2) => LinuxSyscall::Dup2,
+        value if value == u64::from(__NR_dup3) => LinuxSyscall::Dup3,
         value if value == u64::from(__NR_chdir) => LinuxSyscall::Chdir,
         value if value == u64::from(__NR_openat) => LinuxSyscall::OpenAt,
         value if value == u64::from(__NR_fchdir) => LinuxSyscall::Fchdir,
@@ -342,6 +351,7 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_io_uring_enter) => LinuxSyscall::IoUringEnter,
         value if value == u64::from(__NR_io_uring_register) => LinuxSyscall::IoUringRegister,
         value if value == u64::from(__NR_wait4) => LinuxSyscall::Wait4,
+        value if value == u64::from(__NR_vfork) => LinuxSyscall::Vfork,
         number => return SyscallDispatch::Unsupported { number },
     };
     SyscallDispatch::Mapped(LinuxCall {
@@ -373,6 +383,9 @@ mod tests {
             (__NR_writev, LinuxSyscall::WriteV),
             (__NR_getdents64, LinuxSyscall::GetDents64),
             (__NR_close, LinuxSyscall::Close),
+            (__NR_dup, LinuxSyscall::Dup),
+            (__NR_dup2, LinuxSyscall::Dup2),
+            (__NR_dup3, LinuxSyscall::Dup3),
             (__NR_chdir, LinuxSyscall::Chdir),
             (__NR_openat, LinuxSyscall::OpenAt),
             (__NR_fchdir, LinuxSyscall::Fchdir),
@@ -428,6 +441,7 @@ mod tests {
             (__NR_io_uring_enter, LinuxSyscall::IoUringEnter),
             (__NR_io_uring_register, LinuxSyscall::IoUringRegister),
             (__NR_wait4, LinuxSyscall::Wait4),
+            (__NR_vfork, LinuxSyscall::Vfork),
         ];
         for (number, syscall) in expected {
             assert_eq!(
