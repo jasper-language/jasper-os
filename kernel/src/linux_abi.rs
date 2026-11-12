@@ -5600,6 +5600,11 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const DMA_HEAP_IOCTL_ALLOC: u64 = 0xc018_4800;
     const DMA_BUF_IOCTL_SYNC: u64 = 0x4008_6200;
     const DMA_BUF_SET_NAME: u64 = 0x4008_6201;
+    const DMA_BUF_IOCTL_EXPORT_SYNC_FILE: u64 = 0xc008_6202;
+    const DMA_BUF_IOCTL_IMPORT_SYNC_FILE: u64 = 0x4008_6203;
+    const SYNC_IOC_MERGE: u64 = 0xc030_3e03;
+    const SYNC_IOC_FILE_INFO: u64 = 0xc038_3e04;
+    const SYNC_IOC_SET_DEADLINE: u64 = 0x4010_3e05;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if args[1] == FIONREAD && entry.kind == compat_core::fd::CompatKind::Pipe {
@@ -5651,6 +5656,66 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             }
             BINDER_THREAD_EXIT => Ok(0),
             BINDER_WRITE_READ => crate::binder::write_read(pid, fd, args),
+            _ => Err(CompatErrno::NoSys),
+        };
+    }
+    if proc::linux_is_sync_file(pid, entry.handle) {
+        return match args[1] {
+            SYNC_IOC_MERGE => {
+                let mut raw = [0u8; 48];
+                copy_from_user(&mut raw, args[2], 48).map_err(|_| CompatErrno::Fault)?;
+                let other_fd = i32::from_le_bytes(raw[32..36].try_into().unwrap());
+                let flags = u32::from_le_bytes(raw[40..44].try_into().unwrap());
+                let pad = u32::from_le_bytes(raw[44..48].try_into().unwrap());
+                if other_fd < 0 || flags != 0 || pad != 0 {
+                    return Err(CompatErrno::Invalid);
+                }
+                let other = proc::linux_fd(pid, other_fd as u32).ok_or(CompatErrno::BadFd)?;
+                if !proc::linux_is_sync_file(pid, other.handle) {
+                    return Err(CompatErrno::Invalid);
+                }
+                let name_len = raw[..32]
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .unwrap_or(32);
+                let fence = proc::linux_create_sync_file(pid, &raw[..name_len], true)
+                    .ok_or(CompatErrno::NoSpace)?;
+                raw[36..40].copy_from_slice(&(fence as i32).to_le_bytes());
+                copy_to_user(args[2], &raw, raw.len()).map_err(|_| CompatErrno::Fault)?;
+                Ok(0)
+            }
+            SYNC_IOC_FILE_INFO => {
+                let mut raw = [0u8; 56];
+                copy_from_user(&mut raw, args[2], 56).map_err(|_| CompatErrno::Fault)?;
+                let capacity = u32::from_le_bytes(raw[40..44].try_into().unwrap());
+                let buffer = u64::from_le_bytes(raw[48..56].try_into().unwrap());
+                let mut name = [0u8; 32];
+                proc::linux_sync_file_name(pid, entry.handle, &mut name)
+                    .ok_or(CompatErrno::BadFd)?;
+                raw[..32].copy_from_slice(&name);
+                raw[32..36].copy_from_slice(&1i32.to_le_bytes());
+                raw[40..44].copy_from_slice(&1u32.to_le_bytes());
+                if capacity != 0 && buffer != 0 {
+                    let mut info = [0u8; 80];
+                    info[..32].copy_from_slice(&name);
+                    info[32..48].copy_from_slice(b"jasper-sync-file");
+                    info[64..68].copy_from_slice(&1i32.to_le_bytes());
+                    let now = sched::now_ns();
+                    info[72..80].copy_from_slice(&now.to_le_bytes());
+                    copy_to_user(buffer, &info, info.len())
+                        .map_err(|_| CompatErrno::Fault)?;
+                }
+                copy_to_user(args[2], &raw, raw.len()).map_err(|_| CompatErrno::Fault)?;
+                Ok(0)
+            }
+            SYNC_IOC_SET_DEADLINE => {
+                let mut raw = [0u8; 16];
+                copy_from_user(&mut raw, args[2], 16).map_err(|_| CompatErrno::Fault)?;
+                if u64::from_le_bytes(raw[8..16].try_into().unwrap()) != 0 {
+                    return Err(CompatErrno::Invalid);
+                }
+                Ok(0)
+            }
             _ => Err(CompatErrno::NoSys),
         };
     }
@@ -5765,6 +5830,33 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 let name = linux_c_string(args[2], 32)?;
                 proc::linux_ashmem_set_name(pid, entry.handle, &name)
                     .map_err(ashmem_compat_error)?;
+                Ok(0)
+            }
+            DMA_BUF_IOCTL_EXPORT_SYNC_FILE => {
+                let mut raw = [0u8; 8];
+                copy_from_user(&mut raw, args[2], 8).map_err(|_| CompatErrno::Fault)?;
+                let flags = u32::from_le_bytes(raw[..4].try_into().unwrap());
+                if flags == 0 || flags & !3 != 0 {
+                    return Err(CompatErrno::Invalid);
+                }
+                let fence = proc::linux_create_sync_file(pid, b"dma-buf-export", true)
+                    .ok_or(CompatErrno::NoSpace)?;
+                raw[4..8].copy_from_slice(&(fence as i32).to_le_bytes());
+                copy_to_user(args[2], &raw, raw.len()).map_err(|_| CompatErrno::Fault)?;
+                Ok(0)
+            }
+            DMA_BUF_IOCTL_IMPORT_SYNC_FILE => {
+                let mut raw = [0u8; 8];
+                copy_from_user(&mut raw, args[2], 8).map_err(|_| CompatErrno::Fault)?;
+                let flags = u32::from_le_bytes(raw[..4].try_into().unwrap());
+                let fence_fd = i32::from_le_bytes(raw[4..8].try_into().unwrap());
+                if flags == 0 || flags & !3 != 0 || fence_fd < 0 {
+                    return Err(CompatErrno::Invalid);
+                }
+                let fence = proc::linux_fd(pid, fence_fd as u32).ok_or(CompatErrno::BadFd)?;
+                if !proc::linux_is_sync_file(pid, fence.handle) {
+                    return Err(CompatErrno::Invalid);
+                }
                 Ok(0)
             }
             _ => Err(CompatErrno::NoSys),
@@ -6229,6 +6321,15 @@ fn linux_epoll_readiness(
             }
             ready
         }
+        compat_core::fd::CompatKind::Other
+            if proc::linux_is_sync_file(pid, registration.handle) =>
+        {
+            if requested & EPOLLIN != 0 {
+                EPOLLIN
+            } else {
+                0
+            }
+        }
         compat_core::fd::CompatKind::Event => {
             let (counter, _) = proc::linux_eventfd_state(pid, registration.handle)?;
             let value = *counter.lock();
@@ -6525,6 +6626,13 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                         ready |= POLLERR;
                     }
                     ready
+                }
+                Some(entry) if proc::linux_is_sync_file(pid, entry.handle) => {
+                    if events & POLLIN != 0 {
+                        POLLIN
+                    } else {
+                        0
+                    }
                 }
                 Some(entry) if entry.kind == compat_core::fd::CompatKind::Event => {
                     let Some((counter, _)) = proc::linux_eventfd_state(pid, entry.handle) else {
