@@ -1439,11 +1439,13 @@ fn execute(
         LinuxSyscall::FchmodAt2 => compat_result(linux_fchmodat(pid, call.args, true)),
         LinuxSyscall::Fchown => compat_result(linux_fchown(pid, call.args)),
         LinuxSyscall::FchownAt => compat_result(linux_fchownat(pid, call.args)),
+        LinuxSyscall::Lchown => compat_result(linux_lchown(pid, call.args)),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
         LinuxSyscall::Fstatfs => compat_result(linux_fstatfs(pid, call.args)),
         LinuxSyscall::Fsync => compat_result(linux_sync_fd(pid, call.args[0], false)),
         LinuxSyscall::Fdatasync => compat_result(linux_sync_fd(pid, call.args[0], true)),
         LinuxSyscall::Ftruncate => compat_result(linux_ftruncate(pid, call.args)),
+        LinuxSyscall::Truncate => compat_result(linux_truncate(pid, call.args)),
         LinuxSyscall::MemfdCreate => compat_result(linux_memfd_create(pid, call.args)),
         LinuxSyscall::Sync => 0,
         LinuxSyscall::Syncfs => compat_result(linux_syncfs(pid, call.args[0])),
@@ -3238,8 +3240,14 @@ fn linux_ftruncate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let size = args[1];
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
-    let (current, _, _) =
-        proc::linux_ashmem_state(pid, entry.handle).ok_or(CompatErrno::Invalid)?;
+    let Some((current, _, _)) = proc::linux_ashmem_state(pid, entry.handle) else {
+        return match entry.kind {
+            compat_core::fd::CompatKind::File | compat_core::fd::CompatKind::Directory => {
+                Err(CompatErrno::ReadOnly)
+            }
+            _ => Err(CompatErrno::Invalid),
+        };
+    };
     let seals = proc::linux_ashmem_get_seals(pid, entry.handle).ok_or(CompatErrno::Invalid)?;
     if (size > current && seals & 4 != 0) || (size < current && seals & 2 != 0) {
         return Err(CompatErrno::Perm);
@@ -3253,6 +3261,15 @@ fn linux_ftruncate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     proc::linux_ashmem_set_size(pid, entry.handle, size)
         .map_err(ashmem_compat_error)?;
     Ok(0)
+}
+
+fn linux_truncate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    linux_faccessat(
+        pid,
+        [(-100i64) as u64, args[0], 0, 0, 0, 0],
+        false,
+    )?;
+    Err(CompatErrno::ReadOnly)
 }
 
 /// Creates one unconnected AF_UNIX stream socket.
@@ -4516,6 +4533,18 @@ fn linux_fchownat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         pid,
         [args[0], args[1], 0, args[4], 0, 0],
         true,
+    )?;
+    Err(CompatErrno::ReadOnly)
+}
+
+fn linux_lchown(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if !valid_compat_owner(args[1]) || !valid_compat_owner(args[2]) {
+        return Err(CompatErrno::Perm);
+    }
+    linux_faccessat(
+        pid,
+        [(-100i64) as u64, args[0], 0, 0, 0, 0],
+        false,
     )?;
     Err(CompatErrno::ReadOnly)
 }
