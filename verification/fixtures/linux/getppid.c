@@ -534,6 +534,92 @@ int main(void) {
         !WIFEXITED(rights_status) || WEXITSTATUS(rights_status) != 0) {
         return 133;
     }
+    int credential_fds[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, credential_fds) != 0) {
+        return 137;
+    }
+    pid_t credential_parent_pid = getpid();
+    pid_t credential_child = fork();
+    if (credential_child < 0) {
+        return 138;
+    }
+    if (credential_child == 0) {
+        close(credential_fds[0]);
+        int passcred = 1;
+        char credential_control[CMSG_SPACE(sizeof(struct ucred))];
+        memset(credential_control, 0, sizeof(credential_control));
+        char credential_byte = 0;
+        struct iovec credential_iov = {
+            .iov_base = &credential_byte,
+            .iov_len = 1,
+        };
+        struct msghdr credential_message = {
+            .msg_iov = &credential_iov,
+            .msg_iovlen = 1,
+            .msg_control = credential_control,
+            .msg_controllen = sizeof(credential_control),
+        };
+        if (setsockopt(credential_fds[1], SOL_SOCKET, SO_PASSCRED,
+                       &passcred, sizeof(passcred)) != 0 ||
+            recvmsg(credential_fds[1], &credential_message, 0) != 1 ||
+            credential_byte != 'D') {
+            _exit(139);
+        }
+        struct cmsghdr *credential_cmsg =
+            CMSG_FIRSTHDR(&credential_message);
+        struct ucred received_cred;
+        if (!credential_cmsg ||
+            credential_cmsg->cmsg_level != SOL_SOCKET ||
+            credential_cmsg->cmsg_type != SCM_CREDENTIALS ||
+            credential_cmsg->cmsg_len != CMSG_LEN(sizeof(received_cred))) {
+            _exit(140);
+        }
+        memcpy(&received_cred, CMSG_DATA(credential_cmsg),
+               sizeof(received_cred));
+        if (received_cred.pid != credential_parent_pid ||
+            received_cred.uid != 0 || received_cred.gid != 0) {
+            _exit(141);
+        }
+        close(credential_fds[1]);
+        _exit(0);
+    }
+    close(credential_fds[1]);
+    char credential_control[CMSG_SPACE(sizeof(struct ucred))];
+    memset(credential_control, 0, sizeof(credential_control));
+    char credential_byte = 'D';
+    struct iovec credential_iov = {
+        .iov_base = &credential_byte,
+        .iov_len = 1,
+    };
+    struct msghdr credential_message = {
+        .msg_iov = &credential_iov,
+        .msg_iovlen = 1,
+        .msg_control = credential_control,
+        .msg_controllen = sizeof(credential_control),
+    };
+    struct cmsghdr *credential_cmsg = CMSG_FIRSTHDR(&credential_message);
+    struct ucred sent_cred = {
+        .pid = credential_parent_pid,
+        .uid = 0,
+        .gid = 0,
+    };
+    if (!credential_cmsg) {
+        return 142;
+    }
+    credential_cmsg->cmsg_len = CMSG_LEN(sizeof(sent_cred));
+    credential_cmsg->cmsg_level = SOL_SOCKET;
+    credential_cmsg->cmsg_type = SCM_CREDENTIALS;
+    memcpy(CMSG_DATA(credential_cmsg), &sent_cred, sizeof(sent_cred));
+    if (sendmsg(credential_fds[0], &credential_message, MSG_NOSIGNAL) != 1 ||
+        close(credential_fds[0]) != 0) {
+        return 143;
+    }
+    int credential_status = 0;
+    if (waitpid(credential_child, &credential_status, 0) != credential_child ||
+        !WIFEXITED(credential_status) ||
+        WEXITSTATUS(credential_status) != 0) {
+        return 144;
+    }
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
     if (sched_getaffinity(0, sizeof(cpus), &cpus) != 0 ||
