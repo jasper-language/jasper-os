@@ -200,6 +200,24 @@ extern "C" fn jsr_syscall_dispatch(frame: &mut RawFrame) -> u64 {
         frame.rcx = user.rcx;
         frame.user_rsp = user.user_rsp;
     }
+    if let Some(exec) = outcome.exec_redirect {
+        frame.rax = 0;
+        frame.rdi = 0;
+        frame.rsi = 0;
+        frame.rdx = 0;
+        frame.r10 = 0;
+        frame.r8 = 0;
+        frame.r9 = 0;
+        frame.rbx = 0;
+        frame.rbp = 0;
+        frame.r12 = 0;
+        frame.r13 = 0;
+        frame.r14 = 0;
+        frame.r15 = 0;
+        frame.r11 = 0x202;
+        frame.rcx = exec.entry;
+        frame.user_rsp = exec.user_rsp;
+    }
     let rip = frame.rcx;
     if ((rip << 16) as i64 >> 16) as u64 != rip {
         fault::on_user_fault(UserFault { kind: UserFaultKind::ProtectionFault, ip: rip, addr: 0 });

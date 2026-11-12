@@ -621,17 +621,17 @@ pub(crate) fn exec_dynamic_program(
     interpreter: alloc::vec::Vec<u8>,
     argv: alloc::vec::Vec<alloc::vec::Vec<u8>>,
     envp: alloc::vec::Vec<alloc::vec::Vec<u8>>,
-) -> bool {
+) -> Option<(u64, u64)> {
     let saved = match proc::begin_exec_address_space(pid) {
         Ok(saved) => saved,
         Err(error) => {
             kprintln!("[JSR-LINUX-EXEC-FAIL] stage=address_space error={:?}", error);
-            return false;
+            return None;
         }
     };
     if !proc::linux_set_exec_path(pid, &path) {
         let _ = proc::rollback_exec_address_space(pid, saved);
-        return false;
+        return None;
     }
     let prepared = {
         let argv_refs = argv
@@ -655,11 +655,11 @@ pub(crate) fn exec_dynamic_program(
         Err(stage) => {
             kprintln!("[JSR-LINUX-EXEC-FAIL] stage={}", stage);
             let _ = proc::rollback_exec_address_space(pid, saved);
-            return false;
+            return None;
         }
     };
     let Some(space) = proc::current_space_root(pid) else {
-        return false;
+        return None;
     };
     sched::set_current_space(Some(space));
     drop(saved);
@@ -669,9 +669,7 @@ pub(crate) fn exec_dynamic_program(
     drop(interpreter);
     drop(path);
     let _ = crate::arch::set_user_fs_base(0);
-    // SAFETY: the loader validated the executable entry and mapped the complete
-    // initial stack in this Process's fresh address space.
-    unsafe { crate::arch::x86_64::enter_exec(entry, stack) }
+    Some((entry, stack))
 }
 
 /// Executes one bounded program image through the root-backed dynamic namespace.

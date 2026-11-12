@@ -78,6 +78,14 @@ pub struct UserReturn {
     pub user_rsp: u64,
 }
 
+/// Redirect the ordinary syscall return to a freshly exec-replaced image.
+/// 将普通 syscall 返回重定向到刚由 exec 替换的新映像。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecReturn {
+    pub entry: u64,
+    pub user_rsp: u64,
+}
+
 /// One syscall result plus an optional user-context redirect.
 ///
 /// 一次系统调用的返回值，以及可选的用户上下文重定向。
@@ -85,6 +93,7 @@ pub struct UserReturn {
 pub struct SyscallOutcome {
     pub value: i64,
     pub redirect: Option<UserReturn>,
+    pub exec_redirect: Option<ExecReturn>,
 }
 
 impl SyscallOutcome {
@@ -92,6 +101,7 @@ impl SyscallOutcome {
         Self {
             value,
             redirect: None,
+            exec_redirect: None,
         }
     }
 }

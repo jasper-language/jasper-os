@@ -17,7 +17,7 @@ use kernel_core::paging::MapFlags;
 
 use crate::mm::user::{copy_from_user, copy_to_user, copy_to_user_vectored, UserPtrError};
 use crate::sync::IrqSpinLock;
-use crate::syscall::{SyscallArgs, SyscallOutcome, UserReturn, CONSOLE_WRITE_MAX};
+use crate::syscall::{ExecReturn, SyscallArgs, SyscallOutcome, UserReturn, CONSOLE_WRITE_MAX};
 use crate::{console, proc, sched};
 
 #[cfg(feature = "compat-dynamic-libc-verify")]
@@ -1347,6 +1347,16 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
     if !proc::linux_syscall_allowed(pid, call.syscall) {
         return SyscallOutcome::value(-i64::from(CompatErrno::Perm as i32));
     }
+    if call.syscall == LinuxSyscall::Execve {
+        return match linux_execve(pid, call.args) {
+            Ok((entry, user_rsp)) => SyscallOutcome {
+                value: 0,
+                redirect: None,
+                exec_redirect: Some(ExecReturn { entry, user_rsp }),
+            },
+            Err(error) => SyscallOutcome::value(-i64::from(error as i32)),
+        };
+    }
     if call.syscall == LinuxSyscall::RtSigReturn {
         let Some((_, user_rsp)) = a.user_ip else {
             return SyscallOutcome::value(-i64::from(CompatErrno::Fault as i32));
@@ -1355,6 +1365,7 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
             Ok(user) => SyscallOutcome {
                 value: 0,
                 redirect: Some(user),
+                exec_redirect: None,
             },
             Err(error) => SyscallOutcome::value(-i64::from(error as i32)),
         };
@@ -1371,7 +1382,11 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
     if proc::current_exiting() {
         proc::thread_exit(0, "linux signal default action");
     }
-    SyscallOutcome { value, redirect }
+    SyscallOutcome {
+        value,
+        redirect,
+        exec_redirect: None,
+    }
 }
 
 fn execute(
@@ -1411,7 +1426,6 @@ fn execute(
         LinuxSyscall::Clone3 => {
             compat_result(linux_clone3(pid, call.args, user_ip, user_preserved))
         }
-        LinuxSyscall::Execve => compat_result(linux_execve(pid, call.args)),
         LinuxSyscall::Brk => compat_result(linux_brk(pid, call.args[0])),
         LinuxSyscall::Access => compat_result(linux_access(call.args[0])),
         LinuxSyscall::ArchPrctl => compat_result(linux_arch_prctl(call.args)),
@@ -2192,7 +2206,7 @@ fn linux_clone(
 
 /// Executes one root-backed dynamic image in the current Linux Process.
 /// 在当前 Linux Process 中执行一个根卷支持的动态映像。
-fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
     let path = linux_c_string(args[0], 4096)?;
     let resolved = if path.starts_with(b"/") {
         path.clone()
@@ -2222,7 +2236,7 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         target_arch = "x86_64"
     ))]
     {
-        if crate::compat_dynamic_demo::exec_dynamic_program(
+        match crate::compat_dynamic_demo::exec_dynamic_program(
             pid,
             resolved,
             executable,
@@ -2230,9 +2244,8 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             argv,
             envp,
         ) {
-            Ok(0)
-        } else {
-            Err(CompatErrno::NoSys)
+            Some((entry, stack)) => Ok((entry, stack)),
+            None => Err(CompatErrno::NoSys),
         }
     }
     #[cfg(not(all(
