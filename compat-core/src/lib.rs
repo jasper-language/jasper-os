@@ -27,8 +27,8 @@ pub use native::{
     NativeError, NativeHandle, NativeMemory, NativeWait, Uring,
 };
 pub use pipe::{
-    PipeEndpoint, PipeRead, PipeWrite, UnixSocketEndpoint, UnixSocketName, PIPE_BUF, PIPE_CAPACITY,
-    UNIX_SOCKET_NAME_MAX,
+    PipeEndpoint, PipeRead, PipeWrite, UnixCredentials, UnixSocketEndpoint, UnixSocketName, PIPE_BUF,
+    PIPE_CAPACITY, UNIX_SOCKET_NAME_MAX,
 };
 pub use process::{LinuxPid, ProcessEntry, ProcessTable, ProcessTableError, ProcessToken};
 pub use syscall::{
