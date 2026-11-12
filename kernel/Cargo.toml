@@ -82,6 +82,7 @@ pex4-verify = []
 pex5-verify = []
 # Dedicated real-kernel frame allocation, cross-CPU release and reclaim matrix.
 pex7-verify = []
+workload-verify = []
 # Dedicated SEC-1 identity and metadata substrate.
 sec1-verify = ["kernel-core/sec1-verify"]
 # Dedicated SEC-2 capability-lineage slice; full revocation/in-flight coverage

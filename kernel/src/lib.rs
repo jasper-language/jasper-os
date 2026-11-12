@@ -198,6 +198,8 @@ pub mod syscall;
 pub mod task;
 pub mod usi;
 pub mod workload;
+#[cfg(all(feature = "workload-verify", target_arch = "x86_64"))]
+pub mod workload_verify;
 #[cfg(feature = "user-programs")]
 pub mod usi1_demo;
 #[cfg(feature = "usi2-verify")]
