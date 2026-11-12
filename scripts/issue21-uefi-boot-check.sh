@@ -22,7 +22,8 @@ OVMF_VARS="$TARGET/OVMF_VARS.fd"
 KERNEL="$TARGET/x86_64-unknown-none/release/jasper-kernel"
 
 cleanup() {
-  rm -f -- "$IMAGE" "$ESP_IMAGE" "$UEFI_ESP" "$OVMF_VARS"
+  rm -f -- "$IMAGE" "$ESP_IMAGE" "$UEFI_ESP" "$OVMF_VARS" \
+    "$TARGET/system-A.img" "$TARGET/system-B.img"
 }
 trap cleanup EXIT
 

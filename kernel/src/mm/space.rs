@@ -75,6 +75,10 @@ pub struct VmSpace {
     root: arch::SpaceRoot,
     mapper: arch::Mapper,
     phys_offset: u64,
+    /// Only the owner may release the page-table hierarchy. A vfork child
+    /// borrows its parent's root until exec or exit transfers it away.
+    /// 只有拥有者可以释放页表层级；vfork 子进程借用父根，直到 exec 或退出。
+    owned: bool,
     /// 页表已经改变、但跨核击落尚未完成；期间拒绝同一空间的其它修改。
     shootdown_pending: bool,
 }
@@ -90,8 +94,31 @@ impl VmSpace {
         unsafe {
             let root = arch::create_space(template, phys_offset, &mut GlobalFrames)?;
             let mapper = arch::space_mapper(root, phys_offset);
-            Ok(VmSpace { root, mapper, phys_offset, shootdown_pending: false })
+            Ok(VmSpace {
+                root,
+                mapper,
+                phys_offset,
+                owned: true,
+                shootdown_pending: false,
+            })
         }
+    }
+
+    /// Borrows an existing address-space root for the bounded vfork child path.
+    ///
+    /// 为受限 vfork 子进程借用现有地址空间根；借用者不能销毁页表层级。
+    pub(crate) fn borrowed(root: arch::SpaceRoot) -> Result<Self, MapError> {
+        let phys_offset = boot::get()
+            .and_then(|b| b.phys_offset)
+            .ok_or(MapError::NotMapped)?;
+        let mapper = unsafe { arch::space_mapper(root, phys_offset) };
+        Ok(VmSpace {
+            root,
+            mapper,
+            phys_offset,
+            owned: false,
+            shootdown_pending: false,
+        })
     }
 
     /// 地址空间根（诊断用）。
@@ -223,6 +250,9 @@ impl Drop for VmSpace {
             activate_kernel();
         }
         crate::smp::percpu::this().set_space(None);
+        if !self.owned {
+            return;
+        }
         // SAFETY：已确保不是活动空间；此后不再使用 root。
         unsafe { arch::destroy_space(self.root, self.phys_offset, &mut GlobalFrames) };
     }

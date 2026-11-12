@@ -1357,7 +1357,10 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
                     exec_redirect: Some(ExecReturn { entry, user_rsp }),
                 }
             }
-            Err(error) => SyscallOutcome::value(-i64::from(error as i32)),
+            Err(error) => {
+                crate::kprintln!("[JSR-LINUX-EXEC-FAIL] errno={:?}", error);
+                SyscallOutcome::value(-i64::from(error as i32))
+            }
         };
     }
     if call.syscall == LinuxSyscall::RtSigReturn {
@@ -1374,9 +1377,6 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
         };
     }
     let value = execute(pid, call, a.user_ip, a.user_preserved);
-    if call.syscall == LinuxSyscall::Vfork {
-        crate::kprintln!("[JSR-VFORK-DISPATCH-RETURN] value={value}");
-    }
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
         feature = "lifecycle-root-exec-verify"
@@ -2354,25 +2354,8 @@ fn linux_vfork(
     preserved_regs: [u64; 6],
 ) -> Result<u64, CompatErrno> {
     let (user_rip, user_stack) = user_ip.ok_or(CompatErrno::NoSys)?;
-    crate::kprintln!(
-        "[JSR-VFORK-TRAP] rdi={:#x} rip={:#x} rsp={:#x}",
-        args[0],
-        user_rip,
-        user_stack
-    );
     let parent_space = proc::current_space_root(pid).ok_or(CompatErrno::NoSys)?;
-    let (parent_task, parent_name) = sched::current();
-    let parent_stack_top = crate::arch::kernel_stack();
-    let parent_stack_page = kernel_core::paging::VirtPage::containing(parent_stack_top - 1);
-    let parent_stack_frame = unsafe { crate::arch::translate_in(parent_space, parent_stack_page) }
-        .map(|(frame, _)| frame.start());
-    crate::kprintln!(
-        "[JSR-VFORK-PARENT-CONTEXT] task={} name={} kstack={:#x} stack_frame={:?}",
-        parent_task.0,
-        parent_name,
-        parent_stack_top,
-        parent_stack_frame
-    );
+    let (parent_task, _) = sched::current();
     let child = proc::vfork_linux_process(
         pid,
         user_rip,
@@ -2387,28 +2370,12 @@ fn linux_vfork(
         _ => CompatErrno::NoMemory,
     })?;
     let child_pid = proc::linux_pid(child).ok_or(CompatErrno::NoSys)?;
-    let mut steps = 0u32;
     loop {
         if proc::vfork_parent_may_resume(child) {
             sched::set_current_space(Some(parent_space));
-            crate::kprintln!(
-                "[JSR-VFORK-SPACE] parent={:#x} current={:?} stack_frame={:?}",
-                parent_space.0,
-                sched::current_space(),
-                unsafe { crate::arch::translate_in(parent_space, parent_stack_page) }
-                    .map(|(frame, _)| frame.start())
-            );
-            crate::kprintln!("[JSR-VFORK-LINUX-RETURN] child_pid={child_pid}");
             return Ok(u64::from(child_pid));
         }
-        if steps < 4 {
-            crate::kprintln!("[JSR-VFORK-PARENT] child={:#x} step={} before", child.raw(), steps);
-        }
         let blocked = proc::block_step();
-        if steps < 4 {
-            crate::kprintln!("[JSR-VFORK-PARENT] child={:#x} step={} after", child.raw(), steps);
-            steps += 1;
-        }
         if blocked.is_err() {
             let _ = proc::begin_exit(child, -1);
             return Err(CompatErrno::Interrupted);
