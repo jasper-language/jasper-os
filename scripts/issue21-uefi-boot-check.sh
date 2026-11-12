@@ -35,6 +35,15 @@ if [ "${available_kib:-0}" -lt 2097152 ]; then
   echo "FAIL less than 2 GiB host memory available" >&2
   exit 75
 fi
+load1=$(awk '{ print $1 }' /proc/loadavg)
+if awk -v load="$load1" 'BEGIN { exit !(load > 8.0) }'; then
+  echo "FAIL host one-minute load $load1 is too high for another VM" >&2
+  exit 75
+fi
+if pgrep -x qemu-system-x86_64 >/dev/null 2>&1; then
+  echo "FAIL another qemu-system-x86_64 process is already running" >&2
+  exit 75
+fi
 
 # 仅清理本脚本固定命名的派生产物；证据目录必须独占，防止陈旧日志混入。
 # Remove only this script's fixed derived files; evidence output must be fresh.
