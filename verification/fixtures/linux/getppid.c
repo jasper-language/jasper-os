@@ -1199,6 +1199,30 @@ int main(void) {
         return 276;
     }
     *uring_cq_head = *uring_cq_head + 1;
+    uring_index = *uring_sq_tail & *uring_sq_mask;
+    memset(&uring_sqes[uring_index], 0, sizeof(uring_sqes[uring_index]));
+    uring_sqes[uring_index].opcode = IORING_OP_NOP;
+    uring_sqes[uring_index].user_data = 0x494e56414c4944ULL;
+    uring_sq_array[uring_index] = uring_params.sq_entries;
+    __sync_synchronize();
+    *uring_sq_tail = *uring_sq_tail + 1;
+    long uring_invalid_enter =
+        syscall(SYS_io_uring_enter, uring_fd, 1, 0,
+                IORING_ENTER_GETEVENTS, NULL, 0);
+    if (uring_invalid_enter != 1) {
+        printf("io-uring-invalid-enter result=%ld errno=%d\n",
+               uring_invalid_enter, errno);
+        return 278;
+    }
+    uring_cqe = (struct io_uring_cqe *)(uring_sq + uring_params.cq_off.cqes) +
+                (*uring_cq_head & (uring_params.cq_entries - 1));
+    if (uring_cqe->res != -EINVAL) {
+        printf("io-uring-invalid-cqe data=%llx res=%d head=%u tail=%u\n",
+               (unsigned long long)uring_cqe->user_data, uring_cqe->res,
+               *uring_cq_head, *uring_cq_tail);
+        return 279;
+    }
+    *uring_cq_head = *uring_cq_head + 1;
     int uring_unmap_sqes =
         munmap(uring_sqes,
                uring_params.sq_entries * sizeof(struct io_uring_sqe));
