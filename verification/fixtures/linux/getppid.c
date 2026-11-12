@@ -770,7 +770,8 @@ int main(void) {
         close(ashmem_fd) != 0) {
         return 154;
     }
-    int memfd = memfd_create("jasper-memfd", MFD_CLOEXEC);
+    int memfd = memfd_create("jasper-memfd",
+                             MFD_CLOEXEC | MFD_ALLOW_SEALING);
     if (memfd < 0 ||
         (fcntl(memfd, F_GETFD) & FD_CLOEXEC) == 0 ||
         ftruncate(memfd, 4096) != 0) {
@@ -787,8 +788,29 @@ int main(void) {
     }
     memfd_map[0] = 'M';
     if (msync(memfd_map, 4096, MS_SYNC) != 0 ||
-        munmap(memfd_map, 4096) != 0 || close(memfd) != 0) {
+        munmap(memfd_map, 4096) != 0 ||
+        fcntl(memfd, F_ADD_SEALS, F_SEAL_GROW) != 0 ||
+        fcntl(memfd, F_GET_SEALS) != F_SEAL_GROW) {
         return 210;
+    }
+    errno = 0;
+    if (ftruncate(memfd, 8192) != -1 || errno != EPERM ||
+        fcntl(memfd, F_ADD_SEALS, F_SEAL_WRITE) != 0 ||
+        fcntl(memfd, F_GET_SEALS) != (F_SEAL_GROW | F_SEAL_WRITE)) {
+        return 211;
+    }
+    errno = 0;
+    memfd_map = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
+                     memfd, 0);
+    if (memfd_map != MAP_FAILED || errno != EPERM) {
+        printf("memfd-seal-map-fail result=%p errno=%d\n",
+               (void *)memfd_map, errno);
+        return 212;
+    }
+    memfd_map = mmap(NULL, 4096, PROT_READ, MAP_SHARED, memfd, 0);
+    if (memfd_map == MAP_FAILED || memfd_map[0] != 'M' ||
+        munmap(memfd_map, 4096) != 0 || close(memfd) != 0) {
+        return 213;
     }
     int binder_fd = open("/dev/binder", O_RDWR | O_CLOEXEC);
     struct binder_version binder_version = {0};
