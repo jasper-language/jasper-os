@@ -751,6 +751,175 @@ impl<D: DiagnosticIo> PersistentDiagnosticStore<D> {
     }
 }
 
+/// Collector failure before an event reaches the persistent ring.
+/// 事件进入持久环之前的采集失败。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollectError {
+    /// The event schema rejected the input.
+    /// 事件 Schema 拒绝了输入。
+    Schema(SchemaError),
+    /// The persistent snapshot commit failed.
+    /// 持久快照提交失败。
+    Store(DiagnosticStoreError),
+}
+
+/// One durable collection result.
+/// 一次持久采集的结果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollectReport {
+    /// Event-ring admission outcome.
+    /// 事件环的准入结果。
+    pub outcome: RecordOutcome,
+    /// Current ring statistics after the commit.
+    /// 提交后的当前事件环统计。
+    pub stats: RingStats,
+    /// Published persistent snapshot sequence.
+    /// 已发布的持久快照序列。
+    pub sequence: u64,
+}
+
+/// Collector status without exposing retained payloads.
+/// 不暴露保留载荷的采集器状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollectorStatus {
+    /// Current bounded-ring statistics.
+    /// 当前有界环统计。
+    pub stats: RingStats,
+    /// Current durable snapshot sequence.
+    /// 当前持久快照序列。
+    pub sequence: u64,
+}
+
+/// One bounded, privacy-filtered query page.
+/// 一个有界且经过隐私过滤的查询页。
+#[derive(Clone, Copy)]
+pub struct DiagnosticPage<const N: usize> {
+    events: [Option<DiagnosticEvent>; N],
+    len: usize,
+}
+
+impl<const N: usize> DiagnosticPage<N> {
+    /// Creates an empty page.
+    /// 创建空查询页。
+    pub const fn new() -> Self {
+        Self {
+            events: [None; N],
+            len: 0,
+        }
+    }
+
+    /// Number of events copied into this page.
+    /// 本页复制的事件数。
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the page is empty.
+    /// 查询页是否为空。
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns one event by page position.
+    /// 按页内位置返回事件。
+    pub fn get(&self, index: usize) -> Option<&DiagnosticEvent> {
+        self.events.get(index)?.as_ref()
+    }
+}
+
+impl<const N: usize> Default for DiagnosticPage<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Minimal local diagnostic collector over the persistent two-copy store.
+///
+/// This is a service-layer building block, not a new ABI. Ingested inputs are
+/// schema-validated before a durable commit; queries always pass through the
+/// existing privacy ceiling and stable-ID cursor instead of exposing raw ring
+/// entries by ID.
+///
+/// 持久双副本存储上的最小本地诊断采集器。本类型是服务层构件，不是新 ABI；
+/// 输入先做 Schema 校验再持久提交；查询必须经过既有隐私上限和稳定 ID 游标，
+/// 不提供绕过策略的按 ID 原始读取。
+pub struct DiagnosticCollector<D: DiagnosticIo> {
+    store: PersistentDiagnosticStore<D>,
+}
+
+impl<D: DiagnosticIo> DiagnosticCollector<D> {
+    /// Creates and formats a new collector store.
+    /// 创建并格式化新的采集存储。
+    pub fn format(device: D) -> Result<Self, DiagnosticStoreError> {
+        Ok(Self {
+            store: PersistentDiagnosticStore::format(device)?,
+        })
+    }
+
+    /// Reopens the highest valid durable snapshot.
+    /// 重开最高有效持久快照。
+    pub fn open(device: D) -> Result<Self, DiagnosticStoreError> {
+        Ok(Self {
+            store: PersistentDiagnosticStore::open(device)?,
+        })
+    }
+
+    /// Validates, admits and durably commits one event.
+    ///
+    /// A schema or commit failure leaves the previously published in-memory
+    /// ring and durable snapshot unchanged.
+    /// 校验、准入并持久提交一个事件；Schema 或提交失败不改变此前已发布的
+    /// 内存环与持久快照。
+    pub fn collect(&mut self, input: EventInput<'_>) -> Result<CollectReport, CollectError> {
+        let event = DiagnosticEvent::new(input).map_err(CollectError::Schema)?;
+        let (outcome, stats) = self.store.record(event).map_err(CollectError::Store)?;
+        Ok(CollectReport {
+            outcome,
+            stats,
+            sequence: self.store.sequence(),
+        })
+    }
+
+    /// Returns bounded collector status without payloads.
+    /// 返回不含载荷的有界采集器状态。
+    pub fn status(&self) -> CollectorStatus {
+        CollectorStatus {
+            stats: self.store.ring().stats(),
+            sequence: self.store.sequence(),
+        }
+    }
+
+    /// Returns the next privacy-filtered event and advances the query cursor.
+    /// 返回下一条经过隐私过滤的事件并推进查询游标。
+    pub fn query_next(&self, query: &mut DiagnosticQuery) -> Option<DiagnosticEvent> {
+        self.store.ring().query_next(query).copied()
+    }
+
+    /// Returns one bounded query page.
+    ///
+    /// The query limit and page capacity are both enforced; the smaller bound
+    /// wins. No secret or above-ceiling event is copied.
+    /// 同时执行查询上限与页面容量限制，取较小值；不会复制秘密事件或高于
+    /// 隐私上限的事件。
+    pub fn query_page<const N: usize>(&self, query: &mut DiagnosticQuery) -> DiagnosticPage<N> {
+        let mut page = DiagnosticPage::<N>::new();
+        while page.len < N {
+            let Some(event) = self.store.ring().query_next(query) else {
+                break;
+            };
+            page.events[page.len] = Some(*event);
+            page.len += 1;
+        }
+        page
+    }
+
+    /// Returns the backing device for controlled shutdown/reopen.
+    /// 取回底层设备以进行受控关闭或重开。
+    pub fn into_device(self) -> D {
+        self.store.into_device()
+    }
+}
+
 impl<const N: usize> DiagnosticRing<N> {
     fn restore(
         events: [Option<DiagnosticEvent>; N],
@@ -1482,5 +1651,108 @@ mod tests {
         assert_eq!(reopened.sequence(), 2);
         assert_eq!(reopened.ring().len(), 1);
         assert_eq!(reopened.ring().get(1).unwrap().kind(), EventKind::Network);
+    }
+
+    #[test]
+    fn collector_persists_all_event_classes_and_pages_by_stable_id() {
+        let mut collector = DiagnosticCollector::format(MemoryDisk::new()).unwrap();
+        for (index, kind) in EventKind::ALL.into_iter().enumerate() {
+            let mut input = base(kind, Severity::Warning);
+            input.observed_at = 100 + index as u64;
+            let report = collector.collect(input).unwrap();
+            assert_eq!(report.outcome, RecordOutcome::Stored(index as u64 + 1));
+            assert_eq!(report.sequence, index as u64 + 2);
+        }
+        assert_eq!(
+            collector.status(),
+            CollectorStatus {
+                stats: RingStats {
+                    len: EventKind::ALL.len(),
+                    accepted: EventKind::ALL.len() as u64,
+                    capacity_dropped: 0,
+                },
+                sequence: EventKind::ALL.len() as u64 + 1,
+            }
+        );
+
+        let mut query = DiagnosticQuery::new(
+            None,
+            Severity::Info,
+            PrivacyClass::Internal,
+            EventKind::ALL.len(),
+        );
+        let first = collector.query_page::<3>(&mut query);
+        let second = collector.query_page::<3>(&mut query);
+        let third = collector.query_page::<3>(&mut query);
+        assert_eq!((first.len(), second.len(), third.len()), (3, 3, 2));
+        let mut ids = [0u64; 8];
+        for (slot, event) in first
+            .events
+            .iter()
+            .chain(second.events.iter())
+            .chain(third.events.iter())
+            .flatten()
+            .enumerate()
+        {
+            ids[slot] = event.id();
+        }
+        assert_eq!(ids, [1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let reopened = DiagnosticCollector::open(collector.into_device()).unwrap();
+        assert_eq!(
+            reopened.status(),
+            CollectorStatus {
+                stats: RingStats {
+                    len: EventKind::ALL.len(),
+                    accepted: EventKind::ALL.len() as u64,
+                    capacity_dropped: 0,
+                },
+                sequence: EventKind::ALL.len() as u64 + 1,
+            }
+        );
+    }
+
+    #[test]
+    fn collector_commit_failure_keeps_published_state_and_reopen_snapshot() {
+        let mut collector = DiagnosticCollector::format(MemoryDisk::new()).unwrap();
+        collector
+            .collect(base(EventKind::Network, Severity::Warning))
+            .unwrap();
+        let before = collector.status();
+        collector.store.device.fail_write_at = Some(collector.store.device.writes);
+        assert_eq!(
+            collector.collect(base(EventKind::StorageCorruption, Severity::Critical)),
+            Err(CollectError::Store(DiagnosticStoreError::Io(
+                DiagnosticIoError::Write
+            )))
+        );
+        assert_eq!(collector.status(), before);
+
+        collector.store.device.fail_write_at = None;
+        let reopened = DiagnosticCollector::open(collector.into_device()).unwrap();
+        assert_eq!(reopened.status(), before);
+        let mut query = DiagnosticQuery::new(None, Severity::Info, PrivacyClass::Internal, 16);
+        let page = reopened.query_page::<16>(&mut query);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page.get(0).unwrap().kind(), EventKind::Network);
+    }
+
+    #[test]
+    fn collector_query_never_exposes_above_ceiling_events() {
+        let mut collector = DiagnosticCollector::format(MemoryDisk::new()).unwrap();
+        collector
+            .collect(base(EventKind::Network, Severity::Warning))
+            .unwrap();
+        let mut sensitive = base(EventKind::ServiceCrash, Severity::Error);
+        sensitive.privacy = PrivacyClass::Sensitive;
+        collector.collect(sensitive).unwrap();
+        let mut secret = base(EventKind::KernelException, Severity::Critical);
+        secret.privacy = PrivacyClass::Secret;
+        collector.collect(secret).unwrap();
+
+        let mut query = DiagnosticQuery::new(None, Severity::Info, PrivacyClass::Internal, 16);
+        let page = collector.query_page::<16>(&mut query);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page.get(0).unwrap().kind(), EventKind::Network);
     }
 }
