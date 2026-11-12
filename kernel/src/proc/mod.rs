@@ -101,7 +101,8 @@ struct LinuxMapping {
 #[cfg(feature = "linux-abi")]
 #[derive(Clone, Copy)]
 struct VforkParent {
-    exec_committed_at: Option<u64>,
+    task: TaskId,
+    exec_committed: bool,
 }
 
 /// 进程状态。
@@ -2485,6 +2486,7 @@ pub fn vfork_linux_process(
     fs_base: u64,
     preserved_regs: [u64; 6],
     syscall_args: [u64; 6],
+    parent_task: TaskId,
 ) -> Result<ObjId, ProcError> {
     let parent_stack_top = crate::arch::kernel_stack();
     let (parent_linux_pid, calls, state, parent_root, frames, memory_caps) =
@@ -2519,20 +2521,20 @@ pub fn vfork_linux_process(
     let phys_offset = crate::boot::get()
         .and_then(|boot| boot.phys_offset)
         .ok_or(ProcError::Map(MapError::NotMapped))?;
-    let parent_stack_frame = unsafe {
-        crate::arch::translate_in(
-            parent_root,
-            phys_offset,
-            parent_stack_top.saturating_sub(1),
-        )
-    }
-    .map(|(frame, _)| frame)
-    .ok_or(ProcError::Map(MapError::NotMapped))?;
-    if frames
-        .iter()
-        .any(|page| page.frame() == parent_stack_frame)
+    let parent_stack_base = parent_stack_top
+        .checked_sub(crate::sched::stack::STACK_SIZE as u64)
+        .ok_or(ProcError::Map(MapError::InvalidAddress))?;
+    for va in (parent_stack_base..parent_stack_top).step_by(kernel_core::frame::FRAME_SIZE as usize)
     {
-        return Err(ProcError::NotTransferable);
+        let parent_stack_frame = unsafe { crate::arch::translate_in(parent_root, phys_offset, va) }
+            .map(|(frame, _)| frame)
+            .ok_or(ProcError::Map(MapError::NotMapped))?;
+        if frames
+            .iter()
+            .any(|page| page.frame() == parent_stack_frame)
+        {
+            return Err(ProcError::NotTransferable);
+        }
     }
 
     let child = create_linux("linux-vfork", calls)?;
@@ -2556,7 +2558,8 @@ pub fn vfork_linux_process(
         linux.pid = child_pid;
         linux.ppid = parent_linux_pid;
         linux.vfork_parent = Some(VforkParent {
-            exec_committed_at: None,
+            task: parent_task,
+            exec_committed: false,
         });
         p.frames = frames;
         p.memory_caps = memory_caps;
@@ -2603,7 +2606,7 @@ pub(crate) fn vfork_commit_exec(child: ObjId) -> bool {
         let Some(parent) = linux.vfork_parent.as_mut() else {
             return Ok(false);
         };
-        parent.exec_committed_at = Some(sched::timer_ticks());
+        parent.exec_committed = true;
         Ok(true)
     })
     .ok()
@@ -2622,8 +2625,7 @@ pub(crate) fn vfork_parent_may_resume(child: ObjId) -> bool {
                 .linux
                 .as_ref()
                 .and_then(|linux| linux.vfork_parent)
-                .and_then(|parent| parent.exec_committed_at)
-                .is_some_and(|tick| sched::timer_ticks() > tick);
+                .is_some_and(|parent| parent.exec_committed);
             p.state != ProcState::Running || committed
         }
         _ => true,
@@ -3586,8 +3588,23 @@ pub fn begin_exit(pid: ObjId, code: i64) -> bool {
     let started = begin_exit_in_table(pid, code);
     if started {
         wake_threads(pid);
+        if let Some(task) = vfork_parent_task(pid) {
+            sched::wake(task);
+        }
     }
     started
+}
+
+fn vfork_parent_task(pid: ObjId) -> Option<TaskId> {
+    with_proc(pid, |process| {
+        Ok(process
+            .linux
+            .as_ref()
+            .and_then(|linux| linux.vfork_parent)
+            .map(|parent| parent.task))
+    })
+    .ok()
+    .flatten()
 }
 
 /// 唤醒进程 `pid` 的全部睡眠线程（不在睡眠的线程不受影响）。调度器不持锁，可在登记表锁内调用。

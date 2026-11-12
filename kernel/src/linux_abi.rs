@@ -2355,6 +2355,7 @@ fn linux_vfork(
 ) -> Result<u64, CompatErrno> {
     let (user_rip, user_stack) = user_ip.ok_or(CompatErrno::NoSys)?;
     let parent_space = proc::current_space_root(pid).ok_or(CompatErrno::NoSys)?;
+    let (parent_task, _) = sched::current();
     let child = proc::vfork_linux_process(
         pid,
         user_rip,
@@ -2362,6 +2363,7 @@ fn linux_vfork(
         crate::arch::user_fs_base(),
         preserved_regs,
         args,
+        parent_task,
     )
     .map_err(|error| match error {
         proc::ProcError::NotTransferable => CompatErrno::NoSys,
@@ -2373,11 +2375,11 @@ fn linux_vfork(
             sched::set_current_space(Some(parent_space));
             return Ok(u64::from(child_pid));
         }
-        let blocked = proc::block_step();
-        if blocked.is_err() {
+        if proc::current_exiting() {
             let _ = proc::begin_exit(child, -1);
             return Err(CompatErrno::Interrupted);
         }
+        sched::sleep_until(sched::timer_ticks().saturating_add(5));
     }
 }
 

@@ -444,8 +444,6 @@ int main(void) {
         return 68;
     }
     if (vfork_child == 0) {
-        printf("jasper-vfork-child pid=%d ppid=%d\n", getpid(), getppid());
-        fflush(stdout);
         char *vfork_argv[] = {
             "/usr/bin/printf",
             "jasper-vfork-%s\n",

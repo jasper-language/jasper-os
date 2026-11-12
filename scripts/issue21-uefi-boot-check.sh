@@ -127,6 +127,9 @@ if [ "$MODE" = root-exec ]; then
   QEMU_EXTRA=(-cpu "$CPU" -device virtio-rng-pci
     -device isa-debug-exit,iobase=0xf4,iosize=0x04)
 fi
+if [ "${ISSUE21_QEMU_TRACE:-0}" = 1 ]; then
+  QEMU_EXTRA+=(-d int -D "$OUT/qemu-int.log")
+fi
 exec 9>"$QEMU_LOCK"
 if ! flock -n 9; then
   echo "FAIL another Jasper-OS QEMU run holds $QEMU_LOCK" >&2
