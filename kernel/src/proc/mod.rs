@@ -2877,6 +2877,16 @@ pub fn workload_key(pid: ObjId) -> Option<kernel_core::workload::WorkloadKey> {
         .flatten()
 }
 
+pub(crate) fn workload_key_in(
+    table: &kobj::Table,
+    pid: ObjId,
+) -> Option<kernel_core::workload::WorkloadKey> {
+    match table.get(pid) {
+        Ok(KObject::Process(process)) => process.workload,
+        _ => None,
+    }
+}
+
 /// 进程 `pid` 的 CPU 记账（设置过上限时有值；进程销毁后 `None`）。
 pub fn cpu_stats(pid: ObjId) -> Option<sched::policy::CpuLimitStats> {
     let g = with_proc(pid, |p| Ok(p.cpu_group)).ok().flatten()?;

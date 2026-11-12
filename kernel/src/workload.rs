@@ -87,6 +87,17 @@ pub fn reserve_memory(key: WorkloadKey, bytes: u64) -> Result<(), WorkloadError>
     )
 }
 
+pub fn reserve_ring_entries(key: WorkloadKey, entries: u32) -> Result<(), WorkloadError> {
+    WORKLOADS.lock().charge(
+        key,
+        ResourceUsage {
+            memory_bytes: 0,
+            threads: 0,
+            ring_entries: entries,
+        },
+    )
+}
+
 pub fn release_memory(key: WorkloadKey, bytes: u64) {
     let _ = WORKLOADS.lock().release(
         key,
@@ -94,6 +105,17 @@ pub fn release_memory(key: WorkloadKey, bytes: u64) {
             memory_bytes: bytes,
             threads: 0,
             ring_entries: 0,
+        },
+    );
+}
+
+pub fn release_ring_entries(key: WorkloadKey, entries: u32) {
+    let _ = WORKLOADS.lock().release(
+        key,
+        ResourceUsage {
+            memory_bytes: 0,
+            threads: 0,
+            ring_entries: entries,
         },
     );
 }
