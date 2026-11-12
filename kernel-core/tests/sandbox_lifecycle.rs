@@ -172,6 +172,47 @@ fn sandbox_state_is_read_from_workload_not_copied() {
 }
 
 #[test]
+fn cross_domain_queries_and_failed_resource_destruction_are_rejected() {
+    let mut workloads = Workloads::new();
+    let mut sandboxes = Sandboxes::new();
+    let key = sandboxes.create(&mut workloads, DOMAIN, LIMITS).unwrap();
+    running(&mut workloads, &sandboxes, key);
+    let root = sandboxes.root_snapshot(&workloads, key).unwrap().key;
+    let usage = ResourceUsage {
+        memory_bytes: 4096,
+        threads: 1,
+        ring_entries: 1,
+    };
+    workloads.charge(root, usage).unwrap();
+    sandboxes.fail(&mut workloads, key).unwrap();
+
+    let foreign = DomainKey {
+        id: DOMAIN.id + 1,
+        generation: DOMAIN.generation,
+    };
+    assert_eq!(
+        sandboxes.snapshot_in_domain(&workloads, foreign, key),
+        Err(SandboxError::InvalidKey)
+    );
+    assert_eq!(
+        sandboxes
+            .snapshot_in_domain(&workloads, DOMAIN, key)
+            .unwrap()
+            .state,
+        WorkloadState::Failed
+    );
+    assert_eq!(
+        sandboxes.destroy(&mut workloads, key),
+        Err(SandboxError::Workload(WorkloadError::Quota))
+    );
+    assert!(sandboxes.snapshot(&workloads, key).is_ok());
+
+    workloads.release(root, usage).unwrap();
+    sandboxes.destroy(&mut workloads, key).unwrap();
+    assert!(sandboxes.is_empty());
+}
+
+#[test]
 fn stale_sandbox_generation_cannot_alias_reused_slot() {
     let mut workloads = Workloads::new();
     let mut sandboxes = Sandboxes::new();

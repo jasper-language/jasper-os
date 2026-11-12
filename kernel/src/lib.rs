@@ -120,6 +120,7 @@ pub mod prog_demo;
 pub mod ring;
 pub mod rt;
 pub mod rtclass_demo;
+pub mod sandbox;
 #[cfg(feature = "user-programs")]
 pub mod robust_demo;
 #[cfg(feature = "user-programs")]

@@ -180,6 +180,22 @@ impl<const N: usize> SandboxTable<N> {
         })
     }
 
+    /// Query a sandbox only through its authoritative security domain.
+    ///
+    /// 仅通过 Sandbox 的权威安全域查询；其他域与不存在的标识不可区分。
+    pub fn snapshot_in_domain<const W: usize>(
+        &self,
+        workloads: &WorkloadTable<W>,
+        domain: DomainKey,
+        key: SandboxKey,
+    ) -> Result<SandboxSnapshot, SandboxError> {
+        let snapshot = self.snapshot(workloads, key)?;
+        if snapshot.domain != domain {
+            return Err(SandboxError::InvalidKey);
+        }
+        Ok(snapshot)
+    }
+
     /// Return the complete authoritative root Workload record.
     pub fn root_snapshot<const W: usize>(
         &self,
@@ -269,9 +285,29 @@ impl<const N: usize> SandboxTable<N> {
         workloads: &mut WorkloadTable<W>,
         key: SandboxKey,
     ) -> Result<(), SandboxError> {
+        self.destroy_with(workloads, key, |workloads, root| {
+            Ok(workloads.destroy(root)?)
+        })
+    }
+
+    /// Destroy one sandbox through a caller-supplied authoritative root
+    /// destructor. The sandbox mapping is removed only after the destructor
+    /// succeeds, allowing the kernel to retain member and CPU-group checks.
+    ///
+    /// 通过调用方提供的权威 root 销毁逻辑删除 Sandbox；只有销毁成功后才
+    /// 移除映射，内核因此可以复用成员与 CPU group 回收检查。
+    pub fn destroy_with<const W: usize, F>(
+        &mut self,
+        workloads: &mut WorkloadTable<W>,
+        key: SandboxKey,
+        destroy_root: F,
+    ) -> Result<(), SandboxError>
+    where
+        F: FnOnce(&mut WorkloadTable<W>, WorkloadKey) -> Result<(), WorkloadError>,
+    {
         let slot = key.slot as usize;
         let record = self.record(key)?;
-        workloads.destroy(record.root)?;
+        destroy_root(workloads, record.root)?;
         self.slots[slot] = None;
         Ok(())
     }
