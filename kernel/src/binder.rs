@@ -23,6 +23,7 @@ const BINDER_TYPE_BINDER: u32 = 0x7362_2a85;
 const BINDER_TYPE_WEAK_BINDER: u32 = 0x7762_2a85;
 const BINDER_TYPE_HANDLE: u32 = 0x7368_2a85;
 const BINDER_TYPE_WEAK_HANDLE: u32 = 0x7768_2a85;
+const BINDER_TYPE_FD: u32 = 0x6664_2a85;
 const FLAT_BINDER_OBJECT_BYTES: usize = 24;
 
 const BC_TRANSACTION: u32 = 0x4040_6300;
@@ -306,22 +307,61 @@ fn translate_objects(
                 | BINDER_TYPE_WEAK_BINDER
                 | BINDER_TYPE_HANDLE
                 | BINDER_TYPE_WEAK_HANDLE
+                | BINDER_TYPE_FD
         ) {
             return Err(CompatErrno::NoSys);
         }
         objects.push((offset, value, cookie, object_type));
     }
 
-    let mut state = BINDER.lock();
-    state
-        .nodes
+    let mut installed_fds = Vec::new();
+    installed_fds
         .try_reserve(objects.len())
         .map_err(|_| CompatErrno::NoMemory)?;
-    state
-        .handles
-        .try_reserve(objects.len())
-        .map_err(|_| CompatErrno::NoMemory)?;
-    for (offset, value, cookie, object_type) in objects {
+    for (offset, value, _cookie, object_type) in &objects {
+        if *object_type != BINDER_TYPE_FD {
+            continue;
+        }
+        let fd = u32::try_from(*value).map_err(|_| CompatErrno::Invalid)?;
+        let transfer = match proc::linux_capture_fd_transfer(sender, fd) {
+            Ok(transfer) => transfer,
+            Err(_) => {
+                for installed in installed_fds {
+                    let _ = proc::linux_close_fd(recipient, installed);
+                }
+                return Err(CompatErrno::BadFd);
+            }
+        };
+        match proc::linux_install_fd_transfer(recipient, transfer, false) {
+            Ok(installed) => {
+                let object = &mut data[*offset..*offset + FLAT_BINDER_OBJECT_BYTES];
+                object[8..12].copy_from_slice(&installed.to_le_bytes());
+                object[12..16].fill(0);
+                installed_fds.push(installed);
+            }
+            Err(_) => {
+                for installed in installed_fds {
+                    let _ = proc::linux_close_fd(recipient, installed);
+                }
+                return Err(CompatErrno::NoSpace);
+            }
+        }
+    }
+
+    let result = (|| {
+        let mut state = BINDER.lock();
+        state
+            .nodes
+            .try_reserve(objects.len())
+            .map_err(|_| CompatErrno::NoMemory)?;
+        state
+            .handles
+            .try_reserve(objects.len())
+            .map_err(|_| CompatErrno::NoMemory)?;
+        for (offset, value, cookie, object_type) in objects {
+        if object_type == BINDER_TYPE_FD {
+            continue;
+        }
         let weak = matches!(
             object_type,
             BINDER_TYPE_WEAK_BINDER | BINDER_TYPE_WEAK_HANDLE
@@ -410,8 +450,15 @@ fn translate_objects(
         object[..4].copy_from_slice(&translated_type.to_le_bytes());
         object[8..16].copy_from_slice(&translated.to_le_bytes());
         object[16..24].copy_from_slice(&translated_cookie.to_le_bytes());
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        for installed in installed_fds {
+            let _ = proc::linux_close_fd(recipient, installed);
+        }
     }
-    Ok(())
+    result
 }
 
 fn enqueue_transaction(

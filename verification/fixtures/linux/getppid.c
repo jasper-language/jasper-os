@@ -1582,14 +1582,25 @@ int main(void) {
             _exit(172);
         }
         char response[4] = {0};
-        char second_data[6] = "SECOND";
+        int binder_fd = memfd_create("binder-fd", 0);
+        if (binder_fd < 0 || write(binder_fd, "FDOK", 4) != 4 ||
+            lseek(binder_fd, 0, SEEK_SET) != 0) {
+            _exit(173);
+        }
+        struct binder_fd_object second_object = {
+            .hdr.type = BINDER_TYPE_FD,
+            .fd = binder_fd,
+            .cookie = 0x4444,
+        };
+        binder_size_t second_offset = 0;
         struct binder_transaction_data second_request = {
             .target.handle = returned_object.handle,
             .code = 0x5678,
             .flags = 0,
-            .data_size = sizeof(second_data),
-            .offsets_size = 0,
-            .data.ptr.buffer = (binder_uintptr_t)second_data,
+            .data_size = sizeof(second_object),
+            .offsets_size = sizeof(second_offset),
+            .data.ptr.buffer = (binder_uintptr_t)&second_object,
+            .data.ptr.offsets = (binder_uintptr_t)&second_offset,
         };
         memcpy(write_buffer, &(uint32_t){BC_TRANSACTION}, 4);
         memcpy(write_buffer + 4, &second_request, sizeof(second_request));
@@ -1601,8 +1612,9 @@ int main(void) {
         if (ioctl(client, BINDER_WRITE_READ, &exchange) != 0 ||
             exchange.read_consumed != 4 ||
             *(uint32_t *)read_buffer != BR_TRANSACTION_COMPLETE) {
-            _exit(173);
+            _exit(174);
         }
+        close(binder_fd);
         memset(&exchange, 0, sizeof(exchange));
         exchange.read_size = sizeof(read_buffer);
         exchange.read_buffer = (binder_uintptr_t)read_buffer;
@@ -1717,13 +1729,28 @@ int main(void) {
     }
     struct binder_transaction_data second_received;
     memcpy(&second_received, server_read + 4, sizeof(second_received));
-    char second_received_data[6] = {0};
-    memcpy(second_received_data, (void *)second_received.data.ptr.buffer, 6);
+    struct binder_fd_object received_fd_object;
+    binder_size_t received_fd_offset = UINT64_MAX;
+    memcpy(&received_fd_object, (void *)second_received.data.ptr.buffer,
+           sizeof(received_fd_object));
+    memcpy(&received_fd_offset,
+           (void *)second_received.data.ptr.offsets,
+           sizeof(received_fd_offset));
     if (second_received.code != 0x5678 ||
         second_received.sender_pid != binder_child ||
-        second_received.data_size != 6 ||
-        memcmp(second_received_data, "SECOND", 6) != 0) {
+        second_received.data_size != sizeof(received_fd_object) ||
+        second_received.offsets_size != sizeof(received_fd_offset) ||
+        received_fd_offset != 0 ||
+        received_fd_object.hdr.type != BINDER_TYPE_FD ||
+        received_fd_object.fd < 0 ||
+        received_fd_object.cookie != 0x4444) {
         return 178;
+    }
+    char received_fd_data[4] = {0};
+    if (read(received_fd_object.fd, received_fd_data, 4) != 4 ||
+        memcmp(received_fd_data, "FDOK", 4) != 0 ||
+        close(received_fd_object.fd) != 0) {
+        return 179;
     }
     char done_data[4] = "DONE";
     struct binder_transaction_data done = {
