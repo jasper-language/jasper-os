@@ -1433,6 +1433,9 @@ fn execute(
         LinuxSyscall::Chdir => compat_result(linux_chdir(pid, call.args[0])),
         LinuxSyscall::OpenAt => compat_result(linux_openat(pid, call.args)),
         LinuxSyscall::Fchdir => compat_result(linux_fchdir(pid, call.args[0])),
+        LinuxSyscall::Fchmod => compat_result(linux_fchmod(pid, call.args)),
+        LinuxSyscall::FchmodAt => compat_result(linux_fchmodat(pid, call.args, false)),
+        LinuxSyscall::FchmodAt2 => compat_result(linux_fchmodat(pid, call.args, true)),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
         LinuxSyscall::Fstatfs => compat_result(linux_fstatfs(pid, call.args)),
         LinuxSyscall::Fsync => compat_result(linux_sync_fd(pid, call.args[0], false)),
@@ -4438,6 +4441,31 @@ fn linux_fchdir(pid: ObjId, fd: u64) -> Result<u64, CompatErrno> {
     } else {
         Err(CompatErrno::NoSys)
     }
+}
+
+fn linux_fchmod(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[1] & !0o7777 != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    Err(CompatErrno::ReadOnly)
+}
+
+fn linux_fchmodat(
+    pid: ObjId,
+    args: [u64; 6],
+    fchmodat2: bool,
+) -> Result<u64, CompatErrno> {
+    if args[2] & !0o7777 != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    linux_faccessat(
+        pid,
+        [args[0], args[1], 0, if fchmodat2 { args[3] } else { 0 }, 0, 0],
+        fchmodat2,
+    )?;
+    Err(CompatErrno::ReadOnly)
 }
 
 /// Changes the Linux compatibility current directory within the static namespace.
