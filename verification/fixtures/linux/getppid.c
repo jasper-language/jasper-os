@@ -5,6 +5,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <linux/android/binder.h>
 #include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -719,6 +720,18 @@ int main(void) {
         close(to_child[1]) != 0 || close(to_parent[0]) != 0 ||
         close(ashmem_fd) != 0) {
         return 154;
+    }
+    int binder_fd = open("/dev/binder", O_RDWR | O_CLOEXEC);
+    struct binder_version binder_version = {0};
+    uint32_t binder_threads = 4;
+    if (binder_fd < 0 ||
+        (fcntl(binder_fd, F_GETFD) & FD_CLOEXEC) == 0 ||
+        ioctl(binder_fd, BINDER_VERSION, &binder_version) != 0 ||
+        binder_version.protocol_version != BINDER_CURRENT_PROTOCOL_VERSION ||
+        ioctl(binder_fd, BINDER_SET_MAX_THREADS, &binder_threads) != 0 ||
+        ioctl(binder_fd, BINDER_THREAD_EXIT, 0) != 0 ||
+        close(binder_fd) != 0) {
+        return 155;
     }
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
