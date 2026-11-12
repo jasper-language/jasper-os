@@ -1461,6 +1461,7 @@ fn execute(
         LinuxSyscall::Mmap => compat_result(linux_mmap(pid, call.args)),
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
+        LinuxSyscall::Msync => compat_result(linux_msync(pid, call.args)),
         LinuxSyscall::Madvise => compat_result(linux_madvise(pid, call.args)),
         LinuxSyscall::Clone => compat_result(linux_clone(pid, call.args, user_ip, user_preserved)),
         LinuxSyscall::Clone3 => {
@@ -2282,6 +2283,37 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         args[2] & PROT_EXEC != 0,
     )
     .map_err(|_| CompatErrno::NoMemory)?;
+    Ok(0)
+}
+
+fn linux_msync(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    const MS_ASYNC: u64 = 0x1;
+    const MS_INVALIDATE: u64 = 0x2;
+    const MS_SYNC: u64 = 0x4;
+    let address = args[0];
+    let length = args[1];
+    let flags = args[2];
+    if address % PAGE != 0
+        || length == 0
+        || flags & !(MS_ASYNC | MS_INVALIDATE | MS_SYNC) != 0
+        || flags & (MS_ASYNC | MS_SYNC) == (MS_ASYNC | MS_SYNC)
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let end = address.checked_add(length).ok_or(CompatErrno::Invalid)?;
+    if address < crate::arch::USER_WINDOW.0 || end > crate::arch::USER_WINDOW.1 {
+        return Err(CompatErrno::NoMemory);
+    }
+    let rounded = length.checked_add(PAGE - 1).ok_or(CompatErrno::Invalid)? & !(PAGE - 1);
+    let end = address.checked_add(rounded).ok_or(CompatErrno::Invalid)?;
+    let mut page = address;
+    while page < end {
+        if proc::page_flags(pid, page).is_none() {
+            return Err(CompatErrno::NoMemory);
+        }
+        page += PAGE;
+    }
     Ok(0)
 }
 
