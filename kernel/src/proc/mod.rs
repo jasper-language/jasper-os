@@ -3832,6 +3832,7 @@ pub fn begin_exit(pid: ObjId, code: i64) -> bool {
     let started = begin_exit_in_table(pid, code);
     if started {
         wake_threads(pid);
+        #[cfg(feature = "linux-abi")]
         if let Some(task) = vfork_parent_task(pid) {
             sched::wake(task);
         }
@@ -3839,6 +3840,7 @@ pub fn begin_exit(pid: ObjId, code: i64) -> bool {
     started
 }
 
+#[cfg(feature = "linux-abi")]
 fn vfork_parent_task(pid: ObjId) -> Option<TaskId> {
     with_proc(pid, |process| {
         Ok(process
