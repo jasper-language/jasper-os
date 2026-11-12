@@ -46,6 +46,14 @@ pub fn unbind_member(key: WorkloadKey, member: u64) -> Result<(), MembershipErro
     MEMBERS.lock().detach(key, member)
 }
 
+pub fn destroy(key: WorkloadKey) -> Result<(), WorkloadError> {
+    let mut workloads = WORKLOADS.lock();
+    if MEMBERS.lock().count_for(key) != 0 {
+        return Err(WorkloadError::InvalidState);
+    }
+    workloads.destroy(key)
+}
+
 pub fn reserve_thread(key: WorkloadKey) -> Result<(), WorkloadError> {
     WORKLOADS.lock().charge(
         key,
