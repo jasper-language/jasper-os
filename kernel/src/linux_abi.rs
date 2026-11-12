@@ -1449,6 +1449,8 @@ fn execute(
         LinuxSyscall::Fcntl => compat_result(linux_fcntl(pid, call.args)),
         LinuxSyscall::Poll => compat_result(linux_poll(pid, call.args)),
         LinuxSyscall::PPoll => compat_result(linux_ppoll(pid, call.args)),
+        LinuxSyscall::Select => compat_result(linux_select(pid, call.args, false)),
+        LinuxSyscall::PSelect6 => compat_result(linux_select(pid, call.args, true)),
         LinuxSyscall::Ioctl => compat_result(linux_ioctl(pid, call.args)),
         LinuxSyscall::StatFs => compat_result(linux_statfs(call.args)),
         LinuxSyscall::ReadLink => compat_result(linux_readlink(pid, call.args)),
@@ -4977,6 +4979,149 @@ fn linux_ppoll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         pid,
         [args[0], args[1], timeout, 0, 0, 0],
     )
+}
+
+/// Implements `select(2)`/`pselect6(2)` by translating bounded fd sets through
+/// the validated poll readiness path.
+fn linux_select(
+    pid: ObjId,
+    args: [u64; 6],
+    pselect: bool,
+) -> Result<u64, CompatErrno> {
+    const FDSET_BYTES: usize = 128;
+    const POLLIN: u16 = 0x001;
+    const POLLOUT: u16 = 0x004;
+    const POLLERR: u16 = 0x008;
+    const POLLHUP: u16 = 0x010;
+    let nfds = usize::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    if nfds > FDSET_BYTES * 8 {
+        return Err(CompatErrno::Invalid);
+    }
+    if pselect && args[5] != 0 {
+        let mut raw = [0u8; 16];
+        copy_from_user(&mut raw, args[5], 16).map_err(|_| CompatErrno::Fault)?;
+        let mask = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+        let size = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+        if mask != 0 {
+            return Err(CompatErrno::NoSys);
+        }
+        if size != 0 && size != 8 {
+            return Err(CompatErrno::Invalid);
+        }
+    }
+    let mut read_set = [0u8; FDSET_BYTES];
+    let mut write_set = [0u8; FDSET_BYTES];
+    let mut except_set = [0u8; FDSET_BYTES];
+    let mut have_read = false;
+    let mut have_write = false;
+    let mut have_except = false;
+    if args[1] != 0 {
+        copy_from_user(&mut read_set, args[1], FDSET_BYTES)
+            .map_err(|_| CompatErrno::Fault)?;
+        have_read = true;
+    }
+    if args[2] != 0 {
+        copy_from_user(&mut write_set, args[2], FDSET_BYTES)
+            .map_err(|_| CompatErrno::Fault)?;
+        have_write = true;
+    }
+    if args[3] != 0 {
+        copy_from_user(&mut except_set, args[3], FDSET_BYTES)
+            .map_err(|_| CompatErrno::Fault)?;
+        have_except = true;
+    }
+    let mut poll_entries = alloc::vec::Vec::new();
+    for fd in 0..nfds {
+        let bit = 1u8 << (fd % 8);
+        let byte = fd / 8;
+        let mut events = 0u16;
+        if have_read && read_set[byte] & bit != 0 {
+            events |= POLLIN;
+        }
+        if have_write && write_set[byte] & bit != 0 {
+            events |= POLLOUT;
+        }
+        if events != 0 || (have_except && except_set[byte] & bit != 0) {
+            poll_entries.push((fd as i32, events));
+        }
+    }
+    let timeout = if args[4] == 0 {
+        u32::MAX as u64
+    } else {
+        let size = if pselect { 16 } else { 16 };
+        let mut raw = [0u8; 16];
+        copy_from_user(&mut raw, args[4], size).map_err(|_| CompatErrno::Fault)?;
+        let seconds = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+        let fraction = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+        let limit = if pselect { 1_000_000_000 } else { 1_000_000 };
+        if fraction >= limit {
+            return Err(CompatErrno::Invalid);
+        }
+        seconds
+            .checked_mul(1_000)
+            .and_then(|millis| {
+                millis.checked_add(if pselect {
+                    fraction.div_ceil(1_000_000)
+                } else {
+                    fraction.div_ceil(1_000)
+                })
+            })
+            .filter(|millis| *millis <= i32::MAX as u64)
+            .ok_or(CompatErrno::Invalid)?
+    };
+    if poll_entries.is_empty() {
+        return linux_poll(pid, [0, 0, timeout, 0, 0, 0]);
+    }
+    let mut bytes = alloc::vec![0u8; poll_entries.len() * 8];
+    for (index, (fd, events)) in poll_entries.iter().enumerate() {
+        let start = index * 8;
+        bytes[start..start + 4].copy_from_slice(&fd.to_le_bytes());
+        bytes[start + 4..start + 6].copy_from_slice(&events.to_le_bytes());
+    }
+    let address = proc::linux_alloc_transaction_buffer(pid, &bytes)
+        .ok_or(CompatErrno::NoMemory)?;
+    let result = linux_poll(
+        pid,
+        [address, poll_entries.len() as u64, timeout, 0, 0, 0],
+    );
+    let readback = if result.is_ok() {
+        let mut output = alloc::vec![0u8; bytes.len()];
+        copy_from_user(&mut output, address, bytes.len()).map_err(|_| CompatErrno::Fault)?;
+        Some(output)
+    } else {
+        None
+    };
+    let _ = proc::linux_free_transaction_buffer(pid, address, bytes.len());
+    let readback = readback.ok_or_else(|| result.unwrap_err())?;
+    let mut ready_read = [0u8; FDSET_BYTES];
+    let mut ready_write = [0u8; FDSET_BYTES];
+    let mut ready_except = [0u8; FDSET_BYTES];
+    for (index, (fd, _)) in poll_entries.iter().enumerate() {
+        let revents = u16::from_le_bytes(
+            readback[index * 8 + 6..index * 8 + 8].try_into().unwrap(),
+        );
+        let bit = 1u8 << (*fd as usize % 8);
+        let byte = *fd as usize / 8;
+        if revents & (POLLIN | POLLHUP | POLLERR) != 0 {
+            ready_read[byte] |= bit;
+        }
+        if revents & (POLLOUT | POLLERR) != 0 {
+            ready_write[byte] |= bit;
+        }
+        if revents & (POLLERR | POLLHUP) != 0 {
+            ready_except[byte] |= bit;
+        }
+    }
+    if args[1] != 0 {
+        copy_to_user(args[1], &ready_read, FDSET_BYTES).map_err(|_| CompatErrno::Fault)?;
+    }
+    if args[2] != 0 {
+        copy_to_user(args[2], &ready_write, FDSET_BYTES).map_err(|_| CompatErrno::Fault)?;
+    }
+    if args[3] != 0 {
+        copy_to_user(args[3], &ready_except, FDSET_BYTES).map_err(|_| CompatErrno::Fault)?;
+    }
+    result
 }
 
 /// Implements `statfs(2)` over the exact read-only verification namespace.
