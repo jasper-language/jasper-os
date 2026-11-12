@@ -190,6 +190,7 @@ struct LinuxEventFdHandle {
     semaphore: bool,
 }
 
+#[cfg(feature = "linux-abi")]
 pub(crate) struct LinuxFdTransfer {
     description: compat_core::FdDescription,
     resource: LinuxFdResource,
