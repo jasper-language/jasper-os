@@ -80,6 +80,8 @@ const LINUX_SOCKET_HANDLE_BASE: u64 = 0x0000_8100_0000_0000;
 const LINUX_ASHMEM_HANDLE_BASE: u64 = 0x0000_8200_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_BINDER_HANDLE_BASE: u64 = 0x0000_8300_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_ION_DEVICE_HANDLE_BASE: u64 = 0x0000_8400_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -110,6 +112,10 @@ struct LinuxProcessState {
     next_ashmem_handle: u64,
     binder: Vec<Arc<LinuxBinderHandle>>,
     next_binder_handle: u64,
+    ion_devices: Vec<u64>,
+    next_ion_device_handle: u64,
+    ion_allocations: Vec<LinuxIonAllocation>,
+    next_ion_user_handle: u32,
     /// Set only on the child side of vfork. The parent task sleeps until the
     /// child commits exec or leaves `Running`.
     /// 仅 vfork 子进程携带；父任务睡眠到子进程提交 exec 或离开 Running。
@@ -163,6 +169,13 @@ struct LinuxBinderHandle {
 }
 
 #[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxIonAllocation {
+    user_handle: u32,
+    buffer: Arc<AshmemBuffer>,
+}
+
+#[cfg(feature = "linux-abi")]
 pub(crate) struct LinuxFdTransfer {
     description: compat_core::FdDescription,
     resource: LinuxFdResource,
@@ -174,6 +187,7 @@ enum LinuxFdResource {
     Pipe(Arc<compat_core::PipeEndpoint>),
     Ashmem(Arc<AshmemBuffer>),
     Binder(Arc<LinuxBinderHandle>),
+    IonDevice,
     Socket {
         endpoint: Arc<compat_core::UnixSocketEndpoint>,
         listener: Option<Arc<UnixListener>>,
@@ -1303,6 +1317,12 @@ pub(crate) fn linux_capture_fd_transfer(
                         .ok_or(LinuxFdTransferError::Invalid)?;
                     LinuxFdResource::Binder(binder)
                 }
+                compat_core::fd::CompatKind::Device
+                    if entry.handle >= LINUX_ION_DEVICE_HANDLE_BASE
+                        && linux.ion_devices.contains(&entry.handle) =>
+                {
+                    LinuxFdResource::IonDevice
+                }
                 _ => LinuxFdResource::Generic,
             };
             Ok(LinuxFdTransfer {
@@ -1329,9 +1349,17 @@ pub(crate) fn linux_install_fd_transfer(
                 description,
                 resource,
             } = transfer;
-            let (handle, pending_pipe, pending_ashmem, pending_binder, pending_socket) =
-                match resource {
-                LinuxFdResource::Generic => (description.entry.handle, None, None, None, None),
+            let (
+                handle,
+                pending_pipe,
+                pending_ashmem,
+                pending_binder,
+                pending_ion_device,
+                pending_socket,
+            ) = match resource {
+                LinuxFdResource::Generic => {
+                    (description.entry.handle, None, None, None, false, None)
+                }
                 LinuxFdResource::Pipe(endpoint) => {
                     linux
                         .pipes
@@ -1342,6 +1370,7 @@ pub(crate) fn linux_install_fd_transfer(
                         Some(endpoint),
                         None,
                         None,
+                        false,
                         None,
                     )
                 }
@@ -1355,6 +1384,7 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         Some(buffer),
                         None,
+                        false,
                         None,
                     )
                 }
@@ -1368,6 +1398,21 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         None,
                         Some(binder),
+                        false,
+                        None,
+                    )
+                }
+                LinuxFdResource::IonDevice => {
+                    linux
+                        .ion_devices
+                        .try_reserve(1)
+                        .map_err(|_| LinuxFdTransferError::NoSpace)?;
+                    (
+                        linux.next_ion_device_handle,
+                        None,
+                        None,
+                        None,
+                        true,
                         None,
                     )
                 }
@@ -1385,6 +1430,7 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         None,
                         None,
+                        false,
                         Some((endpoint, listener, controls)),
                     )
                 }
@@ -1419,6 +1465,13 @@ pub(crate) fn linux_install_fd_transfer(
                     handle,
                     max_threads: AtomicU32::new(binder.max_threads.load(Ordering::Acquire)),
                 }));
+            }
+            if pending_ion_device {
+                let next = handle
+                    .checked_add(1)
+                    .ok_or(LinuxFdTransferError::NoSpace)?;
+                linux.next_ion_device_handle = next;
+                linux.ion_devices.push(handle);
             }
             if let Some((endpoint, listener, controls)) = pending_socket {
                 let next = handle
@@ -1594,6 +1647,9 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     if handle >= LINUX_BINDER_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.binder.retain(|binder| binder.handle != handle);
     }
+    if handle >= LINUX_ION_DEVICE_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+        linux.ion_devices.retain(|device| *device != handle);
+    }
 }
 
 /// Opens one anonymous ashmem buffer descriptor.
@@ -1693,6 +1749,201 @@ pub(crate) fn linux_is_binder(pid: ObjId, handle: u64) -> bool {
             .is_some_and(|linux| linux.binder.iter().any(|binder| binder.handle == handle)),
         _ => false,
     })
+}
+
+/// Opens the legacy Android ION control device.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_open_ion(pid: ObjId, close_on_exec: bool) -> Option<u32> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.ion_devices.len() >= 8 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .ion_devices
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_ion_device_handle;
+        let next = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ.union(Rights::WRITE),
+                compat_core::fd::CompatKind::Device,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.next_ion_device_handle = next;
+        linux.ion_devices.push(handle);
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_is_ion_device(pid: ObjId, handle: u64) -> bool {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()
+            .is_some_and(|linux| linux.ion_devices.contains(&handle)),
+        _ => false,
+    })
+}
+
+/// Allocates one ION system-heap buffer and returns its per-process user
+/// handle without creating a userspace descriptor yet.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ion_alloc(
+    pid: ObjId,
+    size: u64,
+    alignment: u64,
+    heap_mask: u32,
+    flags: u32,
+) -> Result<u32, LinuxAshmemError> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    if size == 0
+        || size > MAX_BYTES
+        || alignment > PAGE
+        || heap_mask & 1 == 0
+        || flags & !3 != 0
+    {
+        return Err(LinuxAshmemError::Invalid);
+    }
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let linux_pid = linux.pid;
+        if linux.ion_allocations.len() >= 32 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .ion_allocations
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let user_handle = linux
+            .next_ion_user_handle
+            .checked_add(1)
+            .ok_or(ProcError::NoTaskSlot)?;
+        let current = linux.next_ion_user_handle;
+        let pages_count = size.div_ceil(PAGE);
+        let mut charge = p
+            .memory_account
+            .reserve(
+                pages_count,
+                0,
+                p.memory_owned_limit,
+                p.memory_pin_limit,
+            )
+            .ok_or(ProcError::MemoryQuota)?;
+        let mut pages = Vec::new();
+        pages
+            .try_reserve_exact(pages_count as usize)
+            .map_err(|_| ProcError::OutOfFrames)?;
+        for _ in 0..pages_count {
+            let page_charge = charge.take_page().ok_or(ProcError::OutOfFrames)?;
+            pages.push(
+                crate::mm::memory_object::Page::zeroed(page_charge)
+                    .ok_or(ProcError::OutOfFrames)?,
+            );
+        }
+        let buffer = Arc::new(AshmemBuffer {
+            id: (u64::from(current) << 32) | u64::from(linux_pid),
+            size: AtomicU64::new(size),
+            protection: AtomicU32::new(3),
+            pins: AtomicU32::new(0),
+            name: SpinLock::new(([0; 256], 0)),
+            pages: SpinLock::new(pages),
+        });
+        linux.next_ion_user_handle = user_handle;
+        linux.ion_allocations.push(LinuxIonAllocation {
+            user_handle: current,
+            buffer,
+        });
+        Ok(current)
+    })
+    .map_err(|_| LinuxAshmemError::NoMemory)
+}
+
+/// Installs a userspace mapping fd for one ION allocation.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ion_share(
+    pid: ObjId,
+    user_handle: u32,
+    close_on_exec: bool,
+) -> Result<u32, LinuxAshmemError> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let buffer = linux
+            .ion_allocations
+            .iter()
+            .find(|allocation| allocation.user_handle == user_handle)
+            .map(|allocation| Arc::clone(&allocation.buffer))
+            .ok_or(ProcError::NoTaskSlot)?;
+        linux
+            .ashmem
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_ashmem_handle;
+        let next = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ.union(Rights::WRITE),
+                compat_core::fd::CompatKind::Device,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.next_ashmem_handle = next;
+        linux.ashmem.push(LinuxAshmemHandle { handle, buffer });
+        Ok(fd.fd())
+    })
+    .map_err(|_| LinuxAshmemError::NoMemory)
+}
+
+/// Imports one existing ION mapping fd as a new user handle.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ion_import(pid: ObjId, fd: u32) -> Result<u32, LinuxAshmemError> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let entry = linux.fds.get_fd(fd).ok_or(ProcError::NoTaskSlot)?;
+        let buffer = linux
+            .ashmem
+            .iter()
+            .find(|ashmem| ashmem.handle == entry.handle)
+            .map(|ashmem| Arc::clone(&ashmem.buffer))
+            .ok_or(ProcError::NoTaskSlot)?;
+        linux
+            .ion_allocations
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let user = linux.next_ion_user_handle;
+        linux.next_ion_user_handle = user.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        linux.ion_allocations.push(LinuxIonAllocation {
+            user_handle: user,
+            buffer,
+        });
+        Ok(user)
+    })
+    .map_err(|_| LinuxAshmemError::Invalid)
+}
+
+/// Releases one ION user handle while existing mapping fds retain the backing.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ion_free(pid: ObjId, user_handle: u32) -> Result<(), LinuxAshmemError> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let index = linux
+            .ion_allocations
+            .iter()
+            .position(|allocation| allocation.user_handle == user_handle)
+            .ok_or(ProcError::NoTaskSlot)?;
+        linux.ion_allocations.remove(index);
+        Ok(())
+    })
+    .map_err(|_| LinuxAshmemError::Invalid)
 }
 
 /// Resizes one empty ashmem buffer and commits its zeroed page backing
@@ -2382,6 +2633,10 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         next_ashmem_handle: LINUX_ASHMEM_HANDLE_BASE,
         binder: Vec::new(),
         next_binder_handle: LINUX_BINDER_HANDLE_BASE,
+        ion_devices: Vec::new(),
+        next_ion_device_handle: LINUX_ION_DEVICE_HANDLE_BASE,
+        ion_allocations: Vec::new(),
+        next_ion_user_handle: 1,
         vfork_parent: None,
     };
     create_process(name, SyscallSet::EMPTY, move |process| {
@@ -2415,6 +2670,9 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
             linux
                 .binder
                 .retain(|binder| linux.fds.handle_fd_count(binder.handle) != 0);
+            linux
+                .ion_devices
+                .retain(|device| linux.fds.handle_fd_count(*device) != 0);
             linux.mappings.clear();
             linux.brk = crate::arch::USER_WINDOW.0 + 0x1000_0000;
             linux.mmap_next = crate::arch::USER_WINDOW.0 + 0x4000_0000;
