@@ -1453,6 +1453,7 @@ fn execute(
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
         LinuxSyscall::Msync => compat_result(linux_msync(pid, call.args)),
+        LinuxSyscall::MinCore => compat_result(linux_mincore(pid, call.args)),
         LinuxSyscall::Madvise => compat_result(linux_madvise(pid, call.args)),
         LinuxSyscall::Clone => compat_result(linux_clone(pid, call.args, user_ip, user_preserved)),
         LinuxSyscall::Clone3 => {
@@ -2269,6 +2270,35 @@ fn linux_msync(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         page += PAGE;
     }
+    Ok(0)
+}
+
+fn linux_mincore(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    let address = args[0];
+    let length = args[1];
+    if address % PAGE != 0 || length == 0 || args[2] == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let rounded = length.checked_add(PAGE - 1).ok_or(CompatErrno::Invalid)? & !(PAGE - 1);
+    let end = address
+        .checked_add(rounded)
+        .filter(|end| address >= crate::arch::USER_WINDOW.0 && *end <= crate::arch::USER_WINDOW.1)
+        .ok_or(CompatErrno::NoMemory)?;
+    let pages = rounded / PAGE;
+    let mut residency = alloc::vec::Vec::new();
+    residency
+        .try_reserve(pages as usize)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    let mut page = address;
+    while page < end {
+        if proc::page_flags(pid, page).is_none() {
+            return Err(CompatErrno::NoMemory);
+        }
+        residency.push(1);
+        page += PAGE;
+    }
+    copy_to_user(args[2], &residency, residency.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
 }
 

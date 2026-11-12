@@ -750,7 +750,10 @@ int main(void) {
         return 152;
     }
     shared[0] = 'A';
-    if (msync(shared, ashmem_size, MS_SYNC) != 0) {
+    unsigned char ashmem_residency[2] = {0};
+    if (msync(shared, ashmem_size, MS_SYNC) != 0 ||
+        mincore(shared, ashmem_size, ashmem_residency) != 0 ||
+        ashmem_residency[0] != 1 || ashmem_residency[1] != 1) {
         return 201;
     }
     char token[2] = {0};
@@ -856,7 +859,10 @@ int main(void) {
         return 162;
     }
     ion_second[4096] = 'O';
+    unsigned char ion_residency[2] = {0};
     if (msync(ion_second, ion_allocation.len, MS_SYNC) != 0 ||
+        mincore(ion_second, ion_allocation.len, ion_residency) != 0 ||
+        ion_residency[0] != 1 || ion_residency[1] != 1 ||
         munmap(ion_second, ion_allocation.len) != 0) {
         return 163;
     }
