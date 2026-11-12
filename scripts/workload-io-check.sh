@@ -26,6 +26,7 @@ fi
 runtime_active() {
     local comm
     for comm in /proc/[0-9]*/comm; do
+        [ -r "$comm" ] || continue
         IFS= read -r name <"$comm" 2>/dev/null || continue
         case "$name" in
             qemu-system*|VBoxHeadless) return 0 ;;
