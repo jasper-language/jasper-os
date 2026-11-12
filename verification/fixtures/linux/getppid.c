@@ -26,6 +26,7 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <utime.h>
 #include <unistd.h>
 
 #define JASPER_ASHMEM_SET_NAME 0x41006101UL
@@ -1405,6 +1406,27 @@ int main(void) {
     errno = 0;
     if (truncate("/missing-truncate", 0) != -1 || errno != ENOENT) {
         return 234;
+    }
+    errno = 0;
+    if (utime("/usr/lib/x86_64-linux-gnu/libc.so.6", NULL) != -1 ||
+        errno != EROFS) {
+        return 239;
+    }
+    errno = 0;
+    if (utimes("/usr/lib/x86_64-linux-gnu/libc.so.6", NULL) != -1 ||
+        errno != EROFS) {
+        return 240;
+    }
+    errno = 0;
+    if (utimensat(AT_FDCWD, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                  NULL, 0) != -1 ||
+        errno != EROFS) {
+        return 242;
+    }
+    errno = 0;
+    if (utimensat(AT_FDCWD, "/missing-time", NULL, 0) != -1 ||
+        errno != ENOENT) {
+        return 243;
     }
     errno = 0;
     if (readlinkat(AT_FDCWD, "/not-in-compat-root",
