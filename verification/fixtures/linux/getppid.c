@@ -25,7 +25,12 @@
 int main(void) {
     if (getenv("JASPER_EXEC_CHILD") != NULL) {
         printf("jasper-exec-child pid=%d ppid=%d\n", getpid(), getppid());
-        return 0;
+        fflush(stdout);
+        char *registry_argv[] = {"/usr/bin/printf", "jasper-registry-ok\n", NULL};
+        char *registry_envp[] = {NULL};
+        execve(registry_argv[0], registry_argv, registry_envp);
+        printf("jasper-registry-fail errno=%d\n", errno);
+        return 74;
     }
     pid_t parent = getppid();
     if (parent != 0) {

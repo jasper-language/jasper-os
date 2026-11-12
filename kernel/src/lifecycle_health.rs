@@ -366,7 +366,11 @@ fn validate_system_root(
         Slot::A => (P0_SYSTEM_A_LBA, b"JASPER-SYS-A".as_slice()),
         Slot::B => (P0_SYSTEM_B_LBA, b"JASPER-SYS-B".as_slice()),
     };
-    let root = Ext4Reader::open(PartitionExt4Source { device, start_lba })
+    let source_device = Arc::clone(&device);
+    let root = Ext4Reader::open(PartitionExt4Source {
+        device: source_device,
+        start_lba,
+    })
         .map_err(|_| HealthError::RootMount)?;
     let actual_label = root
         .label()
@@ -412,7 +416,7 @@ fn validate_system_root(
     {
         validate_elf_payload(&root, ROOT_EXEC_PROBE_PATH, true)?;
         execute_root_linux_probe(&root)?;
-        execute_root_dynamic_programs(&root)?;
+        execute_root_dynamic_programs(&root, slot, device, start_lba)?;
     }
     Ok(())
 }
@@ -560,6 +564,7 @@ fn install_root_libraries(root: &Ext4Reader) -> Result<(), HealthError> {
 #[cfg(feature = "lifecycle-root-exec-verify")]
 fn run_root_program(
     root: &Ext4Reader,
+    origin: compat_core::executable::SystemImage,
     path: &'static str,
     argv: &[&[u8]],
 ) -> Result<(), HealthError> {
@@ -571,12 +576,14 @@ fn run_root_program(
     let interpreter = root
         .read_file("/lib64/ld-linux-x86-64.so.2", MAX_INTERPRETER_BYTES)
         .map_err(|_| HealthError::RootExecute)?;
-    if path == "/usr/bin/jasper-getppid"
-        && !crate::linux_vfs::install_root_executable(path.as_bytes(), executable.clone())
+    if matches!(path, "/usr/bin/printf" | "/usr/bin/jasper-getppid")
+        && !crate::linux_vfs::install_root_program(
+            origin,
+            path.as_bytes(),
+            executable.len(),
+            interpreter.len(),
+        )
     {
-        return Err(HealthError::RootExecute);
-    }
-    if !crate::linux_vfs::install_root_interpreter(interpreter.clone()) {
         return Err(HealthError::RootExecute);
     }
     let warm_frames = crate::mm::frame::free_frames();
@@ -608,30 +615,42 @@ fn run_root_program(
 }
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
-fn execute_root_dynamic_programs(root: &Ext4Reader) -> Result<(), HealthError> {
+fn execute_root_dynamic_programs(
+    root: &Ext4Reader,
+    slot: Slot,
+    device: Arc<IrqSpinLock<BlockDevice>>,
+    start_lba: u64,
+) -> Result<(), HealthError> {
+    let origin = match slot {
+        Slot::A => compat_core::executable::SystemImage::A,
+        Slot::B => compat_core::executable::SystemImage::B,
+    };
+    if !crate::linux_vfs::configure_root_image(origin, device, start_lba) {
+        return Err(HealthError::RootExecute);
+    }
     install_root_libraries(root)?;
     let true_argv: [&[u8]; 1] = [b"/bin/true"];
-    run_root_program(root, "/bin/true", &true_argv)?;
+    run_root_program(root, origin, "/bin/true", &true_argv)?;
     let getconf_argv: [&[u8]; 2] = [b"/usr/bin/getconf", b"GNU_LIBC_VERSION"];
-    run_root_program(root, "/usr/bin/getconf", &getconf_argv)?;
+    run_root_program(root, origin, "/usr/bin/getconf", &getconf_argv)?;
     let uname_argv: [&[u8]; 2] = [b"/usr/bin/uname", b"-a"];
-    run_root_program(root, "/usr/bin/uname", &uname_argv)?;
+    run_root_program(root, origin, "/usr/bin/uname", &uname_argv)?;
     let hostname_argv: [&[u8]; 1] = [b"/usr/bin/hostname"];
-    run_root_program(root, "/usr/bin/hostname", &hostname_argv)?;
+    run_root_program(root, origin, "/usr/bin/hostname", &hostname_argv)?;
     let basename_argv: [&[u8]; 2] =
         [b"/usr/bin/basename", b"/usr/lib/x86_64-linux-gnu/libc.so.6"];
-    run_root_program(root, "/usr/bin/basename", &basename_argv)?;
+    run_root_program(root, origin, "/usr/bin/basename", &basename_argv)?;
     let dirname_argv: [&[u8]; 2] =
         [b"/usr/bin/dirname", b"/usr/lib/x86_64-linux-gnu/libc.so.6"];
-    run_root_program(root, "/usr/bin/dirname", &dirname_argv)?;
+    run_root_program(root, origin, "/usr/bin/dirname", &dirname_argv)?;
     let id_argv: [&[u8]; 2] = [b"/usr/bin/id", b"-u"];
-    run_root_program(root, "/usr/bin/id", &id_argv)?;
+    run_root_program(root, origin, "/usr/bin/id", &id_argv)?;
     let pwd_argv: [&[u8]; 1] = [b"/usr/bin/pwd"];
-    run_root_program(root, "/usr/bin/pwd", &pwd_argv)?;
+    run_root_program(root, origin, "/usr/bin/pwd", &pwd_argv)?;
     let nproc_argv: [&[u8]; 1] = [b"/usr/bin/nproc"];
-    run_root_program(root, "/usr/bin/nproc", &nproc_argv)?;
+    run_root_program(root, origin, "/usr/bin/nproc", &nproc_argv)?;
     let sleep_argv: [&[u8]; 2] = [b"/usr/bin/sleep", b"0.05"];
-    run_root_program(root, "/usr/bin/sleep", &sleep_argv)?;
+    run_root_program(root, origin, "/usr/bin/sleep", &sleep_argv)?;
     let find_argv: [&[u8]; 6] = [
         b"/usr/bin/find",
         b"/",
@@ -640,27 +659,27 @@ fn execute_root_dynamic_programs(root: &Ext4Reader) -> Result<(), HealthError> {
         b"-mindepth",
         b"1",
     ];
-    run_root_program(root, "/usr/bin/find", &find_argv)?;
+    run_root_program(root, origin, "/usr/bin/find", &find_argv)?;
     let ls_argv: [&[u8]; 3] = [b"/usr/bin/ls", b"-1", b"/usr/bin"];
-    run_root_program(root, "/usr/bin/ls", &ls_argv)?;
+    run_root_program(root, origin, "/usr/bin/ls", &ls_argv)?;
     let wc_argv: [&[u8]; 3] = [
         b"/usr/bin/wc",
         b"-c",
         b"/usr/lib/x86_64-linux-gnu/libc.so.6",
     ];
-    run_root_program(root, "/usr/bin/wc", &wc_argv)?;
+    run_root_program(root, origin, "/usr/bin/wc", &wc_argv)?;
     let printf_argv: [&[u8]; 3] = [b"/usr/bin/printf", b"jasper-%s\n", b"dynamic"];
-    run_root_program(root, "/usr/bin/printf", &printf_argv)?;
+    run_root_program(root, origin, "/usr/bin/printf", &printf_argv)?;
     let ppid_argv: [&[u8]; 1] = [b"/usr/bin/jasper-getppid"];
-    run_root_program(root, "/usr/bin/jasper-getppid", &ppid_argv)?;
+    run_root_program(root, origin, "/usr/bin/jasper-getppid", &ppid_argv)?;
     let dash_argv: [&[u8]; 3] = [
         b"/bin/dash",
         b"-c",
         b"echo jasper-shell-ok\ncd /usr\npwd\n",
     ];
-    run_root_program(root, "/bin/dash", &dash_argv)?;
+    run_root_program(root, origin, "/bin/dash", &dash_argv)?;
     let signal_argv: [&[u8]; 1] = [b"/usr/bin/jasper-signal-basic"];
-    run_root_program(root, "/usr/bin/jasper-signal-basic", &signal_argv)
+    run_root_program(root, origin, "/usr/bin/jasper-signal-basic", &signal_argv)
 }
 
 /// 确认当前 A/B 槽的最小健康集合并持久提交。

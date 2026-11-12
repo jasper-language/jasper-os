@@ -6,9 +6,24 @@
 //! identities needed by the real loader. This is not the production VFS.
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
+use alloc::sync::Arc;
+#[cfg(feature = "lifecycle-root-exec-verify")]
 use alloc::vec::Vec;
 #[cfg(feature = "lifecycle-root-exec-verify")]
 use spin::{Mutex, Once};
+#[cfg(feature = "lifecycle-root-exec-verify")]
+use compat_core::executable::{ExecutableRegistry, SystemImage};
+#[cfg(feature = "lifecycle-root-exec-verify")]
+use jasper_lifecycle_boot::P0_SYSTEM_BYTES;
+#[cfg(feature = "lifecycle-root-exec-verify")]
+use kernel_core::block::{self, Request, Terminal};
+#[cfg(feature = "lifecycle-root-exec-verify")]
+use kernel_core::ext4_view::{Ext4ByteSource, Ext4Reader, Ext4SourceError};
+
+#[cfg(feature = "lifecycle-root-exec-verify")]
+use crate::blk::BlockDevice;
+#[cfg(feature = "lifecycle-root-exec-verify")]
+use crate::sync::IrqSpinLock;
 
 #[cfg(feature = "compat-dynamic-libc-verify")]
 static LIBC: &[u8] = include_bytes!(env!("JSR_UBUNTU_LIBC"));
@@ -37,14 +52,63 @@ static LIBPCRE2: &[u8] = &[];
 #[cfg(feature = "lifecycle-root-exec-verify")]
 static ROOT_LIBRARIES: [Once<Vec<u8>>; 6] = [const { Once::new() }; 6];
 #[cfg(feature = "lifecycle-root-exec-verify")]
-static ROOT_INTERPRETER: Once<Vec<u8>> = Once::new();
+static ROOT_EXECUTABLES: Mutex<ExecutableRegistry> = Mutex::new(ExecutableRegistry::new());
 #[cfg(feature = "lifecycle-root-exec-verify")]
-static ROOT_EXECUTABLES: Mutex<Vec<RootExecutable>> = Mutex::new(Vec::new());
+static ROOT_ORIGIN: Mutex<Option<SystemImage>> = Mutex::new(None);
+#[cfg(feature = "lifecycle-root-exec-verify")]
+static ROOT_SOURCE: Mutex<Option<RootImageSource>> = Mutex::new(None);
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
-struct RootExecutable {
-    path: Vec<u8>,
-    bytes: Vec<u8>,
+const ROOT_INTERPRETER_PATH: &str = "/lib64/ld-linux-x86-64.so.2";
+
+#[cfg(feature = "lifecycle-root-exec-verify")]
+#[derive(Clone)]
+struct RootImageSource {
+    device: Arc<IrqSpinLock<BlockDevice>>,
+    start_lba: u64,
+}
+
+#[cfg(feature = "lifecycle-root-exec-verify")]
+impl Ext4ByteSource for RootImageSource {
+    fn read_exact(&mut self, offset: u64, dst: &mut [u8]) -> Result<(), Ext4SourceError> {
+        let mut done = 0usize;
+        let mut page = [0u8; block::IO_ALIGNMENT as usize];
+        while done < dst.len() {
+            let absolute = offset.checked_add(done as u64).ok_or(Ext4SourceError)?;
+            let io_block = absolute / block::IO_ALIGNMENT;
+            let inner = (absolute % block::IO_ALIGNMENT) as usize;
+            let take = (dst.len() - done).min(page.len() - inner);
+            if absolute
+                .checked_add(take as u64)
+                .filter(|end| *end <= P0_SYSTEM_BYTES)
+                .is_none()
+            {
+                return Err(Ext4SourceError);
+            }
+            let sector = self
+                .start_lba
+                .checked_add(
+                    io_block
+                        .checked_mul(block::SECTORS_PER_IO_UNIT)
+                        .ok_or(Ext4SourceError)?,
+                )
+                .ok_or(Ext4SourceError)?;
+            let mut device = self.device.lock();
+            if !matches!(
+                device.execute(Request::read(sector, 1), false),
+                Ok(Terminal::Completed)
+            ) {
+                return Err(Ext4SourceError);
+            }
+            device
+                .copy_prefix(&mut page)
+                .map_err(|_| Ext4SourceError)?;
+            drop(device);
+            dst[done..done + take].copy_from_slice(&page[inner..inner + take]);
+            done += take;
+        }
+        Ok(())
+    }
 }
 
 const HANDLE_BASE: u64 = 0xffff_0000_0000_0000;
@@ -504,58 +568,82 @@ pub fn install_root_library(file: FileId, bytes: Vec<u8>) -> bool {
         .is_some_and(|installed| !installed.is_empty())
 }
 
-/// Installs one exact executable read from the selected System A/B root.
-/// 安装一个从所选 System A/B 根卷读取的精确可执行映像。
+/// Registers one executable/interpreter pair from the selected System A/B root.
+/// 从所选 System A/B 根卷登记一对可执行映像和解释器。
 #[cfg(feature = "lifecycle-root-exec-verify")]
-pub fn install_root_executable(path: &[u8], bytes: Vec<u8>) -> bool {
-    const MAX_EXECUTABLES: usize = 64;
-    const MAX_PATH: usize = 256;
-    if path.is_empty()
-        || path.len() > MAX_PATH
-        || !path.starts_with(b"/")
-        || bytes.is_empty()
-    {
+pub fn configure_root_image(
+    origin: SystemImage,
+    device: Arc<IrqSpinLock<BlockDevice>>,
+    start_lba: u64,
+) -> bool {
+    let mut active = ROOT_ORIGIN.lock();
+    if active.is_some_and(|selected| selected != origin) {
         return false;
     }
-    let mut executables = ROOT_EXECUTABLES.lock();
-    if let Some(existing) = executables.iter().find(|entry| entry.path == path) {
-        return existing.bytes == bytes;
+    let mut source = ROOT_SOURCE.lock();
+    if source.is_some() {
+        return *active == Some(origin)
+            && source
+                .as_ref()
+                .is_some_and(|configured| configured.start_lba == start_lba);
     }
-    if executables.len() == MAX_EXECUTABLES {
-        return false;
-    }
-    executables.push(RootExecutable {
-        path: path.to_vec(),
-        bytes,
-    });
+    *active = Some(origin);
+    *source = Some(RootImageSource { device, start_lba });
     true
 }
 
-/// Installs the exact root ELF interpreter used by executable images.
-/// 安装可执行映像使用的根卷 ELF 解释器。
 #[cfg(feature = "lifecycle-root-exec-verify")]
-pub fn install_root_interpreter(bytes: Vec<u8>) -> bool {
-    if bytes.is_empty() {
+pub fn install_root_program(
+    origin: SystemImage,
+    path: &[u8],
+    executable_len: usize,
+    interpreter_len: usize,
+) -> bool {
+    let mut active = ROOT_ORIGIN.lock();
+    if active.is_some_and(|selected| selected != origin) {
         return false;
     }
-    ROOT_INTERPRETER.call_once(|| bytes);
-    ROOT_INTERPRETER
-        .get()
-        .is_some_and(|installed| !installed.is_empty())
+    let registered = ROOT_EXECUTABLES.lock().register_program(
+        origin,
+        path,
+        executable_len,
+        ROOT_INTERPRETER_PATH.as_bytes(),
+        interpreter_len,
+    );
+    if registered.is_ok() {
+        *active = Some(origin);
+        true
+    } else {
+        false
+    }
 }
 
-/// Returns cloned executable bytes and the interpreter for one trusted exact path.
-/// 返回可信精确路径的可执行字节副本及解释器。
+/// Reads one declared image pair from the selected System root on demand.
+///
+/// 从所选 System 根按需读取已声明映像；成功解析不是 Jasper 执行授权。
 #[cfg(feature = "lifecycle-root-exec-verify")]
 pub fn root_executable(path: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-    let bytes = ROOT_EXECUTABLES
-        .lock()
-        .iter()
-        .find(|entry| entry.path == path)?
-        .bytes
-        .clone();
-    let interpreter = ROOT_INTERPRETER.get()?.clone();
-    Some((bytes, interpreter))
+    let origin = (*ROOT_ORIGIN.lock())?;
+    let (logical_path, executable_len, interpreter_len) = {
+        let executables = ROOT_EXECUTABLES.lock();
+        let resolved = executables.resolve(origin, path).ok()?;
+        (
+            resolved.path,
+            resolved.executable_len,
+            resolved.interpreter_len,
+        )
+    };
+    let source = ROOT_SOURCE.lock().as_ref()?.clone();
+    let root = Ext4Reader::open(source).ok()?;
+    let logical_path = core::str::from_utf8(logical_path.as_bytes()).ok()?;
+    let executable = root.read_file(logical_path, executable_len).ok()?;
+    let interpreter = root
+        .read_file(ROOT_INTERPRETER_PATH, interpreter_len)
+        .ok()?;
+    if executable.len() != executable_len || interpreter.len() != interpreter_len {
+        return None;
+    }
+    Some((executable, interpreter))
 }
 
 /// Returns whether the verification slice contains any bytes.

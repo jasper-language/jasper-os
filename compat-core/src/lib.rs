@@ -6,12 +6,16 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod executable;
 pub mod fd;
 pub mod native;
 pub mod process;
 pub mod syscall;
 pub mod utsname;
 
+pub use executable::{
+    ExecutableRegistry, LogicalPath, ProgramId, RegistryError, ResolvedProgram, SystemImage,
+};
 pub use fd::{CompatKind, FdBatch, FdEntry, FdHandle, FdTable, FdTableError};
 pub use native::{
     Epoll, EpollEvent, EpollInterest, EventSourceTable, Futex, FutexWake, MemoryMapping,
