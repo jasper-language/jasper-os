@@ -173,7 +173,7 @@ if [ "$MODE" = terminal-session ] && [ "${ISSUE21_MANUAL_INPUT:-0}" != 1 ]; then
     while ! grep -aq '^jasper> ' "$OUT/serial.log"; do
       sleep 1
     done
-    printf 'help\necho hello\nexit\n' >&8
+    printf 'help\necho history\n\016\n\003\004' >&8
   ) &
   SERIAL_FEEDER=$!
   SERIAL_ARGS=(-serial "pipe:$OUT/serial")
@@ -267,6 +267,8 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = terminal-session ]; then
     grep -aqE $'^Jasper-OS native CLI\r?$' "$OUT/serial.log"
     if [ "${ISSUE21_MANUAL_INPUT:-0}" != 1 ]; then
       grep -aqE $'^native-help-ok\r?$' "$OUT/serial.log"
+      [ "$(grep -acE $'^native-echo=history\r?$' "$OUT/serial.log")" -ge 2 ]
+      grep -aqE $'^\^C\r?$' "$OUT/serial.log"
     fi
     grep -aqE $'^native-echo-ok\r?$' "$OUT/serial.log"
     grep -aqE $'^native-bye\r?$' "$OUT/serial.log"

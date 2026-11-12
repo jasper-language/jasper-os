@@ -115,9 +115,13 @@ fn key_to_byte(key: kernel_core::display_input::KeyInput) -> Option<u8> {
         0x0101 => Some(0x08),
         0x0102 => Some(b'\t'),
         0x0103 => Some(b'\n'),
+        0x0110 => Some(0x0e),
+        0x0111 => Some(0x10),
         0x20..=0x7e => {
             let byte = key.code as u8;
-            if byte.is_ascii_uppercase() && key.modifiers & 1 == 0 {
+            if key.modifiers & 2 != 0 && byte.is_ascii_alphabetic() {
+                Some(byte.to_ascii_uppercase() & 0x1f)
+            } else if byte.is_ascii_uppercase() && key.modifiers & 1 == 0 {
                 Some(byte.to_ascii_lowercase())
             } else {
                 Some(byte)

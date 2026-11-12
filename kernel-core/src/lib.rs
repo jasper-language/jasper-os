@@ -92,6 +92,8 @@ pub mod task_hot;
 pub mod task_lifecycle;
 /// Bounded native terminal session queues and close semantics.
 pub mod terminal_session;
+/// Bounded terminal line editing and command history.
+pub mod terminal_editor;
 pub mod tick_lease;
 pub mod wake_mailbox;
 pub mod fdt;
