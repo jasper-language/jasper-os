@@ -8,11 +8,14 @@
 #include <linux/android/binder.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-heap.h>
+#include <linux/futex.h>
 #include <linux/io_uring.h>
 #include <linux/sync_file.h>
+#include <pthread.h>
 #include <poll.h>
 #include <sched.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,6 +74,29 @@ struct jasper_ion_handle_data {
 
 static void signal_noop(int signal) {
     (void)signal;
+}
+
+static uint32_t futex_word;
+static atomic_int futex_started;
+static atomic_int futex_finished;
+
+struct futex_thread_arg {
+    uint32_t bitset;
+};
+
+static void *futex_waiter(void *argument) {
+    struct futex_thread_arg *arg = argument;
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
+        return (void *)(intptr_t)-1000;
+    }
+    deadline.tv_sec += 1;
+    atomic_fetch_add_explicit(&futex_started, 1, memory_order_release);
+    long result = syscall(SYS_futex, &futex_word,
+                          FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG, 0,
+                          &deadline, NULL, arg->bitset);
+    atomic_fetch_add_explicit(&futex_finished, 1, memory_order_release);
+    return (void *)(intptr_t)result;
 }
 
 int main(void) {
@@ -1028,6 +1054,73 @@ int main(void) {
         memcmp(remap_moved, "MOVE", 5) != 0 ||
         munmap(remap_moved, 8192) != 0) {
         return 299;
+    }
+    futex_word = 0;
+    atomic_store(&futex_started, 0);
+    atomic_store(&futex_finished, 0);
+    pthread_t futex_threads[2];
+    struct futex_thread_arg futex_args[2] = {
+        {.bitset = 0x1},
+        {.bitset = 0x2},
+    };
+    if (pthread_create(&futex_threads[0], NULL, futex_waiter,
+                       &futex_args[0]) != 0 ||
+        pthread_create(&futex_threads[1], NULL, futex_waiter,
+                       &futex_args[1]) != 0) {
+        return 300;
+    }
+    while (atomic_load_explicit(&futex_started, memory_order_acquire) != 2) {
+        sched_yield();
+    }
+    if (syscall(SYS_futex, &futex_word,
+                FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, 1,
+                NULL, NULL, 0x1) != 1) {
+        return 301;
+    }
+    struct timespec futex_delay = {.tv_sec = 0, .tv_nsec = 10000000};
+    nanosleep(&futex_delay, NULL);
+    if (atomic_load_explicit(&futex_finished, memory_order_acquire) != 1) {
+        return 302;
+    }
+    if (syscall(SYS_futex, &futex_word,
+                FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, 1,
+                NULL, NULL, 0x2) != 1) {
+        return 303;
+    }
+    void *futex_result0 = NULL;
+    void *futex_result1 = NULL;
+    if (pthread_join(futex_threads[0], &futex_result0) != 0 ||
+        pthread_join(futex_threads[1], &futex_result1) != 0 ||
+        futex_result0 != 0 || futex_result1 != 0 ||
+        atomic_load_explicit(&futex_finished, memory_order_acquire) != 2) {
+        return 304;
+    }
+    futex_word = 0;
+    struct timespec futex_relative = {.tv_sec = 0, .tv_nsec = 20000000};
+    errno = 0;
+    if (syscall(SYS_futex, &futex_word, FUTEX_WAIT | FUTEX_PRIVATE_FLAG,
+                0, &futex_relative, NULL, 0) != -1 ||
+        errno != ETIMEDOUT) {
+        return 305;
+    }
+    struct timespec futex_absolute;
+    clock_gettime(CLOCK_MONOTONIC, &futex_absolute);
+    futex_absolute.tv_nsec += 20000000;
+    if (futex_absolute.tv_nsec >= 1000000000) {
+        futex_absolute.tv_sec++;
+        futex_absolute.tv_nsec -= 1000000000;
+    }
+    errno = 0;
+    if (syscall(SYS_futex, &futex_word,
+                FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG,
+                0, &futex_absolute, NULL, 0x1) != -1 ||
+        errno != ETIMEDOUT) {
+        return 306;
+    }
+    errno = 0;
+    if (syscall(SYS_futex, &futex_word, FUTEX_WAIT | FUTEX_PRIVATE_FLAG,
+                1, NULL, NULL, 0) != -1 || errno != EAGAIN) {
+        return 307;
     }
     int epfd = epoll_create1(EPOLL_CLOEXEC);
     int epoll_pipe[2];

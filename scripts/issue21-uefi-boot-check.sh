@@ -125,7 +125,7 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = terminal-session ]; then
     verification/fixtures/linux/signal_basic.c \
     -o "$ROOT_SIGNAL_FIXTURE" >"$OUT/root-signal-build.log" 2>&1
   ROOT_PPID_FIXTURE="$TARGET/root-getppid"
-  gcc -O2 verification/fixtures/linux/getppid.c \
+  gcc -O2 -pthread verification/fixtures/linux/getppid.c \
     -o "$ROOT_PPID_FIXTURE" >"$OUT/root-ppid-build.log" 2>&1
 fi
 bash scripts/issue21-system-root-fixture.sh \
