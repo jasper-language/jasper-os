@@ -4797,6 +4797,28 @@ pub fn page_flags(pid: ObjId, va: u64) -> Option<MapFlags> {
     .flatten()
 }
 
+/// Returns one private Linux mapping's original protection flags.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_mapping_flags(pid: ObjId, va: u64) -> Option<MapFlags> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_ref().ok_or(ProcError::Exited)?;
+        Ok(linux
+            .mappings
+            .iter()
+            .find(|mapping| mapping.va == va)
+            .map(|mapping| mapping.flags))
+    })
+    .ok()
+    .flatten()
+}
+
+/// Reports whether one Linux virtual page belongs to a shared memory mapping.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_page_is_shared(pid: ObjId, va: u64) -> bool {
+    with_proc(pid, |process| Ok(is_shared_page(process, va)))
+        .unwrap_or(false)
+}
+
 /// Returns the current hardware address-space root for one process.
 /// 返回进程当前硬件地址空间根。
 pub(crate) fn current_space_root(pid: ObjId) -> Option<crate::arch::SpaceRoot> {
