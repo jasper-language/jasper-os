@@ -158,6 +158,10 @@ pub struct Process {
     state: ProcState,
     /// CPU 组（设置过 CPU 上限时有值；进程的全部线程受同一份上限约束，进程销毁时归还）。
     cpu_group: Option<sched::scheduler::CpuGroupId>,
+    /// Native workload membership; quota is charged before each Task is created.
+    /// 原生 Workload 归属；创建每个 Task 前先申请配额。
+    workload: Option<kernel_core::workload::WorkloadKey>,
+    workload_member: Option<u64>,
     /// 由用户进程经 `system.process.spawn` 创建：最后一份外部所有权（父进程中的句柄）释放时若仍在运行即被终止。
     kill_on_release: bool,
     /// 创建它的父进程（弱回指，仅用于父进程释放句柄时归还其子进程配额；归还后清空）。
@@ -948,6 +952,8 @@ fn create_process(
         threads_total: 0,
         state: ProcState::Running,
         cpu_group: None,
+        workload: None,
+        workload_member: None,
         kill_on_release: false,
         spawned_by: None,
         spawned_live: 0,
@@ -2679,6 +2685,7 @@ fn spawn_thread_mode(
             task_obj,
         });
     }
+    let workload = with_proc(id, |p| Ok(p.workload)).ok().flatten();
     // 先完成全部记账（执行上下文 → Process、线程表 → Task），再交给调度器：
     // 否则新线程可能在记账完成前就运行并退出。
     // 先确认进程仍在运行，再取内部引用：两步在同一次对象表访问内完成，失败时不留下半份记账
@@ -2697,7 +2704,9 @@ fn spawn_thread_mode(
         }
         Ok(())
     });
-    let rollback = |reason: ProcError, accounted: bool| {
+    let rollback = |reason: ProcError,
+                    accounted: bool,
+                    charged_workload: Option<kernel_core::workload::WorkloadKey>| {
         {
             let mut reg = REG.lock();
             reg.starts.retain(|s| s.task != task);
@@ -2715,14 +2724,20 @@ fn spawn_thread_mode(
             let _ = t.release_internal(task_obj);
             let _ = t.release_internal(task_obj);
         });
+        if let Some(workload) = charged_workload {
+            crate::workload::release_thread(workload);
+        }
         reason
     };
     if let Err(e) = accounted {
-        return Err(rollback(e, false));
+        return Err(rollback(e, false, None));
+    }
+    if workload.is_some_and(|key| crate::workload::reserve_thread(key).is_err()) {
+        return Err(rollback(ProcError::MemoryQuota, true, None));
     }
     #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
     if !crate::linux_abi::register_linux_thread(id, task, linux_clear_child_tid) {
-        return Err(rollback(ProcError::NoTaskSlot, true));
+        return Err(rollback(ProcError::NoTaskSlot, true, workload));
     }
     // 新线程与进程的其它线程同属一个 CPU 组。交给调度器之后再核对一次：设置上限与创建线程并发时，
     // 两边总有一边把新线程放进组里。
@@ -2735,7 +2750,7 @@ fn spawn_thread_mode(
     if spawned.is_err() {
         #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
         crate::linux_abi::unregister_linux_thread(task);
-        return Err(rollback(ProcError::NoTaskSlot, true));
+        return Err(rollback(ProcError::NoTaskSlot, true, workload));
     }
     if let Some(g) = with_proc(id, |p| Ok(p.cpu_group)).ok().flatten() {
         let _ = sched::assign_cpu_group(task, Some(g));
@@ -2800,6 +2815,30 @@ pub fn set_cpu_limit(pid: ObjId, limit_permille: u32) -> Result<(), CpuLimitErro
         let _ = sched::assign_cpu_group(t, Some(g)); // 已退出的线程无需加入
     }
     Ok(())
+}
+
+/// Binds a thread-less process to one running native workload.
+///
+/// 将尚未创建线程的进程绑定到一个 Running 原生 Workload；成员关系和进程字段
+/// 只在两侧都成功后提交。
+pub fn bind_workload(pid: ObjId, workload: kernel_core::workload::WorkloadKey) -> bool {
+    with_proc(pid, |process| {
+        if process.workload.is_some() || process.threads_live != 0 {
+            return Err(ProcError::Exited);
+        }
+        crate::workload::snapshot(workload).map_err(|_| ProcError::NoSuchProcess)?;
+        crate::workload::bind_member(workload, pid.raw()).map_err(|_| ProcError::NoSuchProcess)?;
+        process.workload = Some(workload);
+        process.workload_member = Some(pid.raw());
+        Ok(())
+    })
+    .is_ok()
+}
+
+pub fn workload_key(pid: ObjId) -> Option<kernel_core::workload::WorkloadKey> {
+    with_proc(pid, |process| Ok(process.workload))
+        .ok()
+        .flatten()
 }
 
 /// 进程 `pid` 的 CPU 记账（设置过上限时有值；进程销毁后 `None`）。
@@ -3697,6 +3736,7 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
     if let Some(m) = member {
         #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
         crate::linux_abi::linux_thread_exit(m.process, m.task);
+        let mut exiting_workload = None;
         let exited = kobj::with(|t| {
             // 线程自己的退出状态：写入本线程的退出码
             if let Ok(KObject::Task(task)) = t.get(m.task_obj) {
@@ -3710,6 +3750,7 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
             let mut left_table = false;
             let last = match t.get_mut(m.process) {
                 Ok(KObject::Process(p)) => {
+                    exiting_workload = p.workload;
                     if let Some(i) = p.threads.iter().position(|x| *x == m.task_obj) {
                         p.threads.swap_remove(i);
                         left_table = true;
@@ -3736,6 +3777,9 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
             let _ = t.release_internal(m.process); // 执行上下文 → Process
             out
         });
+        if let Some(workload) = exiting_workload {
+            crate::workload::release_thread(workload);
+        }
         if let Some((name, threads, handles, code)) = exited {
             kprintln!(
                 "[JSR-PROC] event=system.process.exited id={:#x} name={} code={} threads={} handles_closed={}",
@@ -3849,10 +3893,15 @@ fn destroy_process(p: Box<Process>) {
         exit_state,
         children,
         cpu_group,
+        workload,
+        workload_member,
         ..
     } = *p;
     if let Some(g) = cpu_group {
         let _ = sched::release_cpu_group(g); // 持有者引用；线程早已全部退出，组随之释放
+    }
+    if let (Some(workload), Some(member)) = (workload, workload_member) {
+        let _ = crate::workload::unbind_member(workload, member);
     }
     // 防御：正常路径已在 exiting / exited 时撤销；这里再撤销一次，且不触碰页帧分配器。
     // Device mappings are revoked while the process is still addressable;

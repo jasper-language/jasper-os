@@ -197,6 +197,7 @@ pub mod sync;
 pub mod syscall;
 pub mod task;
 pub mod usi;
+pub mod workload;
 #[cfg(feature = "user-programs")]
 pub mod usi1_demo;
 #[cfg(feature = "usi2-verify")]
