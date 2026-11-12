@@ -23,7 +23,7 @@ use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use kernel_core::capability::{CapabilityId, CapabilityLink};
 use kernel_core::frame::{PhysFrame, FRAME_SIZE};
@@ -122,6 +122,96 @@ struct LinuxSocketHandle {
     handle: u64,
     endpoint: Arc<compat_core::UnixSocketEndpoint>,
     listener: Option<Arc<UnixListener>>,
+    controls: Arc<LinuxSocketControls>,
+}
+
+pub(crate) struct LinuxFdTransfer {
+    description: compat_core::FdDescription,
+    resource: LinuxFdResource,
+}
+
+enum LinuxFdResource {
+    Generic,
+    Pipe(Arc<compat_core::PipeEndpoint>),
+    Socket {
+        endpoint: Arc<compat_core::UnixSocketEndpoint>,
+        listener: Option<Arc<UnixListener>>,
+        controls: Arc<LinuxSocketControls>,
+    },
+}
+
+struct LinuxControlMessage {
+    start: usize,
+    fds: Vec<LinuxFdTransfer>,
+}
+
+struct LinuxSocketControlQueue {
+    messages: SpinLock<VecDeque<LinuxControlMessage>>,
+    written: AtomicUsize,
+    read: AtomicUsize,
+}
+
+struct LinuxSocketControls {
+    rx: SpinLock<Option<Arc<LinuxSocketControlQueue>>>,
+    tx: SpinLock<Option<Arc<LinuxSocketControlQueue>>>,
+}
+
+impl LinuxSocketControls {
+    fn empty() -> Arc<Self> {
+        Arc::new(Self {
+            rx: SpinLock::new(None),
+            tx: SpinLock::new(None),
+        })
+    }
+
+    fn pair() -> (Arc<Self>, Arc<Self>) {
+        let first = Self::empty();
+        let second = Self::empty();
+        let first_to_second = Arc::new(LinuxSocketControlQueue {
+            messages: SpinLock::new(VecDeque::new()),
+            written: AtomicUsize::new(0),
+            read: AtomicUsize::new(0),
+        });
+        let second_to_first = Arc::new(LinuxSocketControlQueue {
+            messages: SpinLock::new(VecDeque::new()),
+            written: AtomicUsize::new(0),
+            read: AtomicUsize::new(0),
+        });
+        *first.tx.lock() = Some(Arc::clone(&first_to_second));
+        *second.rx.lock() = Some(Arc::clone(&first_to_second));
+        *first.rx.lock() = Some(Arc::clone(&second_to_first));
+        *second.tx.lock() = Some(second_to_first);
+        (first, second)
+    }
+
+    fn attach_peer(&self) -> Option<Arc<Self>> {
+        let mut tx = self.tx.lock();
+        let mut rx = self.rx.lock();
+        if tx.is_some() || rx.is_some() {
+            return None;
+        }
+        let peer = Self::empty();
+        let first_to_second = Arc::new(LinuxSocketControlQueue {
+            messages: SpinLock::new(VecDeque::new()),
+            written: AtomicUsize::new(0),
+            read: AtomicUsize::new(0),
+        });
+        let second_to_first = Arc::new(LinuxSocketControlQueue {
+            messages: SpinLock::new(VecDeque::new()),
+            written: AtomicUsize::new(0),
+            read: AtomicUsize::new(0),
+        });
+        *tx = Some(Arc::clone(&first_to_second));
+        *rx = Some(Arc::clone(&second_to_first));
+        *peer.tx.lock() = Some(second_to_first);
+        *peer.rx.lock() = Some(first_to_second);
+        Some(peer)
+    }
+}
+
+struct PendingSocketConnection {
+    endpoint: Arc<compat_core::UnixSocketEndpoint>,
+    controls: Arc<LinuxSocketControls>,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -129,7 +219,7 @@ struct UnixListener {
     name: compat_core::UnixSocketName,
     listening: AtomicU32,
     backlog: AtomicU32,
-    pending: SpinLock<VecDeque<Arc<compat_core::UnixSocketEndpoint>>>,
+    pending: SpinLock<VecDeque<PendingSocketConnection>>,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -146,6 +236,13 @@ pub(crate) enum LinuxSocketError {
     NotConnected,
     ConnectionRefused,
     WouldBlock,
+    NoSpace,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinuxFdTransferError {
+    Invalid,
     NoSpace,
 }
 
@@ -642,6 +739,7 @@ pub(crate) fn linux_socketpair(
         let second_handle = first_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
         linux.next_socket_handle = second_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
         let (first, second) = compat_core::UnixSocketEndpoint::pair();
+        let (first_controls, second_controls) = LinuxSocketControls::pair();
         let rights = kernel_core::object::Rights::READ.union(kernel_core::object::Rights::WRITE);
         let first_fd = linux
             .fds
@@ -678,11 +776,13 @@ pub(crate) fn linux_socketpair(
             handle: first_handle,
             endpoint: Arc::new(first),
             listener: None,
+            controls: first_controls,
         });
         linux.sockets.push(LinuxSocketHandle {
             handle: second_handle,
             endpoint: Arc::new(second),
             listener: None,
+            controls: second_controls,
         });
         Ok((first_fd.fd(), second_fd.fd()))
     })
@@ -729,6 +829,7 @@ pub(crate) fn linux_socket_create(
             handle,
             endpoint,
             listener: None,
+            controls: LinuxSocketControls::empty(),
         });
         Ok(fd.fd())
     })
@@ -873,7 +974,14 @@ pub(crate) fn linux_socket_connect(
             {
                 return Err(LinuxSocketError::Invalid);
             }
-            pending.push_back(accepted);
+            let accepted_controls = socket
+                .controls
+                .attach_peer()
+                .ok_or(LinuxSocketError::Invalid)?;
+            pending.push_back(PendingSocketConnection {
+                endpoint: accepted,
+                controls: accepted_controls,
+            });
             Ok(())
         }
         _ => Err(LinuxSocketError::Invalid),
@@ -905,7 +1013,10 @@ pub(crate) fn linux_socket_accept(
             if listener.listening.load(Ordering::Acquire) == 0 {
                 return Err(LinuxSocketError::Invalid);
             }
-            let accepted = listener
+            let PendingSocketConnection {
+                endpoint: accepted,
+                controls: accepted_controls,
+            } = listener
                 .pending
                 .lock()
                 .pop_front()
@@ -941,6 +1052,7 @@ pub(crate) fn linux_socket_accept(
                 handle: installed_handle,
                 endpoint: accepted,
                 listener: None,
+                controls: accepted_controls,
             });
             Ok(fd.fd())
         }
@@ -982,6 +1094,244 @@ pub(crate) fn linux_socket_endpoint(
             .map(|socket| Arc::clone(&socket.endpoint)),
         _ => None,
     })
+}
+
+/// Captures one descriptor for an SCM_RIGHTS handoff, retaining the shared
+/// open-file description and any process-owned stream resource it references.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_capture_fd_transfer(
+    pid: ObjId,
+    fd: u32,
+) -> Result<LinuxFdTransfer, LinuxFdTransferError> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => {
+            let linux = p.linux.as_ref().ok_or(LinuxFdTransferError::Invalid)?;
+            let entry = linux
+                .fds
+                .get_fd(fd)
+                .ok_or(LinuxFdTransferError::Invalid)?;
+            let description = linux
+                .fds
+                .description_fd(fd)
+                .ok_or(LinuxFdTransferError::Invalid)?;
+            let resource = match entry.kind {
+                compat_core::fd::CompatKind::Pipe => {
+                    let endpoint = linux
+                        .pipes
+                        .iter()
+                        .find(|pipe| pipe.handle == entry.handle)
+                        .map(|pipe| Arc::clone(&pipe.endpoint))
+                        .ok_or(LinuxFdTransferError::Invalid)?;
+                    LinuxFdResource::Pipe(endpoint)
+                }
+                compat_core::fd::CompatKind::Socket => {
+                    let socket = linux
+                        .sockets
+                        .iter()
+                        .find(|socket| socket.handle == entry.handle)
+                        .ok_or(LinuxFdTransferError::Invalid)?;
+                    LinuxFdResource::Socket {
+                        endpoint: Arc::clone(&socket.endpoint),
+                        listener: socket.listener.as_ref().map(Arc::clone),
+                        controls: Arc::clone(&socket.controls),
+                    }
+                }
+                _ => LinuxFdResource::Generic,
+            };
+            Ok(LinuxFdTransfer {
+                description,
+                resource,
+            })
+        }
+        _ => Err(LinuxFdTransferError::Invalid),
+    })
+}
+
+/// Installs one SCM_RIGHTS transfer into a fresh descriptor generation while
+/// retaining the original open-file offset and status flags.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_fd_transfer(
+    pid: ObjId,
+    transfer: LinuxFdTransfer,
+    close_on_exec: bool,
+) -> Result<u32, LinuxFdTransferError> {
+    crate::kobj::with(|t| match t.get_mut(pid) {
+        Ok(KObject::Process(p)) => {
+            let linux = p.linux.as_mut().ok_or(LinuxFdTransferError::Invalid)?;
+            let LinuxFdTransfer {
+                description,
+                resource,
+            } = transfer;
+            let (handle, pending_pipe, pending_socket) = match resource {
+                LinuxFdResource::Generic => (description.entry.handle, None, None),
+                LinuxFdResource::Pipe(endpoint) => {
+                    linux
+                        .pipes
+                        .try_reserve(1)
+                        .map_err(|_| LinuxFdTransferError::NoSpace)?;
+                    (
+                        linux.next_pipe_handle,
+                        Some(endpoint),
+                        None,
+                    )
+                }
+                LinuxFdResource::Socket {
+                    endpoint,
+                    listener,
+                    controls,
+                } => {
+                    linux
+                        .sockets
+                        .try_reserve(1)
+                        .map_err(|_| LinuxFdTransferError::NoSpace)?;
+                    (
+                        linux.next_socket_handle,
+                        None,
+                        Some((endpoint, listener, controls)),
+                    )
+                }
+            };
+            if handle == 0 {
+                return Err(LinuxFdTransferError::NoSpace);
+            }
+            let fd = linux
+                .fds
+                .install_description(description.with_handle(handle), close_on_exec)
+                .map_err(|_| LinuxFdTransferError::NoSpace)?;
+            if let Some(endpoint) = pending_pipe {
+                let next = handle
+                    .checked_add(1)
+                    .ok_or(LinuxFdTransferError::NoSpace)?;
+                linux.next_pipe_handle = next;
+                linux.pipes.push(LinuxPipeHandle { handle, endpoint });
+            }
+            if let Some((endpoint, listener, controls)) = pending_socket {
+                let next = handle
+                    .checked_add(1)
+                    .ok_or(LinuxFdTransferError::NoSpace)?;
+                linux.next_socket_handle = next;
+                linux.sockets.push(LinuxSocketHandle {
+                    handle,
+                    endpoint,
+                    listener,
+                    controls,
+                });
+            }
+            Ok(fd.fd())
+        }
+        _ => Err(LinuxFdTransferError::Invalid),
+    })
+}
+
+/// Queues ancillary descriptors to the peer after a data-bearing sendmsg.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_queue_control(
+    pid: ObjId,
+    handle: u64,
+    bytes: usize,
+    fds: Vec<LinuxFdTransfer>,
+) -> Result<(), LinuxSocketError> {
+    if bytes == 0 || fds.is_empty() {
+        return Err(LinuxSocketError::Invalid);
+    }
+    let controls = crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .sockets
+            .iter()
+            .find(|socket| socket.handle == handle)
+            .map(|socket| Arc::clone(&socket.controls)),
+        _ => None,
+    })
+    .ok_or(LinuxSocketError::NotConnected)?;
+    let queue = controls
+        .tx
+        .lock()
+        .as_ref()
+        .map(Arc::clone)
+        .ok_or(LinuxSocketError::NotConnected)?;
+    let mut messages = queue.messages.lock();
+    messages
+        .try_reserve(1)
+        .map_err(|_| LinuxSocketError::NoSpace)?;
+    let start = queue.written.fetch_add(bytes, Ordering::AcqRel);
+    messages.push_back(LinuxControlMessage { start, fds });
+    Ok(())
+}
+
+/// Advances the directional stream offset for data written without ancillary
+/// descriptors so later SCM_RIGHTS records retain their exact byte position.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_record_data(pid: ObjId, handle: u64, bytes: usize) {
+    if bytes == 0 {
+        return;
+    }
+    let Some(controls) = crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .sockets
+            .iter()
+            .find(|socket| socket.handle == handle)
+            .map(|socket| Arc::clone(&socket.controls)),
+        _ => None,
+    }) else {
+        return;
+    };
+    let queue = controls.tx.lock().as_ref().map(Arc::clone);
+    if let Some(queue) = queue {
+        queue.written.fetch_add(bytes, Ordering::AcqRel);
+    }
+}
+
+/// Consumes ancillary records crossed by a socket read. A non-capturing read
+/// discards the descriptors, matching Linux semantics when control is not
+/// requested by the caller.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_consume_control(
+    pid: ObjId,
+    handle: u64,
+    bytes: usize,
+    capture: bool,
+) -> Vec<LinuxFdTransfer> {
+    if bytes == 0 {
+        return Vec::new();
+    }
+    let Some(controls) = crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .sockets
+            .iter()
+            .find(|socket| socket.handle == handle)
+            .map(|socket| Arc::clone(&socket.controls)),
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    let Some(queue) = controls.rx.lock().as_ref().map(Arc::clone) else {
+        return Vec::new();
+    };
+    let end = queue
+        .read
+        .fetch_add(bytes, Ordering::AcqRel)
+        .saturating_add(bytes);
+    let mut messages = queue.messages.lock();
+    if capture {
+        return if messages.front().is_some_and(|message| message.start < end) {
+            messages
+                .pop_front()
+                .map(|message| message.fds)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+    }
+    while messages.front().is_some_and(|message| message.start < end) {
+        let _ = messages.pop_front();
+    }
+    Vec::new()
 }
 
 /// Returns the shared status flags for one Linux descriptor.

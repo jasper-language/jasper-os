@@ -19,7 +19,9 @@ pub mod utsname;
 pub use executable::{
     ExecutableRegistry, LogicalPath, ProgramId, RegistryError, ResolvedProgram, SystemImage,
 };
-pub use fd::{CompatKind, FdBatch, FdEntry, FdHandle, FdTable, FdTableError};
+pub use fd::{
+    CompatKind, FdBatch, FdDescription, FdEntry, FdHandle, FdTable, FdTableError, OpenFileRef,
+};
 pub use native::{
     Epoll, EpollEvent, EpollInterest, EventSourceTable, Futex, FutexWake, MemoryMapping,
     NativeError, NativeHandle, NativeMemory, NativeWait, Uring,

@@ -349,6 +349,155 @@ int main(void) {
         close(message_fds[0]) != 0 || close(message_fds[1]) != 0) {
         return 118;
     }
+    int rights_fds[2];
+    int transfer_pipe[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, rights_fds) != 0 ||
+        pipe2(transfer_pipe, O_NONBLOCK) != 0) {
+        return 119;
+    }
+    char rights_control[CMSG_SPACE(sizeof(int))];
+    memset(rights_control, 0, sizeof(rights_control));
+    char rights_byte = 'R';
+    struct iovec rights_send_iov = {.iov_base = &rights_byte, .iov_len = 1};
+    struct msghdr rights_send = {
+        .msg_iov = &rights_send_iov,
+        .msg_iovlen = 1,
+        .msg_control = rights_control,
+        .msg_controllen = sizeof(rights_control),
+    };
+    struct cmsghdr *rights_send_cmsg = CMSG_FIRSTHDR(&rights_send);
+    if (!rights_send_cmsg) {
+        return 120;
+    }
+    rights_send_cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    rights_send_cmsg->cmsg_level = SOL_SOCKET;
+    rights_send_cmsg->cmsg_type = SCM_RIGHTS;
+    memcpy(CMSG_DATA(rights_send_cmsg), &transfer_pipe[0], sizeof(int));
+    if (sendmsg(rights_fds[0], &rights_send, MSG_NOSIGNAL) != 1 ||
+        close(transfer_pipe[0]) != 0) {
+        return 121;
+    }
+    memset(rights_control, 0, sizeof(rights_control));
+    char rights_receive_byte = 0;
+    struct iovec rights_receive_iov = {
+        .iov_base = &rights_receive_byte,
+        .iov_len = 1,
+    };
+    struct msghdr rights_receive = {
+        .msg_iov = &rights_receive_iov,
+        .msg_iovlen = 1,
+        .msg_control = rights_control,
+        .msg_controllen = sizeof(rights_control),
+    };
+    if (recvmsg(rights_fds[1], &rights_receive, MSG_CMSG_CLOEXEC) != 1 ||
+        rights_receive_byte != 'R') {
+        return 122;
+    }
+    struct cmsghdr *rights_receive_cmsg = CMSG_FIRSTHDR(&rights_receive);
+    if (!rights_receive_cmsg ||
+        rights_receive_cmsg->cmsg_level != SOL_SOCKET ||
+        rights_receive_cmsg->cmsg_type != SCM_RIGHTS ||
+        rights_receive_cmsg->cmsg_len != CMSG_LEN(sizeof(int))) {
+        return 123;
+    }
+    int received_pipe_read = -1;
+    memcpy(&received_pipe_read, CMSG_DATA(rights_receive_cmsg),
+           sizeof(received_pipe_read));
+    if (received_pipe_read < 0 ||
+        (fcntl(received_pipe_read, F_GETFD) & FD_CLOEXEC) == 0 ||
+        (fcntl(received_pipe_read, F_GETFL) & O_NONBLOCK) == 0 ||
+        write(transfer_pipe[1], "T", 1) != 1 ||
+        read(received_pipe_read, blocking_bytes, 1) != 1 ||
+        blocking_bytes[0] != 'T' ||
+        close(received_pipe_read) != 0 ||
+        close(transfer_pipe[1]) != 0 ||
+        close(rights_fds[0]) != 0 || close(rights_fds[1]) != 0) {
+        return 124;
+    }
+    int cross_rights[2];
+    int cross_pipe[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, cross_rights) != 0 ||
+        pipe2(cross_pipe, O_NONBLOCK) != 0) {
+        return 125;
+    }
+    pid_t rights_child = fork();
+    if (rights_child < 0) {
+        return 126;
+    }
+    if (rights_child == 0) {
+        close(cross_rights[0]);
+        close(cross_pipe[0]);
+        char prefix = 0;
+        if (recv(cross_rights[1], &prefix, 1, 0) != 1 || prefix != 'P') {
+            _exit(127);
+        }
+        memset(rights_control, 0, sizeof(rights_control));
+        rights_receive_byte = 0;
+        rights_receive = (struct msghdr){
+            .msg_iov = &rights_receive_iov,
+            .msg_iovlen = 1,
+            .msg_control = rights_control,
+            .msg_controllen = sizeof(rights_control),
+        };
+        if (recvmsg(cross_rights[1], &rights_receive,
+                    MSG_CMSG_CLOEXEC) != 1 ||
+            rights_receive_byte != 'C') {
+            _exit(128);
+        }
+        rights_receive_cmsg = CMSG_FIRSTHDR(&rights_receive);
+        if (!rights_receive_cmsg ||
+            rights_receive_cmsg->cmsg_type != SCM_RIGHTS ||
+            rights_receive_cmsg->cmsg_len != CMSG_LEN(sizeof(int))) {
+            _exit(129);
+        }
+        received_pipe_read = -1;
+        memcpy(&received_pipe_read, CMSG_DATA(rights_receive_cmsg),
+               sizeof(received_pipe_read));
+        if (received_pipe_read < 0 ||
+            (fcntl(received_pipe_read, F_GETFD) & FD_CLOEXEC) == 0 ||
+            (fcntl(received_pipe_read, F_GETFL) & O_NONBLOCK) == 0 ||
+            read(received_pipe_read, blocking_bytes, 1) != 1 ||
+            blocking_bytes[0] != 'C') {
+            _exit(130);
+        }
+        close(received_pipe_read);
+        close(cross_pipe[1]);
+        close(cross_rights[1]);
+        _exit(0);
+    }
+    close(cross_rights[1]);
+    memset(rights_control, 0, sizeof(rights_control));
+    rights_control[0] = 0;
+    rights_byte = 'C';
+    rights_send_iov.iov_base = &rights_byte;
+    rights_send_iov.iov_len = 1;
+    rights_send = (struct msghdr){
+        .msg_iov = &rights_send_iov,
+        .msg_iovlen = 1,
+        .msg_control = rights_control,
+        .msg_controllen = sizeof(rights_control),
+    };
+    rights_send_cmsg = CMSG_FIRSTHDR(&rights_send);
+    if (!rights_send_cmsg) {
+        return 131;
+    }
+    rights_send_cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    rights_send_cmsg->cmsg_level = SOL_SOCKET;
+    rights_send_cmsg->cmsg_type = SCM_RIGHTS;
+    memcpy(CMSG_DATA(rights_send_cmsg), &cross_pipe[0], sizeof(int));
+    if (write(cross_rights[0], "P", 1) != 1 ||
+        sendmsg(cross_rights[0], &rights_send, MSG_NOSIGNAL) != 1 ||
+        close(cross_pipe[0]) != 0 ||
+        write(cross_pipe[1], "C", 1) != 1 ||
+        close(cross_pipe[1]) != 0 ||
+        close(cross_rights[0]) != 0) {
+        return 132;
+    }
+    int rights_status = 0;
+    if (waitpid(rights_child, &rights_status, 0) != rights_child ||
+        !WIFEXITED(rights_status) || WEXITSTATUS(rights_status) != 0) {
+        return 133;
+    }
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
     if (sched_getaffinity(0, sizeof(cpus), &cpus) != 0 ||
