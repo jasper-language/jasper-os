@@ -33,6 +33,22 @@ pub struct FdHandle {
     generation: u32,
 }
 
+#[derive(Clone)]
+pub struct OpenFileRef(Arc<SpinLock<OpenFileState>>);
+
+#[derive(Clone)]
+pub struct FdDescription {
+    pub entry: FdEntry,
+    open_file: OpenFileRef,
+}
+
+impl FdDescription {
+    pub fn with_handle(mut self, handle: u64) -> Self {
+        self.entry.handle = handle;
+        self
+    }
+}
+
 impl FdHandle {
     pub const fn fd(self) -> u32 {
         self.fd
@@ -259,6 +275,27 @@ impl<const N: usize> FdTable<N> {
             .map(|state| state.lock().status_flags)
     }
 
+    /// Captures one current descriptor and its shared open-file description
+    /// for a controlled SCM_RIGHTS handoff.
+    pub fn description_fd(&self, fd: u32) -> Option<FdDescription> {
+        let entry = self.get_fd(fd)?;
+        let open_file = self.open_files[fd as usize].as_ref()?;
+        Some(FdDescription {
+            entry,
+            open_file: OpenFileRef(Arc::clone(open_file)),
+        })
+    }
+
+    /// Installs a captured descriptor into a new fd generation while retaining
+    /// the original open-file cursor and status flags.
+    pub fn install_description(
+        &mut self,
+        description: FdDescription,
+        close_on_exec: bool,
+    ) -> Result<FdHandle, FdTableError> {
+        self.install_description_at_or_above(description, 0, close_on_exec)
+    }
+
     /// Sets shared Linux status flags for the current fd generation.
     pub fn set_fd_status_flags(&self, fd: u32, flags: u32) -> bool {
         if self.get_fd(fd).is_none() {
@@ -436,6 +473,46 @@ impl<const N: usize> FdTable<N> {
         );
         self.generations[index] = generation;
         self.open_files[index] = Some(cursor);
+        self.slots[index] = Some(Slot {
+            entry: FdEntry {
+                fd: index as u32,
+                generation,
+                handle: entry.handle,
+                rights: entry.rights,
+                kind: entry.kind,
+                close_on_exec,
+            },
+            active: true,
+        });
+        self.open += 1;
+        Ok(FdHandle {
+            fd: index as u32,
+            generation,
+        })
+    }
+
+    fn install_description_at_or_above(
+        &mut self,
+        description: FdDescription,
+        min_fd: u32,
+        close_on_exec: bool,
+    ) -> Result<FdHandle, FdTableError> {
+        let entry = description.entry;
+        if entry.handle == 0 {
+            return Err(FdTableError::InvalidHandle);
+        }
+        let start = min_fd as usize;
+        if start >= N {
+            return Err(FdTableError::NoSpace);
+        }
+        let index = (start..N)
+            .find(|&index| self.slots[index].is_none_or(|slot| !slot.active))
+            .ok_or(FdTableError::NoSpace)?;
+        let generation = self.generations[index]
+            .checked_add(1)
+            .ok_or(FdTableError::GenerationExhausted)?;
+        self.generations[index] = generation;
+        self.open_files[index] = Some(Arc::clone(&(description.open_file).0));
         self.slots[index] = Some(Slot {
             entry: FdEntry {
                 fd: index as u32,
@@ -674,5 +751,35 @@ mod tests {
             .install(0x11, Rights::READ, CompatKind::Pipe, false)
             .unwrap();
         assert_eq!(other.fd_status_flags(other_fd.fd()), Some(0));
+    }
+
+    #[test]
+    fn controlled_transfer_preserves_the_open_file_description() {
+        let mut source = FdTable::<8>::new();
+        let fd = source
+            .install(
+                0x500,
+                Rights::READ.union(Rights::WRITE),
+                CompatKind::Pipe,
+                false,
+            )
+            .unwrap();
+        assert!(source.set_fd_offset(fd.fd(), 37));
+        assert!(source.set_fd_status_flags(fd.fd(), 0x800));
+        let description = source.description_fd(fd.fd()).unwrap();
+        assert!(source.close(fd).is_ok());
+
+        let mut receiver = FdTable::<8>::new();
+        let second_receiver = description.clone();
+        let received = receiver.install_description(description, true).unwrap();
+        assert_eq!(receiver.fd_offset(received.fd()), Some(37));
+        assert_eq!(receiver.fd_status_flags(received.fd()), Some(0x800));
+        assert!(receiver.get(received).unwrap().close_on_exec);
+        assert!(receiver.set_fd_offset(received.fd(), 91));
+        let mut other_receiver = FdTable::<8>::new();
+        let other = other_receiver
+            .install_description(second_receiver, false)
+            .unwrap();
+        assert_eq!(other_receiver.fd_offset(other.fd()), Some(91));
     }
 }

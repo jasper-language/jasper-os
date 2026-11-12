@@ -3224,7 +3224,6 @@ struct LinuxMessageHeader {
     iov_len: usize,
     control: u64,
     control_len: usize,
-    flags: u64,
 }
 
 /// Reads the fixed x86_64 `struct msghdr` ABI without trusting array lengths.
@@ -3241,7 +3240,6 @@ fn read_message_header(pid: ObjId, address: u64) -> Result<LinuxMessageHeader, C
         control: u64::from_le_bytes(raw[32..40].try_into().unwrap()),
         control_len: usize::try_from(u64::from_le_bytes(raw[40..48].try_into().unwrap()))
             .map_err(|_| CompatErrno::Invalid)?,
-        flags: u64::from(u32::from_le_bytes(raw[48..52].try_into().unwrap())),
     })
 }
 
@@ -3282,7 +3280,71 @@ fn read_message_iovecs(
     Ok(vectors)
 }
 
-/// Implements plain-data `sendmsg(2)` on a connected AF_UNIX stream.
+/// Parses and captures SCM_RIGHTS descriptors from one bounded control buffer.
+fn capture_scm_rights(
+    pid: ObjId,
+    header: &LinuxMessageHeader,
+) -> Result<alloc::vec::Vec<proc::LinuxFdTransfer>, CompatErrno> {
+    const CMSG_HEADER_BYTES: usize = 16;
+    const MAX_CONTROL_BYTES: usize = 16 * 1024;
+    const MAX_SCM_FDS: usize = 32;
+    const SOL_SOCKET: i32 = 1;
+    const SCM_RIGHTS: i32 = 1;
+    if header.control == 0 || header.control_len == 0 {
+        return Ok(alloc::vec::Vec::new());
+    }
+    if header.control_len > MAX_CONTROL_BYTES {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut control = alloc::vec![0u8; header.control_len];
+    proc::read(pid, header.control, &mut control).map_err(|_| CompatErrno::Fault)?;
+    let mut offset = 0usize;
+    let mut transfers = alloc::vec::Vec::new();
+    while offset < control.len() {
+        if control.len() - offset < CMSG_HEADER_BYTES {
+            return Err(CompatErrno::Invalid);
+        }
+        let length = usize::try_from(u64::from_le_bytes(
+            control[offset..offset + 8].try_into().unwrap(),
+        ))
+        .map_err(|_| CompatErrno::Invalid)?;
+        if length < CMSG_HEADER_BYTES || length > control.len() - offset {
+            return Err(CompatErrno::Invalid);
+        }
+        let level = i32::from_le_bytes(control[offset + 8..offset + 12].try_into().unwrap());
+        let kind = i32::from_le_bytes(control[offset + 12..offset + 16].try_into().unwrap());
+        if level != SOL_SOCKET || kind != SCM_RIGHTS {
+            return Err(CompatErrno::NoSys);
+        }
+        let payload = length - CMSG_HEADER_BYTES;
+        if payload == 0 || payload % 4 != 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        let start = offset + CMSG_HEADER_BYTES;
+        for raw_fd in control[start..start + payload].chunks_exact(4) {
+            if transfers.len() >= MAX_SCM_FDS {
+                return Err(CompatErrno::Invalid);
+            }
+            let fd = i32::from_le_bytes(raw_fd.try_into().unwrap());
+            if fd < 0 {
+                return Err(CompatErrno::BadFd);
+            }
+            let transfer =
+                proc::linux_capture_fd_transfer(pid, fd as u32).map_err(|error| match error {
+                    proc::LinuxFdTransferError::Invalid => CompatErrno::BadFd,
+                    proc::LinuxFdTransferError::NoSpace => CompatErrno::NoSpace,
+                })?;
+            transfers.push(transfer);
+        }
+        offset = offset
+            .checked_add((length + 7) & !7)
+            .ok_or(CompatErrno::Invalid)?;
+    }
+    Ok(transfers)
+}
+
+/// Implements `sendmsg(2)` on a connected AF_UNIX stream, including
+/// SCM_RIGHTS descriptor transfer.
 fn linux_sendmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MSG_DONTWAIT: u64 = 0x40;
     const MSG_EOR: u64 = 0x80;
@@ -3290,15 +3352,14 @@ fn linux_sendmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MSG_MORE: u64 = 0x8000;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let header = read_message_header(pid, args[1])?;
-    if header.flags & !(MSG_DONTWAIT | MSG_EOR | MSG_NOSIGNAL | MSG_MORE) != 0 {
+    let flags = args[2];
+    if flags & !(MSG_DONTWAIT | MSG_EOR | MSG_NOSIGNAL | MSG_MORE) != 0 {
         return Err(CompatErrno::Invalid);
     }
     if header.name != 0 || header.name_len != 0 {
         return Err(CompatErrno::IsConnected);
     }
-    if header.control != 0 || header.control_len != 0 {
-        return Err(CompatErrno::NoSys);
-    }
+    let transfers = capture_scm_rights(pid, &header)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if entry.kind != compat_core::fd::CompatKind::Socket
         || !entry
@@ -3318,28 +3379,95 @@ fn linux_sendmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         bytes.resize(start + len, 0);
         proc::read(pid, base, &mut bytes[start..]).map_err(|_| CompatErrno::Fault)?;
     }
-    linux_socket_write_buffer(
+    let written = linux_socket_write_buffer(
         pid,
         fd,
         entry.handle,
         &bytes,
-        header.flags & MSG_DONTWAIT != 0,
-        header.flags & MSG_NOSIGNAL != 0,
-    )
+        flags & MSG_DONTWAIT != 0,
+        flags & MSG_NOSIGNAL != 0,
+        transfers.is_empty(),
+    )?;
+    if !transfers.is_empty() {
+        if written == 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        proc::linux_socket_queue_control(
+            pid,
+            entry.handle,
+            written as usize,
+            transfers,
+        )
+        .map_err(socket_compat_error)?;
+    }
+    Ok(written)
 }
 
-/// Implements plain-data `recvmsg(2)` on a connected AF_UNIX stream.
+/// Installs received SCM_RIGHTS descriptors and writes their control message.
+fn receive_scm_rights(
+    pid: ObjId,
+    handle: u64,
+    header: &LinuxMessageHeader,
+    data_bytes: usize,
+    close_on_exec: bool,
+) -> Result<(usize, u64), CompatErrno> {
+    const MSG_CTRUNC: u64 = 0x20;
+    const CMSG_HEADER_BYTES: usize = 16;
+    if header.control == 0 || header.control_len == 0 {
+        return Ok((0, 0));
+    }
+    let transfers = proc::linux_socket_consume_control(pid, handle, data_bytes, true);
+    if transfers.is_empty() {
+        return Ok((0, 0));
+    }
+    let payload = transfers
+        .len()
+        .checked_mul(4)
+        .ok_or(CompatErrno::Invalid)?;
+    let required = (CMSG_HEADER_BYTES + payload + 7) & !7;
+    if required > header.control_len {
+        return Ok((0, MSG_CTRUNC));
+    }
+    let mut installed = alloc::vec::Vec::new();
+    installed
+        .try_reserve(transfers.len())
+        .map_err(|_| CompatErrno::NoMemory)?;
+    for transfer in transfers {
+        match proc::linux_install_fd_transfer(pid, transfer, close_on_exec) {
+            Ok(fd) => installed.push(fd),
+            Err(_) => {
+                for fd in installed {
+                    let _ = proc::linux_close_fd(pid, fd);
+                }
+                return Err(CompatErrno::NoMemory);
+            }
+        }
+    }
+    let mut control = alloc::vec![0u8; required];
+    let cmsg_len = CMSG_HEADER_BYTES + payload;
+    control[0..8].copy_from_slice(&(cmsg_len as u64).to_le_bytes());
+    control[8..12].copy_from_slice(&1i32.to_le_bytes());
+    control[12..16].copy_from_slice(&1i32.to_le_bytes());
+    for (index, fd) in installed.iter().enumerate() {
+        let start = CMSG_HEADER_BYTES + index * 4;
+        control[start..start + 4]
+            .copy_from_slice(&(*fd as i32).to_le_bytes());
+    }
+    proc::write(pid, header.control, &control).map_err(|_| CompatErrno::Fault)?;
+    Ok((required, 0))
+}
+
+/// Implements `recvmsg(2)` on a connected AF_UNIX stream, including
+/// SCM_RIGHTS descriptor receipt.
 fn linux_recvmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MSG_DONTWAIT: u64 = 0x40;
     const MSG_WAITALL: u64 = 0x100;
     const MSG_CMSG_CLOEXEC: u64 = 0x4000_0000;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let header = read_message_header(pid, args[1])?;
-    if header.flags & !(MSG_DONTWAIT | MSG_WAITALL | MSG_CMSG_CLOEXEC) != 0 {
+    let flags = args[2];
+    if flags & !(MSG_DONTWAIT | MSG_WAITALL | MSG_CMSG_CLOEXEC) != 0 {
         return Err(CompatErrno::Invalid);
-    }
-    if header.control != 0 || header.control_len != 0 {
-        return Err(CompatErrno::NoSys);
     }
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if entry.kind != compat_core::fd::CompatKind::Socket
@@ -3356,7 +3484,8 @@ fn linux_recvmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         fd,
         entry.handle,
         &mut bytes,
-        header.flags & MSG_DONTWAIT != 0,
+        flags & MSG_DONTWAIT != 0,
+        header.control != 0 && header.control_len != 0,
     )?;
     let mut offset = 0usize;
     for (base, len) in vectors {
@@ -3367,18 +3496,33 @@ fn linux_recvmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             offset += take;
         }
     }
+    let endpoint =
+        proc::linux_socket_endpoint(pid, entry.handle).ok_or(CompatErrno::NotConnected)?;
+    let mut name_len = 0usize;
     if header.name != 0 {
-        let endpoint = proc::linux_socket_endpoint(pid, entry.handle)
-            .ok_or(CompatErrno::NotConnected)?;
         let name = endpoint
             .peer_name()
             .unwrap_or_else(compat_core::UnixSocketName::empty);
+        name_len = 2 + name.as_bytes().len();
         write_unix_sockaddr_with_capacity(header.name, header.name_len, name)?;
     }
-    let mut raw = [0u8; 4];
-    raw.copy_from_slice(&0u32.to_le_bytes());
-    proc::write(pid, args[1] + 8, &raw).map_err(|_| CompatErrno::Fault)?;
-    proc::write(pid, args[1] + 48, &raw).map_err(|_| CompatErrno::Fault)?;
+    let (control_len, message_flags) = receive_scm_rights(
+        pid,
+        entry.handle,
+        &header,
+        count,
+        flags & MSG_CMSG_CLOEXEC != 0,
+    )?;
+    proc::write(pid, args[1] + 8, &(name_len as u32).to_le_bytes())
+        .map_err(|_| CompatErrno::Fault)?;
+    proc::write(pid, args[1] + 40, &(control_len as u64).to_le_bytes())
+        .map_err(|_| CompatErrno::Fault)?;
+    proc::write(
+        pid,
+        args[1] + 48,
+        &(message_flags as u32).to_le_bytes(),
+    )
+    .map_err(|_| CompatErrno::Fault)?;
     Ok(count as u64)
 }
 
@@ -3559,7 +3703,8 @@ fn linux_socket_read(
     force_nonblocking: bool,
 ) -> Result<u64, CompatErrno> {
     let mut output = alloc::vec![0u8; len];
-    let count = linux_socket_read_buffer(pid, fd, handle, &mut output, force_nonblocking)?;
+    let count =
+        linux_socket_read_buffer(pid, fd, handle, &mut output, force_nonblocking, false)?;
     copy_to_user(address, &output[..count], count).map_err(|_| CompatErrno::Fault)?;
     Ok(count as u64)
 }
@@ -3571,6 +3716,7 @@ fn linux_socket_read_buffer(
     handle: u64,
     output: &mut [u8],
     force_nonblocking: bool,
+    capture_control: bool,
 ) -> Result<usize, CompatErrno> {
     if output.is_empty() {
         return Ok(0);
@@ -3583,7 +3729,12 @@ fn linux_socket_read_buffer(
         || proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
     loop {
         match endpoint.read(output) {
-            compat_core::PipeRead::Data(count) => return Ok(count),
+            compat_core::PipeRead::Data(count) => {
+                if count != 0 && !capture_control {
+                    let _ = proc::linux_socket_consume_control(pid, handle, count, false);
+                }
+                return Ok(count);
+            }
             compat_core::PipeRead::Eof => return Ok(0),
             compat_core::PipeRead::WouldBlock if nonblocking => return Err(CompatErrno::TryAgain),
             compat_core::PipeRead::WouldBlock => {
@@ -3615,6 +3766,7 @@ fn linux_socket_write(
         &input,
         force_nonblocking,
         suppress_sigpipe,
+        true,
     )
 }
 
@@ -3627,6 +3779,7 @@ fn linux_socket_write_buffer(
     input: &[u8],
     force_nonblocking: bool,
     suppress_sigpipe: bool,
+    record_data: bool,
 ) -> Result<u64, CompatErrno> {
     if input.is_empty() {
         return Ok(0);
@@ -3648,9 +3801,18 @@ fn linux_socket_write_buffer(
                 if !suppress_sigpipe {
                     raise_sigpipe(pid);
                 }
-                return Err(CompatErrno::BrokenPipe);
+                if written == 0 {
+                    return Err(CompatErrno::BrokenPipe);
+                }
+                if record_data {
+                    proc::linux_socket_record_data(pid, handle, written);
+                }
+                return Ok(written as u64);
             }
             compat_core::PipeWrite::WouldBlock if nonblocking => {
+                if written != 0 && record_data {
+                    proc::linux_socket_record_data(pid, handle, written);
+                }
                 return if written == 0 {
                     Err(CompatErrno::TryAgain)
                 } else {
@@ -3659,6 +3821,9 @@ fn linux_socket_write_buffer(
             }
             compat_core::PipeWrite::WouldBlock => {
                 if proc::current_exiting() || current_signal_pending(pid) {
+                    if written != 0 && record_data {
+                        proc::linux_socket_record_data(pid, handle, written);
+                    }
                     return if written == 0 {
                         Err(CompatErrno::Interrupted)
                     } else {
@@ -3668,6 +3833,9 @@ fn linux_socket_write_buffer(
                 sched::pause();
             }
         }
+    }
+    if record_data {
+        proc::linux_socket_record_data(pid, handle, written);
     }
     Ok(written as u64)
 }
