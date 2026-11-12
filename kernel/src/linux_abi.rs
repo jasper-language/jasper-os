@@ -4834,10 +4834,7 @@ fn ashmem_compat_error(error: proc::LinuxAshmemError) -> CompatErrno {
     }
 }
 
-/// Implements a bounded non-blocking `poll(2)` over Jasper compatibility fds.
-///
-/// 只接受零超时；常规文件按其请求的读写事件就绪，控制台当前无输入。无效 fd
-/// 返回 `POLLNVAL`，调用不会因未实现的阻塞等待而伪装成功。
+/// Implements bounded blocking and timeout `poll(2)` over compatibility fds.
 fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const POLLIN: u16 = 0x001;
     const POLLOUT: u16 = 0x004;
@@ -4847,10 +4844,19 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MAX_POLLFDS: usize = 64;
     let count = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
     let timeout = args[2] as u32 as i32;
-    if count > MAX_POLLFDS || timeout != 0 {
-        return Err(CompatErrno::NoSys);
+    if count > MAX_POLLFDS {
+        return Err(CompatErrno::Invalid);
     }
-    for index in 0..count {
+    let deadline = if timeout < 0 {
+        None
+    } else {
+        Some(
+            sched::now_ns().saturating_add((timeout as u64).saturating_mul(1_000_000)),
+        )
+    };
+    loop {
+        let mut ready_count = 0usize;
+        for index in 0..count {
         let address = args[0]
             .checked_add((index * 8) as u64)
             .ok_or(CompatErrno::Fault)?;
@@ -4917,10 +4923,29 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 Some(_) => 0,
             }
         };
+        if revents != 0 {
+            ready_count += 1;
+        }
         pollfd[6..8].copy_from_slice(&revents.to_le_bytes());
         copy_to_user(address, &pollfd, pollfd.len()).map_err(|_| CompatErrno::Fault)?;
+        }
+        if ready_count != 0 || timeout == 0 {
+            return Ok(ready_count as u64);
+        }
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        if let Some(deadline) = deadline {
+            if sched::now_ns() >= deadline {
+                return Ok(0);
+            }
+            if sched::sleep_until_ns(deadline).is_err() {
+                sched::pause();
+            }
+        } else {
+            sched::pause();
+        }
     }
-    Ok(0)
 }
 
 /// Implements `statfs(2)` over the exact read-only verification namespace.
