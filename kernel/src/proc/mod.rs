@@ -2535,6 +2535,7 @@ pub fn vfork_linux_process(
         {
             return Err(ProcError::NotTransferable);
         }
+        crate::mm::frame::watch_stack(&[parent_stack_frame]);
     }
 
     let child = create_linux("linux-vfork", calls)?;
