@@ -2506,6 +2506,32 @@ pub(crate) fn linux_close_fd(pid: ObjId, fd: u32) -> bool {
     .is_ok()
 }
 
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_close_range(
+    pid: ObjId,
+    first: u32,
+    last: u32,
+    close_on_exec: bool,
+) -> bool {
+    if first > last {
+        return false;
+    }
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        for fd in first..=last.min(63) {
+            if close_on_exec {
+                let _ = linux.fds.set_close_on_exec_fd(fd, true);
+            } else if let Some(handle) = linux.fds.get_fd(fd).map(|entry| entry.handle) {
+                if linux.fds.close_fd(fd).is_ok() {
+                    release_unreferenced_pipe(linux, handle);
+                }
+            }
+        }
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Updates close-on-exec for one Linux descriptor.
 ///
 /// 更新 Linux fd 的 close-on-exec；只作用于当前有效世代。
