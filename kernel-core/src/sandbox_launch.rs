@@ -146,6 +146,7 @@ pub struct LaunchPlanSnapshot {
     pub image: ImageKey,
     pub image_content: ContentDigest,
     pub volume: Option<VolumeKey>,
+    pub root_capabilities: CapabilitySet,
     pub capabilities: CapabilitySet,
     pub resources: LaunchResources,
     pub network_policy: Option<NetworkPolicyRef>,
@@ -231,6 +232,79 @@ impl From<SandboxStorageError> for LaunchError {
 pub struct SandboxLaunchTable<const N: usize> {
     slots: [Option<Record>; N],
     generations: [u32; N],
+}
+
+/// Live authority facts that cannot be inferred from a launch descriptor.
+///
+/// 不能从启动描述符推断的实时授权事实。实现者必须在请求发生时查询设备、
+/// data scope 和 NET policy 的唯一权威，而不是缓存用户输入。
+pub trait LaunchAuthority {
+    /// Current capabilities granted to this Sandbox root.
+    fn root_capabilities(
+        &self,
+        domain: DomainKey,
+        sandbox: SandboxKey,
+        root: WorkloadKey,
+    ) -> Option<CapabilitySet>;
+
+    /// Whether a device grant is still live for the current Sandbox generation.
+    fn device_grant_live(&self, domain: DomainKey, sandbox: SandboxKey, grant: DeviceGrant)
+        -> bool;
+
+    /// Whether a data grant is still live for the current Sandbox generation.
+    fn data_scope_live(
+        &self,
+        domain: DomainKey,
+        sandbox: SandboxKey,
+        grant: DataScopeGrant,
+    ) -> bool;
+
+    /// Whether the referenced NET policy generation is still authoritative.
+    fn network_policy_live(&self, domain: DomainKey, policy: NetworkPolicyRef) -> bool;
+}
+
+/// Intrinsic Sandbox image/volume authority with every external authority denied.
+///
+/// Built-in Sandbox root may execute its image and access its private volumes,
+/// but device, arbitrary data scopes and network policies remain unavailable
+/// until their authoritative services are connected.
+pub struct IntrinsicLaunchAuthority;
+
+impl LaunchAuthority for IntrinsicLaunchAuthority {
+    fn root_capabilities(
+        &self,
+        _domain: DomainKey,
+        _sandbox: SandboxKey,
+        _root: WorkloadKey,
+    ) -> Option<CapabilitySet> {
+        Some(
+            CapabilitySet::EXECUTE
+                .union(CapabilitySet::DATA_READ)
+                .union(CapabilitySet::DATA_WRITE),
+        )
+    }
+
+    fn device_grant_live(
+        &self,
+        _domain: DomainKey,
+        _sandbox: SandboxKey,
+        _grant: DeviceGrant,
+    ) -> bool {
+        false
+    }
+
+    fn data_scope_live(
+        &self,
+        _domain: DomainKey,
+        _sandbox: SandboxKey,
+        _grant: DataScopeGrant,
+    ) -> bool {
+        false
+    }
+
+    fn network_policy_live(&self, _domain: DomainKey, _policy: NetworkPolicyRef) -> bool {
+        false
+    }
 }
 
 impl<const N: usize> SandboxLaunchTable<N> {
@@ -323,6 +397,7 @@ impl<const N: usize> SandboxLaunchTable<N> {
             image: spec.image,
             image_content: image.image.content,
             volume: spec.volume,
+            root_capabilities: spec.root_capabilities,
             capabilities: spec.capabilities,
             resources: spec.resources,
             network_policy: spec.network_policy,
@@ -351,12 +426,137 @@ impl<const N: usize> SandboxLaunchTable<N> {
         Ok(key)
     }
 
+    /// Create a plan only after all live authority facts are revalidated.
+    ///
+    /// 仅在重新验证全部实时授权事实后创建计划；任何外部 grant/NET 权威缺失
+    /// 都使整个请求失败，不留下部分计划。
+    pub fn create_live<
+        A: LaunchAuthority,
+        const W: usize,
+        const S: usize,
+        const I: usize,
+        const L: usize,
+        const V: usize,
+    >(
+        &mut self,
+        domain: DomainKey,
+        workloads: &WorkloadTable<W>,
+        sandboxes: &SandboxTable<S>,
+        storage: &SandboxStorageTable<I, L, V>,
+        authority: &A,
+        spec: LaunchSpec<'_>,
+    ) -> Result<LaunchPlanKey, LaunchError> {
+        let current = authority
+            .root_capabilities(domain, spec.sandbox, spec.root)
+            .ok_or(LaunchError::InvalidRoot)?;
+        if spec.root_capabilities != current {
+            return Err(LaunchError::Capability);
+        }
+        if let Some(policy) = spec.network_policy {
+            if !authority.network_policy_live(domain, policy) {
+                return Err(LaunchError::InvalidNetwork);
+            }
+        }
+        if spec
+            .devices
+            .iter()
+            .any(|grant| !authority.device_grant_live(domain, spec.sandbox, *grant))
+        {
+            return Err(LaunchError::InvalidDevice);
+        }
+        if spec
+            .data
+            .iter()
+            .any(|grant| !authority.data_scope_live(domain, spec.sandbox, *grant))
+        {
+            return Err(LaunchError::InvalidData);
+        }
+        self.create(domain, workloads, sandboxes, storage, spec)
+    }
+
     pub fn plan(
         &self,
         domain: DomainKey,
         key: LaunchPlanKey,
     ) -> Result<LaunchPlanSnapshot, LaunchError> {
         self.record(domain, key).map(|record| record.plan)
+    }
+
+    /// Query a plan only while every referenced authority is still live.
+    ///
+    /// 仅在所有引用仍存活时查询计划；销毁的 Sandbox/root/image/volume、
+    /// 已撤销的 grant/NET policy 或变化的 root 权限都会使查询失败关闭。
+    pub fn plan_live<
+        A: LaunchAuthority,
+        const W: usize,
+        const S: usize,
+        const I: usize,
+        const L: usize,
+        const V: usize,
+    >(
+        &self,
+        domain: DomainKey,
+        workloads: &WorkloadTable<W>,
+        sandboxes: &SandboxTable<S>,
+        storage: &SandboxStorageTable<I, L, V>,
+        authority: &A,
+        key: LaunchPlanKey,
+    ) -> Result<LaunchPlanSnapshot, LaunchError> {
+        let record = self.record(domain, key)?;
+        let sandbox = sandboxes.snapshot_in_domain(workloads, domain, record.plan.sandbox)?;
+        let workload = workloads.snapshot(record.plan.root)?;
+        if sandbox.root != record.plan.root
+            || workload.domain != domain
+            || workload.parent.is_some()
+            || workload.state != WorkloadState::Running
+            || sandbox.state != WorkloadState::Running
+        {
+            return Err(LaunchError::NotRunning);
+        }
+        if !attenuates_limits(record.plan.resources.limits, workload.limits) {
+            return Err(LaunchError::InvalidLimit);
+        }
+        let current = authority
+            .root_capabilities(domain, record.plan.sandbox, record.plan.root)
+            .ok_or(LaunchError::InvalidRoot)?;
+        if record.plan.root_capabilities != current || !record.plan.capabilities.attenuates(current)
+        {
+            return Err(LaunchError::Capability);
+        }
+        let image = storage.image(domain, record.plan.sandbox, record.plan.image)?;
+        if image.image.content != record.plan.image_content {
+            return Err(LaunchError::Ownership);
+        }
+        if let Some(volume) = record.plan.volume {
+            let volume = storage.volume(domain, record.plan.sandbox, volume)?;
+            if volume.image != record.plan.image {
+                return Err(LaunchError::Ownership);
+            }
+        }
+        if record
+            .plan
+            .network_policy
+            .is_some_and(|policy| !authority.network_policy_live(domain, policy))
+        {
+            return Err(LaunchError::InvalidNetwork);
+        }
+        if record
+            .devices
+            .iter()
+            .flatten()
+            .any(|grant| !authority.device_grant_live(domain, record.plan.sandbox, *grant))
+        {
+            return Err(LaunchError::InvalidDevice);
+        }
+        if record
+            .data
+            .iter()
+            .flatten()
+            .any(|grant| !authority.data_scope_live(domain, record.plan.sandbox, *grant))
+        {
+            return Err(LaunchError::InvalidData);
+        }
+        Ok(record.plan)
     }
 
     pub fn count(&self) -> usize {
@@ -593,6 +793,44 @@ mod tests {
 
     fn digest(byte: u8) -> ContentDigest {
         ContentDigest::new([byte; 32]).unwrap()
+    }
+
+    struct TestAuthority {
+        root: CapabilitySet,
+        external: bool,
+    }
+
+    impl LaunchAuthority for TestAuthority {
+        fn root_capabilities(
+            &self,
+            _domain: DomainKey,
+            _sandbox: SandboxKey,
+            _root: WorkloadKey,
+        ) -> Option<CapabilitySet> {
+            Some(self.root)
+        }
+
+        fn device_grant_live(
+            &self,
+            _domain: DomainKey,
+            _sandbox: SandboxKey,
+            _grant: DeviceGrant,
+        ) -> bool {
+            self.external
+        }
+
+        fn data_scope_live(
+            &self,
+            _domain: DomainKey,
+            _sandbox: SandboxKey,
+            _grant: DataScopeGrant,
+        ) -> bool {
+            self.external
+        }
+
+        fn network_policy_live(&self, _domain: DomainKey, _policy: NetworkPolicyRef) -> bool {
+            self.external
+        }
     }
 
     fn limits() -> ResourceLimits {
@@ -981,5 +1219,72 @@ mod tests {
             .unwrap();
         assert_ne!(old, new);
         assert_eq!(plans.plan(DOMAIN, old), Err(LaunchError::InvalidSandbox));
+    }
+
+    #[test]
+    fn live_authority_is_rechecked_at_create_and_query() {
+        let (workloads, sandboxes, storage, sandbox, root, image, volume, _) = fixture();
+        let mut plans = SandboxLaunchTable::<1>::new();
+        let spec = launch_spec(sandbox, root, image, Some(volume), &[], &[]);
+        let mut authority = TestAuthority {
+            root: CapabilitySet::ALL,
+            external: true,
+        };
+        let key = plans
+            .create_live(DOMAIN, &workloads, &sandboxes, &storage, &authority, spec)
+            .unwrap();
+        assert_eq!(
+            plans
+                .plan_live(DOMAIN, &workloads, &sandboxes, &storage, &authority, key,)
+                .unwrap()
+                .root_capabilities,
+            CapabilitySet::ALL
+        );
+
+        authority.root = CapabilitySet::EXECUTE;
+        assert_eq!(
+            plans.plan_live(DOMAIN, &workloads, &sandboxes, &storage, &authority, key,),
+            Err(LaunchError::Capability)
+        );
+        authority.root = CapabilitySet::ALL;
+        authority.external = false;
+        assert_eq!(
+            plans.plan_live(DOMAIN, &workloads, &sandboxes, &storage, &authority, key,),
+            Err(LaunchError::InvalidNetwork)
+        );
+        plans.destroy(DOMAIN, key).unwrap();
+
+        authority.external = true;
+        authority.root = CapabilitySet::EXECUTE;
+        assert_eq!(
+            plans.create_live(DOMAIN, &workloads, &sandboxes, &storage, &authority, spec,),
+            Err(LaunchError::Capability)
+        );
+        assert_eq!(plans.count(), 0);
+    }
+
+    #[test]
+    fn stopping_sandbox_invalidates_live_plan_queries() {
+        let (mut workloads, sandboxes, storage, sandbox, root, image, volume, _) = fixture();
+        let mut plans = SandboxLaunchTable::<1>::new();
+        let authority = TestAuthority {
+            root: CapabilitySet::ALL,
+            external: true,
+        };
+        let key = plans
+            .create_live(
+                DOMAIN,
+                &workloads,
+                &sandboxes,
+                &storage,
+                &authority,
+                launch_spec(sandbox, root, image, Some(volume), &[], &[]),
+            )
+            .unwrap();
+        sandboxes.request_stop(&mut workloads, sandbox).unwrap();
+        assert_eq!(
+            plans.plan_live(DOMAIN, &workloads, &sandboxes, &storage, &authority, key),
+            Err(LaunchError::NotRunning)
+        );
     }
 }

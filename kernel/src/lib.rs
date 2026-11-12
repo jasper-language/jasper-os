@@ -125,6 +125,7 @@ pub mod ring;
 pub mod rt;
 pub mod rtclass_demo;
 pub mod sandbox;
+pub mod sandbox_launch;
 pub mod sandbox_storage;
 pub mod terminal;
 #[cfg(feature = "user-programs")]

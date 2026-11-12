@@ -200,6 +200,7 @@ pub mod sandbox_image;
 pub mod sandbox_abi;
 pub mod sandbox_storage_abi;
 pub mod sandbox_launch;
+pub mod sandbox_launch_abi;
 pub mod sandbox_store;
 
 pub mod native_install;

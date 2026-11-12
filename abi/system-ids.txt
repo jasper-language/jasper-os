@@ -166,6 +166,9 @@
 96	op	system.sandbox.kill	1	write	沙箱·终止成员	Kill sandbox members
 97	op	system.terminal.read	1	read	终端·读取输入字节	Read terminal input bytes
 98	op	system.terminal.write	1	write	终端·写入输出字节	Write terminal output bytes
+99	op	system.sandbox.launch.create	1	write	沙箱启动计划·创建	Create sandbox launch plan
+100	op	system.sandbox.launch.query	1	read	沙箱启动计划·查询	Query sandbox launch plan
+101	op	system.sandbox.launch.destroy	1	write	沙箱启动计划·销毁	Destroy sandbox launch plan
 4151	error	system.sandbox.error.in_use	1	none	沙箱仍持有镜像或卷	Sandbox storage still in use
 4152	error	system.sandbox.image.error.not_found	1	none	沙箱镜像不存在或无权查看	Sandbox image not found
 4153	error	system.sandbox.image.error.layer	1	none	沙箱镜像层非法	Sandbox image layer invalid
