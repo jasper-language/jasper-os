@@ -180,6 +180,10 @@ if [ "$MODE" = root-exec ]; then
   grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/jasper-getppid path=/usr/bin/jasper-getppid interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
     "$OUT/serial.log"
   grep -aqE $'^jasper-ppid=0 lseek=[1-9][0-9]* affinity=[1-9][0-9]* cpu=[0-9][0-9]* node=0 uptime=[0-9][0-9]* totalram=[1-9][0-9]* freeram=[1-9][0-9]* procs=[1-9][0-9]* exe=/usr/bin/jasper-getppid resolution_ns=[1-9][0-9]* sleep_ns=[1-9][0-9]* wall=[1-9][0-9]* dirent=6 exec_meta=true fork=true\r?$' "$OUT/serial.log"
+  exec_before_pid=$(grep -aoE '^jasper-exec-before pid=[0-9]+ ppid=0' "$OUT/serial.log" | tail -n 1 | sed -E 's/.*pid=([0-9]+).*/\1/')
+  exec_child_pid=$(grep -aoE '^jasper-exec-child pid=[0-9]+ ppid=0' "$OUT/serial.log" | tail -n 1 | sed -E 's/.*pid=([0-9]+).*/\1/')
+  [ -n "$exec_before_pid" ]
+  [ "$exec_before_pid" = "$exec_child_pid" ]
   grep -aq '^\[JSR-LIFE-ROOT-LIBS\] count=6 bytes=[1-9][0-9]* source=system-ab' \
     "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"

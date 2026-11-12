@@ -1411,6 +1411,7 @@ fn execute(
         LinuxSyscall::Clone3 => {
             compat_result(linux_clone3(pid, call.args, user_ip, user_preserved))
         }
+        LinuxSyscall::Execve => compat_result(linux_execve(pid, call.args)),
         LinuxSyscall::Brk => compat_result(linux_brk(pid, call.args[0])),
         LinuxSyscall::Access => compat_result(linux_access(call.args[0])),
         LinuxSyscall::ArchPrctl => compat_result(linux_arch_prctl(call.args)),
@@ -2189,6 +2190,93 @@ fn linux_clone(
     )
 }
 
+/// Executes one root-backed dynamic image in the current Linux Process.
+/// 在当前 Linux Process 中执行一个根卷支持的动态映像。
+fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let path = linux_c_string(args[0], 4096)?;
+    let resolved = if path.starts_with(b"/") {
+        path.clone()
+    } else {
+        if path == b".."
+            || path.starts_with(b"../")
+            || path.windows(4).any(|window| window == b"/../")
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        let base = proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path();
+        let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
+        resolved.extend_from_slice(base);
+        if !base.ends_with(b"/") {
+            resolved.push(b'/');
+        }
+        resolved.extend_from_slice(&path);
+        resolved
+    };
+    drop(path);
+    let argv = linux_string_vector(args[1], 64, 64 * 1024)?;
+    let envp = linux_string_vector(args[2], 64, 64 * 1024)?;
+    let (executable, interpreter) =
+        crate::linux_vfs::root_executable(&resolved).ok_or(CompatErrno::NoEntry)?;
+    #[cfg(all(
+        feature = "lifecycle-root-exec-verify",
+        target_arch = "x86_64"
+    ))]
+    {
+        if crate::compat_dynamic_demo::exec_dynamic_program(
+            pid,
+            resolved,
+            executable,
+            interpreter,
+            argv,
+            envp,
+        ) {
+            Ok(0)
+        } else {
+            Err(CompatErrno::NoSys)
+        }
+    }
+    #[cfg(not(all(
+        feature = "lifecycle-root-exec-verify",
+        target_arch = "x86_64"
+    )))]
+    {
+        let _ = (executable, interpreter, argv, envp);
+        Err(CompatErrno::NoSys)
+    }
+}
+
+/// Reads a bounded NULL-terminated vector of NUL-terminated user strings.
+/// 读取有界的 NULL 结尾用户字符串向量。
+fn linux_string_vector(
+    address: u64,
+    max_entries: usize,
+    max_bytes: usize,
+) -> Result<alloc::vec::Vec<alloc::vec::Vec<u8>>, CompatErrno> {
+    if address == 0 {
+        return Ok(alloc::vec::Vec::new());
+    }
+    let mut output = alloc::vec::Vec::new();
+    let mut total = 0usize;
+    for index in 0..max_entries {
+        let slot = address
+            .checked_add((index * 8) as u64)
+            .ok_or(CompatErrno::Fault)?;
+        let mut raw = [0u8; 8];
+        copy_from_user(&mut raw, slot, 8).map_err(|_| CompatErrno::Fault)?;
+        let string_address = u64::from_le_bytes(raw);
+        if string_address == 0 {
+            return Ok(output);
+        }
+        let string = linux_c_string(string_address, 4096)?;
+        total = total.checked_add(string.len() + 1).ok_or(CompatErrno::Invalid)?;
+        if total > max_bytes {
+            return Err(CompatErrno::Invalid);
+        }
+        output.push(string);
+    }
+    Err(CompatErrno::Invalid)
+}
+
 /// Implements the glibc `fork()` clone subset with a private copied address space.
 /// 实现 glibc `fork()` 使用的独立地址空间复制子集。
 fn linux_fork_clone(
@@ -2222,6 +2310,7 @@ fn linux_fork_clone(
         user_stack,
         crate::arch::user_fs_base(),
         preserved_regs,
+        args,
         clear_child_tid,
     )
     .map_err(|error| match error {
@@ -2390,6 +2479,7 @@ fn linux_spawn_clone(
         user_rip,
         child_stack,
         fs_base,
+        None,
         None,
         clear_child_tid,
         clone_rdx,

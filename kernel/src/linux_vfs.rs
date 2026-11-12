@@ -8,7 +8,7 @@
 #[cfg(feature = "lifecycle-root-exec-verify")]
 use alloc::vec::Vec;
 #[cfg(feature = "lifecycle-root-exec-verify")]
-use spin::Once;
+use spin::{Mutex, Once};
 
 #[cfg(feature = "compat-dynamic-libc-verify")]
 static LIBC: &[u8] = include_bytes!(env!("JSR_UBUNTU_LIBC"));
@@ -36,6 +36,16 @@ static LIBPCRE2: &[u8] = include_bytes!(env!("JSR_UBUNTU_LIBPCRE2"));
 static LIBPCRE2: &[u8] = &[];
 #[cfg(feature = "lifecycle-root-exec-verify")]
 static ROOT_LIBRARIES: [Once<Vec<u8>>; 6] = [const { Once::new() }; 6];
+#[cfg(feature = "lifecycle-root-exec-verify")]
+static ROOT_INTERPRETER: Once<Vec<u8>> = Once::new();
+#[cfg(feature = "lifecycle-root-exec-verify")]
+static ROOT_EXECUTABLES: Mutex<Vec<RootExecutable>> = Mutex::new(Vec::new());
+
+#[cfg(feature = "lifecycle-root-exec-verify")]
+struct RootExecutable {
+    path: Vec<u8>,
+    bytes: Vec<u8>,
+}
 
 const HANDLE_BASE: u64 = 0xffff_0000_0000_0000;
 const DIRECTORY_HANDLE_BASE: u64 = HANDLE_BASE | 0x1000;
@@ -492,6 +502,60 @@ pub fn install_root_library(file: FileId, bytes: Vec<u8>) -> bool {
     ROOT_LIBRARIES[slot]
         .get()
         .is_some_and(|installed| !installed.is_empty())
+}
+
+/// Installs one exact executable read from the selected System A/B root.
+/// 安装一个从所选 System A/B 根卷读取的精确可执行映像。
+#[cfg(feature = "lifecycle-root-exec-verify")]
+pub fn install_root_executable(path: &[u8], bytes: Vec<u8>) -> bool {
+    const MAX_EXECUTABLES: usize = 64;
+    const MAX_PATH: usize = 256;
+    if path.is_empty()
+        || path.len() > MAX_PATH
+        || !path.starts_with(b"/")
+        || bytes.is_empty()
+    {
+        return false;
+    }
+    let mut executables = ROOT_EXECUTABLES.lock();
+    if let Some(existing) = executables.iter().find(|entry| entry.path == path) {
+        return existing.bytes == bytes;
+    }
+    if executables.len() == MAX_EXECUTABLES {
+        return false;
+    }
+    executables.push(RootExecutable {
+        path: path.to_vec(),
+        bytes,
+    });
+    true
+}
+
+/// Installs the exact root ELF interpreter used by executable images.
+/// 安装可执行映像使用的根卷 ELF 解释器。
+#[cfg(feature = "lifecycle-root-exec-verify")]
+pub fn install_root_interpreter(bytes: Vec<u8>) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    ROOT_INTERPRETER.call_once(|| bytes);
+    ROOT_INTERPRETER
+        .get()
+        .is_some_and(|installed| !installed.is_empty())
+}
+
+/// Returns cloned executable bytes and the interpreter for one trusted exact path.
+/// 返回可信精确路径的可执行字节副本及解释器。
+#[cfg(feature = "lifecycle-root-exec-verify")]
+pub fn root_executable(path: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let bytes = ROOT_EXECUTABLES
+        .lock()
+        .iter()
+        .find(|entry| entry.path == path)?
+        .bytes
+        .clone();
+    let interpreter = ROOT_INTERPRETER.get()?.clone();
+    Some((bytes, interpreter))
 }
 
 /// Returns whether the verification slice contains any bytes.

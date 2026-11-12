@@ -211,6 +211,16 @@ struct DeviceMapping {
     phys: u64,
 }
 
+#[cfg(feature = "linux-abi")]
+pub(crate) struct ExecAddressSpace {
+    space: VmSpace,
+    frames: Vec<Arc<crate::mm::memory_object::Page>>,
+    shared_maps: Vec<SharedMapping>,
+    memory_caps: MemoryCapabilityTable<{ kernel_core::memory_capability::MAX_MEMORY_CAPABILITIES }>,
+    memory_account: Arc<crate::mm::memory_quota::Account>,
+    device_maps: Vec<DeviceMapping>,
+}
+
 /// 线程的启动参数（线程首次被调度时读取）。
 #[derive(Clone, Copy)]
 struct ThreadStart {
@@ -222,6 +232,7 @@ struct ThreadStart {
     linux_clone: bool,
     fs_base: Option<u64>,
     linux_fork_regs: Option<[u64; 6]>,
+    linux_fork_args: Option<[u64; 6]>,
     clone_rdx: u64,
     clone_r8: u64,
 }
@@ -807,6 +818,87 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
     };
     create_process(name, SyscallSet::EMPTY, move |process| {
         process.linux = Some(linux);
+    })
+}
+
+/// Swaps one single-threaded Linux process onto a fresh address space for exec.
+/// 为 exec 将单线程 Linux 进程切换到新的空地址空间，并返回可回滚的旧状态。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, ProcError> {
+    let space = VmSpace::new().map_err(ProcError::Map)?;
+    let memory_account =
+        crate::mm::memory_quota::Account::new().ok_or(ProcError::OutOfFrames)?;
+    crate::mm::space::activate_kernel();
+    kobj::with(|t| match t.get_mut(pid) {
+        Ok(KObject::Process(p))
+            if p.state == ProcState::Running
+                && p.threads_live == 1
+                && p.linux.is_some() =>
+        {
+            revoke_all_device_mappings(p);
+            let linux = p.linux.as_mut().expect("checked Linux process");
+            let _ = linux.fds.take_close_on_exec();
+            linux.file_offsets.fill(0);
+            linux.mappings.clear();
+            linux.brk = crate::arch::USER_WINDOW.0 + 0x1000_0000;
+            linux.mmap_next = crate::arch::USER_WINDOW.0 + 0x4000_0000;
+            linux.signal_actions = [[0; 4]; 64];
+            linux.exec_path.fill(0);
+            linux.exec_path_len = 0;
+            Ok(ExecAddressSpace {
+                space: core::mem::replace(&mut p.space, space),
+                frames: core::mem::take(&mut p.frames),
+                shared_maps: core::mem::take(&mut p.shared_maps),
+                memory_caps: core::mem::replace(
+                    &mut p.memory_caps,
+                    MemoryCapabilityTable::new(),
+                ),
+                memory_account: core::mem::replace(&mut p.memory_account, memory_account),
+                device_maps: core::mem::take(&mut p.device_maps),
+            })
+        }
+        Ok(KObject::Process(_)) => Err(ProcError::Exited),
+        _ => Err(ProcError::NoSuchProcess),
+    })
+}
+
+/// Restores the saved address space after a failed exec transaction.
+/// exec 事务失败后恢复保存的地址空间。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn rollback_exec_address_space(
+    pid: ObjId,
+    saved: ExecAddressSpace,
+) -> Result<(), ProcError> {
+    crate::mm::space::activate_kernel();
+    let replacement = kobj::with(|t| match t.get_mut(pid) {
+        Ok(KObject::Process(p)) if p.state == ProcState::Running && p.linux.is_some() => {
+            Ok(ExecAddressSpace {
+                space: core::mem::replace(&mut p.space, saved.space),
+                frames: core::mem::replace(&mut p.frames, saved.frames),
+                shared_maps: core::mem::replace(&mut p.shared_maps, saved.shared_maps),
+                memory_caps: core::mem::replace(&mut p.memory_caps, saved.memory_caps),
+                memory_account: core::mem::replace(
+                    &mut p.memory_account,
+                    saved.memory_account,
+                ),
+                device_maps: core::mem::replace(&mut p.device_maps, saved.device_maps),
+            })
+        }
+        Ok(KObject::Process(_)) => Err(ProcError::Exited),
+        _ => Err(ProcError::NoSuchProcess),
+    })?;
+    drop(replacement.device_maps);
+    drop(replacement.shared_maps);
+    drop(replacement.frames);
+    drop(replacement.memory_caps);
+    drop(replacement.memory_account);
+    drop(replacement.space);
+    kobj::with(|t| match t.get_mut(pid) {
+        Ok(KObject::Process(p)) => {
+            p.space.activate();
+            Ok(())
+        }
+        _ => Err(ProcError::NoSuchProcess),
     })
 }
 
@@ -1815,6 +1907,12 @@ pub fn page_flags(pid: ObjId, va: u64) -> Option<MapFlags> {
     .flatten()
 }
 
+/// Returns the current hardware address-space root for one process.
+/// 返回进程当前硬件地址空间根。
+pub(crate) fn current_space_root(pid: ObjId) -> Option<crate::arch::SpaceRoot> {
+    with_proc(pid, |p| Ok(p.space.root())).ok()
+}
+
 /// 进程当前拥有的数据帧数（诊断与验收用）。
 pub fn frame_count(pid: ObjId) -> Option<usize> {
     with_proc(pid, |p| Ok(p.frames.len())).ok()
@@ -2164,6 +2262,8 @@ fn thread_entry() {
                 s.entry,
                 s.stack,
                 s.linux_fork_regs.unwrap_or([0; 6]),
+                s.linux_fork_args
+                    .unwrap_or([0, 0, s.clone_rdx, 0, s.clone_r8, 0]),
                 s.clone_rdx,
                 s.clone_r8,
             )
@@ -2195,6 +2295,7 @@ pub fn spawn_thread(
         false,
         None,
         None,
+        None,
         0,
         0,
         0,
@@ -2223,6 +2324,7 @@ pub(crate) fn spawn_thread_affinity(
         false,
         None,
         None,
+        None,
         0,
         0,
         0,
@@ -2240,6 +2342,7 @@ pub fn spawn_linux_clone(
     user_stack: u64,
     fs_base: Option<u64>,
     preserved_regs: Option<[u64; 6]>,
+    fork_args: Option<[u64; 6]>,
     clear_child_tid: u64,
     clone_rdx: u64,
     clone_r8: u64,
@@ -2255,6 +2358,7 @@ pub fn spawn_linux_clone(
         true,
         fs_base,
         preserved_regs,
+        fork_args,
         clear_child_tid,
         clone_rdx,
         clone_r8,
@@ -2272,6 +2376,7 @@ pub fn fork_linux_process(
     user_stack: u64,
     fs_base: u64,
     preserved_regs: [u64; 6],
+    fork_args: [u64; 6],
     clear_child_tid: u64,
 ) -> Result<ObjId, ProcError> {
     let (parent_linux_pid, calls, state, mappings) = kobj::with(|t| match t.get(parent) {
@@ -2344,6 +2449,7 @@ pub fn fork_linux_process(
         user_stack,
         Some(fs_base),
         Some(preserved_regs),
+        Some(fork_args),
         clear_child_tid,
         0,
         0,
@@ -2459,18 +2565,18 @@ pub(crate) fn take_linux_child_exit(
     })?;
     let mut matching = false;
     for candidate in child {
-        let state = kobj::with(|t| match t.get(candidate) {
+        let found = kobj::with(|t| match t.get(candidate) {
             Ok(KObject::Process(p)) => {
                 let linux = p.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
                 if linux.pid != target_pid {
                     return Ok(None);
                 }
                 matching = true;
-                Ok(Some(p.state))
+                Ok(Some((linux.pid, p.state)))
             }
             _ => Err(ProcError::NoSuchProcess),
         })?;
-        let Some(state) = state else {
+        let Some((pid, state)) = found else {
             continue;
         };
         let ProcState::Exited { code } = state else {
@@ -2479,7 +2585,7 @@ pub(crate) fn take_linux_child_exit(
         let status = (((code as u32) & 0xff) << 8) as i32;
         let _ = reap(candidate);
         let _ = release_child(parent, candidate);
-        return Ok(Some((target_pid, status)));
+        return Ok(Some((pid, status)));
     }
     if matching {
         Ok(None)
@@ -2500,6 +2606,7 @@ fn spawn_thread_mode(
     linux_clone: bool,
     fs_base: Option<u64>,
     linux_fork_regs: Option<[u64; 6]>,
+    linux_fork_args: Option<[u64; 6]>,
     linux_clear_child_tid: u64,
     clone_rdx: u64,
     clone_r8: u64,
@@ -2562,6 +2669,7 @@ fn spawn_thread_mode(
             linux_clone,
             fs_base,
             linux_fork_regs,
+            linux_fork_args,
             clone_rdx,
             clone_r8,
         });

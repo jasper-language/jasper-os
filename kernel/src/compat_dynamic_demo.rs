@@ -117,6 +117,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Madvise,
         LinuxSyscall::Clone,
         LinuxSyscall::Clone3,
+        LinuxSyscall::Execve,
         LinuxSyscall::Futex,
         LinuxSyscall::Exit,
         LinuxSyscall::ExitGroup,
@@ -502,6 +503,175 @@ fn run_program(
         heap_used_before,
         heap_used_after,
     }
+}
+
+#[cfg(all(
+    feature = "linux-abi",
+    feature = "lifecycle-root-exec-verify",
+    target_arch = "x86_64"
+))]
+fn prepare_exec_image(
+    pid: ObjId,
+    executable: &[u8],
+    interpreter: &[u8],
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> Result<(u64, u64), &'static str> {
+    let executable_plan = jasper_compat_loader::parse(executable).map_err(|_| "parse_executable")?;
+    let interpreter_plan =
+        jasper_compat_loader::parse(interpreter).map_err(|_| "parse_interpreter")?;
+    if executable_plan.interpreter.as_deref() != Some("/lib64/ld-linux-x86-64.so.2") {
+        return Err("pt_interp");
+    }
+    let dynamic = plan_dynamic_program(
+        &executable_plan,
+        &interpreter_plan,
+        EXECUTABLE_BASE,
+        INTERPRETER_BASE,
+        kernel_core::frame::FRAME_SIZE,
+    )
+    .map_err(|_| "dynamic_layout")?;
+    let mut memory = JasperLoaderMemory::new(pid);
+    map_image(&mut memory, executable, &dynamic.executable).map_err(|_| "map_executable")?;
+    map_image(&mut memory, interpreter, &dynamic.interpreter).map_err(|_| "map_interpreter")?;
+    let random = [0x5au8; 16];
+    let stack = stack_input_for_program(ProgramStackInput {
+        plan: &executable_plan,
+        image: &dynamic.executable,
+        interpreter_base: dynamic.interpreter.load_bias,
+        stack_top: STACK_TOP,
+        argv,
+        envp,
+        auxv: &[],
+        random: Some(&random),
+    })
+    .and_then(build_initial_stack)
+    .map_err(|_| "initial_stack")?;
+    let stack_pointer = map_exec_stack(pid, &stack)?;
+    Ok((dynamic.execution.entry(), stack_pointer))
+}
+
+#[cfg(all(
+    feature = "linux-abi",
+    feature = "lifecycle-root-exec-verify",
+    target_arch = "x86_64"
+))]
+fn map_exec_stack(
+    pid: ObjId,
+    stack: &jasper_compat_loader::InitialStackPlan,
+) -> Result<u64, &'static str> {
+    use kernel_core::frame::FRAME_SIZE;
+    use kernel_core::paging::MapFlags;
+    if stack.stack_pointer() == 0
+        || stack.stack_top() <= stack.stack_pointer()
+        || stack.stack_top() != stack.stack_pointer() + stack.bytes().len() as u64
+    {
+        return Err("stack");
+    }
+    let pointer_start = stack.stack_pointer() - stack.stack_pointer() % FRAME_SIZE;
+    let start = stack
+        .stack_top()
+        .checked_sub(STACK_RESERVE_BYTES)
+        .ok_or("stack")?
+        & !(FRAME_SIZE - 1);
+    if start < crate::arch::USER_WINDOW.0 || start > pointer_start {
+        return Err("stack");
+    }
+    let end = stack
+        .stack_top()
+        .checked_add(FRAME_SIZE - 1)
+        .ok_or("stack")?
+        & !(FRAME_SIZE - 1);
+    let mut mapped = alloc::vec::Vec::new();
+    for address in (start..end).step_by(FRAME_SIZE as usize) {
+        if proc::map_new(
+            pid,
+            address,
+            MapFlags::USER.union(MapFlags::WRITE),
+        )
+        .is_err()
+        {
+            for rollback in mapped.iter().rev().copied() {
+                let _ = proc::unmap_page(pid, rollback);
+            }
+            return Err("stack_map");
+        }
+        mapped.push(address);
+    }
+    if proc::write(pid, stack.stack_pointer(), stack.bytes()).is_err() {
+        for rollback in mapped.iter().rev().copied() {
+            let _ = proc::unmap_page(pid, rollback);
+        }
+        return Err("stack_write");
+    }
+    Ok(stack.stack_pointer())
+}
+
+/// Replaces the current Linux image while preserving Process and Linux PID identity.
+/// 在保留 Process 与 Linux PID 身份的前提下替换当前 Linux 映像。
+#[cfg(all(
+    feature = "linux-abi",
+    feature = "lifecycle-root-exec-verify",
+    target_arch = "x86_64"
+))]
+pub(crate) fn exec_dynamic_program(
+    pid: ObjId,
+    path: alloc::vec::Vec<u8>,
+    executable: alloc::vec::Vec<u8>,
+    interpreter: alloc::vec::Vec<u8>,
+    argv: alloc::vec::Vec<alloc::vec::Vec<u8>>,
+    envp: alloc::vec::Vec<alloc::vec::Vec<u8>>,
+) -> bool {
+    let saved = match proc::begin_exec_address_space(pid) {
+        Ok(saved) => saved,
+        Err(error) => {
+            kprintln!("[JSR-LINUX-EXEC-FAIL] stage=address_space error={:?}", error);
+            return false;
+        }
+    };
+    if !proc::linux_set_exec_path(pid, &path) {
+        let _ = proc::rollback_exec_address_space(pid, saved);
+        return false;
+    }
+    let prepared = {
+        let argv_refs = argv
+            .iter()
+            .map(|value| value.as_slice())
+            .collect::<alloc::vec::Vec<_>>();
+        let envp_refs = envp
+            .iter()
+            .map(|value| value.as_slice())
+            .collect::<alloc::vec::Vec<_>>();
+        prepare_exec_image(
+            pid,
+            &executable,
+            &interpreter,
+            &argv_refs,
+            &envp_refs,
+        )
+    };
+    let (entry, stack) = match prepared {
+        Ok(prepared) => prepared,
+        Err(stage) => {
+            kprintln!("[JSR-LINUX-EXEC-FAIL] stage={}", stage);
+            let _ = proc::rollback_exec_address_space(pid, saved);
+            return false;
+        }
+    };
+    let Some(space) = proc::current_space_root(pid) else {
+        return false;
+    };
+    sched::set_current_space(Some(space));
+    drop(saved);
+    drop(argv);
+    drop(envp);
+    drop(executable);
+    drop(interpreter);
+    drop(path);
+    let _ = crate::arch::set_user_fs_base(0);
+    // SAFETY: the loader validated the executable entry and mapped the complete
+    // initial stack in this Process's fresh address space.
+    unsafe { crate::arch::x86_64::enter_exec(entry, stack) }
 }
 
 /// Executes one bounded program image through the root-backed dynamic namespace.

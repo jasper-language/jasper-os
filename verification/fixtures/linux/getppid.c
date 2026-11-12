@@ -8,6 +8,7 @@
 #include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/random.h>
@@ -22,6 +23,10 @@
 #include <unistd.h>
 
 int main(void) {
+    if (getenv("JASPER_EXEC_CHILD") != NULL) {
+        printf("jasper-exec-child pid=%d ppid=%d\n", getpid(), getppid());
+        return 0;
+    }
     pid_t parent = getppid();
     if (parent != 0) {
         return 2;
@@ -399,5 +404,11 @@ int main(void) {
            (long long)info.uptime, (unsigned long long)info.totalram,
            (unsigned long long)info.freeram, (unsigned)info.procs, executable,
            resolution.tv_nsec, relative_elapsed, (long long)realtime_now.tv_sec);
-    return 0;
+    printf("jasper-exec-before pid=%d ppid=%d\n", getpid(), getppid());
+    fflush(stdout);
+    char *exec_argv[] = {"/usr/bin/jasper-getppid", NULL};
+    char *exec_envp[] = {"JASPER_EXEC_CHILD=1", NULL};
+    execve(exec_argv[0], exec_argv, exec_envp);
+    printf("jasper-exec-fail errno=%d\n", errno);
+    return 61;
 }

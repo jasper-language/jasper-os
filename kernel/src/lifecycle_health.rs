@@ -571,6 +571,14 @@ fn run_root_program(
     let interpreter = root
         .read_file("/lib64/ld-linux-x86-64.so.2", MAX_INTERPRETER_BYTES)
         .map_err(|_| HealthError::RootExecute)?;
+    if path == "/usr/bin/jasper-getppid"
+        && !crate::linux_vfs::install_root_executable(path.as_bytes(), executable.clone())
+    {
+        return Err(HealthError::RootExecute);
+    }
+    if !crate::linux_vfs::install_root_interpreter(interpreter.clone()) {
+        return Err(HealthError::RootExecute);
+    }
     let warm_frames = crate::mm::frame::free_frames();
     if !crate::compat_dynamic_demo::run_root_dynamic_program(
         path.trim_start_matches('/'),
@@ -641,18 +649,18 @@ fn execute_root_dynamic_programs(root: &Ext4Reader) -> Result<(), HealthError> {
         b"/usr/lib/x86_64-linux-gnu/libc.so.6",
     ];
     run_root_program(root, "/usr/bin/wc", &wc_argv)?;
+    let printf_argv: [&[u8]; 3] = [b"/usr/bin/printf", b"jasper-%s\n", b"dynamic"];
+    run_root_program(root, "/usr/bin/printf", &printf_argv)?;
+    let ppid_argv: [&[u8]; 1] = [b"/usr/bin/jasper-getppid"];
+    run_root_program(root, "/usr/bin/jasper-getppid", &ppid_argv)?;
     let dash_argv: [&[u8]; 3] = [
         b"/bin/dash",
         b"-c",
         b"echo jasper-shell-ok\ncd /usr\npwd\n",
     ];
     run_root_program(root, "/bin/dash", &dash_argv)?;
-    let printf_argv: [&[u8]; 3] = [b"/usr/bin/printf", b"jasper-%s\n", b"dynamic"];
-    run_root_program(root, "/usr/bin/printf", &printf_argv)?;
     let signal_argv: [&[u8]; 1] = [b"/usr/bin/jasper-signal-basic"];
-    run_root_program(root, "/usr/bin/jasper-signal-basic", &signal_argv)?;
-    let ppid_argv: [&[u8]; 1] = [b"/usr/bin/jasper-getppid"];
-    run_root_program(root, "/usr/bin/jasper-getppid", &ppid_argv)
+    run_root_program(root, "/usr/bin/jasper-signal-basic", &signal_argv)
 }
 
 /// 确认当前 A/B 槽的最小健康集合并持久提交。

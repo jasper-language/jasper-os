@@ -11,6 +11,7 @@
 //! 系统调用编号以 `const` 操作数取自生成的登记表常量，探针里不出现手写编号。
 
 use core::arch::{asm, global_asm};
+use core::cell::UnsafeCell;
 
 use super::gdt;
 use crate::arch::UserProbe;
@@ -43,12 +44,59 @@ pub unsafe fn enter(entry: u64, stack: u64, arg0: u64, arg1: u64) -> ! {
     );
 }
 
+/// Enters a freshly exec-replaced image with zeroed general registers.
+/// 以清零的通用寄存器进入刚由 exec 替换的新映像。
+pub unsafe fn enter_exec(entry: u64, stack: u64) -> ! {
+    let sel = gdt::selectors();
+    jsr_enter_exec(
+        entry,
+        stack,
+        sel.user_code.0 as u64,
+        sel.user_data.0 as u64,
+    )
+}
+
+extern "C" {
+    fn jsr_enter_exec(entry: u64, stack: u64, cs: u64, ss: u64) -> !;
+}
+
+global_asm!(
+    r#"
+    .global jsr_enter_exec
+jsr_enter_exec:
+    mov r8, rdi
+    mov r9, rsi
+    push rcx
+    push r9
+    push 0x202
+    push rdx
+    push r8
+    xor eax, eax
+    xor ebx, ebx
+    xor ecx, ecx
+    xor edx, edx
+    xor esi, esi
+    xor edi, edi
+    xor ebp, ebp
+    xor r8d, r8d
+    xor r9d, r9d
+    xor r10d, r10d
+    xor r11d, r11d
+    xor r12d, r12d
+    xor r13d, r13d
+    xor r14d, r14d
+    xor r15d, r15d
+    iretq
+    "#
+);
+
 /// 进入克隆子线程：用户 RIP/栈取自 `clone`，`rax=0` 表示 syscall 子进程返回。
 /// Enters a cloned child with `rax=0`, the Linux syscall child-return convention.
 pub unsafe fn enter_syscall_return(
     entry: u64,
     stack: u64,
     preserved: [u64; 6],
+    arg_regs: [u64; 6],
     clone_rdx: u64,
     clone_r8: u64,
 ) -> ! {
@@ -65,10 +113,17 @@ pub unsafe fn enter_syscall_return(
         clone_rdx,
         clone_r8,
         preserved,
+        arg_regs,
     };
-    jsr_enter_syscall_return_regs(&frame)
+    let _ = crate::arch::irq_save_disable();
+    let scratch = &SYSCALL_RETURN_FRAMES[crate::arch::cpu_index()];
+    // SAFETY: interrupts are disabled, so this CPU cannot re-enter the bounded
+    // syscall-return frame before `iretq` transfers to user mode.
+    unsafe { *scratch.0.get() = frame; }
+    jsr_enter_syscall_return_regs(scratch.0.get())
 }
 
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct SyscallReturnFrame {
     entry: u64,
@@ -79,7 +134,30 @@ struct SyscallReturnFrame {
     clone_rdx: u64,
     clone_r8: u64,
     preserved: [u64; 6],
+    arg_regs: [u64; 6],
 }
+
+impl SyscallReturnFrame {
+    const ZERO: Self = Self {
+        entry: 0,
+        stack: 0,
+        cs: 0,
+        ss: 0,
+        rflags: 0,
+        clone_rdx: 0,
+        clone_r8: 0,
+        preserved: [0; 6],
+        arg_regs: [0; 6],
+    };
+}
+
+struct SyncFrame(UnsafeCell<SyscallReturnFrame>);
+// SAFETY: each CPU owns exactly one array entry and interrupts are disabled
+// across its write and non-returning `iretq` use.
+unsafe impl Sync for SyncFrame {}
+
+static SYSCALL_RETURN_FRAMES: [SyncFrame; kernel_core::smp::MAX_CPUS] =
+    [const { SyncFrame(UnsafeCell::new(SyscallReturnFrame::ZERO)) }; kernel_core::smp::MAX_CPUS];
 
 extern "C" {
     fn jsr_enter_syscall_return_regs(frame: *const SyscallReturnFrame) -> !;
@@ -90,8 +168,6 @@ global_asm!(
     .global jsr_enter_syscall_return_regs
 jsr_enter_syscall_return_regs:
     mov r9, rdi
-    mov rdx, qword ptr [r9 + 40]
-    mov r8, qword ptr [r9 + 48]
     mov rbx, qword ptr [r9 + 56]
     mov rbp, qword ptr [r9 + 64]
     mov r12, qword ptr [r9 + 72]
@@ -103,11 +179,13 @@ jsr_enter_syscall_return_regs:
     push qword ptr [r9 + 32]
     push qword ptr [r9 + 16]
     push qword ptr [r9]
+    mov rdi, qword ptr [r9 + 104]
+    mov rsi, qword ptr [r9 + 112]
+    mov rdx, qword ptr [r9 + 120]
+    mov r10, qword ptr [r9 + 128]
+    mov r8, qword ptr [r9 + 136]
+    mov r9, qword ptr [r9 + 144]
     xor eax, eax
-    xor edi, edi
-    xor esi, esi
-    xor r10d, r10d
-    xor r9d, r9d
     iretq
     "#
 );
