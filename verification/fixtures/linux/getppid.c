@@ -119,6 +119,68 @@ int main(void) {
         lseek(fd, 0, SEEK_SET) != 0) {
         return 79;
     }
+    int pipe_fds[2];
+    int pipe_flags = O_CLOEXEC | O_NONBLOCK;
+    if (pipe2(pipe_fds, pipe_flags) != 0) {
+        printf("jasper-pipe2-fail stage=create flags=%#x errno=%d\n",
+               pipe_flags, errno);
+        return 86;
+    }
+    int reader_flags = fcntl(pipe_fds[0], F_GETFL);
+    int writer_flags = fcntl(pipe_fds[1], F_GETFL);
+    if ((reader_flags & O_NONBLOCK) == 0 || (writer_flags & O_NONBLOCK) == 0) {
+        printf("jasper-pipe2-fail stage=flags reader=%d writer=%d errno=%d\n",
+               reader_flags, writer_flags, errno);
+        return 86;
+    }
+    if (write(pipe_fds[1], "pipe", 4) != 4) {
+        return 87;
+    }
+    char pipe_bytes[4];
+    if (read(pipe_fds[0], pipe_bytes, sizeof(pipe_bytes)) != 4 ||
+        memcmp(pipe_bytes, "pipe", 4) != 0) {
+        return 88;
+    }
+    errno = 0;
+    if (read(pipe_fds[0], pipe_bytes, sizeof(pipe_bytes)) != -1 ||
+        errno != EAGAIN) {
+        return 89;
+    }
+    if (close(pipe_fds[1]) != 0 ||
+        read(pipe_fds[0], pipe_bytes, sizeof(pipe_bytes)) != 0) {
+        return 90;
+    }
+    errno = 0;
+    if (write(pipe_fds[1], "x", 1) != -1 || errno != EBADF) {
+        return 91;
+    }
+    if (close(pipe_fds[0]) != 0) {
+        return 92;
+    }
+    int blocking_pipe[2];
+    if (pipe2(blocking_pipe, 0) != 0) {
+        return 93;
+    }
+    pid_t pipe_child = fork();
+    if (pipe_child < 0) {
+        return 94;
+    }
+    if (pipe_child == 0) {
+        _exit(write(blocking_pipe[1], "block", 5) == 5 ? 0 : 95);
+    }
+    char blocking_bytes[8] = {0};
+    if (read(blocking_pipe[0], blocking_bytes, 5) != 5 ||
+        memcmp(blocking_bytes, "block", 5) != 0) {
+        return 96;
+    }
+    int pipe_status = 0;
+    if (waitpid(pipe_child, &pipe_status, 0) != pipe_child ||
+        !WIFEXITED(pipe_status) || WEXITSTATUS(pipe_status) != 0) {
+        return 97;
+    }
+    if (close(blocking_pipe[0]) != 0 || close(blocking_pipe[1]) != 0) {
+        return 98;
+    }
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
     if (sched_getaffinity(0, sizeof(cpus), &cpus) != 0 ||
@@ -413,6 +475,7 @@ int main(void) {
     volatile int fork_private = 0x1234;
     pid_t first_child = fork();
     if (first_child < 0) {
+        printf("jasper-fork-fail stage=first errno=%d\n", errno);
         return 59;
     }
     if (first_child == 0) {

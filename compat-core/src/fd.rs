@@ -2,7 +2,7 @@
 
 use alloc::sync::Arc;
 use kernel_core::object::Rights;
-use kernel_core::sync::Atomic64;
+use kernel_core::sync::SpinLock;
 
 pub const MAX_FDS: usize = 1024;
 
@@ -92,9 +92,15 @@ pub struct FdTable<const N: usize = MAX_FDS> {
     slots: [Option<Slot>; N],
     generations: [u32; N],
     /// One open-file description per fd slot. Duplicates and fork clones share
-    /// the same atomic cursor; replacing or closing an fd drops only its reference.
-    open_files: [Option<Arc<Atomic64>>; N],
+    /// the same cursor and status flags; closing one fd drops only its reference.
+    open_files: [Option<Arc<SpinLock<OpenFileState>>>; N],
     open: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenFileState {
+    offset: u64,
+    status_flags: u32,
 }
 
 impl<const N: usize> FdTable<N> {
@@ -227,7 +233,7 @@ impl<const N: usize> FdTable<N> {
         }
         self.open_files[fd as usize]
             .as_ref()
-            .map(|offset| offset.load(core::sync::atomic::Ordering::Acquire))
+            .map(|state| state.lock().offset)
     }
 
     /// Updates every fd sharing the current open-file description.
@@ -238,11 +244,40 @@ impl<const N: usize> FdTable<N> {
         if entry.fd != fd {
             return false;
         }
-        let Some(cursor) = self.open_files[fd as usize].as_ref() else {
+        let Some(description) = self.open_files[fd as usize].as_ref() else {
             return false;
         };
-        cursor.store(offset, core::sync::atomic::Ordering::Release);
+        description.lock().offset = offset;
         true
+    }
+
+    /// Returns the shared Linux status flags for the current fd generation.
+    pub fn fd_status_flags(&self, fd: u32) -> Option<u32> {
+        let _ = self.get_fd(fd)?;
+        self.open_files[fd as usize]
+            .as_ref()
+            .map(|state| state.lock().status_flags)
+    }
+
+    /// Sets shared Linux status flags for the current fd generation.
+    pub fn set_fd_status_flags(&self, fd: u32, flags: u32) -> bool {
+        if self.get_fd(fd).is_none() {
+            return false;
+        }
+        let Some(description) = self.open_files[fd as usize].as_ref() else {
+            return false;
+        };
+        description.lock().status_flags = flags;
+        true
+    }
+
+    /// Counts live descriptors that still reference one synthetic object handle.
+    pub fn handle_fd_count(&self, handle: u64) -> usize {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|slot| slot.active && slot.entry.handle == handle)
+            .count()
     }
 
     pub fn get(&self, handle: FdHandle) -> Result<FdEntry, FdTableError> {
@@ -434,7 +469,10 @@ impl<const N: usize> FdTable<N> {
             .checked_add(1)
             .ok_or(FdTableError::GenerationExhausted)?;
         self.generations[index] = generation;
-        self.open_files[index] = Some(Arc::new(Atomic64::new(0)));
+        self.open_files[index] = Some(Arc::new(SpinLock::new(OpenFileState {
+            offset: 0,
+            status_flags: 0,
+        })));
         self.slots[index] = Some(Slot {
             entry: FdEntry {
                 fd: index as u32,
@@ -613,5 +651,28 @@ mod tests {
         assert_eq!(fds.fd_offset(second.fd()), Some(0));
         assert!(fds.set_fd_offset(second.fd(), 9));
         assert_eq!(fds.fd_offset(first.fd()), Some(5));
+    }
+
+    #[test]
+    fn status_flags_follow_shared_open_file_description() {
+        let mut parent = FdTable::<8>::new();
+        let source = parent
+            .install(0x11, Rights::READ, CompatKind::Pipe, false)
+            .unwrap();
+        let duplicate = parent.duplicate(source, 0, false, None).unwrap();
+        assert!(parent.set_fd_status_flags(source.fd(), 0x800));
+        let child = parent.clone();
+        assert_eq!(child.fd_status_flags(duplicate.fd()), Some(0x800));
+
+        let independent = child
+            .fd_offset(source.fd())
+            .map(|_| child.get_fd(source.fd()).unwrap())
+            .unwrap();
+        assert_eq!(independent.handle, 0x11);
+        let mut other = FdTable::<8>::new();
+        let other_fd = other
+            .install(0x11, Rights::READ, CompatKind::Pipe, false)
+            .unwrap();
+        assert_eq!(other.fd_status_flags(other_fd.fd()), Some(0));
     }
 }

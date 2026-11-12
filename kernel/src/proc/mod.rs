@@ -62,6 +62,8 @@ static LINUX_PID_NEXT: AtomicU32 = AtomicU32::new(1);
 /// 仅用于 Linux 标准流兼容表的受控控制台哨兵；它不是可解析的 Jasper 句柄。
 #[cfg(feature = "linux-abi")]
 pub(crate) const LINUX_CONSOLE_HANDLE: u64 = u64::MAX;
+#[cfg(feature = "linux-abi")]
+const LINUX_PIPE_HANDLE_BASE: u64 = 0x0000_8000_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -84,6 +86,8 @@ struct LinuxProcessState {
     exec_path: [u8; 128],
     exec_path_len: usize,
     mappings: Vec<LinuxMapping>,
+    pipes: Vec<LinuxPipeHandle>,
+    next_pipe_handle: u64,
     /// Set only on the child side of vfork. The parent task sleeps until the
     /// child commits exec or leaves `Running`.
     /// 仅 vfork 子进程携带；父任务睡眠到子进程提交 exec 或离开 Running。
@@ -95,6 +99,13 @@ struct LinuxProcessState {
 struct LinuxMapping {
     va: u64,
     flags: MapFlags,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxPipeHandle {
+    handle: u64,
+    endpoint: Arc<compat_core::PipeEndpoint>,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -490,13 +501,125 @@ pub(crate) fn linux_duplicate_fd_to(
 ) -> Option<u32> {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let old_target_handle = linux.fds.get_fd(target).map(|entry| entry.handle);
         let duplicate = linux
             .fds
             .duplicate_fd_to(fd, target, close_on_exec)
             .map_err(|_| ProcError::NoTaskSlot)?;
+        if let Some(handle) = old_target_handle {
+            release_unreferenced_pipe(linux, handle);
+        }
         Ok(duplicate.fd())
     })
     .ok()
+}
+
+/// Creates a bounded Linux pipe with independently addressable endpoints.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_pipe2(
+    pid: ObjId,
+    close_on_exec: bool,
+    nonblocking: bool,
+) -> Option<(u32, u32)> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.pipes.len() >= 32 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        let reader_handle = linux.next_pipe_handle;
+        let writer_handle = reader_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        linux.next_pipe_handle = writer_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let (reader, writer) = compat_core::PipeEndpoint::pair();
+        let reader_fd = linux
+            .fds
+            .install(
+                reader_handle,
+                kernel_core::object::Rights::READ,
+                compat_core::fd::CompatKind::Pipe,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let writer_fd = match linux.fds.install(
+            writer_handle,
+            kernel_core::object::Rights::WRITE,
+            compat_core::fd::CompatKind::Pipe,
+            close_on_exec,
+        ) {
+            Ok(fd) => fd,
+            Err(_) => {
+                let _ = linux.fds.close(reader_fd);
+                return Err(ProcError::NoTaskSlot);
+            }
+        };
+        if nonblocking {
+            const O_NONBLOCK: u32 = 0x800;
+            if !linux.fds.set_fd_status_flags(reader_fd.fd(), O_NONBLOCK)
+                || !linux.fds.set_fd_status_flags(writer_fd.fd(), O_NONBLOCK)
+            {
+                let _ = linux.fds.close(reader_fd);
+                let _ = linux.fds.close(writer_fd);
+                return Err(ProcError::NoTaskSlot);
+            }
+        }
+        linux.pipes.push(LinuxPipeHandle {
+            handle: reader_handle,
+            endpoint: Arc::new(reader),
+        });
+        linux.pipes.push(LinuxPipeHandle {
+            handle: writer_handle,
+            endpoint: Arc::new(writer),
+        });
+        Ok((reader_fd.fd(), writer_fd.fd()))
+    })
+    .ok()
+}
+
+/// Resolves one pipe endpoint without incrementing its process-lifetime reference.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_pipe_endpoint(
+    pid: ObjId,
+    handle: u64,
+) -> Option<Arc<compat_core::PipeEndpoint>> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .pipes
+            .iter()
+            .find(|pipe| pipe.handle == handle)
+            .map(|pipe| Arc::clone(&pipe.endpoint)),
+        _ => None,
+    })
+}
+
+/// Returns the shared status flags for one Linux descriptor.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_fd_status_flags(pid: ObjId, fd: u32) -> Option<u32> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p.linux.as_ref()?.fds.fd_status_flags(fd),
+        _ => None,
+    })
+}
+
+/// Updates shared Linux status flags for one descriptor generation.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_set_fd_status_flags(pid: ObjId, fd: u32, flags: u32) -> bool {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_ref().ok_or(ProcError::Exited)?;
+        if linux.fds.set_fd_status_flags(fd, flags) {
+            Ok(())
+        } else {
+            Err(ProcError::NoTaskSlot)
+        }
+    })
+    .is_ok()
+}
+
+#[cfg(feature = "linux-abi")]
+fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
+    if handle >= LINUX_PIPE_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+        linux.pipes.retain(|pipe| pipe.handle != handle);
+    }
 }
 
 /// Installs a read-only Linux virtual file and initializes its offset.
@@ -628,7 +751,11 @@ pub(crate) fn set_linux_dir_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
 pub(crate) fn linux_close_fd(pid: ObjId, fd: u32) -> bool {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let handle = linux.fds.get_fd(fd).map(|entry| entry.handle);
         linux.fds.close_fd(fd).map_err(|_| ProcError::NoTaskSlot)?;
+        if let Some(handle) = handle {
+            release_unreferenced_pipe(linux, handle);
+        }
         Ok(())
     })
     .is_ok()
@@ -833,6 +960,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         exec_path: [0; 128],
         exec_path_len: 0,
         mappings: Vec::new(),
+        pipes: Vec::new(),
+        next_pipe_handle: LINUX_PIPE_HANDLE_BASE,
         vfork_parent: None,
     };
     create_process(name, SyscallSet::EMPTY, move |process| {
@@ -857,6 +986,9 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
             revoke_all_device_mappings(p);
             let linux = p.linux.as_mut().expect("checked Linux process");
             let _ = linux.fds.take_close_on_exec();
+            linux
+                .pipes
+                .retain(|pipe| linux.fds.handle_fd_count(pipe.handle) != 0);
             linux.mappings.clear();
             linux.brk = crate::arch::USER_WINDOW.0 + 0x1000_0000;
             linux.mmap_next = crate::arch::USER_WINDOW.0 + 0x4000_0000;
@@ -3566,6 +3698,10 @@ fn release_resources_in(t: &mut kobj::Table, pid: ObjId) -> usize {
             let n = p.handles.close_all(|r| closed.push(r));
             // 进程进入退出流程后它的设备窗口一律撤销；BAR 不是 RAM，这里只改页表。
             revoke_all_device_mappings(p);
+            if let Some(linux) = p.linux.as_mut() {
+                let _ = linux.fds.take_all();
+                linux.pipes.clear();
+            }
             n
         }
         _ => 0,
