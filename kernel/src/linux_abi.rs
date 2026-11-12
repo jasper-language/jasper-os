@@ -1511,6 +1511,9 @@ fn execute(
         LinuxSyscall::Sysinfo => compat_result(linux_sysinfo(call.args[0])),
         LinuxSyscall::SchedGetAffinity => compat_result(linux_sched_getaffinity(pid, call.args)),
         LinuxSyscall::SchedSetAffinity => compat_result(linux_sched_setaffinity(pid, call.args)),
+        LinuxSyscall::SchedSetScheduler => {
+            compat_result(linux_sched_setscheduler(pid, call.args))
+        }
         LinuxSyscall::SchedGetScheduler => {
             compat_result(linux_sched_getscheduler(pid, call.args[0]))
         }
@@ -2041,6 +2044,22 @@ fn linux_sched_getscheduler(pid: ObjId, requested: u64) -> Result<u64, CompatErr
     } else {
         Err(CompatErrno::NoProcess)
     }
+}
+
+fn linux_sched_setscheduler(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
+    if args[0] != 0 && args[0] != current {
+        return Err(CompatErrno::NoProcess);
+    }
+    if args[1] != 0 {
+        return Err(CompatErrno::Perm);
+    }
+    let mut priority = [0u8; 4];
+    copy_from_user(&mut priority, args[2], 4).map_err(|_| CompatErrno::Fault)?;
+    if i32::from_le_bytes(priority) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    Ok(0)
 }
 
 fn linux_task_for_tid(process: ObjId, tid: u32) -> Option<crate::task::TaskId> {
