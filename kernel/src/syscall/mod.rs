@@ -785,6 +785,12 @@ syscall_dispatch! {
     SYSTEM_SANDBOX_DESTROY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         sandbox_destroy(a.args[0])
     },
+    SYSTEM_SANDBOX_WAIT => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_wait(a.args[0], a.args[1])
+    },
+    SYSTEM_SANDBOX_KILL => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_kill(a.args[0])
+    },
     SYSTEM_SANDBOX_IMAGE_LOAD => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         sandbox_image_add(a.args[0])
     },
@@ -1399,6 +1405,69 @@ fn sandbox_destroy(raw_key: u64) -> i64 {
     match crate::sandbox::destroy(domain, key) {
         Ok(()) => 0,
         Err(error) => sandbox_error(error),
+    }
+}
+
+/// Wait for a same-domain Sandbox to reach its root Workload terminal state.
+///
+/// `timeout_ns == 0` is a nonblocking status check. `u64::MAX` waits without a
+/// deadline. No state transition is synthesized by the wait operation.
+fn sandbox_wait(raw_key: u64, timeout_ns: u64) -> i64 {
+    const POLL_INTERVAL_NS: u64 = 1_000_000;
+
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(domain) = proc::workload_domain(pid) else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(key) = kernel_core::sandbox::SandboxKey::from_raw(raw_key) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let deadline = (timeout_ns != u64::MAX)
+        .then(|| sched::now_ns().saturating_add(timeout_ns));
+    loop {
+        let snapshot = match crate::sandbox::snapshot(domain, key) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return sandbox_error(error),
+        };
+        if snapshot.terminal() {
+            return 0;
+        }
+        let now = sched::now_ns();
+        if timeout_ns == 0 || deadline.is_some_and(|deadline| now >= deadline) {
+            return err(SYSTEM_SANDBOX_ERROR_TIMEOUT);
+        }
+        let wake_at = deadline
+            .map(|deadline| deadline.min(now.saturating_add(POLL_INTERVAL_NS)))
+            .unwrap_or_else(|| now.saturating_add(POLL_INTERVAL_NS));
+        if proc::block_until(wake_at).is_err() {
+            return err(SYSTEM_ASYNC_ERROR_CANCELLED);
+        }
+    }
+}
+
+/// Terminate all Process members through the root Workload exit path.
+///
+/// Sandbox state remains derived from the root Workload; `Stopped` still
+/// requires normal resource and child cleanup.
+fn sandbox_kill(raw_key: u64) -> i64 {
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(domain) = proc::workload_domain(pid) else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let Some(key) = kernel_core::sandbox::SandboxKey::from_raw(raw_key) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let root = match crate::sandbox::root_snapshot(domain, key) {
+        Ok(snapshot) => snapshot.key,
+        Err(error) => return sandbox_error(error),
+    };
+    match crate::workload::terminate_in_domain(domain, root) {
+        Ok(()) => 0,
+        Err(error) => workload_error(error),
     }
 }
 

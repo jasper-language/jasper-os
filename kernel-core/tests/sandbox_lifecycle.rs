@@ -34,6 +34,7 @@ fn sandbox_identity_is_stable_and_lifecycle_has_one_terminal() {
 
     assert_eq!(initial.domain, DOMAIN);
     assert_eq!(initial.state, WorkloadState::Created);
+    assert!(!initial.terminal());
     assert_eq!(
         initial.root,
         sandboxes.root_snapshot(&workloads, key).unwrap().key
@@ -61,6 +62,7 @@ fn sandbox_identity_is_stable_and_lifecycle_has_one_terminal() {
     assert_eq!(stopped.root, initial.root);
     assert_eq!(stopped.domain, initial.domain);
     assert_eq!(stopped.state, WorkloadState::Stopped);
+    assert!(stopped.terminal());
     assert_eq!(
         sandboxes.fail(&mut workloads, key),
         Err(SandboxError::Workload(WorkloadError::InvalidState))

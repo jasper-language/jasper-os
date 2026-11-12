@@ -1781,6 +1781,16 @@ pub const OPERATIONS: &[OperationContract] = &[
         args: "u64:sandbox_key,u64:volume_key",
         result: "0_or_error",
     },
+    OperationContract {
+        name: "system.sandbox.wait",
+        args: "u64:sandbox_key,u64:timeout_ns",
+        result: "0_or_error",
+    },
+    OperationContract {
+        name: "system.sandbox.kill",
+        args: "u64:sandbox_key",
+        result: "0_or_error",
+    },
 ];
 
 /// Rights 位是外部 ABI；位值变化必须产生新快照并随 ABI 版本裁决。
@@ -1971,6 +1981,14 @@ pub const SEMANTICS: &[(&str, &str)] = &[
     (
         "sandbox.storage.volume",
         "writable_upper_separate_from_image;child_clone_has_independent_usage",
+    ),
+    (
+        "sandbox.wait",
+        "observes_root_terminal_state_only;zero_timeout_is_nonblocking;max_timeout_is_wait_forever;kernel_monotonic_clock",
+    ),
+    (
+        "sandbox.kill",
+        "same_domain_only;root_workload_begin_exit_members;stopped_requires_normal_resource_drain",
     ),
 ];
 

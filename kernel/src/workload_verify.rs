@@ -35,6 +35,7 @@ const SANDBOX_CLONE_DESC_OFF: u64 = 0x480_0000;
 const SANDBOX_IMAGE_INFO_OFF: u64 = 0x4c0_0000;
 const SANDBOX_LAYER_INFO_OFF: u64 = 0x500_0000;
 const SANDBOX_VOLUME_INFO_OFF: u64 = 0x540_0000;
+const SANDBOX_WAIT_INFO_OFF: u64 = 0x580_0000;
 const STACK_OFF: u64 = 0xC0_0000;
 
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -360,6 +361,21 @@ fn sandbox_abi_code(base: u64, foreign_key: u64) -> Vec<u8> {
     );
     jne_error(&mut code, &mut patches);
 
+    // Waiting never creates a second state machine and cross-domain keys remain hidden.
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_WAIT);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    imm64(&mut code, 0xbe, 0);
+    syscall(&mut code);
+    cmp_rax(&mut code, -(abi::SYSTEM_SANDBOX_ERROR_TIMEOUT as i32));
+    jne_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_WAIT);
+    imm64(&mut code, 0xbf, foreign_key);
+    imm64(&mut code, 0xbe, 0);
+    syscall(&mut code);
+    cmp_rax(&mut code, -(abi::SYSTEM_SANDBOX_ERROR_NOT_FOUND as i32));
+    jne_error(&mut code, &mut patches);
+
     // Bind the kernel-issued sandbox key into all storage descriptors.
     imm64(&mut code, 0xbf, base + SANDBOX_IMAGE_DESC_OFF + 8);
     code.extend_from_slice(&[0x48, 0x89, 0x1f]); // mov [rdi], rbx
@@ -522,16 +538,41 @@ fn sandbox_abi_code(base: u64, foreign_key: u64) -> Vec<u8> {
     );
     jne_error(&mut code, &mut patches);
 
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_KILL);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+
+    // Kill only enters Stopping; wait must not synthesize the drained terminal.
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_WAIT);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    imm64(&mut code, 0xbe, 0);
+    syscall(&mut code);
+    cmp_rax(&mut code, -(abi::SYSTEM_SANDBOX_ERROR_TIMEOUT as i32));
+    jne_error(&mut code, &mut patches);
+
     imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_STOP);
     code.extend_from_slice(&[0x48, 0x89, 0xdf]);
     syscall(&mut code);
     test_rax(&mut code);
     js_error(&mut code, &mut patches);
-    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_STOP);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_WAIT);
     code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    imm64(&mut code, 0xbe, u64::MAX);
+    syscall(&mut code);
+    cmp_rax(&mut code, 0);
+    jne_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_QUERY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    imm64(&mut code, 0xbe, base + SANDBOX_WAIT_INFO_OFF);
+    imm64(&mut code, 0xba, kernel_core::sandbox_abi::INFO_BYTES as u64);
     syscall(&mut code);
     test_rax(&mut code);
-    js_error(&mut code, &mut patches);
+    jle_error(&mut code, &mut patches);
+
     imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_DESTROY);
     code.extend_from_slice(&[0x48, 0x89, 0xdf]);
     syscall(&mut code);
@@ -599,6 +640,8 @@ fn verify_sandbox_abi(base: u64) {
         abi::SYSTEM_SANDBOX_VOLUME_WRITE,
         abi::SYSTEM_SANDBOX_VOLUME_RELEASE,
         abi::SYSTEM_SANDBOX_VOLUME_DESTROY,
+        abi::SYSTEM_SANDBOX_WAIT,
+        abi::SYSTEM_SANDBOX_KILL,
     ]);
     let pid = match proc::create("sandbox-user-abi", calls) {
         Ok(pid) => pid,
@@ -687,6 +730,7 @@ fn verify_sandbox_abi(base: u64) {
                 SANDBOX_IMAGE_INFO_OFF,
                 SANDBOX_LAYER_INFO_OFF,
                 SANDBOX_VOLUME_INFO_OFF,
+                SANDBOX_WAIT_INFO_OFF,
             ]
             .iter()
             .all(|offset| {
@@ -739,10 +783,12 @@ fn verify_sandbox_abi(base: u64) {
     let mut image_info = [0u8; kernel_core::sandbox_storage_abi::IMAGE_INFO_BYTES];
     let mut layer_info = [0u8; kernel_core::sandbox_storage_abi::LAYER_INFO_BYTES];
     let mut volume_info = [0u8; kernel_core::sandbox_storage_abi::VOLUME_INFO_BYTES];
+    let mut wait_info = [0u8; kernel_core::sandbox_abi::INFO_BYTES];
     check(
         proc::read(pid, base + SANDBOX_IMAGE_INFO_OFF, &mut image_info).is_ok()
             && proc::read(pid, base + SANDBOX_LAYER_INFO_OFF, &mut layer_info).is_ok()
-            && proc::read(pid, base + SANDBOX_VOLUME_INFO_OFF, &mut volume_info).is_ok(),
+            && proc::read(pid, base + SANDBOX_VOLUME_INFO_OFF, &mut volume_info).is_ok()
+            && proc::read(pid, base + SANDBOX_WAIT_INFO_OFF, &mut wait_info).is_ok(),
         "sandbox storage query outputs readable",
     );
     check(&image_info[0..4] == b"JSI1", "sandbox image info magic");
@@ -760,6 +806,8 @@ fn verify_sandbox_abi(base: u64) {
         u64::from_le_bytes(volume_info[40..48].try_into().expect("used bytes")) == 7,
         "sandbox parent volume usage",
     );
+    check(&wait_info[0..4] == b"JSB1", "sandbox wait info magic");
+    check(wait_info[6] == 5, "sandbox wait observes Stopped");
     let _ = proc::reap(pid);
     crate::kobj::run_cleanup(usize::MAX);
     check(

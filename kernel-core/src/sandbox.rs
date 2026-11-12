@@ -91,6 +91,15 @@ pub struct SandboxSnapshot {
     pub state: WorkloadState,
 }
 
+impl SandboxSnapshot {
+    /// Terminal state is exclusively the root Workload's terminal state.
+    ///
+    /// 终态完全取自 root Workload，Sandbox 不保存第二份生命周期状态。
+    pub const fn terminal(self) -> bool {
+        self.state.terminal()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Record {
     key: SandboxKey,
