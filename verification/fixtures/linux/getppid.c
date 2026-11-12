@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <linux/android/binder.h>
+#include <linux/io_uring.h>
 #include <poll.h>
 #include <sched.h>
 #include <stdint.h>
@@ -989,10 +990,10 @@ int main(void) {
     }
     int epfd = epoll_create1(EPOLL_CLOEXEC);
     int epoll_pipe[2];
-    struct epoll_event epoll_ready = {0};
+    struct epoll_event epoll_ready[128] = {0};
     if (epfd < 0 || (fcntl(epfd, F_GETFD) & FD_CLOEXEC) == 0 ||
         pipe2(epoll_pipe, 0) != 0 ||
-        epoll_wait(epfd, &epoll_ready, 128, 20) != 0) {
+        epoll_wait(epfd, epoll_ready, 128, 20) != 0) {
         return 250;
     }
     struct epoll_event epoll_interest = {
@@ -1012,10 +1013,10 @@ int main(void) {
         nanosleep(&delay, NULL);
         _exit(write(epoll_pipe[1], "E", 1) == 1 ? 0 : 1);
     }
-    memset(&epoll_ready, 0, sizeof(epoll_ready));
-    if (epoll_wait(epfd, &epoll_ready, 1, 300) != 1 ||
-        (epoll_ready.events & EPOLLIN) == 0 ||
-        epoll_ready.data.u64 != 0x4a5345504f4c4cULL ||
+    memset(epoll_ready, 0, sizeof(epoll_ready));
+    if (epoll_wait(epfd, epoll_ready, 1, 300) != 1 ||
+        (epoll_ready[0].events & EPOLLIN) == 0 ||
+        epoll_ready[0].data.u64 != 0x4a5345504f4c4cULL ||
         read(epoll_pipe[0], memfd_io, 1) != 1 ||
         memfd_io[0] != 'E') {
         return 253;
@@ -1036,9 +1037,9 @@ int main(void) {
                   &epoll_interest) != 0 ||
         write(epoll_event_fd, &epoll_counter, sizeof(epoll_counter)) !=
             sizeof(epoll_counter) ||
-        epoll_wait(epfd, &epoll_ready, 1, 30) != 1 ||
-        epoll_ready.data.u64 != 0x45504f4c4c4554ULL ||
-        epoll_wait(epfd, &epoll_ready, 1, 0) != 0 ||
+        epoll_wait(epfd, epoll_ready, 1, 30) != 1 ||
+        epoll_ready[0].data.u64 != 0x45504f4c4c4554ULL ||
+        epoll_wait(epfd, epoll_ready, 1, 0) != 0 ||
         read(epoll_event_fd, &epoll_counter, sizeof(epoll_counter)) !=
             sizeof(epoll_counter)) {
         return 255;
@@ -1052,19 +1053,19 @@ int main(void) {
     epoll_counter = 1;
     if (write(epoll_event_fd, &epoll_counter, sizeof(epoll_counter)) !=
             sizeof(epoll_counter) ||
-        epoll_wait(epfd, &epoll_ready, 1, 30) != 1 ||
-        epoll_ready.data.u64 != 0x4f4e4553484f54ULL ||
-        epoll_wait(epfd, &epoll_ready, 1, 0) != 0 ||
+        epoll_wait(epfd, epoll_ready, 1, 30) != 1 ||
+        epoll_ready[0].data.u64 != 0x4f4e4553484f54ULL ||
+        epoll_wait(epfd, epoll_ready, 1, 0) != 0 ||
         epoll_ctl(epfd, EPOLL_CTL_MOD, epoll_event_fd,
                   &epoll_interest) != 0 ||
-        epoll_wait(epfd, &epoll_ready, 1, 0) != 1 ||
+        epoll_wait(epfd, epoll_ready, 1, 0) != 1 ||
         read(epoll_event_fd, &epoll_counter, sizeof(epoll_counter)) !=
             sizeof(epoll_counter)) {
         return 257;
     }
     struct timespec epoll_timeout = {.tv_sec = 0, .tv_nsec = 20000000};
     if (epoll_ctl(epfd, EPOLL_CTL_DEL, epoll_event_fd, NULL) != 0 ||
-        syscall(SYS_epoll_pwait2, epfd, &epoll_ready, 1,
+        syscall(SYS_epoll_pwait2, epfd, epoll_ready, 1,
                 &epoll_timeout, NULL, 0) != 0 ||
         close(epoll_event_fd) != 0) {
         return 258;
@@ -1089,7 +1090,7 @@ int main(void) {
         _exit(kill(getppid(), SIGUSR2) == 0 ? 0 : 1);
     }
     errno = 0;
-    long epoll_signal_result = syscall(SYS_epoll_pwait, epfd, &epoll_ready, 1,
+    long epoll_signal_result = syscall(SYS_epoll_pwait, epfd, epoll_ready, 1,
                                       100, &epoll_empty_mask,
                                       sizeof(uint64_t));
     int epoll_signal_errno = errno;
@@ -1103,6 +1104,116 @@ int main(void) {
     if (!WIFEXITED(epoll_child_status) || WEXITSTATUS(epoll_child_status) != 0 ||
         close(epfd) != 0) {
         return 262;
+    }
+    struct io_uring_params uring_params = {0};
+    int uring_fd = syscall(SYS_io_uring_setup, 8, &uring_params);
+    if (uring_fd < 0 || uring_params.sq_entries != 8 ||
+        uring_params.cq_entries != 16 ||
+        (uring_params.features & IORING_FEAT_SINGLE_MMAP) == 0) {
+        return 268;
+    }
+    size_t uring_sq_size =
+        uring_params.sq_off.array +
+        uring_params.sq_entries * sizeof(unsigned);
+    size_t uring_cq_size =
+        uring_params.cq_off.cqes +
+        uring_params.cq_entries * sizeof(struct io_uring_cqe);
+    size_t uring_ring_size =
+        uring_sq_size > uring_cq_size ? uring_sq_size : uring_cq_size;
+    unsigned char *uring_sq = mmap(NULL, uring_ring_size, PROT_READ | PROT_WRITE,
+                                   MAP_SHARED, uring_fd, IORING_OFF_SQ_RING);
+    struct io_uring_sqe *uring_sqes =
+        mmap(NULL, uring_params.sq_entries * sizeof(struct io_uring_sqe),
+             PROT_READ | PROT_WRITE, MAP_SHARED, uring_fd, IORING_OFF_SQES);
+    if (uring_sq == MAP_FAILED || uring_sqes == MAP_FAILED) {
+        return 269;
+    }
+    unsigned *uring_sq_head = (unsigned *)(uring_sq + uring_params.sq_off.head);
+    unsigned *uring_sq_tail = (unsigned *)(uring_sq + uring_params.sq_off.tail);
+    unsigned *uring_sq_mask = (unsigned *)(uring_sq + uring_params.sq_off.ring_mask);
+    unsigned *uring_sq_array = (unsigned *)(uring_sq + uring_params.sq_off.array);
+    unsigned *uring_cq_head = (unsigned *)(uring_sq + uring_params.cq_off.head);
+    unsigned *uring_cq_tail = (unsigned *)(uring_sq + uring_params.cq_off.tail);
+    unsigned uring_index = *uring_sq_tail & *uring_sq_mask;
+    memset(&uring_sqes[uring_index], 0, sizeof(uring_sqes[uring_index]));
+    uring_sqes[uring_index].opcode = IORING_OP_NOP;
+    uring_sqes[uring_index].user_data = 0x4e4f5049ULL;
+    uring_sq_array[uring_index] = uring_index;
+    __sync_synchronize();
+    *uring_sq_tail = *uring_sq_tail + 1;
+    if (syscall(SYS_io_uring_enter, uring_fd, 1, 0, 0, NULL, 0) != 1 ||
+        *uring_sq_head != 1 || *uring_cq_tail != 1) {
+        return 270;
+    }
+    struct io_uring_cqe *uring_cqe =
+        (struct io_uring_cqe *)(uring_sq + uring_params.cq_off.cqes) +
+        (*uring_cq_head & (uring_params.cq_entries - 1));
+    if (uring_cqe->user_data != 0x4e4f5049ULL || uring_cqe->res != 0) {
+        return 271;
+    }
+    *uring_cq_head = *uring_cq_head + 1;
+    int uring_pipe[2];
+    if (pipe2(uring_pipe, 0) != 0) {
+        return 272;
+    }
+    uring_index = *uring_sq_tail & *uring_sq_mask;
+    memset(&uring_sqes[uring_index], 0, sizeof(uring_sqes[uring_index]));
+    uring_sqes[uring_index].opcode = IORING_OP_WRITE;
+    uring_sqes[uring_index].fd = uring_pipe[1];
+    uring_sqes[uring_index].addr = (uint64_t)(uintptr_t)"uring-io";
+    uring_sqes[uring_index].len = 8;
+    uring_sqes[uring_index].off = UINT64_MAX;
+    uring_sqes[uring_index].user_data = 0x57524954ULL;
+    uring_sq_array[uring_index] = uring_index;
+    __sync_synchronize();
+    *uring_sq_tail = *uring_sq_tail + 1;
+    if (syscall(SYS_io_uring_enter, uring_fd, 1, 0, IORING_ENTER_GETEVENTS,
+                NULL, 0) != 1) {
+        return 273;
+    }
+    uring_cqe = (struct io_uring_cqe *)(uring_sq + uring_params.cq_off.cqes) +
+                (*uring_cq_head & (uring_params.cq_entries - 1));
+    if (uring_cqe->user_data != 0x57524954ULL || uring_cqe->res != 8) {
+        return 274;
+    }
+    *uring_cq_head = *uring_cq_head + 1;
+    uring_index = *uring_sq_tail & *uring_sq_mask;
+    memset(&uring_sqes[uring_index], 0, sizeof(uring_sqes[uring_index]));
+    uring_sqes[uring_index].opcode = IORING_OP_READ;
+    uring_sqes[uring_index].fd = uring_pipe[0];
+    uring_sqes[uring_index].addr = (uint64_t)(uintptr_t)memfd_io;
+    uring_sqes[uring_index].len = 8;
+    uring_sqes[uring_index].off = UINT64_MAX;
+    uring_sqes[uring_index].user_data = 0x52454144ULL;
+    uring_sq_array[uring_index] = uring_index;
+    __sync_synchronize();
+    *uring_sq_tail = *uring_sq_tail + 1;
+    if (syscall(SYS_io_uring_enter, uring_fd, 1, 0, IORING_ENTER_GETEVENTS,
+                NULL, 0) != 1) {
+        return 275;
+    }
+    uring_cqe = (struct io_uring_cqe *)(uring_sq + uring_params.cq_off.cqes) +
+                (*uring_cq_head & (uring_params.cq_entries - 1));
+    if (uring_cqe->user_data != 0x52454144ULL || uring_cqe->res != 8 ||
+        memcmp(memfd_io, "uring-io", 8) != 0) {
+        return 276;
+    }
+    *uring_cq_head = *uring_cq_head + 1;
+    int uring_unmap_sqes =
+        munmap(uring_sqes,
+               uring_params.sq_entries * sizeof(struct io_uring_sqe));
+    int uring_unmap_ring = munmap(uring_sq, uring_ring_size);
+    int uring_close_read = close(uring_pipe[0]);
+    int uring_close_write = close(uring_pipe[1]);
+    int uring_close = close(uring_fd);
+    if (uring_unmap_sqes != 0 || uring_unmap_ring != 0 ||
+        uring_close_read != 0 || uring_close_write != 0 ||
+        uring_close != 0) {
+        printf("io-uring-cleanup-fail sqes=%d ring=%d read=%d "
+               "write=%d ringfd=%d errno=%d\n",
+               uring_unmap_sqes, uring_unmap_ring,
+               uring_close_read, uring_close_write, uring_close, errno);
+        return 277;
     }
     int binder_fd = open("/dev/binder", O_RDWR | O_CLOEXEC);
     struct binder_version binder_version = {0};
