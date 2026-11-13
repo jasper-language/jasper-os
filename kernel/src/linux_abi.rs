@@ -6206,6 +6206,11 @@ fn linux_prctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const PR_GET_NAME: u64 = 16;
     const PR_SET_NO_NEW_PRIVS: u64 = 38;
     const PR_GET_NO_NEW_PRIVS: u64 = 39;
+    const ARCH_SHSTK_ENABLE: u64 = 0x5001;
+    const ARCH_SHSTK_DISABLE: u64 = 0x5002;
+    const ARCH_SHSTK_LOCK: u64 = 0x5003;
+    const ARCH_SHSTK_UNLOCK: u64 = 0x5004;
+    const ARCH_SHSTK_STATUS: u64 = 0x5005;
     let (task, _) = sched::current();
     match args[0] {
         PR_SET_NAME => {
@@ -6256,6 +6261,20 @@ fn linux_prctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         PR_GET_NO_NEW_PRIVS => Ok(u64::from(
             proc::linux_no_new_privs(pid).ok_or(CompatErrno::NoProcess)?,
         )),
+        ARCH_SHSTK_STATUS => {
+            let features = proc::linux_shstk_status(pid).ok_or(CompatErrno::NoProcess)?;
+            copy_to_user(args[1], &features.to_le_bytes(), 8).map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        }
+        ARCH_SHSTK_LOCK => {
+            if proc::linux_lock_shstk_features(pid, args[1]) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::Invalid)
+            }
+        }
+        ARCH_SHSTK_ENABLE | ARCH_SHSTK_DISABLE => Err(CompatErrno::NotSupported),
+        ARCH_SHSTK_UNLOCK => Err(CompatErrno::Perm),
         _ => Err(CompatErrno::Invalid),
     }
 }

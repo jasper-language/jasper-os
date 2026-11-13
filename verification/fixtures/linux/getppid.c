@@ -2,6 +2,7 @@
 // 验证内核创建的 Linux 兼容进程的父身份边界。
 #define _GNU_SOURCE
 
+#include <asm/prctl.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -4554,6 +4555,13 @@ int main(void) {
     if (syscall(SYS_lookup_dcookie, 0, NULL, 0) != -1 ||
         errno != ENOENT) {
         return 535;
+    }
+    unsigned long shstk_features = ARCH_SHSTK_SHSTK;
+    if (prctl(ARCH_SHSTK_STATUS, &shstk_features, 0, 0, 0) != 0 ||
+        shstk_features != 0 ||
+        prctl(ARCH_SHSTK_LOCK, ARCH_SHSTK_SHSTK | ARCH_SHSTK_WRSS,
+              0, 0, 0) != 0) {
+        return 652;
     }
     const long unsupported_features[] = {
         SYS_fanotify_init, SYS_fanotify_mark,

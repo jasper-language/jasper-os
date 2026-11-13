@@ -157,6 +157,8 @@ struct LinuxProcessState {
     seccomp_filters: Vec<Vec<SeccompInsn>>,
     seccomp_strict: bool,
     no_new_privs: bool,
+    shstk_features: u64,
+    shstk_locked: u64,
     mappings: Vec<LinuxMapping>,
     sealed_ranges: Vec<(u64, u64)>,
     pipes: Vec<LinuxPipeHandle>,
@@ -4540,6 +4542,30 @@ pub(crate) fn linux_no_new_privs(pid: ObjId) -> Option<bool> {
     })
 }
 
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_shstk_status(pid: ObjId) -> Option<u64> {
+    with_proc(pid, |process| {
+        Ok(process.linux.as_ref().ok_or(ProcError::Exited)?.shstk_features)
+    })
+    .ok()
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_lock_shstk_features(pid: ObjId, features: u64) -> bool {
+    if features & !3 != 0 {
+        return false;
+    }
+    with_proc(pid, |process| {
+        process
+            .linux
+            .as_mut()
+            .ok_or(ProcError::Exited)?
+            .shstk_locked |= features;
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Enables Linux seccomp strict mode for the compatibility process.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_set_seccomp_strict(pid: ObjId) -> bool {
@@ -5006,6 +5032,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         seccomp_filters: Vec::new(),
         seccomp_strict: false,
         no_new_privs: false,
+        shstk_features: 0,
+        shstk_locked: 0,
         mappings: Vec::new(),
         sealed_ranges: Vec::new(),
         pipes: Vec::new(),
