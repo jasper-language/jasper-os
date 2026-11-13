@@ -11,6 +11,7 @@
 #include <linux/dma-heap.h>
 #include <linux/futex.h>
 #include <linux/io_uring.h>
+#include <linux/ioprio.h>
 #include <linux/sched/types.h>
 #include <linux/sync_file.h>
 #include <limits.h>
@@ -3788,6 +3789,29 @@ int main(void) {
         errno != EINVAL ||
         capability_header.version != _LINUX_CAPABILITY_VERSION_3) {
         return 493;
+    }
+    long initial_ioprio =
+        syscall(SYS_ioprio_get, IOPRIO_WHO_PROCESS, 0);
+    if (initial_ioprio < 0 ||
+        syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0,
+                IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 5)) != 0 ||
+        syscall(SYS_ioprio_get, IOPRIO_WHO_PROCESS, 0) !=
+            IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 5) ||
+        syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0,
+                IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0)) != 0 ||
+        syscall(SYS_ioprio_get, IOPRIO_WHO_PROCESS, 0) !=
+            IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0)) {
+        return 512;
+    }
+    errno = 0;
+    if (syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0,
+                IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 8)) != -1 ||
+        errno != EINVAL ||
+        syscall(SYS_ioprio_get, IOPRIO_WHO_PGRP, 0) != -1 ||
+        errno != EOPNOTSUPP ||
+        syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0,
+                (unsigned)initial_ioprio) != 0) {
+        return 513;
     }
     uid_t credential_real_uid = 0;
     uid_t credential_effective_uid = 0;

@@ -205,6 +205,8 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::ArchPrctl,
         LinuxSyscall::CapGet,
         LinuxSyscall::CapSet,
+        LinuxSyscall::IoprioGet,
+        LinuxSyscall::IoprioSet,
         LinuxSyscall::Mount,
         LinuxSyscall::Umount2,
         LinuxSyscall::PivotRoot,

@@ -2042,6 +2042,8 @@ fn execute(
         LinuxSyscall::ArchPrctl => compat_result(linux_arch_prctl(call.args)),
         LinuxSyscall::CapGet => compat_result(linux_capget(pid, call.args)),
         LinuxSyscall::CapSet => compat_result(linux_capset(pid, call.args)),
+        LinuxSyscall::IoprioGet => compat_result(linux_ioprio_get(pid, call.args)),
+        LinuxSyscall::IoprioSet => compat_result(linux_ioprio_set(pid, call.args)),
         LinuxSyscall::Adjtimex
         | LinuxSyscall::ClockAdjtime
         | LinuxSyscall::ClockSettime
@@ -5153,6 +5155,50 @@ fn linux_capset(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::NoProcess);
     }
     Ok(0)
+}
+
+/// Resolves one I/O priority target restricted to the current process.
+fn linux_ioprio_target(pid: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+    const IOPRIO_WHO_PROCESS: u64 = 1;
+    if args[0] != IOPRIO_WHO_PROCESS {
+        return Err(CompatErrno::NotSupported);
+    }
+    let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
+    let requested = args[1] as u32 as i32;
+    if requested != 0 && requested as u64 != current {
+        return Err(CompatErrno::Perm);
+    }
+    Ok(())
+}
+
+/// Returns the process Linux I/O priority.
+fn linux_ioprio_get(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    linux_ioprio_target(pid, args)?;
+    proc::linux_ioprio(pid)
+        .map(u64::from)
+        .ok_or(CompatErrno::NoProcess)
+}
+
+/// Sets the process Linux I/O priority class and level.
+fn linux_ioprio_set(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const IOPRIO_CLASS_MASK: u32 = 0x7;
+    const IOPRIO_CLASS_SHIFT: u32 = 13;
+    const IOPRIO_PRIO_MASK: u32 = (1 << IOPRIO_CLASS_SHIFT) - 1;
+    linux_ioprio_target(pid, args)?;
+    let requested = args[2] as u32;
+    let class = (requested >> IOPRIO_CLASS_SHIFT) & IOPRIO_CLASS_MASK;
+    let data = requested & IOPRIO_PRIO_MASK;
+    let value = match class {
+        0 => (2 << IOPRIO_CLASS_SHIFT) | 4,
+        1 | 2 if data <= 7 => requested,
+        3 if data == 0 => requested,
+        _ => return Err(CompatErrno::Invalid),
+    };
+    if proc::set_linux_ioprio(pid, value) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoProcess)
+    }
 }
 
 /// Implements `clock_gettime(2)` for trusted realtime and Jasper monotonic clocks.
