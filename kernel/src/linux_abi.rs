@@ -2155,6 +2155,10 @@ fn execute(
         }
         LinuxSyscall::Wait4 => compat_result(linux_wait4(pid, call.args)),
         LinuxSyscall::WaitId => compat_result(linux_waitid(pid, call.args)),
+        LinuxSyscall::PidfdOpen => compat_result(linux_pidfd_open(pid, call.args)),
+        LinuxSyscall::PidfdSendSignal => {
+            compat_result(linux_pidfd_send_signal(pid, call.args))
+        }
         _ => -i64::from(CompatErrno::NoSys as i32),
     }
 }
@@ -4282,6 +4286,76 @@ fn linux_waitid(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             Ok(None) => proc::block_step().map_err(|_| CompatErrno::Interrupted)?,
             Err(_) => return Err(CompatErrno::NoChild),
         }
+    }
+}
+
+/// Reports whether a pidfd target has exited or is exiting.
+fn pidfd_target_ready(target: ObjId) -> bool {
+    matches!(
+        proc::state(target),
+        None
+            | Some(proc::ProcState::Exiting { .. })
+            | Some(proc::ProcState::Exited { .. })
+    )
+}
+
+/// Implements `pidfd_open(2)` for process identities.
+fn linux_pidfd_open(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PIDFD_NONBLOCK: u64 = 0x800;
+    if args[1] & !PIDFD_NONBLOCK != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let target_pid = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    if target_pid == 0 {
+        return Err(CompatErrno::NoProcess);
+    }
+    let target = proc::linux_process_for_pid(target_pid).ok_or(CompatErrno::NoProcess)?;
+    let fd = proc::linux_install_pidfd(pid, target, true).ok_or(CompatErrno::NoSpace)?;
+    if args[1] & PIDFD_NONBLOCK != 0 {
+        let flags = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)?;
+        if !proc::linux_set_fd_status_flags(
+            pid,
+            fd,
+            flags | PIDFD_NONBLOCK as u32,
+        ) {
+            let _ = proc::linux_close_fd(pid, fd);
+            return Err(CompatErrno::BadFd);
+        }
+    }
+    Ok(u64::from(fd))
+}
+
+/// Implements signal delivery through an existing pidfd.
+fn linux_pidfd_send_signal(
+    pid: ObjId,
+    args: [u64; 6],
+) -> Result<u64, CompatErrno> {
+    if args[2] != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Pidfd || args[3] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let target = ObjId::from_raw(entry.handle).ok_or(CompatErrno::NoProcess)?;
+    let signal = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if signal > 64 {
+        return Err(CompatErrno::Invalid);
+    }
+    if signal == 0 {
+        return proc::state(target)
+            .map(|_| 0)
+            .ok_or(CompatErrno::NoProcess);
+    }
+    if signal == 19 {
+        return Err(CompatErrno::NotSupported);
+    }
+    let sender = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?;
+    if queue_process_signal(target, signal, sender, 0) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoProcess)
     }
 }
 
@@ -8974,6 +9048,16 @@ fn linux_epoll_readiness(
             }
             ready
         }
+        compat_core::fd::CompatKind::Pidfd => {
+            if requested & EPOLLIN != 0
+                && ObjId::from_raw(registration.handle)
+                    .is_none_or(pidfd_target_ready)
+            {
+                EPOLLIN
+            } else {
+                0
+            }
+        }
         _ => 0,
     };
     Some(ready)
@@ -9183,6 +9267,16 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                         continue;
                     };
                     if events & POLLIN != 0 && signalfd_pending_mask(pid, *mask.lock()) != 0 {
+                        POLLIN
+                    } else {
+                        0
+                    }
+                }
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::Pidfd => {
+                    if events & POLLIN != 0
+                        && ObjId::from_raw(entry.handle)
+                            .is_none_or(pidfd_target_ready)
+                    {
                         POLLIN
                     } else {
                         0

@@ -15,6 +15,7 @@ pub enum CompatKind {
     Event,
     Timer,
     Signal,
+    Pidfd,
     Device,
     Other,
 }

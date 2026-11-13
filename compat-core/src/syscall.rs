@@ -32,8 +32,9 @@ use linux_raw_sys::general::{
     __NR_lremovexattr, __NR_lseek, __NR_lsetxattr, __NR_madvise, __NR_memfd_create,
     __NR_mincore, __NR_mlock, __NR_mlock2, __NR_mlockall, __NR_mmap, __NR_mprotect,
     __NR_mremap, __NR_msync, __NR_munlock, __NR_munlockall, __NR_munmap,
-    __NR_nanosleep, __NR_newfstatat, __NR_open, __NR_openat, __NR_openat2, __NR_pause, __NR_pipe,
-    __NR_pipe2, __NR_poll, __NR_ppoll, __NR_prctl,
+    __NR_nanosleep, __NR_newfstatat, __NR_open, __NR_openat, __NR_openat2, __NR_pause,
+    __NR_pidfd_open, __NR_pidfd_send_signal, __NR_pipe, __NR_pipe2, __NR_poll, __NR_ppoll,
+    __NR_prctl,
     __NR_pread64, __NR_preadv, __NR_preadv2, __NR_pselect6, __NR_prlimit64, __NR_pwrite64,
     __NR_pwritev, __NR_pwritev2, __NR_read, __NR_readlink, __NR_readlinkat, __NR_readv,
     __NR_recvfrom,
@@ -333,6 +334,8 @@ pub enum LinuxSyscall {
     /// Wait for a selected Linux child event through the siginfo ABI.
     /// 通过 siginfo ABI 等待选定的 Linux 子进程事件。
     WaitId,
+    PidfdOpen,
+    PidfdSendSignal,
     /// Create a child that shares the parent's address space while the parent waits.
     /// 创建共享父地址空间的子进程；父进程在子进程 exec 或退出前保持暂停。
     Vfork,
@@ -691,6 +694,8 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_io_uring_register) => LinuxSyscall::IoUringRegister,
         value if value == u64::from(__NR_wait4) => LinuxSyscall::Wait4,
         value if value == u64::from(__NR_waitid) => LinuxSyscall::WaitId,
+        value if value == u64::from(__NR_pidfd_open) => LinuxSyscall::PidfdOpen,
+        value if value == u64::from(__NR_pidfd_send_signal) => LinuxSyscall::PidfdSendSignal,
         value if value == u64::from(__NR_vfork) => LinuxSyscall::Vfork,
         number => return SyscallDispatch::Unsupported { number },
     };
@@ -920,6 +925,8 @@ mod tests {
             (__NR_io_uring_register, LinuxSyscall::IoUringRegister),
             (__NR_wait4, LinuxSyscall::Wait4),
             (__NR_waitid, LinuxSyscall::WaitId),
+            (__NR_pidfd_open, LinuxSyscall::PidfdOpen),
+            (__NR_pidfd_send_signal, LinuxSyscall::PidfdSendSignal),
             (__NR_vfork, LinuxSyscall::Vfork),
         ];
         for (number, syscall) in expected {

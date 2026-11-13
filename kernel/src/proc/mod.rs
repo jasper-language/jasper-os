@@ -3363,6 +3363,29 @@ pub(crate) fn linux_install_file(pid: ObjId, handle: u64, close_on_exec: bool) -
     .ok()
 }
 
+/// Installs one pidfd retaining the target process identity.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_pidfd(
+    pid: ObjId,
+    target: ObjId,
+    close_on_exec: bool,
+) -> Option<u32> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let fd = linux
+            .fds
+            .install(
+                target.raw(),
+                kernel_core::object::Rights::READ,
+                compat_core::fd::CompatKind::Pidfd,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
 /// Installs a read-only Linux directory and initializes its entry cursor.
 ///
 /// 安装只读 Linux 目录；失败不留下部分 fd 状态。
