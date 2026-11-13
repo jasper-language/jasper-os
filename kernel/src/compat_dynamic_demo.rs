@@ -197,6 +197,8 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::RtSigAction,
         LinuxSyscall::RtSigPending,
         LinuxSyscall::RtSigProcMask,
+        LinuxSyscall::RtSigsuspend,
+        LinuxSyscall::RtSigtimedwait,
         LinuxSyscall::RtSigReturn,
         LinuxSyscall::Tkill,
         LinuxSyscall::Tgkill,

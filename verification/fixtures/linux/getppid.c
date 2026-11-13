@@ -100,6 +100,7 @@ static void signal_noop(int signal) {
 
 static volatile sig_atomic_t posix_timer_signals;
 static volatile sig_atomic_t interval_timer_signals;
+static volatile sig_atomic_t sigsuspend_signals;
 
 static void posix_timer_signal_handler(int signal) {
     if (signal == SIGUSR1) {
@@ -110,6 +111,12 @@ static void posix_timer_signal_handler(int signal) {
 static void interval_timer_signal_handler(int signal) {
     if (signal == SIGALRM) {
         interval_timer_signals++;
+    }
+}
+
+static void sigsuspend_signal_handler(int signal) {
+    if (signal == SIGUSR1) {
+        sigsuspend_signals++;
     }
 }
 
@@ -3277,6 +3284,98 @@ int main(void) {
                 WEXITED | WNOWAIT, NULL) != -1 ||
         errno != EOPNOTSUPP) {
         return 434;
+    }
+    sigset_t timedwait_set;
+    sigset_t timedwait_old;
+    sigemptyset(&timedwait_set);
+    sigaddset(&timedwait_set, SIGUSR1);
+    if (sigprocmask(SIG_BLOCK, &timedwait_set, &timedwait_old) != 0 ||
+        kill(getpid(), SIGUSR1) != 0) {
+        return 437;
+    }
+    memset(&waitid_info, 0, sizeof(waitid_info));
+    long timedwait_signal =
+        syscall(SYS_rt_sigtimedwait, &timedwait_set, &waitid_info,
+                NULL, 8);
+    if (timedwait_signal != SIGUSR1 ||
+        waitid_info.si_signo != SIGUSR1 ||
+        waitid_info.si_code != SI_USER ||
+        waitid_info.si_pid != getpid()) {
+        return 438;
+    }
+    sigset_t timedwait_empty;
+    struct timespec timedwait_timeout = {
+        .tv_sec = 0,
+        .tv_nsec = 20000000,
+    };
+    sigemptyset(&timedwait_empty);
+    errno = 0;
+    if (syscall(SYS_rt_sigtimedwait, &timedwait_empty, NULL,
+                &timedwait_timeout, 8) != -1 ||
+        errno != EAGAIN) {
+        return 439;
+    }
+    errno = 0;
+    if (syscall(SYS_rt_sigtimedwait, &timedwait_empty, NULL,
+                NULL, 7) != -1 ||
+        errno != EINVAL ||
+        sigprocmask(SIG_SETMASK, &timedwait_old, NULL) != 0) {
+        return 440;
+    }
+    int sigsuspend_ready[2];
+    if (pipe(sigsuspend_ready) != 0) {
+        return 441;
+    }
+    pid_t sigsuspend_child = fork();
+    if (sigsuspend_child < 0) {
+        return 442;
+    }
+    if (sigsuspend_child == 0) {
+        close(sigsuspend_ready[0]);
+        sigset_t suspend_block;
+        sigset_t suspend_empty;
+        sigset_t suspend_current;
+        sigemptyset(&suspend_block);
+        sigaddset(&suspend_block, SIGUSR1);
+        sigemptyset(&suspend_empty);
+        sigsuspend_signals = 0;
+        char ready = 'R';
+        if (signal(SIGUSR1, sigsuspend_signal_handler) == SIG_ERR ||
+            sigprocmask(SIG_BLOCK, &suspend_block, NULL) != 0 ||
+            write(sigsuspend_ready[1], &ready, 1) != 1) {
+            _exit(2);
+        }
+        long suspend_result =
+            syscall(SYS_rt_sigsuspend, &suspend_empty, 8);
+        int suspend_errno = errno;
+        if (sigprocmask(SIG_BLOCK, NULL, &suspend_current) != 0) {
+            _exit(3);
+        }
+        _exit(suspend_result == -1 && suspend_errno == EINTR &&
+                      sigsuspend_signals > 0 &&
+                      sigismember(&suspend_current, SIGUSR1)
+                  ? 0
+                  : 1);
+    }
+    close(sigsuspend_ready[1]);
+    char sigsuspend_byte = 0;
+    if (read(sigsuspend_ready[0], &sigsuspend_byte, 1) != 1 ||
+        sigsuspend_byte != 'R' ||
+        kill(sigsuspend_child, SIGUSR1) != 0 ||
+        close(sigsuspend_ready[0]) != 0) {
+        return 443;
+    }
+    int sigsuspend_status = 0;
+    if (waitpid(sigsuspend_child, &sigsuspend_status, 0) !=
+            sigsuspend_child ||
+        !WIFEXITED(sigsuspend_status) ||
+        WEXITSTATUS(sigsuspend_status) != 0) {
+        return 444;
+    }
+    errno = 0;
+    if (syscall(SYS_rt_sigsuspend, NULL, 8) != -1 ||
+        errno != EFAULT) {
+        return 445;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);

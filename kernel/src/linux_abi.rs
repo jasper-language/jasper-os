@@ -78,6 +78,7 @@ struct LinuxThread {
     altstack_flags: u32,
     altstack_depth: u8,
     altstack_disarm_depth: u8,
+    sigsuspend_restore_mask: Option<u64>,
 }
 
 fn linux_comm_from_task_name(task_name: &str) -> [u8; 16] {
@@ -333,6 +334,7 @@ pub(crate) fn register_linux_thread(
             altstack_flags: 2,
             altstack_depth: 0,
             altstack_disarm_depth: 0,
+            sigsuspend_restore_mask: None,
         });
         tid
     };
@@ -523,6 +525,34 @@ fn set_current_signal_mask(process: ObjId, mask: u64) -> bool {
     };
     entry.signal_mask = mask & !UNMASKABLE;
     true
+}
+
+/// Stores the mask `rt_sigsuspend` must restore after its signal handler returns.
+fn set_current_sigsuspend_restore_mask(process: ObjId, mask: Option<u64>) -> bool {
+    let (task, _) = sched::current();
+    let mut state = COMPAT.lock();
+    let Some(entry) = state
+        .threads
+        .iter_mut()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)
+    else {
+        return false;
+    };
+    entry.sigsuspend_restore_mask = mask;
+    true
+}
+
+/// Takes the pending `rt_sigsuspend` restore mask for signal-frame construction.
+fn take_current_sigsuspend_restore_mask(process: ObjId) -> Option<u64> {
+    let (task, _) = sched::current();
+    COMPAT
+        .lock()
+        .threads
+        .iter_mut()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)
+        .and_then(|entry| entry.sigsuspend_restore_mask.take())
 }
 
 /// Returns the current thread alternate signal stack and active depth.
@@ -927,7 +957,8 @@ fn build_signal_frame(
     {
         return Err(CompatErrno::Invalid);
     }
-    let old_mask = current_signal_mask(process).ok_or(CompatErrno::Invalid)?;
+    let current_mask = current_signal_mask(process).ok_or(CompatErrno::Invalid)?;
+    let old_mask = take_current_sigsuspend_restore_mask(process).unwrap_or(current_mask);
     let altstack = if action[1] & SA_ONSTACK != 0 {
         current_altstack(process).ok_or(CompatErrno::Invalid)?
     } else {
@@ -1028,23 +1059,23 @@ fn build_signal_frame(
     let nodefer = action[1] & (SA_NODEFER | SA_RESETHAND) != 0;
     let reset_hand = action[1] & SA_RESETHAND != 0;
     let handler_mask = if nodefer {
-        old_mask | action[3]
+        current_mask | action[3]
     } else {
-        old_mask | action[3] | (1u64 << (signal - 1))
+        current_mask | action[3] | (1u64 << (signal - 1))
     };
     if !set_current_signal_mask(process, handler_mask) {
         return Err(CompatErrno::Invalid);
     }
     if reset_hand && !proc::set_linux_signal_action(process, signal, [0; 4]) {
-        let _ = set_current_signal_mask(process, old_mask);
+        let _ = set_current_signal_mask(process, current_mask);
         return Err(CompatErrno::Invalid);
     }
     if proc::write(process, frame_address, &frame).is_err() {
-        let _ = set_current_signal_mask(process, old_mask);
+        let _ = set_current_signal_mask(process, current_mask);
         return Err(CompatErrno::Fault);
     }
     if uses_altstack && !enter_altstack(process, autodisarm) {
-        let _ = set_current_signal_mask(process, old_mask);
+        let _ = set_current_signal_mask(process, current_mask);
         return Err(CompatErrno::Invalid);
     }
     crate::kprintln!(
@@ -1089,6 +1120,9 @@ fn deliver_pending_signal(
     let signal = take_deliverable_signal(process)?;
     let action = proc::linux_signal_action(process, signal)?;
     if action[0] == 1 {
+        if let Some(mask) = take_current_sigsuspend_restore_mask(process) {
+            let _ = set_current_signal_mask(process, mask);
+        }
         crate::kprintln!("[JSR-LINUX-SIGNAL] ignored signal={}", signal);
         return None;
     }
@@ -1976,6 +2010,8 @@ fn execute(
         LinuxSyscall::RtSigAction => compat_result(linux_rt_sigaction(pid, call.args)),
         LinuxSyscall::RtSigPending => compat_result(linux_rt_sigpending(pid, call.args)),
         LinuxSyscall::RtSigProcMask => compat_result(linux_rt_sigprocmask(pid, call.args)),
+        LinuxSyscall::RtSigsuspend => compat_result(linux_rt_sigsuspend(pid, call.args)),
+        LinuxSyscall::RtSigtimedwait => compat_result(linux_rt_sigtimedwait(pid, call.args)),
         LinuxSyscall::Tkill => compat_result(linux_tkill(pid, call.args).map(|()| 0)),
         LinuxSyscall::Tgkill => compat_result(linux_tgkill(pid, call.args).map(|()| 0)),
         LinuxSyscall::SchedYield => {
@@ -9267,6 +9303,114 @@ fn linux_rt_sigprocmask(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
         copy_to_user(args[2], &old.to_le_bytes(), 8).map_err(|_| CompatErrno::Fault)?;
     }
     Ok(0)
+}
+
+/// Reads one fixed-size x86_64 Linux signal mask.
+fn read_linux_sigset(address: u64, size: u64) -> Result<u64, CompatErrno> {
+    if size != 8 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut value = [0u8; 8];
+    copy_from_user(&mut value, address, 8).map_err(|_| CompatErrno::Fault)?;
+    Ok(u64::from_le_bytes(value))
+}
+
+/// Writes the signal metadata represented by one pending record.
+fn write_linux_siginfo(address: u64, record: SignalFdRecord) -> Result<(), CompatErrno> {
+    if address == 0 {
+        return Ok(());
+    }
+    let mut info = [0u8; 128];
+    info[0..4].copy_from_slice(&record.signal.to_le_bytes());
+    info[8..12].copy_from_slice(&record.code.to_le_bytes());
+    info[16..20].copy_from_slice(&record.sender_pid.to_le_bytes());
+    info[20..24].copy_from_slice(&(compat_core::syscall::LINUX_COMPAT_UID as u32).to_le_bytes());
+    copy_to_user(address, &info, info.len()).map_err(|_| CompatErrno::Fault)
+}
+
+/// Implements `rt_sigsuspend(2)` with temporary mask replacement.
+fn linux_rt_sigsuspend(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const UNMASKABLE: u64 = (1u64 << 8) | (1u64 << 18);
+    let requested = read_linux_sigset(args[0], args[1])?;
+    if requested & UNMASKABLE != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let old = current_signal_mask(pid).ok_or(CompatErrno::NoSys)?;
+    if !set_current_signal_mask(pid, requested)
+        || !set_current_sigsuspend_restore_mask(pid, Some(old))
+    {
+        let _ = set_current_signal_mask(pid, old);
+        let _ = set_current_sigsuspend_restore_mask(pid, None);
+        return Err(CompatErrno::NoSys);
+    }
+    loop {
+        if proc::current_exiting() {
+            let _ = set_current_signal_mask(pid, old);
+            let _ = set_current_sigsuspend_restore_mask(pid, None);
+            return Err(CompatErrno::Interrupted);
+        }
+        if current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        sched::pause();
+    }
+}
+
+/// Implements `rt_sigtimedwait(2)` over the standard-signal pending set.
+fn linux_rt_sigtimedwait(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const UNMASKABLE: u64 = (1u64 << 8) | (1u64 << 18);
+    let requested = read_linux_sigset(args[0], args[3])?;
+    if requested & UNMASKABLE != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let timeout = if args[2] == 0 {
+        None
+    } else {
+        Some(
+            sched::now_ns()
+                .checked_add(read_linux_timespec(args[2])?)
+                .ok_or(CompatErrno::Invalid)?,
+        )
+    };
+    let old_mask = current_signal_mask(pid).ok_or(CompatErrno::NoSys)?;
+    if !set_current_signal_mask(pid, old_mask | requested) {
+        return Err(CompatErrno::NoSys);
+    }
+    let result = loop {
+        if proc::current_exiting() {
+            break Err(CompatErrno::Interrupted);
+        }
+        if let Some(record) = take_signalfd_record(pid, requested) {
+            break Ok(record);
+        }
+        if current_signal_pending(pid) {
+            break Err(CompatErrno::Interrupted);
+        }
+        if let Some(deadline) = timeout {
+            if sched::now_ns() >= deadline {
+                break Err(CompatErrno::TryAgain);
+            }
+            if sched::sleep_until_ns(deadline).is_err() {
+                let ticks = deadline
+                    .saturating_sub(sched::now_ns())
+                    .div_ceil(crate::hrtime::tick_ns().max(1))
+                    .max(1);
+                sched::sleep_until(sched::timer_ticks().saturating_add(ticks));
+            }
+        } else {
+            sched::pause();
+        }
+    };
+    if !set_current_signal_mask(pid, old_mask) {
+        return Err(CompatErrno::NoSys);
+    }
+    match result {
+        Ok(record) => {
+            write_linux_siginfo(args[1], record)?;
+            Ok(u64::from(record.signal))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Writes the x86_64 Linux `struct stat` fields required by the loader.
