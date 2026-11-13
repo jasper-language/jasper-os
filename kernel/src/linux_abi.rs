@@ -7272,6 +7272,7 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const ASHMEM_PURGE_ALL_CACHES: u64 = 0x610a;
     const BINDER_SET_MAX_THREADS: u64 = 0x4004_6205;
     const BINDER_SET_CONTEXT_MGR: u64 = 0x4004_6207;
+    const BINDER_SET_CONTEXT_MGR_EXT: u64 = 0x4018_620d;
     const BINDER_THREAD_EXIT: u64 = 0x4004_6208;
     const BINDER_VERSION: u64 = 0xc004_6209;
     const BINDER_WRITE_READ: u64 = 0xc030_6201;
@@ -7333,6 +7334,24 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             }
             BINDER_SET_CONTEXT_MGR => {
                 if crate::binder::set_context_manager(pid) {
+                    Ok(0)
+                } else {
+                    Err(CompatErrno::Busy)
+                }
+            }
+            BINDER_SET_CONTEXT_MGR_EXT => {
+                const BINDER_TYPE_BINDER: u32 = 0x7362_2a85;
+                const FLAT_BINDER_OBJECT_BYTES: usize = 24;
+                let mut raw = [0u8; FLAT_BINDER_OBJECT_BYTES];
+                copy_from_user(&mut raw, args[2], FLAT_BINDER_OBJECT_BYTES)
+                    .map_err(|_| CompatErrno::Fault)?;
+                let object_type = u32::from_le_bytes(raw[0..4].try_into().unwrap());
+                let pointer = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+                let cookie = u64::from_le_bytes(raw[16..24].try_into().unwrap());
+                if object_type != BINDER_TYPE_BINDER {
+                    return Err(CompatErrno::Invalid);
+                }
+                if crate::binder::set_context_manager_ext(pid, pointer, cookie) {
                     Ok(0)
                 } else {
                     Err(CompatErrno::Busy)

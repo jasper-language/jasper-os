@@ -2042,9 +2042,13 @@ int main(void) {
             .data.ptr.buffer = (binder_uintptr_t)request_data,
             .data.ptr.offsets = 0,
         };
-        unsigned char write_buffer[4 + sizeof(request)];
-        memcpy(write_buffer, &(uint32_t){BC_TRANSACTION}, 4);
-        memcpy(write_buffer + 4, &request, sizeof(request));
+        unsigned char write_buffer[4 + sizeof(struct binder_transaction_data_sg)];
+        struct binder_transaction_data_sg request_sg = {
+            .transaction_data = request,
+            .buffers_size = sizeof(request_data),
+        };
+        memcpy(write_buffer, &(uint32_t){BC_TRANSACTION_SG}, 4);
+        memcpy(write_buffer + 4, &request_sg, sizeof(request_sg));
         unsigned char read_buffer[68];
         struct binder_write_read exchange = {
             .write_size = sizeof(write_buffer),
@@ -2146,11 +2150,12 @@ int main(void) {
         memcpy(write_buffer, &(uint32_t){BC_TRANSACTION}, 4);
         memcpy(write_buffer + 4, &second_request, sizeof(second_request));
         memset(&exchange, 0, sizeof(exchange));
-        exchange.write_size = sizeof(write_buffer);
+        exchange.write_size = 4 + sizeof(second_request);
         exchange.write_buffer = (binder_uintptr_t)write_buffer;
         exchange.read_size = sizeof(read_buffer);
         exchange.read_buffer = (binder_uintptr_t)read_buffer;
         if (ioctl(client, BINDER_WRITE_READ, &exchange) != 0 ||
+            exchange.write_consumed != 4 + sizeof(second_request) ||
             exchange.read_consumed != 4 ||
             *(uint32_t *)read_buffer != BR_TRANSACTION_COMPLETE) {
             _exit(174);
@@ -2196,7 +2201,21 @@ int main(void) {
         printf("binder-server-fail stage=open errno=%d\n", errno);
         return 173;
     }
-    int context_result = ioctl(server, BINDER_SET_CONTEXT_MGR, 0);
+        struct flat_binder_object manager_object = {
+            .hdr.type = BINDER_TYPE_BINDER,
+            .flags = FLAT_BINDER_FLAG_ACCEPTS_FDS,
+            .binder = (binder_uintptr_t)(uintptr_t)&manager_object,
+            .cookie = 0x5151,
+        };
+        struct flat_binder_object invalid_manager = manager_object;
+        invalid_manager.hdr.type = BINDER_TYPE_FD;
+        errno = 0;
+        if (ioctl(server, BINDER_SET_CONTEXT_MGR_EXT, &invalid_manager) != -1 ||
+            errno != EINVAL) {
+            return 190;
+        }
+        int context_result =
+            ioctl(server, BINDER_SET_CONTEXT_MGR_EXT, &manager_object);
     if (context_result != 0 || write(binder_ready[1], "R", 1) != 1) {
         printf("binder-server-fail stage=context rc=%d errno=%d\n",
                context_result, errno);
@@ -2237,6 +2256,10 @@ int main(void) {
         .data.ptr.buffer = (binder_uintptr_t)&response_object,
         .data.ptr.offsets = (binder_uintptr_t)&response_offset,
     };
+    struct binder_transaction_data_sg response_sg = {
+        .transaction_data = response,
+        .buffers_size = sizeof(response_object) + sizeof(response_offset),
+    };
     unsigned char server_write[128];
     size_t server_offset = 0;
     memcpy(server_write + server_offset, &(uint32_t){BC_FREE_BUFFER}, 4);
@@ -2245,10 +2268,10 @@ int main(void) {
     memcpy(server_write + server_offset, &received_pointer,
            sizeof(received_pointer));
     server_offset += sizeof(received_pointer);
-    memcpy(server_write + server_offset, &(uint32_t){BC_REPLY}, 4);
+    memcpy(server_write + server_offset, &(uint32_t){BC_REPLY_SG}, 4);
     server_offset += 4;
-    memcpy(server_write + server_offset, &response, sizeof(response));
-    server_offset += sizeof(response);
+    memcpy(server_write + server_offset, &response_sg, sizeof(response_sg));
+    server_offset += sizeof(response_sg);
     memset(&server_exchange, 0, sizeof(server_exchange));
     server_exchange.write_size = server_offset;
     server_exchange.write_buffer = (binder_uintptr_t)server_write;

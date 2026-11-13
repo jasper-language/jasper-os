@@ -12,6 +12,7 @@ use crate::sync::IrqSpinLock;
 
 const BINDER_WRITE_READ_BYTES: usize = 48;
 const BINDER_TRANSACTION_BYTES: usize = 64;
+const BINDER_TRANSACTION_SG_BYTES: usize = 72;
 const BINDER_READ_PACKET_BYTES: usize = 4 + BINDER_TRANSACTION_BYTES;
 const MAX_TRANSACTION_BYTES: usize = 64 * 1024;
 const MAX_OFFSET_BYTES: usize = 4096;
@@ -28,6 +29,8 @@ const FLAT_BINDER_OBJECT_BYTES: usize = 24;
 
 const BC_TRANSACTION: u32 = 0x4040_6300;
 const BC_REPLY: u32 = 0x4040_6301;
+const BC_TRANSACTION_SG: u32 = 0x4048_6311;
+const BC_REPLY_SG: u32 = 0x4048_6312;
 const BC_FREE_BUFFER: u32 = 0x4008_6303;
 const BC_INCREFS: u32 = 0x4004_6304;
 const BC_ACQUIRE: u32 = 0x4004_6305;
@@ -142,6 +145,45 @@ pub(crate) fn set_context_manager(pid: ObjId) -> bool {
         .is_some_and(|owner| owner != pid && Some(owner) != current)
     {
         return false;
+    }
+    state.context_manager = Some(pid);
+    true
+}
+
+/// Installs the legacy context manager from an extended flat binder object.
+/// 从扩展 flat binder object 安装 legacy context manager。
+pub(crate) fn set_context_manager_ext(
+    pid: ObjId,
+    pointer: u64,
+    cookie: u64,
+) -> bool {
+    if pointer == 0 {
+        return false;
+    }
+    let mut state = BINDER.lock();
+    if state
+        .context_manager
+        .is_some_and(|owner| owner != pid && proc::state(owner) == Some(proc::ProcState::Running))
+    {
+        return false;
+    }
+    if state.nodes.len() >= MAX_NODES {
+        return false;
+    }
+    if state.nodes.iter().all(|node| node.owner != pid || node.pointer != pointer) {
+        let id = state.next_node;
+        let Some(next) = id.checked_add(1) else {
+            return false;
+        };
+        state.next_node = next;
+        state.nodes.push(Node {
+            id,
+            owner: pid,
+            pointer,
+            cookie,
+            strong_refs: 1,
+            weak_refs: 0,
+        });
     }
     state.context_manager = Some(pid);
     true
@@ -269,6 +311,35 @@ fn process_write(pid: ObjId, address: u64, size: usize) -> Result<usize, CompatE
                 }
                 enqueue_transaction(pid, command, &bytes[offset + 4..offset + 68])?;
                 offset += 68;
+            }
+            BC_TRANSACTION_SG | BC_REPLY_SG => {
+                if bytes.len() - offset < 4 + BINDER_TRANSACTION_SG_BYTES {
+                    return Err(CompatErrno::Invalid);
+                }
+                let buffers_size = u64::from_le_bytes(
+                    bytes[offset + 68..offset + 76].try_into().unwrap(),
+                );
+                let data_size = u64::from_le_bytes(
+                    bytes[offset + 36..offset + 44].try_into().unwrap(),
+                );
+                let offsets_size = u64::from_le_bytes(
+                    bytes[offset + 44..offset + 52].try_into().unwrap(),
+                );
+                let required = data_size
+                    .checked_add(offsets_size)
+                    .ok_or(CompatErrno::Invalid)?;
+                if buffers_size < required
+                    || buffers_size > (MAX_TRANSACTION_BYTES + MAX_OFFSET_BYTES) as u64
+                {
+                    return Err(CompatErrno::Invalid);
+                }
+                let normal_command = if command == BC_TRANSACTION_SG {
+                    BC_TRANSACTION
+                } else {
+                    BC_REPLY
+                };
+                enqueue_transaction(pid, normal_command, &bytes[offset + 4..offset + 68])?;
+                offset += 76;
             }
             BC_FREE_BUFFER => {
                 if bytes.len() - offset < 12 {
