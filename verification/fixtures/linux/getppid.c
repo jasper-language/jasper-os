@@ -4424,7 +4424,7 @@ int main(void) {
         SYS_fspick, SYS_get_mempolicy, SYS_set_mempolicy,
         SYS_set_mempolicy_home_node, SYS_mbind, SYS_migrate_pages,
         SYS_move_pages, SYS_landlock_create_ruleset, SYS_landlock_add_rule,
-        SYS_landlock_restrict_self, SYS_listmount, SYS_listns,
+        SYS_landlock_restrict_self, SYS_listns,
         SYS_lsm_get_self_attr, SYS_lsm_set_self_attr, SYS_lsm_list_modules,
         SYS_map_shadow_stack, SYS_mount_setattr, SYS_move_mount,
         SYS_name_to_handle_at, SYS_open_by_handle_at, SYS_open_tree,
