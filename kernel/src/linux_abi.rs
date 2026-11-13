@@ -306,6 +306,7 @@ struct LinuxKey {
     description_len: u8,
     payload: alloc::vec::Vec<u8>,
     revoked: bool,
+    linked: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -9959,6 +9960,7 @@ fn linux_process_keyring(
         description_len: 0,
         payload: alloc::vec::Vec::new(),
         revoked: false,
+        linked: true,
     });
     state.process_keyrings.push(LinuxProcessKeyring {
         process,
@@ -10009,6 +10011,7 @@ fn linux_add_key(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }) {
         key.payload = payload;
         key.revoked = false;
+        key.linked = true;
         return Ok(key.serial as u32 as u64);
     }
     if state.keys.len() >= MAX_LINUX_KEYS {
@@ -10026,6 +10029,7 @@ fn linux_add_key(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         description_len: description.len() as u8,
         payload,
         revoked: false,
+        linked: true,
     });
     Ok(serial as u32 as u64)
 }
@@ -10041,6 +10045,7 @@ fn linux_request_key(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         .iter()
         .find(|key| {
             !key.revoked
+                && key.linked
                 && key.application == application
                 && key.key_type[..usize::from(key.type_len)] == key_type[..]
                 && key.description[..usize::from(key.description_len)] == description[..]
@@ -10054,6 +10059,9 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const UPDATE: u64 = 2;
     const REVOKE: u64 = 3;
     const DESCRIBE: u64 = 6;
+    const CLEAR: u64 = 7;
+    const LINK: u64 = 8;
+    const UNLINK: u64 = 9;
     const SEARCH: u64 = 10;
     const READ: u64 = 11;
     const INVALIDATE: u64 = 21;
@@ -10141,6 +10149,42 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             copy_to_user(args[2], &key.payload, key.payload.len()).map_err(|_| CompatErrno::Fault)?;
             Ok(key.payload.len() as u64)
         }
+        LINK | UNLINK => {
+            let key_serial = args[1] as i32;
+            let keyring = args[2] as i32;
+            let mut state = COMPAT.lock();
+            if !state.keys.iter().any(|key| {
+                key.application == application && key.serial == keyring
+                    && key.key_type[..usize::from(key.type_len)] == b"keyring"[..]
+            }) {
+                return Err(CompatErrno::NoKey);
+            }
+            let key = state
+                .keys
+                .iter_mut()
+                .find(|key| key.application == application && key.serial == key_serial)
+                .ok_or(CompatErrno::NoKey)?;
+            key.linked = args[0] == LINK;
+            Ok(0)
+        }
+        CLEAR => {
+            let keyring = args[1] as i32;
+            let mut state = COMPAT.lock();
+            if !state.keys.iter().any(|key| {
+                key.application == application && key.serial == keyring
+                    && key.key_type[..usize::from(key.type_len)] == b"keyring"[..]
+            }) {
+                return Err(CompatErrno::NoKey);
+            }
+            for key in state
+                .keys
+                .iter_mut()
+                .filter(|key| key.application == application)
+            {
+                key.linked = false;
+            }
+            Ok(0)
+        }
         SEARCH => {
             let key_type = linux_c_string(args[2], 16)?;
             let description = linux_c_string(args[3], 64)?;
@@ -10157,6 +10201,7 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 .iter()
                 .find(|key| {
                     !key.revoked
+                        && key.linked
                         && key.application == application
                         && key.key_type[..usize::from(key.type_len)] == key_type[..]
                         && key.description[..usize::from(key.description_len)] == description[..]
