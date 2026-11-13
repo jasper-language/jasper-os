@@ -943,6 +943,15 @@ pub struct DiagnosticAccess {
 pub trait DiagnosticAuthority {
     /// Returns current effective access for one authenticated subject.
     fn access(&self, subject: u64) -> Option<DiagnosticAccess>;
+
+    /// Returns the current policy generation for one authenticated subject.
+    ///
+    /// The default keeps existing authorities valid; production authorities
+    /// should override this with a monotonic policy generation so stale service
+    /// identities fail closed.
+    fn generation(&self, subject: u64) -> Option<u64> {
+        self.access(subject).map(|_| 1)
+    }
 }
 
 /// Service-boundary failure.
@@ -1060,6 +1069,11 @@ impl<D: DiagnosticIo, A: DiagnosticAuthority> DiagnosticService<D, A> {
             return Err(DiagnosticServiceError::Unauthorized);
         }
         Ok(self.collector.status())
+    }
+
+    /// Returns the authority's current policy generation for one subject.
+    pub fn authority_generation(&self, subject: u64) -> Option<u64> {
+        self.authority.generation(subject)
     }
 
     /// Returns the backing device for controlled shutdown or reopen.
@@ -1255,7 +1269,7 @@ fn decode_snapshot(bytes: &[u8; DIAGNOSTIC_COPY_BYTES]) -> Option<Snapshot> {
     ))
 }
 
-fn encode_event(event: &DiagnosticEvent, out: &mut [u8; PERSISTED_EVENT_BYTES]) {
+pub(crate) fn encode_event(event: &DiagnosticEvent, out: &mut [u8; PERSISTED_EVENT_BYTES]) {
     out[..4].copy_from_slice(b"DGE1");
     out[4..6].copy_from_slice(&event.schema_version.to_le_bytes());
     out[8..16].copy_from_slice(&event.id.to_le_bytes());
@@ -1287,7 +1301,7 @@ fn encode_event(event: &DiagnosticEvent, out: &mut [u8; PERSISTED_EVENT_BYTES]) 
     out[224..256].copy_from_slice(&event.payload_digest);
 }
 
-fn decode_event(bytes: &[u8; PERSISTED_EVENT_BYTES]) -> Option<DiagnosticEvent> {
+pub(crate) fn decode_event(bytes: &[u8; PERSISTED_EVENT_BYTES]) -> Option<DiagnosticEvent> {
     if bytes[..4] != *b"DGE1"
         || diag_read_u16(bytes, 4)? != SCHEMA_VERSION
         || bytes[6..8].iter().any(|byte| *byte != 0)

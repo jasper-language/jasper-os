@@ -11,6 +11,7 @@
 #![deny(missing_docs)]
 
 pub use jasper_lifecycle_boot as boot;
+pub mod diagnostic_usi;
 pub mod diagnostics;
 pub mod layout;
 pub mod manifest;
