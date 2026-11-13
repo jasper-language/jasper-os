@@ -2669,6 +2669,7 @@ fn execute(
         LinuxSyscall::ProcessMadvise => compat_result(linux_process_madvise(pid, call.args)),
         LinuxSyscall::FileGetattr => compat_result(linux_file_getattr(pid, call.args)),
         LinuxSyscall::FileSetattr => compat_result(linux_file_setattr(pid, call.args)),
+        LinuxSyscall::ProcessMrelease => compat_result(linux_process_mrelease(pid, call.args)),
         LinuxSyscall::AddKey
         | LinuxSyscall::RequestKey
         | LinuxSyscall::Keyctl
@@ -2700,7 +2701,6 @@ fn execute(
         | LinuxSyscall::PkeyAlloc
         | LinuxSyscall::PkeyFree
         | LinuxSyscall::PkeyMprotect
-        | LinuxSyscall::ProcessMrelease
         | LinuxSyscall::Uprobe
         | LinuxSyscall::Uretprobe
         | LinuxSyscall::Userfaultfd => -(CompatErrno::NotSupported as i32 as i64),
@@ -5084,6 +5084,30 @@ fn linux_process_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno>
         advised = advised.saturating_add(length);
     }
     Ok(advised.min(total))
+}
+
+/// Reports that an exited pidfd target has already released its address space.
+fn linux_process_mrelease(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[1] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Pidfd {
+        return Err(CompatErrno::BadFd);
+    }
+    let target = ObjId::from_raw(entry.handle).ok_or(CompatErrno::NoProcess)?;
+    let caller_app = crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let target_app = crate::security::process_application(target).ok_or(CompatErrno::NoProcess)?;
+    if caller_app != target_app {
+        return Err(CompatErrno::Perm);
+    }
+    match proc::state(target) {
+        Some(proc::ProcState::Exited { .. }) => Ok(0),
+        Some(proc::ProcState::Exiting { .. }) | Some(proc::ProcState::Running) | None => {
+            Err(CompatErrno::NoProcess)
+        }
+    }
 }
 
 /// Implements the process-scope memory barrier command subset.

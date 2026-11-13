@@ -4485,7 +4485,7 @@ int main(void) {
         SYS_map_shadow_stack, SYS_mount_setattr, SYS_move_mount,
         SYS_name_to_handle_at, SYS_open_by_handle_at, SYS_open_tree,
         SYS_open_tree_attr, SYS_pkey_alloc, SYS_pkey_free,
-        SYS_pkey_mprotect, SYS_process_mrelease,
+        SYS_pkey_mprotect,
         SYS_uprobe, SYS_uretprobe, SYS_userfaultfd,
     };
     for (size_t index = 0;
@@ -5708,6 +5708,35 @@ int main(void) {
         close(process_madvise_pidfd) != 0 ||
         munmap(process_madvise_memory, 4096) != 0) {
         return 619;
+    }
+    int mrelease_pipe[2];
+    if (pipe2(mrelease_pipe, O_CLOEXEC) != 0) {
+        return 623;
+    }
+    pid_t mrelease_child = fork();
+    if (mrelease_child < 0) {
+        return 624;
+    }
+    if (mrelease_child == 0) {
+        close(mrelease_pipe[1]);
+        char byte = 0;
+        ssize_t released = read(mrelease_pipe[0], &byte, 1);
+        _exit(released == 1 && byte == 'R' ? 0 : 1);
+    }
+    close(mrelease_pipe[0]);
+    int mrelease_pidfd = syscall(SYS_pidfd_open, mrelease_child, 0);
+    if (mrelease_pidfd < 0 ||
+        write(mrelease_pipe[1], "R", 1) != 1 ||
+        close(mrelease_pipe[1]) != 0) {
+        return 625;
+    }
+    struct timespec mrelease_delay = {.tv_sec = 0, .tv_nsec = 20000000};
+    nanosleep(&mrelease_delay, NULL);
+    if (syscall(SYS_process_mrelease, mrelease_pidfd, 0) != 0 ||
+        close(mrelease_pidfd) != 0 ||
+        waitpid(mrelease_child, &child_status, 0) != mrelease_child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+        return 626;
     }
     uint32_t seccomp_errno = SECCOMP_RET_ERRNO | EPERM;
     uint32_t invalid_seccomp_action = 0x12340000U;
