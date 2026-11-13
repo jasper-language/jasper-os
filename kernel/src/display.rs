@@ -11,6 +11,7 @@
 //! 按键送入原生终端会话；不宣称 compositor 或窗口系统已经完成。
 
 use bootloader_api::info::{FrameBuffer, PixelFormat};
+use kernel_core::display_compositor::{Compositor, LayerKey, LayerPixels, LayerSpec};
 use kernel_core::display_input::{
     DisplayBackend, DisplayCapabilities, DisplayInputError, DisplayInputSession, KeyInput,
     PixelLayout, SurfaceSpec,
@@ -23,12 +24,25 @@ const KEY_CAPACITY: usize = 64;
 const TEXT_COLUMNS: usize = 96;
 const TEXT_ROWS: usize = 32;
 const TEXT_CELLS: usize = TEXT_COLUMNS * TEXT_ROWS;
+const OVERLAY_WIDTH: u32 = 16;
+const OVERLAY_HEIGHT: u32 = 8;
+const OVERLAY_BYTES: usize = OVERLAY_WIDTH as usize * OVERLAY_HEIGHT as usize * 4;
+const OVERLAY_SURFACE: SurfaceSpec = SurfaceSpec {
+    width: OVERLAY_WIDTH,
+    height: OVERLAY_HEIGHT,
+    stride: OVERLAY_WIDTH,
+    bytes_per_pixel: 4,
+    layout: PixelLayout::Bgr,
+};
 
 struct Runtime {
     base: usize,
     len: usize,
     surface: SurfaceSpec,
     session: DisplayInputSession<KEY_CAPACITY>,
+    compositor: Compositor<2>,
+    overlay: [u8; OVERLAY_BYTES],
+    overlay_key: LayerKey,
     pressed: u32,
     released: u32,
     text: [u8; TEXT_CELLS],
@@ -75,12 +89,27 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
         surface: Some(surface),
         keyboard,
     })?;
+    let mut compositor = Compositor::<2>::new();
+    let overlay_key = compositor
+        .create(LayerSpec {
+            surface: OVERLAY_SURFACE,
+            x: width.saturating_sub(24) as i32,
+            y: 16,
+            z_order: 10,
+            visible: true,
+        })
+        .map_err(|_| DisplayInputError::Failed)?;
+    let mut overlay = [0u8; OVERLAY_BYTES];
+    fill_surface(&mut overlay, (0x29, 0xd3, 0xb6));
     let buffer = framebuffer.into_buffer();
     let mut runtime = Runtime {
         base: buffer.as_mut_ptr() as usize,
         len: buffer.len(),
         surface,
         session,
+        compositor,
+        overlay,
+        overlay_key,
         pressed: 0,
         released: 0,
         text: [b' '; TEXT_CELLS],
@@ -90,6 +119,7 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
     };
     runtime.append_text(b"JASPER-OS NATIVE TERMINAL\n\n");
     runtime.paint_boot_frame()?;
+    kprintln!("[JSR-DISPLAY-COMPOSITOR] layers=1 visible=1 primary=terminal overlay=teal");
     *DISPLAY.lock() = Some(runtime);
     Ok(())
 }
@@ -164,13 +194,14 @@ pub fn report() {
             runtime.session.frames(),
             runtime.session.pending_keys(),
             runtime.session.dropped_keys(),
+            runtime.compositor.count(),
             runtime.pressed,
             runtime.released,
         )
     });
-    if let Some((surface, keyboard, frames, keys, dropped, pressed, released)) = snapshot {
+    if let Some((surface, keyboard, frames, keys, dropped, layers, pressed, released)) = snapshot {
         kprintln!(
-            "[JSR-DISPLAY] backend=framebuffer keyboard={} width={} height={} stride={} bpp={} frames={} keys={} dropped={} pressed={} released={}",
+            "[JSR-DISPLAY] backend=framebuffer keyboard={} width={} height={} stride={} bpp={} frames={} keys={} dropped={} compositor_layers={} pressed={} released={}",
             keyboard,
             surface.width,
             surface.height,
@@ -179,6 +210,7 @@ pub fn report() {
             frames,
             keys,
             dropped,
+            layers,
             pressed,
             released
         );
@@ -221,6 +253,7 @@ impl Runtime {
             0x59,
         );
         self.paint_text();
+        self.compose_overlay()?;
         let ticket = self.session.prepare_frame(self.required_bytes()?)?;
         self.session.commit_frame(ticket)?;
         Ok(())
@@ -230,6 +263,7 @@ impl Runtime {
         self.fill(0x08, 0x11, 0x18);
         self.rect(0, 0, self.surface.width, 6, 0x29, 0xd3, 0xb6);
         self.paint_text();
+        self.compose_overlay()?;
         let ticket = self.session.prepare_frame(self.required_bytes()?)?;
         self.session.commit_frame(ticket)?;
         Ok(())
@@ -318,15 +352,8 @@ impl Runtime {
         } else {
             (0xf4, 0xb8, 0x42)
         };
-        self.rect(
-            self.surface.width.saturating_sub(24),
-            16,
-            16,
-            16,
-            color.0,
-            color.1,
-            color.2,
-        );
+        fill_surface(&mut self.overlay, color);
+        let _ = self.compose_overlay();
         if let Ok(bytes) = self.required_bytes() {
             if let Ok(ticket) = self.session.prepare_frame(bytes) {
                 let _ = self.session.commit_frame(ticket);
@@ -336,6 +363,23 @@ impl Runtime {
 
     fn required_bytes(&self) -> Result<u64, DisplayInputError> {
         self.surface.validate()
+    }
+
+    fn compose_overlay(&mut self) -> Result<(), DisplayInputError> {
+        // SAFETY: the framebuffer pointer and length remain valid for the
+        // lifetime of this Runtime, and all geometry is validated before write.
+        let frame = unsafe { core::slice::from_raw_parts_mut(self.base as *mut u8, self.len) };
+        self.compositor
+            .compose(
+                self.surface,
+                frame,
+                &[LayerPixels {
+                    key: self.overlay_key,
+                    bytes: &self.overlay,
+                }],
+            )
+            .map(|_| ())
+            .map_err(|_| DisplayInputError::Failed)
     }
 
     fn fill(&mut self, red: u8, green: u8, blue: u8) {
@@ -383,6 +427,12 @@ impl Runtime {
                 }
             }
         }
+    }
+}
+
+fn fill_surface(bytes: &mut [u8], color: (u8, u8, u8)) {
+    for pixel in bytes.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&[color.2, color.1, color.0, 0xff]);
     }
 }
 
