@@ -920,6 +920,154 @@ impl<D: DiagnosticIo> DiagnosticCollector<D> {
     }
 }
 
+/// One subject's effective diagnostic-service rights.
+///
+/// This is service policy input, not an ABI record and not an authorization
+/// derived from a component name or path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiagnosticAccess {
+    /// Whether the subject may submit validated events for durable collection.
+    pub can_collect: bool,
+    /// Whether the subject may page through retained event summaries.
+    pub can_query: bool,
+    /// Highest event privacy class this subject may observe.
+    pub privacy_ceiling: PrivacyClass,
+    /// Hard per-query page bound imposed by policy.
+    pub max_page: usize,
+}
+
+/// Trusted authority used by the diagnostic service at each operation.
+///
+/// Implementations must derive access from the existing identity/SEC/PEP
+/// model. Component IDs, device paths and event contents are never authority.
+pub trait DiagnosticAuthority {
+    /// Returns current effective access for one authenticated subject.
+    fn access(&self, subject: u64) -> Option<DiagnosticAccess>;
+}
+
+/// Service-boundary failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticServiceError {
+    /// The subject is absent, revoked or lacks the requested operation.
+    Unauthorized,
+    /// Event validation or durable collection failed.
+    Collect(CollectError),
+}
+
+impl From<CollectError> for DiagnosticServiceError {
+    fn from(error: CollectError) -> Self {
+        Self::Collect(error)
+    }
+}
+
+/// One authenticated query request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiagnosticQueryRequest {
+    /// Optional event-kind filter.
+    pub kind: Option<EventKind>,
+    /// Minimum severity.
+    pub minimum_severity: Severity,
+    /// Caller-requested privacy ceiling; the authority may lower it.
+    pub privacy_ceiling: PrivacyClass,
+    /// Stable event-ID cursor from the previous page.
+    pub after_id: u64,
+    /// Caller-requested page size; page capacity and authority may lower it.
+    pub limit: usize,
+}
+
+/// Authority-gated diagnostic service boundary.
+///
+/// The future USI adapter can call this type without adding a new syscall or
+/// pre-approving a `system.*` identifier. Every query re-evaluates the authority
+/// and never exposes an event above its effective privacy ceiling.
+pub struct DiagnosticService<D: DiagnosticIo, A: DiagnosticAuthority> {
+    collector: DiagnosticCollector<D>,
+    authority: A,
+}
+
+impl<D: DiagnosticIo, A: DiagnosticAuthority> DiagnosticService<D, A> {
+    /// Formats a new service backing store.
+    pub fn format(device: D, authority: A) -> Result<Self, DiagnosticServiceError> {
+        Ok(Self {
+            collector: DiagnosticCollector::format(device)
+                .map_err(|error| DiagnosticServiceError::Collect(CollectError::Store(error)))?,
+            authority,
+        })
+    }
+
+    /// Reopens the highest valid durable snapshot.
+    pub fn open(device: D, authority: A) -> Result<Self, DiagnosticServiceError> {
+        Ok(Self {
+            collector: DiagnosticCollector::open(device)
+                .map_err(|error| DiagnosticServiceError::Collect(CollectError::Store(error)))?,
+            authority,
+        })
+    }
+
+    /// Validates, authorizes and durably collects one event.
+    pub fn collect(
+        &mut self,
+        subject: u64,
+        input: EventInput<'_>,
+    ) -> Result<CollectReport, DiagnosticServiceError> {
+        let access = self
+            .authority
+            .access(subject)
+            .ok_or(DiagnosticServiceError::Unauthorized)?;
+        if !access.can_collect {
+            return Err(DiagnosticServiceError::Unauthorized);
+        }
+        self.collector.collect(input).map_err(Into::into)
+    }
+
+    /// Returns one authority-capped query page and its stable resume cursor.
+    ///
+    /// The effective limit is the minimum of page capacity `N`, the caller's
+    /// request and the authority's `max_page`. A zero-size authority page is
+    /// denied rather than silently returning an empty success.
+    pub fn query_page<const N: usize>(
+        &self,
+        subject: u64,
+        request: DiagnosticQueryRequest,
+    ) -> Result<(DiagnosticPage<N>, u64, CollectorStatus), DiagnosticServiceError> {
+        let access = self
+            .authority
+            .access(subject)
+            .ok_or(DiagnosticServiceError::Unauthorized)?;
+        if !access.can_query || access.max_page == 0 || request.limit == 0 || N == 0 {
+            return Err(DiagnosticServiceError::Unauthorized);
+        }
+        let limit = request.limit.min(access.max_page).min(N);
+        let privacy_ceiling = core::cmp::min(request.privacy_ceiling, access.privacy_ceiling);
+        let mut query = DiagnosticQuery::new(
+            request.kind,
+            request.minimum_severity,
+            privacy_ceiling,
+            limit,
+        );
+        query.after_id = request.after_id;
+        let page = self.collector.query_page::<N>(&mut query);
+        Ok((page, query.after_id, self.collector.status()))
+    }
+
+    /// Returns payload-free collector status to a collector or query principal.
+    pub fn status(&self, subject: u64) -> Result<CollectorStatus, DiagnosticServiceError> {
+        let access = self
+            .authority
+            .access(subject)
+            .ok_or(DiagnosticServiceError::Unauthorized)?;
+        if !access.can_collect && !access.can_query {
+            return Err(DiagnosticServiceError::Unauthorized);
+        }
+        Ok(self.collector.status())
+    }
+
+    /// Returns the backing device for controlled shutdown or reopen.
+    pub fn into_device(self) -> D {
+        self.collector.into_device()
+    }
+}
+
 impl<const N: usize> DiagnosticRing<N> {
     fn restore(
         events: [Option<DiagnosticEvent>; N],
@@ -1589,6 +1737,28 @@ mod tests {
         }
     }
 
+    struct TestAuthority;
+
+    impl DiagnosticAuthority for TestAuthority {
+        fn access(&self, subject: u64) -> Option<DiagnosticAccess> {
+            match subject {
+                1 => Some(DiagnosticAccess {
+                    can_collect: false,
+                    can_query: true,
+                    privacy_ceiling: PrivacyClass::Internal,
+                    max_page: 2,
+                }),
+                2 => Some(DiagnosticAccess {
+                    can_collect: true,
+                    can_query: true,
+                    privacy_ceiling: PrivacyClass::Secret,
+                    max_page: 16,
+                }),
+                _ => None,
+            }
+        }
+    }
+
     #[test]
     fn persistent_diagnostics_survive_reopen_with_ring_statistics() {
         let disk = MemoryDisk::new();
@@ -1754,5 +1924,90 @@ mod tests {
         let page = collector.query_page::<16>(&mut query);
         assert_eq!(page.len(), 1);
         assert_eq!(page.get(0).unwrap().kind(), EventKind::Network);
+    }
+
+    #[test]
+    fn diagnostic_service_rechecks_authority_and_caps_privacy_and_pages() {
+        let mut service = DiagnosticService::format(MemoryDisk::new(), TestAuthority).unwrap();
+        service
+            .collect(2, base(EventKind::Network, Severity::Warning))
+            .unwrap();
+        let mut sensitive = base(EventKind::ServiceCrash, Severity::Error);
+        sensitive.privacy = PrivacyClass::Sensitive;
+        service.collect(2, sensitive).unwrap();
+        let mut secret = base(EventKind::KernelException, Severity::Critical);
+        secret.privacy = PrivacyClass::Secret;
+        service.collect(2, secret).unwrap();
+
+        let request = DiagnosticQueryRequest {
+            kind: None,
+            minimum_severity: Severity::Info,
+            privacy_ceiling: PrivacyClass::Secret,
+            after_id: 0,
+            limit: 16,
+        };
+        let (page, cursor, status) = service.query_page::<4>(1, request).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page.get(0).unwrap().kind(), EventKind::Network);
+        assert_eq!(cursor, 1);
+        assert_eq!(status.stats.len, 3);
+        let (next, next_cursor, _) = service
+            .query_page::<4>(
+                1,
+                DiagnosticQueryRequest {
+                    after_id: cursor,
+                    ..request
+                },
+            )
+            .unwrap();
+        assert!(next.is_empty());
+        assert_eq!(next_cursor, cursor);
+
+        let (first, cursor, _) = service.query_page::<2>(2, request).unwrap();
+        assert_eq!((first.len(), cursor), (2, 2));
+        let (second, cursor, _) = service
+            .query_page::<2>(
+                2,
+                DiagnosticQueryRequest {
+                    after_id: cursor,
+                    ..request
+                },
+            )
+            .unwrap();
+        assert_eq!((second.len(), cursor), (1, 3));
+        assert_eq!(
+            service.collect(1, base(EventKind::ApplicationCrash, Severity::Error)),
+            Err(DiagnosticServiceError::Unauthorized)
+        );
+        assert!(matches!(
+            service.query_page::<4>(99, request),
+            Err(DiagnosticServiceError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn diagnostic_service_reopens_with_same_authority_policy() {
+        let mut service = DiagnosticService::format(MemoryDisk::new(), TestAuthority).unwrap();
+        service
+            .collect(2, base(EventKind::UpdateBoot, Severity::Error))
+            .unwrap();
+        let disk = service.into_device();
+        let reopened = DiagnosticService::open(disk, TestAuthority).unwrap();
+        let (page, cursor, status) = reopened
+            .query_page::<4>(
+                1,
+                DiagnosticQueryRequest {
+                    kind: Some(EventKind::UpdateBoot),
+                    minimum_severity: Severity::Info,
+                    privacy_ceiling: PrivacyClass::Internal,
+                    after_id: 0,
+                    limit: 4,
+                },
+            )
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page.get(0).unwrap().kind(), EventKind::UpdateBoot);
+        assert_eq!(cursor, 1);
+        assert_eq!(status.stats.len, 1);
     }
 }
