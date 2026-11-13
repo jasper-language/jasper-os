@@ -10063,6 +10063,24 @@ fn linux_request_key(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         .ok_or(CompatErrno::NoKey)
 }
 
+fn linux_key_allows(
+    key: &LinuxKey,
+    credentials: proc::LinuxCredentials,
+    permission: u32,
+) -> bool {
+    if credentials.euid == 0 {
+        return true;
+    }
+    let shift = if credentials.euid == key.uid {
+        8
+    } else if credentials.egid == key.gid {
+        16
+    } else {
+        24
+    };
+    (key.permissions >> shift) & permission == permission
+}
+
 fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const GET_KEYRING_ID: u64 = 0;
     const UPDATE: u64 = 2;
@@ -10078,6 +10096,7 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const INVALIDATE: u64 = 21;
     let application =
         crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
     match args[0] {
         GET_KEYRING_ID => {
             if args[1] as i32 != -2 && args[1] as i32 != -1 {
@@ -10106,6 +10125,9 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             if key.revoked {
                 return Err(CompatErrno::Access);
             }
+            if !linux_key_allows(key, credentials, 0x02) {
+                return Err(CompatErrno::Access);
+            }
             key.payload = payload;
             Ok(0)
         }
@@ -10117,6 +10139,9 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 .iter_mut()
                 .find(|key| key.application == application && key.serial == serial)
                 .ok_or(CompatErrno::NoEntry)?;
+            if !linux_key_allows(key, credentials, 0x20) {
+                return Err(CompatErrno::Access);
+            }
             key.revoked = true;
             Ok(0)
         }
@@ -10128,6 +10153,9 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 .iter_mut()
                 .find(|key| key.application == application && key.serial == serial)
                 .ok_or(CompatErrno::NoKey)?;
+            if !linux_key_allows(key, credentials, 0x20) {
+                return Err(CompatErrno::Access);
+            }
             if args[2] as u32 != u32::MAX {
                 key.uid = args[2] as u32;
             }
@@ -10149,6 +10177,9 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 .iter_mut()
                 .find(|key| key.application == application && key.serial == serial)
                 .ok_or(CompatErrno::NoKey)?;
+            if !linux_key_allows(key, credentials, 0x20) {
+                return Err(CompatErrno::Access);
+            }
             key.permissions = permissions;
             Ok(0)
         }
@@ -10160,6 +10191,9 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 .iter()
                 .find(|key| key.application == application && key.serial == serial)
                 .ok_or(CompatErrno::NoEntry)?;
+            if !linux_key_allows(key, credentials, 0x01) {
+                return Err(CompatErrno::Access);
+            }
             let length = usize::from(key.description_len) + 1;
             if args[2] != 0 {
                 if args[3] < length as u64 {
@@ -10181,6 +10215,9 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 .find(|key| key.application == application && key.serial == serial)
                 .ok_or(CompatErrno::NoEntry)?;
             if key.revoked {
+                return Err(CompatErrno::Access);
+            }
+            if !linux_key_allows(key, credentials, 0x02) {
                 return Err(CompatErrno::Access);
             }
             if args[2] == 0 {
@@ -10207,6 +10244,9 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 .iter_mut()
                 .find(|key| key.application == application && key.serial == key_serial)
                 .ok_or(CompatErrno::NoKey)?;
+            if !linux_key_allows(key, credentials, 0x10) {
+                return Err(CompatErrno::Access);
+            }
             key.linked = args[0] == LINK;
             Ok(0)
         }
