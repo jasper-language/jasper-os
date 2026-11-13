@@ -30,6 +30,7 @@
 #include <sys/random.h>
 #include <sys/reboot.h>
 #include <sys/resource.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
@@ -169,6 +170,208 @@ int main(void) {
         !sigismember(&pending_signal, SIGUSR1) ||
         sigprocmask(SIG_UNBLOCK, &blocked_signal, NULL) != 0) {
         return 238;
+    }
+    sigset_t signalfd_saved_mask;
+    sigset_t signalfd_mask;
+    sigemptyset(&signalfd_mask);
+    sigaddset(&signalfd_mask, SIGUSR1);
+    sigaddset(&signalfd_mask, SIGUSR2);
+    if (sigprocmask(SIG_BLOCK, &signalfd_mask, &signalfd_saved_mask) != 0) {
+        return 370;
+    }
+    sigemptyset(&signalfd_mask);
+    sigaddset(&signalfd_mask, SIGUSR1);
+    int signalfd_fd = signalfd(-1, &signalfd_mask,
+                               SFD_CLOEXEC | SFD_NONBLOCK);
+    if (signalfd_fd < 0 ||
+        (fcntl(signalfd_fd, F_GETFD) & FD_CLOEXEC) == 0 ||
+        kill(getpid(), SIGUSR1) != 0) {
+        return 371;
+    }
+    struct pollfd signalfd_poll = {
+        .fd = signalfd_fd,
+        .events = POLLIN,
+    };
+    struct signalfd_siginfo signal_info = {0};
+    if (poll(&signalfd_poll, 1, 1000) != 1 ||
+        (signalfd_poll.revents & POLLIN) == 0 ||
+        read(signalfd_fd, &signal_info, sizeof(signal_info)) !=
+            (ssize_t)sizeof(signal_info) ||
+        signal_info.ssi_signo != SIGUSR1 ||
+        signal_info.ssi_code != SI_USER ||
+        signal_info.ssi_pid != (uint32_t)getpid()) {
+        return 372;
+    }
+    errno = 0;
+    if (read(signalfd_fd, &signal_info, sizeof(signal_info)) != -1 ||
+        errno != EAGAIN) {
+        return 373;
+    }
+    int signalfd_epfd = epoll_create1(EPOLL_CLOEXEC);
+    struct epoll_event signalfd_interest = {
+        .events = EPOLLIN,
+        .data.u64 = 0x5349474e4644ULL,
+    };
+    struct epoll_event signalfd_ready = {0};
+    if (signalfd_epfd < 0 ||
+        epoll_ctl(signalfd_epfd, EPOLL_CTL_ADD, signalfd_fd,
+                  &signalfd_interest) != 0 ||
+        kill(getpid(), SIGUSR1) != 0 ||
+        epoll_wait(signalfd_epfd, &signalfd_ready, 1, 1000) != 1 ||
+        (signalfd_ready.events & EPOLLIN) == 0 ||
+        signalfd_ready.data.u64 != 0x5349474e4644ULL) {
+        return 374;
+    }
+    memset(&signal_info, 0, sizeof(signal_info));
+    if (read(signalfd_fd, &signal_info, sizeof(signal_info)) !=
+            (ssize_t)sizeof(signal_info) ||
+        signal_info.ssi_signo != SIGUSR1) {
+        return 375;
+    }
+    sigemptyset(&signalfd_mask);
+    sigaddset(&signalfd_mask, SIGUSR2);
+    if (syscall(SYS_signalfd4, signalfd_fd, &signalfd_mask,
+                8, SFD_NONBLOCK) != signalfd_fd) {
+        return 376;
+    }
+    pid_t signalfd_child = fork();
+    if (signalfd_child < 0) {
+        return 377;
+    }
+    if (signalfd_child == 0) {
+        _exit(kill(getppid(), SIGUSR2) == 0 ? 0 : 1);
+    }
+    int signalfd_child_status = 0;
+    if (waitpid(signalfd_child, &signalfd_child_status, 0) != signalfd_child ||
+        !WIFEXITED(signalfd_child_status) ||
+        WEXITSTATUS(signalfd_child_status) != 0 ||
+        poll(&signalfd_poll, 1, 1000) != 1) {
+        return 378;
+    }
+    memset(&signal_info, 0, sizeof(signal_info));
+    if (read(signalfd_fd, &signal_info, sizeof(signal_info)) !=
+            (ssize_t)sizeof(signal_info) ||
+        signal_info.ssi_signo != SIGUSR2 ||
+        signal_info.ssi_code != SI_USER ||
+        signal_info.ssi_pid != (uint32_t)signalfd_child) {
+        return 379;
+    }
+    sigemptyset(&signalfd_mask);
+    sigaddset(&signalfd_mask, SIGUSR1);
+    if (syscall(SYS_signalfd4, signalfd_fd, &signalfd_mask,
+                8, SFD_NONBLOCK) != signalfd_fd ||
+        syscall(SYS_tgkill, getpid(), gettid(), SIGUSR1) != 0 ||
+        poll(&signalfd_poll, 1, 1000) != 1) {
+        return 380;
+    }
+    memset(&signal_info, 0, sizeof(signal_info));
+    if (read(signalfd_fd, &signal_info, sizeof(signal_info)) !=
+            (ssize_t)sizeof(signal_info) ||
+        signal_info.ssi_signo != SIGUSR1 ||
+        signal_info.ssi_code != SI_TKILL ||
+        signal_info.ssi_pid != (uint32_t)getpid()) {
+        return 381;
+    }
+    int signalfd_socket[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, signalfd_socket) != 0) {
+        return 382;
+    }
+    char signalfd_control[CMSG_SPACE(sizeof(int))];
+    memset(signalfd_control, 0, sizeof(signalfd_control));
+    char signalfd_byte = 'G';
+    struct iovec signalfd_iov = {
+        .iov_base = &signalfd_byte,
+        .iov_len = 1,
+    };
+    struct msghdr signalfd_send = {
+        .msg_iov = &signalfd_iov,
+        .msg_iovlen = 1,
+        .msg_control = signalfd_control,
+        .msg_controllen = sizeof(signalfd_control),
+    };
+    struct cmsghdr *signalfd_cmsg = CMSG_FIRSTHDR(&signalfd_send);
+    signalfd_cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    signalfd_cmsg->cmsg_level = SOL_SOCKET;
+    signalfd_cmsg->cmsg_type = SCM_RIGHTS;
+    memcpy(CMSG_DATA(signalfd_cmsg), &signalfd_fd, sizeof(int));
+    if (sendmsg(signalfd_socket[0], &signalfd_send, MSG_NOSIGNAL) != 1) {
+        return 383;
+    }
+    memset(signalfd_control, 0, sizeof(signalfd_control));
+    char signalfd_received_byte = 0;
+    struct iovec signalfd_receive_iov = {
+        .iov_base = &signalfd_received_byte,
+        .iov_len = 1,
+    };
+    struct msghdr signalfd_receive = {
+        .msg_iov = &signalfd_receive_iov,
+        .msg_iovlen = 1,
+        .msg_control = signalfd_control,
+        .msg_controllen = sizeof(signalfd_control),
+    };
+    if (recvmsg(signalfd_socket[1], &signalfd_receive,
+                MSG_CMSG_CLOEXEC) != 1 ||
+        signalfd_received_byte != 'G') {
+        return 384;
+    }
+    struct cmsghdr *signalfd_received_cmsg = CMSG_FIRSTHDR(&signalfd_receive);
+    int signalfd_received = -1;
+    if (!signalfd_received_cmsg ||
+        signalfd_received_cmsg->cmsg_type != SCM_RIGHTS) {
+        return 385;
+    }
+    memcpy(&signalfd_received, CMSG_DATA(signalfd_received_cmsg),
+           sizeof(signalfd_received));
+    if (signalfd_received < 0 ||
+        (fcntl(signalfd_received, F_GETFD) & FD_CLOEXEC) == 0 ||
+        kill(getpid(), SIGUSR1) != 0 ||
+        read(signalfd_received, &signal_info, sizeof(signal_info)) !=
+            (ssize_t)sizeof(signal_info) ||
+        signal_info.ssi_signo != SIGUSR1) {
+        return 386;
+    }
+    int blocking_signalfd = signalfd(-1, &signalfd_mask, SFD_CLOEXEC);
+    pid_t blocking_signalfd_child = fork();
+    if (blocking_signalfd < 0 || blocking_signalfd_child < 0) {
+        return 390;
+    }
+    if (blocking_signalfd_child == 0) {
+        struct timespec signalfd_delay = {
+            .tv_sec = 0,
+            .tv_nsec = 20000000,
+        };
+        nanosleep(&signalfd_delay, NULL);
+        _exit(kill(getppid(), SIGUSR1) == 0 ? 0 : 1);
+    }
+    memset(&signal_info, 0, sizeof(signal_info));
+    if (read(blocking_signalfd, &signal_info, sizeof(signal_info)) !=
+            (ssize_t)sizeof(signal_info) ||
+        signal_info.ssi_signo != SIGUSR1) {
+        return 391;
+    }
+    signalfd_child_status = 0;
+    if (waitpid(blocking_signalfd_child, &signalfd_child_status, 0) !=
+            blocking_signalfd_child ||
+        !WIFEXITED(signalfd_child_status) ||
+        WEXITSTATUS(signalfd_child_status) != 0 ||
+        close(blocking_signalfd) != 0) {
+        return 392;
+    }
+    errno = 0;
+    if (syscall(SYS_signalfd4, signalfd_fd, &signalfd_mask, 7, 0) != -1 ||
+        errno != EINVAL) {
+        return 387;
+    }
+    errno = 0;
+    if (signalfd(-1, &signalfd_mask, 0x400000) != -1 || errno != EINVAL) {
+        return 388;
+    }
+    if (close(signalfd_received) != 0 ||
+        close(signalfd_socket[0]) != 0 ||
+        close(signalfd_socket[1]) != 0 ||
+        close(signalfd_epfd) != 0 || close(signalfd_fd) != 0 ||
+        sigprocmask(SIG_SETMASK, &signalfd_saved_mask, NULL) != 0) {
+        return 389;
     }
     int fd = open("/usr/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY | O_CLOEXEC);
     if (fd < 0) {

@@ -14,6 +14,7 @@ pub enum CompatKind {
     Pipe,
     Event,
     Timer,
+    Signal,
     Device,
     Other,
 }

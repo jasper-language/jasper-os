@@ -191,6 +191,8 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Tgkill,
         LinuxSyscall::SchedYield,
         LinuxSyscall::Sigaltstack,
+        LinuxSyscall::Signalfd,
+        LinuxSyscall::Signalfd4,
         LinuxSyscall::Kill,
         LinuxSyscall::Uname,
         LinuxSyscall::Mmap,

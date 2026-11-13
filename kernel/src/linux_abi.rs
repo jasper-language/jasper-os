@@ -34,6 +34,19 @@ const MAX_PROCESS_SIGNAL_SETS: usize = 16;
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
 
 #[derive(Clone, Copy)]
+struct SignalOrigin {
+    pid: u32,
+    code: i32,
+}
+
+#[derive(Clone, Copy)]
+struct SignalFdRecord {
+    signal: u32,
+    sender_pid: u32,
+    code: i32,
+}
+
+#[derive(Clone, Copy)]
 struct LinuxThread {
     process: ObjId,
     task: crate::task::TaskId,
@@ -52,6 +65,9 @@ struct LinuxThread {
     /// Standard-signal pending bits for this Linux TID.
     /// 当前 Linux TID 的标准信号 pending 位图。
     pending_signals: u64,
+    /// Source metadata for each coalesced standard signal.
+    /// 每个已合并标准信号的来源元数据。
+    signal_origins: [SignalOrigin; 64],
     /// Per-thread alternate signal stack.
     /// 当前 Linux 线程的备用信号栈。
     altstack_sp: u64,
@@ -121,6 +137,7 @@ struct FlockWaiter {
 struct ProcessSignalSet {
     process: ObjId,
     pending: u64,
+    origins: [SignalOrigin; 64],
 }
 
 struct CompatState {
@@ -282,6 +299,7 @@ pub(crate) fn register_linux_thread(
             rseq_len: 0,
             signal_mask: inherited_mask,
             pending_signals: 0,
+            signal_origins: [SignalOrigin { pid: 0, code: 0 }; 64],
             altstack_sp: 0,
             altstack_size: 0,
             altstack_flags: 2,
@@ -332,7 +350,13 @@ fn linux_tid_for_task(task: crate::task::TaskId) -> Option<(ObjId, u32)> {
 
 /// Queues one standard signal on a target Linux thread in the same process.
 /// 在同一进程的目标 Linux 线程上登记一个标准信号。
-fn queue_thread_signal(process: ObjId, tid: u32, signal: u32) -> bool {
+fn queue_thread_signal(
+    process: ObjId,
+    tid: u32,
+    signal: u32,
+    sender_pid: u32,
+    code: i32,
+) -> bool {
     if !(1..=64).contains(&signal) {
         return false;
     }
@@ -347,6 +371,10 @@ fn queue_thread_signal(process: ObjId, tid: u32, signal: u32) -> bool {
             return false;
         };
         entry.pending_signals |= 1u64 << (signal - 1);
+        entry.signal_origins[signal as usize - 1] = SignalOrigin {
+            pid: sender_pid,
+            code,
+        };
         crate::kprintln!(
             "[JSR-LINUX-SIGNAL] queued target_tid={} signal={} mask={:#x} pending={:#x}",
             tid,
@@ -373,7 +401,7 @@ fn has_linux_thread(process: ObjId, tid: u32) -> bool {
 
 /// Queues one process-directed standard signal and wakes all eligible threads.
 /// 登记一个进程定向标准信号，并唤醒该进程的全部线程。
-fn queue_process_signal(process: ObjId, signal: u32) -> bool {
+fn queue_process_signal(process: ObjId, signal: u32, sender_pid: u32, code: i32) -> bool {
     if !(1..=64).contains(&signal) {
         return false;
     }
@@ -394,6 +422,7 @@ fn queue_process_signal(process: ObjId, signal: u32) -> bool {
             state.process_signals[slot] = Some(ProcessSignalSet {
                 process,
                 pending: 0,
+                origins: [SignalOrigin { pid: 0, code: 0 }; 64],
             });
             slot
         };
@@ -401,6 +430,10 @@ fn queue_process_signal(process: ObjId, signal: u32) -> bool {
             return false;
         };
         entry.pending |= 1u64 << (signal - 1);
+        entry.origins[signal as usize - 1] = SignalOrigin {
+            pid: sender_pid,
+            code,
+        };
         crate::kprintln!(
             "[JSR-LINUX-SIGNAL] queued_process process={:#x} signal={} pending={:#x}",
             process.raw(),
@@ -673,6 +706,71 @@ fn take_deliverable_signal(process: ObjId) -> Option<u32> {
         entry.pending_signals &= !bit;
     }
     Some(index + 1)
+}
+
+fn signalfd_pending_mask(process: ObjId, requested: u64) -> u64 {
+    let (task, _) = sched::current();
+    let state = COMPAT.lock();
+    let thread = state
+        .threads
+        .iter()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)
+        .map(|entry| entry.pending_signals)
+        .unwrap_or(0);
+    let shared = state
+        .process_signals
+        .iter()
+        .flatten()
+        .find(|entry| entry.process == process)
+        .map(|entry| entry.pending)
+        .unwrap_or(0);
+    (thread | shared) & requested
+}
+
+fn take_signalfd_record(process: ObjId, requested: u64) -> Option<SignalFdRecord> {
+    let (task, _) = sched::current();
+    let mut state = COMPAT.lock();
+    let thread_index = state
+        .threads
+        .iter()
+        .position(|entry| {
+            entry.is_some_and(|entry| entry.process == process && entry.task == task)
+        })?;
+    let process_index = state
+        .process_signals
+        .iter()
+        .position(|entry| entry.is_some_and(|entry| entry.process == process));
+    let thread = state.threads[thread_index]?;
+    let process_pending = process_index
+        .and_then(|index| state.process_signals[index])
+        .map(|entry| entry.pending)
+        .unwrap_or(0);
+    let available = (thread.pending_signals | process_pending) & requested;
+    if available == 0 {
+        return None;
+    }
+    let signal = available.trailing_zeros() + 1;
+    let bit = 1u64 << (signal - 1);
+    if thread.pending_signals & bit != 0 {
+        let entry = state.threads[thread_index].as_mut()?;
+        entry.pending_signals &= !bit;
+        let origin = entry.signal_origins[signal as usize - 1];
+        Some(SignalFdRecord {
+            signal,
+            sender_pid: origin.pid,
+            code: origin.code,
+        })
+    } else {
+        let entry = process_index.and_then(|index| state.process_signals[index].as_mut())?;
+        entry.pending &= !bit;
+        let origin = entry.origins[signal as usize - 1];
+        Some(SignalFdRecord {
+            signal,
+            sender_pid: origin.pid,
+            code: origin.code,
+        })
+    }
 }
 
 /// Reports whether the current thread has an unmasked pending signal.
@@ -1001,7 +1099,7 @@ fn linux_tgkill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     if matches!(signal, 9 | 19) {
         return Err(CompatErrno::Invalid);
     }
-    if queue_thread_signal(process, tid, signal) {
+    if queue_thread_signal(process, tid, signal, tgid, -6) {
         Ok(())
     } else {
         Err(CompatErrno::NoProcess)
@@ -1010,7 +1108,7 @@ fn linux_tgkill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
 
 /// Queues a process-directed `kill` for a live compatibility process.
 /// 为存活的兼容进程登记一个进程定向 `kill`。
-fn linux_kill(_process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+fn linux_kill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     let pid = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
     let signal = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
     if pid == 0 {
@@ -1023,7 +1121,8 @@ fn linux_kill(_process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     if signal > 64 || matches!(signal, 9 | 19) {
         return Err(CompatErrno::Invalid);
     }
-    if queue_process_signal(target, signal) {
+    let sender_pid = proc::linux_pid(process).ok_or(CompatErrno::NoProcess)?;
+    if queue_process_signal(target, signal, sender_pid, 0) {
         Ok(())
     } else {
         Err(CompatErrno::NoSpace)
@@ -1817,6 +1916,8 @@ fn execute(
             0
         }
         LinuxSyscall::Sigaltstack => compat_result(linux_sigaltstack(pid, call.args)),
+        LinuxSyscall::Signalfd => compat_result(linux_signalfd(pid, call.args, false)),
+        LinuxSyscall::Signalfd4 => compat_result(linux_signalfd(pid, call.args, true)),
         LinuxSyscall::Kill => compat_result(linux_kill(pid, call.args).map(|()| 0)),
         LinuxSyscall::Uname => compat_result(linux_uname(call.args)),
         LinuxSyscall::GetPid => proc::linux_pid(pid)
@@ -2056,6 +2157,9 @@ fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             return linux_eventfd_write(pid, fd, entry.handle, args[1], len);
         }
         if entry.kind == compat_core::fd::CompatKind::Timer {
+            return Err(CompatErrno::Invalid);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Signal {
             return Err(CompatErrno::Invalid);
         }
         if entry.kind == compat_core::fd::CompatKind::Socket {
@@ -2304,6 +2408,9 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         if entry.kind == compat_core::fd::CompatKind::Timer {
             return linux_timerfd_read(pid, fd, entry.handle, args[1], len);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Signal {
+            return linux_signalfd_read(pid, fd, entry.handle, args[1], len);
         }
         if entry.kind == compat_core::fd::CompatKind::Socket {
             if !entry.rights.contains(kernel_core::object::Rights::READ) {
@@ -4802,6 +4909,114 @@ fn linux_timerfd_read(
     }
 }
 
+fn linux_signalfd(pid: ObjId, args: [u64; 6], modern: bool) -> Result<u64, CompatErrno> {
+    const SFD_NONBLOCK: u64 = 0x800;
+    const SFD_CLOEXEC: u64 = 0x80000;
+    let size = if modern {
+        usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?
+    } else {
+        8
+    };
+    if size != 8 {
+        return Err(CompatErrno::Invalid);
+    }
+    let flags = if modern { args[3] } else { 0 };
+    if flags & !(SFD_NONBLOCK | SFD_CLOEXEC) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut raw = [0u8; 8];
+    copy_from_user(&mut raw, args[1], 8).map_err(|_| CompatErrno::Fault)?;
+    let mask = u64::from_le_bytes(raw);
+    let fd = args[0] as u32 as i32;
+    if fd == -1 {
+        return proc::linux_signalfd_create(
+            pid,
+            mask,
+            flags & SFD_CLOEXEC != 0,
+            flags & SFD_NONBLOCK != 0,
+        )
+        .map(u64::from)
+        .ok_or(CompatErrno::NoSpace);
+    }
+    if fd < 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let fd = fd as u32;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Signal {
+        return Err(CompatErrno::BadFd);
+    }
+    let state = proc::linux_signalfd_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    *state.lock() = mask;
+    if flags & SFD_CLOEXEC != 0 && !proc::linux_set_fd_cloexec(pid, fd, true) {
+        return Err(CompatErrno::BadFd);
+    }
+    if flags & SFD_NONBLOCK != 0 {
+        let current = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)?;
+        if !proc::linux_set_fd_status_flags(pid, fd, current | SFD_NONBLOCK as u32) {
+            return Err(CompatErrno::BadFd);
+        }
+    }
+    Ok(u64::from(fd))
+}
+
+fn linux_signalfd_read(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    address: u64,
+    len: usize,
+) -> Result<u64, CompatErrno> {
+    const RECORD_BYTES: usize = 128;
+    const MAX_RECORDS: usize = 16;
+    if len < RECORD_BYTES {
+        return Err(CompatErrno::Invalid);
+    }
+    let limit = (len / RECORD_BYTES).min(MAX_RECORDS);
+    let mask_state = proc::linux_signalfd_state(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    loop {
+        let requested = *mask_state.lock();
+        let mut records = [SignalFdRecord {
+            signal: 0,
+            sender_pid: 0,
+            code: 0,
+        }; MAX_RECORDS];
+        let mut count = 0usize;
+        while count < limit {
+            let Some(record) = take_signalfd_record(pid, requested) else {
+                break;
+            };
+            records[count] = record;
+            count += 1;
+        }
+        if count != 0 {
+            let mut output = [0u8; RECORD_BYTES * MAX_RECORDS];
+            for (index, record) in records[..count].iter().enumerate() {
+                let base = index * RECORD_BYTES;
+                output[base..base + 4].copy_from_slice(&record.signal.to_le_bytes());
+                output[base + 8..base + 12]
+                    .copy_from_slice(&record.code.to_le_bytes());
+                output[base + 12..base + 16]
+                    .copy_from_slice(&record.sender_pid.to_le_bytes());
+                output[base + 16..base + 20].copy_from_slice(
+                    &(compat_core::syscall::LINUX_COMPAT_UID as u32).to_le_bytes(),
+                );
+            }
+            copy_to_user(address, &output[..count * RECORD_BYTES], count * RECORD_BYTES)
+                .map_err(|_| CompatErrno::Fault)?;
+            return Ok((count * RECORD_BYTES) as u64);
+        }
+        if nonblocking {
+            return Err(CompatErrno::TryAgain);
+        }
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        sched::pause();
+    }
+}
+
 fn linux_ftruncate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let size = args[1];
@@ -6071,7 +6286,7 @@ fn raise_sigpipe(pid: ObjId) {
         }
         _ => {
             if let Some(tid) = linux_tid(pid) {
-                let _ = queue_thread_signal(pid, tid, SIGPIPE);
+                let _ = queue_thread_signal(pid, tid, SIGPIPE, 0, 128);
             }
         }
     }
@@ -7584,6 +7799,14 @@ fn linux_epoll_readiness(
                 0
             }
         }
+        compat_core::fd::CompatKind::Signal => {
+            let mask = proc::linux_signalfd_state(pid, registration.handle)?;
+            if requested & EPOLLIN != 0 && signalfd_pending_mask(pid, *mask.lock()) != 0 {
+                EPOLLIN
+            } else {
+                0
+            }
+        }
         compat_core::fd::CompatKind::Pipe => {
             let pipe = proc::linux_pipe_endpoint(pid, registration.handle)?;
             let mut ready = 0;
@@ -7875,6 +8098,16 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                         && events & POLLIN != 0
                         && state.expirations != 0
                     {
+                        POLLIN
+                    } else {
+                        0
+                    }
+                }
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::Signal => {
+                    let Some(mask) = proc::linux_signalfd_state(pid, entry.handle) else {
+                        continue;
+                    };
+                    if events & POLLIN != 0 && signalfd_pending_mask(pid, *mask.lock()) != 0 {
                         POLLIN
                     } else {
                         0

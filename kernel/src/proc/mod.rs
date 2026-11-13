@@ -92,6 +92,8 @@ const LINUX_DMA_HEAP_HANDLE_BASE: u64 = 0x0000_8700_0000_0000;
 const LINUX_SYNC_FILE_HANDLE_BASE: u64 = 0x0000_8800_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_TIMERFD_HANDLE_BASE: u64 = 0x0000_8900_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_SIGNALFD_HANDLE_BASE: u64 = 0x0000_8a00_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -139,6 +141,8 @@ struct LinuxProcessState {
     next_eventfd_handle: u64,
     timerfds: Vec<LinuxTimerFdHandle>,
     next_timerfd_handle: u64,
+    signalfds: Vec<LinuxSignalFdHandle>,
+    next_signalfd_handle: u64,
     epolls: Vec<LinuxEpollHandle>,
     next_epoll_handle: u64,
     iourings: Vec<LinuxIoUringHandle>,
@@ -235,6 +239,13 @@ struct LinuxTimerFdHandle {
 
 #[cfg(feature = "linux-abi")]
 #[derive(Clone)]
+struct LinuxSignalFdHandle {
+    handle: u64,
+    mask: Arc<SpinLock<u64>>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
 struct LinuxEpollHandle {
     handle: u64,
     registrations: Arc<SpinLock<Vec<LinuxEpollRegistration>>>,
@@ -283,6 +294,7 @@ enum LinuxFdResource {
     IonDevice,
     EventFd(LinuxEventFdHandle),
     TimerFd(LinuxTimerFdHandle),
+    SignalFd(LinuxSignalFdHandle),
     Socket {
         endpoint: Arc<compat_core::UnixSocketEndpoint>,
         listener: Option<Arc<UnixListener>>,
@@ -1411,6 +1423,15 @@ pub(crate) fn linux_capture_fd_transfer(
                         .ok_or(LinuxFdTransferError::Invalid)?;
                     LinuxFdResource::TimerFd(timerfd)
                 }
+                compat_core::fd::CompatKind::Signal => {
+                    let signalfd = linux
+                        .signalfds
+                        .iter()
+                        .find(|signalfd| signalfd.handle == entry.handle)
+                        .cloned()
+                        .ok_or(LinuxFdTransferError::Invalid)?;
+                    LinuxFdResource::SignalFd(signalfd)
+                }
                 compat_core::fd::CompatKind::Device
                     if entry.handle >= LINUX_ASHMEM_HANDLE_BASE =>
                 {
@@ -1473,6 +1494,7 @@ pub(crate) fn linux_install_fd_transfer(
                 pending_ion_device,
                 pending_eventfd,
                 pending_timerfd,
+                pending_signalfd,
                 pending_socket,
             ) = match resource {
                 LinuxFdResource::Generic => {
@@ -1482,6 +1504,7 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         None,
                         false,
+                        None,
                         None,
                         None,
                         None,
@@ -1501,6 +1524,7 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         None,
                         None,
+                        None,
                     )
                 }
                 LinuxFdResource::Ashmem(buffer) => {
@@ -1514,6 +1538,7 @@ pub(crate) fn linux_install_fd_transfer(
                         Some(buffer),
                         None,
                         false,
+                        None,
                         None,
                         None,
                         None,
@@ -1533,6 +1558,7 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         None,
                         None,
+                        None,
                     )
                 }
                 LinuxFdResource::IonDevice => {
@@ -1546,6 +1572,7 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         None,
                         true,
+                        None,
                         None,
                         None,
                         None,
@@ -1565,6 +1592,7 @@ pub(crate) fn linux_install_fd_transfer(
                         Some(eventfd),
                         None,
                         None,
+                        None,
                     )
                 }
                 LinuxFdResource::TimerFd(timerfd) => {
@@ -1580,6 +1608,24 @@ pub(crate) fn linux_install_fd_transfer(
                         false,
                         None,
                         Some(timerfd),
+                        None,
+                        None,
+                    )
+                }
+                LinuxFdResource::SignalFd(signalfd) => {
+                    linux
+                        .signalfds
+                        .try_reserve(1)
+                        .map_err(|_| LinuxFdTransferError::NoSpace)?;
+                    (
+                        linux.next_signalfd_handle,
+                        None,
+                        None,
+                        None,
+                        false,
+                        None,
+                        None,
+                        Some(signalfd),
                         None,
                     )
                 }
@@ -1598,6 +1644,7 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         None,
                         false,
+                        None,
                         None,
                         None,
                         Some((endpoint, listener, controls)),
@@ -1657,6 +1704,14 @@ pub(crate) fn linux_install_fd_transfer(
                 timerfd.handle = handle;
                 linux.next_timerfd_handle = next;
                 linux.timerfds.push(timerfd);
+            }
+            if let Some(mut signalfd) = pending_signalfd {
+                let next = handle
+                    .checked_add(1)
+                    .ok_or(LinuxFdTransferError::NoSpace)?;
+                signalfd.handle = handle;
+                linux.next_signalfd_handle = next;
+                linux.signalfds.push(signalfd);
             }
             if let Some((endpoint, listener, controls)) = pending_socket {
                 let next = handle
@@ -1840,6 +1895,9 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     }
     if handle >= LINUX_TIMERFD_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.timerfds.retain(|timerfd| timerfd.handle != handle);
+    }
+    if handle >= LINUX_SIGNALFD_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+        linux.signalfds.retain(|signalfd| signalfd.handle != handle);
     }
     if handle >= LINUX_EPOLL_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.epolls.retain(|epoll| epoll.handle != handle);
@@ -2096,6 +2154,71 @@ pub(crate) fn linux_timerfd_state(
             .iter()
             .find(|timerfd| timerfd.handle == handle)
             .map(|timerfd| Arc::clone(&timerfd.state)),
+        _ => None,
+    })
+}
+
+/// Creates one signalfd whose mask is shared by duplicated descriptions.
+/// 创建一个由重复描述共享 mask 的 signalfd。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_signalfd_create(
+    pid: ObjId,
+    mask: u64,
+    close_on_exec: bool,
+    nonblocking: bool,
+) -> Option<u32> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.signalfds.len() >= 32 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .signalfds
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_signalfd_handle;
+        linux.next_signalfd_handle = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ,
+                compat_core::fd::CompatKind::Signal,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        if nonblocking
+            && !linux
+                .fds
+                .set_fd_status_flags(fd.fd(), compat_core::syscall::LINUX_O_NONBLOCK)
+        {
+            let _ = linux.fds.close(fd);
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux.signalfds.push(LinuxSignalFdHandle {
+            handle,
+            mask: Arc::new(SpinLock::new(mask)),
+        });
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Returns the shared signal mask for one signalfd handle.
+/// 返回一个 signalfd handle 的共享信号 mask。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_signalfd_state(
+    pid: ObjId,
+    handle: u64,
+) -> Option<Arc<SpinLock<u64>>> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .signalfds
+            .iter()
+            .find(|signalfd| signalfd.handle == handle)
+            .map(|signalfd| Arc::clone(&signalfd.mask)),
         _ => None,
     })
 }
@@ -3834,6 +3957,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         next_eventfd_handle: LINUX_EVENTFD_HANDLE_BASE,
         timerfds: Vec::new(),
         next_timerfd_handle: LINUX_TIMERFD_HANDLE_BASE,
+        signalfds: Vec::new(),
+        next_signalfd_handle: LINUX_SIGNALFD_HANDLE_BASE,
         epolls: Vec::new(),
         next_epoll_handle: LINUX_EPOLL_HANDLE_BASE,
         iourings: Vec::new(),
@@ -3884,6 +4009,9 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
             linux
                 .timerfds
                 .retain(|timerfd| linux.fds.handle_fd_count(timerfd.handle) != 0);
+            linux
+                .signalfds
+                .retain(|signalfd| linux.fds.handle_fd_count(signalfd.handle) != 0);
             linux.mappings.clear();
             linux.brk = crate::arch::USER_WINDOW.0 + 0x1000_0000;
             linux.mmap_next = crate::arch::USER_WINDOW.0 + 0x4000_0000;
