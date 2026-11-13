@@ -141,6 +141,7 @@ struct LinuxProcessState {
     umask: u32,
     ioprio: u32,
     mappings: Vec<LinuxMapping>,
+    sealed_ranges: Vec<(u64, u64)>,
     pipes: Vec<LinuxPipeHandle>,
     next_pipe_handle: u64,
     sockets: Vec<LinuxSocketHandle>,
@@ -4219,6 +4220,54 @@ pub(crate) fn set_linux_mmap_cursor(pid: ObjId, value: u64) -> bool {
         .is_ok()
 }
 
+/// Reports whether any sealed range overlaps `[start, end)`.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_range_is_sealed(pid: ObjId, start: u64, end: u64) -> bool {
+    with_proc(pid, |process| {
+        Ok(process
+            .linux
+            .as_ref()
+            .ok_or(ProcError::Exited)?
+            .sealed_ranges
+            .iter()
+            .any(|(range_start, range_end)| start < *range_end && *range_start < end))
+    })
+    .unwrap_or(false)
+}
+
+/// Adds one bounded, merged sealed range.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn seal_linux_range(pid: ObjId, start: u64, end: u64) -> bool {
+    if start >= end {
+        return false;
+    }
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.sealed_ranges.len() >= 32 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .sealed_ranges
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.sealed_ranges.push((start, end));
+        linux.sealed_ranges.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::new();
+        for (range_start, range_end) in linux.sealed_ranges.iter().copied() {
+            if let Some(last) = merged.last_mut() {
+                if range_start <= last.1 {
+                    last.1 = last.1.max(range_end);
+                    continue;
+                }
+            }
+            merged.push((range_start, range_end));
+        }
+        linux.sealed_ranges = merged;
+        Ok(())
+    })
+    .is_ok()
+}
+
 pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcError> {
     create_process(name, syscalls, |_| {})
 }
@@ -4272,6 +4321,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         umask: 0o022,
         ioprio: (2 << 13) | 4,
         mappings: Vec::new(),
+        sealed_ranges: Vec::new(),
         pipes: Vec::new(),
         next_pipe_handle: LINUX_PIPE_HANDLE_BASE,
         sockets: Vec::new(),
@@ -4346,6 +4396,7 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
                 .signalfds
                 .retain(|signalfd| linux.fds.handle_fd_count(signalfd.handle) != 0);
             linux.mappings.clear();
+            linux.sealed_ranges.clear();
             linux.brk = crate::arch::USER_WINDOW.0 + 0x1000_0000;
             linux.mmap_next = crate::arch::USER_WINDOW.0 + 0x4000_0000;
             linux.signal_actions = [[0; 4]; 64];

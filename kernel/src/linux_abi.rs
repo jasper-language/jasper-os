@@ -2022,6 +2022,7 @@ fn execute(
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
         LinuxSyscall::Mremap => compat_result(linux_mremap(pid, call.args)),
+        LinuxSyscall::Mseal => compat_result(linux_mseal(pid, call.args)),
         LinuxSyscall::Msync => compat_result(linux_msync(pid, call.args)),
         LinuxSyscall::MinCore => compat_result(linux_mincore(pid, call.args)),
         LinuxSyscall::Madvise => compat_result(linux_madvise(pid, call.args)),
@@ -3995,6 +3996,9 @@ fn linux_munmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if end > crate::arch::USER_WINDOW.1 {
         return Err(CompatErrno::Invalid);
     }
+    if proc::linux_range_is_sealed(pid, args[0], end) {
+        return Err(CompatErrno::Perm);
+    }
     let mut page = args[0];
     while page < end {
         if !proc::unmap_shared_page(pid, page).map_err(|_| CompatErrno::NoMemory)? {
@@ -4040,6 +4044,9 @@ fn linux_mremap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let old_end = old_address
         .checked_add(old_rounded)
         .ok_or(CompatErrno::Invalid)?;
+    if proc::linux_range_is_sealed(pid, old_address, old_end) {
+        return Err(CompatErrno::Perm);
+    }
     let new_end = old_address
         .checked_add(new_rounded)
         .ok_or(CompatErrno::Invalid)?;
@@ -4197,6 +4204,9 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if end > crate::arch::USER_WINDOW.1 {
         return Err(CompatErrno::Invalid);
     }
+    if proc::linux_range_is_sealed(pid, args[0], end) {
+        return Err(CompatErrno::Perm);
+    }
     proc::protect_range(
         pid,
         args[0],
@@ -4206,6 +4216,30 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     )
     .map_err(|_| CompatErrno::NoMemory)?;
     Ok(0)
+}
+
+/// Implements page-range sealing for compatibility mappings.
+fn linux_mseal(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    if args[0] % PAGE != 0 || args[1] == 0 || args[2] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let end = args[0]
+        .checked_add(args[1])
+        .filter(|end| args[0] >= crate::arch::USER_WINDOW.0 && *end <= crate::arch::USER_WINDOW.1)
+        .ok_or(CompatErrno::NoMemory)?;
+    let mut page = args[0];
+    while page < end {
+        if proc::page_flags(pid, page).is_none() {
+            return Err(CompatErrno::NoMemory);
+        }
+        page += PAGE;
+    }
+    if proc::seal_linux_range(pid, args[0], end) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoSpace)
+    }
 }
 
 fn linux_msync(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
@@ -4291,6 +4325,12 @@ fn linux_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .is_none_or(|end| end > crate::arch::USER_WINDOW.1)
     {
         return Err(CompatErrno::Invalid);
+    }
+    let end = address.checked_add(length).ok_or(CompatErrno::Invalid)?;
+    if matches!(advice, MADV_DONTNEED | MADV_GUARD_INSTALL)
+        && proc::linux_range_is_sealed(pid, address, end)
+    {
+        return Err(CompatErrno::Perm);
     }
     match advice {
         MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED => Ok(0),

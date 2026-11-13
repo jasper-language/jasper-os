@@ -4053,6 +4053,33 @@ int main(void) {
         close(vmsplice_pipe[1]) != 0) {
         return 521;
     }
+    void *sealed_memory =
+        mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    void *unsealed_memory =
+        mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (sealed_memory == MAP_FAILED || unsealed_memory == MAP_FAILED ||
+        syscall(SYS_mseal, sealed_memory, 4096, 0) != 0) {
+        return 522;
+    }
+    errno = 0;
+    if (mprotect(sealed_memory, 4096, PROT_READ) != -1 ||
+        errno != EPERM ||
+        munmap(sealed_memory, 4096) != -1 || errno != EPERM ||
+        (void *)syscall(SYS_mremap, sealed_memory, 4096, 4096,
+                        MREMAP_MAYMOVE, NULL) != MAP_FAILED ||
+        errno != EPERM ||
+        madvise(sealed_memory, 4096, MADV_DONTNEED) != -1 ||
+        errno != EPERM) {
+        return 523;
+    }
+    errno = 0;
+    if (syscall(SYS_mseal, unsealed_memory, 4096, 1) != -1 ||
+        errno != EINVAL ||
+        munmap(unsealed_memory, 4096) != 0) {
+        return 524;
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);
