@@ -25,6 +25,7 @@
 #include <linux/sync_file.h>
 #include <limits.h>
 #include <mqueue.h>
+#include <linux/mempolicy.h>
 #include <pthread.h>
 #include <poll.h>
 #include <sched.h>
@@ -4542,7 +4543,6 @@ int main(void) {
     const long unsupported_features[] = {
         SYS_add_key, SYS_request_key, SYS_keyctl,
         SYS_fanotify_init, SYS_fanotify_mark,
-        SYS_get_mempolicy, SYS_set_mempolicy,
         SYS_set_mempolicy_home_node, SYS_mbind, SYS_migrate_pages,
         SYS_move_pages, SYS_landlock_create_ruleset, SYS_landlock_add_rule,
         SYS_landlock_restrict_self, SYS_listns,
@@ -5133,6 +5133,26 @@ int main(void) {
     errno = 0;
     if (syscall(SYS_getcpu, (void *)1, NULL, NULL) != -1 || errno != EFAULT) {
         return 14;
+    }
+    int memory_policy = -1;
+    unsigned long memory_nodes = ~0UL;
+    if (syscall(SYS_get_mempolicy, &memory_policy, &memory_nodes,
+                8 * sizeof(memory_nodes), NULL, 0) != 0 ||
+        memory_policy != MPOL_DEFAULT || memory_nodes != 0 ||
+        syscall(SYS_set_mempolicy, MPOL_DEFAULT, NULL, 0) != 0) {
+        return 638;
+    }
+    memory_nodes = 0;
+    if (syscall(SYS_get_mempolicy, NULL, &memory_nodes,
+                8 * sizeof(memory_nodes), NULL,
+                MPOL_F_MEMS_ALLOWED) != 0 ||
+        (memory_nodes & 1UL) == 0) {
+        return 639;
+    }
+    errno = 0;
+    if (syscall(SYS_set_mempolicy, MPOL_BIND, NULL, 0) != -1 ||
+        errno != EINVAL) {
+        return 640;
     }
     char executable[128];
     ssize_t executable_len = readlinkat(AT_FDCWD, "/proc/self/exe",

@@ -2683,13 +2683,13 @@ fn execute(
         LinuxSyscall::FsConfig => compat_result(linux_fsconfig(pid, call.args)),
         LinuxSyscall::FsMount => compat_result(linux_fsmount(pid, call.args)),
         LinuxSyscall::FsPick => compat_result(linux_fspick(pid, call.args)),
+        LinuxSyscall::GetMempolicy => compat_result(linux_get_mempolicy(pid, call.args)),
+        LinuxSyscall::SetMempolicy => compat_result(linux_set_mempolicy(call.args)),
         LinuxSyscall::AddKey
         | LinuxSyscall::RequestKey
         | LinuxSyscall::Keyctl
         | LinuxSyscall::FanotifyInit
         | LinuxSyscall::FanotifyMark
-        | LinuxSyscall::GetMempolicy
-        | LinuxSyscall::SetMempolicy
         | LinuxSyscall::SetMempolicyHomeNode
         | LinuxSyscall::Mbind
         | LinuxSyscall::MigratePages
@@ -9665,6 +9665,45 @@ fn linux_fspick(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     proc::linux_install_mount_tree(pid, args[2] & CLOEXEC != 0)
         .map(u64::from)
         .ok_or(CompatErrno::NoSpace)
+}
+
+fn linux_get_mempolicy(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MPOL_F_MEMS_ALLOWED: u64 = 1 << 2;
+    let mode = args[0];
+    let nodemask = args[1];
+    let maxnode = args[2];
+    let address = args[3];
+    let flags = args[4];
+    if flags & !MPOL_F_MEMS_ALLOWED != 0 || flags != 0 && address != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if flags == 0 && address != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if nodemask != 0 {
+        if maxnode == 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        let available = if flags & MPOL_F_MEMS_ALLOWED != 0 {
+            1u64
+        } else {
+            0u64
+        };
+        copy_to_user(nodemask, &available.to_le_bytes(), 8)
+            .map_err(|_| CompatErrno::Fault)?;
+    }
+    if mode != 0 && flags & MPOL_F_MEMS_ALLOWED == 0 {
+        copy_to_user(mode, &0i32.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(0)
+}
+
+fn linux_set_mempolicy(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let mode = i32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    if mode != 0 || args[1] != 0 && args[2] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    Ok(0)
 }
 
 fn linux_eventfd(pid: ObjId, args: [u64; 6], eventfd2: bool) -> Result<u64, CompatErrno> {
