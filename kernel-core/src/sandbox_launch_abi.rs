@@ -28,7 +28,8 @@ const DATA_OFFSET: usize = DEVICES_OFFSET + MAX_DEVICE_GRANTS * GRANT_BYTES;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LaunchCreateArgs {
     pub sandbox: SandboxKey,
-    pub root: WorkloadKey,
+    /// Optional caller hint. Zero asks the kernel to derive the Sandbox root.
+    pub root: Option<WorkloadKey>,
     pub image: ImageKey,
     pub volume: Option<VolumeKey>,
     pub root_capabilities: CapabilitySet,
@@ -52,7 +53,7 @@ impl LaunchCreateArgs {
         out[0..4].copy_from_slice(&MAGIC.to_le_bytes());
         out[4..6].copy_from_slice(&VERSION.to_le_bytes());
         out[8..16].copy_from_slice(&self.sandbox.to_raw().to_le_bytes());
-        out[16..24].copy_from_slice(&self.root.to_raw().to_le_bytes());
+        out[16..24].copy_from_slice(&self.root.map_or(0, WorkloadKey::to_raw).to_le_bytes());
         out[24..32].copy_from_slice(&self.image.to_raw().to_le_bytes());
         out[32..40].copy_from_slice(&self.volume.map_or(0, VolumeKey::to_raw).to_le_bytes());
         out[40..48].copy_from_slice(&self.root_capabilities.raw().to_le_bytes());
@@ -146,7 +147,10 @@ impl LaunchCreateArgs {
         }
         Some(Self {
             sandbox: SandboxKey::from_raw(read_u64(raw, 8)?)?,
-            root: WorkloadKey::from_raw(read_u64(raw, 16)?)?,
+            root: match read_u64(raw, 16)? {
+                0 => None,
+                raw => Some(WorkloadKey::from_raw(raw)?),
+            },
             image: ImageKey::from_raw(read_u64(raw, 24)?)?,
             volume,
             root_capabilities: CapabilitySet::new(read_u64(raw, 40)?)?,
@@ -334,7 +338,7 @@ mod tests {
     fn args() -> LaunchCreateArgs {
         LaunchCreateArgs {
             sandbox: SandboxKey::from_raw((1u64 << 16) | 2).unwrap(),
-            root: WorkloadKey::from_raw((3u64 << 16) | 4).unwrap(),
+            root: Some(WorkloadKey::from_raw((3u64 << 16) | 4).unwrap()),
             image: ImageKey::from_raw((5u64 << 16) | 6).unwrap(),
             volume: Some(VolumeKey::from_raw((7u64 << 16) | 8).unwrap()),
             root_capabilities: CapabilitySet::ALL,
@@ -416,7 +420,7 @@ mod tests {
         let encoded = LaunchPlanInfo {
             key,
             sandbox: args.sandbox,
-            root: args.root,
+            root: args.root.unwrap(),
             image: args.image,
             volume: args.volume,
             root_capabilities: args.root_capabilities,

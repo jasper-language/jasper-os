@@ -1956,6 +1956,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "user-sandboxprobe"
+version = "0.1.0"
+dependencies = [
+ "jasper-rt",
+ "kernel-core",
+]
+
+[[package]]
 name = "user-schedtest"
 version = "0.1.0"
 dependencies = [

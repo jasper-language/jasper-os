@@ -22,18 +22,31 @@ const STACK_OFF: u64 = 0xC0_0000;
 /// Embedded `user-hello` ELF built from its standalone user crate by `kernel/build.rs`.
 static USER_HELLO: &[u8] = include_bytes!(env!("JSR_USER_HELLO"));
 
+#[cfg(feature = "sandbox-launch-verify")]
+static USER_SANDBOXPROBE: &[u8] = include_bytes!(env!("JSR_USER_SANDBOXPROBE"));
+
 /// 内嵌 Jasper 原生 CLI 映像。 Embedded Jasper native CLI image.
-#[cfg(feature = "terminal-session-verify")]
+#[cfg(all(
+    feature = "terminal-session-verify",
+    not(feature = "sandbox-launch-verify")
+))]
 static USER_CLI: &[u8] = include_bytes!(env!("JSR_USER_CLI"));
 
 /// 返回生产首程序使用的同一份不可变 ELF 镜像。
 /// Returns the same immutable ELF image used by the production first program.
 pub(crate) fn image() -> &'static [u8] {
-    #[cfg(feature = "terminal-session-verify")]
+    #[cfg(feature = "sandbox-launch-verify")]
+    {
+        USER_SANDBOXPROBE
+    }
+    #[cfg(all(
+        feature = "terminal-session-verify",
+        not(feature = "sandbox-launch-verify")
+    ))]
     {
         USER_CLI
     }
-    #[cfg(not(feature = "terminal-session-verify"))]
+    #[cfg(not(any(feature = "terminal-session-verify", feature = "sandbox-launch-verify")))]
     {
         USER_HELLO
     }
@@ -43,7 +56,24 @@ pub(crate) fn image() -> &'static [u8] {
 /// Loads and runs the production first program; requires exit code zero and full frame reclamation.
 pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
     let free_before = frame::free_frames();
-    #[cfg(feature = "terminal-session-verify")]
+    #[cfg(feature = "sandbox-launch-verify")]
+    let allowed = SyscallSet::of(&[
+        abi::SYSTEM_CONSOLE_WRITE,
+        abi::SYSTEM_MEMORY_MAP,
+        abi::SYSTEM_PROCESS_EXIT,
+        abi::SYSTEM_SANDBOX_CREATE,
+        abi::SYSTEM_SANDBOX_STOP,
+        abi::SYSTEM_SANDBOX_DESTROY,
+        abi::SYSTEM_SANDBOX_IMAGE_LOAD,
+        abi::SYSTEM_SANDBOX_IMAGE_DESTROY,
+        abi::SYSTEM_SANDBOX_LAUNCH_CREATE,
+        abi::SYSTEM_SANDBOX_LAUNCH_QUERY,
+        abi::SYSTEM_SANDBOX_LAUNCH_DESTROY,
+    ]);
+    #[cfg(all(
+        feature = "terminal-session-verify",
+        not(feature = "sandbox-launch-verify")
+    ))]
     let allowed = SyscallSet::of(&[
         abi::SYSTEM_CONSOLE_WRITE,
         abi::SYSTEM_TERMINAL_READ,
@@ -51,7 +81,7 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_MEMORY_MAP,
         abi::SYSTEM_PROCESS_EXIT,
     ]);
-    #[cfg(not(feature = "terminal-session-verify"))]
+    #[cfg(not(any(feature = "terminal-session-verify", feature = "sandbox-launch-verify")))]
     let allowed = SyscallSet::of(&[
         abi::SYSTEM_CONSOLE_WRITE,
         abi::SYSTEM_ABI_GET,

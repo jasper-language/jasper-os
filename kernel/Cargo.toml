@@ -189,6 +189,8 @@ lifecycle-block-timeout-verify = ["lifecycle-root-exec-verify", "fault-inject"]
 # Dedicated console-input acceptance: a dynamic Linux program consumes serial
 # bytes through the bounded native terminal session.
 terminal-session-verify = []
+# Native Sandbox launch-plan guest acceptance as the first user program.
+sandbox-launch-verify = ["user-programs"]
 # Pixel 6a (Google Tensor GS101) early-boot probe: Samsung UART only, no scheduler/IRQ start.
 pixel6a-smoke = []
 pixel6a-entry-probe = ["pixel6a-smoke"]

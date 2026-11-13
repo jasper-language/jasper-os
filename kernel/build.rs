@@ -493,6 +493,11 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
     let mut all_programs: Vec<(&str, &str, &str)> = vec![
         ("user/hello", "user-hello", "JSR_USER_HELLO"),
         ("user/cli", "user-cli", "JSR_USER_CLI"),
+        (
+            "user/sandboxprobe",
+            "user-sandboxprobe",
+            "JSR_USER_SANDBOXPROBE",
+        ),
         ("user/ring", "user-ring", "JSR_USER_RING"),
         ("user/ipc", "user-ipc", "JSR_USER_IPC"),
         ("user/prog", "user-prog", "JSR_USER_PROG"),

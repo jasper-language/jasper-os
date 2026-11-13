@@ -1480,9 +1480,16 @@ fn sandbox_launch_create(desc_ptr: u64) -> i64 {
     let Some(args) = kernel_core::sandbox_launch_abi::LaunchCreateArgs::decode(&raw) else {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     };
+    let root = match crate::sandbox::root_snapshot(domain, args.sandbox) {
+        Ok(root) => root.key,
+        Err(error) => return sandbox_error(error),
+    };
+    if args.root.is_some_and(|provided| provided != root) {
+        return sandbox_launch_error(kernel_core::sandbox_launch::LaunchError::InvalidRoot);
+    }
     let spec = kernel_core::sandbox_launch::LaunchSpec {
         sandbox: args.sandbox,
-        root: args.root,
+        root,
         image: args.image,
         volume: args.volume,
         root_capabilities: args.root_capabilities,
