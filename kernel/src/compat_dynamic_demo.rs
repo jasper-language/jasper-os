@@ -216,6 +216,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::GetTid,
         LinuxSyscall::GetRandom,
         LinuxSyscall::GetTimeOfDay,
+        LinuxSyscall::Getrusage,
         LinuxSyscall::Time,
         LinuxSyscall::Getcwd,
         LinuxSyscall::GetUid,

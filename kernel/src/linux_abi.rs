@@ -1826,6 +1826,7 @@ fn execute(
             .unwrap_or_else(|error| -i64::from(error as i32)),
         LinuxSyscall::GetRandom => compat_result(linux_getrandom(call.args)),
         LinuxSyscall::GetTimeOfDay => compat_result(linux_gettimeofday(call.args)),
+        LinuxSyscall::Getrusage => compat_result(linux_getrusage(pid, call.args)),
         LinuxSyscall::Time => compat_result(linux_time(call.args)),
         LinuxSyscall::Getcwd => compat_result(linux_getcwd(pid, call.args)),
         LinuxSyscall::GetUid | LinuxSyscall::GetEuid => {
@@ -4219,6 +4220,33 @@ fn linux_gettimeofday(args: [u64; 6]) -> Result<u64, CompatErrno> {
     value[0..8].copy_from_slice(&(now / 1_000_000_000).to_le_bytes());
     value[8..16].copy_from_slice(&((now % 1_000_000_000) / 1_000).to_le_bytes());
     copy_to_user(args[0], &value, value.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Reports scheduler-accounted CPU time for the process or current thread.
+///
+/// 返回进程或当前线程的调度器 CPU 时间；尚未聚合作业终止后的子进程时间，
+/// 因此 `RUSAGE_CHILDREN` 明确返回 ENOSYS，而不是报告伪造的零值。
+fn linux_getrusage(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const RUSAGE_SELF: i32 = 0;
+    const RUSAGE_CHILDREN: i32 = -1;
+    const RUSAGE_THREAD: i32 = 1;
+    const RUSAGE_BYTES: usize = 144;
+    let ticks = match args[0] as u32 as i32 {
+        RUSAGE_SELF => proc::linux_process_cpu_ticks(pid).ok_or(CompatErrno::NoProcess)?,
+        RUSAGE_THREAD => {
+            let (task, _) = sched::current();
+            linux_tid(pid).ok_or(CompatErrno::NoProcess)?;
+            sched::cpu_ticks(task).ok_or(CompatErrno::NoProcess)?
+        }
+        RUSAGE_CHILDREN => return Err(CompatErrno::NoSys),
+        _ => return Err(CompatErrno::Invalid),
+    };
+    let nanoseconds = ticks.saturating_mul(crate::hrtime::tick_ns());
+    let mut usage = [0u8; RUSAGE_BYTES];
+    usage[0..8].copy_from_slice(&(nanoseconds / 1_000_000_000).to_le_bytes());
+    usage[8..16].copy_from_slice(&((nanoseconds % 1_000_000_000) / 1_000).to_le_bytes());
+    copy_to_user(args[1], &usage, usage.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
 }
 

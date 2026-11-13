@@ -2701,6 +2701,40 @@ int main(void) {
     if (syscall(SYS_sysinfo, (void *)1) != -1 || errno != EFAULT) {
         return 19;
     }
+    struct rusage process_usage = {0};
+    struct rusage thread_usage = {0};
+    errno = 0;
+    int self_usage_result = getrusage(RUSAGE_SELF, &process_usage);
+    int self_usage_errno = errno;
+    errno = 0;
+    int thread_usage_result = getrusage(RUSAGE_THREAD, &thread_usage);
+    int thread_usage_errno = errno;
+    if (self_usage_result != 0 ||
+        (process_usage.ru_utime.tv_sec == 0 &&
+         process_usage.ru_utime.tv_usec == 0) ||
+        thread_usage_result != 0 ||
+        (thread_usage.ru_utime.tv_sec == 0 &&
+         thread_usage.ru_utime.tv_usec == 0)) {
+        printf("getrusage-fail self=%d errno=%d utime=%ld.%06ld "
+               "thread=%d errno=%d utime=%ld.%06ld\n",
+               self_usage_result, self_usage_errno,
+               (long)process_usage.ru_utime.tv_sec,
+               (long)process_usage.ru_utime.tv_usec,
+               thread_usage_result, thread_usage_errno,
+               (long)thread_usage.ru_utime.tv_sec,
+               (long)thread_usage.ru_utime.tv_usec);
+        return 360;
+    }
+    errno = 0;
+    if (getrusage(RUSAGE_CHILDREN, &process_usage) != -1 ||
+        errno != ENOSYS) {
+        return 361;
+    }
+    errno = 0;
+    if (syscall(SYS_getrusage, RUSAGE_SELF, (void *)1) != -1 ||
+        errno != EFAULT) {
+        return 362;
+    }
     struct timespec resolution;
     if (clock_getres(CLOCK_MONOTONIC, &resolution) != 0 ||
         resolution.tv_sec < 0 || resolution.tv_nsec <= 0 ||

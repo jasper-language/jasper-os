@@ -3562,6 +3562,30 @@ pub(crate) fn linux_set_process_group_state(pid: ObjId, pgid: u32, sid: u32) -> 
     .is_ok()
 }
 
+/// Sums scheduler CPU ticks over every live thread in one Linux process.
+/// 汇总一个 Linux 进程全部存活线程的调度器 CPU ticks。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_process_cpu_ticks(pid: ObjId) -> Option<u64> {
+    let tasks = {
+        let registry = REG.lock();
+        registry
+            .members
+            .iter()
+            .filter(|member| member.process == pid)
+            .map(|member| member.task)
+            .collect::<Vec<_>>()
+    };
+    if tasks.is_empty() {
+        return None;
+    }
+    Some(
+        tasks
+            .into_iter()
+            .filter_map(sched::cpu_ticks)
+            .fold(0u64, u64::saturating_add),
+    )
+}
+
 /// Resolves one ABI-visible Linux PID to the owning Jasper process object.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_process_for_pid(linux_pid: u32) -> Option<ObjId> {
