@@ -3,15 +3,17 @@
 //! Responsibility: bind one firmware framebuffer and the real x86 keyboard to
 //! the bounded mechanism in `kernel-core`. It draws a deterministic first frame,
 //! renders terminal bytes with a built-in ASCII font and forwards real key
-//! transitions to the native terminal session. It does not claim a compositor
-//! or window system.
+//! transitions to the native terminal session. Its bounded compositor retains
+//! only the overlay damage region for partial updates; it does not claim a
+//! window system.
 //!
 //! 原生帧缓冲与键盘会话集成。把固件 framebuffer 和真实 x86 键盘绑定到
 //! `kernel-core` 的有界机制，绘制首帧、用内建 ASCII 字体呈现终端字节并把真实
-//! 按键送入原生终端会话；不宣称 compositor 或窗口系统已经完成。
+//! 按键送入原生终端会话；compositor 只保留 overlay damage 区域用于局部更新，
+//! 不宣称窗口系统已经完成。
 
 use bootloader_api::info::{FrameBuffer, PixelFormat};
-use kernel_core::display_compositor::{Compositor, LayerKey, LayerPixels, LayerSpec};
+use kernel_core::display_compositor::{Compositor, DamageRect, LayerKey, LayerPixels, LayerSpec};
 use kernel_core::display_input::{
     DisplayBackend, DisplayCapabilities, DisplayInputError, DisplayInputSession, KeyInput,
     PixelLayout, SurfaceSpec,
@@ -44,6 +46,8 @@ const ACCENT_SURFACE: SurfaceSpec = SurfaceSpec {
     bytes_per_pixel: 4,
     layout: PixelLayout::Bgr,
 };
+const OVERLAY_REGION_BYTES: usize =
+    (OVERLAY_WIDTH as usize + ACCENT_WIDTH as usize) * OVERLAY_HEIGHT as usize * 4;
 
 struct Runtime {
     base: usize,
@@ -55,6 +59,9 @@ struct Runtime {
     overlay_key: LayerKey,
     accent: [u8; ACCENT_BYTES],
     accent_key: LayerKey,
+    overlay_damage: DamageRect,
+    overlay_region_len: usize,
+    overlay_base: [u8; OVERLAY_REGION_BYTES],
     pressed: u32,
     released: u32,
     text: [u8; TEXT_CELLS],
@@ -126,10 +133,36 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
     fill_surface(&mut overlay, (0x29, 0xd3, 0xb6));
     let mut accent = [0u8; ACCENT_BYTES];
     fill_surface(&mut accent, (0x12, 0x36, 0x4a));
+    let overlay_damage = DamageRect::for_layer(
+        compositor
+            .snapshot(overlay_key)
+            .map_err(|_| DisplayInputError::Failed)?
+            .layer,
+        surface,
+    )
+    .map_err(|_| DisplayInputError::Failed)?
+    .union(
+        DamageRect::for_layer(
+            compositor
+                .snapshot(accent_key)
+                .map_err(|_| DisplayInputError::Failed)?
+                .layer,
+            surface,
+        )
+        .map_err(|_| DisplayInputError::Failed)?,
+    );
+    let overlay_region_len = region_bytes(overlay_damage, surface)?;
+    if overlay_region_len > OVERLAY_REGION_BYTES {
+        return Err(DisplayInputError::InvalidSurface);
+    }
     let buffer = framebuffer.into_buffer();
+    let frame_len = usize::try_from(required).map_err(|_| DisplayInputError::InvalidSurface)?;
+    if buffer.len() < frame_len {
+        return Err(DisplayInputError::InvalidSurface);
+    }
     let mut runtime = Runtime {
         base: buffer.as_mut_ptr() as usize,
-        len: buffer.len(),
+        len: frame_len,
         surface,
         session,
         compositor,
@@ -137,6 +170,9 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
         overlay_key,
         accent,
         accent_key,
+        overlay_damage,
+        overlay_region_len,
+        overlay_base: [0u8; OVERLAY_REGION_BYTES],
         pressed: 0,
         released: 0,
         text: [b' '; TEXT_CELLS],
@@ -147,7 +183,7 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
     runtime.append_text(b"JASPER-OS NATIVE TERMINAL\n\n");
     runtime.paint_boot_frame()?;
     kprintln!(
-        "[JSR-DISPLAY-COMPOSITOR] layers=2 visible=2 primary=terminal overlays=bounded alpha=true full_frame=true damage=false"
+        "[JSR-DISPLAY-COMPOSITOR] layers=2 visible=2 primary=terminal overlays=bounded alpha=true full_frame=false damage=true overlay_damage=true text_full=true"
     );
     *DISPLAY.lock() = Some(runtime);
     Ok(())
@@ -282,6 +318,7 @@ impl Runtime {
             0x59,
         );
         self.paint_text();
+        self.snapshot_overlay_base()?;
         self.compose_overlay()?;
         let ticket = self.session.prepare_frame(self.required_bytes()?)?;
         self.session.commit_frame(ticket)?;
@@ -292,6 +329,7 @@ impl Runtime {
         self.fill(0x08, 0x11, 0x18);
         self.rect(0, 0, self.surface.width, 6, 0x29, 0xd3, 0xb6);
         self.paint_text();
+        self.snapshot_overlay_base()?;
         self.compose_overlay()?;
         let ticket = self.session.prepare_frame(self.required_bytes()?)?;
         self.session.commit_frame(ticket)?;
@@ -400,14 +438,49 @@ impl Runtime {
         self.surface.validate()
     }
 
-    fn compose_overlay(&mut self) -> Result<(), DisplayInputError> {
+    fn snapshot_overlay_base(&mut self) -> Result<(), DisplayInputError> {
+        let damage = self.overlay_damage;
+        let bpp = usize::from(self.surface.bytes_per_pixel);
+        let row_bytes = usize::try_from(damage.width)
+            .map_err(|_| DisplayInputError::InvalidSurface)?
+            .checked_mul(bpp)
+            .ok_or(DisplayInputError::InvalidSurface)?;
+        let bottom = i64::from(damage.y) + i64::from(damage.height);
+        // SAFETY: the framebuffer pointer and length remain valid for the
+        // lifetime of this Runtime; damage was clipped during initialization.
+        let frame = unsafe { core::slice::from_raw_parts(self.base as *const u8, self.len) };
+        for (source_row, y) in (i64::from(damage.y)..bottom).enumerate() {
+            let source_offset = usize::try_from(
+                y.checked_mul(i64::from(self.surface.stride))
+                    .and_then(|row| row.checked_add(i64::from(damage.x)))
+                    .and_then(|pixel| pixel.checked_mul(i64::from(self.surface.bytes_per_pixel)))
+                    .ok_or(DisplayInputError::InvalidSurface)?,
+            )
+            .map_err(|_| DisplayInputError::InvalidSurface)?;
+            let source_end = source_offset
+                .checked_add(row_bytes)
+                .ok_or(DisplayInputError::InvalidSurface)?;
+            let destination_start = source_row
+                .checked_mul(row_bytes)
+                .ok_or(DisplayInputError::InvalidSurface)?;
+            let destination_end = destination_start
+                .checked_add(row_bytes)
+                .ok_or(DisplayInputError::InvalidSurface)?;
+            self.overlay_base[destination_start..destination_end]
+                .copy_from_slice(&frame[source_offset..source_end]);
+        }
+        Ok(())
+    }
+
+    fn compose_overlay(&self) -> Result<(), DisplayInputError> {
         // SAFETY: the framebuffer pointer and length remain valid for the
         // lifetime of this Runtime, and all geometry is validated before write.
         let frame = unsafe { core::slice::from_raw_parts_mut(self.base as *mut u8, self.len) };
         self.compositor
-            .compose(
+            .compose_retained_region(
                 self.surface,
                 frame,
+                &self.overlay_base[..self.overlay_region_len],
                 &[
                     LayerPixels {
                         key: self.overlay_key,
@@ -418,6 +491,7 @@ impl Runtime {
                         bytes: &self.accent,
                     },
                 ],
+                self.overlay_damage,
             )
             .map(|_| ())
             .map_err(|_| DisplayInputError::Failed)
@@ -469,6 +543,16 @@ impl Runtime {
             }
         }
     }
+}
+
+fn region_bytes(damage: DamageRect, surface: SurfaceSpec) -> Result<usize, DisplayInputError> {
+    let pixels = usize::try_from(damage.width)
+        .map_err(|_| DisplayInputError::InvalidSurface)?
+        .checked_mul(usize::try_from(damage.height).map_err(|_| DisplayInputError::InvalidSurface)?)
+        .ok_or(DisplayInputError::InvalidSurface)?;
+    pixels
+        .checked_mul(usize::from(surface.bytes_per_pixel))
+        .ok_or(DisplayInputError::InvalidSurface)
 }
 
 fn fill_surface(bytes: &mut [u8], color: (u8, u8, u8)) {

@@ -149,7 +149,7 @@ test -s "$OUT/frame-prompt.ppm"
 test -s "$OUT/frame-command.ppm"
 [ "$(sha256sum "$OUT/frame-prompt.ppm" | awk '{print $1}')" != \
   "$(sha256sum "$OUT/frame-command.ppm" | awk '{print $1}')" ]
-grep -aq '^\[JSR-DISPLAY-COMPOSITOR\] layers=2 visible=2 primary=terminal overlays=bounded alpha=true full_frame=true damage=false' \
+grep -aq '^\[JSR-DISPLAY-COMPOSITOR\] layers=2 visible=2 primary=terminal overlays=bounded alpha=true full_frame=false damage=true overlay_damage=true text_full=true' \
   "$OUT/serial.log"
 printf 'graphical-terminal: PASS frames=%s,%s evidence=%s\n' \
   "$OUT/frame-prompt.ppm" "$OUT/frame-command.ppm" "$OUT"
