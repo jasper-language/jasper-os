@@ -154,6 +154,7 @@ struct LinuxProcessState {
     umask: u32,
     ioprio: u32,
     personality: u32,
+    pdeathsig: u32,
     aio_contexts: Vec<LinuxAioContext>,
     seccomp_filters: Vec<Vec<SeccompInsn>>,
     seccomp_strict: bool,
@@ -4813,6 +4814,25 @@ pub(crate) fn set_linux_personality(pid: ObjId, value: u32) -> bool {
     .is_ok()
 }
 
+/// Returns the parent-death signal configured for one Linux process.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_pdeathsig(pid: ObjId) -> Option<u32> {
+    with_proc(pid, |process| {
+        Ok(process.linux.as_ref().ok_or(ProcError::Exited)?.pdeathsig)
+    })
+    .ok()
+}
+
+/// Replaces the parent-death signal configured for one Linux process.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_pdeathsig(pid: ObjId, signal: u32) -> bool {
+    with_proc(pid, |process| {
+        process.linux.as_mut().ok_or(ProcError::Exited)?.pdeathsig = signal;
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Creates one bounded legacy AIO context.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_aio_create(pid: ObjId, max_events: usize) -> Option<u64> {
@@ -5189,6 +5209,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         umask: 0o022,
         ioprio: (2 << 13) | 4,
         personality: 0,
+        pdeathsig: 0,
         aio_contexts: Vec::new(),
         seccomp_filters: Vec::new(),
         seccomp_strict: false,
@@ -7060,6 +7081,7 @@ pub fn fork_linux_process(
         linux.ppid = parent_linux_pid;
         linux.child_cpu_ticks = 0;
         linux.exited_cpu_ticks = 0;
+        linux.pdeathsig = 0;
         linux.mappings.clear();
         linux.aio_contexts.clear();
         Ok(())
@@ -7212,6 +7234,7 @@ pub fn vfork_linux_process(
         linux.ppid = parent_linux_pid;
         linux.child_cpu_ticks = 0;
         linux.exited_cpu_ticks = 0;
+        linux.pdeathsig = 0;
         linux.vfork_parent = Some(VforkParent {
             task: parent_task,
             exec_committed: false,
@@ -8458,18 +8481,28 @@ pub fn registry_len() -> (usize, usize) {
 
 /// 让一个没有线程的进程进入 exited（关闭其句柄表）；有线程存活时不做任何事并返回 `false`。
 pub fn exit_idle(pid: ObjId, code: i64) -> bool {
-    kobj::with(|t| {
+    let mut parent_deaths = Vec::new();
+    let ok = kobj::with(|t| {
         let ok = matches!(t.get(pid), Ok(KObject::Process(p)) if p.threads_live == 0 && p.state == ProcState::Running);
         if ok {
-            release_resources_in(t, pid);
+            release_resources_in(t, pid, &mut parent_deaths);
             finish_exit_in(t, pid, code);
         }
         ok
-    })
+    });
+    #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+    for (child, signal) in parent_deaths {
+        crate::linux_abi::notify_parent_death(child, signal);
+    }
+    ok
 }
 
 /// 关闭进程的句柄表并释放其子进程表（exiting 或 exited 时；只做一次，之后两表为空）。返回关闭的句柄数。
-fn release_resources_in(t: &mut kobj::Table, pid: ObjId) -> usize {
+fn release_resources_in(
+    t: &mut kobj::Table,
+    pid: ObjId,
+    parent_deaths: &mut Vec<(ObjId, u32)>,
+) -> usize {
     let mut closed: Vec<ObjectRef> = Vec::new();
     let mut children = Vec::new();
     let n = match t.get_mut(pid) {
@@ -8488,6 +8521,19 @@ fn release_resources_in(t: &mut kobj::Table, pid: ObjId) -> usize {
         }
         _ => 0,
     };
+    #[cfg(feature = "linux-abi")]
+    for child in &children {
+        if let Ok(KObject::Process(process)) = t.get(*child) {
+            if let Some(signal) = process
+                .linux
+                .as_ref()
+                .map(|linux| linux.pdeathsig)
+                .filter(|signal| *signal != 0)
+            {
+                parent_deaths.push((*child, signal));
+            }
+        }
+    }
     for r in closed {
         if let Some(id) = ObjId::from_raw(r.id.0) {
             let _ = kobj::release_owner_in(t, id);
@@ -8517,7 +8563,11 @@ fn finish_exit_in(t: &mut kobj::Table, pid: ObjId, code: i64) {
 /// 开始终止后唤醒该进程所有在睡的线程：长时间的定时等待（`time.wait`）也要尽快观察到 exiting。
 /// Begins process termination (exiting phase).
 pub fn begin_exit(pid: ObjId, code: i64) -> bool {
-    let started = begin_exit_in_table(pid, code);
+    let (started, parent_deaths) = begin_exit_in_table(pid, code);
+    #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+    for (child, signal) in parent_deaths {
+        crate::linux_abi::notify_parent_death(child, signal);
+    }
     if started {
         wake_threads(pid);
         #[cfg(feature = "linux-abi")]
@@ -8550,8 +8600,9 @@ fn wake_threads(pid: ObjId) {
 }
 
 /// [`begin_exit`] 的对象表部分：状态迁移、关闭句柄表、无线程时直接进入 exited。
-fn begin_exit_in_table(pid: ObjId, code: i64) -> bool {
-    kobj::with(|t| {
+fn begin_exit_in_table(pid: ObjId, code: i64) -> (bool, Vec<(ObjId, u32)>) {
+    let mut parent_deaths = Vec::new();
+    let started = kobj::with(|t| {
         let idle = match t.get_mut(pid) {
             Ok(KObject::Process(p)) if p.state == ProcState::Running => {
                 p.state = ProcState::Exiting { code };
@@ -8559,7 +8610,7 @@ fn begin_exit_in_table(pid: ObjId, code: i64) -> bool {
             }
             _ => return false,
         };
-        let n = release_resources_in(t, pid);
+        let n = release_resources_in(t, pid, &mut parent_deaths);
         kprintln!(
             "[JSR-PROC] event=system.process.exiting id={:#x} code={} handles_closed={}",
             pid.raw(),
@@ -8570,7 +8621,8 @@ fn begin_exit_in_table(pid: ObjId, code: i64) -> bool {
             finish_exit_in(t, pid, code);
         }
         true
-    })
+    });
+    (started, parent_deaths)
 }
 
 /// Author: chatgpt。对象锁内等待登记的进程门槛，与begin_exit状态迁移串行。
@@ -8812,6 +8864,7 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
         #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
         crate::linux_abi::linux_thread_exit(m.process, m.task);
         let mut exiting_workload = None;
+        let mut parent_deaths = Vec::new();
         let exited = kobj::with(|t| {
             // 线程自己的退出状态：写入本线程的退出码
             if let Ok(KObject::Task(task)) = t.get(m.task_obj) {
@@ -8841,7 +8894,7 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
                 _ => None,
             };
             if let Some((final_code, name, threads)) = last {
-                let n = release_resources_in(t, m.process);
+                let n = release_resources_in(t, m.process, &mut parent_deaths);
                 finish_exit_in(t, m.process, final_code);
                 out = Some((name, threads, n, final_code));
             }
@@ -8852,6 +8905,10 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
             let _ = t.release_internal(m.process); // 执行上下文 → Process
             out
         });
+        #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+        for (child, signal) in parent_deaths {
+            crate::linux_abi::notify_parent_death(child, signal);
+        }
         if let Some(workload) = exiting_workload {
             crate::workload::release_thread(workload);
         }

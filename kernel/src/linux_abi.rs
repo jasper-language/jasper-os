@@ -842,6 +842,14 @@ fn queue_process_signal_info(
     true
 }
 
+/// Delivers one configured parent-death signal to a surviving child.
+#[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+pub(crate) fn notify_parent_death(process: ObjId, signal: u32) {
+    if (1..=64).contains(&signal) {
+        let _ = queue_process_signal(process, signal, 0, LINUX_SI_KERNEL);
+    }
+}
+
 /// Removes process-directed pending signals once the last thread exits.
 /// 最后一个线程退出后移除进程定向 pending 信号。
 fn remove_process_signals(process: ObjId) {
@@ -6234,6 +6242,8 @@ fn linux_getrandom(args: [u64; 6]) -> Result<u64, CompatErrno> {
 /// 仅实现当前 Linux 任务的 `PR_SET_NAME`/`PR_GET_NAME`；名称固定为 Linux 的
 /// 16 字节任务命令名。其他 option 明确返回 EINVAL，不把未实现的安全策略当作成功。
 fn linux_prctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PR_SET_PDEATHSIG: u64 = 1;
+    const PR_GET_PDEATHSIG: u64 = 2;
     const PR_SET_NAME: u64 = 15;
     const PR_GET_NAME: u64 = 16;
     const PR_GET_SECCOMP: u64 = 21;
@@ -6247,6 +6257,22 @@ fn linux_prctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const ARCH_SHSTK_STATUS: u64 = 0x5005;
     let (task, _) = sched::current();
     match args[0] {
+        PR_SET_PDEATHSIG => {
+            let signal = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+            if signal > 64 {
+                return Err(CompatErrno::Invalid);
+            }
+            if proc::set_linux_pdeathsig(pid, signal) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::NoProcess)
+            }
+        }
+        PR_GET_PDEATHSIG => {
+            let signal = proc::linux_pdeathsig(pid).ok_or(CompatErrno::NoProcess)?;
+            copy_to_user(args[1], &signal.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        }
         PR_SET_NAME => {
             let mut name = [0u8; 16];
             for offset in 0..15 {

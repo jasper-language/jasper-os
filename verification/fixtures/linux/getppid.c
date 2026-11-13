@@ -167,6 +167,15 @@ static atomic_int landlock_worker_first_done;
 static atomic_int landlock_worker_second_done;
 static atomic_int landlock_worker_first_ok;
 static atomic_int landlock_worker_second_ok;
+static volatile sig_atomic_t pdeath_done_fd = -1;
+
+static void pdeath_signal_handler(int signal) {
+    if (signal == SIGTERM && pdeath_done_fd >= 0) {
+        char done = 'D';
+        (void)write((int)pdeath_done_fd, &done, 1);
+    }
+    _exit(0);
+}
 
 static int landlock_worker_open(int expect_usr, int expect_lib) {
     int usr = open("/usr/lib/x86_64-linux-gnu/libc.so.6",
@@ -6434,6 +6443,69 @@ int main(void) {
     errno = 0;
     if (waitpid(-1, &child_status, WNOHANG) != -1 || errno != ECHILD) {
         return 67;
+    }
+    int pdeath_ready[2];
+    int pdeath_done[2];
+    if (pipe(pdeath_ready) != 0 || pipe(pdeath_done) != 0) {
+        return 698;
+    }
+    pid_t pdeath_parent = fork();
+    if (pdeath_parent < 0) {
+        return 698;
+    }
+    if (pdeath_parent == 0) {
+        pid_t pdeath_child = fork();
+        if (pdeath_child < 0) {
+            _exit(1);
+        }
+        if (pdeath_child == 0) {
+            close(pdeath_ready[0]);
+            close(pdeath_done[0]);
+            pdeath_done_fd = pdeath_done[1];
+            if (signal(SIGTERM, pdeath_signal_handler) == SIG_ERR ||
+                prctl(PR_SET_PDEATHSIG, SIGTERM, 0, 0, 0) != 0) {
+                _exit(2);
+            }
+            int configured = 0;
+            if (prctl(PR_GET_PDEATHSIG, &configured, 0, 0, 0) != 0 ||
+                configured != SIGTERM) {
+                _exit(3);
+            }
+            char ready = 'R';
+            if (write(pdeath_ready[1], &ready, 1) != 1) {
+                _exit(4);
+            }
+            for (;;) {
+                pause();
+            }
+        }
+        close(pdeath_ready[1]);
+        close(pdeath_done[0]);
+        close(pdeath_done[1]);
+        char ready = 0;
+        _exit(read(pdeath_ready[0], &ready, 1) == 1 &&
+                      ready == 'R'
+                  ? 0
+                  : 5);
+    }
+    close(pdeath_ready[0]);
+    close(pdeath_ready[1]);
+    close(pdeath_done[1]);
+    child_status = 0;
+    char pdeath_byte = 0;
+    struct pollfd pdeath_poll = {
+        .fd = pdeath_done[0],
+        .events = POLLIN,
+    };
+    if (waitpid(pdeath_parent, &child_status, 0) != pdeath_parent ||
+        !WIFEXITED(child_status) ||
+        WEXITSTATUS(child_status) != 0 ||
+        poll(&pdeath_poll, 1, 1000) != 1 ||
+        (pdeath_poll.revents & POLLIN) == 0 ||
+        read(pdeath_done[0], &pdeath_byte, 1) != 1 ||
+        pdeath_byte != 'D' ||
+        close(pdeath_done[0]) != 0) {
+        return 699;
     }
     if (lseek(fd, 0, SEEK_SET) != 0) {
         return 81;
