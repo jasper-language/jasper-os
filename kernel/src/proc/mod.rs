@@ -66,6 +66,8 @@ pub const HANDLES_PER_PROCESS: usize = crate::config::ACTIVE.objects.handles_per
 const USI_REQUEST_SLOTS: usize = 16;
 #[cfg(feature = "linux-abi")]
 static LINUX_PID_NEXT: AtomicU32 = AtomicU32::new(1);
+#[cfg(feature = "linux-abi")]
+static NEXT_LINUX_AIO_CONTEXT: AtomicU64 = AtomicU64::new(0x9000_0000_0000_0001);
 static NEXT_WORKLOAD_DOMAIN: AtomicU32 = AtomicU32::new(1);
 /// Opaque sentinel used only by the Linux standard-stream compatibility table.
 ///
@@ -141,6 +143,7 @@ struct LinuxProcessState {
     umask: u32,
     ioprio: u32,
     personality: u32,
+    aio_contexts: Vec<LinuxAioContext>,
     mappings: Vec<LinuxMapping>,
     sealed_ranges: Vec<(u64, u64)>,
     pipes: Vec<LinuxPipeHandle>,
@@ -298,6 +301,28 @@ pub(crate) struct LinuxInotifyWatch {
 struct LinuxInotifyHandle {
     handle: u64,
     watches: Arc<SpinLock<Vec<LinuxInotifyWatch>>>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxAioEvent {
+    pub(crate) data: u64,
+    pub(crate) object: u64,
+    pub(crate) result: i64,
+    pub(crate) result2: i64,
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) struct LinuxAioState {
+    pub(crate) max_events: usize,
+    pub(crate) events: VecDeque<LinuxAioEvent>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxAioContext {
+    id: u64,
+    state: Arc<SpinLock<LinuxAioState>>,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -4029,6 +4054,70 @@ pub(crate) fn set_linux_personality(pid: ObjId, value: u32) -> bool {
     .is_ok()
 }
 
+/// Creates one bounded legacy AIO context.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_aio_create(pid: ObjId, max_events: usize) -> Option<u64> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.aio_contexts.len() >= 8 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        let id = NEXT_LINUX_AIO_CONTEXT.fetch_add(1, Ordering::AcqRel);
+        if id == 0 || id == u64::MAX {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .aio_contexts
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.aio_contexts.push(LinuxAioContext {
+            id,
+            state: Arc::new(SpinLock::new(LinuxAioState {
+                max_events,
+                events: VecDeque::new(),
+            })),
+        });
+        Ok(id)
+    })
+    .ok()
+}
+
+/// Returns one legacy AIO context state by opaque context id.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_aio_state(
+    pid: ObjId,
+    id: u64,
+) -> Option<Arc<SpinLock<LinuxAioState>>> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .aio_contexts
+            .iter()
+            .find(|context| context.id == id)
+            .map(|context| Arc::clone(&context.state)),
+        _ => None,
+    })
+}
+
+/// Destroys one legacy AIO context.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_aio_destroy(pid: ObjId, id: u64) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        let Some(index) = linux
+            .aio_contexts
+            .iter()
+            .position(|context| context.id == id)
+        else {
+            return Err(ProcError::NoSuchProcess);
+        };
+        linux.aio_contexts.remove(index);
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Sums scheduler CPU ticks over every live thread in one Linux process.
 /// 汇总一个 Linux 进程全部存活线程的调度器 CPU ticks。
 #[cfg(feature = "linux-abi")]
@@ -4341,6 +4430,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         umask: 0o022,
         ioprio: (2 << 13) | 4,
         personality: 0,
+        aio_contexts: Vec::new(),
         mappings: Vec::new(),
         sealed_ranges: Vec::new(),
         pipes: Vec::new(),
@@ -4418,6 +4508,7 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
                 .retain(|signalfd| linux.fds.handle_fd_count(signalfd.handle) != 0);
             linux.mappings.clear();
             linux.sealed_ranges.clear();
+            linux.aio_contexts.clear();
             linux.brk = crate::arch::USER_WINDOW.0 + 0x1000_0000;
             linux.mmap_next = crate::arch::USER_WINDOW.0 + 0x4000_0000;
             linux.signal_actions = [[0; 4]; 64];
@@ -6198,6 +6289,7 @@ pub fn fork_linux_process(
         linux.child_cpu_ticks = 0;
         linux.exited_cpu_ticks = 0;
         linux.mappings.clear();
+        linux.aio_contexts.clear();
         Ok(())
     });
     if prepared.is_err() || inherit_application(parent, child).is_err() {

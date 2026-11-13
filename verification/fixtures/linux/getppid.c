@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <linux/android/binder.h>
+#include <linux/aio_abi.h>
 #include <linux/capability.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-heap.h>
@@ -4210,6 +4211,66 @@ int main(void) {
     errno = 0;
     if (syscall(SYS_memfd_secret, 1) != -1 || errno != EINVAL) {
         return 531;
+    }
+    int aio_fd = memfd_create("legacy-aio", MFD_CLOEXEC);
+    unsigned long aio_context = 0;
+    char aio_source[] = "aio!";
+    char aio_result[4] = {0};
+    char aio_write_data[] = "done";
+    char aio_written[4] = {0};
+    if (aio_fd < 0 ||
+        write(aio_fd, aio_source, sizeof(aio_source) - 1) != 4 ||
+        syscall(SYS_io_setup, 4, &aio_context) != 0) {
+        return 537;
+    }
+    struct iocb aio_read = {
+        .aio_data = 0x41494f52454144ULL,
+        .aio_lio_opcode = IOCB_CMD_PREAD,
+        .aio_fildes = aio_fd,
+        .aio_buf = (uint64_t)(uintptr_t)aio_result,
+        .aio_nbytes = sizeof(aio_result),
+        .aio_offset = 0,
+    };
+    struct iocb *aio_read_pointer = &aio_read;
+    struct io_event aio_event = {0};
+    struct timespec aio_timeout = {.tv_sec = 1};
+    if (syscall(SYS_io_submit, aio_context, 1, &aio_read_pointer) != 1 ||
+        syscall(SYS_io_getevents, aio_context, 1, 1,
+                &aio_event, &aio_timeout) != 1 ||
+        aio_event.data != aio_read.aio_data ||
+        aio_event.obj != (uint64_t)(uintptr_t)&aio_read ||
+        aio_event.res != 4 ||
+        memcmp(aio_result, "aio!", 4) != 0) {
+        return 538;
+    }
+    struct iocb aio_write = {
+        .aio_data = 0x41494f5752495445ULL,
+        .aio_lio_opcode = IOCB_CMD_PWRITE,
+        .aio_fildes = aio_fd,
+        .aio_buf = (uint64_t)(uintptr_t)aio_write_data,
+        .aio_nbytes = sizeof(aio_write_data) - 1,
+        .aio_offset = 4,
+    };
+    struct iocb *aio_write_pointer = &aio_write;
+    memset(&aio_event, 0, sizeof(aio_event));
+    if (syscall(SYS_io_submit, aio_context, 1, &aio_write_pointer) != 1 ||
+        syscall(SYS_io_getevents, aio_context, 1, 1,
+                &aio_event, &aio_timeout) != 1 ||
+        aio_event.res != 4 ||
+        pread(aio_fd, aio_written, sizeof(aio_written), 4) != 4 ||
+        memcmp(aio_written, "done", 4) != 0) {
+        return 539;
+    }
+    errno = 0;
+    if (syscall(SYS_io_cancel, aio_context, &aio_write,
+                &aio_event) != -1 ||
+        errno != EINVAL ||
+        syscall(SYS_io_destroy, aio_context) != 0 ||
+        syscall(SYS_io_getevents, aio_context, 0, 1,
+                &aio_event, NULL) != -1 ||
+        errno != EINVAL ||
+        close(aio_fd) != 0) {
+        return 540;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);

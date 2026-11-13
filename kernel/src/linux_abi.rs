@@ -2276,6 +2276,12 @@ fn execute(
         LinuxSyscall::IoUringRegister => {
             compat_result(linux_io_uring_register(pid, call.args))
         }
+        LinuxSyscall::IoSetup => compat_result(linux_io_setup(pid, call.args)),
+        LinuxSyscall::IoDestroy => compat_result(linux_io_destroy(pid, call.args)),
+        LinuxSyscall::IoSubmit => compat_result(linux_io_submit(pid, call.args)),
+        LinuxSyscall::IoCancel => compat_result(linux_io_cancel(pid, call.args)),
+        LinuxSyscall::IoGetevents => compat_result(linux_io_getevents(pid, call.args, false)),
+        LinuxSyscall::IoPgetevents => compat_result(linux_io_getevents(pid, call.args, true)),
         LinuxSyscall::Exit | LinuxSyscall::ExitGroup => {
             let code = call.args[0] as i64;
             proc::thread_exit(code, "linux process exit")
@@ -9812,6 +9818,169 @@ fn linux_io_uring_register(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     let _ = proc::linux_io_uring_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
     Err(CompatErrno::NoSys)
+}
+
+/// Creates one bounded legacy AIO context.
+fn linux_io_setup(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let max_events = usize::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    if !(1..=1024).contains(&max_events) || args[1] == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let context = proc::linux_aio_create(pid, max_events).ok_or(CompatErrno::NoSpace)?;
+    copy_to_user(args[1], &context.to_le_bytes(), 8).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Destroys one legacy AIO context and all queued completions.
+fn linux_io_destroy(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if proc::linux_aio_destroy(pid, args[0]) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::Invalid)
+    }
+}
+
+/// Reports that no pending operation can be cancelled in the synchronous AIO model.
+fn linux_io_cancel(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let _ = proc::linux_aio_state(pid, args[0]).ok_or(CompatErrno::Invalid)?;
+    Err(CompatErrno::Invalid)
+}
+
+/// Submits legacy AIO requests, completing supported operations synchronously.
+fn linux_io_submit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const IOCB_BYTES: usize = 64;
+    const MAX_REQUESTS: usize = 32;
+    let state = proc::linux_aio_state(pid, args[0]).ok_or(CompatErrno::Invalid)?;
+    let count = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if count > MAX_REQUESTS || count != 0 && args[2] == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut submitted = 0usize;
+    while submitted < count {
+        let pointer_address = args[2]
+            .checked_add((submitted * 8) as u64)
+            .ok_or(CompatErrno::Fault)?;
+        let mut pointer = [0u8; 8];
+        if proc::read(pid, pointer_address, &mut pointer).is_err() {
+            if submitted == 0 {
+                return Err(CompatErrno::Fault);
+            }
+            break;
+        }
+        let iocb_address = u64::from_le_bytes(pointer);
+        let mut iocb = [0u8; IOCB_BYTES];
+        if iocb_address == 0 || proc::read(pid, iocb_address, &mut iocb).is_err() {
+            if submitted == 0 {
+                return Err(CompatErrno::Fault);
+            }
+            break;
+        }
+        let data = u64::from_le_bytes(iocb[0..8].try_into().unwrap());
+        let opcode = u16::from_le_bytes(iocb[16..18].try_into().unwrap());
+        let fd = u32::from_le_bytes(iocb[20..24].try_into().unwrap());
+        let buffer = u64::from_le_bytes(iocb[24..32].try_into().unwrap());
+        let bytes = u64::from_le_bytes(iocb[32..40].try_into().unwrap());
+        let offset = i64::from_le_bytes(iocb[40..48].try_into().unwrap());
+        let result = if offset < 0 {
+            -(i64::from(CompatErrno::Invalid as i32))
+        } else {
+            match opcode {
+                0 => compat_result(linux_pread64(
+                    pid,
+                    [u64::from(fd), buffer, bytes, offset as u64, 0, 0],
+                )),
+                1 => compat_result(linux_pwrite64(
+                    pid,
+                    [u64::from(fd), buffer, bytes, offset as u64, 0, 0],
+                )),
+                2 | 3 => compat_result(linux_sync_fd(pid, u64::from(fd), opcode == 3)),
+                6 => 0,
+                _ => -(i64::from(CompatErrno::Invalid as i32)),
+            }
+        };
+        let mut state = state.lock();
+        if state.events.len() >= state.max_events {
+            if submitted == 0 {
+                return Err(CompatErrno::TryAgain);
+            }
+            break;
+        }
+        state.events.push_back(proc::LinuxAioEvent {
+            data,
+            object: iocb_address,
+            result,
+            result2: 0,
+        });
+        submitted += 1;
+    }
+    Ok(submitted as u64)
+}
+
+/// Returns completed legacy AIO events, optionally waiting for a minimum count.
+fn linux_io_getevents(
+    pid: ObjId,
+    args: [u64; 6],
+    pgetevents: bool,
+) -> Result<u64, CompatErrno> {
+    const EVENT_BYTES: usize = 32;
+    const MAX_EVENTS: usize = 32;
+    if pgetevents && args[5] != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    let state = proc::linux_aio_state(pid, args[0]).ok_or(CompatErrno::Invalid)?;
+    let minimum = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let maximum = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if maximum > MAX_EVENTS || minimum > maximum || maximum != 0 && args[3] == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let deadline = if args[4] == 0 {
+        None
+    } else {
+        Some(
+            sched::now_ns()
+                .checked_add(read_linux_timespec(args[4])?)
+                .ok_or(CompatErrno::Invalid)?,
+        )
+    };
+    let events = loop {
+        let mut ready = alloc::vec::Vec::new();
+        {
+            let mut state = state.lock();
+            while ready.len() < maximum {
+                let Some(event) = state.events.pop_front() else {
+                    break;
+                };
+                ready.push(event);
+            }
+        }
+        if ready.len() >= minimum {
+            break ready;
+        }
+        if let Some(deadline) = deadline {
+            if sched::now_ns() >= deadline {
+                break ready;
+            }
+            let wake = deadline.min(sched::now_ns().saturating_add(10_000_000));
+            if sched::sleep_until_ns(wake).is_err() {
+                sched::pause();
+            }
+        } else {
+            sched::pause();
+        }
+    };
+    if events.is_empty() {
+        return Ok(0);
+    }
+    let mut output = alloc::vec![0u8; events.len() * EVENT_BYTES];
+    for (index, event) in events.iter().enumerate() {
+        let base = index * EVENT_BYTES;
+        output[base..base + 8].copy_from_slice(&event.data.to_le_bytes());
+        output[base + 8..base + 16].copy_from_slice(&event.object.to_le_bytes());
+        output[base + 16..base + 24].copy_from_slice(&event.result.to_le_bytes());
+        output[base + 24..base + 32].copy_from_slice(&event.result2.to_le_bytes());
+    }
+    copy_to_user(args[3], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(events.len() as u64)
 }
 
 /// Creates a bounded Linux epoll instance.
