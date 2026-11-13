@@ -2689,13 +2689,13 @@ fn execute(
         LinuxSyscall::SetMempolicyHomeNode => {
             compat_result(linux_set_mempolicy_home_node(pid, call.args))
         }
+        LinuxSyscall::MigratePages => compat_result(linux_migrate_pages(pid, call.args)),
+        LinuxSyscall::MovePages => compat_result(linux_move_pages(pid, call.args)),
         LinuxSyscall::AddKey
         | LinuxSyscall::RequestKey
         | LinuxSyscall::Keyctl
         | LinuxSyscall::FanotifyInit
         | LinuxSyscall::FanotifyMark
-        | LinuxSyscall::MigratePages
-        | LinuxSyscall::MovePages
         | LinuxSyscall::LandlockCreateRuleset
         | LinuxSyscall::LandlockAddRule
         | LinuxSyscall::LandlockRestrictSelf
@@ -9751,6 +9751,82 @@ fn linux_set_mempolicy_home_node(pid: ObjId, args: [u64; 6]) -> Result<u64, Comp
     }
     linux_mempolicy_range(pid, args[0], args[1])?;
     Ok(0)
+}
+
+fn linux_mempolicy_target(pid: ObjId, raw_pid: u64) -> Result<ObjId, CompatErrno> {
+    let target_pid = u32::try_from(raw_pid).map_err(|_| CompatErrno::Invalid)?;
+    let target = if target_pid == 0 {
+        pid
+    } else {
+        proc::linux_process_for_pid(target_pid).ok_or(CompatErrno::NoProcess)?
+    };
+    let caller = crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let target_app = crate::security::process_application(target).ok_or(CompatErrno::NoProcess)?;
+    if caller != target_app {
+        return Err(CompatErrno::Perm);
+    }
+    Ok(target)
+}
+
+fn linux_migrate_pages(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let maxnode = args[1];
+    if maxnode == 0 || maxnode > 64 || args[2] == 0 || args[3] == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let _ = linux_mempolicy_target(pid, args[0])?;
+    let mut old_nodes = [0u8; 8];
+    let mut new_nodes = [0u8; 8];
+    copy_from_user(&mut old_nodes, args[2], 8).map_err(|_| CompatErrno::Fault)?;
+    copy_from_user(&mut new_nodes, args[3], 8).map_err(|_| CompatErrno::Fault)?;
+    if u64::from_le_bytes(old_nodes) & 1 == 0 || u64::from_le_bytes(new_nodes) & 1 == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    Ok(0)
+}
+
+fn linux_move_pages(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MAX_PAGES: usize = 1024;
+    const MPOL_MF_MOVE: u64 = 2;
+    const MPOL_MF_MOVE_ALL: u64 = 4;
+    let count = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if count == 0 || count > MAX_PAGES || args[5] & !(MPOL_MF_MOVE | MPOL_MF_MOVE_ALL) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let target = linux_mempolicy_target(pid, args[0])?;
+    let mut pages_raw = alloc::vec![0u8; count * 8];
+    let mut statuses = alloc::vec![0i32; count];
+    copy_from_user(&mut pages_raw, args[2], count * 8).map_err(|_| CompatErrno::Fault)?;
+    let mut nodes = alloc::vec![0i32; count];
+    if args[3] != 0 {
+        let mut raw = alloc::vec![0u8; count * 4];
+        copy_from_user(&mut raw, args[3], count * 4).map_err(|_| CompatErrno::Fault)?;
+        for (index, node) in nodes.iter_mut().enumerate() {
+            *node = i32::from_le_bytes(raw[index * 4..index * 4 + 4].try_into().unwrap());
+        }
+    }
+    let mut errors = 0u64;
+    for (index, page) in pages_raw.chunks_exact(8).enumerate() {
+        let address = u64::from_le_bytes(page.try_into().unwrap());
+        if proc::page_flags(target, address).is_none() {
+            statuses[index] = -(CompatErrno::NoEntry as i32);
+            errors += 1;
+        } else if args[3] != 0 {
+            if nodes[index] != 0 {
+                statuses[index] = -(CompatErrno::Invalid as i32);
+                errors += 1;
+            } else {
+                statuses[index] = 0;
+            }
+        } else {
+            statuses[index] = 0;
+        }
+    }
+    let mut status_raw = alloc::vec![0u8; count * 4];
+    for (index, status) in statuses.iter().enumerate() {
+        status_raw[index * 4..index * 4 + 4].copy_from_slice(&status.to_le_bytes());
+    }
+    copy_to_user(args[4], &status_raw, status_raw.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(errors)
 }
 
 fn linux_eventfd(pid: ObjId, args: [u64; 6], eventfd2: bool) -> Result<u64, CompatErrno> {

@@ -4543,8 +4543,7 @@ int main(void) {
     const long unsupported_features[] = {
         SYS_add_key, SYS_request_key, SYS_keyctl,
         SYS_fanotify_init, SYS_fanotify_mark,
-        SYS_migrate_pages,
-        SYS_move_pages, SYS_landlock_create_ruleset, SYS_landlock_add_rule,
+        SYS_landlock_create_ruleset, SYS_landlock_add_rule,
         SYS_landlock_restrict_self, SYS_listns,
         SYS_lsm_set_self_attr,
         SYS_map_shadow_stack, SYS_open_tree_attr,
@@ -5160,9 +5159,28 @@ int main(void) {
         syscall(SYS_mbind, mempolicy_memory, 4096, MPOL_DEFAULT,
                 NULL, 0, MPOL_MF_STRICT) != 0 ||
         syscall(SYS_set_mempolicy_home_node, mempolicy_memory,
-                4096, 0, 0) != 0 ||
-        munmap(mempolicy_memory, 4096) != 0) {
+                4096, 0, 0) != 0) {
         return 641;
+    }
+    void *move_pages_addresses[2] = {
+        mempolicy_memory,
+        (void *)-4096,
+    };
+    int move_pages_nodes[2] = {0, 0};
+    int move_pages_status[2] = {99, 99};
+    unsigned long migrate_mask = 1UL;
+    if (syscall(SYS_move_pages, 0, 2, move_pages_addresses,
+                NULL, move_pages_status, 0) != 1 ||
+        move_pages_status[0] != 0 ||
+        move_pages_status[1] != -ENOENT ||
+        syscall(SYS_move_pages, 0, 1, move_pages_addresses,
+                move_pages_nodes, move_pages_status,
+                MPOL_MF_MOVE) != 0 ||
+        move_pages_status[0] != 0 ||
+        syscall(SYS_migrate_pages, 0, 64,
+                &migrate_mask, &migrate_mask) != 0 ||
+        munmap(mempolicy_memory, 4096) != 0) {
+        return 642;
     }
     char executable[128];
     ssize_t executable_len = readlinkat(AT_FDCWD, "/proc/self/exe",
