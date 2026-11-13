@@ -206,6 +206,8 @@ pub mod sandbox_store;
 pub mod native_install;
 #[cfg(any(test, feature = "persistent-install"))]
 pub mod persistent_install;
+#[cfg(any(test, feature = "persistent-install"))]
+pub mod native_install_service;
 pub mod native_module_lifecycle;
 
 // issue #3：统一定时事件契约。 / Unified timer-event contract.
