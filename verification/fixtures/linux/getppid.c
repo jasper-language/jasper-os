@@ -3377,6 +3377,41 @@ int main(void) {
         errno != EFAULT) {
         return 445;
     }
+    int legacy_epoll = syscall(SYS_epoll_create, 16);
+    if (legacy_epoll < 0 || close(legacy_epoll) != 0) {
+        return 446;
+    }
+    errno = 0;
+    if (syscall(SYS_epoll_create, 0) != -1 || errno != EINVAL) {
+        return 447;
+    }
+    int sendfile_input =
+        syscall(SYS_open, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                O_RDONLY | O_CLOEXEC, 0);
+    int sendfile_pipe[2];
+    off_t sendfile_offset = 0;
+    unsigned char sendfile_bytes[16] = {0};
+    if (sendfile_input < 0 || syscall(SYS_pipe, sendfile_pipe) != 0 ||
+        syscall(SYS_sendfile, sendfile_pipe[1], sendfile_input,
+                &sendfile_offset, sizeof(sendfile_bytes)) !=
+            (long)sizeof(sendfile_bytes) ||
+        sendfile_offset != (off_t)sizeof(sendfile_bytes) ||
+        read(sendfile_pipe[0], sendfile_bytes, sizeof(sendfile_bytes)) !=
+            (ssize_t)sizeof(sendfile_bytes) ||
+        memcmp(sendfile_bytes, "\177ELF", 4) != 0) {
+        return 448;
+    }
+    if (lseek(sendfile_input, 0, SEEK_SET) != 0 ||
+        syscall(SYS_sendfile, sendfile_pipe[1], sendfile_input,
+                NULL, 4) != 4 ||
+        lseek(sendfile_input, 0, SEEK_CUR) != 4) {
+        return 449;
+    }
+    if (close(sendfile_pipe[0]) != 0 ||
+        close(sendfile_pipe[1]) != 0 ||
+        close(sendfile_input) != 0) {
+        return 450;
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);

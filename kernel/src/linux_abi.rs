@@ -1974,6 +1974,7 @@ fn execute(
         LinuxSyscall::Ioctl => compat_result(linux_ioctl(pid, call.args)),
         LinuxSyscall::StatFs => compat_result(linux_statfs(call.args)),
         LinuxSyscall::ReadLink => compat_result(linux_readlink(pid, call.args)),
+        LinuxSyscall::SendFile => compat_result(linux_sendfile(pid, call.args)),
         LinuxSyscall::Mmap => compat_result(linux_mmap(pid, call.args)),
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
@@ -2109,6 +2110,7 @@ fn execute(
         LinuxSyscall::Getrlimit => compat_result(linux_getrlimit(pid, call.args)),
         LinuxSyscall::Setrlimit => compat_result(linux_setrlimit(pid, call.args)),
         LinuxSyscall::Futex => compat_result(linux_futex(pid, call.args)),
+        LinuxSyscall::EpollCreate => compat_result(linux_epoll_create(pid, call.args)),
         LinuxSyscall::EpollCreate1 => compat_result(linux_epoll_create1(pid, call.args)),
         LinuxSyscall::EpollCtl => compat_result(linux_epoll_ctl(pid, call.args)),
         LinuxSyscall::EpollWait => compat_result(linux_epoll_wait(pid, call.args, false, false)),
@@ -6774,10 +6776,23 @@ fn linux_pipe_write(
     if len > compat_core::PIPE_CAPACITY {
         return Err(CompatErrno::Invalid);
     }
-    let endpoint = proc::linux_pipe_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
-    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
     let mut input = alloc::vec![0u8; len];
     copy_from_user(&mut input, address, len).map_err(|_| CompatErrno::Fault)?;
+    linux_pipe_write_buffer(pid, fd, handle, &input).map(|written| written as u64)
+}
+
+/// Writes an already validated byte slice into a bounded pipe.
+fn linux_pipe_write_buffer(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    input: &[u8],
+) -> Result<usize, CompatErrno> {
+    if input.is_empty() {
+        return Ok(0);
+    }
+    let endpoint = proc::linux_pipe_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
     let mut written = 0usize;
     while written < input.len() {
         match endpoint.write(&input[written..]) {
@@ -6794,7 +6809,7 @@ fn linux_pipe_write(
                 return if written == 0 {
                     Err(CompatErrno::TryAgain)
                 } else {
-                    Ok(written as u64)
+                    Ok(written)
                 }
             }
             compat_core::PipeWrite::WouldBlock => {
@@ -6802,14 +6817,14 @@ fn linux_pipe_write(
                     return if written == 0 {
                         Err(CompatErrno::Interrupted)
                     } else {
-                        Ok(written as u64)
+                        Ok(written)
                     };
                 }
                 sched::pause();
             }
         }
     }
-    Ok(written as u64)
+    Ok(written)
 }
 
 /// Reads one connected AF_UNIX stream endpoint.
@@ -8379,6 +8394,16 @@ fn linux_epoll_create1(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         .ok_or(CompatErrno::NoSpace)
 }
 
+/// Implements legacy `epoll_create(2)`; Linux ignores a positive legacy size hint.
+fn linux_epoll_create(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if (args[0] as u32 as i32) <= 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    proc::linux_epoll_create(pid, false)
+        .map(u64::from)
+        .ok_or(CompatErrno::NoSpace)
+}
+
 /// Adds, removes or modifies one epoll interest by the target open-file handle.
 fn linux_epoll_ctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const EPOLL_CTL_ADD: u64 = 1;
@@ -9224,6 +9249,104 @@ fn linux_readlinkat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Invalid);
     }
     linux_readlink(pid, [args[1], args[2], args[3], 0, 0, 0])
+}
+
+/// Implements bounded `sendfile(2)` from one virtual file to a writable stream.
+fn linux_sendfile(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MAX_SENDFILE: u64 = 1024 * 1024;
+    let output_fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let input_fd = u32::try_from(args[1]).map_err(|_| CompatErrno::BadFd)?;
+    let (input_handle, file_offset) =
+        proc::linux_file_state(pid, input_fd).ok_or(CompatErrno::BadFd)?;
+    let file = crate::linux_vfs::FileId::from_handle(input_handle).ok_or(CompatErrno::BadFd)?;
+    let (start, explicit_offset) = if args[2] == 0 {
+        (file_offset, false)
+    } else {
+        let mut raw = [0u8; 8];
+        copy_from_user(&mut raw, args[2], 8).map_err(|_| CompatErrno::Fault)?;
+        let requested = i64::from_le_bytes(raw);
+        if requested < 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        (requested as u64, true)
+    };
+    let start = usize::try_from(start).map_err(|_| CompatErrno::Invalid)?;
+    let bytes = file.bytes();
+    let available = bytes.len().saturating_sub(start);
+    let take = args[3]
+        .min(MAX_SENDFILE)
+        .min(compat_core::PIPE_CAPACITY as u64)
+        .min(available as u64) as usize;
+    if take == 0 {
+        return Ok(0);
+    }
+    let output = proc::linux_fd(pid, output_fd).ok_or(CompatErrno::BadFd)?;
+    let io = admit_process_io(pid, take as u64, 1)?;
+    let written = match output.kind {
+        compat_core::fd::CompatKind::Pipe => {
+            if !output
+                .rights
+                .contains(kernel_core::object::Rights::WRITE)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            linux_pipe_write_buffer(pid, output_fd, output.handle, &bytes[start..start + take])?
+        }
+        compat_core::fd::CompatKind::Socket => {
+            if !output
+                .rights
+                .contains(kernel_core::object::Rights::WRITE)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            linux_socket_write_buffer(
+                pid,
+                output_fd,
+                output.handle,
+                &bytes[start..start + take],
+                false,
+                false,
+                true,
+            )? as usize
+        }
+        compat_core::fd::CompatKind::Device
+            if proc::linux_ashmem_is_regular(pid, output.handle) == Some(true) =>
+        {
+            if !output
+                .rights
+                .contains(kernel_core::object::Rights::WRITE)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            let output_offset = proc::linux_fd_offset(pid, output_fd).ok_or(CompatErrno::BadFd)?;
+            let written = proc::linux_ashmem_write_from(
+                pid,
+                output.handle,
+                output_offset,
+                &bytes[start..start + take],
+            )
+            .map_err(ashmem_compat_error)?;
+            if written != 0
+                && !proc::set_linux_fd_offset(pid, output_fd, output_offset + written as u64)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            written
+        }
+        compat_core::fd::CompatKind::File => return Err(CompatErrno::ReadOnly),
+        _ => return Err(CompatErrno::Invalid),
+    };
+    io.commit();
+    if written == 0 {
+        return Ok(0);
+    }
+    if explicit_offset {
+        copy_to_user(args[2], &(start as u64 + written as u64).to_le_bytes(), 8)
+            .map_err(|_| CompatErrno::Fault)?;
+    } else if !proc::set_linux_file_offset(pid, input_fd, start as u64 + written as u64) {
+        return Err(CompatErrno::BadFd);
+    }
+    Ok(written as u64)
 }
 
 /// Stores or queries one x86_64 Linux signal action.
