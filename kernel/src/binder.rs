@@ -19,6 +19,7 @@ const MAX_OFFSET_BYTES: usize = 4096;
 const MAX_QUEUE: usize = 64;
 const MAX_NODES: usize = 128;
 const MAX_HANDLES: usize = 512;
+const MAX_BINDER_THREADS: usize = 64;
 
 const BINDER_TYPE_BINDER: u32 = 0x7362_2a85;
 const BINDER_TYPE_WEAK_BINDER: u32 = 0x7762_2a85;
@@ -46,12 +47,14 @@ const BC_REGISTER_LOOPER: u32 = 0x630b;
 const BR_TRANSACTION: u32 = 0x8040_7202;
 const BR_REPLY: u32 = 0x8040_7203;
 const BR_TRANSACTION_COMPLETE: u32 = 0x7206;
+const BR_SPAWN_LOOPER: u32 = 0x720d;
 const BR_DEAD_BINDER: u32 = 0x8008_720f;
 const BR_CLEAR_DEATH_NOTIFICATION_DONE: u32 = 0x8008_7210;
 const TF_ONE_WAY: u32 = 0x01;
 
 enum QueuedCommand {
     Complete,
+    SpawnLooper,
     DeathNotification {
         command: u32,
         cookie: u64,
@@ -101,6 +104,13 @@ struct DeathRequest {
     cookie: u64,
 }
 
+#[derive(Clone, Copy)]
+struct BinderThread {
+    process: ObjId,
+    tid: u32,
+    pool_member: bool,
+}
+
 struct State {
     context_manager: Option<ObjId>,
     queue: VecDeque<(ObjId, QueuedCommand)>,
@@ -111,6 +121,8 @@ struct State {
     next_node: u64,
     next_handle: u32,
     death_requests: Vec<DeathRequest>,
+    threads: Vec<BinderThread>,
+    spawn_pending: Vec<ObjId>,
 }
 
 impl State {
@@ -125,6 +137,8 @@ impl State {
             next_node: 1,
             next_handle: 1,
             death_requests: Vec::new(),
+            threads: Vec::new(),
+            spawn_pending: Vec::new(),
         }
     }
 }
@@ -228,12 +242,28 @@ pub(crate) fn release_process(pid: ObjId) {
     state
         .death_requests
         .retain(|request| request.recipient != pid);
+    state.threads.retain(|thread| thread.process != pid);
+    state.spawn_pending.retain(|process| *process != pid);
     state.active.retain(|active| active.target != pid && active.sender != pid);
     state.buffers.retain(|buffer| buffer.process != pid);
     state.queue.retain(|(target, command)| {
         *target != pid
             && !matches!(command, QueuedCommand::Transaction { sender, .. } if *sender == pid)
     });
+}
+
+pub(crate) fn thread_exit(pid: ObjId) {
+    let Some(tid) = crate::linux_abi::current_linux_tid(pid) else {
+        return;
+    };
+    release_thread(pid, tid);
+}
+
+pub(crate) fn release_thread(pid: ObjId, tid: u32) {
+    let mut state = BINDER.lock();
+    state
+        .threads
+        .retain(|thread| thread.process != pid || thread.tid != tid);
 }
 
 pub(crate) fn write_read(pid: ObjId, fd: u32, args: [u64; 6]) -> Result<u64, CompatErrno> {
@@ -262,26 +292,30 @@ pub(crate) fn write_read(pid: ObjId, fd: u32, args: [u64; 6]) -> Result<u64, Com
 
     let nonblocking =
         proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
-    let read_consumed = loop {
-        let queued = {
-            let mut state = BINDER.lock();
-            state
-                .queue
-                .iter()
-                .position(|(target, _)| *target == pid)
-                .and_then(|index| state.queue.remove(index))
-                .map(|(_, command)| command)
-        };
-        if let Some(command) = queued {
-            break deliver(pid, read_buffer, read_size, command)?;
+    let read_consumed = if read_size < 4 {
+        0
+    } else {
+        loop {
+            let queued = {
+                let mut state = BINDER.lock();
+                state
+                    .queue
+                    .iter()
+                    .position(|(target, _)| *target == pid)
+                    .and_then(|index| state.queue.remove(index))
+                    .map(|(_, command)| command)
+            };
+            if let Some(command) = queued {
+                break deliver(pid, read_buffer, read_size, command)?;
+            }
+            if nonblocking {
+                break 0;
+            }
+            if proc::current_exiting() || crate::linux_abi::current_signal_pending(pid) {
+                return Err(CompatErrno::Interrupted);
+            }
+            crate::sched::pause();
         }
-        if read_size < 4 || nonblocking {
-            break 0;
-        }
-        if proc::current_exiting() || crate::linux_abi::current_signal_pending(pid) {
-            return Err(CompatErrno::Interrupted);
-        }
-        crate::sched::pause();
     };
     copy_to_user(
         request_pointer + 32,
@@ -401,12 +435,53 @@ fn process_write(pid: ObjId, address: u64, size: usize) -> Result<usize, CompatE
                 offset += 12;
             }
             BC_ENTER_LOOPER | BC_EXIT_LOOPER | BC_REGISTER_LOOPER => {
+                let tid = crate::linux_abi::current_linux_tid(pid)
+                    .ok_or(CompatErrno::NoSys)?;
+                update_looper(pid, tid, command)?;
                 offset += 4;
             }
             _ => return Err(CompatErrno::NoSys),
         }
     }
     Ok(offset)
+}
+
+fn update_looper(pid: ObjId, tid: u32, command: u32) -> Result<(), CompatErrno> {
+    let mut state = BINDER.lock();
+    let existing = state
+        .threads
+        .iter()
+        .position(|thread| thread.process == pid && thread.tid == tid);
+    if command == BC_EXIT_LOOPER {
+        if let Some(index) = existing {
+            state.threads.remove(index);
+        }
+        return Ok(());
+    }
+    let pool_member = command == BC_REGISTER_LOOPER;
+    if let Some(index) = existing {
+        state.threads[index].pool_member |= pool_member;
+    } else {
+        if state.threads.len() >= MAX_BINDER_THREADS {
+            return Err(CompatErrno::NoSpace);
+        }
+        state
+            .threads
+            .try_reserve(1)
+            .map_err(|_| CompatErrno::NoMemory)?;
+        state.threads.push(BinderThread {
+            process: pid,
+            tid,
+            pool_member,
+        });
+    }
+    if pool_member {
+        state.spawn_pending.retain(|process| *process != pid);
+        state.queue.retain(|(target, command)| {
+            *target != pid || !matches!(command, QueuedCommand::SpawnLooper)
+        });
+    }
+    Ok(())
 }
 
 fn process_reference(
@@ -745,13 +820,36 @@ fn enqueue_transaction(
             return Err(CompatErrno::Invalid);
         }
         translate_objects(pid, target, &mut data, &offsets)?;
+        let max_threads = proc::linux_binder_max_threads(target).unwrap_or(0) as usize;
         let mut state = BINDER.lock();
-        if state.queue.len() >= MAX_QUEUE {
+        let active_pool_threads = state
+            .threads
+            .iter()
+            .filter(|thread| thread.process == target && thread.pool_member)
+            .count();
+        let request_spawn = max_threads != 0
+            && active_pool_threads < max_threads
+            && !state.spawn_pending.contains(&target);
+        let queued = if request_spawn { 3 } else { 2 };
+        if state.queue.len().saturating_add(queued) > MAX_QUEUE {
             return Err(CompatErrno::TryAgain);
         }
-        state.queue.try_reserve(2).map_err(|_| CompatErrno::NoMemory)?;
+        state
+            .queue
+            .try_reserve(queued)
+            .map_err(|_| CompatErrno::NoMemory)?;
         if flags & TF_ONE_WAY == 0 {
             state.active.try_reserve(1).map_err(|_| CompatErrno::NoMemory)?;
+        }
+        if request_spawn {
+            state
+                .spawn_pending
+                .try_reserve(1)
+                .map_err(|_| CompatErrno::NoMemory)?;
+            state.spawn_pending.push(target);
+            state
+                .queue
+                .push_back((target, QueuedCommand::SpawnLooper));
         }
         state.queue.push_back((pid, QueuedCommand::Complete));
         state.queue.push_back((
@@ -791,7 +889,20 @@ fn enqueue_transaction(
         .rposition(|active| active.target == pid)
         .ok_or(CompatErrno::Invalid)?;
     state.active.remove(index);
-    state.queue.try_reserve(2).map_err(|_| CompatErrno::NoMemory)?;
+    if state.queue.len().saturating_add(2) > MAX_QUEUE {
+        state.active.push(ActiveTransaction {
+            target: pid,
+            sender,
+        });
+        return Err(CompatErrno::TryAgain);
+    }
+    if state.queue.try_reserve(2).is_err() {
+        state.active.push(ActiveTransaction {
+            target: pid,
+            sender,
+        });
+        return Err(CompatErrno::NoMemory);
+    }
     state.queue.push_back((pid, QueuedCommand::Complete));
     state.queue.push_back((
         sender,
@@ -821,6 +932,18 @@ fn deliver(
             copy_to_user(
                 address,
                 &BR_TRANSACTION_COMPLETE.to_le_bytes(),
+                4,
+            )
+            .map_err(|_| CompatErrno::Fault)?;
+            Ok(4)
+        }
+        QueuedCommand::SpawnLooper => {
+            if capacity < 4 {
+                return Err(CompatErrno::Range);
+            }
+            copy_to_user(
+                address,
+                &BR_SPAWN_LOOPER.to_le_bytes(),
                 4,
             )
             .map_err(|_| CompatErrno::Fault)?;

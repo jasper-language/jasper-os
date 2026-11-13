@@ -2524,6 +2524,21 @@ pub(crate) fn linux_set_binder_max_threads(pid: ObjId, handle: u64, value: u32) 
     })
 }
 
+/// Returns the process-wide Binder thread-pool limit for one binder descriptor.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_binder_max_threads(pid: ObjId) -> Option<u32> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .binder
+            .iter()
+            .map(|binder| binder.max_threads.load(Ordering::Acquire))
+            .max(),
+        _ => None,
+    })
+}
+
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_is_binder(pid: ObjId, handle: u64) -> bool {
     crate::kobj::with(|t| match t.get(pid) {

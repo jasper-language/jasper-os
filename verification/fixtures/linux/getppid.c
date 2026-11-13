@@ -169,6 +169,58 @@ struct prctl_thread_result {
     char changed[16];
 };
 
+struct binder_pool_thread_result {
+    int fd;
+    int result;
+};
+
+static void *binder_pool_worker(void *argument) {
+    struct binder_pool_thread_result *result = argument;
+    unsigned char read_buffer[68];
+    uint32_t register_looper = BC_REGISTER_LOOPER;
+    struct binder_write_read exchange = {
+        .write_size = sizeof(register_looper),
+        .write_buffer = (binder_uintptr_t)&register_looper,
+    };
+    if (ioctl(result->fd, BINDER_WRITE_READ, &exchange) != 0 ||
+        exchange.write_consumed != sizeof(register_looper)) {
+        result->result = 294;
+        return NULL;
+    }
+    memset(&exchange, 0, sizeof(exchange));
+    exchange.read_size = sizeof(read_buffer);
+    exchange.read_buffer = (binder_uintptr_t)read_buffer;
+    if (ioctl(result->fd, BINDER_WRITE_READ, &exchange) != 0 ||
+        exchange.read_consumed != sizeof(read_buffer) ||
+        *(uint32_t *)read_buffer != BR_TRANSACTION) {
+        result->result = 295;
+        return NULL;
+    }
+    struct binder_transaction_data transaction;
+    memcpy(&transaction, read_buffer + 4, sizeof(transaction));
+    if (transaction.code != 0x2222 ||
+        transaction.flags != TF_ONE_WAY ||
+        transaction.data_size != 4 ||
+        memcmp((void *)transaction.data.ptr.buffer, "LOOP", 4) != 0) {
+        result->result = 296;
+        return NULL;
+    }
+    unsigned char free_buffer[12];
+    memcpy(free_buffer, &(uint32_t){BC_FREE_BUFFER}, 4);
+    binder_uintptr_t pointer = transaction.data.ptr.buffer;
+    memcpy(free_buffer + 4, &pointer, sizeof(pointer));
+    memset(&exchange, 0, sizeof(exchange));
+    exchange.write_size = sizeof(free_buffer);
+    exchange.write_buffer = (binder_uintptr_t)free_buffer;
+    if (ioctl(result->fd, BINDER_WRITE_READ, &exchange) != 0 ||
+        exchange.write_consumed != sizeof(free_buffer)) {
+        result->result = 297;
+        return NULL;
+    }
+    result->result = 0;
+    return NULL;
+}
+
 static void *prctl_name_worker(void *argument) {
     struct prctl_thread_result *result = argument;
     result->get_result = prctl(PR_GET_NAME, result->inherited, 0, 0, 0);
@@ -2454,6 +2506,86 @@ int main(void) {
         server_exchange.write_consumed != sizeof(death_done) ||
         close(binder_ready[1]) != 0 || close(server) != 0) {
         return 182;
+    }
+    int pool_server = open("/dev/binder", O_RDWR | O_CLOEXEC);
+    struct flat_binder_object pool_manager = {
+        .hdr.type = BINDER_TYPE_BINDER,
+        .binder = (binder_uintptr_t)(uintptr_t)&pool_manager,
+        .cookie = 0x5252,
+    };
+    uint32_t pool_max_threads = 2;
+    if (pool_server < 0 ||
+        ioctl(pool_server, BINDER_SET_MAX_THREADS, &pool_max_threads) != 0 ||
+        ioctl(pool_server, BINDER_SET_CONTEXT_MGR_EXT, &pool_manager) != 0 ||
+        pipe2(binder_ready, 0) != 0) {
+        return 520;
+    }
+    pid_t pool_child = fork();
+    if (pool_child < 0) {
+        return 521;
+    }
+    if (pool_child == 0) {
+        close(binder_ready[1]);
+        char ready = 0;
+        int client = open("/dev/binder", O_RDWR | O_CLOEXEC);
+        char loop_data[4] = "LOOP";
+        struct binder_transaction_data request = {
+            .target.handle = 0,
+            .code = 0x2222,
+            .flags = TF_ONE_WAY,
+            .data_size = sizeof(loop_data),
+            .data.ptr.buffer = (binder_uintptr_t)loop_data,
+        };
+        unsigned char write_data[4 + sizeof(request)];
+        memcpy(write_data, &(uint32_t){BC_TRANSACTION}, 4);
+        memcpy(write_data + 4, &request, sizeof(request));
+        unsigned char read_data[4];
+        struct binder_write_read exchange = {
+            .write_size = sizeof(write_data),
+            .write_buffer = (binder_uintptr_t)write_data,
+            .read_size = sizeof(read_data),
+            .read_buffer = (binder_uintptr_t)read_data,
+        };
+        if (client < 0 || read(binder_ready[0], &ready, 1) != 1 ||
+            ready != 'P' ||
+            ioctl(client, BINDER_WRITE_READ, &exchange) != 0 ||
+            exchange.write_consumed != sizeof(write_data) ||
+            exchange.read_consumed != sizeof(read_data) ||
+            *(uint32_t *)read_data != BR_TRANSACTION_COMPLETE) {
+            _exit(522);
+        }
+        close(client);
+        close(binder_ready[0]);
+        _exit(0);
+    }
+    close(binder_ready[0]);
+    if (write(binder_ready[1], "P", 1) != 1) {
+        return 523;
+    }
+    memset(&server_exchange, 0, sizeof(server_exchange));
+    server_exchange.read_size = 4;
+    server_exchange.read_buffer = (binder_uintptr_t)server_read;
+    if (ioctl(pool_server, BINDER_WRITE_READ, &server_exchange) != 0 ||
+        server_exchange.read_consumed != 4 ||
+        *(uint32_t *)server_read != BR_SPAWN_LOOPER) {
+        return 524;
+    }
+    pthread_t pool_thread;
+    struct binder_pool_thread_result pool_thread_result = {
+        .fd = pool_server,
+        .result = -1,
+    };
+    if (pthread_create(&pool_thread, NULL, binder_pool_worker,
+                       &pool_thread_result) != 0 ||
+        pthread_join(pool_thread, NULL) != 0 ||
+        pool_thread_result.result != 0) {
+        return 525;
+    }
+    int pool_status = 0;
+    if (waitpid(pool_child, &pool_status, 0) != pool_child ||
+        !WIFEXITED(pool_status) || WEXITSTATUS(pool_status) != 0 ||
+        close(binder_ready[1]) != 0 || close(pool_server) != 0) {
+        return 526;
     }
     int poll_pipe[2];
     if (pipe2(poll_pipe, 0) != 0) {

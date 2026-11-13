@@ -368,6 +368,10 @@ fn linux_tid(process: ObjId) -> Option<u32> {
         .map(|entry| entry.tid)
 }
 
+pub(crate) fn current_linux_tid(process: ObjId) -> Option<u32> {
+    linux_tid(process)
+}
+
 fn linux_tid_for_task(task: crate::task::TaskId) -> Option<(ObjId, u32)> {
     COMPAT
         .lock()
@@ -1400,6 +1404,7 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
             last_thread,
         )
     };
+    crate::binder::release_thread(process, tid);
     if let Some(ticks) = sched::cpu_ticks(task) {
         let _ = proc::linux_account_exited_thread_cpu(process, ticks);
     }
@@ -9098,7 +9103,10 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     Err(CompatErrno::Busy)
                 }
             }
-            BINDER_THREAD_EXIT => Ok(0),
+            BINDER_THREAD_EXIT => {
+                crate::binder::thread_exit(pid);
+                Ok(0)
+            }
             BINDER_WRITE_READ => crate::binder::write_read(pid, fd, args),
             _ => Err(CompatErrno::NoSys),
         };
