@@ -697,6 +697,13 @@ int main(void) {
         return 633;
     }
     free(file_identity);
+    int mount_tree_fd = syscall(SYS_open_tree, AT_FDCWD, "/",
+                                OPEN_TREE_CLOEXEC);
+    if (mount_tree_fd < 0 ||
+        fcntl(mount_tree_fd, F_GETFD) != FD_CLOEXEC ||
+        close(mount_tree_fd) != 0) {
+        return 635;
+    }
     errno = 0;
     if (readv(-1, vectors, 2) != -1 || errno != EBADF) {
         return 7;
@@ -4516,7 +4523,7 @@ int main(void) {
         SYS_landlock_restrict_self, SYS_listns,
         SYS_lsm_set_self_attr,
         SYS_map_shadow_stack, SYS_mount_setattr, SYS_move_mount,
-        SYS_open_tree, SYS_open_tree_attr,
+        SYS_open_tree_attr,
         SYS_uprobe, SYS_uretprobe, SYS_userfaultfd,
     };
     for (size_t index = 0;

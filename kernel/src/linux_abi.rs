@@ -2676,6 +2676,7 @@ fn execute(
         LinuxSyscall::NameToHandleAt => compat_result(linux_name_to_handle_at(pid, call.args)),
         LinuxSyscall::OpenByHandleAt => compat_result(linux_open_by_handle_at(pid, call.args)),
         LinuxSyscall::LsmGetSelfAttr => compat_result(linux_lsm_get_self_attr(pid, call.args)),
+        LinuxSyscall::OpenTree => compat_result(linux_open_tree(pid, call.args)),
         LinuxSyscall::AddKey
         | LinuxSyscall::RequestKey
         | LinuxSyscall::Keyctl
@@ -2699,7 +2700,6 @@ fn execute(
         | LinuxSyscall::MapShadowStack
         | LinuxSyscall::MountSetattr
         | LinuxSyscall::MoveMount
-        | LinuxSyscall::OpenTree
         | LinuxSyscall::OpenTreeAttr
         | LinuxSyscall::Uprobe
         | LinuxSyscall::Uretprobe
@@ -9485,6 +9485,37 @@ fn linux_open_by_handle_at(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
         crate::linux_vfs::Node::File(_) => Err(CompatErrno::NotDirectory),
         crate::linux_vfs::Node::Executable(_) => Err(CompatErrno::Access),
     }
+}
+
+/// Opens a controlled descriptor for the read-only synthetic mount tree.
+fn linux_open_tree(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const OPEN_TREE_CLONE: u64 = 0x1;
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_NO_AUTOMOUNT: u64 = 0x800;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    const OPEN_TREE_CLOEXEC: u64 = 0x80000;
+    const AT_RECURSIVE: u64 = 0x8000;
+    let flags = args[2];
+    if flags
+        & !(OPEN_TREE_CLONE
+            | AT_SYMLINK_NOFOLLOW
+            | AT_NO_AUTOMOUNT
+            | AT_EMPTY_PATH
+            | OPEN_TREE_CLOEXEC
+            | AT_RECURSIVE)
+        != 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let _ = linux_node_for_path_or_fd(
+        pid,
+        args[0],
+        args[1],
+        flags & AT_EMPTY_PATH != 0,
+    )?;
+    proc::linux_install_mount_tree(pid, flags & OPEN_TREE_CLOEXEC != 0)
+        .map(u64::from)
+        .ok_or(CompatErrno::NoSpace)
 }
 
 fn linux_eventfd(pid: ObjId, args: [u64; 6], eventfd2: bool) -> Result<u64, CompatErrno> {

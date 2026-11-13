@@ -104,6 +104,8 @@ const LINUX_SIGNALFD_HANDLE_BASE: u64 = 0x0000_8a00_0000_0000;
 const LINUX_INOTIFY_HANDLE_BASE: u64 = 0x0000_8b00_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_MQ_HANDLE_BASE: u64 = 0x0000_8c00_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_MOUNT_TREE_HANDLE_BASE: u64 = 0x0000_8e00_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -177,6 +179,8 @@ struct LinuxProcessState {
     next_inotify_handle: u64,
     message_queues: Vec<LinuxMqHandle>,
     next_mq_handle: u64,
+    mount_trees: Vec<u64>,
+    next_mount_tree_handle: u64,
     epolls: Vec<LinuxEpollHandle>,
     next_epoll_handle: u64,
     iourings: Vec<LinuxIoUringHandle>,
@@ -2125,6 +2129,9 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     if handle >= LINUX_MQ_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.message_queues.retain(|queue| queue.handle != handle);
     }
+    if handle >= LINUX_MOUNT_TREE_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+        linux.mount_trees.retain(|mount| *mount != handle);
+    }
     if handle >= LINUX_EPOLL_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.epolls.retain(|epoll| epoll.handle != handle);
     }
@@ -2612,6 +2619,32 @@ pub(crate) fn linux_mq_state(pid: ObjId, handle: u64) -> Option<Arc<LinuxMqShare
             .map(|queue| Arc::clone(&queue.queue)),
         _ => None,
     })
+}
+
+/// Installs one read-only mount-tree descriptor for the synthetic root namespace.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_mount_tree(pid: ObjId, close_on_exec: bool) -> Option<u32> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux
+            .mount_trees
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_mount_tree_handle;
+        linux.next_mount_tree_handle = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ,
+                compat_core::fd::CompatKind::MountTree,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.mount_trees.push(handle);
+        Ok(fd.fd())
+    })
+    .ok()
 }
 
 /// Creates one epoll instance backed by a bounded per-instance registration set.
@@ -4906,6 +4939,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         next_inotify_handle: LINUX_INOTIFY_HANDLE_BASE,
         message_queues: Vec::new(),
         next_mq_handle: LINUX_MQ_HANDLE_BASE,
+        mount_trees: Vec::new(),
+        next_mount_tree_handle: LINUX_MOUNT_TREE_HANDLE_BASE,
         epolls: Vec::new(),
         next_epoll_handle: LINUX_EPOLL_HANDLE_BASE,
         iourings: Vec::new(),

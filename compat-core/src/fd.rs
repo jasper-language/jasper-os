@@ -18,6 +18,7 @@ pub enum CompatKind {
     Pidfd,
     Inotify,
     MessageQueue,
+    MountTree,
     Device,
     Other,
 }
