@@ -948,6 +948,15 @@ int main(void) {
                reader_flags, writer_flags, errno);
         return 86;
     }
+    int pipe_default_capacity = fcntl(pipe_fds[0], F_GETPIPE_SZ);
+    int pipe_resized_capacity = fcntl(pipe_fds[1], F_SETPIPE_SZ, 8192);
+    errno = 0;
+    if (pipe_default_capacity != 65536 ||
+        pipe_resized_capacity != 8192 ||
+        fcntl(pipe_fds[0], F_GETPIPE_SZ) != 8192 ||
+        fcntl(fd, F_GETPIPE_SZ) != -1 || errno != EINVAL) {
+        return 687;
+    }
     if (write(pipe_fds[1], "pipe", 4) != 4) {
         return 87;
     }

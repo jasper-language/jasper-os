@@ -13779,6 +13779,8 @@ pub(crate) fn release_flock_description(owner: u64) {
 fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const F_DUPFD: u64 = 0;
     const F_DUPFD_CLOEXEC: u64 = 1030;
+    const F_SETPIPE_SZ: u64 = 1031;
+    const F_GETPIPE_SZ: u64 = 1032;
     const F_ADD_SEALS: u64 = 1033;
     const F_GET_SEALS: u64 = 1034;
     const F_GETFD: u64 = 1;
@@ -13820,6 +13822,30 @@ fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             let duplicate = proc::linux_duplicate_fd(pid, fd, minimum, args[1] == F_DUPFD_CLOEXEC)
                 .ok_or(CompatErrno::NoSpace)?;
             Ok(u64::from(duplicate))
+        }
+        F_GETPIPE_SZ => {
+            if entry.kind != compat_core::fd::CompatKind::Pipe {
+                return Err(CompatErrno::Invalid);
+            }
+            proc::linux_pipe_endpoint(pid, entry.handle)
+                .map(|pipe| pipe.capacity() as u64)
+                .ok_or(CompatErrno::BadFd)
+        }
+        F_SETPIPE_SZ => {
+            if entry.kind != compat_core::fd::CompatKind::Pipe {
+                return Err(CompatErrno::Invalid);
+            }
+            let page = kernel_core::frame::FRAME_SIZE as u64;
+            let requested = args[2];
+            if requested == 0 || requested > compat_core::pipe::PIPE_CAPACITY as u64 {
+                return Err(CompatErrno::Perm);
+            }
+            let rounded = requested.div_ceil(page) * page;
+            let pipe = proc::linux_pipe_endpoint(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+            if !pipe.set_capacity(rounded as usize) {
+                return Err(CompatErrno::Busy);
+            }
+            Ok(pipe.capacity() as u64)
         }
         F_ADD_SEALS => {
             let seals = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
