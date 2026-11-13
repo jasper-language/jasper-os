@@ -411,6 +411,26 @@ impl PipeEndpoint {
         PipeRead::Data(count)
     }
 
+    /// Copies buffered bytes without consuming the pipe stream.
+    pub fn peek(&self, output: &mut [u8]) -> PipeRead {
+        let state = self.state.lock();
+        if output.is_empty() {
+            return PipeRead::Data(0);
+        }
+        if state.bytes.is_empty() {
+            return if state.writers == 0 {
+                PipeRead::Eof
+            } else {
+                PipeRead::WouldBlock
+            };
+        }
+        let count = output.len().min(state.bytes.len());
+        for (destination, source) in output[..count].iter_mut().zip(state.bytes.iter()) {
+            *destination = *source;
+        }
+        PipeRead::Data(count)
+    }
+
     pub fn buffered_bytes(&self) -> usize {
         self.state.lock().bytes.len()
     }

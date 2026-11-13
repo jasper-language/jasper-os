@@ -4054,6 +4054,30 @@ int main(void) {
         close(vmsplice_pipe[1]) != 0) {
         return 521;
     }
+    int tee_source[2];
+    int tee_destination[2];
+    char tee_source_data[8] = {0};
+    char tee_destination_data[8] = {0};
+    if (pipe(tee_source) != 0 || pipe(tee_destination) != 0 ||
+        write(tee_source[1], "teedata", 8) != 8 ||
+        syscall(SYS_tee, tee_source[0], tee_destination[1], 8, 0) != 8 ||
+        read(tee_source[0], tee_source_data, 8) != 8 ||
+        read(tee_destination[0], tee_destination_data, 8) != 8 ||
+        memcmp(tee_source_data, "teedata", 8) != 0 ||
+        memcmp(tee_destination_data, "teedata", 8) != 0) {
+        return 532;
+    }
+    errno = 0;
+    if (syscall(SYS_tee, tee_source[0], tee_destination[1], 8, 0x10) != -1 ||
+        errno != EINVAL ||
+        syscall(SYS_tee, tee_source[1], tee_destination[1], 8, 0) != -1 ||
+        errno != EBADF ||
+        close(tee_source[0]) != 0 ||
+        close(tee_source[1]) != 0 ||
+        close(tee_destination[0]) != 0 ||
+        close(tee_destination[1]) != 0) {
+        return 533;
+    }
     void *sealed_memory =
         mmap(NULL, 4096, PROT_READ | PROT_WRITE,
              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
