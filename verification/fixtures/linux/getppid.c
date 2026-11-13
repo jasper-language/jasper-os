@@ -81,6 +81,19 @@ struct jasper_ion_handle_data {
     int handle;
 };
 
+struct legacy_dirent_probe {
+    unsigned long d_ino;
+    unsigned long d_off;
+    unsigned short d_reclen;
+    char d_name[];
+};
+
+struct robust_list_probe {
+    void *list;
+    long futex_offset;
+    void *list_op_pending;
+} __attribute__((aligned(8)));
+
 static void signal_noop(int signal) {
     (void)signal;
 }
@@ -3090,6 +3103,129 @@ int main(void) {
     memset(&interval_value, 0, sizeof(interval_value));
     if (setitimer(ITIMER_REAL, &interval_value, NULL) != 0) {
         return 415;
+    }
+    int legacy_fd =
+        syscall(SYS_open, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                O_RDONLY | O_CLOEXEC, 0);
+    unsigned char legacy_magic[4] = {0};
+    if (legacy_fd < 0 ||
+        read(legacy_fd, legacy_magic, sizeof(legacy_magic)) !=
+            (ssize_t)sizeof(legacy_magic) ||
+        memcmp(legacy_magic, "\177ELF", sizeof(legacy_magic)) != 0 ||
+        close(legacy_fd) != 0) {
+        return 417;
+    }
+    errno = 0;
+    if (syscall(SYS_open, (const char *)(uintptr_t)1, O_RDONLY, 0) != -1 ||
+        errno != EFAULT) {
+        return 418;
+    }
+    errno = 0;
+    if (syscall(SYS_creat, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                0644) != -1 || errno != EROFS) {
+        return 419;
+    }
+    int legacy_pipe_fds[2] = {-1, -1};
+    char legacy_pipe_byte = 'P';
+    char legacy_pipe_result = 0;
+    if (syscall(SYS_pipe, legacy_pipe_fds) != 0 ||
+        write(legacy_pipe_fds[1], &legacy_pipe_byte, 1) != 1 ||
+        read(legacy_pipe_fds[0], &legacy_pipe_result, 1) != 1 ||
+        legacy_pipe_result != legacy_pipe_byte ||
+        close(legacy_pipe_fds[0]) != 0 ||
+        close(legacy_pipe_fds[1]) != 0) {
+        return 420;
+    }
+    int legacy_root =
+        syscall(SYS_open, "/", O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+    unsigned char legacy_dents[1024] = {0};
+    long legacy_dents_len =
+        legacy_root < 0
+            ? -1
+            : syscall(SYS_getdents, legacy_root, legacy_dents,
+                      sizeof(legacy_dents));
+    struct legacy_dirent_probe *legacy_first =
+        (struct legacy_dirent_probe *)legacy_dents;
+    if (legacy_root < 0 || legacy_dents_len <= 0 ||
+        legacy_first->d_reclen < 19 ||
+        legacy_first->d_reclen > legacy_dents_len ||
+        strcmp(legacy_first->d_name, ".") != 0 ||
+        close(legacy_root) != 0) {
+        return 421;
+    }
+    errno = 0;
+    if (syscall(SYS_getdents, -1, legacy_dents, sizeof(legacy_dents)) != -1 ||
+        errno != EBADF) {
+        return 422;
+    }
+    struct robust_list_probe robust_probe = {0};
+    void *robust_head = NULL;
+    unsigned long robust_length = 0;
+    if (syscall(SYS_set_robust_list, &robust_probe,
+                sizeof(robust_probe)) != 0 ||
+        syscall(SYS_get_robust_list, 0, &robust_head,
+                &robust_length) != 0 ||
+        robust_head != &robust_probe ||
+        robust_length != sizeof(robust_probe)) {
+        return 423;
+    }
+    errno = 0;
+    if (syscall(SYS_get_robust_list, 0, (void *)(uintptr_t)1,
+                &robust_length) != -1 ||
+        errno != EFAULT) {
+        return 424;
+    }
+    sigset_t tkill_signal_set;
+    sigset_t tkill_old_mask;
+    sigset_t tkill_pending;
+    sigemptyset(&tkill_signal_set);
+    sigaddset(&tkill_signal_set, SIGUSR2);
+    if (sigprocmask(SIG_BLOCK, &tkill_signal_set, &tkill_old_mask) != 0 ||
+        syscall(SYS_tkill, gettid(), SIGUSR2) != 0 ||
+        sigpending(&tkill_pending) != 0 ||
+        !sigismember(&tkill_pending, SIGUSR2) ||
+        sigprocmask(SIG_SETMASK, &tkill_old_mask, NULL) != 0) {
+        return 425;
+    }
+    pid_t legacy_fork_child = syscall(SYS_fork);
+    if (legacy_fork_child < 0) {
+        return 426;
+    }
+    if (legacy_fork_child == 0) {
+        _exit(0);
+    }
+    int legacy_fork_status = 0;
+    if (waitpid(legacy_fork_child, &legacy_fork_status, 0) !=
+            legacy_fork_child ||
+        !WIFEXITED(legacy_fork_status) ||
+        WEXITSTATUS(legacy_fork_status) != 0) {
+        return 427;
+    }
+    pid_t pause_child = fork();
+    if (pause_child < 0) {
+        return 428;
+    }
+    if (pause_child == 0) {
+        struct itimerval pause_timer = {
+            .it_value = {.tv_sec = 0, .tv_usec = 20000},
+        };
+        interval_timer_signals = 0;
+        if (signal(SIGALRM, interval_timer_signal_handler) == SIG_ERR ||
+            setitimer(ITIMER_REAL, &pause_timer, NULL) != 0) {
+            _exit(2);
+        }
+        long pause_result = syscall(SYS_pause);
+        int pause_errno = errno;
+        _exit(pause_result == -1 && pause_errno == EINTR &&
+                      interval_timer_signals > 0
+                  ? 0
+                  : 1);
+    }
+    int pause_child_status = 0;
+    if (waitpid(pause_child, &pause_child_status, 0) != pause_child ||
+        !WIFEXITED(pause_child_status) ||
+        WEXITSTATUS(pause_child_status) != 0) {
+        return 429;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
