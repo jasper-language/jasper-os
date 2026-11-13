@@ -36,6 +36,7 @@
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
 #include <sys/time.h>
+#include <sys/times.h>
 #include <sys/timex.h>
 #include <sys/timerfd.h>
 #include <sys/uio.h>
@@ -2731,10 +2732,22 @@ int main(void) {
          child_usage.ru_utime.tv_usec == 0)) {
         return 361;
     }
+    struct tms process_times = {0};
+    if (times(&process_times) <= 0 || process_times.tms_utime == 0 ||
+        process_times.tms_cutime == 0) {
+        return 363;
+    }
+    if (times(NULL) <= 0) {
+        return 364;
+    }
     errno = 0;
     if (syscall(SYS_getrusage, RUSAGE_SELF, (void *)1) != -1 ||
         errno != EFAULT) {
         return 362;
+    }
+    errno = 0;
+    if (syscall(SYS_times, (void *)1) != -1 || errno != EFAULT) {
+        return 365;
     }
     struct timespec resolution;
     if (clock_getres(CLOCK_MONOTONIC, &resolution) != 0 ||

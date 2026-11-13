@@ -1831,6 +1831,7 @@ fn execute(
         LinuxSyscall::GetTimeOfDay => compat_result(linux_gettimeofday(call.args)),
         LinuxSyscall::Getrusage => compat_result(linux_getrusage(pid, call.args)),
         LinuxSyscall::Time => compat_result(linux_time(call.args)),
+        LinuxSyscall::Times => compat_result(linux_times(pid, call.args)),
         LinuxSyscall::Getcwd => compat_result(linux_getcwd(pid, call.args)),
         LinuxSyscall::GetUid | LinuxSyscall::GetEuid => {
             compat_core::syscall::LINUX_COMPAT_UID as i64
@@ -4261,6 +4262,20 @@ fn linux_time(args: [u64; 6]) -> Result<u64, CompatErrno> {
         copy_to_user(args[0], &seconds.to_le_bytes(), 8).map_err(|_| CompatErrno::Fault)?;
     }
     Ok(seconds)
+}
+
+/// Reports process and waited-child CPU ticks in the legacy `tms` layout.
+/// 以传统 `tms` 布局报告进程与已等待子进程 CPU ticks。
+fn linux_times(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let self_ticks = proc::linux_process_cpu_ticks(pid).ok_or(CompatErrno::NoProcess)?;
+    let child_ticks = proc::linux_children_cpu_ticks(pid).ok_or(CompatErrno::NoProcess)?;
+    if args[0] != 0 {
+        let mut times = [0u8; 32];
+        times[0..8].copy_from_slice(&self_ticks.to_le_bytes());
+        times[16..24].copy_from_slice(&child_ticks.to_le_bytes());
+        copy_to_user(args[0], &times, times.len()).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(sched::timer_ticks())
 }
 
 /// Reports the compatibility clock's conservative timer resolution.
