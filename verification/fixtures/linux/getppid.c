@@ -584,13 +584,12 @@ int main(void) {
     sigemptyset(&sigqueue_mask);
     sigaddset(&sigqueue_mask, SIGUSR1);
     int sigqueue_fd = signalfd(-1, &sigqueue_mask, SFD_NONBLOCK);
-    siginfo_t queued_info = {
-        .si_signo = SIGUSR1,
-        .si_code = SI_QUEUE,
-        .si_pid = getpid(),
-        .si_uid = getuid(),
-        .si_value.sival_ptr = (void *)0x515545554544ULL,
-    };
+    siginfo_t queued_info = {0};
+    queued_info.si_signo = SIGUSR1;
+    queued_info.si_code = SI_QUEUE;
+    queued_info.si_pid = getpid();
+    queued_info.si_uid = getuid();
+    queued_info.si_value.sival_ptr = (void *)0x515545554544ULL;
     if (sigprocmask(SIG_BLOCK, &sigqueue_mask, &sigqueue_saved_mask) != 0 ||
         sigqueue_fd < 0 ||
         syscall(SYS_rt_sigqueueinfo, getpid(), SIGUSR1,
@@ -639,12 +638,11 @@ int main(void) {
         return 396;
     }
     if (forged_source == 0) {
-        siginfo_t forged = {
-            .si_signo = SIGUSR1,
-            .si_code = SI_USER,
-            .si_pid = getpid(),
-            .si_uid = getuid(),
-        };
+        siginfo_t forged = {0};
+        forged.si_signo = SIGUSR1;
+        forged.si_code = SI_USER;
+        forged.si_pid = getpid();
+        forged.si_uid = getuid();
         errno = 0;
         int result = syscall(SYS_rt_sigqueueinfo, getppid(),
                              SIGUSR1, &forged);
@@ -4260,13 +4258,12 @@ int main(void) {
     if (pidfd < 0 || poll(&pidfd_poll, 1, 0) != 0) {
         return 477;
     }
-    siginfo_t pidfd_info = {
-        .si_signo = SIGTERM,
-        .si_code = SI_QUEUE,
-        .si_pid = getpid(),
-        .si_uid = getuid(),
-        .si_value.sival_int = 0x50494446,
-    };
+    siginfo_t pidfd_info = {0};
+    pidfd_info.si_signo = SIGTERM;
+    pidfd_info.si_code = SI_QUEUE;
+    pidfd_info.si_pid = getpid();
+    pidfd_info.si_uid = getuid();
+    pidfd_info.si_value.sival_int = 0x50494446;
     int pidfd_status = 0;
     siginfo_t invalid_pidfd_info = pidfd_info;
     invalid_pidfd_info.si_signo = SIGUSR1;
