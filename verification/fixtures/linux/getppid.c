@@ -490,6 +490,84 @@ int main(void) {
         sigprocmask(SIG_SETMASK, &signalfd_saved_mask, NULL) != 0) {
         return 389;
     }
+    sigset_t sigqueue_saved_mask;
+    sigset_t sigqueue_mask;
+    sigemptyset(&sigqueue_mask);
+    sigaddset(&sigqueue_mask, SIGUSR1);
+    int sigqueue_fd = signalfd(-1, &sigqueue_mask, SFD_NONBLOCK);
+    siginfo_t queued_info = {
+        .si_signo = SIGUSR1,
+        .si_code = SI_QUEUE,
+        .si_pid = getpid(),
+        .si_uid = getuid(),
+        .si_value.sival_ptr = (void *)0x515545554544ULL,
+    };
+    if (sigprocmask(SIG_BLOCK, &sigqueue_mask, &sigqueue_saved_mask) != 0 ||
+        sigqueue_fd < 0 ||
+        syscall(SYS_rt_sigqueueinfo, getpid(), SIGUSR1,
+                &queued_info) != 0 ||
+        read(sigqueue_fd, &signal_info, sizeof(signal_info)) !=
+            (ssize_t)sizeof(signal_info) ||
+        signal_info.ssi_signo != SIGUSR1 ||
+        signal_info.ssi_code != SI_QUEUE ||
+        signal_info.ssi_pid != (uint32_t)getpid() ||
+        signal_info.ssi_uid != (uint32_t)getuid() ||
+        signal_info.ssi_ptr != 0x515545554544ULL) {
+        return 393;
+    }
+    queued_info.si_value.sival_ptr = (void *)0x544744515545ULL;
+    if (syscall(SYS_rt_tgsigqueueinfo, getpid(), gettid(),
+                SIGUSR1, &queued_info) != 0 ||
+        read(sigqueue_fd, &signal_info, sizeof(signal_info)) !=
+            (ssize_t)sizeof(signal_info) ||
+        signal_info.ssi_ptr != 0x544744515545ULL) {
+        return 394;
+    }
+    queued_info.si_value.sival_ptr = (void *)0x574149544544ULL;
+    siginfo_t waited_info = {0};
+    if (syscall(SYS_rt_sigqueueinfo, getpid(), SIGUSR1,
+                &queued_info) != 0 ||
+        syscall(SYS_rt_sigtimedwait, &sigqueue_mask, &waited_info,
+                NULL, 8) != SIGUSR1 ||
+        waited_info.si_code != SI_QUEUE ||
+        waited_info.si_pid != getpid() ||
+        waited_info.si_uid != getuid() ||
+        waited_info.si_value.sival_ptr != (void *)0x574149544544ULL) {
+        return 398;
+    }
+    errno = 0;
+    if (syscall(SYS_rt_sigqueueinfo, getpid(), 0, &queued_info) != -1 ||
+        errno != EINVAL ||
+        syscall(SYS_rt_sigqueueinfo, getpid(), SIGUSR1, NULL) != -1 ||
+        errno != EFAULT ||
+        syscall(SYS_rt_tgsigqueueinfo, getpid(), 0,
+                SIGUSR1, &queued_info) != -1 ||
+        errno != EINVAL) {
+        return 395;
+    }
+    pid_t forged_source = fork();
+    if (forged_source < 0) {
+        return 396;
+    }
+    if (forged_source == 0) {
+        siginfo_t forged = {
+            .si_signo = SIGUSR1,
+            .si_code = SI_USER,
+            .si_pid = getpid(),
+            .si_uid = getuid(),
+        };
+        errno = 0;
+        int result = syscall(SYS_rt_sigqueueinfo, getppid(),
+                             SIGUSR1, &forged);
+        _exit(result == -1 && errno == EPERM ? 0 : 1);
+    }
+    int forged_status = 0;
+    if (waitpid(forged_source, &forged_status, 0) != forged_source ||
+        !WIFEXITED(forged_status) || WEXITSTATUS(forged_status) != 0 ||
+        close(sigqueue_fd) != 0 ||
+        sigprocmask(SIG_SETMASK, &sigqueue_saved_mask, NULL) != 0) {
+        return 397;
+    }
     int fd = open("/usr/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         return 3;

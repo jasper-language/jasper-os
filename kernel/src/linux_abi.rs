@@ -39,14 +39,18 @@ static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
 #[derive(Clone, Copy)]
 struct SignalOrigin {
     pid: u32,
+    uid: u32,
     code: i32,
+    value: u64,
 }
 
 #[derive(Clone, Copy)]
 struct SignalFdRecord {
     signal: u32,
     sender_pid: u32,
+    sender_uid: u32,
     code: i32,
+    value: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -336,7 +340,12 @@ pub(crate) fn register_linux_thread(
             rseq_len: 0,
             signal_mask: inherited_mask,
             pending_signals: 0,
-            signal_origins: [SignalOrigin { pid: 0, code: 0 }; 64],
+            signal_origins: [SignalOrigin {
+                pid: 0,
+                uid: 0,
+                code: 0,
+                value: 0,
+            }; 64],
             altstack_sp: 0,
             altstack_size: 0,
             altstack_flags: 2,
@@ -395,6 +404,31 @@ fn queue_thread_signal(
     sender_pid: u32,
     code: i32,
 ) -> bool {
+    queue_thread_signal_info(
+        process,
+        tid,
+        signal,
+        sender_pid,
+        if code == 128 {
+            0
+        } else {
+            compat_core::syscall::LINUX_COMPAT_UID as u32
+        },
+        code,
+        0,
+    )
+}
+
+/// Queues one thread-directed signal with complete bounded siginfo metadata.
+fn queue_thread_signal_info(
+    process: ObjId,
+    tid: u32,
+    signal: u32,
+    sender_pid: u32,
+    sender_uid: u32,
+    code: i32,
+    value: u64,
+) -> bool {
     if !(1..=64).contains(&signal) {
         return false;
     }
@@ -411,7 +445,9 @@ fn queue_thread_signal(
         entry.pending_signals |= 1u64 << (signal - 1);
         entry.signal_origins[signal as usize - 1] = SignalOrigin {
             pid: sender_pid,
+            uid: sender_uid,
             code,
+            value,
         };
         crate::kprintln!(
             "[JSR-LINUX-SIGNAL] queued target_tid={} signal={} mask={:#x} pending={:#x}",
@@ -440,6 +476,29 @@ fn has_linux_thread(process: ObjId, tid: u32) -> bool {
 /// Queues one process-directed standard signal and wakes all eligible threads.
 /// 登记一个进程定向标准信号，并唤醒该进程的全部线程。
 fn queue_process_signal(process: ObjId, signal: u32, sender_pid: u32, code: i32) -> bool {
+    queue_process_signal_info(
+        process,
+        signal,
+        sender_pid,
+        if code == 128 {
+            0
+        } else {
+            compat_core::syscall::LINUX_COMPAT_UID as u32
+        },
+        code,
+        0,
+    )
+}
+
+/// Queues one process-directed signal with complete bounded siginfo metadata.
+fn queue_process_signal_info(
+    process: ObjId,
+    signal: u32,
+    sender_pid: u32,
+    sender_uid: u32,
+    code: i32,
+    value: u64,
+) -> bool {
     if !(1..=64).contains(&signal) {
         return false;
     }
@@ -460,7 +519,12 @@ fn queue_process_signal(process: ObjId, signal: u32, sender_pid: u32, code: i32)
             state.process_signals[slot] = Some(ProcessSignalSet {
                 process,
                 pending: 0,
-                origins: [SignalOrigin { pid: 0, code: 0 }; 64],
+                origins: [SignalOrigin {
+                    pid: 0,
+                    uid: 0,
+                    code: 0,
+                    value: 0,
+                }; 64],
             });
             slot
         };
@@ -470,7 +534,9 @@ fn queue_process_signal(process: ObjId, signal: u32, sender_pid: u32, code: i32)
         entry.pending |= 1u64 << (signal - 1);
         entry.origins[signal as usize - 1] = SignalOrigin {
             pid: sender_pid,
+            uid: sender_uid,
             code,
+            value,
         };
         crate::kprintln!(
             "[JSR-LINUX-SIGNAL] queued_process process={:#x} signal={} pending={:#x}",
@@ -723,9 +789,9 @@ fn leave_altstack(process: ObjId, autodisarm: bool) -> bool {
     true
 }
 
-/// Takes the lowest unmasked pending signal for the current thread.
-/// 取出当前线程编号最低且未被屏蔽的 pending 信号。
-fn take_deliverable_signal(process: ObjId) -> Option<u32> {
+/// Takes the lowest unmasked pending signal and its siginfo metadata.
+/// 取出当前线程编号最低且未被屏蔽的 pending 信号及其 siginfo 元数据。
+fn take_deliverable_signal(process: ObjId) -> Option<SignalFdRecord> {
     let (task, _) = sched::current();
     let mut state = COMPAT.lock();
     let (blocked, thread_deliverable) = {
@@ -763,6 +829,14 @@ fn take_deliverable_signal(process: ObjId) -> Option<u32> {
             .flatten()
             .find(|entry| entry.process == process)?;
         entry.pending &= !bit;
+        let origin = entry.origins[index as usize];
+        Some(SignalFdRecord {
+            signal: index + 1,
+            sender_pid: origin.pid,
+            sender_uid: origin.uid,
+            code: origin.code,
+            value: origin.value,
+        })
     } else {
         let entry = state
             .threads
@@ -770,8 +844,15 @@ fn take_deliverable_signal(process: ObjId) -> Option<u32> {
             .flatten()
             .find(|entry| entry.process == process && entry.task == task)?;
         entry.pending_signals &= !bit;
+        let origin = entry.signal_origins[index as usize];
+        Some(SignalFdRecord {
+            signal: index + 1,
+            sender_pid: origin.pid,
+            sender_uid: origin.uid,
+            code: origin.code,
+            value: origin.value,
+        })
     }
-    Some(index + 1)
 }
 
 fn signalfd_pending_mask(process: ObjId, requested: u64) -> u64 {
@@ -825,7 +906,9 @@ fn take_signalfd_record(process: ObjId, requested: u64) -> Option<SignalFdRecord
         Some(SignalFdRecord {
             signal,
             sender_pid: origin.pid,
+            sender_uid: origin.uid,
             code: origin.code,
+            value: origin.value,
         })
     } else {
         let entry = process_index.and_then(|index| state.process_signals[index].as_mut())?;
@@ -834,7 +917,9 @@ fn take_signalfd_record(process: ObjId, requested: u64) -> Option<SignalFdRecord
         Some(SignalFdRecord {
             signal,
             sender_pid: origin.pid,
+            sender_uid: origin.uid,
             code: origin.code,
+            value: origin.value,
         })
     }
 }
@@ -932,7 +1017,7 @@ fn copy_fxstate_to_frame(args: &SyscallArgs, frame: &mut [u8]) -> bool {
 /// 在被打断的用户栈上构造有界 Linux x86_64 信号帧。
 fn build_signal_frame(
     process: ObjId,
-    signal: u32,
+    record: SignalFdRecord,
     args: &SyscallArgs,
     user_ip: (u64, u64),
     interrupted_result: i64,
@@ -947,6 +1032,7 @@ fn build_signal_frame(
     const SS_AUTODISARM: u32 = 0x8000_0000;
     const SIG_DFL: u64 = 0;
     const SIG_IGN: u64 = 1;
+    let signal = record.signal;
     let action = proc::linux_signal_action(process, signal).ok_or(CompatErrno::Invalid)?;
     let handler = action[0];
     if handler == SIG_IGN {
@@ -1058,12 +1144,18 @@ fn build_signal_frame(
     write_frame_u64(&mut frame, gregs + 128, resume_rip);
     write_frame_u64(&mut frame, gregs + 136, 0x202);
     write_frame_u64(&mut frame, SIGNAL_UC_OFFSET + SIGNAL_UC_SIGMASK, old_mask);
-    write_frame_u64(&mut frame, SIGNAL_INFO_OFFSET, u64::from(signal));
+    write_frame_u64(&mut frame, SIGNAL_INFO_OFFSET, u64::from(record.signal));
+    write_frame_u64(
+        &mut frame,
+        SIGNAL_INFO_OFFSET + 8,
+        u64::from(record.code as u32),
+    );
     write_frame_u64(
         &mut frame,
         SIGNAL_INFO_OFFSET + 16,
-        u64::from(proc::linux_pid(process).ok_or(CompatErrno::NoProcess)?),
+        u64::from(record.sender_pid) | (u64::from(record.sender_uid) << 32),
     );
+    write_frame_u64(&mut frame, SIGNAL_INFO_OFFSET + 24, record.value);
     let nodefer = action[1] & (SA_NODEFER | SA_RESETHAND) != 0;
     let reset_hand = action[1] & SA_RESETHAND != 0;
     let handler_mask = if nodefer {
@@ -1125,7 +1217,8 @@ fn deliver_pending_signal(
     user_ip: Option<(u64, u64)>,
     interrupted_result: i64,
 ) -> Option<UserReturn> {
-    let signal = take_deliverable_signal(process)?;
+    let record = take_deliverable_signal(process)?;
+    let signal = record.signal;
     let action = proc::linux_signal_action(process, signal)?;
     if action[0] == 1 {
         if let Some(mask) = take_current_sigsuspend_restore_mask(process) {
@@ -1135,7 +1228,7 @@ fn deliver_pending_signal(
         return None;
     }
     let user_ip = user_ip?;
-    match build_signal_frame(process, signal, args, user_ip, interrupted_result) {
+    match build_signal_frame(process, record, args, user_ip, interrupted_result) {
         Ok(user) => Some(user),
         Err(error) => {
             crate::kprintln!(
@@ -1146,6 +1239,81 @@ fn deliver_pending_signal(
             let _ = proc::begin_exit(process, 128 + i64::from(signal));
             None
         }
+    }
+}
+
+/// Reads the bounded x86-64 siginfo layout used by the sigqueue syscalls.
+fn read_linux_queued_siginfo(signal: u32, address: u64) -> Result<SignalOrigin, CompatErrno> {
+    let mut info = [0u8; 128];
+    copy_from_user(&mut info, address, 128).map_err(|_| CompatErrno::Fault)?;
+    if !(1..=64).contains(&signal) {
+        return Err(CompatErrno::Invalid);
+    }
+    Ok(SignalOrigin {
+        pid: u32::from_le_bytes(info[16..20].try_into().unwrap()),
+        uid: u32::from_le_bytes(info[20..24].try_into().unwrap()),
+        code: i32::from_le_bytes(info[8..12].try_into().unwrap()),
+        value: u64::from_le_bytes(info[24..32].try_into().unwrap()),
+    })
+}
+
+/// Rejects forged SI_USER/SI_TKILL metadata from a different task.
+fn check_linux_sigqueue_source(
+    process: ObjId,
+    target_tid: u32,
+    code: i32,
+) -> Result<(), CompatErrno> {
+    const SI_TKILL: i32 = -6;
+    let sender_tid = linux_tid(process).ok_or(CompatErrno::NoSys)?;
+    if (code >= 0 || code == SI_TKILL) && sender_tid != target_tid {
+        return Err(CompatErrno::Perm);
+    }
+    Ok(())
+}
+
+/// Implements process-directed `rt_sigqueueinfo(2)`.
+fn linux_rt_sigqueueinfo(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+    const SIGSTOP: u32 = 19;
+    let pid = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let signal = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let info = read_linux_queued_siginfo(signal, args[2])?;
+    if pid == 0 {
+        return Err(CompatErrno::NoProcess);
+    }
+    if signal == SIGSTOP {
+        return Err(CompatErrno::NotSupported);
+    }
+    let target = proc::linux_process_for_pid(pid).ok_or(CompatErrno::NoProcess)?;
+    check_linux_sigqueue_source(process, pid, info.code)?;
+    if queue_process_signal_info(target, signal, info.pid, info.uid, info.code, info.value) {
+        Ok(())
+    } else {
+        Err(CompatErrno::NoSpace)
+    }
+}
+
+/// Implements thread-directed `rt_tgsigqueueinfo(2)`.
+fn linux_rt_tgsigqueueinfo(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+    const SIGSTOP: u32 = 19;
+    let tgid = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let tid = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let signal = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let info = read_linux_queued_siginfo(signal, args[3])?;
+    if tgid == 0 || tid == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if signal == SIGSTOP {
+        return Err(CompatErrno::NotSupported);
+    }
+    let target = proc::linux_process_for_pid(tgid).ok_or(CompatErrno::NoProcess)?;
+    if !has_linux_thread(target, tid) {
+        return Err(CompatErrno::NoProcess);
+    }
+    check_linux_sigqueue_source(process, tid, info.code)?;
+    if queue_thread_signal_info(target, tid, signal, info.pid, info.uid, info.code, info.value) {
+        Ok(())
+    } else {
+        Err(CompatErrno::NoSpace)
     }
 }
 
@@ -2158,9 +2326,15 @@ fn execute(
         LinuxSyscall::ClockNanosleep => compat_result(linux_clock_nanosleep(pid, call.args)),
         LinuxSyscall::RtSigAction => compat_result(linux_rt_sigaction(pid, call.args)),
         LinuxSyscall::RtSigPending => compat_result(linux_rt_sigpending(pid, call.args)),
+        LinuxSyscall::RtSigqueueinfo => {
+            compat_result(linux_rt_sigqueueinfo(pid, call.args).map(|()| 0))
+        }
         LinuxSyscall::RtSigProcMask => compat_result(linux_rt_sigprocmask(pid, call.args)),
         LinuxSyscall::RtSigsuspend => compat_result(linux_rt_sigsuspend(pid, call.args)),
         LinuxSyscall::RtSigtimedwait => compat_result(linux_rt_sigtimedwait(pid, call.args)),
+        LinuxSyscall::RtTgsigqueueinfo => {
+            compat_result(linux_rt_tgsigqueueinfo(pid, call.args).map(|()| 0))
+        }
         LinuxSyscall::Tkill => compat_result(linux_tkill(pid, call.args).map(|()| 0)),
         LinuxSyscall::Tgkill => compat_result(linux_tgkill(pid, call.args).map(|()| 0)),
         LinuxSyscall::SchedYield => {
@@ -6944,7 +7118,9 @@ fn linux_signalfd_read(
         let mut records = [SignalFdRecord {
             signal: 0,
             sender_pid: 0,
+            sender_uid: 0,
             code: 0,
+            value: 0,
         }; MAX_RECORDS];
         let mut count = 0usize;
         while count < limit {
@@ -6963,9 +7139,10 @@ fn linux_signalfd_read(
                     .copy_from_slice(&record.code.to_le_bytes());
                 output[base + 12..base + 16]
                     .copy_from_slice(&record.sender_pid.to_le_bytes());
-                output[base + 16..base + 20].copy_from_slice(
-                    &(compat_core::syscall::LINUX_COMPAT_UID as u32).to_le_bytes(),
-                );
+                output[base + 16..base + 20].copy_from_slice(&record.sender_uid.to_le_bytes());
+                output[base + 44..base + 48]
+                    .copy_from_slice(&(record.value as u32).to_le_bytes());
+                output[base + 48..base + 56].copy_from_slice(&record.value.to_le_bytes());
             }
             copy_to_user(address, &output[..count * RECORD_BYTES], count * RECORD_BYTES)
                 .map_err(|_| CompatErrno::Fault)?;
@@ -12157,7 +12334,8 @@ fn write_linux_siginfo(address: u64, record: SignalFdRecord) -> Result<(), Compa
     info[0..4].copy_from_slice(&record.signal.to_le_bytes());
     info[8..12].copy_from_slice(&record.code.to_le_bytes());
     info[16..20].copy_from_slice(&record.sender_pid.to_le_bytes());
-    info[20..24].copy_from_slice(&(compat_core::syscall::LINUX_COMPAT_UID as u32).to_le_bytes());
+    info[20..24].copy_from_slice(&record.sender_uid.to_le_bytes());
+    info[24..32].copy_from_slice(&record.value.to_le_bytes());
     copy_to_user(address, &info, info.len()).map_err(|_| CompatErrno::Fault)
 }
 
