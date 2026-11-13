@@ -3756,6 +3756,66 @@ int main(void) {
         capability_header.version != _LINUX_CAPABILITY_VERSION_3) {
         return 493;
     }
+    uid_t credential_real_uid = 0;
+    uid_t credential_effective_uid = 0;
+    uid_t credential_saved_uid = 0;
+    gid_t credential_real_gid = 0;
+    gid_t credential_effective_gid = 0;
+    gid_t credential_saved_gid = 0;
+    if (getresuid(&credential_real_uid, &credential_effective_uid,
+                  &credential_saved_uid) != 0 ||
+        getresgid(&credential_real_gid, &credential_effective_gid,
+                  &credential_saved_gid) != 0 ||
+        credential_real_uid != 0 || credential_effective_uid != 0 ||
+        credential_saved_uid != 0 || credential_real_gid != 0 ||
+        credential_effective_gid != 0 || credential_saved_gid != 0 ||
+        syscall(SYS_setfsuid, 123) != 0 ||
+        syscall(SYS_setfsuid, 0) != 123 ||
+        syscall(SYS_setfsgid, 124) != 0 ||
+        syscall(SYS_setfsgid, 0) != 124) {
+        return 494;
+    }
+    if (syscall(SYS_setresuid, 100, 100, 0) != 0 ||
+        getresuid(&credential_real_uid, &credential_effective_uid,
+                  &credential_saved_uid) != 0 ||
+        credential_real_uid != 100 || credential_effective_uid != 100 ||
+        credential_saved_uid != 0) {
+        return 495;
+    }
+    errno = 0;
+    if (syscall(SYS_setuid, 200) != -1 || errno != EPERM ||
+        syscall(SYS_setresuid, 0, 0, 0) != 0 ||
+        getuid() != 0 || geteuid() != 0) {
+        return 496;
+    }
+    if (syscall(SYS_setresgid, 110, 110, 0) != 0 ||
+        getresgid(&credential_real_gid, &credential_effective_gid,
+                  &credential_saved_gid) != 0 ||
+        credential_real_gid != 110 || credential_effective_gid != 110 ||
+        credential_saved_gid != 0 ||
+        syscall(SYS_setresgid, 0, 0, 0) != 0 ||
+        getgid() != 0 || getegid() != 0) {
+        return 497;
+    }
+    pid_t credentials_child = fork();
+    if (credentials_child < 0) {
+        return 498;
+    }
+    if (credentials_child == 0) {
+        int ok = syscall(SYS_setreuid, 101, 101) == 0 &&
+                 getuid() == 101 && geteuid() == 101 &&
+                 syscall(SYS_setregid, 102, 102) == 0 &&
+                 getgid() == 102 && getegid() == 102;
+        _exit(ok ? 0 : 1);
+    }
+    int credentials_status = 0;
+    if (waitpid(credentials_child, &credentials_status, 0) !=
+            credentials_child ||
+        !WIFEXITED(credentials_status) ||
+        WEXITSTATUS(credentials_status) != 0 ||
+        getuid() != 0 || getgid() != 0) {
+        return 499;
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);

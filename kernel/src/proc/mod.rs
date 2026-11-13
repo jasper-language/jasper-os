@@ -129,6 +129,14 @@ struct LinuxProcessState {
     cap_effective: u64,
     cap_permitted: u64,
     cap_inheritable: u64,
+    uid: u32,
+    euid: u32,
+    suid: u32,
+    fsuid: u32,
+    gid: u32,
+    egid: u32,
+    sgid: u32,
+    fsgid: u32,
     mappings: Vec<LinuxMapping>,
     pipes: Vec<LinuxPipeHandle>,
     next_pipe_handle: u64,
@@ -177,6 +185,19 @@ pub(crate) struct LinuxCapabilities {
     pub(crate) effective: u64,
     pub(crate) permitted: u64,
     pub(crate) inheritable: u64,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxCredentials {
+    pub(crate) uid: u32,
+    pub(crate) euid: u32,
+    pub(crate) suid: u32,
+    pub(crate) fsuid: u32,
+    pub(crate) gid: u32,
+    pub(crate) egid: u32,
+    pub(crate) sgid: u32,
+    pub(crate) fsgid: u32,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -3879,6 +3900,43 @@ pub(crate) fn set_linux_capabilities(pid: ObjId, capabilities: LinuxCapabilities
     .is_ok()
 }
 
+/// Returns the Linux ABI credential state for one compatibility process.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_credentials(pid: ObjId) -> Option<LinuxCredentials> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_ref().ok_or(ProcError::Exited)?;
+        Ok(LinuxCredentials {
+            uid: linux.uid,
+            euid: linux.euid,
+            suid: linux.suid,
+            fsuid: linux.fsuid,
+            gid: linux.gid,
+            egid: linux.egid,
+            sgid: linux.sgid,
+            fsgid: linux.fsgid,
+        })
+    })
+    .ok()
+}
+
+/// Replaces Linux ABI credentials without changing native Jasper authority.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_credentials(pid: ObjId, credentials: LinuxCredentials) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux.uid = credentials.uid;
+        linux.euid = credentials.euid;
+        linux.suid = credentials.suid;
+        linux.fsuid = credentials.fsuid;
+        linux.gid = credentials.gid;
+        linux.egid = credentials.egid;
+        linux.sgid = credentials.sgid;
+        linux.fsgid = credentials.fsgid;
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Sums scheduler CPU ticks over every live thread in one Linux process.
 /// 汇总一个 Linux 进程全部存活线程的调度器 CPU ticks。
 #[cfg(feature = "linux-abi")]
@@ -4131,6 +4189,14 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         cap_effective: (1u64 << 41) - 1,
         cap_permitted: (1u64 << 41) - 1,
         cap_inheritable: 0,
+        uid: 0,
+        euid: 0,
+        suid: 0,
+        fsuid: 0,
+        gid: 0,
+        egid: 0,
+        sgid: 0,
+        fsgid: 0,
         mappings: Vec::new(),
         pipes: Vec::new(),
         next_pipe_handle: LINUX_PIPE_HANDLE_BASE,

@@ -2076,12 +2076,18 @@ fn execute(
         LinuxSyscall::Alarm => compat_result(linux_alarm(pid, call.args)),
         LinuxSyscall::SetItimer => compat_result(linux_setitimer(pid, call.args)),
         LinuxSyscall::Getcwd => compat_result(linux_getcwd(pid, call.args)),
-        LinuxSyscall::GetUid | LinuxSyscall::GetEuid => {
-            compat_core::syscall::LINUX_COMPAT_UID as i64
-        }
-        LinuxSyscall::GetGid | LinuxSyscall::GetEgid => {
-            compat_core::syscall::LINUX_COMPAT_GID as i64
-        }
+        LinuxSyscall::GetUid => compat_result(linux_get_identity(pid, false, false)),
+        LinuxSyscall::GetEuid => compat_result(linux_get_identity(pid, false, true)),
+        LinuxSyscall::GetGid => compat_result(linux_get_identity(pid, true, false)),
+        LinuxSyscall::GetEgid => compat_result(linux_get_identity(pid, true, true)),
+        LinuxSyscall::SetUid => compat_result(linux_set_single_identity(pid, call.args[0], false)),
+        LinuxSyscall::SetGid => compat_result(linux_set_single_identity(pid, call.args[0], true)),
+        LinuxSyscall::SetReUid => compat_result(linux_set_real_effective_identity(pid, call.args, false)),
+        LinuxSyscall::SetReGid => compat_result(linux_set_real_effective_identity(pid, call.args, true)),
+        LinuxSyscall::SetResUid => compat_result(linux_set_reserved_identity(pid, call.args, false)),
+        LinuxSyscall::SetResGid => compat_result(linux_set_reserved_identity(pid, call.args, true)),
+        LinuxSyscall::SetFsuid => linux_set_fs_identity(pid, call.args[0], false),
+        LinuxSyscall::SetFsgid => linux_set_fs_identity(pid, call.args[0], true),
         LinuxSyscall::GetPpid => proc::linux_ppid(pid)
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
@@ -2095,8 +2101,8 @@ fn execute(
         // 兼容身份没有附加组，因此 size 查询和写入都返回 0。
         LinuxSyscall::GetGroups => 0,
         LinuxSyscall::SetGroups => compat_result(linux_setgroups(call.args)),
-        LinuxSyscall::GetResUid => compat_result(linux_getres(call.args, false)),
-        LinuxSyscall::GetResGid => compat_result(linux_getres(call.args, true)),
+        LinuxSyscall::GetResUid => compat_result(linux_getres(pid, call.args, false)),
+        LinuxSyscall::GetResGid => compat_result(linux_getres(pid, call.args, true)),
         LinuxSyscall::GetPriority => compat_result(linux_getpriority(pid, call.args)),
         LinuxSyscall::SetPriority => compat_result(linux_setpriority(pid, call.args)),
         LinuxSyscall::Lseek => compat_result(linux_lseek(pid, call.args)),
@@ -2171,12 +2177,211 @@ fn execute(
     }
 }
 
-/// Writes the Linux x86_64 `struct utsname` compatibility identity.
-/// 写入 Linux x86_64 `struct utsname` 兼容身份。
-fn linux_getres(args: [u64; 6], _gid: bool) -> Result<u64, CompatErrno> {
-    for pointer in [args[0], args[1], args[2]] {
+/// Returns one real or effective Linux ABI identity.
+fn linux_get_identity(pid: ObjId, gid: bool, effective: bool) -> Result<u64, CompatErrno> {
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    Ok(u64::from(if gid {
+        if effective {
+            credentials.egid
+        } else {
+            credentials.gid
+        }
+    } else if effective {
+        credentials.euid
+    } else {
+        credentials.uid
+    }))
+}
+
+/// Commits one validated Linux ABI credential state.
+fn commit_credentials(pid: ObjId, credentials: proc::LinuxCredentials) -> Result<u64, CompatErrno> {
+    if proc::set_linux_credentials(pid, credentials) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoProcess)
+    }
+}
+
+/// Implements `setuid(2)` and `setgid(2)`.
+fn linux_set_single_identity(
+    pid: ObjId,
+    raw_requested: u64,
+    gid: bool,
+) -> Result<u64, CompatErrno> {
+    let requested = raw_requested as u32;
+    if requested == u32::MAX {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    if gid {
+        if credentials.egid != 0 && requested != credentials.gid && requested != credentials.sgid {
+            return Err(CompatErrno::Perm);
+        }
+        credentials.gid = requested;
+        credentials.egid = requested;
+        credentials.sgid = requested;
+        credentials.fsgid = requested;
+    } else {
+        if credentials.euid != 0 && requested != credentials.uid && requested != credentials.suid {
+            return Err(CompatErrno::Perm);
+        }
+        credentials.uid = requested;
+        credentials.euid = requested;
+        credentials.suid = requested;
+        credentials.fsuid = requested;
+    }
+    commit_credentials(pid, credentials)
+}
+
+/// Implements `setreuid(2)` and `setregid(2)`.
+fn linux_set_real_effective_identity(
+    pid: ObjId,
+    args: [u64; 6],
+    gid: bool,
+) -> Result<u64, CompatErrno> {
+    let real_requested = args[0] as u32;
+    let effective_requested = args[1] as u32;
+    let mut credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let (real, effective, saved) = if gid {
+        (credentials.gid, credentials.egid, credentials.sgid)
+    } else {
+        (credentials.uid, credentials.euid, credentials.suid)
+    };
+    let privileged = (if gid { credentials.egid } else { credentials.euid }) == 0;
+    let allowed = |value: u32| {
+        value == u32::MAX || privileged || value == real || value == effective || value == saved
+    };
+    if !allowed(real_requested) || !allowed(effective_requested) {
+        return Err(CompatErrno::Perm);
+    }
+    let new_real = if real_requested == u32::MAX {
+        real
+    } else {
+        real_requested
+    };
+    let new_effective = if effective_requested == u32::MAX {
+        effective
+    } else {
+        effective_requested
+    };
+    let new_saved = if privileged || new_real != real || new_effective != effective {
+        new_effective
+    } else {
+        saved
+    };
+    if gid {
+        credentials.gid = new_real;
+        credentials.egid = new_effective;
+        credentials.sgid = new_saved;
+        if credentials.fsgid == effective {
+            credentials.fsgid = new_effective;
+        }
+    } else {
+        credentials.uid = new_real;
+        credentials.euid = new_effective;
+        credentials.suid = new_saved;
+        if credentials.fsuid == effective {
+            credentials.fsuid = new_effective;
+        }
+    }
+    commit_credentials(pid, credentials)
+}
+
+/// Implements `setresuid(2)` and `setresgid(2)`.
+fn linux_set_reserved_identity(
+    pid: ObjId,
+    args: [u64; 6],
+    gid: bool,
+) -> Result<u64, CompatErrno> {
+    let requested = [args[0] as u32, args[1] as u32, args[2] as u32];
+    let mut credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let current = if gid {
+        [credentials.gid, credentials.egid, credentials.sgid]
+    } else {
+        [credentials.uid, credentials.euid, credentials.suid]
+    };
+    let privileged = (if gid { credentials.egid } else { credentials.euid }) == 0;
+    if requested.iter().any(|value| {
+        *value != u32::MAX && !privileged && !current.contains(value)
+    }) {
+        return Err(CompatErrno::Perm);
+    }
+    let next = [
+        if requested[0] == u32::MAX { current[0] } else { requested[0] },
+        if requested[1] == u32::MAX { current[1] } else { requested[1] },
+        if requested[2] == u32::MAX { current[2] } else { requested[2] },
+    ];
+    if gid {
+        credentials.gid = next[0];
+        credentials.egid = next[1];
+        credentials.sgid = next[2];
+        if credentials.fsgid == current[1] {
+            credentials.fsgid = next[1];
+        }
+    } else {
+        credentials.uid = next[0];
+        credentials.euid = next[1];
+        credentials.suid = next[2];
+        if credentials.fsuid == current[1] {
+            credentials.fsuid = next[1];
+        }
+    }
+    commit_credentials(pid, credentials)
+}
+
+/// Implements `setfsuid(2)` and `setfsgid(2)`, returning the previous identity.
+fn linux_set_fs_identity(pid: ObjId, raw_requested: u64, gid: bool) -> i64 {
+    let requested = raw_requested as u32;
+    let Some(mut credentials) = proc::linux_credentials(pid) else {
+        return -(CompatErrno::NoProcess as i32 as i64);
+    };
+    let (old_fs, effective, real, saved) = if gid {
+        (
+            credentials.fsgid,
+            credentials.egid,
+            credentials.gid,
+            credentials.sgid,
+        )
+    } else {
+        (
+            credentials.fsuid,
+            credentials.euid,
+            credentials.uid,
+            credentials.suid,
+        )
+    };
+    if requested == u32::MAX
+        || requested == old_fs
+        || effective == 0
+        || requested == effective
+        || requested == real
+        || requested == saved
+    {
+        if requested != u32::MAX {
+            if gid {
+                credentials.fsgid = requested;
+            } else {
+                credentials.fsuid = requested;
+            }
+            if !proc::set_linux_credentials(pid, credentials) {
+                return -(CompatErrno::NoProcess as i32 as i64);
+            }
+        }
+    }
+    i64::from(old_fs)
+}
+
+/// Writes the real, effective and saved Linux ABI uid or gid triple.
+fn linux_getres(pid: ObjId, args: [u64; 6], gid: bool) -> Result<u64, CompatErrno> {
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let values = if gid {
+        [credentials.gid, credentials.egid, credentials.sgid]
+    } else {
+        [credentials.uid, credentials.euid, credentials.suid]
+    };
+    for (index, pointer) in [args[0], args[1], args[2]].into_iter().enumerate() {
         if pointer != 0 {
-            copy_to_user(pointer, &0u32.to_le_bytes(), 4)
+            copy_to_user(pointer, &values[index].to_le_bytes(), 4)
                 .map_err(|_| CompatErrno::Fault)?;
         }
     }
