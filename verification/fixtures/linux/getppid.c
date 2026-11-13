@@ -4462,7 +4462,7 @@ int main(void) {
         SYS_map_shadow_stack, SYS_mount_setattr, SYS_move_mount,
         SYS_name_to_handle_at, SYS_open_by_handle_at, SYS_open_tree,
         SYS_open_tree_attr, SYS_pkey_alloc, SYS_pkey_free,
-        SYS_pkey_mprotect, SYS_process_madvise, SYS_process_mrelease,
+        SYS_pkey_mprotect, SYS_process_mrelease,
         SYS_uprobe, SYS_uretprobe, SYS_userfaultfd,
     };
     for (size_t index = 0;
@@ -5664,6 +5664,27 @@ int main(void) {
     if (waitpid(session_child, &child_status, 0) != session_child ||
         !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
         return 348;
+    }
+    int process_madvise_pidfd = syscall(SYS_pidfd_open, getpid(), 0);
+    void *process_madvise_memory = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    struct iovec process_madvise_vector = {
+        .iov_base = process_madvise_memory,
+        .iov_len = 4096,
+    };
+    if (process_madvise_pidfd < 0 ||
+        process_madvise_memory == MAP_FAILED ||
+        syscall(SYS_process_madvise, process_madvise_pidfd,
+                &process_madvise_vector, 1, MADV_WILLNEED, 0) != 4096) {
+        return 618;
+    }
+    errno = 0;
+    if (syscall(SYS_process_madvise, process_madvise_pidfd,
+                &process_madvise_vector, 1, MADV_WILLNEED, 1) != -1 ||
+        errno != EINVAL ||
+        close(process_madvise_pidfd) != 0 ||
+        munmap(process_madvise_memory, 4096) != 0) {
+        return 619;
     }
     uint32_t seccomp_errno = SECCOMP_RET_ERRNO | EPERM;
     uint32_t invalid_seccomp_action = 0x12340000U;

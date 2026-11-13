@@ -2666,6 +2666,7 @@ fn execute(
         LinuxSyscall::Seccomp => compat_result(linux_seccomp(pid, call.args)),
         LinuxSyscall::Cachestat => compat_result(linux_cachestat(pid, call.args)),
         LinuxSyscall::LsmListModules => compat_result(linux_lsm_list_modules(call.args)),
+        LinuxSyscall::ProcessMadvise => compat_result(linux_process_madvise(pid, call.args)),
         LinuxSyscall::AddKey
         | LinuxSyscall::RequestKey
         | LinuxSyscall::Keyctl
@@ -2699,7 +2700,6 @@ fn execute(
         | LinuxSyscall::PkeyAlloc
         | LinuxSyscall::PkeyFree
         | LinuxSyscall::PkeyMprotect
-        | LinuxSyscall::ProcessMadvise
         | LinuxSyscall::ProcessMrelease
         | LinuxSyscall::Uprobe
         | LinuxSyscall::Uretprobe
@@ -5026,6 +5026,64 @@ fn linux_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         _ => Err(CompatErrno::Invalid),
     }
+}
+
+/// Applies an iovec batch of memory advice through a same-process pidfd.
+fn linux_process_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const IOV_MAX: usize = 64;
+    const MADV_COLD: u64 = 20;
+    const MADV_PAGEOUT: u64 = 21;
+    const MADV_COLLAPSE: u64 = 25;
+    if args[4] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if count == 0 || count > IOV_MAX {
+        return Err(CompatErrno::Invalid);
+    }
+    let pidfd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, pidfd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Pidfd {
+        return Err(CompatErrno::BadFd);
+    }
+    let target = ObjId::from_raw(entry.handle).ok_or(CompatErrno::NoProcess)?;
+    if target != pid {
+        return Err(CompatErrno::Perm);
+    }
+    let bytes = count.checked_mul(16).ok_or(CompatErrno::Invalid)?;
+    let mut raw = alloc::vec![0u8; bytes];
+    copy_from_user(&mut raw, args[1], bytes).map_err(|_| CompatErrno::Fault)?;
+    let mut vector = alloc::vec::Vec::new();
+    vector
+        .try_reserve_exact(count)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    let mut total = 0u64;
+    for iovec in raw.chunks_exact(16) {
+        let address = u64::from_le_bytes(iovec[..8].try_into().unwrap());
+        let length = u64::from_le_bytes(iovec[8..].try_into().unwrap());
+        if length == 0 || address % kernel_core::frame::FRAME_SIZE != 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        total = total
+            .checked_add(length)
+            .filter(|total| *total <= i64::MAX as u64)
+            .ok_or(CompatErrno::Invalid)?;
+        vector.push((address, length));
+    }
+    let advice = i32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)? as u64;
+    let mut advised = 0u64;
+    for (address, length) in vector {
+        if matches!(advice, MADV_COLD | MADV_PAGEOUT | MADV_COLLAPSE) {
+            advised = advised.saturating_add(length);
+            continue;
+        }
+        let call = [address, length, advice, 0, 0, 0];
+        if let Err(error) = linux_madvise(target, call) {
+            return if advised == 0 { Err(error) } else { Ok(advised) };
+        }
+        advised = advised.saturating_add(length);
+    }
+    Ok(advised.min(total))
 }
 
 /// Implements the process-scope memory barrier command subset.
