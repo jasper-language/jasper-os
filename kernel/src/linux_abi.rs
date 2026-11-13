@@ -8080,11 +8080,11 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 /// Implements the fixed-size x86_64 `openat2(2)` structure.
 fn linux_openat2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const OPEN_HOW_BYTES: usize = 24;
-    if args[2] != OPEN_HOW_BYTES as u64 {
+    if args[3] != OPEN_HOW_BYTES as u64 {
         return Err(CompatErrno::Invalid);
     }
     let mut how = [0u8; OPEN_HOW_BYTES];
-    copy_from_user(&mut how, args[1], OPEN_HOW_BYTES).map_err(|_| CompatErrno::Fault)?;
+    copy_from_user(&mut how, args[2], OPEN_HOW_BYTES).map_err(|_| CompatErrno::Fault)?;
     let flags = u64::from_le_bytes(how[0..8].try_into().unwrap());
     let mode = u64::from_le_bytes(how[8..16].try_into().unwrap());
     let resolve = u64::from_le_bytes(how[16..24].try_into().unwrap());
@@ -8094,7 +8094,7 @@ fn linux_openat2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if mode & !0o7777 != 0 {
         return Err(CompatErrno::Invalid);
     }
-    linux_openat(pid, [args[0], args[3], flags, mode, 0, 0])
+    linux_openat(pid, [args[0], args[1], flags, mode, 0, 0])
 }
 
 /// Implements legacy x86_64 `open(2)` relative to the current directory.
