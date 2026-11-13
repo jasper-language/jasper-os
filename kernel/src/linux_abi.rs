@@ -1976,6 +1976,10 @@ fn execute(
         LinuxSyscall::Removexattr => compat_result(linux_removexattr(pid, call.args, false, false)),
         LinuxSyscall::LRemovexattr => compat_result(linux_removexattr(pid, call.args, false, true)),
         LinuxSyscall::FRemovexattr => compat_result(linux_removexattr(pid, call.args, true, false)),
+        LinuxSyscall::Setxattrat => compat_result(linux_setxattrat(pid, call.args)),
+        LinuxSyscall::Getxattrat => compat_result(linux_getxattrat(pid, call.args)),
+        LinuxSyscall::Listxattrat => compat_result(linux_listxattrat(pid, call.args)),
+        LinuxSyscall::Removexattrat => compat_result(linux_removexattrat(pid, call.args)),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
         LinuxSyscall::Stat => {
             compat_result(linux_newfstatat(pid, legacy_stat_args(call.args, false)))
@@ -8638,6 +8642,84 @@ fn linux_removexattr(
     } else {
         validate_xattr_path(pid, args[0], nofollow)?;
     }
+    Err(CompatErrno::NoData)
+}
+
+/// Validates the dfd/path target used by the xattrat family.
+fn validate_xattrat_target(
+    pid: ObjId,
+    dfd: u64,
+    path: u64,
+    at_flags: u64,
+) -> Result<(), CompatErrno> {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    if at_flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if at_flags & AT_EMPTY_PATH != 0 {
+        let fd = u32::try_from(dfd).map_err(|_| CompatErrno::BadFd)?;
+        proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+        return Ok(());
+    }
+    let resolved = resolve_linux_at_path(pid, dfd, path)?;
+    crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)?;
+    Ok(())
+}
+
+/// Reads one fixed-version `struct xattr_args`.
+fn read_xattr_args(address: u64, size: u64) -> Result<(u64, u32, u32), CompatErrno> {
+    const XATTR_ARGS_SIZE: usize = 16;
+    if size < XATTR_ARGS_SIZE as u64 || size > 4096 || address == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut raw = [0u8; XATTR_ARGS_SIZE];
+    copy_from_user(&mut raw, address, XATTR_ARGS_SIZE).map_err(|_| CompatErrno::Fault)?;
+    Ok((
+        u64::from_le_bytes(raw[0..8].try_into().unwrap()),
+        u32::from_le_bytes(raw[8..12].try_into().unwrap()),
+        u32::from_le_bytes(raw[12..16].try_into().unwrap()),
+    ))
+}
+
+/// Implements `setxattrat(2)` against the immutable compatibility root.
+fn linux_setxattrat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let (value, size, flags) = read_xattr_args(args[4], args[5])?;
+    validate_xattr_name(args[3])?;
+    validate_xattrat_target(pid, args[0], args[1], args[2])?;
+    if flags & !0x3 != 0 || flags & 0x3 == 0x3 {
+        return Err(CompatErrno::Invalid);
+    }
+    if size != 0 && value == 0 {
+        return Err(CompatErrno::Fault);
+    }
+    Err(CompatErrno::ReadOnly)
+}
+
+/// Implements `getxattrat(2)` over a namespace with no xattrs.
+fn linux_getxattrat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let (_value, _size, flags) = read_xattr_args(args[4], args[5])?;
+    if flags != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    validate_xattr_name(args[3])?;
+    validate_xattrat_target(pid, args[0], args[1], args[2])?;
+    Err(CompatErrno::NoData)
+}
+
+/// Implements `listxattrat(2)` over a namespace with no xattrs.
+fn linux_listxattrat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    validate_xattrat_target(pid, args[0], args[1], args[2])?;
+    if args[4] != 0 && args[3] == 0 {
+        return Err(CompatErrno::Fault);
+    }
+    Ok(0)
+}
+
+/// Implements `removexattrat(2)` over a namespace with no xattrs.
+fn linux_removexattrat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    validate_xattr_name(args[3])?;
+    validate_xattrat_target(pid, args[0], args[1], args[2])?;
     Err(CompatErrno::NoData)
 }
 

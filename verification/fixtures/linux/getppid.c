@@ -109,6 +109,12 @@ struct robust_list_probe {
     void *list_op_pending;
 } __attribute__((aligned(8)));
 
+struct jasper_xattr_args {
+    uint64_t value;
+    uint32_t size;
+    uint32_t flags;
+};
+
 static void signal_noop(int signal) {
     (void)signal;
 }
@@ -3551,6 +3557,45 @@ int main(void) {
                 &xattr_value, 1, 3) != -1 ||
         errno != EINVAL) {
         return 467;
+    }
+    struct jasper_xattr_args xattr_args = {
+        .value = (uint64_t)(uintptr_t)&xattr_value,
+        .size = 1,
+    };
+    errno = 0;
+    if (syscall(SYS_setxattrat, AT_FDCWD, xattr_path, 0,
+                xattr_name, &xattr_args, sizeof(xattr_args)) != -1 ||
+        errno != EROFS) {
+        return 541;
+    }
+    memset(&xattr_args, 0, sizeof(xattr_args));
+    errno = 0;
+    if (syscall(SYS_getxattrat, AT_FDCWD, xattr_path, 0,
+                xattr_name, &xattr_args, sizeof(xattr_args)) != -1 ||
+        errno != ENODATA) {
+        return 542;
+    }
+    if (syscall(SYS_listxattrat, AT_FDCWD, xattr_path, 0,
+                NULL, 0) != 0) {
+        return 543;
+    }
+    errno = 0;
+    if (syscall(SYS_removexattrat, AT_FDCWD, xattr_path, 0,
+                xattr_name) != -1 ||
+        errno != ENODATA) {
+        return 544;
+    }
+    int xattrat_fd =
+        syscall(SYS_open, xattr_path, O_RDONLY | O_CLOEXEC, 0);
+    xattr_args.value = (uint64_t)(uintptr_t)&xattr_value;
+    xattr_args.size = 1;
+    if (xattrat_fd < 0 ||
+        syscall(SYS_setxattrat, xattrat_fd, NULL, AT_EMPTY_PATH,
+                xattr_name, &xattr_args,
+                sizeof(xattr_args)) != -1 ||
+        errno != EROFS ||
+        close(xattrat_fd) != 0) {
+        return 545;
     }
     struct sigaction protected_action = {.sa_handler = SIG_IGN};
     errno = 0;
