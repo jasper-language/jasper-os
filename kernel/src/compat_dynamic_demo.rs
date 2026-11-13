@@ -356,6 +356,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::InotifyAddWatch,
         LinuxSyscall::InotifyRmWatch,
         LinuxSyscall::Kill,
+        LinuxSyscall::Kcmp,
         LinuxSyscall::Uname,
         LinuxSyscall::Mmap,
         LinuxSyscall::Munmap,

@@ -13,6 +13,7 @@
 #include <linux/futex.h>
 #include <linux/io_uring.h>
 #include <linux/ioprio.h>
+#include <linux/kcmp.h>
 #include <linux/membarrier.h>
 #include <linux/sched/types.h>
 #include <linux/sync_file.h>
@@ -630,6 +631,57 @@ int main(void) {
     if (dup3_fd != 21 || fcntl(21, F_GETFD) != FD_CLOEXEC ||
         lseek(21, 0, SEEK_CUR) != 8) {
         return 75;
+    }
+    int kcmp_other = open("/usr/bin/true", O_RDONLY | O_CLOEXEC);
+    errno = 0;
+    if (kcmp_other < 0 ||
+        syscall(SYS_kcmp, getpid(), getpid(), KCMP_FILE,
+                fd, dup_fd) != 0 ||
+        syscall(SYS_kcmp, getpid(), getpid(), KCMP_FILE,
+                fd, kcmp_other) == 0 ||
+        syscall(SYS_kcmp, getpid(), getpid(), KCMP_FILES,
+                fd, dup_fd) != 0 ||
+        syscall(SYS_kcmp, getpid(), getpid(), KCMP_FILE,
+                fd, 9999) != -1 || errno != EBADF) {
+        return 558;
+    }
+    errno = 0;
+    if (syscall(SYS_kcmp, getpid(), getpid(), 99, fd, fd) != -1 ||
+        errno != EINVAL ||
+        syscall(SYS_kcmp, INT_MAX, getpid(), KCMP_FILES,
+                fd, fd) != -1 ||
+        errno != ESRCH) {
+        return 559;
+    }
+    int kcmp_pipe[2];
+    if (pipe2(kcmp_pipe, O_CLOEXEC) != 0) {
+        return 560;
+    }
+    pid_t kcmp_child = fork();
+    if (kcmp_child < 0) {
+        return 561;
+    }
+    if (kcmp_child == 0) {
+        close(kcmp_pipe[1]);
+        char byte = 0;
+        int result = read(kcmp_pipe[0], &byte, 1);
+        _exit(result == 1 && byte == 'K' ? 0 : 1);
+    }
+    close(kcmp_pipe[0]);
+    if (syscall(SYS_kcmp, getpid(), kcmp_child, KCMP_FILE,
+                fd, fd) != 0 ||
+        syscall(SYS_kcmp, getpid(), kcmp_child, KCMP_VM,
+                fd, fd) == 0 ||
+        syscall(SYS_kcmp, getpid(), kcmp_child, KCMP_FILES,
+                fd, fd) == 0) {
+        return 562;
+    }
+    int kcmp_status = 0;
+    if (write(kcmp_pipe[1], "K", 1) != 1 ||
+        waitpid(kcmp_child, &kcmp_status, 0) != kcmp_child ||
+        !WIFEXITED(kcmp_status) || WEXITSTATUS(kcmp_status) != 0 ||
+        close(kcmp_pipe[1]) != 0 || close(kcmp_other) != 0) {
+        return 563;
     }
     if (dup2(fd, 40) != 40 || dup2(fd, 41) != 41 ||
         syscall(SYS_close_range, 40, 41, 0) != 0) {

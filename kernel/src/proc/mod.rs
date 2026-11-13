@@ -2055,6 +2055,15 @@ pub(crate) fn linux_fd_status_flags(pid: ObjId, fd: u32) -> Option<u32> {
     })
 }
 
+/// Returns the open-file-description identity compared by `kcmp(2)`.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_fd_description_identity(pid: ObjId, fd: u32) -> Option<u64> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p.linux.as_ref()?.fds.description_identity(fd),
+        _ => None,
+    })
+}
+
 /// Updates shared Linux status flags for one descriptor generation.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_set_fd_status_flags(pid: ObjId, fd: u32, flags: u32) -> bool {

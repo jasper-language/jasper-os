@@ -1350,6 +1350,73 @@ fn linux_tkill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     linux_tgkill(process, [u64::from(tgid), args[0], args[1], 0, 0, 0])
 }
 
+/// Resolves either a process leader PID or a Linux thread TID.
+fn linux_task_process(task_id: u32) -> Option<ObjId> {
+    if let Some(process) = COMPAT
+        .lock()
+        .threads
+        .iter()
+        .flatten()
+        .find(|entry| entry.tid == task_id)
+        .map(|entry| entry.process)
+    {
+        return Some(process);
+    }
+    proc::linux_process_for_pid(task_id)
+}
+
+/// Returns Linux's stable equality/ordering result for two object identities.
+fn kcmp_identity_order(first: u64, second: u64) -> u64 {
+    if first == second {
+        0
+    } else if first < second {
+        1
+    } else {
+        2
+    }
+}
+
+/// Compares compatibility process resources using the same-application boundary.
+fn linux_kcmp(process: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const KCMP_FILE: u32 = 0;
+    const KCMP_VM: u32 = 1;
+    const KCMP_FILES: u32 = 3;
+    const KCMP_FS: u32 = 2;
+    const KCMP_SIGHAND: u32 = 4;
+    const KCMP_IO: u32 = 5;
+    const KCMP_SYSVSEM: u32 = 6;
+    const KCMP_EPOLL_TFD: u32 = 7;
+    let pid1 = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let pid2 = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let kind = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let first = linux_task_process(pid1).ok_or(CompatErrno::NoProcess)?;
+    let second = linux_task_process(pid2).ok_or(CompatErrno::NoProcess)?;
+    let caller_app = crate::security::process_application(process).ok_or(CompatErrno::Perm)?;
+    let first_app =
+        crate::security::process_application(first).ok_or(CompatErrno::Perm)?;
+    let second_app =
+        crate::security::process_application(second).ok_or(CompatErrno::Perm)?;
+    if caller_app != first_app || caller_app != second_app {
+        return Err(CompatErrno::Perm);
+    }
+    match kind {
+        KCMP_FILE => {
+            let first_fd = u32::try_from(args[3]).map_err(|_| CompatErrno::BadFd)?;
+            let second_fd = u32::try_from(args[4]).map_err(|_| CompatErrno::BadFd)?;
+            let first_id =
+                proc::linux_fd_description_identity(first, first_fd).ok_or(CompatErrno::BadFd)?;
+            let second_id =
+                proc::linux_fd_description_identity(second, second_fd).ok_or(CompatErrno::BadFd)?;
+            Ok(kcmp_identity_order(first_id, second_id))
+        }
+        KCMP_VM | KCMP_FS | KCMP_FILES | KCMP_SIGHAND | KCMP_IO => Ok(
+            kcmp_identity_order(first.raw(), second.raw()),
+        ),
+        KCMP_SYSVSEM | KCMP_EPOLL_TFD => Err(CompatErrno::NotSupported),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
 /// Queues a process-directed `kill` for a live compatibility process.
 /// 为存活的兼容进程登记一个进程定向 `kill`。
 fn linux_kill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
@@ -2351,6 +2418,7 @@ fn execute(
         LinuxSyscall::InotifyAddWatch => compat_result(linux_inotify_add_watch(pid, call.args)),
         LinuxSyscall::InotifyRmWatch => compat_result(linux_inotify_rm_watch(pid, call.args)),
         LinuxSyscall::Kill => compat_result(linux_kill(pid, call.args).map(|()| 0)),
+        LinuxSyscall::Kcmp => compat_result(linux_kcmp(pid, call.args)),
         LinuxSyscall::Uname => compat_result(linux_uname(call.args)),
         LinuxSyscall::GetPid => proc::linux_pid(pid)
             .map(i64::from)
