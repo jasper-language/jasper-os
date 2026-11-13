@@ -17,6 +17,7 @@ pub enum CompatKind {
     Signal,
     Pidfd,
     Inotify,
+    MessageQueue,
     Device,
     Other,
 }

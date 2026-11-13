@@ -45,7 +45,8 @@ use linux_raw_sys::general::{
     __NR_madvise, __NR_membarrier, __NR_memfd_create, __NR_memfd_secret, __NR_mkdir,
     __NR_mkdirat, __NR_mknod, __NR_mknodat,
     __NR_mincore, __NR_mlock, __NR_mlock2, __NR_mlockall, __NR_mmap, __NR_modify_ldt,
-    __NR_mprotect,
+    __NR_mprotect, __NR_mq_getsetattr, __NR_mq_notify, __NR_mq_open, __NR_mq_timedreceive,
+    __NR_mq_timedsend, __NR_mq_unlink,
     __NR_mremap, __NR_mseal, __NR_msync, __NR_munlock, __NR_munlockall, __NR_munmap,
     __NR_nanosleep, __NR_newfstatat, __NR_nfsservctl, __NR_open, __NR_openat, __NR_openat2,
     __NR_pause, __NR_personality,
@@ -399,6 +400,12 @@ pub enum LinuxSyscall {
     Mremap,
     Mseal,
     Msync,
+    MqOpen,
+    MqUnlink,
+    MqTimedsend,
+    MqTimedreceive,
+    MqNotify,
+    MqGetsetattr,
     MinCore,
     Madvise,
     Membarrier,
@@ -649,6 +656,9 @@ pub enum CompatErrno {
     /// Absolute deadline elapsed.
     /// 绝对截止期已到。
     TimedOut = linux_raw_sys::errno::ETIMEDOUT,
+    /// Message is larger than the queue's maximum message size.
+    /// 消息超过队列允许的最大长度。
+    MessageSize = linux_raw_sys::errno::EMSGSIZE,
     /// An operation was cancelled.
     /// 操作已取消。
     Canceled = linux_raw_sys::errno::ECANCELED,
@@ -910,6 +920,12 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_mremap) => LinuxSyscall::Mremap,
         value if value == u64::from(__NR_mseal) => LinuxSyscall::Mseal,
         value if value == u64::from(__NR_msync) => LinuxSyscall::Msync,
+        value if value == u64::from(__NR_mq_open) => LinuxSyscall::MqOpen,
+        value if value == u64::from(__NR_mq_unlink) => LinuxSyscall::MqUnlink,
+        value if value == u64::from(__NR_mq_timedsend) => LinuxSyscall::MqTimedsend,
+        value if value == u64::from(__NR_mq_timedreceive) => LinuxSyscall::MqTimedreceive,
+        value if value == u64::from(__NR_mq_notify) => LinuxSyscall::MqNotify,
+        value if value == u64::from(__NR_mq_getsetattr) => LinuxSyscall::MqGetsetattr,
         value if value == u64::from(__NR_mincore) => LinuxSyscall::MinCore,
         value if value == u64::from(__NR_madvise) => LinuxSyscall::Madvise,
         value if value == u64::from(__NR_membarrier) => LinuxSyscall::Membarrier,
@@ -1300,6 +1316,12 @@ mod tests {
             (__NR_mremap, LinuxSyscall::Mremap),
             (__NR_mseal, LinuxSyscall::Mseal),
             (__NR_msync, LinuxSyscall::Msync),
+            (__NR_mq_open, LinuxSyscall::MqOpen),
+            (__NR_mq_unlink, LinuxSyscall::MqUnlink),
+            (__NR_mq_timedsend, LinuxSyscall::MqTimedsend),
+            (__NR_mq_timedreceive, LinuxSyscall::MqTimedreceive),
+            (__NR_mq_notify, LinuxSyscall::MqNotify),
+            (__NR_mq_getsetattr, LinuxSyscall::MqGetsetattr),
             (__NR_mincore, LinuxSyscall::MinCore),
             (__NR_set_tid_address, LinuxSyscall::SetTidAddress),
             (__NR_clone3, LinuxSyscall::Clone3),

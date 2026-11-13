@@ -17,6 +17,7 @@
 #include <linux/sched/types.h>
 #include <linux/sync_file.h>
 #include <limits.h>
+#include <mqueue.h>
 #include <pthread.h>
 #include <poll.h>
 #include <sched.h>
@@ -4410,6 +4411,64 @@ int main(void) {
                 FUTEX2_SIZE_U32) != -1 ||
         errno != EINVAL) {
         return 551;
+    }
+    const char *mq_name = "jasper-mq-test";
+    syscall(SYS_mq_unlink, mq_name);
+    struct mq_attr mq_attributes = {
+        .mq_maxmsg = 4,
+        .mq_msgsize = 64,
+    };
+    int mq_fd = syscall(SYS_mq_open, mq_name,
+                        O_CREAT | O_RDWR | O_NONBLOCK,
+                        0600, &mq_attributes);
+    struct mq_attr mq_current = {0};
+    char mq_first[64] = {0};
+    char mq_second[64] = {0};
+    unsigned mq_priority = 0;
+    if (mq_fd < 0 ||
+        (fcntl(mq_fd, F_GETFD) & FD_CLOEXEC) == 0 ||
+        syscall(SYS_mq_getsetattr, mq_fd, NULL, &mq_current) != 0 ||
+        mq_current.mq_maxmsg != 4 || mq_current.mq_msgsize != 64 ||
+        (mq_current.mq_flags & O_NONBLOCK) == 0 ||
+        syscall(SYS_mq_timedsend, mq_fd, "low", 3, 1, NULL) != 0 ||
+        syscall(SYS_mq_timedsend, mq_fd, "high", 4, 5, NULL) != 0 ||
+        syscall(SYS_mq_timedreceive, mq_fd, mq_first,
+                sizeof(mq_first), &mq_priority, NULL) != 4 ||
+        mq_priority != 5 || memcmp(mq_first, "high", 4) != 0 ||
+        syscall(SYS_mq_timedreceive, mq_fd, mq_second,
+                sizeof(mq_second), &mq_priority, NULL) != 3 ||
+        mq_priority != 1 || memcmp(mq_second, "low", 3) != 0) {
+        return 552;
+    }
+    struct mq_attr mq_change = {0};
+    struct mq_attr mq_previous = {0};
+    char mq_too_large[65] = {0};
+    if (syscall(SYS_mq_getsetattr, mq_fd, &mq_change, &mq_previous) != 0 ||
+        (mq_previous.mq_flags & O_NONBLOCK) == 0 ||
+        syscall(SYS_mq_timedsend, mq_fd, mq_too_large,
+                sizeof(mq_too_large), 0, NULL) != -1 ||
+        errno != EMSGSIZE ||
+        syscall(SYS_mq_timedsend, mq_fd, "bad", 3, 32768, NULL) != -1 ||
+        errno != EINVAL ||
+        syscall(SYS_mq_timedreceive, mq_fd, mq_first, 32, NULL, NULL) != -1 ||
+        errno != EMSGSIZE ||
+        syscall(SYS_mq_open, mq_name, O_CREAT | O_EXCL | O_RDWR,
+                0600, NULL) != -1 || errno != EEXIST) {
+        return 555;
+    }
+    errno = 0;
+    if (syscall(SYS_mq_notify, mq_fd, NULL) != 0 ||
+        syscall(SYS_mq_unlink, mq_name) != 0 ||
+        syscall(SYS_mq_timedsend, mq_fd, "live", 4, 0, NULL) != 0 ||
+        syscall(SYS_mq_timedreceive, mq_fd, mq_first,
+                sizeof(mq_first), NULL, NULL) != 4 ||
+        memcmp(mq_first, "live", 4) != 0 ||
+        close(mq_fd) != 0) {
+        return 553;
+    }
+    errno = 0;
+    if (syscall(SYS_mq_unlink, mq_name) != -1 || errno != ENOENT) {
+        return 554;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);

@@ -165,6 +165,12 @@ struct IntervalTimer {
     active: bool,
 }
 
+struct MessageQueueName {
+    name: [u8; 256],
+    name_len: u8,
+    queue: alloc::sync::Arc<proc::LinuxMqShared>,
+}
+
 struct CompatState {
     threads: [Option<LinuxThread>; MAX_LINUX_THREADS],
     futexes: [Option<FutexWord>; MAX_FUTEX_WORDS],
@@ -173,6 +179,7 @@ struct CompatState {
     flock_waiters: [Option<FlockWaiter>; MAX_FLOCK_LOCKS],
     posix_timers: [Option<PosixTimer>; MAX_POSIX_TIMERS],
     interval_timers: [Option<IntervalTimer>; MAX_INTERVAL_TIMER_SETS],
+    message_queue_names: alloc::vec::Vec<MessageQueueName>,
 }
 
 impl CompatState {
@@ -185,6 +192,7 @@ impl CompatState {
             flock_waiters: [None; MAX_FLOCK_LOCKS],
             posix_timers: [None; MAX_POSIX_TIMERS],
             interval_timers: [None; MAX_INTERVAL_TIMER_SETS],
+            message_queue_names: alloc::vec::Vec::new(),
         }
     }
 }
@@ -2014,6 +2022,12 @@ fn execute(
         LinuxSyscall::Mremap => compat_result(linux_mremap(pid, call.args)),
         LinuxSyscall::Mseal => compat_result(linux_mseal(pid, call.args)),
         LinuxSyscall::Msync => compat_result(linux_msync(pid, call.args)),
+        LinuxSyscall::MqOpen => compat_result(linux_mq_open(pid, call.args)),
+        LinuxSyscall::MqUnlink => compat_result(linux_mq_unlink(call.args)),
+        LinuxSyscall::MqTimedsend => compat_result(linux_mq_send(pid, call.args, true)),
+        LinuxSyscall::MqTimedreceive => compat_result(linux_mq_receive(pid, call.args, true)),
+        LinuxSyscall::MqNotify => compat_result(linux_mq_notify(pid, call.args)),
+        LinuxSyscall::MqGetsetattr => compat_result(linux_mq_getsetattr(pid, call.args)),
         LinuxSyscall::MinCore => compat_result(linux_mincore(pid, call.args)),
         LinuxSyscall::Madvise => compat_result(linux_madvise(pid, call.args)),
         LinuxSyscall::Membarrier => compat_result(linux_membarrier(call.args)),
@@ -6213,6 +6227,374 @@ fn linux_memfd_secret(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::NoMemory);
     }
     Ok(u64::from(fd))
+}
+
+const LINUX_MQ_ATTR_BYTES: usize = 32;
+const LINUX_MQ_MSG_MAX: i64 = 10;
+const LINUX_MQ_MSGSIZE_MAX: i64 = 8192;
+
+/// Reads and validates the slash-free name consumed by Linux's raw syscall.
+fn read_linux_mq_name(address: u64) -> Result<([u8; 256], u8), CompatErrno> {
+    let name = linux_c_string(address, 256)?;
+    if name.len() > 255 || name.contains(&b'/') {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut output = [0u8; 256];
+    output[..name.len()].copy_from_slice(&name);
+    Ok((output, name.len() as u8))
+}
+
+/// Reads one x86-64 Linux message-queue attribute block.
+fn read_linux_mq_attr(address: u64) -> Result<[u8; LINUX_MQ_ATTR_BYTES], CompatErrno> {
+    let mut attr = [0u8; LINUX_MQ_ATTR_BYTES];
+    copy_from_user(&mut attr, address, LINUX_MQ_ATTR_BYTES)
+        .map_err(|_| CompatErrno::Fault)?;
+    Ok(attr)
+}
+
+/// Parses the creation-only limits, ignoring flags and current message count.
+fn parse_linux_mq_limits(
+    attr: [u8; LINUX_MQ_ATTR_BYTES],
+) -> Result<(usize, usize), CompatErrno> {
+    let max_messages = i64::from_le_bytes(attr[8..16].try_into().unwrap());
+    let message_size = i64::from_le_bytes(attr[16..24].try_into().unwrap());
+    if !(1..=LINUX_MQ_MSG_MAX).contains(&max_messages)
+        || !(1..=LINUX_MQ_MSGSIZE_MAX).contains(&message_size)
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    Ok((max_messages as usize, message_size as usize))
+}
+
+/// Resolves one message-queue descriptor and verifies its access right.
+fn open_message_queue(
+    pid: ObjId,
+    raw_fd: u64,
+    write: bool,
+) -> Result<(u32, alloc::sync::Arc<proc::LinuxMqShared>), CompatErrno> {
+    let fd = u32::try_from(raw_fd).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::MessageQueue
+        || !entry.rights.contains(if write {
+            kernel_core::object::Rights::WRITE
+        } else {
+            kernel_core::object::Rights::READ
+        })
+    {
+        return Err(CompatErrno::BadFd);
+    }
+    let queue = proc::linux_mq_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    Ok((fd, queue))
+}
+
+/// Wakes Linux threads so blocked queue senders and receivers can recheck.
+fn wake_message_queue_waiters() {
+    let mut tasks = [None; MAX_LINUX_THREADS];
+    let mut count = 0usize;
+    {
+        let state = COMPAT.lock();
+        for thread in state.threads.iter().flatten() {
+            if count < tasks.len() {
+                tasks[count] = Some(thread.task);
+                count += 1;
+            }
+        }
+    }
+    for task in tasks[..count].iter().flatten() {
+        sched::wake(*task);
+    }
+}
+
+/// Implements `mq_open(2)` with bounded names and queue storage.
+fn linux_mq_open(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const O_ACCMODE: u64 = 0x3;
+    const O_CREAT: u64 = 0x40;
+    const O_EXCL: u64 = 0x80;
+    const O_NONBLOCK: u64 = 0x800;
+    const O_CLOEXEC: u64 = 0x80000;
+    let requested_attr = if args[3] == 0 {
+        None
+    } else {
+        Some(read_linux_mq_attr(args[3])?)
+    };
+    let flags = args[1];
+    if flags & !(O_ACCMODE | O_CREAT | O_EXCL | O_NONBLOCK | O_CLOEXEC) != 0
+        || flags & O_ACCMODE == O_ACCMODE
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let (name, name_len) = read_linux_mq_name(args[0])?;
+    let rights = match flags & O_ACCMODE {
+        0 => kernel_core::object::Rights::READ,
+        1 => kernel_core::object::Rights::WRITE,
+        _ => kernel_core::object::Rights::READ.union(kernel_core::object::Rights::WRITE),
+    };
+    let install = |queue: alloc::sync::Arc<proc::LinuxMqShared>| {
+        proc::linux_mq_install(
+            pid,
+            queue,
+            rights,
+            true,
+            flags & O_NONBLOCK != 0,
+        )
+        .ok_or(CompatErrno::NoSpace)
+    };
+    let existing = {
+        let state = COMPAT.lock();
+        state
+            .message_queue_names
+            .iter()
+            .find(|entry| entry.name == name && entry.name_len == name_len)
+            .map(|entry| alloc::sync::Arc::clone(&entry.queue))
+    };
+    if let Some(queue) = existing {
+        if flags & (O_CREAT | O_EXCL) == (O_CREAT | O_EXCL) {
+            return Err(CompatErrno::Exists);
+        }
+        return install(queue).map(u64::from);
+    }
+    if flags & O_CREAT == 0 {
+        return Err(CompatErrno::NoEntry);
+    }
+    let (max_messages, message_size) = if let Some(attr) = requested_attr {
+        parse_linux_mq_limits(attr)?
+    } else {
+        (LINUX_MQ_MSG_MAX as usize, LINUX_MQ_MSGSIZE_MAX as usize)
+    };
+    let candidate = alloc::sync::Arc::new(proc::LinuxMqShared {
+        state: kernel_core::sync::SpinLock::new(proc::LinuxMqState {
+            max_messages,
+            message_size,
+            messages: alloc::collections::VecDeque::new(),
+        }),
+    });
+    let candidate_fd = install(alloc::sync::Arc::clone(&candidate))?;
+    let registration = {
+        let mut state = COMPAT.lock();
+        if let Some(queue) = state
+            .message_queue_names
+            .iter()
+            .find(|entry| entry.name == name && entry.name_len == name_len)
+            .map(|entry| alloc::sync::Arc::clone(&entry.queue))
+        {
+            Ok(Some(queue))
+        } else if state.message_queue_names.len() >= 16 {
+            Err(CompatErrno::NoSpace)
+        } else {
+            match state.message_queue_names.try_reserve(1) {
+                Ok(()) => {
+                    state.message_queue_names.push(MessageQueueName {
+                        name,
+                        name_len,
+                        queue: candidate,
+                    });
+                    Ok(None)
+                }
+                Err(_) => Err(CompatErrno::NoMemory),
+            }
+        }
+    };
+    match registration {
+        Ok(None) => Ok(u64::from(candidate_fd)),
+        Ok(Some(queue)) => {
+            let _ = proc::linux_close_fd(pid, candidate_fd);
+            if flags & O_EXCL != 0 {
+                return Err(CompatErrno::Exists);
+            }
+            install(queue).map(u64::from)
+        }
+        Err(error) => {
+            let _ = proc::linux_close_fd(pid, candidate_fd);
+            Err(error)
+        }
+    }
+}
+
+/// Removes one POSIX message-queue name while existing descriptors retain the queue.
+fn linux_mq_unlink(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let (name, name_len) = read_linux_mq_name(args[0])?;
+    let mut state = COMPAT.lock();
+    let Some(index) = state
+        .message_queue_names
+        .iter()
+        .position(|entry| entry.name == name && entry.name_len == name_len)
+    else {
+        return Err(CompatErrno::NoEntry);
+    };
+    state.message_queue_names.remove(index);
+    Ok(0)
+}
+
+/// Parses one optional absolute CLOCK_REALTIME message-queue timeout.
+fn mq_deadline(pointer: u64) -> Result<Option<u64>, CompatErrno> {
+    if pointer == 0 {
+        return Ok(None);
+    }
+    let requested = read_linux_timespec(pointer)?;
+    let wall = crate::arch::wall_clock_ns().ok_or(CompatErrno::NoSys)?;
+    Ok(Some(
+        sched::now_ns().saturating_add(requested.saturating_sub(wall)),
+    ))
+}
+
+/// Implements `mq_timedsend(2)`.
+fn linux_mq_send(pid: ObjId, args: [u64; 6], timed: bool) -> Result<u64, CompatErrno> {
+    const MQ_PRIO_MAX: u32 = 32768;
+    let deadline = if timed { mq_deadline(args[4])? } else { None };
+    let priority = u32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    if priority >= MQ_PRIO_MAX {
+        return Err(CompatErrno::Invalid);
+    }
+    let (fd, queue) = open_message_queue(pid, args[0], true)?;
+    let length = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if length > queue.state.lock().message_size {
+        return Err(CompatErrno::MessageSize);
+    }
+    let mut bytes = alloc::vec![0u8; length];
+    if length != 0 {
+        copy_from_user(&mut bytes, args[1], length).map_err(|_| CompatErrno::Fault)?;
+    }
+    loop {
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        let nonblocking = proc::linux_fd_status_flags(pid, fd).unwrap_or(0) & 0x800 != 0;
+        {
+            let mut state = queue.state.lock();
+            if state.messages.len() < state.max_messages {
+                state
+                    .messages
+                    .try_reserve(1)
+                    .map_err(|_| CompatErrno::NoMemory)?;
+                let position = state
+                    .messages
+                    .iter()
+                    .position(|message| message.priority < priority)
+                    .unwrap_or(state.messages.len());
+                state
+                    .messages
+                    .insert(position, proc::LinuxMqMessage { priority, bytes });
+                break;
+            }
+            if nonblocking {
+                return Err(CompatErrno::TryAgain);
+            }
+        }
+        if deadline.is_some_and(|deadline| sched::now_ns() >= deadline) {
+            return Err(CompatErrno::TimedOut);
+        }
+        if let Some(deadline) = deadline {
+            if sched::sleep_until_ns(deadline).is_err() {
+                sched::pause();
+            }
+        } else {
+            sched::pause();
+        }
+    }
+    wake_message_queue_waiters();
+    Ok(0)
+}
+
+/// Implements `mq_timedreceive(2)`.
+fn linux_mq_receive(pid: ObjId, args: [u64; 6], timed: bool) -> Result<u64, CompatErrno> {
+    let deadline = if timed { mq_deadline(args[4])? } else { None };
+    let (fd, queue) = open_message_queue(pid, args[0], false)?;
+    let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if capacity < queue.state.lock().message_size {
+        return Err(CompatErrno::MessageSize);
+    }
+    let message = loop {
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        let nonblocking = proc::linux_fd_status_flags(pid, fd).unwrap_or(0) & 0x800 != 0;
+        {
+            let mut state = queue.state.lock();
+            if let Some(message) = state.messages.pop_front() {
+                break message;
+            }
+            if nonblocking {
+                return Err(CompatErrno::TryAgain);
+            }
+        }
+        if deadline.is_some_and(|deadline| sched::now_ns() >= deadline) {
+            return Err(CompatErrno::TimedOut);
+        }
+        if let Some(deadline) = deadline {
+            if sched::sleep_until_ns(deadline).is_err() {
+                sched::pause();
+            }
+        } else {
+            sched::pause();
+        }
+    };
+    if !message.bytes.is_empty() {
+        copy_to_user(args[1], &message.bytes, message.bytes.len())
+            .map_err(|_| CompatErrno::Fault)?;
+    }
+    if args[3] != 0 {
+        copy_to_user(args[3], &message.priority.to_le_bytes(), 4)
+            .map_err(|_| CompatErrno::Fault)?;
+    }
+    wake_message_queue_waiters();
+    Ok(message.bytes.len() as u64)
+}
+
+/// Deregistration is supported; signal-based notification remains explicit.
+fn linux_mq_notify(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[1] != 0 {
+        let mut notification = [0u8; 64];
+        copy_from_user(&mut notification, args[1], 64).map_err(|_| CompatErrno::Fault)?;
+    }
+    let _ = open_message_queue(pid, args[0], false)?;
+    if args[1] == 0 {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NotSupported)
+    }
+}
+
+/// Queries or updates one message-queue attribute block.
+fn linux_mq_getsetattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let requested = if args[1] == 0 {
+        None
+    } else {
+        Some(read_linux_mq_attr(args[1])?)
+    };
+    if requested
+        .is_some_and(|attr| i64::from_le_bytes(attr[0..8].try_into().unwrap()) & !0x800 != 0)
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let (fd, queue) = open_message_queue(pid, args[0], false)?;
+    let (max_messages, message_size, current_messages) = {
+        let state = queue.state.lock();
+        (
+            state.max_messages,
+            state.message_size,
+            state.messages.len(),
+        )
+    };
+    let old = [
+        i64::from(proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800),
+        max_messages as i64,
+        message_size as i64,
+        current_messages as i64,
+    ];
+    if let Some(attr) = requested {
+        let flags = i64::from_le_bytes(attr[0..8].try_into().unwrap()) as u32;
+        if !proc::linux_set_fd_status_flags(pid, fd, flags) {
+            return Err(CompatErrno::BadFd);
+        }
+    }
+    if args[2] != 0 {
+        let mut attr = [0u8; LINUX_MQ_ATTR_BYTES];
+        for (index, value) in old.iter().enumerate() {
+            attr[index * 8..index * 8 + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        copy_to_user(args[2], &attr, attr.len()).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(0)
 }
 
 fn linux_eventfd(pid: ObjId, args: [u64; 6], eventfd2: bool) -> Result<u64, CompatErrno> {

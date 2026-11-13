@@ -98,6 +98,8 @@ const LINUX_TIMERFD_HANDLE_BASE: u64 = 0x0000_8900_0000_0000;
 const LINUX_SIGNALFD_HANDLE_BASE: u64 = 0x0000_8a00_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_INOTIFY_HANDLE_BASE: u64 = 0x0000_8b00_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_MQ_HANDLE_BASE: u64 = 0x0000_8c00_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -166,6 +168,8 @@ struct LinuxProcessState {
     next_signalfd_handle: u64,
     inotifies: Vec<LinuxInotifyHandle>,
     next_inotify_handle: u64,
+    message_queues: Vec<LinuxMqHandle>,
+    next_mq_handle: u64,
     epolls: Vec<LinuxEpollHandle>,
     next_epoll_handle: u64,
     iourings: Vec<LinuxIoUringHandle>,
@@ -304,6 +308,31 @@ struct LinuxInotifyHandle {
 }
 
 #[cfg(feature = "linux-abi")]
+pub(crate) struct LinuxMqMessage {
+    pub(crate) priority: u32,
+    pub(crate) bytes: Vec<u8>,
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) struct LinuxMqState {
+    pub(crate) max_messages: usize,
+    pub(crate) message_size: usize,
+    pub(crate) messages: VecDeque<LinuxMqMessage>,
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) struct LinuxMqShared {
+    pub(crate) state: SpinLock<LinuxMqState>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxMqHandle {
+    handle: u64,
+    queue: Arc<LinuxMqShared>,
+}
+
+#[cfg(feature = "linux-abi")]
 #[derive(Clone, Copy)]
 pub(crate) struct LinuxAioEvent {
     pub(crate) data: u64,
@@ -377,6 +406,7 @@ enum LinuxFdResource {
     TimerFd(LinuxTimerFdHandle),
     SignalFd(LinuxSignalFdHandle),
     Inotify(Arc<SpinLock<Vec<LinuxInotifyWatch>>>),
+    MessageQueue(Arc<LinuxMqShared>),
     Socket {
         endpoint: Arc<compat_core::UnixSocketEndpoint>,
         listener: Option<Arc<UnixListener>>,
@@ -1523,6 +1553,15 @@ pub(crate) fn linux_capture_fd_transfer(
                         .ok_or(LinuxFdTransferError::Invalid)?;
                     LinuxFdResource::Inotify(inotify)
                 }
+                compat_core::fd::CompatKind::MessageQueue => {
+                    let queue = linux
+                        .message_queues
+                        .iter()
+                        .find(|queue| queue.handle == entry.handle)
+                        .map(|queue| Arc::clone(&queue.queue))
+                        .ok_or(LinuxFdTransferError::Invalid)?;
+                    LinuxFdResource::MessageQueue(queue)
+                }
                 compat_core::fd::CompatKind::Device
                     if entry.handle >= LINUX_ASHMEM_HANDLE_BASE =>
                 {
@@ -1587,6 +1626,19 @@ pub(crate) fn linux_install_fd_transfer(
                     .try_reserve(1)
                     .map_err(|_| LinuxFdTransferError::NoSpace)?;
                 Some(linux.next_inotify_handle)
+            } else {
+                None
+            };
+            let pending_mq = match &resource {
+                LinuxFdResource::MessageQueue(queue) => Some(Arc::clone(queue)),
+                _ => None,
+            };
+            let mq_handle = if pending_mq.is_some() {
+                linux
+                    .message_queues
+                    .try_reserve(1)
+                    .map_err(|_| LinuxFdTransferError::NoSpace)?;
+                Some(linux.next_mq_handle)
             } else {
                 None
             };
@@ -1746,6 +1798,19 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                     )
                 }
+                LinuxFdResource::MessageQueue(_) => {
+                    (
+                        mq_handle.ok_or(LinuxFdTransferError::NoSpace)?,
+                        None,
+                        None,
+                        None,
+                        false,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                }
                 LinuxFdResource::Socket {
                     endpoint,
                     listener,
@@ -1836,6 +1901,13 @@ pub(crate) fn linux_install_fd_transfer(
                     .ok_or(LinuxFdTransferError::NoSpace)?;
                 linux.next_inotify_handle = next;
                 linux.inotifies.push(LinuxInotifyHandle { handle, watches });
+            }
+            if let Some(queue) = pending_mq {
+                let next = handle
+                    .checked_add(1)
+                    .ok_or(LinuxFdTransferError::NoSpace)?;
+                linux.next_mq_handle = next;
+                linux.message_queues.push(LinuxMqHandle { handle, queue });
             }
             if let Some((endpoint, listener, controls)) = pending_socket {
                 let next = handle
@@ -2025,6 +2097,9 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     }
     if handle >= LINUX_INOTIFY_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.inotifies.retain(|inotify| inotify.handle != handle);
+    }
+    if handle >= LINUX_MQ_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+        linux.message_queues.retain(|queue| queue.handle != handle);
     }
     if handle >= LINUX_EPOLL_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.epolls.retain(|epoll| epoll.handle != handle);
@@ -2408,6 +2483,64 @@ pub(crate) fn linux_inotify_state(
             .iter()
             .find(|inotify| inotify.handle == handle)
             .map(|inotify| Arc::clone(&inotify.watches)),
+        _ => None,
+    })
+}
+
+/// Installs one descriptor sharing a POSIX message queue object.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_mq_install(
+    pid: ObjId,
+    queue: Arc<LinuxMqShared>,
+    rights: Rights,
+    close_on_exec: bool,
+    nonblocking: bool,
+) -> Option<u32> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.message_queues.len() >= 32 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .message_queues
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_mq_handle;
+        linux.next_mq_handle = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                rights,
+                compat_core::fd::CompatKind::MessageQueue,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        if nonblocking
+            && !linux
+                .fds
+                .set_fd_status_flags(fd.fd(), compat_core::syscall::LINUX_O_NONBLOCK)
+        {
+            let _ = linux.fds.close(fd);
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux.message_queues.push(LinuxMqHandle { handle, queue });
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Returns the shared queue object for one message-queue descriptor.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_mq_state(pid: ObjId, handle: u64) -> Option<Arc<LinuxMqShared>> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .message_queues
+            .iter()
+            .find(|queue| queue.handle == handle)
+            .map(|queue| Arc::clone(&queue.queue)),
         _ => None,
     })
 }
@@ -4453,6 +4586,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         next_signalfd_handle: LINUX_SIGNALFD_HANDLE_BASE,
         inotifies: Vec::new(),
         next_inotify_handle: LINUX_INOTIFY_HANDLE_BASE,
+        message_queues: Vec::new(),
+        next_mq_handle: LINUX_MQ_HANDLE_BASE,
         epolls: Vec::new(),
         next_epoll_handle: LINUX_EPOLL_HANDLE_BASE,
         iourings: Vec::new(),
