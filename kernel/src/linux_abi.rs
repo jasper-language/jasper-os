@@ -44,6 +44,8 @@ const MAX_SYSV_SEM_OPS: usize = 32;
 const MAX_SYSV_SEM_WAITERS: usize = 64;
 const MAX_SYSV_SEM_UNDOS: usize = 64;
 const SYSV_SEMVMX: i32 = 32767;
+const MAX_SYSV_SHARED_SEGMENTS: usize = 16;
+const MAX_SYSV_SHARED_ATTACHMENTS: usize = 32;
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
 static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
 
@@ -266,6 +268,34 @@ struct SysVSemaphoreUndo {
     adjustment: i32,
 }
 
+#[derive(Clone, Copy)]
+struct SysVSharedAttachment {
+    process: ObjId,
+    address: u64,
+    length: u64,
+    writable: bool,
+}
+
+struct SysVSharedMemory {
+    id: i32,
+    key: i32,
+    application: kernel_core::security::ApplicationIdentity,
+    uid: u32,
+    gid: u32,
+    cuid: u32,
+    cgid: u32,
+    mode: u16,
+    size: u64,
+    object: proc::LinuxSharedMemoryObject,
+    creator_pid: i32,
+    last_pid: i32,
+    attach_time: i64,
+    detach_time: i64,
+    change_time: i64,
+    deleted: bool,
+    attachments: alloc::vec::Vec<SysVSharedAttachment>,
+}
+
 struct CompatState {
     threads: [Option<LinuxThread>; MAX_LINUX_THREADS],
     futexes: [Option<FutexWord>; MAX_FUTEX_WORDS],
@@ -283,6 +313,8 @@ struct CompatState {
     sysv_semaphore_waiters: [Option<SysVSemaphoreWaiter>; MAX_SYSV_SEM_WAITERS],
     sysv_semaphore_undos: alloc::vec::Vec<SysVSemaphoreUndo>,
     next_sysv_semaphore_id: i32,
+    sysv_shared_segments: alloc::vec::Vec<SysVSharedMemory>,
+    next_sysv_shared_id: i32,
 }
 
 impl CompatState {
@@ -304,6 +336,8 @@ impl CompatState {
             sysv_semaphore_waiters: [None; MAX_SYSV_SEM_WAITERS],
             sysv_semaphore_undos: alloc::vec::Vec::new(),
             next_sysv_semaphore_id: 1,
+            sysv_shared_segments: alloc::vec::Vec::new(),
+            next_sysv_shared_id: 1,
         }
     }
 }
@@ -1900,6 +1934,7 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
         release_posix_timers(process);
         remove_process_signals(process);
         release_sysv_semaphore_undos(process);
+        release_sysv_shared_process(process);
         crate::binder::release_process(process);
     }
 }
@@ -2503,6 +2538,10 @@ fn execute(
         LinuxSyscall::SemOp => compat_result(linux_semop(pid, call.args, false)),
         LinuxSyscall::SemTimedOp => compat_result(linux_semop(pid, call.args, true)),
         LinuxSyscall::SemCtl => compat_result(linux_semctl(pid, call.args)),
+        LinuxSyscall::ShmGet => compat_result(linux_shmget(pid, call.args)),
+        LinuxSyscall::ShmAt => compat_result(linux_shmat(pid, call.args)),
+        LinuxSyscall::ShmDt => compat_result(linux_shmdt(pid, call.args)),
+        LinuxSyscall::ShmCtl => compat_result(linux_shmctl(pid, call.args)),
         LinuxSyscall::MqOpen => compat_result(linux_mq_open(pid, call.args)),
         LinuxSyscall::MqUnlink => compat_result(linux_mq_unlink(call.args)),
         LinuxSyscall::MqTimedsend => compat_result(linux_mq_send(pid, call.args, true)),
@@ -8224,6 +8263,458 @@ fn linux_semctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             drop(state);
             wake_message_queue_waiters();
             Ok(0)
+        }
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+const SYSV_SHM_DS_BYTES: usize = 120;
+
+fn sysv_shared_segment_index(
+    state: &CompatState,
+    application: kernel_core::security::ApplicationIdentity,
+    id: i32,
+) -> Option<usize> {
+    state.sysv_shared_segments.iter().position(|segment| {
+        !segment.deleted && segment.application == application && segment.id == id
+    })
+}
+
+fn sysv_shared_access(
+    segment: &SysVSharedMemory,
+    credentials: proc::LinuxCredentials,
+    write: bool,
+) -> bool {
+    if credentials.euid == 0 {
+        return true;
+    }
+    let shift = if credentials.euid == segment.uid {
+        6
+    } else if credentials.egid == segment.gid {
+        3
+    } else {
+        0
+    };
+    let required = if write { 0o2 } else { 0o4 };
+    segment.mode >> shift & required == required
+}
+
+fn sysv_shm_ds_bytes(segment: &SysVSharedMemory) -> [u8; SYSV_SHM_DS_BYTES] {
+    let mut output = [0u8; SYSV_SHM_DS_BYTES];
+    output[0..4].copy_from_slice(&(segment.key as u32).to_le_bytes());
+    output[4..8].copy_from_slice(&segment.uid.to_le_bytes());
+    output[8..12].copy_from_slice(&segment.gid.to_le_bytes());
+    output[12..16].copy_from_slice(&segment.cuid.to_le_bytes());
+    output[16..20].copy_from_slice(&segment.cgid.to_le_bytes());
+    output[20..24].copy_from_slice(&u32::from(segment.mode).to_le_bytes());
+    output[24..26].copy_from_slice(&(segment.id as u16).to_le_bytes());
+    output[48..56].copy_from_slice(&segment.size.to_le_bytes());
+    output[56..64].copy_from_slice(&segment.attach_time.to_le_bytes());
+    output[64..72].copy_from_slice(&segment.detach_time.to_le_bytes());
+    output[72..80].copy_from_slice(&segment.change_time.to_le_bytes());
+    output[80..84].copy_from_slice(&segment.creator_pid.to_le_bytes());
+    output[84..88].copy_from_slice(&segment.last_pid.to_le_bytes());
+    output[88..96].copy_from_slice(&(segment.attachments.len() as u64).to_le_bytes());
+    output
+}
+
+fn write_sysv_shm_info(address: u64, state: &CompatState) -> Result<(), CompatErrno> {
+    let mut info = [0u8; 48];
+    let active = state
+        .sysv_shared_segments
+        .iter()
+        .filter(|segment| !segment.deleted)
+        .count();
+    let bytes: u64 = state
+        .sysv_shared_segments
+        .iter()
+        .filter(|segment| !segment.deleted)
+        .map(|segment| segment.size)
+        .sum();
+    info[0..4].copy_from_slice(&(active as i32).to_le_bytes());
+    info[8..16].copy_from_slice(&bytes.to_le_bytes());
+    info[16..24].copy_from_slice(&bytes.to_le_bytes());
+    copy_to_user(address, &info, info.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(())
+}
+
+/// Implements `shmget(2)` with application-scoped bounded segments.
+fn linux_shmget(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let key = args[0] as u32 as i32;
+    let size = args[1];
+    let flags = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if flags & !(0o777 | SYSV_IPC_CREAT | SYSV_IPC_EXCL) != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    if key != 0 {
+        let existing = {
+            let state = COMPAT.lock();
+            state
+                .sysv_shared_segments
+                .iter()
+                .find(|segment| {
+                    !segment.deleted
+                        && segment.application == application
+                        && segment.key == key
+                })
+                .map(|segment| (segment.id, segment.size))
+        };
+        if let Some((id, existing_size)) = existing {
+            if flags & (SYSV_IPC_CREAT | SYSV_IPC_EXCL)
+                == (SYSV_IPC_CREAT | SYSV_IPC_EXCL)
+            {
+                return Err(CompatErrno::Exists);
+            }
+            if size > existing_size && size != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            return Ok(id as u32 as u64);
+        }
+    }
+    if flags & SYSV_IPC_CREAT == 0 {
+        return Err(CompatErrno::NoEntry);
+    }
+    if size == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let object =
+        proc::linux_create_shared_memory(pid, size).ok_or(CompatErrno::NoMemory)?;
+    let mut state = COMPAT.lock();
+    if key != 0 {
+        if let Some(segment) = state.sysv_shared_segments.iter().find(|segment| {
+            !segment.deleted && segment.application == application && segment.key == key
+        }) {
+            if flags & (SYSV_IPC_CREAT | SYSV_IPC_EXCL)
+                == (SYSV_IPC_CREAT | SYSV_IPC_EXCL)
+            {
+                return Err(CompatErrno::Exists);
+            }
+            if size > segment.size && size != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            return Ok(segment.id as u32 as u64);
+        }
+    }
+    if state
+        .sysv_shared_segments
+        .iter()
+        .filter(|segment| !segment.deleted)
+        .count()
+        >= MAX_SYSV_SHARED_SEGMENTS
+    {
+        return Err(CompatErrno::NoSpace);
+    }
+    state
+        .sysv_shared_segments
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    let id = state.next_sysv_shared_id;
+    state.next_sysv_shared_id = id.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+    let current_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
+    let now = sysv_time_seconds();
+    state.sysv_shared_segments.push(SysVSharedMemory {
+        id,
+        key,
+        application,
+        uid: credentials.euid,
+        gid: credentials.egid,
+        cuid: credentials.euid,
+        cgid: credentials.egid,
+        mode: (flags & 0o777) as u16,
+        size,
+        object,
+        creator_pid: current_pid,
+        last_pid: 0,
+        attach_time: 0,
+        detach_time: 0,
+        change_time: now,
+        deleted: false,
+        attachments: alloc::vec::Vec::new(),
+    });
+    Ok(id as u32 as u64)
+}
+
+/// Implements `shmat(2)` and records the process attachment lifecycle.
+fn linux_shmat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    const SHM_RDONLY: u64 = 0o10000;
+    const SHM_RND: u64 = 0o20000;
+    const SHM_REMAP: u64 = 0o40000;
+    const SHM_EXEC: u64 = 0o100000;
+    let id = args[0] as i32;
+    let flags = args[2];
+    if flags & !(SHM_RDONLY | SHM_RND | SHM_REMAP | SHM_EXEC) != 0
+        || flags & (SHM_REMAP | SHM_EXEC) != 0
+        || args[1] != 0 && flags & SHM_RND == 0 && args[1] % PAGE != 0
+    {
+        return Err(if flags & SHM_REMAP != 0 {
+            CompatErrno::Perm
+        } else {
+            CompatErrno::NotSupported
+        });
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let segment = {
+        let state = COMPAT.lock();
+        let index =
+            sysv_shared_segment_index(&state, application, id).ok_or(CompatErrno::Invalid)?;
+        let segment = &state.sysv_shared_segments[index];
+        if !sysv_shared_access(segment, credentials, flags & SHM_RDONLY == 0) {
+            return Err(CompatErrno::Access);
+        }
+        (
+            segment.object.clone(),
+            segment.size,
+            segment.attachments.len(),
+        )
+    };
+    if segment.2 >= MAX_SYSV_SHARED_ATTACHMENTS {
+        return Err(CompatErrno::NoSpace);
+    }
+    let length = segment
+        .1
+        .checked_add(PAGE - 1)
+        .ok_or(CompatErrno::Invalid)?
+        & !(PAGE - 1);
+    let requested = args[1];
+    let mut candidate = if requested == 0 {
+        proc::linux_mmap_cursor(pid).ok_or(CompatErrno::NoSys)?
+    } else if flags & SHM_RND != 0 {
+        requested & !(PAGE - 1)
+    } else {
+        requested
+    };
+    if candidate < crate::arch::USER_WINDOW.0
+        || candidate
+            .checked_add(length)
+            .is_none_or(|end| end > crate::arch::USER_WINDOW.1)
+    {
+        return Err(CompatErrno::NoMemory);
+    }
+    let mut mapped = None;
+    while candidate
+        .checked_add(length)
+        .is_some_and(|end| end <= crate::arch::USER_WINDOW.1)
+    {
+        if proc::linux_shared_memory_map(
+            pid,
+            &segment.0,
+            candidate,
+            length,
+            flags & SHM_RDONLY == 0,
+        )
+        .is_ok()
+        {
+            mapped = Some(candidate);
+            break;
+        }
+        candidate = candidate
+            .checked_add(length)
+            .ok_or(CompatErrno::NoMemory)?;
+    }
+    let address = mapped.ok_or(CompatErrno::NoMemory)?;
+    let _ = proc::set_linux_mmap_cursor(
+        pid,
+        address
+            .checked_add(length)
+            .ok_or(CompatErrno::NoMemory)?,
+    );
+    let current_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
+    let mut state = COMPAT.lock();
+    let Some(index) = sysv_shared_segment_index(&state, application, id) else {
+        drop(state);
+        let _ = linux_munmap(pid, [address, length, 0, 0, 0, 0]);
+        return Err(CompatErrno::Removed);
+    };
+    let segment = &mut state.sysv_shared_segments[index];
+    if segment.attachments.len() >= MAX_SYSV_SHARED_ATTACHMENTS
+        || segment
+            .attachments
+            .try_reserve(1)
+            .map_err(|_| CompatErrno::NoSpace)
+            .is_err()
+    {
+        drop(state);
+        let _ = linux_munmap(pid, [address, length, 0, 0, 0, 0]);
+        return Err(CompatErrno::NoSpace);
+    }
+    segment.attachments.push(SysVSharedAttachment {
+        process: pid,
+        address,
+        length,
+        writable: flags & SHM_RDONLY == 0,
+    });
+    segment.attach_time = sysv_time_seconds();
+    segment.last_pid = current_pid;
+    Ok(address)
+}
+
+/// Implements `shmdt(2)` after validating this process's exact attachment.
+fn linux_shmdt(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    let address = args[0];
+    if address % PAGE != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let (id, length) = {
+        let state = COMPAT.lock();
+        state
+            .sysv_shared_segments
+            .iter()
+            .find(|segment| segment.application == application)
+            .and_then(|segment| {
+                segment
+                    .attachments
+                    .iter()
+                    .find(|attachment| attachment.process == pid && attachment.address == address)
+                    .map(|attachment| (segment.id, attachment.length))
+            })
+            .ok_or(CompatErrno::Invalid)?
+    };
+    linux_munmap(pid, [address, length, 0, 0, 0, 0])?;
+    let current_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
+    let mut state = COMPAT.lock();
+    let index = state
+        .sysv_shared_segments
+        .iter()
+        .position(|segment| {
+            segment.id == id
+                && segment.application == application
+                && segment.attachments.iter().any(|attachment| {
+                    attachment.process == pid && attachment.address == address
+                })
+        })
+        .ok_or(CompatErrno::Removed)?;
+    let segment = &mut state.sysv_shared_segments[index];
+    segment
+        .attachments
+        .retain(|attachment| !(attachment.process == pid && attachment.address == address));
+    segment.detach_time = sysv_time_seconds();
+    segment.last_pid = current_pid;
+    let remove = segment.deleted && segment.attachments.is_empty();
+    if remove {
+        state.sysv_shared_segments.remove(index);
+    }
+    Ok(0)
+}
+
+/// Drops process attachment records after process address-space teardown.
+fn release_sysv_shared_process(process: ObjId) {
+    let mut state = COMPAT.lock();
+    let now = sysv_time_seconds();
+    let mut index = 0usize;
+    while index < state.sysv_shared_segments.len() {
+        let segment = &mut state.sysv_shared_segments[index];
+        let before = segment.attachments.len();
+        segment
+            .attachments
+            .retain(|attachment| attachment.process != process);
+        if segment.attachments.len() != before {
+            segment.detach_time = now;
+        }
+        if segment.deleted && segment.attachments.is_empty() {
+            state.sysv_shared_segments.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+/// Implements `shmctl(2)` for metadata, locking and removal.
+fn linux_shmctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const IPC_RMID: u32 = 0;
+    const IPC_SET: u32 = 1;
+    const IPC_STAT: u32 = 2;
+    const IPC_INFO: u32 = 3;
+    const SHM_LOCK: u32 = 3;
+    const SHM_UNLOCK: u32 = 4;
+    const SHM_STAT: u32 = 11;
+    const SHM_INFO: u32 = 14;
+    const SHM_STAT_ANY: u32 = 15;
+    let command = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    if command == SHM_INFO || command == IPC_INFO && args[0] == 0 {
+        let state = COMPAT.lock();
+        return write_sysv_shm_info(args[2], &state).map(|()| 0);
+    }
+    if command == SHM_LOCK || command == SHM_UNLOCK {
+        return Err(CompatErrno::Perm);
+    }
+    let update = if command == IPC_SET {
+        let mut update = [0u8; SYSV_SHM_DS_BYTES];
+        copy_from_user(&mut update, args[2], SYSV_SHM_DS_BYTES)
+            .map_err(|_| CompatErrno::Fault)?;
+        Some(update)
+    } else {
+        None
+    };
+    let mut state = COMPAT.lock();
+    let selected = match command {
+        SHM_STAT | SHM_STAT_ANY => {
+            let index = usize::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+            state
+                .sysv_shared_segments
+                .iter()
+                .enumerate()
+                .filter(|(_, segment)| !segment.deleted && segment.application == application)
+                .nth(index)
+                .map(|(index, _)| index)
+                .ok_or(CompatErrno::Invalid)?
+        }
+        _ => sysv_shared_segment_index(&state, application, args[0] as i32)
+            .ok_or(CompatErrno::Invalid)?,
+    };
+    let segment = &mut state.sysv_shared_segments[selected];
+    match command {
+        IPC_RMID => {
+            if credentials.euid != 0 && credentials.euid != segment.uid {
+                return Err(CompatErrno::Perm);
+            }
+            segment.deleted = true;
+            segment.change_time = sysv_time_seconds();
+            let remove = segment.attachments.is_empty();
+            if remove {
+                state.sysv_shared_segments.remove(selected);
+            }
+            Ok(0)
+        }
+        IPC_SET => {
+            if credentials.euid != 0 && credentials.euid != segment.uid {
+                return Err(CompatErrno::Perm);
+            }
+            let update = update.expect("IPC_SET input");
+            let mode = u32::from_le_bytes(update[20..24].try_into().unwrap()) as u16;
+            if mode & !0o777 != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            segment.uid = u32::from_le_bytes(update[4..8].try_into().unwrap());
+            segment.gid = u32::from_le_bytes(update[8..12].try_into().unwrap());
+            segment.mode = mode;
+            segment.change_time = sysv_time_seconds();
+            Ok(0)
+        }
+        IPC_STAT | SHM_STAT | SHM_STAT_ANY => {
+            if command != SHM_STAT_ANY && !sysv_shared_access(segment, credentials, false) {
+                return Err(CompatErrno::Access);
+            }
+            let output = sysv_shm_ds_bytes(segment);
+            let returned_id = segment.id;
+            drop(state);
+            copy_to_user(args[2], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+            if command == SHM_STAT {
+                Ok(returned_id as u32 as u64)
+            } else {
+                Ok(0)
+            }
         }
         _ => Err(CompatErrno::Invalid),
     }

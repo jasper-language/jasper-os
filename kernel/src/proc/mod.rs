@@ -68,6 +68,8 @@ const USI_REQUEST_SLOTS: usize = 16;
 static LINUX_PID_NEXT: AtomicU32 = AtomicU32::new(1);
 #[cfg(feature = "linux-abi")]
 static NEXT_LINUX_AIO_CONTEXT: AtomicU64 = AtomicU64::new(0x9000_0000_0000_0001);
+#[cfg(feature = "linux-abi")]
+static NEXT_LINUX_SYSV_SHMEM_ID: AtomicU64 = AtomicU64::new(0x0000_8d00_0000_0001);
 static NEXT_WORKLOAD_DOMAIN: AtomicU32 = AtomicU32::new(1);
 /// Opaque sentinel used only by the Linux standard-stream compatibility table.
 ///
@@ -246,6 +248,13 @@ struct AshmemBuffer {
     seals: AtomicU32,
     name: SpinLock<([u8; 256], usize)>,
     pages: SpinLock<Vec<Arc<crate::mm::memory_object::Page>>>,
+}
+
+/// One bounded shared-page object used by the System V `shm*` ABI.
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+pub(crate) struct LinuxSharedMemoryObject {
+    buffer: Arc<AshmemBuffer>,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -2140,6 +2149,51 @@ pub(crate) fn linux_create_memfd(
     linux_open_ashmem_kind(pid, close_on_exec, true, allow_sealing)
 }
 
+/// Allocates one anonymous shared-page object for System V shared memory.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_create_shared_memory(
+    pid: ObjId,
+    size: u64,
+) -> Option<LinuxSharedMemoryObject> {
+    const MAX_BYTES: u64 = 64 * 1024 * 1024;
+    if size == 0 || size > MAX_BYTES {
+        return None;
+    }
+    let pages_count = usize::try_from(size.div_ceil(FRAME_SIZE)).ok()?;
+    let id = NEXT_LINUX_SYSV_SHMEM_ID.fetch_add(1, Ordering::Relaxed);
+    with_proc(pid, |p| {
+        let mut charge = p
+            .memory_account
+            .reserve(pages_count as u64, 0, p.memory_owned_limit, p.memory_pin_limit)
+            .ok_or(ProcError::MemoryQuota)?;
+        let mut pages = Vec::new();
+        pages
+            .try_reserve_exact(pages_count)
+            .map_err(|_| ProcError::OutOfFrames)?;
+        for _ in 0..pages_count {
+            let page_charge = charge.take_page().ok_or(ProcError::OutOfFrames)?;
+            pages.push(
+                crate::mm::memory_object::Page::zeroed(page_charge)
+                    .ok_or(ProcError::OutOfFrames)?,
+            );
+        }
+        Ok(LinuxSharedMemoryObject {
+            buffer: Arc::new(AshmemBuffer {
+                id,
+                regular_file: false,
+                size: AtomicU64::new(size),
+                protection: AtomicU32::new(3),
+                pins: AtomicU32::new(0),
+                allow_sealing: AtomicU32::new(0),
+                seals: AtomicU32::new(0),
+                name: SpinLock::new(([0; 256], 0)),
+                pages: SpinLock::new(pages),
+            }),
+        })
+    })
+    .ok()
+}
+
 #[cfg(feature = "linux-abi")]
 fn linux_open_ashmem_kind(
     pid: ObjId,
@@ -3659,6 +3713,127 @@ pub(crate) fn linux_ashmem_map(
                 page: Arc::clone(page),
                 source: backing,
                 writable: protection & 2 != 0,
+            });
+        }
+        p.space.end_shootdown();
+        Ok(())
+    })
+    .map_err(|error| match error {
+        ProcError::Handle(HandleError::RightsDenied) => LinuxAshmemError::Permission,
+        _ => LinuxAshmemError::NoMemory,
+    })
+}
+
+/// Maps one System V shared-memory object at an exact page-aligned range.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_shared_memory_map(
+    pid: ObjId,
+    object: &LinuxSharedMemoryObject,
+    address: u64,
+    length: u64,
+    writable: bool,
+) -> Result<(), LinuxAshmemError> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    if address % PAGE != 0 || length == 0 || length % PAGE != 0 {
+        return Err(LinuxAshmemError::Invalid);
+    }
+    let pages_count = length / PAGE;
+    let retained = {
+        let guard = object.buffer.pages.lock();
+        let count = usize::try_from(pages_count).map_err(|_| LinuxAshmemError::Invalid)?;
+        let mut retained = Vec::new();
+        retained
+            .try_reserve_exact(count)
+            .map_err(|_| LinuxAshmemError::NoMemory)?;
+        retained.extend(
+            guard
+                .get(..count)
+                .ok_or(LinuxAshmemError::Invalid)?
+                .iter()
+                .cloned(),
+        );
+        retained
+    };
+    let backing = kernel_core::memory_capability::BackingIdentity::new(object.buffer.id, 1)
+        .ok_or(LinuxAshmemError::Invalid)?;
+    with_proc(pid, |p| {
+        if p.frames
+            .len()
+            .checked_add(p.shared_maps.len())
+            .and_then(|count| count.checked_add(retained.len()))
+            .is_none_or(|count| count > MAX_PROCESS_FRAMES)
+        {
+            return Err(ProcError::MemoryQuota);
+        }
+        p.shared_maps
+            .try_reserve(retained.len())
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        if !p
+            .memory_caps
+            .can_grant(address, pages_count, MemoryKind::Shared)
+        {
+            return Err(ProcError::MemoryQuota);
+        }
+        for index in 0..pages_count {
+            if p.space
+                .translate(VirtPage::containing(address + index * PAGE))
+                .is_some()
+            {
+                return Err(ProcError::Map(MapError::InvalidAddress));
+            }
+        }
+        if !p.space.begin_shootdown() {
+            return Err(ProcError::Map(MapError::Busy));
+        }
+        let mut flags = MapFlags::USER;
+        if writable {
+            flags = flags.union(MapFlags::WRITE);
+        }
+        let mut published = 0u64;
+        for page in &retained {
+            if p.space
+                .map_raw(
+                    VirtPage::containing(address + published * PAGE),
+                    page.frame(),
+                    flags,
+                )
+                .is_err()
+            {
+                for index in 0..published {
+                    let _ = p
+                        .space
+                        .unmap_raw(VirtPage::containing(address + index * PAGE));
+                }
+                p.space.end_shootdown();
+                return Err(ProcError::Map(MapError::NotMapped));
+            }
+            published += 1;
+        }
+        let rights = MemoryRights::READ
+            .union(MemoryRights::MAP)
+            .union(if writable {
+                MemoryRights::WRITE
+            } else {
+                MemoryRights::NONE
+            });
+        if p.memory_caps
+            .grant(address, pages_count, rights, MemoryKind::Shared, backing)
+            .is_err()
+        {
+            for index in 0..published {
+                let _ = p
+                    .space
+                    .unmap_raw(VirtPage::containing(address + index * PAGE));
+            }
+            p.space.end_shootdown();
+            return Err(ProcError::MemoryQuota);
+        }
+        for (index, page) in retained.iter().enumerate() {
+            p.shared_maps.push(SharedMapping {
+                va: address + index as u64 * PAGE,
+                page: Arc::clone(page),
+                source: backing,
+                writable,
             });
         }
         p.space.end_shootdown();

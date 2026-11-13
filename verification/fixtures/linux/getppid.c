@@ -36,6 +36,7 @@
 #include <sys/mman.h>
 #include <sys/msg.h>
 #include <sys/sem.h>
+#include <sys/shm.h>
 #include <sys/prctl.h>
 #include <sys/random.h>
 #include <sys/reboot.h>
@@ -4874,6 +4875,65 @@ int main(void) {
         sysv_sem_status.sem_perm.__key != sysv_sem_key ||
         syscall(SYS_semctl, sysv_sem, IPC_RMID, 0, 0) != 0) {
         return 593;
+    }
+    key_t sysv_shm_key = 0x53484d31;
+    int stale_sysv_shm = shmget(sysv_shm_key, 0, 0);
+    if (stale_sysv_shm >= 0) {
+        shmctl(stale_sysv_shm, IPC_RMID, NULL);
+    }
+    int sysv_shm = shmget(sysv_shm_key, 4096,
+                          IPC_CREAT | IPC_EXCL | 0600);
+    if (sysv_shm < 0 ||
+        shmget(sysv_shm_key, 0, 0600) != sysv_shm) {
+        return 594;
+    }
+    char *sysv_shared = shmat(sysv_shm, NULL, 0);
+    if (sysv_shared == (char *)-1) {
+        return 595;
+    }
+    strcpy(sysv_shared, "shared-memory");
+    if (shmdt(sysv_shared) != 0) {
+        return 596;
+    }
+    sysv_shared = shmat(sysv_shm, NULL, SHM_RDONLY);
+    if (sysv_shared == (char *)-1 ||
+        strcmp(sysv_shared, "shared-memory") != 0 ||
+        shmdt(sysv_shared) != 0) {
+        return 597;
+    }
+    pid_t shm_reader = fork();
+    if (shm_reader < 0) {
+        return 598;
+    }
+    if (shm_reader == 0) {
+        char *mapping = shmat(sysv_shm, NULL, SHM_RDONLY);
+        int result = mapping != (char *)-1 &&
+                     strcmp(mapping, "shared-memory") == 0 &&
+                     shmdt(mapping) == 0;
+        _exit(result ? 0 : 1);
+    }
+    int shm_status = 0;
+    if (waitpid(shm_reader, &shm_status, 0) != shm_reader ||
+        !WIFEXITED(shm_status) || WEXITSTATUS(shm_status) != 0) {
+        return 599;
+    }
+    struct shmid_ds sysv_shm_status = {0};
+    if (shmctl(sysv_shm, IPC_STAT, &sysv_shm_status) != 0 ||
+        sysv_shm_status.shm_segsz != 4096 ||
+        sysv_shm_status.shm_nattch != 0 ||
+        sysv_shm_status.shm_perm.__key != sysv_shm_key) {
+        return 600;
+    }
+    sysv_shared = shmat(sysv_shm, NULL, 0);
+    if (sysv_shared == (char *)-1 ||
+        shmctl(sysv_shm, IPC_RMID, NULL) != 0 ||
+        strcmp(sysv_shared, "shared-memory") != 0 ||
+        shmdt(sysv_shared) != 0) {
+        return 601;
+    }
+    errno = 0;
+    if (shmget(sysv_shm_key, 0, 0) != -1 || errno != ENOENT) {
+        return 602;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
