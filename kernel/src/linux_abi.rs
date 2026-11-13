@@ -2646,10 +2646,10 @@ fn execute(
         LinuxSyscall::Listmount => compat_result(linux_listmount(pid, call.args)),
         LinuxSyscall::Statmount => compat_result(linux_statmount(pid, call.args)),
         LinuxSyscall::Seccomp => compat_result(linux_seccomp(pid, call.args)),
+        LinuxSyscall::Cachestat => compat_result(linux_cachestat(pid, call.args)),
         LinuxSyscall::AddKey
         | LinuxSyscall::RequestKey
         | LinuxSyscall::Keyctl
-        | LinuxSyscall::Cachestat
         | LinuxSyscall::FanotifyInit
         | LinuxSyscall::FanotifyMark
         | LinuxSyscall::FileGetattr
@@ -9013,6 +9013,50 @@ fn linux_statmount(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     output.extend_from_slice(&fixed);
     output.extend_from_slice(&strings);
     copy_to_user(args[1], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Implements `cachestat(2)` for the synthetic resident file namespace.
+fn linux_cachestat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    if args[3] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let mut range = [0u8; 16];
+    copy_from_user(&mut range, args[1], 16).map_err(|_| CompatErrno::Fault)?;
+    let offset = u64::from_le_bytes(range[..8].try_into().unwrap());
+    let length = u64::from_le_bytes(range[8..].try_into().unwrap());
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let file_size = if entry.kind == compat_core::fd::CompatKind::File {
+        let (handle, _) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
+        crate::linux_vfs::FileId::from_handle(handle)
+            .ok_or(CompatErrno::BadFd)?
+            .bytes()
+            .len() as u64
+    } else if entry.kind == compat_core::fd::CompatKind::Device {
+        proc::linux_ashmem_state(pid, entry.handle)
+            .map(|(size, _, _)| size)
+            .ok_or(CompatErrno::BadFd)?
+    } else {
+        return Err(CompatErrno::BadFd);
+    };
+    let end = if length == 0 {
+        file_size
+    } else {
+        offset
+            .checked_add(length)
+            .ok_or(CompatErrno::Invalid)?
+            .min(file_size)
+    };
+    let cached_pages = if offset < file_size && end > offset {
+        end.saturating_sub(offset).div_ceil(PAGE)
+    } else {
+        0
+    };
+    let mut output = [0u8; 40];
+    output[..8].copy_from_slice(&cached_pages.to_le_bytes());
+    copy_to_user(args[2], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
 }
 

@@ -17,6 +17,7 @@
 #include <linux/kcmp.h>
 #include <linux/membarrier.h>
 #include <linux/mount.h>
+#include <linux/mman.h>
 #include <linux/sched/types.h>
 #include <linux/seccomp.h>
 #include <linux/sync_file.h>
@@ -629,6 +630,15 @@ int main(void) {
     if (readv(fd, vectors, 2) != (ssize_t)sizeof(magic) ||
         magic[0] != 0x7f || magic[1] != 'E' || magic[2] != 'L' || magic[3] != 'F') {
         return 6;
+    }
+    struct cachestat_range cache_range = {
+        .off = 0,
+        .len = 4096,
+    };
+    struct cachestat cache_status = {0};
+    if (syscall(SYS_cachestat, fd, &cache_range, &cache_status, 0) != 0 ||
+        cache_status.nr_cache == 0) {
+        return 614;
     }
     errno = 0;
     if (readv(-1, vectors, 2) != -1 || errno != EBADF) {
@@ -4420,7 +4430,7 @@ int main(void) {
         return 535;
     }
     const long unsupported_features[] = {
-        SYS_add_key, SYS_request_key, SYS_keyctl, SYS_cachestat,
+        SYS_add_key, SYS_request_key, SYS_keyctl,
         SYS_fanotify_init, SYS_fanotify_mark, SYS_file_getattr,
         SYS_file_setattr, SYS_fsconfig, SYS_fsmount, SYS_fsopen,
         SYS_fspick, SYS_get_mempolicy, SYS_set_mempolicy,
