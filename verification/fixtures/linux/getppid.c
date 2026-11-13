@@ -68,6 +68,16 @@
 #define JASPER_ION_IOC_SYNC 0xc0084907UL
 #define JASPER_ION_HEAP_SYSTEM_MASK 1U
 
+#ifndef SYS_uprobe
+#define SYS_uprobe 336
+#endif
+#ifndef SYS_listns
+#define SYS_listns 470
+#endif
+#ifndef SYS_rseq_slice_yield
+#define SYS_rseq_slice_yield 471
+#endif
+
 struct jasper_ion_allocation_data {
     size_t len;
     size_t align;
@@ -4150,6 +4160,40 @@ int main(void) {
             printf("legacy-call-fail nr=%ld errno=%d\n",
                    legacy_calls[index], errno);
             return 529;
+        }
+    }
+    if (syscall(SYS_rseq_slice_yield) != 0) {
+        return 534;
+    }
+    errno = 0;
+    if (syscall(SYS_lookup_dcookie, 0, NULL, 0) != -1 ||
+        errno != ENOENT) {
+        return 535;
+    }
+    const long unsupported_features[] = {
+        SYS_add_key, SYS_request_key, SYS_keyctl, SYS_cachestat,
+        SYS_fanotify_init, SYS_fanotify_mark, SYS_file_getattr,
+        SYS_file_setattr, SYS_fsconfig, SYS_fsmount, SYS_fsopen,
+        SYS_fspick, SYS_get_mempolicy, SYS_set_mempolicy,
+        SYS_set_mempolicy_home_node, SYS_mbind, SYS_migrate_pages,
+        SYS_move_pages, SYS_landlock_create_ruleset, SYS_landlock_add_rule,
+        SYS_landlock_restrict_self, SYS_listmount, SYS_listns,
+        SYS_lsm_get_self_attr, SYS_lsm_set_self_attr, SYS_lsm_list_modules,
+        SYS_map_shadow_stack, SYS_mount_setattr, SYS_move_mount,
+        SYS_name_to_handle_at, SYS_open_by_handle_at, SYS_open_tree,
+        SYS_open_tree_attr, SYS_pkey_alloc, SYS_pkey_free,
+        SYS_pkey_mprotect, SYS_process_madvise, SYS_process_mrelease,
+        SYS_seccomp, SYS_uprobe, SYS_uretprobe, SYS_userfaultfd,
+    };
+    for (size_t index = 0;
+         index < sizeof(unsupported_features) / sizeof(unsupported_features[0]);
+         index++) {
+        errno = 0;
+        if (syscall(unsupported_features[index], 0, 0, 0, 0, 0, 0) != -1 ||
+            errno != EOPNOTSUPP) {
+            printf("unsupported-feature-fail nr=%ld errno=%d\n",
+                   unsupported_features[index], errno);
+            return 536;
         }
     }
     int secret_fd = syscall(SYS_memfd_secret, O_CLOEXEC);

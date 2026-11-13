@@ -2072,6 +2072,53 @@ fn execute(
         | LinuxSyscall::LegacyUstat
         | LinuxSyscall::LegacyUselib
         | LinuxSyscall::LegacySysfs => -(CompatErrno::NoSys as i32 as i64),
+        LinuxSyscall::RseqSliceYield => {
+            sched::yield_with_cause(crate::sched::scheduler::Cause::YIELD);
+            0
+        }
+        LinuxSyscall::LookupDcookie => -(CompatErrno::NoEntry as i32 as i64),
+        LinuxSyscall::AddKey
+        | LinuxSyscall::RequestKey
+        | LinuxSyscall::Keyctl
+        | LinuxSyscall::Cachestat
+        | LinuxSyscall::FanotifyInit
+        | LinuxSyscall::FanotifyMark
+        | LinuxSyscall::FileGetattr
+        | LinuxSyscall::FileSetattr
+        | LinuxSyscall::FsConfig
+        | LinuxSyscall::FsMount
+        | LinuxSyscall::FsOpen
+        | LinuxSyscall::FsPick
+        | LinuxSyscall::GetMempolicy
+        | LinuxSyscall::SetMempolicy
+        | LinuxSyscall::SetMempolicyHomeNode
+        | LinuxSyscall::Mbind
+        | LinuxSyscall::MigratePages
+        | LinuxSyscall::MovePages
+        | LinuxSyscall::LandlockCreateRuleset
+        | LinuxSyscall::LandlockAddRule
+        | LinuxSyscall::LandlockRestrictSelf
+        | LinuxSyscall::Listmount
+        | LinuxSyscall::Listns
+        | LinuxSyscall::LsmGetSelfAttr
+        | LinuxSyscall::LsmSetSelfAttr
+        | LinuxSyscall::LsmListModules
+        | LinuxSyscall::MapShadowStack
+        | LinuxSyscall::MountSetattr
+        | LinuxSyscall::MoveMount
+        | LinuxSyscall::NameToHandleAt
+        | LinuxSyscall::OpenByHandleAt
+        | LinuxSyscall::OpenTree
+        | LinuxSyscall::OpenTreeAttr
+        | LinuxSyscall::PkeyAlloc
+        | LinuxSyscall::PkeyFree
+        | LinuxSyscall::PkeyMprotect
+        | LinuxSyscall::ProcessMadvise
+        | LinuxSyscall::ProcessMrelease
+        | LinuxSyscall::Seccomp
+        | LinuxSyscall::Uprobe
+        | LinuxSyscall::Uretprobe
+        | LinuxSyscall::Userfaultfd => -(CompatErrno::NotSupported as i32 as i64),
         LinuxSyscall::Adjtimex
         | LinuxSyscall::ClockAdjtime
         | LinuxSyscall::ClockSettime
