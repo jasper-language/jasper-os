@@ -59,7 +59,7 @@ if [ "${available_kib:-0}" -lt 2097152 ]; then
   exit 75
 fi
 load1=$(awk '{ print $1 }' /proc/loadavg)
-if awk -v observed_load="$load1" 'BEGIN { exit !(observed_load > 8.0) }'; then
+if awk -v current_load="$load1" 'BEGIN { exit !(current_load > 8.0) }'; then
   echo "FAIL host one-minute load $load1 is too high for another VM" >&2
   exit 75
 fi

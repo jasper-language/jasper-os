@@ -10,7 +10,9 @@
 #include <linux/dma-heap.h>
 #include <linux/futex.h>
 #include <linux/io_uring.h>
+#include <linux/sched/types.h>
 #include <linux/sync_file.h>
+#include <limits.h>
 #include <pthread.h>
 #include <poll.h>
 #include <sched.h>
@@ -22,15 +24,22 @@
 #include <sys/ioctl.h>
 #include <sys/eventfd.h>
 #include <sys/epoll.h>
+#include <sys/file.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/random.h>
+#include <sys/reboot.h>
 #include <sys/resource.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
 #include <sys/time.h>
+#include <sys/times.h>
+#include <sys/timex.h>
+#include <sys/timerfd.h>
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -76,13 +85,43 @@ static void signal_noop(int signal) {
     (void)signal;
 }
 
+static volatile sig_atomic_t posix_timer_signals;
+
+static void posix_timer_signal_handler(int signal) {
+    if (signal == SIGUSR1) {
+        posix_timer_signals++;
+    }
+}
+
 static uint32_t futex_word;
 static atomic_int futex_started;
 static atomic_int futex_finished;
+static uint32_t futex_requeue_source;
+static uint32_t futex_requeue_target;
+static atomic_int futex_requeue_started;
+static atomic_int futex_requeue_finished;
 
 struct futex_thread_arg {
     uint32_t bitset;
 };
+
+struct prctl_thread_result {
+    int set_result;
+    int get_result;
+    char inherited[16];
+    char changed[16];
+};
+
+static void *prctl_name_worker(void *argument) {
+    struct prctl_thread_result *result = argument;
+    result->get_result = prctl(PR_GET_NAME, result->inherited, 0, 0, 0);
+    result->set_result = prctl(PR_SET_NAME, "worker-thread", 0, 0, 0);
+    if (result->get_result == 0 &&
+        prctl(PR_GET_NAME, result->changed, 0, 0, 0) != 0) {
+        result->get_result = -1;
+    }
+    return NULL;
+}
 
 static void *futex_waiter(void *argument) {
     struct futex_thread_arg *arg = argument;
@@ -96,6 +135,21 @@ static void *futex_waiter(void *argument) {
                           FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG, 0,
                           &deadline, NULL, arg->bitset);
     atomic_fetch_add_explicit(&futex_finished, 1, memory_order_release);
+    return (void *)(intptr_t)result;
+}
+
+static void *futex_requeue_waiter(void *argument) {
+    (void)argument;
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
+        return (void *)(intptr_t)-1000;
+    }
+    deadline.tv_sec += 1;
+    atomic_fetch_add_explicit(&futex_requeue_started, 1, memory_order_release);
+    long result = syscall(SYS_futex, &futex_requeue_source,
+                          FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 0,
+                          &deadline, NULL, 0);
+    atomic_fetch_add_explicit(&futex_requeue_finished, 1, memory_order_release);
     return (void *)(intptr_t)result;
 }
 
@@ -124,6 +178,208 @@ int main(void) {
         !sigismember(&pending_signal, SIGUSR1) ||
         sigprocmask(SIG_UNBLOCK, &blocked_signal, NULL) != 0) {
         return 238;
+    }
+    sigset_t signalfd_saved_mask;
+    sigset_t signalfd_mask;
+    sigemptyset(&signalfd_mask);
+    sigaddset(&signalfd_mask, SIGUSR1);
+    sigaddset(&signalfd_mask, SIGUSR2);
+    if (sigprocmask(SIG_BLOCK, &signalfd_mask, &signalfd_saved_mask) != 0) {
+        return 370;
+    }
+    sigemptyset(&signalfd_mask);
+    sigaddset(&signalfd_mask, SIGUSR1);
+    int signalfd_fd = signalfd(-1, &signalfd_mask,
+                               SFD_CLOEXEC | SFD_NONBLOCK);
+    if (signalfd_fd < 0 ||
+        (fcntl(signalfd_fd, F_GETFD) & FD_CLOEXEC) == 0 ||
+        kill(getpid(), SIGUSR1) != 0) {
+        return 371;
+    }
+    struct pollfd signalfd_poll = {
+        .fd = signalfd_fd,
+        .events = POLLIN,
+    };
+    struct signalfd_siginfo signal_info = {0};
+    if (poll(&signalfd_poll, 1, 1000) != 1 ||
+        (signalfd_poll.revents & POLLIN) == 0 ||
+        read(signalfd_fd, &signal_info, sizeof(signal_info)) !=
+            (ssize_t)sizeof(signal_info) ||
+        signal_info.ssi_signo != SIGUSR1 ||
+        signal_info.ssi_code != SI_USER ||
+        signal_info.ssi_pid != (uint32_t)getpid()) {
+        return 372;
+    }
+    errno = 0;
+    if (read(signalfd_fd, &signal_info, sizeof(signal_info)) != -1 ||
+        errno != EAGAIN) {
+        return 373;
+    }
+    int signalfd_epfd = epoll_create1(EPOLL_CLOEXEC);
+    struct epoll_event signalfd_interest = {
+        .events = EPOLLIN,
+        .data.u64 = 0x5349474e4644ULL,
+    };
+    struct epoll_event signalfd_ready = {0};
+    if (signalfd_epfd < 0 ||
+        epoll_ctl(signalfd_epfd, EPOLL_CTL_ADD, signalfd_fd,
+                  &signalfd_interest) != 0 ||
+        kill(getpid(), SIGUSR1) != 0 ||
+        epoll_wait(signalfd_epfd, &signalfd_ready, 1, 1000) != 1 ||
+        (signalfd_ready.events & EPOLLIN) == 0 ||
+        signalfd_ready.data.u64 != 0x5349474e4644ULL) {
+        return 374;
+    }
+    memset(&signal_info, 0, sizeof(signal_info));
+    if (read(signalfd_fd, &signal_info, sizeof(signal_info)) !=
+            (ssize_t)sizeof(signal_info) ||
+        signal_info.ssi_signo != SIGUSR1) {
+        return 375;
+    }
+    sigemptyset(&signalfd_mask);
+    sigaddset(&signalfd_mask, SIGUSR2);
+    if (syscall(SYS_signalfd4, signalfd_fd, &signalfd_mask,
+                8, SFD_NONBLOCK) != signalfd_fd) {
+        return 376;
+    }
+    pid_t signalfd_child = fork();
+    if (signalfd_child < 0) {
+        return 377;
+    }
+    if (signalfd_child == 0) {
+        _exit(kill(getppid(), SIGUSR2) == 0 ? 0 : 1);
+    }
+    int signalfd_child_status = 0;
+    if (waitpid(signalfd_child, &signalfd_child_status, 0) != signalfd_child ||
+        !WIFEXITED(signalfd_child_status) ||
+        WEXITSTATUS(signalfd_child_status) != 0 ||
+        poll(&signalfd_poll, 1, 1000) != 1) {
+        return 378;
+    }
+    memset(&signal_info, 0, sizeof(signal_info));
+    if (read(signalfd_fd, &signal_info, sizeof(signal_info)) !=
+            (ssize_t)sizeof(signal_info) ||
+        signal_info.ssi_signo != SIGUSR2 ||
+        signal_info.ssi_code != SI_USER ||
+        signal_info.ssi_pid != (uint32_t)signalfd_child) {
+        return 379;
+    }
+    sigemptyset(&signalfd_mask);
+    sigaddset(&signalfd_mask, SIGUSR1);
+    if (syscall(SYS_signalfd4, signalfd_fd, &signalfd_mask,
+                8, SFD_NONBLOCK) != signalfd_fd ||
+        syscall(SYS_tgkill, getpid(), gettid(), SIGUSR1) != 0 ||
+        poll(&signalfd_poll, 1, 1000) != 1) {
+        return 380;
+    }
+    memset(&signal_info, 0, sizeof(signal_info));
+    if (read(signalfd_fd, &signal_info, sizeof(signal_info)) !=
+            (ssize_t)sizeof(signal_info) ||
+        signal_info.ssi_signo != SIGUSR1 ||
+        signal_info.ssi_code != SI_TKILL ||
+        signal_info.ssi_pid != (uint32_t)getpid()) {
+        return 381;
+    }
+    int signalfd_socket[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, signalfd_socket) != 0) {
+        return 382;
+    }
+    char signalfd_control[CMSG_SPACE(sizeof(int))];
+    memset(signalfd_control, 0, sizeof(signalfd_control));
+    char signalfd_byte = 'G';
+    struct iovec signalfd_iov = {
+        .iov_base = &signalfd_byte,
+        .iov_len = 1,
+    };
+    struct msghdr signalfd_send = {
+        .msg_iov = &signalfd_iov,
+        .msg_iovlen = 1,
+        .msg_control = signalfd_control,
+        .msg_controllen = sizeof(signalfd_control),
+    };
+    struct cmsghdr *signalfd_cmsg = CMSG_FIRSTHDR(&signalfd_send);
+    signalfd_cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    signalfd_cmsg->cmsg_level = SOL_SOCKET;
+    signalfd_cmsg->cmsg_type = SCM_RIGHTS;
+    memcpy(CMSG_DATA(signalfd_cmsg), &signalfd_fd, sizeof(int));
+    if (sendmsg(signalfd_socket[0], &signalfd_send, MSG_NOSIGNAL) != 1) {
+        return 383;
+    }
+    memset(signalfd_control, 0, sizeof(signalfd_control));
+    char signalfd_received_byte = 0;
+    struct iovec signalfd_receive_iov = {
+        .iov_base = &signalfd_received_byte,
+        .iov_len = 1,
+    };
+    struct msghdr signalfd_receive = {
+        .msg_iov = &signalfd_receive_iov,
+        .msg_iovlen = 1,
+        .msg_control = signalfd_control,
+        .msg_controllen = sizeof(signalfd_control),
+    };
+    if (recvmsg(signalfd_socket[1], &signalfd_receive,
+                MSG_CMSG_CLOEXEC) != 1 ||
+        signalfd_received_byte != 'G') {
+        return 384;
+    }
+    struct cmsghdr *signalfd_received_cmsg = CMSG_FIRSTHDR(&signalfd_receive);
+    int signalfd_received = -1;
+    if (!signalfd_received_cmsg ||
+        signalfd_received_cmsg->cmsg_type != SCM_RIGHTS) {
+        return 385;
+    }
+    memcpy(&signalfd_received, CMSG_DATA(signalfd_received_cmsg),
+           sizeof(signalfd_received));
+    if (signalfd_received < 0 ||
+        (fcntl(signalfd_received, F_GETFD) & FD_CLOEXEC) == 0 ||
+        kill(getpid(), SIGUSR1) != 0 ||
+        read(signalfd_received, &signal_info, sizeof(signal_info)) !=
+            (ssize_t)sizeof(signal_info) ||
+        signal_info.ssi_signo != SIGUSR1) {
+        return 386;
+    }
+    int blocking_signalfd = signalfd(-1, &signalfd_mask, SFD_CLOEXEC);
+    pid_t blocking_signalfd_child = fork();
+    if (blocking_signalfd < 0 || blocking_signalfd_child < 0) {
+        return 390;
+    }
+    if (blocking_signalfd_child == 0) {
+        struct timespec signalfd_delay = {
+            .tv_sec = 0,
+            .tv_nsec = 20000000,
+        };
+        nanosleep(&signalfd_delay, NULL);
+        _exit(kill(getppid(), SIGUSR1) == 0 ? 0 : 1);
+    }
+    memset(&signal_info, 0, sizeof(signal_info));
+    if (read(blocking_signalfd, &signal_info, sizeof(signal_info)) !=
+            (ssize_t)sizeof(signal_info) ||
+        signal_info.ssi_signo != SIGUSR1) {
+        return 391;
+    }
+    signalfd_child_status = 0;
+    if (waitpid(blocking_signalfd_child, &signalfd_child_status, 0) !=
+            blocking_signalfd_child ||
+        !WIFEXITED(signalfd_child_status) ||
+        WEXITSTATUS(signalfd_child_status) != 0 ||
+        close(blocking_signalfd) != 0) {
+        return 392;
+    }
+    errno = 0;
+    if (syscall(SYS_signalfd4, signalfd_fd, &signalfd_mask, 7, 0) != -1 ||
+        errno != EINVAL) {
+        return 387;
+    }
+    errno = 0;
+    if (signalfd(-1, &signalfd_mask, 0x400000) != -1 || errno != EINVAL) {
+        return 388;
+    }
+    if (close(signalfd_received) != 0 ||
+        close(signalfd_socket[0]) != 0 ||
+        close(signalfd_socket[1]) != 0 ||
+        close(signalfd_epfd) != 0 || close(signalfd_fd) != 0 ||
+        sigprocmask(SIG_SETMASK, &signalfd_saved_mask, NULL) != 0) {
+        return 389;
     }
     int fd = open("/usr/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
@@ -1017,6 +1273,38 @@ int main(void) {
         munmap(memfd_map, 4096) != 0 || close(memfd) != 0) {
         return 214;
     }
+    int allocate_fd = memfd_create("fallocate", 0);
+    if (allocate_fd < 0 ||
+        readahead(allocate_fd, 0, 4096) != 0 ||
+        posix_fadvise(allocate_fd, 0, 0, POSIX_FADV_NORMAL) != 0 ||
+        sync_file_range(allocate_fd, 0, 0, SYNC_FILE_RANGE_WRITE) != 0 ||
+        fallocate(allocate_fd, 0, 0, 8192) != 0) {
+        return 316;
+    }
+    struct stat allocate_stat;
+    if (fstat(allocate_fd, &allocate_stat) != 0 ||
+        allocate_stat.st_size != 8192 ||
+        pwrite(allocate_fd, "ABCDEFGH", 8, 96) != 8 ||
+        fallocate(allocate_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                  96, 8) != 0) {
+        return 317;
+    }
+    unsigned char allocate_zeroes[8];
+    memset(allocate_zeroes, 0xff, sizeof(allocate_zeroes));
+    if (pread(allocate_fd, allocate_zeroes, sizeof(allocate_zeroes), 96) !=
+            (ssize_t)sizeof(allocate_zeroes)) {
+        return 318;
+    }
+    for (size_t index = 0; index < sizeof(allocate_zeroes); index++) {
+        if (allocate_zeroes[index] != 0) {
+            return 319;
+        }
+    }
+    errno = 0;
+    if (fallocate(allocate_fd, FALLOC_FL_KEEP_SIZE, 8192, 4096) != -1 ||
+        errno != EOPNOTSUPP || close(allocate_fd) != 0) {
+        return 320;
+    }
     unsigned char *remap_pages = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
                                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (remap_pages == MAP_FAILED) {
@@ -1095,6 +1383,65 @@ int main(void) {
         atomic_load_explicit(&futex_finished, memory_order_acquire) != 2) {
         return 304;
     }
+    futex_requeue_source = 0;
+    futex_requeue_target = 0;
+    atomic_store(&futex_requeue_started, 0);
+    atomic_store(&futex_requeue_finished, 0);
+    pthread_t requeue_threads[2];
+    if (pthread_create(&requeue_threads[0], NULL, futex_requeue_waiter,
+                       NULL) != 0 ||
+        pthread_create(&requeue_threads[1], NULL, futex_requeue_waiter,
+                       NULL) != 0) {
+        return 308;
+    }
+    while (atomic_load_explicit(&futex_requeue_started,
+                                memory_order_acquire) != 2) {
+        sched_yield();
+    }
+    errno = 0;
+    if (syscall(SYS_futex, &futex_requeue_source,
+                FUTEX_CMP_REQUEUE | FUTEX_PRIVATE_FLAG, 0, 2,
+                &futex_requeue_target, 1) != -1 || errno != EAGAIN) {
+        return 309;
+    }
+    if (syscall(SYS_futex, &futex_requeue_source,
+                FUTEX_CMP_REQUEUE | FUTEX_PRIVATE_FLAG, 0, 2,
+                &futex_requeue_target, 0) != 2) {
+        return 310;
+    }
+    nanosleep(&futex_delay, NULL);
+    if (atomic_load_explicit(&futex_requeue_finished,
+                             memory_order_acquire) != 0 ||
+        syscall(SYS_futex, &futex_requeue_target,
+                FUTEX_WAKE | FUTEX_PRIVATE_FLAG, 2,
+                NULL, NULL, 0) != 2) {
+        return 311;
+    }
+    if (pthread_join(requeue_threads[0], &futex_result0) != 0 ||
+        pthread_join(requeue_threads[1], &futex_result1) != 0 ||
+        futex_result0 != 0 || futex_result1 != 0) {
+        return 312;
+    }
+    atomic_store(&futex_requeue_started, 0);
+    atomic_store(&futex_requeue_finished, 0);
+    if (pthread_create(&requeue_threads[0], NULL, futex_requeue_waiter,
+                       NULL) != 0) {
+        return 313;
+    }
+    while (atomic_load_explicit(&futex_requeue_started,
+                                memory_order_acquire) != 1) {
+        sched_yield();
+    }
+    if (syscall(SYS_futex, &futex_requeue_source,
+                FUTEX_REQUEUE | FUTEX_PRIVATE_FLAG, 0, 1,
+                &futex_requeue_target, 0) != 1 ||
+        syscall(SYS_futex, &futex_requeue_target,
+                FUTEX_WAKE | FUTEX_PRIVATE_FLAG, 1,
+                NULL, NULL, 0) != 1 ||
+        pthread_join(requeue_threads[0], &futex_result0) != 0 ||
+        futex_result0 != 0) {
+        return 314;
+    }
     futex_word = 0;
     struct timespec futex_relative = {.tv_sec = 0, .tv_nsec = 20000000};
     errno = 0;
@@ -1122,6 +1469,57 @@ int main(void) {
                 1, NULL, NULL, 0) != -1 || errno != EAGAIN) {
         return 307;
     }
+    int shared_futex_fd = memfd_create("shared-futex", 0);
+    if (shared_futex_fd < 0 || ftruncate(shared_futex_fd, 4096) != 0) {
+        return 308;
+    }
+    uint32_t *shared_futex_word =
+        mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
+             shared_futex_fd, 0);
+    int shared_futex_ready[2];
+    if (shared_futex_word == MAP_FAILED ||
+        pipe2(shared_futex_ready, 0) != 0) {
+        return 309;
+    }
+    *shared_futex_word = 0;
+    pid_t shared_futex_child = fork();
+    if (shared_futex_child < 0) {
+        return 310;
+    }
+    if (shared_futex_child == 0) {
+        close(shared_futex_ready[0]);
+        char ready = 'F';
+        if (write(shared_futex_ready[1], &ready, 1) != 1) {
+            _exit(311);
+        }
+        struct timespec shared_timeout = {.tv_sec = 2, .tv_nsec = 0};
+        long wait_result =
+            syscall(SYS_futex, shared_futex_word, FUTEX_WAIT, 0,
+                    &shared_timeout, NULL, 0);
+        _exit(wait_result == 0 ? 0 : 312);
+    }
+    close(shared_futex_ready[1]);
+    char shared_ready = 0;
+    struct timespec shared_delay = {.tv_sec = 0, .tv_nsec = 30000000};
+    if (read(shared_futex_ready[0], &shared_ready, 1) != 1 ||
+        shared_ready != 'F') {
+        return 313;
+    }
+    nanosleep(&shared_delay, NULL);
+    if (syscall(SYS_futex, shared_futex_word, FUTEX_WAKE, 1,
+                NULL, NULL, 0) != 1) {
+        return 314;
+    }
+    int shared_futex_status = 0;
+    if (waitpid(shared_futex_child, &shared_futex_status, 0) !=
+            shared_futex_child ||
+        !WIFEXITED(shared_futex_status) ||
+        WEXITSTATUS(shared_futex_status) != 0 ||
+        close(shared_futex_ready[0]) != 0 ||
+        munmap(shared_futex_word, 4096) != 0 ||
+        close(shared_futex_fd) != 0) {
+        return 315;
+    }
     int epfd = epoll_create1(EPOLL_CLOEXEC);
     int epoll_pipe[2];
     struct epoll_event epoll_ready[128] = {0};
@@ -1148,11 +1546,21 @@ int main(void) {
         _exit(write(epoll_pipe[1], "E", 1) == 1 ? 0 : 1);
     }
     memset(epoll_ready, 0, sizeof(epoll_ready));
-    if (epoll_wait(epfd, epoll_ready, 1, 300) != 1 ||
-        (epoll_ready[0].events & EPOLLIN) == 0 ||
+    errno = 0;
+    int epoll_result = epoll_wait(epfd, epoll_ready, 1, 1000);
+    int epoll_errno = errno;
+    ssize_t epoll_bytes = -1;
+    if (epoll_result == 1) {
+        epoll_bytes = read(epoll_pipe[0], memfd_io, 1);
+    }
+    if (epoll_result != 1 || (epoll_ready[0].events & EPOLLIN) == 0 ||
         epoll_ready[0].data.u64 != 0x4a5345504f4c4cULL ||
-        read(epoll_pipe[0], memfd_io, 1) != 1 ||
-        memfd_io[0] != 'E') {
+        epoll_bytes != 1 || memfd_io[0] != 'E') {
+        printf("epoll-event-fail result=%d errno=%d events=%#x data=%#llx "
+               "bytes=%zd byte=%#x\n",
+               epoll_result, epoll_errno, epoll_ready[0].events,
+               (unsigned long long)epoll_ready[0].data.u64,
+               epoll_bytes, epoll_bytes == 1 ? memfd_io[0] : 0);
         return 253;
     }
     int epoll_child_status = 0;
@@ -1415,6 +1823,31 @@ int main(void) {
         ion_share.fd < 0) {
         return 157;
     }
+    struct jasper_ion_fd_data ion_share_other = {
+        .handle = ion_allocation.handle,
+        .fd = -1,
+    };
+    if (ioctl(ion_fd, JASPER_ION_IOC_SHARE, &ion_share_other) != 0 ||
+        ion_share_other.fd < 0) {
+        return 321;
+    }
+    int ion_duplicate = dup(ion_share.fd);
+    if (ion_duplicate < 0 || flock(ion_share.fd, LOCK_EX) != 0 ||
+        flock(ion_duplicate, LOCK_EX | LOCK_NB) != 0 ||
+        flock(ion_share.fd, LOCK_UN) != 0) {
+        return 322;
+    }
+    if (flock(ion_share.fd, LOCK_EX) != 0) {
+        return 323;
+    }
+    errno = 0;
+    if (flock(ion_share_other.fd, LOCK_EX | LOCK_NB) != -1 ||
+        errno != EWOULDBLOCK || flock(ion_share.fd, LOCK_UN) != 0 ||
+        flock(ion_share_other.fd, LOCK_EX | LOCK_NB) != 0 ||
+        flock(ion_share_other.fd, LOCK_UN) != 0 ||
+        close(ion_duplicate) != 0) {
+        return 324;
+    }
     struct stat ion_stat;
     struct statfs ion_statfs;
     if (fstat(ion_share.fd, &ion_stat) != 0 ||
@@ -1473,6 +1906,7 @@ int main(void) {
     if (ioctl(ion_fd, JASPER_ION_IOC_FREE, &ion_free) != 0 ||
         munmap(ion_first, ion_allocation.len) != 0 ||
         close(ion_share.fd) != 0 ||
+        close(ion_share_other.fd) != 0 ||
         close(ion_share_imported.fd) != 0 ||
         close(ion_fd) != 0) {
         return 164;
@@ -1608,9 +2042,13 @@ int main(void) {
             .data.ptr.buffer = (binder_uintptr_t)request_data,
             .data.ptr.offsets = 0,
         };
-        unsigned char write_buffer[4 + sizeof(request)];
-        memcpy(write_buffer, &(uint32_t){BC_TRANSACTION}, 4);
-        memcpy(write_buffer + 4, &request, sizeof(request));
+        unsigned char write_buffer[4 + sizeof(struct binder_transaction_data_sg)];
+        struct binder_transaction_data_sg request_sg = {
+            .transaction_data = request,
+            .buffers_size = sizeof(request_data),
+        };
+        memcpy(write_buffer, &(uint32_t){BC_TRANSACTION_SG}, 4);
+        memcpy(write_buffer + 4, &request_sg, sizeof(request_sg));
         unsigned char read_buffer[68];
         struct binder_write_read exchange = {
             .write_size = sizeof(write_buffer),
@@ -1712,11 +2150,12 @@ int main(void) {
         memcpy(write_buffer, &(uint32_t){BC_TRANSACTION}, 4);
         memcpy(write_buffer + 4, &second_request, sizeof(second_request));
         memset(&exchange, 0, sizeof(exchange));
-        exchange.write_size = sizeof(write_buffer);
+        exchange.write_size = 4 + sizeof(second_request);
         exchange.write_buffer = (binder_uintptr_t)write_buffer;
         exchange.read_size = sizeof(read_buffer);
         exchange.read_buffer = (binder_uintptr_t)read_buffer;
         if (ioctl(client, BINDER_WRITE_READ, &exchange) != 0 ||
+            exchange.write_consumed != 4 + sizeof(second_request) ||
             exchange.read_consumed != 4 ||
             *(uint32_t *)read_buffer != BR_TRANSACTION_COMPLETE) {
             _exit(174);
@@ -1762,7 +2201,21 @@ int main(void) {
         printf("binder-server-fail stage=open errno=%d\n", errno);
         return 173;
     }
-    int context_result = ioctl(server, BINDER_SET_CONTEXT_MGR, 0);
+        struct flat_binder_object manager_object = {
+            .hdr.type = BINDER_TYPE_BINDER,
+            .flags = FLAT_BINDER_FLAG_ACCEPTS_FDS,
+            .binder = (binder_uintptr_t)(uintptr_t)&manager_object,
+            .cookie = 0x5151,
+        };
+        struct flat_binder_object invalid_manager = manager_object;
+        invalid_manager.hdr.type = BINDER_TYPE_FD;
+        errno = 0;
+        if (ioctl(server, BINDER_SET_CONTEXT_MGR_EXT, &invalid_manager) != -1 ||
+            errno != EINVAL) {
+            return 190;
+        }
+        int context_result =
+            ioctl(server, BINDER_SET_CONTEXT_MGR_EXT, &manager_object);
     if (context_result != 0 || write(binder_ready[1], "R", 1) != 1) {
         printf("binder-server-fail stage=context rc=%d errno=%d\n",
                context_result, errno);
@@ -1803,6 +2256,10 @@ int main(void) {
         .data.ptr.buffer = (binder_uintptr_t)&response_object,
         .data.ptr.offsets = (binder_uintptr_t)&response_offset,
     };
+    struct binder_transaction_data_sg response_sg = {
+        .transaction_data = response,
+        .buffers_size = sizeof(response_object) + sizeof(response_offset),
+    };
     unsigned char server_write[128];
     size_t server_offset = 0;
     memcpy(server_write + server_offset, &(uint32_t){BC_FREE_BUFFER}, 4);
@@ -1811,10 +2268,10 @@ int main(void) {
     memcpy(server_write + server_offset, &received_pointer,
            sizeof(received_pointer));
     server_offset += sizeof(received_pointer);
-    memcpy(server_write + server_offset, &(uint32_t){BC_REPLY}, 4);
+    memcpy(server_write + server_offset, &(uint32_t){BC_REPLY_SG}, 4);
     server_offset += 4;
-    memcpy(server_write + server_offset, &response, sizeof(response));
-    server_offset += sizeof(response);
+    memcpy(server_write + server_offset, &response_sg, sizeof(response_sg));
+    server_offset += sizeof(response_sg);
     memset(&server_exchange, 0, sizeof(server_exchange));
     server_exchange.write_size = server_offset;
     server_exchange.write_buffer = (binder_uintptr_t)server_write;
@@ -1958,7 +2415,7 @@ int main(void) {
         .fd = poll_pipe[0],
         .events = POLLIN,
     };
-    if (poll(&poll_read, 1, 300) != 1 ||
+    if (poll(&poll_read, 1, 1000) != 1 ||
         (poll_read.revents & POLLIN) == 0 ||
         read(poll_pipe[0], blocking_bytes, 1) != 1 ||
         blocking_bytes[0] != 'Q') {
@@ -1986,7 +2443,7 @@ int main(void) {
         .fd = ppoll_pipe[0],
         .events = POLLIN,
     };
-    struct timespec ppoll_timeout = {.tv_sec = 0, .tv_nsec = 300000000};
+    struct timespec ppoll_timeout = {.tv_sec = 1, .tv_nsec = 0};
     if (ppoll(&ppoll_read, 1, &ppoll_timeout, NULL) != 1 ||
         (ppoll_read.revents & POLLIN) == 0 ||
         read(ppoll_pipe[0], blocking_bytes, 1) != 1 ||
@@ -2015,7 +2472,7 @@ int main(void) {
     fd_set select_read;
     FD_ZERO(&select_read);
     FD_SET(select_pipe[0], &select_read);
-    struct timeval select_timeout = {.tv_sec = 0, .tv_usec = 300000};
+    struct timeval select_timeout = {.tv_sec = 1, .tv_usec = 0};
     if (select(select_pipe[0] + 1, &select_read, NULL, NULL,
                &select_timeout) != 1 ||
         !FD_ISSET(select_pipe[0], &select_read) ||
@@ -2074,6 +2531,332 @@ int main(void) {
     if (sched_setaffinity(0, sizeof(cpus), &cpus) != 0) {
         return 214;
     }
+    if (setpriority(PRIO_PROCESS, getpid(), 5) != 0 ||
+        getpriority(PRIO_PROCESS, getpid()) != 5 ||
+        setpriority(PRIO_PROCESS, getpid(), 0) != 0 ||
+        getpriority(PRIO_PROCESS, getpid()) != 0 ||
+        sched_get_priority_max(SCHED_OTHER) != 0 ||
+        sched_get_priority_min(SCHED_OTHER) != 0 ||
+        sched_get_priority_max(SCHED_FIFO) != 99 ||
+        sched_get_priority_min(SCHED_FIFO) != 1) {
+        return 317;
+    }
+    struct sched_param scheduler_set = {.sched_priority = 0};
+    struct timespec scheduler_interval = {0};
+    if (sched_setparam(0, &scheduler_set) != 0 ||
+        sched_rr_get_interval(0, &scheduler_interval) != 0 ||
+        scheduler_interval.tv_sec != 0 ||
+        scheduler_interval.tv_nsec != 2000000) {
+        return 318;
+    }
+    scheduler_set.sched_priority = 3;
+    errno = 0;
+    if (sched_setparam(0, &scheduler_set) != -1 || errno != EINVAL) {
+        return 319;
+    }
+    struct sched_attr scheduler_attr = {.size = sizeof(scheduler_attr)};
+    if (syscall(SYS_sched_getattr, 0, &scheduler_attr,
+                sizeof(scheduler_attr), 0) != 0 ||
+        scheduler_attr.sched_policy != SCHED_OTHER ||
+        scheduler_attr.sched_nice != 0 ||
+        scheduler_attr.sched_priority != 0) {
+        return 320;
+    }
+    scheduler_attr.sched_nice = 7;
+    if (syscall(SYS_sched_setattr, 0, &scheduler_attr, 0) != 0 ||
+        syscall(SYS_sched_getattr, 0, &scheduler_attr,
+                sizeof(scheduler_attr), 0) != 0 ||
+        scheduler_attr.sched_nice != 7) {
+        return 321;
+    }
+    scheduler_attr.sched_nice = 0;
+    if (syscall(SYS_sched_setattr, 0, &scheduler_attr, 0) != 0) {
+        return 322;
+    }
+    scheduler_attr.sched_policy = SCHED_FIFO;
+    errno = 0;
+    if (syscall(SYS_sched_setattr, 0, &scheduler_attr, 0) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 323;
+    }
+    scheduler_attr.sched_policy = SCHED_OTHER;
+    scheduler_attr.sched_flags = SCHED_FLAG_RESET_ON_FORK;
+    errno = 0;
+    if (syscall(SYS_sched_setattr, 0, &scheduler_attr, 0) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 324;
+    }
+    scheduler_attr.sched_flags = 0;
+    if (syscall(SYS_sched_getattr, 0, &scheduler_attr,
+                sizeof(scheduler_attr), 0) != 0 ||
+        scheduler_attr.sched_policy != SCHED_OTHER ||
+        scheduler_attr.sched_flags != 0 ||
+        scheduler_attr.sched_nice != 0) {
+        return 325;
+    }
+    errno = 0;
+    if (syscall(SYS_sched_getattr, 0, &scheduler_attr, 47, 0) != -1 ||
+        errno != EINVAL) {
+        return 326;
+    }
+    scheduler_attr.size = 47;
+    errno = 0;
+    if (syscall(SYS_sched_setattr, 0, &scheduler_attr, 0) != -1 ||
+        errno != EINVAL) {
+        return 327;
+    }
+    scheduler_attr.size = sizeof(scheduler_attr);
+    errno = 0;
+    if (syscall(SYS_sched_getattr, 0, &scheduler_attr,
+                sizeof(scheduler_attr), 1) != -1 ||
+        errno != EINVAL) {
+        return 328;
+    }
+    errno = 0;
+    if (syscall(SYS_sched_getattr, INT_MAX, &scheduler_attr,
+                sizeof(scheduler_attr), 0) != -1 ||
+        errno != ESRCH) {
+        return 329;
+    }
+    char main_thread_name[16] = {0};
+    if (prctl(PR_SET_NAME, "main-thread", 0, 0, 0) != 0 ||
+        prctl(PR_GET_NAME, main_thread_name, 0, 0, 0) != 0 ||
+        strcmp(main_thread_name, "main-thread") != 0) {
+        return 330;
+    }
+    struct prctl_thread_result prctl_result = {
+        .set_result = -1,
+        .get_result = -1,
+    };
+    pthread_t prctl_thread;
+    if (pthread_create(&prctl_thread, NULL, prctl_name_worker,
+                       &prctl_result) != 0 ||
+        pthread_join(prctl_thread, NULL) != 0) {
+        return 331;
+    }
+    if (prctl_result.set_result != 0 || prctl_result.get_result != 0 ||
+        strcmp(prctl_result.inherited, "main-thread") != 0 ||
+        strcmp(prctl_result.changed, "worker-thread") != 0 ||
+        prctl(PR_GET_NAME, main_thread_name, 0, 0, 0) != 0 ||
+        strcmp(main_thread_name, "main-thread") != 0) {
+        return 332;
+    }
+    errno = 0;
+    if (prctl(0x7fffffff, 0, 0, 0, 0) != -1 || errno != EINVAL) {
+        return 333;
+    }
+    struct timespec privileged_time = {0};
+    struct timeval privileged_timeval = {0};
+    struct timex privileged_timex = {0};
+    errno = 0;
+    if (syscall(SYS_clock_settime, CLOCK_REALTIME, &privileged_time) != -1 ||
+        errno != EPERM) {
+        return 334;
+    }
+    errno = 0;
+    if (syscall(SYS_settimeofday, &privileged_timeval, NULL) != -1 ||
+        errno != EPERM) {
+        return 335;
+    }
+    errno = 0;
+    if (syscall(SYS_adjtimex, &privileged_timex) != -1 ||
+        errno != EPERM) {
+        return 336;
+    }
+    errno = 0;
+    if (syscall(SYS_clock_adjtime, CLOCK_REALTIME,
+                &privileged_timex) != -1 || errno != EPERM) {
+        return 337;
+    }
+    errno = 0;
+    if (syscall(SYS_sethostname, "jasper", 6) != -1 ||
+        errno != EPERM) {
+        return 338;
+    }
+    errno = 0;
+    if (syscall(SYS_setdomainname, "jasper", 6) != -1 ||
+        errno != EPERM) {
+        return 339;
+    }
+    errno = 0;
+    if (reboot(RB_AUTOBOOT) != -1 || errno != EPERM) {
+        return 340;
+    }
+    int timer_fd = timerfd_create(CLOCK_MONOTONIC,
+                                  TFD_NONBLOCK | TFD_CLOEXEC);
+    if (timer_fd < 0 || (fcntl(timer_fd, F_GETFD) & FD_CLOEXEC) == 0) {
+        return 349;
+    }
+    struct itimerspec timer_value = {
+        .it_value = {.tv_sec = 0, .tv_nsec = 20000000},
+    };
+    if (timerfd_settime(timer_fd, 0, &timer_value, NULL) != 0) {
+        return 350;
+    }
+    struct itimerspec timer_current = {0};
+    if (timerfd_gettime(timer_fd, &timer_current) != 0 ||
+        timer_current.it_value.tv_sec != 0 ||
+        timer_current.it_value.tv_nsec == 0 ||
+        timer_current.it_value.tv_nsec > 200000000) {
+        return 359;
+    }
+    struct pollfd timer_poll = {
+        .fd = timer_fd,
+        .events = POLLIN,
+    };
+    if (poll(&timer_poll, 1, 1000) != 1 ||
+        (timer_poll.revents & POLLIN) == 0) {
+        return 351;
+    }
+    uint64_t timer_expirations = 0;
+    if (read(timer_fd, &timer_expirations, sizeof(timer_expirations)) !=
+            sizeof(timer_expirations) ||
+        timer_expirations == 0) {
+        return 352;
+    }
+    errno = 0;
+    if (read(timer_fd, &timer_expirations, sizeof(timer_expirations)) != -1 ||
+        errno != EAGAIN) {
+        return 353;
+    }
+    memset(&timer_value, 0, sizeof(timer_value));
+    if (timerfd_settime(timer_fd, 0, &timer_value, NULL) != 0 ||
+        poll(&timer_poll, 1, 20) != 0) {
+        return 354;
+    }
+    timer_value.it_interval = (struct timespec){.tv_sec = 0, .tv_nsec = 10000000};
+    timer_value.it_value = (struct timespec){.tv_sec = 0, .tv_nsec = 10000000};
+    int timer_epfd = epoll_create1(EPOLL_CLOEXEC);
+    struct epoll_event timer_interest = {
+        .events = EPOLLIN,
+        .data.u64 = 0x54494d45524644ULL,
+    };
+    struct epoll_event timer_ready = {0};
+    if (timer_epfd < 0 ||
+        epoll_ctl(timer_epfd, EPOLL_CTL_ADD, timer_fd,
+                  &timer_interest) != 0 ||
+        timerfd_settime(timer_fd, 0, &timer_value, NULL) != 0 ||
+        epoll_wait(timer_epfd, &timer_ready, 1, 1000) != 1 ||
+        (timer_ready.events & EPOLLIN) == 0 ||
+        timer_ready.data.u64 != 0x54494d45524644ULL ||
+        epoll_ctl(timer_epfd, EPOLL_CTL_DEL, timer_fd, NULL) != 0) {
+        return 355;
+    }
+    if (read(timer_fd, &timer_expirations, sizeof(timer_expirations)) !=
+        sizeof(timer_expirations)
+        || timer_expirations == 0) {
+        return 356;
+    }
+    memset(&timer_value, 0, sizeof(timer_value));
+    if (timerfd_settime(timer_fd, 0, &timer_value, NULL) != 0 ||
+        close(timer_epfd) != 0 || close(timer_fd) != 0) {
+        return 357;
+    }
+    errno = 0;
+    if (timerfd_create((clockid_t)12345, 0) != -1 || errno != EINVAL) {
+        return 358;
+    }
+    timer_t posix_timer = (timer_t)-1;
+    struct sigevent posix_event = {.sigev_notify = SIGEV_NONE};
+    if (syscall(SYS_timer_create, CLOCK_MONOTONIC, &posix_event,
+                &posix_timer) != 0 || posix_timer == (timer_t)-1) {
+        return 366;
+    }
+    struct itimerspec posix_values = {
+        .it_value = {.tv_sec = 0, .tv_nsec = 20000000},
+    };
+    struct itimerspec posix_current = {0};
+    if (syscall(SYS_timer_settime, posix_timer, 0, &posix_values,
+                NULL) != 0 ||
+        syscall(SYS_timer_gettime, posix_timer, &posix_current) != 0 ||
+        posix_current.it_value.tv_sec != 0 ||
+        posix_current.it_value.tv_nsec == 0) {
+        return 367;
+    }
+    struct timespec posix_delay = {.tv_sec = 0, .tv_nsec = 40000000};
+    if (nanosleep(&posix_delay, NULL) != 0 ||
+        syscall(SYS_timer_getoverrun, posix_timer) != 0 ||
+        syscall(SYS_timer_gettime, posix_timer, &posix_current) != 0 ||
+        posix_current.it_value.tv_sec != 0 ||
+        posix_current.it_value.tv_nsec != 0 ||
+        syscall(SYS_timer_delete, posix_timer) != 0) {
+        return 368;
+    }
+    errno = 0;
+    if (syscall(SYS_timer_gettime, posix_timer, &posix_current) != -1 ||
+        errno != EINVAL) {
+        return 369;
+    }
+    posix_timer_signals = 0;
+    if (signal(SIGUSR1, posix_timer_signal_handler) == SIG_ERR) {
+        return 370;
+    }
+    struct sigevent signal_event = {
+        .sigev_notify = SIGEV_SIGNAL,
+        .sigev_signo = SIGUSR1,
+    };
+    if (syscall(SYS_timer_create, CLOCK_MONOTONIC, &signal_event,
+                &posix_timer) != 0) {
+        return 371;
+    }
+    posix_values.it_value = (struct timespec){.tv_sec = 0, .tv_nsec = 20000000};
+    if (syscall(SYS_timer_settime, posix_timer, 0, &posix_values,
+                NULL) != 0) {
+        return 372;
+    }
+    struct timespec signal_wait = {.tv_sec = 0, .tv_nsec = 500000000};
+    errno = 0;
+    long signal_sleep = nanosleep(&signal_wait, NULL);
+    int signal_sleep_errno = errno;
+    if ((signal_sleep != -1 || signal_sleep_errno != EINTR) &&
+        posix_timer_signals == 0) {
+        return 373;
+    }
+    for (int attempt = 0; attempt < 8 && posix_timer_signals == 0; attempt++) {
+        syscall(SYS_getpid);
+    }
+    if (posix_timer_signals == 0 ||
+        syscall(SYS_timer_delete, posix_timer) != 0) {
+        return 374;
+    }
+    sigset_t timer_signal_set;
+    sigset_t timer_old_mask;
+    sigemptyset(&timer_signal_set);
+    sigaddset(&timer_signal_set, SIGUSR1);
+    if (sigprocmask(SIG_BLOCK, &timer_signal_set, &timer_old_mask) != 0 ||
+        syscall(SYS_timer_create, CLOCK_MONOTONIC, &signal_event,
+                &posix_timer) != 0) {
+        return 377;
+    }
+    posix_values.it_interval = (struct timespec){.tv_sec = 0, .tv_nsec = 10000000};
+    posix_values.it_value = (struct timespec){.tv_sec = 0, .tv_nsec = 10000000};
+    struct timespec overrun_delay = {.tv_sec = 0, .tv_nsec = 80000000};
+    if (syscall(SYS_timer_settime, posix_timer, 0, &posix_values,
+                NULL) != 0 ||
+        nanosleep(&overrun_delay, NULL) != 0 ||
+        syscall(SYS_timer_getoverrun, posix_timer) == 0) {
+        return 378;
+    }
+    memset(&posix_values, 0, sizeof(posix_values));
+    if (syscall(SYS_timer_settime, posix_timer, 0, &posix_values,
+                NULL) != 0 ||
+        syscall(SYS_timer_delete, posix_timer) != 0 ||
+        sigprocmask(SIG_SETMASK, &timer_old_mask, NULL) != 0) {
+        return 379;
+    }
+    struct sigevent unsupported_event = {.sigev_notify = SIGEV_THREAD};
+    errno = 0;
+    if (syscall(SYS_timer_create, CLOCK_MONOTONIC, &unsupported_event,
+                &posix_timer) != -1 || errno != EOPNOTSUPP) {
+        return 375;
+    }
+    errno = 0;
+    if (syscall(SYS_timer_create, CLOCK_MONOTONIC, &posix_event,
+                NULL) != -1 || errno != EFAULT) {
+        return 376;
+    }
+    memset(main_thread_name, 0, sizeof(main_thread_name));
+    prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);
     if (sched_getaffinity(0, sizeof(cpus), &cpus) != 0 ||
         CPU_COUNT(&cpus) < 1 || !CPU_ISSET(0, &cpus)) {
@@ -2251,6 +3034,53 @@ int main(void) {
     errno = 0;
     if (syscall(SYS_sysinfo, (void *)1) != -1 || errno != EFAULT) {
         return 19;
+    }
+    struct rusage process_usage = {0};
+    struct rusage thread_usage = {0};
+    struct rusage child_usage = {0};
+    errno = 0;
+    int self_usage_result = getrusage(RUSAGE_SELF, &process_usage);
+    int self_usage_errno = errno;
+    errno = 0;
+    int thread_usage_result = getrusage(RUSAGE_THREAD, &thread_usage);
+    int thread_usage_errno = errno;
+    if (self_usage_result != 0 ||
+        (process_usage.ru_utime.tv_sec == 0 &&
+         process_usage.ru_utime.tv_usec == 0) ||
+        thread_usage_result != 0 ||
+        (thread_usage.ru_utime.tv_sec == 0 &&
+         thread_usage.ru_utime.tv_usec == 0)) {
+        printf("getrusage-fail self=%d errno=%d utime=%ld.%06ld "
+               "thread=%d errno=%d utime=%ld.%06ld\n",
+               self_usage_result, self_usage_errno,
+               (long)process_usage.ru_utime.tv_sec,
+               (long)process_usage.ru_utime.tv_usec,
+               thread_usage_result, thread_usage_errno,
+               (long)thread_usage.ru_utime.tv_sec,
+               (long)thread_usage.ru_utime.tv_usec);
+        return 360;
+    }
+    if (getrusage(RUSAGE_CHILDREN, &child_usage) != 0 ||
+        (child_usage.ru_utime.tv_sec == 0 &&
+         child_usage.ru_utime.tv_usec == 0)) {
+        return 361;
+    }
+    struct tms process_times = {0};
+    if (times(&process_times) <= 0 || process_times.tms_utime == 0 ||
+        process_times.tms_cutime == 0) {
+        return 363;
+    }
+    if (times(NULL) <= 0) {
+        return 364;
+    }
+    errno = 0;
+    if (syscall(SYS_getrusage, RUSAGE_SELF, (void *)1) != -1 ||
+        errno != EFAULT) {
+        return 362;
+    }
+    errno = 0;
+    if (syscall(SYS_times, (void *)1) != -1 || errno != EFAULT) {
+        return 365;
     }
     struct timespec resolution;
     if (clock_getres(CLOCK_MONOTONIC, &resolution) != 0 ||
@@ -2619,13 +3449,59 @@ int main(void) {
     gid_t effective_gid = (gid_t)-1;
     gid_t saved_gid = (gid_t)-1;
     pid_t process_id = getpid();
+    errno = 0;
     if (getpgrp() != process_id || getpgid(0) != process_id ||
-        getsid(0) != process_id || setsid() != process_id ||
+        getsid(0) != process_id || setpgid(0, 0) != -1 ||
+        errno != EPERM ||
         getresuid(&real_uid, &effective_uid, &saved_uid) != 0 ||
         real_uid != 0 || effective_uid != 0 || saved_uid != 0 ||
         getresgid(&real_gid, &effective_gid, &saved_gid) != 0 ||
         real_gid != 0 || effective_gid != 0 || saved_gid != 0) {
         return 217;
+    }
+    errno = 0;
+    if (setsid() != -1 || errno != EPERM) {
+        return 341;
+    }
+    pid_t group_child = fork();
+    if (group_child < 0) {
+        return 342;
+    }
+    if (group_child == 0) {
+        pid_t child_id = getpid();
+        pid_t parent_group = getppid();
+        if (child_id == parent_group || getpgrp() != parent_group ||
+            getpgid(0) != parent_group ||
+            getsid(0) != parent_group || setpgid(0, 0) != 0 ||
+            getpgrp() != child_id || getpgid(0) != child_id ||
+            getsid(0) != parent_group) {
+            _exit(343);
+        }
+        errno = 0;
+        _exit(setsid() == -1 && errno == EPERM ? 0 : 344);
+    }
+    child_status = 0;
+    if (waitpid(group_child, &child_status, 0) != group_child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+        return 345;
+    }
+    pid_t session_child = fork();
+    if (session_child < 0) {
+        return 346;
+    }
+    if (session_child == 0) {
+        pid_t child_id = getpid();
+        if (getpgrp() == child_id || setsid() != child_id ||
+            getpgrp() != child_id || getpgid(0) != child_id ||
+            getsid(0) != child_id) {
+            _exit(347);
+        }
+        _exit(0);
+    }
+    child_status = 0;
+    if (waitpid(session_child, &child_status, 0) != session_child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+        return 348;
     }
     close(fd);
     printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld wall=%lld dirent=6 exec_meta=true fork=true\n",

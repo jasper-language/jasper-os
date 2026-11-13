@@ -10,7 +10,7 @@ use compat_core::syscall::{
     LINUX_NR_FUTEX,
 };
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use kernel_core::objtable::ObjId;
 use kernel_core::paging::MapFlags;
@@ -31,13 +31,31 @@ static PATH_TRACE_REMAINING: AtomicU32 = AtomicU32::new(24);
 const MAX_LINUX_THREADS: usize = 64;
 const MAX_FUTEX_WORDS: usize = 32;
 const MAX_PROCESS_SIGNAL_SETS: usize = 16;
+const MAX_POSIX_TIMERS: usize = 32;
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
+static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
+
+#[derive(Clone, Copy)]
+struct SignalOrigin {
+    pid: u32,
+    code: i32,
+}
+
+#[derive(Clone, Copy)]
+struct SignalFdRecord {
+    signal: u32,
+    sender_pid: u32,
+    code: i32,
+}
 
 #[derive(Clone, Copy)]
 struct LinuxThread {
     process: ObjId,
     task: crate::task::TaskId,
     tid: u32,
+    /// Linux task-command name exposed by `PR_GET_NAME`.
+    /// 通过 `PR_GET_NAME` 暴露的 Linux 任务命令名。
+    name: [u8; 16],
     clear_child_tid: u64,
     robust_list: u64,
     robust_list_len: u64,
@@ -49,6 +67,9 @@ struct LinuxThread {
     /// Standard-signal pending bits for this Linux TID.
     /// 当前 Linux TID 的标准信号 pending 位图。
     pending_signals: u64,
+    /// Source metadata for each coalesced standard signal.
+    /// 每个已合并标准信号的来源元数据。
+    signal_origins: [SignalOrigin; 64],
     /// Per-thread alternate signal stack.
     /// 当前 Linux 线程的备用信号栈。
     altstack_sp: u64,
@@ -58,9 +79,19 @@ struct LinuxThread {
     altstack_disarm_depth: u8,
 }
 
+fn linux_comm_from_task_name(task_name: &str) -> [u8; 16] {
+    let base = task_name.rsplit('/').next().unwrap_or(task_name);
+    let mut name = [0u8; 16];
+    for (slot, byte) in name.iter_mut().take(15).zip(base.bytes()) {
+        *slot = byte;
+    }
+    name
+}
+
 #[derive(Clone, Copy)]
 struct FutexWaiter {
     task: crate::task::TaskId,
+    key: Option<FutexKey>,
     bitset: u32,
     active: bool,
     woken: bool,
@@ -69,6 +100,7 @@ struct FutexWaiter {
 impl FutexWaiter {
     const EMPTY: Self = Self {
         task: crate::task::TaskId(0),
+        key: None,
         bitset: 0,
         active: false,
         woken: false,
@@ -77,23 +109,59 @@ impl FutexWaiter {
 
 const MAX_FUTEX_WAITERS: usize = 16;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FutexKey {
+    Private { process: ObjId, address: u64 },
+    Shared(u64),
+}
+
 #[derive(Clone, Copy)]
 struct FutexWord {
-    process: ObjId,
-    address: u64,
+    key: FutexKey,
     waiters: [FutexWaiter; MAX_FUTEX_WAITERS],
+}
+
+const MAX_FLOCK_LOCKS: usize = 64;
+
+#[derive(Clone, Copy)]
+struct FlockLock {
+    backing: u64,
+    owner: u64,
+    exclusive: bool,
+}
+
+#[derive(Clone, Copy)]
+struct FlockWaiter {
+    task: crate::task::TaskId,
 }
 
 #[derive(Clone, Copy)]
 struct ProcessSignalSet {
     process: ObjId,
     pending: u64,
+    origins: [SignalOrigin; 64],
+}
+
+#[derive(Clone, Copy)]
+struct PosixTimer {
+    process: ObjId,
+    id: u64,
+    clock: u32,
+    notify: u32,
+    signal: u32,
+    next: u64,
+    interval: u64,
+    overrun: u64,
+    active: bool,
 }
 
 struct CompatState {
     threads: [Option<LinuxThread>; MAX_LINUX_THREADS],
     futexes: [Option<FutexWord>; MAX_FUTEX_WORDS],
     process_signals: [Option<ProcessSignalSet>; MAX_PROCESS_SIGNAL_SETS],
+    flock_locks: [Option<FlockLock>; MAX_FLOCK_LOCKS],
+    flock_waiters: [Option<FlockWaiter>; MAX_FLOCK_LOCKS],
+    posix_timers: [Option<PosixTimer>; MAX_POSIX_TIMERS],
 }
 
 impl CompatState {
@@ -102,6 +170,9 @@ impl CompatState {
             threads: [None; MAX_LINUX_THREADS],
             futexes: [None; MAX_FUTEX_WORDS],
             process_signals: [None; MAX_PROCESS_SIGNAL_SETS],
+            flock_locks: [None; MAX_FLOCK_LOCKS],
+            flock_waiters: [None; MAX_FLOCK_LOCKS],
+            posix_timers: [None; MAX_POSIX_TIMERS],
         }
     }
 }
@@ -204,15 +275,18 @@ pub(crate) fn register_linux_thread(
     let Some(pid) = proc::linux_pid(process) else {
         return false;
     };
+    let (current_task, current_name) = sched::current();
     let tid = {
         let mut state = COMPAT.lock();
-        let inherited_mask = state
+        let inherited = state
             .threads
             .iter()
             .flatten()
-            .find(|entry| entry.process == process && entry.task == task)
-            .map(|entry| entry.signal_mask)
-            .unwrap_or(0);
+            .find(|entry| entry.process == process && entry.task == current_task);
+        let inherited_mask = inherited.map(|entry| entry.signal_mask).unwrap_or(0);
+        let inherited_name = inherited
+            .map(|entry| entry.name)
+            .unwrap_or_else(|| linux_comm_from_task_name(current_name));
         let has_leader = state
             .threads
             .iter()
@@ -234,6 +308,7 @@ pub(crate) fn register_linux_thread(
             process,
             task,
             tid,
+            name: inherited_name,
             clear_child_tid,
             robust_list: 0,
             robust_list_len: 0,
@@ -241,6 +316,7 @@ pub(crate) fn register_linux_thread(
             rseq_len: 0,
             signal_mask: inherited_mask,
             pending_signals: 0,
+            signal_origins: [SignalOrigin { pid: 0, code: 0 }; 64],
             altstack_sp: 0,
             altstack_size: 0,
             altstack_flags: 2,
@@ -291,7 +367,13 @@ fn linux_tid_for_task(task: crate::task::TaskId) -> Option<(ObjId, u32)> {
 
 /// Queues one standard signal on a target Linux thread in the same process.
 /// 在同一进程的目标 Linux 线程上登记一个标准信号。
-fn queue_thread_signal(process: ObjId, tid: u32, signal: u32) -> bool {
+fn queue_thread_signal(
+    process: ObjId,
+    tid: u32,
+    signal: u32,
+    sender_pid: u32,
+    code: i32,
+) -> bool {
     if !(1..=64).contains(&signal) {
         return false;
     }
@@ -306,6 +388,10 @@ fn queue_thread_signal(process: ObjId, tid: u32, signal: u32) -> bool {
             return false;
         };
         entry.pending_signals |= 1u64 << (signal - 1);
+        entry.signal_origins[signal as usize - 1] = SignalOrigin {
+            pid: sender_pid,
+            code,
+        };
         crate::kprintln!(
             "[JSR-LINUX-SIGNAL] queued target_tid={} signal={} mask={:#x} pending={:#x}",
             tid,
@@ -332,7 +418,7 @@ fn has_linux_thread(process: ObjId, tid: u32) -> bool {
 
 /// Queues one process-directed standard signal and wakes all eligible threads.
 /// 登记一个进程定向标准信号，并唤醒该进程的全部线程。
-fn queue_process_signal(process: ObjId, signal: u32) -> bool {
+fn queue_process_signal(process: ObjId, signal: u32, sender_pid: u32, code: i32) -> bool {
     if !(1..=64).contains(&signal) {
         return false;
     }
@@ -353,6 +439,7 @@ fn queue_process_signal(process: ObjId, signal: u32) -> bool {
             state.process_signals[slot] = Some(ProcessSignalSet {
                 process,
                 pending: 0,
+                origins: [SignalOrigin { pid: 0, code: 0 }; 64],
             });
             slot
         };
@@ -360,6 +447,10 @@ fn queue_process_signal(process: ObjId, signal: u32) -> bool {
             return false;
         };
         entry.pending |= 1u64 << (signal - 1);
+        entry.origins[signal as usize - 1] = SignalOrigin {
+            pid: sender_pid,
+            code,
+        };
         crate::kprintln!(
             "[JSR-LINUX-SIGNAL] queued_process process={:#x} signal={} pending={:#x}",
             process.raw(),
@@ -632,6 +723,71 @@ fn take_deliverable_signal(process: ObjId) -> Option<u32> {
         entry.pending_signals &= !bit;
     }
     Some(index + 1)
+}
+
+fn signalfd_pending_mask(process: ObjId, requested: u64) -> u64 {
+    let (task, _) = sched::current();
+    let state = COMPAT.lock();
+    let thread = state
+        .threads
+        .iter()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)
+        .map(|entry| entry.pending_signals)
+        .unwrap_or(0);
+    let shared = state
+        .process_signals
+        .iter()
+        .flatten()
+        .find(|entry| entry.process == process)
+        .map(|entry| entry.pending)
+        .unwrap_or(0);
+    (thread | shared) & requested
+}
+
+fn take_signalfd_record(process: ObjId, requested: u64) -> Option<SignalFdRecord> {
+    let (task, _) = sched::current();
+    let mut state = COMPAT.lock();
+    let thread_index = state
+        .threads
+        .iter()
+        .position(|entry| {
+            entry.is_some_and(|entry| entry.process == process && entry.task == task)
+        })?;
+    let process_index = state
+        .process_signals
+        .iter()
+        .position(|entry| entry.is_some_and(|entry| entry.process == process));
+    let thread = state.threads[thread_index]?;
+    let process_pending = process_index
+        .and_then(|index| state.process_signals[index])
+        .map(|entry| entry.pending)
+        .unwrap_or(0);
+    let available = (thread.pending_signals | process_pending) & requested;
+    if available == 0 {
+        return None;
+    }
+    let signal = available.trailing_zeros() + 1;
+    let bit = 1u64 << (signal - 1);
+    if thread.pending_signals & bit != 0 {
+        let entry = state.threads[thread_index].as_mut()?;
+        entry.pending_signals &= !bit;
+        let origin = entry.signal_origins[signal as usize - 1];
+        Some(SignalFdRecord {
+            signal,
+            sender_pid: origin.pid,
+            code: origin.code,
+        })
+    } else {
+        let entry = process_index.and_then(|index| state.process_signals[index].as_mut())?;
+        entry.pending &= !bit;
+        let origin = entry.origins[signal as usize - 1];
+        Some(SignalFdRecord {
+            signal,
+            sender_pid: origin.pid,
+            code: origin.code,
+        })
+    }
 }
 
 /// Reports whether the current thread has an unmasked pending signal.
@@ -960,7 +1116,7 @@ fn linux_tgkill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     if matches!(signal, 9 | 19) {
         return Err(CompatErrno::Invalid);
     }
-    if queue_thread_signal(process, tid, signal) {
+    if queue_thread_signal(process, tid, signal, tgid, -6) {
         Ok(())
     } else {
         Err(CompatErrno::NoProcess)
@@ -969,7 +1125,7 @@ fn linux_tgkill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
 
 /// Queues a process-directed `kill` for a live compatibility process.
 /// 为存活的兼容进程登记一个进程定向 `kill`。
-fn linux_kill(_process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+fn linux_kill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     let pid = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
     let signal = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
     if pid == 0 {
@@ -982,7 +1138,8 @@ fn linux_kill(_process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     if signal > 64 || matches!(signal, 9 | 19) {
         return Err(CompatErrno::Invalid);
     }
-    if queue_process_signal(target, signal) {
+    let sender_pid = proc::linux_pid(process).ok_or(CompatErrno::NoProcess)?;
+    if queue_process_signal(target, signal, sender_pid, 0) {
         Ok(())
     } else {
         Err(CompatErrno::NoSpace)
@@ -1171,6 +1328,9 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
             last_thread,
         )
     };
+    if let Some(ticks) = sched::cpu_ticks(task) {
+        let _ = proc::linux_account_exited_thread_cpu(process, ticks);
+    }
     if robust_list != 0 {
         let handled = process_robust_list(process, tid, robust_list);
         crate::kprintln!("[JSR-LINUX-ROBUST] handled={handled} tid={tid}");
@@ -1185,6 +1345,7 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
         let _ = futex_wake(process, clear, usize::MAX, u32::MAX);
     }
     if last_thread {
+        release_posix_timers(process);
         remove_process_signals(process);
         crate::binder::release_process(process);
     }
@@ -1253,6 +1414,13 @@ fn futex_value(process: ObjId, address: u64) -> Result<u32, CompatErrno> {
     Ok(u32::from_le_bytes(bytes))
 }
 
+fn futex_key(process: ObjId, address: u64) -> FutexKey {
+    match proc::linux_shared_futex_key(process, address) {
+        Some(key) => FutexKey::Shared(key),
+        None => FutexKey::Private { process, address },
+    }
+}
+
 fn futex_wait(
     process: ObjId,
     address: u64,
@@ -1269,11 +1437,12 @@ fn futex_wait(
     if bitset == 0 {
         return Err(CompatErrno::Invalid);
     }
+    let key = futex_key(process, address);
     let task = sched::current().0;
     {
         let mut state = COMPAT.lock();
         let slot = if let Some(slot) = state.futexes.iter().position(|entry| {
-            entry.is_some_and(|entry| entry.process == process && entry.address == address)
+            entry.is_some_and(|entry| entry.key == key)
         }) {
             slot
         } else {
@@ -1283,8 +1452,7 @@ fn futex_wait(
                 .position(Option::is_none)
                 .ok_or(CompatErrno::NoSpace)?;
             state.futexes[slot] = Some(FutexWord {
-                process,
-                address,
+                key,
                 waiters: [FutexWaiter::EMPTY; MAX_FUTEX_WAITERS],
             });
             slot
@@ -1297,6 +1465,7 @@ fn futex_wait(
             .ok_or(CompatErrno::NoSpace)?;
         word.waiters[waiter_slot] = FutexWaiter {
             task,
+            key: Some(key),
             bitset,
             active: true,
             woken: false,
@@ -1323,13 +1492,9 @@ fn futex_wait(
                 .futexes
                 .iter()
                 .flatten()
-                .find(|word| word.process == process && word.address == address)
-                .and_then(|word| {
-                    word.waiters
-                        .iter()
-                        .find(|waiter| waiter.active && waiter.task == task)
-                        .map(|waiter| waiter.woken)
-                })
+                .flat_map(|word| word.waiters.iter())
+                .find(|waiter| waiter.active && waiter.task == task)
+                .map(|waiter| waiter.woken)
         };
         if waiter_state.is_none_or(|woken| woken) {
             break Ok(0);
@@ -1342,15 +1507,28 @@ fn futex_wait(
             sched::pause();
         }
     };
-    if let Some(word) = COMPAT.lock().futexes.iter_mut().flatten().find(|word| {
-        word.process == process && word.address == address
-    }) {
-        if let Some(waiter) = word
-            .waiters
+    let mut state = COMPAT.lock();
+    let current_key = state
+        .futexes
+        .iter()
+        .flatten()
+        .flat_map(|word| word.waiters.iter())
+        .find(|waiter| waiter.active && waiter.task == task)
+        .and_then(|waiter| waiter.key);
+    if let Some(current_key) = current_key {
+        if let Some(word) = state
+            .futexes
             .iter_mut()
-            .find(|waiter| waiter.active && waiter.task == task)
+            .flatten()
+            .find(|word| word.key == current_key)
         {
-            *waiter = FutexWaiter::EMPTY;
+            if let Some(waiter) = word
+                .waiters
+                .iter_mut()
+                .find(|waiter| waiter.active && waiter.task == task)
+            {
+                *waiter = FutexWaiter::EMPTY;
+            }
         }
     }
     result
@@ -1368,13 +1546,12 @@ fn futex_wake(
     if bitset == 0 {
         return Err(CompatErrno::Invalid);
     }
+    let key = futex_key(process, address);
     let mut tasks = [crate::task::TaskId(0); MAX_FUTEX_WAITERS];
     let mut woken = 0usize;
     {
         let mut state = COMPAT.lock();
-        let Some(word) = state.futexes.iter_mut().flatten().find(|word| {
-            word.process == process && word.address == address
-        }) else {
+        let Some(word) = state.futexes.iter_mut().flatten().find(|word| word.key == key) else {
             return Ok(0);
         };
         for waiter in word.waiters.iter_mut() {
@@ -1392,6 +1569,111 @@ fn futex_wake(
         sched::wake(task);
     }
     Ok(woken as u64)
+}
+
+fn futex_requeue(
+    process: ObjId,
+    source_address: u64,
+    target_address: u64,
+    wake_count: usize,
+    requeue_count: usize,
+    expected: Option<u32>,
+) -> Result<u64, CompatErrno> {
+    if source_address % 4 != 0
+        || target_address % 4 != 0
+        || source_address == target_address
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    if expected.is_some_and(|value| futex_value(process, source_address).ok() != Some(value)) {
+        return Err(CompatErrno::TryAgain);
+    }
+    let source_key = futex_key(process, source_address);
+    let target_key = futex_key(process, target_address);
+    if source_key == target_key {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut woken_tasks = [crate::task::TaskId(0); MAX_FUTEX_WAITERS];
+    let mut moved = [FutexWaiter::EMPTY; MAX_FUTEX_WAITERS];
+    let mut woken = 0usize;
+    let mut requeued = 0usize;
+    let mut state = COMPAT.lock();
+    let target_slot = state
+        .futexes
+        .iter()
+        .position(|word| word.is_some_and(|word| word.key == target_key));
+    let target_capacity = target_slot
+        .map(|slot| {
+            state.futexes[slot]
+                .expect("futex target slot")
+                .waiters
+                .iter()
+                .filter(|waiter| !waiter.active)
+                .count()
+        })
+        .unwrap_or(MAX_FUTEX_WAITERS);
+    let requeue_limit = requeue_count.min(target_capacity);
+    let Some(source_slot) = state
+        .futexes
+        .iter()
+        .position(|word| word.is_some_and(|word| word.key == source_key))
+    else {
+        return Ok(0);
+    };
+    for waiter in state.futexes[source_slot]
+        .as_mut()
+        .expect("futex source slot")
+        .waiters
+        .iter_mut()
+    {
+        if !waiter.active || waiter.woken {
+            continue;
+        }
+        if woken < wake_count {
+            waiter.woken = true;
+            woken_tasks[woken] = waiter.task;
+            woken += 1;
+        } else if requeued < requeue_limit {
+            moved[requeued] = *waiter;
+            moved[requeued].key = Some(target_key);
+            *waiter = FutexWaiter::EMPTY;
+            requeued += 1;
+        } else {
+            break;
+        }
+    }
+    if requeued != 0 {
+        let target_slot = if let Some(slot) = target_slot {
+            slot
+        } else {
+            let slot = state
+                .futexes
+                .iter()
+                .position(Option::is_none)
+                .ok_or(CompatErrno::NoSpace)?;
+            state.futexes[slot] = Some(FutexWord {
+                key: target_key,
+                waiters: [FutexWaiter::EMPTY; MAX_FUTEX_WAITERS],
+            });
+            slot
+        };
+        let target = state.futexes[target_slot]
+            .as_mut()
+            .expect("futex target slot");
+        for installed in 0..requeued {
+            let slot = target
+                .waiters
+                .iter()
+                .position(|waiter| !waiter.active)
+                .expect("preflighted futex target capacity");
+            target.waiters[slot] = moved[installed];
+        }
+    }
+    drop(state);
+    for task in woken_tasks[..woken].iter().copied() {
+        sched::wake(task);
+    }
+    Ok((woken + requeued) as u64)
 }
 
 fn futex_timeout(
@@ -1549,6 +1831,14 @@ fn execute(
         LinuxSyscall::SocketPair => compat_result(linux_socketpair(pid, call.args)),
         LinuxSyscall::EventFd => compat_result(linux_eventfd(pid, call.args, false)),
         LinuxSyscall::EventFd2 => compat_result(linux_eventfd(pid, call.args, true)),
+        LinuxSyscall::TimerFdCreate => compat_result(linux_timerfd_create(pid, call.args)),
+        LinuxSyscall::TimerFdSettime => compat_result(linux_timerfd_settime(pid, call.args)),
+        LinuxSyscall::TimerFdGettime => compat_result(linux_timerfd_gettime(pid, call.args)),
+        LinuxSyscall::TimerCreate => compat_result(linux_timer_create(pid, call.args)),
+        LinuxSyscall::TimerSettime => compat_result(linux_timer_settime(pid, call.args)),
+        LinuxSyscall::TimerGettime => compat_result(linux_timer_gettime(pid, call.args)),
+        LinuxSyscall::TimerGetoverrun => compat_result(linux_timer_getoverrun(pid, call.args)),
+        LinuxSyscall::TimerDelete => compat_result(linux_timer_delete(pid, call.args)),
         LinuxSyscall::SendMsg => compat_result(linux_sendmsg(pid, call.args)),
         LinuxSyscall::RecvMsg => compat_result(linux_recvmsg(pid, call.args)),
         LinuxSyscall::SendTo => compat_result(linux_sendto(pid, call.args)),
@@ -1591,12 +1881,19 @@ fn execute(
         LinuxSyscall::Fdatasync => compat_result(linux_sync_fd(pid, call.args[0], true)),
         LinuxSyscall::Ftruncate => compat_result(linux_ftruncate(pid, call.args)),
         LinuxSyscall::Truncate => compat_result(linux_truncate(pid, call.args)),
+        LinuxSyscall::Fallocate => compat_result(linux_fallocate(pid, call.args)),
+        LinuxSyscall::ReadAhead => compat_result(linux_readahead(pid, call.args)),
+        LinuxSyscall::Fadvise64 => compat_result(linux_fadvise64(pid, call.args)),
+        LinuxSyscall::SyncFileRange => {
+            compat_result(linux_sync_file_range(pid, call.args))
+        }
         LinuxSyscall::MemfdCreate => compat_result(linux_memfd_create(pid, call.args)),
         LinuxSyscall::Sync => 0,
         LinuxSyscall::Syncfs => compat_result(linux_syncfs(pid, call.args[0])),
         LinuxSyscall::NewFstatAt => compat_result(linux_newfstatat(pid, call.args)),
         LinuxSyscall::Statx => compat_result(linux_statx(pid, call.args)),
         LinuxSyscall::Fcntl => compat_result(linux_fcntl(pid, call.args)),
+        LinuxSyscall::Flock => compat_result(linux_flock(pid, call.args)),
         LinuxSyscall::Poll => compat_result(linux_poll(pid, call.args)),
         LinuxSyscall::PPoll => compat_result(linux_ppoll(pid, call.args)),
         LinuxSyscall::Select => compat_result(linux_select(pid, call.args, false)),
@@ -1620,7 +1917,15 @@ fn execute(
         LinuxSyscall::Access => compat_result(linux_access(call.args[0])),
         LinuxSyscall::FaccessAt => compat_result(linux_faccessat(pid, call.args, false)),
         LinuxSyscall::FaccessAt2 => compat_result(linux_faccessat(pid, call.args, true)),
+        LinuxSyscall::Prctl => compat_result(linux_prctl(pid, call.args)),
         LinuxSyscall::ArchPrctl => compat_result(linux_arch_prctl(call.args)),
+        LinuxSyscall::Adjtimex
+        | LinuxSyscall::ClockAdjtime
+        | LinuxSyscall::ClockSettime
+        | LinuxSyscall::Settimeofday
+        | LinuxSyscall::Sethostname
+        | LinuxSyscall::Setdomainname
+        | LinuxSyscall::Reboot => -(CompatErrno::Perm as i32 as i64),
         LinuxSyscall::ClockGettime => compat_result(linux_clock_gettime(call.args)),
         LinuxSyscall::ClockGetres => compat_result(linux_clock_getres(call.args)),
         LinuxSyscall::Nanosleep => compat_result(linux_nanosleep(pid, call.args)),
@@ -1634,6 +1939,8 @@ fn execute(
             0
         }
         LinuxSyscall::Sigaltstack => compat_result(linux_sigaltstack(pid, call.args)),
+        LinuxSyscall::Signalfd => compat_result(linux_signalfd(pid, call.args, false)),
+        LinuxSyscall::Signalfd4 => compat_result(linux_signalfd(pid, call.args, true)),
         LinuxSyscall::Kill => compat_result(linux_kill(pid, call.args).map(|()| 0)),
         LinuxSyscall::Uname => compat_result(linux_uname(call.args)),
         LinuxSyscall::GetPid => proc::linux_pid(pid)
@@ -1646,7 +1953,9 @@ fn execute(
             .unwrap_or_else(|error| -i64::from(error as i32)),
         LinuxSyscall::GetRandom => compat_result(linux_getrandom(call.args)),
         LinuxSyscall::GetTimeOfDay => compat_result(linux_gettimeofday(call.args)),
+        LinuxSyscall::Getrusage => compat_result(linux_getrusage(pid, call.args)),
         LinuxSyscall::Time => compat_result(linux_time(call.args)),
+        LinuxSyscall::Times => compat_result(linux_times(pid, call.args)),
         LinuxSyscall::Getcwd => compat_result(linux_getcwd(pid, call.args)),
         LinuxSyscall::GetUid | LinuxSyscall::GetEuid => {
             compat_core::syscall::LINUX_COMPAT_UID as i64
@@ -1658,18 +1967,18 @@ fn execute(
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
             .unwrap_or_else(|error| -i64::from(error as i32)),
-        LinuxSyscall::GetPgid => compat_result(linux_process_group(pid, call.args[0])),
-        LinuxSyscall::GetPgrp | LinuxSyscall::SetSid => compat_result(
-            proc::linux_pid(pid)
-                .map(u64::from)
-                .ok_or(CompatErrno::NoProcess),
-        ),
-        LinuxSyscall::GetSid => compat_result(linux_process_group(pid, call.args[0])),
+        LinuxSyscall::GetPgid => compat_result(linux_get_pgid(pid, call.args[0])),
+        LinuxSyscall::GetPgrp => compat_result(linux_get_pgrp(pid)),
+        LinuxSyscall::GetSid => compat_result(linux_get_sid(pid, call.args[0])),
+        LinuxSyscall::SetPgid => compat_result(linux_setpgid(pid, call.args)),
+        LinuxSyscall::SetSid => compat_result(linux_setsid(pid)),
         // The compatibility identity has no supplementary groups.
         // 兼容身份没有附加组，因此 size 查询和写入都返回 0。
         LinuxSyscall::GetGroups => 0,
         LinuxSyscall::GetResUid => compat_result(linux_getres(call.args, false)),
         LinuxSyscall::GetResGid => compat_result(linux_getres(call.args, true)),
+        LinuxSyscall::GetPriority => compat_result(linux_getpriority(pid, call.args)),
+        LinuxSyscall::SetPriority => compat_result(linux_setpriority(pid, call.args)),
         LinuxSyscall::Lseek => compat_result(linux_lseek(pid, call.args)),
         LinuxSyscall::GetCpu => compat_result(linux_getcpu(call.args)),
         LinuxSyscall::Sysinfo => compat_result(linux_sysinfo(call.args[0])),
@@ -1682,6 +1991,18 @@ fn execute(
         LinuxSyscall::SchedGetScheduler => {
             compat_result(linux_sched_getscheduler(pid, call.args[0]))
         }
+        LinuxSyscall::SchedSetParam => compat_result(linux_sched_setparam(pid, call.args)),
+        LinuxSyscall::SchedGetPriorityMax => {
+            compat_result(linux_sched_priority(call.args[0], true))
+        }
+        LinuxSyscall::SchedGetPriorityMin => {
+            compat_result(linux_sched_priority(call.args[0], false))
+        }
+        LinuxSyscall::SchedRrGetInterval => {
+            compat_result(linux_sched_rr_get_interval(pid, call.args))
+        }
+        LinuxSyscall::SchedGetAttr => compat_result(linux_sched_getattr(pid, call.args)),
+        LinuxSyscall::SchedSetAttr => compat_result(linux_sched_setattr(pid, call.args)),
         LinuxSyscall::SetTidAddress => set_clear_child_tid(pid, call.args[0])
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
@@ -1735,10 +2056,78 @@ fn linux_getres(args: [u64; 6], _gid: bool) -> Result<u64, CompatErrno> {
     Ok(0)
 }
 
-fn linux_process_group(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
-    let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
-    if requested == 0 || requested == current {
-        Ok(current)
+fn linux_resolve_pid(pid: ObjId, requested: u64) -> Result<ObjId, CompatErrno> {
+    let current_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?;
+    if requested == 0 || requested == u64::from(current_pid) {
+        return Ok(pid);
+    }
+    let target = u32::try_from(requested).map_err(|_| CompatErrno::Invalid)?;
+    proc::linux_process_for_pid(target).ok_or(CompatErrno::NoProcess)
+}
+
+fn linux_get_pgid(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
+    let target = linux_resolve_pid(pid, requested)?;
+    proc::linux_process_group_state(target)
+        .map(|(pgid, _)| u64::from(pgid))
+        .ok_or(CompatErrno::NoProcess)
+}
+
+fn linux_get_pgrp(pid: ObjId) -> Result<u64, CompatErrno> {
+    proc::linux_process_group_state(pid)
+        .map(|(pgid, _)| u64::from(pgid))
+        .ok_or(CompatErrno::NoProcess)
+}
+
+fn linux_get_sid(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
+    let target = linux_resolve_pid(pid, requested)?;
+    proc::linux_process_group_state(target)
+        .map(|(_, sid)| u64::from(sid))
+        .ok_or(CompatErrno::NoProcess)
+}
+
+fn linux_setpgid(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let current_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?;
+    let target_pid = if args[0] == 0 {
+        current_pid
+    } else {
+        u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?
+    };
+    if target_pid != current_pid {
+        return if proc::linux_process_for_pid(target_pid).is_some() {
+            Err(CompatErrno::Perm)
+        } else {
+            Err(CompatErrno::NoProcess)
+        };
+    }
+    let group = if args[1] == 0 {
+        target_pid
+    } else {
+        u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?
+    };
+    let (_, session) =
+        proc::linux_process_group_state(pid).ok_or(CompatErrno::NoProcess)?;
+    if session == current_pid {
+        return Err(CompatErrno::Perm);
+    }
+    if group != target_pid && proc::linux_process_group_session(group) != Some(session) {
+        return Err(CompatErrno::Perm);
+    }
+    if proc::linux_set_process_group_state(pid, group, session) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoProcess)
+    }
+}
+
+fn linux_setsid(pid: ObjId) -> Result<u64, CompatErrno> {
+    let process_id = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?;
+    let (group, _) =
+        proc::linux_process_group_state(pid).ok_or(CompatErrno::NoProcess)?;
+    if group == process_id {
+        return Err(CompatErrno::Perm);
+    }
+    if proc::linux_set_process_group_state(pid, process_id, process_id) {
+        Ok(u64::from(process_id))
     } else {
         Err(CompatErrno::NoProcess)
     }
@@ -1789,6 +2178,12 @@ fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         if entry.kind == compat_core::fd::CompatKind::Event {
             return linux_eventfd_write(pid, fd, entry.handle, args[1], len);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Timer {
+            return Err(CompatErrno::Invalid);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Signal {
+            return Err(CompatErrno::Invalid);
         }
         if entry.kind == compat_core::fd::CompatKind::Socket {
             if !entry.rights.contains(kernel_core::object::Rights::WRITE) {
@@ -2033,6 +2428,12 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         if entry.kind == compat_core::fd::CompatKind::Event {
             return linux_eventfd_read(pid, fd, entry.handle, args[1], len);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Timer {
+            return linux_timerfd_read(pid, fd, entry.handle, args[1], len);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Signal {
+            return linux_signalfd_read(pid, fd, entry.handle, args[1], len);
         }
         if entry.kind == compat_core::fd::CompatKind::Socket {
             if !entry.rights.contains(kernel_core::object::Rights::READ) {
@@ -2611,6 +3012,156 @@ fn linux_sched_getparam(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
     }
     copy_to_user(args[1], &0i32.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
+}
+
+fn linux_priority_target(
+    current: ObjId,
+    which: u64,
+    who: u64,
+) -> Result<ObjId, CompatErrno> {
+    const PRIO_PROCESS: u64 = 0;
+    const PRIO_PGRP: u64 = 1;
+    const PRIO_USER: u64 = 2;
+    let current_pid = u64::from(proc::linux_pid(current).ok_or(CompatErrno::NoProcess)?);
+    match which {
+        PRIO_PROCESS if who == 0 || who == current_pid => Ok(current),
+        PRIO_PROCESS => {
+            let pid = u32::try_from(who).map_err(|_| CompatErrno::NoProcess)?;
+            proc::linux_process_for_pid(pid).ok_or(CompatErrno::NoProcess)
+        }
+        PRIO_PGRP if who == 0 || who == current_pid => Ok(current),
+        PRIO_PGRP => Err(CompatErrno::NoProcess),
+        PRIO_USER if who == 0 || who == compat_core::syscall::LINUX_COMPAT_UID => Ok(current),
+        PRIO_USER => Err(CompatErrno::NoProcess),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+fn linux_getpriority(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let target = linux_priority_target(pid, args[0], args[1])?;
+    let nice = proc::linux_nice(target).ok_or(CompatErrno::NoProcess)?;
+    Ok((20 - nice) as u64)
+}
+
+fn linux_setpriority(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let target = linux_priority_target(pid, args[0], args[1])?;
+    let nice = i32::try_from(args[2] as i32).map_err(|_| CompatErrno::Invalid)?;
+    if !(-20..=19).contains(&nice) {
+        return Err(CompatErrno::Invalid);
+    }
+    if proc::linux_set_nice(target, nice) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoProcess)
+    }
+}
+
+fn linux_sched_priority(policy: u64, maximum: bool) -> Result<u64, CompatErrno> {
+    const SCHED_OTHER: u64 = 0;
+    const SCHED_FIFO: u64 = 1;
+    const SCHED_RR: u64 = 2;
+    const SCHED_BATCH: u64 = 3;
+    const SCHED_IDLE: u64 = 5;
+    match policy {
+        SCHED_OTHER | SCHED_BATCH | SCHED_IDLE => Ok(0),
+        SCHED_FIFO | SCHED_RR => Ok(if maximum { 99 } else { 1 }),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+fn linux_sched_setparam(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
+    if args[0] != 0 && args[0] != current {
+        return Err(CompatErrno::NoProcess);
+    }
+    let mut priority = [0u8; 4];
+    copy_from_user(&mut priority, args[1], 4).map_err(|_| CompatErrno::Fault)?;
+    if i32::from_le_bytes(priority) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    Ok(0)
+}
+
+fn linux_sched_rr_get_interval(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
+    if args[0] != 0 && args[0] != current {
+        return Err(CompatErrno::NoProcess);
+    }
+    let mut timespec = [0u8; 16];
+    timespec[8..16].copy_from_slice(&2_000_000i64.to_le_bytes());
+    copy_to_user(args[1], &timespec, timespec.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+fn linux_sched_target(pid: ObjId, requested: u64) -> Result<ObjId, CompatErrno> {
+    let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
+    if requested == 0 || requested == current {
+        Ok(pid)
+    } else {
+        let target = u32::try_from(requested).map_err(|_| CompatErrno::NoProcess)?;
+        proc::linux_process_for_pid(target).ok_or(CompatErrno::NoProcess)
+    }
+}
+
+fn linux_sched_getattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SCHED_ATTR_BYTES: usize = 48;
+    const SCHED_OTHER: u32 = 0;
+    let target = linux_sched_target(pid, args[0])?;
+    let size = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if size < SCHED_ATTR_BYTES || size > 4096 || args[3] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut output = alloc::vec![0u8; size];
+    output[0..4].copy_from_slice(&(size as u32).to_le_bytes());
+    output[4..8].copy_from_slice(&SCHED_OTHER.to_le_bytes());
+    let nice = proc::linux_nice(target).ok_or(CompatErrno::NoProcess)?;
+    output[16..20].copy_from_slice(&nice.to_le_bytes());
+    copy_to_user(args[1], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+fn linux_sched_setattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SCHED_ATTR_BYTES: usize = 48;
+    const SCHED_OTHER: u32 = 0;
+    let target = linux_sched_target(pid, args[0])?;
+    if args[2] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut raw = [0u8; SCHED_ATTR_BYTES];
+    copy_from_user(&mut raw, args[1], SCHED_ATTR_BYTES).map_err(|_| CompatErrno::Fault)?;
+    let size = u32::from_le_bytes(raw[0..4].try_into().unwrap()) as usize;
+    let policy = u32::from_le_bytes(raw[4..8].try_into().unwrap());
+    let attr_flags = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+    let nice = i32::from_le_bytes(raw[16..20].try_into().unwrap());
+    let priority = u32::from_le_bytes(raw[20..24].try_into().unwrap());
+    let runtime = u64::from_le_bytes(raw[24..32].try_into().unwrap());
+    let deadline = u64::from_le_bytes(raw[32..40].try_into().unwrap());
+    let period = u64::from_le_bytes(raw[40..48].try_into().unwrap());
+    if size < SCHED_ATTR_BYTES
+        || policy != SCHED_OTHER
+        || attr_flags != 0
+        || priority != 0
+        || runtime != 0
+        || deadline != 0
+        || period != 0
+        || !(-20..=19).contains(&nice)
+    {
+        return if policy != SCHED_OTHER
+            || attr_flags != 0
+            || runtime != 0
+            || deadline != 0
+            || period != 0
+        {
+            Err(CompatErrno::NotSupported)
+        } else {
+            Err(CompatErrno::Invalid)
+        };
+    }
+    if proc::linux_set_nice(target, nice) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoProcess)
+    }
 }
 
 fn linux_sched_setscheduler(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
@@ -3566,6 +4117,8 @@ fn linux_spawn_clone(
 fn linux_futex(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const FUTEX_WAIT: u64 = 0;
     const FUTEX_WAKE: u64 = 1;
+    const FUTEX_REQUEUE: u64 = 3;
+    const FUTEX_CMP_REQUEUE: u64 = 4;
     const FUTEX_WAIT_BITSET: u64 = 9;
     const FUTEX_WAKE_BITSET: u64 = 10;
     const FUTEX_PRIVATE_FLAG: u64 = 128;
@@ -3595,6 +4148,22 @@ fn linux_futex(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             args[0],
             usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
             u32::MAX,
+        ),
+        FUTEX_REQUEUE => futex_requeue(
+            pid,
+            args[0],
+            args[4],
+            usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
+            usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?,
+            None,
+        ),
+        FUTEX_CMP_REQUEUE => futex_requeue(
+            pid,
+            args[0],
+            args[4],
+            usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
+            usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?,
+            Some(u32::try_from(args[5]).map_err(|_| CompatErrno::Invalid)?),
         ),
         FUTEX_WAKE_BITSET => futex_wake(
             pid,
@@ -3692,6 +4261,54 @@ fn linux_getrandom(args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(length as u64)
 }
 
+/// Implements the bounded task-name operations of `prctl(2)`.
+///
+/// 仅实现当前 Linux 任务的 `PR_SET_NAME`/`PR_GET_NAME`；名称固定为 Linux 的
+/// 16 字节任务命令名。其他 option 明确返回 EINVAL，不把未实现的安全策略当作成功。
+fn linux_prctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PR_SET_NAME: u64 = 15;
+    const PR_GET_NAME: u64 = 16;
+    let (task, _) = sched::current();
+    match args[0] {
+        PR_SET_NAME => {
+            let mut name = [0u8; 16];
+            for offset in 0..15 {
+                let address = args[1]
+                    .checked_add(offset as u64)
+                    .ok_or(CompatErrno::Fault)?;
+                let mut byte = [0u8; 1];
+                copy_from_user(&mut byte, address, 1).map_err(|_| CompatErrno::Fault)?;
+                if byte[0] == 0 {
+                    break;
+                }
+                name[offset] = byte[0];
+            }
+            let mut state = COMPAT.lock();
+            let thread = state
+                .threads
+                .iter_mut()
+                .flatten()
+                .find(|entry| entry.process == pid && entry.task == task)
+                .ok_or(CompatErrno::NoProcess)?;
+            thread.name = name;
+            Ok(0)
+        }
+        PR_GET_NAME => {
+            let name = COMPAT
+                .lock()
+                .threads
+                .iter()
+                .flatten()
+                .find(|entry| entry.process == pid && entry.task == task)
+                .map(|entry| entry.name)
+                .ok_or(CompatErrno::NoProcess)?;
+            copy_to_user(args[1], &name, name.len()).map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        }
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
 /// Implements the x86_64 `arch_prctl(2)` TLS base operation.
 ///
 /// 当前切片仅接受 `ARCH_SET_FS`，地址必须位于本架构用户私有窗口。线程级 FS_BASE 随
@@ -3740,6 +4357,32 @@ fn linux_gettimeofday(args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(0)
 }
 
+/// Reports scheduler-accounted CPU time for the process or current thread.
+///
+/// 返回进程、当前线程或已等待直接子进程的调度器 CPU 时间。
+fn linux_getrusage(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const RUSAGE_SELF: i32 = 0;
+    const RUSAGE_CHILDREN: i32 = -1;
+    const RUSAGE_THREAD: i32 = 1;
+    const RUSAGE_BYTES: usize = 144;
+    let ticks = match args[0] as u32 as i32 {
+        RUSAGE_SELF => proc::linux_process_cpu_ticks(pid).ok_or(CompatErrno::NoProcess)?,
+        RUSAGE_THREAD => {
+            let (task, _) = sched::current();
+            linux_tid(pid).ok_or(CompatErrno::NoProcess)?;
+            sched::cpu_ticks(task).ok_or(CompatErrno::NoProcess)?
+        }
+        RUSAGE_CHILDREN => proc::linux_children_cpu_ticks(pid).ok_or(CompatErrno::NoProcess)?,
+        _ => return Err(CompatErrno::Invalid),
+    };
+    let nanoseconds = ticks.saturating_mul(crate::hrtime::tick_ns());
+    let mut usage = [0u8; RUSAGE_BYTES];
+    usage[0..8].copy_from_slice(&(nanoseconds / 1_000_000_000).to_le_bytes());
+    usage[8..16].copy_from_slice(&((nanoseconds % 1_000_000_000) / 1_000).to_le_bytes());
+    copy_to_user(args[1], &usage, usage.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
 /// Implements `time(2)` using the trusted RTC.
 ///
 /// 使用可信 RTC 返回 Unix 秒；非空输出指针收到同样的 `time_t`。
@@ -3749,6 +4392,20 @@ fn linux_time(args: [u64; 6]) -> Result<u64, CompatErrno> {
         copy_to_user(args[0], &seconds.to_le_bytes(), 8).map_err(|_| CompatErrno::Fault)?;
     }
     Ok(seconds)
+}
+
+/// Reports process and waited-child CPU ticks in the legacy `tms` layout.
+/// 以传统 `tms` 布局报告进程与已等待子进程 CPU ticks。
+fn linux_times(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let self_ticks = proc::linux_process_cpu_ticks(pid).ok_or(CompatErrno::NoProcess)?;
+    let child_ticks = proc::linux_children_cpu_ticks(pid).ok_or(CompatErrno::NoProcess)?;
+    if args[0] != 0 {
+        let mut times = [0u8; 32];
+        times[0..8].copy_from_slice(&self_ticks.to_le_bytes());
+        times[16..24].copy_from_slice(&child_ticks.to_le_bytes());
+        copy_to_user(args[0], &times, times.len()).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(sched::timer_ticks())
 }
 
 /// Reports the compatibility clock's conservative timer resolution.
@@ -4104,6 +4761,501 @@ fn linux_eventfd_write(
     }
 }
 
+fn linux_timerfd_clock_now(clock: u32) -> Result<u64, CompatErrno> {
+    const CLOCK_REALTIME: u32 = 0;
+    const CLOCK_MONOTONIC: u32 = 1;
+    match clock {
+        CLOCK_MONOTONIC => Ok(sched::now_ns()),
+        CLOCK_REALTIME => crate::arch::wall_clock_ns().ok_or(CompatErrno::NoSys),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+fn linux_timerfd_settle(
+    state: &mut proc::LinuxTimerFdState,
+) -> Result<u64, CompatErrno> {
+    let now = linux_timerfd_clock_now(state.clock)?;
+    if state.next == 0 || now < state.next {
+        return Ok(now);
+    }
+    let expired = if state.interval == 0 {
+        1
+    } else {
+        (now - state.next) / state.interval + 1
+    };
+    state.expirations = state.expirations.saturating_add(expired);
+    state.next = if state.interval == 0 {
+        0
+    } else {
+        state
+            .next
+            .saturating_add(expired.saturating_mul(state.interval))
+    };
+    Ok(now)
+}
+
+fn linux_timerfd_create(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const TFD_NONBLOCK: u64 = 0x800;
+    const TFD_CLOEXEC: u64 = 0x80000;
+    let clock = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    if !matches!(clock, 0 | 1) {
+        return Err(CompatErrno::Invalid);
+    }
+    let flags = args[1];
+    if flags & !(TFD_NONBLOCK | TFD_CLOEXEC) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    proc::linux_timerfd_create(
+        pid,
+        clock,
+        flags & TFD_CLOEXEC != 0,
+        flags & TFD_NONBLOCK != 0,
+    )
+    .map(u64::from)
+    .ok_or(CompatErrno::NoSpace)
+}
+
+fn linux_timerfd_write_state(
+    address: u64,
+    next: u64,
+    interval: u64,
+    now: u64,
+) -> Result<(), CompatErrno> {
+    let remaining = if next == 0 {
+        0
+    } else {
+        next.saturating_sub(now)
+    };
+    let mut output = [0u8; 32];
+    output[0..8].copy_from_slice(&(interval / 1_000_000_000).to_le_bytes());
+    output[8..16].copy_from_slice(&(interval % 1_000_000_000).to_le_bytes());
+    output[16..24].copy_from_slice(&(remaining / 1_000_000_000).to_le_bytes());
+    output[24..32].copy_from_slice(&(remaining % 1_000_000_000).to_le_bytes());
+    copy_to_user(address, &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(())
+}
+
+fn linux_timerfd_settime(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const TFD_TIMER_ABSTIME: u64 = 0x1;
+    const TFD_TIMER_CANCEL_ON_SET: u64 = 0x2;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Timer {
+        return Err(CompatErrno::BadFd);
+    }
+    let flags = args[1];
+    if flags & TFD_TIMER_CANCEL_ON_SET != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    if flags & !TFD_TIMER_ABSTIME != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let interval = read_linux_timespec(args[2])?;
+    let value_address = args[2].checked_add(16).ok_or(CompatErrno::Fault)?;
+    let value = read_linux_timespec(value_address)?;
+    let state = proc::linux_timerfd_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let (now, old_next, old_interval) = {
+        let mut state = state.lock();
+        let now = linux_timerfd_settle(&mut state)?;
+        (now, state.next, state.interval)
+    };
+    if args[3] != 0 {
+        linux_timerfd_write_state(args[3], old_next, old_interval, now)?;
+    }
+    let next = if value == 0 {
+        0
+    } else if flags & TFD_TIMER_ABSTIME != 0 {
+        value
+    } else {
+        now.checked_add(value).ok_or(CompatErrno::Invalid)?
+    };
+    let mut state = state.lock();
+    state.next = next;
+    state.interval = interval;
+    state.expirations = 0;
+    Ok(0)
+}
+
+fn linux_timerfd_gettime(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Timer {
+        return Err(CompatErrno::BadFd);
+    }
+    let state = proc::linux_timerfd_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let (now, next, interval) = {
+        let mut state = state.lock();
+        let now = linux_timerfd_settle(&mut state)?;
+        (now, state.next, state.interval)
+    };
+    linux_timerfd_write_state(args[1], next, interval, now)?;
+    Ok(0)
+}
+
+fn linux_timerfd_read(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    address: u64,
+    len: usize,
+) -> Result<u64, CompatErrno> {
+    if len < 8 {
+        return Err(CompatErrno::Invalid);
+    }
+    let state = proc::linux_timerfd_state(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    loop {
+        let (value, next) = {
+            let mut state = state.lock();
+            linux_timerfd_settle(&mut state)?;
+            (core::mem::take(&mut state.expirations), state.next)
+        };
+        if value != 0 {
+            if copy_to_user(address, &value.to_le_bytes(), 8).is_err() {
+                let mut timer = state.lock();
+                timer.expirations = timer.expirations.saturating_add(value);
+                return Err(CompatErrno::Fault);
+            }
+            return Ok(8);
+        }
+        if nonblocking {
+            return Err(CompatErrno::TryAgain);
+        }
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        if next == 0 {
+            sched::pause();
+        } else {
+            sleep_until_with_signal_check(pid, next)?;
+        }
+    }
+}
+
+fn linux_signalfd(pid: ObjId, args: [u64; 6], modern: bool) -> Result<u64, CompatErrno> {
+    const SFD_NONBLOCK: u64 = 0x800;
+    const SFD_CLOEXEC: u64 = 0x80000;
+    let size = if modern {
+        usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?
+    } else {
+        8
+    };
+    if size != 8 {
+        return Err(CompatErrno::Invalid);
+    }
+    let flags = if modern { args[3] } else { 0 };
+    if flags & !(SFD_NONBLOCK | SFD_CLOEXEC) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut raw = [0u8; 8];
+    copy_from_user(&mut raw, args[1], 8).map_err(|_| CompatErrno::Fault)?;
+    let mask = u64::from_le_bytes(raw);
+    let fd = args[0] as u32 as i32;
+    if fd == -1 {
+        return proc::linux_signalfd_create(
+            pid,
+            mask,
+            flags & SFD_CLOEXEC != 0,
+            flags & SFD_NONBLOCK != 0,
+        )
+        .map(u64::from)
+        .ok_or(CompatErrno::NoSpace);
+    }
+    if fd < 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let fd = fd as u32;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Signal {
+        return Err(CompatErrno::BadFd);
+    }
+    let state = proc::linux_signalfd_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    *state.lock() = mask;
+    if flags & SFD_CLOEXEC != 0 && !proc::linux_set_fd_cloexec(pid, fd, true) {
+        return Err(CompatErrno::BadFd);
+    }
+    if flags & SFD_NONBLOCK != 0 {
+        let current = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)?;
+        if !proc::linux_set_fd_status_flags(pid, fd, current | SFD_NONBLOCK as u32) {
+            return Err(CompatErrno::BadFd);
+        }
+    }
+    Ok(u64::from(fd))
+}
+
+fn linux_signalfd_read(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    address: u64,
+    len: usize,
+) -> Result<u64, CompatErrno> {
+    const RECORD_BYTES: usize = 128;
+    const MAX_RECORDS: usize = 16;
+    if len < RECORD_BYTES {
+        return Err(CompatErrno::Invalid);
+    }
+    let limit = (len / RECORD_BYTES).min(MAX_RECORDS);
+    let mask_state = proc::linux_signalfd_state(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    loop {
+        let requested = *mask_state.lock();
+        let mut records = [SignalFdRecord {
+            signal: 0,
+            sender_pid: 0,
+            code: 0,
+        }; MAX_RECORDS];
+        let mut count = 0usize;
+        while count < limit {
+            let Some(record) = take_signalfd_record(pid, requested) else {
+                break;
+            };
+            records[count] = record;
+            count += 1;
+        }
+        if count != 0 {
+            let mut output = [0u8; RECORD_BYTES * MAX_RECORDS];
+            for (index, record) in records[..count].iter().enumerate() {
+                let base = index * RECORD_BYTES;
+                output[base..base + 4].copy_from_slice(&record.signal.to_le_bytes());
+                output[base + 8..base + 12]
+                    .copy_from_slice(&record.code.to_le_bytes());
+                output[base + 12..base + 16]
+                    .copy_from_slice(&record.sender_pid.to_le_bytes());
+                output[base + 16..base + 20].copy_from_slice(
+                    &(compat_core::syscall::LINUX_COMPAT_UID as u32).to_le_bytes(),
+                );
+            }
+            copy_to_user(address, &output[..count * RECORD_BYTES], count * RECORD_BYTES)
+                .map_err(|_| CompatErrno::Fault)?;
+            return Ok((count * RECORD_BYTES) as u64);
+        }
+        if nonblocking {
+            return Err(CompatErrno::TryAgain);
+        }
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        sched::pause();
+    }
+}
+
+fn linux_posix_timer_settle_one(
+    timer: &mut PosixTimer,
+) -> Result<u64, CompatErrno> {
+    let now = linux_timerfd_clock_now(timer.clock)?;
+    if !timer.active || timer.next == 0 || now < timer.next {
+        return Ok(now);
+    }
+    let expired = if timer.interval == 0 {
+        1
+    } else {
+        (now - timer.next) / timer.interval + 1
+    };
+    if timer.notify == 0 && expired > 1 {
+        timer.overrun = timer.overrun.saturating_add(expired - 1);
+    }
+    timer.next = if timer.interval == 0 {
+        0
+    } else {
+        timer
+            .next
+            .saturating_add(expired.saturating_mul(timer.interval))
+    };
+    timer.active = timer.next != 0;
+    Ok(now)
+}
+
+/// Settles process timers from the periodic clock interrupt.
+/// 从周期时钟中断结算进程计时器。
+pub(crate) fn settle_posix_timers(now: u64) {
+    let mut pending = [None; MAX_POSIX_TIMERS];
+    let mut pending_count = 0usize;
+    {
+        let mut state = COMPAT.lock();
+        for timer in state.posix_timers.iter_mut().flatten() {
+            if !timer.active {
+                continue;
+            }
+            let current = if timer.clock == 0 {
+                match crate::arch::wall_clock_ns() {
+                    Some(value) => value,
+                    None => continue,
+                }
+            } else {
+                now
+            };
+            if current < timer.next {
+                continue;
+            }
+            let expired = if timer.interval == 0 {
+                1
+            } else {
+                (current - timer.next) / timer.interval + 1
+            };
+            if timer.notify == 0 && expired > 1 {
+                timer.overrun = timer.overrun.saturating_add(expired - 1);
+            }
+            timer.next = if timer.interval == 0 {
+                0
+            } else {
+                timer
+                    .next
+                    .saturating_add(expired.saturating_mul(timer.interval))
+            };
+            timer.active = timer.next != 0;
+            if timer.notify == 0 && pending_count < pending.len() {
+                pending[pending_count] = Some((timer.process, timer.signal));
+                pending_count += 1;
+            }
+        }
+    }
+    for (process, signal) in pending.into_iter().flatten() {
+            let _ = queue_process_signal(process, signal, 0, -2);
+    }
+}
+
+fn release_posix_timers(process: ObjId) {
+    let mut state = COMPAT.lock();
+    for timer in state.posix_timers.iter_mut() {
+        if timer.is_some_and(|timer| timer.process == process) {
+            *timer = None;
+        }
+    }
+}
+
+fn linux_timer_create(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SIGEV_SIGNAL: u32 = 0;
+    const SIGEV_NONE: u32 = 1;
+    const SIGALRM: u32 = 14;
+    let clock = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let _ = linux_timerfd_clock_now(clock)?;
+    let mut notify = SIGEV_SIGNAL;
+    let mut signal = SIGALRM;
+    if args[1] != 0 {
+        let mut event = [0u8; 64];
+        copy_from_user(&mut event, args[1], 64).map_err(|_| CompatErrno::Fault)?;
+        signal = u32::from_le_bytes(event[8..12].try_into().unwrap());
+        notify = u32::from_le_bytes(event[12..16].try_into().unwrap());
+        if !matches!(notify, SIGEV_SIGNAL | SIGEV_NONE) {
+            return Err(CompatErrno::NotSupported);
+        }
+    }
+    if notify == SIGEV_SIGNAL && (signal == 0 || signal > 64 || matches!(signal, 9 | 19)) {
+        return Err(CompatErrno::Invalid);
+    }
+    let id = NEXT_POSIX_TIMER_ID.fetch_add(1, Ordering::AcqRel);
+    if id == 0 || id == u64::MAX {
+        return Err(CompatErrno::NoSpace);
+    }
+    {
+        let mut state = COMPAT.lock();
+        let Some(slot) = state.posix_timers.iter().position(Option::is_none) else {
+            return Err(CompatErrno::NoSpace);
+        };
+        state.posix_timers[slot] = Some(PosixTimer {
+            process: pid,
+            id,
+            clock,
+            notify,
+            signal,
+            next: 0,
+            interval: 0,
+            overrun: 0,
+            active: false,
+        });
+    }
+    if copy_to_user(args[2], &id.to_le_bytes(), 8).is_err() {
+        let _ = linux_timer_delete(pid, [id, 0, 0, 0, 0, 0]);
+        return Err(CompatErrno::Fault);
+    }
+    Ok(0)
+}
+
+fn linux_timer_settime(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const TIMER_ABSTIME: u64 = 1;
+    if args[1] & !TIMER_ABSTIME != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let interval = read_linux_timespec(args[2])?;
+    let value_address = args[2].checked_add(16).ok_or(CompatErrno::Fault)?;
+    let value = read_linux_timespec(value_address)?;
+    let (now, old_next, old_interval) = {
+        let mut state = COMPAT.lock();
+        let timer = state
+            .posix_timers
+            .iter_mut()
+            .flatten()
+            .find(|timer| timer.process == pid && timer.id == args[0])
+            .ok_or(CompatErrno::Invalid)?;
+        let now = linux_posix_timer_settle_one(timer)?;
+        (now, timer.next, timer.interval)
+    };
+    if args[3] != 0 {
+        linux_timerfd_write_state(args[3], old_next, old_interval, now)?;
+    }
+    let next = if value == 0 {
+        0
+    } else if args[1] & TIMER_ABSTIME != 0 {
+        value
+    } else {
+        now.checked_add(value).ok_or(CompatErrno::Invalid)?
+    };
+    let mut state = COMPAT.lock();
+    let timer = state
+        .posix_timers
+        .iter_mut()
+        .flatten()
+        .find(|timer| timer.process == pid && timer.id == args[0])
+        .ok_or(CompatErrno::Invalid)?;
+    timer.next = next;
+    timer.interval = interval;
+    timer.overrun = 0;
+    timer.active = next != 0;
+    Ok(0)
+}
+
+fn linux_timer_gettime(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let (now, next, interval) = {
+        let mut state = COMPAT.lock();
+        let timer = state
+            .posix_timers
+            .iter_mut()
+            .flatten()
+            .find(|timer| timer.process == pid && timer.id == args[0])
+            .ok_or(CompatErrno::Invalid)?;
+        let now = linux_posix_timer_settle_one(timer)?;
+        (now, timer.next, timer.interval)
+    };
+    linux_timerfd_write_state(args[1], next, interval, now)?;
+    Ok(0)
+}
+
+fn linux_timer_getoverrun(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let mut state = COMPAT.lock();
+    let timer = state
+        .posix_timers
+        .iter_mut()
+        .flatten()
+        .find(|timer| timer.process == pid && timer.id == args[0])
+        .ok_or(CompatErrno::Invalid)?;
+    let _ = linux_posix_timer_settle_one(timer)?;
+    Ok(timer.overrun)
+}
+
+fn linux_timer_delete(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let mut state = COMPAT.lock();
+    let Some(slot) = state
+        .posix_timers
+        .iter()
+        .position(|timer| timer.is_some_and(|timer| timer.process == pid && timer.id == args[0]))
+    else {
+        return Err(CompatErrno::Invalid);
+    };
+    state.posix_timers[slot] = None;
+    Ok(0)
+}
+
 fn linux_ftruncate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let size = args[1];
@@ -4135,6 +5287,129 @@ fn linux_truncate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         false,
     )?;
     Err(CompatErrno::ReadOnly)
+}
+
+fn linux_fallocate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const FALLOC_FL_KEEP_SIZE: u64 = 0x01;
+    const FALLOC_FL_PUNCH_HOLE: u64 = 0x02;
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let mode = args[1];
+    let offset = args[2];
+    let length = args[3];
+    if length == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if mode & !(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE) != 0
+        || mode & FALLOC_FL_PUNCH_HOLE != 0 && mode & FALLOC_FL_KEEP_SIZE == 0
+    {
+        return Err(CompatErrno::NotSupported);
+    }
+    let end = offset
+        .checked_add(length)
+        .filter(|end| *end <= MAX_BYTES)
+        .ok_or(CompatErrno::Invalid)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind == compat_core::fd::CompatKind::Directory {
+        return Err(CompatErrno::IsDirectory);
+    }
+    let Some((current_size, _, _)) = proc::linux_ashmem_state(pid, entry.handle) else {
+        return match entry.kind {
+            compat_core::fd::CompatKind::File => Err(CompatErrno::ReadOnly),
+            _ => Err(CompatErrno::NotSupported),
+        };
+    };
+    if proc::linux_ashmem_is_regular(pid, entry.handle) != Some(true) {
+        return Err(CompatErrno::NotSupported);
+    }
+    let seals = proc::linux_ashmem_get_seals(pid, entry.handle).ok_or(CompatErrno::Invalid)?;
+    if mode & FALLOC_FL_PUNCH_HOLE != 0 {
+        if end > current_size {
+            return Err(CompatErrno::Invalid);
+        }
+        if seals & (8 | 16) != 0 {
+            return Err(CompatErrno::Perm);
+        }
+        let zeroes = [0u8; 4096];
+        let mut cursor = offset;
+        while cursor < end {
+            let take = (end - cursor).min(zeroes.len() as u64) as usize;
+            proc::linux_ashmem_write_from(pid, entry.handle, cursor, &zeroes[..take])
+                .map_err(ashmem_compat_error)?;
+            cursor += take as u64;
+        }
+        return Ok(0);
+    }
+    if mode & FALLOC_FL_KEEP_SIZE != 0 {
+        return if end <= current_size {
+            Ok(0)
+        } else {
+            Err(CompatErrno::NotSupported)
+        };
+    }
+    if end > current_size {
+        if seals & 4 != 0 {
+            return Err(CompatErrno::Perm);
+        }
+        proc::linux_ashmem_set_size(pid, entry.handle, end)
+            .map_err(ashmem_compat_error)?;
+    }
+    Ok(0)
+}
+
+fn linux_file_range_advice(pid: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let offset = args[1] as i64;
+    let length = args[2] as i64;
+    if offset < 0 || length < 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    match entry.kind {
+        compat_core::fd::CompatKind::File => Ok(()),
+        compat_core::fd::CompatKind::Directory => Err(CompatErrno::IsDirectory),
+        compat_core::fd::CompatKind::Device
+            if proc::linux_ashmem_is_regular(pid, entry.handle) == Some(true) =>
+        {
+            Ok(())
+        }
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+fn linux_readahead(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    linux_file_range_advice(pid, args)?;
+    Ok(0)
+}
+
+fn linux_fadvise64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const POSIX_FADV_NORMAL: u64 = 0;
+    const POSIX_FADV_RANDOM: u64 = 1;
+    const POSIX_FADV_SEQUENTIAL: u64 = 2;
+    const POSIX_FADV_WILLNEED: u64 = 3;
+    const POSIX_FADV_DONTNEED: u64 = 4;
+    const POSIX_FADV_NOREUSE: u64 = 5;
+    if args[3] > POSIX_FADV_NOREUSE {
+        return Err(CompatErrno::Invalid);
+    }
+    let _ = (
+        POSIX_FADV_NORMAL,
+        POSIX_FADV_RANDOM,
+        POSIX_FADV_SEQUENTIAL,
+        POSIX_FADV_WILLNEED,
+        POSIX_FADV_DONTNEED,
+    );
+    linux_file_range_advice(pid, args)?;
+    Ok(0)
+}
+
+fn linux_sync_file_range(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const VALID_FLAGS: u64 = 0x1 | 0x2 | 0x4;
+    if args[3] & !VALID_FLAGS != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    linux_file_range_advice(pid, args)?;
+    Ok(0)
 }
 
 fn linux_utime(pid: ObjId, path: u64) -> Result<u64, CompatErrno> {
@@ -5250,7 +6525,7 @@ fn raise_sigpipe(pid: ObjId) {
         }
         _ => {
             if let Some(tid) = linux_tid(pid) {
-                let _ = queue_thread_signal(pid, tid, SIGPIPE);
+                let _ = queue_thread_signal(pid, tid, SIGPIPE, 0, 128);
             }
         }
     }
@@ -5764,6 +7039,155 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 /// Implements `fcntl(2)` descriptor flag operations.
 ///
 /// 当前支持 `F_GETFD` 与 `F_SETFD`；未知命令和未知 fd 标志失败关闭。
+fn linux_flock(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const LOCK_SH: u64 = 0x1;
+    const LOCK_EX: u64 = 0x2;
+    const LOCK_NB: u64 = 0x4;
+    const LOCK_UN: u64 = 0x8;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let operation = args[1];
+    if operation & !(LOCK_SH | LOCK_EX | LOCK_NB | LOCK_UN) != 0
+        || [LOCK_SH, LOCK_EX, LOCK_UN]
+            .iter()
+            .filter(|flag| operation & **flag != 0)
+            .count()
+            != 1
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::File
+        && (entry.kind != compat_core::fd::CompatKind::Device
+            || proc::linux_ashmem_state(pid, entry.handle).is_none())
+    {
+        return Err(CompatErrno::BadFd);
+    }
+    let (backing, owner) = proc::linux_file_lock_key(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let exclusive = operation & LOCK_EX != 0;
+    let task = sched::current().0;
+    let mut registered = false;
+    loop {
+        let mut wake = [crate::task::TaskId(0); MAX_FLOCK_LOCKS];
+        let mut wake_count = 0usize;
+        let acquired = {
+            let mut state = COMPAT.lock();
+            let conflict = state.flock_locks.iter().flatten().any(|lock| {
+                lock.backing == backing
+                    && lock.owner != owner
+                    && (exclusive || lock.exclusive)
+            });
+            if operation & LOCK_UN != 0 {
+                state
+                    .flock_locks
+                    .iter_mut()
+                    .filter(|lock| {
+                        lock.is_some_and(|lock| {
+                            lock.backing == backing && lock.owner == owner
+                        })
+                    })
+                    .for_each(|lock| *lock = None);
+                for waiter in state.flock_waiters.iter_mut().flatten() {
+                    wake[wake_count] = waiter.task;
+                    wake_count += 1;
+                }
+                state.flock_waiters.fill(None);
+                drop(state);
+                for task in wake[..wake_count].iter().copied() {
+                    sched::wake(task);
+                }
+                return Ok(0);
+            }
+            if !conflict {
+                state
+                    .flock_locks
+                    .iter_mut()
+                    .filter(|lock| {
+                        lock.is_some_and(|lock| {
+                            lock.backing == backing && lock.owner == owner
+                        })
+                    })
+                    .for_each(|lock| *lock = None);
+                let Some(slot) = state.flock_locks.iter().position(Option::is_none) else {
+                    return Err(CompatErrno::NoSpace);
+                };
+                state.flock_locks[slot] = Some(FlockLock {
+                    backing,
+                    owner,
+                    exclusive,
+                });
+                if registered {
+                    if let Some(index) = state
+                        .flock_waiters
+                        .iter()
+                        .position(|waiter| waiter.is_some_and(|waiter| waiter.task == task))
+                    {
+                        state.flock_waiters[index] = None;
+                    }
+                }
+                true
+            } else {
+                if operation & LOCK_NB != 0 {
+                    return Err(CompatErrno::TryAgain);
+                }
+                if !registered {
+                    let Some(slot) = state.flock_waiters.iter().position(Option::is_none) else {
+                        return Err(CompatErrno::NoSpace);
+                    };
+                    state.flock_waiters[slot] = Some(FlockWaiter { task });
+                    registered = true;
+                }
+                false
+            }
+        };
+        if acquired {
+            return Ok(0);
+        }
+        if proc::current_exiting() || current_signal_pending(pid) {
+            if registered {
+                if let Some(index) = COMPAT
+                    .lock()
+                    .flock_waiters
+                    .iter()
+                    .position(|waiter| waiter.is_some_and(|waiter| waiter.task == task))
+                {
+                    COMPAT.lock().flock_waiters[index] = None;
+                }
+            }
+            return Err(CompatErrno::Interrupted);
+        }
+        sched::pause();
+    }
+}
+
+/// Releases flock state after the final descriptor of one open-file
+/// description closes and wakes every blocked flock waiter.
+pub(crate) fn release_flock_description(owner: u64) {
+    let mut tasks = [crate::task::TaskId(0); MAX_FLOCK_LOCKS];
+    let mut count = 0usize;
+    let mut state = COMPAT.lock();
+    state
+        .flock_locks
+        .iter_mut()
+        .filter(|lock| lock.is_some_and(|lock| lock.owner == owner))
+        .for_each(|lock| *lock = None);
+    if state
+        .flock_locks
+        .iter()
+        .any(|lock| lock.is_some_and(|lock| lock.owner == owner))
+    {
+        return;
+    }
+    for waiter in state.flock_waiters.iter_mut().flatten() {
+        tasks[count] = waiter.task;
+        count += 1;
+    }
+    state.flock_waiters.fill(None);
+    drop(state);
+    for task in tasks[..count].iter().copied() {
+        sched::wake(task);
+    }
+}
+
 fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const F_DUPFD: u64 = 0;
     const F_DUPFD_CLOEXEC: u64 = 1030;
@@ -5848,6 +7272,7 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const ASHMEM_PURGE_ALL_CACHES: u64 = 0x610a;
     const BINDER_SET_MAX_THREADS: u64 = 0x4004_6205;
     const BINDER_SET_CONTEXT_MGR: u64 = 0x4004_6207;
+    const BINDER_SET_CONTEXT_MGR_EXT: u64 = 0x4018_620d;
     const BINDER_THREAD_EXIT: u64 = 0x4004_6208;
     const BINDER_VERSION: u64 = 0xc004_6209;
     const BINDER_WRITE_READ: u64 = 0xc030_6201;
@@ -5909,6 +7334,24 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             }
             BINDER_SET_CONTEXT_MGR => {
                 if crate::binder::set_context_manager(pid) {
+                    Ok(0)
+                } else {
+                    Err(CompatErrno::Busy)
+                }
+            }
+            BINDER_SET_CONTEXT_MGR_EXT => {
+                const BINDER_TYPE_BINDER: u32 = 0x7362_2a85;
+                const FLAT_BINDER_OBJECT_BYTES: usize = 24;
+                let mut raw = [0u8; FLAT_BINDER_OBJECT_BYTES];
+                copy_from_user(&mut raw, args[2], FLAT_BINDER_OBJECT_BYTES)
+                    .map_err(|_| CompatErrno::Fault)?;
+                let object_type = u32::from_le_bytes(raw[0..4].try_into().unwrap());
+                let pointer = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+                let cookie = u64::from_le_bytes(raw[16..24].try_into().unwrap());
+                if object_type != BINDER_TYPE_BINDER {
+                    return Err(CompatErrno::Invalid);
+                }
+                if crate::binder::set_context_manager_ext(pid, pointer, cookie) {
                     Ok(0)
                 } else {
                     Err(CompatErrno::Busy)
@@ -6602,6 +8045,26 @@ fn linux_epoll_readiness(
             }
             ready
         }
+        compat_core::fd::CompatKind::Timer => {
+            let state = proc::linux_timerfd_state(pid, registration.handle)?;
+            let mut state = state.lock();
+            if linux_timerfd_settle(&mut state).is_ok()
+                && requested & EPOLLIN != 0
+                && state.expirations != 0
+            {
+                EPOLLIN
+            } else {
+                0
+            }
+        }
+        compat_core::fd::CompatKind::Signal => {
+            let mask = proc::linux_signalfd_state(pid, registration.handle)?;
+            if requested & EPOLLIN != 0 && signalfd_pending_mask(pid, *mask.lock()) != 0 {
+                EPOLLIN
+            } else {
+                0
+            }
+        }
         compat_core::fd::CompatKind::Pipe => {
             let pipe = proc::linux_pipe_endpoint(pid, registration.handle)?;
             let mut ready = 0;
@@ -6869,6 +8332,44 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 None => POLLNVAL,
                 Some(entry) if entry.kind == compat_core::fd::CompatKind::File => {
                     events & (POLLIN | POLLOUT)
+                }
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::Event => {
+                    let Some((counter, _)) = proc::linux_eventfd_state(pid, entry.handle) else {
+                        continue;
+                    };
+                    let value = *counter.lock();
+                    let mut ready = 0;
+                    if events & POLLIN != 0 && value != 0 {
+                        ready |= POLLIN;
+                    }
+                    if events & POLLOUT != 0 && value < u64::MAX - 1 {
+                        ready |= POLLOUT;
+                    }
+                    ready
+                }
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::Timer => {
+                    let Some(state) = proc::linux_timerfd_state(pid, entry.handle) else {
+                        continue;
+                    };
+                    let mut state = state.lock();
+                    if linux_timerfd_settle(&mut state).is_ok()
+                        && events & POLLIN != 0
+                        && state.expirations != 0
+                    {
+                        POLLIN
+                    } else {
+                        0
+                    }
+                }
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::Signal => {
+                    let Some(mask) = proc::linux_signalfd_state(pid, entry.handle) else {
+                        continue;
+                    };
+                    if events & POLLIN != 0 && signalfd_pending_mask(pid, *mask.lock()) != 0 {
+                        POLLIN
+                    } else {
+                        0
+                    }
                 }
                 Some(entry) if entry.handle == proc::LINUX_CONSOLE_HANDLE => {
                     let (pending, ended, failed) = crate::terminal::input_status();
