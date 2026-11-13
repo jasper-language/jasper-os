@@ -703,6 +703,26 @@ int main(void) {
         errno != ESRCH) {
         return 559;
     }
+    int kcmp_epoll = epoll_create1(EPOLL_CLOEXEC);
+    struct epoll_event kcmp_interest = {
+        .events = EPOLLIN,
+        .data.u64 = 0x4b434d5045504f4cULL,
+    };
+    struct kcmp_epoll_slot kcmp_slot = {
+        .efd = (uint32_t)kcmp_epoll,
+        .tfd = (uint32_t)fd,
+        .toff = 0,
+    };
+    if (kcmp_epoll < 0 ||
+        epoll_ctl(kcmp_epoll, EPOLL_CTL_ADD, fd,
+                  &kcmp_interest) != 0 ||
+        syscall(SYS_kcmp, getpid(), getpid(), KCMP_EPOLL_TFD,
+                fd, &kcmp_slot) != 0 ||
+        syscall(SYS_kcmp, getpid(), getpid(), KCMP_EPOLL_TFD,
+                kcmp_other, &kcmp_slot) == 0 ||
+        close(kcmp_epoll) != 0) {
+        return 617;
+    }
     int kcmp_pipe[2];
     if (pipe2(kcmp_pipe, O_CLOEXEC) != 0) {
         return 560;

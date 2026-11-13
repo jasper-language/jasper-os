@@ -1675,7 +1675,25 @@ fn linux_kcmp(process: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         KCMP_VM | KCMP_FS | KCMP_FILES | KCMP_SIGHAND | KCMP_IO => Ok(
             kcmp_identity_order(first.raw(), second.raw()),
         ),
-        KCMP_SYSVSEM | KCMP_EPOLL_TFD => Err(CompatErrno::NotSupported),
+        KCMP_EPOLL_TFD => {
+            let first_fd = u32::try_from(args[3]).map_err(|_| CompatErrno::BadFd)?;
+            let first_id =
+                proc::linux_fd_description_identity(first, first_fd).ok_or(CompatErrno::BadFd)?;
+            let mut slot = [0u8; 12];
+            copy_from_user(&mut slot, args[4], 12).map_err(|_| CompatErrno::Fault)?;
+            let epoll_fd = u32::from_le_bytes(slot[0..4].try_into().unwrap());
+            let target_fd = u32::from_le_bytes(slot[4..8].try_into().unwrap());
+            let target_offset = u32::from_le_bytes(slot[8..12].try_into().unwrap());
+            let second_id = proc::linux_epoll_registration_identity(
+                second,
+                epoll_fd,
+                target_fd,
+                target_offset,
+            )
+            .ok_or(CompatErrno::BadFd)?;
+            Ok(kcmp_identity_order(first_id, second_id))
+        }
+        KCMP_SYSVSEM => Err(CompatErrno::NotSupported),
         _ => Err(CompatErrno::Invalid),
     }
 }
@@ -13212,13 +13230,18 @@ fn linux_epoll_ctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let registrations = proc::linux_epoll_registrations(pid, epoll_entry.handle)
         .ok_or(CompatErrno::BadFd)?;
     let target = proc::linux_fd(pid, target_fd).ok_or(CompatErrno::BadFd)?;
+    let target_description =
+        proc::linux_fd_description_identity(pid, target_fd).ok_or(CompatErrno::BadFd)?;
     if target.handle == epoll_entry.handle || proc::linux_is_epoll(pid, target.handle) {
         return Err(CompatErrno::Invalid);
     }
     let mut registrations = registrations.lock();
     let existing = registrations
         .iter()
-        .position(|registration| registration.handle == target.handle);
+        .position(|registration| {
+            registration.handle == target.handle
+                && registration.description_id == target_description
+        });
     if args[1] == EPOLL_CTL_DEL {
         let index = existing.ok_or(CompatErrno::NoEntry)?;
         registrations.remove(index);
@@ -13241,6 +13264,7 @@ fn linux_epoll_ctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let data = u64::from_le_bytes(raw[4..12].try_into().unwrap());
     let registration = proc::LinuxEpollRegistration {
         handle: target.handle,
+        description_id: target_description,
         kind: target.kind,
         rights: target.rights,
         events,

@@ -379,6 +379,7 @@ struct LinuxEpollHandle {
 #[derive(Clone, Copy)]
 pub(crate) struct LinuxEpollRegistration {
     pub(crate) handle: u64,
+    pub(crate) description_id: u64,
     pub(crate) kind: compat_core::fd::CompatKind,
     pub(crate) rights: kernel_core::object::Rights,
     pub(crate) events: u32,
@@ -2660,6 +2661,42 @@ pub(crate) fn linux_epoll_registrations(
             .find(|epoll| epoll.handle == handle)
             .map(|epoll| Arc::clone(&epoll.registrations)),
         _ => None,
+    })
+}
+
+/// Returns the open-file identity registered in one epoll target slot.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_epoll_registration_identity(
+    pid: ObjId,
+    epoll_fd: u32,
+    target_fd: u32,
+    target_offset: u32,
+) -> Option<u64> {
+    if target_offset != 0 {
+        return None;
+    }
+    crate::kobj::with(|table| {
+        let process = match table.get(pid) {
+            Ok(KObject::Process(process)) => process,
+            _ => return None,
+        };
+        let linux = process.linux.as_ref()?;
+        let epoll = linux.fds.get_fd(epoll_fd)?;
+        let registrations = linux
+            .epolls
+            .iter()
+            .find(|epoll_handle| epoll_handle.handle == epoll.handle)?
+            .registrations
+            .lock();
+        let target = linux.fds.get_fd(target_fd)?;
+        let description_id = linux.fds.description_identity(target_fd)?;
+        registrations
+            .iter()
+            .any(|registration| {
+                registration.handle == target.handle
+                    && registration.description_id == description_id
+            })
+            .then_some(description_id)
     })
 }
 
