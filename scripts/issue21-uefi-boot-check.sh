@@ -20,11 +20,32 @@ if ! flock -w "${ISSUE21_UEFI_BUILD_LOCK_WAIT:-3600}" 8; then
   exit 75
 fi
 
-# Pre-lock or external jobs may still be running. Do not stack with them.
+# Pre-lock or external jobs may still be running. Detect both their shell
+# transaction and their children, with a short grace period for either to spawn.
+foreign_uefi_transaction() {
+  local pid command
+  while read -r pid command; do
+    [ "$pid" = "$$" ] && continue
+    case "$command" in
+      *issue21-uefi-boot-check.sh*) return 0 ;;
+    esac
+  done < <(pgrep -af 'issue21-uefi-boot-check[.]sh' || true)
+  return 1
+}
+
+guest_busy() {
+  foreign_uefi_transaction ||
+    pgrep -x qemu-system-x86_64 >/dev/null 2>&1 ||
+    pgrep -x cargo >/dev/null 2>&1 ||
+    pgrep -x rustc >/dev/null 2>&1
+}
+
 queue_deadline=$(($(date +%s) + ${ISSUE21_UEFI_BUILD_LOCK_WAIT:-3600}))
-while pgrep -x qemu-system-x86_64 >/dev/null 2>&1 ||
-  pgrep -x cargo >/dev/null 2>&1 ||
-  pgrep -x rustc >/dev/null 2>&1; do
+while :; do
+  if ! guest_busy; then
+    sleep 3
+    ! guest_busy && break
+  fi
   if [ "$(date +%s)" -ge "$queue_deadline" ]; then
     echo "issue21-uefi-boot: existing guest build/QEMU did not quiesce" >&2
     exit 75
