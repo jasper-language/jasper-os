@@ -83,6 +83,11 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_INSTALL_REGISTRATION_CREATE,
         abi::SYSTEM_INSTALL_GRANT_CREATE,
         abi::SYSTEM_INSTALL_QUERY,
+        abi::SYSTEM_INSTALL_HANDLE_CREATE,
+        abi::SYSTEM_INSTALL_HANDLE_QUERY,
+        abi::SYSTEM_HANDLE_DUPLICATE,
+        abi::SYSTEM_HANDLE_RESTRICT,
+        abi::SYSTEM_HANDLE_CLOSE,
     ]);
     #[cfg(feature = "sandbox-launch-verify")]
     #[cfg(not(feature = "native-install-abi-verify"))]
