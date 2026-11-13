@@ -138,6 +138,7 @@ struct LinuxProcessState {
     sgid: u32,
     fsgid: u32,
     supplementary_groups: Vec<u32>,
+    umask: u32,
     mappings: Vec<LinuxMapping>,
     pipes: Vec<LinuxPipeHandle>,
     next_pipe_handle: u64,
@@ -3968,6 +3969,25 @@ pub(crate) fn set_linux_supplementary_groups(pid: ObjId, groups: &[u32]) -> bool
     .is_ok()
 }
 
+/// Returns the process-local Linux umask.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_umask(pid: ObjId) -> Option<u32> {
+    with_proc(pid, |process| {
+        Ok(process.linux.as_ref().ok_or(ProcError::Exited)?.umask)
+    })
+    .ok()
+}
+
+/// Replaces the process-local Linux umask.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_umask(pid: ObjId, value: u32) -> bool {
+    with_proc(pid, |process| {
+        process.linux.as_mut().ok_or(ProcError::Exited)?.umask = value & 0o777;
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Sums scheduler CPU ticks over every live thread in one Linux process.
 /// 汇总一个 Linux 进程全部存活线程的调度器 CPU ticks。
 #[cfg(feature = "linux-abi")]
@@ -4229,6 +4249,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         sgid: 0,
         fsgid: 0,
         supplementary_groups: Vec::new(),
+        umask: 0o022,
         mappings: Vec::new(),
         pipes: Vec::new(),
         next_pipe_handle: LINUX_PIPE_HANDLE_BASE,

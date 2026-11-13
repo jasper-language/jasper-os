@@ -1947,6 +1947,21 @@ fn execute(
         }
         LinuxSyscall::FchownAt => compat_result(linux_fchownat(pid, call.args)),
         LinuxSyscall::Lchown => compat_result(linux_lchown(pid, call.args)),
+        LinuxSyscall::Mkdir => compat_result(linux_mkdirat(pid, legacy_path_at_args(call.args))),
+        LinuxSyscall::MkdirAt => compat_result(linux_mkdirat(pid, call.args)),
+        LinuxSyscall::Mknod => compat_result(linux_mknodat(pid, legacy_path_at_args(call.args))),
+        LinuxSyscall::MknodAt => compat_result(linux_mknodat(pid, call.args)),
+        LinuxSyscall::Unlink => compat_result(linux_unlinkat(pid, [(-100i64) as u64, call.args[0], 0, 0, 0, 0])),
+        LinuxSyscall::UnlinkAt => compat_result(linux_unlinkat(pid, call.args)),
+        LinuxSyscall::Rmdir => compat_result(linux_unlinkat(pid, [(-100i64) as u64, call.args[0], 0x200, 0, 0, 0])),
+        LinuxSyscall::Rename => compat_result(linux_renameat(pid, legacy_rename_args(call.args))),
+        LinuxSyscall::RenameAt => compat_result(linux_renameat(pid, call.args)),
+        LinuxSyscall::RenameAt2 => compat_result(linux_renameat2(pid, call.args)),
+        LinuxSyscall::Link => compat_result(linux_linkat(pid, legacy_link_args(call.args))),
+        LinuxSyscall::LinkAt => compat_result(linux_linkat(pid, call.args)),
+        LinuxSyscall::Symlink => compat_result(linux_symlinkat(pid, [call.args[0], (-100i64) as u64, call.args[1], 0, 0, 0])),
+        LinuxSyscall::SymlinkAt => compat_result(linux_symlinkat(pid, call.args)),
+        LinuxSyscall::Umask => compat_result(linux_umask(pid, call.args[0])),
         LinuxSyscall::Setxattr => compat_result(linux_setxattr(pid, call.args, false, false)),
         LinuxSyscall::LSetxattr => compat_result(linux_setxattr(pid, call.args, false, true)),
         LinuxSyscall::FSetxattr => compat_result(linux_setxattr(pid, call.args, true, false)),
@@ -2539,6 +2554,32 @@ fn legacy_stat_args(args: [u64; 6], nofollow: bool) -> [u64; 6] {
 
 fn legacy_futimesat_args(args: [u64; 6]) -> [u64; 6] {
     [args[0], args[1], args[2], 0, 0, 0]
+}
+
+fn legacy_path_at_args(args: [u64; 6]) -> [u64; 6] {
+    [(-100i64) as u64, args[0], args[1], 0, 0, 0]
+}
+
+fn legacy_rename_args(args: [u64; 6]) -> [u64; 6] {
+    [
+        (-100i64) as u64,
+        args[0],
+        (-100i64) as u64,
+        args[1],
+        0,
+        0,
+    ]
+}
+
+fn legacy_link_args(args: [u64; 6]) -> [u64; 6] {
+    [
+        (-100i64) as u64,
+        args[0],
+        (-100i64) as u64,
+        args[1],
+        0,
+        0,
+    ]
 }
 
 fn linux_uname(args: [u64; 6]) -> Result<u64, CompatErrno> {
@@ -7965,6 +8006,167 @@ fn linux_lchown(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         false,
     )?;
     Err(CompatErrno::ReadOnly)
+}
+
+/// Resolves one pathname relative to an explicit directory fd or AT_FDCWD.
+fn resolve_linux_at_path(
+    pid: ObjId,
+    dirfd: u64,
+    address: u64,
+) -> Result<alloc::vec::Vec<u8>, CompatErrno> {
+    let path = linux_c_string(address, 4096)?;
+    if path.starts_with(b"/") {
+        return Ok(path);
+    }
+    if path == b".."
+        || path.starts_with(b"../")
+        || path.windows(4).any(|window| window == b"/../")
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let base = if is_at_fdcwd(dirfd) {
+        proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path()
+    } else {
+        let fd = u32::try_from(dirfd).map_err(|_| CompatErrno::BadFd)?;
+        let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
+        crate::linux_vfs::DirectoryId::from_handle(handle)
+            .ok_or(CompatErrno::BadFd)?
+            .path()
+    };
+    if path == b"." {
+        return Ok(base.to_vec());
+    }
+    let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
+    resolved.extend_from_slice(base);
+    if !base.ends_with(b"/") {
+        resolved.push(b'/');
+    }
+    resolved.extend_from_slice(&path);
+    Ok(resolved)
+}
+
+/// Returns the parent directory path for one resolved absolute path.
+fn linux_parent_path(path: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+    if path == b"/" {
+        return None;
+    }
+    let path = path.strip_suffix(b"/").unwrap_or(path);
+    let slash = path.iter().rposition(|byte| *byte == b'/')?;
+    if slash == 0 {
+        Some(b"/".to_vec())
+    } else {
+        Some(path[..slash].to_vec())
+    }
+}
+
+/// Validates a new path's parent and reports whether the target already exists.
+fn validate_linux_creation_path(
+    pid: ObjId,
+    dirfd: u64,
+    address: u64,
+) -> Result<bool, CompatErrno> {
+    let path = resolve_linux_at_path(pid, dirfd, address)?;
+    let exists = crate::linux_vfs::lookup_node(&path).is_some();
+    let parent = linux_parent_path(&path).ok_or(CompatErrno::Exists)?;
+    let node = crate::linux_vfs::lookup_node(&parent).ok_or(CompatErrno::NoEntry)?;
+    if !node.is_directory() {
+        return Err(CompatErrno::NotDirectory);
+    }
+    Ok(exists)
+}
+
+/// Validates an existing pathname in the compatibility namespace.
+fn validate_linux_existing_path(
+    pid: ObjId,
+    dirfd: u64,
+    address: u64,
+) -> Result<crate::linux_vfs::Node, CompatErrno> {
+    let path = resolve_linux_at_path(pid, dirfd, address)?;
+    crate::linux_vfs::lookup_node(&path).ok_or(CompatErrno::NoEntry)
+}
+
+/// Implements `mkdirat(2)` against the immutable compatibility root.
+fn linux_mkdirat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[2] & !0o7777 != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if validate_linux_creation_path(pid, args[0], args[1])? {
+        return Err(CompatErrno::Exists);
+    }
+    Err(CompatErrno::ReadOnly)
+}
+
+/// Implements `mknodat(2)` against the immutable compatibility root.
+fn linux_mknodat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if validate_linux_creation_path(pid, args[0], args[1])? {
+        return Err(CompatErrno::Exists);
+    }
+    Err(CompatErrno::ReadOnly)
+}
+
+/// Implements `unlinkat(2)` and validates directory/removal type.
+fn linux_unlinkat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const AT_REMOVEDIR: u64 = 0x200;
+    if args[2] & !AT_REMOVEDIR != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let node = validate_linux_existing_path(pid, args[0], args[1])?;
+    if args[2] & AT_REMOVEDIR != 0 && !node.is_directory() {
+        return Err(CompatErrno::NotDirectory);
+    }
+    if args[2] & AT_REMOVEDIR == 0 && node.is_directory() {
+        return Err(CompatErrno::IsDirectory);
+    }
+    Err(CompatErrno::ReadOnly)
+}
+
+/// Implements `renameat(2)` with source and destination parent validation.
+fn linux_renameat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    validate_linux_existing_path(pid, args[0], args[1])?;
+    validate_linux_creation_path(pid, args[2], args[3])?;
+    Err(CompatErrno::ReadOnly)
+}
+
+/// Implements `renameat2(2)` and rejects flags that need mutable-filesystem support.
+fn linux_renameat2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[4] != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    linux_renameat(pid, [args[0], args[1], args[2], args[3], 0, 0])
+}
+
+/// Implements `linkat(2)` against the immutable compatibility root.
+fn linux_linkat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const AT_SYMLINK_FOLLOW: u64 = 0x400;
+    if args[4] & !AT_SYMLINK_FOLLOW != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let node = validate_linux_existing_path(pid, args[0], args[1])?;
+    if node.is_directory() {
+        return Err(CompatErrno::Perm);
+    }
+    if validate_linux_creation_path(pid, args[2], args[3])? {
+        return Err(CompatErrno::Exists);
+    }
+    Err(CompatErrno::ReadOnly)
+}
+
+/// Implements `symlinkat(2)` after validating the destination parent and target string.
+fn linux_symlinkat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let _target = linux_c_string(args[0], 4096)?;
+    if validate_linux_creation_path(pid, args[1], args[2])? {
+        return Err(CompatErrno::Exists);
+    }
+    Err(CompatErrno::ReadOnly)
+}
+
+/// Implements process-local `umask(2)`.
+fn linux_umask(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
+    let old = proc::linux_umask(pid).ok_or(CompatErrno::NoProcess)?;
+    if !proc::set_linux_umask(pid, requested as u32) {
+        return Err(CompatErrno::NoProcess);
+    }
+    Ok(u64::from(old))
 }
 
 /// Validates one xattr pathname and optional symlink-follow policy.

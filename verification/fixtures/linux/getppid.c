@@ -3825,6 +3825,72 @@ int main(void) {
         getuid() != 0 || getgid() != 0) {
         return 499;
     }
+    mode_t old_umask = umask(077);
+    if (old_umask != 022 || umask(old_umask) != 077) {
+        return 501;
+    }
+    const char *mutable_parent = "/usr/lib/x86_64-linux-gnu";
+    const char *new_vfs_path = "/usr/lib/x86_64-linux-gnu/jasper-new-node";
+    errno = 0;
+    if (syscall(SYS_mkdir, mutable_parent, 0755) != -1 ||
+        errno != EEXIST ||
+        syscall(SYS_mkdir, new_vfs_path, 0755) != -1 ||
+        errno != EROFS) {
+        return 502;
+    }
+    errno = 0;
+    if (syscall(SYS_mkdirat, AT_FDCWD, new_vfs_path, 0755) != -1 ||
+        errno != EROFS) {
+        return 503;
+    }
+    errno = 0;
+    if (syscall(SYS_mknod, mutable_parent, S_IFREG | 0600, 0) != -1 ||
+        errno != EEXIST ||
+        syscall(SYS_mknod, new_vfs_path, S_IFREG | 0600, 0) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_mknodat, AT_FDCWD, new_vfs_path,
+                S_IFREG | 0600, 0) != -1 ||
+        errno != EROFS) {
+        return 504;
+    }
+    errno = 0;
+    if (syscall(SYS_unlink, xattr_path) != -1 || errno != EROFS ||
+        syscall(SYS_unlink, "/usr") != -1 || errno != EISDIR ||
+        syscall(SYS_unlinkat, AT_FDCWD, xattr_path, 0) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_unlinkat, AT_FDCWD, xattr_path, AT_REMOVEDIR) != -1 ||
+        errno != ENOTDIR) {
+        return 505;
+    }
+    errno = 0;
+    if (syscall(SYS_rmdir, xattr_path) != -1 || errno != ENOTDIR ||
+        syscall(SYS_rmdir, "/usr") != -1 || errno != EROFS) {
+        return 506;
+    }
+    errno = 0;
+    if (syscall(SYS_rename, xattr_path, new_vfs_path) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_renameat, AT_FDCWD, xattr_path,
+                AT_FDCWD, new_vfs_path) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_renameat2, AT_FDCWD, xattr_path,
+                AT_FDCWD, new_vfs_path, 1) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 507;
+    }
+    errno = 0;
+    if (syscall(SYS_link, xattr_path, new_vfs_path) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_linkat, AT_FDCWD, xattr_path,
+                AT_FDCWD, new_vfs_path, 0) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_symlink, "target", new_vfs_path) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_symlinkat, "target", AT_FDCWD,
+                new_vfs_path) != -1 ||
+        errno != EROFS) {
+        return 508;
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);
