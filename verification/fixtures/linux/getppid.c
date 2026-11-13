@@ -19,6 +19,7 @@
 #include <linux/lsm.h>
 #include <linux/membarrier.h>
 #include <linux/mount.h>
+#include <linux/nsfs.h>
 #include <linux/mman.h>
 #include <linux/sched/types.h>
 #include <linux/seccomp.h>
@@ -4557,7 +4558,7 @@ int main(void) {
     const long unsupported_features[] = {
         SYS_fanotify_init, SYS_fanotify_mark,
         SYS_landlock_create_ruleset, SYS_landlock_add_rule,
-        SYS_landlock_restrict_self, SYS_listns,
+        SYS_landlock_restrict_self,
         SYS_lsm_set_self_attr,
         SYS_map_shadow_stack,
         SYS_uprobe, SYS_uretprobe, SYS_userfaultfd,
@@ -5079,6 +5080,29 @@ int main(void) {
     mount_request.param = mount_ids[0];
     if (syscall(SYS_listmount, &mount_request, mount_ids, 2, 0) != 0) {
         return 604;
+    }
+    struct ns_id_req namespace_request = {
+        .size = sizeof(namespace_request),
+        .ns_id = 0,
+        .ns_type = 0,
+        .user_ns_id = 0,
+    };
+    uint64_t namespace_ids[8] = {0};
+    if (syscall(SYS_listns, &namespace_request, namespace_ids,
+                8, 0) != 8 ||
+        namespace_ids[0] != 1 || namespace_ids[7] != 8) {
+        return 646;
+    }
+    namespace_request.ns_id = namespace_ids[7];
+    if (syscall(SYS_listns, &namespace_request, namespace_ids,
+                8, 0) != 0) {
+        return 647;
+    }
+    namespace_request.ns_id = 0;
+    namespace_request.ns_type = USER_NS;
+    if (syscall(SYS_listns, &namespace_request, namespace_ids,
+                8, 0) != 1 || namespace_ids[0] != 3) {
+        return 648;
     }
     size_t statmount_size = sizeof(struct statmount) + 256;
     struct statmount *mount_status = calloc(1, statmount_size);

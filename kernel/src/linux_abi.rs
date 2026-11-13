@@ -2702,6 +2702,7 @@ fn execute(
         LinuxSyscall::LsmGetSelfAttr => compat_result(linux_lsm_get_self_attr(pid, call.args)),
         LinuxSyscall::OpenTree => compat_result(linux_open_tree(pid, call.args)),
         LinuxSyscall::OpenTreeAttr => compat_result(linux_open_tree_attr(pid, call.args)),
+        LinuxSyscall::Listns => compat_result(linux_listns(call.args)),
         LinuxSyscall::MoveMount => compat_result(linux_move_mount(pid, call.args)),
         LinuxSyscall::MountSetattr => compat_result(linux_mount_setattr(pid, call.args)),
         LinuxSyscall::FsOpen => compat_result(linux_fsopen(pid, call.args)),
@@ -2724,7 +2725,6 @@ fn execute(
         | LinuxSyscall::LandlockCreateRuleset
         | LinuxSyscall::LandlockAddRule
         | LinuxSyscall::LandlockRestrictSelf
-        | LinuxSyscall::Listns
         | LinuxSyscall::LsmSetSelfAttr
         | LinuxSyscall::MapShadowStack
         | LinuxSyscall::Uprobe
@@ -9084,6 +9084,55 @@ fn linux_listmount(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     copy_to_user(args[1], &ROOT_MOUNT_ID.to_le_bytes(), 8)
         .map_err(|_| CompatErrno::Fault)?;
     Ok(1)
+}
+
+fn linux_listns(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[3] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut size = [0u8; 4];
+    copy_from_user(&mut size, args[0], 4).map_err(|_| CompatErrno::Fault)?;
+    let size = u32::from_le_bytes(size) as usize;
+    if size < 32 {
+        return Err(CompatErrno::Invalid);
+    }
+    if size > 4096 {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    let mut request = [0u8; 32];
+    copy_from_user(&mut request, args[0], size.min(32))
+        .map_err(|_| CompatErrno::Fault)?;
+    let cursor = u64::from_le_bytes(request[8..16].try_into().unwrap());
+    let type_mask = u32::from_le_bytes(request[16..20].try_into().unwrap());
+    let user_ns = u64::from_le_bytes(request[24..32].try_into().unwrap());
+    if user_ns != 0 && user_ns != 3 && user_ns != u64::MAX {
+        return Err(CompatErrno::NoEntry);
+    }
+    const NAMESPACES: [(u64, u32); 8] = [
+        (1, 1 << 27),
+        (2, 1 << 26),
+        (3, 1 << 28),
+        (4, 1 << 29),
+        (5, 1 << 25),
+        (6, 1 << 7),
+        (7, 1 << 30),
+        (8, 1 << 17),
+    ];
+    let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let mut output = [0u8; 8 * 8];
+    let mut count = 0usize;
+    for (id, namespace_type) in NAMESPACES {
+        if id <= cursor || type_mask != 0 && type_mask & namespace_type == 0 || count >= capacity {
+            continue;
+        }
+        output[count * 8..count * 8 + 8].copy_from_slice(&id.to_le_bytes());
+        count += 1;
+    }
+    if count != 0 {
+        copy_to_user(args[1], &output[..count * 8], count * 8)
+            .map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(count as u64)
 }
 
 fn append_statmount_string(
