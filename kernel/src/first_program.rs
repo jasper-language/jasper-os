@@ -95,6 +95,8 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_SANDBOX_DESTROY,
         abi::SYSTEM_SANDBOX_IMAGE_LOAD,
         abi::SYSTEM_SANDBOX_IMAGE_DESTROY,
+        abi::SYSTEM_SANDBOX_VOLUME_CREATE,
+        abi::SYSTEM_SANDBOX_VOLUME_DESTROY,
         abi::SYSTEM_SANDBOX_LAUNCH_CREATE,
         abi::SYSTEM_SANDBOX_LAUNCH_QUERY,
         abi::SYSTEM_SANDBOX_LAUNCH_DESTROY,

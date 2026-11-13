@@ -5,13 +5,16 @@
 use jasper_rt::{entry, ids, println, sys};
 use kernel_core::sandbox::SandboxKey;
 use kernel_core::sandbox_image::{
-    ContentDigest, ImageLayerSpec, ImageVersion, SignedImage, MAX_IMAGE_LAYERS,
+    ContentDigest, ImageKey, ImageLayerSpec, ImageVersion, SignedImage, VolumeKey,
+    MAX_IMAGE_LAYERS,
 };
 use kernel_core::sandbox_launch::{CapabilitySet, DataScopeGrant, DeviceGrant, LaunchResources};
 use kernel_core::sandbox_launch_abi::{
     LaunchCreateArgs, CREATE_BYTES, INFO_BYTES, MAX_DATA_SCOPES, MAX_DEVICE_GRANTS,
 };
-use kernel_core::sandbox_storage_abi::{ImageAddArgs, IMAGE_ADD_BYTES};
+use kernel_core::sandbox_storage_abi::{
+    ImageAddArgs, VolumeCreateArgs, IMAGE_ADD_BYTES, VOLUME_CREATE_BYTES,
+};
 use kernel_core::security_domain::DomainKey;
 use kernel_core::workload::ResourceLimits;
 use kernel_core::workload_abi::{CreateArgs, CREATE_BYTES as WORKLOAD_CREATE_BYTES};
@@ -105,26 +108,53 @@ fn load_image(sandbox: SandboxKey) -> Result<u64, i32> {
     Ok(key as u64)
 }
 
-fn create_plan(sandbox: SandboxKey, image_raw: u64) -> Result<u64, i32> {
-    let image = kernel_core::sandbox_image::ImageKey::from_raw(image_raw).ok_or(13)?;
+fn create_volume(sandbox: SandboxKey, image: ImageKey) -> Result<VolumeKey, i32> {
+    let raw = VolumeCreateArgs {
+        sandbox,
+        image,
+        capacity_bytes: 4096,
+    }
+    .encode();
+    debug_assert_eq!(raw.len(), VOLUME_CREATE_BYTES);
+    let key = call(
+        ids::SYSTEM_SANDBOX_VOLUME_CREATE,
+        raw.as_ptr() as u64,
+        raw.len() as u64,
+        0,
+    );
+    if key <= 0 {
+        return Err(23);
+    }
+    VolumeKey::from_raw(key as u64).ok_or(24)
+}
+
+fn create_plan(sandbox: SandboxKey, image: ImageKey, volume: VolumeKey) -> Result<u64, i32> {
+    let mut data = [EMPTY_DATA; MAX_DATA_SCOPES];
+    data[0] = DataScopeGrant {
+        object: volume.to_raw(),
+        generation: (volume.to_raw() >> 16) as u32,
+        owner: DomainKey::NONE,
+        grantee: DomainKey::NONE,
+        writable: true,
+    };
     let raw = LaunchCreateArgs {
         sandbox,
         root: None,
         image,
-        volume: None,
+        volume: Some(volume),
         root_capabilities: CapabilitySet::EXECUTE
             .union(CapabilitySet::DATA_READ)
             .union(CapabilitySet::DATA_WRITE),
-        capabilities: CapabilitySet::EXECUTE,
+        capabilities: CapabilitySet::EXECUTE.union(CapabilitySet::DATA_WRITE),
         resources: LaunchResources {
             limits: LIMITS,
             io_rate: None,
         },
         network_policy: None,
         device_count: 0,
-        data_count: 0,
+        data_count: 1,
         devices: [EMPTY_DEVICE; MAX_DEVICE_GRANTS],
-        data: [EMPTY_DATA; MAX_DATA_SCOPES],
+        data,
     }
     .encode()
     .ok_or(14)?;
@@ -138,7 +168,7 @@ fn create_plan(sandbox: SandboxKey, image_raw: u64) -> Result<u64, i32> {
     (key > 0).then_some(key as u64).ok_or(15)
 }
 
-fn query_plan(sandbox: SandboxKey, plan: u64, image: u64) -> Result<(), i32> {
+fn query_plan(sandbox: SandboxKey, plan: u64, image: ImageKey, volume: VolumeKey) -> Result<(), i32> {
     let mut info = [0u8; INFO_BYTES];
     let result = call(
         ids::SYSTEM_SANDBOX_LAUNCH_QUERY,
@@ -151,7 +181,9 @@ fn query_plan(sandbox: SandboxKey, plan: u64, image: u64) -> Result<(), i32> {
     }
     if u64::from_le_bytes(info[8..16].try_into().unwrap()) != plan
         || u64::from_le_bytes(info[16..24].try_into().unwrap()) != sandbox.to_raw()
-        || u64::from_le_bytes(info[32..40].try_into().unwrap()) != image
+        || u64::from_le_bytes(info[32..40].try_into().unwrap()) != image.to_raw()
+        || u64::from_le_bytes(info[40..48].try_into().unwrap()) != volume.to_raw()
+        || u16::from_le_bytes(info[102..104].try_into().unwrap()) != 1
     {
         return Err(17);
     }
@@ -161,9 +193,10 @@ fn query_plan(sandbox: SandboxKey, plan: u64, image: u64) -> Result<(), i32> {
 fn run() -> Result<(), i32> {
     let sandbox_raw = create_sandbox()?;
     let sandbox = SandboxKey::from_raw(sandbox_raw).ok_or(18)?;
-    let image = load_image(sandbox)?;
-    let plan = create_plan(sandbox, image)?;
-    query_plan(sandbox, plan, image)?;
+    let image = ImageKey::from_raw(load_image(sandbox)?).ok_or(13)?;
+    let volume = create_volume(sandbox, image)?;
+    let plan = create_plan(sandbox, image, volume)?;
+    query_plan(sandbox, plan, image, volume)?;
     if call(ids::SYSTEM_SANDBOX_LAUNCH_DESTROY, plan, 0, 0) != 0 {
         return Err(19);
     }
@@ -172,9 +205,18 @@ fn run() -> Result<(), i32> {
         return Err(20);
     }
     if call(
+        ids::SYSTEM_SANDBOX_VOLUME_DESTROY,
+        sandbox.to_raw(),
+        volume.to_raw(),
+        0,
+    ) != 0
+    {
+        return Err(25);
+    }
+    if call(
         ids::SYSTEM_SANDBOX_IMAGE_DESTROY,
         sandbox.to_raw(),
-        image,
+        image.to_raw(),
         0,
     ) != 0
     {
