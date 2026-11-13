@@ -205,6 +205,7 @@ pub mod sandbox_launch_abi;
 pub mod sandbox_store;
 
 pub mod native_install;
+pub mod native_install_abi;
 #[cfg(any(test, feature = "persistent-install"))]
 pub mod persistent_install;
 #[cfg(any(test, feature = "persistent-install"))]

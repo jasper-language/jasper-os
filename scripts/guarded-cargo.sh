@@ -5,7 +5,7 @@
 # 因此必须排队，并固定在预留 CPU、低优先级和有限 job 数下运行。
 set -eu
 
-cargo_bin=${CARGO_BIN:-$(command -v cargo || true)}
+cargo_bin=${CARGO_BIN:-$(command -v cargo 2>/dev/null || true)}
 if [ -z "$cargo_bin" ]; then
     cargo_bin="${HOME}/.cargo/bin/cargo"
 fi

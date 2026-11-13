@@ -169,6 +169,10 @@
 99	op	system.sandbox.launch.create	1	write	沙箱启动计划·创建	Create sandbox launch plan
 100	op	system.sandbox.launch.query	1	read	沙箱启动计划·查询	Query sandbox launch plan
 101	op	system.sandbox.launch.destroy	1	write	沙箱启动计划·销毁	Destroy sandbox launch plan
+102	op	system.install.package.write	1	write	安装·写入包字节	Store package bytes
+103	op	system.install.registration.create	1	write	安装·登记包	Register package
+104	op	system.install.grant.create	1	write	安装·授予运行权限	Grant installation rights
+105	op	system.install.query	1	read	安装·查询登记	Query installation
 4151	error	system.sandbox.error.in_use	1	none	沙箱仍持有镜像或卷	Sandbox storage still in use
 4152	error	system.sandbox.image.error.not_found	1	none	沙箱镜像不存在或无权查看	Sandbox image not found
 4153	error	system.sandbox.image.error.layer	1	none	沙箱镜像层非法	Sandbox image layer invalid

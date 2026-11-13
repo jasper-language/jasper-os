@@ -8,6 +8,8 @@ use kernel_core::sandbox_launch::{
     CapabilitySet, DataScopeGrant, DeviceGrant, LaunchAuthority, LaunchError, LaunchPlanKey,
     LaunchPlanSnapshot, LaunchSpec, NetworkPolicyRef, SandboxLaunchTable,
 };
+use kernel_core::sandbox::SandboxKey;
+use kernel_core::sandbox_image::VolumeKey;
 use kernel_core::object::Rights;
 use kernel_core::objtable::ObjId;
 use kernel_core::security_domain::DomainKey;
@@ -35,15 +37,19 @@ const DEVICE_RIGHTS: Rights = Rights::READ
 /// and NET policy remain denied until their own live registries exist.
 struct KernelLaunchAuthority {
     domain: DomainKey,
+    sandbox: SandboxKey,
     root_capabilities: CapabilitySet,
     root_ticket: Option<DeviceAuthorityTicket>,
     device_tickets: [Option<DeviceAuthorityTicket>; kernel_core::sandbox_launch::MAX_DEVICE_GRANTS],
+    data_tickets: [Option<VolumeKey>; kernel_core::sandbox_launch::MAX_DATA_SCOPES],
 }
 
 impl KernelLaunchAuthority {
     fn snapshot(
         domain: DomainKey,
+        sandbox: SandboxKey,
         devices: &[DeviceGrant],
+        data: &[DataScopeGrant],
     ) -> Self {
         let mut intrinsic =
             CapabilitySet::EXECUTE.union(CapabilitySet::DATA_READ).union(CapabilitySet::DATA_WRITE);
@@ -77,11 +83,34 @@ impl KernelLaunchAuthority {
             }
             device_tickets[index] = proc::device_authority_ticket(domain, Some(object), rights);
         }
+        let mut data_tickets =
+            [None; kernel_core::sandbox_launch::MAX_DATA_SCOPES];
+        for (index, grant) in data
+            .iter()
+            .copied()
+            .take(data_tickets.len())
+            .enumerate()
+        {
+            if grant.owner != domain || grant.grantee != domain {
+                continue;
+            }
+            let Some(volume) = VolumeKey::from_raw(grant.object) else {
+                continue;
+            };
+            if volume.to_raw() != grant.object {
+                continue;
+            }
+            if STORAGE.lock().volume(domain, sandbox, volume).is_ok() {
+                data_tickets[index] = Some(volume);
+            }
+        }
         Self {
             domain,
+            sandbox,
             root_capabilities: intrinsic,
             root_ticket,
             device_tickets,
+            data_tickets,
         }
     }
 
@@ -100,6 +129,15 @@ impl KernelLaunchAuthority {
             .any(|ticket| !proc::device_authority_ticket_live(self.domain, *ticket))
         {
             return Err(LaunchError::InvalidDevice);
+        }
+        let storage = STORAGE.lock();
+        if self
+            .data_tickets
+            .iter()
+            .flatten()
+            .any(|volume| storage.volume(self.domain, self.sandbox, *volume).is_err())
+        {
+            return Err(LaunchError::InvalidData);
         }
         Ok(())
     }
@@ -139,11 +177,19 @@ impl LaunchAuthority for KernelLaunchAuthority {
 
     fn data_scope_live(
         &self,
-        _domain: DomainKey,
-        _sandbox: kernel_core::sandbox::SandboxKey,
-        _grant: DataScopeGrant,
+        domain: DomainKey,
+        sandbox: SandboxKey,
+        grant: DataScopeGrant,
     ) -> bool {
-        false
+        domain == self.domain
+            && sandbox == self.sandbox
+            && grant.owner == domain
+            && grant.grantee == domain
+            && self
+                .data_tickets
+                .iter()
+                .flatten()
+                .any(|volume| volume.to_raw() == grant.object)
     }
 
     fn network_policy_live(&self, _domain: DomainKey, _policy: NetworkPolicyRef) -> bool {
@@ -153,7 +199,7 @@ impl LaunchAuthority for KernelLaunchAuthority {
 
 /// Admit one immutable launch plan.
 pub fn create(domain: DomainKey, spec: LaunchSpec<'_>) -> Result<LaunchPlanKey, LaunchError> {
-    let authority = KernelLaunchAuthority::snapshot(domain, spec.devices);
+    let authority = KernelLaunchAuthority::snapshot(domain, spec.sandbox, spec.devices, spec.data);
     let sandboxes = SANDBOXES.lock();
     let storage = STORAGE.lock();
     let workloads = WORKLOADS.lock();
@@ -179,14 +225,28 @@ pub fn create(domain: DomainKey, spec: LaunchSpec<'_>) -> Result<LaunchPlanKey, 
 
 /// Query a plan only while every referenced authority is still live.
 pub fn query(domain: DomainKey, key: LaunchPlanKey) -> Result<LaunchPlanSnapshot, LaunchError> {
-    let (plan, device_count, devices) = {
+    let (plan, device_count, devices, data_count, data_scopes) = {
         let plans = LAUNCH.lock();
         let plan = plans.plan(domain, key)?;
         let mut devices = [None; kernel_core::sandbox_launch::MAX_DEVICE_GRANTS];
         for (index, slot) in devices.iter_mut().enumerate().take(plan.devices as usize) {
             *slot = Some(plans.device(domain, key, index as u16)?);
         }
-        (plan, plan.devices as usize, devices)
+        let mut data_scopes = [None; kernel_core::sandbox_launch::MAX_DATA_SCOPES];
+        for (index, slot) in data_scopes
+            .iter_mut()
+            .enumerate()
+            .take(plan.data_scopes as usize)
+        {
+            *slot = Some(plans.data_scope(domain, key, index as u16)?);
+        }
+        (
+            plan,
+            plan.devices as usize,
+            devices,
+            plan.data_scopes as usize,
+            data_scopes,
+        )
     };
     let mut device_grants = [DeviceGrant {
         object: 0,
@@ -198,7 +258,25 @@ pub fn query(domain: DomainKey, key: LaunchPlanKey) -> Result<LaunchPlanSnapshot
     for (target, source) in device_grants.iter_mut().zip(devices[..device_count].iter().flatten()) {
         *target = *source;
     }
-    let authority = KernelLaunchAuthority::snapshot(domain, &device_grants[..device_count]);
+    let mut data_grants = [DataScopeGrant {
+        object: 0,
+        generation: 0,
+        owner: DomainKey::NONE,
+        grantee: DomainKey::NONE,
+        writable: false,
+    }; kernel_core::sandbox_launch::MAX_DATA_SCOPES];
+    for (target, source) in data_grants[..data_count]
+        .iter_mut()
+        .zip(data_scopes[..data_count].iter().flatten())
+    {
+        *target = *source;
+    }
+    let authority = KernelLaunchAuthority::snapshot(
+        domain,
+        plan.sandbox,
+        &device_grants[..device_count],
+        &data_grants[..data_count],
+    );
     let sandboxes = SANDBOXES.lock();
     let storage = STORAGE.lock();
     let workloads = WORKLOADS.lock();
