@@ -6290,19 +6290,25 @@ fn linux_futex_waitv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     result
 }
 
-/// Reports the compatibility service's read-only resource limits.
-///
-/// 返回兼容服务的只读资源上限；本切片不伪造 `prlimit64` 写操作。
+/// Queries or updates process-local compatibility resource limits.
 fn linux_prlimit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    if args[1] != 0 || args[2] != 0 || proc::linux_pid(pid).is_none() {
+    if args[1] != 0 || proc::linux_pid(pid).is_none() {
         return Err(CompatErrno::Invalid);
     }
-    let (current, maximum) = linux_limit(pid, args[0])?;
+    let old = linux_limit(pid, args[0])?;
     if args[3] != 0 {
         let mut bytes = [0u8; 16];
-        bytes[..8].copy_from_slice(&current.to_le_bytes());
-        bytes[8..].copy_from_slice(&maximum.to_le_bytes());
+        bytes[..8].copy_from_slice(&old.0.to_le_bytes());
+        bytes[8..].copy_from_slice(&old.1.to_le_bytes());
         copy_to_user(args[3], &bytes, bytes.len()).map_err(|_| CompatErrno::Fault)?;
+    }
+    if args[2] != 0 {
+        let mut bytes = [0u8; 16];
+        copy_from_user(&mut bytes, args[2], 16)
+            .map_err(|_| CompatErrno::Fault)?;
+        let current = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+        let maximum = u64::from_le_bytes(bytes[8..].try_into().unwrap());
+        update_linux_limit(pid, args[0], current, maximum)?;
     }
     Ok(0)
 }
@@ -6310,14 +6316,49 @@ fn linux_prlimit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn linux_limit(pid: ObjId, resource: u64) -> Result<(u64, u64), CompatErrno> {
     const RLIMIT_STACK: u64 = 3;
     const RLIMIT_NOFILE: u64 = 7;
-    const RLIM_INFINITY: u64 = u64::MAX;
-    if proc::linux_pid(pid).is_none() {
+    let limits = proc::linux_rlimits(pid).ok_or(CompatErrno::Invalid)?;
+    match resource {
+        RLIMIT_STACK => Ok((limits.stack_current, limits.stack_maximum)),
+        RLIMIT_NOFILE => Ok((limits.nofile_current, limits.nofile_maximum)),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+fn update_linux_limit(
+    pid: ObjId,
+    resource: u64,
+    current: u64,
+    maximum: u64,
+) -> Result<(), CompatErrno> {
+    const RLIMIT_STACK: u64 = 3;
+    const RLIMIT_NOFILE: u64 = 7;
+    if current > maximum {
         return Err(CompatErrno::Invalid);
     }
+    let old = proc::linux_rlimits(pid).ok_or(CompatErrno::NoProcess)?;
+    let mut next = old;
     match resource {
-        RLIMIT_STACK => Ok((8 * 1024 * 1024, RLIM_INFINITY)),
-        RLIMIT_NOFILE => Ok((64, 64)),
-        _ => Err(CompatErrno::Invalid),
+        RLIMIT_STACK => {
+            if maximum > old.stack_maximum {
+                return Err(CompatErrno::Perm);
+            }
+            next.stack_current = current;
+            next.stack_maximum = maximum;
+        }
+        RLIMIT_NOFILE => {
+            if maximum > old.nofile_maximum {
+                return Err(CompatErrno::Perm);
+            }
+            if current != old.nofile_current || maximum != old.nofile_maximum {
+                return Err(CompatErrno::NotSupported);
+            }
+        }
+        _ => return Err(CompatErrno::Invalid),
+    }
+    if proc::set_linux_rlimits(pid, next) {
+        Ok(())
+    } else {
+        Err(CompatErrno::NoProcess)
     }
 }
 
@@ -6334,7 +6375,10 @@ fn linux_setrlimit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let _ = linux_limit(pid, args[0])?;
     let mut bytes = [0u8; 16];
     copy_from_user(&mut bytes, args[1], 16).map_err(|_| CompatErrno::Fault)?;
-    Err(CompatErrno::Perm)
+    let current = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+    let maximum = u64::from_le_bytes(bytes[8..].try_into().unwrap());
+    update_linux_limit(pid, args[0], current, maximum)?;
+    Ok(0)
 }
 
 /// Fills a bounded userspace buffer from x86_64 RDRAND.

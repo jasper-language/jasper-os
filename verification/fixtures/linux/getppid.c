@@ -6275,6 +6275,20 @@ int main(void) {
         legacy_limit.rlim_cur != 64 || legacy_limit.rlim_max != 64) {
         return 266;
     }
+    if (syscall(SYS_setrlimit, RLIMIT_NOFILE, &legacy_limit) != 0) {
+        return 267;
+    }
+    struct rlimit old_nofile_limit = {0};
+    if (syscall(SYS_prlimit64, 0, RLIMIT_NOFILE,
+                &legacy_limit, &old_nofile_limit) != 0 ||
+        old_nofile_limit.rlim_cur != 64 ||
+        old_nofile_limit.rlim_max != 64 ||
+        syscall(SYS_getrlimit, RLIMIT_NOFILE, &old_nofile_limit) != 0 ||
+        old_nofile_limit.rlim_cur != 64 ||
+        old_nofile_limit.rlim_max != 64) {
+        return 267;
+    }
+    legacy_limit.rlim_max = 65;
     errno = 0;
     if (syscall(SYS_setrlimit, RLIMIT_NOFILE, &legacy_limit) != -1 ||
         errno != EPERM) {

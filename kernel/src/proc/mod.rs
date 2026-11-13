@@ -157,6 +157,7 @@ struct LinuxProcessState {
     pdeathsig: u32,
     subreaper: bool,
     termination_signal: u32,
+    rlimits: LinuxRlimits,
     aio_contexts: Vec<LinuxAioContext>,
     seccomp_filters: Vec<Vec<SeccompInsn>>,
     seccomp_strict: bool,
@@ -233,6 +234,15 @@ pub(crate) struct LinuxCredentials {
     pub(crate) egid: u32,
     pub(crate) sgid: u32,
     pub(crate) fsgid: u32,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxRlimits {
+    pub(crate) stack_current: u64,
+    pub(crate) stack_maximum: u64,
+    pub(crate) nofile_current: u64,
+    pub(crate) nofile_maximum: u64,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -4889,6 +4899,25 @@ pub(crate) fn set_linux_termination_signal(pid: ObjId, signal: u32) -> bool {
     .is_ok()
 }
 
+/// Returns the process-local Linux resource limits.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_rlimits(pid: ObjId) -> Option<LinuxRlimits> {
+    with_proc(pid, |process| {
+        Ok(process.linux.as_ref().ok_or(ProcError::Exited)?.rlimits)
+    })
+    .ok()
+}
+
+/// Replaces the process-local Linux resource limits.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_rlimits(pid: ObjId, limits: LinuxRlimits) -> bool {
+    with_proc(pid, |process| {
+        process.linux.as_mut().ok_or(ProcError::Exited)?.rlimits = limits;
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Creates one bounded legacy AIO context.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_aio_create(pid: ObjId, max_events: usize) -> Option<u64> {
@@ -5268,6 +5297,12 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         pdeathsig: 0,
         subreaper: false,
         termination_signal: 0,
+        rlimits: LinuxRlimits {
+            stack_current: 8 * 1024 * 1024,
+            stack_maximum: u64::MAX,
+            nofile_current: 64,
+            nofile_maximum: 64,
+        },
         aio_contexts: Vec::new(),
         seccomp_filters: Vec::new(),
         seccomp_strict: false,
