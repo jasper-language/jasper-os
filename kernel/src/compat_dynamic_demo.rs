@@ -84,6 +84,8 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::PwriteV,
         LinuxSyscall::PreadV2,
         LinuxSyscall::PwriteV2,
+        LinuxSyscall::ProcessVmReadV,
+        LinuxSyscall::ProcessVmWriteV,
         LinuxSyscall::ReadLinkAt,
         LinuxSyscall::Write,
         LinuxSyscall::WriteV,

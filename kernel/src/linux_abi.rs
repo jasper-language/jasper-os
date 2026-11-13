@@ -1893,6 +1893,8 @@ fn execute(
         LinuxSyscall::PwriteV2 => {
             compat_result(linux_vectored_file_io(pid, call.args, true, true, true))
         }
+        LinuxSyscall::ProcessVmReadV => compat_result(linux_process_vm_io(pid, call.args, false)),
+        LinuxSyscall::ProcessVmWriteV => compat_result(linux_process_vm_io(pid, call.args, true)),
         LinuxSyscall::ReadLinkAt => compat_result(linux_readlinkat(pid, call.args)),
         LinuxSyscall::Close => compat_result(linux_close(pid, call.args[0])),
         LinuxSyscall::CloseRange => compat_result(linux_close_range(pid, call.args)),
@@ -3224,6 +3226,57 @@ fn linux_vectored_file_io(
         return Err(CompatErrno::BadFd);
     }
     Ok(read as u64)
+}
+
+/// Implements same-process `process_vm_readv/writev` without ptrace authority.
+fn linux_process_vm_io(
+    pid: ObjId,
+    args: [u64; 6],
+    write: bool,
+) -> Result<u64, CompatErrno> {
+    const MAX_PROCESS_VM: usize = 1024 * 1024;
+    if args[5] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let target_pid = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let target = proc::linux_process_for_pid(target_pid).ok_or(CompatErrno::NoProcess)?;
+    if target != pid {
+        return Err(CompatErrno::Perm);
+    }
+    let local_count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let remote_count = usize::try_from(args[4]).map_err(|_| CompatErrno::Invalid)?;
+    let local = read_message_iovecs(pid, args[1], local_count, MAX_PROCESS_VM)?;
+    let remote = read_message_iovecs(pid, args[3], remote_count, MAX_PROCESS_VM)?;
+    let local_total = local.iter().map(|(_, length)| *length).sum::<usize>();
+    let remote_total = remote.iter().map(|(_, length)| *length).sum::<usize>();
+    let total = local_total.min(remote_total);
+    let (source, destination) = if write {
+        (&local, &remote)
+    } else {
+        (&remote, &local)
+    };
+    let mut bytes = alloc::vec![0u8; total];
+    let mut offset = 0usize;
+    for (address, length) in source {
+        if offset == total {
+            break;
+        }
+        let take = (*length).min(total - offset);
+        proc::read(pid, *address, &mut bytes[offset..offset + take])
+            .map_err(|_| CompatErrno::Fault)?;
+        offset += take;
+    }
+    offset = 0;
+    for (address, length) in destination {
+        if offset == total {
+            break;
+        }
+        let take = (*length).min(total - offset);
+        proc::write(pid, *address, &bytes[offset..offset + take])
+            .map_err(|_| CompatErrno::Fault)?;
+        offset += take;
+    }
+    Ok(total as u64)
 }
 
 /// Implements bounded Linux `readv(2)` with all-or-nothing user-range validation.

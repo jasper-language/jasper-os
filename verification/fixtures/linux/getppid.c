@@ -3958,6 +3958,40 @@ int main(void) {
             return 509;
         }
     }
+    char process_vm_source[] = "VMIO";
+    char process_vm_copy[5] = {0};
+    char process_vm_write[] = "SEND";
+    char process_vm_destination[5] = {0};
+    struct iovec process_vm_local = {
+        .iov_base = process_vm_copy,
+        .iov_len = 4,
+    };
+    struct iovec process_vm_remote = {
+        .iov_base = process_vm_source,
+        .iov_len = 4,
+    };
+    if (syscall(SYS_process_vm_readv, getpid(), &process_vm_local, 1,
+                &process_vm_remote, 1, 0) != 4 ||
+        memcmp(process_vm_copy, "VMIO", 4) != 0) {
+        return 514;
+    }
+    process_vm_local.iov_base = process_vm_write;
+    process_vm_remote.iov_base = process_vm_destination;
+    if (syscall(SYS_process_vm_writev, getpid(), &process_vm_local, 1,
+                &process_vm_remote, 1, 0) != 4 ||
+        memcmp(process_vm_destination, "SEND", 4) != 0) {
+        return 515;
+    }
+    errno = 0;
+    if (syscall(SYS_process_vm_readv, getpid(), &process_vm_local, 1,
+                &process_vm_remote, 1, 1) != -1 ||
+        errno != EINVAL ||
+        syscall(SYS_process_vm_writev, getpid(),
+                (struct iovec *)(uintptr_t)1, 1,
+                &process_vm_remote, 1, 0) != -1 ||
+        errno != EFAULT) {
+        return 516;
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);
