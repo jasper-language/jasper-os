@@ -2475,7 +2475,8 @@ fn linux_setgroups(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let mut groups = alloc::vec![0u32; count];
     if count != 0 {
         let mut raw = [0u8; MAX_GROUPS * 4];
-        copy_from_user(&mut raw, args[1], count * 4).map_err(|_| CompatErrno::Fault)?;
+        copy_from_user(&mut raw[..count * 4], args[1], count * 4)
+            .map_err(|_| CompatErrno::Fault)?;
         for (index, group) in groups.iter_mut().enumerate() {
             *group = u32::from_le_bytes(raw[index * 4..index * 4 + 4].try_into().unwrap());
         }
