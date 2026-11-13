@@ -20,6 +20,18 @@ if ! flock -w "${ISSUE21_UEFI_BUILD_LOCK_WAIT:-3600}" 8; then
   exit 75
 fi
 
+# Pre-lock or external jobs may still be running. Do not stack with them.
+queue_deadline=$(($(date +%s) + ${ISSUE21_UEFI_BUILD_LOCK_WAIT:-3600}))
+while pgrep -x qemu-system-x86_64 >/dev/null 2>&1 ||
+  pgrep -x cargo >/dev/null 2>&1 ||
+  pgrep -x rustc >/dev/null 2>&1; do
+  if [ "$(date +%s)" -ge "$queue_deadline" ]; then
+    echo "issue21-uefi-boot: existing guest build/QEMU did not quiesce" >&2
+    exit 75
+  fi
+  sleep 2
+done
+
 guarded_cargo() {
   "$ROOT/scripts/guarded-cargo.sh" "$@"
 }
