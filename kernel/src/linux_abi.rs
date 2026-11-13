@@ -6952,26 +6952,57 @@ fn linux_capset(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(0)
 }
 
-/// Resolves one I/O priority target restricted to the current process.
-fn linux_ioprio_target(pid: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+#[derive(Clone, Copy)]
+enum LinuxIoprioTarget {
+    Process,
+    Group(u32),
+}
+
+/// Resolves one I/O priority target to the current process or one process group.
+fn linux_ioprio_target(pid: ObjId, args: [u64; 6]) -> Result<LinuxIoprioTarget, CompatErrno> {
     const IOPRIO_WHO_PROCESS: u64 = 1;
-    if args[0] != IOPRIO_WHO_PROCESS {
-        return Err(CompatErrno::NotSupported);
+    const IOPRIO_WHO_PGRP: u64 = 2;
+    let current = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?;
+    match args[0] {
+        IOPRIO_WHO_PROCESS => {
+            let requested = args[1] as u32 as i32;
+            if requested != 0 && requested as u32 != current {
+                return Err(CompatErrno::Perm);
+            }
+            Ok(LinuxIoprioTarget::Process)
+        }
+        IOPRIO_WHO_PGRP => {
+            let requested = args[1] as u32 as i32;
+            let caller_group = proc::linux_process_group_state(pid)
+                .ok_or(CompatErrno::NoProcess)?
+                .0;
+            let group = if requested == 0 {
+                caller_group
+            } else if requested > 0 {
+                requested as u32
+            } else {
+                return Err(CompatErrno::Invalid);
+            };
+            let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+            if group != caller_group && credentials.euid != 0 {
+                return Err(CompatErrno::Perm);
+            }
+            Ok(LinuxIoprioTarget::Group(group))
+        }
+        _ => Err(CompatErrno::NotSupported),
     }
-    let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
-    let requested = args[1] as u32 as i32;
-    if requested != 0 && requested as u64 != current {
-        return Err(CompatErrno::Perm);
-    }
-    Ok(())
 }
 
 /// Returns the process Linux I/O priority.
 fn linux_ioprio_get(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    linux_ioprio_target(pid, args)?;
-    proc::linux_ioprio(pid)
-        .map(u64::from)
-        .ok_or(CompatErrno::NoProcess)
+    match linux_ioprio_target(pid, args)? {
+        LinuxIoprioTarget::Process => proc::linux_ioprio(pid)
+            .map(u64::from)
+            .ok_or(CompatErrno::NoProcess),
+        LinuxIoprioTarget::Group(group) => proc::linux_ioprio_group(group)
+            .map(|(value, _)| u64::from(value))
+            .ok_or(CompatErrno::NoProcess),
+    }
 }
 
 /// Sets the process Linux I/O priority class and level.
@@ -6979,7 +7010,7 @@ fn linux_ioprio_set(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const IOPRIO_CLASS_MASK: u32 = 0x7;
     const IOPRIO_CLASS_SHIFT: u32 = 13;
     const IOPRIO_PRIO_MASK: u32 = (1 << IOPRIO_CLASS_SHIFT) - 1;
-    linux_ioprio_target(pid, args)?;
+    let target = linux_ioprio_target(pid, args)?;
     let requested = args[2] as u32;
     let class = (requested >> IOPRIO_CLASS_SHIFT) & IOPRIO_CLASS_MASK;
     let data = requested & IOPRIO_PRIO_MASK;
@@ -6989,7 +7020,11 @@ fn linux_ioprio_set(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         3 if data == 0 => requested,
         _ => return Err(CompatErrno::Invalid),
     };
-    if proc::set_linux_ioprio(pid, value) {
+    let updated = match target {
+        LinuxIoprioTarget::Process => proc::set_linux_ioprio(pid, value),
+        LinuxIoprioTarget::Group(group) => proc::set_linux_ioprio_group(group, value),
+    };
+    if updated {
         Ok(0)
     } else {
         Err(CompatErrno::NoProcess)

@@ -4528,8 +4528,14 @@ int main(void) {
     if (syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0,
                 IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 8)) != -1 ||
         errno != EINVAL ||
-        syscall(SYS_ioprio_get, IOPRIO_WHO_PGRP, 0) != -1 ||
-        errno != EOPNOTSUPP ||
+        syscall(SYS_ioprio_get, IOPRIO_WHO_PGRP, 0) !=
+            IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0) ||
+        syscall(SYS_ioprio_set, IOPRIO_WHO_PGRP, 0,
+                IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 2)) != 0 ||
+        syscall(SYS_ioprio_get, IOPRIO_WHO_PROCESS, 0) !=
+            IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 2) ||
+        syscall(SYS_ioprio_get, IOPRIO_WHO_PGRP, 0) !=
+            IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 2) ||
         syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0,
                 (unsigned)initial_ioprio) != 0) {
         return 513;

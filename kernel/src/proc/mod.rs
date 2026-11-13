@@ -4695,6 +4695,36 @@ pub(crate) fn set_linux_ioprio(pid: ObjId, value: u32) -> bool {
     .is_ok()
 }
 
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ioprio_group(pgid: u32) -> Option<(u32, Vec<ObjId>)> {
+    let mut value = None;
+    let mut members = Vec::new();
+    crate::kobj::with(|table| {
+        table.for_each_live(|id, object| {
+            if let KObject::Process(process) = object {
+                if let Some(linux) = process.linux.as_ref() {
+                    if linux.pgid == pgid {
+                        value.get_or_insert(linux.ioprio);
+                        members.push(id);
+                    }
+                }
+            }
+            true
+        });
+    });
+    value.map(|value| (value, members))
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_ioprio_group(pgid: u32, value: u32) -> bool {
+    let Some((_, members)) = linux_ioprio_group(pgid) else {
+        return false;
+    };
+    members
+        .into_iter()
+        .all(|member| set_linux_ioprio(member, value))
+}
+
 /// Records the irreversible Linux `no_new_privs` process flag.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_set_no_new_privs(pid: ObjId) -> bool {
