@@ -3718,10 +3718,73 @@ int main(void) {
         waitpid(waitid_live_child, NULL, 0) != waitid_live_child) {
         return 436;
     }
-    errno = 0;
-    if (syscall(SYS_waitid, P_PGID, 0, &waitid_info,
-                WEXITED, NULL) != -1 ||
-        errno != EOPNOTSUPP) {
+    int waitid_group_ready[2];
+    if (pipe(waitid_group_ready) != 0) {
+        return 433;
+    }
+    pid_t waitid_group_child = fork();
+    if (waitid_group_child < 0) {
+        return 433;
+    }
+    if (waitid_group_child == 0) {
+        close(waitid_group_ready[0]);
+        pdeath_done_fd = -1;
+        if (setpgid(0, 0) != 0 ||
+            signal(SIGTERM, pdeath_signal_handler) == SIG_ERR) {
+            _exit(1);
+        }
+        char ready = 'R';
+        if (write(waitid_group_ready[1], &ready, 1) != 1) {
+            _exit(2);
+        }
+        pause();
+        _exit(44);
+    }
+    close(waitid_group_ready[1]);
+    char waitid_group_byte = 0;
+    memset(&waitid_info, 0, sizeof(waitid_info));
+    if (read(waitid_group_ready[0], &waitid_group_byte, 1) != 1 ||
+        waitid_group_byte != 'R' ||
+        close(waitid_group_ready[0]) != 0 ||
+        kill(waitid_group_child, SIGTERM) != 0 ||
+        syscall(SYS_waitid, P_PGID, waitid_group_child,
+                &waitid_info, WEXITED, NULL) != 0 ||
+        waitid_info.si_pid != waitid_group_child ||
+        waitid_info.si_status != 0 ||
+        waitid_info.si_code != CLD_EXITED) {
+        return 433;
+    }
+    pid_t waitpid_group_child = -1;
+    int waitpid_group_ready[2];
+    if (pipe(waitpid_group_ready) != 0 ||
+        (waitpid_group_child = fork()) < 0) {
+        return 433;
+    }
+    if (waitpid_group_child == 0) {
+        close(waitpid_group_ready[0]);
+        pdeath_done_fd = -1;
+        if (setpgid(0, 0) != 0 ||
+            signal(SIGTERM, pdeath_signal_handler) == SIG_ERR) {
+            _exit(1);
+        }
+        char ready = 'R';
+        if (write(waitpid_group_ready[1], &ready, 1) != 1) {
+            _exit(2);
+        }
+        pause();
+        _exit(45);
+    }
+    close(waitpid_group_ready[1]);
+    char waitpid_group_byte = 0;
+    int waitpid_group_status = 0;
+    if (read(waitpid_group_ready[0], &waitpid_group_byte, 1) != 1 ||
+        waitpid_group_byte != 'R' ||
+        close(waitpid_group_ready[0]) != 0 ||
+        kill(waitpid_group_child, SIGTERM) != 0 ||
+        waitpid(-waitpid_group_child, &waitpid_group_status, 0) !=
+            waitpid_group_child ||
+        !WIFEXITED(waitpid_group_status) ||
+        WEXITSTATUS(waitpid_group_status) != 0) {
         return 433;
     }
     pid_t waitid_nowait_child = fork();

@@ -5515,17 +5515,32 @@ fn linux_vfork(
 /// 阻塞到一个指定 Linux 子进程退出，再写入编码后的 wait 状态。
 fn linux_wait4(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const WNOHANG: u64 = 1;
+    #[derive(Clone, Copy)]
+    enum Target {
+        Pid(Option<u32>),
+        Group(u32),
+    }
     let target = args[0] as i32;
     let target = match target {
-        -1 => None,
-        value if value > 0 => Some(value as u32),
+        -1 => Target::Pid(None),
+        0 => Target::Group(
+            proc::linux_process_group_state(_pid)
+                .ok_or(CompatErrno::NoProcess)?
+                .0,
+        ),
+        value if value > 0 => Target::Pid(Some(value as u32)),
+        value if value < -1 => Target::Group(value.unsigned_abs()),
         _ => return Err(CompatErrno::Invalid),
     };
     if args[2] & !WNOHANG != 0 || args[3] != 0 {
         return Err(CompatErrno::NoSys);
     }
     loop {
-        match proc::take_linux_child_exit(_pid, target) {
+        let result = match target {
+            Target::Pid(target) => proc::take_linux_child_exit(_pid, target),
+            Target::Group(pgid) => proc::take_linux_child_exit_group(_pid, pgid),
+        };
+        match result {
             Ok(Some((child_pid, status))) => {
                 if args[1] != 0 {
                     copy_to_user(args[1], &status.to_le_bytes(), 4)
@@ -5544,20 +5559,36 @@ fn linux_wait4(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn linux_waitid(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const P_ALL: u32 = 0;
     const P_PID: u32 = 1;
+    const P_PGID: u32 = 2;
     const WNOHANG: u64 = 0x1;
     const WEXITED: u64 = 0x4;
     const WNOWAIT: u64 = 0x0100_0000;
+    #[derive(Clone, Copy)]
+    enum Target {
+        Pid(Option<u32>),
+        Group(u32),
+    }
     let id_type = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
     let target = match id_type {
-        P_ALL => None,
+        P_ALL => Target::Pid(None),
         P_PID => {
             let target = u32::try_from(args[1]).map_err(|_| CompatErrno::NoProcess)?;
             if target == 0 {
                 return Err(CompatErrno::NoProcess);
             }
-            Some(target)
+            Target::Pid(Some(target))
         }
-        _ => return Err(CompatErrno::NotSupported),
+        P_PGID => {
+            let requested = u32::try_from(args[1]).map_err(|_| CompatErrno::NoProcess)?;
+            Target::Group(if requested == 0 {
+                proc::linux_process_group_state(pid)
+                    .ok_or(CompatErrno::NoProcess)?
+                    .0
+            } else {
+                requested
+            })
+        }
+        _ => return Err(CompatErrno::Invalid),
     };
     let options = args[3];
     if args[4] != 0 {
@@ -5571,10 +5602,15 @@ fn linux_waitid(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         copy_to_user(args[2], &zero, zero.len()).map_err(|_| CompatErrno::Fault)?;
     }
     loop {
-        let observed = if options & WNOWAIT != 0 {
-            proc::peek_linux_child_exit(pid, target)
-        } else {
-            proc::take_linux_child_exit(pid, target)
+        let observed = match (target, options & WNOWAIT != 0) {
+            (Target::Pid(target), false) => proc::take_linux_child_exit(pid, target),
+            (Target::Pid(target), true) => proc::peek_linux_child_exit(pid, target),
+            (Target::Group(pgid), false) => {
+                proc::take_linux_child_exit_group(pid, pgid)
+            }
+            (Target::Group(pgid), true) => {
+                proc::peek_linux_child_exit_group(pid, pgid)
+            }
         };
         match observed {
             Ok(Some((child_pid, status))) => {

@@ -7516,27 +7516,38 @@ fn copy_linux_mapping(parent: ObjId, child: ObjId, mapping: LinuxMapping) -> Res
     })
 }
 
-/// Takes one exited Linux child's status and releases its object ownership.
-/// 取得一个已退出 Linux 子进程的状态，并释放父进程和创建者持有的引用。
 #[cfg(feature = "linux-abi")]
-pub(crate) fn take_linux_child_exit(
+#[derive(Clone, Copy)]
+enum LinuxWaitSelector {
+    Any,
+    Pid(u32),
+    ProcessGroup(u32),
+}
+
+#[cfg(feature = "linux-abi")]
+fn linux_child_exit(
     parent: ObjId,
-    target_pid: Option<u32>,
+    selector: LinuxWaitSelector,
+    consume: bool,
 ) -> Result<Option<(u32, i32)>, ProcError> {
-    let child = kobj::with(|t| match t.get(parent) {
-        Ok(KObject::Process(p)) => Ok(p.children.clone()),
+    let children = kobj::with(|table| match table.get(parent) {
+        Ok(KObject::Process(process)) => Ok(process.children.clone()),
         _ => Err(ProcError::NoSuchProcess),
     })?;
-    let mut matching = target_pid.is_none() && !child.is_empty();
-    for candidate in child {
-        let found = kobj::with(|t| match t.get(candidate) {
-            Ok(KObject::Process(p)) => {
-                let linux = p.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
-                if target_pid.is_some_and(|target| linux.pid != target) {
-                    return Ok(None);
+    let mut matching = matches!(selector, LinuxWaitSelector::Any) && !children.is_empty();
+    for candidate in children {
+        let found = kobj::with(|table| match table.get(candidate) {
+            Ok(KObject::Process(process)) => {
+                let linux = process.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
+                let selected = match selector {
+                    LinuxWaitSelector::Any => true,
+                    LinuxWaitSelector::Pid(pid) => linux.pid == pid,
+                    LinuxWaitSelector::ProcessGroup(pgid) => linux.pgid == pgid,
+                };
+                if selected {
+                    matching = true;
                 }
-                matching = true;
-                Ok(Some((linux.pid, p.state)))
+                Ok(selected.then_some((linux.pid, process.state)))
             }
             _ => Err(ProcError::NoSuchProcess),
         })?;
@@ -7544,15 +7555,17 @@ pub(crate) fn take_linux_child_exit(
             continue;
         };
         let ProcState::Exited { code } = state else {
-            return Ok(None);
+            continue;
         };
         let status = (((code as u32) & 0xff) << 8) as i32;
-        let child_ticks = linux_process_cpu_ticks(candidate).unwrap_or(0);
-        if !linux_account_child_cpu(parent, child_ticks) {
-            return Err(ProcError::NoSuchProcess);
+        if consume {
+            let child_ticks = linux_process_cpu_ticks(candidate).unwrap_or(0);
+            if !linux_account_child_cpu(parent, child_ticks) {
+                return Err(ProcError::NoSuchProcess);
+            }
+            let _ = reap(candidate);
+            let _ = release_child(parent, candidate);
         }
-        let _ = reap(candidate);
-        let _ = release_child(parent, candidate);
         return Ok(Some((pid, status)));
     }
     if matching {
@@ -7562,42 +7575,48 @@ pub(crate) fn take_linux_child_exit(
     }
 }
 
+/// Takes one exited Linux child's status and releases its object ownership.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn take_linux_child_exit(
+    parent: ObjId,
+    target_pid: Option<u32>,
+) -> Result<Option<(u32, i32)>, ProcError> {
+    linux_child_exit(
+        parent,
+        target_pid.map_or(LinuxWaitSelector::Any, LinuxWaitSelector::Pid),
+        true,
+    )
+}
+
+/// Takes one exited child from a Linux process group.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn take_linux_child_exit_group(
+    parent: ObjId,
+    pgid: u32,
+) -> Result<Option<(u32, i32)>, ProcError> {
+    linux_child_exit(parent, LinuxWaitSelector::ProcessGroup(pgid), true)
+}
+
 /// Observes one exited Linux child without accounting or releasing it.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn peek_linux_child_exit(
     parent: ObjId,
     target_pid: Option<u32>,
 ) -> Result<Option<(u32, i32)>, ProcError> {
-    let children = kobj::with(|table| match table.get(parent) {
-        Ok(KObject::Process(process)) => Ok(process.children.clone()),
-        _ => Err(ProcError::NoSuchProcess),
-    })?;
-    let mut matching = target_pid.is_none() && !children.is_empty();
-    for candidate in children {
-        let found = kobj::with(|table| match table.get(candidate) {
-            Ok(KObject::Process(process)) => {
-                let linux = process.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
-                if target_pid.is_some_and(|target| linux.pid != target) {
-                    return Ok(None);
-                }
-                matching = true;
-                Ok(Some((linux.pid, process.state)))
-            }
-            _ => Err(ProcError::NoSuchProcess),
-        })?;
-        let Some((pid, state)) = found else {
-            continue;
-        };
-        if let ProcState::Exited { code } = state {
-            return Ok(Some((pid, (((code as u32) & 0xff) << 8) as i32)));
-        }
-        return Ok(None);
-    }
-    if matching {
-        Ok(None)
-    } else {
-        Err(ProcError::NoSuchProcess)
-    }
+    linux_child_exit(
+        parent,
+        target_pid.map_or(LinuxWaitSelector::Any, LinuxWaitSelector::Pid),
+        false,
+    )
+}
+
+/// Observes one exited child from a Linux process group without consuming it.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn peek_linux_child_exit_group(
+    parent: ObjId,
+    pgid: u32,
+) -> Result<Option<(u32, i32)>, ProcError> {
+    linux_child_exit(parent, LinuxWaitSelector::ProcessGroup(pgid), false)
 }
 
 #[allow(clippy::too_many_arguments)]
