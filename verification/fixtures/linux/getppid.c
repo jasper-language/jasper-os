@@ -5239,6 +5239,7 @@ int main(void) {
         KEYCTL_UNLINK = 9,
         KEYCTL_SEARCH = 10,
         KEYCTL_READ = 11,
+        KEYCTL_GET_SECURITY = 17,
         KEY_SPEC_PROCESS_KEYRING = -2,
     };
     int keyring = syscall(SYS_keyctl, KEYCTL_GET_KEYRING_ID,
@@ -5261,6 +5262,9 @@ int main(void) {
         syscall(SYS_keyctl, KEYCTL_CHOWN, key_serial, 0, 0) != 0 ||
         syscall(SYS_keyctl, KEYCTL_SETPERM, key_serial,
                 0x3f3f3f00) != 0 ||
+        syscall(SYS_keyctl, KEYCTL_GET_SECURITY, key_serial,
+                key_buffer, sizeof(key_buffer)) <= 0 ||
+        memcmp(key_buffer, "jasper-key:", 11) != 0 ||
         syscall(SYS_keyctl, KEYCTL_UPDATE, key_serial,
                 "updated", 7) != 0 ||
         syscall(SYS_keyctl, KEYCTL_UNLINK, key_serial, keyring) != 0 ||

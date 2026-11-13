@@ -10112,6 +10112,7 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const UNLINK: u64 = 9;
     const SEARCH: u64 = 10;
     const READ: u64 = 11;
+    const GET_SECURITY: u64 = 17;
     const INVALIDATE: u64 = 21;
     let application =
         crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
@@ -10310,6 +10311,34 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 })
                 .map(|key| key.serial as u32 as u64)
                 .ok_or(CompatErrno::NoKey)
+        }
+        GET_SECURITY => {
+            let serial = args[1] as i32;
+            let state = COMPAT.lock();
+            let key = state
+                .keys
+                .iter()
+                .find(|key| key.application == application && key.serial == serial)
+                .ok_or(CompatErrno::NoKey)?;
+            if !linux_key_allows(key, credentials, 0x01) {
+                return Err(CompatErrno::Access);
+            }
+            let context = alloc::format!(
+                "jasper-key:{}:{}:{}:{}\0",
+                application.stable_id,
+                key.serial,
+                key.uid,
+                key.gid
+            );
+            if args[2] == 0 {
+                return Ok(context.len() as u64);
+            }
+            if args[3] < context.len() as u64 {
+                return Err(CompatErrno::Overflow);
+            }
+            copy_to_user(args[2], context.as_bytes(), context.len())
+                .map_err(|_| CompatErrno::Fault)?;
+            Ok(context.len() as u64)
         }
         _ => Err(CompatErrno::NotSupported),
     }
