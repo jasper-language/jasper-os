@@ -1978,6 +1978,7 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
     }
     if last_thread {
         release_posix_timers(process);
+        release_mq_notifications(process);
         remove_process_signals(process);
         release_sysv_semaphore_undos(process);
         release_sysv_shared_process(process);
@@ -7231,6 +7232,8 @@ fn linux_mq_open(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             max_messages,
             message_size,
             messages: alloc::collections::VecDeque::new(),
+            blocked_receivers: 0,
+            notification: None,
         }),
     });
     let candidate_fd = install(alloc::sync::Arc::clone(&candidate))?;
@@ -7305,6 +7308,8 @@ fn mq_deadline(pointer: u64) -> Result<Option<u64>, CompatErrno> {
 /// Implements `mq_timedsend(2)`.
 fn linux_mq_send(pid: ObjId, args: [u64; 6], timed: bool) -> Result<u64, CompatErrno> {
     const MQ_PRIO_MAX: u32 = 32768;
+    const SIGEV_SIGNAL: u32 = 0;
+    const SI_MESGQ: i32 = -3;
     let deadline = if timed { mq_deadline(args[4])? } else { None };
     let priority = u32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
     if priority >= MQ_PRIO_MAX {
@@ -7319,7 +7324,7 @@ fn linux_mq_send(pid: ObjId, args: [u64; 6], timed: bool) -> Result<u64, CompatE
     if length != 0 {
         copy_from_user(&mut bytes, args[1], length).map_err(|_| CompatErrno::Fault)?;
     }
-    loop {
+    let notification = loop {
         if proc::current_exiting() || current_signal_pending(pid) {
             return Err(CompatErrno::Interrupted);
         }
@@ -7331,6 +7336,9 @@ fn linux_mq_send(pid: ObjId, args: [u64; 6], timed: bool) -> Result<u64, CompatE
                     .messages
                     .try_reserve(1)
                     .map_err(|_| CompatErrno::NoMemory)?;
+                let notify = (state.messages.is_empty() && state.blocked_receivers == 0)
+                    .then(|| state.notification.take())
+                    .flatten();
                 let position = state
                     .messages
                     .iter()
@@ -7339,44 +7347,7 @@ fn linux_mq_send(pid: ObjId, args: [u64; 6], timed: bool) -> Result<u64, CompatE
                 state
                     .messages
                     .insert(position, proc::LinuxMqMessage { priority, bytes });
-                break;
-            }
-            if nonblocking {
-                return Err(CompatErrno::TryAgain);
-            }
-        }
-        if deadline.is_some_and(|deadline| sched::now_ns() >= deadline) {
-            return Err(CompatErrno::TimedOut);
-        }
-        if let Some(deadline) = deadline {
-            if sched::sleep_until_ns(deadline).is_err() {
-                sched::pause();
-            }
-        } else {
-            sched::pause();
-        }
-    }
-    wake_message_queue_waiters();
-    Ok(0)
-}
-
-/// Implements `mq_timedreceive(2)`.
-fn linux_mq_receive(pid: ObjId, args: [u64; 6], timed: bool) -> Result<u64, CompatErrno> {
-    let deadline = if timed { mq_deadline(args[4])? } else { None };
-    let (fd, queue) = open_message_queue(pid, args[0], false)?;
-    let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if capacity < queue.state.lock().message_size {
-        return Err(CompatErrno::MessageSize);
-    }
-    let message = loop {
-        if proc::current_exiting() || current_signal_pending(pid) {
-            return Err(CompatErrno::Interrupted);
-        }
-        let nonblocking = proc::linux_fd_status_flags(pid, fd).unwrap_or(0) & 0x800 != 0;
-        {
-            let mut state = queue.state.lock();
-            if let Some(message) = state.messages.pop_front() {
-                break message;
+                break notify;
             }
             if nonblocking {
                 return Err(CompatErrno::TryAgain);
@@ -7393,6 +7364,71 @@ fn linux_mq_receive(pid: ObjId, args: [u64; 6], timed: bool) -> Result<u64, Comp
             sched::pause();
         }
     };
+    if let Some(notification) = notification {
+        if notification.notify == SIGEV_SIGNAL {
+            let sender_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?;
+            let sender_uid = proc::linux_credentials(pid)
+                .ok_or(CompatErrno::NoProcess)?
+                .uid;
+            let _ = queue_process_signal_info(
+                notification.process,
+                notification.signal,
+                sender_pid,
+                sender_uid,
+                SI_MESGQ,
+                notification.value,
+            );
+        }
+    }
+    wake_message_queue_waiters();
+    Ok(0)
+}
+
+/// Implements `mq_timedreceive(2)`.
+fn linux_mq_receive(pid: ObjId, args: [u64; 6], timed: bool) -> Result<u64, CompatErrno> {
+    let deadline = if timed { mq_deadline(args[4])? } else { None };
+    let (fd, queue) = open_message_queue(pid, args[0], false)?;
+    let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if capacity < queue.state.lock().message_size {
+        return Err(CompatErrno::MessageSize);
+    }
+    let mut registered_waiter = false;
+    let message = (|| {
+        loop {
+            if proc::current_exiting() || current_signal_pending(pid) {
+                return Err(CompatErrno::Interrupted);
+            }
+            let nonblocking = proc::linux_fd_status_flags(pid, fd).unwrap_or(0) & 0x800 != 0;
+            {
+                let mut state = queue.state.lock();
+                if let Some(message) = state.messages.pop_front() {
+                    return Ok(message);
+                }
+                if nonblocking {
+                    return Err(CompatErrno::TryAgain);
+                }
+                if !registered_waiter {
+                    state.blocked_receivers = state.blocked_receivers.saturating_add(1);
+                    registered_waiter = true;
+                }
+            }
+            if deadline.is_some_and(|deadline| sched::now_ns() >= deadline) {
+                return Err(CompatErrno::TimedOut);
+            }
+            if let Some(deadline) = deadline {
+                if sched::sleep_until_ns(deadline).is_err() {
+                    sched::pause();
+                }
+            } else {
+                sched::pause();
+            }
+        }
+    })();
+    if registered_waiter {
+        let mut state = queue.state.lock();
+        state.blocked_receivers = state.blocked_receivers.saturating_sub(1);
+    }
+    let message = message?;
     if !message.bytes.is_empty() {
         copy_to_user(args[1], &message.bytes, message.bytes.len())
             .map_err(|_| CompatErrno::Fault)?;
@@ -7405,17 +7441,49 @@ fn linux_mq_receive(pid: ObjId, args: [u64; 6], timed: bool) -> Result<u64, Comp
     Ok(message.bytes.len() as u64)
 }
 
-/// Deregistration is supported; signal-based notification remains explicit.
+/// Registers or cancels one one-shot message-arrival notification.
 fn linux_mq_notify(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    if args[1] != 0 {
+    const SIGEV_SIGNAL: u32 = 0;
+    const SIGEV_NONE: u32 = 1;
+    let requested = if args[1] == 0 {
+        None
+    } else {
         let mut notification = [0u8; 64];
         copy_from_user(&mut notification, args[1], 64).map_err(|_| CompatErrno::Fault)?;
-    }
-    let _ = open_message_queue(pid, args[0], false)?;
-    if args[1] == 0 {
+        let value = u64::from_le_bytes(notification[..8].try_into().unwrap());
+        let signal = u32::from_le_bytes(notification[8..12].try_into().unwrap());
+        let notify = u32::from_le_bytes(notification[12..16].try_into().unwrap());
+        if !matches!(notify, SIGEV_SIGNAL | SIGEV_NONE)
+            || notify == SIGEV_SIGNAL
+                && (signal == 0 || signal > 64 || matches!(signal, 9 | 19))
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        Some(proc::LinuxMqNotification {
+            process: pid,
+            notify,
+            signal,
+            value,
+        })
+    };
+    let (_, queue) = open_message_queue(pid, args[0], false)?;
+    let mut state = queue.state.lock();
+    if let Some(requested) = requested {
+        if state.notification.is_some() {
+            return Err(CompatErrno::Busy);
+        }
+        state.notification = Some(requested);
         Ok(0)
     } else {
-        Err(CompatErrno::NotSupported)
+        if state
+            .notification
+            .is_some_and(|notification| notification.process == pid)
+        {
+            state.notification = None;
+            Ok(0)
+        } else {
+            Err(CompatErrno::Invalid)
+        }
     }
 }
 
@@ -10978,6 +11046,19 @@ fn release_posix_timers(process: ObjId) {
     for timer in state.interval_timers.iter_mut() {
         if timer.is_some_and(|timer| timer.process == process) {
             *timer = None;
+        }
+    }
+}
+
+/// Removes one dead process's one-shot POSIX message-queue registrations.
+fn release_mq_notifications(process: ObjId) {
+    for queue in proc::linux_mq_queues(process) {
+        let mut state = queue.state.lock();
+        if state
+            .notification
+            .is_some_and(|notification| notification.process == process)
+        {
+            state.notification = None;
         }
     }
 }
@@ -14619,6 +14700,28 @@ fn linux_epoll_readiness(
                 0
             }
         }
+        compat_core::fd::CompatKind::MessageQueue => {
+            let queue = proc::linux_mq_state(pid, registration.handle)?;
+            let state = queue.state.lock();
+            let mut ready = 0;
+            if requested & EPOLLIN != 0
+                && registration
+                    .rights
+                    .contains(kernel_core::object::Rights::READ)
+                && !state.messages.is_empty()
+            {
+                ready |= EPOLLIN;
+            }
+            if requested & EPOLLOUT != 0
+                && registration
+                    .rights
+                    .contains(kernel_core::object::Rights::WRITE)
+                && state.messages.len() < state.max_messages
+            {
+                ready |= EPOLLOUT;
+            }
+            ready
+        }
         compat_core::fd::CompatKind::Pipe => {
             let pipe = proc::linux_pipe_endpoint(pid, registration.handle)?;
             let mut ready = 0;
@@ -14934,6 +15037,26 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     } else {
                         0
                     }
+                }
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::MessageQueue => {
+                    let Some(queue) = proc::linux_mq_state(pid, entry.handle) else {
+                        continue;
+                    };
+                    let state = queue.state.lock();
+                    let mut ready = 0;
+                    if events & POLLIN != 0
+                        && entry.rights.contains(kernel_core::object::Rights::READ)
+                        && !state.messages.is_empty()
+                    {
+                        ready |= POLLIN;
+                    }
+                    if events & POLLOUT != 0
+                        && entry.rights.contains(kernel_core::object::Rights::WRITE)
+                        && state.messages.len() < state.max_messages
+                    {
+                        ready |= POLLOUT;
+                    }
+                    ready
                 }
                 Some(entry) if entry.kind == compat_core::fd::CompatKind::Pidfd => {
                     if events & POLLIN != 0

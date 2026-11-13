@@ -338,10 +338,21 @@ pub(crate) struct LinuxMqMessage {
 }
 
 #[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxMqNotification {
+    pub(crate) process: ObjId,
+    pub(crate) notify: u32,
+    pub(crate) signal: u32,
+    pub(crate) value: u64,
+}
+
+#[cfg(feature = "linux-abi")]
 pub(crate) struct LinuxMqState {
     pub(crate) max_messages: usize,
     pub(crate) message_size: usize,
     pub(crate) messages: VecDeque<LinuxMqMessage>,
+    pub(crate) blocked_receivers: usize,
+    pub(crate) notification: Option<LinuxMqNotification>,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -2636,6 +2647,25 @@ pub(crate) fn linux_mq_state(pid: ObjId, handle: u64) -> Option<Arc<LinuxMqShare
             .find(|queue| queue.handle == handle)
             .map(|queue| Arc::clone(&queue.queue)),
         _ => None,
+    })
+}
+
+/// Returns every message-queue object currently referenced by a process.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_mq_queues(pid: ObjId) -> Vec<Arc<LinuxMqShared>> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()
+            .map(|linux| {
+                linux
+                    .message_queues
+                    .iter()
+                    .map(|queue| Arc::clone(&queue.queue))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
     })
 }
 

@@ -156,6 +156,24 @@ static void signal_noop(int signal) {
 static volatile sig_atomic_t posix_timer_signals;
 static volatile sig_atomic_t interval_timer_signals;
 static volatile sig_atomic_t sigsuspend_signals;
+static volatile sig_atomic_t mq_notification_signals;
+static volatile sig_atomic_t mq_notification_pid;
+static volatile sig_atomic_t mq_notification_uid;
+static volatile sig_atomic_t mq_notification_code;
+static volatile sig_atomic_t mq_notification_value;
+
+static void mq_notification_handler(int signal, siginfo_t *info, void *context) {
+    (void)context;
+    if (signal == SIGUSR1) {
+        mq_notification_signals++;
+        if (info != NULL) {
+            mq_notification_pid = info->si_pid;
+            mq_notification_uid = info->si_uid;
+            mq_notification_code = info->si_code;
+            mq_notification_value = info->si_value.sival_int;
+        }
+    }
+}
 
 static void posix_timer_signal_handler(int signal) {
     if (signal == SIGUSR1) {
@@ -4762,8 +4780,131 @@ int main(void) {
                 0600, NULL) != -1 || errno != EEXIST) {
         return 555;
     }
+    mq_change.mq_flags = O_NONBLOCK;
+    if (syscall(SYS_mq_getsetattr, mq_fd, &mq_change, NULL) != 0) {
+        return 654;
+    }
+    struct pollfd mq_poll = {
+        .fd = mq_fd,
+        .events = POLLIN | POLLOUT,
+    };
+    int mq_epfd = epoll_create1(EPOLL_CLOEXEC);
+    struct epoll_event mq_interest = {
+        .events = EPOLLIN | EPOLLOUT,
+        .data.u64 = 0x4d51504f4c4cULL,
+    };
+    struct epoll_event mq_ready = {0};
+    if (mq_epfd < 0 ||
+        epoll_ctl(mq_epfd, EPOLL_CTL_ADD, mq_fd, &mq_interest) != 0 ||
+        syscall(SYS_mq_timedsend, mq_fd, "poll", 4, 0, NULL) != 0 ||
+        poll(&mq_poll, 1, 1000) != 1 ||
+        (mq_poll.revents & (POLLIN | POLLOUT)) !=
+            (POLLIN | POLLOUT) ||
+        epoll_wait(mq_epfd, &mq_ready, 1, 1000) != 1 ||
+        (mq_ready.events & (EPOLLIN | EPOLLOUT)) !=
+            (EPOLLIN | EPOLLOUT) ||
+        mq_ready.data.u64 != 0x4d51504f4c4cULL ||
+        syscall(SYS_mq_timedreceive, mq_fd, mq_first,
+                sizeof(mq_first), NULL, NULL) != 4 ||
+        memcmp(mq_first, "poll", 4) != 0 ||
+        epoll_ctl(mq_epfd, EPOLL_CTL_DEL, mq_fd, NULL) != 0 ||
+        close(mq_epfd) != 0) {
+        return 655;
+    }
+    struct sigevent mq_none_event = {.sigev_notify = SIGEV_NONE};
+    if (syscall(SYS_mq_notify, mq_fd, &mq_none_event) != 0) {
+        return 656;
+    }
     errno = 0;
-    if (syscall(SYS_mq_notify, mq_fd, NULL) != 0 ||
+    if (syscall(SYS_mq_notify, mq_fd, &mq_none_event) != -1 ||
+        errno != EBUSY) {
+        return 657;
+    }
+    if (syscall(SYS_mq_timedsend, mq_fd, "none", 4, 0, NULL) != 0 ||
+        syscall(SYS_mq_timedreceive, mq_fd, mq_first,
+                sizeof(mq_first), NULL, NULL) != 4 ||
+        memcmp(mq_first, "none", 4) != 0 ||
+        syscall(SYS_mq_notify, mq_fd, &mq_none_event) != 0 ||
+        syscall(SYS_mq_notify, mq_fd, NULL) != 0) {
+        return 658;
+    }
+    errno = 0;
+    if (syscall(SYS_mq_notify, mq_fd, NULL) != -1 || errno != EINVAL) {
+        return 659;
+    }
+    struct sigevent mq_bad_event = {
+        .sigev_notify = SIGEV_SIGNAL,
+        .sigev_signo = 0,
+    };
+    errno = 0;
+    if (syscall(SYS_mq_notify, mq_fd, (void *)1) != -1 ||
+        errno != EFAULT ||
+        syscall(SYS_mq_notify, mq_fd, &mq_bad_event) != -1 ||
+        errno != EINVAL) {
+        return 666;
+    }
+    struct sigaction mq_action = {0};
+    struct sigaction mq_previous_action;
+    mq_action.sa_sigaction = mq_notification_handler;
+    mq_action.sa_flags = SA_SIGINFO;
+    sigemptyset(&mq_action.sa_mask);
+    sigset_t mq_signal_set;
+    sigset_t mq_previous_mask;
+    sigemptyset(&mq_signal_set);
+    sigaddset(&mq_signal_set, SIGUSR1);
+    struct sigevent mq_signal_event = {
+        .sigev_notify = SIGEV_SIGNAL,
+        .sigev_signo = SIGUSR1,
+        .sigev_value.sival_int = 0x4d514e4f,
+    };
+    if (sigaction(SIGUSR1, &mq_action, &mq_previous_action) != 0 ||
+        sigprocmask(SIG_UNBLOCK, &mq_signal_set, &mq_previous_mask) != 0) {
+        return 660;
+    }
+    mq_notification_signals = 0;
+    if (syscall(SYS_mq_notify, mq_fd, &mq_signal_event) != 0) {
+        return 661;
+    }
+    if (syscall(SYS_mq_timedsend, mq_fd, "held", 4, 0, NULL) != 0 ||
+        syscall(SYS_mq_timedsend, mq_fd, "wait", 4, 0, NULL) != 0) {
+        return 662;
+    }
+    for (int attempt = 0; attempt < 8 && mq_notification_signals == 0;
+         attempt++) {
+        syscall(SYS_getpid);
+    }
+    if (mq_notification_signals != 0 ||
+        syscall(SYS_mq_timedreceive, mq_fd, mq_first,
+                sizeof(mq_first), NULL, NULL) != 4 ||
+        memcmp(mq_first, "held", 4) != 0 ||
+        syscall(SYS_mq_timedreceive, mq_fd, mq_first,
+                sizeof(mq_first), NULL, NULL) != 4 ||
+        memcmp(mq_first, "wait", 4) != 0 ||
+        syscall(SYS_mq_timedsend, mq_fd, "note", 4, 0, NULL) != 0) {
+        return 663;
+    }
+    for (int attempt = 0; attempt < 8 && mq_notification_signals == 0;
+         attempt++) {
+        syscall(SYS_getpid);
+    }
+    if (mq_notification_signals != 1 ||
+        mq_notification_pid != getpid() ||
+        mq_notification_uid != getuid() ||
+        mq_notification_code != SI_MESGQ ||
+        (uint32_t)mq_notification_value != 0x4d514e4f ||
+        syscall(SYS_mq_timedreceive, mq_fd, mq_first,
+                sizeof(mq_first), NULL, NULL) != 4 ||
+        memcmp(mq_first, "note", 4) != 0) {
+        return 664;
+    }
+    if (syscall(SYS_mq_notify, mq_fd, &mq_signal_event) != 0 ||
+        syscall(SYS_mq_notify, mq_fd, NULL) != 0 ||
+        sigprocmask(SIG_SETMASK, &mq_previous_mask, NULL) != 0 ||
+        sigaction(SIGUSR1, &mq_previous_action, NULL) != 0) {
+        return 665;
+    }
+    errno = 0;
+    if (syscall(SYS_mq_notify, mq_fd, NULL) != -1 || errno != EINVAL ||
         syscall(SYS_mq_unlink, mq_name) != 0 ||
         syscall(SYS_mq_timedsend, mq_fd, "live", 4, 0, NULL) != 0 ||
         syscall(SYS_mq_timedreceive, mq_fd, mq_first,
