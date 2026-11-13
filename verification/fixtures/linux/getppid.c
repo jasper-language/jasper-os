@@ -3412,6 +3412,66 @@ int main(void) {
         close(sendfile_input) != 0) {
         return 450;
     }
+    void *locked_memory =
+        mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (locked_memory == MAP_FAILED ||
+        syscall(SYS_mlock, locked_memory, 4096) != 0 ||
+        syscall(SYS_mlock2, locked_memory, 4096, 1) != 0 ||
+        syscall(SYS_munlock, locked_memory, 4096) != 0 ||
+        syscall(SYS_mlockall, MCL_CURRENT | MCL_FUTURE) != 0 ||
+        syscall(SYS_munlockall) != 0 ||
+        munmap(locked_memory, 4096) != 0) {
+        return 451;
+    }
+    errno = 0;
+    if (syscall(SYS_mlock, (void *)(uintptr_t)1, 4096) != -1 ||
+        errno != EINVAL) {
+        return 452;
+    }
+    errno = 0;
+    if (syscall(SYS_mlock2, locked_memory, 4096, 2) != -1 ||
+        errno != EINVAL) {
+        return 453;
+    }
+    errno = 0;
+    if (syscall(SYS_mlockall, 8) != -1 || errno != EINVAL) {
+        return 454;
+    }
+    struct jasper_open_how {
+        uint64_t flags;
+        uint64_t mode;
+        uint64_t resolve;
+    } open_how = {
+        .flags = O_RDONLY | O_CLOEXEC,
+    };
+    int openat2_fd =
+        syscall(SYS_openat2, AT_FDCWD,
+                "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                &open_how, sizeof(open_how));
+    unsigned char openat2_magic[4] = {0};
+    if (openat2_fd < 0 ||
+        read(openat2_fd, openat2_magic, sizeof(openat2_magic)) !=
+            (ssize_t)sizeof(openat2_magic) ||
+        memcmp(openat2_magic, "\177ELF", sizeof(openat2_magic)) != 0 ||
+        close(openat2_fd) != 0) {
+        return 455;
+    }
+    errno = 0;
+    if (syscall(SYS_openat2, AT_FDCWD,
+                "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                &open_how, 16) != -1 ||
+        errno != EINVAL) {
+        return 456;
+    }
+    open_how.resolve = 4;
+    errno = 0;
+    if (syscall(SYS_openat2, AT_FDCWD,
+                "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                &open_how, sizeof(open_how)) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 457;
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);
