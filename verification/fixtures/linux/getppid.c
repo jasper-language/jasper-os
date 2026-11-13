@@ -4130,7 +4130,8 @@ int main(void) {
     fflush(stdout);
     char *exec_argv[] = {"/usr/bin/jasper-getppid", NULL};
     char *exec_envp[] = {"JASPER_EXEC_CHILD=1", NULL};
-    execve(exec_argv[0], exec_argv, exec_envp);
+    syscall(SYS_execveat, AT_FDCWD, exec_argv[0],
+            exec_argv, exec_envp, 0);
     printf("jasper-exec-fail errno=%d\n", errno);
     return 61;
 }

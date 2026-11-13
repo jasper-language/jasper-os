@@ -227,6 +227,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Clone3,
         LinuxSyscall::Vfork,
         LinuxSyscall::Execve,
+        LinuxSyscall::Execveat,
         LinuxSyscall::Futex,
         LinuxSyscall::Exit,
         LinuxSyscall::ExitGroup,

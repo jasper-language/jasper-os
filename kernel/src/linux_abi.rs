@@ -1810,8 +1810,13 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
     if !proc::linux_syscall_allowed(pid, call.syscall) {
         return SyscallOutcome::value(-i64::from(CompatErrno::Perm as i32));
     }
-    if call.syscall == LinuxSyscall::Execve {
-        return match linux_execve(pid, call.args) {
+    if matches!(call.syscall, LinuxSyscall::Execve | LinuxSyscall::Execveat) {
+        let executed = if call.syscall == LinuxSyscall::Execve {
+            linux_execve(pid, call.args)
+        } else {
+            linux_execveat(pid, call.args)
+        };
+        return match executed {
             Ok((entry, user_rsp)) => {
                 let _ = proc::vfork_commit_exec(pid);
                 SyscallOutcome {
@@ -4043,6 +4048,14 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
         let _ = (resolved, argv, envp);
         Err(CompatErrno::NoSys)
     }
+}
+
+/// Implements the `AT_FDCWD` and no-flag `execveat(2)` subset.
+fn linux_execveat(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
+    if !is_at_fdcwd(args[0]) || args[4] != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    linux_execve(pid, [args[1], args[2], args[3], 0, 0, 0])
 }
 
 /// Reads a bounded NULL-terminated vector of NUL-terminated user strings.
