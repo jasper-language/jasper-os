@@ -10,7 +10,7 @@ use compat_core::syscall::{
     LINUX_NR_FUTEX,
 };
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use kernel_core::objtable::ObjId;
 use kernel_core::paging::MapFlags;
@@ -31,7 +31,9 @@ static PATH_TRACE_REMAINING: AtomicU32 = AtomicU32::new(24);
 const MAX_LINUX_THREADS: usize = 64;
 const MAX_FUTEX_WORDS: usize = 32;
 const MAX_PROCESS_SIGNAL_SETS: usize = 16;
+const MAX_POSIX_TIMERS: usize = 32;
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
+static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
 
 #[derive(Clone, Copy)]
 struct SignalOrigin {
@@ -140,12 +142,26 @@ struct ProcessSignalSet {
     origins: [SignalOrigin; 64],
 }
 
+#[derive(Clone, Copy)]
+struct PosixTimer {
+    process: ObjId,
+    id: u64,
+    clock: u32,
+    notify: u32,
+    signal: u32,
+    next: u64,
+    interval: u64,
+    overrun: u64,
+    active: bool,
+}
+
 struct CompatState {
     threads: [Option<LinuxThread>; MAX_LINUX_THREADS],
     futexes: [Option<FutexWord>; MAX_FUTEX_WORDS],
     process_signals: [Option<ProcessSignalSet>; MAX_PROCESS_SIGNAL_SETS],
     flock_locks: [Option<FlockLock>; MAX_FLOCK_LOCKS],
     flock_waiters: [Option<FlockWaiter>; MAX_FLOCK_LOCKS],
+    posix_timers: [Option<PosixTimer>; MAX_POSIX_TIMERS],
 }
 
 impl CompatState {
@@ -156,6 +172,7 @@ impl CompatState {
             process_signals: [None; MAX_PROCESS_SIGNAL_SETS],
             flock_locks: [None; MAX_FLOCK_LOCKS],
             flock_waiters: [None; MAX_FLOCK_LOCKS],
+            posix_timers: [None; MAX_POSIX_TIMERS],
         }
     }
 }
@@ -1328,6 +1345,7 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
         let _ = futex_wake(process, clear, usize::MAX, u32::MAX);
     }
     if last_thread {
+        release_posix_timers(process);
         remove_process_signals(process);
         crate::binder::release_process(process);
     }
@@ -1816,6 +1834,11 @@ fn execute(
         LinuxSyscall::TimerFdCreate => compat_result(linux_timerfd_create(pid, call.args)),
         LinuxSyscall::TimerFdSettime => compat_result(linux_timerfd_settime(pid, call.args)),
         LinuxSyscall::TimerFdGettime => compat_result(linux_timerfd_gettime(pid, call.args)),
+        LinuxSyscall::TimerCreate => compat_result(linux_timer_create(pid, call.args)),
+        LinuxSyscall::TimerSettime => compat_result(linux_timer_settime(pid, call.args)),
+        LinuxSyscall::TimerGettime => compat_result(linux_timer_gettime(pid, call.args)),
+        LinuxSyscall::TimerGetoverrun => compat_result(linux_timer_getoverrun(pid, call.args)),
+        LinuxSyscall::TimerDelete => compat_result(linux_timer_delete(pid, call.args)),
         LinuxSyscall::SendMsg => compat_result(linux_sendmsg(pid, call.args)),
         LinuxSyscall::RecvMsg => compat_result(linux_recvmsg(pid, call.args)),
         LinuxSyscall::SendTo => compat_result(linux_sendto(pid, call.args)),
@@ -5015,6 +5038,222 @@ fn linux_signalfd_read(
         }
         sched::pause();
     }
+}
+
+fn linux_posix_timer_settle_one(
+    timer: &mut PosixTimer,
+) -> Result<u64, CompatErrno> {
+    let now = linux_timerfd_clock_now(timer.clock)?;
+    if !timer.active || timer.next == 0 || now < timer.next {
+        return Ok(now);
+    }
+    let expired = if timer.interval == 0 {
+        1
+    } else {
+        (now - timer.next) / timer.interval + 1
+    };
+    if timer.notify == 0 && expired > 1 {
+        timer.overrun = timer.overrun.saturating_add(expired - 1);
+    }
+    timer.next = if timer.interval == 0 {
+        0
+    } else {
+        timer
+            .next
+            .saturating_add(expired.saturating_mul(timer.interval))
+    };
+    timer.active = timer.next != 0;
+    Ok(now)
+}
+
+/// Settles process timers from the periodic clock interrupt.
+/// 从周期时钟中断结算进程计时器。
+pub(crate) fn settle_posix_timers(now: u64) {
+    let mut pending = [None; MAX_POSIX_TIMERS];
+    let mut pending_count = 0usize;
+    {
+        let mut state = COMPAT.lock();
+        for timer in state.posix_timers.iter_mut().flatten() {
+            if !timer.active {
+                continue;
+            }
+            let current = if timer.clock == 0 {
+                match crate::arch::wall_clock_ns() {
+                    Some(value) => value,
+                    None => continue,
+                }
+            } else {
+                now
+            };
+            if current < timer.next {
+                continue;
+            }
+            let expired = if timer.interval == 0 {
+                1
+            } else {
+                (current - timer.next) / timer.interval + 1
+            };
+            if timer.notify == 0 && expired > 1 {
+                timer.overrun = timer.overrun.saturating_add(expired - 1);
+            }
+            timer.next = if timer.interval == 0 {
+                0
+            } else {
+                timer
+                    .next
+                    .saturating_add(expired.saturating_mul(timer.interval))
+            };
+            timer.active = timer.next != 0;
+            if timer.notify == 0 && pending_count < pending.len() {
+                pending[pending_count] = Some((timer.process, timer.signal));
+                pending_count += 1;
+            }
+        }
+    }
+    for (process, signal) in pending.into_iter().flatten() {
+        let _ = queue_process_signal(process, signal);
+    }
+}
+
+fn release_posix_timers(process: ObjId) {
+    let mut state = COMPAT.lock();
+    for timer in state.posix_timers.iter_mut() {
+        if timer.is_some_and(|timer| timer.process == process) {
+            *timer = None;
+        }
+    }
+}
+
+fn linux_timer_create(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SIGEV_SIGNAL: u32 = 0;
+    const SIGEV_NONE: u32 = 1;
+    const SIGALRM: u32 = 14;
+    let clock = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let _ = linux_timerfd_clock_now(clock)?;
+    let mut notify = SIGEV_SIGNAL;
+    let mut signal = SIGALRM;
+    if args[1] != 0 {
+        let mut event = [0u8; 64];
+        copy_from_user(&mut event, args[1], 64).map_err(|_| CompatErrno::Fault)?;
+        signal = u32::from_le_bytes(event[8..12].try_into().unwrap());
+        notify = u32::from_le_bytes(event[12..16].try_into().unwrap());
+        if !matches!(notify, SIGEV_SIGNAL | SIGEV_NONE) {
+            return Err(CompatErrno::NotSupported);
+        }
+    }
+    if notify == SIGEV_SIGNAL && (signal == 0 || signal > 64 || matches!(signal, 9 | 19)) {
+        return Err(CompatErrno::Invalid);
+    }
+    let id = NEXT_POSIX_TIMER_ID.fetch_add(1, Ordering::AcqRel);
+    if id == 0 || id == u64::MAX {
+        return Err(CompatErrno::NoSpace);
+    }
+    {
+        let mut state = COMPAT.lock();
+        let Some(slot) = state.posix_timers.iter().position(Option::is_none) else {
+            return Err(CompatErrno::NoSpace);
+        };
+        state.posix_timers[slot] = Some(PosixTimer {
+            process: pid,
+            id,
+            clock,
+            notify,
+            signal,
+            next: 0,
+            interval: 0,
+            overrun: 0,
+            active: false,
+        });
+    }
+    if copy_to_user(args[2], &id.to_le_bytes(), 8).is_err() {
+        let _ = linux_timer_delete(pid, [id, 0, 0, 0, 0, 0]);
+        return Err(CompatErrno::Fault);
+    }
+    Ok(0)
+}
+
+fn linux_timer_settime(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const TIMER_ABSTIME: u64 = 1;
+    if args[1] & !TIMER_ABSTIME != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let interval = read_linux_timespec(args[2])?;
+    let value_address = args[2].checked_add(16).ok_or(CompatErrno::Fault)?;
+    let value = read_linux_timespec(value_address)?;
+    let (now, old_next, old_interval) = {
+        let mut state = COMPAT.lock();
+        let timer = state
+            .posix_timers
+            .iter_mut()
+            .flatten()
+            .find(|timer| timer.process == pid && timer.id == args[0])
+            .ok_or(CompatErrno::Invalid)?;
+        let now = linux_posix_timer_settle_one(timer)?;
+        (now, timer.next, timer.interval)
+    };
+    if args[3] != 0 {
+        linux_timerfd_write_state(args[3], old_next, old_interval, now)?;
+    }
+    let next = if value == 0 {
+        0
+    } else if args[1] & TIMER_ABSTIME != 0 {
+        value
+    } else {
+        now.checked_add(value).ok_or(CompatErrno::Invalid)?
+    };
+    let mut state = COMPAT.lock();
+    let timer = state
+        .posix_timers
+        .iter_mut()
+        .flatten()
+        .find(|timer| timer.process == pid && timer.id == args[0])
+        .ok_or(CompatErrno::Invalid)?;
+    timer.next = next;
+    timer.interval = interval;
+    timer.overrun = 0;
+    timer.active = next != 0;
+    Ok(0)
+}
+
+fn linux_timer_gettime(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let (now, next, interval) = {
+        let mut state = COMPAT.lock();
+        let timer = state
+            .posix_timers
+            .iter_mut()
+            .flatten()
+            .find(|timer| timer.process == pid && timer.id == args[0])
+            .ok_or(CompatErrno::Invalid)?;
+        let now = linux_posix_timer_settle_one(timer)?;
+        (now, timer.next, timer.interval)
+    };
+    linux_timerfd_write_state(args[1], next, interval, now)?;
+    Ok(0)
+}
+
+fn linux_timer_getoverrun(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let mut state = COMPAT.lock();
+    let timer = state
+        .posix_timers
+        .iter_mut()
+        .flatten()
+        .find(|timer| timer.process == pid && timer.id == args[0])
+        .ok_or(CompatErrno::Invalid)?;
+    let _ = linux_posix_timer_settle_one(timer)?;
+    Ok(timer.overrun)
+}
+
+fn linux_timer_delete(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let mut state = COMPAT.lock();
+    let Some(slot) = state
+        .posix_timers
+        .iter()
+        .position(|timer| timer.is_some_and(|timer| timer.process == pid && timer.id == args[0]))
+    else {
+        return Err(CompatErrno::Invalid);
+    };
+    state.posix_timers[slot] = None;
+    Ok(0)
 }
 
 fn linux_ftruncate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {

@@ -85,6 +85,14 @@ static void signal_noop(int signal) {
     (void)signal;
 }
 
+static volatile sig_atomic_t posix_timer_signals;
+
+static void posix_timer_signal_handler(int signal) {
+    if (signal == SIGUSR1) {
+        posix_timer_signals++;
+    }
+}
+
 static uint32_t futex_word;
 static atomic_int futex_started;
 static atomic_int futex_finished;
@@ -2724,6 +2732,105 @@ int main(void) {
     errno = 0;
     if (timerfd_create((clockid_t)12345, 0) != -1 || errno != EINVAL) {
         return 358;
+    }
+    timer_t posix_timer = (timer_t)-1;
+    struct sigevent posix_event = {.sigev_notify = SIGEV_NONE};
+    if (syscall(SYS_timer_create, CLOCK_MONOTONIC, &posix_event,
+                &posix_timer) != 0 || posix_timer == (timer_t)-1) {
+        return 366;
+    }
+    struct itimerspec posix_values = {
+        .it_value = {.tv_sec = 0, .tv_nsec = 20000000},
+    };
+    struct itimerspec posix_current = {0};
+    if (syscall(SYS_timer_settime, posix_timer, 0, &posix_values,
+                NULL) != 0 ||
+        syscall(SYS_timer_gettime, posix_timer, &posix_current) != 0 ||
+        posix_current.it_value.tv_sec != 0 ||
+        posix_current.it_value.tv_nsec == 0) {
+        return 367;
+    }
+    struct timespec posix_delay = {.tv_sec = 0, .tv_nsec = 40000000};
+    if (nanosleep(&posix_delay, NULL) != 0 ||
+        syscall(SYS_timer_getoverrun, posix_timer) != 0 ||
+        syscall(SYS_timer_gettime, posix_timer, &posix_current) != 0 ||
+        posix_current.it_value.tv_sec != 0 ||
+        posix_current.it_value.tv_nsec != 0 ||
+        syscall(SYS_timer_delete, posix_timer) != 0) {
+        return 368;
+    }
+    errno = 0;
+    if (syscall(SYS_timer_gettime, posix_timer, &posix_current) != -1 ||
+        errno != EINVAL) {
+        return 369;
+    }
+    posix_timer_signals = 0;
+    if (signal(SIGUSR1, posix_timer_signal_handler) == SIG_ERR) {
+        return 370;
+    }
+    struct sigevent signal_event = {
+        .sigev_notify = SIGEV_SIGNAL,
+        .sigev_signo = SIGUSR1,
+    };
+    if (syscall(SYS_timer_create, CLOCK_MONOTONIC, &signal_event,
+                &posix_timer) != 0) {
+        return 371;
+    }
+    posix_values.it_value = (struct timespec){.tv_sec = 0, .tv_nsec = 20000000};
+    if (syscall(SYS_timer_settime, posix_timer, 0, &posix_values,
+                NULL) != 0) {
+        return 372;
+    }
+    struct timespec signal_wait = {.tv_sec = 0, .tv_nsec = 500000000};
+    errno = 0;
+    long signal_sleep = nanosleep(&signal_wait, NULL);
+    int signal_sleep_errno = errno;
+    if ((signal_sleep != -1 || signal_sleep_errno != EINTR) &&
+        posix_timer_signals == 0) {
+        return 373;
+    }
+    for (int attempt = 0; attempt < 8 && posix_timer_signals == 0; attempt++) {
+        syscall(SYS_getpid);
+    }
+    if (posix_timer_signals == 0 ||
+        syscall(SYS_timer_delete, posix_timer) != 0) {
+        return 374;
+    }
+    sigset_t timer_signal_set;
+    sigset_t timer_old_mask;
+    sigemptyset(&timer_signal_set);
+    sigaddset(&timer_signal_set, SIGUSR1);
+    if (sigprocmask(SIG_BLOCK, &timer_signal_set, &timer_old_mask) != 0 ||
+        syscall(SYS_timer_create, CLOCK_MONOTONIC, &signal_event,
+                &posix_timer) != 0) {
+        return 377;
+    }
+    posix_values.it_interval = (struct timespec){.tv_sec = 0, .tv_nsec = 10000000};
+    posix_values.it_value = (struct timespec){.tv_sec = 0, .tv_nsec = 10000000};
+    struct timespec overrun_delay = {.tv_sec = 0, .tv_nsec = 80000000};
+    if (syscall(SYS_timer_settime, posix_timer, 0, &posix_values,
+                NULL) != 0 ||
+        nanosleep(&overrun_delay, NULL) != 0 ||
+        syscall(SYS_timer_getoverrun, posix_timer) == 0) {
+        return 378;
+    }
+    memset(&posix_values, 0, sizeof(posix_values));
+    if (syscall(SYS_timer_settime, posix_timer, 0, &posix_values,
+                NULL) != 0 ||
+        syscall(SYS_timer_delete, posix_timer) != 0 ||
+        sigprocmask(SIG_SETMASK, &timer_old_mask, NULL) != 0) {
+        return 379;
+    }
+    struct sigevent unsupported_event = {.sigev_notify = SIGEV_THREAD};
+    errno = 0;
+    if (syscall(SYS_timer_create, CLOCK_MONOTONIC, &unsupported_event,
+                &posix_timer) != -1 || errno != EOPNOTSUPP) {
+        return 375;
+    }
+    errno = 0;
+    if (syscall(SYS_timer_create, CLOCK_MONOTONIC, &posix_event,
+                NULL) != -1 || errno != EFAULT) {
+        return 376;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);

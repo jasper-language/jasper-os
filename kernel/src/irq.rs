@@ -69,6 +69,8 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
             let entry = crate::arch::clock_counter();
             if let Some(now) = crate::hrtime::now() {
                 crate::user_timer::wake_due(now);
+                #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+                crate::linux_abi::settle_posix_timers(now);
             }
             crate::smp::on_local_tick();
             device::on_cpu_tick();
@@ -87,6 +89,8 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
         IrqLine::LocalTimer => {
             if let Some(now) = crate::hrtime::now() {
                 crate::user_timer::wake_due(now);
+                #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+                crate::linux_abi::settle_posix_timers(now);
             }
             #[cfg(feature="rt2-verify")]
             let diagnostic=crate::rt2_demo::timer_irq();
