@@ -11,6 +11,7 @@
 
 use crate::assembly::Binding;
 use crate::native_install::{Actor, OwnerScope, Subject};
+use crate::security::{IdentityClass, SecurityContext};
 
 pub const MAX_MODULE_NAME_BYTES: usize = 48;
 pub const MAX_MODULE_DEPENDENCIES: usize = 16;
@@ -94,6 +95,14 @@ pub struct ModuleKey {
 }
 
 impl ModuleKey {
+    pub const fn slot(self) -> u16 {
+        self.slot
+    }
+
+    pub const fn generation(self) -> u32 {
+        self.generation
+    }
+
     pub const fn to_raw(self) -> u64 {
         ((self.generation as u64) << 16) | self.slot as u64
     }
@@ -135,10 +144,37 @@ pub enum ModuleOperation {
     Uninstall,
 }
 
+/// Stable target supplied to policy. The provisional key is available during
+/// install so PEP audit and revocation are bound to the same generation that
+/// may later be committed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModuleTarget {
+    owner: OwnerScope,
+    key: Option<ModuleKey>,
+}
+
+impl ModuleTarget {
+    pub const fn new(owner: OwnerScope, key: ModuleKey) -> Self {
+        Self {
+            owner,
+            key: Some(key),
+        }
+    }
+
+    pub const fn owner(self) -> OwnerScope {
+        self.owner
+    }
+
+    pub const fn key(self) -> Option<ModuleKey> {
+        self.key
+    }
+}
+
 /// Existing policy must answer this question; the lifecycle model never
 /// derives authorization from a module name, installation path or AppID.
 pub trait ModuleAuthority {
-    fn authorize(&self, actor: Actor<'_>, operation: ModuleOperation, owner: OwnerScope) -> bool;
+    fn authorize(&self, actor: Actor<'_>, operation: ModuleOperation, target: ModuleTarget)
+        -> bool;
 }
 
 /// Runtime activation hooks supplied by the existing assembly/runtime layer.
@@ -171,8 +207,13 @@ pub trait ModuleLifecycle {
 pub struct ScopeModuleAuthority;
 
 impl ModuleAuthority for ScopeModuleAuthority {
-    fn authorize(&self, actor: Actor<'_>, _operation: ModuleOperation, owner: OwnerScope) -> bool {
-        match owner {
+    fn authorize(
+        &self,
+        actor: Actor<'_>,
+        _operation: ModuleOperation,
+        target: ModuleTarget,
+    ) -> bool {
+        match target.owner {
             OwnerScope::System => actor.subjects.contains(&Subject::System),
             OwnerScope::Device(id) => actor.subjects.contains(&Subject::Device(id)),
             OwnerScope::User(id) => actor.subjects.contains(&Subject::User(id)),
@@ -180,6 +221,53 @@ impl ModuleAuthority for ScopeModuleAuthority {
             OwnerScope::Tenant(id) => actor.subjects.contains(&Subject::Tenant(id)),
             OwnerScope::Workload(id) => actor.subjects.contains(&Subject::Workload(id)),
         }
+    }
+}
+
+/// Final policy engine used by the production SEC/PEP adapter.
+pub trait ModulePep {
+    fn authorize(
+        &self,
+        context: SecurityContext,
+        operation: ModuleOperation,
+        target: ModuleTarget,
+    ) -> bool;
+}
+
+/// SEC-context wrapper around a production PEP. The caller context must be an
+/// active process, task or service identity; owner scope and target generation
+/// are checked before the policy engine sees the request.
+pub struct SecuredModuleAuthority<'a, P: ModulePep> {
+    context: SecurityContext,
+    pep: &'a P,
+}
+
+impl<'a, P: ModulePep> SecuredModuleAuthority<'a, P> {
+    pub fn new(context: SecurityContext, pep: &'a P) -> Option<Self> {
+        context.require_active().ok()?;
+        matches!(
+            context.object.class,
+            IdentityClass::Process | IdentityClass::Task | IdentityClass::Service
+        )
+        .then_some(Self { context, pep })
+    }
+
+    pub const fn context(&self) -> SecurityContext {
+        self.context
+    }
+}
+
+impl<P: ModulePep> ModuleAuthority for SecuredModuleAuthority<'_, P> {
+    fn authorize(
+        &self,
+        actor: Actor<'_>,
+        operation: ModuleOperation,
+        target: ModuleTarget,
+    ) -> bool {
+        self.context.require_active().is_ok()
+            && target.key().is_some()
+            && ScopeModuleAuthority.authorize(actor, operation, target)
+            && self.pep.authorize(self.context, operation, target)
     }
 }
 
@@ -330,9 +418,6 @@ impl<const N: usize> NativeModuleRegistry<N> {
         spec: ModuleSpec<'_>,
     ) -> Result<ModuleKey, ModuleError> {
         validate_spec(spec)?;
-        if !authority.authorize(actor, ModuleOperation::Install, spec.owner) {
-            return Err(ModuleError::NotAuthorized);
-        }
         if self
             .slots
             .iter()
@@ -356,6 +441,13 @@ impl<const N: usize> NativeModuleRegistry<N> {
             slot: slot as u16,
             generation,
         };
+        if !authority.authorize(
+            actor,
+            ModuleOperation::Install,
+            ModuleTarget::new(spec.owner, key),
+        ) {
+            return Err(ModuleError::NotAuthorized);
+        }
         let mut dependencies = [None; MAX_MODULE_DEPENDENCIES];
         for (target, dependency) in dependencies
             .iter_mut()
@@ -386,7 +478,11 @@ impl<const N: usize> NativeModuleRegistry<N> {
     ) -> Result<(), ModuleError> {
         let slot = self.slot(key)?;
         let record = self.slots[slot].ok_or(ModuleError::StaleKey)?;
-        if !authority.authorize(actor, ModuleOperation::Start, record.owner) {
+        if !authority.authorize(
+            actor,
+            ModuleOperation::Start,
+            ModuleTarget::new(record.owner, record.key),
+        ) {
             return Err(ModuleError::NotAuthorized);
         }
         if record.state == ModuleState::Started {
@@ -445,7 +541,11 @@ impl<const N: usize> NativeModuleRegistry<N> {
     ) -> Result<(), ModuleError> {
         let slot = self.slot(key)?;
         let record = self.slots[slot].ok_or(ModuleError::StaleKey)?;
-        if !authority.authorize(actor, ModuleOperation::Stop, record.owner) {
+        if !authority.authorize(
+            actor,
+            ModuleOperation::Stop,
+            ModuleTarget::new(record.owner, record.key),
+        ) {
             return Err(ModuleError::NotAuthorized);
         }
         if record.state != ModuleState::Started {
@@ -495,7 +595,11 @@ impl<const N: usize> NativeModuleRegistry<N> {
     ) -> Result<(), ModuleError> {
         let slot = self.slot(key)?;
         let record = self.slots[slot].ok_or(ModuleError::StaleKey)?;
-        if !authority.authorize(actor, ModuleOperation::Uninstall, record.owner) {
+        if !authority.authorize(
+            actor,
+            ModuleOperation::Uninstall,
+            ModuleTarget::new(record.owner, record.key),
+        ) {
             return Err(ModuleError::NotAuthorized);
         }
         if record.state == ModuleState::Started {
@@ -517,7 +621,11 @@ impl<const N: usize> NativeModuleRegistry<N> {
         key: ModuleKey,
     ) -> Result<ModuleStatus, ModuleError> {
         let record = self.record_status(key)?;
-        if !authority.authorize(actor, ModuleOperation::Query, record.owner) {
+        if !authority.authorize(
+            actor,
+            ModuleOperation::Query,
+            ModuleTarget::new(record.owner, record.key),
+        ) {
             return Err(ModuleError::NotAuthorized);
         }
         Ok(record)
@@ -628,6 +736,8 @@ fn binding_version(value: &str) -> Option<ModuleVersion> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::objtable::ObjId;
+    use crate::security::{ApplicationIdentity, BootId, MetadataState};
     use core::sync::atomic::{AtomicBool, Ordering};
 
     const USER: Actor<'static> = Actor::new(&[Subject::User(7)]);
@@ -636,6 +746,31 @@ mod tests {
     const AUTHORITY: ScopeModuleAuthority = ScopeModuleAuthority;
     static EFFECT_ACTIVE: AtomicBool = AtomicBool::new(false);
     static FAIL_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+    struct AcceptPep {
+        allow: bool,
+    }
+
+    impl ModulePep for AcceptPep {
+        fn authorize(
+            &self,
+            _context: SecurityContext,
+            _operation: ModuleOperation,
+            _target: ModuleTarget,
+        ) -> bool {
+            self.allow
+        }
+    }
+
+    fn active_context(class: IdentityClass) -> SecurityContext {
+        SecurityContext::new(
+            BootId::from_words([0x55aa, 0xaa55]),
+            class,
+            ObjId::from_raw(0x4100).unwrap(),
+            Some(ApplicationIdentity::migrated(7)),
+            MetadataState::Active,
+        )
+    }
 
     fn test_activate() -> Result<(), &'static str> {
         EFFECT_ACTIVE.store(true, Ordering::Release);
@@ -991,6 +1126,26 @@ mod tests {
         assert_eq!(
             registry.status(USER, &AUTHORITY, key).unwrap().state,
             ModuleState::Stopped
+        );
+    }
+
+    #[test]
+    fn secured_authority_requires_active_principal_owner_scope_and_pep_allow() {
+        let allow = AcceptPep { allow: true };
+        let context = active_context(IdentityClass::Process);
+        let authority = SecuredModuleAuthority::new(context, &allow).unwrap();
+        let key = ModuleKey::from_raw((2u64 << 16) | 3).unwrap();
+        let target = ModuleTarget::new(USER_SCOPE, key);
+        assert!(authority.authorize(USER, ModuleOperation::Start, target));
+        assert!(!authority.authorize(OTHER_USER, ModuleOperation::Start, target));
+
+        let deny = AcceptPep { allow: false };
+        let denied = SecuredModuleAuthority::new(context, &deny).unwrap();
+        assert!(!denied.authorize(USER, ModuleOperation::Query, target));
+
+        assert!(SecuredModuleAuthority::new(SecurityContext::legacy(), &allow).is_none());
+        assert!(
+            SecuredModuleAuthority::new(active_context(IdentityClass::Memory), &allow).is_none()
         );
     }
 }
