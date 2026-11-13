@@ -165,6 +165,7 @@ pub mod hwv5_policy;
 pub mod fs0_demo;
 #[cfg(all(target_arch = "x86_64", feature = "native-install-block-verify"))]
 pub mod native_install_block;
+pub mod native_module_catalog;
 #[cfg(all(
     target_arch = "x86_64",
     feature = "lifecycle-diagnostic-block-verify"

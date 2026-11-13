@@ -483,6 +483,49 @@ impl Assembly {
         Ok(report)
     }
 
+    /// Start one declared binding after the initial assembly is active.
+    ///
+    /// This is the single-module counterpart used by the native module lifecycle:
+    /// it preserves dependency order and only publishes through the caller after
+    /// the activation hook succeeds. A failed activation leaves the module in
+    /// `Failed` and never enters the started list.
+    pub fn start_one(&mut self, name: &str) -> Result<(), AssemblyError> {
+        if self.phase != Phase::Started {
+            return Err(AssemblyError::NotStarted);
+        }
+        let i = (0..self.count)
+            .find(|&i| self.module(i).name == name)
+            .ok_or(AssemblyError::UnknownModule)?;
+        if matches!(self.state[i], State::Ready | State::Initializing) {
+            return Err(AssemblyError::NotReady(self.state[i]));
+        }
+        if self.deps[i] & !self.ready_mask() != 0 {
+            self.state[i] = State::Blocked;
+            self.reason[i] = self.first_unmet(i);
+            return Err(AssemblyError::NotReady(State::Blocked));
+        }
+        let binding = self.bindings[i].expect("binding slot below count is filled");
+        if binding.deactivate.is_none() {
+            return Err(AssemblyError::Permanent);
+        }
+        self.state[i] = State::Initializing;
+        match (binding.activate)() {
+            Ok(()) => {
+                self.state[i] = State::Ready;
+                self.health[i] = Health::Healthy;
+                self.reason[i] = "";
+                self.started[self.started_len] = i as u8;
+                self.started_len += 1;
+                Ok(())
+            }
+            Err(reason) => {
+                self.state[i] = State::Failed;
+                self.reason[i] = reason;
+                Err(AssemblyError::NotReady(State::Failed))
+            }
+        }
+    }
+
     /// 按就绪逆序撤回全部就绪模块；可停用者调用 `deactivate`。返回撤回个数。
     fn rollback(&mut self) -> u8 {
         let mut n = 0;
@@ -1056,6 +1099,33 @@ mod tests {
         assert_eq!(a.preflight_stop("mid"), Err(AssemblyError::Permanent));
         assert_eq!(a.health("top"), Some(Health::Unknown));
         assert_eq!(a.audit(&declared, a.published_mask(&declared)), Ok(()));
+    }
+
+    #[test]
+    fn dynamic_start_one_restarts_a_stopped_module_with_ready_dependencies() {
+        let _serial = serial();
+        let binds = [
+            b("top", ok_top, Some(fini_top)),
+            b("mid", ok_mid, None),
+            b("base", ok_base, Some(fini_base)),
+            b("side", ok_side, Some(fini_side)),
+        ];
+        let mut a = Assembly::new(&T_PROFILE, &binds).unwrap();
+        a.start(Policy::AllOrNothing).unwrap();
+        take("a:");
+        a.stop("top").unwrap();
+        take("a:");
+
+        a.start_one("top").unwrap();
+        assert_eq!(a.state("top"), Some((State::Ready, "")));
+        assert_eq!(take("a:"), ["a:top"]);
+        let declared = profile::resolve(&T_PROFILE).unwrap();
+        let mask = a.published_mask(&declared);
+        assert!(mask_has(&declared, mask, "t.top"));
+        assert_eq!(a.audit(&declared, mask), Ok(()));
+        assert_eq!(a.start_one("top"), Err(AssemblyError::NotReady(State::Ready)));
+        a.stop("top").unwrap();
+        take("a:");
     }
 
     #[test]

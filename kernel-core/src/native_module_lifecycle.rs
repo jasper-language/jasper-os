@@ -147,7 +147,17 @@ pub trait ModuleAuthority {
 /// owns the side effects and must keep `activate` atomic when returning `Err`.
 pub trait ModuleLifecycle {
     fn activate(&mut self, status: ModuleStatus) -> Result<(), &'static str>;
-    fn deactivate(&mut self, status: ModuleStatus);
+    fn deactivate(&mut self, status: ModuleStatus) -> Result<(), &'static str>;
+
+    /// Publish only after activation succeeded. A failure must roll activation back.
+    fn publish(&mut self, _status: ModuleStatus) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    /// Withdraw visibility before deactivation and reader draining.
+    fn withdraw(&mut self, _status: ModuleStatus) -> Result<(), &'static str> {
+        Ok(())
+    }
 
     /// Permanent boot services cannot be dynamically stopped.
     fn can_deactivate(&self, _status: ModuleStatus) -> bool {
@@ -193,6 +203,18 @@ impl<'a> BindingModuleLifecycle<'a> {
             .find(|binding| binding.module == status.name.as_str())
             .filter(|binding| binding_version(binding.version) == Some(status.version))
     }
+
+    /// Validate that this status maps to a deactivatable binding with the same
+    /// module name and version, without running activation or deactivation.
+    pub fn validate(&self, status: ModuleStatus) -> Result<(), &'static str> {
+        let binding = self
+            .binding(status)
+            .ok_or("missing or version-mismatched binding")?;
+        if binding.deactivate.is_none() {
+            return Err("permanent binding");
+        }
+        Ok(())
+    }
 }
 
 impl ModuleLifecycle for BindingModuleLifecycle<'_> {
@@ -206,12 +228,13 @@ impl ModuleLifecycle for BindingModuleLifecycle<'_> {
         (binding.activate)()
     }
 
-    fn deactivate(&mut self, status: ModuleStatus) {
+    fn deactivate(&mut self, status: ModuleStatus) -> Result<(), &'static str> {
         if let Some(binding) = self.binding(status) {
             if let Some(deactivate) = binding.deactivate {
                 deactivate();
             }
         }
+        Ok(())
     }
 
     fn can_deactivate(&self, status: ModuleStatus) -> bool {
@@ -406,6 +429,10 @@ impl<const N: usize> NativeModuleRegistry<N> {
         lifecycle
             .activate(status)
             .map_err(ModuleError::EffectFailed)?;
+        if let Err(error) = lifecycle.publish(status) {
+            let _ = lifecycle.deactivate(status);
+            return Err(ModuleError::EffectFailed(error));
+        }
         *self = next;
         Ok(status)
     }
@@ -450,7 +477,12 @@ impl<const N: usize> NativeModuleRegistry<N> {
         if !lifecycle.can_deactivate(status) {
             return Err(ModuleError::Permanent);
         }
-        lifecycle.deactivate(status);
+        lifecycle
+            .withdraw(status)
+            .map_err(ModuleError::EffectFailed)?;
+        lifecycle
+            .deactivate(status)
+            .map_err(ModuleError::EffectFailed)?;
         *self = next;
         Ok(status)
     }
@@ -884,6 +916,81 @@ mod tests {
         assert_eq!(
             registry.status(USER, &AUTHORITY, permanent).unwrap().state,
             ModuleState::Installed
+        );
+    }
+
+    struct RecordingLifecycle {
+        events: [u8; 8],
+        len: usize,
+        fail_publish: bool,
+    }
+
+    impl RecordingLifecycle {
+        fn record(&mut self, event: u8) {
+            self.events[self.len] = event;
+            self.len += 1;
+        }
+    }
+
+    impl ModuleLifecycle for RecordingLifecycle {
+        fn activate(&mut self, _: ModuleStatus) -> Result<(), &'static str> {
+            self.record(1);
+            Ok(())
+        }
+
+        fn publish(&mut self, _: ModuleStatus) -> Result<(), &'static str> {
+            self.record(2);
+            if self.fail_publish {
+                Err("publish failed")
+            } else {
+                Ok(())
+            }
+        }
+
+        fn withdraw(&mut self, _: ModuleStatus) -> Result<(), &'static str> {
+            self.record(4);
+            Ok(())
+        }
+
+        fn deactivate(&mut self, _: ModuleStatus) -> Result<(), &'static str> {
+            self.record(3);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn lifecycle_publishes_after_activation_and_withdraws_before_deactivation() {
+        let mut registry = NativeModuleRegistry::<1>::new();
+        let key = registry
+            .install(USER, &AUTHORITY, spec("jasper.live", version(1, 0, 0), &[]))
+            .unwrap();
+        let mut lifecycle = RecordingLifecycle {
+            events: [0; 8],
+            len: 0,
+            fail_publish: false,
+        };
+        registry
+            .start_with(USER, &AUTHORITY, key, &mut lifecycle)
+            .unwrap();
+        assert_eq!(&lifecycle.events[..lifecycle.len], &[1, 2]);
+        registry
+            .stop_with(USER, &AUTHORITY, key, &mut lifecycle)
+            .unwrap();
+        assert_eq!(&lifecycle.events[..lifecycle.len], &[1, 2, 4, 3]);
+
+        let mut failing = RecordingLifecycle {
+            events: [0; 8],
+            len: 0,
+            fail_publish: true,
+        };
+        assert_eq!(
+            registry.start_with(USER, &AUTHORITY, key, &mut failing),
+            Err(ModuleError::EffectFailed("publish failed"))
+        );
+        assert_eq!(&failing.events[..failing.len], &[1, 2, 3]);
+        assert_eq!(
+            registry.status(USER, &AUTHORITY, key).unwrap().state,
+            ModuleState::Stopped
         );
     }
 }
