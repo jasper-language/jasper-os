@@ -282,6 +282,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Msync,
         LinuxSyscall::MinCore,
         LinuxSyscall::Madvise,
+        LinuxSyscall::Membarrier,
         LinuxSyscall::Mlock,
         LinuxSyscall::Mlock2,
         LinuxSyscall::Mlockall,

@@ -12,6 +12,7 @@
 #include <linux/futex.h>
 #include <linux/io_uring.h>
 #include <linux/ioprio.h>
+#include <linux/membarrier.h>
 #include <linux/sched/types.h>
 #include <linux/sync_file.h>
 #include <limits.h>
@@ -4079,6 +4080,24 @@ int main(void) {
         errno != EINVAL ||
         munmap(unsealed_memory, 4096) != 0) {
         return 524;
+    }
+    long membarrier_commands =
+        syscall(SYS_membarrier, MEMBARRIER_CMD_QUERY, 0, 0);
+    if ((membarrier_commands & MEMBARRIER_CMD_PRIVATE_EXPEDITED) == 0 ||
+        (membarrier_commands & MEMBARRIER_CMD_GLOBAL) == 0 ||
+        syscall(SYS_membarrier,
+                MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0) != 0 ||
+        syscall(SYS_membarrier,
+                MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) != 0 ||
+        syscall(SYS_membarrier, MEMBARRIER_CMD_GLOBAL, 0, 0) != 0) {
+        return 525;
+    }
+    errno = 0;
+    if (syscall(SYS_membarrier, 0x40000000, 0, 0) != -1 ||
+        errno != EOPNOTSUPP ||
+        syscall(SYS_membarrier, MEMBARRIER_CMD_GLOBAL, 1, 0) != -1 ||
+        errno != EINVAL) {
+        return 526;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);

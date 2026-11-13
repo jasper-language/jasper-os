@@ -10,7 +10,7 @@ use compat_core::syscall::{
     LINUX_NR_FUTEX,
 };
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 
 use kernel_core::objtable::ObjId;
 use kernel_core::paging::MapFlags;
@@ -2026,6 +2026,7 @@ fn execute(
         LinuxSyscall::Msync => compat_result(linux_msync(pid, call.args)),
         LinuxSyscall::MinCore => compat_result(linux_mincore(pid, call.args)),
         LinuxSyscall::Madvise => compat_result(linux_madvise(pid, call.args)),
+        LinuxSyscall::Membarrier => compat_result(linux_membarrier(call.args)),
         LinuxSyscall::Mlock => compat_result(linux_mlock(pid, call.args, false)),
         LinuxSyscall::Mlock2 => compat_result(linux_mlock(pid, call.args, true)),
         LinuxSyscall::Mlockall => compat_result(linux_mlockall(call.args)),
@@ -4352,6 +4353,31 @@ fn linux_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             Ok(0)
         }
         _ => Err(CompatErrno::Invalid),
+    }
+}
+
+/// Implements the process-scope memory barrier command subset.
+fn linux_membarrier(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const CMD_QUERY: u64 = 0;
+    const CMD_GLOBAL: u64 = 1;
+    const CMD_GLOBAL_EXPEDITED: u64 = 2;
+    const CMD_REGISTER_GLOBAL_EXPEDITED: u64 = 4;
+    const CMD_PRIVATE_EXPEDITED: u64 = 8;
+    const CMD_REGISTER_PRIVATE_EXPEDITED: u64 = 16;
+    const SUPPORTED: u64 =
+        CMD_GLOBAL | CMD_GLOBAL_EXPEDITED | CMD_REGISTER_GLOBAL_EXPEDITED | CMD_PRIVATE_EXPEDITED
+            | CMD_REGISTER_PRIVATE_EXPEDITED;
+    if args[1] != 0 || args[2] != 0 && args[2] != u64::MAX {
+        return Err(CompatErrno::Invalid);
+    }
+    match args[0] {
+        CMD_QUERY => Ok(SUPPORTED),
+        CMD_GLOBAL | CMD_GLOBAL_EXPEDITED | CMD_PRIVATE_EXPEDITED => {
+            fence(Ordering::SeqCst);
+            Ok(0)
+        }
+        CMD_REGISTER_GLOBAL_EXPEDITED | CMD_REGISTER_PRIVATE_EXPEDITED => Ok(0),
+        _ => Err(CompatErrno::NotSupported),
     }
 }
 
