@@ -816,6 +816,7 @@ dependencies = [
  "jasper-compat-core",
  "jasper-compat-loader",
  "jasper-lifecycle-boot",
+ "jasper-lifecycle-model",
  "kernel-core",
  "noto-sans-mono-bitmap",
  "pic8259",

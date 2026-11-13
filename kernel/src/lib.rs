@@ -165,6 +165,11 @@ pub mod hwv5_policy;
 pub mod fs0_demo;
 #[cfg(all(target_arch = "x86_64", feature = "native-install-block-verify"))]
 pub mod native_install_block;
+#[cfg(all(
+    target_arch = "x86_64",
+    feature = "lifecycle-diagnostic-block-verify"
+))]
+pub mod lifecycle_diagnostic_block;
 #[cfg(all(target_arch = "x86_64", feature = "fs1-ext4-verify"))]
 pub mod fs1_demo;
 #[cfg(any(feature = "pex0-verify", feature = "pex2-verify"))]

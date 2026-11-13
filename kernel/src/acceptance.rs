@@ -1263,13 +1263,23 @@ mod dedicated {
         crate::native_install_block::run();
     }
 
+    #[cfg(all(
+        target_arch = "x86_64",
+        feature = "lifecycle-diagnostic-block-verify"
+    ))]
+    fn exercise_diagnostics(_: &mut BootCtx) {
+        crate::lifecycle_diagnostic_block::run();
+    }
+
     #[cfg(target_arch = "x86_64")]
     fn finish(_: &mut BootCtx) {
-        kprintln!(
-            "[JSR-NATIVE-INSTALL] finish failed={}",
-            crate::native_install_block::failed()
-        );
-        exit_on(u64::from(crate::native_install_block::failed()));
+        let mut failed = crate::native_install_block::failed();
+        #[cfg(feature = "lifecycle-diagnostic-block-verify")]
+        {
+            failed = failed.saturating_add(crate::lifecycle_diagnostic_block::failed());
+        }
+        kprintln!("[JSR-NATIVE-INSTALL] finish failed={}", failed);
+        exit_on(u64::from(failed));
     }
 
     #[cfg(not(target_arch = "x86_64"))]
@@ -1287,6 +1297,11 @@ mod dedicated {
         case("drv3-dma", Stage::Smp, "drv3", drv3_dma),
         #[cfg(target_arch = "x86_64")]
         case("native-install", Stage::Smp, "", exercise),
+        #[cfg(all(
+            target_arch = "x86_64",
+            feature = "lifecycle-diagnostic-block-verify"
+        ))]
+        case("lifecycle-diagnostic", Stage::Smp, "", exercise_diagnostics),
         PlanItem::Finish(finish),
     ];
     pub const PLAN: &[&[Step]] = &[PREFIX, STAGES];

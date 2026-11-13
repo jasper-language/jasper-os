@@ -9,6 +9,7 @@ license = "Apache-2.0"
 [dependencies]
 kernel-core = { path = "../kernel-core" }
 jasper-lifecycle-boot = { path = "../lifecycle-boot" }
+jasper-lifecycle-model = { path = "../lifecycle-model", optional = true }
 # Compatibility crates are optional services. Native Jasper profiles must link
 # neither crate and must remain buildable when these components are absent.
 # 兼容 crate 属于可选服务；原生 Jasper Profile 不链接它们，并可在组件缺失时构建。
@@ -132,7 +133,12 @@ blk1-verify = []
 # FS-0 journal-to-virtio-blk integration and same-disk power-cut drill.
 fs0-journal-verify = []
 # Real virtio-blk persistence of package bytes and installation state across reboot.
-native-install-block-verify = []
+native-install-block-verify = ["dep:jasper-lifecycle-model"]
+# Real virtio-blk persistence and bounded privacy queries for LC-1 diagnostics.
+lifecycle-diagnostic-block-verify = [
+    "dep:jasper-lifecycle-model",
+    "native-install-block-verify",
+]
 # FS-1 real ext4 VFS read/write/fsync/rename over virtio-blk.
 fs1-ext4-verify = ["kernel-core/ext4-write"]
 # Dedicated MOD-1 contract: assembly ordering, publication and runtime stop/health.

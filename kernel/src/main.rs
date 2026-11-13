@@ -20,11 +20,13 @@ mod bios {
     static BOOTLOADER_CONFIG: BootloaderConfig = {
         let mut config = BootloaderConfig::new_default();
         config.mappings.physical_memory = Some(Mapping::Dynamic);
-        #[cfg(feature = "native-install-block-verify")]
+        #[cfg(any(
+            feature = "native-install-block-verify",
+            feature = "lifecycle-diagnostic-block-verify"
+        ))]
         {
-            // The persistence drill exercises the bounded snapshot codec on the
-            // boot stack. Production retains the bootloader default; the store
-            // should move to streaming buffers before it is used there.
+            // Persistence drills exercise bounded codecs on the boot stack.
+            // Production retains the default until streams replace snapshots.
             config.kernel_stack_size = 512 * 1024;
         }
         config
