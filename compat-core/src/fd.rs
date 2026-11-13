@@ -19,6 +19,7 @@ pub enum CompatKind {
     Inotify,
     MessageQueue,
     MountTree,
+    FsContext,
     Device,
     Other,
 }

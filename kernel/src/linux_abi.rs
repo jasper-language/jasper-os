@@ -2679,15 +2679,15 @@ fn execute(
         LinuxSyscall::OpenTree => compat_result(linux_open_tree(pid, call.args)),
         LinuxSyscall::MoveMount => compat_result(linux_move_mount(pid, call.args)),
         LinuxSyscall::MountSetattr => compat_result(linux_mount_setattr(pid, call.args)),
+        LinuxSyscall::FsOpen => compat_result(linux_fsopen(pid, call.args)),
+        LinuxSyscall::FsConfig => compat_result(linux_fsconfig(pid, call.args)),
+        LinuxSyscall::FsMount => compat_result(linux_fsmount(pid, call.args)),
+        LinuxSyscall::FsPick => compat_result(linux_fspick(pid, call.args)),
         LinuxSyscall::AddKey
         | LinuxSyscall::RequestKey
         | LinuxSyscall::Keyctl
         | LinuxSyscall::FanotifyInit
         | LinuxSyscall::FanotifyMark
-        | LinuxSyscall::FsConfig
-        | LinuxSyscall::FsMount
-        | LinuxSyscall::FsOpen
-        | LinuxSyscall::FsPick
         | LinuxSyscall::GetMempolicy
         | LinuxSyscall::SetMempolicy
         | LinuxSyscall::SetMempolicyHomeNode
@@ -9587,6 +9587,84 @@ fn linux_mount_setattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         args[2] & AT_EMPTY_PATH != 0,
     )?;
     Err(CompatErrno::ReadOnly)
+}
+
+fn linux_fsopen(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const FSOPEN_CLOEXEC: u64 = 1;
+    if args[1] & !FSOPEN_CLOEXEC != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let name = linux_c_string(args[0], 16)?;
+    if name != b"jasperfs" {
+        return Err(CompatErrno::NotSupported);
+    }
+    let mut fs_name = [0u8; 16];
+    fs_name[..name.len()].copy_from_slice(&name);
+    proc::linux_install_fs_context(
+        pid,
+        fs_name,
+        name.len() as u8,
+        args[1] & FSOPEN_CLOEXEC != 0,
+    )
+    .map(u64::from)
+    .ok_or(CompatErrno::NoSpace)
+}
+
+fn linux_fsconfig(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const FSCONFIG_CMD_CREATE: u64 = 6;
+    const FSCONFIG_CMD_CREATE_EXCL: u64 = 8;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::FsContext {
+        return Err(CompatErrno::BadFd);
+    }
+    match args[1] {
+        FSCONFIG_CMD_CREATE | FSCONFIG_CMD_CREATE_EXCL => {
+            if args[2] != 0 || args[3] != 0 || args[4] != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            if proc::linux_fs_context_create(pid, fd) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::BadFd)
+            }
+        }
+        0..=5 | 7 => Err(CompatErrno::NotSupported),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+fn linux_fsmount(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const FSMOUNT_CLOEXEC: u64 = 1;
+    if args[1] & !FSMOUNT_CLOEXEC != 0 || args[2] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    if !proc::linux_fs_context_ready(pid, fd) {
+        return Err(CompatErrno::BadFd);
+    }
+    proc::linux_install_mount_tree(pid, args[1] & FSMOUNT_CLOEXEC != 0)
+        .map(u64::from)
+        .ok_or(CompatErrno::NoSpace)
+}
+
+fn linux_fspick(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const CLOEXEC: u64 = 1;
+    const SYMLINK_NOFOLLOW: u64 = 2;
+    const NO_AUTOMOUNT: u64 = 4;
+    const EMPTY_PATH: u64 = 8;
+    if args[2] & !(CLOEXEC | SYMLINK_NOFOLLOW | NO_AUTOMOUNT | EMPTY_PATH) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    linux_node_for_path_or_fd(
+        pid,
+        args[0],
+        args[1],
+        args[2] & EMPTY_PATH != 0,
+    )?;
+    proc::linux_install_mount_tree(pid, args[2] & CLOEXEC != 0)
+        .map(u64::from)
+        .ok_or(CompatErrno::NoSpace)
 }
 
 fn linux_eventfd(pid: ObjId, args: [u64; 6], eventfd2: bool) -> Result<u64, CompatErrno> {

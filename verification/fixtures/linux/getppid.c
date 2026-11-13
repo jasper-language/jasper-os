@@ -712,6 +712,24 @@ int main(void) {
         close(mount_tree_fd) != 0) {
         return 635;
     }
+    int fs_context_fd = syscall(SYS_fsopen, "jasperfs", FSOPEN_CLOEXEC);
+    if (fs_context_fd < 0 ||
+        syscall(SYS_fsconfig, fs_context_fd,
+                FSCONFIG_CMD_CREATE, NULL, NULL, 0) != 0) {
+        return 636;
+    }
+    int created_mount_fd = syscall(SYS_fsmount, fs_context_fd,
+                                   FSMOUNT_CLOEXEC, 0);
+    int picked_mount_fd = syscall(SYS_fspick, AT_FDCWD, "/",
+                                  FSPICK_CLOEXEC);
+    if (created_mount_fd < 0 || picked_mount_fd < 0 ||
+        fcntl(created_mount_fd, F_GETFD) != FD_CLOEXEC ||
+        fcntl(picked_mount_fd, F_GETFD) != FD_CLOEXEC ||
+        close(created_mount_fd) != 0 ||
+        close(picked_mount_fd) != 0 ||
+        close(fs_context_fd) != 0) {
+        return 637;
+    }
     errno = 0;
     if (readv(-1, vectors, 2) != -1 || errno != EBADF) {
         return 7;
@@ -4524,8 +4542,7 @@ int main(void) {
     const long unsupported_features[] = {
         SYS_add_key, SYS_request_key, SYS_keyctl,
         SYS_fanotify_init, SYS_fanotify_mark,
-        SYS_fsconfig, SYS_fsmount, SYS_fsopen,
-        SYS_fspick, SYS_get_mempolicy, SYS_set_mempolicy,
+        SYS_get_mempolicy, SYS_set_mempolicy,
         SYS_set_mempolicy_home_node, SYS_mbind, SYS_migrate_pages,
         SYS_move_pages, SYS_landlock_create_ruleset, SYS_landlock_add_rule,
         SYS_landlock_restrict_self, SYS_listns,
