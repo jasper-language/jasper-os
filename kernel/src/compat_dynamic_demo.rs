@@ -184,6 +184,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Fadvise64,
         LinuxSyscall::SyncFileRange,
         LinuxSyscall::MemfdCreate,
+        LinuxSyscall::MemfdSecret,
         LinuxSyscall::Sync,
         LinuxSyscall::Syncfs,
         LinuxSyscall::NewFstatAt,

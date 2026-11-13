@@ -4128,6 +4128,21 @@ int main(void) {
             return 529;
         }
     }
+    int secret_fd = syscall(SYS_memfd_secret, O_CLOEXEC);
+    char secret_readback[6] = {0};
+    if (secret_fd < 0 ||
+        (fcntl(secret_fd, F_GETFD) & FD_CLOEXEC) == 0 ||
+        write(secret_fd, "secret", 6) != 6 ||
+        lseek(secret_fd, 0, SEEK_SET) != 0 ||
+        read(secret_fd, secret_readback, 6) != 6 ||
+        memcmp(secret_readback, "secret", 6) != 0 ||
+        close(secret_fd) != 0) {
+        return 530;
+    }
+    errno = 0;
+    if (syscall(SYS_memfd_secret, 1) != -1 || errno != EINVAL) {
+        return 531;
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);

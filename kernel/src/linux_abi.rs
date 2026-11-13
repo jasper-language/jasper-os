@@ -2001,6 +2001,7 @@ fn execute(
             compat_result(linux_sync_file_range(pid, call.args))
         }
         LinuxSyscall::MemfdCreate => compat_result(linux_memfd_create(pid, call.args)),
+        LinuxSyscall::MemfdSecret => compat_result(linux_memfd_secret(pid, call.args)),
         LinuxSyscall::Sync => 0,
         LinuxSyscall::Syncfs => compat_result(linux_syncfs(pid, call.args[0])),
         LinuxSyscall::NewFstatAt => compat_result(linux_newfstatat(pid, call.args)),
@@ -5900,6 +5901,21 @@ fn linux_memfd_create(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     .ok_or(CompatErrno::NoSpace)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if proc::linux_ashmem_set_name(pid, entry.handle, &name).is_err() {
+        let _ = proc::linux_close_fd(pid, fd);
+        return Err(CompatErrno::NoMemory);
+    }
+    Ok(u64::from(fd))
+}
+
+/// Creates one close-on-exec anonymous resident memory file.
+fn linux_memfd_secret(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const O_CLOEXEC: u64 = 0x80000;
+    if args[0] & !O_CLOEXEC != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let fd = proc::linux_create_memfd(pid, true, false).ok_or(CompatErrno::NoSpace)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if proc::linux_ashmem_set_name(pid, entry.handle, b"secretmem").is_err() {
         let _ = proc::linux_close_fd(pid, fd);
         return Err(CompatErrno::NoMemory);
     }
