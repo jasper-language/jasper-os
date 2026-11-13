@@ -686,6 +686,7 @@ const HIGHRES: &[Step] = &[st(Stage::HighRes)];
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "hwv5-prod-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "native-install-block-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "net2-verify", feature = "net3-verify", feature = "net4-runtime-verify", feature = "compat-elf-backend-verify", feature = "compat-syscall-verify", feature = "compat-dynamic-libc-verify", feature = "lifecycle-health-fail-verify", feature = "pex1-verify", feature = "pex2-verify", feature = "pex3-verify", feature = "pex4-verify", feature = "pex5-verify", feature = "pex7-verify", feature = "sec6-verify",
     feature = "s2-only", feature = "s4-soak", feature = "workload-verify",
+    feature = "native-install-abi-verify",
 )))]
 const FULL: &[Step] = &[
     case("krn0-tlb", Stage::Smp, "", krn0_tlb),
@@ -770,6 +771,7 @@ const FULL: &[Step] = &[
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "hwv5-prod-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "native-install-block-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "net2-verify", feature = "net3-verify", feature = "net4-runtime-verify", feature = "compat-elf-backend-verify", feature = "compat-syscall-verify", feature = "compat-dynamic-libc-verify", feature = "lifecycle-health-fail-verify", feature = "pex1-verify", feature = "pex2-verify", feature = "pex3-verify", feature = "pex4-verify", feature = "pex5-verify", feature = "pex7-verify", feature = "sec6-verify",
     feature = "s2-only", feature = "s4-soak", feature = "workload-verify",
+    feature = "native-install-abi-verify",
 )))]
 pub use full_selected::{NAME, PLAN};
 
@@ -779,6 +781,7 @@ pub use full_selected::{NAME, PLAN};
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "hwv5-prod-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "native-install-block-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "net2-verify", feature = "net3-verify", feature = "net4-runtime-verify", feature = "compat-elf-backend-verify", feature = "compat-syscall-verify", feature = "compat-dynamic-libc-verify", feature = "lifecycle-health-fail-verify", feature = "pex1-verify", feature = "pex2-verify", feature = "pex3-verify", feature = "pex4-verify", feature = "pex5-verify", feature = "pex7-verify", feature = "sec6-verify",
     feature = "s2-only", feature = "s4-soak", feature = "workload-verify",
+    feature = "native-install-abi-verify",
 )))]
 mod full_selected {
     use super::*;
@@ -838,6 +841,7 @@ const DEDICATED_SELECTED: usize = cfg!(feature = "rt1-verify") as usize
     + cfg!(feature = "pex5-verify") as usize
     + cfg!(feature = "pex7-verify") as usize
     + cfg!(feature = "sec6-verify") as usize
+    + cfg!(feature = "native-install-abi-verify") as usize
     + cfg!(feature = "workload-verify") as usize
     + cfg!(feature = "s2-only") as usize
     + cfg!(feature = "s4-soak") as usize;
@@ -1305,6 +1309,28 @@ mod dedicated {
         PlanItem::Finish(finish),
     ];
     pub const PLAN: &[&[Step]] = &[PREFIX, STAGES];
+}
+
+#[cfg(feature = "native-install-abi-verify")]
+mod dedicated {
+    use super::*;
+
+    pub const NAME: &str = "native-install-abi";
+
+    fn finish(_: &mut BootCtx) {
+        let (state, reclaimed) = crate::first_program::run();
+        kprintln!(
+            "[JSR-PROD] first_program state={:?} reclaimed={}",
+            state,
+            reclaimed
+        );
+        if state == Some(crate::proc::ProcState::Exited { code: 0 }) && reclaimed {
+            exit_on(0);
+        }
+        exit_on(1);
+    }
+
+    pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[PlanItem::Finish(finish)]];
 }
 
 #[cfg(feature = "fs1-ext4-verify")]
@@ -1855,5 +1881,6 @@ mod dedicated {
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "hwv5-prod-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "native-install-block-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "net2-verify", feature = "net3-verify", feature = "net4-runtime-verify", feature = "compat-elf-backend-verify", feature = "compat-syscall-verify", feature = "compat-dynamic-libc-verify", feature = "lifecycle-health-fail-verify", feature = "pex1-verify", feature = "pex2-verify", feature = "pex3-verify", feature = "pex4-verify", feature = "pex5-verify", feature = "pex7-verify", feature = "sec6-verify",
     feature = "s2-only", feature = "s4-soak", feature = "workload-verify",
+    feature = "native-install-abi-verify",
 ))]
 pub use dedicated::{NAME, PLAN};

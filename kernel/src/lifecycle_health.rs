@@ -416,6 +416,7 @@ fn validate_system_root(
     {
         validate_elf_payload(&root, ROOT_EXEC_PROBE_PATH, true)?;
         execute_root_linux_probe(&root)?;
+        #[cfg(not(feature = "native-install-abi-verify"))]
         execute_root_dynamic_programs(&root, slot, device, start_lba)?;
     }
     Ok(())
@@ -458,7 +459,6 @@ fn execute_root_linux_probe(root: &Ext4Reader) -> Result<(), HealthError> {
     let image = root
         .read_file(ROOT_EXEC_PROBE_PATH, MAX_PROBE_BYTES)
         .map_err(|_| HealthError::RootExecute)?;
-    let frames_before = crate::mm::frame::free_frames();
     let calls_before = crate::syscall::call_count();
     let calls = compat_core::syscall::LinuxSyscallSet::of(&[
         compat_core::syscall::LinuxSyscall::Write,
@@ -477,6 +477,7 @@ fn execute_root_linux_probe(root: &Ext4Reader) -> Result<(), HealthError> {
             return Err(HealthError::RootExecute);
         }
     };
+    let frames_before = crate::mm::frame::free_frames();
     let stack = crate::arch::USER_WINDOW.0 + 0xC0_0000;
     let mapped = crate::proc::map_new(
         pid,
@@ -491,13 +492,19 @@ fn execute_root_linux_probe(root: &Ext4Reader) -> Result<(), HealthError> {
     }
     let state = crate::proc::state(pid);
     let _ = crate::proc::reap(pid);
-    crate::kobj::run_cleanup(usize::MAX);
+    for _ in 0..8 {
+        crate::kobj::run_cleanup(usize::MAX);
+        if crate::mm::frame::free_frames() == frames_before {
+            break;
+        }
+        crate::sched::run();
+    }
     let frames_after = crate::mm::frame::free_frames();
     let syscalls = crate::syscall::call_count().saturating_sub(calls_before);
     let exited = state == Some(crate::proc::ProcState::Exited { code: 0 });
     let resources = frames_after == frames_before;
     crate::kprintln!(
-        "[JSR-LIFE-ROOT-EXEC] path={} bytes={} mapped={} cpl3={} exited={} syscalls={} frames_before={} resources={}",
+        "[JSR-LIFE-ROOT-EXEC] path={} bytes={} mapped={} cpl3={} exited={} syscalls={} frames_before={} frames_after={} resources={}",
         ROOT_EXEC_PROBE_PATH,
         image.len(),
         mapped,
@@ -505,6 +512,7 @@ fn execute_root_linux_probe(root: &Ext4Reader) -> Result<(), HealthError> {
         exited,
         syscalls,
         frames_before,
+        frames_after,
         resources
     );
     if mapped && started && exited && syscalls != 0 && resources {

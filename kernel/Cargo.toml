@@ -142,7 +142,7 @@ native-install-block-verify = [
 native-install-fault-verify = ["native-install-block-verify"]
 # Versioned native install ABI exercised by an isolated RAM SectorIo backend.
 native-install-abi-verify = [
-    "native-install-block-verify",
+    "kernel-core/persistent-install",
     "user-programs",
     "kernel-core/sec1-verify",
 ]

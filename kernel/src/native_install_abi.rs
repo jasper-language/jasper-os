@@ -17,24 +17,29 @@ use kernel_core::native_install_service::{
 use kernel_core::persistent_install::PersistentInstallStore;
 use kernel_core::security::SecurityDomain;
 
+use core::cell::UnsafeCell;
+
 use crate::sync::IrqSpinLock;
 use crate::{proc, security};
 
 const RAM_UNITS: usize = 64;
 const RAM_BYTES: usize = RAM_UNITS * STORAGE_UNIT_BYTES;
 
-#[derive(Clone)]
-struct RamDisk {
-    bytes: [u8; RAM_BYTES],
-}
+struct SharedRamStorage(UnsafeCell<[u8; RAM_BYTES]>);
+
+unsafe impl Sync for SharedRamStorage {}
+
+static RAM_STORAGE: SharedRamStorage = SharedRamStorage(UnsafeCell::new([0; RAM_BYTES]));
+
+/// Zero-sized SectorIo handle over the locked verification RAM.
+///
+/// The enclosing `BACKEND` lock is held for every SectorIo call, so this is the
+/// sole temporary mutable access to `RAM_STORAGE`. Keeping the 256 KiB backing
+/// array out of the value avoids constructing a large object on the kernel stack.
+#[derive(Clone, Copy)]
+struct RamDisk;
 
 impl RamDisk {
-    const fn new() -> Self {
-        Self {
-            bytes: [0; RAM_BYTES],
-        }
-    }
-
     fn offset(sector: u64) -> Result<usize, JournalError> {
         usize::try_from(sector)
             .ok()
@@ -55,7 +60,8 @@ impl SectorIo for RamDisk {
         out: &mut [u8; STORAGE_UNIT_BYTES],
     ) -> Result<(), JournalError> {
         let offset = Self::offset(sector)?;
-        out.copy_from_slice(&self.bytes[offset..offset + STORAGE_UNIT_BYTES]);
+            let bytes = unsafe { &mut *RAM_STORAGE.0.get() };
+            out.copy_from_slice(&bytes[offset..offset + STORAGE_UNIT_BYTES]);
         Ok(())
     }
 
@@ -65,7 +71,8 @@ impl SectorIo for RamDisk {
         bytes: &[u8; STORAGE_UNIT_BYTES],
     ) -> Result<(), JournalError> {
         let offset = Self::offset(sector)?;
-        self.bytes[offset..offset + STORAGE_UNIT_BYTES].copy_from_slice(bytes);
+        let storage = unsafe { &mut *RAM_STORAGE.0.get() };
+        storage[offset..offset + STORAGE_UNIT_BYTES].copy_from_slice(bytes);
         Ok(())
     }
 
@@ -82,7 +89,7 @@ fn ensure_backend(
 ) -> Result<(), InstallServiceError> {
     if backend.is_none() {
         let store =
-            PersistentInstallStore::format(RamDisk::new()).map_err(InstallServiceError::Store)?;
+            PersistentInstallStore::format(RamDisk).map_err(InstallServiceError::Store)?;
         *backend = Some(NativeInstallService::new(store));
     }
     Ok(())

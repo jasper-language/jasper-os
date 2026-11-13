@@ -55,38 +55,38 @@ pub const LINUX_SOCKET: LockClass = LockClass::new(12, "system.compat.linux.sock
 /// Memory-pressure state.
 pub const MEMORY_PRESSURE: LockClass = LockClass::new(13, "system.memory.pressure");
 /// Android binder transaction and context-manager state.
-pub const BINDER: LockClass = LockClass::new(14, "system.compat.android.binder");
+pub const BINDER: LockClass = LockClass::new(15, "system.compat.android.binder");
 /// 内核堆。
 /// Kernel heap.
-pub const MEMORY_HEAP: LockClass = LockClass::new(15, "system.memory.heap");
+pub const MEMORY_HEAP: LockClass = LockClass::new(16, "system.memory.heap");
 /// Sandbox image and CoW volume registry.
-pub const SANDBOX_STORAGE: LockClass = LockClass::new(16, "system.sandbox.storage");
+pub const SANDBOX_STORAGE: LockClass = LockClass::new(17, "system.sandbox.storage");
 /// 物理页帧分配器。
 /// Physical frame allocator.
-pub const MEMORY_FRAME: LockClass = LockClass::new(17, "system.memory.frame");
+pub const MEMORY_FRAME: LockClass = LockClass::new(18, "system.memory.frame");
 /// 设备中断路由表（亲和、目标处理器、均衡策略）。
 /// Device-interrupt routing table.
-pub const IRQ_ROUTING: LockClass = LockClass::new(18, "system.irq.routing");
+pub const IRQ_ROUTING: LockClass = LockClass::new(19, "system.irq.routing");
 /// 每核设备中断预算。
 /// Per-processor device-interrupt quota.
-pub const IRQ_QUOTA: LockClass = LockClass::new(19, "system.irq.quota");
+pub const IRQ_QUOTA: LockClass = LockClass::new(20, "system.irq.quota");
 /// 内核跟踪缓冲。
 /// Kernel trace buffer.
-pub const TRACE: LockClass = LockClass::new(20, "system.trace");
+pub const TRACE: LockClass = LockClass::new(21, "system.trace");
 /// Bounded Sandbox launch-plan registry.
-pub const SANDBOX_LAUNCH: LockClass = LockClass::new(21, "system.sandbox.launch");
+pub const SANDBOX_LAUNCH: LockClass = LockClass::new(22, "system.sandbox.launch");
 /// Native package installation ABI backend.
-pub const NATIVE_INSTALL: LockClass = LockClass::new(22, "system.install");
+pub const NATIVE_INSTALL: LockClass = LockClass::new(14, "system.install");
 /// 系统服务的分片队列（每个分片一把，同级，彼此从不嵌套）。
 /// Shard queues of sharded system services.
-pub const SERVICE_SHARD: LockClass = LockClass::new(23, "system.service.shard");
+pub const SERVICE_SHARD: LockClass = LockClass::new(24, "system.service.shard");
 /// Native display and keyboard session.
-pub const DISPLAY: LockClass = LockClass::new(24, "system.display.session");
+pub const DISPLAY: LockClass = LockClass::new(25, "system.display.session");
 /// Native terminal session input/output rings.
-pub const TERMINAL: LockClass = LockClass::new(25, "system.terminal.session");
+pub const TERMINAL: LockClass = LockClass::new(26, "system.terminal.session");
 /// 控制台输出（最内层：持有它时不再获取任何锁）。
 /// Console output (innermost).
-pub const CONSOLE: LockClass = LockClass::new(26, "system.console");
+pub const CONSOLE: LockClass = LockClass::new(27, "system.console");
 
 /// 登记表（按级别递增）。
 /// The registry, in ascending rank order.
@@ -104,6 +104,7 @@ pub const REGISTRY: &[LockClass] = &[
     SYSCALL_LAST_EXIT,
     LINUX_SOCKET,
     MEMORY_PRESSURE,
+    NATIVE_INSTALL,
     BINDER,
     MEMORY_HEAP,
     SANDBOX_STORAGE,
@@ -112,7 +113,6 @@ pub const REGISTRY: &[LockClass] = &[
     IRQ_QUOTA,
     TRACE,
     SANDBOX_LAUNCH,
-    NATIVE_INSTALL,
     SERVICE_SHARD,
     DISPLAY,
     TERMINAL,

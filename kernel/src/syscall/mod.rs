@@ -1625,11 +1625,11 @@ fn install_package_put(desc_ptr: u64) -> i64 {
         if length == 0 || length > STORAGE_UNIT_BYTES || args.bytes_ptr == 0 {
             return err(SYSTEM_ERROR_INVALID_ARGUMENT);
         }
-        let mut bytes = alloc::vec![0u8; length];
-        if let Err(error) = copy_from_user(&mut bytes, args.bytes_ptr, length) {
+        let mut bytes = [0u8; STORAGE_UNIT_BYTES];
+        if let Err(error) = copy_from_user(&mut bytes[..length], args.bytes_ptr, length) {
             return user_ptr_err(error);
         }
-        match crate::native_install_abi::package_put(args.spec, &bytes) {
+        match crate::native_install_abi::package_put(args.spec, &bytes[..length]) {
             Ok(key) => key.to_raw() as i64,
             Err(error) => install_service_error(error),
         }
