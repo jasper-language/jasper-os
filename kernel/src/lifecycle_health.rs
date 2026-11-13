@@ -459,6 +459,12 @@ fn execute_root_linux_probe(root: &Ext4Reader) -> Result<(), HealthError> {
     let image = root
         .read_file(ROOT_EXEC_PROBE_PATH, MAX_PROBE_BYTES)
         .map_err(|_| HealthError::RootExecute)?;
+    // Include process creation and ELF loading in the resource baseline. Their
+    // frames are released by reap/cleanup, so sampling afterwards makes a
+    // successful cleanup look like a leak when free-frame count moves upward.
+    // 基线必须覆盖进程创建和 ELF 装载；它们会在 reap/cleanup 时释放，若在
+    // 装载后采样，成功清理反而会让空闲帧数增加并被误判为泄漏。
+    let frames_before = crate::mm::frame::free_frames();
     let calls_before = crate::syscall::call_count();
     let calls = compat_core::syscall::LinuxSyscallSet::of(&[
         compat_core::syscall::LinuxSyscall::Write,
@@ -477,7 +483,6 @@ fn execute_root_linux_probe(root: &Ext4Reader) -> Result<(), HealthError> {
             return Err(HealthError::RootExecute);
         }
     };
-    let frames_before = crate::mm::frame::free_frames();
     let stack = crate::arch::USER_WINDOW.0 + 0xC0_0000;
     let mapped = crate::proc::map_new(
         pid,
