@@ -2235,6 +2235,29 @@ int main(void) {
     if (sched_setaffinity(0, sizeof(cpus), &cpus) != 0) {
         return 214;
     }
+    if (setpriority(PRIO_PROCESS, getpid(), 5) != 0 ||
+        getpriority(PRIO_PROCESS, getpid()) != 5 ||
+        setpriority(PRIO_PROCESS, getpid(), 0) != 0 ||
+        getpriority(PRIO_PROCESS, getpid()) != 0 ||
+        sched_get_priority_max(SCHED_OTHER) != 0 ||
+        sched_get_priority_min(SCHED_OTHER) != 0 ||
+        sched_get_priority_max(SCHED_FIFO) != 99 ||
+        sched_get_priority_min(SCHED_FIFO) != 1) {
+        return 317;
+    }
+    struct sched_param scheduler_set = {.sched_priority = 0};
+    struct timespec scheduler_interval = {0};
+    if (sched_setparam(0, &scheduler_set) != 0 ||
+        sched_rr_get_interval(0, &scheduler_interval) != 0 ||
+        scheduler_interval.tv_sec != 0 ||
+        scheduler_interval.tv_nsec != 2000000) {
+        return 318;
+    }
+    scheduler_set.sched_priority = 3;
+    errno = 0;
+    if (sched_setparam(0, &scheduler_set) != -1 || errno != EINVAL) {
+        return 319;
+    }
     CPU_ZERO(&cpus);
     if (sched_getaffinity(0, sizeof(cpus), &cpus) != 0 ||
         CPU_COUNT(&cpus) < 1 || !CPU_ISSET(0, &cpus)) {

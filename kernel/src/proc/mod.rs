@@ -102,6 +102,7 @@ struct LinuxProcessState {
     fds: FdTable<64>,
     pid: u32,
     ppid: u32,
+    nice: i32,
     /// Authorized directory view used for relative AT_FDCWD resolution.
     cwd: crate::linux_vfs::DirectoryId,
     brk: u64,
@@ -3353,6 +3354,26 @@ pub(crate) fn linux_process_for_pid(linux_pid: u32) -> Option<ObjId> {
     })
 }
 
+/// Returns one Linux process's nice value.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_nice(pid: ObjId) -> Option<i32> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process.linux.as_ref().map(|linux| linux.nice),
+        _ => None,
+    })
+}
+
+/// Updates one Linux process's nice value.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_set_nice(pid: ObjId, nice: i32) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux.nice = nice;
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Returns the Linux parent identity for this compatibility process.
 /// 返回兼容进程的 Linux 父身份；内核创建的根进程没有父进程。
 #[cfg(feature = "linux-abi")]
@@ -3490,6 +3511,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         fds,
         pid,
         ppid: compat_core::syscall::LINUX_COMPAT_ROOT_PPID as u32,
+        nice: 0,
         cwd: crate::linux_vfs::DirectoryId::Root,
         brk: crate::arch::USER_WINDOW.0 + 0x1000_0000,
         mmap_next: crate::arch::USER_WINDOW.0 + 0x4000_0000,

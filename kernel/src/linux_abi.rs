@@ -1804,6 +1804,8 @@ fn execute(
         LinuxSyscall::GetGroups => 0,
         LinuxSyscall::GetResUid => compat_result(linux_getres(call.args, false)),
         LinuxSyscall::GetResGid => compat_result(linux_getres(call.args, true)),
+        LinuxSyscall::GetPriority => compat_result(linux_getpriority(pid, call.args)),
+        LinuxSyscall::SetPriority => compat_result(linux_setpriority(pid, call.args)),
         LinuxSyscall::Lseek => compat_result(linux_lseek(pid, call.args)),
         LinuxSyscall::GetCpu => compat_result(linux_getcpu(call.args)),
         LinuxSyscall::Sysinfo => compat_result(linux_sysinfo(call.args[0])),
@@ -1815,6 +1817,16 @@ fn execute(
         }
         LinuxSyscall::SchedGetScheduler => {
             compat_result(linux_sched_getscheduler(pid, call.args[0]))
+        }
+        LinuxSyscall::SchedSetParam => compat_result(linux_sched_setparam(pid, call.args)),
+        LinuxSyscall::SchedGetPriorityMax => {
+            compat_result(linux_sched_priority(call.args[0], true))
+        }
+        LinuxSyscall::SchedGetPriorityMin => {
+            compat_result(linux_sched_priority(call.args[0], false))
+        }
+        LinuxSyscall::SchedRrGetInterval => {
+            compat_result(linux_sched_rr_get_interval(pid, call.args))
         }
         LinuxSyscall::SetTidAddress => set_clear_child_tid(pid, call.args[0])
             .map(i64::from)
@@ -2744,6 +2756,85 @@ fn linux_sched_getparam(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
         return Err(CompatErrno::NoProcess);
     }
     copy_to_user(args[1], &0i32.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+fn linux_priority_target(
+    current: ObjId,
+    which: u64,
+    who: u64,
+) -> Result<ObjId, CompatErrno> {
+    const PRIO_PROCESS: u64 = 0;
+    const PRIO_PGRP: u64 = 1;
+    const PRIO_USER: u64 = 2;
+    let current_pid = u64::from(proc::linux_pid(current).ok_or(CompatErrno::NoProcess)?);
+    match which {
+        PRIO_PROCESS if who == 0 || who == current_pid => Ok(current),
+        PRIO_PROCESS => {
+            let pid = u32::try_from(who).map_err(|_| CompatErrno::NoProcess)?;
+            proc::linux_process_for_pid(pid).ok_or(CompatErrno::NoProcess)
+        }
+        PRIO_PGRP if who == 0 || who == current_pid => Ok(current),
+        PRIO_PGRP => Err(CompatErrno::NoProcess),
+        PRIO_USER if who == 0 || who == compat_core::syscall::LINUX_COMPAT_UID => Ok(current),
+        PRIO_USER => Err(CompatErrno::NoProcess),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+fn linux_getpriority(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let target = linux_priority_target(pid, args[0], args[1])?;
+    let nice = proc::linux_nice(target).ok_or(CompatErrno::NoProcess)?;
+    Ok((20 - nice) as u64)
+}
+
+fn linux_setpriority(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let target = linux_priority_target(pid, args[0], args[1])?;
+    let nice = i32::try_from(args[2] as i32).map_err(|_| CompatErrno::Invalid)?;
+    if !(-20..=19).contains(&nice) {
+        return Err(CompatErrno::Invalid);
+    }
+    if proc::linux_set_nice(target, nice) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoProcess)
+    }
+}
+
+fn linux_sched_priority(policy: u64, maximum: bool) -> Result<u64, CompatErrno> {
+    const SCHED_OTHER: u64 = 0;
+    const SCHED_FIFO: u64 = 1;
+    const SCHED_RR: u64 = 2;
+    const SCHED_BATCH: u64 = 3;
+    const SCHED_IDLE: u64 = 5;
+    match policy {
+        SCHED_OTHER | SCHED_BATCH | SCHED_IDLE => Ok(0),
+        SCHED_FIFO | SCHED_RR => Ok(if maximum { 99 } else { 1 }),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+fn linux_sched_setparam(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
+    if args[0] != 0 && args[0] != current {
+        return Err(CompatErrno::NoProcess);
+    }
+    let mut priority = [0u8; 4];
+    copy_from_user(&mut priority, args[1], 4).map_err(|_| CompatErrno::Fault)?;
+    if i32::from_le_bytes(priority) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    Ok(0)
+}
+
+fn linux_sched_rr_get_interval(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
+    if args[0] != 0 && args[0] != current {
+        return Err(CompatErrno::NoProcess);
+    }
+    let mut timespec = [0u8; 16];
+    timespec[8..16].copy_from_slice(&2_000_000i64.to_le_bytes());
+    copy_to_user(args[1], &timespec, timespec.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
 }
 
