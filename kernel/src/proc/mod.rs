@@ -7562,6 +7562,44 @@ pub(crate) fn take_linux_child_exit(
     }
 }
 
+/// Observes one exited Linux child without accounting or releasing it.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn peek_linux_child_exit(
+    parent: ObjId,
+    target_pid: Option<u32>,
+) -> Result<Option<(u32, i32)>, ProcError> {
+    let children = kobj::with(|table| match table.get(parent) {
+        Ok(KObject::Process(process)) => Ok(process.children.clone()),
+        _ => Err(ProcError::NoSuchProcess),
+    })?;
+    let mut matching = target_pid.is_none() && !children.is_empty();
+    for candidate in children {
+        let found = kobj::with(|table| match table.get(candidate) {
+            Ok(KObject::Process(process)) => {
+                let linux = process.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
+                if target_pid.is_some_and(|target| linux.pid != target) {
+                    return Ok(None);
+                }
+                matching = true;
+                Ok(Some((linux.pid, process.state)))
+            }
+            _ => Err(ProcError::NoSuchProcess),
+        })?;
+        let Some((pid, state)) = found else {
+            continue;
+        };
+        if let ProcState::Exited { code } = state {
+            return Ok(Some((pid, (((code as u32) & 0xff) << 8) as i32)));
+        }
+        return Ok(None);
+    }
+    if matching {
+        Ok(None)
+    } else {
+        Err(ProcError::NoSuchProcess)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_thread_mode(
     id: ObjId,

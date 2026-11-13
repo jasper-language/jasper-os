@@ -3724,10 +3724,27 @@ int main(void) {
         errno != EOPNOTSUPP) {
         return 433;
     }
+    pid_t waitid_nowait_child = fork();
+    if (waitid_nowait_child < 0) {
+        return 434;
+    }
+    if (waitid_nowait_child == 0) {
+        _exit(43);
+    }
+    memset(&waitid_info, 0, sizeof(waitid_info));
+    if (syscall(SYS_waitid, P_PID, waitid_nowait_child,
+                &waitid_info, WEXITED | WNOWAIT, NULL) != 0 ||
+        waitid_info.si_pid != waitid_nowait_child ||
+        waitid_info.si_status != 43 ||
+        waitid_info.si_code != CLD_EXITED ||
+        waitpid(waitid_nowait_child, NULL, 0) !=
+            waitid_nowait_child) {
+        return 434;
+    }
     errno = 0;
-    if (syscall(SYS_waitid, P_ALL, 0, &waitid_info,
-                WEXITED | WNOWAIT, NULL) != -1 ||
-        errno != EOPNOTSUPP) {
+    if (syscall(SYS_waitid, P_PID, waitid_nowait_child,
+                &waitid_info, WEXITED | WNOHANG, NULL) != -1 ||
+        errno != ECHILD) {
         return 434;
     }
     sigset_t timedwait_set;

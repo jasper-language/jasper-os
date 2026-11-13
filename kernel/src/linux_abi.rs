@@ -5560,26 +5560,32 @@ fn linux_waitid(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         _ => return Err(CompatErrno::NotSupported),
     };
     let options = args[3];
-    if args[2] == 0 {
-        return Err(CompatErrno::Fault);
-    }
-    if options & WNOWAIT != 0 || args[4] != 0 {
+    if args[4] != 0 {
         return Err(CompatErrno::NotSupported);
     }
-    if options & !(WNOHANG | WEXITED) != 0 || options & WEXITED == 0 {
+    if options & !(WNOHANG | WEXITED | WNOWAIT) != 0 || options & WEXITED == 0 {
         return Err(CompatErrno::NotSupported);
     }
-    let zero = [0u8; 128];
-    copy_to_user(args[2], &zero, zero.len()).map_err(|_| CompatErrno::Fault)?;
+    if args[2] != 0 {
+        let zero = [0u8; 128];
+        copy_to_user(args[2], &zero, zero.len()).map_err(|_| CompatErrno::Fault)?;
+    }
     loop {
-        match proc::take_linux_child_exit(pid, target) {
+        let observed = if options & WNOWAIT != 0 {
+            proc::peek_linux_child_exit(pid, target)
+        } else {
+            proc::take_linux_child_exit(pid, target)
+        };
+        match observed {
             Ok(Some((child_pid, status))) => {
-                let mut info = [0u8; 128];
-                info[0..4].copy_from_slice(&17u32.to_le_bytes());
-                info[8..12].copy_from_slice(&1i32.to_le_bytes());
-                info[16..20].copy_from_slice(&child_pid.to_le_bytes());
-                info[24..28].copy_from_slice(&((status >> 8) & 0xff).to_le_bytes());
-                copy_to_user(args[2], &info, info.len()).map_err(|_| CompatErrno::Fault)?;
+                if args[2] != 0 {
+                    let mut info = [0u8; 128];
+                    info[0..4].copy_from_slice(&17u32.to_le_bytes());
+                    info[8..12].copy_from_slice(&1i32.to_le_bytes());
+                    info[16..20].copy_from_slice(&child_pid.to_le_bytes());
+                    info[24..28].copy_from_slice(&((status >> 8) & 0xff).to_le_bytes());
+                    copy_to_user(args[2], &info, info.len()).map_err(|_| CompatErrno::Fault)?;
+                }
                 return Ok(0);
             }
             Ok(None) if options & WNOHANG != 0 => return Ok(0),
