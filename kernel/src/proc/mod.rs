@@ -4743,6 +4743,24 @@ pub(crate) fn linux_install_seccomp_filter(pid: ObjId, filter: Vec<SeccompInsn>)
     .is_ok()
 }
 
+/// Reports the Linux seccomp mode: disabled, strict, or filter.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_seccomp_mode(pid: ObjId) -> Option<u32> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => {
+            let linux = process.linux.as_ref()?;
+            Some(if !linux.seccomp_filters.is_empty() {
+                2
+            } else if linux.seccomp_strict {
+                1
+            } else {
+                0
+            })
+        }
+        _ => None,
+    })
+}
+
 /// Evaluates strict mode and every installed filter for one syscall.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_seccomp_action(

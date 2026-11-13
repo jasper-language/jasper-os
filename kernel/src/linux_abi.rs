@@ -6236,6 +6236,8 @@ fn linux_getrandom(args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn linux_prctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const PR_SET_NAME: u64 = 15;
     const PR_GET_NAME: u64 = 16;
+    const PR_GET_SECCOMP: u64 = 21;
+    const PR_SET_SECCOMP: u64 = 22;
     const PR_SET_NO_NEW_PRIVS: u64 = 38;
     const PR_GET_NO_NEW_PRIVS: u64 = 39;
     const ARCH_SHSTK_ENABLE: u64 = 0x5001;
@@ -6280,6 +6282,25 @@ fn linux_prctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             copy_to_user(args[1], &name, name.len()).map_err(|_| CompatErrno::Fault)?;
             Ok(0)
         }
+        PR_SET_SECCOMP => {
+            const SECCOMP_MODE_STRICT: u64 = 1;
+            const SECCOMP_MODE_FILTER: u64 = 2;
+            match args[1] {
+                SECCOMP_MODE_STRICT
+                    if proc::linux_seccomp_mode(pid).ok_or(CompatErrno::NoProcess)? == 0 =>
+                {
+                    linux_seccomp(pid, [0, 0, 0, 0, 0, 0])
+                }
+                SECCOMP_MODE_FILTER => {
+                    linux_seccomp(pid, [1, 0, args[2], 0, 0, 0])
+                }
+                SECCOMP_MODE_STRICT => Err(CompatErrno::Invalid),
+                _ => Err(CompatErrno::Invalid),
+            }
+        }
+        PR_GET_SECCOMP => Ok(u64::from(
+            proc::linux_seccomp_mode(pid).ok_or(CompatErrno::NoProcess)?,
+        )),
         PR_SET_NO_NEW_PRIVS => {
             if args[1] != 1 || args[2] != 0 || args[3] != 0 || args[4] != 0 {
                 return Err(CompatErrno::Invalid);

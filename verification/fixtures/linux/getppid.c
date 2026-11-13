@@ -6634,6 +6634,36 @@ int main(void) {
         .len = sizeof(seccomp_code) / sizeof(seccomp_code[0]),
         .filter = seccomp_code,
     };
+    pid_t seccomp_prctl_child = fork();
+    if (seccomp_prctl_child < 0) {
+        return 696;
+    }
+    if (seccomp_prctl_child == 0) {
+        errno = 0;
+        if (prctl(PR_GET_SECCOMP, 0, 0, 0, 0) != 0 ||
+            prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER,
+                  &seccomp_program, 0, 0) != -1 ||
+            errno != EACCES ||
+            prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
+            prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER,
+                  &seccomp_program, 0, 0) != 0 ||
+            prctl(PR_GET_SECCOMP, 0, 0, 0, 0) !=
+                SECCOMP_MODE_FILTER) {
+            _exit(1);
+        }
+        char child_cwd[64];
+        errno = 0;
+        int denied = syscall(SYS_getcwd, child_cwd,
+                             sizeof(child_cwd));
+        _exit(denied == -1 && errno == EPERM ? 0 : 2);
+    }
+    int seccomp_prctl_status = 0;
+    if (waitpid(seccomp_prctl_child, &seccomp_prctl_status, 0) !=
+            seccomp_prctl_child ||
+        !WIFEXITED(seccomp_prctl_status) ||
+        WEXITSTATUS(seccomp_prctl_status) != 0) {
+        return 697;
+    }
     errno = 0;
     if (syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0,
                 &seccomp_program) != -1 || errno != EACCES ||
