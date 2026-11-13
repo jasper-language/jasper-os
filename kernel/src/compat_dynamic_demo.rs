@@ -347,6 +347,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::WaitId,
         LinuxSyscall::PidfdOpen,
         LinuxSyscall::PidfdSendSignal,
+        LinuxSyscall::PidfdGetFd,
     ])
 }
 

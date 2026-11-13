@@ -2208,6 +2208,7 @@ fn execute(
         LinuxSyscall::PidfdSendSignal => {
             compat_result(linux_pidfd_send_signal(pid, call.args))
         }
+        LinuxSyscall::PidfdGetFd => compat_result(linux_pidfd_getfd(pid, call.args)),
         _ => -i64::from(CompatErrno::NoSys as i32),
     }
 }
@@ -4689,6 +4690,33 @@ fn linux_pidfd_send_signal(
     } else {
         Err(CompatErrno::NoProcess)
     }
+}
+
+/// Duplicates a same-process descriptor through a pidfd reference.
+fn linux_pidfd_getfd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[2] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let pidfd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, pidfd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Pidfd {
+        return Err(CompatErrno::BadFd);
+    }
+    let target = ObjId::from_raw(entry.handle).ok_or(CompatErrno::NoProcess)?;
+    if target != pid {
+        return Err(CompatErrno::Perm);
+    }
+    let target_fd = u32::try_from(args[1]).map_err(|_| CompatErrno::BadFd)?;
+    let transfer = proc::linux_capture_fd_transfer(target, target_fd).map_err(|error| match error {
+        proc::LinuxFdTransferError::Invalid => CompatErrno::BadFd,
+        proc::LinuxFdTransferError::NoSpace => CompatErrno::NoSpace,
+    })?;
+    proc::linux_install_fd_transfer(pid, transfer, true)
+        .map(u64::from)
+        .map_err(|error| match error {
+            proc::LinuxFdTransferError::Invalid => CompatErrno::BadFd,
+            proc::LinuxFdTransferError::NoSpace => CompatErrno::NoSpace,
+        })
 }
 
 /// Implements the structured `clone3(2)` layout used by modern glibc.

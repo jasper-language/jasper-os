@@ -3643,6 +3643,30 @@ int main(void) {
         errno != EINVAL) {
         return 479;
     }
+    int self_pidfd = syscall(SYS_pidfd_open, getpid(), 0);
+    int pidfd_source =
+        syscall(SYS_open, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                O_RDONLY | O_CLOEXEC, 0);
+    int pidfd_duplicate =
+        self_pidfd < 0 || pidfd_source < 0
+            ? -1
+            : syscall(SYS_pidfd_getfd, self_pidfd, pidfd_source, 0);
+    unsigned char pidfd_magic[4] = {0};
+    if (pidfd_duplicate < 0 ||
+        (fcntl(pidfd_duplicate, F_GETFD) & FD_CLOEXEC) == 0 ||
+        read(pidfd_duplicate, pidfd_magic, sizeof(pidfd_magic)) !=
+            (ssize_t)sizeof(pidfd_magic) ||
+        memcmp(pidfd_magic, "\177ELF", 4) != 0) {
+        return 510;
+    }
+    errno = 0;
+    if (syscall(SYS_pidfd_getfd, self_pidfd, pidfd_source, 1) != -1 ||
+        errno != EINVAL ||
+        close(pidfd_duplicate) != 0 ||
+        close(pidfd_source) != 0 ||
+        close(self_pidfd) != 0) {
+        return 511;
+    }
     int inotify_fd =
         syscall(SYS_inotify_init1, IN_NONBLOCK | IN_CLOEXEC);
     int inotify_legacy_fd = syscall(SYS_inotify_init);
