@@ -130,6 +130,220 @@ impl SectorIo for VirtioSectorIo<'_> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CutPoint {
+    BlobBodyTorn,
+    BlobBodyUnflushed,
+    BlobHeaderTorn,
+    BlobHeaderUnflushed,
+    MetadataBodyTorn,
+    MetadataBodyUnflushed,
+    MarkerTorn,
+    MarkerUnflushed,
+    MarkerFlushedThenFailed,
+}
+
+impl CutPoint {
+    const ALL: [Self; 9] = [
+        Self::BlobBodyTorn,
+        Self::BlobBodyUnflushed,
+        Self::BlobHeaderTorn,
+        Self::BlobHeaderUnflushed,
+        Self::MetadataBodyTorn,
+        Self::MetadataBodyUnflushed,
+        Self::MarkerTorn,
+        Self::MarkerUnflushed,
+        Self::MarkerFlushedThenFailed,
+    ];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::BlobBodyTorn => "blob-body-torn",
+            Self::BlobBodyUnflushed => "blob-body-unflushed",
+            Self::BlobHeaderTorn => "blob-header-torn",
+            Self::BlobHeaderUnflushed => "blob-header-unflushed",
+            Self::MetadataBodyTorn => "metadata-body-torn",
+            Self::MetadataBodyUnflushed => "metadata-body-unflushed",
+            Self::MarkerTorn => "marker-torn",
+            Self::MarkerUnflushed => "marker-unflushed",
+            Self::MarkerFlushedThenFailed => "marker-flushed-then-failed",
+        }
+    }
+
+    const fn write_target(self) -> Option<u32> {
+        match self {
+            Self::BlobBodyTorn => Some(1),
+            Self::BlobHeaderTorn => Some(2),
+            Self::MetadataBodyTorn => Some(3),
+            Self::MarkerTorn => Some(7),
+            _ => None,
+        }
+    }
+
+    const fn flush_target(self) -> Option<u32> {
+        match self {
+            Self::BlobBodyUnflushed => Some(1),
+            Self::BlobHeaderUnflushed => Some(2),
+            Self::MetadataBodyUnflushed => Some(3),
+            Self::MarkerUnflushed | Self::MarkerFlushedThenFailed => Some(4),
+            _ => None,
+        }
+    }
+
+    const fn after_flush(self) -> bool {
+        matches!(self, Self::MarkerFlushedThenFailed)
+    }
+
+    const fn expects_new_state(self) -> bool {
+        matches!(self, Self::MarkerFlushedThenFailed)
+    }
+}
+
+struct CutSectorIo<'a> {
+    inner: VirtioSectorIo<'a>,
+    cut: CutPoint,
+    writes: u32,
+    flushes: u32,
+}
+
+impl SectorIo for CutSectorIo<'_> {
+    fn capacity_sectors(&self) -> u64 {
+        self.inner.capacity_sectors()
+    }
+
+    fn read_unit(
+        &mut self,
+        sector: u64,
+        out: &mut [u8; STORAGE_UNIT_BYTES],
+    ) -> Result<(), JournalError> {
+        self.inner.read_unit(sector, out)
+    }
+
+    fn write_unit(
+        &mut self,
+        sector: u64,
+        bytes: &[u8; STORAGE_UNIT_BYTES],
+    ) -> Result<(), JournalError> {
+        self.writes = self.writes.saturating_add(1);
+        if self.cut == CutPoint::MarkerUnflushed && self.writes == 7 {
+            // Simulate a marker present only in volatile cache when power is
+            // lost before its required flush.
+            return Ok(());
+        }
+        if self.cut.write_target() == Some(self.writes) {
+            let mut mixed = [0u8; STORAGE_UNIT_BYTES];
+            self.inner.read_unit(sector, &mut mixed)?;
+            let boundary = if self.cut == CutPoint::MarkerTorn {
+                14
+            } else {
+                STORAGE_UNIT_BYTES / 2
+            };
+            mixed[..boundary].copy_from_slice(&bytes[..boundary]);
+            self.inner.write_unit(sector, &mixed)?;
+            return Err(JournalError::Storage);
+        }
+        self.inner.write_unit(sector, bytes)
+    }
+
+    fn flush(&mut self) -> Result<(), JournalError> {
+        self.flushes = self.flushes.saturating_add(1);
+        if self.cut.flush_target() == Some(self.flushes) {
+            if self.cut.after_flush() {
+                self.inner.flush()?;
+            }
+            return Err(JournalError::Storage);
+        }
+        self.inner.flush()
+    }
+}
+
+fn fault_package(index: u8) -> PackageSpec {
+    PackageSpec {
+        app_id: 0x4e41_5449_0000 + u64::from(index),
+        publisher: 9,
+        content: [0xa0u8.wrapping_add(index); 32],
+        version: 1,
+    }
+}
+
+fn verify_baseline(
+    store: &mut PersistentInstallStore<VirtioSectorIo<'_>>,
+    extra_package: bool,
+) -> bool {
+    let Some(package) = store.find_package(PACKAGE) else {
+        return false;
+    };
+    let mut bytes = [0u8; 64];
+    let Ok(length) = store.read_package_bytes(PACKAGE_CONTENT, &mut bytes) else {
+        return false;
+    };
+    let state = store.state();
+    let packages = state.packages.iter().flatten().count();
+    length == PACKAGE_BYTES.len()
+        && &bytes[..length] == PACKAGE_BYTES
+        && packages == if extra_package { 2 } else { 1 }
+        && store.installation_count_for(package) == 2
+        && state.installations.iter().flatten().count() == 2
+        && state.grants.iter().flatten().count() == 1
+        && state.runtimes.iter().flatten().count() == 1
+        && state.data.iter().flatten().count() == 1
+}
+
+fn run_fault_matrix(
+    mut io: VirtioSectorIo<'_>,
+) -> Result<(VirtioSectorIo<'_>, u8), PersistentInstallError> {
+    let mut passed = 0u8;
+    for (index, cut) in CutPoint::ALL.into_iter().enumerate() {
+        let spec = fault_package(index as u8);
+        let mut store = PersistentInstallStore::open(CutSectorIo {
+            inner: VirtioSectorIo {
+                device: &mut *io.device,
+                base_sector: DATA_BASE_SECTOR,
+            },
+            cut,
+            writes: 0,
+            flushes: 0,
+        })?;
+        let injected = store.install_package(spec, b"fault-injected-package");
+        let cut_io = store.into_device();
+        let mut reopened = PersistentInstallStore::open(cut_io.inner)?;
+        let package = reopened.find_package(spec);
+        let state_ok = if cut.expects_new_state() {
+            let Some(_package) = package else {
+                check(false, cut.name());
+                io = reopened.into_device();
+                continue;
+            };
+            let mut bytes = [0u8; 64];
+            let length = reopened.read_package_bytes(spec.content, &mut bytes)?;
+            length == b"fault-injected-package".len()
+                && &bytes[..length] == b"fault-injected-package"
+        } else {
+            package.is_none()
+        };
+        let baseline = verify_baseline(&mut reopened, cut.expects_new_state());
+        if let Some(package) = package {
+            reopened.destroy_package(package)?;
+        }
+        if injected.is_err() && state_ok && baseline {
+            passed = passed.saturating_add(1);
+            kprintln!(
+                "[JSR-NATIVE-INSTALL] fault={} result={} baseline=true",
+                cut.name(),
+                if cut.expects_new_state() {
+                    "new-complete"
+                } else {
+                    "old-preserved"
+                }
+            );
+        } else {
+            check(false, cut.name());
+        }
+        io = reopened.into_device();
+    }
+    Ok((io, passed))
+}
+
 #[inline(never)]
 fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), PersistentInstallError> {
     kprintln!("[JSR-NATIVE-INSTALL] step=open-begin");
@@ -212,9 +426,12 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), Persisten
             kernel_core::native_install::InstallError::NotAuthorized,
         ));
     }
+    let io = store.into_device();
+    let (_io, faults) = run_fault_matrix(io)?;
     kprintln!(
-        "[JSR-NATIVE-INSTALL] stage=reopen packages=1 installations=2 grants=1 runtimes=1 data=1 bytes={} failed=0",
-        bytes_len
+        "[JSR-NATIVE-INSTALL] stage=reopen packages=1 installations=2 grants=1 runtimes=1 data=1 bytes={} faults={} failed=0",
+        bytes_len,
+        faults
     );
     Ok((phase, bytes_len))
 }

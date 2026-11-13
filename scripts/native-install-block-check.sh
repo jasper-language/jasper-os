@@ -64,7 +64,7 @@ env -u CARGO_TARGET_DIR "$ROOT/scripts/guarded-cargo.sh" build --locked --releas
   >"$OUT/image.log" 2>&1
 test -s "$BOOT_IMAGE"
 
-for round in 1 2; do
+for round in 1 2 3; do
   serial="$OUT/round-$round.serial"
   rc_file="$OUT/round-$round.rc"
   set +e
@@ -86,7 +86,10 @@ done
 grep -aq '^\[JSR-NATIVE-INSTALL\] stage=format packages=1 installations=2 grants=1 runtimes=1 data=1 failed=0' \
   "$OUT/round-1.serial"
 ! grep -aq 'stage=format' "$OUT/round-2.serial"
-grep -aq '^\[JSR-NATIVE-INSTALL\] stage=reopen packages=1 installations=2 grants=1 runtimes=1 data=1 bytes=26 failed=0' \
+! grep -aq 'stage=format' "$OUT/round-3.serial"
+grep -aq '^\[JSR-NATIVE-INSTALL\] stage=reopen packages=1 installations=2 grants=1 runtimes=1 data=1 bytes=26 faults=9 failed=0' \
   "$OUT/round-2.serial"
+grep -aq '^\[JSR-NATIVE-INSTALL\] stage=reopen packages=1 installations=2 grants=1 runtimes=1 data=1 bytes=26 faults=9 failed=0' \
+  "$OUT/round-3.serial"
 
-echo "native-install-block: PASS rounds=2 evidence=$OUT"
+echo "native-install-block: PASS rounds=3 faults=9 evidence=$OUT"
