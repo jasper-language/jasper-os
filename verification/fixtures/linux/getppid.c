@@ -4548,6 +4548,16 @@ int main(void) {
     if (syscall(SYS_mq_unlink, mq_name) != -1 || errno != ENOENT) {
         return 554;
     }
+    errno = 0;
+    if (syscall(SYS_epoll_ctl_old, -1, 0, -1, NULL) != -1 ||
+        errno != ENOSYS) {
+        return 556;
+    }
+    errno = 0;
+    if (syscall(SYS_epoll_wait_old, -1, NULL, 0, 0) != -1 ||
+        errno != ENOSYS) {
+        return 557;
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);

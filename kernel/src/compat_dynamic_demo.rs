@@ -232,6 +232,8 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::LegacyNfsservctl,
         LinuxSyscall::LegacyGetpmsg,
         LinuxSyscall::LegacyPutpmsg,
+        LinuxSyscall::LegacyEpollCtlOld,
+        LinuxSyscall::LegacyEpollWaitOld,
         LinuxSyscall::LegacyTuxcall,
         LinuxSyscall::LegacyVserver,
         LinuxSyscall::LegacySecurity,
