@@ -107,6 +107,7 @@ struct DeathRequest {
 #[derive(Clone, Copy)]
 struct BinderThread {
     process: ObjId,
+    task: crate::task::TaskId,
     tid: u32,
     pool_member: bool,
 }
@@ -246,10 +247,7 @@ pub(crate) fn release_process(pid: ObjId) {
     state.spawn_pending.retain(|process| *process != pid);
     state.active.retain(|active| active.target != pid && active.sender != pid);
     state.buffers.retain(|buffer| buffer.process != pid);
-    state.queue.retain(|(target, command)| {
-        *target != pid
-            && !matches!(command, QueuedCommand::Transaction { sender, .. } if *sender == pid)
-    });
+    state.queue.retain(|(target, _)| *target != pid);
 }
 
 pub(crate) fn thread_exit(pid: ObjId) {
@@ -437,7 +435,8 @@ fn process_write(pid: ObjId, address: u64, size: usize) -> Result<usize, CompatE
             BC_ENTER_LOOPER | BC_EXIT_LOOPER | BC_REGISTER_LOOPER => {
                 let tid = crate::linux_abi::current_linux_tid(pid)
                     .ok_or(CompatErrno::NoSys)?;
-                update_looper(pid, tid, command)?;
+                let (task, _) = crate::sched::current();
+                update_looper(pid, task, tid, command)?;
                 offset += 4;
             }
             _ => return Err(CompatErrno::NoSys),
@@ -446,7 +445,12 @@ fn process_write(pid: ObjId, address: u64, size: usize) -> Result<usize, CompatE
     Ok(offset)
 }
 
-fn update_looper(pid: ObjId, tid: u32, command: u32) -> Result<(), CompatErrno> {
+fn update_looper(
+    pid: ObjId,
+    task: crate::task::TaskId,
+    tid: u32,
+    command: u32,
+) -> Result<(), CompatErrno> {
     let mut state = BINDER.lock();
     let existing = state
         .threads
@@ -456,11 +460,13 @@ fn update_looper(pid: ObjId, tid: u32, command: u32) -> Result<(), CompatErrno> 
         if let Some(index) = existing {
             state.threads.remove(index);
         }
+        crate::kprintln!("[JSR-BINDER] looper-exit pid={} tid={}", pid.raw(), tid);
         return Ok(());
     }
     let pool_member = command == BC_REGISTER_LOOPER;
     if let Some(index) = existing {
         state.threads[index].pool_member |= pool_member;
+        state.threads[index].task = task;
     } else {
         if state.threads.len() >= MAX_BINDER_THREADS {
             return Err(CompatErrno::NoSpace);
@@ -471,6 +477,7 @@ fn update_looper(pid: ObjId, tid: u32, command: u32) -> Result<(), CompatErrno> 
             .map_err(|_| CompatErrno::NoMemory)?;
         state.threads.push(BinderThread {
             process: pid,
+            task,
             tid,
             pool_member,
         });
@@ -481,6 +488,13 @@ fn update_looper(pid: ObjId, tid: u32, command: u32) -> Result<(), CompatErrno> 
             *target != pid || !matches!(command, QueuedCommand::SpawnLooper)
         });
     }
+    crate::kprintln!(
+        "[JSR-BINDER] looper-register pid={} tid={} pool={} threads={}",
+        pid.raw(),
+        tid,
+        pool_member,
+        state.threads.len()
+    );
     Ok(())
 }
 
@@ -830,6 +844,16 @@ fn enqueue_transaction(
         let request_spawn = max_threads != 0
             && active_pool_threads < max_threads
             && !state.spawn_pending.contains(&target);
+        crate::kprintln!(
+            "[JSR-BINDER] transaction sender={} target={} code={:#x} flags={:#x} max_threads={} active_pool={} spawn={}",
+            pid.raw(),
+            target.raw(),
+            code,
+            flags,
+            max_threads,
+            active_pool_threads,
+            request_spawn
+        );
         let queued = if request_spawn { 3 } else { 2 };
         if state.queue.len().saturating_add(queued) > MAX_QUEUE {
             return Err(CompatErrno::TryAgain);
@@ -868,6 +892,19 @@ fn enqueue_transaction(
                 target,
                 sender: pid,
             });
+        }
+        let mut wake = [None; MAX_BINDER_THREADS];
+        for (slot, thread) in wake.iter_mut().zip(
+            state
+                .threads
+                .iter()
+                .filter(|thread| thread.process == target),
+        ) {
+            *slot = Some(thread.task);
+        }
+        drop(state);
+        for task in wake.into_iter().flatten() {
+            crate::sched::wake(task);
         }
         return Ok(());
     }
@@ -941,6 +978,10 @@ fn deliver(
             if capacity < 4 {
                 return Err(CompatErrno::Range);
             }
+            crate::kprintln!(
+                "[JSR-BINDER] spawn-deliver recipient={}",
+                recipient.raw()
+            );
             copy_to_user(
                 address,
                 &BR_SPAWN_LOOPER.to_le_bytes(),
@@ -970,6 +1011,14 @@ fn deliver(
             if capacity < BINDER_READ_PACKET_BYTES {
                 return Err(CompatErrno::Range);
             }
+            crate::kprintln!(
+                "[JSR-BINDER] transaction-deliver recipient={} sender={} command={:#x} code={:#x} flags={:#x}",
+                recipient.raw(),
+                sender.raw(),
+                command,
+                code,
+                flags
+            );
             let combined_length = data
                 .len()
                 .checked_add(offsets.len())

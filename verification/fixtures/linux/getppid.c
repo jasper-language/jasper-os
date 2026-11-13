@@ -176,6 +176,8 @@ struct binder_pool_thread_result {
 
 static void *binder_pool_worker(void *argument) {
     struct binder_pool_thread_result *result = argument;
+    printf("binder-pool-worker stage=start tid=%ld\n", (long)syscall(SYS_gettid));
+    fflush(stdout);
     unsigned char read_buffer[68];
     uint32_t register_looper = BC_REGISTER_LOOPER;
     struct binder_write_read exchange = {
@@ -187,6 +189,8 @@ static void *binder_pool_worker(void *argument) {
         result->result = 294;
         return NULL;
     }
+    printf("binder-pool-worker stage=registered\n");
+    fflush(stdout);
     memset(&exchange, 0, sizeof(exchange));
     exchange.read_size = sizeof(read_buffer);
     exchange.read_buffer = (binder_uintptr_t)read_buffer;
@@ -196,6 +200,8 @@ static void *binder_pool_worker(void *argument) {
         result->result = 295;
         return NULL;
     }
+    printf("binder-pool-worker stage=received\n");
+    fflush(stdout);
     struct binder_transaction_data transaction;
     memcpy(&transaction, read_buffer + 4, sizeof(transaction));
     if (transaction.code != 0x2222 ||
@@ -2570,14 +2576,21 @@ int main(void) {
         *(uint32_t *)server_read != BR_SPAWN_LOOPER) {
         return 524;
     }
+    printf("binder-pool-main stage=spawn-received\n");
+    fflush(stdout);
     pthread_t pool_thread;
     struct binder_pool_thread_result pool_thread_result = {
         .fd = pool_server,
         .result = -1,
     };
+    struct timespec pool_join_deadline;
+    if (clock_gettime(CLOCK_REALTIME, &pool_join_deadline) != 0) {
+        return 299;
+    }
+    pool_join_deadline.tv_sec += 2;
     if (pthread_create(&pool_thread, NULL, binder_pool_worker,
                        &pool_thread_result) != 0 ||
-        pthread_join(pool_thread, NULL) != 0 ||
+        pthread_timedjoin_np(pool_thread, NULL, &pool_join_deadline) != 0 ||
         pool_thread_result.result != 0) {
         return 525;
     }
