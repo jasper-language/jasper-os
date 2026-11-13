@@ -690,6 +690,9 @@ pub enum CompatErrno {
     /// No message of the requested type is available.
     /// 请求类型的消息不存在。
     NoMessage = linux_raw_sys::errno::ENOMSG,
+    /// The requested key does not exist.
+    /// 请求的 key 不存在。
+    NoKey = linux_raw_sys::errno::ENOKEY,
     /// A supplied output buffer cannot represent the required result.
     /// 提供的输出缓冲区无法容纳结果。
     Overflow = linux_raw_sys::errno::EOVERFLOW,

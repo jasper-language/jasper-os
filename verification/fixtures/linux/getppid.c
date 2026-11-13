@@ -5224,6 +5224,7 @@ int main(void) {
         KEYCTL_UPDATE = 2,
         KEYCTL_REVOKE = 3,
         KEYCTL_DESCRIBE = 6,
+        KEYCTL_SEARCH = 10,
         KEYCTL_READ = 11,
         KEY_SPEC_PROCESS_KEYRING = -2,
     };
@@ -5242,10 +5243,17 @@ int main(void) {
         syscall(SYS_keyctl, KEYCTL_DESCRIBE, key_serial,
                 key_buffer, sizeof(key_buffer)) != 10 ||
         memcmp(key_buffer, "jasper-key", 10) != 0 ||
+        syscall(SYS_keyctl, KEYCTL_SEARCH, keyring,
+                "user", "jasper-key") != key_serial ||
         syscall(SYS_keyctl, KEYCTL_UPDATE, key_serial,
                 "updated", 7) != 0 ||
         syscall(SYS_keyctl, KEYCTL_REVOKE, key_serial) != 0) {
         return 645;
+    }
+    errno = 0;
+    if (syscall(SYS_keyctl, KEYCTL_SEARCH, keyring,
+                "user", "missing-key") != -1 || errno != ENOKEY) {
+        return 649;
     }
     char executable[128];
     ssize_t executable_len = readlinkat(AT_FDCWD, "/proc/self/exe",

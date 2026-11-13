@@ -10046,7 +10046,7 @@ fn linux_request_key(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 && key.description[..usize::from(key.description_len)] == description[..]
         })
         .map(|key| key.serial as u32 as u64)
-        .ok_or(CompatErrno::NoEntry)
+        .ok_or(CompatErrno::NoKey)
 }
 
 fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
@@ -10054,6 +10054,7 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const UPDATE: u64 = 2;
     const REVOKE: u64 = 3;
     const DESCRIBE: u64 = 6;
+    const SEARCH: u64 = 10;
     const READ: u64 = 11;
     const INVALIDATE: u64 = 21;
     let application =
@@ -10139,6 +10140,29 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             }
             copy_to_user(args[2], &key.payload, key.payload.len()).map_err(|_| CompatErrno::Fault)?;
             Ok(key.payload.len() as u64)
+        }
+        SEARCH => {
+            let key_type = linux_c_string(args[2], 16)?;
+            let description = linux_c_string(args[3], 64)?;
+            let mut state = COMPAT.lock();
+            if !state
+                .keys
+                .iter()
+                .any(|key| key.application == application && key.serial == args[1] as i32)
+            {
+                return Err(CompatErrno::NoKey);
+            }
+            state
+                .keys
+                .iter()
+                .find(|key| {
+                    !key.revoked
+                        && key.application == application
+                        && key.key_type[..usize::from(key.type_len)] == key_type[..]
+                        && key.description[..usize::from(key.description_len)] == description[..]
+                })
+                .map(|key| key.serial as u32 as u64)
+                .ok_or(CompatErrno::NoKey)
         }
         _ => Err(CompatErrno::NotSupported),
     }
