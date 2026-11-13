@@ -9,6 +9,7 @@
 //! 不复制模块执行路径；授权通过显式 authority 接口交给既有 SEC/PEP/Handle
 //! 体系。模块名、AppID 或逻辑路径都不是授权凭证。
 
+use crate::assembly::Binding;
 use crate::native_install::{Actor, OwnerScope, Subject};
 
 pub const MAX_MODULE_NAME_BYTES: usize = 48;
@@ -140,6 +141,20 @@ pub trait ModuleAuthority {
     fn authorize(&self, actor: Actor<'_>, operation: ModuleOperation, owner: OwnerScope) -> bool;
 }
 
+/// Runtime activation hooks supplied by the existing assembly/runtime layer.
+///
+/// The registry owns installation identity and ordering. The implementation
+/// owns the side effects and must keep `activate` atomic when returning `Err`.
+pub trait ModuleLifecycle {
+    fn activate(&mut self, status: ModuleStatus) -> Result<(), &'static str>;
+    fn deactivate(&mut self, status: ModuleStatus);
+
+    /// Permanent boot services cannot be dynamically stopped.
+    fn can_deactivate(&self, _status: ModuleStatus) -> bool {
+        true
+    }
+}
+
 /// Basic scope adapter for models and tests. Production must provide a PEP or
 /// Handle/Rights-backed implementation rather than relying on this adapter.
 #[derive(Clone, Copy, Debug, Default)]
@@ -155,6 +170,53 @@ impl ModuleAuthority for ScopeModuleAuthority {
             OwnerScope::Tenant(id) => actor.subjects.contains(&Subject::Tenant(id)),
             OwnerScope::Workload(id) => actor.subjects.contains(&Subject::Workload(id)),
         }
+    }
+}
+
+/// Adapter from an installed native module identity to an existing
+/// [`Binding`] callback. Only bindings with both activate and deactivate hooks
+/// are eligible for dynamic lifecycle control.
+#[derive(Clone, Copy)]
+pub struct BindingModuleLifecycle<'a> {
+    bindings: &'a [Binding],
+}
+
+impl<'a> BindingModuleLifecycle<'a> {
+    pub const fn new(bindings: &'a [Binding]) -> Self {
+        Self { bindings }
+    }
+
+    fn binding(&self, status: ModuleStatus) -> Option<Binding> {
+        self.bindings
+            .iter()
+            .copied()
+            .find(|binding| binding.module == status.name.as_str())
+            .filter(|binding| binding_version(binding.version) == Some(status.version))
+    }
+}
+
+impl ModuleLifecycle for BindingModuleLifecycle<'_> {
+    fn activate(&mut self, status: ModuleStatus) -> Result<(), &'static str> {
+        let binding = self
+            .binding(status)
+            .ok_or("missing or version-mismatched binding")?;
+        if binding.deactivate.is_none() {
+            return Err("permanent binding");
+        }
+        (binding.activate)()
+    }
+
+    fn deactivate(&mut self, status: ModuleStatus) {
+        if let Some(binding) = self.binding(status) {
+            if let Some(deactivate) = binding.deactivate {
+                deactivate();
+            }
+        }
+    }
+
+    fn can_deactivate(&self, status: ModuleStatus) -> bool {
+        self.binding(status)
+            .is_some_and(|binding| binding.deactivate.is_some())
     }
 }
 
@@ -176,6 +238,8 @@ pub enum ModuleError {
     ActiveDependent,
     DependentInstalled,
     InvalidState,
+    EffectFailed(&'static str),
+    Permanent,
 }
 
 impl ModuleError {
@@ -197,6 +261,8 @@ impl ModuleError {
             Self::ActiveDependent => "system.module.lifecycle.error.active_dependent",
             Self::DependentInstalled => "system.module.lifecycle.error.dependent_installed",
             Self::InvalidState => "system.module.lifecycle.error.state",
+            Self::EffectFailed(_) => "system.module.lifecycle.error.effect",
+            Self::Permanent => "system.module.lifecycle.error.permanent",
         }
     }
 }
@@ -326,6 +392,24 @@ impl<const N: usize> NativeModuleRegistry<N> {
         Ok(())
     }
 
+    /// Starts a module only after its real activation hook succeeds.
+    pub fn start_with<A: ModuleAuthority, L: ModuleLifecycle>(
+        &mut self,
+        actor: Actor<'_>,
+        authority: &A,
+        key: ModuleKey,
+        lifecycle: &mut L,
+    ) -> Result<ModuleStatus, ModuleError> {
+        let mut next = self.clone();
+        next.start(actor, authority, key)?;
+        let status = next.record_status(key)?;
+        lifecycle
+            .activate(status)
+            .map_err(ModuleError::EffectFailed)?;
+        *self = next;
+        Ok(status)
+    }
+
     pub fn stop<A: ModuleAuthority>(
         &mut self,
         actor: Actor<'_>,
@@ -350,6 +434,25 @@ impl<const N: usize> NativeModuleRegistry<N> {
             .state = ModuleState::Stopped;
         *self = next;
         Ok(())
+    }
+
+    /// Stops a module only through the matching real deactivation hook.
+    pub fn stop_with<A: ModuleAuthority, L: ModuleLifecycle>(
+        &mut self,
+        actor: Actor<'_>,
+        authority: &A,
+        key: ModuleKey,
+        lifecycle: &mut L,
+    ) -> Result<ModuleStatus, ModuleError> {
+        let mut next = self.clone();
+        next.stop(actor, authority, key)?;
+        let status = next.record_status(key)?;
+        if !lifecycle.can_deactivate(status) {
+            return Err(ModuleError::Permanent);
+        }
+        lifecycle.deactivate(status);
+        *self = next;
+        Ok(status)
     }
 
     pub fn uninstall<A: ModuleAuthority>(
@@ -381,19 +484,11 @@ impl<const N: usize> NativeModuleRegistry<N> {
         authority: &A,
         key: ModuleKey,
     ) -> Result<ModuleStatus, ModuleError> {
-        let slot = self.slot(key)?;
-        let record = self.slots[slot].ok_or(ModuleError::StaleKey)?;
+        let record = self.record_status(key)?;
         if !authority.authorize(actor, ModuleOperation::Query, record.owner) {
             return Err(ModuleError::NotAuthorized);
         }
-        Ok(ModuleStatus {
-            key: record.key,
-            name: record.name,
-            version: record.version,
-            owner: record.owner,
-            state: record.state,
-            dependencies: u16::from(record.dependency_count),
-        })
+        Ok(record)
     }
 
     pub fn len(&self) -> usize {
@@ -420,6 +515,19 @@ impl<const N: usize> NativeModuleRegistry<N> {
             Some(record) if record.key.generation > key.generation => Err(ModuleError::StaleKey),
             _ => Err(ModuleError::NotInstalled),
         }
+    }
+
+    fn record_status(&self, key: ModuleKey) -> Result<ModuleStatus, ModuleError> {
+        let slot = self.slot(key)?;
+        let record = self.slots[slot].ok_or(ModuleError::StaleKey)?;
+        Ok(ModuleStatus {
+            key: record.key,
+            name: record.name,
+            version: record.version,
+            owner: record.owner,
+            state: record.state,
+            dependencies: u16::from(record.dependency_count),
+        })
     }
 
     fn has_active_dependent(&self, name: ModuleName) -> bool {
@@ -474,14 +582,70 @@ fn validate_spec(spec: ModuleSpec<'_>) -> Result<(), ModuleError> {
     Ok(())
 }
 
+fn binding_version(value: &str) -> Option<ModuleVersion> {
+    let mut parts = value.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(ModuleVersion::new(major, minor, patch))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::{AtomicBool, Ordering};
 
     const USER: Actor<'static> = Actor::new(&[Subject::User(7)]);
     const OTHER_USER: Actor<'static> = Actor::new(&[Subject::User(8)]);
     const USER_SCOPE: OwnerScope = OwnerScope::User(7);
     const AUTHORITY: ScopeModuleAuthority = ScopeModuleAuthority;
+    static EFFECT_ACTIVE: AtomicBool = AtomicBool::new(false);
+    static FAIL_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+    fn test_activate() -> Result<(), &'static str> {
+        EFFECT_ACTIVE.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn test_deactivate() {
+        EFFECT_ACTIVE.store(false, Ordering::Release);
+    }
+
+    fn fail_activate() -> Result<(), &'static str> {
+        FAIL_ACTIVE.store(true, Ordering::Release);
+        Err("injected activation failure")
+    }
+
+    fn permanent_activate() -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    const LIFECYCLE_BINDINGS: [Binding; 3] = [
+        Binding {
+            module: "jasper.test",
+            version: "1.0.0",
+            conflicts: &[],
+            activate: test_activate,
+            deactivate: Some(test_deactivate),
+        },
+        Binding {
+            module: "jasper.fail",
+            version: "1.0.0",
+            conflicts: &[],
+            activate: fail_activate,
+            deactivate: Some(test_deactivate),
+        },
+        Binding {
+            module: "jasper.permanent",
+            version: "1.0.0",
+            conflicts: &[],
+            activate: permanent_activate,
+            deactivate: None,
+        },
+    ];
 
     fn name(value: &str) -> ModuleName {
         ModuleName::new(value).unwrap()
@@ -657,6 +821,69 @@ mod tests {
         assert_eq!(
             registry.uninstall(USER, &AUTHORITY, base),
             Err(ModuleError::DependentInstalled)
+        );
+    }
+
+    #[test]
+    fn binding_lifecycle_commits_only_after_real_activate_and_deactivate() {
+        EFFECT_ACTIVE.store(false, Ordering::Release);
+        let mut registry = NativeModuleRegistry::<1>::new();
+        let mut lifecycle = BindingModuleLifecycle::new(&LIFECYCLE_BINDINGS);
+        let key = registry
+            .install(USER, &AUTHORITY, spec("jasper.test", version(1, 0, 0), &[]))
+            .unwrap();
+
+        assert_eq!(
+            registry
+                .start_with(USER, &AUTHORITY, key, &mut lifecycle)
+                .unwrap()
+                .state,
+            ModuleState::Started
+        );
+        assert!(EFFECT_ACTIVE.load(Ordering::Acquire));
+        assert_eq!(
+            registry
+                .stop_with(USER, &AUTHORITY, key, &mut lifecycle)
+                .unwrap()
+                .state,
+            ModuleState::Stopped
+        );
+        assert!(!EFFECT_ACTIVE.load(Ordering::Acquire));
+        registry.uninstall(USER, &AUTHORITY, key).unwrap();
+    }
+
+    #[test]
+    fn binding_failures_and_permanent_services_do_not_commit_state() {
+        FAIL_ACTIVE.store(false, Ordering::Release);
+        let mut registry = NativeModuleRegistry::<2>::new();
+        let mut lifecycle = BindingModuleLifecycle::new(&LIFECYCLE_BINDINGS);
+        let failing = registry
+            .install(USER, &AUTHORITY, spec("jasper.fail", version(1, 0, 0), &[]))
+            .unwrap();
+        assert_eq!(
+            registry.start_with(USER, &AUTHORITY, failing, &mut lifecycle),
+            Err(ModuleError::EffectFailed("injected activation failure"))
+        );
+        assert!(FAIL_ACTIVE.load(Ordering::Acquire));
+        assert_eq!(
+            registry.status(USER, &AUTHORITY, failing).unwrap().state,
+            ModuleState::Installed
+        );
+
+        let permanent = registry
+            .install(
+                USER,
+                &AUTHORITY,
+                spec("jasper.permanent", version(1, 0, 0), &[]),
+            )
+            .unwrap();
+        assert_eq!(
+            registry.start_with(USER, &AUTHORITY, permanent, &mut lifecycle),
+            Err(ModuleError::EffectFailed("permanent binding"))
+        );
+        assert_eq!(
+            registry.status(USER, &AUTHORITY, permanent).unwrap().state,
+            ModuleState::Installed
         );
     }
 }
