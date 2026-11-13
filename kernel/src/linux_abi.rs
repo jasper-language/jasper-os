@@ -32,6 +32,7 @@ const MAX_LINUX_THREADS: usize = 64;
 const MAX_FUTEX_WORDS: usize = 32;
 const MAX_PROCESS_SIGNAL_SETS: usize = 16;
 const MAX_POSIX_TIMERS: usize = 32;
+const MAX_INTERVAL_TIMER_SETS: usize = 16;
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
 static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
 
@@ -155,6 +156,14 @@ struct PosixTimer {
     active: bool,
 }
 
+#[derive(Clone, Copy)]
+struct IntervalTimer {
+    process: ObjId,
+    next: u64,
+    interval: u64,
+    active: bool,
+}
+
 struct CompatState {
     threads: [Option<LinuxThread>; MAX_LINUX_THREADS],
     futexes: [Option<FutexWord>; MAX_FUTEX_WORDS],
@@ -162,6 +171,7 @@ struct CompatState {
     flock_locks: [Option<FlockLock>; MAX_FLOCK_LOCKS],
     flock_waiters: [Option<FlockWaiter>; MAX_FLOCK_LOCKS],
     posix_timers: [Option<PosixTimer>; MAX_POSIX_TIMERS],
+    interval_timers: [Option<IntervalTimer>; MAX_INTERVAL_TIMER_SETS],
 }
 
 impl CompatState {
@@ -173,6 +183,7 @@ impl CompatState {
             flock_locks: [None; MAX_FLOCK_LOCKS],
             flock_waiters: [None; MAX_FLOCK_LOCKS],
             posix_timers: [None; MAX_POSIX_TIMERS],
+            interval_timers: [None; MAX_INTERVAL_TIMER_SETS],
         }
     }
 }
@@ -1954,8 +1965,11 @@ fn execute(
         LinuxSyscall::GetRandom => compat_result(linux_getrandom(call.args)),
         LinuxSyscall::GetTimeOfDay => compat_result(linux_gettimeofday(call.args)),
         LinuxSyscall::Getrusage => compat_result(linux_getrusage(pid, call.args)),
+        LinuxSyscall::GetItimer => compat_result(linux_getitimer(pid, call.args)),
         LinuxSyscall::Time => compat_result(linux_time(call.args)),
         LinuxSyscall::Times => compat_result(linux_times(pid, call.args)),
+        LinuxSyscall::Alarm => compat_result(linux_alarm(pid, call.args)),
+        LinuxSyscall::SetItimer => compat_result(linux_setitimer(pid, call.args)),
         LinuxSyscall::Getcwd => compat_result(linux_getcwd(pid, call.args)),
         LinuxSyscall::GetUid | LinuxSyscall::GetEuid => {
             compat_core::syscall::LINUX_COMPAT_UID as i64
@@ -4511,6 +4525,208 @@ fn write_linux_timespec(address: u64, nanoseconds: u64) -> Result<u64, CompatErr
     Ok(0)
 }
 
+const LINUX_SIGALRM: u32 = 14;
+const LINUX_SI_KERNEL: i32 = 128;
+const ITIMER_REAL: u32 = 0;
+const ITIMER_VIRTUAL: u32 = 1;
+const ITIMER_PROF: u32 = 2;
+
+/// Decodes one x86_64 `timeval` represented in a fixed little-endian buffer.
+fn decode_linux_timeval(bytes: &[u8]) -> Result<u64, CompatErrno> {
+    let seconds = i64::from_le_bytes(bytes[0..8].try_into().unwrap());
+    let micros = i64::from_le_bytes(bytes[8..16].try_into().unwrap());
+    if seconds < 0 || !(0..1_000_000).contains(&micros) {
+        return Err(CompatErrno::Invalid);
+    }
+    (seconds as u64)
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add((micros as u64) * 1_000))
+        .ok_or(CompatErrno::Invalid)
+}
+
+/// Reads x86_64 `struct itimerval` as `(interval, value)` nanoseconds.
+fn read_linux_itimerval(address: u64) -> Result<(u64, u64), CompatErrno> {
+    const ITIMERVAL_BYTES: usize = 32;
+    if address == 0 {
+        return Err(CompatErrno::Fault);
+    }
+    let mut bytes = [0u8; ITIMERVAL_BYTES];
+    copy_from_user(&mut bytes, address, ITIMERVAL_BYTES).map_err(|_| CompatErrno::Fault)?;
+    let interval = decode_linux_timeval(&bytes[..16])?;
+    let value = decode_linux_timeval(&bytes[16..])?;
+    Ok((interval, value))
+}
+
+/// Encodes x86_64 `struct itimerval`; `next` is an absolute monotonic deadline.
+fn encode_linux_itimerval(interval: u64, next: u64, now: u64) -> [u8; 32] {
+    let remaining = if next == 0 {
+        0
+    } else {
+        next.saturating_sub(now)
+    };
+    let mut bytes = [0u8; 32];
+    bytes[0..8].copy_from_slice(&(interval / 1_000_000_000).to_le_bytes());
+    bytes[8..16].copy_from_slice(&((interval % 1_000_000_000) / 1_000).to_le_bytes());
+    bytes[16..24].copy_from_slice(&(remaining / 1_000_000_000).to_le_bytes());
+    bytes[24..32].copy_from_slice(&((remaining % 1_000_000_000) / 1_000).to_le_bytes());
+    bytes
+}
+
+/// Advances one expired real interval timer and reports whether it fired.
+fn settle_interval_timer(timer: &mut IntervalTimer, now: u64) -> bool {
+    if !timer.active || now < timer.next {
+        return false;
+    }
+    let expired = if timer.interval == 0 {
+        1
+    } else {
+        (now - timer.next) / timer.interval + 1
+    };
+    timer.next = if timer.interval == 0 {
+        0
+    } else {
+        timer
+            .next
+            .saturating_add(expired.saturating_mul(timer.interval))
+    };
+    timer.active = timer.next != 0;
+    true
+}
+
+/// Validates one interval-timer selector.
+fn validate_itimer_which(which: u64) -> Result<u32, CompatErrno> {
+    let which = u32::try_from(which).map_err(|_| CompatErrno::Invalid)?;
+    match which {
+        ITIMER_REAL => Ok(which),
+        ITIMER_VIRTUAL | ITIMER_PROF => Err(CompatErrno::NotSupported),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+/// Returns the settled REAL timer snapshot and whether it just fired.
+fn interval_timer_snapshot(pid: ObjId, now: u64) -> (u64, u64, bool) {
+    let mut state = COMPAT.lock();
+    let Some(timer) = state
+        .interval_timers
+        .iter_mut()
+        .flatten()
+        .find(|timer| timer.process == pid)
+    else {
+        return (0, 0, false);
+    };
+    let fired = settle_interval_timer(timer, now);
+    (timer.next, timer.interval, fired)
+}
+
+/// Replaces the process REAL interval timer, allocating its bounded state slot on demand.
+fn replace_interval_timer(
+    pid: ObjId,
+    next: u64,
+    interval: u64,
+) -> Result<(), CompatErrno> {
+    let mut state = COMPAT.lock();
+    if let Some(timer) = state
+        .interval_timers
+        .iter_mut()
+        .flatten()
+        .find(|timer| timer.process == pid)
+    {
+        *timer = IntervalTimer {
+            process: pid,
+            next,
+            interval,
+            active: next != 0,
+        };
+        return Ok(());
+    }
+    if next == 0 {
+        return Ok(());
+    }
+    let slot = state
+        .interval_timers
+        .iter()
+        .position(Option::is_none)
+        .ok_or(CompatErrno::NoSpace)?;
+    state.interval_timers[slot] = Some(IntervalTimer {
+        process: pid,
+        next,
+        interval,
+        active: true,
+    });
+    Ok(())
+}
+
+/// Implements `getitimer(2)` for the monotonic real timer.
+fn linux_getitimer(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    validate_itimer_which(args[0])?;
+    if args[1] == 0 {
+        return Err(CompatErrno::Fault);
+    }
+    let now = sched::now_ns();
+    let (next, interval, fired) = interval_timer_snapshot(pid, now);
+    if fired {
+        let _ = queue_process_signal(pid, LINUX_SIGALRM, 0, LINUX_SI_KERNEL);
+    }
+    let output = encode_linux_itimerval(interval, next, now);
+    copy_to_user(args[1], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Implements `setitimer(2)` and writes the prior value before replacement.
+fn linux_setitimer(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    validate_itimer_which(args[0])?;
+    let (interval, value) = if args[1] == 0 {
+        (0, 0)
+    } else {
+        read_linux_itimerval(args[1])?
+    };
+    let now = sched::now_ns();
+    let next = if value == 0 {
+        0
+    } else {
+        now.checked_add(value).ok_or(CompatErrno::Invalid)?
+    };
+    let (old_next, old_interval, fired) = interval_timer_snapshot(pid, now);
+    replace_interval_timer(pid, next, interval)?;
+    if fired {
+        let _ = queue_process_signal(pid, LINUX_SIGALRM, 0, LINUX_SI_KERNEL);
+    }
+    if args[2] != 0 {
+        let old = encode_linux_itimerval(old_interval, old_next, now);
+        copy_to_user(args[2], &old, old.len()).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(0)
+}
+
+/// Implements legacy `alarm(2)` over the REAL interval timer.
+fn linux_alarm(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let seconds = u64::from(args[0] as u32);
+    let now = sched::now_ns();
+    let (old_next, _, fired) = interval_timer_snapshot(pid, now);
+    let old_seconds = if old_next == 0 {
+        0
+    } else {
+        old_next
+            .saturating_sub(now)
+            .div_ceil(1_000_000_000)
+    };
+    if fired {
+        let _ = queue_process_signal(pid, LINUX_SIGALRM, 0, LINUX_SI_KERNEL);
+    }
+    let next = if seconds == 0 {
+        0
+    } else {
+        now.checked_add(
+            seconds
+                .checked_mul(1_000_000_000)
+                .ok_or(CompatErrno::Invalid)?,
+        )
+        .ok_or(CompatErrno::Invalid)?
+    };
+    replace_interval_timer(pid, next, 0)?;
+    Ok(old_seconds)
+}
+
 /// Blocks until an absolute monotonic deadline and handles wake-up rechecks.
 ///
 /// 阻塞到绝对单调期限；每次提前返回都重新检查期限、进程终止和待决信号。
@@ -5069,7 +5285,7 @@ fn linux_posix_timer_settle_one(
 /// Settles process timers from the periodic clock interrupt.
 /// 从周期时钟中断结算进程计时器。
 pub(crate) fn settle_posix_timers(now: u64) {
-    let mut pending = [None; MAX_POSIX_TIMERS];
+    let mut pending = [None; MAX_POSIX_TIMERS + MAX_INTERVAL_TIMER_SETS];
     let mut pending_count = 0usize;
     {
         let mut state = COMPAT.lock();
@@ -5105,19 +5321,30 @@ pub(crate) fn settle_posix_timers(now: u64) {
             };
             timer.active = timer.next != 0;
             if timer.notify == 0 && pending_count < pending.len() {
-                pending[pending_count] = Some((timer.process, timer.signal));
+                pending[pending_count] = Some((timer.process, timer.signal, -2));
+                pending_count += 1;
+            }
+        }
+        for timer in state.interval_timers.iter_mut().flatten() {
+            if settle_interval_timer(timer, now) && pending_count < pending.len() {
+                pending[pending_count] = Some((timer.process, 14, 128));
                 pending_count += 1;
             }
         }
     }
-    for (process, signal) in pending.into_iter().flatten() {
-            let _ = queue_process_signal(process, signal, 0, -2);
+    for (process, signal, code) in pending.into_iter().flatten() {
+        let _ = queue_process_signal(process, signal, 0, code);
     }
 }
 
 fn release_posix_timers(process: ObjId) {
     let mut state = COMPAT.lock();
     for timer in state.posix_timers.iter_mut() {
+        if timer.is_some_and(|timer| timer.process == process) {
+            *timer = None;
+        }
+    }
+    for timer in state.interval_timers.iter_mut() {
         if timer.is_some_and(|timer| timer.process == process) {
             *timer = None;
         }

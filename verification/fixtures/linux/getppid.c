@@ -86,11 +86,45 @@ static void signal_noop(int signal) {
 }
 
 static volatile sig_atomic_t posix_timer_signals;
+static volatile sig_atomic_t interval_timer_signals;
 
 static void posix_timer_signal_handler(int signal) {
     if (signal == SIGUSR1) {
         posix_timer_signals++;
     }
+}
+
+static void interval_timer_signal_handler(int signal) {
+    if (signal == SIGALRM) {
+        interval_timer_signals++;
+    }
+}
+
+static int wait_for_interval_signals(int expected) {
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
+        return -1;
+    }
+    deadline.tv_nsec += 500000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec += 1;
+        deadline.tv_nsec -= 1000000000L;
+    }
+    const struct timespec delay = {.tv_sec = 0, .tv_nsec = 5000000L};
+    struct timespec now;
+    do {
+        if (interval_timer_signals >= expected) {
+            return 0;
+        }
+        struct timespec remaining = delay;
+        nanosleep(&remaining, NULL);
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+            return -1;
+        }
+    } while (now.tv_sec < deadline.tv_sec ||
+             (now.tv_sec == deadline.tv_sec &&
+              now.tv_nsec < deadline.tv_nsec));
+    return interval_timer_signals >= expected ? 0 : -1;
 }
 
 static uint32_t futex_word;
@@ -2854,6 +2888,208 @@ int main(void) {
     if (syscall(SYS_timer_create, CLOCK_MONOTONIC, &posix_event,
                 NULL) != -1 || errno != EFAULT) {
         return 376;
+    }
+    interval_timer_signals = 0;
+    if (signal(SIGALRM, interval_timer_signal_handler) == SIG_ERR) {
+        return 393;
+    }
+    struct itimerval interval_value = {0};
+    struct itimerval interval_old = {0};
+    struct itimerval interval_current = {0};
+    if (getitimer(ITIMER_REAL, &interval_current) != 0 ||
+        interval_current.it_interval.tv_sec != 0 ||
+        interval_current.it_interval.tv_usec != 0 ||
+        interval_current.it_value.tv_sec != 0 ||
+        interval_current.it_value.tv_usec != 0) {
+        return 394;
+    }
+    if (alarm(2) != 0 ||
+        getitimer(ITIMER_REAL, &interval_current) != 0 ||
+        interval_current.it_interval.tv_sec != 0 ||
+        interval_current.it_interval.tv_usec != 0 ||
+        interval_current.it_value.tv_sec < 0 ||
+        interval_current.it_value.tv_sec > 2 ||
+        (interval_current.it_value.tv_sec == 0 &&
+         interval_current.it_value.tv_usec == 0)) {
+        return 395;
+    }
+    unsigned int replaced_alarm = alarm(1);
+    if (replaced_alarm == 0 || replaced_alarm > 2 ||
+        alarm(0) == 0 ||
+        getitimer(ITIMER_REAL, &interval_current) != 0 ||
+        interval_current.it_interval.tv_sec != 0 ||
+        interval_current.it_interval.tv_usec != 0 ||
+        interval_current.it_value.tv_sec != 0 ||
+        interval_current.it_value.tv_usec != 0) {
+        return 396;
+    }
+    interval_value.it_interval.tv_usec = 20000;
+    interval_value.it_value.tv_usec = 40000;
+    if (setitimer(ITIMER_REAL, &interval_value, &interval_old) != 0 ||
+        interval_old.it_interval.tv_sec != 0 ||
+        interval_old.it_interval.tv_usec != 0 ||
+        interval_old.it_value.tv_sec != 0 ||
+        interval_old.it_value.tv_usec != 0 ||
+        getitimer(ITIMER_REAL, &interval_current) != 0 ||
+        interval_current.it_interval.tv_sec != 0 ||
+        interval_current.it_interval.tv_usec != 20000 ||
+        interval_current.it_value.tv_sec != 0 ||
+        interval_current.it_value.tv_usec == 0 ||
+        interval_current.it_value.tv_usec > 40000) {
+        return 397;
+    }
+    memset(&interval_value, 0, sizeof(interval_value));
+    if (setitimer(ITIMER_REAL, &interval_value, &interval_old) != 0 ||
+        interval_old.it_interval.tv_sec != 0 ||
+        interval_old.it_interval.tv_usec != 20000 ||
+        interval_old.it_value.tv_sec != 0 ||
+        interval_old.it_value.tv_usec == 0 ||
+        interval_old.it_value.tv_usec > 40000 ||
+        getitimer(ITIMER_REAL, &interval_current) != 0 ||
+        interval_current.it_value.tv_sec != 0 ||
+        interval_current.it_value.tv_usec != 0 ||
+        interval_current.it_interval.tv_sec != 0 ||
+        interval_current.it_interval.tv_usec != 0) {
+        return 398;
+    }
+    interval_timer_signals = 0;
+    interval_value.it_interval.tv_usec = 10000;
+    interval_value.it_value.tv_usec = 10000;
+    if (setitimer(ITIMER_REAL, &interval_value, NULL) != 0 ||
+        wait_for_interval_signals(2) != 0) {
+        return 399;
+    }
+    memset(&interval_old, 0, sizeof(interval_old));
+    if (setitimer(ITIMER_REAL, NULL, &interval_old) != 0 ||
+        interval_old.it_interval.tv_usec != 10000 ||
+        getitimer(ITIMER_REAL, &interval_current) != 0 ||
+        interval_current.it_value.tv_sec != 0 ||
+        interval_current.it_value.tv_usec != 0 ||
+        interval_current.it_interval.tv_sec != 0 ||
+        interval_current.it_interval.tv_usec != 0) {
+        return 400;
+    }
+    sigset_t alarm_signal_set;
+    sigset_t alarm_old_mask;
+    sigemptyset(&alarm_signal_set);
+    sigaddset(&alarm_signal_set, SIGALRM);
+    if (sigprocmask(SIG_BLOCK, &alarm_signal_set, &alarm_old_mask) != 0) {
+        return 401;
+    }
+    int alarm_signalfd =
+        signalfd(-1, &alarm_signal_set, SFD_NONBLOCK | SFD_CLOEXEC);
+    struct pollfd alarm_poll = {
+        .fd = alarm_signalfd,
+        .events = POLLIN,
+    };
+    struct signalfd_siginfo alarm_info = {0};
+    interval_value.it_interval.tv_usec = 10000;
+    interval_value.it_value.tv_usec = 10000;
+    if (alarm_signalfd < 0 ||
+        setitimer(ITIMER_REAL, &interval_value, NULL) != 0 ||
+        poll(&alarm_poll, 1, 1000) != 1 ||
+        read(alarm_signalfd, &alarm_info, sizeof(alarm_info)) !=
+            (ssize_t)sizeof(alarm_info) ||
+        alarm_info.ssi_signo != SIGALRM ||
+        alarm_info.ssi_code != 128 ||
+        alarm_info.ssi_pid != 0) {
+        return 402;
+    }
+    memset(&interval_value, 0, sizeof(interval_value));
+    if (setitimer(ITIMER_REAL, &interval_value, NULL) != 0 ||
+        close(alarm_signalfd) != 0 ||
+        sigprocmask(SIG_SETMASK, &alarm_old_mask, NULL) != 0) {
+        return 403;
+    }
+    errno = 0;
+    if (getitimer(ITIMER_VIRTUAL, &interval_current) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 404;
+    }
+    errno = 0;
+    if (setitimer(ITIMER_PROF, &interval_value, NULL) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 405;
+    }
+    errno = 0;
+    if (getitimer(ITIMER_REAL, (struct itimerval *)(uintptr_t)1) != -1 ||
+        errno != EFAULT) {
+        return 406;
+    }
+    errno = 0;
+    if (setitimer(ITIMER_REAL, (struct itimerval *)(uintptr_t)1, NULL) != -1 ||
+        errno != EFAULT) {
+        return 407;
+    }
+    interval_value.it_value.tv_usec = 1000000;
+    errno = 0;
+    if (setitimer(ITIMER_REAL, &interval_value, NULL) != -1 ||
+        errno != EINVAL) {
+        return 408;
+    }
+    memset(&interval_value, 0, sizeof(interval_value));
+    interval_value.it_value.tv_usec = 200000;
+    errno = 0;
+    if (setitimer(ITIMER_REAL, &interval_value,
+                  (struct itimerval *)(uintptr_t)1) != -1 ||
+        errno != EFAULT ||
+        getitimer(ITIMER_REAL, &interval_current) != 0 ||
+        (interval_current.it_value.tv_sec == 0 &&
+         interval_current.it_value.tv_usec == 0)) {
+        return 416;
+    }
+    memset(&interval_value, 0, sizeof(interval_value));
+    if (setitimer(ITIMER_REAL, &interval_value, NULL) != 0 ||
+        alarm(1) != 0) {
+        return 409;
+    }
+    pid_t interval_child = fork();
+    if (interval_child < 0) {
+        return 410;
+    }
+    if (interval_child == 0) {
+        memset(&interval_current, 0, sizeof(interval_current));
+        int child_result =
+            getitimer(ITIMER_REAL, &interval_current) == 0 &&
+            interval_current.it_value.tv_sec == 0 &&
+            interval_current.it_value.tv_usec == 0;
+        _exit(child_result ? 0 : 1);
+    }
+    int interval_child_status = 0;
+    if (waitpid(interval_child, &interval_child_status, 0) != interval_child ||
+        !WIFEXITED(interval_child_status) ||
+        WEXITSTATUS(interval_child_status) != 0 ||
+        alarm(0) == 0) {
+        return 411;
+    }
+    for (int child_index = 0; child_index < 18; child_index++) {
+        interval_child = fork();
+        if (interval_child < 0) {
+            return 412;
+        }
+        if (interval_child == 0) {
+            interval_value.it_value.tv_sec = 1;
+            _exit(setitimer(ITIMER_REAL, &interval_value, NULL) == 0 ? 0 : 1);
+        }
+        interval_child_status = 0;
+        if (waitpid(interval_child, &interval_child_status, 0) !=
+                interval_child ||
+            !WIFEXITED(interval_child_status) ||
+            WEXITSTATUS(interval_child_status) != 0) {
+            return 413;
+        }
+    }
+    memset(&interval_value, 0, sizeof(interval_value));
+    interval_value.it_value.tv_usec = 10000;
+    if (setitimer(ITIMER_REAL, &interval_value, NULL) != 0 ||
+        getitimer(ITIMER_REAL, &interval_current) != 0 ||
+        (interval_current.it_value.tv_sec == 0 &&
+         interval_current.it_value.tv_usec == 0)) {
+        return 414;
+    }
+    memset(&interval_value, 0, sizeof(interval_value));
+    if (setitimer(ITIMER_REAL, &interval_value, NULL) != 0) {
+        return 415;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
