@@ -78,6 +78,18 @@
 #ifndef SYS_rseq_slice_yield
 #define SYS_rseq_slice_yield 471
 #endif
+#ifndef SYS_futex_wake
+#define SYS_futex_wake 454
+#endif
+#ifndef SYS_futex_wait
+#define SYS_futex_wait 455
+#endif
+#ifndef SYS_futex_requeue
+#define SYS_futex_requeue 456
+#endif
+#ifndef SYS_futex_waitv
+#define SYS_futex_waitv 449
+#endif
 
 struct jasper_ion_allocation_data {
     size_t len;
@@ -113,6 +125,13 @@ struct jasper_xattr_args {
     uint64_t value;
     uint32_t size;
     uint32_t flags;
+};
+
+struct futex2_waitv_probe {
+    uint64_t value;
+    uint64_t address;
+    uint32_t flags;
+    uint32_t reserved;
 };
 
 static void signal_noop(int signal) {
@@ -169,12 +188,16 @@ static int wait_for_interval_signals(int expected) {
 }
 
 static uint32_t futex_word;
+static uint32_t futex2_word;
+static uint32_t futex2_destination;
 static atomic_int futex_started;
 static atomic_int futex_finished;
 static uint32_t futex_requeue_source;
 static uint32_t futex_requeue_target;
 static atomic_int futex_requeue_started;
 static atomic_int futex_requeue_finished;
+static atomic_int futex2_started;
+static atomic_int futex2_finished;
 
 struct futex_thread_arg {
     uint32_t bitset;
@@ -225,6 +248,16 @@ static void *futex_requeue_waiter(void *argument) {
                           FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 0,
                           &deadline, NULL, 0);
     atomic_fetch_add_explicit(&futex_requeue_finished, 1, memory_order_release);
+    return (void *)(intptr_t)result;
+}
+
+static void *futex2_waiter(void *argument) {
+    (void)argument;
+    atomic_store_explicit(&futex2_started, 1, memory_order_release);
+    long result = syscall(
+        SYS_futex_wait, &futex2_word, 0U, UINT32_MAX,
+        FUTEX2_SIZE_U32 | FUTEX2_PRIVATE, NULL, CLOCK_MONOTONIC);
+    atomic_store_explicit(&futex2_finished, 1, memory_order_release);
     return (void *)(intptr_t)result;
 }
 
@@ -4316,6 +4349,67 @@ int main(void) {
         errno != EINVAL ||
         close(aio_fd) != 0) {
         return 540;
+    }
+    futex2_word = 0;
+    atomic_store_explicit(&futex2_started, 0, memory_order_relaxed);
+    atomic_store_explicit(&futex2_finished, 0, memory_order_relaxed);
+    pthread_t futex2_thread;
+    if (pthread_create(&futex2_thread, NULL, futex2_waiter, NULL) != 0) {
+        return 546;
+    }
+    while (!atomic_load_explicit(&futex2_started, memory_order_acquire)) {
+        sched_yield();
+    }
+    struct timespec futex2_delay = {.tv_sec = 0, .tv_nsec = 20000000};
+    nanosleep(&futex2_delay, NULL);
+    __atomic_store_n(&futex2_word, 1, __ATOMIC_RELEASE);
+    if (syscall(SYS_futex_wake, &futex2_word, UINT32_MAX, 1,
+                FUTEX2_SIZE_U32 | FUTEX2_PRIVATE) != 1) {
+        return 547;
+    }
+    void *futex2_thread_result = NULL;
+    if (pthread_join(futex2_thread, &futex2_thread_result) != 0 ||
+        futex2_thread_result != NULL ||
+        !atomic_load_explicit(&futex2_finished, memory_order_acquire)) {
+        return 548;
+    }
+    struct futex2_waitv_probe futex2_waitv[2] = {
+        {
+            .value = 1,
+            .address = (uint64_t)(uintptr_t)&futex2_word,
+            .flags = FUTEX2_SIZE_U32 | FUTEX2_PRIVATE,
+        },
+        {
+            .value = 1,
+            .address = (uint64_t)(uintptr_t)&futex2_destination,
+            .flags = FUTEX2_SIZE_U32 | FUTEX2_PRIVATE,
+        },
+    };
+    if (syscall(SYS_futex_waitv, futex2_waitv, 2, 0,
+                NULL, CLOCK_MONOTONIC) != 1) {
+        return 549;
+    }
+    futex2_destination = 0;
+    struct futex2_waitv_probe futex2_requeue[2] = {
+        {
+            .value = 1,
+            .address = (uint64_t)(uintptr_t)&futex2_word,
+            .flags = FUTEX2_SIZE_U32 | FUTEX2_PRIVATE,
+        },
+        {
+            .value = 0,
+            .address = (uint64_t)(uintptr_t)&futex2_destination,
+            .flags = FUTEX2_SIZE_U32 | FUTEX2_PRIVATE,
+        },
+    };
+    if (syscall(SYS_futex_requeue, futex2_requeue, 0, 0, 1) != 0) {
+        return 550;
+    }
+    errno = 0;
+    if (syscall(SYS_futex_wake, &futex2_word, 0, 1,
+                FUTEX2_SIZE_U32) != -1 ||
+        errno != EINVAL) {
+        return 551;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);

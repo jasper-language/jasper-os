@@ -1580,25 +1580,9 @@ fn futex_wait(
         }
     };
     let mut state = COMPAT.lock();
-    let current_key = state
-        .futexes
-        .iter()
-        .flatten()
-        .flat_map(|word| word.waiters.iter())
-        .find(|waiter| waiter.active && waiter.task == task)
-        .and_then(|waiter| waiter.key);
-    if let Some(current_key) = current_key {
-        if let Some(word) = state
-            .futexes
-            .iter_mut()
-            .flatten()
-            .find(|word| word.key == current_key)
-        {
-            if let Some(waiter) = word
-                .waiters
-                .iter_mut()
-                .find(|waiter| waiter.active && waiter.task == task)
-            {
+    for word in state.futexes.iter_mut().flatten() {
+        for waiter in word.waiters.iter_mut() {
+            if waiter.active && waiter.task == task {
                 *waiter = FutexWaiter::EMPTY;
             }
         }
@@ -2269,6 +2253,10 @@ fn execute(
         LinuxSyscall::Getrlimit => compat_result(linux_getrlimit(pid, call.args)),
         LinuxSyscall::Setrlimit => compat_result(linux_setrlimit(pid, call.args)),
         LinuxSyscall::Futex => compat_result(linux_futex(pid, call.args)),
+        LinuxSyscall::FutexWait => compat_result(linux_futex_wait(pid, call.args)),
+        LinuxSyscall::FutexWake => compat_result(linux_futex_wake(pid, call.args)),
+        LinuxSyscall::FutexRequeue => compat_result(linux_futex_requeue(pid, call.args)),
+        LinuxSyscall::FutexWaitv => compat_result(linux_futex_waitv(pid, call.args)),
         LinuxSyscall::EpollCreate => compat_result(linux_epoll_create(pid, call.args)),
         LinuxSyscall::EpollCreate1 => compat_result(linux_epoll_create1(pid, call.args)),
         LinuxSyscall::EpollCtl => compat_result(linux_epoll_ctl(pid, call.args)),
@@ -5138,6 +5126,253 @@ fn linux_futex(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         ),
         _ => Err(CompatErrno::NoSys),
     }
+}
+
+#[derive(Clone, Copy)]
+struct Futex2Waiter {
+    address: u64,
+    expected: u32,
+    flags: u32,
+    key: FutexKey,
+}
+
+/// Validates one futex2 waiter flag word.
+fn validate_futex2_flags(flags: u32) -> Result<(), CompatErrno> {
+    const FUTEX2_SIZE_MASK: u32 = 0x3;
+    const FUTEX2_SIZE_U32: u32 = 0x2;
+    const FUTEX2_NUMA: u32 = 0x4;
+    const FUTEX2_MPOL: u32 = 0x8;
+    const FUTEX2_PRIVATE: u32 = 128;
+    if flags & !(FUTEX2_SIZE_MASK | FUTEX2_NUMA | FUTEX2_MPOL | FUTEX2_PRIVATE) != 0
+        || flags & FUTEX2_SIZE_MASK != FUTEX2_SIZE_U32
+        || flags & (FUTEX2_NUMA | FUTEX2_MPOL) != 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    Ok(())
+}
+
+/// Reads one bounded futex2 waiter array.
+fn read_futex2_waiters(
+    pid: ObjId,
+    address: u64,
+    count: usize,
+) -> Result<alloc::vec::Vec<Futex2Waiter>, CompatErrno> {
+    const FUTEX2_WAITER_BYTES: usize = 24;
+    let mut waiters = alloc::vec::Vec::new();
+    waiters
+        .try_reserve(count)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    for index in 0..count {
+        let entry = address
+            .checked_add((index * FUTEX2_WAITER_BYTES) as u64)
+            .ok_or(CompatErrno::Fault)?;
+        let mut raw = [0u8; FUTEX2_WAITER_BYTES];
+        proc::read(pid, entry, &mut raw).map_err(|_| CompatErrno::Fault)?;
+        let expected = u32::try_from(u64::from_le_bytes(raw[0..8].try_into().unwrap()))
+            .map_err(|_| CompatErrno::Invalid)?;
+        let futex_address = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+        let flags = u32::from_le_bytes(raw[16..20].try_into().unwrap());
+        if u32::from_le_bytes(raw[20..24].try_into().unwrap()) != 0
+            || futex_address % 4 != 0
+            || waiters
+                .iter()
+                .any(|waiter: &Futex2Waiter| waiter.address == futex_address)
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        validate_futex2_flags(flags)?;
+        waiters.push(Futex2Waiter {
+            address: futex_address,
+            expected,
+            flags,
+            key: futex_key(pid, futex_address),
+        });
+    }
+    Ok(waiters)
+}
+
+/// Converts one absolute futex2 timeout to Jasper monotonic nanoseconds.
+fn futex2_deadline(timeout: u64, clockid: u64) -> Result<Option<u64>, CompatErrno> {
+    if timeout == 0 {
+        return Ok(None);
+    }
+    let requested = read_linux_timespec(timeout)?;
+    match clockid {
+        0 => {
+            let wall = crate::arch::wall_clock_ns().ok_or(CompatErrno::NoSys)?;
+            Ok(Some(
+                sched::now_ns().saturating_add(requested.saturating_sub(wall)),
+            ))
+        }
+        1 => Ok(Some(requested)),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+/// Removes every futex waiter owned by one task.
+fn clear_task_futex_waiters(task: crate::task::TaskId) {
+    let mut state = COMPAT.lock();
+    for word in state.futexes.iter_mut().flatten() {
+        for waiter in word.waiters.iter_mut() {
+            if waiter.active && waiter.task == task {
+                *waiter = FutexWaiter::EMPTY;
+            }
+        }
+    }
+}
+
+/// Implements `futex_wait(2)` from the futex2 family.
+fn linux_futex_wait(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let flags = u32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    validate_futex2_flags(flags)?;
+    let deadline = futex2_deadline(args[4], args[5])?;
+    futex_wait(
+        pid,
+        args[0],
+        u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?,
+        u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
+        deadline,
+    )
+}
+
+/// Implements `futex_wake(2)` from the futex2 family.
+fn linux_futex_wake(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let mask = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let count = i32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let flags = u32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    if count < 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    validate_futex2_flags(flags)?;
+    futex_wake(pid, args[0], count as usize, mask)
+}
+
+/// Implements `futex_requeue(2)` from the futex2 family.
+fn linux_futex_requeue(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[1] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let wake = i32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let requeue = i32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    if wake < 0 || requeue < 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let waiters = read_futex2_waiters(pid, args[0], 2)?;
+    if waiters[0].flags != waiters[1].flags {
+        return Err(CompatErrno::Invalid);
+    }
+    futex_requeue(
+        pid,
+        waiters[0].address,
+        waiters[1].address,
+        wake as usize,
+        requeue as usize,
+        Some(waiters[0].expected),
+    )
+}
+
+/// Implements vectorized `futex_waitv(2)`.
+fn linux_futex_waitv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MAX_WAITV: usize = 16;
+    if args[2] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let count = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if count == 0 || count > MAX_WAITV || args[0] == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let waiters = read_futex2_waiters(pid, args[0], count)?;
+    for (index, waiter) in waiters.iter().enumerate() {
+        if futex_value(pid, waiter.address)? != waiter.expected {
+            return Ok(index as u64);
+        }
+    }
+    let deadline = futex2_deadline(args[3], args[4])?;
+    let task = sched::current().0;
+    {
+        let mut state = COMPAT.lock();
+        for waiter in &waiters {
+            let slot = if let Some(slot) = state
+                .futexes
+                .iter()
+                .position(|entry| entry.is_some_and(|entry| entry.key == waiter.key))
+            {
+                slot
+            } else {
+                let Some(slot) = state.futexes.iter().position(Option::is_none) else {
+                    for word in state.futexes.iter_mut().flatten() {
+                        for entry in word.waiters.iter_mut() {
+                            if entry.active && entry.task == task {
+                                *entry = FutexWaiter::EMPTY;
+                            }
+                        }
+                    }
+                    return Err(CompatErrno::NoSpace);
+                };
+                state.futexes[slot] = Some(FutexWord {
+                    key: waiter.key,
+                    waiters: [FutexWaiter::EMPTY; MAX_FUTEX_WAITERS],
+                });
+                slot
+            };
+            let word = state.futexes[slot].as_mut().ok_or(CompatErrno::NoSpace)?;
+            let Some(entry) = word.waiters.iter_mut().find(|entry| !entry.active) else {
+                for word in state.futexes.iter_mut().flatten() {
+                    for entry in word.waiters.iter_mut() {
+                        if entry.active && entry.task == task {
+                            *entry = FutexWaiter::EMPTY;
+                        }
+                    }
+                }
+                return Err(CompatErrno::NoSpace);
+            };
+            *entry = FutexWaiter {
+                task,
+                key: Some(waiter.key),
+                bitset: u32::MAX,
+                active: true,
+                woken: false,
+            };
+        }
+    }
+    let result = loop {
+        if proc::current_exiting() || current_signal_pending(pid) {
+            break Err(CompatErrno::Interrupted);
+        }
+        if let Some(deadline) = deadline {
+            if sched::now_ns() >= deadline {
+                break Err(CompatErrno::TimedOut);
+            }
+        }
+        let woken = {
+            let state = COMPAT.lock();
+            waiters.iter().position(|waiter| {
+                state
+                    .futexes
+                    .iter()
+                    .flatten()
+                    .find(|word| word.key == waiter.key)
+                    .is_some_and(|word| {
+                        word.waiters
+                            .iter()
+                            .any(|entry| entry.active && entry.task == task && entry.woken)
+                    })
+            })
+        };
+        if let Some(index) = woken {
+            break Ok(index as u64);
+        }
+        if let Some(deadline) = deadline {
+            if sched::sleep_until_ns(deadline).is_err() {
+                sched::pause();
+            }
+        } else {
+            sched::pause();
+        }
+    };
+    clear_task_futex_waiters(task);
+    result
 }
 
 /// Reports the compatibility service's read-only resource limits.
