@@ -12,10 +12,14 @@ use kernel_core::fs::journal::{
     JournalError, SectorIo, SECTORS_PER_STORAGE_UNIT, STORAGE_UNIT_BYTES,
 };
 use kernel_core::native_install::{
-    Actor, DataOwnerKind, GrantRights, GrantSpec, InstallSpec, OwnerScope, PackageSource,
-    PackageSpec, PrincipalKind, PrincipalSpec, Subject, UpdateAuthority,
+    Actor, DataOwnerKind, GrantRights, OwnerScope, PackageSource, PackageSpec, PrincipalKind,
+    Subject,
+};
+use kernel_core::native_install_service::{
+    InstallServiceCaller, InstallServiceError, NativeInstallService,
 };
 use kernel_core::persistent_install::{PersistentInstallError, PersistentInstallStore};
+use kernel_core::security::{BootId, IdentityClass, MetadataState, SecurityContext};
 use kernel_core::security_domain::DomainKey;
 
 use crate::blk::BlockDevice;
@@ -45,15 +49,30 @@ fn check(condition: bool, what: &'static str) {
     }
 }
 
-fn install_spec(package: kernel_core::native_install::PackageKey, user: u64) -> InstallSpec {
-    InstallSpec {
-        package,
-        scope: OwnerScope::User(user),
-        source: PackageSource::Store,
-        update_authority: UpdateAuthority {
-            subject: Subject::User(user),
-        },
-    }
+fn test_context(id: u64) -> SecurityContext {
+    SecurityContext::new(
+        BootId::from_words([0x4e49, 0x5354]),
+        IdentityClass::Process,
+        kernel_core::objtable::ObjId::from_raw((1u64 << 32) | id).unwrap(),
+        None,
+        MetadataState::Active,
+    )
+}
+
+fn system_caller() -> InstallServiceCaller {
+    InstallServiceCaller::new(test_context(1), None, Subject::System).unwrap()
+}
+
+fn user_caller(user: u64) -> InstallServiceCaller {
+    InstallServiceCaller::new(
+        test_context(user),
+        Some(DomainKey {
+            id: user as u32,
+            generation: 1,
+        }),
+        Subject::User(user),
+    )
+    .unwrap()
 }
 
 struct VirtioSectorIo<'a> {
@@ -370,7 +389,7 @@ fn run_fault_matrix(
 }
 
 #[inline(never)]
-fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), PersistentInstallError> {
+fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), InstallServiceError> {
     kprintln!("[JSR-NATIVE-INSTALL] step=open-begin");
     let opened = PersistentInstallStore::open(VirtioSectorIo {
         device,
@@ -385,37 +404,66 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), Persisten
                 base_sector: DATA_BASE_SECTOR,
             })?,
         ),
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     };
     kprintln!("[JSR-NATIVE-INSTALL] step=open phase={}", phase);
 
     if phase == "format" {
         kprintln!("[JSR-NATIVE-INSTALL] step=write-begin");
-        let package = store.install_package(PACKAGE, PACKAGE_BYTES)?;
-        let first = store.install(install_spec(package, 7))?;
-        store.install(install_spec(package, 8))?;
-        store.add_grant(GrantSpec {
-            installation: first,
-            subject: Subject::User(7),
-            rights: GrantRights::DISCOVER.union(GrantRights::START),
-            expires_at: None,
-        })?;
-        let actor = Actor::new(&[Subject::User(7)]);
-        store.start(
-            actor,
-            first,
-            PrincipalSpec {
-                kind: PrincipalKind::User,
-                subject: Subject::User(7),
-                generation: 1,
-                domain: DomainKey {
-                    id: 7,
-                    generation: 1,
-                },
-            },
-            11,
+        let mut service = NativeInstallService::new(store);
+        let system = system_caller();
+        let user = user_caller(7);
+        let other = user_caller(8);
+        check(
+            service
+                .install_package(user, PACKAGE, PACKAGE_BYTES)
+                .is_err(),
+            "non-system package insertion was admitted",
+        );
+        let package = service.install_package(system, PACKAGE, PACKAGE_BYTES)?;
+        let first = service.register(
+            system,
+            package,
+            OwnerScope::User(7),
+            PackageSource::Store,
+            Subject::User(7),
         )?;
-        store.create_data(first, Subject::User(7), DataOwnerKind::PrivateUser)?;
+        service.register(
+            system,
+            package,
+            OwnerScope::User(8),
+            PackageSource::Store,
+            Subject::User(8),
+        )?;
+        check(
+            service
+                .register(
+                    user,
+                    package,
+                    OwnerScope::User(8),
+                    PackageSource::Store,
+                    Subject::User(8),
+                )
+                .is_err(),
+            "cross-scope registration was admitted",
+        );
+        service.add_grant(
+            system,
+            first,
+            Subject::User(7),
+            GrantRights::DISCOVER.union(GrantRights::START),
+            None,
+        )?;
+        service.start(user, first, PrincipalKind::User, 1, 11)?;
+        service.create_data(user, first, Subject::User(7), DataOwnerKind::PrivateUser)?;
+        check(
+            service.query(other, first, 12).is_err(),
+            "cross-user query was admitted",
+        );
+        service.query(user, first, 12)?;
+        kprintln!(
+            "[JSR-NATIVE-INSTALL] service-auth=true package_system_only=true cross_scope_denied=true cross_user_denied=true"
+        );
         kprintln!(
             "[JSR-NATIVE-INSTALL] stage=format packages=1 installations=2 grants=1 runtimes=1 data=1 failed=0"
         );
@@ -430,7 +478,7 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), Persisten
     let bytes_len = store.read_package_bytes(PACKAGE_CONTENT, &mut bytes)?;
     kprintln!("[JSR-NATIVE-INSTALL] reopen-step=bytes");
     if &bytes[..bytes_len] != PACKAGE_BYTES || store.installation_count_for(package) != 2 {
-        return Err(PersistentInstallError::Corrupt);
+        return Err(PersistentInstallError::Corrupt.into());
     }
     kprintln!("[JSR-NATIVE-INSTALL] reopen-step=counts");
     let state = store.state();
@@ -440,7 +488,7 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), Persisten
         || state.runtimes.iter().flatten().count() != 1
         || state.data.iter().flatten().count() != 1
     {
-        return Err(PersistentInstallError::Corrupt);
+        return Err(PersistentInstallError::Corrupt.into());
     }
     kprintln!("[JSR-NATIVE-INSTALL] reopen-step=state");
     let first = state
@@ -453,8 +501,16 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), Persisten
     if !store.can_discover(actor, first.key, 12) || !store.can_start(actor, first.key, 12) {
         return Err(PersistentInstallError::Install(
             kernel_core::native_install::InstallError::NotAuthorized,
-        ));
+        )
+        .into());
     }
+    let mut service = NativeInstallService::new(store);
+    check(
+        service.query(user_caller(8), first.key, 12).is_err(),
+        "cross-user reopen query was admitted",
+    );
+    service.query(user_caller(7), first.key, 12)?;
+    store = service.into_store();
     kprintln!("[JSR-NATIVE-INSTALL] reopen-step=authority");
     let (io, faults) = {
         let io = store.into_device();
