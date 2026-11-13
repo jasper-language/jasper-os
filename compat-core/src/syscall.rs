@@ -68,7 +68,7 @@ use linux_raw_sys::general::{
     __NR_times, __NR_truncate,
     __NR_uname, __NR_utime,
     __NR_splice, __NR_symlink, __NR_symlinkat, __NR_umask, __NR_unlink, __NR_unlinkat,
-    __NR_utimensat,
+    __NR_utimensat, __NR_vmsplice,
     __NR_utimes, __NR_vfork, __NR_wait4, __NR_waitid, __NR_write, __NR_writev,
 };
 
@@ -201,6 +201,7 @@ pub enum LinuxSyscall {
     SymlinkAt,
     Umask,
     Splice,
+    Vmsplice,
     Setxattr,
     LSetxattr,
     FSetxattr,
@@ -628,6 +629,7 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_symlinkat) => LinuxSyscall::SymlinkAt,
         value if value == u64::from(__NR_umask) => LinuxSyscall::Umask,
         value if value == u64::from(__NR_splice) => LinuxSyscall::Splice,
+        value if value == u64::from(__NR_vmsplice) => LinuxSyscall::Vmsplice,
         value if value == u64::from(__NR_setxattr) => LinuxSyscall::Setxattr,
         value if value == u64::from(__NR_lsetxattr) => LinuxSyscall::LSetxattr,
         value if value == u64::from(__NR_fsetxattr) => LinuxSyscall::FSetxattr,
@@ -934,6 +936,7 @@ mod tests {
             (__NR_symlinkat, LinuxSyscall::SymlinkAt),
             (__NR_umask, LinuxSyscall::Umask),
             (__NR_splice, LinuxSyscall::Splice),
+            (__NR_vmsplice, LinuxSyscall::Vmsplice),
             (__NR_setxattr, LinuxSyscall::Setxattr),
             (__NR_lsetxattr, LinuxSyscall::LSetxattr),
             (__NR_fsetxattr, LinuxSyscall::FSetxattr),

@@ -2017,6 +2017,7 @@ fn execute(
         LinuxSyscall::SendFile => compat_result(linux_sendfile(pid, call.args)),
         LinuxSyscall::CopyFileRange => compat_result(linux_copy_file_range(pid, call.args)),
         LinuxSyscall::Splice => compat_result(linux_splice(pid, call.args)),
+        LinuxSyscall::Vmsplice => compat_result(linux_vmsplice(pid, call.args)),
         LinuxSyscall::Mmap => compat_result(linux_mmap(pid, call.args)),
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
@@ -10922,6 +10923,47 @@ fn linux_splice(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
     }
     Ok(written as u64)
+}
+
+/// Implements `vmsplice(2)` from a bounded user iovec array into a pipe.
+fn linux_vmsplice(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SPLICE_F_NONBLOCK: u64 = 0x2;
+    const SPLICE_F_MOVE: u64 = 0x1;
+    const SPLICE_F_MORE: u64 = 0x4;
+    const SPLICE_F_GIFT: u64 = 0x8;
+    let flags = args[3];
+    if flags & !(SPLICE_F_NONBLOCK | SPLICE_F_MOVE | SPLICE_F_MORE | SPLICE_F_GIFT) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Pipe {
+        return Err(CompatErrno::BadFd);
+    }
+    if !entry
+        .rights
+        .contains(kernel_core::object::Rights::WRITE)
+    {
+        return Err(CompatErrno::BadFd);
+    }
+    let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let vectors = read_message_iovecs(pid, args[1], count, compat_core::PIPE_CAPACITY)?;
+    let total = vectors.iter().map(|(_, length)| *length).sum::<usize>();
+    let mut bytes = alloc::vec![0u8; total];
+    let mut offset = 0usize;
+    for (address, length) in vectors {
+        proc::read(pid, address, &mut bytes[offset..offset + length])
+            .map_err(|_| CompatErrno::Fault)?;
+        offset += length;
+    }
+    linux_pipe_write_buffer_mode(
+        pid,
+        fd,
+        entry.handle,
+        &bytes,
+        flags & SPLICE_F_NONBLOCK != 0,
+    )
+    .map(|written| written as u64)
 }
 
 /// Stores or queries one x86_64 Linux signal action.

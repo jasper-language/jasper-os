@@ -4027,6 +4027,32 @@ int main(void) {
         close(splice_dest_pipe[1]) != 0) {
         return 519;
     }
+    int vmsplice_pipe[2];
+    char vmsplice_first[] = "vm";
+    char vmsplice_second[] = "spl";
+    char vmsplice_readback[6] = {0};
+    struct iovec vmsplice_vectors[2] = {
+        {.iov_base = vmsplice_first, .iov_len = 2},
+        {.iov_base = vmsplice_second, .iov_len = 3},
+    };
+    if (pipe(vmsplice_pipe) != 0 ||
+        syscall(SYS_vmsplice, vmsplice_pipe[1], vmsplice_vectors,
+                2, 0) != 5 ||
+        read(vmsplice_pipe[0], vmsplice_readback, 5) != 5 ||
+        memcmp(vmsplice_readback, "vmspl", 5) != 0) {
+        return 520;
+    }
+    errno = 0;
+    if (syscall(SYS_vmsplice, vmsplice_pipe[1], vmsplice_vectors,
+                2, 0x10) != -1 ||
+        errno != EINVAL ||
+        syscall(SYS_vmsplice, vmsplice_pipe[0], vmsplice_vectors,
+                2, 0) != -1 ||
+        errno != EBADF ||
+        close(vmsplice_pipe[0]) != 0 ||
+        close(vmsplice_pipe[1]) != 0) {
+        return 521;
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);
