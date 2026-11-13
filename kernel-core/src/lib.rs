@@ -55,7 +55,7 @@
 //! 本 crate 内的 Rust 模块名只是代码组织，不是接口。
 #![cfg_attr(not(test), no_std)]
 
-#[cfg(any(test, feature = "ext4-view"))]
+#[cfg(any(test, feature = "ext4-view", feature = "persistent-install"))]
 extern crate alloc;
 
 pub mod abi;
@@ -204,6 +204,7 @@ pub mod sandbox_launch_abi;
 pub mod sandbox_store;
 
 pub mod native_install;
+#[cfg(any(test, feature = "persistent-install"))]
 pub mod persistent_install;
 pub mod native_module_lifecycle;
 

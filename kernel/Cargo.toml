@@ -133,7 +133,13 @@ blk1-verify = []
 # FS-0 journal-to-virtio-blk integration and same-disk power-cut drill.
 fs0-journal-verify = []
 # Real virtio-blk persistence of package bytes and installation state across reboot.
-native-install-block-verify = ["dep:jasper-lifecycle-model"]
+native-install-block-verify = [
+    "dep:jasper-lifecycle-model",
+    "kernel-core/persistent-install",
+]
+# Deep test-only codec fault injection; retained outside the production-stack
+# two-boot persistence drill.
+native-install-fault-verify = ["native-install-block-verify"]
 # Real virtio-blk persistence and bounded privacy queries for LC-1 diagnostics.
 lifecycle-diagnostic-block-verify = [
     "dep:jasper-lifecycle-model",

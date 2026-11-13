@@ -57,7 +57,7 @@ truncate -s 16M "$DATA_IMAGE"
   --target-dir "$TARGET" -p xtask >"$OUT/build.log" 2>&1
 env -u CARGO_TARGET_DIR "$ROOT/scripts/guarded-cargo.sh" build --locked --release \
   --target-dir "$TARGET" --target x86_64-unknown-none -p jasper-kernel \
-  --no-default-features --features native-install-block-verify \
+  --no-default-features --features native-install-block-verify,native-install-fault-verify \
   >>"$OUT/build.log" 2>&1
 "$TARGET/release/xtask" \
   "$TARGET/x86_64-unknown-none/release/jasper-kernel" "$BOOT_IMAGE" \

@@ -18,6 +18,7 @@ use crate::native_install::{
     PrincipalSpec, RuntimeKey, RuntimeSnapshot, Subject, UpdateAuthority, CONTENT_BYTES,
 };
 use crate::security_domain::DomainKey;
+use alloc::boxed::Box;
 
 type Model = InstallModel<16, 32, 64, 16, 32>;
 type State = InstallStateSnapshot<16, 32, 64, 16, 32>;
@@ -79,12 +80,13 @@ struct BlobRecord {
 /// A bounded persistent installation store over one `SectorIo` device.
 pub struct PersistentInstallStore<D: SectorIo> {
     device: D,
-    model: Model,
+    model: Box<Model>,
     sequence: u64,
     blobs: [Option<BlobRecord>; BLOB_SLOTS],
 }
 
 impl<D: SectorIo> PersistentInstallStore<D> {
+    #[inline(never)]
     pub fn format(device: D) -> Result<Self, PersistentInstallError> {
         if device.capacity_sectors()
             < (TOTAL_UNITS as u64)
@@ -95,7 +97,7 @@ impl<D: SectorIo> PersistentInstallStore<D> {
         }
         let mut store = Self {
             device,
-            model: Model::new(),
+            model: Box::new(Model::new()),
             sequence: 0,
             blobs: [None; BLOB_SLOTS],
         };
@@ -125,6 +127,7 @@ impl<D: SectorIo> PersistentInstallStore<D> {
         Ok(store)
     }
 
+    #[inline(never)]
     pub fn open(mut device: D) -> Result<Self, PersistentInstallError> {
         let mut header = [0u8; STORAGE_UNIT_BYTES];
         device
@@ -135,19 +138,19 @@ impl<D: SectorIo> PersistentInstallStore<D> {
         {
             return Err(PersistentInstallError::InvalidFormat);
         }
-        let mut selected: Option<(u64, State)> = None;
+        let mut selected: Option<(u64, Box<State>)> = None;
         for slot in 0..2 {
             if let Some((sequence, state)) = read_slot(&mut device, slot)? {
-                if selected.is_none_or(|(current, _)| sequence > current) {
+                if selected.as_ref().is_none_or(|(current, _)| sequence > *current) {
                     selected = Some((sequence, state));
                 }
             }
         }
         let (sequence, state) = selected.ok_or(PersistentInstallError::Corrupt)?;
-        let model = Model::restore_state(state).map_err(PersistentInstallError::Install)?;
+        let model = Model::restore_state(*state).map_err(PersistentInstallError::Install)?;
         let mut store = Self {
             device,
-            model,
+            model: Box::new(model),
             sequence,
             blobs: [None; BLOB_SLOTS],
         };
@@ -383,32 +386,23 @@ impl<D: SectorIo> PersistentInstallStore<D> {
         self.device
     }
 
-    fn commit_model(&mut self, next: Model) -> Result<(), PersistentInstallError> {
+    #[inline(never)]
+    fn commit_model(&mut self, next: Box<Model>) -> Result<(), PersistentInstallError> {
         let sequence = self
             .sequence
             .checked_add(1)
             .ok_or(PersistentInstallError::SequenceExhausted)?;
-        let state = next.snapshot_state();
-        let mut encoded = [0u8; SNAPSHOT_MAX_BYTES];
-        let len = encode_state(&state, &mut encoded)?;
         let slot = sequence as usize & 1;
         let base = FORMAT_UNITS + slot * SLOT_UNITS;
-        for unit in 0..SLOT_BODY_UNITS {
-            let mut bytes = [0u8; STORAGE_UNIT_BYTES];
-            let start = unit * STORAGE_UNIT_BYTES;
-            let end = (start + STORAGE_UNIT_BYTES).min(len);
-            if start < len {
-                bytes[..end - start].copy_from_slice(&encoded[start..end]);
-            }
-            self.write_unit(base + unit, &bytes)?;
-        }
-        self.flush()?;
+        let mut writer = SnapshotUnitWriter::new(&mut self.device, base);
+        let len = encode_model(next.as_ref(), &mut writer)?;
+        let encoded_checksum = writer.finish()?;
         let mut marker = [0u8; STORAGE_UNIT_BYTES];
         marker[..8].copy_from_slice(SNAPSHOT_MAGIC);
         marker[8..12].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
         marker[12..20].copy_from_slice(&sequence.to_le_bytes());
         marker[20..24].copy_from_slice(&(len as u32).to_le_bytes());
-        marker[24..28].copy_from_slice(&checksum(&encoded[..len]).to_le_bytes());
+        marker[24..28].copy_from_slice(&encoded_checksum.to_le_bytes());
         self.write_unit(base + SLOT_BODY_UNITS, &marker)?;
         self.flush()?;
         self.model = next;
@@ -593,10 +587,11 @@ fn valid_package(spec: PackageSpec) -> bool {
         && spec.content.iter().any(|byte| *byte != 0)
 }
 
+#[inline(never)]
 fn read_slot<D: SectorIo>(
     device: &mut D,
     slot: usize,
-) -> Result<Option<(u64, State)>, PersistentInstallError> {
+) -> Result<Option<(u64, Box<State>)>, PersistentInstallError> {
     let base = FORMAT_UNITS + slot * SLOT_UNITS;
     let mut marker = [0u8; STORAGE_UNIT_BYTES];
     device
@@ -613,22 +608,29 @@ fn read_slot<D: SectorIo>(
     if len == 0 || len > SNAPSHOT_MAX_BYTES {
         return Ok(None);
     }
-    let mut encoded = [0u8; SNAPSHOT_MAX_BYTES];
+    let mut hash = 0x811c_9dc5u32;
+    let mut remaining = len;
     for unit in 0..SLOT_BODY_UNITS {
         let mut bytes = [0u8; STORAGE_UNIT_BYTES];
         device
             .read_unit(sector_for_unit(base + unit)?, &mut bytes)
             .map_err(|_| PersistentInstallError::Io)?;
-        let start = unit * STORAGE_UNIT_BYTES;
-        let end = (start + STORAGE_UNIT_BYTES).min(len);
-        if start < len {
-            encoded[start..end].copy_from_slice(&bytes[..end - start]);
+        let take = remaining.min(STORAGE_UNIT_BYTES);
+        for byte in &bytes[..take] {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x0100_0193);
+        }
+        remaining -= take;
+        if remaining == 0 {
+            break;
         }
     }
-    if checksum(&encoded[..len]) != expected {
+    if hash != expected {
         return Ok(None);
     }
-    let state = decode_state(&encoded[..len])?;
+    let mut source = SnapshotUnitReader::new(device, base, len);
+    let state = decode_state(&mut source)?;
+    source.finish()?;
     Ok(Some((sequence, state)))
 }
 
@@ -641,103 +643,129 @@ fn checksum(bytes: &[u8]) -> u32 {
     hash
 }
 
-fn encode_state(
-    state: &State,
-    out: &mut [u8; SNAPSHOT_MAX_BYTES],
+#[inline(never)]
+fn encode_model<S: SnapshotSink>(
+    model: &Model,
+    sink: &mut S,
 ) -> Result<usize, PersistentInstallError> {
-    let mut cursor = Writer { bytes: out, at: 0 };
-    cursor.put(SNAPSHOT_MAGIC)?;
-    cursor.put_u32(FORMAT_VERSION)?;
-    for record in &state.packages {
-        cursor.put_u8(u8::from(record.is_some()))?;
+    let (
+        packages,
+        package_generations,
+        installations,
+        installation_generations,
+        grants,
+        grant_generations,
+        runtimes,
+        runtime_generations,
+        data,
+        data_generations,
+    ) = model.encoding_parts();
+    sink.put(SNAPSHOT_MAGIC)?;
+    sink.put_u32(FORMAT_VERSION)?;
+    for record in packages {
+        sink.put_u8(u8::from(record.is_some()))?;
         if let Some(record) = record {
-            cursor.put_u64(record.key.to_raw())?;
-            cursor.put_u64(record.spec.app_id)?;
-            cursor.put_u64(record.spec.publisher)?;
-            cursor.put(&record.spec.content)?;
-            cursor.put_u32(record.spec.version)?;
+            sink.put_u64(record.key.to_raw())?;
+            sink.put_u64(record.spec.app_id)?;
+            sink.put_u64(record.spec.publisher)?;
+            sink.put(&record.spec.content)?;
+            sink.put_u32(record.spec.version)?;
         }
     }
-    for generation in state.package_generations {
-        cursor.put_u32(generation)?;
+    for generation in package_generations {
+        sink.put_u32(*generation)?;
     }
-    for record in &state.installations {
-        cursor.put_u8(u8::from(record.is_some()))?;
+    for record in installations {
+        sink.put_u8(u8::from(record.is_some()))?;
         if let Some(record) = record {
-            cursor.put_u64(record.key.to_raw())?;
-            cursor.put_u64(record.package.to_raw())?;
-            put_scope(&mut cursor, record.scope)?;
-            cursor.put_u8(package_source_tag(record.source))?;
-            put_subject(&mut cursor, record.update_authority.subject)?;
-            cursor.put_u8(u8::from(record.enabled))?;
+            sink.put_u64(record.key.to_raw())?;
+            sink.put_u64(record.package.to_raw())?;
+            put_scope(sink, record.scope)?;
+            sink.put_u8(package_source_tag(record.source))?;
+            put_subject(sink, record.update_authority.subject)?;
+            sink.put_u8(u8::from(record.enabled))?;
         }
     }
-    for generation in state.installation_generations {
-        cursor.put_u32(generation)?;
+    for generation in installation_generations {
+        sink.put_u32(*generation)?;
     }
-    for record in &state.grants {
-        cursor.put_u8(u8::from(record.is_some()))?;
+    for record in grants {
+        sink.put_u8(u8::from(record.is_some()))?;
         if let Some(record) = record {
-            cursor.put_u64(record.key.to_raw())?;
-            cursor.put_u64(record.installation.to_raw())?;
-            put_subject(&mut cursor, record.subject)?;
-            cursor.put_u32(record.rights.0)?;
-            cursor.put_u8(u8::from(record.expires_at.is_some()))?;
+            sink.put_u64(record.key.to_raw())?;
+            sink.put_u64(record.installation.to_raw())?;
+            put_subject(sink, record.subject)?;
+            sink.put_u32(record.rights.0)?;
+            sink.put_u8(u8::from(record.expires_at.is_some()))?;
             if let Some(expires) = record.expires_at {
-                cursor.put_u64(expires)?;
+                sink.put_u64(expires)?;
             }
-            cursor.put_u8(u8::from(record.active))?;
+            sink.put_u8(u8::from(record.active))?;
         }
     }
-    for generation in state.grant_generations {
-        cursor.put_u32(generation)?;
+    for generation in grant_generations {
+        sink.put_u32(*generation)?;
     }
-    for record in &state.runtimes {
-        cursor.put_u8(u8::from(record.is_some()))?;
+    for record in runtimes {
+        sink.put_u8(u8::from(record.is_some()))?;
         if let Some(record) = record {
-            cursor.put_u64(record.key.to_raw())?;
-            cursor.put_u64(record.installation.to_raw())?;
-            cursor.put_u8(principal_kind_tag(record.principal.kind))?;
-            put_subject(&mut cursor, record.principal.subject)?;
-            cursor.put_u32(record.principal.generation)?;
-            cursor.put_u32(record.principal.domain.id)?;
-            cursor.put_u32(record.principal.domain.generation)?;
-            cursor.put_u32(record.principal.rights.0)?;
-            cursor.put_u64(record.started_at)?;
+            sink.put_u64(record.key.to_raw())?;
+            sink.put_u64(record.installation.to_raw())?;
+            sink.put_u8(principal_kind_tag(record.principal.kind))?;
+            put_subject(sink, record.principal.subject)?;
+            sink.put_u32(record.principal.generation)?;
+            sink.put_u32(record.principal.domain.id)?;
+            sink.put_u32(record.principal.domain.generation)?;
+            sink.put_u32(record.principal.rights.0)?;
+            sink.put_u64(record.started_at)?;
         }
     }
-    for generation in state.runtime_generations {
-        cursor.put_u32(generation)?;
+    for generation in runtime_generations {
+        sink.put_u32(*generation)?;
     }
-    for record in &state.data {
-        cursor.put_u8(u8::from(record.is_some()))?;
+    for record in data {
+        sink.put_u8(u8::from(record.is_some()))?;
         if let Some(record) = record {
-            cursor.put_u64(record.key.to_raw())?;
-            cursor.put_u64(record.package.to_raw())?;
-            put_subject(&mut cursor, record.owner)?;
-            cursor.put_u8(data_kind_tag(record.kind))?;
+            sink.put_u64(record.key.to_raw())?;
+            sink.put_u64(record.package.to_raw())?;
+            put_subject(sink, record.owner)?;
+            sink.put_u8(data_kind_tag(record.kind))?;
         }
     }
-    for generation in state.data_generations {
-        cursor.put_u32(generation)?;
+    for generation in data_generations {
+        sink.put_u32(*generation)?;
     }
-    Ok(cursor.at)
+    Ok(sink.written())
 }
 
-fn decode_state(bytes: &[u8]) -> Result<State, PersistentInstallError> {
-    let mut cursor = Reader { bytes, at: 0 };
-    if cursor.get(8)? != SNAPSHOT_MAGIC || cursor.get_u32()? != FORMAT_VERSION {
+#[inline(never)]
+fn decode_state<R: SnapshotSource>(source: &mut R) -> Result<Box<State>, PersistentInstallError> {
+    let mut cursor = DecodeReader { source };
+    let mut magic = [0u8; 8];
+    cursor.read_exact(&mut magic)?;
+    if &magic != SNAPSHOT_MAGIC || cursor.get_u32()? != FORMAT_VERSION {
         return Err(PersistentInstallError::Corrupt);
     }
-    let mut packages = [None; 16];
-    for record in &mut packages {
+    let mut state = Box::new(State {
+        packages: [None; 16],
+        package_generations: [0; 16],
+        installations: [None; 32],
+        installation_generations: [0; 32],
+        grants: [None; 64],
+        grant_generations: [0; 64],
+        runtimes: [None; 16],
+        runtime_generations: [0; 16],
+        data: [None; 32],
+        data_generations: [0; 32],
+    });
+    for record in &mut state.packages {
         if cursor.get_u8()? != 0 {
             let key =
                 PackageKey::from_raw(cursor.get_u64()?).ok_or(PersistentInstallError::Corrupt)?;
             let app_id = cursor.get_u64()?;
             let publisher = cursor.get_u64()?;
             let mut content = [0u8; CONTENT_BYTES];
-            content.copy_from_slice(cursor.get(CONTENT_BYTES)?);
+            cursor.read_exact(&mut content)?;
             let version = cursor.get_u32()?;
             *record = Some(PackageSnapshot {
                 key,
@@ -750,12 +778,10 @@ fn decode_state(bytes: &[u8]) -> Result<State, PersistentInstallError> {
             });
         }
     }
-    let mut package_generations = [0u32; 16];
-    for generation in &mut package_generations {
+    for generation in &mut state.package_generations {
         *generation = cursor.get_u32()?;
     }
-    let mut installations = [None; 32];
-    for record in &mut installations {
+    for record in &mut state.installations {
         if cursor.get_u8()? != 0 {
             let key = InstallationKey::from_raw(cursor.get_u64()?)
                 .ok_or(PersistentInstallError::Corrupt)?;
@@ -777,12 +803,10 @@ fn decode_state(bytes: &[u8]) -> Result<State, PersistentInstallError> {
             });
         }
     }
-    let mut installation_generations = [0u32; 32];
-    for generation in &mut installation_generations {
+    for generation in &mut state.installation_generations {
         *generation = cursor.get_u32()?;
     }
-    let mut grants = [None; 64];
-    for record in &mut grants {
+    for record in &mut state.grants {
         if cursor.get_u8()? != 0 {
             let key =
                 GrantKey::from_raw(cursor.get_u64()?).ok_or(PersistentInstallError::Corrupt)?;
@@ -806,12 +830,10 @@ fn decode_state(bytes: &[u8]) -> Result<State, PersistentInstallError> {
             });
         }
     }
-    let mut grant_generations = [0u32; 64];
-    for generation in &mut grant_generations {
+    for generation in &mut state.grant_generations {
         *generation = cursor.get_u32()?;
     }
-    let mut runtimes = [None; 16];
-    for record in &mut runtimes {
+    for record in &mut state.runtimes {
         if cursor.get_u8()? != 0 {
             let key =
                 RuntimeKey::from_raw(cursor.get_u64()?).ok_or(PersistentInstallError::Corrupt)?;
@@ -840,12 +862,10 @@ fn decode_state(bytes: &[u8]) -> Result<State, PersistentInstallError> {
             });
         }
     }
-    let mut runtime_generations = [0u32; 16];
-    for generation in &mut runtime_generations {
+    for generation in &mut state.runtime_generations {
         *generation = cursor.get_u32()?;
     }
-    let mut data = [None; 32];
-    for record in &mut data {
+    for record in &mut state.data {
         if cursor.get_u8()? != 0 {
             let key =
                 DataKey::from_raw(cursor.get_u64()?).ok_or(PersistentInstallError::Corrupt)?;
@@ -861,45 +881,16 @@ fn decode_state(bytes: &[u8]) -> Result<State, PersistentInstallError> {
             });
         }
     }
-    let mut data_generations = [0u32; 32];
-    for generation in &mut data_generations {
+    for generation in &mut state.data_generations {
         *generation = cursor.get_u32()?;
     }
-    if cursor.at != bytes.len() {
-        return Err(PersistentInstallError::Corrupt);
-    }
-    Ok(State {
-        packages,
-        package_generations,
-        installations,
-        installation_generations,
-        grants,
-        grant_generations,
-        runtimes,
-        runtime_generations,
-        data,
-        data_generations,
-    })
+    Ok(state)
 }
 
-struct Writer<'a> {
-    bytes: &'a mut [u8],
-    at: usize,
-}
+trait SnapshotSink {
+    fn put(&mut self, value: &[u8]) -> Result<(), PersistentInstallError>;
+    fn written(&self) -> usize;
 
-impl Writer<'_> {
-    fn put(&mut self, value: &[u8]) -> Result<(), PersistentInstallError> {
-        let end = self
-            .at
-            .checked_add(value.len())
-            .ok_or(PersistentInstallError::SnapshotTooLarge)?;
-        if end > self.bytes.len() {
-            return Err(PersistentInstallError::SnapshotTooLarge);
-        }
-        self.bytes[self.at..end].copy_from_slice(value);
-        self.at = end;
-        Ok(())
-    }
     fn put_u8(&mut self, value: u8) -> Result<(), PersistentInstallError> {
         self.put(&[value])
     }
@@ -911,44 +902,182 @@ impl Writer<'_> {
     }
 }
 
-struct Reader<'a> {
-    bytes: &'a [u8],
-    at: usize,
+struct SnapshotUnitWriter<'a, D: SectorIo> {
+    device: &'a mut D,
+    base: usize,
+    unit: [u8; STORAGE_UNIT_BYTES],
+    filled: usize,
+    units_written: usize,
+    written: usize,
+    checksum: u32,
 }
 
-impl<'a> Reader<'a> {
-    fn get(&mut self, len: usize) -> Result<&'a [u8], PersistentInstallError> {
+impl<'a, D: SectorIo> SnapshotUnitWriter<'a, D> {
+    fn new(device: &'a mut D, base: usize) -> Self {
+        Self {
+            device,
+            base,
+            unit: [0u8; STORAGE_UNIT_BYTES],
+            filled: 0,
+            units_written: 0,
+            written: 0,
+            checksum: 0x811c_9dc5,
+        }
+    }
+
+    #[inline(never)]
+    fn flush_unit(&mut self) -> Result<(), PersistentInstallError> {
+        if self.filled == 0 {
+            return Ok(());
+        }
+        if self.units_written >= SLOT_BODY_UNITS {
+            return Err(PersistentInstallError::SnapshotTooLarge);
+        }
+        self.unit[self.filled..].fill(0);
+        self.device
+            .write_unit(sector_for_unit(self.base + self.units_written)?, &self.unit)
+            .map_err(|_| PersistentInstallError::Io)?;
+        self.unit.fill(0);
+        self.filled = 0;
+        self.units_written += 1;
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn finish(mut self) -> Result<u32, PersistentInstallError> {
+        self.flush_unit()?;
+        self.device
+            .flush()
+            .map_err(|_| PersistentInstallError::Io)?;
+        Ok(self.checksum)
+    }
+}
+
+impl<D: SectorIo> SnapshotSink for SnapshotUnitWriter<'_, D> {
+    #[inline(never)]
+    fn put(&mut self, value: &[u8]) -> Result<(), PersistentInstallError> {
         let end = self
-            .at
-            .checked_add(len)
-            .ok_or(PersistentInstallError::Corrupt)?;
-        let value = self
-            .bytes
-            .get(self.at..end)
-            .ok_or(PersistentInstallError::Corrupt)?;
-        self.at = end;
-        Ok(value)
+            .written
+            .checked_add(value.len())
+            .ok_or(PersistentInstallError::SnapshotTooLarge)?;
+        if end > SNAPSHOT_MAX_BYTES {
+            return Err(PersistentInstallError::SnapshotTooLarge);
+        }
+        for byte in value {
+            if self.filled == STORAGE_UNIT_BYTES {
+                self.flush_unit()?;
+            }
+            self.unit[self.filled] = *byte;
+            self.filled += 1;
+            self.checksum ^= u32::from(*byte);
+            self.checksum = self.checksum.wrapping_mul(0x0100_0193);
+        }
+        self.written = end;
+        Ok(())
+    }
+
+    fn written(&self) -> usize {
+        self.written
+    }
+}
+
+trait SnapshotSource {
+    fn read_exact(&mut self, output: &mut [u8]) -> Result<(), PersistentInstallError>;
+}
+
+struct SnapshotUnitReader<'a, D: SectorIo> {
+    device: &'a mut D,
+    base: usize,
+    remaining: usize,
+    unit_index: usize,
+    unit: [u8; STORAGE_UNIT_BYTES],
+    unit_len: usize,
+    unit_at: usize,
+}
+
+impl<'a, D: SectorIo> SnapshotUnitReader<'a, D> {
+    fn new(device: &'a mut D, base: usize, len: usize) -> Self {
+        Self {
+            device,
+            base,
+            remaining: len,
+            unit_index: 0,
+            unit: [0u8; STORAGE_UNIT_BYTES],
+            unit_len: 0,
+            unit_at: 0,
+        }
+    }
+
+    fn finish(self) -> Result<(), PersistentInstallError> {
+        if self.remaining == 0 {
+            Ok(())
+        } else {
+            Err(PersistentInstallError::Corrupt)
+        }
+    }
+}
+
+impl<D: SectorIo> SnapshotSource for SnapshotUnitReader<'_, D> {
+    fn read_exact(&mut self, output: &mut [u8]) -> Result<(), PersistentInstallError> {
+        if output.len() > self.remaining {
+            return Err(PersistentInstallError::Corrupt);
+        }
+        let mut copied = 0;
+        while copied < output.len() {
+            if self.unit_at == self.unit_len {
+                if self.remaining == 0 || self.unit_index >= SLOT_BODY_UNITS {
+                    return Err(PersistentInstallError::Corrupt);
+                }
+                self.device
+                    .read_unit(
+                        sector_for_unit(self.base + self.unit_index)?,
+                        &mut self.unit,
+                    )
+                    .map_err(|_| PersistentInstallError::Io)?;
+                self.unit_len = self.remaining.min(STORAGE_UNIT_BYTES);
+                self.unit_at = 0;
+                self.unit_index += 1;
+            }
+            let take = (output.len() - copied).min(self.unit_len - self.unit_at);
+            output[copied..copied + take]
+                .copy_from_slice(&self.unit[self.unit_at..self.unit_at + take]);
+            copied += take;
+            self.unit_at += take;
+            self.remaining -= take;
+        }
+        Ok(())
+    }
+}
+
+struct DecodeReader<'a, R: SnapshotSource> {
+    source: &'a mut R,
+}
+
+impl<R: SnapshotSource> DecodeReader<'_, R> {
+    fn read_exact(&mut self, output: &mut [u8]) -> Result<(), PersistentInstallError> {
+        self.source.read_exact(output)
     }
     fn get_u8(&mut self) -> Result<u8, PersistentInstallError> {
-        Ok(self.get(1)?[0])
+        let mut bytes = [0u8; 1];
+        self.read_exact(&mut bytes)?;
+        Ok(bytes[0])
     }
     fn get_u32(&mut self) -> Result<u32, PersistentInstallError> {
-        Ok(u32::from_le_bytes(
-            self.get(4)?
-                .try_into()
-                .map_err(|_| PersistentInstallError::Corrupt)?,
-        ))
+        let mut bytes = [0u8; 4];
+        self.read_exact(&mut bytes)?;
+        Ok(u32::from_le_bytes(bytes))
     }
     fn get_u64(&mut self) -> Result<u64, PersistentInstallError> {
-        Ok(u64::from_le_bytes(
-            self.get(8)?
-                .try_into()
-                .map_err(|_| PersistentInstallError::Corrupt)?,
-        ))
+        let mut bytes = [0u8; 8];
+        self.read_exact(&mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
     }
 }
 
-fn put_scope(writer: &mut Writer<'_>, scope: OwnerScope) -> Result<(), PersistentInstallError> {
+fn put_scope<S: SnapshotSink>(
+    writer: &mut S,
+    scope: OwnerScope,
+) -> Result<(), PersistentInstallError> {
     let (tag, id) = match scope {
         OwnerScope::System => (0, 0),
         OwnerScope::Device(id) => (1, id),
@@ -961,7 +1090,9 @@ fn put_scope(writer: &mut Writer<'_>, scope: OwnerScope) -> Result<(), Persisten
     writer.put_u64(id)
 }
 
-fn get_scope(reader: &mut Reader<'_>) -> Result<OwnerScope, PersistentInstallError> {
+fn get_scope<R: SnapshotSource>(
+    reader: &mut DecodeReader<'_, R>,
+) -> Result<OwnerScope, PersistentInstallError> {
     let tag = reader.get_u8()?;
     let id = reader.get_u64()?;
     match (tag, id) {
@@ -975,7 +1106,10 @@ fn get_scope(reader: &mut Reader<'_>) -> Result<OwnerScope, PersistentInstallErr
     }
 }
 
-fn put_subject(writer: &mut Writer<'_>, subject: Subject) -> Result<(), PersistentInstallError> {
+fn put_subject<S: SnapshotSink>(
+    writer: &mut S,
+    subject: Subject,
+) -> Result<(), PersistentInstallError> {
     let (tag, id) = match subject {
         Subject::System => (0, 0),
         Subject::Device(id) => (1, id),
@@ -989,7 +1123,9 @@ fn put_subject(writer: &mut Writer<'_>, subject: Subject) -> Result<(), Persiste
     writer.put_u64(id)
 }
 
-fn get_subject(reader: &mut Reader<'_>) -> Result<Subject, PersistentInstallError> {
+fn get_subject<R: SnapshotSource>(
+    reader: &mut DecodeReader<'_, R>,
+) -> Result<Subject, PersistentInstallError> {
     let tag = reader.get_u8()?;
     let id = reader.get_u64()?;
     match (tag, id) {

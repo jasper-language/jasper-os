@@ -8,7 +8,9 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::block::{self, Request, Terminal};
-use kernel_core::fs::journal::{JournalError, SectorIo, STORAGE_UNIT_BYTES};
+use kernel_core::fs::journal::{
+    JournalError, SectorIo, SECTORS_PER_STORAGE_UNIT, STORAGE_UNIT_BYTES,
+};
 use kernel_core::native_install::{
     Actor, DataOwnerKind, GrantRights, GrantSpec, InstallSpec, OwnerScope, PackageSource,
     PackageSpec, PrincipalKind, PrincipalSpec, Subject, UpdateAuthority,
@@ -170,13 +172,18 @@ impl CutPoint {
         }
     }
 
-    const fn write_target(self) -> Option<u32> {
+    fn matches_unit(self, sector: u64) -> bool {
+        let relative = sector / SECTORS_PER_STORAGE_UNIT;
+        let blob = relative >= 11;
+        let blob_body = blob && relative % 2 == 1;
+        let blob_header = blob && relative % 2 == 0;
+        let slot_body = (1..=9).contains(&relative) && relative % 5 != 0;
+        let marker = matches!(relative, 5 | 10);
         match self {
-            Self::BlobBodyTorn => Some(1),
-            Self::BlobHeaderTorn => Some(2),
-            Self::MetadataBodyTorn => Some(3),
-            Self::MarkerTorn => Some(7),
-            _ => None,
+            Self::BlobBodyTorn | Self::BlobBodyUnflushed => blob_body,
+            Self::BlobHeaderTorn | Self::BlobHeaderUnflushed => blob_header,
+            Self::MetadataBodyTorn | Self::MetadataBodyUnflushed => slot_body,
+            Self::MarkerTorn | Self::MarkerUnflushed | Self::MarkerFlushedThenFailed => marker,
         }
     }
 
@@ -225,12 +232,21 @@ impl SectorIo for CutSectorIo<'_> {
         bytes: &[u8; STORAGE_UNIT_BYTES],
     ) -> Result<(), JournalError> {
         self.writes = self.writes.saturating_add(1);
-        if self.cut == CutPoint::MarkerUnflushed && self.writes == 7 {
+        let target = self.cut.matches_unit(sector);
+        if self.cut == CutPoint::MarkerUnflushed && target {
             // Simulate a marker present only in volatile cache when power is
             // lost before its required flush.
             return Ok(());
         }
-        if self.cut.write_target() == Some(self.writes) {
+        if target
+            && matches!(
+                self.cut,
+                CutPoint::BlobBodyTorn
+                    | CutPoint::BlobHeaderTorn
+                    | CutPoint::MetadataBodyTorn
+                    | CutPoint::MarkerTorn
+            )
+        {
             let mut mixed = [0u8; STORAGE_UNIT_BYTES];
             self.inner.read_unit(sector, &mut mixed)?;
             let boundary = if self.cut == CutPoint::MarkerTorn {
@@ -294,6 +310,7 @@ fn run_fault_matrix(
 ) -> Result<(VirtioSectorIo<'_>, u8), PersistentInstallError> {
     let mut passed = 0u8;
     for (index, cut) in CutPoint::ALL.into_iter().enumerate() {
+        kprintln!("[JSR-NATIVE-INSTALL] fault-begin={}", cut.name());
         let spec = fault_package(index as u8);
         let mut store = PersistentInstallStore::open(CutSectorIo {
             inner: VirtioSectorIo {
@@ -305,6 +322,7 @@ fn run_fault_matrix(
             flushes: 0,
         })?;
         let injected = store.install_package(spec, b"fault-injected-package");
+        kprintln!("[JSR-NATIVE-INSTALL] fault-injected={}", cut.name());
         let cut_io = store.into_device();
         let mut reopened = PersistentInstallStore::open(cut_io.inner)?;
         let package = reopened.find_package(spec);
@@ -337,6 +355,13 @@ fn run_fault_matrix(
                 }
             );
         } else {
+            kprintln!(
+                "[JSR-NATIVE-INSTALL] fault-detail={} injected_err={} state_ok={} baseline={}",
+                cut.name(),
+                injected.is_err(),
+                state_ok,
+                baseline
+            );
             check(false, cut.name());
         }
         io = reopened.into_device();
@@ -400,11 +425,14 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), Persisten
     let package = store
         .find_package(PACKAGE)
         .ok_or(PersistentInstallError::NotFound)?;
+    kprintln!("[JSR-NATIVE-INSTALL] reopen-step=package");
     let mut bytes = [0u8; 64];
     let bytes_len = store.read_package_bytes(PACKAGE_CONTENT, &mut bytes)?;
+    kprintln!("[JSR-NATIVE-INSTALL] reopen-step=bytes");
     if &bytes[..bytes_len] != PACKAGE_BYTES || store.installation_count_for(package) != 2 {
         return Err(PersistentInstallError::Corrupt);
     }
+    kprintln!("[JSR-NATIVE-INSTALL] reopen-step=counts");
     let state = store.state();
     if state.packages.iter().flatten().count() != 1
         || state.installations.iter().flatten().count() != 2
@@ -414,6 +442,7 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), Persisten
     {
         return Err(PersistentInstallError::Corrupt);
     }
+    kprintln!("[JSR-NATIVE-INSTALL] reopen-step=state");
     let first = state
         .installations
         .iter()
@@ -426,8 +455,20 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), Persisten
             kernel_core::native_install::InstallError::NotAuthorized,
         ));
     }
-    let io = store.into_device();
-    let (_io, faults) = run_fault_matrix(io)?;
+    kprintln!("[JSR-NATIVE-INSTALL] reopen-step=authority");
+    let (io, faults) = {
+        let io = store.into_device();
+        #[cfg(feature = "native-install-fault-verify")]
+        {
+            kprintln!("[JSR-NATIVE-INSTALL] reopen-step=fault-begin");
+            run_fault_matrix(io)?
+        }
+        #[cfg(not(feature = "native-install-fault-verify"))]
+        {
+            (io, 0)
+        }
+    };
+    let _ = io;
     kprintln!(
         "[JSR-NATIVE-INSTALL] stage=reopen packages=1 installations=2 grants=1 runtimes=1 data=1 bytes={} faults={} failed=0",
         bytes_len,
