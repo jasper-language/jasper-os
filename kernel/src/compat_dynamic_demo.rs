@@ -262,6 +262,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::LandlockAddRule,
         LinuxSyscall::LandlockRestrictSelf,
         LinuxSyscall::Listmount,
+        LinuxSyscall::Statmount,
         LinuxSyscall::Listns,
         LinuxSyscall::LookupDcookie,
         LinuxSyscall::LsmGetSelfAttr,

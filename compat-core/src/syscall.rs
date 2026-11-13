@@ -99,7 +99,7 @@ use linux_raw_sys::general::{
     __NR_name_to_handle_at, __NR_open_by_handle_at, __NR_open_tree, __NR_open_tree_attr,
     __NR_pkey_alloc, __NR_pkey_free, __NR_pkey_mprotect, __NR_process_madvise,
     __NR_process_mrelease, __NR_request_key, __NR_seccomp,
-    __NR_set_mempolicy, __NR_set_mempolicy_home_node, __NR_uretprobe,
+    __NR_set_mempolicy, __NR_set_mempolicy_home_node, __NR_statmount, __NR_uretprobe,
     __NR_userfaultfd,
 };
 
@@ -366,6 +366,7 @@ pub enum LinuxSyscall {
     LandlockAddRule,
     LandlockRestrictSelf,
     Listmount,
+    Statmount,
     Listns,
     LookupDcookie,
     LsmGetSelfAttr,
@@ -689,6 +690,9 @@ pub enum CompatErrno {
     /// No message of the requested type is available.
     /// 请求类型的消息不存在。
     NoMessage = linux_raw_sys::errno::ENOMSG,
+    /// A supplied output buffer cannot represent the required result.
+    /// 提供的输出缓冲区无法容纳结果。
+    Overflow = linux_raw_sys::errno::EOVERFLOW,
     /// An operation was cancelled.
     /// 操作已取消。
     Canceled = linux_raw_sys::errno::ECANCELED,
@@ -910,6 +914,7 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_landlock_add_rule) => LinuxSyscall::LandlockAddRule,
         value if value == u64::from(__NR_landlock_restrict_self) => LinuxSyscall::LandlockRestrictSelf,
         value if value == u64::from(__NR_listmount) => LinuxSyscall::Listmount,
+        value if value == u64::from(__NR_statmount) => LinuxSyscall::Statmount,
         value if value == LINUX_NR_LISTNS => LinuxSyscall::Listns,
         value if value == u64::from(__NR_lookup_dcookie) => LinuxSyscall::LookupDcookie,
         value if value == u64::from(__NR_lsm_get_self_attr) => LinuxSyscall::LsmGetSelfAttr,
@@ -1320,6 +1325,7 @@ mod tests {
             (__NR_landlock_restrict_self, LinuxSyscall::LandlockRestrictSelf),
             (__NR_listmount, LinuxSyscall::Listmount),
             (LINUX_NR_LISTNS as u32, LinuxSyscall::Listns),
+            (__NR_statmount, LinuxSyscall::Statmount),
             (__NR_lookup_dcookie, LinuxSyscall::LookupDcookie),
             (__NR_lsm_get_self_attr, LinuxSyscall::LsmGetSelfAttr),
             (__NR_lsm_set_self_attr, LinuxSyscall::LsmSetSelfAttr),

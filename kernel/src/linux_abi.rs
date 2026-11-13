@@ -2601,6 +2601,8 @@ fn execute(
             0
         }
         LinuxSyscall::LookupDcookie => -(CompatErrno::NoEntry as i32 as i64),
+        LinuxSyscall::Listmount => compat_result(linux_listmount(pid, call.args)),
+        LinuxSyscall::Statmount => compat_result(linux_statmount(pid, call.args)),
         LinuxSyscall::AddKey
         | LinuxSyscall::RequestKey
         | LinuxSyscall::Keyctl
@@ -2622,7 +2624,6 @@ fn execute(
         | LinuxSyscall::LandlockCreateRuleset
         | LinuxSyscall::LandlockAddRule
         | LinuxSyscall::LandlockRestrictSelf
-        | LinuxSyscall::Listmount
         | LinuxSyscall::Listns
         | LinuxSyscall::LsmGetSelfAttr
         | LinuxSyscall::LsmSetSelfAttr
@@ -8718,6 +8719,135 @@ fn linux_shmctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         _ => Err(CompatErrno::Invalid),
     }
+}
+
+const MNT_ID_REQ_MIN_BYTES: usize = 24;
+const STATMOUNT_FIXED_BYTES: usize = 512;
+
+fn read_mnt_id_req(address: u64) -> Result<(u64, u64, u64), CompatErrno> {
+    let mut size_bytes = [0u8; 4];
+    copy_from_user(&mut size_bytes, address, 4).map_err(|_| CompatErrno::Fault)?;
+    let size = u32::from_le_bytes(size_bytes) as usize;
+    if size < MNT_ID_REQ_MIN_BYTES {
+        return Err(CompatErrno::Invalid);
+    }
+    if size > 4096 {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    let mut request = [0u8; 32];
+    copy_from_user(&mut request, address, size.min(32)).map_err(|_| CompatErrno::Fault)?;
+    Ok((
+        u64::from_le_bytes(request[8..16].try_into().unwrap()),
+        u64::from_le_bytes(request[16..24].try_into().unwrap()),
+        if size >= MNT_ID_REQ_MIN_BYTES + 8 {
+            u64::from_le_bytes(request[24..32].try_into().unwrap())
+        } else {
+            0
+        },
+    ))
+}
+
+/// Implements bounded `listmount(2)` over the single synthetic root mount.
+fn linux_listmount(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const LISTMOUNT_REVERSE: u64 = 1;
+    const ROOT_MOUNT_ID: u64 = 1;
+    let flags = args[3];
+    if flags & !LISTMOUNT_REVERSE != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let (parent, start, namespace) = read_mnt_id_req(args[0])?;
+    if parent != u64::MAX && parent != ROOT_MOUNT_ID {
+        return Err(CompatErrno::NoEntry);
+    }
+    if namespace != 0 && namespace != ROOT_MOUNT_ID {
+        return Err(CompatErrno::NoEntry);
+    }
+    if parent == ROOT_MOUNT_ID {
+        return Ok(0);
+    }
+    let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if count == 0 || start > ROOT_MOUNT_ID {
+        return Ok(0);
+    }
+    copy_to_user(args[1], &ROOT_MOUNT_ID.to_le_bytes(), 8)
+        .map_err(|_| CompatErrno::Fault)?;
+    Ok(1)
+}
+
+fn append_statmount_string(
+    fixed: &mut [u8; STATMOUNT_FIXED_BYTES],
+    strings: &mut alloc::vec::Vec<u8>,
+    field_offset: usize,
+    value: &[u8],
+) -> Result<(), CompatErrno> {
+    let offset = u32::try_from(strings.len()).map_err(|_| CompatErrno::Overflow)?;
+    fixed[field_offset..field_offset + 4].copy_from_slice(&offset.to_le_bytes());
+    strings.extend_from_slice(value);
+    strings.push(0);
+    Ok(())
+}
+
+/// Implements read-only `statmount(2)` for the namespace's synthetic root.
+fn linux_statmount(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const ROOT_MOUNT_ID: u64 = 1;
+    const STATMOUNT_SB_BASIC: u64 = 0x1;
+    const STATMOUNT_MNT_BASIC: u64 = 0x2;
+    const STATMOUNT_MNT_ROOT: u64 = 0x8;
+    const STATMOUNT_MNT_POINT: u64 = 0x10;
+    const STATMOUNT_FS_TYPE: u64 = 0x20;
+    const STATMOUNT_MNT_NS_ID: u64 = 0x40;
+    const STATMOUNT_MNT_OPTS: u64 = 0x80;
+    const SUPPORTED: u64 = STATMOUNT_SB_BASIC
+        | STATMOUNT_MNT_BASIC
+        | STATMOUNT_MNT_ROOT
+        | STATMOUNT_MNT_POINT
+        | STATMOUNT_FS_TYPE
+        | STATMOUNT_MNT_NS_ID
+        | STATMOUNT_MNT_OPTS;
+    if args[3] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let (mount_id, requested, namespace_id) = read_mnt_id_req(args[0])?;
+    if mount_id != ROOT_MOUNT_ID {
+        return Err(CompatErrno::NoEntry);
+    }
+    if namespace_id != 0 && namespace_id != ROOT_MOUNT_ID {
+        return Err(CompatErrno::NoEntry);
+    }
+    let mut fixed = [0u8; STATMOUNT_FIXED_BYTES];
+    let mut strings = alloc::vec::Vec::new();
+    append_statmount_string(&mut fixed, &mut strings, 4, b"ro")?;
+    append_statmount_string(&mut fixed, &mut strings, 36, b"jasperfs")?;
+    append_statmount_string(&mut fixed, &mut strings, 104, b"/")?;
+    append_statmount_string(&mut fixed, &mut strings, 108, b"/")?;
+    let total = STATMOUNT_FIXED_BYTES
+        .checked_add(strings.len())
+        .ok_or(CompatErrno::Overflow)?;
+    let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if capacity < total {
+        return Err(CompatErrno::Overflow);
+    }
+    fixed[0..4].copy_from_slice(&(total as u32).to_le_bytes());
+    fixed[8..16].copy_from_slice(&(requested & SUPPORTED).to_le_bytes());
+    fixed[16..20].copy_from_slice(&0u32.to_le_bytes());
+    fixed[20..24].copy_from_slice(&1u32.to_le_bytes());
+    fixed[24..32].copy_from_slice(&0x4a41_5350u64.to_le_bytes());
+    fixed[32..36].copy_from_slice(&1u32.to_le_bytes());
+    fixed[40..48].copy_from_slice(&ROOT_MOUNT_ID.to_le_bytes());
+    fixed[48..56].copy_from_slice(&ROOT_MOUNT_ID.to_le_bytes());
+    fixed[56..60].copy_from_slice(&(ROOT_MOUNT_ID as u32).to_le_bytes());
+    fixed[60..64].copy_from_slice(&(ROOT_MOUNT_ID as u32).to_le_bytes());
+    fixed[72..80].copy_from_slice(&(1u64 << 18).to_le_bytes());
+    fixed[112..120].copy_from_slice(&ROOT_MOUNT_ID.to_le_bytes());
+    fixed[144..152].copy_from_slice(&SUPPORTED.to_le_bytes());
+    let mut output = alloc::vec::Vec::new();
+    output
+        .try_reserve_exact(total)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    output.extend_from_slice(&fixed);
+    output.extend_from_slice(&strings);
+    copy_to_user(args[1], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
 }
 
 fn linux_eventfd(pid: ObjId, args: [u64; 6], eventfd2: bool) -> Result<u64, CompatErrno> {

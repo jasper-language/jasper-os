@@ -15,6 +15,7 @@
 #include <linux/ioprio.h>
 #include <linux/kcmp.h>
 #include <linux/membarrier.h>
+#include <linux/mount.h>
 #include <linux/sched/types.h>
 #include <linux/sync_file.h>
 #include <limits.h>
@@ -4935,6 +4936,41 @@ int main(void) {
     if (shmget(sysv_shm_key, 0, 0) != -1 || errno != ENOENT) {
         return 602;
     }
+    struct mnt_id_req mount_request = {
+        .size = sizeof(mount_request),
+        .mnt_id = LSMT_ROOT,
+        .param = 0,
+    };
+    uint64_t mount_ids[2] = {0};
+    if (syscall(SYS_listmount, &mount_request, mount_ids, 2, 0) != 1 ||
+        mount_ids[0] == 0) {
+        return 603;
+    }
+    mount_request.param = mount_ids[0];
+    if (syscall(SYS_listmount, &mount_request, mount_ids, 2, 0) != 0) {
+        return 604;
+    }
+    size_t statmount_size = sizeof(struct statmount) + 256;
+    struct statmount *mount_status = calloc(1, statmount_size);
+    mount_request.mnt_id = mount_ids[0];
+    mount_request.param = 0xffffffffU;
+    if (!mount_status ||
+        syscall(SYS_statmount, &mount_request, mount_status,
+                statmount_size, 0) != 0 ||
+        mount_status->size < sizeof(struct statmount) ||
+        mount_status->mnt_id != mount_ids[0] ||
+        mount_status->mnt_parent_id != mount_ids[0] ||
+        (mount_status->mask & (STATMOUNT_FS_TYPE |
+                               STATMOUNT_MNT_ROOT |
+                               STATMOUNT_MNT_POINT)) !=
+            (STATMOUNT_FS_TYPE | STATMOUNT_MNT_ROOT |
+             STATMOUNT_MNT_POINT) ||
+        strcmp(mount_status->str + mount_status->fs_type, "jasperfs") != 0 ||
+        strcmp(mount_status->str + mount_status->mnt_root, "/") != 0 ||
+        strcmp(mount_status->str + mount_status->mnt_point, "/") != 0) {
+        return 605;
+    }
+    free(mount_status);
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);
