@@ -3711,11 +3711,20 @@ int main(void) {
     if (syscall(SYS_setgroups, 0, NULL) != 0) {
         return 488;
     }
-    gid_t unsupported_group = 0;
-    errno = 0;
-    if (syscall(SYS_setgroups, 1, &unsupported_group) != -1 ||
-        errno != EOPNOTSUPP) {
+    gid_t supplementary_groups[2] = {7, 5};
+    gid_t read_supplementary_groups[2] = {0};
+    if (syscall(SYS_setgroups, 2, supplementary_groups) != 0 ||
+        getgroups(0, NULL) != 2 ||
+        getgroups(2, read_supplementary_groups) != 2 ||
+        read_supplementary_groups[0] != 5 ||
+        read_supplementary_groups[1] != 7) {
         return 489;
+    }
+    errno = 0;
+    if (getgroups(1, read_supplementary_groups) != -1 ||
+        errno != EINVAL ||
+        syscall(SYS_setgroups, 0, NULL) != 0) {
+        return 500;
     }
     struct __user_cap_header_struct capability_header = {
         .version = _LINUX_CAPABILITY_VERSION_3,

@@ -2097,10 +2097,8 @@ fn execute(
         LinuxSyscall::GetSid => compat_result(linux_get_sid(pid, call.args[0])),
         LinuxSyscall::SetPgid => compat_result(linux_setpgid(pid, call.args)),
         LinuxSyscall::SetSid => compat_result(linux_setsid(pid)),
-        // The compatibility identity has no supplementary groups.
-        // 兼容身份没有附加组，因此 size 查询和写入都返回 0。
-        LinuxSyscall::GetGroups => 0,
-        LinuxSyscall::SetGroups => compat_result(linux_setgroups(call.args)),
+        LinuxSyscall::GetGroups => compat_result(linux_getgroups(pid, call.args)),
+        LinuxSyscall::SetGroups => compat_result(linux_setgroups(pid, call.args)),
         LinuxSyscall::GetResUid => compat_result(linux_getres(pid, call.args, false)),
         LinuxSyscall::GetResGid => compat_result(linux_getres(pid, call.args, true)),
         LinuxSyscall::GetPriority => compat_result(linux_getpriority(pid, call.args)),
@@ -2388,13 +2386,58 @@ fn linux_getres(pid: ObjId, args: [u64; 6], gid: bool) -> Result<u64, CompatErrn
     Ok(0)
 }
 
-/// Clears supplementary groups; richer group databases are not yet implemented.
-fn linux_setgroups(args: [u64; 6]) -> Result<u64, CompatErrno> {
+/// Returns the bounded supplementary group list.
+fn linux_getgroups(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let size = args[0] as u32 as i32;
+    if size < 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let groups = proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
+    if size == 0 {
+        return Ok(groups.len() as u64);
+    }
+    if args[1] == 0 {
+        return Err(CompatErrno::Fault);
+    }
+    if (size as usize) < groups.len() {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut output = [0u8; 32 * 4];
+    for (index, group) in groups.iter().copied().enumerate() {
+        output[index * 4..index * 4 + 4].copy_from_slice(&group.to_le_bytes());
+    }
+    copy_to_user(args[1], &output[..groups.len() * 4], groups.len() * 4)
+        .map_err(|_| CompatErrno::Fault)?;
+    Ok(groups.len() as u64)
+}
+
+/// Replaces the supplementary group list when the ABI credential permits it.
+fn linux_setgroups(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const CAP_SETGID: u64 = 1 << 6;
+    const MAX_GROUPS: usize = 32;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let capabilities = proc::linux_capabilities(pid).ok_or(CompatErrno::NoProcess)?;
+    if credentials.euid != 0 && capabilities.effective & CAP_SETGID == 0 {
+        return Err(CompatErrno::Perm);
+    }
     let count = usize::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
-    if count == 0 {
+    if count > MAX_GROUPS {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut groups = alloc::vec![0u32; count];
+    if count != 0 {
+        let mut raw = [0u8; MAX_GROUPS * 4];
+        copy_from_user(&mut raw, args[1], count * 4).map_err(|_| CompatErrno::Fault)?;
+        for (index, group) in groups.iter_mut().enumerate() {
+            *group = u32::from_le_bytes(raw[index * 4..index * 4 + 4].try_into().unwrap());
+        }
+        groups.sort_unstable();
+        groups.dedup();
+    }
+    if proc::set_linux_supplementary_groups(pid, &groups) {
         Ok(0)
     } else {
-        Err(CompatErrno::NotSupported)
+        Err(CompatErrno::NoProcess)
     }
 }
 

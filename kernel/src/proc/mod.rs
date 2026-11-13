@@ -137,6 +137,7 @@ struct LinuxProcessState {
     egid: u32,
     sgid: u32,
     fsgid: u32,
+    supplementary_groups: Vec<u32>,
     mappings: Vec<LinuxMapping>,
     pipes: Vec<LinuxPipeHandle>,
     next_pipe_handle: u64,
@@ -3937,6 +3938,36 @@ pub(crate) fn set_linux_credentials(pid: ObjId, credentials: LinuxCredentials) -
     .is_ok()
 }
 
+/// Copies the process supplementary group list for Linux `getgroups`.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_supplementary_groups(pid: ObjId) -> Option<Vec<u32>> {
+    with_proc(pid, |process| {
+        Ok(process
+            .linux
+            .as_ref()
+            .ok_or(ProcError::Exited)?
+            .supplementary_groups
+            .clone())
+    })
+    .ok()
+}
+
+/// Replaces the bounded supplementary group list.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_supplementary_groups(pid: ObjId, groups: &[u32]) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux.supplementary_groups.clear();
+        linux
+            .supplementary_groups
+            .try_reserve(groups.len())
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.supplementary_groups.extend_from_slice(groups);
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Sums scheduler CPU ticks over every live thread in one Linux process.
 /// 汇总一个 Linux 进程全部存活线程的调度器 CPU ticks。
 #[cfg(feature = "linux-abi")]
@@ -4197,6 +4228,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         egid: 0,
         sgid: 0,
         fsgid: 0,
+        supplementary_groups: Vec::new(),
         mappings: Vec::new(),
         pipes: Vec::new(),
         next_pipe_handle: LINUX_PIPE_HANDLE_BASE,
