@@ -3728,9 +3728,7 @@ int main(void) {
     }
     if (waitid_group_child == 0) {
         close(waitid_group_ready[0]);
-        pdeath_done_fd = -1;
-        if (setpgid(0, 0) != 0 ||
-            signal(SIGTERM, pdeath_signal_handler) == SIG_ERR) {
+        if (setpgid(0, 0) != 0) {
             _exit(1);
         }
         char ready = 'R';
@@ -3750,8 +3748,8 @@ int main(void) {
         syscall(SYS_waitid, P_PGID, waitid_group_child,
                 &waitid_info, WEXITED, NULL) != 0 ||
         waitid_info.si_pid != waitid_group_child ||
-        waitid_info.si_status != 0 ||
-        waitid_info.si_code != CLD_EXITED) {
+        waitid_info.si_status != SIGTERM ||
+        waitid_info.si_code != CLD_KILLED) {
         return 433;
     }
     pid_t waitpid_group_child = -1;
@@ -3762,9 +3760,7 @@ int main(void) {
     }
     if (waitpid_group_child == 0) {
         close(waitpid_group_ready[0]);
-        pdeath_done_fd = -1;
-        if (setpgid(0, 0) != 0 ||
-            signal(SIGTERM, pdeath_signal_handler) == SIG_ERR) {
+        if (setpgid(0, 0) != 0) {
             _exit(1);
         }
         char ready = 'R';
@@ -3783,8 +3779,8 @@ int main(void) {
         kill(waitpid_group_child, SIGTERM) != 0 ||
         waitpid(-waitpid_group_child, &waitpid_group_status, 0) !=
             waitpid_group_child ||
-        !WIFEXITED(waitpid_group_status) ||
-        WEXITSTATUS(waitpid_group_status) != 0) {
+        !WIFSIGNALED(waitpid_group_status) ||
+        WTERMSIG(waitpid_group_status) != SIGTERM) {
         return 433;
     }
     pid_t waitid_nowait_child = fork();
@@ -4151,7 +4147,9 @@ int main(void) {
     }
     int kill_status = 0;
     if (kill(kill_child, SIGKILL) != 0 ||
-        waitpid(kill_child, &kill_status, 0) != kill_child) {
+        waitpid(kill_child, &kill_status, 0) != kill_child ||
+        !WIFSIGNALED(kill_status) ||
+        WTERMSIG(kill_status) != SIGKILL) {
         return 471;
     }
     int mmsg_sockets[2];

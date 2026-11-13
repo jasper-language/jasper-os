@@ -156,6 +156,7 @@ struct LinuxProcessState {
     personality: u32,
     pdeathsig: u32,
     subreaper: bool,
+    termination_signal: u32,
     aio_contexts: Vec<LinuxAioContext>,
     seccomp_filters: Vec<Vec<SeccompInsn>>,
     seccomp_strict: bool,
@@ -4853,6 +4854,22 @@ pub(crate) fn set_linux_subreaper(pid: ObjId, enabled: bool) -> bool {
     .is_ok()
 }
 
+/// Records the signal that terminates one Linux process.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_termination_signal(pid: ObjId, signal: u32) -> bool {
+    if !(1..=64).contains(&signal) {
+        return false;
+    }
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.termination_signal == 0 {
+            linux.termination_signal = signal;
+        }
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Creates one bounded legacy AIO context.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_aio_create(pid: ObjId, max_events: usize) -> Option<u64> {
@@ -5231,6 +5248,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         personality: 0,
         pdeathsig: 0,
         subreaper: false,
+        termination_signal: 0,
         aio_contexts: Vec::new(),
         seccomp_filters: Vec::new(),
         seccomp_strict: false,
@@ -7104,6 +7122,7 @@ pub fn fork_linux_process(
         linux.exited_cpu_ticks = 0;
         linux.pdeathsig = 0;
         linux.subreaper = false;
+        linux.termination_signal = 0;
         linux.mappings.clear();
         linux.aio_contexts.clear();
         Ok(())
@@ -7258,6 +7277,7 @@ pub fn vfork_linux_process(
         linux.exited_cpu_ticks = 0;
         linux.pdeathsig = 0;
         linux.subreaper = false;
+        linux.termination_signal = 0;
         linux.vfork_parent = Some(VforkParent {
             task: parent_task,
             exec_committed: false,
@@ -7547,17 +7567,25 @@ fn linux_child_exit(
                 if selected {
                     matching = true;
                 }
-                Ok(selected.then_some((linux.pid, process.state)))
+                Ok(selected.then_some((
+                    linux.pid,
+                    process.state,
+                    linux.termination_signal,
+                )))
             }
             _ => Err(ProcError::NoSuchProcess),
         })?;
-        let Some((pid, state)) = found else {
+        let Some((pid, state, termination_signal)) = found else {
             continue;
         };
         let ProcState::Exited { code } = state else {
             continue;
         };
-        let status = (((code as u32) & 0xff) << 8) as i32;
+        let status = if termination_signal == 0 {
+            (((code as u32) & 0xff) << 8) as i32
+        } else {
+            (termination_signal & 0x7f) as i32
+        };
         if consume {
             let child_ticks = linux_process_cpu_ticks(candidate).unwrap_or(0);
             if !linux_account_child_cpu(parent, child_ticks) {

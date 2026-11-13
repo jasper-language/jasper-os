@@ -1352,6 +1352,7 @@ fn build_signal_frame(
         return Err(CompatErrno::Interrupted);
     }
     if handler == SIG_DFL {
+        let _ = proc::set_linux_termination_signal(process, signal);
         let _ = proc::begin_exit(process, 128 + i64::from(signal));
         return Err(CompatErrno::Interrupted);
     }
@@ -1549,6 +1550,7 @@ fn deliver_pending_signal(
                 signal,
                 error as i32
             );
+            let _ = proc::set_linux_termination_signal(process, signal);
             let _ = proc::begin_exit(process, 128 + i64::from(signal));
             None
         }
@@ -2402,6 +2404,7 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
             proc::thread_exit(128 + 31, "linux seccomp kill thread");
         }
         compat_core::seccomp::SeccompAction::KillProcess => {
+            let _ = proc::set_linux_termination_signal(pid, 31);
             let _ = proc::begin_exit(pid, 128 + 31);
             proc::thread_exit(128 + 31, "linux seccomp kill process");
         }
@@ -5616,10 +5619,20 @@ fn linux_waitid(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             Ok(Some((child_pid, status))) => {
                 if args[2] != 0 {
                     let mut info = [0u8; 128];
+                    let status_value = status & 0x7f;
                     info[0..4].copy_from_slice(&17u32.to_le_bytes());
-                    info[8..12].copy_from_slice(&1i32.to_le_bytes());
+                    info[8..12].copy_from_slice(
+                        &(if status_value == 0 { 1i32 } else { 2i32 }).to_le_bytes(),
+                    );
                     info[16..20].copy_from_slice(&child_pid.to_le_bytes());
-                    info[24..28].copy_from_slice(&((status >> 8) & 0xff).to_le_bytes());
+                    info[24..28].copy_from_slice(
+                        &(if status_value == 0 {
+                            (status >> 8) & 0xff
+                        } else {
+                            status_value
+                        })
+                        .to_le_bytes(),
+                    );
                     copy_to_user(args[2], &info, info.len()).map_err(|_| CompatErrno::Fault)?;
                 }
                 return Ok(0);
@@ -13140,6 +13153,7 @@ fn raise_sigpipe(pid: ObjId) {
     match action[0] {
         1 => {}
         0 => {
+            let _ = proc::set_linux_termination_signal(pid, SIGPIPE);
             let _ = proc::begin_exit(pid, 128 + i64::from(SIGPIPE));
         }
         _ => {
