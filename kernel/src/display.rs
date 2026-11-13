@@ -34,6 +34,16 @@ const OVERLAY_SURFACE: SurfaceSpec = SurfaceSpec {
     bytes_per_pixel: 4,
     layout: PixelLayout::Bgr,
 };
+const ACCENT_WIDTH: u32 = 16;
+const ACCENT_HEIGHT: u32 = 8;
+const ACCENT_BYTES: usize = ACCENT_WIDTH as usize * ACCENT_HEIGHT as usize * 4;
+const ACCENT_SURFACE: SurfaceSpec = SurfaceSpec {
+    width: ACCENT_WIDTH,
+    height: ACCENT_HEIGHT,
+    stride: ACCENT_WIDTH,
+    bytes_per_pixel: 4,
+    layout: PixelLayout::Bgr,
+};
 
 struct Runtime {
     base: usize,
@@ -43,6 +53,8 @@ struct Runtime {
     compositor: Compositor<2>,
     overlay: [u8; OVERLAY_BYTES],
     overlay_key: LayerKey,
+    accent: [u8; ACCENT_BYTES],
+    accent_key: LayerKey,
     pressed: u32,
     released: u32,
     text: [u8; TEXT_CELLS],
@@ -94,13 +106,24 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
         .create(LayerSpec {
             surface: OVERLAY_SURFACE,
             x: width.saturating_sub(24) as i32,
-            y: 16,
+            y: 22,
             z_order: 10,
+            visible: true,
+        })
+        .map_err(|_| DisplayInputError::Failed)?;
+    let accent_key = compositor
+        .create(LayerSpec {
+            surface: ACCENT_SURFACE,
+            x: width.saturating_sub(32) as i32,
+            y: 22,
+            z_order: 20,
             visible: true,
         })
         .map_err(|_| DisplayInputError::Failed)?;
     let mut overlay = [0u8; OVERLAY_BYTES];
     fill_surface(&mut overlay, (0x29, 0xd3, 0xb6));
+    let mut accent = [0u8; ACCENT_BYTES];
+    fill_surface(&mut accent, (0x12, 0x36, 0x4a));
     let buffer = framebuffer.into_buffer();
     let mut runtime = Runtime {
         base: buffer.as_mut_ptr() as usize,
@@ -110,6 +133,8 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
         compositor,
         overlay,
         overlay_key,
+        accent,
+        accent_key,
         pressed: 0,
         released: 0,
         text: [b' '; TEXT_CELLS],
@@ -119,7 +144,7 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
     };
     runtime.append_text(b"JASPER-OS NATIVE TERMINAL\n\n");
     runtime.paint_boot_frame()?;
-    kprintln!("[JSR-DISPLAY-COMPOSITOR] layers=1 visible=1 primary=terminal overlay=teal");
+    kprintln!("[JSR-DISPLAY-COMPOSITOR] layers=2 visible=2 primary=terminal overlays=bounded");
     *DISPLAY.lock() = Some(runtime);
     Ok(())
 }
@@ -353,6 +378,12 @@ impl Runtime {
             (0xf4, 0xb8, 0x42)
         };
         fill_surface(&mut self.overlay, color);
+        let accent = if self.pressed.wrapping_sub(self.released) & 1 == 0 {
+            (0x12, 0x36, 0x4a)
+        } else {
+            (0x54, 0x2c, 0x18)
+        };
+        fill_surface(&mut self.accent, accent);
         let _ = self.compose_overlay();
         if let Ok(bytes) = self.required_bytes() {
             if let Ok(ticket) = self.session.prepare_frame(bytes) {
@@ -373,10 +404,16 @@ impl Runtime {
             .compose(
                 self.surface,
                 frame,
-                &[LayerPixels {
-                    key: self.overlay_key,
-                    bytes: &self.overlay,
-                }],
+                &[
+                    LayerPixels {
+                        key: self.overlay_key,
+                        bytes: &self.overlay,
+                    },
+                    LayerPixels {
+                        key: self.accent_key,
+                        bytes: &self.accent,
+                    },
+                ],
             )
             .map(|_| ())
             .map_err(|_| DisplayInputError::Failed)

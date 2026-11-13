@@ -633,4 +633,92 @@ mod tests {
         assert_eq!(failed.state(), CompositorState::Failed);
         assert_eq!(failed.close(), Err(CompositorError::Failed));
     }
+
+    #[test]
+    fn layer_updates_change_the_next_composition_without_new_keys() {
+        let mut compositor = Compositor::<2>::new();
+        let lower = compositor.create(layer(1)).unwrap();
+        let upper = compositor
+            .create(LayerSpec {
+                surface: RED_RGB,
+                x: 2,
+                y: 1,
+                z_order: 2,
+                visible: true,
+            })
+            .unwrap();
+        let red = [255u8, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0];
+        let blue = [0u8, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255];
+        let mut frame = [0u8; 8 * 4 * 4];
+        compositor
+            .compose(
+                FRAME,
+                &mut frame,
+                &[
+                    LayerPixels {
+                        key: lower,
+                        bytes: &red,
+                    },
+                    LayerPixels {
+                        key: upper,
+                        bytes: &blue,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(pixel(&frame, 2, 1), [255, 0, 0, 0xff]);
+
+        compositor.set_order(upper, 0).unwrap();
+        frame.fill(0);
+        let stats = compositor
+            .compose(
+                FRAME,
+                &mut frame,
+                &[
+                    LayerPixels {
+                        key: lower,
+                        bytes: &red,
+                    },
+                    LayerPixels {
+                        key: upper,
+                        bytes: &blue,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(stats.layers, 2);
+        assert_eq!(pixel(&frame, 2, 1), [0, 0, 255, 0xff]);
+
+        compositor.set_position(upper, 3, 1).unwrap();
+        frame.fill(0);
+        compositor
+            .compose(
+                FRAME,
+                &mut frame,
+                &[
+                    LayerPixels {
+                        key: lower,
+                        bytes: &red,
+                    },
+                    LayerPixels {
+                        key: upper,
+                        bytes: &blue,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(pixel(&frame, 3, 1), [255, 0, 0, 0xff]);
+
+        compositor.set_visible(upper, false).unwrap();
+        assert!(compositor
+            .compose(
+                FRAME,
+                &mut frame,
+                &[LayerPixels {
+                    key: lower,
+                    bytes: &red,
+                }],
+            )
+            .is_ok());
+    }
 }
