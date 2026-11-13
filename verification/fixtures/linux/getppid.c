@@ -79,6 +79,10 @@ static void signal_noop(int signal) {
 static uint32_t futex_word;
 static atomic_int futex_started;
 static atomic_int futex_finished;
+static uint32_t futex_requeue_source;
+static uint32_t futex_requeue_target;
+static atomic_int futex_requeue_started;
+static atomic_int futex_requeue_finished;
 
 struct futex_thread_arg {
     uint32_t bitset;
@@ -96,6 +100,21 @@ static void *futex_waiter(void *argument) {
                           FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG, 0,
                           &deadline, NULL, arg->bitset);
     atomic_fetch_add_explicit(&futex_finished, 1, memory_order_release);
+    return (void *)(intptr_t)result;
+}
+
+static void *futex_requeue_waiter(void *argument) {
+    (void)argument;
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
+        return (void *)(intptr_t)-1000;
+    }
+    deadline.tv_sec += 1;
+    atomic_fetch_add_explicit(&futex_requeue_started, 1, memory_order_release);
+    long result = syscall(SYS_futex, &futex_requeue_source,
+                          FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 0,
+                          &deadline, NULL, 0);
+    atomic_fetch_add_explicit(&futex_requeue_finished, 1, memory_order_release);
     return (void *)(intptr_t)result;
 }
 
@@ -1094,6 +1113,65 @@ int main(void) {
         futex_result0 != 0 || futex_result1 != 0 ||
         atomic_load_explicit(&futex_finished, memory_order_acquire) != 2) {
         return 304;
+    }
+    futex_requeue_source = 0;
+    futex_requeue_target = 0;
+    atomic_store(&futex_requeue_started, 0);
+    atomic_store(&futex_requeue_finished, 0);
+    pthread_t requeue_threads[2];
+    if (pthread_create(&requeue_threads[0], NULL, futex_requeue_waiter,
+                       NULL) != 0 ||
+        pthread_create(&requeue_threads[1], NULL, futex_requeue_waiter,
+                       NULL) != 0) {
+        return 308;
+    }
+    while (atomic_load_explicit(&futex_requeue_started,
+                                memory_order_acquire) != 2) {
+        sched_yield();
+    }
+    errno = 0;
+    if (syscall(SYS_futex, &futex_requeue_source,
+                FUTEX_CMP_REQUEUE | FUTEX_PRIVATE_FLAG, 0, 2,
+                &futex_requeue_target, 1) != -1 || errno != EAGAIN) {
+        return 309;
+    }
+    if (syscall(SYS_futex, &futex_requeue_source,
+                FUTEX_CMP_REQUEUE | FUTEX_PRIVATE_FLAG, 0, 2,
+                &futex_requeue_target, 0) != 2) {
+        return 310;
+    }
+    nanosleep(&futex_delay, NULL);
+    if (atomic_load_explicit(&futex_requeue_finished,
+                             memory_order_acquire) != 0 ||
+        syscall(SYS_futex, &futex_requeue_target,
+                FUTEX_WAKE | FUTEX_PRIVATE_FLAG, 2,
+                NULL, NULL, 0) != 2) {
+        return 311;
+    }
+    if (pthread_join(requeue_threads[0], &futex_result0) != 0 ||
+        pthread_join(requeue_threads[1], &futex_result1) != 0 ||
+        futex_result0 != 0 || futex_result1 != 0) {
+        return 312;
+    }
+    atomic_store(&futex_requeue_started, 0);
+    atomic_store(&futex_requeue_finished, 0);
+    if (pthread_create(&requeue_threads[0], NULL, futex_requeue_waiter,
+                       NULL) != 0) {
+        return 313;
+    }
+    while (atomic_load_explicit(&futex_requeue_started,
+                                memory_order_acquire) != 1) {
+        sched_yield();
+    }
+    if (syscall(SYS_futex, &futex_requeue_source,
+                FUTEX_REQUEUE | FUTEX_PRIVATE_FLAG, 0, 1,
+                &futex_requeue_target, 0) != 1 ||
+        syscall(SYS_futex, &futex_requeue_target,
+                FUTEX_WAKE | FUTEX_PRIVATE_FLAG, 1,
+                NULL, NULL, 0) != 1 ||
+        pthread_join(requeue_threads[0], &futex_result0) != 0 ||
+        futex_result0 != 0) {
+        return 314;
     }
     futex_word = 0;
     struct timespec futex_relative = {.tv_sec = 0, .tv_nsec = 20000000};

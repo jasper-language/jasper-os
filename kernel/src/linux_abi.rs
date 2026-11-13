@@ -61,6 +61,7 @@ struct LinuxThread {
 #[derive(Clone, Copy)]
 struct FutexWaiter {
     task: crate::task::TaskId,
+    key: Option<FutexKey>,
     bitset: u32,
     active: bool,
     woken: bool,
@@ -69,6 +70,7 @@ struct FutexWaiter {
 impl FutexWaiter {
     const EMPTY: Self = Self {
         task: crate::task::TaskId(0),
+        key: None,
         bitset: 0,
         active: false,
         woken: false,
@@ -1309,6 +1311,7 @@ fn futex_wait(
             .ok_or(CompatErrno::NoSpace)?;
         word.waiters[waiter_slot] = FutexWaiter {
             task,
+            key: Some(key),
             bitset,
             active: true,
             woken: false,
@@ -1335,13 +1338,9 @@ fn futex_wait(
                 .futexes
                 .iter()
                 .flatten()
-                .find(|word| word.key == key)
-                .and_then(|word| {
-                    word.waiters
-                        .iter()
-                        .find(|waiter| waiter.active && waiter.task == task)
-                        .map(|waiter| waiter.woken)
-                })
+                .flat_map(|word| word.waiters.iter())
+                .find(|waiter| waiter.active && waiter.task == task)
+                .map(|waiter| waiter.woken)
         };
         if waiter_state.is_none_or(|woken| woken) {
             break Ok(0);
@@ -1354,19 +1353,28 @@ fn futex_wait(
             sched::pause();
         }
     };
-    if let Some(word) = COMPAT
-        .lock()
+    let mut state = COMPAT.lock();
+    let current_key = state
         .futexes
-        .iter_mut()
+        .iter()
         .flatten()
-        .find(|word| word.key == key)
-    {
-        if let Some(waiter) = word
-            .waiters
+        .flat_map(|word| word.waiters.iter())
+        .find(|waiter| waiter.active && waiter.task == task)
+        .and_then(|waiter| waiter.key);
+    if let Some(current_key) = current_key {
+        if let Some(word) = state
+            .futexes
             .iter_mut()
-            .find(|waiter| waiter.active && waiter.task == task)
+            .flatten()
+            .find(|word| word.key == current_key)
         {
-            *waiter = FutexWaiter::EMPTY;
+            if let Some(waiter) = word
+                .waiters
+                .iter_mut()
+                .find(|waiter| waiter.active && waiter.task == task)
+            {
+                *waiter = FutexWaiter::EMPTY;
+            }
         }
     }
     result
@@ -1407,6 +1415,111 @@ fn futex_wake(
         sched::wake(task);
     }
     Ok(woken as u64)
+}
+
+fn futex_requeue(
+    process: ObjId,
+    source_address: u64,
+    target_address: u64,
+    wake_count: usize,
+    requeue_count: usize,
+    expected: Option<u32>,
+) -> Result<u64, CompatErrno> {
+    if source_address % 4 != 0
+        || target_address % 4 != 0
+        || source_address == target_address
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    if expected.is_some_and(|value| futex_value(process, source_address).ok() != Some(value)) {
+        return Err(CompatErrno::TryAgain);
+    }
+    let source_key = futex_key(process, source_address);
+    let target_key = futex_key(process, target_address);
+    if source_key == target_key {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut woken_tasks = [crate::task::TaskId(0); MAX_FUTEX_WAITERS];
+    let mut moved = [FutexWaiter::EMPTY; MAX_FUTEX_WAITERS];
+    let mut woken = 0usize;
+    let mut requeued = 0usize;
+    let mut state = COMPAT.lock();
+    let target_slot = state
+        .futexes
+        .iter()
+        .position(|word| word.is_some_and(|word| word.key == target_key));
+    let target_capacity = target_slot
+        .map(|slot| {
+            state.futexes[slot]
+                .expect("futex target slot")
+                .waiters
+                .iter()
+                .filter(|waiter| !waiter.active)
+                .count()
+        })
+        .unwrap_or(MAX_FUTEX_WAITERS);
+    let requeue_limit = requeue_count.min(target_capacity);
+    let Some(source_slot) = state
+        .futexes
+        .iter()
+        .position(|word| word.is_some_and(|word| word.key == source_key))
+    else {
+        return Ok(0);
+    };
+    for waiter in state.futexes[source_slot]
+        .as_mut()
+        .expect("futex source slot")
+        .waiters
+        .iter_mut()
+    {
+        if !waiter.active || waiter.woken {
+            continue;
+        }
+        if woken < wake_count {
+            waiter.woken = true;
+            woken_tasks[woken] = waiter.task;
+            woken += 1;
+        } else if requeued < requeue_limit {
+            moved[requeued] = *waiter;
+            moved[requeued].key = Some(target_key);
+            *waiter = FutexWaiter::EMPTY;
+            requeued += 1;
+        } else {
+            break;
+        }
+    }
+    if requeued != 0 {
+        let target_slot = if let Some(slot) = target_slot {
+            slot
+        } else {
+            let slot = state
+                .futexes
+                .iter()
+                .position(Option::is_none)
+                .ok_or(CompatErrno::NoSpace)?;
+            state.futexes[slot] = Some(FutexWord {
+                key: target_key,
+                waiters: [FutexWaiter::EMPTY; MAX_FUTEX_WAITERS],
+            });
+            slot
+        };
+        let target = state.futexes[target_slot]
+            .as_mut()
+            .expect("futex target slot");
+        for installed in 0..requeued {
+            let slot = target
+                .waiters
+                .iter()
+                .position(|waiter| !waiter.active)
+                .expect("preflighted futex target capacity");
+            target.waiters[slot] = moved[installed];
+        }
+    }
+    drop(state);
+    for task in woken_tasks[..woken].iter().copied() {
+        sched::wake(task);
+    }
+    Ok((woken + requeued) as u64)
 }
 
 fn futex_timeout(
@@ -3581,6 +3694,8 @@ fn linux_spawn_clone(
 fn linux_futex(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const FUTEX_WAIT: u64 = 0;
     const FUTEX_WAKE: u64 = 1;
+    const FUTEX_REQUEUE: u64 = 3;
+    const FUTEX_CMP_REQUEUE: u64 = 4;
     const FUTEX_WAIT_BITSET: u64 = 9;
     const FUTEX_WAKE_BITSET: u64 = 10;
     const FUTEX_PRIVATE_FLAG: u64 = 128;
@@ -3610,6 +3725,22 @@ fn linux_futex(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             args[0],
             usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
             u32::MAX,
+        ),
+        FUTEX_REQUEUE => futex_requeue(
+            pid,
+            args[0],
+            args[4],
+            usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
+            usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?,
+            None,
+        ),
+        FUTEX_CMP_REQUEUE => futex_requeue(
+            pid,
+            args[0],
+            args[4],
+            usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
+            usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?,
+            Some(u32::try_from(args[5]).map_err(|_| CompatErrno::Invalid)?),
         ),
         FUTEX_WAKE_BITSET => futex_wake(
             pid,
