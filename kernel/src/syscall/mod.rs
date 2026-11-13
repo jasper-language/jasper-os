@@ -845,6 +845,18 @@ syscall_dispatch! {
     SYSTEM_SANDBOX_LAUNCH_DESTROY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         sandbox_launch_destroy(a.args[0])
     },
+    SYSTEM_INSTALL_PACKAGE_WRITE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        install_package_put(a.args[0])
+    },
+    SYSTEM_INSTALL_REGISTRATION_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        install_register(a.args[0])
+    },
+    SYSTEM_INSTALL_GRANT_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        install_grant(a.args[0])
+    },
+    SYSTEM_INSTALL_QUERY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        install_query(a.args[0], a.args[1], a.args[2])
+    },
     SYSTEM_SANDBOX_WAIT => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         sandbox_wait(a.args[0], a.args[1])
     },
@@ -1592,6 +1604,135 @@ fn sandbox_launch_error(error: kernel_core::sandbox_launch::LaunchError) -> i64 
         LaunchError::Sandbox(error) => sandbox_error(error),
         LaunchError::Workload(error) => workload_error(error),
         LaunchError::Storage(error) => sandbox_storage_error(error),
+    }
+}
+
+fn install_package_put(desc_ptr: u64) -> i64 {
+    #[cfg(feature = "native-install-abi-verify")]
+    {
+        use kernel_core::fs::journal::STORAGE_UNIT_BYTES;
+        use kernel_core::native_install_abi::PackagePutArgs;
+
+        let mut raw = [0u8; kernel_core::native_install_abi::PACKAGE_PUT_BYTES];
+        let raw_len = raw.len();
+        if let Err(error) = copy_from_user(&mut raw, desc_ptr, raw_len) {
+            return user_ptr_err(error);
+        }
+        let Some(args) = PackagePutArgs::decode(&raw) else {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        };
+        let length = usize::try_from(args.bytes_len).unwrap_or(usize::MAX);
+        if length == 0 || length > STORAGE_UNIT_BYTES || args.bytes_ptr == 0 {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        }
+        let mut bytes = alloc::vec![0u8; length];
+        if let Err(error) = copy_from_user(&mut bytes, args.bytes_ptr, length) {
+            return user_ptr_err(error);
+        }
+        match crate::native_install_abi::package_put(args.spec, &bytes) {
+            Ok(key) => key.to_raw() as i64,
+            Err(error) => install_service_error(error),
+        }
+    }
+    #[cfg(not(feature = "native-install-abi-verify"))]
+    {
+        let _ = desc_ptr;
+        err(SYSTEM_ERROR_UNSUPPORTED)
+    }
+}
+
+fn install_register(desc_ptr: u64) -> i64 {
+    #[cfg(feature = "native-install-abi-verify")]
+    {
+        use kernel_core::native_install_abi::RegisterArgs;
+
+        let mut raw = [0u8; kernel_core::native_install_abi::REGISTER_BYTES];
+        let raw_len = raw.len();
+        if let Err(error) = copy_from_user(&mut raw, desc_ptr, raw_len) {
+            return user_ptr_err(error);
+        }
+        let Some(args) = RegisterArgs::decode(&raw) else {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        };
+        match crate::native_install_abi::register(args) {
+            Ok(key) => key.to_raw() as i64,
+            Err(error) => install_service_error(error),
+        }
+    }
+    #[cfg(not(feature = "native-install-abi-verify"))]
+    {
+        let _ = desc_ptr;
+        err(SYSTEM_ERROR_UNSUPPORTED)
+    }
+}
+
+fn install_grant(desc_ptr: u64) -> i64 {
+    #[cfg(feature = "native-install-abi-verify")]
+    {
+        use kernel_core::native_install_abi::GrantArgs;
+
+        let mut raw = [0u8; kernel_core::native_install_abi::GRANT_BYTES];
+        let raw_len = raw.len();
+        if let Err(error) = copy_from_user(&mut raw, desc_ptr, raw_len) {
+            return user_ptr_err(error);
+        }
+        let Some(args) = GrantArgs::decode(&raw) else {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        };
+        match crate::native_install_abi::grant(args) {
+            Ok(key) => key.to_raw() as i64,
+            Err(error) => install_service_error(error),
+        }
+    }
+    #[cfg(not(feature = "native-install-abi-verify"))]
+    {
+        let _ = desc_ptr;
+        err(SYSTEM_ERROR_UNSUPPORTED)
+    }
+}
+
+fn install_query(raw_key: u64, ptr: u64, cap: u64) -> i64 {
+    #[cfg(feature = "native-install-abi-verify")]
+    {
+        let Some(key) = kernel_core::native_install::InstallationKey::from_raw(raw_key) else {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        };
+        if cap < kernel_core::native_install_abi::INFO_BYTES as u64 {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        }
+        let info = match crate::native_install_abi::query(key, crate::sched::now_ns()) {
+            Ok(info) => info,
+            Err(error) => return install_service_error(error),
+        };
+        let encoded =
+            kernel_core::native_install_abi::InstallationInfo::from_snapshot(info).encode();
+        if let Err(error) = copy_to_user(ptr, &encoded, encoded.len()) {
+            return user_ptr_err(error);
+        }
+        encoded.len() as i64
+    }
+    #[cfg(not(feature = "native-install-abi-verify"))]
+    {
+        let _ = (raw_key, ptr, cap);
+        err(SYSTEM_ERROR_UNSUPPORTED)
+    }
+}
+
+#[cfg(feature = "native-install-abi-verify")]
+fn install_service_error(error: kernel_core::native_install_service::InstallServiceError) -> i64 {
+    use kernel_core::native_install_service::InstallServiceError;
+    match error {
+        InstallServiceError::Unauthorized | InstallServiceError::Security(_) => {
+            err(SYSTEM_ERROR_RIGHTS_DENIED)
+        }
+        InstallServiceError::InvalidCaller => err(SYSTEM_ERROR_RIGHTS_DENIED),
+        InstallServiceError::Store(
+            kernel_core::persistent_install::PersistentInstallError::Capacity,
+        )
+        | InstallServiceError::Store(
+            kernel_core::persistent_install::PersistentInstallError::SequenceExhausted,
+        ) => err(SYSTEM_ERROR_QUOTA_EXCEEDED),
+        InstallServiceError::Store(_) => err(SYSTEM_ERROR_INVALID_ARGUMENT),
     }
 }
 

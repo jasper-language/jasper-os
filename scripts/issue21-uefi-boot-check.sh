@@ -89,6 +89,7 @@ rm -f -- "$IMAGE" "$ESP_IMAGE" "$UEFI_ESP" "$OVMF_VARS"
 case "$MODE" in
   root-exec) KERNEL_FEATURES=lifecycle-root-exec-verify ;;
   sandbox-launch) KERNEL_FEATURES=lifecycle-root-exec-verify,sandbox-launch-verify ;;
+  native-install-abi) KERNEL_FEATURES=lifecycle-root-exec-verify,native-install-abi-verify ;;
   terminal-session) KERNEL_FEATURES=lifecycle-root-exec-verify,terminal-session-verify ;;
   block-timeout) KERNEL_FEATURES=lifecycle-block-timeout-verify ;;
   *) KERNEL_FEATURES=production,lifecycle-ab-health ;;
@@ -115,7 +116,7 @@ ROOT_EXEC_PROBE=""
 ROOT_FULL_USERLAND=0
 ROOT_SIGNAL_FIXTURE=""
 ROOT_PPID_FIXTURE=""
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = terminal-session ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ]; then
   ROOT_EXEC_PROBE=$(find "$TARGET/x86_64-unknown-none/release/build" \
     -path '*/out/user-target/x86_64-unknown-none/release/user-linuxprobe' \
     -type f -print | sort | tail -n 1)
@@ -159,7 +160,7 @@ QEMU_EXTRA=(-monitor none)
 if [ -n "${ISSUE21_MONITOR_SOCKET:-}" ]; then
   QEMU_EXTRA=(-monitor "unix:$ISSUE21_MONITOR_SOCKET,server=on,wait=off")
 fi
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = terminal-session ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ]; then
   CPU=max
   if [ "${ISSUE21_DISABLE_RDRAND:-0}" = 1 ]; then
     CPU=max,-rdrand,-rdseed
@@ -204,7 +205,7 @@ rc=$?
 set -e
 exec 9>&-
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = terminal-session ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ]; then
   [ "$rc" -eq 33 ]
 else
   [ "$rc" -eq 124 ]
@@ -218,7 +219,7 @@ if [ "$MODE" = block-timeout ]; then
   echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
   exit 0
 fi
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = terminal-session ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ]; then
   grep -aq '^\[JSR-LIFE-ROOT-EXEC\] path=/usr/libexec/jasper/health-probe .* mapped=true cpl3=true exited=true syscalls=[1-9][0-9]* frames_before=[0-9]* resources=true' \
     "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=bin/true path=/bin/true interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true' \
@@ -270,6 +271,10 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = termin
   if [ "$MODE" = sandbox-launch ]; then
     grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
     grep -aqE $'^(\\[JSR-USERTEXT\\].*text=)?sandbox-launch: ok sandbox=true image=true plan=true query=true destroy=true cleanup=true\r?$' "$OUT/serial.log"
+  fi
+  if [ "$MODE" = native-install-abi ]; then
+    grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
+    grep -aqE $'^(\\[JSR-USERTEXT\\].*text=)?native-install-abi: ok package=true idempotent=true register=true grant=true query=true denied_short=true\r?$' "$OUT/serial.log"
   fi
   if [ "$MODE" = terminal-session ]; then
     grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"

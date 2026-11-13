@@ -498,6 +498,11 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
             "user-sandboxprobe",
             "JSR_USER_SANDBOXPROBE",
         ),
+        (
+            "user/installprobe",
+            "user-installprobe",
+            "JSR_USER_INSTALLPROBE",
+        ),
         ("user/ring", "user-ring", "JSR_USER_RING"),
         ("user/ipc", "user-ipc", "JSR_USER_IPC"),
         ("user/prog", "user-prog", "JSR_USER_PROG"),

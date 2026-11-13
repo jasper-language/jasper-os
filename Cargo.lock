@@ -1859,6 +1859,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "user-installprobe"
+version = "0.1.0"
+dependencies = [
+ "jasper-rt",
+ "kernel-core",
+]
+
+[[package]]
 name = "user-ipc"
 version = "0.1.0"
 dependencies = [

@@ -1816,6 +1816,26 @@ pub const OPERATIONS: &[OperationContract] = &[
         args: "u64:plan_key",
         result: "0_or_error",
     },
+    OperationContract {
+        name: "system.install.package.write",
+        args: "u64:package_put_record",
+        result: "package_key_or_error",
+    },
+    OperationContract {
+        name: "system.install.registration.create",
+        args: "u64:register_record",
+        result: "installation_key_or_error",
+    },
+    OperationContract {
+        name: "system.install.grant.create",
+        args: "u64:grant_record",
+        result: "grant_key_or_error",
+    },
+    OperationContract {
+        name: "system.install.query",
+        args: "u64:installation_key,u64:buf,u64:capacity",
+        result: "i64:bytes_or_error",
+    },
 ];
 
 /// Rights 位是外部 ABI；位值变化必须产生新快照并随 ABI 版本裁决。
@@ -2026,6 +2046,14 @@ pub const SEMANTICS: &[(&str, &str)] = &[
     (
         "sandbox.launch.record",
         "stable_keys_and_immutable_policy_only;no_domain_or_logical_path;old_generation_never_revives",
+    ),
+    (
+        "install.authority",
+        "kernel_derived_security_context_domain_and_subject;package_bytes_require_system_caller;paths_and_app_ids_never_authorize",
+    ),
+    (
+        "install.records",
+        "stable_generation_keys;separate_package_registration_grant_runtime_and_data;query_requires_live_discovery_grant",
     ),
     (
         "terminal.input",

@@ -140,6 +140,12 @@ native-install-block-verify = [
 # Deep test-only codec fault injection; retained outside the production-stack
 # two-boot persistence drill.
 native-install-fault-verify = ["native-install-block-verify"]
+# Versioned native install ABI exercised by an isolated RAM SectorIo backend.
+native-install-abi-verify = [
+    "native-install-block-verify",
+    "user-programs",
+    "kernel-core/sec1-verify",
+]
 # Real virtio-blk persistence and bounded privacy queries for LC-1 diagnostics.
 lifecycle-diagnostic-block-verify = [
     "lifecycle-diagnostic-sources",

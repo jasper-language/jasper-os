@@ -25,28 +25,46 @@ static USER_HELLO: &[u8] = include_bytes!(env!("JSR_USER_HELLO"));
 #[cfg(feature = "sandbox-launch-verify")]
 static USER_SANDBOXPROBE: &[u8] = include_bytes!(env!("JSR_USER_SANDBOXPROBE"));
 
+#[cfg(feature = "native-install-abi-verify")]
+static USER_INSTALLPROBE: &[u8] = include_bytes!(env!("JSR_USER_INSTALLPROBE"));
+
 /// 内嵌 Jasper 原生 CLI 映像。 Embedded Jasper native CLI image.
 #[cfg(all(
     feature = "terminal-session-verify",
-    not(feature = "sandbox-launch-verify")
+    not(any(
+        feature = "sandbox-launch-verify",
+        feature = "native-install-abi-verify"
+    ))
 ))]
 static USER_CLI: &[u8] = include_bytes!(env!("JSR_USER_CLI"));
 
 /// 返回生产首程序使用的同一份不可变 ELF 镜像。
 /// Returns the same immutable ELF image used by the production first program.
 pub(crate) fn image() -> &'static [u8] {
+    #[cfg(feature = "native-install-abi-verify")]
+    {
+        USER_INSTALLPROBE
+    }
     #[cfg(feature = "sandbox-launch-verify")]
+    #[cfg(not(feature = "native-install-abi-verify"))]
     {
         USER_SANDBOXPROBE
     }
     #[cfg(all(
         feature = "terminal-session-verify",
-        not(feature = "sandbox-launch-verify")
+        not(any(
+            feature = "sandbox-launch-verify",
+            feature = "native-install-abi-verify"
+        ))
     ))]
     {
         USER_CLI
     }
-    #[cfg(not(any(feature = "terminal-session-verify", feature = "sandbox-launch-verify")))]
+    #[cfg(not(any(
+        feature = "terminal-session-verify",
+        feature = "sandbox-launch-verify",
+        feature = "native-install-abi-verify"
+    )))]
     {
         USER_HELLO
     }
@@ -56,7 +74,18 @@ pub(crate) fn image() -> &'static [u8] {
 /// Loads and runs the production first program; requires exit code zero and full frame reclamation.
 pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
     let free_before = frame::free_frames();
+    #[cfg(feature = "native-install-abi-verify")]
+    let allowed = SyscallSet::of(&[
+        abi::SYSTEM_CONSOLE_WRITE,
+        abi::SYSTEM_MEMORY_MAP,
+        abi::SYSTEM_PROCESS_EXIT,
+        abi::SYSTEM_INSTALL_PACKAGE_WRITE,
+        abi::SYSTEM_INSTALL_REGISTRATION_CREATE,
+        abi::SYSTEM_INSTALL_GRANT_CREATE,
+        abi::SYSTEM_INSTALL_QUERY,
+    ]);
     #[cfg(feature = "sandbox-launch-verify")]
+    #[cfg(not(feature = "native-install-abi-verify"))]
     let allowed = SyscallSet::of(&[
         abi::SYSTEM_CONSOLE_WRITE,
         abi::SYSTEM_MEMORY_MAP,
@@ -72,7 +101,10 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
     ]);
     #[cfg(all(
         feature = "terminal-session-verify",
-        not(feature = "sandbox-launch-verify")
+        not(any(
+            feature = "sandbox-launch-verify",
+            feature = "native-install-abi-verify"
+        ))
     ))]
     let allowed = SyscallSet::of(&[
         abi::SYSTEM_CONSOLE_WRITE,
@@ -81,7 +113,11 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_MEMORY_MAP,
         abi::SYSTEM_PROCESS_EXIT,
     ]);
-    #[cfg(not(any(feature = "terminal-session-verify", feature = "sandbox-launch-verify")))]
+    #[cfg(not(any(
+        feature = "terminal-session-verify",
+        feature = "sandbox-launch-verify",
+        feature = "native-install-abi-verify"
+    )))]
     let allowed = SyscallSet::of(&[
         abi::SYSTEM_CONSOLE_WRITE,
         abi::SYSTEM_ABI_GET,
@@ -90,6 +126,25 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
     let Ok(pid) = proc::create("first-program", allowed) else {
         return (None, false);
     };
+    #[cfg(all(target_arch = "x86_64", feature = "native-install-abi-verify"))]
+    {
+        use kernel_core::mac::MacLabel;
+        use kernel_core::security::{IdentityClass, MetadataState, SecurityContext};
+
+        let mut context = SecurityContext::new(
+            crate::security::boot_id(),
+            IdentityClass::Process,
+            pid,
+            None,
+            MetadataState::Active,
+        );
+        context.mac = MacLabel::system(IdentityClass::Process);
+        if kobj::with(|table| table.set_security_for_verify(pid, context)).is_err() {
+            let _ = proc::reap(pid);
+            kobj::run_cleanup(usize::MAX);
+            return (None, false);
+        }
+    }
     let base = arch::USER_WINDOW.0;
     let started = match proc::load_elf(pid, image()) {
         Ok(entry) => {
