@@ -3861,6 +3861,35 @@ int main(void) {
         return 457;
     }
     const char *xattr_path = "/usr/lib/x86_64-linux-gnu/libc.so.6";
+    int path_only_fd = open(xattr_path, O_PATH | O_CLOEXEC);
+    struct stat path_only_status = {0};
+    char path_only_byte = 0;
+    errno = 0;
+    if (path_only_fd < 0 ||
+        (fcntl(path_only_fd, F_GETFD) & FD_CLOEXEC) == 0 ||
+        (fcntl(path_only_fd, F_GETFL) & O_PATH) == 0 ||
+        fstat(path_only_fd, &path_only_status) != 0 ||
+        !S_ISREG(path_only_status.st_mode) ||
+        read(path_only_fd, &path_only_byte, 1) != -1 ||
+        errno != EBADF) {
+        return 690;
+    }
+    int path_dir_fd = open("/usr/bin", O_PATH | O_DIRECTORY | O_CLOEXEC);
+    int path_exec_fd =
+        path_dir_fd < 0
+            ? -1
+            : openat(path_dir_fd, "printf", O_PATH | O_CLOEXEC);
+    memset(&path_only_status, 0, sizeof(path_only_status));
+    if (path_dir_fd < 0 || path_exec_fd < 0 ||
+        (fcntl(path_dir_fd, F_GETFL) & O_DIRECTORY) == 0 ||
+        fstatat(path_exec_fd, "", &path_only_status,
+                AT_EMPTY_PATH) != 0 ||
+        !S_ISREG(path_only_status.st_mode) ||
+        close(path_exec_fd) != 0 ||
+        close(path_dir_fd) != 0 ||
+        close(path_only_fd) != 0) {
+        return 691;
+    }
     const char *xattr_name = "user.jasper-test";
     char xattr_value = 'X';
     if (syscall(SYS_listxattr, xattr_path, NULL, 0) != 0 ||

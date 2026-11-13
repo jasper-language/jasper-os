@@ -9601,10 +9601,17 @@ fn linux_file_attr_validate(
             proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path()
         } else {
             let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-            let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
-            crate::linux_vfs::DirectoryId::from_handle(handle)
-                .ok_or(CompatErrno::BadFd)?
-                .path()
+            if let Some(crate::linux_vfs::Node::Directory(directory)) =
+                proc::linux_path_node(pid, fd)
+            {
+                directory.path()
+            } else {
+                let (handle, _) =
+                    proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
+                crate::linux_vfs::DirectoryId::from_handle(handle)
+                    .ok_or(CompatErrno::BadFd)?
+                    .path()
+            }
         };
         if path == b"." {
             base.to_vec()
@@ -12736,11 +12743,15 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const O_NONBLOCK: u64 = 0x800;
     const O_NOCTTY: u64 = 0x100;
     const O_NOFOLLOW: u64 = 0x20000;
+    const O_PATH: u64 = 0x20_0000;
     #[cfg(feature = "compat-dynamic-libc-verify")]
     trace_path_address(pid, "openat-address", args[1]);
     let flags = args[2];
+    let path_only = flags & O_PATH != 0;
     if flags & 3 == 3
-        || flags & !(3 | O_CLOEXEC | O_DIRECTORY | O_NONBLOCK | O_NOCTTY | O_NOFOLLOW) != 0
+        || flags
+            & !(3 | O_CLOEXEC | O_DIRECTORY | O_NONBLOCK | O_NOCTTY | O_NOFOLLOW | O_PATH)
+            != 0
     {
         return Err(CompatErrno::Perm);
     }
@@ -12763,10 +12774,17 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path()
         } else {
             let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-            let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
-            crate::linux_vfs::DirectoryId::from_handle(handle)
-                .ok_or(CompatErrno::BadFd)?
-                .path()
+            if let Some(crate::linux_vfs::Node::Directory(directory)) =
+                proc::linux_path_node(pid, fd)
+            {
+                directory.path()
+            } else {
+                let (handle, _) =
+                    proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
+                crate::linux_vfs::DirectoryId::from_handle(handle)
+                    .ok_or(CompatErrno::BadFd)?
+                    .path()
+            }
         };
         if path == b"." {
             base.to_vec()
@@ -12780,7 +12798,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             resolved
         }
     };
-    if resolved == b"/dev/ashmem" {
+    if !path_only && resolved == b"/dev/ashmem" {
         if flags & 3 != 2 {
             return Err(CompatErrno::Perm);
         }
@@ -12788,7 +12806,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .map(u64::from)
             .ok_or(CompatErrno::NoSpace);
     }
-    if resolved == b"/dev/binder" {
+    if !path_only && resolved == b"/dev/binder" {
         if flags & 3 != 2 {
             return Err(CompatErrno::Perm);
         }
@@ -12796,7 +12814,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .map(u64::from)
             .ok_or(CompatErrno::NoSpace);
     }
-    if resolved == b"/dev/ion" {
+    if !path_only && resolved == b"/dev/ion" {
         if flags & 3 != 2 {
             return Err(CompatErrno::Perm);
         }
@@ -12804,7 +12822,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .map(u64::from)
             .ok_or(CompatErrno::NoSpace);
     }
-    if resolved == b"/dev/dma_heap/system" {
+    if !path_only && resolved == b"/dev/dma_heap/system" {
         if flags & 3 != 2 {
             return Err(CompatErrno::Perm);
         }
@@ -12812,11 +12830,19 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .map(u64::from)
             .ok_or(CompatErrno::NoSpace);
     }
-    if flags & 3 != 0 {
+    if !path_only && flags & 3 != 0 {
         return Err(CompatErrno::Perm);
     }
     let node = crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)?;
     let close_on_exec = flags & O_CLOEXEC != 0;
+    if path_only {
+        if flags & O_DIRECTORY != 0 && !node.is_directory() {
+            return Err(CompatErrno::NotDirectory);
+        }
+        return proc::linux_install_path(pid, node, close_on_exec)
+            .map(u64::from)
+            .ok_or(CompatErrno::NoSpace);
+    }
     let fd = match node {
         crate::linux_vfs::Node::File(file) => {
             if flags & O_DIRECTORY != 0 {
@@ -12887,6 +12913,16 @@ fn linux_creat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 /// `fchdir` 只接受已验证的目录 fd，并把同一目录身份提交为进程 cwd。
 fn linux_fchdir(pid: ObjId, fd: u64) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(fd).map_err(|_| CompatErrno::BadFd)?;
+    if let Some(node) = proc::linux_path_node(pid, fd) {
+        let crate::linux_vfs::Node::Directory(directory) = node else {
+            return Err(CompatErrno::NotDirectory);
+        };
+        return if proc::set_linux_cwd(pid, directory) {
+            Ok(0)
+        } else {
+            Err(CompatErrno::NoSys)
+        };
+    }
     let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::BadFd)?;
     let directory = crate::linux_vfs::DirectoryId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
     if proc::set_linux_cwd(pid, directory) {
@@ -13391,6 +13427,11 @@ fn linux_c_string(address: u64, max: usize) -> Result<alloc::vec::Vec<u8>, Compa
 fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind == compat_core::fd::CompatKind::Path {
+        let node = proc::linux_path_node(pid, fd).ok_or(CompatErrno::BadFd)?;
+        write_linux_stat(args[1], node)?;
+        return Ok(0);
+    }
     if entry.kind == compat_core::fd::CompatKind::Device {
         let (size, regular) = proc::linux_ashmem_state(pid, entry.handle)
             .map(|(size, _, _)| {
@@ -13457,13 +13498,17 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 )?;
                 return Ok(0);
             }
-            let node = crate::linux_vfs::FileId::from_handle(entry.handle)
-                .map(crate::linux_vfs::Node::File)
-                .or_else(|| {
-                    crate::linux_vfs::DirectoryId::from_handle(entry.handle)
-                        .map(crate::linux_vfs::Node::Directory)
-                })
-                .ok_or(CompatErrno::BadFd)?;
+            let node = if entry.kind == compat_core::fd::CompatKind::Path {
+                proc::linux_path_node(pid, fd)
+            } else {
+                crate::linux_vfs::FileId::from_handle(entry.handle)
+                    .map(crate::linux_vfs::Node::File)
+                    .or_else(|| {
+                        crate::linux_vfs::DirectoryId::from_handle(entry.handle)
+                            .map(crate::linux_vfs::Node::Directory)
+                    })
+            }
+            .ok_or(CompatErrno::BadFd)?;
             write_linux_stat(args[2], node)?;
             return Ok(0);
         }
@@ -13552,11 +13597,17 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path()
                 } else {
                     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-                    let (handle, _) =
-                        proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
-                    crate::linux_vfs::DirectoryId::from_handle(handle)
-                        .ok_or(CompatErrno::BadFd)?
-                        .path()
+                    if let Some(crate::linux_vfs::Node::Directory(directory)) =
+                        proc::linux_path_node(pid, fd)
+                    {
+                        directory.path()
+                    } else {
+                        let (handle, _) =
+                            proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
+                        crate::linux_vfs::DirectoryId::from_handle(handle)
+                            .ok_or(CompatErrno::BadFd)?
+                            .path()
+                    }
                 };
                 if path == b"." {
                     base.to_vec()
@@ -13599,7 +13650,16 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 )?;
                 return Ok(0);
             }
-            if let Some(file) = crate::linux_vfs::FileId::from_handle(entry.handle) {
+            if let Some(node) = proc::linux_path_node(pid, fd) {
+                (
+                    node,
+                    if node.is_directory() {
+                        4096
+                    } else {
+                        node.stat_metadata().0
+                    },
+                )
+            } else if let Some(file) = crate::linux_vfs::FileId::from_handle(entry.handle) {
                 (
                     crate::linux_vfs::Node::File(file),
                     file.bytes().len() as u64,
@@ -13794,20 +13854,28 @@ fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const FD_CLOEXEC: u64 = 1;
     const O_NONBLOCK: u64 = 0x800;
     const O_DIRECTORY: u64 = 0x10000;
+    const O_PATH: u64 = 0x20_0000;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     match args[1] {
         F_GETFD => Ok(u64::from(entry.close_on_exec)),
         F_GETFL => {
             let status = u64::from(proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)?);
+            let path_node = proc::linux_path_node(pid, fd);
             Ok(status
-                | if entry.kind == compat_core::fd::CompatKind::Directory {
+                | if entry.kind == compat_core::fd::CompatKind::Directory
+                    || path_node.is_some_and(|node| node.is_directory())
+                {
                     O_DIRECTORY
                 } else {
                     0
-                })
+                }
+                | if path_node.is_some() { O_PATH } else { 0 })
         }
         F_SETFL if args[2] & !O_NONBLOCK == 0 => {
+            if entry.kind == compat_core::fd::CompatKind::Path {
+                return Err(CompatErrno::Invalid);
+            }
             if proc::linux_set_fd_status_flags(pid, fd, args[2] as u32) {
                 Ok(0)
             } else {

@@ -20,6 +20,7 @@ pub enum CompatKind {
     MessageQueue,
     MountTree,
     FsContext,
+    Path,
     Device,
     Other,
 }

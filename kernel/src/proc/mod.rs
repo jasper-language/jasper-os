@@ -4114,6 +4114,39 @@ pub(crate) fn linux_install_dir(pid: ObjId, handle: u64, close_on_exec: bool) ->
     .ok()
 }
 
+/// Installs one path-only descriptor without granting stream read/write access.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_path(
+    pid: ObjId,
+    node: crate::linux_vfs::Node,
+    close_on_exec: bool,
+) -> Option<u32> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let fd = linux
+            .fds
+            .install(
+                node.inode(),
+                kernel_core::object::Rights::READ,
+                compat_core::fd::CompatKind::Path,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Resolves the namespace node referenced by one path-only descriptor.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_path_node(pid: ObjId, fd: u32) -> Option<crate::linux_vfs::Node> {
+    let entry = linux_fd(pid, fd)?;
+    if entry.kind != compat_core::fd::CompatKind::Path {
+        return None;
+    }
+    crate::linux_vfs::node_from_inode(entry.handle)
+}
+
 /// Returns `(handle, offset)` for an open read-only Linux file.
 ///
 /// 返回已打开只读 Linux 文件的虚拟句柄与游标。
