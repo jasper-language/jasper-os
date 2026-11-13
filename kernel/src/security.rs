@@ -67,7 +67,7 @@ pub const fn identity_class(kind: Kind) -> IdentityClass {
         Kind::Memory => IdentityClass::Memory,
         Kind::Device | Kind::Interrupt | Kind::DmaMapping => IdentityClass::Device,
         Kind::Vcpu => IdentityClass::Vcpu,
-        Kind::EventSource | Kind::Subscription => IdentityClass::Service,
+        Kind::EventSource | Kind::Subscription | Kind::Installation => IdentityClass::Service,
         Kind::ExitState => IdentityClass::KernelObject,
         Kind::Event | Kind::Ring | Kind::Endpoint | Kind::Mutex | Kind::Timer => {
             IdentityClass::KernelObject
@@ -425,7 +425,9 @@ pub const fn identity_class_for_object(ty: ObjectType) -> IdentityClass {
             IdentityClass::Device
         }
         ObjectType::Vcpu => IdentityClass::Vcpu,
-        ObjectType::EventSource | ObjectType::Subscription => IdentityClass::Service,
+        ObjectType::EventSource | ObjectType::Subscription | ObjectType::Installation => {
+            IdentityClass::Service
+        }
         ObjectType::Event
         | ObjectType::Timer
         | ObjectType::Ring

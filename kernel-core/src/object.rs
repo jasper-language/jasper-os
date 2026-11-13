@@ -254,12 +254,14 @@ pub enum ObjectType {
     DmaMapping,
     EventSource,
     Subscription,
+    /// Native installation registration handle.
+    Installation,
 }
 
 impl ObjectType {
     /// 全部句柄类型（按声明顺序；登记表与验证用）。
     /// All handle types in declaration order.
-    pub const ALL: [ObjectType; 15] = [
+    pub const ALL: [ObjectType; 16] = [
         ObjectType::Event,
         ObjectType::Timer,
         ObjectType::Ring,
@@ -275,6 +277,7 @@ impl ObjectType {
         ObjectType::DmaMapping,
         ObjectType::EventSource,
         ObjectType::Subscription,
+        ObjectType::Installation,
     ];
 
     /// v1 是否允许经 Channel 传递：只有「叶子对象」——自身不持有句柄、
@@ -305,6 +308,7 @@ impl ObjectType {
             ObjectType::Process => "Process",
             ObjectType::Device => "Device",
             ObjectType::Interrupt => "Interrupt",
+            ObjectType::Installation => "Installation",
         }
     }
 }
@@ -1120,6 +1124,8 @@ mod tests {
         assert!(ObjectType::Task.is_transferable_v1() && ObjectType::Event.is_transferable_v1());
         assert!(ObjectType::Mutex.is_transferable_v1() && ObjectType::Mutex.type_name() == "Mutex");
         assert!(ObjectType::Device.is_transferable_v1(), "设备对象是叶子：关闭句柄不销毁设备表项");
+        assert!(!ObjectType::Installation.is_transferable_v1());
+        assert_eq!(ObjectType::Installation.type_name(), "Installation");
         assert!(!ObjectType::Channel.is_transferable_v1() && !ObjectType::Process.is_transferable_v1());
         assert!(!ObjectType::Ring.is_transferable_v1() && !ObjectType::AddressSpace.is_transferable_v1());
         assert!(!ObjectType::Interrupt.is_transferable_v1(), "中断绑定归属创建它的进程");

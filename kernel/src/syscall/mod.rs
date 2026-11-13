@@ -857,6 +857,12 @@ syscall_dispatch! {
     SYSTEM_INSTALL_QUERY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         install_query(a.args[0], a.args[1], a.args[2])
     },
+    SYSTEM_INSTALL_HANDLE_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        install_handle_create(a.args[0])
+    },
+    SYSTEM_INSTALL_HANDLE_QUERY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        install_handle_query(a.args[0], a.args[1], a.args[2])
+    },
     SYSTEM_SANDBOX_WAIT => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         sandbox_wait(a.args[0], a.args[1])
     },
@@ -1714,6 +1720,75 @@ fn install_query(raw_key: u64, ptr: u64, cap: u64) -> i64 {
     #[cfg(not(feature = "native-install-abi-verify"))]
     {
         let _ = (raw_key, ptr, cap);
+        err(SYSTEM_ERROR_UNSUPPORTED)
+    }
+}
+
+fn install_handle_create(raw_key: u64) -> i64 {
+    #[cfg(feature = "native-install-abi-verify")]
+    {
+        use kernel_core::native_install::InstallationKey;
+
+        let Some(installation) = InstallationKey::from_raw(raw_key) else {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        };
+        // Discovery authority is checked before any object is created. The
+        // handle does not turn a key into authority by itself.
+        if let Err(error) =
+            crate::native_install_abi::query(installation, crate::sched::now_ns())
+        {
+            return install_service_error(error);
+        }
+        let Some(pid) = proc::current_process() else {
+            return err(SYSTEM_ERROR_RIGHTS_DENIED);
+        };
+        match crate::native_install_handle::create(pid, installation) {
+            Ok(handle) => handle.raw() as i64,
+            Err(error) => proc_err(error),
+        }
+    }
+    #[cfg(not(feature = "native-install-abi-verify"))]
+    {
+        let _ = raw_key;
+        err(SYSTEM_ERROR_UNSUPPORTED)
+    }
+}
+
+fn install_handle_query(raw_handle: u64, ptr: u64, cap: u64) -> i64 {
+    #[cfg(feature = "native-install-abi-verify")]
+    {
+        use kernel_core::native_install_abi::INFO_BYTES;
+        use kernel_core::object::Rights;
+
+        if cap < INFO_BYTES as u64 {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        }
+        let Some(pid) = proc::current_process() else {
+            return err(SYSTEM_ERROR_RIGHTS_DENIED);
+        };
+        let installation = match crate::native_install_handle::key(
+            pid,
+            handle_arg(raw_handle),
+            Rights::READ,
+        ) {
+            Ok(installation) => installation,
+            Err(error) => return proc_err(error),
+        };
+        let info =
+            match crate::native_install_abi::query(installation, crate::sched::now_ns()) {
+                Ok(info) => info,
+                Err(error) => return install_service_error(error),
+            };
+        let encoded =
+            kernel_core::native_install_abi::InstallationInfo::from_snapshot(info).encode();
+        if let Err(error) = copy_to_user(ptr, &encoded, encoded.len()) {
+            return user_ptr_err(error);
+        }
+        encoded.len() as i64
+    }
+    #[cfg(not(feature = "native-install-abi-verify"))]
+    {
+        let _ = (raw_handle, ptr, cap);
         err(SYSTEM_ERROR_UNSUPPORTED)
     }
 }

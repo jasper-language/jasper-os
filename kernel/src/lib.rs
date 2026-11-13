@@ -170,6 +170,7 @@ pub mod native_install_abi;
 #[cfg(any(feature = "linux-abi", feature = "sec3-verify"))]
 pub mod native_module_authority;
 pub mod native_module_catalog;
+pub(crate) mod native_install_handle;
 #[cfg(all(
     target_arch = "x86_64",
     feature = "lifecycle-diagnostic-block-verify"
