@@ -26,6 +26,11 @@ foreign_uefi_transaction() {
   local pid command
   while read -r pid command; do
     [ "$pid" = "$$" ] && continue
+    if [ -r "/proc/$pid/stat" ]; then
+      read -r _stat_pid _stat_comm _stat_state stat_parent _rest \
+        <"/proc/$pid/stat" || true
+      [ "${stat_parent:-}" = "$$" ] && continue
+    fi
     case "$command" in
       *issue21-uefi-boot-check.sh*) return 0 ;;
     esac
