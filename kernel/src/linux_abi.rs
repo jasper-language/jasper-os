@@ -46,6 +46,7 @@ const MAX_SYSV_SEM_UNDOS: usize = 64;
 const SYSV_SEMVMX: i32 = 32767;
 const MAX_SYSV_SHARED_SEGMENTS: usize = 16;
 const MAX_SYSV_SHARED_ATTACHMENTS: usize = 32;
+const MAX_LINUX_KEYS: usize = 16;
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
 static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
 
@@ -296,6 +297,23 @@ struct SysVSharedMemory {
     attachments: alloc::vec::Vec<SysVSharedAttachment>,
 }
 
+struct LinuxKey {
+    serial: i32,
+    application: kernel_core::security::ApplicationIdentity,
+    key_type: [u8; 16],
+    type_len: u8,
+    description: [u8; 64],
+    description_len: u8,
+    payload: alloc::vec::Vec<u8>,
+    revoked: bool,
+}
+
+#[derive(Clone, Copy)]
+struct LinuxProcessKeyring {
+    process: ObjId,
+    serial: i32,
+}
+
 struct CompatState {
     threads: [Option<LinuxThread>; MAX_LINUX_THREADS],
     futexes: [Option<FutexWord>; MAX_FUTEX_WORDS],
@@ -315,6 +333,9 @@ struct CompatState {
     next_sysv_semaphore_id: i32,
     sysv_shared_segments: alloc::vec::Vec<SysVSharedMemory>,
     next_sysv_shared_id: i32,
+    keys: alloc::vec::Vec<LinuxKey>,
+    process_keyrings: alloc::vec::Vec<LinuxProcessKeyring>,
+    next_key_serial: i32,
 }
 
 impl CompatState {
@@ -338,6 +359,9 @@ impl CompatState {
             next_sysv_semaphore_id: 1,
             sysv_shared_segments: alloc::vec::Vec::new(),
             next_sysv_shared_id: 1,
+            keys: alloc::vec::Vec::new(),
+            process_keyrings: alloc::vec::Vec::new(),
+            next_key_serial: 1,
         }
     }
 }
@@ -2684,6 +2708,9 @@ fn execute(
         LinuxSyscall::FsConfig => compat_result(linux_fsconfig(pid, call.args)),
         LinuxSyscall::FsMount => compat_result(linux_fsmount(pid, call.args)),
         LinuxSyscall::FsPick => compat_result(linux_fspick(pid, call.args)),
+        LinuxSyscall::AddKey => compat_result(linux_add_key(pid, call.args)),
+        LinuxSyscall::RequestKey => compat_result(linux_request_key(pid, call.args)),
+        LinuxSyscall::Keyctl => compat_result(linux_keyctl(pid, call.args)),
         LinuxSyscall::GetMempolicy => compat_result(linux_get_mempolicy(pid, call.args)),
         LinuxSyscall::SetMempolicy => compat_result(linux_set_mempolicy(call.args)),
         LinuxSyscall::Mbind => compat_result(linux_mbind(pid, call.args)),
@@ -2692,10 +2719,7 @@ fn execute(
         }
         LinuxSyscall::MigratePages => compat_result(linux_migrate_pages(pid, call.args)),
         LinuxSyscall::MovePages => compat_result(linux_move_pages(pid, call.args)),
-        LinuxSyscall::AddKey
-        | LinuxSyscall::RequestKey
-        | LinuxSyscall::Keyctl
-        | LinuxSyscall::FanotifyInit
+        LinuxSyscall::FanotifyInit
         | LinuxSyscall::FanotifyMark
         | LinuxSyscall::LandlockCreateRuleset
         | LinuxSyscall::LandlockAddRule
@@ -9851,6 +9875,224 @@ fn linux_move_pages(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     copy_to_user(args[4], &status_raw, status_raw.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(errors)
+}
+
+fn linux_process_keyring(
+    state: &mut CompatState,
+    process: ObjId,
+    application: kernel_core::security::ApplicationIdentity,
+) -> Result<i32, CompatErrno> {
+    if let Some(binding) = state
+        .process_keyrings
+        .iter()
+        .find(|binding| binding.process == process)
+    {
+        return Ok(binding.serial);
+    }
+    if state.keys.len() >= MAX_LINUX_KEYS || state.process_keyrings.len() >= MAX_LINUX_KEYS {
+        return Err(CompatErrno::NoSpace);
+    }
+    state.keys.try_reserve(1).map_err(|_| CompatErrno::NoMemory)?;
+    state
+        .process_keyrings
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    let serial = state.next_key_serial;
+    state.next_key_serial = serial.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+    let mut key_type = [0u8; 16];
+    key_type[..8].copy_from_slice(b"keyring");
+    state.keys.push(LinuxKey {
+        serial,
+        application,
+        key_type,
+        type_len: 7,
+        description: [0; 64],
+        description_len: 0,
+        payload: alloc::vec::Vec::new(),
+        revoked: false,
+    });
+    state.process_keyrings.push(LinuxProcessKeyring {
+        process,
+        serial,
+    });
+    Ok(serial)
+}
+
+fn linux_add_key(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let key_type = linux_c_string(args[0], 16)?;
+    if key_type != b"user" && key_type != b"logon" && key_type != b"keyring" {
+        return Err(CompatErrno::NotSupported);
+    }
+    let description = linux_c_string(args[1], 64)?;
+    if description.is_empty() || description.len() > 64 {
+        return Err(CompatErrno::Invalid);
+    }
+    let payload_len = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    if payload_len > 1024 {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    let mut payload = alloc::vec![0u8; payload_len];
+    if payload_len != 0 {
+        copy_from_user(&mut payload, args[2], payload_len).map_err(|_| CompatErrno::Fault)?;
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let mut type_name = [0u8; 16];
+    type_name[..key_type.len()].copy_from_slice(&key_type);
+    let mut desc_name = [0u8; 64];
+    desc_name[..description.len()].copy_from_slice(&description);
+    let mut state = COMPAT.lock();
+    let keyring = args[4] as i32;
+    let process_ring = linux_process_keyring(&mut state, pid, application)?;
+    if keyring != -2 && keyring != process_ring {
+        if !state
+            .keys
+            .iter()
+            .any(|key| key.application == application && key.serial == keyring)
+        {
+            return Err(CompatErrno::NoEntry);
+        }
+    }
+    if let Some(key) = state.keys.iter_mut().find(|key| {
+        key.application == application
+            && key.key_type[..usize::from(key.type_len)] == key_type[..]
+            && key.description[..usize::from(key.description_len)] == description[..]
+    }) {
+        key.payload = payload;
+        key.revoked = false;
+        return Ok(key.serial as u32 as u64);
+    }
+    if state.keys.len() >= MAX_LINUX_KEYS {
+        return Err(CompatErrno::NoSpace);
+    }
+    state.keys.try_reserve(1).map_err(|_| CompatErrno::NoMemory)?;
+    let serial = state.next_key_serial;
+    state.next_key_serial = serial.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+    state.keys.push(LinuxKey {
+        serial,
+        application,
+        key_type: type_name,
+        type_len: key_type.len() as u8,
+        description: desc_name,
+        description_len: description.len() as u8,
+        payload,
+        revoked: false,
+    });
+    Ok(serial as u32 as u64)
+}
+
+fn linux_request_key(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let key_type = linux_c_string(args[0], 16)?;
+    let description = linux_c_string(args[1], 64)?;
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    COMPAT
+        .lock()
+        .keys
+        .iter()
+        .find(|key| {
+            !key.revoked
+                && key.application == application
+                && key.key_type[..usize::from(key.type_len)] == key_type[..]
+                && key.description[..usize::from(key.description_len)] == description[..]
+        })
+        .map(|key| key.serial as u32 as u64)
+        .ok_or(CompatErrno::NoEntry)
+}
+
+fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const GET_KEYRING_ID: u64 = 0;
+    const UPDATE: u64 = 2;
+    const REVOKE: u64 = 3;
+    const DESCRIBE: u64 = 6;
+    const READ: u64 = 11;
+    const INVALIDATE: u64 = 21;
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    match args[0] {
+        GET_KEYRING_ID => {
+            if args[1] as i32 != -2 && args[1] as i32 != -1 {
+                return Err(CompatErrno::NoEntry);
+            }
+            let mut state = COMPAT.lock();
+            linux_process_keyring(&mut state, pid, application)
+                .map(|serial| serial as u32 as u64)
+        }
+        UPDATE => {
+            let serial = args[1] as i32;
+            let length = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+            if length > 1024 {
+                return Err(CompatErrno::ArgumentTooLong);
+            }
+            let mut payload = alloc::vec![0u8; length];
+            if length != 0 {
+                copy_from_user(&mut payload, args[2], length).map_err(|_| CompatErrno::Fault)?;
+            }
+            let mut state = COMPAT.lock();
+            let key = state
+                .keys
+                .iter_mut()
+                .find(|key| key.application == application && key.serial == serial)
+                .ok_or(CompatErrno::NoEntry)?;
+            if key.revoked {
+                return Err(CompatErrno::Access);
+            }
+            key.payload = payload;
+            Ok(0)
+        }
+        REVOKE | INVALIDATE => {
+            let serial = args[1] as i32;
+            let mut state = COMPAT.lock();
+            let key = state
+                .keys
+                .iter_mut()
+                .find(|key| key.application == application && key.serial == serial)
+                .ok_or(CompatErrno::NoEntry)?;
+            key.revoked = true;
+            Ok(0)
+        }
+        DESCRIBE => {
+            let serial = args[1] as i32;
+            let mut state = COMPAT.lock();
+            let key = state
+                .keys
+                .iter()
+                .find(|key| key.application == application && key.serial == serial)
+                .ok_or(CompatErrno::NoEntry)?;
+            let length = usize::from(key.description_len) + 1;
+            if args[2] != 0 {
+                if args[3] < length as u64 {
+                    return Err(CompatErrno::Range);
+                }
+                copy_to_user(args[2], &key.description[..usize::from(key.description_len)], length - 1)
+                    .map_err(|_| CompatErrno::Fault)?;
+                copy_to_user(args[2] + length as u64 - 1, &[0u8], 1)
+                    .map_err(|_| CompatErrno::Fault)?;
+            }
+            Ok(length as u64)
+        }
+        READ => {
+            let serial = args[1] as i32;
+            let mut state = COMPAT.lock();
+            let key = state
+                .keys
+                .iter()
+                .find(|key| key.application == application && key.serial == serial)
+                .ok_or(CompatErrno::NoEntry)?;
+            if key.revoked {
+                return Err(CompatErrno::Access);
+            }
+            if args[2] == 0 {
+                return Ok(key.payload.len() as u64);
+            }
+            if args[3] < key.payload.len() as u64 {
+                return Err(CompatErrno::Range);
+            }
+            copy_to_user(args[2], &key.payload, key.payload.len()).map_err(|_| CompatErrno::Fault)?;
+            Ok(key.payload.len() as u64)
+        }
+        _ => Err(CompatErrno::NotSupported),
+    }
 }
 
 fn linux_eventfd(pid: ObjId, args: [u64; 6], eventfd2: bool) -> Result<u64, CompatErrno> {

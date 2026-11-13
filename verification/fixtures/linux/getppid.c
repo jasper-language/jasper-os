@@ -4555,7 +4555,6 @@ int main(void) {
         return 535;
     }
     const long unsupported_features[] = {
-        SYS_add_key, SYS_request_key, SYS_keyctl,
         SYS_fanotify_init, SYS_fanotify_mark,
         SYS_landlock_create_ruleset, SYS_landlock_add_rule,
         SYS_landlock_restrict_self, SYS_listns,
@@ -5195,6 +5194,34 @@ int main(void) {
                 &migrate_mask, &migrate_mask) != 0 ||
         munmap(mempolicy_memory, 4096) != 0) {
         return 642;
+    }
+    enum {
+        KEYCTL_GET_KEYRING_ID = 0,
+        KEYCTL_UPDATE = 2,
+        KEYCTL_REVOKE = 3,
+        KEYCTL_DESCRIBE = 6,
+        KEYCTL_READ = 11,
+        KEY_SPEC_PROCESS_KEYRING = -2,
+    };
+    int keyring = syscall(SYS_keyctl, KEYCTL_GET_KEYRING_ID,
+                          KEY_SPEC_PROCESS_KEYRING, 1);
+    int key_serial = syscall(SYS_add_key, "user", "jasper-key",
+                             "key-value", 9, keyring);
+    char key_buffer[32] = {0};
+    if (keyring < 0 || key_serial < 0 ||
+        syscall(SYS_request_key, "user", "jasper-key", NULL,
+                keyring) != key_serial ||
+        syscall(SYS_keyctl, KEYCTL_READ, key_serial, NULL, 0) != 9 ||
+        syscall(SYS_keyctl, KEYCTL_READ, key_serial,
+                key_buffer, sizeof(key_buffer)) != 9 ||
+        memcmp(key_buffer, "key-value", 9) != 0 ||
+        syscall(SYS_keyctl, KEYCTL_DESCRIBE, key_serial,
+                key_buffer, sizeof(key_buffer)) != 10 ||
+        memcmp(key_buffer, "jasper-key", 10) != 0 ||
+        syscall(SYS_keyctl, KEYCTL_UPDATE, key_serial,
+                "updated", 7) != 0 ||
+        syscall(SYS_keyctl, KEYCTL_REVOKE, key_serial) != 0) {
+        return 645;
     }
     char executable[128];
     ssize_t executable_len = readlinkat(AT_FDCWD, "/proc/self/exe",
