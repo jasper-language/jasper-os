@@ -11,6 +11,7 @@
 #include <linux/dma-buf.h>
 #include <linux/dma-heap.h>
 #include <linux/filter.h>
+#include <linux/fs.h>
 #include <linux/futex.h>
 #include <linux/io_uring.h>
 #include <linux/ioprio.h>
@@ -640,6 +641,28 @@ int main(void) {
     if (syscall(SYS_cachestat, fd, &cache_range, &cache_status, 0) != 0 ||
         cache_status.nr_cache == 0) {
         return 614;
+    }
+    struct file_attr file_attributes = {
+        .fa_xflags = UINT64_MAX,
+    };
+    if (syscall(SYS_file_getattr, fd, NULL, &file_attributes,
+                sizeof(file_attributes), AT_EMPTY_PATH) != 0 ||
+        file_attributes.fa_xflags != 0 ||
+        file_attributes.fa_extsize != 0 ||
+        file_attributes.fa_projid != 0) {
+        return 620;
+    }
+    memset(&file_attributes, 0, sizeof(file_attributes));
+    errno = 0;
+    if (syscall(SYS_file_setattr, fd, NULL, &file_attributes,
+                sizeof(file_attributes), AT_EMPTY_PATH) != -1 ||
+        errno != EROFS) {
+        return 621;
+    }
+    errno = 0;
+    if (syscall(SYS_file_getattr, fd, NULL, &file_attributes, 23,
+                AT_EMPTY_PATH) != -1 || errno != EINVAL) {
+        return 622;
     }
     errno = 0;
     if (readv(-1, vectors, 2) != -1 || errno != EBADF) {
@@ -4452,8 +4475,8 @@ int main(void) {
     }
     const long unsupported_features[] = {
         SYS_add_key, SYS_request_key, SYS_keyctl,
-        SYS_fanotify_init, SYS_fanotify_mark, SYS_file_getattr,
-        SYS_file_setattr, SYS_fsconfig, SYS_fsmount, SYS_fsopen,
+        SYS_fanotify_init, SYS_fanotify_mark,
+        SYS_fsconfig, SYS_fsmount, SYS_fsopen,
         SYS_fspick, SYS_get_mempolicy, SYS_set_mempolicy,
         SYS_set_mempolicy_home_node, SYS_mbind, SYS_migrate_pages,
         SYS_move_pages, SYS_landlock_create_ruleset, SYS_landlock_add_rule,

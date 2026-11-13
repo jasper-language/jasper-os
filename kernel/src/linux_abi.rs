@@ -2667,13 +2667,13 @@ fn execute(
         LinuxSyscall::Cachestat => compat_result(linux_cachestat(pid, call.args)),
         LinuxSyscall::LsmListModules => compat_result(linux_lsm_list_modules(call.args)),
         LinuxSyscall::ProcessMadvise => compat_result(linux_process_madvise(pid, call.args)),
+        LinuxSyscall::FileGetattr => compat_result(linux_file_getattr(pid, call.args)),
+        LinuxSyscall::FileSetattr => compat_result(linux_file_setattr(pid, call.args)),
         LinuxSyscall::AddKey
         | LinuxSyscall::RequestKey
         | LinuxSyscall::Keyctl
         | LinuxSyscall::FanotifyInit
         | LinuxSyscall::FanotifyMark
-        | LinuxSyscall::FileGetattr
-        | LinuxSyscall::FileSetattr
         | LinuxSyscall::FsConfig
         | LinuxSyscall::FsMount
         | LinuxSyscall::FsOpen
@@ -9153,6 +9153,105 @@ fn linux_lsm_list_modules(args: [u64; 6]) -> Result<u64, CompatErrno> {
     copy_to_user(args[0], &LSM_ID_CAPABILITY.to_le_bytes(), 8)
         .map_err(|_| CompatErrno::Fault)?;
     Ok(1)
+}
+
+fn linux_file_attr_validate(
+    pid: ObjId,
+    args: &[u64; 6],
+) -> Result<(), CompatErrno> {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    if args[4] & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let size = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    if size < 24 {
+        return Err(CompatErrno::Invalid);
+    }
+    if size > 4096 {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    let path = if args[1] == 0 {
+        None
+    } else {
+        Some(linux_c_string(args[1], 4096)?)
+    };
+    if path.is_none() || path.as_ref().is_some_and(|path| path.is_empty()) {
+        if args[4] & AT_EMPTY_PATH == 0 || path.is_none() {
+            if args[4] & AT_EMPTY_PATH == 0 {
+                return Err(CompatErrno::NoEntry);
+            }
+        }
+        let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+        proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+        return Ok(());
+    }
+    let path = path.expect("nonempty path");
+    let resolved = if path.starts_with(b"/") {
+        if !is_at_fdcwd(args[0]) {
+            return Err(CompatErrno::Invalid);
+        }
+        path
+    } else {
+        if path == b".." || path.starts_with(b"../") || path.windows(4).any(|window| window == b"/../")
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        let base = if is_at_fdcwd(args[0]) {
+            proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path()
+        } else {
+            let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+            let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
+            crate::linux_vfs::DirectoryId::from_handle(handle)
+                .ok_or(CompatErrno::BadFd)?
+                .path()
+        };
+        if path == b"." {
+            base.to_vec()
+        } else {
+            let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
+            resolved.extend_from_slice(base);
+            if !base.ends_with(b"/") {
+                resolved.push(b'/');
+            }
+            resolved.extend_from_slice(&path);
+            resolved
+        }
+    };
+    crate::linux_vfs::lookup_node(&resolved)
+        .map(|_| ())
+        .ok_or(CompatErrno::NoEntry)
+}
+
+/// Implements `file_getattr(2)` for files without extended attributes.
+fn linux_file_getattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    linux_file_attr_validate(pid, &args)?;
+    let size = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    let output = alloc::vec![0u8; size];
+    copy_to_user(args[2], &output, size).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Implements `file_setattr(2)`, failing before a write on the read-only root.
+fn linux_file_setattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let size = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    if size < 24 {
+        return Err(CompatErrno::Invalid);
+    }
+    if size > 4096 {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    let mut input = alloc::vec![0u8; size];
+    copy_from_user(&mut input, args[2], size).map_err(|_| CompatErrno::Fault)?;
+    if input.get(24..).is_some_and(|padding| padding.iter().any(|byte| *byte != 0)) {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    let xflags = u64::from_le_bytes(input[..8].try_into().unwrap());
+    if xflags != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    linux_file_attr_validate(pid, &args)?;
+    Err(CompatErrno::ReadOnly)
 }
 
 fn linux_eventfd(pid: ObjId, args: [u64; 6], eventfd2: bool) -> Result<u64, CompatErrno> {
