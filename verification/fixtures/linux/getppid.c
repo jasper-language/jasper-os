@@ -4514,7 +4514,7 @@ int main(void) {
         SYS_set_mempolicy_home_node, SYS_mbind, SYS_migrate_pages,
         SYS_move_pages, SYS_landlock_create_ruleset, SYS_landlock_add_rule,
         SYS_landlock_restrict_self, SYS_listns,
-        SYS_lsm_get_self_attr, SYS_lsm_set_self_attr,
+        SYS_lsm_set_self_attr,
         SYS_map_shadow_stack, SYS_mount_setattr, SYS_move_mount,
         SYS_open_tree, SYS_open_tree_attr,
         SYS_uprobe, SYS_uretprobe, SYS_userfaultfd,
@@ -5070,6 +5070,17 @@ int main(void) {
     if (syscall(SYS_lsm_list_modules, lsm_ids, &lsm_size, 0) != -1 ||
         errno != E2BIG || lsm_size != sizeof(uint64_t)) {
         return 616;
+    }
+    unsigned char lsm_context_bytes[512] __attribute__((aligned(8))) = {0};
+    uint32_t lsm_context_size = sizeof(lsm_context_bytes);
+    if (syscall(SYS_lsm_get_self_attr, LSM_ATTR_CURRENT,
+                lsm_context_bytes, &lsm_context_size, 0) != 1 ||
+        lsm_context_size < sizeof(struct lsm_ctx) ||
+        ((struct lsm_ctx *)lsm_context_bytes)->len != lsm_context_size ||
+        ((struct lsm_ctx *)lsm_context_bytes)->ctx_len < 9 ||
+        memcmp(((struct lsm_ctx *)lsm_context_bytes)->ctx,
+               "jasper:v", 8) != 0) {
+        return 634;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);

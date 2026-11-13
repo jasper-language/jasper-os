@@ -2675,6 +2675,7 @@ fn execute(
         LinuxSyscall::PkeyMprotect => compat_result(linux_pkey_mprotect(pid, call.args)),
         LinuxSyscall::NameToHandleAt => compat_result(linux_name_to_handle_at(pid, call.args)),
         LinuxSyscall::OpenByHandleAt => compat_result(linux_open_by_handle_at(pid, call.args)),
+        LinuxSyscall::LsmGetSelfAttr => compat_result(linux_lsm_get_self_attr(pid, call.args)),
         LinuxSyscall::AddKey
         | LinuxSyscall::RequestKey
         | LinuxSyscall::Keyctl
@@ -2694,7 +2695,6 @@ fn execute(
         | LinuxSyscall::LandlockAddRule
         | LinuxSyscall::LandlockRestrictSelf
         | LinuxSyscall::Listns
-        | LinuxSyscall::LsmGetSelfAttr
         | LinuxSyscall::LsmSetSelfAttr
         | LinuxSyscall::MapShadowStack
         | LinuxSyscall::MountSetattr
@@ -9196,6 +9196,60 @@ fn linux_lsm_list_modules(args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     copy_to_user(args[0], &LSM_ID_CAPABILITY.to_le_bytes(), 8)
         .map_err(|_| CompatErrno::Fault)?;
+    Ok(1)
+}
+
+/// Returns the process's current Jasper MAC label through the LSM context ABI.
+fn linux_lsm_get_self_attr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const LSM_ATTR_CURRENT: u32 = 100;
+    const LSM_FLAG_SINGLE: u32 = 1;
+    const JASPER_LSM_ID: u64 = 0x4a53_0001;
+    let attribute = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let flags = u32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    if attribute != LSM_ATTR_CURRENT || flags & !LSM_FLAG_SINGLE != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    let label = crate::kobj::with(|table| crate::security::process_mac_label_in(table, pid))
+        .ok_or(CompatErrno::Perm)?;
+    let context = alloc::format!(
+        "jasper:v{}:domain={}:secrecy={}:integrity={}:classes={:#x}\0",
+        label.version,
+        label.domain.0,
+        label.secrecy,
+        label.integrity,
+        label.object_classes
+    );
+    let total = 32usize
+        .checked_add(context.len())
+        .and_then(|size| size.checked_add(7))
+        .map(|size| size & !7)
+        .ok_or(CompatErrno::Overflow)?;
+    let mut available = [0u8; 4];
+    copy_from_user(&mut available, args[2], 4).map_err(|_| CompatErrno::Fault)?;
+    let available = usize::try_from(u32::from_le_bytes(available))
+        .map_err(|_| CompatErrno::Invalid)?;
+    copy_to_user(
+        args[2],
+        &(total as u32).to_le_bytes(),
+        4,
+    )
+    .map_err(|_| CompatErrno::Fault)?;
+    if available < total {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    let mut record = alloc::vec![0u8; total];
+    record[..8].copy_from_slice(&JASPER_LSM_ID.to_le_bytes());
+    record[16..24].copy_from_slice(&(total as u64).to_le_bytes());
+    record[24..32].copy_from_slice(&(context.len() as u64).to_le_bytes());
+    record[32..32 + context.len()].copy_from_slice(context.as_bytes());
+    if flags & LSM_FLAG_SINGLE != 0 {
+        let mut requested = [0u8; 8];
+        copy_from_user(&mut requested, args[1], 8).map_err(|_| CompatErrno::Fault)?;
+        if u64::from_le_bytes(requested) != JASPER_LSM_ID {
+            return Err(CompatErrno::NoSys);
+        }
+    }
+    copy_to_user(args[1], &record, record.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(1)
 }
 
