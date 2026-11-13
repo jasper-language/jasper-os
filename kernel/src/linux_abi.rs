@@ -2050,6 +2050,26 @@ fn execute(
         LinuxSyscall::CapSet => compat_result(linux_capset(pid, call.args)),
         LinuxSyscall::IoprioGet => compat_result(linux_ioprio_get(pid, call.args)),
         LinuxSyscall::IoprioSet => compat_result(linux_ioprio_set(pid, call.args)),
+        LinuxSyscall::Personality => compat_result(linux_personality(pid, call.args[0])),
+        LinuxSyscall::RestartSyscall => -(CompatErrno::Interrupted as i32 as i64),
+        LinuxSyscall::RemapFilePages => -(CompatErrno::NotSupported as i32 as i64),
+        LinuxSyscall::GetThreadArea
+        | LinuxSyscall::SetThreadArea
+        | LinuxSyscall::ModifyLdt
+        | LinuxSyscall::LegacySysctl
+        | LinuxSyscall::LegacyAfs
+        | LinuxSyscall::LegacyCreateModule
+        | LinuxSyscall::LegacyGetKernelSyms
+        | LinuxSyscall::LegacyQueryModule
+        | LinuxSyscall::LegacyNfsservctl
+        | LinuxSyscall::LegacyGetpmsg
+        | LinuxSyscall::LegacyPutpmsg
+        | LinuxSyscall::LegacyTuxcall
+        | LinuxSyscall::LegacyVserver
+        | LinuxSyscall::LegacySecurity
+        | LinuxSyscall::LegacyUstat
+        | LinuxSyscall::LegacyUselib
+        | LinuxSyscall::LegacySysfs => -(CompatErrno::NoSys as i32 as i64),
         LinuxSyscall::Adjtimex
         | LinuxSyscall::ClockAdjtime
         | LinuxSyscall::ClockSettime
@@ -2078,7 +2098,8 @@ fn execute(
         | LinuxSyscall::Ptrace
         | LinuxSyscall::Setns
         | LinuxSyscall::Unshare
-        | LinuxSyscall::Syslog => -(CompatErrno::Perm as i32 as i64),
+        | LinuxSyscall::Syslog
+        | LinuxSyscall::Vhangup => -(CompatErrno::Perm as i32 as i64),
         LinuxSyscall::ClockGettime => compat_result(linux_clock_gettime(call.args)),
         LinuxSyscall::ClockGetres => compat_result(linux_clock_getres(call.args)),
         LinuxSyscall::Nanosleep => compat_result(linux_nanosleep(pid, call.args)),
@@ -5320,6 +5341,23 @@ fn linux_ioprio_set(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     } else {
         Err(CompatErrno::NoProcess)
     }
+}
+
+/// Implements `personality(2)` for the standard Linux execution domain.
+fn linux_personality(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
+    const PERSONALITY_QUERY: u64 = u64::MAX;
+    let current = proc::linux_personality(pid).ok_or(CompatErrno::NoProcess)?;
+    if requested == PERSONALITY_QUERY {
+        return Ok(u64::from(current));
+    }
+    let requested = requested as u32;
+    if requested != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if !proc::set_linux_personality(pid, requested) {
+        return Err(CompatErrno::NoProcess);
+    }
+    Ok(u64::from(current))
 }
 
 /// Implements `clock_gettime(2)` for trusted realtime and Jasper monotonic clocks.

@@ -4099,6 +4099,35 @@ int main(void) {
         errno != EINVAL) {
         return 526;
     }
+    if (syscall(SYS_personality, 0xffffffffUL) != 0 ||
+        syscall(SYS_personality, 0) != 0) {
+        return 527;
+    }
+    errno = 0;
+    if (syscall(SYS_personality, 1) != -1 || errno != EINVAL ||
+        syscall(SYS_restart_syscall) != -1 || errno != EINTR ||
+        syscall(SYS_remap_file_pages, NULL, 4096, 0, 0, 0) != -1 ||
+        errno != EOPNOTSUPP ||
+        syscall(SYS_vhangup) != -1 || errno != EPERM) {
+        return 528;
+    }
+    const long legacy_calls[] = {
+        SYS_get_thread_area, SYS_set_thread_area, SYS_modify_ldt, SYS__sysctl,
+        SYS_afs_syscall, SYS_create_module, SYS_get_kernel_syms,
+        SYS_query_module, SYS_nfsservctl, SYS_getpmsg, SYS_putpmsg,
+        SYS_tuxcall, SYS_vserver, SYS_security, SYS_ustat, SYS_uselib,
+        SYS_sysfs,
+    };
+    for (size_t index = 0;
+         index < sizeof(legacy_calls) / sizeof(legacy_calls[0]); index++) {
+        errno = 0;
+        if (syscall(legacy_calls[index], 0, 0, 0, 0, 0, 0) != -1 ||
+            errno != ENOSYS) {
+            printf("legacy-call-fail nr=%ld errno=%d\n",
+                   legacy_calls[index], errno);
+            return 529;
+        }
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);
