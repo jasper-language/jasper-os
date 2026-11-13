@@ -569,6 +569,38 @@ int main(void) {
         sigprocmask(SIG_SETMASK, &sigqueue_saved_mask, NULL) != 0) {
         return 397;
     }
+    sigset_t realtime_saved_mask;
+    sigset_t realtime_mask;
+    sigemptyset(&realtime_mask);
+    sigaddset(&realtime_mask, SIGRTMIN);
+    int realtime_fd = signalfd(-1, &realtime_mask, SFD_NONBLOCK);
+    if (sigprocmask(SIG_BLOCK, &realtime_mask,
+                    &realtime_saved_mask) != 0 ||
+        realtime_fd < 0) {
+        return 399;
+    }
+    queued_info.si_signo = SIGRTMIN;
+    queued_info.si_code = SI_QUEUE;
+    queued_info.si_value.sival_int = 0x11111111;
+    if (syscall(SYS_rt_sigqueueinfo, getpid(), SIGRTMIN,
+                &queued_info) != 0) {
+        return 400;
+    }
+    queued_info.si_value.sival_int = 0x22222222;
+    if (syscall(SYS_rt_sigqueueinfo, getpid(), SIGRTMIN,
+                &queued_info) != 0 ||
+        read(realtime_fd, &signal_info, sizeof(signal_info)) !=
+            (ssize_t)sizeof(signal_info) ||
+        signal_info.ssi_signo != (uint32_t)SIGRTMIN ||
+        signal_info.ssi_ptr != 0x11111111ULL ||
+        read(realtime_fd, &signal_info, sizeof(signal_info)) !=
+            (ssize_t)sizeof(signal_info) ||
+        signal_info.ssi_signo != (uint32_t)SIGRTMIN ||
+        signal_info.ssi_ptr != 0x22222222ULL ||
+        close(realtime_fd) != 0 ||
+        sigprocmask(SIG_SETMASK, &realtime_saved_mask, NULL) != 0) {
+        return 401;
+    }
     int fd = open("/usr/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         return 3;

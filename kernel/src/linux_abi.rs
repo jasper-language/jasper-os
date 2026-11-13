@@ -33,6 +33,7 @@ const MAX_FUTEX_WORDS: usize = 32;
 const MAX_PROCESS_SIGNAL_SETS: usize = 16;
 const MAX_POSIX_TIMERS: usize = 32;
 const MAX_INTERVAL_TIMER_SETS: usize = 16;
+const MAX_PENDING_SIGNAL_RECORDS: usize = 256;
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
 static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
 
@@ -51,6 +52,15 @@ struct SignalFdRecord {
     sender_uid: u32,
     code: i32,
     value: u64,
+}
+
+#[derive(Clone, Copy)]
+struct QueuedSignalRecord {
+    process: ObjId,
+    /// Zero selects the process-directed queue; otherwise this is the target TID.
+    target_tid: u32,
+    sequence: u64,
+    record: SignalFdRecord,
 }
 
 #[derive(Clone, Copy)]
@@ -184,6 +194,8 @@ struct CompatState {
     posix_timers: [Option<PosixTimer>; MAX_POSIX_TIMERS],
     interval_timers: [Option<IntervalTimer>; MAX_INTERVAL_TIMER_SETS],
     message_queue_names: alloc::vec::Vec<MessageQueueName>,
+    pending_signal_records: [Option<QueuedSignalRecord>; MAX_PENDING_SIGNAL_RECORDS],
+    next_signal_sequence: u64,
 }
 
 impl CompatState {
@@ -197,6 +209,8 @@ impl CompatState {
             posix_timers: [None; MAX_POSIX_TIMERS],
             interval_timers: [None; MAX_INTERVAL_TIMER_SETS],
             message_queue_names: alloc::vec::Vec::new(),
+            pending_signal_records: [None; MAX_PENDING_SIGNAL_RECORDS],
+            next_signal_sequence: 0,
         }
     }
 }
@@ -395,6 +409,79 @@ fn linux_tid_for_task(task: crate::task::TaskId) -> Option<(ObjId, u32)> {
         .map(|entry| (entry.process, entry.tid))
 }
 
+/// Appends one realtime signal record in bounded FIFO order.
+fn enqueue_signal_record(
+    state: &mut CompatState,
+    process: ObjId,
+    target_tid: u32,
+    record: SignalFdRecord,
+) -> bool {
+    let Some(slot) = state
+        .pending_signal_records
+        .iter()
+        .position(Option::is_none)
+    else {
+        return false;
+    };
+    let sequence = state.next_signal_sequence;
+    state.next_signal_sequence = sequence.wrapping_add(1);
+    state.pending_signal_records[slot] = Some(QueuedSignalRecord {
+        process,
+        target_tid,
+        sequence,
+        record,
+    });
+    true
+}
+
+/// Removes the oldest queued record for one process/thread and signal.
+fn take_queued_signal_record(
+    state: &mut CompatState,
+    process: ObjId,
+    target_tid: u32,
+    signal: u32,
+) -> Option<SignalFdRecord> {
+    let slot = state
+        .pending_signal_records
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            entry.is_some_and(|entry| {
+                entry.process == process
+                    && entry.target_tid == target_tid
+                    && entry.record.signal == signal
+            })
+        })
+        .min_by_key(|(_, entry)| entry.map(|entry| entry.sequence).unwrap_or(u64::MAX))
+        .map(|(slot, _)| slot)?;
+    let record = state.pending_signal_records[slot].take()?.record;
+    let still_pending = state.pending_signal_records.iter().any(|entry| {
+        entry.is_some_and(|entry| {
+            entry.process == process
+                && entry.target_tid == target_tid
+                && entry.record.signal == signal
+        })
+    });
+    if !still_pending {
+        let bit = 1u64 << (signal - 1);
+        if target_tid == 0 {
+            if let Some(entry) = state
+                .process_signals
+                .iter_mut()
+                .flatten()
+                .find(|entry| entry.process == process)
+            {
+                entry.pending &= !bit;
+            }
+        } else if let Some(entry) = state.threads.iter_mut().flatten().find(|entry| {
+            entry.process == process && entry.tid == target_tid
+        }) {
+            entry.pending_signals &= !bit;
+        }
+    }
+    Some(record)
+}
+
 /// Queues one standard signal on a target Linux thread in the same process.
 /// 在同一进程的目标 Linux 线程上登记一个标准信号。
 fn queue_thread_signal(
@@ -434,6 +521,25 @@ fn queue_thread_signal_info(
     }
     let target = {
         let mut state = COMPAT.lock();
+        let Some(target) = state
+            .threads
+            .iter()
+            .flatten()
+            .find(|entry| entry.process == process && entry.tid == tid)
+            .map(|entry| entry.task)
+        else {
+            return false;
+        };
+        let record = SignalFdRecord {
+            signal,
+            sender_pid,
+            sender_uid,
+            code,
+            value,
+        };
+        if signal >= 32 && !enqueue_signal_record(&mut state, process, tid, record) {
+            return false;
+        }
         let Some(entry) = state
             .threads
             .iter_mut()
@@ -456,7 +562,7 @@ fn queue_thread_signal_info(
             entry.signal_mask,
             entry.pending_signals
         );
-        entry.task
+        target
     };
     sched::wake(target);
     true
@@ -528,6 +634,16 @@ fn queue_process_signal_info(
             });
             slot
         };
+        let record = SignalFdRecord {
+            signal,
+            sender_pid,
+            sender_uid,
+            code,
+            value,
+        };
+        if signal >= 32 && !enqueue_signal_record(&mut state, process, 0, record) {
+            return false;
+        }
         let Some(entry) = state.process_signals[slot].as_mut() else {
             return false;
         };
@@ -568,6 +684,11 @@ fn remove_process_signals(process: ObjId) {
     {
         state.process_signals[slot] = None;
     }
+    state.pending_signal_records.iter_mut().for_each(|entry| {
+        if entry.is_some_and(|entry| entry.process == process) {
+            *entry = None;
+        }
+    });
 }
 
 /// Returns the blocked signal mask for the current Linux thread.
@@ -794,7 +915,7 @@ fn leave_altstack(process: ObjId, autodisarm: bool) -> bool {
 fn take_deliverable_signal(process: ObjId) -> Option<SignalFdRecord> {
     let (task, _) = sched::current();
     let mut state = COMPAT.lock();
-    let (blocked, thread_deliverable) = {
+    let (blocked, thread_deliverable, thread_tid) = {
         let entry = state
             .threads
             .iter()
@@ -803,6 +924,7 @@ fn take_deliverable_signal(process: ObjId) -> Option<SignalFdRecord> {
         (
             entry.signal_mask,
             entry.pending_signals & !entry.signal_mask,
+            entry.tid,
         )
     };
     let (deliverable, process_directed) = if thread_deliverable != 0 {
@@ -822,6 +944,13 @@ fn take_deliverable_signal(process: ObjId) -> Option<SignalFdRecord> {
     }
     let index = deliverable.trailing_zeros();
     let bit = 1u64 << index;
+    let signal = index + 1;
+    if signal >= 32 {
+        let target_tid = if process_directed { 0 } else { thread_tid };
+        if let Some(record) = take_queued_signal_record(&mut state, process, target_tid, signal) {
+            return Some(record);
+        }
+    }
     if process_directed {
         let entry = state
             .process_signals
@@ -831,7 +960,7 @@ fn take_deliverable_signal(process: ObjId) -> Option<SignalFdRecord> {
         entry.pending &= !bit;
         let origin = entry.origins[index as usize];
         Some(SignalFdRecord {
-            signal: index + 1,
+            signal,
             sender_pid: origin.pid,
             sender_uid: origin.uid,
             code: origin.code,
@@ -846,7 +975,7 @@ fn take_deliverable_signal(process: ObjId) -> Option<SignalFdRecord> {
         entry.pending_signals &= !bit;
         let origin = entry.signal_origins[index as usize];
         Some(SignalFdRecord {
-            signal: index + 1,
+            signal,
             sender_pid: origin.pid,
             sender_uid: origin.uid,
             code: origin.code,
@@ -899,7 +1028,14 @@ fn take_signalfd_record(process: ObjId, requested: u64) -> Option<SignalFdRecord
     }
     let signal = available.trailing_zeros() + 1;
     let bit = 1u64 << (signal - 1);
-    if thread.pending_signals & bit != 0 {
+    let thread_directed = thread.pending_signals & bit != 0;
+    if signal >= 32 {
+        let target_tid = if thread_directed { thread.tid } else { 0 };
+        if let Some(record) = take_queued_signal_record(&mut state, process, target_tid, signal) {
+            return Some(record);
+        }
+    }
+    if thread_directed {
         let entry = state.threads[thread_index].as_mut()?;
         entry.pending_signals &= !bit;
         let origin = entry.signal_origins[signal as usize - 1];
@@ -1288,7 +1424,7 @@ fn linux_rt_sigqueueinfo(process: ObjId, args: [u64; 6]) -> Result<(), CompatErr
     if queue_process_signal_info(target, signal, info.pid, info.uid, info.code, info.value) {
         Ok(())
     } else {
-        Err(CompatErrno::NoSpace)
+        Err(CompatErrno::TryAgain)
     }
 }
 
@@ -1313,7 +1449,7 @@ fn linux_rt_tgsigqueueinfo(process: ObjId, args: [u64; 6]) -> Result<(), CompatE
     if queue_thread_signal_info(target, tid, signal, info.pid, info.uid, info.code, info.value) {
         Ok(())
     } else {
-        Err(CompatErrno::NoSpace)
+        Err(CompatErrno::TryAgain)
     }
 }
 
@@ -1439,7 +1575,7 @@ fn linux_kill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     if queue_process_signal(target, signal, sender_pid, 0) {
         Ok(())
     } else {
-        Err(CompatErrno::NoSpace)
+        Err(CompatErrno::TryAgain)
     }
 }
 
@@ -1629,6 +1765,13 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
             return;
         };
         let entry = state.threads[slot].take().expect("live Linux thread");
+        state.pending_signal_records.iter_mut().for_each(|pending| {
+            if pending.is_some_and(|pending| {
+                pending.process == process && pending.target_tid == entry.tid
+            }) {
+                *pending = None;
+            }
+        });
         let last_thread = !state
             .threads
             .iter()
