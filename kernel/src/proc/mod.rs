@@ -155,6 +155,7 @@ struct LinuxProcessState {
     ioprio: u32,
     personality: u32,
     pdeathsig: u32,
+    subreaper: bool,
     aio_contexts: Vec<LinuxAioContext>,
     seccomp_filters: Vec<Vec<SeccompInsn>>,
     seccomp_strict: bool,
@@ -4833,6 +4834,25 @@ pub(crate) fn set_linux_pdeathsig(pid: ObjId, signal: u32) -> bool {
     .is_ok()
 }
 
+/// Returns whether one Linux process is a child subreaper.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_subreaper(pid: ObjId) -> Option<bool> {
+    with_proc(pid, |process| {
+        Ok(process.linux.as_ref().ok_or(ProcError::Exited)?.subreaper)
+    })
+    .ok()
+}
+
+/// Replaces one process's child-subreaper property.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_subreaper(pid: ObjId, enabled: bool) -> bool {
+    with_proc(pid, |process| {
+        process.linux.as_mut().ok_or(ProcError::Exited)?.subreaper = enabled;
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Creates one bounded legacy AIO context.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_aio_create(pid: ObjId, max_events: usize) -> Option<u64> {
@@ -5210,6 +5230,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         ioprio: (2 << 13) | 4,
         personality: 0,
         pdeathsig: 0,
+        subreaper: false,
         aio_contexts: Vec::new(),
         seccomp_filters: Vec::new(),
         seccomp_strict: false,
@@ -7082,6 +7103,7 @@ pub fn fork_linux_process(
         linux.child_cpu_ticks = 0;
         linux.exited_cpu_ticks = 0;
         linux.pdeathsig = 0;
+        linux.subreaper = false;
         linux.mappings.clear();
         linux.aio_contexts.clear();
         Ok(())
@@ -7235,6 +7257,7 @@ pub fn vfork_linux_process(
         linux.child_cpu_ticks = 0;
         linux.exited_cpu_ticks = 0;
         linux.pdeathsig = 0;
+        linux.subreaper = false;
         linux.vfork_parent = Some(VforkParent {
             task: parent_task,
             exec_committed: false,
@@ -8497,6 +8520,41 @@ pub fn exit_idle(pid: ObjId, code: i64) -> bool {
     ok
 }
 
+#[cfg(feature = "linux-abi")]
+fn linux_process_for_pid_in(t: &kobj::Table, linux_pid: u32) -> Option<ObjId> {
+    let mut found = None;
+    t.for_each_live(|id, object| {
+        if let KObject::Process(process) = object {
+            if process
+                .linux
+                .as_ref()
+                .is_some_and(|linux| linux.pid == linux_pid)
+            {
+                found = Some(id);
+                return false;
+            }
+        }
+        true
+    });
+    found
+}
+
+#[cfg(feature = "linux-abi")]
+fn nearest_subreaper_in(t: &kobj::Table, mut linux_parent: u32) -> Option<ObjId> {
+    for _ in 0..64 {
+        let parent = linux_process_for_pid_in(t, linux_parent)?;
+        let KObject::Process(process) = t.get(parent).ok()? else {
+            return None;
+        };
+        let linux = process.linux.as_ref()?;
+        if process.state == ProcState::Running && linux.subreaper {
+            return Some(parent);
+        }
+        linux_parent = linux.ppid;
+    }
+    None
+}
+
 /// 关闭进程的句柄表并释放其子进程表（exiting 或 exited 时；只做一次，之后两表为空）。返回关闭的句柄数。
 fn release_resources_in(
     t: &mut kobj::Table,
@@ -8505,6 +8563,8 @@ fn release_resources_in(
 ) -> usize {
     let mut closed: Vec<ObjectRef> = Vec::new();
     let mut children = Vec::new();
+    #[cfg(feature = "linux-abi")]
+    let mut linux_parent = 0u32;
     let n = match t.get_mut(pid) {
         Ok(KObject::Process(p)) => {
             children = core::mem::take(&mut p.children);
@@ -8513,6 +8573,7 @@ fn release_resources_in(
             revoke_all_device_mappings(p);
             #[cfg(feature = "linux-abi")]
             if let Some(linux) = p.linux.as_mut() {
+                linux_parent = linux.ppid;
                 let _ = linux.fds.take_all();
                 linux.pipes.clear();
                 linux.sockets.clear();
@@ -8534,12 +8595,51 @@ fn release_resources_in(
             }
         }
     }
+    #[cfg(feature = "linux-abi")]
+    let mut adopted = Vec::new();
+    #[cfg(feature = "linux-abi")]
+    if let Some(reaper) = nearest_subreaper_in(t, linux_parent) {
+        let reaper_pid = match t.get(reaper) {
+            Ok(KObject::Process(process)) => process
+                .linux
+                .as_ref()
+                .map(|linux| linux.pid)
+                .unwrap_or(compat_core::syscall::LINUX_COMPAT_ROOT_PPID as u32),
+            _ => compat_core::syscall::LINUX_COMPAT_ROOT_PPID as u32,
+        };
+        for child in &children {
+            if let Ok(KObject::Process(child_process)) = t.get_mut(*child) {
+                if let Some(linux) = child_process.linux.as_mut() {
+                    linux.ppid = reaper_pid;
+                }
+            }
+            if let Ok(KObject::Process(reaper_process)) = t.get_mut(reaper) {
+                reaper_process.children.push(*child);
+                adopted.push(*child);
+            }
+        }
+    }
+    #[cfg(feature = "linux-abi")]
+    for child in &children {
+        if adopted.contains(child) {
+            continue;
+        }
+        if let Ok(KObject::Process(child_process)) = t.get_mut(*child) {
+            if let Some(linux) = child_process.linux.as_mut() {
+                linux.ppid = compat_core::syscall::LINUX_COMPAT_ROOT_PPID as u32;
+            }
+        }
+    }
     for r in closed {
         if let Some(id) = ObjId::from_raw(r.id.0) {
             let _ = kobj::release_owner_in(t, id);
         }
     }
     for c in children {
+        #[cfg(feature = "linux-abi")]
+        if adopted.contains(&c) {
+            continue;
+        }
         let _ = t.release_internal(c);
     }
     n

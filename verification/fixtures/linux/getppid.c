@@ -6507,6 +6507,72 @@ int main(void) {
         close(pdeath_done[0]) != 0) {
         return 699;
     }
+    int subreaper_enabled = 0;
+    if (prctl(PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0) != 0 ||
+        prctl(PR_GET_CHILD_SUBREAPER, &subreaper_enabled, 0, 0, 0) != 0 ||
+        subreaper_enabled != 0 ||
+        prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0 ||
+        prctl(PR_GET_CHILD_SUBREAPER, &subreaper_enabled, 0, 0, 0) != 0 ||
+        subreaper_enabled != 1) {
+        return 700;
+    }
+    int subreaper_pipe[2];
+    if (pipe(subreaper_pipe) != 0) {
+        return 701;
+    }
+    pid_t subreaper_parent = fork();
+    if (subreaper_parent < 0) {
+        return 701;
+    }
+    if (subreaper_parent == 0) {
+        close(subreaper_pipe[0]);
+        pid_t subreaper_child = fork();
+        if (subreaper_child < 0) {
+            _exit(1);
+        }
+        if (subreaper_child == 0) {
+            close(subreaper_pipe[1]);
+            struct timespec orphan_delay = {
+                .tv_sec = 0,
+                .tv_nsec = 1000000,
+            };
+            for (int attempt = 0; attempt < 1000; attempt++) {
+                if (getppid() == fork_parent_pid) {
+                    break;
+                }
+                nanosleep(&orphan_delay, NULL);
+            }
+            _exit(getppid() == fork_parent_pid ? 0 : 2);
+        }
+        if (write(subreaper_pipe[1], &subreaper_child,
+                  sizeof(subreaper_child)) !=
+            (ssize_t)sizeof(subreaper_child)) {
+            _exit(3);
+        }
+        _exit(0);
+    }
+    close(subreaper_pipe[1]);
+    pid_t adopted_child = -1;
+    if (read(subreaper_pipe[0], &adopted_child,
+             sizeof(adopted_child)) !=
+            (ssize_t)sizeof(adopted_child) ||
+        adopted_child <= 0 ||
+        close(subreaper_pipe[0]) != 0) {
+        return 702;
+    }
+    child_status = 0;
+    if (waitpid(subreaper_parent, &child_status, 0) !=
+            subreaper_parent ||
+        !WIFEXITED(child_status) ||
+        WEXITSTATUS(child_status) != 0) {
+        return 703;
+    }
+    child_status = 0;
+    if (waitpid(adopted_child, &child_status, 0) != adopted_child ||
+        !WIFEXITED(child_status) ||
+        WEXITSTATUS(child_status) != 0) {
+        return 704;
+    }
     if (lseek(fd, 0, SEEK_SET) != 0) {
         return 81;
     }

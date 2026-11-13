@@ -6248,6 +6248,8 @@ fn linux_prctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const PR_GET_NAME: u64 = 16;
     const PR_GET_SECCOMP: u64 = 21;
     const PR_SET_SECCOMP: u64 = 22;
+    const PR_SET_CHILD_SUBREAPER: u64 = 36;
+    const PR_GET_CHILD_SUBREAPER: u64 = 37;
     const PR_SET_NO_NEW_PRIVS: u64 = 38;
     const PR_GET_NO_NEW_PRIVS: u64 = 39;
     const ARCH_SHSTK_ENABLE: u64 = 0x5001;
@@ -6327,6 +6329,20 @@ fn linux_prctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         PR_GET_SECCOMP => Ok(u64::from(
             proc::linux_seccomp_mode(pid).ok_or(CompatErrno::NoProcess)?,
         )),
+        PR_SET_CHILD_SUBREAPER => {
+            if proc::set_linux_subreaper(pid, args[1] != 0) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::NoProcess)
+            }
+        }
+        PR_GET_CHILD_SUBREAPER => {
+            let subreaper =
+                proc::linux_subreaper(pid).ok_or(CompatErrno::NoProcess)?;
+            copy_to_user(args[1], &(u32::from(subreaper)).to_le_bytes(), 4)
+                .map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        }
         PR_SET_NO_NEW_PRIVS => {
             if args[1] != 1 || args[2] != 0 || args[3] != 0 || args[4] != 0 {
                 return Err(CompatErrno::Invalid);
