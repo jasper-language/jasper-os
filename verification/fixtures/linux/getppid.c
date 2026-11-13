@@ -162,6 +162,53 @@ static volatile sig_atomic_t mq_notification_pid;
 static volatile sig_atomic_t mq_notification_uid;
 static volatile sig_atomic_t mq_notification_code;
 static volatile sig_atomic_t mq_notification_value;
+static atomic_int landlock_worker_stage;
+static atomic_int landlock_worker_first_done;
+static atomic_int landlock_worker_second_done;
+static atomic_int landlock_worker_first_ok;
+static atomic_int landlock_worker_second_ok;
+
+static int landlock_worker_open(int expect_usr, int expect_lib) {
+    int usr = open("/usr/lib/x86_64-linux-gnu/libc.so.6",
+                   O_RDONLY | O_CLOEXEC);
+    errno = 0;
+    int lib = open("/lib/x86_64-linux-gnu/libc.so.6",
+                   O_RDONLY | O_CLOEXEC);
+    int lib_errno = errno;
+    int ok = (expect_usr ? usr >= 0 : usr == -1) &&
+             (expect_lib == 0 ? lib >= 0 : lib == -1 &&
+              lib_errno == EACCES);
+    if (usr >= 0) {
+        close(usr);
+    }
+    if (lib >= 0) {
+        close(lib);
+    }
+    return ok;
+}
+
+static void *landlock_worker(void *argument) {
+    (void)argument;
+    while (atomic_load_explicit(&landlock_worker_stage,
+                                memory_order_acquire) == 0) {
+        sched_yield();
+    }
+    atomic_store_explicit(&landlock_worker_first_ok,
+                          landlock_worker_open(1, 0),
+                          memory_order_release);
+    atomic_store_explicit(&landlock_worker_first_done, 1,
+                          memory_order_release);
+    while (atomic_load_explicit(&landlock_worker_stage,
+                                memory_order_acquire) == 1) {
+        sched_yield();
+    }
+    atomic_store_explicit(&landlock_worker_second_ok,
+                          landlock_worker_open(1, 1),
+                          memory_order_release);
+    atomic_store_explicit(&landlock_worker_second_done, 1,
+                          memory_order_release);
+    return NULL;
+}
 
 static void mq_notification_handler(int signal, siginfo_t *info, void *context) {
     (void)context;
@@ -4689,6 +4736,14 @@ int main(void) {
                     &usr_rule, 0) != 0) {
             _exit(1);
         }
+        atomic_store(&landlock_worker_stage, 0);
+        atomic_store(&landlock_worker_first_done, 0);
+        atomic_store(&landlock_worker_second_done, 0);
+        pthread_t landlock_thread;
+        if (pthread_create(&landlock_thread, NULL,
+                           landlock_worker, NULL) != 0) {
+            _exit(2);
+        }
         errno = 0;
         if (syscall(SYS_landlock_add_rule, usr_ruleset,
                     LANDLOCK_RULE_PATH_BENEATH,
@@ -4698,7 +4753,7 @@ int main(void) {
             prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
             syscall(SYS_landlock_restrict_self,
                     usr_ruleset, 0) != 0) {
-            _exit(2);
+            _exit(3);
         }
         int allowed = open("/usr/lib/x86_64-linux-gnu/libc.so.6",
                            O_RDONLY | O_CLOEXEC);
@@ -4709,13 +4764,44 @@ int main(void) {
                              O_PATH | O_CLOEXEC);
         if (allowed < 0 || denied != -1 || errno != EACCES ||
             path_only < 0) {
-            _exit(3);
+            _exit(4);
         }
         close(allowed);
         close(path_only);
+        for (int spin = 0;
+             spin < 10000 &&
+             !atomic_load_explicit(&landlock_worker_first_done,
+                                   memory_order_acquire);
+             spin++) {
+            sched_yield();
+        }
+        if (!atomic_load_explicit(&landlock_worker_first_done,
+                                  memory_order_acquire) ||
+            !atomic_load_explicit(&landlock_worker_first_ok,
+                                  memory_order_acquire) ||
+            syscall(SYS_landlock_restrict_self, usr_ruleset,
+                    LANDLOCK_RESTRICT_SELF_TSYNC) != 0) {
+            _exit(5);
+        }
+        atomic_store_explicit(&landlock_worker_stage, 1,
+                              memory_order_release);
+        for (int spin = 0;
+             spin < 10000 &&
+             !atomic_load_explicit(&landlock_worker_second_done,
+                                   memory_order_acquire);
+             spin++) {
+            sched_yield();
+        }
+        if (!atomic_load_explicit(&landlock_worker_second_done,
+                                  memory_order_acquire) ||
+            !atomic_load_explicit(&landlock_worker_second_ok,
+                                  memory_order_acquire) ||
+            pthread_join(landlock_thread, NULL) != 0) {
+            _exit(6);
+        }
         pid_t sandbox_fork = fork();
         if (sandbox_fork < 0) {
-            _exit(4);
+            _exit(7);
         }
         if (sandbox_fork == 0) {
             int inherited_allowed =
@@ -4735,7 +4821,7 @@ int main(void) {
                 sandbox_fork ||
             !WIFEXITED(sandbox_fork_status) ||
             WEXITSTATUS(sandbox_fork_status) != 0) {
-            _exit(5);
+            _exit(8);
         }
         int lib_ruleset = syscall(SYS_landlock_create_ruleset,
                                   &ruleset_attr,
@@ -4753,7 +4839,7 @@ int main(void) {
                     &lib_rule, 0) != 0 ||
             syscall(SYS_landlock_restrict_self,
                     lib_ruleset, 0) != 0) {
-            _exit(6);
+            _exit(9);
         }
         errno = 0;
         int usr_after_stack =
@@ -4768,7 +4854,7 @@ int main(void) {
         _exit(usr_after_stack == -1 && usr_stack_errno == EACCES &&
                       lib_after_stack == -1 && lib_stack_errno == EACCES
                   ? 0
-                  : 7);
+                  : 10);
     }
     int landlock_status = 0;
     if (waitpid(landlock_child, &landlock_status, 0) != landlock_child ||
