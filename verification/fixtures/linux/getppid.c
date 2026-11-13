@@ -5240,6 +5240,7 @@ int main(void) {
         KEYCTL_SEARCH = 10,
         KEYCTL_READ = 11,
         KEYCTL_GET_SECURITY = 17,
+        KEYCTL_CAPABILITIES = 31,
         KEY_SPEC_PROCESS_KEYRING = -2,
     };
     int keyring = syscall(SYS_keyctl, KEYCTL_GET_KEYRING_ID,
@@ -5287,6 +5288,12 @@ int main(void) {
     if (syscall(SYS_keyctl, KEYCTL_SEARCH, keyring,
                 "user", "clear-key") != -1 || errno != ENOKEY) {
         return 651;
+    }
+    unsigned char key_capabilities[2] = {0};
+    if (syscall(SYS_keyctl, KEYCTL_CAPABILITIES,
+                key_capabilities, sizeof(key_capabilities)) != 0 ||
+        (key_capabilities[0] & 0x21) != 0x21) {
+        return 653;
     }
     char executable[128];
     ssize_t executable_len = readlinkat(AT_FDCWD, "/proc/self/exe",

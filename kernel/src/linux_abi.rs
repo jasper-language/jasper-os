@@ -10114,6 +10114,7 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const READ: u64 = 11;
     const GET_SECURITY: u64 = 17;
     const INVALIDATE: u64 = 21;
+    const CAPABILITIES: u64 = 31;
     let application =
         crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
     let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
@@ -10339,6 +10340,15 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             copy_to_user(args[2], context.as_bytes(), context.len())
                 .map_err(|_| CompatErrno::Fault)?;
             Ok(context.len() as u64)
+        }
+        CAPABILITIES => {
+            if args[2] < 2 {
+                return Err(CompatErrno::ArgumentTooLong);
+            }
+            let capabilities = [0x21u8, 0u8];
+            copy_to_user(args[1], &capabilities, capabilities.len())
+                .map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
         }
         _ => Err(CompatErrno::NotSupported),
     }
