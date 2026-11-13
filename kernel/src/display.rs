@@ -109,6 +109,7 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
             y: 22,
             z_order: 10,
             visible: true,
+            opacity: 0xff,
         })
         .map_err(|_| DisplayInputError::Failed)?;
     let accent_key = compositor
@@ -118,6 +119,7 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
             y: 22,
             z_order: 20,
             visible: true,
+            opacity: 0xa0,
         })
         .map_err(|_| DisplayInputError::Failed)?;
     let mut overlay = [0u8; OVERLAY_BYTES];
@@ -144,7 +146,9 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
     };
     runtime.append_text(b"JASPER-OS NATIVE TERMINAL\n\n");
     runtime.paint_boot_frame()?;
-    kprintln!("[JSR-DISPLAY-COMPOSITOR] layers=2 visible=2 primary=terminal overlays=bounded");
+    kprintln!(
+        "[JSR-DISPLAY-COMPOSITOR] layers=2 visible=2 primary=terminal overlays=bounded alpha=true full_frame=true damage=false"
+    );
     *DISPLAY.lock() = Some(runtime);
     Ok(())
 }

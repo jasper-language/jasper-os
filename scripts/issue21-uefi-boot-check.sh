@@ -15,6 +15,7 @@ OUT="${ISSUE21_UEFI_OUT:-$ROOT/evidence/issue21-uefi-boot-$(date '+%Y%m%d-%H%M%S
 TARGET="${ISSUE21_UEFI_TARGET:-$ROOT/target/issue21-uefi-check}"
 LIMIT="${ISSUE21_UEFI_TIMEOUT:-45}"
 MODE="${ISSUE21_UEFI_MODE:-normal}"
+PREBUILT="${ISSUE21_UEFI_PREBUILT:-0}"
 QEMU_LOCK="${ISSUE21_QEMU_LOCK:-/tmp/jasper-os-qemu.lock}"
 QEMU_CPUS="${ISSUE21_QEMU_CPUS:-0-1}"
 mkdir -p "$OUT"
@@ -24,6 +25,7 @@ ESP_IMAGE="$TARGET/esp.img"
 UEFI_ESP="$TARGET/uefi-esp.img"
 OVMF_VARS="$TARGET/OVMF_VARS.fd"
 KERNEL="$TARGET/x86_64-unknown-none/release/jasper-kernel"
+BOOT_MANAGER="$TARGET/x86_64-unknown-uefi/release/jasper-boot-manager.efi"
 SERIAL_READER=""
 SERIAL_FEEDER=""
 
@@ -94,23 +96,46 @@ case "$MODE" in
   block-timeout) KERNEL_FEATURES=lifecycle-block-timeout-verify ;;
   *) KERNEL_FEATURES=production,lifecycle-ab-health ;;
 esac
-CARGO_TARGET_DIR="$TARGET" guarded_cargo build --locked --release --target x86_64-unknown-none \
-  -p jasper-kernel --features "$KERNEL_FEATURES" >"$OUT/kernel-build.log" 2>&1
-guarded_cargo build --locked --release -p xtask >"$OUT/xtask-build.log" 2>&1
-CARGO_TARGET_DIR="$TARGET" guarded_cargo build --locked --release --target x86_64-unknown-uefi \
-  -p jasper-boot-manager >"$OUT/boot-manager-build.log" 2>&1
+if [ "$PREBUILT" = 1 ]; then
+  [ -x "$KERNEL" ]
+  [ -f "$BOOT_MANAGER" ]
+  [ -x "$ROOT/target/release/xtask" ]
+  for binary in jasper-gpt-image jasper-esp-format jasper-esp-install \
+    jasper-ext4-provision jasper-control-init jasper-control-inspect; do
+    [ -x "$ROOT/target/debug/$binary" ]
+  done
+  : >"$OUT/kernel-build.log"
+  : >"$OUT/xtask-build.log"
+  : >"$OUT/boot-manager-build.log"
+else
+  CARGO_TARGET_DIR="$TARGET" guarded_cargo build --locked --release --target x86_64-unknown-none \
+    -p jasper-kernel --features "$KERNEL_FEATURES" >"$OUT/kernel-build.log" 2>&1
+  guarded_cargo build --locked --release -p xtask >"$OUT/xtask-build.log" 2>&1
+  CARGO_TARGET_DIR="$TARGET" guarded_cargo build --locked --release --target x86_64-unknown-uefi \
+    -p jasper-boot-manager >"$OUT/boot-manager-build.log" 2>&1
+fi
 
-guarded_cargo run --locked -p jasper-lifecycle-staging --bin jasper-gpt-image -- \
+run_lifecycle() {
+  local binary=$1
+  shift
+  if [ "$PREBUILT" = 1 ]; then
+    "$ROOT/target/debug/$binary" "$@"
+  else
+    guarded_cargo run --locked -p jasper-lifecycle-staging --bin "$binary" -- "$@"
+  fi
+}
+
+run_lifecycle jasper-gpt-image \
   "$IMAGE" 38654705664 >"$OUT/gpt.log" 2>&1
-guarded_cargo run --locked -p jasper-lifecycle-staging --bin jasper-esp-format -- \
+run_lifecycle jasper-esp-format \
   "$IMAGE" 38654705664 >"$OUT/esp-format.log" 2>&1
 target/release/xtask uefi-managed-esp \
   "$KERNEL" "$KERNEL" \
-  "$TARGET/x86_64-unknown-uefi/release/jasper-boot-manager.efi" \
+  "$BOOT_MANAGER" \
   "$UEFI_ESP" >"$OUT/uefi-esp.log" 2>&1
-guarded_cargo run --locked -p jasper-lifecycle-staging --bin jasper-esp-install -- \
+run_lifecycle jasper-esp-install \
   "$IMAGE" 38654705664 "$UEFI_ESP" >"$OUT/esp-install.log" 2>&1
-guarded_cargo run --locked -p jasper-lifecycle-staging --bin jasper-ext4-provision -- \
+run_lifecycle jasper-ext4-provision \
   "$IMAGE" 38654705664 >"$OUT/ext4-provision.log" 2>&1
 ROOT_EXEC_PROBE=""
 ROOT_FULL_USERLAND=0
@@ -134,9 +159,9 @@ bash scripts/issue21-system-root-fixture.sh \
   "$IMAGE" "$TARGET" 1050624 A 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" >"$OUT/system-root-a.log" 2>&1
 bash scripts/issue21-system-root-fixture.sh \
   "$IMAGE" "$TARGET" 17827840 B 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" >"$OUT/system-root-b.log" 2>&1
-guarded_cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-init -- \
+run_lifecycle jasper-control-init \
   "$IMAGE" 38654705664 "$KERNEL" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
-guarded_cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-inspect -- \
+run_lifecycle jasper-control-inspect \
   "$IMAGE" 38654705664 >"$OUT/control-inspect.log" 2>&1
 
 if [ "$MODE" = both-controls-corrupt ]; then
@@ -328,7 +353,7 @@ grep -aq '^\[JSR-LIFE-ROOT\] slot=A release=1 schema=1 userland=x86_64-linux-elf
 grep -aq '^\[JSR-LIFE-HEALTH\] result=confirmed slot=A generation=3 release=1 attempts=0 storage=virtio-blk' \
   "$OUT/serial.log"
 ! grep -aqE '^\[JSR-(PANIC|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
-guarded_cargo run --locked -p jasper-lifecycle-staging --bin jasper-control-inspect -- \
+run_lifecycle jasper-control-inspect \
   "$IMAGE" 38654705664 >"$OUT/control-postboot.log" 2>&1
 grep -q 'generation=3 ' "$OUT/control-postboot.log"
 grep -q 'slot=A state=Confirmed generation=3 release=1 attempts=0' \

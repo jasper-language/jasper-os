@@ -2,7 +2,9 @@
 //!
 //! The compositor owns only layer metadata and paints caller-provided surfaces
 //! into a caller-provided framebuffer. It does not own application memory,
-//! implement a window manager, route input or execute GPU commands.
+//! implement a window manager, route input or execute GPU commands. Full-frame
+//! composition is intentional: partial damage requires a retained base layer
+//! snapshot so transparent overlays are never accumulated over stale pixels.
 //!
 //! 有界原生 framebuffer compositor 核心。compositor 只拥有 layer 元数据，并把
 //! 调用方提供的 surface 合成到调用方 framebuffer；不拥有应用内存、不实现窗口
@@ -43,6 +45,8 @@ pub struct LayerSpec {
     pub y: i32,
     pub z_order: u16,
     pub visible: bool,
+    /// Whole-layer opacity multiplied by per-pixel alpha for four-byte surfaces.
+    pub opacity: u8,
 }
 
 /// Immutable layer metadata returned to display clients.
@@ -191,6 +195,12 @@ impl<const N: usize> Compositor<N> {
             return Err(CompositorError::DuplicateOrder);
         }
         self.layer_mut(key)?.layer.z_order = z_order;
+        Ok(())
+    }
+
+    pub fn set_opacity(&mut self, key: LayerKey, opacity: u8) -> Result<(), CompositorError> {
+        self.ensure_open()?;
+        self.layer_mut(key)?.layer.opacity = opacity;
         Ok(())
     }
 
@@ -372,7 +382,23 @@ fn copy_layer(
         for destination_x in left..right {
             let source_x = destination_x - i64::from(layer.x);
             let source_y = destination_y - i64::from(layer.y);
-            let (red, green, blue) = read_pixel(layer.surface, source, source_x, source_y)?;
+            let (red, green, blue, pixel_alpha) =
+                read_pixel(layer.surface, source, source_x, source_y)?;
+            let alpha = multiply_alpha(pixel_alpha, layer.opacity);
+            if alpha == 0 {
+                continue;
+            }
+            let (red, green, blue) = if alpha == u8::MAX {
+                (red, green, blue)
+            } else {
+                let (destination_red, destination_green, destination_blue, _) =
+                    read_pixel(frame, frame_bytes, destination_x, destination_y)?;
+                (
+                    blend_channel(destination_red, red, alpha),
+                    blend_channel(destination_green, green, alpha),
+                    blend_channel(destination_blue, blue, alpha),
+                )
+            };
             write_pixel(
                 frame,
                 frame_bytes,
@@ -393,7 +419,7 @@ fn read_pixel(
     bytes: &[u8],
     x: i64,
     y: i64,
-) -> Result<(u8, u8, u8), CompositorError> {
+) -> Result<(u8, u8, u8, u8), CompositorError> {
     let bpp = usize::from(surface.bytes_per_pixel);
     let offset = usize::try_from(
         y.checked_mul(i64::from(surface.stride))
@@ -405,11 +431,22 @@ fn read_pixel(
     let pixel = bytes
         .get(offset..offset + bpp)
         .ok_or(CompositorError::InvalidSurface)?;
+    let alpha = if bpp == 4 { pixel[3] } else { u8::MAX };
     Ok(match surface.layout {
-        PixelLayout::Gray => (pixel[0], pixel[0], pixel[0]),
-        PixelLayout::Rgb => (pixel[0], pixel[1], pixel[2]),
-        PixelLayout::Bgr => (pixel[2], pixel[1], pixel[0]),
+        PixelLayout::Gray => (pixel[0], pixel[0], pixel[0], alpha),
+        PixelLayout::Rgb => (pixel[0], pixel[1], pixel[2], alpha),
+        PixelLayout::Bgr => (pixel[2], pixel[1], pixel[0], alpha),
     })
+}
+
+fn multiply_alpha(first: u8, second: u8) -> u8 {
+    ((u16::from(first) * u16::from(second) + 127) / 255) as u8
+}
+
+fn blend_channel(destination: u8, source: u8, alpha: u8) -> u8 {
+    let alpha = u32::from(alpha);
+    let inverse = 255 - alpha;
+    ((u32::from(source) * alpha + u32::from(destination) * inverse + 127) / 255) as u8
 }
 
 fn write_pixel(
@@ -480,6 +517,7 @@ mod tests {
             y: 1,
             z_order,
             visible: true,
+            opacity: 0xff,
         }
     }
 
@@ -523,6 +561,7 @@ mod tests {
                 y: 1,
                 z_order: 2,
                 visible: true,
+                opacity: 0xff,
             })
             .unwrap();
         let blue = [0, 0, 255, 0, 0, 255];
@@ -578,6 +617,7 @@ mod tests {
                 y: 0,
                 z_order: 1,
                 visible: true,
+                opacity: 0xff,
             }),
             Err(CompositorError::InvalidSurface)
         );
@@ -591,6 +631,7 @@ mod tests {
                 x: -1,
                 y: -1,
                 visible: false,
+                opacity: 0xff,
                 ..layer(1)
             })
             .unwrap();
@@ -645,6 +686,7 @@ mod tests {
                 y: 1,
                 z_order: 2,
                 visible: true,
+                opacity: 0xff,
             })
             .unwrap();
         let red = [255u8, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0];
@@ -720,5 +762,70 @@ mod tests {
                 }],
             )
             .is_ok());
+    }
+
+    #[test]
+    fn opacity_and_per_pixel_alpha_blend_without_overflow() {
+        let mut compositor = Compositor::<2>::new();
+        let lower = compositor
+            .create(LayerSpec {
+                surface: RED_RGB,
+                x: 1,
+                y: 1,
+                z_order: 1,
+                visible: true,
+                opacity: 0xff,
+            })
+            .unwrap();
+        let upper = compositor
+            .create(LayerSpec {
+                surface: RED_RGB,
+                x: 1,
+                y: 1,
+                z_order: 2,
+                visible: true,
+                opacity: 0x80,
+            })
+            .unwrap();
+        let red = [255u8, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0];
+        let blue = [0u8, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255];
+        let mut frame = [0u8; 8 * 4 * 4];
+        compositor
+            .compose(
+                FRAME,
+                &mut frame,
+                &[
+                    LayerPixels {
+                        key: lower,
+                        bytes: &red,
+                    },
+                    LayerPixels {
+                        key: upper,
+                        bytes: &blue,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(pixel(&frame, 1, 1), [128, 0, 127, 0xff]);
+
+        compositor.set_opacity(upper, 0).unwrap();
+        frame.fill(0);
+        compositor
+            .compose(
+                FRAME,
+                &mut frame,
+                &[
+                    LayerPixels {
+                        key: lower,
+                        bytes: &red,
+                    },
+                    LayerPixels {
+                        key: upper,
+                        bytes: &blue,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(pixel(&frame, 1, 1), [0, 0, 255, 0xff]);
     }
 }
