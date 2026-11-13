@@ -3806,6 +3806,24 @@ int main(void) {
         errno != ECHILD) {
         return 434;
     }
+    pid_t waitid_pidfd_child = fork();
+    if (waitid_pidfd_child < 0) {
+        return 705;
+    }
+    if (waitid_pidfd_child == 0) {
+        _exit(46);
+    }
+    int waitid_pidfd = syscall(SYS_pidfd_open, waitid_pidfd_child, 0);
+    memset(&waitid_info, 0, sizeof(waitid_info));
+    if (waitid_pidfd < 0 ||
+        syscall(SYS_waitid, P_PIDFD, waitid_pidfd,
+                &waitid_info, WEXITED, NULL) != 0 ||
+        waitid_info.si_pid != waitid_pidfd_child ||
+        waitid_info.si_status != 46 ||
+        waitid_info.si_code != CLD_EXITED ||
+        close(waitid_pidfd) != 0) {
+        return 705;
+    }
     sigset_t timedwait_set;
     sigset_t timedwait_old;
     sigemptyset(&timedwait_set);

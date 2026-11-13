@@ -5563,6 +5563,7 @@ fn linux_waitid(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const P_ALL: u32 = 0;
     const P_PID: u32 = 1;
     const P_PGID: u32 = 2;
+    const P_PIDFD: u32 = 3;
     const WNOHANG: u64 = 0x1;
     const WEXITED: u64 = 0x4;
     const WNOWAIT: u64 = 0x0100_0000;
@@ -5590,6 +5591,17 @@ fn linux_waitid(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             } else {
                 requested
             })
+        }
+        P_PIDFD => {
+            let fd = u32::try_from(args[1]).map_err(|_| CompatErrno::BadFd)?;
+            let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+            if entry.kind != compat_core::fd::CompatKind::Pidfd {
+                return Err(CompatErrno::BadFd);
+            }
+            let target = ObjId::from_raw(entry.handle).ok_or(CompatErrno::NoProcess)?;
+            Target::Pid(Some(
+                proc::linux_pid(target).ok_or(CompatErrno::NoProcess)?,
+            ))
         }
         _ => return Err(CompatErrno::Invalid),
     };
