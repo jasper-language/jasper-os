@@ -5064,6 +5064,17 @@ fn linux_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MADV_SEQUENTIAL: u64 = 2;
     const MADV_WILLNEED: u64 = 3;
     const MADV_DONTNEED: u64 = 4;
+    const MADV_FREE: u64 = 8;
+    const MADV_DOFORK: u64 = 11;
+    const MADV_HUGEPAGE: u64 = 14;
+    const MADV_NOHUGEPAGE: u64 = 15;
+    const MADV_DONTDUMP: u64 = 16;
+    const MADV_DODUMP: u64 = 17;
+    const MADV_KEEPONFORK: u64 = 19;
+    const MADV_COLD: u64 = 20;
+    const MADV_PAGEOUT: u64 = 21;
+    const MADV_POPULATE_READ: u64 = 22;
+    const MADV_POPULATE_WRITE: u64 = 23;
     const MADV_GUARD_INSTALL: u64 = 102;
     let address = args[0];
     let length = args[1];
@@ -5084,7 +5095,33 @@ fn linux_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Perm);
     }
     match advice {
-        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED => Ok(0),
+        MADV_NORMAL
+        | MADV_RANDOM
+        | MADV_SEQUENTIAL
+        | MADV_WILLNEED
+        | MADV_FREE
+        | MADV_DOFORK
+        | MADV_HUGEPAGE
+        | MADV_NOHUGEPAGE
+        | MADV_DONTDUMP
+        | MADV_DODUMP
+        | MADV_KEEPONFORK
+        | MADV_COLD
+        | MADV_PAGEOUT => Ok(0),
+        MADV_POPULATE_READ | MADV_POPULATE_WRITE => {
+            let require_write = advice == MADV_POPULATE_WRITE;
+            let mut page = address;
+            while page < end {
+                let Some(flags) = proc::page_flags(pid, page) else {
+                    return Err(CompatErrno::NoMemory);
+                };
+                if require_write && !flags.contains(MapFlags::WRITE) {
+                    return Err(CompatErrno::Access);
+                }
+                page = page.saturating_add(PAGE);
+            }
+            Ok(0)
+        }
         MADV_GUARD_INSTALL => {
             let pages = length.div_ceil(PAGE);
             for page in 0..pages {

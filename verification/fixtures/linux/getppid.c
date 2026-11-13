@@ -4892,6 +4892,22 @@ int main(void) {
     errno = 0;
     if (syscall(SYS_mseal, unsealed_memory, 4096, 1) != -1 ||
         errno != EINVAL ||
+        madvise(unsealed_memory, 4096, MADV_FREE) != 0 ||
+        madvise(unsealed_memory, 4096, MADV_DONTDUMP) != 0 ||
+        madvise(unsealed_memory, 4096, MADV_DODUMP) != 0 ||
+        madvise(unsealed_memory, 4096, MADV_HUGEPAGE) != 0 ||
+        madvise(unsealed_memory, 4096, MADV_NOHUGEPAGE) != 0 ||
+        madvise(unsealed_memory, 4096, MADV_COLD) != 0 ||
+        madvise(unsealed_memory, 4096, MADV_PAGEOUT) != 0 ||
+        madvise(unsealed_memory, 4096, MADV_KEEPONFORK) != 0 ||
+        madvise(unsealed_memory, 4096, MADV_POPULATE_READ) != 0 ||
+        madvise(unsealed_memory, 4096, MADV_POPULATE_WRITE) != 0 ||
+        mprotect(unsealed_memory, 4096, PROT_READ) != 0) {
+        return 524;
+    }
+    errno = 0;
+    if (madvise(unsealed_memory, 4096, MADV_POPULATE_WRITE) != -1 ||
+        errno != EACCES ||
         munmap(unsealed_memory, 4096) != 0) {
         return 524;
     }
