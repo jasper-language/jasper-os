@@ -5323,12 +5323,54 @@ int main(void) {
         return 595;
     }
     strcpy(sysv_shared, "shared-memory");
+    pid_t shm_inherited_child = fork();
+    if (shm_inherited_child < 0) {
+        return 682;
+    }
+    if (shm_inherited_child == 0) {
+        struct shmid_ds inherited_status = {0};
+        int ok = strcmp(sysv_shared, "shared-memory") == 0 &&
+                 shmctl(sysv_shm, IPC_STAT, &inherited_status) == 0 &&
+                 inherited_status.shm_nattch == 2;
+        if (ok) {
+            strcpy(sysv_shared, "child-update");
+            ok = shmdt(sysv_shared) == 0;
+        }
+        _exit(ok ? 0 : 1);
+    }
+    int shm_inherited_status = 0;
+    if (waitpid(shm_inherited_child, &shm_inherited_status, 0) !=
+            shm_inherited_child ||
+        !WIFEXITED(shm_inherited_status) ||
+        WEXITSTATUS(shm_inherited_status) != 0 ||
+        strcmp(sysv_shared, "child-update") != 0) {
+        return 683;
+    }
+    struct shmid_ds shm_after_inherit = {0};
+    if (shmctl(sysv_shm, IPC_STAT, &shm_after_inherit) != 0 ||
+        shm_after_inherit.shm_nattch != 1) {
+        return 684;
+    }
+    pid_t shm_vfork_child = vfork();
+    if (shm_vfork_child < 0) {
+        return 685;
+    }
+    if (shm_vfork_child == 0) {
+        _exit(strcmp(sysv_shared, "child-update") == 0 ? 0 : 1);
+    }
+    if (waitpid(shm_vfork_child, &shm_inherited_status, 0) !=
+            shm_vfork_child ||
+        !WIFEXITED(shm_inherited_status) ||
+        WEXITSTATUS(shm_inherited_status) != 0 ||
+        strcmp(sysv_shared, "child-update") != 0) {
+        return 686;
+    }
     if (shmdt(sysv_shared) != 0) {
         return 596;
     }
     sysv_shared = shmat(sysv_shm, NULL, SHM_RDONLY);
     if (sysv_shared == (char *)-1 ||
-        strcmp(sysv_shared, "shared-memory") != 0 ||
+        strcmp(sysv_shared, "child-update") != 0 ||
         shmdt(sysv_shared) != 0) {
         return 597;
     }
@@ -5339,7 +5381,7 @@ int main(void) {
     if (shm_reader == 0) {
         char *mapping = shmat(sysv_shm, NULL, SHM_RDONLY);
         int result = mapping != (char *)-1 &&
-                     strcmp(mapping, "shared-memory") == 0 &&
+                     strcmp(mapping, "child-update") == 0 &&
                      shmdt(mapping) == 0;
         _exit(result ? 0 : 1);
     }
@@ -5358,7 +5400,7 @@ int main(void) {
     sysv_shared = shmat(sysv_shm, NULL, 0);
     if (sysv_shared == (char *)-1 ||
         shmctl(sysv_shm, IPC_RMID, NULL) != 0 ||
-        strcmp(sysv_shared, "shared-memory") != 0 ||
+        strcmp(sysv_shared, "child-update") != 0 ||
         shmdt(sysv_shared) != 0) {
         return 601;
     }

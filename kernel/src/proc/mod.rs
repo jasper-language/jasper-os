@@ -6953,6 +6953,10 @@ pub fn fork_linux_process(
             return Err(error);
         }
     }
+    if !crate::linux_abi::inherit_sysv_shared_process(parent, child) {
+        rollback(child, false);
+        return Err(ProcError::OutOfFrames);
+    }
     if adopt(parent, child).is_err() {
         rollback(child, false);
         return Err(ProcError::NoSuchProcess);
@@ -6980,7 +6984,7 @@ pub fn fork_linux_process(
 /// Creates a Linux vfork child without copying its pages.
 ///
 /// 创建 Linux vfork 子进程但不复制页面：子进程映射父进程相同的物理帧，父线程
-/// 由调用者休眠等待。共享映射、设备映射和隔离帧不在当前有界切片内，失败关闭。
+/// 由调用者休眠等待。既有共享映射随借用地址空间保留；设备映射和隔离帧失败关闭。
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
 pub fn vfork_linux_process(
     parent: ObjId,
@@ -6992,14 +6996,19 @@ pub fn vfork_linux_process(
     parent_task: TaskId,
 ) -> Result<ObjId, ProcError> {
     let parent_stack_top = crate::arch::kernel_stack();
-    let (parent_linux_pid, calls, state, parent_root, frames, memory_caps) =
+    let (
+        parent_linux_pid,
+        calls,
+        state,
+        parent_root,
+        frames,
+        memory_caps,
+        shared_mappings,
+    ) =
         kobj::with(|t| match t.get(parent) {
             Ok(KObject::Process(p)) if p.state == ProcState::Running && p.threads_live == 1 => {
                 let linux = p.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
-                if !p.shared_maps.is_empty()
-                    || !p.device_maps.is_empty()
-                    || !p.quarantined.is_empty()
-                {
+                if !p.device_maps.is_empty() || !p.quarantined.is_empty() {
                     return Err(ProcError::NotTransferable);
                 }
                 let mut frames = Vec::new();
@@ -7007,6 +7016,18 @@ pub fn vfork_linux_process(
                     .try_reserve(p.frames.len())
                     .map_err(|_| ProcError::OutOfFrames)?;
                 frames.extend(p.frames.iter().cloned());
+                let shared_mappings = p
+                    .shared_maps
+                    .iter()
+                    .map(|mapping| {
+                        (
+                            mapping.va,
+                            Arc::clone(&mapping.page),
+                            mapping.source,
+                            mapping.writable,
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 Ok((
                     linux.pid,
                     linux.calls,
@@ -7014,6 +7035,7 @@ pub fn vfork_linux_process(
                     p.space.root(),
                     frames,
                     p.memory_caps.clone(),
+                    shared_mappings,
                 ))
             }
             Ok(KObject::Process(_)) => Err(ProcError::Exited),
@@ -7063,6 +7085,18 @@ pub fn vfork_linux_process(
         });
         p.frames = frames;
         p.memory_caps = memory_caps;
+        p.shared_maps.clear();
+        p.shared_maps
+            .try_reserve(shared_mappings.len())
+            .map_err(|_| ProcError::OutOfFrames)?;
+        for (va, page, source, writable) in shared_mappings {
+            p.shared_maps.push(SharedMapping {
+                va,
+                page,
+                source,
+                writable,
+            });
+        }
         let borrowed = crate::mm::space::VmSpace::borrowed(parent_root).map_err(ProcError::Map)?;
         let old = core::mem::replace(&mut p.space, borrowed);
         drop(old);
@@ -7071,6 +7105,10 @@ pub fn vfork_linux_process(
     if prepared.is_err() || inherit_application(parent, child).is_err() {
         rollback(child, false);
         return Err(ProcError::NoSuchProcess);
+    }
+    if !crate::linux_abi::inherit_sysv_shared_process(parent, child) {
+        rollback(child, false);
+        return Err(ProcError::OutOfFrames);
     }
     if adopt(parent, child).is_err() {
         rollback(child, false);

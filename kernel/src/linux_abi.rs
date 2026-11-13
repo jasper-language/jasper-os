@@ -9116,6 +9116,53 @@ fn release_sysv_shared_process(process: ObjId) {
     }
 }
 
+/// Copies one forked process's pre-existing System V shared attachments.
+pub(crate) fn inherit_sysv_shared_process(parent: ObjId, child: ObjId) -> bool {
+    let inherited = {
+        let state = COMPAT.lock();
+        let mut inherited = alloc::vec::Vec::new();
+        for segment in &state.sysv_shared_segments {
+            for attachment in &segment.attachments {
+                if attachment.process == parent
+                    && inherited
+                        .try_reserve(1)
+                        .map_err(|_| ())
+                        .and_then(|_| {
+                            inherited.push((
+                                segment.id,
+                                segment.application,
+                                SysVSharedAttachment {
+                                    process: child,
+                                    ..*attachment
+                                },
+                            ));
+                            Ok(())
+                        })
+                        .is_err()
+                {
+                    return false;
+                }
+            }
+        }
+        inherited
+    };
+    let mut state = COMPAT.lock();
+    for (id, application, attachment) in &inherited {
+        let Some(segment) = state
+            .sysv_shared_segments
+            .iter_mut()
+            .find(|segment| segment.id == *id && segment.application == *application)
+        else {
+            return false;
+        };
+        if segment.attachments.try_reserve(1).is_err() {
+            return false;
+        }
+        segment.attachments.push(*attachment);
+    }
+    true
+}
+
 /// Implements `shmctl(2)` for metadata, locking and removal.
 fn linux_shmctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const IPC_RMID: u32 = 0;
