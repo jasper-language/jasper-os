@@ -4274,6 +4274,62 @@ int main(void) {
         close(self_pidfd) != 0) {
         return 511;
     }
+    int pidfd_remote_ready[2];
+    int pidfd_remote_go[2];
+    if (pipe(pidfd_remote_ready) != 0 ||
+        pipe(pidfd_remote_go) != 0) {
+        return 707;
+    }
+    pid_t pidfd_remote_child = fork();
+    if (pidfd_remote_child < 0) {
+        return 707;
+    }
+    if (pidfd_remote_child == 0) {
+        close(pidfd_remote_ready[0]);
+        close(pidfd_remote_go[1]);
+        int remote_fd = memfd_create("pidfd-remote", MFD_CLOEXEC);
+        if (remote_fd < 0 ||
+            write(remote_fd, "PFD2", 4) != 4 ||
+            lseek(remote_fd, 0, SEEK_SET) != 0 ||
+            write(pidfd_remote_ready[1], &remote_fd,
+                  sizeof(remote_fd)) != (ssize_t)sizeof(remote_fd)) {
+            _exit(1);
+        }
+        char go = 0;
+        _exit(read(pidfd_remote_go[0], &go, 1) == 1 ? 0 : 2);
+    }
+    close(pidfd_remote_ready[1]);
+    close(pidfd_remote_go[0]);
+    int remote_child_fd = -1;
+    int remote_pidfd = -1;
+    int remote_duplicate = -1;
+    char remote_pidfd_data[4] = {0};
+    if (read(pidfd_remote_ready[0], &remote_child_fd,
+             sizeof(remote_child_fd)) !=
+            (ssize_t)sizeof(remote_child_fd) ||
+        close(pidfd_remote_ready[0]) != 0 ||
+        (remote_pidfd = syscall(SYS_pidfd_open,
+                                pidfd_remote_child, 0)) < 0 ||
+        (remote_duplicate = syscall(SYS_pidfd_getfd, remote_pidfd,
+                                    remote_child_fd, 0)) < 0 ||
+        read(remote_duplicate, remote_pidfd_data,
+             sizeof(remote_pidfd_data)) !=
+            (ssize_t)sizeof(remote_pidfd_data) ||
+        memcmp(remote_pidfd_data, "PFD2", 4) != 0 ||
+        close(remote_duplicate) != 0 ||
+        close(remote_pidfd) != 0) {
+        return 708;
+    }
+    char pidfd_remote_go_byte = 'G';
+    int pidfd_remote_status = 0;
+    if (write(pidfd_remote_go[1], &pidfd_remote_go_byte, 1) != 1 ||
+        close(pidfd_remote_go[1]) != 0 ||
+        waitpid(pidfd_remote_child, &pidfd_remote_status, 0) !=
+            pidfd_remote_child ||
+        !WIFEXITED(pidfd_remote_status) ||
+        WEXITSTATUS(pidfd_remote_status) != 0) {
+        return 708;
+    }
     int inotify_fd =
         syscall(SYS_inotify_init1, IN_NONBLOCK | IN_CLOEXEC);
     int inotify_legacy_fd = syscall(SYS_inotify_init);

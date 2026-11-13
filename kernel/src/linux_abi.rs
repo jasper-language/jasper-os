@@ -5738,7 +5738,7 @@ fn linux_pidfd_send_signal(
     }
 }
 
-/// Duplicates a same-process descriptor through a pidfd reference.
+/// Duplicates a same-application descriptor through a pidfd reference.
 fn linux_pidfd_getfd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if args[2] != 0 {
         return Err(CompatErrno::Invalid);
@@ -5749,7 +5749,11 @@ fn linux_pidfd_getfd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::BadFd);
     }
     let target = ObjId::from_raw(entry.handle).ok_or(CompatErrno::NoProcess)?;
-    if target != pid {
+    let caller_application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let target_application =
+        crate::security::process_application(target).ok_or(CompatErrno::NoProcess)?;
+    if target != pid && caller_application != target_application {
         return Err(CompatErrno::Perm);
     }
     let target_fd = u32::try_from(args[1]).map_err(|_| CompatErrno::BadFd)?;
