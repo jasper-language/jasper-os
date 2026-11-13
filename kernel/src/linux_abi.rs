@@ -2048,7 +2048,29 @@ fn execute(
         | LinuxSyscall::Settimeofday
         | LinuxSyscall::Sethostname
         | LinuxSyscall::Setdomainname
-        | LinuxSyscall::Reboot => -(CompatErrno::Perm as i32 as i64),
+        | LinuxSyscall::Reboot
+        | LinuxSyscall::Mount
+        | LinuxSyscall::Umount2
+        | LinuxSyscall::PivotRoot
+        | LinuxSyscall::Chroot
+        | LinuxSyscall::Swapon
+        | LinuxSyscall::Swapoff
+        | LinuxSyscall::InitModule
+        | LinuxSyscall::FinitModule
+        | LinuxSyscall::DeleteModule
+        | LinuxSyscall::Acct
+        | LinuxSyscall::Iopl
+        | LinuxSyscall::Ioperm
+        | LinuxSyscall::KexecLoad
+        | LinuxSyscall::KexecFileLoad
+        | LinuxSyscall::Quotactl
+        | LinuxSyscall::QuotactlFd
+        | LinuxSyscall::Bpf
+        | LinuxSyscall::PerfEventOpen
+        | LinuxSyscall::Ptrace
+        | LinuxSyscall::Setns
+        | LinuxSyscall::Unshare
+        | LinuxSyscall::Syslog => -(CompatErrno::Perm as i32 as i64),
         LinuxSyscall::ClockGettime => compat_result(linux_clock_gettime(call.args)),
         LinuxSyscall::ClockGetres => compat_result(linux_clock_getres(call.args)),
         LinuxSyscall::Nanosleep => compat_result(linux_nanosleep(pid, call.args)),

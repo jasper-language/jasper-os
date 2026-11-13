@@ -3,8 +3,12 @@
 use linux_raw_sys::general::{
     __NR_accept, __NR_accept4, __NR_access, __NR_adjtimex, __NR_alarm, __NR_arch_prctl, __NR_bind,
     __NR_brk,
-    __NR_capget, __NR_capset, __NR_chdir, __NR_clock_adjtime, __NR_clock_settime, __NR_reboot,
-    __NR_setdomainname,
+    __NR_acct, __NR_bpf, __NR_capget, __NR_capset, __NR_chdir, __NR_chroot,
+    __NR_clock_adjtime, __NR_clock_settime, __NR_delete_module, __NR_finit_module,
+    __NR_init_module, __NR_ioperm, __NR_iopl, __NR_kexec_file_load, __NR_kexec_load, __NR_mount,
+    __NR_perf_event_open, __NR_pivot_root, __NR_ptrace, __NR_quotactl, __NR_quotactl_fd,
+    __NR_reboot, __NR_setdomainname, __NR_setns, __NR_swapoff, __NR_swapon, __NR_syslog,
+    __NR_umount2, __NR_unshare,
     __NR_sethostname, __NR_settimeofday,
     __NR_faccessat, __NR_faccessat2,
     __NR_clock_getres, __NR_clock_gettime, __NR_clock_nanosleep, __NR_clone, __NR_clone3,
@@ -111,7 +115,7 @@ pub fn seek_target(current: u64, size: u64, offset: i64, whence: u64) -> Option<
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
+#[repr(u16)]
 pub enum LinuxSyscall {
     Read,
     Pread64,
@@ -242,6 +246,28 @@ pub enum LinuxSyscall {
     ArchPrctl,
     CapGet,
     CapSet,
+    Mount,
+    Umount2,
+    PivotRoot,
+    Chroot,
+    Swapon,
+    Swapoff,
+    InitModule,
+    FinitModule,
+    DeleteModule,
+    Acct,
+    Iopl,
+    Ioperm,
+    KexecLoad,
+    KexecFileLoad,
+    Quotactl,
+    QuotactlFd,
+    Bpf,
+    PerfEventOpen,
+    Ptrace,
+    Setns,
+    Unshare,
+    Syslog,
     Adjtimex,
     ClockAdjtime,
     ClockSettime,
@@ -385,10 +411,10 @@ pub enum LinuxSyscall {
 /// 一个 Linux 兼容进程可显式发起的 syscall 集合。该集合不是 Jasper 原生
 /// `SyscallSet` 的别名，也不绕过兼容层参数和 Handle/Rights 检查。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LinuxSyscallSet([u64; 4]);
+pub struct LinuxSyscallSet([u64; 5]);
 
 impl LinuxSyscallSet {
-    const WORDS: usize = 4;
+    const WORDS: usize = 5;
     const BITS: usize = Self::WORDS * 64;
 
     /// No Linux syscall is authorized.
@@ -641,6 +667,28 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_arch_prctl) => LinuxSyscall::ArchPrctl,
         value if value == u64::from(__NR_capget) => LinuxSyscall::CapGet,
         value if value == u64::from(__NR_capset) => LinuxSyscall::CapSet,
+        value if value == u64::from(__NR_mount) => LinuxSyscall::Mount,
+        value if value == u64::from(__NR_umount2) => LinuxSyscall::Umount2,
+        value if value == u64::from(__NR_pivot_root) => LinuxSyscall::PivotRoot,
+        value if value == u64::from(__NR_chroot) => LinuxSyscall::Chroot,
+        value if value == u64::from(__NR_swapon) => LinuxSyscall::Swapon,
+        value if value == u64::from(__NR_swapoff) => LinuxSyscall::Swapoff,
+        value if value == u64::from(__NR_init_module) => LinuxSyscall::InitModule,
+        value if value == u64::from(__NR_finit_module) => LinuxSyscall::FinitModule,
+        value if value == u64::from(__NR_delete_module) => LinuxSyscall::DeleteModule,
+        value if value == u64::from(__NR_acct) => LinuxSyscall::Acct,
+        value if value == u64::from(__NR_iopl) => LinuxSyscall::Iopl,
+        value if value == u64::from(__NR_ioperm) => LinuxSyscall::Ioperm,
+        value if value == u64::from(__NR_kexec_load) => LinuxSyscall::KexecLoad,
+        value if value == u64::from(__NR_kexec_file_load) => LinuxSyscall::KexecFileLoad,
+        value if value == u64::from(__NR_quotactl) => LinuxSyscall::Quotactl,
+        value if value == u64::from(__NR_quotactl_fd) => LinuxSyscall::QuotactlFd,
+        value if value == u64::from(__NR_bpf) => LinuxSyscall::Bpf,
+        value if value == u64::from(__NR_perf_event_open) => LinuxSyscall::PerfEventOpen,
+        value if value == u64::from(__NR_ptrace) => LinuxSyscall::Ptrace,
+        value if value == u64::from(__NR_setns) => LinuxSyscall::Setns,
+        value if value == u64::from(__NR_unshare) => LinuxSyscall::Unshare,
+        value if value == u64::from(__NR_syslog) => LinuxSyscall::Syslog,
         value if value == u64::from(__NR_adjtimex) => LinuxSyscall::Adjtimex,
         value if value == u64::from(__NR_clock_adjtime) => LinuxSyscall::ClockAdjtime,
         value if value == u64::from(__NR_clock_settime) => LinuxSyscall::ClockSettime,
@@ -919,6 +967,28 @@ mod tests {
             (__NR_arch_prctl, LinuxSyscall::ArchPrctl),
             (__NR_capget, LinuxSyscall::CapGet),
             (__NR_capset, LinuxSyscall::CapSet),
+            (__NR_mount, LinuxSyscall::Mount),
+            (__NR_umount2, LinuxSyscall::Umount2),
+            (__NR_pivot_root, LinuxSyscall::PivotRoot),
+            (__NR_chroot, LinuxSyscall::Chroot),
+            (__NR_swapon, LinuxSyscall::Swapon),
+            (__NR_swapoff, LinuxSyscall::Swapoff),
+            (__NR_init_module, LinuxSyscall::InitModule),
+            (__NR_finit_module, LinuxSyscall::FinitModule),
+            (__NR_delete_module, LinuxSyscall::DeleteModule),
+            (__NR_acct, LinuxSyscall::Acct),
+            (__NR_iopl, LinuxSyscall::Iopl),
+            (__NR_ioperm, LinuxSyscall::Ioperm),
+            (__NR_kexec_load, LinuxSyscall::KexecLoad),
+            (__NR_kexec_file_load, LinuxSyscall::KexecFileLoad),
+            (__NR_quotactl, LinuxSyscall::Quotactl),
+            (__NR_quotactl_fd, LinuxSyscall::QuotactlFd),
+            (__NR_bpf, LinuxSyscall::Bpf),
+            (__NR_perf_event_open, LinuxSyscall::PerfEventOpen),
+            (__NR_ptrace, LinuxSyscall::Ptrace),
+            (__NR_setns, LinuxSyscall::Setns),
+            (__NR_unshare, LinuxSyscall::Unshare),
+            (__NR_syslog, LinuxSyscall::Syslog),
             (__NR_adjtimex, LinuxSyscall::Adjtimex),
             (__NR_clock_adjtime, LinuxSyscall::ClockAdjtime),
             (__NR_clock_settime, LinuxSyscall::ClockSettime),

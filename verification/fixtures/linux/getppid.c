@@ -3891,6 +3891,25 @@ int main(void) {
         errno != EROFS) {
         return 508;
     }
+    const long privileged_calls[] = {
+        SYS_mount, SYS_umount2, SYS_pivot_root, SYS_chroot,
+        SYS_swapon, SYS_swapoff, SYS_init_module, SYS_finit_module,
+        SYS_delete_module, SYS_acct, SYS_iopl, SYS_ioperm,
+        SYS_kexec_load, SYS_kexec_file_load, SYS_quotactl,
+        SYS_quotactl_fd, SYS_bpf, SYS_perf_event_open, SYS_ptrace,
+        SYS_setns, SYS_unshare, SYS_syslog,
+    };
+    for (size_t index = 0;
+         index < sizeof(privileged_calls) / sizeof(privileged_calls[0]);
+         index++) {
+        errno = 0;
+        if (syscall(privileged_calls[index], 0, 0, 0, 0, 0, 0) != -1 ||
+            errno != EPERM) {
+            printf("privileged-call-fail nr=%ld errno=%d\n",
+                   privileged_calls[index], errno);
+            return 509;
+        }
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);
