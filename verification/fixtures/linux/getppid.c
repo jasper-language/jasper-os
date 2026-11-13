@@ -4543,7 +4543,7 @@ int main(void) {
     const long unsupported_features[] = {
         SYS_add_key, SYS_request_key, SYS_keyctl,
         SYS_fanotify_init, SYS_fanotify_mark,
-        SYS_set_mempolicy_home_node, SYS_mbind, SYS_migrate_pages,
+        SYS_migrate_pages,
         SYS_move_pages, SYS_landlock_create_ruleset, SYS_landlock_add_rule,
         SYS_landlock_restrict_self, SYS_listns,
         SYS_lsm_set_self_attr,
@@ -5153,6 +5153,16 @@ int main(void) {
     if (syscall(SYS_set_mempolicy, MPOL_BIND, NULL, 0) != -1 ||
         errno != EINVAL) {
         return 640;
+    }
+    void *mempolicy_memory = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mempolicy_memory == MAP_FAILED ||
+        syscall(SYS_mbind, mempolicy_memory, 4096, MPOL_DEFAULT,
+                NULL, 0, MPOL_MF_STRICT) != 0 ||
+        syscall(SYS_set_mempolicy_home_node, mempolicy_memory,
+                4096, 0, 0) != 0 ||
+        munmap(mempolicy_memory, 4096) != 0) {
+        return 641;
     }
     char executable[128];
     ssize_t executable_len = readlinkat(AT_FDCWD, "/proc/self/exe",

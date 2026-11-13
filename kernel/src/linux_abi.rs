@@ -2685,13 +2685,15 @@ fn execute(
         LinuxSyscall::FsPick => compat_result(linux_fspick(pid, call.args)),
         LinuxSyscall::GetMempolicy => compat_result(linux_get_mempolicy(pid, call.args)),
         LinuxSyscall::SetMempolicy => compat_result(linux_set_mempolicy(call.args)),
+        LinuxSyscall::Mbind => compat_result(linux_mbind(pid, call.args)),
+        LinuxSyscall::SetMempolicyHomeNode => {
+            compat_result(linux_set_mempolicy_home_node(pid, call.args))
+        }
         LinuxSyscall::AddKey
         | LinuxSyscall::RequestKey
         | LinuxSyscall::Keyctl
         | LinuxSyscall::FanotifyInit
         | LinuxSyscall::FanotifyMark
-        | LinuxSyscall::SetMempolicyHomeNode
-        | LinuxSyscall::Mbind
         | LinuxSyscall::MigratePages
         | LinuxSyscall::MovePages
         | LinuxSyscall::LandlockCreateRuleset
@@ -9703,6 +9705,51 @@ fn linux_set_mempolicy(args: [u64; 6]) -> Result<u64, CompatErrno> {
     if mode != 0 || args[1] != 0 && args[2] != 0 {
         return Err(CompatErrno::Invalid);
     }
+    Ok(0)
+}
+
+fn linux_mempolicy_range(pid: ObjId, start: u64, length: u64) -> Result<(), CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    if start % PAGE != 0 || length == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let rounded = length
+        .checked_add(PAGE - 1)
+        .ok_or(CompatErrno::Invalid)?
+        & !(PAGE - 1);
+    let end = start
+        .checked_add(rounded)
+        .filter(|end| start >= crate::arch::USER_WINDOW.0 && *end <= crate::arch::USER_WINDOW.1)
+        .ok_or(CompatErrno::NoMemory)?;
+    let mut page = start;
+    while page < end {
+        if proc::page_flags(pid, page).is_none() {
+            return Err(CompatErrno::NoMemory);
+        }
+        page += PAGE;
+    }
+    Ok(())
+}
+
+fn linux_mbind(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SUPPORTED_FLAGS: u64 = 0xf;
+    let mode = i32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if mode != 0 || args[3] != 0 || args[5] & !SUPPORTED_FLAGS != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    linux_mempolicy_range(pid, args[0], args[1])?;
+    Ok(0)
+}
+
+fn linux_set_mempolicy_home_node(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[3] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let home_node = i32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if home_node != 0 {
+        return Err(CompatErrno::NoEntry);
+    }
+    linux_mempolicy_range(pid, args[0], args[1])?;
     Ok(0)
 }
 
