@@ -307,6 +307,9 @@ struct LinuxKey {
     payload: alloc::vec::Vec<u8>,
     revoked: bool,
     linked: bool,
+    uid: u32,
+    gid: u32,
+    permissions: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -9961,6 +9964,9 @@ fn linux_process_keyring(
         payload: alloc::vec::Vec::new(),
         revoked: false,
         linked: true,
+        uid: 0,
+        gid: 0,
+        permissions: 0x3f3f_3f3f,
     });
     state.process_keyrings.push(LinuxProcessKeyring {
         process,
@@ -10030,6 +10036,9 @@ fn linux_add_key(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         payload,
         revoked: false,
         linked: true,
+        uid: 0,
+        gid: 0,
+        permissions: 0x3f3f_3f3f,
     });
     Ok(serial as u32 as u64)
 }
@@ -10058,6 +10067,8 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const GET_KEYRING_ID: u64 = 0;
     const UPDATE: u64 = 2;
     const REVOKE: u64 = 3;
+    const CHOWN: u64 = 4;
+    const SETPERM: u64 = 5;
     const DESCRIBE: u64 = 6;
     const CLEAR: u64 = 7;
     const LINK: u64 = 8;
@@ -10107,6 +10118,38 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 .find(|key| key.application == application && key.serial == serial)
                 .ok_or(CompatErrno::NoEntry)?;
             key.revoked = true;
+            Ok(0)
+        }
+        CHOWN => {
+            let serial = args[1] as i32;
+            let mut state = COMPAT.lock();
+            let key = state
+                .keys
+                .iter_mut()
+                .find(|key| key.application == application && key.serial == serial)
+                .ok_or(CompatErrno::NoKey)?;
+            if args[2] as u32 != u32::MAX {
+                key.uid = args[2] as u32;
+            }
+            if args[3] as u32 != u32::MAX {
+                key.gid = args[3] as u32;
+            }
+            Ok(0)
+        }
+        SETPERM => {
+            const VALID_PERMISSIONS: u32 = 0x3f3f_3f3f;
+            let permissions = args[2] as u32;
+            if permissions & !VALID_PERMISSIONS != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            let serial = args[1] as i32;
+            let mut state = COMPAT.lock();
+            let key = state
+                .keys
+                .iter_mut()
+                .find(|key| key.application == application && key.serial == serial)
+                .ok_or(CompatErrno::NoKey)?;
+            key.permissions = permissions;
             Ok(0)
         }
         DESCRIBE => {
