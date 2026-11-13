@@ -1212,6 +1212,9 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
             last_thread,
         )
     };
+    if let Some(ticks) = sched::cpu_ticks(task) {
+        let _ = proc::linux_account_exited_thread_cpu(process, ticks);
+    }
     if robust_list != 0 {
         let handled = process_robust_list(process, tid, robust_list);
         crate::kprintln!("[JSR-LINUX-ROBUST] handled={handled} tid={tid}");
@@ -4225,8 +4228,7 @@ fn linux_gettimeofday(args: [u64; 6]) -> Result<u64, CompatErrno> {
 
 /// Reports scheduler-accounted CPU time for the process or current thread.
 ///
-/// 返回进程或当前线程的调度器 CPU 时间；尚未聚合作业终止后的子进程时间，
-/// 因此 `RUSAGE_CHILDREN` 明确返回 ENOSYS，而不是报告伪造的零值。
+/// 返回进程、当前线程或已等待直接子进程的调度器 CPU 时间。
 fn linux_getrusage(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const RUSAGE_SELF: i32 = 0;
     const RUSAGE_CHILDREN: i32 = -1;
@@ -4239,7 +4241,7 @@ fn linux_getrusage(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             linux_tid(pid).ok_or(CompatErrno::NoProcess)?;
             sched::cpu_ticks(task).ok_or(CompatErrno::NoProcess)?
         }
-        RUSAGE_CHILDREN => return Err(CompatErrno::NoSys),
+        RUSAGE_CHILDREN => proc::linux_children_cpu_ticks(pid).ok_or(CompatErrno::NoProcess)?,
         _ => return Err(CompatErrno::Invalid),
     };
     let nanoseconds = ticks.saturating_mul(crate::hrtime::tick_ns());

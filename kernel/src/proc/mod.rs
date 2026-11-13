@@ -107,6 +107,12 @@ struct LinuxProcessState {
     pgid: u32,
     sid: u32,
     nice: i32,
+    /// CPU ticks from direct children already waited and reaped.
+    /// 已等待并回收的直接子进程累计 CPU ticks。
+    child_cpu_ticks: u64,
+    /// CPU ticks retained from threads that have already exited.
+    /// 已退出线程保留的累计 CPU ticks。
+    exited_cpu_ticks: u64,
     /// Authorized directory view used for relative AT_FDCWD resolution.
     cwd: crate::linux_vfs::DirectoryId,
     brk: u64,
@@ -3575,15 +3581,50 @@ pub(crate) fn linux_process_cpu_ticks(pid: ObjId) -> Option<u64> {
             .map(|member| member.task)
             .collect::<Vec<_>>()
     };
-    if tasks.is_empty() {
-        return None;
-    }
-    Some(
-        tasks
-            .into_iter()
-            .filter_map(sched::cpu_ticks)
-            .fold(0u64, u64::saturating_add),
-    )
+    let exited = crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => {
+            process.linux.as_ref().map(|linux| linux.exited_cpu_ticks)
+        }
+        _ => None,
+    })?;
+    Some(tasks.into_iter().filter_map(sched::cpu_ticks).fold(
+        exited,
+        u64::saturating_add,
+    ))
+}
+
+/// Returns the accumulated CPU ticks of direct children already reaped.
+/// 返回已回收直接子进程的累计 CPU ticks。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_children_cpu_ticks(pid: ObjId) -> Option<u64> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process.linux.as_ref().map(|linux| linux.child_cpu_ticks),
+        _ => None,
+    })
+}
+
+/// Adds one reaped direct child's CPU time to the waiting parent.
+/// 将一个已回收直接子进程的 CPU 时间累加到等待父进程。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_account_child_cpu(pid: ObjId, ticks: u64) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux.child_cpu_ticks = linux.child_cpu_ticks.saturating_add(ticks);
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Retains one exiting thread's CPU ticks in its Linux process state.
+/// 将一个退出线程的 CPU ticks 保留到所属 Linux 进程状态。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_account_exited_thread_cpu(pid: ObjId, ticks: u64) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux.exited_cpu_ticks = linux.exited_cpu_ticks.saturating_add(ticks);
+        Ok(())
+    })
+    .is_ok()
 }
 
 /// Resolves one ABI-visible Linux PID to the owning Jasper process object.
@@ -3768,6 +3809,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         pgid: pid,
         sid: pid,
         nice: 0,
+        child_cpu_ticks: 0,
+        exited_cpu_ticks: 0,
         cwd: crate::linux_vfs::DirectoryId::Root,
         brk: crate::arch::USER_WINDOW.0 + 0x1000_0000,
         mmap_next: crate::arch::USER_WINDOW.0 + 0x4000_0000,
@@ -5619,6 +5662,8 @@ pub fn fork_linux_process(
         *linux = state;
         linux.pid = child_pid;
         linux.ppid = parent_linux_pid;
+        linux.child_cpu_ticks = 0;
+        linux.exited_cpu_ticks = 0;
         linux.mappings.clear();
         Ok(())
     });
@@ -5746,6 +5791,8 @@ pub fn vfork_linux_process(
         *linux = state;
         linux.pid = child_pid;
         linux.ppid = parent_linux_pid;
+        linux.child_cpu_ticks = 0;
+        linux.exited_cpu_ticks = 0;
         linux.vfork_parent = Some(VforkParent {
             task: parent_task,
             exec_committed: false,
@@ -6019,6 +6066,10 @@ pub(crate) fn take_linux_child_exit(
             return Ok(None);
         };
         let status = (((code as u32) & 0xff) << 8) as i32;
+        let child_ticks = linux_process_cpu_ticks(candidate).unwrap_or(0);
+        if !linux_account_child_cpu(parent, child_ticks) {
+            return Err(ProcError::NoSuchProcess);
+        }
         let _ = reap(candidate);
         let _ = release_child(parent, candidate);
         return Ok(Some((pid, status)));

@@ -4224,7 +4224,9 @@ impl Scheduler {
 
     /// 任务 `id` 累计运行的 tick 数（不存在时 `None`）。
     pub fn cpu_ticks(&self, id: TaskId) -> Option<u64> {
-        self.historical_slot(id).and_then(|i| self.task(i)).map(|t| t.sched.cpu_ticks)
+        self.historical_slot(id)
+            .and_then(|i| self.task(i))
+            .map(|task| task.sched.cpu_ticks + u64::from(task.on_cpu.is_some()))
     }
 }
 

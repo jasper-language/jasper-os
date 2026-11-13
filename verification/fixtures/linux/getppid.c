@@ -2703,6 +2703,7 @@ int main(void) {
     }
     struct rusage process_usage = {0};
     struct rusage thread_usage = {0};
+    struct rusage child_usage = {0};
     errno = 0;
     int self_usage_result = getrusage(RUSAGE_SELF, &process_usage);
     int self_usage_errno = errno;
@@ -2725,9 +2726,9 @@ int main(void) {
                (long)thread_usage.ru_utime.tv_usec);
         return 360;
     }
-    errno = 0;
-    if (getrusage(RUSAGE_CHILDREN, &process_usage) != -1 ||
-        errno != ENOSYS) {
+    if (getrusage(RUSAGE_CHILDREN, &child_usage) != 0 ||
+        (child_usage.ru_utime.tv_sec == 0 &&
+         child_usage.ru_utime.tv_usec == 0)) {
         return 361;
     }
     errno = 0;
