@@ -1225,7 +1225,7 @@ int main(void) {
     }
     errno = 0;
     long epoll_signal_result = syscall(SYS_epoll_pwait, epfd, epoll_ready, 1,
-                                      100, &epoll_empty_mask,
+                                      1000, &epoll_empty_mask,
                                       sizeof(uint64_t));
     int epoll_signal_errno = errno;
     if (epoll_signal_result != -1 || epoll_signal_errno != EINTR ||

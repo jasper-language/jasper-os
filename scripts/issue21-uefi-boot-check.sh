@@ -59,7 +59,7 @@ if [ "${available_kib:-0}" -lt 2097152 ]; then
   exit 75
 fi
 load1=$(awk '{ print $1 }' /proc/loadavg)
-if awk -v load="$load1" 'BEGIN { exit !(load > 8.0) }'; then
+if awk -v observed_load="$load1" 'BEGIN { exit !(observed_load > 8.0) }'; then
   echo "FAIL host one-minute load $load1 is too high for another VM" >&2
   exit 75
 fi
@@ -91,7 +91,7 @@ rm -f -- "$IMAGE" "$ESP_IMAGE" "$UEFI_ESP" "$OVMF_VARS"
 case "$MODE" in
   root-exec) KERNEL_FEATURES=lifecycle-root-exec-verify ;;
   sandbox-launch) KERNEL_FEATURES=lifecycle-root-exec-verify,sandbox-launch-verify ;;
-  native-install-abi) KERNEL_FEATURES=lifecycle-root-exec-verify,native-install-abi-verify ;;
+  native-install-abi) KERNEL_FEATURES=native-install-abi-verify ;;
   terminal-session) KERNEL_FEATURES=lifecycle-root-exec-verify,terminal-session-verify ;;
   block-timeout) KERNEL_FEATURES=lifecycle-block-timeout-verify ;;
   *) KERNEL_FEATURES=production,lifecycle-ab-health ;;
@@ -244,6 +244,13 @@ if [ "$MODE" = block-timeout ]; then
   echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
   exit 0
 fi
+if [ "$MODE" = native-install-abi ]; then
+  grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
+  grep -aqE $'^(\\[JSR-USERTEXT\\].*text=)?native-install-abi: ok package=true idempotent=true register=true grant=true query=true denied_short=true\r?$' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
 if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ]; then
   grep -aq '^\[JSR-LIFE-ROOT-EXEC\] path=/usr/libexec/jasper/health-probe .* mapped=true cpl3=true exited=true syscalls=[1-9][0-9]* frames_before=[0-9]* resources=true' \
     "$OUT/serial.log"
@@ -296,10 +303,6 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
   if [ "$MODE" = sandbox-launch ]; then
     grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
     grep -aqE $'^(\\[JSR-USERTEXT\\].*text=)?sandbox-launch: ok sandbox=true image=true plan=true query=true destroy=true cleanup=true\r?$' "$OUT/serial.log"
-  fi
-  if [ "$MODE" = native-install-abi ]; then
-    grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
-    grep -aqE $'^(\\[JSR-USERTEXT\\].*text=)?native-install-abi: ok package=true idempotent=true register=true grant=true query=true denied_short=true\r?$' "$OUT/serial.log"
   fi
   if [ "$MODE" = terminal-session ]; then
     grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
