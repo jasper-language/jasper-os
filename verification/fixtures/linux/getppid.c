@@ -3992,6 +3992,41 @@ int main(void) {
         errno != EFAULT) {
         return 516;
     }
+    int splice_source_pipe[2];
+    int splice_dest_pipe[2];
+    char splice_readback[8] = {0};
+    if (pipe(splice_source_pipe) != 0 || pipe(splice_dest_pipe) != 0 ||
+        write(splice_source_pipe[1], "splice", 6) != 6 ||
+        syscall(SYS_splice, splice_source_pipe[0], NULL,
+                splice_dest_pipe[1], NULL, 6, 0) != 6 ||
+        read(splice_dest_pipe[0], splice_readback, 6) != 6 ||
+        memcmp(splice_readback, "splice", 6) != 0) {
+        return 517;
+    }
+    int splice_file =
+        syscall(SYS_open, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                O_RDONLY | O_CLOEXEC, 0);
+    off_t splice_offset = 0;
+    memset(splice_readback, 0, sizeof(splice_readback));
+    if (splice_file < 0 ||
+        syscall(SYS_splice, splice_file, &splice_offset,
+                splice_source_pipe[1], NULL, 4, 0) != 4 ||
+        splice_offset != 4 ||
+        read(splice_source_pipe[0], splice_readback, 4) != 4 ||
+        memcmp(splice_readback, "\177ELF", 4) != 0) {
+        return 518;
+    }
+    errno = 0;
+    if (syscall(SYS_splice, splice_file, &splice_offset,
+                splice_source_pipe[1], NULL, 4, 0x10) != -1 ||
+        errno != EINVAL ||
+        close(splice_file) != 0 ||
+        close(splice_source_pipe[0]) != 0 ||
+        close(splice_source_pipe[1]) != 0 ||
+        close(splice_dest_pipe[0]) != 0 ||
+        close(splice_dest_pipe[1]) != 0) {
+        return 519;
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);
