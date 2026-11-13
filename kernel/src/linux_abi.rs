@@ -3967,7 +3967,7 @@ fn linux_vectored_file_io(
     Ok(read as u64)
 }
 
-/// Implements same-process `process_vm_readv/writev` without ptrace authority.
+/// Implements same-application `process_vm_readv/writev` without ptrace authority.
 fn linux_process_vm_io(
     pid: ObjId,
     args: [u64; 6],
@@ -3979,7 +3979,11 @@ fn linux_process_vm_io(
     }
     let target_pid = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
     let target = proc::linux_process_for_pid(target_pid).ok_or(CompatErrno::NoProcess)?;
-    if target != pid {
+    let caller_application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let target_application =
+        crate::security::process_application(target).ok_or(CompatErrno::NoProcess)?;
+    if target != pid && caller_application != target_application {
         return Err(CompatErrno::Perm);
     }
     let local_count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
@@ -3989,10 +3993,10 @@ fn linux_process_vm_io(
     let local_total = local.iter().map(|(_, length)| *length).sum::<usize>();
     let remote_total = remote.iter().map(|(_, length)| *length).sum::<usize>();
     let total = local_total.min(remote_total);
-    let (source, destination) = if write {
-        (&local, &remote)
+    let (source, destination, source_process, destination_process) = if write {
+        (&local, &remote, pid, target)
     } else {
-        (&remote, &local)
+        (&remote, &local, target, pid)
     };
     let mut bytes = alloc::vec![0u8; total];
     let mut offset = 0usize;
@@ -4001,7 +4005,11 @@ fn linux_process_vm_io(
             break;
         }
         let take = (*length).min(total - offset);
-        proc::read(pid, *address, &mut bytes[offset..offset + take])
+        proc::read(
+            source_process,
+            *address,
+            &mut bytes[offset..offset + take],
+        )
             .map_err(|_| CompatErrno::Fault)?;
         offset += take;
     }
@@ -4011,7 +4019,11 @@ fn linux_process_vm_io(
             break;
         }
         let take = (*length).min(total - offset);
-        proc::write(pid, *address, &bytes[offset..offset + take])
+        proc::write(
+            destination_process,
+            *address,
+            &bytes[offset..offset + take],
+        )
             .map_err(|_| CompatErrno::Fault)?;
         offset += take;
     }

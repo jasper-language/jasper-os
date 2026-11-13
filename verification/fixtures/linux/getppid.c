@@ -4627,6 +4627,82 @@ int main(void) {
         memcmp(process_vm_destination, "SEND", 4) != 0) {
         return 515;
     }
+    int process_vm_addresses[2];
+    int process_vm_go[2];
+    if (pipe(process_vm_addresses) != 0 ||
+        pipe(process_vm_go) != 0) {
+        return 706;
+    }
+    pid_t process_vm_child = fork();
+    if (process_vm_child < 0) {
+        return 706;
+    }
+    if (process_vm_child == 0) {
+        close(process_vm_addresses[0]);
+        close(process_vm_go[1]);
+        char remote_source[] = "XPROC";
+        char remote_destination[8] = {0};
+        struct {
+            uintptr_t source;
+            uintptr_t destination;
+        } addresses = {
+            .source = (uintptr_t)remote_source,
+            .destination = (uintptr_t)remote_destination,
+        };
+        if (write(process_vm_addresses[1], &addresses,
+                  sizeof(addresses)) != (ssize_t)sizeof(addresses)) {
+            _exit(1);
+        }
+        char go = 0;
+        if (read(process_vm_go[0], &go, 1) != 1 || go != 'G') {
+            _exit(2);
+        }
+        _exit(memcmp(remote_destination, "SEND2", 5) == 0 ? 0 : 3);
+    }
+    close(process_vm_addresses[1]);
+    close(process_vm_go[0]);
+    struct {
+        uintptr_t source;
+        uintptr_t destination;
+    } child_addresses = {0};
+    char process_vm_remote_copy[6] = {0};
+    if (read(process_vm_addresses[0], &child_addresses,
+             sizeof(child_addresses)) !=
+            (ssize_t)sizeof(child_addresses) ||
+        close(process_vm_addresses[0]) != 0) {
+        return 706;
+    }
+    struct iovec cross_local = {
+        .iov_base = process_vm_remote_copy,
+        .iov_len = 5,
+    };
+    struct iovec cross_remote = {
+        .iov_base = (void *)child_addresses.source,
+        .iov_len = 5,
+    };
+    if (syscall(SYS_process_vm_readv, process_vm_child,
+                &cross_local, 1, &cross_remote, 1, 0) != 5 ||
+        memcmp(process_vm_remote_copy, "XPROC", 5) != 0) {
+        return 706;
+    }
+    cross_local.iov_base = (void *)"SEND2";
+    cross_local.iov_len = 5;
+    cross_remote.iov_base = (void *)child_addresses.destination;
+    cross_remote.iov_len = 8;
+    if (syscall(SYS_process_vm_writev, process_vm_child,
+                &cross_local, 1, &cross_remote, 1, 0) != 5) {
+        return 706;
+    }
+    char process_vm_go_byte = 'G';
+    int process_vm_child_status = 0;
+    if (write(process_vm_go[1], &process_vm_go_byte, 1) != 1 ||
+        close(process_vm_go[1]) != 0 ||
+        waitpid(process_vm_child, &process_vm_child_status, 0) !=
+            process_vm_child ||
+        !WIFEXITED(process_vm_child_status) ||
+        WEXITSTATUS(process_vm_child_status) != 0) {
+        return 706;
+    }
     errno = 0;
     if (syscall(SYS_process_vm_readv, getpid(), &process_vm_local, 1,
                 &process_vm_remote, 1, 1) != -1 ||
