@@ -2050,6 +2050,10 @@ fn execute(
         LinuxSyscall::Sigaltstack => compat_result(linux_sigaltstack(pid, call.args)),
         LinuxSyscall::Signalfd => compat_result(linux_signalfd(pid, call.args, false)),
         LinuxSyscall::Signalfd4 => compat_result(linux_signalfd(pid, call.args, true)),
+        LinuxSyscall::InotifyInit => compat_result(linux_inotify_init(pid, call.args, false)),
+        LinuxSyscall::InotifyInit1 => compat_result(linux_inotify_init(pid, call.args, true)),
+        LinuxSyscall::InotifyAddWatch => compat_result(linux_inotify_add_watch(pid, call.args)),
+        LinuxSyscall::InotifyRmWatch => compat_result(linux_inotify_rm_watch(pid, call.args)),
         LinuxSyscall::Kill => compat_result(linux_kill(pid, call.args).map(|()| 0)),
         LinuxSyscall::Uname => compat_result(linux_uname(call.args)),
         LinuxSyscall::GetPid => proc::linux_pid(pid)
@@ -2622,6 +2626,9 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         if entry.kind == compat_core::fd::CompatKind::Signal {
             return linux_signalfd_read(pid, fd, entry.handle, args[1], len);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Inotify {
+            return linux_inotify_read(pid, fd);
         }
         if entry.kind == compat_core::fd::CompatKind::Socket {
             if !entry.rights.contains(kernel_core::object::Rights::READ) {
@@ -5652,6 +5659,152 @@ fn linux_signalfd_read(
         if nonblocking {
             return Err(CompatErrno::TryAgain);
         }
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        sched::pause();
+    }
+}
+
+/// Resolves one bounded path to a node in the process compatibility namespace.
+fn resolve_linux_path_node(pid: ObjId, address: u64) -> Result<crate::linux_vfs::Node, CompatErrno> {
+    let path = linux_c_string(address, 4096)?;
+    let resolved = if path.starts_with(b"/") {
+        path
+    } else {
+        if path == b".."
+            || path.starts_with(b"../")
+            || path.windows(4).any(|window| window == b"/../")
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        let base = proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path();
+        if path == b"." {
+            base.to_vec()
+        } else {
+            let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
+            resolved.extend_from_slice(base);
+            if !base.ends_with(b"/") {
+                resolved.push(b'/');
+            }
+            resolved.extend_from_slice(&path);
+            resolved
+        }
+    };
+    crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)
+}
+
+/// Creates one bounded inotify instance.
+fn linux_inotify_init(
+    pid: ObjId,
+    args: [u64; 6],
+    modern: bool,
+) -> Result<u64, CompatErrno> {
+    const IN_NONBLOCK: u64 = 0x800;
+    const IN_CLOEXEC: u64 = 0x80000;
+    let flags = if modern { args[0] } else { 0 };
+    if flags & !(IN_NONBLOCK | IN_CLOEXEC) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    proc::linux_inotify_create(
+        pid,
+        flags & IN_CLOEXEC != 0,
+        flags & IN_NONBLOCK != 0,
+    )
+    .map(u64::from)
+    .ok_or(CompatErrno::NoSpace)
+}
+
+/// Adds or updates one inotify watch on a static compatibility node.
+fn linux_inotify_add_watch(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const IN_ONLYDIR: u32 = 0x0100_0000;
+    const IN_DONT_FOLLOW: u32 = 0x0200_0000;
+    const IN_EXCL_UNLINK: u32 = 0x0400_0000;
+    const IN_MASK_CREATE: u32 = 0x1000_0000;
+    const IN_MASK_ADD: u32 = 0x2000_0000;
+    const IN_ONESHOT: u32 = 0x8000_0000;
+    const IN_ALL_EVENTS: u32 = 0x0fff;
+    const IN_CONTROL: u32 = IN_ONLYDIR
+        | IN_DONT_FOLLOW
+        | IN_EXCL_UNLINK
+        | IN_MASK_CREATE
+        | IN_MASK_ADD
+        | IN_ONESHOT;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Inotify {
+        return Err(CompatErrno::BadFd);
+    }
+    let mask = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if mask == 0
+        || mask & !(IN_ALL_EVENTS | IN_CONTROL) != 0
+        || mask & IN_ALL_EVENTS == 0
+        || mask & IN_MASK_CREATE != 0 && mask & IN_MASK_ADD != 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let node = resolve_linux_path_node(pid, args[1])?;
+    if mask & IN_ONLYDIR != 0 && !node.is_directory() {
+        return Err(CompatErrno::NotDirectory);
+    }
+    let watches = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let mut watches = watches.lock();
+    if let Some(watch) = watches.iter_mut().find(|watch| watch.node == node) {
+        if mask & IN_MASK_CREATE != 0 {
+            return Err(CompatErrno::Exists);
+        }
+        let stored_mask = mask & !(IN_MASK_CREATE | IN_MASK_ADD);
+        watch.mask = if mask & IN_MASK_ADD != 0 {
+            watch.mask | stored_mask
+        } else {
+            stored_mask
+        };
+        return Ok(watch.wd as u64);
+    }
+    if watches.len() >= 64 {
+        return Err(CompatErrno::NoSpace);
+    }
+    let wd = (1..=64)
+        .find(|candidate| !watches.iter().any(|watch| watch.wd == *candidate))
+        .ok_or(CompatErrno::NoSpace)?;
+    watches
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    watches.push(proc::LinuxInotifyWatch {
+        wd,
+        node,
+        mask: mask & !(IN_MASK_CREATE | IN_MASK_ADD),
+    });
+    Ok(wd as u64)
+}
+
+/// Removes one watch descriptor from an inotify instance.
+fn linux_inotify_rm_watch(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Inotify {
+        return Err(CompatErrno::BadFd);
+    }
+    let wd = i32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if wd <= 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let watches = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let mut watches = watches.lock();
+    let Some(index) = watches.iter().position(|watch| watch.wd == wd) else {
+        return Err(CompatErrno::Invalid);
+    };
+    watches.remove(index);
+    Ok(0)
+}
+
+/// Blocks or returns `EAGAIN` for an inotify fd on the immutable root namespace.
+fn linux_inotify_read(pid: ObjId, fd: u32) -> Result<u64, CompatErrno> {
+    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    if nonblocking {
+        return Err(CompatErrno::TryAgain);
+    }
+    loop {
         if proc::current_exiting() || current_signal_pending(pid) {
             return Err(CompatErrno::Interrupted);
         }
@@ -9282,6 +9435,7 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                         0
                     }
                 }
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::Inotify => 0,
                 Some(entry) if entry.handle == proc::LINUX_CONSOLE_HANDLE => {
                     let (pending, ended, failed) = crate::terminal::input_status();
                     let mut ready = 0;

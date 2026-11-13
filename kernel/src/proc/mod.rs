@@ -94,6 +94,8 @@ const LINUX_SYNC_FILE_HANDLE_BASE: u64 = 0x0000_8800_0000_0000;
 const LINUX_TIMERFD_HANDLE_BASE: u64 = 0x0000_8900_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_SIGNALFD_HANDLE_BASE: u64 = 0x0000_8a00_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_INOTIFY_HANDLE_BASE: u64 = 0x0000_8b00_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -143,6 +145,8 @@ struct LinuxProcessState {
     next_timerfd_handle: u64,
     signalfds: Vec<LinuxSignalFdHandle>,
     next_signalfd_handle: u64,
+    inotifies: Vec<LinuxInotifyHandle>,
+    next_inotify_handle: u64,
     epolls: Vec<LinuxEpollHandle>,
     next_epoll_handle: u64,
     iourings: Vec<LinuxIoUringHandle>,
@@ -245,6 +249,21 @@ struct LinuxSignalFdHandle {
 }
 
 #[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxInotifyWatch {
+    pub(crate) wd: i32,
+    pub(crate) node: crate::linux_vfs::Node,
+    pub(crate) mask: u32,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxInotifyHandle {
+    handle: u64,
+    watches: Arc<SpinLock<Vec<LinuxInotifyWatch>>>,
+}
+
+#[cfg(feature = "linux-abi")]
 #[derive(Clone)]
 struct LinuxEpollHandle {
     handle: u64,
@@ -295,6 +314,7 @@ enum LinuxFdResource {
     EventFd(LinuxEventFdHandle),
     TimerFd(LinuxTimerFdHandle),
     SignalFd(LinuxSignalFdHandle),
+    Inotify(Arc<SpinLock<Vec<LinuxInotifyWatch>>>),
     Socket {
         endpoint: Arc<compat_core::UnixSocketEndpoint>,
         listener: Option<Arc<UnixListener>>,
@@ -1432,6 +1452,15 @@ pub(crate) fn linux_capture_fd_transfer(
                         .ok_or(LinuxFdTransferError::Invalid)?;
                     LinuxFdResource::SignalFd(signalfd)
                 }
+                compat_core::fd::CompatKind::Inotify => {
+                    let inotify = linux
+                        .inotifies
+                        .iter()
+                        .find(|inotify| inotify.handle == entry.handle)
+                        .map(|inotify| Arc::clone(&inotify.watches))
+                        .ok_or(LinuxFdTransferError::Invalid)?;
+                    LinuxFdResource::Inotify(inotify)
+                }
                 compat_core::fd::CompatKind::Device
                     if entry.handle >= LINUX_ASHMEM_HANDLE_BASE =>
                 {
@@ -1486,6 +1515,19 @@ pub(crate) fn linux_install_fd_transfer(
                 description,
                 resource,
             } = transfer;
+            let pending_inotify = match &resource {
+                LinuxFdResource::Inotify(watches) => Some(Arc::clone(watches)),
+                _ => None,
+            };
+            let inotify_handle = if pending_inotify.is_some() {
+                linux
+                    .inotifies
+                    .try_reserve(1)
+                    .map_err(|_| LinuxFdTransferError::NoSpace)?;
+                Some(linux.next_inotify_handle)
+            } else {
+                None
+            };
             let (
                 handle,
                 pending_pipe,
@@ -1629,6 +1671,19 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                     )
                 }
+                LinuxFdResource::Inotify(_) => {
+                    (
+                        inotify_handle.ok_or(LinuxFdTransferError::NoSpace)?,
+                        None,
+                        None,
+                        None,
+                        false,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                }
                 LinuxFdResource::Socket {
                     endpoint,
                     listener,
@@ -1712,6 +1767,13 @@ pub(crate) fn linux_install_fd_transfer(
                 signalfd.handle = handle;
                 linux.next_signalfd_handle = next;
                 linux.signalfds.push(signalfd);
+            }
+            if let Some(watches) = pending_inotify {
+                let next = handle
+                    .checked_add(1)
+                    .ok_or(LinuxFdTransferError::NoSpace)?;
+                linux.next_inotify_handle = next;
+                linux.inotifies.push(LinuxInotifyHandle { handle, watches });
             }
             if let Some((endpoint, listener, controls)) = pending_socket {
                 let next = handle
@@ -1898,6 +1960,9 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     }
     if handle >= LINUX_SIGNALFD_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.signalfds.retain(|signalfd| signalfd.handle != handle);
+    }
+    if handle >= LINUX_INOTIFY_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+        linux.inotifies.retain(|inotify| inotify.handle != handle);
     }
     if handle >= LINUX_EPOLL_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.epolls.retain(|epoll| epoll.handle != handle);
@@ -2219,6 +2284,68 @@ pub(crate) fn linux_signalfd_state(
             .iter()
             .find(|signalfd| signalfd.handle == handle)
             .map(|signalfd| Arc::clone(&signalfd.mask)),
+        _ => None,
+    })
+}
+
+/// Creates one bounded inotify instance shared across inherited descriptors.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_inotify_create(
+    pid: ObjId,
+    close_on_exec: bool,
+    nonblocking: bool,
+) -> Option<u32> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.inotifies.len() >= 8 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .inotifies
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_inotify_handle;
+        linux.next_inotify_handle = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ,
+                compat_core::fd::CompatKind::Inotify,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        if nonblocking
+            && !linux
+                .fds
+                .set_fd_status_flags(fd.fd(), compat_core::syscall::LINUX_O_NONBLOCK)
+        {
+            let _ = linux.fds.close(fd);
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux.inotifies.push(LinuxInotifyHandle {
+            handle,
+            watches: Arc::new(SpinLock::new(Vec::new())),
+        });
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Returns the shared watch set for one inotify handle.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_inotify_state(
+    pid: ObjId,
+    handle: u64,
+) -> Option<Arc<SpinLock<Vec<LinuxInotifyWatch>>>> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .inotifies
+            .iter()
+            .find(|inotify| inotify.handle == handle)
+            .map(|inotify| Arc::clone(&inotify.watches)),
         _ => None,
     })
 }
@@ -3982,6 +4109,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         next_timerfd_handle: LINUX_TIMERFD_HANDLE_BASE,
         signalfds: Vec::new(),
         next_signalfd_handle: LINUX_SIGNALFD_HANDLE_BASE,
+        inotifies: Vec::new(),
+        next_inotify_handle: LINUX_INOTIFY_HANDLE_BASE,
         epolls: Vec::new(),
         next_epoll_handle: LINUX_EPOLL_HANDLE_BASE,
         iourings: Vec::new(),

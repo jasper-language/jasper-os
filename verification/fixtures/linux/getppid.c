@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/inotify.h>
 #include <sys/eventfd.h>
 #include <sys/epoll.h>
 #include <sys/file.h>
@@ -3640,6 +3641,46 @@ int main(void) {
     if (syscall(SYS_pidfd_open, getpid(), 1) != -1 ||
         errno != EINVAL) {
         return 479;
+    }
+    int inotify_fd =
+        syscall(SYS_inotify_init1, IN_NONBLOCK | IN_CLOEXEC);
+    int inotify_legacy_fd = syscall(SYS_inotify_init);
+    if (inotify_fd < 0 || inotify_legacy_fd < 0 ||
+        (fcntl(inotify_fd, F_GETFD) & FD_CLOEXEC) == 0 ||
+        close(inotify_legacy_fd) != 0) {
+        return 480;
+    }
+    int inotify_wd =
+        syscall(SYS_inotify_add_watch, inotify_fd, xattr_path,
+                IN_MODIFY | IN_ATTRIB);
+    if (inotify_wd <= 0 ||
+        syscall(SYS_inotify_add_watch, inotify_fd, xattr_path,
+                IN_MODIFY | IN_MASK_ADD) != inotify_wd) {
+        return 481;
+    }
+    char inotify_event[128];
+    errno = 0;
+    if (read(inotify_fd, inotify_event, sizeof(inotify_event)) != -1 ||
+        errno != EAGAIN ||
+        syscall(SYS_inotify_rm_watch, inotify_fd, inotify_wd) != 0) {
+        return 482;
+    }
+    errno = 0;
+    if (syscall(SYS_inotify_rm_watch, inotify_fd, inotify_wd) != -1 ||
+        errno != EINVAL) {
+        return 483;
+    }
+    errno = 0;
+    if (syscall(SYS_inotify_add_watch, inotify_fd, "/missing-inotify",
+                IN_MODIFY) != -1 ||
+        errno != ENOENT ||
+        close(inotify_fd) != 0) {
+        return 485;
+    }
+    errno = 0;
+    if (syscall(SYS_inotify_init1, 0x400000) != -1 ||
+        errno != EINVAL) {
+        return 484;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
