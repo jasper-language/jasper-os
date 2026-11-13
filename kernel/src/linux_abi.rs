@@ -2088,6 +2088,7 @@ fn execute(
             proc::thread_exit(code, "linux process exit")
         }
         LinuxSyscall::Wait4 => compat_result(linux_wait4(pid, call.args)),
+        LinuxSyscall::WaitId => compat_result(linux_waitid(pid, call.args)),
         _ => -i64::from(CompatErrno::NoSys as i32),
     }
 }
@@ -4084,6 +4085,55 @@ fn linux_wait4(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 return Ok(u64::from(child_pid));
             }
             Ok(None) if args[2] & WNOHANG != 0 => return Ok(0),
+            Ok(None) => proc::block_step().map_err(|_| CompatErrno::Interrupted)?,
+            Err(_) => return Err(CompatErrno::NoChild),
+        }
+    }
+}
+
+/// Implements `waitid(2)` for exited children and the `WNOHANG` probe.
+fn linux_waitid(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const P_ALL: u32 = 0;
+    const P_PID: u32 = 1;
+    const WNOHANG: u64 = 0x1;
+    const WEXITED: u64 = 0x4;
+    const WNOWAIT: u64 = 0x0100_0000;
+    let id_type = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let target = match id_type {
+        P_ALL => None,
+        P_PID => {
+            let target = u32::try_from(args[1]).map_err(|_| CompatErrno::NoProcess)?;
+            if target == 0 {
+                return Err(CompatErrno::NoProcess);
+            }
+            Some(target)
+        }
+        _ => return Err(CompatErrno::NotSupported),
+    };
+    let options = args[3];
+    if args[2] == 0 {
+        return Err(CompatErrno::Fault);
+    }
+    if options & WNOWAIT != 0 || args[4] != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    if options & !(WNOHANG | WEXITED) != 0 || options & WEXITED == 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    let zero = [0u8; 128];
+    copy_to_user(args[2], &zero, zero.len()).map_err(|_| CompatErrno::Fault)?;
+    loop {
+        match proc::take_linux_child_exit(pid, target) {
+            Ok(Some((child_pid, status))) => {
+                let mut info = [0u8; 128];
+                info[0..4].copy_from_slice(&17u32.to_le_bytes());
+                info[8..12].copy_from_slice(&1i32.to_le_bytes());
+                info[16..20].copy_from_slice(&child_pid.to_le_bytes());
+                info[24..28].copy_from_slice(&((status >> 8) & 0xff).to_le_bytes());
+                copy_to_user(args[2], &info, info.len()).map_err(|_| CompatErrno::Fault)?;
+                return Ok(0);
+            }
+            Ok(None) if options & WNOHANG != 0 => return Ok(0),
             Ok(None) => proc::block_step().map_err(|_| CompatErrno::Interrupted)?,
             Err(_) => return Err(CompatErrno::NoChild),
         }

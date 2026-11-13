@@ -3227,6 +3227,57 @@ int main(void) {
         WEXITSTATUS(pause_child_status) != 0) {
         return 429;
     }
+    pid_t waitid_child = fork();
+    if (waitid_child < 0) {
+        return 430;
+    }
+    if (waitid_child == 0) {
+        _exit(42);
+    }
+    siginfo_t waitid_info = {0};
+    if (syscall(SYS_waitid, P_PID, waitid_child, &waitid_info,
+                WEXITED, NULL) != 0 ||
+        waitid_info.si_pid != waitid_child ||
+        waitid_info.si_status != 42 ||
+        waitid_info.si_code != CLD_EXITED) {
+        return 431;
+    }
+    memset(&waitid_info, 0xff, sizeof(waitid_info));
+    errno = 0;
+    if (syscall(SYS_waitid, P_ALL, 0, &waitid_info,
+                WEXITED | WNOHANG, NULL) != -1 ||
+        errno != ECHILD) {
+        return 432;
+    }
+    pid_t waitid_live_child = fork();
+    if (waitid_live_child < 0) {
+        return 435;
+    }
+    if (waitid_live_child == 0) {
+        pause();
+        _exit(1);
+    }
+    memset(&waitid_info, 0xff, sizeof(waitid_info));
+    if (syscall(SYS_waitid, P_PID, waitid_live_child, &waitid_info,
+                WEXITED | WNOHANG, NULL) != 0 ||
+        waitid_info.si_pid != 0 ||
+        waitid_info.si_status != 0 ||
+        kill(waitid_live_child, SIGTERM) != 0 ||
+        waitpid(waitid_live_child, NULL, 0) != waitid_live_child) {
+        return 436;
+    }
+    errno = 0;
+    if (syscall(SYS_waitid, P_PGID, 0, &waitid_info,
+                WEXITED, NULL) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 433;
+    }
+    errno = 0;
+    if (syscall(SYS_waitid, P_ALL, 0, &waitid_info,
+                WEXITED | WNOWAIT, NULL) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 434;
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);

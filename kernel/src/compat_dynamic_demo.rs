@@ -266,6 +266,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Rseq,
         LinuxSyscall::Prlimit64,
         LinuxSyscall::Wait4,
+        LinuxSyscall::WaitId,
     ])
 }
 

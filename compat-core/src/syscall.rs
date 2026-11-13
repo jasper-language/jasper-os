@@ -48,7 +48,7 @@ use linux_raw_sys::general::{
     __NR_timer_settime, __NR_timerfd_create, __NR_timerfd_gettime, __NR_timerfd_settime,
     __NR_times, __NR_truncate,
     __NR_uname, __NR_utime,
-    __NR_utimensat, __NR_utimes, __NR_vfork, __NR_wait4, __NR_write, __NR_writev,
+    __NR_utimensat, __NR_utimes, __NR_vfork, __NR_wait4, __NR_waitid, __NR_write, __NR_writev,
 };
 
 /// Linux x86_64 futex syscall number for restart policy.
@@ -300,6 +300,9 @@ pub enum LinuxSyscall {
     /// Wait for one Linux child process.
     /// 等待一个 Linux 子进程。
     Wait4,
+    /// Wait for a selected Linux child event through the siginfo ABI.
+    /// 通过 siginfo ABI 等待选定的 Linux 子进程事件。
+    WaitId,
     /// Create a child that shares the parent's address space while the parent waits.
     /// 创建共享父地址空间的子进程；父进程在子进程 exec 或退出前保持暂停。
     Vfork,
@@ -343,7 +346,7 @@ impl LinuxSyscallSet {
     }
 }
 
-const _: () = assert!((LinuxSyscall::Wait4 as usize) < LinuxSyscallSet::BITS);
+const _: () = assert!((LinuxSyscall::WaitId as usize) < LinuxSyscallSet::BITS);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LinuxCall {
@@ -629,6 +632,7 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_io_uring_enter) => LinuxSyscall::IoUringEnter,
         value if value == u64::from(__NR_io_uring_register) => LinuxSyscall::IoUringRegister,
         value if value == u64::from(__NR_wait4) => LinuxSyscall::Wait4,
+        value if value == u64::from(__NR_waitid) => LinuxSyscall::WaitId,
         value if value == u64::from(__NR_vfork) => LinuxSyscall::Vfork,
         number => return SyscallDispatch::Unsupported { number },
     };
@@ -831,6 +835,7 @@ mod tests {
             (__NR_io_uring_enter, LinuxSyscall::IoUringEnter),
             (__NR_io_uring_register, LinuxSyscall::IoUringRegister),
             (__NR_wait4, LinuxSyscall::Wait4),
+            (__NR_waitid, LinuxSyscall::WaitId),
             (__NR_vfork, LinuxSyscall::Vfork),
         ];
         for (number, syscall) in expected {
