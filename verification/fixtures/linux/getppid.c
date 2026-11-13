@@ -713,6 +713,20 @@ int main(void) {
         close(mount_tree_fd) != 0) {
         return 635;
     }
+    int attributed_tree_fd = syscall(SYS_open_tree_attr, AT_FDCWD, "/",
+                                     OPEN_TREE_CLOEXEC,
+                                     &mount_attributes,
+                                     sizeof(mount_attributes));
+    if (attributed_tree_fd < 0 || close(attributed_tree_fd) != 0) {
+        return 643;
+    }
+    mount_attributes.attr_set = MOUNT_ATTR_RDONLY;
+    errno = 0;
+    if (syscall(SYS_open_tree_attr, AT_FDCWD, "/", OPEN_TREE_CLOEXEC,
+                &mount_attributes, sizeof(mount_attributes)) != -1 ||
+        errno != EROFS) {
+        return 644;
+    }
     int fs_context_fd = syscall(SYS_fsopen, "jasperfs", FSOPEN_CLOEXEC);
     if (fs_context_fd < 0 ||
         syscall(SYS_fsconfig, fs_context_fd,
@@ -4546,7 +4560,7 @@ int main(void) {
         SYS_landlock_create_ruleset, SYS_landlock_add_rule,
         SYS_landlock_restrict_self, SYS_listns,
         SYS_lsm_set_self_attr,
-        SYS_map_shadow_stack, SYS_open_tree_attr,
+        SYS_map_shadow_stack,
         SYS_uprobe, SYS_uretprobe, SYS_userfaultfd,
     };
     for (size_t index = 0;

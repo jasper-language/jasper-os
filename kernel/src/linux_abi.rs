@@ -2677,6 +2677,7 @@ fn execute(
         LinuxSyscall::OpenByHandleAt => compat_result(linux_open_by_handle_at(pid, call.args)),
         LinuxSyscall::LsmGetSelfAttr => compat_result(linux_lsm_get_self_attr(pid, call.args)),
         LinuxSyscall::OpenTree => compat_result(linux_open_tree(pid, call.args)),
+        LinuxSyscall::OpenTreeAttr => compat_result(linux_open_tree_attr(pid, call.args)),
         LinuxSyscall::MoveMount => compat_result(linux_move_mount(pid, call.args)),
         LinuxSyscall::MountSetattr => compat_result(linux_mount_setattr(pid, call.args)),
         LinuxSyscall::FsOpen => compat_result(linux_fsopen(pid, call.args)),
@@ -2702,7 +2703,6 @@ fn execute(
         | LinuxSyscall::Listns
         | LinuxSyscall::LsmSetSelfAttr
         | LinuxSyscall::MapShadowStack
-        | LinuxSyscall::OpenTreeAttr
         | LinuxSyscall::Uprobe
         | LinuxSyscall::Uretprobe
         | LinuxSyscall::Userfaultfd => -(CompatErrno::NotSupported as i32 as i64),
@@ -9518,6 +9518,30 @@ fn linux_open_tree(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     proc::linux_install_mount_tree(pid, flags & OPEN_TREE_CLOEXEC != 0)
         .map(u64::from)
         .ok_or(CompatErrno::NoSpace)
+}
+
+fn linux_open_tree_attr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const KNOWN_ATTRIBUTES: u64 = 0x0020_03bf;
+    if args[3] == 0 {
+        if args[4] != 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        return linux_open_tree(pid, args);
+    }
+    if args[4] < 32 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut attributes = [0u8; 32];
+    copy_from_user(&mut attributes, args[3], 32).map_err(|_| CompatErrno::Fault)?;
+    let set = u64::from_le_bytes(attributes[..8].try_into().unwrap());
+    let clear = u64::from_le_bytes(attributes[8..16].try_into().unwrap());
+    if set & !KNOWN_ATTRIBUTES != 0 || clear & !KNOWN_ATTRIBUTES != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if set != 0 || clear != 0 {
+        return Err(CompatErrno::ReadOnly);
+    }
+    linux_open_tree(pid, args)
 }
 
 fn linux_validate_mount_tree_target(pid: ObjId, raw_fd: u64) -> Result<(), CompatErrno> {
