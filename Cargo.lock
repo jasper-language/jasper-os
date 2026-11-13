@@ -816,6 +816,7 @@ dependencies = [
  "jasper-compat-core",
  "jasper-compat-loader",
  "jasper-lifecycle-boot",
+ "jasper-lifecycle-model",
  "kernel-core",
  "noto-sans-mono-bitmap",
  "pic8259",
@@ -1948,6 +1949,14 @@ dependencies = [
 
 [[package]]
 name = "user-rtdemo"
+version = "0.1.0"
+dependencies = [
+ "jasper-rt",
+ "kernel-core",
+]
+
+[[package]]
+name = "user-sandboxprobe"
 version = "0.1.0"
 dependencies = [
  "jasper-rt",

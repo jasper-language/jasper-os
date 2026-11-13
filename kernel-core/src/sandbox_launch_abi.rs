@@ -28,7 +28,8 @@ const DATA_OFFSET: usize = DEVICES_OFFSET + MAX_DEVICE_GRANTS * GRANT_BYTES;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LaunchCreateArgs {
     pub sandbox: SandboxKey,
-    pub root: WorkloadKey,
+    /// Optional caller hint. Zero asks the kernel to derive the Sandbox root.
+    pub root: Option<WorkloadKey>,
     pub image: ImageKey,
     pub volume: Option<VolumeKey>,
     pub root_capabilities: CapabilitySet,
@@ -52,7 +53,7 @@ impl LaunchCreateArgs {
         out[0..4].copy_from_slice(&MAGIC.to_le_bytes());
         out[4..6].copy_from_slice(&VERSION.to_le_bytes());
         out[8..16].copy_from_slice(&self.sandbox.to_raw().to_le_bytes());
-        out[16..24].copy_from_slice(&self.root.to_raw().to_le_bytes());
+        out[16..24].copy_from_slice(&self.root.map_or(0, WorkloadKey::to_raw).to_le_bytes());
         out[24..32].copy_from_slice(&self.image.to_raw().to_le_bytes());
         out[32..40].copy_from_slice(&self.volume.map_or(0, VolumeKey::to_raw).to_le_bytes());
         out[40..48].copy_from_slice(&self.root_capabilities.raw().to_le_bytes());
@@ -146,7 +147,10 @@ impl LaunchCreateArgs {
         }
         Some(Self {
             sandbox: SandboxKey::from_raw(read_u64(raw, 8)?)?,
-            root: WorkloadKey::from_raw(read_u64(raw, 16)?)?,
+            root: match read_u64(raw, 16)? {
+                0 => None,
+                raw => Some(WorkloadKey::from_raw(raw)?),
+            },
             image: ImageKey::from_raw(read_u64(raw, 24)?)?,
             volume,
             root_capabilities: CapabilitySet::new(read_u64(raw, 40)?)?,
@@ -264,55 +268,45 @@ const EMPTY_DATA: DataScopeGrant = DataScopeGrant {
 };
 
 fn decode_device(raw: &[u8], at: usize) -> Option<DeviceGrant> {
+    if raw[at + 8..at + 16].iter().any(|byte| *byte != 0) {
+        return None;
+    }
     Some(DeviceGrant {
         object: read_u64(raw, at)?,
-        owner: decode_domain(raw, at + 8)?,
-        grantee: decode_domain(raw, at + 16)?,
+        owner: DomainKey::NONE,
+        grantee: DomainKey::NONE,
         generation: read_u32(raw, at + 24)?,
         rights: read_u32(raw, at + 28)?,
     })
 }
 
 fn decode_data(raw: &[u8], at: usize) -> Option<DataScopeGrant> {
+    if raw[at + 8..at + 16].iter().any(|byte| *byte != 0) {
+        return None;
+    }
     let writable = read_u32(raw, at + 28)?;
     if writable > 1 {
         return None;
     }
     Some(DataScopeGrant {
         object: read_u64(raw, at)?,
-        owner: decode_domain(raw, at + 8)?,
-        grantee: decode_domain(raw, at + 16)?,
+        owner: DomainKey::NONE,
+        grantee: DomainKey::NONE,
         generation: read_u32(raw, at + 24)?,
         writable: writable == 1,
     })
 }
 
-fn decode_domain(raw: &[u8], at: usize) -> Option<DomainKey> {
-    Some(DomainKey {
-        id: read_u32(raw, at)?,
-        generation: read_u32(raw, at + 4)?,
-    })
-}
-
 fn encode_device(raw: &mut [u8], at: usize, grant: DeviceGrant) {
     raw[at..at + 8].copy_from_slice(&grant.object.to_le_bytes());
-    encode_domain(raw, at + 8, grant.owner);
-    encode_domain(raw, at + 16, grant.grantee);
     raw[at + 24..at + 28].copy_from_slice(&grant.generation.to_le_bytes());
     raw[at + 28..at + 32].copy_from_slice(&grant.rights.to_le_bytes());
 }
 
 fn encode_data(raw: &mut [u8], at: usize, grant: DataScopeGrant) {
     raw[at..at + 8].copy_from_slice(&grant.object.to_le_bytes());
-    encode_domain(raw, at + 8, grant.owner);
-    encode_domain(raw, at + 16, grant.grantee);
     raw[at + 24..at + 28].copy_from_slice(&grant.generation.to_le_bytes());
     raw[at + 28..at + 32].copy_from_slice(&u32::from(grant.writable).to_le_bytes());
-}
-
-fn encode_domain(raw: &mut [u8], at: usize, domain: DomainKey) {
-    raw[at..at + 4].copy_from_slice(&domain.id.to_le_bytes());
-    raw[at + 4..at + 8].copy_from_slice(&domain.generation.to_le_bytes());
 }
 
 fn read_u16(raw: &[u8], at: usize) -> Option<u16> {
@@ -334,7 +328,7 @@ mod tests {
     fn args() -> LaunchCreateArgs {
         LaunchCreateArgs {
             sandbox: SandboxKey::from_raw((1u64 << 16) | 2).unwrap(),
-            root: WorkloadKey::from_raw((3u64 << 16) | 4).unwrap(),
+            root: Some(WorkloadKey::from_raw((3u64 << 16) | 4).unwrap()),
             image: ImageKey::from_raw((5u64 << 16) | 6).unwrap(),
             volume: Some(VolumeKey::from_raw((7u64 << 16) | 8).unwrap()),
             root_capabilities: CapabilitySet::ALL,
@@ -361,26 +355,14 @@ mod tests {
                 object: 9,
                 generation: 2,
                 rights: 3,
-                owner: DomainKey {
-                    id: 44,
-                    generation: 2,
-                },
-                grantee: DomainKey {
-                    id: 44,
-                    generation: 2,
-                },
+                owner: DomainKey::NONE,
+                grantee: DomainKey::NONE,
             }; MAX_DEVICE_GRANTS],
             data: [DataScopeGrant {
                 object: 10,
                 generation: 3,
-                owner: DomainKey {
-                    id: 44,
-                    generation: 2,
-                },
-                grantee: DomainKey {
-                    id: 44,
-                    generation: 2,
-                },
+                owner: DomainKey::NONE,
+                grantee: DomainKey::NONE,
                 writable: true,
             }; MAX_DATA_SCOPES],
         }
@@ -402,6 +384,14 @@ mod tests {
         assert_eq!(decoded.used_devices(), args.used_devices());
         assert_eq!(decoded.used_data(), args.used_data());
         assert_eq!(encoded.len(), CREATE_BYTES);
+        assert_eq!(&encoded[DEVICES_OFFSET + 8..DEVICES_OFFSET + 16], &[0; 8]);
+        assert_eq!(&encoded[DATA_OFFSET + 8..DATA_OFFSET + 16], &[0; 8]);
+        let mut leaked_domain = encoded;
+        leaked_domain[DEVICES_OFFSET + 8] = 1;
+        assert_eq!(LaunchCreateArgs::decode(&leaked_domain), None);
+        let mut leaked_domain = encoded;
+        leaked_domain[DATA_OFFSET + 8] = 1;
+        assert_eq!(LaunchCreateArgs::decode(&leaked_domain), None);
         for at in [6, 7, 94, 95, 150] {
             let mut bad = encoded;
             bad[at] = 1;
@@ -416,7 +406,7 @@ mod tests {
         let encoded = LaunchPlanInfo {
             key,
             sandbox: args.sandbox,
-            root: args.root,
+            root: args.root.unwrap(),
             image: args.image,
             volume: args.volume,
             root_capabilities: args.root_capabilities,

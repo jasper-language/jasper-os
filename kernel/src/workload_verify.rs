@@ -36,6 +36,9 @@ const SANDBOX_IMAGE_INFO_OFF: u64 = 0x4c0_0000;
 const SANDBOX_LAYER_INFO_OFF: u64 = 0x500_0000;
 const SANDBOX_VOLUME_INFO_OFF: u64 = 0x540_0000;
 const SANDBOX_WAIT_INFO_OFF: u64 = 0x580_0000;
+const SANDBOX_LAUNCH_CODE_OFF: u64 = 0x5c0_0000;
+const SANDBOX_LAUNCH_DESC_OFF: u64 = 0x600_0000;
+const SANDBOX_LAUNCH_INFO_OFF: u64 = 0x640_0000;
 const STACK_OFF: u64 = 0xC0_0000;
 
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -605,6 +608,106 @@ fn sandbox_abi_code(base: u64, foreign_key: u64) -> Vec<u8> {
     code
 }
 
+fn sandbox_launch_abi_code(base: u64, foreign_plan: u64) -> Vec<u8> {
+    fn imm32(code: &mut Vec<u8>, opcode: u8, value: u32) {
+        code.push(opcode);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+    fn imm64(code: &mut Vec<u8>, opcode: u8, value: u64) {
+        code.extend_from_slice(&[0x48, opcode]);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+    fn syscall(code: &mut Vec<u8>) {
+        code.extend_from_slice(&[0x0f, 0x05]);
+    }
+    fn test_rax(code: &mut Vec<u8>) {
+        code.extend_from_slice(&[0x48, 0x85, 0xc0]);
+    }
+    fn jle_error(code: &mut Vec<u8>, patches: &mut Vec<usize>) {
+        code.extend_from_slice(&[0x0f, 0x8e, 0, 0, 0, 0]);
+        patches.push(code.len() - 4);
+    }
+    fn js_error(code: &mut Vec<u8>, patches: &mut Vec<usize>) {
+        code.extend_from_slice(&[0x0f, 0x88, 0, 0, 0, 0]);
+        patches.push(code.len() - 4);
+    }
+    fn cmp_rax(code: &mut Vec<u8>, value: i32) {
+        code.extend_from_slice(&[0x48, 0x3d]);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+    fn jne_error(code: &mut Vec<u8>, patches: &mut Vec<usize>) {
+        code.extend_from_slice(&[0x0f, 0x85, 0, 0, 0, 0]);
+        patches.push(code.len() - 4);
+    }
+    fn exit(code: &mut Vec<u8>, status: u32) {
+        imm32(code, 0xb8, abi::SYSTEM_PROCESS_EXIT);
+        imm32(code, 0xbf, status);
+        syscall(code);
+        code.extend_from_slice(&[0x0f, 0x0b]);
+    }
+
+    let mut code = Vec::new();
+    let mut patches = Vec::new();
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_LAUNCH_CREATE);
+    imm64(&mut code, 0xbf, base + SANDBOX_LAUNCH_DESC_OFF);
+    syscall(&mut code);
+    test_rax(&mut code);
+    jle_error(&mut code, &mut patches);
+    code.extend_from_slice(&[0x48, 0x89, 0xc3]); // mov rbx, rax
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_LAUNCH_QUERY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]); // mov rdi, rbx
+    imm64(&mut code, 0xbe, base + SANDBOX_LAUNCH_INFO_OFF);
+    imm32(
+        &mut code,
+        0xba,
+        kernel_core::sandbox_launch_abi::INFO_BYTES as u32,
+    );
+    syscall(&mut code);
+    test_rax(&mut code);
+    jle_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_LAUNCH_QUERY);
+    imm64(&mut code, 0xbf, foreign_plan);
+    imm64(&mut code, 0xbe, base + SANDBOX_LAUNCH_INFO_OFF);
+    imm32(
+        &mut code,
+        0xba,
+        kernel_core::sandbox_launch_abi::INFO_BYTES as u32,
+    );
+    syscall(&mut code);
+    cmp_rax(&mut code, -(abi::SYSTEM_SANDBOX_ERROR_NOT_FOUND as i32));
+    jne_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_LAUNCH_DESTROY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    syscall(&mut code);
+    test_rax(&mut code);
+    js_error(&mut code, &mut patches);
+
+    imm32(&mut code, 0xb8, abi::SYSTEM_SANDBOX_LAUNCH_QUERY);
+    code.extend_from_slice(&[0x48, 0x89, 0xdf]);
+    imm64(&mut code, 0xbe, base + SANDBOX_LAUNCH_INFO_OFF);
+    imm32(
+        &mut code,
+        0xba,
+        kernel_core::sandbox_launch_abi::INFO_BYTES as u32,
+    );
+    syscall(&mut code);
+    cmp_rax(&mut code, -(abi::SYSTEM_SANDBOX_ERROR_NOT_FOUND as i32));
+    jne_error(&mut code, &mut patches);
+    exit(&mut code, 0);
+
+    let error = code.len();
+    for patch in patches {
+        let end = patch + 4;
+        let displacement = (error as i64 - end as i64) as i32;
+        code[patch..end].copy_from_slice(&displacement.to_le_bytes());
+    }
+    exit(&mut code, 1);
+    code
+}
+
 fn verify_sandbox_abi(base: u64) {
     let page = kernel_core::frame::FRAME_SIZE as u64;
     let foreign_domain = DomainKey {
@@ -822,6 +925,319 @@ fn verify_sandbox_abi(base: u64) {
             && crate::sandbox::stop(foreign_domain, foreign).is_ok()
             && crate::sandbox::destroy(foreign_domain, foreign).is_ok(),
         "foreign sandbox cleanup",
+    );
+}
+
+fn verify_sandbox_launch_abi(base: u64) {
+    let plans_before = crate::sandbox_launch::count();
+    let page = kernel_core::frame::FRAME_SIZE as u64;
+    let calls = SyscallSet::of(&[
+        abi::SYSTEM_PROCESS_EXIT,
+        abi::SYSTEM_SANDBOX_LAUNCH_CREATE,
+        abi::SYSTEM_SANDBOX_LAUNCH_QUERY,
+        abi::SYSTEM_SANDBOX_LAUNCH_DESTROY,
+    ]);
+    let pid = match proc::create("sandbox-launch-abi", calls) {
+        Ok(pid) => pid,
+        Err(error) => {
+            kprintln!(
+                "[JSR-SANDBOX-LAUNCH] user ABI process create failed: {:?}",
+                error
+            );
+            check(false, "sandbox launch user ABI process create");
+            return;
+        }
+    };
+    let domain = match proc::workload_domain(pid) {
+        Some(domain) => domain,
+        None => {
+            check(false, "sandbox launch user domain");
+            return;
+        }
+    };
+    let limits = ResourceLimits {
+        cpu_permille: 100,
+        memory_bytes: 2 * page,
+        threads: 1,
+        ring_entries: 1,
+        io_bytes: 64 * 1024,
+        io_ops: 16,
+    };
+    let sandbox = match crate::sandbox::create_sandbox(domain, limits) {
+        Ok(key) => key,
+        Err(error) => {
+            check(false, error.name());
+            return;
+        }
+    };
+    check(
+        crate::sandbox::mark_ready(domain, sandbox).is_ok()
+            && crate::sandbox::start(domain, sandbox).is_ok(),
+        "sandbox launch fixture starts",
+    );
+    let root = match crate::sandbox::root_snapshot(domain, sandbox) {
+        Ok(root) => root,
+        Err(error) => {
+            check(false, error.name());
+            return;
+        }
+    };
+    let content = kernel_core::sandbox_image::ContentDigest::new([0x51; 32]).unwrap();
+    let signature = kernel_core::sandbox_image::ContentDigest::new([0x52; 32]).unwrap();
+    let layers = [
+        kernel_core::sandbox_image::ImageLayerSpec {
+            content,
+            bytes: 5,
+        },
+        kernel_core::sandbox_image::ImageLayerSpec {
+            content: signature,
+            bytes: 7,
+        },
+    ];
+    let image_spec = kernel_core::sandbox_image::ImageSpec {
+        image: kernel_core::sandbox_image::SignedImage {
+            content,
+            signer: 7,
+            signature,
+            version: kernel_core::sandbox_image::ImageVersion {
+                major: 1,
+                minor: 0,
+                patch: 0,
+            },
+        },
+        rootfs_bytes: 12,
+        writable_bytes: 64,
+        max_volumes: 2,
+    };
+    let image = match crate::sandbox_storage::add_image(domain, sandbox, image_spec, &layers) {
+        Ok(image) => image,
+        Err(error) => {
+            check(false, error.name());
+            return;
+        }
+    };
+    let volume = match crate::sandbox_storage::create_volume(domain, sandbox, image, 32) {
+        Ok(volume) => volume,
+        Err(error) => {
+            check(false, error.name());
+            return;
+        }
+    };
+
+    let foreign_domain = DomainKey {
+        id: 0x574f_9010,
+        generation: 1,
+    };
+    let foreign_sandbox = match crate::sandbox::create_sandbox(foreign_domain, limits) {
+        Ok(key) => key,
+        Err(error) => {
+            check(false, error.name());
+            return;
+        }
+    };
+    check(
+        crate::sandbox::mark_ready(foreign_domain, foreign_sandbox).is_ok()
+            && crate::sandbox::start(foreign_domain, foreign_sandbox).is_ok(),
+        "foreign launch fixture starts",
+    );
+    let foreign_root = match crate::sandbox::root_snapshot(foreign_domain, foreign_sandbox) {
+        Ok(root) => root,
+        Err(error) => {
+            check(false, error.name());
+            return;
+        }
+    };
+    let foreign_image =
+        match crate::sandbox_storage::add_image(foreign_domain, foreign_sandbox, image_spec, &layers)
+        {
+            Ok(image) => image,
+            Err(error) => {
+                check(false, error.name());
+                return;
+            }
+        };
+    let root_capabilities = kernel_core::sandbox_launch::CapabilitySet::EXECUTE
+        .union(kernel_core::sandbox_launch::CapabilitySet::DATA_READ)
+        .union(kernel_core::sandbox_launch::CapabilitySet::DATA_WRITE);
+    let foreign_plan = match crate::sandbox_launch::create(
+        foreign_domain,
+        kernel_core::sandbox_launch::LaunchSpec {
+            sandbox: foreign_sandbox,
+            root: foreign_root.key,
+            image: foreign_image,
+            volume: None,
+            root_capabilities,
+            capabilities: kernel_core::sandbox_launch::CapabilitySet::EXECUTE,
+            resources: kernel_core::sandbox_launch::LaunchResources {
+                limits: foreign_root.limits,
+                io_rate: None,
+            },
+            network_policy: None,
+            devices: &[],
+            data: &[],
+        },
+    ) {
+        Ok(key) => key,
+        Err(error) => {
+            check(false, error.name());
+            return;
+        }
+    };
+    let empty_domain = DomainKey::NONE;
+    let create = kernel_core::sandbox_launch_abi::LaunchCreateArgs {
+        sandbox,
+        root: root.key,
+        image,
+        volume: Some(volume),
+        root_capabilities,
+        capabilities: kernel_core::sandbox_launch::CapabilitySet::EXECUTE
+            .union(kernel_core::sandbox_launch::CapabilitySet::DATA_WRITE),
+        resources: kernel_core::sandbox_launch::LaunchResources {
+            limits: root.limits,
+            io_rate: None,
+        },
+        network_policy: None,
+        device_count: 0,
+        data_count: 0,
+        devices: [kernel_core::sandbox_launch::DeviceGrant {
+            object: 0,
+            generation: 0,
+            rights: 0,
+            owner: empty_domain,
+            grantee: empty_domain,
+        }; kernel_core::sandbox_launch_abi::MAX_DEVICE_GRANTS],
+        data: [kernel_core::sandbox_launch::DataScopeGrant {
+            object: 0,
+            generation: 0,
+            owner: empty_domain,
+            grantee: empty_domain,
+            writable: false,
+        }; kernel_core::sandbox_launch_abi::MAX_DATA_SCOPES],
+    };
+    let create = match create.encode() {
+        Some(create) => create,
+        None => {
+            check(false, "sandbox launch descriptor encode");
+            return;
+        }
+    };
+    let code = sandbox_launch_abi_code(base, foreign_plan.to_raw());
+    check(
+        proc::map_new(
+            pid,
+            base + SANDBOX_LAUNCH_CODE_OFF,
+            MapFlags::USER | MapFlags::EXECUTE,
+        )
+        .is_ok()
+            && proc::map_new(
+                pid,
+                base + SANDBOX_LAUNCH_DESC_OFF,
+                MapFlags::USER | MapFlags::WRITE,
+            )
+            .is_ok()
+            && proc::map_new(
+                pid,
+                base + SANDBOX_LAUNCH_INFO_OFF,
+                MapFlags::USER | MapFlags::WRITE,
+            )
+            .is_ok()
+            && proc::map_new(
+                pid,
+                base + STACK_OFF - page,
+                MapFlags::USER | MapFlags::WRITE,
+            )
+            .is_ok(),
+        "sandbox launch user ABI pages map",
+    );
+    check(
+        proc::write(pid, base + SANDBOX_LAUNCH_CODE_OFF, &code).is_ok()
+            && proc::write(pid, base + SANDBOX_LAUNCH_DESC_OFF, &create).is_ok(),
+        "sandbox launch user ABI inputs install",
+    );
+    let task = proc::spawn_thread(
+        pid,
+        "sandbox-launch-abi",
+        base + SANDBOX_LAUNCH_CODE_OFF,
+        base + STACK_OFF,
+        0,
+        0,
+    );
+    check(task.is_ok(), "sandbox launch user ABI task starts");
+    if task.is_err() || !sched::run_until(sched::timer_ticks().saturating_add(1000)) {
+        check(false, "sandbox launch user ABI task settles");
+        return;
+    }
+    check(
+        matches!(proc::state(pid), Some(ProcState::Exited { code: 0 })),
+        "sandbox launch user ABI exits zero",
+    );
+    let mut info = [0u8; kernel_core::sandbox_launch_abi::INFO_BYTES];
+    check(
+        proc::read(pid, base + SANDBOX_LAUNCH_INFO_OFF, &mut info).is_ok(),
+        "sandbox launch query output readable",
+    );
+    check(&info[0..4] == b"JSL1", "sandbox launch query magic");
+    check(
+        u16::from_le_bytes([info[4], info[5]]) == kernel_core::sandbox_launch_abi::VERSION,
+        "sandbox launch query version",
+    );
+    let plan = kernel_core::sandbox_launch::LaunchPlanKey::from_raw(u64::from_le_bytes(
+        info[8..16].try_into().expect("launch plan key"),
+    ));
+    check(plan.is_some(), "sandbox launch returns plan key");
+    check(
+        kernel_core::sandbox::SandboxKey::from_raw(u64::from_le_bytes(
+            info[16..24].try_into().expect("launch sandbox key"),
+        )) == Some(sandbox),
+        "sandbox launch query preserves sandbox",
+    );
+    check(
+        kernel_core::workload::WorkloadKey::from_raw(u64::from_le_bytes(
+            info[24..32].try_into().expect("launch root key"),
+        )) == Some(root.key),
+        "sandbox launch query preserves root",
+    );
+    check(
+        kernel_core::sandbox_image::ImageKey::from_raw(u64::from_le_bytes(
+            info[32..40].try_into().expect("launch image key"),
+        )) == Some(image),
+        "sandbox launch query preserves image",
+    );
+    check(
+        kernel_core::sandbox_image::VolumeKey::from_raw(u64::from_le_bytes(
+            info[40..48].try_into().expect("launch volume key"),
+        )) == Some(volume),
+        "sandbox launch query preserves volume",
+    );
+    check(
+        plan.is_some_and(|key| crate::sandbox_launch::query(domain, key).is_err()),
+        "sandbox launch destroyed key stays invalid",
+    );
+    let _ = proc::reap(pid);
+    crate::kobj::run_cleanup(usize::MAX);
+
+    check(
+        crate::sandbox_launch::destroy(foreign_domain, foreign_plan).is_ok(),
+        "foreign launch plan cleanup",
+    );
+    let _ = crate::sandbox_storage::destroy_image(foreign_domain, foreign_sandbox, foreign_image);
+    let _ = crate::sandbox::stop(foreign_domain, foreign_sandbox);
+    let _ = crate::sandbox::stop(foreign_domain, foreign_sandbox);
+    let _ = crate::sandbox::destroy(foreign_domain, foreign_sandbox);
+
+    let _ = crate::sandbox_storage::destroy_volume(domain, sandbox, volume);
+    let _ = crate::sandbox_storage::destroy_image(domain, sandbox, image);
+    let _ = crate::sandbox::stop(domain, sandbox);
+    let _ = crate::sandbox::stop(domain, sandbox);
+    let _ = crate::sandbox::destroy(domain, sandbox);
+    check(
+        crate::sandbox_launch::count() == plans_before,
+        "sandbox launch plan baseline",
+    );
+    kprintln!(
+        "[JSR-SANDBOX-LAUNCH] runtime=true create=true query=true foreign_hidden=true destroy_stale=true plans={} failed={}",
+        crate::sandbox_launch::count(),
+        failed(),
     );
 }
 
@@ -1485,6 +1901,7 @@ pub fn run() {
     verify_hierarchical_cpu(domain);
     verify_user_workload_abi(base);
     verify_sandbox_abi(base);
+    verify_sandbox_launch_abi(base);
     verify_workload_spawn(base, false);
     verify_workload_spawn(base, true);
     check(

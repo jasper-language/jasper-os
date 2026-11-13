@@ -100,6 +100,13 @@ fn discard_process(pid: ObjId) {
 }
 
 impl BlockDevice {
+    #[cfg_attr(
+        any(
+            feature = "native-install-block-verify",
+            feature = "lifecycle-diagnostic-block-verify"
+        ),
+        inline(never)
+    )]
     pub fn new(device: &pci::Device, data_pages: u64) -> Result<Self, BlkError> {
         if data_pages == 0 || data_pages > block::MAX_DATA_PAGES as u64 {
             return Err(BlkError::Admission(block::Error::ChainTooLong));

@@ -6518,6 +6518,92 @@ pub fn workload_domain(pid: ObjId) -> Option<DomainKey> {
     .ok()
 }
 
+/// Opaque snapshot of one live Device handle used by a launch-plan authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DeviceAuthorityTicket {
+    pid: ObjId,
+    handle: HandleId,
+    object: ObjId,
+    rights: Rights,
+}
+
+impl DeviceAuthorityTicket {
+    pub(crate) fn matches(self, object: ObjId, rights: Rights) -> bool {
+        self.object == object && rights.difference(self.rights).is_empty()
+    }
+}
+
+/// Capture the current process's live Device-handle authority for one object.
+///
+/// The handle table is the sole source of device grant liveness. A caller may
+/// not synthesize a DeviceGrant from an arbitrary object id or stale rights.
+pub(crate) fn device_authority_ticket(
+    domain: DomainKey,
+    object: Option<ObjId>,
+    required: Rights,
+) -> Option<DeviceAuthorityTicket> {
+    let pid = current_process()?;
+    kobj::with(|t| {
+        let KObject::Process(process) = t.get(pid).ok()? else {
+            return None;
+        };
+        if process.workload_domain != Some(domain)
+            || t.security(pid).ok()?.require_active().is_err()
+        {
+            return None;
+        }
+        for (handle, _link, rights) in process.handles.capability_records() {
+            if !rights.contains(required) {
+                continue;
+            }
+            let Ok((object_ref, _)) = process.handles.get(handle) else {
+                continue;
+            };
+            if object_ref.ty != ObjectType::Device {
+                continue;
+            }
+            let Some(object_id) = ObjId::from_raw(object_ref.id.0) else {
+                continue;
+            };
+            if object.is_some_and(|expected| expected != object_id)
+                || !matches!(t.get(object_id), Ok(KObject::Device(_)))
+            {
+                continue;
+            }
+            return Some(DeviceAuthorityTicket {
+                pid,
+                handle,
+                object: object_id,
+                rights,
+            });
+        }
+        None
+    })
+}
+
+/// Revalidate the exact handle and object generation captured earlier.
+pub(crate) fn device_authority_ticket_live(
+    domain: DomainKey,
+    ticket: DeviceAuthorityTicket,
+) -> bool {
+    kobj::with(|t| {
+        let KObject::Process(process) = t.get(ticket.pid).ok()? else {
+            return None;
+        };
+        if process.workload_domain != Some(domain)
+            || !matches!(t.get(ticket.object), Ok(KObject::Device(_)))
+        {
+            return None;
+        }
+        let (object, rights) = process.handles.get(ticket.handle).ok()?;
+        (object.ty == ObjectType::Device
+            && ObjId::from_raw(object.id.0) == Some(ticket.object)
+            && rights.contains(ticket.rights))
+        .then_some(())
+    })
+    .is_some()
+}
+
 /// 进程 `pid` 的 CPU 记账（设置过上限时有值；进程销毁后 `None`）。
 pub fn cpu_stats(pid: ObjId) -> Option<sched::policy::CpuLimitStats> {
     let g = with_proc(pid, |p| Ok(p.cpu_group)).ok().flatten()?;

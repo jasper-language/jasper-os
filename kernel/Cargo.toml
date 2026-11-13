@@ -9,6 +9,7 @@ license = "Apache-2.0"
 [dependencies]
 kernel-core = { path = "../kernel-core" }
 jasper-lifecycle-boot = { path = "../lifecycle-boot" }
+jasper-lifecycle-model = { path = "../lifecycle-model", optional = true }
 # Compatibility crates are optional services. Native Jasper profiles must link
 # neither crate and must remain buildable when these components are absent.
 # 兼容 crate 属于可选服务；原生 Jasper Profile 不链接它们，并可在组件缺失时构建。
@@ -131,6 +132,21 @@ arch2-verify = ["user-programs"]
 blk1-verify = []
 # FS-0 journal-to-virtio-blk integration and same-disk power-cut drill.
 fs0-journal-verify = []
+# Real virtio-blk persistence of package bytes and installation state across reboot.
+native-install-block-verify = [
+    "dep:jasper-lifecycle-model",
+    "kernel-core/persistent-install",
+]
+# Deep test-only codec fault injection; retained outside the production-stack
+# two-boot persistence drill.
+native-install-fault-verify = ["native-install-block-verify"]
+# Real virtio-blk persistence and bounded privacy queries for LC-1 diagnostics.
+lifecycle-diagnostic-block-verify = [
+    "lifecycle-diagnostic-sources",
+    "native-install-block-verify",
+]
+# Panic and lifecycle failures feed the bounded, non-blocking source ring.
+lifecycle-diagnostic-sources = ["dep:jasper-lifecycle-model"]
 # FS-1 real ext4 VFS read/write/fsync/rename over virtio-blk.
 fs1-ext4-verify = ["kernel-core/ext4-write"]
 # Dedicated MOD-1 contract: assembly ordering, publication and runtime stop/health.
@@ -173,6 +189,8 @@ lifecycle-block-timeout-verify = ["lifecycle-root-exec-verify", "fault-inject"]
 # Dedicated console-input acceptance: a dynamic Linux program consumes serial
 # bytes through the bounded native terminal session.
 terminal-session-verify = []
+# Native Sandbox launch-plan guest acceptance as the first user program.
+sandbox-launch-verify = ["user-programs"]
 # Pixel 6a (Google Tensor GS101) early-boot probe: Samsung UART only, no scheduler/IRQ start.
 pixel6a-smoke = []
 pixel6a-entry-probe = ["pixel6a-smoke"]

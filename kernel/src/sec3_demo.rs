@@ -73,6 +73,10 @@ pub fn run() {
         "process did not receive the USER subject label",
     );
     check(
+        crate::native_module_authority::verify(pid),
+        "native module authority PEP boundary failed",
+    );
+    check(
         memory_context.is_some_and(|context| {
             context.mac.domain == SecurityDomain::USER
                 && context.mac.object_classes

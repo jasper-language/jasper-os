@@ -454,7 +454,7 @@ impl DiagnosticQuery {
 
 /// 固定容量诊断事件环；满时优先淘汰最低严重度，同级保留先到事件。
 /// Fixed-capacity diagnostic ring; evicts the lowest severity first and keeps earlier equal-severity events.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiagnosticRing<const N: usize> {
     events: [Option<DiagnosticEvent>; N],
     next_id: u64,
@@ -568,6 +568,550 @@ impl<const N: usize> Default for DiagnosticRing<N> {
     }
 }
 
+/// 持久化诊断副本固定保存的事件数。
+/// Number of events retained by the persistent diagnostic copy.
+pub const PERSISTED_EVENTS: usize = 16;
+/// 一条持久化诊断事件的固定长度。
+/// Fixed encoded length of one persisted diagnostic event.
+pub const PERSISTED_EVENT_BYTES: usize = 256;
+/// 每份诊断快照的固定长度。
+/// Fixed size of one diagnostic snapshot copy.
+pub const DIAGNOSTIC_COPY_BYTES: usize =
+    DIAGNOSTIC_HEADER_BYTES + PERSISTED_EVENTS * PERSISTED_EVENT_BYTES;
+/// 两份诊断副本之间的固定存储跨度。
+/// Fixed storage stride between the two diagnostic copies.
+pub const DIAGNOSTIC_COPY_STRIDE: usize = 8192;
+
+const DIAGNOSTIC_HEADER_BYTES: usize = 64;
+const DIAGNOSTIC_MAGIC: [u8; 8] = *b"JLC1DIAG";
+const DIAGNOSTIC_VERSION: u16 = 1;
+
+/// 诊断持久化宿主错误。
+/// Host failure while reading, writing, or flushing diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticIoError {
+    /// 底层读取失败。The backing read failed.
+    Read,
+    /// 底层写入失败。The backing write failed.
+    Write,
+    /// flush 失败。The backing flush failed.
+    Flush,
+}
+
+/// 双副本诊断存储的最小后端契约。
+/// Minimal byte-addressed backend for two diagnostic snapshot copies.
+pub trait DiagnosticIo {
+    /// 后端容量。Backend capacity in bytes.
+    fn capacity(&self) -> usize;
+    /// 从固定字节偏移读取完整缓冲。Reads one complete buffer at a byte offset.
+    fn read(&mut self, offset: usize, out: &mut [u8]) -> Result<(), DiagnosticIoError>;
+    /// 向固定字节偏移写入完整缓冲。Writes one complete buffer at a byte offset.
+    fn write(&mut self, offset: usize, input: &[u8]) -> Result<(), DiagnosticIoError>;
+    /// 使此前写入持久化。Makes previous writes durable.
+    fn flush(&mut self) -> Result<(), DiagnosticIoError>;
+}
+
+/// 持久化诊断记录错误。
+/// Persistent diagnostic-store failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticStoreError {
+    /// 存储容量不足。The backing store is too small.
+    Capacity,
+    /// 两份副本均不可用。Neither snapshot copy is valid.
+    Corrupt,
+    /// 副本世代或内容存在歧义。The copy generations or contents are ambiguous.
+    ConflictingCopies,
+    /// 底层 I/O 或 flush 失败。The backing I/O or flush failed.
+    Io(DiagnosticIoError),
+    /// 快照序列耗尽。The snapshot sequence is exhausted.
+    SequenceExhausted,
+    /// 事件环拒绝记录。The in-memory ring rejected the event.
+    Record(RecordError),
+}
+
+/// 双副本、有界且可恢复的诊断事件存储。
+///
+/// 每次提交只覆盖非活动副本；写入和 flush 后必须读回一致，才发布新的
+/// 内存快照。已落盘副本仍可作为损坏提交的回退点。
+/// Two-copy, bounded, recoverable diagnostic-event store. A commit overwrites
+/// the inactive copy and publishes it locally only after flush and readback.
+pub struct PersistentDiagnosticStore<D: DiagnosticIo> {
+    device: D,
+    ring: DiagnosticRing<PERSISTED_EVENTS>,
+    sequence: u64,
+}
+
+impl<D: DiagnosticIo> PersistentDiagnosticStore<D> {
+    /// 格式化后端为两个空诊断副本。
+    /// Formats the backing store with two empty diagnostic copies.
+    pub fn format(mut device: D) -> Result<Self, DiagnosticStoreError> {
+        if device.capacity() < DIAGNOSTIC_COPY_STRIDE * 2 {
+            return Err(DiagnosticStoreError::Capacity);
+        }
+        let invalid = [0u8; DIAGNOSTIC_HEADER_BYTES];
+        device
+            .write(0, &invalid)
+            .map_err(DiagnosticStoreError::Io)?;
+        device
+            .write(DIAGNOSTIC_COPY_STRIDE, &invalid)
+            .map_err(DiagnosticStoreError::Io)?;
+        device.flush().map_err(DiagnosticStoreError::Io)?;
+        let mut store = Self {
+            device,
+            ring: DiagnosticRing::new(),
+            sequence: 0,
+        };
+        store.commit(DiagnosticRing::new())?;
+        Ok(store)
+    }
+
+    /// 从两份副本恢复最高有效世代。
+    /// Recovers the highest valid generation from two copies.
+    pub fn open(mut device: D) -> Result<Self, DiagnosticStoreError> {
+        if device.capacity() < DIAGNOSTIC_COPY_STRIDE * 2 {
+            return Err(DiagnosticStoreError::Capacity);
+        }
+        let first = read_snapshot(&mut device, 0)?;
+        let second = read_snapshot(&mut device, DIAGNOSTIC_COPY_STRIDE)?;
+        let (sequence, ring) = match (first, second) {
+            (Some((first_sequence, first_ring)), Some((second_sequence, second_ring)))
+                if first_sequence == second_sequence && first_ring != second_ring =>
+            {
+                return Err(DiagnosticStoreError::ConflictingCopies);
+            }
+            (Some((first_sequence, first_ring)), Some((second_sequence, second_ring))) => {
+                if first_sequence >= second_sequence {
+                    (first_sequence, first_ring)
+                } else {
+                    (second_sequence, second_ring)
+                }
+            }
+            (Some(snapshot), None) | (None, Some(snapshot)) => snapshot,
+            (None, None) => return Err(DiagnosticStoreError::Corrupt),
+        };
+        Ok(Self {
+            device,
+            ring,
+            sequence,
+        })
+    }
+
+    /// 记录事件并持久化完整有界快照。
+    /// Records one event and persists the complete bounded snapshot.
+    pub fn record(
+        &mut self,
+        event: DiagnosticEvent,
+    ) -> Result<(RecordOutcome, RingStats), DiagnosticStoreError> {
+        let mut next = self.ring.clone();
+        let outcome = next.record(event).map_err(DiagnosticStoreError::Record)?;
+        self.commit(next)?;
+        Ok((outcome, self.ring.stats()))
+    }
+
+    /// 当前已发布事件环。Current published event ring.
+    pub const fn ring(&self) -> &DiagnosticRing<PERSISTED_EVENTS> {
+        &self.ring
+    }
+
+    /// 当前快照序列。Current snapshot sequence.
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// 取回底层设备。Returns the backing device.
+    pub fn into_device(self) -> D {
+        self.device
+    }
+
+    fn commit(
+        &mut self,
+        ring: DiagnosticRing<PERSISTED_EVENTS>,
+    ) -> Result<(), DiagnosticStoreError> {
+        let sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(DiagnosticStoreError::SequenceExhausted)?;
+        let bytes = encode_snapshot(sequence, &ring);
+        let slot = (sequence as usize) & 1;
+        let offset = slot * DIAGNOSTIC_COPY_STRIDE;
+        self.device
+            .write(offset, &bytes)
+            .map_err(DiagnosticStoreError::Io)?;
+        self.device.flush().map_err(DiagnosticStoreError::Io)?;
+        let mut readback = [0u8; DIAGNOSTIC_COPY_BYTES];
+        self.device
+            .read(offset, &mut readback)
+            .map_err(DiagnosticStoreError::Io)?;
+        if readback != bytes {
+            return Err(DiagnosticStoreError::Corrupt);
+        }
+        self.ring = ring;
+        self.sequence = sequence;
+        Ok(())
+    }
+}
+
+/// Collector failure before an event reaches the persistent ring.
+/// 事件进入持久环之前的采集失败。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollectError {
+    /// The event schema rejected the input.
+    /// 事件 Schema 拒绝了输入。
+    Schema(SchemaError),
+    /// The persistent snapshot commit failed.
+    /// 持久快照提交失败。
+    Store(DiagnosticStoreError),
+}
+
+/// One durable collection result.
+/// 一次持久采集的结果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollectReport {
+    /// Event-ring admission outcome.
+    /// 事件环的准入结果。
+    pub outcome: RecordOutcome,
+    /// Current ring statistics after the commit.
+    /// 提交后的当前事件环统计。
+    pub stats: RingStats,
+    /// Published persistent snapshot sequence.
+    /// 已发布的持久快照序列。
+    pub sequence: u64,
+}
+
+/// Collector status without exposing retained payloads.
+/// 不暴露保留载荷的采集器状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollectorStatus {
+    /// Current bounded-ring statistics.
+    /// 当前有界环统计。
+    pub stats: RingStats,
+    /// Current durable snapshot sequence.
+    /// 当前持久快照序列。
+    pub sequence: u64,
+}
+
+/// One bounded, privacy-filtered query page.
+/// 一个有界且经过隐私过滤的查询页。
+#[derive(Clone, Copy)]
+pub struct DiagnosticPage<const N: usize> {
+    events: [Option<DiagnosticEvent>; N],
+    len: usize,
+}
+
+impl<const N: usize> DiagnosticPage<N> {
+    /// Creates an empty page.
+    /// 创建空查询页。
+    pub const fn new() -> Self {
+        Self {
+            events: [None; N],
+            len: 0,
+        }
+    }
+
+    /// Number of events copied into this page.
+    /// 本页复制的事件数。
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the page is empty.
+    /// 查询页是否为空。
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns one event by page position.
+    /// 按页内位置返回事件。
+    pub fn get(&self, index: usize) -> Option<&DiagnosticEvent> {
+        self.events.get(index)?.as_ref()
+    }
+}
+
+impl<const N: usize> Default for DiagnosticPage<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Minimal local diagnostic collector over the persistent two-copy store.
+///
+/// This is a service-layer building block, not a new ABI. Ingested inputs are
+/// schema-validated before a durable commit; queries always pass through the
+/// existing privacy ceiling and stable-ID cursor instead of exposing raw ring
+/// entries by ID.
+///
+/// 持久双副本存储上的最小本地诊断采集器。本类型是服务层构件，不是新 ABI；
+/// 输入先做 Schema 校验再持久提交；查询必须经过既有隐私上限和稳定 ID 游标，
+/// 不提供绕过策略的按 ID 原始读取。
+pub struct DiagnosticCollector<D: DiagnosticIo> {
+    store: PersistentDiagnosticStore<D>,
+}
+
+impl<D: DiagnosticIo> DiagnosticCollector<D> {
+    /// Creates and formats a new collector store.
+    /// 创建并格式化新的采集存储。
+    pub fn format(device: D) -> Result<Self, DiagnosticStoreError> {
+        Ok(Self {
+            store: PersistentDiagnosticStore::format(device)?,
+        })
+    }
+
+    /// Reopens the highest valid durable snapshot.
+    /// 重开最高有效持久快照。
+    pub fn open(device: D) -> Result<Self, DiagnosticStoreError> {
+        Ok(Self {
+            store: PersistentDiagnosticStore::open(device)?,
+        })
+    }
+
+    /// Validates, admits and durably commits one event.
+    ///
+    /// A schema or commit failure leaves the previously published in-memory
+    /// ring and durable snapshot unchanged.
+    /// 校验、准入并持久提交一个事件；Schema 或提交失败不改变此前已发布的
+    /// 内存环与持久快照。
+    pub fn collect(&mut self, input: EventInput<'_>) -> Result<CollectReport, CollectError> {
+        let event = DiagnosticEvent::new(input).map_err(CollectError::Schema)?;
+        let (outcome, stats) = self.store.record(event).map_err(CollectError::Store)?;
+        Ok(CollectReport {
+            outcome,
+            stats,
+            sequence: self.store.sequence(),
+        })
+    }
+
+    /// Returns bounded collector status without payloads.
+    /// 返回不含载荷的有界采集器状态。
+    pub fn status(&self) -> CollectorStatus {
+        CollectorStatus {
+            stats: self.store.ring().stats(),
+            sequence: self.store.sequence(),
+        }
+    }
+
+    /// Returns the next privacy-filtered event and advances the query cursor.
+    /// 返回下一条经过隐私过滤的事件并推进查询游标。
+    pub fn query_next(&self, query: &mut DiagnosticQuery) -> Option<DiagnosticEvent> {
+        self.store.ring().query_next(query).copied()
+    }
+
+    /// Returns one bounded query page.
+    ///
+    /// The query limit and page capacity are both enforced; the smaller bound
+    /// wins. No secret or above-ceiling event is copied.
+    /// 同时执行查询上限与页面容量限制，取较小值；不会复制秘密事件或高于
+    /// 隐私上限的事件。
+    pub fn query_page<const N: usize>(&self, query: &mut DiagnosticQuery) -> DiagnosticPage<N> {
+        let mut page = DiagnosticPage::<N>::new();
+        while page.len < N {
+            let Some(event) = self.store.ring().query_next(query) else {
+                break;
+            };
+            page.events[page.len] = Some(*event);
+            page.len += 1;
+        }
+        page
+    }
+
+    /// Returns the backing device for controlled shutdown/reopen.
+    /// 取回底层设备以进行受控关闭或重开。
+    pub fn into_device(self) -> D {
+        self.store.into_device()
+    }
+}
+
+/// One subject's effective diagnostic-service rights.
+///
+/// This is service policy input, not an ABI record and not an authorization
+/// derived from a component name or path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiagnosticAccess {
+    /// Whether the subject may submit validated events for durable collection.
+    pub can_collect: bool,
+    /// Whether the subject may page through retained event summaries.
+    pub can_query: bool,
+    /// Highest event privacy class this subject may observe.
+    pub privacy_ceiling: PrivacyClass,
+    /// Hard per-query page bound imposed by policy.
+    pub max_page: usize,
+}
+
+/// Trusted authority used by the diagnostic service at each operation.
+///
+/// Implementations must derive access from the existing identity/SEC/PEP
+/// model. Component IDs, device paths and event contents are never authority.
+pub trait DiagnosticAuthority {
+    /// Returns current effective access for one authenticated subject.
+    fn access(&self, subject: u64) -> Option<DiagnosticAccess>;
+}
+
+/// Service-boundary failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticServiceError {
+    /// The subject is absent, revoked or lacks the requested operation.
+    Unauthorized,
+    /// Event validation or durable collection failed.
+    Collect(CollectError),
+}
+
+impl From<CollectError> for DiagnosticServiceError {
+    fn from(error: CollectError) -> Self {
+        Self::Collect(error)
+    }
+}
+
+/// One authenticated query request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiagnosticQueryRequest {
+    /// Optional event-kind filter.
+    pub kind: Option<EventKind>,
+    /// Minimum severity.
+    pub minimum_severity: Severity,
+    /// Caller-requested privacy ceiling; the authority may lower it.
+    pub privacy_ceiling: PrivacyClass,
+    /// Stable event-ID cursor from the previous page.
+    pub after_id: u64,
+    /// Caller-requested page size; page capacity and authority may lower it.
+    pub limit: usize,
+}
+
+/// Authority-gated diagnostic service boundary.
+///
+/// The future USI adapter can call this type without adding a new syscall or
+/// pre-approving a `system.*` identifier. Every query re-evaluates the authority
+/// and never exposes an event above its effective privacy ceiling.
+pub struct DiagnosticService<D: DiagnosticIo, A: DiagnosticAuthority> {
+    collector: DiagnosticCollector<D>,
+    authority: A,
+}
+
+impl<D: DiagnosticIo, A: DiagnosticAuthority> DiagnosticService<D, A> {
+    /// Formats a new service backing store.
+    pub fn format(device: D, authority: A) -> Result<Self, DiagnosticServiceError> {
+        Ok(Self {
+            collector: DiagnosticCollector::format(device)
+                .map_err(|error| DiagnosticServiceError::Collect(CollectError::Store(error)))?,
+            authority,
+        })
+    }
+
+    /// Reopens the highest valid durable snapshot.
+    pub fn open(device: D, authority: A) -> Result<Self, DiagnosticServiceError> {
+        Ok(Self {
+            collector: DiagnosticCollector::open(device)
+                .map_err(|error| DiagnosticServiceError::Collect(CollectError::Store(error)))?,
+            authority,
+        })
+    }
+
+    /// Validates, authorizes and durably collects one event.
+    pub fn collect(
+        &mut self,
+        subject: u64,
+        input: EventInput<'_>,
+    ) -> Result<CollectReport, DiagnosticServiceError> {
+        let access = self
+            .authority
+            .access(subject)
+            .ok_or(DiagnosticServiceError::Unauthorized)?;
+        if !access.can_collect {
+            return Err(DiagnosticServiceError::Unauthorized);
+        }
+        self.collector.collect(input).map_err(Into::into)
+    }
+
+    /// Returns one authority-capped query page and its stable resume cursor.
+    ///
+    /// The effective limit is the minimum of page capacity `N`, the caller's
+    /// request and the authority's `max_page`. A zero-size authority page is
+    /// denied rather than silently returning an empty success.
+    pub fn query_page<const N: usize>(
+        &self,
+        subject: u64,
+        request: DiagnosticQueryRequest,
+    ) -> Result<(DiagnosticPage<N>, u64, CollectorStatus), DiagnosticServiceError> {
+        let access = self
+            .authority
+            .access(subject)
+            .ok_or(DiagnosticServiceError::Unauthorized)?;
+        if !access.can_query || access.max_page == 0 || request.limit == 0 || N == 0 {
+            return Err(DiagnosticServiceError::Unauthorized);
+        }
+        let limit = request.limit.min(access.max_page).min(N);
+        let privacy_ceiling = core::cmp::min(request.privacy_ceiling, access.privacy_ceiling);
+        let mut query = DiagnosticQuery::new(
+            request.kind,
+            request.minimum_severity,
+            privacy_ceiling,
+            limit,
+        );
+        query.after_id = request.after_id;
+        let page = self.collector.query_page::<N>(&mut query);
+        Ok((page, query.after_id, self.collector.status()))
+    }
+
+    /// Returns payload-free collector status to a collector or query principal.
+    pub fn status(&self, subject: u64) -> Result<CollectorStatus, DiagnosticServiceError> {
+        let access = self
+            .authority
+            .access(subject)
+            .ok_or(DiagnosticServiceError::Unauthorized)?;
+        if !access.can_collect && !access.can_query {
+            return Err(DiagnosticServiceError::Unauthorized);
+        }
+        Ok(self.collector.status())
+    }
+
+    /// Returns the backing device for controlled shutdown or reopen.
+    pub fn into_device(self) -> D {
+        self.collector.into_device()
+    }
+}
+
+impl<const N: usize> DiagnosticRing<N> {
+    fn restore(
+        events: [Option<DiagnosticEvent>; N],
+        next_id: u64,
+        accepted: u64,
+        capacity_dropped: u64,
+    ) -> Option<Self> {
+        if next_id == 0 || accepted < events.iter().flatten().count() as u64 {
+            return None;
+        }
+        for (index, event) in events.iter().flatten().enumerate() {
+            if event.id == 0
+                || event.id >= next_id
+                || events
+                    .iter()
+                    .flatten()
+                    .take(index)
+                    .any(|prior| prior.id == event.id)
+            {
+                return None;
+            }
+        }
+        Some(Self {
+            events,
+            next_id,
+            accepted,
+            capacity_dropped,
+        })
+    }
+}
+
+type Snapshot = (u64, DiagnosticRing<PERSISTED_EVENTS>);
+
+fn read_snapshot<D: DiagnosticIo>(
+    device: &mut D,
+    offset: usize,
+) -> Result<Option<Snapshot>, DiagnosticStoreError> {
+    let mut bytes = [0u8; DIAGNOSTIC_COPY_BYTES];
+    device
+        .read(offset, &mut bytes)
+        .map_err(DiagnosticStoreError::Io)?;
+    Ok(decode_snapshot(&bytes))
+}
+
 /// 远程导出的用途。Remote-export purpose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExportPurpose {
@@ -631,6 +1175,259 @@ pub fn export_decision(
         return ExportDecision::LocalOnlySensitive;
     }
     ExportDecision::RedactedEnvelope
+}
+
+fn encode_snapshot(
+    sequence: u64,
+    ring: &DiagnosticRing<PERSISTED_EVENTS>,
+) -> [u8; DIAGNOSTIC_COPY_BYTES] {
+    let mut bytes = [0u8; DIAGNOSTIC_COPY_BYTES];
+    bytes[..8].copy_from_slice(&DIAGNOSTIC_MAGIC);
+    bytes[8..10].copy_from_slice(&DIAGNOSTIC_VERSION.to_le_bytes());
+    bytes[10..12].copy_from_slice(&(DIAGNOSTIC_HEADER_BYTES as u16).to_le_bytes());
+    bytes[12..14].copy_from_slice(&(PERSISTED_EVENTS as u16).to_le_bytes());
+    let event_count = ring.events.iter().flatten().count();
+    bytes[14..16].copy_from_slice(&(event_count as u16).to_le_bytes());
+    bytes[16..24].copy_from_slice(&sequence.to_le_bytes());
+    bytes[24..32].copy_from_slice(&ring.next_id.to_le_bytes());
+    let stats = ring.stats();
+    bytes[32..40].copy_from_slice(&stats.accepted.to_le_bytes());
+    bytes[40..48].copy_from_slice(&stats.capacity_dropped.to_le_bytes());
+    for (slot, event) in ring.events.iter().flatten().enumerate() {
+        let start = DIAGNOSTIC_HEADER_BYTES + slot * PERSISTED_EVENT_BYTES;
+        encode_event(
+            event,
+            (&mut bytes[start..start + PERSISTED_EVENT_BYTES])
+                .try_into()
+                .expect("fixed diagnostic-event slot"),
+        );
+    }
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&bytes[..60]);
+    hasher.update(&bytes[DIAGNOSTIC_HEADER_BYTES..]);
+    bytes[60..64].copy_from_slice(&hasher.finalize().to_le_bytes());
+    bytes
+}
+
+fn decode_snapshot(bytes: &[u8; DIAGNOSTIC_COPY_BYTES]) -> Option<Snapshot> {
+    if bytes[..8] != DIAGNOSTIC_MAGIC
+        || diag_read_u16(bytes, 8)? != DIAGNOSTIC_VERSION
+        || diag_read_u16(bytes, 10)? as usize != DIAGNOSTIC_HEADER_BYTES
+        || diag_read_u16(bytes, 12)? as usize != PERSISTED_EVENTS
+        || bytes[48..60].iter().any(|byte| *byte != 0)
+    {
+        return None;
+    }
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&bytes[..60]);
+    hasher.update(&bytes[DIAGNOSTIC_HEADER_BYTES..]);
+    if diag_read_u32(bytes, 60)? != hasher.finalize() {
+        return None;
+    }
+    let event_count = diag_read_u16(bytes, 14)? as usize;
+    if event_count > PERSISTED_EVENTS {
+        return None;
+    }
+    let mut events = [None; PERSISTED_EVENTS];
+    for (slot, event_slot) in events[..event_count].iter_mut().enumerate() {
+        let start = DIAGNOSTIC_HEADER_BYTES + slot * PERSISTED_EVENT_BYTES;
+        let event_bytes: &[u8; PERSISTED_EVENT_BYTES] = bytes[start..start + PERSISTED_EVENT_BYTES]
+            .try_into()
+            .ok()?;
+        *event_slot = Some(decode_event(event_bytes)?);
+    }
+    for slot in event_count..PERSISTED_EVENTS {
+        let start = DIAGNOSTIC_HEADER_BYTES + slot * PERSISTED_EVENT_BYTES;
+        if bytes[start..start + PERSISTED_EVENT_BYTES]
+            .iter()
+            .any(|byte| *byte != 0)
+        {
+            return None;
+        }
+    }
+    let sequence = diag_read_u64(bytes, 16)?;
+    let next_id = diag_read_u64(bytes, 24)?;
+    let accepted = diag_read_u64(bytes, 32)?;
+    let capacity_dropped = diag_read_u64(bytes, 40)?;
+    Some((
+        sequence,
+        DiagnosticRing::restore(events, next_id, accepted, capacity_dropped)?,
+    ))
+}
+
+fn encode_event(event: &DiagnosticEvent, out: &mut [u8; PERSISTED_EVENT_BYTES]) {
+    out[..4].copy_from_slice(b"DGE1");
+    out[4..6].copy_from_slice(&event.schema_version.to_le_bytes());
+    out[8..16].copy_from_slice(&event.id.to_le_bytes());
+    out[16] = event.kind as u8;
+    out[17] = event.severity as u8;
+    out[18] = event.privacy as u8;
+    out[19] = event.clock_quality as u8;
+    out[20..28].copy_from_slice(&event.observed_at.to_le_bytes());
+    out[28] = event.cause_count;
+    out[29] = event.component_len;
+    out[30] = event.payload_len;
+    out[31] = u8::from(event.redacted);
+    for (index, cause) in event.causes.iter().enumerate() {
+        let start = 32 + index * 4;
+        out[start..start + 4].copy_from_slice(&cause.to_le_bytes());
+    }
+    out[64..96].copy_from_slice(&event.component);
+    out[96..100].copy_from_slice(&event.component_version.to_le_bytes());
+    out[100..108].copy_from_slice(&event.transaction_id.to_le_bytes());
+    out[108..116].copy_from_slice(&event.boot_id.to_le_bytes());
+    out[116..148].copy_from_slice(&event.platform_profile);
+    for (index, pressure) in event.resource_pressure.iter().enumerate() {
+        let start = 148 + index * 2;
+        out[start..start + 2].copy_from_slice(&pressure.to_le_bytes());
+    }
+    out[156] = event.recovery as u8;
+    out[157] = event.payload_kind as u8;
+    out[160..224].copy_from_slice(&event.payload_reference);
+    out[224..256].copy_from_slice(&event.payload_digest);
+}
+
+fn decode_event(bytes: &[u8; PERSISTED_EVENT_BYTES]) -> Option<DiagnosticEvent> {
+    if bytes[..4] != *b"DGE1"
+        || diag_read_u16(bytes, 4)? != SCHEMA_VERSION
+        || bytes[6..8].iter().any(|byte| *byte != 0)
+        || bytes[158..160].iter().any(|byte| *byte != 0)
+    {
+        return None;
+    }
+    let id = diag_read_u64(bytes, 8)?;
+    let cause_count = bytes[28] as usize;
+    let component_len = bytes[29] as usize;
+    let payload_len = bytes[30] as usize;
+    if id == 0
+        || cause_count > MAX_CAUSES
+        || component_len == 0
+        || component_len > MAX_COMPONENT_ID
+        || payload_len > MAX_PAYLOAD_REFERENCE
+        || bytes[31] > 1
+    {
+        return None;
+    }
+    if bytes[32 + cause_count * 4..64]
+        .iter()
+        .any(|byte| *byte != 0)
+        || bytes[64 + component_len..96].iter().any(|byte| *byte != 0)
+        || bytes[160 + payload_len..224].iter().any(|byte| *byte != 0)
+    {
+        return None;
+    }
+    let mut causes = [0u32; MAX_CAUSES];
+    for (index, cause) in causes[..cause_count].iter_mut().enumerate() {
+        *cause = diag_read_u32(bytes, 32 + index * 4)?;
+    }
+    let component = core::str::from_utf8(&bytes[64..64 + component_len]).ok()?;
+    let mut platform_profile = [0u8; 32];
+    platform_profile.copy_from_slice(&bytes[116..148]);
+    let mut pressure = [0u16; 4];
+    for (index, value) in pressure.iter_mut().enumerate() {
+        *value = diag_read_u16(bytes, 148 + index * 2)?;
+    }
+    let mut payload_digest = [0u8; 32];
+    payload_digest.copy_from_slice(&bytes[224..256]);
+    let mut event = DiagnosticEvent::new(EventInput {
+        kind: decode_kind(bytes[16])?,
+        severity: decode_severity(bytes[17])?,
+        privacy: decode_privacy(bytes[18])?,
+        clock_quality: decode_clock(bytes[19])?,
+        observed_at: diag_read_u64(bytes, 20)?,
+        causes: &causes[..cause_count],
+        component,
+        component_version: diag_read_u32(bytes, 96)?,
+        transaction_id: diag_read_u64(bytes, 100)?,
+        boot_id: diag_read_u64(bytes, 108)?,
+        platform_profile,
+        resource_pressure: pressure,
+        recovery: decode_recovery(bytes[156])?,
+        payload_kind: decode_payload(bytes[157])?,
+        payload_reference: &bytes[160..160 + payload_len],
+        payload_digest,
+        redacted: bytes[31] != 0,
+    })
+    .ok()?;
+    event.id = id;
+    Some(event)
+}
+
+fn decode_kind(value: u8) -> Option<EventKind> {
+    Some(match value {
+        0 => EventKind::KernelException,
+        1 => EventKind::ServiceCrash,
+        2 => EventKind::ApplicationCrash,
+        3 => EventKind::DriverHardware,
+        4 => EventKind::StorageCorruption,
+        5 => EventKind::Network,
+        6 => EventKind::UpdateBoot,
+        7 => EventKind::PerformanceRegression,
+        _ => return None,
+    })
+}
+
+fn decode_severity(value: u8) -> Option<Severity> {
+    Some(match value {
+        0 => Severity::Info,
+        1 => Severity::Warning,
+        2 => Severity::Error,
+        3 => Severity::Critical,
+        _ => return None,
+    })
+}
+
+fn decode_privacy(value: u8) -> Option<PrivacyClass> {
+    Some(match value {
+        0 => PrivacyClass::Public,
+        1 => PrivacyClass::Internal,
+        2 => PrivacyClass::Sensitive,
+        3 => PrivacyClass::Secret,
+        _ => return None,
+    })
+}
+
+fn decode_clock(value: u8) -> Option<ClockQuality> {
+    Some(match value {
+        0 => ClockQuality::Trusted,
+        1 => ClockQuality::Untrusted,
+        2 => ClockQuality::Unknown,
+        _ => return None,
+    })
+}
+
+fn decode_recovery(value: u8) -> Option<RecoveryAction> {
+    Some(match value {
+        0 => RecoveryAction::None,
+        1 => RecoveryAction::Retry,
+        2 => RecoveryAction::Degraded,
+        3 => RecoveryAction::RolledBack,
+        4 => RecoveryAction::EnteredRecovery,
+        5 => RecoveryAction::Isolated,
+        _ => return None,
+    })
+}
+
+fn decode_payload(value: u8) -> Option<PayloadKind> {
+    Some(match value {
+        0 => PayloadKind::None,
+        1 => PayloadKind::DigestOnly,
+        2 => PayloadKind::LocalReference,
+        3 => PayloadKind::RedactedText,
+        _ => return None,
+    })
+}
+
+fn diag_read_u16(bytes: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+}
+
+fn diag_read_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+
+fn diag_read_u64(bytes: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
 }
 
 #[cfg(test)]
@@ -880,5 +1677,337 @@ mod tests {
         );
         assert_eq!(ring.query_next(&mut category).unwrap().id(), 3);
         assert_eq!(ring.query_next(&mut category), None);
+    }
+
+    struct MemoryDisk {
+        bytes: [u8; DIAGNOSTIC_COPY_STRIDE * 2],
+        writes: usize,
+        fail_write_at: Option<usize>,
+        fail_flush: bool,
+    }
+
+    impl MemoryDisk {
+        fn new() -> Self {
+            Self {
+                bytes: [0; DIAGNOSTIC_COPY_STRIDE * 2],
+                writes: 0,
+                fail_write_at: None,
+                fail_flush: false,
+            }
+        }
+    }
+
+    impl DiagnosticIo for MemoryDisk {
+        fn capacity(&self) -> usize {
+            self.bytes.len()
+        }
+
+        fn read(&mut self, offset: usize, out: &mut [u8]) -> Result<(), DiagnosticIoError> {
+            let end = offset
+                .checked_add(out.len())
+                .ok_or(DiagnosticIoError::Read)?;
+            let source = self.bytes.get(offset..end).ok_or(DiagnosticIoError::Read)?;
+            out.copy_from_slice(source);
+            Ok(())
+        }
+
+        fn write(&mut self, offset: usize, input: &[u8]) -> Result<(), DiagnosticIoError> {
+            let write = self.writes;
+            self.writes = self.writes.saturating_add(1);
+            if self.fail_write_at == Some(write) {
+                return Err(DiagnosticIoError::Write);
+            }
+            let end = offset
+                .checked_add(input.len())
+                .ok_or(DiagnosticIoError::Write)?;
+            let target = self
+                .bytes
+                .get_mut(offset..end)
+                .ok_or(DiagnosticIoError::Write)?;
+            target.copy_from_slice(input);
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<(), DiagnosticIoError> {
+            if self.fail_flush {
+                Err(DiagnosticIoError::Flush)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct TestAuthority;
+
+    impl DiagnosticAuthority for TestAuthority {
+        fn access(&self, subject: u64) -> Option<DiagnosticAccess> {
+            match subject {
+                1 => Some(DiagnosticAccess {
+                    can_collect: false,
+                    can_query: true,
+                    privacy_ceiling: PrivacyClass::Internal,
+                    max_page: 2,
+                }),
+                2 => Some(DiagnosticAccess {
+                    can_collect: true,
+                    can_query: true,
+                    privacy_ceiling: PrivacyClass::Secret,
+                    max_page: 16,
+                }),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn persistent_diagnostics_survive_reopen_with_ring_statistics() {
+        let disk = MemoryDisk::new();
+        let mut store = PersistentDiagnosticStore::format(disk).unwrap();
+        let event = DiagnosticEvent::new(base(EventKind::ServiceCrash, Severity::Error)).unwrap();
+        let (outcome, stats) = store.record(event).unwrap();
+        assert_eq!(outcome, RecordOutcome::Stored(1));
+        assert_eq!(stats.len, 1);
+
+        let reopened = PersistentDiagnosticStore::open(store.into_device()).unwrap();
+        assert_eq!(reopened.sequence(), 2);
+        assert_eq!(reopened.ring().stats(), stats);
+        let restored = reopened.ring().get(1).unwrap();
+        assert_eq!(restored.kind(), EventKind::ServiceCrash);
+        assert_eq!(restored.component(), "system.storage");
+        assert_eq!(restored.resource_pressure(), [10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn failed_inactive_copy_commit_keeps_previous_snapshot() {
+        let disk = MemoryDisk::new();
+        let mut store = PersistentDiagnosticStore::format(disk).unwrap();
+        store
+            .record(DiagnosticEvent::new(base(EventKind::Network, Severity::Warning)).unwrap())
+            .unwrap();
+        store.device.fail_write_at = Some(store.device.writes);
+        assert!(matches!(
+            store.record(
+                DiagnosticEvent::new(base(EventKind::StorageCorruption, Severity::Critical))
+                    .unwrap()
+            ),
+            Err(DiagnosticStoreError::Io(DiagnosticIoError::Write))
+        ));
+        assert_eq!(store.ring().len(), 1);
+
+        store.device.fail_write_at = None;
+        let reopened = PersistentDiagnosticStore::open(store.into_device()).unwrap();
+        assert_eq!(reopened.sequence(), 2);
+        assert_eq!(reopened.ring().len(), 1);
+        assert_eq!(reopened.ring().get(1).unwrap().kind(), EventKind::Network);
+    }
+
+    #[test]
+    fn corrupt_latest_copy_falls_back_to_previous_generation() {
+        let disk = MemoryDisk::new();
+        let mut store = PersistentDiagnosticStore::format(disk).unwrap();
+        store
+            .record(DiagnosticEvent::new(base(EventKind::Network, Severity::Warning)).unwrap())
+            .unwrap();
+        store
+            .record(
+                DiagnosticEvent::new(base(EventKind::StorageCorruption, Severity::Critical))
+                    .unwrap(),
+            )
+            .unwrap();
+        let newest_offset = DIAGNOSTIC_COPY_STRIDE;
+        let mut disk = store.into_device();
+        disk.bytes[newest_offset + 60] ^= 0xff;
+        let reopened = PersistentDiagnosticStore::open(disk).unwrap();
+        assert_eq!(reopened.sequence(), 2);
+        assert_eq!(reopened.ring().len(), 1);
+        assert_eq!(reopened.ring().get(1).unwrap().kind(), EventKind::Network);
+    }
+
+    #[test]
+    fn collector_persists_all_event_classes_and_pages_by_stable_id() {
+        let mut collector = DiagnosticCollector::format(MemoryDisk::new()).unwrap();
+        for (index, kind) in EventKind::ALL.into_iter().enumerate() {
+            let mut input = base(kind, Severity::Warning);
+            input.observed_at = 100 + index as u64;
+            let report = collector.collect(input).unwrap();
+            assert_eq!(report.outcome, RecordOutcome::Stored(index as u64 + 1));
+            assert_eq!(report.sequence, index as u64 + 2);
+        }
+        assert_eq!(
+            collector.status(),
+            CollectorStatus {
+                stats: RingStats {
+                    len: EventKind::ALL.len(),
+                    accepted: EventKind::ALL.len() as u64,
+                    capacity_dropped: 0,
+                },
+                sequence: EventKind::ALL.len() as u64 + 1,
+            }
+        );
+
+        let mut query = DiagnosticQuery::new(
+            None,
+            Severity::Info,
+            PrivacyClass::Internal,
+            EventKind::ALL.len(),
+        );
+        let first = collector.query_page::<3>(&mut query);
+        let second = collector.query_page::<3>(&mut query);
+        let third = collector.query_page::<3>(&mut query);
+        assert_eq!((first.len(), second.len(), third.len()), (3, 3, 2));
+        let mut ids = [0u64; 8];
+        for (slot, event) in first
+            .events
+            .iter()
+            .chain(second.events.iter())
+            .chain(third.events.iter())
+            .flatten()
+            .enumerate()
+        {
+            ids[slot] = event.id();
+        }
+        assert_eq!(ids, [1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let reopened = DiagnosticCollector::open(collector.into_device()).unwrap();
+        assert_eq!(
+            reopened.status(),
+            CollectorStatus {
+                stats: RingStats {
+                    len: EventKind::ALL.len(),
+                    accepted: EventKind::ALL.len() as u64,
+                    capacity_dropped: 0,
+                },
+                sequence: EventKind::ALL.len() as u64 + 1,
+            }
+        );
+    }
+
+    #[test]
+    fn collector_commit_failure_keeps_published_state_and_reopen_snapshot() {
+        let mut collector = DiagnosticCollector::format(MemoryDisk::new()).unwrap();
+        collector
+            .collect(base(EventKind::Network, Severity::Warning))
+            .unwrap();
+        let before = collector.status();
+        collector.store.device.fail_write_at = Some(collector.store.device.writes);
+        assert_eq!(
+            collector.collect(base(EventKind::StorageCorruption, Severity::Critical)),
+            Err(CollectError::Store(DiagnosticStoreError::Io(
+                DiagnosticIoError::Write
+            )))
+        );
+        assert_eq!(collector.status(), before);
+
+        collector.store.device.fail_write_at = None;
+        let reopened = DiagnosticCollector::open(collector.into_device()).unwrap();
+        assert_eq!(reopened.status(), before);
+        let mut query = DiagnosticQuery::new(None, Severity::Info, PrivacyClass::Internal, 16);
+        let page = reopened.query_page::<16>(&mut query);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page.get(0).unwrap().kind(), EventKind::Network);
+    }
+
+    #[test]
+    fn collector_query_never_exposes_above_ceiling_events() {
+        let mut collector = DiagnosticCollector::format(MemoryDisk::new()).unwrap();
+        collector
+            .collect(base(EventKind::Network, Severity::Warning))
+            .unwrap();
+        let mut sensitive = base(EventKind::ServiceCrash, Severity::Error);
+        sensitive.privacy = PrivacyClass::Sensitive;
+        collector.collect(sensitive).unwrap();
+        let mut secret = base(EventKind::KernelException, Severity::Critical);
+        secret.privacy = PrivacyClass::Secret;
+        collector.collect(secret).unwrap();
+
+        let mut query = DiagnosticQuery::new(None, Severity::Info, PrivacyClass::Internal, 16);
+        let page = collector.query_page::<16>(&mut query);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page.get(0).unwrap().kind(), EventKind::Network);
+    }
+
+    #[test]
+    fn diagnostic_service_rechecks_authority_and_caps_privacy_and_pages() {
+        let mut service = DiagnosticService::format(MemoryDisk::new(), TestAuthority).unwrap();
+        service
+            .collect(2, base(EventKind::Network, Severity::Warning))
+            .unwrap();
+        let mut sensitive = base(EventKind::ServiceCrash, Severity::Error);
+        sensitive.privacy = PrivacyClass::Sensitive;
+        service.collect(2, sensitive).unwrap();
+        let mut secret = base(EventKind::KernelException, Severity::Critical);
+        secret.privacy = PrivacyClass::Secret;
+        service.collect(2, secret).unwrap();
+
+        let request = DiagnosticQueryRequest {
+            kind: None,
+            minimum_severity: Severity::Info,
+            privacy_ceiling: PrivacyClass::Secret,
+            after_id: 0,
+            limit: 16,
+        };
+        let (page, cursor, status) = service.query_page::<4>(1, request).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page.get(0).unwrap().kind(), EventKind::Network);
+        assert_eq!(cursor, 1);
+        assert_eq!(status.stats.len, 3);
+        let (next, next_cursor, _) = service
+            .query_page::<4>(
+                1,
+                DiagnosticQueryRequest {
+                    after_id: cursor,
+                    ..request
+                },
+            )
+            .unwrap();
+        assert!(next.is_empty());
+        assert_eq!(next_cursor, cursor);
+
+        let (first, cursor, _) = service.query_page::<2>(2, request).unwrap();
+        assert_eq!((first.len(), cursor), (2, 2));
+        let (second, cursor, _) = service
+            .query_page::<2>(
+                2,
+                DiagnosticQueryRequest {
+                    after_id: cursor,
+                    ..request
+                },
+            )
+            .unwrap();
+        assert_eq!((second.len(), cursor), (1, 3));
+        assert_eq!(
+            service.collect(1, base(EventKind::ApplicationCrash, Severity::Error)),
+            Err(DiagnosticServiceError::Unauthorized)
+        );
+        assert!(matches!(
+            service.query_page::<4>(99, request),
+            Err(DiagnosticServiceError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn diagnostic_service_reopens_with_same_authority_policy() {
+        let mut service = DiagnosticService::format(MemoryDisk::new(), TestAuthority).unwrap();
+        service
+            .collect(2, base(EventKind::UpdateBoot, Severity::Error))
+            .unwrap();
+        let disk = service.into_device();
+        let reopened = DiagnosticService::open(disk, TestAuthority).unwrap();
+        let (page, cursor, status) = reopened
+            .query_page::<4>(
+                1,
+                DiagnosticQueryRequest {
+                    kind: Some(EventKind::UpdateBoot),
+                    minimum_severity: Severity::Info,
+                    privacy_ceiling: PrivacyClass::Internal,
+                    after_id: 0,
+                    limit: 4,
+                },
+            )
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page.get(0).unwrap().kind(), EventKind::UpdateBoot);
+        assert_eq!(cursor, 1);
+        assert_eq!(status.stats.len, 1);
     }
 }

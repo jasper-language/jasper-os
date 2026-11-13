@@ -96,6 +96,10 @@ static BINDINGS: [Binding; 9] = [
     Binding { module: "devices", version: "1.0.0", conflicts: &[], activate: devices_activate, deactivate: None },
 ];
 
+pub(crate) fn bindings() -> &'static [Binding] {
+    &BINDINGS
+}
+
 /// 启动期回滚需要核对的资源类别。
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct BootResources {
@@ -668,6 +672,44 @@ pub fn stop(module: &str) -> Result<(), assembly::AssemblyError> {
         bits,
         published,
         readers
+    );
+    Ok(())
+}
+
+/// Dynamically start one deactivatable module after publication validation.
+///
+/// Activation happens while the assembly state is updated atomically. Its
+/// capability bits are published only after the complete mask passes audit, and
+/// the ServiceCatalog event source receives that same live mask.
+pub(crate) fn start_runtime_module(module: &str) -> Result<(), assembly::AssemblyError> {
+    let _writer = begin_lifespan_change()?;
+    let declared = profile::resolved().ok_or(assembly::AssemblyError::ProfileInvalid)?;
+    let (before, next) = {
+        let mut runtime = RUNTIME.lock();
+        let asm = runtime.as_mut().ok_or(assembly::AssemblyError::NotStarted)?;
+        asm.start_one(module)?;
+        let next = asm.published_mask(&declared);
+        if asm.audit(&declared, next).is_err() {
+            let _ = asm.stop_with(module, |_| {});
+            return Err(assembly::AssemblyError::AuditFailed);
+        }
+        (PUBLICATIONS.mask(), next)
+    };
+    let added = next & !before;
+    if added != 0 {
+        PUBLICATIONS.publish(added);
+        crate::service_catalog::publish_capabilities(PUBLICATIONS.mask());
+    }
+    if PUBLICATIONS.mask() != next {
+        PUBLICATIONS.withdraw_and_wait(added, || sched::yield_now());
+        crate::service_catalog::publish_capabilities(PUBLICATIONS.mask());
+        return Err(assembly::AssemblyError::AuditFailed);
+    }
+    kprintln!(
+        "[JSR-ASSEMBLY] dynamic-start module={} added={:#x} published={:#x}",
+        module,
+        added,
+        PUBLICATIONS.mask()
     );
     Ok(())
 }

@@ -55,7 +55,7 @@
 //! 本 crate 内的 Rust 模块名只是代码组织，不是接口。
 #![cfg_attr(not(test), no_std)]
 
-#[cfg(any(test, feature = "ext4-view"))]
+#[cfg(any(test, feature = "ext4-view", feature = "persistent-install"))]
 extern crate alloc;
 
 pub mod abi;
@@ -74,6 +74,7 @@ pub mod capability;
 pub mod config;
 pub mod device;
 pub mod display_input;
+pub mod display_compositor;
 pub mod deadline;
 pub mod drill;
 pub mod deadline_forest;
@@ -204,7 +205,11 @@ pub mod sandbox_launch_abi;
 pub mod sandbox_store;
 
 pub mod native_install;
+#[cfg(any(test, feature = "persistent-install"))]
 pub mod persistent_install;
+#[cfg(any(test, feature = "persistent-install"))]
+pub mod native_install_service;
+pub mod native_module_lifecycle;
 
 // issue #3：统一定时事件契约。 / Unified timer-event contract.
 pub mod timer_event;

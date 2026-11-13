@@ -97,6 +97,11 @@ fn first_program(_ctx: &mut BootCtx) {
 fn minimum_health(_ctx: &mut BootCtx) {
     if let Err(error) = crate::lifecycle_health::confirm_minimum_health() {
         kprintln!("[JSR-LIFE-HEALTH] result=failed reason={}", error.name());
+        #[cfg(feature = "lifecycle-diagnostic-sources")]
+        kprintln!(
+            "[JSR-DIAG-SOURCE] kind=boot_failure recorded={}",
+            crate::diagnostic_sources::record_boot_failure(error.name())
+        );
         stop(ExitStatus::Failure);
     }
 }

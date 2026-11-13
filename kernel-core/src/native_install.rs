@@ -500,7 +500,39 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
         }
     }
 
+    /// Borrow the complete state as encoding slices without copying the fixed
+    /// tables onto the caller's stack.
+    #[cfg(any(test, feature = "persistent-install"))]
+    pub(crate) fn encoding_parts(
+        &self,
+    ) -> (
+        &[Option<PackageSnapshot>],
+        &[u32],
+        &[Option<InstallationSnapshot>],
+        &[u32],
+        &[Option<GrantSnapshot>],
+        &[u32],
+        &[Option<RuntimeSnapshot>],
+        &[u32],
+        &[Option<DataSnapshot>],
+        &[u32],
+    ) {
+        (
+            &self.packages,
+            &self.package_generations,
+            &self.installations,
+            &self.installation_generations,
+            &self.grants,
+            &self.grant_generations,
+            &self.runtimes,
+            &self.runtime_generations,
+            &self.data,
+            &self.data_generations,
+        )
+    }
+
     /// Restore a complete state only after validating keys and every reference.
+    #[inline(never)]
     pub fn restore_state(
         snapshot: InstallStateSnapshot<P, I, G, R, D>,
     ) -> Result<Self, InstallError> {

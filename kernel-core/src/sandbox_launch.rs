@@ -666,7 +666,6 @@ fn validate_devices(
     }
     for (index, grant) in grants.iter().copied().enumerate() {
         if grant.object == 0
-            || grant.generation == 0
             || grant.rights == 0
             || !grant.owner.is_valid()
             || grant.grantee != domain
@@ -698,7 +697,6 @@ fn validate_data(
             CapabilitySet::DATA_READ
         };
         if grant.object == 0
-            || grant.generation == 0
             || !grant.owner.is_valid()
             || grant.grantee != domain
             || !capabilities.contains(required)
@@ -1161,6 +1159,32 @@ mod tests {
             Err(LaunchError::Capability)
         );
         assert_eq!(plans.count(), 0);
+    }
+
+    #[test]
+    fn first_generation_device_and_data_grants_are_valid() {
+        let (workloads, sandboxes, storage, sandbox, root, image, volume, _) = fixture();
+        let devices = [DeviceGrant {
+            object: 0x500,
+            generation: 0,
+            rights: 3,
+            owner: DOMAIN,
+            grantee: DOMAIN,
+        }];
+        let data = [DataScopeGrant {
+            object: 0x600,
+            generation: 0,
+            owner: DOMAIN,
+            grantee: DOMAIN,
+            writable: false,
+        }];
+        let spec = launch_spec(sandbox, root, image, Some(volume), &devices, &data);
+        let mut plans = SandboxLaunchTable::<1>::new();
+        let key = plans
+            .create(DOMAIN, &workloads, &sandboxes, &storage, spec)
+            .unwrap();
+        assert_eq!(plans.device(DOMAIN, key, 0).unwrap().generation, 0);
+        assert_eq!(plans.data_scope(DOMAIN, key, 0).unwrap().generation, 0);
     }
 
     #[test]
