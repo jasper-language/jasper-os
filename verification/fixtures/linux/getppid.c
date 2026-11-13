@@ -1122,6 +1122,57 @@ int main(void) {
                 1, NULL, NULL, 0) != -1 || errno != EAGAIN) {
         return 307;
     }
+    int shared_futex_fd = memfd_create("shared-futex", 0);
+    if (shared_futex_fd < 0 || ftruncate(shared_futex_fd, 4096) != 0) {
+        return 308;
+    }
+    uint32_t *shared_futex_word =
+        mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
+             shared_futex_fd, 0);
+    int shared_futex_ready[2];
+    if (shared_futex_word == MAP_FAILED ||
+        pipe2(shared_futex_ready, 0) != 0) {
+        return 309;
+    }
+    *shared_futex_word = 0;
+    pid_t shared_futex_child = fork();
+    if (shared_futex_child < 0) {
+        return 310;
+    }
+    if (shared_futex_child == 0) {
+        close(shared_futex_ready[0]);
+        char ready = 'F';
+        if (write(shared_futex_ready[1], &ready, 1) != 1) {
+            _exit(311);
+        }
+        struct timespec shared_timeout = {.tv_sec = 0, .tv_nsec = 500000000};
+        long wait_result =
+            syscall(SYS_futex, shared_futex_word, FUTEX_WAIT, 0,
+                    &shared_timeout, NULL, 0);
+        _exit(wait_result == 0 ? 0 : 312);
+    }
+    close(shared_futex_ready[1]);
+    char shared_ready = 0;
+    struct timespec shared_delay = {.tv_sec = 0, .tv_nsec = 30000000};
+    if (read(shared_futex_ready[0], &shared_ready, 1) != 1 ||
+        shared_ready != 'F') {
+        return 313;
+    }
+    nanosleep(&shared_delay, NULL);
+    if (syscall(SYS_futex, shared_futex_word, FUTEX_WAKE, 1,
+                NULL, NULL, 0) != 1) {
+        return 314;
+    }
+    int shared_futex_status = 0;
+    if (waitpid(shared_futex_child, &shared_futex_status, 0) !=
+            shared_futex_child ||
+        !WIFEXITED(shared_futex_status) ||
+        WEXITSTATUS(shared_futex_status) != 0 ||
+        close(shared_futex_ready[0]) != 0 ||
+        munmap(shared_futex_word, 4096) != 0 ||
+        close(shared_futex_fd) != 0) {
+        return 315;
+    }
     int epfd = epoll_create1(EPOLL_CLOEXEC);
     int epoll_pipe[2];
     struct epoll_event epoll_ready[128] = {0};

@@ -77,10 +77,15 @@ impl FutexWaiter {
 
 const MAX_FUTEX_WAITERS: usize = 16;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FutexKey {
+    Private { process: ObjId, address: u64 },
+    Shared(u64),
+}
+
 #[derive(Clone, Copy)]
 struct FutexWord {
-    process: ObjId,
-    address: u64,
+    key: FutexKey,
     waiters: [FutexWaiter; MAX_FUTEX_WAITERS],
 }
 
@@ -1253,6 +1258,13 @@ fn futex_value(process: ObjId, address: u64) -> Result<u32, CompatErrno> {
     Ok(u32::from_le_bytes(bytes))
 }
 
+fn futex_key(process: ObjId, address: u64) -> FutexKey {
+    match proc::linux_shared_futex_key(process, address) {
+        Some(key) => FutexKey::Shared(key),
+        None => FutexKey::Private { process, address },
+    }
+}
+
 fn futex_wait(
     process: ObjId,
     address: u64,
@@ -1269,11 +1281,12 @@ fn futex_wait(
     if bitset == 0 {
         return Err(CompatErrno::Invalid);
     }
+    let key = futex_key(process, address);
     let task = sched::current().0;
     {
         let mut state = COMPAT.lock();
         let slot = if let Some(slot) = state.futexes.iter().position(|entry| {
-            entry.is_some_and(|entry| entry.process == process && entry.address == address)
+            entry.is_some_and(|entry| entry.key == key)
         }) {
             slot
         } else {
@@ -1283,8 +1296,7 @@ fn futex_wait(
                 .position(Option::is_none)
                 .ok_or(CompatErrno::NoSpace)?;
             state.futexes[slot] = Some(FutexWord {
-                process,
-                address,
+                key,
                 waiters: [FutexWaiter::EMPTY; MAX_FUTEX_WAITERS],
             });
             slot
@@ -1323,7 +1335,7 @@ fn futex_wait(
                 .futexes
                 .iter()
                 .flatten()
-                .find(|word| word.process == process && word.address == address)
+                .find(|word| word.key == key)
                 .and_then(|word| {
                     word.waiters
                         .iter()
@@ -1342,9 +1354,13 @@ fn futex_wait(
             sched::pause();
         }
     };
-    if let Some(word) = COMPAT.lock().futexes.iter_mut().flatten().find(|word| {
-        word.process == process && word.address == address
-    }) {
+    if let Some(word) = COMPAT
+        .lock()
+        .futexes
+        .iter_mut()
+        .flatten()
+        .find(|word| word.key == key)
+    {
         if let Some(waiter) = word
             .waiters
             .iter_mut()
@@ -1368,13 +1384,12 @@ fn futex_wake(
     if bitset == 0 {
         return Err(CompatErrno::Invalid);
     }
+    let key = futex_key(process, address);
     let mut tasks = [crate::task::TaskId(0); MAX_FUTEX_WAITERS];
     let mut woken = 0usize;
     {
         let mut state = COMPAT.lock();
-        let Some(word) = state.futexes.iter_mut().flatten().find(|word| {
-            word.process == process && word.address == address
-        }) else {
+        let Some(word) = state.futexes.iter_mut().flatten().find(|word| word.key == key) else {
             return Ok(0);
         };
         for waiter in word.waiters.iter_mut() {

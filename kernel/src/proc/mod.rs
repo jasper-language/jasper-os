@@ -4819,6 +4819,24 @@ pub(crate) fn linux_page_is_shared(pid: ObjId, va: u64) -> bool {
         .unwrap_or(false)
 }
 
+/// Returns a process-independent futex identity for a shared mapping word.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_shared_futex_key(pid: ObjId, va: u64) -> Option<u64> {
+    with_proc(pid, |process| {
+        if !is_shared_page(process, va) {
+            return Ok(None);
+        }
+        let Some((frame, _)) = process.space.translate(VirtPage::containing(va)) else {
+            return Ok(None);
+        };
+        Ok(Some(
+            frame.start() + va % kernel_core::frame::FRAME_SIZE,
+        ))
+    })
+    .ok()
+    .flatten()
+}
+
 /// Returns the current hardware address-space root for one process.
 /// 返回进程当前硬件地址空间根。
 pub(crate) fn current_space_root(pid: ObjId) -> Option<crate::arch::SpaceRoot> {
@@ -5262,10 +5280,11 @@ pub fn fork_linux_process(
     fork_args: [u64; 6],
     clear_child_tid: u64,
 ) -> Result<ObjId, ProcError> {
-    let (parent_linux_pid, calls, state, mappings) = kobj::with(|t| match t.get(parent) {
+    let (parent_linux_pid, calls, state, mappings, shared_mappings) =
+        kobj::with(|t| match t.get(parent) {
         Ok(KObject::Process(p)) if p.state == ProcState::Running => {
             let linux = p.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
-            if !p.shared_maps.is_empty() || !p.device_maps.is_empty() || !p.quarantined.is_empty() {
+            if !p.device_maps.is_empty() || !p.quarantined.is_empty() {
                 return Err(ProcError::NotTransferable);
             }
             let mappings = linux
@@ -5274,7 +5293,25 @@ pub fn fork_linux_process(
                 .copied()
                 .filter(|mapping| mapping.flags.contains(MapFlags::USER))
                 .collect::<Vec<_>>();
-            Ok((linux.pid, linux.calls, linux.clone(), mappings))
+            let shared_mappings = p
+                .shared_maps
+                .iter()
+                .map(|mapping| {
+                    (
+                        mapping.va,
+                        Arc::clone(&mapping.page),
+                        mapping.source,
+                        mapping.writable,
+                    )
+                })
+                .collect::<Vec<_>>();
+            Ok((
+                linux.pid,
+                linux.calls,
+                linux.clone(),
+                mappings,
+                shared_mappings,
+            ))
         }
         _ => Err(ProcError::NoSuchProcess),
     })?;
@@ -5314,6 +5351,12 @@ pub fn fork_linux_process(
                 mapping.flags,
                 error
             );
+            rollback(child, false);
+            return Err(error);
+        }
+    }
+    for (va, page, source, writable) in shared_mappings {
+        if let Err(error) = copy_linux_shared_mapping(child, va, page, source, writable) {
             rollback(child, false);
             return Err(error);
         }
@@ -5499,6 +5542,77 @@ pub(crate) fn vfork_parent_may_resume(child: ObjId) -> bool {
                     .is_some_and(|parent| parent.exec_committed)
         }
         _ => true,
+    })
+}
+
+#[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+fn copy_linux_shared_mapping(
+    child: ObjId,
+    va: u64,
+    page: Arc<crate::mm::memory_object::Page>,
+    source: BackingIdentity,
+    writable: bool,
+) -> Result<(), ProcError> {
+    with_proc(child, |process| {
+        if process.state != ProcState::Running
+            || process
+                .shared_maps
+                .len()
+                .checked_add(1)
+                .is_none_or(|count| count > MAX_PROCESS_FRAMES)
+        {
+            return Err(ProcError::MemoryQuota);
+        }
+        if process
+            .space
+            .translate(VirtPage::containing(va))
+            .is_some()
+        {
+            return Err(ProcError::Map(MapError::InvalidAddress));
+        }
+        process
+            .shared_maps
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        if !process.space.begin_shootdown() {
+            return Err(ProcError::Map(MapError::Busy));
+        }
+        let mut flags = MapFlags::USER;
+        if writable {
+            flags = flags.union(MapFlags::WRITE);
+        }
+        if process
+            .space
+            .map_raw(VirtPage::containing(va), page.frame(), flags)
+            .is_err()
+        {
+            process.space.end_shootdown();
+            return Err(ProcError::Map(MapError::NotMapped));
+        }
+        let rights = MemoryRights::READ
+            .union(MemoryRights::MAP)
+            .union(if writable {
+                MemoryRights::WRITE
+            } else {
+                MemoryRights::NONE
+            });
+        if process
+            .memory_caps
+            .grant(va, 1, rights, MemoryKind::Shared, source)
+            .is_err()
+        {
+            let _ = process.space.unmap_raw(VirtPage::containing(va));
+            process.space.end_shootdown();
+            return Err(ProcError::MemoryQuota);
+        }
+        process.shared_maps.push(SharedMapping {
+            va,
+            page,
+            source,
+            writable,
+        });
+        process.space.end_shootdown();
+        Ok(())
     })
 }
 
