@@ -88,7 +88,7 @@ fn load_image(sandbox: SandboxKey) -> Result<u64, i32> {
             },
             rootfs_bytes: 64,
             writable_bytes: 4096,
-            max_volumes: 1,
+            max_volumes: 2,
         },
         layer_count: 1,
         layers,
@@ -128,11 +128,16 @@ fn create_volume(sandbox: SandboxKey, image: ImageKey) -> Result<VolumeKey, i32>
     VolumeKey::from_raw(key as u64).ok_or(24)
 }
 
-fn create_plan(sandbox: SandboxKey, image: ImageKey, volume: VolumeKey) -> Result<u64, i32> {
+fn create_plan(
+    sandbox: SandboxKey,
+    image: ImageKey,
+    volume: VolumeKey,
+    data_volume: VolumeKey,
+) -> Result<u64, i32> {
     let mut data = [EMPTY_DATA; MAX_DATA_SCOPES];
     data[0] = DataScopeGrant {
-        object: volume.to_raw(),
-        generation: (volume.to_raw() >> 16) as u32,
+        object: data_volume.to_raw(),
+        generation: (data_volume.to_raw() >> 16) as u32,
         owner: DomainKey::NONE,
         grantee: DomainKey::NONE,
         writable: true,
@@ -195,8 +200,22 @@ fn run() -> Result<(), i32> {
     let sandbox = SandboxKey::from_raw(sandbox_raw).ok_or(18)?;
     let image = ImageKey::from_raw(load_image(sandbox)?).ok_or(13)?;
     let volume = create_volume(sandbox, image)?;
-    let plan = create_plan(sandbox, image, volume)?;
+    let data_volume = create_volume(sandbox, image)?;
+    let plan = create_plan(sandbox, image, volume, data_volume)?;
     query_plan(sandbox, plan, image, volume)?;
+    if call(
+        ids::SYSTEM_SANDBOX_VOLUME_DESTROY,
+        sandbox.to_raw(),
+        data_volume.to_raw(),
+        0,
+    ) != 0
+    {
+        return Err(26);
+    }
+    let revoked = call(ids::SYSTEM_SANDBOX_LAUNCH_QUERY, plan, 0, 0);
+    if revoked != -(ids::SYSTEM_ERROR_RIGHTS_DENIED as i64) {
+        return Err(27);
+    }
     if call(ids::SYSTEM_SANDBOX_LAUNCH_DESTROY, plan, 0, 0) != 0 {
         return Err(19);
     }
@@ -229,7 +248,7 @@ fn run() -> Result<(), i32> {
         return Err(22);
     }
     println!(
-        "sandbox-launch: ok sandbox=true image=true plan=true query=true destroy=true cleanup=true"
+        "sandbox-launch: ok sandbox=true image=true data_authority=true plan=true query=true destroy=true cleanup=true"
     );
     Ok(())
 }
