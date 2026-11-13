@@ -4291,10 +4291,28 @@ int main(void) {
         return 481;
     }
     char inotify_event[128];
+    memset(inotify_event, 0, sizeof(inotify_event));
     errno = 0;
     if (read(inotify_fd, inotify_event, sizeof(inotify_event)) != -1 ||
         errno != EAGAIN ||
         syscall(SYS_inotify_rm_watch, inotify_fd, inotify_wd) != 0) {
+        return 482;
+    }
+    struct pollfd inotify_poll = {
+        .fd = inotify_fd,
+        .events = POLLIN,
+    };
+    if (poll(&inotify_poll, 1, 1000) != 1 ||
+        (inotify_poll.revents & POLLIN) == 0 ||
+        read(inotify_fd, inotify_event, sizeof(inotify_event)) !=
+            (ssize_t)sizeof(struct inotify_event)) {
+        return 482;
+    }
+    struct inotify_event *ignored_event =
+        (struct inotify_event *)inotify_event;
+    if (ignored_event->wd != inotify_wd ||
+        (ignored_event->mask & IN_IGNORED) == 0 ||
+        ignored_event->len != 0) {
         return 482;
     }
     errno = 0;

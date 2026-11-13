@@ -3697,7 +3697,7 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             return linux_signalfd_read(pid, fd, entry.handle, args[1], len);
         }
         if entry.kind == compat_core::fd::CompatKind::Inotify {
-            return linux_inotify_read(pid, fd);
+            return linux_inotify_read(pid, fd, args[1], len);
         }
         if entry.kind == compat_core::fd::CompatKind::Socket {
             if !entry.rights.contains(kernel_core::object::Rights::READ) {
@@ -11474,9 +11474,9 @@ fn linux_inotify_add_watch(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
     if mask & IN_ONLYDIR != 0 && !node.is_directory() {
         return Err(CompatErrno::NotDirectory);
     }
-    let watches = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
-    let mut watches = watches.lock();
-    if let Some(watch) = watches.iter_mut().find(|watch| watch.node == node) {
+    let state = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let mut state = state.lock();
+    if let Some(watch) = state.watches.iter_mut().find(|watch| watch.node == node) {
         if mask & IN_MASK_CREATE != 0 {
             return Err(CompatErrno::Exists);
         }
@@ -11488,16 +11488,17 @@ fn linux_inotify_add_watch(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
         };
         return Ok(watch.wd as u64);
     }
-    if watches.len() >= 64 {
+    if state.watches.len() >= 64 {
         return Err(CompatErrno::NoSpace);
     }
     let wd = (1..=64)
-        .find(|candidate| !watches.iter().any(|watch| watch.wd == *candidate))
+        .find(|candidate| !state.watches.iter().any(|watch| watch.wd == *candidate))
         .ok_or(CompatErrno::NoSpace)?;
-    watches
+    state
+        .watches
         .try_reserve(1)
         .map_err(|_| CompatErrno::NoMemory)?;
-    watches.push(proc::LinuxInotifyWatch {
+    state.watches.push(proc::LinuxInotifyWatch {
         wd,
         node,
         mask: mask & !(IN_MASK_CREATE | IN_MASK_ADD),
@@ -11516,22 +11517,85 @@ fn linux_inotify_rm_watch(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno
     if wd <= 0 {
         return Err(CompatErrno::Invalid);
     }
-    let watches = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
-    let mut watches = watches.lock();
-    let Some(index) = watches.iter().position(|watch| watch.wd == wd) else {
+    let state = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let mut state = state.lock();
+    let Some(index) = state.watches.iter().position(|watch| watch.wd == wd) else {
         return Err(CompatErrno::Invalid);
     };
-    watches.remove(index);
+    state.watches.remove(index);
+    state
+        .events
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    state.events.push_back(proc::LinuxInotifyEvent {
+        wd,
+        mask: 0x8000,
+        cookie: 0,
+        name: [0; 256],
+        name_len: 0,
+    });
+    drop(state);
+    wake_message_queue_waiters();
     Ok(0)
 }
 
-/// Blocks or returns `EAGAIN` for an inotify fd on the immutable root namespace.
-fn linux_inotify_read(pid: ObjId, fd: u32) -> Result<u64, CompatErrno> {
-    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
-    if nonblocking {
-        return Err(CompatErrno::TryAgain);
+/// Reads queued inotify control events.
+fn linux_inotify_read(
+    pid: ObjId,
+    fd: u32,
+    address: u64,
+    len: usize,
+) -> Result<u64, CompatErrno> {
+    const EVENT_HEADER: usize = 16;
+    const MAX_EVENTS: usize = 64;
+    const MAX_NAME: usize = 256;
+    if len < EVENT_HEADER {
+        return Err(CompatErrno::Invalid);
     }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Inotify {
+        return Err(CompatErrno::BadFd);
+    }
+    let state = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
     loop {
+        let capacity = len.min(MAX_EVENTS * (EVENT_HEADER + MAX_NAME));
+        let mut output = alloc::vec![0u8; capacity];
+        let mut written = 0usize;
+        let mut consumed = 0usize;
+        {
+            let mut state = state.lock();
+            for event in state.events.iter().take(MAX_EVENTS) {
+                let name_len = usize::from(event.name_len);
+                let event_len = EVENT_HEADER
+                    .checked_add(name_len)
+                    .and_then(|length| length.checked_add(7))
+                    .map(|length| length & !7)
+                    .ok_or(CompatErrno::Invalid)?;
+                if written + event_len > output.len() {
+                    break;
+                }
+                let base = written;
+                output[base..base + 4].copy_from_slice(&event.wd.to_le_bytes());
+                output[base + 4..base + 8].copy_from_slice(&event.mask.to_le_bytes());
+                output[base + 8..base + 12].copy_from_slice(&event.cookie.to_le_bytes());
+                output[base + 12..base + 16].copy_from_slice(&(name_len as u32).to_le_bytes());
+                output[base + 16..base + 16 + name_len]
+                    .copy_from_slice(&event.name[..name_len]);
+                written += event_len;
+                consumed += 1;
+            }
+            if written != 0 {
+                copy_to_user(address, &output, written).map_err(|_| CompatErrno::Fault)?;
+                for _ in 0..consumed {
+                    state.events.pop_front();
+                }
+                return Ok(written as u64);
+            }
+        }
+        if nonblocking {
+            return Err(CompatErrno::TryAgain);
+        }
         if proc::current_exiting() || current_signal_pending(pid) {
             return Err(CompatErrno::Interrupted);
         }
@@ -15498,6 +15562,14 @@ fn linux_epoll_readiness(
             }
             ready
         }
+        compat_core::fd::CompatKind::Inotify => {
+            let state = proc::linux_inotify_state(pid, registration.handle)?;
+            if requested & EPOLLIN != 0 && !state.lock().events.is_empty() {
+                EPOLLIN
+            } else {
+                0
+            }
+        }
         compat_core::fd::CompatKind::Pidfd => {
             if requested & EPOLLIN != 0
                 && ObjId::from_raw(registration.handle)
@@ -15752,7 +15824,20 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                         0
                     }
                 }
-                Some(entry) if entry.kind == compat_core::fd::CompatKind::Inotify => 0,
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::Inotify => {
+                    let Some(state) =
+                        proc::linux_inotify_state(pid, entry.handle)
+                    else {
+                        continue;
+                    };
+                    if events & POLLIN != 0
+                        && !state.lock().events.is_empty()
+                    {
+                        POLLIN
+                    } else {
+                        0
+                    }
+                }
                 Some(entry) if entry.handle == proc::LINUX_CONSOLE_HANDLE => {
                     let (pending, ended, failed) = crate::terminal::input_status();
                     let mut ready = 0;

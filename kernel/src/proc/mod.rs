@@ -331,10 +331,26 @@ pub(crate) struct LinuxInotifyWatch {
 }
 
 #[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxInotifyEvent {
+    pub(crate) wd: i32,
+    pub(crate) mask: u32,
+    pub(crate) cookie: u32,
+    pub(crate) name: [u8; 256],
+    pub(crate) name_len: u8,
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) struct LinuxInotifyState {
+    pub(crate) watches: Vec<LinuxInotifyWatch>,
+    pub(crate) events: VecDeque<LinuxInotifyEvent>,
+}
+
+#[cfg(feature = "linux-abi")]
 #[derive(Clone)]
 struct LinuxInotifyHandle {
     handle: u64,
-    watches: Arc<SpinLock<Vec<LinuxInotifyWatch>>>,
+    state: Arc<SpinLock<LinuxInotifyState>>,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -477,7 +493,7 @@ enum LinuxFdResource {
     EventFd(LinuxEventFdHandle),
     TimerFd(LinuxTimerFdHandle),
     SignalFd(LinuxSignalFdHandle),
-    Inotify(Arc<SpinLock<Vec<LinuxInotifyWatch>>>),
+    Inotify(Arc<SpinLock<LinuxInotifyState>>),
     MessageQueue(Arc<LinuxMqShared>),
     Socket {
         endpoint: Arc<compat_core::UnixSocketEndpoint>,
@@ -1621,7 +1637,7 @@ pub(crate) fn linux_capture_fd_transfer(
                         .inotifies
                         .iter()
                         .find(|inotify| inotify.handle == entry.handle)
-                        .map(|inotify| Arc::clone(&inotify.watches))
+                        .map(|inotify| Arc::clone(&inotify.state))
                         .ok_or(LinuxFdTransferError::Invalid)?;
                     LinuxFdResource::Inotify(inotify)
                 }
@@ -1967,12 +1983,12 @@ pub(crate) fn linux_install_fd_transfer(
                 linux.next_signalfd_handle = next;
                 linux.signalfds.push(signalfd);
             }
-            if let Some(watches) = pending_inotify {
+            if let Some(state) = pending_inotify {
                 let next = handle
                     .checked_add(1)
                     .ok_or(LinuxFdTransferError::NoSpace)?;
                 linux.next_inotify_handle = next;
-                linux.inotifies.push(LinuxInotifyHandle { handle, watches });
+                linux.inotifies.push(LinuxInotifyHandle { handle, state });
             }
             if let Some(queue) = pending_mq {
                 let next = handle
@@ -2594,19 +2610,22 @@ pub(crate) fn linux_inotify_create(
         }
         linux.inotifies.push(LinuxInotifyHandle {
             handle,
-            watches: Arc::new(SpinLock::new(Vec::new())),
+            state: Arc::new(SpinLock::new(LinuxInotifyState {
+                watches: Vec::new(),
+                events: VecDeque::new(),
+            })),
         });
         Ok(fd.fd())
     })
     .ok()
 }
 
-/// Returns the shared watch set for one inotify handle.
+/// Returns the shared watch and event state for one inotify handle.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_inotify_state(
     pid: ObjId,
     handle: u64,
-) -> Option<Arc<SpinLock<Vec<LinuxInotifyWatch>>>> {
+) -> Option<Arc<SpinLock<LinuxInotifyState>>> {
     crate::kobj::with(|table| match table.get(pid) {
         Ok(KObject::Process(process)) => process
             .linux
@@ -2614,7 +2633,7 @@ pub(crate) fn linux_inotify_state(
             .inotifies
             .iter()
             .find(|inotify| inotify.handle == handle)
-            .map(|inotify| Arc::clone(&inotify.watches)),
+            .map(|inotify| Arc::clone(&inotify.state)),
         _ => None,
     })
 }
