@@ -268,55 +268,45 @@ const EMPTY_DATA: DataScopeGrant = DataScopeGrant {
 };
 
 fn decode_device(raw: &[u8], at: usize) -> Option<DeviceGrant> {
+    if raw[at + 8..at + 16].iter().any(|byte| *byte != 0) {
+        return None;
+    }
     Some(DeviceGrant {
         object: read_u64(raw, at)?,
-        owner: decode_domain(raw, at + 8)?,
-        grantee: decode_domain(raw, at + 16)?,
+        owner: DomainKey::NONE,
+        grantee: DomainKey::NONE,
         generation: read_u32(raw, at + 24)?,
         rights: read_u32(raw, at + 28)?,
     })
 }
 
 fn decode_data(raw: &[u8], at: usize) -> Option<DataScopeGrant> {
+    if raw[at + 8..at + 16].iter().any(|byte| *byte != 0) {
+        return None;
+    }
     let writable = read_u32(raw, at + 28)?;
     if writable > 1 {
         return None;
     }
     Some(DataScopeGrant {
         object: read_u64(raw, at)?,
-        owner: decode_domain(raw, at + 8)?,
-        grantee: decode_domain(raw, at + 16)?,
+        owner: DomainKey::NONE,
+        grantee: DomainKey::NONE,
         generation: read_u32(raw, at + 24)?,
         writable: writable == 1,
     })
 }
 
-fn decode_domain(raw: &[u8], at: usize) -> Option<DomainKey> {
-    Some(DomainKey {
-        id: read_u32(raw, at)?,
-        generation: read_u32(raw, at + 4)?,
-    })
-}
-
 fn encode_device(raw: &mut [u8], at: usize, grant: DeviceGrant) {
     raw[at..at + 8].copy_from_slice(&grant.object.to_le_bytes());
-    encode_domain(raw, at + 8, grant.owner);
-    encode_domain(raw, at + 16, grant.grantee);
     raw[at + 24..at + 28].copy_from_slice(&grant.generation.to_le_bytes());
     raw[at + 28..at + 32].copy_from_slice(&grant.rights.to_le_bytes());
 }
 
 fn encode_data(raw: &mut [u8], at: usize, grant: DataScopeGrant) {
     raw[at..at + 8].copy_from_slice(&grant.object.to_le_bytes());
-    encode_domain(raw, at + 8, grant.owner);
-    encode_domain(raw, at + 16, grant.grantee);
     raw[at + 24..at + 28].copy_from_slice(&grant.generation.to_le_bytes());
     raw[at + 28..at + 32].copy_from_slice(&u32::from(grant.writable).to_le_bytes());
-}
-
-fn encode_domain(raw: &mut [u8], at: usize, domain: DomainKey) {
-    raw[at..at + 4].copy_from_slice(&domain.id.to_le_bytes());
-    raw[at + 4..at + 8].copy_from_slice(&domain.generation.to_le_bytes());
 }
 
 fn read_u16(raw: &[u8], at: usize) -> Option<u16> {
@@ -365,26 +355,14 @@ mod tests {
                 object: 9,
                 generation: 2,
                 rights: 3,
-                owner: DomainKey {
-                    id: 44,
-                    generation: 2,
-                },
-                grantee: DomainKey {
-                    id: 44,
-                    generation: 2,
-                },
+                owner: DomainKey::NONE,
+                grantee: DomainKey::NONE,
             }; MAX_DEVICE_GRANTS],
             data: [DataScopeGrant {
                 object: 10,
                 generation: 3,
-                owner: DomainKey {
-                    id: 44,
-                    generation: 2,
-                },
-                grantee: DomainKey {
-                    id: 44,
-                    generation: 2,
-                },
+                owner: DomainKey::NONE,
+                grantee: DomainKey::NONE,
                 writable: true,
             }; MAX_DATA_SCOPES],
         }
@@ -406,6 +384,14 @@ mod tests {
         assert_eq!(decoded.used_devices(), args.used_devices());
         assert_eq!(decoded.used_data(), args.used_data());
         assert_eq!(encoded.len(), CREATE_BYTES);
+        assert_eq!(&encoded[DEVICES_OFFSET + 8..DEVICES_OFFSET + 16], &[0; 8]);
+        assert_eq!(&encoded[DATA_OFFSET + 8..DATA_OFFSET + 16], &[0; 8]);
+        let mut leaked_domain = encoded;
+        leaked_domain[DEVICES_OFFSET + 8] = 1;
+        assert_eq!(LaunchCreateArgs::decode(&leaked_domain), None);
+        let mut leaked_domain = encoded;
+        leaked_domain[DATA_OFFSET + 8] = 1;
+        assert_eq!(LaunchCreateArgs::decode(&leaked_domain), None);
         for at in [6, 7, 94, 95, 150] {
             let mut bad = encoded;
             bad[at] = 1;

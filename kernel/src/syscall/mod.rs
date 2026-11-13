@@ -25,6 +25,7 @@ use kernel_core::device as devabi;
 use kernel_core::frame::FRAME_SIZE;
 use kernel_core::object::{HandleError, HandleId, ObjectType, Rights};
 use kernel_core::pci::{Bar, Bdf, MAX_BARS};
+use kernel_core::sandbox_launch::{DataScopeGrant, DeviceGrant};
 use kernel_core::sched::Qos;
 
 use crate::kobj::{self, DeviceObj, KObject};
@@ -1487,6 +1488,38 @@ fn sandbox_launch_create(desc_ptr: u64) -> i64 {
     if args.root.is_some_and(|provided| provided != root) {
         return sandbox_launch_error(kernel_core::sandbox_launch::LaunchError::InvalidRoot);
     }
+    let mut devices = [DeviceGrant {
+        object: 0,
+        generation: 0,
+        rights: 0,
+        owner: domain,
+        grantee: domain,
+    }; kernel_core::sandbox_launch_abi::MAX_DEVICE_GRANTS];
+    for (target, source) in devices.iter_mut().zip(args.used_devices()) {
+        *target = DeviceGrant {
+            object: source.object,
+            generation: source.generation,
+            rights: source.rights,
+            owner: domain,
+            grantee: domain,
+        };
+    }
+    let mut data = [DataScopeGrant {
+        object: 0,
+        generation: 0,
+        owner: domain,
+        grantee: domain,
+        writable: false,
+    }; kernel_core::sandbox_launch_abi::MAX_DATA_SCOPES];
+    for (target, source) in data.iter_mut().zip(args.used_data()) {
+        *target = DataScopeGrant {
+            object: source.object,
+            generation: source.generation,
+            owner: domain,
+            grantee: domain,
+            writable: source.writable,
+        };
+    }
     let spec = kernel_core::sandbox_launch::LaunchSpec {
         sandbox: args.sandbox,
         root,
@@ -1496,8 +1529,8 @@ fn sandbox_launch_create(desc_ptr: u64) -> i64 {
         capabilities: args.capabilities,
         resources: args.resources,
         network_policy: args.network_policy,
-        devices: args.used_devices(),
-        data: args.used_data(),
+        devices: &devices[..args.device_count as usize],
+        data: &data[..args.data_count as usize],
     };
     match crate::sandbox_launch::create(domain, spec) {
         Ok(key) => key.to_raw() as i64,
