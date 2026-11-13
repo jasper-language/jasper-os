@@ -4969,6 +4969,22 @@ int main(void) {
         memcmp(mq_first, "later", 5) != 0) {
         return 681;
     }
+    pid_t mq_notify_exit_child = fork();
+    if (mq_notify_exit_child < 0) {
+        return 688;
+    }
+    if (mq_notify_exit_child == 0) {
+        _exit(syscall(SYS_mq_notify, mq_fd, &mq_none_event) == 0 ? 0 : 1);
+    }
+    int mq_notify_exit_status = 0;
+    if (waitpid(mq_notify_exit_child, &mq_notify_exit_status, 0) !=
+            mq_notify_exit_child ||
+        !WIFEXITED(mq_notify_exit_status) ||
+        WEXITSTATUS(mq_notify_exit_status) != 0 ||
+        syscall(SYS_mq_notify, mq_fd, &mq_none_event) != 0 ||
+        syscall(SYS_mq_notify, mq_fd, NULL) != 0) {
+        return 689;
+    }
     if (syscall(SYS_mq_notify, mq_fd, &mq_signal_event) != 0 ||
         syscall(SYS_mq_notify, mq_fd, NULL) != 0 ||
         sigprocmask(SIG_SETMASK, &mq_previous_mask, NULL) != 0 ||
@@ -4986,7 +5002,11 @@ int main(void) {
         }
         errno = 0;
         int denied = syscall(SYS_mq_open, mq_name, O_RDWR, 0, NULL);
-        _exit(denied == -1 && errno == EACCES ? 0 : 2);
+        int open_denied = denied == -1 && errno == EACCES;
+        errno = 0;
+        int unlink_denied = syscall(SYS_mq_unlink, mq_name) == -1 &&
+                            errno == EACCES;
+        _exit(open_denied && unlink_denied ? 0 : 2);
     }
     int mq_permission_status = 0;
     if (waitpid(mq_permission_child, &mq_permission_status, 0) !=

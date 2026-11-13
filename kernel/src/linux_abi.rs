@@ -2635,7 +2635,7 @@ fn execute(
         LinuxSyscall::ShmDt => compat_result(linux_shmdt(pid, call.args)),
         LinuxSyscall::ShmCtl => compat_result(linux_shmctl(pid, call.args)),
         LinuxSyscall::MqOpen => compat_result(linux_mq_open(pid, call.args)),
-        LinuxSyscall::MqUnlink => compat_result(linux_mq_unlink(call.args)),
+        LinuxSyscall::MqUnlink => compat_result(linux_mq_unlink(pid, call.args)),
         LinuxSyscall::MqTimedsend => compat_result(linux_mq_send(pid, call.args, true)),
         LinuxSyscall::MqTimedreceive => compat_result(linux_mq_receive(pid, call.args, true)),
         LinuxSyscall::MqNotify => compat_result(linux_mq_notify(pid, call.args)),
@@ -7364,8 +7364,9 @@ fn linux_mq_open(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 }
 
 /// Removes one POSIX message-queue name while existing descriptors retain the queue.
-fn linux_mq_unlink(args: [u64; 6]) -> Result<u64, CompatErrno> {
+fn linux_mq_unlink(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let (name, name_len) = read_linux_mq_name(args[0])?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
     let mut state = COMPAT.lock();
     let Some(index) = state
         .message_queue_names
@@ -7374,6 +7375,9 @@ fn linux_mq_unlink(args: [u64; 6]) -> Result<u64, CompatErrno> {
     else {
         return Err(CompatErrno::NoEntry);
     };
+    if credentials.euid != 0 && credentials.euid != state.message_queue_names[index].uid {
+        return Err(CompatErrno::Access);
+    }
     state.message_queue_names.remove(index);
     Ok(0)
 }
