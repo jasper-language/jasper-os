@@ -1920,6 +1920,8 @@ fn execute(
         LinuxSyscall::TimerDelete => compat_result(linux_timer_delete(pid, call.args)),
         LinuxSyscall::SendMsg => compat_result(linux_sendmsg(pid, call.args)),
         LinuxSyscall::RecvMsg => compat_result(linux_recvmsg(pid, call.args)),
+        LinuxSyscall::Sendmmsg => compat_result(linux_sendmmsg(pid, call.args)),
+        LinuxSyscall::Recvmmsg => compat_result(linux_recvmmsg(pid, call.args)),
         LinuxSyscall::SendTo => compat_result(linux_sendto(pid, call.args)),
         LinuxSyscall::RecvFrom => compat_result(linux_recvfrom(pid, call.args)),
         LinuxSyscall::Shutdown => compat_result(linux_shutdown(pid, call.args)),
@@ -6653,6 +6655,87 @@ fn linux_recvmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     )
     .map_err(|_| CompatErrno::Fault)?;
     Ok(count as u64)
+}
+
+/// Implements bounded `sendmmsg(2)` over the existing `sendmsg(2)` path.
+fn linux_sendmmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MMSGHDR_BYTES: u64 = 64;
+    const MSG_LEN_OFFSET: u64 = 56;
+    const MAX_MESSAGES: u32 = 16;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let count = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if count > MAX_MESSAGES {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut sent = 0u32;
+    while sent < count {
+        let base = args[1]
+            .checked_add(u64::from(sent) * MMSGHDR_BYTES)
+            .ok_or(CompatErrno::Fault)?;
+        match linux_sendmsg(pid, [args[0], base, args[3], 0, 0, 0]) {
+            Ok(length) => {
+                let length = u32::try_from(length).map_err(|_| CompatErrno::Invalid)?;
+                copy_to_user(
+                    base.checked_add(MSG_LEN_OFFSET).ok_or(CompatErrno::Fault)?,
+                    &length.to_le_bytes(),
+                    4,
+                )
+                .map_err(|_| CompatErrno::Fault)?;
+                sent += 1;
+            }
+            Err(error) if sent == 0 => return Err(error),
+            Err(_) => break,
+        }
+    }
+    Ok(u64::from(sent))
+}
+
+/// Implements bounded `recvmmsg(2)` over the existing `recvmsg(2)` path.
+fn linux_recvmmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MMSGHDR_BYTES: u64 = 64;
+    const MSG_LEN_OFFSET: u64 = 56;
+    const MAX_MESSAGES: u32 = 16;
+    const MSG_DONTWAIT: u64 = 0x40;
+    const MSG_WAITFORONE: u64 = 0x10000;
+    if args[4] != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let count = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if count > MAX_MESSAGES {
+        return Err(CompatErrno::Invalid);
+    }
+    let wait_for_one = args[3] & MSG_WAITFORONE != 0;
+    let flags = args[3] & !MSG_WAITFORONE;
+    let mut received = 0u32;
+    while received < count {
+        let base = args[1]
+            .checked_add(u64::from(received) * MMSGHDR_BYTES)
+            .ok_or(CompatErrno::Fault)?;
+        let message_flags = if wait_for_one && received != 0 {
+            flags | MSG_DONTWAIT
+        } else {
+            flags
+        };
+        match linux_recvmsg(pid, [args[0], base, message_flags, 0, 0, 0]) {
+            Ok(0) => break,
+            Ok(length) => {
+                let length = u32::try_from(length).map_err(|_| CompatErrno::Invalid)?;
+                copy_to_user(
+                    base.checked_add(MSG_LEN_OFFSET).ok_or(CompatErrno::Fault)?,
+                    &length.to_le_bytes(),
+                    4,
+                )
+                .map_err(|_| CompatErrno::Fault)?;
+                received += 1;
+            }
+            Err(error) if received == 0 => return Err(error),
+            Err(_) => break,
+        }
+    }
+    Ok(u64::from(received))
 }
 
 /// Applies one directional AF_UNIX stream shutdown.

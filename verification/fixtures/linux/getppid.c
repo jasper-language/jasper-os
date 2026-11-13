@@ -3561,6 +3561,53 @@ int main(void) {
         waitpid(kill_child, &kill_status, 0) != kill_child) {
         return 471;
     }
+    int mmsg_sockets[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, mmsg_sockets) != 0) {
+        return 472;
+    }
+    char mmsg_send_a[] = "one";
+    char mmsg_send_b[] = "two";
+    char mmsg_recv_a[4] = {0};
+    char mmsg_recv_b[4] = {0};
+    struct iovec mmsg_send_iov[2] = {
+        {.iov_base = mmsg_send_a, .iov_len = 3},
+        {.iov_base = mmsg_send_b, .iov_len = 3},
+    };
+    struct iovec mmsg_recv_iov[2] = {
+        {.iov_base = mmsg_recv_a, .iov_len = 3},
+        {.iov_base = mmsg_recv_b, .iov_len = 3},
+    };
+    struct mmsghdr mmsg_send[2] = {0};
+    struct mmsghdr mmsg_recv[2] = {0};
+    for (int message = 0; message < 2; message++) {
+        mmsg_send[message].msg_hdr.msg_iov = &mmsg_send_iov[message];
+        mmsg_send[message].msg_hdr.msg_iovlen = 1;
+        mmsg_recv[message].msg_hdr.msg_iov = &mmsg_recv_iov[message];
+        mmsg_recv[message].msg_hdr.msg_iovlen = 1;
+    }
+    if (syscall(SYS_sendmmsg, mmsg_sockets[0], mmsg_send, 2, 0) != 2 ||
+        mmsg_send[0].msg_len != 3 || mmsg_send[1].msg_len != 3 ||
+        syscall(SYS_recvmmsg, mmsg_sockets[1], mmsg_recv, 2,
+                MSG_WAITFORONE, NULL) != 2 ||
+        mmsg_recv[0].msg_len != 3 || mmsg_recv[1].msg_len != 3 ||
+        memcmp(mmsg_recv_a, "one", 3) != 0 ||
+        memcmp(mmsg_recv_b, "two", 3) != 0) {
+        return 473;
+    }
+    struct timespec mmsg_timeout = {0};
+    errno = 0;
+    if (syscall(SYS_recvmmsg, mmsg_sockets[1], mmsg_recv, 1,
+                0, &mmsg_timeout) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 474;
+    }
+    errno = 0;
+    if (syscall(SYS_sendmmsg, mmsg_sockets[0], mmsg_send, 17, 0) != -1 ||
+        errno != EINVAL ||
+        close(mmsg_sockets[0]) != 0 ||
+        close(mmsg_sockets[1]) != 0) {
+        return 475;
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);

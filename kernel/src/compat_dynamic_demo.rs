@@ -115,6 +115,8 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::TimerDelete,
         LinuxSyscall::SendMsg,
         LinuxSyscall::RecvMsg,
+        LinuxSyscall::Sendmmsg,
+        LinuxSyscall::Recvmmsg,
         LinuxSyscall::SendTo,
         LinuxSyscall::RecvFrom,
         LinuxSyscall::Shutdown,
