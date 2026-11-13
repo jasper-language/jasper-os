@@ -4897,6 +4897,69 @@ int main(void) {
         memcmp(mq_first, "note", 4) != 0) {
         return 664;
     }
+    int mq_wait_started[2];
+    int mq_wait_done[2];
+    if (pipe(mq_wait_started) != 0 || pipe(mq_wait_done) != 0) {
+        return 676;
+    }
+    mq_notification_signals = 0;
+    if (syscall(SYS_mq_notify, mq_fd, &mq_signal_event) != 0) {
+        return 677;
+    }
+    pid_t mq_waiter = fork();
+    if (mq_waiter < 0) {
+        return 678;
+    }
+    if (mq_waiter == 0) {
+        close(mq_wait_started[0]);
+        close(mq_wait_done[0]);
+        char started = 'R';
+        if (write(mq_wait_started[1], &started, 1) != 1) {
+            _exit(1);
+        }
+        char received[16] = {0};
+        ssize_t count = syscall(SYS_mq_timedreceive, mq_fd,
+                                received, sizeof(received), NULL, NULL);
+        char done = count == 5 && memcmp(received, "child", 5) == 0;
+        if (write(mq_wait_done[1], &done, 1) != 1) {
+            _exit(2);
+        }
+        _exit(done == 1 ? 0 : 3);
+    }
+    close(mq_wait_started[1]);
+    close(mq_wait_done[1]);
+    char wait_started = 0;
+    struct timespec mq_waiter_delay = {.tv_sec = 0, .tv_nsec = 20000000};
+    if (read(mq_wait_started[0], &wait_started, 1) != 1 ||
+        wait_started != 'R' ||
+        nanosleep(&mq_waiter_delay, NULL) != 0 ||
+        syscall(SYS_mq_timedsend, mq_fd, "child", 5, 0, NULL) != 0) {
+        return 679;
+    }
+    char wait_done = 0;
+    int mq_waiter_status = 0;
+    if (read(mq_wait_done[0], &wait_done, 1) != 1 ||
+        wait_done != 1 ||
+        waitpid(mq_waiter, &mq_waiter_status, 0) != mq_waiter ||
+        !WIFEXITED(mq_waiter_status) ||
+        WEXITSTATUS(mq_waiter_status) != 0 ||
+        mq_notification_signals != 0 ||
+        close(mq_wait_started[0]) != 0 ||
+        close(mq_wait_done[0]) != 0 ||
+        syscall(SYS_mq_timedsend, mq_fd, "later", 5, 0, NULL) != 0) {
+        return 680;
+    }
+    for (int attempt = 0; attempt < 8 && mq_notification_signals == 0;
+         attempt++) {
+        syscall(SYS_getpid);
+    }
+    memset(mq_first, 0, sizeof(mq_first));
+    if (mq_notification_signals != 1 ||
+        syscall(SYS_mq_timedreceive, mq_fd, mq_first,
+                sizeof(mq_first), NULL, NULL) != 5 ||
+        memcmp(mq_first, "later", 5) != 0) {
+        return 681;
+    }
     if (syscall(SYS_mq_notify, mq_fd, &mq_signal_event) != 0 ||
         syscall(SYS_mq_notify, mq_fd, NULL) != 0 ||
         sigprocmask(SIG_SETMASK, &mq_previous_mask, NULL) != 0 ||
