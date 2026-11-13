@@ -1791,6 +1791,13 @@ fn execute(
         LinuxSyscall::FaccessAt2 => compat_result(linux_faccessat(pid, call.args, true)),
         LinuxSyscall::Prctl => compat_result(linux_prctl(pid, call.args)),
         LinuxSyscall::ArchPrctl => compat_result(linux_arch_prctl(call.args)),
+        LinuxSyscall::Adjtimex
+        | LinuxSyscall::ClockAdjtime
+        | LinuxSyscall::ClockSettime
+        | LinuxSyscall::Settimeofday
+        | LinuxSyscall::Sethostname
+        | LinuxSyscall::Setdomainname
+        | LinuxSyscall::Reboot => -(CompatErrno::Perm as i32 as i64),
         LinuxSyscall::ClockGettime => compat_result(linux_clock_gettime(call.args)),
         LinuxSyscall::ClockGetres => compat_result(linux_clock_getres(call.args)),
         LinuxSyscall::Nanosleep => compat_result(linux_nanosleep(pid, call.args)),

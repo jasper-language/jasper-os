@@ -28,6 +28,7 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/random.h>
+#include <sys/reboot.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -35,6 +36,7 @@
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
 #include <sys/time.h>
+#include <sys/timex.h>
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -2224,7 +2226,7 @@ int main(void) {
     fd_set select_read;
     FD_ZERO(&select_read);
     FD_SET(select_pipe[0], &select_read);
-    struct timeval select_timeout = {.tv_sec = 0, .tv_usec = 300000};
+    struct timeval select_timeout = {.tv_sec = 1, .tv_usec = 0};
     if (select(select_pipe[0] + 1, &select_read, NULL, NULL,
                &select_timeout) != 1 ||
         !FD_ISSET(select_pipe[0], &select_read) ||
@@ -2396,6 +2398,43 @@ int main(void) {
     errno = 0;
     if (prctl(0x7fffffff, 0, 0, 0, 0) != -1 || errno != EINVAL) {
         return 333;
+    }
+    struct timespec privileged_time = {0};
+    struct timeval privileged_timeval = {0};
+    struct timex privileged_timex = {0};
+    errno = 0;
+    if (syscall(SYS_clock_settime, CLOCK_REALTIME, &privileged_time) != -1 ||
+        errno != EPERM) {
+        return 334;
+    }
+    errno = 0;
+    if (syscall(SYS_settimeofday, &privileged_timeval, NULL) != -1 ||
+        errno != EPERM) {
+        return 335;
+    }
+    errno = 0;
+    if (syscall(SYS_adjtimex, &privileged_timex) != -1 ||
+        errno != EPERM) {
+        return 336;
+    }
+    errno = 0;
+    if (syscall(SYS_clock_adjtime, CLOCK_REALTIME,
+                &privileged_timex) != -1 || errno != EPERM) {
+        return 337;
+    }
+    errno = 0;
+    if (syscall(SYS_sethostname, "jasper", 6) != -1 ||
+        errno != EPERM) {
+        return 338;
+    }
+    errno = 0;
+    if (syscall(SYS_setdomainname, "jasper", 6) != -1 ||
+        errno != EPERM) {
+        return 339;
+    }
+    errno = 0;
+    if (reboot(RB_AUTOBOOT) != -1 || errno != EPERM) {
+        return 340;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
