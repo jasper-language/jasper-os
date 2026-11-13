@@ -1564,6 +1564,9 @@ fn read_linux_queued_siginfo(signal: u32, address: u64) -> Result<SignalOrigin, 
     if !(1..=64).contains(&signal) {
         return Err(CompatErrno::Invalid);
     }
+    if u32::from_le_bytes(info[..4].try_into().unwrap()) != signal {
+        return Err(CompatErrno::Invalid);
+    }
     Ok(SignalOrigin {
         pid: u32::from_le_bytes(info[16..20].try_into().unwrap()),
         uid: u32::from_le_bytes(info[20..24].try_into().unwrap()),
@@ -5713,9 +5716,6 @@ fn linux_pidfd_send_signal(
     pid: ObjId,
     args: [u64; 6],
 ) -> Result<u64, CompatErrno> {
-    if args[2] != 0 {
-        return Err(CompatErrno::NotSupported);
-    }
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if entry.kind != compat_core::fd::CompatKind::Pidfd || args[3] != 0 {
@@ -5735,7 +5735,22 @@ fn linux_pidfd_send_signal(
         return Err(CompatErrno::NotSupported);
     }
     let sender = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?;
-    if queue_process_signal(target, signal, sender, 0) {
+    let queued = if args[2] == 0 {
+        queue_process_signal(target, signal, sender, 0)
+    } else {
+        let target_pid = proc::linux_pid(target).ok_or(CompatErrno::NoProcess)?;
+        let info = read_linux_queued_siginfo(signal, args[2])?;
+        check_linux_sigqueue_source(pid, target_pid, info.code)?;
+        queue_process_signal_info(
+            target,
+            signal,
+            info.pid,
+            info.uid,
+            info.code,
+            info.value,
+        )
+    };
+    if queued {
         Ok(0)
     } else {
         Err(CompatErrno::NoProcess)

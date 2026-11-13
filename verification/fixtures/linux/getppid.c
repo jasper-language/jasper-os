@@ -4233,15 +4233,29 @@ int main(void) {
     if (pidfd < 0 || poll(&pidfd_poll, 1, 0) != 0) {
         return 477;
     }
+    siginfo_t pidfd_info = {
+        .si_signo = SIGTERM,
+        .si_code = SI_QUEUE,
+        .si_pid = getpid(),
+        .si_uid = getuid(),
+        .si_value.sival_int = 0x50494446,
+    };
+    int pidfd_status = 0;
+    siginfo_t invalid_pidfd_info = pidfd_info;
+    invalid_pidfd_info.si_signo = SIGUSR1;
     errno = 0;
-    if (syscall(SYS_pidfd_send_signal, pidfd, SIGTERM,
-                (siginfo_t *)(uintptr_t)1, 0) != -1 ||
-        errno != EOPNOTSUPP ||
-        syscall(SYS_pidfd_send_signal, pidfd, SIGTERM, NULL, 0) != 0 ||
+    if (syscall(SYS_pidfd_send_signal, pidfd, 0, NULL, 0) != 0 ||
+        syscall(SYS_pidfd_send_signal, pidfd, SIGTERM,
+                &invalid_pidfd_info, 0) != -1 ||
+        errno != EINVAL ||
+        syscall(SYS_pidfd_send_signal, pidfd, SIGTERM,
+                &pidfd_info, 0) != 0 ||
         poll(&pidfd_poll, 1, 1000) != 1 ||
         (pidfd_poll.revents & POLLIN) == 0 ||
         syscall(SYS_pidfd_send_signal, pidfd, 0, NULL, 0) != 0 ||
-        waitpid(pidfd_child, NULL, 0) != pidfd_child ||
+        waitpid(pidfd_child, &pidfd_status, 0) != pidfd_child ||
+        !WIFSIGNALED(pidfd_status) ||
+        WTERMSIG(pidfd_status) != SIGTERM ||
         close(pidfd) != 0) {
         return 478;
     }
