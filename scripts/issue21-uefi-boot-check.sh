@@ -7,6 +7,19 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export PATH="${HOME}/.cargo/bin:${PATH}"
 
+# Serialize the complete build/image/QEMU transaction even when callers bypass
+# the host-side vm-run queue. 源码同步仍可并行，但 guest 的重型验收必须独占。
+UEFI_BUILD_LOCK="${ISSUE21_UEFI_BUILD_LOCK:-/tmp/jasper-os-issue21-uefi-build.lock}"
+if ! command -v flock >/dev/null 2>&1; then
+  echo "issue21-uefi-boot: flock is required for guest resource exclusion" >&2
+  exit 69
+fi
+exec 8>"$UEFI_BUILD_LOCK"
+if ! flock -w "${ISSUE21_UEFI_BUILD_LOCK_WAIT:-3600}" 8; then
+  echo "issue21-uefi-boot: guest build/QEMU queue wait timed out" >&2
+  exit 75
+fi
+
 guarded_cargo() {
   "$ROOT/scripts/guarded-cargo.sh" "$@"
 }
