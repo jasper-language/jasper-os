@@ -5111,7 +5111,7 @@ pub(crate) fn settle_posix_timers(now: u64) {
         }
     }
     for (process, signal) in pending.into_iter().flatten() {
-        let _ = queue_process_signal(process, signal);
+            let _ = queue_process_signal(process, signal, 0, -2);
     }
 }
 
