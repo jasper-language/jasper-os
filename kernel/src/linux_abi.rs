@@ -38,6 +38,12 @@ const MAX_SYSV_MESSAGE_QUEUES: usize = 16;
 const MAX_SYSV_MESSAGES_PER_QUEUE: usize = 64;
 const SYSV_MSGMAX: usize = 8192;
 const SYSV_MSGMNB: usize = 16384;
+const MAX_SYSV_SEM_SETS: usize = 16;
+const MAX_SYSV_SEMS_PER_SET: usize = 16;
+const MAX_SYSV_SEM_OPS: usize = 32;
+const MAX_SYSV_SEM_WAITERS: usize = 64;
+const MAX_SYSV_SEM_UNDOS: usize = 64;
+const SYSV_SEMVMX: i32 = 32767;
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
 static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
 
@@ -217,6 +223,49 @@ struct SysVMessageQueue {
     last_receive_pid: i32,
 }
 
+#[derive(Clone, Copy)]
+struct SysVSemaphoreSet {
+    id: i32,
+    key: i32,
+    application: kernel_core::security::ApplicationIdentity,
+    uid: u32,
+    gid: u32,
+    cuid: u32,
+    cgid: u32,
+    mode: u16,
+    values: [i32; MAX_SYSV_SEMS_PER_SET],
+    nsems: usize,
+    operation_time: i64,
+    change_time: i64,
+    last_pid: i32,
+    positive_waiters: [u16; MAX_SYSV_SEMS_PER_SET],
+    zero_waiters: [u16; MAX_SYSV_SEMS_PER_SET],
+}
+
+#[derive(Clone, Copy)]
+struct SysVSemaphoreOperation {
+    number: usize,
+    operation: i16,
+    flags: i16,
+}
+
+#[derive(Clone, Copy)]
+struct SysVSemaphoreWaiter {
+    process: ObjId,
+    task: crate::task::TaskId,
+    semid: i32,
+    semnum: usize,
+    zero: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SysVSemaphoreUndo {
+    process: ObjId,
+    semid: i32,
+    semnum: usize,
+    adjustment: i32,
+}
+
 struct CompatState {
     threads: [Option<LinuxThread>; MAX_LINUX_THREADS],
     futexes: [Option<FutexWord>; MAX_FUTEX_WORDS],
@@ -230,6 +279,10 @@ struct CompatState {
     next_signal_sequence: u64,
     sysv_message_queues: alloc::vec::Vec<SysVMessageQueue>,
     next_sysv_message_queue_id: i32,
+    sysv_semaphore_sets: alloc::vec::Vec<SysVSemaphoreSet>,
+    sysv_semaphore_waiters: [Option<SysVSemaphoreWaiter>; MAX_SYSV_SEM_WAITERS],
+    sysv_semaphore_undos: alloc::vec::Vec<SysVSemaphoreUndo>,
+    next_sysv_semaphore_id: i32,
 }
 
 impl CompatState {
@@ -247,6 +300,10 @@ impl CompatState {
             next_signal_sequence: 0,
             sysv_message_queues: alloc::vec::Vec::new(),
             next_sysv_message_queue_id: 1,
+            sysv_semaphore_sets: alloc::vec::Vec::new(),
+            sysv_semaphore_waiters: [None; MAX_SYSV_SEM_WAITERS],
+            sysv_semaphore_undos: alloc::vec::Vec::new(),
+            next_sysv_semaphore_id: 1,
         }
     }
 }
@@ -1808,6 +1865,7 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
                 *pending = None;
             }
         });
+        remove_all_sysv_semaphore_waiters(&mut state, process, task);
         let last_thread = !state
             .threads
             .iter()
@@ -1841,6 +1899,7 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
     if last_thread {
         release_posix_timers(process);
         remove_process_signals(process);
+        release_sysv_semaphore_undos(process);
         crate::binder::release_process(process);
     }
 }
@@ -2440,6 +2499,10 @@ fn execute(
         LinuxSyscall::MsgSend => compat_result(linux_msgsnd(pid, call.args)),
         LinuxSyscall::MsgReceive => compat_result(linux_msgrcv(pid, call.args)),
         LinuxSyscall::MsgCtl => compat_result(linux_msgctl(pid, call.args)),
+        LinuxSyscall::SemGet => compat_result(linux_semget(pid, call.args)),
+        LinuxSyscall::SemOp => compat_result(linux_semop(pid, call.args, false)),
+        LinuxSyscall::SemTimedOp => compat_result(linux_semop(pid, call.args, true)),
+        LinuxSyscall::SemCtl => compat_result(linux_semctl(pid, call.args)),
         LinuxSyscall::MqOpen => compat_result(linux_mq_open(pid, call.args)),
         LinuxSyscall::MqUnlink => compat_result(linux_mq_unlink(call.args)),
         LinuxSyscall::MqTimedsend => compat_result(linux_mq_send(pid, call.args, true)),
@@ -7470,6 +7533,697 @@ fn linux_msgctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             } else {
                 Ok(0)
             }
+        }
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+const SYSV_SEM_UNDO: u16 = 0x1000;
+const SYSV_SEM_DS_BYTES: usize = 88;
+
+fn sysv_semaphore_set_index(
+    state: &CompatState,
+    application: kernel_core::security::ApplicationIdentity,
+    id: i32,
+) -> Option<usize> {
+    state
+        .sysv_semaphore_sets
+        .iter()
+        .position(|set| set.application == application && set.id == id)
+}
+
+fn sysv_semaphore_access(
+    set: &SysVSemaphoreSet,
+    credentials: proc::LinuxCredentials,
+    write: bool,
+) -> bool {
+    if credentials.euid == 0 {
+        return true;
+    }
+    let shift = if credentials.euid == set.uid {
+        6
+    } else if credentials.egid == set.gid {
+        3
+    } else {
+        0
+    };
+    let required = if write { 0o2 } else { 0o4 };
+    set.mode >> shift & required == required
+}
+
+fn sysv_sem_ds_bytes(set: &SysVSemaphoreSet) -> [u8; SYSV_SEM_DS_BYTES] {
+    let mut output = [0u8; SYSV_SEM_DS_BYTES];
+    output[0..4].copy_from_slice(&(set.key as u32).to_le_bytes());
+    output[4..8].copy_from_slice(&set.uid.to_le_bytes());
+    output[8..12].copy_from_slice(&set.gid.to_le_bytes());
+    output[12..16].copy_from_slice(&set.cuid.to_le_bytes());
+    output[16..20].copy_from_slice(&set.cgid.to_le_bytes());
+    output[20..24].copy_from_slice(&u32::from(set.mode).to_le_bytes());
+    output[24..26].copy_from_slice(&(set.id as u16).to_le_bytes());
+    output[48..56].copy_from_slice(&set.operation_time.to_le_bytes());
+    output[56..64].copy_from_slice(&set.change_time.to_le_bytes());
+    output[64..72].copy_from_slice(&(set.nsems as u64).to_le_bytes());
+    output
+}
+
+fn write_sysv_seminfo(address: u64) -> Result<(), CompatErrno> {
+    let mut info = [0u8; 40];
+    info[4..8].copy_from_slice(&(MAX_SYSV_SEM_SETS as i32).to_le_bytes());
+    info[8..12].copy_from_slice(
+        &((MAX_SYSV_SEM_SETS * MAX_SYSV_SEMS_PER_SET) as i32).to_le_bytes(),
+    );
+    info[12..16].copy_from_slice(&(MAX_SYSV_SEM_UNDOS as i32).to_le_bytes());
+    info[16..20].copy_from_slice(&(MAX_SYSV_SEMS_PER_SET as i32).to_le_bytes());
+    info[20..24].copy_from_slice(&(MAX_SYSV_SEM_OPS as i32).to_le_bytes());
+    info[24..28].copy_from_slice(&(MAX_SYSV_SEM_UNDOS as i32).to_le_bytes());
+    info[28..32].copy_from_slice(&(MAX_SYSV_SEM_UNDOS as i32).to_le_bytes());
+    info[32..36].copy_from_slice(&SYSV_SEMVMX.to_le_bytes());
+    info[36..40].copy_from_slice(&SYSV_SEMVMX.to_le_bytes());
+    copy_to_user(address, &info, info.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(())
+}
+
+fn read_sysv_semaphore_ops(
+    address: u64,
+    count: usize,
+) -> Result<([SysVSemaphoreOperation; MAX_SYSV_SEM_OPS], usize), CompatErrno> {
+    if count == 0 || count > MAX_SYSV_SEM_OPS {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut raw = [0u8; MAX_SYSV_SEM_OPS * 6];
+    copy_from_user(&mut raw, address, count * 6).map_err(|_| CompatErrno::Fault)?;
+    let mut operations = [SysVSemaphoreOperation {
+        number: 0,
+        operation: 0,
+        flags: 0,
+    }; MAX_SYSV_SEM_OPS];
+    for (index, output) in operations[..count].iter_mut().enumerate() {
+        let base = index * 6;
+        let flags = i16::from_le_bytes(raw[base + 4..base + 6].try_into().unwrap()) as u16;
+        if flags & !(SYSV_IPC_NOWAIT as u16 | SYSV_SEM_UNDO) != 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        *output = SysVSemaphoreOperation {
+            number: usize::from(u16::from_le_bytes(raw[base..base + 2].try_into().unwrap())),
+            operation: i16::from_le_bytes(raw[base + 2..base + 4].try_into().unwrap()),
+            flags: flags as i16,
+        };
+    }
+    Ok((operations, count))
+}
+
+enum SysVSemaphoreEvaluation {
+    Ready([i32; MAX_SYSV_SEMS_PER_SET]),
+    Blocked {
+        semnum: usize,
+        zero: bool,
+        nowait: bool,
+    },
+}
+
+fn evaluate_sysv_semaphore_ops(
+    set: &SysVSemaphoreSet,
+    operations: &[SysVSemaphoreOperation],
+) -> Result<SysVSemaphoreEvaluation, CompatErrno> {
+    let mut values = set.values;
+    for operation in operations {
+        if operation.number >= set.nsems {
+            return Err(CompatErrno::Invalid);
+        }
+        let nowait = operation.flags as u16 & SYSV_IPC_NOWAIT as u16 != 0;
+        if operation.operation == 0 {
+            if values[operation.number] != 0 {
+                return Ok(SysVSemaphoreEvaluation::Blocked {
+                    semnum: operation.number,
+                    zero: true,
+                    nowait,
+                });
+            }
+        } else if operation.operation < 0 {
+            let amount = -i32::from(operation.operation);
+            if values[operation.number] < amount {
+                return Ok(SysVSemaphoreEvaluation::Blocked {
+                    semnum: operation.number,
+                    zero: false,
+                    nowait,
+                });
+            }
+            values[operation.number] -= amount;
+        } else {
+            let amount = i32::from(operation.operation);
+            if values[operation.number].saturating_add(amount) > SYSV_SEMVMX {
+                return Err(CompatErrno::TryAgain);
+            }
+            values[operation.number] += amount;
+        }
+    }
+    Ok(SysVSemaphoreEvaluation::Ready(values))
+}
+
+fn remove_sysv_semaphore_waiter(
+    state: &mut CompatState,
+    process: ObjId,
+    task: crate::task::TaskId,
+    semid: i32,
+) {
+    let Some(slot) = state.sysv_semaphore_waiters.iter().position(|waiter| {
+        waiter.is_some_and(|waiter| {
+            waiter.process == process && waiter.task == task && waiter.semid == semid
+        })
+    }) else {
+        return;
+    };
+    let Some(waiter) = state.sysv_semaphore_waiters[slot].take() else {
+        return;
+    };
+    if let Some(set) = state
+        .sysv_semaphore_sets
+        .iter_mut()
+        .find(|set| set.id == semid)
+    {
+        let counts = if waiter.zero {
+            &mut set.zero_waiters
+        } else {
+            &mut set.positive_waiters
+        };
+        if let Some(count) = counts.get_mut(waiter.semnum) {
+            *count = count.saturating_sub(1);
+        }
+    }
+}
+
+fn remove_all_sysv_semaphore_waiters(
+    state: &mut CompatState,
+    process: ObjId,
+    task: crate::task::TaskId,
+) {
+    loop {
+        let Some(semid) = state
+            .sysv_semaphore_waiters
+            .iter()
+            .flatten()
+            .find(|waiter| waiter.process == process && waiter.task == task)
+            .map(|waiter| waiter.semid)
+        else {
+            break;
+        };
+        remove_sysv_semaphore_waiter(state, process, task, semid);
+    }
+}
+
+fn register_sysv_semaphore_waiter(
+    state: &mut CompatState,
+    process: ObjId,
+    task: crate::task::TaskId,
+    semid: i32,
+    semnum: usize,
+    zero: bool,
+) -> bool {
+    if state.sysv_semaphore_waiters.iter().flatten().any(|waiter| {
+        waiter.process == process
+            && waiter.task == task
+            && waiter.semid == semid
+            && waiter.semnum == semnum
+            && waiter.zero == zero
+    }) {
+        return true;
+    }
+    remove_sysv_semaphore_waiter(state, process, task, semid);
+    let Some(slot) = state
+        .sysv_semaphore_waiters
+        .iter()
+        .position(Option::is_none)
+    else {
+        return false;
+    };
+    state.sysv_semaphore_waiters[slot] = Some(SysVSemaphoreWaiter {
+        process,
+        task,
+        semid,
+        semnum,
+        zero,
+    });
+    if let Some(set) = state
+        .sysv_semaphore_sets
+        .iter_mut()
+        .find(|set| set.id == semid)
+    {
+        let counts = if zero {
+            &mut set.zero_waiters
+        } else {
+            &mut set.positive_waiters
+        };
+        if let Some(count) = counts.get_mut(semnum) {
+            *count = count.saturating_add(1);
+        }
+    }
+    true
+}
+
+fn update_sysv_semaphore_undo(
+    state: &mut CompatState,
+    process: ObjId,
+    semid: i32,
+    semnum: usize,
+    operation: i16,
+) -> bool {
+    if let Some(undo) = state.sysv_semaphore_undos.iter_mut().find(|undo| {
+        undo.process == process && undo.semid == semid && undo.semnum == semnum
+    }) {
+        undo.adjustment = undo.adjustment.saturating_sub(i32::from(operation));
+        if undo.adjustment == 0 {
+            let process = undo.process;
+            let semid = undo.semid;
+            let semnum = undo.semnum;
+            state.sysv_semaphore_undos.retain(|undo| {
+                !(undo.process == process && undo.semid == semid && undo.semnum == semnum)
+            });
+        }
+        return true;
+    }
+    if state.sysv_semaphore_undos.len() >= MAX_SYSV_SEM_UNDOS {
+        return false;
+    }
+    state
+        .sysv_semaphore_undos
+        .try_reserve(1)
+        .is_ok_and(|()| {
+            state.sysv_semaphore_undos.push(SysVSemaphoreUndo {
+                process,
+                semid,
+                semnum,
+                adjustment: -i32::from(operation),
+            });
+            true
+        })
+}
+
+/// Applies and drops all SEM_UNDO adjustments owned by an exiting process.
+fn release_sysv_semaphore_undos(process: ObjId) {
+    let mut state = COMPAT.lock();
+    let mut remaining = alloc::vec::Vec::new();
+    for undo in core::mem::take(&mut state.sysv_semaphore_undos) {
+        if undo.process != process {
+            remaining.push(undo);
+            continue;
+        }
+        if let Some(set) = state
+            .sysv_semaphore_sets
+            .iter_mut()
+            .find(|set| set.id == undo.semid)
+        {
+            if let Some(value) = set.values.get_mut(undo.semnum) {
+                *value = value.saturating_add(undo.adjustment).clamp(0, SYSV_SEMVMX);
+                set.change_time = sysv_time_seconds();
+            }
+        }
+    }
+    state.sysv_semaphore_undos = remaining;
+    drop(state);
+    wake_message_queue_waiters();
+}
+
+/// Implements `semget(2)` with bounded per-application semaphore sets.
+fn linux_semget(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let key = args[0] as u32 as i32;
+    let nsems = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let flags = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if flags & !(0o777 | SYSV_IPC_CREAT | SYSV_IPC_EXCL | SYSV_IPC_NOWAIT) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let mut state = COMPAT.lock();
+    if key != 0 {
+        if let Some(set) = state
+            .sysv_semaphore_sets
+            .iter()
+            .find(|set| set.application == application && set.key == key)
+        {
+            if flags & (SYSV_IPC_CREAT | SYSV_IPC_EXCL)
+                == (SYSV_IPC_CREAT | SYSV_IPC_EXCL)
+            {
+                return Err(CompatErrno::Exists);
+            }
+            return Ok(set.id as u32 as u64);
+        }
+    }
+    if flags & SYSV_IPC_CREAT == 0 {
+        return Err(CompatErrno::NoEntry);
+    }
+    if !(1..=MAX_SYSV_SEMS_PER_SET).contains(&nsems) {
+        return Err(CompatErrno::Invalid);
+    }
+    if state.sysv_semaphore_sets.len() >= MAX_SYSV_SEM_SETS {
+        return Err(CompatErrno::NoSpace);
+    }
+    state
+        .sysv_semaphore_sets
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    let id = state.next_sysv_semaphore_id;
+    state.next_sysv_semaphore_id = id.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+    let now = sysv_time_seconds();
+    state.sysv_semaphore_sets.push(SysVSemaphoreSet {
+        id,
+        key,
+        application,
+        uid: credentials.euid,
+        gid: credentials.egid,
+        cuid: credentials.euid,
+        cgid: credentials.egid,
+        mode: (flags & 0o777) as u16,
+        values: [0; MAX_SYSV_SEMS_PER_SET],
+        nsems,
+        operation_time: 0,
+        change_time: now,
+        last_pid: 0,
+        positive_waiters: [0; MAX_SYSV_SEMS_PER_SET],
+        zero_waiters: [0; MAX_SYSV_SEMS_PER_SET],
+    });
+    Ok(id as u32 as u64)
+}
+
+/// Implements `semop(2)` and `semtimedop(2)` atomically.
+fn linux_semop(pid: ObjId, args: [u64; 6], timed: bool) -> Result<u64, CompatErrno> {
+    let deadline = if timed {
+        Some(
+            sched::now_ns()
+                .checked_add(read_linux_timespec(args[3])?)
+                .ok_or(CompatErrno::Invalid)?,
+        )
+    } else {
+        None
+    };
+    let id = args[0] as i32;
+    let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let (operations, operation_count) = read_sysv_semaphore_ops(args[1], count)?;
+    let operations = &operations[..operation_count];
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let process_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
+    let (task, _) = sched::current();
+    let mut waited = false;
+    loop {
+        let evaluation = {
+            let mut state = COMPAT.lock();
+            let set_index = sysv_semaphore_set_index(&state, application, id).ok_or(
+                if waited {
+                    CompatErrno::Removed
+                } else {
+                    CompatErrno::Invalid
+                },
+            )?;
+            let requires_write = operations.iter().any(|operation| operation.operation != 0);
+            if !sysv_semaphore_access(
+                &state.sysv_semaphore_sets[set_index],
+                credentials,
+                requires_write,
+            ) {
+                remove_sysv_semaphore_waiter(&mut state, pid, task, id);
+                return Err(CompatErrno::Access);
+            }
+            match evaluate_sysv_semaphore_ops(&state.sysv_semaphore_sets[set_index], operations) {
+                Ok(SysVSemaphoreEvaluation::Ready(values)) => {
+                    let mut new_undos = 0usize;
+                    for (index, operation) in operations.iter().enumerate() {
+                        if operation.flags as u16 & SYSV_SEM_UNDO == 0 {
+                            continue;
+                        }
+                        let existing = state.sysv_semaphore_undos.iter().any(|undo| {
+                            undo.process == pid
+                                && undo.semid == id
+                                && undo.semnum == operation.number
+                        });
+                        let repeated = operations[..index].iter().any(|previous| {
+                            previous.flags as u16 & SYSV_SEM_UNDO != 0
+                                && previous.number == operation.number
+                        });
+                        if !existing && !repeated {
+                            new_undos += 1;
+                        }
+                    }
+                    if state.sysv_semaphore_undos.len().saturating_add(new_undos)
+                        > MAX_SYSV_SEM_UNDOS
+                        || state
+                            .sysv_semaphore_undos
+                            .try_reserve(new_undos)
+                            .is_err()
+                    {
+                        remove_sysv_semaphore_waiter(&mut state, pid, task, id);
+                        return Err(CompatErrno::NoSpace);
+                    }
+                    {
+                        let set = &mut state.sysv_semaphore_sets[set_index];
+                        set.values = values;
+                        set.operation_time = sysv_time_seconds();
+                        set.last_pid = process_pid;
+                    }
+                    for operation in operations {
+                        if operation.flags as u16 & SYSV_SEM_UNDO != 0
+                            && !update_sysv_semaphore_undo(
+                                &mut state,
+                                pid,
+                                id,
+                                operation.number,
+                                operation.operation,
+                            )
+                        {
+                            return Err(CompatErrno::NoSpace);
+                        }
+                    }
+                    remove_sysv_semaphore_waiter(&mut state, pid, task, id);
+                    Ok(None)
+                }
+                Ok(SysVSemaphoreEvaluation::Blocked {
+                    semnum,
+                    zero,
+                    nowait,
+                }) => {
+                    if nowait {
+                        remove_sysv_semaphore_waiter(&mut state, pid, task, id);
+                        Err(CompatErrno::TryAgain)
+                    } else {
+                        Ok(Some((semnum, zero)))
+                    }
+                }
+                Err(error) => {
+                    remove_sysv_semaphore_waiter(&mut state, pid, task, id);
+                    Err(error)
+                }
+            }
+        }?;
+        let Some((semnum, zero)) = evaluation else {
+            wake_message_queue_waiters();
+            return Ok(0);
+        };
+        {
+            let mut state = COMPAT.lock();
+            if !register_sysv_semaphore_waiter(&mut state, pid, task, id, semnum, zero) {
+                return Err(CompatErrno::NoSpace);
+            }
+        }
+        if proc::current_exiting() || current_signal_pending(pid) {
+            let mut state = COMPAT.lock();
+            remove_sysv_semaphore_waiter(&mut state, pid, task, id);
+            return Err(CompatErrno::Interrupted);
+        }
+        if deadline.is_some_and(|deadline| sched::now_ns() >= deadline) {
+            let mut state = COMPAT.lock();
+            remove_sysv_semaphore_waiter(&mut state, pid, task, id);
+            return Err(CompatErrno::TryAgain);
+        }
+        waited = true;
+        if let Some(deadline) = deadline {
+            if sched::sleep_until_ns(deadline).is_err() {
+                sched::pause();
+            }
+        } else {
+            sched::pause();
+        }
+    }
+}
+
+/// Implements `semctl(2)` for values, counts, metadata and removal.
+fn linux_semctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const IPC_RMID: u32 = 0;
+    const IPC_SET: u32 = 1;
+    const IPC_STAT: u32 = 2;
+    const IPC_INFO: u32 = 3;
+    const GETPID: u32 = 11;
+    const GETVAL: u32 = 12;
+    const GETALL: u32 = 13;
+    const GETNCNT: u32 = 14;
+    const GETZCNT: u32 = 15;
+    const SETVAL: u32 = 16;
+    const SETALL: u32 = 17;
+    const SEM_STAT: u32 = 18;
+    const SEM_INFO: u32 = 19;
+    const SEM_STAT_ANY: u32 = 20;
+    let command = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if command == IPC_INFO || command == SEM_INFO {
+        return write_sysv_seminfo(args[3]).map(|()| 0);
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let update = if command == IPC_SET {
+        let mut update = [0u8; SYSV_SEM_DS_BYTES];
+        copy_from_user(&mut update, args[3], SYSV_SEM_DS_BYTES)
+            .map_err(|_| CompatErrno::Fault)?;
+        Some(update)
+    } else {
+        None
+    };
+    let id = args[0] as i32;
+    let mut state = COMPAT.lock();
+    let selected_index = match command {
+        SEM_STAT | SEM_STAT_ANY => {
+            let index = usize::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+            state
+                .sysv_semaphore_sets
+                .iter()
+                .enumerate()
+                .filter(|(_, set)| set.application == application)
+                .nth(index)
+                .map(|(index, _)| index)
+                .ok_or(CompatErrno::Invalid)?
+        }
+        _ => sysv_semaphore_set_index(&state, application, id).ok_or(CompatErrno::Invalid)?,
+    };
+    let set = &mut state.sysv_semaphore_sets[selected_index];
+    let semnum = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid);
+    let require_sem = |set: &SysVSemaphoreSet| {
+        let semnum = semnum?;
+        if semnum >= set.nsems {
+            return Err(CompatErrno::Invalid);
+        }
+        Ok(semnum)
+    };
+    if matches!(command, GETPID | GETVAL | GETALL | GETNCNT | GETZCNT)
+        && !sysv_semaphore_access(set, credentials, false)
+    {
+        return Err(CompatErrno::Access);
+    }
+    match command {
+        IPC_RMID => {
+            if credentials.euid != 0 && credentials.euid != set.uid {
+                return Err(CompatErrno::Perm);
+            }
+            let removed_id = set.id;
+            state.sysv_semaphore_sets.remove(selected_index);
+            state
+                .sysv_semaphore_waiters
+                .iter_mut()
+                .filter(|waiter| waiter.is_some_and(|waiter| waiter.semid == removed_id))
+                .for_each(|waiter| *waiter = None);
+            state
+                .sysv_semaphore_undos
+                .retain(|undo| undo.semid != removed_id);
+            drop(state);
+            wake_message_queue_waiters();
+            Ok(0)
+        }
+        IPC_SET => {
+            if credentials.euid != 0 && credentials.euid != set.uid {
+                return Err(CompatErrno::Perm);
+            }
+            let update = update.expect("IPC_SET input");
+            let mode = u32::from_le_bytes(update[20..24].try_into().unwrap()) as u16;
+            if mode & !0o777 != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            set.uid = u32::from_le_bytes(update[4..8].try_into().unwrap());
+            set.gid = u32::from_le_bytes(update[8..12].try_into().unwrap());
+            set.mode = mode;
+            set.change_time = sysv_time_seconds();
+            Ok(0)
+        }
+        IPC_STAT | SEM_STAT | SEM_STAT_ANY => {
+            if command != SEM_STAT_ANY && !sysv_semaphore_access(set, credentials, false) {
+                return Err(CompatErrno::Access);
+            }
+            let output = sysv_sem_ds_bytes(set);
+            let returned_id = set.id;
+            drop(state);
+            copy_to_user(args[3], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+            if command == SEM_STAT {
+                Ok(returned_id as u32 as u64)
+            } else {
+                Ok(0)
+            }
+        }
+        GETPID => {
+            require_sem(set)?;
+            Ok(set.last_pid as u32 as u64)
+        }
+        GETVAL => {
+            let semnum = require_sem(set)?;
+            Ok(set.values[semnum] as u64)
+        }
+        GETNCNT => {
+            let semnum = require_sem(set)?;
+            Ok(u64::from(set.positive_waiters[semnum]))
+        }
+        GETZCNT => {
+            let semnum = require_sem(set)?;
+            Ok(u64::from(set.zero_waiters[semnum]))
+        }
+        GETALL => {
+            let output: alloc::vec::Vec<u8> = set.values[..set.nsems]
+                .iter()
+                .flat_map(|value| (*value as u16).to_le_bytes())
+                .collect();
+            drop(state);
+            copy_to_user(args[3], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        }
+        SETVAL => {
+            if !sysv_semaphore_access(set, credentials, true) {
+                return Err(CompatErrno::Access);
+            }
+            let semnum = require_sem(set)?;
+            let value = u32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+            if value > SYSV_SEMVMX as u32 {
+                return Err(CompatErrno::Invalid);
+            }
+            set.values[semnum] = value as i32;
+            set.change_time = sysv_time_seconds();
+            state
+                .sysv_semaphore_undos
+                .retain(|undo| !(undo.semid == id && undo.semnum == semnum));
+            drop(state);
+            wake_message_queue_waiters();
+            Ok(0)
+        }
+        SETALL => {
+            if !sysv_semaphore_access(set, credentials, true) {
+                return Err(CompatErrno::Access);
+            }
+            let nsems = set.nsems;
+            drop(state);
+            let mut values = [0u8; MAX_SYSV_SEMS_PER_SET * 2];
+            copy_from_user(&mut values, args[3], nsems * 2).map_err(|_| CompatErrno::Fault)?;
+            let mut parsed = [0i32; MAX_SYSV_SEMS_PER_SET];
+            for (index, value) in parsed[..nsems].iter_mut().enumerate() {
+                let raw = u16::from_le_bytes(values[index * 2..index * 2 + 2].try_into().unwrap());
+                if i32::from(raw) > SYSV_SEMVMX {
+                    return Err(CompatErrno::Invalid);
+                }
+                *value = i32::from(raw);
+            }
+            let mut state = COMPAT.lock();
+            let set_index = sysv_semaphore_set_index(&state, application, id)
+                .ok_or(CompatErrno::Removed)?;
+            let set = &mut state.sysv_semaphore_sets[set_index];
+            set.values[..nsems].copy_from_slice(&parsed[..nsems]);
+            set.change_time = sysv_time_seconds();
+            state.sysv_semaphore_undos.retain(|undo| undo.semid != id);
+            drop(state);
+            wake_message_queue_waiters();
+            Ok(0)
         }
         _ => Err(CompatErrno::Invalid),
     }

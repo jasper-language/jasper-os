@@ -35,6 +35,7 @@
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/msg.h>
+#include <sys/sem.h>
 #include <sys/prctl.h>
 #include <sys/random.h>
 #include <sys/reboot.h>
@@ -4774,6 +4775,105 @@ int main(void) {
     if (msgrcv(sysv_msg, &sysv_message, sizeof(sysv_message.mtext),
                0, IPC_NOWAIT) != -1) {
         return 582;
+    }
+    key_t sysv_sem_key = 0x53544d31;
+    int stale_sysv_sem = semget(sysv_sem_key, 0, 0);
+    if (stale_sysv_sem >= 0) {
+        syscall(SYS_semctl, stale_sysv_sem, IPC_RMID, 0, 0);
+    }
+    int sysv_sem = semget(sysv_sem_key, 2, IPC_CREAT | IPC_EXCL | 0600);
+    if (sysv_sem < 0 || semget(sysv_sem_key, 0, 0600) != sysv_sem ||
+        syscall(SYS_semctl, sysv_sem, SETVAL, 0, 1) != 0 ||
+        syscall(SYS_semctl, sysv_sem, GETVAL, 0, 0) != 1) {
+        return 583;
+    }
+    struct sembuf semaphore_increment = {
+        .sem_num = 0,
+        .sem_op = 2,
+        .sem_flg = 0,
+    };
+    if (semop(sysv_sem, &semaphore_increment, 1) != 0 ||
+        syscall(SYS_semctl, sysv_sem, GETVAL, 0, 0) != 3) {
+        return 584;
+    }
+    struct sembuf wait_zero = {
+        .sem_num = 1,
+        .sem_op = 0,
+        .sem_flg = IPC_NOWAIT,
+    };
+    if (semop(sysv_sem, &wait_zero, 1) != 0 ||
+        syscall(SYS_semctl, sysv_sem, SETVAL, 0, 0) != 0) {
+        return 585;
+    }
+    pid_t semaphore_waiter = fork();
+    if (semaphore_waiter < 0) {
+        return 586;
+    }
+    if (semaphore_waiter == 0) {
+        struct sembuf wait_positive = {
+            .sem_num = 0,
+            .sem_op = -1,
+            .sem_flg = 0,
+        };
+        _exit(semop(sysv_sem, &wait_positive, 1) == 0 ? 0 : 1);
+    }
+    struct timespec semaphore_delay = {.tv_sec = 0, .tv_nsec = 20000000};
+    if (nanosleep(&semaphore_delay, NULL) != 0 ||
+        syscall(SYS_semctl, sysv_sem, GETNCNT, 0, 0) != 1) {
+        return 587;
+    }
+    struct sembuf wake_positive = {
+        .sem_num = 0,
+        .sem_op = 1,
+        .sem_flg = 0,
+    };
+    int semaphore_status = 0;
+    if (semop(sysv_sem, &wake_positive, 1) != 0 ||
+        waitpid(semaphore_waiter, &semaphore_status, 0) != semaphore_waiter ||
+        !WIFEXITED(semaphore_status) ||
+        WEXITSTATUS(semaphore_status) != 0 ||
+        syscall(SYS_semctl, sysv_sem, GETVAL, 0, 0) != 0) {
+        return 588;
+    }
+    struct sembuf wait_missing = {
+        .sem_num = 1,
+        .sem_op = -1,
+        .sem_flg = 0,
+    };
+    struct timespec semaphore_timeout = {.tv_sec = 0, .tv_nsec = 10000000};
+    errno = 0;
+    if (syscall(SYS_semtimedop, sysv_sem, &wait_missing, 1,
+                &semaphore_timeout) != -1 || errno != EAGAIN) {
+        return 589;
+    }
+    if (syscall(SYS_semctl, sysv_sem, SETVAL, 1, 1) != 0) {
+        return 590;
+    }
+    pid_t undo_child = fork();
+    if (undo_child < 0) {
+        return 591;
+    }
+    if (undo_child == 0) {
+        struct sembuf undo_wait = {
+            .sem_num = 1,
+            .sem_op = -1,
+            .sem_flg = SEM_UNDO,
+        };
+        _exit(semop(sysv_sem, &undo_wait, 1) == 0 ? 0 : 1);
+    }
+    if (waitpid(undo_child, &semaphore_status, 0) != undo_child ||
+        !WIFEXITED(semaphore_status) ||
+        WEXITSTATUS(semaphore_status) != 0 ||
+        syscall(SYS_semctl, sysv_sem, GETVAL, 1, 0) != 1) {
+        return 592;
+    }
+    struct semid_ds sysv_sem_status = {0};
+    if (syscall(SYS_semctl, sysv_sem, IPC_STAT, 0,
+                &sysv_sem_status) != 0 ||
+        sysv_sem_status.sem_nsems != 2 ||
+        sysv_sem_status.sem_perm.__key != sysv_sem_key ||
+        syscall(SYS_semctl, sysv_sem, IPC_RMID, 0, 0) != 0) {
+        return 593;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
