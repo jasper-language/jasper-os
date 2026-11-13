@@ -102,6 +102,8 @@ struct LinuxProcessState {
     fds: FdTable<64>,
     pid: u32,
     ppid: u32,
+    pgid: u32,
+    sid: u32,
     nice: i32,
     /// Authorized directory view used for relative AT_FDCWD resolution.
     cwd: crate::linux_vfs::DirectoryId,
@@ -3370,6 +3372,53 @@ pub(crate) fn linux_pid(pid: ObjId) -> Option<u32> {
     })
 }
 
+/// Returns the Linux process-group and session identities for one process.
+/// 返回一个进程的 Linux 进程组与会话身份。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_process_group_state(pid: ObjId) -> Option<(u32, u32)> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()
+            .map(|linux| (linux.pgid, linux.sid)),
+        _ => None,
+    })
+}
+
+/// Returns the session owning a live Linux process group.
+/// 返回存活 Linux 进程组所属的会话。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_process_group_session(pgid: u32) -> Option<u32> {
+    crate::kobj::with(|table| {
+        let mut session = None;
+        table.for_each_live(|_, object| {
+            if let KObject::Process(process) = object {
+                if let Some(linux) = process.linux.as_ref() {
+                    if linux.pgid == pgid {
+                        session = Some(linux.sid);
+                        return false;
+                    }
+                }
+            }
+            true
+        });
+        session
+    })
+}
+
+/// Commits process-group and session identities after ABI validation.
+/// 在 ABI 校验后提交进程组与会话身份。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_set_process_group_state(pid: ObjId, pgid: u32, sid: u32) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux.pgid = pgid;
+        linux.sid = sid;
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Resolves one ABI-visible Linux PID to the owning Jasper process object.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_process_for_pid(linux_pid: u32) -> Option<ObjId> {
@@ -3549,6 +3598,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         fds,
         pid,
         ppid: compat_core::syscall::LINUX_COMPAT_ROOT_PPID as u32,
+        pgid: pid,
+        sid: pid,
         nice: 0,
         cwd: crate::linux_vfs::DirectoryId::Root,
         brk: crate::arch::USER_WINDOW.0 + 0x1000_0000,

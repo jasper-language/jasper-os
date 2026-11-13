@@ -1333,11 +1333,21 @@ int main(void) {
         _exit(write(epoll_pipe[1], "E", 1) == 1 ? 0 : 1);
     }
     memset(epoll_ready, 0, sizeof(epoll_ready));
-    if (epoll_wait(epfd, epoll_ready, 1, 1000) != 1 ||
-        (epoll_ready[0].events & EPOLLIN) == 0 ||
+    errno = 0;
+    int epoll_result = epoll_wait(epfd, epoll_ready, 1, 1000);
+    int epoll_errno = errno;
+    ssize_t epoll_bytes = -1;
+    if (epoll_result == 1) {
+        epoll_bytes = read(epoll_pipe[0], memfd_io, 1);
+    }
+    if (epoll_result != 1 || (epoll_ready[0].events & EPOLLIN) == 0 ||
         epoll_ready[0].data.u64 != 0x4a5345504f4c4cULL ||
-        read(epoll_pipe[0], memfd_io, 1) != 1 ||
-        memfd_io[0] != 'E') {
+        epoll_bytes != 1 || memfd_io[0] != 'E') {
+        printf("epoll-event-fail result=%d errno=%d events=%#x data=%#llx "
+               "bytes=%zd byte=%#x\n",
+               epoll_result, epoll_errno, epoll_ready[0].events,
+               (unsigned long long)epoll_ready[0].data.u64,
+               epoll_bytes, epoll_bytes == 1 ? memfd_io[0] : 0);
         return 253;
     }
     int epoll_child_status = 0;
@@ -2983,13 +2993,59 @@ int main(void) {
     gid_t effective_gid = (gid_t)-1;
     gid_t saved_gid = (gid_t)-1;
     pid_t process_id = getpid();
+    errno = 0;
     if (getpgrp() != process_id || getpgid(0) != process_id ||
-        getsid(0) != process_id || setsid() != process_id ||
+        getsid(0) != process_id || setpgid(0, 0) != -1 ||
+        errno != EPERM ||
         getresuid(&real_uid, &effective_uid, &saved_uid) != 0 ||
         real_uid != 0 || effective_uid != 0 || saved_uid != 0 ||
         getresgid(&real_gid, &effective_gid, &saved_gid) != 0 ||
         real_gid != 0 || effective_gid != 0 || saved_gid != 0) {
         return 217;
+    }
+    errno = 0;
+    if (setsid() != -1 || errno != EPERM) {
+        return 341;
+    }
+    pid_t group_child = fork();
+    if (group_child < 0) {
+        return 342;
+    }
+    if (group_child == 0) {
+        pid_t child_id = getpid();
+        pid_t parent_group = getppid();
+        if (child_id == parent_group || getpgrp() != parent_group ||
+            getpgid(0) != parent_group ||
+            getsid(0) != parent_group || setpgid(0, 0) != 0 ||
+            getpgrp() != child_id || getpgid(0) != child_id ||
+            getsid(0) != parent_group) {
+            _exit(343);
+        }
+        errno = 0;
+        _exit(setsid() == -1 && errno == EPERM ? 0 : 344);
+    }
+    child_status = 0;
+    if (waitpid(group_child, &child_status, 0) != group_child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+        return 345;
+    }
+    pid_t session_child = fork();
+    if (session_child < 0) {
+        return 346;
+    }
+    if (session_child == 0) {
+        pid_t child_id = getpid();
+        if (getpgrp() == child_id || setsid() != child_id ||
+            getpgrp() != child_id || getpgid(0) != child_id ||
+            getsid(0) != child_id) {
+            _exit(347);
+        }
+        _exit(0);
+    }
+    child_status = 0;
+    if (waitpid(session_child, &child_status, 0) != session_child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+        return 348;
     }
     close(fd);
     printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld wall=%lld dirent=6 exec_meta=true fork=true\n",

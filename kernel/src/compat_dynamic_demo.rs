@@ -208,6 +208,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::GetPgid,
         LinuxSyscall::GetPgrp,
         LinuxSyscall::GetSid,
+        LinuxSyscall::SetPgid,
         LinuxSyscall::SetSid,
         LinuxSyscall::GetTid,
         LinuxSyscall::GetRandom,

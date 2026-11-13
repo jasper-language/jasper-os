@@ -1835,13 +1835,11 @@ fn execute(
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
             .unwrap_or_else(|error| -i64::from(error as i32)),
-        LinuxSyscall::GetPgid => compat_result(linux_process_group(pid, call.args[0])),
-        LinuxSyscall::GetPgrp | LinuxSyscall::SetSid => compat_result(
-            proc::linux_pid(pid)
-                .map(u64::from)
-                .ok_or(CompatErrno::NoProcess),
-        ),
-        LinuxSyscall::GetSid => compat_result(linux_process_group(pid, call.args[0])),
+        LinuxSyscall::GetPgid => compat_result(linux_get_pgid(pid, call.args[0])),
+        LinuxSyscall::GetPgrp => compat_result(linux_get_pgrp(pid)),
+        LinuxSyscall::GetSid => compat_result(linux_get_sid(pid, call.args[0])),
+        LinuxSyscall::SetPgid => compat_result(linux_setpgid(pid, call.args)),
+        LinuxSyscall::SetSid => compat_result(linux_setsid(pid)),
         // The compatibility identity has no supplementary groups.
         // 兼容身份没有附加组，因此 size 查询和写入都返回 0。
         LinuxSyscall::GetGroups => 0,
@@ -1926,10 +1924,78 @@ fn linux_getres(args: [u64; 6], _gid: bool) -> Result<u64, CompatErrno> {
     Ok(0)
 }
 
-fn linux_process_group(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
-    let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
-    if requested == 0 || requested == current {
-        Ok(current)
+fn linux_resolve_pid(pid: ObjId, requested: u64) -> Result<ObjId, CompatErrno> {
+    let current_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?;
+    if requested == 0 || requested == u64::from(current_pid) {
+        return Ok(pid);
+    }
+    let target = u32::try_from(requested).map_err(|_| CompatErrno::Invalid)?;
+    proc::linux_process_for_pid(target).ok_or(CompatErrno::NoProcess)
+}
+
+fn linux_get_pgid(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
+    let target = linux_resolve_pid(pid, requested)?;
+    proc::linux_process_group_state(target)
+        .map(|(pgid, _)| u64::from(pgid))
+        .ok_or(CompatErrno::NoProcess)
+}
+
+fn linux_get_pgrp(pid: ObjId) -> Result<u64, CompatErrno> {
+    proc::linux_process_group_state(pid)
+        .map(|(pgid, _)| u64::from(pgid))
+        .ok_or(CompatErrno::NoProcess)
+}
+
+fn linux_get_sid(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
+    let target = linux_resolve_pid(pid, requested)?;
+    proc::linux_process_group_state(target)
+        .map(|(_, sid)| u64::from(sid))
+        .ok_or(CompatErrno::NoProcess)
+}
+
+fn linux_setpgid(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let current_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?;
+    let target_pid = if args[0] == 0 {
+        current_pid
+    } else {
+        u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?
+    };
+    if target_pid != current_pid {
+        return if proc::linux_process_for_pid(target_pid).is_some() {
+            Err(CompatErrno::Perm)
+        } else {
+            Err(CompatErrno::NoProcess)
+        };
+    }
+    let group = if args[1] == 0 {
+        target_pid
+    } else {
+        u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?
+    };
+    let (_, session) =
+        proc::linux_process_group_state(pid).ok_or(CompatErrno::NoProcess)?;
+    if session == current_pid {
+        return Err(CompatErrno::Perm);
+    }
+    if group != target_pid && proc::linux_process_group_session(group) != Some(session) {
+        return Err(CompatErrno::Perm);
+    }
+    if proc::linux_set_process_group_state(pid, group, session) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoProcess)
+    }
+}
+
+fn linux_setsid(pid: ObjId) -> Result<u64, CompatErrno> {
+    let process_id = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?;
+    let (group, _) =
+        proc::linux_process_group_state(pid).ok_or(CompatErrno::NoProcess)?;
+    if group == process_id {
+        return Err(CompatErrno::Perm);
+    }
+    if proc::linux_set_process_group_state(pid, process_id, process_id) {
+        Ok(u64::from(process_id))
     } else {
         Err(CompatErrno::NoProcess)
     }
