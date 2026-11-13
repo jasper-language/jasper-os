@@ -2025,6 +2025,8 @@ fn execute(
         LinuxSyscall::FaccessAt2 => compat_result(linux_faccessat(pid, call.args, true)),
         LinuxSyscall::Prctl => compat_result(linux_prctl(pid, call.args)),
         LinuxSyscall::ArchPrctl => compat_result(linux_arch_prctl(call.args)),
+        LinuxSyscall::CapGet => compat_result(linux_capget(pid, call.args)),
+        LinuxSyscall::CapSet => compat_result(linux_capset(pid, call.args)),
         LinuxSyscall::Adjtimex
         | LinuxSyscall::ClockAdjtime
         | LinuxSyscall::ClockSettime
@@ -2092,6 +2094,7 @@ fn execute(
         // The compatibility identity has no supplementary groups.
         // 兼容身份没有附加组，因此 size 查询和写入都返回 0。
         LinuxSyscall::GetGroups => 0,
+        LinuxSyscall::SetGroups => compat_result(linux_setgroups(call.args)),
         LinuxSyscall::GetResUid => compat_result(linux_getres(call.args, false)),
         LinuxSyscall::GetResGid => compat_result(linux_getres(call.args, true)),
         LinuxSyscall::GetPriority => compat_result(linux_getpriority(pid, call.args)),
@@ -2178,6 +2181,16 @@ fn linux_getres(args: [u64; 6], _gid: bool) -> Result<u64, CompatErrno> {
         }
     }
     Ok(0)
+}
+
+/// Clears supplementary groups; richer group databases are not yet implemented.
+fn linux_setgroups(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let count = usize::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    if count == 0 {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NotSupported)
+    }
 }
 
 fn linux_resolve_pid(pid: ObjId, requested: u64) -> Result<ObjId, CompatErrno> {
@@ -4733,6 +4746,72 @@ fn linux_arch_prctl(args: [u64; 6]) -> Result<u64, CompatErrno> {
         || !crate::arch::set_user_fs_base(args[1])
     {
         return Err(CompatErrno::Invalid);
+    }
+    Ok(0)
+}
+
+/// Parses the 64-bit capability header used by `capget/capset`.
+fn linux_capability_header(pid: ObjId, address: u64) -> Result<(), CompatErrno> {
+    const CAP_VERSION_3: u32 = 0x2008_0522;
+    let mut raw = [0u8; 8];
+    copy_from_user(&mut raw, address, 8).map_err(|_| CompatErrno::Fault)?;
+    let version = u32::from_le_bytes(raw[..4].try_into().unwrap());
+    if version != CAP_VERSION_3 {
+        copy_to_user(address, &CAP_VERSION_3.to_le_bytes(), 4)
+            .map_err(|_| CompatErrno::Fault)?;
+        return Err(CompatErrno::Invalid);
+    }
+    let requested = i32::from_le_bytes(raw[4..8].try_into().unwrap());
+    let current = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
+    if requested != 0 && requested != current {
+        return Err(CompatErrno::Perm);
+    }
+    Ok(())
+}
+
+/// Reports the Linux ABI capability view without changing native authority.
+fn linux_capget(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    linux_capability_header(pid, args[0])?;
+    let capabilities = proc::linux_capabilities(pid).ok_or(CompatErrno::NoProcess)?;
+    let mut data = [0u8; 24];
+    data[0..4].copy_from_slice(&(capabilities.effective as u32).to_le_bytes());
+    data[4..8].copy_from_slice(&(capabilities.permitted as u32).to_le_bytes());
+    data[8..12].copy_from_slice(&(capabilities.inheritable as u32).to_le_bytes());
+    data[12..16].copy_from_slice(&((capabilities.effective >> 32) as u32).to_le_bytes());
+    data[16..20].copy_from_slice(&((capabilities.permitted >> 32) as u32).to_le_bytes());
+    data[20..24].copy_from_slice(&((capabilities.inheritable >> 32) as u32).to_le_bytes());
+    copy_to_user(args[1], &data, data.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Updates the Linux ABI capability view while preserving native authorization.
+fn linux_capset(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const CAP_FULL_MASK: u64 = (1u64 << 41) - 1;
+    linux_capability_header(pid, args[0])?;
+    let mut data = [0u8; 24];
+    copy_from_user(&mut data, args[1], 24).map_err(|_| CompatErrno::Fault)?;
+    let effective = u64::from(u32::from_le_bytes(data[0..4].try_into().unwrap()))
+        | (u64::from(u32::from_le_bytes(data[12..16].try_into().unwrap())) << 32);
+    let permitted = u64::from(u32::from_le_bytes(data[4..8].try_into().unwrap()))
+        | (u64::from(u32::from_le_bytes(data[16..20].try_into().unwrap())) << 32);
+    let inheritable = u64::from(u32::from_le_bytes(data[8..12].try_into().unwrap()))
+        | (u64::from(u32::from_le_bytes(data[20..24].try_into().unwrap())) << 32);
+    if effective & !permitted != 0
+        || effective & !CAP_FULL_MASK != 0
+        || permitted & !CAP_FULL_MASK != 0
+        || inheritable & !CAP_FULL_MASK != 0
+    {
+        return Err(CompatErrno::Perm);
+    }
+    if !proc::set_linux_capabilities(
+        pid,
+        proc::LinuxCapabilities {
+            effective,
+            permitted,
+            inheritable,
+        },
+    ) {
+        return Err(CompatErrno::NoProcess);
     }
     Ok(0)
 }

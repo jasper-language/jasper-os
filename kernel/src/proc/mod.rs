@@ -126,6 +126,9 @@ struct LinuxProcessState {
     /// Exact executable path exposed through `/proc/self/exe`.
     exec_path: [u8; 128],
     exec_path_len: usize,
+    cap_effective: u64,
+    cap_permitted: u64,
+    cap_inheritable: u64,
     mappings: Vec<LinuxMapping>,
     pipes: Vec<LinuxPipeHandle>,
     next_pipe_handle: u64,
@@ -166,6 +169,14 @@ struct LinuxProcessState {
 struct LinuxMapping {
     va: u64,
     flags: MapFlags,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxCapabilities {
+    pub(crate) effective: u64,
+    pub(crate) permitted: u64,
+    pub(crate) inheritable: u64,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -3841,6 +3852,33 @@ pub(crate) fn linux_set_process_group_state(pid: ObjId, pgid: u32, sid: u32) -> 
     .is_ok()
 }
 
+/// Returns the Linux ABI capability view for one compatibility process.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_capabilities(pid: ObjId) -> Option<LinuxCapabilities> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_ref().ok_or(ProcError::Exited)?;
+        Ok(LinuxCapabilities {
+            effective: linux.cap_effective,
+            permitted: linux.cap_permitted,
+            inheritable: linux.cap_inheritable,
+        })
+    })
+    .ok()
+}
+
+/// Replaces the Linux ABI capability view without changing native authority.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_capabilities(pid: ObjId, capabilities: LinuxCapabilities) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux.cap_effective = capabilities.effective;
+        linux.cap_permitted = capabilities.permitted;
+        linux.cap_inheritable = capabilities.inheritable;
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Sums scheduler CPU ticks over every live thread in one Linux process.
 /// 汇总一个 Linux 进程全部存活线程的调度器 CPU ticks。
 #[cfg(feature = "linux-abi")]
@@ -4090,6 +4128,9 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         signal_actions: [[0; 4]; 64],
         exec_path: [0; 128],
         exec_path_len: 0,
+        cap_effective: (1u64 << 41) - 1,
+        cap_permitted: (1u64 << 41) - 1,
+        cap_inheritable: 0,
         mappings: Vec::new(),
         pipes: Vec::new(),
         next_pipe_handle: LINUX_PIPE_HANDLE_BASE,

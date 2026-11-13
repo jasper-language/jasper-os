@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <linux/android/binder.h>
+#include <linux/capability.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-heap.h>
 #include <linux/futex.h>
@@ -3706,6 +3707,54 @@ int main(void) {
         close(copy_source) != 0 ||
         close(copy_target) != 0) {
         return 487;
+    }
+    if (syscall(SYS_setgroups, 0, NULL) != 0) {
+        return 488;
+    }
+    gid_t unsupported_group = 0;
+    errno = 0;
+    if (syscall(SYS_setgroups, 1, &unsupported_group) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 489;
+    }
+    struct __user_cap_header_struct capability_header = {
+        .version = _LINUX_CAPABILITY_VERSION_3,
+        .pid = 0,
+    };
+    struct __user_cap_data_struct capability_data[2] = {0};
+    struct __user_cap_data_struct original_capability_data[2] = {0};
+    if (syscall(SYS_capget, &capability_header, capability_data) != 0 ||
+        (capability_data[0].effective == 0 &&
+         capability_data[1].effective == 0)) {
+        return 490;
+    }
+    memcpy(original_capability_data, capability_data,
+           sizeof(original_capability_data));
+    memset(capability_data, 0, sizeof(capability_data));
+    capability_data[0].effective = 1;
+    capability_data[0].permitted = 1;
+    if (syscall(SYS_capset, &capability_header, capability_data) != 0 ||
+        syscall(SYS_capget, &capability_header, capability_data) != 0 ||
+        capability_data[0].effective != 1 ||
+        capability_data[0].permitted != 1 ||
+        capability_data[0].inheritable != 0) {
+        return 491;
+    }
+    capability_data[0].effective = 3;
+    capability_data[0].permitted = 1;
+    errno = 0;
+    if (syscall(SYS_capset, &capability_header, capability_data) != -1 ||
+        errno != EPERM ||
+        syscall(SYS_capset, &capability_header,
+                original_capability_data) != 0) {
+        return 492;
+    }
+    capability_header.version = 0;
+    errno = 0;
+    if (syscall(SYS_capget, &capability_header, capability_data) != -1 ||
+        errno != EINVAL ||
+        capability_header.version != _LINUX_CAPABILITY_VERSION_3) {
+        return 493;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
