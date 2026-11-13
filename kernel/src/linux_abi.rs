@@ -13464,6 +13464,18 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 /// Implements the fixed-size x86_64 `openat2(2)` structure.
 fn linux_openat2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const OPEN_HOW_BYTES: usize = 24;
+    const RESOLVE_NO_XDEV: u64 = 0x1;
+    const RESOLVE_NO_MAGICLINKS: u64 = 0x2;
+    const RESOLVE_NO_SYMLINKS: u64 = 0x4;
+    const RESOLVE_BENEATH: u64 = 0x8;
+    const RESOLVE_IN_ROOT: u64 = 0x10;
+    const RESOLVE_CACHED: u64 = 0x20;
+    const SUPPORTED_RESOLVE: u64 = RESOLVE_NO_XDEV
+        | RESOLVE_NO_MAGICLINKS
+        | RESOLVE_NO_SYMLINKS
+        | RESOLVE_BENEATH
+        | RESOLVE_IN_ROOT
+        | RESOLVE_CACHED;
     if args[2] != OPEN_HOW_BYTES as u64 {
         return Err(CompatErrno::Invalid);
     }
@@ -13472,11 +13484,25 @@ fn linux_openat2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let flags = u64::from_le_bytes(how[0..8].try_into().unwrap());
     let mode = u64::from_le_bytes(how[8..16].try_into().unwrap());
     let resolve = u64::from_le_bytes(how[16..24].try_into().unwrap());
-    if resolve != 0 {
-        return Err(CompatErrno::NotSupported);
-    }
-    if mode & !0o7777 != 0 {
+    if resolve & !SUPPORTED_RESOLVE != 0
+        || resolve & RESOLVE_BENEATH != 0 && resolve & RESOLVE_IN_ROOT != 0
+        || mode & !0o7777 != 0
+    {
         return Err(CompatErrno::Invalid);
+    }
+    let path = linux_c_string(args[3], 4096)?;
+    let escapes = path.starts_with(b"/")
+        || path
+            .split(|byte| *byte == b'/')
+            .any(|component| component == b"..");
+    if resolve & RESOLVE_BENEATH != 0 && escapes {
+        return Err(CompatErrno::CrossDevice);
+    }
+    if resolve & RESOLVE_IN_ROOT != 0
+        && path.starts_with(b"/")
+        && !is_at_fdcwd(args[0])
+    {
+        return Err(CompatErrno::NotSupported);
     }
     linux_openat(pid, [args[0], args[3], flags, mode, 0, 0])
 }

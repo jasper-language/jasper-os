@@ -4004,11 +4004,38 @@ int main(void) {
         return 456;
     }
     open_how.resolve = 4;
+    int resolve_fd = syscall(SYS_openat2, AT_FDCWD,
+                             "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                             &open_how, sizeof(open_how));
+    unsigned char resolve_magic[4] = {0};
+    if (resolve_fd < 0 ||
+        read(resolve_fd, resolve_magic, sizeof(resolve_magic)) !=
+            (ssize_t)sizeof(resolve_magic) ||
+        memcmp(resolve_magic, "\177ELF", 4) != 0 ||
+        close(resolve_fd) != 0) {
+        return 457;
+    }
+    open_how.resolve = 8;
     errno = 0;
     if (syscall(SYS_openat2, AT_FDCWD,
                 "/usr/lib/x86_64-linux-gnu/libc.so.6",
                 &open_how, sizeof(open_how)) != -1 ||
-        errno != EOPNOTSUPP) {
+        errno != EXDEV) {
+        return 457;
+    }
+    open_how.resolve = 0x80000000ULL;
+    errno = 0;
+    if (syscall(SYS_openat2, AT_FDCWD,
+                "usr/lib/x86_64-linux-gnu/libc.so.6",
+                &open_how, sizeof(open_how)) != -1 ||
+        errno != EINVAL) {
+        return 457;
+    }
+    open_how.resolve = 8 | 16;
+    errno = 0;
+    if (syscall(SYS_openat2, AT_FDCWD, "usr",
+                &open_how, sizeof(open_how)) != -1 ||
+        errno != EINVAL) {
         return 457;
     }
     const char *xattr_path = "/usr/lib/x86_64-linux-gnu/libc.so.6";
