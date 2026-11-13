@@ -44,7 +44,7 @@ use linux_raw_sys::general::{
     __NR_listxattr, __NR_listxattrat, __NR_llistxattr, __NR_lremovexattr, __NR_lseek,
     __NR_lsetxattr,
     __NR_madvise, __NR_membarrier, __NR_memfd_create, __NR_memfd_secret, __NR_mkdir,
-    __NR_mkdirat, __NR_mknod, __NR_mknodat,
+    __NR_mkdirat, __NR_mknod, __NR_mknodat, __NR_msgctl, __NR_msgget, __NR_msgrcv, __NR_msgsnd,
     __NR_mincore, __NR_mlock, __NR_mlock2, __NR_mlockall, __NR_mmap, __NR_modify_ldt,
     __NR_mprotect, __NR_mq_getsetattr, __NR_mq_notify, __NR_mq_open, __NR_mq_timedreceive,
     __NR_mq_timedsend, __NR_mq_unlink,
@@ -404,6 +404,10 @@ pub enum LinuxSyscall {
     Mremap,
     Mseal,
     Msync,
+    MsgGet,
+    MsgSend,
+    MsgReceive,
+    MsgCtl,
     MqOpen,
     MqUnlink,
     MqTimedsend,
@@ -666,6 +670,15 @@ pub enum CompatErrno {
     /// Message is larger than the queue's maximum message size.
     /// 消息超过队列允许的最大长度。
     MessageSize = linux_raw_sys::errno::EMSGSIZE,
+    /// Argument list or one variable-length argument is too large.
+    /// 参数列表或单个变长参数过大。
+    ArgumentTooLong = linux_raw_sys::errno::E2BIG,
+    /// System V IPC object was removed while a caller waited on it.
+    /// 等待期间 System V IPC 对象已被移除。
+    Removed = linux_raw_sys::errno::EIDRM,
+    /// No message of the requested type is available.
+    /// 请求类型的消息不存在。
+    NoMessage = linux_raw_sys::errno::ENOMSG,
     /// An operation was cancelled.
     /// 操作已取消。
     Canceled = linux_raw_sys::errno::ECANCELED,
@@ -927,6 +940,10 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_mremap) => LinuxSyscall::Mremap,
         value if value == u64::from(__NR_mseal) => LinuxSyscall::Mseal,
         value if value == u64::from(__NR_msync) => LinuxSyscall::Msync,
+        value if value == u64::from(__NR_msgget) => LinuxSyscall::MsgGet,
+        value if value == u64::from(__NR_msgsnd) => LinuxSyscall::MsgSend,
+        value if value == u64::from(__NR_msgrcv) => LinuxSyscall::MsgReceive,
+        value if value == u64::from(__NR_msgctl) => LinuxSyscall::MsgCtl,
         value if value == u64::from(__NR_mq_open) => LinuxSyscall::MqOpen,
         value if value == u64::from(__NR_mq_unlink) => LinuxSyscall::MqUnlink,
         value if value == u64::from(__NR_mq_timedsend) => LinuxSyscall::MqTimedsend,
@@ -1328,6 +1345,10 @@ mod tests {
             (__NR_mremap, LinuxSyscall::Mremap),
             (__NR_mseal, LinuxSyscall::Mseal),
             (__NR_msync, LinuxSyscall::Msync),
+            (__NR_msgget, LinuxSyscall::MsgGet),
+            (__NR_msgsnd, LinuxSyscall::MsgSend),
+            (__NR_msgrcv, LinuxSyscall::MsgReceive),
+            (__NR_msgctl, LinuxSyscall::MsgCtl),
             (__NR_mq_open, LinuxSyscall::MqOpen),
             (__NR_mq_unlink, LinuxSyscall::MqUnlink),
             (__NR_mq_timedsend, LinuxSyscall::MqTimedsend),

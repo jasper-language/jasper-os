@@ -34,6 +34,10 @@ const MAX_PROCESS_SIGNAL_SETS: usize = 16;
 const MAX_POSIX_TIMERS: usize = 32;
 const MAX_INTERVAL_TIMER_SETS: usize = 16;
 const MAX_PENDING_SIGNAL_RECORDS: usize = 256;
+const MAX_SYSV_MESSAGE_QUEUES: usize = 16;
+const MAX_SYSV_MESSAGES_PER_QUEUE: usize = 64;
+const SYSV_MSGMAX: usize = 8192;
+const SYSV_MSGMNB: usize = 16384;
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
 static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
 
@@ -185,6 +189,34 @@ struct MessageQueueName {
     queue: alloc::sync::Arc<proc::LinuxMqShared>,
 }
 
+#[derive(Clone)]
+struct SysVMessage {
+    id: u64,
+    mtype: i64,
+    bytes: alloc::vec::Vec<u8>,
+    reserved: bool,
+}
+
+struct SysVMessageQueue {
+    id: i32,
+    key: i32,
+    application: kernel_core::security::ApplicationIdentity,
+    uid: u32,
+    gid: u32,
+    cuid: u32,
+    cgid: u32,
+    mode: u16,
+    qbytes: usize,
+    cbytes: usize,
+    messages: alloc::collections::VecDeque<SysVMessage>,
+    next_message_id: u64,
+    send_time: i64,
+    receive_time: i64,
+    change_time: i64,
+    last_send_pid: i32,
+    last_receive_pid: i32,
+}
+
 struct CompatState {
     threads: [Option<LinuxThread>; MAX_LINUX_THREADS],
     futexes: [Option<FutexWord>; MAX_FUTEX_WORDS],
@@ -196,6 +228,8 @@ struct CompatState {
     message_queue_names: alloc::vec::Vec<MessageQueueName>,
     pending_signal_records: [Option<QueuedSignalRecord>; MAX_PENDING_SIGNAL_RECORDS],
     next_signal_sequence: u64,
+    sysv_message_queues: alloc::vec::Vec<SysVMessageQueue>,
+    next_sysv_message_queue_id: i32,
 }
 
 impl CompatState {
@@ -211,6 +245,8 @@ impl CompatState {
             message_queue_names: alloc::vec::Vec::new(),
             pending_signal_records: [None; MAX_PENDING_SIGNAL_RECORDS],
             next_signal_sequence: 0,
+            sysv_message_queues: alloc::vec::Vec::new(),
+            next_sysv_message_queue_id: 1,
         }
     }
 }
@@ -2400,6 +2436,10 @@ fn execute(
         LinuxSyscall::Mremap => compat_result(linux_mremap(pid, call.args)),
         LinuxSyscall::Mseal => compat_result(linux_mseal(pid, call.args)),
         LinuxSyscall::Msync => compat_result(linux_msync(pid, call.args)),
+        LinuxSyscall::MsgGet => compat_result(linux_msgget(pid, call.args)),
+        LinuxSyscall::MsgSend => compat_result(linux_msgsnd(pid, call.args)),
+        LinuxSyscall::MsgReceive => compat_result(linux_msgrcv(pid, call.args)),
+        LinuxSyscall::MsgCtl => compat_result(linux_msgctl(pid, call.args)),
         LinuxSyscall::MqOpen => compat_result(linux_mq_open(pid, call.args)),
         LinuxSyscall::MqUnlink => compat_result(linux_mq_unlink(call.args)),
         LinuxSyscall::MqTimedsend => compat_result(linux_mq_send(pid, call.args, true)),
@@ -6982,6 +7022,457 @@ fn linux_mq_getsetattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         copy_to_user(args[2], &attr, attr.len()).map_err(|_| CompatErrno::Fault)?;
     }
     Ok(0)
+}
+
+const SYSV_IPC_CREAT: u32 = 0o1000;
+const SYSV_IPC_EXCL: u32 = 0o2000;
+const SYSV_IPC_NOWAIT: u32 = 0o4000;
+const SYSV_MSG_NOERROR: u32 = 0o10000;
+const SYSV_MSG_EXCEPT: u32 = 0o20000;
+const SYSV_MSG_COPY: u32 = 0o40000;
+const SYSV_MSG_DS_BYTES: usize = 120;
+
+fn sysv_message_queue_index(
+    state: &CompatState,
+    application: kernel_core::security::ApplicationIdentity,
+    id: i32,
+) -> Option<usize> {
+    state
+        .sysv_message_queues
+        .iter()
+        .position(|queue| queue.application == application && queue.id == id)
+}
+
+fn sysv_message_access(
+    queue: &SysVMessageQueue,
+    credentials: proc::LinuxCredentials,
+    write: bool,
+) -> bool {
+    if credentials.euid == 0 {
+        return true;
+    }
+    let shift = if credentials.euid == queue.uid {
+        6
+    } else if credentials.egid == queue.gid {
+        3
+    } else {
+        0
+    };
+    let required = if write { 0o2 } else { 0o4 };
+    queue.mode >> shift & required == required
+}
+
+fn sysv_time_seconds() -> i64 {
+    crate::arch::wall_clock_ns()
+        .map(|time| (time / 1_000_000_000) as i64)
+        .unwrap_or_else(|| (sched::now_ns() / 1_000_000_000) as i64)
+}
+
+fn sysv_msg_ds_bytes(queue: &SysVMessageQueue) -> [u8; SYSV_MSG_DS_BYTES] {
+    let mut output = [0u8; SYSV_MSG_DS_BYTES];
+    output[0..4].copy_from_slice(&(queue.key as u32).to_le_bytes());
+    output[4..8].copy_from_slice(&queue.uid.to_le_bytes());
+    output[8..12].copy_from_slice(&queue.gid.to_le_bytes());
+    output[12..16].copy_from_slice(&queue.cuid.to_le_bytes());
+    output[16..20].copy_from_slice(&queue.cgid.to_le_bytes());
+    output[20..24].copy_from_slice(&u32::from(queue.mode).to_le_bytes());
+    output[24..26].copy_from_slice(&(queue.id as u16).to_le_bytes());
+    output[48..56].copy_from_slice(&queue.send_time.to_le_bytes());
+    output[56..64].copy_from_slice(&queue.receive_time.to_le_bytes());
+    output[64..72].copy_from_slice(&queue.change_time.to_le_bytes());
+    output[72..80].copy_from_slice(&(queue.cbytes as u64).to_le_bytes());
+    output[80..88].copy_from_slice(&(queue.messages.len() as u64).to_le_bytes());
+    output[88..96].copy_from_slice(&(queue.qbytes as u64).to_le_bytes());
+    output[96..100].copy_from_slice(&queue.last_send_pid.to_le_bytes());
+    output[100..104].copy_from_slice(&queue.last_receive_pid.to_le_bytes());
+    output
+}
+
+fn sysv_select_message(queue: &SysVMessageQueue, msgtyp: i64, flags: u32) -> Option<usize> {
+    if flags & SYSV_MSG_COPY != 0 {
+        let ordinal = usize::try_from(msgtyp).ok()?;
+        return queue
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| !message.reserved)
+            .nth(ordinal)
+            .map(|(index, _)| index);
+    }
+    if msgtyp == 0 {
+        return queue
+            .messages
+            .iter()
+            .position(|message| !message.reserved);
+    }
+    if msgtyp > 0 {
+        return queue.messages.iter().position(|message| {
+            !message.reserved
+                && if flags & SYSV_MSG_EXCEPT != 0 {
+                    message.mtype != msgtyp
+                } else {
+                    message.mtype == msgtyp
+                }
+        });
+    }
+    let maximum = msgtyp.unsigned_abs();
+    queue
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| !message.reserved && message.mtype.unsigned_abs() <= maximum)
+        .min_by_key(|(index, message)| (message.mtype, *index))
+        .map(|(index, _)| index)
+}
+
+/// Implements `msgget(2)` over the compatibility application's IPC namespace.
+fn linux_msgget(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let key = args[0] as u32 as i32;
+    let flags = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if flags & !(0o777 | SYSV_IPC_CREAT | SYSV_IPC_EXCL | SYSV_IPC_NOWAIT) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let mut state = COMPAT.lock();
+    if key != 0 {
+        if let Some(queue) = state
+            .sysv_message_queues
+            .iter()
+            .find(|queue| queue.application == application && queue.key == key)
+        {
+            if flags & (SYSV_IPC_CREAT | SYSV_IPC_EXCL)
+                == (SYSV_IPC_CREAT | SYSV_IPC_EXCL)
+            {
+                return Err(CompatErrno::Exists);
+            }
+            return Ok(queue.id as u32 as u64);
+        }
+    }
+    if flags & SYSV_IPC_CREAT == 0 {
+        return Err(CompatErrno::NoEntry);
+    }
+    if state.sysv_message_queues.len() >= MAX_SYSV_MESSAGE_QUEUES {
+        return Err(CompatErrno::NoSpace);
+    }
+    state
+        .sysv_message_queues
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    let id = state.next_sysv_message_queue_id;
+    state.next_sysv_message_queue_id = id.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+    let now = sysv_time_seconds();
+    state.sysv_message_queues.push(SysVMessageQueue {
+        id,
+        key,
+        application,
+        uid: credentials.euid,
+        gid: credentials.egid,
+        cuid: credentials.euid,
+        cgid: credentials.egid,
+        mode: (flags & 0o777) as u16,
+        qbytes: SYSV_MSGMNB,
+        cbytes: 0,
+        messages: alloc::collections::VecDeque::new(),
+        next_message_id: 1,
+        send_time: 0,
+        receive_time: 0,
+        change_time: now,
+        last_send_pid: 0,
+        last_receive_pid: 0,
+    });
+    Ok(id as u32 as u64)
+}
+
+/// Implements `msgsnd(2)` with typed, bounded messages.
+fn linux_msgsnd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let id = args[0] as i32;
+    let length = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let flags = args[4] as u32;
+    if flags & !SYSV_IPC_NOWAIT != 0 || length > SYSV_MSGMAX {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut message_type = [0u8; 8];
+    copy_from_user(&mut message_type, args[1], 8).map_err(|_| CompatErrno::Fault)?;
+    let mtype = i64::from_le_bytes(message_type);
+    if mtype <= 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut bytes = alloc::vec![0u8; length];
+    if length != 0 {
+        let address = args[1].checked_add(8).ok_or(CompatErrno::Fault)?;
+        copy_from_user(&mut bytes, address, length).map_err(|_| CompatErrno::Fault)?;
+    }
+    let mut pending_bytes = Some(bytes);
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let sender_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
+    let mut waited = false;
+    loop {
+        let mut inserted = false;
+        {
+            let mut state = COMPAT.lock();
+            let queue_index = sysv_message_queue_index(&state, application, id).ok_or(
+                if waited {
+                    CompatErrno::Removed
+                } else {
+                    CompatErrno::Invalid
+                },
+            )?;
+            let queue = &mut state.sysv_message_queues[queue_index];
+            if !sysv_message_access(queue, credentials, true) {
+                return Err(CompatErrno::Access);
+            }
+            if length > queue.qbytes {
+                return Err(CompatErrno::MessageSize);
+            }
+            if queue.messages.len() < MAX_SYSV_MESSAGES_PER_QUEUE
+                && queue.cbytes.saturating_add(length) <= queue.qbytes
+            {
+                let message_id = queue.next_message_id;
+                queue.next_message_id =
+                    message_id.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+                queue.messages.push_back(SysVMessage {
+                    id: message_id,
+                    mtype,
+                    bytes: pending_bytes.take().expect("message bytes consumed once"),
+                    reserved: false,
+                });
+                queue.cbytes += length;
+                queue.send_time = sysv_time_seconds();
+                queue.last_send_pid = sender_pid;
+                inserted = true;
+            } else if flags & SYSV_IPC_NOWAIT != 0 {
+                return Err(CompatErrno::TryAgain);
+            }
+        }
+        if inserted {
+            wake_message_queue_waiters();
+            return Ok(0);
+        }
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        waited = true;
+        sched::pause();
+    }
+}
+
+/// Implements `msgrcv(2)` with typed selection, copy mode and reservation.
+fn linux_msgrcv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let id = args[0] as i32;
+    let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let msgtyp = args[3] as i64;
+    let flags = args[4] as u32;
+    if flags & !(SYSV_IPC_NOWAIT | SYSV_MSG_NOERROR | SYSV_MSG_EXCEPT | SYSV_MSG_COPY) != 0
+        || (flags & SYSV_MSG_COPY != 0
+            && (msgtyp < 0 || flags & SYSV_IPC_NOWAIT == 0 || flags & SYSV_MSG_EXCEPT != 0))
+        || (flags & SYSV_MSG_EXCEPT != 0 && msgtyp <= 0)
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let receiver_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
+    let mut waited = false;
+    let message = loop {
+        let selected = {
+            let mut state = COMPAT.lock();
+            let queue_index = sysv_message_queue_index(&state, application, id)
+                .ok_or(if waited {
+                    CompatErrno::Removed
+                } else {
+                    CompatErrno::Invalid
+                })?;
+            let queue = &mut state.sysv_message_queues[queue_index];
+            if !sysv_message_access(queue, credentials, false) {
+                return Err(CompatErrno::Access);
+            }
+            match sysv_select_message(queue, msgtyp, flags) {
+                Some(message_index) => {
+                    if flags & SYSV_MSG_COPY == 0 {
+                        queue.messages[message_index].reserved = true;
+                    }
+                    Some(queue.messages[message_index].clone())
+                }
+                None => {
+                    if flags & SYSV_MSG_COPY != 0 {
+                        return Err(CompatErrno::NoMessage);
+                    }
+                    if flags & SYSV_IPC_NOWAIT != 0 {
+                        return Err(CompatErrno::NoMessage);
+                    }
+                    None
+                }
+            }
+        };
+        if let Some(message) = selected {
+            break message;
+        }
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        waited = true;
+        sched::pause();
+    };
+    let returned = if message.bytes.len() > capacity {
+        if flags & SYSV_MSG_NOERROR == 0 {
+            if flags & SYSV_MSG_COPY == 0 {
+                let mut state = COMPAT.lock();
+                if let Some(queue_index) = sysv_message_queue_index(&state, application, id) {
+                    if let Some(queued) = state.sysv_message_queues[queue_index]
+                        .messages
+                        .iter_mut()
+                        .find(|queued| queued.id == message.id)
+                    {
+                        queued.reserved = false;
+                    }
+                }
+            }
+            return Err(CompatErrno::ArgumentTooLong);
+        }
+        capacity
+    } else {
+        message.bytes.len()
+    };
+    let mut output = alloc::vec![0u8; 8 + returned];
+    output[..8].copy_from_slice(&message.mtype.to_le_bytes());
+    output[8..].copy_from_slice(&message.bytes[..returned]);
+    if copy_to_user(args[1], &output, output.len()).is_err() {
+        if flags & SYSV_MSG_COPY == 0 {
+            let mut state = COMPAT.lock();
+            if let Some(queue_index) = sysv_message_queue_index(&state, application, id) {
+                if let Some(queued) = state.sysv_message_queues[queue_index]
+                    .messages
+                    .iter_mut()
+                    .find(|queued| queued.id == message.id)
+                {
+                    queued.reserved = false;
+                }
+            }
+        }
+        return Err(CompatErrno::Fault);
+    }
+    if flags & SYSV_MSG_COPY == 0 {
+        {
+            let mut state = COMPAT.lock();
+            let queue_index =
+                sysv_message_queue_index(&state, application, id).ok_or(CompatErrno::Removed)?;
+            let queue = &mut state.sysv_message_queues[queue_index];
+            let Some(message_index) = queue.messages.iter().position(|queued| {
+                queued.id == message.id && queued.reserved
+            }) else {
+                return Err(CompatErrno::Removed);
+            };
+            let queued = queue.messages.remove(message_index).unwrap();
+            queue.cbytes = queue.cbytes.saturating_sub(queued.bytes.len());
+            queue.receive_time = sysv_time_seconds();
+            queue.last_receive_pid = receiver_pid;
+        }
+        wake_message_queue_waiters();
+    }
+    Ok(returned as u64)
+}
+
+fn write_sysv_msginfo(address: u64) -> Result<(), CompatErrno> {
+    let mut info = [0u8; 32];
+    info[8..12].copy_from_slice(&(SYSV_MSGMAX as i32).to_le_bytes());
+    info[12..16].copy_from_slice(&(SYSV_MSGMNB as i32).to_le_bytes());
+    info[16..20].copy_from_slice(&(MAX_SYSV_MESSAGE_QUEUES as i32).to_le_bytes());
+    info[20..24].copy_from_slice(&16i32.to_le_bytes());
+    info[24..28].copy_from_slice(&(SYSV_MSGMNB as i32).to_le_bytes());
+    info[28..30].copy_from_slice(&u16::MAX.to_le_bytes());
+    copy_to_user(address, &info, info.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(())
+}
+
+/// Implements `msgctl(2)` for attributes, removal and bounded introspection.
+fn linux_msgctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const IPC_RMID: u32 = 0;
+    const IPC_SET: u32 = 1;
+    const IPC_STAT: u32 = 2;
+    const IPC_INFO: u32 = 3;
+    const MSG_STAT: u32 = 11;
+    const MSG_INFO: u32 = 12;
+    const MSG_STAT_ANY: u32 = 13;
+    let command = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if command == IPC_INFO || command == MSG_INFO {
+        return write_sysv_msginfo(args[2]).map(|()| 0);
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let update = if command == IPC_SET {
+        let mut update = [0u8; SYSV_MSG_DS_BYTES];
+        copy_from_user(&mut update, args[2], SYSV_MSG_DS_BYTES)
+            .map_err(|_| CompatErrno::Fault)?;
+        Some(update)
+    } else {
+        None
+    };
+    let id = args[0] as i32;
+    let mut state = COMPAT.lock();
+    let selected_index = match command {
+        MSG_STAT | MSG_STAT_ANY => {
+            let index = usize::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+            state
+                .sysv_message_queues
+                .iter()
+                .enumerate()
+                .filter(|(_, queue)| queue.application == application)
+                .nth(index)
+                .map(|(index, _)| index)
+                .ok_or(CompatErrno::Invalid)?
+        }
+        _ => sysv_message_queue_index(&state, application, id).ok_or(CompatErrno::Invalid)?,
+    };
+    let queue = &mut state.sysv_message_queues[selected_index];
+    match command {
+        IPC_RMID => {
+            if credentials.euid != 0 && credentials.euid != queue.uid {
+                return Err(CompatErrno::Perm);
+            }
+            state.sysv_message_queues.remove(selected_index);
+            drop(state);
+            wake_message_queue_waiters();
+            Ok(0)
+        }
+        IPC_SET => {
+            if credentials.euid != 0 && credentials.euid != queue.uid {
+                return Err(CompatErrno::Perm);
+            }
+            let update = update.expect("IPC_SET input");
+            let mode = u32::from_le_bytes(update[20..24].try_into().unwrap()) as u16;
+            let qbytes = u64::from_le_bytes(update[88..96].try_into().unwrap());
+            if mode & !0o777 != 0 || qbytes > SYSV_MSGMNB as u64 {
+                return Err(CompatErrno::Invalid);
+            }
+            queue.uid = u32::from_le_bytes(update[4..8].try_into().unwrap());
+            queue.gid = u32::from_le_bytes(update[8..12].try_into().unwrap());
+            queue.mode = mode;
+            queue.qbytes = qbytes as usize;
+            queue.change_time = sysv_time_seconds();
+            Ok(0)
+        }
+        IPC_STAT | MSG_STAT | MSG_STAT_ANY => {
+            if command != MSG_STAT_ANY && !sysv_message_access(queue, credentials, false) {
+                return Err(CompatErrno::Access);
+            }
+            let output = sysv_msg_ds_bytes(queue);
+            let returned_id = queue.id;
+            drop(state);
+            copy_to_user(args[2], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+            if command == MSG_STAT {
+                Ok(returned_id as u32 as u64)
+            } else {
+                Ok(0)
+            }
+        }
+        _ => Err(CompatErrno::Invalid),
+    }
 }
 
 fn linux_eventfd(pid: ObjId, args: [u64; 6], eventfd2: bool) -> Result<u64, CompatErrno> {

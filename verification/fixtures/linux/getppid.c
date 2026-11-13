@@ -29,10 +29,12 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/inotify.h>
+#include <sys/ipc.h>
 #include <sys/eventfd.h>
 #include <sys/epoll.h>
 #include <sys/file.h>
 #include <sys/mman.h>
+#include <sys/msg.h>
 #include <sys/prctl.h>
 #include <sys/random.h>
 #include <sys/reboot.h>
@@ -4641,6 +4643,137 @@ int main(void) {
     if (syscall(SYS_epoll_wait_old, -1, NULL, 0, 0) != -1 ||
         errno != ENOSYS) {
         return 557;
+    }
+    key_t sysv_msg_key = 0x4a534d51;
+    int stale_sysv_msg = msgget(sysv_msg_key, 0);
+    if (stale_sysv_msg >= 0) {
+        msgctl(stale_sysv_msg, IPC_RMID, NULL);
+    }
+    int sysv_msg = msgget(sysv_msg_key, IPC_CREAT | IPC_EXCL | 0600);
+    struct {
+        long mtype;
+        char mtext[64];
+    } sysv_message = {0};
+    if (sysv_msg < 0 ||
+        msgget(sysv_msg_key, 0600) != sysv_msg) {
+        return 564;
+    }
+    errno = 0;
+    if (msgget(sysv_msg_key, IPC_CREAT | IPC_EXCL | 0600) != -1 ||
+        errno != EEXIST) {
+        return 565;
+    }
+    sysv_message.mtype = 3;
+    strcpy(sysv_message.mtext, "three");
+    if (msgsnd(sysv_msg, &sysv_message, 5, 0) != 0) {
+        return 566;
+    }
+    sysv_message.mtype = 1;
+    strcpy(sysv_message.mtext, "one");
+    if (msgsnd(sysv_msg, &sysv_message, 3, 0) != 0) {
+        return 567;
+    }
+    sysv_message.mtype = 2;
+    strcpy(sysv_message.mtext, "two");
+    if (msgsnd(sysv_msg, &sysv_message, 3, 0) != 0) {
+        return 568;
+    }
+    struct msqid_ds sysv_message_status = {0};
+    if (msgctl(sysv_msg, IPC_STAT, &sysv_message_status) != 0 ||
+        sysv_message_status.msg_qnum != 3 ||
+        sysv_message_status.msg_cbytes != 11 ||
+        sysv_message_status.msg_perm.__key != sysv_msg_key) {
+        return 569;
+    }
+    memset(&sysv_message, 0, sizeof(sysv_message));
+    if (msgrcv(sysv_msg, &sysv_message, sizeof(sysv_message.mtext),
+               0, IPC_NOWAIT) != 5 ||
+        sysv_message.mtype != 3 ||
+        memcmp(sysv_message.mtext, "three", 5) != 0) {
+        return 570;
+    }
+    memset(&sysv_message, 0, sizeof(sysv_message));
+    if (msgrcv(sysv_msg, &sysv_message, sizeof(sysv_message.mtext),
+               -2, IPC_NOWAIT) != 3 ||
+        sysv_message.mtype != 1 ||
+        memcmp(sysv_message.mtext, "one", 3) != 0) {
+        return 571;
+    }
+    memset(&sysv_message, 0, sizeof(sysv_message));
+    if (msgrcv(sysv_msg, &sysv_message, sizeof(sysv_message.mtext),
+               2, IPC_NOWAIT) != 3 ||
+        sysv_message.mtype != 2 ||
+        memcmp(sysv_message.mtext, "two", 3) != 0) {
+        return 572;
+    }
+    errno = 0;
+    if (msgrcv(sysv_msg, &sysv_message, sizeof(sysv_message.mtext),
+               0, IPC_NOWAIT) != -1 || errno != ENOMSG) {
+        return 573;
+    }
+    sysv_message.mtype = 4;
+    strcpy(sysv_message.mtext, "copy");
+    if (msgsnd(sysv_msg, &sysv_message, 4, 0) != 0) {
+        return 574;
+    }
+    memset(&sysv_message, 0, sizeof(sysv_message));
+    if (msgrcv(sysv_msg, &sysv_message, sizeof(sysv_message.mtext),
+               0, IPC_NOWAIT | MSG_COPY) != 4 ||
+        sysv_message.mtype != 4 ||
+        memcmp(sysv_message.mtext, "copy", 4) != 0) {
+        return 575;
+    }
+    memset(&sysv_message, 0, sizeof(sysv_message));
+    if (msgrcv(sysv_msg, &sysv_message, sizeof(sysv_message.mtext),
+               0, IPC_NOWAIT) != 4 ||
+        memcmp(sysv_message.mtext, "copy", 4) != 0) {
+        return 576;
+    }
+    sysv_message.mtype = 5;
+    strcpy(sysv_message.mtext, "abcdef");
+    if (msgsnd(sysv_msg, &sysv_message, 6, 0) != 0) {
+        return 577;
+    }
+    errno = 0;
+    if (msgrcv(sysv_msg, &sysv_message, 3, 0, IPC_NOWAIT) != -1 ||
+        errno != E2BIG) {
+        return 578;
+    }
+    memset(&sysv_message, 0, sizeof(sysv_message));
+    if (msgrcv(sysv_msg, &sysv_message, 3, 0,
+               IPC_NOWAIT | MSG_NOERROR) != 3 ||
+        sysv_message.mtype != 5 ||
+        memcmp(sysv_message.mtext, "abc", 3) != 0) {
+        return 579;
+    }
+    pid_t sysv_receiver = fork();
+    if (sysv_receiver < 0) {
+        return 580;
+    }
+    if (sysv_receiver == 0) {
+        memset(&sysv_message, 0, sizeof(sysv_message));
+        ssize_t received = msgrcv(sysv_msg, &sysv_message,
+                                  sizeof(sysv_message.mtext), 6, 0);
+        _exit(received == 4 && sysv_message.mtype == 6 &&
+                      memcmp(sysv_message.mtext, "wake", 4) == 0
+                  ? 0
+                  : 1);
+    }
+    sysv_message.mtype = 6;
+    strcpy(sysv_message.mtext, "wake");
+    int sysv_receiver_status = 0;
+    struct timespec sysv_delay = {.tv_sec = 0, .tv_nsec = 20000000};
+    if (nanosleep(&sysv_delay, NULL) != 0 ||
+        msgsnd(sysv_msg, &sysv_message, 4, 0) != 0 ||
+        waitpid(sysv_receiver, &sysv_receiver_status, 0) != sysv_receiver ||
+        !WIFEXITED(sysv_receiver_status) ||
+        WEXITSTATUS(sysv_receiver_status) != 0 ||
+        msgctl(sysv_msg, IPC_RMID, NULL) != 0) {
+        return 581;
+    }
+    if (msgrcv(sysv_msg, &sysv_message, sizeof(sysv_message.mtext),
+               0, IPC_NOWAIT) != -1) {
+        return 582;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
