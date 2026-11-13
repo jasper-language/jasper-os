@@ -2647,6 +2647,7 @@ fn execute(
         LinuxSyscall::Statmount => compat_result(linux_statmount(pid, call.args)),
         LinuxSyscall::Seccomp => compat_result(linux_seccomp(pid, call.args)),
         LinuxSyscall::Cachestat => compat_result(linux_cachestat(pid, call.args)),
+        LinuxSyscall::LsmListModules => compat_result(linux_lsm_list_modules(call.args)),
         LinuxSyscall::AddKey
         | LinuxSyscall::RequestKey
         | LinuxSyscall::Keyctl
@@ -2670,7 +2671,6 @@ fn execute(
         | LinuxSyscall::Listns
         | LinuxSyscall::LsmGetSelfAttr
         | LinuxSyscall::LsmSetSelfAttr
-        | LinuxSyscall::LsmListModules
         | LinuxSyscall::MapShadowStack
         | LinuxSyscall::MountSetattr
         | LinuxSyscall::MoveMount
@@ -9058,6 +9058,25 @@ fn linux_cachestat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     output[..8].copy_from_slice(&cached_pages.to_le_bytes());
     copy_to_user(args[2], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
+}
+
+/// Implements the active-LSM list for Jasper's capability hook.
+fn linux_lsm_list_modules(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const LSM_ID_CAPABILITY: u64 = 100;
+    if args[2] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut size = [0u8; 4];
+    copy_from_user(&mut size, args[1], 4).map_err(|_| CompatErrno::Fault)?;
+    let available = u32::from_le_bytes(size);
+    let required = 8u32;
+    copy_to_user(args[1], &required.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+    if available < required {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    copy_to_user(args[0], &LSM_ID_CAPABILITY.to_le_bytes(), 8)
+        .map_err(|_| CompatErrno::Fault)?;
+    Ok(1)
 }
 
 fn linux_eventfd(pid: ObjId, args: [u64; 6], eventfd2: bool) -> Result<u64, CompatErrno> {

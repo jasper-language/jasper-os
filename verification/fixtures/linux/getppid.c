@@ -15,6 +15,7 @@
 #include <linux/io_uring.h>
 #include <linux/ioprio.h>
 #include <linux/kcmp.h>
+#include <linux/lsm.h>
 #include <linux/membarrier.h>
 #include <linux/mount.h>
 #include <linux/mman.h>
@@ -4437,7 +4438,7 @@ int main(void) {
         SYS_set_mempolicy_home_node, SYS_mbind, SYS_migrate_pages,
         SYS_move_pages, SYS_landlock_create_ruleset, SYS_landlock_add_rule,
         SYS_landlock_restrict_self, SYS_listns,
-        SYS_lsm_get_self_attr, SYS_lsm_set_self_attr, SYS_lsm_list_modules,
+        SYS_lsm_get_self_attr, SYS_lsm_set_self_attr,
         SYS_map_shadow_stack, SYS_mount_setattr, SYS_move_mount,
         SYS_name_to_handle_at, SYS_open_by_handle_at, SYS_open_tree,
         SYS_open_tree_attr, SYS_pkey_alloc, SYS_pkey_free,
@@ -4983,6 +4984,19 @@ int main(void) {
         return 605;
     }
     free(mount_status);
+    uint64_t lsm_ids[2] = {0};
+    uint32_t lsm_size = sizeof(lsm_ids);
+    if (syscall(SYS_lsm_list_modules, lsm_ids, &lsm_size, 0) != 1 ||
+        lsm_size != sizeof(uint64_t) ||
+        lsm_ids[0] != LSM_ID_CAPABILITY) {
+        return 615;
+    }
+    lsm_size = 0;
+    errno = 0;
+    if (syscall(SYS_lsm_list_modules, lsm_ids, &lsm_size, 0) != -1 ||
+        errno != E2BIG || lsm_size != sizeof(uint64_t)) {
+        return 616;
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);
