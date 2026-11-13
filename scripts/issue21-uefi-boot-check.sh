@@ -29,7 +29,10 @@ foreign_uefi_transaction() {
     case "$command" in
       *issue21-uefi-boot-check.sh*) return 0 ;;
     esac
-  done < <(pgrep -af 'issue21-uefi-boot-check[.]sh' || true)
+  done < <(
+    pgrep -af '^bash (scripts/|/[^ ]*/scripts/)issue21-uefi-boot-check[.]sh( |$)' ||
+      true
+  )
   return 1
 }
 
