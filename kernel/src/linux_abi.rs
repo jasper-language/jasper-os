@@ -323,6 +323,9 @@ struct LinuxProcessKeyring {
 
 struct CompatState {
     threads: [Option<LinuxThread>; MAX_LINUX_THREADS],
+    thread_landlock_domains: [Option<
+        alloc::vec::Vec<alloc::sync::Arc<proc::LinuxLandlockRuleset>>,
+    >; MAX_LINUX_THREADS],
     futexes: [Option<FutexWord>; MAX_FUTEX_WORDS],
     process_signals: [Option<ProcessSignalSet>; MAX_PROCESS_SIGNAL_SETS],
     flock_locks: [Option<FlockLock>; MAX_FLOCK_LOCKS],
@@ -349,6 +352,7 @@ impl CompatState {
     const fn new() -> Self {
         Self {
             threads: [None; MAX_LINUX_THREADS],
+            thread_landlock_domains: [const { None }; MAX_LINUX_THREADS],
             futexes: [None; MAX_FUTEX_WORDS],
             process_signals: [None; MAX_PROCESS_SIGNAL_SETS],
             flock_locks: [None; MAX_FLOCK_LOCKS],
@@ -474,20 +478,25 @@ pub(crate) fn register_linux_thread(
     let (current_task, current_name) = sched::current();
     let tid = {
         let mut state = COMPAT.lock();
-        let inherited = state
-            .threads
-            .iter()
-            .flatten()
-            .find(|entry| entry.process == process && entry.task == current_task);
-        let inherited_mask = inherited.map(|entry| entry.signal_mask).unwrap_or(0);
-        let inherited_name = inherited
-            .map(|entry| entry.name)
-            .unwrap_or_else(|| linux_comm_from_task_name(current_name));
         let has_leader = state
             .threads
             .iter()
             .flatten()
             .any(|entry| entry.process == process);
+        let inherits_current = |entry: &LinuxThread| {
+            entry.task == current_task && (entry.process == process || !has_leader)
+        };
+        let inherited_slot = state.threads.iter().position(|entry| {
+            entry.as_ref().is_some_and(inherits_current)
+        });
+        let inherited = inherited_slot.and_then(|slot| state.threads[slot]);
+        let inherited_mask = inherited.map(|entry| entry.signal_mask).unwrap_or(0);
+        let inherited_name = inherited
+            .map(|entry| entry.name)
+            .unwrap_or_else(|| linux_comm_from_task_name(current_name));
+        let inherited_domains = inherited_slot
+            .and_then(|slot| state.thread_landlock_domains[slot].clone())
+            .unwrap_or_default();
         let tid = if has_leader {
             let tid = NEXT_LINUX_TID.fetch_add(1, Ordering::Relaxed);
             if tid == 0 || tid == u32::MAX {
@@ -525,6 +534,7 @@ pub(crate) fn register_linux_thread(
             altstack_disarm_depth: 0,
             sigsuspend_restore_mask: None,
         });
+        state.thread_landlock_domains[slot] = Some(inherited_domains);
         tid
     };
     if clear_child_tid != 0 && proc::write(process, clear_child_tid, &tid.to_le_bytes()).is_err() {
@@ -543,6 +553,7 @@ pub(crate) fn unregister_linux_thread(task: crate::task::TaskId) {
         .position(|entry| entry.is_some_and(|entry| entry.task == task))
     {
         state.threads[slot] = None;
+        state.thread_landlock_domains[slot] = None;
     }
 }
 
@@ -1941,6 +1952,7 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
             return;
         };
         let entry = state.threads[slot].take().expect("live Linux thread");
+        state.thread_landlock_domains[slot] = None;
         state.pending_signal_records.iter_mut().for_each(|pending| {
             if pending.is_some_and(|pending| {
                 pending.process == process && pending.target_tid == entry.tid
@@ -2730,14 +2742,20 @@ fn execute(
         LinuxSyscall::MovePages => compat_result(linux_move_pages(pid, call.args)),
         LinuxSyscall::FanotifyInit
         | LinuxSyscall::FanotifyMark
-        | LinuxSyscall::LandlockCreateRuleset
-        | LinuxSyscall::LandlockAddRule
-        | LinuxSyscall::LandlockRestrictSelf
         | LinuxSyscall::LsmSetSelfAttr
         | LinuxSyscall::MapShadowStack
         | LinuxSyscall::Uprobe
         | LinuxSyscall::Uretprobe
         | LinuxSyscall::Userfaultfd => -(CompatErrno::NotSupported as i32 as i64),
+        LinuxSyscall::LandlockCreateRuleset => {
+            compat_result(linux_landlock_create_ruleset(pid, call.args))
+        }
+        LinuxSyscall::LandlockAddRule => {
+            compat_result(linux_landlock_add_rule(pid, call.args))
+        }
+        LinuxSyscall::LandlockRestrictSelf => {
+            compat_result(linux_landlock_restrict_self(pid, call.args))
+        }
         LinuxSyscall::Adjtimex
         | LinuxSyscall::ClockAdjtime
         | LinuxSyscall::ClockSettime
@@ -5304,6 +5322,16 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
     drop(path);
     let argv = linux_string_vector(args[1], 64, 64 * 1024)?;
     let envp = linux_string_vector(args[2], 64, 64 * 1024)?;
+    let node = crate::linux_vfs::lookup_node(&resolved)
+        .unwrap_or(crate::linux_vfs::Node::Executable(0));
+    if !landlock_path_allows(
+        pid,
+        node,
+        &resolved,
+        LANDLOCK_ACCESS_FS_EXECUTE,
+    ) {
+        return Err(CompatErrno::Access);
+    }
     #[cfg(all(
         feature = "lifecycle-root-exec-verify",
         target_arch = "x86_64"
@@ -6390,6 +6418,208 @@ fn linux_seccomp(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         _ => Err(CompatErrno::Invalid),
     }
+}
+
+const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1 << 0;
+const LANDLOCK_ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
+const LANDLOCK_ACCESS_FS_READ_FILE: u64 = 1 << 2;
+const LANDLOCK_ACCESS_FS_READ_DIR: u64 = 1 << 3;
+const LANDLOCK_HANDLED_FS: u64 = (1 << 15) - 1;
+
+fn landlock_rule_contains(rule: proc::LinuxLandlockRule, node: crate::linux_vfs::Node, path: &[u8]) -> bool {
+    if rule.node == node {
+        return true;
+    }
+    let crate::linux_vfs::Node::Directory(directory) = rule.node else {
+        return false;
+    };
+    let root = directory.path();
+    root == b"/"
+        || path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with(b"/"))
+}
+
+fn landlock_path_allows(
+    pid: ObjId,
+    node: crate::linux_vfs::Node,
+    path: &[u8],
+    access: u64,
+) -> bool {
+    current_landlock_domains(pid)
+        .iter()
+        .all(|domain| {
+            if domain.handled_access_fs & access == 0 {
+                return true;
+            }
+            domain.rules.iter().any(|rule| {
+                rule.allowed_access & access == access
+                    && landlock_rule_contains(*rule, node, path)
+            })
+        })
+}
+
+fn current_landlock_domains(
+    pid: ObjId,
+) -> alloc::vec::Vec<alloc::sync::Arc<proc::LinuxLandlockRuleset>> {
+    let (task, _) = sched::current();
+    let state = COMPAT.lock();
+    state
+        .threads
+        .iter()
+        .position(|entry| {
+            entry.is_some_and(|entry| entry.process == pid && entry.task == task)
+        })
+        .and_then(|slot| state.thread_landlock_domains[slot].clone())
+        .unwrap_or_default()
+}
+
+/// Creates one stackable Landlock ruleset.
+fn linux_landlock_create_ruleset(
+    pid: ObjId,
+    args: [u64; 6],
+) -> Result<u64, CompatErrno> {
+    const CREATE_RULESET_VERSION: u64 = 1;
+    if args[2] & CREATE_RULESET_VERSION != 0 {
+        if args[2] != CREATE_RULESET_VERSION || args[0] != 0 || args[1] != 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        return Ok(4);
+    }
+    if args[2] != 0 || !(8..=24).contains(&args[1]) {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut raw = [0u8; 24];
+    copy_from_user(&mut raw, args[0], args[1] as usize).map_err(|_| CompatErrno::Fault)?;
+    let handled = u64::from_le_bytes(raw[..8].try_into().unwrap());
+    let handled_net = if args[1] >= 16 {
+        u64::from_le_bytes(raw[8..16].try_into().unwrap())
+    } else {
+        0
+    };
+    let scoped = if args[1] >= 24 {
+        u64::from_le_bytes(raw[16..24].try_into().unwrap())
+    } else {
+        0
+    };
+    if handled == 0 || handled & !LANDLOCK_HANDLED_FS != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if handled_net != 0 || scoped != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    proc::linux_install_landlock_ruleset(pid, handled, true)
+        .map(u64::from)
+        .ok_or(CompatErrno::NoSpace)
+}
+
+/// Adds one path-beneath rule to a Landlock ruleset.
+fn linux_landlock_add_rule(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const RULE_PATH_BENEATH: u64 = 1;
+    if args[1] != RULE_PATH_BENEATH {
+        return Err(if args[1] == 2 {
+            CompatErrno::NotSupported
+        } else {
+            CompatErrno::Invalid
+        });
+    }
+    if args[3] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Sandbox {
+        return Err(CompatErrno::BadFd);
+    }
+    let ruleset = proc::linux_landlock_ruleset(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let mut raw = [0u8; 12];
+    copy_from_user(&mut raw, args[2], 12).map_err(|_| CompatErrno::Fault)?;
+    let allowed = u64::from_le_bytes(raw[..8].try_into().unwrap());
+    let parent_fd = i32::from_le_bytes(raw[8..12].try_into().unwrap());
+    if parent_fd < 0 {
+        return Err(CompatErrno::BadFd);
+    }
+    let node = proc::linux_path_node(pid, parent_fd as u32).ok_or(CompatErrno::BadFd)?;
+    let mut ruleset = ruleset.lock();
+    if allowed == 0 || allowed & !ruleset.handled_access_fs != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if ruleset.rules.iter().any(|rule| rule.node == node) {
+        return Err(CompatErrno::Exists);
+    }
+    if ruleset.rules.len() >= 64 {
+        return Err(CompatErrno::NoSpace);
+    }
+    ruleset
+        .rules
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    ruleset.rules.push(proc::LinuxLandlockRule {
+        node,
+        allowed_access: allowed,
+    });
+    Ok(0)
+}
+
+/// Enforces one ruleset as a new Landlock domain.
+fn linux_landlock_restrict_self(
+    pid: ObjId,
+    args: [u64; 6],
+) -> Result<u64, CompatErrno> {
+    const RESTRICT_FLAGS: u64 = 0x8 | 0x4 | 0x2 | 0x1;
+    if args[1] & !RESTRICT_FLAGS != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if !proc::linux_no_new_privs(pid).ok_or(CompatErrno::NoProcess)? {
+        return Err(CompatErrno::Perm);
+    }
+    if args[0] == u64::MAX {
+        return Ok(0);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Sandbox {
+        return Err(CompatErrno::BadFd);
+    }
+    let ruleset = proc::linux_landlock_ruleset(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let domain = alloc::sync::Arc::new(ruleset.lock().clone());
+    let (task, _) = sched::current();
+    let mut state = COMPAT.lock();
+    let sync_threads = args[1] & 0x8 != 0;
+    let mut slots = [0usize; MAX_LINUX_THREADS];
+    let mut count = 0usize;
+    for (slot, entry) in state.threads.iter().enumerate() {
+        if entry.is_some_and(|entry| {
+            entry.process == pid && (sync_threads || entry.task == task)
+        }) {
+            slots[count] = slot;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return Err(CompatErrno::NoProcess);
+    }
+    if slots[..count].iter().any(|slot| {
+        state.thread_landlock_domains[*slot]
+            .as_ref()
+            .is_some_and(|domains| domains.len() >= 16)
+    }) {
+        return Err(CompatErrno::NoSpace);
+    }
+    for slot in &slots[..count] {
+        state.thread_landlock_domains[*slot]
+            .get_or_insert_with(alloc::vec::Vec::new)
+            .try_reserve(1)
+            .map_err(|_| CompatErrno::NoSpace)?;
+    }
+    for slot in &slots[..count] {
+        state.thread_landlock_domains[*slot]
+            .as_mut()
+            .expect("reserved Landlock domain slot")
+            .push(alloc::sync::Arc::clone(&domain));
+    }
+    Ok(0)
 }
 
 /// Implements the x86_64 `arch_prctl(2)` TLS base operation.
@@ -9782,11 +10012,27 @@ fn linux_open_by_handle_at(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
     let close_on_exec = flags & O_CLOEXEC != 0;
     match node {
         crate::linux_vfs::Node::File(file) if flags & O_DIRECTORY == 0 => {
+            if !landlock_path_allows(
+                pid,
+                node,
+                file.path(),
+                LANDLOCK_ACCESS_FS_READ_FILE,
+            ) {
+                return Err(CompatErrno::Access);
+            }
             proc::linux_install_file(pid, file.handle(), close_on_exec)
                 .map(u64::from)
                 .ok_or(CompatErrno::NoSpace)
         }
         crate::linux_vfs::Node::Directory(directory) => {
+            if !landlock_path_allows(
+                pid,
+                node,
+                directory.path(),
+                LANDLOCK_ACCESS_FS_READ_DIR,
+            ) {
+                return Err(CompatErrno::Access);
+            }
             proc::linux_install_dir(pid, directory.handle(), close_on_exec)
                 .map(u64::from)
                 .ok_or(CompatErrno::NoSpace)
@@ -12842,6 +13088,18 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return proc::linux_install_path(pid, node, close_on_exec)
             .map(u64::from)
             .ok_or(CompatErrno::NoSpace);
+    }
+    let access = if flags & 3 == 0 {
+        if node.is_directory() {
+            LANDLOCK_ACCESS_FS_READ_DIR
+        } else {
+            LANDLOCK_ACCESS_FS_READ_FILE
+        }
+    } else {
+        LANDLOCK_ACCESS_FS_WRITE_FILE
+    };
+    if !landlock_path_allows(pid, node, &resolved, access) {
+        return Err(CompatErrno::Access);
     }
     let fd = match node {
         crate::linux_vfs::Node::File(file) => {

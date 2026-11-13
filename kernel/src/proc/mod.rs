@@ -108,6 +108,7 @@ const LINUX_MQ_HANDLE_BASE: u64 = 0x0000_8c00_0000_0000;
 const LINUX_MOUNT_TREE_HANDLE_BASE: u64 = 0x0000_8e00_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_FS_CONTEXT_HANDLE_BASE: u64 = 0x0000_8f00_0000_0000;
+const LINUX_LANDLOCK_HANDLE_BASE: u64 = 0x0000_9000_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -187,6 +188,8 @@ struct LinuxProcessState {
     next_mount_tree_handle: u64,
     fs_contexts: Vec<LinuxFsContextHandle>,
     next_fs_context_handle: u64,
+    landlock_rulesets: Vec<LinuxLandlockRulesetHandle>,
+    next_landlock_handle: u64,
     epolls: Vec<LinuxEpollHandle>,
     next_epoll_handle: u64,
     iourings: Vec<LinuxIoUringHandle>,
@@ -374,6 +377,27 @@ struct LinuxFsContextHandle {
     fs_name: [u8; 16],
     fs_name_len: u8,
     created: bool,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxLandlockRule {
+    pub(crate) node: crate::linux_vfs::Node,
+    pub(crate) allowed_access: u64,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+pub(crate) struct LinuxLandlockRuleset {
+    pub(crate) handled_access_fs: u64,
+    pub(crate) rules: Vec<LinuxLandlockRule>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxLandlockRulesetHandle {
+    handle: u64,
+    ruleset: Arc<SpinLock<LinuxLandlockRuleset>>,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -2732,6 +2756,62 @@ pub(crate) fn linux_install_fs_context(
         Ok(fd.fd())
     })
     .ok()
+}
+
+/// Installs one Landlock ruleset whose rules are shared by duplicated FDs.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_landlock_ruleset(
+    pid: ObjId,
+    handled_access_fs: u64,
+    close_on_exec: bool,
+) -> Option<u32> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.landlock_rulesets.len() >= 16 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .landlock_rulesets
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_landlock_handle;
+        linux.next_landlock_handle = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ.union(Rights::WRITE),
+                compat_core::fd::CompatKind::Sandbox,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.landlock_rulesets.push(LinuxLandlockRulesetHandle {
+            handle,
+            ruleset: Arc::new(SpinLock::new(LinuxLandlockRuleset {
+                handled_access_fs,
+                rules: Vec::new(),
+            })),
+        });
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_landlock_ruleset(
+    pid: ObjId,
+    handle: u64,
+) -> Option<Arc<SpinLock<LinuxLandlockRuleset>>> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .landlock_rulesets
+            .iter()
+            .find(|ruleset| ruleset.handle == handle)
+            .map(|ruleset| Arc::clone(&ruleset.ruleset)),
+        _ => None,
+    })
 }
 
 #[cfg(feature = "linux-abi")]
@@ -5125,6 +5205,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         next_mount_tree_handle: LINUX_MOUNT_TREE_HANDLE_BASE,
         fs_contexts: Vec::new(),
         next_fs_context_handle: LINUX_FS_CONTEXT_HANDLE_BASE,
+        landlock_rulesets: Vec::new(),
+        next_landlock_handle: LINUX_LANDLOCK_HANDLE_BASE,
         epolls: Vec::new(),
         next_epoll_handle: LINUX_EPOLL_HANDLE_BASE,
         iourings: Vec::new(),

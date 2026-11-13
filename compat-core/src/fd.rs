@@ -21,6 +21,7 @@ pub enum CompatKind {
     MountTree,
     FsContext,
     Path,
+    Sandbox,
     Device,
     Other,
 }

@@ -17,6 +17,7 @@
 #include <linux/io_uring.h>
 #include <linux/ioprio.h>
 #include <linux/kcmp.h>
+#include <linux/landlock.h>
 #include <linux/lsm.h>
 #include <linux/membarrier.h>
 #include <linux/mount.h>
@@ -4621,8 +4622,6 @@ int main(void) {
     }
     const long unsupported_features[] = {
         SYS_fanotify_init, SYS_fanotify_mark,
-        SYS_landlock_create_ruleset, SYS_landlock_add_rule,
-        SYS_landlock_restrict_self,
         SYS_lsm_set_self_attr,
         SYS_map_shadow_stack,
         SYS_uprobe, SYS_uretprobe, SYS_userfaultfd,
@@ -4637,6 +4636,124 @@ int main(void) {
                    unsupported_features[index], errno);
             return 536;
         }
+    }
+    if (syscall(SYS_landlock_create_ruleset, NULL, 0,
+                LANDLOCK_CREATE_RULESET_VERSION) != 4) {
+        return 692;
+    }
+    pid_t landlock_child = fork();
+    if (landlock_child < 0) {
+        return 693;
+    }
+    if (landlock_child == 0) {
+        struct landlock_ruleset_attr ruleset_attr = {
+            .handled_access_fs =
+                LANDLOCK_ACCESS_FS_READ_FILE |
+                LANDLOCK_ACCESS_FS_EXECUTE,
+        };
+        int usr_ruleset = syscall(SYS_landlock_create_ruleset,
+                                  &ruleset_attr,
+                                  sizeof(ruleset_attr), 0);
+        int usr_dir = open("/usr", O_PATH | O_DIRECTORY | O_CLOEXEC);
+        struct landlock_path_beneath_attr usr_rule = {
+            .allowed_access =
+                LANDLOCK_ACCESS_FS_READ_FILE |
+                LANDLOCK_ACCESS_FS_EXECUTE,
+            .parent_fd = usr_dir,
+        };
+        if (usr_ruleset < 0 || usr_dir < 0 ||
+            (fcntl(usr_ruleset, F_GETFD) & FD_CLOEXEC) == 0 ||
+            syscall(SYS_landlock_add_rule, usr_ruleset,
+                    LANDLOCK_RULE_PATH_BENEATH,
+                    &usr_rule, 0) != 0) {
+            _exit(1);
+        }
+        errno = 0;
+        if (syscall(SYS_landlock_add_rule, usr_ruleset,
+                    LANDLOCK_RULE_PATH_BENEATH,
+                    &usr_rule, 0) != -1 || errno != EEXIST ||
+            syscall(SYS_landlock_restrict_self,
+                    usr_ruleset, 0) != -1 || errno != EPERM ||
+            prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
+            syscall(SYS_landlock_restrict_self,
+                    usr_ruleset, 0) != 0) {
+            _exit(2);
+        }
+        int allowed = open("/usr/lib/x86_64-linux-gnu/libc.so.6",
+                           O_RDONLY | O_CLOEXEC);
+        errno = 0;
+        int denied = open("/lib/x86_64-linux-gnu/libc.so.6",
+                          O_RDONLY | O_CLOEXEC);
+        int path_only = open("/lib/x86_64-linux-gnu/libc.so.6",
+                             O_PATH | O_CLOEXEC);
+        if (allowed < 0 || denied != -1 || errno != EACCES ||
+            path_only < 0) {
+            _exit(3);
+        }
+        close(allowed);
+        close(path_only);
+        pid_t sandbox_fork = fork();
+        if (sandbox_fork < 0) {
+            _exit(4);
+        }
+        if (sandbox_fork == 0) {
+            int inherited_allowed =
+                open("/usr/lib/x86_64-linux-gnu/libc.so.6",
+                     O_RDONLY | O_CLOEXEC);
+            errno = 0;
+            int inherited_denied =
+                open("/lib/x86_64-linux-gnu/libc.so.6",
+                     O_RDONLY | O_CLOEXEC);
+            _exit(inherited_allowed >= 0 &&
+                          inherited_denied == -1 && errno == EACCES
+                      ? 0
+                      : 1);
+        }
+        int sandbox_fork_status = 0;
+        if (waitpid(sandbox_fork, &sandbox_fork_status, 0) !=
+                sandbox_fork ||
+            !WIFEXITED(sandbox_fork_status) ||
+            WEXITSTATUS(sandbox_fork_status) != 0) {
+            _exit(5);
+        }
+        int lib_ruleset = syscall(SYS_landlock_create_ruleset,
+                                  &ruleset_attr,
+                                  sizeof(ruleset_attr), 0);
+        int lib_dir = open("/lib", O_PATH | O_DIRECTORY | O_CLOEXEC);
+        struct landlock_path_beneath_attr lib_rule = {
+            .allowed_access =
+                LANDLOCK_ACCESS_FS_READ_FILE |
+                LANDLOCK_ACCESS_FS_EXECUTE,
+            .parent_fd = lib_dir,
+        };
+        if (lib_ruleset < 0 || lib_dir < 0 ||
+            syscall(SYS_landlock_add_rule, lib_ruleset,
+                    LANDLOCK_RULE_PATH_BENEATH,
+                    &lib_rule, 0) != 0 ||
+            syscall(SYS_landlock_restrict_self,
+                    lib_ruleset, 0) != 0) {
+            _exit(6);
+        }
+        errno = 0;
+        int usr_after_stack =
+            open("/usr/lib/x86_64-linux-gnu/libc.so.6",
+                 O_RDONLY | O_CLOEXEC);
+        int usr_stack_errno = errno;
+        errno = 0;
+        int lib_after_stack =
+            open("/lib/x86_64-linux-gnu/libc.so.6",
+                 O_RDONLY | O_CLOEXEC);
+        int lib_stack_errno = errno;
+        _exit(usr_after_stack == -1 && usr_stack_errno == EACCES &&
+                      lib_after_stack == -1 && lib_stack_errno == EACCES
+                  ? 0
+                  : 7);
+    }
+    int landlock_status = 0;
+    if (waitpid(landlock_child, &landlock_status, 0) != landlock_child ||
+        !WIFEXITED(landlock_status) ||
+        WEXITSTATUS(landlock_status) != 0) {
+        return 694;
     }
     int secret_fd = syscall(SYS_memfd_secret, O_CLOEXEC);
     char secret_readback[6] = {0};

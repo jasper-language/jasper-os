@@ -176,6 +176,19 @@ impl FileId {
         }
     }
 
+    /// Stable canonical namespace path exposed to open-by-handle consumers.
+    pub const fn path(self) -> &'static [u8] {
+        match self {
+            Self::Libc => b"/usr/lib/x86_64-linux-gnu/libc.so.6",
+            Self::LibSystemd => b"/usr/lib/x86_64-linux-gnu/libsystemd.so.0",
+            Self::LibSelinux => b"/usr/lib/x86_64-linux-gnu/libselinux.so.1",
+            Self::LibGccS => b"/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
+            Self::LibM => b"/usr/lib/x86_64-linux-gnu/libm.so.6",
+            Self::LibPcre2 => b"/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0",
+            Self::IoProbe => b"/io-probe",
+        }
+    }
+
     #[cfg(feature = "lifecycle-root-exec-verify")]
     const fn root_slot(self) -> Option<usize> {
         Some(match self {
