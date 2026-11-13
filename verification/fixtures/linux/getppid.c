@@ -4903,6 +4903,93 @@ int main(void) {
         sigaction(SIGUSR1, &mq_previous_action, NULL) != 0) {
         return 665;
     }
+    pid_t mq_permission_child = fork();
+    if (mq_permission_child < 0) {
+        return 667;
+    }
+    if (mq_permission_child == 0) {
+        if (syscall(SYS_setresgid, 110, 110, 110) != 0 ||
+            syscall(SYS_setresuid, 100, 100, 100) != 0) {
+            _exit(1);
+        }
+        errno = 0;
+        int denied = syscall(SYS_mq_open, mq_name, O_RDWR, 0, NULL);
+        _exit(denied == -1 && errno == EACCES ? 0 : 2);
+    }
+    int mq_permission_status = 0;
+    if (waitpid(mq_permission_child, &mq_permission_status, 0) !=
+            mq_permission_child ||
+        !WIFEXITED(mq_permission_status) ||
+        WEXITSTATUS(mq_permission_status) != 0) {
+        return 668;
+    }
+    int mq_write_fd = syscall(SYS_mq_open, mq_name,
+                              O_WRONLY | O_NONBLOCK, 0, NULL);
+    struct mq_attr mq_write_attr = {0};
+    if (mq_write_fd < 0 ||
+        syscall(SYS_mq_getsetattr, mq_write_fd, NULL,
+                &mq_write_attr) != 0 ||
+        mq_write_attr.mq_maxmsg != 4 ||
+        syscall(SYS_mq_notify, mq_write_fd, &mq_none_event) != 0 ||
+        syscall(SYS_mq_notify, mq_write_fd, NULL) != 0 ||
+        close(mq_write_fd) != 0) {
+        return 669;
+    }
+    const char *mq_group_name = "jasper-mq-group-test";
+    syscall(SYS_mq_unlink, mq_group_name);
+    if (syscall(SYS_setfsgid, 120) != 0) {
+        return 670;
+    }
+    int mq_group_fd = syscall(SYS_mq_open, mq_group_name,
+                              O_CREAT | O_RDWR | O_NONBLOCK,
+                              0660, &mq_attributes);
+    if (syscall(SYS_setfsgid, 0) != 120 || mq_group_fd < 0) {
+        return 671;
+    }
+    pid_t mq_group_child = fork();
+    if (mq_group_child < 0) {
+        return 672;
+    }
+    if (mq_group_child == 0) {
+        gid_t supplementary_group = 120;
+        if (syscall(SYS_setgroups, 1, &supplementary_group) != 0 ||
+            syscall(SYS_setresgid, 110, 110, 110) != 0 ||
+            syscall(SYS_setresuid, 100, 100, 100) != 0) {
+            _exit(1);
+        }
+        int opened = syscall(SYS_mq_open, mq_group_name,
+                             O_RDWR | O_NONBLOCK, 0, NULL);
+        _exit(opened >= 0 ? 0 : 2);
+    }
+    int mq_group_status = 0;
+    if (waitpid(mq_group_child, &mq_group_status, 0) != mq_group_child ||
+        !WIFEXITED(mq_group_status) ||
+        WEXITSTATUS(mq_group_status) != 0) {
+        return 673;
+    }
+    pid_t mq_other_child = fork();
+    if (mq_other_child < 0) {
+        return 674;
+    }
+    if (mq_other_child == 0) {
+        if (syscall(SYS_setgroups, 0, NULL) != 0 ||
+            syscall(SYS_setresgid, 111, 111, 111) != 0 ||
+            syscall(SYS_setresuid, 100, 100, 100) != 0) {
+            _exit(1);
+        }
+        errno = 0;
+        int denied = syscall(SYS_mq_open, mq_group_name,
+                             O_RDWR | O_NONBLOCK, 0, NULL);
+        _exit(denied == -1 && errno == EACCES ? 0 : 2);
+    }
+    int mq_other_status = 0;
+    if (waitpid(mq_other_child, &mq_other_status, 0) != mq_other_child ||
+        !WIFEXITED(mq_other_status) ||
+        WEXITSTATUS(mq_other_status) != 0 ||
+        close(mq_group_fd) != 0 ||
+        syscall(SYS_mq_unlink, mq_group_name) != 0) {
+        return 675;
+    }
     errno = 0;
     if (syscall(SYS_mq_notify, mq_fd, NULL) != -1 || errno != EINVAL ||
         syscall(SYS_mq_unlink, mq_name) != 0 ||

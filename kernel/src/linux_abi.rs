@@ -196,6 +196,9 @@ struct MessageQueueName {
     name: [u8; 256],
     name_len: u8,
     queue: alloc::sync::Arc<proc::LinuxMqShared>,
+    uid: u32,
+    gid: u32,
+    mode: u16,
 }
 
 #[derive(Clone)]
@@ -7132,6 +7135,35 @@ fn parse_linux_mq_limits(
     Ok((max_messages as usize, message_size as usize))
 }
 
+/// Applies one POSIX message-queue inode permission check.
+fn message_queue_access(
+    credentials: proc::LinuxCredentials,
+    supplementary_groups: &[u32],
+    uid: u32,
+    gid: u32,
+    mode: u16,
+    rights: kernel_core::object::Rights,
+) -> bool {
+    if credentials.euid == 0 {
+        return true;
+    }
+    let shift = if credentials.fsuid == uid {
+        6
+    } else if credentials.fsgid == gid || supplementary_groups.contains(&gid) {
+        3
+    } else {
+        0
+    };
+    let mut required = 0u16;
+    if rights.contains(kernel_core::object::Rights::READ) {
+        required |= 0o4;
+    }
+    if rights.contains(kernel_core::object::Rights::WRITE) {
+        required |= 0o2;
+    }
+    (mode >> shift) & required == required
+}
+
 /// Resolves one message-queue descriptor and verifies its access right.
 fn open_message_queue(
     pid: ObjId,
@@ -7147,6 +7179,20 @@ fn open_message_queue(
             kernel_core::object::Rights::READ
         })
     {
+        return Err(CompatErrno::BadFd);
+    }
+    let queue = proc::linux_mq_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    Ok((fd, queue))
+}
+
+/// Resolves one message-queue descriptor without imposing an I/O direction.
+fn open_message_queue_any(
+    pid: ObjId,
+    raw_fd: u64,
+) -> Result<(u32, alloc::sync::Arc<proc::LinuxMqShared>), CompatErrno> {
+    let fd = u32::try_from(raw_fd).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::MessageQueue {
         return Err(CompatErrno::BadFd);
     }
     let queue = proc::linux_mq_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
@@ -7190,6 +7236,9 @@ fn linux_mq_open(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Invalid);
     }
     let (name, name_len) = read_linux_mq_name(args[0])?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let supplementary_groups =
+        proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
     let rights = match flags & O_ACCMODE {
         0 => kernel_core::object::Rights::READ,
         1 => kernel_core::object::Rights::WRITE,
@@ -7211,11 +7260,28 @@ fn linux_mq_open(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .message_queue_names
             .iter()
             .find(|entry| entry.name == name && entry.name_len == name_len)
-            .map(|entry| alloc::sync::Arc::clone(&entry.queue))
+            .map(|entry| {
+                (
+                    alloc::sync::Arc::clone(&entry.queue),
+                    entry.uid,
+                    entry.gid,
+                    entry.mode,
+                )
+            })
     };
-    if let Some(queue) = existing {
+    if let Some((queue, uid, gid, mode)) = existing {
         if flags & (O_CREAT | O_EXCL) == (O_CREAT | O_EXCL) {
             return Err(CompatErrno::Exists);
+        }
+        if !message_queue_access(
+            credentials,
+            &supplementary_groups,
+            uid,
+            gid,
+            mode,
+            rights,
+        ) {
+            return Err(CompatErrno::Perm);
         }
         return install(queue).map(u64::from);
     }
@@ -7236,6 +7302,8 @@ fn linux_mq_open(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             notification: None,
         }),
     });
+    let mode = ((args[2] as u16) & 0o777)
+        & !(proc::linux_umask(pid).ok_or(CompatErrno::NoProcess)? as u16);
     let candidate_fd = install(alloc::sync::Arc::clone(&candidate))?;
     let registration = {
         let mut state = COMPAT.lock();
@@ -7243,9 +7311,13 @@ fn linux_mq_open(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .message_queue_names
             .iter()
             .find(|entry| entry.name == name && entry.name_len == name_len)
-            .map(|entry| alloc::sync::Arc::clone(&entry.queue))
         {
-            Ok(Some(queue))
+            Ok(Some((
+                alloc::sync::Arc::clone(&queue.queue),
+                queue.uid,
+                queue.gid,
+                queue.mode,
+            )))
         } else if state.message_queue_names.len() >= 16 {
             Err(CompatErrno::NoSpace)
         } else {
@@ -7255,6 +7327,9 @@ fn linux_mq_open(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                         name,
                         name_len,
                         queue: candidate,
+                        uid: credentials.fsuid,
+                        gid: credentials.fsgid,
+                        mode,
                     });
                     Ok(None)
                 }
@@ -7264,10 +7339,20 @@ fn linux_mq_open(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     };
     match registration {
         Ok(None) => Ok(u64::from(candidate_fd)),
-        Ok(Some(queue)) => {
+        Ok(Some((queue, uid, gid, mode))) => {
             let _ = proc::linux_close_fd(pid, candidate_fd);
             if flags & O_EXCL != 0 {
                 return Err(CompatErrno::Exists);
+            }
+            if !message_queue_access(
+                credentials,
+                &supplementary_groups,
+                uid,
+                gid,
+                mode,
+                rights,
+            ) {
+                return Err(CompatErrno::Perm);
             }
             install(queue).map(u64::from)
         }
@@ -7466,7 +7551,7 @@ fn linux_mq_notify(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             value,
         })
     };
-    let (_, queue) = open_message_queue(pid, args[0], false)?;
+    let (_, queue) = open_message_queue_any(pid, args[0])?;
     let mut state = queue.state.lock();
     if let Some(requested) = requested {
         if state.notification.is_some() {
@@ -7499,7 +7584,7 @@ fn linux_mq_getsetattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     {
         return Err(CompatErrno::Invalid);
     }
-    let (fd, queue) = open_message_queue(pid, args[0], false)?;
+    let (fd, queue) = open_message_queue_any(pid, args[0])?;
     let (max_messages, message_size, current_messages) = {
         let state = queue.state.lock();
         (
