@@ -2677,6 +2677,8 @@ fn execute(
         LinuxSyscall::OpenByHandleAt => compat_result(linux_open_by_handle_at(pid, call.args)),
         LinuxSyscall::LsmGetSelfAttr => compat_result(linux_lsm_get_self_attr(pid, call.args)),
         LinuxSyscall::OpenTree => compat_result(linux_open_tree(pid, call.args)),
+        LinuxSyscall::MoveMount => compat_result(linux_move_mount(pid, call.args)),
+        LinuxSyscall::MountSetattr => compat_result(linux_mount_setattr(pid, call.args)),
         LinuxSyscall::AddKey
         | LinuxSyscall::RequestKey
         | LinuxSyscall::Keyctl
@@ -2698,8 +2700,6 @@ fn execute(
         | LinuxSyscall::Listns
         | LinuxSyscall::LsmSetSelfAttr
         | LinuxSyscall::MapShadowStack
-        | LinuxSyscall::MountSetattr
-        | LinuxSyscall::MoveMount
         | LinuxSyscall::OpenTreeAttr
         | LinuxSyscall::Uprobe
         | LinuxSyscall::Uretprobe
@@ -9516,6 +9516,77 @@ fn linux_open_tree(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     proc::linux_install_mount_tree(pid, flags & OPEN_TREE_CLOEXEC != 0)
         .map(u64::from)
         .ok_or(CompatErrno::NoSpace)
+}
+
+fn linux_validate_mount_tree_target(pid: ObjId, raw_fd: u64) -> Result<(), CompatErrno> {
+    let fd = u32::try_from(raw_fd).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::MountTree {
+        return Err(CompatErrno::BadFd);
+    }
+    Ok(())
+}
+
+fn linux_move_mount(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const F_SYMLINKS: u64 = 0x1;
+    const F_AUTOMOUNTS: u64 = 0x2;
+    const F_EMPTY_PATH: u64 = 0x4;
+    const T_SYMLINKS: u64 = 0x10;
+    const T_AUTOMOUNTS: u64 = 0x20;
+    const T_EMPTY_PATH: u64 = 0x40;
+    const SET_GROUP: u64 = 0x100;
+    const BENEATH: u64 = 0x200;
+    let flags = args[4];
+    if flags
+        & !(F_SYMLINKS
+            | F_AUTOMOUNTS
+            | F_EMPTY_PATH
+            | T_SYMLINKS
+            | T_AUTOMOUNTS
+            | T_EMPTY_PATH
+            | SET_GROUP
+            | BENEATH)
+        != 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    if flags & F_EMPTY_PATH != 0 {
+        linux_validate_mount_tree_target(pid, args[0])?;
+    } else {
+        linux_node_for_path_or_fd(pid, args[0], args[1], false)?;
+    }
+    linux_node_for_path_or_fd(
+        pid,
+        args[2],
+        args[3],
+        flags & T_EMPTY_PATH != 0,
+    )?;
+    Err(CompatErrno::ReadOnly)
+}
+
+fn linux_mount_setattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    const AT_RECURSIVE: u64 = 0x8000;
+    const KNOWN_ATTRIBUTES: u64 = 0x0020_03bf;
+    if args[2] & !(AT_EMPTY_PATH | AT_RECURSIVE) != 0
+        || args[4] < 32
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut attributes = [0u8; 32];
+    copy_from_user(&mut attributes, args[3], 32).map_err(|_| CompatErrno::Fault)?;
+    let set = u64::from_le_bytes(attributes[..8].try_into().unwrap());
+    let clear = u64::from_le_bytes(attributes[8..16].try_into().unwrap());
+    if set & !KNOWN_ATTRIBUTES != 0 || clear & !KNOWN_ATTRIBUTES != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    linux_node_for_path_or_fd(
+        pid,
+        args[0],
+        args[1],
+        args[2] & AT_EMPTY_PATH != 0,
+    )?;
+    Err(CompatErrno::ReadOnly)
 }
 
 fn linux_eventfd(pid: ObjId, args: [u64; 6], eventfd2: bool) -> Result<u64, CompatErrno> {

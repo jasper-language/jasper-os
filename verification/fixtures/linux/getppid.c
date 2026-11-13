@@ -699,8 +699,16 @@ int main(void) {
     free(file_identity);
     int mount_tree_fd = syscall(SYS_open_tree, AT_FDCWD, "/",
                                 OPEN_TREE_CLOEXEC);
+    struct mount_attr mount_attributes = {0};
+    errno = 0;
     if (mount_tree_fd < 0 ||
         fcntl(mount_tree_fd, F_GETFD) != FD_CLOEXEC ||
+        syscall(SYS_mount_setattr, AT_FDCWD, "/", AT_RECURSIVE,
+                &mount_attributes, sizeof(mount_attributes)) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_move_mount, mount_tree_fd, NULL, AT_FDCWD, "/",
+                MOVE_MOUNT_F_EMPTY_PATH) != -1 ||
+        errno != EROFS ||
         close(mount_tree_fd) != 0) {
         return 635;
     }
@@ -4522,8 +4530,7 @@ int main(void) {
         SYS_move_pages, SYS_landlock_create_ruleset, SYS_landlock_add_rule,
         SYS_landlock_restrict_self, SYS_listns,
         SYS_lsm_set_self_attr,
-        SYS_map_shadow_stack, SYS_mount_setattr, SYS_move_mount,
-        SYS_open_tree_attr,
+        SYS_map_shadow_stack, SYS_open_tree_attr,
         SYS_uprobe, SYS_uretprobe, SYS_userfaultfd,
     };
     for (size_t index = 0;
