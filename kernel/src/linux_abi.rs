@@ -2298,6 +2298,48 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
     let Some(pid) = proc::current_process() else {
         return SyscallOutcome::value(-i64::from(CompatErrno::NoSys as i32));
     };
+    let mut seccomp_data = [0u8; compat_core::seccomp::SECCOMP_DATA_BYTES];
+    seccomp_data[..4].copy_from_slice(&(a.id as u32).to_le_bytes());
+    seccomp_data[4..8].copy_from_slice(&0xc000_003eu32.to_le_bytes());
+    let instruction_pointer = a.user_ip.map(|ip| ip.0).unwrap_or(0);
+    seccomp_data[8..16].copy_from_slice(&instruction_pointer.to_le_bytes());
+    for (index, argument) in a.args.iter().enumerate() {
+        let offset = 16 + index * 8;
+        seccomp_data[offset..offset + 8].copy_from_slice(&argument.to_le_bytes());
+    }
+    match proc::linux_seccomp_action(pid, &seccomp_data) {
+        compat_core::seccomp::SeccompAction::Allow => {}
+        compat_core::seccomp::SeccompAction::Log => {
+            crate::kprintln!("[JSR-LINUX-SECCOMP] action=log nr={}", a.id);
+        }
+        compat_core::seccomp::SeccompAction::Errno(error) => {
+            return SyscallOutcome::value(-i64::from(error));
+        }
+        compat_core::seccomp::SeccompAction::Trap => {
+            let _ = queue_process_signal(pid, 31, 0, 128);
+            let value = -i64::from(CompatErrno::NoSys as i32);
+            let redirect = deliver_pending_signal(pid, a, a.user_ip, value);
+            if proc::current_exiting() {
+                proc::thread_exit(128 + 31, "linux seccomp trap");
+            }
+            return SyscallOutcome {
+                value,
+                redirect,
+                exec_redirect: None,
+            };
+        }
+        compat_core::seccomp::SeccompAction::KillThread => {
+            proc::thread_exit(128 + 31, "linux seccomp kill thread");
+        }
+        compat_core::seccomp::SeccompAction::KillProcess => {
+            let _ = proc::begin_exit(pid, 128 + 31);
+            proc::thread_exit(128 + 31, "linux seccomp kill process");
+        }
+        compat_core::seccomp::SeccompAction::Trace(_)
+        | compat_core::seccomp::SeccompAction::UserNotify => {
+            return SyscallOutcome::value(-i64::from(CompatErrno::NoSys as i32));
+        }
+    }
     let dispatched = dispatch(SyscallRequest {
         number: a.id,
         args: a.args,
@@ -2603,6 +2645,7 @@ fn execute(
         LinuxSyscall::LookupDcookie => -(CompatErrno::NoEntry as i32 as i64),
         LinuxSyscall::Listmount => compat_result(linux_listmount(pid, call.args)),
         LinuxSyscall::Statmount => compat_result(linux_statmount(pid, call.args)),
+        LinuxSyscall::Seccomp => compat_result(linux_seccomp(pid, call.args)),
         LinuxSyscall::AddKey
         | LinuxSyscall::RequestKey
         | LinuxSyscall::Keyctl
@@ -2640,7 +2683,6 @@ fn execute(
         | LinuxSyscall::PkeyMprotect
         | LinuxSyscall::ProcessMadvise
         | LinuxSyscall::ProcessMrelease
-        | LinuxSyscall::Seccomp
         | LinuxSyscall::Uprobe
         | LinuxSyscall::Uretprobe
         | LinuxSyscall::Userfaultfd => -(CompatErrno::NotSupported as i32 as i64),
@@ -6012,6 +6054,8 @@ fn linux_getrandom(args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn linux_prctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const PR_SET_NAME: u64 = 15;
     const PR_GET_NAME: u64 = 16;
+    const PR_SET_NO_NEW_PRIVS: u64 = 38;
+    const PR_GET_NO_NEW_PRIVS: u64 = 39;
     let (task, _) = sched::current();
     match args[0] {
         PR_SET_NAME => {
@@ -6047,6 +6091,128 @@ fn linux_prctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 .map(|entry| entry.name)
                 .ok_or(CompatErrno::NoProcess)?;
             copy_to_user(args[1], &name, name.len()).map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        }
+        PR_SET_NO_NEW_PRIVS => {
+            if args[1] != 1 || args[2] != 0 || args[3] != 0 || args[4] != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            if proc::linux_set_no_new_privs(pid) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::NoProcess)
+            }
+        }
+        PR_GET_NO_NEW_PRIVS => Ok(u64::from(
+            proc::linux_no_new_privs(pid).ok_or(CompatErrno::NoProcess)?,
+        )),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+/// Implements `seccomp(2)` filter installation and introspection.
+fn linux_seccomp(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    use compat_core::seccomp::{
+        SeccompAction, SeccompInsn, MAX_FILTER_INSNS,
+    };
+
+    const SECCOMP_SET_MODE_STRICT: u64 = 0;
+    const SECCOMP_SET_MODE_FILTER: u64 = 1;
+    const SECCOMP_GET_ACTION_AVAIL: u64 = 2;
+    const SECCOMP_GET_NOTIF_SIZES: u64 = 3;
+    const FILTER_FLAG_TSYNC: u64 = 1;
+    const FILTER_FLAG_LOG: u64 = 2;
+    const FILTER_FLAG_SPEC_ALLOW: u64 = 4;
+    const FILTER_FLAG_NEW_LISTENER: u64 = 8;
+    const FILTER_FLAG_TSYNC_ESRCH: u64 = 16;
+    const FILTER_FLAG_WAIT_KILLABLE_RECV: u64 = 32;
+    let operation = args[0];
+    match operation {
+        SECCOMP_SET_MODE_STRICT => {
+            if args[1] != 0 || args[2] != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            if !proc::linux_no_new_privs(pid).ok_or(CompatErrno::NoProcess)? {
+                return Err(CompatErrno::Access);
+            }
+            if proc::linux_set_seccomp_strict(pid) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::NoProcess)
+            }
+        }
+        SECCOMP_SET_MODE_FILTER => {
+            let flags = args[1];
+            if flags
+                & !(FILTER_FLAG_TSYNC
+                    | FILTER_FLAG_LOG
+                    | FILTER_FLAG_SPEC_ALLOW
+                    | FILTER_FLAG_TSYNC_ESRCH)
+                != 0
+            {
+                return Err(if flags & (FILTER_FLAG_NEW_LISTENER | FILTER_FLAG_WAIT_KILLABLE_RECV) != 0
+                {
+                    CompatErrno::NotSupported
+                } else {
+                    CompatErrno::Invalid
+                });
+            }
+            if !proc::linux_no_new_privs(pid).ok_or(CompatErrno::NoProcess)? {
+                return Err(CompatErrno::Access);
+            }
+            let mut program = [0u8; 16];
+            copy_from_user(&mut program, args[2], 16).map_err(|_| CompatErrno::Fault)?;
+            let length = usize::from(u16::from_le_bytes(program[..2].try_into().unwrap()));
+            if length == 0 || length > MAX_FILTER_INSNS {
+                return Err(CompatErrno::Invalid);
+            }
+            let filter_pointer = u64::from_le_bytes(program[8..16].try_into().unwrap());
+            let bytes = length.checked_mul(8).ok_or(CompatErrno::Invalid)?;
+            let mut raw = alloc::vec![0u8; bytes];
+            copy_from_user(&mut raw, filter_pointer, bytes).map_err(|_| CompatErrno::Fault)?;
+            let mut filter = alloc::vec::Vec::new();
+            filter
+                .try_reserve_exact(length)
+                .map_err(|_| CompatErrno::NoMemory)?;
+            for instruction in raw.chunks_exact(8) {
+                filter.push(SeccompInsn {
+                    code: u16::from_le_bytes(instruction[..2].try_into().unwrap()),
+                    jt: instruction[2],
+                    jf: instruction[3],
+                    k: u32::from_le_bytes(instruction[4..8].try_into().unwrap()),
+                });
+            }
+            if compat_core::seccomp::validate(&filter).is_err() {
+                return Err(CompatErrno::Invalid);
+            }
+            if proc::linux_install_seccomp_filter(pid, filter) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::NoSpace)
+            }
+        }
+        SECCOMP_GET_ACTION_AVAIL => {
+            if args[1] != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            let mut raw = [0u8; 4];
+            copy_from_user(&mut raw, args[2], 4).map_err(|_| CompatErrno::Fault)?;
+            if SeccompAction::action_available(u32::from_le_bytes(raw)) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::Invalid)
+            }
+        }
+        SECCOMP_GET_NOTIF_SIZES => {
+            if args[1] != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            let sizes = [80u16, 24, 64];
+            let mut output = [0u8; 6];
+            for (index, size) in sizes.iter().enumerate() {
+                output[index * 2..index * 2 + 2].copy_from_slice(&size.to_le_bytes());
+            }
+            copy_to_user(args[2], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
             Ok(0)
         }
         _ => Err(CompatErrno::Invalid),

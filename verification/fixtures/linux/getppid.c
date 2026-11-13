@@ -10,6 +10,7 @@
 #include <linux/capability.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-heap.h>
+#include <linux/filter.h>
 #include <linux/futex.h>
 #include <linux/io_uring.h>
 #include <linux/ioprio.h>
@@ -17,6 +18,7 @@
 #include <linux/membarrier.h>
 #include <linux/mount.h>
 #include <linux/sched/types.h>
+#include <linux/seccomp.h>
 #include <linux/sync_file.h>
 #include <limits.h>
 #include <mqueue.h>
@@ -4430,7 +4432,7 @@ int main(void) {
         SYS_name_to_handle_at, SYS_open_by_handle_at, SYS_open_tree,
         SYS_open_tree_attr, SYS_pkey_alloc, SYS_pkey_free,
         SYS_pkey_mprotect, SYS_process_madvise, SYS_process_mrelease,
-        SYS_seccomp, SYS_uprobe, SYS_uretprobe, SYS_userfaultfd,
+        SYS_uprobe, SYS_uretprobe, SYS_userfaultfd,
     };
     for (size_t index = 0;
          index < sizeof(unsupported_features) / sizeof(unsupported_features[0]);
@@ -5618,6 +5620,50 @@ int main(void) {
     if (waitpid(session_child, &child_status, 0) != session_child ||
         !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
         return 348;
+    }
+    uint32_t seccomp_errno = SECCOMP_RET_ERRNO | EPERM;
+    uint32_t invalid_seccomp_action = 0x12340000U;
+    struct seccomp_notif_sizes seccomp_sizes = {0};
+    if (syscall(SYS_seccomp, SECCOMP_GET_ACTION_AVAIL, 0,
+                &seccomp_errno) != 0 ||
+        syscall(SYS_seccomp, SECCOMP_GET_NOTIF_SIZES, 0,
+                &seccomp_sizes) != 0 ||
+        seccomp_sizes.seccomp_notif == 0 ||
+        seccomp_sizes.seccomp_notif_resp == 0 ||
+        seccomp_sizes.seccomp_data != 64) {
+        return 610;
+    }
+    errno = 0;
+    if (syscall(SYS_seccomp, SECCOMP_GET_ACTION_AVAIL, 0,
+                &invalid_seccomp_action) != -1 ||
+        errno != EINVAL) {
+        return 611;
+    }
+    struct sock_filter seccomp_code[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_getcwd, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog seccomp_program = {
+        .len = sizeof(seccomp_code) / sizeof(seccomp_code[0]),
+        .filter = seccomp_code,
+    };
+    errno = 0;
+    if (syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0,
+                &seccomp_program) != -1 || errno != EACCES ||
+        prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 0 ||
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
+        prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1 ||
+        syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0,
+                &seccomp_program) != 0) {
+        return 612;
+    }
+    char seccomp_cwd[64];
+    errno = 0;
+    if (syscall(SYS_getcwd, seccomp_cwd, sizeof(seccomp_cwd)) != -1 ||
+        errno != EPERM) {
+        return 613;
     }
     close(fd);
     printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld wall=%lld dirent=6 exec_meta=true fork=true\n",

@@ -57,6 +57,8 @@ use crate::{arch, kprintln, sched};
 #[cfg(feature = "linux-abi")]
 use compat_core::fd::FdTable;
 #[cfg(feature = "linux-abi")]
+use compat_core::seccomp::{evaluate as evaluate_seccomp, SeccompAction, SeccompInsn};
+#[cfg(feature = "linux-abi")]
 use compat_core::syscall::{LinuxSyscall, LinuxSyscallSet};
 
 pub mod spawn;
@@ -148,6 +150,9 @@ struct LinuxProcessState {
     ioprio: u32,
     personality: u32,
     aio_contexts: Vec<LinuxAioContext>,
+    seccomp_filters: Vec<Vec<SeccompInsn>>,
+    seccomp_strict: bool,
+    no_new_privs: bool,
     mappings: Vec<LinuxMapping>,
     sealed_ranges: Vec<(u64, u64)>,
     pipes: Vec<LinuxPipeHandle>,
@@ -4352,6 +4357,95 @@ pub(crate) fn set_linux_ioprio(pid: ObjId, value: u32) -> bool {
     .is_ok()
 }
 
+/// Records the irreversible Linux `no_new_privs` process flag.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_set_no_new_privs(pid: ObjId) -> bool {
+    with_proc(pid, |process| {
+        process
+            .linux
+            .as_mut()
+            .ok_or(ProcError::Exited)?
+            .no_new_privs = true;
+        Ok(())
+    })
+    .is_ok()
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_no_new_privs(pid: ObjId) -> Option<bool> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => Some(p.linux.as_ref()?.no_new_privs),
+        _ => None,
+    })
+}
+
+/// Enables Linux seccomp strict mode for the compatibility process.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_set_seccomp_strict(pid: ObjId) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if !linux.no_new_privs {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux.seccomp_strict = true;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Appends one prevalidated filter to the process's ordered seccomp stack.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_seccomp_filter(pid: ObjId, filter: Vec<SeccompInsn>) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if !linux.no_new_privs
+            || linux.seccomp_filters.len() >= compat_core::seccomp::MAX_FILTER_DEPTH
+        {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .seccomp_filters
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.seccomp_filters.push(filter);
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Evaluates strict mode and every installed filter for one syscall.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_seccomp_action(
+    pid: ObjId,
+    data: &[u8; compat_core::seccomp::SECCOMP_DATA_BYTES],
+) -> SeccompAction {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => {
+            let Some(linux) = p.linux.as_ref() else {
+                return SeccompAction::Allow;
+            };
+            if linux.seccomp_strict {
+                let number = i32::from_le_bytes(data[..4].try_into().unwrap());
+                return if matches!(number, 0 | 1 | 15 | 60 | 231) {
+                    SeccompAction::Allow
+                } else {
+                    SeccompAction::KillProcess
+                };
+            }
+            linux
+                .seccomp_filters
+                .iter()
+                .fold(SeccompAction::Allow, |combined, filter| {
+                    evaluate_seccomp(filter, data)
+                        .map_or(SeccompAction::KillProcess, |action| {
+                            combined.combine(action)
+                        })
+                })
+        }
+        _ => SeccompAction::Allow,
+    })
+}
+
 /// Returns the Linux execution personality.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_personality(pid: ObjId) -> Option<u32> {
@@ -4748,6 +4842,9 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         ioprio: (2 << 13) | 4,
         personality: 0,
         aio_contexts: Vec::new(),
+        seccomp_filters: Vec::new(),
+        seccomp_strict: false,
+        no_new_privs: false,
         mappings: Vec::new(),
         sealed_ranges: Vec::new(),
         pipes: Vec::new(),

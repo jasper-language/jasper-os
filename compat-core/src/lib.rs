@@ -13,6 +13,7 @@ pub mod fd;
 pub mod native;
 pub mod pipe;
 pub mod process;
+pub mod seccomp;
 pub mod syscall;
 pub mod utsname;
 
@@ -31,6 +32,10 @@ pub use pipe::{
     PIPE_CAPACITY, UNIX_SOCKET_NAME_MAX,
 };
 pub use process::{LinuxPid, ProcessEntry, ProcessTable, ProcessTableError, ProcessToken};
+pub use seccomp::{
+    evaluate as evaluate_seccomp_filter, validate as validate_seccomp_filter, SeccompAction,
+    SeccompInsn, SECCOMP_DATA_BYTES, MAX_FILTER_DEPTH, MAX_FILTER_INSNS,
+};
 pub use syscall::{
     compat_result, dispatch, CompatErrno, LinuxCall, LinuxSyscall, LinuxSyscallSet,
     SyscallDispatch, SyscallRequest,
