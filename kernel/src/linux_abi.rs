@@ -91,6 +91,20 @@ struct FutexWord {
     waiters: [FutexWaiter; MAX_FUTEX_WAITERS],
 }
 
+const MAX_FLOCK_LOCKS: usize = 64;
+
+#[derive(Clone, Copy)]
+struct FlockLock {
+    backing: u64,
+    owner: u64,
+    exclusive: bool,
+}
+
+#[derive(Clone, Copy)]
+struct FlockWaiter {
+    task: crate::task::TaskId,
+}
+
 #[derive(Clone, Copy)]
 struct ProcessSignalSet {
     process: ObjId,
@@ -101,6 +115,8 @@ struct CompatState {
     threads: [Option<LinuxThread>; MAX_LINUX_THREADS],
     futexes: [Option<FutexWord>; MAX_FUTEX_WORDS],
     process_signals: [Option<ProcessSignalSet>; MAX_PROCESS_SIGNAL_SETS],
+    flock_locks: [Option<FlockLock>; MAX_FLOCK_LOCKS],
+    flock_waiters: [Option<FlockWaiter>; MAX_FLOCK_LOCKS],
 }
 
 impl CompatState {
@@ -109,6 +125,8 @@ impl CompatState {
             threads: [None; MAX_LINUX_THREADS],
             futexes: [None; MAX_FUTEX_WORDS],
             process_signals: [None; MAX_PROCESS_SIGNAL_SETS],
+            flock_locks: [None; MAX_FLOCK_LOCKS],
+            flock_waiters: [None; MAX_FLOCK_LOCKS],
         }
     }
 }
@@ -1731,6 +1749,7 @@ fn execute(
         LinuxSyscall::NewFstatAt => compat_result(linux_newfstatat(pid, call.args)),
         LinuxSyscall::Statx => compat_result(linux_statx(pid, call.args)),
         LinuxSyscall::Fcntl => compat_result(linux_fcntl(pid, call.args)),
+        LinuxSyscall::Flock => compat_result(linux_flock(pid, call.args)),
         LinuxSyscall::Poll => compat_result(linux_poll(pid, call.args)),
         LinuxSyscall::PPoll => compat_result(linux_ppoll(pid, call.args)),
         LinuxSyscall::Select => compat_result(linux_select(pid, call.args, false)),
@@ -6130,6 +6149,155 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 /// Implements `fcntl(2)` descriptor flag operations.
 ///
 /// 当前支持 `F_GETFD` 与 `F_SETFD`；未知命令和未知 fd 标志失败关闭。
+fn linux_flock(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const LOCK_SH: u64 = 0x1;
+    const LOCK_EX: u64 = 0x2;
+    const LOCK_NB: u64 = 0x4;
+    const LOCK_UN: u64 = 0x8;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let operation = args[1];
+    if operation & !(LOCK_SH | LOCK_EX | LOCK_NB | LOCK_UN) != 0
+        || [LOCK_SH, LOCK_EX, LOCK_UN]
+            .iter()
+            .filter(|flag| operation & **flag != 0)
+            .count()
+            != 1
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::File
+        && (entry.kind != compat_core::fd::CompatKind::Device
+            || proc::linux_ashmem_state(pid, entry.handle).is_none())
+    {
+        return Err(CompatErrno::BadFd);
+    }
+    let (backing, owner) = proc::linux_file_lock_key(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let exclusive = operation & LOCK_EX != 0;
+    let task = sched::current().0;
+    let mut registered = false;
+    loop {
+        let mut wake = [crate::task::TaskId(0); MAX_FLOCK_LOCKS];
+        let mut wake_count = 0usize;
+        let acquired = {
+            let mut state = COMPAT.lock();
+            let conflict = state.flock_locks.iter().flatten().any(|lock| {
+                lock.backing == backing
+                    && lock.owner != owner
+                    && (exclusive || lock.exclusive)
+            });
+            if operation & LOCK_UN != 0 {
+                state
+                    .flock_locks
+                    .iter_mut()
+                    .filter(|lock| {
+                        lock.is_some_and(|lock| {
+                            lock.backing == backing && lock.owner == owner
+                        })
+                    })
+                    .for_each(|lock| *lock = None);
+                for waiter in state.flock_waiters.iter_mut().flatten() {
+                    wake[wake_count] = waiter.task;
+                    wake_count += 1;
+                }
+                state.flock_waiters.fill(None);
+                drop(state);
+                for task in wake[..wake_count].iter().copied() {
+                    sched::wake(task);
+                }
+                return Ok(0);
+            }
+            if !conflict {
+                state
+                    .flock_locks
+                    .iter_mut()
+                    .filter(|lock| {
+                        lock.is_some_and(|lock| {
+                            lock.backing == backing && lock.owner == owner
+                        })
+                    })
+                    .for_each(|lock| *lock = None);
+                let Some(slot) = state.flock_locks.iter().position(Option::is_none) else {
+                    return Err(CompatErrno::NoSpace);
+                };
+                state.flock_locks[slot] = Some(FlockLock {
+                    backing,
+                    owner,
+                    exclusive,
+                });
+                if registered {
+                    if let Some(index) = state
+                        .flock_waiters
+                        .iter()
+                        .position(|waiter| waiter.is_some_and(|waiter| waiter.task == task))
+                    {
+                        state.flock_waiters[index] = None;
+                    }
+                }
+                true
+            } else {
+                if operation & LOCK_NB != 0 {
+                    return Err(CompatErrno::TryAgain);
+                }
+                if !registered {
+                    let Some(slot) = state.flock_waiters.iter().position(Option::is_none) else {
+                        return Err(CompatErrno::NoSpace);
+                    };
+                    state.flock_waiters[slot] = Some(FlockWaiter { task });
+                    registered = true;
+                }
+                false
+            }
+        };
+        if acquired {
+            return Ok(0);
+        }
+        if proc::current_exiting() || current_signal_pending(pid) {
+            if registered {
+                if let Some(index) = COMPAT
+                    .lock()
+                    .flock_waiters
+                    .iter()
+                    .position(|waiter| waiter.is_some_and(|waiter| waiter.task == task))
+                {
+                    COMPAT.lock().flock_waiters[index] = None;
+                }
+            }
+            return Err(CompatErrno::Interrupted);
+        }
+        sched::pause();
+    }
+}
+
+/// Releases flock state after the final descriptor of one open-file
+/// description closes and wakes every blocked flock waiter.
+pub(crate) fn release_flock_description(owner: u64) {
+    let mut tasks = [crate::task::TaskId(0); MAX_FLOCK_LOCKS];
+    let mut count = 0usize;
+    let mut state = COMPAT.lock();
+    state
+        .flock_locks
+        .iter_mut()
+        .filter(|lock| lock.is_some_and(|lock| lock.owner == owner))
+        .for_each(|lock| *lock = None);
+    if state
+        .flock_locks
+        .iter()
+        .any(|lock| lock.is_some_and(|lock| lock.owner == owner))
+    {
+        return;
+    }
+    for waiter in state.flock_waiters.iter_mut().flatten() {
+        tasks[count] = waiter.task;
+        count += 1;
+    }
+    state.flock_waiters.fill(None);
+    drop(state);
+    for task in tasks[..count].iter().copied() {
+        sched::wake(task);
+    }
+}
+
 fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const F_DUPFD: u64 = 0;
     const F_DUPFD_CLOEXEC: u64 = 1030;

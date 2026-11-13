@@ -22,6 +22,7 @@
 #include <sys/ioctl.h>
 #include <sys/eventfd.h>
 #include <sys/epoll.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/random.h>
 #include <sys/resource.h>
@@ -1576,6 +1577,31 @@ int main(void) {
         ion_share.fd < 0) {
         return 157;
     }
+    struct jasper_ion_fd_data ion_share_other = {
+        .handle = ion_allocation.handle,
+        .fd = -1,
+    };
+    if (ioctl(ion_fd, JASPER_ION_IOC_SHARE, &ion_share_other) != 0 ||
+        ion_share_other.fd < 0) {
+        return 321;
+    }
+    int ion_duplicate = dup(ion_share.fd);
+    if (ion_duplicate < 0 || flock(ion_share.fd, LOCK_EX) != 0 ||
+        flock(ion_duplicate, LOCK_EX | LOCK_NB) != 0 ||
+        flock(ion_share.fd, LOCK_UN) != 0) {
+        return 322;
+    }
+    if (flock(ion_share.fd, LOCK_EX) != 0) {
+        return 323;
+    }
+    errno = 0;
+    if (flock(ion_share_other.fd, LOCK_EX | LOCK_NB) != -1 ||
+        errno != EWOULDBLOCK || flock(ion_share.fd, LOCK_UN) != 0 ||
+        flock(ion_share_other.fd, LOCK_EX | LOCK_NB) != 0 ||
+        flock(ion_share_other.fd, LOCK_UN) != 0 ||
+        close(ion_duplicate) != 0) {
+        return 324;
+    }
     struct stat ion_stat;
     struct statfs ion_statfs;
     if (fstat(ion_share.fd, &ion_stat) != 0 ||
@@ -1634,6 +1660,7 @@ int main(void) {
     if (ioctl(ion_fd, JASPER_ION_IOC_FREE, &ion_free) != 0 ||
         munmap(ion_first, ion_allocation.len) != 0 ||
         close(ion_share.fd) != 0 ||
+        close(ion_share_other.fd) != 0 ||
         close(ion_share_imported.fd) != 0 ||
         close(ion_fd) != 0) {
         return 164;

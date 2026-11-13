@@ -3188,6 +3188,26 @@ pub(crate) fn set_linux_fd_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
     .is_ok()
 }
 
+/// Returns `(backing identity, open-file-description identity)` for a flock.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_file_lock_key(pid: ObjId, fd: u32) -> Option<(u64, u64)> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => {
+            let linux = process.linux.as_ref()?;
+            let entry = linux.fds.get_fd(fd)?;
+            let description = linux.fds.description_identity(fd)?;
+            let backing = linux
+                .ashmem
+                .iter()
+                .find(|ashmem| ashmem.handle == entry.handle)
+                .map(|ashmem| ashmem.buffer.id)
+                .unwrap_or(entry.handle);
+            Some((backing, description))
+        }
+        _ => None,
+    })
+}
+
 /// Returns `(handle, next_entry)` for an open compatibility directory.
 ///
 /// 返回已打开兼容目录的虚拟句柄与下一个目录项序号。
@@ -3233,7 +3253,13 @@ pub(crate) fn linux_close_fd(pid: ObjId, fd: u32) -> bool {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
         let handle = linux.fds.get_fd(fd).map(|entry| entry.handle);
+        let description = linux.fds.description_identity(fd);
         linux.fds.close_fd(fd).map_err(|_| ProcError::NoTaskSlot)?;
+        if let Some(description) = description {
+            if linux.fds.description_ref_count(description) == 0 {
+                crate::linux_abi::release_flock_description(description);
+            }
+        }
         if let Some(handle) = handle {
             release_unreferenced_pipe(linux, handle);
         }
@@ -3260,10 +3286,17 @@ pub(crate) fn linux_close_range(
             linux.fds = fds;
         }
         let mut released = Vec::new();
+        let mut descriptions = Vec::new();
         for fd in first..=last.min(63) {
             if close_on_exec {
                 let _ = linux.fds.set_close_on_exec_fd(fd, true);
             } else if let Some(handle) = linux.fds.get_fd(fd).map(|entry| entry.handle) {
+                if let Some(description) = linux.fds.description_identity(fd) {
+                    if !descriptions.contains(&description) {
+                        descriptions.try_reserve(1).map_err(|_| ProcError::NoTaskSlot)?;
+                        descriptions.push(description);
+                    }
+                }
                 if linux.fds.close_fd(fd).is_ok() {
                     released.push(handle);
                 }
@@ -3271,6 +3304,11 @@ pub(crate) fn linux_close_range(
         }
         for handle in released {
             release_unreferenced_pipe(linux, handle);
+        }
+        for description in descriptions {
+            if linux.fds.description_ref_count(description) == 0 {
+                crate::linux_abi::release_flock_description(description);
+            }
         }
         Ok(())
     })

@@ -267,6 +267,26 @@ impl<const N: usize> FdTable<N> {
         true
     }
 
+    /// Returns a stable identity for the shared open-file description.
+    pub fn description_identity(&self, fd: u32) -> Option<u64> {
+        let entry = self.get_fd(fd)?;
+        if entry.fd != fd {
+            return None;
+        }
+        self.open_files[fd as usize]
+            .as_ref()
+            .map(|description| Arc::as_ptr(description) as usize as u64)
+    }
+
+    /// Counts descriptors sharing one open-file description.
+    pub fn description_ref_count(&self, identity: u64) -> usize {
+        self.open_files
+            .iter()
+            .flatten()
+            .filter(|description| Arc::as_ptr(description) as usize as u64 == identity)
+            .count()
+    }
+
     /// Returns the shared Linux status flags for the current fd generation.
     pub fn fd_status_flags(&self, fd: u32) -> Option<u32> {
         let _ = self.get_fd(fd)?;
