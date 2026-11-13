@@ -1158,8 +1158,8 @@ fn linux_tgkill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
             .then_some(())
             .ok_or(CompatErrno::NoProcess);
     }
-    if matches!(signal, 9 | 19) {
-        return Err(CompatErrno::Invalid);
+    if signal == 19 {
+        return Err(CompatErrno::NotSupported);
     }
     if queue_thread_signal(process, tid, signal, tgid, -6) {
         Ok(())
@@ -1186,8 +1186,11 @@ fn linux_kill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     if signal == 0 {
         return Ok(());
     }
-    if signal > 64 || matches!(signal, 9 | 19) {
+    if signal > 64 {
         return Err(CompatErrno::Invalid);
+    }
+    if signal == 19 {
+        return Err(CompatErrno::NotSupported);
     }
     let sender_pid = proc::linux_pid(process).ok_or(CompatErrno::NoProcess)?;
     if queue_process_signal(target, signal, sender_pid, 0) {
@@ -9606,7 +9609,7 @@ fn linux_rt_sigaction(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let old = proc::linux_signal_action(pid, signal).ok_or(CompatErrno::NoSys)?;
     if args[1] != 0 {
         if args[0] == SIGKILL || args[0] == SIGSTOP {
-            return Err(CompatErrno::Perm);
+            return Err(CompatErrno::Invalid);
         }
         let mut action = [0u8; SIGACTION_BYTES];
         copy_from_user(&mut action, args[1], SIGACTION_BYTES).map_err(|_| CompatErrno::Fault)?;

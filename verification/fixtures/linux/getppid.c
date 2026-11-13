@@ -3537,6 +3537,30 @@ int main(void) {
         errno != EINVAL) {
         return 467;
     }
+    struct sigaction protected_action = {.sa_handler = SIG_IGN};
+    errno = 0;
+    if (syscall(SYS_rt_sigaction, SIGKILL, &protected_action,
+                NULL, 8) != -1 ||
+        errno != EINVAL) {
+        return 468;
+    }
+    errno = 0;
+    if (kill(getpid(), SIGSTOP) != -1 || errno != EOPNOTSUPP) {
+        return 469;
+    }
+    pid_t kill_child = fork();
+    if (kill_child < 0) {
+        return 470;
+    }
+    if (kill_child == 0) {
+        pause();
+        _exit(1);
+    }
+    int kill_status = 0;
+    if (kill(kill_child, SIGKILL) != 0 ||
+        waitpid(kill_child, &kill_status, 0) != kill_child) {
+        return 471;
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);
