@@ -38,6 +38,9 @@ struct LinuxThread {
     process: ObjId,
     task: crate::task::TaskId,
     tid: u32,
+    /// Linux task-command name exposed by `PR_GET_NAME`.
+    /// 通过 `PR_GET_NAME` 暴露的 Linux 任务命令名。
+    name: [u8; 16],
     clear_child_tid: u64,
     robust_list: u64,
     robust_list_len: u64,
@@ -56,6 +59,15 @@ struct LinuxThread {
     altstack_flags: u32,
     altstack_depth: u8,
     altstack_disarm_depth: u8,
+}
+
+fn linux_comm_from_task_name(task_name: &str) -> [u8; 16] {
+    let base = task_name.rsplit('/').next().unwrap_or(task_name);
+    let mut name = [0u8; 16];
+    for (slot, byte) in name.iter_mut().take(15).zip(base.bytes()) {
+        *slot = byte;
+    }
+    name
 }
 
 #[derive(Clone, Copy)]
@@ -229,15 +241,18 @@ pub(crate) fn register_linux_thread(
     let Some(pid) = proc::linux_pid(process) else {
         return false;
     };
+    let (current_task, current_name) = sched::current();
     let tid = {
         let mut state = COMPAT.lock();
-        let inherited_mask = state
+        let inherited = state
             .threads
             .iter()
             .flatten()
-            .find(|entry| entry.process == process && entry.task == task)
-            .map(|entry| entry.signal_mask)
-            .unwrap_or(0);
+            .find(|entry| entry.process == process && entry.task == current_task);
+        let inherited_mask = inherited.map(|entry| entry.signal_mask).unwrap_or(0);
+        let inherited_name = inherited
+            .map(|entry| entry.name)
+            .unwrap_or_else(|| linux_comm_from_task_name(current_name));
         let has_leader = state
             .threads
             .iter()
@@ -259,6 +274,7 @@ pub(crate) fn register_linux_thread(
             process,
             task,
             tid,
+            name: inherited_name,
             clear_child_tid,
             robust_list: 0,
             robust_list_len: 0,
@@ -1773,6 +1789,7 @@ fn execute(
         LinuxSyscall::Access => compat_result(linux_access(call.args[0])),
         LinuxSyscall::FaccessAt => compat_result(linux_faccessat(pid, call.args, false)),
         LinuxSyscall::FaccessAt2 => compat_result(linux_faccessat(pid, call.args, true)),
+        LinuxSyscall::Prctl => compat_result(linux_prctl(pid, call.args)),
         LinuxSyscall::ArchPrctl => compat_result(linux_arch_prctl(call.args)),
         LinuxSyscall::ClockGettime => compat_result(linux_clock_gettime(call.args)),
         LinuxSyscall::ClockGetres => compat_result(linux_clock_getres(call.args)),
@@ -4025,6 +4042,54 @@ fn linux_getrandom(args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     copy_to_user(args[0], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(length as u64)
+}
+
+/// Implements the bounded task-name operations of `prctl(2)`.
+///
+/// 仅实现当前 Linux 任务的 `PR_SET_NAME`/`PR_GET_NAME`；名称固定为 Linux 的
+/// 16 字节任务命令名。其他 option 明确返回 EINVAL，不把未实现的安全策略当作成功。
+fn linux_prctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PR_SET_NAME: u64 = 15;
+    const PR_GET_NAME: u64 = 16;
+    let (task, _) = sched::current();
+    match args[0] {
+        PR_SET_NAME => {
+            let mut name = [0u8; 16];
+            for offset in 0..15 {
+                let address = args[1]
+                    .checked_add(offset as u64)
+                    .ok_or(CompatErrno::Fault)?;
+                let mut byte = [0u8; 1];
+                copy_from_user(&mut byte, address, 1).map_err(|_| CompatErrno::Fault)?;
+                if byte[0] == 0 {
+                    break;
+                }
+                name[offset] = byte[0];
+            }
+            let mut state = COMPAT.lock();
+            let thread = state
+                .threads
+                .iter_mut()
+                .flatten()
+                .find(|entry| entry.process == pid && entry.task == task)
+                .ok_or(CompatErrno::NoProcess)?;
+            thread.name = name;
+            Ok(0)
+        }
+        PR_GET_NAME => {
+            let name = COMPAT
+                .lock()
+                .threads
+                .iter()
+                .flatten()
+                .find(|entry| entry.process == pid && entry.task == task)
+                .map(|entry| entry.name)
+                .ok_or(CompatErrno::NoProcess)?;
+            copy_to_user(args[1], &name, name.len()).map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        }
+        _ => Err(CompatErrno::Invalid),
+    }
 }
 
 /// Implements the x86_64 `arch_prctl(2)` TLS base operation.

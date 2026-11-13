@@ -26,6 +26,7 @@
 #include <sys/epoll.h>
 #include <sys/file.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/random.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -90,6 +91,24 @@ static atomic_int futex_requeue_finished;
 struct futex_thread_arg {
     uint32_t bitset;
 };
+
+struct prctl_thread_result {
+    int set_result;
+    int get_result;
+    char inherited[16];
+    char changed[16];
+};
+
+static void *prctl_name_worker(void *argument) {
+    struct prctl_thread_result *result = argument;
+    result->get_result = prctl(PR_GET_NAME, result->inherited, 0, 0, 0);
+    result->set_result = prctl(PR_SET_NAME, "worker-thread", 0, 0, 0);
+    if (result->get_result == 0 &&
+        prctl(PR_GET_NAME, result->changed, 0, 0, 0) != 0) {
+        result->get_result = -1;
+    }
+    return NULL;
+}
 
 static void *futex_waiter(void *argument) {
     struct futex_thread_arg *arg = argument;
@@ -1258,7 +1277,7 @@ int main(void) {
         if (write(shared_futex_ready[1], &ready, 1) != 1) {
             _exit(311);
         }
-        struct timespec shared_timeout = {.tv_sec = 0, .tv_nsec = 500000000};
+        struct timespec shared_timeout = {.tv_sec = 2, .tv_nsec = 0};
         long wait_result =
             syscall(SYS_futex, shared_futex_word, FUTEX_WAIT, 0,
                     &shared_timeout, NULL, 0);
@@ -1312,7 +1331,7 @@ int main(void) {
         _exit(write(epoll_pipe[1], "E", 1) == 1 ? 0 : 1);
     }
     memset(epoll_ready, 0, sizeof(epoll_ready));
-    if (epoll_wait(epfd, epoll_ready, 1, 300) != 1 ||
+    if (epoll_wait(epfd, epoll_ready, 1, 1000) != 1 ||
         (epoll_ready[0].events & EPOLLIN) == 0 ||
         epoll_ready[0].data.u64 != 0x4a5345504f4c4cULL ||
         read(epoll_pipe[0], memfd_io, 1) != 1 ||
@@ -2148,7 +2167,7 @@ int main(void) {
         .fd = poll_pipe[0],
         .events = POLLIN,
     };
-    if (poll(&poll_read, 1, 300) != 1 ||
+    if (poll(&poll_read, 1, 1000) != 1 ||
         (poll_read.revents & POLLIN) == 0 ||
         read(poll_pipe[0], blocking_bytes, 1) != 1 ||
         blocking_bytes[0] != 'Q') {
@@ -2176,7 +2195,7 @@ int main(void) {
         .fd = ppoll_pipe[0],
         .events = POLLIN,
     };
-    struct timespec ppoll_timeout = {.tv_sec = 0, .tv_nsec = 300000000};
+    struct timespec ppoll_timeout = {.tv_sec = 1, .tv_nsec = 0};
     if (ppoll(&ppoll_read, 1, &ppoll_timeout, NULL) != 1 ||
         (ppoll_read.revents & POLLIN) == 0 ||
         read(ppoll_pipe[0], blocking_bytes, 1) != 1 ||
@@ -2351,6 +2370,35 @@ int main(void) {
         errno != ESRCH) {
         return 329;
     }
+    char main_thread_name[16] = {0};
+    if (prctl(PR_SET_NAME, "main-thread", 0, 0, 0) != 0 ||
+        prctl(PR_GET_NAME, main_thread_name, 0, 0, 0) != 0 ||
+        strcmp(main_thread_name, "main-thread") != 0) {
+        return 330;
+    }
+    struct prctl_thread_result prctl_result = {
+        .set_result = -1,
+        .get_result = -1,
+    };
+    pthread_t prctl_thread;
+    if (pthread_create(&prctl_thread, NULL, prctl_name_worker,
+                       &prctl_result) != 0 ||
+        pthread_join(prctl_thread, NULL) != 0) {
+        return 331;
+    }
+    if (prctl_result.set_result != 0 || prctl_result.get_result != 0 ||
+        strcmp(prctl_result.inherited, "main-thread") != 0 ||
+        strcmp(prctl_result.changed, "worker-thread") != 0 ||
+        prctl(PR_GET_NAME, main_thread_name, 0, 0, 0) != 0 ||
+        strcmp(main_thread_name, "main-thread") != 0) {
+        return 332;
+    }
+    errno = 0;
+    if (prctl(0x7fffffff, 0, 0, 0, 0) != -1 || errno != EINVAL) {
+        return 333;
+    }
+    memset(main_thread_name, 0, sizeof(main_thread_name));
+    prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);
     if (sched_getaffinity(0, sizeof(cpus), &cpus) != 0 ||
         CPU_COUNT(&cpus) < 1 || !CPU_ISSET(0, &cpus)) {

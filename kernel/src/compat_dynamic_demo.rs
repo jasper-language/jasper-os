@@ -157,6 +157,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Access,
         LinuxSyscall::FaccessAt,
         LinuxSyscall::FaccessAt2,
+        LinuxSyscall::Prctl,
         LinuxSyscall::ArchPrctl,
         LinuxSyscall::ClockGettime,
         LinuxSyscall::ClockGetres,
