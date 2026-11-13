@@ -4484,8 +4484,7 @@ int main(void) {
         SYS_lsm_get_self_attr, SYS_lsm_set_self_attr,
         SYS_map_shadow_stack, SYS_mount_setattr, SYS_move_mount,
         SYS_name_to_handle_at, SYS_open_by_handle_at, SYS_open_tree,
-        SYS_open_tree_attr, SYS_pkey_alloc, SYS_pkey_free,
-        SYS_pkey_mprotect,
+        SYS_open_tree_attr,
         SYS_uprobe, SYS_uretprobe, SYS_userfaultfd,
     };
     for (size_t index = 0;
@@ -5737,6 +5736,25 @@ int main(void) {
         waitpid(mrelease_child, &child_status, 0) != mrelease_child ||
         !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
         return 626;
+    }
+    errno = 0;
+    if (syscall(SYS_pkey_alloc, 0, 0) != -1 || errno != ENOSPC ||
+        syscall(SYS_pkey_alloc, 1, 0) != -1 || errno != EINVAL ||
+        syscall(SYS_pkey_free, 0) != -1 || errno != EINVAL) {
+        return 627;
+    }
+    void *pkey_memory = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (pkey_memory == MAP_FAILED ||
+        syscall(SYS_pkey_mprotect, pkey_memory, 4096,
+                PROT_READ, 0) != 0) {
+        return 628;
+    }
+    errno = 0;
+    if (syscall(SYS_pkey_mprotect, pkey_memory, 4096,
+                PROT_READ, 1) != -1 || errno != EINVAL ||
+        munmap(pkey_memory, 4096) != 0) {
+        return 629;
     }
     uint32_t seccomp_errno = SECCOMP_RET_ERRNO | EPERM;
     uint32_t invalid_seccomp_action = 0x12340000U;

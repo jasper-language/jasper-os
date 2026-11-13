@@ -2670,6 +2670,9 @@ fn execute(
         LinuxSyscall::FileGetattr => compat_result(linux_file_getattr(pid, call.args)),
         LinuxSyscall::FileSetattr => compat_result(linux_file_setattr(pid, call.args)),
         LinuxSyscall::ProcessMrelease => compat_result(linux_process_mrelease(pid, call.args)),
+        LinuxSyscall::PkeyAlloc => compat_result(linux_pkey_alloc(call.args)),
+        LinuxSyscall::PkeyFree => compat_result(linux_pkey_free(call.args)),
+        LinuxSyscall::PkeyMprotect => compat_result(linux_pkey_mprotect(pid, call.args)),
         LinuxSyscall::AddKey
         | LinuxSyscall::RequestKey
         | LinuxSyscall::Keyctl
@@ -2698,9 +2701,6 @@ fn execute(
         | LinuxSyscall::OpenByHandleAt
         | LinuxSyscall::OpenTree
         | LinuxSyscall::OpenTreeAttr
-        | LinuxSyscall::PkeyAlloc
-        | LinuxSyscall::PkeyFree
-        | LinuxSyscall::PkeyMprotect
         | LinuxSyscall::Uprobe
         | LinuxSyscall::Uretprobe
         | LinuxSyscall::Userfaultfd => -(CompatErrno::NotSupported as i32 as i64),
@@ -5108,6 +5108,26 @@ fn linux_process_mrelease(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno
             Err(CompatErrno::NoProcess)
         }
     }
+}
+
+/// Reports exhaustion because Jasper does not currently enable hardware PKU slots.
+fn linux_pkey_alloc(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[0] != 0 || args[1] & !3 != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    Err(CompatErrno::NoSpace)
+}
+
+fn linux_pkey_free(_args: [u64; 6]) -> Result<u64, CompatErrno> {
+    Err(CompatErrno::Invalid)
+}
+
+/// Key zero retains normal mprotect behavior without claiming PKU enforcement.
+fn linux_pkey_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[3] as u32 as i32 != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    linux_mprotect(pid, [args[0], args[1], args[2], 0, 0, 0])
 }
 
 /// Implements the process-scope memory barrier command subset.
