@@ -90,6 +90,8 @@ const LINUX_EPOLL_HANDLE_BASE: u64 = 0x0000_8600_0000_0000;
 const LINUX_DMA_HEAP_HANDLE_BASE: u64 = 0x0000_8700_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_SYNC_FILE_HANDLE_BASE: u64 = 0x0000_8800_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_TIMERFD_HANDLE_BASE: u64 = 0x0000_8900_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -129,6 +131,8 @@ struct LinuxProcessState {
     next_ion_user_handle: u32,
     eventfds: Vec<LinuxEventFdHandle>,
     next_eventfd_handle: u64,
+    timerfds: Vec<LinuxTimerFdHandle>,
+    next_timerfd_handle: u64,
     epolls: Vec<LinuxEpollHandle>,
     next_epoll_handle: u64,
     iourings: Vec<LinuxIoUringHandle>,
@@ -208,6 +212,22 @@ struct LinuxEventFdHandle {
 }
 
 #[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxTimerFdState {
+    pub(crate) clock: u32,
+    pub(crate) next: u64,
+    pub(crate) interval: u64,
+    pub(crate) expirations: u64,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxTimerFdHandle {
+    handle: u64,
+    state: Arc<SpinLock<LinuxTimerFdState>>,
+}
+
+#[cfg(feature = "linux-abi")]
 #[derive(Clone)]
 struct LinuxEpollHandle {
     handle: u64,
@@ -256,6 +276,7 @@ enum LinuxFdResource {
     Binder(Arc<LinuxBinderHandle>),
     IonDevice,
     EventFd(LinuxEventFdHandle),
+    TimerFd(LinuxTimerFdHandle),
     Socket {
         endpoint: Arc<compat_core::UnixSocketEndpoint>,
         listener: Option<Arc<UnixListener>>,
@@ -1375,6 +1396,15 @@ pub(crate) fn linux_capture_fd_transfer(
                         .ok_or(LinuxFdTransferError::Invalid)?;
                     LinuxFdResource::EventFd(eventfd)
                 }
+                compat_core::fd::CompatKind::Timer => {
+                    let timerfd = linux
+                        .timerfds
+                        .iter()
+                        .find(|timerfd| timerfd.handle == entry.handle)
+                        .cloned()
+                        .ok_or(LinuxFdTransferError::Invalid)?;
+                    LinuxFdResource::TimerFd(timerfd)
+                }
                 compat_core::fd::CompatKind::Device
                     if entry.handle >= LINUX_ASHMEM_HANDLE_BASE =>
                 {
@@ -1436,10 +1466,20 @@ pub(crate) fn linux_install_fd_transfer(
                 pending_binder,
                 pending_ion_device,
                 pending_eventfd,
+                pending_timerfd,
                 pending_socket,
             ) = match resource {
                 LinuxFdResource::Generic => {
-                    (description.entry.handle, None, None, None, false, None, None)
+                    (
+                        description.entry.handle,
+                        None,
+                        None,
+                        None,
+                        false,
+                        None,
+                        None,
+                        None,
+                    )
                 }
                 LinuxFdResource::Pipe(endpoint) => {
                     linux
@@ -1452,6 +1492,7 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         None,
                         false,
+                        None,
                         None,
                         None,
                     )
@@ -1469,6 +1510,7 @@ pub(crate) fn linux_install_fd_transfer(
                         false,
                         None,
                         None,
+                        None,
                     )
                 }
                 LinuxFdResource::Binder(binder) => {
@@ -1482,6 +1524,7 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         Some(binder),
                         false,
+                        None,
                         None,
                         None,
                     )
@@ -1499,6 +1542,7 @@ pub(crate) fn linux_install_fd_transfer(
                         true,
                         None,
                         None,
+                        None,
                     )
                 }
                 LinuxFdResource::EventFd(eventfd) => {
@@ -1513,6 +1557,23 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         false,
                         Some(eventfd),
+                        None,
+                        None,
+                    )
+                }
+                LinuxFdResource::TimerFd(timerfd) => {
+                    linux
+                        .timerfds
+                        .try_reserve(1)
+                        .map_err(|_| LinuxFdTransferError::NoSpace)?;
+                    (
+                        linux.next_timerfd_handle,
+                        None,
+                        None,
+                        None,
+                        false,
+                        None,
+                        Some(timerfd),
                         None,
                     )
                 }
@@ -1531,6 +1592,7 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         None,
                         false,
+                        None,
                         None,
                         Some((endpoint, listener, controls)),
                     )
@@ -1581,6 +1643,14 @@ pub(crate) fn linux_install_fd_transfer(
                 eventfd.handle = handle;
                 linux.next_eventfd_handle = next;
                 linux.eventfds.push(eventfd);
+            }
+            if let Some(mut timerfd) = pending_timerfd {
+                let next = handle
+                    .checked_add(1)
+                    .ok_or(LinuxFdTransferError::NoSpace)?;
+                timerfd.handle = handle;
+                linux.next_timerfd_handle = next;
+                linux.timerfds.push(timerfd);
             }
             if let Some((endpoint, listener, controls)) = pending_socket {
                 let next = handle
@@ -1761,6 +1831,9 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     }
     if handle >= LINUX_EVENTFD_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.eventfds.retain(|eventfd| eventfd.handle != handle);
+    }
+    if handle >= LINUX_TIMERFD_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+        linux.timerfds.retain(|timerfd| timerfd.handle != handle);
     }
     if handle >= LINUX_EPOLL_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.epolls.retain(|epoll| epoll.handle != handle);
@@ -1947,6 +2020,76 @@ pub(crate) fn linux_eventfd_state(
             .iter()
             .find(|eventfd| eventfd.handle == handle)
             .map(|eventfd| (Arc::clone(&eventfd.counter), eventfd.semaphore)),
+        _ => None,
+    })
+}
+
+/// Creates one shared timer state and installs its readable descriptor.
+/// 创建一个共享计时器状态并安装其可读描述符。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_timerfd_create(
+    pid: ObjId,
+    clock: u32,
+    close_on_exec: bool,
+    nonblocking: bool,
+) -> Option<u32> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.timerfds.len() >= 32 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .timerfds
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_timerfd_handle;
+        linux.next_timerfd_handle = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ,
+                compat_core::fd::CompatKind::Timer,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        if nonblocking
+            && !linux
+                .fds
+                .set_fd_status_flags(fd.fd(), compat_core::syscall::LINUX_O_NONBLOCK)
+        {
+            let _ = linux.fds.close(fd);
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux.timerfds.push(LinuxTimerFdHandle {
+            handle,
+            state: Arc::new(SpinLock::new(LinuxTimerFdState {
+                clock,
+                next: 0,
+                interval: 0,
+                expirations: 0,
+            })),
+        });
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Returns the shared timer state referenced by one descriptor.
+/// 返回一个描述符引用的共享计时器状态。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_timerfd_state(
+    pid: ObjId,
+    handle: u64,
+) -> Option<Arc<SpinLock<LinuxTimerFdState>>> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .timerfds
+            .iter()
+            .find(|timerfd| timerfd.handle == handle)
+            .map(|timerfd| Arc::clone(&timerfd.state)),
         _ => None,
     })
 }
@@ -3622,6 +3765,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         next_ion_user_handle: 1,
         eventfds: Vec::new(),
         next_eventfd_handle: LINUX_EVENTFD_HANDLE_BASE,
+        timerfds: Vec::new(),
+        next_timerfd_handle: LINUX_TIMERFD_HANDLE_BASE,
         epolls: Vec::new(),
         next_epoll_handle: LINUX_EPOLL_HANDLE_BASE,
         iourings: Vec::new(),
@@ -3669,6 +3814,9 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
             linux
                 .eventfds
                 .retain(|eventfd| linux.fds.handle_fd_count(eventfd.handle) != 0);
+            linux
+                .timerfds
+                .retain(|timerfd| linux.fds.handle_fd_count(timerfd.handle) != 0);
             linux.mappings.clear();
             linux.brk = crate::arch::USER_WINDOW.0 + 0x1000_0000;
             linux.mmap_next = crate::arch::USER_WINDOW.0 + 0x4000_0000;

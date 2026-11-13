@@ -13,6 +13,7 @@ pub enum CompatKind {
     Socket,
     Pipe,
     Event,
+    Timer,
     Device,
     Other,
 }

@@ -1711,6 +1711,9 @@ fn execute(
         LinuxSyscall::SocketPair => compat_result(linux_socketpair(pid, call.args)),
         LinuxSyscall::EventFd => compat_result(linux_eventfd(pid, call.args, false)),
         LinuxSyscall::EventFd2 => compat_result(linux_eventfd(pid, call.args, true)),
+        LinuxSyscall::TimerFdCreate => compat_result(linux_timerfd_create(pid, call.args)),
+        LinuxSyscall::TimerFdSettime => compat_result(linux_timerfd_settime(pid, call.args)),
+        LinuxSyscall::TimerFdGettime => compat_result(linux_timerfd_gettime(pid, call.args)),
         LinuxSyscall::SendMsg => compat_result(linux_sendmsg(pid, call.args)),
         LinuxSyscall::RecvMsg => compat_result(linux_recvmsg(pid, call.args)),
         LinuxSyscall::SendTo => compat_result(linux_sendto(pid, call.args)),
@@ -2047,6 +2050,9 @@ fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         if entry.kind == compat_core::fd::CompatKind::Event {
             return linux_eventfd_write(pid, fd, entry.handle, args[1], len);
         }
+        if entry.kind == compat_core::fd::CompatKind::Timer {
+            return Err(CompatErrno::Invalid);
+        }
         if entry.kind == compat_core::fd::CompatKind::Socket {
             if !entry.rights.contains(kernel_core::object::Rights::WRITE) {
                 return Err(CompatErrno::BadFd);
@@ -2290,6 +2296,9 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         if entry.kind == compat_core::fd::CompatKind::Event {
             return linux_eventfd_read(pid, fd, entry.handle, args[1], len);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Timer {
+            return linux_timerfd_read(pid, fd, entry.handle, args[1], len);
         }
         if entry.kind == compat_core::fd::CompatKind::Socket {
             if !entry.rights.contains(kernel_core::object::Rights::READ) {
@@ -4574,6 +4583,177 @@ fn linux_eventfd_write(
             return Err(CompatErrno::Interrupted);
         }
         sched::pause();
+    }
+}
+
+fn linux_timerfd_clock_now(clock: u32) -> Result<u64, CompatErrno> {
+    const CLOCK_REALTIME: u32 = 0;
+    const CLOCK_MONOTONIC: u32 = 1;
+    match clock {
+        CLOCK_MONOTONIC => Ok(sched::now_ns()),
+        CLOCK_REALTIME => crate::arch::wall_clock_ns().ok_or(CompatErrno::NoSys),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+fn linux_timerfd_settle(
+    state: &mut proc::LinuxTimerFdState,
+) -> Result<u64, CompatErrno> {
+    let now = linux_timerfd_clock_now(state.clock)?;
+    if state.next == 0 || now < state.next {
+        return Ok(now);
+    }
+    let expired = if state.interval == 0 {
+        1
+    } else {
+        (now - state.next) / state.interval + 1
+    };
+    state.expirations = state.expirations.saturating_add(expired);
+    state.next = if state.interval == 0 {
+        0
+    } else {
+        state
+            .next
+            .saturating_add(expired.saturating_mul(state.interval))
+    };
+    Ok(now)
+}
+
+fn linux_timerfd_create(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const TFD_NONBLOCK: u64 = 0x800;
+    const TFD_CLOEXEC: u64 = 0x80000;
+    let clock = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    if !matches!(clock, 0 | 1) {
+        return Err(CompatErrno::Invalid);
+    }
+    let flags = args[1];
+    if flags & !(TFD_NONBLOCK | TFD_CLOEXEC) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    proc::linux_timerfd_create(
+        pid,
+        clock,
+        flags & TFD_CLOEXEC != 0,
+        flags & TFD_NONBLOCK != 0,
+    )
+    .map(u64::from)
+    .ok_or(CompatErrno::NoSpace)
+}
+
+fn linux_timerfd_write_state(
+    address: u64,
+    next: u64,
+    interval: u64,
+    now: u64,
+) -> Result<(), CompatErrno> {
+    let remaining = if next == 0 {
+        0
+    } else {
+        next.saturating_sub(now)
+    };
+    let mut output = [0u8; 32];
+    output[0..8].copy_from_slice(&(interval / 1_000_000_000).to_le_bytes());
+    output[8..16].copy_from_slice(&(interval % 1_000_000_000).to_le_bytes());
+    output[16..24].copy_from_slice(&(remaining / 1_000_000_000).to_le_bytes());
+    output[24..32].copy_from_slice(&(remaining % 1_000_000_000).to_le_bytes());
+    copy_to_user(address, &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(())
+}
+
+fn linux_timerfd_settime(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const TFD_TIMER_ABSTIME: u64 = 0x1;
+    const TFD_TIMER_CANCEL_ON_SET: u64 = 0x2;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Timer {
+        return Err(CompatErrno::BadFd);
+    }
+    let flags = args[1];
+    if flags & TFD_TIMER_CANCEL_ON_SET != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    if flags & !TFD_TIMER_ABSTIME != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let interval = read_linux_timespec(args[2])?;
+    let value_address = args[2].checked_add(16).ok_or(CompatErrno::Fault)?;
+    let value = read_linux_timespec(value_address)?;
+    let state = proc::linux_timerfd_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let (now, old_next, old_interval) = {
+        let mut state = state.lock();
+        let now = linux_timerfd_settle(&mut state)?;
+        (now, state.next, state.interval)
+    };
+    if args[3] != 0 {
+        linux_timerfd_write_state(args[3], old_next, old_interval, now)?;
+    }
+    let next = if value == 0 {
+        0
+    } else if flags & TFD_TIMER_ABSTIME != 0 {
+        value
+    } else {
+        now.checked_add(value).ok_or(CompatErrno::Invalid)?
+    };
+    let mut state = state.lock();
+    state.next = next;
+    state.interval = interval;
+    state.expirations = 0;
+    Ok(0)
+}
+
+fn linux_timerfd_gettime(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Timer {
+        return Err(CompatErrno::BadFd);
+    }
+    let state = proc::linux_timerfd_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let (now, next, interval) = {
+        let mut state = state.lock();
+        let now = linux_timerfd_settle(&mut state)?;
+        (now, state.next, state.interval)
+    };
+    linux_timerfd_write_state(args[1], next, interval, now)?;
+    Ok(0)
+}
+
+fn linux_timerfd_read(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    address: u64,
+    len: usize,
+) -> Result<u64, CompatErrno> {
+    if len < 8 {
+        return Err(CompatErrno::Invalid);
+    }
+    let state = proc::linux_timerfd_state(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    loop {
+        let (value, next) = {
+            let mut state = state.lock();
+            linux_timerfd_settle(&mut state)?;
+            (core::mem::take(&mut state.expirations), state.next)
+        };
+        if value != 0 {
+            if copy_to_user(address, &value.to_le_bytes(), 8).is_err() {
+                let mut timer = state.lock();
+                timer.expirations = timer.expirations.saturating_add(value);
+                return Err(CompatErrno::Fault);
+            }
+            return Ok(8);
+        }
+        if nonblocking {
+            return Err(CompatErrno::TryAgain);
+        }
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        if next == 0 {
+            sched::pause();
+        } else {
+            sleep_until_with_signal_check(pid, next)?;
+        }
     }
 }
 
@@ -7347,6 +7527,18 @@ fn linux_epoll_readiness(
             }
             ready
         }
+        compat_core::fd::CompatKind::Timer => {
+            let state = proc::linux_timerfd_state(pid, registration.handle)?;
+            let mut state = state.lock();
+            if linux_timerfd_settle(&mut state).is_ok()
+                && requested & EPOLLIN != 0
+                && state.expirations != 0
+            {
+                EPOLLIN
+            } else {
+                0
+            }
+        }
         compat_core::fd::CompatKind::Pipe => {
             let pipe = proc::linux_pipe_endpoint(pid, registration.handle)?;
             let mut ready = 0;
@@ -7628,6 +7820,20 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                         ready |= POLLOUT;
                     }
                     ready
+                }
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::Timer => {
+                    let Some(state) = proc::linux_timerfd_state(pid, entry.handle) else {
+                        continue;
+                    };
+                    let mut state = state.lock();
+                    if linux_timerfd_settle(&mut state).is_ok()
+                        && events & POLLIN != 0
+                        && state.expirations != 0
+                    {
+                        POLLIN
+                    } else {
+                        0
+                    }
                 }
                 Some(entry) if entry.handle == proc::LINUX_CONSOLE_HANDLE => {
                     let (pending, ended, failed) = crate::terminal::input_status();

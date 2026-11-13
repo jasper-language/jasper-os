@@ -37,6 +37,7 @@
 #include <sys/sysinfo.h>
 #include <sys/time.h>
 #include <sys/timex.h>
+#include <sys/timerfd.h>
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -2445,6 +2446,80 @@ int main(void) {
     errno = 0;
     if (reboot(RB_AUTOBOOT) != -1 || errno != EPERM) {
         return 340;
+    }
+    int timer_fd = timerfd_create(CLOCK_MONOTONIC,
+                                  TFD_NONBLOCK | TFD_CLOEXEC);
+    if (timer_fd < 0 || (fcntl(timer_fd, F_GETFD) & FD_CLOEXEC) == 0) {
+        return 349;
+    }
+    struct itimerspec timer_value = {
+        .it_value = {.tv_sec = 0, .tv_nsec = 20000000},
+    };
+    if (timerfd_settime(timer_fd, 0, &timer_value, NULL) != 0) {
+        return 350;
+    }
+    struct itimerspec timer_current = {0};
+    if (timerfd_gettime(timer_fd, &timer_current) != 0 ||
+        timer_current.it_value.tv_sec != 0 ||
+        timer_current.it_value.tv_nsec == 0 ||
+        timer_current.it_value.tv_nsec > 200000000) {
+        return 359;
+    }
+    struct pollfd timer_poll = {
+        .fd = timer_fd,
+        .events = POLLIN,
+    };
+    if (poll(&timer_poll, 1, 1000) != 1 ||
+        (timer_poll.revents & POLLIN) == 0) {
+        return 351;
+    }
+    uint64_t timer_expirations = 0;
+    if (read(timer_fd, &timer_expirations, sizeof(timer_expirations)) !=
+            sizeof(timer_expirations) ||
+        timer_expirations == 0) {
+        return 352;
+    }
+    errno = 0;
+    if (read(timer_fd, &timer_expirations, sizeof(timer_expirations)) != -1 ||
+        errno != EAGAIN) {
+        return 353;
+    }
+    memset(&timer_value, 0, sizeof(timer_value));
+    if (timerfd_settime(timer_fd, 0, &timer_value, NULL) != 0 ||
+        poll(&timer_poll, 1, 20) != 0) {
+        return 354;
+    }
+    timer_value.it_interval = (struct timespec){.tv_sec = 0, .tv_nsec = 10000000};
+    timer_value.it_value = (struct timespec){.tv_sec = 0, .tv_nsec = 10000000};
+    int timer_epfd = epoll_create1(EPOLL_CLOEXEC);
+    struct epoll_event timer_interest = {
+        .events = EPOLLIN,
+        .data.u64 = 0x54494d45524644ULL,
+    };
+    struct epoll_event timer_ready = {0};
+    if (timer_epfd < 0 ||
+        epoll_ctl(timer_epfd, EPOLL_CTL_ADD, timer_fd,
+                  &timer_interest) != 0 ||
+        timerfd_settime(timer_fd, 0, &timer_value, NULL) != 0 ||
+        epoll_wait(timer_epfd, &timer_ready, 1, 1000) != 1 ||
+        (timer_ready.events & EPOLLIN) == 0 ||
+        timer_ready.data.u64 != 0x54494d45524644ULL ||
+        epoll_ctl(timer_epfd, EPOLL_CTL_DEL, timer_fd, NULL) != 0) {
+        return 355;
+    }
+    if (read(timer_fd, &timer_expirations, sizeof(timer_expirations)) !=
+        sizeof(timer_expirations)
+        || timer_expirations == 0) {
+        return 356;
+    }
+    memset(&timer_value, 0, sizeof(timer_value));
+    if (timerfd_settime(timer_fd, 0, &timer_value, NULL) != 0 ||
+        close(timer_epfd) != 0 || close(timer_fd) != 0) {
+        return 357;
+    }
+    errno = 0;
+    if (timerfd_create((clockid_t)12345, 0) != -1 || errno != EINVAL) {
+        return 358;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
