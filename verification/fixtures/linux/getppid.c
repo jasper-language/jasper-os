@@ -4331,6 +4331,27 @@ int main(void) {
     if (old_umask != 022 || umask(old_umask) != 077) {
         return 501;
     }
+    int umask_msg = msgget(0x554d5347, IPC_CREAT | IPC_EXCL | 0666);
+    int umask_sem = semget(0x554d5345, 1, IPC_CREAT | IPC_EXCL | 0666);
+    int umask_shm = shmget(0x554d5348, 4096,
+                           IPC_CREAT | IPC_EXCL | 0666);
+    struct msqid_ds umask_msg_status = {0};
+    struct semid_ds umask_sem_status = {0};
+    struct shmid_ds umask_shm_status = {0};
+    if (umask_msg < 0 || umask_sem < 0 || umask_shm < 0 ||
+        msgctl(umask_msg, IPC_STAT, &umask_msg_status) != 0 ||
+        (umask_msg_status.msg_perm.mode & 0777) != 0600 ||
+        syscall(SYS_semctl, umask_sem, IPC_STAT, 0,
+                &umask_sem_status) != 0 ||
+        (umask_sem_status.sem_perm.mode & 0777) != 0600 ||
+        shmctl(umask_shm, IPC_STAT, &umask_shm_status) != 0 ||
+        (umask_shm_status.shm_perm.mode & 0777) != 0600 ||
+        msgctl(umask_msg, IPC_RMID, NULL) != 0 ||
+        syscall(SYS_semctl, umask_sem, IPC_RMID, 0, 0) != 0 ||
+        shmctl(umask_shm, IPC_RMID, NULL) != 0 ||
+        umask(022) != 077) {
+        return 695;
+    }
     const char *mutable_parent = "/usr/lib/x86_64-linux-gnu";
     const char *new_vfs_path = "/usr/lib/x86_64-linux-gnu/jasper-new-node";
     errno = 0;

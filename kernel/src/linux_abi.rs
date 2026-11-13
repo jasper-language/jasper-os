@@ -7871,6 +7871,7 @@ fn sysv_message_queue_index(
 fn sysv_message_access(
     queue: &SysVMessageQueue,
     credentials: proc::LinuxCredentials,
+    groups: &[u32],
     write: bool,
 ) -> bool {
     if credentials.euid == 0 {
@@ -7878,7 +7879,7 @@ fn sysv_message_access(
     }
     let shift = if credentials.euid == queue.uid {
         6
-    } else if credentials.egid == queue.gid {
+    } else if credentials.egid == queue.gid || groups.contains(&queue.gid) {
         3
     } else {
         0
@@ -7960,6 +7961,8 @@ fn linux_msgget(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let application =
         crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
     let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let mode =
+        (flags & 0o777) & !proc::linux_umask(pid).ok_or(CompatErrno::NoProcess)?;
     let mut state = COMPAT.lock();
     if key != 0 {
         if let Some(queue) = state
@@ -7996,7 +7999,7 @@ fn linux_msgget(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         gid: credentials.egid,
         cuid: credentials.euid,
         cgid: credentials.egid,
-        mode: (flags & 0o777) as u16,
+        mode: mode as u16,
         qbytes: SYSV_MSGMNB,
         cbytes: 0,
         messages: alloc::collections::VecDeque::new(),
@@ -8033,6 +8036,8 @@ fn linux_msgsnd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let application =
         crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
     let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let supplementary_groups =
+        proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
     let sender_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
     let mut waited = false;
     loop {
@@ -8047,7 +8052,7 @@ fn linux_msgsnd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 },
             )?;
             let queue = &mut state.sysv_message_queues[queue_index];
-            if !sysv_message_access(queue, credentials, true) {
+            if !sysv_message_access(queue, credentials, &supplementary_groups, true) {
                 return Err(CompatErrno::Access);
             }
             if length > queue.qbytes {
@@ -8101,6 +8106,8 @@ fn linux_msgrcv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let application =
         crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
     let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let supplementary_groups =
+        proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
     let receiver_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
     let mut waited = false;
     let message = loop {
@@ -8113,7 +8120,7 @@ fn linux_msgrcv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     CompatErrno::Invalid
                 })?;
             let queue = &mut state.sysv_message_queues[queue_index];
-            if !sysv_message_access(queue, credentials, false) {
+            if !sysv_message_access(queue, credentials, &supplementary_groups, false) {
                 return Err(CompatErrno::Access);
             }
             match sysv_select_message(queue, msgtyp, flags) {
@@ -8230,6 +8237,8 @@ fn linux_msgctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let application =
         crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
     let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let supplementary_groups =
+        proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
     let update = if command == IPC_SET {
         let mut update = [0u8; SYSV_MSG_DS_BYTES];
         copy_from_user(&mut update, args[2], SYSV_MSG_DS_BYTES)
@@ -8283,7 +8292,14 @@ fn linux_msgctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             Ok(0)
         }
         IPC_STAT | MSG_STAT | MSG_STAT_ANY => {
-            if command != MSG_STAT_ANY && !sysv_message_access(queue, credentials, false) {
+            if command != MSG_STAT_ANY
+                && !sysv_message_access(
+                    queue,
+                    credentials,
+                    &supplementary_groups,
+                    false,
+                )
+            {
                 return Err(CompatErrno::Access);
             }
             let output = sysv_msg_ds_bytes(queue);
@@ -8317,6 +8333,7 @@ fn sysv_semaphore_set_index(
 fn sysv_semaphore_access(
     set: &SysVSemaphoreSet,
     credentials: proc::LinuxCredentials,
+    groups: &[u32],
     write: bool,
 ) -> bool {
     if credentials.euid == 0 {
@@ -8324,7 +8341,7 @@ fn sysv_semaphore_access(
     }
     let shift = if credentials.euid == set.uid {
         6
-    } else if credentials.egid == set.gid {
+    } else if credentials.egid == set.gid || groups.contains(&set.gid) {
         3
     } else {
         0
@@ -8616,6 +8633,8 @@ fn linux_semget(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let application =
         crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
     let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let mode =
+        (flags & 0o777) & !proc::linux_umask(pid).ok_or(CompatErrno::NoProcess)?;
     let mut state = COMPAT.lock();
     if key != 0 {
         if let Some(set) = state
@@ -8655,7 +8674,7 @@ fn linux_semget(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         gid: credentials.egid,
         cuid: credentials.euid,
         cgid: credentials.egid,
-        mode: (flags & 0o777) as u16,
+        mode: mode as u16,
         values: [0; MAX_SYSV_SEMS_PER_SET],
         nsems,
         operation_time: 0,
@@ -8685,6 +8704,8 @@ fn linux_semop(pid: ObjId, args: [u64; 6], timed: bool) -> Result<u64, CompatErr
     let application =
         crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
     let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let supplementary_groups =
+        proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
     let process_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
     let (task, _) = sched::current();
     let mut waited = false;
@@ -8702,6 +8723,7 @@ fn linux_semop(pid: ObjId, args: [u64; 6], timed: bool) -> Result<u64, CompatErr
             if !sysv_semaphore_access(
                 &state.sysv_semaphore_sets[set_index],
                 credentials,
+                &supplementary_groups,
                 requires_write,
             ) {
                 remove_sysv_semaphore_waiter(&mut state, pid, task, id);
@@ -8831,6 +8853,8 @@ fn linux_semctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let application =
         crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
     let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let supplementary_groups =
+        proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
     let update = if command == IPC_SET {
         let mut update = [0u8; SYSV_SEM_DS_BYTES];
         copy_from_user(&mut update, args[3], SYSV_SEM_DS_BYTES)
@@ -8865,7 +8889,12 @@ fn linux_semctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         Ok(semnum)
     };
     if matches!(command, GETPID | GETVAL | GETALL | GETNCNT | GETZCNT)
-        && !sysv_semaphore_access(set, credentials, false)
+        && !sysv_semaphore_access(
+            set,
+            credentials,
+            &supplementary_groups,
+            false,
+        )
     {
         return Err(CompatErrno::Access);
     }
@@ -8904,7 +8933,14 @@ fn linux_semctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             Ok(0)
         }
         IPC_STAT | SEM_STAT | SEM_STAT_ANY => {
-            if command != SEM_STAT_ANY && !sysv_semaphore_access(set, credentials, false) {
+            if command != SEM_STAT_ANY
+                && !sysv_semaphore_access(
+                    set,
+                    credentials,
+                    &supplementary_groups,
+                    false,
+                )
+            {
                 return Err(CompatErrno::Access);
             }
             let output = sysv_sem_ds_bytes(set);
@@ -8943,7 +8979,12 @@ fn linux_semctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             Ok(0)
         }
         SETVAL => {
-            if !sysv_semaphore_access(set, credentials, true) {
+            if !sysv_semaphore_access(
+                set,
+                credentials,
+                &supplementary_groups,
+                true,
+            ) {
                 return Err(CompatErrno::Access);
             }
             let semnum = require_sem(set)?;
@@ -8961,7 +9002,12 @@ fn linux_semctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             Ok(0)
         }
         SETALL => {
-            if !sysv_semaphore_access(set, credentials, true) {
+            if !sysv_semaphore_access(
+                set,
+                credentials,
+                &supplementary_groups,
+                true,
+            ) {
                 return Err(CompatErrno::Access);
             }
             let nsems = set.nsems;
@@ -9006,6 +9052,7 @@ fn sysv_shared_segment_index(
 fn sysv_shared_access(
     segment: &SysVSharedMemory,
     credentials: proc::LinuxCredentials,
+    groups: &[u32],
     write: bool,
 ) -> bool {
     if credentials.euid == 0 {
@@ -9013,7 +9060,7 @@ fn sysv_shared_access(
     }
     let shift = if credentials.euid == segment.uid {
         6
-    } else if credentials.egid == segment.gid {
+    } else if credentials.egid == segment.gid || groups.contains(&segment.gid) {
         3
     } else {
         0
@@ -9072,6 +9119,8 @@ fn linux_shmget(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let application =
         crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
     let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let mode =
+        (flags & 0o777) & !proc::linux_umask(pid).ok_or(CompatErrno::NoProcess)?;
     if key != 0 {
         let existing = {
             let state = COMPAT.lock();
@@ -9146,7 +9195,7 @@ fn linux_shmget(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         gid: credentials.egid,
         cuid: credentials.euid,
         cgid: credentials.egid,
-        mode: (flags & 0o777) as u16,
+        mode: mode as u16,
         size,
         object,
         creator_pid: current_pid,
@@ -9182,12 +9231,19 @@ fn linux_shmat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let application =
         crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
     let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let supplementary_groups =
+        proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
     let segment = {
         let state = COMPAT.lock();
         let index =
             sysv_shared_segment_index(&state, application, id).ok_or(CompatErrno::Invalid)?;
         let segment = &state.sysv_shared_segments[index];
-        if !sysv_shared_access(segment, credentials, flags & SHM_RDONLY == 0) {
+        if !sysv_shared_access(
+            segment,
+            credentials,
+            &supplementary_groups,
+            flags & SHM_RDONLY == 0,
+        ) {
             return Err(CompatErrno::Access);
         }
         (
@@ -9412,6 +9468,8 @@ fn linux_shmctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let application =
         crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
     let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let supplementary_groups =
+        proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
     if command == SHM_INFO || command == IPC_INFO && args[0] == 0 {
         let state = COMPAT.lock();
         return write_sysv_shm_info(args[2], &state).map(|()| 0);
@@ -9473,7 +9531,14 @@ fn linux_shmctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             Ok(0)
         }
         IPC_STAT | SHM_STAT | SHM_STAT_ANY => {
-            if command != SHM_STAT_ANY && !sysv_shared_access(segment, credentials, false) {
+            if command != SHM_STAT_ANY
+                && !sysv_shared_access(
+                    segment,
+                    credentials,
+                    &supplementary_groups,
+                    false,
+                )
+            {
                 return Err(CompatErrno::Access);
             }
             let output = sysv_shm_ds_bytes(segment);
