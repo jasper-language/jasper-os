@@ -227,6 +227,8 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::SchedGetPriorityMax,
         LinuxSyscall::SchedGetPriorityMin,
         LinuxSyscall::SchedRrGetInterval,
+        LinuxSyscall::SchedGetAttr,
+        LinuxSyscall::SchedSetAttr,
         LinuxSyscall::SetTidAddress,
         LinuxSyscall::SetRobustList,
         LinuxSyscall::Rseq,

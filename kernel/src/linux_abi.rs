@@ -1847,6 +1847,8 @@ fn execute(
         LinuxSyscall::SchedRrGetInterval => {
             compat_result(linux_sched_rr_get_interval(pid, call.args))
         }
+        LinuxSyscall::SchedGetAttr => compat_result(linux_sched_getattr(pid, call.args)),
+        LinuxSyscall::SchedSetAttr => compat_result(linux_sched_setattr(pid, call.args)),
         LinuxSyscall::SetTidAddress => set_clear_child_tid(pid, call.args[0])
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
@@ -2855,6 +2857,77 @@ fn linux_sched_rr_get_interval(pid: ObjId, args: [u64; 6]) -> Result<u64, Compat
     timespec[8..16].copy_from_slice(&2_000_000i64.to_le_bytes());
     copy_to_user(args[1], &timespec, timespec.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
+}
+
+fn linux_sched_target(pid: ObjId, requested: u64) -> Result<ObjId, CompatErrno> {
+    let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
+    if requested == 0 || requested == current {
+        Ok(pid)
+    } else {
+        let target = u32::try_from(requested).map_err(|_| CompatErrno::NoProcess)?;
+        proc::linux_process_for_pid(target).ok_or(CompatErrno::NoProcess)
+    }
+}
+
+fn linux_sched_getattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SCHED_ATTR_BYTES: usize = 48;
+    const SCHED_OTHER: u32 = 0;
+    let target = linux_sched_target(pid, args[0])?;
+    let size = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if size < SCHED_ATTR_BYTES || size > 4096 || args[3] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut output = alloc::vec![0u8; size];
+    output[0..4].copy_from_slice(&(size as u32).to_le_bytes());
+    output[4..8].copy_from_slice(&SCHED_OTHER.to_le_bytes());
+    let nice = proc::linux_nice(target).ok_or(CompatErrno::NoProcess)?;
+    output[16..20].copy_from_slice(&nice.to_le_bytes());
+    copy_to_user(args[1], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+fn linux_sched_setattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SCHED_ATTR_BYTES: usize = 48;
+    const SCHED_OTHER: u32 = 0;
+    let target = linux_sched_target(pid, args[0])?;
+    if args[2] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut raw = [0u8; SCHED_ATTR_BYTES];
+    copy_from_user(&mut raw, args[1], SCHED_ATTR_BYTES).map_err(|_| CompatErrno::Fault)?;
+    let size = u32::from_le_bytes(raw[0..4].try_into().unwrap()) as usize;
+    let policy = u32::from_le_bytes(raw[4..8].try_into().unwrap());
+    let attr_flags = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+    let nice = i32::from_le_bytes(raw[16..20].try_into().unwrap());
+    let priority = u32::from_le_bytes(raw[20..24].try_into().unwrap());
+    let runtime = u64::from_le_bytes(raw[24..32].try_into().unwrap());
+    let deadline = u64::from_le_bytes(raw[32..40].try_into().unwrap());
+    let period = u64::from_le_bytes(raw[40..48].try_into().unwrap());
+    if size < SCHED_ATTR_BYTES
+        || policy != SCHED_OTHER
+        || attr_flags != 0
+        || priority != 0
+        || runtime != 0
+        || deadline != 0
+        || period != 0
+        || !(-20..=19).contains(&nice)
+    {
+        return if policy != SCHED_OTHER
+            || attr_flags != 0
+            || runtime != 0
+            || deadline != 0
+            || period != 0
+        {
+            Err(CompatErrno::NotSupported)
+        } else {
+            Err(CompatErrno::Invalid)
+        };
+    }
+    if proc::linux_set_nice(target, nice) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoProcess)
+    }
 }
 
 fn linux_sched_setscheduler(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {

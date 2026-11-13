@@ -5,7 +5,7 @@
 # 因此必须排队，并固定在预留 CPU、低优先级和有限 job 数下运行。
 set -eu
 
-cargo_bin=${CARGO_BIN:-/home/auth/.cargo/bin/cargo}
+cargo_bin=${CARGO_BIN:-$(command -v cargo || true)}
 build_cpus=${JASPER_BUILD_CPUS:-4-5}
 build_jobs=${JASPER_CARGO_JOBS:-2}
 minimum_available_kib=${JASPER_BUILD_MIN_AVAILABLE_GIB:-12884902}

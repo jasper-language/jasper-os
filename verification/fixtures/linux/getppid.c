@@ -10,7 +10,9 @@
 #include <linux/dma-heap.h>
 #include <linux/futex.h>
 #include <linux/io_uring.h>
+#include <linux/sched/types.h>
 #include <linux/sync_file.h>
+#include <limits.h>
 #include <pthread.h>
 #include <poll.h>
 #include <sched.h>
@@ -1387,7 +1389,7 @@ int main(void) {
     }
     errno = 0;
     long epoll_signal_result = syscall(SYS_epoll_pwait, epfd, epoll_ready, 1,
-                                      100, &epoll_empty_mask,
+                                      1000, &epoll_empty_mask,
                                       sizeof(uint64_t));
     int epoll_signal_errno = errno;
     if (epoll_signal_result != -1 || epoll_signal_errno != EINTR ||
@@ -2284,6 +2286,70 @@ int main(void) {
     errno = 0;
     if (sched_setparam(0, &scheduler_set) != -1 || errno != EINVAL) {
         return 319;
+    }
+    struct sched_attr scheduler_attr = {.size = sizeof(scheduler_attr)};
+    if (syscall(SYS_sched_getattr, 0, &scheduler_attr,
+                sizeof(scheduler_attr), 0) != 0 ||
+        scheduler_attr.sched_policy != SCHED_OTHER ||
+        scheduler_attr.sched_nice != 0 ||
+        scheduler_attr.sched_priority != 0) {
+        return 320;
+    }
+    scheduler_attr.sched_nice = 7;
+    if (syscall(SYS_sched_setattr, 0, &scheduler_attr, 0) != 0 ||
+        syscall(SYS_sched_getattr, 0, &scheduler_attr,
+                sizeof(scheduler_attr), 0) != 0 ||
+        scheduler_attr.sched_nice != 7) {
+        return 321;
+    }
+    scheduler_attr.sched_nice = 0;
+    if (syscall(SYS_sched_setattr, 0, &scheduler_attr, 0) != 0) {
+        return 322;
+    }
+    scheduler_attr.sched_policy = SCHED_FIFO;
+    errno = 0;
+    if (syscall(SYS_sched_setattr, 0, &scheduler_attr, 0) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 323;
+    }
+    scheduler_attr.sched_policy = SCHED_OTHER;
+    scheduler_attr.sched_flags = SCHED_FLAG_RESET_ON_FORK;
+    errno = 0;
+    if (syscall(SYS_sched_setattr, 0, &scheduler_attr, 0) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 324;
+    }
+    scheduler_attr.sched_flags = 0;
+    if (syscall(SYS_sched_getattr, 0, &scheduler_attr,
+                sizeof(scheduler_attr), 0) != 0 ||
+        scheduler_attr.sched_policy != SCHED_OTHER ||
+        scheduler_attr.sched_flags != 0 ||
+        scheduler_attr.sched_nice != 0) {
+        return 325;
+    }
+    errno = 0;
+    if (syscall(SYS_sched_getattr, 0, &scheduler_attr, 47, 0) != -1 ||
+        errno != EINVAL) {
+        return 326;
+    }
+    scheduler_attr.size = 47;
+    errno = 0;
+    if (syscall(SYS_sched_setattr, 0, &scheduler_attr, 0) != -1 ||
+        errno != EINVAL) {
+        return 327;
+    }
+    scheduler_attr.size = sizeof(scheduler_attr);
+    errno = 0;
+    if (syscall(SYS_sched_getattr, 0, &scheduler_attr,
+                sizeof(scheduler_attr), 1) != -1 ||
+        errno != EINVAL) {
+        return 328;
+    }
+    errno = 0;
+    if (syscall(SYS_sched_getattr, INT_MAX, &scheduler_attr,
+                sizeof(scheduler_attr), 0) != -1 ||
+        errno != ESRCH) {
+        return 329;
     }
     CPU_ZERO(&cpus);
     if (sched_getaffinity(0, sizeof(cpus), &cpus) != 0 ||
