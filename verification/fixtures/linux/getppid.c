@@ -6942,6 +6942,63 @@ int main(void) {
         munmap(process_madvise_memory, 4096) != 0) {
         return 619;
     }
+    int process_madvise_remote_address[2];
+    int process_madvise_remote_go[2];
+    if (pipe(process_madvise_remote_address) != 0 ||
+        pipe(process_madvise_remote_go) != 0) {
+        return 709;
+    }
+    pid_t process_madvise_child = fork();
+    if (process_madvise_child < 0) {
+        return 709;
+    }
+    if (process_madvise_child == 0) {
+        close(process_madvise_remote_address[0]);
+        close(process_madvise_remote_go[1]);
+        void *memory = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (memory == MAP_FAILED ||
+            write(process_madvise_remote_address[1], &memory,
+                  sizeof(memory)) != (ssize_t)sizeof(memory)) {
+            _exit(1);
+        }
+        char go = 0;
+        _exit(read(process_madvise_remote_go[0], &go, 1) == 1 ? 0 : 2);
+    }
+    close(process_madvise_remote_address[1]);
+    close(process_madvise_remote_go[0]);
+    void *process_madvise_remote_memory = NULL;
+    int process_madvise_remote_pidfd = -1;
+    struct iovec process_madvise_remote_vector = {0};
+    if (read(process_madvise_remote_address[0],
+             &process_madvise_remote_memory,
+             sizeof(process_madvise_remote_memory)) !=
+            (ssize_t)sizeof(process_madvise_remote_memory) ||
+        close(process_madvise_remote_address[0]) != 0 ||
+        (process_madvise_remote_pidfd =
+             syscall(SYS_pidfd_open, process_madvise_child, 0)) < 0) {
+        return 709;
+    }
+    process_madvise_remote_vector.iov_base =
+        process_madvise_remote_memory;
+    process_madvise_remote_vector.iov_len = 4096;
+    if (syscall(SYS_process_madvise, process_madvise_remote_pidfd,
+                &process_madvise_remote_vector, 1,
+                MADV_WILLNEED, 0) != 4096) {
+        return 709;
+    }
+    char process_madvise_go_byte = 'G';
+    int process_madvise_status = 0;
+    if (write(process_madvise_remote_go[1],
+              &process_madvise_go_byte, 1) != 1 ||
+        close(process_madvise_remote_go[1]) != 0 ||
+        close(process_madvise_remote_pidfd) != 0 ||
+        waitpid(process_madvise_child, &process_madvise_status, 0) !=
+            process_madvise_child ||
+        !WIFEXITED(process_madvise_status) ||
+        WEXITSTATUS(process_madvise_status) != 0) {
+        return 709;
+    }
     int mrelease_pipe[2];
     if (pipe2(mrelease_pipe, O_CLOEXEC) != 0) {
         return 623;
