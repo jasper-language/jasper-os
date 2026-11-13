@@ -181,6 +181,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::StatFs,
         LinuxSyscall::ReadLink,
         LinuxSyscall::SendFile,
+        LinuxSyscall::CopyFileRange,
         LinuxSyscall::Brk,
         LinuxSyscall::Access,
         LinuxSyscall::FaccessAt,

@@ -3682,6 +3682,31 @@ int main(void) {
         errno != EINVAL) {
         return 484;
     }
+    int copy_source =
+        syscall(SYS_open, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                O_RDONLY | O_CLOEXEC, 0);
+    int copy_target = memfd_create("copy-file-range", MFD_CLOEXEC);
+    off_t copy_input_offset = 0;
+    off_t copy_output_offset = 0;
+    unsigned char copied_magic[8] = {0};
+    if (copy_source < 0 || copy_target < 0 ||
+        syscall(SYS_copy_file_range, copy_source, &copy_input_offset,
+                copy_target, &copy_output_offset, 8, 0) != 8 ||
+        copy_input_offset != 8 || copy_output_offset != 8 ||
+        lseek(copy_target, 0, SEEK_SET) != 0 ||
+        read(copy_target, copied_magic, sizeof(copied_magic)) !=
+            (ssize_t)sizeof(copied_magic) ||
+        memcmp(copied_magic, "\177ELF", 4) != 0) {
+        return 486;
+    }
+    errno = 0;
+    if (syscall(SYS_copy_file_range, copy_source, &copy_input_offset,
+                copy_target, &copy_output_offset, 8, 1) != -1 ||
+        errno != EINVAL ||
+        close(copy_source) != 0 ||
+        close(copy_target) != 0) {
+        return 487;
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);

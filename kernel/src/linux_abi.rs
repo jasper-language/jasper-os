@@ -1998,6 +1998,7 @@ fn execute(
         LinuxSyscall::StatFs => compat_result(linux_statfs(call.args)),
         LinuxSyscall::ReadLink => compat_result(linux_readlink(pid, call.args)),
         LinuxSyscall::SendFile => compat_result(linux_sendfile(pid, call.args)),
+        LinuxSyscall::CopyFileRange => compat_result(linux_copy_file_range(pid, call.args)),
         LinuxSyscall::Mmap => compat_result(linux_mmap(pid, call.args)),
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
@@ -9921,6 +9922,140 @@ fn linux_sendfile(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .map_err(|_| CompatErrno::Fault)?;
     } else if !proc::set_linux_file_offset(pid, input_fd, start as u64 + written as u64) {
         return Err(CompatErrno::BadFd);
+    }
+    Ok(written as u64)
+}
+
+/// Implements bounded `copy_file_range(2)` between virtual files and memfds.
+fn linux_copy_file_range(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MAX_COPY: u64 = 1024 * 1024;
+    if args[5] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let input_fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let output_fd = u32::try_from(args[2]).map_err(|_| CompatErrno::BadFd)?;
+    let input = proc::linux_fd(pid, input_fd).ok_or(CompatErrno::BadFd)?;
+    let output = proc::linux_fd(pid, output_fd).ok_or(CompatErrno::BadFd)?;
+    let input_offset = if args[1] == 0 {
+        proc::linux_fd_offset(pid, input_fd).ok_or(CompatErrno::BadFd)?
+    } else {
+        let mut raw = [0u8; 8];
+        copy_from_user(&mut raw, args[1], 8).map_err(|_| CompatErrno::Fault)?;
+        let value = i64::from_le_bytes(raw);
+        if value < 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        value as u64
+    };
+    let output_offset = if args[3] == 0 {
+        proc::linux_fd_offset(pid, output_fd).ok_or(CompatErrno::BadFd)?
+    } else {
+        let mut raw = [0u8; 8];
+        copy_from_user(&mut raw, args[3], 8).map_err(|_| CompatErrno::Fault)?;
+        let value = i64::from_le_bytes(raw);
+        if value < 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        value as u64
+    };
+    let requested = args[4].min(MAX_COPY);
+    let (bytes, available) = match input.kind {
+        compat_core::fd::CompatKind::File => {
+            if !input
+                .rights
+                .contains(kernel_core::object::Rights::READ)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            let file =
+                crate::linux_vfs::FileId::from_handle(input.handle).ok_or(CompatErrno::BadFd)?;
+            let bytes = file.bytes();
+            let start = usize::try_from(input_offset).map_err(|_| CompatErrno::Invalid)?;
+            let available = bytes.len().saturating_sub(start);
+            (
+                bytes[start..start + available.min(requested as usize)].to_vec(),
+                available,
+            )
+        }
+        compat_core::fd::CompatKind::Device
+            if proc::linux_ashmem_is_regular(pid, input.handle) == Some(true) =>
+        {
+            if !input
+                .rights
+                .contains(kernel_core::object::Rights::READ)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            let (size, _, _) =
+                proc::linux_ashmem_state(pid, input.handle).ok_or(CompatErrno::BadFd)?;
+            let available = size.saturating_sub(input_offset);
+            let mut bytes = alloc::vec![0u8; available.min(requested) as usize];
+            let copied = proc::linux_ashmem_read_from(
+                pid,
+                input.handle,
+                input_offset,
+                &mut bytes,
+            )
+            .map_err(ashmem_compat_error)?;
+            bytes.truncate(copied);
+            (bytes, available as usize)
+        }
+        _ => return Err(CompatErrno::Invalid),
+    };
+    let _ = available;
+    if bytes.is_empty() {
+        return Ok(0);
+    }
+    if input.handle == output.handle
+        && input_offset < output_offset.saturating_add(bytes.len() as u64)
+        && output_offset < input_offset.saturating_add(bytes.len() as u64)
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let io = admit_process_io(pid, bytes.len() as u64, 1)?;
+    let written = match output.kind {
+        compat_core::fd::CompatKind::Device
+            if proc::linux_ashmem_is_regular(pid, output.handle) == Some(true) =>
+        {
+            if !output
+                .rights
+                .contains(kernel_core::object::Rights::WRITE)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            proc::linux_ashmem_write_from(pid, output.handle, output_offset, &bytes)
+                .map_err(ashmem_compat_error)?
+        }
+        compat_core::fd::CompatKind::File => return Err(CompatErrno::ReadOnly),
+        _ => return Err(CompatErrno::Invalid),
+    };
+    io.commit();
+    if written == 0 {
+        return Ok(0);
+    }
+    if args[1] == 0 {
+        if !proc::set_linux_fd_offset(pid, input_fd, input_offset + written as u64) {
+            return Err(CompatErrno::BadFd);
+        }
+    } else {
+        copy_to_user(
+            args[1],
+            &(input_offset + written as u64).to_le_bytes(),
+            8,
+        )
+        .map_err(|_| CompatErrno::Fault)?;
+    }
+    if args[3] == 0 {
+        if !proc::set_linux_fd_offset(pid, output_fd, output_offset + written as u64) {
+            return Err(CompatErrno::BadFd);
+        }
+    } else {
+        copy_to_user(
+            args[3],
+            &(output_offset + written as u64).to_le_bytes(),
+            8,
+        )
+        .map_err(|_| CompatErrno::Fault)?;
     }
     Ok(written as u64)
 }
