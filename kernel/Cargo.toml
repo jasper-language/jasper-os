@@ -142,9 +142,11 @@ native-install-block-verify = [
 native-install-fault-verify = ["native-install-block-verify"]
 # Real virtio-blk persistence and bounded privacy queries for LC-1 diagnostics.
 lifecycle-diagnostic-block-verify = [
-    "dep:jasper-lifecycle-model",
+    "lifecycle-diagnostic-sources",
     "native-install-block-verify",
 ]
+# Panic and lifecycle failures feed the bounded, non-blocking source ring.
+lifecycle-diagnostic-sources = ["dep:jasper-lifecycle-model"]
 # FS-1 real ext4 VFS read/write/fsync/rename over virtio-blk.
 fs1-ext4-verify = ["kernel-core/ext4-write"]
 # Dedicated MOD-1 contract: assembly ordering, publication and runtime stop/health.

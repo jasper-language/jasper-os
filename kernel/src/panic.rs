@@ -9,8 +9,17 @@ use crate::{arch, console};
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    #[cfg(feature = "lifecycle-diagnostic-sources")]
+    let recorded = crate::diagnostic_sources::record_kernel_exception();
+    #[cfg(feature = "lifecycle-diagnostic-sources")]
+    console::emergency_print(format_args!(
+        "[JSR-DIAG-SOURCE] kind=kernel_exception recorded={}\n",
+        recorded
+    ));
     match info.location() {
-        Some(loc) => console::emergency_print(format_args!("[JSR-PANIC] {}:{}\n", loc.file(), loc.line())),
+        Some(loc) => {
+            console::emergency_print(format_args!("[JSR-PANIC] {}:{}\n", loc.file(), loc.line()))
+        }
         None => console::emergency_print(format_args!("[JSR-PANIC] (no location)\n")),
     }
     arch::halt_forever()

@@ -83,9 +83,9 @@ for round in 1 2; do
   ! grep -aqE '^\[JSR-(PANIC|LIFE-DIAG-FAIL)\]|KERNEL PANIC|panicked at' "$serial"
 done
 
-grep -aq '^\[JSR-LIFE-DIAG\] stage=format events=3 sequence=4 query=2 privacy=true append=true failed=0' \
+grep -aq '^\[JSR-LIFE-DIAG\] stage=format events=5 sequence=6 query=4 sources=2 privacy=true append=true failed=0' \
   "$OUT/round-1.serial"
-grep -aq '^\[JSR-LIFE-DIAG\] stage=reopen events=4 sequence=5 query=2 privacy=true append=true failed=0' \
+grep -aq '^\[JSR-LIFE-DIAG\] stage=reopen events=6 sequence=7 query=4 sources=0 privacy=true append=true failed=0' \
   "$OUT/round-2.serial"
 
 echo "lifecycle-diagnostic-block: PASS rounds=2 evidence=$OUT"

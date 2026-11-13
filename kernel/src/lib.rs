@@ -170,6 +170,8 @@ pub mod native_install_block;
     feature = "lifecycle-diagnostic-block-verify"
 ))]
 pub mod lifecycle_diagnostic_block;
+#[cfg(feature = "lifecycle-diagnostic-sources")]
+pub mod diagnostic_sources;
 #[cfg(all(target_arch = "x86_64", feature = "fs1-ext4-verify"))]
 pub mod fs1_demo;
 #[cfg(any(feature = "pex0-verify", feature = "pex2-verify"))]

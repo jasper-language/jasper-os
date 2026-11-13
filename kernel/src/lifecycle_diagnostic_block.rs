@@ -8,14 +8,14 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use jasper_lifecycle_model::diagnostics::{
-    ClockQuality, DiagnosticCollector, DiagnosticIo, DiagnosticIoError, DiagnosticPage,
-    DiagnosticQuery, DiagnosticStoreError, EventInput, EventKind, PayloadKind, PrivacyClass,
-    RecoveryAction, Severity, DIAGNOSTIC_COPY_STRIDE,
+    ClockQuality, DiagnosticCollector, DiagnosticIo, DiagnosticIoError, DiagnosticQuery,
+    DiagnosticStoreError, EventInput, EventKind, PayloadKind, PrivacyClass, RecoveryAction,
+    Severity, DIAGNOSTIC_COPY_STRIDE,
 };
 use kernel_core::block::{self, Request, Terminal};
 
 use crate::blk::BlockDevice;
-use crate::{baseline, kprintln, mmio, pci, virtio};
+use crate::{baseline, diagnostic_sources, kprintln, mmio, pci, virtio};
 
 const DATA_PAGES: u64 = 1;
 const DATA_BASE_SECTOR: u64 = 8192;
@@ -182,17 +182,19 @@ fn event(
     }
 }
 
-fn exercise(device: &mut BlockDevice) -> Result<(&'static str, u64), DiagnosticStoreError> {
+fn exercise(
+    device: &mut BlockDevice,
+) -> Result<(&'static str, u64, usize, usize), DiagnosticStoreError> {
     match DiagnosticCollector::open(VirtioDiagnosticIo { device }) {
         Ok(mut collector) => {
             let status = collector.status();
-            check(status.stats.len == 3, "reopen event count");
-            check(status.stats.accepted == 3, "reopen accepted count");
-            check(status.sequence == 4, "reopen sequence");
+            check(status.stats.len == 5, "reopen event count");
+            check(status.stats.accepted == 5, "reopen accepted count");
+            check(status.sequence == 6, "reopen sequence");
             let mut query =
                 DiagnosticQuery::new(None, Severity::Warning, PrivacyClass::Internal, 4);
             let page = collector.query_page::<4>(&mut query);
-            check(page.len() == 2, "privacy-filtered query count");
+            check(page.len() == 4, "privacy-filtered query count");
             check(
                 (0..page.len()).all(|index| {
                     page.get(index)
@@ -216,10 +218,10 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, u64), DiagnosticS
                     }
                 })?;
             let status = collector.status();
-            check(status.stats.len == 4, "append event count");
-            check(status.stats.accepted == 4, "append accepted count");
-            check(status.sequence == 5, "append sequence");
-            Ok(("reopen", status.sequence))
+            check(status.stats.len == 6, "append event count");
+            check(status.stats.accepted == 6, "append accepted count");
+            check(status.sequence == 7, "append sequence");
+            Ok(("reopen", status.sequence, 4, 0))
         }
         Err(DiagnosticStoreError::Corrupt) => {
             let mut collector = DiagnosticCollector::format(VirtioDiagnosticIo { device })?;
@@ -268,11 +270,32 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, u64), DiagnosticS
                         DiagnosticStoreError::Corrupt
                     }
                 })?;
+            check(
+                diagnostic_sources::record_kernel_exception(),
+                "record kernel exception source",
+            );
+            check(
+                diagnostic_sources::record_boot_failure("health.storage"),
+                "record boot failure source",
+            );
+            let sources =
+                diagnostic_sources::drain_into(&mut collector).map_err(|error| match error {
+                    jasper_lifecycle_model::diagnostics::CollectError::Store(error) => error,
+                    jasper_lifecycle_model::diagnostics::CollectError::Schema(_) => {
+                        DiagnosticStoreError::Corrupt
+                    }
+                })?;
+            check(sources.drained == 2, "drain two source events");
+            check(sources.pending == 0, "drain leaves no source events");
             let status = collector.status();
-            check(status.stats.len == 3, "format event count");
-            check(status.stats.accepted == 3, "format accepted count");
-            check(status.sequence == 4, "format sequence");
-            Ok(("format", status.sequence))
+            check(status.stats.len == 5, "format event count");
+            check(status.stats.accepted == 5, "format accepted count");
+            check(status.sequence == 6, "format sequence");
+            let mut query =
+                DiagnosticQuery::new(None, Severity::Warning, PrivacyClass::Internal, 4);
+            let page = collector.query_page::<4>(&mut query);
+            check(page.len() == 4, "format privacy-filtered query count");
+            Ok(("format", status.sequence, 4, sources.drained))
         }
         Err(error) => Err(error),
     }
@@ -295,11 +318,13 @@ pub fn run() {
         .map_err(|_| DiagnosticStoreError::Io(DiagnosticIoError::Read));
     match result {
         Ok(mut blockdev) => match exercise(&mut blockdev) {
-            Ok((phase, sequence)) => kprintln!(
-                "[JSR-LIFE-DIAG] stage={} events={} sequence={} query=2 privacy=true append=true failed={}",
+            Ok((phase, sequence, query, sources)) => kprintln!(
+                "[JSR-LIFE-DIAG] stage={} events={} sequence={} query={} sources={} privacy=true append=true failed={}",
                 phase,
-                if phase == "format" { 3 } else { 4 },
+                if phase == "format" { 5 } else { 6 },
                 sequence,
+                query,
+                sources,
                 failed()
             ),
             Err(error) => {
