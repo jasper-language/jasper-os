@@ -664,6 +664,39 @@ int main(void) {
                 AT_EMPTY_PATH) != -1 || errno != EINVAL) {
         return 622;
     }
+    struct file_handle *file_identity = calloc(1, sizeof(struct file_handle) + 8);
+    int file_mount_id = 0;
+    if (!file_identity) {
+        return 630;
+    }
+    file_identity->handle_bytes = 8;
+    if (syscall(SYS_name_to_handle_at, AT_FDCWD,
+                "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                file_identity, &file_mount_id, AT_SYMLINK_FOLLOW) != 0 ||
+        file_identity->handle_bytes != 8 ||
+        file_mount_id == 0) {
+        return 631;
+    }
+    int handle_fd = syscall(SYS_open_by_handle_at, AT_FDCWD,
+                            file_identity, O_RDONLY | O_CLOEXEC);
+    unsigned char handle_magic[4] = {0};
+    if (handle_fd < 0 ||
+        read(handle_fd, handle_magic, sizeof(handle_magic)) !=
+            (ssize_t)sizeof(handle_magic) ||
+        handle_magic[0] != 0x7f || handle_magic[1] != 'E' ||
+        handle_magic[2] != 'L' || handle_magic[3] != 'F' ||
+        close(handle_fd) != 0) {
+        return 632;
+    }
+    file_identity->handle_bytes = 4;
+    errno = 0;
+    if (syscall(SYS_name_to_handle_at, AT_FDCWD,
+                "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                file_identity, &file_mount_id, 0) != -1 ||
+        errno != EOVERFLOW || file_identity->handle_bytes != 8) {
+        return 633;
+    }
+    free(file_identity);
     errno = 0;
     if (readv(-1, vectors, 2) != -1 || errno != EBADF) {
         return 7;
@@ -4483,8 +4516,7 @@ int main(void) {
         SYS_landlock_restrict_self, SYS_listns,
         SYS_lsm_get_self_attr, SYS_lsm_set_self_attr,
         SYS_map_shadow_stack, SYS_mount_setattr, SYS_move_mount,
-        SYS_name_to_handle_at, SYS_open_by_handle_at, SYS_open_tree,
-        SYS_open_tree_attr,
+        SYS_open_tree, SYS_open_tree_attr,
         SYS_uprobe, SYS_uretprobe, SYS_userfaultfd,
     };
     for (size_t index = 0;

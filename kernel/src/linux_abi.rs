@@ -2673,6 +2673,8 @@ fn execute(
         LinuxSyscall::PkeyAlloc => compat_result(linux_pkey_alloc(call.args)),
         LinuxSyscall::PkeyFree => compat_result(linux_pkey_free(call.args)),
         LinuxSyscall::PkeyMprotect => compat_result(linux_pkey_mprotect(pid, call.args)),
+        LinuxSyscall::NameToHandleAt => compat_result(linux_name_to_handle_at(pid, call.args)),
+        LinuxSyscall::OpenByHandleAt => compat_result(linux_open_by_handle_at(pid, call.args)),
         LinuxSyscall::AddKey
         | LinuxSyscall::RequestKey
         | LinuxSyscall::Keyctl
@@ -2697,8 +2699,6 @@ fn execute(
         | LinuxSyscall::MapShadowStack
         | LinuxSyscall::MountSetattr
         | LinuxSyscall::MoveMount
-        | LinuxSyscall::NameToHandleAt
-        | LinuxSyscall::OpenByHandleAt
         | LinuxSyscall::OpenTree
         | LinuxSyscall::OpenTreeAttr
         | LinuxSyscall::Uprobe
@@ -9296,6 +9296,141 @@ fn linux_file_setattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     linux_file_attr_validate(pid, &args)?;
     Err(CompatErrno::ReadOnly)
+}
+
+fn linux_node_for_path_or_fd(
+    pid: ObjId,
+    raw_dfd: u64,
+    path_pointer: u64,
+    empty_allowed: bool,
+) -> Result<crate::linux_vfs::Node, CompatErrno> {
+    let path = if path_pointer == 0 {
+        None
+    } else {
+        Some(linux_c_string(path_pointer, 4096)?)
+    };
+    if path.is_none() || path.as_ref().is_some_and(|path| path.is_empty()) {
+        if !empty_allowed {
+            return Err(CompatErrno::NoEntry);
+        }
+        let fd = u32::try_from(raw_dfd).map_err(|_| CompatErrno::BadFd)?;
+        let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+        if entry.kind == compat_core::fd::CompatKind::File {
+            return crate::linux_vfs::FileId::from_handle(entry.handle)
+                .map(crate::linux_vfs::Node::File)
+                .ok_or(CompatErrno::BadFd);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Directory {
+            return crate::linux_vfs::DirectoryId::from_handle(entry.handle)
+                .map(crate::linux_vfs::Node::Directory)
+                .ok_or(CompatErrno::BadFd);
+        }
+        return Err(CompatErrno::BadFd);
+    }
+    let path = path.expect("nonempty path");
+    let resolved = if path.starts_with(b"/") {
+        if !is_at_fdcwd(raw_dfd) {
+            return Err(CompatErrno::Invalid);
+        }
+        path
+    } else {
+        if path == b".." || path.starts_with(b"../") || path.windows(4).any(|window| window == b"/../")
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        let base = if is_at_fdcwd(raw_dfd) {
+            proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path()
+        } else {
+            let fd = u32::try_from(raw_dfd).map_err(|_| CompatErrno::BadFd)?;
+            let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
+            crate::linux_vfs::DirectoryId::from_handle(handle)
+                .ok_or(CompatErrno::BadFd)?
+                .path()
+        };
+        if path == b"." {
+            base.to_vec()
+        } else {
+            let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
+            resolved.extend_from_slice(base);
+            if !base.ends_with(b"/") {
+                resolved.push(b'/');
+            }
+            resolved.extend_from_slice(&path);
+            resolved
+        }
+    };
+    crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)
+}
+
+/// Implements `name_to_handle_at(2)` with stable virtual inode handles.
+fn linux_name_to_handle_at(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const AT_HANDLE_FID: u64 = 0x200;
+    const AT_SYMLINK_FOLLOW: u64 = 0x400;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    if args[4] & !(AT_HANDLE_FID | AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let node = linux_node_for_path_or_fd(
+        pid,
+        args[0],
+        args[1],
+        args[4] & AT_EMPTY_PATH != 0,
+    )?;
+    let mut capacity = [0u8; 4];
+    copy_from_user(&mut capacity, args[2], 4).map_err(|_| CompatErrno::Fault)?;
+    let required = 8u32;
+    copy_to_user(args[2], &required.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+    if u32::from_le_bytes(capacity) < required {
+        return Err(CompatErrno::Overflow);
+    }
+    let mut handle = [0u8; 16];
+    handle[..4].copy_from_slice(&required.to_le_bytes());
+    handle[4..8].copy_from_slice(&0x4a41_5348i32.to_le_bytes());
+    handle[8..16].copy_from_slice(&node.inode().to_le_bytes());
+    copy_to_user(args[2], &handle, handle.len()).map_err(|_| CompatErrno::Fault)?;
+    if args[3] != 0 {
+        copy_to_user(args[3], &1i32.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(0)
+}
+
+/// Implements `open_by_handle_at(2)` over stable read-only virtual identities.
+fn linux_open_by_handle_at(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const O_ACCMODE: u64 = 0x3;
+    const O_CLOEXEC: u64 = 0x80000;
+    const O_DIRECTORY: u64 = 0x10000;
+    let flags = args[2];
+    if flags & !(O_ACCMODE | O_CLOEXEC | O_DIRECTORY) != 0 || flags & O_ACCMODE != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if !is_at_fdcwd(args[0]) {
+        let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+        proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    }
+    let mut raw = [0u8; 16];
+    copy_from_user(&mut raw, args[1], 16).map_err(|_| CompatErrno::Fault)?;
+    if u32::from_le_bytes(raw[..4].try_into().unwrap()) != 8
+        || i32::from_le_bytes(raw[4..8].try_into().unwrap()) != 0x4a41_5348
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let inode = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+    let node = crate::linux_vfs::node_from_inode(inode).ok_or(CompatErrno::NoEntry)?;
+    let close_on_exec = flags & O_CLOEXEC != 0;
+    match node {
+        crate::linux_vfs::Node::File(file) if flags & O_DIRECTORY == 0 => {
+            proc::linux_install_file(pid, file.handle(), close_on_exec)
+                .map(u64::from)
+                .ok_or(CompatErrno::NoSpace)
+        }
+        crate::linux_vfs::Node::Directory(directory) => {
+            proc::linux_install_dir(pid, directory.handle(), close_on_exec)
+                .map(u64::from)
+                .ok_or(CompatErrno::NoSpace)
+        }
+        crate::linux_vfs::Node::File(_) => Err(CompatErrno::NotDirectory),
+        crate::linux_vfs::Node::Executable(_) => Err(CompatErrno::Access),
+    }
 }
 
 fn linux_eventfd(pid: ObjId, args: [u64; 6], eventfd2: bool) -> Result<u64, CompatErrno> {

@@ -569,6 +569,41 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
     }
 }
 
+/// Resolves one stable compatibility inode back to its read-only node.
+pub fn node_from_inode(inode: u64) -> Option<Node> {
+    const FILES: [FileId; 7] = [
+        FileId::Libc,
+        FileId::LibSystemd,
+        FileId::LibSelinux,
+        FileId::LibGccS,
+        FileId::LibM,
+        FileId::LibPcre2,
+        FileId::IoProbe,
+    ];
+    if let Some(file) = FILES.into_iter().find(|file| file.inode() == inode) {
+        return Some(Node::File(file));
+    }
+    fn search(directory: DirectoryId, inode: u64) -> Option<Node> {
+        for entry in directory_entries(directory) {
+            if entry.node.inode() == inode {
+                return Some(entry.node);
+            }
+            if let Node::Directory(child) = entry.node {
+                if let Some(node) = search(child, inode) {
+                    return Some(node);
+                }
+            }
+        }
+        None
+    }
+    let root = DirectoryId::Root;
+    if root.inode() == inode {
+        Some(Node::Directory(root))
+    } else {
+        search(root, inode)
+    }
+}
+
 /// Installs the libc bytes read from the selected System A/B root.
 /// 安装从所选 System A/B 根卷读取的 libc 字节。
 #[cfg(feature = "lifecycle-root-exec-verify")]
