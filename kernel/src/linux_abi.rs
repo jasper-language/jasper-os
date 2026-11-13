@@ -1942,6 +1942,18 @@ fn execute(
         }
         LinuxSyscall::FchownAt => compat_result(linux_fchownat(pid, call.args)),
         LinuxSyscall::Lchown => compat_result(linux_lchown(pid, call.args)),
+        LinuxSyscall::Setxattr => compat_result(linux_setxattr(pid, call.args, false, false)),
+        LinuxSyscall::LSetxattr => compat_result(linux_setxattr(pid, call.args, false, true)),
+        LinuxSyscall::FSetxattr => compat_result(linux_setxattr(pid, call.args, true, false)),
+        LinuxSyscall::Getxattr => compat_result(linux_getxattr(pid, call.args, false, false)),
+        LinuxSyscall::LGetxattr => compat_result(linux_getxattr(pid, call.args, false, true)),
+        LinuxSyscall::FGetxattr => compat_result(linux_getxattr(pid, call.args, true, false)),
+        LinuxSyscall::Listxattr => compat_result(linux_listxattr(pid, call.args, false, false)),
+        LinuxSyscall::LListxattr => compat_result(linux_listxattr(pid, call.args, false, true)),
+        LinuxSyscall::FListxattr => compat_result(linux_listxattr(pid, call.args, true, false)),
+        LinuxSyscall::Removexattr => compat_result(linux_removexattr(pid, call.args, false, false)),
+        LinuxSyscall::LRemovexattr => compat_result(linux_removexattr(pid, call.args, false, true)),
+        LinuxSyscall::FRemovexattr => compat_result(linux_removexattr(pid, call.args, true, false)),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
         LinuxSyscall::Stat => {
             compat_result(linux_newfstatat(pid, legacy_stat_args(call.args, false)))
@@ -7312,6 +7324,126 @@ fn linux_lchown(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         false,
     )?;
     Err(CompatErrno::ReadOnly)
+}
+
+/// Validates one xattr pathname and optional symlink-follow policy.
+fn validate_xattr_path(
+    pid: ObjId,
+    path: u64,
+    nofollow: bool,
+) -> Result<(), CompatErrno> {
+    linux_faccessat(
+        pid,
+        [
+            (-100i64) as u64,
+            path,
+            0,
+            if nofollow { 0x100 } else { 0 },
+            0,
+            0,
+        ],
+        true,
+    )?;
+    Ok(())
+}
+
+/// Validates a non-empty bounded xattr name.
+fn validate_xattr_name(address: u64) -> Result<(), CompatErrno> {
+    if linux_c_string(address, 255)?.is_empty() {
+        return Err(CompatErrno::Invalid);
+    }
+    Ok(())
+}
+
+/// Validates an xattr file descriptor.
+fn validate_xattr_fd(pid: ObjId, raw_fd: u64) -> Result<u32, CompatErrno> {
+    let fd = u32::try_from(raw_fd).map_err(|_| CompatErrno::BadFd)?;
+    proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    Ok(fd)
+}
+
+/// Implements path and fd variants of `setxattr(2)`.
+fn linux_setxattr(
+    pid: ObjId,
+    args: [u64; 6],
+    fd: bool,
+    nofollow: bool,
+) -> Result<u64, CompatErrno> {
+    const XATTR_CREATE: u64 = 0x1;
+    const XATTR_REPLACE: u64 = 0x2;
+    let name = args[1];
+    let value = args[2];
+    let size = args[3];
+    let flags = args[4];
+    if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0
+        || flags & XATTR_CREATE != 0 && flags & XATTR_REPLACE != 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    validate_xattr_name(name)?;
+    if size != 0 && value == 0 {
+        return Err(CompatErrno::Fault);
+    }
+    if fd {
+        validate_xattr_fd(pid, args[0])?;
+    } else {
+        validate_xattr_path(pid, args[0], nofollow)?;
+    }
+    Err(CompatErrno::ReadOnly)
+}
+
+/// Implements path and fd variants of `getxattr(2)` over a namespace with no xattrs.
+fn linux_getxattr(
+    pid: ObjId,
+    args: [u64; 6],
+    fd: bool,
+    nofollow: bool,
+) -> Result<u64, CompatErrno> {
+    let name = args[1];
+    validate_xattr_name(name)?;
+    if fd {
+        validate_xattr_fd(pid, args[0])?;
+    } else {
+        validate_xattr_path(pid, args[0], nofollow)?;
+    }
+    Err(CompatErrno::NoData)
+}
+
+/// Implements path and fd variants of `listxattr(2)` over a namespace with no xattrs.
+fn linux_listxattr(
+    pid: ObjId,
+    args: [u64; 6],
+    fd: bool,
+    nofollow: bool,
+) -> Result<u64, CompatErrno> {
+    let list = args[1];
+    let size = args[2];
+    if fd {
+        validate_xattr_fd(pid, args[0])?;
+    } else {
+        validate_xattr_path(pid, args[0], nofollow)?;
+    }
+    if size != 0 && list == 0 {
+        return Err(CompatErrno::Fault);
+    }
+    Ok(0)
+}
+
+/// Implements path and fd variants of `removexattr(2)` over a namespace with no xattrs.
+fn linux_removexattr(
+    pid: ObjId,
+    args: [u64; 6],
+    fd: bool,
+    nofollow: bool,
+) -> Result<u64, CompatErrno> {
+    let name = args[1];
+    validate_xattr_name(name)?;
+    if fd {
+        validate_xattr_fd(pid, args[0])?;
+    } else {
+        validate_xattr_path(pid, args[0], nofollow)?;
+    }
+    Err(CompatErrno::NoData)
 }
 
 /// Changes the Linux compatibility current directory within the static namespace.

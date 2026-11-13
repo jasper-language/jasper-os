@@ -3472,6 +3472,71 @@ int main(void) {
         errno != EOPNOTSUPP) {
         return 457;
     }
+    const char *xattr_path = "/usr/lib/x86_64-linux-gnu/libc.so.6";
+    const char *xattr_name = "user.jasper-test";
+    char xattr_value = 'X';
+    if (syscall(SYS_listxattr, xattr_path, NULL, 0) != 0 ||
+        syscall(SYS_llistxattr, xattr_path, NULL, 0) != 0) {
+        return 458;
+    }
+    errno = 0;
+    if (syscall(SYS_getxattr, xattr_path, xattr_name,
+                NULL, 0) != -1 ||
+        errno != ENODATA) {
+        return 459;
+    }
+    errno = 0;
+    if (syscall(SYS_lgetxattr, xattr_path, xattr_name,
+                NULL, 0) != -1 ||
+        errno != ENODATA) {
+        return 460;
+    }
+    errno = 0;
+    if (syscall(SYS_setxattr, xattr_path, xattr_name,
+                &xattr_value, 1, 0) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_lsetxattr, xattr_path, xattr_name,
+                &xattr_value, 1, 0) != -1 ||
+        errno != EROFS) {
+        return 461;
+    }
+    errno = 0;
+    if (syscall(SYS_removexattr, xattr_path, xattr_name) != -1 ||
+        errno != ENODATA ||
+        syscall(SYS_lremovexattr, xattr_path, xattr_name) != -1 ||
+        errno != ENODATA) {
+        return 462;
+    }
+    int xattr_fd =
+        syscall(SYS_open, xattr_path, O_RDONLY | O_CLOEXEC, 0);
+    if (xattr_fd < 0 ||
+        syscall(SYS_flistxattr, xattr_fd, NULL, 0) != 0) {
+        return 463;
+    }
+    errno = 0;
+    if (syscall(SYS_fgetxattr, xattr_fd, xattr_name,
+                NULL, 0) != -1 ||
+        errno != ENODATA) {
+        return 464;
+    }
+    errno = 0;
+    if (syscall(SYS_fsetxattr, xattr_fd, xattr_name,
+                &xattr_value, 1, 0) != -1 ||
+        errno != EROFS) {
+        return 465;
+    }
+    errno = 0;
+    if (syscall(SYS_fremovexattr, xattr_fd, xattr_name) != -1 ||
+        errno != ENODATA ||
+        close(xattr_fd) != 0) {
+        return 466;
+    }
+    errno = 0;
+    if (syscall(SYS_setxattr, xattr_path, xattr_name,
+                &xattr_value, 1, 3) != -1 ||
+        errno != EINVAL) {
+        return 467;
+    }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
     CPU_ZERO(&cpus);
