@@ -1036,6 +1036,38 @@ int main(void) {
         munmap(memfd_map, 4096) != 0 || close(memfd) != 0) {
         return 214;
     }
+    int allocate_fd = memfd_create("fallocate", 0);
+    if (allocate_fd < 0 ||
+        readahead(allocate_fd, 0, 4096) != 0 ||
+        posix_fadvise(allocate_fd, 0, 0, POSIX_FADV_NORMAL) != 0 ||
+        sync_file_range(allocate_fd, 0, 0, SYNC_FILE_RANGE_WRITE) != 0 ||
+        fallocate(allocate_fd, 0, 0, 8192) != 0) {
+        return 316;
+    }
+    struct stat allocate_stat;
+    if (fstat(allocate_fd, &allocate_stat) != 0 ||
+        allocate_stat.st_size != 8192 ||
+        pwrite(allocate_fd, "ABCDEFGH", 8, 96) != 8 ||
+        fallocate(allocate_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                  96, 8) != 0) {
+        return 317;
+    }
+    unsigned char allocate_zeroes[8];
+    memset(allocate_zeroes, 0xff, sizeof(allocate_zeroes));
+    if (pread(allocate_fd, allocate_zeroes, sizeof(allocate_zeroes), 96) !=
+            (ssize_t)sizeof(allocate_zeroes)) {
+        return 318;
+    }
+    for (size_t index = 0; index < sizeof(allocate_zeroes); index++) {
+        if (allocate_zeroes[index] != 0) {
+            return 319;
+        }
+    }
+    errno = 0;
+    if (fallocate(allocate_fd, FALLOC_FL_KEEP_SIZE, 8192, 4096) != -1 ||
+        errno != EOPNOTSUPP || close(allocate_fd) != 0) {
+        return 320;
+    }
     unsigned char *remap_pages = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
                                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (remap_pages == MAP_FAILED) {

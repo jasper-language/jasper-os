@@ -1719,6 +1719,12 @@ fn execute(
         LinuxSyscall::Fdatasync => compat_result(linux_sync_fd(pid, call.args[0], true)),
         LinuxSyscall::Ftruncate => compat_result(linux_ftruncate(pid, call.args)),
         LinuxSyscall::Truncate => compat_result(linux_truncate(pid, call.args)),
+        LinuxSyscall::Fallocate => compat_result(linux_fallocate(pid, call.args)),
+        LinuxSyscall::ReadAhead => compat_result(linux_readahead(pid, call.args)),
+        LinuxSyscall::Fadvise64 => compat_result(linux_fadvise64(pid, call.args)),
+        LinuxSyscall::SyncFileRange => {
+            compat_result(linux_sync_file_range(pid, call.args))
+        }
         LinuxSyscall::MemfdCreate => compat_result(linux_memfd_create(pid, call.args)),
         LinuxSyscall::Sync => 0,
         LinuxSyscall::Syncfs => compat_result(linux_syncfs(pid, call.args[0])),
@@ -4281,6 +4287,129 @@ fn linux_truncate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         false,
     )?;
     Err(CompatErrno::ReadOnly)
+}
+
+fn linux_fallocate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const FALLOC_FL_KEEP_SIZE: u64 = 0x01;
+    const FALLOC_FL_PUNCH_HOLE: u64 = 0x02;
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let mode = args[1];
+    let offset = args[2];
+    let length = args[3];
+    if length == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if mode & !(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE) != 0
+        || mode & FALLOC_FL_PUNCH_HOLE != 0 && mode & FALLOC_FL_KEEP_SIZE == 0
+    {
+        return Err(CompatErrno::NotSupported);
+    }
+    let end = offset
+        .checked_add(length)
+        .filter(|end| *end <= MAX_BYTES)
+        .ok_or(CompatErrno::Invalid)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind == compat_core::fd::CompatKind::Directory {
+        return Err(CompatErrno::IsDirectory);
+    }
+    let Some((current_size, _, _)) = proc::linux_ashmem_state(pid, entry.handle) else {
+        return match entry.kind {
+            compat_core::fd::CompatKind::File => Err(CompatErrno::ReadOnly),
+            _ => Err(CompatErrno::NotSupported),
+        };
+    };
+    if proc::linux_ashmem_is_regular(pid, entry.handle) != Some(true) {
+        return Err(CompatErrno::NotSupported);
+    }
+    let seals = proc::linux_ashmem_get_seals(pid, entry.handle).ok_or(CompatErrno::Invalid)?;
+    if mode & FALLOC_FL_PUNCH_HOLE != 0 {
+        if end > current_size {
+            return Err(CompatErrno::Invalid);
+        }
+        if seals & (8 | 16) != 0 {
+            return Err(CompatErrno::Perm);
+        }
+        let zeroes = [0u8; 4096];
+        let mut cursor = offset;
+        while cursor < end {
+            let take = (end - cursor).min(zeroes.len() as u64) as usize;
+            proc::linux_ashmem_write_from(pid, entry.handle, cursor, &zeroes[..take])
+                .map_err(ashmem_compat_error)?;
+            cursor += take as u64;
+        }
+        return Ok(0);
+    }
+    if mode & FALLOC_FL_KEEP_SIZE != 0 {
+        return if end <= current_size {
+            Ok(0)
+        } else {
+            Err(CompatErrno::NotSupported)
+        };
+    }
+    if end > current_size {
+        if seals & 4 != 0 {
+            return Err(CompatErrno::Perm);
+        }
+        proc::linux_ashmem_set_size(pid, entry.handle, end)
+            .map_err(ashmem_compat_error)?;
+    }
+    Ok(0)
+}
+
+fn linux_file_range_advice(pid: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let offset = args[1] as i64;
+    let length = args[2] as i64;
+    if offset < 0 || length < 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    match entry.kind {
+        compat_core::fd::CompatKind::File => Ok(()),
+        compat_core::fd::CompatKind::Directory => Err(CompatErrno::IsDirectory),
+        compat_core::fd::CompatKind::Device
+            if proc::linux_ashmem_is_regular(pid, entry.handle) == Some(true) =>
+        {
+            Ok(())
+        }
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+fn linux_readahead(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    linux_file_range_advice(pid, args)?;
+    Ok(0)
+}
+
+fn linux_fadvise64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const POSIX_FADV_NORMAL: u64 = 0;
+    const POSIX_FADV_RANDOM: u64 = 1;
+    const POSIX_FADV_SEQUENTIAL: u64 = 2;
+    const POSIX_FADV_WILLNEED: u64 = 3;
+    const POSIX_FADV_DONTNEED: u64 = 4;
+    const POSIX_FADV_NOREUSE: u64 = 5;
+    if args[3] > POSIX_FADV_NOREUSE {
+        return Err(CompatErrno::Invalid);
+    }
+    let _ = (
+        POSIX_FADV_NORMAL,
+        POSIX_FADV_RANDOM,
+        POSIX_FADV_SEQUENTIAL,
+        POSIX_FADV_WILLNEED,
+        POSIX_FADV_DONTNEED,
+    );
+    linux_file_range_advice(pid, args)?;
+    Ok(0)
+}
+
+fn linux_sync_file_range(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const VALID_FLAGS: u64 = 0x1 | 0x2 | 0x4;
+    if args[3] & !VALID_FLAGS != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    linux_file_range_advice(pid, args)?;
+    Ok(0)
 }
 
 fn linux_utime(pid: ObjId, path: u64) -> Result<u64, CompatErrno> {

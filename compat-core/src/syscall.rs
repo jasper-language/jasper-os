@@ -8,7 +8,8 @@ use linux_raw_sys::general::{
     __NR_epoll_create1, __NR_epoll_ctl,
     __NR_epoll_pwait, __NR_epoll_pwait2, __NR_epoll_wait, __NR_eventfd, __NR_eventfd2, __NR_execve,
     __NR_exit, __NR_exit_group,
-    __NR_fchdir, __NR_fchmod, __NR_fchmodat, __NR_fchmodat2, __NR_fchown, __NR_fchownat,
+    __NR_fadvise64, __NR_fallocate, __NR_fchdir, __NR_fchmod, __NR_fchmodat, __NR_fchmodat2,
+    __NR_fchown, __NR_fchownat,
     __NR_chmod, __NR_chown, __NR_fcntl, __NR_fdatasync, __NR_fstat, __NR_fstatfs, __NR_fsync,
     __NR_futimesat, __NR_getrlimit, __NR_lstat, __NR_setrlimit, __NR_stat,
     __NR_ftruncate, __NR_futex, __NR_getcpu, __NR_getcwd,
@@ -24,13 +25,14 @@ use linux_raw_sys::general::{
     __NR_pread64, __NR_preadv, __NR_preadv2, __NR_pselect6, __NR_prlimit64, __NR_pwrite64,
     __NR_pwritev, __NR_pwritev2, __NR_read, __NR_readlink, __NR_readlinkat, __NR_readv,
     __NR_recvfrom,
-    __NR_recvmsg, __NR_rseq, __NR_rt_sigaction, __NR_rt_sigpending, __NR_rt_sigprocmask,
+    __NR_readahead, __NR_recvmsg, __NR_rseq, __NR_rt_sigaction, __NR_rt_sigpending, __NR_rt_sigprocmask,
     __NR_rt_sigreturn,
     __NR_sched_getaffinity, __NR_sched_getparam, __NR_sched_getscheduler, __NR_sched_setaffinity,
     __NR_sched_setscheduler, __NR_sched_yield, __NR_select, __NR_sendmsg, __NR_sendto,
     __NR_set_robust_list, __NR_set_tid_address, __NR_setsid, __NR_setsockopt, __NR_shutdown,
     __NR_sigaltstack, __NR_socket, __NR_socketpair, __NR_statfs, __NR_statx, __NR_sync,
-    __NR_syncfs, __NR_sysinfo, __NR_tgkill, __NR_time, __NR_truncate, __NR_uname, __NR_utime,
+    __NR_sync_file_range, __NR_syncfs, __NR_sysinfo, __NR_tgkill, __NR_time, __NR_truncate,
+    __NR_uname, __NR_utime,
     __NR_utimensat, __NR_utimes, __NR_vfork, __NR_wait4, __NR_write, __NR_writev,
 };
 
@@ -141,6 +143,10 @@ pub enum LinuxSyscall {
     Fdatasync,
     Ftruncate,
     Truncate,
+    Fallocate,
+    ReadAhead,
+    Fadvise64,
+    SyncFileRange,
     MemfdCreate,
     Sync,
     Syncfs,
@@ -365,6 +371,9 @@ pub enum CompatErrno {
     /// 操作已取消。
     Canceled = linux_raw_sys::errno::ECANCELED,
     NoSys = linux_raw_sys::errno::ENOSYS,
+    /// The operation is not supported by this backing object.
+    /// 当前 backing 对象不支持该操作。
+    NotSupported = linux_raw_sys::errno::EOPNOTSUPP,
 }
 
 pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
@@ -428,6 +437,10 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_fdatasync) => LinuxSyscall::Fdatasync,
         value if value == u64::from(__NR_ftruncate) => LinuxSyscall::Ftruncate,
         value if value == u64::from(__NR_truncate) => LinuxSyscall::Truncate,
+        value if value == u64::from(__NR_fallocate) => LinuxSyscall::Fallocate,
+        value if value == u64::from(__NR_readahead) => LinuxSyscall::ReadAhead,
+        value if value == u64::from(__NR_fadvise64) => LinuxSyscall::Fadvise64,
+        value if value == u64::from(__NR_sync_file_range) => LinuxSyscall::SyncFileRange,
         value if value == u64::from(__NR_memfd_create) => LinuxSyscall::MemfdCreate,
         value if value == u64::from(__NR_sync) => LinuxSyscall::Sync,
         value if value == u64::from(__NR_syncfs) => LinuxSyscall::Syncfs,
@@ -596,6 +609,10 @@ mod tests {
             (__NR_fdatasync, LinuxSyscall::Fdatasync),
             (__NR_ftruncate, LinuxSyscall::Ftruncate),
             (__NR_truncate, LinuxSyscall::Truncate),
+            (__NR_fallocate, LinuxSyscall::Fallocate),
+            (__NR_readahead, LinuxSyscall::ReadAhead),
+            (__NR_fadvise64, LinuxSyscall::Fadvise64),
+            (__NR_sync_file_range, LinuxSyscall::SyncFileRange),
             (__NR_memfd_create, LinuxSyscall::MemfdCreate),
             (__NR_sync, LinuxSyscall::Sync),
             (__NR_syncfs, LinuxSyscall::Syncfs),
