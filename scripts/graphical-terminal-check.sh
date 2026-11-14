@@ -11,6 +11,10 @@ fi
 
 OUT="${GRAPHICAL_TERMINAL_OUT:-$ROOT/evidence/graphical-terminal-$(date '+%Y%m%d-%H%M%S')}"
 SOCKET="$OUT/monitor.sock"
+command -v socat >/dev/null 2>&1 || {
+  echo "graphical-terminal: socat is required for monitor input" >&2
+  exit 69
+}
 mkdir -p "$OUT"
 rm -f -- "$SOCKET"
 
