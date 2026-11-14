@@ -17,6 +17,11 @@ pub enum CompatKind {
     Signal,
     Pidfd,
     Inotify,
+    MessageQueue,
+    MountTree,
+    FsContext,
+    Path,
+    Sandbox,
     Device,
     Other,
 }

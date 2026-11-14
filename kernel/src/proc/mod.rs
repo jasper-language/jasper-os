@@ -57,6 +57,8 @@ use crate::{arch, kprintln, sched};
 #[cfg(feature = "linux-abi")]
 use compat_core::fd::{FdDescription, FdTable};
 #[cfg(feature = "linux-abi")]
+use compat_core::seccomp::{evaluate as evaluate_seccomp, SeccompAction, SeccompInsn};
+#[cfg(feature = "linux-abi")]
 use compat_core::syscall::{LinuxSyscall, LinuxSyscallSet};
 
 pub mod spawn;
@@ -66,6 +68,10 @@ pub const HANDLES_PER_PROCESS: usize = crate::config::ACTIVE.objects.handles_per
 const USI_REQUEST_SLOTS: usize = 16;
 #[cfg(feature = "linux-abi")]
 static LINUX_PID_NEXT: AtomicU32 = AtomicU32::new(1);
+#[cfg(feature = "linux-abi")]
+static NEXT_LINUX_AIO_CONTEXT: AtomicU64 = AtomicU64::new(0x9000_0000_0000_0001);
+#[cfg(feature = "linux-abi")]
+static NEXT_LINUX_SYSV_SHMEM_ID: AtomicU64 = AtomicU64::new(0x0000_8d00_0000_0001);
 static NEXT_WORKLOAD_DOMAIN: AtomicU32 = AtomicU32::new(1);
 /// Opaque sentinel used only by the Linux standard-stream compatibility table.
 ///
@@ -96,6 +102,13 @@ const LINUX_TIMERFD_HANDLE_BASE: u64 = 0x0000_8900_0000_0000;
 const LINUX_SIGNALFD_HANDLE_BASE: u64 = 0x0000_8a00_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_INOTIFY_HANDLE_BASE: u64 = 0x0000_8b00_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_MQ_HANDLE_BASE: u64 = 0x0000_8c00_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_MOUNT_TREE_HANDLE_BASE: u64 = 0x0000_8e00_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_FS_CONTEXT_HANDLE_BASE: u64 = 0x0000_8f00_0000_0000;
+const LINUX_LANDLOCK_HANDLE_BASE: u64 = 0x0000_9000_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -141,7 +154,19 @@ struct LinuxProcessState {
     membarrier_flags: u8,
     umask: u32,
     ioprio: u32,
+    personality: u32,
+    pdeathsig: u32,
+    subreaper: bool,
+    termination_signal: u32,
+    rlimits: LinuxRlimits,
+    aio_contexts: Vec<LinuxAioContext>,
+    seccomp_filters: Vec<Vec<SeccompInsn>>,
+    seccomp_strict: bool,
+    no_new_privs: bool,
+    shstk_features: u64,
+    shstk_locked: u64,
     mappings: Vec<LinuxMapping>,
+    sealed_ranges: Vec<(u64, u64)>,
     pipes: Vec<LinuxPipeHandle>,
     next_pipe_handle: u64,
     sockets: Vec<LinuxSocketHandle>,
@@ -162,6 +187,14 @@ struct LinuxProcessState {
     next_signalfd_handle: u64,
     inotifies: Vec<LinuxInotifyHandle>,
     next_inotify_handle: u64,
+    message_queues: Vec<LinuxMqHandle>,
+    next_mq_handle: u64,
+    mount_trees: Vec<u64>,
+    next_mount_tree_handle: u64,
+    fs_contexts: Vec<LinuxFsContextHandle>,
+    next_fs_context_handle: u64,
+    landlock_rulesets: Vec<LinuxLandlockRulesetHandle>,
+    next_landlock_handle: u64,
     epolls: Vec<LinuxEpollHandle>,
     next_epoll_handle: u64,
     iourings: Vec<LinuxIoUringHandle>,
@@ -205,6 +238,15 @@ pub(crate) struct LinuxCredentials {
 }
 
 #[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxRlimits {
+    pub(crate) stack_current: u64,
+    pub(crate) stack_maximum: u64,
+    pub(crate) nofile_current: u64,
+    pub(crate) nofile_maximum: u64,
+}
+
+#[cfg(feature = "linux-abi")]
 #[derive(Clone)]
 struct LinuxPipeHandle {
     handle: u64,
@@ -238,6 +280,13 @@ struct AshmemBuffer {
     seals: AtomicU32,
     name: SpinLock<([u8; 256], usize)>,
     pages: SpinLock<Vec<Arc<crate::mm::memory_object::Page>>>,
+}
+
+/// One bounded shared-page object used by the System V `shm*` ABI.
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+pub(crate) struct LinuxSharedMemoryObject {
+    buffer: Arc<AshmemBuffer>,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -293,10 +342,114 @@ pub(crate) struct LinuxInotifyWatch {
 }
 
 #[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxInotifyEvent {
+    pub(crate) wd: i32,
+    pub(crate) mask: u32,
+    pub(crate) cookie: u32,
+    pub(crate) name: [u8; 256],
+    pub(crate) name_len: u8,
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) struct LinuxInotifyState {
+    pub(crate) watches: Vec<LinuxInotifyWatch>,
+    pub(crate) events: VecDeque<LinuxInotifyEvent>,
+}
+
+#[cfg(feature = "linux-abi")]
 #[derive(Clone)]
 struct LinuxInotifyHandle {
     handle: u64,
-    watches: Arc<SpinLock<Vec<LinuxInotifyWatch>>>,
+    state: Arc<SpinLock<LinuxInotifyState>>,
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) struct LinuxMqMessage {
+    pub(crate) priority: u32,
+    pub(crate) bytes: Vec<u8>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxMqNotification {
+    pub(crate) process: ObjId,
+    pub(crate) notify: u32,
+    pub(crate) signal: u32,
+    pub(crate) value: u64,
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) struct LinuxMqState {
+    pub(crate) max_messages: usize,
+    pub(crate) message_size: usize,
+    pub(crate) messages: VecDeque<LinuxMqMessage>,
+    pub(crate) blocked_receivers: usize,
+    pub(crate) notification: Option<LinuxMqNotification>,
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) struct LinuxMqShared {
+    pub(crate) state: SpinLock<LinuxMqState>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxMqHandle {
+    handle: u64,
+    queue: Arc<LinuxMqShared>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxFsContextHandle {
+    handle: u64,
+    fs_name: [u8; 16],
+    fs_name_len: u8,
+    created: bool,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxLandlockRule {
+    pub(crate) node: crate::linux_vfs::Node,
+    pub(crate) allowed_access: u64,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+pub(crate) struct LinuxLandlockRuleset {
+    pub(crate) handled_access_fs: u64,
+    pub(crate) rules: Vec<LinuxLandlockRule>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxLandlockRulesetHandle {
+    handle: u64,
+    ruleset: Arc<SpinLock<LinuxLandlockRuleset>>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxAioEvent {
+    pub(crate) data: u64,
+    pub(crate) object: u64,
+    pub(crate) result: i64,
+    pub(crate) result2: i64,
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) struct LinuxAioState {
+    pub(crate) max_events: usize,
+    pub(crate) events: VecDeque<LinuxAioEvent>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxAioContext {
+    id: u64,
+    state: Arc<SpinLock<LinuxAioState>>,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -310,6 +463,7 @@ struct LinuxEpollHandle {
 #[derive(Clone, Copy)]
 pub(crate) struct LinuxEpollRegistration {
     pub(crate) handle: u64,
+    pub(crate) description_id: u64,
     pub(crate) kind: compat_core::fd::CompatKind,
     pub(crate) rights: kernel_core::object::Rights,
     pub(crate) events: u32,
@@ -351,7 +505,8 @@ enum LinuxFdResource {
     EventFd(LinuxEventFdHandle),
     TimerFd(LinuxTimerFdHandle),
     SignalFd(LinuxSignalFdHandle),
-    Inotify(Arc<SpinLock<Vec<LinuxInotifyWatch>>>),
+    Inotify(Arc<SpinLock<LinuxInotifyState>>),
+    MessageQueue(Arc<LinuxMqShared>),
     Socket {
         endpoint: Arc<compat_core::UnixSocketEndpoint>,
         listener: Option<Arc<UnixListener>>,
@@ -1494,9 +1649,18 @@ pub(crate) fn linux_capture_fd_transfer(
                         .inotifies
                         .iter()
                         .find(|inotify| inotify.handle == entry.handle)
-                        .map(|inotify| Arc::clone(&inotify.watches))
+                        .map(|inotify| Arc::clone(&inotify.state))
                         .ok_or(LinuxFdTransferError::Invalid)?;
                     LinuxFdResource::Inotify(inotify)
+                }
+                compat_core::fd::CompatKind::MessageQueue => {
+                    let queue = linux
+                        .message_queues
+                        .iter()
+                        .find(|queue| queue.handle == entry.handle)
+                        .map(|queue| Arc::clone(&queue.queue))
+                        .ok_or(LinuxFdTransferError::Invalid)?;
+                    LinuxFdResource::MessageQueue(queue)
                 }
                 compat_core::fd::CompatKind::Device
                     if entry.handle >= LINUX_ASHMEM_HANDLE_BASE =>
@@ -1562,6 +1726,19 @@ pub(crate) fn linux_install_fd_transfer(
                     .try_reserve(1)
                     .map_err(|_| LinuxFdTransferError::NoSpace)?;
                 Some(linux.next_inotify_handle)
+            } else {
+                None
+            };
+            let pending_mq = match &resource {
+                LinuxFdResource::MessageQueue(queue) => Some(Arc::clone(queue)),
+                _ => None,
+            };
+            let mq_handle = if pending_mq.is_some() {
+                linux
+                    .message_queues
+                    .try_reserve(1)
+                    .map_err(|_| LinuxFdTransferError::NoSpace)?;
+                Some(linux.next_mq_handle)
             } else {
                 None
             };
@@ -1721,6 +1898,19 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                     )
                 }
+                LinuxFdResource::MessageQueue(_) => {
+                    (
+                        mq_handle.ok_or(LinuxFdTransferError::NoSpace)?,
+                        None,
+                        None,
+                        None,
+                        false,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                }
                 LinuxFdResource::Socket {
                     endpoint,
                     listener,
@@ -1805,12 +1995,19 @@ pub(crate) fn linux_install_fd_transfer(
                 linux.next_signalfd_handle = next;
                 linux.signalfds.push(signalfd);
             }
-            if let Some(watches) = pending_inotify {
+            if let Some(state) = pending_inotify {
                 let next = handle
                     .checked_add(1)
                     .ok_or(LinuxFdTransferError::NoSpace)?;
                 linux.next_inotify_handle = next;
-                linux.inotifies.push(LinuxInotifyHandle { handle, watches });
+                linux.inotifies.push(LinuxInotifyHandle { handle, state });
+            }
+            if let Some(queue) = pending_mq {
+                let next = handle
+                    .checked_add(1)
+                    .ok_or(LinuxFdTransferError::NoSpace)?;
+                linux.next_mq_handle = next;
+                linux.message_queues.push(LinuxMqHandle { handle, queue });
             }
             if let Some((endpoint, listener, controls)) = pending_socket {
                 let next = handle
@@ -1958,6 +2155,15 @@ pub(crate) fn linux_fd_status_flags(pid: ObjId, fd: u32) -> Option<u32> {
     })
 }
 
+/// Returns the open-file-description identity compared by `kcmp(2)`.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_fd_description_identity(pid: ObjId, fd: u32) -> Option<u64> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p.linux.as_ref()?.fds.description_identity(fd),
+        _ => None,
+    })
+}
+
 /// Updates shared Linux status flags for one descriptor generation.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_set_fd_status_flags(pid: ObjId, fd: u32, flags: u32) -> bool {
@@ -2012,6 +2218,15 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     if handle >= LINUX_INOTIFY_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
         linux.inotifies.retain(|inotify| inotify.handle != handle);
     }
+    if handle >= LINUX_MQ_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
+        linux.message_queues.retain(|queue| queue.handle != handle);
+    }
+    if handle >= LINUX_MOUNT_TREE_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
+        linux.mount_trees.retain(|mount| *mount != handle);
+    }
+    if handle >= LINUX_FS_CONTEXT_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
+        linux.fs_contexts.retain(|context| context.handle != handle);
+    }
     if handle >= LINUX_EPOLL_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
         linux.epolls.retain(|epoll| epoll.handle != handle);
     }
@@ -2057,6 +2272,51 @@ pub(crate) fn linux_create_memfd(
     allow_sealing: bool,
 ) -> Option<u32> {
     linux_open_ashmem_kind(pid, close_on_exec, true, allow_sealing)
+}
+
+/// Allocates one anonymous shared-page object for System V shared memory.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_create_shared_memory(
+    pid: ObjId,
+    size: u64,
+) -> Option<LinuxSharedMemoryObject> {
+    const MAX_BYTES: u64 = 64 * 1024 * 1024;
+    if size == 0 || size > MAX_BYTES {
+        return None;
+    }
+    let pages_count = usize::try_from(size.div_ceil(FRAME_SIZE)).ok()?;
+    let id = NEXT_LINUX_SYSV_SHMEM_ID.fetch_add(1, Ordering::Relaxed);
+    with_proc(pid, |p| {
+        let mut charge = p
+            .memory_account
+            .reserve(pages_count as u64, 0, p.memory_owned_limit, p.memory_pin_limit)
+            .ok_or(ProcError::MemoryQuota)?;
+        let mut pages = Vec::new();
+        pages
+            .try_reserve_exact(pages_count)
+            .map_err(|_| ProcError::OutOfFrames)?;
+        for _ in 0..pages_count {
+            let page_charge = charge.take_page().ok_or(ProcError::OutOfFrames)?;
+            pages.push(
+                crate::mm::memory_object::Page::zeroed(page_charge)
+                    .ok_or(ProcError::OutOfFrames)?,
+            );
+        }
+        Ok(LinuxSharedMemoryObject {
+            buffer: Arc::new(AshmemBuffer {
+                id,
+                regular_file: false,
+                size: AtomicU64::new(size),
+                protection: AtomicU32::new(3),
+                pins: AtomicU32::new(0),
+                allow_sealing: AtomicU32::new(0),
+                seals: AtomicU32::new(0),
+                name: SpinLock::new(([0; 256], 0)),
+                pages: SpinLock::new(pages),
+            }),
+        })
+    })
+    .ok()
 }
 
 #[cfg(feature = "linux-abi")]
@@ -2390,19 +2650,22 @@ pub(crate) fn linux_inotify_create(
         }
         linux.inotifies.push(LinuxInotifyHandle {
             handle,
-            watches: Arc::new(SpinLock::new(Vec::new())),
+            state: Arc::new(SpinLock::new(LinuxInotifyState {
+                watches: Vec::new(),
+                events: VecDeque::new(),
+            })),
         });
         Ok(fd.fd())
     })
     .ok()
 }
 
-/// Returns the shared watch set for one inotify handle.
+/// Returns the shared watch and event state for one inotify handle.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_inotify_state(
     pid: ObjId,
     handle: u64,
-) -> Option<Arc<SpinLock<Vec<LinuxInotifyWatch>>>> {
+) -> Option<Arc<SpinLock<LinuxInotifyState>>> {
     crate::kobj::with(|table| match table.get(pid) {
         Ok(KObject::Process(process)) => process
             .linux
@@ -2410,9 +2673,243 @@ pub(crate) fn linux_inotify_state(
             .inotifies
             .iter()
             .find(|inotify| inotify.handle == handle)
-            .map(|inotify| Arc::clone(&inotify.watches)),
+            .map(|inotify| Arc::clone(&inotify.state)),
         _ => None,
     })
+}
+
+/// Installs one descriptor sharing a POSIX message queue object.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_mq_install(
+    pid: ObjId,
+    queue: Arc<LinuxMqShared>,
+    rights: Rights,
+    close_on_exec: bool,
+    nonblocking: bool,
+) -> Option<u32> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.message_queues.len() >= 32 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .message_queues
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_mq_handle;
+        linux.next_mq_handle = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                rights,
+                compat_core::fd::CompatKind::MessageQueue,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        if nonblocking
+            && !linux
+                .fds
+                .set_fd_status_flags(fd.fd(), compat_core::syscall::LINUX_O_NONBLOCK)
+        {
+            let _ = linux.fds.close(fd);
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux.message_queues.push(LinuxMqHandle { handle, queue });
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Returns the shared queue object for one message-queue descriptor.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_mq_state(pid: ObjId, handle: u64) -> Option<Arc<LinuxMqShared>> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .message_queues
+            .iter()
+            .find(|queue| queue.handle == handle)
+            .map(|queue| Arc::clone(&queue.queue)),
+        _ => None,
+    })
+}
+
+/// Returns every message-queue object currently referenced by a process.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_mq_queues(pid: ObjId) -> Vec<Arc<LinuxMqShared>> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()
+            .map(|linux| {
+                linux
+                    .message_queues
+                    .iter()
+                    .map(|queue| Arc::clone(&queue.queue))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    })
+}
+
+/// Installs one read-only mount-tree descriptor for the synthetic root namespace.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_mount_tree(pid: ObjId, close_on_exec: bool) -> Option<u32> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux
+            .mount_trees
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_mount_tree_handle;
+        linux.next_mount_tree_handle = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ,
+                compat_core::fd::CompatKind::MountTree,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.mount_trees.push(handle);
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Installs one new filesystem configuration context.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_fs_context(
+    pid: ObjId,
+    fs_name: [u8; 16],
+    fs_name_len: u8,
+    close_on_exec: bool,
+) -> Option<u32> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.fs_contexts.len() >= 16 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .fs_contexts
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_fs_context_handle;
+        linux.next_fs_context_handle = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ.union(Rights::WRITE),
+                compat_core::fd::CompatKind::FsContext,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.fs_contexts.push(LinuxFsContextHandle {
+            handle,
+            fs_name,
+            fs_name_len,
+            created: false,
+        });
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Installs one Landlock ruleset whose rules are shared by duplicated FDs.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_landlock_ruleset(
+    pid: ObjId,
+    handled_access_fs: u64,
+    close_on_exec: bool,
+) -> Option<u32> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.landlock_rulesets.len() >= 16 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .landlock_rulesets
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_landlock_handle;
+        linux.next_landlock_handle = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ.union(Rights::WRITE),
+                compat_core::fd::CompatKind::Sandbox,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.landlock_rulesets.push(LinuxLandlockRulesetHandle {
+            handle,
+            ruleset: Arc::new(SpinLock::new(LinuxLandlockRuleset {
+                handled_access_fs,
+                rules: Vec::new(),
+            })),
+        });
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_landlock_ruleset(
+    pid: ObjId,
+    handle: u64,
+) -> Option<Arc<SpinLock<LinuxLandlockRuleset>>> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .landlock_rulesets
+            .iter()
+            .find(|ruleset| ruleset.handle == handle)
+            .map(|ruleset| Arc::clone(&ruleset.ruleset)),
+        _ => None,
+    })
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_fs_context_create(pid: ObjId, fd: u32) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        let entry = linux.fds.get_fd(fd).ok_or(ProcError::NoTaskSlot)?;
+        let context = linux
+            .fs_contexts
+            .iter_mut()
+            .find(|context| context.handle == entry.handle)
+            .ok_or(ProcError::NoTaskSlot)?;
+        context.created = true;
+        Ok(())
+    })
+    .is_ok()
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_fs_context_ready(pid: ObjId, fd: u32) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_ref().ok_or(ProcError::Exited)?;
+        let entry = linux.fds.get_fd(fd).ok_or(ProcError::NoTaskSlot)?;
+        linux
+            .fs_contexts
+            .iter()
+            .find(|context| context.handle == entry.handle)
+            .is_some_and(|context| {
+                context.created
+                    && context.fs_name_len == 8
+                    && context.fs_name[..8] == b"jasperfs"[..]
+            })
+            .then_some(())
+            .ok_or(ProcError::NoTaskSlot)
+    })
+    .is_ok()
 }
 
 /// Creates one epoll instance backed by a bounded per-instance registration set.
@@ -2462,6 +2959,42 @@ pub(crate) fn linux_epoll_registrations(
             .find(|epoll| epoll.handle == handle)
             .map(|epoll| Arc::clone(&epoll.registrations)),
         _ => None,
+    })
+}
+
+/// Returns the open-file identity registered in one epoll target slot.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_epoll_registration_identity(
+    pid: ObjId,
+    epoll_fd: u32,
+    target_fd: u32,
+    target_offset: u32,
+) -> Option<u64> {
+    if target_offset != 0 {
+        return None;
+    }
+    crate::kobj::with(|table| {
+        let process = match table.get(pid) {
+            Ok(KObject::Process(process)) => process,
+            _ => return None,
+        };
+        let linux = process.linux.as_ref()?;
+        let epoll = linux.fds.get_fd(epoll_fd)?;
+        let registrations = linux
+            .epolls
+            .iter()
+            .find(|epoll_handle| epoll_handle.handle == epoll.handle)?
+            .registrations
+            .lock();
+        let target = linux.fds.get_fd(target_fd)?;
+        let description_id = linux.fds.description_identity(target_fd)?;
+        registrations
+            .iter()
+            .any(|registration| {
+                registration.handle == target.handle
+                    && registration.description_id == description_id
+            })
+            .then_some(description_id)
     })
 }
 
@@ -3665,6 +4198,127 @@ pub(crate) fn linux_ashmem_map(
     })
 }
 
+/// Maps one System V shared-memory object at an exact page-aligned range.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_shared_memory_map(
+    pid: ObjId,
+    object: &LinuxSharedMemoryObject,
+    address: u64,
+    length: u64,
+    writable: bool,
+) -> Result<(), LinuxAshmemError> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    if address % PAGE != 0 || length == 0 || length % PAGE != 0 {
+        return Err(LinuxAshmemError::Invalid);
+    }
+    let pages_count = length / PAGE;
+    let retained = {
+        let guard = object.buffer.pages.lock();
+        let count = usize::try_from(pages_count).map_err(|_| LinuxAshmemError::Invalid)?;
+        let mut retained = Vec::new();
+        retained
+            .try_reserve_exact(count)
+            .map_err(|_| LinuxAshmemError::NoMemory)?;
+        retained.extend(
+            guard
+                .get(..count)
+                .ok_or(LinuxAshmemError::Invalid)?
+                .iter()
+                .cloned(),
+        );
+        retained
+    };
+    let backing = kernel_core::memory_capability::BackingIdentity::new(object.buffer.id, 1)
+        .ok_or(LinuxAshmemError::Invalid)?;
+    with_proc(pid, |p| {
+        if p.frames
+            .len()
+            .checked_add(p.shared_maps.len())
+            .and_then(|count| count.checked_add(retained.len()))
+            .is_none_or(|count| count > MAX_PROCESS_FRAMES)
+        {
+            return Err(ProcError::MemoryQuota);
+        }
+        p.shared_maps
+            .try_reserve(retained.len())
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        if !p
+            .memory_caps
+            .can_grant(address, pages_count, MemoryKind::Shared)
+        {
+            return Err(ProcError::MemoryQuota);
+        }
+        for index in 0..pages_count {
+            if p.space
+                .translate(VirtPage::containing(address + index * PAGE))
+                .is_some()
+            {
+                return Err(ProcError::Map(MapError::InvalidAddress));
+            }
+        }
+        if !p.space.begin_shootdown() {
+            return Err(ProcError::Map(MapError::Busy));
+        }
+        let mut flags = MapFlags::USER;
+        if writable {
+            flags = flags.union(MapFlags::WRITE);
+        }
+        let mut published = 0u64;
+        for page in &retained {
+            if p.space
+                .map_raw(
+                    VirtPage::containing(address + published * PAGE),
+                    page.frame(),
+                    flags,
+                )
+                .is_err()
+            {
+                for index in 0..published {
+                    let _ = p
+                        .space
+                        .unmap_raw(VirtPage::containing(address + index * PAGE));
+                }
+                p.space.end_shootdown();
+                return Err(ProcError::Map(MapError::NotMapped));
+            }
+            published += 1;
+        }
+        let rights = MemoryRights::READ
+            .union(MemoryRights::MAP)
+            .union(if writable {
+                MemoryRights::WRITE
+            } else {
+                MemoryRights::NONE
+            });
+        if p.memory_caps
+            .grant(address, pages_count, rights, MemoryKind::Shared, backing)
+            .is_err()
+        {
+            for index in 0..published {
+                let _ = p
+                    .space
+                    .unmap_raw(VirtPage::containing(address + index * PAGE));
+            }
+            p.space.end_shootdown();
+            return Err(ProcError::MemoryQuota);
+        }
+        for (index, page) in retained.iter().enumerate() {
+            p.shared_maps.push(SharedMapping {
+                va: address + index as u64 * PAGE,
+                page: Arc::clone(page),
+                source: backing,
+                writable,
+            });
+        }
+        p.space.end_shootdown();
+        Ok(())
+    })
+    .map_err(|error| match error {
+        ProcError::Handle(HandleError::RightsDenied) => LinuxAshmemError::Permission,
+        _ => LinuxAshmemError::NoMemory,
+    })
+}
+
 /// Installs a read-only Linux virtual file and initializes its offset.
 ///
 /// 安装只读 Linux 虚拟文件；失败不留下部分 fd 状态。
@@ -3734,6 +4388,39 @@ pub(crate) fn linux_install_dir(pid: ObjId, handle: u64, close_on_exec: bool) ->
         Ok(fd.fd())
     })
     .ok()
+}
+
+/// Installs one path-only descriptor without granting stream read/write access.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_path(
+    pid: ObjId,
+    node: crate::linux_vfs::Node,
+    close_on_exec: bool,
+) -> Option<u32> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let fd = linux
+            .fds
+            .install(
+                node.inode(),
+                kernel_core::object::Rights::READ,
+                compat_core::fd::CompatKind::Path,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Resolves the namespace node referenced by one path-only descriptor.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_path_node(pid: ObjId, fd: u32) -> Option<crate::linux_vfs::Node> {
+    let entry = linux_fd(pid, fd)?;
+    if entry.kind != compat_core::fd::CompatKind::Path {
+        return None;
+    }
+    crate::linux_vfs::node_from_inode(entry.handle)
 }
 
 /// Returns `(handle, offset)` for an open read-only Linux file.
@@ -4196,6 +4883,323 @@ pub(crate) fn set_linux_ioprio(pid: ObjId, value: u32) -> bool {
     .is_ok()
 }
 
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ioprio_group(pgid: u32) -> Option<(u32, Vec<ObjId>)> {
+    let mut value = None;
+    let mut members = Vec::new();
+    crate::kobj::with(|table| {
+        table.for_each_live(|id, object| {
+            if let KObject::Process(process) = object {
+                if let Some(linux) = process.linux.as_ref() {
+                    if linux.pgid == pgid {
+                        value.get_or_insert(linux.ioprio);
+                        members.push(id);
+                    }
+                }
+            }
+            true
+        });
+    });
+    value.map(|value| (value, members))
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_ioprio_group(pgid: u32, value: u32) -> bool {
+    let Some((_, members)) = linux_ioprio_group(pgid) else {
+        return false;
+    };
+    members
+        .into_iter()
+        .all(|member| set_linux_ioprio(member, value))
+}
+
+/// Records the irreversible Linux `no_new_privs` process flag.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_set_no_new_privs(pid: ObjId) -> bool {
+    with_proc(pid, |process| {
+        process
+            .linux
+            .as_mut()
+            .ok_or(ProcError::Exited)?
+            .no_new_privs = true;
+        Ok(())
+    })
+    .is_ok()
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_no_new_privs(pid: ObjId) -> Option<bool> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => Some(p.linux.as_ref()?.no_new_privs),
+        _ => None,
+    })
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_shstk_status(pid: ObjId) -> Option<u64> {
+    with_proc(pid, |process| {
+        Ok(process.linux.as_ref().ok_or(ProcError::Exited)?.shstk_features)
+    })
+    .ok()
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_lock_shstk_features(pid: ObjId, features: u64) -> bool {
+    if features & !3 != 0 {
+        return false;
+    }
+    with_proc(pid, |process| {
+        process
+            .linux
+            .as_mut()
+            .ok_or(ProcError::Exited)?
+            .shstk_locked |= features;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Enables Linux seccomp strict mode for the compatibility process.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_set_seccomp_strict(pid: ObjId) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if !linux.no_new_privs {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux.seccomp_strict = true;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Appends one prevalidated filter to the process's ordered seccomp stack.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_seccomp_filter(pid: ObjId, filter: Vec<SeccompInsn>) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if !linux.no_new_privs
+            || linux.seccomp_filters.len() >= compat_core::seccomp::MAX_FILTER_DEPTH
+        {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .seccomp_filters
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.seccomp_filters.push(filter);
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Reports the Linux seccomp mode: disabled, strict, or filter.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_seccomp_mode(pid: ObjId) -> Option<u32> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => {
+            let linux = process.linux.as_ref()?;
+            Some(if !linux.seccomp_filters.is_empty() {
+                2
+            } else if linux.seccomp_strict {
+                1
+            } else {
+                0
+            })
+        }
+        _ => None,
+    })
+}
+
+/// Evaluates strict mode and every installed filter for one syscall.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_seccomp_action(
+    pid: ObjId,
+    data: &[u8; compat_core::seccomp::SECCOMP_DATA_BYTES],
+) -> SeccompAction {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => {
+            let Some(linux) = p.linux.as_ref() else {
+                return SeccompAction::Allow;
+            };
+            if linux.seccomp_strict {
+                let number = i32::from_le_bytes(data[..4].try_into().unwrap());
+                return if matches!(number, 0 | 1 | 15 | 60 | 231) {
+                    SeccompAction::Allow
+                } else {
+                    SeccompAction::KillProcess
+                };
+            }
+            linux
+                .seccomp_filters
+                .iter()
+                .fold(SeccompAction::Allow, |combined, filter| {
+                    evaluate_seccomp(filter, data)
+                        .map_or(SeccompAction::KillProcess, |action| {
+                            combined.combine(action)
+                        })
+                })
+        }
+        _ => SeccompAction::Allow,
+    })
+}
+
+/// Returns the Linux execution personality.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_personality(pid: ObjId) -> Option<u32> {
+    with_proc(pid, |process| {
+        Ok(process.linux.as_ref().ok_or(ProcError::Exited)?.personality)
+    })
+    .ok()
+}
+
+/// Replaces the Linux execution personality.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_personality(pid: ObjId, value: u32) -> bool {
+    with_proc(pid, |process| {
+        process.linux.as_mut().ok_or(ProcError::Exited)?.personality = value;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Returns the parent-death signal configured for one Linux process.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_pdeathsig(pid: ObjId) -> Option<u32> {
+    with_proc(pid, |process| {
+        Ok(process.linux.as_ref().ok_or(ProcError::Exited)?.pdeathsig)
+    })
+    .ok()
+}
+
+/// Replaces the parent-death signal configured for one Linux process.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_pdeathsig(pid: ObjId, signal: u32) -> bool {
+    with_proc(pid, |process| {
+        process.linux.as_mut().ok_or(ProcError::Exited)?.pdeathsig = signal;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Returns whether one Linux process is a child subreaper.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_subreaper(pid: ObjId) -> Option<bool> {
+    with_proc(pid, |process| {
+        Ok(process.linux.as_ref().ok_or(ProcError::Exited)?.subreaper)
+    })
+    .ok()
+}
+
+/// Replaces one process's child-subreaper property.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_subreaper(pid: ObjId, enabled: bool) -> bool {
+    with_proc(pid, |process| {
+        process.linux.as_mut().ok_or(ProcError::Exited)?.subreaper = enabled;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Records the signal that terminates one Linux process.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_termination_signal(pid: ObjId, signal: u32) -> bool {
+    if !(1..=64).contains(&signal) {
+        return false;
+    }
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.termination_signal == 0 {
+            linux.termination_signal = signal;
+        }
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Returns the process-local Linux resource limits.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_rlimits(pid: ObjId) -> Option<LinuxRlimits> {
+    with_proc(pid, |process| {
+        Ok(process.linux.as_ref().ok_or(ProcError::Exited)?.rlimits)
+    })
+    .ok()
+}
+
+/// Replaces the process-local Linux resource limits.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_rlimits(pid: ObjId, limits: LinuxRlimits) -> bool {
+    with_proc(pid, |process| {
+        process.linux.as_mut().ok_or(ProcError::Exited)?.rlimits = limits;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Creates one bounded legacy AIO context.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_aio_create(pid: ObjId, max_events: usize) -> Option<u64> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.aio_contexts.len() >= 8 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        let id = NEXT_LINUX_AIO_CONTEXT.fetch_add(1, Ordering::AcqRel);
+        if id == 0 || id == u64::MAX {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .aio_contexts
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.aio_contexts.push(LinuxAioContext {
+            id,
+            state: Arc::new(SpinLock::new(LinuxAioState {
+                max_events,
+                events: VecDeque::new(),
+            })),
+        });
+        Ok(id)
+    })
+    .ok()
+}
+
+/// Returns one legacy AIO context state by opaque context id.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_aio_state(
+    pid: ObjId,
+    id: u64,
+) -> Option<Arc<SpinLock<LinuxAioState>>> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .aio_contexts
+            .iter()
+            .find(|context| context.id == id)
+            .map(|context| Arc::clone(&context.state)),
+        _ => None,
+    })
+}
+
+/// Destroys one legacy AIO context.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_aio_destroy(pid: ObjId, id: u64) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        let Some(index) = linux
+            .aio_contexts
+            .iter()
+            .position(|context| context.id == id)
+        else {
+            return Err(ProcError::NoSuchProcess);
+        };
+        linux.aio_contexts.remove(index);
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Sums scheduler CPU ticks over every live thread in one Linux process.
 /// 汇总一个 Linux 进程全部存活线程的调度器 CPU ticks。
 #[cfg(feature = "linux-abi")]
@@ -4407,6 +5411,54 @@ pub(crate) fn set_linux_mmap_cursor(pid: ObjId, value: u64) -> bool {
         .is_ok()
 }
 
+/// Reports whether any sealed range overlaps `[start, end)`.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_range_is_sealed(pid: ObjId, start: u64, end: u64) -> bool {
+    with_proc(pid, |process| {
+        Ok(process
+            .linux
+            .as_ref()
+            .ok_or(ProcError::Exited)?
+            .sealed_ranges
+            .iter()
+            .any(|(range_start, range_end)| start < *range_end && *range_start < end))
+    })
+    .unwrap_or(false)
+}
+
+/// Adds one bounded, merged sealed range.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn seal_linux_range(pid: ObjId, start: u64, end: u64) -> bool {
+    if start >= end {
+        return false;
+    }
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.sealed_ranges.len() >= 32 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .sealed_ranges
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.sealed_ranges.push((start, end));
+        linux.sealed_ranges.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::new();
+        for (range_start, range_end) in linux.sealed_ranges.iter().copied() {
+            if let Some(last) = merged.last_mut() {
+                if range_start <= last.1 {
+                    last.1 = last.1.max(range_end);
+                    continue;
+                }
+            }
+            merged.push((range_start, range_end));
+        }
+        linux.sealed_ranges = merged;
+        Ok(())
+    })
+    .is_ok()
+}
+
 pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcError> {
     create_process(name, syscalls, |_| {})
 }
@@ -4460,7 +5512,24 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         membarrier_flags: 0,
         umask: 0o022,
         ioprio: (2 << 13) | 4,
+        personality: 0,
+        pdeathsig: 0,
+        subreaper: false,
+        termination_signal: 0,
+        rlimits: LinuxRlimits {
+            stack_current: 8 * 1024 * 1024,
+            stack_maximum: u64::MAX,
+            nofile_current: 64,
+            nofile_maximum: 64,
+        },
+        aio_contexts: Vec::new(),
+        seccomp_filters: Vec::new(),
+        seccomp_strict: false,
+        no_new_privs: false,
+        shstk_features: 0,
+        shstk_locked: 0,
         mappings: Vec::new(),
+        sealed_ranges: Vec::new(),
         pipes: Vec::new(),
         next_pipe_handle: LINUX_PIPE_HANDLE_BASE,
         sockets: Vec::new(),
@@ -4481,6 +5550,14 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         next_signalfd_handle: LINUX_SIGNALFD_HANDLE_BASE,
         inotifies: Vec::new(),
         next_inotify_handle: LINUX_INOTIFY_HANDLE_BASE,
+        message_queues: Vec::new(),
+        next_mq_handle: LINUX_MQ_HANDLE_BASE,
+        mount_trees: Vec::new(),
+        next_mount_tree_handle: LINUX_MOUNT_TREE_HANDLE_BASE,
+        fs_contexts: Vec::new(),
+        next_fs_context_handle: LINUX_FS_CONTEXT_HANDLE_BASE,
+        landlock_rulesets: Vec::new(),
+        next_landlock_handle: LINUX_LANDLOCK_HANDLE_BASE,
         epolls: Vec::new(),
         next_epoll_handle: LINUX_EPOLL_HANDLE_BASE,
         iourings: Vec::new(),
@@ -4538,6 +5615,8 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
                 .signalfds
                 .retain(|signalfd| linux.fds.handle_fd_count(signalfd.handle) != 0);
             linux.mappings.clear();
+            linux.sealed_ranges.clear();
+            linux.aio_contexts.clear();
             linux.brk = crate::arch::USER_WINDOW.0 + 0x1000_0000;
             linux.mmap_next = crate::arch::USER_WINDOW.0 + 0x4000_0000;
             linux.signal_actions = [[0; 4]; 64];
@@ -6317,7 +7396,11 @@ pub fn fork_linux_process(
         linux.ppid = parent_linux_pid;
         linux.child_cpu_ticks = 0;
         linux.exited_cpu_ticks = 0;
+        linux.pdeathsig = 0;
+        linux.subreaper = false;
+        linux.termination_signal = 0;
         linux.mappings.clear();
+        linux.aio_contexts.clear();
         Ok(())
     });
     if prepared.is_err() || inherit_application(parent, child).is_err() {
@@ -6341,6 +7424,10 @@ pub fn fork_linux_process(
             rollback(child, false);
             return Err(error);
         }
+    }
+    if !crate::linux_abi::inherit_sysv_shared_process(parent, child) {
+        rollback(child, false);
+        return Err(ProcError::OutOfFrames);
     }
     if adopt(parent, child).is_err() {
         rollback(child, false);
@@ -6369,7 +7456,7 @@ pub fn fork_linux_process(
 /// Creates a Linux vfork child without copying its pages.
 ///
 /// 创建 Linux vfork 子进程但不复制页面：子进程映射父进程相同的物理帧，父线程
-/// 由调用者休眠等待。共享映射、设备映射和隔离帧不在当前有界切片内，失败关闭。
+/// 由调用者休眠等待。既有共享映射随借用地址空间保留；设备映射和隔离帧失败关闭。
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
 pub fn vfork_linux_process(
     parent: ObjId,
@@ -6381,14 +7468,19 @@ pub fn vfork_linux_process(
     parent_task: TaskId,
 ) -> Result<ObjId, ProcError> {
     let parent_stack_top = crate::arch::kernel_stack();
-    let (parent_linux_pid, calls, state, parent_root, frames, memory_caps) =
+    let (
+        parent_linux_pid,
+        calls,
+        state,
+        parent_root,
+        frames,
+        memory_caps,
+        shared_mappings,
+    ) =
         kobj::with(|t| match t.get(parent) {
             Ok(KObject::Process(p)) if p.state == ProcState::Running && p.threads_live == 1 => {
                 let linux = p.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
-                if !p.shared_maps.is_empty()
-                    || !p.device_maps.is_empty()
-                    || !p.quarantined.is_empty()
-                {
+                if !p.device_maps.is_empty() || !p.quarantined.is_empty() {
                     return Err(ProcError::NotTransferable);
                 }
                 let mut frames = Vec::new();
@@ -6396,6 +7488,18 @@ pub fn vfork_linux_process(
                     .try_reserve(p.frames.len())
                     .map_err(|_| ProcError::OutOfFrames)?;
                 frames.extend(p.frames.iter().cloned());
+                let shared_mappings = p
+                    .shared_maps
+                    .iter()
+                    .map(|mapping| {
+                        (
+                            mapping.va,
+                            Arc::clone(&mapping.page),
+                            mapping.source,
+                            mapping.writable,
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 Ok((
                     linux.pid,
                     linux.calls,
@@ -6403,6 +7507,7 @@ pub fn vfork_linux_process(
                     p.space.root(),
                     frames,
                     p.memory_caps.clone(),
+                    shared_mappings,
                 ))
             }
             Ok(KObject::Process(_)) => Err(ProcError::Exited),
@@ -6446,12 +7551,27 @@ pub fn vfork_linux_process(
         linux.ppid = parent_linux_pid;
         linux.child_cpu_ticks = 0;
         linux.exited_cpu_ticks = 0;
+        linux.pdeathsig = 0;
+        linux.subreaper = false;
+        linux.termination_signal = 0;
         linux.vfork_parent = Some(VforkParent {
             task: parent_task,
             exec_committed: false,
         });
         p.frames = frames;
         p.memory_caps = memory_caps;
+        p.shared_maps.clear();
+        p.shared_maps
+            .try_reserve(shared_mappings.len())
+            .map_err(|_| ProcError::OutOfFrames)?;
+        for (va, page, source, writable) in shared_mappings {
+            p.shared_maps.push(SharedMapping {
+                va,
+                page,
+                source,
+                writable,
+            });
+        }
         let borrowed = crate::mm::space::VmSpace::borrowed(parent_root).map_err(ProcError::Map)?;
         let old = core::mem::replace(&mut p.space, borrowed);
         drop(old);
@@ -6460,6 +7580,10 @@ pub fn vfork_linux_process(
     if prepared.is_err() || inherit_application(parent, child).is_err() {
         rollback(child, false);
         return Err(ProcError::NoSuchProcess);
+    }
+    if !crate::linux_abi::inherit_sysv_shared_process(parent, child) {
+        rollback(child, false);
+        return Err(ProcError::OutOfFrames);
     }
     if adopt(parent, child).is_err() {
         rollback(child, false);
@@ -6688,43 +7812,64 @@ fn copy_linux_mapping(parent: ObjId, child: ObjId, mapping: LinuxMapping) -> Res
     })
 }
 
-/// Takes one exited Linux child's status and releases its object ownership.
-/// 取得一个已退出 Linux 子进程的状态，并释放父进程和创建者持有的引用。
 #[cfg(feature = "linux-abi")]
-pub(crate) fn take_linux_child_exit(
+#[derive(Clone, Copy)]
+enum LinuxWaitSelector {
+    Any,
+    Pid(u32),
+    ProcessGroup(u32),
+}
+
+#[cfg(feature = "linux-abi")]
+fn linux_child_exit(
     parent: ObjId,
-    target_pid: Option<u32>,
+    selector: LinuxWaitSelector,
+    consume: bool,
 ) -> Result<Option<(u32, i32)>, ProcError> {
-    let child = kobj::with(|t| match t.get(parent) {
-        Ok(KObject::Process(p)) => Ok(p.children.clone()),
+    let children = kobj::with(|table| match table.get(parent) {
+        Ok(KObject::Process(process)) => Ok(process.children.clone()),
         _ => Err(ProcError::NoSuchProcess),
     })?;
-    let mut matching = target_pid.is_none() && !child.is_empty();
-    for candidate in child {
-        let found = kobj::with(|t| match t.get(candidate) {
-            Ok(KObject::Process(p)) => {
-                let linux = p.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
-                if target_pid.is_some_and(|target| linux.pid != target) {
-                    return Ok(None);
+    let mut matching = matches!(selector, LinuxWaitSelector::Any) && !children.is_empty();
+    for candidate in children {
+        let found = kobj::with(|table| match table.get(candidate) {
+            Ok(KObject::Process(process)) => {
+                let linux = process.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
+                let selected = match selector {
+                    LinuxWaitSelector::Any => true,
+                    LinuxWaitSelector::Pid(pid) => linux.pid == pid,
+                    LinuxWaitSelector::ProcessGroup(pgid) => linux.pgid == pgid,
+                };
+                if selected {
+                    matching = true;
                 }
-                matching = true;
-                Ok(Some((linux.pid, p.state)))
+                Ok(selected.then_some((
+                    linux.pid,
+                    process.state,
+                    linux.termination_signal,
+                )))
             }
             _ => Err(ProcError::NoSuchProcess),
         })?;
-        let Some((pid, state)) = found else {
+        let Some((pid, state, termination_signal)) = found else {
             continue;
         };
         let ProcState::Exited { code } = state else {
-            return Ok(None);
+            continue;
         };
-        let status = (((code as u32) & 0xff) << 8) as i32;
-        let child_ticks = linux_process_cpu_ticks(candidate).unwrap_or(0);
-        if !linux_account_child_cpu(parent, child_ticks) {
-            return Err(ProcError::NoSuchProcess);
+        let status = if termination_signal == 0 {
+            (((code as u32) & 0xff) << 8) as i32
+        } else {
+            (termination_signal & 0x7f) as i32
+        };
+        if consume {
+            let child_ticks = linux_process_cpu_ticks(candidate).unwrap_or(0);
+            if !linux_account_child_cpu(parent, child_ticks) {
+                return Err(ProcError::NoSuchProcess);
+            }
+            let _ = reap(candidate);
+            let _ = release_child(parent, candidate);
         }
-        let _ = reap(candidate);
-        let _ = release_child(parent, candidate);
         return Ok(Some((pid, status)));
     }
     if matching {
@@ -6732,6 +7877,50 @@ pub(crate) fn take_linux_child_exit(
     } else {
         Err(ProcError::NoSuchProcess)
     }
+}
+
+/// Takes one exited Linux child's status and releases its object ownership.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn take_linux_child_exit(
+    parent: ObjId,
+    target_pid: Option<u32>,
+) -> Result<Option<(u32, i32)>, ProcError> {
+    linux_child_exit(
+        parent,
+        target_pid.map_or(LinuxWaitSelector::Any, LinuxWaitSelector::Pid),
+        true,
+    )
+}
+
+/// Takes one exited child from a Linux process group.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn take_linux_child_exit_group(
+    parent: ObjId,
+    pgid: u32,
+) -> Result<Option<(u32, i32)>, ProcError> {
+    linux_child_exit(parent, LinuxWaitSelector::ProcessGroup(pgid), true)
+}
+
+/// Observes one exited Linux child without accounting or releasing it.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn peek_linux_child_exit(
+    parent: ObjId,
+    target_pid: Option<u32>,
+) -> Result<Option<(u32, i32)>, ProcError> {
+    linux_child_exit(
+        parent,
+        target_pid.map_or(LinuxWaitSelector::Any, LinuxWaitSelector::Pid),
+        false,
+    )
+}
+
+/// Observes one exited child from a Linux process group without consuming it.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn peek_linux_child_exit_group(
+    parent: ObjId,
+    pgid: u32,
+) -> Result<Option<(u32, i32)>, ProcError> {
+    linux_child_exit(parent, LinuxWaitSelector::ProcessGroup(pgid), false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7705,20 +8894,67 @@ pub fn registry_len() -> (usize, usize) {
 
 /// 让一个没有线程的进程进入 exited（关闭其句柄表）；有线程存活时不做任何事并返回 `false`。
 pub fn exit_idle(pid: ObjId, code: i64) -> bool {
-    kobj::with(|t| {
+    let mut parent_deaths = Vec::new();
+    let ok = kobj::with(|t| {
         let ok = matches!(t.get(pid), Ok(KObject::Process(p)) if p.threads_live == 0 && p.state == ProcState::Running);
         if ok {
-            release_resources_in(t, pid);
+            release_resources_in(t, pid, &mut parent_deaths);
             finish_exit_in(t, pid, code);
         }
         ok
-    })
+    });
+    #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+    for (child, signal) in parent_deaths {
+        crate::linux_abi::notify_parent_death(child, signal);
+    }
+    ok
+}
+
+#[cfg(feature = "linux-abi")]
+fn linux_process_for_pid_in(t: &kobj::Table, linux_pid: u32) -> Option<ObjId> {
+    let mut found = None;
+    t.for_each_live(|id, object| {
+        if let KObject::Process(process) = object {
+            if process
+                .linux
+                .as_ref()
+                .is_some_and(|linux| linux.pid == linux_pid)
+            {
+                found = Some(id);
+                return false;
+            }
+        }
+        true
+    });
+    found
+}
+
+#[cfg(feature = "linux-abi")]
+fn nearest_subreaper_in(t: &kobj::Table, mut linux_parent: u32) -> Option<ObjId> {
+    for _ in 0..64 {
+        let parent = linux_process_for_pid_in(t, linux_parent)?;
+        let KObject::Process(process) = t.get(parent).ok()? else {
+            return None;
+        };
+        let linux = process.linux.as_ref()?;
+        if process.state == ProcState::Running && linux.subreaper {
+            return Some(parent);
+        }
+        linux_parent = linux.ppid;
+    }
+    None
 }
 
 /// 关闭进程的句柄表并释放其子进程表（exiting 或 exited 时；只做一次，之后两表为空）。返回关闭的句柄数。
-fn release_resources_in(t: &mut kobj::Table, pid: ObjId) -> usize {
+fn release_resources_in(
+    t: &mut kobj::Table,
+    pid: ObjId,
+    parent_deaths: &mut Vec<(ObjId, u32)>,
+) -> usize {
     let mut closed: Vec<ObjectRef> = Vec::new();
     let mut children = Vec::new();
+    #[cfg(feature = "linux-abi")]
+    let mut linux_parent = 0u32;
     let n = match t.get_mut(pid) {
         Ok(KObject::Process(p)) => {
             children = core::mem::take(&mut p.children);
@@ -7727,6 +8963,7 @@ fn release_resources_in(t: &mut kobj::Table, pid: ObjId) -> usize {
             revoke_all_device_mappings(p);
             #[cfg(feature = "linux-abi")]
             if let Some(linux) = p.linux.as_mut() {
+                linux_parent = linux.ppid;
                 let _ = linux.fds.take_all();
                 linux.pipes.clear();
                 linux.sockets.clear();
@@ -7735,12 +8972,64 @@ fn release_resources_in(t: &mut kobj::Table, pid: ObjId) -> usize {
         }
         _ => 0,
     };
+    #[cfg(feature = "linux-abi")]
+    for child in &children {
+        if let Ok(KObject::Process(process)) = t.get(*child) {
+            if let Some(signal) = process
+                .linux
+                .as_ref()
+                .map(|linux| linux.pdeathsig)
+                .filter(|signal| *signal != 0)
+            {
+                parent_deaths.push((*child, signal));
+            }
+        }
+    }
+    #[cfg(feature = "linux-abi")]
+    let mut adopted = Vec::new();
+    #[cfg(feature = "linux-abi")]
+    if let Some(reaper) = nearest_subreaper_in(t, linux_parent) {
+        let reaper_pid = match t.get(reaper) {
+            Ok(KObject::Process(process)) => process
+                .linux
+                .as_ref()
+                .map(|linux| linux.pid)
+                .unwrap_or(compat_core::syscall::LINUX_COMPAT_ROOT_PPID as u32),
+            _ => compat_core::syscall::LINUX_COMPAT_ROOT_PPID as u32,
+        };
+        for child in &children {
+            if let Ok(KObject::Process(child_process)) = t.get_mut(*child) {
+                if let Some(linux) = child_process.linux.as_mut() {
+                    linux.ppid = reaper_pid;
+                }
+            }
+            if let Ok(KObject::Process(reaper_process)) = t.get_mut(reaper) {
+                reaper_process.children.push(*child);
+                adopted.push(*child);
+            }
+        }
+    }
+    #[cfg(feature = "linux-abi")]
+    for child in &children {
+        if adopted.contains(child) {
+            continue;
+        }
+        if let Ok(KObject::Process(child_process)) = t.get_mut(*child) {
+            if let Some(linux) = child_process.linux.as_mut() {
+                linux.ppid = compat_core::syscall::LINUX_COMPAT_ROOT_PPID as u32;
+            }
+        }
+    }
     for r in closed {
         if let Some(id) = ObjId::from_raw(r.id.0) {
             let _ = kobj::release_owner_in(t, id);
         }
     }
     for c in children {
+        #[cfg(feature = "linux-abi")]
+        if adopted.contains(&c) {
+            continue;
+        }
         let _ = t.release_internal(c);
     }
     n
@@ -7764,7 +9053,11 @@ fn finish_exit_in(t: &mut kobj::Table, pid: ObjId, code: i64) {
 /// 开始终止后唤醒该进程所有在睡的线程：长时间的定时等待（`time.wait`）也要尽快观察到 exiting。
 /// Begins process termination (exiting phase).
 pub fn begin_exit(pid: ObjId, code: i64) -> bool {
-    let started = begin_exit_in_table(pid, code);
+    let (started, parent_deaths) = begin_exit_in_table(pid, code);
+    #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+    for (child, signal) in parent_deaths {
+        crate::linux_abi::notify_parent_death(child, signal);
+    }
     if started {
         wake_threads(pid);
         #[cfg(feature = "linux-abi")]
@@ -7797,8 +9090,9 @@ fn wake_threads(pid: ObjId) {
 }
 
 /// [`begin_exit`] 的对象表部分：状态迁移、关闭句柄表、无线程时直接进入 exited。
-fn begin_exit_in_table(pid: ObjId, code: i64) -> bool {
-    kobj::with(|t| {
+fn begin_exit_in_table(pid: ObjId, code: i64) -> (bool, Vec<(ObjId, u32)>) {
+    let mut parent_deaths = Vec::new();
+    let started = kobj::with(|t| {
         let idle = match t.get_mut(pid) {
             Ok(KObject::Process(p)) if p.state == ProcState::Running => {
                 p.state = ProcState::Exiting { code };
@@ -7806,7 +9100,7 @@ fn begin_exit_in_table(pid: ObjId, code: i64) -> bool {
             }
             _ => return false,
         };
-        let n = release_resources_in(t, pid);
+        let n = release_resources_in(t, pid, &mut parent_deaths);
         kprintln!(
             "[JSR-PROC] event=system.process.exiting id={:#x} code={} handles_closed={}",
             pid.raw(),
@@ -7817,7 +9111,8 @@ fn begin_exit_in_table(pid: ObjId, code: i64) -> bool {
             finish_exit_in(t, pid, code);
         }
         true
-    })
+    });
+    (started, parent_deaths)
 }
 
 /// Author: chatgpt。对象锁内等待登记的进程门槛，与begin_exit状态迁移串行。
@@ -8059,6 +9354,7 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
         #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
         crate::linux_abi::linux_thread_exit(m.process, m.task);
         let mut exiting_workload = None;
+        let mut parent_deaths = Vec::new();
         let exited = kobj::with(|t| {
             // 线程自己的退出状态：写入本线程的退出码
             if let Ok(KObject::Task(task)) = t.get(m.task_obj) {
@@ -8088,7 +9384,7 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
                 _ => None,
             };
             if let Some((final_code, name, threads)) = last {
-                let n = release_resources_in(t, m.process);
+                let n = release_resources_in(t, m.process, &mut parent_deaths);
                 finish_exit_in(t, m.process, final_code);
                 out = Some((name, threads, n, final_code));
             }
@@ -8099,6 +9395,10 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
             let _ = t.release_internal(m.process); // 执行上下文 → Process
             out
         });
+        #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+        for (child, signal) in parent_deaths {
+            crate::linux_abi::notify_parent_death(child, signal);
+        }
         if let Some(workload) = exiting_workload {
             crate::workload::release_thread(workload);
         }

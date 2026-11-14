@@ -103,7 +103,8 @@ pub(crate) fn close_in(t: &mut kobj::Table, id: ObjId) {
         p.spawned_live = p.spawned_live.saturating_sub(1);
     }
     let Some(idle) = idle else { return };
-    let n = super::release_resources_in(t, id);
+    let mut parent_deaths = alloc::vec::Vec::new();
+    let n = super::release_resources_in(t, id, &mut parent_deaths);
     kprintln!("[JSR-PROC] event=system.process.killed id={:#x} cause=last_handle_released code={} handles_closed={}", id.raw(), KILLED_CODE, n);
     if idle {
         super::finish_exit_in(t, id, KILLED_CODE);

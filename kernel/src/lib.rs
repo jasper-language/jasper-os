@@ -68,7 +68,6 @@ pub(crate) mod binder;
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
 pub mod linux_abi;
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
-pub(crate) mod sysv_ipc;
 #[cfg(all(
     any(
         feature = "compat-dynamic-libc-verify",

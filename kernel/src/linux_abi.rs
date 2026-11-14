@@ -10,7 +10,7 @@ use compat_core::syscall::{
     LINUX_NR_FUTEX,
 };
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 
 use kernel_core::objtable::ObjId;
 use kernel_core::paging::MapFlags;
@@ -32,75 +32,48 @@ const MAX_LINUX_THREADS: usize = 64;
 const MAX_FUTEX_WORDS: usize = 32;
 const MAX_PROCESS_SIGNAL_SETS: usize = 16;
 const MAX_POSIX_TIMERS: usize = 32;
-const MAX_QUEUED_RT_SIGNALS: usize = 16;
 const MAX_INTERVAL_TIMER_SETS: usize = 16;
+const MAX_PENDING_SIGNAL_RECORDS: usize = 256;
+const MAX_SYSV_MESSAGE_QUEUES: usize = 16;
+const MAX_SYSV_MESSAGES_PER_QUEUE: usize = 64;
+const SYSV_MSGMAX: usize = 8192;
+const SYSV_MSGMNB: usize = 16384;
+const MAX_SYSV_SEM_SETS: usize = 16;
+const MAX_SYSV_SEMS_PER_SET: usize = 16;
+const MAX_SYSV_SEM_OPS: usize = 32;
+const MAX_SYSV_SEM_WAITERS: usize = 64;
+const MAX_SYSV_SEM_UNDOS: usize = 64;
+const SYSV_SEMVMX: i32 = 32767;
+const MAX_SYSV_SHARED_SEGMENTS: usize = 16;
+const MAX_SYSV_SHARED_ATTACHMENTS: usize = 32;
+const MAX_LINUX_KEYS: usize = 16;
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
 static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
 
 #[derive(Clone, Copy)]
 struct SignalOrigin {
     pid: u32,
+    uid: u32,
     code: i32,
     value: u64,
-}
-
-#[derive(Clone, Copy)]
-struct PendingRtSignal {
-    signal: u32,
-    origin: SignalOrigin,
-    active: bool,
-}
-
-impl PendingRtSignal {
-    const EMPTY: Self = Self {
-        signal: 0,
-        origin: SignalOrigin {
-            pid: 0,
-            code: 0,
-            value: 0,
-        },
-        active: false,
-    };
-}
-
-fn enqueue_rt_signal(
-    queue: &mut [PendingRtSignal; MAX_QUEUED_RT_SIGNALS],
-    signal: u32,
-    origin: SignalOrigin,
-) -> bool {
-    let mut compact = [PendingRtSignal::EMPTY; MAX_QUEUED_RT_SIGNALS];
-    let mut count = 0usize;
-    for pending in queue.iter().copied().filter(|pending| pending.active) {
-        compact[count] = pending;
-        count += 1;
-    }
-    if count == MAX_QUEUED_RT_SIGNALS {
-        return false;
-    }
-    compact[count] = PendingRtSignal {
-        signal,
-        origin,
-        active: true,
-    };
-    *queue = compact;
-    true
-}
-
-fn has_rt_signal(
-    queue: &[PendingRtSignal; MAX_QUEUED_RT_SIGNALS],
-    signal: u32,
-) -> bool {
-    queue
-        .iter()
-        .any(|pending| pending.active && pending.signal == signal)
 }
 
 #[derive(Clone, Copy)]
 struct SignalFdRecord {
     signal: u32,
     sender_pid: u32,
+    sender_uid: u32,
     code: i32,
     value: u64,
+}
+
+#[derive(Clone, Copy)]
+struct QueuedSignalRecord {
+    process: ObjId,
+    /// Zero selects the process-directed queue; otherwise this is the target TID.
+    target_tid: u32,
+    sequence: u64,
+    record: SignalFdRecord,
 }
 
 #[derive(Clone, Copy)]
@@ -125,8 +98,6 @@ struct LinuxThread {
     /// Source metadata for each coalesced standard signal.
     /// 每个已合并标准信号的来源元数据。
     signal_origins: [SignalOrigin; 64],
-    /// Bounded queue for real-time signals; duplicates are preserved.
-    rt_signals: [PendingRtSignal; MAX_QUEUED_RT_SIGNALS],
     /// Per-thread alternate signal stack.
     /// 当前 Linux 线程的备用信号栈。
     altstack_sp: u64,
@@ -198,7 +169,6 @@ struct ProcessSignalSet {
     process: ObjId,
     pending: u64,
     origins: [SignalOrigin; 64],
-    rt_signals: [PendingRtSignal; MAX_QUEUED_RT_SIGNALS],
 }
 
 #[derive(Clone, Copy)]
@@ -222,26 +192,187 @@ struct IntervalTimer {
     active: bool,
 }
 
+struct MessageQueueName {
+    name: [u8; 256],
+    name_len: u8,
+    queue: alloc::sync::Arc<proc::LinuxMqShared>,
+    uid: u32,
+    gid: u32,
+    mode: u16,
+}
+
+#[derive(Clone)]
+struct SysVMessage {
+    id: u64,
+    mtype: i64,
+    bytes: alloc::vec::Vec<u8>,
+    reserved: bool,
+}
+
+struct SysVMessageQueue {
+    id: i32,
+    key: i32,
+    application: kernel_core::security::ApplicationIdentity,
+    uid: u32,
+    gid: u32,
+    cuid: u32,
+    cgid: u32,
+    mode: u16,
+    qbytes: usize,
+    cbytes: usize,
+    messages: alloc::collections::VecDeque<SysVMessage>,
+    next_message_id: u64,
+    send_time: i64,
+    receive_time: i64,
+    change_time: i64,
+    last_send_pid: i32,
+    last_receive_pid: i32,
+}
+
+#[derive(Clone, Copy)]
+struct SysVSemaphoreSet {
+    id: i32,
+    key: i32,
+    application: kernel_core::security::ApplicationIdentity,
+    uid: u32,
+    gid: u32,
+    cuid: u32,
+    cgid: u32,
+    mode: u16,
+    values: [i32; MAX_SYSV_SEMS_PER_SET],
+    nsems: usize,
+    operation_time: i64,
+    change_time: i64,
+    last_pid: i32,
+    positive_waiters: [u16; MAX_SYSV_SEMS_PER_SET],
+    zero_waiters: [u16; MAX_SYSV_SEMS_PER_SET],
+}
+
+#[derive(Clone, Copy)]
+struct SysVSemaphoreOperation {
+    number: usize,
+    operation: i16,
+    flags: i16,
+}
+
+#[derive(Clone, Copy)]
+struct SysVSemaphoreWaiter {
+    process: ObjId,
+    task: crate::task::TaskId,
+    semid: i32,
+    semnum: usize,
+    zero: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SysVSemaphoreUndo {
+    process: ObjId,
+    semid: i32,
+    semnum: usize,
+    adjustment: i32,
+}
+
+#[derive(Clone, Copy)]
+struct SysVSharedAttachment {
+    process: ObjId,
+    address: u64,
+    length: u64,
+    writable: bool,
+}
+
+struct SysVSharedMemory {
+    id: i32,
+    key: i32,
+    application: kernel_core::security::ApplicationIdentity,
+    uid: u32,
+    gid: u32,
+    cuid: u32,
+    cgid: u32,
+    mode: u16,
+    size: u64,
+    object: proc::LinuxSharedMemoryObject,
+    creator_pid: i32,
+    last_pid: i32,
+    attach_time: i64,
+    detach_time: i64,
+    change_time: i64,
+    deleted: bool,
+    attachments: alloc::vec::Vec<SysVSharedAttachment>,
+}
+
+struct LinuxKey {
+    serial: i32,
+    application: kernel_core::security::ApplicationIdentity,
+    key_type: [u8; 16],
+    type_len: u8,
+    description: [u8; 64],
+    description_len: u8,
+    payload: alloc::vec::Vec<u8>,
+    revoked: bool,
+    linked: bool,
+    uid: u32,
+    gid: u32,
+    permissions: u32,
+}
+
+#[derive(Clone, Copy)]
+struct LinuxProcessKeyring {
+    process: ObjId,
+    serial: i32,
+}
+
 struct CompatState {
     threads: [Option<LinuxThread>; MAX_LINUX_THREADS],
+    thread_landlock_domains: [Option<
+        alloc::vec::Vec<alloc::sync::Arc<proc::LinuxLandlockRuleset>>,
+    >; MAX_LINUX_THREADS],
     futexes: [Option<FutexWord>; MAX_FUTEX_WORDS],
     process_signals: [Option<ProcessSignalSet>; MAX_PROCESS_SIGNAL_SETS],
     flock_locks: [Option<FlockLock>; MAX_FLOCK_LOCKS],
     flock_waiters: [Option<FlockWaiter>; MAX_FLOCK_LOCKS],
     posix_timers: [Option<PosixTimer>; MAX_POSIX_TIMERS],
     interval_timers: [Option<IntervalTimer>; MAX_INTERVAL_TIMER_SETS],
+    message_queue_names: alloc::vec::Vec<MessageQueueName>,
+    pending_signal_records: [Option<QueuedSignalRecord>; MAX_PENDING_SIGNAL_RECORDS],
+    next_signal_sequence: u64,
+    sysv_message_queues: alloc::vec::Vec<SysVMessageQueue>,
+    next_sysv_message_queue_id: i32,
+    sysv_semaphore_sets: alloc::vec::Vec<SysVSemaphoreSet>,
+    sysv_semaphore_waiters: [Option<SysVSemaphoreWaiter>; MAX_SYSV_SEM_WAITERS],
+    sysv_semaphore_undos: alloc::vec::Vec<SysVSemaphoreUndo>,
+    next_sysv_semaphore_id: i32,
+    sysv_shared_segments: alloc::vec::Vec<SysVSharedMemory>,
+    next_sysv_shared_id: i32,
+    keys: alloc::vec::Vec<LinuxKey>,
+    process_keyrings: alloc::vec::Vec<LinuxProcessKeyring>,
+    next_key_serial: i32,
 }
 
 impl CompatState {
     const fn new() -> Self {
         Self {
             threads: [None; MAX_LINUX_THREADS],
+            thread_landlock_domains: [const { None }; MAX_LINUX_THREADS],
             futexes: [None; MAX_FUTEX_WORDS],
             process_signals: [None; MAX_PROCESS_SIGNAL_SETS],
             flock_locks: [None; MAX_FLOCK_LOCKS],
             flock_waiters: [None; MAX_FLOCK_LOCKS],
             posix_timers: [None; MAX_POSIX_TIMERS],
             interval_timers: [None; MAX_INTERVAL_TIMER_SETS],
+            message_queue_names: alloc::vec::Vec::new(),
+            pending_signal_records: [None; MAX_PENDING_SIGNAL_RECORDS],
+            next_signal_sequence: 0,
+            sysv_message_queues: alloc::vec::Vec::new(),
+            next_sysv_message_queue_id: 1,
+            sysv_semaphore_sets: alloc::vec::Vec::new(),
+            sysv_semaphore_waiters: [None; MAX_SYSV_SEM_WAITERS],
+            sysv_semaphore_undos: alloc::vec::Vec::new(),
+            next_sysv_semaphore_id: 1,
+            sysv_shared_segments: alloc::vec::Vec::new(),
+            next_sysv_shared_id: 1,
+            keys: alloc::vec::Vec::new(),
+            process_keyrings: alloc::vec::Vec::new(),
+            next_key_serial: 1,
         }
     }
 }
@@ -347,20 +478,25 @@ pub(crate) fn register_linux_thread(
     let (current_task, current_name) = sched::current();
     let tid = {
         let mut state = COMPAT.lock();
-        let inherited = state
-            .threads
-            .iter()
-            .flatten()
-            .find(|entry| entry.process == process && entry.task == current_task);
-        let inherited_mask = inherited.map(|entry| entry.signal_mask).unwrap_or(0);
-        let inherited_name = inherited
-            .map(|entry| entry.name)
-            .unwrap_or_else(|| linux_comm_from_task_name(current_name));
         let has_leader = state
             .threads
             .iter()
             .flatten()
             .any(|entry| entry.process == process);
+        let inherits_current = |entry: &LinuxThread| {
+            entry.task == current_task && (entry.process == process || !has_leader)
+        };
+        let inherited_slot = state.threads.iter().position(|entry| {
+            entry.as_ref().is_some_and(inherits_current)
+        });
+        let inherited = inherited_slot.and_then(|slot| state.threads[slot]);
+        let inherited_mask = inherited.map(|entry| entry.signal_mask).unwrap_or(0);
+        let inherited_name = inherited
+            .map(|entry| entry.name)
+            .unwrap_or_else(|| linux_comm_from_task_name(current_name));
+        let inherited_domains = inherited_slot
+            .and_then(|slot| state.thread_landlock_domains[slot].clone())
+            .unwrap_or_default();
         let tid = if has_leader {
             let tid = NEXT_LINUX_TID.fetch_add(1, Ordering::Relaxed);
             if tid == 0 || tid == u32::MAX {
@@ -387,10 +523,10 @@ pub(crate) fn register_linux_thread(
             pending_signals: 0,
             signal_origins: [SignalOrigin {
                 pid: 0,
+                uid: 0,
                 code: 0,
                 value: 0,
             }; 64],
-            rt_signals: [PendingRtSignal::EMPTY; MAX_QUEUED_RT_SIGNALS],
             altstack_sp: 0,
             altstack_size: 0,
             altstack_flags: 2,
@@ -398,6 +534,7 @@ pub(crate) fn register_linux_thread(
             altstack_disarm_depth: 0,
             sigsuspend_restore_mask: None,
         });
+        state.thread_landlock_domains[slot] = Some(inherited_domains);
         tid
     };
     if clear_child_tid != 0 && proc::write(process, clear_child_tid, &tid.to_le_bytes()).is_err() {
@@ -416,6 +553,7 @@ pub(crate) fn unregister_linux_thread(task: crate::task::TaskId) {
         .position(|entry| entry.is_some_and(|entry| entry.task == task))
     {
         state.threads[slot] = None;
+        state.thread_landlock_domains[slot] = None;
     }
 }
 
@@ -430,10 +568,6 @@ fn linux_tid(process: ObjId) -> Option<u32> {
         .map(|entry| entry.tid)
 }
 
-pub(crate) fn current_linux_tid(process: ObjId) -> Option<u32> {
-    linux_tid(process)
-}
-
 fn linux_tid_for_task(task: crate::task::TaskId) -> Option<(ObjId, u32)> {
     COMPAT
         .lock()
@@ -442,6 +576,79 @@ fn linux_tid_for_task(task: crate::task::TaskId) -> Option<(ObjId, u32)> {
         .flatten()
         .find(|entry| entry.task == task)
         .map(|entry| (entry.process, entry.tid))
+}
+
+/// Appends one realtime signal record in bounded FIFO order.
+fn enqueue_signal_record(
+    state: &mut CompatState,
+    process: ObjId,
+    target_tid: u32,
+    record: SignalFdRecord,
+) -> bool {
+    let Some(slot) = state
+        .pending_signal_records
+        .iter()
+        .position(Option::is_none)
+    else {
+        return false;
+    };
+    let sequence = state.next_signal_sequence;
+    state.next_signal_sequence = sequence.wrapping_add(1);
+    state.pending_signal_records[slot] = Some(QueuedSignalRecord {
+        process,
+        target_tid,
+        sequence,
+        record,
+    });
+    true
+}
+
+/// Removes the oldest queued record for one process/thread and signal.
+fn take_queued_signal_record(
+    state: &mut CompatState,
+    process: ObjId,
+    target_tid: u32,
+    signal: u32,
+) -> Option<SignalFdRecord> {
+    let slot = state
+        .pending_signal_records
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            entry.is_some_and(|entry| {
+                entry.process == process
+                    && entry.target_tid == target_tid
+                    && entry.record.signal == signal
+            })
+        })
+        .min_by_key(|(_, entry)| entry.map(|entry| entry.sequence).unwrap_or(u64::MAX))
+        .map(|(slot, _)| slot)?;
+    let record = state.pending_signal_records[slot].take()?.record;
+    let still_pending = state.pending_signal_records.iter().any(|entry| {
+        entry.is_some_and(|entry| {
+            entry.process == process
+                && entry.target_tid == target_tid
+                && entry.record.signal == signal
+        })
+    });
+    if !still_pending {
+        let bit = 1u64 << (signal - 1);
+        if target_tid == 0 {
+            if let Some(entry) = state
+                .process_signals
+                .iter_mut()
+                .flatten()
+                .find(|entry| entry.process == process)
+            {
+                entry.pending &= !bit;
+            }
+        } else if let Some(entry) = state.threads.iter_mut().flatten().find(|entry| {
+            entry.process == process && entry.tid == target_tid
+        }) {
+            entry.pending_signals &= !bit;
+        }
+    }
+    Some(record)
 }
 
 /// Queues one standard signal on a target Linux thread in the same process.
@@ -453,14 +660,28 @@ fn queue_thread_signal(
     sender_pid: u32,
     code: i32,
 ) -> bool {
-    queue_thread_signal_value(process, tid, signal, sender_pid, code, 0)
+    queue_thread_signal_info(
+        process,
+        tid,
+        signal,
+        sender_pid,
+        if code == 128 {
+            0
+        } else {
+            compat_core::syscall::LINUX_COMPAT_UID as u32
+        },
+        code,
+        0,
+    )
 }
 
-fn queue_thread_signal_value(
+/// Queues one thread-directed signal with complete bounded siginfo metadata.
+fn queue_thread_signal_info(
     process: ObjId,
     tid: u32,
     signal: u32,
     sender_pid: u32,
+    sender_uid: u32,
     code: i32,
     value: u64,
 ) -> bool {
@@ -469,6 +690,25 @@ fn queue_thread_signal_value(
     }
     let target = {
         let mut state = COMPAT.lock();
+        let Some(target) = state
+            .threads
+            .iter()
+            .flatten()
+            .find(|entry| entry.process == process && entry.tid == tid)
+            .map(|entry| entry.task)
+        else {
+            return false;
+        };
+        let record = SignalFdRecord {
+            signal,
+            sender_pid,
+            sender_uid,
+            code,
+            value,
+        };
+        if signal >= 32 && !enqueue_signal_record(&mut state, process, tid, record) {
+            return false;
+        }
         let Some(entry) = state
             .threads
             .iter_mut()
@@ -477,16 +717,13 @@ fn queue_thread_signal_value(
         else {
             return false;
         };
-        let origin = SignalOrigin {
+        entry.pending_signals |= 1u64 << (signal - 1);
+        entry.signal_origins[signal as usize - 1] = SignalOrigin {
             pid: sender_pid,
+            uid: sender_uid,
             code,
             value,
         };
-        if signal >= 32 && !enqueue_rt_signal(&mut entry.rt_signals, signal, origin) {
-            return false;
-        }
-        entry.pending_signals |= 1u64 << (signal - 1);
-        entry.signal_origins[signal as usize - 1] = origin;
         crate::kprintln!(
             "[JSR-LINUX-SIGNAL] queued target_tid={} signal={} mask={:#x} pending={:#x}",
             tid,
@@ -494,7 +731,7 @@ fn queue_thread_signal_value(
             entry.signal_mask,
             entry.pending_signals
         );
-        entry.task
+        target
     };
     sched::wake(target);
     true
@@ -514,13 +751,26 @@ fn has_linux_thread(process: ObjId, tid: u32) -> bool {
 /// Queues one process-directed standard signal and wakes all eligible threads.
 /// 登记一个进程定向标准信号，并唤醒该进程的全部线程。
 fn queue_process_signal(process: ObjId, signal: u32, sender_pid: u32, code: i32) -> bool {
-    queue_process_signal_value(process, signal, sender_pid, code, 0)
+    queue_process_signal_info(
+        process,
+        signal,
+        sender_pid,
+        if code == 128 {
+            0
+        } else {
+            compat_core::syscall::LINUX_COMPAT_UID as u32
+        },
+        code,
+        0,
+    )
 }
 
-fn queue_process_signal_value(
+/// Queues one process-directed signal with complete bounded siginfo metadata.
+fn queue_process_signal_info(
     process: ObjId,
     signal: u32,
     sender_pid: u32,
+    sender_uid: u32,
     code: i32,
     value: u64,
 ) -> bool {
@@ -546,26 +796,33 @@ fn queue_process_signal_value(
                 pending: 0,
                 origins: [SignalOrigin {
                     pid: 0,
+                    uid: 0,
                     code: 0,
                     value: 0,
                 }; 64],
-                rt_signals: [PendingRtSignal::EMPTY; MAX_QUEUED_RT_SIGNALS],
             });
             slot
         };
-        let Some(entry) = state.process_signals[slot].as_mut() else {
-            return false;
-        };
-        let origin = SignalOrigin {
-            pid: sender_pid,
+        let record = SignalFdRecord {
+            signal,
+            sender_pid,
+            sender_uid,
             code,
             value,
         };
-        if signal >= 32 && !enqueue_rt_signal(&mut entry.rt_signals, signal, origin) {
+        if signal >= 32 && !enqueue_signal_record(&mut state, process, 0, record) {
             return false;
         }
+        let Some(entry) = state.process_signals[slot].as_mut() else {
+            return false;
+        };
         entry.pending |= 1u64 << (signal - 1);
-        entry.origins[signal as usize - 1] = origin;
+        entry.origins[signal as usize - 1] = SignalOrigin {
+            pid: sender_pid,
+            uid: sender_uid,
+            code,
+            value,
+        };
         crate::kprintln!(
             "[JSR-LINUX-SIGNAL] queued_process process={:#x} signal={} pending={:#x}",
             process.raw(),
@@ -585,6 +842,14 @@ fn queue_process_signal_value(
     true
 }
 
+/// Delivers one configured parent-death signal to a surviving child.
+#[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+pub(crate) fn notify_parent_death(process: ObjId, signal: u32) {
+    if (1..=64).contains(&signal) {
+        let _ = queue_process_signal(process, signal, 0, LINUX_SI_KERNEL);
+    }
+}
+
 /// Removes process-directed pending signals once the last thread exits.
 /// 最后一个线程退出后移除进程定向 pending 信号。
 fn remove_process_signals(process: ObjId) {
@@ -596,6 +861,11 @@ fn remove_process_signals(process: ObjId) {
     {
         state.process_signals[slot] = None;
     }
+    state.pending_signal_records.iter_mut().for_each(|entry| {
+        if entry.is_some_and(|entry| entry.process == process) {
+            *entry = None;
+        }
+    });
 }
 
 /// Returns the blocked signal mask for the current Linux thread.
@@ -817,12 +1087,12 @@ fn leave_altstack(process: ObjId, autodisarm: bool) -> bool {
     true
 }
 
-/// Takes the lowest unmasked pending signal for the current thread.
-/// 取出当前线程编号最低且未被屏蔽的 pending 信号。
-fn take_deliverable_signal(process: ObjId) -> Option<(u32, SignalOrigin)> {
+/// Takes the lowest unmasked pending signal and its siginfo metadata.
+/// 取出当前线程编号最低且未被屏蔽的 pending 信号及其 siginfo 元数据。
+fn take_deliverable_signal(process: ObjId) -> Option<SignalFdRecord> {
     let (task, _) = sched::current();
     let mut state = COMPAT.lock();
-    let (blocked, thread_deliverable) = {
+    let (blocked, thread_deliverable, thread_tid) = {
         let entry = state
             .threads
             .iter()
@@ -831,6 +1101,7 @@ fn take_deliverable_signal(process: ObjId) -> Option<(u32, SignalOrigin)> {
         (
             entry.signal_mask,
             entry.pending_signals & !entry.signal_mask,
+            entry.tid,
         )
     };
     let (deliverable, process_directed) = if thread_deliverable != 0 {
@@ -850,54 +1121,44 @@ fn take_deliverable_signal(process: ObjId) -> Option<(u32, SignalOrigin)> {
     }
     let index = deliverable.trailing_zeros();
     let bit = 1u64 << index;
-    let (signal, origin) = if process_directed {
+    let signal = index + 1;
+    if signal >= 32 {
+        let target_tid = if process_directed { 0 } else { thread_tid };
+        if let Some(record) = take_queued_signal_record(&mut state, process, target_tid, signal) {
+            return Some(record);
+        }
+    }
+    if process_directed {
         let entry = state
             .process_signals
             .iter_mut()
             .flatten()
             .find(|entry| entry.process == process)?;
-        let signal = index + 1;
-        if signal >= 32 {
-            let pending_index = entry
-                .rt_signals
-                .iter()
-                .position(|pending| pending.active && pending.signal == signal)?;
-            let origin = entry.rt_signals[pending_index].origin;
-            entry.rt_signals[pending_index].active = false;
-            entry.origins[signal as usize - 1] = origin;
-            if !has_rt_signal(&entry.rt_signals, signal) {
-                entry.pending &= !bit;
-            }
-            (signal, origin)
-        } else {
-            entry.pending &= !bit;
-            (signal, entry.origins[signal as usize - 1])
-        }
+        entry.pending &= !bit;
+        let origin = entry.origins[index as usize];
+        Some(SignalFdRecord {
+            signal,
+            sender_pid: origin.pid,
+            sender_uid: origin.uid,
+            code: origin.code,
+            value: origin.value,
+        })
     } else {
         let entry = state
             .threads
             .iter_mut()
             .flatten()
             .find(|entry| entry.process == process && entry.task == task)?;
-        let signal = index + 1;
-        if signal >= 32 {
-            let pending_index = entry
-                .rt_signals
-                .iter()
-                .position(|pending| pending.active && pending.signal == signal)?;
-            let origin = entry.rt_signals[pending_index].origin;
-            entry.rt_signals[pending_index].active = false;
-            entry.signal_origins[signal as usize - 1] = origin;
-            if !has_rt_signal(&entry.rt_signals, signal) {
-                entry.pending_signals &= !bit;
-            }
-            (signal, origin)
-        } else {
-            entry.pending_signals &= !bit;
-            (signal, entry.signal_origins[signal as usize - 1])
-        }
-    };
-    Some((signal, origin))
+        entry.pending_signals &= !bit;
+        let origin = entry.signal_origins[index as usize];
+        Some(SignalFdRecord {
+            signal,
+            sender_pid: origin.pid,
+            sender_uid: origin.uid,
+            code: origin.code,
+            value: origin.value,
+        })
+    }
 }
 
 fn signalfd_pending_mask(process: ObjId, requested: u64) -> u64 {
@@ -944,49 +1205,32 @@ fn take_signalfd_record(process: ObjId, requested: u64) -> Option<SignalFdRecord
     }
     let signal = available.trailing_zeros() + 1;
     let bit = 1u64 << (signal - 1);
-    if thread.pending_signals & bit != 0 {
+    let thread_directed = thread.pending_signals & bit != 0;
+    if signal >= 32 {
+        let target_tid = if thread_directed { thread.tid } else { 0 };
+        if let Some(record) = take_queued_signal_record(&mut state, process, target_tid, signal) {
+            return Some(record);
+        }
+    }
+    if thread_directed {
         let entry = state.threads[thread_index].as_mut()?;
-        let origin = if signal >= 32 {
-            let pending_index = entry
-                .rt_signals
-                .iter()
-                .position(|pending| pending.active && pending.signal == signal)?;
-            let origin = entry.rt_signals[pending_index].origin;
-            entry.rt_signals[pending_index].active = false;
-            if !has_rt_signal(&entry.rt_signals, signal) {
-                entry.pending_signals &= !bit;
-            }
-            origin
-        } else {
-            entry.pending_signals &= !bit;
-            entry.signal_origins[signal as usize - 1]
-        };
+        entry.pending_signals &= !bit;
+        let origin = entry.signal_origins[signal as usize - 1];
         Some(SignalFdRecord {
             signal,
             sender_pid: origin.pid,
+            sender_uid: origin.uid,
             code: origin.code,
             value: origin.value,
         })
     } else {
         let entry = process_index.and_then(|index| state.process_signals[index].as_mut())?;
-        let origin = if signal >= 32 {
-            let pending_index = entry
-                .rt_signals
-                .iter()
-                .position(|pending| pending.active && pending.signal == signal)?;
-            let origin = entry.rt_signals[pending_index].origin;
-            entry.rt_signals[pending_index].active = false;
-            if !has_rt_signal(&entry.rt_signals, signal) {
-                entry.pending &= !bit;
-            }
-            origin
-        } else {
-            entry.pending &= !bit;
-            entry.origins[signal as usize - 1]
-        };
+        entry.pending &= !bit;
+        let origin = entry.origins[signal as usize - 1];
         Some(SignalFdRecord {
             signal,
             sender_pid: origin.pid,
+            sender_uid: origin.uid,
             code: origin.code,
             value: origin.value,
         })
@@ -1086,8 +1330,7 @@ fn copy_fxstate_to_frame(args: &SyscallArgs, frame: &mut [u8]) -> bool {
 /// 在被打断的用户栈上构造有界 Linux x86_64 信号帧。
 fn build_signal_frame(
     process: ObjId,
-    signal: u32,
-    origin: SignalOrigin,
+    record: SignalFdRecord,
     args: &SyscallArgs,
     user_ip: (u64, u64),
     interrupted_result: i64,
@@ -1102,12 +1345,14 @@ fn build_signal_frame(
     const SS_AUTODISARM: u32 = 0x8000_0000;
     const SIG_DFL: u64 = 0;
     const SIG_IGN: u64 = 1;
+    let signal = record.signal;
     let action = proc::linux_signal_action(process, signal).ok_or(CompatErrno::Invalid)?;
     let handler = action[0];
     if handler == SIG_IGN {
         return Err(CompatErrno::Interrupted);
     }
     if handler == SIG_DFL {
+        let _ = proc::set_linux_termination_signal(process, signal);
         let _ = proc::begin_exit(process, 128 + i64::from(signal));
         return Err(CompatErrno::Interrupted);
     }
@@ -1213,19 +1458,18 @@ fn build_signal_frame(
     write_frame_u64(&mut frame, gregs + 128, resume_rip);
     write_frame_u64(&mut frame, gregs + 136, 0x202);
     write_frame_u64(&mut frame, SIGNAL_UC_OFFSET + SIGNAL_UC_SIGMASK, old_mask);
-    write_frame_u64(&mut frame, SIGNAL_INFO_OFFSET, u64::from(signal));
+    write_frame_u64(&mut frame, SIGNAL_INFO_OFFSET, u64::from(record.signal));
     write_frame_u64(
         &mut frame,
         SIGNAL_INFO_OFFSET + 8,
-        u64::from(origin.code as u32),
+        u64::from(record.code as u32),
     );
     write_frame_u64(
         &mut frame,
         SIGNAL_INFO_OFFSET + 16,
-        u64::from(origin.pid)
-            | (compat_core::syscall::LINUX_COMPAT_UID as u64) << 32,
+        u64::from(record.sender_pid) | (u64::from(record.sender_uid) << 32),
     );
-    write_frame_u64(&mut frame, SIGNAL_INFO_OFFSET + 24, origin.value);
+    write_frame_u64(&mut frame, SIGNAL_INFO_OFFSET + 24, record.value);
     let nodefer = action[1] & (SA_NODEFER | SA_RESETHAND) != 0;
     let reset_hand = action[1] & SA_RESETHAND != 0;
     let handler_mask = if nodefer {
@@ -1287,7 +1531,8 @@ fn deliver_pending_signal(
     user_ip: Option<(u64, u64)>,
     interrupted_result: i64,
 ) -> Option<UserReturn> {
-    let (signal, origin) = take_deliverable_signal(process)?;
+    let record = take_deliverable_signal(process)?;
+    let signal = record.signal;
     let action = proc::linux_signal_action(process, signal)?;
     if action[0] == 1 {
         if let Some(mask) = take_current_sigsuspend_restore_mask(process) {
@@ -1297,14 +1542,7 @@ fn deliver_pending_signal(
         return None;
     }
     let user_ip = user_ip?;
-    match build_signal_frame(
-        process,
-        signal,
-        origin,
-        args,
-        user_ip,
-        interrupted_result,
-    ) {
+    match build_signal_frame(process, record, args, user_ip, interrupted_result) {
         Ok(user) => Some(user),
         Err(error) => {
             crate::kprintln!(
@@ -1312,9 +1550,88 @@ fn deliver_pending_signal(
                 signal,
                 error as i32
             );
+            let _ = proc::set_linux_termination_signal(process, signal);
             let _ = proc::begin_exit(process, 128 + i64::from(signal));
             None
         }
+    }
+}
+
+/// Reads the bounded x86-64 siginfo layout used by the sigqueue syscalls.
+fn read_linux_queued_siginfo(signal: u32, address: u64) -> Result<SignalOrigin, CompatErrno> {
+    let mut info = [0u8; 128];
+    copy_from_user(&mut info, address, 128).map_err(|_| CompatErrno::Fault)?;
+    if !(1..=64).contains(&signal) {
+        return Err(CompatErrno::Invalid);
+    }
+    if u32::from_le_bytes(info[..4].try_into().unwrap()) != signal {
+        return Err(CompatErrno::Invalid);
+    }
+    Ok(SignalOrigin {
+        pid: u32::from_le_bytes(info[16..20].try_into().unwrap()),
+        uid: u32::from_le_bytes(info[20..24].try_into().unwrap()),
+        code: i32::from_le_bytes(info[8..12].try_into().unwrap()),
+        value: u64::from_le_bytes(info[24..32].try_into().unwrap()),
+    })
+}
+
+/// Rejects forged SI_USER/SI_TKILL metadata from a different task.
+fn check_linux_sigqueue_source(
+    process: ObjId,
+    target_tid: u32,
+    code: i32,
+) -> Result<(), CompatErrno> {
+    const SI_TKILL: i32 = -6;
+    let sender_tid = linux_tid(process).ok_or(CompatErrno::NoSys)?;
+    if (code >= 0 || code == SI_TKILL) && sender_tid != target_tid {
+        return Err(CompatErrno::Perm);
+    }
+    Ok(())
+}
+
+/// Implements process-directed `rt_sigqueueinfo(2)`.
+fn linux_rt_sigqueueinfo(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+    const SIGSTOP: u32 = 19;
+    let pid = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let signal = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let info = read_linux_queued_siginfo(signal, args[2])?;
+    if pid == 0 {
+        return Err(CompatErrno::NoProcess);
+    }
+    if signal == SIGSTOP {
+        return Err(CompatErrno::NotSupported);
+    }
+    let target = proc::linux_process_for_pid(pid).ok_or(CompatErrno::NoProcess)?;
+    check_linux_sigqueue_source(process, pid, info.code)?;
+    if queue_process_signal_info(target, signal, info.pid, info.uid, info.code, info.value) {
+        Ok(())
+    } else {
+        Err(CompatErrno::TryAgain)
+    }
+}
+
+/// Implements thread-directed `rt_tgsigqueueinfo(2)`.
+fn linux_rt_tgsigqueueinfo(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+    const SIGSTOP: u32 = 19;
+    let tgid = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let tid = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let signal = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let info = read_linux_queued_siginfo(signal, args[3])?;
+    if tgid == 0 || tid == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if signal == SIGSTOP {
+        return Err(CompatErrno::NotSupported);
+    }
+    let target = proc::linux_process_for_pid(tgid).ok_or(CompatErrno::NoProcess)?;
+    if !has_linux_thread(target, tid) {
+        return Err(CompatErrno::NoProcess);
+    }
+    check_linux_sigqueue_source(process, tid, info.code)?;
+    if queue_thread_signal_info(target, tid, signal, info.pid, info.uid, info.code, info.value) {
+        Ok(())
+    } else {
+        Err(CompatErrno::TryAgain)
     }
 }
 
@@ -1345,69 +1662,95 @@ fn linux_tgkill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     }
 }
 
-/// Queues process- or thread-directed `siginfo_t` with SI_QUEUE payload data.
-fn linux_rt_sigqueueinfo(
-    process: ObjId,
-    args: [u64; 6],
-    thread_directed: bool,
-) -> Result<u64, CompatErrno> {
-    let (target_pid, target_tid, signal, info_address) = if thread_directed {
-        (
-            u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?,
-            Some(u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?),
-            u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
-            args[3],
-        )
-    } else {
-        (
-            u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?,
-            None,
-            u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?,
-            args[2],
-        )
-    };
-    if target_pid == 0
-        || signal == 0
-        || signal > 64
-        || signal == 19
-    {
-        return Err(CompatErrno::Invalid);
-    }
-    let mut info = [0u8; 128];
-    copy_from_user(&mut info, info_address, 128).map_err(|_| CompatErrno::Fault)?;
-    let info_signal = i32::from_le_bytes(info[0..4].try_into().unwrap());
-    let code = i32::from_le_bytes(info[8..12].try_into().unwrap());
-    let value = u64::from_le_bytes(info[24..32].try_into().unwrap());
-    if info_signal != signal as i32 {
-        return Err(CompatErrno::Invalid);
-    }
-    if !(-5..=-1).contains(&code) {
-        return Err(CompatErrno::Perm);
-    }
-    let sender_pid = proc::linux_pid(process).ok_or(CompatErrno::NoProcess)?;
-    if let Some(tid) = target_tid {
-        if sender_pid != target_pid || !has_linux_thread(process, tid) {
-            return Err(CompatErrno::NoProcess);
-        }
-        if queue_thread_signal_value(process, tid, signal, sender_pid, code, value) {
-            Ok(0)
-        } else {
-            Err(CompatErrno::NoSpace)
-        }
-    } else {
-        let target = proc::linux_process_for_pid(target_pid).ok_or(CompatErrno::NoProcess)?;
-        if queue_process_signal_value(target, signal, sender_pid, code, value) {
-            Ok(0)
-        } else {
-            Err(CompatErrno::NoSpace)
-        }
-    }
-}
-
 /// Queues a thread-directed `tkill` in the current compatibility process.
 fn linux_tkill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     let tgid = proc::linux_pid(process).ok_or(CompatErrno::NoProcess)?;
     linux_tgkill(process, [u64::from(tgid), args[0], args[1], 0, 0, 0])
+}
+
+/// Resolves either a process leader PID or a Linux thread TID.
+fn linux_task_process(task_id: u32) -> Option<ObjId> {
+    if let Some(process) = COMPAT
+        .lock()
+        .threads
+        .iter()
+        .flatten()
+        .find(|entry| entry.tid == task_id)
+        .map(|entry| entry.process)
+    {
+        return Some(process);
+    }
+    proc::linux_process_for_pid(task_id)
+}
+
+/// Returns Linux's stable equality/ordering result for two object identities.
+fn kcmp_identity_order(first: u64, second: u64) -> u64 {
+    if first == second {
+        0
+    } else if first < second {
+        1
+    } else {
+        2
+    }
+}
+
+/// Compares compatibility process resources using the same-application boundary.
+fn linux_kcmp(process: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const KCMP_FILE: u32 = 0;
+    const KCMP_VM: u32 = 1;
+    const KCMP_FILES: u32 = 3;
+    const KCMP_FS: u32 = 2;
+    const KCMP_SIGHAND: u32 = 4;
+    const KCMP_IO: u32 = 5;
+    const KCMP_SYSVSEM: u32 = 6;
+    const KCMP_EPOLL_TFD: u32 = 7;
+    let pid1 = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let pid2 = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let kind = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let first = linux_task_process(pid1).ok_or(CompatErrno::NoProcess)?;
+    let second = linux_task_process(pid2).ok_or(CompatErrno::NoProcess)?;
+    let caller_app = crate::security::process_application(process).ok_or(CompatErrno::Perm)?;
+    let first_app =
+        crate::security::process_application(first).ok_or(CompatErrno::Perm)?;
+    let second_app =
+        crate::security::process_application(second).ok_or(CompatErrno::Perm)?;
+    if caller_app != first_app || caller_app != second_app {
+        return Err(CompatErrno::Perm);
+    }
+    match kind {
+        KCMP_FILE => {
+            let first_fd = u32::try_from(args[3]).map_err(|_| CompatErrno::BadFd)?;
+            let second_fd = u32::try_from(args[4]).map_err(|_| CompatErrno::BadFd)?;
+            let first_id =
+                proc::linux_fd_description_identity(first, first_fd).ok_or(CompatErrno::BadFd)?;
+            let second_id =
+                proc::linux_fd_description_identity(second, second_fd).ok_or(CompatErrno::BadFd)?;
+            Ok(kcmp_identity_order(first_id, second_id))
+        }
+        KCMP_VM | KCMP_FS | KCMP_FILES | KCMP_SIGHAND | KCMP_IO => Ok(
+            kcmp_identity_order(first.raw(), second.raw()),
+        ),
+        KCMP_EPOLL_TFD => {
+            let first_fd = u32::try_from(args[3]).map_err(|_| CompatErrno::BadFd)?;
+            let first_id =
+                proc::linux_fd_description_identity(first, first_fd).ok_or(CompatErrno::BadFd)?;
+            let mut slot = [0u8; 12];
+            copy_from_user(&mut slot, args[4], 12).map_err(|_| CompatErrno::Fault)?;
+            let epoll_fd = u32::from_le_bytes(slot[0..4].try_into().unwrap());
+            let target_fd = u32::from_le_bytes(slot[4..8].try_into().unwrap());
+            let target_offset = u32::from_le_bytes(slot[8..12].try_into().unwrap());
+            let second_id = proc::linux_epoll_registration_identity(
+                second,
+                epoll_fd,
+                target_fd,
+                target_offset,
+            )
+            .ok_or(CompatErrno::BadFd)?;
+            Ok(kcmp_identity_order(first_id, second_id))
+        }
+        KCMP_SYSVSEM => Err(CompatErrno::NotSupported),
+        _ => Err(CompatErrno::Invalid),
+    }
 }
 
 /// Queues a process-directed `kill` for a live compatibility process.
@@ -1432,7 +1775,7 @@ fn linux_kill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     if queue_process_signal(target, signal, sender_pid, 0) {
         Ok(())
     } else {
-        Err(CompatErrno::NoSpace)
+        Err(CompatErrno::TryAgain)
     }
 }
 
@@ -1622,6 +1965,15 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
             return;
         };
         let entry = state.threads[slot].take().expect("live Linux thread");
+        state.thread_landlock_domains[slot] = None;
+        state.pending_signal_records.iter_mut().for_each(|pending| {
+            if pending.is_some_and(|pending| {
+                pending.process == process && pending.target_tid == entry.tid
+            }) {
+                *pending = None;
+            }
+        });
+        remove_all_sysv_semaphore_waiters(&mut state, process, task);
         let last_thread = !state
             .threads
             .iter()
@@ -1636,7 +1988,6 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
             last_thread,
         )
     };
-    crate::binder::release_thread(process, tid);
     if let Some(ticks) = sched::cpu_ticks(task) {
         let _ = proc::linux_account_exited_thread_cpu(process, ticks);
     }
@@ -1655,7 +2006,10 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
     }
     if last_thread {
         release_posix_timers(process);
+        release_mq_notifications(process);
         remove_process_signals(process);
+        release_sysv_semaphore_undos(process);
+        release_sysv_shared_process(process);
         crate::binder::release_process(process);
     }
 }
@@ -1817,25 +2171,9 @@ fn futex_wait(
         }
     };
     let mut state = COMPAT.lock();
-    let current_key = state
-        .futexes
-        .iter()
-        .flatten()
-        .flat_map(|word| word.waiters.iter())
-        .find(|waiter| waiter.active && waiter.task == task)
-        .and_then(|waiter| waiter.key);
-    if let Some(current_key) = current_key {
-        if let Some(word) = state
-            .futexes
-            .iter_mut()
-            .flatten()
-            .find(|word| word.key == current_key)
-        {
-            if let Some(waiter) = word
-                .waiters
-                .iter_mut()
-                .find(|waiter| waiter.active && waiter.task == task)
-            {
+    for word in state.futexes.iter_mut().flatten() {
+        for waiter in word.waiters.iter_mut() {
+            if waiter.active && waiter.task == task {
                 *waiter = FutexWaiter::EMPTY;
             }
         }
@@ -2035,6 +2373,49 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
     let Some(pid) = proc::current_process() else {
         return SyscallOutcome::value(-i64::from(CompatErrno::NoSys as i32));
     };
+    let mut seccomp_data = [0u8; compat_core::seccomp::SECCOMP_DATA_BYTES];
+    seccomp_data[..4].copy_from_slice(&(a.id as u32).to_le_bytes());
+    seccomp_data[4..8].copy_from_slice(&0xc000_003eu32.to_le_bytes());
+    let instruction_pointer = a.user_ip.map(|ip| ip.0).unwrap_or(0);
+    seccomp_data[8..16].copy_from_slice(&instruction_pointer.to_le_bytes());
+    for (index, argument) in a.args.iter().enumerate() {
+        let offset = 16 + index * 8;
+        seccomp_data[offset..offset + 8].copy_from_slice(&argument.to_le_bytes());
+    }
+    match proc::linux_seccomp_action(pid, &seccomp_data) {
+        compat_core::seccomp::SeccompAction::Allow => {}
+        compat_core::seccomp::SeccompAction::Log => {
+            crate::kprintln!("[JSR-LINUX-SECCOMP] action=log nr={}", a.id);
+        }
+        compat_core::seccomp::SeccompAction::Errno(error) => {
+            return SyscallOutcome::value(-i64::from(error));
+        }
+        compat_core::seccomp::SeccompAction::Trap => {
+            let _ = queue_process_signal(pid, 31, 0, 128);
+            let value = -i64::from(CompatErrno::NoSys as i32);
+            let redirect = deliver_pending_signal(pid, a, a.user_ip, value);
+            if proc::current_exiting() {
+                proc::thread_exit(128 + 31, "linux seccomp trap");
+            }
+            return SyscallOutcome {
+                value,
+                redirect,
+                exec_redirect: None,
+            };
+        }
+        compat_core::seccomp::SeccompAction::KillThread => {
+            proc::thread_exit(128 + 31, "linux seccomp kill thread");
+        }
+        compat_core::seccomp::SeccompAction::KillProcess => {
+            let _ = proc::set_linux_termination_signal(pid, 31);
+            let _ = proc::begin_exit(pid, 128 + 31);
+            proc::thread_exit(128 + 31, "linux seccomp kill process");
+        }
+        compat_core::seccomp::SeccompAction::Trace(_)
+        | compat_core::seccomp::SeccompAction::UserNotify => {
+            return SyscallOutcome::value(-i64::from(CompatErrno::NoSys as i32));
+        }
+    }
     let dispatched = dispatch(SyscallRequest {
         number: a.id,
         args: a.args,
@@ -2132,9 +2513,6 @@ fn execute(
         }
         LinuxSyscall::ProcessVmReadV => compat_result(linux_process_vm_io(pid, call.args, false)),
         LinuxSyscall::ProcessVmWriteV => compat_result(linux_process_vm_io(pid, call.args, true)),
-        LinuxSyscall::ProcessMadvise => {
-            compat_result(linux_process_madvise(pid, call.args))
-        }
         LinuxSyscall::ReadLinkAt => compat_result(linux_readlinkat(pid, call.args)),
         LinuxSyscall::Close => compat_result(linux_close(pid, call.args[0])),
         LinuxSyscall::CloseRange => compat_result(linux_close_range(pid, call.args)),
@@ -2150,10 +2528,6 @@ fn execute(
         LinuxSyscall::Accept => compat_result(linux_accept(pid, call.args, false)),
         LinuxSyscall::Accept4 => compat_result(linux_accept(pid, call.args, true)),
         LinuxSyscall::SocketPair => compat_result(linux_socketpair(pid, call.args)),
-        LinuxSyscall::MsgGet => compat_result(linux_msgget(pid, call.args)),
-        LinuxSyscall::MsgCtl => compat_result(linux_msgctl(pid, call.args)),
-        LinuxSyscall::MsgSnd => compat_result(linux_msgsnd(pid, call.args)),
-        LinuxSyscall::MsgRcv => compat_result(linux_msgrcv(pid, call.args)),
         LinuxSyscall::EventFd => compat_result(linux_eventfd(pid, call.args, false)),
         LinuxSyscall::EventFd2 => compat_result(linux_eventfd(pid, call.args, true)),
         LinuxSyscall::TimerFdCreate => compat_result(linux_timerfd_create(pid, call.args)),
@@ -2220,6 +2594,10 @@ fn execute(
         LinuxSyscall::Removexattr => compat_result(linux_removexattr(pid, call.args, false, false)),
         LinuxSyscall::LRemovexattr => compat_result(linux_removexattr(pid, call.args, false, true)),
         LinuxSyscall::FRemovexattr => compat_result(linux_removexattr(pid, call.args, true, false)),
+        LinuxSyscall::Setxattrat => compat_result(linux_setxattrat(pid, call.args)),
+        LinuxSyscall::Getxattrat => compat_result(linux_getxattrat(pid, call.args)),
+        LinuxSyscall::Listxattrat => compat_result(linux_listxattrat(pid, call.args)),
+        LinuxSyscall::Removexattrat => compat_result(linux_removexattrat(pid, call.args)),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
         LinuxSyscall::Stat => {
             compat_result(linux_newfstatat(pid, legacy_stat_args(call.args, false)))
@@ -2245,6 +2623,7 @@ fn execute(
             compat_result(linux_sync_file_range(pid, call.args))
         }
         LinuxSyscall::MemfdCreate => compat_result(linux_memfd_create(pid, call.args)),
+        LinuxSyscall::MemfdSecret => compat_result(linux_memfd_secret(pid, call.args)),
         LinuxSyscall::Sync => 0,
         LinuxSyscall::Syncfs => compat_result(linux_syncfs(pid, call.args[0])),
         LinuxSyscall::NewFstatAt => compat_result(linux_newfstatat(pid, call.args)),
@@ -2261,17 +2640,35 @@ fn execute(
         LinuxSyscall::SendFile => compat_result(linux_sendfile(pid, call.args)),
         LinuxSyscall::CopyFileRange => compat_result(linux_copy_file_range(pid, call.args)),
         LinuxSyscall::Splice => compat_result(linux_splice(pid, call.args)),
+        LinuxSyscall::Vmsplice => compat_result(linux_vmsplice(pid, call.args)),
         LinuxSyscall::Tee => compat_result(linux_tee(pid, call.args)),
-        LinuxSyscall::VmSplice => compat_result(linux_vmsplice(pid, call.args)),
-        LinuxSyscall::Cachestat => compat_result(linux_cachestat(pid, call.args)),
         LinuxSyscall::Mmap => compat_result(linux_mmap(pid, call.args)),
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
         LinuxSyscall::Mremap => compat_result(linux_mremap(pid, call.args)),
+        LinuxSyscall::Mseal => compat_result(linux_mseal(pid, call.args)),
         LinuxSyscall::Msync => compat_result(linux_msync(pid, call.args)),
+        LinuxSyscall::MsgGet => compat_result(linux_msgget(pid, call.args)),
+        LinuxSyscall::MsgSend => compat_result(linux_msgsnd(pid, call.args)),
+        LinuxSyscall::MsgReceive => compat_result(linux_msgrcv(pid, call.args)),
+        LinuxSyscall::MsgCtl => compat_result(linux_msgctl(pid, call.args)),
+        LinuxSyscall::SemGet => compat_result(linux_semget(pid, call.args)),
+        LinuxSyscall::SemOp => compat_result(linux_semop(pid, call.args, false)),
+        LinuxSyscall::SemTimedOp => compat_result(linux_semop(pid, call.args, true)),
+        LinuxSyscall::SemCtl => compat_result(linux_semctl(pid, call.args)),
+        LinuxSyscall::ShmGet => compat_result(linux_shmget(pid, call.args)),
+        LinuxSyscall::ShmAt => compat_result(linux_shmat(pid, call.args)),
+        LinuxSyscall::ShmDt => compat_result(linux_shmdt(pid, call.args)),
+        LinuxSyscall::ShmCtl => compat_result(linux_shmctl(pid, call.args)),
+        LinuxSyscall::MqOpen => compat_result(linux_mq_open(pid, call.args)),
+        LinuxSyscall::MqUnlink => compat_result(linux_mq_unlink(pid, call.args)),
+        LinuxSyscall::MqTimedsend => compat_result(linux_mq_send(pid, call.args, true)),
+        LinuxSyscall::MqTimedreceive => compat_result(linux_mq_receive(pid, call.args, true)),
+        LinuxSyscall::MqNotify => compat_result(linux_mq_notify(pid, call.args)),
+        LinuxSyscall::MqGetsetattr => compat_result(linux_mq_getsetattr(pid, call.args)),
         LinuxSyscall::MinCore => compat_result(linux_mincore(pid, call.args)),
         LinuxSyscall::Madvise => compat_result(linux_madvise(pid, call.args)),
-        LinuxSyscall::MemBarrier => compat_result(linux_membarrier(pid, call.args)),
+        LinuxSyscall::Membarrier => compat_result(linux_membarrier(call.args)),
         LinuxSyscall::Mlock => compat_result(linux_mlock(pid, call.args, false)),
         LinuxSyscall::Mlock2 => compat_result(linux_mlock(pid, call.args, true)),
         LinuxSyscall::Mlockall => compat_result(linux_mlockall(call.args)),
@@ -2295,6 +2692,84 @@ fn execute(
         LinuxSyscall::CapSet => compat_result(linux_capset(pid, call.args)),
         LinuxSyscall::IoprioGet => compat_result(linux_ioprio_get(pid, call.args)),
         LinuxSyscall::IoprioSet => compat_result(linux_ioprio_set(pid, call.args)),
+        LinuxSyscall::Personality => compat_result(linux_personality(pid, call.args[0])),
+        LinuxSyscall::RestartSyscall => -(CompatErrno::Interrupted as i32 as i64),
+        LinuxSyscall::RemapFilePages => -(CompatErrno::NotSupported as i32 as i64),
+        LinuxSyscall::GetThreadArea
+        | LinuxSyscall::SetThreadArea
+        | LinuxSyscall::ModifyLdt
+        | LinuxSyscall::LegacySysctl
+        | LinuxSyscall::LegacyAfs
+        | LinuxSyscall::LegacyCreateModule
+        | LinuxSyscall::LegacyGetKernelSyms
+        | LinuxSyscall::LegacyQueryModule
+        | LinuxSyscall::LegacyNfsservctl
+        | LinuxSyscall::LegacyGetpmsg
+        | LinuxSyscall::LegacyPutpmsg
+        | LinuxSyscall::LegacyEpollCtlOld
+        | LinuxSyscall::LegacyEpollWaitOld
+        | LinuxSyscall::LegacyTuxcall
+        | LinuxSyscall::LegacyVserver
+        | LinuxSyscall::LegacySecurity
+        | LinuxSyscall::LegacyUstat
+        | LinuxSyscall::LegacyUselib
+        | LinuxSyscall::LegacySysfs => -(CompatErrno::NoSys as i32 as i64),
+        LinuxSyscall::RseqSliceYield => {
+            sched::yield_with_cause(crate::sched::scheduler::Cause::YIELD);
+            0
+        }
+        LinuxSyscall::LookupDcookie => -(CompatErrno::NoEntry as i32 as i64),
+        LinuxSyscall::Listmount => compat_result(linux_listmount(pid, call.args)),
+        LinuxSyscall::Statmount => compat_result(linux_statmount(pid, call.args)),
+        LinuxSyscall::Seccomp => compat_result(linux_seccomp(pid, call.args)),
+        LinuxSyscall::Cachestat => compat_result(linux_cachestat(pid, call.args)),
+        LinuxSyscall::LsmListModules => compat_result(linux_lsm_list_modules(call.args)),
+        LinuxSyscall::ProcessMadvise => compat_result(linux_process_madvise(pid, call.args)),
+        LinuxSyscall::FileGetattr => compat_result(linux_file_getattr(pid, call.args)),
+        LinuxSyscall::FileSetattr => compat_result(linux_file_setattr(pid, call.args)),
+        LinuxSyscall::ProcessMrelease => compat_result(linux_process_mrelease(pid, call.args)),
+        LinuxSyscall::PkeyAlloc => compat_result(linux_pkey_alloc(call.args)),
+        LinuxSyscall::PkeyFree => compat_result(linux_pkey_free(call.args)),
+        LinuxSyscall::PkeyMprotect => compat_result(linux_pkey_mprotect(pid, call.args)),
+        LinuxSyscall::NameToHandleAt => compat_result(linux_name_to_handle_at(pid, call.args)),
+        LinuxSyscall::OpenByHandleAt => compat_result(linux_open_by_handle_at(pid, call.args)),
+        LinuxSyscall::LsmGetSelfAttr => compat_result(linux_lsm_get_self_attr(pid, call.args)),
+        LinuxSyscall::OpenTree => compat_result(linux_open_tree(pid, call.args)),
+        LinuxSyscall::OpenTreeAttr => compat_result(linux_open_tree_attr(pid, call.args)),
+        LinuxSyscall::Listns => compat_result(linux_listns(call.args)),
+        LinuxSyscall::MoveMount => compat_result(linux_move_mount(pid, call.args)),
+        LinuxSyscall::MountSetattr => compat_result(linux_mount_setattr(pid, call.args)),
+        LinuxSyscall::FsOpen => compat_result(linux_fsopen(pid, call.args)),
+        LinuxSyscall::FsConfig => compat_result(linux_fsconfig(pid, call.args)),
+        LinuxSyscall::FsMount => compat_result(linux_fsmount(pid, call.args)),
+        LinuxSyscall::FsPick => compat_result(linux_fspick(pid, call.args)),
+        LinuxSyscall::AddKey => compat_result(linux_add_key(pid, call.args)),
+        LinuxSyscall::RequestKey => compat_result(linux_request_key(pid, call.args)),
+        LinuxSyscall::Keyctl => compat_result(linux_keyctl(pid, call.args)),
+        LinuxSyscall::GetMempolicy => compat_result(linux_get_mempolicy(pid, call.args)),
+        LinuxSyscall::SetMempolicy => compat_result(linux_set_mempolicy(call.args)),
+        LinuxSyscall::Mbind => compat_result(linux_mbind(pid, call.args)),
+        LinuxSyscall::SetMempolicyHomeNode => {
+            compat_result(linux_set_mempolicy_home_node(pid, call.args))
+        }
+        LinuxSyscall::MigratePages => compat_result(linux_migrate_pages(pid, call.args)),
+        LinuxSyscall::MovePages => compat_result(linux_move_pages(pid, call.args)),
+        LinuxSyscall::FanotifyInit
+        | LinuxSyscall::FanotifyMark
+        | LinuxSyscall::LsmSetSelfAttr
+        | LinuxSyscall::MapShadowStack
+        | LinuxSyscall::Uprobe
+        | LinuxSyscall::Uretprobe
+        | LinuxSyscall::Userfaultfd => -(CompatErrno::NotSupported as i32 as i64),
+        LinuxSyscall::LandlockCreateRuleset => {
+            compat_result(linux_landlock_create_ruleset(pid, call.args))
+        }
+        LinuxSyscall::LandlockAddRule => {
+            compat_result(linux_landlock_add_rule(pid, call.args))
+        }
+        LinuxSyscall::LandlockRestrictSelf => {
+            compat_result(linux_landlock_restrict_self(pid, call.args))
+        }
         LinuxSyscall::Adjtimex
         | LinuxSyscall::ClockAdjtime
         | LinuxSyscall::ClockSettime
@@ -2323,23 +2798,24 @@ fn execute(
         | LinuxSyscall::Ptrace
         | LinuxSyscall::Setns
         | LinuxSyscall::Unshare
-        | LinuxSyscall::Syslog => -(CompatErrno::Perm as i32 as i64),
+        | LinuxSyscall::Syslog
+        | LinuxSyscall::Vhangup => -(CompatErrno::Perm as i32 as i64),
         LinuxSyscall::ClockGettime => compat_result(linux_clock_gettime(call.args)),
         LinuxSyscall::ClockGetres => compat_result(linux_clock_getres(call.args)),
         LinuxSyscall::Nanosleep => compat_result(linux_nanosleep(pid, call.args)),
         LinuxSyscall::Pause => compat_result(linux_pause(pid)),
         LinuxSyscall::ClockNanosleep => compat_result(linux_clock_nanosleep(pid, call.args)),
         LinuxSyscall::RtSigAction => compat_result(linux_rt_sigaction(pid, call.args)),
-        LinuxSyscall::RtSigQueueInfo => {
-            compat_result(linux_rt_sigqueueinfo(pid, call.args, false))
-        }
-        LinuxSyscall::RtTgSigQueueInfo => {
-            compat_result(linux_rt_sigqueueinfo(pid, call.args, true))
-        }
         LinuxSyscall::RtSigPending => compat_result(linux_rt_sigpending(pid, call.args)),
+        LinuxSyscall::RtSigqueueinfo => {
+            compat_result(linux_rt_sigqueueinfo(pid, call.args).map(|()| 0))
+        }
         LinuxSyscall::RtSigProcMask => compat_result(linux_rt_sigprocmask(pid, call.args)),
         LinuxSyscall::RtSigsuspend => compat_result(linux_rt_sigsuspend(pid, call.args)),
         LinuxSyscall::RtSigtimedwait => compat_result(linux_rt_sigtimedwait(pid, call.args)),
+        LinuxSyscall::RtTgsigqueueinfo => {
+            compat_result(linux_rt_tgsigqueueinfo(pid, call.args).map(|()| 0))
+        }
         LinuxSyscall::Tkill => compat_result(linux_tkill(pid, call.args).map(|()| 0)),
         LinuxSyscall::Tgkill => compat_result(linux_tgkill(pid, call.args).map(|()| 0)),
         LinuxSyscall::SchedYield => {
@@ -2354,6 +2830,7 @@ fn execute(
         LinuxSyscall::InotifyAddWatch => compat_result(linux_inotify_add_watch(pid, call.args)),
         LinuxSyscall::InotifyRmWatch => compat_result(linux_inotify_rm_watch(pid, call.args)),
         LinuxSyscall::Kill => compat_result(linux_kill(pid, call.args).map(|()| 0)),
+        LinuxSyscall::Kcmp => compat_result(linux_kcmp(pid, call.args)),
         LinuxSyscall::Uname => compat_result(linux_uname(call.args)),
         LinuxSyscall::GetPid => proc::linux_pid(pid)
             .map(i64::from)
@@ -2446,6 +2923,10 @@ fn execute(
         LinuxSyscall::Getrlimit => compat_result(linux_getrlimit(pid, call.args)),
         LinuxSyscall::Setrlimit => compat_result(linux_setrlimit(pid, call.args)),
         LinuxSyscall::Futex => compat_result(linux_futex(pid, call.args)),
+        LinuxSyscall::FutexWait => compat_result(linux_futex_wait(pid, call.args)),
+        LinuxSyscall::FutexWake => compat_result(linux_futex_wake(pid, call.args)),
+        LinuxSyscall::FutexRequeue => compat_result(linux_futex_requeue(pid, call.args)),
+        LinuxSyscall::FutexWaitv => compat_result(linux_futex_waitv(pid, call.args)),
         LinuxSyscall::EpollCreate => compat_result(linux_epoll_create(pid, call.args)),
         LinuxSyscall::EpollCreate1 => compat_result(linux_epoll_create1(pid, call.args)),
         LinuxSyscall::EpollCtl => compat_result(linux_epoll_ctl(pid, call.args)),
@@ -2457,6 +2938,12 @@ fn execute(
         LinuxSyscall::IoUringRegister => {
             compat_result(linux_io_uring_register(pid, call.args))
         }
+        LinuxSyscall::IoSetup => compat_result(linux_io_setup(pid, call.args)),
+        LinuxSyscall::IoDestroy => compat_result(linux_io_destroy(pid, call.args)),
+        LinuxSyscall::IoSubmit => compat_result(linux_io_submit(pid, call.args)),
+        LinuxSyscall::IoCancel => compat_result(linux_io_cancel(pid, call.args)),
+        LinuxSyscall::IoGetevents => compat_result(linux_io_getevents(pid, call.args, false)),
+        LinuxSyscall::IoPgetevents => compat_result(linux_io_getevents(pid, call.args, true)),
         LinuxSyscall::Exit | LinuxSyscall::ExitGroup => {
             let code = call.args[0] as i64;
             proc::thread_exit(code, "linux process exit")
@@ -2470,60 +2957,6 @@ fn execute(
         LinuxSyscall::PidfdGetFd => compat_result(linux_pidfd_getfd(pid, call.args)),
         _ => -i64::from(CompatErrno::NoSys as i32),
     }
-}
-
-fn sysv_caller(pid: ObjId) -> Result<crate::sysv_ipc::Caller, CompatErrno> {
-    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
-    let capabilities = proc::linux_capabilities(pid).ok_or(CompatErrno::NoProcess)?;
-    Ok(crate::sysv_ipc::Caller {
-        process: pid,
-        pid: proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?,
-        euid: credentials.euid,
-        egid: credentials.egid,
-        groups: proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?,
-        cap_effective: capabilities.effective,
-        now: crate::arch::wall_clock_ns()
-            .ok_or(CompatErrno::NoSys)?
-            / 1_000_000_000,
-    })
-}
-
-fn linux_msgget(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    crate::sysv_ipc::msgget(
-        &sysv_caller(pid)?,
-        args[0] as u32 as i32,
-        args[1],
-    )
-}
-
-fn linux_msgctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    crate::sysv_ipc::msgctl(
-        &sysv_caller(pid)?,
-        args[0] as u32 as i32,
-        args[1],
-        args[2],
-    )
-}
-
-fn linux_msgsnd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    crate::sysv_ipc::msgsnd(
-        &sysv_caller(pid)?,
-        args[0] as u32 as i32,
-        args[1],
-        args[2],
-        args[3],
-    )
-}
-
-fn linux_msgrcv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    crate::sysv_ipc::msgrcv(
-        &sysv_caller(pid)?,
-        args[0] as u32 as i32,
-        args[1],
-        args[2],
-        args[3] as i64,
-        args[4],
-    )
 }
 
 /// Returns one real or effective Linux ABI identity.
@@ -2778,8 +3211,7 @@ fn linux_setgroups(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let mut groups = alloc::vec![0u32; count];
     if count != 0 {
         let mut raw = [0u8; MAX_GROUPS * 4];
-        copy_from_user(&mut raw[..count * 4], args[1], count * 4)
-            .map_err(|_| CompatErrno::Fault)?;
+        copy_from_user(&mut raw, args[1], count * 4).map_err(|_| CompatErrno::Fault)?;
         for (index, group) in groups.iter_mut().enumerate() {
             *group = u32::from_le_bytes(raw[index * 4..index * 4 + 4].try_into().unwrap());
         }
@@ -3268,7 +3700,7 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             return linux_signalfd_read(pid, fd, entry.handle, args[1], len);
         }
         if entry.kind == compat_core::fd::CompatKind::Inotify {
-            return linux_inotify_read(pid, fd);
+            return linux_inotify_read(pid, fd, args[1], len);
         }
         if entry.kind == compat_core::fd::CompatKind::Socket {
             if !entry.rights.contains(kernel_core::object::Rights::READ) {
@@ -3538,7 +3970,7 @@ fn linux_vectored_file_io(
     Ok(read as u64)
 }
 
-/// Implements same-process `process_vm_readv/writev` without ptrace authority.
+/// Implements same-application `process_vm_readv/writev` without ptrace authority.
 fn linux_process_vm_io(
     pid: ObjId,
     args: [u64; 6],
@@ -3550,7 +3982,11 @@ fn linux_process_vm_io(
     }
     let target_pid = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
     let target = proc::linux_process_for_pid(target_pid).ok_or(CompatErrno::NoProcess)?;
-    if target != pid {
+    let caller_application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let target_application =
+        crate::security::process_application(target).ok_or(CompatErrno::NoProcess)?;
+    if target != pid && caller_application != target_application {
         return Err(CompatErrno::Perm);
     }
     let local_count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
@@ -3560,10 +3996,10 @@ fn linux_process_vm_io(
     let local_total = local.iter().map(|(_, length)| *length).sum::<usize>();
     let remote_total = remote.iter().map(|(_, length)| *length).sum::<usize>();
     let total = local_total.min(remote_total);
-    let (source, destination) = if write {
-        (&local, &remote)
+    let (source, destination, source_process, destination_process) = if write {
+        (&local, &remote, pid, target)
     } else {
-        (&remote, &local)
+        (&remote, &local, target, pid)
     };
     let mut bytes = alloc::vec![0u8; total];
     let mut offset = 0usize;
@@ -3572,7 +4008,11 @@ fn linux_process_vm_io(
             break;
         }
         let take = (*length).min(total - offset);
-        proc::read(pid, *address, &mut bytes[offset..offset + take])
+        proc::read(
+            source_process,
+            *address,
+            &mut bytes[offset..offset + take],
+        )
             .map_err(|_| CompatErrno::Fault)?;
         offset += take;
     }
@@ -3582,65 +4022,13 @@ fn linux_process_vm_io(
             break;
         }
         let take = (*length).min(total - offset);
-        proc::write(pid, *address, &bytes[offset..offset + take])
+        proc::write(
+            destination_process,
+            *address,
+            &bytes[offset..offset + take],
+        )
             .map_err(|_| CompatErrno::Fault)?;
         offset += take;
-    }
-    Ok(total as u64)
-}
-
-/// Implements pidfd-scoped memory advice with page-rounded user iovecs.
-fn linux_process_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
-    const MAX_ADVISE: usize = 64 * 1024 * 1024;
-    const MADV_WILLNEED: u64 = 3;
-    const MADV_DONTNEED: u64 = 4;
-    const MADV_COLD: u64 = 20;
-    const MADV_PAGEOUT: u64 = 21;
-    if args[4] != 0 {
-        return Err(CompatErrno::Invalid);
-    }
-    let pidfd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-    let entry = proc::linux_fd(pid, pidfd).ok_or(CompatErrno::BadFd)?;
-    if entry.kind != compat_core::fd::CompatKind::Pidfd {
-        return Err(CompatErrno::BadFd);
-    }
-    let target = ObjId::from_raw(entry.handle).ok_or(CompatErrno::NoProcess)?;
-    if proc::state(target) != Some(proc::ProcState::Running) {
-        return Err(CompatErrno::NoProcess);
-    }
-    let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    let vectors = read_message_iovecs(pid, args[1], count, MAX_ADVISE)?;
-    let total = vectors.iter().map(|(_, length)| *length).sum::<usize>();
-    if total > MAX_ADVISE {
-        return Err(CompatErrno::Invalid);
-    }
-    let advice = args[3];
-    if !matches!(
-        advice,
-        MADV_WILLNEED | MADV_DONTNEED | MADV_COLD | MADV_PAGEOUT
-    ) {
-        return Err(CompatErrno::Invalid);
-    }
-    for (address, length) in vectors {
-        if length == 0 {
-            continue;
-        }
-        let end = address
-            .checked_add(length as u64)
-            .ok_or(CompatErrno::Invalid)?;
-        let start = address & !(PAGE - 1);
-        let end = end
-            .checked_add(PAGE - 1)
-            .ok_or(CompatErrno::Invalid)?
-            & !(PAGE - 1);
-        let rounded = end.checked_sub(start).ok_or(CompatErrno::Invalid)?;
-        let effective = if matches!(advice, MADV_COLD | MADV_PAGEOUT) {
-            MADV_WILLNEED
-        } else {
-            advice
-        };
-        linux_madvise(target, [start, rounded, effective, 0, 0, 0])?;
     }
     Ok(total as u64)
 }
@@ -4359,6 +4747,9 @@ fn linux_munmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if end > crate::arch::USER_WINDOW.1 {
         return Err(CompatErrno::Invalid);
     }
+    if proc::linux_range_is_sealed(pid, args[0], end) {
+        return Err(CompatErrno::Perm);
+    }
     let mut page = args[0];
     while page < end {
         if !proc::unmap_shared_page(pid, page).map_err(|_| CompatErrno::NoMemory)? {
@@ -4404,6 +4795,9 @@ fn linux_mremap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let old_end = old_address
         .checked_add(old_rounded)
         .ok_or(CompatErrno::Invalid)?;
+    if proc::linux_range_is_sealed(pid, old_address, old_end) {
+        return Err(CompatErrno::Perm);
+    }
     let new_end = old_address
         .checked_add(new_rounded)
         .ok_or(CompatErrno::Invalid)?;
@@ -4561,6 +4955,9 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if end > crate::arch::USER_WINDOW.1 {
         return Err(CompatErrno::Invalid);
     }
+    if proc::linux_range_is_sealed(pid, args[0], end) {
+        return Err(CompatErrno::Perm);
+    }
     proc::protect_range(
         pid,
         args[0],
@@ -4570,6 +4967,30 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     )
     .map_err(|_| CompatErrno::NoMemory)?;
     Ok(0)
+}
+
+/// Implements page-range sealing for compatibility mappings.
+fn linux_mseal(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    if args[0] % PAGE != 0 || args[1] == 0 || args[2] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let end = args[0]
+        .checked_add(args[1])
+        .filter(|end| args[0] >= crate::arch::USER_WINDOW.0 && *end <= crate::arch::USER_WINDOW.1)
+        .ok_or(CompatErrno::NoMemory)?;
+    let mut page = args[0];
+    while page < end {
+        if proc::page_flags(pid, page).is_none() {
+            return Err(CompatErrno::NoMemory);
+        }
+        page += PAGE;
+    }
+    if proc::seal_linux_range(pid, args[0], end) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoSpace)
+    }
 }
 
 fn linux_msync(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
@@ -4643,6 +5064,17 @@ fn linux_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MADV_SEQUENTIAL: u64 = 2;
     const MADV_WILLNEED: u64 = 3;
     const MADV_DONTNEED: u64 = 4;
+    const MADV_FREE: u64 = 8;
+    const MADV_DOFORK: u64 = 11;
+    const MADV_HUGEPAGE: u64 = 14;
+    const MADV_NOHUGEPAGE: u64 = 15;
+    const MADV_DONTDUMP: u64 = 16;
+    const MADV_DODUMP: u64 = 17;
+    const MADV_KEEPONFORK: u64 = 19;
+    const MADV_COLD: u64 = 20;
+    const MADV_PAGEOUT: u64 = 21;
+    const MADV_POPULATE_READ: u64 = 22;
+    const MADV_POPULATE_WRITE: u64 = 23;
     const MADV_GUARD_INSTALL: u64 = 102;
     let address = args[0];
     let length = args[1];
@@ -4656,8 +5088,40 @@ fn linux_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     {
         return Err(CompatErrno::Invalid);
     }
+    let end = address.checked_add(length).ok_or(CompatErrno::Invalid)?;
+    if matches!(advice, MADV_DONTNEED | MADV_GUARD_INSTALL)
+        && proc::linux_range_is_sealed(pid, address, end)
+    {
+        return Err(CompatErrno::Perm);
+    }
     match advice {
-        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED => Ok(0),
+        MADV_NORMAL
+        | MADV_RANDOM
+        | MADV_SEQUENTIAL
+        | MADV_WILLNEED
+        | MADV_FREE
+        | MADV_DOFORK
+        | MADV_HUGEPAGE
+        | MADV_NOHUGEPAGE
+        | MADV_DONTDUMP
+        | MADV_DODUMP
+        | MADV_KEEPONFORK
+        | MADV_COLD
+        | MADV_PAGEOUT => Ok(0),
+        MADV_POPULATE_READ | MADV_POPULATE_WRITE => {
+            let require_write = advice == MADV_POPULATE_WRITE;
+            let mut page = address;
+            while page < end {
+                let Some(flags) = proc::page_flags(pid, page) else {
+                    return Err(CompatErrno::NoMemory);
+                };
+                if require_write && !flags.contains(MapFlags::WRITE) {
+                    return Err(CompatErrno::Access);
+                }
+                page = page.saturating_add(PAGE);
+            }
+            Ok(0)
+        }
         MADV_GUARD_INSTALL => {
             let pages = length.div_ceil(PAGE);
             for page in 0..pages {
@@ -4679,100 +5143,134 @@ fn linux_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
 }
 
-/// Implements process-wide and private-expedited `membarrier(2)` registrations.
-fn linux_membarrier(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const QUERY: u64 = 0;
-    const GLOBAL: u64 = 1 << 0;
-    const GLOBAL_EXPEDITED: u64 = 1 << 1;
-    const REGISTER_GLOBAL_EXPEDITED: u64 = 1 << 2;
-    const PRIVATE_EXPEDITED: u64 = 1 << 3;
-    const REGISTER_PRIVATE_EXPEDITED: u64 = 1 << 4;
-    const PRIVATE_EXPEDITED_SYNC_CORE: u64 = 1 << 5;
-    const REGISTER_PRIVATE_EXPEDITED_SYNC_CORE: u64 = 1 << 6;
-    const PRIVATE_EXPEDITED_RSEQ: u64 = 1 << 7;
-    const REGISTER_PRIVATE_EXPEDITED_RSEQ: u64 = 1 << 8;
-    const GET_REGISTERED: u64 = 1 << 9;
-    const SUPPORTED: u64 = GLOBAL
-        | GLOBAL_EXPEDITED
-        | REGISTER_GLOBAL_EXPEDITED
-        | PRIVATE_EXPEDITED
-        | REGISTER_PRIVATE_EXPEDITED
-        | PRIVATE_EXPEDITED_SYNC_CORE
-        | REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
-        | PRIVATE_EXPEDITED_RSEQ
-        | REGISTER_PRIVATE_EXPEDITED_RSEQ
-        | GET_REGISTERED;
-    const REGISTERED_PRIVATE: u8 = 1;
-    const REGISTERED_SYNC_CORE: u8 = 2;
-    const REGISTERED_RSEQ: u8 = 4;
+/// Applies an iovec batch of memory advice through a same-process pidfd.
+fn linux_process_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const IOV_MAX: usize = 64;
+    const MADV_COLD: u64 = 20;
+    const MADV_PAGEOUT: u64 = 21;
+    const MADV_COLLAPSE: u64 = 25;
+    if args[4] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if count == 0 || count > IOV_MAX {
+        return Err(CompatErrno::Invalid);
+    }
+    let pidfd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, pidfd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Pidfd {
+        return Err(CompatErrno::BadFd);
+    }
+    let target = ObjId::from_raw(entry.handle).ok_or(CompatErrno::NoProcess)?;
+    let caller_application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let target_application =
+        crate::security::process_application(target).ok_or(CompatErrno::NoProcess)?;
+    if target != pid && caller_application != target_application {
+        return Err(CompatErrno::Perm);
+    }
+    let bytes = count.checked_mul(16).ok_or(CompatErrno::Invalid)?;
+    let mut raw = alloc::vec![0u8; bytes];
+    copy_from_user(&mut raw, args[1], bytes).map_err(|_| CompatErrno::Fault)?;
+    let mut vector = alloc::vec::Vec::new();
+    vector
+        .try_reserve_exact(count)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    let mut total = 0u64;
+    for iovec in raw.chunks_exact(16) {
+        let address = u64::from_le_bytes(iovec[..8].try_into().unwrap());
+        let length = u64::from_le_bytes(iovec[8..].try_into().unwrap());
+        if length == 0 || address % kernel_core::frame::FRAME_SIZE != 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        total = total
+            .checked_add(length)
+            .filter(|total| *total <= i64::MAX as u64)
+            .ok_or(CompatErrno::Invalid)?;
+        vector.push((address, length));
+    }
+    let advice = i32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)? as u64;
+    let mut advised = 0u64;
+    for (address, length) in vector {
+        if matches!(advice, MADV_COLD | MADV_PAGEOUT | MADV_COLLAPSE) {
+            advised = advised.saturating_add(length);
+            continue;
+        }
+        let call = [address, length, advice, 0, 0, 0];
+        if let Err(error) = linux_madvise(target, call) {
+            return if advised == 0 { Err(error) } else { Ok(advised) };
+        }
+        advised = advised.saturating_add(length);
+    }
+    Ok(advised.min(total))
+}
+
+/// Reports that an exited pidfd target has already released its address space.
+fn linux_process_mrelease(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if args[1] != 0 {
         return Err(CompatErrno::Invalid);
     }
-    let cpu_id = args[2] as u32 as i32;
-    let registered = || proc::linux_membarrier_flags(pid).ok_or(CompatErrno::NoProcess);
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Pidfd {
+        return Err(CompatErrno::BadFd);
+    }
+    let target = ObjId::from_raw(entry.handle).ok_or(CompatErrno::NoProcess)?;
+    let caller_app = crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let target_app = crate::security::process_application(target).ok_or(CompatErrno::NoProcess)?;
+    if caller_app != target_app {
+        return Err(CompatErrno::Perm);
+    }
+    match proc::state(target) {
+        Some(proc::ProcState::Exited { .. }) => Ok(0),
+        Some(proc::ProcState::Exiting { .. }) | Some(proc::ProcState::Running) | None => {
+            Err(CompatErrno::NoProcess)
+        }
+    }
+}
+
+/// Reports exhaustion because Jasper does not currently enable hardware PKU slots.
+fn linux_pkey_alloc(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[0] != 0 || args[1] & !3 != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    Err(CompatErrno::NoSpace)
+}
+
+fn linux_pkey_free(_args: [u64; 6]) -> Result<u64, CompatErrno> {
+    Err(CompatErrno::Invalid)
+}
+
+/// Key zero retains normal mprotect behavior without claiming PKU enforcement.
+fn linux_pkey_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[3] as u32 as i32 != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    linux_mprotect(pid, [args[0], args[1], args[2], 0, 0, 0])
+}
+
+/// Implements the process-scope memory barrier command subset.
+fn linux_membarrier(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const CMD_QUERY: u64 = 0;
+    const CMD_GLOBAL: u64 = 1;
+    const CMD_GLOBAL_EXPEDITED: u64 = 2;
+    const CMD_REGISTER_GLOBAL_EXPEDITED: u64 = 4;
+    const CMD_PRIVATE_EXPEDITED: u64 = 8;
+    const CMD_REGISTER_PRIVATE_EXPEDITED: u64 = 16;
+    const SUPPORTED: u64 =
+        CMD_GLOBAL | CMD_GLOBAL_EXPEDITED | CMD_REGISTER_GLOBAL_EXPEDITED | CMD_PRIVATE_EXPEDITED
+            | CMD_REGISTER_PRIVATE_EXPEDITED;
+    if args[1] != 0 || args[2] != 0 && args[2] != u64::MAX {
+        return Err(CompatErrno::Invalid);
+    }
     match args[0] {
-        QUERY => {
-            if args[2] != 0 {
-                return Err(CompatErrno::Invalid);
-            }
-            Ok(SUPPORTED)
-        }
-        GLOBAL | GLOBAL_EXPEDITED => {
-            if cpu_id != 0 && cpu_id != -1 {
-                return Err(CompatErrno::Invalid);
-            }
-            core::sync::atomic::fence(Ordering::SeqCst);
+        CMD_QUERY => Ok(SUPPORTED),
+        CMD_GLOBAL | CMD_GLOBAL_EXPEDITED | CMD_PRIVATE_EXPEDITED => {
+            fence(Ordering::SeqCst);
             Ok(0)
         }
-        REGISTER_GLOBAL_EXPEDITED => Ok(0),
-        PRIVATE_EXPEDITED
-        | PRIVATE_EXPEDITED_SYNC_CORE
-        | PRIVATE_EXPEDITED_RSEQ => {
-            if cpu_id != -1 {
-                return Err(CompatErrno::Invalid);
-            }
-            let required = match args[0] {
-                PRIVATE_EXPEDITED => REGISTERED_PRIVATE,
-                PRIVATE_EXPEDITED_SYNC_CORE => REGISTERED_SYNC_CORE,
-                _ => REGISTERED_RSEQ,
-            };
-            if registered()? & required == 0 {
-                return Err(CompatErrno::Perm);
-            }
-            core::sync::atomic::fence(Ordering::SeqCst);
-            Ok(0)
-        }
-        REGISTER_PRIVATE_EXPEDITED
-        | REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
-        | REGISTER_PRIVATE_EXPEDITED_RSEQ => {
-            if cpu_id != -1 {
-                return Err(CompatErrno::Invalid);
-            }
-            let flag = match args[0] {
-                REGISTER_PRIVATE_EXPEDITED => REGISTERED_PRIVATE,
-                REGISTER_PRIVATE_EXPEDITED_SYNC_CORE => REGISTERED_SYNC_CORE,
-                _ => REGISTERED_RSEQ,
-            };
-            if proc::register_linux_membarrier(pid, flag) {
-                Ok(0)
-            } else {
-                Err(CompatErrno::NoProcess)
-            }
-        }
-        GET_REGISTERED => {
-            if cpu_id != -1 {
-                return Err(CompatErrno::Invalid);
-            }
-            let flags = registered()?;
-            Ok(u64::from(
-                (flags & REGISTERED_PRIVATE != 0) as u8 * PRIVATE_EXPEDITED as u8
-                    | (flags & REGISTERED_SYNC_CORE != 0) as u8
-                        * PRIVATE_EXPEDITED_SYNC_CORE as u8
-                    | (flags & REGISTERED_RSEQ != 0) as u8
-                        * PRIVATE_EXPEDITED_RSEQ as u8,
-            ))
-        }
-        _ => Err(CompatErrno::Invalid),
+        CMD_REGISTER_GLOBAL_EXPEDITED | CMD_REGISTER_PRIVATE_EXPEDITED => Ok(0),
+        _ => Err(CompatErrno::NotSupported),
     }
 }
 
@@ -4891,6 +5389,16 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
     drop(path);
     let argv = linux_string_vector(args[1], 64, 64 * 1024)?;
     let envp = linux_string_vector(args[2], 64, 64 * 1024)?;
+    let node = crate::linux_vfs::lookup_node(&resolved)
+        .unwrap_or(crate::linux_vfs::Node::Executable(0));
+    if !landlock_path_allows(
+        pid,
+        node,
+        &resolved,
+        LANDLOCK_ACCESS_FS_EXECUTE,
+    ) {
+        return Err(CompatErrno::Access);
+    }
     #[cfg(all(
         feature = "lifecycle-root-exec-verify",
         target_arch = "x86_64"
@@ -5066,17 +5574,32 @@ fn linux_vfork(
 /// 阻塞到一个指定 Linux 子进程退出，再写入编码后的 wait 状态。
 fn linux_wait4(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const WNOHANG: u64 = 1;
+    #[derive(Clone, Copy)]
+    enum Target {
+        Pid(Option<u32>),
+        Group(u32),
+    }
     let target = args[0] as i32;
     let target = match target {
-        -1 => None,
-        value if value > 0 => Some(value as u32),
+        -1 => Target::Pid(None),
+        0 => Target::Group(
+            proc::linux_process_group_state(_pid)
+                .ok_or(CompatErrno::NoProcess)?
+                .0,
+        ),
+        value if value > 0 => Target::Pid(Some(value as u32)),
+        value if value < -1 => Target::Group(value.unsigned_abs()),
         _ => return Err(CompatErrno::Invalid),
     };
     if args[2] & !WNOHANG != 0 || args[3] != 0 {
         return Err(CompatErrno::NoSys);
     }
     loop {
-        match proc::take_linux_child_exit(_pid, target) {
+        let result = match target {
+            Target::Pid(target) => proc::take_linux_child_exit(_pid, target),
+            Target::Group(pgid) => proc::take_linux_child_exit_group(_pid, pgid),
+        };
+        match result {
             Ok(Some((child_pid, status))) => {
                 if args[1] != 0 {
                     copy_to_user(args[1], &status.to_le_bytes(), 4)
@@ -5095,42 +5618,91 @@ fn linux_wait4(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn linux_waitid(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const P_ALL: u32 = 0;
     const P_PID: u32 = 1;
+    const P_PGID: u32 = 2;
+    const P_PIDFD: u32 = 3;
     const WNOHANG: u64 = 0x1;
     const WEXITED: u64 = 0x4;
     const WNOWAIT: u64 = 0x0100_0000;
+    #[derive(Clone, Copy)]
+    enum Target {
+        Pid(Option<u32>),
+        Group(u32),
+    }
     let id_type = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
     let target = match id_type {
-        P_ALL => None,
+        P_ALL => Target::Pid(None),
         P_PID => {
             let target = u32::try_from(args[1]).map_err(|_| CompatErrno::NoProcess)?;
             if target == 0 {
                 return Err(CompatErrno::NoProcess);
             }
-            Some(target)
+            Target::Pid(Some(target))
         }
-        _ => return Err(CompatErrno::NotSupported),
+        P_PGID => {
+            let requested = u32::try_from(args[1]).map_err(|_| CompatErrno::NoProcess)?;
+            Target::Group(if requested == 0 {
+                proc::linux_process_group_state(pid)
+                    .ok_or(CompatErrno::NoProcess)?
+                    .0
+            } else {
+                requested
+            })
+        }
+        P_PIDFD => {
+            let fd = u32::try_from(args[1]).map_err(|_| CompatErrno::BadFd)?;
+            let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+            if entry.kind != compat_core::fd::CompatKind::Pidfd {
+                return Err(CompatErrno::BadFd);
+            }
+            let target = ObjId::from_raw(entry.handle).ok_or(CompatErrno::NoProcess)?;
+            Target::Pid(Some(
+                proc::linux_pid(target).ok_or(CompatErrno::NoProcess)?,
+            ))
+        }
+        _ => return Err(CompatErrno::Invalid),
     };
     let options = args[3];
-    if args[2] == 0 {
-        return Err(CompatErrno::Fault);
-    }
-    if options & WNOWAIT != 0 || args[4] != 0 {
+    if args[4] != 0 {
         return Err(CompatErrno::NotSupported);
     }
-    if options & !(WNOHANG | WEXITED) != 0 || options & WEXITED == 0 {
+    if options & !(WNOHANG | WEXITED | WNOWAIT) != 0 || options & WEXITED == 0 {
         return Err(CompatErrno::NotSupported);
     }
-    let zero = [0u8; 128];
-    copy_to_user(args[2], &zero, zero.len()).map_err(|_| CompatErrno::Fault)?;
+    if args[2] != 0 {
+        let zero = [0u8; 128];
+        copy_to_user(args[2], &zero, zero.len()).map_err(|_| CompatErrno::Fault)?;
+    }
     loop {
-        match proc::take_linux_child_exit(pid, target) {
+        let observed = match (target, options & WNOWAIT != 0) {
+            (Target::Pid(target), false) => proc::take_linux_child_exit(pid, target),
+            (Target::Pid(target), true) => proc::peek_linux_child_exit(pid, target),
+            (Target::Group(pgid), false) => {
+                proc::take_linux_child_exit_group(pid, pgid)
+            }
+            (Target::Group(pgid), true) => {
+                proc::peek_linux_child_exit_group(pid, pgid)
+            }
+        };
+        match observed {
             Ok(Some((child_pid, status))) => {
-                let mut info = [0u8; 128];
-                info[0..4].copy_from_slice(&17u32.to_le_bytes());
-                info[8..12].copy_from_slice(&1i32.to_le_bytes());
-                info[16..20].copy_from_slice(&child_pid.to_le_bytes());
-                info[24..28].copy_from_slice(&((status >> 8) & 0xff).to_le_bytes());
-                copy_to_user(args[2], &info, info.len()).map_err(|_| CompatErrno::Fault)?;
+                if args[2] != 0 {
+                    let mut info = [0u8; 128];
+                    let status_value = status & 0x7f;
+                    info[0..4].copy_from_slice(&17u32.to_le_bytes());
+                    info[8..12].copy_from_slice(
+                        &(if status_value == 0 { 1i32 } else { 2i32 }).to_le_bytes(),
+                    );
+                    info[16..20].copy_from_slice(&child_pid.to_le_bytes());
+                    info[24..28].copy_from_slice(
+                        &(if status_value == 0 {
+                            (status >> 8) & 0xff
+                        } else {
+                            status_value
+                        })
+                        .to_le_bytes(),
+                    );
+                    copy_to_user(args[2], &info, info.len()).map_err(|_| CompatErrno::Fault)?;
+                }
                 return Ok(0);
             }
             Ok(None) if options & WNOHANG != 0 => return Ok(0),
@@ -5181,9 +5753,6 @@ fn linux_pidfd_send_signal(
     pid: ObjId,
     args: [u64; 6],
 ) -> Result<u64, CompatErrno> {
-    if args[2] != 0 {
-        return Err(CompatErrno::NotSupported);
-    }
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if entry.kind != compat_core::fd::CompatKind::Pidfd || args[3] != 0 {
@@ -5203,14 +5772,29 @@ fn linux_pidfd_send_signal(
         return Err(CompatErrno::NotSupported);
     }
     let sender = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?;
-    if queue_process_signal(target, signal, sender, 0) {
+    let queued = if args[2] == 0 {
+        queue_process_signal(target, signal, sender, 0)
+    } else {
+        let target_pid = proc::linux_pid(target).ok_or(CompatErrno::NoProcess)?;
+        let info = read_linux_queued_siginfo(signal, args[2])?;
+        check_linux_sigqueue_source(pid, target_pid, info.code)?;
+        queue_process_signal_info(
+            target,
+            signal,
+            info.pid,
+            info.uid,
+            info.code,
+            info.value,
+        )
+    };
+    if queued {
         Ok(0)
     } else {
         Err(CompatErrno::NoProcess)
     }
 }
 
-/// Duplicates a same-process descriptor through a pidfd reference.
+/// Duplicates a same-application descriptor through a pidfd reference.
 fn linux_pidfd_getfd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if args[2] != 0 {
         return Err(CompatErrno::Invalid);
@@ -5221,7 +5805,11 @@ fn linux_pidfd_getfd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::BadFd);
     }
     let target = ObjId::from_raw(entry.handle).ok_or(CompatErrno::NoProcess)?;
-    if target != pid {
+    let caller_application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let target_application =
+        crate::security::process_application(target).ok_or(CompatErrno::NoProcess)?;
+    if target != pid && caller_application != target_application {
         return Err(CompatErrno::Perm);
     }
     let target_fd = u32::try_from(args[1]).map_err(|_| CompatErrno::BadFd)?;
@@ -5455,19 +6043,272 @@ fn linux_futex(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
 }
 
-/// Reports the compatibility service's read-only resource limits.
-///
-/// 返回兼容服务的只读资源上限；本切片不伪造 `prlimit64` 写操作。
-fn linux_prlimit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    if args[1] != 0 || args[2] != 0 || proc::linux_pid(pid).is_none() {
+#[derive(Clone, Copy)]
+struct Futex2Waiter {
+    address: u64,
+    expected: u32,
+    flags: u32,
+    key: FutexKey,
+}
+
+/// Validates one futex2 waiter flag word.
+fn validate_futex2_flags(flags: u32) -> Result<(), CompatErrno> {
+    const FUTEX2_SIZE_MASK: u32 = 0x3;
+    const FUTEX2_SIZE_U32: u32 = 0x2;
+    const FUTEX2_NUMA: u32 = 0x4;
+    const FUTEX2_MPOL: u32 = 0x8;
+    const FUTEX2_PRIVATE: u32 = 128;
+    if flags & !(FUTEX2_SIZE_MASK | FUTEX2_NUMA | FUTEX2_MPOL | FUTEX2_PRIVATE) != 0
+        || flags & FUTEX2_SIZE_MASK != FUTEX2_SIZE_U32
+        || flags & (FUTEX2_NUMA | FUTEX2_MPOL) != 0
+    {
         return Err(CompatErrno::Invalid);
     }
-    let (current, maximum) = linux_limit(pid, args[0])?;
+    Ok(())
+}
+
+/// Reads one bounded futex2 waiter array.
+fn read_futex2_waiters(
+    pid: ObjId,
+    address: u64,
+    count: usize,
+) -> Result<alloc::vec::Vec<Futex2Waiter>, CompatErrno> {
+    const FUTEX2_WAITER_BYTES: usize = 24;
+    let mut waiters = alloc::vec::Vec::new();
+    waiters
+        .try_reserve(count)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    for index in 0..count {
+        let entry = address
+            .checked_add((index * FUTEX2_WAITER_BYTES) as u64)
+            .ok_or(CompatErrno::Fault)?;
+        let mut raw = [0u8; FUTEX2_WAITER_BYTES];
+        proc::read(pid, entry, &mut raw).map_err(|_| CompatErrno::Fault)?;
+        let expected = u32::try_from(u64::from_le_bytes(raw[0..8].try_into().unwrap()))
+            .map_err(|_| CompatErrno::Invalid)?;
+        let futex_address = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+        let flags = u32::from_le_bytes(raw[16..20].try_into().unwrap());
+        if u32::from_le_bytes(raw[20..24].try_into().unwrap()) != 0
+            || futex_address % 4 != 0
+            || waiters
+                .iter()
+                .any(|waiter: &Futex2Waiter| waiter.address == futex_address)
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        validate_futex2_flags(flags)?;
+        waiters.push(Futex2Waiter {
+            address: futex_address,
+            expected,
+            flags,
+            key: futex_key(pid, futex_address),
+        });
+    }
+    Ok(waiters)
+}
+
+/// Converts one absolute futex2 timeout to Jasper monotonic nanoseconds.
+fn futex2_deadline(timeout: u64, clockid: u64) -> Result<Option<u64>, CompatErrno> {
+    if timeout == 0 {
+        return Ok(None);
+    }
+    let requested = read_linux_timespec(timeout)?;
+    match clockid {
+        0 => {
+            let wall = crate::arch::wall_clock_ns().ok_or(CompatErrno::NoSys)?;
+            Ok(Some(
+                sched::now_ns().saturating_add(requested.saturating_sub(wall)),
+            ))
+        }
+        1 => Ok(Some(requested)),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+/// Removes every futex waiter owned by one task.
+fn clear_task_futex_waiters(task: crate::task::TaskId) {
+    let mut state = COMPAT.lock();
+    for word in state.futexes.iter_mut().flatten() {
+        for waiter in word.waiters.iter_mut() {
+            if waiter.active && waiter.task == task {
+                *waiter = FutexWaiter::EMPTY;
+            }
+        }
+    }
+}
+
+/// Implements `futex_wait(2)` from the futex2 family.
+fn linux_futex_wait(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let flags = u32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    validate_futex2_flags(flags)?;
+    let deadline = futex2_deadline(args[4], args[5])?;
+    futex_wait(
+        pid,
+        args[0],
+        u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?,
+        u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
+        deadline,
+    )
+}
+
+/// Implements `futex_wake(2)` from the futex2 family.
+fn linux_futex_wake(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let mask = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let count = i32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let flags = u32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    if count < 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    validate_futex2_flags(flags)?;
+    futex_wake(pid, args[0], count as usize, mask)
+}
+
+/// Implements `futex_requeue(2)` from the futex2 family.
+fn linux_futex_requeue(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[1] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let wake = i32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let requeue = i32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    if wake < 0 || requeue < 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let waiters = read_futex2_waiters(pid, args[0], 2)?;
+    if waiters[0].flags != waiters[1].flags {
+        return Err(CompatErrno::Invalid);
+    }
+    futex_requeue(
+        pid,
+        waiters[0].address,
+        waiters[1].address,
+        wake as usize,
+        requeue as usize,
+        Some(waiters[0].expected),
+    )
+}
+
+/// Implements vectorized `futex_waitv(2)`.
+fn linux_futex_waitv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MAX_WAITV: usize = 16;
+    if args[2] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let count = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if count == 0 || count > MAX_WAITV || args[0] == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let waiters = read_futex2_waiters(pid, args[0], count)?;
+    for (index, waiter) in waiters.iter().enumerate() {
+        if futex_value(pid, waiter.address)? != waiter.expected {
+            return Ok(index as u64);
+        }
+    }
+    let deadline = futex2_deadline(args[3], args[4])?;
+    let task = sched::current().0;
+    {
+        let mut state = COMPAT.lock();
+        for waiter in &waiters {
+            let slot = if let Some(slot) = state
+                .futexes
+                .iter()
+                .position(|entry| entry.is_some_and(|entry| entry.key == waiter.key))
+            {
+                slot
+            } else {
+                let Some(slot) = state.futexes.iter().position(Option::is_none) else {
+                    for word in state.futexes.iter_mut().flatten() {
+                        for entry in word.waiters.iter_mut() {
+                            if entry.active && entry.task == task {
+                                *entry = FutexWaiter::EMPTY;
+                            }
+                        }
+                    }
+                    return Err(CompatErrno::NoSpace);
+                };
+                state.futexes[slot] = Some(FutexWord {
+                    key: waiter.key,
+                    waiters: [FutexWaiter::EMPTY; MAX_FUTEX_WAITERS],
+                });
+                slot
+            };
+            let word = state.futexes[slot].as_mut().ok_or(CompatErrno::NoSpace)?;
+            let Some(entry) = word.waiters.iter_mut().find(|entry| !entry.active) else {
+                for word in state.futexes.iter_mut().flatten() {
+                    for entry in word.waiters.iter_mut() {
+                        if entry.active && entry.task == task {
+                            *entry = FutexWaiter::EMPTY;
+                        }
+                    }
+                }
+                return Err(CompatErrno::NoSpace);
+            };
+            *entry = FutexWaiter {
+                task,
+                key: Some(waiter.key),
+                bitset: u32::MAX,
+                active: true,
+                woken: false,
+            };
+        }
+    }
+    let result = loop {
+        if proc::current_exiting() || current_signal_pending(pid) {
+            break Err(CompatErrno::Interrupted);
+        }
+        if let Some(deadline) = deadline {
+            if sched::now_ns() >= deadline {
+                break Err(CompatErrno::TimedOut);
+            }
+        }
+        let woken = {
+            let state = COMPAT.lock();
+            waiters.iter().position(|waiter| {
+                state
+                    .futexes
+                    .iter()
+                    .flatten()
+                    .find(|word| word.key == waiter.key)
+                    .is_some_and(|word| {
+                        word.waiters
+                            .iter()
+                            .any(|entry| entry.active && entry.task == task && entry.woken)
+                    })
+            })
+        };
+        if let Some(index) = woken {
+            break Ok(index as u64);
+        }
+        if let Some(deadline) = deadline {
+            if sched::sleep_until_ns(deadline).is_err() {
+                sched::pause();
+            }
+        } else {
+            sched::pause();
+        }
+    };
+    clear_task_futex_waiters(task);
+    result
+}
+
+/// Queries or updates process-local compatibility resource limits.
+fn linux_prlimit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[1] != 0 || proc::linux_pid(pid).is_none() {
+        return Err(CompatErrno::Invalid);
+    }
+    let old = linux_limit(pid, args[0])?;
     if args[3] != 0 {
         let mut bytes = [0u8; 16];
-        bytes[..8].copy_from_slice(&current.to_le_bytes());
-        bytes[8..].copy_from_slice(&maximum.to_le_bytes());
+        bytes[..8].copy_from_slice(&old.0.to_le_bytes());
+        bytes[8..].copy_from_slice(&old.1.to_le_bytes());
         copy_to_user(args[3], &bytes, bytes.len()).map_err(|_| CompatErrno::Fault)?;
+    }
+    if args[2] != 0 {
+        let mut bytes = [0u8; 16];
+        copy_from_user(&mut bytes, args[2], 16)
+            .map_err(|_| CompatErrno::Fault)?;
+        let current = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+        let maximum = u64::from_le_bytes(bytes[8..].try_into().unwrap());
+        update_linux_limit(pid, args[0], current, maximum)?;
     }
     Ok(0)
 }
@@ -5475,14 +6316,49 @@ fn linux_prlimit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn linux_limit(pid: ObjId, resource: u64) -> Result<(u64, u64), CompatErrno> {
     const RLIMIT_STACK: u64 = 3;
     const RLIMIT_NOFILE: u64 = 7;
-    const RLIM_INFINITY: u64 = u64::MAX;
-    if proc::linux_pid(pid).is_none() {
+    let limits = proc::linux_rlimits(pid).ok_or(CompatErrno::Invalid)?;
+    match resource {
+        RLIMIT_STACK => Ok((limits.stack_current, limits.stack_maximum)),
+        RLIMIT_NOFILE => Ok((limits.nofile_current, limits.nofile_maximum)),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+fn update_linux_limit(
+    pid: ObjId,
+    resource: u64,
+    current: u64,
+    maximum: u64,
+) -> Result<(), CompatErrno> {
+    const RLIMIT_STACK: u64 = 3;
+    const RLIMIT_NOFILE: u64 = 7;
+    if current > maximum {
         return Err(CompatErrno::Invalid);
     }
+    let old = proc::linux_rlimits(pid).ok_or(CompatErrno::NoProcess)?;
+    let mut next = old;
     match resource {
-        RLIMIT_STACK => Ok((8 * 1024 * 1024, RLIM_INFINITY)),
-        RLIMIT_NOFILE => Ok((64, 64)),
-        _ => Err(CompatErrno::Invalid),
+        RLIMIT_STACK => {
+            if maximum > old.stack_maximum {
+                return Err(CompatErrno::Perm);
+            }
+            next.stack_current = current;
+            next.stack_maximum = maximum;
+        }
+        RLIMIT_NOFILE => {
+            if maximum > old.nofile_maximum {
+                return Err(CompatErrno::Perm);
+            }
+            if current != old.nofile_current || maximum != old.nofile_maximum {
+                return Err(CompatErrno::NotSupported);
+            }
+        }
+        _ => return Err(CompatErrno::Invalid),
+    }
+    if proc::set_linux_rlimits(pid, next) {
+        Ok(())
+    } else {
+        Err(CompatErrno::NoProcess)
     }
 }
 
@@ -5499,7 +6375,10 @@ fn linux_setrlimit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let _ = linux_limit(pid, args[0])?;
     let mut bytes = [0u8; 16];
     copy_from_user(&mut bytes, args[1], 16).map_err(|_| CompatErrno::Fault)?;
-    Err(CompatErrno::Perm)
+    let current = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+    let maximum = u64::from_le_bytes(bytes[8..].try_into().unwrap());
+    update_linux_limit(pid, args[0], current, maximum)?;
+    Ok(0)
 }
 
 /// Fills a bounded userspace buffer from x86_64 RDRAND.
@@ -5546,10 +6425,39 @@ fn linux_getrandom(args: [u64; 6]) -> Result<u64, CompatErrno> {
 /// 仅实现当前 Linux 任务的 `PR_SET_NAME`/`PR_GET_NAME`；名称固定为 Linux 的
 /// 16 字节任务命令名。其他 option 明确返回 EINVAL，不把未实现的安全策略当作成功。
 fn linux_prctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PR_SET_PDEATHSIG: u64 = 1;
+    const PR_GET_PDEATHSIG: u64 = 2;
     const PR_SET_NAME: u64 = 15;
     const PR_GET_NAME: u64 = 16;
+    const PR_GET_SECCOMP: u64 = 21;
+    const PR_SET_SECCOMP: u64 = 22;
+    const PR_SET_CHILD_SUBREAPER: u64 = 36;
+    const PR_GET_CHILD_SUBREAPER: u64 = 37;
+    const PR_SET_NO_NEW_PRIVS: u64 = 38;
+    const PR_GET_NO_NEW_PRIVS: u64 = 39;
+    const ARCH_SHSTK_ENABLE: u64 = 0x5001;
+    const ARCH_SHSTK_DISABLE: u64 = 0x5002;
+    const ARCH_SHSTK_LOCK: u64 = 0x5003;
+    const ARCH_SHSTK_UNLOCK: u64 = 0x5004;
+    const ARCH_SHSTK_STATUS: u64 = 0x5005;
     let (task, _) = sched::current();
     match args[0] {
+        PR_SET_PDEATHSIG => {
+            let signal = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+            if signal > 64 {
+                return Err(CompatErrno::Invalid);
+            }
+            if proc::set_linux_pdeathsig(pid, signal) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::NoProcess)
+            }
+        }
+        PR_GET_PDEATHSIG => {
+            let signal = proc::linux_pdeathsig(pid).ok_or(CompatErrno::NoProcess)?;
+            copy_to_user(args[1], &signal.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        }
         PR_SET_NAME => {
             let mut name = [0u8; 16];
             for offset in 0..15 {
@@ -5585,8 +6493,379 @@ fn linux_prctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             copy_to_user(args[1], &name, name.len()).map_err(|_| CompatErrno::Fault)?;
             Ok(0)
         }
+        PR_SET_SECCOMP => {
+            const SECCOMP_MODE_STRICT: u64 = 1;
+            const SECCOMP_MODE_FILTER: u64 = 2;
+            match args[1] {
+                SECCOMP_MODE_STRICT
+                    if proc::linux_seccomp_mode(pid).ok_or(CompatErrno::NoProcess)? == 0 =>
+                {
+                    linux_seccomp(pid, [0, 0, 0, 0, 0, 0])
+                }
+                SECCOMP_MODE_FILTER => {
+                    linux_seccomp(pid, [1, 0, args[2], 0, 0, 0])
+                }
+                SECCOMP_MODE_STRICT => Err(CompatErrno::Invalid),
+                _ => Err(CompatErrno::Invalid),
+            }
+        }
+        PR_GET_SECCOMP => Ok(u64::from(
+            proc::linux_seccomp_mode(pid).ok_or(CompatErrno::NoProcess)?,
+        )),
+        PR_SET_CHILD_SUBREAPER => {
+            if proc::set_linux_subreaper(pid, args[1] != 0) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::NoProcess)
+            }
+        }
+        PR_GET_CHILD_SUBREAPER => {
+            let subreaper =
+                proc::linux_subreaper(pid).ok_or(CompatErrno::NoProcess)?;
+            copy_to_user(args[1], &(u32::from(subreaper)).to_le_bytes(), 4)
+                .map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        }
+        PR_SET_NO_NEW_PRIVS => {
+            if args[1] != 1 || args[2] != 0 || args[3] != 0 || args[4] != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            if proc::linux_set_no_new_privs(pid) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::NoProcess)
+            }
+        }
+        PR_GET_NO_NEW_PRIVS => Ok(u64::from(
+            proc::linux_no_new_privs(pid).ok_or(CompatErrno::NoProcess)?,
+        )),
+        ARCH_SHSTK_STATUS => {
+            let features = proc::linux_shstk_status(pid).ok_or(CompatErrno::NoProcess)?;
+            copy_to_user(args[1], &features.to_le_bytes(), 8).map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        }
+        ARCH_SHSTK_LOCK => {
+            if proc::linux_lock_shstk_features(pid, args[1]) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::Invalid)
+            }
+        }
+        ARCH_SHSTK_ENABLE | ARCH_SHSTK_DISABLE => Err(CompatErrno::NotSupported),
+        ARCH_SHSTK_UNLOCK => Err(CompatErrno::Perm),
         _ => Err(CompatErrno::Invalid),
     }
+}
+
+/// Implements `seccomp(2)` filter installation and introspection.
+fn linux_seccomp(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    use compat_core::seccomp::{
+        SeccompAction, SeccompInsn, MAX_FILTER_INSNS,
+    };
+
+    const SECCOMP_SET_MODE_STRICT: u64 = 0;
+    const SECCOMP_SET_MODE_FILTER: u64 = 1;
+    const SECCOMP_GET_ACTION_AVAIL: u64 = 2;
+    const SECCOMP_GET_NOTIF_SIZES: u64 = 3;
+    const FILTER_FLAG_TSYNC: u64 = 1;
+    const FILTER_FLAG_LOG: u64 = 2;
+    const FILTER_FLAG_SPEC_ALLOW: u64 = 4;
+    const FILTER_FLAG_NEW_LISTENER: u64 = 8;
+    const FILTER_FLAG_TSYNC_ESRCH: u64 = 16;
+    const FILTER_FLAG_WAIT_KILLABLE_RECV: u64 = 32;
+    let operation = args[0];
+    match operation {
+        SECCOMP_SET_MODE_STRICT => {
+            if args[1] != 0 || args[2] != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            if !proc::linux_no_new_privs(pid).ok_or(CompatErrno::NoProcess)? {
+                return Err(CompatErrno::Access);
+            }
+            if proc::linux_set_seccomp_strict(pid) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::NoProcess)
+            }
+        }
+        SECCOMP_SET_MODE_FILTER => {
+            let flags = args[1];
+            if flags
+                & !(FILTER_FLAG_TSYNC
+                    | FILTER_FLAG_LOG
+                    | FILTER_FLAG_SPEC_ALLOW
+                    | FILTER_FLAG_TSYNC_ESRCH)
+                != 0
+            {
+                return Err(if flags & (FILTER_FLAG_NEW_LISTENER | FILTER_FLAG_WAIT_KILLABLE_RECV) != 0
+                {
+                    CompatErrno::NotSupported
+                } else {
+                    CompatErrno::Invalid
+                });
+            }
+            if !proc::linux_no_new_privs(pid).ok_or(CompatErrno::NoProcess)? {
+                return Err(CompatErrno::Access);
+            }
+            let mut program = [0u8; 16];
+            copy_from_user(&mut program, args[2], 16).map_err(|_| CompatErrno::Fault)?;
+            let length = usize::from(u16::from_le_bytes(program[..2].try_into().unwrap()));
+            if length == 0 || length > MAX_FILTER_INSNS {
+                return Err(CompatErrno::Invalid);
+            }
+            let filter_pointer = u64::from_le_bytes(program[8..16].try_into().unwrap());
+            let bytes = length.checked_mul(8).ok_or(CompatErrno::Invalid)?;
+            let mut raw = alloc::vec![0u8; bytes];
+            copy_from_user(&mut raw, filter_pointer, bytes).map_err(|_| CompatErrno::Fault)?;
+            let mut filter = alloc::vec::Vec::new();
+            filter
+                .try_reserve_exact(length)
+                .map_err(|_| CompatErrno::NoMemory)?;
+            for instruction in raw.chunks_exact(8) {
+                filter.push(SeccompInsn {
+                    code: u16::from_le_bytes(instruction[..2].try_into().unwrap()),
+                    jt: instruction[2],
+                    jf: instruction[3],
+                    k: u32::from_le_bytes(instruction[4..8].try_into().unwrap()),
+                });
+            }
+            if compat_core::seccomp::validate(&filter).is_err() {
+                return Err(CompatErrno::Invalid);
+            }
+            if proc::linux_install_seccomp_filter(pid, filter) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::NoSpace)
+            }
+        }
+        SECCOMP_GET_ACTION_AVAIL => {
+            if args[1] != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            let mut raw = [0u8; 4];
+            copy_from_user(&mut raw, args[2], 4).map_err(|_| CompatErrno::Fault)?;
+            if SeccompAction::action_available(u32::from_le_bytes(raw)) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::Invalid)
+            }
+        }
+        SECCOMP_GET_NOTIF_SIZES => {
+            if args[1] != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            let sizes = [80u16, 24, 64];
+            let mut output = [0u8; 6];
+            for (index, size) in sizes.iter().enumerate() {
+                output[index * 2..index * 2 + 2].copy_from_slice(&size.to_le_bytes());
+            }
+            copy_to_user(args[2], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        }
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1 << 0;
+const LANDLOCK_ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
+const LANDLOCK_ACCESS_FS_READ_FILE: u64 = 1 << 2;
+const LANDLOCK_ACCESS_FS_READ_DIR: u64 = 1 << 3;
+const LANDLOCK_HANDLED_FS: u64 = (1 << 15) - 1;
+
+fn landlock_rule_contains(rule: proc::LinuxLandlockRule, node: crate::linux_vfs::Node, path: &[u8]) -> bool {
+    if rule.node == node {
+        return true;
+    }
+    let crate::linux_vfs::Node::Directory(directory) = rule.node else {
+        return false;
+    };
+    let root = directory.path();
+    root == b"/"
+        || path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with(b"/"))
+}
+
+fn landlock_path_allows(
+    pid: ObjId,
+    node: crate::linux_vfs::Node,
+    path: &[u8],
+    access: u64,
+) -> bool {
+    current_landlock_domains(pid)
+        .iter()
+        .all(|domain| {
+            if domain.handled_access_fs & access == 0 {
+                return true;
+            }
+            domain.rules.iter().any(|rule| {
+                rule.allowed_access & access == access
+                    && landlock_rule_contains(*rule, node, path)
+            })
+        })
+}
+
+fn current_landlock_domains(
+    pid: ObjId,
+) -> alloc::vec::Vec<alloc::sync::Arc<proc::LinuxLandlockRuleset>> {
+    let (task, _) = sched::current();
+    let state = COMPAT.lock();
+    state
+        .threads
+        .iter()
+        .position(|entry| {
+            entry.is_some_and(|entry| entry.process == pid && entry.task == task)
+        })
+        .and_then(|slot| state.thread_landlock_domains[slot].clone())
+        .unwrap_or_default()
+}
+
+/// Creates one stackable Landlock ruleset.
+fn linux_landlock_create_ruleset(
+    pid: ObjId,
+    args: [u64; 6],
+) -> Result<u64, CompatErrno> {
+    const CREATE_RULESET_VERSION: u64 = 1;
+    if args[2] & CREATE_RULESET_VERSION != 0 {
+        if args[2] != CREATE_RULESET_VERSION || args[0] != 0 || args[1] != 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        return Ok(4);
+    }
+    if args[2] != 0 || !(8..=24).contains(&args[1]) {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut raw = [0u8; 24];
+    copy_from_user(&mut raw, args[0], args[1] as usize).map_err(|_| CompatErrno::Fault)?;
+    let handled = u64::from_le_bytes(raw[..8].try_into().unwrap());
+    let handled_net = if args[1] >= 16 {
+        u64::from_le_bytes(raw[8..16].try_into().unwrap())
+    } else {
+        0
+    };
+    let scoped = if args[1] >= 24 {
+        u64::from_le_bytes(raw[16..24].try_into().unwrap())
+    } else {
+        0
+    };
+    if handled == 0 || handled & !LANDLOCK_HANDLED_FS != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if handled_net != 0 || scoped != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    proc::linux_install_landlock_ruleset(pid, handled, true)
+        .map(u64::from)
+        .ok_or(CompatErrno::NoSpace)
+}
+
+/// Adds one path-beneath rule to a Landlock ruleset.
+fn linux_landlock_add_rule(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const RULE_PATH_BENEATH: u64 = 1;
+    if args[1] != RULE_PATH_BENEATH {
+        return Err(if args[1] == 2 {
+            CompatErrno::NotSupported
+        } else {
+            CompatErrno::Invalid
+        });
+    }
+    if args[3] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Sandbox {
+        return Err(CompatErrno::BadFd);
+    }
+    let ruleset = proc::linux_landlock_ruleset(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let mut raw = [0u8; 12];
+    copy_from_user(&mut raw, args[2], 12).map_err(|_| CompatErrno::Fault)?;
+    let allowed = u64::from_le_bytes(raw[..8].try_into().unwrap());
+    let parent_fd = i32::from_le_bytes(raw[8..12].try_into().unwrap());
+    if parent_fd < 0 {
+        return Err(CompatErrno::BadFd);
+    }
+    let node = proc::linux_path_node(pid, parent_fd as u32).ok_or(CompatErrno::BadFd)?;
+    let mut ruleset = ruleset.lock();
+    if allowed == 0 || allowed & !ruleset.handled_access_fs != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if ruleset.rules.iter().any(|rule| rule.node == node) {
+        return Err(CompatErrno::Exists);
+    }
+    if ruleset.rules.len() >= 64 {
+        return Err(CompatErrno::NoSpace);
+    }
+    ruleset
+        .rules
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    ruleset.rules.push(proc::LinuxLandlockRule {
+        node,
+        allowed_access: allowed,
+    });
+    Ok(0)
+}
+
+/// Enforces one ruleset as a new Landlock domain.
+fn linux_landlock_restrict_self(
+    pid: ObjId,
+    args: [u64; 6],
+) -> Result<u64, CompatErrno> {
+    const RESTRICT_FLAGS: u64 = 0x8 | 0x4 | 0x2 | 0x1;
+    if args[1] & !RESTRICT_FLAGS != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if !proc::linux_no_new_privs(pid).ok_or(CompatErrno::NoProcess)? {
+        return Err(CompatErrno::Perm);
+    }
+    if args[0] == u64::MAX {
+        return Ok(0);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Sandbox {
+        return Err(CompatErrno::BadFd);
+    }
+    let ruleset = proc::linux_landlock_ruleset(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let domain = alloc::sync::Arc::new(ruleset.lock().clone());
+    let (task, _) = sched::current();
+    let mut state = COMPAT.lock();
+    let sync_threads = args[1] & 0x8 != 0;
+    let mut slots = [0usize; MAX_LINUX_THREADS];
+    let mut count = 0usize;
+    for (slot, entry) in state.threads.iter().enumerate() {
+        if entry.is_some_and(|entry| {
+            entry.process == pid && (sync_threads || entry.task == task)
+        }) {
+            slots[count] = slot;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return Err(CompatErrno::NoProcess);
+    }
+    if slots[..count].iter().any(|slot| {
+        state.thread_landlock_domains[*slot]
+            .as_ref()
+            .is_some_and(|domains| domains.len() >= 16)
+    }) {
+        return Err(CompatErrno::NoSpace);
+    }
+    for slot in &slots[..count] {
+        state.thread_landlock_domains[*slot]
+            .get_or_insert_with(alloc::vec::Vec::new)
+            .try_reserve(1)
+            .map_err(|_| CompatErrno::NoSpace)?;
+    }
+    for slot in &slots[..count] {
+        state.thread_landlock_domains[*slot]
+            .as_mut()
+            .expect("reserved Landlock domain slot")
+            .push(alloc::sync::Arc::clone(&domain));
+    }
+    Ok(0)
 }
 
 /// Implements the x86_64 `arch_prctl(2)` TLS base operation.
@@ -5673,26 +6952,57 @@ fn linux_capset(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(0)
 }
 
-/// Resolves one I/O priority target restricted to the current process.
-fn linux_ioprio_target(pid: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+#[derive(Clone, Copy)]
+enum LinuxIoprioTarget {
+    Process,
+    Group(u32),
+}
+
+/// Resolves one I/O priority target to the current process or one process group.
+fn linux_ioprio_target(pid: ObjId, args: [u64; 6]) -> Result<LinuxIoprioTarget, CompatErrno> {
     const IOPRIO_WHO_PROCESS: u64 = 1;
-    if args[0] != IOPRIO_WHO_PROCESS {
-        return Err(CompatErrno::NotSupported);
+    const IOPRIO_WHO_PGRP: u64 = 2;
+    let current = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?;
+    match args[0] {
+        IOPRIO_WHO_PROCESS => {
+            let requested = args[1] as u32 as i32;
+            if requested != 0 && requested as u32 != current {
+                return Err(CompatErrno::Perm);
+            }
+            Ok(LinuxIoprioTarget::Process)
+        }
+        IOPRIO_WHO_PGRP => {
+            let requested = args[1] as u32 as i32;
+            let caller_group = proc::linux_process_group_state(pid)
+                .ok_or(CompatErrno::NoProcess)?
+                .0;
+            let group = if requested == 0 {
+                caller_group
+            } else if requested > 0 {
+                requested as u32
+            } else {
+                return Err(CompatErrno::Invalid);
+            };
+            let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+            if group != caller_group && credentials.euid != 0 {
+                return Err(CompatErrno::Perm);
+            }
+            Ok(LinuxIoprioTarget::Group(group))
+        }
+        _ => Err(CompatErrno::NotSupported),
     }
-    let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
-    let requested = args[1] as u32 as i32;
-    if requested != 0 && requested as u64 != current {
-        return Err(CompatErrno::Perm);
-    }
-    Ok(())
 }
 
 /// Returns the process Linux I/O priority.
 fn linux_ioprio_get(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    linux_ioprio_target(pid, args)?;
-    proc::linux_ioprio(pid)
-        .map(u64::from)
-        .ok_or(CompatErrno::NoProcess)
+    match linux_ioprio_target(pid, args)? {
+        LinuxIoprioTarget::Process => proc::linux_ioprio(pid)
+            .map(u64::from)
+            .ok_or(CompatErrno::NoProcess),
+        LinuxIoprioTarget::Group(group) => proc::linux_ioprio_group(group)
+            .map(|(value, _)| u64::from(value))
+            .ok_or(CompatErrno::NoProcess),
+    }
 }
 
 /// Sets the process Linux I/O priority class and level.
@@ -5700,7 +7010,7 @@ fn linux_ioprio_set(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const IOPRIO_CLASS_MASK: u32 = 0x7;
     const IOPRIO_CLASS_SHIFT: u32 = 13;
     const IOPRIO_PRIO_MASK: u32 = (1 << IOPRIO_CLASS_SHIFT) - 1;
-    linux_ioprio_target(pid, args)?;
+    let target = linux_ioprio_target(pid, args)?;
     let requested = args[2] as u32;
     let class = (requested >> IOPRIO_CLASS_SHIFT) & IOPRIO_CLASS_MASK;
     let data = requested & IOPRIO_PRIO_MASK;
@@ -5710,11 +7020,32 @@ fn linux_ioprio_set(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         3 if data == 0 => requested,
         _ => return Err(CompatErrno::Invalid),
     };
-    if proc::set_linux_ioprio(pid, value) {
+    let updated = match target {
+        LinuxIoprioTarget::Process => proc::set_linux_ioprio(pid, value),
+        LinuxIoprioTarget::Group(group) => proc::set_linux_ioprio_group(group, value),
+    };
+    if updated {
         Ok(0)
     } else {
         Err(CompatErrno::NoProcess)
     }
+}
+
+/// Implements `personality(2)` for the standard Linux execution domain.
+fn linux_personality(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
+    const PERSONALITY_QUERY: u64 = u64::MAX;
+    let current = proc::linux_personality(pid).ok_or(CompatErrno::NoProcess)?;
+    if requested == PERSONALITY_QUERY {
+        return Ok(u64::from(current));
+    }
+    let requested = requested as u32;
+    if requested != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if !proc::set_linux_personality(pid, requested) {
+        return Err(CompatErrno::NoProcess);
+    }
+    Ok(u64::from(current))
 }
 
 /// Implements `clock_gettime(2)` for trusted realtime and Jasper monotonic clocks.
@@ -6263,6 +7594,3569 @@ fn linux_memfd_create(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(u64::from(fd))
 }
 
+/// Creates one close-on-exec anonymous resident memory file.
+fn linux_memfd_secret(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const O_CLOEXEC: u64 = 0x80000;
+    if args[0] & !O_CLOEXEC != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let fd = proc::linux_create_memfd(pid, true, false).ok_or(CompatErrno::NoSpace)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if proc::linux_ashmem_set_name(pid, entry.handle, b"secretmem").is_err() {
+        let _ = proc::linux_close_fd(pid, fd);
+        return Err(CompatErrno::NoMemory);
+    }
+    Ok(u64::from(fd))
+}
+
+const LINUX_MQ_ATTR_BYTES: usize = 32;
+const LINUX_MQ_MSG_MAX: i64 = 10;
+const LINUX_MQ_MSGSIZE_MAX: i64 = 8192;
+
+/// Reads and validates the slash-free name consumed by Linux's raw syscall.
+fn read_linux_mq_name(address: u64) -> Result<([u8; 256], u8), CompatErrno> {
+    let name = linux_c_string(address, 256)?;
+    if name.len() > 255 || name.contains(&b'/') {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut output = [0u8; 256];
+    output[..name.len()].copy_from_slice(&name);
+    Ok((output, name.len() as u8))
+}
+
+/// Reads one x86-64 Linux message-queue attribute block.
+fn read_linux_mq_attr(address: u64) -> Result<[u8; LINUX_MQ_ATTR_BYTES], CompatErrno> {
+    let mut attr = [0u8; LINUX_MQ_ATTR_BYTES];
+    copy_from_user(&mut attr, address, LINUX_MQ_ATTR_BYTES)
+        .map_err(|_| CompatErrno::Fault)?;
+    Ok(attr)
+}
+
+/// Parses the creation-only limits, ignoring flags and current message count.
+fn parse_linux_mq_limits(
+    attr: [u8; LINUX_MQ_ATTR_BYTES],
+) -> Result<(usize, usize), CompatErrno> {
+    let max_messages = i64::from_le_bytes(attr[8..16].try_into().unwrap());
+    let message_size = i64::from_le_bytes(attr[16..24].try_into().unwrap());
+    if !(1..=LINUX_MQ_MSG_MAX).contains(&max_messages)
+        || !(1..=LINUX_MQ_MSGSIZE_MAX).contains(&message_size)
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    Ok((max_messages as usize, message_size as usize))
+}
+
+/// Applies one POSIX message-queue inode permission check.
+fn message_queue_access(
+    credentials: proc::LinuxCredentials,
+    supplementary_groups: &[u32],
+    uid: u32,
+    gid: u32,
+    mode: u16,
+    rights: kernel_core::object::Rights,
+) -> bool {
+    if credentials.euid == 0 {
+        return true;
+    }
+    let shift = if credentials.fsuid == uid {
+        6
+    } else if credentials.fsgid == gid || supplementary_groups.contains(&gid) {
+        3
+    } else {
+        0
+    };
+    let mut required = 0u16;
+    if rights.contains(kernel_core::object::Rights::READ) {
+        required |= 0o4;
+    }
+    if rights.contains(kernel_core::object::Rights::WRITE) {
+        required |= 0o2;
+    }
+    (mode >> shift) & required == required
+}
+
+/// Resolves one message-queue descriptor and verifies its access right.
+fn open_message_queue(
+    pid: ObjId,
+    raw_fd: u64,
+    write: bool,
+) -> Result<(u32, alloc::sync::Arc<proc::LinuxMqShared>), CompatErrno> {
+    let fd = u32::try_from(raw_fd).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::MessageQueue
+        || !entry.rights.contains(if write {
+            kernel_core::object::Rights::WRITE
+        } else {
+            kernel_core::object::Rights::READ
+        })
+    {
+        return Err(CompatErrno::BadFd);
+    }
+    let queue = proc::linux_mq_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    Ok((fd, queue))
+}
+
+/// Resolves one message-queue descriptor without imposing an I/O direction.
+fn open_message_queue_any(
+    pid: ObjId,
+    raw_fd: u64,
+) -> Result<(u32, alloc::sync::Arc<proc::LinuxMqShared>), CompatErrno> {
+    let fd = u32::try_from(raw_fd).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::MessageQueue {
+        return Err(CompatErrno::BadFd);
+    }
+    let queue = proc::linux_mq_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    Ok((fd, queue))
+}
+
+/// Wakes Linux threads so blocked queue senders and receivers can recheck.
+fn wake_message_queue_waiters() {
+    let mut tasks = [None; MAX_LINUX_THREADS];
+    let mut count = 0usize;
+    {
+        let state = COMPAT.lock();
+        for thread in state.threads.iter().flatten() {
+            if count < tasks.len() {
+                tasks[count] = Some(thread.task);
+                count += 1;
+            }
+        }
+    }
+    for task in tasks[..count].iter().flatten() {
+        sched::wake(*task);
+    }
+}
+
+/// Implements `mq_open(2)` with bounded names and queue storage.
+fn linux_mq_open(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const O_ACCMODE: u64 = 0x3;
+    const O_CREAT: u64 = 0x40;
+    const O_EXCL: u64 = 0x80;
+    const O_NONBLOCK: u64 = 0x800;
+    const O_CLOEXEC: u64 = 0x80000;
+    let requested_attr = if args[3] == 0 {
+        None
+    } else {
+        Some(read_linux_mq_attr(args[3])?)
+    };
+    let flags = args[1];
+    if flags & !(O_ACCMODE | O_CREAT | O_EXCL | O_NONBLOCK | O_CLOEXEC) != 0
+        || flags & O_ACCMODE == O_ACCMODE
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let (name, name_len) = read_linux_mq_name(args[0])?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let supplementary_groups =
+        proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
+    let rights = match flags & O_ACCMODE {
+        0 => kernel_core::object::Rights::READ,
+        1 => kernel_core::object::Rights::WRITE,
+        _ => kernel_core::object::Rights::READ.union(kernel_core::object::Rights::WRITE),
+    };
+    let install = |queue: alloc::sync::Arc<proc::LinuxMqShared>| {
+        proc::linux_mq_install(
+            pid,
+            queue,
+            rights,
+            true,
+            flags & O_NONBLOCK != 0,
+        )
+        .ok_or(CompatErrno::NoSpace)
+    };
+    let existing = {
+        let state = COMPAT.lock();
+        state
+            .message_queue_names
+            .iter()
+            .find(|entry| entry.name == name && entry.name_len == name_len)
+            .map(|entry| {
+                (
+                    alloc::sync::Arc::clone(&entry.queue),
+                    entry.uid,
+                    entry.gid,
+                    entry.mode,
+                )
+            })
+    };
+    if let Some((queue, uid, gid, mode)) = existing {
+        if flags & (O_CREAT | O_EXCL) == (O_CREAT | O_EXCL) {
+            return Err(CompatErrno::Exists);
+        }
+        if !message_queue_access(
+            credentials,
+            &supplementary_groups,
+            uid,
+            gid,
+            mode,
+            rights,
+        ) {
+            return Err(CompatErrno::Perm);
+        }
+        return install(queue).map(u64::from);
+    }
+    if flags & O_CREAT == 0 {
+        return Err(CompatErrno::NoEntry);
+    }
+    let (max_messages, message_size) = if let Some(attr) = requested_attr {
+        parse_linux_mq_limits(attr)?
+    } else {
+        (LINUX_MQ_MSG_MAX as usize, LINUX_MQ_MSGSIZE_MAX as usize)
+    };
+    let candidate = alloc::sync::Arc::new(proc::LinuxMqShared {
+        state: kernel_core::sync::SpinLock::new(proc::LinuxMqState {
+            max_messages,
+            message_size,
+            messages: alloc::collections::VecDeque::new(),
+            blocked_receivers: 0,
+            notification: None,
+        }),
+    });
+    let mode = ((args[2] as u16) & 0o777)
+        & !(proc::linux_umask(pid).ok_or(CompatErrno::NoProcess)? as u16);
+    let candidate_fd = install(alloc::sync::Arc::clone(&candidate))?;
+    let registration = {
+        let mut state = COMPAT.lock();
+        if let Some(queue) = state
+            .message_queue_names
+            .iter()
+            .find(|entry| entry.name == name && entry.name_len == name_len)
+        {
+            Ok(Some((
+                alloc::sync::Arc::clone(&queue.queue),
+                queue.uid,
+                queue.gid,
+                queue.mode,
+            )))
+        } else if state.message_queue_names.len() >= 16 {
+            Err(CompatErrno::NoSpace)
+        } else {
+            match state.message_queue_names.try_reserve(1) {
+                Ok(()) => {
+                    state.message_queue_names.push(MessageQueueName {
+                        name,
+                        name_len,
+                        queue: candidate,
+                        uid: credentials.fsuid,
+                        gid: credentials.fsgid,
+                        mode,
+                    });
+                    Ok(None)
+                }
+                Err(_) => Err(CompatErrno::NoMemory),
+            }
+        }
+    };
+    match registration {
+        Ok(None) => Ok(u64::from(candidate_fd)),
+        Ok(Some((queue, uid, gid, mode))) => {
+            let _ = proc::linux_close_fd(pid, candidate_fd);
+            if flags & O_EXCL != 0 {
+                return Err(CompatErrno::Exists);
+            }
+            if !message_queue_access(
+                credentials,
+                &supplementary_groups,
+                uid,
+                gid,
+                mode,
+                rights,
+            ) {
+                return Err(CompatErrno::Perm);
+            }
+            install(queue).map(u64::from)
+        }
+        Err(error) => {
+            let _ = proc::linux_close_fd(pid, candidate_fd);
+            Err(error)
+        }
+    }
+}
+
+/// Removes one POSIX message-queue name while existing descriptors retain the queue.
+fn linux_mq_unlink(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let (name, name_len) = read_linux_mq_name(args[0])?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let mut state = COMPAT.lock();
+    let Some(index) = state
+        .message_queue_names
+        .iter()
+        .position(|entry| entry.name == name && entry.name_len == name_len)
+    else {
+        return Err(CompatErrno::NoEntry);
+    };
+    if credentials.euid != 0 && credentials.euid != state.message_queue_names[index].uid {
+        return Err(CompatErrno::Access);
+    }
+    state.message_queue_names.remove(index);
+    Ok(0)
+}
+
+/// Parses one optional absolute CLOCK_REALTIME message-queue timeout.
+fn mq_deadline(pointer: u64) -> Result<Option<u64>, CompatErrno> {
+    if pointer == 0 {
+        return Ok(None);
+    }
+    let requested = read_linux_timespec(pointer)?;
+    let wall = crate::arch::wall_clock_ns().ok_or(CompatErrno::NoSys)?;
+    Ok(Some(
+        sched::now_ns().saturating_add(requested.saturating_sub(wall)),
+    ))
+}
+
+/// Implements `mq_timedsend(2)`.
+fn linux_mq_send(pid: ObjId, args: [u64; 6], timed: bool) -> Result<u64, CompatErrno> {
+    const MQ_PRIO_MAX: u32 = 32768;
+    const SIGEV_SIGNAL: u32 = 0;
+    const SI_MESGQ: i32 = -3;
+    let deadline = if timed { mq_deadline(args[4])? } else { None };
+    let priority = u32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    if priority >= MQ_PRIO_MAX {
+        return Err(CompatErrno::Invalid);
+    }
+    let (fd, queue) = open_message_queue(pid, args[0], true)?;
+    let length = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if length > queue.state.lock().message_size {
+        return Err(CompatErrno::MessageSize);
+    }
+    let mut bytes = alloc::vec![0u8; length];
+    if length != 0 {
+        copy_from_user(&mut bytes, args[1], length).map_err(|_| CompatErrno::Fault)?;
+    }
+    let notification = loop {
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        let nonblocking = proc::linux_fd_status_flags(pid, fd).unwrap_or(0) & 0x800 != 0;
+        {
+            let mut state = queue.state.lock();
+            if state.messages.len() < state.max_messages {
+                state
+                    .messages
+                    .try_reserve(1)
+                    .map_err(|_| CompatErrno::NoMemory)?;
+                let notify = (state.messages.is_empty() && state.blocked_receivers == 0)
+                    .then(|| state.notification.take())
+                    .flatten();
+                let position = state
+                    .messages
+                    .iter()
+                    .position(|message| message.priority < priority)
+                    .unwrap_or(state.messages.len());
+                state
+                    .messages
+                    .insert(position, proc::LinuxMqMessage { priority, bytes });
+                break notify;
+            }
+            if nonblocking {
+                return Err(CompatErrno::TryAgain);
+            }
+        }
+        if deadline.is_some_and(|deadline| sched::now_ns() >= deadline) {
+            return Err(CompatErrno::TimedOut);
+        }
+        if let Some(deadline) = deadline {
+            if sched::sleep_until_ns(deadline).is_err() {
+                sched::pause();
+            }
+        } else {
+            sched::pause();
+        }
+    };
+    if let Some(notification) = notification {
+        if notification.notify == SIGEV_SIGNAL {
+            let sender_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?;
+            let sender_uid = proc::linux_credentials(pid)
+                .ok_or(CompatErrno::NoProcess)?
+                .uid;
+            let _ = queue_process_signal_info(
+                notification.process,
+                notification.signal,
+                sender_pid,
+                sender_uid,
+                SI_MESGQ,
+                notification.value,
+            );
+        }
+    }
+    wake_message_queue_waiters();
+    Ok(0)
+}
+
+/// Implements `mq_timedreceive(2)`.
+fn linux_mq_receive(pid: ObjId, args: [u64; 6], timed: bool) -> Result<u64, CompatErrno> {
+    let deadline = if timed { mq_deadline(args[4])? } else { None };
+    let (fd, queue) = open_message_queue(pid, args[0], false)?;
+    let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if capacity < queue.state.lock().message_size {
+        return Err(CompatErrno::MessageSize);
+    }
+    let mut registered_waiter = false;
+    let message = (|| {
+        loop {
+            if proc::current_exiting() || current_signal_pending(pid) {
+                return Err(CompatErrno::Interrupted);
+            }
+            let nonblocking = proc::linux_fd_status_flags(pid, fd).unwrap_or(0) & 0x800 != 0;
+            {
+                let mut state = queue.state.lock();
+                if let Some(message) = state.messages.pop_front() {
+                    return Ok(message);
+                }
+                if nonblocking {
+                    return Err(CompatErrno::TryAgain);
+                }
+                if !registered_waiter {
+                    state.blocked_receivers = state.blocked_receivers.saturating_add(1);
+                    registered_waiter = true;
+                }
+            }
+            if deadline.is_some_and(|deadline| sched::now_ns() >= deadline) {
+                return Err(CompatErrno::TimedOut);
+            }
+            if let Some(deadline) = deadline {
+                if sched::sleep_until_ns(deadline).is_err() {
+                    sched::pause();
+                }
+            } else {
+                sched::pause();
+            }
+        }
+    })();
+    if registered_waiter {
+        let mut state = queue.state.lock();
+        state.blocked_receivers = state.blocked_receivers.saturating_sub(1);
+    }
+    let message = message?;
+    if !message.bytes.is_empty() {
+        copy_to_user(args[1], &message.bytes, message.bytes.len())
+            .map_err(|_| CompatErrno::Fault)?;
+    }
+    if args[3] != 0 {
+        copy_to_user(args[3], &message.priority.to_le_bytes(), 4)
+            .map_err(|_| CompatErrno::Fault)?;
+    }
+    wake_message_queue_waiters();
+    Ok(message.bytes.len() as u64)
+}
+
+/// Registers or cancels one one-shot message-arrival notification.
+fn linux_mq_notify(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SIGEV_SIGNAL: u32 = 0;
+    const SIGEV_NONE: u32 = 1;
+    let requested = if args[1] == 0 {
+        None
+    } else {
+        let mut notification = [0u8; 64];
+        copy_from_user(&mut notification, args[1], 64).map_err(|_| CompatErrno::Fault)?;
+        let value = u64::from_le_bytes(notification[..8].try_into().unwrap());
+        let signal = u32::from_le_bytes(notification[8..12].try_into().unwrap());
+        let notify = u32::from_le_bytes(notification[12..16].try_into().unwrap());
+        if !matches!(notify, SIGEV_SIGNAL | SIGEV_NONE)
+            || notify == SIGEV_SIGNAL
+                && (signal == 0 || signal > 64 || matches!(signal, 9 | 19))
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        Some(proc::LinuxMqNotification {
+            process: pid,
+            notify,
+            signal,
+            value,
+        })
+    };
+    let (_, queue) = open_message_queue_any(pid, args[0])?;
+    let mut state = queue.state.lock();
+    if let Some(requested) = requested {
+        if state.notification.is_some() {
+            return Err(CompatErrno::Busy);
+        }
+        state.notification = Some(requested);
+        Ok(0)
+    } else {
+        if state
+            .notification
+            .is_some_and(|notification| notification.process == pid)
+        {
+            state.notification = None;
+            Ok(0)
+        } else {
+            Err(CompatErrno::Invalid)
+        }
+    }
+}
+
+/// Queries or updates one message-queue attribute block.
+fn linux_mq_getsetattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let requested = if args[1] == 0 {
+        None
+    } else {
+        Some(read_linux_mq_attr(args[1])?)
+    };
+    if requested
+        .is_some_and(|attr| i64::from_le_bytes(attr[0..8].try_into().unwrap()) & !0x800 != 0)
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let (fd, queue) = open_message_queue_any(pid, args[0])?;
+    let (max_messages, message_size, current_messages) = {
+        let state = queue.state.lock();
+        (
+            state.max_messages,
+            state.message_size,
+            state.messages.len(),
+        )
+    };
+    let old = [
+        i64::from(proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800),
+        max_messages as i64,
+        message_size as i64,
+        current_messages as i64,
+    ];
+    if let Some(attr) = requested {
+        let flags = i64::from_le_bytes(attr[0..8].try_into().unwrap()) as u32;
+        if !proc::linux_set_fd_status_flags(pid, fd, flags) {
+            return Err(CompatErrno::BadFd);
+        }
+    }
+    if args[2] != 0 {
+        let mut attr = [0u8; LINUX_MQ_ATTR_BYTES];
+        for (index, value) in old.iter().enumerate() {
+            attr[index * 8..index * 8 + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        copy_to_user(args[2], &attr, attr.len()).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(0)
+}
+
+const SYSV_IPC_CREAT: u32 = 0o1000;
+const SYSV_IPC_EXCL: u32 = 0o2000;
+const SYSV_IPC_NOWAIT: u32 = 0o4000;
+const SYSV_MSG_NOERROR: u32 = 0o10000;
+const SYSV_MSG_EXCEPT: u32 = 0o20000;
+const SYSV_MSG_COPY: u32 = 0o40000;
+const SYSV_MSG_DS_BYTES: usize = 120;
+
+fn sysv_message_queue_index(
+    state: &CompatState,
+    application: kernel_core::security::ApplicationIdentity,
+    id: i32,
+) -> Option<usize> {
+    state
+        .sysv_message_queues
+        .iter()
+        .position(|queue| queue.application == application && queue.id == id)
+}
+
+fn sysv_message_access(
+    queue: &SysVMessageQueue,
+    credentials: proc::LinuxCredentials,
+    groups: &[u32],
+    write: bool,
+) -> bool {
+    if credentials.euid == 0 {
+        return true;
+    }
+    let shift = if credentials.euid == queue.uid {
+        6
+    } else if credentials.egid == queue.gid || groups.contains(&queue.gid) {
+        3
+    } else {
+        0
+    };
+    let required = if write { 0o2 } else { 0o4 };
+    queue.mode >> shift & required == required
+}
+
+fn sysv_time_seconds() -> i64 {
+    crate::arch::wall_clock_ns()
+        .map(|time| (time / 1_000_000_000) as i64)
+        .unwrap_or_else(|| (sched::now_ns() / 1_000_000_000) as i64)
+}
+
+fn sysv_msg_ds_bytes(queue: &SysVMessageQueue) -> [u8; SYSV_MSG_DS_BYTES] {
+    let mut output = [0u8; SYSV_MSG_DS_BYTES];
+    output[0..4].copy_from_slice(&(queue.key as u32).to_le_bytes());
+    output[4..8].copy_from_slice(&queue.uid.to_le_bytes());
+    output[8..12].copy_from_slice(&queue.gid.to_le_bytes());
+    output[12..16].copy_from_slice(&queue.cuid.to_le_bytes());
+    output[16..20].copy_from_slice(&queue.cgid.to_le_bytes());
+    output[20..24].copy_from_slice(&u32::from(queue.mode).to_le_bytes());
+    output[24..26].copy_from_slice(&(queue.id as u16).to_le_bytes());
+    output[48..56].copy_from_slice(&queue.send_time.to_le_bytes());
+    output[56..64].copy_from_slice(&queue.receive_time.to_le_bytes());
+    output[64..72].copy_from_slice(&queue.change_time.to_le_bytes());
+    output[72..80].copy_from_slice(&(queue.cbytes as u64).to_le_bytes());
+    output[80..88].copy_from_slice(&(queue.messages.len() as u64).to_le_bytes());
+    output[88..96].copy_from_slice(&(queue.qbytes as u64).to_le_bytes());
+    output[96..100].copy_from_slice(&queue.last_send_pid.to_le_bytes());
+    output[100..104].copy_from_slice(&queue.last_receive_pid.to_le_bytes());
+    output
+}
+
+fn sysv_select_message(queue: &SysVMessageQueue, msgtyp: i64, flags: u32) -> Option<usize> {
+    if flags & SYSV_MSG_COPY != 0 {
+        let ordinal = usize::try_from(msgtyp).ok()?;
+        return queue
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| !message.reserved)
+            .nth(ordinal)
+            .map(|(index, _)| index);
+    }
+    if msgtyp == 0 {
+        return queue
+            .messages
+            .iter()
+            .position(|message| !message.reserved);
+    }
+    if msgtyp > 0 {
+        return queue.messages.iter().position(|message| {
+            !message.reserved
+                && if flags & SYSV_MSG_EXCEPT != 0 {
+                    message.mtype != msgtyp
+                } else {
+                    message.mtype == msgtyp
+                }
+        });
+    }
+    let maximum = msgtyp.unsigned_abs();
+    queue
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| !message.reserved && message.mtype.unsigned_abs() <= maximum)
+        .min_by_key(|(index, message)| (message.mtype, *index))
+        .map(|(index, _)| index)
+}
+
+/// Implements `msgget(2)` over the compatibility application's IPC namespace.
+fn linux_msgget(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let key = args[0] as u32 as i32;
+    let flags = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if flags & !(0o777 | SYSV_IPC_CREAT | SYSV_IPC_EXCL | SYSV_IPC_NOWAIT) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let mode =
+        (flags & 0o777) & !proc::linux_umask(pid).ok_or(CompatErrno::NoProcess)?;
+    let mut state = COMPAT.lock();
+    if key != 0 {
+        if let Some(queue) = state
+            .sysv_message_queues
+            .iter()
+            .find(|queue| queue.application == application && queue.key == key)
+        {
+            if flags & (SYSV_IPC_CREAT | SYSV_IPC_EXCL)
+                == (SYSV_IPC_CREAT | SYSV_IPC_EXCL)
+            {
+                return Err(CompatErrno::Exists);
+            }
+            return Ok(queue.id as u32 as u64);
+        }
+    }
+    if flags & SYSV_IPC_CREAT == 0 {
+        return Err(CompatErrno::NoEntry);
+    }
+    if state.sysv_message_queues.len() >= MAX_SYSV_MESSAGE_QUEUES {
+        return Err(CompatErrno::NoSpace);
+    }
+    state
+        .sysv_message_queues
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    let id = state.next_sysv_message_queue_id;
+    state.next_sysv_message_queue_id = id.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+    let now = sysv_time_seconds();
+    state.sysv_message_queues.push(SysVMessageQueue {
+        id,
+        key,
+        application,
+        uid: credentials.euid,
+        gid: credentials.egid,
+        cuid: credentials.euid,
+        cgid: credentials.egid,
+        mode: mode as u16,
+        qbytes: SYSV_MSGMNB,
+        cbytes: 0,
+        messages: alloc::collections::VecDeque::new(),
+        next_message_id: 1,
+        send_time: 0,
+        receive_time: 0,
+        change_time: now,
+        last_send_pid: 0,
+        last_receive_pid: 0,
+    });
+    Ok(id as u32 as u64)
+}
+
+/// Implements `msgsnd(2)` with typed, bounded messages.
+fn linux_msgsnd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let id = args[0] as i32;
+    let length = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let flags = args[4] as u32;
+    if flags & !SYSV_IPC_NOWAIT != 0 || length > SYSV_MSGMAX {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut message_type = [0u8; 8];
+    copy_from_user(&mut message_type, args[1], 8).map_err(|_| CompatErrno::Fault)?;
+    let mtype = i64::from_le_bytes(message_type);
+    if mtype <= 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut bytes = alloc::vec![0u8; length];
+    if length != 0 {
+        let address = args[1].checked_add(8).ok_or(CompatErrno::Fault)?;
+        copy_from_user(&mut bytes, address, length).map_err(|_| CompatErrno::Fault)?;
+    }
+    let mut pending_bytes = Some(bytes);
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let supplementary_groups =
+        proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
+    let sender_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
+    let mut waited = false;
+    loop {
+        let mut inserted = false;
+        {
+            let mut state = COMPAT.lock();
+            let queue_index = sysv_message_queue_index(&state, application, id).ok_or(
+                if waited {
+                    CompatErrno::Removed
+                } else {
+                    CompatErrno::Invalid
+                },
+            )?;
+            let queue = &mut state.sysv_message_queues[queue_index];
+            if !sysv_message_access(queue, credentials, &supplementary_groups, true) {
+                return Err(CompatErrno::Access);
+            }
+            if length > queue.qbytes {
+                return Err(CompatErrno::MessageSize);
+            }
+            if queue.messages.len() < MAX_SYSV_MESSAGES_PER_QUEUE
+                && queue.cbytes.saturating_add(length) <= queue.qbytes
+            {
+                let message_id = queue.next_message_id;
+                queue.next_message_id =
+                    message_id.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+                queue.messages.push_back(SysVMessage {
+                    id: message_id,
+                    mtype,
+                    bytes: pending_bytes.take().expect("message bytes consumed once"),
+                    reserved: false,
+                });
+                queue.cbytes += length;
+                queue.send_time = sysv_time_seconds();
+                queue.last_send_pid = sender_pid;
+                inserted = true;
+            } else if flags & SYSV_IPC_NOWAIT != 0 {
+                return Err(CompatErrno::TryAgain);
+            }
+        }
+        if inserted {
+            wake_message_queue_waiters();
+            return Ok(0);
+        }
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        waited = true;
+        sched::pause();
+    }
+}
+
+/// Implements `msgrcv(2)` with typed selection, copy mode and reservation.
+fn linux_msgrcv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let id = args[0] as i32;
+    let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let msgtyp = args[3] as i64;
+    let flags = args[4] as u32;
+    if flags & !(SYSV_IPC_NOWAIT | SYSV_MSG_NOERROR | SYSV_MSG_EXCEPT | SYSV_MSG_COPY) != 0
+        || (flags & SYSV_MSG_COPY != 0
+            && (msgtyp < 0 || flags & SYSV_IPC_NOWAIT == 0 || flags & SYSV_MSG_EXCEPT != 0))
+        || (flags & SYSV_MSG_EXCEPT != 0 && msgtyp <= 0)
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let supplementary_groups =
+        proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
+    let receiver_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
+    let mut waited = false;
+    let message = loop {
+        let selected = {
+            let mut state = COMPAT.lock();
+            let queue_index = sysv_message_queue_index(&state, application, id)
+                .ok_or(if waited {
+                    CompatErrno::Removed
+                } else {
+                    CompatErrno::Invalid
+                })?;
+            let queue = &mut state.sysv_message_queues[queue_index];
+            if !sysv_message_access(queue, credentials, &supplementary_groups, false) {
+                return Err(CompatErrno::Access);
+            }
+            match sysv_select_message(queue, msgtyp, flags) {
+                Some(message_index) => {
+                    if flags & SYSV_MSG_COPY == 0 {
+                        queue.messages[message_index].reserved = true;
+                    }
+                    Some(queue.messages[message_index].clone())
+                }
+                None => {
+                    if flags & SYSV_MSG_COPY != 0 {
+                        return Err(CompatErrno::NoMessage);
+                    }
+                    if flags & SYSV_IPC_NOWAIT != 0 {
+                        return Err(CompatErrno::NoMessage);
+                    }
+                    None
+                }
+            }
+        };
+        if let Some(message) = selected {
+            break message;
+        }
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        waited = true;
+        sched::pause();
+    };
+    let returned = if message.bytes.len() > capacity {
+        if flags & SYSV_MSG_NOERROR == 0 {
+            if flags & SYSV_MSG_COPY == 0 {
+                let mut state = COMPAT.lock();
+                if let Some(queue_index) = sysv_message_queue_index(&state, application, id) {
+                    if let Some(queued) = state.sysv_message_queues[queue_index]
+                        .messages
+                        .iter_mut()
+                        .find(|queued| queued.id == message.id)
+                    {
+                        queued.reserved = false;
+                    }
+                }
+            }
+            return Err(CompatErrno::ArgumentTooLong);
+        }
+        capacity
+    } else {
+        message.bytes.len()
+    };
+    let mut output = alloc::vec![0u8; 8 + returned];
+    output[..8].copy_from_slice(&message.mtype.to_le_bytes());
+    output[8..].copy_from_slice(&message.bytes[..returned]);
+    if copy_to_user(args[1], &output, output.len()).is_err() {
+        if flags & SYSV_MSG_COPY == 0 {
+            let mut state = COMPAT.lock();
+            if let Some(queue_index) = sysv_message_queue_index(&state, application, id) {
+                if let Some(queued) = state.sysv_message_queues[queue_index]
+                    .messages
+                    .iter_mut()
+                    .find(|queued| queued.id == message.id)
+                {
+                    queued.reserved = false;
+                }
+            }
+        }
+        return Err(CompatErrno::Fault);
+    }
+    if flags & SYSV_MSG_COPY == 0 {
+        {
+            let mut state = COMPAT.lock();
+            let queue_index =
+                sysv_message_queue_index(&state, application, id).ok_or(CompatErrno::Removed)?;
+            let queue = &mut state.sysv_message_queues[queue_index];
+            let Some(message_index) = queue.messages.iter().position(|queued| {
+                queued.id == message.id && queued.reserved
+            }) else {
+                return Err(CompatErrno::Removed);
+            };
+            let queued = queue.messages.remove(message_index).unwrap();
+            queue.cbytes = queue.cbytes.saturating_sub(queued.bytes.len());
+            queue.receive_time = sysv_time_seconds();
+            queue.last_receive_pid = receiver_pid;
+        }
+        wake_message_queue_waiters();
+    }
+    Ok(returned as u64)
+}
+
+fn write_sysv_msginfo(address: u64) -> Result<(), CompatErrno> {
+    let mut info = [0u8; 32];
+    info[8..12].copy_from_slice(&(SYSV_MSGMAX as i32).to_le_bytes());
+    info[12..16].copy_from_slice(&(SYSV_MSGMNB as i32).to_le_bytes());
+    info[16..20].copy_from_slice(&(MAX_SYSV_MESSAGE_QUEUES as i32).to_le_bytes());
+    info[20..24].copy_from_slice(&16i32.to_le_bytes());
+    info[24..28].copy_from_slice(&(SYSV_MSGMNB as i32).to_le_bytes());
+    info[28..30].copy_from_slice(&u16::MAX.to_le_bytes());
+    copy_to_user(address, &info, info.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(())
+}
+
+/// Implements `msgctl(2)` for attributes, removal and bounded introspection.
+fn linux_msgctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const IPC_RMID: u32 = 0;
+    const IPC_SET: u32 = 1;
+    const IPC_STAT: u32 = 2;
+    const IPC_INFO: u32 = 3;
+    const MSG_STAT: u32 = 11;
+    const MSG_INFO: u32 = 12;
+    const MSG_STAT_ANY: u32 = 13;
+    let command = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if command == IPC_INFO || command == MSG_INFO {
+        return write_sysv_msginfo(args[2]).map(|()| 0);
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let supplementary_groups =
+        proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
+    let update = if command == IPC_SET {
+        let mut update = [0u8; SYSV_MSG_DS_BYTES];
+        copy_from_user(&mut update, args[2], SYSV_MSG_DS_BYTES)
+            .map_err(|_| CompatErrno::Fault)?;
+        Some(update)
+    } else {
+        None
+    };
+    let id = args[0] as i32;
+    let mut state = COMPAT.lock();
+    let selected_index = match command {
+        MSG_STAT | MSG_STAT_ANY => {
+            let index = usize::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+            state
+                .sysv_message_queues
+                .iter()
+                .enumerate()
+                .filter(|(_, queue)| queue.application == application)
+                .nth(index)
+                .map(|(index, _)| index)
+                .ok_or(CompatErrno::Invalid)?
+        }
+        _ => sysv_message_queue_index(&state, application, id).ok_or(CompatErrno::Invalid)?,
+    };
+    let queue = &mut state.sysv_message_queues[selected_index];
+    match command {
+        IPC_RMID => {
+            if credentials.euid != 0 && credentials.euid != queue.uid {
+                return Err(CompatErrno::Perm);
+            }
+            state.sysv_message_queues.remove(selected_index);
+            drop(state);
+            wake_message_queue_waiters();
+            Ok(0)
+        }
+        IPC_SET => {
+            if credentials.euid != 0 && credentials.euid != queue.uid {
+                return Err(CompatErrno::Perm);
+            }
+            let update = update.expect("IPC_SET input");
+            let mode = u32::from_le_bytes(update[20..24].try_into().unwrap()) as u16;
+            let qbytes = u64::from_le_bytes(update[88..96].try_into().unwrap());
+            if mode & !0o777 != 0 || qbytes > SYSV_MSGMNB as u64 {
+                return Err(CompatErrno::Invalid);
+            }
+            queue.uid = u32::from_le_bytes(update[4..8].try_into().unwrap());
+            queue.gid = u32::from_le_bytes(update[8..12].try_into().unwrap());
+            queue.mode = mode;
+            queue.qbytes = qbytes as usize;
+            queue.change_time = sysv_time_seconds();
+            Ok(0)
+        }
+        IPC_STAT | MSG_STAT | MSG_STAT_ANY => {
+            if command != MSG_STAT_ANY
+                && !sysv_message_access(
+                    queue,
+                    credentials,
+                    &supplementary_groups,
+                    false,
+                )
+            {
+                return Err(CompatErrno::Access);
+            }
+            let output = sysv_msg_ds_bytes(queue);
+            let returned_id = queue.id;
+            drop(state);
+            copy_to_user(args[2], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+            if command == MSG_STAT {
+                Ok(returned_id as u32 as u64)
+            } else {
+                Ok(0)
+            }
+        }
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+const SYSV_SEM_UNDO: u16 = 0x1000;
+const SYSV_SEM_DS_BYTES: usize = 88;
+
+fn sysv_semaphore_set_index(
+    state: &CompatState,
+    application: kernel_core::security::ApplicationIdentity,
+    id: i32,
+) -> Option<usize> {
+    state
+        .sysv_semaphore_sets
+        .iter()
+        .position(|set| set.application == application && set.id == id)
+}
+
+fn sysv_semaphore_access(
+    set: &SysVSemaphoreSet,
+    credentials: proc::LinuxCredentials,
+    groups: &[u32],
+    write: bool,
+) -> bool {
+    if credentials.euid == 0 {
+        return true;
+    }
+    let shift = if credentials.euid == set.uid {
+        6
+    } else if credentials.egid == set.gid || groups.contains(&set.gid) {
+        3
+    } else {
+        0
+    };
+    let required = if write { 0o2 } else { 0o4 };
+    set.mode >> shift & required == required
+}
+
+fn sysv_sem_ds_bytes(set: &SysVSemaphoreSet) -> [u8; SYSV_SEM_DS_BYTES] {
+    let mut output = [0u8; SYSV_SEM_DS_BYTES];
+    output[0..4].copy_from_slice(&(set.key as u32).to_le_bytes());
+    output[4..8].copy_from_slice(&set.uid.to_le_bytes());
+    output[8..12].copy_from_slice(&set.gid.to_le_bytes());
+    output[12..16].copy_from_slice(&set.cuid.to_le_bytes());
+    output[16..20].copy_from_slice(&set.cgid.to_le_bytes());
+    output[20..24].copy_from_slice(&u32::from(set.mode).to_le_bytes());
+    output[24..26].copy_from_slice(&(set.id as u16).to_le_bytes());
+    output[48..56].copy_from_slice(&set.operation_time.to_le_bytes());
+    output[56..64].copy_from_slice(&set.change_time.to_le_bytes());
+    output[64..72].copy_from_slice(&(set.nsems as u64).to_le_bytes());
+    output
+}
+
+fn write_sysv_seminfo(address: u64) -> Result<(), CompatErrno> {
+    let mut info = [0u8; 40];
+    info[4..8].copy_from_slice(&(MAX_SYSV_SEM_SETS as i32).to_le_bytes());
+    info[8..12].copy_from_slice(
+        &((MAX_SYSV_SEM_SETS * MAX_SYSV_SEMS_PER_SET) as i32).to_le_bytes(),
+    );
+    info[12..16].copy_from_slice(&(MAX_SYSV_SEM_UNDOS as i32).to_le_bytes());
+    info[16..20].copy_from_slice(&(MAX_SYSV_SEMS_PER_SET as i32).to_le_bytes());
+    info[20..24].copy_from_slice(&(MAX_SYSV_SEM_OPS as i32).to_le_bytes());
+    info[24..28].copy_from_slice(&(MAX_SYSV_SEM_UNDOS as i32).to_le_bytes());
+    info[28..32].copy_from_slice(&(MAX_SYSV_SEM_UNDOS as i32).to_le_bytes());
+    info[32..36].copy_from_slice(&SYSV_SEMVMX.to_le_bytes());
+    info[36..40].copy_from_slice(&SYSV_SEMVMX.to_le_bytes());
+    copy_to_user(address, &info, info.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(())
+}
+
+fn read_sysv_semaphore_ops(
+    address: u64,
+    count: usize,
+) -> Result<([SysVSemaphoreOperation; MAX_SYSV_SEM_OPS], usize), CompatErrno> {
+    if count == 0 || count > MAX_SYSV_SEM_OPS {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut raw = [0u8; MAX_SYSV_SEM_OPS * 6];
+    copy_from_user(&mut raw, address, count * 6).map_err(|_| CompatErrno::Fault)?;
+    let mut operations = [SysVSemaphoreOperation {
+        number: 0,
+        operation: 0,
+        flags: 0,
+    }; MAX_SYSV_SEM_OPS];
+    for (index, output) in operations[..count].iter_mut().enumerate() {
+        let base = index * 6;
+        let flags = i16::from_le_bytes(raw[base + 4..base + 6].try_into().unwrap()) as u16;
+        if flags & !(SYSV_IPC_NOWAIT as u16 | SYSV_SEM_UNDO) != 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        *output = SysVSemaphoreOperation {
+            number: usize::from(u16::from_le_bytes(raw[base..base + 2].try_into().unwrap())),
+            operation: i16::from_le_bytes(raw[base + 2..base + 4].try_into().unwrap()),
+            flags: flags as i16,
+        };
+    }
+    Ok((operations, count))
+}
+
+enum SysVSemaphoreEvaluation {
+    Ready([i32; MAX_SYSV_SEMS_PER_SET]),
+    Blocked {
+        semnum: usize,
+        zero: bool,
+        nowait: bool,
+    },
+}
+
+fn evaluate_sysv_semaphore_ops(
+    set: &SysVSemaphoreSet,
+    operations: &[SysVSemaphoreOperation],
+) -> Result<SysVSemaphoreEvaluation, CompatErrno> {
+    let mut values = set.values;
+    for operation in operations {
+        if operation.number >= set.nsems {
+            return Err(CompatErrno::Invalid);
+        }
+        let nowait = operation.flags as u16 & SYSV_IPC_NOWAIT as u16 != 0;
+        if operation.operation == 0 {
+            if values[operation.number] != 0 {
+                return Ok(SysVSemaphoreEvaluation::Blocked {
+                    semnum: operation.number,
+                    zero: true,
+                    nowait,
+                });
+            }
+        } else if operation.operation < 0 {
+            let amount = -i32::from(operation.operation);
+            if values[operation.number] < amount {
+                return Ok(SysVSemaphoreEvaluation::Blocked {
+                    semnum: operation.number,
+                    zero: false,
+                    nowait,
+                });
+            }
+            values[operation.number] -= amount;
+        } else {
+            let amount = i32::from(operation.operation);
+            if values[operation.number].saturating_add(amount) > SYSV_SEMVMX {
+                return Err(CompatErrno::TryAgain);
+            }
+            values[operation.number] += amount;
+        }
+    }
+    Ok(SysVSemaphoreEvaluation::Ready(values))
+}
+
+fn remove_sysv_semaphore_waiter(
+    state: &mut CompatState,
+    process: ObjId,
+    task: crate::task::TaskId,
+    semid: i32,
+) {
+    let Some(slot) = state.sysv_semaphore_waiters.iter().position(|waiter| {
+        waiter.is_some_and(|waiter| {
+            waiter.process == process && waiter.task == task && waiter.semid == semid
+        })
+    }) else {
+        return;
+    };
+    let Some(waiter) = state.sysv_semaphore_waiters[slot].take() else {
+        return;
+    };
+    if let Some(set) = state
+        .sysv_semaphore_sets
+        .iter_mut()
+        .find(|set| set.id == semid)
+    {
+        let counts = if waiter.zero {
+            &mut set.zero_waiters
+        } else {
+            &mut set.positive_waiters
+        };
+        if let Some(count) = counts.get_mut(waiter.semnum) {
+            *count = count.saturating_sub(1);
+        }
+    }
+}
+
+fn remove_all_sysv_semaphore_waiters(
+    state: &mut CompatState,
+    process: ObjId,
+    task: crate::task::TaskId,
+) {
+    loop {
+        let Some(semid) = state
+            .sysv_semaphore_waiters
+            .iter()
+            .flatten()
+            .find(|waiter| waiter.process == process && waiter.task == task)
+            .map(|waiter| waiter.semid)
+        else {
+            break;
+        };
+        remove_sysv_semaphore_waiter(state, process, task, semid);
+    }
+}
+
+fn register_sysv_semaphore_waiter(
+    state: &mut CompatState,
+    process: ObjId,
+    task: crate::task::TaskId,
+    semid: i32,
+    semnum: usize,
+    zero: bool,
+) -> bool {
+    if state.sysv_semaphore_waiters.iter().flatten().any(|waiter| {
+        waiter.process == process
+            && waiter.task == task
+            && waiter.semid == semid
+            && waiter.semnum == semnum
+            && waiter.zero == zero
+    }) {
+        return true;
+    }
+    remove_sysv_semaphore_waiter(state, process, task, semid);
+    let Some(slot) = state
+        .sysv_semaphore_waiters
+        .iter()
+        .position(Option::is_none)
+    else {
+        return false;
+    };
+    state.sysv_semaphore_waiters[slot] = Some(SysVSemaphoreWaiter {
+        process,
+        task,
+        semid,
+        semnum,
+        zero,
+    });
+    if let Some(set) = state
+        .sysv_semaphore_sets
+        .iter_mut()
+        .find(|set| set.id == semid)
+    {
+        let counts = if zero {
+            &mut set.zero_waiters
+        } else {
+            &mut set.positive_waiters
+        };
+        if let Some(count) = counts.get_mut(semnum) {
+            *count = count.saturating_add(1);
+        }
+    }
+    true
+}
+
+fn update_sysv_semaphore_undo(
+    state: &mut CompatState,
+    process: ObjId,
+    semid: i32,
+    semnum: usize,
+    operation: i16,
+) -> bool {
+    if let Some(undo) = state.sysv_semaphore_undos.iter_mut().find(|undo| {
+        undo.process == process && undo.semid == semid && undo.semnum == semnum
+    }) {
+        undo.adjustment = undo.adjustment.saturating_sub(i32::from(operation));
+        if undo.adjustment == 0 {
+            let process = undo.process;
+            let semid = undo.semid;
+            let semnum = undo.semnum;
+            state.sysv_semaphore_undos.retain(|undo| {
+                !(undo.process == process && undo.semid == semid && undo.semnum == semnum)
+            });
+        }
+        return true;
+    }
+    if state.sysv_semaphore_undos.len() >= MAX_SYSV_SEM_UNDOS {
+        return false;
+    }
+    state
+        .sysv_semaphore_undos
+        .try_reserve(1)
+        .is_ok_and(|()| {
+            state.sysv_semaphore_undos.push(SysVSemaphoreUndo {
+                process,
+                semid,
+                semnum,
+                adjustment: -i32::from(operation),
+            });
+            true
+        })
+}
+
+/// Applies and drops all SEM_UNDO adjustments owned by an exiting process.
+fn release_sysv_semaphore_undos(process: ObjId) {
+    let mut state = COMPAT.lock();
+    let mut remaining = alloc::vec::Vec::new();
+    for undo in core::mem::take(&mut state.sysv_semaphore_undos) {
+        if undo.process != process {
+            remaining.push(undo);
+            continue;
+        }
+        if let Some(set) = state
+            .sysv_semaphore_sets
+            .iter_mut()
+            .find(|set| set.id == undo.semid)
+        {
+            if let Some(value) = set.values.get_mut(undo.semnum) {
+                *value = value.saturating_add(undo.adjustment).clamp(0, SYSV_SEMVMX);
+                set.change_time = sysv_time_seconds();
+            }
+        }
+    }
+    state.sysv_semaphore_undos = remaining;
+    drop(state);
+    wake_message_queue_waiters();
+}
+
+/// Implements `semget(2)` with bounded per-application semaphore sets.
+fn linux_semget(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let key = args[0] as u32 as i32;
+    let nsems = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let flags = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if flags & !(0o777 | SYSV_IPC_CREAT | SYSV_IPC_EXCL | SYSV_IPC_NOWAIT) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let mode =
+        (flags & 0o777) & !proc::linux_umask(pid).ok_or(CompatErrno::NoProcess)?;
+    let mut state = COMPAT.lock();
+    if key != 0 {
+        if let Some(set) = state
+            .sysv_semaphore_sets
+            .iter()
+            .find(|set| set.application == application && set.key == key)
+        {
+            if flags & (SYSV_IPC_CREAT | SYSV_IPC_EXCL)
+                == (SYSV_IPC_CREAT | SYSV_IPC_EXCL)
+            {
+                return Err(CompatErrno::Exists);
+            }
+            return Ok(set.id as u32 as u64);
+        }
+    }
+    if flags & SYSV_IPC_CREAT == 0 {
+        return Err(CompatErrno::NoEntry);
+    }
+    if !(1..=MAX_SYSV_SEMS_PER_SET).contains(&nsems) {
+        return Err(CompatErrno::Invalid);
+    }
+    if state.sysv_semaphore_sets.len() >= MAX_SYSV_SEM_SETS {
+        return Err(CompatErrno::NoSpace);
+    }
+    state
+        .sysv_semaphore_sets
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    let id = state.next_sysv_semaphore_id;
+    state.next_sysv_semaphore_id = id.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+    let now = sysv_time_seconds();
+    state.sysv_semaphore_sets.push(SysVSemaphoreSet {
+        id,
+        key,
+        application,
+        uid: credentials.euid,
+        gid: credentials.egid,
+        cuid: credentials.euid,
+        cgid: credentials.egid,
+        mode: mode as u16,
+        values: [0; MAX_SYSV_SEMS_PER_SET],
+        nsems,
+        operation_time: 0,
+        change_time: now,
+        last_pid: 0,
+        positive_waiters: [0; MAX_SYSV_SEMS_PER_SET],
+        zero_waiters: [0; MAX_SYSV_SEMS_PER_SET],
+    });
+    Ok(id as u32 as u64)
+}
+
+/// Implements `semop(2)` and `semtimedop(2)` atomically.
+fn linux_semop(pid: ObjId, args: [u64; 6], timed: bool) -> Result<u64, CompatErrno> {
+    let deadline = if timed {
+        Some(
+            sched::now_ns()
+                .checked_add(read_linux_timespec(args[3])?)
+                .ok_or(CompatErrno::Invalid)?,
+        )
+    } else {
+        None
+    };
+    let id = args[0] as i32;
+    let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let (operations, operation_count) = read_sysv_semaphore_ops(args[1], count)?;
+    let operations = &operations[..operation_count];
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let supplementary_groups =
+        proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
+    let process_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
+    let (task, _) = sched::current();
+    let mut waited = false;
+    loop {
+        let evaluation = {
+            let mut state = COMPAT.lock();
+            let set_index = sysv_semaphore_set_index(&state, application, id).ok_or(
+                if waited {
+                    CompatErrno::Removed
+                } else {
+                    CompatErrno::Invalid
+                },
+            )?;
+            let requires_write = operations.iter().any(|operation| operation.operation != 0);
+            if !sysv_semaphore_access(
+                &state.sysv_semaphore_sets[set_index],
+                credentials,
+                &supplementary_groups,
+                requires_write,
+            ) {
+                remove_sysv_semaphore_waiter(&mut state, pid, task, id);
+                return Err(CompatErrno::Access);
+            }
+            match evaluate_sysv_semaphore_ops(&state.sysv_semaphore_sets[set_index], operations) {
+                Ok(SysVSemaphoreEvaluation::Ready(values)) => {
+                    let mut new_undos = 0usize;
+                    for (index, operation) in operations.iter().enumerate() {
+                        if operation.flags as u16 & SYSV_SEM_UNDO == 0 {
+                            continue;
+                        }
+                        let existing = state.sysv_semaphore_undos.iter().any(|undo| {
+                            undo.process == pid
+                                && undo.semid == id
+                                && undo.semnum == operation.number
+                        });
+                        let repeated = operations[..index].iter().any(|previous| {
+                            previous.flags as u16 & SYSV_SEM_UNDO != 0
+                                && previous.number == operation.number
+                        });
+                        if !existing && !repeated {
+                            new_undos += 1;
+                        }
+                    }
+                    if state.sysv_semaphore_undos.len().saturating_add(new_undos)
+                        > MAX_SYSV_SEM_UNDOS
+                        || state
+                            .sysv_semaphore_undos
+                            .try_reserve(new_undos)
+                            .is_err()
+                    {
+                        remove_sysv_semaphore_waiter(&mut state, pid, task, id);
+                        return Err(CompatErrno::NoSpace);
+                    }
+                    {
+                        let set = &mut state.sysv_semaphore_sets[set_index];
+                        set.values = values;
+                        set.operation_time = sysv_time_seconds();
+                        set.last_pid = process_pid;
+                    }
+                    for operation in operations {
+                        if operation.flags as u16 & SYSV_SEM_UNDO != 0
+                            && !update_sysv_semaphore_undo(
+                                &mut state,
+                                pid,
+                                id,
+                                operation.number,
+                                operation.operation,
+                            )
+                        {
+                            return Err(CompatErrno::NoSpace);
+                        }
+                    }
+                    remove_sysv_semaphore_waiter(&mut state, pid, task, id);
+                    Ok(None)
+                }
+                Ok(SysVSemaphoreEvaluation::Blocked {
+                    semnum,
+                    zero,
+                    nowait,
+                }) => {
+                    if nowait {
+                        remove_sysv_semaphore_waiter(&mut state, pid, task, id);
+                        Err(CompatErrno::TryAgain)
+                    } else {
+                        Ok(Some((semnum, zero)))
+                    }
+                }
+                Err(error) => {
+                    remove_sysv_semaphore_waiter(&mut state, pid, task, id);
+                    Err(error)
+                }
+            }
+        }?;
+        let Some((semnum, zero)) = evaluation else {
+            wake_message_queue_waiters();
+            return Ok(0);
+        };
+        {
+            let mut state = COMPAT.lock();
+            if !register_sysv_semaphore_waiter(&mut state, pid, task, id, semnum, zero) {
+                return Err(CompatErrno::NoSpace);
+            }
+        }
+        if proc::current_exiting() || current_signal_pending(pid) {
+            let mut state = COMPAT.lock();
+            remove_sysv_semaphore_waiter(&mut state, pid, task, id);
+            return Err(CompatErrno::Interrupted);
+        }
+        if deadline.is_some_and(|deadline| sched::now_ns() >= deadline) {
+            let mut state = COMPAT.lock();
+            remove_sysv_semaphore_waiter(&mut state, pid, task, id);
+            return Err(CompatErrno::TryAgain);
+        }
+        waited = true;
+        if let Some(deadline) = deadline {
+            if sched::sleep_until_ns(deadline).is_err() {
+                sched::pause();
+            }
+        } else {
+            sched::pause();
+        }
+    }
+}
+
+/// Implements `semctl(2)` for values, counts, metadata and removal.
+fn linux_semctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const IPC_RMID: u32 = 0;
+    const IPC_SET: u32 = 1;
+    const IPC_STAT: u32 = 2;
+    const IPC_INFO: u32 = 3;
+    const GETPID: u32 = 11;
+    const GETVAL: u32 = 12;
+    const GETALL: u32 = 13;
+    const GETNCNT: u32 = 14;
+    const GETZCNT: u32 = 15;
+    const SETVAL: u32 = 16;
+    const SETALL: u32 = 17;
+    const SEM_STAT: u32 = 18;
+    const SEM_INFO: u32 = 19;
+    const SEM_STAT_ANY: u32 = 20;
+    let command = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if command == IPC_INFO || command == SEM_INFO {
+        return write_sysv_seminfo(args[3]).map(|()| 0);
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let supplementary_groups =
+        proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
+    let update = if command == IPC_SET {
+        let mut update = [0u8; SYSV_SEM_DS_BYTES];
+        copy_from_user(&mut update, args[3], SYSV_SEM_DS_BYTES)
+            .map_err(|_| CompatErrno::Fault)?;
+        Some(update)
+    } else {
+        None
+    };
+    let id = args[0] as i32;
+    let mut state = COMPAT.lock();
+    let selected_index = match command {
+        SEM_STAT | SEM_STAT_ANY => {
+            let index = usize::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+            state
+                .sysv_semaphore_sets
+                .iter()
+                .enumerate()
+                .filter(|(_, set)| set.application == application)
+                .nth(index)
+                .map(|(index, _)| index)
+                .ok_or(CompatErrno::Invalid)?
+        }
+        _ => sysv_semaphore_set_index(&state, application, id).ok_or(CompatErrno::Invalid)?,
+    };
+    let set = &mut state.sysv_semaphore_sets[selected_index];
+    let semnum = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid);
+    let require_sem = |set: &SysVSemaphoreSet| {
+        let semnum = semnum?;
+        if semnum >= set.nsems {
+            return Err(CompatErrno::Invalid);
+        }
+        Ok(semnum)
+    };
+    if matches!(command, GETPID | GETVAL | GETALL | GETNCNT | GETZCNT)
+        && !sysv_semaphore_access(
+            set,
+            credentials,
+            &supplementary_groups,
+            false,
+        )
+    {
+        return Err(CompatErrno::Access);
+    }
+    match command {
+        IPC_RMID => {
+            if credentials.euid != 0 && credentials.euid != set.uid {
+                return Err(CompatErrno::Perm);
+            }
+            let removed_id = set.id;
+            state.sysv_semaphore_sets.remove(selected_index);
+            state
+                .sysv_semaphore_waiters
+                .iter_mut()
+                .filter(|waiter| waiter.is_some_and(|waiter| waiter.semid == removed_id))
+                .for_each(|waiter| *waiter = None);
+            state
+                .sysv_semaphore_undos
+                .retain(|undo| undo.semid != removed_id);
+            drop(state);
+            wake_message_queue_waiters();
+            Ok(0)
+        }
+        IPC_SET => {
+            if credentials.euid != 0 && credentials.euid != set.uid {
+                return Err(CompatErrno::Perm);
+            }
+            let update = update.expect("IPC_SET input");
+            let mode = u32::from_le_bytes(update[20..24].try_into().unwrap()) as u16;
+            if mode & !0o777 != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            set.uid = u32::from_le_bytes(update[4..8].try_into().unwrap());
+            set.gid = u32::from_le_bytes(update[8..12].try_into().unwrap());
+            set.mode = mode;
+            set.change_time = sysv_time_seconds();
+            Ok(0)
+        }
+        IPC_STAT | SEM_STAT | SEM_STAT_ANY => {
+            if command != SEM_STAT_ANY
+                && !sysv_semaphore_access(
+                    set,
+                    credentials,
+                    &supplementary_groups,
+                    false,
+                )
+            {
+                return Err(CompatErrno::Access);
+            }
+            let output = sysv_sem_ds_bytes(set);
+            let returned_id = set.id;
+            drop(state);
+            copy_to_user(args[3], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+            if command == SEM_STAT {
+                Ok(returned_id as u32 as u64)
+            } else {
+                Ok(0)
+            }
+        }
+        GETPID => {
+            require_sem(set)?;
+            Ok(set.last_pid as u32 as u64)
+        }
+        GETVAL => {
+            let semnum = require_sem(set)?;
+            Ok(set.values[semnum] as u64)
+        }
+        GETNCNT => {
+            let semnum = require_sem(set)?;
+            Ok(u64::from(set.positive_waiters[semnum]))
+        }
+        GETZCNT => {
+            let semnum = require_sem(set)?;
+            Ok(u64::from(set.zero_waiters[semnum]))
+        }
+        GETALL => {
+            let output: alloc::vec::Vec<u8> = set.values[..set.nsems]
+                .iter()
+                .flat_map(|value| (*value as u16).to_le_bytes())
+                .collect();
+            drop(state);
+            copy_to_user(args[3], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        }
+        SETVAL => {
+            if !sysv_semaphore_access(
+                set,
+                credentials,
+                &supplementary_groups,
+                true,
+            ) {
+                return Err(CompatErrno::Access);
+            }
+            let semnum = require_sem(set)?;
+            let value = u32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+            if value > SYSV_SEMVMX as u32 {
+                return Err(CompatErrno::Invalid);
+            }
+            set.values[semnum] = value as i32;
+            set.change_time = sysv_time_seconds();
+            state
+                .sysv_semaphore_undos
+                .retain(|undo| !(undo.semid == id && undo.semnum == semnum));
+            drop(state);
+            wake_message_queue_waiters();
+            Ok(0)
+        }
+        SETALL => {
+            if !sysv_semaphore_access(
+                set,
+                credentials,
+                &supplementary_groups,
+                true,
+            ) {
+                return Err(CompatErrno::Access);
+            }
+            let nsems = set.nsems;
+            drop(state);
+            let mut values = [0u8; MAX_SYSV_SEMS_PER_SET * 2];
+            copy_from_user(&mut values, args[3], nsems * 2).map_err(|_| CompatErrno::Fault)?;
+            let mut parsed = [0i32; MAX_SYSV_SEMS_PER_SET];
+            for (index, value) in parsed[..nsems].iter_mut().enumerate() {
+                let raw = u16::from_le_bytes(values[index * 2..index * 2 + 2].try_into().unwrap());
+                if i32::from(raw) > SYSV_SEMVMX {
+                    return Err(CompatErrno::Invalid);
+                }
+                *value = i32::from(raw);
+            }
+            let mut state = COMPAT.lock();
+            let set_index = sysv_semaphore_set_index(&state, application, id)
+                .ok_or(CompatErrno::Removed)?;
+            let set = &mut state.sysv_semaphore_sets[set_index];
+            set.values[..nsems].copy_from_slice(&parsed[..nsems]);
+            set.change_time = sysv_time_seconds();
+            state.sysv_semaphore_undos.retain(|undo| undo.semid != id);
+            drop(state);
+            wake_message_queue_waiters();
+            Ok(0)
+        }
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+const SYSV_SHM_DS_BYTES: usize = 120;
+
+fn sysv_shared_segment_index(
+    state: &CompatState,
+    application: kernel_core::security::ApplicationIdentity,
+    id: i32,
+) -> Option<usize> {
+    state.sysv_shared_segments.iter().position(|segment| {
+        !segment.deleted && segment.application == application && segment.id == id
+    })
+}
+
+fn sysv_shared_access(
+    segment: &SysVSharedMemory,
+    credentials: proc::LinuxCredentials,
+    groups: &[u32],
+    write: bool,
+) -> bool {
+    if credentials.euid == 0 {
+        return true;
+    }
+    let shift = if credentials.euid == segment.uid {
+        6
+    } else if credentials.egid == segment.gid || groups.contains(&segment.gid) {
+        3
+    } else {
+        0
+    };
+    let required = if write { 0o2 } else { 0o4 };
+    segment.mode >> shift & required == required
+}
+
+fn sysv_shm_ds_bytes(segment: &SysVSharedMemory) -> [u8; SYSV_SHM_DS_BYTES] {
+    let mut output = [0u8; SYSV_SHM_DS_BYTES];
+    output[0..4].copy_from_slice(&(segment.key as u32).to_le_bytes());
+    output[4..8].copy_from_slice(&segment.uid.to_le_bytes());
+    output[8..12].copy_from_slice(&segment.gid.to_le_bytes());
+    output[12..16].copy_from_slice(&segment.cuid.to_le_bytes());
+    output[16..20].copy_from_slice(&segment.cgid.to_le_bytes());
+    output[20..24].copy_from_slice(&u32::from(segment.mode).to_le_bytes());
+    output[24..26].copy_from_slice(&(segment.id as u16).to_le_bytes());
+    output[48..56].copy_from_slice(&segment.size.to_le_bytes());
+    output[56..64].copy_from_slice(&segment.attach_time.to_le_bytes());
+    output[64..72].copy_from_slice(&segment.detach_time.to_le_bytes());
+    output[72..80].copy_from_slice(&segment.change_time.to_le_bytes());
+    output[80..84].copy_from_slice(&segment.creator_pid.to_le_bytes());
+    output[84..88].copy_from_slice(&segment.last_pid.to_le_bytes());
+    output[88..96].copy_from_slice(&(segment.attachments.len() as u64).to_le_bytes());
+    output
+}
+
+fn write_sysv_shm_info(address: u64, state: &CompatState) -> Result<(), CompatErrno> {
+    let mut info = [0u8; 48];
+    let active = state
+        .sysv_shared_segments
+        .iter()
+        .filter(|segment| !segment.deleted)
+        .count();
+    let bytes: u64 = state
+        .sysv_shared_segments
+        .iter()
+        .filter(|segment| !segment.deleted)
+        .map(|segment| segment.size)
+        .sum();
+    info[0..4].copy_from_slice(&(active as i32).to_le_bytes());
+    info[8..16].copy_from_slice(&bytes.to_le_bytes());
+    info[16..24].copy_from_slice(&bytes.to_le_bytes());
+    copy_to_user(address, &info, info.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(())
+}
+
+/// Implements `shmget(2)` with application-scoped bounded segments.
+fn linux_shmget(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let key = args[0] as u32 as i32;
+    let size = args[1];
+    let flags = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if flags & !(0o777 | SYSV_IPC_CREAT | SYSV_IPC_EXCL) != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let mode =
+        (flags & 0o777) & !proc::linux_umask(pid).ok_or(CompatErrno::NoProcess)?;
+    if key != 0 {
+        let existing = {
+            let state = COMPAT.lock();
+            state
+                .sysv_shared_segments
+                .iter()
+                .find(|segment| {
+                    !segment.deleted
+                        && segment.application == application
+                        && segment.key == key
+                })
+                .map(|segment| (segment.id, segment.size))
+        };
+        if let Some((id, existing_size)) = existing {
+            if flags & (SYSV_IPC_CREAT | SYSV_IPC_EXCL)
+                == (SYSV_IPC_CREAT | SYSV_IPC_EXCL)
+            {
+                return Err(CompatErrno::Exists);
+            }
+            if size > existing_size && size != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            return Ok(id as u32 as u64);
+        }
+    }
+    if flags & SYSV_IPC_CREAT == 0 {
+        return Err(CompatErrno::NoEntry);
+    }
+    if size == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let object =
+        proc::linux_create_shared_memory(pid, size).ok_or(CompatErrno::NoMemory)?;
+    let mut state = COMPAT.lock();
+    if key != 0 {
+        if let Some(segment) = state.sysv_shared_segments.iter().find(|segment| {
+            !segment.deleted && segment.application == application && segment.key == key
+        }) {
+            if flags & (SYSV_IPC_CREAT | SYSV_IPC_EXCL)
+                == (SYSV_IPC_CREAT | SYSV_IPC_EXCL)
+            {
+                return Err(CompatErrno::Exists);
+            }
+            if size > segment.size && size != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            return Ok(segment.id as u32 as u64);
+        }
+    }
+    if state
+        .sysv_shared_segments
+        .iter()
+        .filter(|segment| !segment.deleted)
+        .count()
+        >= MAX_SYSV_SHARED_SEGMENTS
+    {
+        return Err(CompatErrno::NoSpace);
+    }
+    state
+        .sysv_shared_segments
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    let id = state.next_sysv_shared_id;
+    state.next_sysv_shared_id = id.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+    let current_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
+    let now = sysv_time_seconds();
+    state.sysv_shared_segments.push(SysVSharedMemory {
+        id,
+        key,
+        application,
+        uid: credentials.euid,
+        gid: credentials.egid,
+        cuid: credentials.euid,
+        cgid: credentials.egid,
+        mode: mode as u16,
+        size,
+        object,
+        creator_pid: current_pid,
+        last_pid: 0,
+        attach_time: 0,
+        detach_time: 0,
+        change_time: now,
+        deleted: false,
+        attachments: alloc::vec::Vec::new(),
+    });
+    Ok(id as u32 as u64)
+}
+
+/// Implements `shmat(2)` and records the process attachment lifecycle.
+fn linux_shmat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    const SHM_RDONLY: u64 = 0o10000;
+    const SHM_RND: u64 = 0o20000;
+    const SHM_REMAP: u64 = 0o40000;
+    const SHM_EXEC: u64 = 0o100000;
+    let id = args[0] as i32;
+    let flags = args[2];
+    if flags & !(SHM_RDONLY | SHM_RND | SHM_REMAP | SHM_EXEC) != 0
+        || flags & (SHM_REMAP | SHM_EXEC) != 0
+        || args[1] != 0 && flags & SHM_RND == 0 && args[1] % PAGE != 0
+    {
+        return Err(if flags & SHM_REMAP != 0 {
+            CompatErrno::Perm
+        } else {
+            CompatErrno::NotSupported
+        });
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let supplementary_groups =
+        proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
+    let segment = {
+        let state = COMPAT.lock();
+        let index =
+            sysv_shared_segment_index(&state, application, id).ok_or(CompatErrno::Invalid)?;
+        let segment = &state.sysv_shared_segments[index];
+        if !sysv_shared_access(
+            segment,
+            credentials,
+            &supplementary_groups,
+            flags & SHM_RDONLY == 0,
+        ) {
+            return Err(CompatErrno::Access);
+        }
+        (
+            segment.object.clone(),
+            segment.size,
+            segment.attachments.len(),
+        )
+    };
+    if segment.2 >= MAX_SYSV_SHARED_ATTACHMENTS {
+        return Err(CompatErrno::NoSpace);
+    }
+    let length = segment
+        .1
+        .checked_add(PAGE - 1)
+        .ok_or(CompatErrno::Invalid)?
+        & !(PAGE - 1);
+    let requested = args[1];
+    let mut candidate = if requested == 0 {
+        proc::linux_mmap_cursor(pid).ok_or(CompatErrno::NoSys)?
+    } else if flags & SHM_RND != 0 {
+        requested & !(PAGE - 1)
+    } else {
+        requested
+    };
+    if candidate < crate::arch::USER_WINDOW.0
+        || candidate
+            .checked_add(length)
+            .is_none_or(|end| end > crate::arch::USER_WINDOW.1)
+    {
+        return Err(CompatErrno::NoMemory);
+    }
+    let mut mapped = None;
+    while candidate
+        .checked_add(length)
+        .is_some_and(|end| end <= crate::arch::USER_WINDOW.1)
+    {
+        if proc::linux_shared_memory_map(
+            pid,
+            &segment.0,
+            candidate,
+            length,
+            flags & SHM_RDONLY == 0,
+        )
+        .is_ok()
+        {
+            mapped = Some(candidate);
+            break;
+        }
+        candidate = candidate
+            .checked_add(length)
+            .ok_or(CompatErrno::NoMemory)?;
+    }
+    let address = mapped.ok_or(CompatErrno::NoMemory)?;
+    let _ = proc::set_linux_mmap_cursor(
+        pid,
+        address
+            .checked_add(length)
+            .ok_or(CompatErrno::NoMemory)?,
+    );
+    let current_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
+    let mut state = COMPAT.lock();
+    let Some(index) = sysv_shared_segment_index(&state, application, id) else {
+        drop(state);
+        let _ = linux_munmap(pid, [address, length, 0, 0, 0, 0]);
+        return Err(CompatErrno::Removed);
+    };
+    let segment = &mut state.sysv_shared_segments[index];
+    if segment.attachments.len() >= MAX_SYSV_SHARED_ATTACHMENTS
+        || segment
+            .attachments
+            .try_reserve(1)
+            .map_err(|_| CompatErrno::NoSpace)
+            .is_err()
+    {
+        drop(state);
+        let _ = linux_munmap(pid, [address, length, 0, 0, 0, 0]);
+        return Err(CompatErrno::NoSpace);
+    }
+    segment.attachments.push(SysVSharedAttachment {
+        process: pid,
+        address,
+        length,
+        writable: flags & SHM_RDONLY == 0,
+    });
+    segment.attach_time = sysv_time_seconds();
+    segment.last_pid = current_pid;
+    Ok(address)
+}
+
+/// Implements `shmdt(2)` after validating this process's exact attachment.
+fn linux_shmdt(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    let address = args[0];
+    if address % PAGE != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let (id, length) = {
+        let state = COMPAT.lock();
+        state
+            .sysv_shared_segments
+            .iter()
+            .find(|segment| segment.application == application)
+            .and_then(|segment| {
+                segment
+                    .attachments
+                    .iter()
+                    .find(|attachment| attachment.process == pid && attachment.address == address)
+                    .map(|attachment| (segment.id, attachment.length))
+            })
+            .ok_or(CompatErrno::Invalid)?
+    };
+    linux_munmap(pid, [address, length, 0, 0, 0, 0])?;
+    let current_pid = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
+    let mut state = COMPAT.lock();
+    let index = state
+        .sysv_shared_segments
+        .iter()
+        .position(|segment| {
+            segment.id == id
+                && segment.application == application
+                && segment.attachments.iter().any(|attachment| {
+                    attachment.process == pid && attachment.address == address
+                })
+        })
+        .ok_or(CompatErrno::Removed)?;
+    let segment = &mut state.sysv_shared_segments[index];
+    segment
+        .attachments
+        .retain(|attachment| !(attachment.process == pid && attachment.address == address));
+    segment.detach_time = sysv_time_seconds();
+    segment.last_pid = current_pid;
+    let remove = segment.deleted && segment.attachments.is_empty();
+    if remove {
+        state.sysv_shared_segments.remove(index);
+    }
+    Ok(0)
+}
+
+/// Drops process attachment records after process address-space teardown.
+fn release_sysv_shared_process(process: ObjId) {
+    let mut state = COMPAT.lock();
+    let now = sysv_time_seconds();
+    let mut index = 0usize;
+    while index < state.sysv_shared_segments.len() {
+        let segment = &mut state.sysv_shared_segments[index];
+        let before = segment.attachments.len();
+        segment
+            .attachments
+            .retain(|attachment| attachment.process != process);
+        if segment.attachments.len() != before {
+            segment.detach_time = now;
+        }
+        if segment.deleted && segment.attachments.is_empty() {
+            state.sysv_shared_segments.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+/// Copies one forked process's pre-existing System V shared attachments.
+pub(crate) fn inherit_sysv_shared_process(parent: ObjId, child: ObjId) -> bool {
+    let inherited = {
+        let state = COMPAT.lock();
+        let mut inherited = alloc::vec::Vec::new();
+        for segment in &state.sysv_shared_segments {
+            for attachment in &segment.attachments {
+                if attachment.process == parent
+                    && inherited
+                        .try_reserve(1)
+                        .map_err(|_| ())
+                        .and_then(|_| {
+                            inherited.push((
+                                segment.id,
+                                segment.application,
+                                SysVSharedAttachment {
+                                    process: child,
+                                    ..*attachment
+                                },
+                            ));
+                            Ok(())
+                        })
+                        .is_err()
+                {
+                    return false;
+                }
+            }
+        }
+        inherited
+    };
+    let mut state = COMPAT.lock();
+    for (id, application, attachment) in &inherited {
+        let Some(segment) = state
+            .sysv_shared_segments
+            .iter_mut()
+            .find(|segment| segment.id == *id && segment.application == *application)
+        else {
+            return false;
+        };
+        if segment.attachments.try_reserve(1).is_err() {
+            return false;
+        }
+        segment.attachments.push(*attachment);
+    }
+    true
+}
+
+/// Implements `shmctl(2)` for metadata, locking and removal.
+fn linux_shmctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const IPC_RMID: u32 = 0;
+    const IPC_SET: u32 = 1;
+    const IPC_STAT: u32 = 2;
+    const IPC_INFO: u32 = 3;
+    const SHM_LOCK: u32 = 3;
+    const SHM_UNLOCK: u32 = 4;
+    const SHM_STAT: u32 = 11;
+    const SHM_INFO: u32 = 14;
+    const SHM_STAT_ANY: u32 = 15;
+    let command = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let supplementary_groups =
+        proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
+    if command == SHM_INFO || command == IPC_INFO && args[0] == 0 {
+        let state = COMPAT.lock();
+        return write_sysv_shm_info(args[2], &state).map(|()| 0);
+    }
+    if command == SHM_LOCK || command == SHM_UNLOCK {
+        return Err(CompatErrno::Perm);
+    }
+    let update = if command == IPC_SET {
+        let mut update = [0u8; SYSV_SHM_DS_BYTES];
+        copy_from_user(&mut update, args[2], SYSV_SHM_DS_BYTES)
+            .map_err(|_| CompatErrno::Fault)?;
+        Some(update)
+    } else {
+        None
+    };
+    let mut state = COMPAT.lock();
+    let selected = match command {
+        SHM_STAT | SHM_STAT_ANY => {
+            let index = usize::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+            state
+                .sysv_shared_segments
+                .iter()
+                .enumerate()
+                .filter(|(_, segment)| !segment.deleted && segment.application == application)
+                .nth(index)
+                .map(|(index, _)| index)
+                .ok_or(CompatErrno::Invalid)?
+        }
+        _ => sysv_shared_segment_index(&state, application, args[0] as i32)
+            .ok_or(CompatErrno::Invalid)?,
+    };
+    let segment = &mut state.sysv_shared_segments[selected];
+    match command {
+        IPC_RMID => {
+            if credentials.euid != 0 && credentials.euid != segment.uid {
+                return Err(CompatErrno::Perm);
+            }
+            segment.deleted = true;
+            segment.change_time = sysv_time_seconds();
+            let remove = segment.attachments.is_empty();
+            if remove {
+                state.sysv_shared_segments.remove(selected);
+            }
+            Ok(0)
+        }
+        IPC_SET => {
+            if credentials.euid != 0 && credentials.euid != segment.uid {
+                return Err(CompatErrno::Perm);
+            }
+            let update = update.expect("IPC_SET input");
+            let mode = u32::from_le_bytes(update[20..24].try_into().unwrap()) as u16;
+            if mode & !0o777 != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            segment.uid = u32::from_le_bytes(update[4..8].try_into().unwrap());
+            segment.gid = u32::from_le_bytes(update[8..12].try_into().unwrap());
+            segment.mode = mode;
+            segment.change_time = sysv_time_seconds();
+            Ok(0)
+        }
+        IPC_STAT | SHM_STAT | SHM_STAT_ANY => {
+            if command != SHM_STAT_ANY
+                && !sysv_shared_access(
+                    segment,
+                    credentials,
+                    &supplementary_groups,
+                    false,
+                )
+            {
+                return Err(CompatErrno::Access);
+            }
+            let output = sysv_shm_ds_bytes(segment);
+            let returned_id = segment.id;
+            drop(state);
+            copy_to_user(args[2], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+            if command == SHM_STAT {
+                Ok(returned_id as u32 as u64)
+            } else {
+                Ok(0)
+            }
+        }
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+const MNT_ID_REQ_MIN_BYTES: usize = 24;
+const STATMOUNT_FIXED_BYTES: usize = 512;
+
+fn read_mnt_id_req(address: u64) -> Result<(u64, u64, u64), CompatErrno> {
+    let mut size_bytes = [0u8; 4];
+    copy_from_user(&mut size_bytes, address, 4).map_err(|_| CompatErrno::Fault)?;
+    let size = u32::from_le_bytes(size_bytes) as usize;
+    if size < MNT_ID_REQ_MIN_BYTES {
+        return Err(CompatErrno::Invalid);
+    }
+    if size > 4096 {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    let mut request = [0u8; 32];
+    copy_from_user(&mut request, address, size.min(32)).map_err(|_| CompatErrno::Fault)?;
+    Ok((
+        u64::from_le_bytes(request[8..16].try_into().unwrap()),
+        u64::from_le_bytes(request[16..24].try_into().unwrap()),
+        if size >= MNT_ID_REQ_MIN_BYTES + 8 {
+            u64::from_le_bytes(request[24..32].try_into().unwrap())
+        } else {
+            0
+        },
+    ))
+}
+
+/// Implements bounded `listmount(2)` over the single synthetic root mount.
+fn linux_listmount(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const LISTMOUNT_REVERSE: u64 = 1;
+    const ROOT_MOUNT_ID: u64 = 1;
+    let flags = args[3];
+    if flags & !LISTMOUNT_REVERSE != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let (parent, start, namespace) = read_mnt_id_req(args[0])?;
+    if parent != u64::MAX && parent != ROOT_MOUNT_ID {
+        return Err(CompatErrno::NoEntry);
+    }
+    if namespace != 0 && namespace != ROOT_MOUNT_ID {
+        return Err(CompatErrno::NoEntry);
+    }
+    if parent == ROOT_MOUNT_ID {
+        return Ok(0);
+    }
+    let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if count == 0 || start > ROOT_MOUNT_ID {
+        return Ok(0);
+    }
+    copy_to_user(args[1], &ROOT_MOUNT_ID.to_le_bytes(), 8)
+        .map_err(|_| CompatErrno::Fault)?;
+    Ok(1)
+}
+
+fn linux_listns(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[3] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut size = [0u8; 4];
+    copy_from_user(&mut size, args[0], 4).map_err(|_| CompatErrno::Fault)?;
+    let size = u32::from_le_bytes(size) as usize;
+    if size < 32 {
+        return Err(CompatErrno::Invalid);
+    }
+    if size > 4096 {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    let mut request = [0u8; 32];
+    copy_from_user(&mut request, args[0], size.min(32))
+        .map_err(|_| CompatErrno::Fault)?;
+    let cursor = u64::from_le_bytes(request[8..16].try_into().unwrap());
+    let type_mask = u32::from_le_bytes(request[16..20].try_into().unwrap());
+    let user_ns = u64::from_le_bytes(request[24..32].try_into().unwrap());
+    if user_ns != 0 && user_ns != 3 && user_ns != u64::MAX {
+        return Err(CompatErrno::NoEntry);
+    }
+    const NAMESPACES: [(u64, u32); 8] = [
+        (1, 1 << 27),
+        (2, 1 << 26),
+        (3, 1 << 28),
+        (4, 1 << 29),
+        (5, 1 << 25),
+        (6, 1 << 7),
+        (7, 1 << 30),
+        (8, 1 << 17),
+    ];
+    let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let mut output = [0u8; 8 * 8];
+    let mut count = 0usize;
+    for (id, namespace_type) in NAMESPACES {
+        if id <= cursor || type_mask != 0 && type_mask & namespace_type == 0 || count >= capacity {
+            continue;
+        }
+        output[count * 8..count * 8 + 8].copy_from_slice(&id.to_le_bytes());
+        count += 1;
+    }
+    if count != 0 {
+        copy_to_user(args[1], &output[..count * 8], count * 8)
+            .map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(count as u64)
+}
+
+fn append_statmount_string(
+    fixed: &mut [u8; STATMOUNT_FIXED_BYTES],
+    strings: &mut alloc::vec::Vec<u8>,
+    field_offset: usize,
+    value: &[u8],
+) -> Result<(), CompatErrno> {
+    let offset = u32::try_from(strings.len()).map_err(|_| CompatErrno::Overflow)?;
+    fixed[field_offset..field_offset + 4].copy_from_slice(&offset.to_le_bytes());
+    strings.extend_from_slice(value);
+    strings.push(0);
+    Ok(())
+}
+
+/// Implements read-only `statmount(2)` for the namespace's synthetic root.
+fn linux_statmount(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const ROOT_MOUNT_ID: u64 = 1;
+    const STATMOUNT_SB_BASIC: u64 = 0x1;
+    const STATMOUNT_MNT_BASIC: u64 = 0x2;
+    const STATMOUNT_MNT_ROOT: u64 = 0x8;
+    const STATMOUNT_MNT_POINT: u64 = 0x10;
+    const STATMOUNT_FS_TYPE: u64 = 0x20;
+    const STATMOUNT_MNT_NS_ID: u64 = 0x40;
+    const STATMOUNT_MNT_OPTS: u64 = 0x80;
+    const SUPPORTED: u64 = STATMOUNT_SB_BASIC
+        | STATMOUNT_MNT_BASIC
+        | STATMOUNT_MNT_ROOT
+        | STATMOUNT_MNT_POINT
+        | STATMOUNT_FS_TYPE
+        | STATMOUNT_MNT_NS_ID
+        | STATMOUNT_MNT_OPTS;
+    if args[3] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let (mount_id, requested, namespace_id) = read_mnt_id_req(args[0])?;
+    if mount_id != ROOT_MOUNT_ID {
+        return Err(CompatErrno::NoEntry);
+    }
+    if namespace_id != 0 && namespace_id != ROOT_MOUNT_ID {
+        return Err(CompatErrno::NoEntry);
+    }
+    let mut fixed = [0u8; STATMOUNT_FIXED_BYTES];
+    let mut strings = alloc::vec::Vec::new();
+    append_statmount_string(&mut fixed, &mut strings, 4, b"ro")?;
+    append_statmount_string(&mut fixed, &mut strings, 36, b"jasperfs")?;
+    append_statmount_string(&mut fixed, &mut strings, 104, b"/")?;
+    append_statmount_string(&mut fixed, &mut strings, 108, b"/")?;
+    let total = STATMOUNT_FIXED_BYTES
+        .checked_add(strings.len())
+        .ok_or(CompatErrno::Overflow)?;
+    let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if capacity < total {
+        return Err(CompatErrno::Overflow);
+    }
+    fixed[0..4].copy_from_slice(&(total as u32).to_le_bytes());
+    fixed[8..16].copy_from_slice(&(requested & SUPPORTED).to_le_bytes());
+    fixed[16..20].copy_from_slice(&0u32.to_le_bytes());
+    fixed[20..24].copy_from_slice(&1u32.to_le_bytes());
+    fixed[24..32].copy_from_slice(&0x4a41_5350u64.to_le_bytes());
+    fixed[32..36].copy_from_slice(&1u32.to_le_bytes());
+    fixed[40..48].copy_from_slice(&ROOT_MOUNT_ID.to_le_bytes());
+    fixed[48..56].copy_from_slice(&ROOT_MOUNT_ID.to_le_bytes());
+    fixed[56..60].copy_from_slice(&(ROOT_MOUNT_ID as u32).to_le_bytes());
+    fixed[60..64].copy_from_slice(&(ROOT_MOUNT_ID as u32).to_le_bytes());
+    fixed[72..80].copy_from_slice(&(1u64 << 18).to_le_bytes());
+    fixed[112..120].copy_from_slice(&ROOT_MOUNT_ID.to_le_bytes());
+    fixed[144..152].copy_from_slice(&SUPPORTED.to_le_bytes());
+    let mut output = alloc::vec::Vec::new();
+    output
+        .try_reserve_exact(total)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    output.extend_from_slice(&fixed);
+    output.extend_from_slice(&strings);
+    copy_to_user(args[1], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Implements `cachestat(2)` for the synthetic resident file namespace.
+fn linux_cachestat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    if args[3] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let mut range = [0u8; 16];
+    copy_from_user(&mut range, args[1], 16).map_err(|_| CompatErrno::Fault)?;
+    let offset = u64::from_le_bytes(range[..8].try_into().unwrap());
+    let length = u64::from_le_bytes(range[8..].try_into().unwrap());
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let file_size = if entry.kind == compat_core::fd::CompatKind::File {
+        let (handle, _) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
+        crate::linux_vfs::FileId::from_handle(handle)
+            .ok_or(CompatErrno::BadFd)?
+            .bytes()
+            .len() as u64
+    } else if entry.kind == compat_core::fd::CompatKind::Device {
+        proc::linux_ashmem_state(pid, entry.handle)
+            .map(|(size, _, _)| size)
+            .ok_or(CompatErrno::BadFd)?
+    } else {
+        return Err(CompatErrno::BadFd);
+    };
+    let end = if length == 0 {
+        file_size
+    } else {
+        offset
+            .checked_add(length)
+            .ok_or(CompatErrno::Invalid)?
+            .min(file_size)
+    };
+    let cached_pages = if offset < file_size && end > offset {
+        end.saturating_sub(offset).div_ceil(PAGE)
+    } else {
+        0
+    };
+    let mut output = [0u8; 40];
+    output[..8].copy_from_slice(&cached_pages.to_le_bytes());
+    copy_to_user(args[2], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Implements the active-LSM list for Jasper's capability hook.
+fn linux_lsm_list_modules(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const LSM_ID_CAPABILITY: u64 = 100;
+    if args[2] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut size = [0u8; 4];
+    copy_from_user(&mut size, args[1], 4).map_err(|_| CompatErrno::Fault)?;
+    let available = u32::from_le_bytes(size);
+    let required = 8u32;
+    copy_to_user(args[1], &required.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+    if available < required {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    copy_to_user(args[0], &LSM_ID_CAPABILITY.to_le_bytes(), 8)
+        .map_err(|_| CompatErrno::Fault)?;
+    Ok(1)
+}
+
+/// Returns the process's current Jasper MAC label through the LSM context ABI.
+fn linux_lsm_get_self_attr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const LSM_ATTR_CURRENT: u32 = 100;
+    const LSM_FLAG_SINGLE: u32 = 1;
+    const JASPER_LSM_ID: u64 = 0x4a53_0001;
+    let attribute = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let flags = u32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    if attribute != LSM_ATTR_CURRENT || flags & !LSM_FLAG_SINGLE != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    let label = crate::kobj::with(|table| crate::security::process_mac_label_in(table, pid))
+        .ok_or(CompatErrno::Perm)?;
+    let context = alloc::format!(
+        "jasper:v{}:domain={}:secrecy={}:integrity={}:classes={:#x}\0",
+        label.version,
+        label.domain.0,
+        label.secrecy,
+        label.integrity,
+        label.object_classes
+    );
+    let total = 32usize
+        .checked_add(context.len())
+        .and_then(|size| size.checked_add(7))
+        .map(|size| size & !7)
+        .ok_or(CompatErrno::Overflow)?;
+    let mut available = [0u8; 4];
+    copy_from_user(&mut available, args[2], 4).map_err(|_| CompatErrno::Fault)?;
+    let available = usize::try_from(u32::from_le_bytes(available))
+        .map_err(|_| CompatErrno::Invalid)?;
+    copy_to_user(
+        args[2],
+        &(total as u32).to_le_bytes(),
+        4,
+    )
+    .map_err(|_| CompatErrno::Fault)?;
+    if available < total {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    let mut record = alloc::vec![0u8; total];
+    record[..8].copy_from_slice(&JASPER_LSM_ID.to_le_bytes());
+    record[16..24].copy_from_slice(&(total as u64).to_le_bytes());
+    record[24..32].copy_from_slice(&(context.len() as u64).to_le_bytes());
+    record[32..32 + context.len()].copy_from_slice(context.as_bytes());
+    if flags & LSM_FLAG_SINGLE != 0 {
+        let mut requested = [0u8; 8];
+        copy_from_user(&mut requested, args[1], 8).map_err(|_| CompatErrno::Fault)?;
+        if u64::from_le_bytes(requested) != JASPER_LSM_ID {
+            return Err(CompatErrno::NoSys);
+        }
+    }
+    copy_to_user(args[1], &record, record.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(1)
+}
+
+fn linux_file_attr_validate(
+    pid: ObjId,
+    args: &[u64; 6],
+) -> Result<(), CompatErrno> {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    if args[4] & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let size = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    if size < 24 {
+        return Err(CompatErrno::Invalid);
+    }
+    if size > 4096 {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    let path = if args[1] == 0 {
+        None
+    } else {
+        Some(linux_c_string(args[1], 4096)?)
+    };
+    if path.is_none() || path.as_ref().is_some_and(|path| path.is_empty()) {
+        if args[4] & AT_EMPTY_PATH == 0 || path.is_none() {
+            if args[4] & AT_EMPTY_PATH == 0 {
+                return Err(CompatErrno::NoEntry);
+            }
+        }
+        let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+        proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+        return Ok(());
+    }
+    let path = path.expect("nonempty path");
+    let resolved = if path.starts_with(b"/") {
+        if !is_at_fdcwd(args[0]) {
+            return Err(CompatErrno::Invalid);
+        }
+        path
+    } else {
+        if path == b".." || path.starts_with(b"../") || path.windows(4).any(|window| window == b"/../")
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        let base = if is_at_fdcwd(args[0]) {
+            proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path()
+        } else {
+            let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+            if let Some(crate::linux_vfs::Node::Directory(directory)) =
+                proc::linux_path_node(pid, fd)
+            {
+                directory.path()
+            } else {
+                let (handle, _) =
+                    proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
+                crate::linux_vfs::DirectoryId::from_handle(handle)
+                    .ok_or(CompatErrno::BadFd)?
+                    .path()
+            }
+        };
+        if path == b"." {
+            base.to_vec()
+        } else {
+            let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
+            resolved.extend_from_slice(base);
+            if !base.ends_with(b"/") {
+                resolved.push(b'/');
+            }
+            resolved.extend_from_slice(&path);
+            resolved
+        }
+    };
+    crate::linux_vfs::lookup_node(&resolved)
+        .map(|_| ())
+        .ok_or(CompatErrno::NoEntry)
+}
+
+/// Implements `file_getattr(2)` for files without extended attributes.
+fn linux_file_getattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    linux_file_attr_validate(pid, &args)?;
+    let size = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    let output = alloc::vec![0u8; size];
+    copy_to_user(args[2], &output, size).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Implements `file_setattr(2)`, failing before a write on the read-only root.
+fn linux_file_setattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let size = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    if size < 24 {
+        return Err(CompatErrno::Invalid);
+    }
+    if size > 4096 {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    let mut input = alloc::vec![0u8; size];
+    copy_from_user(&mut input, args[2], size).map_err(|_| CompatErrno::Fault)?;
+    if input.get(24..).is_some_and(|padding| padding.iter().any(|byte| *byte != 0)) {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    let xflags = u64::from_le_bytes(input[..8].try_into().unwrap());
+    if xflags != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    linux_file_attr_validate(pid, &args)?;
+    Err(CompatErrno::ReadOnly)
+}
+
+fn linux_node_for_path_or_fd(
+    pid: ObjId,
+    raw_dfd: u64,
+    path_pointer: u64,
+    empty_allowed: bool,
+) -> Result<crate::linux_vfs::Node, CompatErrno> {
+    let path = if path_pointer == 0 {
+        None
+    } else {
+        Some(linux_c_string(path_pointer, 4096)?)
+    };
+    if path.is_none() || path.as_ref().is_some_and(|path| path.is_empty()) {
+        if !empty_allowed {
+            return Err(CompatErrno::NoEntry);
+        }
+        let fd = u32::try_from(raw_dfd).map_err(|_| CompatErrno::BadFd)?;
+        let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+        if entry.kind == compat_core::fd::CompatKind::File {
+            return crate::linux_vfs::FileId::from_handle(entry.handle)
+                .map(crate::linux_vfs::Node::File)
+                .ok_or(CompatErrno::BadFd);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Directory {
+            return crate::linux_vfs::DirectoryId::from_handle(entry.handle)
+                .map(crate::linux_vfs::Node::Directory)
+                .ok_or(CompatErrno::BadFd);
+        }
+        return Err(CompatErrno::BadFd);
+    }
+    let path = path.expect("nonempty path");
+    let resolved = if path.starts_with(b"/") {
+        if !is_at_fdcwd(raw_dfd) {
+            return Err(CompatErrno::Invalid);
+        }
+        path
+    } else {
+        if path == b".." || path.starts_with(b"../") || path.windows(4).any(|window| window == b"/../")
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        let base = if is_at_fdcwd(raw_dfd) {
+            proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path()
+        } else {
+            let fd = u32::try_from(raw_dfd).map_err(|_| CompatErrno::BadFd)?;
+            let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
+            crate::linux_vfs::DirectoryId::from_handle(handle)
+                .ok_or(CompatErrno::BadFd)?
+                .path()
+        };
+        if path == b"." {
+            base.to_vec()
+        } else {
+            let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
+            resolved.extend_from_slice(base);
+            if !base.ends_with(b"/") {
+                resolved.push(b'/');
+            }
+            resolved.extend_from_slice(&path);
+            resolved
+        }
+    };
+    crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)
+}
+
+/// Implements `name_to_handle_at(2)` with stable virtual inode handles.
+fn linux_name_to_handle_at(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const AT_HANDLE_FID: u64 = 0x200;
+    const AT_SYMLINK_FOLLOW: u64 = 0x400;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    if args[4] & !(AT_HANDLE_FID | AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let node = linux_node_for_path_or_fd(
+        pid,
+        args[0],
+        args[1],
+        args[4] & AT_EMPTY_PATH != 0,
+    )?;
+    let mut capacity = [0u8; 4];
+    copy_from_user(&mut capacity, args[2], 4).map_err(|_| CompatErrno::Fault)?;
+    let required = 8u32;
+    copy_to_user(args[2], &required.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+    if u32::from_le_bytes(capacity) < required {
+        return Err(CompatErrno::Overflow);
+    }
+    let mut handle = [0u8; 16];
+    handle[..4].copy_from_slice(&required.to_le_bytes());
+    handle[4..8].copy_from_slice(&0x4a41_5348i32.to_le_bytes());
+    handle[8..16].copy_from_slice(&node.inode().to_le_bytes());
+    copy_to_user(args[2], &handle, handle.len()).map_err(|_| CompatErrno::Fault)?;
+    if args[3] != 0 {
+        copy_to_user(args[3], &1i32.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(0)
+}
+
+/// Implements `open_by_handle_at(2)` over stable read-only virtual identities.
+fn linux_open_by_handle_at(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const O_ACCMODE: u64 = 0x3;
+    const O_CLOEXEC: u64 = 0x80000;
+    const O_DIRECTORY: u64 = 0x10000;
+    let flags = args[2];
+    if flags & !(O_ACCMODE | O_CLOEXEC | O_DIRECTORY) != 0 || flags & O_ACCMODE != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if !is_at_fdcwd(args[0]) {
+        let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+        proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    }
+    let mut raw = [0u8; 16];
+    copy_from_user(&mut raw, args[1], 16).map_err(|_| CompatErrno::Fault)?;
+    if u32::from_le_bytes(raw[..4].try_into().unwrap()) != 8
+        || i32::from_le_bytes(raw[4..8].try_into().unwrap()) != 0x4a41_5348
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let inode = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+    let node = crate::linux_vfs::node_from_inode(inode).ok_or(CompatErrno::NoEntry)?;
+    let close_on_exec = flags & O_CLOEXEC != 0;
+    match node {
+        crate::linux_vfs::Node::File(file) if flags & O_DIRECTORY == 0 => {
+            if !landlock_path_allows(
+                pid,
+                node,
+                file.path(),
+                LANDLOCK_ACCESS_FS_READ_FILE,
+            ) {
+                return Err(CompatErrno::Access);
+            }
+            proc::linux_install_file(pid, file.handle(), close_on_exec)
+                .map(u64::from)
+                .ok_or(CompatErrno::NoSpace)
+        }
+        crate::linux_vfs::Node::Directory(directory) => {
+            if !landlock_path_allows(
+                pid,
+                node,
+                directory.path(),
+                LANDLOCK_ACCESS_FS_READ_DIR,
+            ) {
+                return Err(CompatErrno::Access);
+            }
+            proc::linux_install_dir(pid, directory.handle(), close_on_exec)
+                .map(u64::from)
+                .ok_or(CompatErrno::NoSpace)
+        }
+        crate::linux_vfs::Node::File(_) => Err(CompatErrno::NotDirectory),
+        crate::linux_vfs::Node::Executable(_) => Err(CompatErrno::Access),
+    }
+}
+
+/// Opens a controlled descriptor for the read-only synthetic mount tree.
+fn linux_open_tree(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const OPEN_TREE_CLONE: u64 = 0x1;
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_NO_AUTOMOUNT: u64 = 0x800;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    const OPEN_TREE_CLOEXEC: u64 = 0x80000;
+    const AT_RECURSIVE: u64 = 0x8000;
+    let flags = args[2];
+    if flags
+        & !(OPEN_TREE_CLONE
+            | AT_SYMLINK_NOFOLLOW
+            | AT_NO_AUTOMOUNT
+            | AT_EMPTY_PATH
+            | OPEN_TREE_CLOEXEC
+            | AT_RECURSIVE)
+        != 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let _ = linux_node_for_path_or_fd(
+        pid,
+        args[0],
+        args[1],
+        flags & AT_EMPTY_PATH != 0,
+    )?;
+    proc::linux_install_mount_tree(pid, flags & OPEN_TREE_CLOEXEC != 0)
+        .map(u64::from)
+        .ok_or(CompatErrno::NoSpace)
+}
+
+fn linux_open_tree_attr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const KNOWN_ATTRIBUTES: u64 = 0x0020_03bf;
+    if args[3] == 0 {
+        if args[4] != 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        return linux_open_tree(pid, args);
+    }
+    if args[4] < 32 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut attributes = [0u8; 32];
+    copy_from_user(&mut attributes, args[3], 32).map_err(|_| CompatErrno::Fault)?;
+    let set = u64::from_le_bytes(attributes[..8].try_into().unwrap());
+    let clear = u64::from_le_bytes(attributes[8..16].try_into().unwrap());
+    if set & !KNOWN_ATTRIBUTES != 0 || clear & !KNOWN_ATTRIBUTES != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if set != 0 || clear != 0 {
+        return Err(CompatErrno::ReadOnly);
+    }
+    linux_open_tree(pid, args)
+}
+
+fn linux_validate_mount_tree_target(pid: ObjId, raw_fd: u64) -> Result<(), CompatErrno> {
+    let fd = u32::try_from(raw_fd).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::MountTree {
+        return Err(CompatErrno::BadFd);
+    }
+    Ok(())
+}
+
+fn linux_move_mount(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const F_SYMLINKS: u64 = 0x1;
+    const F_AUTOMOUNTS: u64 = 0x2;
+    const F_EMPTY_PATH: u64 = 0x4;
+    const T_SYMLINKS: u64 = 0x10;
+    const T_AUTOMOUNTS: u64 = 0x20;
+    const T_EMPTY_PATH: u64 = 0x40;
+    const SET_GROUP: u64 = 0x100;
+    const BENEATH: u64 = 0x200;
+    let flags = args[4];
+    if flags
+        & !(F_SYMLINKS
+            | F_AUTOMOUNTS
+            | F_EMPTY_PATH
+            | T_SYMLINKS
+            | T_AUTOMOUNTS
+            | T_EMPTY_PATH
+            | SET_GROUP
+            | BENEATH)
+        != 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    if flags & F_EMPTY_PATH != 0 {
+        linux_validate_mount_tree_target(pid, args[0])?;
+    } else {
+        linux_node_for_path_or_fd(pid, args[0], args[1], false)?;
+    }
+    linux_node_for_path_or_fd(
+        pid,
+        args[2],
+        args[3],
+        flags & T_EMPTY_PATH != 0,
+    )?;
+    Err(CompatErrno::ReadOnly)
+}
+
+fn linux_mount_setattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    const AT_RECURSIVE: u64 = 0x8000;
+    const KNOWN_ATTRIBUTES: u64 = 0x0020_03bf;
+    if args[2] & !(AT_EMPTY_PATH | AT_RECURSIVE) != 0
+        || args[4] < 32
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut attributes = [0u8; 32];
+    copy_from_user(&mut attributes, args[3], 32).map_err(|_| CompatErrno::Fault)?;
+    let set = u64::from_le_bytes(attributes[..8].try_into().unwrap());
+    let clear = u64::from_le_bytes(attributes[8..16].try_into().unwrap());
+    if set & !KNOWN_ATTRIBUTES != 0 || clear & !KNOWN_ATTRIBUTES != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    linux_node_for_path_or_fd(
+        pid,
+        args[0],
+        args[1],
+        args[2] & AT_EMPTY_PATH != 0,
+    )?;
+    Err(CompatErrno::ReadOnly)
+}
+
+fn linux_fsopen(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const FSOPEN_CLOEXEC: u64 = 1;
+    if args[1] & !FSOPEN_CLOEXEC != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let name = linux_c_string(args[0], 16)?;
+    if name != b"jasperfs" {
+        return Err(CompatErrno::NotSupported);
+    }
+    let mut fs_name = [0u8; 16];
+    fs_name[..name.len()].copy_from_slice(&name);
+    proc::linux_install_fs_context(
+        pid,
+        fs_name,
+        name.len() as u8,
+        args[1] & FSOPEN_CLOEXEC != 0,
+    )
+    .map(u64::from)
+    .ok_or(CompatErrno::NoSpace)
+}
+
+fn linux_fsconfig(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const FSCONFIG_CMD_CREATE: u64 = 6;
+    const FSCONFIG_CMD_CREATE_EXCL: u64 = 8;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::FsContext {
+        return Err(CompatErrno::BadFd);
+    }
+    match args[1] {
+        FSCONFIG_CMD_CREATE | FSCONFIG_CMD_CREATE_EXCL => {
+            if args[2] != 0 || args[3] != 0 || args[4] != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            if proc::linux_fs_context_create(pid, fd) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::BadFd)
+            }
+        }
+        0..=5 | 7 => Err(CompatErrno::NotSupported),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+fn linux_fsmount(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const FSMOUNT_CLOEXEC: u64 = 1;
+    if args[1] & !FSMOUNT_CLOEXEC != 0 || args[2] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    if !proc::linux_fs_context_ready(pid, fd) {
+        return Err(CompatErrno::BadFd);
+    }
+    proc::linux_install_mount_tree(pid, args[1] & FSMOUNT_CLOEXEC != 0)
+        .map(u64::from)
+        .ok_or(CompatErrno::NoSpace)
+}
+
+fn linux_fspick(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const CLOEXEC: u64 = 1;
+    const SYMLINK_NOFOLLOW: u64 = 2;
+    const NO_AUTOMOUNT: u64 = 4;
+    const EMPTY_PATH: u64 = 8;
+    if args[2] & !(CLOEXEC | SYMLINK_NOFOLLOW | NO_AUTOMOUNT | EMPTY_PATH) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    linux_node_for_path_or_fd(
+        pid,
+        args[0],
+        args[1],
+        args[2] & EMPTY_PATH != 0,
+    )?;
+    proc::linux_install_mount_tree(pid, args[2] & CLOEXEC != 0)
+        .map(u64::from)
+        .ok_or(CompatErrno::NoSpace)
+}
+
+fn linux_get_mempolicy(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MPOL_F_MEMS_ALLOWED: u64 = 1 << 2;
+    let mode = args[0];
+    let nodemask = args[1];
+    let maxnode = args[2];
+    let address = args[3];
+    let flags = args[4];
+    if flags & !MPOL_F_MEMS_ALLOWED != 0 || flags != 0 && address != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if flags == 0 && address != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if nodemask != 0 {
+        if maxnode == 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        let available = if flags & MPOL_F_MEMS_ALLOWED != 0 {
+            1u64
+        } else {
+            0u64
+        };
+        copy_to_user(nodemask, &available.to_le_bytes(), 8)
+            .map_err(|_| CompatErrno::Fault)?;
+    }
+    if mode != 0 && flags & MPOL_F_MEMS_ALLOWED == 0 {
+        copy_to_user(mode, &0i32.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(0)
+}
+
+fn linux_set_mempolicy(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let mode = i32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    if mode != 0 || args[1] != 0 && args[2] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    Ok(0)
+}
+
+fn linux_mempolicy_range(pid: ObjId, start: u64, length: u64) -> Result<(), CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    if start % PAGE != 0 || length == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let rounded = length
+        .checked_add(PAGE - 1)
+        .ok_or(CompatErrno::Invalid)?
+        & !(PAGE - 1);
+    let end = start
+        .checked_add(rounded)
+        .filter(|end| start >= crate::arch::USER_WINDOW.0 && *end <= crate::arch::USER_WINDOW.1)
+        .ok_or(CompatErrno::NoMemory)?;
+    let mut page = start;
+    while page < end {
+        if proc::page_flags(pid, page).is_none() {
+            return Err(CompatErrno::NoMemory);
+        }
+        page += PAGE;
+    }
+    Ok(())
+}
+
+fn linux_mbind(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SUPPORTED_FLAGS: u64 = 0xf;
+    let mode = i32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if mode != 0 || args[3] != 0 || args[5] & !SUPPORTED_FLAGS != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    linux_mempolicy_range(pid, args[0], args[1])?;
+    Ok(0)
+}
+
+fn linux_set_mempolicy_home_node(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[3] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let home_node = i32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if home_node != 0 {
+        return Err(CompatErrno::NoEntry);
+    }
+    linux_mempolicy_range(pid, args[0], args[1])?;
+    Ok(0)
+}
+
+fn linux_mempolicy_target(pid: ObjId, raw_pid: u64) -> Result<ObjId, CompatErrno> {
+    let target_pid = u32::try_from(raw_pid).map_err(|_| CompatErrno::Invalid)?;
+    let target = if target_pid == 0 {
+        pid
+    } else {
+        proc::linux_process_for_pid(target_pid).ok_or(CompatErrno::NoProcess)?
+    };
+    let caller = crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let target_app = crate::security::process_application(target).ok_or(CompatErrno::NoProcess)?;
+    if caller != target_app {
+        return Err(CompatErrno::Perm);
+    }
+    Ok(target)
+}
+
+fn linux_migrate_pages(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let maxnode = args[1];
+    if maxnode == 0 || maxnode > 64 || args[2] == 0 || args[3] == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let _ = linux_mempolicy_target(pid, args[0])?;
+    let mut old_nodes = [0u8; 8];
+    let mut new_nodes = [0u8; 8];
+    copy_from_user(&mut old_nodes, args[2], 8).map_err(|_| CompatErrno::Fault)?;
+    copy_from_user(&mut new_nodes, args[3], 8).map_err(|_| CompatErrno::Fault)?;
+    if u64::from_le_bytes(old_nodes) & 1 == 0 || u64::from_le_bytes(new_nodes) & 1 == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    Ok(0)
+}
+
+fn linux_move_pages(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MAX_PAGES: usize = 1024;
+    const MPOL_MF_MOVE: u64 = 2;
+    const MPOL_MF_MOVE_ALL: u64 = 4;
+    let count = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if count == 0 || count > MAX_PAGES || args[5] & !(MPOL_MF_MOVE | MPOL_MF_MOVE_ALL) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let target = linux_mempolicy_target(pid, args[0])?;
+    let mut pages_raw = alloc::vec![0u8; count * 8];
+    let mut statuses = alloc::vec![0i32; count];
+    copy_from_user(&mut pages_raw, args[2], count * 8).map_err(|_| CompatErrno::Fault)?;
+    let mut nodes = alloc::vec![0i32; count];
+    if args[3] != 0 {
+        let mut raw = alloc::vec![0u8; count * 4];
+        copy_from_user(&mut raw, args[3], count * 4).map_err(|_| CompatErrno::Fault)?;
+        for (index, node) in nodes.iter_mut().enumerate() {
+            *node = i32::from_le_bytes(raw[index * 4..index * 4 + 4].try_into().unwrap());
+        }
+    }
+    let mut errors = 0u64;
+    for (index, page) in pages_raw.chunks_exact(8).enumerate() {
+        let address = u64::from_le_bytes(page.try_into().unwrap());
+        if proc::page_flags(target, address).is_none() {
+            statuses[index] = -(CompatErrno::NoEntry as i32);
+            errors += 1;
+        } else if args[3] != 0 {
+            if nodes[index] != 0 {
+                statuses[index] = -(CompatErrno::Invalid as i32);
+                errors += 1;
+            } else {
+                statuses[index] = 0;
+            }
+        } else {
+            statuses[index] = 0;
+        }
+    }
+    let mut status_raw = alloc::vec![0u8; count * 4];
+    for (index, status) in statuses.iter().enumerate() {
+        status_raw[index * 4..index * 4 + 4].copy_from_slice(&status.to_le_bytes());
+    }
+    copy_to_user(args[4], &status_raw, status_raw.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(errors)
+}
+
+fn linux_process_keyring(
+    state: &mut CompatState,
+    process: ObjId,
+    application: kernel_core::security::ApplicationIdentity,
+) -> Result<i32, CompatErrno> {
+    if let Some(binding) = state
+        .process_keyrings
+        .iter()
+        .find(|binding| binding.process == process)
+    {
+        return Ok(binding.serial);
+    }
+    if state.keys.len() >= MAX_LINUX_KEYS || state.process_keyrings.len() >= MAX_LINUX_KEYS {
+        return Err(CompatErrno::NoSpace);
+    }
+    state.keys.try_reserve(1).map_err(|_| CompatErrno::NoMemory)?;
+    state
+        .process_keyrings
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    let serial = state.next_key_serial;
+    state.next_key_serial = serial.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+    let mut key_type = [0u8; 16];
+    key_type[..8].copy_from_slice(b"keyring");
+    state.keys.push(LinuxKey {
+        serial,
+        application,
+        key_type,
+        type_len: 7,
+        description: [0; 64],
+        description_len: 0,
+        payload: alloc::vec::Vec::new(),
+        revoked: false,
+        linked: true,
+        uid: 0,
+        gid: 0,
+        permissions: 0x3f3f_3f3f,
+    });
+    state.process_keyrings.push(LinuxProcessKeyring {
+        process,
+        serial,
+    });
+    Ok(serial)
+}
+
+fn linux_add_key(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let key_type = linux_c_string(args[0], 16)?;
+    if key_type != b"user" && key_type != b"logon" && key_type != b"keyring" {
+        return Err(CompatErrno::NotSupported);
+    }
+    let description = linux_c_string(args[1], 64)?;
+    if description.is_empty() || description.len() > 64 {
+        return Err(CompatErrno::Invalid);
+    }
+    let payload_len = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    if payload_len > 1024 {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    let mut payload = alloc::vec![0u8; payload_len];
+    if payload_len != 0 {
+        copy_from_user(&mut payload, args[2], payload_len).map_err(|_| CompatErrno::Fault)?;
+    }
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let mut type_name = [0u8; 16];
+    type_name[..key_type.len()].copy_from_slice(&key_type);
+    let mut desc_name = [0u8; 64];
+    desc_name[..description.len()].copy_from_slice(&description);
+    let mut state = COMPAT.lock();
+    let keyring = args[4] as i32;
+    let process_ring = linux_process_keyring(&mut state, pid, application)?;
+    if keyring != -2 && keyring != process_ring {
+        if !state
+            .keys
+            .iter()
+            .any(|key| key.application == application && key.serial == keyring)
+        {
+            return Err(CompatErrno::NoEntry);
+        }
+    }
+    if let Some(key) = state.keys.iter_mut().find(|key| {
+        key.application == application
+            && key.key_type[..usize::from(key.type_len)] == key_type[..]
+            && key.description[..usize::from(key.description_len)] == description[..]
+    }) {
+        key.payload = payload;
+        key.revoked = false;
+        key.linked = true;
+        return Ok(key.serial as u32 as u64);
+    }
+    if state.keys.len() >= MAX_LINUX_KEYS {
+        return Err(CompatErrno::NoSpace);
+    }
+    state.keys.try_reserve(1).map_err(|_| CompatErrno::NoMemory)?;
+    let serial = state.next_key_serial;
+    state.next_key_serial = serial.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+    state.keys.push(LinuxKey {
+        serial,
+        application,
+        key_type: type_name,
+        type_len: key_type.len() as u8,
+        description: desc_name,
+        description_len: description.len() as u8,
+        payload,
+        revoked: false,
+        linked: true,
+        uid: 0,
+        gid: 0,
+        permissions: 0x3f3f_3f3f,
+    });
+    Ok(serial as u32 as u64)
+}
+
+fn linux_request_key(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let key_type = linux_c_string(args[0], 16)?;
+    let description = linux_c_string(args[1], 64)?;
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    COMPAT
+        .lock()
+        .keys
+        .iter()
+        .find(|key| {
+            !key.revoked
+                && key.linked
+                && key.application == application
+                && key.key_type[..usize::from(key.type_len)] == key_type[..]
+                && key.description[..usize::from(key.description_len)] == description[..]
+        })
+        .map(|key| key.serial as u32 as u64)
+        .ok_or(CompatErrno::NoKey)
+}
+
+fn linux_key_allows(
+    key: &LinuxKey,
+    credentials: proc::LinuxCredentials,
+    permission: u32,
+) -> bool {
+    if credentials.euid == 0 {
+        return true;
+    }
+    let shift = if credentials.euid == key.uid {
+        8
+    } else if credentials.egid == key.gid {
+        16
+    } else {
+        24
+    };
+    (key.permissions >> shift) & permission == permission
+}
+
+fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const GET_KEYRING_ID: u64 = 0;
+    const UPDATE: u64 = 2;
+    const REVOKE: u64 = 3;
+    const CHOWN: u64 = 4;
+    const SETPERM: u64 = 5;
+    const DESCRIBE: u64 = 6;
+    const CLEAR: u64 = 7;
+    const LINK: u64 = 8;
+    const UNLINK: u64 = 9;
+    const SEARCH: u64 = 10;
+    const READ: u64 = 11;
+    const GET_SECURITY: u64 = 17;
+    const INVALIDATE: u64 = 21;
+    const CAPABILITIES: u64 = 31;
+    let application =
+        crate::security::process_application(pid).ok_or(CompatErrno::Perm)?;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    match args[0] {
+        GET_KEYRING_ID => {
+            if args[1] as i32 != -2 && args[1] as i32 != -1 {
+                return Err(CompatErrno::NoEntry);
+            }
+            let mut state = COMPAT.lock();
+            linux_process_keyring(&mut state, pid, application)
+                .map(|serial| serial as u32 as u64)
+        }
+        UPDATE => {
+            let serial = args[1] as i32;
+            let length = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+            if length > 1024 {
+                return Err(CompatErrno::ArgumentTooLong);
+            }
+            let mut payload = alloc::vec![0u8; length];
+            if length != 0 {
+                copy_from_user(&mut payload, args[2], length).map_err(|_| CompatErrno::Fault)?;
+            }
+            let mut state = COMPAT.lock();
+            let key = state
+                .keys
+                .iter_mut()
+                .find(|key| key.application == application && key.serial == serial)
+                .ok_or(CompatErrno::NoEntry)?;
+            if key.revoked {
+                return Err(CompatErrno::Access);
+            }
+            if !linux_key_allows(key, credentials, 0x02) {
+                return Err(CompatErrno::Access);
+            }
+            key.payload = payload;
+            Ok(0)
+        }
+        REVOKE | INVALIDATE => {
+            let serial = args[1] as i32;
+            let mut state = COMPAT.lock();
+            let key = state
+                .keys
+                .iter_mut()
+                .find(|key| key.application == application && key.serial == serial)
+                .ok_or(CompatErrno::NoEntry)?;
+            if !linux_key_allows(key, credentials, 0x20) {
+                return Err(CompatErrno::Access);
+            }
+            key.revoked = true;
+            Ok(0)
+        }
+        CHOWN => {
+            let serial = args[1] as i32;
+            let mut state = COMPAT.lock();
+            let key = state
+                .keys
+                .iter_mut()
+                .find(|key| key.application == application && key.serial == serial)
+                .ok_or(CompatErrno::NoKey)?;
+            if !linux_key_allows(key, credentials, 0x20) {
+                return Err(CompatErrno::Access);
+            }
+            if args[2] as u32 != u32::MAX {
+                key.uid = args[2] as u32;
+            }
+            if args[3] as u32 != u32::MAX {
+                key.gid = args[3] as u32;
+            }
+            Ok(0)
+        }
+        SETPERM => {
+            const VALID_PERMISSIONS: u32 = 0x3f3f_3f3f;
+            let permissions = args[2] as u32;
+            if permissions & !VALID_PERMISSIONS != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            let serial = args[1] as i32;
+            let mut state = COMPAT.lock();
+            let key = state
+                .keys
+                .iter_mut()
+                .find(|key| key.application == application && key.serial == serial)
+                .ok_or(CompatErrno::NoKey)?;
+            if !linux_key_allows(key, credentials, 0x20) {
+                return Err(CompatErrno::Access);
+            }
+            key.permissions = permissions;
+            Ok(0)
+        }
+        DESCRIBE => {
+            let serial = args[1] as i32;
+            let mut state = COMPAT.lock();
+            let key = state
+                .keys
+                .iter()
+                .find(|key| key.application == application && key.serial == serial)
+                .ok_or(CompatErrno::NoEntry)?;
+            if !linux_key_allows(key, credentials, 0x01) {
+                return Err(CompatErrno::Access);
+            }
+            let length = usize::from(key.description_len) + 1;
+            if args[2] != 0 {
+                if args[3] < length as u64 {
+                    return Err(CompatErrno::Range);
+                }
+                copy_to_user(args[2], &key.description[..usize::from(key.description_len)], length - 1)
+                    .map_err(|_| CompatErrno::Fault)?;
+                copy_to_user(args[2] + length as u64 - 1, &[0u8], 1)
+                    .map_err(|_| CompatErrno::Fault)?;
+            }
+            Ok(length as u64)
+        }
+        READ => {
+            let serial = args[1] as i32;
+            let mut state = COMPAT.lock();
+            let key = state
+                .keys
+                .iter()
+                .find(|key| key.application == application && key.serial == serial)
+                .ok_or(CompatErrno::NoEntry)?;
+            if key.revoked {
+                return Err(CompatErrno::Access);
+            }
+            if !linux_key_allows(key, credentials, 0x02) {
+                return Err(CompatErrno::Access);
+            }
+            if args[2] == 0 {
+                return Ok(key.payload.len() as u64);
+            }
+            if args[3] < key.payload.len() as u64 {
+                return Err(CompatErrno::Range);
+            }
+            copy_to_user(args[2], &key.payload, key.payload.len()).map_err(|_| CompatErrno::Fault)?;
+            Ok(key.payload.len() as u64)
+        }
+        LINK | UNLINK => {
+            let key_serial = args[1] as i32;
+            let keyring = args[2] as i32;
+            let mut state = COMPAT.lock();
+            if !state.keys.iter().any(|key| {
+                key.application == application && key.serial == keyring
+                    && key.key_type[..usize::from(key.type_len)] == b"keyring"[..]
+            }) {
+                return Err(CompatErrno::NoKey);
+            }
+            let key = state
+                .keys
+                .iter_mut()
+                .find(|key| key.application == application && key.serial == key_serial)
+                .ok_or(CompatErrno::NoKey)?;
+            if !linux_key_allows(key, credentials, 0x10) {
+                return Err(CompatErrno::Access);
+            }
+            key.linked = args[0] == LINK;
+            Ok(0)
+        }
+        CLEAR => {
+            let keyring = args[1] as i32;
+            let mut state = COMPAT.lock();
+            if !state.keys.iter().any(|key| {
+                key.application == application && key.serial == keyring
+                    && key.key_type[..usize::from(key.type_len)] == b"keyring"[..]
+            }) {
+                return Err(CompatErrno::NoKey);
+            }
+            for key in state
+                .keys
+                .iter_mut()
+                .filter(|key| key.application == application)
+            {
+                key.linked = false;
+            }
+            Ok(0)
+        }
+        SEARCH => {
+            let key_type = linux_c_string(args[2], 16)?;
+            let description = linux_c_string(args[3], 64)?;
+            let mut state = COMPAT.lock();
+            if !state
+                .keys
+                .iter()
+                .any(|key| key.application == application && key.serial == args[1] as i32)
+            {
+                return Err(CompatErrno::NoKey);
+            }
+            state
+                .keys
+                .iter()
+                .find(|key| {
+                    !key.revoked
+                        && key.linked
+                        && key.application == application
+                        && key.key_type[..usize::from(key.type_len)] == key_type[..]
+                        && key.description[..usize::from(key.description_len)] == description[..]
+                })
+                .map(|key| key.serial as u32 as u64)
+                .ok_or(CompatErrno::NoKey)
+        }
+        GET_SECURITY => {
+            let serial = args[1] as i32;
+            let state = COMPAT.lock();
+            let key = state
+                .keys
+                .iter()
+                .find(|key| key.application == application && key.serial == serial)
+                .ok_or(CompatErrno::NoKey)?;
+            if !linux_key_allows(key, credentials, 0x01) {
+                return Err(CompatErrno::Access);
+            }
+            let context = alloc::format!(
+                "jasper-key:{}:{}:{}:{}\0",
+                application.stable_id,
+                key.serial,
+                key.uid,
+                key.gid
+            );
+            if args[2] == 0 {
+                return Ok(context.len() as u64);
+            }
+            if args[3] < context.len() as u64 {
+                return Err(CompatErrno::Overflow);
+            }
+            copy_to_user(args[2], context.as_bytes(), context.len())
+                .map_err(|_| CompatErrno::Fault)?;
+            Ok(context.len() as u64)
+        }
+        CAPABILITIES => {
+            if args[2] < 2 {
+                return Err(CompatErrno::ArgumentTooLong);
+            }
+            let capabilities = [0x21u8, 0u8];
+            copy_to_user(args[1], &capabilities, capabilities.len())
+                .map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        }
+        _ => Err(CompatErrno::NotSupported),
+    }
+}
+
 fn linux_eventfd(pid: ObjId, args: [u64; 6], eventfd2: bool) -> Result<u64, CompatErrno> {
     const EFD_SEMAPHORE: u64 = 0x1;
     const EFD_NONBLOCK: u64 = 0x800;
@@ -6610,6 +11504,7 @@ fn linux_signalfd_read(
         let mut records = [SignalFdRecord {
             signal: 0,
             sender_pid: 0,
+            sender_uid: 0,
             code: 0,
             value: 0,
         }; MAX_RECORDS];
@@ -6630,9 +11525,10 @@ fn linux_signalfd_read(
                     .copy_from_slice(&record.code.to_le_bytes());
                 output[base + 12..base + 16]
                     .copy_from_slice(&record.sender_pid.to_le_bytes());
-                output[base + 16..base + 20].copy_from_slice(
-                    &(compat_core::syscall::LINUX_COMPAT_UID as u32).to_le_bytes(),
-                );
+                output[base + 16..base + 20].copy_from_slice(&record.sender_uid.to_le_bytes());
+                output[base + 44..base + 48]
+                    .copy_from_slice(&(record.value as u32).to_le_bytes());
+                output[base + 48..base + 56].copy_from_slice(&record.value.to_le_bytes());
             }
             copy_to_user(address, &output[..count * RECORD_BYTES], count * RECORD_BYTES)
                 .map_err(|_| CompatErrno::Fault)?;
@@ -6729,9 +11625,9 @@ fn linux_inotify_add_watch(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
     if mask & IN_ONLYDIR != 0 && !node.is_directory() {
         return Err(CompatErrno::NotDirectory);
     }
-    let watches = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
-    let mut watches = watches.lock();
-    if let Some(watch) = watches.iter_mut().find(|watch| watch.node == node) {
+    let state = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let mut state = state.lock();
+    if let Some(watch) = state.watches.iter_mut().find(|watch| watch.node == node) {
         if mask & IN_MASK_CREATE != 0 {
             return Err(CompatErrno::Exists);
         }
@@ -6743,16 +11639,17 @@ fn linux_inotify_add_watch(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
         };
         return Ok(watch.wd as u64);
     }
-    if watches.len() >= 64 {
+    if state.watches.len() >= 64 {
         return Err(CompatErrno::NoSpace);
     }
     let wd = (1..=64)
-        .find(|candidate| !watches.iter().any(|watch| watch.wd == *candidate))
+        .find(|candidate| !state.watches.iter().any(|watch| watch.wd == *candidate))
         .ok_or(CompatErrno::NoSpace)?;
-    watches
+    state
+        .watches
         .try_reserve(1)
         .map_err(|_| CompatErrno::NoMemory)?;
-    watches.push(proc::LinuxInotifyWatch {
+    state.watches.push(proc::LinuxInotifyWatch {
         wd,
         node,
         mask: mask & !(IN_MASK_CREATE | IN_MASK_ADD),
@@ -6771,22 +11668,85 @@ fn linux_inotify_rm_watch(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno
     if wd <= 0 {
         return Err(CompatErrno::Invalid);
     }
-    let watches = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
-    let mut watches = watches.lock();
-    let Some(index) = watches.iter().position(|watch| watch.wd == wd) else {
+    let state = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let mut state = state.lock();
+    let Some(index) = state.watches.iter().position(|watch| watch.wd == wd) else {
         return Err(CompatErrno::Invalid);
     };
-    watches.remove(index);
+    state.watches.remove(index);
+    state
+        .events
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    state.events.push_back(proc::LinuxInotifyEvent {
+        wd,
+        mask: 0x8000,
+        cookie: 0,
+        name: [0; 256],
+        name_len: 0,
+    });
+    drop(state);
+    wake_message_queue_waiters();
     Ok(0)
 }
 
-/// Blocks or returns `EAGAIN` for an inotify fd on the immutable root namespace.
-fn linux_inotify_read(pid: ObjId, fd: u32) -> Result<u64, CompatErrno> {
-    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
-    if nonblocking {
-        return Err(CompatErrno::TryAgain);
+/// Reads queued inotify control events.
+fn linux_inotify_read(
+    pid: ObjId,
+    fd: u32,
+    address: u64,
+    len: usize,
+) -> Result<u64, CompatErrno> {
+    const EVENT_HEADER: usize = 16;
+    const MAX_EVENTS: usize = 64;
+    const MAX_NAME: usize = 256;
+    if len < EVENT_HEADER {
+        return Err(CompatErrno::Invalid);
     }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Inotify {
+        return Err(CompatErrno::BadFd);
+    }
+    let state = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
     loop {
+        let capacity = len.min(MAX_EVENTS * (EVENT_HEADER + MAX_NAME));
+        let mut output = alloc::vec![0u8; capacity];
+        let mut written = 0usize;
+        let mut consumed = 0usize;
+        {
+            let mut state = state.lock();
+            for event in state.events.iter().take(MAX_EVENTS) {
+                let name_len = usize::from(event.name_len);
+                let event_len = EVENT_HEADER
+                    .checked_add(name_len)
+                    .and_then(|length| length.checked_add(7))
+                    .map(|length| length & !7)
+                    .ok_or(CompatErrno::Invalid)?;
+                if written + event_len > output.len() {
+                    break;
+                }
+                let base = written;
+                output[base..base + 4].copy_from_slice(&event.wd.to_le_bytes());
+                output[base + 4..base + 8].copy_from_slice(&event.mask.to_le_bytes());
+                output[base + 8..base + 12].copy_from_slice(&event.cookie.to_le_bytes());
+                output[base + 12..base + 16].copy_from_slice(&(name_len as u32).to_le_bytes());
+                output[base + 16..base + 16 + name_len]
+                    .copy_from_slice(&event.name[..name_len]);
+                written += event_len;
+                consumed += 1;
+            }
+            if written != 0 {
+                copy_to_user(address, &output, written).map_err(|_| CompatErrno::Fault)?;
+                for _ in 0..consumed {
+                    state.events.pop_front();
+                }
+                return Ok(written as u64);
+            }
+        }
+        if nonblocking {
+            return Err(CompatErrno::TryAgain);
+        }
         if proc::current_exiting() || current_signal_pending(pid) {
             return Err(CompatErrno::Interrupted);
         }
@@ -6827,14 +11787,6 @@ pub(crate) fn settle_posix_timers(now: u64) {
     let mut pending_count = 0usize;
     {
         let mut state = COMPAT.lock();
-        let mut process_signals: [Option<(ObjId, u64)>; MAX_PROCESS_SIGNAL_SETS] =
-            [None; MAX_PROCESS_SIGNAL_SETS];
-        for (slot, signals) in process_signals
-            .iter_mut()
-            .zip(state.process_signals.iter().flatten())
-        {
-            *slot = Some((signals.process, signals.pending));
-        }
         for timer in state.posix_timers.iter_mut().flatten() {
             if !timer.active {
                 continue;
@@ -6855,20 +11807,8 @@ pub(crate) fn settle_posix_timers(now: u64) {
             } else {
                 (current - timer.next) / timer.interval + 1
             };
-            if timer.notify == 0 {
-                let signal_pending = process_signals
-                    .iter()
-                    .flatten()
-                    .find(|(process, _)| *process == timer.process)
-                    .is_some_and(|(_, pending)| {
-                        *pending & (1u64 << (timer.signal - 1)) != 0
-                    });
-                let overrun = if signal_pending {
-                    expired
-                } else {
-                    expired.saturating_sub(1)
-                };
-                timer.overrun = timer.overrun.saturating_add(overrun);
+            if timer.notify == 0 && expired > 1 {
+                timer.overrun = timer.overrun.saturating_add(expired - 1);
             }
             timer.next = if timer.interval == 0 {
                 0
@@ -6905,6 +11845,19 @@ fn release_posix_timers(process: ObjId) {
     for timer in state.interval_timers.iter_mut() {
         if timer.is_some_and(|timer| timer.process == process) {
             *timer = None;
+        }
+    }
+}
+
+/// Removes one dead process's one-shot POSIX message-queue registrations.
+fn release_mq_notifications(process: ObjId) {
+    for queue in proc::linux_mq_queues(process) {
+        let mut state = queue.state.lock();
+        if state
+            .notification
+            .is_some_and(|notification| notification.process == process)
+        {
+            state.notification = None;
         }
     }
 }
@@ -8194,37 +13147,6 @@ fn linux_pipe_read_buffer(
     }
 }
 
-/// Copies one bounded pipe slice without consuming the source bytes.
-fn linux_pipe_peek_buffer(
-    pid: ObjId,
-    fd: u32,
-    handle: u64,
-    output: &mut [u8],
-    force_nonblocking: bool,
-) -> Result<usize, CompatErrno> {
-    if output.is_empty() {
-        return Ok(0);
-    }
-    let endpoint = proc::linux_pipe_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
-    let nonblocking = force_nonblocking
-        || proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
-    loop {
-        match endpoint.peek(&mut *output) {
-            compat_core::PipeRead::Data(count) => return Ok(count),
-            compat_core::PipeRead::Eof => return Ok(0),
-            compat_core::PipeRead::WouldBlock if nonblocking => {
-                return Err(CompatErrno::TryAgain)
-            }
-            compat_core::PipeRead::WouldBlock => {
-                if proc::current_exiting() || current_signal_pending(pid) {
-                    return Err(CompatErrno::Interrupted);
-                }
-                sched::pause();
-            }
-        }
-    }
-}
-
 /// Writes a bounded pipe byte stream and preserves `PIPE_BUF` atomic writes.
 fn linux_pipe_write(
     pid: ObjId,
@@ -8458,6 +13380,7 @@ fn raise_sigpipe(pid: ObjId) {
     match action[0] {
         1 => {}
         0 => {
+            let _ = proc::set_linux_termination_signal(pid, SIGPIPE);
             let _ = proc::begin_exit(pid, 128 + i64::from(SIGPIPE));
         }
         _ => {
@@ -8477,11 +13400,15 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const O_NONBLOCK: u64 = 0x800;
     const O_NOCTTY: u64 = 0x100;
     const O_NOFOLLOW: u64 = 0x20000;
+    const O_PATH: u64 = 0x20_0000;
     #[cfg(feature = "compat-dynamic-libc-verify")]
     trace_path_address(pid, "openat-address", args[1]);
     let flags = args[2];
+    let path_only = flags & O_PATH != 0;
     if flags & 3 == 3
-        || flags & !(3 | O_CLOEXEC | O_DIRECTORY | O_NONBLOCK | O_NOCTTY | O_NOFOLLOW) != 0
+        || flags
+            & !(3 | O_CLOEXEC | O_DIRECTORY | O_NONBLOCK | O_NOCTTY | O_NOFOLLOW | O_PATH)
+            != 0
     {
         return Err(CompatErrno::Perm);
     }
@@ -8504,10 +13431,17 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path()
         } else {
             let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-            let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
-            crate::linux_vfs::DirectoryId::from_handle(handle)
-                .ok_or(CompatErrno::BadFd)?
-                .path()
+            if let Some(crate::linux_vfs::Node::Directory(directory)) =
+                proc::linux_path_node(pid, fd)
+            {
+                directory.path()
+            } else {
+                let (handle, _) =
+                    proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
+                crate::linux_vfs::DirectoryId::from_handle(handle)
+                    .ok_or(CompatErrno::BadFd)?
+                    .path()
+            }
         };
         if path == b"." {
             base.to_vec()
@@ -8521,7 +13455,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             resolved
         }
     };
-    if resolved == b"/dev/ashmem" {
+    if !path_only && resolved == b"/dev/ashmem" {
         if flags & 3 != 2 {
             return Err(CompatErrno::Perm);
         }
@@ -8529,7 +13463,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .map(u64::from)
             .ok_or(CompatErrno::NoSpace);
     }
-    if resolved == b"/dev/binder" {
+    if !path_only && resolved == b"/dev/binder" {
         if flags & 3 != 2 {
             return Err(CompatErrno::Perm);
         }
@@ -8537,7 +13471,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .map(u64::from)
             .ok_or(CompatErrno::NoSpace);
     }
-    if resolved == b"/dev/ion" {
+    if !path_only && resolved == b"/dev/ion" {
         if flags & 3 != 2 {
             return Err(CompatErrno::Perm);
         }
@@ -8545,7 +13479,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .map(u64::from)
             .ok_or(CompatErrno::NoSpace);
     }
-    if resolved == b"/dev/dma_heap/system" {
+    if !path_only && resolved == b"/dev/dma_heap/system" {
         if flags & 3 != 2 {
             return Err(CompatErrno::Perm);
         }
@@ -8553,11 +13487,31 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .map(u64::from)
             .ok_or(CompatErrno::NoSpace);
     }
-    if flags & 3 != 0 {
+    if !path_only && flags & 3 != 0 {
         return Err(CompatErrno::Perm);
     }
     let node = crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)?;
     let close_on_exec = flags & O_CLOEXEC != 0;
+    if path_only {
+        if flags & O_DIRECTORY != 0 && !node.is_directory() {
+            return Err(CompatErrno::NotDirectory);
+        }
+        return proc::linux_install_path(pid, node, close_on_exec)
+            .map(u64::from)
+            .ok_or(CompatErrno::NoSpace);
+    }
+    let access = if flags & 3 == 0 {
+        if node.is_directory() {
+            LANDLOCK_ACCESS_FS_READ_DIR
+        } else {
+            LANDLOCK_ACCESS_FS_READ_FILE
+        }
+    } else {
+        LANDLOCK_ACCESS_FS_WRITE_FILE
+    };
+    if !landlock_path_allows(pid, node, &resolved, access) {
+        return Err(CompatErrno::Access);
+    }
     let fd = match node {
         crate::linux_vfs::Node::File(file) => {
             if flags & O_DIRECTORY != 0 {
@@ -8589,21 +13543,47 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 /// Implements the fixed-size x86_64 `openat2(2)` structure.
 fn linux_openat2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const OPEN_HOW_BYTES: usize = 24;
-    if args[3] != OPEN_HOW_BYTES as u64 {
+    const RESOLVE_NO_XDEV: u64 = 0x1;
+    const RESOLVE_NO_MAGICLINKS: u64 = 0x2;
+    const RESOLVE_NO_SYMLINKS: u64 = 0x4;
+    const RESOLVE_BENEATH: u64 = 0x8;
+    const RESOLVE_IN_ROOT: u64 = 0x10;
+    const RESOLVE_CACHED: u64 = 0x20;
+    const SUPPORTED_RESOLVE: u64 = RESOLVE_NO_XDEV
+        | RESOLVE_NO_MAGICLINKS
+        | RESOLVE_NO_SYMLINKS
+        | RESOLVE_BENEATH
+        | RESOLVE_IN_ROOT
+        | RESOLVE_CACHED;
+    if args[2] != OPEN_HOW_BYTES as u64 {
         return Err(CompatErrno::Invalid);
     }
     let mut how = [0u8; OPEN_HOW_BYTES];
-    copy_from_user(&mut how, args[2], OPEN_HOW_BYTES).map_err(|_| CompatErrno::Fault)?;
+    copy_from_user(&mut how, args[1], OPEN_HOW_BYTES).map_err(|_| CompatErrno::Fault)?;
     let flags = u64::from_le_bytes(how[0..8].try_into().unwrap());
     let mode = u64::from_le_bytes(how[8..16].try_into().unwrap());
     let resolve = u64::from_le_bytes(how[16..24].try_into().unwrap());
-    if resolve != 0 {
-        return Err(CompatErrno::NotSupported);
-    }
-    if mode & !0o7777 != 0 {
+    if resolve & !SUPPORTED_RESOLVE != 0
+        || resolve & RESOLVE_BENEATH != 0 && resolve & RESOLVE_IN_ROOT != 0
+        || mode & !0o7777 != 0
+    {
         return Err(CompatErrno::Invalid);
     }
-    linux_openat(pid, [args[0], args[1], flags, mode, 0, 0])
+    let path = linux_c_string(args[3], 4096)?;
+    let escapes = path.starts_with(b"/")
+        || path
+            .split(|byte| *byte == b'/')
+            .any(|component| component == b"..");
+    if resolve & RESOLVE_BENEATH != 0 && escapes {
+        return Err(CompatErrno::CrossDevice);
+    }
+    if resolve & RESOLVE_IN_ROOT != 0
+        && path.starts_with(b"/")
+        && !is_at_fdcwd(args[0])
+    {
+        return Err(CompatErrno::NotSupported);
+    }
+    linux_openat(pid, [args[0], args[3], flags, mode, 0, 0])
 }
 
 /// Implements legacy x86_64 `open(2)` relative to the current directory.
@@ -8628,6 +13608,16 @@ fn linux_creat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 /// `fchdir` 只接受已验证的目录 fd，并把同一目录身份提交为进程 cwd。
 fn linux_fchdir(pid: ObjId, fd: u64) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(fd).map_err(|_| CompatErrno::BadFd)?;
+    if let Some(node) = proc::linux_path_node(pid, fd) {
+        let crate::linux_vfs::Node::Directory(directory) = node else {
+            return Err(CompatErrno::NotDirectory);
+        };
+        return if proc::set_linux_cwd(pid, directory) {
+            Ok(0)
+        } else {
+            Err(CompatErrno::NoSys)
+        };
+    }
     let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::BadFd)?;
     let directory = crate::linux_vfs::DirectoryId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
     if proc::set_linux_cwd(pid, directory) {
@@ -8980,6 +13970,84 @@ fn linux_removexattr(
     Err(CompatErrno::NoData)
 }
 
+/// Validates the dfd/path target used by the xattrat family.
+fn validate_xattrat_target(
+    pid: ObjId,
+    dfd: u64,
+    path: u64,
+    at_flags: u64,
+) -> Result<(), CompatErrno> {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    if at_flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if at_flags & AT_EMPTY_PATH != 0 {
+        let fd = u32::try_from(dfd).map_err(|_| CompatErrno::BadFd)?;
+        proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+        return Ok(());
+    }
+    let resolved = resolve_linux_at_path(pid, dfd, path)?;
+    crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)?;
+    Ok(())
+}
+
+/// Reads one fixed-version `struct xattr_args`.
+fn read_xattr_args(address: u64, size: u64) -> Result<(u64, u32, u32), CompatErrno> {
+    const XATTR_ARGS_SIZE: usize = 16;
+    if size < XATTR_ARGS_SIZE as u64 || size > 4096 || address == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut raw = [0u8; XATTR_ARGS_SIZE];
+    copy_from_user(&mut raw, address, XATTR_ARGS_SIZE).map_err(|_| CompatErrno::Fault)?;
+    Ok((
+        u64::from_le_bytes(raw[0..8].try_into().unwrap()),
+        u32::from_le_bytes(raw[8..12].try_into().unwrap()),
+        u32::from_le_bytes(raw[12..16].try_into().unwrap()),
+    ))
+}
+
+/// Implements `setxattrat(2)` against the immutable compatibility root.
+fn linux_setxattrat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let (value, size, flags) = read_xattr_args(args[4], args[5])?;
+    validate_xattr_name(args[3])?;
+    validate_xattrat_target(pid, args[0], args[1], args[2])?;
+    if flags & !0x3 != 0 || flags & 0x3 == 0x3 {
+        return Err(CompatErrno::Invalid);
+    }
+    if size != 0 && value == 0 {
+        return Err(CompatErrno::Fault);
+    }
+    Err(CompatErrno::ReadOnly)
+}
+
+/// Implements `getxattrat(2)` over a namespace with no xattrs.
+fn linux_getxattrat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let (_value, _size, flags) = read_xattr_args(args[4], args[5])?;
+    if flags != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    validate_xattr_name(args[3])?;
+    validate_xattrat_target(pid, args[0], args[1], args[2])?;
+    Err(CompatErrno::NoData)
+}
+
+/// Implements `listxattrat(2)` over a namespace with no xattrs.
+fn linux_listxattrat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    validate_xattrat_target(pid, args[0], args[1], args[2])?;
+    if args[4] != 0 && args[3] == 0 {
+        return Err(CompatErrno::Fault);
+    }
+    Ok(0)
+}
+
+/// Implements `removexattrat(2)` over a namespace with no xattrs.
+fn linux_removexattrat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    validate_xattr_name(args[3])?;
+    validate_xattrat_target(pid, args[0], args[1], args[2])?;
+    Err(CompatErrno::NoData)
+}
+
 /// Changes the Linux compatibility current directory within the static namespace.
 ///
 /// 绝对路径从兼容根解析，相对路径从进程当前目录解析；仅目录节点可提交为 cwd。
@@ -9054,6 +14122,11 @@ fn linux_c_string(address: u64, max: usize) -> Result<alloc::vec::Vec<u8>, Compa
 fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind == compat_core::fd::CompatKind::Path {
+        let node = proc::linux_path_node(pid, fd).ok_or(CompatErrno::BadFd)?;
+        write_linux_stat(args[1], node)?;
+        return Ok(0);
+    }
     if entry.kind == compat_core::fd::CompatKind::Device {
         let (size, regular) = proc::linux_ashmem_state(pid, entry.handle)
             .map(|(size, _, _)| {
@@ -9120,13 +14193,17 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 )?;
                 return Ok(0);
             }
-            let node = crate::linux_vfs::FileId::from_handle(entry.handle)
-                .map(crate::linux_vfs::Node::File)
-                .or_else(|| {
-                    crate::linux_vfs::DirectoryId::from_handle(entry.handle)
-                        .map(crate::linux_vfs::Node::Directory)
-                })
-                .ok_or(CompatErrno::BadFd)?;
+            let node = if entry.kind == compat_core::fd::CompatKind::Path {
+                proc::linux_path_node(pid, fd)
+            } else {
+                crate::linux_vfs::FileId::from_handle(entry.handle)
+                    .map(crate::linux_vfs::Node::File)
+                    .or_else(|| {
+                        crate::linux_vfs::DirectoryId::from_handle(entry.handle)
+                            .map(crate::linux_vfs::Node::Directory)
+                    })
+            }
+            .ok_or(CompatErrno::BadFd)?;
             write_linux_stat(args[2], node)?;
             return Ok(0);
         }
@@ -9215,11 +14292,17 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path()
                 } else {
                     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-                    let (handle, _) =
-                        proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
-                    crate::linux_vfs::DirectoryId::from_handle(handle)
-                        .ok_or(CompatErrno::BadFd)?
-                        .path()
+                    if let Some(crate::linux_vfs::Node::Directory(directory)) =
+                        proc::linux_path_node(pid, fd)
+                    {
+                        directory.path()
+                    } else {
+                        let (handle, _) =
+                            proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
+                        crate::linux_vfs::DirectoryId::from_handle(handle)
+                            .ok_or(CompatErrno::BadFd)?
+                            .path()
+                    }
                 };
                 if path == b"." {
                     base.to_vec()
@@ -9262,7 +14345,16 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 )?;
                 return Ok(0);
             }
-            if let Some(file) = crate::linux_vfs::FileId::from_handle(entry.handle) {
+            if let Some(node) = proc::linux_path_node(pid, fd) {
+                (
+                    node,
+                    if node.is_directory() {
+                        4096
+                    } else {
+                        node.stat_metadata().0
+                    },
+                )
+            } else if let Some(file) = crate::linux_vfs::FileId::from_handle(entry.handle) {
                 (
                     crate::linux_vfs::Node::File(file),
                     file.bytes().len() as u64,
@@ -9446,6 +14538,8 @@ pub(crate) fn release_flock_description(owner: u64) {
 fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const F_DUPFD: u64 = 0;
     const F_DUPFD_CLOEXEC: u64 = 1030;
+    const F_SETPIPE_SZ: u64 = 1031;
+    const F_GETPIPE_SZ: u64 = 1032;
     const F_ADD_SEALS: u64 = 1033;
     const F_GET_SEALS: u64 = 1034;
     const F_GETFD: u64 = 1;
@@ -9455,20 +14549,28 @@ fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const FD_CLOEXEC: u64 = 1;
     const O_NONBLOCK: u64 = 0x800;
     const O_DIRECTORY: u64 = 0x10000;
+    const O_PATH: u64 = 0x20_0000;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     match args[1] {
         F_GETFD => Ok(u64::from(entry.close_on_exec)),
         F_GETFL => {
             let status = u64::from(proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)?);
+            let path_node = proc::linux_path_node(pid, fd);
             Ok(status
-                | if entry.kind == compat_core::fd::CompatKind::Directory {
+                | if entry.kind == compat_core::fd::CompatKind::Directory
+                    || path_node.is_some_and(|node| node.is_directory())
+                {
                     O_DIRECTORY
                 } else {
                     0
-                })
+                }
+                | if path_node.is_some() { O_PATH } else { 0 })
         }
         F_SETFL if args[2] & !O_NONBLOCK == 0 => {
+            if entry.kind == compat_core::fd::CompatKind::Path {
+                return Err(CompatErrno::Invalid);
+            }
             if proc::linux_set_fd_status_flags(pid, fd, args[2] as u32) {
                 Ok(0)
             } else {
@@ -9487,6 +14589,30 @@ fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             let duplicate = proc::linux_duplicate_fd(pid, fd, minimum, args[1] == F_DUPFD_CLOEXEC)
                 .ok_or(CompatErrno::NoSpace)?;
             Ok(u64::from(duplicate))
+        }
+        F_GETPIPE_SZ => {
+            if entry.kind != compat_core::fd::CompatKind::Pipe {
+                return Err(CompatErrno::Invalid);
+            }
+            proc::linux_pipe_endpoint(pid, entry.handle)
+                .map(|pipe| pipe.capacity() as u64)
+                .ok_or(CompatErrno::BadFd)
+        }
+        F_SETPIPE_SZ => {
+            if entry.kind != compat_core::fd::CompatKind::Pipe {
+                return Err(CompatErrno::Invalid);
+            }
+            let page = kernel_core::frame::FRAME_SIZE as u64;
+            let requested = args[2];
+            if requested == 0 || requested > compat_core::pipe::PIPE_CAPACITY as u64 {
+                return Err(CompatErrno::Perm);
+            }
+            let rounded = requested.div_ceil(page) * page;
+            let pipe = proc::linux_pipe_endpoint(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+            if !pipe.set_capacity(rounded as usize) {
+                return Err(CompatErrno::Busy);
+            }
+            Ok(pipe.capacity() as u64)
         }
         F_ADD_SEALS => {
             let seals = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
@@ -9527,8 +14653,6 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const ASHMEM_PURGE_ALL_CACHES: u64 = 0x610a;
     const BINDER_SET_MAX_THREADS: u64 = 0x4004_6205;
     const BINDER_SET_CONTEXT_MGR: u64 = 0x4004_6207;
-    const BINDER_GET_NODE_DEBUG_INFO: u64 = 0xc018_620b;
-    const BINDER_GET_NODE_INFO_FOR_REF: u64 = 0xc018_620c;
     const BINDER_SET_CONTEXT_MGR_EXT: u64 = 0x4018_620d;
     const BINDER_THREAD_EXIT: u64 = 0x4004_6208;
     const BINDER_VERSION: u64 = 0xc004_6209;
@@ -9596,12 +14720,6 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     Err(CompatErrno::Busy)
                 }
             }
-            BINDER_GET_NODE_DEBUG_INFO => {
-                crate::binder::get_node_debug_info(pid, args[2])
-            }
-            BINDER_GET_NODE_INFO_FOR_REF => {
-                crate::binder::get_node_info_for_ref(pid, args[2])
-            }
             BINDER_SET_CONTEXT_MGR_EXT => {
                 const BINDER_TYPE_BINDER: u32 = 0x7362_2a85;
                 const FLAT_BINDER_OBJECT_BYTES: usize = 24;
@@ -9620,10 +14738,7 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     Err(CompatErrno::Busy)
                 }
             }
-            BINDER_THREAD_EXIT => {
-                crate::binder::thread_exit(pid);
-                Ok(0)
-            }
+            BINDER_THREAD_EXIT => Ok(0),
             BINDER_WRITE_READ => crate::binder::write_read(pid, fd, args),
             _ => Err(CompatErrno::NoSys),
         };
@@ -9951,117 +15066,6 @@ fn io_uring_write(
         .map_err(ashmem_compat_error)
 }
 
-/// Executes one regular-file operation through a retained fixed-file
-/// description. `positioned` requests use the SQE offset; otherwise the shared
-/// open-file cursor is consumed.
-fn linux_io_uring_fixed_file_io(
-    pid: ObjId,
-    file: &compat_core::fd::FdDescription,
-    write: bool,
-    address: u64,
-    len: usize,
-    offset: u64,
-) -> Result<u64, CompatErrno> {
-    const MAX_IO_URING_FILE_BYTES: usize = 1024 * 1024;
-    if len > MAX_IO_URING_FILE_BYTES {
-        return Err(CompatErrno::Invalid);
-    }
-    let required = if write {
-        kernel_core::object::Rights::WRITE
-    } else {
-        kernel_core::object::Rights::READ
-    };
-    if !file.entry.rights.contains(required) {
-        return Err(CompatErrno::BadFd);
-    }
-    let positioned = offset != u64::MAX;
-    let effective_offset = if positioned {
-        offset
-    } else {
-        file.offset()
-    };
-    if len == 0 {
-        return Ok(0);
-    }
-    match file.entry.kind {
-        compat_core::fd::CompatKind::Device
-            if proc::linux_ashmem_is_regular(pid, file.entry.handle) == Some(true) =>
-        {
-            if write {
-                let mut bytes = alloc::vec![0u8; len];
-                copy_from_user(&mut bytes, address, len).map_err(|_| CompatErrno::Fault)?;
-                let io = admit_process_io(pid, len as u64, 1)?;
-                let written = proc::linux_ashmem_write_from(
-                    pid,
-                    file.entry.handle,
-                    effective_offset,
-                    &bytes,
-                )
-                .map_err(ashmem_compat_error)?;
-                io.commit();
-                if !positioned && written != 0 {
-                    file.set_offset(effective_offset + written as u64);
-                }
-                Ok(written as u64)
-            } else {
-                let mut bytes = alloc::vec![0u8; len];
-                let read = proc::linux_ashmem_read_from(
-                    pid,
-                    file.entry.handle,
-                    effective_offset,
-                    &mut bytes,
-                )
-                .map_err(ashmem_compat_error)?;
-                let io = admit_process_io(pid, read as u64, 1)?;
-                if read != 0 {
-                    copy_to_user(address, &bytes[..read], read)
-                        .map_err(|_| CompatErrno::Fault)?;
-                }
-                io.commit();
-                if !positioned && read != 0 {
-                    file.set_offset(effective_offset + read as u64);
-                }
-                Ok(read as u64)
-            }
-        }
-        compat_core::fd::CompatKind::File if !write => {
-            let backing =
-                crate::linux_vfs::FileId::from_handle(file.entry.handle)
-                    .ok_or(CompatErrno::BadFd)?;
-            let offset = usize::try_from(effective_offset).map_err(|_| CompatErrno::Invalid)?;
-            let source = backing.bytes();
-            let available = source.len().saturating_sub(offset).min(len);
-            let io = admit_process_io(pid, available as u64, 1)?;
-            if available != 0 {
-                copy_to_user(address, &source[offset..offset + available], available)
-                    .map_err(|_| CompatErrno::Fault)?;
-            }
-            io.commit();
-            if !positioned && available != 0 {
-                file.set_offset(effective_offset + available as u64);
-            }
-            Ok(available as u64)
-        }
-        _ => Err(CompatErrno::NoSys),
-    }
-}
-
-/// Returns whether a retained fixed file supports fsync/fdatasync.
-fn linux_io_uring_fixed_file_sync(
-    pid: ObjId,
-    file: &compat_core::fd::FdDescription,
-) -> Result<u64, CompatErrno> {
-    match file.entry.kind {
-        compat_core::fd::CompatKind::File | compat_core::fd::CompatKind::Directory => Ok(0),
-        compat_core::fd::CompatKind::Device
-            if proc::linux_ashmem_is_regular(pid, file.entry.handle) == Some(true) =>
-        {
-            Ok(0)
-        }
-        _ => Err(CompatErrno::Invalid),
-    }
-}
-
 /// Creates a shared SQ/CQ/SQE backing object and publishes the Linux
 /// `io_uring_params` geometry with single-mmap support.
 fn linux_io_uring_setup(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
@@ -10139,7 +15143,6 @@ fn linux_io_uring_setup(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
 fn linux_io_uring_enter(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const IORING_ENTER_GETEVENTS: u64 = 1;
     const IORING_ENTER_SQ_WAKEUP: u64 = 2;
-    const IOSQE_FIXED_FILE: u8 = 1 << 0;
     const IORING_OP_NOP: u8 = 0;
     const IORING_OP_FSYNC: u8 = 3;
     const IORING_OP_READ: u8 = 22;
@@ -10214,42 +15217,12 @@ fn linux_io_uring_enter(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
         } else {
             operation_flags != 0
         };
-        let fixed_file = sqe_flags & IOSQE_FIXED_FILE != 0;
-        let result = if sqe_flags & !IOSQE_FIXED_FILE != 0
+        let result = if sqe_flags != 0
             || invalid_operation_flags
             || sqe_index >= entries
             || target_fd < 0 && opcode != IORING_OP_NOP
         {
             Err(CompatErrno::Invalid)
-        } else if fixed_file && opcode != IORING_OP_NOP {
-            (|| {
-                let file =
-                    proc::linux_io_uring_fixed_file(pid, entry.handle, target_fd as u32)
-                        .ok_or(CompatErrno::BadFd)?;
-                match opcode {
-                    IORING_OP_FSYNC => {
-                        linux_io_uring_fixed_file_sync(pid, &file)?;
-                        Ok(0)
-                    }
-                    IORING_OP_READ => linux_io_uring_fixed_file_io(
-                        pid,
-                        &file,
-                        false,
-                        address,
-                        length as usize,
-                        offset,
-                    ),
-                    IORING_OP_WRITE => linux_io_uring_fixed_file_io(
-                        pid,
-                        &file,
-                        true,
-                        address,
-                        length as usize,
-                        offset,
-                    ),
-                    _ => Err(CompatErrno::NoSys),
-                }
-            })()
         } else {
             match opcode {
                 IORING_OP_NOP => Ok(0),
@@ -10303,102 +15276,176 @@ fn linux_io_uring_enter(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
     Ok(submit as u64)
 }
 
-/// Implements the fixed-file registration table. Every slot captures the
-/// descriptor's open-file description; replacement is atomic after all new
-/// descriptors and user memory have been validated.
+/// io_uring registration is returned as unsupported until fixed files and
+/// buffers have real object-lifetime tracking.
 fn linux_io_uring_register(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const IORING_REGISTER_FILES: u32 = 2;
-    const IORING_UNREGISTER_FILES: u32 = 3;
-    const IORING_REGISTER_FILES_UPDATE: u32 = 6;
-
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
-    let (entries, _) =
-        proc::linux_io_uring_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
-    let opcode = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
-    let count = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
-    let read_descriptions =
-        |address: u64, count: usize| -> Result<
-            alloc::vec::Vec<Option<compat_core::fd::FdDescription>>,
-            CompatErrno,
-        > {
-            if count > entries as usize {
-                return Err(CompatErrno::Invalid);
-            }
-            if count != 0 && address == 0 {
+    let _ = proc::linux_io_uring_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    Err(CompatErrno::NoSys)
+}
+
+/// Creates one bounded legacy AIO context.
+fn linux_io_setup(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let max_events = usize::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    if !(1..=1024).contains(&max_events) || args[1] == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let context = proc::linux_aio_create(pid, max_events).ok_or(CompatErrno::NoSpace)?;
+    copy_to_user(args[1], &context.to_le_bytes(), 8).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Destroys one legacy AIO context and all queued completions.
+fn linux_io_destroy(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if proc::linux_aio_destroy(pid, args[0]) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::Invalid)
+    }
+}
+
+/// Reports that no pending operation can be cancelled in the synchronous AIO model.
+fn linux_io_cancel(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let _ = proc::linux_aio_state(pid, args[0]).ok_or(CompatErrno::Invalid)?;
+    Err(CompatErrno::Invalid)
+}
+
+/// Submits legacy AIO requests, completing supported operations synchronously.
+fn linux_io_submit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const IOCB_BYTES: usize = 64;
+    const MAX_REQUESTS: usize = 32;
+    let state = proc::linux_aio_state(pid, args[0]).ok_or(CompatErrno::Invalid)?;
+    let count = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if count > MAX_REQUESTS || count != 0 && args[2] == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut submitted = 0usize;
+    while submitted < count {
+        let pointer_address = args[2]
+            .checked_add((submitted * 8) as u64)
+            .ok_or(CompatErrno::Fault)?;
+        let mut pointer = [0u8; 8];
+        if proc::read(pid, pointer_address, &mut pointer).is_err() {
+            if submitted == 0 {
                 return Err(CompatErrno::Fault);
             }
-            let mut files = alloc::vec::Vec::new();
-            files
-                .try_reserve(count)
-                .map_err(|_| CompatErrno::NoMemory)?;
-            for index in 0..count {
-                let slot = address
-                    .checked_add((index * 4) as u64)
-                    .ok_or(CompatErrno::Fault)?;
-                let mut raw = [0u8; 4];
-                copy_from_user(&mut raw, slot, 4).map_err(|_| CompatErrno::Fault)?;
-                let raw_fd = i32::from_le_bytes(raw);
-                if raw_fd == -1 {
-                    files.push(None);
-                } else if raw_fd < 0 {
-                    return Err(CompatErrno::BadFd);
-                } else {
-                    files.push(Some(
-                        proc::linux_fd_description(pid, raw_fd as u32)
-                            .ok_or(CompatErrno::BadFd)?,
-                    ));
-                }
+            break;
+        }
+        let iocb_address = u64::from_le_bytes(pointer);
+        let mut iocb = [0u8; IOCB_BYTES];
+        if iocb_address == 0 || proc::read(pid, iocb_address, &mut iocb).is_err() {
+            if submitted == 0 {
+                return Err(CompatErrno::Fault);
             }
-            Ok(files)
+            break;
+        }
+        let data = u64::from_le_bytes(iocb[0..8].try_into().unwrap());
+        let opcode = u16::from_le_bytes(iocb[16..18].try_into().unwrap());
+        let fd = u32::from_le_bytes(iocb[20..24].try_into().unwrap());
+        let buffer = u64::from_le_bytes(iocb[24..32].try_into().unwrap());
+        let bytes = u64::from_le_bytes(iocb[32..40].try_into().unwrap());
+        let offset = i64::from_le_bytes(iocb[40..48].try_into().unwrap());
+        let result = if offset < 0 {
+            -(i64::from(CompatErrno::Invalid as i32))
+        } else {
+            match opcode {
+                0 => compat_result(linux_pread64(
+                    pid,
+                    [u64::from(fd), buffer, bytes, offset as u64, 0, 0],
+                )),
+                1 => compat_result(linux_pwrite64(
+                    pid,
+                    [u64::from(fd), buffer, bytes, offset as u64, 0, 0],
+                )),
+                2 | 3 => compat_result(linux_sync_fd(pid, u64::from(fd), opcode == 3)),
+                6 => 0,
+                _ => -(i64::from(CompatErrno::Invalid as i32)),
+            }
         };
-
-    match opcode {
-        IORING_REGISTER_FILES => {
-            let files = read_descriptions(args[2], count)?;
-            if proc::linux_io_uring_replace_fixed_files(pid, entry.handle, files) {
-                Ok(0)
-            } else {
-                Err(CompatErrno::Invalid)
+        let mut state = state.lock();
+        if state.events.len() >= state.max_events {
+            if submitted == 0 {
+                return Err(CompatErrno::TryAgain);
             }
+            break;
         }
-        IORING_UNREGISTER_FILES => {
-            if count != 0 || args[2] != 0 {
-                return Err(CompatErrno::Invalid);
-            }
-            if proc::linux_io_uring_clear_fixed_files(pid, entry.handle) {
-                Ok(0)
-            } else {
-                Err(CompatErrno::Invalid)
-            }
-        }
-        IORING_REGISTER_FILES_UPDATE => {
-            if args[2] == 0 || count == 0 {
-                return Err(CompatErrno::Invalid);
-            }
-            let mut header = [0u8; 16];
-            copy_from_user(&mut header, args[2], 16).map_err(|_| CompatErrno::Fault)?;
-            let offset = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
-            let reserved = u32::from_le_bytes(header[4..8].try_into().unwrap());
-            let fds = u64::from_le_bytes(header[8..16].try_into().unwrap());
-            let registered =
-                proc::linux_io_uring_fixed_file_count(pid, entry.handle)
-                    .ok_or(CompatErrno::BadFd)?;
-            if reserved != 0
-                || offset > registered
-                || offset.checked_add(count).is_none_or(|end| end > registered)
-            {
-                return Err(CompatErrno::Invalid);
-            }
-            let files = read_descriptions(fds, count)?;
-            if proc::linux_io_uring_update_fixed_files(pid, entry.handle, offset, files) {
-                Ok(0)
-            } else {
-                Err(CompatErrno::Invalid)
-            }
-        }
-        _ => Err(CompatErrno::NoSys),
+        state.events.push_back(proc::LinuxAioEvent {
+            data,
+            object: iocb_address,
+            result,
+            result2: 0,
+        });
+        submitted += 1;
     }
+    Ok(submitted as u64)
+}
+
+/// Returns completed legacy AIO events, optionally waiting for a minimum count.
+fn linux_io_getevents(
+    pid: ObjId,
+    args: [u64; 6],
+    pgetevents: bool,
+) -> Result<u64, CompatErrno> {
+    const EVENT_BYTES: usize = 32;
+    const MAX_EVENTS: usize = 32;
+    if pgetevents && args[5] != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    let state = proc::linux_aio_state(pid, args[0]).ok_or(CompatErrno::Invalid)?;
+    let minimum = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let maximum = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if maximum > MAX_EVENTS || minimum > maximum || maximum != 0 && args[3] == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let deadline = if args[4] == 0 {
+        None
+    } else {
+        Some(
+            sched::now_ns()
+                .checked_add(read_linux_timespec(args[4])?)
+                .ok_or(CompatErrno::Invalid)?,
+        )
+    };
+    let events = loop {
+        let mut ready = alloc::vec::Vec::new();
+        {
+            let mut state = state.lock();
+            while ready.len() < maximum {
+                let Some(event) = state.events.pop_front() else {
+                    break;
+                };
+                ready.push(event);
+            }
+        }
+        if ready.len() >= minimum {
+            break ready;
+        }
+        if let Some(deadline) = deadline {
+            if sched::now_ns() >= deadline {
+                break ready;
+            }
+            let wake = deadline.min(sched::now_ns().saturating_add(10_000_000));
+            if sched::sleep_until_ns(wake).is_err() {
+                sched::pause();
+            }
+        } else {
+            sched::pause();
+        }
+    };
+    if events.is_empty() {
+        return Ok(0);
+    }
+    let mut output = alloc::vec![0u8; events.len() * EVENT_BYTES];
+    for (index, event) in events.iter().enumerate() {
+        let base = index * EVENT_BYTES;
+        output[base..base + 8].copy_from_slice(&event.data.to_le_bytes());
+        output[base + 8..base + 16].copy_from_slice(&event.object.to_le_bytes());
+        output[base + 16..base + 24].copy_from_slice(&event.result.to_le_bytes());
+        output[base + 24..base + 32].copy_from_slice(&event.result2.to_le_bytes());
+    }
+    copy_to_user(args[3], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(events.len() as u64)
 }
 
 /// Creates a bounded Linux epoll instance.
@@ -10446,13 +15493,18 @@ fn linux_epoll_ctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let registrations = proc::linux_epoll_registrations(pid, epoll_entry.handle)
         .ok_or(CompatErrno::BadFd)?;
     let target = proc::linux_fd(pid, target_fd).ok_or(CompatErrno::BadFd)?;
+    let target_description =
+        proc::linux_fd_description_identity(pid, target_fd).ok_or(CompatErrno::BadFd)?;
     if target.handle == epoll_entry.handle || proc::linux_is_epoll(pid, target.handle) {
         return Err(CompatErrno::Invalid);
     }
     let mut registrations = registrations.lock();
     let existing = registrations
         .iter()
-        .position(|registration| registration.handle == target.handle);
+        .position(|registration| {
+            registration.handle == target.handle
+                && registration.description_id == target_description
+        });
     if args[1] == EPOLL_CTL_DEL {
         let index = existing.ok_or(CompatErrno::NoEntry)?;
         registrations.remove(index);
@@ -10475,6 +15527,7 @@ fn linux_epoll_ctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let data = u64::from_le_bytes(raw[4..12].try_into().unwrap());
     let registration = proc::LinuxEpollRegistration {
         handle: target.handle,
+        description_id: target_description,
         kind: target.kind,
         rights: target.rights,
         events,
@@ -10572,6 +15625,28 @@ fn linux_epoll_readiness(
                 0
             }
         }
+        compat_core::fd::CompatKind::MessageQueue => {
+            let queue = proc::linux_mq_state(pid, registration.handle)?;
+            let state = queue.state.lock();
+            let mut ready = 0;
+            if requested & EPOLLIN != 0
+                && registration
+                    .rights
+                    .contains(kernel_core::object::Rights::READ)
+                && !state.messages.is_empty()
+            {
+                ready |= EPOLLIN;
+            }
+            if requested & EPOLLOUT != 0
+                && registration
+                    .rights
+                    .contains(kernel_core::object::Rights::WRITE)
+                && state.messages.len() < state.max_messages
+            {
+                ready |= EPOLLOUT;
+            }
+            ready
+        }
         compat_core::fd::CompatKind::Pipe => {
             let pipe = proc::linux_pipe_endpoint(pid, registration.handle)?;
             let mut ready = 0;
@@ -10663,6 +15738,14 @@ fn linux_epoll_readiness(
                 ready |= EPOLLOUT;
             }
             ready
+        }
+        compat_core::fd::CompatKind::Inotify => {
+            let state = proc::linux_inotify_state(pid, registration.handle)?;
+            if requested & EPOLLIN != 0 && !state.lock().events.is_empty() {
+                EPOLLIN
+            } else {
+                0
+            }
         }
         compat_core::fd::CompatKind::Pidfd => {
             if requested & EPOLLIN != 0
@@ -10888,6 +15971,26 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                         0
                     }
                 }
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::MessageQueue => {
+                    let Some(queue) = proc::linux_mq_state(pid, entry.handle) else {
+                        continue;
+                    };
+                    let state = queue.state.lock();
+                    let mut ready = 0;
+                    if events & POLLIN != 0
+                        && entry.rights.contains(kernel_core::object::Rights::READ)
+                        && !state.messages.is_empty()
+                    {
+                        ready |= POLLIN;
+                    }
+                    if events & POLLOUT != 0
+                        && entry.rights.contains(kernel_core::object::Rights::WRITE)
+                        && state.messages.len() < state.max_messages
+                    {
+                        ready |= POLLOUT;
+                    }
+                    ready
+                }
                 Some(entry) if entry.kind == compat_core::fd::CompatKind::Pidfd => {
                     if events & POLLIN != 0
                         && ObjId::from_raw(entry.handle)
@@ -10898,7 +16001,20 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                         0
                     }
                 }
-                Some(entry) if entry.kind == compat_core::fd::CompatKind::Inotify => 0,
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::Inotify => {
+                    let Some(state) =
+                        proc::linux_inotify_state(pid, entry.handle)
+                    else {
+                        continue;
+                    };
+                    if events & POLLIN != 0
+                        && !state.lock().events.is_empty()
+                    {
+                        POLLIN
+                    } else {
+                        0
+                    }
+                }
                 Some(entry) if entry.handle == proc::LINUX_CONSOLE_HANDLE => {
                     let (pending, ended, failed) = crate::terminal::input_status();
                     let mut ready = 0;
@@ -11680,10 +16796,55 @@ fn linux_splice(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(written as u64)
 }
 
-/// Implements `tee(2)` by duplicating pipe bytes without consuming the source.
+/// Implements `vmsplice(2)` from a bounded user iovec array into a pipe.
+fn linux_vmsplice(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SPLICE_F_NONBLOCK: u64 = 0x2;
+    const SPLICE_F_MOVE: u64 = 0x1;
+    const SPLICE_F_MORE: u64 = 0x4;
+    const SPLICE_F_GIFT: u64 = 0x8;
+    let flags = args[3];
+    if flags & !(SPLICE_F_NONBLOCK | SPLICE_F_MOVE | SPLICE_F_MORE | SPLICE_F_GIFT) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Pipe {
+        return Err(CompatErrno::BadFd);
+    }
+    if !entry
+        .rights
+        .contains(kernel_core::object::Rights::WRITE)
+    {
+        return Err(CompatErrno::BadFd);
+    }
+    let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let vectors = read_message_iovecs(pid, args[1], count, compat_core::PIPE_CAPACITY)?;
+    let total = vectors.iter().map(|(_, length)| *length).sum::<usize>();
+    let mut bytes = alloc::vec![0u8; total];
+    let mut offset = 0usize;
+    for (address, length) in vectors {
+        proc::read(pid, address, &mut bytes[offset..offset + length])
+            .map_err(|_| CompatErrno::Fault)?;
+        offset += length;
+    }
+    linux_pipe_write_buffer_mode(
+        pid,
+        fd,
+        entry.handle,
+        &bytes,
+        flags & SPLICE_F_NONBLOCK != 0,
+    )
+    .map(|written| written as u64)
+}
+
+/// Duplicates pipe data into another pipe without consuming the source.
 fn linux_tee(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const SPLICE_F_NONBLOCK: u64 = 0x2;
-    if args[3] & !SPLICE_F_NONBLOCK != 0 {
+    const SPLICE_F_MOVE: u64 = 0x1;
+    const SPLICE_F_MORE: u64 = 0x4;
+    const SPLICE_F_GIFT: u64 = 0x8;
+    let flags = args[3];
+    if flags & !(SPLICE_F_NONBLOCK | SPLICE_F_MOVE | SPLICE_F_MORE | SPLICE_F_GIFT) != 0 {
         return Err(CompatErrno::Invalid);
     }
     let input_fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
@@ -11692,160 +16853,45 @@ fn linux_tee(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let output = proc::linux_fd(pid, output_fd).ok_or(CompatErrno::BadFd)?;
     if input.kind != compat_core::fd::CompatKind::Pipe
         || output.kind != compat_core::fd::CompatKind::Pipe
-        || input.handle == output.handle
-    {
-        return Err(CompatErrno::Invalid);
-    }
-    if !input
-        .rights
-        .contains(kernel_core::object::Rights::READ)
+        || !input
+            .rights
+            .contains(kernel_core::object::Rights::READ)
         || !output
             .rights
             .contains(kernel_core::object::Rights::WRITE)
     {
         return Err(CompatErrno::BadFd);
     }
-    let limit = args[2].min(compat_core::PIPE_CAPACITY as u64) as usize;
-    if limit == 0 {
-        return Ok(0);
-    }
-    let force_nonblocking = args[3] & SPLICE_F_NONBLOCK != 0;
+    let limit = args[2]
+        .min(compat_core::PIPE_CAPACITY as u64)
+        .min(1024 * 1024) as usize;
     let mut bytes = alloc::vec![0u8; limit];
-    let count = linux_pipe_peek_buffer(
-        pid,
-        input_fd,
-        input.handle,
-        &mut bytes,
-        force_nonblocking,
-    )?;
-    if count == 0 {
-        return Ok(0);
-    }
+    let endpoint = proc::linux_pipe_endpoint(pid, input.handle).ok_or(CompatErrno::BadFd)?;
+    let force_nonblocking = flags & SPLICE_F_NONBLOCK != 0;
+    let count = loop {
+        match endpoint.peek(&mut bytes) {
+            compat_core::PipeRead::Data(count) => break count,
+            compat_core::PipeRead::Eof => return Ok(0),
+            compat_core::PipeRead::WouldBlock if force_nonblocking => {
+                return Err(CompatErrno::TryAgain);
+            }
+            compat_core::PipeRead::WouldBlock => {
+                if proc::current_exiting() || current_signal_pending(pid) {
+                    return Err(CompatErrno::Interrupted);
+                }
+                sched::pause();
+            }
+        }
+    };
+    bytes.truncate(count);
     linux_pipe_write_buffer_mode(
         pid,
         output_fd,
         output.handle,
-        &bytes[..count],
+        &bytes,
         force_nonblocking,
     )
     .map(|written| written as u64)
-}
-
-/// Implements `vmsplice(2)` by importing user iovecs into a bounded pipe.
-fn linux_vmsplice(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const SPLICE_F_NONBLOCK: u64 = 0x2;
-    const SPLICE_F_MOVE: u64 = 0x1;
-    const SPLICE_F_MORE: u64 = 0x4;
-    const SPLICE_F_GIFT: u64 = 0x8;
-    const MAX_IOVECS: usize = 1024;
-    const IOVEC_BYTES: usize = 16;
-    if args[3] & !(SPLICE_F_NONBLOCK | SPLICE_F_MOVE | SPLICE_F_MORE | SPLICE_F_GIFT) != 0 {
-        return Err(CompatErrno::Invalid);
-    }
-    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
-    if entry.kind != compat_core::fd::CompatKind::Pipe
-        || !entry
-            .rights
-            .contains(kernel_core::object::Rights::WRITE)
-    {
-        return Err(CompatErrno::BadFd);
-    }
-    let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if count > MAX_IOVECS {
-        return Err(CompatErrno::Invalid);
-    }
-    if count == 0 {
-        return Ok(0);
-    }
-    let iovec_bytes = count.checked_mul(IOVEC_BYTES).ok_or(CompatErrno::Invalid)?;
-    let mut raw_iov = alloc::vec![0u8; iovec_bytes];
-    copy_from_user(&mut raw_iov, args[1], iovec_bytes).map_err(|_| CompatErrno::Fault)?;
-    let mut total = 0usize;
-    for iovec in raw_iov.chunks_exact(IOVEC_BYTES) {
-        let length =
-            usize::try_from(u64::from_le_bytes(iovec[8..16].try_into().unwrap()))
-                .map_err(|_| CompatErrno::Invalid)?;
-        total = total.checked_add(length).ok_or(CompatErrno::Invalid)?;
-        if total > compat_core::PIPE_CAPACITY {
-            return Err(CompatErrno::Invalid);
-        }
-    }
-    let mut bytes = alloc::vec![0u8; total];
-    let mut done = 0usize;
-    for iovec in raw_iov.chunks_exact(IOVEC_BYTES) {
-        let base = u64::from_le_bytes(iovec[0..8].try_into().unwrap());
-        let length =
-            usize::try_from(u64::from_le_bytes(iovec[8..16].try_into().unwrap()))
-                .map_err(|_| CompatErrno::Invalid)?;
-        if length != 0 {
-            copy_from_user(&mut bytes[done..done + length], base, length)
-                .map_err(|_| CompatErrno::Fault)?;
-        }
-        done += length;
-    }
-    linux_pipe_write_buffer_mode(
-        pid,
-        fd,
-        entry.handle,
-        &bytes,
-        args[3] & SPLICE_F_NONBLOCK != 0,
-    )
-    .map(|written| written as u64)
-}
-
-/// Implements `cachestat(2)` for memory-backed compatibility files.
-fn linux_cachestat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const RANGE_BYTES: usize = 16;
-    const INFO_BYTES: usize = 40;
-    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
-    if args[3] != 0 {
-        return Err(CompatErrno::Invalid);
-    }
-    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
-    if !entry
-        .rights
-        .contains(kernel_core::object::Rights::READ)
-    {
-        return Err(CompatErrno::BadFd);
-    }
-    let mut range = [0u8; RANGE_BYTES];
-    copy_from_user(&mut range, args[1], RANGE_BYTES).map_err(|_| CompatErrno::Fault)?;
-    let offset = u64::from_le_bytes(range[0..8].try_into().unwrap());
-    let length = u64::from_le_bytes(range[8..16].try_into().unwrap());
-    let total = match entry.kind {
-        compat_core::fd::CompatKind::File => {
-            let file =
-                crate::linux_vfs::FileId::from_handle(entry.handle).ok_or(CompatErrno::BadFd)?;
-            file.bytes().len() as u64
-        }
-        compat_core::fd::CompatKind::Device
-            if proc::linux_ashmem_is_regular(pid, entry.handle) == Some(true) =>
-        {
-            proc::linux_ashmem_state(pid, entry.handle)
-                .map(|state| state.0)
-                .ok_or(CompatErrno::BadFd)?
-        }
-        _ => return Err(CompatErrno::BadFd),
-    };
-    let end = if length == 0 {
-        total
-    } else {
-        offset
-            .checked_add(length)
-            .ok_or(CompatErrno::Invalid)?
-            .min(total)
-    };
-    let cached_pages = if offset >= end {
-        0
-    } else {
-        end.div_ceil(PAGE).saturating_sub(offset / PAGE)
-    };
-    let mut info = [0u8; INFO_BYTES];
-    info[0..8].copy_from_slice(&cached_pages.to_le_bytes());
-    copy_to_user(args[2], &info, info.len()).map_err(|_| CompatErrno::Fault)?;
-    Ok(0)
 }
 
 /// Stores or queries one x86_64 Linux signal action.
@@ -11946,9 +16992,8 @@ fn write_linux_siginfo(address: u64, record: SignalFdRecord) -> Result<(), Compa
     info[0..4].copy_from_slice(&record.signal.to_le_bytes());
     info[8..12].copy_from_slice(&record.code.to_le_bytes());
     info[16..20].copy_from_slice(&record.sender_pid.to_le_bytes());
-    info[20..24].copy_from_slice(&(compat_core::syscall::LINUX_COMPAT_UID as u32).to_le_bytes());
-    info[44..48].copy_from_slice(&(record.value as u32).to_le_bytes());
-    info[48..56].copy_from_slice(&record.value.to_le_bytes());
+    info[20..24].copy_from_slice(&record.sender_uid.to_le_bytes());
+    info[24..32].copy_from_slice(&record.value.to_le_bytes());
     copy_to_user(address, &info, info.len()).map_err(|_| CompatErrno::Fault)
 }
 

@@ -36,6 +36,7 @@ struct PipeState {
     bytes: VecDeque<u8>,
     readers: u32,
     writers: u32,
+    capacity: usize,
 }
 
 pub struct PipeEndpoint {
@@ -375,6 +376,7 @@ impl PipeEndpoint {
             bytes: VecDeque::with_capacity(PIPE_CAPACITY.min(PIPE_BUF)),
             readers: 1,
             writers: 1,
+            capacity: PIPE_CAPACITY,
         }));
         (
             Self {
@@ -411,7 +413,7 @@ impl PipeEndpoint {
         PipeRead::Data(count)
     }
 
-    /// Copies bytes from the readable end without consuming them.
+    /// Copies buffered bytes without consuming the pipe stream.
     pub fn peek(&self, output: &mut [u8]) -> PipeRead {
         let state = self.state.lock();
         if output.is_empty() {
@@ -425,14 +427,31 @@ impl PipeEndpoint {
             };
         }
         let count = output.len().min(state.bytes.len());
-        for (slot, byte) in output[..count].iter_mut().zip(state.bytes.iter()) {
-            *slot = *byte;
+        for (destination, source) in output[..count].iter_mut().zip(state.bytes.iter()) {
+            *destination = *source;
         }
         PipeRead::Data(count)
     }
 
     pub fn buffered_bytes(&self) -> usize {
         self.state.lock().bytes.len()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.state.lock().capacity
+    }
+
+    /// Resizes the shared pipe without discarding buffered bytes.
+    pub fn set_capacity(&self, capacity: usize) -> bool {
+        let mut state = self.state.lock();
+        if capacity < PIPE_BUF
+            || capacity > PIPE_CAPACITY
+            || state.bytes.len() > capacity
+        {
+            return false;
+        }
+        state.capacity = capacity;
+        true
     }
 
     pub fn is_readable(&self) -> bool {
@@ -442,7 +461,7 @@ impl PipeEndpoint {
 
     pub fn is_writable(&self) -> bool {
         let state = self.state.lock();
-        state.readers != 0 && state.bytes.len() < PIPE_CAPACITY
+        state.readers != 0 && state.bytes.len() < state.capacity
     }
 
     pub fn readers_gone(&self) -> bool {
@@ -464,7 +483,7 @@ impl PipeEndpoint {
         if state.readers == 0 {
             return PipeWrite::Broken;
         }
-        let available = PIPE_CAPACITY.saturating_sub(state.bytes.len());
+        let available = state.capacity.saturating_sub(state.bytes.len());
         if available == 0 {
             return PipeWrite::WouldBlock;
         }
@@ -522,6 +541,20 @@ mod tests {
         assert_eq!(reader.read(&mut output), PipeRead::Data(1));
         assert_eq!(reader.read(&mut output), PipeRead::Eof);
         assert_eq!(reader.write(b"x"), PipeWrite::Broken);
+    }
+
+    #[test]
+    fn pipe_capacity_resizes_without_losing_buffered_bytes() {
+        let (reader, writer) = PipeEndpoint::pair();
+        assert_eq!(reader.capacity(), PIPE_CAPACITY);
+        assert_eq!(writer.write(b"data"), PipeWrite::Data(4));
+        assert!(reader.set_capacity(PIPE_BUF));
+        assert_eq!(reader.capacity(), PIPE_BUF);
+        assert!(!reader.set_capacity(1));
+        assert!(!reader.set_capacity(PIPE_CAPACITY + 1));
+        let mut bytes = [0; 4];
+        assert_eq!(reader.read(&mut bytes), PipeRead::Data(4));
+        assert_eq!(&bytes, b"data");
     }
 
     #[test]
