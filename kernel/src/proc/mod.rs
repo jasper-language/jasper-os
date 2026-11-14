@@ -371,6 +371,26 @@ pub(crate) struct LinuxInotifyEvent {
 pub(crate) struct LinuxInotifyState {
     pub(crate) watches: Vec<LinuxInotifyWatch>,
     pub(crate) events: VecDeque<LinuxInotifyEvent>,
+    pub(crate) fanotify: bool,
+    pub(crate) fanotify_marks: Vec<LinuxFanotifyMark>,
+    pub(crate) fanotify_events: VecDeque<LinuxFanotifyEvent>,
+    pub(crate) fanotify_event_cloexec: bool,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxFanotifyMark {
+    pub(crate) node: crate::linux_vfs::Node,
+    pub(crate) mask: u64,
+    pub(crate) scope: u8,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxFanotifyEvent {
+    pub(crate) node: crate::linux_vfs::Node,
+    pub(crate) mask: u64,
+    pub(crate) pid: i32,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -2744,6 +2764,28 @@ pub(crate) fn linux_inotify_create(
     close_on_exec: bool,
     nonblocking: bool,
 ) -> Option<u32> {
+    linux_notification_create(pid, close_on_exec, nonblocking, false, false)
+}
+
+/// Creates one bounded fanotify notification instance.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_fanotify_create(
+    pid: ObjId,
+    close_on_exec: bool,
+    nonblocking: bool,
+    event_cloexec: bool,
+) -> Option<u32> {
+    linux_notification_create(pid, close_on_exec, nonblocking, true, event_cloexec)
+}
+
+#[cfg(feature = "linux-abi")]
+fn linux_notification_create(
+    pid: ObjId,
+    close_on_exec: bool,
+    nonblocking: bool,
+    fanotify: bool,
+    fanotify_event_cloexec: bool,
+) -> Option<u32> {
     with_proc(pid, |process| {
         let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
         if linux.inotifies.len() >= 8 {
@@ -2777,6 +2819,10 @@ pub(crate) fn linux_inotify_create(
             state: Arc::new(SpinLock::new(LinuxInotifyState {
                 watches: Vec::new(),
                 events: VecDeque::new(),
+                fanotify,
+                fanotify_marks: Vec::new(),
+                fanotify_events: VecDeque::new(),
+                fanotify_event_cloexec,
             })),
         });
         Ok(fd.fd())
@@ -2800,6 +2846,67 @@ pub(crate) fn linux_inotify_state(
             .map(|inotify| Arc::clone(&inotify.state)),
         _ => None,
     })
+}
+
+/// Reports whether an inotify/fanotify descriptor has readable events.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_notification_ready(pid: ObjId, handle: u64) -> Option<bool> {
+    let state = linux_inotify_state(pid, handle)?;
+    let state = state.lock();
+    Some(if state.fanotify {
+        !state.fanotify_events.is_empty()
+    } else {
+        !state.events.is_empty()
+    })
+}
+
+/// Delivers one real compatibility VFS event to every matching fanotify mark.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_fanotify_notify(
+    node: crate::linux_vfs::Node,
+    mask: u64,
+    source_pid: u32,
+) {
+    let mut states = Vec::new();
+    kobj::with(|table| {
+        table.for_each_live(|_, object| {
+            if let KObject::Process(process) = object {
+                if let Some(linux) = process.linux.as_ref() {
+                    states.extend(linux.inotifies.iter().map(|entry| Arc::clone(&entry.state)));
+                }
+            }
+            true
+        });
+    });
+    let mut delivered = false;
+    for state in states {
+        let mut state = state.lock();
+        if !state.fanotify || state.fanotify_events.len() >= 64 {
+            continue;
+        }
+        let selected = state.fanotify_marks.iter().any(|mark| {
+            let in_scope = mark.node == node
+                || mark.scope != 0
+                    && matches!(
+                        mark.node,
+                        crate::linux_vfs::Node::Directory(
+                            crate::linux_vfs::DirectoryId::Root
+                        )
+                    );
+            in_scope && mark.mask & mask != 0
+        });
+        if selected && state.fanotify_events.len() < 64 {
+            state.fanotify_events.push_back(LinuxFanotifyEvent {
+                node,
+                mask,
+                pid: source_pid as i32,
+            });
+            delivered = true;
+        }
+    }
+    if delivered {
+        crate::linux_abi::wake_message_queue_waiters();
+    }
 }
 
 /// Installs one descriptor sharing a POSIX message queue object.

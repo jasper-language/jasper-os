@@ -11,6 +11,7 @@
 #include <linux/capability.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-heap.h>
+#include <linux/fanotify.h>
 #include <linux/filter.h>
 #include <linux/fs.h>
 #include <linux/fscrypt.h>
@@ -5238,6 +5239,89 @@ jasper_android_binder:
         errno != EINVAL) {
         return 484;
     }
+    int fanotify_fd = syscall(SYS_fanotify_init,
+                              FAN_CLOEXEC | FAN_NONBLOCK,
+                              O_RDONLY | O_CLOEXEC);
+    uint64_t fanotify_mask =
+        FAN_OPEN | FAN_ACCESS | FAN_CLOSE_NOWRITE;
+    if (fanotify_fd < 0 ||
+        syscall(SYS_fanotify_mark, fanotify_fd,
+                FAN_MARK_ADD | FAN_MARK_DONT_FOLLOW,
+                fanotify_mask, AT_FDCWD, xattr_path) != 0) {
+        return 712;
+    }
+    int fanotify_file = open(xattr_path, O_RDONLY | O_CLOEXEC);
+    unsigned char fanotify_magic[4] = {0};
+    if (fanotify_file < 0 ||
+        read(fanotify_file, fanotify_magic,
+             sizeof(fanotify_magic)) !=
+            (ssize_t)sizeof(fanotify_magic) ||
+        memcmp(fanotify_magic, "\177ELF", 4) != 0 ||
+        close(fanotify_file) != 0) {
+        return 712;
+    }
+    struct pollfd fanotify_poll = {
+        .fd = fanotify_fd,
+        .events = POLLIN,
+    };
+    unsigned char fanotify_events[256] = {0};
+    ssize_t fanotify_bytes =
+        poll(&fanotify_poll, 1, 1000) == 1
+            ? read(fanotify_fd, fanotify_events,
+                   sizeof(fanotify_events))
+            : -1;
+    uint64_t fanotify_seen = 0;
+    int fanotify_event_count = 0;
+    for (ssize_t offset = 0;
+         offset + (ssize_t)sizeof(struct fanotify_event_metadata) <=
+             fanotify_bytes;
+         offset +=
+             (ssize_t)((struct fanotify_event_metadata *)
+                           (fanotify_events + offset))->event_len) {
+        struct fanotify_event_metadata *metadata =
+            (struct fanotify_event_metadata *)(fanotify_events + offset);
+        if (metadata->event_len !=
+                sizeof(struct fanotify_event_metadata) ||
+            metadata->vers != FANOTIFY_METADATA_VERSION ||
+            metadata->metadata_len !=
+                sizeof(struct fanotify_event_metadata) ||
+            metadata->fd < 0 ||
+            metadata->pid != getpid() ||
+            (fcntl(metadata->fd, F_GETFD) & FD_CLOEXEC) == 0) {
+            return 712;
+        }
+        struct stat fanotify_stat;
+        if (fstat(metadata->fd, &fanotify_stat) != 0 ||
+            !S_ISREG(fanotify_stat.st_mode)) {
+            return 712;
+        }
+        fanotify_seen |= metadata->mask;
+        fanotify_event_count++;
+    }
+    if (fanotify_bytes <= 0 || fanotify_event_count != 3 ||
+        fanotify_seen & fanotify_mask != fanotify_mask ||
+        syscall(SYS_fanotify_mark, fanotify_fd, FAN_MARK_REMOVE,
+                0, AT_FDCWD, xattr_path) != 0) {
+        dprintf(STDOUT_FILENO,
+                "fanotify-fail bytes=%zd count=%d seen=%#llx "
+                "want=%#llx errno=%d\n",
+                fanotify_bytes, fanotify_event_count,
+                (unsigned long long)fanotify_seen,
+                (unsigned long long)fanotify_mask, errno);
+        return 712;
+    }
+    for (ssize_t offset = 0;
+         offset + (ssize_t)sizeof(struct fanotify_event_metadata) <=
+             fanotify_bytes;
+         offset +=
+             (ssize_t)((struct fanotify_event_metadata *)
+                           (fanotify_events + offset))->event_len) {
+        close(((struct fanotify_event_metadata *)
+                   (fanotify_events + offset))->fd);
+    }
+    if (close(fanotify_fd) != 0) {
+        return 712;
+    }
     int copy_source =
         syscall(SYS_open, "/usr/lib/x86_64-linux-gnu/libc.so.6",
                 O_RDONLY | O_CLOEXEC, 0);
@@ -5863,7 +5947,6 @@ jasper_android_binder:
         return 652;
     }
     const long unsupported_features[] = {
-        SYS_fanotify_init, SYS_fanotify_mark,
         SYS_map_shadow_stack,
         SYS_uprobe, SYS_uretprobe, SYS_userfaultfd,
     };

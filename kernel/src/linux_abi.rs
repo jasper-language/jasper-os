@@ -2781,9 +2781,7 @@ fn execute(
         }
         LinuxSyscall::MigratePages => compat_result(linux_migrate_pages(pid, call.args)),
         LinuxSyscall::MovePages => compat_result(linux_move_pages(pid, call.args)),
-        LinuxSyscall::FanotifyInit
-        | LinuxSyscall::FanotifyMark
-        | LinuxSyscall::MapShadowStack
+        LinuxSyscall::MapShadowStack
         | LinuxSyscall::Uprobe
         | LinuxSyscall::Uretprobe
         | LinuxSyscall::Userfaultfd => -(CompatErrno::NotSupported as i32 as i64),
@@ -2855,6 +2853,8 @@ fn execute(
         LinuxSyscall::InotifyInit1 => compat_result(linux_inotify_init(pid, call.args, true)),
         LinuxSyscall::InotifyAddWatch => compat_result(linux_inotify_add_watch(pid, call.args)),
         LinuxSyscall::InotifyRmWatch => compat_result(linux_inotify_rm_watch(pid, call.args)),
+        LinuxSyscall::FanotifyInit => compat_result(linux_fanotify_init(pid, call.args)),
+        LinuxSyscall::FanotifyMark => compat_result(linux_fanotify_mark(pid, call.args)),
         LinuxSyscall::Kill => compat_result(linux_kill(pid, call.args).map(|()| 0)),
         LinuxSyscall::Kcmp => compat_result(linux_kcmp(pid, call.args)),
         LinuxSyscall::Uname => compat_result(linux_uname(call.args)),
@@ -3732,6 +3732,11 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             return linux_signalfd_read(pid, fd, entry.handle, args[1], len);
         }
         if entry.kind == compat_core::fd::CompatKind::Inotify {
+            if proc::linux_inotify_state(pid, entry.handle)
+                .is_some_and(|state| state.lock().fanotify)
+            {
+                return linux_fanotify_read(pid, fd, args[1], len);
+            }
             return linux_inotify_read(pid, fd, args[1], len);
         }
         if entry.kind == compat_core::fd::CompatKind::Socket {
@@ -3805,6 +3810,11 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if !proc::set_linux_file_offset(pid, fd, (offset + available) as u64) {
         return Err(CompatErrno::BadFd);
     }
+    proc::linux_fanotify_notify(
+        crate::linux_vfs::Node::File(file),
+        0x1,
+        proc::linux_pid(pid).unwrap_or(0),
+    );
     Ok(available as u64)
 }
 
@@ -3847,6 +3857,11 @@ fn linux_pread64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .map_err(|_| CompatErrno::Fault)?;
     }
     io.commit();
+    proc::linux_fanotify_notify(
+        crate::linux_vfs::Node::File(file),
+        0x1,
+        proc::linux_pid(pid).unwrap_or(0),
+    );
     Ok(available as u64)
 }
 
@@ -7648,7 +7663,29 @@ fn sleep_until_with_signal_check(pid: ObjId, deadline: u64) -> Result<(), Compat
 /// 经兼容 fd 表关闭描述符；重复关闭返回 `EBADF`，不会影响其他世代。
 fn linux_close(pid: ObjId, fd: u64) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(fd).map_err(|_| CompatErrno::BadFd)?;
+    let node = proc::linux_fd(pid, fd).and_then(|entry| match entry.kind {
+        compat_core::fd::CompatKind::File => crate::linux_vfs::FileId::from_handle(entry.handle)
+            .map(crate::linux_vfs::Node::File),
+        compat_core::fd::CompatKind::Directory => {
+            crate::linux_vfs::DirectoryId::from_handle(entry.handle)
+                .map(crate::linux_vfs::Node::Directory)
+        }
+        compat_core::fd::CompatKind::Path => proc::linux_path_node(pid, fd),
+        _ => None,
+    });
     if proc::linux_close_fd(pid, fd) {
+        if let Some(node) = node {
+            proc::linux_fanotify_notify(
+                node,
+                0x10u64
+                    | if node.is_directory() {
+                        0x4000_0000u64
+                    } else {
+                        0
+                    },
+                proc::linux_pid(pid).unwrap_or(0),
+            );
+        }
         Ok(0)
     } else {
         Err(CompatErrno::BadFd)
@@ -7888,7 +7925,7 @@ fn open_message_queue_any(
 }
 
 /// Wakes Linux threads so blocked queue senders and receivers can recheck.
-fn wake_message_queue_waiters() {
+pub(crate) fn wake_message_queue_waiters() {
     let mut tasks = [None; MAX_LINUX_THREADS];
     let mut count = 0usize;
     {
@@ -11887,6 +11924,144 @@ fn linux_inotify_init(
     .ok_or(CompatErrno::NoSpace)
 }
 
+/// Creates a classic fanotify notification group.
+fn linux_fanotify_init(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const FAN_CLOEXEC: u32 = 0x1;
+    const FAN_NONBLOCK: u32 = 0x2;
+    const FAN_CLASS_CONTENT: u32 = 0x4;
+    const FAN_CLASS_PRE_CONTENT: u32 = 0x8;
+    const FAN_UNLIMITED_QUEUE: u32 = 0x10;
+    const FAN_UNLIMITED_MARKS: u32 = 0x20;
+    const FAN_ENABLE_AUDIT: u32 = 0x40;
+    const O_NONBLOCK: u32 = 0x800;
+    const O_CLOEXEC: u32 = 0x80000;
+    const O_LARGEFILE: u32 = 0x8000;
+    let flags = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let event_flags = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if flags & (FAN_CLASS_CONTENT | FAN_CLASS_PRE_CONTENT) != 0
+        || flags
+            & !(FAN_CLOEXEC
+                | FAN_NONBLOCK
+                | FAN_CLASS_CONTENT
+                | FAN_CLASS_PRE_CONTENT
+                | FAN_UNLIMITED_QUEUE
+                | FAN_UNLIMITED_MARKS
+                | FAN_ENABLE_AUDIT)
+            != 0
+        || event_flags & !(O_NONBLOCK | O_CLOEXEC | O_LARGEFILE) != 0
+    {
+        return Err(CompatErrno::NotSupported);
+    }
+    proc::linux_fanotify_create(
+        pid,
+        flags & FAN_CLOEXEC != 0,
+        flags & FAN_NONBLOCK != 0,
+        event_flags & O_CLOEXEC != 0,
+    )
+    .map(u64::from)
+    .ok_or(CompatErrno::NoSpace)
+}
+
+/// Adds or removes one inode, mount, or filesystem fanotify mark.
+fn linux_fanotify_mark(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const FAN_MARK_ADD: u32 = 0x1;
+    const FAN_MARK_REMOVE: u32 = 0x2;
+    const FAN_MARK_DONT_FOLLOW: u32 = 0x4;
+    const FAN_MARK_ONLYDIR: u32 = 0x8;
+    const FAN_MARK_MOUNT: u32 = 0x10;
+    const FAN_MARK_FILESYSTEM: u32 = 0x100;
+    const FAN_ACCESS: u64 = 0x1;
+    const FAN_MODIFY: u64 = 0x2;
+    const FAN_CLOSE_WRITE: u64 = 0x8;
+    const FAN_CLOSE_NOWRITE: u64 = 0x10;
+    const FAN_OPEN: u64 = 0x20;
+    const FAN_OPEN_EXEC: u64 = 0x1000;
+    const FAN_EVENT_ON_CHILD: u64 = 0x0800_0000;
+    const FAN_ONDIR: u64 = 0x4000_0000;
+    const NOTIFICATION_MASK: u64 =
+        FAN_ACCESS | FAN_MODIFY | FAN_CLOSE_WRITE | FAN_CLOSE_NOWRITE | FAN_OPEN | FAN_OPEN_EXEC;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Inotify {
+        return Err(CompatErrno::BadFd);
+    }
+    let flags = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let mask = args[2];
+    let scope_flags = flags & (FAN_MARK_MOUNT | FAN_MARK_FILESYSTEM);
+    if flags & !(FAN_MARK_ADD
+        | FAN_MARK_REMOVE
+        | FAN_MARK_DONT_FOLLOW
+        | FAN_MARK_ONLYDIR
+        | FAN_MARK_MOUNT
+        | FAN_MARK_FILESYSTEM)
+        != 0
+        || flags & (FAN_MARK_ADD | FAN_MARK_REMOVE)
+            != FAN_MARK_ADD
+                && flags & (FAN_MARK_ADD | FAN_MARK_REMOVE) != FAN_MARK_REMOVE
+        || scope_flags == (FAN_MARK_MOUNT | FAN_MARK_FILESYSTEM)
+        || mask & !(NOTIFICATION_MASK | FAN_EVENT_ON_CHILD | FAN_ONDIR) != 0
+    {
+        return Err(CompatErrno::NotSupported);
+    }
+    if !is_at_fdcwd(args[3]) || args[4] == 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    let node = resolve_linux_path_node(pid, args[4])?;
+    if flags & FAN_MARK_ONLYDIR != 0 && !node.is_directory() {
+        return Err(CompatErrno::NotDirectory);
+    }
+    if scope_flags != 0
+        && node
+            != crate::linux_vfs::Node::Directory(crate::linux_vfs::DirectoryId::Root)
+    {
+        return Err(CompatErrno::NotSupported);
+    }
+    let scope = if scope_flags == FAN_MARK_FILESYSTEM {
+        2
+    } else if scope_flags == FAN_MARK_MOUNT {
+        1
+    } else {
+        0
+    };
+    let state = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let mut state = state.lock();
+    if !state.fanotify {
+        return Err(CompatErrno::BadFd);
+    }
+    if flags & FAN_MARK_REMOVE != 0 {
+        let before = state.fanotify_marks.len();
+        state
+            .fanotify_marks
+            .retain(|mark| !(mark.node == node && mark.scope == scope));
+        return if state.fanotify_marks.len() == before {
+            Err(CompatErrno::NoEntry)
+        } else {
+            Ok(0)
+        };
+    }
+    if let Some(mark) = state
+        .fanotify_marks
+        .iter_mut()
+        .find(|mark| mark.node == node && mark.scope == scope)
+    {
+        mark.mask = mask;
+        return Ok(0);
+    }
+    if state.fanotify_marks.len() >= 64 {
+        return Err(CompatErrno::NoSpace);
+    }
+    state
+        .fanotify_marks
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    state.fanotify_marks.push(proc::LinuxFanotifyMark {
+        node,
+        mask,
+        scope,
+    });
+    Ok(0)
+}
+
 /// Adds or updates one inotify watch on a static compatibility node.
 fn linux_inotify_add_watch(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const IN_ONLYDIR: u32 = 0x0100_0000;
@@ -11921,6 +12096,9 @@ fn linux_inotify_add_watch(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
     }
     let state = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
     let mut state = state.lock();
+    if state.fanotify {
+        return Err(CompatErrno::BadFd);
+    }
     if let Some(watch) = state.watches.iter_mut().find(|watch| watch.node == node) {
         if mask & IN_MASK_CREATE != 0 {
             return Err(CompatErrno::Exists);
@@ -11964,6 +12142,9 @@ fn linux_inotify_rm_watch(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno
     }
     let state = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
     let mut state = state.lock();
+    if state.fanotify {
+        return Err(CompatErrno::BadFd);
+    }
     let Some(index) = state.watches.iter().position(|watch| watch.wd == wd) else {
         return Err(CompatErrno::Invalid);
     };
@@ -11982,6 +12163,94 @@ fn linux_inotify_rm_watch(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno
     drop(state);
     wake_message_queue_waiters();
     Ok(0)
+}
+
+/// Reads classic fanotify event metadata and installs one file descriptor per
+/// delivered event.
+fn linux_fanotify_read(
+    pid: ObjId,
+    fd: u32,
+    address: u64,
+    len: usize,
+) -> Result<u64, CompatErrno> {
+    const EVENT_BYTES: usize = 24;
+    const MAX_EVENTS: usize = 8;
+    if len < EVENT_BYTES {
+        return Err(CompatErrno::Invalid);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Inotify {
+        return Err(CompatErrno::BadFd);
+    }
+    let state = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking =
+        proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    loop {
+        let (batch, event_cloexec) = {
+            let mut state = state.lock();
+            if !state.fanotify {
+                return Err(CompatErrno::BadFd);
+            }
+            let count = (len / EVENT_BYTES).min(MAX_EVENTS).min(state.fanotify_events.len());
+            let batch = state.fanotify_events.drain(..count).collect::<alloc::vec::Vec<_>>();
+            (batch, state.fanotify_event_cloexec)
+        };
+        if batch.is_empty() {
+            if nonblocking {
+                return Err(CompatErrno::TryAgain);
+            }
+            if proc::current_exiting() || current_signal_pending(pid) {
+                return Err(CompatErrno::Interrupted);
+            }
+            sched::pause();
+            continue;
+        }
+        let mut output = alloc::vec![0u8; batch.len() * EVENT_BYTES];
+        let mut installed = alloc::vec::Vec::new();
+        let mut failed = false;
+        for (index, event) in batch.iter().enumerate() {
+            let event_fd = match event.node {
+                crate::linux_vfs::Node::File(file) => {
+                    proc::linux_install_file(pid, file.handle(), event_cloexec)
+                }
+                crate::linux_vfs::Node::Directory(directory) => {
+                    proc::linux_install_dir(pid, directory.handle(), event_cloexec)
+                }
+                crate::linux_vfs::Node::Executable(_) => {
+                    proc::linux_install_path(pid, event.node, event_cloexec)
+                }
+            };
+            let Some(event_fd) = event_fd else {
+                failed = true;
+                break;
+            };
+            installed.push(event_fd);
+            let base = index * EVENT_BYTES;
+            output[base..base + 4].copy_from_slice(&(EVENT_BYTES as u32).to_le_bytes());
+            output[base + 4] = 3;
+            output[base + 5] = 0;
+            output[base + 6..base + 8].copy_from_slice(&(EVENT_BYTES as u16).to_le_bytes());
+            output[base + 8..base + 16].copy_from_slice(&event.mask.to_le_bytes());
+            output[base + 16..base + 20]
+                .copy_from_slice(&(event_fd as i32).to_le_bytes());
+            output[base + 20..base + 24].copy_from_slice(&event.pid.to_le_bytes());
+        }
+        if failed || copy_to_user(address, &output, output.len()).is_err() {
+            for event_fd in installed {
+                let _ = proc::linux_close_fd(pid, event_fd);
+            }
+            let mut state = state.lock();
+            for event in batch.into_iter().rev() {
+                state.fanotify_events.push_front(event);
+            }
+            return Err(if failed {
+                CompatErrno::NoSpace
+            } else {
+                CompatErrno::Fault
+            });
+        }
+        return Ok(output.len() as u64);
+    }
 }
 
 /// Reads queued inotify control events.
@@ -13864,6 +14133,17 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
     }
     .ok_or(CompatErrno::NoSpace)?;
+    let event_mask = 0x20u64
+        | if node.is_directory() {
+            0x4000_0000u64
+        } else {
+            0
+        };
+    proc::linux_fanotify_notify(
+        node,
+        event_mask,
+        proc::linux_pid(pid).unwrap_or(0),
+    );
     Ok(u64::from(fd))
 }
 
@@ -16910,8 +17190,8 @@ fn linux_epoll_readiness(
             ready
         }
         compat_core::fd::CompatKind::Inotify => {
-            let state = proc::linux_inotify_state(pid, registration.handle)?;
-            if requested & EPOLLIN != 0 && !state.lock().events.is_empty() {
+            if requested & EPOLLIN != 0
+                && proc::linux_notification_ready(pid, registration.handle)? {
                 EPOLLIN
             } else {
                 0
@@ -17172,13 +17452,9 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     }
                 }
                 Some(entry) if entry.kind == compat_core::fd::CompatKind::Inotify => {
-                    let Some(state) =
-                        proc::linux_inotify_state(pid, entry.handle)
-                    else {
-                        continue;
-                    };
                     if events & POLLIN != 0
-                        && !state.lock().events.is_empty()
+                        && proc::linux_notification_ready(pid, entry.handle)
+                            == Some(true)
                     {
                         POLLIN
                     } else {
