@@ -11197,11 +11197,8 @@ fn linux_keyctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     return Err(CompatErrno::Access);
                 }
                 alloc::format!(
-                    "jasper-key:{}:{}:{}:{}\0",
-                    application.stable_id,
-                    key.serial,
-                    key.uid,
-                    key.gid
+                    "jasper-key:{:016x}\0",
+                    application.stable_id
                 )
             };
             if args[2] == 0 {
