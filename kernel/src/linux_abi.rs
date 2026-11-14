@@ -2760,6 +2760,7 @@ fn execute(
         LinuxSyscall::NameToHandleAt => compat_result(linux_name_to_handle_at(pid, call.args)),
         LinuxSyscall::OpenByHandleAt => compat_result(linux_open_by_handle_at(pid, call.args)),
         LinuxSyscall::LsmGetSelfAttr => compat_result(linux_lsm_get_self_attr(pid, call.args)),
+        LinuxSyscall::LsmSetSelfAttr => compat_result(linux_lsm_set_self_attr(pid, call.args)),
         LinuxSyscall::OpenTree => compat_result(linux_open_tree(pid, call.args)),
         LinuxSyscall::OpenTreeAttr => compat_result(linux_open_tree_attr(pid, call.args)),
         LinuxSyscall::Listns => compat_result(linux_listns(call.args)),
@@ -2782,7 +2783,6 @@ fn execute(
         LinuxSyscall::MovePages => compat_result(linux_move_pages(pid, call.args)),
         LinuxSyscall::FanotifyInit
         | LinuxSyscall::FanotifyMark
-        | LinuxSyscall::LsmSetSelfAttr
         | LinuxSyscall::MapShadowStack
         | LinuxSyscall::Uprobe
         | LinuxSyscall::Uretprobe
@@ -10202,6 +10202,92 @@ fn linux_lsm_get_self_attr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
     }
     copy_to_user(args[1], &record, record.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(1)
+}
+
+/// Applies one bounded Jasper LSM self-label without allowing privilege
+/// escalation. The context is the same versioned form exposed by get-self-attr.
+fn linux_lsm_set_self_attr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    use kernel_core::mac::{Integrity, MacLabel, Secrecy};
+    use kernel_core::security::SecurityDomain;
+
+    const LSM_ATTR_CURRENT: u32 = 100;
+    const LSM_FLAG_SINGLE: u32 = 1;
+    const JASPER_LSM_ID: u64 = 0x4a53_0001;
+    const RECORD_FIXED: usize = 32;
+    const MAX_CONTEXT: usize = 4096;
+
+    let attribute = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let flags = u32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    if attribute != LSM_ATTR_CURRENT || flags & !LSM_FLAG_SINGLE != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    let mut available = [0u8; 4];
+    copy_from_user(&mut available, args[2], 4).map_err(|_| CompatErrno::Fault)?;
+    let available = usize::try_from(u32::from_le_bytes(available))
+        .map_err(|_| CompatErrno::Invalid)?;
+    if available < RECORD_FIXED {
+        return Err(CompatErrno::Invalid);
+    }
+    if available > MAX_CONTEXT {
+        return Err(CompatErrno::ArgumentTooLong);
+    }
+    let mut record = alloc::vec![0u8; available];
+    copy_from_user(&mut record, args[1], available).map_err(|_| CompatErrno::Fault)?;
+    let id = u64::from_le_bytes(record[0..8].try_into().unwrap());
+    let record_flags = u64::from_le_bytes(record[8..16].try_into().unwrap());
+    let length = usize::try_from(u64::from_le_bytes(record[16..24].try_into().unwrap()))
+        .map_err(|_| CompatErrno::Invalid)?;
+    let context_len = usize::try_from(u64::from_le_bytes(record[24..32].try_into().unwrap()))
+        .map_err(|_| CompatErrno::Invalid)?;
+    if id != JASPER_LSM_ID || record_flags != 0 || context_len == 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let expected_length = RECORD_FIXED
+        .checked_add(context_len)
+        .and_then(|value| value.checked_add(7))
+        .map(|value| value & !7)
+        .ok_or(CompatErrno::Overflow)?;
+    if length != expected_length || length > available {
+        return Err(CompatErrno::Invalid);
+    }
+    let context_end = RECORD_FIXED
+        .checked_add(context_len)
+        .ok_or(CompatErrno::Overflow)?;
+    let context = &record[RECORD_FIXED..context_end];
+    if context.last() != Some(&0) || context[..context_len - 1].contains(&0) {
+        return Err(CompatErrno::Invalid);
+    }
+    let text = core::str::from_utf8(&context[..context_len - 1])
+        .map_err(|_| CompatErrno::Invalid)?;
+    let rest = text
+        .strip_prefix("jasper:v1:domain=")
+        .ok_or(CompatErrno::Invalid)?;
+    let (domain, rest) = rest
+        .split_once(":secrecy=")
+        .ok_or(CompatErrno::Invalid)?;
+    let (secrecy, rest) = rest
+        .split_once(":integrity=")
+        .ok_or(CompatErrno::Invalid)?;
+    let (integrity, classes) = rest
+        .split_once(":classes=")
+        .ok_or(CompatErrno::Invalid)?;
+    let domain = u32::from_str_radix(domain, 10).map_err(|_| CompatErrno::Invalid)?;
+    let secrecy = Secrecy::from_raw(
+        u8::from_str_radix(secrecy, 10).map_err(|_| CompatErrno::Invalid)?,
+    )
+    .ok_or(CompatErrno::Invalid)?;
+    let integrity = Integrity::from_raw(
+        u8::from_str_radix(integrity, 10).map_err(|_| CompatErrno::Invalid)?,
+    )
+    .ok_or(CompatErrno::Invalid)?;
+    let classes = classes
+        .strip_prefix("0x")
+        .ok_or(CompatErrno::Invalid)
+        .and_then(|value| u16::from_str_radix(value, 16).map_err(|_| CompatErrno::Invalid))?;
+    let replacement = MacLabel::new(SecurityDomain(domain), secrecy, integrity, classes);
+    crate::security::attenuate_process_mac_label(pid, replacement)
+        .map_err(|_| CompatErrno::Perm)?;
+    Ok(0)
 }
 
 fn linux_file_attr_validate(

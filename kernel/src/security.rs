@@ -392,6 +392,35 @@ pub fn process_mac_label_in(t: &Table, pid: ObjId) -> Option<MacLabel> {
     Some(t.security(pid).ok()?.mac)
 }
 
+/// Applies a process-requested MAC self-label only when every security
+/// dimension is equal or narrower than the current label.
+pub fn attenuate_process_mac_label(pid: ObjId, replacement: MacLabel) -> Result<(), MacDenial> {
+    kobj::with(|t| {
+        if !matches!(t.get(pid), Ok(kobj::KObject::Process(_))) {
+            return Err(MacDenial::InvalidSubjectLabel);
+        }
+        let current = t.security(pid).map_err(|_| MacDenial::InvalidSubjectLabel)?;
+        let existing = current.mac;
+        if !existing.is_supported() || !replacement.is_supported() {
+            return Err(MacDenial::InvalidSubjectLabel);
+        }
+        if replacement.domain != existing.domain {
+            return Err(MacDenial::NoRule);
+        }
+        if replacement.secrecy > existing.secrecy {
+            return Err(MacDenial::SecrecyDenied);
+        }
+        if replacement.integrity > existing.integrity {
+            return Err(MacDenial::IntegrityDenied);
+        }
+        if replacement.object_classes & !existing.object_classes != 0 {
+            return Err(MacDenial::ClassDenied);
+        }
+        t.replace_mac_if_current(pid, existing, replacement)
+            .map_err(|_| MacDenial::InvalidSubjectLabel)
+    })
+}
+
 #[cfg(feature = "sec3-verify")]
 pub fn set_mac_for_verify(id: ObjId, mac: MacLabel) -> Result<(), ()> {
     kobj::with(|t| t.set_mac_for_verify(id, mac).map_err(|_| ()))

@@ -310,6 +310,22 @@ impl<T: 'static> ObjectTable<T> {
         Ok(())
     }
 
+    /// Replace a MAC label only if the caller's previously observed label is
+    /// still current. Security policy computes and validates the attenuation.
+    pub fn replace_mac_if_current(
+        &mut self,
+        id: ObjId,
+        expected: crate::mac::MacLabel,
+        replacement: crate::mac::MacLabel,
+    ) -> Result<(), ObjError> {
+        let entry = self.entry_mut(id)?;
+        if entry.security.mac != expected {
+            return Err(ObjError::Invalid);
+        }
+        entry.security.mac = replacement;
+        Ok(())
+    }
+
     fn entry(&self, id: ObjId) -> Result<&Entry<T>, ObjError> {
         let slot = self.slots.get(id.index as usize).ok_or(ObjError::Invalid)?;
         match &slot.entry {

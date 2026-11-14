@@ -5850,7 +5850,6 @@ jasper_android_binder:
     }
     const long unsupported_features[] = {
         SYS_fanotify_init, SYS_fanotify_mark,
-        SYS_lsm_set_self_attr,
         SYS_map_shadow_stack,
         SYS_uprobe, SYS_uretprobe, SYS_userfaultfd,
     };
@@ -7014,6 +7013,33 @@ jasper_android_binder:
         memcmp(((struct lsm_ctx *)lsm_context_bytes)->ctx,
                "jasper:v", 8) != 0) {
         return 634;
+    }
+    uint32_t lsm_set_size = lsm_context_size;
+    if (syscall(SYS_lsm_set_self_attr, LSM_ATTR_CURRENT,
+                lsm_context_bytes, &lsm_set_size, 0) != 0) {
+        return 710;
+    }
+    struct lsm_ctx *self_attr = (struct lsm_ctx *)lsm_context_bytes;
+    char *secrecy_value = strstr(self_attr->ctx, ":secrecy=");
+    if (secrecy_value == NULL ||
+        secrecy_value[9] < '0' || secrecy_value[9] > '3') {
+        return 710;
+    }
+    if (secrecy_value[9] < '3') {
+        char original_secrecy = secrecy_value[9];
+        secrecy_value[9] = '3';
+        errno = 0;
+        long escalation =
+            syscall(SYS_lsm_set_self_attr, LSM_ATTR_CURRENT,
+                    lsm_context_bytes, &lsm_set_size, 0);
+        int escalation_errno = errno;
+        secrecy_value[9] = original_secrecy;
+        if (escalation != -1 || escalation_errno != EPERM) {
+            dprintf(STDOUT_FILENO,
+                    "lsm-set-self-attr-fail result=%ld errno=%d\n",
+                    escalation, escalation_errno);
+            return 710;
+        }
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
