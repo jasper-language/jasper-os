@@ -93,10 +93,8 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
     #[cfg(not(feature = "native-install-abi-verify"))]
     let allowed = SyscallSet::of(&[
         abi::SYSTEM_CONSOLE_WRITE,
-        abi::SYSTEM_ABI_GET,
         abi::SYSTEM_MEMORY_MAP,
         abi::SYSTEM_PROCESS_EXIT,
-        abi::SYSTEM_TASK_EXIT,
         abi::SYSTEM_PROCESS_WAIT,
         abi::SYSTEM_HANDLE_CLOSE,
         abi::SYSTEM_SANDBOX_CREATE,

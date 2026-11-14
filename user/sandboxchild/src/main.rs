@@ -53,7 +53,7 @@ fn write(text: &str) -> i64 {
 pub extern "C" fn _start() -> ! {
     let _ = write("sandbox-child: running native bound workload\n");
     unsafe {
-        syscall2(ids::SYSTEM_TASK_EXIT, 0, 0);
+        syscall2(ids::SYSTEM_PROCESS_EXIT, 0, 0);
     }
     loop {
         core::hint::spin_loop();
@@ -63,7 +63,7 @@ pub extern "C" fn _start() -> ! {
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     unsafe {
-        syscall2(ids::SYSTEM_TASK_EXIT, 101, 0);
+        syscall2(ids::SYSTEM_PROCESS_EXIT, 101, 0);
     }
     loop {
         core::hint::spin_loop();

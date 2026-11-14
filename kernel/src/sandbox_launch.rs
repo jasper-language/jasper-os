@@ -392,11 +392,7 @@ pub fn start(
         return Err(error);
     }
 
-    let calls = SyscallSet::of(&[
-        abi::SYSTEM_CONSOLE_WRITE,
-        abi::SYSTEM_ABI_GET,
-        abi::SYSTEM_TASK_EXIT,
-    ]);
+    let calls = SyscallSet::of(&[abi::SYSTEM_CONSOLE_WRITE, abi::SYSTEM_PROCESS_EXIT]);
     let spawned = match proc::spawn::spawn_child_with_workload(
         parent,
         image,
