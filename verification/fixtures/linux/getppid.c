@@ -50,6 +50,16 @@
 #include <utime.h>
 #include <unistd.h>
 
+#ifndef SYS_cachestat
+#define SYS_cachestat 451
+#endif
+#ifndef SYS_rt_tgsigqueueinfo
+#define SYS_rt_tgsigqueueinfo 297
+#endif
+#ifndef SYS_process_madvise
+#define SYS_process_madvise 440
+#endif
+
 #define JASPER_ASHMEM_SET_NAME 0x41006101UL
 #define JASPER_ASHMEM_SET_PROT_MASK 0x40046102UL
 #define JASPER_ASHMEM_SET_SIZE 0x40086103UL
@@ -104,6 +114,10 @@ static void signal_noop(int signal) {
 static volatile sig_atomic_t posix_timer_signals;
 static volatile sig_atomic_t interval_timer_signals;
 static volatile sig_atomic_t sigsuspend_signals;
+static volatile sig_atomic_t rt_queue_signals;
+static volatile sig_atomic_t rt_queue_values[4];
+static volatile sig_atomic_t rt_queue_code;
+static volatile sig_atomic_t rt_queue_pid;
 
 static void posix_timer_signal_handler(int signal) {
     if (signal == SIGUSR1) {
@@ -121,6 +135,17 @@ static void sigsuspend_signal_handler(int signal) {
     if (signal == SIGUSR1) {
         sigsuspend_signals++;
     }
+}
+
+static void rt_queue_signal_handler(int signal, siginfo_t *info, void *context) {
+    (void)signal;
+    (void)context;
+    if (info == NULL || rt_queue_signals >= 4) {
+        return;
+    }
+    rt_queue_values[rt_queue_signals++] = info->si_value.sival_int;
+    rt_queue_code = info->si_code;
+    rt_queue_pid = info->si_pid;
 }
 
 static int wait_for_interval_signals(int expected) {
@@ -289,6 +314,91 @@ int main(void) {
         !sigismember(&pending_signal, SIGUSR1) ||
         sigprocmask(SIG_UNBLOCK, &blocked_signal, NULL) != 0) {
         return 238;
+    }
+    struct sigaction rt_action = {0};
+    rt_action.sa_sigaction = rt_queue_signal_handler;
+    rt_action.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&rt_action.sa_mask);
+    sigset_t rt_mask;
+    sigset_t rt_old_mask;
+    sigset_t rt_pending_mask;
+    sigemptyset(&rt_mask);
+    sigaddset(&rt_mask, SIGRTMIN);
+    if (sigaction(SIGRTMIN, &rt_action, NULL) != 0 ||
+        sigprocmask(SIG_BLOCK, &rt_mask, &rt_old_mask) != 0) {
+        return 542;
+    }
+    union sigval first_value = {.sival_int = 0x1111};
+    union sigval second_value = {.sival_int = 0x2222};
+    if (sigqueue(getpid(), SIGRTMIN, first_value) != 0 ||
+        sigqueue(getpid(), SIGRTMIN, second_value) != 0 ||
+        sigpending(&rt_pending_mask) != 0 ||
+        !sigismember(&rt_pending_mask, SIGRTMIN) ||
+        sigprocmask(SIG_SETMASK, &rt_old_mask, NULL) != 0) {
+        return 543;
+    }
+    struct timespec rt_deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &rt_deadline) != 0) {
+        return 544;
+    }
+    rt_deadline.tv_sec += 1;
+    const struct timespec rt_delay = {.tv_sec = 0, .tv_nsec = 5000000L};
+    struct timespec rt_now;
+    while (rt_queue_signals < 2) {
+        struct timespec remaining = rt_delay;
+        nanosleep(&remaining, NULL);
+        if (clock_gettime(CLOCK_MONOTONIC, &rt_now) != 0 ||
+            rt_now.tv_sec > rt_deadline.tv_sec ||
+            (rt_now.tv_sec == rt_deadline.tv_sec &&
+             rt_now.tv_nsec >= rt_deadline.tv_nsec)) {
+            break;
+        }
+    }
+    if (rt_queue_signals != 2 ||
+        rt_queue_values[0] != 0x1111 ||
+        rt_queue_values[1] != 0x2222 ||
+        rt_queue_code != SI_QUEUE ||
+        rt_queue_pid != getpid()) {
+        return 545;
+    }
+    sigemptyset(&rt_mask);
+    sigaddset(&rt_mask, SIGRTMIN + 1);
+    if (sigaction(SIGRTMIN + 1, &rt_action, NULL) != 0) {
+        return 546;
+    }
+    rt_queue_signals = 0;
+    siginfo_t thread_info = {0};
+    thread_info.si_signo = SIGRTMIN + 1;
+    thread_info.si_code = SI_QUEUE;
+    thread_info.si_value.sival_int = 0x3333;
+    if (syscall(SYS_rt_tgsigqueueinfo, getpid(), (pid_t)syscall(SYS_gettid),
+                SIGRTMIN + 1, &thread_info) != 0) {
+        return 547;
+    }
+    rt_deadline.tv_sec = rt_now.tv_sec + 1;
+    rt_deadline.tv_nsec = rt_now.tv_nsec;
+    while (rt_queue_signals == 0) {
+        struct timespec remaining = rt_delay;
+        nanosleep(&remaining, NULL);
+        if (clock_gettime(CLOCK_MONOTONIC, &rt_now) != 0 ||
+            rt_now.tv_sec > rt_deadline.tv_sec ||
+            (rt_now.tv_sec == rt_deadline.tv_sec &&
+             rt_now.tv_nsec >= rt_deadline.tv_nsec)) {
+            break;
+        }
+    }
+    if (rt_queue_signals != 1 ||
+        rt_queue_values[0] != 0x3333 ||
+        rt_queue_code != SI_QUEUE ||
+        rt_queue_pid != getpid()) {
+        return 548;
+    }
+    thread_info.si_code = 1;
+    errno = 0;
+    if (syscall(SYS_rt_tgsigqueueinfo, getpid(), (pid_t)syscall(SYS_gettid),
+                SIGRTMIN + 1, &thread_info) != -1 ||
+        errno != EPERM) {
+        return 549;
     }
     sigset_t signalfd_saved_mask;
     sigset_t signalfd_mask;
@@ -2327,6 +2437,31 @@ int main(void) {
         }
         int context_result =
             ioctl(server, BINDER_SET_CONTEXT_MGR_EXT, &manager_object);
+    int manager_node_found = 0;
+    struct binder_node_debug_info manager_debug = {0};
+    for (int node_index = 0; node_index < 16; node_index++) {
+        if (ioctl(server, BINDER_GET_NODE_DEBUG_INFO, &manager_debug) != 0) {
+            return 533;
+        }
+        if (manager_debug.ptr == 0) {
+            break;
+        }
+        if (manager_debug.ptr ==
+                (binder_uintptr_t)(uintptr_t)&manager_object &&
+            manager_debug.cookie == 0x5151 &&
+            manager_debug.has_strong_ref != 0) {
+            struct binder_node_debug_info after_manager = manager_debug;
+            if (ioctl(server, BINDER_GET_NODE_DEBUG_INFO,
+                      &after_manager) != 0) {
+                return 534;
+            }
+            manager_node_found = 1;
+            break;
+        }
+    }
+    if (!manager_node_found) {
+        return 535;
+    }
     if (context_result != 0 || write(binder_ready[1], "R", 1) != 1) {
         printf("binder-server-fail stage=context rc=%d errno=%d\n",
                context_result, errno);
@@ -2426,6 +2561,19 @@ int main(void) {
         received_objects.binder.handle == 0 ||
         received_objects.binder.cookie != 0) {
         return 178;
+    }
+    struct binder_node_info_for_ref second_node_info = {
+        .handle = received_objects.binder.handle,
+    };
+    if (ioctl(server, BINDER_GET_NODE_INFO_FOR_REF,
+              &second_node_info) != 0 ||
+        second_node_info.handle != received_objects.binder.handle ||
+        second_node_info.strong_count != 1 ||
+        second_node_info.weak_count != 0 ||
+        second_node_info.reserved1 != 0 ||
+        second_node_info.reserved2 != 0 ||
+        second_node_info.reserved3 != 0) {
+        return 536;
     }
     char received_fd_data[4] = {0};
     if (read(received_objects.fd.fd, received_fd_data, 4) != 4 ||
@@ -3801,6 +3949,28 @@ int main(void) {
         memcmp(pidfd_magic, "\177ELF", 4) != 0) {
         return 510;
     }
+    unsigned char *madvise_page =
+        mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    struct iovec madvise_range = {
+        .iov_base = madvise_page,
+        .iov_len = 4096,
+    };
+    if (madvise_page == MAP_FAILED) {
+        return 550;
+    }
+    memset(madvise_page, 0x5a, 4096);
+    if (syscall(SYS_process_madvise, self_pidfd, &madvise_range, 1,
+                MADV_DONTNEED, 0) != 4096 ||
+        madvise_page[0] != 0) {
+        return 551;
+    }
+    errno = 0;
+    if (syscall(SYS_process_madvise, self_pidfd, &madvise_range, 1,
+                MADV_WILLNEED, 1) != -1 || errno != EINVAL ||
+        munmap(madvise_page, 4096) != 0) {
+        return 552;
+    }
     errno = 0;
     if (syscall(SYS_pidfd_getfd, self_pidfd, pidfd_source, 1) != -1 ||
         errno != EINVAL ||
@@ -4160,6 +4330,53 @@ int main(void) {
                 4, 0x10) != -1 || errno != EINVAL) {
         return 528;
     }
+    struct iovec vmsplice_vectors[] = {
+        {.iov_base = "VM", .iov_len = 2},
+        {.iov_base = "SPL", .iov_len = 3},
+    };
+    memset(splice_readback, 0, sizeof(splice_readback));
+    if (syscall(SYS_vmsplice, splice_source_pipe[1], vmsplice_vectors,
+                sizeof(vmsplice_vectors) / sizeof(vmsplice_vectors[0]),
+                0) != 5 ||
+        read(splice_source_pipe[0], splice_readback, 5) != 5 ||
+        memcmp(splice_readback, "VMSPL", 5) != 0) {
+        return 537;
+    }
+    errno = 0;
+    if (syscall(SYS_vmsplice, splice_source_pipe[1], vmsplice_vectors,
+                1, 0x10) != -1 || errno != EINVAL) {
+        return 538;
+    }
+    errno = 0;
+    if (syscall(SYS_vmsplice, 0, vmsplice_vectors, 1, 0) != -1 ||
+        errno != EBADF) {
+        return 539;
+    }
+    errno = 0;
+    if (syscall(SYS_membarrier, 8, 0, -1) != -1 || errno != EPERM) {
+        return 529;
+    }
+    if (syscall(SYS_membarrier, 16, 0, -1) != 0 ||
+        syscall(SYS_membarrier, 8, 0, -1) != 0 ||
+        syscall(SYS_membarrier, 64, 0, -1) != 0 ||
+        syscall(SYS_membarrier, 32, 0, -1) != 0 ||
+        syscall(SYS_membarrier, 256, 0, -1) != 0 ||
+        syscall(SYS_membarrier, 128, 0, -1) != 0) {
+        return 530;
+    }
+    long membarrier_supported = syscall(SYS_membarrier, 0, 0, 0);
+    long membarrier_registered = syscall(SYS_membarrier, 512, 0, -1);
+    if (membarrier_supported < 0 ||
+        (membarrier_supported & (2 | 8 | 32 | 128 | 512)) !=
+            (2 | 8 | 32 | 128 | 512) ||
+        membarrier_registered != (8 | 32 | 128) ||
+        syscall(SYS_membarrier, 1, 0, -1) != 0) {
+        return 531;
+    }
+    errno = 0;
+    if (syscall(SYS_membarrier, 8, 1, -1) != -1 || errno != EINVAL) {
+        return 532;
+    }
     int splice_file =
         syscall(SYS_open, "/usr/lib/x86_64-linux-gnu/libc.so.6",
                 O_RDONLY | O_CLOEXEC, 0);
@@ -4172,6 +4389,31 @@ int main(void) {
         read(splice_source_pipe[0], splice_readback, 4) != 4 ||
         memcmp(splice_readback, "\177ELF", 4) != 0) {
         return 518;
+    }
+    struct cachestat_range_probe {
+        uint64_t offset;
+        uint64_t length;
+    } cachestat_range = {.offset = 0, .length = 4096};
+    struct cachestat_probe {
+        uint64_t cached;
+        uint64_t dirty;
+        uint64_t writeback;
+        uint64_t evicted;
+        uint64_t recently_evicted;
+    } cachestat_info = {0};
+    if (syscall(SYS_cachestat, splice_file, &cachestat_range,
+                &cachestat_info, 0) != 0 ||
+        cachestat_info.cached != 1 ||
+        cachestat_info.dirty != 0 ||
+        cachestat_info.writeback != 0 ||
+        cachestat_info.evicted != 0 ||
+        cachestat_info.recently_evicted != 0) {
+        return 540;
+    }
+    errno = 0;
+    if (syscall(SYS_cachestat, splice_file, &cachestat_range,
+                &cachestat_info, 1) != -1 || errno != EINVAL) {
+        return 541;
     }
     errno = 0;
     if (syscall(SYS_splice, splice_file, &splice_offset,

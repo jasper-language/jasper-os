@@ -264,6 +264,66 @@ pub(crate) fn release_thread(pid: ObjId, tid: u32) {
         .retain(|thread| thread.process != pid || thread.tid != tid);
 }
 
+/// Returns one node in pointer-cursor order for `BINDER_GET_NODE_DEBUG_INFO`.
+pub(crate) fn get_node_debug_info(_pid: ObjId, request: u64) -> Result<u64, CompatErrno> {
+    const INFO_BYTES: usize = 24;
+    let mut input = [0u8; INFO_BYTES];
+    copy_from_user(&mut input, request, INFO_BYTES).map_err(|_| CompatErrno::Fault)?;
+    let cursor = u64::from_le_bytes(input[0..8].try_into().unwrap());
+    let state = BINDER.lock();
+    let next = if cursor == 0 {
+        state.nodes.iter().min_by_key(|node| node.id)
+    } else {
+        let current = state
+            .nodes
+            .iter()
+            .find(|node| node.pointer == cursor)
+            .ok_or(CompatErrno::NoEntry)?;
+        state
+            .nodes
+            .iter()
+            .filter(|node| node.id > current.id)
+            .min_by_key(|node| node.id)
+    };
+    let mut output = [0u8; INFO_BYTES];
+    if let Some(node) = next {
+        output[0..8].copy_from_slice(&node.pointer.to_le_bytes());
+        output[8..16].copy_from_slice(&node.cookie.to_le_bytes());
+        output[16..20].copy_from_slice(&u32::from(node.strong_refs != 0).to_le_bytes());
+        output[20..24].copy_from_slice(&u32::from(node.weak_refs != 0).to_le_bytes());
+    }
+    drop(state);
+    copy_to_user(request, &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Returns strong/weak counts for one local Binder handle.
+pub(crate) fn get_node_info_for_ref(pid: ObjId, request: u64) -> Result<u64, CompatErrno> {
+    const INFO_BYTES: usize = 24;
+    let mut input = [0u8; INFO_BYTES];
+    copy_from_user(&mut input, request, INFO_BYTES).map_err(|_| CompatErrno::Fault)?;
+    let handle = u32::from_le_bytes(input[0..4].try_into().unwrap());
+    let state = BINDER.lock();
+    let node_id = state
+        .handles
+        .iter()
+        .find(|binding| binding.recipient == pid && binding.handle == handle)
+        .map(|binding| binding.node)
+        .ok_or(CompatErrno::NoEntry)?;
+    let node = state
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .ok_or(CompatErrno::NoEntry)?;
+    let mut output = [0u8; INFO_BYTES];
+    output[0..4].copy_from_slice(&handle.to_le_bytes());
+    output[4..8].copy_from_slice(&node.strong_refs.to_le_bytes());
+    output[8..12].copy_from_slice(&node.weak_refs.to_le_bytes());
+    drop(state);
+    copy_to_user(request, &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
 pub(crate) fn write_read(pid: ObjId, fd: u32, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let request_pointer = args[2];
     let mut request = [0u8; BINDER_WRITE_READ_BYTES];
