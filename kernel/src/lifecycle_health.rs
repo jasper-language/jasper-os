@@ -664,6 +664,11 @@ fn execute_root_dynamic_programs(
         return Err(HealthError::RootExecute);
     }
     install_root_libraries(root)?;
+#[cfg(feature = "android-fixture-verify")]
+{
+    let ppid_argv: [&[u8]; 1] = [b"/usr/bin/jasper-getppid"];
+    return run_root_program(root, origin, "/usr/bin/jasper-getppid", &ppid_argv);
+}
     let true_argv: [&[u8]; 1] = [b"/bin/true"];
     run_root_program(root, origin, "/bin/true", &true_argv)?;
     let getconf_argv: [&[u8]; 2] = [b"/usr/bin/getconf", b"GNU_LIBC_VERSION"];

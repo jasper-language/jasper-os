@@ -193,6 +193,8 @@ lifecycle-ab-health = ["kernel-core/ext4-view"]
 lifecycle-health-fail-verify = ["lifecycle-ab-health"]
 # Dedicated acceptance: load and execute the static Linux health probe from the selected System root.
 lifecycle-root-exec-verify = ["lifecycle-health-fail-verify", "linux-abi", "compat-elf"]
+# Focused Android UAPI acceptance on the same real root image and UEFI path.
+android-fixture-verify = ["lifecycle-root-exec-verify"]
 # Dedicated negative acceptance: lose the first virtio-blk completion and require
 # the hardware-counter timeout to fail the health gate without hanging silently.
 lifecycle-block-timeout-verify = ["lifecycle-root-exec-verify", "fault-inject"]

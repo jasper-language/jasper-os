@@ -155,6 +155,9 @@ case "$MODE" in
   block-timeout) KERNEL_FEATURES=lifecycle-block-timeout-verify ;;
   *) KERNEL_FEATURES=production,lifecycle-ab-health ;;
 esac
+if [ "${JASPER_ANDROID_ONLY:-0}" = 1 ]; then
+  KERNEL_FEATURES="$KERNEL_FEATURES,android-fixture-verify"
+fi
 if [ "$PREBUILT" = 1 ]; then
   [ -x "$KERNEL" ]
   [ -f "$BOOT_MANAGER" ]
@@ -308,6 +311,22 @@ if [ "$MODE" = native-install-abi ]; then
   grep -aqE $'^(\\[JSR-USERTEXT\\].*text=)?native-install-abi: ok package=true idempotent=true register=true grant=true query=true handle=true rights=true close=true denied_short=true\r?$' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
   echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
+if [ "${JASPER_ANDROID_ONLY:-0}" = 1 ]; then
+  grep -aq '^\[JSR-LIFE-ROOT-EXEC\] path=/usr/libexec/jasper/health-probe .* mapped=true cpl3=true exited=true syscalls=[1-9][0-9]* frames_before=[0-9]* frames_after=[0-9]* resources=true' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/jasper-getppid path=/usr/bin/jasper-getppid interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=false failed=0' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=usr/bin/jasper-getppid path=/usr/bin/jasper-getppid interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true failed=0' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT\] slot=A release=1 schema=1 userland=x86_64-linux-elf' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' \
+    "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \
+    "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE android_only=true qemu_rc=$rc evidence=$OUT"
   exit 0
 fi
 if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ]; then
