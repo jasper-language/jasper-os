@@ -22,6 +22,10 @@ use jasper_lifecycle_boot::commit;
 use jasper_lifecycle_boot::CommitError;
 use kernel_core::block::{self, Request, Terminal};
 use kernel_core::ext4_view::{Ext4ByteSource, Ext4Reader, Ext4SourceError};
+#[cfg(feature = "lifecycle-root-exec-verify")]
+use kernel_core::security::ApplicationIdentity;
+#[cfg(feature = "lifecycle-root-exec-verify")]
+use sha2::{Digest as _, Sha256};
 
 use crate::blk::BlockDevice;
 use crate::sync::IrqSpinLock;
@@ -456,6 +460,7 @@ fn validate_elf_payload(
 #[cfg(feature = "lifecycle-root-exec-verify")]
 fn execute_root_linux_probe(root: &Ext4Reader) -> Result<(), HealthError> {
     const MAX_PROBE_BYTES: usize = 1024 * 1024;
+    const ROOT_PROBE_APP_ID: u64 = 0x4a53_5201;
     let image = root
         .read_file(ROOT_EXEC_PROBE_PATH, MAX_PROBE_BYTES)
         .map_err(|_| HealthError::RootExecute)?;
@@ -474,6 +479,18 @@ fn execute_root_linux_probe(root: &Ext4Reader) -> Result<(), HealthError> {
     ]);
     let pid = crate::proc::create_linux("root-linux-probe", calls)
         .map_err(|_| HealthError::RootExecute)?;
+    let digest: [u8; 32] = Sha256::digest(&image).into();
+    if crate::proc::set_application(
+        pid,
+        ApplicationIdentity::measured(ROOT_PROBE_APP_ID, 1, digest),
+    )
+    .is_err()
+    {
+        crate::proc::exit_idle(pid, -1);
+        let _ = crate::proc::reap(pid);
+        crate::kobj::run_cleanup(usize::MAX);
+        return Err(HealthError::RootExecute);
+    }
     let entry = match crate::proc::load_linux_elf(pid, &image) {
         Ok(entry) => entry,
         Err(_) => {
