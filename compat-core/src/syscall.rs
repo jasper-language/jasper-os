@@ -41,6 +41,7 @@ use linux_raw_sys::general::{
     __NR_madvise, __NR_membarrier, __NR_memfd_create, __NR_mkdir, __NR_mkdirat, __NR_mknod, __NR_mknodat,
     __NR_mincore, __NR_mlock, __NR_mlock2, __NR_mlockall, __NR_mmap, __NR_mprotect,
     __NR_mremap, __NR_msync, __NR_munlock, __NR_munlockall, __NR_munmap,
+    __NR_msgctl, __NR_msgget, __NR_msgrcv, __NR_msgsnd,
     __NR_nanosleep, __NR_newfstatat, __NR_open, __NR_openat, __NR_openat2, __NR_pause,
     __NR_pidfd_getfd, __NR_pidfd_open, __NR_pidfd_send_signal, __NR_pipe, __NR_pipe2, __NR_poll,
     __NR_ppoll, __NR_prctl,
@@ -153,6 +154,10 @@ pub enum LinuxSyscall {
     Accept,
     Accept4,
     SocketPair,
+    MsgGet,
+    MsgCtl,
+    MsgSnd,
+    MsgRcv,
     EventFd,
     EventFd2,
     TimerFdCreate,
@@ -525,6 +530,12 @@ pub enum CompatErrno {
     /// A non-directory operation encountered a directory.
     /// 非目录操作遇到了目录。
     IsDirectory = linux_raw_sys::errno::EISDIR,
+    /// The request exceeds an object-specific data limit.
+    TooBig = linux_raw_sys::errno::E2BIG,
+    /// No message matches the requested SysV receive selector.
+    NoMessage = linux_raw_sys::errno::ENOMSG,
+    /// A SysV IPC object was removed while a waiter was blocked on it.
+    NoId = linux_raw_sys::errno::EIDRM,
     /// Seek is invalid for a pipe or console stream.
     /// 管道或控制台流不支持定位。
     Pipe = linux_raw_sys::errno::ESPIPE,
@@ -587,6 +598,10 @@ pub fn dispatch(request: SyscallRequest) -> SyscallDispatch {
         value if value == u64::from(__NR_accept) => LinuxSyscall::Accept,
         value if value == u64::from(__NR_accept4) => LinuxSyscall::Accept4,
         value if value == u64::from(__NR_socketpair) => LinuxSyscall::SocketPair,
+        value if value == u64::from(__NR_msgget) => LinuxSyscall::MsgGet,
+        value if value == u64::from(__NR_msgctl) => LinuxSyscall::MsgCtl,
+        value if value == u64::from(__NR_msgsnd) => LinuxSyscall::MsgSnd,
+        value if value == u64::from(__NR_msgrcv) => LinuxSyscall::MsgRcv,
         value if value == u64::from(__NR_eventfd) => LinuxSyscall::EventFd,
         value if value == u64::from(__NR_eventfd2) => LinuxSyscall::EventFd2,
         value if value == u64::from(__NR_timerfd_create) => LinuxSyscall::TimerFdCreate,
@@ -900,6 +915,10 @@ mod tests {
             (__NR_accept, LinuxSyscall::Accept),
             (__NR_accept4, LinuxSyscall::Accept4),
             (__NR_socketpair, LinuxSyscall::SocketPair),
+            (__NR_msgget, LinuxSyscall::MsgGet),
+            (__NR_msgctl, LinuxSyscall::MsgCtl),
+            (__NR_msgsnd, LinuxSyscall::MsgSnd),
+            (__NR_msgrcv, LinuxSyscall::MsgRcv),
             (__NR_eventfd, LinuxSyscall::EventFd),
             (__NR_eventfd2, LinuxSyscall::EventFd2),
             (__NR_timerfd_create, LinuxSyscall::TimerFdCreate),
