@@ -37,6 +37,8 @@ const BC_INCREFS: u32 = 0x4004_6304;
 const BC_ACQUIRE: u32 = 0x4004_6305;
 const BC_RELEASE: u32 = 0x4004_6306;
 const BC_DECREFS: u32 = 0x4004_6307;
+const BC_INCREFS_DONE: u32 = 0x4010_6308;
+const BC_ACQUIRE_DONE: u32 = 0x4010_6309;
 const BC_REQUEST_DEATH_NOTIFICATION: u32 = 0x400c_630e;
 const BC_CLEAR_DEATH_NOTIFICATION: u32 = 0x400c_630f;
 const BC_DEAD_BINDER_DONE: u32 = 0x4008_6310;
@@ -51,6 +53,10 @@ const BR_TRANSACTION: u32 = 0x8040_7202;
 const BR_REPLY: u32 = 0x8040_7203;
 const BR_DEAD_REPLY: u32 = 0x7205;
 const BR_TRANSACTION_COMPLETE: u32 = 0x7206;
+const BR_INCREFS: u32 = 0x8010_7207;
+const BR_ACQUIRE: u32 = 0x8010_7208;
+const BR_RELEASE: u32 = 0x8010_7209;
+const BR_DECREFS: u32 = 0x8010_720a;
 const BR_OK: u32 = 0x7201;
 const BR_FAILED_REPLY: u32 = 0x7211;
 const BR_FROZEN_REPLY: u32 = 0x7212;
@@ -72,6 +78,11 @@ enum QueuedCommand {
     SpawnLooper,
     DeathNotification {
         command: u32,
+        cookie: u64,
+    },
+    NodeReference {
+        command: u32,
+        pointer: u64,
         cookie: u64,
     },
     FreezeNotification {
@@ -137,6 +148,8 @@ struct Node {
     cookie: u64,
     strong_refs: u32,
     weak_refs: u32,
+    strong_ack_pending: bool,
+    weak_ack_pending: bool,
     dead: bool,
 }
 
@@ -260,6 +273,8 @@ pub(crate) fn set_context_manager_ext(
             cookie,
             strong_refs: 1,
             weak_refs: 0,
+            strong_ack_pending: false,
+            weak_ack_pending: false,
             dead: false,
         });
     }
@@ -806,6 +821,24 @@ fn process_write(pid: ObjId, address: u64, size: usize) -> Result<usize, CompatE
                 process_reference(pid, command, handle)?;
                 offset += 8;
             }
+            BC_INCREFS_DONE | BC_ACQUIRE_DONE => {
+                if bytes.len() - offset < 4 + 16 {
+                    return Err(CompatErrno::Invalid);
+                }
+                let pointer = u64::from_le_bytes(
+                    bytes[offset + 4..offset + 12].try_into().unwrap(),
+                );
+                let cookie = u64::from_le_bytes(
+                    bytes[offset + 12..offset + 20].try_into().unwrap(),
+                );
+                acknowledge_node_reference(
+                    pid,
+                    pointer,
+                    cookie,
+                    command == BC_ACQUIRE_DONE,
+                )?;
+                offset += 20;
+            }
             BC_REQUEST_DEATH_NOTIFICATION | BC_CLEAR_DEATH_NOTIFICATION => {
                 if bytes.len() - offset < 16 {
                     return Err(CompatErrno::Invalid);
@@ -948,25 +981,93 @@ fn process_reference(
         .find(|binding| binding.recipient == recipient && binding.handle == handle)
         .map(|binding| binding.node)
         .ok_or(CompatErrno::NoEntry)?;
+    let node_index = state
+        .nodes
+        .iter()
+        .position(|node| node.id == node_id)
+        .ok_or(CompatErrno::NoEntry)?;
+    let notification = match command {
+        BC_ACQUIRE => {
+            let node = &mut state.nodes[node_index];
+            node.strong_refs = node
+                .strong_refs
+                .checked_add(1)
+                .ok_or(CompatErrno::NoSpace)?;
+            if node.strong_ack_pending {
+                None
+            } else {
+                node.strong_ack_pending = true;
+                Some(BR_ACQUIRE)
+            }
+        }
+        BC_RELEASE => {
+            let node = &mut state.nodes[node_index];
+            node.strong_refs = node.strong_refs.checked_sub(1).ok_or(CompatErrno::Invalid)?;
+            Some(BR_RELEASE)
+        }
+        BC_INCREFS => {
+            let node = &mut state.nodes[node_index];
+            node.weak_refs = node
+                .weak_refs
+                .checked_add(1)
+                .ok_or(CompatErrno::NoSpace)?;
+            if node.weak_ack_pending {
+                None
+            } else {
+                node.weak_ack_pending = true;
+                Some(BR_INCREFS)
+            }
+        }
+        BC_DECREFS => {
+            let node = &mut state.nodes[node_index];
+            node.weak_refs = node.weak_refs.checked_sub(1).ok_or(CompatErrno::Invalid)?;
+            Some(BR_DECREFS)
+        }
+        _ => return Err(CompatErrno::Invalid),
+    };
+    if let Some(command) = notification {
+        state
+            .queue
+            .try_reserve(1)
+            .map_err(|_| CompatErrno::NoMemory)?;
+        let node = state.nodes[node_index];
+        state.queue.push_back((
+            node.owner,
+            QueuedCommand::NodeReference {
+                command,
+                pointer: node.pointer,
+                cookie: node.cookie,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn acknowledge_node_reference(
+    owner: ObjId,
+    pointer: u64,
+    cookie: u64,
+    strong: bool,
+) -> Result<(), CompatErrno> {
+    let mut state = BINDER.lock();
     let node = state
         .nodes
         .iter_mut()
-        .find(|node| node.id == node_id)
+        .find(|node| node.owner == owner && node.pointer == pointer)
         .ok_or(CompatErrno::NoEntry)?;
-    match command {
-        BC_ACQUIRE => {
-            node.strong_refs = node.strong_refs.checked_add(1).ok_or(CompatErrno::NoSpace)?
+    if node.cookie != cookie {
+        return Err(CompatErrno::Invalid);
+    }
+    if strong {
+        if !node.strong_ack_pending {
+            return Err(CompatErrno::Invalid);
         }
-        BC_RELEASE => {
-            node.strong_refs = node.strong_refs.checked_sub(1).ok_or(CompatErrno::Invalid)?
+        node.strong_ack_pending = false;
+    } else {
+        if !node.weak_ack_pending {
+            return Err(CompatErrno::Invalid);
         }
-        BC_INCREFS => {
-            node.weak_refs = node.weak_refs.checked_add(1).ok_or(CompatErrno::NoSpace)?
-        }
-        BC_DECREFS => {
-            node.weak_refs = node.weak_refs.checked_sub(1).ok_or(CompatErrno::Invalid)?
-        }
-        _ => return Err(CompatErrno::Invalid),
+        node.weak_ack_pending = false;
     }
     Ok(())
 }
@@ -1265,6 +1366,8 @@ fn translate_objects(
                         cookie,
                         strong_refs: u32::from(!weak),
                         weak_refs: u32::from(weak),
+                        strong_ack_pending: false,
+                        weak_ack_pending: false,
                         dead: false,
                     });
                     id
@@ -1620,6 +1723,21 @@ fn deliver(
             let mut packet = [0u8; 12];
             packet[..4].copy_from_slice(&command.to_le_bytes());
             packet[4..12].copy_from_slice(&cookie.to_le_bytes());
+            copy_to_user(address, &packet, packet.len()).map_err(|_| CompatErrno::Fault)?;
+            Ok(packet.len())
+        }
+        QueuedCommand::NodeReference {
+            command,
+            pointer,
+            cookie,
+        } => {
+            if capacity < 20 {
+                return Err(CompatErrno::Range);
+            }
+            let mut packet = [0u8; 20];
+            packet[..4].copy_from_slice(&command.to_le_bytes());
+            packet[4..12].copy_from_slice(&pointer.to_le_bytes());
+            packet[12..20].copy_from_slice(&cookie.to_le_bytes());
             copy_to_user(address, &packet, packet.len()).map_err(|_| CompatErrno::Fault)?;
             Ok(packet.len())
         }

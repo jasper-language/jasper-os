@@ -2928,6 +2928,20 @@ int main(void) {
             cleanup.write_consumed != sizeof(free_buffer)) {
             _exit(172);
         }
+        unsigned char reference_write[16];
+        memcpy(reference_write, &(uint32_t){BC_ACQUIRE}, 4);
+        memcpy(reference_write + 4, &returned_object.handle,
+               sizeof(returned_object.handle));
+        memcpy(reference_write + 8, &(uint32_t){BC_INCREFS}, 4);
+        memcpy(reference_write + 12, &returned_object.handle,
+               sizeof(returned_object.handle));
+        memset(&exchange, 0, sizeof(exchange));
+        exchange.write_size = sizeof(reference_write);
+        exchange.write_buffer = (binder_uintptr_t)reference_write;
+        if (ioctl(client, BINDER_WRITE_READ, &exchange) != 0 ||
+            exchange.write_consumed != sizeof(reference_write)) {
+            _exit(725);
+        }
         char response[4] = {0};
         int binder_fd = memfd_create("binder-fd", 0);
         if (binder_fd < 0 || write(binder_fd, "FDOK", 4) != 4 ||
@@ -3098,6 +3112,56 @@ int main(void) {
         server_exchange.read_consumed != 4 ||
         *(uint32_t *)server_read != BR_TRANSACTION_COMPLETE) {
         return 175;
+    }
+    memset(&server_exchange, 0, sizeof(server_exchange));
+    server_exchange.read_size = sizeof(server_read);
+    server_exchange.read_buffer = (binder_uintptr_t)server_read;
+    if (ioctl(server, BINDER_WRITE_READ, &server_exchange) != 0 ||
+        server_exchange.read_consumed != 20 ||
+        *(uint32_t *)server_read != BR_ACQUIRE) {
+        return 726;
+    }
+    binder_uintptr_t ref_pointer = 0;
+    binder_uintptr_t ref_cookie = 0;
+    memcpy(&ref_pointer, server_read + 4, sizeof(ref_pointer));
+    memcpy(&ref_cookie, server_read + 12, sizeof(ref_cookie));
+    if (ref_pointer != (binder_uintptr_t)(uintptr_t)&response_object ||
+        ref_cookie != 0x7777) {
+        return 727;
+    }
+    memcpy(server_write, &(uint32_t){BC_ACQUIRE_DONE}, 4);
+    memcpy(server_write + 4, &ref_pointer, sizeof(ref_pointer));
+    memcpy(server_write + 12, &ref_cookie, sizeof(ref_cookie));
+    memset(&server_exchange, 0, sizeof(server_exchange));
+    server_exchange.write_size = 20;
+    server_exchange.write_buffer = (binder_uintptr_t)server_write;
+    if (ioctl(server, BINDER_WRITE_READ, &server_exchange) != 0 ||
+        server_exchange.write_consumed != 20) {
+        return 728;
+    }
+    memset(&server_exchange, 0, sizeof(server_exchange));
+    server_exchange.read_size = sizeof(server_read);
+    server_exchange.read_buffer = (binder_uintptr_t)server_read;
+    if (ioctl(server, BINDER_WRITE_READ, &server_exchange) != 0 ||
+        server_exchange.read_consumed != 20 ||
+        *(uint32_t *)server_read != BR_INCREFS) {
+        return 729;
+    }
+    memcpy(&ref_pointer, server_read + 4, sizeof(ref_pointer));
+    memcpy(&ref_cookie, server_read + 12, sizeof(ref_cookie));
+    if (ref_pointer != (binder_uintptr_t)(uintptr_t)&response_object ||
+        ref_cookie != 0x7777) {
+        return 729;
+    }
+    memcpy(server_write, &(uint32_t){BC_INCREFS_DONE}, 4);
+    memcpy(server_write + 4, &ref_pointer, sizeof(ref_pointer));
+    memcpy(server_write + 12, &ref_cookie, sizeof(ref_cookie));
+    memset(&server_exchange, 0, sizeof(server_exchange));
+    server_exchange.write_size = 20;
+    server_exchange.write_buffer = (binder_uintptr_t)server_write;
+    if (ioctl(server, BINDER_WRITE_READ, &server_exchange) != 0 ||
+        server_exchange.write_consumed != 20) {
+        return 729;
     }
     memset(&server_exchange, 0, sizeof(server_exchange));
     server_exchange.read_size = sizeof(server_read);
