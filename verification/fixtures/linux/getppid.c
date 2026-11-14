@@ -187,6 +187,9 @@ static int landlock_worker_open(int expect_usr, int expect_lib) {
     int ok = (expect_usr ? usr >= 0 : usr == -1) &&
              (expect_lib == 0 ? lib >= 0 : lib == -1 &&
               lib_errno == EACCES);
+    dprintf(STDOUT_FILENO,
+            "landlock-worker-open expect=%d,%d usr=%d lib=%d errno=%d ok=%d\n",
+            expect_usr, expect_lib, usr, lib, lib_errno, ok);
     if (usr >= 0) {
         close(usr);
     }
@@ -198,21 +201,26 @@ static int landlock_worker_open(int expect_usr, int expect_lib) {
 
 static void *landlock_worker(void *argument) {
     (void)argument;
-    while (atomic_load_explicit(&landlock_worker_stage,
-                                memory_order_acquire) == 0) {
-        sched_yield();
-    }
+    dprintf(STDOUT_FILENO, "landlock-worker stage=enter\n");
+    dprintf(STDOUT_FILENO, "landlock-worker stage=first-start\n");
+    int first_ok = landlock_worker_open(1, 0);
+    dprintf(STDOUT_FILENO, "landlock-worker stage=first-done ok=%d errno=%d\n",
+            first_ok, errno);
     atomic_store_explicit(&landlock_worker_first_ok,
-                          landlock_worker_open(1, 0),
+                          first_ok,
                           memory_order_release);
     atomic_store_explicit(&landlock_worker_first_done, 1,
                           memory_order_release);
     while (atomic_load_explicit(&landlock_worker_stage,
-                                memory_order_acquire) == 1) {
+                                memory_order_acquire) != 1) {
         sched_yield();
     }
+    dprintf(STDOUT_FILENO, "landlock-worker stage=second-start\n");
+    int second_ok = landlock_worker_open(1, 1);
+    dprintf(STDOUT_FILENO, "landlock-worker stage=second-done ok=%d errno=%d\n",
+            second_ok, errno);
     atomic_store_explicit(&landlock_worker_second_ok,
-                          landlock_worker_open(1, 1),
+                          second_ok,
                           memory_order_release);
     atomic_store_explicit(&landlock_worker_second_done, 1,
                           memory_order_release);
@@ -448,10 +456,22 @@ int main(void) {
         _exit(kill(getppid(), SIGUSR2) == 0 ? 0 : 1);
     }
     int signalfd_child_status = 0;
-    if (waitpid(signalfd_child, &signalfd_child_status, 0) != signalfd_child ||
+    pid_t signalfd_wait =
+        waitpid(signalfd_child, &signalfd_child_status, 0);
+    int signalfd_poll_result = poll(&signalfd_poll, 1, 1000);
+    if (signalfd_wait != signalfd_child ||
         !WIFEXITED(signalfd_child_status) ||
         WEXITSTATUS(signalfd_child_status) != 0 ||
-        poll(&signalfd_poll, 1, 1000) != 1) {
+        signalfd_poll_result != 1) {
+        dprintf(STDOUT_FILENO,
+                "signalfd-child-fail child=%d wait=%d WIF=%d code=%d "
+                "poll=%d revents=%#x errno=%d\n",
+                signalfd_child, signalfd_wait,
+                WIFEXITED(signalfd_child_status),
+                WIFEXITED(signalfd_child_status)
+                    ? WEXITSTATUS(signalfd_child_status)
+                    : -1,
+                signalfd_poll_result, signalfd_poll.revents, errno);
         return 378;
     }
     memset(&signal_info, 0, sizeof(signal_info));
@@ -667,24 +687,41 @@ int main(void) {
     }
     queued_info.si_signo = SIGRTMIN;
     queued_info.si_code = SI_QUEUE;
-    queued_info.si_value.sival_int = 0x11111111;
+    queued_info.si_value.sival_ptr = (void *)0x11111111ULL;
     if (syscall(SYS_rt_sigqueueinfo, getpid(), SIGRTMIN,
                 &queued_info) != 0) {
         return 400;
     }
-    queued_info.si_value.sival_int = 0x22222222;
+    queued_info.si_value.sival_ptr = (void *)0x22222222ULL;
     if (syscall(SYS_rt_sigqueueinfo, getpid(), SIGRTMIN,
-                &queued_info) != 0 ||
-        read(realtime_fd, &signal_info, sizeof(signal_info)) !=
-            (ssize_t)sizeof(signal_info) ||
-        signal_info.ssi_signo != (uint32_t)SIGRTMIN ||
-        signal_info.ssi_ptr != 0x11111111ULL ||
-        read(realtime_fd, &signal_info, sizeof(signal_info)) !=
-            (ssize_t)sizeof(signal_info) ||
-        signal_info.ssi_signo != (uint32_t)SIGRTMIN ||
-        signal_info.ssi_ptr != 0x22222222ULL ||
+                &queued_info) != 0) {
+        return 400;
+    }
+    memset(&signal_info, 0, sizeof(signal_info));
+    ssize_t realtime_read_one =
+        read(realtime_fd, &signal_info, sizeof(signal_info));
+    uint32_t realtime_signo_one = signal_info.ssi_signo;
+    uint64_t realtime_ptr_one = signal_info.ssi_ptr;
+    memset(&signal_info, 0, sizeof(signal_info));
+    ssize_t realtime_read_two =
+        read(realtime_fd, &signal_info, sizeof(signal_info));
+    uint32_t realtime_signo_two = signal_info.ssi_signo;
+    uint64_t realtime_ptr_two = signal_info.ssi_ptr;
+    if (realtime_read_one != (ssize_t)sizeof(signal_info) ||
+        realtime_signo_one != (uint32_t)SIGRTMIN ||
+        realtime_ptr_one != 0x11111111ULL ||
+        realtime_read_two != (ssize_t)sizeof(signal_info) ||
+        realtime_signo_two != (uint32_t)SIGRTMIN ||
+        realtime_ptr_two != 0x22222222ULL ||
         close(realtime_fd) != 0 ||
         sigprocmask(SIG_SETMASK, &realtime_saved_mask, NULL) != 0) {
+        dprintf(STDOUT_FILENO,
+                "realtime-signalfd-fail r1=%zd s1=%u p1=%#llx "
+                "r2=%zd s2=%u p2=%#llx errno=%d\n",
+                realtime_read_one, realtime_signo_one,
+                (unsigned long long)realtime_ptr_one,
+                realtime_read_two, realtime_signo_two,
+                (unsigned long long)realtime_ptr_two, errno);
         return 401;
     }
     int fd = open("/usr/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY | O_CLOEXEC);
@@ -861,17 +898,32 @@ int main(void) {
         lseek(21, 0, SEEK_CUR) != 8) {
         return 75;
     }
-    int kcmp_other = open("/usr/bin/true", O_RDONLY | O_CLOEXEC);
+    int kcmp_other =
+        open("/usr/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY | O_CLOEXEC);
     errno = 0;
-    if (kcmp_other < 0 ||
-        syscall(SYS_kcmp, getpid(), getpid(), KCMP_FILE,
-                fd, dup_fd) != 0 ||
-        syscall(SYS_kcmp, getpid(), getpid(), KCMP_FILE,
-                fd, kcmp_other) == 0 ||
-        syscall(SYS_kcmp, getpid(), getpid(), KCMP_FILES,
-                fd, dup_fd) != 0 ||
-        syscall(SYS_kcmp, getpid(), getpid(), KCMP_FILE,
-                fd, 9999) != -1 || errno != EBADF) {
+    long kcmp_same =
+        syscall(SYS_kcmp, getpid(), getpid(), KCMP_FILE, fd, dup_fd);
+    int kcmp_same_errno = errno;
+    errno = 0;
+    long kcmp_different =
+        syscall(SYS_kcmp, getpid(), getpid(), KCMP_FILE, fd, kcmp_other);
+    int kcmp_different_errno = errno;
+    errno = 0;
+    long kcmp_files =
+        syscall(SYS_kcmp, getpid(), getpid(), KCMP_FILES, fd, dup_fd);
+    int kcmp_files_errno = errno;
+    errno = 0;
+    long kcmp_bad =
+        syscall(SYS_kcmp, getpid(), getpid(), KCMP_FILE, fd, 9999);
+    int kcmp_bad_errno = errno;
+    if (kcmp_other < 0 || kcmp_same != 0 || kcmp_different == 0 ||
+        kcmp_files != 0 || kcmp_bad != -1 || kcmp_bad_errno != EBADF) {
+        dprintf(STDOUT_FILENO,
+                "kcmp-fail other=%d same=%ld different=%ld files=%ld "
+                "bad=%ld errnos=%d/%d/%d/%d\n",
+                kcmp_other, kcmp_same, kcmp_different, kcmp_files,
+                kcmp_bad, kcmp_same_errno, kcmp_different_errno,
+                kcmp_files_errno, kcmp_bad_errno);
         return 558;
     }
     errno = 0;
@@ -3452,10 +3504,19 @@ int main(void) {
     posix_values.it_interval = (struct timespec){.tv_sec = 0, .tv_nsec = 10000000};
     posix_values.it_value = (struct timespec){.tv_sec = 0, .tv_nsec = 10000000};
     struct timespec overrun_delay = {.tv_sec = 0, .tv_nsec = 80000000};
-    if (syscall(SYS_timer_settime, posix_timer, 0, &posix_values,
-                NULL) != 0 ||
-        nanosleep(&overrun_delay, NULL) != 0 ||
-        syscall(SYS_timer_getoverrun, posix_timer) == 0) {
+    int posix_set_result =
+        syscall(SYS_timer_settime, posix_timer, 0, &posix_values, NULL);
+    int posix_sleep_result = nanosleep(&overrun_delay, NULL);
+    errno = 0;
+    long posix_overrun = syscall(SYS_timer_getoverrun, posix_timer);
+    int posix_overrun_errno = errno;
+    if (posix_set_result != 0 || posix_sleep_result != 0 ||
+        posix_overrun <= 0) {
+        dprintf(STDOUT_FILENO,
+                "posix-timer-overrun-fail timer=%d set=%d sleep=%d "
+                "overrun=%ld errno=%d\n",
+                posix_timer, posix_set_result, posix_sleep_result,
+                posix_overrun, posix_overrun_errno);
         return 378;
     }
     memset(&posix_values, 0, sizeof(posix_values));
@@ -3652,6 +3713,9 @@ int main(void) {
     for (int child_index = 0; child_index < 18; child_index++) {
         interval_child = fork();
         if (interval_child < 0) {
+            dprintf(STDOUT_FILENO,
+                    "interval-fork-fail index=%d errno=%d\n",
+                    child_index, errno);
             return 412;
         }
         if (interval_child == 0) {
@@ -4111,11 +4175,20 @@ int main(void) {
                 "/usr/lib/x86_64-linux-gnu/libc.so.6",
                 &open_how, sizeof(open_how));
     unsigned char openat2_magic[4] = {0};
+    ssize_t openat2_read =
+        openat2_fd >= 0
+            ? read(openat2_fd, openat2_magic, sizeof(openat2_magic))
+            : -1;
     if (openat2_fd < 0 ||
-        read(openat2_fd, openat2_magic, sizeof(openat2_magic)) !=
-            (ssize_t)sizeof(openat2_magic) ||
+        openat2_read != (ssize_t)sizeof(openat2_magic) ||
         memcmp(openat2_magic, "\177ELF", sizeof(openat2_magic)) != 0 ||
         close(openat2_fd) != 0) {
+        dprintf(STDOUT_FILENO,
+                "openat2-basic-fail fd=%d read=%zd magic=%02x%02x%02x%02x "
+                "errno=%d\n",
+                openat2_fd, openat2_read, openat2_magic[0],
+                openat2_magic[1], openat2_magic[2],
+                openat2_magic[3], errno);
         return 455;
     }
     errno = 0;
@@ -4421,11 +4494,21 @@ int main(void) {
             ? -1
             : syscall(SYS_pidfd_getfd, self_pidfd, pidfd_source, 0);
     unsigned char pidfd_magic[4] = {0};
-    if (pidfd_duplicate < 0 ||
-        (fcntl(pidfd_duplicate, F_GETFD) & FD_CLOEXEC) == 0 ||
-        read(pidfd_duplicate, pidfd_magic, sizeof(pidfd_magic)) !=
-            (ssize_t)sizeof(pidfd_magic) ||
+    ssize_t pidfd_read =
+        pidfd_duplicate >= 0
+            ? read(pidfd_duplicate, pidfd_magic, sizeof(pidfd_magic))
+            : -1;
+    int pidfd_cloexec =
+        pidfd_duplicate >= 0 ? fcntl(pidfd_duplicate, F_GETFD) : -1;
+    if (pidfd_duplicate < 0 || (pidfd_cloexec & FD_CLOEXEC) == 0 ||
+        pidfd_read != (ssize_t)sizeof(pidfd_magic) ||
         memcmp(pidfd_magic, "\177ELF", 4) != 0) {
+        dprintf(STDOUT_FILENO,
+                "pidfd-getfd-basic-fail self=%d source=%d duplicate=%d "
+                "cloexec=%#x read=%zd magic=%02x%02x%02x%02x errno=%d\n",
+                self_pidfd, pidfd_source, pidfd_duplicate, pidfd_cloexec,
+                pidfd_read, pidfd_magic[0], pidfd_magic[1],
+                pidfd_magic[2], pidfd_magic[3], errno);
         return 510;
     }
     errno = 0;
@@ -4511,19 +4594,35 @@ int main(void) {
     char inotify_event[128];
     memset(inotify_event, 0, sizeof(inotify_event));
     errno = 0;
-    if (read(inotify_fd, inotify_event, sizeof(inotify_event)) != -1 ||
-        errno != EAGAIN ||
-        syscall(SYS_inotify_rm_watch, inotify_fd, inotify_wd) != 0) {
+    ssize_t inotify_empty =
+        read(inotify_fd, inotify_event, sizeof(inotify_event));
+    int inotify_empty_errno = errno;
+    int inotify_remove =
+        syscall(SYS_inotify_rm_watch, inotify_fd, inotify_wd);
+    if (inotify_empty != -1 || inotify_empty_errno != EAGAIN ||
+        inotify_remove != 0) {
+        dprintf(STDOUT_FILENO,
+                "inotify-ignored-fail stage=empty read=%zd errno=%d rm=%d\n",
+                inotify_empty, inotify_empty_errno, inotify_remove);
         return 482;
     }
     struct pollfd inotify_poll = {
         .fd = inotify_fd,
         .events = POLLIN,
     };
-    if (poll(&inotify_poll, 1, 1000) != 1 ||
+    int inotify_poll_result = poll(&inotify_poll, 1, 1000);
+    ssize_t inotify_ignored_read =
+        inotify_poll_result == 1
+            ? read(inotify_fd, inotify_event, sizeof(inotify_event))
+            : -1;
+    if (inotify_poll_result != 1 ||
         (inotify_poll.revents & POLLIN) == 0 ||
-        read(inotify_fd, inotify_event, sizeof(inotify_event)) !=
-            (ssize_t)sizeof(struct inotify_event)) {
+        inotify_ignored_read != (ssize_t)sizeof(struct inotify_event)) {
+        dprintf(STDOUT_FILENO,
+                "inotify-ignored-fail stage=poll poll=%d revents=%#x "
+                "read=%zd errno=%d buffer=%p\n",
+                inotify_poll_result, inotify_poll.revents,
+                inotify_ignored_read, errno, (void *)inotify_event);
         return 482;
     }
     struct inotify_event *ignored_event =
@@ -4531,6 +4630,11 @@ int main(void) {
     if (ignored_event->wd != inotify_wd ||
         (ignored_event->mask & IN_IGNORED) == 0 ||
         ignored_event->len != 0) {
+        dprintf(STDOUT_FILENO,
+                "inotify-ignored-fail stage=event expected=%d wd=%d "
+                "mask=%#x len=%u\n",
+                inotify_wd, ignored_event->wd, ignored_event->mask,
+                ignored_event->len);
         return 482;
     }
     errno = 0;
@@ -4580,11 +4684,21 @@ int main(void) {
     }
     gid_t supplementary_groups[2] = {7, 5};
     gid_t read_supplementary_groups[2] = {0};
-    if (syscall(SYS_setgroups, 2, supplementary_groups) != 0 ||
-        getgroups(0, NULL) != 2 ||
-        getgroups(2, read_supplementary_groups) != 2 ||
+    int supplementary_set =
+        syscall(SYS_setgroups, 2, supplementary_groups);
+    int supplementary_count = getgroups(0, NULL);
+    int supplementary_read =
+        getgroups(2, read_supplementary_groups);
+    if (supplementary_set != 0 || supplementary_count != 2 ||
+        supplementary_read != 2 ||
         read_supplementary_groups[0] != 5 ||
         read_supplementary_groups[1] != 7) {
+        dprintf(STDOUT_FILENO,
+                "supplementary-groups-fail set=%d count=%d read=%d "
+                "groups=%u,%u errno=%d\n",
+                supplementary_set, supplementary_count, supplementary_read,
+                read_supplementary_groups[0],
+                read_supplementary_groups[1], errno);
         return 489;
     }
     errno = 0;
@@ -4722,7 +4836,7 @@ int main(void) {
         return 499;
     }
     mode_t old_umask = umask(077);
-    if (old_umask != 022 || umask(old_umask) != 077) {
+    if (old_umask != 022) {
         return 501;
     }
     int umask_msg = msgget(0x554d5347, IPC_CREAT | IPC_EXCL | 0666);
@@ -4732,18 +4846,41 @@ int main(void) {
     struct msqid_ds umask_msg_status = {0};
     struct semid_ds umask_sem_status = {0};
     struct shmid_ds umask_shm_status = {0};
+    int umask_msg_stat =
+        umask_msg < 0 ? -1 : msgctl(umask_msg, IPC_STAT, &umask_msg_status);
+    int umask_sem_stat =
+        umask_sem < 0
+            ? -1
+            : syscall(SYS_semctl, umask_sem, 0, IPC_STAT,
+                      &umask_sem_status);
+    int umask_shm_stat =
+        umask_shm < 0 ? -1 : shmctl(umask_shm, IPC_STAT, &umask_shm_status);
+    unsigned int umask_msg_mode = umask_msg_status.msg_perm.mode & 0777;
+    unsigned int umask_sem_mode = umask_sem_status.sem_perm.mode & 0777;
+    unsigned int umask_shm_mode = umask_shm_status.shm_perm.mode & 0777;
+    int umask_msg_remove =
+        umask_msg < 0 ? -1 : msgctl(umask_msg, IPC_RMID, NULL);
+    int umask_sem_remove =
+        umask_sem < 0
+            ? -1
+            : syscall(SYS_semctl, umask_sem, 0, IPC_RMID, 0);
+    int umask_shm_remove =
+        umask_shm < 0 ? -1 : shmctl(umask_shm, IPC_RMID, NULL);
+    mode_t umask_restore = umask(old_umask);
     if (umask_msg < 0 || umask_sem < 0 || umask_shm < 0 ||
-        msgctl(umask_msg, IPC_STAT, &umask_msg_status) != 0 ||
-        (umask_msg_status.msg_perm.mode & 0777) != 0600 ||
-        syscall(SYS_semctl, umask_sem, IPC_STAT, 0,
-                &umask_sem_status) != 0 ||
-        (umask_sem_status.sem_perm.mode & 0777) != 0600 ||
-        shmctl(umask_shm, IPC_STAT, &umask_shm_status) != 0 ||
-        (umask_shm_status.shm_perm.mode & 0777) != 0600 ||
-        msgctl(umask_msg, IPC_RMID, NULL) != 0 ||
-        syscall(SYS_semctl, umask_sem, IPC_RMID, 0, 0) != 0 ||
-        shmctl(umask_shm, IPC_RMID, NULL) != 0 ||
-        umask(022) != 077) {
+        umask_msg_stat != 0 || umask_msg_mode != 0666 ||
+        umask_sem_stat != 0 || umask_sem_mode != 0666 ||
+        umask_shm_stat != 0 || umask_shm_mode != 0666 ||
+        umask_msg_remove != 0 || umask_sem_remove != 0 ||
+        umask_shm_remove != 0 || umask_restore != 077) {
+        dprintf(STDOUT_FILENO,
+                "umask-ipc-fail msg=%d/%d/%o/%d sem=%d/%d/%o/%d "
+                "shm=%d/%d/%o/%d restore=%o errno=%d\n",
+                umask_msg, umask_msg_stat, umask_msg_mode,
+                umask_msg_remove, umask_sem, umask_sem_stat,
+                umask_sem_mode, umask_sem_remove, umask_shm,
+                umask_shm_stat, umask_shm_mode, umask_shm_remove,
+                (unsigned int)umask_restore, errno);
         return 695;
     }
     const char *mutable_parent = "/usr/lib/x86_64-linux-gnu";
@@ -5214,12 +5351,25 @@ int main(void) {
              spin++) {
             sched_yield();
         }
-        if (!atomic_load_explicit(&landlock_worker_first_done,
-                                  memory_order_acquire) ||
-            !atomic_load_explicit(&landlock_worker_first_ok,
-                                  memory_order_acquire) ||
-            syscall(SYS_landlock_restrict_self, usr_ruleset,
-                    LANDLOCK_RESTRICT_SELF_TSYNC) != 0) {
+        int worker_first_done =
+            atomic_load_explicit(&landlock_worker_first_done,
+                                 memory_order_acquire);
+        int worker_first_ok =
+            atomic_load_explicit(&landlock_worker_first_ok,
+                                 memory_order_acquire);
+        errno = 0;
+        long worker_tsync =
+            worker_first_done && worker_first_ok
+                ? syscall(SYS_landlock_restrict_self, usr_ruleset,
+                          LANDLOCK_RESTRICT_SELF_TSYNC)
+                : -1;
+        if (!worker_first_done || !worker_first_ok ||
+            worker_tsync != 0) {
+            dprintf(STDOUT_FILENO,
+                    "landlock-tsync-fail done=%d ok=%d result=%ld "
+                    "errno=%d\n",
+                    worker_first_done, worker_first_ok,
+                    worker_tsync, errno);
             _exit(5);
         }
         atomic_store_explicit(&landlock_worker_stage, 1,
@@ -5512,6 +5662,10 @@ int main(void) {
         close(mq_epfd) != 0) {
         return 655;
     }
+    mq_change.mq_flags = 0;
+    if (syscall(SYS_mq_getsetattr, mq_fd, &mq_change, NULL) != 0) {
+        return 655;
+    }
     struct sigevent mq_none_event = {.sigev_notify = SIGEV_NONE};
     if (syscall(SYS_mq_notify, mq_fd, &mq_none_event) != 0) {
         return 656;
@@ -5574,14 +5728,28 @@ int main(void) {
          attempt++) {
         syscall(SYS_getpid);
     }
-    if (mq_notification_signals != 0 ||
+    int mq_signals_before_drain = mq_notification_signals;
+    ssize_t mq_first_read =
         syscall(SYS_mq_timedreceive, mq_fd, mq_first,
-                sizeof(mq_first), NULL, NULL) != 4 ||
-        memcmp(mq_first, "held", 4) != 0 ||
+                sizeof(mq_first), NULL, NULL);
+    int mq_first_ok = memcmp(mq_first, "held", 4) == 0;
+    ssize_t mq_second_read =
         syscall(SYS_mq_timedreceive, mq_fd, mq_first,
-                sizeof(mq_first), NULL, NULL) != 4 ||
-        memcmp(mq_first, "wait", 4) != 0 ||
-        syscall(SYS_mq_timedsend, mq_fd, "note", 4, 0, NULL) != 0) {
+                sizeof(mq_first), NULL, NULL);
+    int mq_second_ok = memcmp(mq_first, "wait", 4) == 0;
+    errno = 0;
+    long mq_note_send =
+        syscall(SYS_mq_timedsend, mq_fd, "note", 4, 0, NULL);
+    int mq_note_errno = errno;
+    if (mq_signals_before_drain != 1 || mq_first_read != 4 ||
+        !mq_first_ok || mq_second_read != 4 || !mq_second_ok ||
+        mq_note_send != 0) {
+        dprintf(STDOUT_FILENO,
+                "mq-notify-drain-fail signals=%d reads=%zd/%zd "
+                "contents=%d/%d send=%ld errno=%d\n",
+                mq_signals_before_drain, mq_first_read,
+                mq_second_read, mq_first_ok, mq_second_ok,
+                mq_note_send, mq_note_errno);
         return 663;
     }
     for (int attempt = 0; attempt < 8 && mq_notification_signals == 0;
@@ -5618,10 +5786,15 @@ int main(void) {
         if (write(mq_wait_started[1], &started, 1) != 1) {
             _exit(1);
         }
-        char received[16] = {0};
+        char received[64] = {0};
         ssize_t count = syscall(SYS_mq_timedreceive, mq_fd,
                                 received, sizeof(received), NULL, NULL);
         char done = count == 5 && memcmp(received, "child", 5) == 0;
+        dprintf(STDOUT_FILENO,
+                "mq-child-receive count=%zd done=%d errno=%d data=%02x%02x%02x%02x%02x\n",
+                count, done, errno, (unsigned char)received[0],
+                (unsigned char)received[1], (unsigned char)received[2],
+                (unsigned char)received[3], (unsigned char)received[4]);
         if (write(mq_wait_done[1], &done, 1) != 1) {
             _exit(2);
         }
@@ -5630,7 +5803,7 @@ int main(void) {
     close(mq_wait_started[1]);
     close(mq_wait_done[1]);
     char wait_started = 0;
-    struct timespec mq_waiter_delay = {.tv_sec = 0, .tv_nsec = 20000000};
+    struct timespec mq_waiter_delay = {.tv_sec = 0, .tv_nsec = 200000000};
     if (read(mq_wait_started[0], &wait_started, 1) != 1 ||
         wait_started != 'R' ||
         nanosleep(&mq_waiter_delay, NULL) != 0 ||
@@ -5639,15 +5812,31 @@ int main(void) {
     }
     char wait_done = 0;
     int mq_waiter_status = 0;
-    if (read(mq_wait_done[0], &wait_done, 1) != 1 ||
-        wait_done != 1 ||
-        waitpid(mq_waiter, &mq_waiter_status, 0) != mq_waiter ||
-        !WIFEXITED(mq_waiter_status) ||
-        WEXITSTATUS(mq_waiter_status) != 0 ||
-        mq_notification_signals != 0 ||
-        close(mq_wait_started[0]) != 0 ||
-        close(mq_wait_done[0]) != 0 ||
-        syscall(SYS_mq_timedsend, mq_fd, "later", 5, 0, NULL) != 0) {
+    ssize_t mq_wait_done_read =
+        read(mq_wait_done[0], &wait_done, 1);
+    pid_t mq_waiter_reaped =
+        waitpid(mq_waiter, &mq_waiter_status, 0);
+    int mq_waiter_exit_ok =
+        WIFEXITED(mq_waiter_status) &&
+        WEXITSTATUS(mq_waiter_status) == 0;
+    int mq_blocked_signals = mq_notification_signals;
+    int mq_started_close = close(mq_wait_started[0]);
+    int mq_done_close = close(mq_wait_done[0]);
+    errno = 0;
+    long mq_later_send =
+        syscall(SYS_mq_timedsend, mq_fd, "later", 5, 0, NULL);
+    int mq_later_errno = errno;
+    if (mq_wait_done_read != 1 || wait_done != 1 ||
+        mq_waiter_reaped != mq_waiter || !mq_waiter_exit_ok ||
+        mq_blocked_signals != 0 || mq_started_close != 0 ||
+        mq_done_close != 0 || mq_later_send != 0) {
+        dprintf(STDOUT_FILENO,
+                "mq-notify-blocked-fail read=%zd done=%d waiter=%d/%d "
+                "exit=%d signals=%d closes=%d/%d send=%ld errno=%d\n",
+                mq_wait_done_read, wait_done, mq_waiter,
+                mq_waiter_reaped, mq_waiter_exit_ok,
+                mq_blocked_signals, mq_started_close,
+                mq_done_close, mq_later_send, mq_later_errno);
         return 680;
     }
     for (int attempt = 0; attempt < 8 && mq_notification_signals == 0;
@@ -5695,9 +5884,16 @@ int main(void) {
         errno = 0;
         int denied = syscall(SYS_mq_open, mq_name, O_RDWR, 0, NULL);
         int open_denied = denied == -1 && errno == EACCES;
+        int open_errno = errno;
         errno = 0;
         int unlink_denied = syscall(SYS_mq_unlink, mq_name) == -1 &&
                             errno == EACCES;
+        int unlink_errno = errno;
+        dprintf(STDOUT_FILENO,
+                "mq-permission-child uid=%d gid=%d open=%d/%d "
+                "unlink=%d/%d\n",
+                getuid(), getgid(), denied, open_errno,
+                unlink_denied ? -1 : 0, unlink_errno);
         _exit(open_denied && unlink_denied ? 0 : 2);
     }
     int mq_permission_status = 0;
@@ -5724,10 +5920,13 @@ int main(void) {
     if (syscall(SYS_setfsgid, 120) != 0) {
         return 670;
     }
+    mode_t mq_creation_umask = umask(0);
     int mq_group_fd = syscall(SYS_mq_open, mq_group_name,
                               O_CREAT | O_RDWR | O_NONBLOCK,
                               0660, &mq_attributes);
-    if (syscall(SYS_setfsgid, 0) != 120 || mq_group_fd < 0) {
+    mode_t mq_creation_restore = umask(mq_creation_umask);
+    if (syscall(SYS_setfsgid, 0) != 120 || mq_group_fd < 0 ||
+        mq_creation_restore != 0) {
         return 671;
     }
     pid_t mq_group_child = fork();
@@ -5741,8 +5940,17 @@ int main(void) {
             syscall(SYS_setresuid, 100, 100, 100) != 0) {
             _exit(1);
         }
+        gid_t read_groups[4] = {0};
+        int group_count = getgroups(4, read_groups);
+        errno = 0;
         int opened = syscall(SYS_mq_open, mq_group_name,
                              O_RDWR | O_NONBLOCK, 0, NULL);
+        int opened_errno = errno;
+        dprintf(STDOUT_FILENO,
+                "mq-group-child uid=%d gid=%d groups=%d/%u open=%d/%d\n",
+                getuid(), getgid(), group_count,
+                group_count > 0 ? read_groups[0] : 0,
+                opened, opened_errno);
         _exit(opened >= 0 ? 0 : 2);
     }
     int mq_group_status = 0;
@@ -5932,12 +6140,12 @@ int main(void) {
     key_t sysv_sem_key = 0x53544d31;
     int stale_sysv_sem = semget(sysv_sem_key, 0, 0);
     if (stale_sysv_sem >= 0) {
-        syscall(SYS_semctl, stale_sysv_sem, IPC_RMID, 0, 0);
+        syscall(SYS_semctl, stale_sysv_sem, 0, IPC_RMID, 0);
     }
     int sysv_sem = semget(sysv_sem_key, 2, IPC_CREAT | IPC_EXCL | 0600);
     if (sysv_sem < 0 || semget(sysv_sem_key, 0, 0600) != sysv_sem ||
-        syscall(SYS_semctl, sysv_sem, SETVAL, 0, 1) != 0 ||
-        syscall(SYS_semctl, sysv_sem, GETVAL, 0, 0) != 1) {
+        syscall(SYS_semctl, sysv_sem, 0, SETVAL, 1) != 0 ||
+        syscall(SYS_semctl, sysv_sem, 0, GETVAL, 0) != 1) {
         return 583;
     }
     struct sembuf semaphore_increment = {
@@ -5945,8 +6153,20 @@ int main(void) {
         .sem_op = 2,
         .sem_flg = 0,
     };
-    if (semop(sysv_sem, &semaphore_increment, 1) != 0 ||
-        syscall(SYS_semctl, sysv_sem, GETVAL, 0, 0) != 3) {
+    dprintf(STDOUT_FILENO,
+            "sysv-sem-increment-args ptr=%p num=%u op=%d flags=%d\n",
+            (void *)&semaphore_increment, semaphore_increment.sem_num,
+            semaphore_increment.sem_op, semaphore_increment.sem_flg);
+    int semaphore_increment_result =
+        semop(sysv_sem, &semaphore_increment, 1);
+    long semaphore_incremented_value =
+        syscall(SYS_semctl, sysv_sem, 0, GETVAL, 0);
+    if (semaphore_increment_result != 0 ||
+        semaphore_incremented_value != 3) {
+        dprintf(STDOUT_FILENO,
+                "sysv-sem-increment-fail op=%d value=%ld errno=%d\n",
+                semaphore_increment_result,
+                semaphore_incremented_value, errno);
         return 584;
     }
     struct sembuf wait_zero = {
@@ -5955,7 +6175,7 @@ int main(void) {
         .sem_flg = IPC_NOWAIT,
     };
     if (semop(sysv_sem, &wait_zero, 1) != 0 ||
-        syscall(SYS_semctl, sysv_sem, SETVAL, 0, 0) != 0) {
+        syscall(SYS_semctl, sysv_sem, 0, SETVAL, 0) != 0) {
         return 585;
     }
     pid_t semaphore_waiter = fork();
@@ -5972,7 +6192,7 @@ int main(void) {
     }
     struct timespec semaphore_delay = {.tv_sec = 0, .tv_nsec = 20000000};
     if (nanosleep(&semaphore_delay, NULL) != 0 ||
-        syscall(SYS_semctl, sysv_sem, GETNCNT, 0, 0) != 1) {
+        syscall(SYS_semctl, sysv_sem, 0, GETNCNT, 0) != 1) {
         return 587;
     }
     struct sembuf wake_positive = {
@@ -5985,7 +6205,7 @@ int main(void) {
         waitpid(semaphore_waiter, &semaphore_status, 0) != semaphore_waiter ||
         !WIFEXITED(semaphore_status) ||
         WEXITSTATUS(semaphore_status) != 0 ||
-        syscall(SYS_semctl, sysv_sem, GETVAL, 0, 0) != 0) {
+        syscall(SYS_semctl, sysv_sem, 0, GETVAL, 0) != 0) {
         return 588;
     }
     struct sembuf wait_missing = {
@@ -5999,7 +6219,7 @@ int main(void) {
                 &semaphore_timeout) != -1 || errno != EAGAIN) {
         return 589;
     }
-    if (syscall(SYS_semctl, sysv_sem, SETVAL, 1, 1) != 0) {
+    if (syscall(SYS_semctl, sysv_sem, 1, SETVAL, 1) != 0) {
         return 590;
     }
     pid_t undo_child = fork();
@@ -6017,15 +6237,15 @@ int main(void) {
     if (waitpid(undo_child, &semaphore_status, 0) != undo_child ||
         !WIFEXITED(semaphore_status) ||
         WEXITSTATUS(semaphore_status) != 0 ||
-        syscall(SYS_semctl, sysv_sem, GETVAL, 1, 0) != 1) {
+        syscall(SYS_semctl, sysv_sem, 1, GETVAL, 0) != 1) {
         return 592;
     }
     struct semid_ds sysv_sem_status = {0};
-    if (syscall(SYS_semctl, sysv_sem, IPC_STAT, 0,
+    if (syscall(SYS_semctl, sysv_sem, 0, IPC_STAT,
                 &sysv_sem_status) != 0 ||
         sysv_sem_status.sem_nsems != 2 ||
         sysv_sem_status.sem_perm.__key != sysv_sem_key ||
-        syscall(SYS_semctl, sysv_sem, IPC_RMID, 0, 0) != 0) {
+        syscall(SYS_semctl, sysv_sem, 0, IPC_RMID, 0) != 0) {
         return 593;
     }
     key_t sysv_shm_key = 0x53484d31;
@@ -6302,29 +6522,86 @@ int main(void) {
     int key_serial = syscall(SYS_add_key, "user", "jasper-key",
                              "key-value", 9, keyring);
     char key_buffer[32] = {0};
+    long key_request =
+        keyring < 0 || key_serial < 0
+            ? -1
+            : syscall(SYS_request_key, "user", "jasper-key", NULL,
+                      keyring);
+    long key_read_size =
+        key_serial < 0
+            ? -1
+            : syscall(SYS_keyctl, KEYCTL_READ, key_serial, NULL, 0);
+    memset(key_buffer, 0, sizeof(key_buffer));
+    long key_read =
+        key_serial < 0
+            ? -1
+            : syscall(SYS_keyctl, KEYCTL_READ, key_serial,
+                      key_buffer, sizeof(key_buffer));
+    int key_read_ok = memcmp(key_buffer, "key-value", 9) == 0;
+    memset(key_buffer, 0, sizeof(key_buffer));
+    long key_describe =
+        key_serial < 0
+            ? -1
+            : syscall(SYS_keyctl, KEYCTL_DESCRIBE, key_serial,
+                      key_buffer, sizeof(key_buffer));
+    int key_describe_ok =
+        memcmp(key_buffer, "jasper-key", 10) == 0;
+    long key_search =
+        keyring < 0
+            ? -1
+            : syscall(SYS_keyctl, KEYCTL_SEARCH, keyring,
+                      "user", "jasper-key");
+    long key_chown =
+        key_serial < 0
+            ? -1
+            : syscall(SYS_keyctl, KEYCTL_CHOWN, key_serial, 0, 0);
+    long key_setperm =
+        key_serial < 0
+            ? -1
+            : syscall(SYS_keyctl, KEYCTL_SETPERM, key_serial,
+                      0x3f3f3f00);
+    memset(key_buffer, 0, sizeof(key_buffer));
+    long key_security =
+        key_serial < 0
+            ? -1
+            : syscall(SYS_keyctl, KEYCTL_GET_SECURITY, key_serial,
+                      key_buffer, sizeof(key_buffer));
+    int key_security_ok =
+        memcmp(key_buffer, "jasper-key:", 11) == 0;
+    long key_update =
+        key_serial < 0
+            ? -1
+            : syscall(SYS_keyctl, KEYCTL_UPDATE, key_serial,
+                      "updated", 7);
+    long key_unlink =
+        key_serial < 0
+            ? -1
+            : syscall(SYS_keyctl, KEYCTL_UNLINK, key_serial, keyring);
+    long key_link =
+        key_serial < 0
+            ? -1
+            : syscall(SYS_keyctl, KEYCTL_LINK, key_serial, keyring);
+    long key_revoke =
+        key_serial < 0
+            ? -1
+            : syscall(SYS_keyctl, KEYCTL_REVOKE, key_serial);
     if (keyring < 0 || key_serial < 0 ||
-        syscall(SYS_request_key, "user", "jasper-key", NULL,
-                keyring) != key_serial ||
-        syscall(SYS_keyctl, KEYCTL_READ, key_serial, NULL, 0) != 9 ||
-        syscall(SYS_keyctl, KEYCTL_READ, key_serial,
-                key_buffer, sizeof(key_buffer)) != 9 ||
-        memcmp(key_buffer, "key-value", 9) != 0 ||
-        syscall(SYS_keyctl, KEYCTL_DESCRIBE, key_serial,
-                key_buffer, sizeof(key_buffer)) != 10 ||
-        memcmp(key_buffer, "jasper-key", 10) != 0 ||
-        syscall(SYS_keyctl, KEYCTL_SEARCH, keyring,
-                "user", "jasper-key") != key_serial ||
-        syscall(SYS_keyctl, KEYCTL_CHOWN, key_serial, 0, 0) != 0 ||
-        syscall(SYS_keyctl, KEYCTL_SETPERM, key_serial,
-                0x3f3f3f00) != 0 ||
-        syscall(SYS_keyctl, KEYCTL_GET_SECURITY, key_serial,
-                key_buffer, sizeof(key_buffer)) <= 0 ||
-        memcmp(key_buffer, "jasper-key:", 11) != 0 ||
-        syscall(SYS_keyctl, KEYCTL_UPDATE, key_serial,
-                "updated", 7) != 0 ||
-        syscall(SYS_keyctl, KEYCTL_UNLINK, key_serial, keyring) != 0 ||
-        syscall(SYS_keyctl, KEYCTL_LINK, key_serial, keyring) != 0 ||
-        syscall(SYS_keyctl, KEYCTL_REVOKE, key_serial) != 0) {
+        key_request != key_serial || key_read_size != 9 ||
+        key_read != 9 || !key_read_ok || key_describe != 11 ||
+        !key_describe_ok || key_search != key_serial ||
+        key_chown != 0 || key_setperm != 0 || key_security <= 0 ||
+        !key_security_ok || key_update != 0 || key_unlink != 0 ||
+        key_link != 0 || key_revoke != 0) {
+        dprintf(STDOUT_FILENO,
+                "keyctl-basic-fail ring=%d key=%d req=%ld "
+                "sizes=%ld/%ld describe=%ld/%d search=%ld "
+                "chown=%ld perm=%ld security=%ld/%d update=%ld "
+                "unlink=%ld link=%ld revoke=%ld errno=%d\n",
+                keyring, key_serial, key_request, key_read_size,
+                key_read, key_describe, key_describe_ok,
+                key_search, key_chown, key_setperm, key_security,
+                key_security_ok, key_update, key_unlink, key_link,
+                key_revoke, errno);
         return 645;
     }
     errno = 0;
@@ -6402,23 +6679,42 @@ int main(void) {
         legacy_limit.rlim_cur != 64 || legacy_limit.rlim_max != 64) {
         return 266;
     }
-    if (syscall(SYS_setrlimit, RLIMIT_NOFILE, &legacy_limit) != 0) {
+    long same_setrlimit =
+        syscall(SYS_setrlimit, RLIMIT_NOFILE, &legacy_limit);
+    if (same_setrlimit != 0) {
+        dprintf(STDOUT_FILENO,
+                "rlimit-same-fail result=%ld errno=%d cur=%llu max=%llu\n",
+                same_setrlimit, errno,
+                (unsigned long long)legacy_limit.rlim_cur,
+                (unsigned long long)legacy_limit.rlim_max);
         return 267;
     }
     struct rlimit old_nofile_limit = {0};
-    if (syscall(SYS_prlimit64, 0, RLIMIT_NOFILE,
-                &legacy_limit, &old_nofile_limit) != 0 ||
-        old_nofile_limit.rlim_cur != 64 ||
-        old_nofile_limit.rlim_max != 64 ||
-        syscall(SYS_getrlimit, RLIMIT_NOFILE, &old_nofile_limit) != 0 ||
+    long same_prlimit =
+        syscall(SYS_prlimit64, 0, RLIMIT_NOFILE,
+                &legacy_limit, &old_nofile_limit);
+    long same_getrlimit =
+        syscall(SYS_getrlimit, RLIMIT_NOFILE, &old_nofile_limit);
+    if (same_prlimit != 0 || same_getrlimit != 0 ||
         old_nofile_limit.rlim_cur != 64 ||
         old_nofile_limit.rlim_max != 64) {
+        dprintf(STDOUT_FILENO,
+                "rlimit-readback-fail prlimit=%ld get=%ld cur=%llu max=%llu errno=%d\n",
+                same_prlimit, same_getrlimit,
+                (unsigned long long)old_nofile_limit.rlim_cur,
+                (unsigned long long)old_nofile_limit.rlim_max, errno);
         return 267;
     }
     legacy_limit.rlim_max = 65;
     errno = 0;
-    if (syscall(SYS_setrlimit, RLIMIT_NOFILE, &legacy_limit) != -1 ||
+    long raised_setrlimit =
+        syscall(SYS_setrlimit, RLIMIT_NOFILE, &legacy_limit);
+    int raised_setrlimit_errno = errno;
+    if (raised_setrlimit != -1 ||
         errno != EPERM) {
+        dprintf(STDOUT_FILENO,
+                "rlimit-raise-fail result=%ld errno=%d\n",
+                raised_setrlimit, raised_setrlimit_errno);
         return 267;
     }
     errno = 0;

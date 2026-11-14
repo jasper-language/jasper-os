@@ -7869,6 +7869,10 @@ fn linux_child_exit(
             }
             let _ = reap(candidate);
             let _ = release_child(parent, candidate);
+            // Reclaim the child's address-space frames immediately.  Otherwise
+            // a fork/wait loop can exhaust the frame allocator before the next
+            // scheduler cleanup point, which is not Linux wait semantics.
+            crate::kobj::run_cleanup(usize::MAX);
         }
         return Ok(Some((pid, status)));
     }
@@ -9019,6 +9023,11 @@ fn release_resources_in(
                 linux.ppid = compat_core::syscall::LINUX_COMPAT_ROOT_PPID as u32;
             }
         }
+        // With no live subreaper there is no process able to consume this
+        // child's wait status (Jasper's compatibility root is not Linux PID 1).
+        // Release the creation ownership now so the task reference alone keeps
+        // a running orphan alive, and a later exit is reclaimed automatically.
+        let _ = kobj::release_owner_in(t, *child);
     }
     for r in closed {
         if let Some(id) = ObjId::from_raw(r.id.0) {
@@ -9413,6 +9422,7 @@ pub fn thread_exit(code: i64, cause: &'static str) -> ! {
             );
         }
     }
+    kprintln!("[JSR-PROC] event=system.task.exit_switch task={} cause={}", me.0, cause);
     sched::exit_current(cause)
 }
 

@@ -562,10 +562,10 @@ pub enum LinuxSyscall {
 /// 一个 Linux 兼容进程可显式发起的 syscall 集合。该集合不是 Jasper 原生
 /// `SyscallSet` 的别名，也不绕过兼容层参数和 Handle/Rights 检查。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LinuxSyscallSet([u64; 6]);
+pub struct LinuxSyscallSet([u64; 7]);
 
 impl LinuxSyscallSet {
-    const WORDS: usize = 6;
+    const WORDS: usize = 7;
     const BITS: usize = Self::WORDS * 64;
 
     /// No Linux syscall is authorized.
@@ -596,6 +596,7 @@ impl LinuxSyscallSet {
 }
 
 const _: () = assert!((LinuxSyscall::WaitId as usize) < LinuxSyscallSet::BITS);
+const _: () = assert!((LinuxSyscall::Vfork as usize) < LinuxSyscallSet::BITS);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LinuxCall {

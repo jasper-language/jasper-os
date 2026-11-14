@@ -246,11 +246,14 @@ impl VmSpace {
 
 impl Drop for VmSpace {
     fn drop(&mut self) {
-        if self.is_active() {
-            activate_kernel();
-        }
+        // A borrowed root belongs to the vfork parent. Dropping the child's
+        // VmSpace handle must not deactivate a CPU that is legitimately still
+        // running in that parent address space.
         if !self.owned {
             return;
+        }
+        if self.is_active() {
+            activate_kernel();
         }
         crate::smp::percpu::this().set_space(None);
         // SAFETY：已确保不是活动空间；此后不再使用 root。
