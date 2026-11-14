@@ -51,6 +51,21 @@ impl FdDescription {
         self.entry.handle = handle;
         self
     }
+
+    /// Returns the cursor shared by every descriptor and fixed-file reference.
+    pub fn offset(&self) -> u64 {
+        self.open_file.0.lock().offset
+    }
+
+    /// Updates the cursor shared by every descriptor and fixed-file reference.
+    pub fn set_offset(&self, offset: u64) {
+        self.open_file.0.lock().offset = offset;
+    }
+
+    /// Returns the Linux status flags attached to this open-file description.
+    pub fn status_flags(&self) -> u32 {
+        self.open_file.0.lock().status_flags
+    }
 }
 
 impl FdHandle {
@@ -737,6 +752,28 @@ mod tests {
             "closing one fd must not destroy the shared description"
         );
         assert_eq!(child.fd_offset(duplicate.fd()), Some(29));
+    }
+
+    #[test]
+    fn captured_description_survives_source_close_and_preserves_cursor() {
+        let mut fds = FdTable::<8>::new();
+        let source = fds
+            .install(
+                0x88,
+                Rights::READ.union(Rights::WRITE),
+                CompatKind::File,
+                false,
+            )
+            .unwrap();
+        let captured = fds.description_fd(source.fd()).unwrap();
+        fds.close(source).unwrap();
+        assert!(fds.get_fd(source.fd()).is_none());
+
+        captured.set_offset(37);
+        assert_eq!(captured.offset(), 37);
+        let reinstalled = fds.install_description(captured, false).unwrap();
+        assert_eq!(fds.fd_offset(reinstalled.fd()), Some(37));
+        assert_eq!(fds.get(reinstalled).unwrap().handle, 0x88);
     }
 
     #[test]

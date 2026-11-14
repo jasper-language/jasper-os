@@ -55,7 +55,7 @@ use crate::syscall::SyscallSet;
 use crate::task::TaskId;
 use crate::{arch, kprintln, sched};
 #[cfg(feature = "linux-abi")]
-use compat_core::fd::FdTable;
+use compat_core::fd::{FdDescription, FdTable};
 #[cfg(feature = "linux-abi")]
 use compat_core::syscall::{LinuxSyscall, LinuxSyscallSet};
 
@@ -319,11 +319,12 @@ pub(crate) struct LinuxEpollRegistration {
 }
 
 #[cfg(feature = "linux-abi")]
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct LinuxIoUringHandle {
     handle: u64,
     entries: u32,
     cq_entries: u32,
+    fixed_files: Vec<Option<FdDescription>>,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -1972,44 +1973,72 @@ pub(crate) fn linux_set_fd_status_flags(pid: ObjId, fd: u32, flags: u32) -> bool
 }
 
 #[cfg(feature = "linux-abi")]
+fn linux_handle_in_use(linux: &LinuxProcessState, handle: u64) -> bool {
+    linux.fds.handle_fd_count(handle) != 0
+        || linux.iourings.iter().any(|ring| {
+            ring.fixed_files
+                .iter()
+                .flatten()
+                .any(|file| file.entry.handle == handle)
+        })
+}
+
+#[cfg(feature = "linux-abi")]
 fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
-    if handle >= LINUX_PIPE_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+    if handle >= LINUX_PIPE_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
         linux.pipes.retain(|pipe| pipe.handle != handle);
     }
-    if handle >= LINUX_SOCKET_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+    if handle >= LINUX_SOCKET_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
         linux.sockets.retain(|socket| socket.handle != handle);
     }
-    if handle >= LINUX_ASHMEM_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+    if handle >= LINUX_ASHMEM_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
         linux.ashmem.retain(|ashmem| ashmem.handle != handle);
     }
-    if handle >= LINUX_BINDER_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+    if handle >= LINUX_BINDER_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
         linux.binder.retain(|binder| binder.handle != handle);
     }
-    if handle >= LINUX_ION_DEVICE_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+    if handle >= LINUX_ION_DEVICE_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
         linux.ion_devices.retain(|device| *device != handle);
     }
-    if handle >= LINUX_EVENTFD_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+    if handle >= LINUX_EVENTFD_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
         linux.eventfds.retain(|eventfd| eventfd.handle != handle);
     }
-    if handle >= LINUX_TIMERFD_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+    if handle >= LINUX_TIMERFD_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
         linux.timerfds.retain(|timerfd| timerfd.handle != handle);
     }
-    if handle >= LINUX_SIGNALFD_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+    if handle >= LINUX_SIGNALFD_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
         linux.signalfds.retain(|signalfd| signalfd.handle != handle);
     }
-    if handle >= LINUX_INOTIFY_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+    if handle >= LINUX_INOTIFY_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
         linux.inotifies.retain(|inotify| inotify.handle != handle);
     }
-    if handle >= LINUX_EPOLL_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+    if handle >= LINUX_EPOLL_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
         linux.epolls.retain(|epoll| epoll.handle != handle);
     }
-    if linux.fds.handle_fd_count(handle) == 0 {
-        linux.iourings.retain(|ring| ring.handle != handle);
+    let mut released_fixed = Vec::new();
+    if !linux_handle_in_use(linux, handle) {
+        linux.iourings.retain(|ring| {
+            if ring.handle != handle {
+                return true;
+            }
+            released_fixed.extend(
+                ring.fixed_files
+                    .iter()
+                    .flatten()
+                    .map(|file| file.entry.handle),
+            );
+            false
+        });
     }
-    if linux.fds.handle_fd_count(handle) == 0 {
+    if !linux_handle_in_use(linux, handle) {
         linux.dma_heaps.retain(|heap| *heap != handle);
         linux.dmabufs.retain(|buffer| *buffer != handle);
         linux.sync_files.retain(|file| file.handle != handle);
+    }
+    for fixed_handle in released_fixed {
+        if fixed_handle != handle {
+            release_unreferenced_pipe(linux, fixed_handle);
+        }
     }
 }
 
@@ -2474,6 +2503,7 @@ pub(crate) fn linux_io_uring_register(
             handle,
             entries,
             cq_entries,
+            fixed_files: Vec::new(),
         });
         Ok(())
     })
@@ -2493,6 +2523,124 @@ pub(crate) fn linux_io_uring_state(pid: ObjId, handle: u64) -> Option<(u32, u32)
             .map(|ring| (ring.entries, ring.cq_entries)),
         _ => None,
     })
+}
+
+/// Captures one descriptor's open-file description for a fixed io_uring slot.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_fd_description(pid: ObjId, fd: u32) -> Option<FdDescription> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process.linux.as_ref()?.fds.description_fd(fd),
+        _ => None,
+    })
+}
+
+/// Replaces a ring's fixed-file table after all slot descriptors were validated.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_io_uring_replace_fixed_files(
+    pid: ObjId,
+    handle: u64,
+    files: Vec<Option<FdDescription>>,
+) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        let old_files = {
+            let ring = linux
+                .iourings
+                .iter_mut()
+                .find(|ring| ring.handle == handle)
+                .ok_or(ProcError::NoTaskSlot)?;
+            if files.len() > ring.entries as usize {
+                return Err(ProcError::NoTaskSlot);
+            }
+            core::mem::replace(&mut ring.fixed_files, files)
+        };
+        for file in old_files.into_iter().flatten() {
+            release_unreferenced_pipe(linux, file.entry.handle);
+        }
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Atomically applies one validated fixed-file update range.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_io_uring_update_fixed_files(
+    pid: ObjId,
+    handle: u64,
+    offset: usize,
+    files: Vec<Option<FdDescription>>,
+) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        let old_files = {
+            let ring = linux
+                .iourings
+                .iter_mut()
+                .find(|ring| ring.handle == handle)
+                .ok_or(ProcError::NoTaskSlot)?;
+            let end = offset
+                .checked_add(files.len())
+                .ok_or(ProcError::NoTaskSlot)?;
+            if offset > ring.fixed_files.len() || end > ring.fixed_files.len() {
+                return Err(ProcError::NoTaskSlot);
+            }
+            let mut old_files = Vec::new();
+            old_files
+                .try_reserve(files.len())
+                .map_err(|_| ProcError::NoTaskSlot)?;
+            for (slot, file) in ring.fixed_files[offset..end].iter_mut().zip(files) {
+                old_files.push(core::mem::replace(slot, file));
+            }
+            old_files
+        };
+        for file in old_files.into_iter().flatten() {
+            release_unreferenced_pipe(linux, file.entry.handle);
+        }
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Returns the current registered fixed-file count, including sparse slots.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_io_uring_fixed_file_count(pid: ObjId, handle: u64) -> Option<usize> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .iourings
+            .iter()
+            .find(|ring| ring.handle == handle)
+            .map(|ring| ring.fixed_files.len()),
+        _ => None,
+    })
+}
+
+/// Resolves one fixed-file slot to its retained open-file description.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_io_uring_fixed_file(
+    pid: ObjId,
+    handle: u64,
+    index: u32,
+) -> Option<FdDescription> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .iourings
+            .iter()
+            .find(|ring| ring.handle == handle)?
+            .fixed_files
+            .get(index as usize)?
+            .clone(),
+        _ => None,
+    })
+}
+
+/// Clears a ring's fixed-file table.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_io_uring_clear_fixed_files(pid: ObjId, handle: u64) -> bool {
+    linux_io_uring_replace_fixed_files(pid, handle, Vec::new())
 }
 
 /// Translates the three Linux io_uring mmap pseudo-offsets to backing offsets.
