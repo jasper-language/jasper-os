@@ -2238,6 +2238,130 @@ int main(void) {
         return 276;
     }
     *uring_cq_head = *uring_cq_head + 1;
+    int uring_fixed_memfd = memfd_create("uring-fixed", 0);
+    int uring_update_memfd = memfd_create("uring-update", 0);
+    if (uring_fixed_memfd < 0 || uring_update_memfd < 0 ||
+        ftruncate(uring_fixed_memfd, 16) != 0 ||
+        ftruncate(uring_update_memfd, 16) != 0 ||
+        pwrite(uring_update_memfd, "updated", 7, 0) != 7) {
+        printf("uring-fixed-create-fail fixed=%d update=%d errno=%d\n",
+               uring_fixed_memfd, uring_update_memfd, errno);
+        return 280;
+    }
+    int uring_fixed_fds[2] = {uring_fixed_memfd, -1};
+    if (syscall(SYS_io_uring_register, uring_fd, IORING_REGISTER_FILES,
+                uring_fixed_fds, 2) != 0 ||
+        close(uring_fixed_memfd) != 0) {
+        printf("uring-fixed-register-fail errno=%d\n", errno);
+        return 281;
+    }
+    uring_index = *uring_sq_tail & *uring_sq_mask;
+    memset(&uring_sqes[uring_index], 0, sizeof(uring_sqes[uring_index]));
+    uring_sqes[uring_index].opcode = IORING_OP_WRITE;
+    uring_sqes[uring_index].flags = IOSQE_FIXED_FILE;
+    uring_sqes[uring_index].fd = 0;
+    uring_sqes[uring_index].addr = (uint64_t)(uintptr_t)"fixed!";
+    uring_sqes[uring_index].len = 6;
+    uring_sqes[uring_index].off = 0;
+    uring_sqes[uring_index].user_data = 0x4649584544ULL;
+    uring_sq_array[uring_index] = uring_index;
+    __sync_synchronize();
+    *uring_sq_tail = *uring_sq_tail + 1;
+    if (syscall(SYS_io_uring_enter, uring_fd, 1, 0, IORING_ENTER_GETEVENTS,
+                NULL, 0) != 1) {
+        return 282;
+    }
+    uring_cqe = (struct io_uring_cqe *)(uring_sq + uring_params.cq_off.cqes) +
+                (*uring_cq_head & (uring_params.cq_entries - 1));
+    if (uring_cqe->user_data != 0x4649584544ULL || uring_cqe->res != 6) {
+        printf("uring-fixed-write-fail data=%llx res=%d\n",
+               (unsigned long long)uring_cqe->user_data, uring_cqe->res);
+        return 283;
+    }
+    *uring_cq_head = *uring_cq_head + 1;
+    memset(memfd_io, 0, 16);
+    uring_index = *uring_sq_tail & *uring_sq_mask;
+    memset(&uring_sqes[uring_index], 0, sizeof(uring_sqes[uring_index]));
+    uring_sqes[uring_index].opcode = IORING_OP_READ;
+    uring_sqes[uring_index].flags = IOSQE_FIXED_FILE;
+    uring_sqes[uring_index].fd = 0;
+    uring_sqes[uring_index].addr = (uint64_t)(uintptr_t)memfd_io;
+    uring_sqes[uring_index].len = 6;
+    uring_sqes[uring_index].off = 0;
+    uring_sqes[uring_index].user_data = 0x4649585244ULL;
+    uring_sq_array[uring_index] = uring_index;
+    __sync_synchronize();
+    *uring_sq_tail = *uring_sq_tail + 1;
+    if (syscall(SYS_io_uring_enter, uring_fd, 1, 0, IORING_ENTER_GETEVENTS,
+                NULL, 0) != 1) {
+        return 284;
+    }
+    uring_cqe = (struct io_uring_cqe *)(uring_sq + uring_params.cq_off.cqes) +
+                (*uring_cq_head & (uring_params.cq_entries - 1));
+    if (uring_cqe->user_data != 0x4649585244ULL || uring_cqe->res != 6 ||
+        memcmp(memfd_io, "fixed!", 6) != 0) {
+        printf("uring-fixed-read-fail data=%llx res=%d bytes=%02x%02x%02x%02x%02x%02x\n",
+               (unsigned long long)uring_cqe->user_data, uring_cqe->res,
+               memfd_io[0], memfd_io[1], memfd_io[2],
+               memfd_io[3], memfd_io[4], memfd_io[5]);
+        return 285;
+    }
+    *uring_cq_head = *uring_cq_head + 1;
+    uring_index = *uring_sq_tail & *uring_sq_mask;
+    memset(&uring_sqes[uring_index], 0, sizeof(uring_sqes[uring_index]));
+    uring_sqes[uring_index].opcode = IORING_OP_FSYNC;
+    uring_sqes[uring_index].flags = IOSQE_FIXED_FILE;
+    uring_sqes[uring_index].fd = 0;
+    uring_sqes[uring_index].user_data = 0x4649584653ULL;
+    uring_sq_array[uring_index] = uring_index;
+    __sync_synchronize();
+    *uring_sq_tail = *uring_sq_tail + 1;
+    if (syscall(SYS_io_uring_enter, uring_fd, 1, 0, IORING_ENTER_GETEVENTS,
+                NULL, 0) != 1) {
+        return 286;
+    }
+    uring_cqe = (struct io_uring_cqe *)(uring_sq + uring_params.cq_off.cqes) +
+                (*uring_cq_head & (uring_params.cq_entries - 1));
+    if (uring_cqe->user_data != 0x4649584653ULL || uring_cqe->res != 0) {
+        return 287;
+    }
+    *uring_cq_head = *uring_cq_head + 1;
+    struct io_uring_files_update uring_update = {
+        .offset = 1,
+        .fds = (uint64_t)(uintptr_t)&uring_update_memfd,
+    };
+    if (syscall(SYS_io_uring_register, uring_fd,
+                IORING_REGISTER_FILES_UPDATE, &uring_update, 1) != 0 ||
+        close(uring_update_memfd) != 0) {
+        printf("uring-fixed-update-fail errno=%d\n", errno);
+        return 288;
+    }
+    memset(memfd_io, 0, 16);
+    uring_index = *uring_sq_tail & *uring_sq_mask;
+    memset(&uring_sqes[uring_index], 0, sizeof(uring_sqes[uring_index]));
+    uring_sqes[uring_index].opcode = IORING_OP_READ;
+    uring_sqes[uring_index].flags = IOSQE_FIXED_FILE;
+    uring_sqes[uring_index].fd = 1;
+    uring_sqes[uring_index].addr = (uint64_t)(uintptr_t)memfd_io;
+    uring_sqes[uring_index].len = 7;
+    uring_sqes[uring_index].off = 0;
+    uring_sqes[uring_index].user_data = 0x555044415445ULL;
+    uring_sq_array[uring_index] = uring_index;
+    __sync_synchronize();
+    *uring_sq_tail = *uring_sq_tail + 1;
+    if (syscall(SYS_io_uring_enter, uring_fd, 1, 0, IORING_ENTER_GETEVENTS,
+                NULL, 0) != 1) {
+        return 289;
+    }
+    uring_cqe = (struct io_uring_cqe *)(uring_sq + uring_params.cq_off.cqes) +
+                (*uring_cq_head & (uring_params.cq_entries - 1));
+    if (uring_cqe->user_data != 0x555044415445ULL || uring_cqe->res != 7 ||
+        memcmp(memfd_io, "updated", 7) != 0 ||
+        syscall(SYS_io_uring_register, uring_fd,
+                IORING_UNREGISTER_FILES, NULL, 0) != 0) {
+        return 290;
+    }
+    *uring_cq_head = *uring_cq_head + 1;
     uring_index = *uring_sq_tail & *uring_sq_mask;
     memset(&uring_sqes[uring_index], 0, sizeof(uring_sqes[uring_index]));
     uring_sqes[uring_index].opcode = IORING_OP_NOP;

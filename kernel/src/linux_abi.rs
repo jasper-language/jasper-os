@@ -15070,6 +15070,117 @@ fn io_uring_write(
         .map_err(ashmem_compat_error)
 }
 
+/// Executes one regular-file operation through a retained fixed-file
+/// description. `positioned` requests use the SQE offset; otherwise the shared
+/// open-file cursor is consumed.
+fn linux_io_uring_fixed_file_io(
+    pid: ObjId,
+    file: &compat_core::fd::FdDescription,
+    write: bool,
+    address: u64,
+    len: usize,
+    offset: u64,
+) -> Result<u64, CompatErrno> {
+    const MAX_IO_URING_FILE_BYTES: usize = 1024 * 1024;
+    if len > MAX_IO_URING_FILE_BYTES {
+        return Err(CompatErrno::Invalid);
+    }
+    let required = if write {
+        kernel_core::object::Rights::WRITE
+    } else {
+        kernel_core::object::Rights::READ
+    };
+    if !file.entry.rights.contains(required) {
+        return Err(CompatErrno::BadFd);
+    }
+    let positioned = offset != u64::MAX;
+    let effective_offset = if positioned {
+        offset
+    } else {
+        file.offset()
+    };
+    if len == 0 {
+        return Ok(0);
+    }
+    match file.entry.kind {
+        compat_core::fd::CompatKind::Device
+            if proc::linux_ashmem_is_regular(pid, file.entry.handle) == Some(true) =>
+        {
+            if write {
+                let mut bytes = alloc::vec![0u8; len];
+                copy_from_user(&mut bytes, address, len).map_err(|_| CompatErrno::Fault)?;
+                let io = admit_process_io(pid, len as u64, 1)?;
+                let written = proc::linux_ashmem_write_from(
+                    pid,
+                    file.entry.handle,
+                    effective_offset,
+                    &bytes,
+                )
+                .map_err(ashmem_compat_error)?;
+                io.commit();
+                if !positioned && written != 0 {
+                    file.set_offset(effective_offset + written as u64);
+                }
+                Ok(written as u64)
+            } else {
+                let mut bytes = alloc::vec![0u8; len];
+                let read = proc::linux_ashmem_read_from(
+                    pid,
+                    file.entry.handle,
+                    effective_offset,
+                    &mut bytes,
+                )
+                .map_err(ashmem_compat_error)?;
+                let io = admit_process_io(pid, read as u64, 1)?;
+                if read != 0 {
+                    copy_to_user(address, &bytes[..read], read)
+                        .map_err(|_| CompatErrno::Fault)?;
+                }
+                io.commit();
+                if !positioned && read != 0 {
+                    file.set_offset(effective_offset + read as u64);
+                }
+                Ok(read as u64)
+            }
+        }
+        compat_core::fd::CompatKind::File if !write => {
+            let backing =
+                crate::linux_vfs::FileId::from_handle(file.entry.handle)
+                    .ok_or(CompatErrno::BadFd)?;
+            let offset = usize::try_from(effective_offset).map_err(|_| CompatErrno::Invalid)?;
+            let source = backing.bytes();
+            let available = source.len().saturating_sub(offset).min(len);
+            let io = admit_process_io(pid, available as u64, 1)?;
+            if available != 0 {
+                copy_to_user(address, &source[offset..offset + available], available)
+                    .map_err(|_| CompatErrno::Fault)?;
+            }
+            io.commit();
+            if !positioned && available != 0 {
+                file.set_offset(effective_offset + available as u64);
+            }
+            Ok(available as u64)
+        }
+        _ => Err(CompatErrno::NoSys),
+    }
+}
+
+/// Returns whether a retained fixed file supports fsync/fdatasync.
+fn linux_io_uring_fixed_file_sync(
+    pid: ObjId,
+    file: &compat_core::fd::FdDescription,
+) -> Result<u64, CompatErrno> {
+    match file.entry.kind {
+        compat_core::fd::CompatKind::File | compat_core::fd::CompatKind::Directory => Ok(0),
+        compat_core::fd::CompatKind::Device
+            if proc::linux_ashmem_is_regular(pid, file.entry.handle) == Some(true) =>
+        {
+            Ok(0)
+        }
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
 /// Creates a shared SQ/CQ/SQE backing object and publishes the Linux
 /// `io_uring_params` geometry with single-mmap support.
 fn linux_io_uring_setup(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
@@ -15147,6 +15258,7 @@ fn linux_io_uring_setup(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
 fn linux_io_uring_enter(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const IORING_ENTER_GETEVENTS: u64 = 1;
     const IORING_ENTER_SQ_WAKEUP: u64 = 2;
+    const IOSQE_FIXED_FILE: u8 = 1 << 0;
     const IORING_OP_NOP: u8 = 0;
     const IORING_OP_FSYNC: u8 = 3;
     const IORING_OP_READ: u8 = 22;
@@ -15221,12 +15333,42 @@ fn linux_io_uring_enter(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
         } else {
             operation_flags != 0
         };
-        let result = if sqe_flags != 0
+        let fixed_file = sqe_flags & IOSQE_FIXED_FILE != 0;
+        let result = if sqe_flags & !IOSQE_FIXED_FILE != 0
             || invalid_operation_flags
             || sqe_index >= entries
             || target_fd < 0 && opcode != IORING_OP_NOP
         {
             Err(CompatErrno::Invalid)
+        } else if fixed_file && opcode != IORING_OP_NOP {
+            (|| {
+                let file =
+                    proc::linux_io_uring_fixed_file(pid, entry.handle, target_fd as u32)
+                        .ok_or(CompatErrno::BadFd)?;
+                match opcode {
+                    IORING_OP_FSYNC => {
+                        linux_io_uring_fixed_file_sync(pid, &file)?;
+                        Ok(0)
+                    }
+                    IORING_OP_READ => linux_io_uring_fixed_file_io(
+                        pid,
+                        &file,
+                        false,
+                        address,
+                        length as usize,
+                        offset,
+                    ),
+                    IORING_OP_WRITE => linux_io_uring_fixed_file_io(
+                        pid,
+                        &file,
+                        true,
+                        address,
+                        length as usize,
+                        offset,
+                    ),
+                    _ => Err(CompatErrno::NoSys),
+                }
+            })()
         } else {
             match opcode {
                 IORING_OP_NOP => Ok(0),
@@ -15280,13 +15422,102 @@ fn linux_io_uring_enter(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
     Ok(submit as u64)
 }
 
-/// io_uring registration is returned as unsupported until fixed files and
-/// buffers have real object-lifetime tracking.
+/// Implements the fixed-file registration table. Every slot captures the
+/// descriptor's open-file description; replacement is atomic after all new
+/// descriptors and user memory have been validated.
 fn linux_io_uring_register(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const IORING_REGISTER_FILES: u32 = 2;
+    const IORING_UNREGISTER_FILES: u32 = 3;
+    const IORING_REGISTER_FILES_UPDATE: u32 = 6;
+
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
-    let _ = proc::linux_io_uring_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
-    Err(CompatErrno::NoSys)
+    let (entries, _) =
+        proc::linux_io_uring_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let opcode = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    let count = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+    let read_descriptions =
+        |address: u64, count: usize| -> Result<
+            alloc::vec::Vec<Option<compat_core::fd::FdDescription>>,
+            CompatErrno,
+        > {
+            if count > entries as usize {
+                return Err(CompatErrno::Invalid);
+            }
+            if count != 0 && address == 0 {
+                return Err(CompatErrno::Fault);
+            }
+            let mut files = alloc::vec::Vec::new();
+            files
+                .try_reserve(count)
+                .map_err(|_| CompatErrno::NoMemory)?;
+            for index in 0..count {
+                let slot = address
+                    .checked_add((index * 4) as u64)
+                    .ok_or(CompatErrno::Fault)?;
+                let mut raw = [0u8; 4];
+                copy_from_user(&mut raw, slot, 4).map_err(|_| CompatErrno::Fault)?;
+                let raw_fd = i32::from_le_bytes(raw);
+                if raw_fd == -1 {
+                    files.push(None);
+                } else if raw_fd < 0 {
+                    return Err(CompatErrno::BadFd);
+                } else {
+                    files.push(Some(
+                        proc::linux_fd_description(pid, raw_fd as u32)
+                            .ok_or(CompatErrno::BadFd)?,
+                    ));
+                }
+            }
+            Ok(files)
+        };
+
+    match opcode {
+        IORING_REGISTER_FILES => {
+            let files = read_descriptions(args[2], count)?;
+            if proc::linux_io_uring_replace_fixed_files(pid, entry.handle, files) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::Invalid)
+            }
+        }
+        IORING_UNREGISTER_FILES => {
+            if count != 0 || args[2] != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            if proc::linux_io_uring_clear_fixed_files(pid, entry.handle) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::Invalid)
+            }
+        }
+        IORING_REGISTER_FILES_UPDATE => {
+            if args[2] == 0 || count == 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            let mut header = [0u8; 16];
+            copy_from_user(&mut header, args[2], 16).map_err(|_| CompatErrno::Fault)?;
+            let offset = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
+            let reserved = u32::from_le_bytes(header[4..8].try_into().unwrap());
+            let fds = u64::from_le_bytes(header[8..16].try_into().unwrap());
+            let registered =
+                proc::linux_io_uring_fixed_file_count(pid, entry.handle)
+                    .ok_or(CompatErrno::BadFd)?;
+            if reserved != 0
+                || offset > registered
+                || offset.checked_add(count).is_none_or(|end| end > registered)
+            {
+                return Err(CompatErrno::Invalid);
+            }
+            let files = read_descriptions(fds, count)?;
+            if proc::linux_io_uring_update_fixed_files(pid, entry.handle, offset, files) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::Invalid)
+            }
+        }
+        _ => Err(CompatErrno::NoSys),
+    }
 }
 
 /// Creates one bounded legacy AIO context.
