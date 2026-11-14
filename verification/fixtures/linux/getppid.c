@@ -2817,6 +2817,7 @@ jasper_android_binder:
         return 723;
     }
     struct binder_frozen_status_info binder_frozen = {0};
+    binder_frozen.pid = (uint32_t)getpid();
     if (ioctl(binder_fd, BINDER_FREEZE, &binder_freeze) != 0 ||
         ioctl(binder_fd, BINDER_GET_FROZEN_INFO, &binder_frozen) != 0 ||
         binder_frozen.pid != (uint32_t)getpid() ||
@@ -3635,6 +3636,7 @@ jasper_android_binder:
         return 737;
     }
     memset(&binder_frozen, 0, sizeof(binder_frozen));
+    binder_frozen.pid = (uint32_t)getpid();
     if (ioctl(server, BINDER_GET_FROZEN_INFO, &binder_frozen) != 0 ||
         binder_frozen.pid != (uint32_t)getpid() ||
         (binder_frozen.sync_recv & 1) == 0) {
