@@ -1517,10 +1517,23 @@ fn sandbox_launch_create(desc_ptr: u64) -> i64 {
         grantee: domain,
     }; kernel_core::sandbox_launch_abi::MAX_DEVICE_GRANTS];
     for (target, source) in devices.iter_mut().zip(args.used_devices()) {
+        let Some(rights) = rights_arg(u64::from(source.rights)) else {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        };
+        let Some((object, _)) = proc::device_authority_identity(
+            domain,
+            handle_arg(source.object),
+            rights,
+        ) else {
+            return err(SYSTEM_ERROR_RIGHTS_DENIED);
+        };
+        if source.generation != 0 && source.generation != object.generation() {
+            return err(SYSTEM_ERROR_RIGHTS_DENIED);
+        }
         *target = DeviceGrant {
-            object: source.object,
-            generation: source.generation,
-            rights: source.rights,
+            object: object.raw(),
+            generation: object.generation(),
+            rights: rights.bits(),
             owner: domain,
             grantee: domain,
         };

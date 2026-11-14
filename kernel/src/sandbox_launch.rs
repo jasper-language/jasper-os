@@ -39,8 +39,8 @@ const DEVICE_RIGHTS: Rights = Rights::READ
 /// Device authority snapshot taken before Sandbox/Storage/Workload locks.
 ///
 /// The production handle table is the sole device-grant authority. Data scopes
-/// are bound to exact live volume generations and image ownership; NET policy
-/// remains denied until its own live registry exists.
+/// are bound to exact live volume generations and image ownership. NET policy
+/// references are checked against the kernel-owned live policy registry.
 #[derive(Clone, Copy)]
 struct DataAuthorityTicket {
     volume: VolumeKey,
@@ -52,6 +52,7 @@ struct KernelLaunchAuthority {
     domain: DomainKey,
     sandbox: SandboxKey,
     root_capabilities: CapabilitySet,
+    network_policy: Option<NetworkPolicyRef>,
     root_ticket: Option<DeviceAuthorityTicket>,
     device_tickets: [Option<DeviceAuthorityTicket>; kernel_core::sandbox_launch::MAX_DEVICE_GRANTS],
     data_tickets: [Option<DataAuthorityTicket>; kernel_core::sandbox_launch::MAX_DATA_SCOPES],
@@ -64,9 +65,13 @@ impl KernelLaunchAuthority {
         image: ImageKey,
         devices: &[DeviceGrant],
         data: &[DataScopeGrant],
+        network_policy: Option<NetworkPolicyRef>,
     ) -> Self {
         let mut intrinsic =
             CapabilitySet::EXECUTE.union(CapabilitySet::DATA_READ).union(CapabilitySet::DATA_WRITE);
+        if network_policy.is_some_and(|policy| crate::net_policy::live(domain, sandbox, policy)) {
+            intrinsic = intrinsic.union(CapabilitySet::NETWORK);
+        }
         let root_ticket = proc::device_authority_ticket(domain, None, Rights::NONE);
         if root_ticket.is_some() {
             intrinsic = intrinsic.union(CapabilitySet::DEVICE);
@@ -111,7 +116,7 @@ impl KernelLaunchAuthority {
             let Some(volume) = VolumeKey::from_raw(grant.object) else {
                 continue;
             };
-            if volume.to_raw() != grant.object {
+            if volume.to_raw() != grant.object || volume.generation() != grant.generation {
                 continue;
             }
             if STORAGE
@@ -130,6 +135,7 @@ impl KernelLaunchAuthority {
             domain,
             sandbox,
             root_capabilities: intrinsic,
+            network_policy,
             root_ticket,
             device_tickets,
             data_tickets,
@@ -164,6 +170,12 @@ impl KernelLaunchAuthority {
             })
         {
             return Err(LaunchError::InvalidData);
+        }
+        if self
+            .network_policy
+            .is_some_and(|policy| !crate::net_policy::live(self.domain, self.sandbox, policy))
+        {
+            return Err(LaunchError::InvalidNetwork);
         }
         Ok(())
     }
@@ -220,8 +232,15 @@ impl LaunchAuthority for KernelLaunchAuthority {
                 })
     }
 
-    fn network_policy_live(&self, _domain: DomainKey, _policy: NetworkPolicyRef) -> bool {
-        false
+    fn network_policy_live(
+        &self,
+        domain: DomainKey,
+        sandbox: SandboxKey,
+        policy: NetworkPolicyRef,
+    ) -> bool {
+        domain == self.domain
+            && sandbox == self.sandbox
+            && crate::net_policy::live(domain, sandbox, policy)
     }
 }
 
@@ -233,6 +252,7 @@ pub fn create(domain: DomainKey, spec: LaunchSpec<'_>) -> Result<LaunchPlanKey, 
         spec.image,
         spec.devices,
         spec.data,
+        spec.network_policy,
     );
     let sandboxes = SANDBOXES.lock();
     let storage = STORAGE.lock();
@@ -337,6 +357,7 @@ fn plan_authority(
         plan.image,
         &device_grants[..device_count],
         &data_grants[..data_count],
+        plan.network_policy,
     );
     Ok((plan, authority))
 }

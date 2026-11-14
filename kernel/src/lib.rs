@@ -124,6 +124,7 @@ pub mod prog_demo;
 pub mod ring;
 pub mod rt;
 pub mod rtclass_demo;
+pub(crate) mod net_policy;
 pub mod sandbox;
 pub mod sandbox_launch;
 pub mod sandbox_storage;

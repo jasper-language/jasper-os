@@ -38,6 +38,9 @@ pub struct LaunchCreateArgs {
     pub network_policy: Option<NetworkPolicyRef>,
     pub device_count: u16,
     pub data_count: u16,
+    /// In the user ABI, `DeviceGrant.object` is the caller's Device handle.
+    /// Generation zero asks the kernel to derive it; a non-zero generation must
+    /// match the live object.
     pub devices: [DeviceGrant; MAX_DEVICE_GRANTS],
     pub data: [DataScopeGrant; MAX_DATA_SCOPES],
 }

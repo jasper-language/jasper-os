@@ -7,6 +7,7 @@
 use crate::{
     capability::{AuthorityGrant, AuthoritySnapshot, CapabilityGraph},
     object::Rights,
+    security_domain::DomainKey,
 };
 
 pub const NET_MAJOR: u16 = 1;
@@ -861,6 +862,170 @@ impl PolicySlot {
     }
 }
 
+#[derive(Clone, Copy)]
+struct LivePolicyRecord {
+    domain: DomainKey,
+    scope: u64,
+    policy: NetworkPolicy,
+}
+
+#[derive(Clone, Copy)]
+struct BurnedPolicyGeneration {
+    scope: u64,
+    generation: u32,
+}
+
+/// Fixed-capacity registry for the unique live NET policy authority.
+///
+/// A policy is live only for the exact domain, sandbox scope and key
+/// generation. Removing it burns the slot generation so an old reference can
+/// never revive after slot reuse.
+pub struct LiveNetworkPolicies<const N: usize> {
+    slots: [Option<LivePolicyRecord>; N],
+    burned: [Option<BurnedPolicyGeneration>; N],
+}
+
+impl<const N: usize> LiveNetworkPolicies<N> {
+    pub const fn new() -> Self {
+        Self {
+            slots: [None; N],
+            burned: [None; N],
+        }
+    }
+
+    pub fn install(
+        &mut self,
+        domain: DomainKey,
+        scope: u64,
+        policy: NetworkPolicy,
+    ) -> Result<(), NetError> {
+        if !domain.is_valid() || scope == 0 || policy.epoch == 0 {
+            return Err(NetError::InvalidPolicy);
+        }
+        if self
+            .burned
+            .iter()
+            .flatten()
+            .any(|entry| entry.scope == scope && policy.epoch <= entry.generation)
+        {
+            return Err(NetError::Revoked);
+        }
+        if let Some(record) = self.slots.iter().flatten().find(|record| record.scope == scope) {
+            if record.domain != domain {
+                return Err(NetError::InvalidIdentity);
+            }
+            if policy.epoch <= record.policy.epoch {
+                return Err(NetError::InvalidPolicy);
+            }
+        }
+        let slot = self
+            .slots
+            .iter()
+            .position(|record| record.is_some_and(|record| record.scope == scope))
+            .or_else(|| {
+                self.slots
+                    .iter()
+                    .position(Option::is_none)
+            })
+            .ok_or(NetError::CapacityExhausted)?;
+        self.slots[slot] = Some(LivePolicyRecord {
+            domain,
+            scope,
+            policy,
+        });
+        Ok(())
+    }
+
+    pub fn snapshot(
+        &self,
+        domain: DomainKey,
+        scope: u64,
+        generation: u32,
+    ) -> Result<NetworkPolicy, NetError> {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|record| {
+                record.domain == domain
+                    && record.scope == scope
+                    && record.policy.epoch == generation
+            })
+            .map(|record| record.policy)
+            .next()
+            .ok_or(NetError::Revoked)
+    }
+
+    pub fn revoke(
+        &mut self,
+        domain: DomainKey,
+        scope: u64,
+        generation: u32,
+    ) -> Result<(), NetError> {
+        let slot = self
+            .slots
+            .iter()
+            .position(|record| {
+                record.is_some_and(|record| {
+                    record.domain == domain
+                        && record.scope == scope
+                        && record.policy.epoch == generation
+                })
+            })
+            .ok_or(NetError::Revoked)?;
+        if self
+            .burned
+            .iter()
+            .flatten()
+            .any(|entry| entry.scope == scope && entry.generation >= generation)
+        {
+            self.slots[slot] = None;
+            return Ok(());
+        }
+        let burned_slot = self
+            .burned
+            .iter()
+            .position(Option::is_none)
+            .or_else(|| {
+                self.burned
+                    .iter()
+                    .position(|entry| entry.is_some_and(|entry| entry.scope == scope))
+            })
+            .ok_or(NetError::CapacityExhausted)?;
+        self.slots[slot] = None;
+        self.burned[burned_slot] = Some(BurnedPolicyGeneration { scope, generation });
+        Ok(())
+    }
+
+    pub fn generation(&self, domain: DomainKey, scope: u64) -> Option<u32> {
+        self.slots
+            .iter()
+            .flatten()
+            .find(|record| record.domain == domain && record.scope == scope)
+            .map(|record| record.policy.epoch)
+    }
+
+    pub fn revoke_scope(&mut self, domain: DomainKey, scope: u64) -> bool {
+        let Some(generation) = self.generation(domain, scope) else {
+            return false;
+        };
+        self.revoke(domain, scope, generation).is_ok()
+    }
+
+    pub fn len(&self) -> usize {
+        self.slots.iter().flatten().count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl<const N: usize> Default for LiveNetworkPolicies<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConnectionGrant {
     pub source: EndpointIdentity,
@@ -1080,6 +1245,52 @@ mod tests {
             NetworkPolicy::compile(bytes),
             Err(NetError::InvalidPolicy)
         );
+    }
+
+    #[test]
+    fn live_policy_is_domain_scope_and_generation_exact() {
+        let domain = DomainKey {
+            id: 41,
+            generation: 3,
+        };
+        let other_domain = DomainKey {
+            id: 42,
+            generation: 3,
+        };
+        let policy = NetworkPolicy {
+            version: NetVersion::V1_0_0,
+            allowed: NetCapabilities::CONNECT.union(NetCapabilities::SEND),
+            required: NetCapabilities::CONNECT,
+            epoch: 7,
+        };
+        let mut live = LiveNetworkPolicies::<2>::new();
+        live.install(domain, 0x10001, policy).unwrap();
+        assert_eq!(live.snapshot(domain, 0x10001, 7), Ok(policy));
+        assert_eq!(
+            live.snapshot(domain, 0x10002, 7),
+            Err(NetError::Revoked)
+        );
+        assert_eq!(
+            live.snapshot(other_domain, 0x10001, 7),
+            Err(NetError::Revoked)
+        );
+        live.revoke(domain, 0x10001, 7).unwrap();
+        assert_eq!(
+            live.snapshot(domain, 0x10001, 7),
+            Err(NetError::Revoked)
+        );
+
+        assert_eq!(
+            live.install(domain, 0x10001, policy),
+            Err(NetError::Revoked)
+        );
+        let replacement = NetworkPolicy { epoch: 8, ..policy };
+        live.install(domain, 0x10001, replacement).unwrap();
+        assert_eq!(
+            live.snapshot(domain, 0x10001, 7),
+            Err(NetError::Revoked)
+        );
+        assert_eq!(live.snapshot(domain, 0x10001, 8), Ok(replacement));
     }
 
     #[test]

@@ -1023,6 +1023,23 @@ fn verify_sandbox_launch_abi(base: u64) {
             return;
         }
     };
+    let network_policy = match crate::net_policy::install(
+        domain,
+        sandbox,
+        kernel_core::net::NetworkPolicy {
+            version: kernel_core::net::NetVersion::V1_0_0,
+            allowed: kernel_core::net::NetCapabilities::CONNECT
+                .union(kernel_core::net::NetCapabilities::SEND),
+            required: kernel_core::net::NetCapabilities::CONNECT,
+            epoch: 7,
+        },
+    ) {
+        Ok(policy) => policy,
+        Err(error) => {
+            check(false, error.name());
+            return;
+        }
+    };
 
     let foreign_domain = DomainKey {
         id: 0x574f_9010,
@@ -1056,9 +1073,13 @@ fn verify_sandbox_launch_abi(base: u64) {
                 return;
             }
         };
-    let root_capabilities = kernel_core::sandbox_launch::CapabilitySet::EXECUTE
+    let foreign_root_capabilities = kernel_core::sandbox_launch::CapabilitySet::EXECUTE
         .union(kernel_core::sandbox_launch::CapabilitySet::DATA_READ)
         .union(kernel_core::sandbox_launch::CapabilitySet::DATA_WRITE);
+    let root_capabilities = kernel_core::sandbox_launch::CapabilitySet::EXECUTE
+        .union(kernel_core::sandbox_launch::CapabilitySet::DATA_READ)
+        .union(kernel_core::sandbox_launch::CapabilitySet::DATA_WRITE)
+        .union(kernel_core::sandbox_launch::CapabilitySet::NETWORK);
     let foreign_plan = match crate::sandbox_launch::create(
         foreign_domain,
         kernel_core::sandbox_launch::LaunchSpec {
@@ -1066,7 +1087,7 @@ fn verify_sandbox_launch_abi(base: u64) {
             root: foreign_root.key,
             image: foreign_image,
             volume: None,
-            root_capabilities,
+            root_capabilities: foreign_root_capabilities,
             capabilities: kernel_core::sandbox_launch::CapabilitySet::EXECUTE,
             resources: kernel_core::sandbox_launch::LaunchResources {
                 limits: foreign_root.limits,
@@ -1086,17 +1107,18 @@ fn verify_sandbox_launch_abi(base: u64) {
     let empty_domain = DomainKey::NONE;
     let create = kernel_core::sandbox_launch_abi::LaunchCreateArgs {
         sandbox,
-        root: root.key,
+        root: Some(root.key),
         image,
         volume: Some(volume),
         root_capabilities,
         capabilities: kernel_core::sandbox_launch::CapabilitySet::EXECUTE
-            .union(kernel_core::sandbox_launch::CapabilitySet::DATA_WRITE),
+            .union(kernel_core::sandbox_launch::CapabilitySet::DATA_WRITE)
+            .union(kernel_core::sandbox_launch::CapabilitySet::NETWORK),
         resources: kernel_core::sandbox_launch::LaunchResources {
             limits: root.limits,
             io_rate: None,
         },
-        network_policy: None,
+        network_policy: Some(network_policy),
         device_count: 0,
         data_count: 0,
         devices: [kernel_core::sandbox_launch::DeviceGrant {
@@ -1213,6 +1235,46 @@ fn verify_sandbox_launch_abi(base: u64) {
         plan.is_some_and(|key| crate::sandbox_launch::query(domain, key).is_err()),
         "sandbox launch destroyed key stays invalid",
     );
+
+    let network_plan = match crate::sandbox_launch::create(
+        domain,
+        kernel_core::sandbox_launch::LaunchSpec {
+            sandbox,
+            root: root.key,
+            image,
+            volume: None,
+            root_capabilities,
+            capabilities: kernel_core::sandbox_launch::CapabilitySet::EXECUTE
+                .union(kernel_core::sandbox_launch::CapabilitySet::NETWORK),
+            resources: kernel_core::sandbox_launch::LaunchResources {
+                limits: root.limits,
+                io_rate: None,
+            },
+            network_policy: Some(network_policy),
+            devices: &[],
+            data: &[],
+        },
+    ) {
+        Ok(key) => key,
+        Err(error) => {
+            check(false, error.name());
+            return;
+        }
+    };
+    check(
+        crate::sandbox_launch::query(domain, network_plan).is_ok(),
+        "sandbox launch accepts live NET policy",
+    );
+    check(
+        crate::net_policy::revoke(domain, sandbox, network_policy).is_ok()
+            && crate::sandbox_launch::query(domain, network_plan)
+                == Err(kernel_core::sandbox_launch::LaunchError::InvalidNetwork),
+        "sandbox launch revokes stale NET policy",
+    );
+    check(
+        crate::sandbox_launch::destroy(domain, network_plan).is_ok(),
+        "sandbox launch NET plan cleanup",
+    );
     let _ = proc::reap(pid);
     crate::kobj::run_cleanup(usize::MAX);
 
@@ -1235,7 +1297,7 @@ fn verify_sandbox_launch_abi(base: u64) {
         "sandbox launch plan baseline",
     );
     kprintln!(
-        "[JSR-SANDBOX-LAUNCH] runtime=true create=true query=true foreign_hidden=true destroy_stale=true plans={} failed={}",
+        "[JSR-SANDBOX-LAUNCH] runtime=true create=true query=true net_live=true net_revoked=true foreign_hidden=true destroy_stale=true plans={} failed={}",
         crate::sandbox_launch::count(),
         failed(),
     );

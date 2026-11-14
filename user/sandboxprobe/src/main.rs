@@ -3,12 +3,16 @@
 #![no_main]
 
 use jasper_rt::{entry, ids, println, sys};
+use kernel_core::device::{Filter, Record, RECORD_SIZE};
+use kernel_core::object::Rights;
 use kernel_core::sandbox::SandboxKey;
 use kernel_core::sandbox_image::{
     ContentDigest, ImageKey, ImageLayerSpec, ImageVersion, SignedImage, VolumeKey,
     MAX_IMAGE_LAYERS,
 };
-use kernel_core::sandbox_launch::{CapabilitySet, DataScopeGrant, DeviceGrant, LaunchResources};
+use kernel_core::sandbox_launch::{
+    CapabilitySet, DataScopeGrant, DeviceGrant, LaunchResources, NetworkPolicyRef,
+};
 use kernel_core::sandbox_launch_abi::{
     LaunchCreateArgs, CREATE_BYTES, INFO_BYTES, MAX_DATA_SCOPES, MAX_DEVICE_GRANTS,
 };
@@ -132,12 +136,37 @@ fn create_volume(sandbox: SandboxKey, image: ImageKey) -> Result<VolumeKey, i32>
     VolumeKey::from_raw(key as u64).ok_or(24)
 }
 
-fn create_plan(
+fn open_first_device() -> Result<i64, i32> {
+    let mut records = [0u8; 4096];
+    let required = call(
+        ids::SYSTEM_DEVICE_LIST,
+        u64::from(Filter::ALL.to_word()),
+        records.as_mut_ptr() as u64,
+        records.len() as u64,
+    );
+    if required < RECORD_SIZE as i64 || required as usize > records.len() {
+        return Err(36);
+    }
+    let mut raw = [0u8; RECORD_SIZE];
+    raw.copy_from_slice(&records[..RECORD_SIZE]);
+    let device = Record::decode(&raw);
+    let handle = call(
+        ids::SYSTEM_DEVICE_OPEN,
+        u64::from(device.bdf),
+        Rights::READ.bits() as u64,
+        0,
+    );
+    (handle > 0).then_some(handle).ok_or(37)
+}
+
+fn plan_record(
     sandbox: SandboxKey,
     image: ImageKey,
     volume: VolumeKey,
     data_volume: VolumeKey,
-) -> Result<u64, i32> {
+    device: Option<i64>,
+    network_generation: Option<u32>,
+) -> Option<[u8; CREATE_BYTES]> {
     let mut data = [EMPTY_DATA; MAX_DATA_SCOPES];
     data[0] = DataScopeGrant {
         object: data_volume.to_raw(),
@@ -146,33 +175,95 @@ fn create_plan(
         grantee: DomainKey::NONE,
         writable: true,
     };
-    let raw = LaunchCreateArgs {
+    let mut devices = [EMPTY_DEVICE; MAX_DEVICE_GRANTS];
+    let device_count = if let Some(handle) = device {
+        devices[0] = DeviceGrant {
+            object: handle as u64,
+            generation: 0,
+            rights: Rights::READ.bits(),
+            owner: DomainKey::NONE,
+            grantee: DomainKey::NONE,
+        };
+        1
+    } else {
+        0
+    };
+    let mut root_capabilities = CapabilitySet::EXECUTE
+        .union(CapabilitySet::DATA_READ)
+        .union(CapabilitySet::DATA_WRITE);
+    let mut capabilities = CapabilitySet::EXECUTE.union(CapabilitySet::DATA_WRITE);
+    if device.is_some() {
+        root_capabilities = root_capabilities.union(CapabilitySet::DEVICE);
+        capabilities = capabilities.union(CapabilitySet::DEVICE);
+    }
+    if network_generation.is_some() {
+        root_capabilities = root_capabilities.union(CapabilitySet::NETWORK);
+        capabilities = capabilities.union(CapabilitySet::NETWORK);
+    }
+    LaunchCreateArgs {
         sandbox,
         root: None,
         image,
         volume: Some(volume),
-        root_capabilities: CapabilitySet::EXECUTE
-            .union(CapabilitySet::DATA_READ)
-            .union(CapabilitySet::DATA_WRITE),
-        capabilities: CapabilitySet::EXECUTE.union(CapabilitySet::DATA_WRITE),
+        root_capabilities,
+        capabilities,
         resources: LaunchResources {
             limits: LIMITS,
             io_rate: None,
         },
-        network_policy: None,
-        device_count: 0,
+        network_policy: network_generation.map(|generation| NetworkPolicyRef {
+            policy: sandbox.to_raw(),
+            generation,
+        }),
+        device_count,
         data_count: 1,
-        devices: [EMPTY_DEVICE; MAX_DEVICE_GRANTS],
+        devices,
         data,
     }
     .encode()
-    .ok_or(14)?;
-    debug_assert_eq!(raw.len(), CREATE_BYTES);
-    let key = call(
+}
+
+fn create_plan_call(
+    sandbox: SandboxKey,
+    image: ImageKey,
+    volume: VolumeKey,
+    data_volume: VolumeKey,
+    device: Option<i64>,
+    network_generation: Option<u32>,
+) -> i64 {
+    let Some(raw) = plan_record(
+        sandbox,
+        image,
+        volume,
+        data_volume,
+        device,
+        network_generation,
+    ) else {
+        return -(ids::SYSTEM_ERROR_INVALID_ARGUMENT as i64);
+    };
+    call(
         ids::SYSTEM_SANDBOX_LAUNCH_CREATE,
         raw.as_ptr() as u64,
         raw.len() as u64,
         0,
+    )
+}
+
+fn create_plan(
+    sandbox: SandboxKey,
+    image: ImageKey,
+    volume: VolumeKey,
+    data_volume: VolumeKey,
+    device: Option<i64>,
+    network_generation: Option<u32>,
+) -> Result<u64, i32> {
+    let key = create_plan_call(
+        sandbox,
+        image,
+        volume,
+        data_volume,
+        device,
+        network_generation,
     );
     (key > 0).then_some(key as u64).ok_or(15)
 }
@@ -216,7 +307,38 @@ fn run() -> Result<(), i32> {
     let image = ImageKey::from_raw(load_image(sandbox)?).ok_or(13)?;
     let volume = create_volume(sandbox, image)?;
     let data_volume = create_volume(sandbox, image)?;
-    let invalid_plan = create_plan(sandbox, image, volume, data_volume)?;
+    let device = open_first_device()?;
+    let device_plan = create_plan(sandbox, image, volume, data_volume, Some(device), None)?;
+    query_plan(sandbox, device_plan, image, volume)?;
+    if call(ids::SYSTEM_HANDLE_CLOSE, device as u64, 0, 0) != 0 {
+        return Err(38);
+    }
+    let revoked_device = call(ids::SYSTEM_SANDBOX_LAUNCH_QUERY, device_plan, 0, 0);
+    if revoked_device != -(ids::SYSTEM_ERROR_RIGHTS_DENIED as i64) {
+        return Err(39);
+    }
+    if call(ids::SYSTEM_SANDBOX_LAUNCH_DESTROY, device_plan, 0, 0) != 0 {
+        return Err(40);
+    }
+
+    let stale_network = create_plan_call(
+        sandbox,
+        image,
+        volume,
+        data_volume,
+        None,
+        Some(2),
+    );
+    if stale_network != -(ids::SYSTEM_ERROR_RIGHTS_DENIED as i64) {
+        return Err(41);
+    }
+    let network_plan = create_plan(sandbox, image, volume, data_volume, None, Some(1))?;
+    query_plan(sandbox, network_plan, image, volume)?;
+    if call(ids::SYSTEM_SANDBOX_LAUNCH_DESTROY, network_plan, 0, 0) != 0 {
+        return Err(42);
+    }
+
+    let invalid_plan = create_plan(sandbox, image, volume, data_volume, None, None)?;
     let invalid = start_plan(invalid_plan, &SANDBOX_CHILD[..SANDBOX_CHILD.len() - 1]);
     if invalid != -(ids::SYSTEM_ERROR_RIGHTS_DENIED as i64) {
         return Err(28);
@@ -225,7 +347,7 @@ fn run() -> Result<(), i32> {
         return Err(29);
     }
 
-    let plan = create_plan(sandbox, image, volume, data_volume)?;
+    let plan = create_plan(sandbox, image, volume, data_volume, None, None)?;
     query_plan(sandbox, plan, image, volume)?;
     let child = start_plan(plan, SANDBOX_CHILD);
     if child <= 0 {
@@ -248,7 +370,7 @@ fn run() -> Result<(), i32> {
         return Err(34);
     }
 
-    let revoked_plan = create_plan(sandbox, image, volume, data_volume)?;
+    let revoked_plan = create_plan(sandbox, image, volume, data_volume, None, None)?;
     query_plan(sandbox, revoked_plan, image, volume)?;
     if call(
         ids::SYSTEM_SANDBOX_VOLUME_DESTROY,
@@ -295,7 +417,7 @@ fn run() -> Result<(), i32> {
         return Err(22);
     }
     println!(
-        "sandbox-launch: ok sandbox=true image=true data_authority=true plan=true query=true child=true child_exit=0 child_cleanup=true destroy=true cleanup=true"
+        "sandbox-launch: ok sandbox=true image=true device_authority=true data_authority=true net_authority=true plan=true query=true child=true child_exit=0 child_cleanup=true destroy=true cleanup=true"
     );
     Ok(())
 }

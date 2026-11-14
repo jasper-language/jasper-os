@@ -6581,6 +6581,35 @@ pub(crate) fn device_authority_ticket(
     })
 }
 
+/// Resolve an exact caller handle into a canonical device object identity.
+///
+/// User ABI records carry handles, never kernel object ids. The returned object
+/// id, generation and rights snapshot are all taken from this process's live
+/// handle table and belong only to the kernel-issued workload domain.
+pub(crate) fn device_authority_identity(
+    domain: DomainKey,
+    handle: HandleId,
+    required: Rights,
+) -> Option<(ObjId, Rights)> {
+    let pid = current_process()?;
+    kobj::with(|t| {
+        let KObject::Process(process) = t.get(pid).ok()? else {
+            return None;
+        };
+        if process.workload_domain != Some(domain)
+            || t.security(pid).ok()?.require_active().is_err()
+        {
+            return None;
+        }
+        let (object, rights) = process.handles.get(handle).ok()?;
+        if object.ty != ObjectType::Device || !rights.contains(required) || required.is_empty() {
+            return None;
+        }
+        let object = ObjId::from_raw(object.id.0)?;
+        matches!(t.get(object), Ok(KObject::Device(_))).then_some((object, rights))
+    })
+}
+
 /// Revalidate the exact handle and object generation captured earlier.
 pub(crate) fn device_authority_ticket_live(
     domain: DomainKey,

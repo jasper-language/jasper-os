@@ -73,6 +73,10 @@ impl NetworkPolicyRef {
 }
 
 /// One device or accelerator grant, already issued by the device authority.
+///
+/// User ABI records put the caller's Device handle in `object`; the syscall
+/// boundary resolves it to the canonical object id and generation before this
+/// admitted record is stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeviceGrant {
     pub object: u64,
@@ -278,7 +282,12 @@ pub trait LaunchAuthority {
     ) -> bool;
 
     /// Whether the referenced NET policy generation is still authoritative.
-    fn network_policy_live(&self, domain: DomainKey, policy: NetworkPolicyRef) -> bool;
+    fn network_policy_live(
+        &self,
+        domain: DomainKey,
+        sandbox: SandboxKey,
+        policy: NetworkPolicyRef,
+    ) -> bool;
 }
 
 /// Intrinsic Sandbox image/volume authority with every external authority denied.
@@ -320,7 +329,12 @@ impl LaunchAuthority for IntrinsicLaunchAuthority {
         false
     }
 
-    fn network_policy_live(&self, _domain: DomainKey, _policy: NetworkPolicyRef) -> bool {
+    fn network_policy_live(
+        &self,
+        _domain: DomainKey,
+        _sandbox: SandboxKey,
+        _policy: NetworkPolicyRef,
+    ) -> bool {
         false
     }
 }
@@ -473,7 +487,7 @@ impl<const N: usize> SandboxLaunchTable<N> {
             return Err(LaunchError::Capability);
         }
         if let Some(policy) = spec.network_policy {
-            if !authority.network_policy_live(domain, policy) {
+            if !authority.network_policy_live(domain, spec.sandbox, policy) {
                 return Err(LaunchError::InvalidNetwork);
             }
         }
@@ -556,7 +570,9 @@ impl<const N: usize> SandboxLaunchTable<N> {
         if record
             .plan
             .network_policy
-            .is_some_and(|policy| !authority.network_policy_live(domain, policy))
+            .is_some_and(|policy| {
+                !authority.network_policy_live(domain, record.plan.sandbox, policy)
+            })
         {
             return Err(LaunchError::InvalidNetwork);
         }
@@ -928,7 +944,12 @@ mod tests {
             self.external
         }
 
-        fn network_policy_live(&self, _domain: DomainKey, _policy: NetworkPolicyRef) -> bool {
+        fn network_policy_live(
+            &self,
+            _domain: DomainKey,
+            _sandbox: SandboxKey,
+            _policy: NetworkPolicyRef,
+        ) -> bool {
             self.external
         }
     }
