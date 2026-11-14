@@ -362,6 +362,9 @@ static void *futex2_waiter(void *argument) {
 }
 
 int main(void) {
+#ifdef JASPER_ANDROID_ONLY
+    goto jasper_android_tests;
+#endif
     if (getenv("JASPER_EXEC_CHILD") != NULL) {
         printf("jasper-exec-child pid=%d ppid=%d\n", getpid(), getppid());
         fflush(stdout);
@@ -1571,6 +1574,8 @@ int main(void) {
         WEXITSTATUS(credential_status) != 0) {
         return 144;
     }
+jasper_android_tests:
+    (void)0;
     int ashmem_fd = open("/dev/ashmem", O_RDWR | O_CLOEXEC);
     char ashmem_name[256] = "jasper-ashmem";
     size_t ashmem_size = 8192;
@@ -2128,6 +2133,9 @@ int main(void) {
     if (close(verity_fd) != 0) {
         return 747;
     }
+#ifdef JASPER_ANDROID_ONLY
+    goto jasper_android_binder;
+#endif
     int allocate_fd = memfd_create("fallocate", 0);
     if (allocate_fd < 0 ||
         readahead(allocate_fd, 0, 4096) != 0 ||
@@ -2760,6 +2768,8 @@ int main(void) {
                uring_close_read, uring_close_write, uring_close, errno);
         return 277;
     }
+jasper_android_binder:
+    (void)0;
     int binder_fd = open("/dev/binder", O_RDWR | O_CLOEXEC);
     struct binder_version binder_version = {0};
     uint32_t binder_threads = 4;
@@ -3636,6 +3646,9 @@ int main(void) {
         close(binder_ready[1]) != 0 || close(server) != 0) {
         return 739;
     }
+#ifdef JASPER_ANDROID_ONLY
+    return 0;
+#endif
     int poll_pipe[2];
     if (pipe2(poll_pipe, 0) != 0) {
         return 180;

@@ -214,7 +214,12 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
     verification/fixtures/linux/signal_basic.c \
     -o "$ROOT_SIGNAL_FIXTURE" >"$OUT/root-signal-build.log" 2>&1
   ROOT_PPID_FIXTURE="$TARGET/root-getppid"
+  ANDROID_FIXTURE_FLAGS=()
+  if [ "${JASPER_ANDROID_ONLY:-0}" = 1 ]; then
+    ANDROID_FIXTURE_FLAGS=(-DJASPER_ANDROID_ONLY)
+  fi
   gcc -O2 -pthread verification/fixtures/linux/getppid.c \
+    "${ANDROID_FIXTURE_FLAGS[@]}" \
     -o "$ROOT_PPID_FIXTURE" >"$OUT/root-ppid-build.log" 2>&1
 fi
 bash scripts/issue21-system-root-fixture.sh \
