@@ -1,8 +1,49 @@
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+fn user_triple(arch: &str) -> &'static str {
+    match arch {
+        "x86_64" => "x86_64-unknown-none",
+        "aarch64" => "aarch64-unknown-none-softfloat",
+        "riscv64" => "riscv64imac-unknown-none-elf",
+        "riscv32" => "riscv32imac-unknown-none-elf",
+        other => panic!("unsupported Sandbox child architecture: {other}"),
+    }
+}
+
+fn build_sandbox_child(root: &Path, out: &Path, triple: &str) {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let target_dir = out.join("sandbox-child-target");
+    let status = std::process::Command::new(cargo)
+        .current_dir(root)
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_TARGET_DIR")
+        .args([
+            "build",
+            "--release",
+            "--target",
+            triple,
+            "-p",
+            "user-sandboxchild",
+            "--target-dir",
+        ])
+        .arg(&target_dir)
+        .status()
+        .expect("cannot start Sandbox child build");
+    assert!(status.success(), "user-sandboxchild build failed");
+    let elf = target_dir
+        .join(triple)
+        .join("release")
+        .join("user-sandboxchild");
+    let bytes = std::fs::read(&elf)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", elf.display()));
+    std::fs::write(out.join("sandbox-child.elf"), bytes).unwrap();
+}
 
 fn main() {
     let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let root = dir.join("../..");
     println!(
         "cargo:rerun-if-changed={}",
         dir.join("../../abi/abi-version.txt").display()
@@ -37,4 +78,14 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=--defsym=JSR_IMAGE_BASE={base:#x}");
     println!("cargo:rustc-link-arg-bins=--no-pie");
     println!("cargo:rustc-link-arg-bins=-static");
+    for path in [
+        "user/sandboxchild/src/main.rs",
+        "user/sandboxchild/Cargo.toml",
+        "user/sandboxchild/link.ld",
+        "user/sandboxchild/build.rs",
+    ] {
+        println!("cargo:rerun-if-changed={}", root.join(path).display());
+    }
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    build_sandbox_child(&root, &out, user_triple(&arch));
 }

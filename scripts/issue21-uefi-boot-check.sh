@@ -361,7 +361,8 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
   grep -aqE $'^external-ok\r?$' "$OUT/serial.log"
   if [ "$MODE" = sandbox-launch ]; then
     grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
-    grep -aqE $'^(\\[JSR-USERTEXT\\].*text=)?sandbox-launch: ok sandbox=true image=true data_authority=true plan=true query=true destroy=true cleanup=true\r?$' "$OUT/serial.log"
+    grep -aqE '^\[JSR-SANDBOX-LAUNCH\] started plan=0x[0-9a-f]+ child_handle=0x[0-9a-f]+ workload=0x[0-9a-f]+' "$OUT/serial.log"
+    grep -aqE $'^(\\[JSR-USERTEXT\\].*text=)?sandbox-launch: ok sandbox=true image=true device_authority=true data_authority=true net_authority=true plan=true query=true child=true child_exit=0 child_cleanup=true destroy=true cleanup=true\r?$' "$OUT/serial.log"
   fi
   if [ "$MODE" = terminal-session ]; then
     grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"

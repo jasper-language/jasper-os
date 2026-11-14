@@ -172,6 +172,10 @@ impl VolumeKey {
             generation: (raw >> 16) as u32,
         })
     }
+
+    pub const fn generation(self) -> u32 {
+        self.generation
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

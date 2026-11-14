@@ -167,3 +167,4 @@
 4161	error	system.terminal.error.would_block	1	none	终端·当前没有输入且要求非阻塞	Terminal input would block
 4162	error	system.terminal.error.closed	1	none	终端·会话已关闭	Terminal session closed
 4163	error	system.terminal.error.failed	1	none	终端·会话发生故障	Terminal session failed
+108	op	system.sandbox.launch.start	1	write	沙箱启动计划·启动受限子进程	Start bounded sandbox child

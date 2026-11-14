@@ -35,9 +35,17 @@ pub fn create_sandbox(
     domain: DomainKey,
     limits: ResourceLimits,
 ) -> Result<SandboxKey, SandboxError> {
-    let mut sandboxes = SANDBOXES.lock();
-    let mut workloads = WORKLOADS.lock();
-    sandboxes.create(&mut workloads, domain, limits)
+    let key = {
+        let mut sandboxes = SANDBOXES.lock();
+        let mut workloads = WORKLOADS.lock();
+        sandboxes.create(&mut workloads, domain, limits)?
+    };
+    if crate::net_policy::provision_default(domain, key).is_err() {
+        let _ = fail(domain, key);
+        let _ = destroy(domain, key);
+        return Err(SandboxError::Capacity);
+    }
+    Ok(key)
 }
 
 /// Advance a same-domain sandbox from `Created` to `Ready`.
@@ -143,7 +151,11 @@ pub fn destroy(domain: DomainKey, key: SandboxKey) -> Result<(), SandboxError> {
     let _ = checked_root(&sandboxes, &workloads, domain, key)?;
     sandboxes.destroy_with(&mut workloads, key, |workloads, root| {
         crate::workload::destroy_locked(workloads, root)
-    })
+    })?;
+    drop(workloads);
+    drop(sandboxes);
+    let _ = crate::net_policy::revoke_scope(domain, key);
+    Ok(())
 }
 
 /// Number of live Sandbox identities, exposed for bounded diagnostics/tests.
