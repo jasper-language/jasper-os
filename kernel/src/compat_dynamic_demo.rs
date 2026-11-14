@@ -13,6 +13,8 @@ use jasper_compat_loader::{
     stack_input_for_program, ProgramStackInput,
 };
 use kernel_core::objtable::ObjId;
+use kernel_core::security::ApplicationIdentity;
+use sha2::{Digest as _, Sha256};
 
 use crate::compat_elf::{JasperExecutionBackend, JasperLoaderMemory};
 use crate::mm::frame::free_frames;
@@ -72,6 +74,16 @@ fn check(ok: bool, stage: &'static str) {
 fn cleanup(pid: ObjId) {
     let _ = proc::reap(pid);
     kobj::run_cleanup(usize::MAX);
+}
+
+fn application_identity(name: &str, executable: &[u8]) -> ApplicationIdentity {
+    let mut id = 0xcbf2_9ce4_8422_2325u64;
+    for byte in name.as_bytes() {
+        id ^= u64::from(*byte);
+        id = id.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let measurement: [u8; 32] = Sha256::digest(executable).into();
+    ApplicationIdentity::measured(id, 1, measurement)
 }
 
 fn allowed_calls() -> LinuxSyscallSet {
@@ -666,6 +678,11 @@ fn run_program(
         check(false, "create");
         return ProgramResult::FAILED;
     };
+    if proc::set_application(pid, application_identity(name, executable)).is_err() {
+        check(false, "application_identity");
+        cleanup(pid);
+        return ProgramResult::FAILED;
+    }
     if argv
         .first()
         .is_none_or(|path| !proc::linux_set_exec_path(pid, path))
