@@ -2781,10 +2781,9 @@ fn execute(
         }
         LinuxSyscall::MigratePages => compat_result(linux_migrate_pages(pid, call.args)),
         LinuxSyscall::MovePages => compat_result(linux_move_pages(pid, call.args)),
-        LinuxSyscall::MapShadowStack
-        | LinuxSyscall::Uprobe
-        | LinuxSyscall::Uretprobe
-        | LinuxSyscall::Userfaultfd => -(CompatErrno::NotSupported as i32 as i64),
+        LinuxSyscall::MapShadowStack | LinuxSyscall::Userfaultfd => {
+            -(CompatErrno::NotSupported as i32 as i64)
+        }
         LinuxSyscall::LandlockCreateRuleset => {
             compat_result(linux_landlock_create_ruleset(pid, call.args))
         }
@@ -2855,6 +2854,13 @@ fn execute(
         LinuxSyscall::InotifyRmWatch => compat_result(linux_inotify_rm_watch(pid, call.args)),
         LinuxSyscall::FanotifyInit => compat_result(linux_fanotify_init(pid, call.args)),
         LinuxSyscall::FanotifyMark => compat_result(linux_fanotify_mark(pid, call.args)),
+        LinuxSyscall::Uprobe => -(CompatErrno::Protocol as i32 as i64),
+        LinuxSyscall::Uretprobe => {
+            if let Some(tid) = linux_tid(pid) {
+                let _ = queue_thread_signal(pid, tid, 4, 0, 128);
+            }
+            -1
+        }
         LinuxSyscall::Kill => compat_result(linux_kill(pid, call.args).map(|()| 0)),
         LinuxSyscall::Kcmp => compat_result(linux_kcmp(pid, call.args)),
         LinuxSyscall::Uname => compat_result(linux_uname(call.args)),

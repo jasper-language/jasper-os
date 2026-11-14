@@ -5948,7 +5948,7 @@ jasper_android_binder:
     }
     const long unsupported_features[] = {
         SYS_map_shadow_stack,
-        SYS_uprobe, SYS_uretprobe, SYS_userfaultfd,
+        SYS_userfaultfd,
     };
     for (size_t index = 0;
          index < sizeof(unsupported_features) / sizeof(unsupported_features[0]);
@@ -5960,6 +5960,25 @@ jasper_android_binder:
                    unsupported_features[index], errno);
             return 536;
         }
+    }
+    errno = 0;
+    if (syscall(SYS_uprobe) != -1 || errno != EPROTO) {
+        return 713;
+    }
+    pid_t uretprobe_child = fork();
+    if (uretprobe_child < 0) {
+        return 713;
+    }
+    if (uretprobe_child == 0) {
+        syscall(SYS_uretprobe);
+        _exit(1);
+    }
+    int uretprobe_status = 0;
+    if (waitpid(uretprobe_child, &uretprobe_status, 0) !=
+            uretprobe_child ||
+        !WIFSIGNALED(uretprobe_status) ||
+        WTERMSIG(uretprobe_status) != SIGILL) {
+        return 713;
     }
     if (syscall(SYS_landlock_create_ruleset, NULL, 0,
                 LANDLOCK_CREATE_RULESET_VERSION) != 4) {

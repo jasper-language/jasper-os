@@ -646,6 +646,8 @@ pub enum CompatErrno {
     TryAgain = linux_raw_sys::errno::EAGAIN,
     NoMemory = linux_raw_sys::errno::ENOMEM,
     Fault = linux_raw_sys::errno::EFAULT,
+    /// A kernel trampoline entry point was called from an untrusted location.
+    Protocol = linux_raw_sys::errno::EPROTO,
     Invalid = linux_raw_sys::errno::EINVAL,
     /// The requested metadata or extended attribute does not exist.
     /// 请求的元数据或扩展属性不存在。

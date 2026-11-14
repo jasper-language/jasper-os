@@ -15,8 +15,6 @@ Mapped does not mean every optional kernel subsystem is implemented. The
 following entries remain explicit non-success paths and are not counted as
 feature-complete:
 
-- `uprobe`
-- `uretprobe`
 - `userfaultfd`
 
 `map_shadow_stack` returns `EOPNOTSUPP` because the current Jasper kernel
@@ -45,6 +43,8 @@ removed interfaces.
 - Security: Landlock, seccomp, keyrings, fs-verity, fscrypt, Jasper MAC
   contexts, and attenuated `lsm_set_self_attr`.
 - File notification: inotify and classic fanotify notification groups.
+- Probe trampoline ABI: untrusted `uprobe`/`uretprobe` calls return the
+  kernel-compatible `EPROTO`/`SIGILL` behavior.
 - Android: Binder freeze, references, security contexts, fscrypt, and
   fs-verity.
 
@@ -64,6 +64,8 @@ removed interfaces.
   `evidence/issue21-uefi-boot-20261114-remap-file-pages-v107`
 - fanotify open/access/close delivery:
   `evidence/issue21-uefi-boot-20261114-fanotify-v109`
+- uprobe/uretprobe entry semantics:
+  `evidence/issue21-uefi-boot-20261114-uprobe-entry-v111`
 
 Every QEMU run above exits with `qemu_rc=33`, reaches
 `root_execution_complete`, and performs no parallel issue21 boot.
