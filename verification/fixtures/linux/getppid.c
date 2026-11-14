@@ -2090,6 +2090,22 @@ int main(void) {
                sizeof(fscrypt_v2_policy)) != 0) {
         return 762;
     }
+    struct fscrypt_get_key_status_arg fscrypt_v2_status = {
+        .key_spec = fscrypt_v2_add->key_spec,
+    };
+    unsigned char fscrypt_v2_nonce[16] = {0};
+    if (ioctl(fscrypt_v2_fd, FS_IOC_GET_ENCRYPTION_KEY_STATUS,
+              &fscrypt_v2_status) != 0 ||
+        fscrypt_v2_status.status != FSCRYPT_KEY_STATUS_PRESENT ||
+        fscrypt_v2_status.status_flags !=
+            FSCRYPT_KEY_STATUS_FLAG_ADDED_BY_SELF ||
+        fscrypt_v2_status.user_count != 1 ||
+        ioctl(fscrypt_v2_fd, FS_IOC_GET_ENCRYPTION_NONCE,
+              &fscrypt_v2_nonce) != 0 ||
+        memcmp(fscrypt_nonce, fscrypt_v2_nonce,
+               sizeof(fscrypt_v2_nonce)) == 0) {
+        return 765;
+    }
     struct fscrypt_remove_key_arg fscrypt_v2_remove = {
         .key_spec = fscrypt_v2_add->key_spec,
     };
