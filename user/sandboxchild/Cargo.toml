@@ -1,0 +1,15 @@
+# user-sandboxchild —— 由 Sandbox launch plan 启动的最小原生子进程。
+[package]
+name = "user-sandboxchild"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "user-sandboxchild"
+path = "src/main.rs"
+test = false
+bench = false
+
+[build-dependencies]
+kernel-core = { path = "../../kernel-core" }

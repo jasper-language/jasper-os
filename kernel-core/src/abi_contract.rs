@@ -1817,6 +1817,11 @@ pub const OPERATIONS: &[OperationContract] = &[
         result: "0_or_error",
     },
     OperationContract {
+        name: "system.sandbox.launch.start",
+        args: "u64:plan_key,u64:image_ptr,u64:image_len",
+        result: "process_handle_or_error",
+    },
+    OperationContract {
         name: "system.install.package.write",
         args: "u64:package_put_record",
         result: "package_key_or_error",

@@ -9,15 +9,20 @@ use kernel_core::sandbox_launch::{
     LaunchPlanSnapshot, LaunchSpec, NetworkPolicyRef, SandboxLaunchTable,
 };
 use kernel_core::sandbox::SandboxKey;
-use kernel_core::sandbox_image::{ImageKey, VolumeKey};
+use kernel_core::sandbox_image::{ContentDigest, ImageKey, VolumeKey};
 use kernel_core::object::Rights;
 use kernel_core::objtable::ObjId;
 use kernel_core::security_domain::DomainKey;
+use kernel_core::spawn_abi::{CPU_UNLIMITED, MAX_IMAGE_BYTES};
+use kernel_core::workload::{ResourceUsage, WorkloadKey, WorkloadState};
+use sha2::{Digest as _, Sha256};
 
+use crate::kprintln;
 use crate::proc::{self, DeviceAuthorityTicket};
 use crate::sandbox::{MAX_SANDBOXES, SANDBOXES};
 use crate::sandbox_storage::{MAX_IMAGES, MAX_LAYERS, MAX_VOLUMES, STORAGE};
 use crate::sync::IrqSpinLock;
+use crate::syscall::{table as abi, SyscallSet};
 use crate::workload::{MAX_WORKLOADS, WORKLOADS};
 
 pub const MAX_LAUNCH_PLANS: usize = 32;
@@ -254,6 +259,32 @@ pub fn create(domain: DomainKey, spec: LaunchSpec<'_>) -> Result<LaunchPlanKey, 
 
 /// Query a plan only while every referenced authority is still live.
 pub fn query(domain: DomainKey, key: LaunchPlanKey) -> Result<LaunchPlanSnapshot, LaunchError> {
+    let (plan, authority) = plan_authority(domain, key)?;
+    let sandboxes = SANDBOXES.lock();
+    let storage = STORAGE.lock();
+    let workloads = WORKLOADS.lock();
+    let plans = LAUNCH.lock();
+    let result = plans.plan_live(
+        domain,
+        &workloads,
+        &sandboxes,
+        &storage,
+        &authority,
+        key,
+    );
+    drop(plans);
+    drop(workloads);
+    drop(storage);
+    drop(sandboxes);
+    result?;
+    authority.revalidate()?;
+    Ok(plan)
+}
+
+fn plan_authority(
+    domain: DomainKey,
+    key: LaunchPlanKey,
+) -> Result<(LaunchPlanSnapshot, KernelLaunchAuthority), LaunchError> {
     let (plan, device_count, devices, data_count, data_scopes) = {
         let plans = LAUNCH.lock();
         let plan = plans.plan(domain, key)?;
@@ -307,30 +338,192 @@ pub fn query(domain: DomainKey, key: LaunchPlanKey) -> Result<LaunchPlanSnapshot
         &device_grants[..device_count],
         &data_grants[..data_count],
     );
+    Ok((plan, authority))
+}
+
+/// Start the bounded native child admitted by one launch plan.
+///
+/// The supplied ELF must hash to the plan's immutable image content. The plan
+/// is consumed once, and the child is bound to a child Workload whose limits
+/// are the admitted plan limits. No logical path participates in authority.
+pub fn start(
+    domain: DomainKey,
+    key: LaunchPlanKey,
+    image: &[u8],
+) -> Result<kernel_core::object::HandleId, LaunchError> {
+    if image.is_empty() || image.len() as u64 > MAX_IMAGE_BYTES {
+        return Err(LaunchError::InvalidImage);
+    }
+    let (plan, authority) = plan_authority(domain, key)?;
+    if !plan.capabilities.contains(CapabilitySet::EXECUTE) {
+        return Err(LaunchError::Capability);
+    }
+    let digest: [u8; 32] = Sha256::digest(image).into();
+    if ContentDigest::new(digest) != Some(plan.image_content) {
+        return Err(LaunchError::Ownership);
+    }
+
     let sandboxes = SANDBOXES.lock();
     let storage = STORAGE.lock();
     let workloads = WORKLOADS.lock();
-    let plans = LAUNCH.lock();
-    let result = plans.plan_live(
-        domain,
-        &workloads,
-        &sandboxes,
-        &storage,
-        &authority,
-        key,
-    );
-    drop(plans);
+    let plan = LAUNCH
+        .lock()
+        .begin_start(domain, &workloads, &sandboxes, &storage, &authority, key);
     drop(workloads);
     drop(storage);
     drop(sandboxes);
-    result?;
-    authority.revalidate()?;
-    Ok(plan)
+    let plan = plan?;
+    if let Err(error) = authority.revalidate() {
+        let _ = LAUNCH.lock().fail_start(domain, key);
+        return Err(error);
+    }
+
+    let parent = proc::current_process().ok_or(LaunchError::InvalidRoot)?;
+    let child_workload = match create_child_workload(domain, plan.root, plan.resources) {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = LAUNCH.lock().fail_start(domain, key);
+            return Err(error);
+        }
+    };
+    if let Err(error) = LAUNCH.lock().attach_child(domain, key, child_workload) {
+        discard_child_workload(domain, child_workload);
+        let _ = LAUNCH.lock().fail_start(domain, key);
+        return Err(error);
+    }
+
+    let calls = SyscallSet::of(&[
+        abi::SYSTEM_CONSOLE_WRITE,
+        abi::SYSTEM_ABI_GET,
+        abi::SYSTEM_TASK_EXIT,
+    ]);
+    let spawned = match proc::spawn::spawn_child_with_workload(
+        parent,
+        image,
+        calls,
+        0,
+        CPU_UNLIMITED,
+        Some(child_workload),
+    ) {
+        Ok(spawned) => spawned,
+        Err(_) => {
+            discard_child_workload(domain, child_workload);
+            let _ = LAUNCH.lock().fail_start(domain, key);
+            return Err(LaunchError::Spawn);
+        }
+    };
+    if proc::close_handle_for(parent, spawned.channel).is_err() {
+        let _ = proc::close_handle_for(parent, spawned.process);
+        discard_child_workload(domain, child_workload);
+        let _ = LAUNCH.lock().fail_start(domain, key);
+        return Err(LaunchError::Spawn);
+    }
+    kprintln!(
+        "[JSR-SANDBOX-LAUNCH] started plan={:#x} child_handle={:#x} workload={:#x}",
+        key.to_raw(),
+        spawned.process.raw(),
+        child_workload.to_raw()
+    );
+    Ok(spawned.process)
 }
 
 /// Destroy a same-domain plan identity and invalidate its generation.
 pub fn destroy(domain: DomainKey, key: LaunchPlanKey) -> Result<(), LaunchError> {
+    let child = {
+        let plans = LAUNCH.lock();
+        plans.child_workload(domain, key)?
+    };
+    if let Some(child) = child {
+        crate::kobj::run_cleanup(32);
+        let members = crate::workload::member_count_in_domain(domain, child)
+            .map_err(LaunchError::Workload)?;
+        if members != 0 {
+            let _ = crate::workload::terminate_in_domain(domain, child);
+            return Err(LaunchError::ChildNotTerminated);
+        }
+        let snapshot =
+            crate::workload::snapshot_in_domain(domain, child).map_err(LaunchError::Workload)?;
+        if snapshot.usage != ResourceUsage::default() || snapshot.children != 0 {
+            return Err(LaunchError::ChildNotTerminated);
+        }
+        match snapshot.state {
+            WorkloadState::Running => {
+                crate::workload::transition(child, WorkloadState::Stopping)
+                    .map_err(LaunchError::Workload)?;
+                crate::workload::transition(child, WorkloadState::Stopped)
+                    .map_err(LaunchError::Workload)?;
+            }
+            WorkloadState::Stopping => {
+                crate::workload::transition(child, WorkloadState::Stopped)
+                    .map_err(LaunchError::Workload)?;
+            }
+            WorkloadState::Stopped | WorkloadState::Failed => {}
+            _ => return Err(LaunchError::ChildNotTerminated),
+        }
+        crate::workload::destroy_in_domain(domain, child).map_err(LaunchError::Workload)?;
+    }
     LAUNCH.lock().destroy(domain, key)
+}
+
+fn create_child_workload(
+    domain: DomainKey,
+    root: WorkloadKey,
+    resources: kernel_core::sandbox_launch::LaunchResources,
+) -> Result<WorkloadKey, LaunchError> {
+    let mut workloads = WORKLOADS.lock();
+    let parent = workloads.snapshot(root).map_err(LaunchError::Workload)?;
+    if parent.domain != domain || parent.state != WorkloadState::Running {
+        return Err(LaunchError::InvalidRoot);
+    }
+    let child = workloads
+        .create_child(root, resources.limits)
+        .map_err(LaunchError::Workload)?;
+    if let Some(rate) = resources.io_rate {
+        if let Err(error) = workloads.configure_io_rate(child, rate) {
+            let _ = workloads.transition(child, WorkloadState::Failed);
+            let _ = workloads.destroy(child);
+            return Err(LaunchError::Workload(error));
+        }
+    }
+    if let Err(error) = workloads
+        .transition(child, WorkloadState::Ready)
+        .and_then(|()| workloads.transition(child, WorkloadState::Running))
+    {
+        let _ = workloads.transition(child, WorkloadState::Failed);
+        let _ = workloads.destroy(child);
+        return Err(LaunchError::Workload(error));
+    }
+    Ok(child)
+}
+
+fn discard_child_workload(domain: DomainKey, child: WorkloadKey) {
+    crate::kobj::run_cleanup(32);
+    let Ok(snapshot) = crate::workload::snapshot_in_domain(domain, child) else {
+        return;
+    };
+    if crate::workload::member_count_in_domain(domain, child).unwrap_or(1) != 0
+        || snapshot.usage != ResourceUsage::default()
+        || snapshot.children != 0
+    {
+        let _ = crate::workload::terminate_in_domain(domain, child);
+        return;
+    }
+    match snapshot.state {
+        WorkloadState::Running => {
+            let _ = crate::workload::transition(child, WorkloadState::Stopping);
+        }
+        WorkloadState::Stopping => {}
+        WorkloadState::Stopped | WorkloadState::Failed => {}
+        _ => {
+            let _ = crate::workload::transition(child, WorkloadState::Failed);
+        }
+    }
+    if let Ok(snapshot) = crate::workload::snapshot_in_domain(domain, child) {
+        if snapshot.state == WorkloadState::Stopping {
+            let _ = crate::workload::transition(child, WorkloadState::Stopped);
+        }
+    }
+    let _ = crate::workload::destroy_in_domain(domain, child);
 }
 
 /// Bounded diagnostic count.

@@ -93,8 +93,12 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
     #[cfg(not(feature = "native-install-abi-verify"))]
     let allowed = SyscallSet::of(&[
         abi::SYSTEM_CONSOLE_WRITE,
+        abi::SYSTEM_ABI_GET,
         abi::SYSTEM_MEMORY_MAP,
         abi::SYSTEM_PROCESS_EXIT,
+        abi::SYSTEM_TASK_EXIT,
+        abi::SYSTEM_PROCESS_WAIT,
+        abi::SYSTEM_HANDLE_CLOSE,
         abi::SYSTEM_SANDBOX_CREATE,
         abi::SYSTEM_SANDBOX_STOP,
         abi::SYSTEM_SANDBOX_DESTROY,
@@ -105,6 +109,7 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_SANDBOX_LAUNCH_CREATE,
         abi::SYSTEM_SANDBOX_LAUNCH_QUERY,
         abi::SYSTEM_SANDBOX_LAUNCH_DESTROY,
+        abi::SYSTEM_SANDBOX_LAUNCH_START,
     ]);
     #[cfg(all(
         feature = "terminal-session-verify",

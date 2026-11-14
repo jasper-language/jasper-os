@@ -155,11 +155,21 @@ pub struct LaunchPlanSnapshot {
     pub data_writable_mask: u16,
 }
 
+/// One-shot execution state for an admitted launch plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaunchState {
+    Ready,
+    Started,
+    Failed,
+}
+
 #[derive(Clone, Copy)]
 struct Record {
     key: LaunchPlanKey,
     domain: DomainKey,
     plan: LaunchPlanSnapshot,
+    state: LaunchState,
+    child_workload: Option<WorkloadKey>,
     devices: [Option<DeviceGrant>; MAX_DEVICE_GRANTS],
     data: [Option<DataScopeGrant>; MAX_DATA_SCOPES],
 }
@@ -177,6 +187,10 @@ pub enum LaunchError {
     InvalidDevice,
     InvalidData,
     DuplicateGrant,
+    AlreadyStarted,
+    ChildNotTerminated,
+    InvalidImage,
+    Spawn,
     Capacity,
     IdExhausted,
     InvalidView,
@@ -199,6 +213,10 @@ impl LaunchError {
             Self::InvalidDevice => "system.sandbox.launch.error.device",
             Self::InvalidData => "system.sandbox.launch.error.data",
             Self::DuplicateGrant => "system.sandbox.launch.error.duplicate",
+            Self::AlreadyStarted => "system.sandbox.launch.error.started",
+            Self::ChildNotTerminated => "system.sandbox.launch.error.child",
+            Self::InvalidImage => "system.sandbox.launch.error.image",
+            Self::Spawn => "system.sandbox.launch.error.spawn",
             Self::Capacity => "system.sandbox.launch.error.capacity",
             Self::IdExhausted => "system.sandbox.launch.error.ids_exhausted",
             Self::InvalidView => "system.sandbox.launch.error.view",
@@ -420,6 +438,8 @@ impl<const N: usize> SandboxLaunchTable<N> {
             key,
             domain,
             plan,
+            state: LaunchState::Ready,
+            child_workload: None,
             devices,
             data,
         });
@@ -557,6 +577,88 @@ impl<const N: usize> SandboxLaunchTable<N> {
             return Err(LaunchError::InvalidData);
         }
         Ok(record.plan)
+    }
+
+    /// Atomically revalidate and consume one plan's single launch attempt.
+    pub fn begin_start<
+        A: LaunchAuthority,
+        const W: usize,
+        const S: usize,
+        const I: usize,
+        const L: usize,
+        const V: usize,
+    >(
+        &mut self,
+        domain: DomainKey,
+        workloads: &WorkloadTable<W>,
+        sandboxes: &SandboxTable<S>,
+        storage: &SandboxStorageTable<I, L, V>,
+        authority: &A,
+        key: LaunchPlanKey,
+    ) -> Result<LaunchPlanSnapshot, LaunchError> {
+        let plan = self.plan_live(domain, workloads, sandboxes, storage, authority, key)?;
+        let record = self
+            .slots
+            .get_mut(key.slot as usize)
+            .and_then(Option::as_mut)
+            .filter(|record| record.key == key && record.domain == domain)
+            .ok_or(LaunchError::InvalidSandbox)?;
+        if record.state != LaunchState::Ready {
+            return Err(LaunchError::AlreadyStarted);
+        }
+        record.state = LaunchState::Started;
+        Ok(plan)
+    }
+
+    /// Bind the child Workload created for a consumed plan.
+    pub fn attach_child(
+        &mut self,
+        domain: DomainKey,
+        key: LaunchPlanKey,
+        child: WorkloadKey,
+    ) -> Result<(), LaunchError> {
+        let record = self
+            .slots
+            .get_mut(key.slot as usize)
+            .and_then(Option::as_mut)
+            .filter(|record| record.key == key && record.domain == domain)
+            .ok_or(LaunchError::InvalidSandbox)?;
+        if record.state != LaunchState::Started || record.child_workload.is_some() {
+            return Err(LaunchError::AlreadyStarted);
+        }
+        record.child_workload = Some(child);
+        Ok(())
+    }
+
+    pub fn launch_state(
+        &self,
+        domain: DomainKey,
+        key: LaunchPlanKey,
+    ) -> Result<LaunchState, LaunchError> {
+        Ok(self.record(domain, key)?.state)
+    }
+
+    pub fn child_workload(
+        &self,
+        domain: DomainKey,
+        key: LaunchPlanKey,
+    ) -> Result<Option<WorkloadKey>, LaunchError> {
+        Ok(self.record(domain, key)?.child_workload)
+    }
+
+    /// Consume a failed start attempt without permitting a second execution.
+    pub fn fail_start(&mut self, domain: DomainKey, key: LaunchPlanKey) -> Result<(), LaunchError> {
+        let record = self
+            .slots
+            .get_mut(key.slot as usize)
+            .and_then(Option::as_mut)
+            .filter(|record| record.key == key && record.domain == domain)
+            .ok_or(LaunchError::InvalidSandbox)?;
+        if record.state == LaunchState::Ready {
+            return Err(LaunchError::InvalidSandbox);
+        }
+        record.state = LaunchState::Failed;
+        Ok(())
     }
 
     pub fn count(&self) -> usize {
@@ -1243,6 +1345,56 @@ mod tests {
             .unwrap();
         assert_ne!(old, new);
         assert_eq!(plans.plan(DOMAIN, old), Err(LaunchError::InvalidSandbox));
+    }
+
+    #[test]
+    fn admitted_plan_is_started_once_and_tracks_its_child_workload() {
+        let (mut workloads, sandboxes, storage, sandbox, root, image, _, _) = fixture();
+        let spec = LaunchSpec {
+            sandbox,
+            root,
+            image,
+            volume: None,
+            root_capabilities: CapabilitySet::ALL,
+            capabilities: CapabilitySet::EXECUTE,
+            resources: LaunchResources {
+                limits: limits(),
+                io_rate: None,
+            },
+            network_policy: None,
+            devices: &[],
+            data: &[],
+        };
+        let authority = TestAuthority {
+            root: CapabilitySet::ALL,
+            external: false,
+        };
+        let mut plans = SandboxLaunchTable::<1>::new();
+        let key = plans
+            .create_live(DOMAIN, &workloads, &sandboxes, &storage, &authority, spec)
+            .unwrap();
+        assert_eq!(plans.launch_state(DOMAIN, key), Ok(LaunchState::Ready));
+        assert_eq!(
+            plans.begin_start(DOMAIN, &workloads, &sandboxes, &storage, &authority, key,),
+            Ok(plans.plan(DOMAIN, key).unwrap())
+        );
+        assert_eq!(plans.launch_state(DOMAIN, key), Ok(LaunchState::Started));
+        assert_eq!(
+            plans.begin_start(DOMAIN, &workloads, &sandboxes, &storage, &authority, key,),
+            Err(LaunchError::AlreadyStarted)
+        );
+        let child = workloads.create_child(root, limits()).unwrap();
+        plans.attach_child(DOMAIN, key, child).unwrap();
+        assert_eq!(plans.child_workload(DOMAIN, key), Ok(Some(child)));
+        assert_eq!(
+            plans.attach_child(DOMAIN, key, child),
+            Err(LaunchError::AlreadyStarted)
+        );
+        plans.destroy(DOMAIN, key).unwrap();
+        assert_eq!(
+            plans.launch_state(DOMAIN, key),
+            Err(LaunchError::InvalidSandbox)
+        );
     }
 
     #[test]

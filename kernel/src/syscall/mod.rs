@@ -845,6 +845,9 @@ syscall_dispatch! {
     SYSTEM_SANDBOX_LAUNCH_DESTROY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         sandbox_launch_destroy(a.args[0])
     },
+    SYSTEM_SANDBOX_LAUNCH_START => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        sandbox_launch_start(a.args[0], a.args[1], a.args[2])
+    },
     SYSTEM_INSTALL_PACKAGE_WRITE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         install_package_put(a.args[0])
     },
@@ -1592,6 +1595,30 @@ fn sandbox_launch_destroy(raw_key: u64) -> i64 {
     }
 }
 
+fn sandbox_launch_start(raw_key: u64, image_ptr: u64, image_len: u64) -> i64 {
+    let domain = match current_domain() {
+        Ok(domain) => domain,
+        Err(error) => return error,
+    };
+    let Some(key) = kernel_core::sandbox_launch::LaunchPlanKey::from_raw(raw_key) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    if image_len == 0 || image_len > kernel_core::spawn_abi::MAX_IMAGE_BYTES {
+        return sandbox_launch_error(kernel_core::sandbox_launch::LaunchError::InvalidImage);
+    }
+    let Ok(image_len) = usize::try_from(image_len) else {
+        return sandbox_launch_error(kernel_core::sandbox_launch::LaunchError::InvalidImage);
+    };
+    let mut image = vec![0u8; image_len];
+    if let Err(error) = copy_from_user(&mut image, image_ptr, image_len) {
+        return user_ptr_err(error);
+    }
+    match crate::sandbox_launch::start(domain, key, &image) {
+        Ok(handle) => handle.raw() as i64,
+        Err(error) => sandbox_launch_error(error),
+    }
+}
+
 fn sandbox_launch_error(error: kernel_core::sandbox_launch::LaunchError) -> i64 {
     use kernel_core::sandbox_launch::LaunchError;
     match error {
@@ -1604,8 +1631,12 @@ fn sandbox_launch_error(error: kernel_core::sandbox_launch::LaunchError) -> i64 
         | LaunchError::InvalidNetwork
         | LaunchError::InvalidDevice
         | LaunchError::InvalidData
-        | LaunchError::DuplicateGrant => err(SYSTEM_ERROR_RIGHTS_DENIED),
+        | LaunchError::DuplicateGrant
+        | LaunchError::InvalidImage => err(SYSTEM_ERROR_RIGHTS_DENIED),
         LaunchError::InvalidLimit | LaunchError::InvalidView => err(SYSTEM_ERROR_INVALID_ARGUMENT),
+        LaunchError::AlreadyStarted | LaunchError::ChildNotTerminated | LaunchError::Spawn => {
+            err(SYSTEM_SANDBOX_ERROR_STATE)
+        }
         LaunchError::Capacity | LaunchError::IdExhausted => err(SYSTEM_SANDBOX_ERROR_CAPACITY),
         LaunchError::Sandbox(error) => sandbox_error(error),
         LaunchError::Workload(error) => workload_error(error),

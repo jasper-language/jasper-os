@@ -18,6 +18,7 @@ compat-core = { package = "jasper-compat-core", path = "../compat-core", optiona
 spin = "0.12.3"
 ed25519-dalek = { version = "=3.0.0", default-features = false }
 crc = "=3.4.0"
+sha2 = { version = "=0.11.1", default-features = false }
 
 # 只在 x86_64 上使用：引导协议、描述符表 / 页表封装、8259 PIC。其它指令集的平台代码不依赖第三方 crate。
 [target.'cfg(target_arch = "x86_64")'.dependencies]

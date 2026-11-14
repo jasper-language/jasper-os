@@ -820,6 +820,7 @@ dependencies = [
  "kernel-core",
  "noto-sans-mono-bitmap",
  "pic8259",
+ "sha2",
  "spin",
  "x86_64",
 ]
@@ -1964,11 +1965,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "user-sandboxchild"
+version = "0.1.0"
+dependencies = [
+ "kernel-core",
+]
+
+[[package]]
 name = "user-sandboxprobe"
 version = "0.1.0"
 dependencies = [
  "jasper-rt",
  "kernel-core",
+ "sha2",
 ]
 
 [[package]]

@@ -18,6 +18,9 @@ use kernel_core::sandbox_storage_abi::{
 use kernel_core::security_domain::DomainKey;
 use kernel_core::workload::ResourceLimits;
 use kernel_core::workload_abi::{CreateArgs, CREATE_BYTES as WORKLOAD_CREATE_BYTES};
+use sha2::{Digest as _, Sha256};
+
+static SANDBOX_CHILD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sandbox-child.elf"));
 
 const LIMITS: ResourceLimits = ResourceLimits {
     cpu_permille: 100,
@@ -47,8 +50,9 @@ fn call(id: u64, a: u64, b: u64, c: u64) -> i64 {
     unsafe { sys::call3(id, a, b, c) }
 }
 
-fn digest(byte: u8) -> ContentDigest {
-    ContentDigest::new([byte; 32]).expect("non-zero test digest")
+fn digest(bytes: &[u8]) -> ContentDigest {
+    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    ContentDigest::new(digest).expect("non-zero content digest")
 }
 
 fn create_sandbox() -> Result<u64, i32> {
@@ -70,23 +74,23 @@ fn create_sandbox() -> Result<u64, i32> {
 fn load_image(sandbox: SandboxKey) -> Result<u64, i32> {
     let mut layers = [ImageLayerSpec::default(); MAX_IMAGE_LAYERS];
     layers[0] = ImageLayerSpec {
-        content: digest(0x31),
-        bytes: 64,
+        content: digest(SANDBOX_CHILD),
+        bytes: SANDBOX_CHILD.len() as u64,
     };
     let raw = ImageAddArgs {
         sandbox,
         spec: kernel_core::sandbox_image::ImageSpec {
             image: SignedImage {
-                content: digest(0x11),
+                content: digest(SANDBOX_CHILD),
                 signer: 7,
-                signature: digest(0x22),
+                signature: digest(b"jasper-os sandbox launch acceptance"),
                 version: ImageVersion {
                     major: 1,
                     minor: 0,
                     patch: 0,
                 },
             },
-            rootfs_bytes: 64,
+            rootfs_bytes: SANDBOX_CHILD.len() as u64,
             writable_bytes: 4096,
             max_volumes: 2,
         },
@@ -195,14 +199,57 @@ fn query_plan(sandbox: SandboxKey, plan: u64, image: ImageKey, volume: VolumeKey
     Ok(())
 }
 
+fn start_plan(plan: u64, image: &[u8]) -> i64 {
+    unsafe {
+        sys::call3(
+            ids::SYSTEM_SANDBOX_LAUNCH_START,
+            plan,
+            image.as_ptr() as u64,
+            image.len() as u64,
+        )
+    }
+}
+
 fn run() -> Result<(), i32> {
     let sandbox_raw = create_sandbox()?;
     let sandbox = SandboxKey::from_raw(sandbox_raw).ok_or(18)?;
     let image = ImageKey::from_raw(load_image(sandbox)?).ok_or(13)?;
     let volume = create_volume(sandbox, image)?;
     let data_volume = create_volume(sandbox, image)?;
+    let invalid_plan = create_plan(sandbox, image, volume, data_volume)?;
+    let invalid = start_plan(invalid_plan, &SANDBOX_CHILD[..SANDBOX_CHILD.len() - 1]);
+    if invalid != -(ids::SYSTEM_ERROR_RIGHTS_DENIED as i64) {
+        return Err(28);
+    }
+    if call(ids::SYSTEM_SANDBOX_LAUNCH_DESTROY, invalid_plan, 0, 0) != 0 {
+        return Err(29);
+    }
+
     let plan = create_plan(sandbox, image, volume, data_volume)?;
     query_plan(sandbox, plan, image, volume)?;
+    let child = start_plan(plan, SANDBOX_CHILD);
+    if child <= 0 {
+        return Err(30);
+    }
+    if start_plan(plan, SANDBOX_CHILD) != -(ids::SYSTEM_SANDBOX_ERROR_STATE as i64) {
+        return Err(35);
+    }
+    if call(ids::SYSTEM_PROCESS_WAIT, child as u64, 0, 0) != 0 {
+        return Err(31);
+    }
+    if call(ids::SYSTEM_HANDLE_CLOSE, child as u64, 0, 0) != 0 {
+        return Err(32);
+    }
+    if call(ids::SYSTEM_SANDBOX_LAUNCH_DESTROY, plan, 0, 0) != 0 {
+        return Err(33);
+    }
+    let restarted = start_plan(plan, SANDBOX_CHILD);
+    if restarted != -(ids::SYSTEM_SANDBOX_ERROR_NOT_FOUND as i64) {
+        return Err(34);
+    }
+
+    let revoked_plan = create_plan(sandbox, image, volume, data_volume)?;
+    query_plan(sandbox, revoked_plan, image, volume)?;
     if call(
         ids::SYSTEM_SANDBOX_VOLUME_DESTROY,
         sandbox.to_raw(),
@@ -212,14 +259,14 @@ fn run() -> Result<(), i32> {
     {
         return Err(26);
     }
-    let revoked = call(ids::SYSTEM_SANDBOX_LAUNCH_QUERY, plan, 0, 0);
+    let revoked = call(ids::SYSTEM_SANDBOX_LAUNCH_QUERY, revoked_plan, 0, 0);
     if revoked != -(ids::SYSTEM_ERROR_RIGHTS_DENIED as i64) {
         return Err(27);
     }
-    if call(ids::SYSTEM_SANDBOX_LAUNCH_DESTROY, plan, 0, 0) != 0 {
+    if call(ids::SYSTEM_SANDBOX_LAUNCH_DESTROY, revoked_plan, 0, 0) != 0 {
         return Err(19);
     }
-    let stale = call(ids::SYSTEM_SANDBOX_LAUNCH_QUERY, plan, 0, 0);
+    let stale = call(ids::SYSTEM_SANDBOX_LAUNCH_QUERY, revoked_plan, 0, 0);
     if stale != -(ids::SYSTEM_SANDBOX_ERROR_NOT_FOUND as i64) {
         return Err(20);
     }
@@ -248,7 +295,7 @@ fn run() -> Result<(), i32> {
         return Err(22);
     }
     println!(
-        "sandbox-launch: ok sandbox=true image=true data_authority=true plan=true query=true destroy=true cleanup=true"
+        "sandbox-launch: ok sandbox=true image=true data_authority=true plan=true query=true child=true child_exit=0 child_cleanup=true destroy=true cleanup=true"
     );
     Ok(())
 }
