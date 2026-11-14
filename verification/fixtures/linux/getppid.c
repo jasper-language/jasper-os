@@ -5808,11 +5808,25 @@ jasper_android_binder:
         syscall(SYS_personality, 0) != 0) {
         return 527;
     }
+    unsigned char remap_expected[16] = {0};
+    unsigned char *remap_file = mmap(NULL, 4096, PROT_READ,
+                                     MAP_SHARED, fd, 0);
+    if (pread(fd, remap_expected, sizeof(remap_expected), 4096) !=
+            (ssize_t)sizeof(remap_expected) ||
+        remap_file == MAP_FAILED ||
+        syscall(SYS_remap_file_pages, remap_file, 4096, 0, 1, 0) != 0 ||
+        memcmp(remap_file, remap_expected, sizeof(remap_expected)) != 0 ||
+        munmap(remap_file, 4096) != 0) {
+        dprintf(STDOUT_FILENO,
+                "remap-file-pages-fail map=%p errno=%d\n",
+                (void *)remap_file, errno);
+        return 711;
+    }
     errno = 0;
     if (syscall(SYS_personality, 1) != -1 || errno != EINVAL ||
         syscall(SYS_restart_syscall) != -1 || errno != EINTR ||
         syscall(SYS_remap_file_pages, NULL, 4096, 0, 0, 0) != -1 ||
-        errno != EOPNOTSUPP ||
+        errno != EINVAL ||
         syscall(SYS_vhangup) != -1 || errno != EPERM) {
         return 528;
     }

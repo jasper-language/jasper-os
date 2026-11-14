@@ -216,6 +216,9 @@ struct LinuxProcessState {
 struct LinuxMapping {
     va: u64,
     flags: MapFlags,
+    file: Option<crate::linux_vfs::FileId>,
+    file_offset: u64,
+    shared_file: bool,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -6119,7 +6122,13 @@ pub fn map_new(id: ObjId, va: u64, flags: MapFlags) -> Result<PhysFrame, ProcErr
         }
         #[cfg(feature = "linux-abi")]
         if let Some(linux) = p.linux.as_mut() {
-            linux.mappings.push(LinuxMapping { va, flags });
+            linux.mappings.push(LinuxMapping {
+                va,
+                flags,
+                file: None,
+                file_offset: 0,
+                shared_file: false,
+            });
         }
         p.frames.push(Arc::clone(&page));
         Ok(f)
@@ -7134,6 +7143,49 @@ pub(crate) fn linux_mapping_flags(pid: ObjId, va: u64) -> Option<MapFlags> {
     .flatten()
 }
 
+/// Returns the immutable-file backing metadata for one Linux mapping page.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_mapping_file(
+    pid: ObjId,
+    va: u64,
+) -> Option<(crate::linux_vfs::FileId, u64, bool)> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_ref().ok_or(ProcError::Exited)?;
+        let mapping = linux
+            .mappings
+            .iter()
+            .find(|mapping| mapping.va == va)
+            .ok_or(ProcError::NoSuchProcess)?;
+        Ok(mapping.file.map(|file| (file, mapping.file_offset, mapping.shared_file)))
+    })
+    .ok()
+    .flatten()
+}
+
+/// Records immutable-file backing metadata after a successful mapping.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_mapping_file(
+    pid: ObjId,
+    va: u64,
+    file: crate::linux_vfs::FileId,
+    file_offset: u64,
+    shared: bool,
+) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        let mapping = linux
+            .mappings
+            .iter_mut()
+            .find(|mapping| mapping.va == va)
+            .ok_or(ProcError::NoSuchProcess)?;
+        mapping.file = Some(file);
+        mapping.file_offset = file_offset;
+        mapping.shared_file = shared;
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Reports whether one Linux virtual page belongs to a shared memory mapping.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_page_is_shared(pid: ObjId, va: u64) -> bool {
@@ -8070,6 +8122,9 @@ fn copy_linux_mapping(parent: ObjId, child: ObjId, mapping: LinuxMapping) -> Res
         linux.mappings.push(LinuxMapping {
             va: mapping.va,
             flags: current_flags,
+            file: mapping.file,
+            file_offset: mapping.file_offset,
+            shared_file: mapping.shared_file,
         });
         p.frames.push(Arc::clone(&page));
         Ok(())

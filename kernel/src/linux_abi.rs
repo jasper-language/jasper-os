@@ -2720,7 +2720,7 @@ fn execute(
         LinuxSyscall::IoprioSet => compat_result(linux_ioprio_set(pid, call.args)),
         LinuxSyscall::Personality => compat_result(linux_personality(pid, call.args[0])),
         LinuxSyscall::RestartSyscall => -(CompatErrno::Interrupted as i32 as i64),
-        LinuxSyscall::RemapFilePages => -(CompatErrno::NotSupported as i32 as i64),
+        LinuxSyscall::RemapFilePages => compat_result(linux_remap_file_pages(pid, call.args)),
         LinuxSyscall::GetThreadArea
         | LinuxSyscall::SetThreadArea
         | LinuxSyscall::ModifyLdt
@@ -4612,8 +4612,8 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if ashmem_handle.is_some() && args[3] & MAP_SHARED == 0 {
         return Err(CompatErrno::Invalid);
     }
-    if ashmem_handle.is_none() && args[3] & MAP_PRIVATE == 0 {
-        return Err(CompatErrno::Invalid);
+    if ashmem_handle.is_none() && args[3] & MAP_SHARED != 0 && args[2] & PROT_WRITE != 0 {
+        return Err(CompatErrno::Access);
     }
     let io = if let Some(file) = file {
         let offset = usize::try_from(args[5]).map_err(|_| CompatErrno::Invalid)?;
@@ -4754,6 +4754,23 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 copied += chunk;
             }
         }
+        for (index, address) in mapped.iter().copied().enumerate() {
+            let file_offset = args[5]
+                .checked_add((index as u64) * PAGE)
+                .ok_or(CompatErrno::Invalid)?;
+            if !proc::set_linux_mapping_file(
+                pid,
+                address,
+                file,
+                file_offset,
+                args[3] & MAP_SHARED != 0,
+            ) {
+                for address in mapped.iter().rev().copied() {
+                    let _ = proc::unmap_page(pid, address);
+                }
+                return Err(CompatErrno::NoSys);
+            }
+        }
     }
     if !proc::set_linux_mmap_cursor(pid, start + rounded) {
         for address in mapped.iter().rev().copied() {
@@ -4765,6 +4782,117 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         io.commit();
     }
     Ok(start)
+}
+
+fn install_linux_file_page(
+    pid: ObjId,
+    address: u64,
+    file: crate::linux_vfs::FileId,
+    file_offset: u64,
+    flags: MapFlags,
+    shared: bool,
+) -> Result<(), CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    if proc::map_new(pid, address, flags).is_err() {
+        return Err(CompatErrno::NoMemory);
+    }
+    let source = file.bytes();
+    let offset = usize::try_from(file_offset).map_err(|_| CompatErrno::Invalid)?;
+    if offset < source.len() {
+        let count = (source.len() - offset).min(PAGE as usize);
+        if proc::write(pid, address, &source[offset..offset + count]).is_err() {
+            let _ = proc::unmap_page(pid, address);
+            return Err(CompatErrno::Fault);
+        }
+    }
+    if !proc::set_linux_mapping_file(pid, address, file, file_offset, shared) {
+        let _ = proc::unmap_page(pid, address);
+        return Err(CompatErrno::NoSys);
+    }
+    Ok(())
+}
+
+/// Remaps a read-only `MAP_SHARED` regular-file window onto a different file
+/// page offset. The bounded virtual filesystem keeps a stable file identity,
+/// so each destination page can be rebuilt transactionally.
+fn linux_remap_file_pages(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    const MAX_REMAP_BYTES: u64 = 64 * 1024 * 1024;
+    let start = args[0];
+    let size = args[1];
+    let flags = args[4];
+    let file_page = args[3];
+    if start % PAGE != 0
+        || size == 0
+        || size > MAX_REMAP_BYTES
+        || flags != 0
+        || start < crate::arch::USER_WINDOW.0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let rounded = size.checked_add(PAGE - 1).ok_or(CompatErrno::Invalid)? & !(PAGE - 1);
+    let end = start.checked_add(rounded).ok_or(CompatErrno::Invalid)?;
+    if end > crate::arch::USER_WINDOW.1 {
+        return Err(CompatErrno::Invalid);
+    }
+    if proc::linux_range_is_sealed(pid, start, end) {
+        return Err(CompatErrno::Perm);
+    }
+    let (file, _, shared) =
+        proc::linux_mapping_file(pid, start).ok_or(CompatErrno::Invalid)?;
+    if !shared {
+        return Err(CompatErrno::Invalid);
+    }
+    let mapping_flags =
+        proc::linux_mapping_flags(pid, start).ok_or(CompatErrno::Invalid)?;
+    let mut previous = alloc::vec::Vec::new();
+    previous
+        .try_reserve((rounded / PAGE) as usize)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    let mut page = start;
+    while page < end {
+        let current_flags =
+            proc::linux_mapping_flags(pid, page).ok_or(CompatErrno::Invalid)?;
+        let (current_file, current_offset, current_shared) =
+            proc::linux_mapping_file(pid, page).ok_or(CompatErrno::Invalid)?;
+        if current_file != file
+            || !current_shared
+            || current_flags != mapping_flags
+            || proc::page_flags(pid, page).is_none()
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        previous.push((page, current_offset));
+        page += PAGE;
+    }
+
+    let mut index = 0u64;
+    let mut page = start;
+    while page < end {
+        let new_offset = file_page
+            .checked_mul(PAGE)
+            .and_then(|offset| offset.checked_add(index.checked_mul(PAGE)?))
+            .ok_or(CompatErrno::Invalid)?;
+        if proc::unmap_page(pid, page).is_err()
+            || install_linux_file_page(pid, page, file, new_offset, mapping_flags, true).is_err()
+        {
+            for (restore_page, restore_offset) in previous.iter().copied() {
+                let _ = proc::unmap_page(pid, restore_page);
+                let _ = install_linux_file_page(
+                    pid,
+                    restore_page,
+                    file,
+                    restore_offset,
+                    mapping_flags,
+                    true,
+                );
+            }
+            return Err(CompatErrno::NoMemory);
+        }
+        index += 1;
+        page += PAGE;
+    }
+    Ok(0)
 }
 
 fn linux_munmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
