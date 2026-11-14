@@ -14750,11 +14750,17 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const ASHMEM_GET_PIN_STATUS: u64 = 0x6109;
     const ASHMEM_PURGE_ALL_CACHES: u64 = 0x610a;
     const BINDER_SET_MAX_THREADS: u64 = 0x4004_6205;
+    const BINDER_SET_IDLE_TIMEOUT: u64 = 0x4008_6203;
+    const BINDER_SET_IDLE_PRIORITY: u64 = 0x4004_6206;
     const BINDER_SET_CONTEXT_MGR: u64 = 0x4004_6207;
     const BINDER_SET_CONTEXT_MGR_EXT: u64 = 0x4018_620d;
     const BINDER_THREAD_EXIT: u64 = 0x4004_6208;
     const BINDER_VERSION: u64 = 0xc004_6209;
     const BINDER_WRITE_READ: u64 = 0xc030_6201;
+    const BINDER_FREEZE: u64 = 0x400c_620e;
+    const BINDER_GET_FROZEN_INFO: u64 = 0xc00c_620f;
+    const BINDER_ENABLE_ONEWAY_SPAM_DETECTION: u64 = 0x4004_6210;
+    const BINDER_GET_EXTENDED_ERROR: u64 = 0xc00c_6211;
     const ION_IOC_ALLOC: u64 = 0xc020_4900;
     const ION_IOC_FREE: u64 = 0xc004_4901;
     const ION_IOC_MAP: u64 = 0xc008_4902;
@@ -14802,7 +14808,7 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 let mut raw = [0u8; 4];
                 copy_from_user(&mut raw, args[2], 4).map_err(|_| CompatErrno::Fault)?;
                 let value = u32::from_le_bytes(raw);
-                if value == 0 || value > 64 {
+                if value > 64 {
                     return Err(CompatErrno::Invalid);
                 }
                 if proc::linux_set_binder_max_threads(pid, entry.handle, value) {
@@ -14836,7 +14842,25 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     Err(CompatErrno::Busy)
                 }
             }
-            BINDER_THREAD_EXIT => Ok(0),
+            BINDER_SET_IDLE_TIMEOUT | BINDER_SET_IDLE_PRIORITY => Err(CompatErrno::Invalid),
+            BINDER_THREAD_EXIT => {
+                crate::binder::thread_exit(pid);
+                Ok(0)
+            }
+            BINDER_FREEZE | BINDER_GET_FROZEN_INFO => Err(CompatErrno::NotSupported),
+            BINDER_ENABLE_ONEWAY_SPAM_DETECTION => {
+                let mut raw = [0u8; 4];
+                copy_from_user(&mut raw, args[2], 4).map_err(|_| CompatErrno::Fault)?;
+                if crate::binder::set_oneway_spam_detection(
+                    pid,
+                    u32::from_le_bytes(raw) != 0,
+                ) {
+                    Ok(0)
+                } else {
+                    Err(CompatErrno::NoSpace)
+                }
+            }
+            BINDER_GET_EXTENDED_ERROR => crate::binder::get_extended_error(pid, args[2]),
             BINDER_WRITE_READ => crate::binder::write_read(pid, fd, args),
             _ => Err(CompatErrno::NoSys),
         };

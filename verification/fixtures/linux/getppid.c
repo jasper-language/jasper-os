@@ -2465,6 +2465,46 @@ int main(void) {
         ioctl(binder_fd, BINDER_THREAD_EXIT, 0) != 0) {
         return 155;
     }
+    uint32_t binder_threads_zero = 0;
+    int64_t binder_idle_timeout = 1000000;
+    int32_t binder_idle_priority = 0;
+    uint32_t binder_spam_enabled = 1;
+    struct binder_extended_error binder_extended = {0};
+    struct binder_freeze_info binder_freeze = {
+        .pid = (uint32_t)getpid(),
+        .enable = 1,
+        .timeout_ms = 0,
+    };
+    if (ioctl(binder_fd, BINDER_SET_MAX_THREADS,
+              &binder_threads_zero) != 0 ||
+        ioctl(binder_fd, BINDER_SET_MAX_THREADS, &binder_threads) != 0) {
+        return 720;
+    }
+    errno = 0;
+    if (ioctl(binder_fd, BINDER_SET_IDLE_TIMEOUT,
+              &binder_idle_timeout) != -1 ||
+        errno != EINVAL) {
+        return 721;
+    }
+    errno = 0;
+    if (ioctl(binder_fd, BINDER_SET_IDLE_PRIORITY,
+              &binder_idle_priority) != -1 ||
+        errno != EINVAL) {
+        return 722;
+    }
+    if (ioctl(binder_fd, BINDER_ENABLE_ONEWAY_SPAM_DETECTION,
+              &binder_spam_enabled) != 0 ||
+        ioctl(binder_fd, BINDER_GET_EXTENDED_ERROR,
+              &binder_extended) != 0 ||
+        binder_extended.id != 0 || binder_extended.command != BR_OK ||
+        binder_extended.param != 0) {
+        return 723;
+    }
+    errno = 0;
+    if (ioctl(binder_fd, BINDER_FREEZE, &binder_freeze) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 724;
+    }
     struct stat binder_stat;
     struct statfs binder_statfs;
     if (fstat(binder_fd, &binder_stat) != 0 ||

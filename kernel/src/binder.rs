@@ -48,6 +48,7 @@ const BR_TRANSACTION: u32 = 0x8040_7202;
 const BR_REPLY: u32 = 0x8040_7203;
 const BR_DEAD_REPLY: u32 = 0x7205;
 const BR_TRANSACTION_COMPLETE: u32 = 0x7206;
+const BR_OK: u32 = 0x7201;
 const BR_FAILED_REPLY: u32 = 0x7211;
 const BR_SPAWN_LOOPER: u32 = 0x720d;
 const BR_DEAD_BINDER: u32 = 0x8008_720f;
@@ -83,6 +84,15 @@ struct TransactionBuffer {
     process: ObjId,
     address: u64,
     length: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ExtendedError {
+    process: ObjId,
+    tid: u32,
+    id: u32,
+    command: u32,
+    param: i32,
 }
 
 #[derive(Clone, Copy)]
@@ -130,6 +140,9 @@ struct State {
     death_requests: Vec<DeathRequest>,
     threads: Vec<BinderThread>,
     spawn_pending: Vec<ObjId>,
+    extended_errors: Vec<ExtendedError>,
+    oneway_spam: Vec<ObjId>,
+    next_error_id: u32,
 }
 
 impl State {
@@ -146,6 +159,9 @@ impl State {
             death_requests: Vec::new(),
             threads: Vec::new(),
             spawn_pending: Vec::new(),
+            extended_errors: Vec::new(),
+            oneway_spam: Vec::new(),
+            next_error_id: 1,
         }
     }
 }
@@ -300,6 +316,10 @@ pub(crate) fn release_process(pid: ObjId) {
     }
     state.threads.retain(|thread| thread.process != pid);
     state.spawn_pending.retain(|process| *process != pid);
+    state
+        .extended_errors
+        .retain(|error| error.process != pid);
+    state.oneway_spam.retain(|process| *process != pid);
     state.active.retain(|active| active.target != pid && active.sender != pid);
     state.buffers.retain(|buffer| buffer.process != pid);
     state.queue.retain(|(target, _)| *target != pid);
@@ -308,6 +328,8 @@ pub(crate) fn release_process(pid: ObjId) {
     state.death_requests.shrink_to_fit();
     state.threads.shrink_to_fit();
     state.spawn_pending.shrink_to_fit();
+    state.extended_errors.shrink_to_fit();
+    state.oneway_spam.shrink_to_fit();
     state.active.shrink_to_fit();
     state.buffers.shrink_to_fit();
     state.queue.shrink_to_fit();
@@ -384,6 +406,46 @@ pub(crate) fn get_node_info_for_ref(pid: ObjId, request: u64) -> Result<u64, Com
     output[8..12].copy_from_slice(&node.weak_refs.to_le_bytes());
     drop(state);
     copy_to_user(request, &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Stores the process-wide one-way spam detection setting. This slice retains
+/// the UAPI state; heuristic suspect reporting remains a separate behavior.
+pub(crate) fn set_oneway_spam_detection(pid: ObjId, enabled: bool) -> bool {
+    let mut state = BINDER.lock();
+    let index = state.oneway_spam.iter().position(|process| *process == pid);
+    if enabled {
+        if index.is_none() {
+            if state.oneway_spam.try_reserve(1).is_err() {
+                return false;
+            }
+            state.oneway_spam.push(pid);
+        }
+    } else if let Some(index) = index {
+        state.oneway_spam.swap_remove(index);
+    }
+    true
+}
+
+/// Returns and clears the calling thread's extended transaction error.
+pub(crate) fn get_extended_error(pid: ObjId, address: u64) -> Result<u64, CompatErrno> {
+    let tid = crate::linux_abi::current_linux_tid(pid).ok_or(CompatErrno::NoSys)?;
+    let error = {
+        let mut state = BINDER.lock();
+        state
+            .extended_errors
+            .iter()
+            .position(|error| error.process == pid && error.tid == tid)
+            .map(|index| state.extended_errors.remove(index))
+    };
+    let mut output = [0u8; 12];
+    let (id, command, param) = error
+        .map(|error| (error.id, error.command, error.param))
+        .unwrap_or((0, BR_OK, 0));
+    output[0..4].copy_from_slice(&id.to_le_bytes());
+    output[4..8].copy_from_slice(&command.to_le_bytes());
+    output[8..12].copy_from_slice(&param.to_le_bytes());
+    copy_to_user(address, &output, output.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
 }
 
@@ -731,7 +793,11 @@ fn resolve_transaction_target(pid: ObjId, handle: u32) -> Result<ObjId, CompatEr
 
 /// Queues the asynchronous completion sequence for a transaction that failed
 /// before it could be delivered to the peer.
-fn queue_reply_error(pid: ObjId, command: u32) -> Result<(), CompatErrno> {
+fn queue_reply_error(
+    pid: ObjId,
+    command: u32,
+    param: CompatErrno,
+) -> Result<(), CompatErrno> {
     let mut state = BINDER.lock();
     if state.queue.len().saturating_add(2) > MAX_QUEUE {
         return Err(CompatErrno::TryAgain);
@@ -740,6 +806,23 @@ fn queue_reply_error(pid: ObjId, command: u32) -> Result<(), CompatErrno> {
         .queue
         .try_reserve(2)
         .map_err(|_| CompatErrno::NoMemory)?;
+    state
+        .extended_errors
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    let tid = crate::linux_abi::current_linux_tid(pid).unwrap_or(0);
+    state
+        .extended_errors
+        .retain(|error| error.process != pid || error.tid != tid);
+    let id = state.next_error_id;
+    state.next_error_id = state.next_error_id.wrapping_add(1).max(1);
+    state.extended_errors.push(ExtendedError {
+        process: pid,
+        tid,
+        id,
+        command,
+        param: -(param as i32),
+    });
     state.queue.push_back((pid, QueuedCommand::Complete));
     state.queue.push_back((pid, QueuedCommand::ReplyError { command }));
     crate::kprintln!(
@@ -978,7 +1061,7 @@ fn enqueue_transaction(
         let target = match resolve_transaction_target(pid, handle) {
             Ok(target) => target,
             Err(CompatErrno::NoEntry | CompatErrno::BadFd) => {
-                queue_reply_error(pid, BR_FAILED_REPLY)?;
+                queue_reply_error(pid, BR_FAILED_REPLY, CompatErrno::Invalid)?;
                 return Ok(());
             }
             Err(error) => return Err(error),
@@ -987,12 +1070,12 @@ fn enqueue_transaction(
             return Err(CompatErrno::Invalid);
         }
         if proc::state(target) != Some(proc::ProcState::Running) {
-            queue_reply_error(pid, BR_DEAD_REPLY)?;
+            queue_reply_error(pid, BR_DEAD_REPLY, CompatErrno::NoProcess)?;
             return Ok(());
         }
         if let Err(error) = translate_objects(pid, target, &mut data, &offsets) {
             if matches!(error, CompatErrno::Invalid | CompatErrno::NoEntry | CompatErrno::BadFd) {
-                queue_reply_error(pid, BR_FAILED_REPLY)?;
+                queue_reply_error(pid, BR_FAILED_REPLY, CompatErrno::Invalid)?;
                 return Ok(());
             }
             return Err(error);
@@ -1081,11 +1164,11 @@ fn enqueue_transaction(
             .map(|active| active.sender)
     };
     let Some(sender) = sender else {
-        queue_reply_error(pid, BR_FAILED_REPLY)?;
+        queue_reply_error(pid, BR_FAILED_REPLY, CompatErrno::Invalid)?;
         return Ok(());
     };
     if proc::state(sender) != Some(proc::ProcState::Running) {
-        queue_reply_error(pid, BR_DEAD_REPLY)?;
+        queue_reply_error(pid, BR_DEAD_REPLY, CompatErrno::NoProcess)?;
         return Ok(());
     }
     translate_objects(pid, sender, &mut data, &offsets)?;
