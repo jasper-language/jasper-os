@@ -6,10 +6,12 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <linux/android/binder.h>
+#include <linux/capability.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-heap.h>
 #include <linux/futex.h>
 #include <linux/io_uring.h>
+#include <linux/ioprio.h>
 #include <linux/sched/types.h>
 #include <linux/sync_file.h>
 #include <limits.h>
@@ -22,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/inotify.h>
 #include <sys/eventfd.h>
 #include <sys/epoll.h>
 #include <sys/file.h>
@@ -81,16 +84,66 @@ struct jasper_ion_handle_data {
     int handle;
 };
 
+struct legacy_dirent_probe {
+    unsigned long d_ino;
+    unsigned long d_off;
+    unsigned short d_reclen;
+    char d_name[];
+};
+
+struct robust_list_probe {
+    void *list;
+    long futex_offset;
+    void *list_op_pending;
+} __attribute__((aligned(8)));
+
 static void signal_noop(int signal) {
     (void)signal;
 }
 
 static volatile sig_atomic_t posix_timer_signals;
+static volatile sig_atomic_t interval_timer_signals;
+static volatile sig_atomic_t sigsuspend_signals;
 
 static void posix_timer_signal_handler(int signal) {
     if (signal == SIGUSR1) {
         posix_timer_signals++;
     }
+}
+
+static void interval_timer_signal_handler(int signal) {
+    if (signal == SIGALRM) {
+        interval_timer_signals++;
+    }
+}
+
+static void sigsuspend_signal_handler(int signal) {
+    if (signal == SIGUSR1) {
+        sigsuspend_signals++;
+    }
+}
+
+static int wait_for_interval_signals(int expected) {
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
+        return -1;
+    }
+    deadline.tv_sec += 2;
+    const struct timespec delay = {.tv_sec = 0, .tv_nsec = 5000000L};
+    struct timespec now;
+    do {
+        if (interval_timer_signals >= expected) {
+            return 0;
+        }
+        struct timespec remaining = delay;
+        nanosleep(&remaining, NULL);
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+            return -1;
+        }
+    } while (now.tv_sec < deadline.tv_sec ||
+             (now.tv_sec == deadline.tv_sec &&
+              now.tv_nsec < deadline.tv_nsec));
+    return interval_timer_signals >= expected ? 0 : -1;
 }
 
 static uint32_t futex_word;
@@ -111,6 +164,64 @@ struct prctl_thread_result {
     char inherited[16];
     char changed[16];
 };
+
+struct binder_pool_thread_result {
+    int fd;
+    int result;
+};
+
+static void *binder_pool_worker(void *argument) {
+    struct binder_pool_thread_result *result = argument;
+    printf("binder-pool-worker stage=start tid=%ld\n", (long)syscall(SYS_gettid));
+    fflush(stdout);
+    unsigned char read_buffer[68];
+    uint32_t register_looper = BC_REGISTER_LOOPER;
+    struct binder_write_read exchange = {
+        .write_size = sizeof(register_looper),
+        .write_buffer = (binder_uintptr_t)&register_looper,
+    };
+    if (ioctl(result->fd, BINDER_WRITE_READ, &exchange) != 0 ||
+        exchange.write_consumed != sizeof(register_looper)) {
+        result->result = 294;
+        return NULL;
+    }
+    printf("binder-pool-worker stage=registered\n");
+    fflush(stdout);
+    memset(&exchange, 0, sizeof(exchange));
+    exchange.read_size = sizeof(read_buffer);
+    exchange.read_buffer = (binder_uintptr_t)read_buffer;
+    if (ioctl(result->fd, BINDER_WRITE_READ, &exchange) != 0 ||
+        exchange.read_consumed != sizeof(read_buffer) ||
+        *(uint32_t *)read_buffer != BR_TRANSACTION) {
+        result->result = 295;
+        return NULL;
+    }
+    printf("binder-pool-worker stage=received\n");
+    fflush(stdout);
+    struct binder_transaction_data transaction;
+    memcpy(&transaction, read_buffer + 4, sizeof(transaction));
+    if (transaction.code != 0x2222 ||
+        transaction.flags != TF_ONE_WAY ||
+        transaction.data_size != 4 ||
+        memcmp((void *)transaction.data.ptr.buffer, "LOOP", 4) != 0) {
+        result->result = 296;
+        return NULL;
+    }
+    unsigned char free_buffer[12];
+    memcpy(free_buffer, &(uint32_t){BC_FREE_BUFFER}, 4);
+    binder_uintptr_t pointer = transaction.data.ptr.buffer;
+    memcpy(free_buffer + 4, &pointer, sizeof(pointer));
+    memset(&exchange, 0, sizeof(exchange));
+    exchange.write_size = sizeof(free_buffer);
+    exchange.write_buffer = (binder_uintptr_t)free_buffer;
+    if (ioctl(result->fd, BINDER_WRITE_READ, &exchange) != 0 ||
+        exchange.write_consumed != sizeof(free_buffer)) {
+        result->result = 297;
+        return NULL;
+    }
+    result->result = 0;
+    return NULL;
+}
 
 static void *prctl_name_worker(void *argument) {
     struct prctl_thread_result *result = argument;
@@ -2398,6 +2509,93 @@ int main(void) {
         close(binder_ready[1]) != 0 || close(server) != 0) {
         return 182;
     }
+    int pool_server = open("/dev/binder", O_RDWR | O_CLOEXEC);
+    struct flat_binder_object pool_manager = {
+        .hdr.type = BINDER_TYPE_BINDER,
+        .binder = (binder_uintptr_t)(uintptr_t)&pool_manager,
+        .cookie = 0x5252,
+    };
+    uint32_t pool_max_threads = 2;
+    if (pool_server < 0 ||
+        ioctl(pool_server, BINDER_SET_MAX_THREADS, &pool_max_threads) != 0 ||
+        ioctl(pool_server, BINDER_SET_CONTEXT_MGR_EXT, &pool_manager) != 0 ||
+        pipe2(binder_ready, 0) != 0) {
+        return 520;
+    }
+    pid_t pool_child = fork();
+    if (pool_child < 0) {
+        return 521;
+    }
+    if (pool_child == 0) {
+        close(binder_ready[1]);
+        char ready = 0;
+        int client = open("/dev/binder", O_RDWR | O_CLOEXEC);
+        char loop_data[4] = "LOOP";
+        struct binder_transaction_data request = {
+            .target.handle = 0,
+            .code = 0x2222,
+            .flags = TF_ONE_WAY,
+            .data_size = sizeof(loop_data),
+            .data.ptr.buffer = (binder_uintptr_t)loop_data,
+        };
+        unsigned char write_data[4 + sizeof(request)];
+        memcpy(write_data, &(uint32_t){BC_TRANSACTION}, 4);
+        memcpy(write_data + 4, &request, sizeof(request));
+        unsigned char read_data[4];
+        struct binder_write_read exchange = {
+            .write_size = sizeof(write_data),
+            .write_buffer = (binder_uintptr_t)write_data,
+            .read_size = sizeof(read_data),
+            .read_buffer = (binder_uintptr_t)read_data,
+        };
+        if (client < 0 || read(binder_ready[0], &ready, 1) != 1 ||
+            ready != 'P' ||
+            ioctl(client, BINDER_WRITE_READ, &exchange) != 0 ||
+            exchange.write_consumed != sizeof(write_data) ||
+            exchange.read_consumed != sizeof(read_data) ||
+            *(uint32_t *)read_data != BR_TRANSACTION_COMPLETE) {
+            _exit(522);
+        }
+        close(client);
+        close(binder_ready[0]);
+        _exit(0);
+    }
+    close(binder_ready[0]);
+    if (write(binder_ready[1], "P", 1) != 1) {
+        return 523;
+    }
+    memset(&server_exchange, 0, sizeof(server_exchange));
+    server_exchange.read_size = 4;
+    server_exchange.read_buffer = (binder_uintptr_t)server_read;
+    if (ioctl(pool_server, BINDER_WRITE_READ, &server_exchange) != 0 ||
+        server_exchange.read_consumed != 4 ||
+        *(uint32_t *)server_read != BR_SPAWN_LOOPER) {
+        return 524;
+    }
+    printf("binder-pool-main stage=spawn-received\n");
+    fflush(stdout);
+    pthread_t pool_thread;
+    struct binder_pool_thread_result pool_thread_result = {
+        .fd = pool_server,
+        .result = -1,
+    };
+    struct timespec pool_join_deadline;
+    if (clock_gettime(CLOCK_REALTIME, &pool_join_deadline) != 0) {
+        return 299;
+    }
+    pool_join_deadline.tv_sec += 2;
+    if (pthread_create(&pool_thread, NULL, binder_pool_worker,
+                       &pool_thread_result) != 0 ||
+        pthread_timedjoin_np(pool_thread, NULL, &pool_join_deadline) != 0 ||
+        pool_thread_result.result != 0) {
+        return 525;
+    }
+    int pool_status = 0;
+    if (waitpid(pool_child, &pool_status, 0) != pool_child ||
+        !WIFEXITED(pool_status) || WEXITSTATUS(pool_status) != 0 ||
+        close(binder_ready[1]) != 0 || close(pool_server) != 0) {
+        return 526;
+    }
     int poll_pipe[2];
     if (pipe2(poll_pipe, 0) != 0) {
         return 180;
@@ -2830,7 +3028,7 @@ int main(void) {
     }
     posix_values.it_interval = (struct timespec){.tv_sec = 0, .tv_nsec = 10000000};
     posix_values.it_value = (struct timespec){.tv_sec = 0, .tv_nsec = 10000000};
-    struct timespec overrun_delay = {.tv_sec = 0, .tv_nsec = 80000000};
+    struct timespec overrun_delay = {.tv_sec = 0, .tv_nsec = 500000000};
     if (syscall(SYS_timer_settime, posix_timer, 0, &posix_values,
                 NULL) != 0 ||
         nanosleep(&overrun_delay, NULL) != 0 ||
@@ -2854,6 +3052,1121 @@ int main(void) {
     if (syscall(SYS_timer_create, CLOCK_MONOTONIC, &posix_event,
                 NULL) != -1 || errno != EFAULT) {
         return 376;
+    }
+    interval_timer_signals = 0;
+    if (signal(SIGALRM, interval_timer_signal_handler) == SIG_ERR) {
+        return 393;
+    }
+    struct itimerval interval_value = {0};
+    struct itimerval interval_old = {0};
+    struct itimerval interval_current = {0};
+    if (getitimer(ITIMER_REAL, &interval_current) != 0 ||
+        interval_current.it_interval.tv_sec != 0 ||
+        interval_current.it_interval.tv_usec != 0 ||
+        interval_current.it_value.tv_sec != 0 ||
+        interval_current.it_value.tv_usec != 0) {
+        return 394;
+    }
+    if (alarm(2) != 0 ||
+        getitimer(ITIMER_REAL, &interval_current) != 0 ||
+        interval_current.it_interval.tv_sec != 0 ||
+        interval_current.it_interval.tv_usec != 0 ||
+        interval_current.it_value.tv_sec < 0 ||
+        interval_current.it_value.tv_sec > 2 ||
+        (interval_current.it_value.tv_sec == 0 &&
+         interval_current.it_value.tv_usec == 0)) {
+        return 395;
+    }
+    unsigned int replaced_alarm = alarm(1);
+    if (replaced_alarm == 0 || replaced_alarm > 2 ||
+        alarm(0) == 0 ||
+        getitimer(ITIMER_REAL, &interval_current) != 0 ||
+        interval_current.it_interval.tv_sec != 0 ||
+        interval_current.it_interval.tv_usec != 0 ||
+        interval_current.it_value.tv_sec != 0 ||
+        interval_current.it_value.tv_usec != 0) {
+        return 396;
+    }
+    interval_value.it_interval.tv_usec = 20000;
+    interval_value.it_value.tv_usec = 40000;
+    if (setitimer(ITIMER_REAL, &interval_value, &interval_old) != 0 ||
+        interval_old.it_interval.tv_sec != 0 ||
+        interval_old.it_interval.tv_usec != 0 ||
+        interval_old.it_value.tv_sec != 0 ||
+        interval_old.it_value.tv_usec != 0 ||
+        getitimer(ITIMER_REAL, &interval_current) != 0 ||
+        interval_current.it_interval.tv_sec != 0 ||
+        interval_current.it_interval.tv_usec != 20000 ||
+        interval_current.it_value.tv_sec != 0 ||
+        interval_current.it_value.tv_usec == 0 ||
+        interval_current.it_value.tv_usec > 40000) {
+        return 397;
+    }
+    memset(&interval_value, 0, sizeof(interval_value));
+    if (setitimer(ITIMER_REAL, &interval_value, &interval_old) != 0 ||
+        interval_old.it_interval.tv_sec != 0 ||
+        interval_old.it_interval.tv_usec != 20000 ||
+        interval_old.it_value.tv_sec != 0 ||
+        interval_old.it_value.tv_usec == 0 ||
+        interval_old.it_value.tv_usec > 40000 ||
+        getitimer(ITIMER_REAL, &interval_current) != 0 ||
+        interval_current.it_value.tv_sec != 0 ||
+        interval_current.it_value.tv_usec != 0 ||
+        interval_current.it_interval.tv_sec != 0 ||
+        interval_current.it_interval.tv_usec != 0) {
+        return 398;
+    }
+    interval_timer_signals = 0;
+    interval_value.it_interval.tv_usec = 10000;
+    interval_value.it_value.tv_usec = 10000;
+    if (setitimer(ITIMER_REAL, &interval_value, NULL) != 0 ||
+        wait_for_interval_signals(2) != 0) {
+        return 399;
+    }
+    memset(&interval_old, 0, sizeof(interval_old));
+    if (setitimer(ITIMER_REAL, NULL, &interval_old) != 0 ||
+        interval_old.it_interval.tv_usec != 10000 ||
+        getitimer(ITIMER_REAL, &interval_current) != 0 ||
+        interval_current.it_value.tv_sec != 0 ||
+        interval_current.it_value.tv_usec != 0 ||
+        interval_current.it_interval.tv_sec != 0 ||
+        interval_current.it_interval.tv_usec != 0) {
+        return 400;
+    }
+    sigset_t alarm_signal_set;
+    sigset_t alarm_old_mask;
+    sigemptyset(&alarm_signal_set);
+    sigaddset(&alarm_signal_set, SIGALRM);
+    if (sigprocmask(SIG_BLOCK, &alarm_signal_set, &alarm_old_mask) != 0) {
+        return 401;
+    }
+    int alarm_signalfd =
+        signalfd(-1, &alarm_signal_set, SFD_NONBLOCK | SFD_CLOEXEC);
+    struct pollfd alarm_poll = {
+        .fd = alarm_signalfd,
+        .events = POLLIN,
+    };
+    struct signalfd_siginfo alarm_info = {0};
+    interval_value.it_interval.tv_usec = 10000;
+    interval_value.it_value.tv_usec = 10000;
+    if (alarm_signalfd < 0 ||
+        setitimer(ITIMER_REAL, &interval_value, NULL) != 0 ||
+        poll(&alarm_poll, 1, 1000) != 1 ||
+        read(alarm_signalfd, &alarm_info, sizeof(alarm_info)) !=
+            (ssize_t)sizeof(alarm_info) ||
+        alarm_info.ssi_signo != SIGALRM ||
+        alarm_info.ssi_code != 128 ||
+        alarm_info.ssi_pid != 0) {
+        return 402;
+    }
+    memset(&interval_value, 0, sizeof(interval_value));
+    if (setitimer(ITIMER_REAL, &interval_value, NULL) != 0 ||
+        close(alarm_signalfd) != 0 ||
+        sigprocmask(SIG_SETMASK, &alarm_old_mask, NULL) != 0) {
+        return 403;
+    }
+    errno = 0;
+    if (getitimer(ITIMER_VIRTUAL, &interval_current) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 404;
+    }
+    errno = 0;
+    if (setitimer(ITIMER_PROF, &interval_value, NULL) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 405;
+    }
+    errno = 0;
+    if (getitimer(ITIMER_REAL, (struct itimerval *)(uintptr_t)1) != -1 ||
+        errno != EFAULT) {
+        return 406;
+    }
+    errno = 0;
+    if (setitimer(ITIMER_REAL, (struct itimerval *)(uintptr_t)1, NULL) != -1 ||
+        errno != EFAULT) {
+        return 407;
+    }
+    interval_value.it_value.tv_usec = 1000000;
+    errno = 0;
+    if (setitimer(ITIMER_REAL, &interval_value, NULL) != -1 ||
+        errno != EINVAL) {
+        return 408;
+    }
+    memset(&interval_value, 0, sizeof(interval_value));
+    interval_value.it_value.tv_usec = 200000;
+    errno = 0;
+    if (setitimer(ITIMER_REAL, &interval_value,
+                  (struct itimerval *)(uintptr_t)1) != -1 ||
+        errno != EFAULT ||
+        getitimer(ITIMER_REAL, &interval_current) != 0 ||
+        (interval_current.it_value.tv_sec == 0 &&
+         interval_current.it_value.tv_usec == 0)) {
+        return 416;
+    }
+    memset(&interval_value, 0, sizeof(interval_value));
+    if (setitimer(ITIMER_REAL, &interval_value, NULL) != 0 ||
+        alarm(1) != 0) {
+        return 409;
+    }
+    pid_t interval_child = fork();
+    if (interval_child < 0) {
+        return 410;
+    }
+    if (interval_child == 0) {
+        memset(&interval_current, 0, sizeof(interval_current));
+        int child_result =
+            getitimer(ITIMER_REAL, &interval_current) == 0 &&
+            interval_current.it_value.tv_sec == 0 &&
+            interval_current.it_value.tv_usec == 0;
+        _exit(child_result ? 0 : 1);
+    }
+    int interval_child_status = 0;
+    if (waitpid(interval_child, &interval_child_status, 0) != interval_child ||
+        !WIFEXITED(interval_child_status) ||
+        WEXITSTATUS(interval_child_status) != 0 ||
+        alarm(0) == 0) {
+        return 411;
+    }
+    for (int child_index = 0; child_index < 18; child_index++) {
+        interval_child = fork();
+        if (interval_child < 0) {
+            return 412;
+        }
+        if (interval_child == 0) {
+            interval_value.it_value.tv_sec = 1;
+            _exit(setitimer(ITIMER_REAL, &interval_value, NULL) == 0 ? 0 : 1);
+        }
+        interval_child_status = 0;
+        if (waitpid(interval_child, &interval_child_status, 0) !=
+                interval_child ||
+            !WIFEXITED(interval_child_status) ||
+            WEXITSTATUS(interval_child_status) != 0) {
+            return 413;
+        }
+    }
+    memset(&interval_value, 0, sizeof(interval_value));
+    interval_value.it_value.tv_usec = 10000;
+    if (setitimer(ITIMER_REAL, &interval_value, NULL) != 0 ||
+        getitimer(ITIMER_REAL, &interval_current) != 0 ||
+        (interval_current.it_value.tv_sec == 0 &&
+         interval_current.it_value.tv_usec == 0)) {
+        return 414;
+    }
+    memset(&interval_value, 0, sizeof(interval_value));
+    if (setitimer(ITIMER_REAL, &interval_value, NULL) != 0) {
+        return 415;
+    }
+    int legacy_fd =
+        syscall(SYS_open, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                O_RDONLY | O_CLOEXEC, 0);
+    unsigned char legacy_magic[4] = {0};
+    if (legacy_fd < 0 ||
+        read(legacy_fd, legacy_magic, sizeof(legacy_magic)) !=
+            (ssize_t)sizeof(legacy_magic) ||
+        memcmp(legacy_magic, "\177ELF", sizeof(legacy_magic)) != 0 ||
+        close(legacy_fd) != 0) {
+        return 417;
+    }
+    errno = 0;
+    if (syscall(SYS_open, (const char *)(uintptr_t)1, O_RDONLY, 0) != -1 ||
+        errno != EFAULT) {
+        return 418;
+    }
+    errno = 0;
+    if (syscall(SYS_creat, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                0644) != -1 || errno != EROFS) {
+        return 419;
+    }
+    int legacy_pipe_fds[2] = {-1, -1};
+    char legacy_pipe_byte = 'P';
+    char legacy_pipe_result = 0;
+    if (syscall(SYS_pipe, legacy_pipe_fds) != 0 ||
+        write(legacy_pipe_fds[1], &legacy_pipe_byte, 1) != 1 ||
+        read(legacy_pipe_fds[0], &legacy_pipe_result, 1) != 1 ||
+        legacy_pipe_result != legacy_pipe_byte ||
+        close(legacy_pipe_fds[0]) != 0 ||
+        close(legacy_pipe_fds[1]) != 0) {
+        return 420;
+    }
+    int legacy_root =
+        syscall(SYS_open, "/", O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+    unsigned char legacy_dents[1024] = {0};
+    long legacy_dents_len =
+        legacy_root < 0
+            ? -1
+            : syscall(SYS_getdents, legacy_root, legacy_dents,
+                      sizeof(legacy_dents));
+    struct legacy_dirent_probe *legacy_first =
+        (struct legacy_dirent_probe *)legacy_dents;
+    if (legacy_root < 0 || legacy_dents_len <= 0 ||
+        legacy_first->d_reclen < 19 ||
+        legacy_first->d_reclen > legacy_dents_len ||
+        strcmp(legacy_first->d_name, ".") != 0 ||
+        close(legacy_root) != 0) {
+        return 421;
+    }
+    errno = 0;
+    if (syscall(SYS_getdents, -1, legacy_dents, sizeof(legacy_dents)) != -1 ||
+        errno != EBADF) {
+        return 422;
+    }
+    struct robust_list_probe robust_probe = {0};
+    void *robust_head = NULL;
+    unsigned long robust_length = 0;
+    if (syscall(SYS_set_robust_list, &robust_probe,
+                sizeof(robust_probe)) != 0 ||
+        syscall(SYS_get_robust_list, 0, &robust_head,
+                &robust_length) != 0 ||
+        robust_head != &robust_probe ||
+        robust_length != sizeof(robust_probe)) {
+        return 423;
+    }
+    errno = 0;
+    if (syscall(SYS_get_robust_list, 0, (void *)(uintptr_t)1,
+                &robust_length) != -1 ||
+        errno != EFAULT) {
+        return 424;
+    }
+    sigset_t tkill_signal_set;
+    sigset_t tkill_old_mask;
+    sigset_t tkill_pending;
+    sigemptyset(&tkill_signal_set);
+    sigaddset(&tkill_signal_set, SIGUSR2);
+    if (sigprocmask(SIG_BLOCK, &tkill_signal_set, &tkill_old_mask) != 0 ||
+        syscall(SYS_tkill, gettid(), SIGUSR2) != 0 ||
+        sigpending(&tkill_pending) != 0 ||
+        !sigismember(&tkill_pending, SIGUSR2) ||
+        sigprocmask(SIG_SETMASK, &tkill_old_mask, NULL) != 0) {
+        return 425;
+    }
+    pid_t legacy_fork_child = syscall(SYS_fork);
+    if (legacy_fork_child < 0) {
+        return 426;
+    }
+    if (legacy_fork_child == 0) {
+        _exit(0);
+    }
+    int legacy_fork_status = 0;
+    if (waitpid(legacy_fork_child, &legacy_fork_status, 0) !=
+            legacy_fork_child ||
+        !WIFEXITED(legacy_fork_status) ||
+        WEXITSTATUS(legacy_fork_status) != 0) {
+        return 427;
+    }
+    pid_t pause_child = fork();
+    if (pause_child < 0) {
+        return 428;
+    }
+    if (pause_child == 0) {
+        struct itimerval pause_timer = {
+            .it_value = {.tv_sec = 0, .tv_usec = 20000},
+        };
+        interval_timer_signals = 0;
+        if (signal(SIGALRM, interval_timer_signal_handler) == SIG_ERR ||
+            setitimer(ITIMER_REAL, &pause_timer, NULL) != 0) {
+            _exit(2);
+        }
+        long pause_result = syscall(SYS_pause);
+        int pause_errno = errno;
+        _exit(pause_result == -1 && pause_errno == EINTR &&
+                      interval_timer_signals > 0
+                  ? 0
+                  : 1);
+    }
+    int pause_child_status = 0;
+    if (waitpid(pause_child, &pause_child_status, 0) != pause_child ||
+        !WIFEXITED(pause_child_status) ||
+        WEXITSTATUS(pause_child_status) != 0) {
+        return 429;
+    }
+    pid_t waitid_child = fork();
+    if (waitid_child < 0) {
+        return 430;
+    }
+    if (waitid_child == 0) {
+        _exit(42);
+    }
+    siginfo_t waitid_info = {0};
+    if (syscall(SYS_waitid, P_PID, waitid_child, &waitid_info,
+                WEXITED, NULL) != 0 ||
+        waitid_info.si_pid != waitid_child ||
+        waitid_info.si_status != 42 ||
+        waitid_info.si_code != CLD_EXITED) {
+        return 431;
+    }
+    memset(&waitid_info, 0xff, sizeof(waitid_info));
+    errno = 0;
+    if (syscall(SYS_waitid, P_ALL, 0, &waitid_info,
+                WEXITED | WNOHANG, NULL) != -1 ||
+        errno != ECHILD) {
+        return 432;
+    }
+    pid_t waitid_live_child = fork();
+    if (waitid_live_child < 0) {
+        return 435;
+    }
+    if (waitid_live_child == 0) {
+        pause();
+        _exit(1);
+    }
+    memset(&waitid_info, 0xff, sizeof(waitid_info));
+    if (syscall(SYS_waitid, P_PID, waitid_live_child, &waitid_info,
+                WEXITED | WNOHANG, NULL) != 0 ||
+        waitid_info.si_pid != 0 ||
+        waitid_info.si_status != 0 ||
+        kill(waitid_live_child, SIGTERM) != 0 ||
+        waitpid(waitid_live_child, NULL, 0) != waitid_live_child) {
+        return 436;
+    }
+    errno = 0;
+    if (syscall(SYS_waitid, P_PGID, 0, &waitid_info,
+                WEXITED, NULL) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 433;
+    }
+    errno = 0;
+    if (syscall(SYS_waitid, P_ALL, 0, &waitid_info,
+                WEXITED | WNOWAIT, NULL) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 434;
+    }
+    sigset_t timedwait_set;
+    sigset_t timedwait_old;
+    sigemptyset(&timedwait_set);
+    sigaddset(&timedwait_set, SIGUSR1);
+    if (sigprocmask(SIG_BLOCK, &timedwait_set, &timedwait_old) != 0 ||
+        kill(getpid(), SIGUSR1) != 0) {
+        return 437;
+    }
+    memset(&waitid_info, 0, sizeof(waitid_info));
+    long timedwait_signal =
+        syscall(SYS_rt_sigtimedwait, &timedwait_set, &waitid_info,
+                NULL, 8);
+    if (timedwait_signal != SIGUSR1 ||
+        waitid_info.si_signo != SIGUSR1 ||
+        waitid_info.si_code != SI_USER ||
+        waitid_info.si_pid != getpid()) {
+        return 438;
+    }
+    sigset_t timedwait_empty;
+    struct timespec timedwait_timeout = {
+        .tv_sec = 0,
+        .tv_nsec = 20000000,
+    };
+    sigemptyset(&timedwait_empty);
+    errno = 0;
+    if (syscall(SYS_rt_sigtimedwait, &timedwait_empty, NULL,
+                &timedwait_timeout, 8) != -1 ||
+        errno != EAGAIN) {
+        return 439;
+    }
+    errno = 0;
+    if (syscall(SYS_rt_sigtimedwait, &timedwait_empty, NULL,
+                NULL, 7) != -1 ||
+        errno != EINVAL ||
+        sigprocmask(SIG_SETMASK, &timedwait_old, NULL) != 0) {
+        return 440;
+    }
+    int sigsuspend_ready[2];
+    if (pipe(sigsuspend_ready) != 0) {
+        return 441;
+    }
+    pid_t sigsuspend_child = fork();
+    if (sigsuspend_child < 0) {
+        return 442;
+    }
+    if (sigsuspend_child == 0) {
+        close(sigsuspend_ready[0]);
+        sigset_t suspend_block;
+        sigset_t suspend_empty;
+        sigset_t suspend_current;
+        sigemptyset(&suspend_block);
+        sigaddset(&suspend_block, SIGUSR1);
+        sigemptyset(&suspend_empty);
+        sigsuspend_signals = 0;
+        char ready = 'R';
+        if (signal(SIGUSR1, sigsuspend_signal_handler) == SIG_ERR ||
+            sigprocmask(SIG_BLOCK, &suspend_block, NULL) != 0 ||
+            write(sigsuspend_ready[1], &ready, 1) != 1) {
+            _exit(2);
+        }
+        long suspend_result =
+            syscall(SYS_rt_sigsuspend, &suspend_empty, 8);
+        int suspend_errno = errno;
+        if (sigprocmask(SIG_BLOCK, NULL, &suspend_current) != 0) {
+            _exit(3);
+        }
+        _exit(suspend_result == -1 && suspend_errno == EINTR &&
+                      sigsuspend_signals > 0 &&
+                      sigismember(&suspend_current, SIGUSR1)
+                  ? 0
+                  : 1);
+    }
+    close(sigsuspend_ready[1]);
+    char sigsuspend_byte = 0;
+    if (read(sigsuspend_ready[0], &sigsuspend_byte, 1) != 1 ||
+        sigsuspend_byte != 'R' ||
+        kill(sigsuspend_child, SIGUSR1) != 0 ||
+        close(sigsuspend_ready[0]) != 0) {
+        return 443;
+    }
+    int sigsuspend_status = 0;
+    if (waitpid(sigsuspend_child, &sigsuspend_status, 0) !=
+            sigsuspend_child ||
+        !WIFEXITED(sigsuspend_status) ||
+        WEXITSTATUS(sigsuspend_status) != 0) {
+        return 444;
+    }
+    errno = 0;
+    if (syscall(SYS_rt_sigsuspend, NULL, 8) != -1 ||
+        errno != EFAULT) {
+        return 445;
+    }
+    int legacy_epoll = syscall(SYS_epoll_create, 16);
+    if (legacy_epoll < 0 || close(legacy_epoll) != 0) {
+        return 446;
+    }
+    errno = 0;
+    if (syscall(SYS_epoll_create, 0) != -1 || errno != EINVAL) {
+        return 447;
+    }
+    int sendfile_input =
+        syscall(SYS_open, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                O_RDONLY | O_CLOEXEC, 0);
+    int sendfile_pipe[2];
+    off_t sendfile_offset = 0;
+    unsigned char sendfile_bytes[16] = {0};
+    if (sendfile_input < 0 || syscall(SYS_pipe, sendfile_pipe) != 0 ||
+        syscall(SYS_sendfile, sendfile_pipe[1], sendfile_input,
+                &sendfile_offset, sizeof(sendfile_bytes)) !=
+            (long)sizeof(sendfile_bytes) ||
+        sendfile_offset != (off_t)sizeof(sendfile_bytes) ||
+        read(sendfile_pipe[0], sendfile_bytes, sizeof(sendfile_bytes)) !=
+            (ssize_t)sizeof(sendfile_bytes) ||
+        memcmp(sendfile_bytes, "\177ELF", 4) != 0) {
+        return 448;
+    }
+    if (lseek(sendfile_input, 0, SEEK_SET) != 0 ||
+        syscall(SYS_sendfile, sendfile_pipe[1], sendfile_input,
+                NULL, 4) != 4 ||
+        lseek(sendfile_input, 0, SEEK_CUR) != 4) {
+        return 449;
+    }
+    if (close(sendfile_pipe[0]) != 0 ||
+        close(sendfile_pipe[1]) != 0 ||
+        close(sendfile_input) != 0) {
+        return 450;
+    }
+    void *locked_memory =
+        mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (locked_memory == MAP_FAILED ||
+        syscall(SYS_mlock, locked_memory, 4096) != 0 ||
+        syscall(SYS_mlock2, locked_memory, 4096, 1) != 0 ||
+        syscall(SYS_munlock, locked_memory, 4096) != 0 ||
+        syscall(SYS_mlockall, MCL_CURRENT | MCL_FUTURE) != 0 ||
+        syscall(SYS_munlockall) != 0 ||
+        munmap(locked_memory, 4096) != 0) {
+        return 451;
+    }
+    errno = 0;
+    if (syscall(SYS_mlock, (void *)(uintptr_t)1, 4096) != -1 ||
+        errno != EINVAL) {
+        return 452;
+    }
+    errno = 0;
+    if (syscall(SYS_mlock2, locked_memory, 4096, 2) != -1 ||
+        errno != EINVAL) {
+        return 453;
+    }
+    errno = 0;
+    if (syscall(SYS_mlockall, 8) != -1 || errno != EINVAL) {
+        return 454;
+    }
+    struct jasper_open_how {
+        uint64_t flags;
+        uint64_t mode;
+        uint64_t resolve;
+    } open_how = {
+        .flags = O_RDONLY | O_CLOEXEC,
+    };
+    int openat2_fd =
+        syscall(SYS_openat2, AT_FDCWD,
+                "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                &open_how, sizeof(open_how));
+    unsigned char openat2_magic[4] = {0};
+    if (openat2_fd < 0 ||
+        read(openat2_fd, openat2_magic, sizeof(openat2_magic)) !=
+            (ssize_t)sizeof(openat2_magic) ||
+        memcmp(openat2_magic, "\177ELF", sizeof(openat2_magic)) != 0 ||
+        close(openat2_fd) != 0) {
+        return 455;
+    }
+    errno = 0;
+    if (syscall(SYS_openat2, AT_FDCWD,
+                "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                &open_how, 16) != -1 ||
+        errno != EINVAL) {
+        return 456;
+    }
+    open_how.resolve = 4;
+    errno = 0;
+    if (syscall(SYS_openat2, AT_FDCWD,
+                "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                &open_how, sizeof(open_how)) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 457;
+    }
+    const char *xattr_path = "/usr/lib/x86_64-linux-gnu/libc.so.6";
+    const char *xattr_name = "user.jasper-test";
+    char xattr_value = 'X';
+    if (syscall(SYS_listxattr, xattr_path, NULL, 0) != 0 ||
+        syscall(SYS_llistxattr, xattr_path, NULL, 0) != 0) {
+        return 458;
+    }
+    errno = 0;
+    if (syscall(SYS_getxattr, xattr_path, xattr_name,
+                NULL, 0) != -1 ||
+        errno != ENODATA) {
+        return 459;
+    }
+    errno = 0;
+    if (syscall(SYS_lgetxattr, xattr_path, xattr_name,
+                NULL, 0) != -1 ||
+        errno != ENODATA) {
+        return 460;
+    }
+    errno = 0;
+    if (syscall(SYS_setxattr, xattr_path, xattr_name,
+                &xattr_value, 1, 0) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_lsetxattr, xattr_path, xattr_name,
+                &xattr_value, 1, 0) != -1 ||
+        errno != EROFS) {
+        return 461;
+    }
+    errno = 0;
+    if (syscall(SYS_removexattr, xattr_path, xattr_name) != -1 ||
+        errno != ENODATA ||
+        syscall(SYS_lremovexattr, xattr_path, xattr_name) != -1 ||
+        errno != ENODATA) {
+        return 462;
+    }
+    int xattr_fd =
+        syscall(SYS_open, xattr_path, O_RDONLY | O_CLOEXEC, 0);
+    if (xattr_fd < 0 ||
+        syscall(SYS_flistxattr, xattr_fd, NULL, 0) != 0) {
+        return 463;
+    }
+    errno = 0;
+    if (syscall(SYS_fgetxattr, xattr_fd, xattr_name,
+                NULL, 0) != -1 ||
+        errno != ENODATA) {
+        return 464;
+    }
+    errno = 0;
+    if (syscall(SYS_fsetxattr, xattr_fd, xattr_name,
+                &xattr_value, 1, 0) != -1 ||
+        errno != EROFS) {
+        return 465;
+    }
+    errno = 0;
+    if (syscall(SYS_fremovexattr, xattr_fd, xattr_name) != -1 ||
+        errno != ENODATA ||
+        close(xattr_fd) != 0) {
+        return 466;
+    }
+    errno = 0;
+    if (syscall(SYS_setxattr, xattr_path, xattr_name,
+                &xattr_value, 1, 3) != -1 ||
+        errno != EINVAL) {
+        return 467;
+    }
+    struct sigaction protected_action = {.sa_handler = SIG_IGN};
+    errno = 0;
+    if (syscall(SYS_rt_sigaction, SIGKILL, &protected_action,
+                NULL, 8) != -1 ||
+        errno != EINVAL) {
+        return 468;
+    }
+    errno = 0;
+    if (kill(getpid(), SIGSTOP) != -1 || errno != EOPNOTSUPP) {
+        return 469;
+    }
+    pid_t kill_child = fork();
+    if (kill_child < 0) {
+        return 470;
+    }
+    if (kill_child == 0) {
+        pause();
+        _exit(1);
+    }
+    int kill_status = 0;
+    if (kill(kill_child, SIGKILL) != 0 ||
+        waitpid(kill_child, &kill_status, 0) != kill_child) {
+        return 471;
+    }
+    int mmsg_sockets[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, mmsg_sockets) != 0) {
+        return 472;
+    }
+    char mmsg_send_a[] = "one";
+    char mmsg_send_b[] = "two";
+    char mmsg_recv_a[4] = {0};
+    char mmsg_recv_b[4] = {0};
+    struct iovec mmsg_send_iov[2] = {
+        {.iov_base = mmsg_send_a, .iov_len = 3},
+        {.iov_base = mmsg_send_b, .iov_len = 3},
+    };
+    struct iovec mmsg_recv_iov[2] = {
+        {.iov_base = mmsg_recv_a, .iov_len = 3},
+        {.iov_base = mmsg_recv_b, .iov_len = 3},
+    };
+    struct mmsghdr mmsg_send[2] = {0};
+    struct mmsghdr mmsg_recv[2] = {0};
+    for (int message = 0; message < 2; message++) {
+        mmsg_send[message].msg_hdr.msg_iov = &mmsg_send_iov[message];
+        mmsg_send[message].msg_hdr.msg_iovlen = 1;
+        mmsg_recv[message].msg_hdr.msg_iov = &mmsg_recv_iov[message];
+        mmsg_recv[message].msg_hdr.msg_iovlen = 1;
+    }
+    if (syscall(SYS_sendmmsg, mmsg_sockets[0], mmsg_send, 2, 0) != 2 ||
+        mmsg_send[0].msg_len != 3 || mmsg_send[1].msg_len != 3 ||
+        syscall(SYS_recvmmsg, mmsg_sockets[1], mmsg_recv, 2,
+                MSG_WAITFORONE, NULL) != 2 ||
+        mmsg_recv[0].msg_len != 3 || mmsg_recv[1].msg_len != 3 ||
+        memcmp(mmsg_recv_a, "one", 3) != 0 ||
+        memcmp(mmsg_recv_b, "two", 3) != 0) {
+        return 473;
+    }
+    struct timespec mmsg_timeout = {0};
+    errno = 0;
+    if (syscall(SYS_recvmmsg, mmsg_sockets[1], mmsg_recv, 1,
+                0, &mmsg_timeout) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 474;
+    }
+    errno = 0;
+    if (syscall(SYS_sendmmsg, mmsg_sockets[0], mmsg_send, 17, 0) != -1 ||
+        errno != EINVAL ||
+        close(mmsg_sockets[0]) != 0 ||
+        close(mmsg_sockets[1]) != 0) {
+        return 475;
+    }
+    pid_t pidfd_child = fork();
+    if (pidfd_child < 0) {
+        return 476;
+    }
+    if (pidfd_child == 0) {
+        pause();
+        _exit(1);
+    }
+    int pidfd = syscall(SYS_pidfd_open, pidfd_child, 0x800);
+    struct pollfd pidfd_poll = {
+        .fd = pidfd,
+        .events = POLLIN,
+    };
+    if (pidfd < 0 || poll(&pidfd_poll, 1, 0) != 0) {
+        return 477;
+    }
+    errno = 0;
+    if (syscall(SYS_pidfd_send_signal, pidfd, SIGTERM,
+                (siginfo_t *)(uintptr_t)1, 0) != -1 ||
+        errno != EOPNOTSUPP ||
+        syscall(SYS_pidfd_send_signal, pidfd, SIGTERM, NULL, 0) != 0 ||
+        poll(&pidfd_poll, 1, 1000) != 1 ||
+        (pidfd_poll.revents & POLLIN) == 0 ||
+        syscall(SYS_pidfd_send_signal, pidfd, 0, NULL, 0) != 0 ||
+        waitpid(pidfd_child, NULL, 0) != pidfd_child ||
+        close(pidfd) != 0) {
+        return 478;
+    }
+    errno = 0;
+    if (syscall(SYS_pidfd_open, getpid(), 1) != -1 ||
+        errno != EINVAL) {
+        return 479;
+    }
+    int self_pidfd = syscall(SYS_pidfd_open, getpid(), 0);
+    int pidfd_source =
+        syscall(SYS_open, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                O_RDONLY | O_CLOEXEC, 0);
+    int pidfd_duplicate =
+        self_pidfd < 0 || pidfd_source < 0
+            ? -1
+            : syscall(SYS_pidfd_getfd, self_pidfd, pidfd_source, 0);
+    unsigned char pidfd_magic[4] = {0};
+    if (pidfd_duplicate < 0 ||
+        (fcntl(pidfd_duplicate, F_GETFD) & FD_CLOEXEC) == 0 ||
+        read(pidfd_duplicate, pidfd_magic, sizeof(pidfd_magic)) !=
+            (ssize_t)sizeof(pidfd_magic) ||
+        memcmp(pidfd_magic, "\177ELF", 4) != 0) {
+        return 510;
+    }
+    errno = 0;
+    if (syscall(SYS_pidfd_getfd, self_pidfd, pidfd_source, 1) != -1 ||
+        errno != EINVAL ||
+        close(pidfd_duplicate) != 0 ||
+        close(pidfd_source) != 0 ||
+        close(self_pidfd) != 0) {
+        return 511;
+    }
+    int inotify_fd =
+        syscall(SYS_inotify_init1, IN_NONBLOCK | IN_CLOEXEC);
+    int inotify_legacy_fd = syscall(SYS_inotify_init);
+    if (inotify_fd < 0 || inotify_legacy_fd < 0 ||
+        (fcntl(inotify_fd, F_GETFD) & FD_CLOEXEC) == 0 ||
+        close(inotify_legacy_fd) != 0) {
+        return 480;
+    }
+    int inotify_wd =
+        syscall(SYS_inotify_add_watch, inotify_fd, xattr_path,
+                IN_MODIFY | IN_ATTRIB);
+    if (inotify_wd <= 0 ||
+        syscall(SYS_inotify_add_watch, inotify_fd, xattr_path,
+                IN_MODIFY | IN_MASK_ADD) != inotify_wd) {
+        return 481;
+    }
+    char inotify_event[128];
+    errno = 0;
+    if (read(inotify_fd, inotify_event, sizeof(inotify_event)) != -1 ||
+        errno != EAGAIN ||
+        syscall(SYS_inotify_rm_watch, inotify_fd, inotify_wd) != 0) {
+        return 482;
+    }
+    errno = 0;
+    if (syscall(SYS_inotify_rm_watch, inotify_fd, inotify_wd) != -1 ||
+        errno != EINVAL) {
+        return 483;
+    }
+    errno = 0;
+    if (syscall(SYS_inotify_add_watch, inotify_fd, "/missing-inotify",
+                IN_MODIFY) != -1 ||
+        errno != ENOENT ||
+        close(inotify_fd) != 0) {
+        return 485;
+    }
+    errno = 0;
+    if (syscall(SYS_inotify_init1, 0x400000) != -1 ||
+        errno != EINVAL) {
+        return 484;
+    }
+    int copy_source =
+        syscall(SYS_open, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                O_RDONLY | O_CLOEXEC, 0);
+    int copy_target = memfd_create("copy-file-range", MFD_CLOEXEC);
+    off_t copy_input_offset = 0;
+    off_t copy_output_offset = 0;
+    unsigned char copied_magic[8] = {0};
+    if (copy_source < 0 || copy_target < 0 ||
+        syscall(SYS_copy_file_range, copy_source, &copy_input_offset,
+                copy_target, &copy_output_offset, 8, 0) != 8 ||
+        copy_input_offset != 8 || copy_output_offset != 8 ||
+        lseek(copy_target, 0, SEEK_SET) != 0 ||
+        read(copy_target, copied_magic, sizeof(copied_magic)) !=
+            (ssize_t)sizeof(copied_magic) ||
+        memcmp(copied_magic, "\177ELF", 4) != 0) {
+        return 486;
+    }
+    errno = 0;
+    if (syscall(SYS_copy_file_range, copy_source, &copy_input_offset,
+                copy_target, &copy_output_offset, 8, 1) != -1 ||
+        errno != EINVAL ||
+        close(copy_source) != 0 ||
+        close(copy_target) != 0) {
+        return 487;
+    }
+    if (syscall(SYS_setgroups, 0, NULL) != 0) {
+        return 488;
+    }
+    gid_t supplementary_groups[2] = {7, 5};
+    gid_t read_supplementary_groups[2] = {0};
+    if (syscall(SYS_setgroups, 2, supplementary_groups) != 0 ||
+        getgroups(0, NULL) != 2 ||
+        getgroups(2, read_supplementary_groups) != 2 ||
+        read_supplementary_groups[0] != 5 ||
+        read_supplementary_groups[1] != 7) {
+        return 489;
+    }
+    errno = 0;
+    if (getgroups(1, read_supplementary_groups) != -1 ||
+        errno != EINVAL ||
+        syscall(SYS_setgroups, 0, NULL) != 0) {
+        return 500;
+    }
+    struct __user_cap_header_struct capability_header = {
+        .version = _LINUX_CAPABILITY_VERSION_3,
+        .pid = 0,
+    };
+    struct __user_cap_data_struct capability_data[2] = {0};
+    struct __user_cap_data_struct original_capability_data[2] = {0};
+    if (syscall(SYS_capget, &capability_header, capability_data) != 0 ||
+        (capability_data[0].effective == 0 &&
+         capability_data[1].effective == 0)) {
+        return 490;
+    }
+    memcpy(original_capability_data, capability_data,
+           sizeof(original_capability_data));
+    memset(capability_data, 0, sizeof(capability_data));
+    capability_data[0].effective = 1;
+    capability_data[0].permitted = 1;
+    if (syscall(SYS_capset, &capability_header, capability_data) != 0 ||
+        syscall(SYS_capget, &capability_header, capability_data) != 0 ||
+        capability_data[0].effective != 1 ||
+        capability_data[0].permitted != 1 ||
+        capability_data[0].inheritable != 0) {
+        return 491;
+    }
+    capability_data[0].effective = 3;
+    capability_data[0].permitted = 1;
+    errno = 0;
+    if (syscall(SYS_capset, &capability_header, capability_data) != -1 ||
+        errno != EPERM ||
+        syscall(SYS_capset, &capability_header,
+                original_capability_data) != 0) {
+        return 492;
+    }
+    capability_header.version = 0;
+    errno = 0;
+    if (syscall(SYS_capget, &capability_header, capability_data) != -1 ||
+        errno != EINVAL ||
+        capability_header.version != _LINUX_CAPABILITY_VERSION_3) {
+        return 493;
+    }
+    long initial_ioprio =
+        syscall(SYS_ioprio_get, IOPRIO_WHO_PROCESS, 0);
+    if (initial_ioprio < 0 ||
+        syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0,
+                IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 5)) != 0 ||
+        syscall(SYS_ioprio_get, IOPRIO_WHO_PROCESS, 0) !=
+            IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 5) ||
+        syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0,
+                IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0)) != 0 ||
+        syscall(SYS_ioprio_get, IOPRIO_WHO_PROCESS, 0) !=
+            IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0)) {
+        return 512;
+    }
+    errno = 0;
+    if (syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0,
+                IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 8)) != -1 ||
+        errno != EINVAL ||
+        syscall(SYS_ioprio_get, IOPRIO_WHO_PGRP, 0) != -1 ||
+        errno != EOPNOTSUPP ||
+        syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0,
+                (unsigned)initial_ioprio) != 0) {
+        return 513;
+    }
+    uid_t credential_real_uid = 0;
+    uid_t credential_effective_uid = 0;
+    uid_t credential_saved_uid = 0;
+    gid_t credential_real_gid = 0;
+    gid_t credential_effective_gid = 0;
+    gid_t credential_saved_gid = 0;
+    if (getresuid(&credential_real_uid, &credential_effective_uid,
+                  &credential_saved_uid) != 0 ||
+        getresgid(&credential_real_gid, &credential_effective_gid,
+                  &credential_saved_gid) != 0 ||
+        credential_real_uid != 0 || credential_effective_uid != 0 ||
+        credential_saved_uid != 0 || credential_real_gid != 0 ||
+        credential_effective_gid != 0 || credential_saved_gid != 0 ||
+        syscall(SYS_setfsuid, 123) != 0 ||
+        syscall(SYS_setfsuid, 0) != 123 ||
+        syscall(SYS_setfsgid, 124) != 0 ||
+        syscall(SYS_setfsgid, 0) != 124) {
+        return 494;
+    }
+    if (syscall(SYS_setresuid, 100, 100, 0) != 0 ||
+        getresuid(&credential_real_uid, &credential_effective_uid,
+                  &credential_saved_uid) != 0 ||
+        credential_real_uid != 100 || credential_effective_uid != 100 ||
+        credential_saved_uid != 0) {
+        return 495;
+    }
+    errno = 0;
+    if (syscall(SYS_setuid, 200) != -1 || errno != EPERM ||
+        syscall(SYS_setresuid, 0, 0, 0) != 0 ||
+        getuid() != 0 || geteuid() != 0) {
+        return 496;
+    }
+    if (syscall(SYS_setresgid, 110, 110, 0) != 0 ||
+        getresgid(&credential_real_gid, &credential_effective_gid,
+                  &credential_saved_gid) != 0 ||
+        credential_real_gid != 110 || credential_effective_gid != 110 ||
+        credential_saved_gid != 0 ||
+        syscall(SYS_setresgid, 0, 0, 0) != 0 ||
+        getgid() != 0 || getegid() != 0) {
+        return 497;
+    }
+    pid_t credentials_child = fork();
+    if (credentials_child < 0) {
+        return 498;
+    }
+    if (credentials_child == 0) {
+        int ok = syscall(SYS_setreuid, 101, 101) == 0 &&
+                 getuid() == 101 && geteuid() == 101 &&
+                 syscall(SYS_setregid, 102, 102) == 0 &&
+                 getgid() == 102 && getegid() == 102;
+        _exit(ok ? 0 : 1);
+    }
+    int credentials_status = 0;
+    if (waitpid(credentials_child, &credentials_status, 0) !=
+            credentials_child ||
+        !WIFEXITED(credentials_status) ||
+        WEXITSTATUS(credentials_status) != 0 ||
+        getuid() != 0 || getgid() != 0) {
+        return 499;
+    }
+    mode_t old_umask = umask(077);
+    if (old_umask != 022 || umask(old_umask) != 077) {
+        return 501;
+    }
+    const char *mutable_parent = "/usr/lib/x86_64-linux-gnu";
+    const char *new_vfs_path = "/usr/lib/x86_64-linux-gnu/jasper-new-node";
+    errno = 0;
+    if (syscall(SYS_mkdir, mutable_parent, 0755) != -1 ||
+        errno != EEXIST ||
+        syscall(SYS_mkdir, new_vfs_path, 0755) != -1 ||
+        errno != EROFS) {
+        return 502;
+    }
+    errno = 0;
+    if (syscall(SYS_mkdirat, AT_FDCWD, new_vfs_path, 0755) != -1 ||
+        errno != EROFS) {
+        return 503;
+    }
+    errno = 0;
+    if (syscall(SYS_mknod, mutable_parent, S_IFREG | 0600, 0) != -1 ||
+        errno != EEXIST ||
+        syscall(SYS_mknod, new_vfs_path, S_IFREG | 0600, 0) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_mknodat, AT_FDCWD, new_vfs_path,
+                S_IFREG | 0600, 0) != -1 ||
+        errno != EROFS) {
+        return 504;
+    }
+    errno = 0;
+    if (syscall(SYS_unlink, xattr_path) != -1 || errno != EROFS ||
+        syscall(SYS_unlink, "/usr") != -1 || errno != EISDIR ||
+        syscall(SYS_unlinkat, AT_FDCWD, xattr_path, 0) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_unlinkat, AT_FDCWD, xattr_path, AT_REMOVEDIR) != -1 ||
+        errno != ENOTDIR) {
+        return 505;
+    }
+    errno = 0;
+    if (syscall(SYS_rmdir, xattr_path) != -1 || errno != ENOTDIR ||
+        syscall(SYS_rmdir, "/usr") != -1 || errno != EROFS) {
+        return 506;
+    }
+    errno = 0;
+    if (syscall(SYS_rename, xattr_path, new_vfs_path) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_renameat, AT_FDCWD, xattr_path,
+                AT_FDCWD, new_vfs_path) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_renameat2, AT_FDCWD, xattr_path,
+                AT_FDCWD, new_vfs_path, 1) != -1 ||
+        errno != EOPNOTSUPP) {
+        return 507;
+    }
+    errno = 0;
+    if (syscall(SYS_link, xattr_path, new_vfs_path) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_linkat, AT_FDCWD, xattr_path,
+                AT_FDCWD, new_vfs_path, 0) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_symlink, "target", new_vfs_path) != -1 ||
+        errno != EROFS ||
+        syscall(SYS_symlinkat, "target", AT_FDCWD,
+                new_vfs_path) != -1 ||
+        errno != EROFS) {
+        return 508;
+    }
+    const long privileged_calls[] = {
+        SYS_mount, SYS_umount2, SYS_pivot_root, SYS_chroot,
+        SYS_swapon, SYS_swapoff, SYS_init_module, SYS_finit_module,
+        SYS_delete_module, SYS_acct, SYS_iopl, SYS_ioperm,
+        SYS_kexec_load, SYS_kexec_file_load, SYS_quotactl,
+        SYS_quotactl_fd, SYS_bpf, SYS_perf_event_open, SYS_ptrace,
+        SYS_setns, SYS_unshare, SYS_syslog,
+    };
+    for (size_t index = 0;
+         index < sizeof(privileged_calls) / sizeof(privileged_calls[0]);
+         index++) {
+        errno = 0;
+        if (syscall(privileged_calls[index], 0, 0, 0, 0, 0, 0) != -1 ||
+            errno != EPERM) {
+            printf("privileged-call-fail nr=%ld errno=%d\n",
+                   privileged_calls[index], errno);
+            return 509;
+        }
+    }
+    char process_vm_source[] = "VMIO";
+    char process_vm_copy[5] = {0};
+    char process_vm_write[] = "SEND";
+    char process_vm_destination[5] = {0};
+    struct iovec process_vm_local = {
+        .iov_base = process_vm_copy,
+        .iov_len = 4,
+    };
+    struct iovec process_vm_remote = {
+        .iov_base = process_vm_source,
+        .iov_len = 4,
+    };
+    if (syscall(SYS_process_vm_readv, getpid(), &process_vm_local, 1,
+                &process_vm_remote, 1, 0) != 4 ||
+        memcmp(process_vm_copy, "VMIO", 4) != 0) {
+        return 514;
+    }
+    process_vm_local.iov_base = process_vm_write;
+    process_vm_remote.iov_base = process_vm_destination;
+    if (syscall(SYS_process_vm_writev, getpid(), &process_vm_local, 1,
+                &process_vm_remote, 1, 0) != 4 ||
+        memcmp(process_vm_destination, "SEND", 4) != 0) {
+        return 515;
+    }
+    errno = 0;
+    if (syscall(SYS_process_vm_readv, getpid(), &process_vm_local, 1,
+                &process_vm_remote, 1, 1) != -1 ||
+        errno != EINVAL ||
+        syscall(SYS_process_vm_writev, getpid(),
+                (struct iovec *)(uintptr_t)1, 1,
+                &process_vm_remote, 1, 0) != -1 ||
+        errno != EFAULT) {
+        return 516;
+    }
+    int splice_source_pipe[2];
+    int splice_dest_pipe[2];
+    char splice_readback[8] = {0};
+    if (pipe(splice_source_pipe) != 0 || pipe(splice_dest_pipe) != 0 ||
+        write(splice_source_pipe[1], "splice", 6) != 6 ||
+        syscall(SYS_splice, splice_source_pipe[0], NULL,
+                splice_dest_pipe[1], NULL, 6, 0) != 6 ||
+        read(splice_dest_pipe[0], splice_readback, 6) != 6 ||
+        memcmp(splice_readback, "splice", 6) != 0) {
+        return 517;
+    }
+    int splice_file =
+        syscall(SYS_open, "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                O_RDONLY | O_CLOEXEC, 0);
+    off_t splice_offset = 0;
+    memset(splice_readback, 0, sizeof(splice_readback));
+    if (splice_file < 0 ||
+        syscall(SYS_splice, splice_file, &splice_offset,
+                splice_source_pipe[1], NULL, 4, 0) != 4 ||
+        splice_offset != 4 ||
+        read(splice_source_pipe[0], splice_readback, 4) != 4 ||
+        memcmp(splice_readback, "\177ELF", 4) != 0) {
+        return 518;
+    }
+    errno = 0;
+    if (syscall(SYS_splice, splice_file, &splice_offset,
+                splice_source_pipe[1], NULL, 4, 0x10) != -1 ||
+        errno != EINVAL ||
+        close(splice_file) != 0 ||
+        close(splice_source_pipe[0]) != 0 ||
+        close(splice_source_pipe[1]) != 0 ||
+        close(splice_dest_pipe[0]) != 0 ||
+        close(splice_dest_pipe[1]) != 0) {
+        return 519;
     }
     memset(main_thread_name, 0, sizeof(main_thread_name));
     prctl(PR_GET_NAME, main_thread_name, 0, 0, 0);
@@ -3513,7 +4826,8 @@ int main(void) {
     fflush(stdout);
     char *exec_argv[] = {"/usr/bin/jasper-getppid", NULL};
     char *exec_envp[] = {"JASPER_EXEC_CHILD=1", NULL};
-    execve(exec_argv[0], exec_argv, exec_envp);
+    syscall(SYS_execveat, AT_FDCWD, exec_argv[0],
+            exec_argv, exec_envp, 0);
     printf("jasper-exec-fail errno=%d\n", errno);
     return 61;
 }

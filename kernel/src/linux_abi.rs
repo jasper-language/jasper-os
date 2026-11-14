@@ -32,6 +32,7 @@ const MAX_LINUX_THREADS: usize = 64;
 const MAX_FUTEX_WORDS: usize = 32;
 const MAX_PROCESS_SIGNAL_SETS: usize = 16;
 const MAX_POSIX_TIMERS: usize = 32;
+const MAX_INTERVAL_TIMER_SETS: usize = 16;
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
 static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
 
@@ -77,6 +78,7 @@ struct LinuxThread {
     altstack_flags: u32,
     altstack_depth: u8,
     altstack_disarm_depth: u8,
+    sigsuspend_restore_mask: Option<u64>,
 }
 
 fn linux_comm_from_task_name(task_name: &str) -> [u8; 16] {
@@ -155,6 +157,14 @@ struct PosixTimer {
     active: bool,
 }
 
+#[derive(Clone, Copy)]
+struct IntervalTimer {
+    process: ObjId,
+    next: u64,
+    interval: u64,
+    active: bool,
+}
+
 struct CompatState {
     threads: [Option<LinuxThread>; MAX_LINUX_THREADS],
     futexes: [Option<FutexWord>; MAX_FUTEX_WORDS],
@@ -162,6 +172,7 @@ struct CompatState {
     flock_locks: [Option<FlockLock>; MAX_FLOCK_LOCKS],
     flock_waiters: [Option<FlockWaiter>; MAX_FLOCK_LOCKS],
     posix_timers: [Option<PosixTimer>; MAX_POSIX_TIMERS],
+    interval_timers: [Option<IntervalTimer>; MAX_INTERVAL_TIMER_SETS],
 }
 
 impl CompatState {
@@ -173,6 +184,7 @@ impl CompatState {
             flock_locks: [None; MAX_FLOCK_LOCKS],
             flock_waiters: [None; MAX_FLOCK_LOCKS],
             posix_timers: [None; MAX_POSIX_TIMERS],
+            interval_timers: [None; MAX_INTERVAL_TIMER_SETS],
         }
     }
 }
@@ -322,6 +334,7 @@ pub(crate) fn register_linux_thread(
             altstack_flags: 2,
             altstack_depth: 0,
             altstack_disarm_depth: 0,
+            sigsuspend_restore_mask: None,
         });
         tid
     };
@@ -353,6 +366,10 @@ fn linux_tid(process: ObjId) -> Option<u32> {
         .flatten()
         .find(|entry| entry.process == process && entry.task == task)
         .map(|entry| entry.tid)
+}
+
+pub(crate) fn current_linux_tid(process: ObjId) -> Option<u32> {
+    linux_tid(process)
 }
 
 fn linux_tid_for_task(task: crate::task::TaskId) -> Option<(ObjId, u32)> {
@@ -512,6 +529,34 @@ fn set_current_signal_mask(process: ObjId, mask: u64) -> bool {
     };
     entry.signal_mask = mask & !UNMASKABLE;
     true
+}
+
+/// Stores the mask `rt_sigsuspend` must restore after its signal handler returns.
+fn set_current_sigsuspend_restore_mask(process: ObjId, mask: Option<u64>) -> bool {
+    let (task, _) = sched::current();
+    let mut state = COMPAT.lock();
+    let Some(entry) = state
+        .threads
+        .iter_mut()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)
+    else {
+        return false;
+    };
+    entry.sigsuspend_restore_mask = mask;
+    true
+}
+
+/// Takes the pending `rt_sigsuspend` restore mask for signal-frame construction.
+fn take_current_sigsuspend_restore_mask(process: ObjId) -> Option<u64> {
+    let (task, _) = sched::current();
+    COMPAT
+        .lock()
+        .threads
+        .iter_mut()
+        .flatten()
+        .find(|entry| entry.process == process && entry.task == task)
+        .and_then(|entry| entry.sigsuspend_restore_mask.take())
 }
 
 /// Returns the current thread alternate signal stack and active depth.
@@ -916,7 +961,8 @@ fn build_signal_frame(
     {
         return Err(CompatErrno::Invalid);
     }
-    let old_mask = current_signal_mask(process).ok_or(CompatErrno::Invalid)?;
+    let current_mask = current_signal_mask(process).ok_or(CompatErrno::Invalid)?;
+    let old_mask = take_current_sigsuspend_restore_mask(process).unwrap_or(current_mask);
     let altstack = if action[1] & SA_ONSTACK != 0 {
         current_altstack(process).ok_or(CompatErrno::Invalid)?
     } else {
@@ -1017,23 +1063,23 @@ fn build_signal_frame(
     let nodefer = action[1] & (SA_NODEFER | SA_RESETHAND) != 0;
     let reset_hand = action[1] & SA_RESETHAND != 0;
     let handler_mask = if nodefer {
-        old_mask | action[3]
+        current_mask | action[3]
     } else {
-        old_mask | action[3] | (1u64 << (signal - 1))
+        current_mask | action[3] | (1u64 << (signal - 1))
     };
     if !set_current_signal_mask(process, handler_mask) {
         return Err(CompatErrno::Invalid);
     }
     if reset_hand && !proc::set_linux_signal_action(process, signal, [0; 4]) {
-        let _ = set_current_signal_mask(process, old_mask);
+        let _ = set_current_signal_mask(process, current_mask);
         return Err(CompatErrno::Invalid);
     }
     if proc::write(process, frame_address, &frame).is_err() {
-        let _ = set_current_signal_mask(process, old_mask);
+        let _ = set_current_signal_mask(process, current_mask);
         return Err(CompatErrno::Fault);
     }
     if uses_altstack && !enter_altstack(process, autodisarm) {
-        let _ = set_current_signal_mask(process, old_mask);
+        let _ = set_current_signal_mask(process, current_mask);
         return Err(CompatErrno::Invalid);
     }
     crate::kprintln!(
@@ -1078,6 +1124,9 @@ fn deliver_pending_signal(
     let signal = take_deliverable_signal(process)?;
     let action = proc::linux_signal_action(process, signal)?;
     if action[0] == 1 {
+        if let Some(mask) = take_current_sigsuspend_restore_mask(process) {
+            let _ = set_current_signal_mask(process, mask);
+        }
         crate::kprintln!("[JSR-LINUX-SIGNAL] ignored signal={}", signal);
         return None;
     }
@@ -1113,14 +1162,20 @@ fn linux_tgkill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
             .then_some(())
             .ok_or(CompatErrno::NoProcess);
     }
-    if matches!(signal, 9 | 19) {
-        return Err(CompatErrno::Invalid);
+    if signal == 19 {
+        return Err(CompatErrno::NotSupported);
     }
     if queue_thread_signal(process, tid, signal, tgid, -6) {
         Ok(())
     } else {
         Err(CompatErrno::NoProcess)
     }
+}
+
+/// Queues a thread-directed `tkill` in the current compatibility process.
+fn linux_tkill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+    let tgid = proc::linux_pid(process).ok_or(CompatErrno::NoProcess)?;
+    linux_tgkill(process, [u64::from(tgid), args[0], args[1], 0, 0, 0])
 }
 
 /// Queues a process-directed `kill` for a live compatibility process.
@@ -1135,8 +1190,11 @@ fn linux_kill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     if signal == 0 {
         return Ok(());
     }
-    if signal > 64 || matches!(signal, 9 | 19) {
+    if signal > 64 {
         return Err(CompatErrno::Invalid);
+    }
+    if signal == 19 {
+        return Err(CompatErrno::NotSupported);
     }
     let sender_pid = proc::linux_pid(process).ok_or(CompatErrno::NoProcess)?;
     if queue_process_signal(target, signal, sender_pid, 0) {
@@ -1262,6 +1320,24 @@ fn register_robust_list(process: ObjId, address: u64, length: u64) -> bool {
     true
 }
 
+/// Reads one same-process Linux thread's robust-list head and length.
+fn linux_get_robust_list(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let requested = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let current = linux_tid(pid).ok_or(CompatErrno::NoProcess)?;
+    let tid = if requested == 0 { current } else { requested };
+    let (head, length) = COMPAT
+        .lock()
+        .threads
+        .iter()
+        .flatten()
+        .find(|entry| entry.process == pid && entry.tid == tid)
+        .map(|entry| (entry.robust_list, entry.robust_list_len))
+        .ok_or(CompatErrno::NoProcess)?;
+    copy_to_user(args[1], &head.to_le_bytes(), 8).map_err(|_| CompatErrno::Fault)?;
+    copy_to_user(args[2], &length.to_le_bytes(), 8).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
 fn register_rseq(process: ObjId, address: u64, length: u64, flags: u64, signature: u64) -> bool {
     if flags != 0
         || signature != 0x5305_3053
@@ -1328,6 +1404,7 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
             last_thread,
         )
     };
+    crate::binder::release_thread(process, tid);
     if let Some(ticks) = sched::cpu_ticks(task) {
         let _ = proc::linux_account_exited_thread_cpu(process, ticks);
     }
@@ -1741,8 +1818,13 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
     if !proc::linux_syscall_allowed(pid, call.syscall) {
         return SyscallOutcome::value(-i64::from(CompatErrno::Perm as i32));
     }
-    if call.syscall == LinuxSyscall::Execve {
-        return match linux_execve(pid, call.args) {
+    if matches!(call.syscall, LinuxSyscall::Execve | LinuxSyscall::Execveat) {
+        let executed = if call.syscall == LinuxSyscall::Execve {
+            linux_execve(pid, call.args)
+        } else {
+            linux_execveat(pid, call.args)
+        };
+        return match executed {
             Ok((entry, user_rsp)) => {
                 let _ = proc::vfork_commit_exec(pid);
                 SyscallOutcome {
@@ -1798,6 +1880,7 @@ fn execute(
     match call.syscall {
         LinuxSyscall::Write => compat_result(linux_write(pid, call.args)),
         LinuxSyscall::WriteV => compat_result(linux_writev(pid, call.args)),
+        LinuxSyscall::GetDents => compat_result(linux_getdents(pid, call.args)),
         LinuxSyscall::GetDents64 => compat_result(linux_getdents64(pid, call.args)),
         LinuxSyscall::Read => compat_result(linux_read(pid, call.args)),
         LinuxSyscall::Pread64 => compat_result(linux_pread64(pid, call.args)),
@@ -1815,12 +1898,15 @@ fn execute(
         LinuxSyscall::PwriteV2 => {
             compat_result(linux_vectored_file_io(pid, call.args, true, true, true))
         }
+        LinuxSyscall::ProcessVmReadV => compat_result(linux_process_vm_io(pid, call.args, false)),
+        LinuxSyscall::ProcessVmWriteV => compat_result(linux_process_vm_io(pid, call.args, true)),
         LinuxSyscall::ReadLinkAt => compat_result(linux_readlinkat(pid, call.args)),
         LinuxSyscall::Close => compat_result(linux_close(pid, call.args[0])),
         LinuxSyscall::CloseRange => compat_result(linux_close_range(pid, call.args)),
         LinuxSyscall::Dup => compat_result(linux_dup(pid, call.args)),
         LinuxSyscall::Dup2 => compat_result(linux_dup2(pid, call.args)),
         LinuxSyscall::Dup3 => compat_result(linux_dup3(pid, call.args)),
+        LinuxSyscall::Pipe => compat_result(linux_pipe(pid, call.args)),
         LinuxSyscall::Pipe2 => compat_result(linux_pipe2(pid, call.args)),
         LinuxSyscall::Socket => compat_result(linux_socket(pid, call.args)),
         LinuxSyscall::Bind => compat_result(linux_bind(pid, call.args)),
@@ -1841,6 +1927,8 @@ fn execute(
         LinuxSyscall::TimerDelete => compat_result(linux_timer_delete(pid, call.args)),
         LinuxSyscall::SendMsg => compat_result(linux_sendmsg(pid, call.args)),
         LinuxSyscall::RecvMsg => compat_result(linux_recvmsg(pid, call.args)),
+        LinuxSyscall::Sendmmsg => compat_result(linux_sendmmsg(pid, call.args)),
+        LinuxSyscall::Recvmmsg => compat_result(linux_recvmmsg(pid, call.args)),
         LinuxSyscall::SendTo => compat_result(linux_sendto(pid, call.args)),
         LinuxSyscall::RecvFrom => compat_result(linux_recvfrom(pid, call.args)),
         LinuxSyscall::Shutdown => compat_result(linux_shutdown(pid, call.args)),
@@ -1849,7 +1937,10 @@ fn execute(
         LinuxSyscall::GetSockOpt => compat_result(linux_getsockopt(pid, call.args)),
         LinuxSyscall::SetSockOpt => compat_result(linux_setsockopt(pid, call.args)),
         LinuxSyscall::Chdir => compat_result(linux_chdir(pid, call.args[0])),
+        LinuxSyscall::Open => compat_result(linux_open(pid, call.args)),
         LinuxSyscall::OpenAt => compat_result(linux_openat(pid, call.args)),
+        LinuxSyscall::OpenAt2 => compat_result(linux_openat2(pid, call.args)),
+        LinuxSyscall::Creat => compat_result(linux_creat(pid, call.args)),
         LinuxSyscall::Fchdir => compat_result(linux_fchdir(pid, call.args[0])),
         LinuxSyscall::Chmod => {
             compat_result(linux_fchmodat(pid, legacy_chmod_args(call.args), false))
@@ -1863,6 +1954,33 @@ fn execute(
         }
         LinuxSyscall::FchownAt => compat_result(linux_fchownat(pid, call.args)),
         LinuxSyscall::Lchown => compat_result(linux_lchown(pid, call.args)),
+        LinuxSyscall::Mkdir => compat_result(linux_mkdirat(pid, legacy_path_at_args(call.args))),
+        LinuxSyscall::MkdirAt => compat_result(linux_mkdirat(pid, call.args)),
+        LinuxSyscall::Mknod => compat_result(linux_mknodat(pid, legacy_path_at_args(call.args))),
+        LinuxSyscall::MknodAt => compat_result(linux_mknodat(pid, call.args)),
+        LinuxSyscall::Unlink => compat_result(linux_unlinkat(pid, [(-100i64) as u64, call.args[0], 0, 0, 0, 0])),
+        LinuxSyscall::UnlinkAt => compat_result(linux_unlinkat(pid, call.args)),
+        LinuxSyscall::Rmdir => compat_result(linux_unlinkat(pid, [(-100i64) as u64, call.args[0], 0x200, 0, 0, 0])),
+        LinuxSyscall::Rename => compat_result(linux_renameat(pid, legacy_rename_args(call.args))),
+        LinuxSyscall::RenameAt => compat_result(linux_renameat(pid, call.args)),
+        LinuxSyscall::RenameAt2 => compat_result(linux_renameat2(pid, call.args)),
+        LinuxSyscall::Link => compat_result(linux_linkat(pid, legacy_link_args(call.args))),
+        LinuxSyscall::LinkAt => compat_result(linux_linkat(pid, call.args)),
+        LinuxSyscall::Symlink => compat_result(linux_symlinkat(pid, [call.args[0], (-100i64) as u64, call.args[1], 0, 0, 0])),
+        LinuxSyscall::SymlinkAt => compat_result(linux_symlinkat(pid, call.args)),
+        LinuxSyscall::Umask => compat_result(linux_umask(pid, call.args[0])),
+        LinuxSyscall::Setxattr => compat_result(linux_setxattr(pid, call.args, false, false)),
+        LinuxSyscall::LSetxattr => compat_result(linux_setxattr(pid, call.args, false, true)),
+        LinuxSyscall::FSetxattr => compat_result(linux_setxattr(pid, call.args, true, false)),
+        LinuxSyscall::Getxattr => compat_result(linux_getxattr(pid, call.args, false, false)),
+        LinuxSyscall::LGetxattr => compat_result(linux_getxattr(pid, call.args, false, true)),
+        LinuxSyscall::FGetxattr => compat_result(linux_getxattr(pid, call.args, true, false)),
+        LinuxSyscall::Listxattr => compat_result(linux_listxattr(pid, call.args, false, false)),
+        LinuxSyscall::LListxattr => compat_result(linux_listxattr(pid, call.args, false, true)),
+        LinuxSyscall::FListxattr => compat_result(linux_listxattr(pid, call.args, true, false)),
+        LinuxSyscall::Removexattr => compat_result(linux_removexattr(pid, call.args, false, false)),
+        LinuxSyscall::LRemovexattr => compat_result(linux_removexattr(pid, call.args, false, true)),
+        LinuxSyscall::FRemovexattr => compat_result(linux_removexattr(pid, call.args, true, false)),
         LinuxSyscall::Fstat => compat_result(linux_fstat(pid, call.args)),
         LinuxSyscall::Stat => {
             compat_result(linux_newfstatat(pid, legacy_stat_args(call.args, false)))
@@ -1901,6 +2019,9 @@ fn execute(
         LinuxSyscall::Ioctl => compat_result(linux_ioctl(pid, call.args)),
         LinuxSyscall::StatFs => compat_result(linux_statfs(call.args)),
         LinuxSyscall::ReadLink => compat_result(linux_readlink(pid, call.args)),
+        LinuxSyscall::SendFile => compat_result(linux_sendfile(pid, call.args)),
+        LinuxSyscall::CopyFileRange => compat_result(linux_copy_file_range(pid, call.args)),
+        LinuxSyscall::Splice => compat_result(linux_splice(pid, call.args)),
         LinuxSyscall::Mmap => compat_result(linux_mmap(pid, call.args)),
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
@@ -1908,7 +2029,15 @@ fn execute(
         LinuxSyscall::Msync => compat_result(linux_msync(pid, call.args)),
         LinuxSyscall::MinCore => compat_result(linux_mincore(pid, call.args)),
         LinuxSyscall::Madvise => compat_result(linux_madvise(pid, call.args)),
+        LinuxSyscall::Mlock => compat_result(linux_mlock(pid, call.args, false)),
+        LinuxSyscall::Mlock2 => compat_result(linux_mlock(pid, call.args, true)),
+        LinuxSyscall::Mlockall => compat_result(linux_mlockall(call.args)),
+        LinuxSyscall::Munlock => compat_result(linux_munlock(pid, call.args)),
+        LinuxSyscall::Munlockall => 0,
         LinuxSyscall::Clone => compat_result(linux_clone(pid, call.args, user_ip, user_preserved)),
+        LinuxSyscall::Fork => {
+            compat_result(linux_fork(pid, call.args, user_ip, user_preserved))
+        }
         LinuxSyscall::Clone3 => {
             compat_result(linux_clone3(pid, call.args, user_ip, user_preserved))
         }
@@ -1919,20 +2048,50 @@ fn execute(
         LinuxSyscall::FaccessAt2 => compat_result(linux_faccessat(pid, call.args, true)),
         LinuxSyscall::Prctl => compat_result(linux_prctl(pid, call.args)),
         LinuxSyscall::ArchPrctl => compat_result(linux_arch_prctl(call.args)),
+        LinuxSyscall::CapGet => compat_result(linux_capget(pid, call.args)),
+        LinuxSyscall::CapSet => compat_result(linux_capset(pid, call.args)),
+        LinuxSyscall::IoprioGet => compat_result(linux_ioprio_get(pid, call.args)),
+        LinuxSyscall::IoprioSet => compat_result(linux_ioprio_set(pid, call.args)),
         LinuxSyscall::Adjtimex
         | LinuxSyscall::ClockAdjtime
         | LinuxSyscall::ClockSettime
         | LinuxSyscall::Settimeofday
         | LinuxSyscall::Sethostname
         | LinuxSyscall::Setdomainname
-        | LinuxSyscall::Reboot => -(CompatErrno::Perm as i32 as i64),
+        | LinuxSyscall::Reboot
+        | LinuxSyscall::Mount
+        | LinuxSyscall::Umount2
+        | LinuxSyscall::PivotRoot
+        | LinuxSyscall::Chroot
+        | LinuxSyscall::Swapon
+        | LinuxSyscall::Swapoff
+        | LinuxSyscall::InitModule
+        | LinuxSyscall::FinitModule
+        | LinuxSyscall::DeleteModule
+        | LinuxSyscall::Acct
+        | LinuxSyscall::Iopl
+        | LinuxSyscall::Ioperm
+        | LinuxSyscall::KexecLoad
+        | LinuxSyscall::KexecFileLoad
+        | LinuxSyscall::Quotactl
+        | LinuxSyscall::QuotactlFd
+        | LinuxSyscall::Bpf
+        | LinuxSyscall::PerfEventOpen
+        | LinuxSyscall::Ptrace
+        | LinuxSyscall::Setns
+        | LinuxSyscall::Unshare
+        | LinuxSyscall::Syslog => -(CompatErrno::Perm as i32 as i64),
         LinuxSyscall::ClockGettime => compat_result(linux_clock_gettime(call.args)),
         LinuxSyscall::ClockGetres => compat_result(linux_clock_getres(call.args)),
         LinuxSyscall::Nanosleep => compat_result(linux_nanosleep(pid, call.args)),
+        LinuxSyscall::Pause => compat_result(linux_pause(pid)),
         LinuxSyscall::ClockNanosleep => compat_result(linux_clock_nanosleep(pid, call.args)),
         LinuxSyscall::RtSigAction => compat_result(linux_rt_sigaction(pid, call.args)),
         LinuxSyscall::RtSigPending => compat_result(linux_rt_sigpending(pid, call.args)),
         LinuxSyscall::RtSigProcMask => compat_result(linux_rt_sigprocmask(pid, call.args)),
+        LinuxSyscall::RtSigsuspend => compat_result(linux_rt_sigsuspend(pid, call.args)),
+        LinuxSyscall::RtSigtimedwait => compat_result(linux_rt_sigtimedwait(pid, call.args)),
+        LinuxSyscall::Tkill => compat_result(linux_tkill(pid, call.args).map(|()| 0)),
         LinuxSyscall::Tgkill => compat_result(linux_tgkill(pid, call.args).map(|()| 0)),
         LinuxSyscall::SchedYield => {
             sched::yield_with_cause(crate::sched::scheduler::Cause::YIELD);
@@ -1941,6 +2100,10 @@ fn execute(
         LinuxSyscall::Sigaltstack => compat_result(linux_sigaltstack(pid, call.args)),
         LinuxSyscall::Signalfd => compat_result(linux_signalfd(pid, call.args, false)),
         LinuxSyscall::Signalfd4 => compat_result(linux_signalfd(pid, call.args, true)),
+        LinuxSyscall::InotifyInit => compat_result(linux_inotify_init(pid, call.args, false)),
+        LinuxSyscall::InotifyInit1 => compat_result(linux_inotify_init(pid, call.args, true)),
+        LinuxSyscall::InotifyAddWatch => compat_result(linux_inotify_add_watch(pid, call.args)),
+        LinuxSyscall::InotifyRmWatch => compat_result(linux_inotify_rm_watch(pid, call.args)),
         LinuxSyscall::Kill => compat_result(linux_kill(pid, call.args).map(|()| 0)),
         LinuxSyscall::Uname => compat_result(linux_uname(call.args)),
         LinuxSyscall::GetPid => proc::linux_pid(pid)
@@ -1954,15 +2117,24 @@ fn execute(
         LinuxSyscall::GetRandom => compat_result(linux_getrandom(call.args)),
         LinuxSyscall::GetTimeOfDay => compat_result(linux_gettimeofday(call.args)),
         LinuxSyscall::Getrusage => compat_result(linux_getrusage(pid, call.args)),
+        LinuxSyscall::GetItimer => compat_result(linux_getitimer(pid, call.args)),
         LinuxSyscall::Time => compat_result(linux_time(call.args)),
         LinuxSyscall::Times => compat_result(linux_times(pid, call.args)),
+        LinuxSyscall::Alarm => compat_result(linux_alarm(pid, call.args)),
+        LinuxSyscall::SetItimer => compat_result(linux_setitimer(pid, call.args)),
         LinuxSyscall::Getcwd => compat_result(linux_getcwd(pid, call.args)),
-        LinuxSyscall::GetUid | LinuxSyscall::GetEuid => {
-            compat_core::syscall::LINUX_COMPAT_UID as i64
-        }
-        LinuxSyscall::GetGid | LinuxSyscall::GetEgid => {
-            compat_core::syscall::LINUX_COMPAT_GID as i64
-        }
+        LinuxSyscall::GetUid => compat_result(linux_get_identity(pid, false, false)),
+        LinuxSyscall::GetEuid => compat_result(linux_get_identity(pid, false, true)),
+        LinuxSyscall::GetGid => compat_result(linux_get_identity(pid, true, false)),
+        LinuxSyscall::GetEgid => compat_result(linux_get_identity(pid, true, true)),
+        LinuxSyscall::SetUid => compat_result(linux_set_single_identity(pid, call.args[0], false)),
+        LinuxSyscall::SetGid => compat_result(linux_set_single_identity(pid, call.args[0], true)),
+        LinuxSyscall::SetReUid => compat_result(linux_set_real_effective_identity(pid, call.args, false)),
+        LinuxSyscall::SetReGid => compat_result(linux_set_real_effective_identity(pid, call.args, true)),
+        LinuxSyscall::SetResUid => compat_result(linux_set_reserved_identity(pid, call.args, false)),
+        LinuxSyscall::SetResGid => compat_result(linux_set_reserved_identity(pid, call.args, true)),
+        LinuxSyscall::SetFsuid => linux_set_fs_identity(pid, call.args[0], false),
+        LinuxSyscall::SetFsgid => linux_set_fs_identity(pid, call.args[0], true),
         LinuxSyscall::GetPpid => proc::linux_ppid(pid)
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
@@ -1972,11 +2144,10 @@ fn execute(
         LinuxSyscall::GetSid => compat_result(linux_get_sid(pid, call.args[0])),
         LinuxSyscall::SetPgid => compat_result(linux_setpgid(pid, call.args)),
         LinuxSyscall::SetSid => compat_result(linux_setsid(pid)),
-        // The compatibility identity has no supplementary groups.
-        // 兼容身份没有附加组，因此 size 查询和写入都返回 0。
-        LinuxSyscall::GetGroups => 0,
-        LinuxSyscall::GetResUid => compat_result(linux_getres(call.args, false)),
-        LinuxSyscall::GetResGid => compat_result(linux_getres(call.args, true)),
+        LinuxSyscall::GetGroups => compat_result(linux_getgroups(pid, call.args)),
+        LinuxSyscall::SetGroups => compat_result(linux_setgroups(pid, call.args)),
+        LinuxSyscall::GetResUid => compat_result(linux_getres(pid, call.args, false)),
+        LinuxSyscall::GetResGid => compat_result(linux_getres(pid, call.args, true)),
         LinuxSyscall::GetPriority => compat_result(linux_getpriority(pid, call.args)),
         LinuxSyscall::SetPriority => compat_result(linux_setpriority(pid, call.args)),
         LinuxSyscall::Lseek => compat_result(linux_lseek(pid, call.args)),
@@ -2007,6 +2178,7 @@ fn execute(
             .map(i64::from)
             .ok_or(CompatErrno::NoSys)
             .unwrap_or_else(|error| -i64::from(error as i32)),
+        LinuxSyscall::GetRobustList => compat_result(linux_get_robust_list(pid, call.args)),
         LinuxSyscall::SetRobustList => {
             if register_robust_list(pid, call.args[0], call.args[1]) {
                 0
@@ -2025,6 +2197,7 @@ fn execute(
         LinuxSyscall::Getrlimit => compat_result(linux_getrlimit(pid, call.args)),
         LinuxSyscall::Setrlimit => compat_result(linux_setrlimit(pid, call.args)),
         LinuxSyscall::Futex => compat_result(linux_futex(pid, call.args)),
+        LinuxSyscall::EpollCreate => compat_result(linux_epoll_create(pid, call.args)),
         LinuxSyscall::EpollCreate1 => compat_result(linux_epoll_create1(pid, call.args)),
         LinuxSyscall::EpollCtl => compat_result(linux_epoll_ctl(pid, call.args)),
         LinuxSyscall::EpollWait => compat_result(linux_epoll_wait(pid, call.args, false, false)),
@@ -2040,20 +2213,281 @@ fn execute(
             proc::thread_exit(code, "linux process exit")
         }
         LinuxSyscall::Wait4 => compat_result(linux_wait4(pid, call.args)),
+        LinuxSyscall::WaitId => compat_result(linux_waitid(pid, call.args)),
+        LinuxSyscall::PidfdOpen => compat_result(linux_pidfd_open(pid, call.args)),
+        LinuxSyscall::PidfdSendSignal => {
+            compat_result(linux_pidfd_send_signal(pid, call.args))
+        }
+        LinuxSyscall::PidfdGetFd => compat_result(linux_pidfd_getfd(pid, call.args)),
         _ => -i64::from(CompatErrno::NoSys as i32),
     }
 }
 
-/// Writes the Linux x86_64 `struct utsname` compatibility identity.
-/// 写入 Linux x86_64 `struct utsname` 兼容身份。
-fn linux_getres(args: [u64; 6], _gid: bool) -> Result<u64, CompatErrno> {
-    for pointer in [args[0], args[1], args[2]] {
+/// Returns one real or effective Linux ABI identity.
+fn linux_get_identity(pid: ObjId, gid: bool, effective: bool) -> Result<u64, CompatErrno> {
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    Ok(u64::from(if gid {
+        if effective {
+            credentials.egid
+        } else {
+            credentials.gid
+        }
+    } else if effective {
+        credentials.euid
+    } else {
+        credentials.uid
+    }))
+}
+
+/// Commits one validated Linux ABI credential state.
+fn commit_credentials(pid: ObjId, credentials: proc::LinuxCredentials) -> Result<u64, CompatErrno> {
+    if proc::set_linux_credentials(pid, credentials) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoProcess)
+    }
+}
+
+/// Implements `setuid(2)` and `setgid(2)`.
+fn linux_set_single_identity(
+    pid: ObjId,
+    raw_requested: u64,
+    gid: bool,
+) -> Result<u64, CompatErrno> {
+    let requested = raw_requested as u32;
+    if requested == u32::MAX {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    if gid {
+        if credentials.egid != 0 && requested != credentials.gid && requested != credentials.sgid {
+            return Err(CompatErrno::Perm);
+        }
+        credentials.gid = requested;
+        credentials.egid = requested;
+        credentials.sgid = requested;
+        credentials.fsgid = requested;
+    } else {
+        if credentials.euid != 0 && requested != credentials.uid && requested != credentials.suid {
+            return Err(CompatErrno::Perm);
+        }
+        credentials.uid = requested;
+        credentials.euid = requested;
+        credentials.suid = requested;
+        credentials.fsuid = requested;
+    }
+    commit_credentials(pid, credentials)
+}
+
+/// Implements `setreuid(2)` and `setregid(2)`.
+fn linux_set_real_effective_identity(
+    pid: ObjId,
+    args: [u64; 6],
+    gid: bool,
+) -> Result<u64, CompatErrno> {
+    let real_requested = args[0] as u32;
+    let effective_requested = args[1] as u32;
+    let mut credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let (real, effective, saved) = if gid {
+        (credentials.gid, credentials.egid, credentials.sgid)
+    } else {
+        (credentials.uid, credentials.euid, credentials.suid)
+    };
+    let privileged = (if gid { credentials.egid } else { credentials.euid }) == 0;
+    let allowed = |value: u32| {
+        value == u32::MAX || privileged || value == real || value == effective || value == saved
+    };
+    if !allowed(real_requested) || !allowed(effective_requested) {
+        return Err(CompatErrno::Perm);
+    }
+    let new_real = if real_requested == u32::MAX {
+        real
+    } else {
+        real_requested
+    };
+    let new_effective = if effective_requested == u32::MAX {
+        effective
+    } else {
+        effective_requested
+    };
+    let new_saved = if privileged || new_real != real || new_effective != effective {
+        new_effective
+    } else {
+        saved
+    };
+    if gid {
+        credentials.gid = new_real;
+        credentials.egid = new_effective;
+        credentials.sgid = new_saved;
+        if credentials.fsgid == effective {
+            credentials.fsgid = new_effective;
+        }
+    } else {
+        credentials.uid = new_real;
+        credentials.euid = new_effective;
+        credentials.suid = new_saved;
+        if credentials.fsuid == effective {
+            credentials.fsuid = new_effective;
+        }
+    }
+    commit_credentials(pid, credentials)
+}
+
+/// Implements `setresuid(2)` and `setresgid(2)`.
+fn linux_set_reserved_identity(
+    pid: ObjId,
+    args: [u64; 6],
+    gid: bool,
+) -> Result<u64, CompatErrno> {
+    let requested = [args[0] as u32, args[1] as u32, args[2] as u32];
+    let mut credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let current = if gid {
+        [credentials.gid, credentials.egid, credentials.sgid]
+    } else {
+        [credentials.uid, credentials.euid, credentials.suid]
+    };
+    let privileged = (if gid { credentials.egid } else { credentials.euid }) == 0;
+    if requested.iter().any(|value| {
+        *value != u32::MAX && !privileged && !current.contains(value)
+    }) {
+        return Err(CompatErrno::Perm);
+    }
+    let next = [
+        if requested[0] == u32::MAX { current[0] } else { requested[0] },
+        if requested[1] == u32::MAX { current[1] } else { requested[1] },
+        if requested[2] == u32::MAX { current[2] } else { requested[2] },
+    ];
+    if gid {
+        credentials.gid = next[0];
+        credentials.egid = next[1];
+        credentials.sgid = next[2];
+        if credentials.fsgid == current[1] {
+            credentials.fsgid = next[1];
+        }
+    } else {
+        credentials.uid = next[0];
+        credentials.euid = next[1];
+        credentials.suid = next[2];
+        if credentials.fsuid == current[1] {
+            credentials.fsuid = next[1];
+        }
+    }
+    commit_credentials(pid, credentials)
+}
+
+/// Implements `setfsuid(2)` and `setfsgid(2)`, returning the previous identity.
+fn linux_set_fs_identity(pid: ObjId, raw_requested: u64, gid: bool) -> i64 {
+    let requested = raw_requested as u32;
+    let Some(mut credentials) = proc::linux_credentials(pid) else {
+        return -(CompatErrno::NoProcess as i32 as i64);
+    };
+    let (old_fs, effective, real, saved) = if gid {
+        (
+            credentials.fsgid,
+            credentials.egid,
+            credentials.gid,
+            credentials.sgid,
+        )
+    } else {
+        (
+            credentials.fsuid,
+            credentials.euid,
+            credentials.uid,
+            credentials.suid,
+        )
+    };
+    if requested == u32::MAX
+        || requested == old_fs
+        || effective == 0
+        || requested == effective
+        || requested == real
+        || requested == saved
+    {
+        if requested != u32::MAX {
+            if gid {
+                credentials.fsgid = requested;
+            } else {
+                credentials.fsuid = requested;
+            }
+            if !proc::set_linux_credentials(pid, credentials) {
+                return -(CompatErrno::NoProcess as i32 as i64);
+            }
+        }
+    }
+    i64::from(old_fs)
+}
+
+/// Writes the real, effective and saved Linux ABI uid or gid triple.
+fn linux_getres(pid: ObjId, args: [u64; 6], gid: bool) -> Result<u64, CompatErrno> {
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let values = if gid {
+        [credentials.gid, credentials.egid, credentials.sgid]
+    } else {
+        [credentials.uid, credentials.euid, credentials.suid]
+    };
+    for (index, pointer) in [args[0], args[1], args[2]].into_iter().enumerate() {
         if pointer != 0 {
-            copy_to_user(pointer, &0u32.to_le_bytes(), 4)
+            copy_to_user(pointer, &values[index].to_le_bytes(), 4)
                 .map_err(|_| CompatErrno::Fault)?;
         }
     }
     Ok(0)
+}
+
+/// Returns the bounded supplementary group list.
+fn linux_getgroups(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let size = args[0] as u32 as i32;
+    if size < 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let groups = proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?;
+    if size == 0 {
+        return Ok(groups.len() as u64);
+    }
+    if args[1] == 0 {
+        return Err(CompatErrno::Fault);
+    }
+    if (size as usize) < groups.len() {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut output = [0u8; 32 * 4];
+    for (index, group) in groups.iter().copied().enumerate() {
+        output[index * 4..index * 4 + 4].copy_from_slice(&group.to_le_bytes());
+    }
+    copy_to_user(args[1], &output[..groups.len() * 4], groups.len() * 4)
+        .map_err(|_| CompatErrno::Fault)?;
+    Ok(groups.len() as u64)
+}
+
+/// Replaces the supplementary group list when the ABI credential permits it.
+fn linux_setgroups(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const CAP_SETGID: u64 = 1 << 6;
+    const MAX_GROUPS: usize = 32;
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let capabilities = proc::linux_capabilities(pid).ok_or(CompatErrno::NoProcess)?;
+    if credentials.euid != 0 && capabilities.effective & CAP_SETGID == 0 {
+        return Err(CompatErrno::Perm);
+    }
+    let count = usize::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    if count > MAX_GROUPS {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut groups = alloc::vec![0u32; count];
+    if count != 0 {
+        let mut raw = [0u8; MAX_GROUPS * 4];
+        copy_from_user(&mut raw[..count * 4], args[1], count * 4)
+            .map_err(|_| CompatErrno::Fault)?;
+        for (index, group) in groups.iter_mut().enumerate() {
+            *group = u32::from_le_bytes(raw[index * 4..index * 4 + 4].try_into().unwrap());
+        }
+        groups.sort_unstable();
+        groups.dedup();
+    }
+    if proc::set_linux_supplementary_groups(pid, &groups) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoProcess)
+    }
 }
 
 fn linux_resolve_pid(pid: ObjId, requested: u64) -> Result<ObjId, CompatErrno> {
@@ -2154,6 +2588,32 @@ fn legacy_stat_args(args: [u64; 6], nofollow: bool) -> [u64; 6] {
 
 fn legacy_futimesat_args(args: [u64; 6]) -> [u64; 6] {
     [args[0], args[1], args[2], 0, 0, 0]
+}
+
+fn legacy_path_at_args(args: [u64; 6]) -> [u64; 6] {
+    [(-100i64) as u64, args[0], args[1], 0, 0, 0]
+}
+
+fn legacy_rename_args(args: [u64; 6]) -> [u64; 6] {
+    [
+        (-100i64) as u64,
+        args[0],
+        (-100i64) as u64,
+        args[1],
+        0,
+        0,
+    ]
+}
+
+fn legacy_link_args(args: [u64; 6]) -> [u64; 6] {
+    [
+        (-100i64) as u64,
+        args[0],
+        (-100i64) as u64,
+        args[1],
+        0,
+        0,
+    ]
 }
 
 fn linux_uname(args: [u64; 6]) -> Result<u64, CompatErrno> {
@@ -2363,6 +2823,75 @@ fn linux_getdents64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(output.len() as u64)
 }
 
+/// Reads bounded legacy `linux_dirent` records from one compatibility directory.
+fn linux_getdents(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MAX_GETDENTS: usize = 64 * 1024;
+    const DT_DIR: u8 = 4;
+    const DT_REG: u8 = 8;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if capacity > MAX_GETDENTS {
+        return Err(CompatErrno::Invalid);
+    }
+    let (handle, start) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let directory = crate::linux_vfs::DirectoryId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
+    let children = crate::linux_vfs::directory_entries(directory);
+    let count = 2usize
+        .checked_add(children.len())
+        .ok_or(CompatErrno::Invalid)?;
+    let start = usize::try_from(start).map_err(|_| CompatErrno::Invalid)?;
+    if start > count {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut output = alloc::vec::Vec::new();
+    let mut index = start;
+    while index < count {
+        let (name, inode, kind) = if index == 0 {
+            (b".".as_slice(), directory.inode(), DT_DIR)
+        } else if index == 1 {
+            (b"..".as_slice(), directory.inode(), DT_DIR)
+        } else {
+            let entry = &children[index - 2];
+            (
+                entry.name,
+                entry.node.inode(),
+                if entry.node.is_directory() {
+                    DT_DIR
+                } else {
+                    DT_REG
+                },
+            )
+        };
+        let record_len = align_up(19usize.saturating_add(name.len()) as u64, 8) as usize;
+        if record_len == 0 || record_len > u16::MAX as usize {
+            return Err(CompatErrno::Invalid);
+        }
+        if output.len().saturating_add(record_len) > capacity {
+            if output.is_empty() {
+                return Err(CompatErrno::Invalid);
+            }
+            break;
+        }
+        let base = output.len();
+        output.resize(base + record_len, 0);
+        output[base..base + 8].copy_from_slice(&inode.to_le_bytes());
+        output[base + 8..base + 16].copy_from_slice(&((index + 1) as i64).to_le_bytes());
+        output[base + 16..base + 18].copy_from_slice(&(record_len as u16).to_le_bytes());
+        output[base + 18..base + 18 + name.len()].copy_from_slice(name);
+        output[base + record_len - 1] = kind;
+        index += 1;
+    }
+    let io = admit_process_io(pid, output.len() as u64, 1)?;
+    if !output.is_empty() {
+        copy_to_user(args[1], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    }
+    io.commit();
+    if !proc::set_linux_dir_offset(pid, fd, index as u64) {
+        return Err(CompatErrno::BadFd);
+    }
+    Ok(output.len() as u64)
+}
+
 fn authorize_console(pid: ObjId, fd: u32, write: bool) -> Result<(), CompatErrno> {
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     let rights = if write {
@@ -2434,6 +2963,9 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         if entry.kind == compat_core::fd::CompatKind::Signal {
             return linux_signalfd_read(pid, fd, entry.handle, args[1], len);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Inotify {
+            return linux_inotify_read(pid, fd);
         }
         if entry.kind == compat_core::fd::CompatKind::Socket {
             if !entry.rights.contains(kernel_core::object::Rights::READ) {
@@ -2701,6 +3233,57 @@ fn linux_vectored_file_io(
         return Err(CompatErrno::BadFd);
     }
     Ok(read as u64)
+}
+
+/// Implements same-process `process_vm_readv/writev` without ptrace authority.
+fn linux_process_vm_io(
+    pid: ObjId,
+    args: [u64; 6],
+    write: bool,
+) -> Result<u64, CompatErrno> {
+    const MAX_PROCESS_VM: usize = 1024 * 1024;
+    if args[5] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let target_pid = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let target = proc::linux_process_for_pid(target_pid).ok_or(CompatErrno::NoProcess)?;
+    if target != pid {
+        return Err(CompatErrno::Perm);
+    }
+    let local_count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let remote_count = usize::try_from(args[4]).map_err(|_| CompatErrno::Invalid)?;
+    let local = read_message_iovecs(pid, args[1], local_count, MAX_PROCESS_VM)?;
+    let remote = read_message_iovecs(pid, args[3], remote_count, MAX_PROCESS_VM)?;
+    let local_total = local.iter().map(|(_, length)| *length).sum::<usize>();
+    let remote_total = remote.iter().map(|(_, length)| *length).sum::<usize>();
+    let total = local_total.min(remote_total);
+    let (source, destination) = if write {
+        (&local, &remote)
+    } else {
+        (&remote, &local)
+    };
+    let mut bytes = alloc::vec![0u8; total];
+    let mut offset = 0usize;
+    for (address, length) in source {
+        if offset == total {
+            break;
+        }
+        let take = (*length).min(total - offset);
+        proc::read(pid, *address, &mut bytes[offset..offset + take])
+            .map_err(|_| CompatErrno::Fault)?;
+        offset += take;
+    }
+    offset = 0;
+    for (address, length) in destination {
+        if offset == total {
+            break;
+        }
+        let take = (*length).min(total - offset);
+        proc::write(pid, *address, &bytes[offset..offset + take])
+            .map_err(|_| CompatErrno::Fault)?;
+        offset += take;
+    }
+    Ok(total as u64)
 }
 
 /// Implements bounded Linux `readv(2)` with all-or-nothing user-range validation.
@@ -3737,6 +4320,77 @@ fn linux_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
 }
 
+/// Validates one page-aligned resident-memory range.
+fn linux_lock_range(pid: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    const MAX_LOCK_BYTES: u64 = 64 * 1024 * 1024;
+    let address = args[0];
+    let length = args[1];
+    if length == 0 {
+        return Ok(());
+    }
+    if address % PAGE != 0 || length > MAX_LOCK_BYTES {
+        return Err(CompatErrno::Invalid);
+    }
+    let rounded = length.checked_add(PAGE - 1).ok_or(CompatErrno::Invalid)? & !(PAGE - 1);
+    let end = address
+        .checked_add(rounded)
+        .filter(|end| address >= crate::arch::USER_WINDOW.0 && *end <= crate::arch::USER_WINDOW.1)
+        .ok_or(CompatErrno::NoMemory)?;
+    let mut page = address;
+    while page < end {
+        if proc::page_flags(pid, page).is_none() {
+            return Err(CompatErrno::NoMemory);
+        }
+        page += PAGE;
+    }
+    Ok(())
+}
+
+/// Implements `mlock(2)` and `mlock2(2)` over the non-reclaimable resident memory model.
+fn linux_mlock(
+    pid: ObjId,
+    args: [u64; 6],
+    mlock2: bool,
+) -> Result<u64, CompatErrno> {
+    const MLOCK_ONFAULT: u64 = 0x1;
+    if mlock2 && args[2] & !MLOCK_ONFAULT != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    linux_lock_range(pid, args)?;
+    Ok(0)
+}
+
+/// Implements process-wide current/future memory locking.
+fn linux_mlockall(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MCL_CURRENT: u64 = 0x1;
+    const MCL_FUTURE: u64 = 0x2;
+    const MCL_ONFAULT: u64 = 0x4;
+    if args[0] == 0
+        || args[0] & !(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0
+        || args[0] & (MCL_CURRENT | MCL_FUTURE) == 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    Ok(0)
+}
+
+/// Implements `munlock(2)`; the resident-memory model needs no page state change.
+fn linux_munlock(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    if args[1] == 0 {
+        return Ok(0);
+    }
+    if args[0] % PAGE != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    args[0]
+        .checked_add(args[1])
+        .filter(|end| args[0] >= crate::arch::USER_WINDOW.0 && *end <= crate::arch::USER_WINDOW.1)
+        .ok_or(CompatErrno::Invalid)?;
+    Ok(0)
+}
+
 /// Implements the x86_64 Linux `clone(2)` thread subset used by glibc pthreads.
 ///
 /// 实现 glibc pthread 使用的 x86_64 Linux `clone(2)` 线程子集；共享同一 Jasper 地址空间、
@@ -3810,6 +4464,14 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
         let _ = (resolved, argv, envp);
         Err(CompatErrno::NoSys)
     }
+}
+
+/// Implements the `AT_FDCWD` and no-flag `execveat(2)` subset.
+fn linux_execveat(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
+    if !is_at_fdcwd(args[0]) || args[4] != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    linux_execve(pid, [args[1], args[2], args[3], 0, 0, 0])
 }
 
 /// Reads a bounded NULL-terminated vector of NUL-terminated user strings.
@@ -3887,6 +4549,22 @@ fn linux_fork_clone(
         .ok_or(CompatErrno::NoSys)
 }
 
+/// Implements legacy x86_64 `fork(2)` as a private address-space copy.
+fn linux_fork(
+    pid: ObjId,
+    _args: [u64; 6],
+    user_ip: Option<(u64, u64)>,
+    preserved_regs: [u64; 6],
+) -> Result<u64, CompatErrno> {
+    const SIGCHLD: u64 = 17;
+    linux_fork_clone(
+        pid,
+        [SIGCHLD, 0, 0, 0, 0, 0],
+        user_ip,
+        preserved_regs,
+    )
+}
+
 /// Implements `vfork(2)` as shared-memory execution with a suspended parent.
 ///
 /// 实现 `vfork(2)`：子进程共享父进程物理页；父线程睡眠到子进程成功 exec
@@ -3955,6 +4633,152 @@ fn linux_wait4(_pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             Err(_) => return Err(CompatErrno::NoChild),
         }
     }
+}
+
+/// Implements `waitid(2)` for exited children and the `WNOHANG` probe.
+fn linux_waitid(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const P_ALL: u32 = 0;
+    const P_PID: u32 = 1;
+    const WNOHANG: u64 = 0x1;
+    const WEXITED: u64 = 0x4;
+    const WNOWAIT: u64 = 0x0100_0000;
+    let id_type = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    let target = match id_type {
+        P_ALL => None,
+        P_PID => {
+            let target = u32::try_from(args[1]).map_err(|_| CompatErrno::NoProcess)?;
+            if target == 0 {
+                return Err(CompatErrno::NoProcess);
+            }
+            Some(target)
+        }
+        _ => return Err(CompatErrno::NotSupported),
+    };
+    let options = args[3];
+    if args[2] == 0 {
+        return Err(CompatErrno::Fault);
+    }
+    if options & WNOWAIT != 0 || args[4] != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    if options & !(WNOHANG | WEXITED) != 0 || options & WEXITED == 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    let zero = [0u8; 128];
+    copy_to_user(args[2], &zero, zero.len()).map_err(|_| CompatErrno::Fault)?;
+    loop {
+        match proc::take_linux_child_exit(pid, target) {
+            Ok(Some((child_pid, status))) => {
+                let mut info = [0u8; 128];
+                info[0..4].copy_from_slice(&17u32.to_le_bytes());
+                info[8..12].copy_from_slice(&1i32.to_le_bytes());
+                info[16..20].copy_from_slice(&child_pid.to_le_bytes());
+                info[24..28].copy_from_slice(&((status >> 8) & 0xff).to_le_bytes());
+                copy_to_user(args[2], &info, info.len()).map_err(|_| CompatErrno::Fault)?;
+                return Ok(0);
+            }
+            Ok(None) if options & WNOHANG != 0 => return Ok(0),
+            Ok(None) => proc::block_step().map_err(|_| CompatErrno::Interrupted)?,
+            Err(_) => return Err(CompatErrno::NoChild),
+        }
+    }
+}
+
+/// Reports whether a pidfd target has exited or is exiting.
+fn pidfd_target_ready(target: ObjId) -> bool {
+    matches!(
+        proc::state(target),
+        None
+            | Some(proc::ProcState::Exiting { .. })
+            | Some(proc::ProcState::Exited { .. })
+    )
+}
+
+/// Implements `pidfd_open(2)` for process identities.
+fn linux_pidfd_open(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PIDFD_NONBLOCK: u64 = 0x800;
+    if args[1] & !PIDFD_NONBLOCK != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let target_pid = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
+    if target_pid == 0 {
+        return Err(CompatErrno::NoProcess);
+    }
+    let target = proc::linux_process_for_pid(target_pid).ok_or(CompatErrno::NoProcess)?;
+    let fd = proc::linux_install_pidfd(pid, target, true).ok_or(CompatErrno::NoSpace)?;
+    if args[1] & PIDFD_NONBLOCK != 0 {
+        let flags = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)?;
+        if !proc::linux_set_fd_status_flags(
+            pid,
+            fd,
+            flags | PIDFD_NONBLOCK as u32,
+        ) {
+            let _ = proc::linux_close_fd(pid, fd);
+            return Err(CompatErrno::BadFd);
+        }
+    }
+    Ok(u64::from(fd))
+}
+
+/// Implements signal delivery through an existing pidfd.
+fn linux_pidfd_send_signal(
+    pid: ObjId,
+    args: [u64; 6],
+) -> Result<u64, CompatErrno> {
+    if args[2] != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Pidfd || args[3] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let target = ObjId::from_raw(entry.handle).ok_or(CompatErrno::NoProcess)?;
+    let signal = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if signal > 64 {
+        return Err(CompatErrno::Invalid);
+    }
+    if signal == 0 {
+        return proc::state(target)
+            .map(|_| 0)
+            .ok_or(CompatErrno::NoProcess);
+    }
+    if signal == 19 {
+        return Err(CompatErrno::NotSupported);
+    }
+    let sender = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?;
+    if queue_process_signal(target, signal, sender, 0) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoProcess)
+    }
+}
+
+/// Duplicates a same-process descriptor through a pidfd reference.
+fn linux_pidfd_getfd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[2] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let pidfd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, pidfd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Pidfd {
+        return Err(CompatErrno::BadFd);
+    }
+    let target = ObjId::from_raw(entry.handle).ok_or(CompatErrno::NoProcess)?;
+    if target != pid {
+        return Err(CompatErrno::Perm);
+    }
+    let target_fd = u32::try_from(args[1]).map_err(|_| CompatErrno::BadFd)?;
+    let transfer = proc::linux_capture_fd_transfer(target, target_fd).map_err(|error| match error {
+        proc::LinuxFdTransferError::Invalid => CompatErrno::BadFd,
+        proc::LinuxFdTransferError::NoSpace => CompatErrno::NoSpace,
+    })?;
+    proc::linux_install_fd_transfer(pid, transfer, true)
+        .map(u64::from)
+        .map_err(|error| match error {
+            proc::LinuxFdTransferError::Invalid => CompatErrno::BadFd,
+            proc::LinuxFdTransferError::NoSpace => CompatErrno::NoSpace,
+        })
 }
 
 /// Implements the structured `clone3(2)` layout used by modern glibc.
@@ -4327,6 +5151,116 @@ fn linux_arch_prctl(args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(0)
 }
 
+/// Parses the 64-bit capability header used by `capget/capset`.
+fn linux_capability_header(pid: ObjId, address: u64) -> Result<(), CompatErrno> {
+    const CAP_VERSION_3: u32 = 0x2008_0522;
+    let mut raw = [0u8; 8];
+    copy_from_user(&mut raw, address, 8).map_err(|_| CompatErrno::Fault)?;
+    let version = u32::from_le_bytes(raw[..4].try_into().unwrap());
+    if version != CAP_VERSION_3 {
+        copy_to_user(address, &CAP_VERSION_3.to_le_bytes(), 4)
+            .map_err(|_| CompatErrno::Fault)?;
+        return Err(CompatErrno::Invalid);
+    }
+    let requested = i32::from_le_bytes(raw[4..8].try_into().unwrap());
+    let current = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)? as i32;
+    if requested != 0 && requested != current {
+        return Err(CompatErrno::Perm);
+    }
+    Ok(())
+}
+
+/// Reports the Linux ABI capability view without changing native authority.
+fn linux_capget(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    linux_capability_header(pid, args[0])?;
+    let capabilities = proc::linux_capabilities(pid).ok_or(CompatErrno::NoProcess)?;
+    let mut data = [0u8; 24];
+    data[0..4].copy_from_slice(&(capabilities.effective as u32).to_le_bytes());
+    data[4..8].copy_from_slice(&(capabilities.permitted as u32).to_le_bytes());
+    data[8..12].copy_from_slice(&(capabilities.inheritable as u32).to_le_bytes());
+    data[12..16].copy_from_slice(&((capabilities.effective >> 32) as u32).to_le_bytes());
+    data[16..20].copy_from_slice(&((capabilities.permitted >> 32) as u32).to_le_bytes());
+    data[20..24].copy_from_slice(&((capabilities.inheritable >> 32) as u32).to_le_bytes());
+    copy_to_user(args[1], &data, data.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Updates the Linux ABI capability view while preserving native authorization.
+fn linux_capset(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const CAP_FULL_MASK: u64 = (1u64 << 41) - 1;
+    linux_capability_header(pid, args[0])?;
+    let mut data = [0u8; 24];
+    copy_from_user(&mut data, args[1], 24).map_err(|_| CompatErrno::Fault)?;
+    let effective = u64::from(u32::from_le_bytes(data[0..4].try_into().unwrap()))
+        | (u64::from(u32::from_le_bytes(data[12..16].try_into().unwrap())) << 32);
+    let permitted = u64::from(u32::from_le_bytes(data[4..8].try_into().unwrap()))
+        | (u64::from(u32::from_le_bytes(data[16..20].try_into().unwrap())) << 32);
+    let inheritable = u64::from(u32::from_le_bytes(data[8..12].try_into().unwrap()))
+        | (u64::from(u32::from_le_bytes(data[20..24].try_into().unwrap())) << 32);
+    if effective & !permitted != 0
+        || effective & !CAP_FULL_MASK != 0
+        || permitted & !CAP_FULL_MASK != 0
+        || inheritable & !CAP_FULL_MASK != 0
+    {
+        return Err(CompatErrno::Perm);
+    }
+    if !proc::set_linux_capabilities(
+        pid,
+        proc::LinuxCapabilities {
+            effective,
+            permitted,
+            inheritable,
+        },
+    ) {
+        return Err(CompatErrno::NoProcess);
+    }
+    Ok(0)
+}
+
+/// Resolves one I/O priority target restricted to the current process.
+fn linux_ioprio_target(pid: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
+    const IOPRIO_WHO_PROCESS: u64 = 1;
+    if args[0] != IOPRIO_WHO_PROCESS {
+        return Err(CompatErrno::NotSupported);
+    }
+    let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
+    let requested = args[1] as u32 as i32;
+    if requested != 0 && requested as u64 != current {
+        return Err(CompatErrno::Perm);
+    }
+    Ok(())
+}
+
+/// Returns the process Linux I/O priority.
+fn linux_ioprio_get(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    linux_ioprio_target(pid, args)?;
+    proc::linux_ioprio(pid)
+        .map(u64::from)
+        .ok_or(CompatErrno::NoProcess)
+}
+
+/// Sets the process Linux I/O priority class and level.
+fn linux_ioprio_set(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const IOPRIO_CLASS_MASK: u32 = 0x7;
+    const IOPRIO_CLASS_SHIFT: u32 = 13;
+    const IOPRIO_PRIO_MASK: u32 = (1 << IOPRIO_CLASS_SHIFT) - 1;
+    linux_ioprio_target(pid, args)?;
+    let requested = args[2] as u32;
+    let class = (requested >> IOPRIO_CLASS_SHIFT) & IOPRIO_CLASS_MASK;
+    let data = requested & IOPRIO_PRIO_MASK;
+    let value = match class {
+        0 => (2 << IOPRIO_CLASS_SHIFT) | 4,
+        1 | 2 if data <= 7 => requested,
+        3 if data == 0 => requested,
+        _ => return Err(CompatErrno::Invalid),
+    };
+    if proc::set_linux_ioprio(pid, value) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoProcess)
+    }
+}
+
 /// Implements `clock_gettime(2)` for trusted realtime and Jasper monotonic clocks.
 ///
 /// `CLOCK_MONOTONIC` 使用高精度内核单调时钟；`CLOCK_REALTIME` 只能取自信任的
@@ -4448,6 +5382,16 @@ fn linux_nanosleep(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
 }
 
+/// Implements `pause(2)`, returning after one unmasked signal wakes the task.
+fn linux_pause(pid: ObjId) -> Result<u64, CompatErrno> {
+    loop {
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        sched::pause();
+    }
+}
+
 /// Implements relative realtime/monotonic sleep and absolute realtime/monotonic sleep.
 ///
 /// 相对等待统一使用单调截止期；绝对 realtime 期限先与可信 RTC 当前值作差，再转换为
@@ -4509,6 +5453,208 @@ fn write_linux_timespec(address: u64, nanoseconds: u64) -> Result<u64, CompatErr
     timespec[8..16].copy_from_slice(&(nanoseconds % 1_000_000_000).to_le_bytes());
     copy_to_user(address, &timespec, timespec.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
+}
+
+const LINUX_SIGALRM: u32 = 14;
+const LINUX_SI_KERNEL: i32 = 128;
+const ITIMER_REAL: u32 = 0;
+const ITIMER_VIRTUAL: u32 = 1;
+const ITIMER_PROF: u32 = 2;
+
+/// Decodes one x86_64 `timeval` represented in a fixed little-endian buffer.
+fn decode_linux_timeval(bytes: &[u8]) -> Result<u64, CompatErrno> {
+    let seconds = i64::from_le_bytes(bytes[0..8].try_into().unwrap());
+    let micros = i64::from_le_bytes(bytes[8..16].try_into().unwrap());
+    if seconds < 0 || !(0..1_000_000).contains(&micros) {
+        return Err(CompatErrno::Invalid);
+    }
+    (seconds as u64)
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add((micros as u64) * 1_000))
+        .ok_or(CompatErrno::Invalid)
+}
+
+/// Reads x86_64 `struct itimerval` as `(interval, value)` nanoseconds.
+fn read_linux_itimerval(address: u64) -> Result<(u64, u64), CompatErrno> {
+    const ITIMERVAL_BYTES: usize = 32;
+    if address == 0 {
+        return Err(CompatErrno::Fault);
+    }
+    let mut bytes = [0u8; ITIMERVAL_BYTES];
+    copy_from_user(&mut bytes, address, ITIMERVAL_BYTES).map_err(|_| CompatErrno::Fault)?;
+    let interval = decode_linux_timeval(&bytes[..16])?;
+    let value = decode_linux_timeval(&bytes[16..])?;
+    Ok((interval, value))
+}
+
+/// Encodes x86_64 `struct itimerval`; `next` is an absolute monotonic deadline.
+fn encode_linux_itimerval(interval: u64, next: u64, now: u64) -> [u8; 32] {
+    let remaining = if next == 0 {
+        0
+    } else {
+        next.saturating_sub(now)
+    };
+    let mut bytes = [0u8; 32];
+    bytes[0..8].copy_from_slice(&(interval / 1_000_000_000).to_le_bytes());
+    bytes[8..16].copy_from_slice(&((interval % 1_000_000_000) / 1_000).to_le_bytes());
+    bytes[16..24].copy_from_slice(&(remaining / 1_000_000_000).to_le_bytes());
+    bytes[24..32].copy_from_slice(&((remaining % 1_000_000_000) / 1_000).to_le_bytes());
+    bytes
+}
+
+/// Advances one expired real interval timer and reports whether it fired.
+fn settle_interval_timer(timer: &mut IntervalTimer, now: u64) -> bool {
+    if !timer.active || now < timer.next {
+        return false;
+    }
+    let expired = if timer.interval == 0 {
+        1
+    } else {
+        (now - timer.next) / timer.interval + 1
+    };
+    timer.next = if timer.interval == 0 {
+        0
+    } else {
+        timer
+            .next
+            .saturating_add(expired.saturating_mul(timer.interval))
+    };
+    timer.active = timer.next != 0;
+    true
+}
+
+/// Validates one interval-timer selector.
+fn validate_itimer_which(which: u64) -> Result<u32, CompatErrno> {
+    let which = u32::try_from(which).map_err(|_| CompatErrno::Invalid)?;
+    match which {
+        ITIMER_REAL => Ok(which),
+        ITIMER_VIRTUAL | ITIMER_PROF => Err(CompatErrno::NotSupported),
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+/// Returns the settled REAL timer snapshot and whether it just fired.
+fn interval_timer_snapshot(pid: ObjId, now: u64) -> (u64, u64, bool) {
+    let mut state = COMPAT.lock();
+    let Some(timer) = state
+        .interval_timers
+        .iter_mut()
+        .flatten()
+        .find(|timer| timer.process == pid)
+    else {
+        return (0, 0, false);
+    };
+    let fired = settle_interval_timer(timer, now);
+    (timer.next, timer.interval, fired)
+}
+
+/// Replaces the process REAL interval timer, allocating its bounded state slot on demand.
+fn replace_interval_timer(
+    pid: ObjId,
+    next: u64,
+    interval: u64,
+) -> Result<(), CompatErrno> {
+    let mut state = COMPAT.lock();
+    if let Some(timer) = state
+        .interval_timers
+        .iter_mut()
+        .flatten()
+        .find(|timer| timer.process == pid)
+    {
+        *timer = IntervalTimer {
+            process: pid,
+            next,
+            interval,
+            active: next != 0,
+        };
+        return Ok(());
+    }
+    if next == 0 {
+        return Ok(());
+    }
+    let slot = state
+        .interval_timers
+        .iter()
+        .position(Option::is_none)
+        .ok_or(CompatErrno::NoSpace)?;
+    state.interval_timers[slot] = Some(IntervalTimer {
+        process: pid,
+        next,
+        interval,
+        active: true,
+    });
+    Ok(())
+}
+
+/// Implements `getitimer(2)` for the monotonic real timer.
+fn linux_getitimer(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    validate_itimer_which(args[0])?;
+    if args[1] == 0 {
+        return Err(CompatErrno::Fault);
+    }
+    let now = sched::now_ns();
+    let (next, interval, fired) = interval_timer_snapshot(pid, now);
+    if fired {
+        let _ = queue_process_signal(pid, LINUX_SIGALRM, 0, LINUX_SI_KERNEL);
+    }
+    let output = encode_linux_itimerval(interval, next, now);
+    copy_to_user(args[1], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Implements `setitimer(2)` and writes the prior value before replacement.
+fn linux_setitimer(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    validate_itimer_which(args[0])?;
+    let (interval, value) = if args[1] == 0 {
+        (0, 0)
+    } else {
+        read_linux_itimerval(args[1])?
+    };
+    let now = sched::now_ns();
+    let next = if value == 0 {
+        0
+    } else {
+        now.checked_add(value).ok_or(CompatErrno::Invalid)?
+    };
+    let (old_next, old_interval, fired) = interval_timer_snapshot(pid, now);
+    replace_interval_timer(pid, next, interval)?;
+    if fired {
+        let _ = queue_process_signal(pid, LINUX_SIGALRM, 0, LINUX_SI_KERNEL);
+    }
+    if args[2] != 0 {
+        let old = encode_linux_itimerval(old_interval, old_next, now);
+        copy_to_user(args[2], &old, old.len()).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(0)
+}
+
+/// Implements legacy `alarm(2)` over the REAL interval timer.
+fn linux_alarm(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let seconds = u64::from(args[0] as u32);
+    let now = sched::now_ns();
+    let (old_next, _, fired) = interval_timer_snapshot(pid, now);
+    let old_seconds = if old_next == 0 {
+        0
+    } else {
+        old_next
+            .saturating_sub(now)
+            .div_ceil(1_000_000_000)
+    };
+    if fired {
+        let _ = queue_process_signal(pid, LINUX_SIGALRM, 0, LINUX_SI_KERNEL);
+    }
+    let next = if seconds == 0 {
+        0
+    } else {
+        now.checked_add(
+            seconds
+                .checked_mul(1_000_000_000)
+                .ok_or(CompatErrno::Invalid)?,
+        )
+        .ok_or(CompatErrno::Invalid)?
+    };
+    replace_interval_timer(pid, next, 0)?;
+    Ok(old_seconds)
 }
 
 /// Blocks until an absolute monotonic deadline and handles wake-up rechecks.
@@ -4633,6 +5779,11 @@ fn linux_pipe2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Fault);
     }
     Ok(0)
+}
+
+/// Implements legacy `pipe(2)` through the bounded `pipe2(2)` path.
+fn linux_pipe(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    linux_pipe2(pid, [args[0], 0, 0, 0, 0, 0])
 }
 
 fn linux_memfd_create(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
@@ -5040,6 +6191,152 @@ fn linux_signalfd_read(
     }
 }
 
+/// Resolves one bounded path to a node in the process compatibility namespace.
+fn resolve_linux_path_node(pid: ObjId, address: u64) -> Result<crate::linux_vfs::Node, CompatErrno> {
+    let path = linux_c_string(address, 4096)?;
+    let resolved = if path.starts_with(b"/") {
+        path
+    } else {
+        if path == b".."
+            || path.starts_with(b"../")
+            || path.windows(4).any(|window| window == b"/../")
+        {
+            return Err(CompatErrno::Invalid);
+        }
+        let base = proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path();
+        if path == b"." {
+            base.to_vec()
+        } else {
+            let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
+            resolved.extend_from_slice(base);
+            if !base.ends_with(b"/") {
+                resolved.push(b'/');
+            }
+            resolved.extend_from_slice(&path);
+            resolved
+        }
+    };
+    crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)
+}
+
+/// Creates one bounded inotify instance.
+fn linux_inotify_init(
+    pid: ObjId,
+    args: [u64; 6],
+    modern: bool,
+) -> Result<u64, CompatErrno> {
+    const IN_NONBLOCK: u64 = 0x800;
+    const IN_CLOEXEC: u64 = 0x80000;
+    let flags = if modern { args[0] } else { 0 };
+    if flags & !(IN_NONBLOCK | IN_CLOEXEC) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    proc::linux_inotify_create(
+        pid,
+        flags & IN_CLOEXEC != 0,
+        flags & IN_NONBLOCK != 0,
+    )
+    .map(u64::from)
+    .ok_or(CompatErrno::NoSpace)
+}
+
+/// Adds or updates one inotify watch on a static compatibility node.
+fn linux_inotify_add_watch(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const IN_ONLYDIR: u32 = 0x0100_0000;
+    const IN_DONT_FOLLOW: u32 = 0x0200_0000;
+    const IN_EXCL_UNLINK: u32 = 0x0400_0000;
+    const IN_MASK_CREATE: u32 = 0x1000_0000;
+    const IN_MASK_ADD: u32 = 0x2000_0000;
+    const IN_ONESHOT: u32 = 0x8000_0000;
+    const IN_ALL_EVENTS: u32 = 0x0fff;
+    const IN_CONTROL: u32 = IN_ONLYDIR
+        | IN_DONT_FOLLOW
+        | IN_EXCL_UNLINK
+        | IN_MASK_CREATE
+        | IN_MASK_ADD
+        | IN_ONESHOT;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Inotify {
+        return Err(CompatErrno::BadFd);
+    }
+    let mask = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if mask == 0
+        || mask & !(IN_ALL_EVENTS | IN_CONTROL) != 0
+        || mask & IN_ALL_EVENTS == 0
+        || mask & IN_MASK_CREATE != 0 && mask & IN_MASK_ADD != 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let node = resolve_linux_path_node(pid, args[1])?;
+    if mask & IN_ONLYDIR != 0 && !node.is_directory() {
+        return Err(CompatErrno::NotDirectory);
+    }
+    let watches = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let mut watches = watches.lock();
+    if let Some(watch) = watches.iter_mut().find(|watch| watch.node == node) {
+        if mask & IN_MASK_CREATE != 0 {
+            return Err(CompatErrno::Exists);
+        }
+        let stored_mask = mask & !(IN_MASK_CREATE | IN_MASK_ADD);
+        watch.mask = if mask & IN_MASK_ADD != 0 {
+            watch.mask | stored_mask
+        } else {
+            stored_mask
+        };
+        return Ok(watch.wd as u64);
+    }
+    if watches.len() >= 64 {
+        return Err(CompatErrno::NoSpace);
+    }
+    let wd = (1..=64)
+        .find(|candidate| !watches.iter().any(|watch| watch.wd == *candidate))
+        .ok_or(CompatErrno::NoSpace)?;
+    watches
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    watches.push(proc::LinuxInotifyWatch {
+        wd,
+        node,
+        mask: mask & !(IN_MASK_CREATE | IN_MASK_ADD),
+    });
+    Ok(wd as u64)
+}
+
+/// Removes one watch descriptor from an inotify instance.
+fn linux_inotify_rm_watch(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Inotify {
+        return Err(CompatErrno::BadFd);
+    }
+    let wd = i32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
+    if wd <= 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let watches = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let mut watches = watches.lock();
+    let Some(index) = watches.iter().position(|watch| watch.wd == wd) else {
+        return Err(CompatErrno::Invalid);
+    };
+    watches.remove(index);
+    Ok(0)
+}
+
+/// Blocks or returns `EAGAIN` for an inotify fd on the immutable root namespace.
+fn linux_inotify_read(pid: ObjId, fd: u32) -> Result<u64, CompatErrno> {
+    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    if nonblocking {
+        return Err(CompatErrno::TryAgain);
+    }
+    loop {
+        if proc::current_exiting() || current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        sched::pause();
+    }
+}
+
 fn linux_posix_timer_settle_one(
     timer: &mut PosixTimer,
 ) -> Result<u64, CompatErrno> {
@@ -5069,10 +6366,18 @@ fn linux_posix_timer_settle_one(
 /// Settles process timers from the periodic clock interrupt.
 /// 从周期时钟中断结算进程计时器。
 pub(crate) fn settle_posix_timers(now: u64) {
-    let mut pending = [None; MAX_POSIX_TIMERS];
+    let mut pending = [None; MAX_POSIX_TIMERS + MAX_INTERVAL_TIMER_SETS];
     let mut pending_count = 0usize;
     {
         let mut state = COMPAT.lock();
+        let mut process_signals: [Option<(ObjId, u64)>; MAX_PROCESS_SIGNAL_SETS] =
+            [None; MAX_PROCESS_SIGNAL_SETS];
+        for (slot, signals) in process_signals
+            .iter_mut()
+            .zip(state.process_signals.iter().flatten())
+        {
+            *slot = Some((signals.process, signals.pending));
+        }
         for timer in state.posix_timers.iter_mut().flatten() {
             if !timer.active {
                 continue;
@@ -5093,8 +6398,20 @@ pub(crate) fn settle_posix_timers(now: u64) {
             } else {
                 (current - timer.next) / timer.interval + 1
             };
-            if timer.notify == 0 && expired > 1 {
-                timer.overrun = timer.overrun.saturating_add(expired - 1);
+            if timer.notify == 0 {
+                let signal_pending = process_signals
+                    .iter()
+                    .flatten()
+                    .find(|(process, _)| *process == timer.process)
+                    .is_some_and(|(_, pending)| {
+                        *pending & (1u64 << (timer.signal - 1)) != 0
+                    });
+                let overrun = if signal_pending {
+                    expired
+                } else {
+                    expired.saturating_sub(1)
+                };
+                timer.overrun = timer.overrun.saturating_add(overrun);
             }
             timer.next = if timer.interval == 0 {
                 0
@@ -5105,19 +6422,30 @@ pub(crate) fn settle_posix_timers(now: u64) {
             };
             timer.active = timer.next != 0;
             if timer.notify == 0 && pending_count < pending.len() {
-                pending[pending_count] = Some((timer.process, timer.signal));
+                pending[pending_count] = Some((timer.process, timer.signal, -2));
+                pending_count += 1;
+            }
+        }
+        for timer in state.interval_timers.iter_mut().flatten() {
+            if settle_interval_timer(timer, now) && pending_count < pending.len() {
+                pending[pending_count] = Some((timer.process, 14, 128));
                 pending_count += 1;
             }
         }
     }
-    for (process, signal) in pending.into_iter().flatten() {
-            let _ = queue_process_signal(process, signal, 0, -2);
+    for (process, signal, code) in pending.into_iter().flatten() {
+        let _ = queue_process_signal(process, signal, 0, code);
     }
 }
 
 fn release_posix_timers(process: ObjId) {
     let mut state = COMPAT.lock();
     for timer in state.posix_timers.iter_mut() {
+        if timer.is_some_and(|timer| timer.process == process) {
+            *timer = None;
+        }
+    }
+    for timer in state.interval_timers.iter_mut() {
         if timer.is_some_and(|timer| timer.process == process) {
             *timer = None;
         }
@@ -6101,6 +7429,87 @@ fn linux_recvmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(count as u64)
 }
 
+/// Implements bounded `sendmmsg(2)` over the existing `sendmsg(2)` path.
+fn linux_sendmmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MMSGHDR_BYTES: u64 = 64;
+    const MSG_LEN_OFFSET: u64 = 56;
+    const MAX_MESSAGES: u32 = 16;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let count = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if count > MAX_MESSAGES {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut sent = 0u32;
+    while sent < count {
+        let base = args[1]
+            .checked_add(u64::from(sent) * MMSGHDR_BYTES)
+            .ok_or(CompatErrno::Fault)?;
+        match linux_sendmsg(pid, [args[0], base, args[3], 0, 0, 0]) {
+            Ok(length) => {
+                let length = u32::try_from(length).map_err(|_| CompatErrno::Invalid)?;
+                copy_to_user(
+                    base.checked_add(MSG_LEN_OFFSET).ok_or(CompatErrno::Fault)?,
+                    &length.to_le_bytes(),
+                    4,
+                )
+                .map_err(|_| CompatErrno::Fault)?;
+                sent += 1;
+            }
+            Err(error) if sent == 0 => return Err(error),
+            Err(_) => break,
+        }
+    }
+    Ok(u64::from(sent))
+}
+
+/// Implements bounded `recvmmsg(2)` over the existing `recvmsg(2)` path.
+fn linux_recvmmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MMSGHDR_BYTES: u64 = 64;
+    const MSG_LEN_OFFSET: u64 = 56;
+    const MAX_MESSAGES: u32 = 16;
+    const MSG_DONTWAIT: u64 = 0x40;
+    const MSG_WAITFORONE: u64 = 0x10000;
+    if args[4] != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let count = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if count > MAX_MESSAGES {
+        return Err(CompatErrno::Invalid);
+    }
+    let wait_for_one = args[3] & MSG_WAITFORONE != 0;
+    let flags = args[3] & !MSG_WAITFORONE;
+    let mut received = 0u32;
+    while received < count {
+        let base = args[1]
+            .checked_add(u64::from(received) * MMSGHDR_BYTES)
+            .ok_or(CompatErrno::Fault)?;
+        let message_flags = if wait_for_one && received != 0 {
+            flags | MSG_DONTWAIT
+        } else {
+            flags
+        };
+        match linux_recvmsg(pid, [args[0], base, message_flags, 0, 0, 0]) {
+            Ok(0) => break,
+            Ok(length) => {
+                let length = u32::try_from(length).map_err(|_| CompatErrno::Invalid)?;
+                copy_to_user(
+                    base.checked_add(MSG_LEN_OFFSET).ok_or(CompatErrno::Fault)?,
+                    &length.to_le_bytes(),
+                    4,
+                )
+                .map_err(|_| CompatErrno::Fault)?;
+                received += 1;
+            }
+            Err(error) if received == 0 => return Err(error),
+            Err(_) => break,
+        }
+    }
+    Ok(u64::from(received))
+}
+
 /// Applies one directional AF_UNIX stream shutdown.
 fn linux_shutdown(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
@@ -6291,16 +7700,31 @@ fn linux_pipe_read(
     if len == 0 {
         return Ok(0);
     }
-    let endpoint = proc::linux_pipe_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
-    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
     let mut output = alloc::vec![0u8; len];
+    let count = linux_pipe_read_buffer(pid, fd, handle, &mut output, false)?;
+    if count != 0 {
+        copy_to_user(address, &output[..count], count).map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(count as u64)
+}
+
+/// Reads one bounded bytes slice from a pipe with optional forced nonblocking mode.
+fn linux_pipe_read_buffer(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    output: &mut [u8],
+    force_nonblocking: bool,
+) -> Result<usize, CompatErrno> {
+    if output.is_empty() {
+        return Ok(0);
+    }
+    let endpoint = proc::linux_pipe_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking = force_nonblocking
+        || proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
     loop {
-        match endpoint.read(&mut output) {
-            compat_core::PipeRead::Data(0) => return Ok(0),
-            compat_core::PipeRead::Data(count) => {
-                copy_to_user(address, &output[..count], count).map_err(|_| CompatErrno::Fault)?;
-                return Ok(count as u64);
-            }
+        match endpoint.read(&mut *output) {
+            compat_core::PipeRead::Data(count) => return Ok(count),
             compat_core::PipeRead::Eof => return Ok(0),
             compat_core::PipeRead::WouldBlock if nonblocking => return Err(CompatErrno::TryAgain),
             compat_core::PipeRead::WouldBlock => {
@@ -6327,10 +7751,35 @@ fn linux_pipe_write(
     if len > compat_core::PIPE_CAPACITY {
         return Err(CompatErrno::Invalid);
     }
-    let endpoint = proc::linux_pipe_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
-    let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
     let mut input = alloc::vec![0u8; len];
     copy_from_user(&mut input, address, len).map_err(|_| CompatErrno::Fault)?;
+    linux_pipe_write_buffer(pid, fd, handle, &input).map(|written| written as u64)
+}
+
+/// Writes an already validated byte slice into a bounded pipe.
+fn linux_pipe_write_buffer(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    input: &[u8],
+) -> Result<usize, CompatErrno> {
+    linux_pipe_write_buffer_mode(pid, fd, handle, input, false)
+}
+
+/// Writes a pipe buffer with optional forced nonblocking mode.
+fn linux_pipe_write_buffer_mode(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    input: &[u8],
+    force_nonblocking: bool,
+) -> Result<usize, CompatErrno> {
+    if input.is_empty() {
+        return Ok(0);
+    }
+    let endpoint = proc::linux_pipe_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking = force_nonblocking
+        || proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
     let mut written = 0usize;
     while written < input.len() {
         match endpoint.write(&input[written..]) {
@@ -6347,7 +7796,7 @@ fn linux_pipe_write(
                 return if written == 0 {
                     Err(CompatErrno::TryAgain)
                 } else {
-                    Ok(written as u64)
+                    Ok(written)
                 }
             }
             compat_core::PipeWrite::WouldBlock => {
@@ -6355,14 +7804,14 @@ fn linux_pipe_write(
                     return if written == 0 {
                         Err(CompatErrno::Interrupted)
                     } else {
-                        Ok(written as u64)
+                        Ok(written)
                     };
                 }
                 sched::pause();
             }
         }
     }
-    Ok(written as u64)
+    Ok(written)
 }
 
 /// Reads one connected AF_UNIX stream endpoint.
@@ -6649,6 +8098,43 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(u64::from(fd))
 }
 
+/// Implements the fixed-size x86_64 `openat2(2)` structure.
+fn linux_openat2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const OPEN_HOW_BYTES: usize = 24;
+    if args[3] != OPEN_HOW_BYTES as u64 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut how = [0u8; OPEN_HOW_BYTES];
+    copy_from_user(&mut how, args[2], OPEN_HOW_BYTES).map_err(|_| CompatErrno::Fault)?;
+    let flags = u64::from_le_bytes(how[0..8].try_into().unwrap());
+    let mode = u64::from_le_bytes(how[8..16].try_into().unwrap());
+    let resolve = u64::from_le_bytes(how[16..24].try_into().unwrap());
+    if resolve != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    if mode & !0o7777 != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    linux_openat(pid, [args[0], args[1], flags, mode, 0, 0])
+}
+
+/// Implements legacy x86_64 `open(2)` relative to the current directory.
+fn linux_open(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    linux_openat(
+        pid,
+        [(-100i64) as u64, args[0], args[1], args[2], 0, 0],
+    )
+}
+
+/// Implements `creat(2)` as a write-open denied by the immutable compatibility root.
+fn linux_creat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[1] & !0o7777 != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    linux_faccessat(pid, [(-100i64) as u64, args[0], 0, 0, 0, 0], false)?;
+    Err(CompatErrno::ReadOnly)
+}
+
 /// Changes the compatibility working directory to one authorized directory.
 ///
 /// `fchdir` 只接受已验证的目录 fd，并把同一目录身份提交为进程 cwd。
@@ -6723,6 +8209,287 @@ fn linux_lchown(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         false,
     )?;
     Err(CompatErrno::ReadOnly)
+}
+
+/// Resolves one pathname relative to an explicit directory fd or AT_FDCWD.
+fn resolve_linux_at_path(
+    pid: ObjId,
+    dirfd: u64,
+    address: u64,
+) -> Result<alloc::vec::Vec<u8>, CompatErrno> {
+    let path = linux_c_string(address, 4096)?;
+    if path.starts_with(b"/") {
+        return Ok(path);
+    }
+    if path == b".."
+        || path.starts_with(b"../")
+        || path.windows(4).any(|window| window == b"/../")
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let base = if is_at_fdcwd(dirfd) {
+        proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path()
+    } else {
+        let fd = u32::try_from(dirfd).map_err(|_| CompatErrno::BadFd)?;
+        let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
+        crate::linux_vfs::DirectoryId::from_handle(handle)
+            .ok_or(CompatErrno::BadFd)?
+            .path()
+    };
+    if path == b"." {
+        return Ok(base.to_vec());
+    }
+    let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
+    resolved.extend_from_slice(base);
+    if !base.ends_with(b"/") {
+        resolved.push(b'/');
+    }
+    resolved.extend_from_slice(&path);
+    Ok(resolved)
+}
+
+/// Returns the parent directory path for one resolved absolute path.
+fn linux_parent_path(path: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+    if path == b"/" {
+        return None;
+    }
+    let path = path.strip_suffix(b"/").unwrap_or(path);
+    let slash = path.iter().rposition(|byte| *byte == b'/')?;
+    if slash == 0 {
+        Some(b"/".to_vec())
+    } else {
+        Some(path[..slash].to_vec())
+    }
+}
+
+/// Validates a new path's parent and reports whether the target already exists.
+fn validate_linux_creation_path(
+    pid: ObjId,
+    dirfd: u64,
+    address: u64,
+) -> Result<bool, CompatErrno> {
+    let path = resolve_linux_at_path(pid, dirfd, address)?;
+    let exists = crate::linux_vfs::lookup_node(&path).is_some();
+    let parent = linux_parent_path(&path).ok_or(CompatErrno::Exists)?;
+    let node = crate::linux_vfs::lookup_node(&parent).ok_or(CompatErrno::NoEntry)?;
+    if !node.is_directory() {
+        return Err(CompatErrno::NotDirectory);
+    }
+    Ok(exists)
+}
+
+/// Validates an existing pathname in the compatibility namespace.
+fn validate_linux_existing_path(
+    pid: ObjId,
+    dirfd: u64,
+    address: u64,
+) -> Result<crate::linux_vfs::Node, CompatErrno> {
+    let path = resolve_linux_at_path(pid, dirfd, address)?;
+    crate::linux_vfs::lookup_node(&path).ok_or(CompatErrno::NoEntry)
+}
+
+/// Implements `mkdirat(2)` against the immutable compatibility root.
+fn linux_mkdirat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[2] & !0o7777 != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if validate_linux_creation_path(pid, args[0], args[1])? {
+        return Err(CompatErrno::Exists);
+    }
+    Err(CompatErrno::ReadOnly)
+}
+
+/// Implements `mknodat(2)` against the immutable compatibility root.
+fn linux_mknodat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if validate_linux_creation_path(pid, args[0], args[1])? {
+        return Err(CompatErrno::Exists);
+    }
+    Err(CompatErrno::ReadOnly)
+}
+
+/// Implements `unlinkat(2)` and validates directory/removal type.
+fn linux_unlinkat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const AT_REMOVEDIR: u64 = 0x200;
+    if args[2] & !AT_REMOVEDIR != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let node = validate_linux_existing_path(pid, args[0], args[1])?;
+    if args[2] & AT_REMOVEDIR != 0 && !node.is_directory() {
+        return Err(CompatErrno::NotDirectory);
+    }
+    if args[2] & AT_REMOVEDIR == 0 && node.is_directory() {
+        return Err(CompatErrno::IsDirectory);
+    }
+    Err(CompatErrno::ReadOnly)
+}
+
+/// Implements `renameat(2)` with source and destination parent validation.
+fn linux_renameat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    validate_linux_existing_path(pid, args[0], args[1])?;
+    validate_linux_creation_path(pid, args[2], args[3])?;
+    Err(CompatErrno::ReadOnly)
+}
+
+/// Implements `renameat2(2)` and rejects flags that need mutable-filesystem support.
+fn linux_renameat2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if args[4] != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    linux_renameat(pid, [args[0], args[1], args[2], args[3], 0, 0])
+}
+
+/// Implements `linkat(2)` against the immutable compatibility root.
+fn linux_linkat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const AT_SYMLINK_FOLLOW: u64 = 0x400;
+    if args[4] & !AT_SYMLINK_FOLLOW != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let node = validate_linux_existing_path(pid, args[0], args[1])?;
+    if node.is_directory() {
+        return Err(CompatErrno::Perm);
+    }
+    if validate_linux_creation_path(pid, args[2], args[3])? {
+        return Err(CompatErrno::Exists);
+    }
+    Err(CompatErrno::ReadOnly)
+}
+
+/// Implements `symlinkat(2)` after validating the destination parent and target string.
+fn linux_symlinkat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let _target = linux_c_string(args[0], 4096)?;
+    if validate_linux_creation_path(pid, args[1], args[2])? {
+        return Err(CompatErrno::Exists);
+    }
+    Err(CompatErrno::ReadOnly)
+}
+
+/// Implements process-local `umask(2)`.
+fn linux_umask(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
+    let old = proc::linux_umask(pid).ok_or(CompatErrno::NoProcess)?;
+    if !proc::set_linux_umask(pid, requested as u32) {
+        return Err(CompatErrno::NoProcess);
+    }
+    Ok(u64::from(old))
+}
+
+/// Validates one xattr pathname and optional symlink-follow policy.
+fn validate_xattr_path(
+    pid: ObjId,
+    path: u64,
+    nofollow: bool,
+) -> Result<(), CompatErrno> {
+    linux_faccessat(
+        pid,
+        [
+            (-100i64) as u64,
+            path,
+            0,
+            if nofollow { 0x100 } else { 0 },
+            0,
+            0,
+        ],
+        true,
+    )?;
+    Ok(())
+}
+
+/// Validates a non-empty bounded xattr name.
+fn validate_xattr_name(address: u64) -> Result<(), CompatErrno> {
+    if linux_c_string(address, 255)?.is_empty() {
+        return Err(CompatErrno::Invalid);
+    }
+    Ok(())
+}
+
+/// Validates an xattr file descriptor.
+fn validate_xattr_fd(pid: ObjId, raw_fd: u64) -> Result<u32, CompatErrno> {
+    let fd = u32::try_from(raw_fd).map_err(|_| CompatErrno::BadFd)?;
+    proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    Ok(fd)
+}
+
+/// Implements path and fd variants of `setxattr(2)`.
+fn linux_setxattr(
+    pid: ObjId,
+    args: [u64; 6],
+    fd: bool,
+    nofollow: bool,
+) -> Result<u64, CompatErrno> {
+    const XATTR_CREATE: u64 = 0x1;
+    const XATTR_REPLACE: u64 = 0x2;
+    let name = args[1];
+    let value = args[2];
+    let size = args[3];
+    let flags = args[4];
+    if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0
+        || flags & XATTR_CREATE != 0 && flags & XATTR_REPLACE != 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    validate_xattr_name(name)?;
+    if size != 0 && value == 0 {
+        return Err(CompatErrno::Fault);
+    }
+    if fd {
+        validate_xattr_fd(pid, args[0])?;
+    } else {
+        validate_xattr_path(pid, args[0], nofollow)?;
+    }
+    Err(CompatErrno::ReadOnly)
+}
+
+/// Implements path and fd variants of `getxattr(2)` over a namespace with no xattrs.
+fn linux_getxattr(
+    pid: ObjId,
+    args: [u64; 6],
+    fd: bool,
+    nofollow: bool,
+) -> Result<u64, CompatErrno> {
+    let name = args[1];
+    validate_xattr_name(name)?;
+    if fd {
+        validate_xattr_fd(pid, args[0])?;
+    } else {
+        validate_xattr_path(pid, args[0], nofollow)?;
+    }
+    Err(CompatErrno::NoData)
+}
+
+/// Implements path and fd variants of `listxattr(2)` over a namespace with no xattrs.
+fn linux_listxattr(
+    pid: ObjId,
+    args: [u64; 6],
+    fd: bool,
+    nofollow: bool,
+) -> Result<u64, CompatErrno> {
+    let list = args[1];
+    let size = args[2];
+    if fd {
+        validate_xattr_fd(pid, args[0])?;
+    } else {
+        validate_xattr_path(pid, args[0], nofollow)?;
+    }
+    if size != 0 && list == 0 {
+        return Err(CompatErrno::Fault);
+    }
+    Ok(0)
+}
+
+/// Implements path and fd variants of `removexattr(2)` over a namespace with no xattrs.
+fn linux_removexattr(
+    pid: ObjId,
+    args: [u64; 6],
+    fd: bool,
+    nofollow: bool,
+) -> Result<u64, CompatErrno> {
+    let name = args[1];
+    validate_xattr_name(name)?;
+    if fd {
+        validate_xattr_fd(pid, args[0])?;
+    } else {
+        validate_xattr_path(pid, args[0], nofollow)?;
+    }
+    Err(CompatErrno::NoData)
 }
 
 /// Changes the Linux compatibility current directory within the static namespace.
@@ -7357,7 +9124,10 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     Err(CompatErrno::Busy)
                 }
             }
-            BINDER_THREAD_EXIT => Ok(0),
+            BINDER_THREAD_EXIT => {
+                crate::binder::thread_exit(pid);
+                Ok(0)
+            }
             BINDER_WRITE_READ => crate::binder::write_read(pid, fd, args),
             _ => Err(CompatErrno::NoSys),
         };
@@ -7915,6 +9685,16 @@ fn linux_epoll_create1(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         .ok_or(CompatErrno::NoSpace)
 }
 
+/// Implements legacy `epoll_create(2)`; Linux ignores a positive legacy size hint.
+fn linux_epoll_create(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    if (args[0] as u32 as i32) <= 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    proc::linux_epoll_create(pid, false)
+        .map(u64::from)
+        .ok_or(CompatErrno::NoSpace)
+}
+
 /// Adds, removes or modifies one epoll interest by the target open-file handle.
 fn linux_epoll_ctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const EPOLL_CTL_ADD: u64 = 1;
@@ -8157,6 +9937,16 @@ fn linux_epoll_readiness(
             }
             ready
         }
+        compat_core::fd::CompatKind::Pidfd => {
+            if requested & EPOLLIN != 0
+                && ObjId::from_raw(registration.handle)
+                    .is_none_or(pidfd_target_ready)
+            {
+                EPOLLIN
+            } else {
+                0
+            }
+        }
         _ => 0,
     };
     Some(ready)
@@ -8371,6 +10161,17 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                         0
                     }
                 }
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::Pidfd => {
+                    if events & POLLIN != 0
+                        && ObjId::from_raw(entry.handle)
+                            .is_none_or(pidfd_target_ready)
+                    {
+                        POLLIN
+                    } else {
+                        0
+                    }
+                }
+                Some(entry) if entry.kind == compat_core::fd::CompatKind::Inotify => 0,
                 Some(entry) if entry.handle == proc::LINUX_CONSOLE_HANDLE => {
                     let (pending, ended, failed) = crate::terminal::input_status();
                     let mut ready = 0;
@@ -8762,6 +10563,396 @@ fn linux_readlinkat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     linux_readlink(pid, [args[1], args[2], args[3], 0, 0, 0])
 }
 
+/// Implements bounded `sendfile(2)` from one virtual file to a writable stream.
+fn linux_sendfile(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MAX_SENDFILE: u64 = 1024 * 1024;
+    let output_fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let input_fd = u32::try_from(args[1]).map_err(|_| CompatErrno::BadFd)?;
+    let (input_handle, file_offset) =
+        proc::linux_file_state(pid, input_fd).ok_or(CompatErrno::BadFd)?;
+    let file = crate::linux_vfs::FileId::from_handle(input_handle).ok_or(CompatErrno::BadFd)?;
+    let (start, explicit_offset) = if args[2] == 0 {
+        (file_offset, false)
+    } else {
+        let mut raw = [0u8; 8];
+        copy_from_user(&mut raw, args[2], 8).map_err(|_| CompatErrno::Fault)?;
+        let requested = i64::from_le_bytes(raw);
+        if requested < 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        (requested as u64, true)
+    };
+    let start = usize::try_from(start).map_err(|_| CompatErrno::Invalid)?;
+    let bytes = file.bytes();
+    let available = bytes.len().saturating_sub(start);
+    let take = args[3]
+        .min(MAX_SENDFILE)
+        .min(compat_core::PIPE_CAPACITY as u64)
+        .min(available as u64) as usize;
+    if take == 0 {
+        return Ok(0);
+    }
+    let output = proc::linux_fd(pid, output_fd).ok_or(CompatErrno::BadFd)?;
+    let io = admit_process_io(pid, take as u64, 1)?;
+    let written = match output.kind {
+        compat_core::fd::CompatKind::Pipe => {
+            if !output
+                .rights
+                .contains(kernel_core::object::Rights::WRITE)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            linux_pipe_write_buffer(pid, output_fd, output.handle, &bytes[start..start + take])?
+        }
+        compat_core::fd::CompatKind::Socket => {
+            if !output
+                .rights
+                .contains(kernel_core::object::Rights::WRITE)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            linux_socket_write_buffer(
+                pid,
+                output_fd,
+                output.handle,
+                &bytes[start..start + take],
+                false,
+                false,
+                true,
+            )? as usize
+        }
+        compat_core::fd::CompatKind::Device
+            if proc::linux_ashmem_is_regular(pid, output.handle) == Some(true) =>
+        {
+            if !output
+                .rights
+                .contains(kernel_core::object::Rights::WRITE)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            let output_offset = proc::linux_fd_offset(pid, output_fd).ok_or(CompatErrno::BadFd)?;
+            let written = proc::linux_ashmem_write_from(
+                pid,
+                output.handle,
+                output_offset,
+                &bytes[start..start + take],
+            )
+            .map_err(ashmem_compat_error)?;
+            if written != 0
+                && !proc::set_linux_fd_offset(pid, output_fd, output_offset + written as u64)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            written
+        }
+        compat_core::fd::CompatKind::File => return Err(CompatErrno::ReadOnly),
+        _ => return Err(CompatErrno::Invalid),
+    };
+    io.commit();
+    if written == 0 {
+        return Ok(0);
+    }
+    if explicit_offset {
+        copy_to_user(args[2], &(start as u64 + written as u64).to_le_bytes(), 8)
+            .map_err(|_| CompatErrno::Fault)?;
+    } else if !proc::set_linux_file_offset(pid, input_fd, start as u64 + written as u64) {
+        return Err(CompatErrno::BadFd);
+    }
+    Ok(written as u64)
+}
+
+/// Implements bounded `copy_file_range(2)` between virtual files and memfds.
+fn linux_copy_file_range(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MAX_COPY: u64 = 1024 * 1024;
+    if args[5] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let input_fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let output_fd = u32::try_from(args[2]).map_err(|_| CompatErrno::BadFd)?;
+    let input = proc::linux_fd(pid, input_fd).ok_or(CompatErrno::BadFd)?;
+    let output = proc::linux_fd(pid, output_fd).ok_or(CompatErrno::BadFd)?;
+    let input_offset = if args[1] == 0 {
+        proc::linux_fd_offset(pid, input_fd).ok_or(CompatErrno::BadFd)?
+    } else {
+        let mut raw = [0u8; 8];
+        copy_from_user(&mut raw, args[1], 8).map_err(|_| CompatErrno::Fault)?;
+        let value = i64::from_le_bytes(raw);
+        if value < 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        value as u64
+    };
+    let output_offset = if args[3] == 0 {
+        proc::linux_fd_offset(pid, output_fd).ok_or(CompatErrno::BadFd)?
+    } else {
+        let mut raw = [0u8; 8];
+        copy_from_user(&mut raw, args[3], 8).map_err(|_| CompatErrno::Fault)?;
+        let value = i64::from_le_bytes(raw);
+        if value < 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        value as u64
+    };
+    let requested = args[4].min(MAX_COPY);
+    let (bytes, available) = match input.kind {
+        compat_core::fd::CompatKind::File => {
+            if !input
+                .rights
+                .contains(kernel_core::object::Rights::READ)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            let file =
+                crate::linux_vfs::FileId::from_handle(input.handle).ok_or(CompatErrno::BadFd)?;
+            let bytes = file.bytes();
+            let start = usize::try_from(input_offset).map_err(|_| CompatErrno::Invalid)?;
+            let available = bytes.len().saturating_sub(start);
+            (
+                bytes[start..start + available.min(requested as usize)].to_vec(),
+                available,
+            )
+        }
+        compat_core::fd::CompatKind::Device
+            if proc::linux_ashmem_is_regular(pid, input.handle) == Some(true) =>
+        {
+            if !input
+                .rights
+                .contains(kernel_core::object::Rights::READ)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            let (size, _, _) =
+                proc::linux_ashmem_state(pid, input.handle).ok_or(CompatErrno::BadFd)?;
+            let available = size.saturating_sub(input_offset);
+            let mut bytes = alloc::vec![0u8; available.min(requested) as usize];
+            let copied = proc::linux_ashmem_read_from(
+                pid,
+                input.handle,
+                input_offset,
+                &mut bytes,
+            )
+            .map_err(ashmem_compat_error)?;
+            bytes.truncate(copied);
+            (bytes, available as usize)
+        }
+        _ => return Err(CompatErrno::Invalid),
+    };
+    let _ = available;
+    if bytes.is_empty() {
+        return Ok(0);
+    }
+    if input.handle == output.handle
+        && input_offset < output_offset.saturating_add(bytes.len() as u64)
+        && output_offset < input_offset.saturating_add(bytes.len() as u64)
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let io = admit_process_io(pid, bytes.len() as u64, 1)?;
+    let written = match output.kind {
+        compat_core::fd::CompatKind::Device
+            if proc::linux_ashmem_is_regular(pid, output.handle) == Some(true) =>
+        {
+            if !output
+                .rights
+                .contains(kernel_core::object::Rights::WRITE)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            proc::linux_ashmem_write_from(pid, output.handle, output_offset, &bytes)
+                .map_err(ashmem_compat_error)?
+        }
+        compat_core::fd::CompatKind::File => return Err(CompatErrno::ReadOnly),
+        _ => return Err(CompatErrno::Invalid),
+    };
+    io.commit();
+    if written == 0 {
+        return Ok(0);
+    }
+    if args[1] == 0 {
+        if !proc::set_linux_fd_offset(pid, input_fd, input_offset + written as u64) {
+            return Err(CompatErrno::BadFd);
+        }
+    } else {
+        copy_to_user(
+            args[1],
+            &(input_offset + written as u64).to_le_bytes(),
+            8,
+        )
+        .map_err(|_| CompatErrno::Fault)?;
+    }
+    if args[3] == 0 {
+        if !proc::set_linux_fd_offset(pid, output_fd, output_offset + written as u64) {
+            return Err(CompatErrno::BadFd);
+        }
+    } else {
+        copy_to_user(
+            args[3],
+            &(output_offset + written as u64).to_le_bytes(),
+            8,
+        )
+        .map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(written as u64)
+}
+
+/// Implements `splice(2)` for virtual-file and pipe copy paths.
+fn linux_splice(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SPLICE_F_NONBLOCK: u64 = 0x2;
+    const SPLICE_F_MOVE: u64 = 0x1;
+    const SPLICE_F_MORE: u64 = 0x4;
+    const SPLICE_F_GIFT: u64 = 0x8;
+    if args[5]
+        & !(SPLICE_F_NONBLOCK | SPLICE_F_MOVE | SPLICE_F_MORE | SPLICE_F_GIFT)
+        != 0
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let input_fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let output_fd = u32::try_from(args[2]).map_err(|_| CompatErrno::BadFd)?;
+    let input = proc::linux_fd(pid, input_fd).ok_or(CompatErrno::BadFd)?;
+    let output = proc::linux_fd(pid, output_fd).ok_or(CompatErrno::BadFd)?;
+    match output.kind {
+        compat_core::fd::CompatKind::Pipe => {}
+        compat_core::fd::CompatKind::Device
+            if proc::linux_ashmem_is_regular(pid, output.handle) == Some(true) => {}
+        compat_core::fd::CompatKind::File => return Err(CompatErrno::ReadOnly),
+        _ => return Err(CompatErrno::Invalid),
+    }
+    if !output
+        .rights
+        .contains(kernel_core::object::Rights::WRITE)
+    {
+        return Err(CompatErrno::BadFd);
+    }
+    let limit = args[4]
+        .min(compat_core::PIPE_CAPACITY as u64)
+        .min(1024 * 1024) as usize;
+    let force_nonblocking = args[5] & SPLICE_F_NONBLOCK != 0;
+    let (input_offset, explicit_input_offset, bytes) = match input.kind {
+        compat_core::fd::CompatKind::Pipe => {
+            if args[1] != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            if !input
+                .rights
+                .contains(kernel_core::object::Rights::READ)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            let mut bytes = alloc::vec![0u8; limit];
+            let count = linux_pipe_read_buffer(
+                pid,
+                input_fd,
+                input.handle,
+                &mut bytes,
+                force_nonblocking,
+            )?;
+            bytes.truncate(count);
+            (0, false, bytes)
+        }
+        compat_core::fd::CompatKind::File => {
+            if !input
+                .rights
+                .contains(kernel_core::object::Rights::READ)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            let file =
+                crate::linux_vfs::FileId::from_handle(input.handle).ok_or(CompatErrno::BadFd)?;
+            let cursor = proc::linux_fd_offset(pid, input_fd).ok_or(CompatErrno::BadFd)?;
+            let explicit = args[1] != 0;
+            let offset = if explicit {
+                let mut raw = [0u8; 8];
+                copy_from_user(&mut raw, args[1], 8).map_err(|_| CompatErrno::Fault)?;
+                let value = i64::from_le_bytes(raw);
+                if value < 0 {
+                    return Err(CompatErrno::Invalid);
+                }
+                value as u64
+            } else {
+                cursor
+            };
+            let start = usize::try_from(offset).map_err(|_| CompatErrno::Invalid)?;
+            let bytes = file.bytes();
+            let available = bytes.len().saturating_sub(start).min(limit);
+            (offset, explicit, bytes[start..start + available].to_vec())
+        }
+        _ => return Err(CompatErrno::Invalid),
+    };
+    if bytes.is_empty() {
+        return Ok(0);
+    }
+    let written = match output.kind {
+        compat_core::fd::CompatKind::Pipe => {
+            if args[3] != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            if !output
+                .rights
+                .contains(kernel_core::object::Rights::WRITE)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            linux_pipe_write_buffer_mode(
+                pid,
+                output_fd,
+                output.handle,
+                &bytes,
+                force_nonblocking,
+            )?
+        }
+        compat_core::fd::CompatKind::Device
+            if proc::linux_ashmem_is_regular(pid, output.handle) == Some(true) =>
+        {
+            if !output
+                .rights
+                .contains(kernel_core::object::Rights::WRITE)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            let cursor = proc::linux_fd_offset(pid, output_fd).ok_or(CompatErrno::BadFd)?;
+            let explicit = args[3] != 0;
+            let offset = if explicit {
+                let mut raw = [0u8; 8];
+                copy_from_user(&mut raw, args[3], 8).map_err(|_| CompatErrno::Fault)?;
+                let value = i64::from_le_bytes(raw);
+                if value < 0 {
+                    return Err(CompatErrno::Invalid);
+                }
+                value as u64
+            } else {
+                cursor
+            };
+            let written =
+                proc::linux_ashmem_write_from(pid, output.handle, offset, &bytes)
+                    .map_err(ashmem_compat_error)?;
+            if written != 0 && explicit {
+                copy_to_user(args[3], &(offset + written as u64).to_le_bytes(), 8)
+                    .map_err(|_| CompatErrno::Fault)?;
+            } else if written != 0
+                && !proc::set_linux_fd_offset(pid, output_fd, offset + written as u64)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            written
+        }
+        compat_core::fd::CompatKind::File => return Err(CompatErrno::ReadOnly),
+        _ => return Err(CompatErrno::Invalid),
+    };
+    if written == 0 {
+        return Ok(0);
+    }
+    if input.kind == compat_core::fd::CompatKind::File {
+        if explicit_input_offset {
+            copy_to_user(args[1], &(input_offset + written as u64).to_le_bytes(), 8)
+                .map_err(|_| CompatErrno::Fault)?;
+        } else if !proc::set_linux_fd_offset(pid, input_fd, input_offset + written as u64) {
+            return Err(CompatErrno::BadFd);
+        }
+    }
+    Ok(written as u64)
+}
+
 /// Stores or queries one x86_64 Linux signal action.
 ///
 /// 只保存线程库的同步处置配置；信号生成、排队和用户栈帧投递尚未接入，因此该
@@ -8777,7 +10968,7 @@ fn linux_rt_sigaction(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let old = proc::linux_signal_action(pid, signal).ok_or(CompatErrno::NoSys)?;
     if args[1] != 0 {
         if args[0] == SIGKILL || args[0] == SIGSTOP {
-            return Err(CompatErrno::Perm);
+            return Err(CompatErrno::Invalid);
         }
         let mut action = [0u8; SIGACTION_BYTES];
         copy_from_user(&mut action, args[1], SIGACTION_BYTES).map_err(|_| CompatErrno::Fault)?;
@@ -8839,6 +11030,114 @@ fn linux_rt_sigprocmask(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
         copy_to_user(args[2], &old.to_le_bytes(), 8).map_err(|_| CompatErrno::Fault)?;
     }
     Ok(0)
+}
+
+/// Reads one fixed-size x86_64 Linux signal mask.
+fn read_linux_sigset(address: u64, size: u64) -> Result<u64, CompatErrno> {
+    if size != 8 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut value = [0u8; 8];
+    copy_from_user(&mut value, address, 8).map_err(|_| CompatErrno::Fault)?;
+    Ok(u64::from_le_bytes(value))
+}
+
+/// Writes the signal metadata represented by one pending record.
+fn write_linux_siginfo(address: u64, record: SignalFdRecord) -> Result<(), CompatErrno> {
+    if address == 0 {
+        return Ok(());
+    }
+    let mut info = [0u8; 128];
+    info[0..4].copy_from_slice(&record.signal.to_le_bytes());
+    info[8..12].copy_from_slice(&record.code.to_le_bytes());
+    info[16..20].copy_from_slice(&record.sender_pid.to_le_bytes());
+    info[20..24].copy_from_slice(&(compat_core::syscall::LINUX_COMPAT_UID as u32).to_le_bytes());
+    copy_to_user(address, &info, info.len()).map_err(|_| CompatErrno::Fault)
+}
+
+/// Implements `rt_sigsuspend(2)` with temporary mask replacement.
+fn linux_rt_sigsuspend(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const UNMASKABLE: u64 = (1u64 << 8) | (1u64 << 18);
+    let requested = read_linux_sigset(args[0], args[1])?;
+    if requested & UNMASKABLE != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let old = current_signal_mask(pid).ok_or(CompatErrno::NoSys)?;
+    if !set_current_signal_mask(pid, requested)
+        || !set_current_sigsuspend_restore_mask(pid, Some(old))
+    {
+        let _ = set_current_signal_mask(pid, old);
+        let _ = set_current_sigsuspend_restore_mask(pid, None);
+        return Err(CompatErrno::NoSys);
+    }
+    loop {
+        if proc::current_exiting() {
+            let _ = set_current_signal_mask(pid, old);
+            let _ = set_current_sigsuspend_restore_mask(pid, None);
+            return Err(CompatErrno::Interrupted);
+        }
+        if current_signal_pending(pid) {
+            return Err(CompatErrno::Interrupted);
+        }
+        sched::pause();
+    }
+}
+
+/// Implements `rt_sigtimedwait(2)` over the standard-signal pending set.
+fn linux_rt_sigtimedwait(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const UNMASKABLE: u64 = (1u64 << 8) | (1u64 << 18);
+    let requested = read_linux_sigset(args[0], args[3])?;
+    if requested & UNMASKABLE != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let timeout = if args[2] == 0 {
+        None
+    } else {
+        Some(
+            sched::now_ns()
+                .checked_add(read_linux_timespec(args[2])?)
+                .ok_or(CompatErrno::Invalid)?,
+        )
+    };
+    let old_mask = current_signal_mask(pid).ok_or(CompatErrno::NoSys)?;
+    if !set_current_signal_mask(pid, old_mask | requested) {
+        return Err(CompatErrno::NoSys);
+    }
+    let result = loop {
+        if proc::current_exiting() {
+            break Err(CompatErrno::Interrupted);
+        }
+        if let Some(record) = take_signalfd_record(pid, requested) {
+            break Ok(record);
+        }
+        if current_signal_pending(pid) {
+            break Err(CompatErrno::Interrupted);
+        }
+        if let Some(deadline) = timeout {
+            if sched::now_ns() >= deadline {
+                break Err(CompatErrno::TryAgain);
+            }
+            if sched::sleep_until_ns(deadline).is_err() {
+                let ticks = deadline
+                    .saturating_sub(sched::now_ns())
+                    .div_ceil(crate::hrtime::tick_ns().max(1))
+                    .max(1);
+                sched::sleep_until(sched::timer_ticks().saturating_add(ticks));
+            }
+        } else {
+            sched::pause();
+        }
+    };
+    if !set_current_signal_mask(pid, old_mask) {
+        return Err(CompatErrno::NoSys);
+    }
+    match result {
+        Ok(record) => {
+            write_linux_siginfo(args[1], record)?;
+            Ok(u64::from(record.signal))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Writes the x86_64 Linux `struct stat` fields required by the loader.

@@ -94,6 +94,8 @@ const LINUX_SYNC_FILE_HANDLE_BASE: u64 = 0x0000_8800_0000_0000;
 const LINUX_TIMERFD_HANDLE_BASE: u64 = 0x0000_8900_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_SIGNALFD_HANDLE_BASE: u64 = 0x0000_8a00_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_INOTIFY_HANDLE_BASE: u64 = 0x0000_8b00_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
 ///
@@ -124,6 +126,20 @@ struct LinuxProcessState {
     /// Exact executable path exposed through `/proc/self/exe`.
     exec_path: [u8; 128],
     exec_path_len: usize,
+    cap_effective: u64,
+    cap_permitted: u64,
+    cap_inheritable: u64,
+    uid: u32,
+    euid: u32,
+    suid: u32,
+    fsuid: u32,
+    gid: u32,
+    egid: u32,
+    sgid: u32,
+    fsgid: u32,
+    supplementary_groups: Vec<u32>,
+    umask: u32,
+    ioprio: u32,
     mappings: Vec<LinuxMapping>,
     pipes: Vec<LinuxPipeHandle>,
     next_pipe_handle: u64,
@@ -143,6 +159,8 @@ struct LinuxProcessState {
     next_timerfd_handle: u64,
     signalfds: Vec<LinuxSignalFdHandle>,
     next_signalfd_handle: u64,
+    inotifies: Vec<LinuxInotifyHandle>,
+    next_inotify_handle: u64,
     epolls: Vec<LinuxEpollHandle>,
     next_epoll_handle: u64,
     iourings: Vec<LinuxIoUringHandle>,
@@ -162,6 +180,27 @@ struct LinuxProcessState {
 struct LinuxMapping {
     va: u64,
     flags: MapFlags,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxCapabilities {
+    pub(crate) effective: u64,
+    pub(crate) permitted: u64,
+    pub(crate) inheritable: u64,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxCredentials {
+    pub(crate) uid: u32,
+    pub(crate) euid: u32,
+    pub(crate) suid: u32,
+    pub(crate) fsuid: u32,
+    pub(crate) gid: u32,
+    pub(crate) egid: u32,
+    pub(crate) sgid: u32,
+    pub(crate) fsgid: u32,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -245,6 +284,21 @@ struct LinuxSignalFdHandle {
 }
 
 #[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxInotifyWatch {
+    pub(crate) wd: i32,
+    pub(crate) node: crate::linux_vfs::Node,
+    pub(crate) mask: u32,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxInotifyHandle {
+    handle: u64,
+    watches: Arc<SpinLock<Vec<LinuxInotifyWatch>>>,
+}
+
+#[cfg(feature = "linux-abi")]
 #[derive(Clone)]
 struct LinuxEpollHandle {
     handle: u64,
@@ -295,6 +349,7 @@ enum LinuxFdResource {
     EventFd(LinuxEventFdHandle),
     TimerFd(LinuxTimerFdHandle),
     SignalFd(LinuxSignalFdHandle),
+    Inotify(Arc<SpinLock<Vec<LinuxInotifyWatch>>>),
     Socket {
         endpoint: Arc<compat_core::UnixSocketEndpoint>,
         listener: Option<Arc<UnixListener>>,
@@ -1432,6 +1487,15 @@ pub(crate) fn linux_capture_fd_transfer(
                         .ok_or(LinuxFdTransferError::Invalid)?;
                     LinuxFdResource::SignalFd(signalfd)
                 }
+                compat_core::fd::CompatKind::Inotify => {
+                    let inotify = linux
+                        .inotifies
+                        .iter()
+                        .find(|inotify| inotify.handle == entry.handle)
+                        .map(|inotify| Arc::clone(&inotify.watches))
+                        .ok_or(LinuxFdTransferError::Invalid)?;
+                    LinuxFdResource::Inotify(inotify)
+                }
                 compat_core::fd::CompatKind::Device
                     if entry.handle >= LINUX_ASHMEM_HANDLE_BASE =>
                 {
@@ -1486,6 +1550,19 @@ pub(crate) fn linux_install_fd_transfer(
                 description,
                 resource,
             } = transfer;
+            let pending_inotify = match &resource {
+                LinuxFdResource::Inotify(watches) => Some(Arc::clone(watches)),
+                _ => None,
+            };
+            let inotify_handle = if pending_inotify.is_some() {
+                linux
+                    .inotifies
+                    .try_reserve(1)
+                    .map_err(|_| LinuxFdTransferError::NoSpace)?;
+                Some(linux.next_inotify_handle)
+            } else {
+                None
+            };
             let (
                 handle,
                 pending_pipe,
@@ -1629,6 +1706,19 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                     )
                 }
+                LinuxFdResource::Inotify(_) => {
+                    (
+                        inotify_handle.ok_or(LinuxFdTransferError::NoSpace)?,
+                        None,
+                        None,
+                        None,
+                        false,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                }
                 LinuxFdResource::Socket {
                     endpoint,
                     listener,
@@ -1712,6 +1802,13 @@ pub(crate) fn linux_install_fd_transfer(
                 signalfd.handle = handle;
                 linux.next_signalfd_handle = next;
                 linux.signalfds.push(signalfd);
+            }
+            if let Some(watches) = pending_inotify {
+                let next = handle
+                    .checked_add(1)
+                    .ok_or(LinuxFdTransferError::NoSpace)?;
+                linux.next_inotify_handle = next;
+                linux.inotifies.push(LinuxInotifyHandle { handle, watches });
             }
             if let Some((endpoint, listener, controls)) = pending_socket {
                 let next = handle
@@ -1898,6 +1995,9 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     }
     if handle >= LINUX_SIGNALFD_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.signalfds.retain(|signalfd| signalfd.handle != handle);
+    }
+    if handle >= LINUX_INOTIFY_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
+        linux.inotifies.retain(|inotify| inotify.handle != handle);
     }
     if handle >= LINUX_EPOLL_HANDLE_BASE && linux.fds.handle_fd_count(handle) == 0 {
         linux.epolls.retain(|epoll| epoll.handle != handle);
@@ -2223,6 +2323,68 @@ pub(crate) fn linux_signalfd_state(
     })
 }
 
+/// Creates one bounded inotify instance shared across inherited descriptors.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_inotify_create(
+    pid: ObjId,
+    close_on_exec: bool,
+    nonblocking: bool,
+) -> Option<u32> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.inotifies.len() >= 8 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .inotifies
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_inotify_handle;
+        linux.next_inotify_handle = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ,
+                compat_core::fd::CompatKind::Inotify,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        if nonblocking
+            && !linux
+                .fds
+                .set_fd_status_flags(fd.fd(), compat_core::syscall::LINUX_O_NONBLOCK)
+        {
+            let _ = linux.fds.close(fd);
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux.inotifies.push(LinuxInotifyHandle {
+            handle,
+            watches: Arc::new(SpinLock::new(Vec::new())),
+        });
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Returns the shared watch set for one inotify handle.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_inotify_state(
+    pid: ObjId,
+    handle: u64,
+) -> Option<Arc<SpinLock<Vec<LinuxInotifyWatch>>>> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .inotifies
+            .iter()
+            .find(|inotify| inotify.handle == handle)
+            .map(|inotify| Arc::clone(&inotify.watches)),
+        _ => None,
+    })
+}
+
 /// Creates one epoll instance backed by a bounded per-instance registration set.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_epoll_create(pid: ObjId, close_on_exec: bool) -> Option<u32> {
@@ -2359,6 +2521,21 @@ pub(crate) fn linux_set_binder_max_threads(pid: ObjId, handle: u64, value: u32) 
                 true
             }),
         _ => false,
+    })
+}
+
+/// Returns the process-wide Binder thread-pool limit for one binder descriptor.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_binder_max_threads(pid: ObjId) -> Option<u32> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .binder
+            .iter()
+            .map(|binder| binder.max_threads.load(Ordering::Acquire))
+            .max(),
+        _ => None,
     })
 }
 
@@ -3363,6 +3540,29 @@ pub(crate) fn linux_install_file(pid: ObjId, handle: u64, close_on_exec: bool) -
     .ok()
 }
 
+/// Installs one pidfd retaining the target process identity.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_pidfd(
+    pid: ObjId,
+    target: ObjId,
+    close_on_exec: bool,
+) -> Option<u32> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let fd = linux
+            .fds
+            .install(
+                target.raw(),
+                kernel_core::object::Rights::READ,
+                compat_core::fd::CompatKind::Pidfd,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
 /// Installs a read-only Linux directory and initializes its entry cursor.
 ///
 /// 安装只读 Linux 目录；失败不留下部分 fd 状态。
@@ -3691,6 +3891,138 @@ pub(crate) fn linux_set_process_group_state(pid: ObjId, pgid: u32, sid: u32) -> 
     .is_ok()
 }
 
+/// Returns the Linux ABI capability view for one compatibility process.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_capabilities(pid: ObjId) -> Option<LinuxCapabilities> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_ref().ok_or(ProcError::Exited)?;
+        Ok(LinuxCapabilities {
+            effective: linux.cap_effective,
+            permitted: linux.cap_permitted,
+            inheritable: linux.cap_inheritable,
+        })
+    })
+    .ok()
+}
+
+/// Replaces the Linux ABI capability view without changing native authority.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_capabilities(pid: ObjId, capabilities: LinuxCapabilities) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux.cap_effective = capabilities.effective;
+        linux.cap_permitted = capabilities.permitted;
+        linux.cap_inheritable = capabilities.inheritable;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Returns the Linux ABI credential state for one compatibility process.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_credentials(pid: ObjId) -> Option<LinuxCredentials> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_ref().ok_or(ProcError::Exited)?;
+        Ok(LinuxCredentials {
+            uid: linux.uid,
+            euid: linux.euid,
+            suid: linux.suid,
+            fsuid: linux.fsuid,
+            gid: linux.gid,
+            egid: linux.egid,
+            sgid: linux.sgid,
+            fsgid: linux.fsgid,
+        })
+    })
+    .ok()
+}
+
+/// Replaces Linux ABI credentials without changing native Jasper authority.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_credentials(pid: ObjId, credentials: LinuxCredentials) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux.uid = credentials.uid;
+        linux.euid = credentials.euid;
+        linux.suid = credentials.suid;
+        linux.fsuid = credentials.fsuid;
+        linux.gid = credentials.gid;
+        linux.egid = credentials.egid;
+        linux.sgid = credentials.sgid;
+        linux.fsgid = credentials.fsgid;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Copies the process supplementary group list for Linux `getgroups`.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_supplementary_groups(pid: ObjId) -> Option<Vec<u32>> {
+    with_proc(pid, |process| {
+        Ok(process
+            .linux
+            .as_ref()
+            .ok_or(ProcError::Exited)?
+            .supplementary_groups
+            .clone())
+    })
+    .ok()
+}
+
+/// Replaces the bounded supplementary group list.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_supplementary_groups(pid: ObjId, groups: &[u32]) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux.supplementary_groups.clear();
+        linux
+            .supplementary_groups
+            .try_reserve(groups.len())
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.supplementary_groups.extend_from_slice(groups);
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Returns the process-local Linux umask.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_umask(pid: ObjId) -> Option<u32> {
+    with_proc(pid, |process| {
+        Ok(process.linux.as_ref().ok_or(ProcError::Exited)?.umask)
+    })
+    .ok()
+}
+
+/// Replaces the process-local Linux umask.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_umask(pid: ObjId, value: u32) -> bool {
+    with_proc(pid, |process| {
+        process.linux.as_mut().ok_or(ProcError::Exited)?.umask = value & 0o777;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Returns the Linux ABI I/O priority.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ioprio(pid: ObjId) -> Option<u32> {
+    with_proc(pid, |process| {
+        Ok(process.linux.as_ref().ok_or(ProcError::Exited)?.ioprio)
+    })
+    .ok()
+}
+
+/// Replaces the Linux ABI I/O priority.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_ioprio(pid: ObjId, value: u32) -> bool {
+    with_proc(pid, |process| {
+        process.linux.as_mut().ok_or(ProcError::Exited)?.ioprio = value;
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Sums scheduler CPU ticks over every live thread in one Linux process.
 /// 汇总一个 Linux 进程全部存活线程的调度器 CPU ticks。
 #[cfg(feature = "linux-abi")]
@@ -3940,6 +4272,20 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         signal_actions: [[0; 4]; 64],
         exec_path: [0; 128],
         exec_path_len: 0,
+        cap_effective: (1u64 << 41) - 1,
+        cap_permitted: (1u64 << 41) - 1,
+        cap_inheritable: 0,
+        uid: 0,
+        euid: 0,
+        suid: 0,
+        fsuid: 0,
+        gid: 0,
+        egid: 0,
+        sgid: 0,
+        fsgid: 0,
+        supplementary_groups: Vec::new(),
+        umask: 0o022,
+        ioprio: (2 << 13) | 4,
         mappings: Vec::new(),
         pipes: Vec::new(),
         next_pipe_handle: LINUX_PIPE_HANDLE_BASE,
@@ -3959,6 +4305,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         next_timerfd_handle: LINUX_TIMERFD_HANDLE_BASE,
         signalfds: Vec::new(),
         next_signalfd_handle: LINUX_SIGNALFD_HANDLE_BASE,
+        inotifies: Vec::new(),
+        next_inotify_handle: LINUX_INOTIFY_HANDLE_BASE,
         epolls: Vec::new(),
         next_epoll_handle: LINUX_EPOLL_HANDLE_BASE,
         iourings: Vec::new(),
