@@ -2132,6 +2132,9 @@ fn execute(
         }
         LinuxSyscall::ProcessVmReadV => compat_result(linux_process_vm_io(pid, call.args, false)),
         LinuxSyscall::ProcessVmWriteV => compat_result(linux_process_vm_io(pid, call.args, true)),
+        LinuxSyscall::ProcessMadvise => {
+            compat_result(linux_process_madvise(pid, call.args))
+        }
         LinuxSyscall::ReadLinkAt => compat_result(linux_readlinkat(pid, call.args)),
         LinuxSyscall::Close => compat_result(linux_close(pid, call.args[0])),
         LinuxSyscall::CloseRange => compat_result(linux_close_range(pid, call.args)),
@@ -3524,6 +3527,62 @@ fn linux_process_vm_io(
         proc::write(pid, *address, &bytes[offset..offset + take])
             .map_err(|_| CompatErrno::Fault)?;
         offset += take;
+    }
+    Ok(total as u64)
+}
+
+/// Implements pidfd-scoped memory advice with page-rounded user iovecs.
+fn linux_process_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    const MAX_ADVISE: usize = 64 * 1024 * 1024;
+    const MADV_WILLNEED: u64 = 3;
+    const MADV_DONTNEED: u64 = 4;
+    const MADV_COLD: u64 = 20;
+    const MADV_PAGEOUT: u64 = 21;
+    if args[4] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let pidfd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, pidfd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Pidfd {
+        return Err(CompatErrno::BadFd);
+    }
+    let target = ObjId::from_raw(entry.handle).ok_or(CompatErrno::NoProcess)?;
+    if proc::state(target) != Some(proc::ProcState::Running) {
+        return Err(CompatErrno::NoProcess);
+    }
+    let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    let vectors = read_message_iovecs(pid, args[1], count, MAX_ADVISE)?;
+    let total = vectors.iter().map(|(_, length)| *length).sum::<usize>();
+    if total > MAX_ADVISE {
+        return Err(CompatErrno::Invalid);
+    }
+    let advice = args[3];
+    if !matches!(
+        advice,
+        MADV_WILLNEED | MADV_DONTNEED | MADV_COLD | MADV_PAGEOUT
+    ) {
+        return Err(CompatErrno::Invalid);
+    }
+    for (address, length) in vectors {
+        if length == 0 {
+            continue;
+        }
+        let end = address
+            .checked_add(length as u64)
+            .ok_or(CompatErrno::Invalid)?;
+        let start = address & !(PAGE - 1);
+        let end = end
+            .checked_add(PAGE - 1)
+            .ok_or(CompatErrno::Invalid)?
+            & !(PAGE - 1);
+        let rounded = end.checked_sub(start).ok_or(CompatErrno::Invalid)?;
+        let effective = if matches!(advice, MADV_COLD | MADV_PAGEOUT) {
+            MADV_WILLNEED
+        } else {
+            advice
+        };
+        linux_madvise(target, [start, rounded, effective, 0, 0, 0])?;
     }
     Ok(total as u64)
 }

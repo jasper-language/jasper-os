@@ -56,6 +56,9 @@
 #ifndef SYS_rt_tgsigqueueinfo
 #define SYS_rt_tgsigqueueinfo 297
 #endif
+#ifndef SYS_process_madvise
+#define SYS_process_madvise 440
+#endif
 
 #define JASPER_ASHMEM_SET_NAME 0x41006101UL
 #define JASPER_ASHMEM_SET_PROT_MASK 0x40046102UL
@@ -3945,6 +3948,28 @@ int main(void) {
             (ssize_t)sizeof(pidfd_magic) ||
         memcmp(pidfd_magic, "\177ELF", 4) != 0) {
         return 510;
+    }
+    unsigned char *madvise_page =
+        mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    struct iovec madvise_range = {
+        .iov_base = madvise_page,
+        .iov_len = 4096,
+    };
+    if (madvise_page == MAP_FAILED) {
+        return 550;
+    }
+    memset(madvise_page, 0x5a, 4096);
+    if (syscall(SYS_process_madvise, self_pidfd, &madvise_range, 1,
+                MADV_DONTNEED, 0) != 4096 ||
+        madvise_page[0] != 0) {
+        return 551;
+    }
+    errno = 0;
+    if (syscall(SYS_process_madvise, self_pidfd, &madvise_range, 1,
+                MADV_WILLNEED, 1) != -1 || errno != EINVAL ||
+        munmap(madvise_page, 4096) != 0) {
+        return 552;
     }
     errno = 0;
     if (syscall(SYS_pidfd_getfd, self_pidfd, pidfd_source, 1) != -1 ||
