@@ -60,6 +60,8 @@ use compat_core::fd::{FdDescription, FdTable};
 use compat_core::seccomp::{evaluate as evaluate_seccomp, SeccompAction, SeccompInsn};
 #[cfg(feature = "linux-abi")]
 use compat_core::syscall::{LinuxSyscall, LinuxSyscallSet};
+#[cfg(feature = "linux-abi")]
+use crate::fscrypt::{FileCipher, FscryptError, Policy as FscryptPolicy};
 
 pub mod spawn;
 
@@ -281,8 +283,16 @@ struct AshmemBuffer {
     verity_enabled: AtomicU32,
     verity_digest: SpinLock<[u8; 32]>,
     verity_descriptor: SpinLock<[u8; 256]>,
+    fscrypt: SpinLock<Option<FscryptFileState>>,
     name: SpinLock<([u8; 256], usize)>,
     pages: SpinLock<Vec<Arc<crate::mm::memory_object::Page>>>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+struct FscryptFileState {
+    policy: FscryptPolicy,
+    nonce: [u8; crate::fscrypt::FILE_NONCE_BYTES],
 }
 
 /// One bounded shared-page object used by the System V `shm*` ABI.
@@ -647,6 +657,9 @@ pub(crate) enum LinuxAshmemError {
     Busy,
     NoMemory,
     NotAshmem,
+    Exists,
+    NoKey,
+    NotSupported,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -2317,6 +2330,7 @@ pub(crate) fn linux_create_shared_memory(
                 verity_enabled: AtomicU32::new(0),
                 verity_digest: SpinLock::new([0; 32]),
                 verity_descriptor: SpinLock::new([0; 256]),
+                fscrypt: SpinLock::new(None),
                 name: SpinLock::new(([0; 256], 0)),
                 pages: SpinLock::new(pages),
             }),
@@ -2366,6 +2380,7 @@ fn linux_open_ashmem_kind(
                 verity_enabled: AtomicU32::new(0),
                 verity_digest: SpinLock::new([0; 32]),
                 verity_descriptor: SpinLock::new([0; 256]),
+                fscrypt: SpinLock::new(None),
                 name: SpinLock::new(([0; 256], 0)),
                 pages: SpinLock::new(Vec::new()),
             }),
@@ -2389,6 +2404,103 @@ pub(crate) fn linux_ashmem_is_regular(pid: ObjId, handle: u64) -> Option<bool> {
             .map(|ashmem| ashmem.buffer.regular_file),
         _ => None,
     })
+}
+
+#[cfg(feature = "linux-abi")]
+fn fscrypt_ashmem_error(error: FscryptError) -> LinuxAshmemError {
+    match error {
+        FscryptError::Invalid => LinuxAshmemError::Invalid,
+        FscryptError::Permission => LinuxAshmemError::Permission,
+        FscryptError::NoKey => LinuxAshmemError::NoKey,
+        FscryptError::NoSpace => LinuxAshmemError::NoMemory,
+    }
+}
+
+#[cfg(feature = "linux-abi")]
+fn linux_ashmem_buffer_for(
+    pid: ObjId,
+    handle: u64,
+) -> Result<Arc<AshmemBuffer>, LinuxAshmemError> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .ashmem
+            .iter()
+            .find(|ashmem| ashmem.handle == handle)
+            .map(|ashmem| Arc::clone(&ashmem.buffer)),
+        _ => None,
+    })
+    .ok_or(LinuxAshmemError::NotAshmem)
+}
+
+/// Installs or validates an fscrypt policy on one empty regular compatibility
+/// file. A matching repeated SET is idempotent; a different policy is EEXIST.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_fscrypt_set_policy(
+    pid: ObjId,
+    handle: u64,
+    policy: FscryptPolicy,
+    uid: u32,
+) -> Result<(), LinuxAshmemError> {
+    policy.validate().map_err(fscrypt_ashmem_error)?;
+    let buffer = linux_ashmem_buffer_for(pid, handle)?;
+    if !buffer.regular_file {
+        return Err(LinuxAshmemError::NotSupported);
+    }
+    let mut current = buffer.fscrypt.lock();
+    if let Some(existing) = *current {
+        return if existing.policy == policy {
+            Ok(())
+        } else {
+            Err(LinuxAshmemError::Exists)
+        };
+    }
+    if buffer.size.load(Ordering::Acquire) != 0 {
+        return Err(LinuxAshmemError::Invalid);
+    }
+    if matches!(policy, FscryptPolicy::V2 { .. })
+        && !crate::fscrypt::key_added_by(policy.key_specifier(), uid)
+    {
+        return Err(LinuxAshmemError::NoKey);
+    }
+    let nonce = crate::fscrypt::next_file_nonce(crate::security::boot_id(), buffer.id);
+    *current = Some(FscryptFileState { policy, nonce });
+    Ok(())
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_fscrypt_policy(
+    pid: ObjId,
+    handle: u64,
+) -> Result<Option<FscryptPolicy>, LinuxAshmemError> {
+    Ok(linux_ashmem_buffer_for(pid, handle)?
+        .fscrypt
+        .lock()
+        .map(|state| state.policy))
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_fscrypt_nonce(
+    pid: ObjId,
+    handle: u64,
+) -> Result<Option<[u8; crate::fscrypt::FILE_NONCE_BYTES]>, LinuxAshmemError> {
+    Ok(linux_ashmem_buffer_for(pid, handle)?
+        .fscrypt
+        .lock()
+        .map(|state| state.nonce))
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_fscrypt_pwsalt(
+    pid: ObjId,
+    handle: u64,
+) -> Result<[u8; 16], LinuxAshmemError> {
+    let buffer = linux_ashmem_buffer_for(pid, handle)?;
+    if !buffer.regular_file {
+        return Err(LinuxAshmemError::NotSupported);
+    }
+    Ok(crate::fscrypt::pwsalt(crate::security::boot_id()))
 }
 
 /// Opens one bounded Android binder device descriptor.
@@ -3498,6 +3610,7 @@ pub(crate) fn linux_ion_alloc(
             verity_enabled: AtomicU32::new(0),
             verity_digest: SpinLock::new([0; 32]),
             verity_descriptor: SpinLock::new([0; 256]),
+            fscrypt: SpinLock::new(None),
             name: SpinLock::new(([0; 256], 0)),
             pages: SpinLock::new(pages),
         });
@@ -3685,6 +3798,11 @@ pub(crate) fn linux_ashmem_set_size(
         if !buffer.regular_file && buffer.size.load(Ordering::Acquire) != 0 {
             return Err(ProcError::NoTaskSlot);
         }
+        let fscrypt = *buffer.fscrypt.lock();
+        let cipher = fscrypt
+            .map(|state| FileCipher::new(state.policy, state.nonce))
+            .transpose()
+            .map_err(|_| ProcError::Handle(HandleError::RightsDenied))?;
         let mut pages = buffer.pages.lock();
         let current_pages = pages.len() as u64;
         if pages_count > current_pages {
@@ -3713,13 +3831,35 @@ pub(crate) fn linux_ashmem_set_size(
                 .try_reserve_exact(additional as usize)
                 .map_err(|_| ProcError::OutOfFrames)?;
             pages.append(&mut allocated);
+            if let Some(cipher) = cipher {
+                let mut data_unit = [0u8; FRAME_SIZE as usize];
+                for index in current_pages..pages_count {
+                    let page = pages
+                        .get(index as usize)
+                        .ok_or(ProcError::OutOfFrames)?;
+                    cipher.encrypt(index, &mut data_unit);
+                    let pointer = crate::mm::phys_to_virt(page.frame().start())
+                        .ok_or(ProcError::OutOfFrames)?;
+                    // SAFETY: the retained page owns one writable frame.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            data_unit.as_ptr(),
+                            pointer,
+                            data_unit.len(),
+                        )
+                    };
+                }
+            }
         } else {
             pages.truncate(pages_count as usize);
         }
         buffer.size.store(size, Ordering::Release);
         Ok(())
     })
-    .map_err(|_| LinuxAshmemError::NoMemory)
+    .map_err(|error| match error {
+        ProcError::Handle(HandleError::RightsDenied) => LinuxAshmemError::NoKey,
+        _ => LinuxAshmemError::NoMemory,
+    })
 }
 
 /// Copies a byte range out of one memfd backing object without changing its
@@ -3750,6 +3890,11 @@ pub(crate) fn linux_ashmem_read_from(
         .map_err(|_| LinuxAshmemError::Invalid)?
         .min(output.len());
     let page_bytes = kernel_core::frame::FRAME_SIZE as usize;
+    let fscrypt = *buffer.fscrypt.lock();
+    let cipher = fscrypt
+        .map(|state| FileCipher::new(state.policy, state.nonce))
+        .transpose()
+        .map_err(fscrypt_ashmem_error)?;
     let pages = buffer.pages.lock();
     let mut copied = 0usize;
     while copied < available {
@@ -3763,15 +3908,32 @@ pub(crate) fn linux_ashmem_read_from(
         let page = pages.get(index).ok_or(LinuxAshmemError::Invalid)?;
         let pointer = crate::mm::phys_to_virt(page.frame().start() + inner as u64)
             .ok_or(LinuxAshmemError::NoMemory)?;
-        // SAFETY: the retained Page owns this live frame and the range is
-        // bounded to one page. The caller-side buffer is a distinct allocation.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                pointer as *const u8,
-                output[copied..].as_mut_ptr(),
-                take,
-            )
-        };
+        if let Some(cipher) = cipher.as_ref() {
+            let frame = crate::mm::phys_to_virt(page.frame().start())
+                .ok_or(LinuxAshmemError::NoMemory)?;
+            let mut data_unit = [0u8; FRAME_SIZE as usize];
+            // SAFETY: the retained Page owns one complete frame.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    frame as *const u8,
+                    data_unit.as_mut_ptr(),
+                    data_unit.len(),
+                )
+            };
+            cipher.decrypt(index as u64, &mut data_unit);
+            output[copied..copied + take]
+                .copy_from_slice(&data_unit[inner..inner + take]);
+        } else {
+            // SAFETY: the retained Page owns this live frame and the range is
+            // bounded to one page. The caller-side buffer is a distinct allocation.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    pointer as *const u8,
+                    output[copied..].as_mut_ptr(),
+                    take,
+                )
+            };
+        }
         copied += take;
     }
     Ok(available)
@@ -3811,6 +3973,11 @@ pub(crate) fn linux_ashmem_write_from(
     if seals & (8 | 16) != 0 {
         return Err(LinuxAshmemError::Permission);
     }
+    let fscrypt = *buffer.fscrypt.lock();
+    let cipher = fscrypt
+        .map(|state| FileCipher::new(state.policy, state.nonce))
+        .transpose()
+        .map_err(fscrypt_ashmem_error)?;
     let length = u64::try_from(input.len()).map_err(|_| LinuxAshmemError::Invalid)?;
     let end = offset
         .checked_add(length)
@@ -3836,17 +4003,43 @@ pub(crate) fn linux_ashmem_write_from(
         let inner = (absolute % page_bytes as u64) as usize;
         let take = (input.len() - copied).min(page_bytes - inner);
         let page = pages.get(index).ok_or(LinuxAshmemError::Invalid)?;
-        let pointer = crate::mm::phys_to_virt(page.frame().start() + inner as u64)
-            .ok_or(LinuxAshmemError::NoMemory)?;
-        // SAFETY: the retained Page owns this live frame and the range is
-        // bounded to one page. The source allocation cannot alias the frame.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                input[copied..].as_ptr(),
-                pointer,
-                take,
-            )
-        };
+        if let Some(cipher) = cipher.as_ref() {
+            let frame = crate::mm::phys_to_virt(page.frame().start())
+                .ok_or(LinuxAshmemError::NoMemory)?;
+            let mut data_unit = [0u8; FRAME_SIZE as usize];
+            // SAFETY: the retained Page owns one complete frame.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    frame as *const u8,
+                    data_unit.as_mut_ptr(),
+                    data_unit.len(),
+                )
+            };
+            cipher.decrypt(index as u64, &mut data_unit);
+            data_unit[inner..inner + take]
+                .copy_from_slice(&input[copied..copied + take]);
+            cipher.encrypt(index as u64, &mut data_unit);
+            // SAFETY: the retained page owns the complete writable frame.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data_unit.as_ptr(),
+                    frame,
+                    data_unit.len(),
+                )
+            };
+        } else {
+            let pointer = crate::mm::phys_to_virt(page.frame().start() + inner as u64)
+                .ok_or(LinuxAshmemError::NoMemory)?;
+            // SAFETY: the retained Page owns this live frame and the range is
+            // bounded to one page. The source allocation cannot alias the frame.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    input[copied..].as_ptr(),
+                    pointer,
+                    take,
+                )
+            };
+        }
         copied += take;
     }
     Ok(input.len())
@@ -4138,6 +4331,15 @@ pub(crate) fn linux_ashmem_map(
         || protection & !3 != 0
     {
         return Err(LinuxAshmemError::Invalid);
+    }
+    if linux_ashmem_buffer_for(pid, handle)?
+        .fscrypt
+        .lock()
+        .is_some()
+    {
+        // Mapping ciphertext directly would violate fscrypt's plaintext mmap
+        // contract. Fail closed until page faults can transform mapped data.
+        return Err(LinuxAshmemError::NotSupported);
     }
     let (buffer, pages) = crate::kobj::with(|t| match t.get(pid) {
         Ok(KObject::Process(p)) => {

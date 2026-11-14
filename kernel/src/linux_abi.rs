@@ -4705,6 +4705,9 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             proc::LinuxAshmemError::Invalid => CompatErrno::Invalid,
             proc::LinuxAshmemError::NoMemory => CompatErrno::NoMemory,
             proc::LinuxAshmemError::NotAshmem => CompatErrno::BadFd,
+            proc::LinuxAshmemError::Exists => CompatErrno::Exists,
+            proc::LinuxAshmemError::NoKey => CompatErrno::NoKey,
+            proc::LinuxAshmemError::NotSupported => CompatErrno::NotSupported,
         })?;
         if !proc::set_linux_mmap_cursor(pid, start + rounded) {
             return Err(CompatErrno::NoSys);
@@ -14921,6 +14924,294 @@ fn linux_fsverity_read_metadata(
     Ok(count as u64)
 }
 
+fn fscrypt_compat_error(error: crate::fscrypt::FscryptError) -> CompatErrno {
+    match error {
+        crate::fscrypt::FscryptError::Invalid => CompatErrno::Invalid,
+        crate::fscrypt::FscryptError::Permission => CompatErrno::Access,
+        crate::fscrypt::FscryptError::NoKey => CompatErrno::NoKey,
+        crate::fscrypt::FscryptError::NoSpace => CompatErrno::NoSpace,
+    }
+}
+
+fn fscrypt_ashmem_error(error: proc::LinuxAshmemError) -> CompatErrno {
+    match error {
+        proc::LinuxAshmemError::Invalid => CompatErrno::Invalid,
+        proc::LinuxAshmemError::Permission => CompatErrno::Access,
+        proc::LinuxAshmemError::Busy => CompatErrno::Busy,
+        proc::LinuxAshmemError::NoMemory => CompatErrno::NoMemory,
+        proc::LinuxAshmemError::NotAshmem => CompatErrno::NotTty,
+        proc::LinuxAshmemError::Exists => CompatErrno::Exists,
+        proc::LinuxAshmemError::NoKey => CompatErrno::NoKey,
+        proc::LinuxAshmemError::NotSupported => CompatErrno::NotSupported,
+    }
+}
+
+fn parse_fscrypt_key_specifier(
+    raw: &[u8],
+) -> Result<crate::fscrypt::KeySpecifier, CompatErrno> {
+    if raw.len() < 40 {
+        return Err(CompatErrno::Invalid);
+    }
+    let kind = u32::from_le_bytes(raw[..4].try_into().unwrap());
+    let reserved = u32::from_le_bytes(raw[4..8].try_into().unwrap());
+    if reserved != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&raw[8..40]);
+    let spec = crate::fscrypt::KeySpecifier { kind, bytes };
+    spec.is_valid()
+        .then_some(spec)
+        .ok_or(CompatErrno::Invalid)
+}
+
+fn parse_fscrypt_policy(raw: &[u8]) -> Result<crate::fscrypt::Policy, CompatErrno> {
+    let version = *raw.first().ok_or(CompatErrno::Invalid)?;
+    let policy = match version {
+        0 => {
+            if raw.len() < 12 {
+                return Err(CompatErrno::Invalid);
+            }
+            let mut descriptor = [0u8; 8];
+            descriptor.copy_from_slice(&raw[4..12]);
+            crate::fscrypt::Policy::V1 {
+                contents_mode: raw[1],
+                filenames_mode: raw[2],
+                flags: raw[3],
+                descriptor,
+            }
+        }
+        2 => {
+            if raw.len() < 24 || raw[5..8].iter().any(|byte| *byte != 0) {
+                return Err(CompatErrno::Invalid);
+            }
+            let mut identifier = [0u8; 16];
+            identifier.copy_from_slice(&raw[8..24]);
+            crate::fscrypt::Policy::V2 {
+                contents_mode: raw[1],
+                filenames_mode: raw[2],
+                flags: raw[3],
+                log2_data_unit_size: raw[4],
+                identifier,
+            }
+        }
+        _ => return Err(CompatErrno::Invalid),
+    };
+    policy.validate().map_err(fscrypt_compat_error)?;
+    Ok(policy)
+}
+
+fn encode_fscrypt_policy(policy: crate::fscrypt::Policy) -> alloc::vec::Vec<u8> {
+    match policy {
+        crate::fscrypt::Policy::V1 {
+            contents_mode,
+            filenames_mode,
+            flags,
+            descriptor,
+        } => {
+            let mut raw = alloc::vec![0u8; 12];
+            raw[0] = 0;
+            raw[1] = contents_mode;
+            raw[2] = filenames_mode;
+            raw[3] = flags;
+            raw[4..12].copy_from_slice(&descriptor);
+            raw
+        }
+        crate::fscrypt::Policy::V2 {
+            contents_mode,
+            filenames_mode,
+            flags,
+            log2_data_unit_size,
+            identifier,
+        } => {
+            let mut raw = alloc::vec![0u8; 24];
+            raw[0] = 2;
+            raw[1] = contents_mode;
+            raw[2] = filenames_mode;
+            raw[3] = flags;
+            raw[4] = log2_data_unit_size;
+            raw[8..24].copy_from_slice(&identifier);
+            raw
+        }
+    }
+}
+
+fn fscrypt_caller(pid: ObjId) -> Result<(u32, bool), CompatErrno> {
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let capabilities = proc::linux_capabilities(pid).ok_or(CompatErrno::NoProcess)?;
+    Ok((
+        credentials.fsuid,
+        credentials.euid == 0 || capabilities.effective & (1u64 << 21) != 0,
+    ))
+}
+
+fn linux_fscrypt_set_policy(pid: ObjId, fd: u32, request: u64) -> Result<u64, CompatErrno> {
+    let mut version = [0u8; 1];
+    copy_from_user(&mut version, request, 1).map_err(|_| CompatErrno::Fault)?;
+    let size = match version[0] {
+        0 => 12,
+        2 => 24,
+        _ => return Err(CompatErrno::Invalid),
+    };
+    let mut raw = [0u8; 24];
+    copy_from_user(&mut raw[..size], request, size).map_err(|_| CompatErrno::Fault)?;
+    let policy = parse_fscrypt_policy(&raw[..size])?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let (uid, _) = fscrypt_caller(pid)?;
+    proc::linux_ashmem_fscrypt_set_policy(pid, entry.handle, policy, uid)
+        .map_err(fscrypt_ashmem_error)?;
+    Ok(0)
+}
+
+fn linux_fscrypt_get_policy(pid: ObjId, fd: u32, request: u64) -> Result<u64, CompatErrno> {
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let policy = proc::linux_ashmem_fscrypt_policy(pid, entry.handle)
+        .map_err(fscrypt_ashmem_error)?
+        .ok_or(CompatErrno::NoData)?;
+    if !matches!(policy, crate::fscrypt::Policy::V1 { .. }) {
+        return Err(CompatErrno::Invalid);
+    }
+    let encoded = encode_fscrypt_policy(policy);
+    copy_to_user(request, &encoded, encoded.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+fn linux_fscrypt_get_policy_ex(
+    pid: ObjId,
+    fd: u32,
+    request: u64,
+) -> Result<u64, CompatErrno> {
+    let mut capacity = [0u8; 8];
+    copy_from_user(&mut capacity, request, 8).map_err(|_| CompatErrno::Fault)?;
+    let capacity = usize::try_from(u64::from_le_bytes(capacity))
+        .map_err(|_| CompatErrno::Invalid)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let policy = proc::linux_ashmem_fscrypt_policy(pid, entry.handle)
+        .map_err(fscrypt_ashmem_error)?
+        .ok_or(CompatErrno::NoData)?;
+    let encoded = encode_fscrypt_policy(policy);
+    if capacity < encoded.len() {
+        return Err(CompatErrno::Overflow);
+    }
+    let mut output = alloc::vec![0u8; 8 + encoded.len()];
+    output[..8].copy_from_slice(&(encoded.len() as u64).to_le_bytes());
+    output[8..].copy_from_slice(&encoded);
+    copy_to_user(request, &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+fn linux_fscrypt_get_pwsalt(pid: ObjId, fd: u32, request: u64) -> Result<u64, CompatErrno> {
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let salt = proc::linux_ashmem_fscrypt_pwsalt(pid, entry.handle)
+        .map_err(fscrypt_ashmem_error)?;
+    copy_to_user(request, &salt, salt.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+fn linux_fscrypt_add_key(pid: ObjId, fd: u32, request: u64) -> Result<u64, CompatErrno> {
+    const ADD_KEY_BYTES: usize = 80;
+    const HW_WRAPPED: u32 = 1;
+    const MAX_RAW_KEY: usize = 64;
+    let mut raw = [0u8; ADD_KEY_BYTES];
+    copy_from_user(&mut raw, request, ADD_KEY_BYTES).map_err(|_| CompatErrno::Fault)?;
+    let spec = parse_fscrypt_key_specifier(&raw[..40])?;
+    let raw_size =
+        usize::try_from(u32::from_le_bytes(raw[40..44].try_into().unwrap()))
+            .map_err(|_| CompatErrno::Invalid)?;
+    let key_id = u32::from_le_bytes(raw[44..48].try_into().unwrap());
+    let flags = u32::from_le_bytes(raw[48..52].try_into().unwrap());
+    if raw[52..].iter().any(|byte| *byte != 0) || flags & !HW_WRAPPED != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if flags & HW_WRAPPED != 0 {
+        return Err(CompatErrno::NotSupported);
+    }
+    if key_id != 0 {
+        return Err(CompatErrno::NoKey);
+    }
+    if raw_size == 0 || raw_size > MAX_RAW_KEY {
+        return Err(CompatErrno::Invalid);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if proc::linux_ashmem_is_regular(pid, entry.handle) != Some(true) {
+        return Err(CompatErrno::NotSupported);
+    }
+    let mut key = alloc::vec![0u8; raw_size];
+    copy_from_user(&mut key, request + ADD_KEY_BYTES as u64, raw_size)
+        .map_err(|_| CompatErrno::Fault)?;
+    let (uid, has_sys_admin) = fscrypt_caller(pid)?;
+    let returned = crate::fscrypt::add_key(spec, &key, uid, has_sys_admin);
+    key.fill(0);
+    let returned = returned.map_err(fscrypt_compat_error)?;
+    if returned.kind == crate::fscrypt::KEY_SPEC_TYPE_IDENTIFIER {
+        copy_to_user(request + 8, &returned.bytes[..16], 16)
+            .map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(0)
+}
+
+fn linux_fscrypt_remove_key(
+    pid: ObjId,
+    fd: u32,
+    request: u64,
+    all_users: bool,
+) -> Result<u64, CompatErrno> {
+    let mut raw = [0u8; 64];
+    let request_size = raw.len();
+    copy_from_user(&mut raw, request, request_size).map_err(|_| CompatErrno::Fault)?;
+    let spec = parse_fscrypt_key_specifier(&raw[..40])?;
+    if raw[44..].iter().any(|byte| *byte != 0) {
+        return Err(CompatErrno::Invalid);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if proc::linux_ashmem_is_regular(pid, entry.handle) != Some(true) {
+        return Err(CompatErrno::NotSupported);
+    }
+    let (uid, has_sys_admin) = fscrypt_caller(pid)?;
+    let flags = crate::fscrypt::remove_key(spec, uid, all_users, has_sys_admin)
+        .map_err(fscrypt_compat_error)?;
+    raw[40..44].copy_from_slice(&flags.to_le_bytes());
+    raw[44..].fill(0);
+    copy_to_user(request, &raw, raw.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+fn linux_fscrypt_key_status(
+    pid: ObjId,
+    fd: u32,
+    request: u64,
+) -> Result<u64, CompatErrno> {
+    let mut raw = [0u8; 128];
+    let request_size = raw.len();
+    copy_from_user(&mut raw, request, request_size).map_err(|_| CompatErrno::Fault)?;
+    let spec = parse_fscrypt_key_specifier(&raw[..40])?;
+    if raw[40..64].iter().any(|byte| *byte != 0) {
+        return Err(CompatErrno::Invalid);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if proc::linux_ashmem_is_regular(pid, entry.handle) != Some(true) {
+        return Err(CompatErrno::NotSupported);
+    }
+    let (uid, _) = fscrypt_caller(pid)?;
+    let (status, status_flags, user_count) = crate::fscrypt::key_status(spec, uid)
+        .map_err(fscrypt_compat_error)?;
+    raw[64..68].copy_from_slice(&status.to_le_bytes());
+    raw[68..72].copy_from_slice(&status_flags.to_le_bytes());
+    raw[72..76].copy_from_slice(&user_count.to_le_bytes());
+    raw[76..].fill(0);
+    copy_to_user(request, &raw, raw.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+fn linux_fscrypt_get_nonce(pid: ObjId, fd: u32, request: u64) -> Result<u64, CompatErrno> {
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let nonce = proc::linux_ashmem_fscrypt_nonce(pid, entry.handle)
+        .map_err(fscrypt_ashmem_error)?
+        .ok_or(CompatErrno::NoData)?;
+    copy_to_user(request, &nonce, nonce.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
 fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const TCGETS: u64 = 0x5401;
     const TCSETS: u64 = 0x5402;
@@ -15133,7 +15424,36 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             | FS_IOC_GET_ENCRYPTION_KEY_STATUS
             | FS_IOC_GET_ENCRYPTION_NONCE
     ) {
-        return Err(CompatErrno::NotTty);
+        return match args[1] {
+            FS_IOC_SET_ENCRYPTION_POLICY => {
+                linux_fscrypt_set_policy(pid, fd, args[2])
+            }
+            FS_IOC_GET_ENCRYPTION_PWSALT => {
+                linux_fscrypt_get_pwsalt(pid, fd, args[2])
+            }
+            FS_IOC_GET_ENCRYPTION_POLICY => {
+                linux_fscrypt_get_policy(pid, fd, args[2])
+            }
+            FS_IOC_GET_ENCRYPTION_POLICY_EX => {
+                linux_fscrypt_get_policy_ex(pid, fd, args[2])
+            }
+            FS_IOC_ADD_ENCRYPTION_KEY => {
+                linux_fscrypt_add_key(pid, fd, args[2])
+            }
+            FS_IOC_REMOVE_ENCRYPTION_KEY => {
+                linux_fscrypt_remove_key(pid, fd, args[2], false)
+            }
+            FS_IOC_REMOVE_ENCRYPTION_KEY_ALL_USERS => {
+                linux_fscrypt_remove_key(pid, fd, args[2], true)
+            }
+            FS_IOC_GET_ENCRYPTION_KEY_STATUS => {
+                linux_fscrypt_key_status(pid, fd, args[2])
+            }
+            FS_IOC_GET_ENCRYPTION_NONCE => {
+                linux_fscrypt_get_nonce(pid, fd, args[2])
+            }
+            _ => unreachable!(),
+        };
     }
     if proc::linux_is_sync_file(pid, entry.handle) {
         return match args[1] {
@@ -15424,6 +15744,9 @@ fn ashmem_compat_error(error: proc::LinuxAshmemError) -> CompatErrno {
         proc::LinuxAshmemError::Busy => CompatErrno::Busy,
         proc::LinuxAshmemError::NoMemory => CompatErrno::NoMemory,
         proc::LinuxAshmemError::NotAshmem => CompatErrno::NotTty,
+        proc::LinuxAshmemError::Exists => CompatErrno::Exists,
+        proc::LinuxAshmemError::NoKey => CompatErrno::NoKey,
+        proc::LinuxAshmemError::NotSupported => CompatErrno::NotSupported,
     }
 }
 

@@ -65,6 +65,8 @@ pub mod fault;
 pub(crate) mod first_program;
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
 pub(crate) mod binder;
+#[cfg(feature = "linux-abi")]
+pub(crate) mod fscrypt;
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
 pub mod linux_abi;
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]

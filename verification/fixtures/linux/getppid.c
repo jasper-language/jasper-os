@@ -1895,26 +1895,219 @@ int main(void) {
         errno != EPERM) {
         return 744;
     }
-    unsigned char fscrypt_buffer[256] = {0};
-    unsigned long fscrypt_ioctls[] = {
-        FS_IOC_SET_ENCRYPTION_POLICY,
-        FS_IOC_GET_ENCRYPTION_PWSALT,
-        FS_IOC_GET_ENCRYPTION_POLICY,
-        FS_IOC_GET_ENCRYPTION_POLICY_EX,
-        FS_IOC_ADD_ENCRYPTION_KEY,
-        FS_IOC_REMOVE_ENCRYPTION_KEY,
-        FS_IOC_REMOVE_ENCRYPTION_KEY_ALL_USERS,
-        FS_IOC_GET_ENCRYPTION_KEY_STATUS,
-        FS_IOC_GET_ENCRYPTION_NONCE,
+    int fscrypt_fd = memfd_create("fscrypt", 0);
+    unsigned char fscrypt_key_bytes[64];
+    unsigned char fscrypt_add_storage[
+        sizeof(struct fscrypt_add_key_arg) + sizeof(fscrypt_key_bytes)]
+        __attribute__((aligned(8))) = {0};
+    struct fscrypt_add_key_arg *fscrypt_add =
+        (struct fscrypt_add_key_arg *)fscrypt_add_storage;
+    for (size_t index = 0; index < sizeof(fscrypt_key_bytes); index++) {
+        fscrypt_key_bytes[index] = (unsigned char)(0x20 + index);
+    }
+    memcpy(fscrypt_add->key_spec.u.descriptor, "JASPER01",
+           sizeof(fscrypt_add->key_spec.u.descriptor));
+    fscrypt_add->key_spec.type = FSCRYPT_KEY_SPEC_TYPE_DESCRIPTOR;
+    fscrypt_add->raw_size = sizeof(fscrypt_key_bytes);
+    memcpy(fscrypt_add->raw, fscrypt_key_bytes,
+           sizeof(fscrypt_key_bytes));
+    if (fscrypt_fd < 0 ||
+        ioctl(fscrypt_fd, FS_IOC_ADD_ENCRYPTION_KEY,
+              fscrypt_add_storage) != 0) {
+        return 746;
+    }
+    struct fscrypt_policy_v1 fscrypt_policy = {
+        .version = FSCRYPT_POLICY_V1,
+        .contents_encryption_mode = FSCRYPT_MODE_AES_256_XTS,
+        .filenames_encryption_mode = FSCRYPT_MODE_AES_256_CTS,
+        .flags = FSCRYPT_POLICY_FLAGS_PAD_16,
     };
+    memcpy(fscrypt_policy.master_key_descriptor, "JASPER01",
+           sizeof(fscrypt_policy.master_key_descriptor));
+    if (ioctl(fscrypt_fd, FS_IOC_SET_ENCRYPTION_POLICY,
+              &fscrypt_policy) != 0 ||
+        ioctl(fscrypt_fd, FS_IOC_SET_ENCRYPTION_POLICY,
+              &fscrypt_policy) != 0) {
+        return 748;
+    }
+    struct fscrypt_policy_v1 conflicting_policy = fscrypt_policy;
+    conflicting_policy.flags = FSCRYPT_POLICY_FLAGS_PAD_32;
+    errno = 0;
+    if (ioctl(fscrypt_fd, FS_IOC_SET_ENCRYPTION_POLICY,
+              &conflicting_policy) != -1 ||
+        errno != EEXIST) {
+        return 749;
+    }
+    unsigned char fscrypt_pwsalt[16] = {0};
+    unsigned char second_pwsalt[16] = {0};
+    struct fscrypt_policy_v1 read_policy = {0};
+    if (ioctl(fscrypt_fd, FS_IOC_GET_ENCRYPTION_PWSALT,
+              fscrypt_pwsalt) != 0 ||
+        ioctl(fscrypt_fd, FS_IOC_GET_ENCRYPTION_PWSALT,
+              second_pwsalt) != 0 ||
+        memcmp(fscrypt_pwsalt, second_pwsalt,
+               sizeof(fscrypt_pwsalt)) != 0 ||
+        ioctl(fscrypt_fd, FS_IOC_GET_ENCRYPTION_POLICY,
+              &read_policy) != 0 ||
+        memcmp(&read_policy, &fscrypt_policy,
+               sizeof(fscrypt_policy)) != 0) {
+        return 750;
+    }
+    struct fscrypt_get_policy_ex_arg read_policy_ex = {
+        .policy_size = sizeof(struct fscrypt_policy_v1),
+    };
+    unsigned char fscrypt_nonce[16] = {0};
+    unsigned char second_nonce[16] = {0};
+    if (ioctl(fscrypt_fd, FS_IOC_GET_ENCRYPTION_POLICY_EX,
+              &read_policy_ex) != 0 ||
+        read_policy_ex.policy.version != FSCRYPT_POLICY_V1 ||
+        memcmp(&read_policy_ex.policy.v1, &fscrypt_policy,
+               sizeof(fscrypt_policy)) != 0 ||
+        ioctl(fscrypt_fd, FS_IOC_GET_ENCRYPTION_NONCE,
+              fscrypt_nonce) != 0 ||
+        ioctl(fscrypt_fd, FS_IOC_GET_ENCRYPTION_NONCE,
+              second_nonce) != 0 ||
+        memcmp(fscrypt_nonce, second_nonce,
+               sizeof(fscrypt_nonce)) != 0) {
+        return 751;
+    }
+    struct fscrypt_key_specifier fscrypt_spec = {0};
+    fscrypt_spec.type = FSCRYPT_KEY_SPEC_TYPE_DESCRIPTOR;
+    memcpy(fscrypt_spec.u.descriptor, "JASPER01",
+           sizeof(fscrypt_spec.u.descriptor));
+    struct fscrypt_get_key_status_arg fscrypt_status = {
+        .key_spec = fscrypt_spec,
+    };
+    if (ioctl(fscrypt_fd, FS_IOC_GET_ENCRYPTION_KEY_STATUS,
+              &fscrypt_status) != 0 ||
+        fscrypt_status.status != FSCRYPT_KEY_STATUS_PRESENT) {
+        return 752;
+    }
+    static const char fscrypt_plaintext[] =
+        "android-fscrypt-sensitive-content";
+    unsigned char fscrypt_readback[sizeof(fscrypt_plaintext)] = {0};
+    if (pwrite(fscrypt_fd, fscrypt_plaintext,
+               sizeof(fscrypt_plaintext), 0) !=
+            (ssize_t)sizeof(fscrypt_plaintext) ||
+        pread(fscrypt_fd, fscrypt_readback,
+              sizeof(fscrypt_readback), 0) !=
+            (ssize_t)sizeof(fscrypt_readback) ||
+        memcmp(fscrypt_plaintext, fscrypt_readback,
+               sizeof(fscrypt_plaintext)) != 0) {
+        return 753;
+    }
+    struct fscrypt_remove_key_arg fscrypt_remove = {
+        .key_spec = fscrypt_spec,
+    };
+    if (ioctl(fscrypt_fd, FS_IOC_REMOVE_ENCRYPTION_KEY,
+              &fscrypt_remove) != 0) {
+        return 754;
+    }
+    errno = 0;
+    if (pread(fscrypt_fd, fscrypt_readback,
+              sizeof(fscrypt_readback), 0) != -1 ||
+        errno != ENOKEY) {
+        return 755;
+    }
+    memset(&fscrypt_status, 0, sizeof(fscrypt_status));
+    fscrypt_status.key_spec = fscrypt_spec;
+    if (ioctl(fscrypt_fd, FS_IOC_GET_ENCRYPTION_KEY_STATUS,
+              &fscrypt_status) != 0 ||
+        fscrypt_status.status != FSCRYPT_KEY_STATUS_ABSENT) {
+        return 756;
+    }
+    if (ioctl(fscrypt_fd, FS_IOC_ADD_ENCRYPTION_KEY,
+              fscrypt_add_storage) != 0) {
+        return 757;
+    }
+    memset(fscrypt_readback, 0, sizeof(fscrypt_readback));
+    if (pread(fscrypt_fd, fscrypt_readback,
+              sizeof(fscrypt_readback), 0) !=
+            (ssize_t)sizeof(fscrypt_readback) ||
+        memcmp(fscrypt_plaintext, fscrypt_readback,
+               sizeof(fscrypt_plaintext)) != 0) {
+        return 758;
+    }
+    int fscrypt_v2_fd = memfd_create("fscrypt-v2", 0);
+    unsigned char fscrypt_v2_key[32];
+    unsigned char fscrypt_v2_add_storage[
+        sizeof(struct fscrypt_add_key_arg) + sizeof(fscrypt_v2_key)]
+        __attribute__((aligned(8))) = {0};
+    struct fscrypt_add_key_arg *fscrypt_v2_add =
+        (struct fscrypt_add_key_arg *)fscrypt_v2_add_storage;
+    for (size_t index = 0; index < sizeof(fscrypt_v2_key); index++) {
+        fscrypt_v2_key[index] = (unsigned char)(0xa0 - index);
+    }
+    fscrypt_v2_add->key_spec.type =
+        FSCRYPT_KEY_SPEC_TYPE_IDENTIFIER;
+    fscrypt_v2_add->raw_size = sizeof(fscrypt_v2_key);
+    memcpy(fscrypt_v2_add->raw, fscrypt_v2_key,
+           sizeof(fscrypt_v2_key));
+    if (fscrypt_v2_fd < 0 ||
+        ioctl(fscrypt_v2_fd, FS_IOC_ADD_ENCRYPTION_KEY,
+              fscrypt_v2_add_storage) != 0) {
+        return 760;
+    }
+    int v2_identifier_nonzero = 0;
     for (size_t index = 0;
-         index < sizeof(fscrypt_ioctls) / sizeof(fscrypt_ioctls[0]);
+         index < sizeof(fscrypt_v2_add->key_spec.u.identifier);
          index++) {
-        errno = 0;
-        if (ioctl(verity_fd, fscrypt_ioctls[index], fscrypt_buffer) != -1 ||
-            errno != ENOTTY) {
-            return 746;
-        }
+        v2_identifier_nonzero |=
+            fscrypt_v2_add->key_spec.u.identifier[index];
+    }
+    struct fscrypt_policy_v2 fscrypt_v2_policy = {
+        .version = FSCRYPT_POLICY_V2,
+        .contents_encryption_mode = FSCRYPT_MODE_AES_256_XTS,
+        .filenames_encryption_mode = FSCRYPT_MODE_AES_256_CTS,
+        .flags = FSCRYPT_POLICY_FLAGS_PAD_16,
+        .log2_data_unit_size = 0,
+    };
+    memcpy(fscrypt_v2_policy.master_key_identifier,
+           fscrypt_v2_add->key_spec.u.identifier,
+           sizeof(fscrypt_v2_policy.master_key_identifier));
+    unsigned char fscrypt_v2_readback[sizeof(fscrypt_plaintext)] = {0};
+    if (!v2_identifier_nonzero ||
+        ioctl(fscrypt_v2_fd, FS_IOC_SET_ENCRYPTION_POLICY,
+              &fscrypt_v2_policy) != 0 ||
+        pwrite(fscrypt_v2_fd, fscrypt_plaintext,
+               sizeof(fscrypt_plaintext), 0) !=
+            (ssize_t)sizeof(fscrypt_plaintext) ||
+        pread(fscrypt_v2_fd, fscrypt_v2_readback,
+              sizeof(fscrypt_v2_readback), 0) !=
+            (ssize_t)sizeof(fscrypt_v2_readback) ||
+        memcmp(fscrypt_plaintext, fscrypt_v2_readback,
+               sizeof(fscrypt_plaintext)) != 0) {
+        return 761;
+    }
+    struct fscrypt_get_policy_ex_arg fscrypt_v2_policy_ex = {
+        .policy_size = sizeof(struct fscrypt_policy_v2),
+    };
+    if (ioctl(fscrypt_v2_fd, FS_IOC_GET_ENCRYPTION_POLICY_EX,
+              &fscrypt_v2_policy_ex) != 0 ||
+        fscrypt_v2_policy_ex.policy.version != FSCRYPT_POLICY_V2 ||
+        memcmp(&fscrypt_v2_policy_ex.policy.v2,
+               &fscrypt_v2_policy,
+               sizeof(fscrypt_v2_policy)) != 0) {
+        return 762;
+    }
+    struct fscrypt_remove_key_arg fscrypt_v2_remove = {
+        .key_spec = fscrypt_v2_add->key_spec,
+    };
+    if (ioctl(fscrypt_v2_fd,
+              FS_IOC_REMOVE_ENCRYPTION_KEY_ALL_USERS,
+              &fscrypt_v2_remove) != 0) {
+        return 763;
+    }
+    errno = 0;
+    if (pread(fscrypt_v2_fd, fscrypt_v2_readback,
+              sizeof(fscrypt_v2_readback), 0) != -1 ||
+        errno != ENOKEY || close(fscrypt_v2_fd) != 0) {
+        return 764;
+    }
+    if (ioctl(fscrypt_fd, FS_IOC_REMOVE_ENCRYPTION_KEY_ALL_USERS,
+              &fscrypt_remove) != 0 ||
+        close(fscrypt_fd) != 0) {
+        return 759;
     }
     if (close(verity_fd) != 0) {
         return 747;
@@ -3022,7 +3215,7 @@ int main(void) {
     }
     close(binder_ready[0]);
     int server = open("/dev/binder", O_RDWR | O_CLOEXEC);
-    unsigned char server_read[68];
+    unsigned char server_read[76];
     struct binder_write_read server_exchange = {
         .read_size = sizeof(server_read),
         .read_buffer = (binder_uintptr_t)server_read,
@@ -3053,8 +3246,8 @@ int main(void) {
     }
     int server_receive_result =
         ioctl(server, BINDER_WRITE_READ, &server_exchange);
-    if (server_receive_result != 0 || server_exchange.read_consumed != 68 ||
-        *(uint32_t *)server_read != BR_TRANSACTION) {
+    if (server_receive_result != 0 || server_exchange.read_consumed != 76 ||
+        *(uint32_t *)server_read != BR_TRANSACTION_SEC_CTX) {
         printf("binder-server-fail stage=receive rc=%d errno=%d "
                "read_consumed=%llu command=%#x\n",
                server_receive_result, errno,
@@ -3064,11 +3257,16 @@ int main(void) {
     }
     struct binder_transaction_data received;
     memcpy(&received, server_read + 4, sizeof(received));
+    binder_uintptr_t received_secctx = 0;
+    memcpy(&received_secctx, server_read + 68, sizeof(received_secctx));
+    const char *received_secctx_text =
+        received_secctx == 0 ? "" : (const char *)(uintptr_t)received_secctx;
     char received_data[4] = {0};
     memcpy(received_data, (void *)received.data.ptr.buffer, 4);
     if (received.code != 0x1234 || received.sender_pid != binder_child ||
         received.data_size != 4 ||
-        memcmp(received_data, "PING", 4) != 0) {
+        memcmp(received_data, "PING", 4) != 0 ||
+        strncmp(received_secctx_text, "jasper:v1:boot=", 16) != 0) {
         return 174;
     }
     struct flat_binder_object response_object = {
@@ -3167,12 +3365,19 @@ int main(void) {
     server_exchange.read_size = sizeof(server_read);
     server_exchange.read_buffer = (binder_uintptr_t)server_read;
     if (ioctl(server, BINDER_WRITE_READ, &server_exchange) != 0 ||
-        server_exchange.read_consumed != 68 ||
-        *(uint32_t *)server_read != BR_TRANSACTION) {
+        server_exchange.read_consumed != 76 ||
+        *(uint32_t *)server_read != BR_TRANSACTION_SEC_CTX) {
         return 177;
     }
     struct binder_transaction_data second_received;
     memcpy(&second_received, server_read + 4, sizeof(second_received));
+    binder_uintptr_t second_secctx = 0;
+    memcpy(&second_secctx, server_read + 68, sizeof(second_secctx));
+    if (second_secctx == 0 ||
+        strncmp((const char *)(uintptr_t)second_secctx,
+                "jasper:v1:boot=", 16) != 0) {
+        return 178;
+    }
     struct {
         struct binder_fd_object fd;
         struct flat_binder_object binder;
