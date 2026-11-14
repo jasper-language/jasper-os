@@ -2327,6 +2327,31 @@ int main(void) {
         }
         int context_result =
             ioctl(server, BINDER_SET_CONTEXT_MGR_EXT, &manager_object);
+    int manager_node_found = 0;
+    struct binder_node_debug_info manager_debug = {0};
+    for (int node_index = 0; node_index < 16; node_index++) {
+        if (ioctl(server, BINDER_GET_NODE_DEBUG_INFO, &manager_debug) != 0) {
+            return 533;
+        }
+        if (manager_debug.ptr == 0) {
+            break;
+        }
+        if (manager_debug.ptr ==
+                (binder_uintptr_t)(uintptr_t)&manager_object &&
+            manager_debug.cookie == 0x5151 &&
+            manager_debug.has_strong_ref != 0) {
+            struct binder_node_debug_info after_manager = manager_debug;
+            if (ioctl(server, BINDER_GET_NODE_DEBUG_INFO,
+                      &after_manager) != 0) {
+                return 534;
+            }
+            manager_node_found = 1;
+            break;
+        }
+    }
+    if (!manager_node_found) {
+        return 535;
+    }
     if (context_result != 0 || write(binder_ready[1], "R", 1) != 1) {
         printf("binder-server-fail stage=context rc=%d errno=%d\n",
                context_result, errno);
@@ -2426,6 +2451,19 @@ int main(void) {
         received_objects.binder.handle == 0 ||
         received_objects.binder.cookie != 0) {
         return 178;
+    }
+    struct binder_node_info_for_ref second_node_info = {
+        .handle = received_objects.binder.handle,
+    };
+    if (ioctl(server, BINDER_GET_NODE_INFO_FOR_REF,
+              &second_node_info) != 0 ||
+        second_node_info.handle != received_objects.binder.handle ||
+        second_node_info.strong_count != 1 ||
+        second_node_info.weak_count != 0 ||
+        second_node_info.reserved1 != 0 ||
+        second_node_info.reserved2 != 0 ||
+        second_node_info.reserved3 != 0) {
+        return 536;
     }
     char received_fd_data[4] = {0};
     if (read(received_objects.fd.fd, received_fd_data, 4) != 4 ||

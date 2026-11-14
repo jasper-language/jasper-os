@@ -9169,6 +9169,8 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const ASHMEM_PURGE_ALL_CACHES: u64 = 0x610a;
     const BINDER_SET_MAX_THREADS: u64 = 0x4004_6205;
     const BINDER_SET_CONTEXT_MGR: u64 = 0x4004_6207;
+    const BINDER_GET_NODE_DEBUG_INFO: u64 = 0xc018_620b;
+    const BINDER_GET_NODE_INFO_FOR_REF: u64 = 0xc018_620c;
     const BINDER_SET_CONTEXT_MGR_EXT: u64 = 0x4018_620d;
     const BINDER_THREAD_EXIT: u64 = 0x4004_6208;
     const BINDER_VERSION: u64 = 0xc004_6209;
@@ -9235,6 +9237,12 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 } else {
                     Err(CompatErrno::Busy)
                 }
+            }
+            BINDER_GET_NODE_DEBUG_INFO => {
+                crate::binder::get_node_debug_info(pid, args[2])
+            }
+            BINDER_GET_NODE_INFO_FOR_REF => {
+                crate::binder::get_node_info_for_ref(pid, args[2])
             }
             BINDER_SET_CONTEXT_MGR_EXT => {
                 const BINDER_TYPE_BINDER: u32 = 0x7362_2a85;
