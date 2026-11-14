@@ -29,6 +29,7 @@
 #include <linux/sched/types.h>
 #include <linux/seccomp.h>
 #include <linux/sync_file.h>
+#include <linux/userfaultfd.h>
 #include <limits.h>
 #include <mqueue.h>
 #include <linux/mempolicy.h>
@@ -178,6 +179,57 @@ static void pdeath_signal_handler(int signal) {
         (void)write((int)pdeath_done_fd, &done, 1);
     }
     _exit(0);
+}
+
+struct jasper_uffd_job {
+    int uffd;
+    void *page;
+    int ok;
+    int error;
+    int stage;
+    int ioctl_result;
+    ssize_t copy_result;
+};
+
+static void *jasper_uffd_worker(void *argument) {
+    struct jasper_uffd_job *job = argument;
+    struct pollfd pollfd = {.fd = job->uffd, .events = POLLIN};
+    struct uffd_msg message;
+    memset(&message, 0, sizeof(message));
+    if (poll(&pollfd, 1, 1000) != 1 ||
+        (pollfd.revents & POLLIN) == 0) {
+        job->stage = 1;
+        job->error = errno;
+        return NULL;
+    }
+    if (read(job->uffd, &message, sizeof(message)) !=
+            (ssize_t)sizeof(message) ||
+        message.event != UFFD_EVENT_PAGEFAULT ||
+        message.arg.pagefault.address !=
+            (unsigned long)job->page) {
+        job->stage = 2;
+        job->error = errno;
+        return NULL;
+    }
+    unsigned char source[4096];
+    memcpy(source, "UFFD", 4);
+    struct uffdio_copy copy = {
+        .dst = (unsigned long)job->page,
+        .src = (unsigned long)source,
+        .len = sizeof(source),
+        .mode = 0,
+    };
+    errno = 0;
+    job->ioctl_result = ioctl(job->uffd, UFFDIO_COPY, &copy);
+    job->copy_result = copy.copy;
+    if (job->ioctl_result != 0 ||
+        copy.copy != (ssize_t)sizeof(source)) {
+        job->stage = 3;
+        job->error = errno;
+        return NULL;
+    }
+    job->ok = 1;
+    return NULL;
 }
 
 static int landlock_worker_open(int expect_usr, int expect_lib) {
@@ -5322,6 +5374,61 @@ jasper_android_binder:
     if (close(fanotify_fd) != 0) {
         return 712;
     }
+    int uffd = syscall(SYS_userfaultfd, UFFD_USER_MODE_ONLY);
+    struct uffdio_api uffd_api = {
+        .api = UFFD_API,
+        .features = UFFD_FEATURE_THREAD_ID,
+    };
+    if (uffd < 0 ||
+        ioctl(uffd, UFFDIO_API, &uffd_api) != 0 ||
+        uffd_api.api != UFFD_API ||
+        (uffd_api.features & UFFD_FEATURE_THREAD_ID) == 0 ||
+        (uffd_api.ioctls & ((1ULL << _UFFDIO_REGISTER) |
+                            (1ULL << _UFFDIO_COPY))) !=
+            ((1ULL << _UFFDIO_REGISTER) | (1ULL << _UFFDIO_COPY))) {
+        return 714;
+    }
+    unsigned char *uffd_page = mmap(NULL, 4096,
+                                    PROT_READ | PROT_WRITE,
+                                    MAP_PRIVATE | MAP_ANONYMOUS,
+                                    -1, 0);
+    struct uffdio_register uffd_register = {
+        .range = {.start = (unsigned long)uffd_page, .len = 4096},
+        .mode = UFFDIO_REGISTER_MODE_MISSING,
+    };
+    if (uffd_page == MAP_FAILED ||
+        ioctl(uffd, UFFDIO_REGISTER, &uffd_register) != 0 ||
+        uffd_register.ioctls == 0) {
+        return 714;
+    }
+    uffd_page[0] = 0x11;
+    if (madvise(uffd_page, 4096, MADV_DONTNEED) != 0) {
+        return 714;
+    }
+    struct jasper_uffd_job uffd_job = {
+        .uffd = uffd,
+        .page = uffd_page,
+    };
+    pthread_t uffd_thread;
+    if (pthread_create(&uffd_thread, NULL,
+                       jasper_uffd_worker, &uffd_job) != 0) {
+        return 714;
+    }
+    unsigned char uffd_value = *(volatile unsigned char *)uffd_page;
+    if (pthread_join(uffd_thread, NULL) != 0 ||
+        !uffd_job.ok || uffd_value != 'U' ||
+        memcmp(uffd_page, "UFFD", 4) != 0 ||
+        ioctl(uffd, UFFDIO_UNREGISTER, &uffd_register.range) != 0 ||
+        munmap(uffd_page, 4096) != 0 ||
+        close(uffd) != 0) {
+        dprintf(STDOUT_FILENO,
+                "userfaultfd-fail ok=%d error=%d stage=%d "
+                "ioctl=%d copy=%zd value=%#x errno=%d\n",
+                uffd_job.ok, uffd_job.error,
+                uffd_job.stage, uffd_job.ioctl_result,
+                uffd_job.copy_result, uffd_value, errno);
+        return 714;
+    }
     int copy_source =
         syscall(SYS_open, "/usr/lib/x86_64-linux-gnu/libc.so.6",
                 O_RDONLY | O_CLOEXEC, 0);
@@ -5948,7 +6055,6 @@ jasper_android_binder:
     }
     const long unsupported_features[] = {
         SYS_map_shadow_stack,
-        SYS_userfaultfd,
     };
     for (size_t index = 0;
          index < sizeof(unsupported_features) / sizeof(unsupported_features[0]);

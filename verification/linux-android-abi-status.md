@@ -1,7 +1,7 @@
 # Linux/POSIX and Android ABI status
 
 Audit baseline: current public `main`, including the `KCMP_SYSVSEM`, LSM
-self-attribute, `remap_file_pages`, and fanotify implementations.
+self-attribute, `remap_file_pages`, fanotify, and userfaultfd implementations.
 
 ## Coverage
 
@@ -10,12 +10,6 @@ self-attribute, `remap_file_pages`, and fanotify implementations.
   - 3 pre-dispatch entries: `execve`, `execveat`, and `rt_sigreturn`
 - Android kernel ABI: **94/94** strict items verified
 - Native ABI contract: **3.14.0**
-
-Mapped does not mean every optional kernel subsystem is implemented. The
-following entries remain explicit non-success paths and are not counted as
-feature-complete:
-
-- `userfaultfd`
 
 `map_shadow_stack` returns `EOPNOTSUPP` because the current Jasper kernel
 advertises no user shadow-stack feature through `ARCH_SHSTK_STATUS`. This is a
@@ -43,6 +37,8 @@ removed interfaces.
 - Security: Landlock, seccomp, keyrings, fs-verity, fscrypt, Jasper MAC
   contexts, and attenuated `lsm_set_self_attr`.
 - File notification: inotify and classic fanotify notification groups.
+- userfaultfd missing-page mode: registered ranges, real fault delivery,
+  COPY/ZEROPAGE registration, fault parking, resolution, and instruction retry.
 - Probe trampoline ABI: untrusted `uprobe`/`uretprobe` calls return the
   kernel-compatible `EPROTO`/`SIGILL` behavior.
 - Android: Binder freeze, references, security contexts, fscrypt, and
@@ -51,9 +47,9 @@ removed interfaces.
 ## Acceptance evidence
 
 - Full Linux/Android root UEFI:
-  `evidence/issue21-uefi-boot-20261114-uprobe-entry-v111`
+  `evidence/issue21-uefi-boot-20261115-userfaultfd-v123-clean`
 - Sandbox launch UEFI:
-  `evidence/issue21-uefi-boot-20261114-fanotify-sandbox-v112`
+  `evidence/issue21-uefi-boot-20261115-userfaultfd-sandbox-v124`
 - Android-focused UEFI:
   `evidence/issue21-uefi-boot-20261114-linux-android-merged-v100`
 - `KCMP_SYSVSEM`:
@@ -66,6 +62,8 @@ removed interfaces.
   `evidence/issue21-uefi-boot-20261114-fanotify-v109`
 - uprobe/uretprobe entry semantics:
   `evidence/issue21-uefi-boot-20261114-uprobe-entry-v111`
+- userfaultfd missing-page recovery:
+  `evidence/issue21-uefi-boot-20261115-userfaultfd-v123-clean`
 
 Every QEMU run above exits with `qemu_rc=33`, reaches
 `root_execution_complete`, and performs no parallel issue21 boot.

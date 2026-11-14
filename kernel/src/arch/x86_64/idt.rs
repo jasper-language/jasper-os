@@ -75,9 +75,19 @@ fn from_user(frame: &InterruptStackFrame) -> bool {
 }
 
 /// 缺页：来自用户态 ⇒ 只终止该任务；来自内核态 ⇒ 缺陷，打印后停机（目前没有按需分页）。
-extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, _code: PageFaultErrorCode) {
+extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: PageFaultErrorCode) {
     let addr = x86_64::registers::control::Cr2::read_raw();
     if from_user(&frame) {
+        #[cfg(feature = "linux-abi")]
+        if let Some(pid) = crate::proc::current_process() {
+            if crate::proc::linux_userfault_wait(
+                pid,
+                addr,
+                code.contains(PageFaultErrorCode::CAUSED_BY_WRITE),
+            ) {
+                return;
+            }
+        }
         fault::on_user_fault(UserFault { kind: UserFaultKind::PageFault, ip: frame.instruction_pointer.as_u64(), addr });
     }
     console::_print(format_args!("[JSR-EXC] page fault ip={:#x} addr={:#x}\n", frame.instruction_pointer.as_u64(), addr));

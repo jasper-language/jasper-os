@@ -105,6 +105,8 @@ const LINUX_SIGNALFD_HANDLE_BASE: u64 = 0x0000_8a00_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_INOTIFY_HANDLE_BASE: u64 = 0x0000_8b00_0000_0000;
 #[cfg(feature = "linux-abi")]
+const LINUX_USERFAULT_HANDLE_BASE: u64 = 0x0000_8b80_0000_0000;
+#[cfg(feature = "linux-abi")]
 const LINUX_MQ_HANDLE_BASE: u64 = 0x0000_8c00_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_MOUNT_TREE_HANDLE_BASE: u64 = 0x0000_8e00_0000_0000;
@@ -189,6 +191,8 @@ struct LinuxProcessState {
     next_signalfd_handle: u64,
     inotifies: Vec<LinuxInotifyHandle>,
     next_inotify_handle: u64,
+    userfaultfds: Vec<LinuxUserfaultHandle>,
+    next_userfault_handle: u64,
     message_queues: Vec<LinuxMqHandle>,
     next_mq_handle: u64,
     mount_trees: Vec<u64>,
@@ -398,6 +402,37 @@ pub(crate) struct LinuxFanotifyEvent {
 struct LinuxInotifyHandle {
     handle: u64,
     state: Arc<SpinLock<LinuxInotifyState>>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxUserfaultRange {
+    pub(crate) start: u64,
+    pub(crate) end: u64,
+    pub(crate) flags: MapFlags,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxUserfaultEvent {
+    pub(crate) address: u64,
+    pub(crate) flags: u64,
+    pub(crate) tid: u32,
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) struct LinuxUserfaultState {
+    pub(crate) api: bool,
+    pub(crate) features: u64,
+    pub(crate) ranges: Vec<LinuxUserfaultRange>,
+    pub(crate) events: VecDeque<LinuxUserfaultEvent>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone)]
+struct LinuxUserfaultHandle {
+    handle: u64,
+    state: Arc<SpinLock<LinuxUserfaultState>>,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -2254,8 +2289,17 @@ fn release_unreferenced_pipe(linux: &mut LinuxProcessState, handle: u64) {
     if handle >= LINUX_SIGNALFD_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
         linux.signalfds.retain(|signalfd| signalfd.handle != handle);
     }
-    if handle >= LINUX_INOTIFY_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
+    if handle >= LINUX_INOTIFY_HANDLE_BASE
+        && handle < LINUX_USERFAULT_HANDLE_BASE
+        && !linux_handle_in_use(linux, handle)
+    {
         linux.inotifies.retain(|inotify| inotify.handle != handle);
+    }
+    if handle >= LINUX_USERFAULT_HANDLE_BASE
+        && handle < LINUX_MQ_HANDLE_BASE
+        && !linux_handle_in_use(linux, handle)
+    {
+        linux.userfaultfds.retain(|userfault| userfault.handle != handle);
     }
     if handle >= LINUX_MQ_HANDLE_BASE && !linux_handle_in_use(linux, handle) {
         linux.message_queues.retain(|queue| queue.handle != handle);
@@ -2858,6 +2902,140 @@ pub(crate) fn linux_notification_ready(pid: ObjId, handle: u64) -> Option<bool> 
     } else {
         !state.events.is_empty()
     })
+}
+
+/// Creates one bounded userfaultfd missing-page handler.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_userfault_create(pid: ObjId, close_on_exec: bool) -> Option<u32> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux.userfaultfds.len() >= 8 {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux
+            .userfaultfds
+            .try_reserve(1)
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        let handle = linux.next_userfault_handle;
+        linux.next_userfault_handle = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ,
+                compat_core::fd::CompatKind::Other,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        linux.userfaultfds.push(LinuxUserfaultHandle {
+            handle,
+            state: Arc::new(SpinLock::new(LinuxUserfaultState {
+                api: false,
+                features: 0,
+                ranges: Vec::new(),
+                events: VecDeque::new(),
+            })),
+        });
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_userfault_state(
+    pid: ObjId,
+    handle: u64,
+) -> Option<Arc<SpinLock<LinuxUserfaultState>>> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()?
+            .userfaultfds
+            .iter()
+            .find(|entry| entry.handle == handle)
+            .map(|entry| Arc::clone(&entry.state)),
+        _ => None,
+    })
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_userfault_registered(pid: ObjId, address: u64) -> bool {
+    let states = crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()
+            .map(|linux| {
+                linux
+                    .userfaultfds
+                    .iter()
+                    .map(|entry| Arc::clone(&entry.state))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    });
+    states.into_iter().any(|state| {
+        state
+            .lock()
+            .ranges
+            .iter()
+            .any(|range| address >= range.start && address < range.end)
+    })
+}
+
+/// Parks a missing-page fault until user space resolves or unregisters it.
+/// Returns `false` when the fault is not covered by a userfaultfd range.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_userfault_wait(pid: ObjId, address: u64, write: bool) -> bool {
+    let states = crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process
+            .linux
+            .as_ref()
+            .map(|linux| {
+                linux
+                    .userfaultfds
+                    .iter()
+                    .map(|entry| Arc::clone(&entry.state))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    });
+    let page = address - address % kernel_core::frame::FRAME_SIZE;
+    let mut queued = false;
+    let tid = crate::linux_abi::current_linux_tid(pid).unwrap_or(0);
+    for state in states {
+        let mut state = state.lock();
+        if !state.api
+            || !state
+                .ranges
+                .iter()
+                .any(|range| address >= range.start && address < range.end)
+        {
+            continue;
+        }
+        if state.events.len() < 64 {
+            state.events.push_back(LinuxUserfaultEvent {
+                address: page,
+                flags: if write { 1 } else { 0 },
+                tid,
+            });
+            queued = true;
+        }
+    }
+    if !queued {
+        return false;
+    }
+    crate::linux_abi::wake_message_queue_waiters();
+    loop {
+        if crate::proc::page_flags(pid, page).is_some() {
+            return true;
+        }
+        if !linux_userfault_registered(pid, page) {
+            return false;
+        }
+        sched::pause();
+    }
 }
 
 /// Delivers one real compatibility VFS event to every matching fanotify mark.
@@ -5924,6 +6102,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         next_signalfd_handle: LINUX_SIGNALFD_HANDLE_BASE,
         inotifies: Vec::new(),
         next_inotify_handle: LINUX_INOTIFY_HANDLE_BASE,
+        userfaultfds: Vec::new(),
+        next_userfault_handle: LINUX_USERFAULT_HANDLE_BASE,
         message_queues: Vec::new(),
         next_mq_handle: LINUX_MQ_HANDLE_BASE,
         mount_trees: Vec::new(),

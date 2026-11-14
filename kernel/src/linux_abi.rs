@@ -2781,9 +2781,7 @@ fn execute(
         }
         LinuxSyscall::MigratePages => compat_result(linux_migrate_pages(pid, call.args)),
         LinuxSyscall::MovePages => compat_result(linux_move_pages(pid, call.args)),
-        LinuxSyscall::MapShadowStack | LinuxSyscall::Userfaultfd => {
-            -(CompatErrno::NotSupported as i32 as i64)
-        }
+        LinuxSyscall::MapShadowStack => -(CompatErrno::NotSupported as i32 as i64),
         LinuxSyscall::LandlockCreateRuleset => {
             compat_result(linux_landlock_create_ruleset(pid, call.args))
         }
@@ -2854,6 +2852,7 @@ fn execute(
         LinuxSyscall::InotifyRmWatch => compat_result(linux_inotify_rm_watch(pid, call.args)),
         LinuxSyscall::FanotifyInit => compat_result(linux_fanotify_init(pid, call.args)),
         LinuxSyscall::FanotifyMark => compat_result(linux_fanotify_mark(pid, call.args)),
+        LinuxSyscall::Userfaultfd => compat_result(linux_userfaultfd(pid, call.args)),
         LinuxSyscall::Uprobe => -(CompatErrno::Protocol as i32 as i64),
         LinuxSyscall::Uretprobe => {
             if let Some(tid) = linux_tid(pid) {
@@ -3744,6 +3743,11 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 return linux_fanotify_read(pid, fd, args[1], len);
             }
             return linux_inotify_read(pid, fd, args[1], len);
+        }
+        if entry.kind == compat_core::fd::CompatKind::Other {
+            if let Some(state) = proc::linux_userfault_state(pid, entry.handle) {
+                return linux_userfault_read(pid, fd, state, args[1], len);
+            }
         }
         if entry.kind == compat_core::fd::CompatKind::Socket {
             if !entry.rights.contains(kernel_core::object::Rights::READ) {
@@ -5313,6 +5317,15 @@ fn linux_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         MADV_DONTNEED => {
             let pages = length.div_ceil(PAGE);
+            if proc::linux_userfault_registered(pid, address)
+                && proc::linux_userfault_registered(pid, end.saturating_sub(1))
+            {
+                for page in 0..pages {
+                    proc::unmap_page(pid, address + page * PAGE)
+                        .map_err(|_| CompatErrno::NoMemory)?;
+                }
+                return Ok(0);
+            }
             for page in 0..pages {
                 let va = address + page * PAGE;
                 let flags = proc::page_flags(pid, va).unwrap_or(MapFlags::USER);
@@ -11968,6 +11981,246 @@ fn linux_fanotify_init(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     .ok_or(CompatErrno::NoSpace)
 }
 
+fn linux_userfaultfd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const UFFD_USER_MODE_ONLY: u64 = 1;
+    if args[0] & !UFFD_USER_MODE_ONLY != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    proc::linux_userfault_create(pid, false)
+        .map(u64::from)
+        .ok_or(CompatErrno::NoSpace)
+}
+
+fn linux_userfault_ioctl(
+    pid: ObjId,
+    state: alloc::sync::Arc<crate::sync::SpinLock<proc::LinuxUserfaultState>>,
+    command: u64,
+    argument: u64,
+) -> Result<u64, CompatErrno> {
+    const UFFD_API: u64 = 0xAA;
+    const UFFD_FEATURE_THREAD_ID: u64 = 1 << 8;
+    const UFFDIO_REGISTER_MODE_MISSING: u64 = 1;
+    const UFFDIO_API: u64 = 0xc018_aa3f;
+    const UFFDIO_REGISTER: u64 = 0xc020_aa00;
+    const UFFDIO_UNREGISTER: u64 = 0x8010_aa01;
+    const UFFDIO_WAKE: u64 = 0x8010_aa02;
+    const UFFDIO_COPY: u64 = 0xc028_aa03;
+    const UFFDIO_ZEROPAGE: u64 = 0xc020_aa04;
+    const UFFD_IOCTLS: u64 = 0x1f;
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    match command {
+        UFFDIO_API => {
+            let mut raw = [0u8; 24];
+            copy_from_user(&mut raw, argument, 24).map_err(|_| CompatErrno::Fault)?;
+            let api = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+            let requested = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+            if api != UFFD_API || requested & !UFFD_FEATURE_THREAD_ID != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            let mut state = state.lock();
+            state.api = true;
+            state.features = UFFD_FEATURE_THREAD_ID;
+            drop(state);
+            raw[8..16].copy_from_slice(&UFFD_FEATURE_THREAD_ID.to_le_bytes());
+            raw[16..24].copy_from_slice(&UFFD_IOCTLS.to_le_bytes());
+            copy_to_user(argument, &raw, raw.len()).map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        }
+        UFFDIO_REGISTER => {
+            let mut raw = [0u8; 32];
+            copy_from_user(&mut raw, argument, 32).map_err(|_| CompatErrno::Fault)?;
+            let start = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+            let len = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+            let mode = u64::from_le_bytes(raw[16..24].try_into().unwrap());
+            if start % PAGE != 0
+                || len == 0
+                || mode != UFFDIO_REGISTER_MODE_MISSING
+                || start < crate::arch::USER_WINDOW.0
+            {
+                return Err(CompatErrno::Invalid);
+            }
+            let end = start.checked_add(len).ok_or(CompatErrno::Invalid)?;
+            if end > crate::arch::USER_WINDOW.1 {
+                return Err(CompatErrno::Invalid);
+            }
+            let flags = proc::page_flags(pid, start).ok_or(CompatErrno::NoMemory)?;
+            let mut cursor = start;
+            while cursor < end {
+                if proc::page_flags(pid, cursor) != Some(flags) {
+                    return Err(CompatErrno::NoMemory);
+                }
+                cursor = cursor.saturating_add(PAGE);
+            }
+            let mut state = state.lock();
+            if !state.api {
+                return Err(CompatErrno::Invalid);
+            }
+            if state
+                .ranges
+                .iter()
+                .any(|range| start < range.end && range.start < end)
+            {
+                return Err(CompatErrno::Busy);
+            }
+            state
+                .ranges
+                .try_reserve(1)
+                .map_err(|_| CompatErrno::NoMemory)?;
+            state.ranges.push(proc::LinuxUserfaultRange { start, end, flags });
+            drop(state);
+            raw[24..32].copy_from_slice(&UFFD_IOCTLS.to_le_bytes());
+            copy_to_user(argument, &raw, raw.len()).map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        }
+        UFFDIO_UNREGISTER | UFFDIO_WAKE => {
+            let mut raw = [0u8; 16];
+            copy_from_user(&mut raw, argument, 16).map_err(|_| CompatErrno::Fault)?;
+            let start = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+            let len = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+            if start % PAGE != 0 || len == 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            let end = start.checked_add(len).ok_or(CompatErrno::Invalid)?;
+            if command == UFFDIO_WAKE {
+                return Ok(0);
+            }
+            let mut state = state.lock();
+            let before = state.ranges.len();
+            state
+                .ranges
+                .retain(|range| !(start <= range.start && range.end <= end));
+            if before == state.ranges.len() {
+                return Err(CompatErrno::Invalid);
+            }
+            Ok(0)
+        }
+        UFFDIO_COPY | UFFDIO_ZEROPAGE => {
+            let (dst, src, len, mode, bytes) = if command == UFFDIO_COPY {
+                let mut raw = [0u8; 32];
+                copy_from_user(&mut raw, argument, 32).map_err(|_| CompatErrno::Fault)?;
+                let dst = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+                let src = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+                let len = u64::from_le_bytes(raw[16..24].try_into().unwrap());
+                let mode = u64::from_le_bytes(raw[24..32].try_into().unwrap());
+                if mode & !1 != 0 {
+                    return Err(CompatErrno::Invalid);
+                }
+                let count = usize::try_from(len).map_err(|_| CompatErrno::Invalid)?;
+                let mut bytes = alloc::vec![0u8; count];
+                copy_from_user(&mut bytes, src, count).map_err(|_| CompatErrno::Fault)?;
+                (dst, src, len, mode, bytes)
+            } else {
+                let mut raw = [0u8; 24];
+                copy_from_user(&mut raw, argument, 24)
+                    .map_err(|_| CompatErrno::Fault)?;
+                let dst = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+                let len = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+                let mode = u64::from_le_bytes(raw[16..24].try_into().unwrap());
+                if mode & !1 != 0 {
+                    return Err(CompatErrno::Invalid);
+                }
+                (dst, 0, len, mode, alloc::vec::Vec::new())
+            };
+            let _ = (src, mode);
+            if dst % PAGE != 0 || len == 0 || len % PAGE != 0 || len > 64 * PAGE {
+                return Err(CompatErrno::Invalid);
+            }
+            let end = dst.checked_add(len).ok_or(CompatErrno::Invalid)?;
+            let flags = {
+                let state = state.lock();
+                let selected = state
+                    .ranges
+                    .iter()
+                    .find(|range| dst >= range.start && end <= range.end)
+                    .map(|range| range.flags)
+                    .ok_or(CompatErrno::Invalid)?;
+                selected
+            };
+            let mut mapped = alloc::vec::Vec::new();
+            let mut offset = 0usize;
+            while (offset as u64) < len {
+                let address = dst + offset as u64;
+                if proc::page_flags(pid, address).is_some() {
+                    for address in mapped.into_iter().rev() {
+                        let _ = proc::unmap_page(pid, address);
+                    }
+                    return Err(CompatErrno::Exists);
+                }
+                if let Err(error) = proc::map_new(pid, address, flags) {
+                    let _ = error;
+                    for address in mapped.into_iter().rev() {
+                        let _ = proc::unmap_page(pid, address);
+                    }
+                    return Err(CompatErrno::NoMemory);
+                }
+                mapped.push(address);
+                if command == UFFDIO_COPY {
+                    if let Err(error) =
+                        proc::write(pid, address, &bytes[offset..offset + PAGE as usize])
+                    {
+                        let _ = error;
+                        for address in mapped.into_iter().rev() {
+                            let _ = proc::unmap_page(pid, address);
+                        }
+                        return Err(CompatErrno::Fault);
+                    }
+                }
+                offset += PAGE as usize;
+            }
+            let result_offset = if command == UFFDIO_COPY { 32 } else { 24 };
+            let mut result = alloc::vec![0u8; result_offset + 8];
+            copy_from_user(&mut result[..result_offset], argument, result_offset)
+                .map_err(|_| CompatErrno::Fault)?;
+            result[result_offset..].copy_from_slice(&(len as i64).to_le_bytes());
+            copy_to_user(argument, &result, result.len()).map_err(|_| CompatErrno::Fault)?;
+            Ok(0)
+        }
+        _ => Err(CompatErrno::NotSupported),
+    }
+}
+
+fn linux_userfault_read(
+    pid: ObjId,
+    fd: u32,
+    state: alloc::sync::Arc<crate::sync::SpinLock<proc::LinuxUserfaultState>>,
+    address: u64,
+    len: usize,
+) -> Result<u64, CompatErrno> {
+    const EVENT_BYTES: usize = 32;
+    if len < EVENT_BYTES {
+        return Err(CompatErrno::Invalid);
+    }
+    let nonblocking =
+        proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    loop {
+        let batch = {
+            let mut state = state.lock();
+            let count = (len / EVENT_BYTES).min(64).min(state.events.len());
+            state.events.drain(..count).collect::<alloc::vec::Vec<_>>()
+        };
+        if batch.is_empty() {
+            if nonblocking {
+                return Err(CompatErrno::TryAgain);
+            }
+            if proc::current_exiting() || current_signal_pending(pid) {
+                return Err(CompatErrno::Interrupted);
+            }
+            sched::pause();
+            continue;
+        }
+        let mut output = alloc::vec![0u8; batch.len() * EVENT_BYTES];
+        for (index, event) in batch.iter().enumerate() {
+            let base = index * EVENT_BYTES;
+            output[base] = 0x12;
+            output[base + 8..base + 16].copy_from_slice(&event.flags.to_le_bytes());
+            output[base + 16..base + 24].copy_from_slice(&event.address.to_le_bytes());
+            output[base + 24..base + 28].copy_from_slice(&event.tid.to_le_bytes());
+        }
+        copy_to_user(address, &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+        return Ok(output.len() as u64);
+    }
+}
+
 /// Adds or removes one inode, mount, or filesystem fanotify mark.
 fn linux_fanotify_mark(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const FAN_MARK_ADD: u32 = 0x1;
@@ -15783,6 +16036,9 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const SYNC_IOC_SET_DEADLINE: u64 = 0x4010_3e05;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if let Some(state) = proc::linux_userfault_state(pid, entry.handle) {
+        return linux_userfault_ioctl(pid, state, args[1], args[2]);
+    }
     if args[1] == FIONREAD && entry.kind == compat_core::fd::CompatKind::Pipe {
         if !entry.rights.contains(kernel_core::object::Rights::READ) {
             return Err(CompatErrno::BadFd);
@@ -17203,6 +17459,16 @@ fn linux_epoll_readiness(
                 0
             }
         }
+        compat_core::fd::CompatKind::Other
+            if proc::linux_userfault_state(pid, registration.handle).is_some() =>
+        {
+            let state = proc::linux_userfault_state(pid, registration.handle)?;
+            if requested & EPOLLIN != 0 && !state.lock().events.is_empty() {
+                EPOLLIN
+            } else {
+                0
+            }
+        }
         compat_core::fd::CompatKind::Pidfd => {
             if requested & EPOLLIN != 0
                 && ObjId::from_raw(registration.handle)
@@ -17462,6 +17728,14 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                         && proc::linux_notification_ready(pid, entry.handle)
                             == Some(true)
                     {
+                        POLLIN
+                    } else {
+                        0
+                    }
+                }
+                Some(entry) if proc::linux_userfault_state(pid, entry.handle).is_some() => {
+                    let state = proc::linux_userfault_state(pid, entry.handle).unwrap();
+                    if events & POLLIN != 0 && !state.lock().events.is_empty() {
                         POLLIN
                     } else {
                         0
