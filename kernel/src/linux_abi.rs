@@ -2023,6 +2023,7 @@ fn execute(
         LinuxSyscall::CopyFileRange => compat_result(linux_copy_file_range(pid, call.args)),
         LinuxSyscall::Splice => compat_result(linux_splice(pid, call.args)),
         LinuxSyscall::Tee => compat_result(linux_tee(pid, call.args)),
+        LinuxSyscall::VmSplice => compat_result(linux_vmsplice(pid, call.args)),
         LinuxSyscall::Mmap => compat_result(linux_mmap(pid, call.args)),
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
@@ -11138,6 +11139,69 @@ fn linux_tee(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         output.handle,
         &bytes[..count],
         force_nonblocking,
+    )
+    .map(|written| written as u64)
+}
+
+/// Implements `vmsplice(2)` by importing user iovecs into a bounded pipe.
+fn linux_vmsplice(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SPLICE_F_NONBLOCK: u64 = 0x2;
+    const SPLICE_F_MOVE: u64 = 0x1;
+    const SPLICE_F_MORE: u64 = 0x4;
+    const SPLICE_F_GIFT: u64 = 0x8;
+    const MAX_IOVECS: usize = 1024;
+    const IOVEC_BYTES: usize = 16;
+    if args[3] & !(SPLICE_F_NONBLOCK | SPLICE_F_MOVE | SPLICE_F_MORE | SPLICE_F_GIFT) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Pipe
+        || !entry
+            .rights
+            .contains(kernel_core::object::Rights::WRITE)
+    {
+        return Err(CompatErrno::BadFd);
+    }
+    let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
+    if count > MAX_IOVECS {
+        return Err(CompatErrno::Invalid);
+    }
+    if count == 0 {
+        return Ok(0);
+    }
+    let iovec_bytes = count.checked_mul(IOVEC_BYTES).ok_or(CompatErrno::Invalid)?;
+    let mut raw_iov = alloc::vec![0u8; iovec_bytes];
+    copy_from_user(&mut raw_iov, args[1], iovec_bytes).map_err(|_| CompatErrno::Fault)?;
+    let mut total = 0usize;
+    for iovec in raw_iov.chunks_exact(IOVEC_BYTES) {
+        let length =
+            usize::try_from(u64::from_le_bytes(iovec[8..16].try_into().unwrap()))
+                .map_err(|_| CompatErrno::Invalid)?;
+        total = total.checked_add(length).ok_or(CompatErrno::Invalid)?;
+        if total > compat_core::PIPE_CAPACITY {
+            return Err(CompatErrno::Invalid);
+        }
+    }
+    let mut bytes = alloc::vec![0u8; total];
+    let mut done = 0usize;
+    for iovec in raw_iov.chunks_exact(IOVEC_BYTES) {
+        let base = u64::from_le_bytes(iovec[0..8].try_into().unwrap());
+        let length =
+            usize::try_from(u64::from_le_bytes(iovec[8..16].try_into().unwrap()))
+                .map_err(|_| CompatErrno::Invalid)?;
+        if length != 0 {
+            copy_from_user(&mut bytes[done..done + length], base, length)
+                .map_err(|_| CompatErrno::Fault)?;
+        }
+        done += length;
+    }
+    linux_pipe_write_buffer_mode(
+        pid,
+        fd,
+        entry.handle,
+        &bytes,
+        args[3] & SPLICE_F_NONBLOCK != 0,
     )
     .map(|written| written as u64)
 }

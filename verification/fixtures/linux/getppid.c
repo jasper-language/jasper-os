@@ -4198,6 +4198,28 @@ int main(void) {
                 4, 0x10) != -1 || errno != EINVAL) {
         return 528;
     }
+    struct iovec vmsplice_vectors[] = {
+        {.iov_base = "VM", .iov_len = 2},
+        {.iov_base = "SPL", .iov_len = 3},
+    };
+    memset(splice_readback, 0, sizeof(splice_readback));
+    if (syscall(SYS_vmsplice, splice_source_pipe[1], vmsplice_vectors,
+                sizeof(vmsplice_vectors) / sizeof(vmsplice_vectors[0]),
+                0) != 5 ||
+        read(splice_source_pipe[0], splice_readback, 5) != 5 ||
+        memcmp(splice_readback, "VMSPL", 5) != 0) {
+        return 537;
+    }
+    errno = 0;
+    if (syscall(SYS_vmsplice, splice_source_pipe[1], vmsplice_vectors,
+                1, 0x10) != -1 || errno != EINVAL) {
+        return 538;
+    }
+    errno = 0;
+    if (syscall(SYS_vmsplice, 0, vmsplice_vectors, 1, 0) != -1 ||
+        errno != EBADF) {
+        return 539;
+    }
     errno = 0;
     if (syscall(SYS_membarrier, 8, 0, -1) != -1 || errno != EPERM) {
         return 529;

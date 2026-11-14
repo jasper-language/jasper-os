@@ -201,6 +201,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::CopyFileRange,
         LinuxSyscall::Splice,
         LinuxSyscall::Tee,
+        LinuxSyscall::VmSplice,
         LinuxSyscall::Brk,
         LinuxSyscall::Access,
         LinuxSyscall::FaccessAt,
