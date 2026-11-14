@@ -6370,6 +6370,14 @@ pub(crate) fn settle_posix_timers(now: u64) {
     let mut pending_count = 0usize;
     {
         let mut state = COMPAT.lock();
+        let mut process_signals: [Option<(ObjId, u64)>; MAX_PROCESS_SIGNAL_SETS] =
+            [None; MAX_PROCESS_SIGNAL_SETS];
+        for (slot, signals) in process_signals
+            .iter_mut()
+            .zip(state.process_signals.iter().flatten())
+        {
+            *slot = Some((signals.process, signals.pending));
+        }
         for timer in state.posix_timers.iter_mut().flatten() {
             if !timer.active {
                 continue;
@@ -6390,8 +6398,20 @@ pub(crate) fn settle_posix_timers(now: u64) {
             } else {
                 (current - timer.next) / timer.interval + 1
             };
-            if timer.notify == 0 && expired > 1 {
-                timer.overrun = timer.overrun.saturating_add(expired - 1);
+            if timer.notify == 0 {
+                let signal_pending = process_signals
+                    .iter()
+                    .flatten()
+                    .find(|(process, _)| *process == timer.process)
+                    .is_some_and(|(_, pending)| {
+                        *pending & (1u64 << (timer.signal - 1)) != 0
+                    });
+                let overrun = if signal_pending {
+                    expired
+                } else {
+                    expired.saturating_sub(1)
+                };
+                timer.overrun = timer.overrun.saturating_add(overrun);
             }
             timer.next = if timer.interval == 0 {
                 0

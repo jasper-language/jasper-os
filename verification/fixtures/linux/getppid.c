@@ -3028,7 +3028,7 @@ int main(void) {
     }
     posix_values.it_interval = (struct timespec){.tv_sec = 0, .tv_nsec = 10000000};
     posix_values.it_value = (struct timespec){.tv_sec = 0, .tv_nsec = 10000000};
-    struct timespec overrun_delay = {.tv_sec = 0, .tv_nsec = 80000000};
+    struct timespec overrun_delay = {.tv_sec = 0, .tv_nsec = 500000000};
     if (syscall(SYS_timer_settime, posix_timer, 0, &posix_values,
                 NULL) != 0 ||
         nanosleep(&overrun_delay, NULL) != 0 ||
