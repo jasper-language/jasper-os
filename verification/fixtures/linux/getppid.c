@@ -4160,6 +4160,31 @@ int main(void) {
                 4, 0x10) != -1 || errno != EINVAL) {
         return 528;
     }
+    errno = 0;
+    if (syscall(SYS_membarrier, 8, 0, -1) != -1 || errno != EPERM) {
+        return 529;
+    }
+    if (syscall(SYS_membarrier, 16, 0, -1) != 0 ||
+        syscall(SYS_membarrier, 8, 0, -1) != 0 ||
+        syscall(SYS_membarrier, 64, 0, -1) != 0 ||
+        syscall(SYS_membarrier, 32, 0, -1) != 0 ||
+        syscall(SYS_membarrier, 256, 0, -1) != 0 ||
+        syscall(SYS_membarrier, 128, 0, -1) != 0) {
+        return 530;
+    }
+    long membarrier_supported = syscall(SYS_membarrier, 0, 0, 0);
+    long membarrier_registered = syscall(SYS_membarrier, 512, 0, -1);
+    if (membarrier_supported < 0 ||
+        (membarrier_supported & (2 | 8 | 32 | 128 | 512)) !=
+            (2 | 8 | 32 | 128 | 512) ||
+        membarrier_registered != (8 | 32 | 128) ||
+        syscall(SYS_membarrier, 1, 0, -1) != 0) {
+        return 531;
+    }
+    errno = 0;
+    if (syscall(SYS_membarrier, 8, 1, -1) != -1 || errno != EINVAL) {
+        return 532;
+    }
     int splice_file =
         syscall(SYS_open, "/usr/lib/x86_64-linux-gnu/libc.so.6",
                 O_RDONLY | O_CLOEXEC, 0);

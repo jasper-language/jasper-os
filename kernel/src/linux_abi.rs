@@ -2030,6 +2030,7 @@ fn execute(
         LinuxSyscall::Msync => compat_result(linux_msync(pid, call.args)),
         LinuxSyscall::MinCore => compat_result(linux_mincore(pid, call.args)),
         LinuxSyscall::Madvise => compat_result(linux_madvise(pid, call.args)),
+        LinuxSyscall::MemBarrier => compat_result(linux_membarrier(pid, call.args)),
         LinuxSyscall::Mlock => compat_result(linux_mlock(pid, call.args, false)),
         LinuxSyscall::Mlock2 => compat_result(linux_mlock(pid, call.args, true)),
         LinuxSyscall::Mlockall => compat_result(linux_mlockall(call.args)),
@@ -4316,6 +4317,103 @@ fn linux_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 proc::map_new(pid, va, flags).map_err(|_| CompatErrno::NoMemory)?;
             }
             Ok(0)
+        }
+        _ => Err(CompatErrno::Invalid),
+    }
+}
+
+/// Implements process-wide and private-expedited `membarrier(2)` registrations.
+fn linux_membarrier(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const QUERY: u64 = 0;
+    const GLOBAL: u64 = 1 << 0;
+    const GLOBAL_EXPEDITED: u64 = 1 << 1;
+    const REGISTER_GLOBAL_EXPEDITED: u64 = 1 << 2;
+    const PRIVATE_EXPEDITED: u64 = 1 << 3;
+    const REGISTER_PRIVATE_EXPEDITED: u64 = 1 << 4;
+    const PRIVATE_EXPEDITED_SYNC_CORE: u64 = 1 << 5;
+    const REGISTER_PRIVATE_EXPEDITED_SYNC_CORE: u64 = 1 << 6;
+    const PRIVATE_EXPEDITED_RSEQ: u64 = 1 << 7;
+    const REGISTER_PRIVATE_EXPEDITED_RSEQ: u64 = 1 << 8;
+    const GET_REGISTERED: u64 = 1 << 9;
+    const SUPPORTED: u64 = GLOBAL
+        | GLOBAL_EXPEDITED
+        | REGISTER_GLOBAL_EXPEDITED
+        | PRIVATE_EXPEDITED
+        | REGISTER_PRIVATE_EXPEDITED
+        | PRIVATE_EXPEDITED_SYNC_CORE
+        | REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
+        | PRIVATE_EXPEDITED_RSEQ
+        | REGISTER_PRIVATE_EXPEDITED_RSEQ
+        | GET_REGISTERED;
+    const REGISTERED_PRIVATE: u8 = 1;
+    const REGISTERED_SYNC_CORE: u8 = 2;
+    const REGISTERED_RSEQ: u8 = 4;
+    if args[1] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let cpu_id = args[2] as u32 as i32;
+    let registered = || proc::linux_membarrier_flags(pid).ok_or(CompatErrno::NoProcess);
+    match args[0] {
+        QUERY => {
+            if args[2] != 0 {
+                return Err(CompatErrno::Invalid);
+            }
+            Ok(SUPPORTED)
+        }
+        GLOBAL | GLOBAL_EXPEDITED => {
+            if cpu_id != 0 && cpu_id != -1 {
+                return Err(CompatErrno::Invalid);
+            }
+            core::sync::atomic::fence(Ordering::SeqCst);
+            Ok(0)
+        }
+        REGISTER_GLOBAL_EXPEDITED => Ok(0),
+        PRIVATE_EXPEDITED
+        | PRIVATE_EXPEDITED_SYNC_CORE
+        | PRIVATE_EXPEDITED_RSEQ => {
+            if cpu_id != -1 {
+                return Err(CompatErrno::Invalid);
+            }
+            let required = match args[0] {
+                PRIVATE_EXPEDITED => REGISTERED_PRIVATE,
+                PRIVATE_EXPEDITED_SYNC_CORE => REGISTERED_SYNC_CORE,
+                _ => REGISTERED_RSEQ,
+            };
+            if registered()? & required == 0 {
+                return Err(CompatErrno::Perm);
+            }
+            core::sync::atomic::fence(Ordering::SeqCst);
+            Ok(0)
+        }
+        REGISTER_PRIVATE_EXPEDITED
+        | REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
+        | REGISTER_PRIVATE_EXPEDITED_RSEQ => {
+            if cpu_id != -1 {
+                return Err(CompatErrno::Invalid);
+            }
+            let flag = match args[0] {
+                REGISTER_PRIVATE_EXPEDITED => REGISTERED_PRIVATE,
+                REGISTER_PRIVATE_EXPEDITED_SYNC_CORE => REGISTERED_SYNC_CORE,
+                _ => REGISTERED_RSEQ,
+            };
+            if proc::register_linux_membarrier(pid, flag) {
+                Ok(0)
+            } else {
+                Err(CompatErrno::NoProcess)
+            }
+        }
+        GET_REGISTERED => {
+            if cpu_id != -1 {
+                return Err(CompatErrno::Invalid);
+            }
+            let flags = registered()?;
+            Ok(u64::from(
+                (flags & REGISTERED_PRIVATE != 0) as u8 * PRIVATE_EXPEDITED as u8
+                    | (flags & REGISTERED_SYNC_CORE != 0) as u8
+                        * PRIVATE_EXPEDITED_SYNC_CORE as u8
+                    | (flags & REGISTERED_RSEQ != 0) as u8
+                        * PRIVATE_EXPEDITED_RSEQ as u8,
+            ))
         }
         _ => Err(CompatErrno::Invalid),
     }

@@ -138,6 +138,7 @@ struct LinuxProcessState {
     sgid: u32,
     fsgid: u32,
     supplementary_groups: Vec<u32>,
+    membarrier_flags: u8,
     umask: u32,
     ioprio: u32,
     mappings: Vec<LinuxMapping>,
@@ -3985,6 +3986,30 @@ pub(crate) fn set_linux_supplementary_groups(pid: ObjId, groups: &[u32]) -> bool
     .is_ok()
 }
 
+/// Returns the process-local membarrier registration bits.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_membarrier_flags(pid: ObjId) -> Option<u8> {
+    with_proc(pid, |process| {
+        Ok(process
+            .linux
+            .as_ref()
+            .ok_or(ProcError::Exited)?
+            .membarrier_flags)
+    })
+    .ok()
+}
+
+/// Atomically adds process-local membarrier registration bits.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn register_linux_membarrier(pid: ObjId, flags: u8) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux.membarrier_flags |= flags;
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Returns the process-local Linux umask.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_umask(pid: ObjId) -> Option<u32> {
@@ -4284,6 +4309,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         sgid: 0,
         fsgid: 0,
         supplementary_groups: Vec::new(),
+        membarrier_flags: 0,
         umask: 0o022,
         ioprio: (2 << 13) | 4,
         mappings: Vec::new(),
