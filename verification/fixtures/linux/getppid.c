@@ -29,6 +29,7 @@
 #include <sys/epoll.h>
 #include <sys/file.h>
 #include <sys/mman.h>
+#include <sys/msg.h>
 #include <sys/prctl.h>
 #include <sys/random.h>
 #include <sys/reboot.h>
@@ -5197,6 +5198,131 @@ int main(void) {
     if (waitpid(session_child, &child_status, 0) != session_child ||
         !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
         return 348;
+    }
+    key_t msg_key = 0x4a534d51;
+    int msg_queue =
+        msgget(msg_key, IPC_CREAT | IPC_EXCL | 0600);
+    if (msg_queue < 0 ||
+        msgget(msg_key, IPC_CREAT | 0600) != msg_queue) {
+        return 590;
+    }
+    errno = 0;
+    if (msgget(msg_key, IPC_CREAT | IPC_EXCL | 0600) != -1 ||
+        errno != EEXIST) {
+        return 591;
+    }
+    struct {
+        long mtype;
+        char mtext[32];
+    } msg = {0};
+    msg.mtype = 20;
+    memcpy(msg.mtext, "twenty", 6);
+    if (msgsnd(msg_queue, &msg, 6, 0) != 0) {
+        return 592;
+    }
+    msg.mtype = 10;
+    memcpy(msg.mtext, "ten", 3);
+    if (msgsnd(msg_queue, &msg, 3, 0) != 0) {
+        return 593;
+    }
+    msg.mtype = 30;
+    memcpy(msg.mtext, "thirty", 6);
+    if (msgsnd(msg_queue, &msg, 6, 0) != 0) {
+        return 594;
+    }
+    struct msqid_ds msg_ds = {0};
+    if (msgctl(msg_queue, IPC_STAT, &msg_ds) != 0 ||
+        msg_ds.msg_qnum != 3 ||
+        msg_ds.__msg_cbytes != 15 ||
+        msg_ds.msg_perm.cuid != geteuid() ||
+        msg_ds.msg_perm.cgid != getegid()) {
+        return 595;
+    }
+    memset(&msg, 0, sizeof(msg));
+    if (msgrcv(msg_queue, &msg, sizeof(msg.mtext), 0,
+               MSG_COPY | IPC_NOWAIT) != 6 ||
+        msg.mtype != 20 || memcmp(msg.mtext, "twenty", 6) != 0) {
+        return 596;
+    }
+    memset(&msg, 0, sizeof(msg));
+    if (msgrcv(msg_queue, &msg, sizeof(msg.mtext), 0, 0) != 6 ||
+        msg.mtype != 20 || memcmp(msg.mtext, "twenty", 6) != 0) {
+        return 597;
+    }
+    memset(&msg, 0, sizeof(msg));
+    if (msgrcv(msg_queue, &msg, sizeof(msg.mtext), -15, 0) != 3 ||
+        msg.mtype != 10 || memcmp(msg.mtext, "ten", 3) != 0) {
+        return 598;
+    }
+    memset(&msg, 0, sizeof(msg));
+    if (msgrcv(msg_queue, &msg, sizeof(msg.mtext), 20,
+               MSG_EXCEPT) != 6 ||
+        msg.mtype != 30 || memcmp(msg.mtext, "thirty", 6) != 0) {
+        return 599;
+    }
+    msg.mtype = 5;
+    memcpy(msg.mtext, "small", 5);
+    if (msgsnd(msg_queue, &msg, 5, 0) != 0) {
+        return 600;
+    }
+    errno = 0;
+    if (msgrcv(msg_queue, &msg, 2, 5, 0) != -1 ||
+        errno != E2BIG) {
+        return 601;
+    }
+    memset(&msg, 0, sizeof(msg));
+    if (msgrcv(msg_queue, &msg, 2, 5, MSG_NOERROR) != 2 ||
+        msg.mtype != 5 || memcmp(msg.mtext, "sm", 2) != 0) {
+        return 602;
+    }
+    errno = 0;
+    if (msgrcv(msg_queue, &msg, sizeof(msg.mtext), 0,
+               IPC_NOWAIT) != -1 ||
+        errno != ENOMSG) {
+        return 603;
+    }
+    pid_t msg_child = fork();
+    if (msg_child < 0) {
+        return 604;
+    }
+    if (msg_child == 0) {
+        struct timespec delay = {.tv_sec = 0, .tv_nsec = 50000000};
+        nanosleep(&delay, NULL);
+        msg.mtype = 99;
+        memcpy(msg.mtext, "wake", 4);
+        _exit(msgsnd(msg_queue, &msg, 4, 0) == 0 ? 0 : 1);
+    }
+    memset(&msg, 0, sizeof(msg));
+    if (msgrcv(msg_queue, &msg, sizeof(msg.mtext), 99, 0) != 4 ||
+        msg.mtype != 99 || memcmp(msg.mtext, "wake", 4) != 0) {
+        return 605;
+    }
+    if (waitpid(msg_child, &child_status, 0) != msg_child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+        return 606;
+    }
+    msg_ds.msg_perm.mode = 0600;
+    msg_ds.msg_qbytes = 4096;
+    if (msgctl(msg_queue, IPC_SET, &msg_ds) != 0 ||
+        msgctl(msg_queue, MSG_STAT, &msg_ds) != msg_queue ||
+        msg_ds.msg_qbytes != 4096) {
+        return 607;
+    }
+    struct msginfo msg_info = {0};
+    if (msgctl(msg_queue, IPC_INFO, (struct msqid_ds *)&msg_info) != 0 ||
+        msg_info.msgmax != 8192 ||
+        msg_info.msgmnb != 16384 ||
+        msgctl(msg_queue, MSG_INFO, (struct msqid_ds *)&msg_info) != 0) {
+        return 608;
+    }
+    if (msgctl(msg_queue, IPC_RMID, NULL) != 0) {
+        return 609;
+    }
+    errno = 0;
+    if (msgsnd(msg_queue, &msg, 4, IPC_NOWAIT) != -1 ||
+        errno != EINVAL ||
+        msgget(msg_key, 0600) != -1 || errno != ENOENT) {
+        return 610;
     }
     close(fd);
     printf("jasper-ppid=%d lseek=%lld affinity=%d cpu=%u node=%u uptime=%lld totalram=%llu freeram=%llu procs=%u exe=%s resolution_ns=%ld sleep_ns=%lld wall=%lld dirent=6 exec_meta=true fork=true\n",

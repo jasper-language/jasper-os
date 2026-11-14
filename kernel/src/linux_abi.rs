@@ -2150,6 +2150,10 @@ fn execute(
         LinuxSyscall::Accept => compat_result(linux_accept(pid, call.args, false)),
         LinuxSyscall::Accept4 => compat_result(linux_accept(pid, call.args, true)),
         LinuxSyscall::SocketPair => compat_result(linux_socketpair(pid, call.args)),
+        LinuxSyscall::MsgGet => compat_result(linux_msgget(pid, call.args)),
+        LinuxSyscall::MsgCtl => compat_result(linux_msgctl(pid, call.args)),
+        LinuxSyscall::MsgSnd => compat_result(linux_msgsnd(pid, call.args)),
+        LinuxSyscall::MsgRcv => compat_result(linux_msgrcv(pid, call.args)),
         LinuxSyscall::EventFd => compat_result(linux_eventfd(pid, call.args, false)),
         LinuxSyscall::EventFd2 => compat_result(linux_eventfd(pid, call.args, true)),
         LinuxSyscall::TimerFdCreate => compat_result(linux_timerfd_create(pid, call.args)),
@@ -2466,6 +2470,60 @@ fn execute(
         LinuxSyscall::PidfdGetFd => compat_result(linux_pidfd_getfd(pid, call.args)),
         _ => -i64::from(CompatErrno::NoSys as i32),
     }
+}
+
+fn sysv_caller(pid: ObjId) -> Result<crate::sysv_ipc::Caller, CompatErrno> {
+    let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
+    let capabilities = proc::linux_capabilities(pid).ok_or(CompatErrno::NoProcess)?;
+    Ok(crate::sysv_ipc::Caller {
+        process: pid,
+        pid: proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?,
+        euid: credentials.euid,
+        egid: credentials.egid,
+        groups: proc::linux_supplementary_groups(pid).ok_or(CompatErrno::NoProcess)?,
+        cap_effective: capabilities.effective,
+        now: crate::arch::wall_clock_ns()
+            .ok_or(CompatErrno::NoSys)?
+            / 1_000_000_000,
+    })
+}
+
+fn linux_msgget(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    crate::sysv_ipc::msgget(
+        &sysv_caller(pid)?,
+        args[0] as u32 as i32,
+        args[1],
+    )
+}
+
+fn linux_msgctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    crate::sysv_ipc::msgctl(
+        &sysv_caller(pid)?,
+        args[0] as u32 as i32,
+        args[1],
+        args[2],
+    )
+}
+
+fn linux_msgsnd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    crate::sysv_ipc::msgsnd(
+        &sysv_caller(pid)?,
+        args[0] as u32 as i32,
+        args[1],
+        args[2],
+        args[3],
+    )
+}
+
+fn linux_msgrcv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    crate::sysv_ipc::msgrcv(
+        &sysv_caller(pid)?,
+        args[0] as u32 as i32,
+        args[1],
+        args[2],
+        args[3] as i64,
+        args[4],
+    )
 }
 
 /// Returns one real or effective Linux ABI identity.
