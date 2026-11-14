@@ -104,6 +104,7 @@ enum QueuedCommand {
     },
 }
 
+#[derive(Clone, Copy)]
 struct ActiveTransaction {
     target: ObjId,
     sender: ObjId,
@@ -290,6 +291,27 @@ pub(crate) fn set_context_manager_ext(
 /// Releases every Binder node, local handle and queued state owned by one
 /// compatibility process. Called after its final Linux thread exits.
 pub(crate) fn release_process(pid: ObjId) {
+    let active = BINDER.lock().active.clone();
+    let mut dead_replies = Vec::new();
+    if dead_replies
+        .try_reserve(active.len().saturating_mul(2))
+        .is_ok()
+    {
+        for transaction in active {
+            if transaction.target == pid
+                && proc::state(transaction.sender) == Some(proc::ProcState::Running)
+            {
+                dead_replies.push(transaction.sender);
+            }
+            if transaction.sender == pid
+                && proc::state(transaction.target) == Some(proc::ProcState::Running)
+            {
+                dead_replies.push(transaction.target);
+            }
+        }
+    } else {
+        dead_replies.clear();
+    }
     let mut state = BINDER.lock();
     if state.context_manager == Some(pid) {
         state.context_manager = None;
@@ -309,22 +331,6 @@ pub(crate) fn release_process(pid: ObjId) {
         .iter()
         .filter(|request| dead_nodes[..dead_count].contains(&request.node))
         .count();
-    let mut dead_replies = Vec::new();
-    if dead_replies
-        .try_reserve(state.active.len().saturating_mul(2))
-        .is_err()
-    {
-        dead_replies.clear();
-    } else {
-        for active in &state.active {
-            if active.target == pid && proc::state(active.sender) == Some(proc::ProcState::Running) {
-                dead_replies.push(active.sender);
-            }
-            if active.sender == pid && proc::state(active.target) == Some(proc::ProcState::Running) {
-                dead_replies.push(active.target);
-            }
-        }
-    }
     if state
         .queue
         .try_reserve(notifications.saturating_add(dead_replies.len()))
@@ -711,23 +717,7 @@ pub(crate) fn write_read(pid: ObjId, fd: u32, args: [u64; 6]) -> Result<u64, Com
         0
     } else {
         loop {
-            let queued = {
-                let mut state = BINDER.lock();
-                let frozen = state
-                    .frozen_processes
-                    .iter()
-                    .any(|frozen| frozen.process == pid);
-                state
-                    .queue
-                    .iter()
-                    .position(|(target, command)| {
-                        *target == pid
-                            && (!frozen
-                                || !matches!(command, QueuedCommand::Transaction { .. }))
-                    })
-                    .and_then(|index| state.queue.remove(index))
-                    .map(|(_, command)| command)
-            };
+            let queued = take_queued(pid);
             if let Some(command) = queued {
                 break deliver(pid, read_buffer, read_size, command)?;
             }
@@ -747,6 +737,52 @@ pub(crate) fn write_read(pid: ObjId, fd: u32, args: [u64; 6]) -> Result<u64, Com
     )
     .map_err(|_| CompatErrno::Fault)?;
     Ok(0)
+}
+
+fn take_queued(pid: ObjId) -> Option<QueuedCommand> {
+    let mut state = BINDER.lock();
+    let frozen = state
+        .frozen_processes
+        .iter()
+        .any(|frozen| frozen.process == pid);
+    let index = state.queue.iter().position(|(target, command)| {
+        *target == pid
+            && (!frozen || !matches!(command, QueuedCommand::Transaction { .. }))
+    })?;
+    let command = state.queue.remove(index).map(|(_, command)| command);
+    drop(state);
+    command
+}
+
+fn reserve_transaction_buffer_capacity() -> Result<(), CompatErrno> {
+    let mut state = BINDER.lock();
+    state
+        .buffers
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    drop(state);
+    Ok(())
+}
+
+fn register_transaction_buffer(recipient: ObjId, address: u64, length: usize) {
+    let mut state = BINDER.lock();
+    state.buffers.push(TransactionBuffer {
+        process: recipient,
+        address,
+        length,
+    });
+    drop(state);
+}
+
+fn take_transaction_buffer(pid: ObjId, address: u64) -> Option<usize> {
+    let mut state = BINDER.lock();
+    let index = state
+        .buffers
+        .iter()
+        .position(|buffer| buffer.process == pid && buffer.address == address)?;
+    let length = state.buffers.remove(index).length;
+    drop(state);
+    Some(length)
 }
 
 fn process_write(pid: ObjId, address: u64, size: usize) -> Result<usize, CompatErrno> {
@@ -803,15 +839,8 @@ fn process_write(pid: ObjId, address: u64, size: usize) -> Result<usize, CompatE
                     return Err(CompatErrno::Invalid);
                 }
                 let pointer = u64::from_le_bytes(bytes[offset + 4..offset + 12].try_into().unwrap());
-                let length = {
-                    let mut state = BINDER.lock();
-                    let index = state
-                        .buffers
-                        .iter()
-                        .position(|buffer| buffer.process == pid && buffer.address == pointer)
-                        .ok_or(CompatErrno::Invalid)?;
-                    state.buffers.remove(index).length
-                };
+                let length =
+                    take_transaction_buffer(pid, pointer).ok_or(CompatErrno::Invalid)?;
                 if !proc::linux_free_transaction_buffer(pid, pointer, length) {
                     return Err(CompatErrno::Invalid);
                 }
@@ -936,6 +965,7 @@ fn update_looper(
         if let Some(index) = existing {
             state.threads.remove(index);
         }
+        drop(state);
         crate::kprintln!("[JSR-BINDER] looper-exit pid={} tid={}", pid.raw(), tid);
         return Ok(());
     }
@@ -964,12 +994,14 @@ fn update_looper(
             *target != pid || !matches!(command, QueuedCommand::SpawnLooper)
         });
     }
+    let threads = state.threads.len();
+    drop(state);
     crate::kprintln!(
         "[JSR-BINDER] looper-register pid={} tid={} pool={} threads={}",
         pid.raw(),
         tid,
         pool_member,
-        state.threads.len()
+        threads
     );
     Ok(())
 }
@@ -1504,13 +1536,32 @@ fn encode_binder_security_context(
 /// Projects Jasper's real subject MAC label and application identity into the
 /// opaque context string consumed by `BR_TRANSACTION_SEC_CTX`.
 fn binder_security_context(process: ObjId) -> Result<Vec<u8>, CompatErrno> {
-    let (context, application) = crate::kobj::with(|table| {
+    let identified = crate::kobj::with(|table| {
         let context = table.security(process).ok()?.require_active().ok()?;
-        let application = context.application?;
-        Some((context, application))
-    })
-    .ok_or(CompatErrno::Perm)?;
+        Some((context, context.application))
+    });
+    let Some((context, application)) = identified else {
+        crate::kprintln!(
+            "[JSR-BINDER] security-context-metadata-missing process={}",
+            process.raw()
+        );
+        return Err(CompatErrno::Perm);
+    };
+    let Some(application) = application else {
+        crate::kprintln!(
+            "[JSR-BINDER] security-context-application-missing process={} legacy_app={}",
+            process.raw(),
+            proc::app(process).unwrap_or(0)
+        );
+        return Err(CompatErrno::Perm);
+    };
     if !context.mac.is_supported() || !application.is_valid() {
+        crate::kprintln!(
+            "[JSR-BINDER] security-context-invalid process={} mac={:?} app={:?}",
+            process.raw(),
+            context.mac,
+            application
+        );
         return Err(CompatErrno::Perm);
     }
     Ok(encode_binder_security_context(
@@ -1567,8 +1618,17 @@ fn enqueue_transaction(
             queue_reply_error(pid, BR_DEAD_REPLY, CompatErrno::NoProcess)?;
             return Ok(());
         }
-        crate::security::authorize_process_pair(pid, target, MacEffect::Share)
-            .map_err(|_| CompatErrno::Perm)?;
+        if let Err(denial) =
+            crate::security::authorize_process_pair(pid, target, MacEffect::Share)
+        {
+            crate::kprintln!(
+                "[JSR-BINDER] transaction-deny sender={} target={} denial={:?}",
+                pid.raw(),
+                target.raw(),
+                denial
+            );
+            return Err(CompatErrno::Perm);
+        }
         let one_way = flags & TF_ONE_WAY != 0;
         let frozen = process_is_frozen(target);
         if frozen && !one_way {
@@ -1595,16 +1655,6 @@ fn enqueue_transaction(
             && active_pool_threads < max_threads
             && !state.spawn_pending.contains(&target)
             && !frozen;
-        crate::kprintln!(
-            "[JSR-BINDER] transaction sender={} target={} code={:#x} flags={:#x} max_threads={} active_pool={} spawn={}",
-            pid.raw(),
-            target.raw(),
-            code,
-            flags,
-            max_threads,
-            active_pool_threads,
-            request_spawn
-        );
         let spam_suspect = one_way && note_oneway_spam(&mut state, pid, target);
         let queued = 2
             + usize::from(request_spawn)
@@ -1675,6 +1725,16 @@ fn enqueue_transaction(
             *slot = Some(thread.task);
         }
         drop(state);
+        crate::kprintln!(
+            "[JSR-BINDER] transaction sender={} target={} code={:#x} flags={:#x} max_threads={} active_pool={} spawn={}",
+            pid.raw(),
+            target.raw(),
+            code,
+            flags,
+            max_threads,
+            active_pool_threads,
+            request_spawn
+        );
         if frozen && one_way {
             note_frozen_transaction(target, true);
         }
@@ -1864,25 +1924,10 @@ fn deliver(
             if let Some(context) = &security_context {
                 combined.extend_from_slice(context);
             }
+            let sender_pid = proc::linux_pid(sender).unwrap_or(0);
+            reserve_transaction_buffer_capacity()?;
             let buffer = proc::linux_alloc_transaction_buffer(recipient, &combined)
                 .ok_or(CompatErrno::NoMemory)?;
-            {
-                let mut state = BINDER.lock();
-                if state.buffers.try_reserve(1).is_err() {
-                    drop(state);
-                    let _ = proc::linux_free_transaction_buffer(
-                        recipient,
-                        buffer,
-                        buffer_length,
-                    );
-                    return Err(CompatErrno::NoMemory);
-                }
-                state.buffers.push(TransactionBuffer {
-                    process: recipient,
-                    address: buffer,
-                    length: buffer_length,
-                });
-            }
             let mut packet = [0u8; BINDER_SEC_CTX_PACKET_BYTES];
             packet[0..4].copy_from_slice(&command.to_le_bytes());
             let transaction = &mut packet[4..BINDER_READ_PACKET_BYTES];
@@ -1890,7 +1935,6 @@ fn deliver(
             transaction[8..16].copy_from_slice(&0u64.to_le_bytes());
             transaction[16..20].copy_from_slice(&code.to_le_bytes());
             transaction[20..24].copy_from_slice(&flags.to_le_bytes());
-            let sender_pid = proc::linux_pid(sender).unwrap_or(0);
             transaction[24..28].copy_from_slice(&(sender_pid as i32).to_le_bytes());
             transaction[28..32].copy_from_slice(&0u32.to_le_bytes());
             transaction[32..40].copy_from_slice(&(data.len() as u64).to_le_bytes());
@@ -1904,8 +1948,23 @@ fn deliver(
                         &(buffer + security_offset as u64).to_le_bytes(),
                     );
             }
-            copy_to_user(address, &packet[..packet_bytes], packet_bytes)
-                .map_err(|_| CompatErrno::Fault)?;
+            if let Err(error) = copy_to_user(address, &packet[..packet_bytes], packet_bytes) {
+                let _ = proc::linux_free_transaction_buffer(
+                    recipient,
+                    buffer,
+                    buffer_length,
+                );
+                return Err(if matches!(
+                    error,
+                    crate::mm::user::UserPtrError::Quota
+                        | crate::mm::user::UserPtrError::OutOfMemory
+                ) {
+                    CompatErrno::NoMemory
+                } else {
+                    CompatErrno::Fault
+                });
+            }
+            register_transaction_buffer(recipient, buffer, buffer_length);
             Ok(packet_bytes)
         }
     }

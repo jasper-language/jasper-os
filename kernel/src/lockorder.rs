@@ -17,8 +17,11 @@
 
 use kernel_core::lockorder::{validate_registry, LockClass};
 
-/// Stable Sandbox identity registry (outermost: no ranked lock may be held).
-/// 稳定的 Sandbox 身份注册表（最外层：获取它时不得持有其他登记锁）。
+/// Android Binder state may allocate, schedule waiters and inspect process
+/// state, so it is the outermost compatibility lock.
+pub const BINDER: LockClass = LockClass::new(0, "system.compat.android.binder");
+/// Stable Sandbox identity registry.
+/// 稳定的 Sandbox 身份注册表。
 pub const SANDBOX: LockClass = LockClass::new(1, "system.sandbox.registry");
 /// 进程登记表（进程与成员线程）。
 /// Process registry.
@@ -56,8 +59,6 @@ pub const SYSV_IPC: LockClass = LockClass::new(13, "system.compat.sysv_ipc");
 /// 内存压力参数与统计。
 /// Memory-pressure state.
 pub const MEMORY_PRESSURE: LockClass = LockClass::new(14, "system.memory.pressure");
-/// Android binder transaction and context-manager state.
-pub const BINDER: LockClass = LockClass::new(16, "system.compat.android.binder");
 /// 内核堆。
 /// Kernel heap.
 pub const MEMORY_HEAP: LockClass = LockClass::new(17, "system.memory.heap");
@@ -93,6 +94,7 @@ pub const CONSOLE: LockClass = LockClass::new(28, "system.console");
 /// 登记表（按级别递增）。
 /// The registry, in ascending rank order.
 pub const REGISTRY: &[LockClass] = &[
+    BINDER,
     SANDBOX,
     PROC_REGISTRY,
     ASSEMBLY,
@@ -108,7 +110,6 @@ pub const REGISTRY: &[LockClass] = &[
     SYSV_IPC,
     MEMORY_PRESSURE,
     NATIVE_INSTALL,
-    BINDER,
     MEMORY_HEAP,
     SANDBOX_STORAGE,
     MEMORY_FRAME,
