@@ -43,6 +43,9 @@ const BC_DEAD_BINDER_DONE: u32 = 0x4008_6310;
 const BC_ENTER_LOOPER: u32 = 0x630c;
 const BC_EXIT_LOOPER: u32 = 0x630d;
 const BC_REGISTER_LOOPER: u32 = 0x630b;
+const BC_REQUEST_FREEZE_NOTIFICATION: u32 = 0x4010_6313;
+const BC_CLEAR_FREEZE_NOTIFICATION: u32 = 0x4010_6314;
+const BC_FREEZE_NOTIFICATION_DONE: u32 = 0x4008_6315;
 
 const BR_TRANSACTION: u32 = 0x8040_7202;
 const BR_REPLY: u32 = 0x8040_7203;
@@ -56,6 +59,8 @@ const BR_TRANSACTION_PENDING_FROZEN: u32 = 0x7214;
 const BR_SPAWN_LOOPER: u32 = 0x720d;
 const BR_DEAD_BINDER: u32 = 0x8008_720f;
 const BR_CLEAR_DEATH_NOTIFICATION_DONE: u32 = 0x8008_7210;
+const BR_FROZEN_BINDER: u32 = 0x800c_7215;
+const BR_CLEAR_FREEZE_NOTIFICATION_DONE: u32 = 0x8008_7216;
 const TF_ONE_WAY: u32 = 0x01;
 const ONEWAY_SPAM_SUSPECT_THRESHOLD: u32 = 32;
 
@@ -67,6 +72,10 @@ enum QueuedCommand {
     SpawnLooper,
     DeathNotification {
         command: u32,
+        cookie: u64,
+    },
+    FreezeNotification {
+        frozen: bool,
         cookie: u64,
     },
     Transaction {
@@ -111,6 +120,13 @@ struct SpamSample {
     sender: ObjId,
     target: ObjId,
     count: u32,
+}
+
+#[derive(Clone, Copy)]
+struct FreezeRequest {
+    recipient: ObjId,
+    node: u64,
+    cookie: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -162,6 +178,7 @@ struct State {
     oneway_spam: Vec<ObjId>,
     frozen_processes: Vec<FrozenProcess>,
     spam_samples: Vec<SpamSample>,
+    freeze_requests: Vec<FreezeRequest>,
     next_error_id: u32,
 }
 
@@ -183,6 +200,7 @@ impl State {
             oneway_spam: Vec::new(),
             frozen_processes: Vec::new(),
             spam_samples: Vec::new(),
+            freeze_requests: Vec::new(),
             next_error_id: 1,
         }
     }
@@ -348,6 +366,9 @@ pub(crate) fn release_process(pid: ObjId) {
     state
         .spam_samples
         .retain(|sample| sample.sender != pid && sample.target != pid);
+    state
+        .freeze_requests
+        .retain(|request| request.recipient != pid);
     state.active.retain(|active| active.target != pid && active.sender != pid);
     state.buffers.retain(|buffer| buffer.process != pid);
     state.queue.retain(|(target, _)| *target != pid);
@@ -360,6 +381,7 @@ pub(crate) fn release_process(pid: ObjId) {
     state.oneway_spam.shrink_to_fit();
     state.frozen_processes.shrink_to_fit();
     state.spam_samples.shrink_to_fit();
+    state.freeze_requests.shrink_to_fit();
     state.active.shrink_to_fit();
     state.buffers.shrink_to_fit();
     state.queue.shrink_to_fit();
@@ -477,6 +499,39 @@ pub(crate) fn set_frozen(
         .frozen_processes
         .iter()
         .position(|frozen| frozen.process == target);
+    let notification_count = state
+        .freeze_requests
+        .iter()
+        .filter(|request| {
+            state
+                .nodes
+                .iter()
+                .any(|node| node.id == request.node && node.owner == target)
+        })
+        .count();
+    if state.queue.len().saturating_add(notification_count) > MAX_QUEUE {
+        return Err(CompatErrno::TryAgain);
+    }
+    state
+        .queue
+        .try_reserve(notification_count)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    let mut notifications = Vec::new();
+    notifications
+        .try_reserve(notification_count)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    notifications.extend(
+        state
+            .freeze_requests
+            .iter()
+            .filter(|request| {
+                state
+                    .nodes
+                    .iter()
+                    .any(|node| node.id == request.node && node.owner == target)
+            })
+            .map(|request| (request.recipient, request.cookie)),
+    );
     if enable {
         if index.is_none() {
             state
@@ -492,6 +547,15 @@ pub(crate) fn set_frozen(
     } else {
         let index = index.ok_or(CompatErrno::Invalid)?;
         state.frozen_processes.remove(index);
+    }
+    for (recipient, cookie) in notifications {
+        state.queue.push_back((
+            recipient,
+            QueuedCommand::FreezeNotification {
+                frozen: enable,
+                cookie,
+            },
+        ));
     }
     let wake = state
         .threads
@@ -758,6 +822,21 @@ fn process_write(pid: ObjId, address: u64, size: usize) -> Result<usize, CompatE
                 }
                 offset += 16;
             }
+            BC_REQUEST_FREEZE_NOTIFICATION | BC_CLEAR_FREEZE_NOTIFICATION => {
+                if bytes.len() - offset < 16 {
+                    return Err(CompatErrno::Invalid);
+                }
+                let handle =
+                    u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
+                let cookie =
+                    u64::from_le_bytes(bytes[offset + 8..offset + 16].try_into().unwrap());
+                if command == BC_REQUEST_FREEZE_NOTIFICATION {
+                    request_freeze_notification(pid, handle, cookie)?;
+                } else {
+                    clear_freeze_notification(pid, handle, cookie)?;
+                }
+                offset += 16;
+            }
             BC_DEAD_BINDER_DONE => {
                 if bytes.len() - offset < 12 {
                     return Err(CompatErrno::Invalid);
@@ -771,6 +850,24 @@ fn process_write(pid: ObjId, address: u64, size: usize) -> Result<usize, CompatE
                     .retain(|request| {
                         request.recipient != pid || request.cookie != cookie
                     });
+                offset += 12;
+            }
+            BC_FREEZE_NOTIFICATION_DONE => {
+                if bytes.len() - offset < 12 {
+                    return Err(CompatErrno::Invalid);
+                }
+                let cookie =
+                    u64::from_le_bytes(bytes[offset + 4..offset + 12].try_into().unwrap());
+                BINDER.lock().queue.retain(|(target, command)| {
+                    *target != pid
+                        || !matches!(
+                            command,
+                            QueuedCommand::FreezeNotification {
+                                cookie: queued,
+                                ..
+                            } if *queued == cookie
+                        )
+                });
                 offset += 12;
             }
             BC_ENTER_LOOPER | BC_EXIT_LOOPER | BC_REGISTER_LOOPER => {
@@ -923,6 +1020,69 @@ fn clear_death(recipient: ObjId, handle: u32, cookie: u64) -> Result<(), CompatE
         recipient,
         QueuedCommand::DeathNotification {
             command: BR_CLEAR_DEATH_NOTIFICATION_DONE,
+            cookie,
+        },
+    ));
+    Ok(())
+}
+
+fn request_freeze_notification(
+    recipient: ObjId,
+    handle: u32,
+    cookie: u64,
+) -> Result<(), CompatErrno> {
+    let mut state = BINDER.lock();
+    let node = state
+        .handles
+        .iter()
+        .find(|binding| binding.recipient == recipient && binding.handle == handle)
+        .map(|binding| binding.node)
+        .ok_or(CompatErrno::NoEntry)?;
+    state
+        .freeze_requests
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    if let Some(request) = state
+        .freeze_requests
+        .iter_mut()
+        .find(|request| request.recipient == recipient && request.node == node)
+    {
+        request.cookie = cookie;
+    } else {
+        state.freeze_requests.push(FreezeRequest {
+            recipient,
+            node,
+            cookie,
+        });
+    }
+    Ok(())
+}
+
+fn clear_freeze_notification(
+    recipient: ObjId,
+    handle: u32,
+    cookie: u64,
+) -> Result<(), CompatErrno> {
+    let mut state = BINDER.lock();
+    let node = state
+        .handles
+        .iter()
+        .find(|binding| binding.recipient == recipient && binding.handle == handle)
+        .map(|binding| binding.node)
+        .ok_or(CompatErrno::NoEntry)?;
+    let index = state
+        .freeze_requests
+        .iter()
+        .position(|request| {
+            request.recipient == recipient && request.node == node && request.cookie == cookie
+        })
+        .ok_or(CompatErrno::NoEntry)?;
+    state.queue.try_reserve(1).map_err(|_| CompatErrno::NoMemory)?;
+    state.freeze_requests.remove(index);
+    state.queue.push_back((
+        recipient,
+        QueuedCommand::DeathNotification {
+            command: BR_CLEAR_FREEZE_NOTIFICATION_DONE,
             cookie,
         },
     ));
@@ -1441,6 +1601,17 @@ fn deliver(
             )
             .map_err(|_| CompatErrno::Fault)?;
             Ok(4)
+        }
+        QueuedCommand::FreezeNotification { frozen, cookie } => {
+            if capacity < 16 {
+                return Err(CompatErrno::Range);
+            }
+            let mut packet = [0u8; 16];
+            packet[..4].copy_from_slice(&BR_FROZEN_BINDER.to_le_bytes());
+            packet[4..12].copy_from_slice(&cookie.to_le_bytes());
+            packet[12..16].copy_from_slice(&u32::from(frozen).to_le_bytes());
+            copy_to_user(address, &packet, packet.len()).map_err(|_| CompatErrno::Fault)?;
+            Ok(packet.len())
         }
         QueuedCommand::DeathNotification { command, cookie } => {
             if capacity < 12 {
