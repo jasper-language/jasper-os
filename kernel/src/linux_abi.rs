@@ -2022,6 +2022,7 @@ fn execute(
         LinuxSyscall::SendFile => compat_result(linux_sendfile(pid, call.args)),
         LinuxSyscall::CopyFileRange => compat_result(linux_copy_file_range(pid, call.args)),
         LinuxSyscall::Splice => compat_result(linux_splice(pid, call.args)),
+        LinuxSyscall::Tee => compat_result(linux_tee(pid, call.args)),
         LinuxSyscall::Mmap => compat_result(linux_mmap(pid, call.args)),
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
@@ -7737,6 +7738,37 @@ fn linux_pipe_read_buffer(
     }
 }
 
+/// Copies one bounded pipe slice without consuming the source bytes.
+fn linux_pipe_peek_buffer(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    output: &mut [u8],
+    force_nonblocking: bool,
+) -> Result<usize, CompatErrno> {
+    if output.is_empty() {
+        return Ok(0);
+    }
+    let endpoint = proc::linux_pipe_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let nonblocking = force_nonblocking
+        || proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    loop {
+        match endpoint.peek(&mut *output) {
+            compat_core::PipeRead::Data(count) => return Ok(count),
+            compat_core::PipeRead::Eof => return Ok(0),
+            compat_core::PipeRead::WouldBlock if nonblocking => {
+                return Err(CompatErrno::TryAgain)
+            }
+            compat_core::PipeRead::WouldBlock => {
+                if proc::current_exiting() || current_signal_pending(pid) {
+                    return Err(CompatErrno::Interrupted);
+                }
+                sched::pause();
+            }
+        }
+    }
+}
+
 /// Writes a bounded pipe byte stream and preserves `PIPE_BUF` atomic writes.
 fn linux_pipe_write(
     pid: ObjId,
@@ -10951,6 +10983,57 @@ fn linux_splice(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
     }
     Ok(written as u64)
+}
+
+/// Implements `tee(2)` by duplicating pipe bytes without consuming the source.
+fn linux_tee(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const SPLICE_F_NONBLOCK: u64 = 0x2;
+    if args[3] & !SPLICE_F_NONBLOCK != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let input_fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let output_fd = u32::try_from(args[1]).map_err(|_| CompatErrno::BadFd)?;
+    let input = proc::linux_fd(pid, input_fd).ok_or(CompatErrno::BadFd)?;
+    let output = proc::linux_fd(pid, output_fd).ok_or(CompatErrno::BadFd)?;
+    if input.kind != compat_core::fd::CompatKind::Pipe
+        || output.kind != compat_core::fd::CompatKind::Pipe
+        || input.handle == output.handle
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    if !input
+        .rights
+        .contains(kernel_core::object::Rights::READ)
+        || !output
+            .rights
+            .contains(kernel_core::object::Rights::WRITE)
+    {
+        return Err(CompatErrno::BadFd);
+    }
+    let limit = args[2].min(compat_core::PIPE_CAPACITY as u64) as usize;
+    if limit == 0 {
+        return Ok(0);
+    }
+    let force_nonblocking = args[3] & SPLICE_F_NONBLOCK != 0;
+    let mut bytes = alloc::vec![0u8; limit];
+    let count = linux_pipe_peek_buffer(
+        pid,
+        input_fd,
+        input.handle,
+        &mut bytes,
+        force_nonblocking,
+    )?;
+    if count == 0 {
+        return Ok(0);
+    }
+    linux_pipe_write_buffer_mode(
+        pid,
+        output_fd,
+        output.handle,
+        &bytes[..count],
+        force_nonblocking,
+    )
+    .map(|written| written as u64)
 }
 
 /// Stores or queries one x86_64 Linux signal action.
