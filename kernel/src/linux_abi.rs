@@ -14847,7 +14847,32 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 crate::binder::thread_exit(pid);
                 Ok(0)
             }
-            BINDER_FREEZE | BINDER_GET_FROZEN_INFO => Err(CompatErrno::NotSupported),
+            BINDER_FREEZE => {
+                let mut raw = [0u8; 12];
+                copy_from_user(&mut raw, args[2], 12)
+                    .map_err(|_| CompatErrno::Fault)?;
+                let target_pid = u32::from_le_bytes(raw[0..4].try_into().unwrap());
+                let enable = u32::from_le_bytes(raw[4..8].try_into().unwrap());
+                if enable > 1 {
+                    return Err(CompatErrno::Invalid);
+                }
+                crate::binder::set_frozen(pid, target_pid, enable != 0)?;
+                Ok(0)
+            }
+            BINDER_GET_FROZEN_INFO => {
+                let mut raw = [0u8; 12];
+                copy_from_user(&mut raw, args[2], 12)
+                    .map_err(|_| CompatErrno::Fault)?;
+                let target_pid = u32::from_le_bytes(raw[0..4].try_into().unwrap());
+                let (pid_out, sync_recv, async_recv) =
+                    crate::binder::get_frozen_status(pid, target_pid)?;
+                raw = [0u8; 12];
+                raw[0..4].copy_from_slice(&pid_out.to_le_bytes());
+                raw[4..8].copy_from_slice(&sync_recv.to_le_bytes());
+                raw[8..12].copy_from_slice(&async_recv.to_le_bytes());
+                copy_to_user(args[2], &raw, raw.len()).map_err(|_| CompatErrno::Fault)?;
+                Ok(0)
+            }
             BINDER_ENABLE_ONEWAY_SPAM_DETECTION => {
                 let mut raw = [0u8; 4];
                 copy_from_user(&mut raw, args[2], 4).map_err(|_| CompatErrno::Fault)?;

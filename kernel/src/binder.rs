@@ -50,10 +50,14 @@ const BR_DEAD_REPLY: u32 = 0x7205;
 const BR_TRANSACTION_COMPLETE: u32 = 0x7206;
 const BR_OK: u32 = 0x7201;
 const BR_FAILED_REPLY: u32 = 0x7211;
+const BR_FROZEN_REPLY: u32 = 0x7212;
+const BR_ONEWAY_SPAM_SUSPECT: u32 = 0x7213;
+const BR_TRANSACTION_PENDING_FROZEN: u32 = 0x7214;
 const BR_SPAWN_LOOPER: u32 = 0x720d;
 const BR_DEAD_BINDER: u32 = 0x8008_720f;
 const BR_CLEAR_DEATH_NOTIFICATION_DONE: u32 = 0x8008_7210;
 const TF_ONE_WAY: u32 = 0x01;
+const ONEWAY_SPAM_SUSPECT_THRESHOLD: u32 = 32;
 
 enum QueuedCommand {
     Complete,
@@ -93,6 +97,20 @@ struct ExtendedError {
     id: u32,
     command: u32,
     param: i32,
+}
+
+#[derive(Clone, Copy)]
+struct FrozenProcess {
+    process: ObjId,
+    sync_recv: u32,
+    async_recv: u32,
+}
+
+#[derive(Clone, Copy)]
+struct SpamSample {
+    sender: ObjId,
+    target: ObjId,
+    count: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -142,6 +160,8 @@ struct State {
     spawn_pending: Vec<ObjId>,
     extended_errors: Vec<ExtendedError>,
     oneway_spam: Vec<ObjId>,
+    frozen_processes: Vec<FrozenProcess>,
+    spam_samples: Vec<SpamSample>,
     next_error_id: u32,
 }
 
@@ -161,6 +181,8 @@ impl State {
             spawn_pending: Vec::new(),
             extended_errors: Vec::new(),
             oneway_spam: Vec::new(),
+            frozen_processes: Vec::new(),
+            spam_samples: Vec::new(),
             next_error_id: 1,
         }
     }
@@ -320,6 +342,12 @@ pub(crate) fn release_process(pid: ObjId) {
         .extended_errors
         .retain(|error| error.process != pid);
     state.oneway_spam.retain(|process| *process != pid);
+    state
+        .frozen_processes
+        .retain(|frozen| frozen.process != pid);
+    state
+        .spam_samples
+        .retain(|sample| sample.sender != pid && sample.target != pid);
     state.active.retain(|active| active.target != pid && active.sender != pid);
     state.buffers.retain(|buffer| buffer.process != pid);
     state.queue.retain(|(target, _)| *target != pid);
@@ -330,6 +358,8 @@ pub(crate) fn release_process(pid: ObjId) {
     state.spawn_pending.shrink_to_fit();
     state.extended_errors.shrink_to_fit();
     state.oneway_spam.shrink_to_fit();
+    state.frozen_processes.shrink_to_fit();
+    state.spam_samples.shrink_to_fit();
     state.active.shrink_to_fit();
     state.buffers.shrink_to_fit();
     state.queue.shrink_to_fit();
@@ -423,8 +453,126 @@ pub(crate) fn set_oneway_spam_detection(pid: ObjId, enabled: bool) -> bool {
         }
     } else if let Some(index) = index {
         state.oneway_spam.swap_remove(index);
+        state.spam_samples.retain(|sample| sample.sender != pid);
     }
     true
+}
+
+/// Updates Binder-level process freeze state. Frozen processes remain
+/// schedulable, but incoming transactions obey the Binder frozen protocol.
+pub(crate) fn set_frozen(
+    requester: ObjId,
+    target_pid: u32,
+    enable: bool,
+) -> Result<(), CompatErrno> {
+    let target = proc::linux_process_for_pid(target_pid).ok_or(CompatErrno::NoProcess)?;
+    if target != requester && proc::app(target) != proc::app(requester) {
+        return Err(CompatErrno::Perm);
+    }
+    if proc::state(target) != Some(proc::ProcState::Running) {
+        return Err(CompatErrno::NoProcess);
+    }
+    let mut state = BINDER.lock();
+    let index = state
+        .frozen_processes
+        .iter()
+        .position(|frozen| frozen.process == target);
+    if enable {
+        if index.is_none() {
+            state
+                .frozen_processes
+                .try_reserve(1)
+                .map_err(|_| CompatErrno::NoMemory)?;
+            state.frozen_processes.push(FrozenProcess {
+                process: target,
+                sync_recv: 0,
+                async_recv: 0,
+            });
+        }
+    } else {
+        let index = index.ok_or(CompatErrno::Invalid)?;
+        state.frozen_processes.remove(index);
+    }
+    let wake = state
+        .threads
+        .iter()
+        .filter(|thread| thread.process == target)
+        .map(|thread| thread.task)
+        .collect::<Vec<_>>();
+    drop(state);
+    for task in wake {
+        crate::sched::wake(task);
+    }
+    Ok(())
+}
+
+/// Returns and clears frozen-transaction counters for one process.
+pub(crate) fn get_frozen_status(
+    _requester: ObjId,
+    target_pid: u32,
+) -> Result<(u32, u32, u32), CompatErrno> {
+    let target = proc::linux_process_for_pid(target_pid).ok_or(CompatErrno::NoProcess)?;
+    let mut state = BINDER.lock();
+    let frozen = state
+        .frozen_processes
+        .iter_mut()
+        .find(|frozen| frozen.process == target)
+        .ok_or(CompatErrno::Invalid)?;
+    let (sync_recv, async_recv) = (frozen.sync_recv, frozen.async_recv);
+    frozen.sync_recv = 0;
+    frozen.async_recv = 0;
+    Ok((target_pid, sync_recv, async_recv))
+}
+
+fn process_is_frozen(process: ObjId) -> bool {
+    BINDER
+        .lock()
+        .frozen_processes
+        .iter()
+        .any(|frozen| frozen.process == process)
+}
+
+fn note_frozen_transaction(target: ObjId, one_way: bool) {
+    let mut state = BINDER.lock();
+    if let Some(frozen) = state
+        .frozen_processes
+        .iter_mut()
+        .find(|frozen| frozen.process == target)
+    {
+        if one_way {
+            frozen.async_recv = frozen.async_recv.saturating_add(1);
+        } else {
+            frozen.sync_recv |= 0x3;
+        }
+    }
+}
+
+/// Advances the bounded one-way spam heuristic for one sender/target pair.
+fn note_oneway_spam(state: &mut State, sender: ObjId, target: ObjId) -> bool {
+    if !state.oneway_spam.contains(&sender) {
+        return false;
+    }
+    if let Some(sample) = state
+        .spam_samples
+        .iter_mut()
+        .find(|sample| sample.sender == sender && sample.target == target)
+    {
+        sample.count = sample.count.saturating_add(1);
+        if sample.count >= ONEWAY_SPAM_SUSPECT_THRESHOLD {
+            sample.count = 0;
+            return true;
+        }
+        return false;
+    }
+    if state.spam_samples.try_reserve(1).is_err() {
+        return false;
+    }
+    state.spam_samples.push(SpamSample {
+        sender,
+        target,
+        count: 1,
+    });
+    false
 }
 
 /// Returns and clears the calling thread's extended transaction error.
@@ -481,10 +629,18 @@ pub(crate) fn write_read(pid: ObjId, fd: u32, args: [u64; 6]) -> Result<u64, Com
         loop {
             let queued = {
                 let mut state = BINDER.lock();
+                let frozen = state
+                    .frozen_processes
+                    .iter()
+                    .any(|frozen| frozen.process == pid);
                 state
                     .queue
                     .iter()
-                    .position(|(target, _)| *target == pid)
+                    .position(|(target, command)| {
+                        *target == pid
+                            && (!frozen
+                                || !matches!(command, QueuedCommand::Transaction { .. }))
+                    })
                     .and_then(|index| state.queue.remove(index))
                     .map(|(_, command)| command)
             };
@@ -1073,6 +1229,13 @@ fn enqueue_transaction(
             queue_reply_error(pid, BR_DEAD_REPLY, CompatErrno::NoProcess)?;
             return Ok(());
         }
+        let one_way = flags & TF_ONE_WAY != 0;
+        let frozen = process_is_frozen(target);
+        if frozen && !one_way {
+            note_frozen_transaction(target, false);
+            queue_reply_error(pid, BR_FROZEN_REPLY, CompatErrno::Busy)?;
+            return Ok(());
+        }
         if let Err(error) = translate_objects(pid, target, &mut data, &offsets) {
             if matches!(error, CompatErrno::Invalid | CompatErrno::NoEntry | CompatErrno::BadFd) {
                 queue_reply_error(pid, BR_FAILED_REPLY, CompatErrno::Invalid)?;
@@ -1089,7 +1252,8 @@ fn enqueue_transaction(
             .count();
         let request_spawn = max_threads != 0
             && active_pool_threads < max_threads
-            && !state.spawn_pending.contains(&target);
+            && !state.spawn_pending.contains(&target)
+            && !frozen;
         crate::kprintln!(
             "[JSR-BINDER] transaction sender={} target={} code={:#x} flags={:#x} max_threads={} active_pool={} spawn={}",
             pid.raw(),
@@ -1100,7 +1264,11 @@ fn enqueue_transaction(
             active_pool_threads,
             request_spawn
         );
-        let queued = if request_spawn { 3 } else { 2 };
+        let spam_suspect = one_way && note_oneway_spam(&mut state, pid, target);
+        let queued = 2
+            + usize::from(request_spawn)
+            + usize::from(frozen && one_way)
+            + usize::from(spam_suspect);
         if state.queue.len().saturating_add(queued) > MAX_QUEUE {
             return Err(CompatErrno::TryAgain);
         }
@@ -1122,6 +1290,22 @@ fn enqueue_transaction(
                 .push_back((target, QueuedCommand::SpawnLooper));
         }
         state.queue.push_back((pid, QueuedCommand::Complete));
+        if frozen && one_way {
+            state.queue.push_back((
+                pid,
+                QueuedCommand::ReplyError {
+                    command: BR_TRANSACTION_PENDING_FROZEN,
+                },
+            ));
+        }
+        if spam_suspect {
+            state.queue.push_back((
+                pid,
+                QueuedCommand::ReplyError {
+                    command: BR_ONEWAY_SPAM_SUSPECT,
+                },
+            ));
+        }
         state.queue.push_back((
             target,
             QueuedCommand::Transaction {
@@ -1133,7 +1317,7 @@ fn enqueue_transaction(
                 offsets,
             },
         ));
-        if flags & TF_ONE_WAY == 0 {
+        if !one_way {
             state.active.push(ActiveTransaction {
                 target,
                 sender: pid,
@@ -1149,6 +1333,9 @@ fn enqueue_transaction(
             *slot = Some(thread.task);
         }
         drop(state);
+        if frozen && one_way {
+            note_frozen_transaction(target, true);
+        }
         for task in wake.into_iter().flatten() {
             crate::sched::wake(task);
         }
@@ -1331,5 +1518,25 @@ fn deliver(
             copy_to_user(address, &packet, packet.len()).map_err(|_| CompatErrno::Fault)?;
             Ok(packet.len())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oneway_spam_threshold_is_per_sender_and_target() {
+        let sender = ObjId::from_raw(1).unwrap();
+        let target = ObjId::from_raw(2).unwrap();
+        let other = ObjId::from_raw(3).unwrap();
+        let mut state = State::new();
+        state.oneway_spam.push(sender);
+        for _ in 1..ONEWAY_SPAM_SUSPECT_THRESHOLD {
+            assert!(!note_oneway_spam(&mut state, sender, target));
+        }
+        assert!(note_oneway_spam(&mut state, sender, target));
+        assert!(!note_oneway_spam(&mut state, sender, other));
+        assert!(!note_oneway_spam(&mut state, other, target));
     }
 }

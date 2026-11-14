@@ -2500,9 +2500,15 @@ int main(void) {
         binder_extended.param != 0) {
         return 723;
     }
-    errno = 0;
-    if (ioctl(binder_fd, BINDER_FREEZE, &binder_freeze) != -1 ||
-        errno != EOPNOTSUPP) {
+    struct binder_frozen_status_info binder_frozen = {0};
+    if (ioctl(binder_fd, BINDER_FREEZE, &binder_freeze) != 0 ||
+        ioctl(binder_fd, BINDER_GET_FROZEN_INFO, &binder_frozen) != 0 ||
+        binder_frozen.pid != (uint32_t)getpid() ||
+        binder_frozen.sync_recv != 0 || binder_frozen.async_recv != 0) {
+        return 724;
+    }
+    binder_freeze.enable = 0;
+    if (ioctl(binder_fd, BINDER_FREEZE, &binder_freeze) != 0) {
         return 724;
     }
     struct stat binder_stat;
@@ -3107,9 +3113,86 @@ int main(void) {
     server_exchange.write_size = sizeof(death_done);
     server_exchange.write_buffer = (binder_uintptr_t)death_done;
     if (ioctl(server, BINDER_WRITE_READ, &server_exchange) != 0 ||
-        server_exchange.write_consumed != sizeof(death_done) ||
-        close(binder_ready[1]) != 0 || close(server) != 0) {
+        server_exchange.write_consumed != sizeof(death_done)) {
         return 182;
+    }
+    int freeze_ready[2];
+    if (pipe(freeze_ready) != 0) {
+        return 730;
+    }
+    binder_freeze.pid = (uint32_t)getpid();
+    binder_freeze.enable = 1;
+    binder_freeze.timeout_ms = 0;
+    if (ioctl(server, BINDER_FREEZE, &binder_freeze) != 0) {
+        return 731;
+    }
+    pid_t frozen_client = fork();
+    if (frozen_client < 0) {
+        return 732;
+    }
+    if (frozen_client == 0) {
+        close(freeze_ready[1]);
+        char start = 0;
+        if (read(freeze_ready[0], &start, 1) != 1 || start != 'F') {
+            _exit(733);
+        }
+        int client = open("/dev/binder", O_RDWR | O_CLOEXEC);
+        struct binder_transaction_data frozen_request = {
+            .target.handle = 0,
+            .code = 0xfee,
+            .flags = 0,
+            .data_size = 0,
+            .offsets_size = 0,
+        };
+        uint32_t frozen_command = BC_TRANSACTION;
+        unsigned char frozen_write[4 + sizeof(frozen_request)];
+        memcpy(frozen_write, &frozen_command, 4);
+        memcpy(frozen_write + 4, &frozen_request, sizeof(frozen_request));
+        unsigned char frozen_read[64] = {0};
+        struct binder_write_read frozen_exchange = {
+            .write_size = sizeof(frozen_write),
+            .write_buffer = (binder_uintptr_t)frozen_write,
+            .read_size = sizeof(frozen_read),
+            .read_buffer = (binder_uintptr_t)frozen_read,
+        };
+        if (client < 0 ||
+            ioctl(client, BINDER_WRITE_READ, &frozen_exchange) != 0 ||
+            frozen_exchange.write_consumed != sizeof(frozen_write) ||
+            frozen_exchange.read_consumed != 4 ||
+            *(uint32_t *)frozen_read != BR_TRANSACTION_COMPLETE) {
+            _exit(734);
+        }
+        memset(&frozen_exchange, 0, sizeof(frozen_exchange));
+        frozen_exchange.read_size = sizeof(frozen_read);
+        frozen_exchange.read_buffer = (binder_uintptr_t)frozen_read;
+        if (ioctl(client, BINDER_WRITE_READ, &frozen_exchange) != 0 ||
+            frozen_exchange.read_consumed != 4 ||
+            *(uint32_t *)frozen_read != BR_FROZEN_REPLY ||
+            close(client) != 0) {
+            _exit(735);
+        }
+        _exit(0);
+    }
+    close(freeze_ready[0]);
+    if (write(freeze_ready[1], "F", 1) != 1) {
+        return 736;
+    }
+    int frozen_status = 0;
+    if (waitpid(frozen_client, &frozen_status, 0) != frozen_client ||
+        !WIFEXITED(frozen_status) || WEXITSTATUS(frozen_status) != 0) {
+        return 737;
+    }
+    memset(&binder_frozen, 0, sizeof(binder_frozen));
+    if (ioctl(server, BINDER_GET_FROZEN_INFO, &binder_frozen) != 0 ||
+        binder_frozen.pid != (uint32_t)getpid() ||
+        (binder_frozen.sync_recv & 1) == 0) {
+        return 738;
+    }
+    binder_freeze.enable = 0;
+    if (ioctl(server, BINDER_FREEZE, &binder_freeze) != 0 ||
+        close(freeze_ready[1]) != 0 ||
+        close(binder_ready[1]) != 0 || close(server) != 0) {
+        return 739;
     }
     int poll_pipe[2];
     if (pipe2(poll_pipe, 0) != 0) {
