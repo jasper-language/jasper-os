@@ -3197,15 +3197,65 @@ int main(void) {
             exchange.write_consumed != 4 + sizeof(second_request) ||
             exchange.read_consumed != 4 ||
             *(uint32_t *)read_buffer != BR_TRANSACTION_COMPLETE) {
+            dprintf(STDOUT_FILENO,
+                    "binder-client-second-send-fail errno=%d write=%llu "
+                    "read=%llu command=%#x\n",
+                    errno,
+                    (unsigned long long)exchange.write_consumed,
+                    (unsigned long long)exchange.read_consumed,
+                    *(uint32_t *)read_buffer);
             _exit(174);
         }
         close(binder_fd);
-        memset(&exchange, 0, sizeof(exchange));
-        exchange.read_size = sizeof(read_buffer);
-        exchange.read_buffer = (binder_uintptr_t)read_buffer;
-        if (ioctl(client, BINDER_WRITE_READ, &exchange) != 0 ||
-            exchange.read_consumed != 68 ||
-            *(uint32_t *)read_buffer != BR_REPLY) {
+        for (int reference_steps = 0; reference_steps < 8;
+             reference_steps++) {
+            memset(&exchange, 0, sizeof(exchange));
+            exchange.read_size = sizeof(read_buffer);
+            exchange.read_buffer = (binder_uintptr_t)read_buffer;
+            if (ioctl(client, BINDER_WRITE_READ, &exchange) != 0) {
+                _exit(174);
+            }
+            uint32_t command = *(uint32_t *)read_buffer;
+            if (command == BR_REPLY) {
+                break;
+            }
+            if (exchange.read_consumed != 20 ||
+                (command != BR_ACQUIRE && command != BR_RELEASE &&
+                 command != BR_INCREFS && command != BR_DECREFS)) {
+                dprintf(STDOUT_FILENO,
+                        "binder-client-reference-fail errno=%d read=%llu "
+                        "command=%#x\n",
+                        errno,
+                        (unsigned long long)exchange.read_consumed,
+                        command);
+                _exit(174);
+            }
+            if (command == BR_ACQUIRE || command == BR_INCREFS) {
+                binder_uintptr_t pointer = 0;
+                binder_uintptr_t cookie = 0;
+                memcpy(&pointer, read_buffer + 4, sizeof(pointer));
+                memcpy(&cookie, read_buffer + 12, sizeof(cookie));
+                uint32_t done =
+                    command == BR_ACQUIRE ? BC_ACQUIRE_DONE
+                                          : BC_INCREFS_DONE;
+                memcpy(write_buffer, &done, 4);
+                memcpy(write_buffer + 4, &pointer, sizeof(pointer));
+                memcpy(write_buffer + 12, &cookie, sizeof(cookie));
+                memset(&exchange, 0, sizeof(exchange));
+                exchange.write_size = 20;
+                exchange.write_buffer =
+                    (binder_uintptr_t)write_buffer;
+                if (ioctl(client, BINDER_WRITE_READ,
+                          &exchange) != 0 ||
+                    exchange.write_consumed != 20) {
+                    _exit(174);
+                }
+            }
+        }
+        if (*(uint32_t *)read_buffer != BR_REPLY) {
+            dprintf(STDOUT_FILENO,
+                    "binder-client-second-reply-missing command=%#x\n",
+                    *(uint32_t *)read_buffer);
             _exit(174);
         }
         memcpy(&reply, read_buffer + 4, sizeof(reply));
@@ -3282,7 +3332,17 @@ int main(void) {
     if (received.code != 0x1234 || received.sender_pid != binder_child ||
         received.data_size != 4 ||
         memcmp(received_data, "PING", 4) != 0 ||
-        strncmp(received_secctx_text, "jasper:v1:boot=", 16) != 0) {
+        strncmp(received_secctx_text, "jasper:v1:boot=", 15) != 0) {
+        dprintf(STDOUT_FILENO,
+                "binder-receive-fail code=%#x sender=%d want_sender=%d "
+                "size=%llu data=%02x%02x%02x%02x secctx=%.*s\n",
+                received.code, received.sender_pid, binder_child,
+                (unsigned long long)received.data_size,
+                (unsigned char)received_data[0],
+                (unsigned char)received_data[1],
+                (unsigned char)received_data[2],
+                (unsigned char)received_data[3], 96,
+                received_secctx_text);
         return 174;
     }
     struct flat_binder_object response_object = {
@@ -3391,7 +3451,7 @@ int main(void) {
     memcpy(&second_secctx, server_read + 68, sizeof(second_secctx));
     if (second_secctx == 0 ||
         strncmp((const char *)(uintptr_t)second_secctx,
-                "jasper:v1:boot=", 16) != 0) {
+                "jasper:v1:boot=", 15) != 0) {
         return 178;
     }
     struct {
