@@ -321,6 +321,26 @@ pub fn authorize_handle(pid: ObjId, handle: HandleId, effect: MacEffect) -> Resu
     authorize_label_pair(subject, object, effect)
 }
 
+/// Authorize an inter-process effect against the target process label.
+///
+/// Binder nodes are owned by their process but are not independent KObjects.
+/// The owner's live SEC context is therefore the policy target for a
+/// transaction. Identity lookup and binding remain under the object-table
+/// window; the MAC engine is acquired only after that window is released.
+pub fn authorize_process_pair(
+    subject: ObjId,
+    object: ObjId,
+    effect: MacEffect,
+) -> Result<(), MacDenial> {
+    let (subject, object) = kobj::with(|t| {
+        let subject = t.security(subject).ok()?.require_active().ok()?;
+        let object = t.security(object).ok()?.require_active().ok()?;
+        Some((subject, object))
+    })
+    .ok_or(MacDenial::NoPolicy)?;
+    authorize_label_pair(subject, object, effect)
+}
+
 /// Return a bounded decision queue for the audit consumer.
 pub fn take_audit() -> Option<kernel_core::mac::MacDecision> {
     MAC.lock().drain_audit()

@@ -4,7 +4,9 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use compat_core::syscall::CompatErrno;
+use kernel_core::mac::{MacEffect, MacLabel};
 use kernel_core::objtable::ObjId;
+use kernel_core::security::ApplicationIdentity;
 
 use crate::mm::user::{copy_from_user, copy_to_user};
 use crate::proc;
@@ -14,6 +16,7 @@ const BINDER_WRITE_READ_BYTES: usize = 48;
 const BINDER_TRANSACTION_BYTES: usize = 64;
 const BINDER_TRANSACTION_SG_BYTES: usize = 72;
 const BINDER_READ_PACKET_BYTES: usize = 4 + BINDER_TRANSACTION_BYTES;
+const BINDER_SEC_CTX_PACKET_BYTES: usize = BINDER_READ_PACKET_BYTES + 8;
 const MAX_TRANSACTION_BYTES: usize = 64 * 1024;
 const MAX_OFFSET_BYTES: usize = 4096;
 const MAX_QUEUE: usize = 64;
@@ -50,6 +53,7 @@ const BC_CLEAR_FREEZE_NOTIFICATION: u32 = 0x4010_6314;
 const BC_FREEZE_NOTIFICATION_DONE: u32 = 0x4008_6315;
 
 const BR_TRANSACTION: u32 = 0x8040_7202;
+const BR_TRANSACTION_SEC_CTX: u32 = 0x8048_7202;
 const BR_REPLY: u32 = 0x8040_7203;
 const BR_DEAD_REPLY: u32 = 0x7205;
 const BR_TRANSACTION_COMPLETE: u32 = 0x7206;
@@ -96,6 +100,7 @@ enum QueuedCommand {
         flags: u32,
         data: Vec<u8>,
         offsets: Vec<u8>,
+        security_context: Option<Vec<u8>>,
     },
 }
 
@@ -1445,6 +1450,76 @@ fn translate_objects(
     result
 }
 
+fn append_decimal(output: &mut Vec<u8>, mut value: u64) {
+    let mut digits = [0u8; 20];
+    let mut index = digits.len();
+    loop {
+        index -= 1;
+        digits[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    output.extend_from_slice(&digits[index..]);
+}
+
+fn append_hex(output: &mut Vec<u8>, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize]);
+        output.push(HEX[(byte & 0x0f) as usize]);
+    }
+}
+
+fn encode_binder_security_context(
+    label: MacLabel,
+    application: ApplicationIdentity,
+    boot: kernel_core::security::BootId,
+) -> Vec<u8> {
+    let mut output = Vec::new();
+    output.extend_from_slice(b"jasper:v1:boot=");
+    append_hex(&mut output, &boot.words[0].to_le_bytes());
+    append_hex(&mut output, &boot.words[1].to_le_bytes());
+    output.extend_from_slice(b":app=");
+    append_decimal(&mut output, application.stable_id);
+    output.extend_from_slice(b":gen=");
+    append_decimal(&mut output, u64::from(application.generation));
+    output.extend_from_slice(b":measure=");
+    append_decimal(&mut output, application.measurement_state as u64);
+    output.extend_from_slice(b":digest=");
+    append_hex(&mut output, &application.measurement);
+    output.extend_from_slice(b":domain=");
+    append_decimal(&mut output, u64::from(label.domain.0));
+    output.extend_from_slice(b":s=");
+    append_decimal(&mut output, u64::from(label.secrecy));
+    output.extend_from_slice(b":i=");
+    append_decimal(&mut output, u64::from(label.integrity));
+    output.extend_from_slice(b":c=");
+    append_decimal(&mut output, u64::from(label.object_classes));
+    output.push(0);
+    output
+}
+
+/// Projects Jasper's real subject MAC label and application identity into the
+/// opaque context string consumed by `BR_TRANSACTION_SEC_CTX`.
+fn binder_security_context(process: ObjId) -> Result<Vec<u8>, CompatErrno> {
+    let (context, application) = crate::kobj::with(|table| {
+        let context = table.security(process).ok()?.require_active().ok()?;
+        let application = context.application?;
+        Some((context, application))
+    })
+    .ok_or(CompatErrno::Perm)?;
+    if !context.mac.is_supported() || !application.is_valid() {
+        return Err(CompatErrno::Perm);
+    }
+    Ok(encode_binder_security_context(
+        context.mac,
+        application,
+        context.object.boot_id,
+    ))
+}
+
 fn enqueue_transaction(
     pid: ObjId,
     command: u32,
@@ -1492,6 +1567,8 @@ fn enqueue_transaction(
             queue_reply_error(pid, BR_DEAD_REPLY, CompatErrno::NoProcess)?;
             return Ok(());
         }
+        crate::security::authorize_process_pair(pid, target, MacEffect::Share)
+            .map_err(|_| CompatErrno::Perm)?;
         let one_way = flags & TF_ONE_WAY != 0;
         let frozen = process_is_frozen(target);
         if frozen && !one_way {
@@ -1506,6 +1583,7 @@ fn enqueue_transaction(
             }
             return Err(error);
         }
+        let security_context = binder_security_context(pid)?;
         let max_threads = proc::linux_binder_max_threads(target).unwrap_or(0) as usize;
         let mut state = BINDER.lock();
         let active_pool_threads = state
@@ -1572,12 +1650,13 @@ fn enqueue_transaction(
         state.queue.push_back((
             target,
             QueuedCommand::Transaction {
-                command: BR_TRANSACTION,
+                command: BR_TRANSACTION_SEC_CTX,
                 sender: pid,
                 code,
                 flags,
                 data,
                 offsets,
+                security_context: Some(security_context),
             },
         ));
         if !one_way {
@@ -1653,6 +1732,7 @@ fn enqueue_transaction(
             flags: 0,
             data,
             offsets,
+            security_context: None,
         },
     ));
     Ok(())
@@ -1748,8 +1828,14 @@ fn deliver(
             flags,
             data,
             offsets,
+            security_context,
         } => {
-            if capacity < BINDER_READ_PACKET_BYTES {
+            let packet_bytes = if security_context.is_some() {
+                BINDER_SEC_CTX_PACKET_BYTES
+            } else {
+                BINDER_READ_PACKET_BYTES
+            };
+            if capacity < packet_bytes {
                 return Err(CompatErrno::Range);
             }
             crate::kprintln!(
@@ -1764,12 +1850,20 @@ fn deliver(
                 .len()
                 .checked_add(offsets.len())
                 .ok_or(CompatErrno::Invalid)?;
+            let security_offset = combined_length;
+            let security_length = security_context.as_ref().map_or(0, Vec::len);
+            let buffer_length = combined_length
+                .checked_add(security_length)
+                .ok_or(CompatErrno::Invalid)?;
             let mut combined = Vec::new();
             combined
-                .try_reserve(combined_length)
+                .try_reserve(buffer_length)
                 .map_err(|_| CompatErrno::NoMemory)?;
             combined.extend_from_slice(&data);
             combined.extend_from_slice(&offsets);
+            if let Some(context) = &security_context {
+                combined.extend_from_slice(context);
+            }
             let buffer = proc::linux_alloc_transaction_buffer(recipient, &combined)
                 .ok_or(CompatErrno::NoMemory)?;
             {
@@ -1779,19 +1873,19 @@ fn deliver(
                     let _ = proc::linux_free_transaction_buffer(
                         recipient,
                         buffer,
-                        combined_length,
+                        buffer_length,
                     );
                     return Err(CompatErrno::NoMemory);
                 }
                 state.buffers.push(TransactionBuffer {
                     process: recipient,
                     address: buffer,
-                    length: combined_length,
+                    length: buffer_length,
                 });
             }
-            let mut packet = [0u8; BINDER_READ_PACKET_BYTES];
+            let mut packet = [0u8; BINDER_SEC_CTX_PACKET_BYTES];
             packet[0..4].copy_from_slice(&command.to_le_bytes());
-            let transaction = &mut packet[4..];
+            let transaction = &mut packet[4..BINDER_READ_PACKET_BYTES];
             transaction[0..8].copy_from_slice(&0u64.to_le_bytes());
             transaction[8..16].copy_from_slice(&0u64.to_le_bytes());
             transaction[16..20].copy_from_slice(&code.to_le_bytes());
@@ -1804,8 +1898,15 @@ fn deliver(
             transaction[48..56].copy_from_slice(&buffer.to_le_bytes());
             transaction[56..64]
                 .copy_from_slice(&(buffer + data.len() as u64).to_le_bytes());
-            copy_to_user(address, &packet, packet.len()).map_err(|_| CompatErrno::Fault)?;
-            Ok(packet.len())
+            if security_context.is_some() {
+                packet[BINDER_READ_PACKET_BYTES..BINDER_SEC_CTX_PACKET_BYTES]
+                    .copy_from_slice(
+                        &(buffer + security_offset as u64).to_le_bytes(),
+                    );
+            }
+            copy_to_user(address, &packet[..packet_bytes], packet_bytes)
+                .map_err(|_| CompatErrno::Fault)?;
+            Ok(packet_bytes)
         }
     }
 }
@@ -1813,6 +1914,8 @@ fn deliver(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kernel_core::mac::{Integrity, Secrecy};
+    use kernel_core::security::{MeasurementState, SecurityDomain};
 
     #[test]
     fn oneway_spam_threshold_is_per_sender_and_target() {
@@ -1827,5 +1930,31 @@ mod tests {
         assert!(note_oneway_spam(&mut state, sender, target));
         assert!(!note_oneway_spam(&mut state, sender, other));
         assert!(!note_oneway_spam(&mut state, other, target));
+    }
+
+    #[test]
+    fn security_context_encodes_live_mac_and_measured_application_identity() {
+        let label = MacLabel::new(
+            SecurityDomain::USER,
+            Secrecy::Sensitive,
+            Integrity::Trusted,
+            0x0206,
+        );
+        let application = ApplicationIdentity {
+            stable_id: 0x1234_5678_9abc_def0,
+            generation: 7,
+            measurement_state: MeasurementState::Present,
+            measurement: [0xab; 32],
+        };
+        let boot = kernel_core::security::BootId::from_words([
+            0x0807_0605_0403_0201,
+            0x100f_0e0d_0c0b_0a09,
+        ]);
+        let context = encode_binder_security_context(label, application, boot);
+        assert!(context.starts_with(
+            b"jasper:v1:boot=0102030405060708090a0b0c0d0e0f10:app=1311768467463790320:gen=7:measure=1:digest="
+        ));
+        assert!(context.ends_with(b":domain=1:s=2:i=2:c=518\0"));
+        assert_eq!(context.iter().filter(|byte| **byte == 0).count(), 1);
     }
 }
