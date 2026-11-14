@@ -202,6 +202,7 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::Splice,
         LinuxSyscall::Tee,
         LinuxSyscall::VmSplice,
+        LinuxSyscall::Cachestat,
         LinuxSyscall::Brk,
         LinuxSyscall::Access,
         LinuxSyscall::FaccessAt,

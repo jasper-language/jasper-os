@@ -2024,6 +2024,7 @@ fn execute(
         LinuxSyscall::Splice => compat_result(linux_splice(pid, call.args)),
         LinuxSyscall::Tee => compat_result(linux_tee(pid, call.args)),
         LinuxSyscall::VmSplice => compat_result(linux_vmsplice(pid, call.args)),
+        LinuxSyscall::Cachestat => compat_result(linux_cachestat(pid, call.args)),
         LinuxSyscall::Mmap => compat_result(linux_mmap(pid, call.args)),
         LinuxSyscall::Munmap => compat_result(linux_munmap(pid, call.args)),
         LinuxSyscall::Mprotect => compat_result(linux_mprotect(pid, call.args)),
@@ -11204,6 +11205,60 @@ fn linux_vmsplice(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         args[3] & SPLICE_F_NONBLOCK != 0,
     )
     .map(|written| written as u64)
+}
+
+/// Implements `cachestat(2)` for memory-backed compatibility files.
+fn linux_cachestat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const RANGE_BYTES: usize = 16;
+    const INFO_BYTES: usize = 40;
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    if args[3] != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if !entry
+        .rights
+        .contains(kernel_core::object::Rights::READ)
+    {
+        return Err(CompatErrno::BadFd);
+    }
+    let mut range = [0u8; RANGE_BYTES];
+    copy_from_user(&mut range, args[1], RANGE_BYTES).map_err(|_| CompatErrno::Fault)?;
+    let offset = u64::from_le_bytes(range[0..8].try_into().unwrap());
+    let length = u64::from_le_bytes(range[8..16].try_into().unwrap());
+    let total = match entry.kind {
+        compat_core::fd::CompatKind::File => {
+            let file =
+                crate::linux_vfs::FileId::from_handle(entry.handle).ok_or(CompatErrno::BadFd)?;
+            file.bytes().len() as u64
+        }
+        compat_core::fd::CompatKind::Device
+            if proc::linux_ashmem_is_regular(pid, entry.handle) == Some(true) =>
+        {
+            proc::linux_ashmem_state(pid, entry.handle)
+                .map(|state| state.0)
+                .ok_or(CompatErrno::BadFd)?
+        }
+        _ => return Err(CompatErrno::BadFd),
+    };
+    let end = if length == 0 {
+        total
+    } else {
+        offset
+            .checked_add(length)
+            .ok_or(CompatErrno::Invalid)?
+            .min(total)
+    };
+    let cached_pages = if offset >= end {
+        0
+    } else {
+        end.div_ceil(PAGE).saturating_sub(offset / PAGE)
+    };
+    let mut info = [0u8; INFO_BYTES];
+    info[0..8].copy_from_slice(&cached_pages.to_le_bytes());
+    copy_to_user(args[2], &info, info.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
 }
 
 /// Stores or queries one x86_64 Linux signal action.

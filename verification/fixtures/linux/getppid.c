@@ -50,6 +50,10 @@
 #include <utime.h>
 #include <unistd.h>
 
+#ifndef SYS_cachestat
+#define SYS_cachestat 451
+#endif
+
 #define JASPER_ASHMEM_SET_NAME 0x41006101UL
 #define JASPER_ASHMEM_SET_PROT_MASK 0x40046102UL
 #define JASPER_ASHMEM_SET_SIZE 0x40086103UL
@@ -4257,6 +4261,31 @@ int main(void) {
         read(splice_source_pipe[0], splice_readback, 4) != 4 ||
         memcmp(splice_readback, "\177ELF", 4) != 0) {
         return 518;
+    }
+    struct cachestat_range_probe {
+        uint64_t offset;
+        uint64_t length;
+    } cachestat_range = {.offset = 0, .length = 4096};
+    struct cachestat_probe {
+        uint64_t cached;
+        uint64_t dirty;
+        uint64_t writeback;
+        uint64_t evicted;
+        uint64_t recently_evicted;
+    } cachestat_info = {0};
+    if (syscall(SYS_cachestat, splice_file, &cachestat_range,
+                &cachestat_info, 0) != 0 ||
+        cachestat_info.cached != 1 ||
+        cachestat_info.dirty != 0 ||
+        cachestat_info.writeback != 0 ||
+        cachestat_info.evicted != 0 ||
+        cachestat_info.recently_evicted != 0) {
+        return 540;
+    }
+    errno = 0;
+    if (syscall(SYS_cachestat, splice_file, &cachestat_range,
+                &cachestat_info, 1) != -1 || errno != EINVAL) {
+        return 541;
     }
     errno = 0;
     if (syscall(SYS_splice, splice_file, &splice_offset,
