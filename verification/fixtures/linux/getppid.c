@@ -13,6 +13,7 @@
 #include <linux/dma-heap.h>
 #include <linux/filter.h>
 #include <linux/fs.h>
+#include <linux/fscrypt.h>
 #include <linux/fsverity.h>
 #include <linux/futex.h>
 #include <linux/io_uring.h>
@@ -1891,8 +1892,32 @@ int main(void) {
     verity_flags = FS_VERITY_FL;
     errno = 0;
     if (ioctl(verity_fd, FS_IOC_SETFLAGS, &verity_flags) != -1 ||
-        errno != EPERM || close(verity_fd) != 0) {
+        errno != EPERM) {
         return 744;
+    }
+    unsigned char fscrypt_buffer[256] = {0};
+    unsigned long fscrypt_ioctls[] = {
+        FS_IOC_SET_ENCRYPTION_POLICY,
+        FS_IOC_GET_ENCRYPTION_PWSALT,
+        FS_IOC_GET_ENCRYPTION_POLICY,
+        FS_IOC_GET_ENCRYPTION_POLICY_EX,
+        FS_IOC_ADD_ENCRYPTION_KEY,
+        FS_IOC_REMOVE_ENCRYPTION_KEY,
+        FS_IOC_REMOVE_ENCRYPTION_KEY_ALL_USERS,
+        FS_IOC_GET_ENCRYPTION_KEY_STATUS,
+        FS_IOC_GET_ENCRYPTION_NONCE,
+    };
+    for (size_t index = 0;
+         index < sizeof(fscrypt_ioctls) / sizeof(fscrypt_ioctls[0]);
+         index++) {
+        errno = 0;
+        if (ioctl(verity_fd, fscrypt_ioctls[index], fscrypt_buffer) != -1 ||
+            errno != ENOTTY) {
+            return 746;
+        }
+    }
+    if (close(verity_fd) != 0) {
+        return 747;
     }
     int allocate_fd = memfd_create("fallocate", 0);
     if (allocate_fd < 0 ||

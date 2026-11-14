@@ -14957,6 +14957,15 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const FS_IOC_ENABLE_VERITY: u64 = 0x4080_6685;
     const FS_IOC_MEASURE_VERITY: u64 = 0xc004_6686;
     const FS_IOC_READ_VERITY_METADATA: u64 = 0xc028_6687;
+    const FS_IOC_SET_ENCRYPTION_POLICY: u64 = 0x800c_6613;
+    const FS_IOC_GET_ENCRYPTION_PWSALT: u64 = 0x4010_6614;
+    const FS_IOC_GET_ENCRYPTION_POLICY: u64 = 0x400c_6615;
+    const FS_IOC_GET_ENCRYPTION_POLICY_EX: u64 = 0xc009_6616;
+    const FS_IOC_ADD_ENCRYPTION_KEY: u64 = 0xc050_6617;
+    const FS_IOC_REMOVE_ENCRYPTION_KEY: u64 = 0xc040_6618;
+    const FS_IOC_REMOVE_ENCRYPTION_KEY_ALL_USERS: u64 = 0xc040_6619;
+    const FS_IOC_GET_ENCRYPTION_KEY_STATUS: u64 = 0xc080_661a;
+    const FS_IOC_GET_ENCRYPTION_NONCE: u64 = 0x8010_661b;
     const ION_IOC_ALLOC: u64 = 0xc020_4900;
     const ION_IOC_FREE: u64 = 0xc004_4901;
     const ION_IOC_MAP: u64 = 0xc008_4902;
@@ -15111,6 +15120,20 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             }
             _ => unreachable!(),
         };
+    }
+    if matches!(
+        args[1],
+        FS_IOC_SET_ENCRYPTION_POLICY
+            | FS_IOC_GET_ENCRYPTION_PWSALT
+            | FS_IOC_GET_ENCRYPTION_POLICY
+            | FS_IOC_GET_ENCRYPTION_POLICY_EX
+            | FS_IOC_ADD_ENCRYPTION_KEY
+            | FS_IOC_REMOVE_ENCRYPTION_KEY
+            | FS_IOC_REMOVE_ENCRYPTION_KEY_ALL_USERS
+            | FS_IOC_GET_ENCRYPTION_KEY_STATUS
+            | FS_IOC_GET_ENCRYPTION_NONCE
+    ) {
+        return Err(CompatErrno::NotTty);
     }
     if proc::linux_is_sync_file(pid, entry.handle) {
         return match args[1] {
