@@ -278,6 +278,9 @@ struct AshmemBuffer {
     pins: AtomicU32,
     allow_sealing: AtomicU32,
     seals: AtomicU32,
+    verity_enabled: AtomicU32,
+    verity_digest: SpinLock<[u8; 32]>,
+    verity_descriptor: SpinLock<[u8; 256]>,
     name: SpinLock<([u8; 256], usize)>,
     pages: SpinLock<Vec<Arc<crate::mm::memory_object::Page>>>,
 }
@@ -2311,6 +2314,9 @@ pub(crate) fn linux_create_shared_memory(
                 pins: AtomicU32::new(0),
                 allow_sealing: AtomicU32::new(0),
                 seals: AtomicU32::new(0),
+                verity_enabled: AtomicU32::new(0),
+                verity_digest: SpinLock::new([0; 32]),
+                verity_descriptor: SpinLock::new([0; 256]),
                 name: SpinLock::new(([0; 256], 0)),
                 pages: SpinLock::new(pages),
             }),
@@ -2357,6 +2363,9 @@ fn linux_open_ashmem_kind(
                 pins: AtomicU32::new(0),
                 allow_sealing: AtomicU32::new(u32::from(allow_sealing)),
                 seals: AtomicU32::new(0),
+                verity_enabled: AtomicU32::new(0),
+                verity_digest: SpinLock::new([0; 32]),
+                verity_descriptor: SpinLock::new([0; 256]),
                 name: SpinLock::new(([0; 256], 0)),
                 pages: SpinLock::new(Vec::new()),
             }),
@@ -3486,6 +3495,9 @@ pub(crate) fn linux_ion_alloc(
             pins: AtomicU32::new(0),
             allow_sealing: AtomicU32::new(0),
             seals: AtomicU32::new(0),
+            verity_enabled: AtomicU32::new(0),
+            verity_digest: SpinLock::new([0; 32]),
+            verity_descriptor: SpinLock::new([0; 256]),
             name: SpinLock::new(([0; 256], 0)),
             pages: SpinLock::new(pages),
         });
@@ -3862,6 +3874,56 @@ pub(crate) fn linux_ashmem_state(
             }),
         _ => None,
     })
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_verity_state(
+    pid: ObjId,
+    handle: u64,
+) -> Option<(bool, [u8; 32], [u8; 256])> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => {
+            let ashmem = process
+                .linux
+                .as_ref()?
+                .ashmem
+                .iter()
+                .find(|ashmem| ashmem.handle == handle)?;
+            Some((
+                ashmem.buffer.verity_enabled.load(Ordering::Acquire) != 0,
+                *ashmem.buffer.verity_digest.lock(),
+                *ashmem.buffer.verity_descriptor.lock(),
+            ))
+        }
+        _ => None,
+    })
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ashmem_set_verity(
+    pid: ObjId,
+    handle: u64,
+    digest: [u8; 32],
+    descriptor: [u8; 256],
+) -> bool {
+    with_proc(pid, |process| {
+        let ashmem = process
+            .linux
+            .as_ref()
+            .ok_or(ProcError::Exited)?
+            .ashmem
+            .iter()
+            .find(|ashmem| ashmem.handle == handle)
+            .ok_or(ProcError::NoSuchProcess)?;
+        *ashmem.buffer.verity_digest.lock() = digest;
+        *ashmem.buffer.verity_descriptor.lock() = descriptor;
+        ashmem
+            .buffer
+            .verity_enabled
+            .store(1, Ordering::Release);
+        Ok(())
+    })
+    .is_ok()
 }
 
 #[cfg(feature = "linux-abi")]

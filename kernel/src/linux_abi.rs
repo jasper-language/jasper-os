@@ -12,6 +12,8 @@ use compat_core::syscall::{
 
 use core::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 
+use sha2::{Digest as _, Sha256};
+
 use kernel_core::objtable::ObjId;
 use kernel_core::paging::MapFlags;
 
@@ -14730,6 +14732,195 @@ fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 ///
 /// 当前标准流不是 TerminalSession；常见 TTY 查询明确返回 `ENOTTY`，其他设备
 /// 控制请求返回 `ENOSYS`，不会把普通控制台描述符伪装成终端。
+fn fsverity_file_bytes(pid: ObjId, fd: u32) -> Result<alloc::vec::Vec<u8>, CompatErrno> {
+    const MAX_VERITY_BYTES: u64 = 64 * 1024 * 1024;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind == compat_core::fd::CompatKind::Device
+        && proc::linux_ashmem_is_regular(pid, entry.handle) == Some(true)
+    {
+        let (size, _, _) = proc::linux_ashmem_state(pid, entry.handle)
+            .ok_or(CompatErrno::BadFd)?;
+        if size > MAX_VERITY_BYTES {
+            return Err(CompatErrno::NoMemory);
+        }
+        let mut bytes = alloc::vec![0u8; size as usize];
+        let read = proc::linux_ashmem_read_from(pid, entry.handle, 0, &mut bytes)
+            .map_err(ashmem_compat_error)?;
+        bytes.truncate(read);
+        return Ok(bytes);
+    }
+    if entry.kind == compat_core::fd::CompatKind::File {
+        let (handle, _) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
+        let file = crate::linux_vfs::FileId::from_handle(handle)
+            .ok_or(CompatErrno::BadFd)?;
+        return Ok(file.bytes().to_vec());
+    }
+    Err(CompatErrno::NotTty)
+}
+
+fn fsverity_sha256_block(salt: &[u8], block: &[u8]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(salt);
+    hash.update(block);
+    hash.finalize().into()
+}
+
+/// Builds the SHA-256 Merkle root and fs-verity descriptor. The descriptor is
+/// the value returned by FS_IOC_MEASURE_VERITY's file digest.
+fn fsverity_descriptor(
+    data: &[u8],
+    salt: &[u8],
+) -> Result<([u8; 256], [u8; 32]), CompatErrno> {
+    const BLOCK: usize = 4096;
+    let mut level = alloc::vec::Vec::new();
+    let blocks = data.len().div_ceil(BLOCK).max(1);
+    level
+        .try_reserve_exact(blocks)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    for index in 0..blocks {
+        let start = index.saturating_mul(BLOCK);
+        let end = data.len().min(start.saturating_add(BLOCK));
+        let mut block = [0u8; BLOCK];
+        if start < end {
+            block[..end - start].copy_from_slice(&data[start..end]);
+        }
+        level.push(fsverity_sha256_block(salt, &block));
+    }
+    while level.len() > 1 {
+        let mut next = alloc::vec::Vec::new();
+        next.try_reserve_exact(level.len().div_ceil(BLOCK / 32))
+            .map_err(|_| CompatErrno::NoMemory)?;
+        for children in level.chunks(BLOCK / 32) {
+            let mut block = [0u8; BLOCK];
+            for (index, child) in children.iter().enumerate() {
+                block[index * 32..index * 32 + 32].copy_from_slice(child);
+            }
+            next.push(fsverity_sha256_block(salt, &block));
+        }
+        level = next;
+    }
+    let root = level.first().copied().ok_or(CompatErrno::NoMemory)?;
+    let mut descriptor = [0u8; 256];
+    descriptor[0] = 1;
+    descriptor[1] = 1;
+    descriptor[2] = 12;
+    descriptor[3] = salt.len() as u8;
+    descriptor[8..16].copy_from_slice(&(data.len() as u64).to_le_bytes());
+    descriptor[16..48].copy_from_slice(&root);
+    descriptor[48..48 + salt.len()].copy_from_slice(salt);
+    let digest: [u8; 32] = Sha256::digest(descriptor).into();
+    Ok((descriptor, digest))
+}
+
+fn linux_fsverity_enable(pid: ObjId, fd: u32, request: u64) -> Result<u64, CompatErrno> {
+    const ARG_BYTES: usize = 128;
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.kind != compat_core::fd::CompatKind::Device
+        || proc::linux_ashmem_is_regular(pid, entry.handle) != Some(true)
+    {
+        return if entry.kind == compat_core::fd::CompatKind::File {
+            Err(CompatErrno::ReadOnly)
+        } else {
+            Err(CompatErrno::NotTty)
+        };
+    }
+    let mut raw = [0u8; ARG_BYTES];
+    copy_from_user(&mut raw, request, ARG_BYTES).map_err(|_| CompatErrno::Fault)?;
+    let version = u32::from_le_bytes(raw[0..4].try_into().unwrap());
+    let algorithm = u32::from_le_bytes(raw[4..8].try_into().unwrap());
+    let block_size = u32::from_le_bytes(raw[8..12].try_into().unwrap());
+    let salt_size = u32::from_le_bytes(raw[12..16].try_into().unwrap());
+    let salt_ptr = u64::from_le_bytes(raw[16..24].try_into().unwrap());
+    let signature_size = u32::from_le_bytes(raw[24..28].try_into().unwrap());
+    if version != 1
+        || algorithm != 1
+        || !block_size.is_power_of_two()
+        || !(4096..=65536).contains(&block_size)
+        || salt_size > 32
+        || signature_size != 0
+        || raw[28..].iter().any(|byte| *byte != 0)
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut salt = [0u8; 32];
+    if salt_size != 0 {
+        copy_from_user(&mut salt[..salt_size as usize], salt_ptr, salt_size as usize)
+            .map_err(|_| CompatErrno::Fault)?;
+    }
+    let data = fsverity_file_bytes(pid, fd)?;
+    let (descriptor, digest) =
+        fsverity_descriptor(&data, &salt[..salt_size as usize])?;
+    if proc::linux_ashmem_set_verity(pid, entry.handle, digest, descriptor) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoMemory)
+    }
+}
+
+fn linux_fsverity_measure(pid: ObjId, fd: u32, request: u64) -> Result<u64, CompatErrno> {
+    let mut header = [0u8; 4];
+    copy_from_user(&mut header, request, 4).map_err(|_| CompatErrno::Fault)?;
+    let algorithm = u16::from_le_bytes(header[0..2].try_into().unwrap());
+    let capacity = u16::from_le_bytes(header[2..4].try_into().unwrap());
+    if algorithm != 0 && algorithm != 1 {
+        return Err(CompatErrno::NotSupported);
+    }
+    if capacity < 32 {
+        return Err(CompatErrno::Overflow);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let (enabled, digest, _) = proc::linux_ashmem_verity_state(pid, entry.handle)
+        .ok_or(CompatErrno::NoData)?;
+    if !enabled {
+        return Err(CompatErrno::NoData);
+    }
+    let mut output = [0u8; 36];
+    output[0..2].copy_from_slice(&1u16.to_le_bytes());
+    output[2..4].copy_from_slice(&32u16.to_le_bytes());
+    output[4..36].copy_from_slice(&digest);
+    copy_to_user(request, &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+fn linux_fsverity_read_metadata(
+    pid: ObjId,
+    fd: u32,
+    request: u64,
+) -> Result<u64, CompatErrno> {
+    let mut raw = [0u8; 40];
+    copy_from_user(&mut raw, request, 40).map_err(|_| CompatErrno::Fault)?;
+    let metadata_type = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+    let offset = usize::try_from(u64::from_le_bytes(raw[8..16].try_into().unwrap()))
+        .map_err(|_| CompatErrno::Overflow)?;
+    let length =
+        usize::try_from(u64::from_le_bytes(raw[16..24].try_into().unwrap()))
+            .map_err(|_| CompatErrno::Overflow)?;
+    let buffer = u64::from_le_bytes(raw[24..32].try_into().unwrap());
+    let reserved = u64::from_le_bytes(raw[32..40].try_into().unwrap());
+    offset
+        .checked_add(length)
+        .ok_or(CompatErrno::Overflow)?;
+    if reserved != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    if metadata_type != 2 {
+        return Err(CompatErrno::NoData);
+    }
+    let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let (enabled, _, descriptor) = proc::linux_ashmem_verity_state(pid, entry.handle)
+        .ok_or(CompatErrno::NoData)?;
+    if !enabled {
+        return Err(CompatErrno::NoData);
+    }
+    let start = offset.min(descriptor.len());
+    let count = length.min(descriptor.len().saturating_sub(start));
+    if count != 0 {
+        copy_to_user(buffer, &descriptor[start..start + count], count)
+            .map_err(|_| CompatErrno::Fault)?;
+    }
+    Ok(count as u64)
+}
+
 fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const TCGETS: u64 = 0x5401;
     const TCSETS: u64 = 0x5402;
@@ -14761,6 +14952,11 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const BINDER_GET_FROZEN_INFO: u64 = 0xc00c_620f;
     const BINDER_ENABLE_ONEWAY_SPAM_DETECTION: u64 = 0x4004_6210;
     const BINDER_GET_EXTENDED_ERROR: u64 = 0xc00c_6211;
+    const FS_IOC_GETFLAGS: u64 = 0x8008_6601;
+    const FS_IOC_SETFLAGS: u64 = 0x4008_6602;
+    const FS_IOC_ENABLE_VERITY: u64 = 0x4080_6685;
+    const FS_IOC_MEASURE_VERITY: u64 = 0xc004_6686;
+    const FS_IOC_READ_VERITY_METADATA: u64 = 0xc028_6687;
     const ION_IOC_ALLOC: u64 = 0xc020_4900;
     const ION_IOC_FREE: u64 = 0xc004_4901;
     const ION_IOC_MAP: u64 = 0xc008_4902;
@@ -14888,6 +15084,32 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             BINDER_GET_EXTENDED_ERROR => crate::binder::get_extended_error(pid, args[2]),
             BINDER_WRITE_READ => crate::binder::write_read(pid, fd, args),
             _ => Err(CompatErrno::NoSys),
+        };
+    }
+    if matches!(
+        args[1],
+        FS_IOC_GETFLAGS
+            | FS_IOC_SETFLAGS
+            | FS_IOC_ENABLE_VERITY
+            | FS_IOC_MEASURE_VERITY
+            | FS_IOC_READ_VERITY_METADATA
+    ) {
+        return match args[1] {
+            FS_IOC_GETFLAGS => {
+                let enabled = proc::linux_ashmem_verity_state(pid, entry.handle)
+                    .is_some_and(|(enabled, _, _)| enabled);
+                let flags = if enabled { 0x0010_0000u64 } else { 0 };
+                copy_to_user(args[2], &flags.to_le_bytes(), 8)
+                    .map_err(|_| CompatErrno::Fault)?;
+                Ok(0)
+            }
+            FS_IOC_SETFLAGS => Err(CompatErrno::Perm),
+            FS_IOC_ENABLE_VERITY => linux_fsverity_enable(pid, fd, args[2]),
+            FS_IOC_MEASURE_VERITY => linux_fsverity_measure(pid, fd, args[2]),
+            FS_IOC_READ_VERITY_METADATA => {
+                linux_fsverity_read_metadata(pid, fd, args[2])
+            }
+            _ => unreachable!(),
         };
     }
     if proc::linux_is_sync_file(pid, entry.handle) {

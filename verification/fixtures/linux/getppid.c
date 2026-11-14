@@ -13,6 +13,7 @@
 #include <linux/dma-heap.h>
 #include <linux/filter.h>
 #include <linux/fs.h>
+#include <linux/fsverity.h>
 #include <linux/futex.h>
 #include <linux/io_uring.h>
 #include <linux/ioprio.h>
@@ -1821,6 +1822,77 @@ int main(void) {
     if (memfd_map == MAP_FAILED || memfd_map[0] != 'M' ||
         munmap(memfd_map, 4096) != 0 || close(memfd) != 0) {
         return 214;
+    }
+    int verity_fd = memfd_create("fsverity", 0);
+    unsigned char verity_data[8192];
+    for (size_t index = 0; index < sizeof(verity_data); index++) {
+        verity_data[index] = (unsigned char)(index * 37u + 11u);
+    }
+    struct {
+        uint16_t algorithm;
+        uint16_t size;
+        unsigned char digest[32];
+    } verity_digest = {.size = sizeof(verity_digest.digest)};
+    if (verity_fd < 0 ||
+        ftruncate(verity_fd, sizeof(verity_data)) != 0 ||
+        pwrite(verity_fd, verity_data, sizeof(verity_data), 0) !=
+            (ssize_t)sizeof(verity_data)) {
+        return 740;
+    }
+    unsigned char verity_salt[4] = {0x46, 0x53, 0x56, 0x31};
+    struct fsverity_enable_arg verity_enable = {
+        .version = 1,
+        .hash_algorithm = FS_VERITY_HASH_ALG_SHA256,
+        .block_size = 4096,
+        .salt_size = sizeof(verity_salt),
+        .salt_ptr = (uint64_t)(uintptr_t)verity_salt,
+    };
+    int verity_flags = 0;
+    if (ioctl(verity_fd, FS_IOC_ENABLE_VERITY, &verity_enable) != 0 ||
+        ioctl(verity_fd, FS_IOC_MEASURE_VERITY, &verity_digest) != 0 ||
+        verity_digest.algorithm != FS_VERITY_HASH_ALG_SHA256 ||
+        verity_digest.size != 32 ||
+        ioctl(verity_fd, FS_IOC_GETFLAGS, &verity_flags) != 0 ||
+        (verity_flags & FS_VERITY_FL) == 0) {
+        return 742;
+    }
+    static const unsigned char verity_expected_digest[32] = {
+        0xcb, 0xc8, 0x7f, 0xfe, 0x11, 0x4b, 0x9c, 0xf7,
+        0x0f, 0x63, 0xdf, 0xf4, 0xa8, 0x61, 0x17, 0x31,
+        0x28, 0x49, 0x56, 0xab, 0x89, 0xb4, 0xa3, 0x58,
+        0x61, 0xcf, 0x26, 0x0e, 0xf7, 0x86, 0xdb, 0x3d,
+    };
+    if (memcmp(verity_digest.digest, verity_expected_digest,
+               sizeof(verity_expected_digest)) != 0) {
+        return 745;
+    }
+    for (size_t index = 0; index < sizeof(verity_digest.digest); index++) {
+        if (verity_digest.digest[index] != 0) {
+            break;
+        }
+        if (index + 1 == sizeof(verity_digest.digest)) {
+            return 741;
+        }
+    }
+    struct fsverity_read_metadata_arg verity_metadata = {
+        .metadata_type = FS_VERITY_METADATA_TYPE_DESCRIPTOR,
+        .length = 256,
+    };
+    unsigned char verity_descriptor[256] = {0};
+    verity_metadata.buf_ptr =
+        (uint64_t)(uintptr_t)verity_descriptor;
+    if (ioctl(verity_fd, FS_IOC_READ_VERITY_METADATA, &verity_metadata) !=
+            256 ||
+        verity_descriptor[0] != 1 ||
+        verity_descriptor[1] != FS_VERITY_HASH_ALG_SHA256 ||
+        verity_descriptor[3] != sizeof(verity_salt)) {
+        return 743;
+    }
+    verity_flags = FS_VERITY_FL;
+    errno = 0;
+    if (ioctl(verity_fd, FS_IOC_SETFLAGS, &verity_flags) != -1 ||
+        errno != EPERM || close(verity_fd) != 0) {
+        return 744;
     }
     int allocate_fd = memfd_create("fallocate", 0);
     if (allocate_fd < 0 ||
