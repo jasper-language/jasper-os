@@ -4144,6 +4144,22 @@ int main(void) {
         memcmp(splice_readback, "splice", 6) != 0) {
         return 517;
     }
+    char tee_copy[4] = {0};
+    char tee_origin[4] = {0};
+    if (write(splice_source_pipe[1], "TEES", 4) != 4 ||
+        syscall(SYS_tee, splice_source_pipe[0], splice_dest_pipe[1],
+                4, 0) != 4 ||
+        read(splice_source_pipe[0], tee_origin, 4) != 4 ||
+        read(splice_dest_pipe[0], tee_copy, 4) != 4 ||
+        memcmp(tee_origin, "TEES", 4) != 0 ||
+        memcmp(tee_copy, "TEES", 4) != 0) {
+        return 527;
+    }
+    errno = 0;
+    if (syscall(SYS_tee, splice_source_pipe[0], splice_dest_pipe[1],
+                4, 0x10) != -1 || errno != EINVAL) {
+        return 528;
+    }
     int splice_file =
         syscall(SYS_open, "/usr/lib/x86_64-linux-gnu/libc.so.6",
                 O_RDONLY | O_CLOEXEC, 0);
