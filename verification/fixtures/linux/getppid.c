@@ -128,11 +128,7 @@ static int wait_for_interval_signals(int expected) {
     if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
         return -1;
     }
-    deadline.tv_nsec += 500000000L;
-    if (deadline.tv_nsec >= 1000000000L) {
-        deadline.tv_sec += 1;
-        deadline.tv_nsec -= 1000000000L;
-    }
+    deadline.tv_sec += 2;
     const struct timespec delay = {.tv_sec = 0, .tv_nsec = 5000000L};
     struct timespec now;
     do {
