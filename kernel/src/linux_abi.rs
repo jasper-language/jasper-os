@@ -568,6 +568,10 @@ fn linux_tid(process: ObjId) -> Option<u32> {
         .map(|entry| entry.tid)
 }
 
+pub(crate) fn current_linux_tid(process: ObjId) -> Option<u32> {
+    linux_tid(process)
+}
+
 fn linux_tid_for_task(task: crate::task::TaskId) -> Option<(ObjId, u32)> {
     COMPAT
         .lock()

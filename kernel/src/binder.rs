@@ -19,6 +19,7 @@ const MAX_OFFSET_BYTES: usize = 4096;
 const MAX_QUEUE: usize = 64;
 const MAX_NODES: usize = 128;
 const MAX_HANDLES: usize = 512;
+const MAX_BINDER_THREADS: usize = 64;
 
 const BINDER_TYPE_BINDER: u32 = 0x7362_2a85;
 const BINDER_TYPE_WEAK_BINDER: u32 = 0x7762_2a85;
@@ -45,13 +46,20 @@ const BC_REGISTER_LOOPER: u32 = 0x630b;
 
 const BR_TRANSACTION: u32 = 0x8040_7202;
 const BR_REPLY: u32 = 0x8040_7203;
+const BR_DEAD_REPLY: u32 = 0x7205;
 const BR_TRANSACTION_COMPLETE: u32 = 0x7206;
+const BR_FAILED_REPLY: u32 = 0x7211;
+const BR_SPAWN_LOOPER: u32 = 0x720d;
 const BR_DEAD_BINDER: u32 = 0x8008_720f;
 const BR_CLEAR_DEATH_NOTIFICATION_DONE: u32 = 0x8008_7210;
 const TF_ONE_WAY: u32 = 0x01;
 
 enum QueuedCommand {
     Complete,
+    ReplyError {
+        command: u32,
+    },
+    SpawnLooper,
     DeathNotification {
         command: u32,
         cookie: u64,
@@ -85,6 +93,7 @@ struct Node {
     cookie: u64,
     strong_refs: u32,
     weak_refs: u32,
+    dead: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -101,6 +110,14 @@ struct DeathRequest {
     cookie: u64,
 }
 
+#[derive(Clone, Copy)]
+struct BinderThread {
+    process: ObjId,
+    task: crate::task::TaskId,
+    tid: u32,
+    pool_member: bool,
+}
+
 struct State {
     context_manager: Option<ObjId>,
     queue: VecDeque<(ObjId, QueuedCommand)>,
@@ -111,6 +128,8 @@ struct State {
     next_node: u64,
     next_handle: u32,
     death_requests: Vec<DeathRequest>,
+    threads: Vec<BinderThread>,
+    spawn_pending: Vec<ObjId>,
 }
 
 impl State {
@@ -125,6 +144,8 @@ impl State {
             next_node: 1,
             next_handle: 1,
             death_requests: Vec::new(),
+            threads: Vec::new(),
+            spawn_pending: Vec::new(),
         }
     }
 }
@@ -183,6 +204,7 @@ pub(crate) fn set_context_manager_ext(
             cookie,
             strong_refs: 1,
             weak_refs: 0,
+            dead: false,
         });
     }
     state.context_manager = Some(pid);
@@ -198,7 +220,11 @@ pub(crate) fn release_process(pid: ObjId) {
     }
     let mut dead_nodes = [0u64; MAX_NODES];
     let mut dead_count = 0usize;
-    for node in state.nodes.iter().filter(|node| node.owner == pid) {
+    for node in state
+        .nodes
+        .iter()
+        .filter(|node| node.owner == pid && !node.dead)
+    {
         dead_nodes[dead_count] = node.id;
         dead_count += 1;
     }
@@ -207,7 +233,27 @@ pub(crate) fn release_process(pid: ObjId) {
         .iter()
         .filter(|request| dead_nodes[..dead_count].contains(&request.node))
         .count();
-    if state.queue.try_reserve(notifications).is_ok() {
+    let mut dead_replies = Vec::new();
+    if dead_replies
+        .try_reserve(state.active.len().saturating_mul(2))
+        .is_err()
+    {
+        dead_replies.clear();
+    } else {
+        for active in &state.active {
+            if active.target == pid && proc::state(active.sender) == Some(proc::ProcState::Running) {
+                dead_replies.push(active.sender);
+            }
+            if active.sender == pid && proc::state(active.target) == Some(proc::ProcState::Running) {
+                dead_replies.push(active.target);
+            }
+        }
+    }
+    if state
+        .queue
+        .try_reserve(notifications.saturating_add(dead_replies.len()))
+        .is_ok()
+    {
         for node in dead_nodes[..dead_count].iter().copied() {
             for index in 0..state.death_requests.len() {
                 let request = state.death_requests[index];
@@ -222,18 +268,123 @@ pub(crate) fn release_process(pid: ObjId) {
                 }
             }
         }
+        for recipient in dead_replies {
+            state.queue.push_back((
+                recipient,
+                QueuedCommand::ReplyError {
+                    command: BR_DEAD_REPLY,
+                },
+            ));
+        }
     }
-    state.nodes.retain(|node| node.owner != pid);
+    // Keep dead node identities as tombstones. Existing remote handles must
+    // continue resolving to the dead owner so transactions return BR_DEAD_REPLY
+    // instead of being confused with an unknown handle (BR_FAILED_REPLY).
+    for node in state.nodes.iter_mut().filter(|node| node.owner == pid) {
+        node.strong_refs = 0;
+        node.weak_refs = 0;
+        node.dead = true;
+    }
     state.handles.retain(|binding| binding.recipient != pid);
     state
         .death_requests
         .retain(|request| request.recipient != pid);
+    let mut referenced_nodes = Vec::new();
+    if referenced_nodes
+        .try_reserve(state.handles.len().saturating_add(state.death_requests.len()))
+        .is_ok()
+    {
+        referenced_nodes.extend(state.handles.iter().map(|handle| handle.node));
+        referenced_nodes.extend(state.death_requests.iter().map(|request| request.node));
+        state.nodes.retain(|node| !node.dead || referenced_nodes.contains(&node.id));
+    }
+    state.threads.retain(|thread| thread.process != pid);
+    state.spawn_pending.retain(|process| *process != pid);
     state.active.retain(|active| active.target != pid && active.sender != pid);
     state.buffers.retain(|buffer| buffer.process != pid);
-    state.queue.retain(|(target, command)| {
-        *target != pid
-            && !matches!(command, QueuedCommand::Transaction { sender, .. } if *sender == pid)
-    });
+    state.queue.retain(|(target, _)| *target != pid);
+    state.nodes.shrink_to_fit();
+    state.handles.shrink_to_fit();
+    state.death_requests.shrink_to_fit();
+    state.threads.shrink_to_fit();
+    state.spawn_pending.shrink_to_fit();
+    state.active.shrink_to_fit();
+    state.buffers.shrink_to_fit();
+    state.queue.shrink_to_fit();
+}
+
+pub(crate) fn thread_exit(pid: ObjId) {
+    let Some(tid) = crate::linux_abi::current_linux_tid(pid) else {
+        return;
+    };
+    release_thread(pid, tid);
+}
+
+pub(crate) fn release_thread(pid: ObjId, tid: u32) {
+    let mut state = BINDER.lock();
+    state
+        .threads
+        .retain(|thread| thread.process != pid || thread.tid != tid);
+}
+
+/// Returns one node in pointer-cursor order for `BINDER_GET_NODE_DEBUG_INFO`.
+pub(crate) fn get_node_debug_info(_pid: ObjId, request: u64) -> Result<u64, CompatErrno> {
+    const INFO_BYTES: usize = 24;
+    let mut input = [0u8; INFO_BYTES];
+    copy_from_user(&mut input, request, INFO_BYTES).map_err(|_| CompatErrno::Fault)?;
+    let cursor = u64::from_le_bytes(input[0..8].try_into().unwrap());
+    let state = BINDER.lock();
+    let next = if cursor == 0 {
+        state.nodes.iter().min_by_key(|node| node.id)
+    } else {
+        let current = state
+            .nodes
+            .iter()
+            .find(|node| node.pointer == cursor)
+            .ok_or(CompatErrno::NoEntry)?;
+        state
+            .nodes
+            .iter()
+            .filter(|node| node.id > current.id)
+            .min_by_key(|node| node.id)
+    };
+    let mut output = [0u8; INFO_BYTES];
+    if let Some(node) = next {
+        output[0..8].copy_from_slice(&node.pointer.to_le_bytes());
+        output[8..16].copy_from_slice(&node.cookie.to_le_bytes());
+        output[16..20].copy_from_slice(&u32::from(node.strong_refs != 0).to_le_bytes());
+        output[20..24].copy_from_slice(&u32::from(node.weak_refs != 0).to_le_bytes());
+    }
+    drop(state);
+    copy_to_user(request, &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
+}
+
+/// Returns strong/weak counts for one local Binder handle.
+pub(crate) fn get_node_info_for_ref(pid: ObjId, request: u64) -> Result<u64, CompatErrno> {
+    const INFO_BYTES: usize = 24;
+    let mut input = [0u8; INFO_BYTES];
+    copy_from_user(&mut input, request, INFO_BYTES).map_err(|_| CompatErrno::Fault)?;
+    let handle = u32::from_le_bytes(input[0..4].try_into().unwrap());
+    let state = BINDER.lock();
+    let node_id = state
+        .handles
+        .iter()
+        .find(|binding| binding.recipient == pid && binding.handle == handle)
+        .map(|binding| binding.node)
+        .ok_or(CompatErrno::NoEntry)?;
+    let node = state
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .ok_or(CompatErrno::NoEntry)?;
+    let mut output = [0u8; INFO_BYTES];
+    output[0..4].copy_from_slice(&handle.to_le_bytes());
+    output[4..8].copy_from_slice(&node.strong_refs.to_le_bytes());
+    output[8..12].copy_from_slice(&node.weak_refs.to_le_bytes());
+    drop(state);
+    copy_to_user(request, &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    Ok(0)
 }
 
 pub(crate) fn write_read(pid: ObjId, fd: u32, args: [u64; 6]) -> Result<u64, CompatErrno> {
@@ -262,26 +413,30 @@ pub(crate) fn write_read(pid: ObjId, fd: u32, args: [u64; 6]) -> Result<u64, Com
 
     let nonblocking =
         proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
-    let read_consumed = loop {
-        let queued = {
-            let mut state = BINDER.lock();
-            state
-                .queue
-                .iter()
-                .position(|(target, _)| *target == pid)
-                .and_then(|index| state.queue.remove(index))
-                .map(|(_, command)| command)
-        };
-        if let Some(command) = queued {
-            break deliver(pid, read_buffer, read_size, command)?;
+    let read_consumed = if read_size < 4 {
+        0
+    } else {
+        loop {
+            let queued = {
+                let mut state = BINDER.lock();
+                state
+                    .queue
+                    .iter()
+                    .position(|(target, _)| *target == pid)
+                    .and_then(|index| state.queue.remove(index))
+                    .map(|(_, command)| command)
+            };
+            if let Some(command) = queued {
+                break deliver(pid, read_buffer, read_size, command)?;
+            }
+            if nonblocking {
+                break 0;
+            }
+            if proc::current_exiting() || crate::linux_abi::current_signal_pending(pid) {
+                return Err(CompatErrno::Interrupted);
+            }
+            crate::sched::pause();
         }
-        if read_size < 4 || nonblocking {
-            break 0;
-        }
-        if proc::current_exiting() || crate::linux_abi::current_signal_pending(pid) {
-            return Err(CompatErrno::Interrupted);
-        }
-        crate::sched::pause();
     };
     copy_to_user(
         request_pointer + 32,
@@ -401,12 +556,69 @@ fn process_write(pid: ObjId, address: u64, size: usize) -> Result<usize, CompatE
                 offset += 12;
             }
             BC_ENTER_LOOPER | BC_EXIT_LOOPER | BC_REGISTER_LOOPER => {
+                let tid = crate::linux_abi::current_linux_tid(pid)
+                    .ok_or(CompatErrno::NoSys)?;
+                let (task, _) = crate::sched::current();
+                update_looper(pid, task, tid, command)?;
                 offset += 4;
             }
             _ => return Err(CompatErrno::NoSys),
         }
     }
     Ok(offset)
+}
+
+fn update_looper(
+    pid: ObjId,
+    task: crate::task::TaskId,
+    tid: u32,
+    command: u32,
+) -> Result<(), CompatErrno> {
+    let mut state = BINDER.lock();
+    let existing = state
+        .threads
+        .iter()
+        .position(|thread| thread.process == pid && thread.tid == tid);
+    if command == BC_EXIT_LOOPER {
+        if let Some(index) = existing {
+            state.threads.remove(index);
+        }
+        crate::kprintln!("[JSR-BINDER] looper-exit pid={} tid={}", pid.raw(), tid);
+        return Ok(());
+    }
+    let pool_member = command == BC_REGISTER_LOOPER;
+    if let Some(index) = existing {
+        state.threads[index].pool_member |= pool_member;
+        state.threads[index].task = task;
+    } else {
+        if state.threads.len() >= MAX_BINDER_THREADS {
+            return Err(CompatErrno::NoSpace);
+        }
+        state
+            .threads
+            .try_reserve(1)
+            .map_err(|_| CompatErrno::NoMemory)?;
+        state.threads.push(BinderThread {
+            process: pid,
+            task,
+            tid,
+            pool_member,
+        });
+    }
+    if pool_member {
+        state.spawn_pending.retain(|process| *process != pid);
+        state.queue.retain(|(target, command)| {
+            *target != pid || !matches!(command, QueuedCommand::SpawnLooper)
+        });
+    }
+    crate::kprintln!(
+        "[JSR-BINDER] looper-register pid={} tid={} pool={} threads={}",
+        pid.raw(),
+        tid,
+        pool_member,
+        state.threads.len()
+    );
+    Ok(())
 }
 
 fn process_reference(
@@ -515,6 +727,28 @@ fn resolve_transaction_target(pid: ObjId, handle: u32) -> Result<ObjId, CompatEr
         .find(|node| node.id == binding.node)
         .map(|node| node.owner)
         .ok_or(CompatErrno::NoEntry)
+}
+
+/// Queues the asynchronous completion sequence for a transaction that failed
+/// before it could be delivered to the peer.
+fn queue_reply_error(pid: ObjId, command: u32) -> Result<(), CompatErrno> {
+    let mut state = BINDER.lock();
+    if state.queue.len().saturating_add(2) > MAX_QUEUE {
+        return Err(CompatErrno::TryAgain);
+    }
+    state
+        .queue
+        .try_reserve(2)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    state.queue.push_back((pid, QueuedCommand::Complete));
+    state.queue.push_back((pid, QueuedCommand::ReplyError { command }));
+    crate::kprintln!(
+        "[JSR-BINDER] reply-error-queued recipient={} command={:#x} queue={}",
+        pid.raw(),
+        command,
+        state.queue.len()
+    );
+    Ok(())
 }
 
 /// Translates flat binder objects in one transaction. Binder definitions become
@@ -632,6 +866,7 @@ fn translate_objects(
                         cookie,
                         strong_refs: u32::from(!weak),
                         weak_refs: u32::from(weak),
+                        dead: false,
                     });
                     id
                 }
@@ -740,18 +975,68 @@ fn enqueue_transaction(
 
     if command == BC_TRANSACTION {
         let handle = u32::from_le_bytes(transaction[0..4].try_into().unwrap());
-        let target = resolve_transaction_target(pid, handle)?;
+        let target = match resolve_transaction_target(pid, handle) {
+            Ok(target) => target,
+            Err(CompatErrno::NoEntry | CompatErrno::BadFd) => {
+                queue_reply_error(pid, BR_FAILED_REPLY)?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         if target == pid {
             return Err(CompatErrno::Invalid);
         }
-        translate_objects(pid, target, &mut data, &offsets)?;
+        if proc::state(target) != Some(proc::ProcState::Running) {
+            queue_reply_error(pid, BR_DEAD_REPLY)?;
+            return Ok(());
+        }
+        if let Err(error) = translate_objects(pid, target, &mut data, &offsets) {
+            if matches!(error, CompatErrno::Invalid | CompatErrno::NoEntry | CompatErrno::BadFd) {
+                queue_reply_error(pid, BR_FAILED_REPLY)?;
+                return Ok(());
+            }
+            return Err(error);
+        }
+        let max_threads = proc::linux_binder_max_threads(target).unwrap_or(0) as usize;
         let mut state = BINDER.lock();
-        if state.queue.len() >= MAX_QUEUE {
+        let active_pool_threads = state
+            .threads
+            .iter()
+            .filter(|thread| thread.process == target && thread.pool_member)
+            .count();
+        let request_spawn = max_threads != 0
+            && active_pool_threads < max_threads
+            && !state.spawn_pending.contains(&target);
+        crate::kprintln!(
+            "[JSR-BINDER] transaction sender={} target={} code={:#x} flags={:#x} max_threads={} active_pool={} spawn={}",
+            pid.raw(),
+            target.raw(),
+            code,
+            flags,
+            max_threads,
+            active_pool_threads,
+            request_spawn
+        );
+        let queued = if request_spawn { 3 } else { 2 };
+        if state.queue.len().saturating_add(queued) > MAX_QUEUE {
             return Err(CompatErrno::TryAgain);
         }
-        state.queue.try_reserve(2).map_err(|_| CompatErrno::NoMemory)?;
+        state
+            .queue
+            .try_reserve(queued)
+            .map_err(|_| CompatErrno::NoMemory)?;
         if flags & TF_ONE_WAY == 0 {
             state.active.try_reserve(1).map_err(|_| CompatErrno::NoMemory)?;
+        }
+        if request_spawn {
+            state
+                .spawn_pending
+                .try_reserve(1)
+                .map_err(|_| CompatErrno::NoMemory)?;
+            state.spawn_pending.push(target);
+            state
+                .queue
+                .push_back((target, QueuedCommand::SpawnLooper));
         }
         state.queue.push_back((pid, QueuedCommand::Complete));
         state.queue.push_back((
@@ -771,6 +1056,19 @@ fn enqueue_transaction(
                 sender: pid,
             });
         }
+        let mut wake = [None; MAX_BINDER_THREADS];
+        for (slot, thread) in wake.iter_mut().zip(
+            state
+                .threads
+                .iter()
+                .filter(|thread| thread.process == target),
+        ) {
+            *slot = Some(thread.task);
+        }
+        drop(state);
+        for task in wake.into_iter().flatten() {
+            crate::sched::wake(task);
+        }
         return Ok(());
     }
 
@@ -781,8 +1079,15 @@ fn enqueue_transaction(
             .iter()
             .rfind(|active| active.target == pid)
             .map(|active| active.sender)
-            .ok_or(CompatErrno::Invalid)?
     };
+    let Some(sender) = sender else {
+        queue_reply_error(pid, BR_FAILED_REPLY)?;
+        return Ok(());
+    };
+    if proc::state(sender) != Some(proc::ProcState::Running) {
+        queue_reply_error(pid, BR_DEAD_REPLY)?;
+        return Ok(());
+    }
     translate_objects(pid, sender, &mut data, &offsets)?;
     let mut state = BINDER.lock();
     let index = state
@@ -791,7 +1096,20 @@ fn enqueue_transaction(
         .rposition(|active| active.target == pid)
         .ok_or(CompatErrno::Invalid)?;
     state.active.remove(index);
-    state.queue.try_reserve(2).map_err(|_| CompatErrno::NoMemory)?;
+    if state.queue.len().saturating_add(2) > MAX_QUEUE {
+        state.active.push(ActiveTransaction {
+            target: pid,
+            sender,
+        });
+        return Err(CompatErrno::TryAgain);
+    }
+    if state.queue.try_reserve(2).is_err() {
+        state.active.push(ActiveTransaction {
+            target: pid,
+            sender,
+        });
+        return Err(CompatErrno::NoMemory);
+    }
     state.queue.push_back((pid, QueuedCommand::Complete));
     state.queue.push_back((
         sender,
@@ -826,6 +1144,34 @@ fn deliver(
             .map_err(|_| CompatErrno::Fault)?;
             Ok(4)
         }
+        QueuedCommand::ReplyError { command } => {
+            if capacity < 4 {
+                return Err(CompatErrno::Range);
+            }
+            crate::kprintln!(
+                "[JSR-BINDER] reply-error-deliver recipient={} command={:#x}",
+                recipient.raw(),
+                command
+            );
+            copy_to_user(address, &command.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
+            Ok(4)
+        }
+        QueuedCommand::SpawnLooper => {
+            if capacity < 4 {
+                return Err(CompatErrno::Range);
+            }
+            crate::kprintln!(
+                "[JSR-BINDER] spawn-deliver recipient={}",
+                recipient.raw()
+            );
+            copy_to_user(
+                address,
+                &BR_SPAWN_LOOPER.to_le_bytes(),
+                4,
+            )
+            .map_err(|_| CompatErrno::Fault)?;
+            Ok(4)
+        }
         QueuedCommand::DeathNotification { command, cookie } => {
             if capacity < 12 {
                 return Err(CompatErrno::Range);
@@ -847,6 +1193,14 @@ fn deliver(
             if capacity < BINDER_READ_PACKET_BYTES {
                 return Err(CompatErrno::Range);
             }
+            crate::kprintln!(
+                "[JSR-BINDER] transaction-deliver recipient={} sender={} command={:#x} code={:#x} flags={:#x}",
+                recipient.raw(),
+                sender.raw(),
+                command,
+                code,
+                flags
+            );
             let combined_length = data
                 .len()
                 .checked_add(offsets.len())
