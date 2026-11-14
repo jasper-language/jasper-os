@@ -4509,7 +4509,10 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
         {
             revoke_all_device_mappings(p);
             let linux = p.linux.as_mut().expect("checked Linux process");
-            let _ = linux.fds.take_close_on_exec();
+            let close_on_exec = linux.fds.take_close_on_exec();
+            for handle in close_on_exec.handles().iter().copied() {
+                release_unreferenced_pipe(linux, handle);
+            }
             linux
                 .pipes
                 .retain(|pipe| linux.fds.handle_fd_count(pipe.handle) != 0);
