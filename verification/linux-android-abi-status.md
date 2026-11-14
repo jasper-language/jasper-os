@@ -51,9 +51,9 @@ removed interfaces.
 ## Acceptance evidence
 
 - Full Linux/Android root UEFI:
-  `evidence/issue21-uefi-boot-20261114-linux-android-full-v102`
+  `evidence/issue21-uefi-boot-20261114-uprobe-entry-v111`
 - Sandbox launch UEFI:
-  `evidence/issue21-uefi-boot-20261114-linux-android-sandbox-v103`
+  `evidence/issue21-uefi-boot-20261114-fanotify-sandbox-v112`
 - Android-focused UEFI:
   `evidence/issue21-uefi-boot-20261114-linux-android-merged-v100`
 - `KCMP_SYSVSEM`:
