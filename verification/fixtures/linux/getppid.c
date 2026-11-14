@@ -53,6 +53,9 @@
 #ifndef SYS_cachestat
 #define SYS_cachestat 451
 #endif
+#ifndef SYS_rt_tgsigqueueinfo
+#define SYS_rt_tgsigqueueinfo 297
+#endif
 
 #define JASPER_ASHMEM_SET_NAME 0x41006101UL
 #define JASPER_ASHMEM_SET_PROT_MASK 0x40046102UL
@@ -108,6 +111,10 @@ static void signal_noop(int signal) {
 static volatile sig_atomic_t posix_timer_signals;
 static volatile sig_atomic_t interval_timer_signals;
 static volatile sig_atomic_t sigsuspend_signals;
+static volatile sig_atomic_t rt_queue_signals;
+static volatile sig_atomic_t rt_queue_values[4];
+static volatile sig_atomic_t rt_queue_code;
+static volatile sig_atomic_t rt_queue_pid;
 
 static void posix_timer_signal_handler(int signal) {
     if (signal == SIGUSR1) {
@@ -125,6 +132,17 @@ static void sigsuspend_signal_handler(int signal) {
     if (signal == SIGUSR1) {
         sigsuspend_signals++;
     }
+}
+
+static void rt_queue_signal_handler(int signal, siginfo_t *info, void *context) {
+    (void)signal;
+    (void)context;
+    if (info == NULL || rt_queue_signals >= 4) {
+        return;
+    }
+    rt_queue_values[rt_queue_signals++] = info->si_value.sival_int;
+    rt_queue_code = info->si_code;
+    rt_queue_pid = info->si_pid;
 }
 
 static int wait_for_interval_signals(int expected) {
@@ -293,6 +311,91 @@ int main(void) {
         !sigismember(&pending_signal, SIGUSR1) ||
         sigprocmask(SIG_UNBLOCK, &blocked_signal, NULL) != 0) {
         return 238;
+    }
+    struct sigaction rt_action = {0};
+    rt_action.sa_sigaction = rt_queue_signal_handler;
+    rt_action.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&rt_action.sa_mask);
+    sigset_t rt_mask;
+    sigset_t rt_old_mask;
+    sigset_t rt_pending_mask;
+    sigemptyset(&rt_mask);
+    sigaddset(&rt_mask, SIGRTMIN);
+    if (sigaction(SIGRTMIN, &rt_action, NULL) != 0 ||
+        sigprocmask(SIG_BLOCK, &rt_mask, &rt_old_mask) != 0) {
+        return 542;
+    }
+    union sigval first_value = {.sival_int = 0x1111};
+    union sigval second_value = {.sival_int = 0x2222};
+    if (sigqueue(getpid(), SIGRTMIN, first_value) != 0 ||
+        sigqueue(getpid(), SIGRTMIN, second_value) != 0 ||
+        sigpending(&rt_pending_mask) != 0 ||
+        !sigismember(&rt_pending_mask, SIGRTMIN) ||
+        sigprocmask(SIG_SETMASK, &rt_old_mask, NULL) != 0) {
+        return 543;
+    }
+    struct timespec rt_deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &rt_deadline) != 0) {
+        return 544;
+    }
+    rt_deadline.tv_sec += 1;
+    const struct timespec rt_delay = {.tv_sec = 0, .tv_nsec = 5000000L};
+    struct timespec rt_now;
+    while (rt_queue_signals < 2) {
+        struct timespec remaining = rt_delay;
+        nanosleep(&remaining, NULL);
+        if (clock_gettime(CLOCK_MONOTONIC, &rt_now) != 0 ||
+            rt_now.tv_sec > rt_deadline.tv_sec ||
+            (rt_now.tv_sec == rt_deadline.tv_sec &&
+             rt_now.tv_nsec >= rt_deadline.tv_nsec)) {
+            break;
+        }
+    }
+    if (rt_queue_signals != 2 ||
+        rt_queue_values[0] != 0x1111 ||
+        rt_queue_values[1] != 0x2222 ||
+        rt_queue_code != SI_QUEUE ||
+        rt_queue_pid != getpid()) {
+        return 545;
+    }
+    sigemptyset(&rt_mask);
+    sigaddset(&rt_mask, SIGRTMIN + 1);
+    if (sigaction(SIGRTMIN + 1, &rt_action, NULL) != 0) {
+        return 546;
+    }
+    rt_queue_signals = 0;
+    siginfo_t thread_info = {0};
+    thread_info.si_signo = SIGRTMIN + 1;
+    thread_info.si_code = SI_QUEUE;
+    thread_info.si_value.sival_int = 0x3333;
+    if (syscall(SYS_rt_tgsigqueueinfo, getpid(), (pid_t)syscall(SYS_gettid),
+                SIGRTMIN + 1, &thread_info) != 0) {
+        return 547;
+    }
+    rt_deadline.tv_sec = rt_now.tv_sec + 1;
+    rt_deadline.tv_nsec = rt_now.tv_nsec;
+    while (rt_queue_signals == 0) {
+        struct timespec remaining = rt_delay;
+        nanosleep(&remaining, NULL);
+        if (clock_gettime(CLOCK_MONOTONIC, &rt_now) != 0 ||
+            rt_now.tv_sec > rt_deadline.tv_sec ||
+            (rt_now.tv_sec == rt_deadline.tv_sec &&
+             rt_now.tv_nsec >= rt_deadline.tv_nsec)) {
+            break;
+        }
+    }
+    if (rt_queue_signals != 1 ||
+        rt_queue_values[0] != 0x3333 ||
+        rt_queue_code != SI_QUEUE ||
+        rt_queue_pid != getpid()) {
+        return 548;
+    }
+    thread_info.si_code = 1;
+    errno = 0;
+    if (syscall(SYS_rt_tgsigqueueinfo, getpid(), (pid_t)syscall(SYS_gettid),
+                SIGRTMIN + 1, &thread_info) != -1 ||
+        errno != EPERM) {
+        return 549;
     }
     sigset_t signalfd_saved_mask;
     sigset_t signalfd_mask;

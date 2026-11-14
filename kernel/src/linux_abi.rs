@@ -32,6 +32,7 @@ const MAX_LINUX_THREADS: usize = 64;
 const MAX_FUTEX_WORDS: usize = 32;
 const MAX_PROCESS_SIGNAL_SETS: usize = 16;
 const MAX_POSIX_TIMERS: usize = 32;
+const MAX_QUEUED_RT_SIGNALS: usize = 16;
 const MAX_INTERVAL_TIMER_SETS: usize = 16;
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
 static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
@@ -40,6 +41,58 @@ static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
 struct SignalOrigin {
     pid: u32,
     code: i32,
+    value: u64,
+}
+
+#[derive(Clone, Copy)]
+struct PendingRtSignal {
+    signal: u32,
+    origin: SignalOrigin,
+    active: bool,
+}
+
+impl PendingRtSignal {
+    const EMPTY: Self = Self {
+        signal: 0,
+        origin: SignalOrigin {
+            pid: 0,
+            code: 0,
+            value: 0,
+        },
+        active: false,
+    };
+}
+
+fn enqueue_rt_signal(
+    queue: &mut [PendingRtSignal; MAX_QUEUED_RT_SIGNALS],
+    signal: u32,
+    origin: SignalOrigin,
+) -> bool {
+    let mut compact = [PendingRtSignal::EMPTY; MAX_QUEUED_RT_SIGNALS];
+    let mut count = 0usize;
+    for pending in queue.iter().copied().filter(|pending| pending.active) {
+        compact[count] = pending;
+        count += 1;
+    }
+    if count == MAX_QUEUED_RT_SIGNALS {
+        return false;
+    }
+    compact[count] = PendingRtSignal {
+        signal,
+        origin,
+        active: true,
+    };
+    *queue = compact;
+    true
+}
+
+fn has_rt_signal(
+    queue: &[PendingRtSignal; MAX_QUEUED_RT_SIGNALS],
+    signal: u32,
+) -> bool {
+    queue
+        .iter()
+        .any(|pending| pending.active && pending.signal == signal)
 }
 
 #[derive(Clone, Copy)]
@@ -47,6 +100,7 @@ struct SignalFdRecord {
     signal: u32,
     sender_pid: u32,
     code: i32,
+    value: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -71,6 +125,8 @@ struct LinuxThread {
     /// Source metadata for each coalesced standard signal.
     /// 每个已合并标准信号的来源元数据。
     signal_origins: [SignalOrigin; 64],
+    /// Bounded queue for real-time signals; duplicates are preserved.
+    rt_signals: [PendingRtSignal; MAX_QUEUED_RT_SIGNALS],
     /// Per-thread alternate signal stack.
     /// 当前 Linux 线程的备用信号栈。
     altstack_sp: u64,
@@ -142,6 +198,7 @@ struct ProcessSignalSet {
     process: ObjId,
     pending: u64,
     origins: [SignalOrigin; 64],
+    rt_signals: [PendingRtSignal; MAX_QUEUED_RT_SIGNALS],
 }
 
 #[derive(Clone, Copy)]
@@ -328,7 +385,12 @@ pub(crate) fn register_linux_thread(
             rseq_len: 0,
             signal_mask: inherited_mask,
             pending_signals: 0,
-            signal_origins: [SignalOrigin { pid: 0, code: 0 }; 64],
+            signal_origins: [SignalOrigin {
+                pid: 0,
+                code: 0,
+                value: 0,
+            }; 64],
+            rt_signals: [PendingRtSignal::EMPTY; MAX_QUEUED_RT_SIGNALS],
             altstack_sp: 0,
             altstack_size: 0,
             altstack_flags: 2,
@@ -391,6 +453,17 @@ fn queue_thread_signal(
     sender_pid: u32,
     code: i32,
 ) -> bool {
+    queue_thread_signal_value(process, tid, signal, sender_pid, code, 0)
+}
+
+fn queue_thread_signal_value(
+    process: ObjId,
+    tid: u32,
+    signal: u32,
+    sender_pid: u32,
+    code: i32,
+    value: u64,
+) -> bool {
     if !(1..=64).contains(&signal) {
         return false;
     }
@@ -404,11 +477,16 @@ fn queue_thread_signal(
         else {
             return false;
         };
-        entry.pending_signals |= 1u64 << (signal - 1);
-        entry.signal_origins[signal as usize - 1] = SignalOrigin {
+        let origin = SignalOrigin {
             pid: sender_pid,
             code,
+            value,
         };
+        if signal >= 32 && !enqueue_rt_signal(&mut entry.rt_signals, signal, origin) {
+            return false;
+        }
+        entry.pending_signals |= 1u64 << (signal - 1);
+        entry.signal_origins[signal as usize - 1] = origin;
         crate::kprintln!(
             "[JSR-LINUX-SIGNAL] queued target_tid={} signal={} mask={:#x} pending={:#x}",
             tid,
@@ -436,6 +514,16 @@ fn has_linux_thread(process: ObjId, tid: u32) -> bool {
 /// Queues one process-directed standard signal and wakes all eligible threads.
 /// 登记一个进程定向标准信号，并唤醒该进程的全部线程。
 fn queue_process_signal(process: ObjId, signal: u32, sender_pid: u32, code: i32) -> bool {
+    queue_process_signal_value(process, signal, sender_pid, code, 0)
+}
+
+fn queue_process_signal_value(
+    process: ObjId,
+    signal: u32,
+    sender_pid: u32,
+    code: i32,
+    value: u64,
+) -> bool {
     if !(1..=64).contains(&signal) {
         return false;
     }
@@ -456,18 +544,28 @@ fn queue_process_signal(process: ObjId, signal: u32, sender_pid: u32, code: i32)
             state.process_signals[slot] = Some(ProcessSignalSet {
                 process,
                 pending: 0,
-                origins: [SignalOrigin { pid: 0, code: 0 }; 64],
+                origins: [SignalOrigin {
+                    pid: 0,
+                    code: 0,
+                    value: 0,
+                }; 64],
+                rt_signals: [PendingRtSignal::EMPTY; MAX_QUEUED_RT_SIGNALS],
             });
             slot
         };
         let Some(entry) = state.process_signals[slot].as_mut() else {
             return false;
         };
-        entry.pending |= 1u64 << (signal - 1);
-        entry.origins[signal as usize - 1] = SignalOrigin {
+        let origin = SignalOrigin {
             pid: sender_pid,
             code,
+            value,
         };
+        if signal >= 32 && !enqueue_rt_signal(&mut entry.rt_signals, signal, origin) {
+            return false;
+        }
+        entry.pending |= 1u64 << (signal - 1);
+        entry.origins[signal as usize - 1] = origin;
         crate::kprintln!(
             "[JSR-LINUX-SIGNAL] queued_process process={:#x} signal={} pending={:#x}",
             process.raw(),
@@ -721,7 +819,7 @@ fn leave_altstack(process: ObjId, autodisarm: bool) -> bool {
 
 /// Takes the lowest unmasked pending signal for the current thread.
 /// 取出当前线程编号最低且未被屏蔽的 pending 信号。
-fn take_deliverable_signal(process: ObjId) -> Option<u32> {
+fn take_deliverable_signal(process: ObjId) -> Option<(u32, SignalOrigin)> {
     let (task, _) = sched::current();
     let mut state = COMPAT.lock();
     let (blocked, thread_deliverable) = {
@@ -752,22 +850,54 @@ fn take_deliverable_signal(process: ObjId) -> Option<u32> {
     }
     let index = deliverable.trailing_zeros();
     let bit = 1u64 << index;
-    if process_directed {
+    let (signal, origin) = if process_directed {
         let entry = state
             .process_signals
             .iter_mut()
             .flatten()
             .find(|entry| entry.process == process)?;
-        entry.pending &= !bit;
+        let signal = index + 1;
+        if signal >= 32 {
+            let pending_index = entry
+                .rt_signals
+                .iter()
+                .position(|pending| pending.active && pending.signal == signal)?;
+            let origin = entry.rt_signals[pending_index].origin;
+            entry.rt_signals[pending_index].active = false;
+            entry.origins[signal as usize - 1] = origin;
+            if !has_rt_signal(&entry.rt_signals, signal) {
+                entry.pending &= !bit;
+            }
+            (signal, origin)
+        } else {
+            entry.pending &= !bit;
+            (signal, entry.origins[signal as usize - 1])
+        }
     } else {
         let entry = state
             .threads
             .iter_mut()
             .flatten()
             .find(|entry| entry.process == process && entry.task == task)?;
-        entry.pending_signals &= !bit;
-    }
-    Some(index + 1)
+        let signal = index + 1;
+        if signal >= 32 {
+            let pending_index = entry
+                .rt_signals
+                .iter()
+                .position(|pending| pending.active && pending.signal == signal)?;
+            let origin = entry.rt_signals[pending_index].origin;
+            entry.rt_signals[pending_index].active = false;
+            entry.signal_origins[signal as usize - 1] = origin;
+            if !has_rt_signal(&entry.rt_signals, signal) {
+                entry.pending_signals &= !bit;
+            }
+            (signal, origin)
+        } else {
+            entry.pending_signals &= !bit;
+            (signal, entry.signal_origins[signal as usize - 1])
+        }
+    };
+    Some((signal, origin))
 }
 
 fn signalfd_pending_mask(process: ObjId, requested: u64) -> u64 {
@@ -816,21 +946,49 @@ fn take_signalfd_record(process: ObjId, requested: u64) -> Option<SignalFdRecord
     let bit = 1u64 << (signal - 1);
     if thread.pending_signals & bit != 0 {
         let entry = state.threads[thread_index].as_mut()?;
-        entry.pending_signals &= !bit;
-        let origin = entry.signal_origins[signal as usize - 1];
+        let origin = if signal >= 32 {
+            let pending_index = entry
+                .rt_signals
+                .iter()
+                .position(|pending| pending.active && pending.signal == signal)?;
+            let origin = entry.rt_signals[pending_index].origin;
+            entry.rt_signals[pending_index].active = false;
+            if !has_rt_signal(&entry.rt_signals, signal) {
+                entry.pending_signals &= !bit;
+            }
+            origin
+        } else {
+            entry.pending_signals &= !bit;
+            entry.signal_origins[signal as usize - 1]
+        };
         Some(SignalFdRecord {
             signal,
             sender_pid: origin.pid,
             code: origin.code,
+            value: origin.value,
         })
     } else {
         let entry = process_index.and_then(|index| state.process_signals[index].as_mut())?;
-        entry.pending &= !bit;
-        let origin = entry.origins[signal as usize - 1];
+        let origin = if signal >= 32 {
+            let pending_index = entry
+                .rt_signals
+                .iter()
+                .position(|pending| pending.active && pending.signal == signal)?;
+            let origin = entry.rt_signals[pending_index].origin;
+            entry.rt_signals[pending_index].active = false;
+            if !has_rt_signal(&entry.rt_signals, signal) {
+                entry.pending &= !bit;
+            }
+            origin
+        } else {
+            entry.pending &= !bit;
+            entry.origins[signal as usize - 1]
+        };
         Some(SignalFdRecord {
             signal,
             sender_pid: origin.pid,
             code: origin.code,
+            value: origin.value,
         })
     }
 }
@@ -929,6 +1087,7 @@ fn copy_fxstate_to_frame(args: &SyscallArgs, frame: &mut [u8]) -> bool {
 fn build_signal_frame(
     process: ObjId,
     signal: u32,
+    origin: SignalOrigin,
     args: &SyscallArgs,
     user_ip: (u64, u64),
     interrupted_result: i64,
@@ -1057,9 +1216,16 @@ fn build_signal_frame(
     write_frame_u64(&mut frame, SIGNAL_INFO_OFFSET, u64::from(signal));
     write_frame_u64(
         &mut frame,
-        SIGNAL_INFO_OFFSET + 16,
-        u64::from(proc::linux_pid(process).ok_or(CompatErrno::NoProcess)?),
+        SIGNAL_INFO_OFFSET + 8,
+        u64::from(origin.code as u32),
     );
+    write_frame_u64(
+        &mut frame,
+        SIGNAL_INFO_OFFSET + 16,
+        u64::from(origin.pid)
+            | (compat_core::syscall::LINUX_COMPAT_UID as u64) << 32,
+    );
+    write_frame_u64(&mut frame, SIGNAL_INFO_OFFSET + 24, origin.value);
     let nodefer = action[1] & (SA_NODEFER | SA_RESETHAND) != 0;
     let reset_hand = action[1] & SA_RESETHAND != 0;
     let handler_mask = if nodefer {
@@ -1121,7 +1287,7 @@ fn deliver_pending_signal(
     user_ip: Option<(u64, u64)>,
     interrupted_result: i64,
 ) -> Option<UserReturn> {
-    let signal = take_deliverable_signal(process)?;
+    let (signal, origin) = take_deliverable_signal(process)?;
     let action = proc::linux_signal_action(process, signal)?;
     if action[0] == 1 {
         if let Some(mask) = take_current_sigsuspend_restore_mask(process) {
@@ -1131,7 +1297,14 @@ fn deliver_pending_signal(
         return None;
     }
     let user_ip = user_ip?;
-    match build_signal_frame(process, signal, args, user_ip, interrupted_result) {
+    match build_signal_frame(
+        process,
+        signal,
+        origin,
+        args,
+        user_ip,
+        interrupted_result,
+    ) {
         Ok(user) => Some(user),
         Err(error) => {
             crate::kprintln!(
@@ -1169,6 +1342,65 @@ fn linux_tgkill(process: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
         Ok(())
     } else {
         Err(CompatErrno::NoProcess)
+    }
+}
+
+/// Queues process- or thread-directed `siginfo_t` with SI_QUEUE payload data.
+fn linux_rt_sigqueueinfo(
+    process: ObjId,
+    args: [u64; 6],
+    thread_directed: bool,
+) -> Result<u64, CompatErrno> {
+    let (target_pid, target_tid, signal, info_address) = if thread_directed {
+        (
+            u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?,
+            Some(u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?),
+            u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
+            args[3],
+        )
+    } else {
+        (
+            u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?,
+            None,
+            u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?,
+            args[2],
+        )
+    };
+    if target_pid == 0
+        || signal == 0
+        || signal > 64
+        || signal == 19
+    {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut info = [0u8; 128];
+    copy_from_user(&mut info, info_address, 128).map_err(|_| CompatErrno::Fault)?;
+    let info_signal = i32::from_le_bytes(info[0..4].try_into().unwrap());
+    let code = i32::from_le_bytes(info[8..12].try_into().unwrap());
+    let value = u64::from_le_bytes(info[24..32].try_into().unwrap());
+    if info_signal != signal as i32 {
+        return Err(CompatErrno::Invalid);
+    }
+    if !(-5..=-1).contains(&code) {
+        return Err(CompatErrno::Perm);
+    }
+    let sender_pid = proc::linux_pid(process).ok_or(CompatErrno::NoProcess)?;
+    if let Some(tid) = target_tid {
+        if sender_pid != target_pid || !has_linux_thread(process, tid) {
+            return Err(CompatErrno::NoProcess);
+        }
+        if queue_thread_signal_value(process, tid, signal, sender_pid, code, value) {
+            Ok(0)
+        } else {
+            Err(CompatErrno::NoSpace)
+        }
+    } else {
+        let target = proc::linux_process_for_pid(target_pid).ok_or(CompatErrno::NoProcess)?;
+        if queue_process_signal_value(target, signal, sender_pid, code, value) {
+            Ok(0)
+        } else {
+            Err(CompatErrno::NoSpace)
+        }
     }
 }
 
@@ -2091,6 +2323,12 @@ fn execute(
         LinuxSyscall::Pause => compat_result(linux_pause(pid)),
         LinuxSyscall::ClockNanosleep => compat_result(linux_clock_nanosleep(pid, call.args)),
         LinuxSyscall::RtSigAction => compat_result(linux_rt_sigaction(pid, call.args)),
+        LinuxSyscall::RtSigQueueInfo => {
+            compat_result(linux_rt_sigqueueinfo(pid, call.args, false))
+        }
+        LinuxSyscall::RtTgSigQueueInfo => {
+            compat_result(linux_rt_sigqueueinfo(pid, call.args, true))
+        }
         LinuxSyscall::RtSigPending => compat_result(linux_rt_sigpending(pid, call.args)),
         LinuxSyscall::RtSigProcMask => compat_result(linux_rt_sigprocmask(pid, call.args)),
         LinuxSyscall::RtSigsuspend => compat_result(linux_rt_sigsuspend(pid, call.args)),
@@ -6256,6 +6494,7 @@ fn linux_signalfd_read(
             signal: 0,
             sender_pid: 0,
             code: 0,
+            value: 0,
         }; MAX_RECORDS];
         let mut count = 0usize;
         while count < limit {
@@ -11360,6 +11599,8 @@ fn write_linux_siginfo(address: u64, record: SignalFdRecord) -> Result<(), Compa
     info[8..12].copy_from_slice(&record.code.to_le_bytes());
     info[16..20].copy_from_slice(&record.sender_pid.to_le_bytes());
     info[20..24].copy_from_slice(&(compat_core::syscall::LINUX_COMPAT_UID as u32).to_le_bytes());
+    info[44..48].copy_from_slice(&(record.value as u32).to_le_bytes());
+    info[48..56].copy_from_slice(&record.value.to_le_bytes());
     copy_to_user(address, &info, info.len()).map_err(|_| CompatErrno::Fault)
 }
 

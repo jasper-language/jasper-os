@@ -260,6 +260,8 @@ fn allowed_calls() -> LinuxSyscallSet {
         LinuxSyscall::IoUringEnter,
         LinuxSyscall::IoUringRegister,
         LinuxSyscall::RtSigAction,
+        LinuxSyscall::RtSigQueueInfo,
+        LinuxSyscall::RtTgSigQueueInfo,
         LinuxSyscall::RtSigPending,
         LinuxSyscall::RtSigProcMask,
         LinuxSyscall::RtSigsuspend,
