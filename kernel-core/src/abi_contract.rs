@@ -1836,6 +1836,16 @@ pub const OPERATIONS: &[OperationContract] = &[
         args: "u64:installation_key,u64:buf,u64:capacity",
         result: "i64:bytes_or_error",
     },
+    OperationContract {
+        name: "system.install.handle.create",
+        args: "u64:installation_key",
+        result: "handle_or_error",
+    },
+    OperationContract {
+        name: "system.install.handle.query",
+        args: "handle,u64:buf,u64:capacity",
+        result: "i64:bytes_or_error",
+    },
 ];
 
 /// Rights 位是外部 ABI；位值变化必须产生新快照并随 ABI 版本裁决。
@@ -2054,6 +2064,10 @@ pub const SEMANTICS: &[(&str, &str)] = &[
     (
         "install.records",
         "stable_generation_keys;separate_package_registration_grant_runtime_and_data;query_requires_live_discovery_grant",
+    ),
+    (
+        "install.handle",
+        "stable_installation_key_only;no_logical_path_or_authority;live_discovery_checked_before_create;query_requires_read_and_service_rechecks_caller",
     ),
     (
         "terminal.input",

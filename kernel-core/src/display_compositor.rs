@@ -2,13 +2,15 @@
 //!
 //! The compositor owns only layer metadata and paints caller-provided surfaces
 //! into a caller-provided framebuffer. It does not own application memory,
-//! implement a window manager, route input or execute GPU commands. Full-frame
-//! composition is intentional: partial damage requires a retained base layer
-//! snapshot so transparent overlays are never accumulated over stale pixels.
+//! implement a window manager, route input or execute GPU commands. Retained
+//! composition accepts a caller-owned pre-overlay frame snapshot and restores
+//! only damaged pixels before replaying layers, so transparent overlays never
+//! accumulate over stale pixels.
 //!
 //! 有界原生 framebuffer compositor 核心。compositor 只拥有 layer 元数据，并把
 //! 调用方提供的 surface 合成到调用方 framebuffer；不拥有应用内存、不实现窗口
-//! 管理器、不路由输入，也不执行 GPU 命令。
+//! 管理器、不路由输入，也不执行 GPU 命令。retained 合成接受调用方持有的
+//! overlay 前快照，只恢复 damage 区域后再重放图层，避免透明像素累积。
 
 use crate::display_input::{DisplayInputError, PixelLayout, SurfaceSpec};
 
@@ -68,6 +70,117 @@ pub struct LayerPixels<'a> {
 pub struct CompositionStats {
     pub layers: usize,
     pub pixels: u64,
+}
+
+/// A rectangle in framebuffer coordinates. `union` returns a conservative
+/// bounding rectangle and saturates instead of wrapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DamageRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl DamageRect {
+    pub const fn empty() -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        }
+    }
+
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    pub const fn full(surface: SurfaceSpec) -> Self {
+        Self::new(0, 0, surface.width, surface.height)
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+
+    /// Clip to the framebuffer. An entirely offscreen region becomes empty.
+    pub fn clipped(self, frame: SurfaceSpec) -> Result<Self, CompositorError> {
+        let _ = validate_surface(frame)?;
+        let left = i64::from(self.x).min(i64::from(frame.width)).max(0);
+        let top = i64::from(self.y).min(i64::from(frame.height)).max(0);
+        let right = self.right().min(i64::from(frame.width)).max(0);
+        let bottom = self.bottom().min(i64::from(frame.height)).max(0);
+        if left >= right || top >= bottom {
+            return Ok(Self::empty());
+        }
+        Ok(Self::new(
+            left as u32,
+            top as u32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        ))
+    }
+
+    /// Return a conservative rectangle covering both inputs.
+    pub fn union(self, other: Self) -> Self {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return self;
+        }
+        let left = i64::from(self.x).min(i64::from(other.x)).max(0);
+        let top = i64::from(self.y).min(i64::from(other.y)).max(0);
+        let right = self.right().max(other.right());
+        let bottom = self.bottom().max(other.bottom());
+        Self::new(
+            left as u32,
+            top as u32,
+            (right - left).min(i64::from(u32::MAX)) as u32,
+            (bottom - top).min(i64::from(u32::MAX)) as u32,
+        )
+    }
+
+    /// Compute the visible damage caused by one layer in `frame`.
+    pub fn for_layer(layer: LayerSpec, frame: SurfaceSpec) -> Result<Self, CompositorError> {
+        let _ = validate_layer(layer)?;
+        let _ = validate_surface(frame)?;
+        let left = i64::from(layer.x);
+        let top = i64::from(layer.y);
+        let right = left
+            .checked_add(i64::from(layer.surface.width))
+            .ok_or(CompositorError::InvalidLayer)?;
+        let bottom = top
+            .checked_add(i64::from(layer.surface.height))
+            .ok_or(CompositorError::InvalidLayer)?;
+        let clipped_left = left.min(i64::from(frame.width)).max(0);
+        let clipped_top = top.min(i64::from(frame.height)).max(0);
+        let clipped_right = right.min(i64::from(frame.width)).max(0);
+        let clipped_bottom = bottom.min(i64::from(frame.height)).max(0);
+        if clipped_left >= clipped_right || clipped_top >= clipped_bottom {
+            return Ok(Self::empty());
+        }
+        Ok(Self::new(
+            clipped_left as u32,
+            clipped_top as u32,
+            (clipped_right - clipped_left) as u32,
+            (clipped_bottom - clipped_top) as u32,
+        ))
+    }
+
+    fn right(self) -> i64 {
+        i64::from(self.x) + i64::from(self.width)
+    }
+
+    fn bottom(self) -> i64 {
+        i64::from(self.y) + i64::from(self.height)
+    }
 }
 
 /// Compositor lifecycle. Open is the only mutable state.
@@ -223,6 +336,74 @@ impl<const N: usize> Compositor<N> {
         if frame_bytes.len() as u64 != frame_len {
             return Err(CompositorError::InvalidSurface);
         }
+        let (ordered, ordered_len) = self.ordered_layers()?;
+        self.validate_pixels(&ordered[..ordered_len], pixels)?;
+
+        let damage = DamageRect::full(frame);
+        let mut written = 0u64;
+        for slot in ordered[..ordered_len].iter().copied() {
+            let layer = self.layers[slot].ok_or(CompositorError::StaleKey)?.layer;
+            let input = pixels
+                .iter()
+                .find(|input| input.key == self.layers[slot].unwrap().key)
+                .ok_or(CompositorError::MissingSurface)?;
+            written =
+                written.saturating_add(copy_layer(layer, input.bytes, frame, frame_bytes, damage)?);
+        }
+        Ok(CompositionStats {
+            layers: ordered_len,
+            pixels: written,
+        })
+    }
+
+    /// Compose only `damage` after restoring those pixels from a retained
+    /// pre-overlay frame snapshot.
+    ///
+    /// `base_bytes` must contain the framebuffer contents before any registered
+    /// compositor layer was applied. Replaying every visible layer over that
+    /// pristine base makes repeated partial updates idempotent for translucent
+    /// pixels. Bytes outside `damage` are left untouched.
+    pub fn compose_retained(
+        &self,
+        frame: SurfaceSpec,
+        frame_bytes: &mut [u8],
+        base_bytes: &[u8],
+        pixels: &[LayerPixels<'_>],
+        damage: DamageRect,
+    ) -> Result<CompositionStats, CompositorError> {
+        self.ensure_open()?;
+        let frame_len = validate_surface(frame)?;
+        if frame_bytes.len() as u64 != frame_len || base_bytes.len() as u64 != frame_len {
+            return Err(CompositorError::InvalidSurface);
+        }
+        let damage = damage.clipped(frame)?;
+        let (ordered, ordered_len) = self.ordered_layers()?;
+        self.validate_pixels(&ordered[..ordered_len], pixels)?;
+        if damage.is_empty() {
+            return Ok(CompositionStats {
+                layers: ordered_len,
+                pixels: 0,
+            });
+        }
+
+        copy_base_rect(base_bytes, frame_bytes, frame, damage)?;
+        let mut written = 0u64;
+        for slot in ordered[..ordered_len].iter().copied() {
+            let layer = self.layers[slot].ok_or(CompositorError::StaleKey)?.layer;
+            let input = pixels
+                .iter()
+                .find(|input| input.key == self.layers[slot].unwrap().key)
+                .ok_or(CompositorError::MissingSurface)?;
+            written =
+                written.saturating_add(copy_layer(layer, input.bytes, frame, frame_bytes, damage)?);
+        }
+        Ok(CompositionStats {
+            layers: ordered_len,
+            pixels: written,
+        })
+    }
+
+    fn ordered_layers(&self) -> Result<([usize; N], usize), CompositorError> {
         let mut ordered = [usize::MAX; N];
         let mut ordered_len = 0usize;
         for (slot, layer) in self.layers.iter().enumerate() {
@@ -246,7 +427,14 @@ impl<const N: usize> Compositor<N> {
             ordered[at] = slot;
             ordered_len += 1;
         }
+        Ok((ordered, ordered_len))
+    }
 
+    fn validate_pixels(
+        &self,
+        ordered: &[usize],
+        pixels: &[LayerPixels<'_>],
+    ) -> Result<(), CompositorError> {
         for (index, input) in pixels.iter().enumerate() {
             if pixels[..index]
                 .iter()
@@ -255,9 +443,7 @@ impl<const N: usize> Compositor<N> {
                 return Err(CompositorError::DuplicateSurface);
             }
         }
-
-        let mut written = 0u64;
-        for slot in ordered[..ordered_len].iter().copied() {
+        for slot in ordered.iter().copied() {
             let layer = self.layers[slot].ok_or(CompositorError::StaleKey)?.layer;
             let input = pixels
                 .iter()
@@ -267,12 +453,8 @@ impl<const N: usize> Compositor<N> {
             if input.bytes.len() as u64 != source_len {
                 return Err(CompositorError::InvalidSurface);
             }
-            written = written.saturating_add(copy_layer(layer, input.bytes, frame, frame_bytes)?);
         }
-        Ok(CompositionStats {
-            layers: ordered_len,
-            pixels: written,
-        })
+        Ok(())
     }
 
     pub fn close(&mut self) -> Result<(), CompositorError> {
@@ -359,21 +541,26 @@ fn copy_layer(
     source: &[u8],
     frame: SurfaceSpec,
     frame_bytes: &mut [u8],
+    damage: DamageRect,
 ) -> Result<u64, CompositorError> {
     let frame_width = i64::from(frame.width);
     let frame_height = i64::from(frame.height);
     let source_width = i64::from(layer.surface.width);
     let source_height = i64::from(layer.surface.height);
-    let left = i64::from(layer.x).max(0);
-    let top = i64::from(layer.y).max(0);
+    let damage_right = i64::from(damage.x) + i64::from(damage.width);
+    let damage_bottom = i64::from(damage.y) + i64::from(damage.height);
+    let left = i64::from(layer.x).max(i64::from(damage.x));
+    let top = i64::from(layer.y).max(i64::from(damage.y));
     let right = i64::from(layer.x)
         .checked_add(source_width)
         .ok_or(CompositorError::InvalidLayer)?
-        .min(frame_width);
+        .min(frame_width)
+        .min(damage_right);
     let bottom = i64::from(layer.y)
         .checked_add(source_height)
         .ok_or(CompositorError::InvalidLayer)?
-        .min(frame_height);
+        .min(frame_height)
+        .min(damage_bottom);
     if left >= right || top >= bottom {
         return Ok(0);
     }
@@ -412,6 +599,45 @@ fn copy_layer(
         }
     }
     Ok(written)
+}
+
+fn copy_base_rect(
+    base: &[u8],
+    frame_bytes: &mut [u8],
+    frame: SurfaceSpec,
+    damage: DamageRect,
+) -> Result<(), CompositorError> {
+    if damage.is_empty() {
+        return Ok(());
+    }
+    let bpp = usize::from(frame.bytes_per_pixel);
+    let row_bytes = usize::try_from(damage.width)
+        .map_err(|_| CompositorError::InvalidSurface)?
+        .checked_mul(bpp)
+        .ok_or(CompositorError::InvalidSurface)?;
+    let right = i64::from(damage.x) + i64::from(damage.width);
+    let bottom = i64::from(damage.y) + i64::from(damage.height);
+    for y in i64::from(damage.y)..bottom {
+        let offset = usize::try_from(
+            y.checked_mul(i64::from(frame.stride))
+                .and_then(|row| row.checked_add(i64::from(damage.x)))
+                .and_then(|pixel| pixel.checked_mul(i64::from(frame.bytes_per_pixel)))
+                .ok_or(CompositorError::InvalidSurface)?,
+        )
+        .map_err(|_| CompositorError::InvalidSurface)?;
+        let end = offset
+            .checked_add(row_bytes)
+            .ok_or(CompositorError::InvalidSurface)?;
+        let source = base
+            .get(offset..end)
+            .ok_or(CompositorError::InvalidSurface)?;
+        let destination = frame_bytes
+            .get_mut(offset..end)
+            .ok_or(CompositorError::InvalidSurface)?;
+        destination.copy_from_slice(source);
+    }
+    debug_assert!(right <= i64::from(frame.width));
+    Ok(())
 }
 
 fn read_pixel(
@@ -827,5 +1053,206 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pixel(&frame, 1, 1), [0, 0, 255, 0xff]);
+    }
+
+    #[test]
+    fn damage_rectangles_clip_union_and_preserve_empty_regions() {
+        assert_eq!(
+            DamageRect::new(2, 2, 4, 3).clipped(FRAME),
+            Ok(DamageRect::new(2, 2, 4, 2))
+        );
+        assert!(DamageRect::new(8, 0, 2, 2)
+            .clipped(FRAME)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            DamageRect::new(1, 1, 2, 1).union(DamageRect::new(5, 3, 2, 1)),
+            DamageRect::new(1, 1, 6, 3)
+        );
+        assert_eq!(
+            DamageRect::empty().union(DamageRect::new(3, 2, 1, 1)),
+            DamageRect::new(3, 2, 1, 1)
+        );
+
+        let offscreen_left = LayerSpec {
+            x: -1,
+            y: 1,
+            ..layer(1)
+        };
+        assert_eq!(
+            DamageRect::for_layer(offscreen_left, FRAME),
+            Ok(DamageRect::new(0, 1, 1, 2))
+        );
+        assert_eq!(
+            DamageRect::for_layer(
+                LayerSpec {
+                    x: 9,
+                    y: 9,
+                    ..layer(1)
+                },
+                FRAME,
+            ),
+            Ok(DamageRect::empty())
+        );
+    }
+
+    #[test]
+    fn retained_partial_composition_is_idempotent_for_alpha() {
+        let mut compositor = Compositor::<1>::new();
+        let translucent = compositor
+            .create(LayerSpec {
+                surface: SurfaceSpec {
+                    width: 2,
+                    height: 2,
+                    stride: 2,
+                    bytes_per_pixel: 4,
+                    layout: PixelLayout::Bgr,
+                },
+                x: 1,
+                y: 1,
+                opacity: 0xff,
+                ..layer(1)
+            })
+            .unwrap();
+        let mut source = [0u8; 2 * 2 * 4];
+        for pixel in source.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[0, 0, 255, 0x80]);
+        }
+        let damage = DamageRect::new(1, 1, 2, 2);
+        let mut base = [0u8; 8 * 4 * 4];
+        for pixel in base.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[0, 255, 0, 0xff]);
+        }
+        let mut frame = [9u8; 8 * 4 * 4];
+        let inputs = [LayerPixels {
+            key: translucent,
+            bytes: &source,
+        }];
+        compositor
+            .compose_retained(FRAME, &mut frame, &base, &inputs, damage)
+            .unwrap();
+        let first = frame;
+        compositor
+            .compose_retained(FRAME, &mut frame, &base, &inputs, damage)
+            .unwrap();
+        assert_eq!(frame, first);
+        assert_eq!(pixel(&frame, 1, 1), [0, 127, 128, 0xff]);
+        assert_eq!(pixel(&frame, 0, 0), [9, 9, 9, 9]);
+    }
+
+    #[test]
+    fn retained_damage_matches_full_composition_with_overlap_and_clipping() {
+        let mut compositor = Compositor::<2>::new();
+        let lower = compositor
+            .create(LayerSpec {
+                surface: SurfaceSpec {
+                    width: 3,
+                    height: 3,
+                    stride: 3,
+                    bytes_per_pixel: 3,
+                    layout: PixelLayout::Rgb,
+                },
+                x: -1,
+                y: 1,
+                z_order: 1,
+                visible: true,
+                opacity: 0x80,
+            })
+            .unwrap();
+        let upper = compositor
+            .create(LayerSpec {
+                surface: SurfaceSpec {
+                    width: 3,
+                    height: 2,
+                    stride: 3,
+                    bytes_per_pixel: 3,
+                    layout: PixelLayout::Rgb,
+                },
+                x: 2,
+                y: 0,
+                z_order: 2,
+                visible: true,
+                opacity: 0xc0,
+            })
+            .unwrap();
+        let blue = [
+            0u8, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0,
+            255, 0, 0, 255,
+        ];
+        let red = [
+            255u8, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0,
+        ];
+        let inputs = [
+            LayerPixels {
+                key: lower,
+                bytes: &blue,
+            },
+            LayerPixels {
+                key: upper,
+                bytes: &red,
+            },
+        ];
+        let mut base = [0u8; 8 * 4 * 4];
+        for (index, pixel) in base.chunks_exact_mut(4).enumerate() {
+            pixel.copy_from_slice(&[(index & 0xff) as u8, 40, 80, 0xff]);
+        }
+
+        let mut full = base;
+        compositor.compose(FRAME, &mut full, &inputs).unwrap();
+        let damage = DamageRect::for_layer(compositor.snapshot(lower).unwrap().layer, FRAME)
+            .unwrap()
+            .union(
+                DamageRect::for_layer(compositor.snapshot(upper).unwrap().layer, FRAME).unwrap(),
+            );
+        let mut partial = base;
+        compositor
+            .compose_retained(FRAME, &mut partial, &base, &inputs, damage)
+            .unwrap();
+        for y in damage.y..damage.y + damage.height {
+            for x in damage.x..damage.x + damage.width {
+                assert_eq!(
+                    pixel(&partial, x as usize, y as usize),
+                    pixel(&full, x as usize, y as usize)
+                );
+            }
+        }
+        assert_eq!(pixel(&partial, 7, 3), pixel(&base, 7, 3));
+    }
+
+    #[test]
+    fn retained_composition_validates_atomically_and_empty_damage_does_nothing() {
+        let mut compositor = Compositor::<1>::new();
+        let key = compositor.create(layer(1)).unwrap();
+        let red = [255u8, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0];
+        let base = [2u8; 8 * 4 * 4];
+        let mut frame = [7u8; 8 * 4 * 4];
+        assert_eq!(
+            compositor.compose_retained(
+                FRAME,
+                &mut frame,
+                &base[..4],
+                &[LayerPixels { key, bytes: &red }],
+                DamageRect::full(FRAME),
+            ),
+            Err(CompositorError::InvalidSurface)
+        );
+        assert_eq!(frame, [7u8; 8 * 4 * 4]);
+
+        assert_eq!(
+            compositor.compose_retained(FRAME, &mut frame, &base, &[], DamageRect::full(FRAME),),
+            Err(CompositorError::MissingSurface)
+        );
+        assert_eq!(frame, [7u8; 8 * 4 * 4]);
+
+        compositor
+            .compose_retained(
+                FRAME,
+                &mut frame,
+                &base,
+                &[LayerPixels { key, bytes: &red }],
+                DamageRect::empty(),
+            )
+            .unwrap();
+        assert_eq!(frame, [7u8; 8 * 4 * 4]);
     }
 }

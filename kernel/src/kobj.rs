@@ -92,6 +92,8 @@ pub enum KObject {
     /// 设备中断（MSI-X 表项到处理器向量的绑定；关闭即解绑）。
     /// Device interrupt (an MSI-X entry bound to a processor vector; unbound on close).
     Interrupt(Box<crate::interrupt::InterruptObj>),
+    /// Native installation registration handle; a leaf carrying only a stable key.
+    Installation(crate::native_install_handle::InstallationObj),
 }
 
 impl KObject {
@@ -114,6 +116,7 @@ impl KObject {
             KObject::ExitState(_) => Kind::ExitState,
             KObject::Device(_) => Kind::Device,
             KObject::Interrupt(_) => Kind::Interrupt,
+            KObject::Installation(_) => Kind::Installation,
         }
     }
 
@@ -176,7 +179,12 @@ const fn close_hook(kind: Kind) -> Option<CloseHookEntry> {
         )),
         Kind::Vcpu => Some(close_entry(crate::vcpu::close_in, ClosingLocks::ObjectTable)),
         Kind::DmaMapping => Some(close_entry(crate::dma::close_in, ClosingLocks::ObjectTable)),
-        Kind::Task | Kind::ExitState | Kind::Memory | Kind::Event | Kind::Device => None,
+        Kind::Task
+        | Kind::ExitState
+        | Kind::Memory
+        | Kind::Event
+        | Kind::Device
+        | Kind::Installation => None,
     }
 }
 
@@ -230,7 +238,8 @@ const fn destroy_hook(kind: Kind) -> Option<DestroyHook> {
         | Kind::DmaMapping
         | Kind::Memory
         | Kind::Event
-        | Kind::Device => None,
+        | Kind::Device
+        | Kind::Installation => None,
     }
 }
 

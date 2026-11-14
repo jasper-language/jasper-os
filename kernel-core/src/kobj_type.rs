@@ -62,11 +62,13 @@ pub enum Kind {
     Event,
     /// 设备。
     Device,
+    /// Native installation registration handle; it carries no path or authority.
+    Installation,
 }
 
 impl Kind {
     /// 种类数。
-    pub const COUNT: usize = 15;
+    pub const COUNT: usize = 16;
     /// 全部种类（按声明顺序）。
     pub const ALL: [Kind; Kind::COUNT] = [
         Kind::Process,
@@ -84,6 +86,7 @@ impl Kind {
         Kind::Memory,
         Kind::Event,
         Kind::Device,
+        Kind::Installation,
     ];
 
     /// 在 [`REGISTRY`] 中的下标（= 声明顺序）。
@@ -428,6 +431,20 @@ pub const REGISTRY: [Contract; Kind::COUNT] = [
         tree_self: false,
         carries: Carry::Nothing,
     },
+    Contract {
+        kind: Kind::Installation,
+        name: "Installation",
+        handle: Some(ObjectType::Installation),
+        rights: Rights::READ.union(Rights::DUPLICATE),
+        transferable: false,
+        closing: Closing::None,
+        closing_locks: ClosingLocks::None,
+        destroy: Destroy::None,
+        destroy_locks: DestroyLocks::None,
+        strong: &[],
+        tree_self: false,
+        carries: Carry::Nothing,
+    },
 ];
 
 /// 句柄创建检查的结论。
@@ -631,6 +648,26 @@ mod tests {
         assert_eq!(check_grant(Kind::Process, ObjectType::Process, tr), GrantCheck::NotTransferable);
         assert_eq!(check_grant(Kind::Event, ObjectType::Event, Rights::READ), GrantCheck::RightsDenied);
         assert_eq!(check_grant(Kind::Process, ObjectType::Process, Rights::NONE), GrantCheck::Allowed);
+        assert_eq!(
+            check_grant(
+                Kind::Installation,
+                ObjectType::Installation,
+                Rights::READ.union(Rights::DUPLICATE),
+            ),
+            GrantCheck::Allowed
+        );
+        assert_eq!(
+            check_grant(Kind::Installation, ObjectType::Installation, Rights::WRITE),
+            GrantCheck::RightsDenied
+        );
+        assert_eq!(
+            check_grant(
+                Kind::Installation,
+                ObjectType::Installation,
+                Rights::READ.union(Rights::TRANSFER),
+            ),
+            GrantCheck::NotTransferable
+        );
     }
 
     #[test]

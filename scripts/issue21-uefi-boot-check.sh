@@ -7,12 +7,71 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export PATH="${HOME}/.cargo/bin:${PATH}"
 
+# Serialize the complete build/image/QEMU transaction even when callers bypass
+# the host-side vm-run queue. 源码同步仍可并行，但 guest 的重型验收必须独占。
+UEFI_BUILD_LOCK="${ISSUE21_UEFI_BUILD_LOCK:-/tmp/jasper-os-issue21-uefi-build.lock}"
+if ! command -v flock >/dev/null 2>&1; then
+  echo "issue21-uefi-boot: flock is required for guest resource exclusion" >&2
+  exit 69
+fi
+exec 8>"$UEFI_BUILD_LOCK"
+if ! flock -w "${ISSUE21_UEFI_BUILD_LOCK_WAIT:-3600}" 8; then
+  echo "issue21-uefi-boot: guest build/QEMU queue wait timed out" >&2
+  exit 75
+fi
+
+# Pre-lock or external jobs may still be running. Detect both their shell
+# transaction and their children, with a short grace period for either to spawn.
+foreign_uefi_transaction() {
+  local pid command
+  while read -r pid command; do
+    [ "$pid" = "$$" ] && continue
+    if [ -r "/proc/$pid/stat" ]; then
+      read -r _stat_pid _stat_comm _stat_state stat_parent _rest \
+        <"/proc/$pid/stat" || true
+      [ "${stat_parent:-}" = "$$" ] && continue
+    fi
+    case "$command" in
+      *issue21-uefi-boot-check.sh*) return 0 ;;
+    esac
+  done < <(
+    pgrep -af '^bash (scripts/|/[^ ]*/scripts/)issue21-uefi-boot-check[.]sh( |$)' ||
+      true
+  )
+  return 1
+}
+
+guest_busy() {
+  foreign_uefi_transaction ||
+    pgrep -x qemu-system-x86_64 >/dev/null 2>&1 ||
+    pgrep -x cargo >/dev/null 2>&1 ||
+    pgrep -x rustc >/dev/null 2>&1
+}
+
+queue_deadline=$(($(date +%s) + ${ISSUE21_UEFI_BUILD_LOCK_WAIT:-3600}))
+while :; do
+  if ! guest_busy; then
+    sleep 3
+    ! guest_busy && break
+  fi
+  if [ "$(date +%s)" -ge "$queue_deadline" ]; then
+    echo "issue21-uefi-boot: existing guest build/QEMU did not quiesce" >&2
+    exit 75
+  fi
+  sleep 2
+done
+
 guarded_cargo() {
   "$ROOT/scripts/guarded-cargo.sh" "$@"
 }
 
 OUT="${ISSUE21_UEFI_OUT:-$ROOT/evidence/issue21-uefi-boot-$(date '+%Y%m%d-%H%M%S')}"
 TARGET="${ISSUE21_UEFI_TARGET:-$ROOT/target/issue21-uefi-check}"
+CARGO_TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
+case "$CARGO_TARGET" in
+  /*) ;;
+  *) CARGO_TARGET="$ROOT/$CARGO_TARGET" ;;
+esac
 LIMIT="${ISSUE21_UEFI_TIMEOUT:-45}"
 MODE="${ISSUE21_UEFI_MODE:-normal}"
 PREBUILT="${ISSUE21_UEFI_PREBUILT:-0}"
@@ -99,10 +158,10 @@ esac
 if [ "$PREBUILT" = 1 ]; then
   [ -x "$KERNEL" ]
   [ -f "$BOOT_MANAGER" ]
-  [ -x "$ROOT/target/release/xtask" ]
+  [ -x "$CARGO_TARGET/release/xtask" ]
   for binary in jasper-gpt-image jasper-esp-format jasper-esp-install \
     jasper-ext4-provision jasper-control-init jasper-control-inspect; do
-    [ -x "$ROOT/target/debug/$binary" ]
+    [ -x "$CARGO_TARGET/debug/$binary" ]
   done
   : >"$OUT/kernel-build.log"
   : >"$OUT/xtask-build.log"
@@ -119,7 +178,7 @@ run_lifecycle() {
   local binary=$1
   shift
   if [ "$PREBUILT" = 1 ]; then
-    "$ROOT/target/debug/$binary" "$@"
+    "$CARGO_TARGET/debug/$binary" "$@"
   else
     guarded_cargo run --locked -p jasper-lifecycle-staging --bin "$binary" -- "$@"
   fi
@@ -129,7 +188,7 @@ run_lifecycle jasper-gpt-image \
   "$IMAGE" 38654705664 >"$OUT/gpt.log" 2>&1
 run_lifecycle jasper-esp-format \
   "$IMAGE" 38654705664 >"$OUT/esp-format.log" 2>&1
-target/release/xtask uefi-managed-esp \
+"$CARGO_TARGET/release/xtask" uefi-managed-esp \
   "$KERNEL" "$KERNEL" \
   "$BOOT_MANAGER" \
   "$UEFI_ESP" >"$OUT/uefi-esp.log" 2>&1
@@ -246,7 +305,7 @@ if [ "$MODE" = block-timeout ]; then
 fi
 if [ "$MODE" = native-install-abi ]; then
   grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
-  grep -aqE $'^(\\[JSR-USERTEXT\\].*text=)?native-install-abi: ok package=true idempotent=true register=true grant=true query=true denied_short=true\r?$' "$OUT/serial.log"
+  grep -aqE $'^(\\[JSR-USERTEXT\\].*text=)?native-install-abi: ok package=true idempotent=true register=true grant=true query=true handle=true rights=true close=true denied_short=true\r?$' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
   echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
   exit 0
@@ -302,7 +361,7 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
   grep -aqE $'^external-ok\r?$' "$OUT/serial.log"
   if [ "$MODE" = sandbox-launch ]; then
     grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
-    grep -aqE $'^(\\[JSR-USERTEXT\\].*text=)?sandbox-launch: ok sandbox=true image=true plan=true query=true destroy=true cleanup=true\r?$' "$OUT/serial.log"
+    grep -aqE $'^(\\[JSR-USERTEXT\\].*text=)?sandbox-launch: ok sandbox=true image=true data_authority=true plan=true query=true destroy=true cleanup=true\r?$' "$OUT/serial.log"
   fi
   if [ "$MODE" = terminal-session ]; then
     grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"

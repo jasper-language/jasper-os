@@ -83,6 +83,11 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_INSTALL_REGISTRATION_CREATE,
         abi::SYSTEM_INSTALL_GRANT_CREATE,
         abi::SYSTEM_INSTALL_QUERY,
+        abi::SYSTEM_INSTALL_HANDLE_CREATE,
+        abi::SYSTEM_INSTALL_HANDLE_QUERY,
+        abi::SYSTEM_HANDLE_DUPLICATE,
+        abi::SYSTEM_HANDLE_RESTRICT,
+        abi::SYSTEM_HANDLE_CLOSE,
     ]);
     #[cfg(feature = "sandbox-launch-verify")]
     #[cfg(not(feature = "native-install-abi-verify"))]
@@ -130,8 +135,10 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
     };
     #[cfg(all(target_arch = "x86_64", feature = "native-install-abi-verify"))]
     {
-        use kernel_core::mac::MacLabel;
-        use kernel_core::security::{IdentityClass, MetadataState, SecurityContext};
+        use kernel_core::mac::{Integrity, MacLabel, Secrecy, OBJECT_CLASS_ALL};
+        use kernel_core::security::{
+            IdentityClass, MetadataState, SecurityContext, SecurityDomain,
+        };
 
         let mut context = SecurityContext::new(
             crate::security::boot_id(),
@@ -140,7 +147,12 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
             None,
             MetadataState::Active,
         );
-        context.mac = MacLabel::system(IdentityClass::Process);
+        context.mac = MacLabel::new(
+            SecurityDomain::SYSTEM,
+            Secrecy::Internal,
+            Integrity::Trusted,
+            OBJECT_CLASS_ALL,
+        );
         if kobj::with(|table| table.set_security_for_verify(pid, context)).is_err() {
             let _ = proc::reap(pid);
             kobj::run_cleanup(usize::MAX);

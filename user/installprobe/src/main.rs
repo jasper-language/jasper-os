@@ -8,8 +8,8 @@ use kernel_core::native_install::{
     CONTENT_BYTES,
 };
 use kernel_core::native_install_abi::{
-    GrantArgs, InstallationInfo, PackagePutArgs, RegisterArgs, GRANT_BYTES, INFO_BYTES,
-    PACKAGE_PUT_BYTES, REGISTER_BYTES,
+    GrantArgs, PackagePutArgs, RegisterArgs, GRANT_BYTES, INFO_BYTES, PACKAGE_PUT_BYTES,
+    REGISTER_BYTES,
 };
 
 const PACKAGE_BYTES: &[u8] = b"native-install-abi";
@@ -105,6 +105,37 @@ fn query(installation: u64, package: u64) -> Result<(), i32> {
     Ok(())
 }
 
+fn open_handle(installation: u64) -> Result<u64, i32> {
+    let handle = call(ids::SYSTEM_INSTALL_HANDLE_CREATE, installation, 0, 0);
+    (handle > 0).then_some(handle as u64).ok_or(19)
+}
+
+fn query_handle(handle: u64, installation: u64, package: u64) -> Result<(), i32> {
+    let mut info = [0u8; INFO_BYTES];
+    let result = call(
+        ids::SYSTEM_INSTALL_HANDLE_QUERY,
+        handle,
+        info.as_mut_ptr() as u64,
+        info.len() as u64,
+    );
+    if result != INFO_BYTES as i64 || &info[..4] != b"JSI1" {
+        return Err(20);
+    }
+    if u64::from_le_bytes(info[8..16].try_into().unwrap()) != installation
+        || u64::from_le_bytes(info[16..24].try_into().unwrap()) != package
+        || info[41] != 1
+    {
+        return Err(21);
+    }
+    Ok(())
+}
+
+fn close(handle: u64) -> Result<(), i32> {
+    (call(ids::SYSTEM_HANDLE_CLOSE, handle, 0, 0) == 0)
+        .then_some(())
+        .ok_or(22)
+}
+
 fn run() -> Result<(), i32> {
     let package = put_package()?;
     let installation = register(package)?;
@@ -119,8 +150,43 @@ fn run() -> Result<(), i32> {
     if short != -(ids::SYSTEM_ERROR_INVALID_ARGUMENT as i64) {
         return Err(18);
     }
+    let handle = open_handle(installation)?;
+    query_handle(handle, installation, package)?;
+    let duplicate = call(
+        ids::SYSTEM_HANDLE_DUPLICATE,
+        handle,
+        kernel_core::object::Rights::READ.bits() as u64,
+        0,
+    );
+    if duplicate <= 0 {
+        return Err(23);
+    }
+    close(handle)?;
+    query_handle(duplicate as u64, installation, package)?;
+    if call(ids::SYSTEM_HANDLE_RESTRICT, duplicate as u64, 0, 0) != 0 {
+        return Err(24);
+    }
+    if call(
+        ids::SYSTEM_INSTALL_HANDLE_QUERY,
+        duplicate as u64,
+        0,
+        INFO_BYTES as u64,
+    ) != -(ids::SYSTEM_HANDLE_ERROR_RIGHTS_DENIED as i64)
+    {
+        return Err(25);
+    }
+    close(duplicate as u64)?;
+    if call(
+        ids::SYSTEM_INSTALL_HANDLE_QUERY,
+        duplicate as u64,
+        0,
+        INFO_BYTES as u64,
+    ) != -(ids::SYSTEM_HANDLE_ERROR_INVALID as i64)
+    {
+        return Err(26);
+    }
     println!(
-        "native-install-abi: ok package=true idempotent=true register=true grant=true query=true denied_short=true"
+        "native-install-abi: ok package=true idempotent=true register=true grant=true query=true handle=true rights=true close=true denied_short=true"
     );
     Ok(())
 }

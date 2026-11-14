@@ -9,7 +9,7 @@ use kernel_core::sandbox_launch::{
     LaunchPlanSnapshot, LaunchSpec, NetworkPolicyRef, SandboxLaunchTable,
 };
 use kernel_core::sandbox::SandboxKey;
-use kernel_core::sandbox_image::VolumeKey;
+use kernel_core::sandbox_image::{ImageKey, VolumeKey};
 use kernel_core::object::Rights;
 use kernel_core::objtable::ObjId;
 use kernel_core::security_domain::DomainKey;
@@ -34,20 +34,29 @@ const DEVICE_RIGHTS: Rights = Rights::READ
 /// Device authority snapshot taken before Sandbox/Storage/Workload locks.
 ///
 /// The production handle table is the sole device-grant authority. Data scopes
-/// and NET policy remain denied until their own live registries exist.
+/// are bound to exact live volume generations and image ownership; NET policy
+/// remains denied until its own live registry exists.
+#[derive(Clone, Copy)]
+struct DataAuthorityTicket {
+    volume: VolumeKey,
+    image: ImageKey,
+    writable: bool,
+}
+
 struct KernelLaunchAuthority {
     domain: DomainKey,
     sandbox: SandboxKey,
     root_capabilities: CapabilitySet,
     root_ticket: Option<DeviceAuthorityTicket>,
     device_tickets: [Option<DeviceAuthorityTicket>; kernel_core::sandbox_launch::MAX_DEVICE_GRANTS],
-    data_tickets: [Option<VolumeKey>; kernel_core::sandbox_launch::MAX_DATA_SCOPES],
+    data_tickets: [Option<DataAuthorityTicket>; kernel_core::sandbox_launch::MAX_DATA_SCOPES],
 }
 
 impl KernelLaunchAuthority {
     fn snapshot(
         domain: DomainKey,
         sandbox: SandboxKey,
+        image: ImageKey,
         devices: &[DeviceGrant],
         data: &[DataScopeGrant],
     ) -> Self {
@@ -100,8 +109,16 @@ impl KernelLaunchAuthority {
             if volume.to_raw() != grant.object {
                 continue;
             }
-            if STORAGE.lock().volume(domain, sandbox, volume).is_ok() {
-                data_tickets[index] = Some(volume);
+            if STORAGE
+                .lock()
+                .volume(domain, sandbox, volume)
+                .is_ok_and(|snapshot| snapshot.image == image)
+            {
+                data_tickets[index] = Some(DataAuthorityTicket {
+                    volume,
+                    image,
+                    writable: grant.writable,
+                });
             }
         }
         Self {
@@ -135,7 +152,11 @@ impl KernelLaunchAuthority {
             .data_tickets
             .iter()
             .flatten()
-            .any(|volume| storage.volume(self.domain, self.sandbox, *volume).is_err())
+            .any(|ticket| {
+                !storage
+                    .volume(self.domain, self.sandbox, ticket.volume)
+                    .is_ok_and(|snapshot| snapshot.image == ticket.image)
+            })
         {
             return Err(LaunchError::InvalidData);
         }
@@ -189,7 +210,9 @@ impl LaunchAuthority for KernelLaunchAuthority {
                 .data_tickets
                 .iter()
                 .flatten()
-                .any(|volume| volume.to_raw() == grant.object)
+                .any(|ticket| {
+                    ticket.volume.to_raw() == grant.object && ticket.writable == grant.writable
+                })
     }
 
     fn network_policy_live(&self, _domain: DomainKey, _policy: NetworkPolicyRef) -> bool {
@@ -199,7 +222,13 @@ impl LaunchAuthority for KernelLaunchAuthority {
 
 /// Admit one immutable launch plan.
 pub fn create(domain: DomainKey, spec: LaunchSpec<'_>) -> Result<LaunchPlanKey, LaunchError> {
-    let authority = KernelLaunchAuthority::snapshot(domain, spec.sandbox, spec.devices, spec.data);
+    let authority = KernelLaunchAuthority::snapshot(
+        domain,
+        spec.sandbox,
+        spec.image,
+        spec.devices,
+        spec.data,
+    );
     let sandboxes = SANDBOXES.lock();
     let storage = STORAGE.lock();
     let workloads = WORKLOADS.lock();
@@ -274,6 +303,7 @@ pub fn query(domain: DomainKey, key: LaunchPlanKey) -> Result<LaunchPlanSnapshot
     let authority = KernelLaunchAuthority::snapshot(
         domain,
         plan.sandbox,
+        plan.image,
         &device_grants[..device_count],
         &data_grants[..data_count],
     );
