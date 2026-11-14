@@ -921,15 +921,19 @@ int main(void) {
     long kcmp_bad =
         syscall(SYS_kcmp, getpid(), getpid(), KCMP_FILE, fd, 9999);
     int kcmp_bad_errno = errno;
+    errno = 0;
+    long kcmp_sysvsem =
+        syscall(SYS_kcmp, getpid(), getpid(), 6, 0, 0);
     if (kcmp_other < 0 || kcmp_same != 0 || kcmp_different == 0 ||
-        kcmp_files != 0 || kcmp_bad != -1 || kcmp_bad_errno != EBADF) {
+        kcmp_files != 0 || kcmp_bad != -1 || kcmp_bad_errno != EBADF ||
+        kcmp_sysvsem != 0) {
         dprintf(STDOUT_FILENO,
                 "kcmp-fail other=%d same=%ld different=%ld files=%ld "
-                "bad=%ld errnos=%d/%d/%d/%d\n",
+                "bad=%ld sysvsem=%ld errnos=%d/%d/%d/%d\n",
                 kcmp_other, kcmp_same, kcmp_different, kcmp_files,
-                kcmp_bad, kcmp_same_errno, kcmp_different_errno,
+                kcmp_bad, kcmp_sysvsem, kcmp_same_errno, kcmp_different_errno,
                 kcmp_files_errno, kcmp_bad_errno);
-        return 558;
+        return 707;
     }
     errno = 0;
     if (syscall(SYS_kcmp, getpid(), getpid(), 99, fd, fd) != -1 ||

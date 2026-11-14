@@ -1748,7 +1748,12 @@ fn linux_kcmp(process: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 proc::linux_fd_description_identity(second, second_fd).ok_or(CompatErrno::BadFd)?;
             Ok(kcmp_identity_order(first_id, second_id))
         }
-        KCMP_VM | KCMP_FS | KCMP_FILES | KCMP_SIGHAND | KCMP_IO => Ok(
+        KCMP_VM
+        | KCMP_FS
+        | KCMP_FILES
+        | KCMP_SIGHAND
+        | KCMP_IO
+        | KCMP_SYSVSEM => Ok(
             kcmp_identity_order(first.raw(), second.raw()),
         ),
         KCMP_EPOLL_TFD => {
@@ -1769,7 +1774,6 @@ fn linux_kcmp(process: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .ok_or(CompatErrno::BadFd)?;
             Ok(kcmp_identity_order(first_id, second_id))
         }
-        KCMP_SYSVSEM => Err(CompatErrno::NotSupported),
         _ => Err(CompatErrno::Invalid),
     }
 }
@@ -5248,10 +5252,19 @@ fn linux_process_mrelease(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno
     if caller_app != target_app {
         return Err(CompatErrno::Perm);
     }
-    match proc::state(target) {
-        Some(proc::ProcState::Exited { .. }) => Ok(0),
-        Some(proc::ProcState::Exiting { .. }) | Some(proc::ProcState::Running) | None => {
-            Err(CompatErrno::NoProcess)
+    let deadline = sched::timer_ticks().saturating_add(100);
+    loop {
+        match proc::state(target) {
+            Some(proc::ProcState::Exited { .. }) | None => return Ok(0),
+            Some(proc::ProcState::Exiting { .. }) | Some(proc::ProcState::Running) => {
+                if proc::current_exiting() {
+                    return Err(CompatErrno::Interrupted);
+                }
+                if sched::timer_ticks() >= deadline {
+                    return Err(CompatErrno::TryAgain);
+                }
+                sched::sleep_until(sched::timer_ticks().saturating_add(5));
+            }
         }
     }
 }
