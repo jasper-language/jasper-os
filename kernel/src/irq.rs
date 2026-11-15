@@ -400,10 +400,23 @@ pub mod device {
     /// 未知线号的中断数（平台报告了超出范围的线）。
     static STRAY: AtomicU32 = AtomicU32::new(0);
 
-    /// 平台已接好的设备中断线数（不超过 [`MAX_LINES`]）。
-    /// Number of device lines provided by the platform.
+    /// 平台已接好的设备中断线数；当前固定表无法容纳时失败关闭。
+    ///
+    /// `MAX_LINES` 仍是待整改实现边界，不能静默截断固件发现结果。超过边界
+    /// 时拒绝发布不完整路由拓扑并停止启动，动态扩容属于 HC-11 后续工作。
+    /// Number of reported device lines, failing closed when the legacy table
+    /// cannot represent the complete discovered topology.
     pub fn line_count() -> usize {
-        arch::device_irq_count().min(MAX_LINES)
+        let discovered = arch::device_irq_count();
+        if discovered > MAX_LINES {
+            crate::kprintln!(
+                "[JSR-IRQ] reject=incomplete_line_table discovered={} capacity={}",
+                discovered,
+                MAX_LINES
+            );
+            arch::halt_forever();
+        }
+        discovered
     }
 
     /// 中断线的规范名。
