@@ -254,7 +254,9 @@ extern "C" fn jsr_loongarch64_secondary_rust(hw_id: u64) -> ! {
         super::trap::init();
         super::uart::init_mapped();
         enable_ipi();
-        super::timer::init(TIMER_HZ.load(Ordering::Acquire));
+        if !super::timer::init(TIMER_HZ.load(Ordering::Acquire)) {
+            crate::console::write_str("[JSR-SMP] secondary timer unavailable\n");
+        }
         super::cpu::irq_unmask();
     }
     let index = cpu_index();

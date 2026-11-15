@@ -7,9 +7,13 @@ use super::cpu::{self, TCFG_EN, TCFG_PERIOD, TCFG_VAL_SHIFT};
 static INTERVAL: AtomicU64 = AtomicU64::new(0);
 
 /// Program the local timer and unmask its ECFG input.
-pub fn init(hz: u32) {
-    let frequency = cpu::timer_frequency().max(1);
-    let interval = (frequency / u64::from(hz.max(1))).max(1);
+pub fn init(hz: u32) -> bool {
+    let frequency = cpu::timer_frequency();
+    if frequency == 0 || hz == 0 {
+        crate::console::write_str("[JSR-TIMER] failure reason=invalid-clock\n");
+        return false;
+    }
+    let interval = (frequency / u64::from(hz)).max(1);
     INTERVAL.store(interval, Ordering::Relaxed);
     // SAFETY: writes only this processor's local timer state.
     unsafe {
@@ -17,6 +21,7 @@ pub fn init(hz: u32) {
         cpu::write_csr!("0x41", (interval << TCFG_VAL_SHIFT) | TCFG_PERIOD | TCFG_EN);
         cpu::set_csr_bits(cpu::CSR_ECFG, cpu::ECFG_TIMER);
     }
+    true
 }
 
 /// Acknowledge and re-arm the periodic timer.

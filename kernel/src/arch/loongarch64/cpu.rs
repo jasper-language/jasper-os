@@ -215,9 +215,12 @@ pub fn read_time() -> u64 {
 pub fn timer_frequency() -> u64 {
     let base = cpucfg(4) & 0xffff_ffff;
     let ratio = cpucfg(5);
-    let mul = (ratio & 0xffff).max(1);
-    let div = ((ratio >> 16) & 0xffff).max(1);
-    base.saturating_mul(mul) / div
+    let mul = ratio & 0xffff;
+    let div = (ratio >> 16) & 0xffff;
+    if base == 0 || mul == 0 || div == 0 {
+        return 0;
+    }
+    base.checked_mul(mul).map_or(0, |frequency| frequency / div)
 }
 
 /// Data barrier.

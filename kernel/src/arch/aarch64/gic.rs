@@ -104,9 +104,25 @@ fn find_current_redist() -> Option<u64> {
     if base == 0 || stride < 0x2_0000 {
         return None;
     }
-    let frames = (size / stride).min(MAX_CPUS as u64);
+    // Physical GICR slots are indexed by the firmware-described region, not by
+    // the number of CPUs this kernel currently admits. Sparse or disabled CPU
+    // slots may precede the current CPU, so truncating traversal at MAX_CPUS
+    // can hide a valid redistributor.
+    let frames = size / stride;
+    if frames == 0 {
+        return None;
+    }
+    let Some(limit) = base.checked_add(size) else {
+        return None;
+    };
     for index in 0..frames {
-        let frame = base + index * stride;
+        let Some(frame) = index
+            .checked_mul(stride)
+            .and_then(|offset| base.checked_add(offset))
+            .filter(|frame| frame.checked_add(stride).is_some_and(|end| end <= limit))
+        else {
+            break;
+        };
         // SAFETY: frame is within the GICR range from the validated DTB.
         let typer = unsafe { r64(frame, GICR_TYPER) };
         if (typer >> 32) as u32 == gicr_affinity() {

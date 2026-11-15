@@ -50,7 +50,9 @@ impl Platform for LoongArch64 {
     }
 
     fn irq_init(timer_hz: u32) {
-        timer::init(timer_hz);
+        if !timer::init(timer_hz) {
+            crate::console::write_str("[JSR-IRQ] timer unavailable\n");
+        }
     }
 
     fn timer_stretch(ticks: u32) -> bool {

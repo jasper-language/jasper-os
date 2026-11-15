@@ -12,6 +12,7 @@
 //! 按键送入原生终端会话；compositor 只保留 overlay damage 区域用于局部更新，
 //! 不宣称窗口系统已经完成。
 
+#[cfg(target_arch = "x86_64")]
 use bootloader_api::info::{FrameBuffer, PixelFormat};
 use kernel_core::display_compositor::{Compositor, DamageRect, LayerKey, LayerPixels, LayerSpec};
 use kernel_core::display_input::{
@@ -75,6 +76,7 @@ static DISPLAY: IrqSpinLock<Option<Runtime>> = IrqSpinLock::ranked(crate::lockor
 /// Bind and immediately paint one boot frame from the firmware framebuffer.
 ///
 /// 绑定固件帧缓冲并立即绘制一帧启动画面。
+#[cfg(target_arch = "x86_64")]
 pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
     let info = framebuffer.info();
     let layout = match info.pixel_format {
