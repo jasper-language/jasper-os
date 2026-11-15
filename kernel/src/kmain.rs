@@ -246,10 +246,11 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
             Some(())
         }),
         // POL-5：多模式 B（统一仲裁）由 Profile 决定；没有 `sched.arbiter` 时保持单模式 A。
-        Stage::SchedMode => stage(ctx, s, |_| {
+        Stage::SchedMode => stage(ctx, s, |ctx| {
             let multi_mode = profile::has_capability("sched.arbiter");
             sched::set_arbiter(multi_mode);
             kprintln!("[JSR-SCHED] mode={}", if multi_mode { "multi" } else { "single" });
+            crate::capability_matrix::report(ctx.boot);
             Some(())
         }),
         // 内核地址空间：准备失败时不能创建任何独立地址空间。

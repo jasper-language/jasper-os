@@ -188,6 +188,7 @@ pub mod extension_abi;
 
 pub mod cpu_time;
 pub mod cpu_identity;
+pub mod capability_matrix;
 
 pub mod subscription;
 
