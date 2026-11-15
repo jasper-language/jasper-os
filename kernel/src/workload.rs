@@ -8,8 +8,10 @@ use kernel_core::objtable::ObjId;
 use kernel_core::security_domain::DomainKey;
 use kernel_core::workload::{
     IoRateLimits, IoRateSnapshot, IoUsage, MembershipError, ResourceLimits, ResourceUsage,
-    WorkloadError, WorkloadKey, WorkloadMembers, WorkloadSnapshot, WorkloadState, WorkloadTable,
+    WorkloadError, WorkloadKey, WorkloadMembers, WorkloadRegistryPlan, WorkloadSnapshot,
+    WorkloadState, WorkloadTable, plan_workload_registry,
 };
+use spin::Once;
 
 use crate::proc;
 use crate::sched::scheduler::CpuGroupId;
@@ -26,17 +28,67 @@ static CPU_GROUPS: IrqSpinLock<[Option<(WorkloadKey, CpuGroupId)>; MAX_WORKLOADS
     IrqSpinLock::new([None; MAX_WORKLOADS]);
 static MEMORY_RELEASE_FAILURES: AtomicU32 = AtomicU32::new(0);
 static IO_ROLLBACK_FAILURES: AtomicU32 = AtomicU32::new(0);
+static REGISTRY_PLAN: Once<WorkloadRegistryPlan> = Once::new();
 pub const WORKLOAD_TERMINATED_CODE: i64 = -3;
 
+/// Admit runtime registry counts from task capacity and the heap budget.
+pub fn init_registry(tasks: usize) -> bool {
+    let memory_budget = crate::mm::heap::limit();
+    let Some(plan) = plan_workload_registry(memory_budget, tasks) else {
+        crate::kprintln!("[JSR-WORKLOAD] reject=registry_capacity tasks={tasks} budget={memory_budget}");
+        return false;
+    };
+    let plan = WorkloadRegistryPlan {
+        workloads: plan.workloads.min(MAX_WORKLOADS),
+        members: plan.members.min(MAX_WORKLOAD_MEMBERS),
+    };
+    crate::kprintln!(
+        "[JSR-WORKLOAD] capacity workloads={} members={} tasks={} budget={} fixed_workloads={} fixed_members={} dynamic=false",
+        plan.workloads,
+        plan.members,
+        tasks,
+        memory_budget,
+        MAX_WORKLOADS,
+        MAX_WORKLOAD_MEMBERS
+    );
+    REGISTRY_PLAN.call_once(|| plan);
+    true
+}
+
+fn registry_plan() -> Option<WorkloadRegistryPlan> {
+    REGISTRY_PLAN.get().copied()
+}
+
 pub fn create(domain: DomainKey, limits: ResourceLimits) -> Result<WorkloadKey, WorkloadError> {
-    WORKLOADS.lock().create(domain, limits)
+    let mut workloads = WORKLOADS.lock();
+    admit_workload(&workloads)?;
+    workloads.create(domain, limits)
 }
 
 pub fn create_child(
     parent: WorkloadKey,
     limits: ResourceLimits,
 ) -> Result<WorkloadKey, WorkloadError> {
-    WORKLOADS.lock().create_child(parent, limits)
+    let mut workloads = WORKLOADS.lock();
+    create_child_locked(&mut workloads, parent, limits)
+}
+
+pub(crate) fn create_child_locked(
+    workloads: &mut WorkloadTable<MAX_WORKLOADS>,
+    parent: WorkloadKey,
+    limits: ResourceLimits,
+) -> Result<WorkloadKey, WorkloadError> {
+    admit_workload(workloads)?;
+    workloads.create_child(parent, limits)
+}
+
+pub(crate) fn admit_workload(
+    workloads: &WorkloadTable<MAX_WORKLOADS>,
+) -> Result<(), WorkloadError> {
+    let plan = registry_plan().ok_or(WorkloadError::Capacity)?;
+    (workloads.len() < plan.workloads)
+        .then_some(())
+        .ok_or(WorkloadError::Capacity)
 }
 
 /// Create a root or child Workload only inside the caller's authority domain.
@@ -142,7 +194,12 @@ pub fn snapshot(key: WorkloadKey) -> Result<WorkloadSnapshot, WorkloadError> {
 
 pub fn bind_member(key: WorkloadKey, member: u64) -> Result<(), MembershipError> {
     let workloads = WORKLOADS.lock();
-    MEMBERS.lock().attach(&workloads, key, member)
+    let mut members = MEMBERS.lock();
+    let plan = registry_plan().ok_or(MembershipError::Capacity)?;
+    if members.len() >= plan.members {
+        return Err(MembershipError::Capacity);
+    }
+    members.attach(&workloads, key, member)
 }
 
 pub fn unbind_member(key: WorkloadKey, member: u64) -> Result<(), MembershipError> {

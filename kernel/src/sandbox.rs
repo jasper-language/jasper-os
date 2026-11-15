@@ -38,6 +38,7 @@ pub fn create_sandbox(
     let key = {
         let mut sandboxes = SANDBOXES.lock();
         let mut workloads = WORKLOADS.lock();
+        crate::workload::admit_workload(&workloads).map_err(|_| SandboxError::Capacity)?;
         sandboxes.create(&mut workloads, domain, limits)?
     };
     if crate::net_policy::provision_default(domain, key).is_err() {

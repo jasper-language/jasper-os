@@ -12,6 +12,7 @@ use crate::boot::BootSpec;
 use crate::plan;
 use crate::{
     assembly, bootcap, clock, config, irq, kprint, kprintln, mm, pci, proc, profile, sched, smp,
+    workload,
 };
 use kernel_core::boot_stage::{
     plan_check, PlanItem, PlanSummary, Stage, StageError, StageState, Tracker,
@@ -252,6 +253,9 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         Stage::Capacity => stage(ctx, s, |ctx| {
             let cap = bootcap::validate();
             if !proc::spawn::init_child_limit(cap.tasks) {
+                return None;
+            }
+            if !workload::init_registry(cap.tasks) {
                 return None;
             }
             ctx.capacity = Some(cap);

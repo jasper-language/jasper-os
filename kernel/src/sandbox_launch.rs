@@ -492,8 +492,7 @@ fn create_child_workload(
     if parent.domain != domain || parent.state != WorkloadState::Running {
         return Err(LaunchError::InvalidRoot);
     }
-    let child = workloads
-        .create_child(root, resources.limits)
+    let child = crate::workload::create_child_locked(&mut workloads, root, resources.limits)
         .map_err(LaunchError::Workload)?;
     if let Some(rate) = resources.io_rate {
         if let Err(error) = workloads.configure_io_rate(child, rate) {

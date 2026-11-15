@@ -184,6 +184,43 @@ pub struct IoRateSnapshot {
     pub window_active: bool,
 }
 
+/// Runtime admission for the fixed implementation envelopes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkloadRegistryPlan {
+    pub workloads: usize,
+    pub members: usize,
+}
+
+/// Derive admitted Workload and member counts from task capacity and memory.
+///
+/// Issue #33 HC-21 policy: Workload metadata and member metadata each receive
+/// half of a 1/1024 memory share; the smaller of policy demand and admitted
+/// task capacity wins. The caller's fixed storage remains an implementation
+/// envelope until backing allocation is made fully dynamic.
+pub fn plan_workload_registry(
+    memory_budget: u64,
+    workload_slots: usize,
+) -> Option<WorkloadRegistryPlan> {
+    if workload_slots == 0 {
+        return None;
+    }
+    let metadata_budget = usize::try_from(memory_budget / 1024).ok()?;
+    let workload_bytes = core::mem::size_of::<Record>();
+    let member_bytes = core::mem::size_of::<WorkloadMember>();
+    if workload_bytes == 0 || member_bytes == 0 {
+        return None;
+    }
+    let per_registry = metadata_budget / 2;
+    let workloads = workload_slots.min(per_registry / workload_bytes);
+    let member_policy = workload_slots.checked_mul(4)?;
+    let members = member_policy.min(per_registry / member_bytes);
+    if workloads == 0 || members == 0 {
+        None
+    } else {
+        Some(WorkloadRegistryPlan { workloads, members })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkloadState {
     Created,
@@ -1408,5 +1445,18 @@ mod tests {
         table.release(key, one_page).unwrap();
         table.release(key, one_page).unwrap();
         assert_eq!(table.snapshot(key).unwrap().usage, ResourceUsage::default());
+    }
+
+    #[test]
+    fn workload_registry_plan_follows_memory_and_task_capacity() {
+        let small = plan_workload_registry(1024 * 1024, 8).unwrap();
+        let standard = plan_workload_registry(256 * 1024 * 1024, 64).unwrap();
+        assert!(small.workloads <= 8);
+        assert!(standard.workloads > small.workloads);
+        assert!(standard.workloads <= 64);
+        assert!(standard.members >= standard.workloads);
+        assert!(standard.members <= 256);
+        assert_eq!(plan_workload_registry(0, 64), None);
+        assert_eq!(plan_workload_registry(1024 * 1024, 0), None);
     }
 }
