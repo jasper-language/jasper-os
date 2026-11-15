@@ -66,6 +66,14 @@ RULES = (
         re.compile(r"\b(?:max|min|clamp)\s*\([^)]*\b(?:MAX|DEFAULT)_[A-Z0-9_]*"),
         "resource size clamped to a software default or maximum",
     ),
+    Rule(
+        "HC-G8",
+        re.compile(
+            r"\bconst\s+[A-Z0-9_]*(?:CAPACITY|SLOTS|LINES|VECTORS|CPUS)"
+            r"[A-Z0-9_]*\s*:\s*[^=]+\s*=\s*\d"
+        ),
+        "fixed production capacity introduced as a numeric constant",
+    ),
 )
 
 DISCOVERY_PATH = re.compile(
@@ -152,18 +160,20 @@ def self_test() -> None:
     patch = """diff --git a/kernel/src/arch/boot.rs b/kernel/src/arch/boot.rs
 --- a/kernel/src/arch/boot.rs
 +++ b/kernel/src/arch/boot.rs
-@@ -1,0 +1,5 @@
+@@ -1,0 +1,6 @@
 +const MAX_CPUS: usize = 32;
 +let line = count.min(MAX_LINES);
 +let verified = true;
 +let name = entries.get(index).unwrap_or("none");
++const INPUT_CAPACITY: usize = 4096;
 +const MAX_PROTOCOL: usize = 64; // JASPER-HARDCODE-REVIEW: issue=33 source=SPEC
 """
     found = scan_patch(patch)
-    assert len(found) == 4, found
+    assert len(found) == 5, found
     assert any("HC-G1" in item for item in found)
     assert any("HC-G2" in item for item in found)
     assert any("HC-G7" in item for item in found)
+    assert any("HC-G8" in item for item in found)
     assert not any(item.endswith("MAX_PROTOCOL: usize = 64;") for item in found)
     print("hardcode-gate: self-test PASS")
 
