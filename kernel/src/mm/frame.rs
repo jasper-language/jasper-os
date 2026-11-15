@@ -4,25 +4,16 @@
 //! 并以中断安全的方式对整个内核提供 `allocate` / `deallocate` / 统计。
 //!
 //! 设计：
-//! * 位图存放在 `.bss` 的静态数组里（无堆）。[`BITMAP_WORDS`] 个 `u64` 覆盖
-//!   `BITMAP_WORDS × 64 × 4 KiB` 的物理地址空间；超出部分由分配器计入 `ignored_frames` 并在启动时打印。
+//! * 位图元数据在启动交接时按完整物理内存图推导，并从可用 RAM 中动态预留；
+//!   不使用编译 Profile 固定数组，也不依赖内核堆。
 //! * 分配器本身由 [`IrqSpinLock`] 保护：中断处理程序（将来的缺页处理等）与任务都可能分配页帧。
 //! * 分配策略可替换（`FrameAllocator` trait）；这里只是选定位图实现并管理它的生命周期。
-
-use core::ptr::addr_of_mut;
 
 use kernel_core::frame::{BitmapFrameAllocator, FrameAllocator, FrameError, PhysFrame};
 use spin::Once;
 
 use crate::boot::BootSpec;
 use crate::sync::IrqSpinLock;
-
-/// 位图字数：16384 × 64 帧 × 4 KiB = 4 GiB 物理地址空间（位图本身占 128 KiB）。
-/// 位图字数随配置档变化：standard 覆盖 64 GiB，compact 覆盖 4 GiB。
-pub const BITMAP_WORDS: usize = crate::config::ACTIVE.memory.frame_bitmap_words;
-
-/// 位图存储（`.bss`，由引导器清零映射）。只在 [`init`] 中被借出一次。
-static mut BITMAP: [u64; BITMAP_WORDS] = [0; BITMAP_WORDS];
 
 /// 全局分配器（初始化一次）。
 static ALLOCATOR: Once<IrqSpinLock<BitmapFrameAllocator<'static>>> = Once::new();
@@ -42,9 +33,29 @@ pub struct FrameStats {
 
 /// 用交接信息初始化全局分配器（只生效一次）。
 pub fn init(boot: &'static BootSpec) -> FrameStats {
+    if ALLOCATOR.get().is_some() {
+        return stats(boot.regions().len());
+    }
+    let Some(metadata) = boot.frame_bitmap else {
+        crate::kprintln!(
+            "[JSR-FRAME] reject=frame_bitmap_missing reason=derived_metadata_unavailable"
+        );
+        return stats(boot.regions().len());
+    };
+    let Some(phys_offset) = boot.phys_offset else {
+        crate::kprintln!("[JSR-FRAME] reject=frame_bitmap_unmapped");
+        return stats(boot.regions().len());
+    };
+    let Some(pointer) = phys_offset.checked_add(metadata.physical) else {
+        crate::kprintln!("[JSR-FRAME] reject=frame_bitmap_pointer_overflow");
+        return stats(boot.regions().len());
+    };
+    // SAFETY: boot hand-off reserved exactly this zeroed range from complete
+    // usable RAM and provided a verified direct-map offset. Once guarantees the
+    // slice is handed to the allocator only once and never mutated elsewhere.
+    let bits: &'static mut [u64] =
+        unsafe { core::slice::from_raw_parts_mut(pointer as *mut u64, metadata.words) };
     ALLOCATOR.call_once(|| {
-        // SAFETY：`Once` 保证这段只执行一次，BITMAP 的唯一可变借用交给分配器、此后不再被直接访问。
-        let bits: &'static mut [u64] = unsafe { &mut *addr_of_mut!(BITMAP) };
         IrqSpinLock::ranked(crate::lockorder::MEMORY_FRAME, BitmapFrameAllocator::new(bits, boot.regions()))
     });
     stats(boot.regions().len())

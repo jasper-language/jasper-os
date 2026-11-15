@@ -90,14 +90,11 @@ pub struct PhysRegionTable<const N: usize> {
 impl<const N: usize> PhysRegionTable<N> {
     pub const fn new() -> Self {
         Self {
-            regions: [
-                PhysRegion {
-                    start: 0,
-                    end: 0,
-                    kind: RegionKind::Reserved,
-                };
-                N
-            ],
+            regions: [PhysRegion {
+                start: 0,
+                end: 0,
+                kind: RegionKind::Reserved,
+            }; N],
             len: 0,
             discovered: 0,
             admitted: 0,
@@ -182,7 +179,11 @@ impl<const N: usize> Default for PhysRegionTable<N> {
 
 impl PhysRegion {
     /// 空区域（静态数组初始化用）。
-    pub const EMPTY: PhysRegion = PhysRegion { start: 0, end: 0, kind: RegionKind::Reserved };
+    pub const EMPTY: PhysRegion = PhysRegion {
+        start: 0,
+        end: 0,
+        kind: RegionKind::Reserved,
+    };
 
     /// 区域内**完整**包含的第一个与最后一个（不含）帧号；起点向上、终点向下对齐到 4 KiB。
     pub const fn frame_range(&self) -> (u64, u64) {
@@ -194,6 +195,96 @@ impl PhysRegion {
             (first, first)
         }
     }
+}
+
+/// Runtime-derived frame-bitmap storage and coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameBitmapPlan {
+    /// Physical start of the zeroed metadata range.
+    pub physical: u64,
+    /// Number of 64-frame bitmap words.
+    pub words: usize,
+    /// Page-aligned physical metadata length.
+    pub reserve_bytes: u64,
+}
+
+/// Derive bitmap coverage from the highest usable physical address.
+///
+/// The bitmap must cover frame numbers, not merely the number of usable bytes.
+/// Sparse address spaces that would need more than 1/16 of usable RAM are
+/// rejected instead of silently truncating the final address range.
+pub fn plan_frame_bitmap(regions: &[PhysRegion], phys_offset: u64) -> Option<FrameBitmapPlan> {
+    let max_physical = regions
+        .iter()
+        .filter(|region| region.kind == RegionKind::Usable)
+        .map(|region| region.end)
+        .max()?;
+    let frames = max_physical / FRAME_SIZE;
+    let words = usize::try_from(frames.div_ceil(64)).ok()?;
+    let bytes = words.checked_mul(core::mem::size_of::<u64>())?;
+    let reserve_bytes = u64::try_from(align_up(bytes, FRAME_SIZE as usize)?).ok()?;
+    let usable_bytes = regions
+        .iter()
+        .filter(|region| region.kind == RegionKind::Usable)
+        .try_fold(0u64, |total, region| {
+            total.checked_add(region.end.checked_sub(region.start)?)
+        })?;
+    if reserve_bytes == 0 || reserve_bytes > usable_bytes / 16 {
+        return None;
+    }
+
+    for region in regions
+        .iter()
+        .filter(|region| region.kind == RegionKind::Usable)
+        .copied()
+    {
+        let mut end = align_down(region.end, FRAME_SIZE);
+        let Some(min_end) = region.start.checked_add(reserve_bytes) else {
+            continue;
+        };
+        while end >= min_end {
+            let start = end.checked_sub(reserve_bytes)?;
+            if start != 0 {
+                if let Some(overlap) = overlapping_reserved_start(regions, start, end) {
+                    end = if overlap < end {
+                        overlap
+                    } else {
+                        end.checked_sub(FRAME_SIZE)?
+                    };
+                    continue;
+                }
+                if phys_offset.checked_add(start).is_some() {
+                    return Some(FrameBitmapPlan {
+                        physical: start,
+                        words,
+                        reserve_bytes,
+                    });
+                }
+            }
+            end = end.checked_sub(FRAME_SIZE)?;
+        }
+    }
+    None
+}
+
+fn overlapping_reserved_start(regions: &[PhysRegion], start: u64, end: u64) -> Option<u64> {
+    regions
+        .iter()
+        .filter(|region| {
+            region.kind == RegionKind::Reserved && region.start < end && start < region.end
+        })
+        .map(|region| align_down(region.start, FRAME_SIZE))
+        .max()
+}
+
+fn align_up(value: usize, align: usize) -> Option<usize> {
+    value
+        .checked_add(align - 1)
+        .map(|value| value / align * align)
+}
+
+const fn align_down(value: u64, align: u64) -> u64 {
+    value / align * align
 }
 
 /// 页帧分配错误（`system.memory.error.*`）。
@@ -279,7 +370,14 @@ impl<'a> BitmapFrameAllocator<'a> {
             }
         }
         let free = bits.iter().map(|w| w.count_zeros() as usize).sum();
-        BitmapFrameAllocator { bits, regions, usable: free, free, ignored, hint: 0 }
+        BitmapFrameAllocator {
+            bits,
+            regions,
+            usable: free,
+            free,
+            ignored,
+            hint: 0,
+        }
     }
 
     /// 因超出位图管理范围而未纳入的可用帧数。
@@ -291,7 +389,9 @@ impl<'a> BitmapFrameAllocator<'a> {
     /// 不用 `as usize`：32 位目标上截断会把一个很大的帧号映射到错误的位上。
     /// Bitmap word index of frame `n`, without truncating casts.
     fn word_index(&self, n: u64) -> Option<usize> {
-        usize::try_from(n / 64).ok().filter(|&i| i < self.bits.len())
+        usize::try_from(n / 64)
+            .ok()
+            .filter(|&i| i < self.bits.len())
     }
 
     /// 该帧当前是否已分配（或不可用）。
@@ -379,7 +479,11 @@ impl BitmapFrameAllocator<'_> {
     /// 先校验整段的每一帧都可释放（在管理范围内、位于可用区域、当前已占用），全部通过后才修改位图；
     /// 任一帧不合法即整体拒绝且不留残留改动。`count` 为 0 同样拒绝。
     /// Releases a whole contiguous run after validating every frame.
-    pub fn deallocate_contiguous(&mut self, first: PhysFrame, count: usize) -> Result<(), FrameError> {
+    pub fn deallocate_contiguous(
+        &mut self,
+        first: PhysFrame,
+        count: usize,
+    ) -> Result<(), FrameError> {
         if first.start() % FRAME_SIZE != 0 {
             return Err(FrameError::Misaligned);
         }
@@ -387,7 +491,9 @@ impl BitmapFrameAllocator<'_> {
             return Err(FrameError::NotUsable);
         }
         let start = first.number();
-        let end = start.checked_add(count as u64).ok_or(FrameError::NotUsable)?;
+        let end = start
+            .checked_add(count as u64)
+            .ok_or(FrameError::NotUsable)?;
         for n in start..end {
             let frame = PhysFrame::from_number(n);
             if self.word_index(n).is_none() || !self.is_usable(frame) {
@@ -572,7 +678,10 @@ mod tests {
         assert_eq!(table.dropped(), 1);
         assert!(!table.is_complete());
         assert!(
-            table.regions().iter().all(|region| region.kind == RegionKind::Usable),
+            table
+                .regions()
+                .iter()
+                .all(|region| region.kind == RegionKind::Usable),
             "the dropped reserved range must not be silently synthesized from the partial map"
         );
     }
@@ -597,11 +706,23 @@ mod tests {
     fn regions() -> [PhysRegion; 3] {
         [
             // 0..640 KiB 可用（含帧 0，帧 0 必须被排除）
-            PhysRegion { start: 0, end: 640 * 1024, kind: RegionKind::Usable },
+            PhysRegion {
+                start: 0,
+                end: 640 * 1024,
+                kind: RegionKind::Usable,
+            },
             // 1 MiB..2 MiB 可用，但起点不对齐：应向上对齐
-            PhysRegion { start: MIB + 100, end: 2 * MIB, kind: RegionKind::Usable },
+            PhysRegion {
+                start: MIB + 100,
+                end: 2 * MIB,
+                kind: RegionKind::Usable,
+            },
             // 1.5 MiB..1.5 MiB+8 KiB 保留（与可用区重叠，保留优先）
-            PhysRegion { start: MIB + MIB / 2, end: MIB + MIB / 2 + 8192, kind: RegionKind::Reserved },
+            PhysRegion {
+                start: MIB + MIB / 2,
+                end: MIB + MIB / 2 + 8192,
+                kind: RegionKind::Reserved,
+            },
         ]
     }
 
@@ -630,7 +751,10 @@ mod tests {
             assert!(!seen[f.number() as usize], "重复分配 {:?}", f);
             seen[f.number() as usize] = true;
             let reserved = (MIB + MIB / 2) / FRAME_SIZE;
-            assert!(f.number() != reserved && f.number() != reserved + 1, "分出了保留帧");
+            assert!(
+                f.number() != reserved && f.number() != reserved + 1,
+                "分出了保留帧"
+            );
         }
         assert_eq!(a.allocate(), Err(FrameError::OutOfFrames));
         assert_eq!(a.free_frames(), 0);
@@ -683,15 +807,25 @@ mod tests {
         assert_eq!(a.deallocate(f), Err(FrameError::DoubleFree));
         let reserved = PhysFrame::from_start(MIB + MIB / 2).unwrap();
         assert_eq!(a.deallocate(reserved), Err(FrameError::NotUsable));
-        assert_eq!(a.deallocate(PhysFrame::from_number(0)), Err(FrameError::NotUsable));
+        assert_eq!(
+            a.deallocate(PhysFrame::from_number(0)),
+            Err(FrameError::NotUsable)
+        );
         assert_eq!(a.deallocate(PhysFrame(4097)), Err(FrameError::Misaligned));
         assert_eq!(PhysFrame::from_start(4097), None);
-        assert_eq!(FrameError::DoubleFree.name(), "system.memory.error.double_free");
+        assert_eq!(
+            FrameError::DoubleFree.name(),
+            "system.memory.error.double_free"
+        );
     }
 
     #[test]
     fn frames_beyond_capacity_are_reported_not_lost_silently() {
-        let regs = [PhysRegion { start: 0, end: 8 * MIB, kind: RegionKind::Usable }];
+        let regs = [PhysRegion {
+            start: 0,
+            end: 8 * MIB,
+            kind: RegionKind::Usable,
+        }];
         let mut bits = [0u64; 16]; // 只管 4 MiB
         let a = BitmapFrameAllocator::new(&mut bits, &regs);
         assert_eq!(a.usable_frames(), 1024 - 1);
@@ -733,7 +867,11 @@ mod tests {
     #[test]
     fn contiguous_allocation_skips_fragmented_holes() {
         // 16 帧可用区域，帧 0 永不分配：1..16 共 15 帧。
-        let regs = [PhysRegion { start: 0, end: 16 * FRAME_SIZE, kind: RegionKind::Usable }];
+        let regs = [PhysRegion {
+            start: 0,
+            end: 16 * FRAME_SIZE,
+            kind: RegionKind::Usable,
+        }];
         let mut bits = [0u64; 16];
         let mut a = BitmapFrameAllocator::new(&mut bits, &regs);
         for _ in 0..15 {
@@ -764,8 +902,14 @@ mod tests {
         let free = a.free_frames();
         let before_bits = a.bits.to_vec();
         assert_eq!(a.allocate_contiguous(0), Err(FrameError::OutOfFrames));
-        assert_eq!(a.allocate_contiguous(free + 1), Err(FrameError::OutOfFrames));
-        assert_eq!(a.allocate_contiguous(usize::MAX), Err(FrameError::OutOfFrames));
+        assert_eq!(
+            a.allocate_contiguous(free + 1),
+            Err(FrameError::OutOfFrames)
+        );
+        assert_eq!(
+            a.allocate_contiguous(usize::MAX),
+            Err(FrameError::OutOfFrames)
+        );
         assert_eq!(a.free_frames(), free);
         assert_eq!(a.bits, before_bits.as_slice());
     }
@@ -779,21 +923,33 @@ mod tests {
         let base = a.allocate_contiguous(3).unwrap();
         a.deallocate_contiguous(base, 3).unwrap();
         assert_eq!(a.free_frames(), before);
-        assert_eq!(a.deallocate_contiguous(base, 3), Err(FrameError::DoubleFree));
+        assert_eq!(
+            a.deallocate_contiguous(base, 3),
+            Err(FrameError::DoubleFree)
+        );
         assert_eq!(a.free_frames(), before);
 
         let base = a.allocate_contiguous(2).unwrap();
         let free = a.free_frames();
         let before_bits = a.bits.to_vec();
         // 第三帧仍空闲：整段校验失败，前两帧也必须保持已占用。
-        assert_eq!(a.deallocate_contiguous(base, 3), Err(FrameError::DoubleFree));
+        assert_eq!(
+            a.deallocate_contiguous(base, 3),
+            Err(FrameError::DoubleFree)
+        );
         assert_eq!(a.free_frames(), free);
         assert_eq!(a.bits, before_bits.as_slice());
         assert!(a.is_used(base) && a.is_used(PhysFrame::from_number(base.number() + 1)));
 
-        assert_eq!(a.deallocate_contiguous(PhysFrame::from_number(900), 2), Err(FrameError::NotUsable));
+        assert_eq!(
+            a.deallocate_contiguous(PhysFrame::from_number(900), 2),
+            Err(FrameError::NotUsable)
+        );
         assert_eq!(a.deallocate_contiguous(base, 0), Err(FrameError::NotUsable));
-        assert_eq!(a.deallocate_contiguous(PhysFrame(4097), 1), Err(FrameError::Misaligned));
+        assert_eq!(
+            a.deallocate_contiguous(PhysFrame(4097), 1),
+            Err(FrameError::Misaligned)
+        );
         assert_eq!(a.free_frames(), free);
         assert_eq!(a.bits, before_bits.as_slice());
     }
@@ -802,9 +958,21 @@ mod tests {
     fn contiguous_allocation_never_spans_reserved_hole() {
         // 可用 0..8 帧、保留 8..12 帧、可用 12..20 帧，两段之间是不可用空洞。
         let regs = [
-            PhysRegion { start: 0, end: 8 * FRAME_SIZE, kind: RegionKind::Usable },
-            PhysRegion { start: 8 * FRAME_SIZE, end: 12 * FRAME_SIZE, kind: RegionKind::Reserved },
-            PhysRegion { start: 12 * FRAME_SIZE, end: 20 * FRAME_SIZE, kind: RegionKind::Usable },
+            PhysRegion {
+                start: 0,
+                end: 8 * FRAME_SIZE,
+                kind: RegionKind::Usable,
+            },
+            PhysRegion {
+                start: 8 * FRAME_SIZE,
+                end: 12 * FRAME_SIZE,
+                kind: RegionKind::Reserved,
+            },
+            PhysRegion {
+                start: 12 * FRAME_SIZE,
+                end: 20 * FRAME_SIZE,
+                kind: RegionKind::Usable,
+            },
         ];
         let mut bits = [0u64; 16];
         let mut a = BitmapFrameAllocator::new(&mut bits, &regs);
@@ -822,5 +990,78 @@ mod tests {
         }
         // 第一段只剩 7 帧，分配 7 帧应从帧 1 开始。
         assert_eq!(a.allocate_contiguous(7), Ok(PhysFrame::from_number(1)));
+    }
+
+    #[test]
+    fn frame_bitmap_plan_rejects_a_map_without_usable_memory() {
+        let regions = [PhysRegion {
+            start: 0,
+            end: 4 * 1024 * 1024,
+            kind: RegionKind::Reserved,
+        }];
+
+        assert_eq!(plan_frame_bitmap(&regions, 0), None);
+    }
+
+    #[test]
+    fn frame_bitmap_plan_rejects_direct_map_pointer_overflow() {
+        let regions = [PhysRegion {
+            start: 0,
+            end: 4 * 1024 * 1024 * 1024,
+            kind: RegionKind::Usable,
+        }];
+
+        assert_eq!(plan_frame_bitmap(&regions, u64::MAX), None);
+    }
+
+    #[test]
+    fn frame_bitmap_plan_rejects_excessive_sparse_address_space() {
+        let base = 1u64 << 40;
+        let regions = [PhysRegion {
+            start: base,
+            end: base + 1024 * 1024,
+            kind: RegionKind::Usable,
+        }];
+
+        assert_eq!(plan_frame_bitmap(&regions, 0), None);
+    }
+
+    #[test]
+    fn frame_bitmap_plan_covers_highest_address_instead_of_usable_byte_count() {
+        let base = 1u64 << 30;
+        let length = 128u64 * 1024 * 1024;
+        let regions = [PhysRegion {
+            start: base,
+            end: base + length,
+            kind: RegionKind::Usable,
+        }];
+
+        let plan = plan_frame_bitmap(&regions, 0).expect("dense sparse range fits budget");
+        let frames_from_bytes = length / FRAME_SIZE;
+        assert!(plan.words as u64 > frames_from_bytes.div_ceil(64) + 1024);
+        assert_eq!(plan.physical % FRAME_SIZE, 0);
+        assert!(plan.physical >= base);
+        assert!(plan.physical + plan.reserve_bytes <= base + length);
+    }
+
+    #[test]
+    fn frame_bitmap_plan_skips_reserved_tail_ranges() {
+        let end = 16u64 * 1024 * 1024;
+        let reserved_start = 12u64 * 1024 * 1024;
+        let regions = [
+            PhysRegion {
+                start: reserved_start,
+                end,
+                kind: RegionKind::Reserved,
+            },
+            PhysRegion {
+                start: 0,
+                end,
+                kind: RegionKind::Usable,
+            },
+        ];
+
+        let plan = plan_frame_bitmap(&regions, 0).expect("space before reservation");
+        assert_eq!(plan.physical + plan.reserve_bytes, reserved_start);
     }
 }

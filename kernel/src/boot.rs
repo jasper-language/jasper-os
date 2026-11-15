@@ -6,12 +6,19 @@
 //!
 //! 生命周期：`BootSpec` 在启动最早期由 [`install`] 放进 `'static` 存储，之后只读。
 
-use kernel_core::frame::{PhysRegion, PhysRegionTable};
+use kernel_core::frame::{plan_frame_bitmap, PhysRegion, PhysRegionTable, RegionKind};
 use kernel_core::psci::Conduit;
 use spin::Once;
 
 /// 最多记录的物理内存区域数（超出部分计入 `dropped_regions`，不静默丢弃）。
 pub const MAX_REGIONS: usize = 256;
+
+/// Runtime frame-bitmap metadata physically reserved during hand-off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameBitmapBoot {
+    pub physical: u64,
+    pub words: usize,
+}
 
 /// 帧缓冲像素格式（与设备树 `simple-framebuffer` 的常见取值对应）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +89,8 @@ pub struct BootSpec {
     pub bootargs: Option<&'static str>,
     /// `/chosen/linux,initrd-start` / `-end` 给出的 `(start, end)`。
     pub initrd: Option<(u64, u64)>,
+    /// Frame bitmap derived from the complete memory map and reserved from RAM.
+    pub frame_bitmap: Option<FrameBitmapBoot>,
 }
 
 impl BootSpec {
@@ -96,6 +105,7 @@ impl BootSpec {
             serial: None,
             bootargs: None,
             initrd: None,
+            frame_bitmap: None,
         }
     }
 
@@ -159,8 +169,61 @@ impl Default for BootSpec {
 static BOOT: Once<BootSpec> = Once::new();
 
 /// 把交接信息放进 `'static` 存储（只允许一次；重复调用返回第一次的值）。
-pub fn install(spec: BootSpec) -> &'static BootSpec {
-    BOOT.call_once(|| spec)
+pub fn install(mut spec: BootSpec) -> &'static BootSpec {
+    BOOT.call_once(|| {
+        claim_frame_bitmap(&mut spec);
+        spec
+    })
+}
+
+/// Claim and zero bitmap metadata from the complete usable memory map.
+fn claim_frame_bitmap(spec: &mut BootSpec) -> bool {
+    if !spec.regions.is_complete() {
+        return false;
+    }
+    let Some(phys_offset) = spec.phys_offset else {
+        return false;
+    };
+    let Some(plan) = plan_frame_bitmap(spec.regions.regions(), phys_offset) else {
+        return false;
+    };
+
+    let Some(end) = plan.physical.checked_add(plan.reserve_bytes) else {
+        return false;
+    };
+    spec.regions.push(PhysRegion {
+        start: plan.physical,
+        end,
+        kind: RegionKind::Reserved,
+    });
+    if !spec.regions.is_complete() {
+        return false;
+    }
+    let Some(pointer) = phys_offset.checked_add(plan.physical) else {
+        return false;
+    };
+    let Ok(reserve_bytes) = usize::try_from(plan.reserve_bytes) else {
+        return false;
+    };
+    let Ok(pointer) = usize::try_from(pointer) else {
+        return false;
+    };
+    let Some(last_offset) = reserve_bytes.checked_sub(1) else {
+        return false;
+    };
+    if pointer.checked_add(last_offset).is_none() {
+        return false;
+    }
+    // SAFETY: the range came from complete usable RAM, remains inside that
+    // region, overlaps no reservation, and is directly mapped.
+    unsafe {
+        core::ptr::write_bytes(pointer as *mut u8, 0, reserve_bytes);
+    }
+    spec.frame_bitmap = Some(FrameBitmapBoot {
+        physical: plan.physical,
+        words: plan.words,
+    });
+    true
 }
 
 /// 已安装的交接信息（未安装时为 `None`）。

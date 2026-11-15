@@ -74,8 +74,6 @@ pub struct MemoryParams {
     pub max_vm_guest_frames: usize,
     /// 单次映射 / 取消映射最多涉及的页数。
     pub max_map_pages: u64,
-    /// 页帧位图的字数（每字 64 帧；16K 字 ≈ 4 GiB，256K 字 ≈ 64 GiB）。
-    pub frame_bitmap_words: usize,
 }
 
 /// 对象与句柄参数。
@@ -268,8 +266,6 @@ impl KernelConfig {
             max_process_frames: 0,
             max_vm_guest_frames: 32 * 1024,
             max_map_pages: 1024,
-            // 256K 字 × 64 帧 × 4 KiB = 64 GiB 物理内存（.bss 占 2 MiB）。
-            frame_bitmap_words: 256 * 1024,
         },
         objects: ObjectParams {
             max_objects: 1024,
@@ -331,8 +327,6 @@ impl KernelConfig {
             max_process_frames: 0,
             max_vm_guest_frames: 16 * 1024,
             max_map_pages: 1024,
-            // 紧凑档只覆盖 4 GiB，把 .bss 压回 128 KiB。
-            frame_bitmap_words: 16 * 1024,
         },
         objects: ObjectParams {
             max_objects: 512,
