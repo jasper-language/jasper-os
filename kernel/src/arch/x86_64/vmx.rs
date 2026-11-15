@@ -243,18 +243,27 @@ pub struct GuestExecutionState {
 
 struct Region {
     frame: PhysFrame,
+    frames: usize,
 }
 
 impl Region {
     fn allocate_zeroed(fill: u8) -> Result<Self, VmxError> {
-        let frame = crate::mm::frame::allocate().map_err(|_| VmxError::OutOfFrames)?;
+        Self::allocate_zeroed_frames(fill, 1)
+    }
+
+    fn allocate_zeroed_frames(fill: u8, frames: usize) -> Result<Self, VmxError> {
+        if frames == 0 {
+            return Err(VmxError::OutOfFrames);
+        }
+        let frame = crate::mm::frame::allocate_contiguous(frames)
+            .map_err(|_| VmxError::OutOfFrames)?;
         let Some(ptr) = crate::mm::phys_to_virt(frame.start()) else {
-            let _ = crate::mm::frame::deallocate(frame);
+            let _ = crate::mm::frame::deallocate_contiguous(frame, frames);
             return Err(VmxError::MissingPhysicalMap);
         };
-        // SAFETY: the frame was just allocated and is not published elsewhere.
-        unsafe { ptr::write_bytes(ptr, fill, FRAME_SIZE as usize) };
-        Ok(Self { frame })
+        // SAFETY: the contiguous frames were just allocated and are not published elsewhere.
+        unsafe { ptr::write_bytes(ptr, fill, FRAME_SIZE as usize * frames) };
+        Ok(Self { frame, frames })
     }
 
     fn physical(&self) -> u64 {
@@ -264,7 +273,7 @@ impl Region {
 
 impl Drop for Region {
     fn drop(&mut self) {
-        let _ = crate::mm::frame::deallocate(self.frame);
+        let _ = crate::mm::frame::deallocate_contiguous(self.frame, self.frames);
     }
 }
 
@@ -413,8 +422,13 @@ struct HostXsave {
 
 impl HostXsave {
     fn new(mask: u64) -> Result<Self, VmxError> {
+        if mask == 0 {
+            return Err(VmxError::InvalidState { code: mask });
+        }
+        let bytes = super::xstate::save_size();
+        let frames = bytes.div_ceil(FRAME_SIZE as usize);
         Ok(Self {
-            area: Region::allocate_zeroed(0)?,
+            area: Region::allocate_zeroed_frames(0, frames)?,
             mask,
             saved: false,
         })
@@ -424,8 +438,8 @@ impl HostXsave {
         let Some(ptr) = crate::mm::phys_to_virt(self.area.physical()) else {
             return Err(VmxError::MissingPhysicalMap);
         };
-        // SAFETY: CR4.OSXSAVE and IA32_XSS have been prepared by enable_vmx;
-        // the 4 KiB region covers the CPUID-reported enabled-state size.
+        // SAFETY: CR4.OSXSAVE is active, the caller saved before changing to a
+        // guest XCR0, and the contiguous region covers the shared host size.
         unsafe {
             asm!(
                 "xsave64 [{}]",
@@ -446,8 +460,13 @@ impl HostXsave {
         let Some(ptr) = crate::mm::phys_to_virt(self.area.physical()) else {
             return;
         };
-        // SAFETY: the area was populated by `save` and remains private.
+        // SAFETY: the descriptor was populated by save and remains private.
         unsafe {
+            if read_cr4() & CR4_OSXSAVE == 0 {
+                self.saved = false;
+                return;
+            }
+            write_xcr0(self.mask);
             asm!(
                 "xrstor64 [{}]",
                 in(reg) ptr,
@@ -879,7 +898,10 @@ fn enable_vmx() -> Result<(HostRegisters, EntryRestore), VmxError> {
     let xsave = cpu.ecx & (1 << 26) != 0;
     let fxsr = cpu.edx & (1 << 24) != 0 && cpu.edx & (1 << 25) != 0;
     let xsave_leaf = core::arch::x86_64::__cpuid_count(0xD, 0);
-    if xsave && xsave_leaf.ebx > FRAME_SIZE as u32 {
+    if xsave
+        && (super::xstate::mask() == 0
+            || xsave_leaf.ebx as usize != super::xstate::save_size())
+    {
         return Err(VmxError::InvalidState {
             code: u64::from(xsave_leaf.ebx),
         });
@@ -1546,17 +1568,22 @@ impl VmxVm {
         write_revision(&vmcs, revision)?;
 
         let (host, restore) = enable_vmx()?;
-        if guest.state.xcr0 & !restore.xcr0_supported != 0 {
+        let guest_xcr0 = guest.state.xcr0;
+        if kernel_core::xsave::validate_xcr0(guest_xcr0, restore.xcr0_supported).is_err() {
             restore_entry(restore);
             return Err(VmxError::InvalidState {
-                code: guest.state.xcr0,
+                code: guest_xcr0,
             });
         }
-        if restore.cr4_osxsave {
-            write_xcr0(guest.state.xcr0);
+        let guest_size = super::xstate::size_for_xcr0(guest_xcr0);
+        if guest_size.is_none_or(|size| size > super::xstate::save_size()) {
+            restore_entry(restore);
+            return Err(VmxError::InvalidState {
+                code: guest_xcr0,
+            });
         }
-        let mut host_xsave = if restore.cr4_osxsave {
-            match HostXsave::new(guest.state.xcr0) {
+        let mut host_xsave = if restore.xcr0_supported != 0 {
+            match HostXsave::new(restore.xcr0) {
                 Ok(mut state) => {
                     if let Err(error) = state.save() {
                         restore_entry(restore);
@@ -1572,6 +1599,9 @@ impl VmxVm {
         } else {
             None
         };
+        if restore.xcr0_supported != 0 && guest_xcr0 != restore.xcr0 {
+            write_xcr0(guest_xcr0);
+        }
         if let Err(error) = vmxon(vmxon_region.physical()) {
             if let Some(state) = host_xsave.as_mut() {
                 state.restore();

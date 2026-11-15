@@ -2736,8 +2736,9 @@ check_hwv1() {
 
 check_hwv2() {
   if has '^\[JSR-HWV2\] backend=Vmx entered=true vmxoff=true vmcs=true ept=true cpuid=1 rdtsc=1 msr=1 io=1 ept_exit=1 exception=1 exits=6 tsc=true xsave=true state_saved=true failed=0' \
+     && has '^\[JSR-HWV2-XSTATE\] host_xcr0=0x[0-9a-f]+ guest_xcr0=0x[0-9a-f]+ invalid_rejected=4 host_restored=true failed=0' \
      && ! has '^\[JSR-HWV2-FAIL\]'; then
-    record HWV-2 PASS "真实 Intel VMXON/VMCS/VMLAUNCH/VMRESUME；CPUID、RDTSC/TSC offset、RDMSR、I/O、EPT/MMIO 与 #UD VM-Exit 均可恢复；非法 EFER/EPT 状态拒绝；XSAVE 路径与 host 状态恢复；VMXOFF 后对象/页帧回基线"
+    record HWV-2 PASS "真实 Intel VMXON/VMCS/VMLAUNCH/VMRESUME；CPUID、RDTSC/TSC offset、RDMSR、I/O、EPT/MMIO 与 #UD VM-Exit 均可恢复；非法 EFER/EPT 与四类非法 Guest XCR0 在 VM Entry 前拒绝；HostXsave 按共享尺寸保存完整宿主状态并恢复；VMXOFF 后对象/页帧回基线"
   else
     record HWV-2 FAIL "缺少完整 Intel VMX 执行合同、退出恢复/非法状态拒绝失败，或资源未回基线"
   fi

@@ -189,6 +189,31 @@ pub fn run() {
         crate::arch::x86_64::vmx::VmxVm::new(ept_root + 1, execution).is_err(),
         "misaligned EPT pointer was not rejected",
     );
+    invalid = execution;
+    let mut invalid_xcr0gs_rejected = 0;
+    for xcr0 in [0u64, 0x2, 0x5, 1u64 << 63] {
+        invalid.state.xcr0 = xcr0;
+        if crate::arch::x86_64::vmx::VmxVm::new(ept_root, invalid).is_err() {
+            invalid_xcr0gs_rejected += 1;
+        }
+    }
+    check(
+        invalid_xcr0gs_rejected == 4,
+        "invalid guest XCR0 was not rejected before VM entry",
+    );
+    let host_after_xcr0_negatives = crate::arch::x86_64::vmx::host_snapshot();
+    check(
+        host_before == host_after_xcr0_negatives,
+        "invalid guest XCR0 changed host VMX state",
+    );
+    kprintln!(
+        "[JSR-HWV2-XSTATE] host_xcr0={:#x} guest_xcr0={:#x} invalid_rejected={} host_restored={} failed={}",
+        crate::arch::x86_64::xstate::mask(),
+        state.xcr0,
+        invalid_xcr0gs_rejected,
+        host_before == host_after_xcr0_negatives,
+        failed()
+    );
 
     if proc::exit_idle(pid, 0) {
         check(proc::reap(pid).is_some(), "HWV-2 process reap failed");
