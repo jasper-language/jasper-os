@@ -98,7 +98,9 @@ impl Platform for Aarch64 {
         #[cfg(feature = "pixel6a-gic-init-probe")]
         boot::pixel6a_power_off();
         devirq::configure();
-        timer::init(timer_hz);
+        if !timer::init(timer_hz) {
+            crate::console::write_str("[JSR-IRQ] timer unavailable\n");
+        }
     }
 
     fn timer_stretch(ticks: u32) -> bool {

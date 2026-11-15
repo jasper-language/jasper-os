@@ -41,27 +41,25 @@ const QEMU_VIRT_DTB: u64 = 0x4000_0000;
 /// 找不到设备树或必需设备时的退出码（与 x86_64 的失败码相同）。
 const EXIT_FAILURE: u32 = 35;
 
-// Pixel 6a's FDT declares /timer clock-frequency = 0x1770000. The virtual
-// counter is usable from the PE probe, but CNTFRQ_EL0 reads as zero here.
 #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full-probe"))]
-const PIXEL6A_GENERIC_TIMER_HZ: u64 = 24_576_000;
-
-#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full-probe"))]
-fn pixel6a_timer_frequency() -> u64 {
+fn pixel6a_timer_frequency(fdt: Option<&Fdt<'_>>) -> Option<u64> {
     let frequency: u64;
     unsafe { core::arch::asm!("mrs {}, cntfrq_el0", out(reg) frequency) };
-    if frequency >= 1_000_000 {
-        frequency
-    } else {
-        PIXEL6A_GENERIC_TIMER_HZ
+    if frequency != 0 {
+        return Some(frequency);
     }
+    let node = fdt?.find_compatible("arm,armv8-timer").ok().flatten()?;
+    node.cell("clock-frequency", 0).filter(|frequency| *frequency != 0).map(u64::from)
 }
 
 #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full-probe"))]
-pub(super) fn pixel6a_reset_after(seconds: u64) -> ! {
+pub(super) fn pixel6a_reset_after(seconds: u64, fdt: Option<&Fdt<'_>>) -> ! {
     let start: u64;
     unsafe { core::arch::asm!("mrs {}, cntvct_el0", out(reg) start) };
-    let frequency = pixel6a_timer_frequency();
+    let Some(frequency) = pixel6a_timer_frequency(fdt) else {
+        crate::kprintln!("[JSR-TIMER] failure reason=unverified-counter-frequency");
+        pixel6a_reset_now();
+    };
     let deadline = start.saturating_add(frequency.saturating_mul(seconds));
     loop {
         let now: u64;
@@ -71,6 +69,11 @@ pub(super) fn pixel6a_reset_after(seconds: u64) -> ! {
         }
         core::hint::spin_loop();
     }
+    pixel6a_reset_now()
+}
+
+#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full-probe"))]
+fn pixel6a_reset_now() -> ! {
     // Prefer PSCI SYSTEM_RESET2(arch warm), then fall back to SYSTEM_RESET.
     unsafe {
         core::arch::asm!(
@@ -592,7 +595,7 @@ extern "C" fn jsr_aarch64_boot(dtb_hint: u64, uefi_system_table: u64) -> ! {
         samsung_uart::set_base(mmu::PHYS_OFFSET + 0x10a0_0000);
         samsung_uart::init();
         crate::kprintln!("[JSR-PIXEL6A] entry=reached stage=after-mmu");
-        pixel6a_reset_after(3);
+        pixel6a_reset_after(3, None);
     }
 
     let early_end = mmu::cover_phys(0);
@@ -689,7 +692,7 @@ extern "C" fn jsr_aarch64_boot(dtb_hint: u64, uefi_system_table: u64) -> ! {
             memory_count
         );
         crate::kprintln!("[JSR-PIXEL6A] probe=complete action=psci-reset");
-        pixel6a_reset_after(3);
+        pixel6a_reset_after(3, Some(&fdt));
     }
 
     let covered = mmu::cover_phys(ram_end);

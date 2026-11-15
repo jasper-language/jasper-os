@@ -246,7 +246,9 @@ extern "C" fn jsr_a64_secondary_main(index: u64) -> ! {
         // 本处理器收不到中断：不报到，发起方等待超时后判失败
         crate::arch::halt_forever();
     }
-    timer::init(AP_TIMER_HZ.load(Ordering::Relaxed));
+    if !timer::init(AP_TIMER_HZ.load(Ordering::Relaxed)) {
+        crate::console::write_str("[JSR-SMP] secondary timer unavailable\n");
+    }
     crate::smp::secondary_main(index)
 }
 

@@ -30,9 +30,13 @@ pub fn interrupt() -> Option<u32> {
 const CNTKCTL_EL0VCTEN: u64 = 1 << 1;
 
 /// 以 `hz` 的频率开始产生周期中断（中断是否送达由 GIC 与 PSTATE 决定）。
-pub fn init(hz: u32) {
+pub fn init(hz: u32) -> bool {
     let freq = read_sysreg!("cntfrq_el0");
-    let interval = (freq / u64::from(hz.max(1))).max(1);
+    if freq == 0 || hz == 0 {
+        crate::console::write_str("[JSR-TIMER] failure reason=invalid-cntfrq\n");
+        return false;
+    }
+    let interval = (freq / u64::from(hz)).max(1);
     INTERVAL.store(interval, Ordering::Relaxed);
     // SAFETY：只配置本处理器的虚拟定时器：先装倒计时值，再使能且不屏蔽其中断输出。
     // CNTKCTL_EL1 只置 EL0VCTEN：用户态可读虚拟计数器（与 x86_64 用户态可读时间戳计数器对等），
@@ -43,6 +47,7 @@ pub fn init(hz: u32) {
         write_sysreg!("cntv_ctl_el0", 1u64);
     }
     super::cpu::isb();
+    true
 }
 
 /// 重装下一个周期（在定时器中断里、结束中断之前调用；同时撤下电平触发的中断信号）。
