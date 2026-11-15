@@ -9,11 +9,6 @@
 //! 队列、失败原子的帧提交和唯一终态；不包含 compositor、PTY、Linux 输入
 //! 或 GPU 命令执行语义。
 
-/// Maximum bytes represented by one surface descriptor.
-///
-/// 单个 surface 描述符允许表示的最大字节数。
-pub const MAX_SURFACE_BYTES: u64 = 256 * 1024 * 1024;
-
 /// Pixel layout exposed by a display backend.
 ///
 /// 显示后端暴露的像素布局。
@@ -63,7 +58,7 @@ impl SurfaceSpec {
             .checked_mul(u64::from(self.height))
             .and_then(|bytes| bytes.checked_mul(u64::from(self.bytes_per_pixel)))
             .ok_or(DisplayInputError::InvalidSurface)?;
-        if required == 0 || required > MAX_SURFACE_BYTES {
+        if required == 0 || required > usize::MAX as u64 {
             return Err(DisplayInputError::InvalidSurface);
         }
         Ok(required)
@@ -388,6 +383,13 @@ mod tests {
             ..SURFACE
         };
         assert_eq!(wide.validate(), Ok(8192 * 4));
+        let large = SurfaceSpec {
+            width: 8193,
+            height: 8192,
+            stride: 8193,
+            ..SURFACE
+        };
+        assert_eq!(large.validate(), Ok(8193 * 8192 * 4));
         assert_eq!(
             SurfaceSpec {
                 stride: u32::MAX,
