@@ -124,6 +124,7 @@ jobs:
       - name: 一键验收 / scripts/accept.sh
         env:
           # 托管运行器只有少量核且没有硬件虚拟化：用全部核，QEMU 时限放宽（判据本身不变）。
+          JASPER_ACCEL: tcg
           JASPER_QEMU_TIMEOUT: "600"
         run: JASPER_CORES="0-$(( $(nproc) - 1 ))" bash scripts/accept.sh
       - name: 上传证据 / upload evidence
