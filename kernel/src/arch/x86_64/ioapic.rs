@@ -123,7 +123,7 @@ fn write_low(p: &Pin) {
 pub fn configure(madt: &Madt, phys_offset: u64, boot_apic_id: u32) -> usize {
     let mut pins = PINS.lock();
     let mut ok = 0;
-    let mut masked_all = [0u64; kernel_core::acpi::MAX_IO_CONTROLLERS];
+    let mut masked_all = alloc::vec::Vec::new();
     for (i, &(_, isa, vector)) in LINES.iter().enumerate() {
         let route = madt.isa_route(isa);
         let Some((ctrl, pin)) = madt.controller_for(route.gsi) else {
@@ -142,11 +142,14 @@ pub fn configure(madt: &Madt, phys_offset: u64, boot_apic_id: u32) -> usize {
             for e in 0..entries {
                 write_reg(base, REG_REDIRECT + 2 * e, RTE_MASKED);
             }
-            if let Some(slot) = masked_all.iter_mut().find(|s| **s == 0) {
-                *slot = base;
+            if masked_all.try_reserve(1).is_err() {
+                break;
             }
+            masked_all.push(base);
         }
-        let low = vector as u32 | if route.active_low { RTE_ACTIVE_LOW } else { 0 } | if route.level { RTE_LEVEL } else { 0 };
+        let low = vector as u32
+            | if route.active_low { RTE_ACTIVE_LOW } else { 0 }
+            | if route.level { RTE_LEVEL } else { 0 };
         pins[i] = Pin { base, pin, low, masked: true };
         write_reg(base, REG_REDIRECT + 2 * pin + 1, boot_apic_id << 24);
         write_low(&pins[i]);

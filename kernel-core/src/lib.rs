@@ -57,6 +57,7 @@
 
 #[cfg(any(
     test,
+    feature = "acpi-dynamic",
     feature = "network-dynamic",
     feature = "ext4-view",
     feature = "persistent-install"
@@ -67,6 +68,7 @@ pub mod abi;
 pub mod abi_contract;
 pub mod arch2;
 pub mod abi_version;
+#[cfg(any(test, feature = "acpi-dynamic"))]
 pub mod acpi;
 pub mod argcase;
 pub mod arbiter;

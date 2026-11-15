@@ -2,13 +2,16 @@
 //! Read-only ACPI parsing for processor and device discovery: RSDP → RSDT/XSDT → MADT / MCFG / DMAR.
 //!
 //! # 职责与边界
-//! * 只解析，不分配：物理内存经调用者注入的 [`PhysRead`] 读取（内核经全物理内存映射实现，宿主测试用内存数组）。
+//! * 只读解析；物理内存经调用者注入的 [`PhysRead`] 读取（内核经全物理内存映射实现，
+//!   宿主测试用内存数组）。完整发现清单按实际条目分配，分配失败明确拒绝。
 //! * 固件表是**不可信输入**：校验签名与校验和，长度设上限，条目长度为 0 或越界即报错，绝不越界或死循环。
 //! * 只覆盖处理器、中断路由和 DMA 重映射枚举：MADT、MCFG 以及 DMAR 的
 //!   hardware unit/device scope。不解析 AML、不写 IOMMU 寄存器。
 //!
 //! # 为什么放在 kernel-core
 //! 表格式与指令集无关（x86_64 与部分 AArch64 服务器都用 ACPI），放在这里可以在宿主上用构造的表测试。
+
+use alloc::vec::Vec;
 
 use crate::pci::Ecam;
 use crate::smp::Topology;
@@ -46,6 +49,8 @@ pub enum AcpiError {
     NoMcfg,
     /// 根表中没有 DMAR（平台不暴露 Intel DMA remapping）。
     NoDmar,
+    /// 无法为完整发现结果分配审计内存。
+    Capacity,
 }
 
 impl AcpiError {
@@ -60,14 +65,10 @@ impl AcpiError {
             AcpiError::NoMadt => "system.firmware.error.no_madt",
             AcpiError::NoMcfg => "system.firmware.error.no_mcfg",
             AcpiError::NoDmar => "system.firmware.error.no_dmar",
+            AcpiError::Capacity => "system.firmware.error.capacity",
         }
     }
 }
-
-/// 记录的 I/O 中断控制器上限（超出的只计数）。
-pub const MAX_IO_CONTROLLERS: usize = 4;
-/// 记录的 ISA 中断源覆盖条目上限（ISA 中断只有 16 条）。
-pub const MAX_ISA_OVERRIDES: usize = 16;
 
 /// 一个 I/O 中断控制器。
 /// One I/O interrupt controller.
@@ -95,26 +96,22 @@ pub struct IsaRoute {
 
 /// MADT 中与处理器启动、中断路由相关的信息。
 /// Processor and interrupt-routing information from the MADT.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Madt {
     /// 本地中断控制器寄存器的物理地址（已应用覆盖条目）。
     pub local_controller: u64,
     /// 已启用处理器的硬件标识（引导处理器排在下标 0）。
     pub topology: Topology,
-    io: [IoController; MAX_IO_CONTROLLERS],
-    io_count: usize,
+    io: Vec<IoController>,
     /// (ISA 中断号, 路由)。
-    overrides: [(u8, IsaRoute); MAX_ISA_OVERRIDES],
-    override_count: usize,
-    /// 超出上限而未记录的 I/O 中断控制器与覆盖条目数。
-    pub dropped_routing: usize,
+    overrides: Vec<(u8, IsaRoute)>,
 }
 
 impl Madt {
     /// 已记录的 I/O 中断控制器。
     /// Recorded I/O interrupt controllers.
     pub fn io_controllers(&self) -> &[IoController] {
-        &self.io[..self.io_count]
+        &self.io
     }
 
     /// 负责全局中断号 `gsi` 的 I/O 中断控制器及其输入线号（取 `gsi_base` 不超过 `gsi` 的最大者；
@@ -131,7 +128,7 @@ impl Madt {
     /// ISA 中断 `irq` 的路由：有覆盖条目时按条目，否则恒等映射、高电平有效、边沿触发。
     /// Route of ISA interrupt `irq`.
     pub fn isa_route(&self, irq: u8) -> IsaRoute {
-        self.overrides[..self.override_count]
+        self.overrides
             .iter()
             .find(|(src, _)| *src == irq)
             .map(|(_, r)| *r)
@@ -281,16 +278,8 @@ pub fn parse_madt(m: &dyn PhysRead, rsdp: u64, boot_hw_id: u32) -> Result<Madt, 
     }
     let mut local_controller = read_u32(m, madt + 36)? as u64;
     let mut topology = Topology::boot_only(boot_hw_id);
-    let mut io = [IoController::default(); MAX_IO_CONTROLLERS];
-    let mut overrides = [(
-        0u8,
-        IsaRoute {
-            gsi: 0,
-            active_low: false,
-            level: false,
-        },
-    ); MAX_ISA_OVERRIDES];
-    let (mut io_count, mut override_count, mut dropped_routing) = (0usize, 0usize, 0usize);
+    let mut io = Vec::new();
+    let mut overrides = Vec::new();
     let mut off = MADT_ENTRIES_OFFSET;
     while off < len {
         if len - off < 2 {
@@ -315,12 +304,8 @@ pub fn parse_madt(m: &dyn PhysRead, rsdp: u64, boot_hw_id: u32) -> Result<Madt, 
                     address: read_u32(m, at + 4)? as u64,
                     gsi_base: read_u32(m, at + 8)?,
                 };
-                if io_count < MAX_IO_CONTROLLERS {
-                    io[io_count] = c;
-                    io_count += 1;
-                } else {
-                    dropped_routing += 1;
-                }
+                io.try_reserve(1).map_err(|_| AcpiError::Capacity)?;
+                io.push(c);
             }
             // ISA 中断源覆盖：总线(1) 源(1) 全局中断号(4) 标志(2)
             (2, 10..) => {
@@ -330,12 +315,8 @@ pub fn parse_madt(m: &dyn PhysRead, rsdp: u64, boot_hw_id: u32) -> Result<Madt, 
                 }
                 let route = isa_route_from(read_u32(m, at + 4)?, u16::from_le_bytes(f));
                 let src = read_u8(m, at + 3)?;
-                if override_count < MAX_ISA_OVERRIDES {
-                    overrides[override_count] = (src, route);
-                    override_count += 1;
-                } else {
-                    dropped_routing += 1;
-                }
+                overrides.try_reserve(1).map_err(|_| AcpiError::Capacity)?;
+                overrides.push((src, route));
             }
             // 本地中断控制器地址覆盖：保留(2) 地址(8)
             (5, 12..) => local_controller = read_u64(m, at + 4)?,
@@ -353,15 +334,10 @@ pub fn parse_madt(m: &dyn PhysRead, rsdp: u64, boot_hw_id: u32) -> Result<Madt, 
         local_controller,
         topology,
         io,
-        io_count,
         overrides,
-        override_count,
-        dropped_routing,
     })
 }
 
-/// 记录的 ECAM 窗口上限（超出的只计数）。
-pub const MAX_ECAM_WINDOWS: usize = 4;
 /// MCFG 中保留字段之后、窗口条目开始处的偏移。
 const MCFG_ENTRIES_OFFSET: u32 = 44;
 /// MCFG 每个窗口条目的长度。
@@ -369,11 +345,10 @@ const MCFG_ENTRY_LEN: u32 = 16;
 
 /// MCFG 解析结果：平台声明的 ECAM 窗口。
 /// ECAM windows declared by the MCFG.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mcfg {
-    windows: [Ecam; MAX_ECAM_WINDOWS],
-    count: usize,
-    /// 超出上限或总线范围颠倒而未记录的条目数。
+    windows: Vec<Ecam>,
+    /// 总线范围颠倒而未记录的条目数。
     pub dropped: usize,
 }
 
@@ -381,7 +356,7 @@ impl Mcfg {
     /// 已记录的窗口（按表中顺序）。
     /// Recorded windows in table order.
     pub fn windows(&self) -> &[Ecam] {
-        &self.windows[..self.count]
+        &self.windows
     }
 }
 
@@ -394,15 +369,8 @@ pub fn parse_mcfg(m: &dyn PhysRead, rsdp: u64) -> Result<Mcfg, AcpiError> {
     if len < MCFG_ENTRIES_OFFSET || (len - MCFG_ENTRIES_OFFSET) % MCFG_ENTRY_LEN != 0 {
         return Err(AcpiError::BadLength);
     }
-    let empty = Ecam {
-        base: 0,
-        segment: 0,
-        bus_start: 0,
-        bus_end: 0,
-    };
     let mut out = Mcfg {
-        windows: [empty; MAX_ECAM_WINDOWS],
-        count: 0,
+        windows: Vec::new(),
         dropped: 0,
     };
     let mut off = MCFG_ENTRIES_OFFSET;
@@ -418,11 +386,13 @@ pub fn parse_mcfg(m: &dyn PhysRead, rsdp: u64) -> Result<Mcfg, AcpiError> {
             bus_start: tail[2],
             bus_end: tail[3],
         };
-        if window.is_empty() || out.count == MAX_ECAM_WINDOWS {
+        if window.is_empty() {
             out.dropped += 1;
         } else {
-            out.windows[out.count] = window;
-            out.count += 1;
+            out.windows
+                .try_reserve(1)
+                .map_err(|_| AcpiError::Capacity)?;
+            out.windows.push(window);
         }
         off += MCFG_ENTRY_LEN;
     }
@@ -869,7 +839,6 @@ mod tests {
         assert_eq!((c.address, pin), (0xFEC0_0000, 8));
         let (c, pin) = madt.controller_for(30).unwrap();
         assert_eq!((c.id, pin), (2, 6));
-        assert_eq!(madt.dropped_routing, 0);
     }
 
     #[test]
@@ -885,10 +854,16 @@ mod tests {
             .map(|i| ioapic(i, 0xFEC0_0000 + i as u32 * 0x1000, i as u32 * 24))
             .collect();
         let madt = parse_madt(&image(0, &many), 0x100, 0).unwrap();
-        assert_eq!(
-            (madt.io_controllers().len(), madt.dropped_routing),
-            (MAX_IO_CONTROLLERS, 2)
-        );
+        assert_eq!(madt.io_controllers().len(), 6);
+    }
+
+    #[test]
+    fn all_isa_overrides_are_retained_without_a_fixed_inventory_limit() {
+        let mut entries = vec![lapic(0, 1)];
+        entries.extend((0..20u8).map(|source| iso(source, 32 + u32::from(source), 0)));
+        let madt = parse_madt(&image(0, &entries), 0x100, 0).unwrap();
+        assert_eq!(madt.overrides.len(), 20);
+        assert_eq!(madt.isa_route(19).gsi, 51);
     }
 
     #[test]
@@ -958,13 +933,13 @@ mod tests {
     }
 
     #[test]
-    fn mcfg_inverted_and_excess_windows_counted() {
+    fn mcfg_invalid_is_rejected_without_capping_valid_windows() {
         let mut e: Vec<(u64, u16, u8, u8)> = vec![(0xC000_0000, 0, 9, 3)];
         e.extend((0..5u16).map(|i| (0xD000_0000 + ((i as u64) << 28), i, 0, 0)));
         let mcfg = parse_mcfg(&image_with_mcfg(&e), 0x100).unwrap();
-        assert_eq!(mcfg.windows().len(), MAX_ECAM_WINDOWS);
+        assert_eq!(mcfg.windows().len(), 5);
         assert_eq!(mcfg.windows()[0].segment, 0);
-        assert_eq!(mcfg.dropped, 2, "一条总线范围颠倒 + 一条超出上限");
+        assert_eq!(mcfg.dropped, 1, "仅有总线范围颠倒的条目被拒绝");
     }
 
     #[test]
