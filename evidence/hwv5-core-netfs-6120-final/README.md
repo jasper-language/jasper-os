@@ -34,3 +34,19 @@ taskset -c 0-3 env \
 The gate requires QEMU exit 33, core, PIO, NET and FS markers, non-zero guest
 TX/RX and FUSE request counts, `pio_marker=true`, `marker=true`,
 `reclaim=true`, `policy_overflow=0` and no failure marker.
+
+Final result:
+
+```text
+qemu_rc=33
+[JSR-HWV5-NET] device=net discovered=true link=true tx=true rx=true arp=true ok=true
+[JSR-HWV5-FS] device=fs discovered=true mount=true lookup=true read=true write=true ok=true
+[JSR-HWV4-LINUX] virtio_net_tx_frames=1 virtio_net_rx_frames=1
+  virtio_net_backend_tx=1 virtio_net_backend_rx=1 virtio_fs_requests=13
+  pio_marker=true marker=true reclaim=true
+[JSR-HWV5] vmm=true policy=true policy_overflow=0 failed=0
+```
+
+The FUSE sequence includes INIT, LOOKUP, OPEN, READ, WRITE, FLUSH and RELEASE.
+After WRITE, the guest closes and reopens the file, then reads 22 bytes and
+matches `Jasper virtio-fs guest`.
