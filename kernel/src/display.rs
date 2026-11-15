@@ -16,14 +16,13 @@
 use bootloader_api::info::{FrameBuffer, PixelFormat};
 use kernel_core::display_compositor::{Compositor, DamageRect, LayerKey, LayerPixels, LayerSpec};
 use kernel_core::display_input::{
-    DisplayBackend, DisplayCapabilities, DisplayInputError, DisplayInputSession, KeyInput,
-    PixelLayout, SurfaceSpec,
+    plan_key_queue_capacity, DisplayBackend, DisplayCapabilities, DisplayInputError,
+    DynamicDisplayInputSession, KeyInput, PixelLayout, SurfaceSpec,
 };
 
-use crate::kprintln;
+use crate::{kprintln, mm};
 use crate::sync::IrqSpinLock;
 
-const KEY_CAPACITY: usize = 64;
 const TEXT_COLUMNS: usize = 96;
 const TEXT_ROWS: usize = 32;
 const TEXT_CELLS: usize = TEXT_COLUMNS * TEXT_ROWS;
@@ -54,7 +53,7 @@ struct Runtime {
     base: usize,
     len: usize,
     surface: SurfaceSpec,
-    session: DisplayInputSession<KEY_CAPACITY>,
+    session: DynamicDisplayInputSession,
     compositor: Compositor<2>,
     overlay: [u8; OVERLAY_BYTES],
     overlay_key: LayerKey,
@@ -105,11 +104,16 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
     let keyboard = crate::arch::x86_64::keyboard::init();
     #[cfg(not(target_arch = "x86_64"))]
     let keyboard = false;
-    let session = DisplayInputSession::open(DisplayCapabilities {
-        backend: Some(DisplayBackend::Framebuffer),
-        surface: Some(surface),
-        keyboard,
-    })?;
+    let input_capacity = plan_key_queue_capacity(required, mm::heap::limit())
+        .ok_or(DisplayInputError::Failed)?;
+    let session = DynamicDisplayInputSession::open(
+        DisplayCapabilities {
+            backend: Some(DisplayBackend::Framebuffer),
+            surface: Some(surface),
+            keyboard,
+        },
+        input_capacity,
+    )?;
     let mut compositor = Compositor::<2>::new();
     let overlay_key = compositor
         .create(LayerSpec {
@@ -185,7 +189,8 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
     runtime.append_text(b"JASPER-OS NATIVE TERMINAL\n\n");
     runtime.paint_boot_frame()?;
     kprintln!(
-        "[JSR-DISPLAY-COMPOSITOR] layers=2 visible=2 primary=terminal overlays=bounded alpha=true full_frame=false damage=true overlay_damage=true text_full=true"
+        "[JSR-DISPLAY-COMPOSITOR] layers=2 visible=2 primary=terminal overlays=bounded alpha=true full_frame=false damage=true overlay_damage=true text_full=true input_capacity={}",
+        input_capacity
     );
     *DISPLAY.lock() = Some(runtime);
     Ok(())
@@ -260,15 +265,16 @@ pub fn report() {
             runtime.session.keyboard_available(),
             runtime.session.frames(),
             runtime.session.pending_keys(),
+            runtime.session.key_capacity(),
             runtime.session.dropped_keys(),
             runtime.compositor.count(),
             runtime.pressed,
             runtime.released,
         )
     });
-    if let Some((surface, keyboard, frames, keys, dropped, layers, pressed, released)) = snapshot {
+    if let Some((surface, keyboard, frames, keys, capacity, dropped, layers, pressed, released)) = snapshot {
         kprintln!(
-            "[JSR-DISPLAY] backend=framebuffer keyboard={} width={} height={} stride={} bpp={} frames={} keys={} dropped={} compositor_layers={} pressed={} released={}",
+            "[JSR-DISPLAY] backend=framebuffer keyboard={} width={} height={} stride={} bpp={} frames={} keys={} input_capacity={} dropped={} compositor_layers={} pressed={} released={}",
             keyboard,
             surface.width,
             surface.height,
@@ -276,6 +282,7 @@ pub fn report() {
             surface.bytes_per_pixel,
             frames,
             keys,
+            capacity,
             dropped,
             layers,
             pressed,

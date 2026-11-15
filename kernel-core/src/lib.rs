@@ -60,6 +60,7 @@
     feature = "acpi-dynamic",
     feature = "network-dynamic",
     feature = "terminal-dynamic",
+    feature = "display-dynamic",
     feature = "ext4-view",
     feature = "persistent-install"
 ))]

@@ -9,6 +9,9 @@
 //! 队列、失败原子的帧提交和唯一终态；不包含 compositor、PTY、Linux 输入
 //! 或 GPU 命令执行语义。
 
+#[cfg(any(test, feature = "display-dynamic"))]
+use alloc::collections::VecDeque;
+
 /// Pixel layout exposed by a display backend.
 ///
 /// 显示后端暴露的像素布局。
@@ -128,6 +131,20 @@ pub struct KeyInput {
     pub code: u16,
     pub pressed: bool,
     pub modifiers: u8,
+}
+
+/// Derive a keyboard queue from presentment demand and admitted memory.
+pub fn plan_key_queue_capacity(surface_bytes: u64, memory_budget: u64) -> Option<usize> {
+    let event_bytes = core::mem::size_of::<KeyInput>() as u64;
+    if event_bytes == 0 || memory_budget < event_bytes {
+        return None;
+    }
+    // Issue #33 HC-22 policy: input metadata may consume at most 1/1024 of the
+    // admitted memory. One event of demand is admitted per 4 KiB of surface.
+    let policy_bytes = (memory_budget / 1024).max(event_bytes);
+    let budget_events = usize::try_from(policy_bytes / event_bytes).ok()?;
+    let demand = usize::try_from((surface_bytes / 4096).max(1)).ok()?;
+    Some(demand.min(budget_events))
 }
 
 /// Session lifecycle state.
@@ -345,6 +362,178 @@ impl<const KEYS: usize> DisplayInputSession<KEYS> {
     }
 }
 
+/// Native display session whose keyboard queue is allocated at runtime.
+#[cfg(any(test, feature = "display-dynamic"))]
+pub struct DynamicDisplayInputSession {
+    backend: DisplayBackend,
+    surface: SurfaceSpec,
+    surface_bytes: u64,
+    keyboard: bool,
+    keys: VecDeque<KeyInput>,
+    key_capacity: usize,
+    state: DisplaySessionState,
+    pending: Option<FrameTicket>,
+    next_ticket: u64,
+    frames: u64,
+    dropped_keys: u64,
+}
+
+#[cfg(any(test, feature = "display-dynamic"))]
+impl DynamicDisplayInputSession {
+    pub fn open(
+        capabilities: DisplayCapabilities,
+        key_capacity: usize,
+    ) -> Result<Self, DisplayInputError> {
+        let backend = capabilities.backend.ok_or(DisplayInputError::Unsupported)?;
+        let surface = capabilities.surface.ok_or(DisplayInputError::Unsupported)?;
+        let surface_bytes = surface.validate()?;
+        if key_capacity == 0 {
+            return Err(DisplayInputError::Unsupported);
+        }
+        let mut keys = VecDeque::new();
+        keys.try_reserve_exact(key_capacity)
+            .map_err(|_| DisplayInputError::Failed)?;
+        Ok(Self {
+            backend,
+            surface,
+            surface_bytes,
+            keyboard: capabilities.keyboard,
+            keys,
+            key_capacity,
+            state: DisplaySessionState::Open,
+            pending: None,
+            next_ticket: 1,
+            frames: 0,
+            dropped_keys: 0,
+        })
+    }
+
+    pub const fn backend(&self) -> DisplayBackend {
+        self.backend
+    }
+
+    pub const fn surface(&self) -> SurfaceSpec {
+        self.surface
+    }
+
+    pub const fn state(&self) -> DisplaySessionState {
+        self.state
+    }
+
+    pub const fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    pub fn pending_keys(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub const fn key_capacity(&self) -> usize {
+        self.key_capacity
+    }
+
+    pub const fn dropped_keys(&self) -> u64 {
+        self.dropped_keys
+    }
+
+    pub const fn keyboard_available(&self) -> bool {
+        self.keyboard
+    }
+
+    pub fn push_key(&mut self, key: KeyInput) -> Result<(), DisplayInputError> {
+        self.ensure_open()?;
+        self.ensure_keyboard()?;
+        if self.keys.len() == self.key_capacity {
+            self.dropped_keys = self.dropped_keys.saturating_add(1);
+            return Err(DisplayInputError::QueueFull);
+        }
+        self.keys.push_back(key);
+        Ok(())
+    }
+
+    pub fn pop_key(&mut self) -> Result<KeyInput, DisplayInputError> {
+        self.ensure_open()?;
+        self.ensure_keyboard()?;
+        self.keys
+            .pop_front()
+            .ok_or(DisplayInputError::QueueEmpty)
+    }
+
+    pub fn prepare_frame(&mut self, bytes: u64) -> Result<FrameTicket, DisplayInputError> {
+        self.ensure_open()?;
+        if bytes != self.surface_bytes {
+            return Err(DisplayInputError::InvalidFrame);
+        }
+        if self.pending.is_some() {
+            return Err(DisplayInputError::Busy);
+        }
+        let sequence = self.next_ticket;
+        self.next_ticket = sequence.checked_add(1).ok_or(DisplayInputError::Failed)?;
+        let ticket = FrameTicket { sequence, bytes };
+        self.pending = Some(ticket);
+        Ok(ticket)
+    }
+
+    pub fn commit_frame(&mut self, ticket: FrameTicket) -> Result<u64, DisplayInputError> {
+        self.ensure_open()?;
+        if ticket.bytes != self.surface_bytes || self.pending != Some(ticket) {
+            return Err(DisplayInputError::StaleTicket);
+        }
+        self.pending = None;
+        self.frames = self.frames.saturating_add(1);
+        Ok(self.frames)
+    }
+
+    pub fn abort_frame(&mut self, ticket: FrameTicket) -> Result<(), DisplayInputError> {
+        self.ensure_open()?;
+        if self.pending != Some(ticket) {
+            return Err(DisplayInputError::StaleTicket);
+        }
+        self.pending = None;
+        Ok(())
+    }
+
+    pub fn close(&mut self) -> Result<(), DisplayInputError> {
+        match self.state {
+            DisplaySessionState::Open => {
+                self.pending = None;
+                self.state = DisplaySessionState::Closed;
+                Ok(())
+            }
+            DisplaySessionState::Closed => Ok(()),
+            DisplaySessionState::Failed => Err(DisplayInputError::Failed),
+        }
+    }
+
+    pub fn fail(&mut self) -> Result<(), DisplayInputError> {
+        match self.state {
+            DisplaySessionState::Open => {
+                self.pending = None;
+                self.state = DisplaySessionState::Failed;
+                Ok(())
+            }
+            DisplaySessionState::Failed => Ok(()),
+            DisplaySessionState::Closed => Err(DisplayInputError::Closed),
+        }
+    }
+
+    fn ensure_open(&self) -> Result<(), DisplayInputError> {
+        match self.state {
+            DisplaySessionState::Open => Ok(()),
+            DisplaySessionState::Closed => Err(DisplayInputError::Closed),
+            DisplaySessionState::Failed => Err(DisplayInputError::Failed),
+        }
+    }
+
+    fn ensure_keyboard(&self) -> Result<(), DisplayInputError> {
+        if self.keyboard {
+            Ok(())
+        } else {
+            Err(DisplayInputError::Unsupported)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,5 +715,33 @@ mod tests {
         assert_eq!(failed.state(), DisplaySessionState::Failed);
         assert_eq!(failed.close(), Err(DisplayInputError::Failed));
         assert_eq!(failed.pop_key(), Err(DisplayInputError::Failed));
+    }
+
+    #[test]
+    fn dynamic_key_capacity_follows_surface_and_memory_budget() {
+        let tiny = plan_key_queue_capacity(160, 64).unwrap();
+        let standard = plan_key_queue_capacity(1280 * 720 * 3, 128 * 1024 * 1024).unwrap();
+        assert_eq!(tiny, 1);
+        assert_eq!(standard, (1280 * 720 * 3) / 4096);
+        assert!(plan_key_queue_capacity(160, 0).is_none());
+    }
+
+    #[test]
+    fn dynamic_session_preserves_fifo_and_rejects_overflow() {
+        let mut session = DynamicDisplayInputSession::open(capabilities(), 2).unwrap();
+        let key = |code| KeyInput {
+            code,
+            pressed: true,
+            modifiers: 0,
+        };
+        session.push_key(key(1)).unwrap();
+        session.push_key(key(2)).unwrap();
+        assert_eq!(session.push_key(key(3)), Err(DisplayInputError::QueueFull));
+        assert_eq!(session.pop_key(), Ok(key(1)));
+        session.push_key(key(3)).unwrap();
+        assert_eq!(session.pop_key(), Ok(key(2)));
+        assert_eq!(session.pop_key(), Ok(key(3)));
+        assert_eq!(session.pop_key(), Err(DisplayInputError::QueueEmpty));
+        assert_eq!(session.dropped_keys(), 1);
     }
 }
