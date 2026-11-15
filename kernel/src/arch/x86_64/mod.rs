@@ -35,6 +35,8 @@ pub mod hwv4_demo;
 pub mod linux_guest;
 #[cfg(any(feature = "hwv5-verify", feature = "hwv5-prod-verify"))]
 pub mod hwv5_demo;
+#[cfg(feature = "hwv6-verify")]
+pub mod hwv6_demo;
 mod paging;
 mod gdt;
 mod idt;

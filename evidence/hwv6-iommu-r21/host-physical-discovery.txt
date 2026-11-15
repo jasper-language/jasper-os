@@ -1,0 +1,18 @@
+Host physical IOMMU observations (2026-11-15, Europe/Berlin)
+
+CPU: Intel Core i9-10850K, VT-x exposed
+Kernel IOMMU class: /sys/class/iommu/dmar1 -> ../../devices/virtual/iommu/dmar1
+Firmware DMAR node exists: /sys/firmware/acpi/tables/DMAR
+IOMMU groups visible: 0..16 (17 non-empty groups)
+
+Sample groups:
+1: 0000:00:01.0 0000:01:00.0 0000:01:00.1 (root port + NVIDIA GPU/audio)
+13: 0000:02:00.0 (NVMe)
+14: 0000:04:00.0 (RTL8125 Ethernet)
+15: 0000:05:00.0 (Broadcom Wi-Fi)
+16: 0000:06:00.0 (second NVMe)
+
+The current unprivileged agent cannot read the DMAR table bytes or perform
+destructive VFIO rebinding. This confirms that the host has a physical Intel
+IOMMU, but it is not a substitute for booting Jasper OS on the machine and
+proving physical passthrough, DMA faults and FLR/unbind isolation.

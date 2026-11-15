@@ -1,11 +1,11 @@
-//! ACPI 表的只读解析（处理器与设备发现所需的子集）：RSDP → RSDT/XSDT → MADT / MCFG。
-//! Read-only ACPI parsing for processor and device discovery: RSDP → RSDT/XSDT → MADT / MCFG.
+//! ACPI 表的只读解析（处理器与设备发现所需的子集）：RSDP → RSDT/XSDT → MADT / MCFG / DMAR。
+//! Read-only ACPI parsing for processor and device discovery: RSDP → RSDT/XSDT → MADT / MCFG / DMAR.
 //!
 //! # 职责与边界
 //! * 只解析，不分配：物理内存经调用者注入的 [`PhysRead`] 读取（内核经全物理内存映射实现，宿主测试用内存数组）。
 //! * 固件表是**不可信输入**：校验签名与校验和，长度设上限，条目长度为 0 或越界即报错，绝不越界或死循环。
-//! * 只覆盖处理器与中断路由枚举：本地中断控制器条目（含 x2 扩展形式）、本地中断控制器地址覆盖条目、
-//!   I/O 中断控制器条目与 ISA 中断源覆盖条目；以及 MCFG 的 ECAM 窗口（PCI 配置空间位置）。不解析 AML、不处理其他表。
+//! * 只覆盖处理器、中断路由和 DMA 重映射枚举：MADT、MCFG 以及 DMAR 的
+//!   hardware unit/device scope。不解析 AML、不写 IOMMU 寄存器。
 //!
 //! # 为什么放在 kernel-core
 //! 表格式与指令集无关（x86_64 与部分 AArch64 服务器都用 ACPI），放在这里可以在宿主上用构造的表测试。
@@ -44,6 +44,8 @@ pub enum AcpiError {
     NoMadt,
     /// 根表中没有 MCFG（平台不提供 ECAM）。
     NoMcfg,
+    /// 根表中没有 DMAR（平台不暴露 Intel DMA remapping）。
+    NoDmar,
 }
 
 impl AcpiError {
@@ -57,6 +59,7 @@ impl AcpiError {
             AcpiError::BadLength => "system.firmware.error.bad_length",
             AcpiError::NoMadt => "system.firmware.error.no_madt",
             AcpiError::NoMcfg => "system.firmware.error.no_mcfg",
+            AcpiError::NoDmar => "system.firmware.error.no_dmar",
         }
     }
 }
@@ -118,7 +121,11 @@ impl Madt {
     /// 每个控制器的输入线数要读寄存器才知道，由调用者校验）。
     /// Controller responsible for `gsi`, with the pin number on it.
     pub fn controller_for(&self, gsi: u32) -> Option<(IoController, u32)> {
-        self.io_controllers().iter().filter(|c| c.gsi_base <= gsi).max_by_key(|c| c.gsi_base).map(|c| (*c, gsi - c.gsi_base))
+        self.io_controllers()
+            .iter()
+            .filter(|c| c.gsi_base <= gsi)
+            .max_by_key(|c| c.gsi_base)
+            .map(|c| (*c, gsi - c.gsi_base))
     }
 
     /// ISA 中断 `irq` 的路由：有覆盖条目时按条目，否则恒等映射、高电平有效、边沿触发。
@@ -128,28 +135,49 @@ impl Madt {
             .iter()
             .find(|(src, _)| *src == irq)
             .map(|(_, r)| *r)
-            .unwrap_or(IsaRoute { gsi: irq as u32, active_low: false, level: false })
+            .unwrap_or(IsaRoute {
+                gsi: irq as u32,
+                active_low: false,
+                level: false,
+            })
     }
 }
 
 /// 覆盖条目的标志：极性（位 0–1）与触发方式（位 2–3）；00 = 遵从总线规定（ISA：高电平有效、边沿触发）。
 fn isa_route_from(gsi: u32, flags: u16) -> IsaRoute {
-    IsaRoute { gsi, active_low: flags & 0b11 == 0b11, level: (flags >> 2) & 0b11 == 0b11 }
+    IsaRoute {
+        gsi,
+        active_low: flags & 0b11 == 0b11,
+        level: (flags >> 2) & 0b11 == 0b11,
+    }
 }
 
 fn read_u8(m: &dyn PhysRead, at: u64) -> Result<u8, AcpiError> {
     let mut b = [0u8; 1];
-    m.read(at, &mut b).then_some(b[0]).ok_or(AcpiError::Unreadable)
+    m.read(at, &mut b)
+        .then_some(b[0])
+        .ok_or(AcpiError::Unreadable)
 }
 
 fn read_u32(m: &dyn PhysRead, at: u64) -> Result<u32, AcpiError> {
     let mut b = [0u8; 4];
-    m.read(at, &mut b).then(|| u32::from_le_bytes(b)).ok_or(AcpiError::Unreadable)
+    m.read(at, &mut b)
+        .then(|| u32::from_le_bytes(b))
+        .ok_or(AcpiError::Unreadable)
+}
+
+fn read_u16(m: &dyn PhysRead, at: u64) -> Result<u16, AcpiError> {
+    let mut b = [0u8; 2];
+    m.read(at, &mut b)
+        .then(|| u16::from_le_bytes(b))
+        .ok_or(AcpiError::Unreadable)
 }
 
 fn read_u64(m: &dyn PhysRead, at: u64) -> Result<u64, AcpiError> {
     let mut b = [0u8; 8];
-    m.read(at, &mut b).then(|| u64::from_le_bytes(b)).ok_or(AcpiError::Unreadable)
+    m.read(at, &mut b)
+        .then(|| u64::from_le_bytes(b))
+        .ok_or(AcpiError::Unreadable)
 }
 
 /// `[at, at + len)` 的字节和（模 256）是否为零。
@@ -218,13 +246,22 @@ fn table(m: &dyn PhysRead, at: u64, signature: &[u8; 4]) -> Result<u32, AcpiErro
 }
 
 /// 在根表中找签名为 `want` 的表的地址；签名不符的条目跳过，找不到返回 `Ok(None)`。
-fn find_table(m: &dyn PhysRead, root: u64, width: u64, want: &[u8; 4]) -> Result<Option<u64>, AcpiError> {
+fn find_table(
+    m: &dyn PhysRead,
+    root: u64,
+    width: u64,
+    want: &[u8; 4],
+) -> Result<Option<u64>, AcpiError> {
     let sig: &[u8; 4] = if width == 8 { b"XSDT" } else { b"RSDT" };
     let len = table(m, root, sig)? as u64;
     let entries = (len - SDT_HEADER_LEN as u64) / width;
     for i in 0..entries {
         let at = root + SDT_HEADER_LEN as u64 + i * width;
-        let addr = if width == 8 { read_u64(m, at)? } else { read_u32(m, at)? as u64 };
+        let addr = if width == 8 {
+            read_u64(m, at)?
+        } else {
+            read_u32(m, at)? as u64
+        };
         let mut s = [0u8; 4];
         if addr != 0 && m.read(addr, &mut s) && &s == want {
             return Ok(Some(addr));
@@ -245,7 +282,14 @@ pub fn parse_madt(m: &dyn PhysRead, rsdp: u64, boot_hw_id: u32) -> Result<Madt, 
     let mut local_controller = read_u32(m, madt + 36)? as u64;
     let mut topology = Topology::boot_only(boot_hw_id);
     let mut io = [IoController::default(); MAX_IO_CONTROLLERS];
-    let mut overrides = [(0u8, IsaRoute { gsi: 0, active_low: false, level: false }); MAX_ISA_OVERRIDES];
+    let mut overrides = [(
+        0u8,
+        IsaRoute {
+            gsi: 0,
+            active_low: false,
+            level: false,
+        },
+    ); MAX_ISA_OVERRIDES];
     let (mut io_count, mut override_count, mut dropped_routing) = (0usize, 0usize, 0usize);
     let mut off = MADT_ENTRIES_OFFSET;
     while off < len {
@@ -266,7 +310,11 @@ pub fn parse_madt(m: &dyn PhysRead, rsdp: u64, boot_hw_id: u32) -> Result<Madt, 
             }
             // I/O 中断控制器：标识(1) 保留(1) 地址(4) 全局中断号起点(4)
             (1, 12..) => {
-                let c = IoController { id: read_u8(m, at + 2)?, address: read_u32(m, at + 4)? as u64, gsi_base: read_u32(m, at + 8)? };
+                let c = IoController {
+                    id: read_u8(m, at + 2)?,
+                    address: read_u32(m, at + 4)? as u64,
+                    gsi_base: read_u32(m, at + 8)?,
+                };
                 if io_count < MAX_IO_CONTROLLERS {
                     io[io_count] = c;
                     io_count += 1;
@@ -301,7 +349,15 @@ pub fn parse_madt(m: &dyn PhysRead, rsdp: u64, boot_hw_id: u32) -> Result<Madt, 
         }
         off += elen;
     }
-    Ok(Madt { local_controller, topology, io, io_count, overrides, override_count, dropped_routing })
+    Ok(Madt {
+        local_controller,
+        topology,
+        io,
+        io_count,
+        overrides,
+        override_count,
+        dropped_routing,
+    })
 }
 
 /// 记录的 ECAM 窗口上限（超出的只计数）。
@@ -338,8 +394,17 @@ pub fn parse_mcfg(m: &dyn PhysRead, rsdp: u64) -> Result<Mcfg, AcpiError> {
     if len < MCFG_ENTRIES_OFFSET || (len - MCFG_ENTRIES_OFFSET) % MCFG_ENTRY_LEN != 0 {
         return Err(AcpiError::BadLength);
     }
-    let empty = Ecam { base: 0, segment: 0, bus_start: 0, bus_end: 0 };
-    let mut out = Mcfg { windows: [empty; MAX_ECAM_WINDOWS], count: 0, dropped: 0 };
+    let empty = Ecam {
+        base: 0,
+        segment: 0,
+        bus_start: 0,
+        bus_end: 0,
+    };
+    let mut out = Mcfg {
+        windows: [empty; MAX_ECAM_WINDOWS],
+        count: 0,
+        dropped: 0,
+    };
     let mut off = MCFG_ENTRIES_OFFSET;
     while off < len {
         let e = at + off as u64;
@@ -360,6 +425,230 @@ pub fn parse_mcfg(m: &dyn PhysRead, rsdp: u64) -> Result<Mcfg, AcpiError> {
             out.count += 1;
         }
         off += MCFG_ENTRY_LEN;
+    }
+    Ok(out)
+}
+
+/// DMAR 中记录的 hardware unit 上限。超过上限只计数，绝不把截断表当成完整表。
+pub const MAX_DMAR_UNITS: usize = 8;
+/// 每个 hardware unit 保留的 device scope 上限。
+pub const MAX_DMAR_SCOPES: usize = 32;
+/// 一条 PCI device scope 保留的 bridge path 深度上限。
+pub const MAX_DMAR_PATH: usize = 8;
+
+/// DMAR device scope 类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmarScopeKind {
+    PciEndpoint,
+    PciBridge,
+    IoApic,
+    Hpet,
+    AcpiNamespace,
+    Reserved(u8),
+}
+
+/// 一条 DMAR device scope。`path` 是桥下逐级 `(device, function)`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmarScope {
+    pub kind: DmarScopeKind,
+    pub enumeration_id: u8,
+    pub start_bus: u8,
+    path: [(u8, u8); MAX_DMAR_PATH],
+    path_len: usize,
+}
+
+impl DmarScope {
+    pub fn path(&self) -> &[(u8, u8)] {
+        &self.path[..self.path_len]
+    }
+}
+
+/// 一个 DMAR hardware unit（DRHD）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmarUnit {
+    pub segment: u16,
+    pub register_base: u64,
+    /// Register set size in 4 KiB pages, as encoded by DMAR.
+    pub register_pages: u8,
+    pub include_all: bool,
+    scopes: [DmarScope; MAX_DMAR_SCOPES],
+    scope_count: usize,
+}
+
+impl DmarUnit {
+    pub fn scopes(&self) -> &[DmarScope] {
+        &self.scopes[..self.scope_count]
+    }
+
+    /// Whether this DRHD owns a PCI requester. `include_all` is an explicit
+    /// firmware statement; for scoped units only PCI endpoint/bridge paths
+    /// count. IOAPIC/HPET scopes do not authorize DMA.
+    pub fn covers(&self, segment: u16, bus: u8, device: u8, function: u8) -> bool {
+        if self.segment != segment {
+            return false;
+        }
+        if self.include_all {
+            return true;
+        }
+        self.scopes().iter().any(|scope| {
+            if !matches!(
+                scope.kind,
+                DmarScopeKind::PciEndpoint | DmarScopeKind::PciBridge
+            ) {
+                return false;
+            }
+            if scope.path_len == 0 {
+                return false;
+            }
+            let last = scope.path[scope.path_len - 1];
+            last == (device, function) && (scope.path_len > 1 || scope.start_bus == bus)
+        })
+    }
+}
+
+/// DMAR 解析结果。`intr_remap` 是固件声明，不是本内核已验证的 IR 状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Dmar {
+    pub host_address_width: u8,
+    pub intr_remap: bool,
+    pub x2apic_opt_out: bool,
+    pub x2apic_mode: bool,
+    units: [DmarUnit; MAX_DMAR_UNITS],
+    unit_count: usize,
+    /// Hardware units or scopes that did not fit in the fixed result.
+    pub dropped: usize,
+}
+
+impl Dmar {
+    pub fn units(&self) -> &[DmarUnit] {
+        &self.units[..self.unit_count]
+    }
+
+    pub fn unit_for(&self, segment: u16, bus: u8, device: u8, function: u8) -> Option<&DmarUnit> {
+        self.units()
+            .iter()
+            .find(|unit| unit.covers(segment, bus, device, function))
+    }
+}
+
+const DMAR_ENTRIES_OFFSET: u32 = 48;
+const DMAR_DRHD_MIN_LEN: u16 = 16;
+const DMAR_SCOPE_MIN_LEN: u16 = 6;
+
+/// 从 RSDP 出发解析 `DMAR`。所有子结构和 device scope 都做边界、
+/// 对齐与长度校验；截断的 unit/scope 计入 `dropped`，固件结构损坏失败关闭。
+pub fn parse_dmar(m: &dyn PhysRead, rsdp: u64) -> Result<Dmar, AcpiError> {
+    let (root, width) = root_table(m, rsdp)?;
+    let at = find_table(m, root, width, b"DMAR")?.ok_or(AcpiError::NoDmar)?;
+    let len = table(m, at, b"DMAR")?;
+    if len < DMAR_ENTRIES_OFFSET {
+        return Err(AcpiError::BadLength);
+    }
+    let host_address_width = read_u8(m, at + 36)?;
+    let flags = read_u8(m, at + 37)?;
+    if !(1..=64).contains(&host_address_width) {
+        return Err(AcpiError::BadLength);
+    }
+    let empty_scope = DmarScope {
+        kind: DmarScopeKind::Reserved(0),
+        enumeration_id: 0,
+        start_bus: 0,
+        path: [(0, 0); MAX_DMAR_PATH],
+        path_len: 0,
+    };
+    let empty_unit = DmarUnit {
+        segment: 0,
+        register_base: 0,
+        register_pages: 0,
+        include_all: false,
+        scopes: [empty_scope; MAX_DMAR_SCOPES],
+        scope_count: 0,
+    };
+    let mut out = Dmar {
+        host_address_width,
+        intr_remap: flags & 1 != 0,
+        x2apic_opt_out: flags & 2 != 0,
+        x2apic_mode: flags & 4 != 0,
+        units: [empty_unit; MAX_DMAR_UNITS],
+        unit_count: 0,
+        dropped: 0,
+    };
+    let mut off = DMAR_ENTRIES_OFFSET;
+    while off < len {
+        if len - off < 4 {
+            return Err(AcpiError::BadLength);
+        }
+        let h = at + off as u64;
+        let kind = read_u16(m, h)?;
+        let elen = read_u16(m, h + 2)?;
+        if elen < 4 || u32::from(elen) > len - off {
+            return Err(AcpiError::BadLength);
+        }
+        if kind == 0 {
+            if elen < DMAR_DRHD_MIN_LEN {
+                return Err(AcpiError::BadLength);
+            }
+            let mut unit = empty_unit;
+            unit.include_all = read_u8(m, h + 4)? & 1 != 0;
+            // A zero size field is the architecturally defined minimum
+            // 4 KiB register block and is what QEMU's Q35 DMAR emits.
+            unit.register_pages = read_u8(m, h + 5)?.max(1);
+            unit.segment = read_u16(m, h + 6)?;
+            unit.register_base = read_u64(m, h + 8)?;
+            if unit.register_base == 0 || unit.register_base & 0xfff != 0 {
+                return Err(AcpiError::BadLength);
+            }
+            let mut scope_off = DMAR_DRHD_MIN_LEN;
+            while scope_off < elen {
+                if elen - scope_off < DMAR_SCOPE_MIN_LEN {
+                    return Err(AcpiError::BadLength);
+                }
+                let s = h + u64::from(scope_off);
+                let entry_type = read_u8(m, s)?;
+                let slen = read_u16(m, s + 1)?;
+                if slen < DMAR_SCOPE_MIN_LEN
+                    || slen > elen - scope_off
+                    || (slen - DMAR_SCOPE_MIN_LEN) % 2 != 0
+                {
+                    return Err(AcpiError::BadLength);
+                }
+                if unit.scope_count < MAX_DMAR_SCOPES {
+                    let level_count = ((slen - DMAR_SCOPE_MIN_LEN) / 2) as usize;
+                    let mut scope = empty_scope;
+                    scope.kind = match entry_type {
+                        1 => DmarScopeKind::PciEndpoint,
+                        2 => DmarScopeKind::PciBridge,
+                        3 => DmarScopeKind::IoApic,
+                        4 => DmarScopeKind::Hpet,
+                        5 => DmarScopeKind::AcpiNamespace,
+                        other => DmarScopeKind::Reserved(other),
+                    };
+                    scope.enumeration_id = read_u8(m, s + 4)?;
+                    scope.start_bus = read_u8(m, s + 5)?;
+                    if level_count > MAX_DMAR_PATH {
+                        out.dropped += 1;
+                    } else {
+                        for level in 0..level_count {
+                            let p = s + DMAR_SCOPE_MIN_LEN as u64 + level as u64 * 2;
+                            scope.path[level] = (read_u8(m, p)?, read_u8(m, p + 1)?);
+                        }
+                        scope.path_len = level_count;
+                        unit.scopes[unit.scope_count] = scope;
+                        unit.scope_count += 1;
+                    }
+                } else {
+                    out.dropped += 1;
+                }
+                scope_off += slen;
+            }
+            if out.unit_count < MAX_DMAR_UNITS {
+                out.units[out.unit_count] = unit;
+                out.unit_count += 1;
+            } else {
+                out.dropped += 1;
+            }
+        }
+        off += u32::from(elen);
     }
     Ok(out)
 }
@@ -485,7 +774,16 @@ mod tests {
     fn v2_xsdt_with_x2_entries_and_override_and_nonzero_boot() {
         let mut ov = vec![5, 12, 0, 0];
         ov.extend_from_slice(&0xFED0_0000u64.to_le_bytes());
-        let m = image(2, &[lapic(0, 1), x2apic(300, 1), ov, lapic(5, 1), vec![1, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]);
+        let m = image(
+            2,
+            &[
+                lapic(0, 1),
+                x2apic(300, 1),
+                ov,
+                lapic(5, 1),
+                vec![1, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ],
+        );
         let madt = parse_madt(&m, 0x100, 5).unwrap();
         assert_eq!(madt.local_controller, 0xFED0_0000);
         assert_eq!(madt.topology.ids(), &[5, 0, 300]);
@@ -530,13 +828,43 @@ mod tests {
 
     #[test]
     fn io_controllers_and_isa_overrides() {
-        let m = image(2, &[lapic(0, 1), ioapic(1, 0xFEC0_0000, 0), ioapic(2, 0xFEC1_0000, 24), iso(0, 2, 0), iso(9, 9, 0b1111)]);
+        let m = image(
+            2,
+            &[
+                lapic(0, 1),
+                ioapic(1, 0xFEC0_0000, 0),
+                ioapic(2, 0xFEC1_0000, 24),
+                iso(0, 2, 0),
+                iso(9, 9, 0b1111),
+            ],
+        );
         let madt = parse_madt(&m, 0x100, 0).unwrap();
         assert_eq!(madt.io_controllers().len(), 2);
-        assert_eq!(madt.isa_route(0), IsaRoute { gsi: 2, active_low: false, level: false });
-        assert_eq!(madt.isa_route(9), IsaRoute { gsi: 9, active_low: true, level: true });
+        assert_eq!(
+            madt.isa_route(0),
+            IsaRoute {
+                gsi: 2,
+                active_low: false,
+                level: false
+            }
+        );
+        assert_eq!(
+            madt.isa_route(9),
+            IsaRoute {
+                gsi: 9,
+                active_low: true,
+                level: true
+            }
+        );
         // 没有覆盖条目：恒等映射、ISA 默认电气特性
-        assert_eq!(madt.isa_route(4), IsaRoute { gsi: 4, active_low: false, level: false });
+        assert_eq!(
+            madt.isa_route(4),
+            IsaRoute {
+                gsi: 4,
+                active_low: false,
+                level: false
+            }
+        );
         let (c, pin) = madt.controller_for(8).unwrap();
         assert_eq!((c.address, pin), (0xFEC0_0000, 8));
         let (c, pin) = madt.controller_for(30).unwrap();
@@ -553,9 +881,14 @@ mod tests {
         let madt = parse_madt(&image(0, &[lapic(0, 1)]), 0x100, 0).unwrap();
         assert!(madt.io_controllers().is_empty());
         assert_eq!(madt.controller_for(4), None);
-        let many: Vec<Vec<u8>> = (0..6u8).map(|i| ioapic(i, 0xFEC0_0000 + i as u32 * 0x1000, i as u32 * 24)).collect();
+        let many: Vec<Vec<u8>> = (0..6u8)
+            .map(|i| ioapic(i, 0xFEC0_0000 + i as u32 * 0x1000, i as u32 * 24))
+            .collect();
         let madt = parse_madt(&image(0, &many), 0x100, 0).unwrap();
-        assert_eq!((madt.io_controllers().len(), madt.dropped_routing), (MAX_IO_CONTROLLERS, 2));
+        assert_eq!(
+            (madt.io_controllers().len(), madt.dropped_routing),
+            (MAX_IO_CONTROLLERS, 2)
+        );
     }
 
     #[test]
@@ -603,12 +936,25 @@ mod tests {
         assert_eq!(
             mcfg.windows(),
             &[
-                Ecam { base: 0xB000_0000, segment: 0, bus_start: 0, bus_end: 0xFF },
-                Ecam { base: 0xE000_0000, segment: 1, bus_start: 0x10, bus_end: 0x1F },
+                Ecam {
+                    base: 0xB000_0000,
+                    segment: 0,
+                    bus_start: 0,
+                    bus_end: 0xFF
+                },
+                Ecam {
+                    base: 0xE000_0000,
+                    segment: 1,
+                    bus_start: 0x10,
+                    bus_end: 0x1F
+                },
             ]
         );
         assert_eq!(mcfg.dropped, 0);
-        assert!(parse_madt(&m, 0x100, 0).is_ok(), "加入 MCFG 后 MADT 仍可找到");
+        assert!(
+            parse_madt(&m, 0x100, 0).is_ok(),
+            "加入 MCFG 后 MADT 仍可找到"
+        );
     }
 
     #[test]
@@ -623,7 +969,10 @@ mod tests {
 
     #[test]
     fn mcfg_missing_or_malformed_rejected() {
-        assert_eq!(parse_mcfg(&image(2, &[lapic(0, 1)]), 0x100), Err(AcpiError::NoMcfg));
+        assert_eq!(
+            parse_mcfg(&image(2, &[lapic(0, 1)]), 0x100),
+            Err(AcpiError::NoMcfg)
+        );
         assert_eq!(AcpiError::NoMcfg.name(), "system.firmware.error.no_mcfg");
         let mut ragged = image_with_mcfg(&[(0xB000_0000, 0, 0, 0xFF)]);
         // 长度改成不是整条目，再修正校验和：长度检查必须拒绝。
@@ -635,5 +984,90 @@ mod tests {
         let mut bad = image_with_mcfg(&[(0xB000_0000, 0, 0, 0xFF)]);
         bad.0[0x1000 + 44] ^= 0x10; // 改条目不改校验和
         assert_eq!(parse_mcfg(&bad, 0x100), Err(AcpiError::BadChecksum));
+    }
+
+    fn image_with_dmar(drhd: Vec<u8>) -> Mem {
+        let mut m = image(2, &[lapic(0, 1)]);
+        let mut body = vec![0u8; 12];
+        body[0] = 48;
+        body[1] = 0b111;
+        body.extend_from_slice(&drhd);
+        let dmar = sdt(b"DMAR", &body);
+        m.0[0x1000..0x1000 + dmar.len()].copy_from_slice(&dmar);
+        let mut root_body = Vec::new();
+        for a in [0x400u64, 0x800, 0x1000] {
+            root_body.extend_from_slice(&a.to_le_bytes());
+        }
+        let root = sdt(b"XSDT", &root_body);
+        m.0[0x200..0x200 + root.len()].copy_from_slice(&root);
+        m
+    }
+
+    fn drhd_with_scope(include_all: bool, path: &[(u8, u8)]) -> Vec<u8> {
+        let mut unit = vec![0u8; 16];
+        let len = (16 + 6 + path.len() * 2) as u16;
+        unit[..2].copy_from_slice(&0u16.to_le_bytes());
+        unit[2..4].copy_from_slice(&len.to_le_bytes());
+        unit[4] = u8::from(include_all);
+        unit[5] = 0; // minimum 4 KiB block
+        unit[8..16].copy_from_slice(&0xFED9_0000u64.to_le_bytes());
+        unit.extend_from_slice(&[1, (6 + path.len() * 2) as u8, 0, 0, 0, 0]);
+        for &(device, function) in path {
+            unit.push(device);
+            unit.push(function);
+        }
+        unit
+    }
+
+    #[test]
+    fn dmar_hardware_units_and_scopes_parsed() {
+        let m = image_with_dmar(drhd_with_scope(false, &[(2, 0)]));
+        let dmar = parse_dmar(&m, 0x100).unwrap();
+        assert_eq!(dmar.host_address_width, 48);
+        assert!(dmar.intr_remap && dmar.x2apic_opt_out && dmar.x2apic_mode);
+        assert_eq!(dmar.units().len(), 1);
+        let unit = &dmar.units()[0];
+        assert_eq!(unit.register_base, 0xFED9_0000);
+        assert_eq!(unit.register_pages, 1);
+        assert_eq!(unit.scopes().len(), 1);
+        assert_eq!(unit.scopes()[0].kind, DmarScopeKind::PciEndpoint);
+        assert_eq!(unit.scopes()[0].path(), &[(2, 0)]);
+        assert!(unit.covers(0, 0, 2, 0));
+        assert!(!unit.covers(0, 0, 3, 0));
+        assert_eq!(
+            dmar.unit_for(0, 0, 2, 0).map(|u| u.register_base),
+            Some(0xFED9_0000)
+        );
+        assert!(dmar.unit_for(0, 0, 3, 0).is_none());
+    }
+
+    #[test]
+    fn dmar_include_all_and_negative_scope_types() {
+        let dmar = parse_dmar(&image_with_dmar(drhd_with_scope(true, &[])), 0x100).unwrap();
+        assert!(dmar.units()[0].covers(0, 0xff, 0x1f, 7));
+        let mut ioapic = drhd_with_scope(false, &[]);
+        ioapic[16] = 3;
+        let dmar = parse_dmar(&image_with_dmar(ioapic), 0x100).unwrap();
+        assert!(!dmar.units()[0].covers(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn dmar_missing_and_malformed_scopes_fail_closed() {
+        assert_eq!(
+            parse_dmar(&image(2, &[lapic(0, 1)]), 0x100),
+            Err(AcpiError::NoDmar)
+        );
+        assert_eq!(AcpiError::NoDmar.name(), "system.firmware.error.no_dmar");
+
+        let mut malformed = image_with_dmar(drhd_with_scope(false, &[(2, 0)]));
+        // Make the scope length larger than its containing DRHD, then update
+        // the DMAR checksum so the parser reaches structural validation.
+        malformed.0[0x1000 + 48 + 16 + 1] = 32;
+        let dmar_len =
+            u32::from_le_bytes(malformed.0[0x1000 + 4..0x1000 + 8].try_into().unwrap()) as usize;
+        let mut table = malformed.0[0x1000..0x1000 + dmar_len].to_vec();
+        fix_checksum(&mut table, 9);
+        malformed.0[0x1000..0x1000 + dmar_len].copy_from_slice(&table);
+        assert_eq!(parse_dmar(&malformed, 0x100), Err(AcpiError::BadLength));
     }
 }

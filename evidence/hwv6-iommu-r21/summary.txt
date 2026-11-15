@@ -1,0 +1,23 @@
+HWV-6 focused acceptance
+backend: QEMU 10.2.1 Intel VT-d model, KVM, q35, intremap=on
+qemu.rc: 33
+guest: Jasper OS x86_64, 4 vCPU
+device matrix: two RTL8139 DMA functions + one virtio-rng MSI-X function
+
+PASS markers:
+[JSR-HWV6] backend=qemu-intel-iommu dmar=true units=1 segment=0 mmio=0xfed90000 aw=1 dma=true translation=true faults=2 ir=true reset=true resources=true failed=0
+[JSR-HWV6-IR] source=0018 vector=96 delivered=1 remapped=true compatibility_blocked=true ok=true
+[JSR-HWV6-DMA-FAULT] source=0018 reason=2 addr=0xaea000 phase=unbind ok=true
+[JSR-HWV6-DMA-FAULT] source=0020 reason=2 addr=0xaea000 phase=unbound ok=true
+[JSR-HWV6-LIFECYCLE] exclusive=true authorized=true denied=true revoked=true old_dma=false irq_clean=true resources=true checks=11 failed=0
+
+Reproduction:
+HWV6_IOMMU_OUT=evidence/hwv6-iommu-r21 \
+HWV6_IOMMU_CPUS=0-3 \
+bash scripts/hwv6-iommu-check.sh
+
+Scope boundary:
+This proves the real QEMU Intel VT-d register/table/fault/IR path and KVM
+execution. It does not claim that QEMU is a physical VT-d/AMD-Vi platform;
+physical VFIO passthrough and FLR on the host device remain a separate
+hardware-qualification gate.

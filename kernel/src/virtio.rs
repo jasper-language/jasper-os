@@ -51,6 +51,8 @@ pub const STATUS_FAILED: u8 = 128;
 /// `VIRTIO_F_VERSION_1` 位于设备特性第 1 页的第 0 位。
 /// `VIRTIO_F_VERSION_1` is bit 0 of feature page 1.
 const VIRTIO_F_VERSION_1: u32 = 1 << 0;
+/// `VIRTIO_F_ACCESS_PLATFORM`: device DMA uses an IOMMU-advertised IOVA.
+const VIRTIO_F_ACCESS_PLATFORM: u32 = 1 << 1;
 /// 描述符标志：后续还有链式描述符。
 pub const VIRTQ_DESC_F_NEXT: u16 = 1;
 /// 描述符标志：设备可写。
@@ -178,8 +180,16 @@ impl VirtioPci {
         let notify = map_capability(device, CAP_CFG_NOTIFY, 4)?;
         let isr = map_capability(device, CAP_CFG_ISR, 1)?;
         let device_config = map_capability(device, CAP_CFG_DEVICE, 4)?;
-        let notify_multiplier = pci::notify_multiplier(device).ok_or(VirtioError::NoNotifyMultiplier)?;
-        Ok(VirtioPci { bdf: device.bdf, common, notify, isr, device_config, notify_multiplier })
+        let notify_multiplier =
+            pci::notify_multiplier(device).ok_or(VirtioError::NoNotifyMultiplier)?;
+        Ok(VirtioPci {
+            bdf: device.bdf,
+            common,
+            notify,
+            isr,
+            device_config,
+            notify_multiplier,
+        })
     }
 
     /// 设备地址。
@@ -212,7 +222,9 @@ impl VirtioPci {
     /// Resets the device and waits for the status to become zero.
     pub fn reset(&self) -> Result<(), VirtioError> {
         #[cfg(feature = "fault-inject")]
-        if crate::fault_inject::RESET_TIMEOUT.hit() { return Err(VirtioError::ResetTimeout); }
+        if crate::fault_inject::RESET_TIMEOUT.hit() {
+            return Err(VirtioError::ResetTimeout);
+        }
         self.write_status(0);
         let start = sched::timer_ticks();
         while self.status() != 0 {
@@ -256,7 +268,15 @@ impl VirtioPci {
             return Err(VirtioError::FeatureRejected);
         }
         self.driver_features(0, device_features);
-        self.driver_features(1, VIRTIO_F_VERSION_1);
+        self.driver_features(
+            1,
+            VIRTIO_F_VERSION_1
+                | if offered & VIRTIO_F_ACCESS_PLATFORM != 0 {
+                    VIRTIO_F_ACCESS_PLATFORM
+                } else {
+                    0
+                },
+        );
         self.add_status(STATUS_FEATURES_OK);
         if self.status() & STATUS_FEATURES_OK == 0 {
             return Err(VirtioError::FeatureRejected);
@@ -308,11 +328,14 @@ impl VirtioPci {
             }
             let (desc, driver, device) = queue.addresses();
             self.common.write32(COMMON_QUEUE_DESC, desc as u32);
-            self.common.write32(COMMON_QUEUE_DESC + 4, (desc >> 32) as u32);
+            self.common
+                .write32(COMMON_QUEUE_DESC + 4, (desc >> 32) as u32);
             self.common.write32(COMMON_QUEUE_DRIVER, driver as u32);
-            self.common.write32(COMMON_QUEUE_DRIVER + 4, (driver >> 32) as u32);
+            self.common
+                .write32(COMMON_QUEUE_DRIVER + 4, (driver >> 32) as u32);
             self.common.write32(COMMON_QUEUE_DEVICE, device as u32);
-            self.common.write32(COMMON_QUEUE_DEVICE + 4, (device >> 32) as u32);
+            self.common
+                .write32(COMMON_QUEUE_DEVICE + 4, (device >> 32) as u32);
             if let Some(entry) = msix_entry {
                 self.common.write16(COMMON_QUEUE_MSIX_ENTRY, entry);
                 if self.common.read16(COMMON_QUEUE_MSIX_ENTRY) == 0xFFFF {
@@ -329,7 +352,10 @@ impl VirtioPci {
     /// Notifies queue 0.
     pub fn notify(&self, notify_off: u16) -> Result<(), VirtioError> {
         let offset = notify_off as u64 * self.notify_multiplier as u64;
-        if offset.checked_add(4).is_none_or(|end| end > self.notify.len()) {
+        if offset
+            .checked_add(4)
+            .is_none_or(|end| end > self.notify.len())
+        {
             return Err(VirtioError::NotifyOutOfWindow);
         }
         // SAFETY：通知地址已校验在映射内；写入的队列号 0 是唯一的队列。
@@ -381,7 +407,10 @@ fn map_capability(
         .iter()
         .find(|cap| cap.cfg_type == cfg_type)
         .ok_or(VirtioError::NoModernCapability)?;
-    let bar = *device.bars.get(cap.bar as usize).ok_or(VirtioError::NoModernCapability)?;
+    let bar = *device
+        .bars
+        .get(cap.bar as usize)
+        .ok_or(VirtioError::NoModernCapability)?;
     let length = cap.length.max(minimum);
     Ok(Mapping::map(&bar, cap.bar_offset, length)?)
 }
@@ -590,6 +619,13 @@ impl Queue {
         self.used_idx
     }
 
+    /// Device-owned used-ring index for bounded diagnostics.
+    pub fn device_used_index(&self) -> u16 {
+        // SAFETY: the used ring is an owned queue page and this is a volatile
+        // snapshot of the device-written index.
+        unsafe { read_u16(self.used.add(2)) }
+    }
+
     /// 初始化每个描述符：指向各自的 64 字节缓冲区，设备可写，无链。
     fn init_descriptors(&mut self, buffers_phys: u64) {
         for i in 0..WANTED_QUEUE_SIZE as usize {
@@ -700,7 +736,8 @@ pub(crate) fn quiesce_with(
 
 /// 分配四页物理连续的帧；失败时不留下已占用的帧。
 fn allocate_contiguous() -> Result<[PhysFrame; QUEUE_PAGES], VirtioError> {
-    let base = mm::frame::allocate_contiguous(QUEUE_PAGES).map_err(|_| VirtioError::NoContiguousFrames)?;
+    let base =
+        mm::frame::allocate_contiguous(QUEUE_PAGES).map_err(|_| VirtioError::NoContiguousFrames)?;
     Ok([
         base,
         PhysFrame::from_number(base.number() + 1),
