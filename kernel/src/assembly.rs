@@ -270,6 +270,22 @@ pub fn boot() -> u32 {
             return 1;
         }
     };
+    let Some(capacity) = assembly::plan_assembly_capacity(&ACTIVE, crate::mm::heap::limit()) else {
+        kprintln!("[JSR-ASSEMBLY] reject=metadata_budget");
+        return 1;
+    };
+    kprintln!(
+        "[JSR-ASSEMBLY] capacity modules={} capabilities={} services={} metadata={} budget={} fixed_modules={} fixed_capabilities={} fixed_services={} fixed_dependencies={} dynamic=false",
+        capacity.modules,
+        capacity.capabilities,
+        capacity.services,
+        capacity.metadata_bytes,
+        capacity.memory_budget,
+        assembly::MAX_MODULES,
+        kernel_core::profile::MAX_CAPABILITIES,
+        kernel_core::profile::MAX_SERVICES,
+        kernel_core::native_module_lifecycle::MAX_MODULE_DEPENDENCIES
+    );
     let mut asm = match Assembly::new(&ACTIVE, &BINDINGS) {
         Ok(a) => a,
         Err(e) => {

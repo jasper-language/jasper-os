@@ -268,6 +268,51 @@ pub struct Report {
     pub unattempted: u8,
 }
 
+/// Runtime metadata admitted for one Profile assembly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssemblyCapacityPlan {
+    pub modules: usize,
+    pub capabilities: usize,
+    pub services: usize,
+    pub metadata_bytes: usize,
+    pub memory_budget: usize,
+}
+
+/// Derive assembly metadata demand from the Profile and heap budget.
+///
+/// Issue #33 HC-23 policy: module runtime state and resolved Profile entries
+/// receive at most 1/1024 of the admitted heap. Fixed implementation envelopes
+/// remain authoritative until their backing storage is dynamic.
+pub fn plan_assembly_capacity(
+    profile: &SystemProfile,
+    memory_budget: u64,
+) -> Option<AssemblyCapacityPlan> {
+    let resolved = profile::resolve(profile).ok()?;
+    let modules = profile.modules.len();
+    let capabilities = resolved.capabilities().len();
+    let services = resolved.services().len();
+    let entry_bytes = core::mem::size_of::<usize>();
+    if modules == 0 || entry_bytes == 0 {
+        return None;
+    }
+    // Seven runtime vectors plus resolved capability/service metadata and the
+    // bounded error report are represented by conservative machine-word units.
+    let units = modules
+        .checked_mul(7)?
+        .checked_add(capabilities)?
+        .checked_add(services)?
+        .checked_add(crate::profile::MAX_ERRORS)?;
+    let metadata_bytes = units.checked_mul(entry_bytes)?;
+    let memory_budget = usize::try_from(memory_budget / 1024).ok()?;
+    (metadata_bytes <= memory_budget).then_some(AssemblyCapacityPlan {
+        modules,
+        capabilities,
+        services,
+        metadata_bytes,
+        memory_budget,
+    })
+}
+
 /// 发布掩码与声明不一致之处（[`Assembly::audit`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditError {
@@ -1165,6 +1210,17 @@ mod tests {
         assert_eq!(a.audit(&declared, all), Ok(()));
         take("a:");
     }
+
+    #[test]
+    fn assembly_capacity_plan_follows_declared_metadata_and_budget() {
+        let profile = profile::HEADLESS;
+        let standard = plan_assembly_capacity(&profile, 256 * 1024 * 1024).unwrap();
+        assert_eq!(standard.modules, profile.modules.len());
+        assert!(standard.capabilities > 0);
+        assert!(standard.services > 0);
+        assert!(standard.metadata_bytes <= standard.memory_budget);
+        assert_eq!(plan_assembly_capacity(&profile, 0), None);
+    }
 }
 
 #[cfg(kani)]
@@ -1280,4 +1336,5 @@ mod proofs {
             }
         }
     }
+
 }
