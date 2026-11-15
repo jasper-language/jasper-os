@@ -37,6 +37,7 @@ impl Platform for LoongArch64 {
     const USER_WINDOW: (u64, u64) = space::USER_WINDOW;
     const KERNEL_PART_ENTRIES: usize = space::KERNEL_LAST - space::KERNEL_FIRST;
     const KERNEL_HEAP_BASE: u64 = 0x0000_4444_4444_0000;
+    const KERNEL_HEAP_END: u64 = Self::INVALID_VA;
     const KERNEL_PROBE_VA: u64 = 0x0000_4000_0000_0000;
     // With VALEN=48, bit 48 set while bit 47 is clear is non-canonical.
     const INVALID_VA: u64 = 0x0001_0000_0000_0000;

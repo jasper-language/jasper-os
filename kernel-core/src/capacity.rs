@@ -166,7 +166,7 @@ pub struct MemoryCost {
     pub per_task: usize,
     /// 每个实时表项。
     pub per_rt: usize,
-    /// 三张表合计不得超过的字节数（内核按堆上限留出余量后给出）。
+    /// 三张表合计不得超过的字节数（内核按运行时准入的堆预算留出余量后给出）。
     pub mem_limit: usize,
 }
 

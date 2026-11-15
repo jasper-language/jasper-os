@@ -82,6 +82,7 @@ impl Platform for Riscv {
     const KERNEL_PART_ENTRIES: usize = mode::KERNEL_LAST - mode::KERNEL_FIRST;
 
     const KERNEL_HEAP_BASE: u64 = mode::KERNEL_HEAP_BASE;
+    const KERNEL_HEAP_END: u64 = (mode::KERNEL_LAST as u64) << mode::TOP_SHIFT;
 
     const KERNEL_PROBE_VA: u64 = mode::KERNEL_PROBE_VA;
 

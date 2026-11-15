@@ -481,10 +481,10 @@ fn heap_paths(cal: &Calibration) {
     }
     report("heap.alloc_free_64", &small, cal);
     report("heap.alloc_free_4096", &page, cal);
-    // 失败路径：超出堆上限的申请被拒，堆的统计不变
+    // 失败路径：超出运行时堆预算的申请被拒，堆的统计不变
     let stats_before = heap::stats();
     let mut v: Vec<u8> = Vec::new();
-    let refused = v.try_reserve(config::ACTIVE.memory.heap_max as usize + 4096).is_err();
+    let refused = v.try_reserve(heap::limit() as usize + 4096).is_err();
     let unchanged = heap::stats() == stats_before && v.capacity() == 0;
     check(refused && unchanged, "超大堆申请未被拒绝或改动了堆");
     let after = baseline();

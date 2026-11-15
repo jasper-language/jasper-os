@@ -59,10 +59,13 @@ pub struct SchedParams {
 /// Memory parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryParams {
-    /// 内核堆虚拟区间上限（字节，按需映射）。
-    pub heap_max: u64,
     /// 内核堆每次至少增长的字节数。
     pub heap_grow_step: u64,
+    /// 内核堆可从启动时空闲物理页帧中准入的份额（千分比）。
+    ///
+    /// 这是策略上限，不是固定容量：实际字节数由启动内存图、空闲页帧和
+    /// 架构虚拟地址跨度共同推导。其余份额留给进程、页表、设备缓冲和服务。
+    pub heap_budget_permille: u16,
     /// 内存压力分级与保留帧。
     pub pressure: PressureParams,
     /// 每个进程可选的数据帧上限；`0` 表示默认不设固定上限，仅受全局物理内存与压力准入约束。
@@ -241,8 +244,8 @@ pub mod bounds {
 }
 
 impl KernelConfig {
-    /// 默认配置档：100 Hz；时间片 2/2/4/4 tick；64 个任务槽位；128 KiB 内核栈；堆上限 64 MiB、
-    /// 每次增长 64 KiB；1024 个内核对象；每进程 64 个句柄。
+    /// 默认配置档：100 Hz；时间片 2/2/4/4 tick；64 个任务槽位；128 KiB 内核栈；
+    /// 堆按启动时空闲物理页帧的四分之一准入、每次增长 64 KiB；1024 个内核对象；每进程 64 个句柄。
     pub const STANDARD: KernelConfig = KernelConfig {
         name: "standard",
         clock: ClockParams {
@@ -259,8 +262,8 @@ impl KernelConfig {
             cpu_burst_ticks: 4,
         },
         memory: MemoryParams {
-            heap_max: 64 * 1024 * 1024,
             heap_grow_step: 64 * 1024,
+            heap_budget_permille: 250,
             pressure: PressureParams::DEFAULT,
             max_process_frames: 0,
             max_vm_guest_frames: 32 * 1024,
@@ -318,8 +321,8 @@ impl KernelConfig {
             cpu_burst_ticks: 4,
         },
         memory: MemoryParams {
-            heap_max: 32 * 1024 * 1024,
             heap_grow_step: 16 * 1024,
+            heap_budget_permille: 250,
             pressure: PressureParams {
                 low_permille: 100,
                 critical_permille: 40,
@@ -432,13 +435,8 @@ impl KernelConfig {
             "heap_grow_step"
         );
         require!(
-            m.heap_max % PAGE == 0 && m.heap_max >= m.heap_grow_step,
-            "heap_max"
-        );
-        // IPC 队列里的消息体都在内核堆上：全系统配额必须给堆留下至少同样多的余量。
-        require!(
-            self.ipc.max_total_bytes as u64 * 2 <= m.heap_max,
-            "heap_max"
+            m.heap_budget_permille > 0 && m.heap_budget_permille <= 800,
+            "heap_budget_permille"
         );
         require!(
             m.pressure.critical_permille > 0
@@ -508,8 +506,11 @@ impl KernelConfig {
         f("watchdog_ticks", self.sched.watchdog_ticks as u64);
         f("watchdog_log", self.sched.watchdog_log as u64);
         f("cpu_burst_ticks", self.sched.cpu_burst_ticks as u64);
-        f("heap_max", self.memory.heap_max);
         f("heap_grow_step", self.memory.heap_grow_step);
+        f(
+            "heap_budget_permille",
+            self.memory.heap_budget_permille as u64,
+        );
         f(
             "pressure_low_permille",
             self.memory.pressure.low_permille as u64,
@@ -608,10 +609,7 @@ mod tests {
             (64, 128 * 1024, 50)
         );
         assert_eq!(s.memory.pressure, PressureParams::DEFAULT);
-        assert_eq!(
-            (s.memory.heap_max, s.memory.heap_grow_step),
-            (64 << 20, 64 << 10)
-        );
+        assert_eq!(s.memory.heap_grow_step, 64 << 10);
         assert_eq!(
             (s.objects.max_objects, s.objects.handles_per_process),
             (1024, 64)
@@ -711,8 +709,12 @@ mod tests {
         rejects("cpu_burst_ticks", |c| c.sched.cpu_burst_ticks = 0);
         rejects("cpu_burst_ticks", |c| c.sched.cpu_burst_ticks = 65);
         rejects("heap_grow_step", |c| c.memory.heap_grow_step = 100);
-        rejects("heap_max", |c| c.memory.heap_max = 32 * 1024);
-        rejects("heap_max", |c| c.memory.heap_max = 16 * 1024 * 1024);
+        rejects("heap_budget_permille", |c| {
+            c.memory.heap_budget_permille = 0
+        });
+        rejects("heap_budget_permille", |c| {
+            c.memory.heap_budget_permille = 801
+        });
         rejects("pressure", |c| c.memory.pressure.critical_permille = 200);
         rejects("pressure", |c| c.memory.pressure.critical_permille = 0);
         rejects("max_vm_guest_frames", |c| c.memory.max_vm_guest_frames = 0);

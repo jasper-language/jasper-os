@@ -173,7 +173,7 @@ const DRILL_GROW: u64 = if heap::GROW_STEP > 16 * FRAME_SIZE { heap::GROW_STEP }
 
 /// 2. 内核堆扩容中途失败的回滚。使用独立的演练堆与紧邻真实堆的演练窗口，不影响全局分配器。
 fn heap_rollback() {
-    let start = heap::HEAP_START + heap::HEAP_MAX;
+    let start = heap::HEAP_START + heap::limit();
     let window_end = start + 1024 * 1024;
     let mut h = LinkedListHeap::empty();
     let mut end = start;

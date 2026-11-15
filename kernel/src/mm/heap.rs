@@ -1,7 +1,8 @@
 //! 内核堆（M2.3）：把 `kernel-core` 的链表堆算法接到「页帧 + 映射」之上，作为 Rust 的全局分配器。
 //!
 //! # 职责
-//! * 在固定的虚拟区间 [`HEAP_START`, `HEAP_START + HEAP_MAX`) 上按需增长：分配失败时映射更多页再重试
+//! * 在平台预留的 [`HEAP_START`, `KERNEL_HEAP_END`) 虚拟跨度内按需增长；
+//!   实际物理上限在初始化时由空闲页帧预算推导。
 //! * 实现 `GlobalAlloc`，使内核可以使用 `alloc`（`Box` / `Vec` / `String` …）
 //!
 //! # 为什么按需增长、不预先映射全部
@@ -16,16 +17,18 @@ use core::alloc::{GlobalAlloc, Layout};
 use kernel_core::frame::{PhysFrame, FRAME_SIZE};
 use kernel_core::heap::LinkedListHeap;
 use kernel_core::paging::{MapFlags, VirtPage};
+use spin::Once;
 
 use super::{frame, map};
 use crate::sync::IrqSpinLock;
 
 /// 堆虚拟区间起点（由平台给出：位于内核共享部分，与映射演练地址、内核镜像、物理内存映射均不重叠）。
 pub const HEAP_START: u64 = crate::arch::KERNEL_HEAP_BASE;
-/// 堆虚拟区间上限（只是预留，实际按需映射）。
-pub const HEAP_MAX: u64 = crate::config::ACTIVE.memory.heap_max;
 /// 每次至少增长的字节数。
 pub const GROW_STEP: u64 = crate::config::ACTIVE.memory.heap_grow_step;
+/// Policy share of the free physical-frame inventory admitted to the heap.
+/// The byte limit itself is derived at boot, not fixed at build time.
+const HEAP_BUDGET_PERMILLE: u64 = crate::config::ACTIVE.memory.heap_budget_permille as u64;
 
 /// 堆状态：算法本体 + 已映射到的位置。
 struct HeapState {
@@ -36,6 +39,7 @@ struct HeapState {
 
 static HEAP: IrqSpinLock<HeapState> =
     IrqSpinLock::ranked(crate::lockorder::MEMORY_HEAP, HeapState { heap: LinkedListHeap::empty(), mapped_end: HEAP_START });
+static HEAP_LIMIT: Once<u64> = Once::new();
 
 /// 增长失败的原因（诊断用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,7 +141,15 @@ pub fn grow_in(
 
 /// 至少增长 `bytes` 字节（调用者已持有堆锁）。
 fn grow(state: &mut HeapState, bytes: u64) -> Result<(), GrowError> {
-    grow_in(&mut state.heap, &mut state.mapped_end, HEAP_START + HEAP_MAX, bytes, &mut KernelGrowEnv).map(|_| ())
+    let limit = HEAP_LIMIT.get().copied().ok_or(GrowError::LimitReached)?;
+    grow_in(
+        &mut state.heap,
+        &mut state.mapped_end,
+        HEAP_START + limit,
+        bytes,
+        &mut KernelGrowEnv,
+    )
+    .map(|_| ())
 }
 
 /// Result of one acceptance-only growth through the real kernel frame and mapping path.
@@ -181,11 +193,34 @@ pub fn grow_for_verify(requested: u64) -> Result<GrowthRecord, GrowError> {
 
 /// 初始化堆：映射首批页。需在页帧与映射服务就绪之后调用。
 pub fn init() -> Result<(), GrowError> {
+    let available = (frame::free_frames() as u64)
+        .checked_mul(FRAME_SIZE)
+        .ok_or(GrowError::LimitReached)?;
+    let physical_budget = available
+        .checked_mul(HEAP_BUDGET_PERMILLE)
+        .ok_or(GrowError::LimitReached)?
+        / 1000;
+    let virtual_budget = crate::arch::KERNEL_HEAP_END
+        .checked_sub(HEAP_START)
+        .ok_or(GrowError::LimitReached)?;
+    let limit = physical_budget
+        .min(virtual_budget)
+        / FRAME_SIZE
+        * FRAME_SIZE;
+    if limit < GROW_STEP {
+        return Err(GrowError::LimitReached);
+    }
+    HEAP_LIMIT.call_once(|| limit);
     let mut s = HEAP.lock();
     if s.heap.total_bytes() == 0 {
         grow(&mut s, GROW_STEP)?;
     }
     Ok(())
+}
+
+/// Runtime-admitted physical heap window. Zero before heap initialisation.
+pub fn limit() -> u64 {
+    HEAP_LIMIT.get().copied().unwrap_or(0)
 }
 
 /// 保证堆里至少有 `bytes` 字节空闲（不足时一次增长补齐）。

@@ -13,6 +13,7 @@ HEADER="${JSR_LINUX_GUEST_HEADER:?set JSR_LINUX_GUEST_HEADER}"
 KERNEL="${JSR_LINUX_GUEST_KERNEL:?set JSR_LINUX_GUEST_KERNEL}"
 CPUS="${HWV5_CORE_CPUS:-4-11}"
 SMP="${HWV5_CORE_SMP:-4}"
+MEMORY_MB="${HWV5_CORE_MEMORY_MB:-512}"
 ACCEL="${HWV5_CORE_ACCEL:-kvm}"
 CPU_MODEL="${HWV5_CORE_CPU:-host}"
 mkdir -p "$OUT" "$TARGET"
@@ -31,7 +32,7 @@ flock /tmp/jasper-os-qemu.lock nice -n 10 taskset -c "$CPUS" timeout "$LIMIT" qe
   -accel "$ACCEL" \
   -cpu "$CPU_MODEL" \
   -machine q35 \
-  -m 512M \
+  -m "${MEMORY_MB}M" \
   -smp "$SMP" \
   -drive format=raw,file="$OUT/kernel.img",snapshot=on \
   -device virtio-rng-pci \

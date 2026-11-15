@@ -70,6 +70,7 @@ impl Platform for Aarch64 {
 
     /// 内核共享部分（顶级第 136 项）内，与 x86_64 相同的地址。
     const KERNEL_HEAP_BASE: u64 = 0x0000_4444_4444_0000;
+    const KERNEL_HEAP_END: u64 = Self::INVALID_VA;
 
     /// 内核共享部分的第一个顶级表项（第 128 项）的起点。
     const KERNEL_PROBE_VA: u64 = 0x0000_4000_0000_0000;

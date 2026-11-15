@@ -63,10 +63,10 @@ pub fn try_leak<T>(n: usize, fill: impl FnMut() -> T) -> Option<&'static mut [T]
     try_boxed(n, fill).map(Box::leak)
 }
 
-/// 三张表合计可用的内存预算：堆上限减去 IPC 全系统配额的两倍。
-/// 配置档已要求「IPC 全系统字节配额 × 2 ≤ 堆上限」，这里把同样的余量留给运行期的消息体与其他分配。
+/// Boot-table budget derived from the runtime-admitted heap window after
+/// reserving twice the configured system-wide IPC byte quota.
 fn mem_limit() -> usize {
-    (ACTIVE.memory.heap_max as usize).saturating_sub(2 * ACTIVE.ipc.max_total_bytes)
+    (crate::mm::heap::limit() as usize).saturating_sub(2 * ACTIVE.ipc.max_total_bytes)
 }
 
 fn cost() -> MemoryCost {

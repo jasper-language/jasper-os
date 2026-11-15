@@ -118,6 +118,8 @@ pub const LOW_USER_WINDOW: (u64, u64) = (0, 0);
 pub const KERNEL_PART_ENTRIES: usize = <Current as Platform>::KERNEL_PART_ENTRIES;
 /// 内核堆虚拟区起点，见 [`Platform::KERNEL_HEAP_BASE`]。
 pub const KERNEL_HEAP_BASE: u64 = <Current as Platform>::KERNEL_HEAP_BASE;
+/// End of the architecture-reserved virtual range for the kernel heap.
+pub const KERNEL_HEAP_END: u64 = <Current as Platform>::KERNEL_HEAP_END;
 /// 私有窗口之外的演练地址，见 [`Platform::KERNEL_PROBE_VA`]。
 pub const KERNEL_PROBE_VA: u64 = <Current as Platform>::KERNEL_PROBE_VA;
 /// 超出可用虚拟地址范围的地址，见 [`Platform::INVALID_VA`]。
@@ -300,6 +302,10 @@ pub trait Platform {
     /// 各 ISA 可用的虚拟地址位数不同（如 RISC-V Sv39 的低半区只有 256 GiB），因此由平台给出。
     /// Start of the kernel heap's virtual range, outside the private window.
     const KERNEL_HEAP_BASE: u64;
+
+    /// End of the architecture-reserved virtual range for the kernel heap.
+    /// The heap's physically backed limit is derived at runtime within this span.
+    const KERNEL_HEAP_END: u64;
 
     /// 私有窗口之外一个平时不映射的页地址（映射演练与「私有窗口外」负向用例用），与堆区不重叠。
     /// An otherwise unused page address outside the private window (mapping self-tests).

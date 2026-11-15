@@ -123,6 +123,7 @@ impl Platform for X86_64 {
 
     /// 低半区 PML4 第 136 项内（私有窗口之外；堆在创建任何用户地址空间之前建立，因而被所有空间共享）。
     const KERNEL_HEAP_BASE: u64 = 0x0000_4444_4444_0000;
+    const KERNEL_HEAP_END: u64 = Self::INVALID_VA;
 
     /// 低半区 PML4 第 128 项的起点（私有窗口之外，平时不映射）。
     const KERNEL_PROBE_VA: u64 = 0x0000_4000_0000_0000;
