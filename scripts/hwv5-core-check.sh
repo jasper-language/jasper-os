@@ -43,6 +43,11 @@ printf '%s\n' "$rc" >"$OUT/qemu.rc"
 [ "$rc" -eq 33 ]
 grep -aq '\[JSR-HWV5\] backend=Vmx bus=mmio devices=rng,console,block linux=true vmm=true policy=true policy_allowed=[1-9][0-9]* policy_denied=[1-9][0-9]* policy_overflow=0 failed=0' \
   "$OUT/serial.log"
+grep -aFq '[JSR-HWV4-LINUX] linux=true' "$OUT/serial.log"
+grep -aEq 'virtio_rng_requests=[1-9][0-9]*' "$OUT/serial.log"
+grep -aEq 'virtio_console_bytes=[1-9][0-9]*' "$OUT/serial.log"
+grep -aEq 'virtio_block_requests=[1-9][0-9]*' "$OUT/serial.log"
+grep -aFq 'reclaim=true' "$OUT/serial.log"
 grep -aq '\[JSR-HWV5-PIO\] device=jpio discovered=true ping=true reset=true pending=true cancel=true generation=2 writes=0 ok=true' \
   "$OUT/serial.log"
 grep -aq '\[JSR-HWV5-PIO\] backend=Vmx transport=pio decoded=true routed=true probe=true reset=true pending=true cancel=true failure_atomic=true resource=true failed=0' \
