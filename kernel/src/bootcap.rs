@@ -106,7 +106,10 @@ pub fn validate() -> BootCapacity {
             crate::kmain::stop_boot(ExitStatus::Failure)
         }
     };
-    let (cap, source) = match capacity::resolve(ACTIVE.boot_capacity(), overrides, cost()) {
+    let cost = cost();
+    let policy = ACTIVE.boot_capacity();
+    let derived = capacity::derive(policy, cost);
+    let (cap, source) = match capacity::resolve(derived, overrides, cost) {
         Ok(r) => r,
         Err(e) => reject(e),
     };

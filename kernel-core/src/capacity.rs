@@ -235,6 +235,38 @@ fn check(field: &'static str, value: usize, min: usize, max: usize) -> Result<()
     Ok(())
 }
 
+/// Derive actual boot capacities from policy ceilings and the admitted memory budget.
+///
+/// `policy` is an upper bound, not a claim about the machine. The realtime
+/// table keeps its policy size; task slots are reduced first to fit the byte
+/// budget, then object slots consume the remaining budget. Validation still
+/// runs afterwards and fails closed if even the safety minima do not fit.
+pub fn derive(policy: BootCapacity, cost: MemoryCost) -> BootCapacity {
+    let rt = policy.rt.min(bounds::MAX_RT);
+    let min_tasks = bounds::MIN_TASKS.max(rt.saturating_add(1));
+    let rt_bytes = rt.saturating_mul(cost.per_rt);
+    let budget = cost.mem_limit.saturating_sub(rt_bytes);
+    let object_floor = bounds::MIN_OBJECTS.saturating_mul(cost.per_object);
+    let task_budget = budget.saturating_sub(object_floor);
+    let tasks_by_memory = if cost.per_task == 0 {
+        policy.tasks
+    } else {
+        task_budget / cost.per_task
+    };
+    let tasks = policy.tasks.min(tasks_by_memory).max(min_tasks);
+    let remaining = budget.saturating_sub(tasks.saturating_mul(cost.per_task));
+    let objects_by_memory = if cost.per_object == 0 {
+        policy.objects
+    } else {
+        remaining / cost.per_object
+    };
+    let objects = policy.objects
+        .min(bounds::MAX_OBJECTS)
+        .min(objects_by_memory)
+        .max(bounds::MIN_OBJECTS);
+    BootCapacity { objects, tasks, rt }
+}
+
 /// 合成最终容量：默认值叠加覆盖值，再逐项检查范围、一致性与内存预算。
 /// 通过返回（容量, 来源）；任何一项不通过都返回第一条拒绝原因，调用者据此拒绝启动。
 /// Combine defaults and overrides, then validate range, consistency and memory mem_limit.

@@ -75,6 +75,38 @@ fn configurations_that_do_not_fit_in_memory_are_rejected() {
 }
 
 #[test]
+fn runtime_budget_narrows_policy_ceilings_before_resolution() {
+    let policy = BootCapacity {
+        objects: 16384,
+        tasks: 256,
+        rt: 8,
+    };
+    let tight = MemoryCost {
+        mem_limit: 8 * 1024 * 1024,
+        ..COST
+    };
+    let derived = derive(policy, tight);
+    assert!(derived.tasks < policy.tasks);
+    assert!(derived.objects < policy.objects);
+    assert_eq!(derived.rt, policy.rt);
+    assert_eq!(
+        resolve(derived, Overrides::default(), tight),
+        Ok((derived, Source::Default))
+    );
+}
+
+#[test]
+fn derived_capacity_keeps_realtime_below_task_slots() {
+    let policy = BootCapacity {
+        objects: bounds::MIN_OBJECTS,
+        tasks: bounds::MIN_TASKS,
+        rt: bounds::MAX_RT,
+    };
+    let derived = derive(policy, COST);
+    assert!(derived.rt < derived.tasks);
+}
+
+#[test]
 fn magic_appears_only_inverted_in_the_parser() {
     // 解析器比较的是取反后的标记；取反两次必须还原。
     assert_eq!(invert(MAGIC_INVERTED), RECORD_MAGIC);
