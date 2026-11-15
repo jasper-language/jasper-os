@@ -82,6 +82,15 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
     };
     let discovery = arch::cpu_init_boot(boot);
     let topo = *TOPOLOGY.call_once(|| discovery.topology);
+    if topo.dropped > 0 {
+        crate::kprintln!(
+            "[JSR-SMP] reject=cpu_set_capacity present={} capacity={} dropped={}",
+            topo.count(),
+            kernel_core::smp::MAX_CPUS,
+            topo.dropped
+        );
+        arch::halt_forever();
+    }
     let me = percpu::get(0).expect("引导处理器的每核数据");
     me.set_hw_id(topo.hw_id(0).unwrap_or(0));
     if me.state.get() == CpuState::Absent {
