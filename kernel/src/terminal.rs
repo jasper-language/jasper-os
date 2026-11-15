@@ -15,7 +15,6 @@ use crate::{arch, console, display, sched};
 
 const INPUT_CAPACITY: usize = 4096;
 const OUTPUT_CAPACITY: usize = 4096;
-const UART_PUMP_LIMIT: usize = 64;
 
 static TERMINAL: IrqSpinLock<TerminalSession<INPUT_CAPACITY, OUTPUT_CAPACITY>> =
     IrqSpinLock::ranked(crate::lockorder::TERMINAL, TerminalSession::new());
@@ -71,7 +70,15 @@ pub fn input_status() -> (bool, bool, bool) {
 }
 
 fn pump_serial_input() {
-    for _ in 0..UART_PUMP_LIMIT {
+    let budget = {
+        let snapshot = TERMINAL.lock().snapshot();
+        snapshot.input_capacity.saturating_sub(snapshot.input_bytes)
+    };
+    if budget == 0 {
+        emit(b"\n[JSR-TERM] input_full=true drop=true\n");
+        return;
+    }
+    for _ in 0..budget {
         let Some(received) = arch::console_try_read_byte() else {
             return;
         };
