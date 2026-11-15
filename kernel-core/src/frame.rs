@@ -70,6 +70,63 @@ pub struct PhysRegion {
     pub kind: RegionKind,
 }
 
+/// Bounded physical-memory region table used by architecture boot adapters.
+///
+/// Any overflow is counted, never silently forgotten. Security-sensitive
+/// consumers must reject a table whose [`Self::is_complete`] value is false.
+///
+/// 架构启动适配器使用的有界物理内存区域表。溢出必须计数，安全相关消费者
+/// 只能使用 [`Self::is_complete`] 为真的表发布页帧能力。
+pub struct PhysRegionTable<const N: usize> {
+    regions: [PhysRegion; N],
+    len: usize,
+    dropped: usize,
+}
+
+impl<const N: usize> PhysRegionTable<N> {
+    pub const fn new() -> Self {
+        Self {
+            regions: [
+                PhysRegion {
+                    start: 0,
+                    end: 0,
+                    kind: RegionKind::Reserved,
+                };
+                N
+            ],
+            len: 0,
+            dropped: 0,
+        }
+    }
+
+    pub fn push(&mut self, region: PhysRegion) {
+        if self.len < N {
+            self.regions[self.len] = region;
+            self.len += 1;
+        } else {
+            self.dropped = self.dropped.saturating_add(1);
+        }
+    }
+
+    pub fn regions(&self) -> &[PhysRegion] {
+        &self.regions[..self.len]
+    }
+
+    pub const fn dropped(&self) -> usize {
+        self.dropped
+    }
+
+    pub const fn is_complete(&self) -> bool {
+        self.dropped == 0
+    }
+}
+
+impl<const N: usize> Default for PhysRegionTable<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PhysRegion {
     /// 空区域（静态数组初始化用）。
     pub const EMPTY: PhysRegion = PhysRegion { start: 0, end: 0, kind: RegionKind::Reserved };
@@ -347,6 +404,30 @@ mod tests {
     use super::*;
 
     const MIB: u64 = 1024 * 1024;
+
+    #[test]
+    fn physical_region_table_never_hides_capacity_loss() {
+        let mut regions = PhysRegionTable::<2>::new();
+        regions.push(PhysRegion {
+            start: 0,
+            end: FRAME_SIZE,
+            kind: RegionKind::Reserved,
+        });
+        regions.push(PhysRegion {
+            start: FRAME_SIZE,
+            end: 2 * FRAME_SIZE,
+            kind: RegionKind::Usable,
+        });
+        assert!(regions.is_complete());
+        regions.push(PhysRegion {
+            start: 2 * FRAME_SIZE,
+            end: 3 * FRAME_SIZE,
+            kind: RegionKind::Reserved,
+        });
+        assert_eq!(regions.regions().len(), 2);
+        assert_eq!(regions.dropped(), 1);
+        assert!(!regions.is_complete());
+    }
 
     fn regions() -> [PhysRegion; 3] {
         [

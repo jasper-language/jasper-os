@@ -6,7 +6,7 @@
 //!
 //! 生命周期：`BootSpec` 在启动最早期由 [`install`] 放进 `'static` 存储，之后只读。
 
-use kernel_core::frame::PhysRegion;
+use kernel_core::frame::{PhysRegion, PhysRegionTable};
 use kernel_core::psci::Conduit;
 use spin::Once;
 
@@ -67,10 +67,7 @@ pub struct SerialBoot {
 
 /// 内核需要从引导器得到的全部信息。
 pub struct BootSpec {
-    regions: [PhysRegion; MAX_REGIONS],
-    region_count: usize,
-    /// 因超出 `MAX_REGIONS` 而未记录的区域数。
-    pub dropped_regions: usize,
+    regions: PhysRegionTable<MAX_REGIONS>,
     /// 「物理地址 + 偏移 = 内核可访问的虚拟地址」中的偏移；引导器未映射全部物理内存时为 `None`。
     pub phys_offset: Option<u64>,
     /// 固件 ACPI 根指针（RSDP）的物理地址；引导器未提供时为 `None`（处理器发现退回只用引导处理器）。
@@ -91,9 +88,7 @@ impl BootSpec {
     /// 空的交接信息。
     pub const fn new() -> Self {
         BootSpec {
-            regions: [PhysRegion::EMPTY; MAX_REGIONS],
-            region_count: 0,
-            dropped_regions: 0,
+            regions: PhysRegionTable::new(),
             phys_offset: None,
             acpi_rsdp: None,
             framebuffer: None,
@@ -109,17 +104,12 @@ impl BootSpec {
     /// 截断区域会让保留区与可用区都可能丢失，因此只作为诊断事实保留。
     /// 页帧分配器初始化前必须使用 [`Self::has_complete_regions`] 失败关闭。
     pub fn push_region(&mut self, region: PhysRegion) {
-        if self.region_count < MAX_REGIONS {
-            self.regions[self.region_count] = region;
-            self.region_count += 1;
-        } else {
-            self.dropped_regions = self.dropped_regions.saturating_add(1);
-        }
+        self.regions.push(region);
     }
 
     /// 已记录的物理内存区域。
     pub fn regions(&self) -> &[PhysRegion] {
-        &self.regions[..self.region_count]
+        self.regions.regions()
     }
 
     /// Whether the complete firmware/bootloader memory map was retained.
@@ -131,7 +121,12 @@ impl BootSpec {
     /// 只有完整保留固件/引导器内存图时才允许发布可用页帧。被丢弃的区域
     /// 可能是固件、内核映像、DTB 或 MMIO 保留区，继续初始化会破坏隔离。
     pub const fn has_complete_regions(&self) -> bool {
-        self.dropped_regions == 0
+        self.regions.is_complete()
+    }
+
+    /// Number of regions lost to bounded-table overflow.
+    pub const fn dropped_regions(&self) -> usize {
+        self.regions.dropped()
     }
 }
 
@@ -176,7 +171,7 @@ mod tests {
             end: (MAX_REGIONS as u64 + 1) * 4096,
             kind: RegionKind::Reserved,
         });
-        assert_eq!(spec.dropped_regions, 1);
+        assert_eq!(spec.dropped_regions(), 1);
         assert!(!spec.has_complete_regions());
     }
 }

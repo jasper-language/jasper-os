@@ -189,7 +189,7 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
             if !ctx.boot.has_complete_regions() {
                 kprintln!(
                     "[JSR-BOOT] reject=memory_map_truncated dropped_regions={}",
-                    ctx.boot.dropped_regions
+                    ctx.boot.dropped_regions()
                 );
                 return None;
             }

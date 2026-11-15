@@ -70,7 +70,7 @@ pub fn run(boot: &'static BootSpec, stats: frame::FrameStats) {
         stats.usable,
         stats.usable as u64 * FRAME_SIZE / (1024 * 1024),
         stats.ignored,
-        boot.dropped_regions,
+        boot.dropped_regions(),
         if boot.phys_offset.is_some() { "mapped" } else { "none" }
     );
     check(stats.usable > 0, "没有可用帧");
