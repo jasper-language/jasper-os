@@ -29,9 +29,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 # programs that only share ABI/layout types keep the default allocation-free
 # surface.
 network-dynamic = []
-# Allocator-backed native Terminal rings are kernel-only. User ABI crates keep
-# the default allocation-free surface.
-terminal-dynamic = []
 # Firmware tables are parsed into runtime-sized inventories by the kernel;
 # user ABI crates keep the allocation-free default surface.
 acpi-dynamic = []
