@@ -427,6 +427,42 @@ fn configure_dynamic_libc_fixtures() {
             "signal fixture 必须声明未修改的 ld-linux"
         );
         println!("cargo:rustc-env={variable}={}", path.display());
+
+        let variable = "JSR_UBUNTU_SIGRETURN_XSTATE";
+        let path = std::env::var_os(variable)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                panic!(
+                    "compat-signal-verify 需要 {variable} 指向已编译的 rt_sigreturn XSTATE fixture"
+                )
+            });
+        println!("cargo:rerun-if-env-changed={variable}");
+        println!("cargo:rerun-if-changed={}", path.display());
+        let bytes = std::fs::read(&path).unwrap_or_else(|error| {
+            panic!(
+                "rt_sigreturn XSTATE fixture 无法读取：{}（{error}）",
+                path.display()
+            )
+        });
+        assert_eq!(&bytes[..4], b"\x7fELF", "rt_sigreturn XSTATE fixture 不是 ELF");
+        assert_eq!(bytes[4], 2, "rt_sigreturn XSTATE fixture 必须是 ELF64");
+        assert_eq!(bytes[5], 1, "rt_sigreturn XSTATE fixture 必须是小端");
+        assert_eq!(
+            fixture_u16(&bytes, 18),
+            Some(62),
+            "rt_sigreturn XSTATE fixture 必须是 x86_64"
+        );
+        assert_eq!(
+            fixture_u16(&bytes, 16),
+            Some(3),
+            "rt_sigreturn XSTATE fixture 必须是 ET_DYN"
+        );
+        assert_eq!(
+            dynamic_interpreter(&bytes),
+            Some(b"/lib64/ld-linux-x86-64.so.2".as_slice()),
+            "rt_sigreturn XSTATE fixture 必须声明未修改的 ld-linux"
+        );
+        println!("cargo:rustc-env={variable}={}", path.display());
     }
 }
 

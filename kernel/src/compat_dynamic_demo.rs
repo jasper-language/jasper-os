@@ -28,6 +28,8 @@ static PRINTF: &[u8] = include_bytes!(env!("JSR_UBUNTU_PRINTF"));
 static PTHREAD: &[u8] = include_bytes!(env!("JSR_UBUNTU_PTHREAD"));
 #[cfg(feature = "compat-signal-verify")]
 static SIGNAL: &[u8] = include_bytes!(env!("JSR_UBUNTU_SIGNAL"));
+#[cfg(feature = "compat-signal-verify")]
+static SIGRETURN_XSTATE: &[u8] = include_bytes!(env!("JSR_UBUNTU_SIGRETURN_XSTATE"));
 static INTERPRETER: &[u8] = include_bytes!(env!("JSR_UBUNTU_LD_LINUX"));
 static FAILED: AtomicU32 = AtomicU32::new(0);
 
@@ -612,6 +614,30 @@ pub fn run() {
         result
     };
 
+    #[cfg(feature = "compat-signal-verify")]
+    let sigreturn_xstate_result = {
+        let sigreturn_argv: [&[u8]; 1] = [b"/usr/bin/jasper-sigreturn-xstate"];
+        let sigreturn_baseline = free_frames();
+        let result = run_program(
+            "ubuntu-dynamic-sigreturn-xstate",
+            SIGRETURN_XSTATE,
+            INTERPRETER,
+            &sigreturn_argv,
+            sigreturn_baseline,
+            true,
+        );
+        kprintln!(
+            "[JSR-COMPAT-SIGRETURN-XSTATE] fixture=ubuntu-x86_64 executable=sigreturn-xstate mapped={} entry=interpreter true interpreter_syscalls={} syscall_delta={} exit_zero={} resources={} failed={}",
+            result.mapped,
+            result.interpreter_entered,
+            result.syscalls,
+            result.exited_zero,
+            result.resources,
+            failed()
+        );
+        result
+    };
+
     let frames_after = free_frames();
     let resources = true_result.resources
         && getconf_result.resources
@@ -630,6 +656,16 @@ pub fn run() {
             #[cfg(feature = "compat-signal-verify")]
             {
                 signal_result.resources && signal_result.exited_zero
+            }
+            #[cfg(not(feature = "compat-signal-verify"))]
+            {
+                true
+            }
+        }
+        && {
+            #[cfg(feature = "compat-signal-verify")]
+            {
+                sigreturn_xstate_result.resources && sigreturn_xstate_result.exited_zero
             }
             #[cfg(not(feature = "compat-signal-verify"))]
             {

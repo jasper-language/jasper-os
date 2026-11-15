@@ -1147,9 +1147,19 @@ fn enter_altstack(process: ObjId, autodisarm: bool) -> bool {
     true
 }
 
-/// Leaves one signal frame that was marked as using the alternate stack.
-/// 离开一个标记为使用备用栈的信号帧。
-fn leave_altstack(process: ObjId, autodisarm: bool) -> bool {
+/// Atomically restores the signal mask and leaves one alternate-stack frame.
+///
+/// Every fallible state transition is validated while holding the same lock;
+/// a malformed `rt_sigreturn` frame therefore cannot publish a partial signal
+/// mask or altstack-depth change.
+/// 原子恢复信号 mask，并在同一次事务中离开备用栈信号帧。
+fn commit_rt_sigreturn(
+    process: ObjId,
+    mask: u64,
+    leave_altstack: bool,
+    autodisarm: bool,
+) -> bool {
+    const UNMASKABLE: u64 = (1u64 << (9 - 1)) | (1u64 << (19 - 1));
     let (task, _) = sched::current();
     let mut state = COMPAT.lock();
     let Some(entry) = state
@@ -1160,22 +1170,33 @@ fn leave_altstack(process: ObjId, autodisarm: bool) -> bool {
     else {
         return false;
     };
-    let Some(next) = entry.altstack_depth.checked_sub(1) else {
-        return false;
-    };
-    entry.altstack_depth = next;
-    if autodisarm {
-        let Some(armed) = entry.altstack_disarm_depth.checked_sub(1) else {
-            entry.altstack_depth = next + 1;
+    let next_depth = if leave_altstack {
+        let Some(next) = entry.altstack_depth.checked_sub(1) else {
             return false;
         };
-        entry.altstack_disarm_depth = armed;
+        next
+    } else {
+        entry.altstack_depth
+    };
+    let next_disarm = if leave_altstack && autodisarm {
+        let Some(armed) = entry.altstack_disarm_depth.checked_sub(1) else {
+            return false;
+        };
+        armed
+    } else {
+        entry.altstack_disarm_depth
+    };
+
+    entry.signal_mask = mask & !UNMASKABLE;
+    entry.altstack_depth = next_depth;
+    entry.altstack_disarm_depth = next_disarm;
+    if leave_altstack {
+        crate::kprintln!(
+            "[JSR-LINUX-ALTSTACK] leave depth={} autodisarm={}",
+            next_depth,
+            autodisarm
+        );
     }
-    crate::kprintln!(
-        "[JSR-LINUX-ALTSTACK] leave depth={} autodisarm={}",
-        next,
-        autodisarm
-    );
     true
 }
 
@@ -1920,9 +1941,6 @@ fn linux_rt_sigreturn(
             .try_into()
             .expect("fixed signal-mask field"),
     );
-    if !set_current_signal_mask(process, old_mask) {
-        return Err(CompatErrno::Invalid);
-    }
     let fpstate_address = u64::from_le_bytes(
         context[SIGNAL_UC_FPREGS..SIGNAL_UC_FPREGS + 8]
             .try_into()
@@ -1950,15 +1968,17 @@ fn linux_rt_sigreturn(
     let Some(destination) = args.fxstate else {
         return Err(CompatErrno::Fault);
     };
+    let leave_altstack =
+        uc_flags & JASPER_UC_FLAG_ALTSTACK != 0;
+    let autodisarm =
+        uc_flags & JASPER_UC_FLAG_ALTSTACK_AUTODISARM != 0;
+    if !commit_rt_sigreturn(process, old_mask, leave_altstack, autodisarm) {
+        return Err(CompatErrno::Invalid);
+    }
     // SAFETY: the syscall entry owns this aligned FP state buffer until return;
     // rt_sigreturn can replace it with the validated userspace signal state.
     unsafe {
         core::ptr::copy_nonoverlapping(fxstate.as_ptr(), destination, state_bytes);
-    }
-    if uc_flags & JASPER_UC_FLAG_ALTSTACK != 0
-        && !leave_altstack(process, uc_flags & JASPER_UC_FLAG_ALTSTACK_AUTODISARM != 0)
-    {
-        return Err(CompatErrno::Invalid);
     }
     crate::kprintln!(
         "[JSR-LINUX-SIGNAL] restored rip={:#x} rsp={:#x} mask={:#x}",

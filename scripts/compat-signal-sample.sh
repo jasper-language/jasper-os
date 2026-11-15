@@ -16,7 +16,11 @@ mkdir -p "$OUT" "$TARGET"
 gcc -O2 -mavx -pthread -fno-stack-protector \
   verification/fixtures/linux/signal_basic.c \
   -o "$TARGET/signal-basic" >"$OUT/fixture-build.log" 2>&1
+gcc -O2 -mavx -mxsave -fcf-protection=none -fno-stack-protector -fno-strict-aliasing \
+  verification/fixtures/linux/sigreturn_xstate.c \
+  -o "$TARGET/sigreturn-xstate" >>"$OUT/fixture-build.log" 2>&1
 export JSR_UBUNTU_SIGNAL="$TARGET/signal-basic"
+export JSR_UBUNTU_SIGRETURN_XSTATE="$TARGET/sigreturn-xstate"
 
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none \
   -p jasper-kernel --features compat-signal-verify >"$OUT/kernel-build.log" 2>&1
@@ -41,7 +45,16 @@ printf '%s\n' "$rc" >"$OUT/qemu.rc"
 [ "$rc" -eq 33 ]
 grep -aq '^jasper-signal-ok' "$OUT/serial.log"
 grep -aq '^jasper-fpu-ok' "$OUT/serial.log"
+for case_name in xstate_bv_disabled missing_x87 compact_format reserved_xcomp_bv \
+  reserved_header mxcsr_reserved fpstate_oob; do
+  grep -aq "^\[JSR-SIGRETURN-NEGATIVE\] case=$case_name .*mask_unchanged=true" \
+    "$OUT/serial.log"
+done
+grep -aq '^jasper-sigreturn-xstate-valid-invoke' "$OUT/serial.log"
+grep -aq '^jasper-sigreturn-xstate-ok' "$OUT/serial.log"
 grep -aq '^\[JSR-COMPAT-SIGNAL\] .*exit_zero=true .*resources=true failed=0' \
+  "$OUT/serial.log"
+grep -aq '^\[JSR-COMPAT-SIGRETURN-XSTATE\] .*exit_zero=true .*resources=true failed=0' \
   "$OUT/serial.log"
 ! grep -aqE '^\[JSR-(PANIC|COMPAT-DYNAMIC-FAIL|LINUX-ABI-FAIL)\]|panicked at|KERNEL PANIC' \
   "$OUT/serial.log"
