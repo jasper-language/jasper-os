@@ -64,6 +64,11 @@ global_asm!(
         mov qword ptr [r8 + 512], 0
         mov qword ptr [r8 + 520], 0
         mov qword ptr [r8 + 528], 0
+        mov qword ptr [r8 + 536], 0
+        mov qword ptr [r8 + 544], 0
+        mov qword ptr [r8 + 552], 0
+        mov qword ptr [r8 + 560], 0
+        mov qword ptr [r8 + 568], 0
         mov rax, qword ptr [rip + JSR_XSTATE_MASK]
         mov rdx, rax
         shr rdx, 32

@@ -118,6 +118,11 @@ jsr_syscall_entry:
     mov qword ptr [rsp + 512], 0
     mov qword ptr [rsp + 520], 0
     mov qword ptr [rsp + 528], 0
+    mov qword ptr [rsp + 536], 0
+    mov qword ptr [rsp + 544], 0
+    mov qword ptr [rsp + 552], 0
+    mov qword ptr [rsp + 560], 0
+    mov qword ptr [rsp + 568], 0
     mov rax, qword ptr gs:[56]
     mov rdx, rax
     shr rdx, 32
