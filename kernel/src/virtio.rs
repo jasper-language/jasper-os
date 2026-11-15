@@ -403,7 +403,8 @@ fn map_capability(
     cfg_type: u8,
     minimum: u32,
 ) -> Result<Mapping, VirtioError> {
-    let cap = device.caps[..device.cap_count]
+    let cap = device
+        .caps
         .iter()
         .find(|cap| cap.cfg_type == cfg_type)
         .ok_or(VirtioError::NoModernCapability)?;

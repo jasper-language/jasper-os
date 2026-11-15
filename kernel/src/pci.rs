@@ -4,16 +4,16 @@
 //! # 职责
 //! * 复用 `kernel_core::pci` 的头部解码、BAR 探测与穷举枚举；本文件不重复任何解码规则。
 //! * 把每个存在功能的 BDF、厂商 / 设备号、类 / 子类 / 编程接口、头部类型与 BAR（类型、基址、尺寸）
-//!   存进容量有界的启动期设备表；超出容量只计数并报告，不 panic，也不丢弃已记录项。
+//!   存进按实际发现结果和启动期内存预算动态建立的只读设备表。
 //! * BAR 探测前后各取一份标准头快照，确认探测结束后寄存器恢复原状；恢复失败如实计入失败。
 //! * 每发现一个功能输出一行 `[JSR-PCI] dev …`；汇总行由 `pci_demo` 在所有断言之后输出。
 //!
 //! # 边界
 //! * 不含端口号、`asm!` 或任何 ISA 专有内容；配置空间后端由 `arch::PciAccess` 注入。
 //! * 设备表建立后只读；不在运行时重新枚举，也不为设备注册中断或 DMA。
-//! * 设备数量超限、枚举读取失败、BAR 编码非法都只记录并继续，由演练汇总判据决定启动是否失败。
+//! * 枚举读取失败、BAR 编码非法、能力链损坏或动态库存预算不足都会标记表不完整并失败关闭。
 
-use alloc::boxed::Box;
+use alloc::vec::Vec;
 use kernel_core::device::{CapabilityRecord, CAP_CFG_NOTIFY, CAP_ID_VENDOR};
 use kernel_core::pci::{
     self as core_pci, Bar, Bdf, ConfigSpace, Function, Header, MsiCapability, MsiConfigError,
@@ -26,18 +26,32 @@ use crate::boot::BootSpec;
 use crate::kprintln;
 use crate::sync::IrqSpinLock;
 
-/// 启动期设备表容量（QEMU 默认机型的功能数远低于此；超出只计数并报告）。
-/// Boot-time device-table capacity; excess functions are counted and reported.
-pub const MAX_DEVICES: usize = 64;
-/// 每个功能最多保留的厂商专有能力条数（virtio 1.x 通常 3–5 条）。
-/// Maximum vendor capabilities retained per function.
-pub const MAX_CAPABILITIES: usize = 16;
 /// BAR 探测前后快照覆盖的标准头字节数（16 个双字）。
 const SNAPSHOT_WORDS: usize = 16;
 
+/// Boot inventory budget derived from currently free heap bytes. The PCI table
+/// may consume at most one quarter of that snapshot; crossing it fails closed.
+struct InventoryBudget {
+    remaining: usize,
+}
+
+impl InventoryBudget {
+    const fn new(bytes: usize) -> Self {
+        Self { remaining: bytes }
+    }
+
+    fn charge<T>(&mut self) -> bool {
+        let Some(remaining) = self.remaining.checked_sub(core::mem::size_of::<T>()) else {
+            return false;
+        };
+        self.remaining = remaining;
+        true
+    }
+}
+
 /// 一个已枚举功能的只读快照。
 /// Read-only snapshot of one enumerated function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Device {
     /// 总线 / 设备 / 功能地址。
     /// Bus/device/function address.
@@ -50,21 +64,15 @@ pub struct Device {
     pub bars: [Bar; MAX_BARS],
     /// 厂商专有能力快照（仅 PCI 能力号 0x09；其余能力号不保留）。
     /// Vendor-specific capability snapshots (PCI capability ID 0x09 only).
-    pub caps: [CapabilityRecord; MAX_CAPABILITIES],
-    /// 有效能力条数（`caps[..cap_count]`）。
-    /// Number of valid capability records.
-    pub cap_count: usize,
-    /// 能力链上发现的目标厂商能力总数（包括因固定容量未保留的条目）。
+    pub caps: Vec<CapabilityRecord>,
+    /// 能力链上发现的目标厂商能力总数。
     /// Number of matching vendor capabilities discovered on the chain.
     pub cap_discovered: usize,
-    /// 固定容量内保留的目标厂商能力条数。
-    /// Number of matching vendor capabilities retained in the fixed snapshot.
-    pub cap_admitted: usize,
-    /// 固定容量已满后仍发现的目标厂商能力条数。
-    /// Number of matching vendor capabilities observed after capacity was reached.
-    pub cap_truncated: usize,
-    /// 能力链遍历失败、能力字段读取失败或固定容量截断（不把部分结果当成完整结果）。
-    /// The chain walk, a capability-field read, or fixed-capacity completeness failed.
+    /// 已发现但不满足 virtio 厂商能力格式的条目数。
+    /// Discovered vendor entries rejected before admission as virtio records.
+    pub cap_rejected: usize,
+    /// 能力链遍历、字段读取或库存分配失败（不得发布部分结果）。
+    /// Capability walking, field reads, or inventory allocation failed.
     pub caps_error: bool,
     /// 解析得到的 MSI 能力（每功能至多一个；没有时为 `None`）。
     /// Parsed MSI capability, at most one per function.
@@ -94,12 +102,11 @@ pub struct Table {
     /// 实际使用的访问机制。
     /// Access mechanism actually used.
     pub mechanism: PciMechanism,
-    /// 每个功能单独装箱，避免启动栈上出现整张设备表的大对象。
-    /// Each function is boxed so the boot stack never holds the whole device table.
-    entries: [Option<Box<Device>>; MAX_DEVICES],
-    count: usize,
-    /// 因超出容量而未记录的功能数。
-    /// Functions dropped because the table was full.
+    /// 动态设备库存，规模由枚举结果与启动期内存预算共同决定。
+    /// Dynamic device inventory sized by enumeration and boot-memory budget.
+    entries: Vec<Device>,
+    /// 因预算不足而未记录的功能数。
+    /// Functions not recorded because the inventory budget was exhausted.
     pub dropped: usize,
     /// 所有已记录功能中实际实现的 BAR 总数。
     /// Number of implemented BARs across all recorded functions.
@@ -113,6 +120,8 @@ pub struct Table {
     /// 所有 BAR 探测前后标准头逐双字一致。
     /// Every standard header was dword-identical before and after BAR probing.
     pub restored: bool,
+    /// 枚举、探测和所有能力库存均可发布。
+    pub complete: bool,
 }
 
 impl Table {
@@ -121,26 +130,26 @@ impl Table {
     pub const fn empty() -> Table {
         Table {
             mechanism: PciMechanism::Unavailable,
-            entries: [const { None }; MAX_DEVICES],
-            count: 0,
+            entries: Vec::new(),
             dropped: 0,
             bars: 0,
             enumerate_error: false,
             probe_failed: 0,
             restored: false,
+            complete: true,
         }
     }
 
     /// 已记录的功能数。
     /// Number of recorded functions.
     pub fn functions(&self) -> usize {
-        self.count
+        self.entries.len()
     }
 
     /// 遍历已记录的功能。
     /// Iterate recorded functions.
     pub fn devices(&self) -> impl Iterator<Item = &Device> {
-        self.entries[..self.count].iter().flatten().map(|entry| &**entry)
+        self.entries.iter()
     }
 
     /// 按 BDF 查找已记录的功能；不存在返回 `None`（不触碰硬件，只查启动期快照）。
@@ -178,12 +187,21 @@ pub fn activate() -> Result<(), &'static str> {
             kprintln!("[JSR-PCI] unavailable reason=system.device.error.config_unreachable");
             return Table::empty();
         };
-        let arch::PciAccess { config, mechanism, buses } = access;
+        let arch::PciAccess {
+            config,
+            mechanism,
+            buses,
+        } = access;
         let table = build(config, mechanism, buses);
         let _ = CONFIG.call_once(|| IrqSpinLock::new(config));
         table
     });
-    ready().then_some(()).ok_or("PCI table not activated")
+    let table = TABLE.get().ok_or("PCI table not activated")?;
+    if table.complete {
+        Ok(())
+    } else {
+        Err("PCI inventory incomplete")
+    }
 }
 
 /// 设备表已由模块激活建立（空表也包括不可用平台的真实结果）。
@@ -236,43 +254,62 @@ pub fn bus_master_enabled(bdf: Bdf) -> Result<bool, core_pci::PciError> {
 /// 只在需要时读配置空间，不把倍率缓存进设备表（设备表在启动期建立，必须保持紧凑）。
 /// Reads the notification multiplier on demand instead of caching it in the boot-time table.
 pub fn notify_multiplier(device: &Device) -> Option<u32> {
-    let capability = device.caps[..device.cap_count]
+    let capability = device
+        .caps
         .iter()
         .find(|cap| cap.cfg_type == CAP_CFG_NOTIFY)?;
     read_config32(device.bdf, capability.pci_offset as u16 + 16)
 }
 
-fn build(config: &mut dyn ConfigSpace, mechanism: PciMechanism, buses: core::ops::RangeInclusive<u8>) -> Table {
-    let mut out = Table { mechanism, ..Table::empty() };
+fn build(
+    config: &mut dyn ConfigSpace,
+    mechanism: PciMechanism,
+    buses: core::ops::RangeInclusive<u8>,
+) -> Table {
+    let mut out = Table {
+        mechanism,
+        complete: true,
+        ..Table::empty()
+    };
+    let mut budget = InventoryBudget::new(crate::mm::heap::stats().1 / 4);
 
-    // 穷举只读取头部；BAR 探测需要独占 `config`，所以先把功能收集到有界槽位里。
-    let mut slots: [Option<Function>; MAX_DEVICES] = [None; MAX_DEVICES];
-    let mut found = 0usize;
+    // Enumeration only reads headers; BAR probing needs exclusive access, so
+    // collect the discovered functions into the admitted runtime inventory.
+    let mut slots = Vec::new();
     let result = core_pci::enumerate(config, buses, |f| {
-        if found < MAX_DEVICES {
-            slots[found] = Some(*f);
-            found += 1;
-        } else {
+        if !budget.charge::<Function>() || slots.try_reserve(1).is_err() {
             out.dropped += 1;
+            out.complete = false;
+            return false;
         }
+        slots.push(*f);
         true
     });
     if let Err(e) = result {
         out.enumerate_error = true;
+        out.complete = false;
         kprintln!("[JSR-PCI] error enumerate={}", e.name());
     }
     if out.dropped > 0 {
-        kprintln!("[JSR-PCI] dropped functions={} capacity={}", out.dropped, MAX_DEVICES);
+        kprintln!(
+            "[JSR-PCI] dropped functions={} reason=system.memory.error.capacity",
+            out.dropped
+        );
     }
 
     out.restored = true;
-    for function in slots[..found].iter().flatten() {
+    for function in &slots {
         let before = snapshot(config, function.bdf);
         let bars = match core_pci::probe_bars(config, function.bdf, function.header.kind) {
             Ok(bars) => bars,
             Err(e) => {
                 out.probe_failed += 1;
-                kprintln!("[JSR-PCI] error probe bdf={} reason={}", format_bdf(function.bdf), e.name());
+                out.complete = false;
+                kprintln!(
+                    "[JSR-PCI] error probe bdf={} reason={}",
+                    format_bdf(function.bdf),
+                    e.name()
+                );
                 [Bar::None; MAX_BARS]
             }
         };
@@ -283,32 +320,42 @@ fn build(config: &mut dyn ConfigSpace, mechanism: PciMechanism, buses: core::ops
         };
         if !same {
             out.restored = false;
+            out.complete = false;
             kprintln!("[JSR-PCI] error restore bdf={}", format_bdf(function.bdf));
         }
-        let snapshot = probe_capabilities(config, function.bdf);
+        let snapshot = probe_capabilities(config, function.bdf, &mut budget);
         let (msi, msi_error) = match core_pci::parse_msi(config, function.bdf) {
             Ok(cap) => (cap, None),
             Err(e) => {
-                kprintln!("[JSR-PCI] error msi bdf={} reason={}", format_bdf(function.bdf), e.name());
+                out.complete = false;
+                kprintln!(
+                    "[JSR-PCI] error msi bdf={} reason={}",
+                    format_bdf(function.bdf),
+                    e.name()
+                );
                 (None, Some(e))
             }
         };
         let (msix, msix_error) = match core_pci::parse_msix(config, function.bdf, &bars) {
             Ok(cap) => (cap, None),
             Err(e) => {
-                kprintln!("[JSR-PCI] error msix bdf={} reason={}", format_bdf(function.bdf), e.name());
+                out.complete = false;
+                kprintln!(
+                    "[JSR-PCI] error msix bdf={} reason={}",
+                    format_bdf(function.bdf),
+                    e.name()
+                );
                 (None, Some(e))
             }
         };
+        let cap_rejected = snapshot.discovered.saturating_sub(snapshot.caps.len());
         let device = Device {
             bdf: function.bdf,
             header: function.header,
             bars,
             caps: snapshot.caps,
-            cap_count: snapshot.cap_count,
             cap_discovered: snapshot.discovered,
-            cap_admitted: snapshot.admitted,
-            cap_truncated: snapshot.truncated,
+            cap_rejected,
             caps_error: snapshot.error,
             msi,
             msix,
@@ -324,50 +371,70 @@ fn build(config: &mut dyn ConfigSpace, mechanism: PciMechanism, buses: core::ops
             class_code(&device.header),
             device.bar_count(),
             device.cap_discovered,
-            device.cap_admitted,
-            device.cap_truncated
+            device.caps.len(),
+            device.cap_rejected
         );
-        out.entries[out.count] = Some(Box::new(device));
-        out.count += 1;
+        if !budget.charge::<Device>() || out.entries.try_reserve(1).is_err() {
+            out.dropped += 1;
+            out.complete = false;
+            break;
+        }
+        if device.caps_error {
+            out.complete = false;
+        }
+        out.entries.push(device);
     }
     out
 }
 
 /// 遍历一个功能的配置空间能力链，只保留厂商专有能力（0x09）并解析 virtio 1.x 的四个字段。
 ///
-/// 能力链遍历复用 `kernel_core::pci::for_each_capability`；字段读取失败时返回 `caps_error = true`，
-/// 调用方不得把部分结果当成完整能力表。能力条数超过 [`MAX_CAPABILITIES`] 时保留前面的条目，
-/// 但必须报告截断并让需要完整性的消费者失败关闭。
+/// 能力链遍历复用 `kernel_core::pci::for_each_capability`；所有目标偏移先进入
+/// 动态库存，再逐项解析。字段读取或库存分配失败时返回 `caps_error = true`，
+/// 调用方不得把部分结果当成完整能力表。
 /// Snapshot vendor-specific capabilities of one function, reusing the DRV-1A chain walker.
 struct CapabilitySnapshot {
-    caps: [CapabilityRecord; MAX_CAPABILITIES],
-    cap_count: usize,
+    caps: Vec<CapabilityRecord>,
     discovered: usize,
-    admitted: usize,
-    truncated: usize,
     error: bool,
 }
 
 fn probe_capabilities(
     cfg: &mut dyn ConfigSpace,
     bdf: Bdf,
+    budget: &mut InventoryBudget,
 ) -> CapabilitySnapshot {
-    let scan =
-        core_pci::scan_capability_offsets::<MAX_CAPABILITIES>(cfg, bdf, CAP_ID_VENDOR);
     let mut snapshot = CapabilitySnapshot {
-        caps: [CapabilityRecord::NONE; MAX_CAPABILITIES],
-        cap_count: 0,
-        discovered: scan.discovered(),
-        admitted: scan.admitted(),
-        truncated: scan.truncated(),
-        error: scan.error().is_some() || scan.truncated() != 0,
+        caps: Vec::new(),
+        discovered: 0,
+        error: false,
     };
-    if scan.error().is_some() {
+    let mut offsets = Vec::new();
+    if let Err(error) = core_pci::for_each_capability(cfg, bdf, |id, at| {
+        if id != CAP_ID_VENDOR {
+            return true;
+        }
+        snapshot.discovered += 1;
+        if !budget.charge::<u8>() || offsets.try_reserve(1).is_err() {
+            snapshot.error = true;
+            return false;
+        }
+        offsets.push(at);
+        true
+    }) {
+        snapshot.error = true;
+        kprintln!(
+            "[JSR-PCI] capability error bdf={} reason={}",
+            format_bdf(bdf),
+            error.name()
+        );
+    }
+    if snapshot.error {
         return snapshot;
     }
-    let mut valid = 0usize;
-    for at in scan.offsets() {
-        let Some(header) = cfg.read32(bdf, *at as u16) else {
+
+    for at in offsets {
+        let Some(header) = cfg.read32(bdf, at as u16) else {
             snapshot.error = true;
             return snapshot;
         };
@@ -376,30 +443,32 @@ fn probe_capabilities(
         if cap_len < 16 {
             continue;
         }
-        let Some(fields) = cfg.read32(bdf, *at as u16 + 4) else {
+        let Some(fields) = cfg.read32(bdf, at as u16 + 4) else {
             snapshot.error = true;
             return snapshot;
         };
-        let Some(offset) = cfg.read32(bdf, *at as u16 + 8) else {
+        let Some(offset) = cfg.read32(bdf, at as u16 + 8) else {
             snapshot.error = true;
             return snapshot;
         };
-        let Some(length) = cfg.read32(bdf, *at as u16 + 12) else {
+        let Some(length) = cfg.read32(bdf, at as u16 + 12) else {
             snapshot.error = true;
             return snapshot;
         };
-        snapshot.caps[valid] = CapabilityRecord {
-            pci_offset: *at,
+        if !budget.charge::<CapabilityRecord>() || snapshot.caps.try_reserve(1).is_err() {
+            snapshot.error = true;
+            return snapshot;
+        }
+        snapshot.caps.push(CapabilityRecord {
+            pci_offset: at,
             id: (header & 0xFF) as u8,
             // 字节 3 是 cfg_type；字节 4 是 BAR 号，随后是 id 与保留字节。
             cfg_type: (header >> 24) as u8,
             bar: (fields & 0xFF) as u8,
             bar_offset: offset,
             length,
-        };
-        valid += 1;
+        });
     }
-    snapshot.cap_count = valid;
     snapshot
 }
 
@@ -421,7 +490,13 @@ struct BdfFmt(Bdf);
 
 impl core::fmt::Display for BdfFmt {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:02x}:{:02x}.{}", self.0.bus(), self.0.device(), self.0.function())
+        write!(
+            f,
+            "{:02x}:{:02x}.{}",
+            self.0.bus(),
+            self.0.device(),
+            self.0.function()
+        )
     }
 }
 

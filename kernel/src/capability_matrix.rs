@@ -88,16 +88,16 @@ pub fn report(boot: &BootSpec) {
         crate::pci::table()
             .devices()
             .fold((0u32, 0u32, 0u32), |counts, device| {
-                let chain_failure = u32::from(device.caps_error && device.cap_truncated == 0);
+                let chain_failure = u32::from(device.caps_error);
                 (
                     counts
                         .0
                         .saturating_add(device.cap_discovered as u32)
                         .saturating_add(chain_failure),
-                    counts.1.saturating_add(device.cap_admitted as u32),
+                    counts.1.saturating_add(device.caps.len() as u32),
                     counts
                         .2
-                        .saturating_add(device.cap_truncated as u32)
+                        .saturating_add(device.cap_rejected as u32)
                         .saturating_add(chain_failure),
                 )
             });

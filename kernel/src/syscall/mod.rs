@@ -1093,7 +1093,7 @@ fn device_capability_list(handle: u64, ptr: u64, cap: u64) -> i64 {
     if device.caps_error {
         return err(SYSTEM_DEVICE_ERROR_BAD_CAPABILITY);
     }
-    let required = device.cap_count * devabi::CAP_RECORD_SIZE;
+    let required = device.caps.len() * devabi::CAP_RECORD_SIZE;
     if required > capacity {
         return required as i64;
     }
@@ -1101,7 +1101,7 @@ fn device_capability_list(handle: u64, ptr: u64, cap: u64) -> i64 {
         return 0;
     }
     let mut buf = vec![0u8; required];
-    for (i, record) in device.caps[..device.cap_count].iter().enumerate() {
+    for (i, record) in device.caps.iter().enumerate() {
         let mut raw = [0u8; devabi::CAP_RECORD_SIZE];
         record.encode(&mut raw);
         let at = i * devabi::CAP_RECORD_SIZE;

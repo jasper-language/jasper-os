@@ -1408,7 +1408,24 @@ mod tests {
         assert_eq!(complete.admitted(), 17);
         assert_eq!(complete.truncated(), 0);
         assert!(complete.is_complete());
-        assert_eq!(complete.offsets(), chain.iter().map(|entry| entry.1).collect::<Vec<_>>());
+        assert_eq!(
+            complete.offsets(),
+            chain.iter().map(|entry| entry.1).collect::<Vec<_>>()
+        );
+
+        let mut dynamic = Vec::new();
+        for_each_capability(&mut m, d, |id, at| {
+            if id == 0x09 {
+                dynamic.push(at);
+            }
+            true
+        })
+        .unwrap();
+        assert_eq!(dynamic.len(), 17);
+        assert_eq!(
+            dynamic,
+            chain.iter().map(|entry| entry.1).collect::<Vec<_>>()
+        );
     }
 
     #[test]
