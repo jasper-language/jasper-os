@@ -36,6 +36,18 @@ pub const RNG_DEVICE_MODERN: u16 = 0x1044;
 pub const BLK_DEVICE_LEGACY: u16 = 0x1001;
 /// 仅现代（modern-only）virtio-blk 的设备号。
 pub const BLK_DEVICE_MODERN: u16 = 0x1042;
+/// 传统（transitional）virtio-net 的设备号。
+/// Legacy/transitional virtio-net device ID.
+pub const NET_DEVICE_LEGACY: u16 = 0x1000;
+/// 仅现代（modern-only）virtio-net 的设备号。
+/// Modern-only virtio-net device ID.
+pub const NET_DEVICE_MODERN: u16 = 0x1041;
+/// 传统（transitional）virtio-gpu 的设备号。
+/// Legacy/transitional virtio-gpu device ID.
+pub const GPU_DEVICE_LEGACY: u16 = 0x1010;
+/// 仅现代（modern-only）virtio-gpu 的设备号。
+/// Modern-only virtio-gpu device ID.
+pub const GPU_DEVICE_MODERN: u16 = 0x1050;
 
 /// 设备状态：已确认。
 pub const STATUS_ACKNOWLEDGE: u8 = 1;
@@ -156,6 +168,18 @@ pub const fn is_rng_device(device: u16) -> bool {
 
 pub const fn is_blk_device(device: u16) -> bool {
     device == BLK_DEVICE_LEGACY || device == BLK_DEVICE_MODERN
+}
+
+/// 设备号是否属于内核已实现的 virtio-net 驱动族。
+/// Whether a device ID belongs to the implemented virtio-net family.
+pub const fn is_net_device(device: u16) -> bool {
+    device == NET_DEVICE_LEGACY || device == NET_DEVICE_MODERN
+}
+
+/// 设备号是否属于内核已实现的 virtio-gpu 驱动族。
+/// Whether a device ID belongs to the implemented virtio-gpu family.
+pub const fn is_gpu_device(device: u16) -> bool {
+    device == GPU_DEVICE_LEGACY || device == GPU_DEVICE_MODERN
 }
 
 /// 现代 virtio PCI 传输句柄（四个能力窗口各持有一份映射）。

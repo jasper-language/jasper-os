@@ -1,9 +1,71 @@
 //! Cross-module capability diagnostics using the shared kernel-core policy.
 
 use kernel_core::capability_matrix::{classify, CapabilityCoverage, CapabilityFacts};
+use kernel_core::device::{CAP_CFG_COMMON, CAP_CFG_DEVICE, CAP_CFG_ISR, CAP_CFG_NOTIFY};
 
 use crate::boot::BootSpec;
 use crate::kprintln;
+use crate::pci::Device;
+
+/// PCI base class for network controllers.
+const PCI_CLASS_NETWORK: u8 = 0x02;
+/// PCI base class for display controllers.
+const PCI_CLASS_DISPLAY: u8 = 0x03;
+
+/// Whether a device exposes the four modern virtio PCI capability windows used
+/// by the native transport. A device ID alone is not enough to claim support
+/// for a transitional-only function.
+fn has_modern_virtio_transport(device: &Device) -> bool {
+    if device.caps_error {
+        return false;
+    }
+    [CAP_CFG_COMMON, CAP_CFG_NOTIFY, CAP_CFG_ISR, CAP_CFG_DEVICE]
+        .into_iter()
+        .all(|kind| device.caps.iter().any(|cap| cap.cfg_type == kind))
+}
+
+/// Build facts for one PCI device class from the completed boot inventory.
+///
+/// Discovery is independent of driver support: every function in the class is
+/// counted first. Only functions whose device family and transport the kernel
+/// actually implements are reported as supported. No driver instance is
+/// admitted, enabled, exposed or verified by inventory inspection alone.
+fn pci_class_facts(class: u8, supported: impl Fn(&Device) -> bool) -> CapabilityFacts {
+    if !crate::pci::ready() || !crate::pci::table().complete {
+        return CapabilityFacts {
+            coverage: CapabilityCoverage::Failed,
+            ..CapabilityFacts::default()
+        };
+    }
+
+    let mut discovered = 0u32;
+    let mut kernel_supported = 0u32;
+    for device in crate::pci::table()
+        .devices()
+        .filter(|device| device.header.class == class)
+    {
+        discovered = discovered.saturating_add(1);
+        if supported(device) {
+            kernel_supported = kernel_supported.saturating_add(1);
+        }
+    }
+
+    CapabilityFacts {
+        coverage: CapabilityCoverage::Complete,
+        discovered,
+        kernel_supported,
+        admitted: 0,
+        rejected: 0,
+        // The shared lifecycle contract accounts every discovery as admitted,
+        // rejected or currently unavailable. A supported function that has not
+        // passed driver admission remains unavailable and cannot skip stages.
+        unsupported: discovered,
+        enabled: 0,
+        exposed: 0,
+        verified: 0,
+        security_critical: true,
+    }
+}
 
 fn emit(domain: &'static str, facts: CapabilityFacts) {
     match classify(facts) {
@@ -118,21 +180,20 @@ pub fn report(boot: &BootSpec) {
         },
     );
 
-    // These optional runtime domains are not wired into this boot inventory.
-    // Report the missing probe explicitly instead of turning zero counts into a
-    // claim of "no hardware" or inferring capabilities from optional libraries.
     emit(
         "system.network",
-        CapabilityFacts {
-            coverage: CapabilityCoverage::NotProbed,
-            ..CapabilityFacts::default()
-        },
+        pci_class_facts(PCI_CLASS_NETWORK, |device| {
+            device.header.vendor == crate::virtio::VIRTIO_VENDOR
+                && crate::virtio::is_net_device(device.header.device)
+                && has_modern_virtio_transport(device)
+        }),
     );
     emit(
         "system.device.gpu",
-        CapabilityFacts {
-            coverage: CapabilityCoverage::NotProbed,
-            ..CapabilityFacts::default()
-        },
+        pci_class_facts(PCI_CLASS_DISPLAY, |device| {
+            device.header.vendor == crate::virtio::VIRTIO_VENDOR
+                && crate::virtio::is_gpu_device(device.header.device)
+                && has_modern_virtio_transport(device)
+        }),
     );
 }

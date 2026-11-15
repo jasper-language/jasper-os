@@ -2958,6 +2958,19 @@ check_net4runtime() {
   fi
 }
 
+check_issue33capability() {
+  local network gpu
+  network=$(grep -aoE '^\[JSR-CAPABILITY\] domain=system\.network .*' "$SERIAL" 2>/dev/null | head -1)
+  gpu=$(grep -aoE '^\[JSR-CAPABILITY\] domain=system\.device\.gpu .*' "$SERIAL" 2>/dev/null | head -1)
+  if printf '%s\n' "$network" | grep -qE 'inventory=complete discovered=[1-9][0-9]* supported=[1-9][0-9]* .*enabled=0 exposed=0 verified=0 fault=none' \
+     && printf '%s\n' "$gpu" | grep -qE 'inventory=complete discovered=[1-9][0-9]* .*enabled=0 exposed=0 verified=0 fault=none' \
+     && ! printf '%s\n%s\n' "$network" "$gpu" | grep -q 'inventory=not-probed'; then
+    record ISSUE33-CAPABILITY PASS "同一启动由完整 PCI 库存生成 NET/GPU 类事实：网络发现真实 virtio-net 并标记 kernel-supported，GPU 类按实际显示控制器库存报告；未从发现/支持自动晋级到 admitted/enabled/exposed/verified"
+  else
+    record ISSUE33-CAPABILITY FAIL "NET/GPU 能力矩阵未接入完整 PCI 库存或发生阶段晋级：network=${network:-缺} gpu=${gpu:-缺}"
+  fi
+}
+
 check_compatelfbackend() {
   if has '^\[JSR-COMPAT-ELF\] backend=true map=true relocate=true stack=true ring3=true exit=true resources=true failed=0' \
      && ! has '^\[JSR-COMPAT-ELF-FAIL\]'; then
@@ -3066,11 +3079,11 @@ if [ "$SPOT" -eq 1 ]; then
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_nativeecosystem; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
+  check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_issue33capability; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_nativeecosystem; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
+  check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_issue33capability; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
 fi
 
 check_jaso1_multi
