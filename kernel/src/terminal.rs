@@ -7,17 +7,33 @@
 //! 串口与 framebuffer/PS-2 前端共用有界会话环，输入同时回显到串口与原生
 //! 图形终端；不宣称已实现 PTY、termios、行编辑或作业控制。
 
-use kernel_core::terminal_session::{TerminalError, TerminalSession, TerminalState};
+use kernel_core::terminal_session::{DynamicTerminalSession, TerminalError, TerminalState};
+use kernel_core::frame::FRAME_SIZE;
+use spin::Once;
 
 use crate::proc;
 use crate::sync::IrqSpinLock;
 use crate::{arch, console, display, sched};
 
-const INPUT_CAPACITY: usize = 4096;
-const OUTPUT_CAPACITY: usize = 4096;
+/// Share of currently free physical frames admitted to the native terminal.
+const TERMINAL_MEMORY_SHARE_DENOMINATOR: u64 = 64;
 
-static TERMINAL: IrqSpinLock<TerminalSession<INPUT_CAPACITY, OUTPUT_CAPACITY>> =
-    IrqSpinLock::ranked(crate::lockorder::TERMINAL, TerminalSession::new());
+static TERMINAL: Once<IrqSpinLock<DynamicTerminalSession>> = Once::new();
+
+fn terminal() -> &'static IrqSpinLock<DynamicTerminalSession> {
+    TERMINAL.call_once(|| {
+        let available = crate::mm::frame::free_frames() as u64 * FRAME_SIZE;
+        let budget = (available / TERMINAL_MEMORY_SHARE_DENOMINATOR).max(2 * FRAME_SIZE);
+        assert!(budget <= available, "terminal capacity exceeds free frames");
+        let input = usize::try_from(budget / 2).expect("terminal capacity fits address space");
+        let output =
+            usize::try_from(budget - input as u64).expect("terminal capacity fits address space");
+        let session = DynamicTerminalSession::new(input, output)
+            .expect("terminal capacities are admitted from free frames");
+        crate::kprintln!("[JSR-TERM] capacity input={} output={}", input, output);
+        IrqSpinLock::ranked(crate::lockorder::TERMINAL, session)
+    })
+}
 
 /// Read standard input, translating serial CR to LF and blocking outside IRQ context.
 ///
@@ -30,7 +46,7 @@ pub fn read_input(destination: &mut [u8], nonblocking: bool) -> Result<usize, Te
         pump_serial_input();
         pump_display_input();
         let result = {
-            let mut terminal = TERMINAL.lock();
+            let mut terminal = terminal().lock();
             terminal.read_input(destination)
         };
         match result {
@@ -57,7 +73,7 @@ pub fn write_output(bytes: &[u8]) {
 /// 查询是否有待读输入，以及是否已出现稳定挂断。
 pub fn input_status() -> (bool, bool, bool) {
     pump_serial_input();
-    let snapshot = TERMINAL.lock().snapshot();
+    let snapshot = terminal().lock().snapshot();
     let ended = matches!(
         snapshot.state,
         TerminalState::InputClosed | TerminalState::Closed | TerminalState::Failed
@@ -71,7 +87,7 @@ pub fn input_status() -> (bool, bool, bool) {
 
 fn pump_serial_input() {
     let budget = {
-        let snapshot = TERMINAL.lock().snapshot();
+        let snapshot = terminal().lock().snapshot();
         snapshot.input_capacity.saturating_sub(snapshot.input_bytes)
     };
     if budget == 0 {
@@ -83,14 +99,14 @@ fn pump_serial_input() {
             return;
         };
         if received == 0x04 {
-            let closed = TERMINAL.lock().close_input().is_ok();
+            let closed = terminal().lock().close_input().is_ok();
             if closed {
                 emit(b"\n");
             }
             return;
         }
         let byte = if received == b'\r' { b'\n' } else { received };
-        let accepted = TERMINAL.lock().enqueue_input(&[byte]).is_ok();
+        let accepted = terminal().lock().enqueue_input(&[byte]).is_ok();
         if !accepted {
             emit(b"\n[JSR-TERM] input_full=true drop=true\n");
             return;
@@ -105,7 +121,7 @@ fn pump_display_input() {
         let Some(byte) = key_to_byte(key) else {
             continue;
         };
-        let accepted = TERMINAL.lock().enqueue_input(&[byte]).is_ok();
+        let accepted = terminal().lock().enqueue_input(&[byte]).is_ok();
         if !accepted {
             emit(b"\n[JSR-TERM] input_full=true drop=true\n");
             return;

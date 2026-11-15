@@ -293,6 +293,147 @@ impl<const INPUT_CAP: usize, const OUTPUT_CAP: usize> Default
     }
 }
 
+/// Allocator-backed terminal session whose ring sizes are admitted at runtime.
+pub struct DynamicTerminalSession {
+    input: alloc::vec::Vec<u8>,
+    input_head: usize,
+    input_len: usize,
+    output: alloc::vec::Vec<u8>,
+    output_head: usize,
+    output_len: usize,
+    input_closed: bool,
+    output_closed: bool,
+    terminal: Option<TerminalOutcome>,
+}
+
+impl DynamicTerminalSession {
+    /// Allocate two independent rings with the supplied capacities.
+    pub fn new(input_capacity: usize, output_capacity: usize) -> Result<Self, TerminalError> {
+        if input_capacity == 0 || output_capacity == 0 {
+            return Err(TerminalError::Invalid);
+        }
+        Ok(Self {
+            input: alloc::vec![0; input_capacity],
+            input_head: 0,
+            input_len: 0,
+            output: alloc::vec![0; output_capacity],
+            output_head: 0,
+            output_len: 0,
+            input_closed: false,
+            output_closed: false,
+            terminal: None,
+        })
+    }
+
+    pub fn state(&self) -> TerminalState {
+        match self.terminal {
+            Some(TerminalOutcome::Failed) => TerminalState::Failed,
+            Some(TerminalOutcome::Closed) => TerminalState::Closed,
+            None if self.input_closed && self.output_closed => TerminalState::Closed,
+            None if self.input_closed => TerminalState::InputClosed,
+            None if self.output_closed => TerminalState::OutputClosed,
+            None => TerminalState::Open,
+        }
+    }
+
+    pub fn snapshot(&self) -> TerminalSnapshot {
+        TerminalSnapshot {
+            state: self.state(),
+            input_bytes: self.input_len,
+            output_bytes: self.output_len,
+            input_capacity: self.input.len(),
+            output_capacity: self.output.len(),
+        }
+    }
+
+    pub fn enqueue_input(&mut self, bytes: &[u8]) -> Result<(), TerminalError> {
+        let cap = self.input.len();
+        self.ensure_writable(self.input_closed)?;
+        if bytes.len() > cap.saturating_sub(self.input_len) {
+            return Err(TerminalError::Full);
+        }
+        let tail = (self.input_head + self.input_len) % cap;
+        for (index, byte) in bytes.iter().copied().enumerate() {
+            self.input[(tail + index) % cap] = byte;
+        }
+        self.input_len += bytes.len();
+        Ok(())
+    }
+
+    pub fn read_input(&mut self, destination: &mut [u8]) -> Result<usize, TerminalError> {
+        if destination.is_empty() {
+            return Ok(0);
+        }
+        self.ensure_live()?;
+        if self.input_len == 0 {
+            return Err(if self.input_closed { TerminalError::Eof } else { TerminalError::WouldBlock });
+        }
+        let count = destination.len().min(self.input_len);
+        let cap = self.input.len();
+        for (index, slot) in destination[..count].iter_mut().enumerate() {
+            *slot = self.input[(self.input_head + index) % cap];
+        }
+        self.input_head = (self.input_head + count) % cap;
+        self.input_len -= count;
+        Ok(count)
+    }
+
+    pub fn enqueue_output(&mut self, bytes: &[u8]) -> Result<(), TerminalError> {
+        let cap = self.output.len();
+        self.ensure_writable(self.output_closed)?;
+        if bytes.len() > cap.saturating_sub(self.output_len) {
+            return Err(TerminalError::Full);
+        }
+        let tail = (self.output_head + self.output_len) % cap;
+        for (index, byte) in bytes.iter().copied().enumerate() {
+            self.output[(tail + index) % cap] = byte;
+        }
+        self.output_len += bytes.len();
+        Ok(())
+    }
+
+    pub fn drain_output(&mut self, destination: &mut [u8]) -> Result<usize, TerminalError> {
+        if destination.is_empty() {
+            return Ok(0);
+        }
+        self.ensure_live()?;
+        let count = destination.len().min(self.output_len);
+        let cap = self.output.len();
+        for (index, slot) in destination[..count].iter_mut().enumerate() {
+            *slot = self.output[(self.output_head + index) % cap];
+        }
+        self.output_head = (self.output_head + count) % cap;
+        self.output_len -= count;
+        Ok(count)
+    }
+
+    pub fn close_input(&mut self) -> Result<(), TerminalError> {
+        self.ensure_live()?;
+        self.input_closed = true;
+        if self.output_closed {
+            self.terminal = Some(TerminalOutcome::Closed);
+        }
+        Ok(())
+    }
+
+    fn ensure_writable(&self, half_closed: bool) -> Result<(), TerminalError> {
+        match self.terminal {
+            Some(TerminalOutcome::Failed) => Err(TerminalError::Failed),
+            Some(TerminalOutcome::Closed) => Err(TerminalError::Closed),
+            None if half_closed => Err(TerminalError::Closed),
+            None => Ok(()),
+        }
+    }
+
+    fn ensure_live(&self) -> Result<(), TerminalError> {
+        match self.terminal {
+            Some(TerminalOutcome::Failed) => Err(TerminalError::Failed),
+            Some(TerminalOutcome::Closed) => Err(TerminalError::Closed),
+            None => Ok(()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,5 +517,32 @@ mod tests {
         assert_eq!(empty.enqueue_input(b"x"), Err(TerminalError::Invalid));
         assert_eq!(empty.read_input(&mut [0u8; 1]), Err(TerminalError::Invalid));
         assert_eq!(empty.snapshot().state, TerminalState::Open);
+    }
+
+    #[test]
+    fn dynamic_session_uses_runtime_capacity_and_preserves_wrap_order() {
+        let mut session = DynamicTerminalSession::new(3, 5).unwrap();
+        assert_eq!(session.snapshot().input_capacity, 3);
+        assert_eq!(session.snapshot().output_capacity, 5);
+        session.enqueue_input(b"abc").unwrap();
+        assert_eq!(session.enqueue_input(b"d"), Err(TerminalError::Full));
+        let mut read = [0; 2];
+        assert_eq!(session.read_input(&mut read), Ok(2));
+        session.enqueue_input(b"de").unwrap();
+        let mut rest = [0; 3];
+        assert_eq!(session.read_input(&mut rest), Ok(3));
+        assert_eq!(&rest, b"cde");
+    }
+
+    #[test]
+    fn dynamic_session_rejects_zero_capacity() {
+        assert!(matches!(
+            DynamicTerminalSession::new(0, 1),
+            Err(TerminalError::Invalid)
+        ));
+        assert!(matches!(
+            DynamicTerminalSession::new(1, 0),
+            Err(TerminalError::Invalid)
+        ));
     }
 }
