@@ -24,12 +24,13 @@
 //! （已建的子进程经「无线程退出 + 释放所有权」销毁，已发放的句柄被收回），调用者的句柄表与配额保持原样。
 
 use alloc::vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kernel_core::frame::FRAME_SIZE;
 use kernel_core::object::{HandleId, ObjectId, ObjectRef, ObjectType, Rights};
 use kernel_core::objtable::ObjId;
 use kernel_core::paging::MapFlags;
-use kernel_core::spawn_abi::{self, SpawnDesc, SpawnReject, CPU_UNLIMITED, MAX_CHILDREN, SPAWN_DESC_SIZE};
+use kernel_core::spawn_abi::{self, SpawnDesc, SpawnReject, CPU_UNLIMITED, SPAWN_DESC_SIZE};
 
 use super::{receiver, ProcError, ProcState};
 use crate::kobj::{self, KObject};
@@ -48,6 +49,23 @@ const STACK_PAGES: u64 = 4;
 const CHILD_NAME: &str = "spawned";
 /// 每次创建前最多销毁的死亡对象数（有界：系统调用路径上的额外工作不随积压增长）。
 const RECLAIM_BUDGET: usize = 32;
+/// Runtime-derived parent child-handle allowance; zero before capacity admission.
+static CHILD_LIMIT: AtomicUsize = AtomicUsize::new(0);
+
+/// Install the child allowance derived from the runtime-admitted task table.
+pub fn init_child_limit(tasks: usize) -> bool {
+    let limit = spawn_abi::child_limit(tasks);
+    if limit == 0 {
+        return false;
+    }
+    CHILD_LIMIT.store(limit, Ordering::Release);
+    kprintln!("[JSR-SPAWN] child_limit={} tasks={} source=boot_capacity", limit, tasks);
+    true
+}
+
+fn child_limit() -> usize {
+    CHILD_LIMIT.load(Ordering::Acquire)
+}
 
 /// 创建成功：父进程中的两个句柄。
 /// Handles the parent receives on success.
@@ -140,7 +158,7 @@ pub fn spawn_child_with_workload(
     // 预检（不改状态）：父进程仍在运行、配额未满、句柄表放得下两个句柄
     kobj::with(|t| {
         let p = receiver(t, parent).map_err(SpawnError::Proc)?;
-        if p.spawned_live as usize >= MAX_CHILDREN {
+        if p.spawned_live as usize >= child_limit() {
             return Err(SpawnError::TooManyChildren);
         }
         if p.handles.free_slots() < 2 {
@@ -193,7 +211,7 @@ pub fn spawn_child_with_workload(
     let handed = kobj::with(|t| {
         let r = (|| {
             let p = receiver(t, parent)?;
-            if p.spawned_live as usize >= MAX_CHILDREN {
+            if p.spawned_live as usize >= child_limit() {
                 return Err(ProcError::NoTaskSlot);
             }
             let rights = Rights::WAIT.union(Rights::SUBSCRIBE);

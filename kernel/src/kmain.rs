@@ -11,7 +11,7 @@ use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
 use crate::plan;
 use crate::{
-    assembly, bootcap, clock, config, irq, kprint, kprintln, mm, pci, profile, sched, smp,
+    assembly, bootcap, clock, config, irq, kprint, kprintln, mm, pci, proc, profile, sched, smp,
 };
 use kernel_core::boot_stage::{
     plan_check, PlanItem, PlanSummary, Stage, StageError, StageState, Tracker,
@@ -246,6 +246,9 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         // 这样阶段只保留容量验证这一真实内存顺序约束。
         Stage::Capacity => stage(ctx, s, |ctx| {
             let cap = bootcap::validate();
+            if !proc::spawn::init_child_limit(cap.tasks) {
+                return None;
+            }
             ctx.capacity = Some(cap);
             Some(())
         }),

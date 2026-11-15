@@ -28,9 +28,17 @@ pub const SPAWN_DESC_VERSION: u16 = 2;
 /// 子进程映像（ELF）的字节数上限：内核要把它复制进内核缓冲区，必须有界。
 /// Upper bound on the child image size.
 pub const MAX_IMAGE_BYTES: u64 = 2 * 1024 * 1024;
-/// 每个进程同时持有（以进程句柄计）的、由它创建的子进程数上限（防止无界地创建进程）。
-/// Upper bound on children a process holds at once.
-pub const MAX_CHILDREN: usize = 8;
+/// Derive a parent's child-handle allowance from the admitted task inventory.
+///
+/// Policy: one parent may retain at most one eighth of task slots, with at
+/// least one child and at least one slot left for the parent itself. The final
+/// global process/task admission remains authoritative.
+pub fn child_limit(tasks: usize) -> usize {
+    if tasks <= 1 {
+        return 0;
+    }
+    (tasks / 8).max(1).min(tasks - 1)
+}
 /// CPU 上限的取值上界（千分比；1000 = 不限）。
 pub const CPU_UNLIMITED: u32 = 1000;
 /// CPU 上限的取值下界（千分比）：太小的上限会让子进程几乎无法前进，按参数非法拒绝。
@@ -408,5 +416,20 @@ mod tests {
         assert!(decoded.calls.contains(64));
         assert!(!decoded.calls.contains(63));
         assert!(!decoded.calls.contains(65));
+    }
+
+    #[test]
+    fn child_limit_follows_admitted_task_capacity() {
+        assert_eq!(child_limit(0), 0);
+        assert_eq!(child_limit(1), 0);
+        assert_eq!(child_limit(8), 1);
+        assert_eq!(child_limit(32), 4);
+        assert_eq!(child_limit(64), 8);
+        assert_eq!(child_limit(1024), 128);
+        for tasks in 2..=1024 {
+            let limit = child_limit(tasks);
+            assert!(limit > 0);
+            assert!(limit < tasks);
+        }
     }
 }
