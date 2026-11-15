@@ -2,7 +2,7 @@
 //! x86_64 device MSI vectors: range selection, IDT entries, message encoding and delivery.
 //!
 //! # 职责
-//! * 为设备 MSI 保留一段不与其他用途冲突的向量：`0x60..=0x6F`。
+//! * 为设备 MSI 使用架构允许的完整外部设备向量窗口：`0x60..=0xEF`。
 //!   已占用：`0x00–0x1F` 处理器异常、`0x20–0x2F` 8259、`0x50/0x51` I/O APIC 设备线、
 //!   `0xEC` 本地定时器、`0xF0–0xF2` 核间中断、`0xFF` 伪中断。
 //! * 为这段向量各装一个 IDT 入口。入口只做两件事：把向量交给 Core 的 `irq::on_msi`
@@ -22,15 +22,19 @@ use crate::arch::{MsiMessage, MsiRange};
 
 /// 设备 MSI 向量范围的第一个向量。
 pub const FIRST_VECTOR: u8 = 0x60;
+/// 外部设备向量窗口终点（不含）。
+pub const END_VECTOR: u8 = 0xF0;
+/// 本地 APIC 定时器在该窗口中的保留向量。
+const LOCAL_TIMER_VECTOR: u8 = 0xEC;
 /// 设备 MSI 向量个数。
-pub const VECTOR_COUNT: u8 = 16;
+pub const VECTOR_COUNT: u8 = END_VECTOR - FIRST_VECTOR - 1;
 
 /// 固定投递的 MSI 消息地址基址（本地 APIC 消息地址）。
 const MSI_ADDRESS_BASE: u64 = 0xFEE0_0000;
 
 /// 向量是否落在本平台的设备 MSI 范围内。
 fn in_range(vector: u8) -> bool {
-    (FIRST_VECTOR..FIRST_VECTOR + VECTOR_COUNT).contains(&vector)
+    (FIRST_VECTOR..END_VECTOR).contains(&vector) && vector != LOCAL_TIMER_VECTOR
 }
 
 /// 可用的向量范围。
@@ -67,49 +71,10 @@ pub fn trigger(cpu: usize, vector: u8) -> Result<(), kernel_core::msi::MsiError>
     }
 }
 
-/// 设备 MSI 的 IDT 入口：交给 Core 处理后 EOI。
-macro_rules! msi_entry {
-    ($name:ident, $vector:expr) => {
-        extern "x86-interrupt" fn $name(_frame: InterruptStackFrame) {
-            crate::irq::on_msi($vector);
-            apic::eoi();
-        }
-    };
+mod generated {
+    use super::*;
+    include!(concat!(env!("OUT_DIR"), "/x86_msi_entries.rs"));
 }
 
-msi_entry!(vector_0x60, FIRST_VECTOR);
-msi_entry!(vector_0x61, FIRST_VECTOR + 1);
-msi_entry!(vector_0x62, FIRST_VECTOR + 2);
-msi_entry!(vector_0x63, FIRST_VECTOR + 3);
-msi_entry!(vector_0x64, FIRST_VECTOR + 4);
-msi_entry!(vector_0x65, FIRST_VECTOR + 5);
-msi_entry!(vector_0x66, FIRST_VECTOR + 6);
-msi_entry!(vector_0x67, FIRST_VECTOR + 7);
-msi_entry!(vector_0x68, FIRST_VECTOR + 8);
-msi_entry!(vector_0x69, FIRST_VECTOR + 9);
-msi_entry!(vector_0x6a, FIRST_VECTOR + 10);
-msi_entry!(vector_0x6b, FIRST_VECTOR + 11);
-msi_entry!(vector_0x6c, FIRST_VECTOR + 12);
-msi_entry!(vector_0x6d, FIRST_VECTOR + 13);
-msi_entry!(vector_0x6e, FIRST_VECTOR + 14);
-msi_entry!(vector_0x6f, FIRST_VECTOR + 15);
-
-/// 向量号与对应入口（供 IDT 初始化按下标安装）。
-pub(super) const ENTRIES: [(u8, extern "x86-interrupt" fn(InterruptStackFrame)); VECTOR_COUNT as usize] = [
-    (FIRST_VECTOR, vector_0x60),
-    (FIRST_VECTOR + 1, vector_0x61),
-    (FIRST_VECTOR + 2, vector_0x62),
-    (FIRST_VECTOR + 3, vector_0x63),
-    (FIRST_VECTOR + 4, vector_0x64),
-    (FIRST_VECTOR + 5, vector_0x65),
-    (FIRST_VECTOR + 6, vector_0x66),
-    (FIRST_VECTOR + 7, vector_0x67),
-    (FIRST_VECTOR + 8, vector_0x68),
-    (FIRST_VECTOR + 9, vector_0x69),
-    (FIRST_VECTOR + 10, vector_0x6a),
-    (FIRST_VECTOR + 11, vector_0x6b),
-    (FIRST_VECTOR + 12, vector_0x6c),
-    (FIRST_VECTOR + 13, vector_0x6d),
-    (FIRST_VECTOR + 14, vector_0x6e),
-    (FIRST_VECTOR + 15, vector_0x6f),
-];
+/// 向量号与对应入口（供 IDT 初始化逐项安装）。
+pub(super) use generated::ENTRIES;

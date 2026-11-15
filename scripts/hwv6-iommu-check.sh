@@ -48,6 +48,7 @@ grep -aq '^\[JSR-HWV6-DMA-FAULT\].*phase=unbind ok=true' "$OUT/serial.log"
 grep -aq '^\[JSR-HWV6-DMA-FAULT\].*phase=unbound ok=true' "$OUT/serial.log"
 grep -aq '^\[JSR-HWV6-IR\].*remapped=true compatibility_blocked=true ok=true' \
   "$OUT/serial.log"
+grep -aq '^\[JSR-MSI\] range first=0x60 vectors=143' "$OUT/serial.log"
 grep -aq '^\[JSR-HWV6-LIFECYCLE\] exclusive=true authorized=true denied=true revoked=true old_dma=false irq_clean=true resources=true' \
   "$OUT/serial.log"
 ! grep -aqE '^\[JSR-HWV6-FAIL\]|^\[JSR-PANIC\]|panicked at|KERNEL PANIC' \

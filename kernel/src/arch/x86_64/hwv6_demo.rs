@@ -707,6 +707,11 @@ fn run_rtl(boot: &BootSpec) -> bool {
     let online = sched::online_cpus();
     let cpu = online.iter().next().unwrap_or(0);
     let range = arch::msi_vector_range().expect("x86 MSI vector range");
+    kprintln!(
+        "[JSR-MSI] range first=0x{:02x} vectors={}",
+        range.first,
+        range.count
+    );
     let pool = VectorPool::new(range.first, range.count, online).expect("MSI vector pool");
     let vector = pool.alloc(cpu).expect("MSI vector");
     let _ = irq::msi_bind(cpu, vector.get(), Some(msi_handler));
@@ -889,6 +894,11 @@ pub fn run(boot: &BootSpec) {
     let online = sched::online_cpus();
     let cpu = online.iter().next().unwrap_or(0);
     let range = arch::msi_vector_range().expect("x86 MSI vector range");
+    kprintln!(
+        "[JSR-MSI] range first=0x{:02x} vectors={}",
+        range.first,
+        range.count
+    );
     let pool = VectorPool::new(range.first, range.count, online).expect("MSI vector pool");
     let vector = pool.alloc(cpu).expect("MSI vector");
     let _ = irq::msi_bind(cpu, vector.get(), Some(msi_handler));
