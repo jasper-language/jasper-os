@@ -153,7 +153,10 @@ pub unsafe fn start(req: &CpuStart<space::SpaceRoot>) -> Result<(), SmpError> {
 #[no_mangle]
 extern "C" fn jsr_rv_secondary_main(index: usize) -> ! {
     // SAFETY：本处理器刚以内核地址空间打开地址转换，此处只设置本处理器的状态位。
-    unsafe { mmu::configure_hart() };
+    if !unsafe { mmu::configure_hart() } {
+        crate::console::write_str("[JSR-SMP] secondary reject=sstatus-not-disabled\n");
+        crate::arch::halt_forever();
+    }
     trap::init();
     cpu::enable_sources(cpu::SIE_SSIE);
     timer::init(AP_TIMER_HZ.load(Ordering::Relaxed));

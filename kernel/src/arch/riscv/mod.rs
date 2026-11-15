@@ -93,6 +93,14 @@ impl Platform for Riscv {
     }
 
     fn early_init() {
+        // SAFETY: runs once on the boot hart and only clears/rechecks supervisor state.
+        if !unsafe { mmu::configure_hart() } {
+            crate::console::write_str("[JSR-EXTSTATE] failure reason=riscv-sstatus-not-disabled\n");
+            Self::exit_emulator(ExitStatus::Failure);
+        }
+        crate::console::write_str(
+            "[JSR-EXTSTATE] arch=riscv fs=0 sum=0 f=d=v=disabled source=fail-closed\n",
+        );
         trap::init();
         crate::console::write_str("[JSR-VEC] ok\n");
     }

@@ -48,6 +48,7 @@ pub unsafe fn enter(entry: u64, stack: u64, arg0: u64, arg1: u64) -> ! {
     let top = this_cpu_top().load(Ordering::Relaxed);
     assert!(top != 0 && top % 16 == 0, "进入用户态前未设置内核栈顶");
     asm!(
+        "msr cpacr_el1, xzr",
         "mov sp, x4",
         "sub sp, sp, #{frame}",
         "mov x9, sp",

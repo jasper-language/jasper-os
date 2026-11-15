@@ -88,6 +88,13 @@ impl Platform for Aarch64 {
     fn early_init() {
         vectors::init();
         crate::console::write_str("[JSR-VEC] ok\n");
+        if !mmu::extensions_disabled() {
+            crate::console::write_str("[JSR-EXTSTATE] failure reason=aarch64-cpacr-not-disabled\n");
+            Self::exit_emulator(ExitStatus::Failure);
+        }
+        crate::console::write_str(
+            "[JSR-EXTSTATE] arch=aarch64 cpacr_el1=0 fp=simd=sve=disabled source=fail-closed\n",
+        );
     }
 
     fn irq_init(timer_hz: u32) {

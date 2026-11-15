@@ -217,3 +217,8 @@ pub unsafe fn enable() {
     write_sysreg!("sctlr_el1", SCTLR);
     cpu::isb();
 }
+
+/// Whether EL0/EL1 FP, SIMD and SVE/SME access remains disabled.
+pub fn extensions_disabled() -> bool {
+    read_sysreg!("cpacr_el1") == 0
+}

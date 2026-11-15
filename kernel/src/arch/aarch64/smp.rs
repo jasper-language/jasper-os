@@ -240,6 +240,10 @@ pub unsafe fn start(req: &CpuStart<space::SpaceRoot>) -> Result<(), SmpError> {
 #[no_mangle]
 extern "C" fn jsr_a64_secondary_main(index: u64) -> ! {
     let index = index as usize;
+    if !mmu::extensions_disabled() {
+        crate::console::write_str("[JSR-SMP] secondary reject=cpacr-not-disabled\n");
+        crate::arch::halt_forever();
+    }
     vectors::init();
     let ready = timer::interrupt().is_some_and(gic::init_cpu) && gic::record_interface(index) != 0;
     if !ready {
