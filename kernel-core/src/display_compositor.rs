@@ -14,8 +14,6 @@
 
 use crate::display_input::{DisplayInputError, PixelLayout, SurfaceSpec};
 
-pub const MAX_COMPOSITOR_LAYERS: usize = 16;
-
 /// Stable layer identity. A destroyed slot never revives the same key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LayerKey {
