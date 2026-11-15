@@ -54,8 +54,17 @@ pub struct Device {
     /// 有效能力条数（`caps[..cap_count]`）。
     /// Number of valid capability records.
     pub cap_count: usize,
-    /// 能力链遍历或能力字段读取失败（不把部分结果当成完整结果）。
-    /// The chain walk or a capability-field read failed.
+    /// 能力链上发现的目标厂商能力总数（包括因固定容量未保留的条目）。
+    /// Number of matching vendor capabilities discovered on the chain.
+    pub cap_discovered: usize,
+    /// 固定容量内保留的目标厂商能力条数。
+    /// Number of matching vendor capabilities retained in the fixed snapshot.
+    pub cap_admitted: usize,
+    /// 固定容量已满后仍发现的目标厂商能力条数。
+    /// Number of matching vendor capabilities observed after capacity was reached.
+    pub cap_truncated: usize,
+    /// 能力链遍历失败、能力字段读取失败或固定容量截断（不把部分结果当成完整结果）。
+    /// The chain walk, a capability-field read, or fixed-capacity completeness failed.
     pub caps_error: bool,
     /// 解析得到的 MSI 能力（每功能至多一个；没有时为 `None`）。
     /// Parsed MSI capability, at most one per function.
@@ -276,7 +285,7 @@ fn build(config: &mut dyn ConfigSpace, mechanism: PciMechanism, buses: core::ops
             out.restored = false;
             kprintln!("[JSR-PCI] error restore bdf={}", format_bdf(function.bdf));
         }
-        let (caps, cap_count, caps_error) = probe_capabilities(config, function.bdf);
+        let snapshot = probe_capabilities(config, function.bdf);
         let (msi, msi_error) = match core_pci::parse_msi(config, function.bdf) {
             Ok(cap) => (cap, None),
             Err(e) => {
@@ -295,9 +304,12 @@ fn build(config: &mut dyn ConfigSpace, mechanism: PciMechanism, buses: core::ops
             bdf: function.bdf,
             header: function.header,
             bars,
-            caps,
-            cap_count,
-            caps_error,
+            caps: snapshot.caps,
+            cap_count: snapshot.cap_count,
+            cap_discovered: snapshot.discovered,
+            cap_admitted: snapshot.admitted,
+            cap_truncated: snapshot.truncated,
+            caps_error: snapshot.error,
             msi,
             msix,
             msi_error,
@@ -305,12 +317,15 @@ fn build(config: &mut dyn ConfigSpace, mechanism: PciMechanism, buses: core::ops
         };
         out.bars += device.bar_count();
         kprintln!(
-            "[JSR-PCI] dev bdf={} vendor=0x{:04x} device=0x{:04x} class=0x{:06x} bars={}",
+            "[JSR-PCI] dev bdf={} vendor=0x{:04x} device=0x{:04x} class=0x{:06x} bars={} caps_discovered={} caps_admitted={} caps_truncated={}",
             format_bdf(device.bdf),
             device.header.vendor,
             device.header.device,
             class_code(&device.header),
-            device.bar_count()
+            device.bar_count(),
+            device.cap_discovered,
+            device.cap_admitted,
+            device.cap_truncated
         );
         out.entries[out.count] = Some(Box::new(device));
         out.count += 1;
@@ -321,30 +336,40 @@ fn build(config: &mut dyn ConfigSpace, mechanism: PciMechanism, buses: core::ops
 /// 遍历一个功能的配置空间能力链，只保留厂商专有能力（0x09）并解析 virtio 1.x 的四个字段。
 ///
 /// 能力链遍历复用 `kernel_core::pci::for_each_capability`；字段读取失败时返回 `caps_error = true`，
-/// 调用方不得把部分结果当成完整能力表。能力条数超过 [`MAX_CAPABILITIES`] 时只保留前面的条目并继续，
-/// 不改变设备是否存在这一事实。
+/// 调用方不得把部分结果当成完整能力表。能力条数超过 [`MAX_CAPABILITIES`] 时保留前面的条目，
+/// 但必须报告截断并让需要完整性的消费者失败关闭。
 /// Snapshot vendor-specific capabilities of one function, reusing the DRV-1A chain walker.
+struct CapabilitySnapshot {
+    caps: [CapabilityRecord; MAX_CAPABILITIES],
+    cap_count: usize,
+    discovered: usize,
+    admitted: usize,
+    truncated: usize,
+    error: bool,
+}
+
 fn probe_capabilities(
     cfg: &mut dyn ConfigSpace,
     bdf: Bdf,
-) -> ([CapabilityRecord; MAX_CAPABILITIES], usize, bool) {
-    let mut offsets = [0u8; MAX_CAPABILITIES];
-    let mut count = 0usize;
-    let walked = core_pci::for_each_capability(cfg, bdf, |id, at| {
-        if id == CAP_ID_VENDOR && count < MAX_CAPABILITIES {
-            offsets[count] = at;
-            count += 1;
-        }
-        true
-    });
-    if walked.is_err() {
-        return ([CapabilityRecord::NONE; MAX_CAPABILITIES], 0, true);
+) -> CapabilitySnapshot {
+    let scan =
+        core_pci::scan_capability_offsets::<MAX_CAPABILITIES>(cfg, bdf, CAP_ID_VENDOR);
+    let mut snapshot = CapabilitySnapshot {
+        caps: [CapabilityRecord::NONE; MAX_CAPABILITIES],
+        cap_count: 0,
+        discovered: scan.discovered(),
+        admitted: scan.admitted(),
+        truncated: scan.truncated(),
+        error: scan.error().is_some() || scan.truncated() != 0,
+    };
+    if scan.error().is_some() {
+        return snapshot;
     }
-    let mut caps = [CapabilityRecord::NONE; MAX_CAPABILITIES];
     let mut valid = 0usize;
-    for at in offsets.iter().take(count) {
+    for at in scan.offsets() {
         let Some(header) = cfg.read32(bdf, *at as u16) else {
-            return ([CapabilityRecord::NONE; MAX_CAPABILITIES], 0, true);
+            snapshot.error = true;
+            return snapshot;
         };
         // virtio 能力结构固定 16 字节；更短的厂商专有能力不是 virtio 能力，跳过而不猜测字段。
         let cap_len = ((header >> 16) & 0xFF) as u8;
@@ -352,15 +377,18 @@ fn probe_capabilities(
             continue;
         }
         let Some(fields) = cfg.read32(bdf, *at as u16 + 4) else {
-            return ([CapabilityRecord::NONE; MAX_CAPABILITIES], 0, true);
+            snapshot.error = true;
+            return snapshot;
         };
         let Some(offset) = cfg.read32(bdf, *at as u16 + 8) else {
-            return ([CapabilityRecord::NONE; MAX_CAPABILITIES], 0, true);
+            snapshot.error = true;
+            return snapshot;
         };
         let Some(length) = cfg.read32(bdf, *at as u16 + 12) else {
-            return ([CapabilityRecord::NONE; MAX_CAPABILITIES], 0, true);
+            snapshot.error = true;
+            return snapshot;
         };
-        caps[valid] = CapabilityRecord {
+        snapshot.caps[valid] = CapabilityRecord {
             pci_offset: *at,
             id: (header & 0xFF) as u8,
             // 字节 3 是 cfg_type；字节 4 是 BAR 号，随后是 id 与保留字节。
@@ -371,7 +399,8 @@ fn probe_capabilities(
         };
         valid += 1;
     }
-    (caps, valid, false)
+    snapshot.cap_count = valid;
+    snapshot
 }
 
 /// 读取标准头前 64 字节；任一读失败返回 `None`（不把「读不到」当成「没变化」）。

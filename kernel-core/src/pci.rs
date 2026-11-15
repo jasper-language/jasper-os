@@ -434,6 +434,91 @@ pub fn for_each_capability(
     if at == 0 { Ok(()) } else { Err(PciError::BadCapability) }
 }
 
+/// Bounded snapshot of capability offsets for one capability ID.
+///
+/// `discovered` counts every matching entry seen on the chain, `admitted`
+/// counts offsets retained in the fixed array, and `truncated` counts matches
+/// observed after capacity was reached. A truncated or malformed scan is never
+/// a complete snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityScan<const N: usize> {
+    offsets: [u8; N],
+    discovered: usize,
+    admitted: usize,
+    truncated: usize,
+    error: Option<PciError>,
+}
+
+impl<const N: usize> CapabilityScan<N> {
+    pub const fn empty() -> Self {
+        Self {
+            offsets: [0; N],
+            discovered: 0,
+            admitted: 0,
+            truncated: 0,
+            error: None,
+        }
+    }
+
+    /// Retained offsets in chain order.
+    pub fn offsets(&self) -> &[u8] {
+        &self.offsets[..self.admitted]
+    }
+
+    /// Number of matching capabilities observed on the chain.
+    pub const fn discovered(&self) -> usize {
+        self.discovered
+    }
+
+    /// Number of matching capabilities retained in this snapshot.
+    pub const fn admitted(&self) -> usize {
+        self.admitted
+    }
+
+    /// Number of matching capabilities observed after the fixed capacity filled.
+    pub const fn truncated(&self) -> usize {
+        self.truncated
+    }
+
+    /// Chain-walk or configuration-read failure.
+    pub const fn error(&self) -> Option<PciError> {
+        self.error
+    }
+
+    /// Whether this is a complete, error-free snapshot.
+    pub const fn is_complete(&self) -> bool {
+        self.error.is_none() && self.truncated == 0
+    }
+}
+
+/// Scans one capability ID without hiding fixed-capacity overflow.
+///
+/// The whole chain is always walked so the returned counters describe hardware
+/// discovery rather than how much the caller happened to retain.
+pub fn scan_capability_offsets<const N: usize>(
+    cfg: &mut dyn ConfigSpace,
+    bdf: Bdf,
+    target_id: u8,
+) -> CapabilityScan<N> {
+    let mut scan = CapabilityScan::<N>::empty();
+    let result = for_each_capability(cfg, bdf, |id, at| {
+        if id == target_id {
+            scan.discovered = scan.discovered.saturating_add(1);
+            if scan.admitted < N {
+                scan.offsets[scan.admitted] = at;
+                scan.admitted += 1;
+            } else {
+                scan.truncated = scan.truncated.saturating_add(1);
+            }
+        }
+        true
+    });
+    if let Err(error) = result {
+        scan.error = Some(error);
+    }
+    scan
+}
+
 // ---------------------------------------------------------------------------
 // MSI / MSI-X 能力
 // ---------------------------------------------------------------------------
@@ -1294,6 +1379,36 @@ mod tests {
         with_caps(&mut m, odd, &[(0x09, 0x40, 0x52)]); // 未对齐
         assert_eq!(for_each_capability(&mut m, odd, |_, _| true), Err(PciError::BadCapability));
         assert_eq!(PciError::BadCapability.name(), "system.device.error.bad_capability");
+    }
+
+    #[test]
+    fn capability_scan_reports_capacity_truncation_instead_of_hiding_it() {
+        let mut m = Model::default();
+        let d = bdf(0, 1, 0);
+        m.add(d, 0x1AF4, 0x1041, 0, 0);
+        let chain: Vec<(u8, u8, u8)> = (0..17)
+            .map(|index| {
+                let at = 0x40 + index * 4;
+                let next = if index == 16 { 0 } else { at + 4 };
+                (0x09, at, next)
+            })
+            .collect();
+        with_caps(&mut m, d, &chain);
+
+        let bounded = scan_capability_offsets::<16>(&mut m, d, 0x09);
+        assert_eq!(bounded.discovered(), 17);
+        assert_eq!(bounded.admitted(), 16);
+        assert_eq!(bounded.truncated(), 1);
+        assert_eq!(bounded.error(), None);
+        assert!(!bounded.is_complete());
+        assert_eq!(bounded.offsets().len(), 16);
+
+        let complete = scan_capability_offsets::<32>(&mut m, d, 0x09);
+        assert_eq!(complete.discovered(), 17);
+        assert_eq!(complete.admitted(), 17);
+        assert_eq!(complete.truncated(), 0);
+        assert!(complete.is_complete());
+        assert_eq!(complete.offsets(), chain.iter().map(|entry| entry.1).collect::<Vec<_>>());
     }
 
     #[test]
