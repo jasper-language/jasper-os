@@ -39,8 +39,8 @@ pub fn init_registry(tasks: usize) -> bool {
         return false;
     };
     let plan = WorkloadRegistryPlan {
-        workloads: plan.workloads.min(MAX_WORKLOADS),
-        members: plan.members.min(MAX_WORKLOAD_MEMBERS),
+        workloads: plan.workloads.min(MAX_WORKLOADS), // JASPER-HARDCODE-REVIEW: issue=33 source=runtime budget and fixed storage envelope reason=runtime admission only shrinks the current table and logs dynamic=false
+        members: plan.members.min(MAX_WORKLOAD_MEMBERS), // JASPER-HARDCODE-REVIEW: issue=33 source=runtime budget and fixed storage envelope reason=runtime admission only shrinks the current table and logs dynamic=false
     };
     crate::kprintln!(
         "[JSR-WORKLOAD] capacity workloads={} members={} tasks={} budget={} fixed_workloads={} fixed_members={} dynamic=false",
