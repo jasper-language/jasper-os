@@ -206,6 +206,15 @@ fn main() {
             println!("cargo:rerun-if-changed={}", path.display());
             println!("cargo:rustc-env={target}={}", path.display());
         }
+        let initramfs = std::env::var_os("JSR_LINUX_GUEST_INITRAMFS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/dev/null"));
+        println!("cargo:rerun-if-env-changed=JSR_LINUX_GUEST_INITRAMFS");
+        println!("cargo:rerun-if-changed={}", initramfs.display());
+        println!(
+            "cargo:rustc-env=JSR_LINUX_GUEST_INITRAMFS={}",
+            initramfs.display()
+        );
     }
     if std::env::var_os("CARGO_FEATURE_COMPAT_DYNAMIC_LIBC_VERIFY").is_some()
         || std::env::var_os("CARGO_FEATURE_LIFECYCLE_ROOT_EXEC_VERIFY").is_some()

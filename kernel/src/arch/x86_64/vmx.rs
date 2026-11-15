@@ -1082,6 +1082,7 @@ impl LinuxPlatform for NoLinuxDevices {
 }
 
 const LINUX_MARKER: &[u8] = b"[JSR-LINUX-GUEST]";
+const LINUX_DONE_MARKER: &[u8] = b"[JSR-LINUX-GUEST] done=true";
 const PIO_MARKER: &[u8] = b"[JSR-HWV5-PIO]";
 
 const PIO_PIC_MASTER: u16 = 1;
@@ -1098,9 +1099,11 @@ struct LinuxRuntime {
     uart_ier: u8,
     uart_mcr: u8,
     serial_match: usize,
+    done_match: usize,
     pio_match: usize,
     serial_bytes: u32,
     marker_seen: bool,
+    done_seen: bool,
     pio_marker_seen: bool,
     pic_master_mask: u8,
     pic_slave_mask: u8,
@@ -1138,9 +1141,11 @@ impl LinuxRuntime {
             uart_ier: 0,
             uart_mcr: 0,
             serial_match: 0,
+            done_match: 0,
             pio_match: 0,
             serial_bytes: 0,
             marker_seen: false,
+            done_seen: false,
             pio_marker_seen: false,
             pic_master_mask: 0xff,
             pic_slave_mask: 0xff,
@@ -1193,6 +1198,16 @@ impl LinuxRuntime {
                 }
             } else {
                 self.serial_match = usize::from(byte == LINUX_MARKER[0]);
+            }
+        }
+        if !self.done_seen {
+            if byte == LINUX_DONE_MARKER[self.done_match] {
+                self.done_match += 1;
+                if self.done_match == LINUX_DONE_MARKER.len() {
+                    self.done_seen = true;
+                }
+            } else {
+                self.done_match = usize::from(byte == LINUX_DONE_MARKER[0]);
             }
         }
         if !self.pio_marker_seen {
@@ -1284,7 +1299,14 @@ impl LinuxRuntime {
                     self.pic_init_stage[1] = 1;
                     self.pic_slave_mask = 0xff;
                 } else if value & 0x20 != 0 {
-                    // Slave EOI is not needed for the UP timer path.
+                    let irq = self
+                        .pic_in_service
+                        .checked_shr(8)
+                        .map(|bits| bits.trailing_zeros().saturating_add(8))
+                        .unwrap_or(15)
+                        .min(15);
+                    self.pic_in_service &= !(1u16 << irq);
+                    self.pic_eois = self.pic_eois.saturating_add(1);
                 }
             }
             0xa1 => self.pic_slave_mask = value,
@@ -1511,14 +1533,27 @@ impl LinuxRuntime {
     }
 
     fn raise_irq(&mut self, irq: u8) -> Option<u8> {
-        if irq >= 8
-            || self.pic_master_mask & (1u8 << irq) != 0
-            || self.pic_in_service & (1u16 << irq) != 0
-        {
+        if self.pic_in_service & (1u16 << irq) != 0 {
             return None;
         }
-        self.pic_in_service |= 1u16 << irq;
-        Some(self.pic_master_vector.wrapping_add(irq))
+        if irq < 8 {
+            if self.pic_master_mask & (1u8 << irq) != 0 {
+                return None;
+            }
+            self.pic_in_service |= 1u16 << irq;
+            return Some(self.pic_master_vector.wrapping_add(irq));
+        }
+        if irq < 16 {
+            let line = irq - 8;
+            if self.pic_master_mask & (1u8 << 2) != 0
+                || self.pic_slave_mask & (1u8 << line) != 0
+            {
+                return None;
+            }
+            self.pic_in_service |= (1u16 << 2) | (1u16 << irq);
+            return Some(self.pic_slave_vector.wrapping_add(line));
+        }
+        None
     }
 }
 
@@ -1808,6 +1843,36 @@ impl VmxVm {
                     });
                 }
                 EXIT_HLT => {
+                    if linux.done_seen {
+                        report.halted = true;
+                        report.serial_bytes = linux.serial_bytes;
+                        report.linux_marker = linux.marker_seen;
+                        return Ok(LinuxReport {
+                            exits: report.exits,
+                            serial_bytes: report.serial_bytes,
+                            timer_interrupts: linux.timer_injections,
+                            timer_eois: linux.pic_eois,
+                            pio_reads: linux.pio_reads,
+                            pio_writes: linux.pio_writes,
+                            pio_probe_generation: linux.pio_probe.generation(),
+                            pio_requests: linux.pio_probe.requests(),
+                            pio_cancels: linux.pio_probe.cancels(),
+                            pio_marker: linux.pio_marker_seen,
+                            marker: report.linux_marker,
+                            halted: true,
+                        });
+                    }
+                    if self.guest.state.rflags & 0x200 != 0
+                        && vmread(GUEST_INTERRUPTIBILITY).unwrap_or(1) == 0
+                    {
+                        if let Some(irq) = devices.take_irq() {
+                            if let Some(vector) = linux.raise_irq(irq) {
+                                self.pending_interrupt = Some(vector);
+                                continue;
+                            }
+                            devices.return_irq(irq);
+                        }
+                    }
                     if !linux.marker_seen {
                         self.pending_interrupt = linux.force_timer_interrupt();
                         if self.pending_interrupt.is_some() {

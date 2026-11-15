@@ -23,7 +23,10 @@ const VMM_OBJECT_BASE: u64 = 0x6000;
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static SURFACE_ROTATIONS: AtomicU64 = AtomicU64::new(0);
-static PEP: IrqSpinLock<Hwv5Pep<8, 8, 4096>> =
+// A single Linux early-boot trace regularly exceeds 4096 audited PIO events.
+// Keep a bounded reliable audit, but size it for the complete
+// rng/console/block/net/fs acceptance path; overflow still fails closed.
+static PEP: IrqSpinLock<Hwv5Pep<8, 8, 131072>> =
     IrqSpinLock::ranked(crate::lockorder::HWV5_POLICY, Hwv5Pep::new());
 
 /// 一个设备面在创建时取得的安全世代租约。

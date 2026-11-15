@@ -24,6 +24,7 @@ use core::sync::atomic::{fence, Ordering};
 
 static LINUX_SETUP: &[u8] = include_bytes!(env!("JSR_LINUX_GUEST_HEADER"));
 static LINUX_KERNEL: &[u8] = include_bytes!(env!("JSR_LINUX_GUEST_KERNEL"));
+static LINUX_INITRAMFS: &[u8] = include_bytes!(env!("JSR_LINUX_GUEST_INITRAMFS"));
 
 // The minimal kernel + initramfs boots in 64 MiB. Keep this below Jasper's
 // default 128 MiB machine budget so the guest cap is exercised rather than
@@ -36,6 +37,10 @@ const BOOT_PARAMS: u64 = 0x8000;
 const COMMAND_LINE: u64 = 0x7000;
 const GUEST_STACK: u64 = 0x9f000;
 const KERNEL_BASE: u64 = 0x0100_0000;
+// Keep the initramfs above the kernel's 18 MiB decompression reservation.
+// The 64-bit boot protocol may overwrite low memory while decompressing even
+// when the compressed image is loaded at KERNEL_BASE.
+const INITRAMFS_BASE: u64 = 0x0300_0000;
 const PAGE_2M: u64 = 2 * 1024 * 1024;
 const PAGE_ENTRIES: u64 = GUEST_RAM / PAGE_2M;
 const VIRTIO_RNG_BASE: u64 = 0xd000_0000;
@@ -50,6 +55,7 @@ const VIRTIO_FS_BASE: u64 = 0xd000_4000;
 const VIRTIO_FS_IRQ: u8 = 11;
 const VIRTIO_GPU_BASE: u64 = 0xd000_5000;
 const VIRTIO_GPU_IRQ: u8 = 12;
+const PIO_MARKER_PREFIX: &[u8] = b"[JSR-HWV5-PIO]";
 
 struct VirtioGuestBus {
     pid: kernel_core::objtable::ObjId,
@@ -68,6 +74,8 @@ struct VirtioGuestBus {
     last_avail: [u16; 2],
     console_last_avail: [u16; 2],
     console_bytes: u32,
+    console_pio_marker_match: usize,
+    console_pio_marker_seen: bool,
     block_last_avail: u16,
     block_requests: u32,
     net_rx_last_avail: u16,
@@ -98,7 +106,11 @@ impl VirtioGuestBus {
             net: VirtioMmio::new(
                 VirtioDeviceType::Net,
                 16,
-                [kernel_core::virtio_net::FEATURE_MAC, FEATURE_VERSION_1],
+                [
+                    kernel_core::virtio_net::FEATURE_MAC
+                        | kernel_core::virtio_net::FEATURE_STATUS,
+                    FEATURE_VERSION_1,
+                ],
             ),
             net_backend: VirtioNetBackend::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x57], [10, 0, 2, 2]),
             net_lease: hwv5_policy::lease(Hwv5Surface::Net),
@@ -110,6 +122,8 @@ impl VirtioGuestBus {
             last_avail: [0; 2],
             console_last_avail: [0; 2],
             console_bytes: 0,
+            console_pio_marker_match: 0,
+            console_pio_marker_seen: false,
             block_last_avail: 0,
             block_requests: 0,
             net_rx_last_avail: 0,
@@ -236,6 +250,17 @@ impl VirtioGuestBus {
                 let mut byte = [0u8];
                 if !self.read_guest(address + u64::from(offset), &mut byte) {
                     return;
+                }
+                if self.console_pio_marker_match < PIO_MARKER_PREFIX.len()
+                    && byte[0] == PIO_MARKER_PREFIX[self.console_pio_marker_match]
+                {
+                    self.console_pio_marker_match += 1;
+                    if self.console_pio_marker_match == PIO_MARKER_PREFIX.len() {
+                        self.console_pio_marker_seen = true;
+                    }
+                } else {
+                    self.console_pio_marker_match =
+                        usize::from(byte[0] == PIO_MARKER_PREFIX[0]);
                 }
                 crate::arch::console_write_byte(byte[0]);
             }
@@ -1156,7 +1181,7 @@ impl LinuxPlatform for VirtioGuestBus {
     }
 
     fn return_irq(&mut self, irq: u8) {
-        if irq < 8 {
+        if irq < 16 {
             self.pending_irqs |= 1u16 << irq;
         }
     }
@@ -1301,12 +1326,13 @@ fn run_impl(virtio_rng: bool) -> bool {
             && devices.net_tx_frames != 0
             && devices.net_rx_frames != 0
             && devices.net_rejected == 0);
+    let pio_marker = report.pio_marker || devices.console_pio_marker_seen;
     let virtio_ok = !virtio_rng
         || (devices.rng_requests != 0
             && devices.console_bytes != 0
             && devices.block_requests != 0
             && net_ok
-            && report.pio_marker
+            && pio_marker
             && report.pio_reads != 0
             && report.pio_writes != 0
             && report.pio_probe_generation == 2
@@ -1341,7 +1367,7 @@ fn run_impl(virtio_rng: bool) -> bool {
         report.pio_probe_generation,
         report.pio_requests,
         report.pio_cancels,
-        report.pio_marker,
+        pio_marker,
         report.marker,
         report.halted,
         lifecycle,
@@ -1394,6 +1420,9 @@ fn prepare(
     if init_size == 0 || init_size > GUEST_RAM - KERNEL_BASE {
         return Err(());
     }
+    if LINUX_INITRAMFS.len() > (GUEST_RAM - INITRAMFS_BASE) as usize {
+        return Err(());
+    }
     let alignment = read_u32(LINUX_SETUP, 0x230)? as u64;
     if alignment == 0 || KERNEL_BASE % alignment != 0 {
         return Err(());
@@ -1407,7 +1436,18 @@ fn prepare(
 
     write_bytes(pid, handle, BOOT_PARAMS + 0x1f1, &LINUX_SETUP[0x1f1..0x290])?;
     write_u32(pid, handle, BOOT_PARAMS + 0x0c8, 0);
-    if virtio_rng {
+    let external_initrd = !LINUX_INITRAMFS.is_empty();
+    if virtio_rng && external_initrd {
+        write_bytes(pid, handle, INITRAMFS_BASE, LINUX_INITRAMFS)?;
+        write_u32(pid, handle, BOOT_PARAMS + 0x218, INITRAMFS_BASE as u32);
+        write_u32(pid, handle, BOOT_PARAMS + 0x21c, LINUX_INITRAMFS.len() as u32);
+        write_bytes(
+            pid,
+            handle,
+            COMMAND_LINE,
+            b"earlyprintk=serial earlycon=uart,io,0x3f8,115200 keep_bootcon ignore_loglevel loglevel=7 nokaslr no_timer_check lpj=1000000 panic=-1 init=/init io_delay=none initcall_blacklist=serial8250_init virtio_mmio.device=0x200@0xd0000000:5 virtio_mmio.device=0x200@0xd0001000:6 virtio_mmio.device=0x200@0xd0002000:3 virtio_mmio.device=0x200@0xd0003000:10 virtio_mmio.device=0x200@0xd0004000:11 virtio_mmio.device=0x200@0xd0005000:12\0",
+        )?;
+    } else if virtio_rng {
         write_bytes(
             pid,
             handle,
@@ -1434,8 +1474,6 @@ fn prepare(
     let loadflags = read_u8(LINUX_SETUP, 0x211)? | 1;
     write_u8(pid, handle, BOOT_PARAMS + 0x211, loadflags & !2);
     write_u32(pid, handle, BOOT_PARAMS + 0x214, KERNEL_BASE as u32);
-    write_u32(pid, handle, BOOT_PARAMS + 0x218, 0);
-    write_u32(pid, handle, BOOT_PARAMS + 0x21c, 0);
 
     write_u64(pid, handle, BOOT_PARAMS + 0x2d0, 0);
     write_u64(pid, handle, BOOT_PARAMS + 0x2d8, LINUX_USABLE_RAM);

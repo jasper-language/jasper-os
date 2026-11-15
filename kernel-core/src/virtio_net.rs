@@ -22,6 +22,7 @@ pub const RX_QUEUE_CAPACITY: usize = 4;
 pub const FEATURE_CSUM: u32 = 1 << 0;
 pub const FEATURE_GUEST_CSUM: u32 = 1 << 1;
 pub const FEATURE_MAC: u32 = 1 << 5;
+pub const FEATURE_STATUS: u32 = 1 << 16;
 pub const FEATURE_GSO: u32 = 1 << 27;
 
 const NET_HDR_F_NEEDS_CSUM: u8 = 1;

@@ -307,7 +307,10 @@ impl VirtioFsBackend {
         write_out_header(response, len as u32, 0, header.unique);
         put_u32(response, 16, 7);
         put_u32(response, 20, 31);
-        put_u32(response, 24, 4096);
+        put_u32(response, 24, 0);
+        put_u32(response, 28, 0);
+        put_u32(response, 36, 4096);
+        put_u32(response, 40, 1);
         Ok(len)
     }
 
@@ -521,11 +524,11 @@ fn write_attr(response: &mut [u8], offset: usize, node: u64, size: usize, is_dir
     put_u64(response, offset + 16, 1);
     put_u32(
         response,
-        offset + 48,
+        offset + 60,
         if is_directory { 0o040755 } else { 0o100644 },
     );
-    put_u32(response, offset + 52, if is_directory { 2 } else { 1 });
-    put_u32(response, offset + 72, 4096);
+    put_u32(response, offset + 64, if is_directory { 2 } else { 1 });
+    put_u32(response, offset + 80, 4096);
 }
 
 fn get_u16(bytes: &[u8], offset: usize) -> u16 {
@@ -595,6 +598,9 @@ mod tests {
         );
         assert_eq!(backend.handle_request(&init, &mut response).unwrap(), 80);
         assert_eq!(get_u32(&response, 16), 7);
+        assert_eq!(get_u32(&response, 20), 31);
+        assert_eq!(get_u32(&response, 36), 4096);
+        assert_eq!(get_u32(&response, 40), 1);
 
         let lookup = request(OP_LOOKUP, 2, ROOT_NODE, b"hello.txt\0");
         assert_eq!(
@@ -602,6 +608,10 @@ mod tests {
             FUSE_OUT_HEADER_BYTES + ENTRY_OUT_BYTES
         );
         assert_eq!(get_u64(&response, 16), FILE_NODE);
+        assert_eq!(get_u64(&response, 56), FILE_NODE);
+        assert_eq!(get_u32(&response, 56 + 60), 0o100644);
+        assert_eq!(get_u32(&response, 56 + 64), 1);
+        assert_eq!(get_u32(&response, 56 + 80), 4096);
 
         let handle = open_file(&mut backend);
         assert_eq!(backend.handle_count(), 1);

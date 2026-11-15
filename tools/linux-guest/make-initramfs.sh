@@ -13,7 +13,7 @@ gcc -static -nostdlib -fno-builtin -fno-stack-protector -fno-pie -no-pie \
     "$here/init.c" -o "$work/root/init"
 (
     cd "$work/root"
-    find . -mindepth 1 -print0 | sort -z |
+    find . -print0 | sort -z |
         cpio --null -o --format=newc --owner=0:0 2>/dev/null |
         gzip -9n
 ) > "$out"
