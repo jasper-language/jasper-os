@@ -2572,7 +2572,11 @@ pub(crate) fn linux_ashmem_fscrypt_pwsalt(
 
 /// Opens one bounded Android binder device descriptor.
 #[cfg(feature = "linux-abi")]
-pub(crate) fn linux_open_binder(pid: ObjId, close_on_exec: bool) -> Option<u32> {
+pub(crate) fn linux_open_binder(
+    pid: ObjId,
+    close_on_exec: bool,
+    nonblocking: bool,
+) -> Option<u32> {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
         if linux.binder.len() >= 8 {
@@ -2593,6 +2597,13 @@ pub(crate) fn linux_open_binder(pid: ObjId, close_on_exec: bool) -> Option<u32> 
                 close_on_exec,
             )
             .map_err(|_| ProcError::NoTaskSlot)?;
+        if nonblocking
+            && !linux
+                .fds
+                .set_fd_status_flags(fd.fd(), compat_core::syscall::LINUX_O_NONBLOCK)
+        {
+            return Err(ProcError::NoTaskSlot);
+        }
         linux.next_binder_handle = next;
         linux.binder.push(Arc::new(LinuxBinderHandle {
             handle,

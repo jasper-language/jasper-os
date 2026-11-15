@@ -664,6 +664,55 @@ fn execute_root_dynamic_programs(
         return Err(HealthError::RootExecute);
     }
     install_root_libraries(root)?;
+#[cfg(feature = "android-ecosystem-verify")]
+{
+    let toybox = root
+        .read_file("/usr/bin/toybox", 4 * 1024 * 1024)
+        .map_err(|_| HealthError::RootExecute)?;
+    let uname_argv: [&[u8]; 3] = [b"/usr/bin/toybox", b"uname", b"-a"];
+    let printf_argv: [&[u8]; 3] = [b"/usr/bin/toybox", b"printf", b"toybox-ok\n"];
+    let sha_argv: [&[u8]; 3] = [
+        b"/usr/bin/toybox",
+        b"sha256sum",
+        b"/usr/lib/x86_64-linux-gnu/libc.so.6",
+    ];
+    let frames_before = crate::mm::frame::free_frames();
+    if !crate::compat_dynamic_demo::run_root_static_program(
+        "android-toybox-uname",
+        &toybox,
+        &uname_argv,
+        frames_before,
+        false,
+    ) || !crate::compat_dynamic_demo::run_root_static_program(
+        "android-toybox-printf",
+        &toybox,
+        &printf_argv,
+        frames_before,
+        false,
+    ) || !crate::compat_dynamic_demo::run_root_static_program(
+        "android-toybox-sha256sum",
+        &toybox,
+        &sha_argv,
+        frames_before,
+        false,
+    ) {
+        return Err(HealthError::RootExecute);
+    }
+    let binder_test = root
+        .read_file("/usr/bin/aosp-binder-driver-test", 16 * 1024 * 1024)
+        .map_err(|_| HealthError::RootExecute)?;
+    let binder_argv: [&[u8]; 1] = [b"/usr/bin/aosp-binder-driver-test"];
+    if !crate::compat_dynamic_demo::run_root_static_program(
+        "aosp-binder-driver-test",
+        &binder_test,
+        &binder_argv,
+        crate::mm::frame::free_frames(),
+        false,
+    ) {
+        return Err(HealthError::RootExecute);
+    }
+    return Ok(());
+}
 #[cfg(feature = "android-fixture-verify")]
 {
     let ppid_argv: [&[u8]; 1] = [b"/usr/bin/jasper-getppid"];

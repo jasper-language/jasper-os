@@ -44,6 +44,19 @@ removed interfaces.
 - Android: Binder freeze, references, security contexts, fscrypt, and
   fs-verity.
 
+## Upstream userspace runtime checks
+
+- Unmodified upstream Toybox was built as static PIE and executed through the
+  Jasper UEFI/root-image/Linux ABI path: `uname`, `printf`, and `sha256sum`
+  all exited zero.
+- The unmodified AOSP Binder `binderDriverInterfaceTest.cpp` passed **20/20**
+  cases on the Jasper UEFI path, including transactions, death and freeze
+  notifications, reference commands, ioctl errors, and nonblocking reads.
+- See [ecosystem-runtime-tests.md](ecosystem-runtime-tests.md) for exact
+  evidence and for host-only Wine, DXVK/VKD3D-Proton, Metal2Vulkan, Darling,
+  OpenJDK, ART, and APK baselines. Host results are not counted as Jasper
+  passes.
+
 ## Acceptance evidence
 
 - Full Linux/Android root UEFI:

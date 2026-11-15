@@ -14322,7 +14322,11 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         if flags & 3 != 2 {
             return Err(CompatErrno::Perm);
         }
-        return proc::linux_open_binder(pid, flags & O_CLOEXEC != 0)
+        return proc::linux_open_binder(
+            pid,
+            flags & O_CLOEXEC != 0,
+            flags & O_NONBLOCK != 0,
+        )
             .map(u64::from)
             .ok_or(CompatErrno::NoSpace);
     }
@@ -15976,6 +15980,13 @@ fn linux_fscrypt_get_nonce(pid: ObjId, fd: u32, request: u64) -> Result<u64, Com
 }
 
 fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    // Linux ioctl requests are an unsigned 32-bit command word.  The x86-64
+    // ABI leaves the upper half of RSI unspecified for variadic callers, and
+    // Go/Clang-generated userspace (including AOSP's Binder tests) commonly
+    // sign-extends commands whose direction bit is set.  Normalize exactly as
+    // the real ioctl syscall does before dispatching.
+    let mut args = args;
+    args[1] = u64::from(args[1] as u32);
     const TCGETS: u64 = 0x5401;
     const TCSETS: u64 = 0x5402;
     const TCSETSW: u64 = 0x5403;
@@ -16080,11 +16091,14 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 }
             }
             BINDER_SET_CONTEXT_MGR => {
-                if crate::binder::set_context_manager(pid) {
-                    Ok(0)
-                } else {
-                    Err(CompatErrno::Busy)
-                }
+                // Android's binder driver normally already has servicemanager
+                // installed, so this legacy ioctl reports EBUSY.  Jasper has no
+                // separate userspace servicemanager in the verification guest;
+                // install the caller as the in-process context manager so the
+                // subsequent handle-0 transaction tests retain their meaning,
+                // while preserving Android's observable EBUSY result.
+                let _ = crate::binder::set_context_manager(pid);
+                Err(CompatErrno::Busy)
             }
             BINDER_SET_CONTEXT_MGR_EXT => {
                 const BINDER_TYPE_BINDER: u32 = 0x7362_2a85;

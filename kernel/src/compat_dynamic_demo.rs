@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use compat_core::syscall::{LinuxSyscall, LinuxSyscallSet};
 use jasper_compat_loader::{
     build_initial_stack, map_image, plan_dynamic_program, run_process_entry,
-    stack_input_for_program, ProgramStackInput,
+    stack_input_for_program, ImageLayout, ProgramStackInput,
 };
 use kernel_core::objtable::ObjId;
 use kernel_core::security::ApplicationIdentity;
@@ -838,6 +838,114 @@ fn run_program(
         heap_used_before,
         heap_used_after,
     }
+}
+
+/// Runs an unmodified static Linux ELF from the selected root image.
+///
+/// 运行 System A/B 根卷中的未修改静态 Linux ELF；静态程序自己提供 C 运行时，
+/// 不伪造解释器或动态库。
+#[cfg(feature = "lifecycle-root-exec-verify")]
+pub(crate) fn run_root_static_program(
+    name: &'static str,
+    executable: &[u8],
+    argv: &[&[u8]],
+    frames_before: usize,
+    enforce_resources: bool,
+) -> bool {
+    let calls_before = crate::syscall::call_count();
+    let heap_before = crate::mm::heap::stats();
+    let Ok(pid) = proc::create_linux(name, allowed_calls()) else {
+        return false;
+    };
+    let failed = || {
+        cleanup(pid);
+        false
+    };
+    if proc::set_application(pid, application_identity(name, executable)).is_err()
+        || argv.first().is_none_or(|path| !proc::linux_set_exec_path(pid, path))
+    {
+        return failed();
+    }
+    let plan = match jasper_compat_loader::parse(executable) {
+        Ok(plan) if plan.interpreter.is_none() => plan,
+        _ => return failed(),
+    };
+    let load_bias = if plan.position_independent {
+        EXECUTABLE_BASE
+    } else {
+        0
+    };
+    let image = match ImageLayout::new(&plan, load_bias, kernel_core::frame::FRAME_SIZE) {
+        Ok(image) => image,
+        Err(_) => return failed(),
+    };
+    let stack = match stack_input_for_program(ProgramStackInput {
+        plan: &plan,
+        image: &image,
+        interpreter_base: 0,
+        stack_top: STACK_TOP,
+        argv,
+        envp: &[],
+        auxv: &[],
+        random: Some(&[0x5au8; 16]),
+    })
+    .and_then(build_initial_stack)
+    {
+        Ok(stack) => stack,
+        Err(_) => return failed(),
+    };
+    let mut memory = JasperLoaderMemory::new(pid);
+    if map_image(&mut memory, executable, &image).is_err() {
+        return failed();
+    }
+    let stack_pointer = match map_exec_stack(pid, &stack) {
+        Ok(stack_pointer) => stack_pointer,
+        Err(_) => return failed(),
+    };
+    let entry = image.entry;
+    let started = proc::spawn_thread(pid, name, entry, stack_pointer, 0, 0).is_ok();
+    if started {
+        let deadline = sched::timer_ticks().saturating_add(PROGRAM_DEADLINE_TICKS);
+        let completed = sched::run_until(deadline);
+        if !completed {
+            let _ = proc::begin_exit(pid, 124);
+            let _ = sched::run_until(sched::timer_ticks().saturating_add(100));
+        }
+    }
+    let exited_zero = started && proc::state(pid) == Some(ProcState::Exited { code: 0 });
+    let syscalls = crate::syscall::call_count().saturating_sub(calls_before);
+    drop(memory);
+    drop(image);
+    drop(stack);
+    drop(plan);
+    let frames_after_before_cleanup = crate::mm::frame::free_frames();
+    cleanup(pid);
+    let frames_after = crate::mm::frame::free_frames();
+    let heap_after = crate::mm::heap::stats();
+    let heap_used_before = heap_before.0.saturating_sub(heap_before.1);
+    let heap_used_after = heap_after.0.saturating_sub(heap_after.1);
+    let resources = frames_after == frames_before && heap_used_after == heap_used_before;
+    kprintln!(
+        "[JSR-ANDROID-TOYBOX] program={} static=true mapped={} started={} syscalls={} exit_zero={} frames_before={} frames_after={} resources={}",
+        name,
+        true,
+        started,
+        syscalls,
+        exited_zero,
+        frames_before,
+        frames_after,
+        resources
+    );
+    if !resources {
+        kprintln!(
+            "[JSR-ANDROID-TOYBOX-RESOURCE] name={} frames_after_before_cleanup={} heap_before={} heap_after={}",
+            name,
+            frames_after_before_cleanup,
+            heap_used_before,
+            heap_used_after
+        );
+    }
+    started && exited_zero && syscalls != 0 && (!enforce_resources || resources)
 }
 
 #[cfg(all(
