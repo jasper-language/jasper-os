@@ -24,6 +24,10 @@ pub const USER_FIRST: usize = 32;
 pub const USER_LAST: usize = 64;
 /// 私有窗口对应的虚拟地址区间 `[start, end)`。
 pub const USER_WINDOW: (u64, u64) = ((USER_FIRST as u64) << 39, (USER_LAST as u64) << 39);
+/// Dedicated below-2 GiB private window for Linux `MAP_32BIT` users.
+/// PML4 entry zero's PDPT entry one covers `[1 GiB, 2 GiB)`.
+pub const LOW_USER_WINDOW: (u64, u64) = (1 << 30, 2 << 30);
+const LOW_USER_PDPT_INDEX: usize = 1;
 // 用户态运行时与用户程序的链接地址按同一数值布局：两边必须一致。
 const _: () = assert!(USER_WINDOW.0 == kernel_core::user_layout::WINDOW_BASE_X86_64);
 
@@ -52,11 +56,34 @@ pub unsafe fn create(template: SpaceRoot, phys_offset: u64, frames: &mut dyn Fra
     if (USER_FIRST..USER_LAST).any(|i| !cur[i].is_unused()) {
         return Err(MapError::InvalidAddress);
     }
-    let f = frames.allocate().map_err(|_| MapError::OutOfFrames)?;
+    let low_frame = frames.allocate().map_err(|_| MapError::OutOfFrames)?;
+    let f = match frames.allocate() {
+        Ok(frame) => frame,
+        Err(_) => {
+            let _ = frames.deallocate(low_frame);
+            return Err(MapError::OutOfFrames);
+        }
+    };
     let new = table_at(phys_offset, f.start());
     new.zero();
+    let low = table_at(phys_offset, low_frame.start());
+    low.zero();
+    if !cur[0].is_unused() {
+        let template_low = table_at(phys_offset, cur[0].addr().as_u64());
+        for i in 0..512 {
+            if i != LOW_USER_PDPT_INDEX {
+                low[i] = template_low[i].clone();
+            }
+        }
+    }
+    new[0].set_addr(
+        PhysAddr::new(low_frame.start()),
+        PageTableFlags::PRESENT
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::USER_ACCESSIBLE,
+    );
     for i in 0..512 {
-        if !(USER_FIRST..USER_LAST).contains(&i) {
+        if i != 0 && !(USER_FIRST..USER_LAST).contains(&i) {
             new[i] = cur[i].clone();
         }
     }
@@ -144,6 +171,20 @@ pub unsafe fn switch(root: SpaceRoot) {
 /// `root` 不能是当前活动空间，也不能再被使用。
 pub unsafe fn destroy(root: SpaceRoot, phys_offset: u64, frames: &mut dyn FrameAllocator) {
     let pml4 = table_at(phys_offset, root.0);
+    if !pml4[0].is_unused() {
+        let low_phys = pml4[0].addr().as_u64();
+        let low = table_at(phys_offset, low_phys);
+        free_subtree(
+            &mut low[LOW_USER_PDPT_INDEX],
+            2,
+            phys_offset,
+            frames,
+        );
+        let _ = frames.deallocate(
+            PhysFrame::from_start(low_phys).unwrap_or(PhysFrame::from_number(0)),
+        );
+        pml4[0].set_unused();
+    }
     for i in USER_FIRST..USER_LAST {
         free_subtree(&mut pml4[i], 3, phys_offset, frames);
     }

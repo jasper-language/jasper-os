@@ -9,7 +9,10 @@
 use crate::memory_object::PAGE_BYTES;
 
 pub const MEMORY_CAPABILITY_FORMAT_VERSION: u16 = 1;
-pub const MAX_MEMORY_CAPABILITIES: usize = 256;
+// Real Android/ART processes create hundreds of disjoint executable, anonymous,
+// JIT and thread-stack mappings. Keep enough fixed provenance slots for that
+// working set without making Process destruction exceed the kernel stack budget.
+pub const MAX_MEMORY_CAPABILITIES: usize = 384;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemoryRights(u16);
@@ -199,6 +202,16 @@ impl<const N: usize> MemoryCapabilityTable<N> {
         })
     }
 
+    /// Returns the first active entry that blocks an otherwise valid grant.
+    pub fn overlapping(&self, start: u64, pages: u64) -> Option<MemoryCapability> {
+        let end = canonical_end(start, pages)?;
+        self.slots
+            .iter()
+            .flatten()
+            .copied()
+            .find(|cap| cap.state == CapabilityState::Active && cap.start < end && start < cap.end)
+    }
+
     /// Create or extend an adjacent capability.  Adjacent private mappings are
     /// coalesced to keep image/stack/page-by-page loaders bounded.
     pub fn grant(
@@ -236,13 +249,35 @@ impl<const N: usize> MemoryCapabilityTable<N> {
                 if cap.rights.contains(rights) {
                     return Ok(cap.id);
                 }
-                return Err(MemoryCapabilityError::Overlap);
+                if cap.backing != backing {
+                    return Err(MemoryCapabilityError::StaleIdentity);
+                }
+                let epoch = self
+                    .epoch
+                    .checked_add(1)
+                    .ok_or(MemoryCapabilityError::NoSpace)?;
+                self.epoch = epoch;
+                cap.epoch = epoch;
+                cap.rights = cap.rights.union(rights);
+                return Ok(cap.id);
             }
             return Err(MemoryCapabilityError::Overlap);
         }
-        let Some(index) = self.slots.iter().position(Option::is_none) else {
-            return Err(MemoryCapabilityError::NoSpace);
-        };
+        // Revoked entries no longer grant access, so reuse them after exhausting
+        // empty slots instead of permanently shrinking the mutable mapping budget.
+        let index = self
+            .slots
+            .iter()
+            .position(Option::is_none)
+            .or_else(|| {
+                self.slots.iter().position(|slot| {
+                    matches!(
+                        slot,
+                        Some(cap) if cap.state == CapabilityState::Revoked
+                    )
+                })
+            })
+            .ok_or(MemoryCapabilityError::NoSpace)?;
         let epoch = self
             .epoch
             .checked_add(1)

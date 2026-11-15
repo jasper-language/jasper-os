@@ -1,0 +1,42 @@
+dir.system = /system/bin/
+dir.system = /data
+
+[system]
+additional.namespaces = com_android_art,com_android_i18n
+namespace.default.isolated = false
+namespace.default.visible = true
+namespace.default.search.paths = /system/${LIB}
+namespace.default.permitted.paths = /system
+namespace.default.permitted.paths += /apex
+namespace.default.permitted.paths += /data
+namespace.default.links = com_android_art,com_android_i18n
+namespace.default.link.com_android_art.shared_libs = libdexfile.so:libnativebridge.so:libnativehelper.so:libnativeloader.so
+namespace.default.link.com_android_i18n.shared_libs = libandroidicu.so:libicu.so:libicui18n.so:libicuuc.so
+
+namespace.com_android_art.isolated = false
+namespace.com_android_art.visible = true
+namespace.com_android_art.search.paths = /apex/com.android.art/${LIB}
+namespace.com_android_art.search.paths += /system/${LIB}
+namespace.com_android_art.permitted.paths = /apex/com.android.art
+namespace.com_android_art.permitted.paths += /system
+namespace.com_android_art.permitted.paths += /data
+namespace.com_android_art.links = com_android_i18n,default
+namespace.com_android_art.link.com_android_i18n.shared_libs = libandroidicu.so:libicu.so:libicu_jni.so:libicui18n.so:libicuuc.so
+namespace.com_android_art.link.default.shared_libs = libbase.so:libnativehelper.so:libc++.so:libc.so:libdl.so:libdl_android.so:liblog.so:libm.so
+
+namespace.com_android_i18n.isolated = false
+namespace.com_android_i18n.visible = true
+namespace.com_android_i18n.search.paths = /apex/com.android.i18n/${LIB}
+namespace.com_android_i18n.search.paths += /system/${LIB}
+namespace.com_android_i18n.permitted.paths = /apex/com.android.i18n
+namespace.com_android_i18n.permitted.paths += /system
+namespace.com_android_i18n.links = default
+namespace.com_android_i18n.link.default.shared_libs = libbase.so:libnativehelper.so:libc++.so:libc.so:libdl.so:liblog.so:libm.so:libdl_android.so
+
+[default]
+namespace.default.isolated = false
+namespace.default.visible = true
+namespace.default.search.paths = /system/${LIB}
+namespace.default.permitted.paths = /system
+namespace.default.permitted.paths += /apex
+namespace.default.permitted.paths += /data

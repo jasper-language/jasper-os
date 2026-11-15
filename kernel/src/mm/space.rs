@@ -67,7 +67,10 @@ pub fn activate_kernel() {
 
 /// 地址是否位于私有窗口内。
 pub fn in_private_window(va: u64) -> bool {
-    va >= arch::USER_WINDOW.0 && va < arch::USER_WINDOW.1
+    (va >= arch::USER_WINDOW.0 && va < arch::USER_WINDOW.1)
+        || (arch::LOW_USER_WINDOW.1 > arch::LOW_USER_WINDOW.0
+            && va >= arch::LOW_USER_WINDOW.0
+            && va < arch::LOW_USER_WINDOW.1)
 }
 
 /// 一个独立的虚拟地址空间。

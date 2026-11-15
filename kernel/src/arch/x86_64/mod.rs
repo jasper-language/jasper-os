@@ -47,7 +47,7 @@ mod pit;
 pub mod second_level;
 pub mod svm;
 pub mod virtual_interrupt;
-mod space;
+pub(crate) mod space;
 mod syscall;
 mod port;
 mod smp;
@@ -301,6 +301,18 @@ impl Platform for X86_64 {
 
     fn user_fs_base() -> u64 {
         ::x86_64::registers::model_specific::FsBase::read().as_u64()
+    }
+
+    fn set_user_gs_base(base: u64) -> bool {
+        if base >= Self::USER_WINDOW.1 {
+            return false;
+        }
+        ::x86_64::registers::model_specific::GsBase::write(::x86_64::VirtAddr::new(base));
+        true
+    }
+
+    fn user_gs_base() -> u64 {
+        ::x86_64::registers::model_specific::GsBase::read().as_u64()
     }
 
     unsafe fn enter_user(entry: u64, stack: u64, arg0: u64, arg1: u64) -> ! {

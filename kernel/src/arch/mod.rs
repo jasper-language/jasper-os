@@ -109,6 +109,11 @@ pub type Mapper = <Current as Platform>::Mapper;
 pub type SpaceRoot = <Current as Platform>::SpaceRoot;
 /// 每个地址空间私有的虚拟窗口，见 [`Platform::USER_WINDOW`]。
 pub const USER_WINDOW: (u64, u64) = <Current as Platform>::USER_WINDOW;
+/// Optional low private window used by 32-bit address constrained Linux mappings.
+#[cfg(target_arch = "x86_64")]
+pub const LOW_USER_WINDOW: (u64, u64) = self::x86_64::space::LOW_USER_WINDOW;
+#[cfg(not(target_arch = "x86_64"))]
+pub const LOW_USER_WINDOW: (u64, u64) = (0, 0);
 /// 内核共享部分的顶级表项数，见 [`Platform::KERNEL_PART_ENTRIES`]。
 pub const KERNEL_PART_ENTRIES: usize = <Current as Platform>::KERNEL_PART_ENTRIES;
 /// 内核堆虚拟区起点，见 [`Platform::KERNEL_HEAP_BASE`]。
@@ -486,6 +491,16 @@ pub trait Platform {
         0
     }
 
+    /// Sets the current task's secondary user context base where supported.
+    fn set_user_gs_base(_base: u64) -> bool {
+        false
+    }
+
+    /// Returns the current task's secondary user context base where supported.
+    fn user_gs_base() -> u64 {
+        0
+    }
+
     /// 进入用户态执行（永不返回；回到内核只能经中断、异常或系统调用）。
     ///
     /// # Safety
@@ -814,6 +829,14 @@ pub fn set_user_fs_base(base: u64) -> bool {
 /// 读取当前任务用户 TLS 基址。
 pub fn user_fs_base() -> u64 {
     Current::user_fs_base()
+}
+/// Sets the current task's secondary user context base.
+pub fn set_user_gs_base(base: u64) -> bool {
+    Current::set_user_gs_base(base)
+}
+/// Reads the current task's secondary user context base.
+pub fn user_gs_base() -> u64 {
+    Current::user_gs_base()
 }
 /// 见 [`Platform::enter_user`]。
 ///

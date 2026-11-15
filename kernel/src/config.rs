@@ -13,10 +13,18 @@ use kernel_core::config::KernelConfig;
 use crate::{kprint, kprintln};
 
 /// 本次构建生效的配置档。
-#[cfg(all(not(feature = "profile-compact"), not(feature = "evt1-verify")))]
+#[cfg(all(
+    not(feature = "profile-compact"),
+    not(feature = "evt1-verify"),
+    not(feature = "android-art-verify")
+))]
 pub const ACTIVE: KernelConfig = KernelConfig::STANDARD;
 /// 本次构建生效的配置档。
-#[cfg(all(feature = "profile-compact", not(feature = "evt1-verify")))]
+#[cfg(all(
+    feature = "profile-compact",
+    not(feature = "evt1-verify"),
+    not(feature = "android-art-verify")
+))]
 pub const ACTIVE: KernelConfig = KernelConfig::COMPACT;
 
 /// Author: chatgpt。独立EVT机制验证容量：1000等待者、控制器和引导槽；默认档不变。
@@ -24,6 +32,14 @@ pub const ACTIVE: KernelConfig = KernelConfig::COMPACT;
 pub const ACTIVE: KernelConfig = {
     let mut c = KernelConfig::STANDARD;
     c.sched.max_tasks = 1024;
+    c.memory.heap_max = 128 * 1024 * 1024;
+    c
+};
+/// ART verification keeps the full 40 MiB immutable root file set resident while
+/// also retaining the normal kernel allocation headroom.
+#[cfg(all(feature = "android-art-verify", not(feature = "evt1-verify")))]
+pub const ACTIVE: KernelConfig = {
+    let mut c = KernelConfig::STANDARD;
     c.memory.heap_max = 128 * 1024 * 1024;
     c
 };

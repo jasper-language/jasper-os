@@ -24,6 +24,7 @@ const AT_PAGESZ: u64 = 6;
 const AT_BASE: u64 = 7;
 const AT_FLAGS: u64 = 8;
 const AT_ENTRY: u64 = 9;
+const AT_SECURE: u64 = 23;
 const AT_RANDOM: u64 = 25;
 const AT_EXECFN: u64 = 31;
 
@@ -478,6 +479,10 @@ pub fn build_initial_stack(input: InitialStackInput<'_>) -> Result<InitialStackP
             key: AT_ENTRY,
             value: input.program_entry,
         },
+        AuxvEntry {
+            key: AT_SECURE,
+            value: 0,
+        },
     ]);
     if input.random.is_some() {
         auxv.push(AuxvEntry {
@@ -579,6 +584,7 @@ fn reserved_auxv(key: u64) -> bool {
             | AT_BASE
             | AT_FLAGS
             | AT_ENTRY
+            | AT_SECURE
             | AT_RANDOM
             | AT_EXECFN
     )

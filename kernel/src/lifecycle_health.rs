@@ -419,7 +419,8 @@ fn validate_system_root(
     #[cfg(feature = "lifecycle-root-exec-verify")]
     {
         validate_elf_payload(&root, ROOT_EXEC_PROBE_PATH, true)?;
-        execute_root_linux_probe(&root)?;
+        execute_root_linux_probe(&root, false)?;
+        execute_root_linux_probe(&root, true)?;
         #[cfg(not(feature = "native-install-abi-verify"))]
         execute_root_dynamic_programs(&root, slot, device, start_lba)?;
     }
@@ -458,7 +459,7 @@ fn validate_elf_payload(
 }
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
-fn execute_root_linux_probe(root: &Ext4Reader) -> Result<(), HealthError> {
+fn execute_root_linux_probe(root: &Ext4Reader, enforce_resources: bool) -> Result<(), HealthError> {
     const MAX_PROBE_BYTES: usize = 1024 * 1024;
     const ROOT_PROBE_APP_ID: u64 = 0x4a53_5201;
     let image = root
@@ -537,7 +538,7 @@ fn execute_root_linux_probe(root: &Ext4Reader) -> Result<(), HealthError> {
         frames_after,
         resources
     );
-    if mapped && started && exited && syscalls != 0 && resources {
+    if mapped && started && exited && syscalls != 0 && (!enforce_resources || resources) {
         Ok(())
     } else {
         Err(HealthError::RootExecute)
@@ -627,7 +628,9 @@ fn run_root_program(
         path,
         &executable,
         &interpreter,
+        "/lib64/ld-linux-x86-64.so.2",
         argv,
+        &[],
         warm_frames,
         false,
     ) {
@@ -639,7 +642,9 @@ fn run_root_program(
         path,
         &executable,
         &interpreter,
+        "/lib64/ld-linux-x86-64.so.2",
         argv,
+        &[],
         frames_before,
         true,
     ) {
@@ -647,6 +652,84 @@ fn run_root_program(
     } else {
         Err(HealthError::RootExecute)
     }
+}
+
+#[cfg(feature = "lifecycle-root-exec-verify")]
+fn install_root_android_files(root: &Ext4Reader) -> Result<(), HealthError> {
+    for path in crate::linux_vfs::ANDROID_FILE_PATHS {
+        let bytes = match root.read_file(
+            core::str::from_utf8(path).map_err(|_| HealthError::RootExecute)?,
+            64 * 1024 * 1024,
+        ) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                #[cfg(feature = "android-art-verify")]
+                crate::kprintln!(
+                    "[JSR-ANDROID-ART] file-skip path={}",
+                    core::str::from_utf8(path).unwrap_or("<non-utf8>")
+                );
+                continue;
+            }
+        };
+        if !crate::linux_vfs::install_root_android_file(path, bytes) {
+            #[cfg(feature = "android-art-verify")]
+            crate::kprintln!(
+                "[JSR-ANDROID-ART] file-install-fail path={}",
+                core::str::from_utf8(path).unwrap_or("<non-utf8>")
+            );
+            return Err(HealthError::RootExecute);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(
+    feature = "android-ecosystem-verify",
+    feature = "android-art-verify"
+))]
+fn run_root_android_program(
+    root: &Ext4Reader,
+    path: &'static str,
+    interpreter_path: &'static str,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> Result<(), HealthError> {
+    const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+    let executable = root
+        .read_file(path, MAX_IMAGE_BYTES)
+        .map_err(|_| HealthError::RootExecute)?;
+    let interpreter = root
+        .read_file(interpreter_path, MAX_IMAGE_BYTES)
+        .map_err(|_| HealthError::RootExecute)?;
+    let warm_frames = crate::mm::frame::free_frames();
+    if !crate::compat_dynamic_demo::run_root_dynamic_program(
+        path.trim_start_matches('/'),
+        path,
+        &executable,
+        &interpreter,
+        interpreter_path,
+        argv,
+        envp,
+        warm_frames,
+        false,
+    ) {
+        return Err(HealthError::RootExecute);
+    }
+    let frames_before = crate::mm::frame::free_frames();
+    if !crate::compat_dynamic_demo::run_root_dynamic_program(
+        path.trim_start_matches('/'),
+        path,
+        &executable,
+        &interpreter,
+        interpreter_path,
+        argv,
+        envp,
+        frames_before,
+        true,
+    ) {
+        return Err(HealthError::RootExecute);
+    }
+    Ok(())
 }
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
@@ -664,8 +747,48 @@ fn execute_root_dynamic_programs(
         return Err(HealthError::RootExecute);
     }
     install_root_libraries(root)?;
+#[cfg(feature = "android-art-verify")]
+{
+    install_root_android_files(root)?;
+    let art_argv: [&[u8]; 6] = [
+        b"/system/bin/dalvikvm64",
+        b"-Xuse-stderr-logger",
+        b"-Xbootclasspath:/apex/com.android.art/javalib/core-oj.jar:/apex/com.android.art/javalib/core-libart.jar:/apex/com.android.i18n/javalib/core-icu4j.jar",
+        b"-cp",
+        b"/data/local/tmp/classes.dex",
+        b"HelloJvm",
+    ];
+    let art_envp: [&[u8]; 5] = [
+        b"ANDROID_ROOT=/system",
+        b"ANDROID_DATA=/data",
+        b"ANDROID_ART_ROOT=/apex/com.android.art",
+        b"ANDROID_I18N_ROOT=/apex/com.android.i18n",
+        b"ANDROID_TZDATA_ROOT=/system/etc",
+    ];
+    run_root_android_program(
+        root,
+        "/system/bin/dalvikvm64",
+        "/system/bin/linker64",
+        &art_argv,
+        &art_envp,
+    )?;
+    return Ok(());
+}
 #[cfg(feature = "android-ecosystem-verify")]
 {
+    install_root_android_files(root)?;
+    let android_toybox_argv: [&[u8]; 3] = [
+        b"/system/bin/toybox",
+        b"uname",
+        b"-a",
+    ];
+    run_root_android_program(
+        root,
+        "/system/bin/toybox",
+        "/system/bin/linker64",
+        &android_toybox_argv,
+        &[],
+    )?;
     let toybox = root
         .read_file("/usr/bin/toybox", 4 * 1024 * 1024)
         .map_err(|_| HealthError::RootExecute)?;

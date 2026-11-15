@@ -153,6 +153,7 @@ case "$MODE" in
   native-install-abi) KERNEL_FEATURES=native-install-abi-verify ;;
   terminal-session) KERNEL_FEATURES=lifecycle-root-exec-verify,terminal-session-verify ;;
   android-ecosystem) KERNEL_FEATURES=lifecycle-root-exec-verify,android-ecosystem-verify ;;
+  android-art) KERNEL_FEATURES=lifecycle-root-exec-verify,android-art-verify ;;
   block-timeout) KERNEL_FEATURES=lifecycle-block-timeout-verify ;;
   *) KERNEL_FEATURES=production,lifecycle-ab-health ;;
 esac
@@ -206,7 +207,9 @@ ROOT_SIGNAL_FIXTURE=""
 ROOT_PPID_FIXTURE=""
 ROOT_ANDROID_TOYBOX="${JASPER_TOYBOX_BIN:-}"
 ROOT_AOSP_BINDER_TEST="${JASPER_AOSP_BINDER_TEST:-}"
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ]; then
+ROOT_ANDROID_TREE="${JASPER_ANDROID_TREE:-}"
+ROOT_ANDROID_LINKER_CONFIG=""
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ]; then
   ROOT_EXEC_PROBE=$(find "$TARGET/x86_64-unknown-none/release/build" \
     -path '*/out/user-target/x86_64-unknown-none/release/user-linuxprobe' \
     -type f -print | sort | tail -n 1)
@@ -232,11 +235,18 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
     echo "issue21-uefi-boot: JASPER_AOSP_BINDER_TEST is required for android-ecosystem mode" >&2
     exit 64
   fi
+  if [ "$MODE" = android-art ] && [ -z "$ROOT_ANDROID_TREE" ]; then
+    echo "issue21-uefi-boot: JASPER_ANDROID_TREE is required for android-art mode" >&2
+    exit 64
+  fi
+  if [ "$MODE" = android-art ]; then
+    ROOT_ANDROID_LINKER_CONFIG="$PWD/verification/fixtures/android/ld.config.txt"
+  fi
 fi
 bash scripts/issue21-system-root-fixture.sh \
-  "$IMAGE" "$TARGET" 1050624 A 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" >"$OUT/system-root-a.log" 2>&1
+  "$IMAGE" "$TARGET" 1050624 A 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" "$ROOT_ANDROID_TREE" "$ROOT_ANDROID_LINKER_CONFIG" >"$OUT/system-root-a.log" 2>&1
 bash scripts/issue21-system-root-fixture.sh \
-  "$IMAGE" "$TARGET" 17827840 B 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" >"$OUT/system-root-b.log" 2>&1
+  "$IMAGE" "$TARGET" 17827840 B 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" "$ROOT_ANDROID_TREE" "$ROOT_ANDROID_LINKER_CONFIG" >"$OUT/system-root-b.log" 2>&1
 run_lifecycle jasper-control-init \
   "$IMAGE" 38654705664 "$KERNEL" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
 run_lifecycle jasper-control-inspect \
@@ -263,7 +273,7 @@ QEMU_EXTRA=(-monitor none)
 if [ -n "${ISSUE21_MONITOR_SOCKET:-}" ]; then
   QEMU_EXTRA=(-monitor "unix:$ISSUE21_MONITOR_SOCKET,server=on,wait=off")
 fi
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ]; then
   CPU=max
   if [ "${ISSUE21_DISABLE_RDRAND:-0}" = 1 ]; then
     CPU=max,-rdrand,-rdseed
@@ -297,7 +307,7 @@ set +e
 nice -n 15 taskset -c "$QEMU_CPUS" timeout "$LIMIT" qemu-system-x86_64 \
   -accel tcg \
   -machine q35 \
-  -m 512M \
+  -m "${ISSUE21_QEMU_MEMORY:-512M}" \
   -smp 1 \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
   -drive if=pflash,format=raw,file="$OVMF_VARS" \
@@ -308,7 +318,7 @@ rc=$?
 set -e
 exec 9>&-
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ]; then
   [ "$rc" -eq 33 ]
 else
   [ "$rc" -eq 124 ]
@@ -339,6 +349,15 @@ if [ "$MODE" = android-ecosystem ]; then
   grep -aq '^\[JSR-ANDROID-TOYBOX\] program=android-toybox-sha256sum static=true mapped=true started=true syscalls=[1-9][0-9]* exit_zero=true' \
     "$OUT/serial.log"
   grep -aq '^\[JSR-ANDROID-TOYBOX\] program=aosp-binder-driver-test static=true mapped=true started=true syscalls=[1-9][0-9]* exit_zero=true' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
+if [ "$MODE" = android-art ]; then
+  grep -aq '^JVM_OK value=499500' "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=system/bin/dalvikvm64 path=/system/bin/dalvikvm64 interpreter=/system/bin/linker64 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true failed=0' \
     "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"

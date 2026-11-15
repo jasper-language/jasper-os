@@ -34,7 +34,7 @@ static FAILED: AtomicU32 = AtomicU32::new(0);
 const EXECUTABLE_BASE: u64 = arch::USER_WINDOW.0 + 0x40_0000;
 const INTERPRETER_BASE: u64 = arch::USER_WINDOW.0 + 0x20_0000_0000;
 const STACK_TOP: u64 = arch::USER_WINDOW.0 + 0x10_0000_0000;
-const STACK_RESERVE_BYTES: u64 = 64 * kernel_core::frame::FRAME_SIZE;
+const STACK_RESERVE_BYTES: u64 = 8 * 1024 * 1024;
 const PROGRAM_DEADLINE_TICKS: u64 = 3000;
 
 #[derive(Clone, Copy)]
@@ -672,6 +672,28 @@ fn run_program(
     frames_before: usize,
     enforce_resources: bool,
 ) -> ProgramResult {
+    run_program_with_interpreter(
+        name,
+        executable,
+        interpreter,
+        "/lib64/ld-linux-x86-64.so.2",
+        argv,
+        &[],
+        frames_before,
+        enforce_resources,
+    )
+}
+
+fn run_program_with_interpreter(
+    name: &'static str,
+    executable: &[u8],
+    interpreter: &[u8],
+    interpreter_path: &'static str,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    frames_before: usize,
+    enforce_resources: bool,
+) -> ProgramResult {
     let calls_before = crate::syscall::call_count();
     let heap_before = crate::mm::heap::stats();
     let Ok(pid) = proc::create_linux(name, allowed_calls()) else {
@@ -707,10 +729,7 @@ fn run_program(
             return ProgramResult::FAILED;
         }
     };
-    check(
-        executable_plan.interpreter.as_deref() == Some("/lib64/ld-linux-x86-64.so.2"),
-        "pt_interp",
-    );
+    check(executable_plan.interpreter.as_deref() == Some(interpreter_path), "pt_interp");
     let dynamic = match plan_dynamic_program(
         &executable_plan,
         &interpreter_plan,
@@ -743,7 +762,7 @@ fn run_program(
         interpreter_base: dynamic.interpreter.load_bias,
         stack_top: STACK_TOP,
         argv,
-        envp: &[],
+        envp,
         auxv: &[],
         random: Some(&random),
     })
@@ -1119,15 +1138,19 @@ pub(crate) fn run_root_dynamic_program(
     path: &'static str,
     executable: &[u8],
     interpreter: &[u8],
+    interpreter_path: &'static str,
     argv: &[&[u8]],
+    envp: &[&[u8]],
     frames_before: usize,
     enforce_resources: bool,
 ) -> bool {
-    let result = run_program(
+    let result = run_program_with_interpreter(
         name,
         executable,
         interpreter,
+        interpreter_path,
         argv,
+        envp,
         frames_before,
         enforce_resources,
     );
@@ -1137,9 +1160,10 @@ pub(crate) fn run_root_dynamic_program(
         && (!enforce_resources || result.resources)
         && result.syscalls != 0;
     kprintln!(
-        "[JSR-LIFE-ROOT-DYNAMIC] program={} path={} interpreter=/lib64/ld-linux-x86-64.so.2 mapped={} interpreter_syscalls={} syscalls={} exit_zero={} frames_before={} resources={} failed={}",
+        "[JSR-LIFE-ROOT-DYNAMIC] program={} path={} interpreter={} mapped={} interpreter_syscalls={} syscalls={} exit_zero={} frames_before={} resources={} failed={}",
         name,
         path,
+        interpreter_path,
         result.mapped,
         result.interpreter_entered,
         result.syscalls,

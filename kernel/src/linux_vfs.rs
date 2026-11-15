@@ -50,7 +50,10 @@ static LIBPCRE2: &[u8] = include_bytes!(env!("JSR_UBUNTU_LIBPCRE2"));
 #[cfg(not(feature = "compat-dynamic-libc-verify"))]
 static LIBPCRE2: &[u8] = &[];
 #[cfg(feature = "lifecycle-root-exec-verify")]
-static ROOT_LIBRARIES: [Once<Vec<u8>>; 6] = [const { Once::new() }; 6];
+const ROOT_LIBRARY_SLOTS: usize = 96;
+#[cfg(feature = "lifecycle-root-exec-verify")]
+static ROOT_LIBRARIES: [Once<Vec<u8>>; ROOT_LIBRARY_SLOTS] =
+    [const { Once::new() }; ROOT_LIBRARY_SLOTS];
 #[cfg(feature = "lifecycle-root-exec-verify")]
 static ROOT_EXECUTABLES: Mutex<ExecutableRegistry> = Mutex::new(ExecutableRegistry::new());
 #[cfg(feature = "lifecycle-root-exec-verify")]
@@ -60,6 +63,82 @@ static ROOT_SOURCE: Mutex<Option<RootImageSource>> = Mutex::new(None);
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
 const ROOT_INTERPRETER_PATH: &str = "/lib64/ld-linux-x86-64.so.2";
+
+pub(crate) const ANDROID_FILE_PATHS: &[&[u8]] = &[
+    b"/system/bin/linker64",
+    b"/system/bin/toybox",
+    b"/system/bin/sh",
+    b"/system/bin/dalvikvm64",
+    b"/system/lib64/libc.so",
+    b"/system/lib64/libm.so",
+    b"/system/lib64/libdl.so",
+    b"/system/lib64/libdl_android.so",
+    b"/system/lib64/libc++.so",
+    b"/system/lib64/libbase.so",
+    b"/system/lib64/liblog.so",
+    b"/system/lib64/libcrypto.so",
+    b"/system/lib64/libz.so",
+    b"/system/lib64/libprocessgroup.so",
+    b"/system/lib64/libselinux.so",
+    b"/system/lib64/libcgrouprc.so",
+    b"/system/lib64/libpcre2.so",
+    b"/system/lib64/libpackagelistparser.so",
+    b"/system/lib64/libstatssocket.so",
+    b"/system/lib64/libart.so",
+    b"/system/lib64/libartbase.so",
+    b"/system/lib64/libartpalette.so",
+    b"/system/lib64/libdexfile.so",
+    b"/system/lib64/libart-compiler.so",
+    b"/system/lib64/libnativehelper.so",
+    b"/system/lib64/libsigchain.so",
+    b"/system/lib64/liblz4.so",
+    b"/system/lib64/liblzma.so",
+    b"/system/lib64/libnativebridge.so",
+    b"/system/lib64/libnativeloader.so",
+    b"/system/lib64/libunwindstack.so",
+    b"/system/lib64/libprofile.so",
+    b"/system/lib64/libartpalette-system.so",
+    b"/system/lib64/heapprofd_client_api.so",
+    b"/system/lib64/libprocinfo.so",
+    b"/system/lib64/libnetd_client.so",
+    b"/system/lib64/libcutils.so",
+    b"/system/lib64/libtombstoned_client.so",
+    b"/system/lib64/libjavacore.so",
+    b"/system/lib64/libandroidicu.so",
+    b"/system/lib64/libicu.so",
+    b"/system/lib64/libicu_jni.so",
+    b"/system/lib64/libicui18n.so",
+    b"/system/lib64/libicuuc.so",
+    b"/system/framework/core-oj.jar",
+    b"/system/framework/core-libart.jar",
+    b"/system/framework/apache-xml.jar",
+    b"/system/framework/bouncycastle.jar",
+    b"/system/framework/boot.art",
+    b"/system/framework/boot.oat",
+    b"/system/framework/boot.vdex",
+    b"/system/framework/x86_64/boot.oat",
+    b"/system/framework/x86_64/boot.art",
+    b"/system/framework/x86_64/boot-core-libart.oat",
+    b"/system/framework/x86_64/boot-core-libart.art",
+    b"/system/framework/boot-core-libart.vdex",
+    b"/system/etc/public.libraries.txt",
+    b"/data/local/tmp/classes.dex",
+    b"/data/local/tmp/app.apk",
+    b"/apex/com.android.art/javalib/core-oj.jar",
+    b"/apex/com.android.art/javalib/core-libart.jar",
+    b"/apex/com.android.i18n/javalib/core-icu4j.jar",
+    b"/apex/com.android.i18n/etc/icu/icudt72l.dat",
+    b"/apex/com.android.i18n/lib64/libandroidicu.so",
+    b"/apex/com.android.i18n/lib64/libicu.so",
+    b"/apex/com.android.i18n/lib64/libicu_jni.so",
+    b"/apex/com.android.i18n/lib64/libicui18n.so",
+    b"/apex/com.android.i18n/lib64/libicuuc.so",
+    b"/linkerconfig/ld.config.txt",
+    b"/system/lib64/libandroidio.so",
+    b"/system/lib64/libexpat.so",
+    b"/system/lib64/libopenjdk.so",
+    b"/system/lib64/libopenjdkjvm.so",
+];
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
 #[derive(Clone)]
@@ -123,6 +202,8 @@ pub enum FileId {
     LibGccS,
     LibM,
     LibPcre2,
+    /// One bounded upstream Android file staged under `/system` or `/data`.
+    AndroidFile(u8),
     /// Synthetic, non-empty data used only to exercise the real Linux read
     /// syscall path from a Workload-bound guest.
     IoProbe,
@@ -140,6 +221,7 @@ impl FileId {
             Self::LibGccS => 4,
             Self::LibM => 5,
             Self::LibPcre2 => 6,
+            Self::AndroidFile(slot) => 0x4000 + slot as u64,
             Self::IoProbe => 7,
         }
     }
@@ -156,6 +238,7 @@ impl FileId {
                 Self::LibGccS => 4,
                 Self::LibM => 5,
                 Self::LibPcre2 => 6,
+                Self::AndroidFile(slot) => 0x8000 + slot as u64,
                 Self::IoProbe => 7,
             }
     }
@@ -172,12 +255,17 @@ impl FileId {
             value if value == (HANDLE_BASE | 5) => Some(Self::LibM),
             value if value == (HANDLE_BASE | 6) => Some(Self::LibPcre2),
             value if value == (HANDLE_BASE | 7) => Some(Self::IoProbe),
+            value if value >= (HANDLE_BASE | 0x8000)
+                && value <= (HANDLE_BASE | 0x80ff) =>
+            {
+                Some(Self::AndroidFile((value - (HANDLE_BASE | 0x8000)) as u8))
+            }
             _ => None,
         }
     }
 
     /// Stable canonical namespace path exposed to open-by-handle consumers.
-    pub const fn path(self) -> &'static [u8] {
+    pub fn path(self) -> &'static [u8] {
         match self {
             Self::Libc => b"/usr/lib/x86_64-linux-gnu/libc.so.6",
             Self::LibSystemd => b"/usr/lib/x86_64-linux-gnu/libsystemd.so.0",
@@ -185,6 +273,10 @@ impl FileId {
             Self::LibGccS => b"/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
             Self::LibM => b"/usr/lib/x86_64-linux-gnu/libm.so.6",
             Self::LibPcre2 => b"/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0",
+            Self::AndroidFile(slot) => ANDROID_FILE_PATHS
+                .get(slot as usize)
+                .copied()
+                .unwrap_or(b"/system"),
             Self::IoProbe => b"/io-probe",
         }
     }
@@ -198,6 +290,7 @@ impl FileId {
             Self::LibGccS => 3,
             Self::LibM => 4,
             Self::LibPcre2 => 5,
+            Self::AndroidFile(slot) => 6 + slot as usize,
             Self::IoProbe => return None,
         })
     }
@@ -219,6 +312,13 @@ impl FileId {
             Self::LibGccS => LIBGCC_S,
             Self::LibM => LIBM,
             Self::LibPcre2 => LIBPCRE2,
+            #[cfg(feature = "lifecycle-root-exec-verify")]
+            Self::AndroidFile(slot) => ROOT_LIBRARIES
+                .get(usize::from(slot) + 6)
+                .and_then(Once::get)
+                .map_or(&[], Vec::as_slice),
+            #[cfg(not(feature = "lifecycle-root-exec-verify"))]
+            Self::AndroidFile(_) => &[],
             Self::IoProbe => {
                 #[cfg(feature = "workload-io-verify")]
                 {
@@ -245,6 +345,23 @@ pub enum DirectoryId {
     UsrLib,
     UsrLibX86_64,
     UsrBin,
+    System,
+    SystemBin,
+    SystemLib64,
+    SystemFramework,
+    SystemEtc,
+    Apex,
+    ApexArt,
+    ApexArtJavalib,
+    ApexI18n,
+    ApexI18nJavalib,
+    ApexI18nEtc,
+    ApexI18nEtcIcu,
+    ApexI18nLib64,
+    LinkerConfig,
+    Data,
+    DataLocal,
+    DataLocalTmp,
 }
 
 impl DirectoryId {
@@ -261,6 +378,23 @@ impl DirectoryId {
                 Self::UsrLib => 4,
                 Self::UsrLibX86_64 => 5,
                 Self::UsrBin => 6,
+            Self::System => 7,
+            Self::SystemBin => 8,
+            Self::SystemLib64 => 9,
+            Self::SystemFramework => 10,
+            Self::SystemEtc => 11,
+            Self::Apex => 12,
+            Self::ApexArt => 13,
+            Self::ApexArtJavalib => 14,
+            Self::ApexI18n => 15,
+            Self::ApexI18nJavalib => 16,
+            Self::ApexI18nEtc => 17,
+            Self::ApexI18nEtcIcu => 18,
+            Self::ApexI18nLib64 => 19,
+            Self::LinkerConfig => 20,
+            Self::Data => 21,
+            Self::DataLocal => 22,
+            Self::DataLocalTmp => 23,
             }
     }
 
@@ -277,6 +411,23 @@ impl DirectoryId {
                 Self::UsrLib => 5,
                 Self::UsrLibX86_64 => 6,
                 Self::UsrBin => 7,
+            Self::System => 8,
+            Self::SystemBin => 9,
+            Self::SystemLib64 => 10,
+            Self::SystemFramework => 11,
+            Self::SystemEtc => 12,
+            Self::Apex => 13,
+            Self::ApexArt => 14,
+            Self::ApexArtJavalib => 15,
+            Self::ApexI18n => 16,
+            Self::ApexI18nJavalib => 17,
+            Self::ApexI18nEtc => 18,
+            Self::ApexI18nEtcIcu => 19,
+            Self::ApexI18nLib64 => 20,
+            Self::LinkerConfig => 21,
+            Self::Data => 22,
+            Self::DataLocal => 23,
+            Self::DataLocalTmp => 24,
             }
     }
 
@@ -292,6 +443,23 @@ impl DirectoryId {
             value if value == (DIRECTORY_HANDLE_BASE | 5) => Some(Self::UsrLib),
             value if value == (DIRECTORY_HANDLE_BASE | 6) => Some(Self::UsrLibX86_64),
             value if value == (DIRECTORY_HANDLE_BASE | 7) => Some(Self::UsrBin),
+            value if value == (DIRECTORY_HANDLE_BASE | 8) => Some(Self::System),
+            value if value == (DIRECTORY_HANDLE_BASE | 9) => Some(Self::SystemBin),
+            value if value == (DIRECTORY_HANDLE_BASE | 10) => Some(Self::SystemLib64),
+            value if value == (DIRECTORY_HANDLE_BASE | 11) => Some(Self::SystemFramework),
+            value if value == (DIRECTORY_HANDLE_BASE | 12) => Some(Self::SystemEtc),
+            value if value == (DIRECTORY_HANDLE_BASE | 13) => Some(Self::Apex),
+            value if value == (DIRECTORY_HANDLE_BASE | 14) => Some(Self::ApexArt),
+            value if value == (DIRECTORY_HANDLE_BASE | 15) => Some(Self::ApexArtJavalib),
+            value if value == (DIRECTORY_HANDLE_BASE | 16) => Some(Self::ApexI18n),
+            value if value == (DIRECTORY_HANDLE_BASE | 17) => Some(Self::ApexI18nJavalib),
+            value if value == (DIRECTORY_HANDLE_BASE | 18) => Some(Self::ApexI18nEtc),
+            value if value == (DIRECTORY_HANDLE_BASE | 19) => Some(Self::ApexI18nEtcIcu),
+            value if value == (DIRECTORY_HANDLE_BASE | 20) => Some(Self::ApexI18nLib64),
+            value if value == (DIRECTORY_HANDLE_BASE | 21) => Some(Self::LinkerConfig),
+            value if value == (DIRECTORY_HANDLE_BASE | 22) => Some(Self::Data),
+            value if value == (DIRECTORY_HANDLE_BASE | 23) => Some(Self::DataLocal),
+            value if value == (DIRECTORY_HANDLE_BASE | 24) => Some(Self::DataLocalTmp),
             _ => None,
         }
     }
@@ -308,6 +476,23 @@ impl DirectoryId {
             Self::UsrBin => b"/usr/bin",
             Self::UsrLib => b"/usr/lib",
             Self::UsrLibX86_64 => b"/usr/lib/x86_64-linux-gnu",
+            Self::System => b"/system",
+            Self::SystemBin => b"/system/bin",
+            Self::SystemLib64 => b"/system/lib64",
+            Self::SystemFramework => b"/system/framework",
+            Self::SystemEtc => b"/system/etc",
+            Self::Apex => b"/apex",
+            Self::ApexArt => b"/apex/com.android.art",
+            Self::ApexArtJavalib => b"/apex/com.android.art/javalib",
+            Self::ApexI18n => b"/apex/com.android.i18n",
+            Self::ApexI18nJavalib => b"/apex/com.android.i18n/javalib",
+            Self::ApexI18nEtc => b"/apex/com.android.i18n/etc",
+            Self::ApexI18nEtcIcu => b"/apex/com.android.i18n/etc/icu",
+            Self::ApexI18nLib64 => b"/apex/com.android.i18n/lib64",
+            Self::LinkerConfig => b"/linkerconfig",
+            Self::Data => b"/data",
+            Self::DataLocal => b"/data/local",
+            Self::DataLocalTmp => b"/data/local/tmp",
         }
     }
 }
@@ -376,6 +561,12 @@ pub fn lookup(path: &[u8]) -> Option<FileId> {
     {
         return None;
     }
+    if let Some(index) = ANDROID_FILE_PATHS
+        .iter()
+        .position(|candidate| *candidate == path)
+    {
+        return Some(FileId::AndroidFile(index as u8));
+    }
     match path {
         b"/lib/x86_64-linux-gnu/libc.so.6" | b"/usr/lib/x86_64-linux-gnu/libc.so.6" => {
             Some(FileId::Libc)
@@ -413,6 +604,23 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/usr/bin" => Some(DirectoryId::UsrBin),
         b"/usr/lib" => Some(DirectoryId::UsrLib),
         b"/usr/lib/x86_64-linux-gnu" => Some(DirectoryId::UsrLibX86_64),
+        b"/system" => Some(DirectoryId::System),
+        b"/system/bin" => Some(DirectoryId::SystemBin),
+        b"/system/lib64" => Some(DirectoryId::SystemLib64),
+        b"/system/framework" => Some(DirectoryId::SystemFramework),
+        b"/system/etc" => Some(DirectoryId::SystemEtc),
+        b"/apex" => Some(DirectoryId::Apex),
+        b"/apex/com.android.art" => Some(DirectoryId::ApexArt),
+        b"/apex/com.android.art/javalib" => Some(DirectoryId::ApexArtJavalib),
+        b"/apex/com.android.i18n" => Some(DirectoryId::ApexI18n),
+        b"/apex/com.android.i18n/javalib" => Some(DirectoryId::ApexI18nJavalib),
+        b"/apex/com.android.i18n/etc" => Some(DirectoryId::ApexI18nEtc),
+        b"/apex/com.android.i18n/etc/icu" => Some(DirectoryId::ApexI18nEtcIcu),
+        b"/apex/com.android.i18n/lib64" => Some(DirectoryId::ApexI18nLib64),
+        b"/linkerconfig" => Some(DirectoryId::LinkerConfig),
+        b"/data" => Some(DirectoryId::Data),
+        b"/data/local" => Some(DirectoryId::DataLocal),
+        b"/data/local/tmp" => Some(DirectoryId::DataLocalTmp),
         _ => None,
     };
     let exact = directory
@@ -436,6 +644,23 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/usr/bin" => Some(DirectoryId::UsrBin),
         b"/usr/lib" => Some(DirectoryId::UsrLib),
         b"/usr/lib/x86_64-linux-gnu" => Some(DirectoryId::UsrLibX86_64),
+        b"/system" => Some(DirectoryId::System),
+        b"/system/bin" => Some(DirectoryId::SystemBin),
+        b"/system/lib64" => Some(DirectoryId::SystemLib64),
+        b"/system/framework" => Some(DirectoryId::SystemFramework),
+        b"/system/etc" => Some(DirectoryId::SystemEtc),
+        b"/apex" => Some(DirectoryId::Apex),
+        b"/apex/com.android.art" => Some(DirectoryId::ApexArt),
+        b"/apex/com.android.art/javalib" => Some(DirectoryId::ApexArtJavalib),
+        b"/apex/com.android.i18n" => Some(DirectoryId::ApexI18n),
+        b"/apex/com.android.i18n/javalib" => Some(DirectoryId::ApexI18nJavalib),
+        b"/apex/com.android.i18n/etc" => Some(DirectoryId::ApexI18nEtc),
+        b"/apex/com.android.i18n/etc/icu" => Some(DirectoryId::ApexI18nEtcIcu),
+        b"/apex/com.android.i18n/lib64" => Some(DirectoryId::ApexI18nLib64),
+        b"/linkerconfig" => Some(DirectoryId::LinkerConfig),
+        b"/data" => Some(DirectoryId::Data),
+        b"/data/local" => Some(DirectoryId::DataLocal),
+        b"/data/local/tmp" => Some(DirectoryId::DataLocalTmp),
         _ => None,
     }?;
     directory_entries(directory)
@@ -456,6 +681,22 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirEntry {
             name: b"usr",
             node: Node::Directory(DirectoryId::Usr),
+        },
+        DirEntry {
+            name: b"system",
+            node: Node::Directory(DirectoryId::System),
+        },
+        DirEntry {
+            name: b"apex",
+            node: Node::Directory(DirectoryId::Apex),
+        },
+        DirEntry {
+            name: b"linkerconfig",
+            node: Node::Directory(DirectoryId::LinkerConfig),
+        },
+        DirEntry {
+            name: b"data",
+            node: Node::Directory(DirectoryId::Data),
         },
     ];
     const LIB: &[DirEntry] = &[DirEntry {
@@ -572,6 +813,164 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         name: b"x86_64-linux-gnu",
         node: Node::Directory(DirectoryId::UsrLibX86_64),
     }];
+    const SYSTEM: &[DirEntry] = &[
+        DirEntry {
+            name: b"bin",
+            node: Node::Directory(DirectoryId::SystemBin),
+        },
+        DirEntry {
+            name: b"lib64",
+            node: Node::Directory(DirectoryId::SystemLib64),
+        },
+        DirEntry {
+            name: b"framework",
+            node: Node::Directory(DirectoryId::SystemFramework),
+        },
+        DirEntry {
+            name: b"etc",
+            node: Node::Directory(DirectoryId::SystemEtc),
+        },
+    ];
+    const SYSTEM_BIN: &[DirEntry] = &[
+        DirEntry {
+            name: b"linker64",
+            node: Node::File(FileId::AndroidFile(0)),
+        },
+        DirEntry {
+            name: b"toybox",
+            node: Node::File(FileId::AndroidFile(1)),
+        },
+        DirEntry {
+            name: b"sh",
+            node: Node::File(FileId::AndroidFile(2)),
+        },
+        DirEntry {
+            name: b"dalvikvm64",
+            node: Node::File(FileId::AndroidFile(3)),
+        },
+    ];
+    const SYSTEM_LIB64: &[DirEntry] = &[
+        DirEntry { name: b"libc.so", node: Node::File(FileId::AndroidFile(4)) },
+        DirEntry { name: b"libm.so", node: Node::File(FileId::AndroidFile(5)) },
+        DirEntry { name: b"libdl.so", node: Node::File(FileId::AndroidFile(6)) },
+        DirEntry { name: b"libdl_android.so", node: Node::File(FileId::AndroidFile(7)) },
+        DirEntry { name: b"libc++.so", node: Node::File(FileId::AndroidFile(8)) },
+        DirEntry { name: b"libbase.so", node: Node::File(FileId::AndroidFile(9)) },
+        DirEntry { name: b"liblog.so", node: Node::File(FileId::AndroidFile(10)) },
+        DirEntry { name: b"libcrypto.so", node: Node::File(FileId::AndroidFile(11)) },
+        DirEntry { name: b"libz.so", node: Node::File(FileId::AndroidFile(12)) },
+        DirEntry { name: b"libprocessgroup.so", node: Node::File(FileId::AndroidFile(13)) },
+        DirEntry { name: b"libselinux.so", node: Node::File(FileId::AndroidFile(14)) },
+        DirEntry { name: b"libcgrouprc.so", node: Node::File(FileId::AndroidFile(15)) },
+        DirEntry { name: b"libpcre2.so", node: Node::File(FileId::AndroidFile(16)) },
+        DirEntry { name: b"libpackagelistparser.so", node: Node::File(FileId::AndroidFile(17)) },
+        DirEntry { name: b"libstatssocket.so", node: Node::File(FileId::AndroidFile(18)) },
+        DirEntry { name: b"libart.so", node: Node::File(FileId::AndroidFile(19)) },
+        DirEntry { name: b"libartbase.so", node: Node::File(FileId::AndroidFile(20)) },
+        DirEntry { name: b"libartpalette.so", node: Node::File(FileId::AndroidFile(21)) },
+        DirEntry { name: b"libdexfile.so", node: Node::File(FileId::AndroidFile(22)) },
+        DirEntry { name: b"libart-compiler.so", node: Node::File(FileId::AndroidFile(23)) },
+        DirEntry { name: b"libnativehelper.so", node: Node::File(FileId::AndroidFile(24)) },
+        DirEntry { name: b"libsigchain.so", node: Node::File(FileId::AndroidFile(25)) },
+        DirEntry { name: b"liblz4.so", node: Node::File(FileId::AndroidFile(26)) },
+        DirEntry { name: b"liblzma.so", node: Node::File(FileId::AndroidFile(27)) },
+        DirEntry { name: b"libnativebridge.so", node: Node::File(FileId::AndroidFile(28)) },
+        DirEntry { name: b"libnativeloader.so", node: Node::File(FileId::AndroidFile(29)) },
+        DirEntry { name: b"libunwindstack.so", node: Node::File(FileId::AndroidFile(30)) },
+        DirEntry { name: b"libprofile.so", node: Node::File(FileId::AndroidFile(31)) },
+        DirEntry { name: b"libartpalette-system.so", node: Node::File(FileId::AndroidFile(32)) },
+        DirEntry { name: b"heapprofd_client_api.so", node: Node::File(FileId::AndroidFile(33)) },
+        DirEntry { name: b"libprocinfo.so", node: Node::File(FileId::AndroidFile(34)) },
+        DirEntry { name: b"libnetd_client.so", node: Node::File(FileId::AndroidFile(35)) },
+        DirEntry { name: b"libcutils.so", node: Node::File(FileId::AndroidFile(36)) },
+        DirEntry { name: b"libtombstoned_client.so", node: Node::File(FileId::AndroidFile(37)) },
+        DirEntry { name: b"libjavacore.so", node: Node::File(FileId::AndroidFile(38)) },
+        DirEntry { name: b"libandroidicu.so", node: Node::File(FileId::AndroidFile(39)) },
+        DirEntry { name: b"libicu.so", node: Node::File(FileId::AndroidFile(40)) },
+        DirEntry { name: b"libicu_jni.so", node: Node::File(FileId::AndroidFile(41)) },
+        DirEntry { name: b"libicui18n.so", node: Node::File(FileId::AndroidFile(42)) },
+        DirEntry { name: b"libicuuc.so", node: Node::File(FileId::AndroidFile(43)) },
+    ];
+    const SYSTEM_FRAMEWORK: &[DirEntry] = &[
+        DirEntry { name: b"core-oj.jar", node: Node::File(FileId::AndroidFile(44)) },
+        DirEntry { name: b"core-libart.jar", node: Node::File(FileId::AndroidFile(45)) },
+        DirEntry { name: b"apache-xml.jar", node: Node::File(FileId::AndroidFile(46)) },
+        DirEntry { name: b"bouncycastle.jar", node: Node::File(FileId::AndroidFile(47)) },
+        DirEntry { name: b"boot.art", node: Node::File(FileId::AndroidFile(48)) },
+        DirEntry { name: b"boot.oat", node: Node::File(FileId::AndroidFile(49)) },
+        DirEntry { name: b"boot.vdex", node: Node::File(FileId::AndroidFile(50)) },
+    ];
+    const SYSTEM_ETC: &[DirEntry] = &[DirEntry {
+        name: b"public.libraries.txt",
+        node: Node::File(FileId::AndroidFile(56)),
+    }];
+    const APEX: &[DirEntry] = &[
+        DirEntry {
+            name: b"com.android.art",
+            node: Node::Directory(DirectoryId::ApexArt),
+        },
+        DirEntry {
+            name: b"com.android.i18n",
+            node: Node::Directory(DirectoryId::ApexI18n),
+        },
+    ];
+    const APEX_ART: &[DirEntry] = &[DirEntry {
+        name: b"javalib",
+        node: Node::Directory(DirectoryId::ApexArtJavalib),
+    }];
+    const APEX_ART_JAVALIB: &[DirEntry] = &[
+        DirEntry { name: b"core-oj.jar", node: Node::File(FileId::AndroidFile(59)) },
+        DirEntry { name: b"core-libart.jar", node: Node::File(FileId::AndroidFile(60)) },
+    ];
+    const APEX_I18N: &[DirEntry] = &[
+        DirEntry {
+            name: b"javalib",
+            node: Node::Directory(DirectoryId::ApexI18nJavalib),
+        },
+        DirEntry {
+            name: b"etc",
+            node: Node::Directory(DirectoryId::ApexI18nEtc),
+        },
+        DirEntry {
+            name: b"lib64",
+            node: Node::Directory(DirectoryId::ApexI18nLib64),
+        },
+    ];
+    const APEX_I18N_JAVALIB: &[DirEntry] = &[DirEntry {
+        name: b"core-icu4j.jar",
+        node: Node::File(FileId::AndroidFile(61)),
+    }];
+    const APEX_I18N_ETC: &[DirEntry] = &[DirEntry {
+        name: b"icu",
+        node: Node::Directory(DirectoryId::ApexI18nEtcIcu),
+    }];
+    const APEX_I18N_ETC_ICU: &[DirEntry] = &[DirEntry {
+        name: b"icudt72l.dat",
+        node: Node::File(FileId::AndroidFile(62)),
+    }];
+    const APEX_I18N_LIB64: &[DirEntry] = &[
+        DirEntry { name: b"libandroidicu.so", node: Node::File(FileId::AndroidFile(63)) },
+        DirEntry { name: b"libicu.so", node: Node::File(FileId::AndroidFile(64)) },
+        DirEntry { name: b"libicu_jni.so", node: Node::File(FileId::AndroidFile(65)) },
+        DirEntry { name: b"libicui18n.so", node: Node::File(FileId::AndroidFile(66)) },
+        DirEntry { name: b"libicuuc.so", node: Node::File(FileId::AndroidFile(67)) },
+    ];
+    const LINKER_CONFIG: &[DirEntry] = &[DirEntry {
+        name: b"ld.config.txt",
+        node: Node::File(FileId::AndroidFile(68)),
+    }];
+    const DATA: &[DirEntry] = &[DirEntry {
+        name: b"local",
+        node: Node::Directory(DirectoryId::DataLocal),
+    }];
+    const DATA_LOCAL: &[DirEntry] = &[DirEntry {
+        name: b"tmp",
+        node: Node::Directory(DirectoryId::DataLocalTmp),
+    }];
+    const DATA_LOCAL_TMP: &[DirEntry] = &[
+        DirEntry { name: b"classes.dex", node: Node::File(FileId::AndroidFile(57)) },
+        DirEntry { name: b"app.apk", node: Node::File(FileId::AndroidFile(58)) },
+    ];
     match directory {
         DirectoryId::Root => ROOT,
         DirectoryId::Lib => LIB,
@@ -579,6 +978,23 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirectoryId::Usr => USR,
         DirectoryId::UsrBin => USR_BIN,
         DirectoryId::UsrLib => USR_LIB,
+        DirectoryId::System => SYSTEM,
+        DirectoryId::SystemBin => SYSTEM_BIN,
+        DirectoryId::SystemLib64 => SYSTEM_LIB64,
+        DirectoryId::SystemFramework => SYSTEM_FRAMEWORK,
+        DirectoryId::SystemEtc => SYSTEM_ETC,
+        DirectoryId::Apex => APEX,
+        DirectoryId::ApexArt => APEX_ART,
+        DirectoryId::ApexArtJavalib => APEX_ART_JAVALIB,
+        DirectoryId::ApexI18n => APEX_I18N,
+        DirectoryId::ApexI18nJavalib => APEX_I18N_JAVALIB,
+        DirectoryId::ApexI18nEtc => APEX_I18N_ETC,
+        DirectoryId::ApexI18nEtcIcu => APEX_I18N_ETC_ICU,
+        DirectoryId::ApexI18nLib64 => APEX_I18N_LIB64,
+        DirectoryId::LinkerConfig => LINKER_CONFIG,
+        DirectoryId::Data => DATA,
+        DirectoryId::DataLocal => DATA_LOCAL,
+        DirectoryId::DataLocalTmp => DATA_LOCAL_TMP,
     }
 }
 
@@ -638,6 +1054,25 @@ pub fn install_root_library(file: FileId, bytes: Vec<u8>) -> bool {
     ROOT_LIBRARIES[slot]
         .get()
         .is_some_and(|installed| !installed.is_empty())
+}
+
+/// Installs one upstream Android file from the selected System A/B root.
+#[cfg(feature = "lifecycle-root-exec-verify")]
+pub fn install_root_android_file(path: &[u8], bytes: Vec<u8>) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let Some(index) = ANDROID_FILE_PATHS
+        .iter()
+        .position(|candidate| *candidate == path)
+    else {
+        return false;
+    };
+    let Some(slot) = ROOT_LIBRARIES.get(index + 6) else {
+        return false;
+    };
+    slot.call_once(|| bytes);
+    slot.get().is_some_and(|installed| !installed.is_empty())
 }
 
 /// Registers one executable/interpreter pair from the selected System A/B root.

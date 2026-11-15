@@ -14,6 +14,8 @@ ROOT_SIGNAL_FIXTURE="${8:-}"
 ROOT_PPID_FIXTURE="${9:-}"
 ROOT_ANDROID_TOYBOX="${10:-}"
 ROOT_AOSP_BINDER_TEST="${11:-}"
+ROOT_ANDROID_TREE="${12:-}"
+ROOT_ANDROID_LINKER_CONFIG="${13:-}"
 [[ "$SLOT" == A || "$SLOT" == B ]]
 [[ "$RELEASE" =~ ^[1-9][0-9]*$ ]]
 mkdir -p "$WORK"
@@ -121,6 +123,32 @@ if [ -n "$ROOT_AOSP_BINDER_TEST" ]; then
   write_file "$ROOT_AOSP_BINDER_TEST" /usr/bin/aosp-binder-driver-test
   debugfs -w -R 'sif /usr/bin/aosp-binder-driver-test mode 0100755' "$PARTITION" >/dev/null
 fi
+if [ -n "$ROOT_ANDROID_TREE" ]; then
+  [[ -d "$ROOT_ANDROID_TREE" ]]
+  while IFS= read -r directory; do
+    relative=${directory#"$ROOT_ANDROID_TREE"}
+    [ -n "$relative" ] && ensure_dir "$relative"
+  done < <(find "$ROOT_ANDROID_TREE" -type d -print | sort)
+  while IFS= read -r -d '' source; do
+    relative=${source#"$ROOT_ANDROID_TREE"/}
+    if [ -n "$ROOT_ANDROID_LINKER_CONFIG" ] && [ "$relative" = linkerconfig/ld.config.txt ]; then
+      continue
+    fi
+    destination="/$relative"
+    write_file "$source" "$destination"
+    if [[ -x "$source" ]]; then
+      debugfs -w -R "sif $destination mode 0100755" "$PARTITION" >/dev/null
+    else
+      debugfs -w -R "sif $destination mode 0100644" "$PARTITION" >/dev/null
+    fi
+  done < <(find "$ROOT_ANDROID_TREE" -type f -print0)
+fi
+if [ -n "$ROOT_ANDROID_LINKER_CONFIG" ]; then
+  [[ -f "$ROOT_ANDROID_LINKER_CONFIG" ]]
+  ensure_dir /linkerconfig
+  write_file "$ROOT_ANDROID_LINKER_CONFIG" /linkerconfig/ld.config.txt
+  debugfs -w -R 'sif /linkerconfig/ld.config.txt mode 0100644' "$PARTITION" >/dev/null
+fi
 e2fsck -fy "$PARTITION"
 e2fsck -fn "$PARTITION"
 
@@ -156,8 +184,20 @@ fi
 if [ -n "$ROOT_AOSP_BINDER_TEST" ]; then
   verify_payload /usr/bin/aosp-binder-driver-test "$ROOT_AOSP_BINDER_TEST"
 fi
+if [ -n "$ROOT_ANDROID_TREE" ]; then
+  while IFS= read -r -d '' source; do
+    relative=${source#"$ROOT_ANDROID_TREE"/}
+    if [ -n "$ROOT_ANDROID_LINKER_CONFIG" ] && [ "$relative" = linkerconfig/ld.config.txt ]; then
+      continue
+    fi
+    verify_payload "/$relative" "$source"
+  done < <(find "$ROOT_ANDROID_TREE" -type f -print0)
+fi
+if [ -n "$ROOT_ANDROID_LINKER_CONFIG" ]; then
+  verify_payload /linkerconfig/ld.config.txt "$ROOT_ANDROID_LINKER_CONFIG"
+fi
 
 dd if="$PARTITION" of="$IMAGE" bs=512 seek="$START_LBA" \
   conv=notrunc,sparse status=none
 sync
-echo "system-root-fixture: PASS slot=$SLOT release=$RELEASE start_lba=$START_LBA files=6 userland=x86_64-linux-elf root_exec_probe=$([ -n "$ROOT_EXEC_PROBE" ] && echo present || echo absent) full_userland=$FULL_USERLAND signal_fixture=$([ -n "$ROOT_SIGNAL_FIXTURE" ] && echo present || echo absent) ppid_fixture=$([ -n "$ROOT_PPID_FIXTURE" ] && echo present || echo absent) toybox=$([ -n "$ROOT_ANDROID_TOYBOX" ] && echo present || echo absent) aosp_binder_test=$([ -n "$ROOT_AOSP_BINDER_TEST" ] && echo present || echo absent)"
+echo "system-root-fixture: PASS slot=$SLOT release=$RELEASE start_lba=$START_LBA files=6 userland=x86_64-linux-elf root_exec_probe=$([ -n "$ROOT_EXEC_PROBE" ] && echo present || echo absent) full_userland=$FULL_USERLAND signal_fixture=$([ -n "$ROOT_SIGNAL_FIXTURE" ] && echo present || echo absent) ppid_fixture=$([ -n "$ROOT_PPID_FIXTURE" ] && echo present || echo absent) toybox=$([ -n "$ROOT_ANDROID_TOYBOX" ] && echo present || echo absent) aosp_binder_test=$([ -n "$ROOT_AOSP_BINDER_TEST" ] && echo present || echo absent) android_tree=$([ -n "$ROOT_ANDROID_TREE" ] && echo present || echo absent)"

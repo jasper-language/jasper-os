@@ -26,6 +26,9 @@ pub struct TaskContext {
     /// IA32_FS_BASE，Linux x86_64 TLS 的线程指针基址。
     /// IA32_FS_BASE used by x86_64 Linux TLS.
     pub fs_base: u64,
+    /// IA32_GS_BASE. Jasper keeps the syscall entry block in KERNEL_GS_BASE,
+    /// so task switching must preserve the active user GS base here.
+    pub gs_base: u64,
 }
 
 impl TaskContext {
@@ -35,6 +38,7 @@ impl TaskContext {
             fpu_state: [0; 512],
             rsp: 0,
             fs_base: 0,
+            gs_base: 0,
         }
     }
 }
@@ -45,7 +49,9 @@ extern "C" {
 }
 
 // rdi = old, rsi = new（System V 调用约定）。FPU 映像在偏移 0，rsp 在 512，
-// FS_BASE 在 520。rax/rdx 是 caller-saved，可被 MSR 读写临时占用。
+// FS_BASE 在 520，GS_BASE 在 528。rax/rdx 是 caller-saved，可被 MSR 读写临时占用。
+// GS_BASE must not be confused with KERNEL_GS_BASE: syscall entry swaps the two,
+// and the kernel deliberately restores the user GS base while dispatching.
 // 注意是 `mov rsp, [rsi]`（取 new.rsp 的值），不是 `mov rsp, rsi`（那是指针本身）——
 // 后者正是 M1.3 之前骨架里的致命缺陷。
 global_asm!(
@@ -58,9 +64,20 @@ global_asm!(
         shl  rdx, 32
         or   rax, rdx
         mov  [rdi + 520], rax
+        mov  ecx, 0xc0000101
+        rdmsr
+        shl  rdx, 32
+        or   rax, rdx
+        mov  [rdi + 528], rax
         mov  rax, [rsi + 520]
         mov  rdx, rax
         shr  rdx, 32
+        mov  ecx, 0xc0000100
+        wrmsr
+        mov  rax, [rsi + 528]
+        mov  rdx, rax
+        shr  rdx, 32
+        mov  ecx, 0xc0000101
         wrmsr
         push rbp
         push rbx
@@ -101,6 +118,7 @@ pub unsafe fn init_task_frame(stack_top: *mut u8, entry: extern "C" fn() -> !) -
         fpu_state: [0; 512],
         rsp: frame as u64,
         fs_base: 0,
+        gs_base: 0,
     };
     // FXSAVE: x87 control word at 0 and MXCSR at 24. Use the architectural defaults so a new
     // task cannot inherit another task's exception masks, stack pointers or SIMD registers.

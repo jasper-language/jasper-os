@@ -27,8 +27,15 @@ use crate::{console, proc, sched};
     feature = "workload-io-verify"
 ))]
 static SYSCALL_TRACE_REMAINING: AtomicU32 = AtomicU32::new(512);
-#[cfg(feature = "compat-dynamic-libc-verify")]
-static PATH_TRACE_REMAINING: AtomicU32 = AtomicU32::new(24);
+#[cfg(any(
+    feature = "compat-dynamic-libc-verify",
+    feature = "android-art-verify"
+))]
+static PATH_TRACE_REMAINING: AtomicU32 = AtomicU32::new(512);
+#[cfg(feature = "android-art-verify")]
+static ART_TLS_TRACE_REMAINING: AtomicU32 = AtomicU32::new(0);
+const LINUX_PROC_MAPS_HANDLE: u64 = 0x4a53_5052_4f43_4d50;
+const LINUX_PROC_STAT_HANDLE: u64 = 0x4a53_5052_4f43_5354;
 
 const MAX_LINUX_THREADS: usize = 64;
 const MAX_FUTEX_WORDS: usize = 32;
@@ -415,7 +422,10 @@ fn trace_request(args: &SyscallArgs) {
     }
 }
 
-#[cfg(feature = "compat-dynamic-libc-verify")]
+#[cfg(any(
+    feature = "compat-dynamic-libc-verify",
+    feature = "android-art-verify"
+))]
 fn trace_path(kind: &str, path: &[u8]) {
     let remaining = PATH_TRACE_REMAINING.load(Ordering::Relaxed);
     if remaining == 0
@@ -449,7 +459,10 @@ fn trace_path(kind: &str, path: &[u8]) {
     crate::kprintln!("[JSR-LINUX-PATH] kind={} path={}", kind, text);
 }
 
-#[cfg(feature = "compat-dynamic-libc-verify")]
+#[cfg(any(
+    feature = "compat-dynamic-libc-verify",
+    feature = "android-art-verify"
+))]
 fn trace_path_address(pid: ObjId, kind: &str, address: u64) {
     let mut bytes = [0u8; 160];
     match proc::read(pid, address, &mut bytes) {
@@ -572,6 +585,27 @@ fn linux_tid(process: ObjId) -> Option<u32> {
 
 pub(crate) fn current_linux_tid(process: ObjId) -> Option<u32> {
     linux_tid(process)
+}
+
+fn linux_process_for_tid(tid: u32) -> Option<ObjId> {
+    COMPAT
+        .lock()
+        .threads
+        .iter()
+        .flatten()
+        .find(|entry| entry.tid == tid)
+        .map(|entry| entry.process)
+}
+
+fn linux_tid_owned_by_process(process: ObjId, tid: u64) -> bool {
+    u32::try_from(tid).is_ok_and(|tid| {
+        COMPAT
+            .lock()
+            .threads
+            .iter()
+            .flatten()
+            .any(|entry| entry.process == process && entry.tid == tid)
+    })
 }
 
 /// Returns the full security application identity, falling back to the
@@ -2204,6 +2238,7 @@ fn futex_wait(
             }
         }
     }
+    prune_empty_futex_words(&mut state);
     result
 }
 
@@ -2342,6 +2377,7 @@ fn futex_requeue(
             target.waiters[slot] = moved[installed];
         }
     }
+    prune_empty_futex_words(&mut state);
     drop(state);
     for task in woken_tasks[..woken].iter().copied() {
         sched::wake(task);
@@ -2457,6 +2493,32 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
     if !proc::linux_syscall_allowed(pid, call.syscall) {
         return SyscallOutcome::value(-i64::from(CompatErrno::Perm as i32));
     }
+    #[cfg(any(
+        feature = "android-ecosystem-verify",
+        feature = "android-art-verify"
+    ))]
+    {
+        let mut executable = [0u8; 128];
+        if let Some(length) = proc::linux_exec_path(pid, &mut executable) {
+            if executable[..length].starts_with(b"/system/bin/") {
+                crate::kprintln!(
+                    "[JSR-ANDROID-SYSCALL] phase=enter call={:?} args={:?}",
+                    call.syscall,
+                    call.args
+                );
+                if ART_TLS_TRACE_REMAINING.load(Ordering::Relaxed) != 0 {
+                    ART_TLS_TRACE_REMAINING.fetch_sub(1, Ordering::Relaxed);
+                    crate::kprintln!(
+                        "[JSR-ANDROID-ART] syscall={:?} tid={} fs_base={:#x} gs_base={:#x}",
+                        call.syscall,
+                        current_linux_tid(pid).unwrap_or(0),
+                        crate::arch::user_fs_base(),
+                        crate::arch::user_gs_base()
+                    );
+                }
+            }
+        }
+    }
     if matches!(call.syscall, LinuxSyscall::Execve | LinuxSyscall::Execveat) {
         let executed = if call.syscall == LinuxSyscall::Execve {
             linux_execve(pid, call.args)
@@ -2492,6 +2554,22 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
         };
     }
     let value = execute(pid, call, a.user_ip, a.user_preserved);
+    #[cfg(any(
+        feature = "android-ecosystem-verify",
+        feature = "android-art-verify"
+    ))]
+    {
+        let mut executable = [0u8; 128];
+        if let Some(length) = proc::linux_exec_path(pid, &mut executable) {
+            if executable[..length].starts_with(b"/system/bin/") {
+                crate::kprintln!(
+                    "[JSR-ANDROID-SYSCALL] phase=exit call={:?} value={}",
+                    call.syscall,
+                    value
+                );
+            }
+        }
+    }
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
         feature = "lifecycle-root-exec-verify"
@@ -3721,6 +3799,18 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Invalid);
     }
     if let Some(entry) = proc::linux_fd(pid, fd) {
+        if entry.handle == LINUX_PROC_MAPS_HANDLE {
+            if !entry.rights.contains(kernel_core::object::Rights::READ) {
+                return Err(CompatErrno::BadFd);
+            }
+            return linux_proc_maps_read(pid, fd, args[1], len, None);
+        }
+        if entry.handle == LINUX_PROC_STAT_HANDLE {
+            if !entry.rights.contains(kernel_core::object::Rights::READ) {
+                return Err(CompatErrno::BadFd);
+            }
+            return linux_proc_stat_read(pid, fd, args[1], len, None);
+        }
         if entry.kind == compat_core::fd::CompatKind::Pipe {
             if !entry.rights.contains(kernel_core::object::Rights::READ) {
                 return Err(CompatErrno::BadFd);
@@ -3839,6 +3929,18 @@ fn linux_pread64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Invalid);
     }
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if entry.handle == LINUX_PROC_MAPS_HANDLE {
+        if !entry.rights.contains(kernel_core::object::Rights::READ) {
+            return Err(CompatErrno::BadFd);
+        }
+        return linux_proc_maps_read(pid, fd, args[1], len, Some(args[3]));
+    }
+    if entry.handle == LINUX_PROC_STAT_HANDLE {
+        if !entry.rights.contains(kernel_core::object::Rights::READ) {
+            return Err(CompatErrno::BadFd);
+        }
+        return linux_proc_stat_read(pid, fd, args[1], len, Some(args[3]));
+    }
     if entry.kind == compat_core::fd::CompatKind::Device
         && proc::linux_ashmem_is_regular(pid, entry.handle) == Some(true)
     {
@@ -3872,6 +3974,58 @@ fn linux_pread64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         0x1,
         proc::linux_pid(pid).unwrap_or(0),
     );
+    Ok(available as u64)
+}
+
+fn linux_proc_maps_read(
+    pid: ObjId,
+    fd: u32,
+    destination: u64,
+    len: usize,
+    explicit_offset: Option<u64>,
+) -> Result<u64, CompatErrno> {
+    let maps = proc::linux_proc_maps(pid).ok_or(CompatErrno::NoProcess)?;
+    let offset = explicit_offset
+        .unwrap_or_else(|| proc::linux_fd_offset(pid, fd).unwrap_or(0));
+    let offset = usize::try_from(offset).map_err(|_| CompatErrno::Invalid)?;
+    let available = maps.len().saturating_sub(offset).min(len);
+    let io = admit_process_io(pid, available as u64, 1)?;
+    if available != 0 {
+        copy_to_user(destination, &maps[offset..offset + available], available)
+            .map_err(|_| CompatErrno::Fault)?;
+    }
+    io.commit();
+    if explicit_offset.is_none()
+        && !proc::set_linux_file_offset(pid, fd, (offset + available) as u64)
+    {
+        return Err(CompatErrno::BadFd);
+    }
+    Ok(available as u64)
+}
+
+fn linux_proc_stat_read(
+    pid: ObjId,
+    fd: u32,
+    destination: u64,
+    len: usize,
+    explicit_offset: Option<u64>,
+) -> Result<u64, CompatErrno> {
+    let stat = proc::linux_proc_stat(pid).ok_or(CompatErrno::NoProcess)?;
+    let offset = explicit_offset
+        .unwrap_or_else(|| proc::linux_fd_offset(pid, fd).unwrap_or(0));
+    let offset = usize::try_from(offset).map_err(|_| CompatErrno::Invalid)?;
+    let available = stat.len().saturating_sub(offset).min(len);
+    let io = admit_process_io(pid, available as u64, 1)?;
+    if available != 0 {
+        copy_to_user(destination, &stat[offset..offset + available], available)
+            .map_err(|_| CompatErrno::Fault)?;
+    }
+    io.commit();
+    if explicit_offset.is_none()
+        && !proc::set_linux_file_offset(pid, fd, (offset + available) as u64)
+    {
+        return Err(CompatErrno::BadFd);
+    }
     Ok(available as u64)
 }
 
@@ -4383,7 +4537,12 @@ fn linux_sched_setaffinity(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
 /// 返回 `ESRCH`，不猜测 Jasper 调度类别与 Linux 策略的等价关系。
 fn linux_sched_getscheduler(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
     let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
-    if requested == 0 || requested == current {
+    if requested == 0
+        || requested == current
+        || requested
+            == u64::from(current_linux_tid(pid).ok_or(CompatErrno::NoProcess)?)
+        || linux_tid_owned_by_process(pid, requested)
+    {
         Ok(0)
     } else {
         Err(CompatErrno::NoProcess)
@@ -4392,7 +4551,11 @@ fn linux_sched_getscheduler(pid: ObjId, requested: u64) -> Result<u64, CompatErr
 
 fn linux_sched_getparam(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let current = u64::from(proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?);
-    if args[0] != 0 && args[0] != current {
+    if args[0] != 0
+        && args[0] != current
+        && args[0] != u64::from(current_linux_tid(pid).ok_or(CompatErrno::NoProcess)?)
+        && !linux_tid_owned_by_process(pid, args[0])
+    {
         return Err(CompatErrno::NoProcess);
     }
     copy_to_user(args[1], &0i32.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
@@ -4412,7 +4575,9 @@ fn linux_priority_target(
         PRIO_PROCESS if who == 0 || who == current_pid => Ok(current),
         PRIO_PROCESS => {
             let pid = u32::try_from(who).map_err(|_| CompatErrno::NoProcess)?;
-            proc::linux_process_for_pid(pid).ok_or(CompatErrno::NoProcess)
+            proc::linux_process_for_pid(pid)
+                .or_else(|| linux_process_for_tid(pid))
+                .ok_or(CompatErrno::NoProcess)
         }
         PRIO_PGRP if who == 0 || who == current_pid => Ok(current),
         PRIO_PGRP => Err(CompatErrno::NoProcess),
@@ -4575,17 +4740,28 @@ fn linux_task_for_tid(process: ObjId, tid: u32) -> Option<crate::task::TaskId> {
         .map(|entry| entry.task)
 }
 
+fn linux_user_range_valid(start: u64, end: u64) -> bool {
+    (start >= crate::arch::USER_WINDOW.0 && end <= crate::arch::USER_WINDOW.1)
+        || (crate::arch::LOW_USER_WINDOW.1 > crate::arch::LOW_USER_WINDOW.0
+            && start >= crate::arch::LOW_USER_WINDOW.0
+            && end <= crate::arch::LOW_USER_WINDOW.1)
+}
+
 /// Maps a bounded file-backed or anonymous private compatibility region.
 ///
 /// 支持真实 libc 文件和匿名私有映射；拒绝写执行同开、越界、未对齐文件偏移、
 /// 未知非私有标志和与已有映射冲突的 `MAP_FIXED`。失败会撤销本次全部页。
 fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
-    const MAX_MAP_BYTES: u64 = 64 * 1024 * 1024;
+    // Bionic's linker reserves a large address-space arena before it maps
+    // individual DSOs with MAP_FIXED.  Keep the reservation bounded while
+    // accepting the 70+ MiB range used by Android 14.
+    const MAX_MAP_BYTES: u64 = 16 * 1024 * 1024 * 1024;
     const MAP_SHARED: u64 = 0x01;
     const MAP_PRIVATE: u64 = 0x02;
     const MAP_FIXED: u64 = 0x10;
     const MAP_ANONYMOUS: u64 = 0x20;
+    const MAP_32BIT: u64 = 0x40;
     const MAP_DENYWRITE: u64 = 0x800;
     const MAP_NORESERVE: u64 = 0x4000;
     const MAP_STACK: u64 = 0x20000;
@@ -4597,9 +4773,6 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if bytes == 0 || bytes > MAX_MAP_BYTES || args[2] & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
         return Err(CompatErrno::Invalid);
     }
-    if args[2] & PROT_WRITE != 0 && args[2] & PROT_EXEC != 0 {
-        return Err(CompatErrno::Perm);
-    }
     let sharing = args[3] & (MAP_SHARED | MAP_PRIVATE);
     if sharing == 0
         || sharing == (MAP_SHARED | MAP_PRIVATE)
@@ -4608,6 +4781,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 | MAP_PRIVATE
                 | MAP_FIXED
                 | MAP_ANONYMOUS
+                | MAP_32BIT
                 | MAP_DENYWRITE
                 | MAP_NORESERVE
                 | MAP_STACK)
@@ -4618,6 +4792,11 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
 
     let anonymous = args[3] & MAP_ANONYMOUS != 0;
+    let map32 = args[3] & MAP_32BIT != 0;
+    let explicit_low = args[0] != 0
+        && args[0] >= crate::arch::LOW_USER_WINDOW.0
+        && args[0] < crate::arch::LOW_USER_WINDOW.1;
+    let use_low_window = map32 || explicit_low;
     let mut ashmem_handle = None;
     let file = if anonymous {
         None
@@ -4637,7 +4816,11 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if ashmem_handle.is_some() && args[3] & MAP_SHARED == 0 {
         return Err(CompatErrno::Invalid);
     }
-    if ashmem_handle.is_none() && args[3] & MAP_SHARED != 0 && args[2] & PROT_WRITE != 0 {
+    if !anonymous
+        && ashmem_handle.is_none()
+        && args[3] & MAP_SHARED != 0
+        && args[2] & PROT_WRITE != 0
+    {
         return Err(CompatErrno::Access);
     }
     let io = if let Some(file) = file {
@@ -4653,30 +4836,99 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         None
     };
     let rounded = bytes.checked_add(PAGE - 1).ok_or(CompatErrno::Invalid)? & !(PAGE - 1);
-    let cursor = proc::linux_mmap_cursor(pid).ok_or(CompatErrno::NoSys)?;
-    let requested = if args[0] == 0 {
+    let (window_start, window_end) = if use_low_window {
+        crate::arch::LOW_USER_WINDOW
+    } else {
+        crate::arch::USER_WINDOW
+    };
+    let cursor = if use_low_window {
+        proc::linux_mmap32_cursor(pid)
+    } else {
+        proc::linux_mmap_cursor(pid)
+    }
+    .ok_or(CompatErrno::NoSys)?;
+    let mut requested = if args[0] == 0 {
         cursor
     } else {
         align_down(args[0], PAGE)
     };
-    if requested < crate::arch::USER_WINDOW.0
+    if requested < window_start
         || requested
             .checked_add(rounded)
-            .is_none_or(|end| end > crate::arch::USER_WINDOW.1)
+            .is_none_or(|end| end > window_end)
     {
         return Err(CompatErrno::NoMemory);
+    }
+    if args[0] == 0 {
+        requested = proc::linux_next_free_start(pid, requested, rounded)
+            .ok_or(CompatErrno::NoMemory)?;
+        if requested < window_start
+            || requested
+                .checked_add(rounded)
+                .is_none_or(|end| end > window_end)
+        {
+            return Err(CompatErrno::NoMemory);
+        }
+    }
+    if anonymous && args[2] == 0 {
+        let end = requested
+            .checked_add(rounded)
+            .ok_or(CompatErrno::NoMemory)?;
+        if args[3] & MAP_FIXED != 0 {
+            let _ = proc::linux_remove_reserved_range(pid, requested, end);
+        }
+        if proc::linux_reserve_range(pid, requested, end).is_err() {
+            #[cfg(any(
+                feature = "android-ecosystem-verify",
+                feature = "android-art-verify"
+            ))]
+            crate::kprintln!(
+                "[JSR-ANDROID-MMAP] reserve-fail start={} end={} debug={:?}",
+                requested,
+                end,
+                proc::linux_range_debug(pid)
+            );
+            #[cfg(any(
+                feature = "android-ecosystem-verify",
+                feature = "android-art-verify"
+            ))]
+            crate::kprintln!(
+                "[JSR-ANDROID-MMAP] reservation-overlap={:?}",
+                proc::linux_reservation_overlap(pid, requested, end)
+            );
+            return Err(CompatErrno::NoMemory);
+        }
+        let advanced = if use_low_window {
+            proc::set_linux_mmap32_cursor(pid, end)
+        } else {
+            proc::set_linux_mmap_cursor(pid, end)
+        };
+        if !advanced {
+            let _ = proc::linux_remove_reserved_range(pid, requested, end);
+            return Err(CompatErrno::NoSys);
+        }
+        return Ok(requested);
     }
     if args[3] & MAP_FIXED != 0 {
         // MAP_FIXED replaces prior mappings by contract. The source bytes remain available
         // in the immutable virtual file, so a later mapping failure cannot expose stale pages.
+        let _ = proc::linux_remove_reserved_range(
+            pid,
+            requested,
+            requested + rounded,
+        );
         let mut page = requested;
         while page < requested + rounded {
-            let _ = proc::unmap_page(pid, page);
+            if proc::page_flags(pid, page).is_some() {
+                if !proc::unmap_shared_page(pid, page).map_err(|_| CompatErrno::NoMemory)? {
+                    proc::unmap_page(pid, page).map_err(|_| CompatErrno::NoMemory)?;
+                }
+            }
             page += PAGE;
         }
     }
     let mut start = requested;
-    while start < crate::arch::USER_WINDOW.1.saturating_sub(rounded) {
+    while start < window_end.saturating_sub(rounded) {
         let mut page = start;
         let mut free = true;
         while page < start + rounded {
@@ -4694,7 +4946,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         start = start.checked_add(rounded).ok_or(CompatErrno::NoMemory)?;
     }
-    if start + rounded > crate::arch::USER_WINDOW.1 {
+    if start + rounded > window_end {
         return Err(CompatErrno::NoMemory);
     }
     let writable = args[2] & PROT_WRITE != 0;
@@ -4738,7 +4990,32 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             proc::LinuxAshmemError::NoKey => CompatErrno::NoKey,
             proc::LinuxAshmemError::NotSupported => CompatErrno::NotSupported,
         })?;
-        if !proc::set_linux_mmap_cursor(pid, start + rounded) {
+        let advanced = if use_low_window {
+            proc::set_linux_mmap32_cursor(pid, start + rounded)
+        } else {
+            proc::set_linux_mmap_cursor(pid, start + rounded)
+        };
+        if !advanced {
+            return Err(CompatErrno::NoSys);
+        }
+        return Ok(start);
+    }
+    if anonymous && args[3] & MAP_SHARED != 0 {
+        let object =
+            proc::linux_create_shared_memory(pid, rounded).ok_or(CompatErrno::NoMemory)?;
+        proc::linux_shared_memory_map(pid, &object, start, rounded, writable)
+            .map_err(|_| CompatErrno::NoMemory)?;
+        let advanced = if use_low_window {
+            proc::set_linux_mmap32_cursor(pid, start + rounded)
+        } else {
+            proc::set_linux_mmap_cursor(pid, start + rounded)
+        };
+        if !advanced {
+            let mut page = start;
+            while page < start + rounded {
+                let _ = proc::unmap_shared_page(pid, page);
+                page += PAGE;
+            }
             return Err(CompatErrno::NoSys);
         }
         return Ok(start);
@@ -4797,7 +5074,12 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             }
         }
     }
-    if !proc::set_linux_mmap_cursor(pid, start + rounded) {
+    let advanced = if use_low_window {
+        proc::set_linux_mmap32_cursor(pid, start + rounded)
+    } else {
+        proc::set_linux_mmap_cursor(pid, start + rounded)
+    };
+    if !advanced {
         for address in mapped.iter().rev().copied() {
             let _ = proc::unmap_page(pid, address);
         }
@@ -4936,8 +5218,19 @@ fn linux_munmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if proc::linux_range_is_sealed(pid, args[0], end) {
         return Err(CompatErrno::Perm);
     }
+    if args[2] == 0 && proc::linux_range_is_reserved(pid, args[0], end) {
+        return Ok(0);
+    }
+    let _ = proc::linux_remove_reserved_range(pid, args[0], end);
+    if proc::linux_unmap_private_range(pid, args[0], end).map_err(|_| CompatErrno::NoMemory)? {
+        return Ok(0);
+    }
     let mut page = args[0];
     while page < end {
+        if proc::page_flags(pid, page).is_none() {
+            page += PAGE;
+            continue;
+        }
         if !proc::unmap_shared_page(pid, page).map_err(|_| CompatErrno::NoMemory)? {
             proc::unmap_page(pid, page).map_err(|_| CompatErrno::NoMemory)?;
         }
@@ -4987,8 +5280,7 @@ fn linux_mremap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let new_end = old_address
         .checked_add(new_rounded)
         .ok_or(CompatErrno::Invalid)?;
-    if old_address < crate::arch::USER_WINDOW.0
-        || new_end > crate::arch::USER_WINDOW.1
+    if !linux_user_range_valid(old_address, new_end)
         || proc::linux_page_is_shared(pid, old_address)
     {
         return Err(CompatErrno::NoMemory);
@@ -5037,7 +5329,17 @@ fn linux_mremap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 mapped.push(page);
                 page += PAGE;
             }
-            let _ = proc::set_linux_mmap_cursor(pid, new_end.max(proc::linux_mmap_cursor(pid).unwrap_or(0)));
+            if new_end < crate::arch::LOW_USER_WINDOW.1 {
+                let _ = proc::set_linux_mmap32_cursor(
+                    pid,
+                    new_end.max(proc::linux_mmap32_cursor(pid).unwrap_or(0)),
+                );
+            } else {
+                let _ = proc::set_linux_mmap_cursor(
+                    pid,
+                    new_end.max(proc::linux_mmap_cursor(pid).unwrap_or(0)),
+                );
+            }
             return Ok(old_address);
         }
         if flags & MREMAP_MAYMOVE == 0 {
@@ -5057,10 +5359,10 @@ fn linux_mremap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .checked_add(new_rounded)
             .ok_or(CompatErrno::NoMemory)?;
         let overlaps_old = target < old_end && old_address < target_end;
-        if target >= crate::arch::USER_WINDOW.0
-            && target_end <= crate::arch::USER_WINDOW.1
-            && !overlaps_old
-        {
+        if linux_user_range_valid(target, target_end) && !overlaps_old {
+            if flags & MREMAP_FIXED != 0 {
+                break;
+            }
             let mut free = true;
             let mut page = target;
             while page < target_end {
@@ -5080,12 +5382,42 @@ fn linux_mremap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         target = target.checked_add(new_rounded).ok_or(CompatErrno::NoMemory)?;
     }
 
+    let target_end = target
+        .checked_add(new_rounded)
+        .ok_or(CompatErrno::NoMemory)?;
+    let target_was_reserved = proc::linux_range_is_reserved(pid, target, target_end);
+    if flags & MREMAP_FIXED != 0 {
+        let _ = proc::linux_remove_reserved_range(pid, target, target_end);
+        let mut page = target;
+        while page < target_end {
+            if proc::page_flags(pid, page).is_some() {
+                if !proc::unmap_shared_page(pid, page).map_err(|_| CompatErrno::NoMemory)? {
+                    proc::unmap_page(pid, page).map_err(|_| CompatErrno::NoMemory)?;
+                }
+            }
+            page += PAGE;
+        }
+    }
     let mut mapped = alloc::vec::Vec::new();
     let mut page = target;
-    while page < target + new_rounded {
-        if proc::map_new(pid, page, mapping_flags).is_err() {
+    while page < target_end {
+        if let Err(error) = proc::map_new(pid, page, mapping_flags) {
+            #[cfg(any(
+                feature = "android-ecosystem-verify",
+                feature = "android-art-verify"
+            ))]
+            crate::kprintln!(
+                "[JSR-ANDROID-MREMAP] map-fail source={} target={} pages={} error={:?}",
+                old_address,
+                target,
+                new_rounded / PAGE,
+                error
+            );
             for address in mapped.into_iter().rev() {
                 let _ = proc::unmap_page(pid, address);
+            }
+            if target_was_reserved {
+                let _ = proc::linux_reserve_range(pid, target, target_end);
             }
             return Err(CompatErrno::NoMemory);
         }
@@ -5103,6 +5435,9 @@ fn linux_mremap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             for address in mapped.into_iter().rev() {
                 let _ = proc::unmap_page(pid, address);
             }
+            if target_was_reserved {
+                let _ = proc::linux_reserve_range(pid, target, target_end);
+            }
             return Err(CompatErrno::Fault);
         }
         copied += chunk as u64;
@@ -5113,14 +5448,24 @@ fn linux_mremap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             for address in mapped.into_iter().rev() {
                 let _ = proc::unmap_page(pid, address);
             }
+            if target_was_reserved {
+                let _ = proc::linux_reserve_range(pid, target, target_end);
+            }
             return Err(CompatErrno::NoMemory);
         }
         page += PAGE;
     }
-    let _ = proc::set_linux_mmap_cursor(
-        pid,
-        (target + new_rounded).max(proc::linux_mmap_cursor(pid).unwrap_or(0)),
-    );
+    if target < crate::arch::LOW_USER_WINDOW.1 {
+        let _ = proc::set_linux_mmap32_cursor(
+            pid,
+            (target + new_rounded).max(proc::linux_mmap32_cursor(pid).unwrap_or(0)),
+        );
+    } else {
+        let _ = proc::set_linux_mmap_cursor(
+            pid,
+            (target + new_rounded).max(proc::linux_mmap_cursor(pid).unwrap_or(0)),
+        );
+    }
     Ok(target)
 }
 
@@ -5133,7 +5478,6 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         || args[1] == 0
         || args[1] % PAGE != 0
         || args[2] & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0
-        || (args[2] & PROT_WRITE != 0 && args[2] & PROT_EXEC != 0)
     {
         return Err(CompatErrno::Invalid);
     }
@@ -5144,14 +5488,71 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if proc::linux_range_is_sealed(pid, args[0], end) {
         return Err(CompatErrno::Perm);
     }
-    proc::protect_range(
-        pid,
-        args[0],
-        args[1] / PAGE,
-        args[2] & PROT_WRITE != 0,
-        args[2] & PROT_EXEC != 0,
-    )
-    .map_err(|_| CompatErrno::NoMemory)?;
+    if args[2] != 0
+        && proc::linux_materialize_reserved(
+            pid,
+            args[0],
+            end,
+            args[2] & PROT_WRITE != 0,
+        )
+        .map_err(|error| {
+            #[cfg(any(
+                feature = "android-ecosystem-verify",
+                feature = "android-art-verify"
+            ))]
+            crate::kprintln!(
+                "[JSR-ANDROID-MPROTECT] materialize-fail start={} end={} error={:?} free_frames={} usable_frames={} memory_caps={:?}",
+                args[0],
+                end,
+                error,
+                crate::mm::frame::free_frames(),
+                crate::mm::frame::usable_frames(),
+                proc::memory_capability_stats(pid)
+            );
+            CompatErrno::NoMemory
+        })?
+    {
+        if args[2] & PROT_EXEC != 0 {
+            proc::protect_range_access(
+                pid,
+                args[0],
+                args[1] / PAGE,
+                true,
+                args[2] & PROT_WRITE != 0,
+                true,
+            )
+            .map_err(|_| CompatErrno::NoMemory)?;
+        }
+        return Ok(0);
+    }
+    let pages = args[1] / PAGE;
+    let mut done = 0;
+    while done < pages {
+        let chunk = (pages - done).min(proc::MAX_MAP_PAGES);
+        proc::protect_range_access(
+            pid,
+            args[0] + done * PAGE,
+            chunk,
+            args[2] != 0,
+            args[2] & PROT_WRITE != 0,
+            args[2] & PROT_EXEC != 0,
+        )
+        .map_err(|error| {
+        #[cfg(any(
+            feature = "android-ecosystem-verify",
+            feature = "android-art-verify"
+        ))]
+        crate::kprintln!(
+            "[JSR-ANDROID-MPROTECT] protect-fail start={} end={} flags={} error={:?}",
+            args[0],
+            end,
+            args[2],
+            error
+        );
+        CompatErrno::NoMemory
+        })?;
+        done += chunk;
+    }
     Ok(0)
 }
 
@@ -6175,6 +6576,18 @@ fn linux_spawn_clone(
         clone_r8,
     )
     .map_err(|_| CompatErrno::NoMemory)?;
+    #[cfg(feature = "android-art-verify")]
+    {
+        ART_TLS_TRACE_REMAINING.store(24, Ordering::Relaxed);
+        crate::kprintln!(
+            "[JSR-ANDROID-ART] clone parent_tid={} child_tid={} tls={:#x} fs_base={:#x} gs_base={:#x}",
+            current_linux_tid(pid).unwrap_or(0),
+            linux_tid_for_task(task).map(|(_, tid)| tid).unwrap_or(0),
+            tls,
+            crate::arch::user_fs_base(),
+            crate::arch::user_gs_base()
+        );
+    }
     let (_, tid) = linux_tid_for_task(task).ok_or(CompatErrno::NoSys)?;
     let tid_bytes = tid.to_le_bytes();
     if flags & CLONE_PARENT_SETTID != 0 {
@@ -6341,6 +6754,18 @@ fn clear_task_futex_waiters(task: crate::task::TaskId) {
             if waiter.active && waiter.task == task {
                 *waiter = FutexWaiter::EMPTY;
             }
+        }
+    }
+    prune_empty_futex_words(&mut state);
+}
+
+fn prune_empty_futex_words(state: &mut CompatState) {
+    for slot in &mut state.futexes {
+        if slot
+            .as_ref()
+            .is_some_and(|word| word.waiters.iter().all(|waiter| !waiter.active))
+        {
+            *slot = None;
         }
     }
 }
@@ -7079,20 +7504,35 @@ fn linux_landlock_restrict_self(
     Ok(0)
 }
 
-/// Implements the x86_64 `arch_prctl(2)` TLS base operation.
-///
-/// 当前切片仅接受 `ARCH_SET_FS`，地址必须位于本架构用户私有窗口。线程级 FS_BASE 随
-/// 任务上下文保存和恢复，不能把值泄漏给下一任务。
+/// Implements the x86_64 `arch_prctl(2)` FS/GS base operations.
 fn linux_arch_prctl(args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const ARCH_SET_GS: u64 = 0x1001;
     const ARCH_SET_FS: u64 = 0x1002;
-    if args[0] != ARCH_SET_FS {
-        return Err(CompatErrno::Invalid);
-    }
-    if args[1] < crate::arch::USER_WINDOW.0
-        || args[1] >= crate::arch::USER_WINDOW.1
-        || !crate::arch::set_user_fs_base(args[1])
-    {
-        return Err(CompatErrno::Invalid);
+    const ARCH_GET_FS: u64 = 0x1003;
+    const ARCH_GET_GS: u64 = 0x1004;
+    match args[0] {
+        ARCH_SET_FS | ARCH_SET_GS => {
+            if args[1] != 0 && !linux_user_range_valid(args[1], args[1] + 1) {
+                return Err(CompatErrno::Invalid);
+            }
+            let set = if args[0] == ARCH_SET_FS {
+                crate::arch::set_user_fs_base(args[1])
+            } else {
+                crate::arch::set_user_gs_base(args[1])
+            };
+            if !set {
+                return Err(CompatErrno::Invalid);
+            }
+        }
+        ARCH_GET_FS | ARCH_GET_GS => {
+            let base = if args[0] == ARCH_GET_FS {
+                crate::arch::user_fs_base()
+            } else {
+                crate::arch::user_gs_base()
+            };
+            copy_to_user(args[1], &base.to_le_bytes(), 8).map_err(|_| CompatErrno::Fault)?;
+        }
+        _ => return Err(CompatErrno::Invalid),
     }
     Ok(0)
 }
@@ -14256,7 +14696,10 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const O_NOCTTY: u64 = 0x100;
     const O_NOFOLLOW: u64 = 0x20000;
     const O_PATH: u64 = 0x20_0000;
-    #[cfg(feature = "compat-dynamic-libc-verify")]
+    #[cfg(any(
+        feature = "compat-dynamic-libc-verify",
+        feature = "android-art-verify"
+    ))]
     trace_path_address(pid, "openat-address", args[1]);
     let flags = args[2];
     let path_only = flags & O_PATH != 0;
@@ -14268,7 +14711,10 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Perm);
     }
     let path = linux_c_string(args[1], 4096)?;
-    #[cfg(feature = "compat-dynamic-libc-verify")]
+    #[cfg(any(
+        feature = "compat-dynamic-libc-verify",
+        feature = "android-art-verify"
+    ))]
     trace_path("openat", &path);
     let resolved = if path.starts_with(b"/") {
         if !is_at_fdcwd(args[0]) {
@@ -14310,6 +14756,22 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             resolved
         }
     };
+    if !path_only && resolved == b"/proc/self/maps" {
+        if flags & 3 != 0 {
+            return Err(CompatErrno::Perm);
+        }
+        return proc::linux_install_file(pid, LINUX_PROC_MAPS_HANDLE, flags & O_CLOEXEC != 0)
+            .map(u64::from)
+            .ok_or(CompatErrno::NoSpace);
+    }
+    if !path_only && resolved == b"/proc/self/stat" {
+        if flags & 3 != 0 {
+            return Err(CompatErrno::Perm);
+        }
+        return proc::linux_install_file(pid, LINUX_PROC_STAT_HANDLE, flags & O_CLOEXEC != 0)
+            .map(u64::from)
+            .ok_or(CompatErrno::NoSpace);
+    }
     if !path_only && resolved == b"/dev/ashmem" {
         if flags & 3 != 2 {
             return Err(CompatErrno::Perm);
@@ -14327,6 +14789,11 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             flags & O_CLOEXEC != 0,
             flags & O_NONBLOCK != 0,
         )
+            .map(u64::from)
+            .ok_or(CompatErrno::NoSpace);
+    }
+    if !path_only && resolved == b"/dev/null" {
+        return proc::linux_open_null(pid, flags)
             .map(u64::from)
             .ok_or(CompatErrno::NoSpace);
     }
@@ -15013,6 +15480,20 @@ fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             size,
             if regular { 0o100600 } else { 0o020666 },
         )?;
+        return Ok(0);
+    }
+    if entry.handle == LINUX_PROC_MAPS_HANDLE {
+        let size = proc::linux_proc_maps(pid)
+            .map(|maps| maps.len() as u64)
+            .unwrap_or(0);
+        write_synthetic_stat(args[1], entry.handle, 1, size, 0o100444)?;
+        return Ok(0);
+    }
+    if entry.handle == LINUX_PROC_STAT_HANDLE {
+        let size = proc::linux_proc_stat(pid)
+            .map(|stat| stat.len() as u64)
+            .unwrap_or(0);
+        write_synthetic_stat(args[1], entry.handle, 1, size, 0o100444)?;
         return Ok(0);
     }
     let node = crate::linux_vfs::FileId::from_handle(entry.handle)

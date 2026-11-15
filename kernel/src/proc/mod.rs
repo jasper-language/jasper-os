@@ -138,6 +138,8 @@ struct LinuxProcessState {
     cwd: crate::linux_vfs::DirectoryId,
     brk: u64,
     mmap_next: u64,
+    mmap32_next: u64,
+    stack_range: Option<(u64, u64)>,
     /// Linux process-wide signal dispositions.
     signal_actions: [[u64; 4]; 64],
     /// Exact executable path exposed through `/proc/self/exe`.
@@ -170,6 +172,7 @@ struct LinuxProcessState {
     shstk_features: u64,
     shstk_locked: u64,
     mappings: Vec<LinuxMapping>,
+    reservations: Vec<LinuxReservation>,
     sealed_ranges: Vec<(u64, u64)>,
     pipes: Vec<LinuxPipeHandle>,
     next_pipe_handle: u64,
@@ -223,6 +226,13 @@ struct LinuxMapping {
     file: Option<crate::linux_vfs::FileId>,
     file_offset: u64,
     shared_file: bool,
+}
+
+#[derive(Clone, Copy)]
+#[cfg(feature = "linux-abi")]
+struct LinuxReservation {
+    start: u64,
+    end: u64,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -2610,6 +2620,35 @@ pub(crate) fn linux_open_binder(
             max_threads: AtomicU32::new(0),
         }));
         Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Opens the Linux null device as a bounded compatibility descriptor.
+///
+/// 为 Bionic 的早期启动路径提供 `/dev/null`，避免 libc 因为标准描述符的
+/// fallback 不存在而在 `__early_abort` 中崩溃。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_open_null(pid: ObjId, flags: u64) -> Option<u32> {
+    if flags & 3 == 3 {
+        return None;
+    }
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let mut rights = Rights::READ;
+        if flags & 3 != 0 {
+            rights = rights.union(Rights::WRITE);
+        }
+        linux
+            .fds
+            .install(
+                LINUX_CONSOLE_HANDLE,
+                rights,
+                compat_core::fd::CompatKind::Other,
+                flags & 0x80000 != 0,
+            )
+            .map(|fd| fd.fd())
+            .map_err(|_| ProcError::NoTaskSlot)
     })
     .ok()
 }
@@ -5974,6 +6013,427 @@ pub(crate) fn set_linux_mmap_cursor(pid: ObjId, value: u64) -> bool {
         .is_ok()
 }
 
+/// Returns the next candidate address for Linux `MAP_32BIT`.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_mmap32_cursor(pid: ObjId) -> Option<u64> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()
+            .map(|linux| linux.mmap32_next)
+            .filter(|next| *next != 0),
+        _ => None,
+    })
+}
+
+/// Advances the Linux `MAP_32BIT` cursor after all mappings succeed.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_mmap32_cursor(pid: ObjId, value: u64) -> bool {
+    value != 0
+        && with_proc(pid, |p| {
+            let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+            if linux.mmap32_next == 0 {
+                return Err(ProcError::Exited);
+            }
+            linux.mmap32_next = value;
+            Ok(())
+        })
+        .is_ok()
+}
+
+/// Records the main user stack range exposed through procfs.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_stack_range(pid: ObjId, start: u64, end: u64) -> bool {
+    start < end
+        && with_proc(pid, |p| {
+            p.linux
+                .as_mut()
+                .ok_or(ProcError::Exited)?
+                .stack_range = Some((start, end));
+            Ok(())
+        })
+        .is_ok()
+}
+
+/// Reserves a large PROT_NONE address range without allocating physical frames.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_reserve_range(pid: ObjId, start: u64, end: u64) -> Result<(), MemError> {
+    if start % FRAME_SIZE != 0
+        || end <= start
+        || !((start >= arch::USER_WINDOW.0 && end <= arch::USER_WINDOW.1)
+            || (arch::LOW_USER_WINDOW.1 > arch::LOW_USER_WINDOW.0
+                && start >= arch::LOW_USER_WINDOW.0
+                && end <= arch::LOW_USER_WINDOW.1))
+    {
+        return Err(MemError::InvalidRange);
+    }
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        if linux
+            .mappings
+            .iter()
+            .any(|mapping| mapping.va < end && mapping.va + FRAME_SIZE > start)
+            || linux
+                .reservations
+                .iter()
+                .any(|reservation| reservation.start < end && reservation.end > start)
+        {
+            return Err(ProcError::Map(MapError::InvalidAddress));
+        }
+        linux
+            .reservations
+            .try_reserve(1)
+            .map_err(|_| ProcError::MemoryQuota)?;
+        linux.reservations.push(LinuxReservation { start, end });
+        Ok(())
+    })
+    .map_err(|_| MemError::AlreadyMapped)
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_range_debug(pid: ObjId) -> Option<(u64, usize, usize)> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p.linux.as_ref().map(|linux| {
+            (
+                linux.mmap_next,
+                linux.reservations.len(),
+                linux.mappings.len(),
+            )
+        }),
+        _ => None,
+    })
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_reservation_overlap(
+    pid: ObjId,
+    start: u64,
+    end: u64,
+) -> Option<(u64, u64)> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p.linux.as_ref().and_then(|linux| {
+            linux
+                .reservations
+                .iter()
+                .find(|reservation| reservation.start < end && reservation.end > start)
+                .map(|reservation| (reservation.start, reservation.end))
+        }),
+        _ => None,
+    })
+}
+
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_next_free_start(pid: ObjId, start: u64, size: u64) -> Option<u64> {
+    crate::kobj::with(|t| {
+        let p = match t.get(pid) {
+            Ok(KObject::Process(p)) => p,
+            _ => return None,
+        };
+        let linux = p.linux.as_ref()?;
+        let alignment = kernel_core::frame::FRAME_SIZE;
+        let mut candidate = start;
+        for _ in 0..linux.reservations.len().saturating_add(linux.mappings.len()).saturating_add(1) {
+            let end = candidate.checked_add(size)?;
+            if end > arch::USER_WINDOW.1 {
+                return None;
+            }
+            let reservation_end = linux
+                .reservations
+                .iter()
+                .filter(|reservation| reservation.start < end && reservation.end > candidate)
+                .map(|reservation| reservation.end)
+                .max();
+            let mapping_end = linux
+                .mappings
+                .iter()
+                .filter(|mapping| mapping.va < end && mapping.va + alignment > candidate)
+                .map(|mapping| mapping.va + alignment)
+                .max();
+            let Some(next) = reservation_end.into_iter().chain(mapping_end).max() else {
+                return Some(candidate);
+            };
+            candidate = next.checked_add(alignment - 1)? & !(alignment - 1);
+        }
+        None
+    })
+}
+
+/// Renders this process's actual Linux mappings, lazy reservations, shared
+/// mappings and device mappings for `/proc/self/maps`.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_proc_maps(pid: ObjId) -> Option<Vec<u8>> {
+    use core::fmt::Write as _;
+
+    crate::kobj::with(|t| {
+        let Ok(KObject::Process(p)) = t.get(pid) else {
+            return None;
+        };
+        let linux = p.linux.as_ref()?;
+        let mut rows = Vec::new();
+        rows.try_reserve(
+            linux
+                .mappings
+                .len()
+                .saturating_add(linux.reservations.len())
+                .saturating_add(p.shared_maps.len())
+                .saturating_add(p.device_maps.len()),
+        )
+        .ok()?;
+        for mapping in &linux.mappings {
+            let flags = p
+                .space
+                .translate(VirtPage::containing(mapping.va))
+                .map_or(mapping.flags, |(_, flags)| flags);
+            rows.push((
+                mapping.va,
+                mapping.va + FRAME_SIZE,
+                flags,
+                mapping.file,
+            ));
+        }
+        for reservation in &linux.reservations {
+            rows.push((
+                reservation.start,
+                reservation.end,
+                MapFlags::READ_ONLY,
+                None,
+            ));
+        }
+        for mapping in &p.shared_maps {
+            let flags = if mapping.writable {
+                MapFlags::USER.union(MapFlags::WRITE)
+            } else {
+                MapFlags::USER
+            };
+            rows.push((mapping.va, mapping.va + FRAME_SIZE, flags, None));
+        }
+        for mapping in &p.device_maps {
+            rows.push((
+                mapping.va,
+                mapping.va + mapping.pages * FRAME_SIZE,
+                MapFlags::USER.union(MapFlags::WRITE).union(MapFlags::NO_CACHE),
+                None,
+            ));
+        }
+        rows.sort_unstable_by_key(|row| row.0);
+
+        let mut text = alloc::string::String::new();
+        // The mapping table is page-granular, so avoid duplicating all rows a
+        // second time. ART can create >200k page records; a second full vector
+        // plus a large speculative String reserve exhausts the 128 MiB heap.
+        text.try_reserve(4096).ok()?;
+        let mut rows = rows.into_iter().peekable();
+        while let Some((start, mut end, flags, file)) = rows.next() {
+            while let Some(&(next_start, next_end, next_flags, next_file)) = rows.peek() {
+                let stack_boundary = linux.stack_range.is_some_and(|(stack_start, stack_end)| {
+                    end == stack_start
+                        || next_start == stack_start
+                        || end == stack_end
+                        || next_start == stack_end
+                });
+                if next_start != end || flags != next_flags || file != next_file || stack_boundary {
+                    break;
+                }
+                end = next_end;
+                rows.next();
+            }
+            let read = if flags.contains(MapFlags::USER) {
+                'r'
+            } else {
+                '-'
+            };
+            let write = if flags.contains(MapFlags::WRITE) {
+                'w'
+            } else {
+                '-'
+            };
+            let execute = if flags.contains(MapFlags::EXECUTE) {
+                'x'
+            } else {
+                '-'
+            };
+            let is_stack = linux
+                .stack_range
+                .is_some_and(|(stack_start, stack_end)| {
+                    start >= stack_start && end <= stack_end
+                });
+            let path = if is_stack {
+                "[stack]"
+            } else {
+                file.and_then(|file| core::str::from_utf8(file.path()).ok())
+                    .unwrap_or("[anon]")
+            };
+            write!(
+                text,
+                "{:016x}-{:016x} {}{}{}p 00000000 00:00 0 {}\n",
+                start, end, read, write, execute, path
+            )
+            .ok()?;
+        }
+        #[cfg(feature = "android-art-verify")]
+        {
+            let stack_line = text
+                .lines()
+                .find(|line| line.ends_with("[stack]"))
+                .unwrap_or("<missing>");
+            crate::kprintln!(
+                "[JSR-ANDROID-ART] maps stack_range={:?} stack_line={}",
+                linux.stack_range,
+                stack_line
+            );
+        }
+        Some(text.into_bytes())
+    })
+}
+
+/// Renders one Linux `/proc/self/stat` record from the live process state.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_proc_stat(pid: ObjId) -> Option<Vec<u8>> {
+    use core::fmt::Write as _;
+
+    let cpu_ticks = linux_process_cpu_ticks(pid).unwrap_or(0);
+    crate::kobj::with(|t| {
+        let Ok(KObject::Process(p)) = t.get(pid) else {
+            return None;
+        };
+        let linux = p.linux.as_ref()?;
+        let mut comm = [b'_'; 64];
+        let mut length = 0usize;
+        let count = linux.exec_path_len.min(linux.exec_path.len());
+        if count != 0 {
+            let path = &linux.exec_path;
+            let start = path[..count]
+                .iter()
+                .rposition(|byte| *byte == b'/')
+                .map_or(0, |index| index + 1);
+            for byte in path[start..count].iter().copied().take(comm.len()) {
+                comm[length] = if byte.is_ascii_graphic() && !matches!(byte, b'(' | b')') {
+                    byte
+                } else {
+                    b'_'
+                };
+                length += 1;
+            }
+        }
+        if length == 0 {
+            comm[0] = b'?';
+            length = 1;
+        }
+        let reservations = linux
+            .reservations
+            .iter()
+            .map(|range| range.end.saturating_sub(range.start) / FRAME_SIZE)
+            .sum::<u64>();
+        let virtual_pages = p
+            .frames
+            .len()
+            .saturating_add(p.shared_maps.len())
+            .saturating_add(p.device_maps.iter().map(|mapping| mapping.pages as usize).sum())
+            .saturating_add(reservations as usize) as u64;
+        let resident_pages = p.frames.len().saturating_add(p.shared_maps.len()) as u64;
+        let startstack = linux
+            .stack_range
+            .map(|(_, end)| end.saturating_sub(16))
+            .unwrap_or(0);
+        let mut text = alloc::string::String::new();
+        text.try_reserve(512).ok()?;
+        write!(
+            text,
+            "{} ({}) R {} {} {} 0 -1 4194560 0 0 0 0 {} {} 0 0 20 0 {} 0 1 {} {} 18446744073709551615 0 0 {} 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+            linux.pid,
+            core::str::from_utf8(&comm[..length]).unwrap_or("?"),
+            linux.ppid,
+            linux.pgid,
+            linux.sid,
+            cpu_ticks,
+            0,
+            p.threads_live.max(1),
+            virtual_pages * FRAME_SIZE,
+            resident_pages,
+            startstack,
+        )
+        .ok()?;
+        #[cfg(feature = "android-art-verify")]
+        crate::kprintln!("[JSR-ANDROID-ART] stat={}", text);
+        Some(text.into_bytes())
+    })
+}
+
+/// Returns whether a range is fully covered by one lazy reservation.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_range_is_reserved(pid: ObjId, start: u64, end: u64) -> bool {
+    with_proc(pid, |p| {
+        Ok(p.linux.as_ref().is_some_and(|linux| {
+            linux
+                .reservations
+                .iter()
+                .any(|reservation| reservation.start <= start && reservation.end >= end)
+        }))
+    })
+    .unwrap_or(false)
+}
+
+/// Removes or splits lazy reservations overlapping one address range.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_remove_reserved_range(pid: ObjId, start: u64, end: u64) -> bool {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        let mut changed = false;
+        let mut retained = Vec::new();
+        retained
+            .try_reserve(linux.reservations.len().saturating_add(1))
+            .map_err(|_| ProcError::MemoryQuota)?;
+        for reservation in linux.reservations.iter().copied() {
+            if reservation.end <= start || reservation.start >= end {
+                retained.push(reservation);
+                continue;
+            }
+            changed = true;
+            if reservation.start < start {
+                retained.push(LinuxReservation {
+                    start: reservation.start,
+                    end: start,
+                });
+            }
+            if reservation.end > end {
+                retained.push(LinuxReservation {
+                    start: end,
+                    end: reservation.end,
+                });
+            }
+        }
+        linux.reservations = retained;
+        Ok(changed)
+    })
+    .unwrap_or(false)
+}
+
+/// Materializes a reserved subrange as zero-filled anonymous pages.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_materialize_reserved(
+    pid: ObjId,
+    start: u64,
+    end: u64,
+    writable: bool,
+) -> Result<bool, MemError> {
+    if !linux_range_is_reserved(pid, start, end) {
+        return Ok(false);
+    }
+    if !linux_remove_reserved_range(pid, start, end) {
+        return Ok(false);
+    }
+    let pages = (end - start) / FRAME_SIZE;
+    if pages > MAX_MAP_PAGES {
+        let _ = linux_reserve_range(pid, start, end);
+        return Err(MemError::Quota);
+    }
+    if let Err(error) = map_anon(pid, start, pages, writable) {
+        let _ = linux_reserve_range(pid, start, end);
+        return Err(error);
+    }
+    Ok(true)
+}
+
 /// Reports whether any sealed range overlaps `[start, end)`.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_range_is_sealed(pid: ObjId, start: u64, end: u64) -> bool {
@@ -6057,6 +6517,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         cwd: crate::linux_vfs::DirectoryId::Root,
         brk: crate::arch::USER_WINDOW.0 + 0x1000_0000,
         mmap_next: crate::arch::USER_WINDOW.0 + 0x4000_0000,
+        mmap32_next: crate::arch::LOW_USER_WINDOW.0 + 0x1000_0000,
+        stack_range: None,
         signal_actions: [[0; 4]; 64],
         exec_path: [0; 128],
         exec_path_len: 0,
@@ -6092,6 +6554,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         shstk_features: 0,
         shstk_locked: 0,
         mappings: Vec::new(),
+        reservations: Vec::new(),
         sealed_ranges: Vec::new(),
         pipes: Vec::new(),
         next_pipe_handle: LINUX_PIPE_HANDLE_BASE,
@@ -6184,6 +6647,8 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
             linux.aio_contexts.clear();
             linux.brk = crate::arch::USER_WINDOW.0 + 0x1000_0000;
             linux.mmap_next = crate::arch::USER_WINDOW.0 + 0x4000_0000;
+            linux.mmap32_next = crate::arch::LOW_USER_WINDOW.0 + 0x1000_0000;
+            linux.stack_range = None;
             linux.signal_actions = [[0; 4]; 64];
             linux.exec_path.fill(0);
             linux.exec_path_len = 0;
@@ -6685,6 +7150,13 @@ pub fn map_anon(pid: ObjId, va: u64, pages: u64, writable: bool) -> Result<(), M
             return Err(MemError::Busy);
         }
         if !p.memory_caps.can_grant(va, pages, MemoryKind::Anonymous) {
+            #[cfg(feature = "android-art-verify")]
+            crate::kprintln!(
+                "[JSR-ANDROID-CAP] grant-conflict start={} end={} overlap={:?}",
+                va,
+                va + pages * FRAME_SIZE,
+                p.memory_caps.overlapping(va, pages)
+            );
             return Err(MemError::Quota);
         }
         active = p.space.active_cpus();
@@ -7321,6 +7793,105 @@ pub fn unmap_range(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
     Ok(())
 }
 
+/// Fast Linux `munmap` for a private range. Unlike [`unmap_range`], unmapped
+/// holes are allowed. Returns `false` before changing anything when the range
+/// includes a shared or device mapping, so the caller can use backing-aware
+/// removal for that rare mixed case.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_unmap_private_range(
+    pid: ObjId,
+    start: u64,
+    end: u64,
+) -> Result<bool, ProcError> {
+    if start % FRAME_SIZE != 0 || end <= start {
+        return Err(ProcError::Map(MapError::InvalidAddress));
+    }
+    let pages = (end - start) / FRAME_SIZE;
+    let special = kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => Ok((0..pages).any(|i| {
+            let va = start + i * FRAME_SIZE;
+            is_shared_page(p, va) || is_device_page(p, va)
+        })),
+        _ => Err(ProcError::NoSuchProcess),
+    })?;
+    if special {
+        return Ok(false);
+    }
+
+    let mut gone = Vec::new();
+    gone.try_reserve_exact(pages as usize)
+        .map_err(|_| ProcError::OutOfFrames)?;
+    let active = kobj::with(|t| {
+        let Ok(KObject::Process(p)) = t.get_mut(pid) else {
+            return Err(ProcError::NoSuchProcess);
+        };
+        if !p.space.begin_shootdown() {
+            return Err(ProcError::Map(MapError::Busy));
+        }
+        for i in 0..pages {
+            let va = start + i * FRAME_SIZE;
+            if p.space.translate(VirtPage::containing(va)).is_none() {
+                continue;
+            }
+            match p.space.unmap_raw(VirtPage::containing(va)) {
+                Ok(frame) => gone.push(frame),
+                Err(error) => {
+                    p.space.end_shootdown();
+                    return Err(ProcError::Map(error));
+                }
+            }
+        }
+        let _ = p.memory_caps.revoke_range(start, pages);
+        if let Some(linux) = p.linux.as_mut() {
+            linux
+                .mappings
+                .retain(|mapping| mapping.va < start || mapping.va >= end);
+        }
+        Ok(p.space.active_cpus())
+    })?;
+
+    if crate::smp::tlb_shootdown_on(active, start, pages).is_err() {
+        kobj::with(|t| {
+            if let Ok(KObject::Process(p)) = t.get_mut(pid) {
+                gone.sort_unstable_by_key(|frame| frame.start());
+                for page in &p.frames {
+                    if gone
+                        .binary_search_by_key(&page.frame().start(), |frame| frame.start())
+                        .is_ok()
+                    {
+                        page.quarantine();
+                    }
+                }
+                p.frames.retain(|page| {
+                    gone.binary_search_by_key(&page.frame().start(), |frame| frame.start())
+                        .is_err()
+                });
+                p.quarantine(gone);
+            }
+            Ok::<(), ProcError>(())
+        })
+        .ok();
+        return Err(ProcError::Map(MapError::Busy));
+    }
+
+    kobj::with(|t| {
+        let Ok(KObject::Process(p)) = t.get_mut(pid) else {
+            return Err(ProcError::NoSuchProcess);
+        };
+        gone.sort_unstable_by_key(|frame| frame.start());
+        for frame in &gone {
+            crate::mm::pin::mapping_released(*frame);
+        }
+        p.frames.retain(|page| {
+            gone.binary_search_by_key(&page.frame().start(), |frame| frame.start())
+                .is_err()
+        });
+        p.space.end_shootdown();
+        Ok(())
+    })?;
+    Ok(true)
+}
+
 /// 修改进程 `pid` 中 `[va, va + pages 页)` 的访问权限：`writable` 与 `executable` 不能同时为真（W^X）。
 ///
 /// **全有或全无**：区间内任一页未映射 ⇒ 什么也不改，返回 [`MemError::NotMapped`]。
@@ -7336,17 +7907,29 @@ pub fn protect_range(
     if writable && executable {
         return Err(MemError::InvalidRange);
     }
+    protect_range_access(pid, va, pages, true, writable, executable)
+}
+
+/// Changes access rights with an explicit user-accessible bit. `accessible == false`
+/// implements Linux `PROT_NONE` while retaining the mapped backing pages.
+pub fn protect_range_access(
+    pid: ObjId,
+    va: u64,
+    pages: u64,
+    accessible: bool,
+    writable: bool,
+    executable: bool,
+) -> Result<(), MemError> {
     checked_range(va, pages)?;
-    let mut flags = MapFlags::USER;
+    let mut flags = MapFlags::READ_ONLY;
+    if accessible {
+        flags = flags.union(MapFlags::USER);
+    }
     if writable {
         flags = flags.union(MapFlags::WRITE);
     }
     if executable {
         flags = flags.union(MapFlags::EXECUTE);
-    }
-    let mut touched: Vec<PhysFrame> = Vec::new();
-    if touched.try_reserve_exact(pages as usize).is_err() {
-        return Err(MemError::OutOfMemory);
     }
     let active = kobj::with(|t| {
         let Ok(KObject::Process(p)) = t.get_mut(pid) else {
@@ -7359,9 +7942,11 @@ pub fn protect_range(
             if is_device_page(p, va + i * FRAME_SIZE) || is_shared_page(p, va + i * FRAME_SIZE) {
                 return Err(MemError::InvalidRange);
             }
-            match p.space.translate(VirtPage::containing(va + i * FRAME_SIZE)) {
-                Some((f, _)) => touched.push(f),
-                None => return Err(MemError::NotMapped),
+            if p.space
+                .translate(VirtPage::containing(va + i * FRAME_SIZE))
+                .is_none()
+            {
+                return Err(MemError::NotMapped);
             }
         }
         if !p.space.begin_shootdown() {
@@ -7387,21 +7972,23 @@ pub fn protect_range(
         // 而是永久隔离，进程销毁时也不会回到分配器。
         kobj::with(|t| {
             if let Ok(KObject::Process(p)) = t.get_mut(pid) {
-                touched.sort_unstable_by_key(|f| f.start());
-                for page in &p.frames {
-                    if touched
-                        .binary_search_by_key(&page.frame().start(), |g| g.start())
-                        .is_ok()
-                    {
-                        page.quarantine();
+                for i in 0..pages {
+                    let frame = p
+                        .space
+                        .translate(VirtPage::containing(va + i * FRAME_SIZE))
+                        .map(|(frame, _)| frame);
+                    if let Some(frame) = frame {
+                        if let Some(index) = p
+                            .frames
+                            .iter()
+                            .position(|page| page.frame().start() == frame.start())
+                        {
+                            let page = p.frames.remove(index);
+                            page.quarantine();
+                            p.quarantine_one(frame);
+                        }
                     }
                 }
-                p.frames.retain(|f| {
-                    touched
-                        .binary_search_by_key(&f.frame().start(), |g| g.start())
-                        .is_err()
-                });
-                p.quarantine(touched);
             }
             Ok::<(), MemError>(())
         })

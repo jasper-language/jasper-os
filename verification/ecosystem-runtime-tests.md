@@ -28,9 +28,23 @@ exit result into a fabricated success.
 ### Android Toybox binary
 
 The Android 34 AOSP system image was downloaded and its system/APEX partitions
-extracted. Its unmodified `/system/bin/toybox` was executed in an isolated
-Android userspace baseline and reported the expected Toybox `uname` output.
-This is a host/runtime baseline, not yet a Jasper execution result.
+extracted. Its unmodified `/system/bin/toybox` and `/system/bin/linker64` were
+staged in Jasper's root image and executed through the real Linux ABI.
+
+Evidence: `evidence/android-bionic-toybox-diag-20261115-061237`.
+
+Result: the Bionic linker ran 555 and 552 system calls for two Toybox launches;
+both processes exited zero. Jasper then reached `root_execution_complete` with
+`qemu_rc=33`. The same boot also ran the upstream static Toybox commands and
+the AOSP Binder test below, so this is a Jasper result rather than a host
+baseline.
+
+Bionic's 8.8 GiB `PROT_NONE` arena exposed a kernel allocation bug: automatic
+anonymous mappings could be placed inside a lazy address reservation. Later
+`mprotect` then attempted to materialize an already-mapped page and returned
+`ENOMEM`. Jasper now avoids both concrete mappings and lazy reservations when
+choosing an automatic `mmap` address. `mprotect` also no longer allocates a
+temporary vector on its normal success path.
 
 ### AOSP Binder driver test
 
@@ -109,8 +123,6 @@ ART boot-runtime staging limit and is not claimed as a Jasper pass.
 
 - Provide a general root-image namespace for Android `/system`, `/apex` and
   framework paths instead of the current bounded Linux fixture.
-- Teach the root loader to use non-glibc interpreters such as
-  `/system/bin/linker64` and to discover Bionic libraries from the root image.
 - Run ART official tests and an unmodified APK through that path.
 - Stage Wine/DXVK/VKD3D and Metal2Vulkan in a Jasper guest with a real GPU or
   an explicit virtual Vulkan device; the current UEFI QEMU fixture has no

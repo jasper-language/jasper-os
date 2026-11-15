@@ -346,6 +346,12 @@ impl JasperExecutionBackend {
             }
             return Err(LoaderError::MemoryWrite);
         }
+        if !proc::set_linux_stack_range(self.process, start, end) {
+            for rollback in mapped.iter().rev().copied() {
+                let _ = proc::unmap_page(self.process, rollback);
+            }
+            return Err(LoaderError::MemoryMap);
+        }
         Ok(mapped)
     }
 }

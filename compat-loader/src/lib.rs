@@ -604,9 +604,26 @@ fn range_in_writable_image(range: VirtualRange, segments: &[LoadSegment]) -> boo
         return false;
     };
     segments.iter().any(|segment| {
+        let Some(segment_end) = segment
+            .virtual_address
+            .checked_add(segment.memory_bytes)
+        else {
+            return false;
+        };
+        let align = segment.align.max(1);
+        let Some(padded_end) = segment_end
+            .checked_add(align - 1)
+            .map(|value| value / align * align)
+        else {
+            return false;
+        };
+        // Android's lld rounds PT_GNU_RELRO up to the following page.  The
+        // page may lie in the alignment gap between two PT_LOAD segments, but
+        // ImageLayout will still map it as part of the image.
         segment.writable
             && range.address >= segment.virtual_address
-            && end <= segment.virtual_address + segment.memory_bytes
+            && range.address < segment_end
+            && end <= padded_end
     })
 }
 
