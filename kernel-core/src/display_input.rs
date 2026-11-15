@@ -9,11 +9,6 @@
 //! 队列、失败原子的帧提交和唯一终态；不包含 compositor、PTY、Linux 输入
 //! 或 GPU 命令执行语义。
 
-/// Largest accepted width or height for one native surface.
-///
-/// 单个原生 surface 可接受的最大宽度或高度。
-pub const MAX_SURFACE_DIMENSION: u32 = 4096;
-
 /// Maximum bytes represented by one surface descriptor.
 ///
 /// 单个 surface 描述符允许表示的最大字节数。
@@ -58,8 +53,6 @@ impl SurfaceSpec {
     pub fn validate(self) -> Result<u64, DisplayInputError> {
         if self.width == 0
             || self.height == 0
-            || self.width > MAX_SURFACE_DIMENSION
-            || self.height > MAX_SURFACE_DIMENSION
             || self.stride < self.width
             || self.bytes_per_pixel == 0
             || self.bytes_per_pixel > 4
@@ -388,14 +381,13 @@ mod tests {
             .validate(),
             Err(DisplayInputError::InvalidSurface)
         );
-        assert_eq!(
-            SurfaceSpec {
-                width: MAX_SURFACE_DIMENSION + 1,
-                ..SURFACE
-            }
-            .validate(),
-            Err(DisplayInputError::InvalidSurface)
-        );
+        let wide = SurfaceSpec {
+            width: 8192,
+            height: 1,
+            stride: 8192,
+            ..SURFACE
+        };
+        assert_eq!(wide.validate(), Ok(8192 * 4));
         assert_eq!(
             SurfaceSpec {
                 stride: u32::MAX,
