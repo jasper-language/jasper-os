@@ -5,11 +5,12 @@
 //! HWV-2 (Intel) and HWV-3 (AMD) provide their backends.
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use kernel_core::hwvirt::Backend;
 use kernel_core::hwvirt_vcpu::{
-    GuestMap, GuestMapping, GuestPermissions, Lifecycle, MapError, StateError, VcpuLifecycle,
-    VcpuState, MAX_GUEST_MAPPINGS,
+    plan_guest_mapping_capacity, DynamicGuestMap, GuestMapping, GuestPermissions, Lifecycle,
+    MapError, StateError, VcpuLifecycle, VcpuState,
 };
 use kernel_core::object::{HandleId, ObjectType, Rights};
 use kernel_core::objtable::ObjId;
@@ -45,6 +46,7 @@ pub enum VcpuError {
     Table(TableError),
     Closed,
     InvalidMemory,
+    Capacity,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,10 +63,10 @@ pub struct VcpuView {
 pub struct VcpuObj {
     owner: ObjId,
     lifecycle: VcpuLifecycle,
-    guest: GuestMap<MAX_GUEST_MAPPINGS>,
+    guest: DynamicGuestMap,
     second_level: SecondLevel,
     /// One internal Memory reference for each occupied guest-map slot.
-    pins: [Option<ObjId>; MAX_GUEST_MAPPINGS],
+    pins: Vec<Option<ObjId>>,
     closing: bool,
 }
 
@@ -98,6 +100,18 @@ fn resolve(t: &mut Table, pid: ObjId, h: HandleId, rights: Rights) -> Result<Obj
 
 pub fn create_for(pid: ObjId, backend: Backend) -> Result<HandleId, VcpuError> {
     let second_level = SecondLevel::new(backend).map_err(VcpuError::Table)?;
+    let capacity = plan_guest_mapping_capacity(crate::mm::heap::limit())
+        .ok_or(VcpuError::Capacity)?;
+    let guest = DynamicGuestMap::new(capacity).ok_or(VcpuError::Capacity)?;
+    let mut pins = Vec::new();
+    pins.try_reserve_exact(capacity)
+        .map_err(|_| VcpuError::Capacity)?;
+    pins.resize(capacity, None);
+    crate::kprintln!(
+        "[JSR-VCPU] mapping_capacity={} budget={}",
+        capacity,
+        crate::mm::heap::limit()
+    );
     kobj::with(|t| {
         if !proc::running_in(t, pid) {
             return Err(VcpuError::Process(ProcError::NoSuchProcess));
@@ -105,9 +119,9 @@ pub fn create_for(pid: ObjId, backend: Backend) -> Result<HandleId, VcpuError> {
         let object = VcpuObj {
             owner: pid,
             lifecycle: VcpuLifecycle::new(backend),
-            guest: GuestMap::new(),
+            guest,
             second_level,
-            pins: [None; MAX_GUEST_MAPPINGS],
+            pins,
             closing: false,
         };
         proc::grant_new_in(t, pid, KObject::Vcpu(Box::new(object)), ObjectType::Vcpu, VCPU_RIGHTS)
@@ -348,13 +362,10 @@ pub fn close_in(t: &mut Table, id: ObjId) {
         vcpu.closing = true;
         vcpu.lifecycle.close();
         vcpu.guest.clear();
-        vcpu.pins
+        core::mem::take(&mut vcpu.pins)
     };
     for memory in memory_ids.into_iter().flatten() {
         let _ = t.release_internal(memory);
-    }
-    if let Some(vcpu) = vcpu_mut(t, id) {
-        vcpu.pins.fill(None);
     }
 }
 
@@ -365,7 +376,7 @@ pub fn error_code(error: VcpuError) -> i64 {
         VcpuError::State(StateError::Closed) | VcpuError::Closed => err(SYSTEM_HANDLE_ERROR_INVALID),
         VcpuError::State(_) => err(SYSTEM_ERROR_INVALID_ARGUMENT),
         VcpuError::Map(MapError::Permissions) => err(SYSTEM_ERROR_RIGHTS_DENIED),
-        VcpuError::Map(_) | VcpuError::Table(_) | VcpuError::InvalidMemory => {
+        VcpuError::Map(_) | VcpuError::Table(_) | VcpuError::InvalidMemory | VcpuError::Capacity => {
             err(SYSTEM_ERROR_INVALID_ARGUMENT)
         }
     }

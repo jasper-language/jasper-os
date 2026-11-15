@@ -6,6 +6,9 @@
 
 use crate::hwvirt::Backend;
 
+#[cfg(any(test, feature = "hwvirt-vcpu-dynamic"))]
+use alloc::vec::Vec;
+
 pub const MAX_GUEST_MAPPINGS: usize = 64;
 pub const MAX_GPA: u64 = 1 << 48;
 
@@ -150,6 +153,19 @@ impl GuestPermissions {
     pub const READ_WRITE: Self = Self { read: true, write: true, execute: false };
     pub const READ_EXECUTE: Self = Self { read: true, write: false, execute: true };
     pub const ALL: Self = Self { read: true, write: true, execute: true };
+}
+
+/// Derive one vCPU's mapping-table capacity from the admitted memory budget.
+///
+/// Issue #33 HC-25 policy: guest mapping metadata may consume at most 1/1024
+/// of the admitted heap. The VMM ABI v1 constants remain unchanged.
+pub fn plan_guest_mapping_capacity(memory_budget: u64) -> Option<usize> {
+    let entry_bytes = core::mem::size_of::<Option<GuestMapping>>() as u64;
+    if entry_bytes == 0 {
+        return None;
+    }
+    let capacity = (memory_budget / 1024) / entry_bytes / 2;
+    usize::try_from(capacity).ok().filter(|&capacity| capacity != 0)
 }
 
 /// One guest-physical mapping. `memory_id` and `memory_offset` refer to a
@@ -310,6 +326,143 @@ impl<const N: usize> Default for GuestMap<N> {
     }
 }
 
+/// Heap-backed guest map with runtime-selected per-vCPU capacity.
+#[cfg(any(test, feature = "hwvirt-vcpu-dynamic"))]
+pub struct DynamicGuestMap {
+    entries: Vec<Option<GuestMapping>>,
+}
+
+#[cfg(any(test, feature = "hwvirt-vcpu-dynamic"))]
+impl DynamicGuestMap {
+    pub fn new(capacity: usize) -> Option<Self> {
+        if capacity == 0 {
+            return None;
+        }
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(capacity).ok()?;
+        entries.resize(capacity, None);
+        Some(Self { entries })
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.iter().flatten().count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.iter().all(Option::is_none)
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn get(&self, slot: usize) -> Option<GuestMapping> {
+        self.entries.get(slot).copied().flatten()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (usize, GuestMapping)> + '_ {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, entry)| entry.map(|mapping| (slot, mapping)))
+    }
+
+    pub fn validate(
+        &self,
+        guest_start: u64,
+        pages: u64,
+        memory_offset: u64,
+        memory_pages: u64,
+        permissions: GuestPermissions,
+    ) -> Result<(), MapError> {
+        if pages == 0 {
+            return Err(MapError::ZeroPages);
+        }
+        if guest_start % 4096 != 0 || memory_offset % 4096 != 0 {
+            return Err(MapError::Misaligned);
+        }
+        if !permissions.read {
+            return Err(MapError::Permissions);
+        }
+        let guest_bytes = pages.checked_mul(4096).ok_or(MapError::Overflow)?;
+        let guest_end = guest_start.checked_add(guest_bytes).ok_or(MapError::Overflow)?;
+        if guest_end > MAX_GPA {
+            return Err(MapError::OutsideGuestWindow);
+        }
+        if memory_offset
+            .checked_add(guest_bytes)
+            .filter(|&end| end <= memory_pages.saturating_mul(4096))
+            .is_none()
+        {
+            return Err(MapError::OutsideMemory);
+        }
+        for (_, existing) in self.iter() {
+            if guest_start < existing.guest_end() && existing.guest_start < guest_end {
+                return Err(MapError::Overlap);
+            }
+        }
+        self.entries
+            .iter()
+            .position(Option::is_none)
+            .ok_or(MapError::Full)?;
+        Ok(())
+    }
+
+    pub fn map(
+        &mut self,
+        guest_start: u64,
+        pages: u64,
+        memory_id: u64,
+        memory_offset: u64,
+        memory_pages: u64,
+        permissions: GuestPermissions,
+    ) -> Result<usize, MapError> {
+        self.validate(
+            guest_start,
+            pages,
+            memory_offset,
+            memory_pages,
+            permissions,
+        )?;
+        let slot = self
+            .entries
+            .iter()
+            .position(Option::is_none)
+            .ok_or(MapError::Full)?;
+        self.entries[slot] = Some(GuestMapping {
+            guest_start,
+            pages,
+            memory_id,
+            memory_offset,
+            permissions,
+        });
+        Ok(slot)
+    }
+
+    pub fn unmap_exact(
+        &mut self,
+        guest_start: u64,
+        pages: u64,
+    ) -> Result<GuestMapping, MapError> {
+        let slot = self
+            .iter()
+            .find_map(|(slot, mapping)| {
+                (mapping.guest_start == guest_start && mapping.pages == pages).then_some(slot)
+            })
+            .ok_or(MapError::NotFound)?;
+        Ok(self.entries[slot].take().expect("located mapping"))
+    }
+
+    pub fn lookup(&self, guest: u64) -> Option<(usize, GuestMapping)> {
+        self.iter()
+            .find(|(_, mapping)| guest >= mapping.guest_start && guest < mapping.guest_end())
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.fill(None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,6 +505,37 @@ mod tests {
         assert_eq!(map.take_all_for_memory(7).count(), 2);
         assert_eq!(map.len(), 1);
         assert!(map.lookup(0x3000).is_some());
+    }
+
+    #[test]
+    fn guest_mapping_capacity_follows_memory_budget() {
+        let small = plan_guest_mapping_capacity(1024 * 1024).unwrap();
+        let large = plan_guest_mapping_capacity(256 * 1024 * 1024).unwrap();
+        assert!(small > 0);
+        assert!(large > small);
+        assert_eq!(plan_guest_mapping_capacity(0), None);
+    }
+
+    #[test]
+    fn dynamic_guest_map_preserves_atomic_mapping_rules() {
+        let mut map = DynamicGuestMap::new(2).unwrap();
+        assert_eq!(map.capacity(), 2);
+        assert_eq!(
+            map.map(0x1000, 2, 7, 0, 2, GuestPermissions::READ_WRITE),
+            Ok(0)
+        );
+        assert_eq!(
+            map.map(0x2000, 1, 8, 0, 1, GuestPermissions::READ),
+            Err(MapError::Overlap)
+        );
+        assert_eq!(
+            map.map(0x2001, 1, 8, 0, 1, GuestPermissions::READ),
+            Err(MapError::Misaligned)
+        );
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.lookup(0x1000).unwrap().0, 0);
+        assert_eq!(map.unmap_exact(0x1000, 2).unwrap().memory_id, 7);
+        assert!(map.is_empty());
     }
 
 }

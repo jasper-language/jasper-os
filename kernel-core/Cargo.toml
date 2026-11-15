@@ -38,6 +38,8 @@ terminal-dynamic = []
 # Runtime-sized native display input queues use the kernel allocator; user ABI
 # crates retain the allocation-free display contract.
 display-dynamic = []
+# Per-vCPU guest mapping tables are allocated from the admitted kernel heap.
+hwvirt-vcpu-dynamic = []
 # Persistent installation requires the kernel heap for bounded transactional
 # state snapshots; core profiles that do not use it remain allocation-free.
 persistent-install = []
