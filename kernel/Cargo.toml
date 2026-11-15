@@ -70,6 +70,7 @@ hwv5-verify = ["hwv4-linux", "user-programs"]
 hwv5-prod-verify = []
 # Intel VT-d DMAR translation, DMA-fault and interrupt-remapping drill.
 hwv6-verify = []
+hwv7-gpu-verify = ["hwv4-linux"]
 # JASO-1 multi-image and source-envelope acceptance only.
 jaso1-verify = []
 # DRV-3 DMA mapping lifecycle drill.

@@ -1046,6 +1046,12 @@ pub struct LinuxReport {
     pub pio_requests: u32,
     pub pio_cancels: u32,
     pub pio_marker: bool,
+    pub gpu_commands: u64,
+    pub gpu_created: u64,
+    pub gpu_destroyed: u64,
+    pub gpu_scanouts: u64,
+    pub gpu_transfers: u64,
+    pub gpu_flushes: u64,
     pub marker: bool,
     pub halted: bool,
 }
@@ -1058,6 +1064,24 @@ pub trait LinuxPlatform {
     fn write_mmio(&mut self, gpa: u64, width: u8, value: u64) -> bool;
     fn take_irq(&mut self) -> Option<u8>;
     fn return_irq(&mut self, irq: u8);
+    fn gpu_commands(&self) -> u64 {
+        0
+    }
+    fn gpu_created(&self) -> u64 {
+        0
+    }
+    fn gpu_destroyed(&self) -> u64 {
+        0
+    }
+    fn gpu_scanouts(&self) -> u64 {
+        0
+    }
+    fn gpu_transfers(&self) -> u64 {
+        0
+    }
+    fn gpu_flushes(&self) -> u64 {
+        0
+    }
 }
 
 struct NoLinuxDevices;
@@ -1858,6 +1882,12 @@ impl VmxVm {
                             pio_requests: linux.pio_probe.requests(),
                             pio_cancels: linux.pio_probe.cancels(),
                             pio_marker: linux.pio_marker_seen,
+                            gpu_commands: devices.gpu_commands(),
+                            gpu_created: devices.gpu_created(),
+                            gpu_destroyed: devices.gpu_destroyed(),
+                            gpu_scanouts: devices.gpu_scanouts(),
+                            gpu_transfers: devices.gpu_transfers(),
+                            gpu_flushes: devices.gpu_flushes(),
                             marker: report.linux_marker,
                             halted: true,
                         });
@@ -1895,6 +1925,12 @@ impl VmxVm {
                         pio_requests: linux.pio_probe.requests(),
                         pio_cancels: linux.pio_probe.cancels(),
                         pio_marker: linux.pio_marker_seen,
+                        gpu_commands: devices.gpu_commands(),
+                        gpu_created: devices.gpu_created(),
+                        gpu_destroyed: devices.gpu_destroyed(),
+                        gpu_scanouts: devices.gpu_scanouts(),
+                        gpu_transfers: devices.gpu_transfers(),
+                        gpu_flushes: devices.gpu_flushes(),
                         marker: report.linux_marker,
                         halted: true,
                     });

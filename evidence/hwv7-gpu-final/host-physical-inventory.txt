@@ -1,0 +1,5 @@
+GPU 0000:00:02.0 Intel UHD Graphics 630; driver=i915; IOMMU group has no listed peer device
+GPU 0000:01:00.0 NVIDIA RTX 3060; driver=nvidia; IOMMU group 1 also contains 0000:00:01.0 and 0000:01:00.1
+IOMMU class: /sys/class/iommu/dmar1
+Passwordless sudo: unavailable
+Conclusion: physical VFIO rebinding/FLR cannot be performed safely in this session; QEMU virtio-gpu is a virtual backend, not a paravirtual/passthrough backend.

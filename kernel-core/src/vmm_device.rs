@@ -37,7 +37,7 @@ pub enum VirtioDeviceType {
 impl VirtioDeviceType {
     pub const fn id(self) -> u32 {
         match self {
-            VirtioDeviceType::Gpu => 5,
+            VirtioDeviceType::Gpu => 16,
             VirtioDeviceType::Net => 1,
             VirtioDeviceType::Block => 2,
             VirtioDeviceType::Console => 3,
@@ -136,6 +136,7 @@ pub struct VirtioMmio {
     feature_select: u32,
     driver_feature_select: u32,
     queue_select: u16,
+    shm_select: u32,
     queues: [QueueState; QUEUE_COUNT],
     interrupt_status: u32,
     config_generation: u32,
@@ -151,6 +152,7 @@ impl VirtioMmio {
             feature_select: 0,
             driver_feature_select: 0,
             queue_select: 0,
+            shm_select: 0,
             queues: [
                 QueueState::new(queue_size),
                 QueueState::new(queue_size),
@@ -216,6 +218,8 @@ impl VirtioMmio {
             0x094 => self.selected_queue()?.address.driver >> 32,
             0x0a0 => self.selected_queue()?.address.device,
             0x0a4 => self.selected_queue()?.address.device >> 32,
+            0x0ac => u64::from(self.shm_select),
+            0x0b0..=0x0bc => u64::from(u32::MAX),
             0x0fc => u64::from(self.config_generation),
             CONFIG_OFFSET.. => 0,
             _ => return Err(MmioError::UnknownRegister),
@@ -259,12 +263,13 @@ impl VirtioMmio {
                 queue.ready = value != 0;
             }
             0x050 => {
-                let queue = self.queue_select;
-                if !self.selected_queue()?.ready {
+                let queue = value as u16;
+                if queue as usize >= QUEUE_COUNT || !self.queues[queue as usize].ready {
                     return Err(MmioError::QueueNotReady);
                 }
                 return Ok(MmioWrite { queue_notified: Some(queue), ..MmioWrite::NONE });
             }
+            0x0ac => self.shm_select = value as u32,
             0x064 => {
                 self.interrupt_status &= !(value as u32);
             }
@@ -358,6 +363,11 @@ mod tests {
         assert_eq!(d.read(0, 4), Ok(u64::from(MMIO_MAGIC)));
         assert_eq!(d.read(4, 4), Ok(u64::from(MMIO_VERSION)));
         assert_eq!(d.read(8, 4), Ok(26));
+        let mut gpu = VirtioMmio::new(VirtioDeviceType::Gpu, 16, [0, FEATURE_VERSION_1]);
+        assert_eq!(gpu.read(8, 4), Ok(16));
+        gpu.write(0x0ac, 4, 1).unwrap();
+        assert_eq!(gpu.read(0x0ac, 4), Ok(1));
+        assert_eq!(gpu.read(0x0b0, 4), Ok(u64::from(u32::MAX)));
         d.write(0x014, 4, 1).unwrap();
         assert_eq!(d.read(0x010, 4), Ok(u64::from(FEATURE_VERSION_1)));
         d.write(0x030, 4, QUEUE_COUNT as u64).unwrap_err();
@@ -384,6 +394,13 @@ mod tests {
         );
         let write = d.write(0x050, 4, 0).unwrap();
         assert_eq!(write.queue_notified, Some(0));
+        d.write(0x030, 4, 1).unwrap();
+        d.write(0x038, 4, 8).unwrap();
+        d.write(0x080, 8, 0x4000).unwrap();
+        d.write(0x090, 8, 0x5000).unwrap();
+        d.write(0x0a0, 8, 0x6000).unwrap();
+        d.write(0x044, 4, 1).unwrap();
+        assert_eq!(d.write(0x050, 4, 0).unwrap().queue_notified, Some(0));
         d.raise_interrupt(3);
         d.write(0x064, 4, 1).unwrap();
         assert_eq!(d.interrupt_status(), 2);

@@ -8,6 +8,7 @@ pub const CONTROL_HEADER_BYTES: usize = 24;
 pub const DISPLAY_INFO_BYTES: usize = 24 + 16 * 24;
 pub const MAX_RESOURCES: usize = 8;
 pub const MAX_DIMENSION: u32 = 4096;
+pub const MAX_BACKING_ENTRIES: u32 = 16;
 
 pub const CMD_GET_DISPLAY_INFO: u32 = 0x0100;
 pub const CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
@@ -90,7 +91,10 @@ pub struct VirtioGpuBackend {
     scanout: Option<Scanout>,
     generation: u32,
     commands: u64,
+    created: u64,
+    destroyed: u64,
     rejected: u64,
+    scanouts: u64,
     transfers: u64,
     flushes: u64,
 }
@@ -102,7 +106,10 @@ impl VirtioGpuBackend {
             scanout: None,
             generation: 1,
             commands: 0,
+            created: 0,
+            destroyed: 0,
             rejected: 0,
+            scanouts: 0,
             transfers: 0,
             flushes: 0,
         }
@@ -116,8 +123,20 @@ impl VirtioGpuBackend {
         self.commands
     }
 
+    pub const fn created(&self) -> u64 {
+        self.created
+    }
+
+    pub const fn destroyed(&self) -> u64 {
+        self.destroyed
+    }
+
     pub const fn rejected(&self) -> u64 {
         self.rejected
+    }
+
+    pub const fn scanouts(&self) -> u64 {
+        self.scanouts
     }
 
     pub const fn transfers(&self) -> u64 {
@@ -230,6 +249,7 @@ impl VirtioGpuBackend {
             .find(|entry| entry.is_none())
             .ok_or((RESP_ERR_OUT_OF_MEMORY, GpuFrontendError::Capacity))?;
         *slot = Some(resource);
+        self.created = self.created.saturating_add(1);
         Ok(nodata(response, header))
     }
 
@@ -239,15 +259,36 @@ impl VirtioGpuBackend {
         request: &[u8],
         response: &mut [u8],
     ) -> Result<usize, (u32, GpuFrontendError)> {
-        if request.len() != CONTROL_HEADER_BYTES + 24 {
+        if request.len() < CONTROL_HEADER_BYTES + 8 {
             return Err((RESP_ERR_UNSPEC, GpuFrontendError::InvalidPayload));
         }
         let id = get_u32(request, 24);
         let entries = get_u32(request, 28);
-        let address = get_u64(request, 32);
-        let length = get_u32(request, 40);
-        if entries != 1 || address == 0 || length == 0 {
+        let entries_len = usize::try_from(entries)
+            .ok()
+            .and_then(|count| count.checked_mul(16))
+            .and_then(|bytes| (CONTROL_HEADER_BYTES + 8).checked_add(bytes));
+        if entries == 0
+            || entries > MAX_BACKING_ENTRIES
+            || entries_len != Some(request.len())
+        {
             return Err((RESP_ERR_UNSPEC, GpuFrontendError::InvalidPayload));
+        }
+        let mut address = 0u64;
+        let mut length = 0u32;
+        for index in 0..entries as usize {
+            let entry = CONTROL_HEADER_BYTES + 8 + index * 16;
+            let entry_address = get_u64(request, entry);
+            let entry_length = get_u32(request, entry + 8);
+            if entry_address == 0 || entry_length == 0 {
+                return Err((RESP_ERR_UNSPEC, GpuFrontendError::InvalidPayload));
+            }
+            if index == 0 {
+                address = entry_address;
+            }
+            length = length
+                .checked_add(entry_length)
+                .ok_or((RESP_ERR_UNSPEC, GpuFrontendError::BackingOverflow))?;
         }
         let slot = self.resource_slot(id)?;
         let resource = self.resources[slot]
@@ -320,6 +361,7 @@ impl VirtioGpuBackend {
             width: get_u32(request, 32),
             height: get_u32(request, 36),
         });
+        self.scanouts = self.scanouts.saturating_add(1);
         Ok(nodata(response, header))
     }
 
@@ -381,6 +423,7 @@ impl VirtioGpuBackend {
         let id = get_u32(request, 24);
         let slot = self.resource_slot(id)?;
         self.resources[slot] = None;
+        self.destroyed = self.destroyed.saturating_add(1);
         if self
             .scanout
             .is_some_and(|scanout| scanout.resource_id == id)
@@ -550,6 +593,29 @@ mod tests {
         assert_response(&response, RESP_ERR_UNSPEC);
 
         assert_eq!(gpu.handle_command(&attach(), &mut response), Ok(24));
+        assert_response(&response, RESP_OK_NODATA);
+    }
+
+    #[test]
+    fn attach_accepts_multiple_backing_entries_and_sums_their_lengths() {
+        let mut gpu = VirtioGpuBackend::new();
+        let mut response = [0u8; 512];
+        gpu.handle_command(&create(), &mut response).unwrap();
+
+        let mut payload = [0u8; 40];
+        put_u32(&mut payload, 0, 1);
+        put_u32(&mut payload, 4, 2);
+        put_u64(&mut payload, 8, 0x20_0000);
+        put_u32(&mut payload, 16, 64 * 32 * 4);
+        put_u64(&mut payload, 24, 0x30_0000);
+        put_u32(&mut payload, 32, 64 * 32 * 4);
+        assert_eq!(
+            gpu.handle_command(
+                &command(CMD_RESOURCE_ATTACH_BACKING, 9, &payload),
+                &mut response
+            ),
+            Ok(24)
+        );
         assert_response(&response, RESP_OK_NODATA);
     }
 

@@ -1185,13 +1185,37 @@ impl LinuxPlatform for VirtioGuestBus {
             self.pending_irqs |= 1u16 << irq;
         }
     }
+
+    fn gpu_commands(&self) -> u64 {
+        self.gpu_backend.commands()
+    }
+
+    fn gpu_created(&self) -> u64 {
+        self.gpu_backend.created()
+    }
+
+    fn gpu_destroyed(&self) -> u64 {
+        self.gpu_backend.destroyed()
+    }
+
+    fn gpu_scanouts(&self) -> u64 {
+        self.gpu_backend.scanouts()
+    }
+
+    fn gpu_transfers(&self) -> u64 {
+        self.gpu_backend.transfers()
+    }
+
+    fn gpu_flushes(&self) -> u64 {
+        self.gpu_backend.flushes()
+    }
 }
 
 pub fn run() -> bool {
     run_impl(false)
 }
 
-#[cfg(feature = "hwv5-verify")]
+#[cfg(any(feature = "hwv5-verify", feature = "hwv7-gpu-verify"))]
 pub fn run_virtio() -> bool {
     run_impl(true)
 }
@@ -1327,6 +1351,16 @@ fn run_impl(virtio_rng: bool) -> bool {
             && devices.net_rx_frames != 0
             && devices.net_rejected == 0);
     let pio_marker = report.pio_marker || devices.console_pio_marker_seen;
+    let gpu_ok = !cfg!(feature = "hwv7-gpu-verify")
+        || (report.gpu_commands != 0
+            && report.gpu_created >= 2
+            && report.gpu_destroyed != 0
+            && report.gpu_scanouts != 0
+            && report.gpu_transfers != 0
+            && report.gpu_flushes != 0
+            && devices.gpu_backend.resource_count() <= 1
+            && devices.gpu_backend.generation() == 2
+            && devices.gpu_rejected == 0);
     let virtio_ok = !virtio_rng
         || (devices.rng_requests != 0
             && devices.console_bytes != 0
@@ -1337,10 +1371,12 @@ fn run_impl(virtio_rng: bool) -> bool {
             && report.pio_writes != 0
             && report.pio_probe_generation == 2
             && report.pio_requests == 1
-            && report.pio_cancels == 1);
-    let ok = report.marker && report.halted && lifecycle && shutdown && reclaimed && virtio_ok;
+            && report.pio_cancels == 1
+            && gpu_ok);
+    let ok =
+        report.marker && report.halted && lifecycle && shutdown && reclaimed && virtio_ok;
     kprintln!(
-        "[JSR-HWV4-LINUX] linux=true exits={} serial_bytes={} timer_interrupts={} timer_eois={} virtio_rng_requests={} virtio_console_bytes={} virtio_block_requests={} virtio_net_tx_frames={} virtio_net_rx_frames={} virtio_net_backend_tx={} virtio_net_backend_rx={} virtio_net_reset_generation={} virtio_net_rejected={} virtio_fs_requests={} virtio_fs_rejected={} virtio_fs_handles={} virtio_fs_reset_generation={} virtio_gpu_requests={} virtio_gpu_rejected={} virtio_gpu_resources={} virtio_gpu_reset_generation={} pio_reads={} pio_writes={} pio_generation={} pio_requests={} pio_cancels={} pio_marker={} marker={} halted={} lifecycle={} shutdown={} reclaim={}",
+        "[JSR-HWV4-LINUX] linux=true exits={} serial_bytes={} timer_interrupts={} timer_eois={} virtio_rng_requests={} virtio_console_bytes={} virtio_block_requests={} virtio_net_tx_frames={} virtio_net_rx_frames={} virtio_net_backend_tx={} virtio_net_backend_rx={} virtio_net_reset_generation={} virtio_net_rejected={} virtio_fs_requests={} virtio_fs_rejected={} virtio_fs_handles={} virtio_fs_reset_generation={} virtio_gpu_requests={} virtio_gpu_rejected={} virtio_gpu_resources={} virtio_gpu_reset_generation={} virtio_gpu_commands={} virtio_gpu_created={} virtio_gpu_destroyed={} virtio_gpu_scanouts={} virtio_gpu_transfers={} virtio_gpu_flushes={} pio_reads={} pio_writes={} pio_generation={} pio_requests={} pio_cancels={} pio_marker={} marker={} halted={} lifecycle={} shutdown={} reclaim={}",
         report.exits,
         report.serial_bytes,
         report.timer_interrupts,
@@ -1362,6 +1398,12 @@ fn run_impl(virtio_rng: bool) -> bool {
         devices.gpu_rejected,
         devices.gpu_backend.resource_count(),
         devices.gpu_backend.generation(),
+        report.gpu_commands,
+        report.gpu_created,
+        report.gpu_destroyed,
+        report.gpu_scanouts,
+        report.gpu_transfers,
+        report.gpu_flushes,
         report.pio_reads,
         report.pio_writes,
         report.pio_probe_generation,
@@ -1373,6 +1415,19 @@ fn run_impl(virtio_rng: bool) -> bool {
         lifecycle,
         shutdown,
         reclaimed
+    );
+    kprintln!(
+        "[JSR-HWV7-GPU] backend=virtio-mmio commands={} created={} destroyed={} scanouts={} transfers={} flushes={} rejected={} resources={} reset_generation={} ok={}",
+        report.gpu_commands,
+        report.gpu_created,
+        report.gpu_destroyed,
+        report.gpu_scanouts,
+        report.gpu_transfers,
+        report.gpu_flushes,
+        devices.gpu_rejected,
+        devices.gpu_backend.resource_count(),
+        devices.gpu_backend.generation(),
+        gpu_ok
     );
     ok
 }

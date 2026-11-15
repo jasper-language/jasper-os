@@ -26,6 +26,11 @@ static SURFACE_ROTATIONS: AtomicU64 = AtomicU64::new(0);
 // A single Linux early-boot trace regularly exceeds 4096 audited PIO events.
 // Keep a bounded reliable audit, but size it for the complete
 // rng/console/block/net/fs acceptance path; overflow still fails closed.
+#[cfg(feature = "hwv7-gpu-verify")]
+static PEP: IrqSpinLock<Hwv5Pep<8, 8, 1048576>> =
+    IrqSpinLock::ranked(crate::lockorder::HWV5_POLICY, Hwv5Pep::new());
+
+#[cfg(not(feature = "hwv7-gpu-verify"))]
 static PEP: IrqSpinLock<Hwv5Pep<8, 8, 131072>> =
     IrqSpinLock::ranked(crate::lockorder::HWV5_POLICY, Hwv5Pep::new());
 

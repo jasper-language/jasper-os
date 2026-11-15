@@ -105,6 +105,85 @@ struct sockaddr_ll {
     unsigned char address[8];
 };
 
+struct drm_mode_modeinfo {
+    unsigned int clock;
+    unsigned short hdisplay;
+    unsigned short hsync_start;
+    unsigned short hsync_end;
+    unsigned short htotal;
+    unsigned short hskew;
+    unsigned short vdisplay;
+    unsigned short vsync_start;
+    unsigned short vsync_end;
+    unsigned short vtotal;
+    unsigned short vscan;
+    unsigned int vrefresh;
+    unsigned int flags;
+    unsigned int type;
+    char name[32];
+};
+
+struct drm_mode_card_res {
+    unsigned long long fb_id_ptr;
+    unsigned long long crtc_id_ptr;
+    unsigned long long connector_id_ptr;
+    unsigned long long encoder_id_ptr;
+    unsigned int count_fbs;
+    unsigned int count_crtcs;
+    unsigned int count_connectors;
+    unsigned int count_encoders;
+    unsigned int min_width;
+    unsigned int max_width;
+    unsigned int min_height;
+    unsigned int max_height;
+};
+
+struct drm_mode_crtc {
+    unsigned long long set_connectors_ptr;
+    unsigned int count_connectors;
+    unsigned int crtc_id;
+    unsigned int fb_id;
+    unsigned int x;
+    unsigned int y;
+    unsigned int gamma_size;
+    unsigned int mode_valid;
+    struct drm_mode_modeinfo mode;
+};
+
+struct drm_mode_create_dumb {
+    unsigned int height;
+    unsigned int width;
+    unsigned int bpp;
+    unsigned int flags;
+    unsigned int handle;
+    unsigned int pitch;
+    unsigned long long size;
+};
+
+struct drm_mode_fb_cmd2 {
+    unsigned int fb_id;
+    unsigned int width;
+    unsigned int height;
+    unsigned int pixel_format;
+    unsigned int flags;
+    unsigned int handles[4];
+    unsigned int pitches[4];
+    unsigned int offsets[4];
+    unsigned long long modifier[4];
+};
+
+struct drm_mode_fb_dirty_cmd {
+    unsigned int fb_id;
+    unsigned int flags;
+    unsigned int color;
+    unsigned int num_clips;
+    unsigned long long clips_ptr;
+};
+
+struct drm_mode_destroy_dumb {
+    unsigned int handle;
+};
+
 static void zero_bytes(unsigned char *bytes, usize len) {
     for (usize i = 0; i < len; ++i)
         bytes[i] = 0;
@@ -130,6 +209,7 @@ static long net_set_error;
 static int net_flags;
 static long fs_write_result;
 static long fs_readback_result;
+static int gpu_stage;
 
 static int arp_roundtrip(int *tx_ok, int *rx_ok) {
     static const unsigned char expected_ip[4] = {10, 0, 2, 2};
@@ -315,6 +395,96 @@ static int virtiofs_roundtrip(void) {
     return ok;
 }
 
+static int gpu_roundtrip(void) {
+    static const char path[] = "/dev/dri/card0";
+    struct drm_mode_card_res resources;
+    struct drm_mode_crtc crtc;
+    struct drm_mode_crtc disable;
+    struct drm_mode_create_dumb dumb;
+    struct drm_mode_fb_cmd2 fb;
+    struct drm_mode_fb_dirty_cmd dirty;
+    struct drm_mode_destroy_dumb destroy;
+    unsigned int crtc_id = 0;
+    unsigned int connector_id = 0;
+    long fd = syscall3(2, (long)path, 2, 0);
+    if (fd < 0)
+        return 0;
+    gpu_stage = 1;
+
+    zero_bytes((unsigned char *)&resources, sizeof(resources));
+    if (syscall3(16, fd, 0xc04064a0, (long)&resources) < 0)
+        return 0;
+    gpu_stage = 2;
+    if (resources.count_crtcs != 0 && resources.count_connectors != 0) {
+        resources.crtc_id_ptr = (unsigned long long)(unsigned long)&crtc_id;
+        resources.connector_id_ptr =
+            (unsigned long long)(unsigned long)&connector_id;
+        resources.count_crtcs = 1;
+        resources.count_connectors = 1;
+        if (syscall3(16, fd, 0xc04064a0, (long)&resources) == 0
+            && crtc_id != 0 && connector_id != 0) {
+            zero_bytes((unsigned char *)&crtc, sizeof(crtc));
+            crtc.crtc_id = crtc_id;
+            (void)syscall3(16, fd, 0xc06864a1, (long)&crtc);
+        }
+    }
+    gpu_stage = 4;
+
+    zero_bytes((unsigned char *)&dumb, sizeof(dumb));
+    dumb.width = 64;
+    dumb.height = 64;
+    dumb.bpp = 32;
+    if (syscall3(16, fd, 0xc02064b2, (long)&dumb) < 0
+        || dumb.handle == 0 || dumb.pitch < 64 * 4)
+        return 0;
+    gpu_stage = 5;
+
+    zero_bytes((unsigned char *)&fb, sizeof(fb));
+    fb.width = dumb.width;
+    fb.height = dumb.height;
+    fb.pixel_format = 0x34325258;
+    fb.handles[0] = dumb.handle;
+    fb.pitches[0] = dumb.pitch;
+    if (syscall3(16, fd, 0xc06864b8, (long)&fb) < 0 || fb.fb_id == 0)
+        return 0;
+    gpu_stage = 6;
+
+    if (crtc_id != 0 && connector_id != 0) {
+        unsigned int connector = connector_id;
+        struct drm_mode_crtc set = crtc;
+        set.set_connectors_ptr = (unsigned long long)(unsigned long)&connector;
+        set.count_connectors = 1;
+        set.crtc_id = crtc_id;
+        set.fb_id = fb.fb_id;
+        set.mode_valid = 1;
+        if (syscall3(16, fd, 0xc06864a2, (long)&set) < 0)
+            return 0;
+    }
+    gpu_stage = 7;
+
+    zero_bytes((unsigned char *)&dirty, sizeof(dirty));
+    dirty.fb_id = fb.fb_id;
+    if (syscall3(16, fd, 0xc01864b1, (long)&dirty) < 0)
+        return 0;
+    gpu_stage = 8;
+
+    {
+        unsigned int stale = fb.fb_id;
+        (void)syscall3(16, fd, 0xc00464af, (long)&stale);
+    }
+    if (crtc_id != 0) {
+        zero_bytes((unsigned char *)&disable, sizeof(disable));
+        disable.crtc_id = crtc_id;
+        (void)syscall3(16, fd, 0xc06864a2, (long)&disable);
+    }
+    destroy.handle = dumb.handle;
+    if (syscall3(16, fd, 0xc00464b4, (long)&destroy) < 0)
+        return 0;
+    gpu_stage = 9;
+    (void)syscall1(3, fd);
+    return 1;
+}
+
 __attribute__((noreturn)) void _start(void) {
     static const char dev[] = "/dev";
     static const char devtmpfs[] = "devtmpfs";
@@ -334,6 +504,10 @@ __attribute__((noreturn)) void _start(void) {
         "<2>[JSR-HWV5-NET] device=net discovered=true link=true tx=true rx=true arp=true ok=true\n";
     static const char fs_marker[] =
         "<2>[JSR-HWV5-FS] device=fs discovered=true mount=true lookup=true read=true write=true ok=true\n";
+    static const char gpu_marker[] =
+        "<2>[JSR-HWV5-GPU] device=gpu discovered=true display=true create=true attach=true scanout=true transfer=true flush=true unref=true reset=true ok=true\n";
+    static const char gpu_fail_marker[] =
+        "<2>[JSR-HWV5-GPU] device=gpu ok=false stage=";
     static const char net_start_marker[] =
         "<2>[JSR-LINUX-GUEST] stage=net-start\n";
     static const char pio_fail_marker[] =
@@ -370,6 +544,7 @@ __attribute__((noreturn)) void _start(void) {
     int net_rx_ok = 0;
     int net_ok;
     int fs_ok;
+    int gpu_ok;
     long fd;
     long hvc;
 
@@ -441,6 +616,7 @@ __attribute__((noreturn)) void _start(void) {
     if (fd >= 0)
         (void)syscall1(3, fd);
     fs_ok = virtiofs_roundtrip();
+    gpu_ok = gpu_roundtrip();
     fd = syscall3(2, (long)kmsg_path, 1, 0);
     if (fd >= 0 && fs_stage < 5)
         write_cstr(fd, fs_stage_markers[fs_stage]);
@@ -469,6 +645,11 @@ __attribute__((noreturn)) void _start(void) {
         write_decimal(fd, (unsigned long)fs_ok);
         write_cstr(fd, "\n");
     }
+    if (fd >= 0 && !gpu_ok) {
+        write_all(fd, gpu_fail_marker, sizeof(gpu_fail_marker) - 1);
+        write_decimal(fd, (unsigned long)gpu_stage);
+        write_cstr(fd, "\n");
+    }
     if (fd >= 0) {
         write_all(fd, base_marker, sizeof(base_marker) - 1);
         if (rng_ok)
@@ -483,8 +664,27 @@ __attribute__((noreturn)) void _start(void) {
             write_all(fd, net_marker, sizeof(net_marker) - 1);
         if (fs_ok)
             write_all(fd, fs_marker, sizeof(fs_marker) - 1);
+        if (gpu_ok)
+            write_all(fd, gpu_marker, sizeof(gpu_marker) - 1);
         if (console_ok)
             write_all(hvc, console_marker, sizeof(console_marker) - 1);
+    }
+    if (hvc >= 0) {
+        if (pio_ok)
+            write_all(hvc, pio_marker, sizeof(pio_marker) - 1);
+        else
+            write_all(hvc, pio_fail_marker, sizeof(pio_fail_marker) - 1);
+        if (net_ok)
+            write_all(hvc, net_marker, sizeof(net_marker) - 1);
+        if (fs_ok)
+            write_all(hvc, fs_marker, sizeof(fs_marker) - 1);
+        if (gpu_ok)
+            write_all(hvc, gpu_marker, sizeof(gpu_marker) - 1);
+        else {
+            write_all(hvc, gpu_fail_marker, sizeof(gpu_fail_marker) - 1);
+            write_decimal(hvc, (unsigned long)gpu_stage);
+            write_all(hvc, "\n", 1);
+        }
     }
     fd = syscall3(2, (long)kmsg_path, 1, 0);
     if (fd >= 0) {
@@ -502,16 +702,6 @@ __attribute__((noreturn)) void _start(void) {
             write_all(fd, net_marker, sizeof(net_marker) - 1);
         if (fs_ok)
             write_all(fd, fs_marker, sizeof(fs_marker) - 1);
-    }
-    if (hvc >= 0) {
-        if (pio_ok)
-            write_all(hvc, pio_marker, sizeof(pio_marker) - 1);
-        else
-            write_all(hvc, pio_fail_marker, sizeof(pio_fail_marker) - 1);
-        if (net_ok)
-            write_all(hvc, net_marker, sizeof(net_marker) - 1);
-        if (fs_ok)
-            write_all(hvc, fs_marker, sizeof(fs_marker) - 1);
     }
     for (;;)
         (void)syscall1(34, 0);
