@@ -100,8 +100,28 @@ impl<const N: usize> PhysRegionTable<N> {
     }
 
     pub fn push(&mut self, region: PhysRegion) {
+        if region.start >= region.end {
+            return;
+        }
+        let mut merged = region;
+        let mut index = 0;
+        while index < self.len {
+            let current = self.regions[index];
+            if current.kind == merged.kind
+                && current.start <= merged.end
+                && merged.start <= current.end
+            {
+                merged.start = current.start.min(merged.start);
+                merged.end = current.end.max(merged.end);
+                self.len -= 1;
+                self.regions[index] = self.regions[self.len];
+                index = 0;
+                continue;
+            }
+            index += 1;
+        }
         if self.len < N {
-            self.regions[self.len] = region;
+            self.regions[self.len] = merged;
             self.len += 1;
         } else {
             self.dropped = self.dropped.saturating_add(1);
@@ -427,6 +447,22 @@ mod tests {
         assert_eq!(regions.regions().len(), 2);
         assert_eq!(regions.dropped(), 1);
         assert!(!regions.is_complete());
+    }
+
+    #[test]
+    fn physical_region_table_merges_adjacent_same_kind_ranges() {
+        let mut regions = PhysRegionTable::<3>::new();
+        for index in 0..3 {
+            regions.push(PhysRegion {
+                start: index * FRAME_SIZE,
+                end: (index + 1) * FRAME_SIZE,
+                kind: RegionKind::Usable,
+            });
+        }
+        assert_eq!(regions.regions().len(), 1);
+        assert_eq!(regions.regions()[0].start, 0);
+        assert_eq!(regions.regions()[0].end, 3 * FRAME_SIZE);
+        assert!(regions.is_complete());
     }
 
     fn regions() -> [PhysRegion; 3] {

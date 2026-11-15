@@ -11,7 +11,7 @@ use kernel_core::psci::Conduit;
 use spin::Once;
 
 /// 最多记录的物理内存区域数（超出部分计入 `dropped_regions`，不静默丢弃）。
-pub const MAX_REGIONS: usize = 128;
+pub const MAX_REGIONS: usize = 256;
 
 /// 帧缓冲像素格式（与设备树 `simple-framebuffer` 的常见取值对应）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
