@@ -11,6 +11,7 @@ BOOT_IMAGE="$TARGET/boot.img"
 DATA_IMAGE="$TARGET/data.img"
 LIMIT="${LIFECYCLE_DIAG_TIMEOUT:-90}"
 QEMU_CPUS="${LIFECYCLE_DIAG_QEMU_CPUS:-0-1}"
+ALLOW_VBOX="${LIFECYCLE_DIAG_ALLOW_VBOX:-0}"
 mkdir -p "$OUT" "$TARGET"
 
 exec 9>/tmp/jasper-os-qemu.lock
@@ -40,7 +41,8 @@ runtime_active() {
     [ -r "$comm" ] || continue
     IFS= read -r name <"$comm" 2>/dev/null || continue
     case "$name" in
-      qemu-system*|VBoxHeadless) return 0 ;;
+      qemu-system*) return 0 ;;
+      VBoxHeadless) [ "$ALLOW_VBOX" = 1 ] || return 0 ;;
     esac
   done
   return 1

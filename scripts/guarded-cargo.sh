@@ -14,6 +14,7 @@ build_jobs=${JASPER_CARGO_JOBS:-2}
 minimum_available_kib=${JASPER_BUILD_MIN_AVAILABLE_GIB:-12884902}
 minimum_disk_kib=${JASPER_BUILD_MIN_DISK_GIB:-12582912}
 lock_path=${JASPER_BUILD_LOCK:-/tmp/jasper-os-cargo-$(id -u).lock}
+allow_vbox=${JASPER_BUILD_ALLOW_VBOX:-0}
 
 if [ ! -x "$cargo_bin" ]; then
     echo "guarded-cargo: cargo not executable: $cargo_bin" >&2
@@ -40,7 +41,8 @@ runtime_active() {
         [ -r "$comm" ] || continue
         IFS= read -r name <"$comm" 2>/dev/null || continue
         case "$name" in
-            qemu-system*|VBoxHeadless) return 0 ;;
+            qemu-system*) return 0 ;;
+            VBoxHeadless) [ "$allow_vbox" = 1 ] || return 0 ;;
         esac
     done
     return 1
