@@ -655,7 +655,10 @@ fn run_root_program(
 }
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
-fn install_root_android_files(root: &Ext4Reader) -> Result<(), HealthError> {
+fn install_root_android_files(
+    root: &Ext4Reader,
+    origin: compat_core::executable::SystemImage,
+) -> Result<(), HealthError> {
     for path in crate::linux_vfs::ANDROID_FILE_PATHS {
         let bytes = match root.read_file(
             core::str::from_utf8(path).map_err(|_| HealthError::RootExecute)?,
@@ -663,7 +666,10 @@ fn install_root_android_files(root: &Ext4Reader) -> Result<(), HealthError> {
         ) {
             Ok(bytes) => bytes,
             Err(_) => {
-                #[cfg(feature = "android-art-verify")]
+                #[cfg(any(
+                    feature = "android-art-verify",
+                    feature = "vulkan-metal2vulkan-verify"
+                ))]
                 crate::kprintln!(
                     "[JSR-ANDROID-ART] file-skip path={}",
                     core::str::from_utf8(path).unwrap_or("<non-utf8>")
@@ -671,13 +677,30 @@ fn install_root_android_files(root: &Ext4Reader) -> Result<(), HealthError> {
                 continue;
             }
         };
+        let byte_len = bytes.len();
         if !crate::linux_vfs::install_root_android_file(path, bytes) {
-            #[cfg(feature = "android-art-verify")]
+            #[cfg(any(
+                feature = "android-art-verify",
+                feature = "vulkan-metal2vulkan-verify"
+            ))]
             crate::kprintln!(
                 "[JSR-ANDROID-ART] file-install-fail path={}",
                 core::str::from_utf8(path).unwrap_or("<non-utf8>")
             );
             return Err(HealthError::RootExecute);
+        }
+        if *path == b"/usr/bin/llvm-as" {
+            let interpreter = root
+                .read_file("/lib64/ld-linux-x86-64.so.2", 16 * 1024 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            if !crate::linux_vfs::install_root_program(
+                origin,
+                path,
+                byte_len,
+                interpreter.len(),
+            ) {
+                return Err(HealthError::RootExecute);
+            }
         }
     }
     Ok(())
@@ -685,25 +708,39 @@ fn install_root_android_files(root: &Ext4Reader) -> Result<(), HealthError> {
 
 #[cfg(any(
     feature = "android-ecosystem-verify",
-    feature = "android-art-verify"
+    feature = "android-art-verify",
+    feature = "vulkan-metal2vulkan-verify"
 ))]
 fn run_root_android_program(
     root: &Ext4Reader,
+    name: &'static str,
     path: &'static str,
     interpreter_path: &'static str,
     argv: &[&[u8]],
     envp: &[&[u8]],
 ) -> Result<(), HealthError> {
-    const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
-    let executable = root
-        .read_file(path, MAX_IMAGE_BYTES)
-        .map_err(|_| HealthError::RootExecute)?;
+    const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+    let executable = root.read_file(path, MAX_IMAGE_BYTES).map_err(|error| {
+        crate::kprintln!(
+            "[JSR-ROOT-DYNAMIC-READ] fail=executable path={} error={:?}",
+            path,
+            error
+        );
+        HealthError::RootExecute
+    })?;
     let interpreter = root
         .read_file(interpreter_path, MAX_IMAGE_BYTES)
-        .map_err(|_| HealthError::RootExecute)?;
+        .map_err(|error| {
+            crate::kprintln!(
+                "[JSR-ROOT-DYNAMIC-READ] fail=interpreter path={} error={:?}",
+                interpreter_path,
+                error
+            );
+            HealthError::RootExecute
+        })?;
     let warm_frames = crate::mm::frame::free_frames();
     if !crate::compat_dynamic_demo::run_root_dynamic_program(
-        path.trim_start_matches('/'),
+        name,
         path,
         &executable,
         &interpreter,
@@ -715,9 +752,13 @@ fn run_root_android_program(
     ) {
         return Err(HealthError::RootExecute);
     }
+    // Keep the measured run from folding a first-time kernel-heap growth step
+    // into its frame baseline. Workloads may legitimately consume the remaining
+    // free bytes from cache metadata allocations made by the warm-up pass.
+    crate::mm::heap::ensure_free(256 * 1024).map_err(|_| HealthError::RootExecute)?;
     let frames_before = crate::mm::frame::free_frames();
     if !crate::compat_dynamic_demo::run_root_dynamic_program(
-        path.trim_start_matches('/'),
+        name,
         path,
         &executable,
         &interpreter,
@@ -749,7 +790,7 @@ fn execute_root_dynamic_programs(
     install_root_libraries(root)?;
 #[cfg(feature = "android-art-verify")]
 {
-    install_root_android_files(root)?;
+    install_root_android_files(root, origin)?;
     let art_argv: [&[u8]; 6] = [
         b"/system/bin/dalvikvm64",
         b"-Xuse-stderr-logger",
@@ -767,16 +808,33 @@ fn execute_root_dynamic_programs(
     ];
     run_root_android_program(
         root,
+        "system/bin/dalvikvm64",
         "/system/bin/dalvikvm64",
         "/system/bin/linker64",
         &art_argv,
+        &art_envp,
+    )?;
+    let apk_argv: [&[u8]; 6] = [
+        b"/system/bin/dalvikvm64",
+        b"-Xuse-stderr-logger",
+        b"-Xbootclasspath:/apex/com.android.art/javalib/core-oj.jar:/apex/com.android.art/javalib/core-libart.jar:/apex/com.android.i18n/javalib/core-icu4j.jar",
+        b"-cp",
+        b"/data/local/tmp/app.apk",
+        b"androidx.constraintlayout.core.motion.parse.KeyParser",
+    ];
+    run_root_android_program(
+        root,
+        "android-art-upstream-apk",
+        "/system/bin/dalvikvm64",
+        "/system/bin/linker64",
+        &apk_argv,
         &art_envp,
     )?;
     return Ok(());
 }
 #[cfg(feature = "android-ecosystem-verify")]
 {
-    install_root_android_files(root)?;
+    install_root_android_files(root, origin)?;
     let android_toybox_argv: [&[u8]; 3] = [
         b"/system/bin/toybox",
         b"uname",
@@ -784,6 +842,7 @@ fn execute_root_dynamic_programs(
     ];
     run_root_android_program(
         root,
+        "system/bin/toybox",
         "/system/bin/toybox",
         "/system/bin/linker64",
         &android_toybox_argv,
@@ -834,6 +893,38 @@ fn execute_root_dynamic_programs(
     ) {
         return Err(HealthError::RootExecute);
     }
+    return Ok(());
+}
+#[cfg(feature = "vulkan-metal2vulkan-verify")]
+{
+    install_root_android_files(root, origin)?;
+    let vulkan_envp: [&[u8]; 5] = [
+        b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu",
+        b"VK_DRIVER_FILES=/usr/lib/x86_64-linux-gnu/vk_swiftshader_icd.json",
+        b"VK_ICD_FILENAMES=/usr/lib/x86_64-linux-gnu/vk_swiftshader_icd.json",
+        b"HOME=/data",
+        b"XDG_CACHE_HOME=/data/.cache",
+    ];
+    let compute_argv: [&[u8]; 1] = [b"/usr/bin/metal2vulkan-compute"];
+    crate::linux_abi::reset_vulkan_trace_budget();
+    run_root_android_program(
+        root,
+        "metal2vulkan-compute",
+        "/usr/bin/metal2vulkan-compute",
+        "/lib64/ld-linux-x86-64.so.2",
+        &compute_argv,
+        &vulkan_envp,
+    )?;
+    let render_argv: [&[u8]; 1] = [b"/usr/bin/metal2vulkan-render"];
+    crate::linux_abi::reset_vulkan_trace_budget();
+    run_root_android_program(
+        root,
+        "metal2vulkan-render",
+        "/usr/bin/metal2vulkan-render",
+        "/lib64/ld-linux-x86-64.so.2",
+        &render_argv,
+        &vulkan_envp,
+    )?;
     return Ok(());
 }
 #[cfg(feature = "android-fixture-verify")]

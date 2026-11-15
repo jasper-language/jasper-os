@@ -74,7 +74,7 @@ write_file() {
   debugfs -R "stat $destination" "$PARTITION" 2>/dev/null | grep -q '^Inode:'
 }
 
-for directory in /etc /bin /lib64 /usr /usr/bin /usr/lib /usr/lib/x86_64-linux-gnu /usr/libexec /usr/libexec/jasper; do
+for directory in /etc /bin /lib64 /usr /usr/bin /usr/lib /usr/lib/x86_64-linux-gnu /usr/libexec /usr/libexec/jasper /data /data/.cache /data/.cache/metal2vulkan; do
   ensure_dir "$directory"
 done
 write_file "$MARKER" /etc/jasper-root

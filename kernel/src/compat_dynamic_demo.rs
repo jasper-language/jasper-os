@@ -827,7 +827,14 @@ fn run_program_with_interpreter(
     let heap_after = crate::mm::heap::stats();
     let heap_used_before = heap_before.0.saturating_sub(heap_before.1);
     let heap_used_after = heap_after.0.saturating_sub(heap_after.1);
-    let resources = frames_after == frames_before && heap_used_after == heap_used_before;
+    let heap_growth = heap_after.3.saturating_sub(heap_before.3);
+    let frame_deficit = frames_before.saturating_sub(frames_after);
+    // The page-backed kernel heap grows monotonically. A mapping that expands by
+    // exactly the missing frames keeps all capacity in the allocator and is not a
+    // workload leak, provided the used heap returns to its baseline.
+    let resources = heap_used_after == heap_used_before
+        && (frames_after == frames_before && heap_growth == 0
+            || heap_growth == frame_deficit as u64 * kernel_core::frame::FRAME_SIZE);
     if !resources {
         let (pins, orphaned) = crate::mm::pin::stats();
         kprintln!(
@@ -943,7 +950,11 @@ pub(crate) fn run_root_static_program(
     let heap_after = crate::mm::heap::stats();
     let heap_used_before = heap_before.0.saturating_sub(heap_before.1);
     let heap_used_after = heap_after.0.saturating_sub(heap_after.1);
-    let resources = frames_after == frames_before && heap_used_after == heap_used_before;
+    let heap_growth = heap_after.3.saturating_sub(heap_before.3);
+    let frame_deficit = frames_before.saturating_sub(frames_after);
+    let resources = heap_used_after == heap_used_before
+        && (frames_after == frames_before && heap_growth == 0
+            || heap_growth == frame_deficit as u64 * kernel_core::frame::FRAME_SIZE);
     kprintln!(
         "[JSR-ANDROID-TOYBOX] program={} static=true mapped={} started={} syscalls={} exit_zero={} frames_before={} frames_after={} resources={}",
         name,
@@ -1012,6 +1023,46 @@ fn prepare_exec_image(
     .map_err(|_| "initial_stack")?;
     let stack_pointer = map_exec_stack(pid, &stack)?;
     Ok((dynamic.execution.entry(), stack_pointer))
+}
+
+#[cfg(all(
+    feature = "linux-abi",
+    feature = "lifecycle-root-exec-verify",
+    target_arch = "x86_64"
+))]
+fn prepare_exec_static_image(
+    pid: ObjId,
+    executable: &[u8],
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> Result<(u64, u64), &'static str> {
+    let plan = jasper_compat_loader::parse(executable).map_err(|_| "parse_executable")?;
+    if plan.interpreter.is_some() {
+        return Err("static_with_interpreter");
+    }
+    let load_bias = if plan.position_independent {
+        EXECUTABLE_BASE
+    } else {
+        0
+    };
+    let image = ImageLayout::new(&plan, load_bias, kernel_core::frame::FRAME_SIZE)
+        .map_err(|_| "static_layout")?;
+    let stack = stack_input_for_program(ProgramStackInput {
+        plan: &plan,
+        image: &image,
+        interpreter_base: 0,
+        stack_top: STACK_TOP,
+        argv,
+        envp,
+        auxv: &[],
+        random: Some(&[0x5au8; 16]),
+    })
+    .and_then(build_initial_stack)
+    .map_err(|_| "initial_stack")?;
+    let mut memory = JasperLoaderMemory::new(pid);
+    map_image(&mut memory, executable, &image).map_err(|_| "map_executable")?;
+    let stack_pointer = map_exec_stack(pid, &stack)?;
+    Ok((image.entry, stack_pointer))
 }
 
 #[cfg(all(
@@ -1125,6 +1176,66 @@ pub(crate) fn exec_dynamic_program(
     drop(envp);
     drop(executable);
     drop(interpreter);
+    drop(path);
+    let _ = crate::arch::set_user_fs_base(0);
+    Some((entry, stack))
+}
+
+/// Replaces the current Linux image with one unmodified static ELF.
+#[cfg(all(
+    feature = "linux-abi",
+    feature = "lifecycle-root-exec-verify",
+    target_arch = "x86_64"
+))]
+pub(crate) fn exec_static_program(
+    pid: ObjId,
+    path: alloc::vec::Vec<u8>,
+    executable: alloc::vec::Vec<u8>,
+    argv: alloc::vec::Vec<alloc::vec::Vec<u8>>,
+    envp: alloc::vec::Vec<alloc::vec::Vec<u8>>,
+) -> Option<(u64, u64)> {
+    let saved = match proc::begin_exec_address_space(pid) {
+        Ok(saved) => saved,
+        Err(error) => {
+            kprintln!(
+                "[JSR-LINUX-EXEC-FAIL] stage=static_address_space error={:?}",
+                error
+            );
+            return None;
+        }
+    };
+    if !proc::linux_set_exec_path(pid, &path) {
+        let _ = proc::rollback_exec_address_space(pid, saved);
+        return None;
+    }
+    let prepared = {
+        let argv_refs = argv
+            .iter()
+            .map(|value| value.as_slice())
+            .collect::<alloc::vec::Vec<_>>();
+        let envp_refs = envp
+            .iter()
+            .map(|value| value.as_slice())
+            .collect::<alloc::vec::Vec<_>>();
+        prepare_exec_static_image(pid, &executable, &argv_refs, &envp_refs)
+    };
+    let (entry, stack) = match prepared {
+        Ok(prepared) => prepared,
+        Err(stage) => {
+            kprintln!("[JSR-LINUX-EXEC-FAIL] stage={}", stage);
+            let _ = proc::rollback_exec_address_space(pid, saved);
+            return None;
+        }
+    };
+    let Some(space) = proc::current_space_root(pid) else {
+        return None;
+    };
+    let _ = proc::vfork_commit_exec(pid);
+    sched::set_current_space(Some(space));
+    drop(saved);
+    drop(argv);
+    drop(envp);
+    drop(executable);
     drop(path);
     let _ = crate::arch::set_user_fs_base(0);
     Some((entry, stack))

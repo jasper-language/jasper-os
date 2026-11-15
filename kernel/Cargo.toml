@@ -200,6 +200,9 @@ android-fixture-verify = ["lifecycle-root-exec-verify"]
 android-ecosystem-verify = ["lifecycle-root-exec-verify"]
 # Run the unmodified AOSP ART runtime and tests through the root-backed Linux ABI.
 android-art-verify = ["lifecycle-root-exec-verify"]
+# Run upstream Metal2Vulkan official examples through Jasper's Linux ABI with
+# an unmodified SwiftShader Vulkan ICD.
+vulkan-metal2vulkan-verify = ["lifecycle-root-exec-verify"]
 # Dedicated negative acceptance: lose the first virtio-blk completion and require
 # the hardware-counter timeout to fail the health gate without hanging silently.
 lifecycle-block-timeout-verify = ["lifecycle-root-exec-verify", "fault-inject"]

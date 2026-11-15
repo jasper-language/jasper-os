@@ -24,15 +24,26 @@ use crate::{console, proc, sched};
 
 #[cfg(any(
     feature = "compat-dynamic-libc-verify",
-    feature = "workload-io-verify"
+    feature = "workload-io-verify",
+    feature = "vulkan-metal2vulkan-verify"
 ))]
-static SYSCALL_TRACE_REMAINING: AtomicU32 = AtomicU32::new(512);
+const SYSCALL_TRACE_BUDGET: u32 = 1024;
 #[cfg(any(
     feature = "compat-dynamic-libc-verify",
-    feature = "android-art-verify"
+    feature = "workload-io-verify",
+    feature = "vulkan-metal2vulkan-verify"
+))]
+static SYSCALL_TRACE_REMAINING: AtomicU32 = AtomicU32::new(SYSCALL_TRACE_BUDGET);
+#[cfg(any(
+    feature = "compat-dynamic-libc-verify",
+    feature = "android-art-verify",
+    feature = "vulkan-metal2vulkan-verify"
 ))]
 static PATH_TRACE_REMAINING: AtomicU32 = AtomicU32::new(512);
-#[cfg(feature = "android-art-verify")]
+#[cfg(any(
+    feature = "android-art-verify",
+    feature = "vulkan-metal2vulkan-verify"
+))]
 static ART_TLS_TRACE_REMAINING: AtomicU32 = AtomicU32::new(0);
 const LINUX_PROC_MAPS_HANDLE: u64 = 0x4a53_5052_4f43_4d50;
 const LINUX_PROC_STAT_HANDLE: u64 = 0x4a53_5052_4f43_5354;
@@ -330,6 +341,17 @@ struct LinuxProcessKeyring {
     serial: i32,
 }
 
+struct LinuxCacheFile {
+    id: u32,
+    path: alloc::vec::Vec<u8>,
+    bytes: alloc::vec::Vec<u8>,
+}
+
+struct LinuxCacheDir {
+    id: u32,
+    path: alloc::vec::Vec<u8>,
+}
+
 struct CompatState {
     threads: [Option<LinuxThread>; MAX_LINUX_THREADS],
     thread_landlock_domains: [Option<
@@ -355,6 +377,9 @@ struct CompatState {
     keys: alloc::vec::Vec<LinuxKey>,
     process_keyrings: alloc::vec::Vec<LinuxProcessKeyring>,
     next_key_serial: i32,
+    cache_files: alloc::vec::Vec<LinuxCacheFile>,
+    cache_dirs: alloc::vec::Vec<LinuxCacheDir>,
+    next_cache_node_id: u32,
 }
 
 impl CompatState {
@@ -382,6 +407,9 @@ impl CompatState {
             keys: alloc::vec::Vec::new(),
             process_keyrings: alloc::vec::Vec::new(),
             next_key_serial: 1,
+            cache_files: alloc::vec::Vec::new(),
+            cache_dirs: alloc::vec::Vec::new(),
+            next_cache_node_id: 1,
         }
     }
 }
@@ -389,16 +417,23 @@ impl CompatState {
 static COMPAT: IrqSpinLock<CompatState> =
     IrqSpinLock::ranked(crate::lockorder::LINUX_COMPAT, CompatState::new());
 
+const LINUX_CACHE_ROOT: &[u8] = b"/data/.cache/metal2vulkan";
+const LINUX_CACHE_FILE_HANDLE_BASE: u64 = 0x4a53_4346_0000_0000;
+const LINUX_CACHE_DIR_HANDLE_BASE: u64 = 0x4a53_4344_0000_0000;
+
 #[cfg(any(
     feature = "compat-dynamic-libc-verify",
-    feature = "workload-io-verify"
+    feature = "workload-io-verify",
+    feature = "vulkan-metal2vulkan-verify"
 ))]
 fn trace_request(args: &SyscallArgs) {
     let remaining = SYSCALL_TRACE_REMAINING.load(Ordering::Relaxed);
     if remaining == 0 {
         return;
     }
-    let index = 512 - remaining;
+    let index = SYSCALL_TRACE_BUDGET - remaining;
+    let process = proc::current_process();
+    let tid = process.and_then(current_linux_tid).unwrap_or(0);
     if SYSCALL_TRACE_REMAINING
         .compare_exchange(
             remaining,
@@ -409,8 +444,10 @@ fn trace_request(args: &SyscallArgs) {
         .is_ok()
     {
         crate::kprintln!(
-            "[JSR-LINUX-SYSCALL] index={} nr={} a0={:#x} a1={:#x} a2={:#x} a3={:#x} a4={:#x} a5={:#x}",
+            "[JSR-LINUX-SYSCALL] index={} tid={} ip={:#x} nr={} a0={:#x} a1={:#x} a2={:#x} a3={:#x} a4={:#x} a5={:#x}",
             index,
+            tid,
+            args.user_ip.map_or(0, |ip| ip.0),
             args.id,
             args.args[0],
             args.args[1],
@@ -424,7 +461,8 @@ fn trace_request(args: &SyscallArgs) {
 
 #[cfg(any(
     feature = "compat-dynamic-libc-verify",
-    feature = "android-art-verify"
+    feature = "android-art-verify",
+    feature = "vulkan-metal2vulkan-verify"
 ))]
 fn trace_path(kind: &str, path: &[u8]) {
     let remaining = PATH_TRACE_REMAINING.load(Ordering::Relaxed);
@@ -461,7 +499,8 @@ fn trace_path(kind: &str, path: &[u8]) {
 
 #[cfg(any(
     feature = "compat-dynamic-libc-verify",
-    feature = "android-art-verify"
+    feature = "android-art-verify",
+    feature = "vulkan-metal2vulkan-verify"
 ))]
 fn trace_path_address(pid: ObjId, kind: &str, address: u64) {
     let mut bytes = [0u8; 160];
@@ -473,6 +512,12 @@ fn trace_path_address(pid: ObjId, kind: &str, address: u64) {
             address
         ),
     }
+}
+
+#[cfg(feature = "vulkan-metal2vulkan-verify")]
+pub(crate) fn reset_vulkan_trace_budget() {
+    SYSCALL_TRACE_REMAINING.store(0, Ordering::Relaxed);
+    PATH_TRACE_REMAINING.store(0, Ordering::Relaxed);
 }
 
 /// Registers the first task of a Linux process as leader and later tasks with unique TIDs.
@@ -491,7 +536,7 @@ pub(crate) fn register_linux_thread(
         return false;
     };
     let (current_task, current_name) = sched::current();
-    let tid = {
+    {
         let mut state = COMPAT.lock();
         let has_leader = state
             .threads
@@ -552,10 +597,9 @@ pub(crate) fn register_linux_thread(
         state.thread_landlock_domains[slot] = Some(inherited_domains);
         tid
     };
-    if clear_child_tid != 0 && proc::write(process, clear_child_tid, &tid.to_le_bytes()).is_err() {
-        unregister_linux_thread(task);
-        return false;
-    }
+    // CLONE_CHILD_CLEARTID only names the word the kernel clears at thread exit. A
+    // CLONE_CHILD_SETTID request is written separately by the clone caller after setup.
+    // Writing the TID here would overwrite glibc's joinstate and turn detach into join.
     true
 }
 
@@ -1339,7 +1383,6 @@ fn blocked_pending_signal_mask(process: ObjId) -> u64 {
     (thread.pending_signals | shared) & thread.signal_mask
 }
 
-const SIGNAL_FRAME_BYTES: usize = 8 + 968 + 128 + crate::syscall::XSAVE_BYTES;
 const SIGNAL_UC_OFFSET: usize = 8;
 const SIGNAL_UC_GREGS: usize = 40;
 const SIGNAL_UC_SIGMASK: usize = 296;
@@ -1348,6 +1391,10 @@ const SIGNAL_INFO_OFFSET: usize = SIGNAL_UC_OFFSET + 968;
 const SIGNAL_FPSTATE_OFFSET: usize = SIGNAL_INFO_OFFSET + 128;
 const JASPER_UC_FLAG_ALTSTACK: u64 = 1u64 << 63;
 const JASPER_UC_FLAG_ALTSTACK_AUTODISARM: u64 = 1u64 << 62;
+
+fn signal_frame_bytes() -> usize {
+    SIGNAL_FPSTATE_OFFSET + crate::arch::x86_64::xstate::save_size()
+}
 
 fn write_frame_u64(frame: &mut [u8], offset: usize, value: u64) {
     if let Some(field) = frame.get_mut(offset..offset + 8) {
@@ -1369,14 +1416,15 @@ fn copy_fxstate_to_frame(args: &SyscallArgs, frame: &mut [u8]) -> bool {
     let Some(source) = args.fxstate else {
         return false;
     };
-    let Some(destination) = frame.get_mut(
-        SIGNAL_FPSTATE_OFFSET..SIGNAL_FPSTATE_OFFSET.saturating_add(crate::syscall::XSAVE_BYTES),
-    ) else {
+    let state_bytes = crate::arch::x86_64::xstate::save_size();
+    let Some(destination) =
+        frame.get_mut(SIGNAL_FPSTATE_OFFSET..SIGNAL_FPSTATE_OFFSET.saturating_add(state_bytes))
+    else {
         return false;
     };
     // SAFETY: the x86_64 syscall entry owns this aligned XSAVE image for the
     // duration of dispatch; the frame destination is a separate fixed buffer.
-    destination.copy_from_slice(unsafe { &*source });
+    destination.copy_from_slice(unsafe { core::slice::from_raw_parts(source, state_bytes) });
     true
 }
 
@@ -1429,7 +1477,7 @@ fn build_signal_frame(
     let uses_altstack = action[1] & SA_ONSTACK != 0
         && altstack.2 & SS_DISABLE == 0
         && altstack.4 == 0
-        && altstack.1 >= SIGNAL_FRAME_BYTES as u64
+        && altstack.1 >= signal_frame_bytes() as u64
         && user_register(altstack.0);
     let autodisarm = uses_altstack && altstack.2 & SS_AUTODISARM != 0;
     let (stack_top, red_zone) = if uses_altstack {
@@ -1445,12 +1493,12 @@ fn build_signal_frame(
         (user_ip.1, 128)
     };
     let frame_address = stack_top
-        .checked_sub(red_zone + SIGNAL_FRAME_BYTES as u64)
+        .checked_sub(red_zone + signal_frame_bytes() as u64)
         .map(|value| value & !0xf)
         .filter(|value| {
             *value >= crate::arch::USER_WINDOW.0
                 && value
-                    .checked_add(SIGNAL_FRAME_BYTES as u64)
+                    .checked_add(signal_frame_bytes() as u64)
                     .is_some_and(|end| end <= crate::arch::USER_WINDOW.1)
         })
         .ok_or(CompatErrno::Fault)?;
@@ -1463,7 +1511,7 @@ fn build_signal_frame(
     let fpstate_address = frame_address
         .checked_add(SIGNAL_FPSTATE_OFFSET as u64)
         .ok_or(CompatErrno::Fault)?;
-    let mut frame = [0u8; SIGNAL_FRAME_BYTES];
+    let mut frame = alloc::vec![0u8; signal_frame_bytes()];
     write_frame_u64(&mut frame, 0, action[2]);
     if !copy_fxstate_to_frame(args, &mut frame) {
         return Err(CompatErrno::Fault);
@@ -1882,12 +1930,13 @@ fn linux_rt_sigreturn(
     );
     if fpstate_address < crate::arch::USER_WINDOW.0
         || fpstate_address
-            .checked_add(crate::syscall::XSAVE_BYTES as u64)
+            .checked_add(crate::arch::x86_64::xstate::save_size() as u64)
             .is_none_or(|end| end > crate::arch::USER_WINDOW.1)
     {
         return Err(CompatErrno::Fault);
     }
-    let mut fxstate = [0u8; crate::syscall::XSAVE_BYTES];
+    let state_bytes = crate::arch::x86_64::xstate::save_size();
+    let mut fxstate = alloc::vec![0u8; state_bytes];
     proc::read(process, fpstate_address, &mut fxstate).map_err(|_| CompatErrno::Fault)?;
     let Some(destination) = args.fxstate else {
         return Err(CompatErrno::Fault);
@@ -1895,7 +1944,7 @@ fn linux_rt_sigreturn(
     // SAFETY: the syscall entry owns this aligned FP state buffer until return;
     // rt_sigreturn can replace it with the validated userspace signal state.
     unsafe {
-        *destination = fxstate;
+        core::ptr::copy_nonoverlapping(fxstate.as_ptr(), destination, state_bytes);
     }
     if uc_flags & JASPER_UC_FLAG_ALTSTACK != 0
         && !leave_altstack(process, uc_flags & JASPER_UC_FLAG_ALTSTACK_AUTODISARM != 0)
@@ -2144,6 +2193,18 @@ fn futex_key(process: ObjId, address: u64) -> FutexKey {
     }
 }
 
+fn remove_futex_waiter(task: crate::task::TaskId) {
+    let mut state = COMPAT.lock();
+    for word in state.futexes.iter_mut().flatten() {
+        for waiter in word.waiters.iter_mut() {
+            if waiter.active && waiter.task == task {
+                *waiter = FutexWaiter::EMPTY;
+            }
+        }
+    }
+    prune_empty_futex_words(&mut state);
+}
+
 fn futex_wait(
     process: ObjId,
     address: u64,
@@ -2194,6 +2255,13 @@ fn futex_wait(
             woken: false,
         };
     }
+    // Close the check/register lost-wake window. A writer may change the
+    // word and wake between the first value check and waiter publication;
+    // Linux reports EAGAIN in that case instead of sleeping forever.
+    if futex_value(process, address)? != expected {
+        remove_futex_waiter(task);
+        return Err(CompatErrno::TryAgain);
+    }
     let result = loop {
         if proc::current_exiting() {
             break Err(CompatErrno::Interrupted);
@@ -2230,15 +2298,7 @@ fn futex_wait(
             sched::pause();
         }
     };
-    let mut state = COMPAT.lock();
-    for word in state.futexes.iter_mut().flatten() {
-        for waiter in word.waiters.iter_mut() {
-            if waiter.active && waiter.task == task {
-                *waiter = FutexWaiter::EMPTY;
-            }
-        }
-    }
-    prune_empty_futex_words(&mut state);
+    remove_futex_waiter(task);
     result
 }
 
@@ -2429,7 +2489,8 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
     }
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
-        feature = "workload-io-verify"
+        feature = "workload-io-verify",
+        feature = "vulkan-metal2vulkan-verify"
     ))]
     trace_request(a);
     let Some(pid) = proc::current_process() else {
@@ -2495,7 +2556,8 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
     }
     #[cfg(any(
         feature = "android-ecosystem-verify",
-        feature = "android-art-verify"
+        feature = "android-art-verify",
+        feature = "vulkan-metal2vulkan-verify"
     ))]
     {
         let mut executable = [0u8; 128];
@@ -2556,7 +2618,8 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
     let value = execute(pid, call, a.user_ip, a.user_preserved);
     #[cfg(any(
         feature = "android-ecosystem-verify",
-        feature = "android-art-verify"
+        feature = "android-art-verify",
+        feature = "vulkan-metal2vulkan-verify"
     ))]
     {
         let mut executable = [0u8; 128];
@@ -3480,6 +3543,12 @@ fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Invalid);
     }
     if let Some(entry) = proc::linux_fd(pid, fd) {
+        if linux_cache_file_id(entry.handle).is_some() {
+            if !entry.rights.contains(kernel_core::object::Rights::WRITE) {
+                return Err(CompatErrno::BadFd);
+            }
+            return linux_cache_write(pid, fd, entry.handle, args[1], len);
+        }
         if entry.kind == compat_core::fd::CompatKind::Pipe {
             if !entry.rights.contains(kernel_core::object::Rights::WRITE) {
                 return Err(CompatErrno::BadFd);
@@ -3605,6 +3674,63 @@ fn linux_writev(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 ///
 /// 从兼容目录读取有界 `linux_dirent64`；`.` 与 `..` 动态生成，游标只在全部记录
 /// 成功写入用户缓冲区后推进。过小缓冲区不会返回半条记录。
+fn linux_cache_getdents64(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    destination: u64,
+    capacity: usize,
+    start: u64,
+) -> Result<u64, CompatErrno> {
+    let children = linux_cache_children(handle).ok_or(CompatErrno::BadFd)?;
+    let count = 2usize
+        .checked_add(children.len())
+        .ok_or(CompatErrno::Invalid)?;
+    let start = usize::try_from(start).map_err(|_| CompatErrno::Invalid)?;
+    if start > count {
+        return Err(CompatErrno::Invalid);
+    }
+    let mut output = alloc::vec::Vec::new();
+    let mut index = start;
+    while index < count {
+        let (name, inode, kind) = if index == 0 {
+            (b".".as_slice(), 1u64, 4u8)
+        } else if index == 1 {
+            (b"..".as_slice(), 1u64, 4u8)
+        } else {
+            let (name, inode, kind) = &children[index - 2];
+            (name.as_slice(), *inode, *kind)
+        };
+        let record_len = align_up(
+            19usize.saturating_add(name.len()).saturating_add(1) as u64,
+            8,
+        ) as usize;
+        if output.len().saturating_add(record_len) > capacity {
+            if output.is_empty() {
+                return Err(CompatErrno::Invalid);
+            }
+            break;
+        }
+        let base = output.len();
+        output.resize(base + record_len, 0);
+        output[base..base + 8].copy_from_slice(&inode.to_le_bytes());
+        output[base + 8..base + 16].copy_from_slice(&((index + 1) as i64).to_le_bytes());
+        output[base + 16..base + 18].copy_from_slice(&(record_len as u16).to_le_bytes());
+        output[base + 18] = kind;
+        output[base + 19..base + 19 + name.len()].copy_from_slice(name);
+        index += 1;
+    }
+    let io = admit_process_io(pid, output.len() as u64, 1)?;
+    if !output.is_empty() {
+        copy_to_user(destination, &output, output.len()).map_err(|_| CompatErrno::Fault)?;
+    }
+    io.commit();
+    if !proc::set_linux_dir_offset(pid, fd, index as u64) {
+        return Err(CompatErrno::BadFd);
+    }
+    Ok(output.len() as u64)
+}
+
 fn linux_getdents64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MAX_GETDENTS: usize = 64 * 1024;
     const DT_DIR: u8 = 4;
@@ -3615,6 +3741,9 @@ fn linux_getdents64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Invalid);
     }
     let (handle, start) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if linux_cache_dir_id(handle).is_some() {
+        return linux_cache_getdents64(pid, fd, handle, args[1], capacity, start);
+    }
     let directory = crate::linux_vfs::DirectoryId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
     let children = crate::linux_vfs::directory_entries(directory);
     let count = 2usize
@@ -3799,6 +3928,12 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Invalid);
     }
     if let Some(entry) = proc::linux_fd(pid, fd) {
+        if linux_cache_file_id(entry.handle).is_some() {
+            if !entry.rights.contains(kernel_core::object::Rights::READ) {
+                return Err(CompatErrno::BadFd);
+            }
+            return linux_cache_read(pid, fd, entry.handle, args[1], len);
+        }
         if entry.handle == LINUX_PROC_MAPS_HANDLE {
             if !entry.rights.contains(kernel_core::object::Rights::READ) {
                 return Err(CompatErrno::BadFd);
@@ -4655,7 +4790,11 @@ fn linux_sched_target(pid: ObjId, requested: u64) -> Result<ObjId, CompatErrno> 
 
 fn linux_sched_getattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const SCHED_ATTR_BYTES: usize = 48;
+    const SCHED_ATTR_BYTES_V2: usize = 56;
     const SCHED_OTHER: u32 = 0;
+    const SCHED_FLAG_RESET_ON_FORK: u64 = 0x01;
+    const SCHED_FLAG_UTIL_CLAMP_MIN: u64 = 0x20;
+    const SCHED_FLAG_UTIL_CLAMP_MAX: u64 = 0x40;
     let target = linux_sched_target(pid, args[0])?;
     let size = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
     if size < SCHED_ATTR_BYTES || size > 4096 || args[3] != 0 {
@@ -4666,20 +4805,47 @@ fn linux_sched_getattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     output[4..8].copy_from_slice(&SCHED_OTHER.to_le_bytes());
     let nice = proc::linux_nice(target).ok_or(CompatErrno::NoProcess)?;
     output[16..20].copy_from_slice(&nice.to_le_bytes());
+    if size >= SCHED_ATTR_BYTES_V2 {
+        let (reset_on_fork, util_min, util_max) =
+            proc::linux_sched_attributes(target).ok_or(CompatErrno::NoProcess)?;
+        let mut flags = 0u64;
+        if reset_on_fork {
+            flags |= SCHED_FLAG_RESET_ON_FORK;
+        }
+        if util_min != 0 {
+            flags |= SCHED_FLAG_UTIL_CLAMP_MIN;
+        }
+        if util_max != 1024 {
+            flags |= SCHED_FLAG_UTIL_CLAMP_MAX;
+        }
+        output[8..16].copy_from_slice(&flags.to_le_bytes());
+        output[48..52].copy_from_slice(&u32::from(util_min).to_le_bytes());
+        output[52..56].copy_from_slice(&u32::from(util_max).to_le_bytes());
+    }
     copy_to_user(args[1], &output, output.len()).map_err(|_| CompatErrno::Fault)?;
     Ok(0)
 }
 
 fn linux_sched_setattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const SCHED_ATTR_BYTES: usize = 48;
+    const SCHED_ATTR_BYTES_V2: usize = 56;
     const SCHED_OTHER: u32 = 0;
+    const SCHED_FLAG_RESET_ON_FORK: u64 = 0x01;
+    const SCHED_FLAG_KEEP_PARAMS: u64 = 0x10;
+    const SCHED_FLAG_UTIL_CLAMP_MIN: u64 = 0x20;
+    const SCHED_FLAG_UTIL_CLAMP_MAX: u64 = 0x40;
     let target = linux_sched_target(pid, args[0])?;
     if args[2] != 0 {
         return Err(CompatErrno::Invalid);
     }
-    let mut raw = [0u8; SCHED_ATTR_BYTES];
-    copy_from_user(&mut raw, args[1], SCHED_ATTR_BYTES).map_err(|_| CompatErrno::Fault)?;
+    let mut raw = [0u8; SCHED_ATTR_BYTES_V2];
+    copy_from_user(&mut raw[..8], args[1], 8).map_err(|_| CompatErrno::Fault)?;
     let size = u32::from_le_bytes(raw[0..4].try_into().unwrap()) as usize;
+    if !(SCHED_ATTR_BYTES..=4096).contains(&size) {
+        return Err(CompatErrno::Invalid);
+    }
+    let copied = size.min(SCHED_ATTR_BYTES_V2);
+    copy_from_user(&mut raw[..copied], args[1], copied).map_err(|_| CompatErrno::Fault)?;
     let policy = u32::from_le_bytes(raw[4..8].try_into().unwrap());
     let attr_flags = u64::from_le_bytes(raw[8..16].try_into().unwrap());
     let nice = i32::from_le_bytes(raw[16..20].try_into().unwrap());
@@ -4687,27 +4853,51 @@ fn linux_sched_setattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let runtime = u64::from_le_bytes(raw[24..32].try_into().unwrap());
     let deadline = u64::from_le_bytes(raw[32..40].try_into().unwrap());
     let period = u64::from_le_bytes(raw[40..48].try_into().unwrap());
-    if size < SCHED_ATTR_BYTES
-        || policy != SCHED_OTHER
-        || attr_flags != 0
-        || priority != 0
-        || runtime != 0
-        || deadline != 0
-        || period != 0
+    let supported_flags = SCHED_FLAG_RESET_ON_FORK
+        | SCHED_FLAG_KEEP_PARAMS
+        | SCHED_FLAG_UTIL_CLAMP_MIN
+        | SCHED_FLAG_UTIL_CLAMP_MAX;
+    let keep_params = attr_flags & SCHED_FLAG_KEEP_PARAMS != 0;
+    if policy != SCHED_OTHER
+        || attr_flags & !supported_flags != 0
+        || !keep_params && priority != 0
+        || !keep_params && (runtime != 0 || deadline != 0 || period != 0)
         || !(-20..=19).contains(&nice)
     {
         return if policy != SCHED_OTHER
-            || attr_flags != 0
-            || runtime != 0
-            || deadline != 0
-            || period != 0
+            || attr_flags & !supported_flags != 0
         {
             Err(CompatErrno::NotSupported)
         } else {
             Err(CompatErrno::Invalid)
         };
     }
-    if proc::linux_set_nice(target, nice) {
+    let (previous_reset_on_fork, previous_util_min, previous_util_max) =
+        proc::linux_sched_attributes(target).ok_or(CompatErrno::NoProcess)?;
+    let util_min = if size >= SCHED_ATTR_BYTES_V2
+        && attr_flags & SCHED_FLAG_UTIL_CLAMP_MIN != 0
+    {
+        u16::try_from(u32::from_le_bytes(raw[48..52].try_into().unwrap()))
+            .map_err(|_| CompatErrno::Invalid)?
+    } else {
+        previous_util_min
+    };
+    let util_max = if size >= SCHED_ATTR_BYTES_V2
+        && attr_flags & SCHED_FLAG_UTIL_CLAMP_MAX != 0
+    {
+        u16::try_from(u32::from_le_bytes(raw[52..56].try_into().unwrap()))
+            .map_err(|_| CompatErrno::Invalid)?
+    } else {
+        previous_util_max
+    };
+    if util_min > 1024 || util_max > 1024 || util_min > util_max {
+        return Err(CompatErrno::Invalid);
+    }
+    let reset_on_fork = attr_flags & SCHED_FLAG_RESET_ON_FORK != 0
+        || (attr_flags & SCHED_FLAG_RESET_ON_FORK == 0 && previous_reset_on_fork);
+    if proc::linux_set_sched_attributes(target, reset_on_fork, util_min, util_max)
+        && (keep_params || proc::linux_set_nice(target, nice))
+    {
         Ok(0)
     } else {
         Err(CompatErrno::NoProcess)
@@ -4798,6 +4988,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         && args[0] < crate::arch::LOW_USER_WINDOW.1;
     let use_low_window = map32 || explicit_low;
     let mut ashmem_handle = None;
+    let mut ashmem_regular = false;
     let file = if anonymous {
         None
     } else {
@@ -4807,13 +4998,15 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             && proc::linux_ashmem_state(pid, entry.handle).is_some()
         {
             ashmem_handle = Some(entry.handle);
+            ashmem_regular =
+                proc::linux_ashmem_is_regular(pid, entry.handle).unwrap_or(false);
             None
         } else {
         let (handle, _) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
             Some(crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?)
         }
     };
-    if ashmem_handle.is_some() && args[3] & MAP_SHARED == 0 {
+    if ashmem_handle.is_some() && !ashmem_regular && args[3] & MAP_SHARED == 0 {
         return Err(CompatErrno::Invalid);
     }
     if !anonymous
@@ -5218,7 +5411,8 @@ fn linux_munmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if proc::linux_range_is_sealed(pid, args[0], end) {
         return Err(CompatErrno::Perm);
     }
-    if args[2] == 0 && proc::linux_range_is_reserved(pid, args[0], end) {
+    let was_reserved = proc::linux_range_is_reserved(pid, args[0], end);
+    if args[2] == 0 && was_reserved {
         return Ok(0);
     }
     let _ = proc::linux_remove_reserved_range(pid, args[0], end);
@@ -5401,7 +5595,7 @@ fn linux_mremap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let mut mapped = alloc::vec::Vec::new();
     let mut page = target;
     while page < target_end {
-        if let Err(error) = proc::map_new(pid, page, mapping_flags) {
+        if let Err(_error) = proc::map_new(pid, page, mapping_flags) {
             #[cfg(any(
                 feature = "android-ecosystem-verify",
                 feature = "android-art-verify"
@@ -5411,7 +5605,7 @@ fn linux_mremap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 old_address,
                 target,
                 new_rounded / PAGE,
-                error
+                _error
             );
             for address in mapped.into_iter().rev() {
                 let _ = proc::unmap_page(pid, address);
@@ -5488,8 +5682,8 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if proc::linux_range_is_sealed(pid, args[0], end) {
         return Err(CompatErrno::Perm);
     }
-    if args[2] != 0
-        && proc::linux_materialize_reserved(
+    let materialized = if args[2] != 0 {
+        proc::linux_materialize_reserved(
             pid,
             args[0],
             end,
@@ -5498,7 +5692,8 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         .map_err(|error| {
             #[cfg(any(
                 feature = "android-ecosystem-verify",
-                feature = "android-art-verify"
+                feature = "android-art-verify",
+                feature = "vulkan-metal2vulkan-verify"
             ))]
             crate::kprintln!(
                 "[JSR-ANDROID-MPROTECT] materialize-fail start={} end={} error={:?} free_frames={} usable_frames={} memory_caps={:?}",
@@ -5511,9 +5706,12 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             );
             CompatErrno::NoMemory
         })?
-    {
+    } else {
+        false
+    };
+    if materialized {
         if args[2] & PROT_EXEC != 0 {
-            proc::protect_range_access(
+            proc::protect_linux_range_access(
                 pid,
                 args[0],
                 args[1] / PAGE,
@@ -5529,7 +5727,7 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let mut done = 0;
     while done < pages {
         let chunk = (pages - done).min(proc::MAX_MAP_PAGES);
-        proc::protect_range_access(
+        proc::protect_linux_range_access(
             pid,
             args[0] + done * PAGE,
             chunk,
@@ -5540,14 +5738,18 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         .map_err(|error| {
         #[cfg(any(
             feature = "android-ecosystem-verify",
-            feature = "android-art-verify"
+            feature = "android-art-verify",
+            feature = "vulkan-metal2vulkan-verify"
         ))]
         crate::kprintln!(
-            "[JSR-ANDROID-MPROTECT] protect-fail start={} end={} flags={} error={:?}",
+            "[JSR-ANDROID-MPROTECT] protect-fail start={:#x} end={:#x} flags={} error={:?} page_flags={:?} mapping_flags={:?} shared={}",
             args[0],
             end,
             args[2],
-            error
+            error,
+            proc::page_flags(pid, args[0]),
+            proc::linux_mapping_flags(pid, args[0]),
+            proc::linux_page_is_shared(pid, args[0])
         );
         CompatErrno::NoMemory
         })?;
@@ -5666,16 +5868,13 @@ fn linux_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let address = args[0];
     let length = args[1];
     let advice = args[2];
-    if address % PAGE != 0
-        || length == 0
-        || address < crate::arch::USER_WINDOW.0
-        || address
-            .checked_add(length)
-            .is_none_or(|end| end > crate::arch::USER_WINDOW.1)
-    {
+    if address % PAGE != 0 || length == 0 {
         return Err(CompatErrno::Invalid);
     }
     let end = address.checked_add(length).ok_or(CompatErrno::Invalid)?;
+    if !linux_user_range_valid(address, end) {
+        return Err(CompatErrno::Invalid);
+    }
     if matches!(advice, MADV_DONTNEED | MADV_GUARD_INSTALL)
         && proc::linux_range_is_sealed(pid, address, end)
     {
@@ -5994,6 +6193,8 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
         resolved
     };
     drop(path);
+    #[cfg(feature = "vulkan-metal2vulkan-verify")]
+    trace_path("execve", &resolved);
     let argv = linux_string_vector(args[1], 64, 64 * 1024)?;
     let envp = linux_string_vector(args[2], 64, 64 * 1024)?;
     let node = crate::linux_vfs::lookup_node(&resolved)
@@ -6018,14 +6219,28 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
                 crate::linux_vfs::RootExecutableError::Io => CompatErrno::Invalid,
             },
         )?;
-        match crate::compat_dynamic_demo::exec_dynamic_program(
-            pid,
-            resolved,
-            executable,
-            interpreter,
-            argv,
-            envp,
-        ) {
+        let replaced = if jasper_compat_loader::parse(&executable)
+            .ok()
+            .is_some_and(|plan| plan.interpreter.is_none())
+        {
+            crate::compat_dynamic_demo::exec_static_program(
+                pid,
+                resolved,
+                executable,
+                argv,
+                envp,
+            )
+        } else {
+            crate::compat_dynamic_demo::exec_dynamic_program(
+                pid,
+                resolved,
+                executable,
+                interpreter,
+                argv,
+                envp,
+            )
+        };
+        match replaced {
             Some((entry, stack)) => Ok((entry, stack)),
             None => Err(CompatErrno::NoSys),
         }
@@ -6088,12 +6303,17 @@ fn linux_fork_clone(
     preserved_regs: [u64; 6],
 ) -> Result<u64, CompatErrno> {
     const SIGCHLD: u64 = 17;
+    const CLONE_CLEAR_SIGHAND: u64 = 0x0000_0001_0000_0000;
     const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
     const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
     const CLONE_FLAGS: u64 = CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID;
     let flags = args[0];
     let signal = flags & 0xff;
-    if args[1] != 0 || signal != SIGCHLD || flags & !(CLONE_FLAGS | 0xff) != 0 || args[2] != 0 {
+    if args[1] != 0
+        || signal != SIGCHLD
+        || flags & !(CLONE_FLAGS | CLONE_CLEAR_SIGHAND | 0xff) != 0
+        || args[2] != 0
+    {
         return Err(CompatErrno::Invalid);
     }
     let (user_rip, user_stack) = user_ip.ok_or(CompatErrno::NoSys)?;
@@ -6441,7 +6661,7 @@ fn linux_clone3(
     pid: ObjId,
     args: [u64; 6],
     user_ip: Option<(u64, u64)>,
-    _user_preserved: [u64; 6],
+    user_preserved: [u64; 6],
 ) -> Result<u64, CompatErrno> {
     const CLONE_ARGS_BYTES: usize = 88;
     let size = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
@@ -6462,7 +6682,10 @@ fn linux_clone3(
     let set_tid = read(64);
     let set_tid_size = read(72);
     let cgroup = read(80);
-    #[cfg(feature = "compat-dynamic-libc-verify")]
+    #[cfg(any(
+        feature = "compat-dynamic-libc-verify",
+        feature = "vulkan-metal2vulkan-verify"
+    ))]
     crate::kprintln!(
         "[JSR-LINUX-CLONE3-ARGS] flags={:#x} pidfd={:#x} child_tid={:#x} parent_tid={:#x} exit_signal={:#x} stack={:#x} size={:#x} tls={:#x} set_tid={:#x} set_tid_size={} cgroup={:#x}",
         flags,
@@ -6478,6 +6701,19 @@ fn linux_clone3(
         cgroup
     );
     let _ = (pidfd, set_tid, set_tid_size, cgroup);
+    const CLONE_VM: u64 = 0x0000_0100;
+    const CLONE_VFORK: u64 = 0x0000_4000;
+    if flags & CLONE_VM != 0 && flags & CLONE_VFORK != 0 {
+        return linux_vfork(pid, args, user_ip, user_preserved);
+    }
+    if flags & CLONE_VM == 0 {
+        return linux_fork_clone(
+            pid,
+            [flags, stack, parent_tid, child_tid, tls, 0],
+            user_ip,
+            user_preserved,
+        );
+    }
     if exit_signal != 0 || stack_size == 0 {
         return Err(CompatErrno::Invalid);
     }
@@ -6485,7 +6721,10 @@ fn linux_clone3(
         .checked_add(stack_size)
         .filter(|top| *top <= crate::arch::USER_WINDOW.1)
         .ok_or(CompatErrno::Invalid)?;
-    #[cfg(feature = "compat-dynamic-libc-verify")]
+    #[cfg(any(
+        feature = "compat-dynamic-libc-verify",
+        feature = "vulkan-metal2vulkan-verify"
+    ))]
     crate::kprintln!(
         "[JSR-LINUX-CLONE3] flags={:#x} stack={:#x} size={:#x} top={:#x} tls={:#x} child_tid={:#x} parent_tid={:#x} rip={:#x}",
         flags,
@@ -6617,15 +6856,15 @@ fn linux_futex(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         FUTEX_WAIT => futex_wait(
             pid,
             args[0],
-            u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
+            args[2] as u32,
             u32::MAX,
             futex_timeout(args[3], false, false)?,
         ),
         FUTEX_WAIT_BITSET => futex_wait(
             pid,
             args[0],
-            u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
-            u32::try_from(args[5]).map_err(|_| CompatErrno::Invalid)?,
+            args[2] as u32,
+            args[5] as u32,
             futex_timeout(
                 args[3],
                 args[1] & FUTEX_CLOCK_REALTIME != 0,
@@ -6652,13 +6891,13 @@ fn linux_futex(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             args[4],
             usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
             usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?,
-            Some(u32::try_from(args[5]).map_err(|_| CompatErrno::Invalid)?),
+            Some(args[5] as u32),
         ),
         FUTEX_WAKE_BITSET => futex_wake(
             pid,
             args[0],
             usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?,
-            u32::try_from(args[5]).map_err(|_| CompatErrno::Invalid)?,
+            args[5] as u32,
         ),
         _ => Err(CompatErrno::NoSys),
     }
@@ -7112,6 +7351,13 @@ fn linux_prctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 .flatten()
                 .find(|entry| entry.process == pid && entry.task == task)
                 .ok_or(CompatErrno::NoProcess)?;
+            #[cfg(feature = "vulkan-metal2vulkan-verify")]
+            crate::kprintln!(
+                "[JSR-VULKAN-THREAD] tid={} name={}",
+                thread.tid,
+                core::str::from_utf8(&name[..name.iter().position(|b| *b == 0).unwrap_or(16)])
+                    .unwrap_or("<non-utf8>")
+            );
             thread.name = name;
             Ok(0)
         }
@@ -7790,7 +8036,7 @@ fn linux_clock_getres(args: [u64; 6]) -> Result<u64, CompatErrno> {
         CLOCK_MONOTONIC => crate::hrtime::tick_ns().max(1),
         CLOCK_REALTIME => {
             crate::arch::wall_clock_ns().ok_or(CompatErrno::NoSys)?;
-            1_000_000_000
+            crate::hrtime::tick_ns().max(1)
         }
         _ => return Err(CompatErrno::Invalid),
     };
@@ -14686,6 +14932,342 @@ fn raise_sigpipe(pid: ObjId) {
     }
 }
 
+fn linux_cache_path(path: &[u8]) -> bool {
+    path == LINUX_CACHE_ROOT
+        || path
+            .strip_prefix(LINUX_CACHE_ROOT)
+            .is_some_and(|suffix| suffix.starts_with(b"/"))
+}
+
+fn linux_cache_file_id(handle: u64) -> Option<u32> {
+    handle
+        .checked_sub(LINUX_CACHE_FILE_HANDLE_BASE)
+        .and_then(|id| u32::try_from(id).ok())
+}
+
+fn linux_cache_dir_id(handle: u64) -> Option<u32> {
+    handle
+        .checked_sub(LINUX_CACHE_DIR_HANDLE_BASE)
+        .and_then(|id| u32::try_from(id).ok())
+}
+
+fn linux_cache_dir_path(handle: u64) -> Option<alloc::vec::Vec<u8>> {
+    let id = linux_cache_dir_id(handle)?;
+    COMPAT
+        .lock()
+        .cache_dirs
+        .iter()
+        .find(|directory| directory.id == id)
+        .map(|directory| directory.path.clone())
+}
+
+fn linux_cache_children(
+    handle: u64,
+) -> Option<alloc::vec::Vec<(alloc::vec::Vec<u8>, u64, u8)>> {
+    let id = linux_cache_dir_id(handle)?;
+    let state = COMPAT.lock();
+    let path = &state
+        .cache_dirs
+        .iter()
+        .find(|directory| directory.id == id)?
+        .path;
+    let mut children = alloc::vec::Vec::new();
+    for directory in &state.cache_dirs {
+        if let Some(name) = directory.path.strip_prefix(path.as_slice()) {
+            if let Some(name) = name.strip_prefix(b"/") {
+                if !name.is_empty() && !name.contains(&b'/') {
+                    children.push((
+                        name.to_vec(),
+                        LINUX_CACHE_DIR_HANDLE_BASE | u64::from(directory.id),
+                        4,
+                    ));
+                }
+            }
+        }
+    }
+    for file in &state.cache_files {
+        if let Some(name) = file.path.strip_prefix(path.as_slice()) {
+            if let Some(name) = name.strip_prefix(b"/") {
+                if !name.is_empty() && !name.contains(&b'/') {
+                    children.push((
+                        name.to_vec(),
+                        LINUX_CACHE_FILE_HANDLE_BASE | u64::from(file.id),
+                        8,
+                    ));
+                }
+            }
+        }
+    }
+    Some(children)
+}
+
+fn linux_cache_ensure_root(state: &mut CompatState) -> Option<u32> {
+    if let Some(directory) = state
+        .cache_dirs
+        .iter()
+        .find(|directory| directory.path == LINUX_CACHE_ROOT)
+    {
+        return Some(directory.id);
+    }
+    // Keep the virtual cache's metadata capacity stable before the first
+    // workload. Metal2Vulkan creates and removes several small cache entries;
+    // allowing a later Vec growth would make otherwise complete executions fail
+    // the steady-state heap check.
+    state.cache_dirs.try_reserve(16).ok()?;
+    state.cache_files.try_reserve(64).ok()?;
+    let id = state.next_cache_node_id;
+    state.next_cache_node_id = state.next_cache_node_id.checked_add(1)?;
+    state.cache_dirs.try_reserve(1).ok()?;
+    state.cache_dirs.push(LinuxCacheDir {
+        id,
+        path: LINUX_CACHE_ROOT.to_vec(),
+    });
+    Some(id)
+}
+
+fn linux_cache_parent(path: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+    let path = path.strip_suffix(b"/").unwrap_or(path);
+    let slash = path.iter().rposition(|byte| *byte == b'/')?;
+    if slash < LINUX_CACHE_ROOT.len() {
+        None
+    } else {
+        Some(path[..slash].to_vec())
+    }
+}
+
+fn linux_cache_open(
+    pid: ObjId,
+    path: &[u8],
+    flags: u64,
+    close_on_exec: bool,
+) -> Result<u64, CompatErrno> {
+    const O_ACCMODE: u64 = 3;
+    const O_CREAT: u64 = 0x40;
+    const O_EXCL: u64 = 0x80;
+    const O_TRUNC: u64 = 0x200;
+    const O_DIRECTORY: u64 = 0x10000;
+    let readable = flags & O_ACCMODE != 1;
+    let writable = flags & O_ACCMODE != 0;
+    let handle = {
+        let mut state = COMPAT.lock();
+        linux_cache_ensure_root(&mut state).ok_or(CompatErrno::NoSpace)?;
+        if let Some(directory) = state
+            .cache_dirs
+            .iter()
+            .find(|directory| directory.path == path)
+        {
+            if writable {
+                return Err(CompatErrno::IsDirectory);
+            }
+            LINUX_CACHE_DIR_HANDLE_BASE | u64::from(directory.id)
+        } else {
+            let existing = state
+                .cache_files
+                .iter()
+                .position(|file| file.path == path);
+            let index = if let Some(index) = existing {
+                if flags & O_CREAT != 0 && flags & O_EXCL != 0 {
+                    return Err(CompatErrno::Exists);
+                }
+                index
+            } else {
+                if flags & O_CREAT == 0 {
+                    return Err(CompatErrno::NoEntry);
+                }
+                if flags & O_DIRECTORY != 0 {
+                    return Err(CompatErrno::NotDirectory);
+                }
+                let parent = linux_cache_parent(path).ok_or(CompatErrno::NoEntry)?;
+                if !state
+                    .cache_dirs
+                    .iter()
+                    .any(|directory| directory.path == parent)
+                {
+                    return Err(CompatErrno::NoEntry);
+                }
+                let id = state.next_cache_node_id;
+                state.next_cache_node_id =
+                    state.next_cache_node_id.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+                state.cache_files.try_reserve(1).map_err(|_| CompatErrno::NoSpace)?;
+                state.cache_files.push(LinuxCacheFile {
+                    id,
+                    path: path.to_vec(),
+                    bytes: alloc::vec::Vec::new(),
+                });
+                state.cache_files.len() - 1
+            };
+            if flags & O_TRUNC != 0 {
+                state.cache_files[index].bytes.clear();
+            }
+            let id = state.cache_files[index].id;
+            LINUX_CACHE_FILE_HANDLE_BASE | u64::from(id)
+        }
+    };
+    let installed = if linux_cache_dir_id(handle).is_some() {
+        proc::linux_install_dir(pid, handle, close_on_exec)
+    } else {
+        proc::linux_install_rw_file(pid, handle, readable, writable, close_on_exec)
+    };
+    installed.map(u64::from).ok_or(CompatErrno::NoSpace)
+}
+
+fn linux_cache_create_dir(path: &[u8]) -> Result<(), CompatErrno> {
+    let mut state = COMPAT.lock();
+    linux_cache_ensure_root(&mut state).ok_or(CompatErrno::NoSpace)?;
+    if state.cache_dirs.iter().any(|directory| directory.path == path)
+        || state.cache_files.iter().any(|file| file.path == path)
+    {
+        return Ok(());
+    }
+    let parent = linux_cache_parent(path).ok_or(CompatErrno::NoEntry)?;
+    if !state
+        .cache_dirs
+        .iter()
+        .any(|directory| directory.path == parent)
+    {
+        return Err(CompatErrno::NoEntry);
+    }
+    let id = state.next_cache_node_id;
+    state.next_cache_node_id = state.next_cache_node_id.checked_add(1).ok_or(CompatErrno::NoSpace)?;
+    state.cache_dirs.try_reserve(1).map_err(|_| CompatErrno::NoSpace)?;
+    state.cache_dirs.push(LinuxCacheDir {
+        id,
+        path: path.to_vec(),
+    });
+    Ok(())
+}
+
+fn linux_cache_unlink(path: &[u8], remove_dir: bool) -> Result<(), CompatErrno> {
+    let mut state = COMPAT.lock();
+    if remove_dir {
+        if path == LINUX_CACHE_ROOT {
+            return Err(CompatErrno::Perm);
+        }
+        if state.cache_files.iter().any(|file| {
+            file.path.starts_with(path)
+                && file.path.get(path.len()) == Some(&b'/')
+        }) || state.cache_dirs.iter().any(|directory| {
+            directory.path.starts_with(path)
+                && directory.path.get(path.len()) == Some(&b'/')
+        }) {
+            return Err(CompatErrno::Busy);
+        }
+        let Some(index) = state
+            .cache_dirs
+            .iter()
+            .position(|directory| directory.path == path)
+        else {
+            return Err(CompatErrno::NoEntry);
+        };
+        state.cache_dirs.swap_remove(index);
+        return Ok(());
+    }
+    if state.cache_dirs.iter().any(|directory| directory.path == path) {
+        return Err(CompatErrno::IsDirectory);
+    }
+    let Some(index) = state.cache_files.iter().position(|file| file.path == path) else {
+        return Err(CompatErrno::NoEntry);
+    };
+    state.cache_files.swap_remove(index);
+    Ok(())
+}
+
+fn linux_cache_rename(old_path: &[u8], new_path: &[u8]) -> Result<(), CompatErrno> {
+    let mut state = COMPAT.lock();
+    if state
+        .cache_files
+        .iter()
+        .any(|file| file.path == new_path)
+    {
+        return Err(CompatErrno::Exists);
+    }
+    let parent = linux_cache_parent(new_path).ok_or(CompatErrno::NoEntry)?;
+    if !state
+        .cache_dirs
+        .iter()
+        .any(|directory| directory.path == parent)
+    {
+        return Err(CompatErrno::NoEntry);
+    }
+    let Some(file) = state
+        .cache_files
+        .iter_mut()
+        .find(|file| file.path == old_path)
+    else {
+        return Err(CompatErrno::NoEntry);
+    };
+    file.path.clear();
+    file.path.try_reserve(new_path.len()).map_err(|_| CompatErrno::NoSpace)?;
+    file.path.extend_from_slice(new_path);
+    Ok(())
+}
+
+fn linux_cache_read(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    destination: u64,
+    len: usize,
+) -> Result<u64, CompatErrno> {
+    let id = linux_cache_file_id(handle).ok_or(CompatErrno::BadFd)?;
+    let offset = proc::linux_fd_offset(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let offset = usize::try_from(offset).map_err(|_| CompatErrno::Invalid)?;
+    let bytes = {
+        let state = COMPAT.lock();
+        let file = state
+            .cache_files
+            .iter()
+            .find(|file| file.id == id)
+            .ok_or(CompatErrno::BadFd)?;
+        let available = file.bytes.len().saturating_sub(offset).min(len);
+        file.bytes[offset..offset + available].to_vec()
+    };
+    if !bytes.is_empty() {
+        copy_to_user(destination, &bytes, bytes.len()).map_err(|_| CompatErrno::Fault)?;
+    }
+    if !proc::set_linux_file_offset(pid, fd, (offset + bytes.len()) as u64) {
+        return Err(CompatErrno::BadFd);
+    }
+    Ok(bytes.len() as u64)
+}
+
+fn linux_cache_write(
+    pid: ObjId,
+    fd: u32,
+    handle: u64,
+    source: u64,
+    len: usize,
+) -> Result<u64, CompatErrno> {
+    if len == 0 {
+        return Ok(0);
+    }
+    let mut bytes = alloc::vec![0u8; len];
+    copy_from_user(&mut bytes, source, len).map_err(|_| CompatErrno::Fault)?;
+    let id = linux_cache_file_id(handle).ok_or(CompatErrno::BadFd)?;
+    let offset = proc::linux_fd_offset(pid, fd).ok_or(CompatErrno::BadFd)?;
+    let offset = usize::try_from(offset).map_err(|_| CompatErrno::Invalid)?;
+    let end = offset.checked_add(len).ok_or(CompatErrno::Invalid)?;
+    {
+        let mut state = COMPAT.lock();
+        let file = state
+            .cache_files
+            .iter_mut()
+            .find(|file| file.id == id)
+            .ok_or(CompatErrno::BadFd)?;
+        if end > 16 * 1024 * 1024 {
+            return Err(CompatErrno::NoSpace);
+        }
+        file.bytes.try_reserve(end.saturating_sub(file.bytes.len()))
+            .map_err(|_| CompatErrno::NoSpace)?;
+        file.bytes.resize(end, 0);
+        file.bytes[offset..end].copy_from_slice(&bytes);
+    }
+    if !proc::set_linux_file_offset(pid, fd, end as u64) {
+        return Err(CompatErrno::BadFd);
+    }
+    Ok(len as u64)
+}
+
 /// Opens one exact virtual read-only path through `openat(2)`.
 ///
 /// 仅接受绝对路径与只读标志；`O_CLOEXEC` 被保留，写模式、路径穿越和未知路径失败关闭。
@@ -14696,16 +15278,31 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const O_NOCTTY: u64 = 0x100;
     const O_NOFOLLOW: u64 = 0x20000;
     const O_PATH: u64 = 0x20_0000;
+    const O_CREAT: u64 = 0x40;
+    const O_EXCL: u64 = 0x80;
+    const O_TRUNC: u64 = 0x200;
+    const O_APPEND: u64 = 0x400;
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
-        feature = "android-art-verify"
+        feature = "android-art-verify",
+        feature = "vulkan-metal2vulkan-verify"
     ))]
     trace_path_address(pid, "openat-address", args[1]);
     let flags = args[2];
     let path_only = flags & O_PATH != 0;
     if flags & 3 == 3
         || flags
-            & !(3 | O_CLOEXEC | O_DIRECTORY | O_NONBLOCK | O_NOCTTY | O_NOFOLLOW | O_PATH)
+            & !(3
+                | O_CLOEXEC
+                | O_DIRECTORY
+                | O_NONBLOCK
+                | O_NOCTTY
+                | O_NOFOLLOW
+                | O_PATH
+                | O_CREAT
+                | O_EXCL
+                | O_TRUNC
+                | O_APPEND)
             != 0
     {
         return Err(CompatErrno::Perm);
@@ -14713,9 +15310,19 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let path = linux_c_string(args[1], 4096)?;
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
-        feature = "android-art-verify"
+        feature = "android-art-verify",
+        feature = "vulkan-metal2vulkan-verify"
     ))]
     trace_path("openat", &path);
+    if linux_cache_path(&path) {
+        return linux_cache_open(pid, &path, flags, flags & O_CLOEXEC != 0);
+    }
+    if !path.starts_with(b"/") && !is_at_fdcwd(args[0]) {
+        let candidate = resolve_linux_at_path(pid, args[0], args[1])?;
+        if linux_cache_path(&candidate) {
+            return linux_cache_open(pid, &candidate, flags, flags & O_CLOEXEC != 0);
+        }
+    }
     let resolved = if path.starts_with(b"/") {
         if !is_at_fdcwd(args[0]) {
             return Err(CompatErrno::Invalid);
@@ -14763,6 +15370,9 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return proc::linux_install_file(pid, LINUX_PROC_MAPS_HANDLE, flags & O_CLOEXEC != 0)
             .map(u64::from)
             .ok_or(CompatErrno::NoSpace);
+    }
+    if !path_only && linux_cache_path(&resolved) {
+        return linux_cache_open(pid, &resolved, flags, flags & O_CLOEXEC != 0);
     }
     if !path_only && resolved == b"/proc/self/stat" {
         if flags & 3 != 0 {
@@ -15043,19 +15653,30 @@ fn resolve_linux_at_path(
         return Err(CompatErrno::Invalid);
     }
     let base = if is_at_fdcwd(dirfd) {
-        proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path()
+        proc::linux_cwd(pid).ok_or(CompatErrno::NoSys)?.path().to_vec()
     } else {
         let fd = u32::try_from(dirfd).map_err(|_| CompatErrno::BadFd)?;
-        let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
-        crate::linux_vfs::DirectoryId::from_handle(handle)
-            .ok_or(CompatErrno::BadFd)?
-            .path()
+        if let Some(crate::linux_vfs::Node::Directory(directory)) =
+            proc::linux_path_node(pid, fd)
+        {
+            directory.path().to_vec()
+        } else {
+            let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
+            if let Some(path) = linux_cache_dir_path(handle) {
+                path
+            } else {
+                crate::linux_vfs::DirectoryId::from_handle(handle)
+                    .ok_or(CompatErrno::BadFd)?
+                    .path()
+                    .to_vec()
+            }
+        }
     };
     if path == b"." {
-        return Ok(base.to_vec());
+        return Ok(base);
     }
     let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
-    resolved.extend_from_slice(base);
+    resolved.extend_from_slice(&base);
     if !base.ends_with(b"/") {
         resolved.push(b'/');
     }
@@ -15108,6 +15729,11 @@ fn linux_mkdirat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if args[2] & !0o7777 != 0 {
         return Err(CompatErrno::Invalid);
     }
+    let path = resolve_linux_at_path(pid, args[0], args[1])?;
+    if linux_cache_path(&path) {
+        linux_cache_create_dir(&path)?;
+        return Ok(0);
+    }
     if validate_linux_creation_path(pid, args[0], args[1])? {
         return Err(CompatErrno::Exists);
     }
@@ -15128,6 +15754,11 @@ fn linux_unlinkat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if args[2] & !AT_REMOVEDIR != 0 {
         return Err(CompatErrno::Invalid);
     }
+    let path = resolve_linux_at_path(pid, args[0], args[1])?;
+    if linux_cache_path(&path) {
+        linux_cache_unlink(&path, args[2] & AT_REMOVEDIR != 0)?;
+        return Ok(0);
+    }
     let node = validate_linux_existing_path(pid, args[0], args[1])?;
     if args[2] & AT_REMOVEDIR != 0 && !node.is_directory() {
         return Err(CompatErrno::NotDirectory);
@@ -15140,6 +15771,15 @@ fn linux_unlinkat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 
 /// Implements `renameat(2)` with source and destination parent validation.
 fn linux_renameat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    let old_path = resolve_linux_at_path(pid, args[0], args[1])?;
+    let new_path = resolve_linux_at_path(pid, args[2], args[3])?;
+    if linux_cache_path(&old_path) || linux_cache_path(&new_path) {
+        if !linux_cache_path(&old_path) || !linux_cache_path(&new_path) {
+            return Err(CompatErrno::CrossDevice);
+        }
+        linux_cache_rename(&old_path, &new_path)?;
+        return Ok(0);
+    }
     validate_linux_existing_path(pid, args[0], args[1])?;
     validate_linux_creation_path(pid, args[2], args[3])?;
     Err(CompatErrno::ReadOnly)
@@ -16475,6 +17115,7 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const TIOCGWINSZ: u64 = 0x5413;
     const TIOCSWINSZ: u64 = 0x5414;
     const FIONREAD: u64 = 0x541b;
+    const FIONBIO: u64 = 0x5421;
     const TCGETS2: u64 = 0x802c_542a;
     const ASHMEM_SET_NAME: u64 = 0x4100_6101;
     const ASHMEM_SET_PROT_MASK: u64 = 0x4004_6102;
@@ -16548,6 +17189,22 @@ fn linux_ioctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         let available = i32::try_from(socket.buffered_bytes()).unwrap_or(i32::MAX);
         copy_to_user(args[2], &available.to_le_bytes(), 4).map_err(|_| CompatErrno::Fault)?;
         return Ok(0);
+    }
+    if args[1] == FIONBIO {
+        let mut raw = [0u8; 4];
+        copy_from_user(&mut raw, args[2], 4).map_err(|_| CompatErrno::Fault)?;
+        let nonblocking = u32::from_le_bytes(raw) != 0;
+        let current = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)?;
+        let updated = if nonblocking {
+            current | 0x800
+        } else {
+            current & !0x800
+        };
+        return if proc::linux_set_fd_status_flags(pid, fd, updated) {
+            Ok(0)
+        } else {
+            Err(CompatErrno::BadFd)
+        };
     }
     if entry.kind == compat_core::fd::CompatKind::Device
         && proc::linux_is_binder(pid, entry.handle)

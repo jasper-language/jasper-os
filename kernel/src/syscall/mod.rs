@@ -39,9 +39,6 @@ pub const CONSOLE_WRITE_MAX: usize = 4096;
 
 /// `system.profile.get` 单次最多写入的字节数（结构化描述足够小，超过即视为调用错误）。
 pub const PROFILE_TEXT_MAX: usize = 2048;
-/// Maximum x87/SSE/AVX state image retained by the x86_64 syscall entry.
-/// x86_64 syscall 入口保留的 x87/SSE/AVX 最大状态映像。
-pub const XSAVE_BYTES: usize = 4096;
 use table::*;
 
 /// 一次系统调用的输入（与 ISA 无关）。
@@ -59,7 +56,7 @@ pub struct SyscallArgs {
     pub user_preserved: [u64; 6],
     /// Kernel-owned XSAVE image for the current x86_64 syscall.
     /// 当前 x86_64 syscall 在内核栈上的 XSAVE 映像。
-    pub fxstate: Option<*mut [u8; XSAVE_BYTES]>,
+    pub fxstate: Option<*mut u8>,
 }
 
 /// Registers to publish instead of the ordinary syscall return path.

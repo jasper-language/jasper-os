@@ -49,6 +49,9 @@ pub struct StackPool {
     statics: [Stack; STATIC_STACKS],
     /// 槽位 → 堆栈起点（空指针 = 尚未分配；静态槽位恒为空指针）。长度 = 已预留到的槽位数。
     heap: Vec<*mut Stack>,
+    /// Kernel-owned extended CPU-state area for each task slot.
+    /// 每个任务槽位由内核拥有的扩展 CPU 状态区；与栈槽位生命周期一致，只增不减。
+    extended_state: Vec<*mut u8>,
 }
 
 // SAFETY：堆栈指针指向本池独占拥有、永不释放的堆内存；栈池随调度器一起由锁保护，
@@ -58,7 +61,11 @@ unsafe impl Send for StackPool {}
 impl StackPool {
     /// 构造栈池：只有静态栈可用（`const`，可放进 `static`）。
     pub const fn new() -> Self {
-        StackPool { statics: [const { Stack::zeroed() }; STATIC_STACKS], heap: Vec::new() }
+        StackPool {
+            statics: [const { Stack::zeroed() }; STATIC_STACKS],
+            heap: Vec::new(),
+            extended_state: Vec::new(),
+        }
     }
 
     /// 堆就绪后为 `slots` 个槽位中的非静态槽位分配栈（幂等：已分配的槽位跳过；只增不减）。返回可用槽位总数。
@@ -70,10 +77,35 @@ impl StackPool {
             if self.heap.try_reserve_exact(slots - self.heap.len()).is_err() {
                 return Err(ReserveError { available: self.available() });
             }
+            if self
+                .extended_state
+                .try_reserve_exact(slots - self.extended_state.len())
+                .is_err()
+            {
+                return Err(ReserveError { available: self.available() });
+            }
             self.heap.resize(slots, null_mut());
+            self.extended_state.resize(slots, null_mut());
         }
         let layout = Layout::new::<Stack>();
-        for slot in STATIC_STACKS..slots {
+        let state_bytes = crate::arch::extended_state_bytes();
+        let state_align = crate::arch::extended_state_align().max(1);
+        let state_layout = Layout::from_size_align(state_bytes, state_align)
+            .map_err(|_| ReserveError { available: self.available() })?;
+        for slot in 0..slots {
+            if state_bytes != 0 && self.extended_state[slot].is_null() {
+                // SAFETY: the layout has non-zero size and the allocation is owned
+                // by this never-shrinking pool until system shutdown.
+                // SAFETY：布局尺寸非零，分配由本只增不减的池持有到系统关闭。
+                let state = unsafe { alloc::alloc::alloc_zeroed(state_layout) };
+                if state.is_null() {
+                    return Err(ReserveError { available: self.available() });
+                }
+                self.extended_state[slot] = state;
+            }
+            if slot < STATIC_STACKS {
+                continue;
+            }
             if !self.heap[slot].is_null() {
                 continue;
             }
@@ -125,6 +157,15 @@ impl StackPool {
     /// 调用者保证该槽位有栈（[`StackPool::has_stack`]），且此刻没有任务在这块栈上运行。
     pub unsafe fn prepare_initial_frame(&mut self, slot: usize, entry: extern "C" fn() -> !) -> TaskContext {
         let base = self.base(slot);
-        crate::arch::init_task_frame(base.add(STACK_SIZE), entry)
+        let extended_state = self
+            .extended_state
+            .get(slot)
+            .copied()
+            .unwrap_or(null_mut());
+        crate::arch::init_task_frame_with_extended_state(
+            base.add(STACK_SIZE),
+            entry,
+            extended_state,
+        )
     }
 }

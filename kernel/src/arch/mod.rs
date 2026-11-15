@@ -390,6 +390,25 @@ pub trait Platform {
     /// 该栈此刻不得有任何执行流在使用。
     unsafe fn init_task_frame(stack_top: *mut u8, entry: extern "C" fn() -> !) -> Self::TaskContext;
 
+    /// Size of the dynamically allocated extended CPU-state area per task.
+    fn extended_state_bytes() -> usize {
+        0
+    }
+
+    /// Required alignment of the per-task extended CPU-state area.
+    fn extended_state_align() -> usize {
+        1
+    }
+
+    /// Initializes a task context with a caller-owned extended-state area.
+    unsafe fn init_task_frame_with_extended_state(
+        stack_top: *mut u8,
+        entry: extern "C" fn() -> !,
+        _extended_state: *mut u8,
+    ) -> Self::TaskContext {
+        Self::init_task_frame(stack_top, entry)
+    }
+
     /// 通知仿真器退出（真机上等同于停机）。
     fn exit_emulator(status: ExitStatus) -> !;
 
@@ -735,6 +754,23 @@ pub unsafe fn switch_context(old: *mut TaskContext, new: *const TaskContext) {
 pub unsafe fn init_task_frame(stack_top: *mut u8, entry: extern "C" fn() -> !) -> TaskContext {
     Current::init_task_frame(stack_top, entry)
 }
+
+pub fn extended_state_bytes() -> usize {
+    Current::extended_state_bytes()
+}
+
+pub fn extended_state_align() -> usize {
+    Current::extended_state_align()
+}
+
+pub unsafe fn init_task_frame_with_extended_state(
+    stack_top: *mut u8,
+    entry: extern "C" fn() -> !,
+    extended_state: *mut u8,
+) -> TaskContext {
+    Current::init_task_frame_with_extended_state(stack_top, entry, extended_state)
+}
+
 /// 见 [`Platform::active_mapper`]。
 ///
 /// # Safety

@@ -138,6 +138,19 @@ pub(crate) const ANDROID_FILE_PATHS: &[&[u8]] = &[
     b"/system/lib64/libexpat.so",
     b"/system/lib64/libopenjdk.so",
     b"/system/lib64/libopenjdkjvm.so",
+    b"/data/local/tmp/art-official-001.dex",
+    b"/data/local/tmp/art-official-002.dex",
+    b"/data/local/tmp/art-official-003.dex",
+    b"/usr/lib/x86_64-linux-gnu/libvulkan.so.1",
+    b"/usr/lib/x86_64-linux-gnu/libvk_swiftshader.so",
+    b"/usr/lib/x86_64-linux-gnu/vk_swiftshader_icd.json",
+    b"/usr/lib/x86_64-linux-gnu/libdl.so.2",
+    b"/usr/lib/x86_64-linux-gnu/libpthread.so.0",
+    b"/usr/lib/x86_64-linux-gnu/runtime_examples.air",
+    b"/usr/bin/llvm-as",
+    b"/sys/devices/system/cpu/online",
+    b"/proc/stat",
+    b"/SwiftShader.ini",
 ];
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
@@ -362,6 +375,8 @@ pub enum DirectoryId {
     Data,
     DataLocal,
     DataLocalTmp,
+    DataCache,
+    DataCacheMetal,
 }
 
 impl DirectoryId {
@@ -395,6 +410,8 @@ impl DirectoryId {
             Self::Data => 21,
             Self::DataLocal => 22,
             Self::DataLocalTmp => 23,
+            Self::DataCache => 24,
+            Self::DataCacheMetal => 25,
             }
     }
 
@@ -428,6 +445,8 @@ impl DirectoryId {
             Self::Data => 22,
             Self::DataLocal => 23,
             Self::DataLocalTmp => 24,
+            Self::DataCache => 25,
+            Self::DataCacheMetal => 26,
             }
     }
 
@@ -460,6 +479,8 @@ impl DirectoryId {
             value if value == (DIRECTORY_HANDLE_BASE | 22) => Some(Self::Data),
             value if value == (DIRECTORY_HANDLE_BASE | 23) => Some(Self::DataLocal),
             value if value == (DIRECTORY_HANDLE_BASE | 24) => Some(Self::DataLocalTmp),
+            value if value == (DIRECTORY_HANDLE_BASE | 25) => Some(Self::DataCache),
+            value if value == (DIRECTORY_HANDLE_BASE | 26) => Some(Self::DataCacheMetal),
             _ => None,
         }
     }
@@ -493,6 +514,8 @@ impl DirectoryId {
             Self::Data => b"/data",
             Self::DataLocal => b"/data/local",
             Self::DataLocalTmp => b"/data/local/tmp",
+            Self::DataCache => b"/data/.cache",
+            Self::DataCacheMetal => b"/data/.cache/metal2vulkan",
         }
     }
 }
@@ -586,6 +609,15 @@ pub fn lookup(path: &[u8]) -> Option<FileId> {
         b"/lib/x86_64-linux-gnu/libpcre2-8.so.0" | b"/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0" => {
             Some(FileId::LibPcre2)
         }
+        b"/lib/libvulkan.so.1" | b"/usr/lib/libvulkan.so.1" => {
+            Some(FileId::AndroidFile(76))
+        }
+        b"/lib/libvk_swiftshader.so" | b"/usr/lib/libvk_swiftshader.so" => {
+            Some(FileId::AndroidFile(77))
+        }
+        b"/lib/vk_swiftshader_icd.json" | b"/usr/lib/vk_swiftshader_icd.json" => {
+            Some(FileId::AndroidFile(78))
+        }
         #[cfg(feature = "workload-io-verify")]
         b"/io-probe" => Some(FileId::IoProbe),
         _ => None,
@@ -621,6 +653,8 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/data" => Some(DirectoryId::Data),
         b"/data/local" => Some(DirectoryId::DataLocal),
         b"/data/local/tmp" => Some(DirectoryId::DataLocalTmp),
+        b"/data/.cache" => Some(DirectoryId::DataCache),
+        b"/data/.cache/metal2vulkan" => Some(DirectoryId::DataCacheMetal),
         _ => None,
     };
     let exact = directory
@@ -661,6 +695,8 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/data" => Some(DirectoryId::Data),
         b"/data/local" => Some(DirectoryId::DataLocal),
         b"/data/local/tmp" => Some(DirectoryId::DataLocalTmp),
+        b"/data/.cache" => Some(DirectoryId::DataCache),
+        b"/data/.cache/metal2vulkan" => Some(DirectoryId::DataCacheMetal),
         _ => None,
     }?;
     directory_entries(directory)
@@ -728,6 +764,30 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
             name: b"libpcre2-8.so.0",
             node: Node::File(FileId::LibPcre2),
         },
+        DirEntry {
+            name: b"libvulkan.so.1",
+            node: Node::File(FileId::AndroidFile(76)),
+        },
+        DirEntry {
+            name: b"libvk_swiftshader.so",
+            node: Node::File(FileId::AndroidFile(77)),
+        },
+        DirEntry {
+            name: b"vk_swiftshader_icd.json",
+            node: Node::File(FileId::AndroidFile(78)),
+        },
+        DirEntry {
+            name: b"libdl.so.2",
+            node: Node::File(FileId::AndroidFile(79)),
+        },
+        DirEntry {
+            name: b"libpthread.so.0",
+            node: Node::File(FileId::AndroidFile(80)),
+        },
+        DirEntry {
+            name: b"runtime_examples.air",
+            node: Node::File(FileId::AndroidFile(81)),
+        },
     ];
     const USR: &[DirEntry] = &[
         DirEntry {
@@ -740,6 +800,10 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         },
     ];
     const USR_BIN: &[DirEntry] = &[
+        DirEntry {
+            name: b"llvm-as",
+            node: Node::File(FileId::AndroidFile(82)),
+        },
         DirEntry {
             name: b"basename",
             node: Node::Executable(0x3000),
@@ -959,10 +1023,16 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         name: b"ld.config.txt",
         node: Node::File(FileId::AndroidFile(68)),
     }];
-    const DATA: &[DirEntry] = &[DirEntry {
-        name: b"local",
-        node: Node::Directory(DirectoryId::DataLocal),
-    }];
+    const DATA: &[DirEntry] = &[
+        DirEntry {
+            name: b"local",
+            node: Node::Directory(DirectoryId::DataLocal),
+        },
+        DirEntry {
+            name: b".cache",
+            node: Node::Directory(DirectoryId::DataCache),
+        },
+    ];
     const DATA_LOCAL: &[DirEntry] = &[DirEntry {
         name: b"tmp",
         node: Node::Directory(DirectoryId::DataLocalTmp),
@@ -970,7 +1040,14 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
     const DATA_LOCAL_TMP: &[DirEntry] = &[
         DirEntry { name: b"classes.dex", node: Node::File(FileId::AndroidFile(57)) },
         DirEntry { name: b"app.apk", node: Node::File(FileId::AndroidFile(58)) },
+        DirEntry { name: b"art-official-001.dex", node: Node::File(FileId::AndroidFile(73)) },
+        DirEntry { name: b"art-official-002.dex", node: Node::File(FileId::AndroidFile(74)) },
+        DirEntry { name: b"art-official-003.dex", node: Node::File(FileId::AndroidFile(75)) },
     ];
+    const DATA_CACHE: &[DirEntry] = &[DirEntry {
+        name: b"metal2vulkan",
+        node: Node::Directory(DirectoryId::DataCacheMetal),
+    }];
     match directory {
         DirectoryId::Root => ROOT,
         DirectoryId::Lib => LIB,
@@ -995,6 +1072,8 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirectoryId::Data => DATA,
         DirectoryId::DataLocal => DATA_LOCAL,
         DirectoryId::DataLocalTmp => DATA_LOCAL_TMP,
+        DirectoryId::DataCache => DATA_CACHE,
+        DirectoryId::DataCacheMetal => &[],
     }
 }
 

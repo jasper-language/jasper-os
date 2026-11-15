@@ -16,14 +16,16 @@ use crate::{kprint, kprintln};
 #[cfg(all(
     not(feature = "profile-compact"),
     not(feature = "evt1-verify"),
-    not(feature = "android-art-verify")
+    not(feature = "android-art-verify"),
+    not(feature = "vulkan-metal2vulkan-verify")
 ))]
 pub const ACTIVE: KernelConfig = KernelConfig::STANDARD;
 /// 本次构建生效的配置档。
 #[cfg(all(
     feature = "profile-compact",
     not(feature = "evt1-verify"),
-    not(feature = "android-art-verify")
+    not(feature = "android-art-verify"),
+    not(feature = "vulkan-metal2vulkan-verify")
 ))]
 pub const ACTIVE: KernelConfig = KernelConfig::COMPACT;
 
@@ -37,7 +39,13 @@ pub const ACTIVE: KernelConfig = {
 };
 /// ART verification keeps the full 40 MiB immutable root file set resident while
 /// also retaining the normal kernel allocation headroom.
-#[cfg(all(feature = "android-art-verify", not(feature = "evt1-verify")))]
+#[cfg(all(
+    any(
+        feature = "android-art-verify",
+        feature = "vulkan-metal2vulkan-verify"
+    ),
+    not(feature = "evt1-verify")
+))]
 pub const ACTIVE: KernelConfig = {
     let mut c = KernelConfig::STANDARD;
     c.memory.heap_max = 128 * 1024 * 1024;

@@ -128,6 +128,9 @@ struct LinuxProcessState {
     pgid: u32,
     sid: u32,
     nice: i32,
+    sched_reset_on_fork: bool,
+    sched_util_clamp_min: u16,
+    sched_util_clamp_max: u16,
     /// CPU ticks from direct children already waited and reaped.
     /// 已等待并回收的直接子进程累计 CPU ticks。
     child_cpu_ticks: u64,
@@ -266,10 +269,22 @@ pub(crate) struct LinuxRlimits {
 }
 
 #[cfg(feature = "linux-abi")]
-#[derive(Clone)]
 struct LinuxPipeHandle {
     handle: u64,
     endpoint: Arc<compat_core::PipeEndpoint>,
+}
+
+#[cfg(feature = "linux-abi")]
+impl Clone for LinuxPipeHandle {
+    fn clone(&self) -> Self {
+        Self {
+            handle: self.handle,
+            // `PipeEndpoint::clone` increments the reader/writer census shared by
+            // all descriptors. Cloning only the outer `Arc` would make another
+            // process closing its copy look like the last endpoint closing.
+            endpoint: Arc::new((*self.endpoint).clone()),
+        }
+    }
 }
 
 #[cfg(feature = "linux-abi")]
@@ -843,7 +858,7 @@ struct SharedMapping {
     va: u64,
     page: Arc<crate::mm::memory_object::Page>,
     source: BackingIdentity,
-    writable: bool,
+    flags: MapFlags,
 }
 
 /// 一次成功的设备 BAR 映射：把创建它的句柄、虚拟区间与物理 BAR 起始地址记在一起。
@@ -4484,7 +4499,10 @@ pub(crate) fn linux_ashmem_add_seals(
         if seals & 8 != 0
             && p.shared_maps
                 .iter()
-                .any(|mapping| mapping.source.object_id == buffer.id && mapping.writable)
+                .any(|mapping| {
+                    mapping.source.object_id == buffer.id
+                        && mapping.flags.contains(MapFlags::WRITE)
+                })
         {
             return Err(ProcError::Map(MapError::Busy));
         }
@@ -4788,7 +4806,7 @@ pub(crate) fn linux_ashmem_map(
                 va: address + index as u64 * PAGE,
                 page: Arc::clone(page),
                 source: backing,
-                writable: protection & 2 != 0,
+                flags,
             });
         }
         p.space.end_shootdown();
@@ -4909,7 +4927,7 @@ pub(crate) fn linux_shared_memory_map(
                 va: address + index as u64 * PAGE,
                 page: Arc::clone(page),
                 source: backing,
-                writable,
+                flags,
             });
         }
         p.space.end_shootdown();
@@ -4936,6 +4954,44 @@ pub(crate) fn linux_install_file(pid: ObjId, handle: u64, close_on_exec: bool) -
             .install(
                 handle,
                 kernel_core::object::Rights::READ,
+                compat_core::fd::CompatKind::File,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Installs a writable virtual file with explicit read/write rights.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_rw_file(
+    pid: ObjId,
+    handle: u64,
+    readable: bool,
+    writable: bool,
+    close_on_exec: bool,
+) -> Option<u32> {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        if handle == 0 || !readable && !writable {
+            return Err(ProcError::Exited);
+        }
+        let rights = if readable {
+            kernel_core::object::Rights::READ
+        } else {
+            kernel_core::object::Rights::NONE
+        }
+        .union(if writable {
+            kernel_core::object::Rights::WRITE
+        } else {
+            kernel_core::object::Rights::NONE
+        });
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                rights,
                 compat_core::fd::CompatKind::File,
                 close_on_exec,
             )
@@ -5903,6 +5959,39 @@ pub(crate) fn linux_set_nice(pid: ObjId, nice: i32) -> bool {
     .is_ok()
 }
 
+/// Returns Linux scheduler attributes represented by the compatibility profile.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_sched_attributes(pid: ObjId) -> Option<(bool, u16, u16)> {
+    crate::kobj::with(|table| match table.get(pid) {
+        Ok(KObject::Process(process)) => process.linux.as_ref().map(|linux| {
+            (
+                linux.sched_reset_on_fork,
+                linux.sched_util_clamp_min,
+                linux.sched_util_clamp_max,
+            )
+        }),
+        _ => None,
+    })
+}
+
+/// Updates Linux scheduler attributes represented by the compatibility profile.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_set_sched_attributes(
+    pid: ObjId,
+    reset_on_fork: bool,
+    util_min: u16,
+    util_max: u16,
+) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux.sched_reset_on_fork = reset_on_fork;
+        linux.sched_util_clamp_min = util_min;
+        linux.sched_util_clamp_max = util_max;
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Returns the Linux parent identity for this compatibility process.
 /// 返回兼容进程的 Linux 父身份；内核创建的根进程没有父进程。
 #[cfg(feature = "linux-abi")]
@@ -6169,62 +6258,102 @@ pub(crate) fn linux_proc_maps(pid: ObjId) -> Option<Vec<u8>> {
             return None;
         };
         let linux = p.linux.as_ref()?;
-        let mut rows = Vec::new();
-        rows.try_reserve(
-            linux
-                .mappings
-                .len()
-                .saturating_add(linux.reservations.len())
-                .saturating_add(p.shared_maps.len())
-                .saturating_add(p.device_maps.len()),
-        )
-        .ok()?;
-        for mapping in &linux.mappings {
-            let flags = p
-                .space
-                .translate(VirtPage::containing(mapping.va))
-                .map_or(mapping.flags, |(_, flags)| flags);
-            rows.push((
-                mapping.va,
-                mapping.va + FRAME_SIZE,
-                flags,
-                mapping.file,
-            ));
+        const SOURCE_MAPPING: u32 = 0;
+        const SOURCE_RESERVATION: u32 = 1;
+        const SOURCE_SHARED: u32 = 2;
+        const SOURCE_DEVICE: u32 = 3;
+        let mut order = Vec::new();
+        let source_rows = linux
+            .mappings
+            .len()
+            .saturating_add(linux.reservations.len())
+            .saturating_add(p.shared_maps.len())
+            .saturating_add(p.device_maps.len());
+        if order.try_reserve(source_rows).is_err() {
+            #[cfg(feature = "android-art-verify")]
+            crate::kprintln!(
+                "[JSR-PROC-MAPS] order-reserve-fail rows={} heap={:?}",
+                source_rows,
+                crate::mm::heap::stats()
+            );
+            return None;
         }
-        for reservation in &linux.reservations {
-            rows.push((
-                reservation.start,
-                reservation.end,
-                MapFlags::READ_ONLY,
-                None,
-            ));
+        for (index, mapping) in linux.mappings.iter().enumerate() {
+            order.push(((index as u32) << 2) | SOURCE_MAPPING);
         }
-        for mapping in &p.shared_maps {
-            let flags = if mapping.writable {
-                MapFlags::USER.union(MapFlags::WRITE)
-            } else {
-                MapFlags::USER
+        for (index, reservation) in linux.reservations.iter().enumerate() {
+            order.push(((index as u32) << 2) | SOURCE_RESERVATION);
+        }
+        for (index, mapping) in p.shared_maps.iter().enumerate() {
+            order.push(((index as u32) << 2) | SOURCE_SHARED);
+        }
+        for (index, mapping) in p.device_maps.iter().enumerate() {
+            order.push(((index as u32) << 2) | SOURCE_DEVICE);
+        }
+        let row_data =
+            |code: u32| -> Option<(u64, u64, MapFlags, Option<crate::linux_vfs::FileId>)> {
+                let index = (code >> 2) as usize;
+                match code & 3 {
+                    SOURCE_MAPPING => {
+                        let mapping = *linux.mappings.get(index)?;
+                        let flags = p
+                            .space
+                            .translate(VirtPage::containing(mapping.va))
+                            .map_or(mapping.flags, |(_, flags)| flags);
+                        Some((mapping.va, mapping.va + FRAME_SIZE, flags, mapping.file))
+                    }
+                    SOURCE_RESERVATION => {
+                        let reservation = *linux.reservations.get(index)?;
+                        Some((
+                            reservation.start,
+                            reservation.end,
+                            MapFlags::READ_ONLY,
+                            None,
+                        ))
+                    }
+                    SOURCE_SHARED => {
+                        let mapping = p.shared_maps.get(index)?;
+                        Some((mapping.va, mapping.va + FRAME_SIZE, mapping.flags, None))
+                    }
+                    SOURCE_DEVICE => {
+                        let mapping = p.device_maps.get(index)?;
+                        Some((
+                            mapping.va,
+                            mapping.va + mapping.pages * FRAME_SIZE,
+                            MapFlags::USER.union(MapFlags::WRITE).union(MapFlags::NO_CACHE),
+                            None,
+                        ))
+                    }
+                    _ => None,
+                }
             };
-            rows.push((mapping.va, mapping.va + FRAME_SIZE, flags, None));
-        }
-        for mapping in &p.device_maps {
-            rows.push((
-                mapping.va,
-                mapping.va + mapping.pages * FRAME_SIZE,
-                MapFlags::USER.union(MapFlags::WRITE).union(MapFlags::NO_CACHE),
-                None,
-            ));
-        }
-        rows.sort_unstable_by_key(|row| row.0);
+        order.sort_unstable_by_key(|code| row_data(*code).map_or(u64::MAX, |row| row.0));
 
-        let mut text = alloc::string::String::new();
-        // The mapping table is page-granular, so avoid duplicating all rows a
-        // second time. ART can create >200k page records; a second full vector
-        // plus a large speculative String reserve exhausts the 128 MiB heap.
-        text.try_reserve(4096).ok()?;
-        let mut rows = rows.into_iter().peekable();
-        while let Some((start, mut end, flags, file)) = rows.next() {
-            while let Some(&(next_start, next_end, next_flags, next_file)) = rows.peek() {
+        // ART can create >200k page records. Compute the exact merged output
+        // size without allocating a second row set, then reserve once. Letting
+        // String grow geometrically can require a larger transient allocation
+        // than the final maps text and fail near the bounded kernel-heap limit.
+        let mut text_len = 0usize;
+        let mut cursor = 0usize;
+        while cursor < order.len() {
+            let code = order[cursor];
+            let Some((start, mut end, flags, file)) = row_data(code) else {
+                #[cfg(feature = "android-art-verify")]
+                crate::kprintln!("[JSR-PROC-MAPS] size-row-fail code={} rows={}", code, order.len());
+                return None;
+            };
+            cursor += 1;
+            while cursor < order.len() {
+                let next_code = order[cursor];
+                let Some((next_start, next_end, next_flags, next_file)) = row_data(next_code) else {
+                    #[cfg(feature = "android-art-verify")]
+                    crate::kprintln!(
+                        "[JSR-PROC-MAPS] size-next-fail code={} rows={}",
+                        next_code,
+                        order.len()
+                    );
+                    return None;
+                };
                 let stack_boundary = linux.stack_range.is_some_and(|(stack_start, stack_end)| {
                     end == stack_start
                         || next_start == stack_start
@@ -6235,7 +6364,67 @@ pub(crate) fn linux_proc_maps(pid: ObjId) -> Option<Vec<u8>> {
                     break;
                 }
                 end = next_end;
-                rows.next();
+                cursor += 1;
+            }
+            let path_len = if linux
+                .stack_range
+                .is_some_and(|(stack_start, stack_end)| start >= stack_start && end <= stack_end)
+            {
+                b"[stack]".len()
+            } else {
+                file.and_then(|file| core::str::from_utf8(file.path()).ok())
+                    .map_or(b"[anon]".len(), str::len)
+            };
+            text_len = text_len.saturating_add(57 + path_len);
+        }
+        #[cfg(feature = "android-art-verify")]
+        crate::kprintln!(
+            "[JSR-PROC-MAPS] rows={} text_len={} heap={:?}",
+            order.len(),
+            text_len,
+            crate::mm::heap::stats()
+        );
+        let mut text = alloc::string::String::new();
+        if text.try_reserve_exact(text_len).is_err() {
+            #[cfg(feature = "android-art-verify")]
+            crate::kprintln!(
+                "[JSR-PROC-MAPS] text-reserve-fail text_len={} heap={:?}",
+                text_len,
+                crate::mm::heap::stats()
+            );
+            return None;
+        }
+        let mut cursor = 0usize;
+        while cursor < order.len() {
+            let code = order[cursor];
+            let Some((start, mut end, flags, file)) = row_data(code) else {
+                #[cfg(feature = "android-art-verify")]
+                crate::kprintln!("[JSR-PROC-MAPS] emit-row-fail code={} rows={}", code, order.len());
+                return None;
+            };
+            cursor += 1;
+            while cursor < order.len() {
+                let next_code = order[cursor];
+                let Some((next_start, next_end, next_flags, next_file)) = row_data(next_code) else {
+                    #[cfg(feature = "android-art-verify")]
+                    crate::kprintln!(
+                        "[JSR-PROC-MAPS] emit-next-fail code={} rows={}",
+                        next_code,
+                        order.len()
+                    );
+                    return None;
+                };
+                let stack_boundary = linux.stack_range.is_some_and(|(stack_start, stack_end)| {
+                    end == stack_start
+                        || next_start == stack_start
+                        || end == stack_end
+                        || next_start == stack_end
+                });
+                if next_start != end || flags != next_flags || file != next_file || stack_boundary {
+                    break;
+                }
+                end = next_end;
+                cursor += 1;
             }
             let read = if flags.contains(MapFlags::USER) {
                 'r'
@@ -6263,12 +6452,22 @@ pub(crate) fn linux_proc_maps(pid: ObjId) -> Option<Vec<u8>> {
                 file.and_then(|file| core::str::from_utf8(file.path()).ok())
                     .unwrap_or("[anon]")
             };
-            write!(
+            if write!(
                 text,
                 "{:016x}-{:016x} {}{}{}p 00000000 00:00 0 {}\n",
                 start, end, read, write, execute, path
             )
-            .ok()?;
+            .is_err()
+            {
+                #[cfg(feature = "android-art-verify")]
+                crate::kprintln!(
+                    "[JSR-PROC-MAPS] write-fail text_len={} actual={} heap={:?}",
+                    text_len,
+                    text.len(),
+                    crate::mm::heap::stats()
+                );
+                return None;
+            }
         }
         #[cfg(feature = "android-art-verify")]
         {
@@ -6512,6 +6711,9 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         pgid: pid,
         sid: pid,
         nice: 0,
+        sched_reset_on_fork: false,
+        sched_util_clamp_min: 0,
+        sched_util_clamp_max: 1024,
         child_cpu_ticks: 0,
         exited_cpu_ticks: 0,
         cwd: crate::linux_vfs::DirectoryId::Root,
@@ -7417,7 +7619,7 @@ pub fn map_memory(
                 page: Arc::clone(page),
                 source: BackingIdentity::new(id.raw(), id.generation())
                     .expect("live object has a valid generation"),
-                writable,
+                flags,
             });
         }
         p.memory_caps
@@ -8004,6 +8206,109 @@ pub fn protect_range_access(
     })
 }
 
+/// Applies Linux `mprotect(2)` permissions to private and shared pages.
+///
+/// Native Jasper capabilities keep shared mappings immutable through the
+/// stricter [`protect_range_access`] path. Linux processes, however, may change
+/// the per-process page protection of a shared backing; the backing frame stays
+/// shared while only this address-space mapping receives the new permissions.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn protect_linux_range_access(
+    pid: ObjId,
+    va: u64,
+    pages: u64,
+    accessible: bool,
+    writable: bool,
+    executable: bool,
+) -> Result<(), MemError> {
+    checked_range(va, pages)?;
+    let mut flags = MapFlags::READ_ONLY;
+    if accessible {
+        flags = flags.union(MapFlags::USER);
+    }
+    if writable {
+        flags = flags.union(MapFlags::WRITE);
+    }
+    if executable {
+        flags = flags.union(MapFlags::EXECUTE);
+    }
+    let active = kobj::with(|t| {
+        let Ok(KObject::Process(p)) = t.get_mut(pid) else {
+            return Err(MemError::NoSuchProcess);
+        };
+        if p.state != ProcState::Running {
+            return Err(MemError::NoSuchProcess);
+        }
+        for i in 0..pages {
+            if is_device_page(p, va + i * FRAME_SIZE) {
+                return Err(MemError::InvalidRange);
+            }
+            if p.space
+                .translate(VirtPage::containing(va + i * FRAME_SIZE))
+                .is_none()
+            {
+                return Err(MemError::NotMapped);
+            }
+        }
+        if !p.space.begin_shootdown() {
+            return Err(MemError::Busy);
+        }
+        for i in 0..pages {
+            if let Err(e) = p
+                .space
+                .protect_raw(VirtPage::containing(va + i * FRAME_SIZE), flags)
+            {
+                p.space.end_shootdown();
+                return Err(match e {
+                    MapError::Busy => MemError::Busy,
+                    MapError::OutOfFrames => MemError::OutOfMemory,
+                    _ => MemError::InvalidRange,
+                });
+            }
+        }
+        let end = va + pages * FRAME_SIZE;
+        for mapping in &mut p.shared_maps {
+            if mapping.va >= va && mapping.va < end {
+                mapping.flags = flags;
+            }
+        }
+        Ok(p.space.active_cpus())
+    })?;
+    if crate::smp::tlb_shootdown_on(active, va, pages).is_err() {
+        kobj::with(|t| {
+            if let Ok(KObject::Process(p)) = t.get_mut(pid) {
+                for i in 0..pages {
+                    let frame = p
+                        .space
+                        .translate(VirtPage::containing(va + i * FRAME_SIZE))
+                        .map(|(frame, _)| frame);
+                    if let Some(frame) = frame {
+                        if let Some(index) = p
+                            .frames
+                            .iter()
+                            .position(|page| page.frame().start() == frame.start())
+                        {
+                            let page = p.frames.remove(index);
+                            page.quarantine();
+                            p.quarantine_one(frame);
+                        }
+                    }
+                }
+            }
+            Ok::<(), MemError>(())
+        })
+        .ok();
+        return Err(MemError::Busy);
+    }
+    kobj::with(|t| {
+        let Ok(KObject::Process(p)) = t.get_mut(pid) else {
+            return Err(MemError::NoSuchProcess);
+        };
+        p.space.end_shootdown();
+        Ok(())
+    })
+}
+
 /// 进程中 `va` 所在页的映射标志（未映射为 `None`；诊断与验收用）。
 pub fn page_flags(pid: ObjId, va: u64) -> Option<MapFlags> {
     with_proc(pid, |p| {
@@ -8034,6 +8339,7 @@ pub(crate) fn linux_mapping_file(
     pid: ObjId,
     va: u64,
 ) -> Option<(crate::linux_vfs::FileId, u64, bool)> {
+    let va = va - va % FRAME_SIZE;
     with_proc(pid, |process| {
         let linux = process.linux.as_ref().ok_or(ProcError::Exited)?;
         let mapping = linux
@@ -8560,7 +8866,7 @@ pub fn fork_linux_process(
                         mapping.va,
                         Arc::clone(&mapping.page),
                         mapping.source,
-                        mapping.writable,
+                        mapping.flags,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -8620,8 +8926,8 @@ pub fn fork_linux_process(
             return Err(error);
         }
     }
-    for (va, page, source, writable) in shared_mappings {
-        if let Err(error) = copy_linux_shared_mapping(child, va, page, source, writable) {
+    for (va, page, source, flags) in shared_mappings {
+        if let Err(error) = copy_linux_shared_mapping(child, va, page, source, flags) {
             rollback(child, false);
             return Err(error);
         }
@@ -8679,7 +8985,7 @@ pub fn vfork_linux_process(
         shared_mappings,
     ) =
         kobj::with(|t| match t.get(parent) {
-            Ok(KObject::Process(p)) if p.state == ProcState::Running && p.threads_live == 1 => {
+            Ok(KObject::Process(p)) if p.state == ProcState::Running && p.threads_live != 0 => {
                 let linux = p.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
                 if !p.device_maps.is_empty() || !p.quarantined.is_empty() {
                     return Err(ProcError::NotTransferable);
@@ -8697,7 +9003,7 @@ pub fn vfork_linux_process(
                             mapping.va,
                             Arc::clone(&mapping.page),
                             mapping.source,
-                            mapping.writable,
+                            mapping.flags,
                         )
                     })
                     .collect::<Vec<_>>();
@@ -8765,12 +9071,12 @@ pub fn vfork_linux_process(
         p.shared_maps
             .try_reserve(shared_mappings.len())
             .map_err(|_| ProcError::OutOfFrames)?;
-        for (va, page, source, writable) in shared_mappings {
+        for (va, page, source, flags) in shared_mappings {
             p.shared_maps.push(SharedMapping {
                 va,
                 page,
                 source,
-                writable,
+                flags,
             });
         }
         let borrowed = crate::mm::space::VmSpace::borrowed(parent_root).map_err(ProcError::Map)?;
@@ -8859,7 +9165,7 @@ fn copy_linux_shared_mapping(
     va: u64,
     page: Arc<crate::mm::memory_object::Page>,
     source: BackingIdentity,
-    writable: bool,
+    flags: MapFlags,
 ) -> Result<(), ProcError> {
     with_proc(child, |process| {
         if process.state != ProcState::Running
@@ -8885,10 +9191,7 @@ fn copy_linux_shared_mapping(
         if !process.space.begin_shootdown() {
             return Err(ProcError::Map(MapError::Busy));
         }
-        let mut flags = MapFlags::USER;
-        if writable {
-            flags = flags.union(MapFlags::WRITE);
-        }
+        let writable = flags.contains(MapFlags::WRITE);
         if process
             .space
             .map_raw(VirtPage::containing(va), page.frame(), flags)
@@ -8917,7 +9220,7 @@ fn copy_linux_shared_mapping(
             va,
             page,
             source,
-            writable,
+            flags,
         });
         process.space.end_shootdown();
         Ok(())

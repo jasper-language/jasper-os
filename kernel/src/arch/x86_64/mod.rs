@@ -26,6 +26,7 @@ mod bm1;
 pub use bm1::init as bm1_init;
 mod apic;
 mod context;
+pub(crate) mod xstate;
 pub mod hwvirt_demo;
 pub mod hwv2_demo;
 pub mod hwv3_demo;
@@ -209,7 +210,23 @@ impl Platform for X86_64 {
     }
 
     unsafe fn init_task_frame(stack_top: *mut u8, entry: extern "C" fn() -> !) -> Self::TaskContext {
-        context::init_task_frame(stack_top, entry)
+        context::init_task_frame(stack_top, entry, core::ptr::null_mut())
+    }
+
+    fn extended_state_bytes() -> usize {
+        xstate::task_area_size()
+    }
+
+    fn extended_state_align() -> usize {
+        xstate::XSTATE_ALIGN
+    }
+
+    unsafe fn init_task_frame_with_extended_state(
+        stack_top: *mut u8,
+        entry: extern "C" fn() -> !,
+        extended_state: *mut u8,
+    ) -> Self::TaskContext {
+        context::init_task_frame(stack_top, entry, extended_state)
     }
 
     fn exit_emulator(status: ExitStatus) -> ! {
@@ -446,17 +463,20 @@ pub(super) fn enable_sse() -> bool {
     } else {
         0
     };
-    let use_xsave = avx && avx_size <= crate::syscall::XSAVE_BYTES;
+    let use_xsave = xsave;
     unsafe {
         let mut cr4: u64;
         core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
         cr4 |= CR4_OSXSAVE;
         core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
-        // Do not expose AVX state through XCR0 unless the syscall entry can
-        // preserve the complete area within its fixed kernel-stack buffer.
-        // 只有 syscall 入口能在固定内核栈缓冲区内完整保存时，才通过 XCR0
-        // 向用户态暴露 AVX 状态。
-        let xcr0 = 0x3u64 | if use_xsave { 0x4 } else { 0 };
+        // SSE state is part of the x86_64 baseline. AVX state may only be
+        // admitted when CPUID reports both XSAVE and AVX support; writing the
+        // AVX bit otherwise faults in XSETBV and would expose a false kernel
+        // capability before the common BSP/AP policy check can run.
+        // SSE 是 x86_64 基线状态；只有 CPUID 同时确认 XSAVE 与 AVX 后才能
+        // 将 AVX 写入 XCR0。否则 XSETBV 会故障，并可能在统一 BSP/AP 策略
+        // 检查之前向用户态暴露并不存在的能力。
+        let xcr0 = 0x3u64 | if avx { 0x4 } else { 0 };
         core::arch::asm!(
             "xsetbv",
             in("ecx") 0u32,
@@ -464,13 +484,17 @@ pub(super) fn enable_sse() -> bool {
             in("edx") (xcr0 >> 32) as u32,
             options(nostack)
         );
+        if !xstate::configure(xcr0) {
+            crate::kprintln!("[JSR-XSAVE] failure=cpu-state-mismatch");
+            crate::arch::halt_forever();
+        }
     }
     crate::kprintln!(
         "[JSR-XSAVE] enabled={} avx={} avx_size={} capacity={}",
         use_xsave,
         avx,
         avx_size,
-        crate::syscall::XSAVE_BYTES
+        xstate::save_size()
     );
     use_xsave
 }

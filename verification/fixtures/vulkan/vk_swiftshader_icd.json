@@ -1,0 +1,7 @@
+{
+  "file_format_version": "1.0.0",
+  "ICD": {
+    "library_path": "/usr/lib/x86_64-linux-gnu/libvk_swiftshader.so",
+    "api_version": "1.0.5"
+  }
+}
