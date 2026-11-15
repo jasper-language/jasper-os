@@ -13,6 +13,8 @@ HEADER="${JSR_LINUX_GUEST_HEADER:?set JSR_LINUX_GUEST_HEADER}"
 KERNEL="${JSR_LINUX_GUEST_KERNEL:?set JSR_LINUX_GUEST_KERNEL}"
 CPUS="${HWV5_CORE_CPUS:-4-11}"
 SMP="${HWV5_CORE_SMP:-4}"
+ACCEL="${HWV5_CORE_ACCEL:-kvm}"
+CPU_MODEL="${HWV5_CORE_CPU:-host}"
 mkdir -p "$OUT" "$TARGET"
 
 cargo build --locked --release --target-dir "$TARGET" -p xtask \
@@ -26,8 +28,8 @@ CARGO_TARGET_DIR="$TARGET" cargo build --locked --release \
 
 set +e
 nice -n 10 taskset -c "$CPUS" timeout "$LIMIT" qemu-system-x86_64 \
-  -accel kvm \
-  -cpu host \
+  -accel "$ACCEL" \
+  -cpu "$CPU_MODEL" \
   -machine q35 \
   -m 512M \
   -smp "$SMP" \
