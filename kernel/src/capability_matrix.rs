@@ -1,6 +1,6 @@
 //! Cross-module capability diagnostics using the shared kernel-core policy.
 
-use kernel_core::capability_matrix::{classify, CapabilityFacts};
+use kernel_core::capability_matrix::{classify, CapabilityCoverage, CapabilityFacts};
 
 use crate::boot::BootSpec;
 use crate::kprintln;
@@ -8,9 +8,10 @@ use crate::kprintln;
 fn emit(domain: &'static str, facts: CapabilityFacts) {
     match classify(facts) {
         Ok(stage) => kprintln!(
-            "[JSR-CAPABILITY] domain={} state={} discovered={} supported={} admitted={} rejected={} unsupported={} enabled={} exposed={} verified={} fault=none",
+            "[JSR-CAPABILITY] domain={} state={} inventory={} discovered={} supported={} admitted={} rejected={} unsupported={} enabled={} exposed={} verified={} fault=none",
             domain,
             stage.name(),
+            facts.coverage.name(),
             facts.discovered,
             facts.kernel_supported,
             facts.admitted,
@@ -21,8 +22,9 @@ fn emit(domain: &'static str, facts: CapabilityFacts) {
             facts.verified
         ),
         Err(error) => kprintln!(
-            "[JSR-CAPABILITY] domain={} state=invalid discovered={} supported={} admitted={} rejected={} unsupported={} enabled={} exposed={} verified={} fault={}",
+            "[JSR-CAPABILITY] domain={} state=invalid inventory={} discovered={} supported={} admitted={} rejected={} unsupported={} enabled={} exposed={} verified={} fault={}",
             domain,
+            facts.coverage.name(),
             facts.discovered,
             facts.kernel_supported,
             facts.admitted,
@@ -44,6 +46,7 @@ pub fn report(boot: &BootSpec) {
     emit(
         "system.memory.boot-map",
         CapabilityFacts {
+            coverage: CapabilityCoverage::Complete,
             discovered: boot.discovered_regions() as u32,
             kernel_supported: memory_admitted,
             admitted: memory_admitted,
@@ -65,6 +68,7 @@ pub fn report(boot: &BootSpec) {
         emit(
             "system.cpu.xstate",
             CapabilityFacts {
+                coverage: CapabilityCoverage::Complete,
                 discovered: supported_mask.count_ones(),
                 kernel_supported: supported,
                 admitted: enabled,
@@ -72,7 +76,7 @@ pub fn report(boot: &BootSpec) {
                 unsupported: (supported_mask & !enabled_mask).count_ones(),
                 enabled,
                 exposed: enabled,
-                verified: enabled,
+                verified: 0,
                 security_critical: true,
             },
         );
@@ -81,23 +85,27 @@ pub fn report(boot: &BootSpec) {
     emit("system.cpu.xstate", CapabilityFacts::default());
 
     let (pci_discovered, pci_admitted, pci_rejected) =
-        crate::pci::table().devices().fold((0u32, 0u32, 0u32), |counts, device| {
-            let chain_failure =
-                u32::from(device.caps_error && device.cap_truncated == 0);
-            (
-                counts.0
-                    .saturating_add(device.cap_discovered as u32)
-                    .saturating_add(chain_failure),
-                counts.1.saturating_add(device.cap_admitted as u32),
-                counts.2
-                    .saturating_add(device.cap_truncated as u32)
-                    .saturating_add(chain_failure),
-            )
-        });
+        crate::pci::table()
+            .devices()
+            .fold((0u32, 0u32, 0u32), |counts, device| {
+                let chain_failure = u32::from(device.caps_error && device.cap_truncated == 0);
+                (
+                    counts
+                        .0
+                        .saturating_add(device.cap_discovered as u32)
+                        .saturating_add(chain_failure),
+                    counts.1.saturating_add(device.cap_admitted as u32),
+                    counts
+                        .2
+                        .saturating_add(device.cap_truncated as u32)
+                        .saturating_add(chain_failure),
+                )
+            });
     let pci_publishable = pci_rejected == 0;
     emit(
         "system.device.pci-capabilities",
         CapabilityFacts {
+            coverage: CapabilityCoverage::Complete,
             discovered: pci_discovered,
             kernel_supported: pci_discovered,
             admitted: pci_admitted,
@@ -105,14 +113,26 @@ pub fn report(boot: &BootSpec) {
             unsupported: 0,
             enabled: if pci_publishable { pci_admitted } else { 0 },
             exposed: if pci_publishable { pci_admitted } else { 0 },
-            verified: if pci_publishable { pci_admitted } else { 0 },
+            verified: 0,
             security_critical: true,
         },
     );
 
-    // No cross-device completeness inventory exists yet. Keep these domains
-    // visible as unsupported instead of inferring capabilities from Profile
-    // declarations or optional libraries.
-    emit("system.network", CapabilityFacts::default());
-    emit("system.device.gpu", CapabilityFacts::default());
+    // These optional runtime domains are not wired into this boot inventory.
+    // Report the missing probe explicitly instead of turning zero counts into a
+    // claim of "no hardware" or inferring capabilities from optional libraries.
+    emit(
+        "system.network",
+        CapabilityFacts {
+            coverage: CapabilityCoverage::NotProbed,
+            ..CapabilityFacts::default()
+        },
+    );
+    emit(
+        "system.device.gpu",
+        CapabilityFacts {
+            coverage: CapabilityCoverage::NotProbed,
+            ..CapabilityFacts::default()
+        },
+    );
 }

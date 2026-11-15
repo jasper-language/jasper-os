@@ -3,6 +3,8 @@
 /// Highest lifecycle state justified by one capability inventory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CapabilityStage {
+    NotProbed,
+    DiscoveryFailed,
     Unsupported,
     Discovered,
     KernelSupported,
@@ -16,6 +18,8 @@ pub enum CapabilityStage {
 impl CapabilityStage {
     pub const fn name(self) -> &'static str {
         match self {
+            Self::NotProbed => "not-probed",
+            Self::DiscoveryFailed => "discovery-failed",
             Self::Unsupported => "unsupported",
             Self::Discovered => "discovered",
             Self::KernelSupported => "kernel-supported",
@@ -28,9 +32,32 @@ impl CapabilityStage {
     }
 }
 
+/// Whether an adapter actually attempted the inventory that produced its counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CapabilityCoverage {
+    /// The subsystem was not wired into this boot or is absent from this build.
+    #[default]
+    NotProbed,
+    /// Discovery ran to completion and all discovered entries are accounted for.
+    Complete,
+    /// Discovery ran but could not produce a trustworthy inventory.
+    Failed,
+}
+
+impl CapabilityCoverage {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NotProbed => "not-probed",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 /// Numeric inventory used by boot, CPU, device, network and GPU adapters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CapabilityFacts {
+    pub coverage: CapabilityCoverage,
     pub discovered: u32,
     pub kernel_supported: u32,
     pub admitted: u32,
@@ -57,9 +84,7 @@ impl CapabilityError {
             Self::SupportedExceedsDiscovered => {
                 "system.capability.error.supported_exceeds_discovered"
             }
-            Self::StageWithoutPredecessor(_) => {
-                "system.capability.error.stage_without_predecessor"
-            }
+            Self::StageWithoutPredecessor(_) => "system.capability.error.stage_without_predecessor",
             Self::SecurityCriticalRejectionPublished => {
                 "system.capability.error.security_rejection_published"
             }
@@ -69,6 +94,21 @@ impl CapabilityError {
 
 /// Classify a complete inventory and prevent stage skipping or unsafe publication.
 pub fn classify(facts: CapabilityFacts) -> Result<CapabilityStage, CapabilityError> {
+    let no_facts = facts.discovered == 0
+        && facts.kernel_supported == 0
+        && facts.admitted == 0
+        && facts.rejected == 0
+        && facts.unsupported == 0
+        && facts.enabled == 0
+        && facts.exposed == 0
+        && facts.verified == 0;
+    match facts.coverage {
+        CapabilityCoverage::NotProbed if no_facts => return Ok(CapabilityStage::NotProbed),
+        CapabilityCoverage::NotProbed => return Err(CapabilityError::InventoryMismatch),
+        CapabilityCoverage::Failed if no_facts => return Ok(CapabilityStage::DiscoveryFailed),
+        CapabilityCoverage::Failed => return Err(CapabilityError::InventoryMismatch),
+        CapabilityCoverage::Complete => {}
+    }
     if facts.discovered
         != facts
             .admitted
@@ -89,9 +129,7 @@ pub fn classify(facts: CapabilityFacts) -> Result<CapabilityStage, CapabilityErr
     if facts.verified > facts.exposed {
         return Err(CapabilityError::StageWithoutPredecessor("verified"));
     }
-    if facts.security_critical
-        && facts.rejected != 0
-        && (facts.exposed != 0 || facts.verified != 0)
+    if facts.security_critical && facts.rejected != 0 && (facts.exposed != 0 || facts.verified != 0)
     {
         return Err(CapabilityError::SecurityCriticalRejectionPublished);
     }
@@ -122,6 +160,7 @@ mod tests {
     #[test]
     fn stage_order_requires_every_predecessor() {
         let verified = CapabilityFacts {
+            coverage: CapabilityCoverage::Complete,
             discovered: 4,
             kernel_supported: 4,
             admitted: 4,
@@ -151,6 +190,7 @@ mod tests {
     #[test]
     fn unaccounted_capacity_and_heterogeneous_support_fail_closed() {
         let truncated = CapabilityFacts {
+            coverage: CapabilityCoverage::Complete,
             discovered: 17,
             kernel_supported: 17,
             admitted: 16,
@@ -159,12 +199,10 @@ mod tests {
             security_critical: true,
             ..CapabilityFacts::default()
         };
-        assert_eq!(
-            classify(truncated),
-            Err(CapabilityError::InventoryMismatch)
-        );
+        assert_eq!(classify(truncated), Err(CapabilityError::InventoryMismatch));
 
         let heterogeneous = CapabilityFacts {
+            coverage: CapabilityCoverage::Complete,
             discovered: 2,
             kernel_supported: 1,
             admitted: 2,
@@ -183,6 +221,7 @@ mod tests {
     #[test]
     fn security_rejection_is_visible_and_never_published() {
         let rejected = CapabilityFacts {
+            coverage: CapabilityCoverage::Complete,
             discovered: 17,
             kernel_supported: 17,
             admitted: 16,
@@ -204,5 +243,52 @@ mod tests {
             classify(published),
             Err(CapabilityError::SecurityCriticalRejectionPublished)
         );
+    }
+
+    #[test]
+    fn not_probed_is_not_misreported_as_unsupported() {
+        let unknown = CapabilityFacts::default();
+        assert_eq!(classify(unknown), Ok(CapabilityStage::NotProbed));
+
+        let fabricated = CapabilityFacts {
+            discovered: 1,
+            ..unknown
+        };
+        assert_eq!(
+            classify(fabricated),
+            Err(CapabilityError::InventoryMismatch)
+        );
+    }
+
+    #[test]
+    fn enabled_does_not_become_verified_without_evidence() {
+        let exposed = CapabilityFacts {
+            coverage: CapabilityCoverage::Complete,
+            discovered: 2,
+            kernel_supported: 2,
+            admitted: 2,
+            rejected: 0,
+            unsupported: 0,
+            enabled: 2,
+            exposed: 2,
+            verified: 0,
+            security_critical: true,
+        };
+        assert_eq!(classify(exposed), Ok(CapabilityStage::Exposed));
+    }
+
+    #[test]
+    fn failed_discovery_is_distinct_from_no_hardware() {
+        let failed = CapabilityFacts {
+            coverage: CapabilityCoverage::Failed,
+            ..CapabilityFacts::default()
+        };
+        assert_eq!(classify(failed), Ok(CapabilityStage::DiscoveryFailed));
+
+        let absent = CapabilityFacts {
+            coverage: CapabilityCoverage::Complete,
+            ..CapabilityFacts::default()
+        };
+        assert_eq!(classify(absent), Ok(CapabilityStage::Unsupported));
     }
 }
