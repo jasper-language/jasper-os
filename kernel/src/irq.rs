@@ -416,7 +416,7 @@ pub mod device {
     /// A bounded table is valid only when every discovered line is represented.
     /// The platform source, accepted subset, rejected remainder and implementation
     /// capacity are published together before any consumer can use the table.
-    pub fn admit_topology() -> LineTopology {
+    pub fn admit_topology(source: &'static str) -> LineTopology {
         let discovered = arch::device_irq_count();
         let admitted = discovered.min(MAX_LINES); // JASPER-HARDCODE-REVIEW: issue=32 source=runtime platform IRQ inventory reason=bounded routing table only publishes a complete inventory
         let topology = LineTopology {
@@ -427,7 +427,8 @@ pub mod device {
         };
         if !TOPOLOGY_REPORTED.swap(true, Ordering::AcqRel) {
             crate::kprintln!(
-                "[JSR-IRQ] topology discovered={} admitted={} rejected={} capacity={} complete={}",
+                "[JSR-IRQ] topology source={} discovered={} admitted={} rejected={} capacity={} complete={}",
+                source,
                 topology.discovered,
                 topology.admitted,
                 topology.rejected,
@@ -455,7 +456,11 @@ pub mod device {
     /// Number of reported device lines, failing closed when the legacy table
     /// cannot represent the complete discovered topology.
     pub fn line_count() -> usize {
-        admit_topology().admitted
+        let discovered = arch::device_irq_count();
+        if discovered > MAX_LINES {
+            return admit_topology("line_table_access").admitted;
+        }
+        discovered
     }
 
     /// 中断线的规范名。

@@ -187,7 +187,6 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         // 中断控制器 + 定时器，开中断后等到足够多的 tick。
         Stage::Timer => stage(ctx, s, |_| {
             arch::irq_init(TIMER_HZ);
-            irq::device::admit_topology();
             arch::irq_enable();
             let mut waits: u64 = 0;
             while clock::ticks() < BOOT_TICKS {
@@ -299,6 +298,7 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         // SMP-1：启动其他处理器。部分处理器没上线不算失败，结果由 `StartReport` 报告。
         Stage::Smp => stage(ctx, s, |ctx| {
             let report = smp::start_secondaries(TIMER_HZ);
+            irq::device::admit_topology("smp_ready");
             #[cfg(feature = "pixel6a-smp-probe")]
             if report.present == 8 && report.online == 8 && report.failed == 0 {
                 kprintln!("[JSR-PIXEL6A] smp=8 online=8 action=psci-off");
