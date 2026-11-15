@@ -55,7 +55,12 @@
 //! 本 crate 内的 Rust 模块名只是代码组织，不是接口。
 #![cfg_attr(not(test), no_std)]
 
-#[cfg(any(test, feature = "ext4-view", feature = "persistent-install"))]
+#[cfg(any(
+    test,
+    feature = "network-dynamic",
+    feature = "ext4-view",
+    feature = "persistent-install"
+))]
 extern crate alloc;
 
 pub mod abi;
@@ -122,7 +127,9 @@ pub mod msi;
 pub mod net;
 pub mod net1a;
 pub mod net3;
+#[cfg(feature = "network-dynamic")]
 pub mod net4_runtime;
+#[cfg(feature = "network-dynamic")]
 pub mod net4_service;
 pub mod numa;
 pub mod profile;
@@ -160,6 +167,7 @@ pub mod user_layout;
 pub mod vmm_device;
 pub mod virtio_fs;
 pub mod virtio_gpu;
+#[cfg(feature = "network-dynamic")]
 pub mod virtio_net;
 pub mod wait;
 pub mod workload;

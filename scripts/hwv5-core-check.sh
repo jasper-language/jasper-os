@@ -27,7 +27,7 @@ CARGO_TARGET_DIR="$TARGET" cargo build --locked --release \
   >"$OUT/image.log" 2>&1
 
 set +e
-nice -n 10 taskset -c "$CPUS" timeout "$LIMIT" qemu-system-x86_64 \
+flock /tmp/jasper-os-qemu.lock nice -n 10 taskset -c "$CPUS" timeout "$LIMIT" qemu-system-x86_64 \
   -accel "$ACCEL" \
   -cpu "$CPU_MODEL" \
   -machine q35 \
@@ -59,6 +59,8 @@ grep -aq '\[JSR-HWV5-NET\] device=net discovered=true link=true tx=true rx=true 
 grep -aq '\[JSR-HWV5-FS\] device=fs discovered=true mount=true lookup=true read=true write=true ok=true' \
   "$OUT/serial.log"
 grep -aqE '\[JSR-HWV4-LINUX\] .*virtio_net_tx_frames=[1-9][0-9]* virtio_net_rx_frames=[1-9][0-9]* .*virtio_fs_requests=[1-9][0-9]* .*pio_marker=true marker=true .*reclaim=true' \
+  "$OUT/serial.log"
+grep -aFq 'virtio_net_mtu=1500 virtio_net_max_frame=1514 virtio_net_rx_queue=8' \
   "$OUT/serial.log"
 ! grep -aqE '^\[JSR-HWV5-FAIL\]|^\[JSR-HWV5-VMM-FAIL\]|^\[JSR-PANIC\]|panicked at|KERNEL PANIC' \
   "$OUT/serial.log"

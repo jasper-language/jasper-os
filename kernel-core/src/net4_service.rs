@@ -8,12 +8,14 @@
 //! sockets without implementing protocol cryptography or external process hosting.
 
 use crate::net4_runtime::{
-    UdpAddress, UdpHandle, UdpQuota, UdpRights, UdpRuntimeError, UdpSocketRuntime, UdpStats,
+    UdpAddress, UdpHandle, UdpLimits, UdpQuota, UdpRights, UdpRuntimeError, UdpSocketRuntime,
+    UdpStats,
 };
 use crate::wireguard::{
     Config, Encapsulated, EntropySource, Error as WireGuardError, Now, PollOutput, Received,
     Stats as WireGuardStats, Tunnel,
 };
+use alloc::vec::Vec;
 
 const MAX_POLL_STEPS: usize = 16;
 
@@ -65,9 +67,10 @@ pub enum WireGuardReceive<'a> {
 /// 绑定一个本地 UDP socket 和一个 WireGuard 对端的 hosted service 核心。
 ///
 /// A hosted-service core binding one local UDP socket to one WireGuard peer. Datagram
-/// buffers remain caller-owned; the service never allocates and never bypasses socket quotas.
-pub struct WireGuardService<const S: usize, const Q: usize> {
-    runtime: UdpSocketRuntime<S, Q>,
+/// buffers remain caller-owned; internal reconstruction buffers are bounded by
+/// the admitted runtime limits and never bypass socket quotas.
+pub struct WireGuardService {
+    runtime: UdpSocketRuntime,
     socket: UdpHandle,
     local: UdpAddress,
     remote: UdpAddress,
@@ -75,7 +78,7 @@ pub struct WireGuardService<const S: usize, const Q: usize> {
     active: bool,
 }
 
-impl<const S: usize, const Q: usize> WireGuardService<S, Q> {
+impl WireGuardService {
     /// 创建服务并绑定本地 UDP 端口。
     ///
     /// Creates the service and binds its local UDP address with explicit quota.
@@ -84,11 +87,12 @@ impl<const S: usize, const Q: usize> WireGuardService<S, Q> {
         local: UdpAddress,
         remote: UdpAddress,
         quota: UdpQuota,
+        limits: UdpLimits,
     ) -> Result<Self, NetServiceError> {
         if remote.ip == local.ip && remote.port == local.port {
             return Err(NetServiceError::UnexpectedPeer);
         }
-        let mut runtime = UdpSocketRuntime::new(quota);
+        let mut runtime = UdpSocketRuntime::new(quota, limits)?;
         let socket = runtime.bind(local, UdpRights::SERVICE)?;
         let tunnel = Tunnel::new(config)?;
         Ok(Self {
@@ -116,11 +120,7 @@ impl<const S: usize, const Q: usize> WireGuardService<S, Q> {
     /// 向当前 socket 投递一个外部接收报文，验证来源后才进入队列。
     ///
     /// Delivers one externally received datagram to the bound socket after checking its peer.
-    pub fn deliver(
-        &mut self,
-        source: UdpAddress,
-        datagram: &[u8],
-    ) -> Result<(), NetServiceError> {
+    pub fn deliver(&mut self, source: UdpAddress, datagram: &[u8]) -> Result<(), NetServiceError> {
         if !self.active {
             return Err(NetServiceError::Inactive);
         }
@@ -147,9 +147,7 @@ impl<const S: usize, const Q: usize> WireGuardService<S, Q> {
         }
         let result = match self.tunnel.encapsulate(now, payload, output, rng)? {
             Encapsulated::Transport(wire) => (WireGuardEmit::Transport, wire),
-            Encapsulated::HandshakeInitiation(wire) => {
-                (WireGuardEmit::HandshakeInitiation, wire)
-            }
+            Encapsulated::HandshakeInitiation(wire) => (WireGuardEmit::HandshakeInitiation, wire),
         };
         self.runtime.send(self.socket, self.remote, result.1)?;
         Ok(result)
@@ -168,15 +166,22 @@ impl<const S: usize, const Q: usize> WireGuardService<S, Q> {
         if !self.active {
             return Err(NetServiceError::Inactive);
         }
-        let mut wire = [0u8; crate::net4_runtime::MAX_UDP_DATAGRAM_BYTES];
+        let mut wire = Vec::new();
+        wire.try_reserve_exact(self.runtime.limits().max_datagram_bytes)
+            .map_err(|_| NetServiceError::Udp(UdpRuntimeError::Capacity))?;
+        wire.resize(self.runtime.limits().max_datagram_bytes, 0);
         let (source, wire_len) = self.runtime.recv(self.socket, &mut wire)?;
         if source != self.remote {
             return Err(NetServiceError::UnexpectedPeer);
         }
-        match self
-            .tunnel
-            .decapsulate(now, &self.remote.ip, false, &wire[..wire_len], plaintext, rng)?
-        {
+        match self.tunnel.decapsulate(
+            now,
+            &self.remote.ip,
+            false,
+            &wire[..wire_len],
+            plaintext,
+            rng,
+        )? {
             Received::Data(data) => Ok(WireGuardReceive::Data(data.len())),
             Received::Keepalive => Ok(WireGuardReceive::Keepalive),
             Received::Reply(reply) => {
@@ -208,9 +213,9 @@ impl<const S: usize, const Q: usize> WireGuardService<S, Q> {
                     self.runtime.send(self.socket, self.remote, wire)?;
                     sent += 1;
                 }
-                PollOutput::HandshakeExpired
-                | PollOutput::SessionsExpired
-                | PollOutput::Idle => return Ok(sent),
+                PollOutput::HandshakeExpired | PollOutput::SessionsExpired | PollOutput::Idle => {
+                    return Ok(sent)
+                }
             }
         }
         Err(NetServiceError::PollLimit)
@@ -276,23 +281,26 @@ mod tests {
         let a_public = a_key.public_key();
         let b_public = b_key.public_key();
         let quota = UdpQuota::new(2, 4, 4096);
-        let mut a = WireGuardService::<2, 4>::new(
+        let limits = UdpLimits::new(2, 4, 1200);
+        let mut a = WireGuardService::new(
             Config::new(a_key, b_public),
             address(1),
             address(2),
             quota,
+            limits,
         )
         .unwrap();
-        let mut b = WireGuardService::<2, 4>::new(
+        let mut b = WireGuardService::new(
             Config::new(b_key, a_public),
             address(2),
             address(1),
             quota,
+            limits,
         )
         .unwrap();
         let now = Now::new(0, 1_700_000_000, 0);
         let mut rng = DeterministicRng::new(9);
-        let mut a_wire = [0u8; crate::net4_runtime::MAX_UDP_DATAGRAM_BYTES];
+        let mut a_wire = [0u8; 1200];
         let mut plaintext = [0u8; 2048];
         let (packet, packet_len) = ipv4_packet(b"service");
 
@@ -337,11 +345,12 @@ mod tests {
         let mut key_rng = DeterministicRng::new(0x4e45_5434_5045_4552);
         let local_key = StaticSecret::generate(&mut key_rng).unwrap();
         let peer_key = StaticSecret::generate(&mut key_rng).unwrap();
-        let mut service = WireGuardService::<1, 1>::new(
+        let mut service = WireGuardService::new(
             Config::new(local_key, peer_key.public_key()),
             address(1),
             address(2),
             UdpQuota::new(1, 1, 1200),
+            UdpLimits::new(1, 1, 1200),
         )
         .unwrap();
         assert_eq!(

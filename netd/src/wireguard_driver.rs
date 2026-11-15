@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use jasper_kernel_core::net4_runtime::{
-    UdpAddress, UdpHandle, UdpQuota, UdpRights, UdpRuntimeError, UdpSocketRuntime, UdpStats,
+    UdpAddress, UdpHandle, UdpLimits, UdpQuota, UdpRights, UdpRuntimeError, UdpSocketRuntime,
+    UdpStats,
 };
 
 use crate::jasper_sink::JasperUdpSink;
@@ -381,23 +382,24 @@ impl From<WireGuardRouterError> for WireGuardMultipeerServiceError {
 
 /// Multi-peer WireGuard service over the bounded Jasper UDP runtime.
 /// 基于有界 Jasper UDP runtime 的多 peer WireGuard 服务。
-pub struct WireGuardMultipeerService<const S: usize, const Q: usize> {
-    runtime: UdpSocketRuntime<S, Q>,
+pub struct WireGuardMultipeerService {
+    runtime: UdpSocketRuntime,
     socket: UdpHandle,
     local: UdpAddress,
     router: WireGuardRouter,
     active: bool,
 }
 
-impl<const S: usize, const Q: usize> WireGuardMultipeerService<S, Q> {
+impl WireGuardMultipeerService {
     pub fn new(
         local: UdpAddress,
         quota: UdpQuota,
+        limits: UdpLimits,
         max_peers: usize,
         max_routes: usize,
         max_buckets_per_peer: usize,
     ) -> Result<Self, WireGuardMultipeerServiceError> {
-        let mut runtime = UdpSocketRuntime::new(quota);
+        let mut runtime = UdpSocketRuntime::new(quota, limits)?;
         let socket = runtime.bind(local, UdpRights::SERVICE)?;
         let router = WireGuardRouter::new(max_peers, max_routes, max_buckets_per_peer)?;
         Ok(Self {
@@ -471,7 +473,7 @@ impl<const S: usize, const Q: usize> WireGuardMultipeerService<S, Q> {
         if !self.active {
             return Err(WireGuardMultipeerServiceError::Inactive);
         }
-        let mut wire = [0u8; jasper_kernel_core::net4_runtime::MAX_UDP_DATAGRAM_BYTES];
+        let mut wire = vec![0u8; self.runtime.limits().max_datagram_bytes];
         let (source, len) = self.runtime.recv(self.socket, &mut wire)?;
         let mut sink = JasperUdpSink::new(&mut self.runtime, self.socket, source);
         Ok(self.router.decapsulate_from(
@@ -927,8 +929,9 @@ mod tests {
         let a_address = UdpAddress::new([10, 0, 0, 1], 51820);
         let b_address = UdpAddress::new([10, 0, 0, 2], 51820);
         let quota = UdpQuota::new(2, 8, 4096);
-        let mut a = WireGuardMultipeerService::<2, 8>::new(a_address, quota, 2, 2, 2).unwrap();
-        let mut b = WireGuardMultipeerService::<2, 8>::new(b_address, quota, 2, 2, 2).unwrap();
+        let limits = UdpLimits::new(2, 8, 1200);
+        let mut a = WireGuardMultipeerService::new(a_address, quota, limits, 2, 2, 2).unwrap();
+        let mut b = WireGuardMultipeerService::new(b_address, quota, limits, 2, 2, 2).unwrap();
         a.add_peer(
             Config::new(a_key, b_public),
             "10.0.0.2:51820".parse().unwrap(),

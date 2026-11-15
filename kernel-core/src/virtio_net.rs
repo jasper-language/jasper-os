@@ -5,25 +5,153 @@
 //! and deterministic host replies. A kernel/hypervisor backend still performs
 //! guest-memory descriptor walks and interrupt delivery.
 
-use crate::net1a::{
-    EthernetFrame, IpProtocol, Ipv4Header, Net1aPacket, parse_ethernet_payload,
-};
-use crate::net1b::{UdpDatagram, ipv4_transport_checksum};
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
+
+use crate::net1a::{parse_ethernet_payload, EthernetFrame, IpProtocol, Ipv4Header, Net1aPacket};
+use crate::net1b::{ipv4_transport_checksum, UdpDatagram};
 use crate::net4_runtime::{
-    UdpAddress, UdpHandle, UdpRights, UdpRuntimeError, UdpSocketRuntime, UdpStats,
+    UdpAddress, UdpHandle, UdpLimits, UdpQuota, UdpRights, UdpRuntimeError, UdpSocketRuntime,
+    UdpStats,
 };
 
 pub const MAC_BYTES: usize = 6;
 pub const VIRTIO_NET_HEADER_BYTES: usize = 12;
 pub const ETHERNET_HEADER_BYTES: usize = 14;
-pub const MAX_FRAME_BYTES: usize = 1514;
-pub const RX_QUEUE_CAPACITY: usize = 4;
+pub const IPV4_UDP_OVERHEAD_BYTES: usize = 28;
 
 pub const FEATURE_CSUM: u32 = 1 << 0;
 pub const FEATURE_GUEST_CSUM: u32 = 1 << 1;
+pub const FEATURE_MTU: u32 = 1 << 3;
 pub const FEATURE_MAC: u32 = 1 << 5;
 pub const FEATURE_STATUS: u32 = 1 << 16;
 pub const FEATURE_GSO: u32 = 1 << 27;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VirtioNetFacts {
+    pub features: u32,
+    pub mtu: u16,
+    pub queue_size: u16,
+    pub link_up: bool,
+}
+
+impl VirtioNetFacts {
+    pub fn discover(
+        features: u32,
+        mtu: Option<u16>,
+        queue_size: u16,
+        link_up: bool,
+    ) -> Result<Self, NetAdmissionError> {
+        let Some(mtu) = mtu else {
+            return Err(NetAdmissionError::MtuUndiscovered);
+        };
+        if features & FEATURE_MAC == 0 {
+            return Err(NetAdmissionError::MacUnsupported);
+        }
+        if features & FEATURE_MTU == 0 || mtu == 0 {
+            return Err(NetAdmissionError::MtuUnsupported);
+        }
+        if features & FEATURE_STATUS == 0 {
+            return Err(NetAdmissionError::StatusUnsupported);
+        }
+        if queue_size == 0 {
+            return Err(NetAdmissionError::QueueUnavailable);
+        }
+        Ok(Self {
+            features,
+            mtu,
+            queue_size,
+            link_up,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetPolicy {
+    pub max_frame_bytes: usize,
+    pub rx_queue_limit: usize,
+    pub rx_bytes_budget: usize,
+    pub udp_sockets: usize,
+    pub udp_queue_depth: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetCapacity {
+    pub mtu: u16,
+    pub max_frame_bytes: usize,
+    pub rx_queue_depth: usize,
+    pub udp: UdpLimits,
+}
+
+impl NetCapacity {
+    pub fn admit(facts: VirtioNetFacts, policy: NetPolicy) -> Result<Self, NetAdmissionError> {
+        let max_frame_bytes = ETHERNET_HEADER_BYTES
+            .checked_add(usize::from(facts.mtu))
+            .ok_or(NetAdmissionError::Capacity)?;
+        if max_frame_bytes > policy.max_frame_bytes {
+            return Err(NetAdmissionError::FrameBudget);
+        }
+        let rx_queue_depth = usize::from(facts.queue_size).min(policy.rx_queue_limit);
+        if rx_queue_depth == 0 {
+            return Err(NetAdmissionError::QueueUnavailable);
+        }
+        let rx_bytes = rx_queue_depth
+            .checked_mul(max_frame_bytes)
+            .ok_or(NetAdmissionError::Capacity)?;
+        if rx_bytes > policy.rx_bytes_budget {
+            return Err(NetAdmissionError::RxBudget);
+        }
+        let max_datagram_bytes = usize::from(facts.mtu)
+            .checked_sub(IPV4_UDP_OVERHEAD_BYTES)
+            .filter(|bytes| *bytes != 0)
+            .ok_or(NetAdmissionError::DatagramBudget)?;
+        let udp = UdpLimits::new(
+            policy.udp_sockets,
+            policy.udp_queue_depth,
+            max_datagram_bytes,
+        );
+        if !udp.valid() {
+            return Err(NetAdmissionError::DatagramBudget);
+        }
+        Ok(Self {
+            mtu: facts.mtu,
+            max_frame_bytes,
+            rx_queue_depth,
+            udp,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetAdmissionError {
+    MacUnsupported,
+    MtuUndiscovered,
+    MtuUnsupported,
+    StatusUnsupported,
+    QueueUnavailable,
+    FrameBudget,
+    RxBudget,
+    DatagramBudget,
+    Memory,
+    Capacity,
+}
+
+impl NetAdmissionError {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::MacUnsupported => "system.net.error.mac_unsupported",
+            Self::MtuUndiscovered => "system.net.error.mtu_undiscovered",
+            Self::MtuUnsupported => "system.net.error.mtu_unsupported",
+            Self::StatusUnsupported => "system.net.error.status_unsupported",
+            Self::QueueUnavailable => "system.net.error.queue_unavailable",
+            Self::FrameBudget => "system.net.error.frame_budget",
+            Self::RxBudget => "system.net.error.rx_budget",
+            Self::DatagramBudget => "system.net.error.datagram_budget",
+            Self::Memory => "system.net.error.memory",
+            Self::Capacity => "system.net.error.capacity",
+        }
+    }
+}
 
 const NET_HDR_F_NEEDS_CSUM: u8 = 1;
 const NET_HDR_F_DATA_VALID: u8 = 2;
@@ -45,6 +173,7 @@ pub enum NetError {
     GsoUnsupported,
     TruncatedHeaders,
     MalformedChecksum,
+    Capacity,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,20 +245,22 @@ pub enum TransmitOutcome {
     Accepted,
 }
 
-#[derive(Clone, Copy)]
 pub struct RxFrame {
-    bytes: [u8; MAX_FRAME_BYTES],
-    len: usize,
+    bytes: Vec<u8>,
 }
 
 impl RxFrame {
-    const EMPTY: Self = Self {
-        bytes: [0; MAX_FRAME_BYTES],
-        len: 0,
-    };
-
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
+        &self.bytes
+    }
+
+    fn zeroed(len: usize) -> Result<Self, NetError> {
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(len)
+            .map_err(|_| NetError::Capacity)?;
+        bytes.resize(len, 0);
+        Ok(Self { bytes })
     }
 }
 
@@ -137,33 +268,71 @@ pub struct VirtioNetBackend {
     mac: [u8; MAC_BYTES],
     ipv4: [u8; 4],
     link_up: bool,
+    capacity: NetCapacity,
     reset_generation: u32,
     tx_frames: u64,
     rx_frames: u64,
     malformed: u64,
-    rx: [RxFrame; RX_QUEUE_CAPACITY],
-    rx_head: usize,
-    rx_len: usize,
-    udp: UdpSocketRuntime<2, 4>,
-    udp_handle: Option<UdpHandle>,
+    rx: VecDeque<RxFrame>,
+    udp: UdpSocketRuntime,
+    udp_handles: Vec<(UdpHandle, u16)>,
 }
 
 impl VirtioNetBackend {
-    pub const fn new(mac: [u8; MAC_BYTES], ipv4: [u8; 4]) -> Self {
-        Self {
+    pub fn admit(
+        mac: [u8; MAC_BYTES],
+        ipv4: [u8; 4],
+        facts: VirtioNetFacts,
+        policy: NetPolicy,
+    ) -> Result<Self, NetAdmissionError> {
+        let capacity = NetCapacity::admit(facts, policy)?;
+        let mut rx = VecDeque::new();
+        rx.try_reserve_exact(capacity.rx_queue_depth)
+            .map_err(|_| NetAdmissionError::Memory)?;
+        let max_datagrams = policy
+            .udp_queue_depth
+            .checked_mul(policy.udp_sockets)
+            .ok_or(NetAdmissionError::Capacity)?;
+        let max_bytes = max_datagrams
+            .checked_mul(capacity.udp.max_datagram_bytes)
+            .ok_or(NetAdmissionError::Capacity)?;
+        let sockets = u32::try_from(policy.udp_sockets).map_err(|_| NetAdmissionError::Capacity)?;
+        let max_datagrams =
+            u32::try_from(max_datagrams).map_err(|_| NetAdmissionError::Capacity)?;
+        let udp = UdpSocketRuntime::new(
+            UdpQuota::new(sockets, max_datagrams, max_bytes as u64),
+            capacity.udp,
+        )
+        .map_err(|_| NetAdmissionError::Memory)?;
+        let mut udp_handles = Vec::new();
+        udp_handles
+            .try_reserve_exact(capacity.udp.max_sockets)
+            .map_err(|_| NetAdmissionError::Memory)?;
+        Ok(Self {
             mac,
             ipv4,
-            link_up: true,
+            link_up: facts.link_up,
+            capacity,
             reset_generation: 1,
             tx_frames: 0,
             rx_frames: 0,
             malformed: 0,
-            rx: [RxFrame::EMPTY; RX_QUEUE_CAPACITY],
-            rx_head: 0,
-            rx_len: 0,
-            udp: UdpSocketRuntime::new(crate::net4_runtime::UdpQuota::new(2, 8, 8192)),
-            udp_handle: None,
-        }
+            rx,
+            udp,
+            udp_handles,
+        })
+    }
+
+    pub const fn capacity(&self) -> NetCapacity {
+        self.capacity
+    }
+
+    pub const fn mtu(&self) -> u16 {
+        self.capacity.mtu
+    }
+
+    pub const fn max_frame_bytes(&self) -> usize {
+        self.capacity.max_frame_bytes
     }
 
     pub const fn mac(&self) -> [u8; MAC_BYTES] {
@@ -196,11 +365,9 @@ impl VirtioNetBackend {
 
     pub fn reset(&mut self) {
         self.reset_generation = self.reset_generation.saturating_add(1);
-        self.rx_head = 0;
-        self.rx_len = 0;
-        self.rx = [RxFrame::EMPTY; RX_QUEUE_CAPACITY];
+        self.rx.clear();
         self.udp.revoke_all();
-        self.udp_handle = None;
+        self.udp_handles.clear();
     }
 
     pub fn set_link(&mut self, up: bool) {
@@ -211,13 +378,15 @@ impl VirtioNetBackend {
     ///
     /// Enables one UDP service socket on the backend's IPv4 address.
     pub fn enable_udp_service(&mut self, port: u16) -> Result<UdpHandle, UdpRuntimeError> {
-        if self.udp_handle.is_some() {
+        if self.udp_handles.len() >= self.capacity.udp.max_sockets {
             return Err(UdpRuntimeError::Capacity);
         }
         let handle = self
             .udp
             .bind(UdpAddress::new(self.ipv4, port), UdpRights::SERVICE)?;
-        self.udp_handle = Some(handle);
+        // `admit` reserved the complete admitted socket budget before creating
+        // the backend, so publication cannot fail after binding has committed.
+        self.udp_handles.push((handle, port));
         Ok(handle)
     }
 
@@ -226,19 +395,25 @@ impl VirtioNetBackend {
     }
 
     pub fn transmit(&mut self, bytes: &[u8]) -> Result<TransmitOutcome, NetError> {
-        let outcome = classify(bytes, self.mac, self.ipv4).inspect_err(|_| {
-            self.malformed = self.malformed.saturating_add(1);
-        })?;
+        let outcome = classify(bytes, self.mac, self.ipv4, self.capacity.max_frame_bytes)
+            .inspect_err(|_| {
+                self.malformed = self.malformed.saturating_add(1);
+            })?;
         self.tx_frames = self.tx_frames.saturating_add(1);
         let reply = match outcome {
             TransmitOutcome::ArpReply => Some(arp_reply(bytes, self.mac, self.ipv4)?),
             TransmitOutcome::IcmpEchoReply => Some(icmp_echo_reply(bytes, self.mac, self.ipv4)?),
             TransmitOutcome::UdpEchoReply => {
-                let Some(handle) = self.udp_handle else {
-                    return Ok(TransmitOutcome::Accepted);
-                };
-                match udp_echo_reply(bytes, self.mac, self.ipv4, &mut self.udp, handle) {
-                    Ok(reply) => Some(reply),
+                match udp_echo_reply(
+                    bytes,
+                    self.mac,
+                    self.ipv4,
+                    &mut self.udp,
+                    &self.udp_handles,
+                    self.capacity.max_frame_bytes,
+                ) {
+                    Ok(Some(reply)) => Some(reply),
+                    Ok(None) => return Ok(TransmitOutcome::Accepted),
                     Err(_) => return Ok(TransmitOutcome::Accepted),
                 }
             }
@@ -251,23 +426,15 @@ impl VirtioNetBackend {
     }
 
     pub fn pop_rx(&mut self) -> Option<RxFrame> {
-        if self.rx_len == 0 {
-            return None;
-        }
-        let frame = self.rx[self.rx_head];
-        self.rx[self.rx_head] = RxFrame::EMPTY;
-        self.rx_head = (self.rx_head + 1) % RX_QUEUE_CAPACITY;
-        self.rx_len -= 1;
-        Some(frame)
+        self.rx.pop_front()
     }
 
     fn enqueue(&mut self, frame: RxFrame) -> Result<(), NetError> {
-        if self.rx_len == RX_QUEUE_CAPACITY {
+        if self.rx.len() == self.capacity.rx_queue_depth {
             return Err(NetError::RxQueueFull);
         }
-        let index = (self.rx_head + self.rx_len) % RX_QUEUE_CAPACITY;
-        self.rx[index] = frame;
-        self.rx_len += 1;
+        self.rx.try_reserve(1).map_err(|_| NetError::Capacity)?;
+        self.rx.push_back(frame);
         self.rx_frames = self.rx_frames.saturating_add(1);
         Ok(())
     }
@@ -277,8 +444,9 @@ fn classify(
     bytes: &[u8],
     mac: [u8; MAC_BYTES],
     ipv4: [u8; 4],
+    max_frame_bytes: usize,
 ) -> Result<TransmitOutcome, NetError> {
-    if bytes.len() > MAX_FRAME_BYTES {
+    if bytes.len() > max_frame_bytes {
         return Err(NetError::FrameTooLarge);
     }
     if bytes.len() < ETHERNET_HEADER_BYTES {
@@ -294,9 +462,7 @@ fn classify(
             return Err(NetError::TruncatedHeaders);
         }
         let arp = &bytes[ETHERNET_HEADER_BYTES..];
-        if u16::from_be_bytes([arp[6], arp[7]]) == ARP_REQUEST
-            && arp[24..28] == ipv4
-        {
+        if u16::from_be_bytes([arp[6], arp[7]]) == ARP_REQUEST && arp[24..28] == ipv4 {
             return Ok(TransmitOutcome::ArpReply);
         }
         return Ok(TransmitOutcome::Accepted);
@@ -332,7 +498,7 @@ fn classify(
 }
 
 fn arp_reply(request: &[u8], mac: [u8; MAC_BYTES], ipv4: [u8; 4]) -> Result<RxFrame, NetError> {
-    let mut frame = RxFrame::EMPTY;
+    let mut frame = RxFrame::zeroed(ETHERNET_HEADER_BYTES + 28)?;
     frame.bytes[..6].copy_from_slice(&request[6..12]);
     frame.bytes[6..12].copy_from_slice(&mac);
     frame.bytes[12..14].copy_from_slice(&ETHERTYPE_ARP.to_be_bytes());
@@ -344,18 +510,24 @@ fn arp_reply(request: &[u8], mac: [u8; MAC_BYTES], ipv4: [u8; 4]) -> Result<RxFr
     out[14..18].copy_from_slice(&ipv4);
     out[18..24].copy_from_slice(&arp[8..14]);
     out[24..28].copy_from_slice(&arp[14..18]);
-    frame.len = ETHERNET_HEADER_BYTES + 28;
     Ok(frame)
 }
 
-fn icmp_echo_reply(request: &[u8], mac: [u8; MAC_BYTES], ipv4: [u8; 4]) -> Result<RxFrame, NetError> {
+fn icmp_echo_reply(
+    request: &[u8],
+    mac: [u8; MAC_BYTES],
+    ipv4: [u8; 4],
+) -> Result<RxFrame, NetError> {
     let ip = &request[ETHERNET_HEADER_BYTES..];
     let ip_header = usize::from(ip[0] & 0x0f) * 4;
     let ip_total = usize::from(u16::from_be_bytes([ip[2], ip[3]]));
     if ip_total < ip_header + 8 || ip_total > ip.len() {
         return Err(NetError::TruncatedHeaders);
     }
-    let mut frame = RxFrame::EMPTY;
+    let frame_len = ETHERNET_HEADER_BYTES
+        .checked_add(ip_total)
+        .ok_or(NetError::Capacity)?;
+    let mut frame = RxFrame::zeroed(frame_len)?;
     frame.bytes[..6].copy_from_slice(&request[6..12]);
     frame.bytes[6..12].copy_from_slice(&mac);
     frame.bytes[12..14].copy_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
@@ -371,7 +543,6 @@ fn icmp_echo_reply(request: &[u8], mac: [u8; MAC_BYTES], ipv4: [u8; 4]) -> Resul
     out_ip[ip_header + 2..ip_header + 4].fill(0);
     let icmp_sum = checksum(&out_ip[ip_header..ip_total]);
     out_ip[ip_header + 2..ip_header + 4].copy_from_slice(&icmp_sum.to_be_bytes());
-    frame.len = ETHERNET_HEADER_BYTES + ip_total;
     Ok(frame)
 }
 
@@ -379,20 +550,33 @@ fn udp_echo_reply(
     request: &[u8],
     mac: [u8; MAC_BYTES],
     ipv4: [u8; 4],
-    runtime: &mut UdpSocketRuntime<2, 4>,
-    handle: UdpHandle,
-) -> Result<RxFrame, UdpRuntimeError> {
-    let ethernet = EthernetFrame::parse(request).map_err(|_| UdpRuntimeError::InvalidAddress)?;
+    runtime: &mut UdpSocketRuntime,
+    handles: &[(UdpHandle, u16)],
+    max_frame_bytes: usize,
+) -> Result<Option<RxFrame>, UdpRuntimeError> {
+    let ethernet = EthernetFrame::parse_bounded(request, max_frame_bytes)
+        .map_err(|_| UdpRuntimeError::InvalidAddress)?;
     let Net1aPacket::Ipv4(ip) =
         parse_ethernet_payload(ethernet).map_err(|_| UdpRuntimeError::InvalidAddress)?
     else {
         return Err(UdpRuntimeError::InvalidAddress);
     };
     let datagram = UdpDatagram::parse(ip).map_err(|_| UdpRuntimeError::InvalidAddress)?;
+    let Some((handle, _)) = handles
+        .iter()
+        .find(|(_, port)| *port == datagram.destination_port)
+    else {
+        return Ok(None);
+    };
+    let handle = *handle;
     let source = UdpAddress::new(ip.source, datagram.source_port);
     let destination = UdpAddress::new(ip.destination, datagram.destination_port);
     runtime.receive(source, destination, datagram.payload)?;
-    let mut payload = [0u8; crate::net4_runtime::MAX_UDP_DATAGRAM_BYTES];
+    let mut payload = Vec::new();
+    payload
+        .try_reserve_exact(runtime.limits().max_datagram_bytes)
+        .map_err(|_| UdpRuntimeError::Capacity)?;
+    payload.resize(runtime.limits().max_datagram_bytes, 0);
     let (reply_to, payload_len) = runtime.recv(handle, &mut payload)?;
     let reply = build_udp_reply(
         request,
@@ -402,9 +586,10 @@ fn udp_echo_reply(
         datagram.destination_port,
         datagram.source_port,
         &payload[..payload_len],
+        max_frame_bytes,
     )?;
     runtime.send(handle, reply_to, &payload[..payload_len])?;
-    Ok(reply)
+    Ok(Some(reply))
 }
 
 fn build_udp_reply(
@@ -415,6 +600,7 @@ fn build_udp_reply(
     source_port: u16,
     destination_port: u16,
     payload: &[u8],
+    max_frame_bytes: usize,
 ) -> Result<RxFrame, UdpRuntimeError> {
     let ip_bytes = 28usize
         .checked_add(payload.len())
@@ -422,10 +608,13 @@ fn build_udp_reply(
     let frame_len = ETHERNET_HEADER_BYTES
         .checked_add(ip_bytes)
         .ok_or(UdpRuntimeError::DatagramTooLarge)?;
-    if frame_len > MAX_FRAME_BYTES || ip_bytes > u16::MAX as usize {
+    if frame_len > max_frame_bytes || ip_bytes > u16::MAX as usize {
         return Err(UdpRuntimeError::DatagramTooLarge);
     }
-    let mut frame = RxFrame::EMPTY;
+    let mut frame = RxFrame::zeroed(frame_len).map_err(|error| match error {
+        NetError::Capacity => UdpRuntimeError::Capacity,
+        _ => UdpRuntimeError::DatagramTooLarge,
+    })?;
     frame.bytes[..6].copy_from_slice(&request[6..12]);
     frame.bytes[6..12].copy_from_slice(&mac);
     frame.bytes[12..14].copy_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
@@ -453,7 +642,6 @@ fn build_udp_reply(
         })
         .to_be_bytes(),
     );
-    frame.len = frame_len;
     Ok(frame)
 }
 
@@ -475,6 +663,33 @@ fn checksum(bytes: &[u8]) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn backend_with(
+        mtu: u16,
+        queue_size: u16,
+        rx_queue_limit: usize,
+        udp_queue_depth: usize,
+    ) -> VirtioNetBackend {
+        let features = FEATURE_MAC | FEATURE_MTU | FEATURE_STATUS;
+        let facts = VirtioNetFacts::discover(features, Some(mtu), queue_size, true).unwrap();
+        VirtioNetBackend::admit(
+            [2, 0, 0, 0, 0, 1],
+            [10, 0, 2, 1],
+            facts,
+            NetPolicy {
+                max_frame_bytes: 16 * 1024,
+                rx_queue_limit,
+                rx_bytes_budget: 256 * 1024,
+                udp_sockets: 2,
+                udp_queue_depth,
+            },
+        )
+        .unwrap()
+    }
+
+    fn backend() -> VirtioNetBackend {
+        backend_with(1500, 16, 4, 4)
+    }
 
     fn arp_request() -> [u8; 42] {
         let mut frame = [0u8; 42];
@@ -504,10 +719,7 @@ mod tests {
         );
         raw[0] = 0;
         raw[1] = 1;
-        assert_eq!(
-            VirtioNetHeader::decode(&raw),
-            Err(NetError::GsoUnsupported)
-        );
+        assert_eq!(VirtioNetHeader::decode(&raw), Err(NetError::GsoUnsupported));
     }
 
     #[test]
@@ -517,7 +729,7 @@ mod tests {
         assert_eq!(&request[12..14], &ETHERTYPE_ARP.to_be_bytes());
         assert_eq!(&request[20..22], &ARP_REQUEST.to_be_bytes());
         assert_eq!(&request[38..42], &[10, 0, 2, 1]);
-        let mut backend = VirtioNetBackend::new([2, 0, 0, 0, 0, 1], [10, 0, 2, 1]);
+        let mut backend = backend();
         assert_eq!(backend.transmit(&request), Ok(TransmitOutcome::ArpReply));
         let reply = backend.pop_rx().unwrap();
         assert_eq!(backend.tx_frames(), 1);
@@ -531,12 +743,10 @@ mod tests {
 
     #[test]
     fn malformed_and_oversized_frames_fail_without_queue_mutation() {
-        let mut backend = VirtioNetBackend::new([2, 0, 0, 0, 0, 1], [10, 0, 2, 1]);
+        let mut backend = backend();
         assert_eq!(backend.transmit(&[0; 13]), Err(NetError::TruncatedHeaders));
-        assert_eq!(
-            backend.transmit(&[0; MAX_FRAME_BYTES + 1]),
-            Err(NetError::FrameTooLarge)
-        );
+        let oversized = vec![0; backend.max_frame_bytes() + 1];
+        assert_eq!(backend.transmit(&oversized), Err(NetError::FrameTooLarge));
         assert!(backend.pop_rx().is_none());
         assert_eq!(backend.malformed(), 2);
         assert_eq!(backend.tx_frames(), 0);
@@ -544,7 +754,7 @@ mod tests {
 
     #[test]
     fn reset_advances_generation_and_drops_queued_rx() {
-        let mut backend = VirtioNetBackend::new([2, 0, 0, 0, 0, 1], [10, 0, 2, 1]);
+        let mut backend = backend();
         backend.transmit(&arp_request()).unwrap();
         assert!(backend.pop_rx().is_some());
         backend.transmit(&arp_request()).unwrap();
@@ -555,18 +765,23 @@ mod tests {
 
     #[test]
     fn rx_queue_exhaustion_is_distinct_from_oversized_frames() {
-        let mut backend = VirtioNetBackend::new([2, 0, 0, 0, 0, 1], [10, 0, 2, 1]);
-        for _ in 0..RX_QUEUE_CAPACITY {
-            assert_eq!(backend.transmit(&arp_request()), Ok(TransmitOutcome::ArpReply));
+        let mut backend = backend();
+        let depth = backend.capacity().rx_queue_depth;
+        for _ in 0..depth {
+            assert_eq!(
+                backend.transmit(&arp_request()),
+                Ok(TransmitOutcome::ArpReply)
+            );
         }
-        assert_eq!(
-            backend.transmit(&arp_request()),
-            Err(NetError::RxQueueFull)
-        );
+        assert_eq!(backend.transmit(&arp_request()), Err(NetError::RxQueueFull));
         assert_ne!(NetError::RxQueueFull, NetError::FrameTooLarge);
     }
 
     fn udp_frame(payload: &[u8]) -> [u8; 46] {
+        udp_frame_to(payload, 4433)
+    }
+
+    fn udp_frame_to(payload: &[u8], destination_port: u16) -> [u8; 46] {
         let mut frame = [0u8; 46];
         frame[..6].copy_from_slice(&[2, 0, 0, 0, 0, 1]);
         frame[6..12].copy_from_slice(&[2, 0, 0, 0, 0, 2]);
@@ -583,28 +798,24 @@ mod tests {
         ip[10..12].copy_from_slice(&ip_sum.to_be_bytes());
         let udp = &mut ip[20..];
         udp[0..2].copy_from_slice(&49152u16.to_be_bytes());
-        udp[2..4].copy_from_slice(&4433u16.to_be_bytes());
+        udp[2..4].copy_from_slice(&destination_port.to_be_bytes());
         udp[4..6].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
         udp[8..].copy_from_slice(payload);
-        let udp_sum = ipv4_transport_checksum(
-            [10, 0, 2, 15],
-            [10, 0, 2, 1],
-            IpProtocol::Udp,
-            udp,
-        );
+        let udp_sum = ipv4_transport_checksum([10, 0, 2, 15], [10, 0, 2, 1], IpProtocol::Udp, udp);
         udp[6..8].copy_from_slice(&udp_sum.to_be_bytes());
         frame
     }
 
     #[test]
     fn udp_runtime_socket_echoes_real_frame_and_returns_quota() {
-        let mut backend = VirtioNetBackend::new([2, 0, 0, 0, 0, 1], [10, 0, 2, 1]);
+        let mut backend = backend();
         backend.enable_udp_service(4433).unwrap();
+        backend.enable_udp_service(4434).unwrap();
         assert_eq!(
-            backend.enable_udp_service(4434),
+            backend.enable_udp_service(4435),
             Err(UdpRuntimeError::Capacity)
         );
-        assert_eq!(backend.udp_stats().active_sockets, 1);
+        assert_eq!(backend.udp_stats().active_sockets, 2);
         let request = udp_frame(b"quic");
         assert_eq!(
             backend.transmit(&request),
@@ -619,30 +830,76 @@ mod tests {
         assert_eq!(udp.source_port, 4433);
         assert_eq!(udp.destination_port, 49152);
         assert_eq!(udp.payload, b"quic");
+        let request = udp_frame_to(b"next", 4434);
+        assert_eq!(
+            backend.transmit(&request),
+            Ok(TransmitOutcome::UdpEchoReply)
+        );
+        let reply = backend.pop_rx().unwrap();
+        let EthernetFrame { payload, .. } = EthernetFrame::parse(reply.bytes()).unwrap();
+        let ip = Ipv4Header::parse(payload).unwrap();
+        let udp = UdpDatagram::parse(ip).unwrap();
+        assert_eq!(udp.source_port, 4434);
+        assert_eq!(udp.payload, b"next");
         let stats = backend.udp_stats();
-        assert_eq!(stats.received_datagrams, 1);
-        assert_eq!(stats.sent_datagrams, 1);
+        assert_eq!(stats.received_datagrams, 2);
+        assert_eq!(stats.sent_datagrams, 2);
         assert_eq!(stats.queued_datagrams, 0);
         backend.reset();
         assert_eq!(backend.udp_stats().active_sockets, 0);
-        assert_eq!(
-            backend.transmit(&request),
-            Ok(TransmitOutcome::Accepted)
-        );
+        assert_eq!(backend.transmit(&request), Ok(TransmitOutcome::Accepted));
         assert!(backend.pop_rx().is_none());
     }
 
     #[test]
     fn malformed_udp_checksum_is_rejected_without_reply() {
-        let mut backend = VirtioNetBackend::new([2, 0, 0, 0, 0, 1], [10, 0, 2, 1]);
+        let mut backend = backend();
         backend.enable_udp_service(4433).unwrap();
         let mut request = udp_frame(b"quic");
         request[40] ^= 0xff;
-        assert_eq!(
-            backend.transmit(&request),
-            Err(NetError::MalformedChecksum)
-        );
+        assert_eq!(backend.transmit(&request), Err(NetError::MalformedChecksum));
         assert!(backend.pop_rx().is_none());
         assert_eq!(backend.malformed(), 1);
+    }
+
+    #[test]
+    fn device_facts_and_policy_produce_distinct_runtime_capacities() {
+        let standard = backend_with(1500, 16, 4, 3);
+        let jumbo = backend_with(9000, 32, 8, 7);
+        assert_eq!(standard.max_frame_bytes(), 1514);
+        assert_eq!(standard.capacity().rx_queue_depth, 4);
+        assert_eq!(standard.capacity().udp.max_datagram_bytes, 1472);
+        assert_eq!(jumbo.max_frame_bytes(), 9014);
+        assert_eq!(jumbo.capacity().rx_queue_depth, 8);
+        assert_eq!(jumbo.capacity().udp.max_datagram_bytes, 8972);
+        assert_ne!(standard.capacity(), jumbo.capacity());
+    }
+
+    #[test]
+    fn missing_mtu_and_policy_budget_fail_closed() {
+        assert_eq!(
+            VirtioNetFacts::discover(FEATURE_MAC | FEATURE_STATUS, None, 16, true),
+            Err(NetAdmissionError::MtuUndiscovered)
+        );
+        let facts = VirtioNetFacts::discover(
+            FEATURE_MAC | FEATURE_MTU | FEATURE_STATUS,
+            Some(9000),
+            16,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            NetCapacity::admit(
+                facts,
+                NetPolicy {
+                    max_frame_bytes: 1514,
+                    rx_queue_limit: 16,
+                    rx_bytes_budget: 256 * 1024,
+                    udp_sockets: 2,
+                    udp_queue_depth: 4,
+                }
+            ),
+            Err(NetAdmissionError::FrameBudget)
+        );
     }
 }

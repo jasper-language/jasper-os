@@ -7,18 +7,17 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use kernel_core::net1a::{EthernetFrame, parse_ethernet_payload};
+use kernel_core::net1a::{parse_ethernet_payload, EthernetFrame};
 use kernel_core::net1b::UdpDatagram;
 use kernel_core::net4_runtime::{
-    UdpAddress, UdpQuota, UdpRights, UdpRuntimeError, UdpSocketRuntime,
+    UdpAddress, UdpLimits, UdpQuota, UdpRights, UdpRuntimeError, UdpSocketRuntime,
 };
-use kernel_core::net4_service::{
-    WireGuardEmit, WireGuardReceive, WireGuardService,
+use kernel_core::net4_service::{WireGuardEmit, WireGuardReceive, WireGuardService};
+use kernel_core::virtio_net::{
+    NetPolicy, TransmitOutcome, VirtioNetBackend, VirtioNetFacts, FEATURE_MAC, FEATURE_MTU,
+    FEATURE_STATUS,
 };
-use kernel_core::virtio_net::{TransmitOutcome, VirtioNetBackend};
-use kernel_core::wireguard::{
-    testing::DeterministicRng, Config, Now, StaticSecret,
-};
+use kernel_core::wireguard::{testing::DeterministicRng, Config, Now, StaticSecret};
 
 use crate::kprintln;
 
@@ -79,27 +78,30 @@ fn verify_wireguard_service() -> bool {
     let a_public = a_key.public_key();
     let b_public = b_key.public_key();
     let quota = UdpQuota::new(1, 1, 1200);
-    let mut a = match WireGuardService::<1, 1>::new(
+    let limits = UdpLimits::new(1, 1, 1200);
+    let mut a = match WireGuardService::new(
         Config::new(a_key, b_public),
         UdpAddress::new([10, 0, 3, 1], 51820),
         UdpAddress::new([10, 0, 3, 2], 51820),
         quota,
+        limits,
     ) {
         Ok(service) => service,
         Err(_) => return false,
     };
-    let mut b = match WireGuardService::<1, 1>::new(
+    let mut b = match WireGuardService::new(
         Config::new(b_key, a_public),
         UdpAddress::new([10, 0, 3, 2], 51820),
         UdpAddress::new([10, 0, 3, 1], 51820),
         quota,
+        limits,
     ) {
         Ok(service) => service,
         Err(_) => return false,
     };
     let now = Now::new(0, 1_700_000_000, 0);
     let mut rng = DeterministicRng::new(9);
-    let mut a_wire = [0u8; kernel_core::net4_runtime::MAX_UDP_DATAGRAM_BYTES];
+    let mut a_wire = alloc::vec![0u8; limits.max_datagram_bytes];
     let mut plaintext = [0u8; 2048];
     let mut packet = [0u8; 64];
     let total = 26usize;
@@ -129,9 +131,7 @@ fn verify_wireguard_service() -> bool {
         }
         _ => return false,
     }
-    if a.receive(now, &mut plaintext, &mut rng)
-        != Ok(WireGuardReceive::HandshakeComplete)
-    {
+    if a.receive(now, &mut plaintext, &mut rng) != Ok(WireGuardReceive::HandshakeComplete) {
         return false;
     }
     match a.encapsulate(now, &packet[..total], &mut a_wire, &mut rng) {
@@ -164,12 +164,37 @@ fn verify_wireguard_service() -> bool {
 
 pub fn run() {
     let before = crate::baseline::baseline();
-    let mut backend = VirtioNetBackend::new([2, 0, 0, 0, 0, 1], [10, 0, 2, 1]);
+    let Ok(facts) = VirtioNetFacts::discover(
+        FEATURE_MAC | FEATURE_MTU | FEATURE_STATUS,
+        Some(1500),
+        16,
+        true,
+    ) else {
+        check(false, "net_facts");
+        return;
+    };
+    let Ok(mut backend) = VirtioNetBackend::admit(
+        [2, 0, 0, 0, 0, 1],
+        [10, 0, 2, 1],
+        facts,
+        NetPolicy {
+            max_frame_bytes: 4096,
+            rx_queue_limit: 8,
+            rx_bytes_budget: 64 * 1024,
+            udp_sockets: 2,
+            udp_queue_depth: 4,
+        },
+    ) else {
+        check(false, "net_admission");
+        return;
+    };
     let first_handle = backend.enable_udp_service(4433);
     check(first_handle.is_ok(), "bind");
+    let second_handle = backend.enable_udp_service(4434);
+    check(second_handle.is_ok(), "bind_second");
     check(
-        backend.enable_udp_service(4434) == Err(UdpRuntimeError::Capacity),
-        "duplicate_service",
+        backend.enable_udp_service(4435) == Err(UdpRuntimeError::Capacity),
+        "service_budget",
     );
 
     let request = udp_frame(b"quic");
@@ -182,9 +207,7 @@ pub fn run() {
         let Ok(ethernet) = EthernetFrame::parse(reply.bytes()) else {
             return false;
         };
-        let Ok(kernel_core::net1a::Net1aPacket::Ipv4(ip)) =
-            parse_ethernet_payload(ethernet)
-        else {
+        let Ok(kernel_core::net1a::Net1aPacket::Ipv4(ip)) = parse_ethernet_payload(ethernet) else {
             return false;
         };
         let Ok(udp) = UdpDatagram::parse(ip) else {
@@ -201,20 +224,29 @@ pub fn run() {
     let stats = backend.udp_stats();
     check(stats.received_datagrams == 1, "received_stats");
     check(stats.sent_datagrams == 1, "sent_stats");
-    check(stats.queued_datagrams == 0 && stats.queued_bytes == 0, "queue");
+    check(
+        stats.queued_datagrams == 0 && stats.queued_bytes == 0,
+        "queue",
+    );
 
-    let mut quota_runtime = UdpSocketRuntime::<1, 1>::new(UdpQuota::new(1, 1, 4));
+    let Ok(mut quota_runtime) =
+        UdpSocketRuntime::new(UdpQuota::new(1, 1, 4), UdpLimits::new(1, 1, 4))
+    else {
+        check(false, "quota_runtime");
+        return;
+    };
     let quota_local = UdpAddress::new([10, 0, 2, 2], 5353);
     let quota_remote = UdpAddress::new([10, 0, 2, 15], 49153);
     let quota_socket = quota_runtime.bind(quota_local, UdpRights::SERVICE);
     check(quota_socket.is_ok(), "quota_bind");
     check(
-        quota_runtime.receive(quota_remote, quota_local, b"1234").is_ok(),
+        quota_runtime
+            .receive(quota_remote, quota_local, b"1234")
+            .is_ok(),
         "quota_receive",
     );
     check(
-        quota_runtime.receive(quota_remote, quota_local, b"5")
-            == Err(UdpRuntimeError::QueueFull),
+        quota_runtime.receive(quota_remote, quota_local, b"5") == Err(UdpRuntimeError::QueueFull),
         "quota_reject",
     );
     if let Ok(handle) = quota_socket {
@@ -231,8 +263,7 @@ pub fn run() {
     let mut malformed = udp_frame(b"quic");
     malformed[40] ^= 0xff;
     check(
-        backend.transmit(&malformed)
-            == Err(kernel_core::virtio_net::NetError::MalformedChecksum),
+        backend.transmit(&malformed) == Err(kernel_core::virtio_net::NetError::MalformedChecksum),
         "checksum",
     );
     check(backend.pop_rx().is_none(), "malformed_reply");
@@ -249,9 +280,16 @@ pub fn run() {
 
     let after = crate::baseline::baseline();
     let resources = before == after;
+    let capacity = backend.capacity();
     check(resources, "resources");
     kprintln!(
-        "[JSR-NET4-RUNTIME] wire=true udp=true socket=true quota=true generation=true echo=true service=true wireguard=true reset=true resources={} failed={}",
+        "[JSR-NET4-RUNTIME] wire=true udp=true socket=true quota=true generation=true echo=true service=true wireguard=true reset=true mtu={} max_frame={} rx_queue={} udp_sockets={} udp_queue={} max_datagram={} resources={} failed={}",
+        capacity.mtu,
+        capacity.max_frame_bytes,
+        capacity.rx_queue_depth,
+        capacity.udp.max_sockets,
+        capacity.udp.queue_depth,
+        capacity.udp.max_datagram_bytes,
         resources,
         failed()
     );

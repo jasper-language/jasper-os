@@ -9,6 +9,7 @@ export PATH="${HOME}/.cargo/bin:${PATH}"
 OUT="${NET4_RUNTIME_OUT:-$ROOT/evidence/net4-runtime-$(date '+%Y%m%d-%H%M%S')}"
 TARGET="${NET4_RUNTIME_TARGET:-$ROOT/target/net4-runtime}"
 LIMIT="${NET4_RUNTIME_TIMEOUT:-300}"
+CPUS="${NET4_RUNTIME_CPUS:-4-7}"
 mkdir -p "$OUT" "$TARGET"
 
 cargo build --locked --release --target-dir "$TARGET" -p xtask \
@@ -21,24 +22,24 @@ CARGO_TARGET_DIR="$TARGET" cargo build --locked --release \
   >"$OUT/image.log" 2>&1
 
 set +e
-nice -n 10 taskset -c 0 timeout "$LIMIT" qemu-system-x86_64 \
-  -accel tcg \
-  -machine q35 \
-  -cpu max \
-  -m 256M \
-  -smp 1 \
-  -drive format=raw,file="$OUT/kernel.img",snapshot=on \
-  -device virtio-rng-pci \
-  -device virtio-net-pci,netdev=n0 \
-  -netdev user,id=n0 \
-  -serial "file:$OUT/serial.log" \
-  -display none -monitor none -no-reboot \
-  -device isa-debug-exit,iobase=0xf4,iosize=0x04
+flock /tmp/jasper-os-qemu.lock nice -n 10 taskset -c "$CPUS" timeout "$LIMIT" qemu-system-x86_64 \
+    -accel tcg \
+    -machine q35 \
+    -cpu max \
+    -m 256M \
+    -smp 1 \
+    -drive format=raw,file="$OUT/kernel.img",snapshot=on \
+    -device virtio-rng-pci \
+    -device virtio-net-pci,netdev=n0 \
+    -netdev user,id=n0 \
+    -serial "file:$OUT/serial.log" \
+    -display none -monitor none -no-reboot \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04
 rc=$?
 set -e
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
 [ "$rc" -eq 33 ]
-grep -aq '^\[JSR-NET4-RUNTIME\] wire=true udp=true socket=true quota=true generation=true echo=true service=true wireguard=true reset=true resources=true failed=0' \
+grep -aq '^\[JSR-NET4-RUNTIME\] wire=true udp=true socket=true quota=true generation=true echo=true service=true wireguard=true reset=true mtu=1500 max_frame=1514 rx_queue=8 udp_sockets=2 udp_queue=4 max_datagram=1472 resources=true failed=0' \
   "$OUT/serial.log"
 ! grep -aqE '^\[JSR-NET4-RUNTIME-FAIL\]|^\[JSR-PANIC\]|panicked at|KERNEL PANIC' \
   "$OUT/serial.log"

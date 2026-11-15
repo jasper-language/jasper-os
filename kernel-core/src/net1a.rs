@@ -4,11 +4,6 @@ use crate::net::NetError;
 
 pub const ETHERNET_HEADER_BYTES: usize = 14;
 pub const ETHERNET_MIN_FRAME_BYTES: usize = 60;
-/// Largest Ethernet II frame (excluding the four-byte FCS) accepted by this
-/// parser. Network drivers normally remove the FCS before handing a frame to
-/// the protocol stack; accepting the on-wire size here would admit four
-/// trailing bytes as protocol payload.
-pub const ETHERNET_MAX_FRAME_BYTES: usize = 1514;
 pub const ARP_IPV4_BYTES: usize = 28;
 pub const IPV4_MIN_HEADER_BYTES: usize = 20;
 
@@ -43,23 +38,36 @@ pub struct EthernetFrame<'a> {
 }
 
 impl<'a> EthernetFrame<'a> {
+    /// Parses a driver-bounded frame without imposing a platform MTU.
+    /// 解析已由驱动按运行时 MTU 限制的帧，不额外假设平台帧长。
     pub fn parse(bytes: &'a [u8]) -> Result<Self, NetError> {
         if bytes.len() < ETHERNET_HEADER_BYTES {
             return Err(NetError::WireTooShort);
         }
-        if bytes.len() > ETHERNET_MAX_FRAME_BYTES {
+        Ok(Self::assemble(bytes))
+    }
+
+    pub fn parse_bounded(bytes: &'a [u8], max_frame_bytes: usize) -> Result<Self, NetError> {
+        if bytes.len() < ETHERNET_HEADER_BYTES {
+            return Err(NetError::WireTooShort);
+        }
+        if max_frame_bytes < ETHERNET_HEADER_BYTES || bytes.len() > max_frame_bytes {
             return Err(NetError::InvalidPolicy);
         }
+        Ok(Self::assemble(bytes))
+    }
+
+    fn assemble(bytes: &'a [u8]) -> Self {
         let mut destination = [0u8; 6];
         let mut source = [0u8; 6];
         destination.copy_from_slice(&bytes[..6]);
         source.copy_from_slice(&bytes[6..12]);
-        Ok(Self {
+        Self {
             destination: MacAddress(destination),
             source: MacAddress(source),
             ether_type: EtherType::from_raw(u16::from_be_bytes([bytes[12], bytes[13]])),
             payload: &bytes[ETHERNET_HEADER_BYTES..],
-        })
+        }
     }
 }
 
@@ -279,9 +287,9 @@ mod tests {
     #[test]
     fn malformed_lengths_checksums_and_versions_fail_closed() {
         assert_eq!(EthernetFrame::parse(&[0; 13]), Err(NetError::WireTooShort));
-        assert!(EthernetFrame::parse(&[0; ETHERNET_MAX_FRAME_BYTES]).is_ok());
+        assert!(EthernetFrame::parse(&[0; 9014]).is_ok());
         assert_eq!(
-            EthernetFrame::parse(&[0; ETHERNET_MAX_FRAME_BYTES + 1]),
+            EthernetFrame::parse_bounded(&[0; 1515], 1514),
             Err(NetError::InvalidPolicy)
         );
         let mut ip = ipv4_packet();
@@ -299,6 +307,16 @@ mod tests {
         let checksum = internet_checksum(&ip[..20]);
         ip[10..12].copy_from_slice(&checksum.to_be_bytes());
         assert_eq!(Ipv4Header::parse(&ip), Err(NetError::InvalidPolicy));
+    }
+
+    #[test]
+    fn bounded_ethernet_parser_accepts_device_admitted_jumbo_frame() {
+        let frame = [0u8; 9014];
+        assert_eq!(
+            EthernetFrame::parse_bounded(&frame, 1514),
+            Err(NetError::InvalidPolicy)
+        );
+        assert!(EthernetFrame::parse_bounded(&frame, 9014).is_ok());
     }
 
     #[test]
