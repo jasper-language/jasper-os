@@ -21,8 +21,10 @@ use super::paging::desc;
 
 /// 全物理内存映射的偏移（顶级第 1 项的起点）。
 pub const PHYS_OFFSET: u64 = 1 << 39;
-/// 早期就映射的物理地址范围（GiB）：覆盖 QEMU `virt` 的设备区与内存起点，设备树读出前即可访问。
-const EARLY_PHYS_GIB: usize = 4;
+/// Minimum early normal-RAM coverage outside the Pixel firmware path.
+const QEMU_EARLY_GIB: u64 = 2;
+/// Pixel firmware tables can sit above QEMU's RAM base.
+const PIXEL_EARLY_GIB: u64 = 4;
 /// 内核映像恒等映射可用的第 3 级表数（每张 2 MiB；与链接脚本中的映像大小上限一致）。
 const IMAGE_L3_TABLES: usize = 16;
 const GIB: u64 = 1 << 30;
@@ -39,6 +41,7 @@ static mut ID_L1: Table = EMPTY;
 static mut ID_L2: Table = EMPTY;
 static mut ID_L3: [Table; IMAGE_L3_TABLES] = [EMPTY; IMAGE_L3_TABLES];
 static mut PHYS_L1: Table = EMPTY;
+static mut PHYS_L2_EARLY: Table = EMPTY;
 
 extern "C" {
     static __image_start: u8;
@@ -93,11 +96,12 @@ fn device_block(phys: u64) -> u64 {
 ///
 /// # Safety
 /// 只能在 MMU 打开之前、没有其他执行流时调用一次。
-pub unsafe fn build_boot_tables() -> bool {
+pub unsafe fn build_boot_tables(early_normal: u64) -> bool {
     let (start, end) = image_range();
     let text_end = core::ptr::addr_of!(__text_end) as u64;
     let rodata_end = core::ptr::addr_of!(__rodata_end) as u64;
     if start % MIB2 != 0 || end <= start || (start / GIB) != ((end - 1) / GIB) || end - start > IMAGE_L3_TABLES as u64 * MIB2 {
+        super::semihost::write0(b"[JSR-A64-MMU] reject=image-layout\n\0");
         return false;
     }
     let root = addr_of_mut!(ROOT) as *mut u64;
@@ -105,6 +109,7 @@ pub unsafe fn build_boot_tables() -> bool {
     let id_l2 = addr_of_mut!(ID_L2) as *mut u64;
     let id_l3 = addr_of_mut!(ID_L3) as *mut Table;
     let phys_l1 = addr_of_mut!(PHYS_L1) as *mut u64;
+    let phys_l2 = addr_of_mut!(PHYS_L2_EARLY) as *mut u64;
 
     // 恒等映射：按 4 KiB 页、按段权限
     let mut page = start;
@@ -123,11 +128,40 @@ pub unsafe fn build_boot_tables() -> bool {
     id_l1.add(((start >> 30) & 511) as usize).write_volatile(table_desc(id_l2 as u64));
     root.write_volatile(table_desc(id_l1 as u64));
 
-    // 全物理内存映射：第 0 GiB 设备内存，其后为普通内存
-    phys_l1.write_volatile(device_block(0));
-    let mut g = 1;
-    while g < EARLY_PHYS_GIB {
-        phys_l1.add(g).write_volatile(normal_block(g as u64 * GIB));
+    // The first physical GiB contains both low MMIO and QEMU RAM. Use 2 MiB
+    // leaves to split them instead of applying Device attributes to RAM.
+    let normal_start = early_normal / MIB2 * MIB2;
+    if normal_start >= 512 * GIB {
+        super::semihost::write0(b"[JSR-A64-MMU] reject=normal-start\n\0");
+        return false;
+    }
+    if normal_start < GIB {
+        for index in 0..512usize {
+            let pa = index as u64 * MIB2;
+            phys_l2.add(index).write_volatile(if pa < normal_start {
+                device_block(pa)
+            } else {
+                normal_block(pa)
+            });
+        }
+        phys_l1.write_volatile(table_desc(phys_l2 as u64));
+    } else {
+        let first_normal = (normal_start / GIB) as usize;
+        for index in 0..first_normal {
+            phys_l1.add(index).write_volatile(device_block(index as u64 * GIB));
+        }
+        phys_l1
+            .add(first_normal)
+            .write_volatile(normal_block(first_normal as u64 * GIB));
+    }
+    let early_gib = if cfg!(any(feature = "pixel6a-smoke", feature = "pixel6a-full")) {
+        PIXEL_EARLY_GIB
+    } else {
+        QEMU_EARLY_GIB.max(normal_start / GIB + 1)
+    };
+    let mut g = if normal_start < GIB { 1 } else { normal_start / GIB + 1 };
+    while g < early_gib {
+        phys_l1.add(g as usize).write_volatile(normal_block(g * GIB));
         g += 1;
     }
     root.add(1).write_volatile(table_desc(phys_l1 as u64));
@@ -138,15 +172,20 @@ pub unsafe fn build_boot_tables() -> bool {
 /// 至少是早期映射的范围，至多 512 GiB（超出部分不映射）。
 /// Extend the linear physical map to cover `[0, end)`; returns the covered end.
 pub fn cover_phys(end: u64) -> u64 {
-    let gib = end.div_ceil(GIB).clamp(EARLY_PHYS_GIB as u64, 512) as usize;
+    let minimum = if cfg!(any(feature = "pixel6a-smoke", feature = "pixel6a-full")) {
+        PIXEL_EARLY_GIB
+    } else {
+        QEMU_EARLY_GIB
+    };
+    let gib = end.div_ceil(GIB).clamp(minimum, 512) as usize;
     let phys_l1 = addr_of_mut!(PHYS_L1) as *mut u64;
     for g in 1..gib {
-        // SAFETY：PHYS_L1 是本模块独占的早期表，经恒等映射访问；无效 → 有效的写入无需作废 TLB。
+        // SAFETY: PHYS_L1 is the module-owned direct-map table accessed through
+        // the identity map. Firmware-discovered RAM is admitted as Normal,
+        // replacing any temporary Device-only prefix block above GiB 0.
         unsafe {
             let slot = phys_l1.add(g);
-            if slot.read_volatile() & desc::VALID == 0 {
-                slot.write_volatile(normal_block(g as u64 * GIB));
-            }
+            slot.write_volatile(normal_block(g as u64 * GIB));
         }
     }
     cpu::table_write_barrier();

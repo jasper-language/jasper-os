@@ -584,7 +584,18 @@ extern "C" fn jsr_aarch64_boot(dtb_hint: u64, uefi_system_table: u64) -> ! {
     };
     // SAFETY：此刻 MMU 关闭且只有本执行流；建表只做对齐的 64 位写。
     unsafe {
-        if !mmu::build_boot_tables() {
+        let early_normal = if cfg!(any(
+            feature = "pixel6a-smoke",
+            feature = "pixel6a-full"
+        )) {
+            QEMU_VIRT_DTB
+        } else if dtb_hint != 0 && dtb_hint % (2 * 1024 * 1024) == 0 {
+            dtb_hint
+        } else {
+            QEMU_VIRT_DTB
+        };
+        if !mmu::build_boot_tables(early_normal) {
+            semihost::write0(b"[JSR-A64-MMU] reject=boot-map\n\0");
             semihost::exit(EXIT_FAILURE);
         }
         mmu::enable();

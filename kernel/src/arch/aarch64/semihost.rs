@@ -6,8 +6,24 @@
 
 /// 半主机操作：带状态的退出（AArch64 形式，参数块 = [原因, 退出码]）。
 const SYS_EXIT: u64 = 0x18;
+/// Semihosting write-null-terminated-string operation.
+const SYS_WRITE0: u64 = 0x04;
 /// 退出原因：应用程序正常退出（附带退出码）。
 const ADP_STOPPED_APPLICATION_EXIT: u64 = 0x2_0026;
+
+/// Write one NUL-terminated diagnostic string through semihosting.
+pub fn write0(text: &'static [u8]) {
+    // SAFETY: `text` is a static NUL-terminated byte string and semihosting
+    // reads it synchronously.
+    unsafe {
+        core::arch::asm!(
+            "hlt #0xf000",
+            in("x0") SYS_WRITE0,
+            in("x1") text.as_ptr(),
+            options(nostack)
+        );
+    }
+}
 
 /// 以 `code` 结束仿真（不返回）。
 pub fn exit(code: u32) -> ! {
