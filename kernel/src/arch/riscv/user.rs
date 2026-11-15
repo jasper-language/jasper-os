@@ -34,7 +34,15 @@ static KERNEL_STACK_TOP: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(0) 
 
 /// 本处理器的内核栈顶记录。
 fn this_cpu_top() -> &'static AtomicUsize {
-    &KERNEL_STACK_TOP[super::smp::cpu_index().min(MAX_CPUS - 1)]
+    let index = super::smp::cpu_index();
+    KERNEL_STACK_TOP.get(index).unwrap_or_else(|| {
+        crate::kprintln!(
+            "[JSR-SMP] reject=cpu_index_out_of_range index={} max={}",
+            index,
+            MAX_CPUS
+        );
+        crate::arch::halt_forever()
+    })
 }
 
 /// 记录本处理器当前任务的内核栈顶。

@@ -269,9 +269,16 @@ pub fn init(index: usize, xsave: bool) {
 
 /// 更新本处理器系统调用入口使用的内核栈顶（与本核 TSS.rsp0 同步）。
 pub fn set_kernel_stack(top: u64) {
-    if let Some(b) = BLOCKS.get(super::smp::cpu_index()) {
-        b.kstack.store(top, Ordering::Relaxed);
-    }
+    let index = super::smp::cpu_index();
+    let Some(block) = BLOCKS.get(index) else {
+        crate::kprintln!(
+            "[JSR-SMP] reject=syscall_entry_uninitialized index={} max={}",
+            index,
+            MAX_CPUS
+        );
+        crate::arch::halt_forever();
+    };
+    block.kstack.store(top, Ordering::Relaxed);
 }
 
 /// 经 IA32_KERNEL_GS_BASE 读出本处理器入口块登记的内核栈顶（入口实际使用的就是这个值）。

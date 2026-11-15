@@ -164,6 +164,13 @@ pub fn get(cpu: usize) -> Option<&'static PerCpu> {
 /// 本处理器的每核数据。
 /// Per-CPU record of the executing processor.
 pub fn this() -> &'static PerCpu {
-    // 平台保证下标小于 MAX_CPUS；越界属于平台缺陷，退回引导处理器的记录而不是越界访问。
-    CPUS.get(arch::cpu_index()).unwrap_or(&CPUS[0])
+    let index = arch::cpu_index();
+    CPUS.get(index).unwrap_or_else(|| {
+        crate::kprintln!(
+            "[JSR-SMP] reject=cpu_index_out_of_range index={} max={}",
+            index,
+            MAX_CPUS
+        );
+        arch::halt_forever()
+    })
 }

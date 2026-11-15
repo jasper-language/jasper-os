@@ -147,7 +147,12 @@ pub fn cpu_index() -> usize {
             return index;
         }
     }
-    0
+    crate::kprintln!(
+        "[JSR-SMP] reject=cpu_id_unregistered hw={} online={}",
+        hw,
+        CPU_COUNT.load(Ordering::Acquire)
+    );
+    crate::arch::halt_forever()
 }
 
 pub fn send_ipi(cpu: usize, kind: IpiKind) -> Result<(), SmpError> {

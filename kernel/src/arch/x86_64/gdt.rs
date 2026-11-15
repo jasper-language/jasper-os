@@ -162,7 +162,13 @@ pub fn selectors() -> Selectors {
 /// 调用者（调度器）在关中断临界区内调用；CPU 只在特权级切换时读取它。
 pub fn set_kernel_stack(top: u64) {
     let p = CPU_TSS.get(super::smp::cpu_index()).map(|t| t.load(Ordering::Acquire)).unwrap_or(core::ptr::null_mut());
-    let p = if p.is_null() { addr_of_mut!(TSS) } else { p };
+    if p.is_null() {
+        crate::kprintln!(
+            "[JSR-SMP] reject=tss_uninitialized index={}",
+            super::smp::cpu_index()
+        );
+        crate::arch::halt_forever();
+    }
     // SAFETY：p 是本处理器的 TSS；只有本处理器在关中断下写它，CPU 读取的是同一块内存。
     unsafe { (*p).privilege_stack_table[0] = VirtAddr::new(top) };
 }

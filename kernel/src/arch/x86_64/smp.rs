@@ -258,14 +258,20 @@ pub fn hw_id_of(cpu: usize) -> Option<u32> {
     HW_ID.get(cpu).map(|h| h.load(Ordering::Relaxed)).filter(|&h| h != u32::MAX)
 }
 
-/// 当前处理器的逻辑下标（APIC 未就绪或标识未登记时为 0）。
+/// 当前处理器的逻辑下标；APIC 已就绪但标识未登记时失败关闭。
 #[inline]
 pub fn cpu_index() -> usize {
     if !apic::ready() {
         return 0;
     }
     match INDEX_OF[(apic::id() & 0xFF) as usize].load(Ordering::Acquire) {
-        0 => 0,
+        0 => {
+            crate::kprintln!(
+                "[JSR-SMP] reject=cpu_id_unregistered apic={:#x}",
+                apic::id()
+            );
+            crate::arch::halt_forever()
+        }
         n => n as usize - 1,
     }
 }
