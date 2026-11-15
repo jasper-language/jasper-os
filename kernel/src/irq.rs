@@ -22,7 +22,7 @@
 //! 本处理器下一个 tick 调用解除屏蔽回调；设备在屏蔽期间只置挂起位，解除后重新送达，到达不丢。
 //! Core 不知道消息表项在哪里：回调与上下文值由绑定方登记。
 
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use kernel_core::irq::{AffinityPolicy, Charge, CoreQuota, IrqError, LineLoad, QuotaParams, Released, MAX_LINES};
 use kernel_core::msi::MsiError;
@@ -399,6 +399,54 @@ pub mod device {
     static WINDOW: [IrqU64; MAX_LINES] = [const { IrqU64::new(0) }; MAX_LINES];
     /// 未知线号的中断数（平台报告了超出范围的线）。
     static STRAY: AtomicU32 = AtomicU32::new(0);
+    /// 拓扑事实只发布一次，避免运行期重复打印。
+    static TOPOLOGY_REPORTED: AtomicBool = AtomicBool::new(false);
+
+    /// Complete platform-to-routing-table admission facts.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct LineTopology {
+        pub discovered: usize,
+        pub admitted: usize,
+        pub rejected: usize,
+        pub capacity: usize,
+    }
+
+    /// Admit the platform's complete IRQ inventory into the routing table.
+    ///
+    /// A bounded table is valid only when every discovered line is represented.
+    /// The platform source, accepted subset, rejected remainder and implementation
+    /// capacity are published together before any consumer can use the table.
+    pub fn admit_topology() -> LineTopology {
+        let discovered = arch::device_irq_count();
+        let admitted = discovered.min(MAX_LINES); // JASPER-HARDCODE-REVIEW: issue=32 source=runtime platform IRQ inventory reason=bounded routing table only publishes a complete inventory
+        let topology = LineTopology {
+            discovered,
+            admitted,
+            rejected: discovered - admitted,
+            capacity: MAX_LINES,
+        };
+        if !TOPOLOGY_REPORTED.swap(true, Ordering::AcqRel) {
+            crate::kprintln!(
+                "[JSR-IRQ] topology discovered={} admitted={} rejected={} capacity={} complete={}",
+                topology.discovered,
+                topology.admitted,
+                topology.rejected,
+                topology.capacity,
+                topology.rejected == 0
+            );
+        }
+        if topology.rejected != 0 {
+            crate::kprintln!(
+                "[JSR-IRQ] reject=incomplete_line_table discovered={} admitted={} rejected={} capacity={}",
+                topology.discovered,
+                topology.admitted,
+                topology.rejected,
+                topology.capacity
+            );
+            arch::halt_forever();
+        }
+        topology
+    }
 
     /// 平台已接好的设备中断线数；当前固定表无法容纳时失败关闭。
     ///
@@ -407,16 +455,7 @@ pub mod device {
     /// Number of reported device lines, failing closed when the legacy table
     /// cannot represent the complete discovered topology.
     pub fn line_count() -> usize {
-        let discovered = arch::device_irq_count();
-        if discovered > MAX_LINES {
-            crate::kprintln!(
-                "[JSR-IRQ] reject=incomplete_line_table discovered={} capacity={}",
-                discovered,
-                MAX_LINES
-            );
-            arch::halt_forever();
-        }
-        discovered
+        admit_topology().admitted
     }
 
     /// 中断线的规范名。

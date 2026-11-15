@@ -187,6 +187,7 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         // 中断控制器 + 定时器，开中断后等到足够多的 tick。
         Stage::Timer => stage(ctx, s, |_| {
             arch::irq_init(TIMER_HZ);
+            irq::device::admit_topology();
             arch::irq_enable();
             let mut waits: u64 = 0;
             while clock::ticks() < BOOT_TICKS {
