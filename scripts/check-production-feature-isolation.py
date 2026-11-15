@@ -18,7 +18,7 @@ PRODUCTION_CHECK = ROOT / "scripts/production-check.sh"
 
 REQUIRED = {"production", "default", "user-programs"}
 CONFIGURATION_ONLY = {"profile-compact", "sched-rr"}
-PRODUCTION_CAPABILITIES = {"lifecycle-ab-health"}
+PRODUCTION_CAPABILITIES = {"lifecycle-ab-health", "terminal-session-verify"}
 
 
 def fail(message: str) -> None:
