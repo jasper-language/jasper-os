@@ -12,7 +12,7 @@
 //! 启动代码与位置无关：实模式下以 CS 推出所在帧的线性地址，之后一律相对它寻址；只有 GDTR 的基址由这里在复制时填入。
 
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use kernel_core::acpi::{self, PhysRead};
 use kernel_core::frame::PhysFrame;
@@ -31,6 +31,10 @@ pub const START_FRAME_LIMIT: u64 = 0x10_0000;
 static INDEX_OF: [AtomicU8; 256] = [const { AtomicU8::new(0) }; 256];
 /// 逻辑下标 → APIC 标识。
 static HW_ID: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(u32::MAX) }; MAX_CPUS];
+/// 已启用本地 APIC、但拓扑尚未登记的引导处理器标识。
+static BOOTSTRAP_ID: AtomicU32 = AtomicU32::new(u32::MAX);
+/// 拓扑映射已经完整发布。
+static TOPOLOGY_READY: AtomicBool = AtomicBool::new(false);
 /// 其他处理器本地定时器的频率（启动前写入）。
 static AP_TIMER_HZ: AtomicU32 = AtomicU32::new(0);
 
@@ -175,6 +179,7 @@ pub fn init_boot(boot: &BootSpec) -> CpuDiscovery {
     }
     apic::enable_local(true);
     let boot_id = apic::id();
+    BOOTSTRAP_ID.store(boot_id, Ordering::Release);
     apic::calibrate_timer();
     let (topology, source) = match boot.acpi_rsdp {
         Some(rsdp) => match acpi::parse_madt(&PhysWindow(offset), rsdp, boot_id) {
@@ -192,6 +197,7 @@ pub fn init_boot(boot: &BootSpec) -> CpuDiscovery {
             INDEX_OF[id as usize].store(i as u8 + 1, Ordering::Release);
         }
     }
+    TOPOLOGY_READY.store(true, Ordering::Release);
     CpuDiscovery { topology, source }
 }
 
@@ -264,11 +270,17 @@ pub fn cpu_index() -> usize {
     if !apic::ready() {
         return 0;
     }
-    match INDEX_OF[(apic::id() & 0xFF) as usize].load(Ordering::Acquire) {
+    let id = apic::id();
+    match INDEX_OF[(id & 0xFF) as usize].load(Ordering::Acquire) {
         0 => {
+            if !TOPOLOGY_READY.load(Ordering::Acquire)
+                && BOOTSTRAP_ID.load(Ordering::Acquire) == id
+            {
+                return 0;
+            }
             crate::kprintln!(
                 "[JSR-SMP] reject=cpu_id_unregistered apic={:#x}",
-                apic::id()
+                id
             );
             crate::arch::halt_forever()
         }
