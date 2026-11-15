@@ -14,6 +14,7 @@ use jasper_compat_loader::{
 use kernel_core::frame::FRAME_SIZE;
 use kernel_core::objtable::ObjId;
 use kernel_core::paging::MapFlags;
+use kernel_core::smp::CpuSet;
 
 use crate::proc;
 use crate::task::TaskId;
@@ -255,6 +256,7 @@ pub struct JasperExecutionBackend {
     name: &'static str,
     task: Option<TaskId>,
     stack_reserve_bytes: u64,
+    affinity: Option<CpuSet>,
 }
 
 impl JasperExecutionBackend {
@@ -267,6 +269,7 @@ impl JasperExecutionBackend {
             name,
             task: None,
             stack_reserve_bytes: 0,
+            affinity: None,
         }
     }
 
@@ -284,6 +287,24 @@ impl JasperExecutionBackend {
             name,
             task: None,
             stack_reserve_bytes,
+            affinity: None,
+        }
+    }
+
+    /// Creates a stack-reserving backend whose initial thread starts with an
+    /// explicit CPU affinity set.
+    pub const fn with_stack_reserve_and_affinity(
+        process: ObjId,
+        name: &'static str,
+        stack_reserve_bytes: u64,
+        affinity: CpuSet,
+    ) -> Self {
+        Self {
+            process,
+            name,
+            task: None,
+            stack_reserve_bytes,
+            affinity: Some(affinity),
         }
     }
 
@@ -368,13 +389,14 @@ impl ExecutionBackend for JasperExecutionBackend {
             return Err(LoaderError::BadExecution);
         }
         let mapped = self.load_stack(&frame.stack)?;
-        match proc::spawn_thread(
+        match proc::spawn_thread_affinity(
             self.process,
             self.name,
             frame.pc,
             frame.stack.stack_pointer(),
             0,
             0,
+            self.affinity,
         ) {
             Ok((task, _)) => {
                 self.task = Some(task);

@@ -845,6 +845,10 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
             node: Node::Executable(0x3011),
         },
         DirEntry {
+            name: b"jasper-xstate-matrix",
+            node: Node::Executable(0x3012),
+        },
+        DirEntry {
             name: b"ls",
             node: Node::Executable(0x3009),
         },

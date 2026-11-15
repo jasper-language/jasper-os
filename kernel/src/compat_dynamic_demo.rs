@@ -30,6 +30,8 @@ static PTHREAD: &[u8] = include_bytes!(env!("JSR_UBUNTU_PTHREAD"));
 static SIGNAL: &[u8] = include_bytes!(env!("JSR_UBUNTU_SIGNAL"));
 #[cfg(feature = "compat-signal-verify")]
 static SIGRETURN_XSTATE: &[u8] = include_bytes!(env!("JSR_UBUNTU_SIGRETURN_XSTATE"));
+#[cfg(feature = "compat-xstate-matrix-verify")]
+static XSTATE_MATRIX: &[u8] = include_bytes!(env!("JSR_UBUNTU_XSTATE_MATRIX"));
 static INTERPRETER: &[u8] = include_bytes!(env!("JSR_UBUNTU_LD_LINUX"));
 static FAILED: AtomicU32 = AtomicU32::new(0);
 
@@ -638,6 +640,48 @@ pub fn run() {
         result
     };
 
+    #[cfg(feature = "compat-xstate-matrix-verify")]
+    let xstate_matrix_result = {
+        let matrix_argv: [&[u8]; 1] = [b"/usr/bin/jasper-xstate-matrix"];
+        // The first process grows the kernel heap while creating five Linux
+        // threads. Run one unmeasured warmup so the measured run proves that
+        // scheduler/XSAVE churn itself returns every frame and heap byte.
+        let online = sched::online_cpus();
+        kprintln!(
+            "[JSR-COMPAT-XSTATE-MATRIX] scheduler_online={:#x}",
+            u64::from(online.bits())
+        );
+        let _ = run_program_on(
+            "ubuntu-dynamic-xstate-matrix-warmup",
+            XSTATE_MATRIX,
+            INTERPRETER,
+            &matrix_argv,
+            free_frames(),
+            false,
+            online,
+        );
+        let matrix_baseline = free_frames();
+        let result = run_program_on(
+            "ubuntu-dynamic-xstate-matrix",
+            XSTATE_MATRIX,
+            INTERPRETER,
+            &matrix_argv,
+            matrix_baseline,
+            true,
+            online,
+        );
+        kprintln!(
+            "[JSR-COMPAT-XSTATE-MATRIX] fixture=ubuntu-x86_64 executable=xstate-matrix mapped={} entry=interpreter true interpreter_syscalls={} syscall_delta={} exit_zero={} resources={} failed={}",
+            result.mapped,
+            result.interpreter_entered,
+            result.syscalls,
+            result.exited_zero,
+            result.resources,
+            failed()
+        );
+        result
+    };
+
     let frames_after = free_frames();
     let resources = true_result.resources
         && getconf_result.resources
@@ -668,6 +712,16 @@ pub fn run() {
                 sigreturn_xstate_result.resources && sigreturn_xstate_result.exited_zero
             }
             #[cfg(not(feature = "compat-signal-verify"))]
+            {
+                true
+            }
+        }
+        && {
+            #[cfg(feature = "compat-xstate-matrix-verify")]
+            {
+                xstate_matrix_result.resources && xstate_matrix_result.exited_zero
+            }
+            #[cfg(not(feature = "compat-xstate-matrix-verify"))]
             {
                 true
             }
@@ -717,6 +771,29 @@ fn run_program(
         &[],
         frames_before,
         enforce_resources,
+        None,
+    )
+}
+
+fn run_program_on(
+    name: &'static str,
+    executable: &[u8],
+    interpreter: &[u8],
+    argv: &[&[u8]],
+    frames_before: usize,
+    enforce_resources: bool,
+    affinity: kernel_core::smp::CpuSet,
+) -> ProgramResult {
+    run_program_with_interpreter(
+        name,
+        executable,
+        interpreter,
+        "/lib64/ld-linux-x86-64.so.2",
+        argv,
+        &[],
+        frames_before,
+        enforce_resources,
+        Some(affinity),
     )
 }
 
@@ -729,6 +806,7 @@ fn run_program_with_interpreter(
     envp: &[&[u8]],
     frames_before: usize,
     enforce_resources: bool,
+    affinity: Option<kernel_core::smp::CpuSet>,
 ) -> ProgramResult {
     let calls_before = crate::syscall::call_count();
     let heap_before = crate::mm::heap::stats();
@@ -805,7 +883,15 @@ fn run_program_with_interpreter(
     .and_then(build_initial_stack);
     check(stack.is_ok(), "initial_stack");
 
-    let mut backend = JasperExecutionBackend::with_stack_reserve(pid, name, STACK_RESERVE_BYTES);
+    let mut backend = match affinity {
+        Some(online) => JasperExecutionBackend::with_stack_reserve_and_affinity(
+            pid,
+            name,
+            STACK_RESERVE_BYTES,
+            online,
+        ),
+        None => JasperExecutionBackend::with_stack_reserve(pid, name, STACK_RESERVE_BYTES),
+    };
     let mut entered = false;
     let mut thread = false;
     let mut completed = false;
@@ -1300,6 +1386,7 @@ pub(crate) fn run_root_dynamic_program(
         envp,
         frames_before,
         enforce_resources,
+        None,
     );
     let verified = result.mapped
         && result.interpreter_entered

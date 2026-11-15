@@ -124,6 +124,8 @@ compat-dynamic-libc-verify = ["linux-abi", "compat-elf"]
 compat-pthread-verify = ["compat-dynamic-libc-verify"]
 # Unmodified Ubuntu glibc sigaction, tgkill, blocking and nested rt_sigreturn path.
 compat-signal-verify = ["compat-dynamic-libc-verify"]
+# Real YMM0-YMM15 scheduler/migration matrix over Linux pthreads.
+compat-xstate-matrix-verify = ["compat-dynamic-libc-verify"]
 # SEC-6 software memory capabilities, pointer provenance and CHERI-ready boundary.
 sec6-verify = []
 # Dedicated USI-1 CLI/structured service acceptance.
