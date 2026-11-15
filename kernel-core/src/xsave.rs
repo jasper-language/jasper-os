@@ -24,7 +24,27 @@ pub enum XsaveImageError {
     ReservedHeader,
     DisabledComponent,
     MissingX87State,
+    AvxRequiresSse,
     InvalidMxcsr,
+}
+
+/// Validate an XCR0 value before it is installed or assigned to a guest.
+///
+/// x87 is mandatory, AVX requires SSE, and no component outside the common
+/// supported mask may be enabled.
+pub fn validate_xcr0(xcr0: u64, supported_mask: u64) -> Result<(), XsaveImageError> {
+    if xcr0 & X87_STATE_BIT == 0 {
+        return Err(XsaveImageError::MissingX87State);
+    }
+    if xcr0 & !supported_mask != 0 {
+        return Err(XsaveImageError::DisabledComponent);
+    }
+    const SSE_BIT: u64 = 1 << 1;
+    const AVX_BIT: u64 = 1 << 2;
+    if xcr0 & AVX_BIT != 0 && xcr0 & SSE_BIT == 0 {
+        return Err(XsaveImageError::AvxRequiresSse);
+    }
+    Ok(())
 }
 
 /// Validate one standard-format XSAVE image for the active XCR0 policy.
@@ -157,6 +177,33 @@ mod tests {
         assert_eq!(
             validate_standard_image(&moved[..MIN_STANDARD_IMAGE_BYTES - 1], 0x3),
             Err(XsaveImageError::TooShort)
+        );
+    }
+
+    #[test]
+    fn xcr0_requires_x87_and_sse_before_avx_and_stays_within_support() {
+        assert_eq!(validate_xcr0(0x1, 0x7), Ok(()));
+        assert_eq!(validate_xcr0(0x3, 0x7), Ok(()));
+        assert_eq!(validate_xcr0(0x7, 0x7), Ok(()));
+        assert_eq!(
+            validate_xcr0(0, 0x7),
+            Err(XsaveImageError::MissingX87State)
+        );
+        assert_eq!(
+            validate_xcr0(0x2, 0x7),
+            Err(XsaveImageError::MissingX87State)
+        );
+        assert_eq!(
+            validate_xcr0(0x5, 0x7),
+            Err(XsaveImageError::AvxRequiresSse)
+        );
+        assert_eq!(
+            validate_xcr0(0x9, 0x7),
+            Err(XsaveImageError::DisabledComponent)
+        );
+        assert_eq!(
+            validate_xcr0(0x7, 0x3),
+            Err(XsaveImageError::DisabledComponent)
         );
     }
 }

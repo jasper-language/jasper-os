@@ -477,6 +477,9 @@ pub(super) fn enable_sse() -> bool {
         // 将 AVX 写入 XCR0。否则 XSETBV 会故障，并可能在统一 BSP/AP 策略
         // 检查之前向用户态暴露并不存在的能力。
         let xcr0 = 0x3u64 | if avx { 0x4 } else { 0 };
+        if kernel_core::xsave::validate_xcr0(xcr0, u64::from(xsave_leaf.eax)).is_err() {
+            return false;
+        }
         core::arch::asm!(
             "xsetbv",
             in("ecx") 0u32,

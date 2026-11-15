@@ -62,6 +62,26 @@ pub(crate) fn save_size() -> usize {
     JSR_XSTATE_SIZE.load(Ordering::Acquire) as usize
 }
 
+/// Standard-format XSAVE area size required by one guest XCR0 subset.
+///
+/// Jasper currently admits x87, SSE and AVX. The legacy region plus standard
+/// header is always present; AVX adds the CPUID-reported offset and size.
+pub(crate) fn size_for_xcr0(mask: u64) -> Option<usize> {
+    if mask & !0x7 != 0 {
+        return None;
+    }
+    let mut size = FXSAVE_BYTES + kernel_core::xsave::STANDARD_HEADER_BYTES;
+    if mask & (1 << 2) != 0 {
+        let avx = core::arch::x86_64::__cpuid_count(0xD, 2);
+        if avx.eax == 0 {
+            return None;
+        }
+        let end = usize::try_from(avx.ebx).ok()?.checked_add(usize::try_from(avx.eax).ok()?)?;
+        size = size.max(end);
+    }
+    Some(size)
+}
+
 /// Size allocated per task. FXSAVE-only configurations keep their compact
 /// 512-byte image inside `TaskContext`.
 /// 每任务状态区大小；仅 FXSAVE 时继续使用任务上下文内的紧凑回退区。
