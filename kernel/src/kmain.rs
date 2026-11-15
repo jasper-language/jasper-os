@@ -199,6 +199,14 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
             }
             let stats = mm::frame::init(ctx.boot);
             ctx.frames = Some(stats);
+            if stats.ignored > 0 {
+                kprintln!(
+                    "[JSR-FRAME] reject=bitmap_capacity usable={} ignored={}",
+                    stats.usable,
+                    stats.ignored
+                );
+                return None;
+            }
             (stats.usable > 0).then_some(())
         }),
         // 架构无关映射 API（x86_64 由 4 级页表实现）。引导器未提供物理内存映射时启动停止。
