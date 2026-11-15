@@ -106,6 +106,11 @@ struct Record {
     root: WorkloadKey,
 }
 
+/// Size of one Sandbox identity record for runtime budget planning.
+pub const fn record_bytes() -> usize {
+    core::mem::size_of::<Record>()
+}
+
 /// Fixed-capacity sandbox identity table.
 ///
 /// A sandbox is created in `Created` and follows the root Workload's

@@ -258,6 +258,9 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
             if !workload::init_registry(cap.tasks) {
                 return None;
             }
+            if !crate::sandbox::init_registry() {
+                return None;
+            }
             ctx.capacity = Some(cap);
             Some(())
         }),

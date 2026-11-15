@@ -11,7 +11,7 @@ use kernel_core::sandbox_image::{
 };
 use kernel_core::security_domain::DomainKey;
 
-use crate::sandbox::{MAX_SANDBOXES, SANDBOXES};
+use crate::sandbox::{registry_plan, MAX_SANDBOXES, SANDBOXES};
 use crate::sync::IrqSpinLock;
 use crate::workload::{MAX_WORKLOADS, WORKLOADS};
 
@@ -51,6 +51,12 @@ pub fn add_image(
     let workloads = WORKLOADS.lock();
     if !sandbox_exists(&sandboxes, &workloads, domain, sandbox, true) {
         return Err(SandboxStorageError::InvalidImage);
+    }
+    let plan = registry_plan().ok_or(SandboxStorageError::Capacity)?;
+    if storage.image_count() >= plan.images
+        || layers.len() > plan.layers.saturating_sub(storage.layer_count())
+    {
+        return Err(SandboxStorageError::Capacity);
     }
     storage.add_image(domain, sandbox, spec, layers)
 }
@@ -110,6 +116,10 @@ pub fn create_volume(
     if !sandbox_exists(&sandboxes, &workloads, domain, sandbox, true) {
         return Err(SandboxStorageError::InvalidVolume);
     }
+    let plan = registry_plan().ok_or(SandboxStorageError::Capacity)?;
+    if storage.volume_count() >= plan.volumes {
+        return Err(SandboxStorageError::Capacity);
+    }
     storage.create_volume(domain, sandbox, image, capacity_bytes)
 }
 
@@ -124,6 +134,10 @@ pub fn clone_volume(
     let workloads = WORKLOADS.lock();
     if !sandbox_exists(&sandboxes, &workloads, domain, sandbox, true) {
         return Err(SandboxStorageError::InvalidVolume);
+    }
+    let plan = registry_plan().ok_or(SandboxStorageError::Capacity)?;
+    if storage.volume_count() >= plan.volumes {
+        return Err(SandboxStorageError::Capacity);
     }
     storage.clone_volume(domain, sandbox, parent, capacity_bytes)
 }

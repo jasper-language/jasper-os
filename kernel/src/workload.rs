@@ -59,6 +59,10 @@ fn registry_plan() -> Option<WorkloadRegistryPlan> {
     REGISTRY_PLAN.get().copied()
 }
 
+pub(crate) fn registry_capacity() -> usize {
+    registry_plan().map_or(0, |plan| plan.workloads)
+}
+
 pub fn create(domain: DomainKey, limits: ResourceLimits) -> Result<WorkloadKey, WorkloadError> {
     let mut workloads = WORKLOADS.lock();
     admit_workload(&workloads)?;

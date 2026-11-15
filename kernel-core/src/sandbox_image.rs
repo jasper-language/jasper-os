@@ -231,6 +231,70 @@ struct VolumeRecord {
     used_bytes: u64,
 }
 
+/// Per-entry costs used to derive runtime registry admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SandboxRegistryCost {
+    pub sandboxes: usize,
+    pub images: usize,
+    pub layers: usize,
+    pub volumes: usize,
+}
+
+impl SandboxRegistryCost {
+    pub const fn current() -> Self {
+        Self {
+            sandboxes: crate::sandbox::record_bytes(),
+            images: core::mem::size_of::<ImageRecord>(),
+            layers: core::mem::size_of::<LayerRecord>(),
+            volumes: core::mem::size_of::<VolumeRecord>(),
+        }
+    }
+}
+
+/// Runtime counts admitted inside the fixed implementation envelopes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SandboxRegistryPlan {
+    pub sandboxes: usize,
+    pub images: usize,
+    pub layers: usize,
+    pub volumes: usize,
+}
+
+/// Derive Sandbox/storage admission from heap and Workload capacity.
+///
+/// Issue #33 HC-20 policy: each of the four metadata registries receives one
+/// quarter of a 1/1024 memory share. Demand is tied to admitted Workloads and
+/// the result must be clamped by the caller's fixed storage envelope.
+pub fn plan_sandbox_registry(
+    memory_budget: u64,
+    workload_capacity: usize,
+    cost: SandboxRegistryCost,
+) -> Option<SandboxRegistryPlan> {
+    if workload_capacity == 0
+        || cost.sandboxes == 0
+        || cost.images == 0
+        || cost.layers == 0
+        || cost.volumes == 0
+    {
+        return None;
+    }
+    let metadata_budget = usize::try_from(memory_budget / 1024).ok()?;
+    let per_registry = metadata_budget / 4;
+    let image_demand = workload_capacity / 2;
+    let layer_demand = workload_capacity.checked_mul(4)?;
+    let plan = SandboxRegistryPlan {
+        sandboxes: workload_capacity.min(per_registry / cost.sandboxes),
+        images: image_demand.min(per_registry / cost.images),
+        layers: layer_demand.min(per_registry / cost.layers),
+        volumes: workload_capacity.min(per_registry / cost.volumes),
+    };
+    (plan.sandboxes != 0
+        && plan.images != 0
+        && plan.layers != 0
+        && plan.volumes != 0)
+        .then_some(plan)
+}
+
 /// Fixed-capacity storage registry. Rejections perform no partial writes.
 ///
 /// 固定容量存储注册表；任何拒绝都不产生部分写入。
@@ -573,6 +637,10 @@ impl<const I: usize, const L: usize, const V: usize> SandboxStorageTable<I, L, V
 
     pub fn image_count(&self) -> usize {
         self.images.iter().flatten().count()
+    }
+
+    pub fn layer_count(&self) -> usize {
+        self.layers.iter().flatten().count()
     }
 
     pub fn volume_count(&self) -> usize {
@@ -955,5 +1023,20 @@ mod tests {
             storage.image(domain, sandbox, replacement).unwrap().layers,
             2
         );
+    }
+
+    #[test]
+    fn sandbox_registry_plan_follows_memory_and_workload_capacity() {
+        let cost = SandboxRegistryCost::current();
+        let small = plan_sandbox_registry(1024 * 1024, 8, cost).unwrap();
+        let standard = plan_sandbox_registry(256 * 1024 * 1024, 64, cost).unwrap();
+        assert!(small.sandboxes <= 8);
+        assert!(standard.sandboxes > small.sandboxes);
+        assert!(standard.sandboxes <= 64);
+        assert!(standard.images <= 32);
+        assert!(standard.layers <= 256);
+        assert!(standard.volumes <= 64);
+        assert_eq!(plan_sandbox_registry(0, 64, cost), None);
+        assert_eq!(plan_sandbox_registry(1024 * 1024, 0, cost), None);
     }
 }
