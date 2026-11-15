@@ -1938,6 +1938,15 @@ fn linux_rt_sigreturn(
     let state_bytes = crate::arch::x86_64::xstate::save_size();
     let mut fxstate = alloc::vec![0u8; state_bytes];
     proc::read(process, fpstate_address, &mut fxstate).map_err(|_| CompatErrno::Fault)?;
+    let state_mask = crate::arch::x86_64::xstate::mask();
+    let state_valid = if state_mask == 0 {
+        kernel_core::xsave::validate_legacy_fxsave(&fxstate).is_ok()
+    } else {
+        kernel_core::xsave::validate_standard_image(&fxstate, state_mask).is_ok()
+    };
+    if !state_valid {
+        return Err(CompatErrno::Invalid);
+    }
     let Some(destination) = args.fxstate else {
         return Err(CompatErrno::Fault);
     };
