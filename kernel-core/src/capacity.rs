@@ -212,8 +212,10 @@ pub struct CapError {
 /// 容量来源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
-    /// 全部取配置档默认值。
+    /// 全部取配置档默认值（兼容静态调用方）。
     Default,
+    /// 至少一项由运行时发现与内存预算派生。
+    Derived,
     /// 至少一项来自镜像里的启动容量记录。
     Override,
 }
@@ -223,6 +225,7 @@ impl Source {
     pub const fn as_str(self) -> &'static str {
         match self {
             Source::Default => "default",
+            Source::Derived => "derived",
             Source::Override => "override",
         }
     }
@@ -271,6 +274,24 @@ pub fn derive(policy: BootCapacity, cost: MemoryCost) -> BootCapacity {
 /// 通过返回（容量, 来源）；任何一项不通过都返回第一条拒绝原因，调用者据此拒绝启动。
 /// Combine defaults and overrides, then validate range, consistency and memory mem_limit.
 pub fn resolve(defaults: BootCapacity, ov: Overrides, cost: MemoryCost) -> Result<(BootCapacity, Source), CapError> {
+    resolve_with_source(defaults, ov, cost, Source::Default)
+}
+
+/// Resolve capacities whose defaults were derived from runtime facts.
+pub fn resolve_derived(
+    defaults: BootCapacity,
+    ov: Overrides,
+    cost: MemoryCost,
+) -> Result<(BootCapacity, Source), CapError> {
+    resolve_with_source(defaults, ov, cost, Source::Derived)
+}
+
+fn resolve_with_source(
+    defaults: BootCapacity,
+    ov: Overrides,
+    cost: MemoryCost,
+    default_source: Source,
+) -> Result<(BootCapacity, Source), CapError> {
     let pick = |o: Option<u32>, d: usize| o.map_or(d, |v| v as usize);
     let cap = BootCapacity {
         objects: pick(ov.objects, defaults.objects),
@@ -296,7 +317,7 @@ pub fn resolve(defaults: BootCapacity, ov: Overrides, cost: MemoryCost) -> Resul
     if total > cost.mem_limit as u64 {
         return Err(CapError { field: "total", value: total, min: 0, max: cost.mem_limit as u64, reason: CapReason::ExceedsMemory });
     }
-    let source = if ov.any() { Source::Override } else { Source::Default };
+    let source = if ov.any() { Source::Override } else { default_source };
     Ok((cap, source))
 }
 

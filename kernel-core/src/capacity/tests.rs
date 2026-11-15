@@ -90,9 +90,10 @@ fn runtime_budget_narrows_policy_ceilings_before_resolution() {
     assert!(derived.objects < policy.objects);
     assert_eq!(derived.rt, policy.rt);
     assert_eq!(
-        resolve(derived, Overrides::default(), tight),
-        Ok((derived, Source::Default))
+        resolve_derived(derived, Overrides::default(), tight),
+        Ok((derived, Source::Derived))
     );
+    assert_eq!(Source::Derived.as_str(), "derived");
 }
 
 #[test]

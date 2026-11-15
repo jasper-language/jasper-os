@@ -109,7 +109,7 @@ pub fn validate() -> BootCapacity {
     let cost = cost();
     let policy = ACTIVE.boot_capacity();
     let derived = capacity::derive(policy, cost);
-    let (cap, source) = match capacity::resolve(derived, overrides, cost) {
+    let (cap, source) = match capacity::resolve_derived(derived, overrides, cost) {
         Ok(r) => r,
         Err(e) => reject(e),
     };
