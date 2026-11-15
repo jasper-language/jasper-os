@@ -11,6 +11,8 @@ TARGET="${HWV2_XSTATE_TARGET:-$ROOT/target/hwv2-xstate}"
 LIMIT="${HWV2_XSTATE_TIMEOUT:-300}"
 ACCEL="${HWV2_XSTATE_ACCEL:-tcg}"
 CPU_MODEL="${HWV2_XSTATE_CPU:-max,+vmx}"
+SMP="${HWV2_XSTATE_SMP:-1}"
+TASKSET_CPUS="${HWV2_XSTATE_TASKSET:-0}"
 mkdir -p "$OUT" "$TARGET"
 
 cargo build --locked --release --target-dir "$TARGET" -p xtask \
@@ -23,12 +25,12 @@ CARGO_TARGET_DIR="$TARGET" cargo build --locked --release \
   >"$OUT/image.log" 2>&1
 
 set +e
-nice -n 10 taskset -c 0 timeout "$LIMIT" qemu-system-x86_64 \
+nice -n 10 taskset -c "$TASKSET_CPUS" timeout "$LIMIT" qemu-system-x86_64 \
   -accel "$ACCEL" \
   -machine q35 \
   -cpu "$CPU_MODEL" \
   -m 512M \
-  -smp 1 \
+  -smp "$SMP" \
   -drive format=raw,file="$OUT/kernel.img",snapshot=on \
   -serial "file:$OUT/serial.log" \
   -display none -monitor none -no-reboot \

@@ -188,7 +188,7 @@ fn storm_arrival() {
 fn hog() {
     let _ = sched::set_current_qos(Qos::Utility);
     while sched::timer_ticks() < HOG_END.load(Ordering::Relaxed) {
-        PROGRESS[arch::cpu_index().min(MAX_CPUS - 1)].fetch_add(1, Ordering::Relaxed);
+        PROGRESS[arch::cpu_index()].fetch_add(1, Ordering::Relaxed);
         core::hint::spin_loop();
     }
 }

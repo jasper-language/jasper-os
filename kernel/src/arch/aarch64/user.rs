@@ -26,7 +26,7 @@ static KERNEL_STACK_TOP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; M
 
 /// 本处理器的内核栈顶记录。
 fn this_cpu_top() -> &'static AtomicU64 {
-    &KERNEL_STACK_TOP[super::smp::cpu_index().min(MAX_CPUS - 1)]
+    &KERNEL_STACK_TOP[crate::arch::cpu_index()]
 }
 
 /// 记录本处理器当前任务的内核栈顶。

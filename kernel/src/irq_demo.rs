@@ -659,7 +659,7 @@ fn service_worker() {
             OUT_OF_ORDER.fetch_add(1, Ordering::Relaxed);
         }
         acc ^= work(iters, req);
-        ON_CPU[arch::cpu_index().min(MAX_CPUS - 1)].fetch_add(1, Ordering::Relaxed);
+        ON_CPU[arch::cpu_index()].fetch_add(1, Ordering::Relaxed);
         SERVICE.complete(shard);
     }
     SINK.fetch_add(acc, Ordering::Relaxed);

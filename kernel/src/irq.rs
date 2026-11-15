@@ -294,7 +294,15 @@ pub fn msi_bind(cpu: usize, vector: u8, handler: Option<MsiHandler>) -> Result<(
 /// 不调用设备中断线的任何旧处理函数，也不切换任务。
 /// MSI entry point: dispatch on the current processor, then charge the per-CPU quota.
 pub fn on_msi(vector: u8) {
-    let cpu = arch::cpu_index().min(MAX_CPUS - 1);
+    let cpu = arch::cpu_index();
+    if cpu >= MAX_CPUS {
+        crate::kprintln!(
+            "[JSR-SMP] reject=cpu_index_out_of_range index={} max={}",
+            cpu,
+            MAX_CPUS
+        );
+        arch::halt_forever();
+    }
     if vector as usize >= MSI_SLOTS {
         MSI_SPURIOUS[cpu].fetch_add(1, Ordering::Relaxed);
         return;
@@ -591,7 +599,7 @@ pub mod device {
         }
         let t0 = arch::cycles();
         arch::device_irq_ack(line);
-        let cpu = arch::cpu_index().min(MAX_CPUS - 1);
+        let cpu = arch::cpu_index();
         COUNTS[line][cpu].fetch_add(1, Ordering::Relaxed);
         WINDOW[line].fetch_add(1, Ordering::Relaxed);
         let h = HANDLERS[line].load(Ordering::Acquire);
@@ -621,7 +629,7 @@ pub mod device {
     /// 每个处理器的 tick（中断上下文）：补充本处理器的预算，解除被节流且仍启用的线的屏蔽，
     /// 并对被节流的 MSI 槽位调用其解除屏蔽动作（槽位已解除登记的跳过）。
     pub(super) fn on_cpu_tick() {
-        let cpu = arch::cpu_index().min(MAX_CPUS - 1);
+        let cpu = arch::cpu_index();
         let Released { lines, msi } = QUOTAS[cpu].lock().on_tick(arch::cycles());
         if !msi.is_empty() {
             for slot in msi.iter() {
@@ -645,7 +653,7 @@ pub mod device {
     /// 空闲停表前查询：是 ⇒ 保持周期 tick，否则风暴下的补充与解除屏蔽会被推迟到停表结束。
     /// Whether this CPU's device quota still needs the periodic tick.
     pub fn cpu_needs_tick() -> bool {
-        let cpu = arch::cpu_index().min(MAX_CPUS - 1);
+        let cpu = arch::cpu_index();
         QUOTAS[cpu].lock().needs_tick()
     }
 

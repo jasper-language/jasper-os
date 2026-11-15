@@ -187,6 +187,7 @@ pub mod event_wait;
 pub mod extension_abi;
 
 pub mod cpu_time;
+pub mod cpu_identity;
 
 pub mod subscription;
 

@@ -253,7 +253,9 @@ extern "C" fn ap_entry(index: u64) -> ! {
     // AP 以自己的 CR0/CR4 状态启动，不继承 BSP 的 OSFXSR 设置。
     // APs reset with their own CR0/CR4 state; they do not inherit the BSP OSFXSR setup.
     let xsave = super::enable_sse();
-    syscall::init(index, xsave);
+    if !syscall::init(index, xsave) {
+        crate::arch::halt_forever();
+    }
     apic::enable_local(false);
     apic::start_periodic(AP_TIMER_HZ.load(Ordering::Relaxed));
     crate::smp::secondary_main(index)
@@ -271,20 +273,37 @@ pub fn cpu_index() -> usize {
         return 0;
     }
     let id = apic::id();
-    match INDEX_OF[(id & 0xFF) as usize].load(Ordering::Acquire) {
-        0 => {
-            if !TOPOLOGY_READY.load(Ordering::Acquire)
-                && BOOTSTRAP_ID.load(Ordering::Acquire) == id
-            {
-                return 0;
-            }
+    let registered = match INDEX_OF[(id & 0xFF) as usize].load(Ordering::Acquire) {
+        0 => None,
+        n => Some(n as usize - 1),
+    };
+    let bootstrap = BOOTSTRAP_ID.load(Ordering::Acquire);
+    match kernel_core::cpu_identity::resolve_index(
+        id,
+        registered,
+        TOPOLOGY_READY.load(Ordering::Acquire),
+        (bootstrap != u32::MAX).then_some(bootstrap),
+        MAX_CPUS,
+    ) {
+        Ok(index) => index,
+        Err(error) => {
+            let reason = match error {
+                kernel_core::cpu_identity::CpuIdentityError::Unregistered { .. } => {
+                    "cpu_id_unregistered"
+                }
+                kernel_core::cpu_identity::CpuIdentityError::OutOfRange { .. } => {
+                    "cpu_index_out_of_range"
+                }
+                kernel_core::cpu_identity::CpuIdentityError::Offline { .. } => "cpu_offline",
+            };
             crate::kprintln!(
-                "[JSR-SMP] reject=cpu_id_unregistered apic={:#x}",
-                id
+                "[JSR-SMP] reject={} domain={} apic={:#x}",
+                reason,
+                error.name(),
+                id,
             );
             crate::arch::halt_forever()
         }
-        n => n as usize - 1,
     }
 }
 

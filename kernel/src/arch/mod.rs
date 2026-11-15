@@ -937,7 +937,15 @@ pub unsafe fn cpu_start(
 /// 见 [`Platform::cpu_index`]。
 #[inline(always)]
 pub fn cpu_index() -> usize {
-    Current::cpu_index()
+    let index = Current::cpu_index();
+    match kernel_core::cpu_identity::validate_online(
+        index,
+        kernel_core::smp::MAX_CPUS,
+        true,
+    ) {
+        Ok(index) => index,
+        Err(_) => Current::halt_forever(),
+    }
 }
 /// 见 [`Platform::send_ipi`]。
 pub fn send_ipi(cpu: usize, kind: kernel_core::smp::IpiKind) -> Result<(), kernel_core::smp::SmpError> {

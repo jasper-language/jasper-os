@@ -244,8 +244,15 @@ extern "C" fn jsr_syscall_dispatch(frame: &mut RawFrame) -> u64 {
 /// STAR：进入时 CS = 内核代码段（0x08），SS = 其后的内核数据段；
 /// 返回时 CS = 基址 0x10 + 16 = 用户代码段（0x20|3），SS = 0x10 + 8 = 用户数据段（0x18|3）。
 /// 这正是 gdt.rs 中「用户数据段排在用户代码段之前」的原因。
-pub fn init(index: usize, xsave: bool) {
-    let block_ref = &BLOCKS[index.min(MAX_CPUS - 1)];
+pub fn init(index: usize, xsave: bool) -> bool {
+    let Some(block_ref) = BLOCKS.get(index) else {
+        crate::kprintln!(
+            "[JSR-SMP] reject=syscall_entry_uninitialized index={} max={}",
+            index,
+            MAX_CPUS
+        );
+        return false;
+    };
     block_ref.xsave.store(u64::from(xsave), Ordering::Relaxed);
     block_ref
         .xstate_size
@@ -265,6 +272,7 @@ pub fn init(index: usize, xsave: bool) {
         Msr::new(MSR_SFMASK).write(0x0200 | 0x0400 | 0x0100); // IF | DF | TF
         Msr::new(MSR_KERNEL_GS_BASE).write(block);
     }
+    true
 }
 
 /// 更新本处理器系统调用入口使用的内核栈顶（与本核 TSS.rsp0 同步）。

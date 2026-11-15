@@ -39,7 +39,7 @@ pub fn record_syscall(cycles: u64) {
 
 /// 进入关中断区：最外层记起点，嵌套只加深计数。
 pub fn irq_off_enter() {
-    let cpu = crate::arch::cpu_index().min(MAX_CPUS - 1);
+    let cpu = crate::arch::cpu_index();
     if IRQ_OFF_DEPTH[cpu].fetch_add(1, Ordering::Relaxed) == 0 {
         IRQ_OFF_START[cpu].store(crate::arch::cycles() as u32, Ordering::Relaxed);
     }
@@ -47,7 +47,7 @@ pub fn irq_off_enter() {
 
 /// 离开关中断区：最外层退出时结算本次窗口。
 pub fn irq_off_exit() {
-    let cpu = crate::arch::cpu_index().min(MAX_CPUS - 1);
+    let cpu = crate::arch::cpu_index();
     if IRQ_OFF_DEPTH[cpu].fetch_sub(1, Ordering::Relaxed) != 1 {
         return;
     }

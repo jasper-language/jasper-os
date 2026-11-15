@@ -142,17 +142,25 @@ fn cpu_hw_id() -> u32 {
 
 pub fn cpu_index() -> usize {
     let hw = cpu_hw_id();
+    let mut registered = None;
     for index in 0..CPU_COUNT.load(Ordering::Acquire).min(MAX_CPUS as u32) as usize {
         if HW_IDS[index].load(Ordering::Acquire) == hw {
-            return index;
+            registered = Some(index);
+            break;
         }
     }
-    crate::kprintln!(
-        "[JSR-SMP] reject=cpu_id_unregistered hw={} online={}",
-        hw,
-        CPU_COUNT.load(Ordering::Acquire)
-    );
-    crate::arch::halt_forever()
+    match kernel_core::cpu_identity::resolve_index(hw, registered, true, None, MAX_CPUS) {
+        Ok(index) => index,
+        Err(error) => {
+            crate::kprintln!(
+                "[JSR-SMP] reject=cpu_id_unregistered domain={} hw={} online={}",
+                error.name(),
+                hw,
+                CPU_COUNT.load(Ordering::Acquire)
+            );
+            crate::arch::halt_forever()
+        }
+    }
 }
 
 pub fn send_ipi(cpu: usize, kind: IpiKind) -> Result<(), SmpError> {

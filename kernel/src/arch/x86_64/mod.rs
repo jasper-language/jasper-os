@@ -134,7 +134,9 @@ impl Platform for X86_64 {
         idt::init();
         let xsave = enable_sse();
         crate::console::write_str("[JSR-IDT] ok\n");
-        syscall::init(0, xsave);
+        if !syscall::init(0, xsave) {
+            crate::arch::halt_forever();
+        }
     }
 
     fn timer_stretch(ticks: u32) -> bool {
