@@ -128,6 +128,26 @@ impl BootSpec {
     pub const fn dropped_regions(&self) -> usize {
         self.regions.dropped()
     }
+
+    /// Number of memory-map entries discovered from the firmware/bootloader.
+    pub const fn discovered_regions(&self) -> usize {
+        self.regions.discovered()
+    }
+
+    /// Number of well-formed entries accepted before coalescing.
+    pub const fn admitted_regions(&self) -> usize {
+        self.regions.admitted()
+    }
+
+    /// Number of same-kind coalescing operations performed.
+    pub const fn merged_regions(&self) -> usize {
+        self.regions.merged()
+    }
+
+    /// Number of malformed entries rejected by bounds validation.
+    pub const fn invalid_regions(&self) -> usize {
+        self.regions.invalid()
+    }
 }
 
 impl Default for BootSpec {
@@ -172,6 +192,32 @@ mod tests {
             kind: RegionKind::Reserved,
         });
         assert_eq!(spec.dropped_regions(), 1);
+        assert!(!spec.has_complete_regions());
+    }
+
+    #[test]
+    fn malformed_regions_fail_closed_and_are_counted() {
+        let mut spec = BootSpec::new();
+        spec.push_region(PhysRegion {
+            start: 0,
+            end: 0,
+            kind: RegionKind::Usable,
+        });
+        spec.push_region(PhysRegion {
+            start: 8192,
+            end: 4096,
+            kind: RegionKind::Reserved,
+        });
+        spec.push_region(PhysRegion {
+            start: 4096,
+            end: 8192,
+            kind: RegionKind::Reserved,
+        });
+
+        assert_eq!(spec.discovered_regions(), 3);
+        assert_eq!(spec.admitted_regions(), 1);
+        assert_eq!(spec.invalid_regions(), 2);
+        assert_eq!(spec.regions().len(), 1);
         assert!(!spec.has_complete_regions());
     }
 }

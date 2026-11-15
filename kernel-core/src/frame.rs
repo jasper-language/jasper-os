@@ -80,6 +80,10 @@ pub struct PhysRegion {
 pub struct PhysRegionTable<const N: usize> {
     regions: [PhysRegion; N],
     len: usize,
+    discovered: usize,
+    admitted: usize,
+    merged: usize,
+    invalid: usize,
     dropped: usize,
 }
 
@@ -95,14 +99,21 @@ impl<const N: usize> PhysRegionTable<N> {
                 N
             ],
             len: 0,
+            discovered: 0,
+            admitted: 0,
+            merged: 0,
+            invalid: 0,
             dropped: 0,
         }
     }
 
     pub fn push(&mut self, region: PhysRegion) {
+        self.discovered = self.discovered.saturating_add(1);
         if region.start >= region.end {
+            self.invalid = self.invalid.saturating_add(1);
             return;
         }
+        self.admitted = self.admitted.saturating_add(1);
         let mut merged = region;
         let mut index = 0;
         while index < self.len {
@@ -113,6 +124,7 @@ impl<const N: usize> PhysRegionTable<N> {
             {
                 merged.start = current.start.min(merged.start);
                 merged.end = current.end.max(merged.end);
+                self.merged = self.merged.saturating_add(1);
                 self.len -= 1;
                 self.regions[index] = self.regions[self.len];
                 index = 0;
@@ -136,8 +148,29 @@ impl<const N: usize> PhysRegionTable<N> {
         self.dropped
     }
 
+    /// Number of input ranges offered to the table, including invalid and
+    /// capacity-dropped ranges.
+    pub const fn discovered(&self) -> usize {
+        self.discovered
+    }
+
+    /// Number of well-formed non-empty ranges admitted before coalescing.
+    pub const fn admitted(&self) -> usize {
+        self.admitted
+    }
+
+    /// Number of same-kind coalescing operations performed.
+    pub const fn merged(&self) -> usize {
+        self.merged
+    }
+
+    /// Number of malformed ranges (`start >= end`) rejected.
+    pub const fn invalid(&self) -> usize {
+        self.invalid
+    }
+
     pub const fn is_complete(&self) -> bool {
-        self.dropped == 0
+        self.dropped == 0 && self.invalid == 0
     }
 }
 
@@ -447,6 +480,10 @@ mod tests {
         assert_eq!(regions.regions().len(), 2);
         assert_eq!(regions.dropped(), 1);
         assert!(!regions.is_complete());
+        assert_eq!(regions.discovered(), 3);
+        assert_eq!(regions.admitted(), 3);
+        assert_eq!(regions.merged(), 0);
+        assert_eq!(regions.invalid(), 0);
     }
 
     #[test]
@@ -463,6 +500,98 @@ mod tests {
         assert_eq!(regions.regions()[0].start, 0);
         assert_eq!(regions.regions()[0].end, 3 * FRAME_SIZE);
         assert!(regions.is_complete());
+        assert_eq!(regions.discovered(), 3);
+        assert_eq!(regions.admitted(), 3);
+        assert_eq!(regions.merged(), 2);
+        assert_eq!(regions.invalid(), 0);
+    }
+
+    #[test]
+    fn hostile_memory_maps_never_publish_reserved_or_malformed_frames() {
+        let mut table = PhysRegionTable::<4>::new();
+        table.push(PhysRegion {
+            start: FRAME_SIZE,
+            end: 3 * FRAME_SIZE,
+            kind: RegionKind::Usable,
+        });
+        table.push(PhysRegion {
+            start: 2 * FRAME_SIZE,
+            end: 5 * FRAME_SIZE,
+            kind: RegionKind::Reserved,
+        });
+        table.push(PhysRegion {
+            start: 3 * FRAME_SIZE,
+            end: 4 * FRAME_SIZE,
+            kind: RegionKind::Usable,
+        });
+        table.push(PhysRegion {
+            start: 9 * FRAME_SIZE,
+            end: 6 * FRAME_SIZE,
+            kind: RegionKind::Reserved,
+        });
+
+        assert_eq!(table.discovered(), 4);
+        assert_eq!(table.admitted(), 3);
+        assert_eq!(table.invalid(), 1);
+        assert_eq!(table.merged(), 1);
+        assert_eq!(table.dropped(), 0);
+        assert!(!table.is_complete());
+
+        let mut bits = [0u64; 2];
+        let allocator = BitmapFrameAllocator::new(&mut bits, table.regions());
+        assert!(!allocator.is_used(PhysFrame::from_number(1)));
+        for frame in 2..5 {
+            assert!(
+                allocator.is_used(PhysFrame::from_number(frame)),
+                "frame {frame} must not be published across overlap/interleave"
+            );
+        }
+        assert_eq!(
+            allocator.usable_frames(),
+            1,
+            "only the non-reserved frame may be published"
+        );
+    }
+
+    #[test]
+    fn trailing_reserved_overflow_fails_before_frame_publication() {
+        let mut table = PhysRegionTable::<4>::new();
+        for index in 0..4 {
+            table.push(PhysRegion {
+                start: (index * 3 + 1) * FRAME_SIZE,
+                end: (index * 3 + 2) * FRAME_SIZE,
+                kind: RegionKind::Usable,
+            });
+        }
+        table.push(PhysRegion {
+            start: FRAME_SIZE,
+            end: 2 * FRAME_SIZE,
+            kind: RegionKind::Reserved,
+        });
+
+        assert_eq!(table.dropped(), 1);
+        assert!(!table.is_complete());
+        assert!(
+            table.regions().iter().all(|region| region.kind == RegionKind::Usable),
+            "the dropped reserved range must not be silently synthesized from the partial map"
+        );
+    }
+
+    #[test]
+    fn frame_ranges_include_only_frames_fully_inside_a_region() {
+        let usable = PhysRegion {
+            start: FRAME_SIZE,
+            end: 3 * FRAME_SIZE - 1,
+            kind: RegionKind::Usable,
+        };
+        let regions = [usable];
+        let mut bits = [0u64; 1];
+        let allocator = BitmapFrameAllocator::new(&mut bits, &regions);
+
+        assert!(allocator.is_used(PhysFrame::from_number(0)));
+        assert!(!allocator.is_used(PhysFrame::from_number(1)));
+        assert!(allocator.is_used(PhysFrame::from_number(2)));
+        assert!(allocator.is_used(PhysFrame::from_number(3)));
     }
 
     fn regions() -> [PhysRegion; 3] {

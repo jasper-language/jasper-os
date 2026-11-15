@@ -65,8 +65,12 @@ fn write_read_back(f: PhysFrame, pattern: u64) -> bool {
 /// Runs the M2.1 exercise; the allocator was initialised by the `frames` boot stage.
 pub fn run(boot: &'static BootSpec, stats: frame::FrameStats) {
     kprintln!(
-        "[JSR-FRAME] regions={} usable_frames={} usable_mib={} ignored={} dropped_regions={} phys_offset={}",
+        "[JSR-FRAME] regions={} discovered={} admitted={} merged={} invalid={} usable_frames={} usable_mib={} ignored={} dropped_regions={} phys_offset={}",
         stats.regions,
+        boot.discovered_regions(),
+        boot.admitted_regions(),
+        boot.merged_regions(),
+        boot.invalid_regions(),
         stats.usable,
         stats.usable as u64 * FRAME_SIZE / (1024 * 1024),
         stats.ignored,

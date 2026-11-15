@@ -188,7 +188,11 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         Stage::Frames => stage(ctx, s, |ctx| {
             if !ctx.boot.has_complete_regions() {
                 kprintln!(
-                    "[JSR-BOOT] reject=memory_map_truncated dropped_regions={}",
+                    "[JSR-BOOT] reject=memory_map_incomplete discovered={} admitted={} merged={} invalid={} dropped={}",
+                    ctx.boot.discovered_regions(),
+                    ctx.boot.admitted_regions(),
+                    ctx.boot.merged_regions(),
+                    ctx.boot.invalid_regions(),
                     ctx.boot.dropped_regions()
                 );
                 return None;
