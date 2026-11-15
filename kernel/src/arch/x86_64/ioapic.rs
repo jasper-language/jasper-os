@@ -1,9 +1,9 @@
-//! I/O APIC 与本平台的两条可路由设备中断线：COM1 串口（ISA 4）与 CMOS 实时时钟（ISA 8）。
-//! I/O APIC driver and this platform's two routable device lines: the COM1 UART and the CMOS RTC.
+//! I/O APIC discovery and the device IRQ routes currently supported by this platform.
 //!
 //! # 职责
-//! * 由 MADT 找到负责这两条 ISA 中断的 I/O APIC 与输入线（应用中断源覆盖条目的极性与触发方式），
-//!   初始化时屏蔽该控制器的全部输入线，再为两条线写好向量与目标。
+//! * 枚举 MADT 声明并由 IOAPIC 寄存器确认的全部实际输入线，初始化时全部屏蔽；
+//! * 已支持设备只声明自己的 legacy interrupt request，实际 GSI、控制器、pin、极性与
+//!   触发方式由 ACPI/MADT 决定；
 //! * 路由 = 改写重定向表项的目标 APIC 标识（物理目标模式）；屏蔽 = 表项的屏蔽位。
 //! * 设备侧：串口的「发送保持寄存器空」中断、实时时钟的周期中断；确认与持续自触发都在这里。
 //!
@@ -14,9 +14,9 @@
 //!   （串口重写中断使能寄存器、时钟读状态寄存器 C），不丢中断。
 //! * 寄存器窗口是「选择 + 数据」两步访问，全部经一把关中断的自旋锁串行；CMOS 的索引 / 数据端口另用一把。
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use alloc::vec::Vec;
 
-use kernel_core::acpi::Madt;
+use kernel_core::acpi::{IoController, Madt};
 use kernel_core::irq::IrqError;
 use spin::Mutex;
 
@@ -29,12 +29,36 @@ pub const SERIAL_VECTOR: u8 = 0x50;
 /// 实时时钟线的向量。
 pub const RTC_VECTOR: u8 = 0x51;
 
-/// 本平台的设备中断线：（规范名, ISA 中断号, 向量）。
-const LINES: [(&str, u8, u8); 2] = [("serial", 4, SERIAL_VECTOR), ("rtc", 8, RTC_VECTOR)];
-/// 串口线下标。
-pub const LINE_SERIAL: usize = 0;
-/// 实时时钟线下标。
-pub const LINE_RTC: usize = 1;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeviceKind {
+    Serial,
+    Rtc,
+}
+
+/// A supported driver's legacy interrupt request. The ISA request is a device
+/// contract; GSI, controller, pin and electrical properties still come from
+/// the firmware MADT and are never inferred from this number.
+struct IrqBinding {
+    name: &'static str,
+    legacy_irq: u8,
+    vector: u8,
+    kind: DeviceKind,
+}
+
+const DEVICE_BINDINGS: [IrqBinding; 2] = [
+    IrqBinding {
+        name: "serial",
+        legacy_irq: 4,
+        vector: SERIAL_VECTOR,
+        kind: DeviceKind::Serial,
+    },
+    IrqBinding {
+        name: "rtc",
+        legacy_irq: 8,
+        vector: RTC_VECTOR,
+        kind: DeviceKind::Rtc,
+    },
+];
 
 const IOREGSEL: u64 = 0x00;
 const IOWIN: u64 = 0x10;
@@ -84,29 +108,33 @@ struct Pin {
     /// 重定向表项低 32 位中除屏蔽位外的部分（向量、极性、触发方式）。
     low: u32,
     masked: bool,
+    storm: bool,
+    name: &'static str,
+    vector: u8,
+    kind: DeviceKind,
 }
 
-static PINS: Mutex<[Pin; 2]> = Mutex::new([
-    Pin { base: 0, pin: 0, low: 0, masked: true },
-    Pin { base: 0, pin: 0, low: 0, masked: true },
-]);
-/// 可用线数（配置成功后为 2）。
-static COUNT: AtomicUsize = AtomicUsize::new(0);
-/// 各线的持续自触发开关。
-static STORM: [AtomicBool; 2] = [const { AtomicBool::new(false) }; 2];
+static PINS: Mutex<Vec<Pin>> = Mutex::new(Vec::new());
 /// CMOS 索引 / 数据端口。
 static CMOS: Mutex<()> = Mutex::new(());
 
-fn read_reg(base: u64, reg: u32) -> u32 {
-    // SAFETY：`base` 是 MADT 给出的 I/O APIC 寄存器窗口（经全物理映射，不可缓存）；先选后读。
-    unsafe {
-        ((base + IOREGSEL) as *mut u32).write_volatile(reg);
-        ((base + IOWIN) as *const u32).read_volatile()
+fn pin_read(base: u64, reg: u32) -> Option<u32> {
+    let selector = base.checked_add(IOREGSEL)?;
+    let window = base.checked_add(IOWIN)?;
+    if selector == 0 || window == 0 {
+        return None;
     }
+    // SAFETY: both addresses came from a MADT IOAPIC window and passed checked
+    // arithmetic; select-before-read is the mandated register protocol.
+    Some(unsafe {
+        (selector as *mut u32).write_volatile(reg);
+        (window as *const u32).read_volatile()
+    })
 }
 
 fn write_reg(base: u64, reg: u32, v: u32) {
-    // SAFETY：同 [`read_reg`]；先选后写。
+    // SAFETY：base came from a checked MADT IOAPIC window; select-before-write
+    // is the mandated register protocol.
     unsafe {
         ((base + IOREGSEL) as *mut u32).write_volatile(reg);
         ((base + IOWIN) as *mut u32).write_volatile(v);
@@ -114,127 +142,200 @@ fn write_reg(base: u64, reg: u32, v: u32) {
 }
 
 fn write_low(p: &Pin) {
-    write_reg(p.base, REG_REDIRECT + 2 * p.pin, p.low | if p.masked { RTE_MASKED } else { 0 });
+    write_reg(
+        p.base,
+        REG_REDIRECT + 2 * p.pin,
+        p.low | if p.masked { RTE_MASKED } else { 0 },
+    );
 }
 
-/// 由 MADT 配置两条线（引导处理器上调用一次）：屏蔽所在控制器的全部输入线，写好向量与目标（引导处理器），保持屏蔽。
-/// 找不到控制器或输入线超出控制器容量时该线不可用；返回可用线数。
-/// Configure the device lines from the MADT.
+fn controller_window(controller: IoController, phys_offset: u64) -> Option<(u64, u32)> {
+    let base = phys_offset.checked_add(controller.address)?;
+    if base == 0 {
+        return None;
+    }
+    let entries = (pin_read(base, REG_VERSION)? >> 16) & 0xFF;
+    Some((base, entries + 1))
+}
+
+/// Enumerate every firmware-declared IOAPIC input, mask it, then publish only
+/// routes whose device driver is implemented. All other physical inputs are
+/// counted as unsupported instead of being misrepresented as absent.
 pub fn configure(madt: &Madt, phys_offset: u64, boot_apic_id: u32) -> usize {
-    let mut pins = PINS.lock();
-    let mut ok = 0;
-    let mut masked_all = alloc::vec::Vec::new();
-    for (i, &(_, isa, vector)) in LINES.iter().enumerate() {
-        let route = madt.isa_route(isa);
-        let Some((ctrl, pin)) = madt.controller_for(route.gsi) else {
-            break;
+    let mut physical_pins = 0usize;
+    let mut controllers = 0usize;
+    for (index, &controller) in madt.io_controllers().iter().enumerate() {
+        if madt.io_controllers()[..index]
+            .iter()
+            .any(|prior| prior.address == controller.address)
+        {
+            continue;
+        }
+        let Some((base, entries)) = controller_window(controller, phys_offset) else {
+            continue;
         };
-        if ctrl.address >= 1 << 32 {
-            break;
+        controllers += 1;
+        physical_pins = physical_pins.saturating_add(entries as usize);
+        for entry in 0..entries {
+            write_reg(base, REG_REDIRECT + 2 * entry, RTE_MASKED);
         }
-        let base = phys_offset + ctrl.address;
-        let entries = ((read_reg(base, REG_VERSION) >> 16) & 0xFF) + 1;
-        if pin >= entries {
-            break;
+    }
+
+    let mut discovered = Vec::new();
+    if discovered.try_reserve_exact(DEVICE_BINDINGS.len()).is_err() {
+        crate::kprintln!(
+            "[JSR-IOAPIC] controllers={} pins={} exposed=0 unsupported={} invalid={} allocation=false",
+            controllers,
+            physical_pins,
+            physical_pins,
+            DEVICE_BINDINGS.len()
+        );
+        PINS.lock().clear();
+        return 0;
+    }
+    let mut invalid = 0usize;
+    for binding in DEVICE_BINDINGS {
+        let route = madt.isa_route(binding.legacy_irq);
+        let Some((controller, pin)) = madt.controller_for(route.gsi) else {
+            invalid += 1;
+            continue;
+        };
+        let Some((base, entries)) = controller_window(controller, phys_offset) else {
+            invalid += 1;
+            continue;
+        };
+        if pin >= entries
+            || discovered
+                .iter()
+                .any(|existing: &Pin| existing.base == base && existing.pin == pin)
+            || discovered
+                .iter()
+                .any(|existing: &Pin| existing.vector == binding.vector)
+        {
+            invalid += 1;
+            continue;
         }
-        // 第一次见到这个控制器：屏蔽它的全部输入线
-        if !masked_all.contains(&base) {
-            for e in 0..entries {
-                write_reg(base, REG_REDIRECT + 2 * e, RTE_MASKED);
-            }
-            if masked_all.try_reserve(1).is_err() {
-                break;
-            }
-            masked_all.push(base);
-        }
-        let low = vector as u32
+        let low = u32::from(binding.vector)
             | if route.active_low { RTE_ACTIVE_LOW } else { 0 }
             | if route.level { RTE_LEVEL } else { 0 };
-        pins[i] = Pin { base, pin, low, masked: true };
+        let pin_state = Pin {
+            base,
+            pin,
+            low,
+            masked: true,
+            storm: false,
+            name: binding.name,
+            vector: binding.vector,
+            kind: binding.kind,
+        };
         write_reg(base, REG_REDIRECT + 2 * pin + 1, boot_apic_id << 24);
-        write_low(&pins[i]);
-        ok = i + 1;
+        write_low(&pin_state);
+        discovered.push(pin_state);
     }
-    COUNT.store(ok, Ordering::Release);
-    ok
+
+    let exposed = discovered.len();
+    *PINS.lock() = discovered;
+    crate::kprintln!(
+        "[JSR-IOAPIC] controllers={} pins={} exposed={} unsupported={} invalid={} dropped={}",
+        controllers,
+        physical_pins,
+        exposed,
+        physical_pins.saturating_sub(exposed),
+        invalid,
+        0
+    );
+    for (line, pin) in PINS.lock().iter().enumerate() {
+        crate::kprintln!(
+            "[JSR-IOAPIC] line={} name={} vector={} gsi_pin={} controlled=true",
+            line,
+            pin.name,
+            pin.vector,
+            pin.pin
+        );
+    }
+    exposed
 }
 
 /// 可用线数。
 pub fn count() -> usize {
-    COUNT.load(Ordering::Acquire)
+    PINS.lock().len()
 }
 
 /// 线的规范名。
 pub fn name(line: usize) -> &'static str {
-    LINES.get(line).map(|l| l.0).unwrap_or("none")
+    PINS.lock().get(line).map(|pin| pin.name).unwrap_or("none")
 }
 
-/// 线号是否可用。
-fn valid(line: usize) -> bool {
-    line < count()
+/// Resolve the runtime logical line for one registered device vector.
+pub fn line_for_vector(vector: u8) -> Option<usize> {
+    PINS.lock().iter().position(|pin| pin.vector == vector)
 }
 
 /// 路由到逻辑下标 `cpu`（改目标 APIC 标识，屏蔽状态不变）。
 pub fn route(line: usize, cpu: usize) -> Result<(), IrqError> {
-    if !valid(line) {
-        return Err(IrqError::NoLine);
-    }
-    let id = smp::hw_id_of(cpu).filter(|&id| id < 256).ok_or(IrqError::RouteFailed)?;
+    let id = smp::hw_id_of(cpu)
+        .filter(|&id| id < 256)
+        .ok_or(IrqError::RouteFailed)?;
     without_irq(|| {
         let pins = PINS.lock();
-        let p = &pins[line];
+        let p = pins.get(line).ok_or(IrqError::NoLine)?;
         write_reg(p.base, REG_REDIRECT + 2 * p.pin + 1, id << 24);
-    });
-    Ok(())
+        Ok(())
+    })
 }
 
 /// 屏蔽 / 解除屏蔽；解除时让设备重新产生中断条件（边沿在屏蔽期间被丢弃）。
 pub fn set_masked(line: usize, masked: bool) {
-    if !valid(line) {
-        return;
-    }
-    without_irq(|| {
+    let Some(rearm_state) = without_irq(|| {
         let mut pins = PINS.lock();
-        pins[line].masked = masked;
-        write_low(&pins[line]);
-    });
+        let pin = pins.get_mut(line)?;
+        pin.masked = masked;
+        write_low(pin);
+        Some((pin.kind, pin.storm))
+    }) else {
+        return;
+    };
     if !masked {
-        rearm(line);
+        rearm(rearm_state);
     }
 }
 
 /// 设备侧确认：串口读中断标识寄存器、时钟读状态寄存器 C；持续自触发时立即重新触发。
 pub fn ack(line: usize) {
-    match line {
-        LINE_SERIAL => {
+    let Some((kind, storm)) = PINS.lock().get(line).map(|pin| (pin.kind, pin.storm)) else {
+        return;
+    };
+    match kind {
+        DeviceKind::Serial => {
             // SAFETY：读 IIR 清除「发送保持寄存器空」中断条件；只影响中断状态。
             unsafe { inb(UART_IIR) };
-            if STORM[LINE_SERIAL].load(Ordering::Relaxed) {
+            if storm {
                 retrigger_serial();
             }
         }
-        LINE_RTC => {
+        DeviceKind::Rtc => {
             cmos_read(RTC_REG_C);
         }
-        _ => {}
     }
 }
 
 /// 打开 / 关闭持续自触发。
 pub fn self_trigger(line: usize, on: bool) -> Result<(), IrqError> {
-    if !valid(line) {
-        return Err(IrqError::NoLine);
-    }
-    STORM[line].store(on, Ordering::Relaxed);
-    match line {
-        LINE_SERIAL => {
+    let kind = {
+        let mut pins = PINS.lock();
+        let pin = pins.get_mut(line).ok_or(IrqError::NoLine)?;
+        pin.storm = on;
+        pin.kind
+    };
+    match kind {
+        DeviceKind::Serial => {
             // SAFETY：只改串口的中断使能与 OUT2；控制台的轮询发送不依赖这两个寄存器。
             unsafe {
                 outb(UART_MCR, MCR_OUT2);
                 outb(UART_IER, if on { IER_THRI } else { 0 });
             }
         }
-        _ => {
+        DeviceKind::Rtc => {
             without_irq(|| {
                 let _g = CMOS.lock();
                 let a = cmos_read_locked(RTC_REG_A);
@@ -249,13 +350,14 @@ pub fn self_trigger(line: usize, on: bool) -> Result<(), IrqError> {
 }
 
 /// 解除屏蔽后重新产生中断条件。
-fn rearm(line: usize) {
-    match line {
-        LINE_SERIAL if STORM[LINE_SERIAL].load(Ordering::Relaxed) => retrigger_serial(),
-        LINE_RTC => {
+fn rearm(state: (DeviceKind, bool)) {
+    let (kind, storm) = state;
+    match kind {
+        DeviceKind::Serial if storm => retrigger_serial(),
+        DeviceKind::Serial => {}
+        DeviceKind::Rtc => {
             cmos_read(RTC_REG_C);
         }
-        _ => {}
     }
 }
 

@@ -155,13 +155,17 @@ extern "x86-interrupt" fn ipi_call_handler(frame: InterruptStackFrame) {
 
 /// 串口设备中断（经 I/O APIC，可在任意处理器上到达）：Core 先处理，再 EOI（边沿触发，EOI 只发给本地 APIC）。
 extern "x86-interrupt" fn serial_irq_handler(_frame: InterruptStackFrame) {
-    irq::on_device_irq(ioapic::LINE_SERIAL);
+    if let Some(line) = ioapic::line_for_vector(ioapic::SERIAL_VECTOR) {
+        irq::on_device_irq(line);
+    }
     apic::eoi();
 }
 
 /// 实时时钟设备中断：同上。
 extern "x86-interrupt" fn rtc_irq_handler(_frame: InterruptStackFrame) {
-    irq::on_device_irq(ioapic::LINE_RTC);
+    if let Some(line) = ioapic::line_for_vector(ioapic::RTC_VECTOR) {
+        irq::on_device_irq(line);
+    }
     apic::eoi();
 }
 
