@@ -7,32 +7,61 @@
 //! 串口与 framebuffer/PS-2 前端共用有界会话环，输入同时回显到串口与原生
 //! 图形终端；不宣称已实现 PTY、termios、行编辑或作业控制。
 
-use kernel_core::terminal_session::{DynamicTerminalSession, TerminalError, TerminalState};
 use kernel_core::frame::FRAME_SIZE;
+use kernel_core::terminal_session::{
+    plan_terminal_capacity, DynamicTerminalSession, TerminalError, TerminalState,
+};
 use spin::Once;
 
-use crate::proc;
 use crate::sync::IrqSpinLock;
-use crate::{arch, console, display, sched};
+use crate::{arch, console, display, mm, proc, sched};
 
-/// Share of currently free physical frames admitted to the native terminal.
-const TERMINAL_MEMORY_SHARE_DENOMINATOR: u64 = 64;
+struct TerminalRuntime {
+    session: DynamicTerminalSession,
+    uart_pump_bytes: usize,
+}
 
-static TERMINAL: Once<IrqSpinLock<DynamicTerminalSession>> = Once::new();
+static TERMINAL: Once<IrqSpinLock<TerminalRuntime>> = Once::new();
 
-fn terminal() -> &'static IrqSpinLock<DynamicTerminalSession> {
+/// Allocate terminal rings from the runtime-admitted memory budget.
+pub fn init() -> bool {
+    if TERMINAL.get().is_some() {
+        return true;
+    }
+    let available = mm::frame::free_frames()
+        .checked_mul(FRAME_SIZE as usize)
+        .and_then(|free| u64::try_from(free).ok())
+        .map(|free| free.min(mm::heap::limit()));
+    let Some(available) = available else {
+        crate::kprintln!("[JSR-TERM] reject=capacity_budget_overflow");
+        return false;
+    };
+    let Some(capacity) = plan_terminal_capacity(available, 1) else {
+        crate::kprintln!("[JSR-TERM] reject=capacity_unavailable available={available}");
+        return false;
+    };
+    let Ok(session) = DynamicTerminalSession::new(capacity.input_bytes, capacity.output_bytes)
+    else {
+        crate::kprintln!("[JSR-TERM] reject=capacity_invalid");
+        return false;
+    };
+    crate::kprintln!(
+        "[JSR-TERM] capacity input={} output={} uart_pump={} available={}",
+        capacity.input_bytes,
+        capacity.output_bytes,
+        capacity.uart_pump_bytes,
+        available
+    );
     TERMINAL.call_once(|| {
-        let available = crate::mm::frame::free_frames() as u64 * FRAME_SIZE;
-        let budget = (available / TERMINAL_MEMORY_SHARE_DENOMINATOR).max(2 * FRAME_SIZE);
-        assert!(budget <= available, "terminal capacity exceeds free frames");
-        let input = usize::try_from(budget / 2).expect("terminal capacity fits address space");
-        let output =
-            usize::try_from(budget - input as u64).expect("terminal capacity fits address space");
-        let session = DynamicTerminalSession::new(input, output)
-            .expect("terminal capacities are admitted from free frames");
-        crate::kprintln!("[JSR-TERM] capacity input={} output={}", input, output);
-        IrqSpinLock::ranked(crate::lockorder::TERMINAL, session)
-    })
+        IrqSpinLock::ranked(
+            crate::lockorder::TERMINAL,
+            TerminalRuntime {
+                session,
+                uart_pump_bytes: capacity.uart_pump_bytes,
+            },
+        )
+    });
+    true
 }
 
 /// Read standard input, translating serial CR to LF and blocking outside IRQ context.
@@ -45,9 +74,9 @@ pub fn read_input(destination: &mut [u8], nonblocking: bool) -> Result<usize, Te
     loop {
         pump_serial_input();
         pump_display_input();
-        let result = {
-            let mut terminal = terminal().lock();
-            terminal.read_input(destination)
+        let result = match TERMINAL.get() {
+            Some(terminal) => terminal.lock().session.read_input(destination),
+            None => Err(TerminalError::Failed),
         };
         match result {
             Err(TerminalError::WouldBlock) if !nonblocking => {
@@ -73,7 +102,10 @@ pub fn write_output(bytes: &[u8]) {
 /// 查询是否有待读输入，以及是否已出现稳定挂断。
 pub fn input_status() -> (bool, bool, bool) {
     pump_serial_input();
-    let snapshot = terminal().lock().snapshot();
+    let Some(terminal) = TERMINAL.get() else {
+        return (false, true, true);
+    };
+    let snapshot = terminal.lock().session.snapshot();
     let ended = matches!(
         snapshot.state,
         TerminalState::InputClosed | TerminalState::Closed | TerminalState::Failed
@@ -86,27 +118,29 @@ pub fn input_status() -> (bool, bool, bool) {
 }
 
 fn pump_serial_input() {
-    let budget = {
-        let snapshot = terminal().lock().snapshot();
-        snapshot.input_capacity.saturating_sub(snapshot.input_bytes)
-    };
-    if budget == 0 {
-        emit(b"\n[JSR-TERM] input_full=true drop=true\n");
+    let Some(pump_bytes) = TERMINAL
+        .get()
+        .map(|terminal| terminal.lock().uart_pump_bytes)
+    else {
         return;
-    }
-    for _ in 0..budget {
+    };
+    for _ in 0..pump_bytes {
         let Some(received) = arch::console_try_read_byte() else {
             return;
         };
         if received == 0x04 {
-            let closed = terminal().lock().close_input().is_ok();
+            let closed = TERMINAL
+                .get()
+                .is_some_and(|terminal| terminal.lock().session.close_input().is_ok());
             if closed {
                 emit(b"\n");
             }
             return;
         }
         let byte = if received == b'\r' { b'\n' } else { received };
-        let accepted = terminal().lock().enqueue_input(&[byte]).is_ok();
+        let accepted = TERMINAL
+            .get()
+            .is_some_and(|terminal| terminal.lock().session.enqueue_input(&[byte]).is_ok());
         if !accepted {
             emit(b"\n[JSR-TERM] input_full=true drop=true\n");
             return;
@@ -116,12 +150,23 @@ fn pump_serial_input() {
 }
 
 fn pump_display_input() {
+    let Some(pump_bytes) = TERMINAL
+        .get()
+        .map(|terminal| terminal.lock().uart_pump_bytes)
+    else {
+        return;
+    };
     display::poll_input();
-    while let Some(key) = display::next_key() {
+    for _ in 0..pump_bytes {
+        let Some(key) = display::next_key() else {
+            return;
+        };
         let Some(byte) = key_to_byte(key) else {
             continue;
         };
-        let accepted = terminal().lock().enqueue_input(&[byte]).is_ok();
+        let accepted = TERMINAL
+            .get()
+            .is_some_and(|terminal| terminal.lock().session.enqueue_input(&[byte]).is_ok());
         if !accepted {
             emit(b"\n[JSR-TERM] input_full=true drop=true\n");
             return;

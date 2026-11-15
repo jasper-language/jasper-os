@@ -211,6 +211,7 @@ pub fn run_map() {
 /// The heap was first mapped by the `heap` boot stage.
 pub fn run_heap() {
     let (total0, free0, blocks0, mapped0) = heap::stats();
+    let used0 = total0.saturating_sub(free0);
     kprintln!("[JSR-HEAP] init total={} free={} blocks={} mapped={}", total0, free0, blocks0, mapped0);
 
     {
@@ -235,10 +236,11 @@ pub fn run_heap() {
         kprintln!("[JSR-HEAP] grow big_bytes={} mapped_before={} mapped_after={}", big.len(), mapped0, mapped1);
     }
 
-    // 全部离开作用域后：空闲字节 = 总字节，且所有空闲块合并成一个
+    // 演练对象全部离开作用域后，常驻内存占用应回到进入前的基线。
     let (total2, free2, blocks2, mapped2) = heap::stats();
-    let back = free2 == total2;
-    check(back, "释放后空闲字节未回到总量（泄漏或记账错误）");
+    let used2 = total2.saturating_sub(free2);
+    let back = used2 == used0;
+    check(back, "释放后常驻字节未回到基线（泄漏或记账错误）");
     check(blocks2 == 1, "释放后空闲块未合并为一个");
     kprintln!("[JSR-HEAP] after free total={} free={} blocks={} mapped={} baseline_ok={}", total2, free2, blocks2, mapped2, back && blocks2 == 1);
     kprintln!("[JSR-HEAP] checks={} failed={}", CHECKS.load(Ordering::Relaxed), failed());

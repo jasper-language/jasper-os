@@ -10,8 +10,12 @@
 use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
 use crate::plan;
-use kernel_core::boot_stage::{plan_check, PlanItem, PlanSummary, Stage, StageError, StageState, Tracker};
-use crate::{assembly, bootcap, clock, config, irq, kprint, kprintln, mm, pci, profile, sched, smp};
+use crate::{
+    assembly, bootcap, clock, config, irq, kprint, kprintln, mm, pci, profile, sched, smp,
+};
+use kernel_core::boot_stage::{
+    plan_check, PlanItem, PlanSummary, Stage, StageError, StageState, Tracker,
+};
 
 /// 内核版本（横幅中输出）。
 pub const VERSION: &str = "0.0.1";
@@ -103,7 +107,11 @@ fn stage(ctx: &mut BootCtx, s: Stage, body: impl FnOnce(&mut BootCtx) -> Option<
                 e.as_str(),
                 missing.name()
             ),
-            _ => kprintln!("[JSR-BOOT-STAGE] refused stage={} reason={}", s.name(), e.as_str()),
+            _ => kprintln!(
+                "[JSR-BOOT-STAGE] refused stage={} reason={}",
+                s.name(),
+                e.as_str()
+            ),
         }
         kprintln!("[JSR-EXIT] failure boot_stage={}", s.name());
         stop_boot(ExitStatus::Failure);
@@ -111,7 +119,11 @@ fn stage(ctx: &mut BootCtx, s: Stage, body: impl FnOnce(&mut BootCtx) -> Option<
     if body(ctx).is_some() {
         // begin 刚成功且阶段串行，complete 不会被拒。begin just succeeded; complete cannot be refused.
         let _ = ctx.tracker.complete(s);
-        kprintln!("[JSR-BOOT-STAGE] done stage={} done_mask={:#x}", s.name(), ctx.tracker.done_mask());
+        kprintln!(
+            "[JSR-BOOT-STAGE] done stage={} done_mask={:#x}",
+            s.name(),
+            ctx.tracker.done_mask()
+        );
         return;
     }
     let _ = ctx.tracker.fail(s);
@@ -132,7 +144,10 @@ fn stage(ctx: &mut BootCtx, s: Stage, body: impl FnOnce(&mut BootCtx) -> Option<
             resources_baseline
         );
     }
-    if let Some(blocked_stage) = Stage::ALL.iter().find(|candidate| blocked & candidate.bit() != 0) {
+    if let Some(blocked_stage) = Stage::ALL
+        .iter()
+        .find(|candidate| blocked & candidate.bit() != 0)
+    {
         let refusal = ctx.tracker.begin(*blocked_stage);
         let (begin, started) = match refusal {
             Err(e) => (e.as_str(), 0),
@@ -155,7 +170,11 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
     match s {
         Stage::Console => stage(ctx, s, |_| {
             arch::console_init();
-            kprintln!("[JSR-BOOT] jasper-os rust kernel {} {}", VERSION, arch::NAME);
+            kprintln!(
+                "[JSR-BOOT] jasper-os rust kernel {} {}",
+                VERSION,
+                arch::NAME
+            );
             config::report();
             Some(())
         }),
@@ -218,7 +237,11 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
             mm::map::init(ctx.boot).then_some(())
         }),
         // 内核堆（Box/Vec/String 可用，按需增长）。首批映射失败时启动停止。
-        Stage::Heap => stage(ctx, s, |_| mm::heap::init().ok()),
+        Stage::Heap => stage(ctx, s, |_| {
+            mm::heap::init()
+                .ok()
+                .and_then(|_| crate::terminal::init().then_some(()))
+        }),
         // 堆就绪：校验启动期容量记录与内存预算。对象表、实时表和任务表由模块激活安装，
         // 这样阶段只保留容量验证这一真实内存顺序约束。
         Stage::Capacity => stage(ctx, s, |ctx| {
@@ -257,7 +280,10 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         Stage::SchedMode => stage(ctx, s, |ctx| {
             let multi_mode = profile::has_capability("sched.arbiter");
             sched::set_arbiter(multi_mode);
-            kprintln!("[JSR-SCHED] mode={}", if multi_mode { "multi" } else { "single" });
+            kprintln!(
+                "[JSR-SCHED] mode={}",
+                if multi_mode { "multi" } else { "single" }
+            );
             crate::capability_matrix::report(ctx.boot);
             Some(())
         }),
@@ -300,7 +326,10 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         }),
         // 用户运行时只判定「可以装载用户程序」；运行哪些服务由装配决定。
         Stage::UserRuntime => stage(ctx, s, |_| {
-            kprintln!("[JSR-STAGE] user_runtime embedded_programs={}", cfg!(feature = "user-programs"));
+            kprintln!(
+                "[JSR-STAGE] user_runtime embedded_programs={}",
+                cfg!(feature = "user-programs")
+            );
             mm::space::init().ok().map(|_| ())
         }),
     }
@@ -308,7 +337,14 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
 
 /// 内核主流程（永不返回）。`boot` 是引导适配层转换好的交接信息。
 pub fn start(boot: &'static BootSpec) -> ! {
-    let mut ctx = BootCtx { boot, tracker: Tracker::new(), frames: None, capacity: None, smp: None, idle_divisor: 0 };
+    let mut ctx = BootCtx {
+        boot,
+        tracker: Tracker::new(),
+        frames: None,
+        capacity: None,
+        smp: None,
+        idle_divisor: 0,
+    };
     for part in plan::PLAN {
         for step in part.iter() {
             match step {

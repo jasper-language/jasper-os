@@ -32,6 +32,9 @@ network-dynamic = []
 # Firmware tables are parsed into runtime-sized inventories by the kernel;
 # user ABI crates keep the allocation-free default surface.
 acpi-dynamic = []
+# Terminal rings are sized from the admitted runtime memory budget and require
+# the caller's allocator.
+terminal-dynamic = []
 # Persistent installation requires the kernel heap for bounded transactional
 # state snapshots; core profiles that do not use it remain allocation-free.
 persistent-install = []
