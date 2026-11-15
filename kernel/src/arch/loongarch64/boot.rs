@@ -29,6 +29,7 @@ global_asm!(
 _start:
     csrrd $t0, 0x20
     bnez  $t0, 9f
+    csrwr $zero, 0x2
     move  $tp, $zero
     csrrd $t0, 0x0
     li.d  $t1, (1 << 2)
@@ -63,6 +64,14 @@ extern "C" fn jsr_loongarch64_boot() -> ! {
     uart::init_physical();
     crate::console::write_str(
         "[JSR-ARCH] loongarch64 entry=physical console=uart16550 qemu=virt\n",
+    );
+    let euen = cpu::disable_extended_units();
+    if euen != 0 {
+        crate::console::write_str("[JSR-EXTSTATE] failure reason=euen-not-disabled\n");
+        super::testdev::stop(35);
+    }
+    crate::console::write_str(
+        "[JSR-EXTSTATE] arch=loongarch64 fpen=0 lsxen=0 lasxen=0 euen=0 source=fail-closed\n",
     );
     // SAFETY: written once by `_start` before Rust runs and before MMU enable.
     let efi_boot = unsafe { core::ptr::read_volatile(&raw const JSR_LOONGARCH_BOOT_EFI_BOOT) };

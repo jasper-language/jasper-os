@@ -15,6 +15,7 @@ global_asm!(
     .balign 4
     .global enter_user
 enter_user:
+    csrwr $zero, 0x2
     st.d $sp, $sp, -8
     st.d $ra, $sp, -16
     st.d $fp, $sp, -24

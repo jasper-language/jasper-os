@@ -123,6 +123,20 @@ macro_rules! write_csr {
 
 pub(super) use {read_csr, write_csr};
 
+/// Disable every architecture extension unit and return the observed state.
+///
+/// The kernel uses the soft-float target and does not preserve FP/LSX/LASX
+/// state, so firmware defaults must never make those units user-visible.
+pub fn disable_extended_units() -> u64 {
+    // SAFETY: EUEN only controls extension-unit enable bits; no enabled unit
+    // state is read or consumed after this write.
+    unsafe {
+        write_csr!("0x2", 0u64);
+        data_barrier();
+        read_csr!("0x2")
+    }
+}
+
 /// Atomically clear `mask` in a CSR.
 #[inline(always)]
 pub unsafe fn clear_csr_bits(csr: u64, mask: u64) {

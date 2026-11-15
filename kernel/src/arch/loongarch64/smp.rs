@@ -48,6 +48,7 @@ global_asm!(
     .global jsr_loongarch64_secondary_entry
 jsr_loongarch64_secondary_entry:
     csrrd  $a0, 0x20
+    csrwr  $zero, 0x2
     la.local $t0, JSR_LOONGARCH64_AP_STACKS
     slli.d $t1, $a0, 14
     add.d  $t0, $t0, $t1
@@ -330,6 +331,13 @@ pub fn enable_ipi() {
 
 #[no_mangle]
 extern "C" fn jsr_loongarch64_secondary_rust(hw_id: u64) -> ! {
+    if super::cpu::disable_extended_units() != 0 {
+        crate::console::write_str("[JSR-SMP] secondary reject=euen-not-disabled\n");
+        loop {
+            // SAFETY: halting this secondary forever is the failure-closed behavior.
+            unsafe { core::arch::asm!("idle 0", options(nomem, nostack)) };
+        }
+    }
     // SAFETY: the AP has a private static boot stack inside the identity map.
     unsafe {
         super::mmu::enable();
