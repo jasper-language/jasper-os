@@ -669,4 +669,54 @@ mod tests {
             Some(TerminalError::Invalid)
         );
     }
+
+    #[test]
+    fn dynamic_session_sustains_full_ring_chunked_load() {
+        fn expected(position: usize) -> u8 {
+            position.wrapping_mul(37).wrapping_add(11) as u8
+        }
+
+        const CHUNK: usize = 1024;
+        let capacity = 64 * 1024;
+        let cycles = 16;
+        let mut session = DynamicTerminalSession::new(capacity, capacity).unwrap();
+        let mut write = [0u8; CHUNK];
+        let mut read = [0u8; CHUNK];
+
+        for cycle in 0..cycles {
+            for chunk in 0..capacity / CHUNK {
+                let base = (cycle * capacity + chunk * CHUNK) as usize;
+                for (index, byte) in write.iter_mut().enumerate() {
+                    *byte = expected(base + index);
+                }
+                session.enqueue_input(&write).unwrap();
+            }
+            for chunk in 0..capacity / CHUNK {
+                let base = (cycle * capacity + chunk * CHUNK) as usize;
+                assert_eq!(session.read_input(&mut read), Ok(CHUNK));
+                for (index, byte) in read.iter().enumerate() {
+                    assert_eq!(*byte, expected(base + index));
+                }
+            }
+        }
+
+        for cycle in 0..cycles {
+            for chunk in 0..capacity / CHUNK {
+                let base = (cycle * capacity + chunk * CHUNK) as usize;
+                for (index, byte) in write.iter_mut().enumerate() {
+                    *byte = expected(base + index);
+                }
+                session.enqueue_output(&write).unwrap();
+            }
+            for chunk in 0..capacity / CHUNK {
+                let base = (cycle * capacity + chunk * CHUNK) as usize;
+                assert_eq!(session.drain_output(&mut read), Ok(CHUNK));
+                for (index, byte) in read.iter().enumerate() {
+                    assert_eq!(*byte, expected(base + index));
+                }
+            }
+        }
+        assert_eq!(session.snapshot().input_bytes, 0);
+        assert_eq!(session.snapshot().output_bytes, 0);
+    }
 }
