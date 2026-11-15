@@ -105,18 +105,33 @@ impl BootSpec {
     }
 
     /// 追加一个区域；满了则计数丢弃。
+    ///
+    /// 截断区域会让保留区与可用区都可能丢失，因此只作为诊断事实保留。
+    /// 页帧分配器初始化前必须使用 [`Self::has_complete_regions`] 失败关闭。
     pub fn push_region(&mut self, region: PhysRegion) {
         if self.region_count < MAX_REGIONS {
             self.regions[self.region_count] = region;
             self.region_count += 1;
         } else {
-            self.dropped_regions += 1;
+            self.dropped_regions = self.dropped_regions.saturating_add(1);
         }
     }
 
     /// 已记录的物理内存区域。
     pub fn regions(&self) -> &[PhysRegion] {
         &self.regions[..self.region_count]
+    }
+
+    /// Whether the complete firmware/bootloader memory map was retained.
+    ///
+    /// A dropped region may be a reserved firmware, kernel-image, DTB or MMIO
+    /// range. Publishing usable frames from an incomplete map could therefore
+    /// allocate memory that the kernel does not own.
+    ///
+    /// 只有完整保留固件/引导器内存图时才允许发布可用页帧。被丢弃的区域
+    /// 可能是固件、内核映像、DTB 或 MMIO 保留区，继续初始化会破坏隔离。
+    pub const fn has_complete_regions(&self) -> bool {
+        self.dropped_regions == 0
     }
 }
 
@@ -136,4 +151,32 @@ pub fn install(spec: BootSpec) -> &'static BootSpec {
 /// 已安装的交接信息（未安装时为 `None`）。
 pub fn get() -> Option<&'static BootSpec> {
     BOOT.get()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kernel_core::frame::RegionKind;
+
+    #[test]
+    fn region_capacity_reports_every_drop_and_rejects_incomplete_maps() {
+        let mut spec = BootSpec::new();
+        for index in 0..MAX_REGIONS {
+            spec.push_region(PhysRegion {
+                start: index as u64 * 4096,
+                end: (index as u64 + 1) * 4096,
+                kind: RegionKind::Usable,
+            });
+        }
+        assert!(spec.has_complete_regions());
+        assert_eq!(spec.regions().len(), MAX_REGIONS);
+
+        spec.push_region(PhysRegion {
+            start: MAX_REGIONS as u64 * 4096,
+            end: (MAX_REGIONS as u64 + 1) * 4096,
+            kind: RegionKind::Reserved,
+        });
+        assert_eq!(spec.dropped_regions, 1);
+        assert!(!spec.has_complete_regions());
+    }
 }

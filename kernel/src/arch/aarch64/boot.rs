@@ -669,7 +669,6 @@ extern "C" fn jsr_aarch64_boot(dtb_hint: u64, uefi_system_table: u64) -> ! {
         } else {
             memory_truncated = true;
         }
-        spec.push_region(PhysRegion { start: base, end, kind: RegionKind::Usable });
     });
 
     print_dtb_summary(&fdt, &summary, &memory, memory_count, memory_truncated);
@@ -718,7 +717,18 @@ extern "C" fn jsr_aarch64_boot(dtb_hint: u64, uefi_system_table: u64) -> ! {
     if ram_end > covered {
         spec.push_region(PhysRegion { start: covered, end: ram_end, kind: RegionKind::Reserved });
     }
-    if walked.is_err() || ram_end == 0 {
+    // Publish usable ranges only after every reserved range has a chance to
+    // consume the bounded table. This prevents a long usable list from
+    // evicting firmware, image, DTB or MMIO reservations.
+    // 先记录全部保留区，再发布可用内存，避免长 Usable 列表挤掉关键保留区。
+    let memory_walked = fdt.for_each_memory(|base, size| {
+        spec.push_region(PhysRegion {
+            start: base,
+            end: base.saturating_add(size),
+            kind: RegionKind::Usable,
+        });
+    });
+    if walked.is_err() || memory_walked.is_err() || ram_end == 0 {
         crate::console::write_str("[JSR-BOOT] device tree has no usable memory\n");
         semihost::exit(EXIT_FAILURE);
     }

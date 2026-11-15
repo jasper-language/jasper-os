@@ -218,7 +218,6 @@ extern "C" fn jsr_riscv_boot(hart: usize, dtb: usize) -> ! {
     let walked = fdt.for_each_memory(|base, size| {
         let end = base.saturating_add(size);
         ram_end = ram_end.max(end);
-        spec.push_region(PhysRegion { start: base, end, kind: RegionKind::Usable });
     });
     let covered = mmu::cover_phys(ram_end);
     // 保留：内核映像、设备树本身、设备树声明的固件保留区（分配器按「保留优先」处理重叠）
@@ -239,7 +238,17 @@ extern "C" fn jsr_riscv_boot(hart: usize, dtb: usize) -> ! {
     if hole_end > hole_start {
         spec.push_region(PhysRegion { start: hole_start, end: hole_end, kind: RegionKind::Reserved });
     }
-    if walked.is_err() || ram_end == 0 {
+    // Reserved ranges are recorded before usable RAM so a bounded table can
+    // never silently lose a firmware or kernel-owned exclusion.
+    // 保留区优先记录；后续仍有任何截断时，页帧阶段会失败关闭。
+    let memory_walked = fdt.for_each_memory(|base, size| {
+        spec.push_region(PhysRegion {
+            start: base,
+            end: base.saturating_add(size),
+            kind: RegionKind::Usable,
+        });
+    });
+    if walked.is_err() || memory_walked.is_err() || ram_end == 0 {
         uart::init();
         crate::console::write_str("[JSR-BOOT] device tree has no usable memory\n");
         testdev::exit(EXIT_FAILURE);

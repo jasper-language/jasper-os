@@ -186,6 +186,13 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         }),
         // 物理页帧分配（真实内存图）。没有任何可用帧时启动停止。
         Stage::Frames => stage(ctx, s, |ctx| {
+            if !ctx.boot.has_complete_regions() {
+                kprintln!(
+                    "[JSR-BOOT] reject=memory_map_truncated dropped_regions={}",
+                    ctx.boot.dropped_regions
+                );
+                return None;
+            }
             let stats = mm::frame::init(ctx.boot);
             ctx.frames = Some(stats);
             (stats.usable > 0).then_some(())
