@@ -286,6 +286,16 @@ pub fn report() {
     }
 }
 
+/// Primary surface dimensions discovered from the firmware framebuffer.
+///
+/// 从固件帧缓冲发现主显示面的真实尺寸；没有显示后端时返回 `None`。
+pub fn primary_surface() -> Option<(u32, u32)> {
+    DISPLAY
+        .lock()
+        .as_ref()
+        .map(|runtime| (runtime.surface.width, runtime.surface.height))
+}
+
 impl Runtime {
     fn paint_boot_frame(&mut self) -> Result<(), DisplayInputError> {
         let required = usize::try_from(self.required_bytes()?)

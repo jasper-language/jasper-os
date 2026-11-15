@@ -1467,6 +1467,10 @@ impl LinuxRuntime {
         Ok(value & width.mask())
     }
 
+    fn pio_is_discard(&self, port: u16) -> bool {
+        self.pio_map.route(port) == Some(PIO_DISCARD)
+    }
+
     fn pio_out(&mut self, port: u16, width: PioWidth, value: u64) -> Result<(), PioError> {
         let token = self.pio_map.route(port).ok_or(PioError::UnmappedPort)?;
         match token {
@@ -2356,10 +2360,14 @@ impl VmxVm {
         linux.last_pio_port = access.port;
         linux.last_pio_qualification = qualification;
         linux.last_pio_width = access.width.bytes();
-        let allowed = match access.direction {
-            PioDirection::In => crate::hwv5_policy::pio_read_at(self.pio_lease),
-            PioDirection::Out => crate::hwv5_policy::pio_write_at(self.pio_lease),
-        };
+        // PIO delay sinks have no device effect, but Linux graphics
+        // initialization can issue a large burst of them. They are still
+        // decoded and routed; only effect auditing is skipped.
+        let allowed = linux.pio_is_discard(access.port)
+            || match access.direction {
+                PioDirection::In => crate::hwv5_policy::pio_read_at(self.pio_lease),
+                PioDirection::Out => crate::hwv5_policy::pio_write_at(self.pio_lease),
+            };
         if !allowed {
             return Err(PioError::NotReady);
         }

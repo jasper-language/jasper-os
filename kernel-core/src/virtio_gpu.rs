@@ -1,14 +1,25 @@
 //! Bounded virtio-gpu 2D control protocol.
 //!
-//! 职责：解析固定布局控制命令，维护有界 2D 资源、backing 和 scanout 状态。
+//! 职责：解析规范布局控制命令，维护准入后的 2D 资源、backing 和 scanout 状态。
 //! 边界：不进行像素复制、virgl/vulkan 渲染或真实 GPU 命令执行。
 //! Responsibility: host-side control-plane resource bookkeeping.
+//!
+//! [`RESOURCE_STORAGE_SLOTS`] is the no-allocation implementation envelope, not
+//! a device or session capability. Every backend instance receives a runtime
+//! [`GpuPolicy`] whose resource count and backing-byte budget are produced by
+//! the platform from its display facts and available memory.
 
 pub const CONTROL_HEADER_BYTES: usize = 24;
-pub const DISPLAY_INFO_BYTES: usize = 24 + 16 * 24;
-pub const MAX_RESOURCES: usize = 8;
-pub const MAX_DIMENSION: u32 = 4096;
-pub const MAX_BACKING_ENTRIES: u32 = 16;
+/// Protocol-defined scanout slots in `resp_display_info`.
+pub const DISPLAY_SCANOUTS: usize = 16;
+pub const DISPLAY_INFO_BYTES: usize = CONTROL_HEADER_BYTES + DISPLAY_SCANOUTS * 24;
+/// Storage envelope for the allocation-free backend state machine.
+///
+/// The active session budget is supplied by [`GpuPolicy`]; this is only the
+/// implementation's storage bound. A platform admitting more than this must
+/// use an allocating backend rather than silently treating the bound as a
+/// device capability.
+pub const RESOURCE_STORAGE_SLOTS: usize = 8;
 
 pub const CMD_GET_DISPLAY_INFO: u32 = 0x0100;
 pub const CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
@@ -35,13 +46,55 @@ pub enum GpuFrontendError {
     HeaderTooShort,
     InvalidHeader,
     InvalidPayload,
+    InvalidPolicy,
     UnsupportedCommand,
     InvalidResource,
     InvalidScanout,
     BackingRequired,
     BackingOverflow,
+    BudgetExceeded,
     Capacity,
     ResponseTooSmall,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuPolicy {
+    pub display_width: u32,
+    pub display_height: u32,
+    pub display_enabled: bool,
+    pub resource_budget: usize,
+    pub backing_byte_budget: u64,
+}
+
+impl GpuPolicy {
+    pub fn single_display(
+        width: u32,
+        height: u32,
+        resource_budget: usize,
+        backing_byte_budget: u64,
+    ) -> Result<Self, GpuFrontendError> {
+        let policy = Self {
+            display_width: width,
+            display_height: height,
+            display_enabled: true,
+            resource_budget,
+            backing_byte_budget,
+        };
+        policy.validate()?;
+        Ok(policy)
+    }
+
+    pub fn validate(self) -> Result<(), GpuFrontendError> {
+        let display_valid =
+            !self.display_enabled || (self.display_width != 0 && self.display_height != 0);
+        let resources_valid = self.resource_budget != 0
+            && self.resource_budget <= RESOURCE_STORAGE_SLOTS
+            && self.backing_byte_budget != 0;
+        if !display_valid || !resources_valid {
+            return Err(GpuFrontendError::InvalidPolicy);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +129,7 @@ struct Resource {
     format: u32,
     width: u32,
     height: u32,
+    bytes: u64,
     backing: Option<(u64, u32)>,
 }
 
@@ -87,7 +141,9 @@ struct Scanout {
 }
 
 pub struct VirtioGpuBackend {
-    resources: [Option<Resource>; MAX_RESOURCES],
+    policy: GpuPolicy,
+    resources: [Option<Resource>; RESOURCE_STORAGE_SLOTS],
+    resident_bytes: u64,
     scanout: Option<Scanout>,
     generation: u32,
     commands: u64,
@@ -100,9 +156,14 @@ pub struct VirtioGpuBackend {
 }
 
 impl VirtioGpuBackend {
-    pub const fn new() -> Self {
+    pub fn new(policy: GpuPolicy) -> Self {
+        if policy.validate().is_err() {
+            return Self::disabled();
+        }
         Self {
-            resources: [None; MAX_RESOURCES],
+            policy,
+            resources: [None; RESOURCE_STORAGE_SLOTS],
+            resident_bytes: 0,
             scanout: None,
             generation: 1,
             commands: 0,
@@ -113,6 +174,39 @@ impl VirtioGpuBackend {
             transfers: 0,
             flushes: 0,
         }
+    }
+
+    /// A fail-closed backend used when the platform has no verified display
+    /// facts. It reports no scanouts and rejects every control command.
+    pub fn disabled() -> Self {
+        Self {
+            policy: GpuPolicy {
+                display_width: 0,
+                display_height: 0,
+                display_enabled: false,
+                resource_budget: 1,
+                backing_byte_budget: 1,
+            },
+            resources: [None; RESOURCE_STORAGE_SLOTS],
+            resident_bytes: 0,
+            scanout: None,
+            generation: 1,
+            commands: 0,
+            created: 0,
+            destroyed: 0,
+            rejected: 0,
+            scanouts: 0,
+            transfers: 0,
+            flushes: 0,
+        }
+    }
+
+    pub const fn policy(&self) -> GpuPolicy {
+        self.policy
+    }
+
+    pub const fn resident_bytes(&self) -> u64 {
+        self.resident_bytes
     }
 
     pub const fn generation(&self) -> u32 {
@@ -154,6 +248,7 @@ impl VirtioGpuBackend {
     pub fn reset(&mut self) {
         self.generation = self.generation.saturating_add(1);
         self.resources.fill(None);
+        self.resident_bytes = 0;
         self.scanout = None;
     }
 
@@ -166,6 +261,15 @@ impl VirtioGpuBackend {
             return Err(GpuFrontendError::ResponseTooSmall);
         }
         let header = ControlHeader::decode(request)?;
+        if !self.policy.display_enabled {
+            self.rejected = self.rejected.saturating_add(1);
+            return self.error(
+                header,
+                response,
+                RESP_ERR_UNSPEC,
+                GpuFrontendError::InvalidPolicy,
+            );
+        }
         let result = match header.command {
             CMD_GET_DISPLAY_INFO => self.display_info(header, request, response),
             CMD_RESOURCE_CREATE_2D => self.create_2d(header, request, response),
@@ -210,10 +314,10 @@ impl VirtioGpuBackend {
         }
         response[..DISPLAY_INFO_BYTES].fill(0);
         write_response(response, header, RESP_OK_DISPLAY_INFO);
-        put_u32(response, 24, 1);
-        put_u32(response, 32, 1024);
-        put_u32(response, 36, 768);
-        put_u32(response, 40, 1024 * 4);
+        put_u32(response, 32, self.policy.display_width);
+        put_u32(response, 36, self.policy.display_height);
+        put_u32(response, 40, u32::from(self.policy.display_enabled));
+        put_u32(response, 44, 0);
         Ok(DISPLAY_INFO_BYTES)
     }
 
@@ -231,17 +335,27 @@ impl VirtioGpuBackend {
             format: get_u32(request, 28),
             width: get_u32(request, 32),
             height: get_u32(request, 36),
+            bytes: u64::from(get_u32(request, 32))
+                .checked_mul(u64::from(get_u32(request, 36)))
+                .and_then(|pixels| pixels.checked_mul(PIXEL_BYTES))
+                .ok_or((RESP_ERR_OUT_OF_MEMORY, GpuFrontendError::BackingOverflow))?,
             backing: None,
         };
         if resource.id == 0
             || resource.format != FORMAT_B8G8R8X8
             || resource.width == 0
             || resource.height == 0
-            || resource.width > MAX_DIMENSION
-            || resource.height > MAX_DIMENSION
             || self.resource(resource.id).is_some()
         {
             return Err((RESP_ERR_INVALID_RESOURCE, GpuFrontendError::InvalidResource));
+        }
+        if self.resource_count() >= self.policy.resource_budget
+            || self
+                .resident_bytes
+                .checked_add(resource.bytes)
+                .is_none_or(|bytes| bytes > self.policy.backing_byte_budget)
+        {
+            return Err((RESP_ERR_OUT_OF_MEMORY, GpuFrontendError::BudgetExceeded));
         }
         let slot = self
             .resources
@@ -249,6 +363,7 @@ impl VirtioGpuBackend {
             .find(|entry| entry.is_none())
             .ok_or((RESP_ERR_OUT_OF_MEMORY, GpuFrontendError::Capacity))?;
         *slot = Some(resource);
+        self.resident_bytes += resource.bytes;
         self.created = self.created.saturating_add(1);
         Ok(nodata(response, header))
     }
@@ -268,10 +383,7 @@ impl VirtioGpuBackend {
             .ok()
             .and_then(|count| count.checked_mul(16))
             .and_then(|bytes| (CONTROL_HEADER_BYTES + 8).checked_add(bytes));
-        if entries == 0
-            || entries > MAX_BACKING_ENTRIES
-            || entries_len != Some(request.len())
-        {
+        if entries == 0 || entries_len != Some(request.len()) {
             return Err((RESP_ERR_UNSPEC, GpuFrontendError::InvalidPayload));
         }
         let mut address = 0u64;
@@ -297,11 +409,7 @@ impl VirtioGpuBackend {
         if resource.backing.is_some() {
             return Err((RESP_ERR_UNSPEC, GpuFrontendError::InvalidResource));
         }
-        let required = u64::from(resource.width)
-            .checked_mul(u64::from(resource.height))
-            .and_then(|pixels| pixels.checked_mul(PIXEL_BYTES))
-            .ok_or((RESP_ERR_UNSPEC, GpuFrontendError::BackingOverflow))?;
-        if u64::from(length) < required {
+        if u64::from(length) < resource.bytes {
             return Err((RESP_ERR_UNSPEC, GpuFrontendError::BackingOverflow));
         }
         resource.backing = Some((address, length));
@@ -356,10 +464,14 @@ impl VirtioGpuBackend {
         if resource.backing.is_none() {
             return Err((RESP_ERR_UNSPEC, GpuFrontendError::BackingRequired));
         }
+        let rect = request_rect(request);
+        if !rect_inside(rect, resource.width, resource.height) {
+            return Err((RESP_ERR_INVALID_SCANOUT, GpuFrontendError::InvalidScanout));
+        }
         self.scanout = Some(Scanout {
             resource_id,
-            width: get_u32(request, 32),
-            height: get_u32(request, 36),
+            width: rect.2,
+            height: rect.3,
         });
         self.scanouts = self.scanouts.saturating_add(1);
         Ok(nodata(response, header))
@@ -381,14 +493,26 @@ impl VirtioGpuBackend {
             .backing
             .ok_or((RESP_ERR_UNSPEC, GpuFrontendError::BackingRequired))?;
         let offset = get_u64(request, 40);
-        let width = u64::from(get_u32(request, 32));
-        let height = u64::from(get_u32(request, 36));
-        let bytes = width
-            .checked_mul(height)
-            .and_then(|pixels| pixels.checked_mul(PIXEL_BYTES))
-            .and_then(|bytes| offset.checked_add(bytes))
+        let rect = request_rect(request);
+        if !rect_inside(rect, resource.width, resource.height) {
+            return Err((RESP_ERR_INVALID_RESOURCE, GpuFrontendError::InvalidResource));
+        }
+        let row_bytes = u64::from(resource.width)
+            .checked_mul(PIXEL_BYTES)
             .ok_or((RESP_ERR_UNSPEC, GpuFrontendError::BackingOverflow))?;
-        if bytes > u64::from(backing_len) {
+        let last_row = u64::from(rect.1)
+            .checked_add(u64::from(rect.3) - 1)
+            .ok_or((RESP_ERR_UNSPEC, GpuFrontendError::BackingOverflow))?;
+        let last_column = u64::from(rect.0)
+            .checked_add(u64::from(rect.2) - 1)
+            .ok_or((RESP_ERR_UNSPEC, GpuFrontendError::BackingOverflow))?;
+        let end = last_row
+            .checked_mul(row_bytes)
+            .and_then(|row| row.checked_add(last_column.checked_mul(PIXEL_BYTES)?))
+            .and_then(|last| last.checked_add(PIXEL_BYTES))
+            .and_then(|end| offset.checked_add(end))
+            .ok_or((RESP_ERR_UNSPEC, GpuFrontendError::BackingOverflow))?;
+        if end > u64::from(backing_len) {
             return Err((RESP_ERR_UNSPEC, GpuFrontendError::BackingOverflow));
         }
         self.transfers = self.transfers.saturating_add(1);
@@ -404,7 +528,10 @@ impl VirtioGpuBackend {
         if request.len() != CONTROL_HEADER_BYTES + 24 {
             return Err((RESP_ERR_UNSPEC, GpuFrontendError::InvalidPayload));
         }
-        if self.resource(get_u32(request, 40)).is_none() {
+        let resource = self
+            .resource(get_u32(request, 40))
+            .ok_or((RESP_ERR_INVALID_RESOURCE, GpuFrontendError::InvalidResource))?;
+        if !rect_inside(request_rect(request), resource.width, resource.height) {
             return Err((RESP_ERR_INVALID_RESOURCE, GpuFrontendError::InvalidResource));
         }
         self.flushes = self.flushes.saturating_add(1);
@@ -422,6 +549,9 @@ impl VirtioGpuBackend {
         }
         let id = get_u32(request, 24);
         let slot = self.resource_slot(id)?;
+        if let Some(resource) = self.resources[slot] {
+            self.resident_bytes = self.resident_bytes.saturating_sub(resource.bytes);
+        }
         self.resources[slot] = None;
         self.destroyed = self.destroyed.saturating_add(1);
         if self
@@ -461,12 +591,6 @@ impl VirtioGpuBackend {
     }
 }
 
-impl Default for VirtioGpuBackend {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 fn nodata(response: &mut [u8], header: ControlHeader) -> usize {
     write_response(response, header, RESP_OK_NODATA);
     CONTROL_HEADER_BYTES
@@ -492,6 +616,25 @@ fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
 
 fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+/// `virtio_gpu_rect` occupies the first 16 payload bytes of scanout,
+/// transfer and flush commands.
+fn request_rect(request: &[u8]) -> (u32, u32, u32, u32) {
+    (
+        get_u32(request, 24),
+        get_u32(request, 28),
+        get_u32(request, 32),
+        get_u32(request, 36),
+    )
+}
+
+fn rect_inside(rect: (u32, u32, u32, u32), width: u32, height: u32) -> bool {
+    let (x, y, rect_width, rect_height) = rect;
+    rect_width != 0
+        && rect_height != 0
+        && x.checked_add(rect_width).is_some_and(|end| end <= width)
+        && y.checked_add(rect_height).is_some_and(|end| end <= height)
 }
 
 #[cfg(test)]
@@ -530,9 +673,13 @@ mod tests {
         assert_eq!(get_u32(response, 0), expected);
     }
 
+    fn gpu() -> VirtioGpuBackend {
+        VirtioGpuBackend::new(GpuPolicy::single_display(1024, 768, 8, 16 * 1024 * 1024).unwrap())
+    }
+
     #[test]
     fn create_attach_scanout_transfer_flush_and_unref_roundtrip() {
-        let mut gpu = VirtioGpuBackend::new();
+        let mut gpu = gpu();
         let mut response = [0u8; 512];
         assert_eq!(gpu.handle_command(&create(), &mut response), Ok(24));
         assert_response(&response, RESP_OK_NODATA);
@@ -574,7 +721,7 @@ mod tests {
 
     #[test]
     fn backing_size_uses_width_times_height_pixels_and_rejects_short_range() {
-        let mut gpu = VirtioGpuBackend::new();
+        let mut gpu = gpu();
         let mut response = [0u8; 512];
         gpu.handle_command(&create(), &mut response).unwrap();
 
@@ -598,7 +745,7 @@ mod tests {
 
     #[test]
     fn attach_accepts_multiple_backing_entries_and_sums_their_lengths() {
-        let mut gpu = VirtioGpuBackend::new();
+        let mut gpu = gpu();
         let mut response = [0u8; 512];
         gpu.handle_command(&create(), &mut response).unwrap();
 
@@ -621,7 +768,7 @@ mod tests {
 
     #[test]
     fn malformed_duplicate_and_scanout_without_backing_fail_closed() {
-        let mut gpu = VirtioGpuBackend::new();
+        let mut gpu = gpu();
         let mut response = [0u8; 512];
         assert_eq!(gpu.handle_command(&create(), &mut response), Ok(24));
         assert_eq!(gpu.handle_command(&create(), &mut response), Ok(24));
@@ -640,17 +787,111 @@ mod tests {
 
     #[test]
     fn display_info_and_reset_revoke_old_resources() {
-        let mut gpu = VirtioGpuBackend::new();
+        let mut gpu = gpu();
         let mut response = [0u8; DISPLAY_INFO_BYTES];
         assert_eq!(
             gpu.handle_command(&command(CMD_GET_DISPLAY_INFO, 7, &[]), &mut response),
             Ok(DISPLAY_INFO_BYTES)
         );
-        assert_eq!(get_u32(&response, 24), 1);
         assert_eq!(get_u32(&response, 32), 1024);
+        assert_eq!(get_u32(&response, 36), 768);
+        assert_eq!(get_u32(&response, 40), 1);
         gpu.handle_command(&create(), &mut response).unwrap();
         gpu.reset();
         assert_eq!(gpu.generation(), 2);
         assert_eq!(gpu.resource_count(), 0);
+        assert_eq!(gpu.resident_bytes(), 0);
+    }
+
+    #[test]
+    fn display_facts_follow_policy_instead_of_fixed_mode() {
+        let mut first =
+            VirtioGpuBackend::new(GpuPolicy::single_display(800, 600, 2, 8 * 1024 * 1024).unwrap());
+        let mut second = VirtioGpuBackend::new(
+            GpuPolicy::single_display(1920, 1080, 2, 16 * 1024 * 1024).unwrap(),
+        );
+        let mut first_response = [0u8; DISPLAY_INFO_BYTES];
+        let mut second_response = [0u8; DISPLAY_INFO_BYTES];
+        first
+            .handle_command(&command(CMD_GET_DISPLAY_INFO, 1, &[]), &mut first_response)
+            .unwrap();
+        second
+            .handle_command(&command(CMD_GET_DISPLAY_INFO, 2, &[]), &mut second_response)
+            .unwrap();
+        assert_eq!(
+            (get_u32(&first_response, 32), get_u32(&first_response, 36)),
+            (800, 600)
+        );
+        assert_eq!(
+            (get_u32(&second_response, 32), get_u32(&second_response, 36)),
+            (1920, 1080)
+        );
+        assert_ne!(first_response[32..44], second_response[32..44]);
+    }
+
+    #[test]
+    fn policy_budget_not_implementation_slots_controls_capacity() {
+        let mut gpu = VirtioGpuBackend::new(
+            GpuPolicy::single_display(1024, 768, 1, 16 * 1024 * 1024).unwrap(),
+        );
+        let mut response = [0u8; 512];
+        assert_eq!(gpu.handle_command(&create(), &mut response), Ok(24));
+        assert_response(&response, RESP_OK_NODATA);
+        let mut second = [0u8; 16];
+        put_u32(&mut second, 0, 2);
+        put_u32(&mut second, 4, FORMAT_B8G8R8X8);
+        put_u32(&mut second, 8, 64);
+        put_u32(&mut second, 12, 64);
+        assert_eq!(
+            gpu.handle_command(&command(CMD_RESOURCE_CREATE_2D, 3, &second), &mut response),
+            Ok(24)
+        );
+        assert_response(&response, RESP_ERR_OUT_OF_MEMORY);
+    }
+
+    #[test]
+    fn missing_display_facts_fail_closed() {
+        let mut gpu = VirtioGpuBackend::disabled();
+        let mut response = [0u8; 512];
+        assert_eq!(gpu.handle_command(&create(), &mut response), Ok(24));
+        assert_response(&response, RESP_ERR_UNSPEC);
+        assert_eq!(gpu.resource_count(), 0);
+        assert_eq!(gpu.policy().display_enabled, false);
+    }
+
+    #[test]
+    fn dimensions_are_bounded_by_bytes_and_backing_entries_are_not_capped() {
+        let mut gpu = VirtioGpuBackend::new(
+            GpuPolicy::single_display(1024, 768, 1, 512 * 1024 * 1024).unwrap(),
+        );
+        let mut response = [0u8; 512];
+        let mut large = [0u8; 16];
+        put_u32(&mut large, 0, 1);
+        put_u32(&mut large, 4, FORMAT_B8G8R8X8);
+        put_u32(&mut large, 8, 8192);
+        put_u32(&mut large, 12, 8192);
+        assert_eq!(
+            gpu.handle_command(&command(CMD_RESOURCE_CREATE_2D, 1, &large), &mut response),
+            Ok(24)
+        );
+        assert_response(&response, RESP_OK_NODATA);
+
+        let entries = 17u32;
+        let mut payload = [0u8; 8 + 17 * 16];
+        put_u32(&mut payload, 0, 1);
+        put_u32(&mut payload, 4, entries);
+        let each = 16 * 1024 * 1024;
+        for index in 0..entries as usize {
+            let at = 8 + index * 16;
+            put_u64(&mut payload, at, 0x20_0000 + (index as u64 * each as u64));
+            put_u32(&mut payload, at + 8, each);
+        }
+        put_u32(&mut payload, 4, entries);
+        let mut request = vec![0u8; CONTROL_HEADER_BYTES + payload.len()];
+        put_u32(&mut request, 0, CMD_RESOURCE_ATTACH_BACKING);
+        put_u64(&mut request, 8, 2);
+        request[CONTROL_HEADER_BYTES..].copy_from_slice(&payload);
+        assert_eq!(gpu.handle_command(&request, &mut response), Ok(24));
+        assert_response(&response, RESP_OK_NODATA);
     }
 }

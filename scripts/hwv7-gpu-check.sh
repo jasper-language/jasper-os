@@ -16,7 +16,20 @@ CPUS="${HWV7_GPU_CPUS:-0-3}"
 SMP="${HWV7_GPU_SMP:-4}"
 ACCEL="${HWV7_GPU_ACCEL:-kvm}"
 CPU_MODEL="${HWV7_GPU_CPU:-host}"
+XRES="${HWV7_GPU_XRES:-}"
+YRES="${HWV7_GPU_YRES:-}"
+MEMORY_MB="${HWV7_GPU_MEMORY_MB:-512}"
 mkdir -p "$OUT" "$TARGET"
+
+DISPLAY_ARGS=()
+if [ -n "$XRES" ] || [ -n "$YRES" ]; then
+    if [ -z "$XRES" ] || [ -z "$YRES" ]; then
+        echo "HWV7_GPU_XRES and HWV7_GPU_YRES must be set together" >&2
+        exit 2
+    fi
+    DISPLAY_ARGS=(-vga none -device "virtio-vga,xres=$XRES,yres=$YRES")
+fi
+printf 'xres=%s\nyres=%s\nmemory_mb=%s\n' "$XRES" "$YRES" "$MEMORY_MB" >"$OUT/display.txt"
 
 cargo build --locked --release --target-dir "$TARGET" -p xtask \
   >"$OUT/xtask-build.log" 2>&1
@@ -32,11 +45,12 @@ CARGO_TARGET_DIR="$TARGET" cargo build --locked --release \
   >"$OUT/image.log" 2>&1
 
 set +e
-nice -n 10 taskset -c "$CPUS" timeout "$LIMIT" qemu-system-x86_64 \
+flock /tmp/jasper-os-qemu.lock nice -n 10 taskset -c "$CPUS" timeout "$LIMIT" qemu-system-x86_64 \
   -accel "$ACCEL" \
   -cpu "$CPU_MODEL" \
   -machine q35 \
-  -m 512M \
+  "${DISPLAY_ARGS[@]}" \
+  -m "${MEMORY_MB}M" \
   -smp "$SMP" \
   -drive format=raw,file="$OUT/kernel.img",snapshot=on \
   -device virtio-rng-pci \
@@ -52,7 +66,7 @@ grep -aFq '[JSR-HWV5-GPU] device=gpu discovered=true display=true create=true at
   "$OUT/serial.log"
 grep -aEq '\[JSR-HWV4-LINUX\] .*virtio_gpu_resources=[01] virtio_gpu_reset_generation=2 virtio_gpu_commands=[1-9][0-9]* virtio_gpu_created=[2-9][0-9]* virtio_gpu_destroyed=[1-9][0-9]* virtio_gpu_scanouts=[1-9][0-9]* virtio_gpu_transfers=[1-9][0-9]* virtio_gpu_flushes=[1-9][0-9]* .*reclaim=true' \
   "$OUT/serial.log"
-grep -aq '^\[JSR-HWV7-GPU\] .*commands=[1-9][0-9]* created=[2-9][0-9]* destroyed=[1-9][0-9]* scanouts=[1-9][0-9]* transfers=[1-9][0-9]* flushes=[1-9][0-9]* rejected=0 resources=[01] reset_generation=2 ok=true' \
+grep -aq '^\[JSR-HWV7-GPU\] .*width=[1-9][0-9]* height=[1-9][0-9]* resource_budget=[1-9][0-9]* backing_budget=[1-9][0-9]* commands=[1-9][0-9]* created=[2-9][0-9]* destroyed=[1-9][0-9]* scanouts=[1-9][0-9]* transfers=[1-9][0-9]* flushes=[1-9][0-9]* rejected=0 resources=[01] reset_generation=2 ok=true' \
   "$OUT/serial.log"
 ! grep -aqE '^\[JSR-HWV5-GPU\].*ok=false|^\[JSR-HWV5-FAIL\]|^\[JSR-HWV5-VMM-FAIL\]|^\[JSR-PANIC\]|panicked at|KERNEL PANIC' \
   "$OUT/serial.log"

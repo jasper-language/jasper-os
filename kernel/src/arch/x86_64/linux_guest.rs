@@ -11,7 +11,9 @@ use kernel_core::hwvirt_vcpu::{GuestPermissions, VcpuState};
 use kernel_core::virtio_fs::{
     VirtioFsBackend, FUSE_OUT_HEADER_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, OP_WRITE,
 };
-use kernel_core::virtio_gpu::{VirtioGpuBackend, CONTROL_HEADER_BYTES};
+use kernel_core::virtio_gpu::{
+    GpuFrontendError, GpuPolicy, VirtioGpuBackend, CONTROL_HEADER_BYTES, RESOURCE_STORAGE_SLOTS,
+};
 use kernel_core::virtio_net::{
     NetPolicy, VirtioNetBackend, VirtioNetFacts, VirtioNetHeader, FEATURE_MAC, FEATURE_MTU,
     FEATURE_STATUS, VIRTIO_NET_HEADER_BYTES,
@@ -131,7 +133,7 @@ impl VirtioGuestBus {
             fs_backend: VirtioFsBackend::new(),
             fs_lease: hwv5_policy::lease(Hwv5Surface::Fs),
             gpu: VirtioMmio::new(VirtioDeviceType::Gpu, 16, [0, FEATURE_VERSION_1]),
-            gpu_backend: VirtioGpuBackend::new(),
+            gpu_backend: Self::gpu_backend(),
             last_avail: [0; 2],
             console_last_avail: [0; 2],
             console_bytes: 0,
@@ -164,6 +166,38 @@ impl VirtioGuestBus {
             rng_requests: 0,
             random_state: 0x4a61_7370_6572_4f53,
         })
+    }
+
+    fn gpu_backend() -> VirtioGpuBackend {
+        let policy: Result<GpuPolicy, GpuFrontendError> = (|| {
+            let (display_width, display_height) =
+                crate::display::primary_surface().ok_or(GpuFrontendError::InvalidPolicy)?;
+            let frame_bytes = u64::from(display_width)
+                .checked_mul(u64::from(display_height))
+                .and_then(|pixels| pixels.checked_mul(4))
+                .ok_or(GpuFrontendError::InvalidPolicy)?;
+            let free_bytes = (mm::frame::free_frames() as u64)
+                .checked_mul(kernel_core::frame::FRAME_SIZE)
+                .ok_or(GpuFrontendError::InvalidPolicy)?;
+            // Keep three quarters of currently free RAM outside this virtual GPU.
+            let backing_budget = free_bytes / 4;
+            let resource_budget = usize::try_from(backing_budget / frame_bytes)
+                .unwrap_or(0)
+                .min(RESOURCE_STORAGE_SLOTS);
+            GpuPolicy::single_display(
+                display_width,
+                display_height,
+                resource_budget,
+                backing_budget,
+            )
+        })();
+        match policy {
+            Ok(policy) => VirtioGpuBackend::new(policy),
+            Err(error) => {
+                kprintln!("[JSR-HWV4-LINUX-FAIL] gpu_policy={:?}", error);
+                VirtioGpuBackend::disabled()
+            }
+        }
     }
 
     fn next_random(&mut self) -> u8 {
@@ -1456,7 +1490,11 @@ fn run_impl(virtio_rng: bool) -> bool {
         reclaimed
     );
     kprintln!(
-        "[JSR-HWV7-GPU] backend=virtio-mmio commands={} created={} destroyed={} scanouts={} transfers={} flushes={} rejected={} resources={} reset_generation={} ok={}",
+        "[JSR-HWV7-GPU] backend=virtio-mmio width={} height={} resource_budget={} backing_budget={} commands={} created={} destroyed={} scanouts={} transfers={} flushes={} rejected={} resources={} reset_generation={} ok={}",
+        devices.gpu_backend.policy().display_width,
+        devices.gpu_backend.policy().display_height,
+        devices.gpu_backend.policy().resource_budget,
+        devices.gpu_backend.policy().backing_byte_budget,
         report.gpu_commands,
         report.gpu_created,
         report.gpu_destroyed,
