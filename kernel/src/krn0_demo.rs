@@ -150,15 +150,15 @@ pub fn run_dma() {
     kprintln!("[JSR-KRN0] summary dma_teardown failed={}", DMA_FAILED.load(Ordering::Relaxed));
 }
 
-/// 运行 MMIO 槽位压力：先同时占满全部槽位并确认下一次映射被拒且位图不变，
-/// 再执行 10^4 轮映射 / 丢弃，核对槽位数与位图守恒。
+/// Exercise dynamic MMIO ranges: retain more regions than the former 32-slot
+/// cap, map a range larger than the former 64 KiB slot, and verify conservation.
 pub fn run_mmio() {
     if let Err(e) = mmio::prepare_window() {
         check(false, e.name());
         kprintln!("[JSR-KRN0] summary mmio_slots failed={}", FAILED.load(Ordering::Relaxed));
         return;
     }
-    let frame = match mm::frame::allocate() {
+    let frame = match mm::frame::allocate_contiguous(64) {
         Ok(f) => f,
         Err(_) => {
             check(false, "MMIO 槽位压力无法分配页帧");
@@ -166,11 +166,17 @@ pub fn run_mmio() {
             return;
         }
     };
-    let bar = Bar::Memory { base: frame.start(), size: mmio::SLOT_STRIDE, prefetchable: false, wide: false };
-    let before = mmio::slots_used();
-    let free_before = mmio::slots_free();
+    let bar = Bar::Memory {
+        base: frame.start(),
+        size: 64 * kernel_core::frame::FRAME_SIZE,
+        prefetchable: false,
+        wide: false,
+    };
+    let before = mmio::mapped_regions();
+    let free_before = mmio::free_bytes();
+    let active = mmio::active_window_bytes();
     let mut held = alloc::vec::Vec::new();
-    for _ in 0..free_before {
+    for _ in 0..64 {
         match mmio::Mapping::map(&bar, 0, kernel_core::frame::FRAME_SIZE as u32) {
             Ok(m) => held.push(m),
             Err(e) => {
@@ -179,16 +185,15 @@ pub fn run_mmio() {
             }
         }
     }
-    let full = mmio::slots_used() == mmio::MAX_SLOTS && mmio::slots_free() == 0;
-    let refused = matches!(
-        mmio::Mapping::map(&bar, 0, kernel_core::frame::FRAME_SIZE as u32),
-        Err(mmio::MmioError::OutOfWindow)
-    );
-    check(full, "MMIO 槽位未全部占用");
-    check(refused, "槽位耗尽后仍分配了新槽位");
+    let multiple = mmio::mapped_regions() == before + 64;
+    let large_mapping = mmio::Mapping::map(&bar, 0, 128 * 1024);
+    let large = large_mapping.is_ok();
+    check(multiple, "MMIO 不能保留超过旧 32 槽上限的映射");
+    check(large, "MMIO 不能建立超过旧 64 KiB 槽位的映射");
     drop(held);
-    let emptied = mmio::slots_used() == before && mmio::slots_free() == free_before;
-    check(emptied, "MMIO 映射丢弃后槽位未全部归还");
+    let emptied = mmio::mapped_regions() == before + usize::from(large)
+        && mmio::free_bytes() == free_before.saturating_sub(128 * 1024);
+    check(emptied, "MMIO 映射丢弃后区间未归还");
 
     let mut rounds_ok = true;
     for _ in 0..MMIO_ROUNDS {
@@ -199,30 +204,33 @@ pub fn run_mmio() {
                 break;
             }
         };
-        if mmio::slots_used() != before + 1 {
+        if mmio::mapped_regions() != before + 1 + usize::from(large) {
             rounds_ok = false;
         }
         drop(mapping);
-        if mmio::slots_used() != before || mmio::slots_free() != free_before {
+        if mmio::mapped_regions() != before + usize::from(large)
+            || mmio::free_bytes() != free_before.saturating_sub(128 * 1024)
+        {
             rounds_ok = false;
             break;
         }
     }
-    check(rounds_ok, "MMIO 映射 / 丢弃压力后槽位或位图不守恒");
-    let _ = mm::frame::deallocate(frame);
-    let after = mmio::slots_used();
-    let conserved = after == before && after + mmio::slots_free() == mmio::MAX_SLOTS;
-    check(conserved, "MMIO 槽位计数与位图未守恒");
+    check(rounds_ok, "MMIO 映射 / 丢弃压力后区间不守恒");
+    drop(large_mapping);
+    let _ = mm::frame::deallocate_contiguous(frame, 64);
+    let after = mmio::mapped_regions();
+    let conserved = after == before && mmio::free_bytes() == free_before;
+    check(conserved, "MMIO 区间计数与容量未守恒");
     kprintln!(
-        "[JSR-KRN0] case=mmio_slots rounds={} max_slots={} used_before={} used_after={} free={} exhausted_refused={} bitmap_conserved={} ok={}",
+        "[JSR-KRN0] case=mmio_slots rounds={} active_bytes={} retained_regions=64 large_mapping={} used_before={} used_after={} free={} conserved={} ok={}",
         MMIO_ROUNDS,
-        mmio::MAX_SLOTS,
+        active,
+        large,
         before,
         after,
-        mmio::slots_free(),
-        refused,
+        mmio::free_bytes(),
         conserved,
-        full && refused && emptied && rounds_ok && conserved
+        multiple && large && emptied && rounds_ok && conserved
     );
     kprintln!("[JSR-KRN0] summary mmio_slots failed={}", FAILED.load(Ordering::Relaxed));
 }

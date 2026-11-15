@@ -90,11 +90,15 @@ pub fn hardware_random_u64() -> Option<u64> {
 
 use super::{ExitStatus, PciAccess, Platform, UserProbe};
 
-/// 设备寄存器窗口在内核高半区的位置与大小（PML4 下标 352；启动期已预分配顶级表项）。
-/// 不与 ECAM 窗口（下标 288）、堆（低半区）或用户窗口重叠；2 MiB 范围内共享同一组下级页表。
+/// Start of the reserved MMIO virtual-address span (PML4 index 352).
+///
+/// This is an address-space reservation, not a device-capacity limit. The MMIO
+/// allocator derives its active window from actual free frames and mapping
+/// demand, then pre-establishes only the page tables admitted within this span.
+/// It does not overlap ECAM (index 288), the low-half heap, or user windows.
 const MMIO_WINDOW_BASE: u64 = 0xFFFF_B000_0000_0000;
-/// 设备寄存器窗口字节数。
-const MMIO_WINDOW_SIZE: u64 = 2 * 1024 * 1024;
+/// One PML4 entry of non-overlapping high-half virtual address space.
+const MMIO_WINDOW_SPAN: u64 = 512 * 1024 * 1024 * 1024;
 
 /// x86_64 平台（零大小类型，仅作为 trait 实现的载体）。
 pub struct X86_64;
@@ -411,7 +415,7 @@ impl Platform for X86_64 {
     }
 
     fn mmio_window() -> Option<(u64, u64)> {
-        Some((MMIO_WINDOW_BASE, MMIO_WINDOW_SIZE))
+        Some((MMIO_WINDOW_BASE, MMIO_WINDOW_SPAN))
     }
 
     #[inline(always)]

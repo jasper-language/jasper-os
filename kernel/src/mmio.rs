@@ -5,27 +5,26 @@
 //! * 按「BAR + BAR 内偏移 + 字节数」映射，页对齐处理、页表安装与回滚全部交给 [`crate::mm::map`]；
 //!   本文件不实现页表，也不出现任何指令集专有值。
 //! * 返回的 [`Mapping`] 把虚拟地址调整到请求的起始偏移；调用者用带偏移的 `read*` / `write*` 访问寄存器。
-//! * 槽位用位图分配，比较交换只在位空闲时推进；每个映射丢弃后归还自己的槽位。
+//! * 映射区间由运行时准入窗口的空闲段动态分配；每个映射丢弃后归还自己的区间。
 //!
 //! # 边界
-//! * 只映射内存 BAR；I/O 端口 BAR、越界区间、超出窗口或大于一个槽位的映射一律返回结构化错误。
+//! * 只映射内存 BAR；I/O 端口 BAR、越界区间和超出准入窗口的映射返回结构化错误。
 //! * 不解释设备语义、不注册中断、不分配 DMA；丢弃 [`Mapping`] 只取消映射，不修改设备状态。
 //! * 映射页固定为可写、全局、不可缓存且不可执行；设备寄存器不得经缓存访问。
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use alloc::vec::Vec;
 
 use kernel_core::frame::{PhysFrame, FRAME_SIZE};
 use kernel_core::paging::{MapFlags, VirtPage};
 use kernel_core::pci::Bar;
+use spin::{Mutex, Once};
 
 use crate::{arch, mm};
 
-/// 每个映射槽位的虚拟地址间距（64 KiB，足以容纳一个 MSI-X 表与相邻寄存器窗）。
-/// Virtual-address stride of one mapping slot.
-pub const SLOT_STRIDE: u64 = 64 * 1024;
-/// 窗口内最多分配的槽位数（与平台给出的 2 MiB 窗口一致）。
-/// Maximum number of mapping slots in the reserved window.
-pub const MAX_SLOTS: usize = (2 * 1024 * 1024 / SLOT_STRIDE) as usize;
+/// Page-table pre-establishment granularity.
+const PAGE_TABLE_BLOCK_BYTES: u64 = 2 * 1024 * 1024;
+/// At most 1/128 of free frames may become persistent MMIO page-table state.
+const PAGE_TABLE_FRAME_BUDGET_DIVISOR: usize = 128;
 
 /// MMIO 映射错误。
 /// MMIO mapping error.
@@ -37,8 +36,7 @@ pub enum MmioError {
     /// BAR 不存在、不是内存 BAR、基址未对齐，或请求区间越出 BAR。
     /// The BAR is absent, is not a memory BAR, is misaligned, or the range exceeds it.
     BadBar,
-    /// 请求区间超过一个槽位，或窗口槽位已用尽。
-    /// The range exceeds one slot, or the window is exhausted.
+    /// The admitted MMIO window cannot satisfy this mapping.
     OutOfWindow,
     /// 页表映射失败。
     /// The page-table mapping failed.
@@ -61,8 +59,8 @@ impl MmioError {
 /// 一段已建立的内核 MMIO 映射；丢弃时取消映射。
 /// One established kernel MMIO mapping, unmapped on drop.
 pub struct Mapping {
-    /// 本映射独占的窗口槽位。
-    slot: u32,
+    /// Page-aligned byte offset inside the admitted MMIO window.
+    window_offset: u64,
     /// 请求起始偏移对应的虚拟地址。
     va: u64,
     /// 映射起始虚拟地址（页对齐）。
@@ -93,29 +91,18 @@ impl Mapping {
         let page_offset = offset as u64 % FRAME_SIZE;
         let page_start = offset as u64 - page_offset;
         let pages = (page_offset + len as u64).div_ceil(FRAME_SIZE);
-        if pages * FRAME_SIZE > SLOT_STRIDE {
-            return Err(MmioError::OutOfWindow);
-        }
-        let (window_base, window_len) = arch::mmio_window().ok_or(MmioError::Unsupported)?;
-        let slot = allocate_slot()?;
-        let slot_index = slot as u64;
-        let page_va = match window_base.checked_add(slot_index * SLOT_STRIDE) {
-            Some(va) => va,
-            None => {
-                release_slot(slot);
-                return Err(MmioError::OutOfWindow);
-            }
-        };
-        if page_va.checked_add(pages * FRAME_SIZE).is_none_or(|e| e > window_base + window_len) {
-            release_slot(slot);
-            return Err(MmioError::OutOfWindow);
-        }
+        let required_bytes = pages
+            .checked_mul(FRAME_SIZE)
+            .ok_or(MmioError::OutOfWindow)?;
+        let (window_offset, page_va) = allocate_window_range(required_bytes)?;
 
         let flags = MapFlags::WRITE | MapFlags::GLOBAL | MapFlags::NO_CACHE;
         let mut mapped = 0u64;
         while mapped < pages {
-            let page = VirtPage::from_start(page_va + mapped * FRAME_SIZE).ok_or(MmioError::OutOfWindow)?;
-            let frame = PhysFrame::from_start(base + page_start + mapped * FRAME_SIZE).ok_or(MmioError::BadBar)?;
+            let page = VirtPage::from_start(page_va + mapped * FRAME_SIZE)
+                .ok_or(MmioError::OutOfWindow)?;
+            let frame = PhysFrame::from_start(base + page_start + mapped * FRAME_SIZE)
+                .ok_or(MmioError::BadBar)?;
             #[cfg(all(feature = "s2-fuzz", target_arch = "x86_64"))]
             let injected = crate::s2::MMIO_MAP.hit();
             #[cfg(not(all(feature = "s2-fuzz", target_arch = "x86_64")))]
@@ -123,14 +110,22 @@ impl Mapping {
             if injected || mm::map::map(page, frame, flags).is_err() {
                 // chatgpt: an unconfirmed rollback may leave stale remote TLB
                 // entries. Quarantine the VA slot exactly as Mapping::drop does.
-                if mapped == 0 || mm::map::unmap_pages(VirtPage::containing(page_va), mapped).is_ok() {
-                    release_slot(slot);
+                if mapped == 0
+                    || mm::map::unmap_pages(VirtPage::containing(page_va), mapped).is_ok()
+                {
+                    release_window_range(window_offset, pages);
                 }
                 return Err(MmioError::MapFailed);
             }
             mapped += 1;
         }
-        Ok(Mapping { slot, va: page_va + page_offset, page_va, pages, len: len as u64 })
+        Ok(Mapping {
+            window_offset,
+            va: page_va + page_offset,
+            page_va,
+            pages,
+            len: len as u64,
+        })
     }
 
     /// 请求起始偏移对应的虚拟地址。
@@ -210,78 +205,147 @@ impl Drop for Mapping {
     fn drop(&mut self) {
         if let Some(start) = VirtPage::from_start(self.page_va) {
             if mm::map::unmap_pages(start, self.pages).is_ok() {
-                release_slot(self.slot);
+                release_window_range(self.window_offset, self.pages);
             }
         }
     }
 }
 
-/// 已分配槽位的位图；`MAX_SLOTS` 个低位有效。
-static SLOT_BITS: AtomicU32 = AtomicU32::new(0);
-
-fn slot_mask() -> u32 {
-    if MAX_SLOTS == 32 {
-        u32::MAX
-    } else {
-        (1u32 << MAX_SLOTS).wrapping_sub(1)
-    }
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Allocation {
+    offset: u64,
+    pages: u64,
 }
 
-/// 先读取位图确认有空位，再用比较交换占用同一个空位；竞争失败时重新读取。
-fn allocate_slot() -> Result<u32, MmioError> {
-    let mask = slot_mask();
-    loop {
-        let used = SLOT_BITS.load(Ordering::Acquire);
-        let free = !used & mask;
-        if free == 0 {
-            return Err(MmioError::OutOfWindow);
+struct State {
+    base: u64,
+    span: u64,
+    active_len: u64,
+    allocations: Vec<Allocation>,
+}
+
+static STATE: Mutex<State> = Mutex::new(State {
+    base: 0,
+    span: 0,
+    active_len: 0,
+    allocations: Vec::new(),
+});
+static PREPARED: Once<Result<(), MmioError>> = Once::new();
+
+fn allocate_window_range(required_bytes: u64) -> Result<(u64, u64), MmioError> {
+    let (base, span) = arch::mmio_window().ok_or(MmioError::Unsupported)?;
+    let mut state = STATE.lock();
+    if state.base != base || state.span != span || state.active_len == 0 {
+        return Err(MmioError::Unsupported);
+    }
+    state
+        .allocations
+        .try_reserve(1)
+        .map_err(|_| MmioError::OutOfWindow)?;
+
+    let mut cursor = 0u64;
+    for allocation in &state.allocations {
+        if allocation.offset.saturating_sub(cursor) >= required_bytes {
+            break;
         }
-        let slot = free.trailing_zeros();
-        match SLOT_BITS.compare_exchange_weak(used, used | (1 << slot), Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => return Ok(slot),
-            Err(_) => continue,
-        }
+        cursor = cursor.max(
+            allocation
+                .offset
+                .saturating_add(allocation.pages.saturating_mul(FRAME_SIZE)),
+        );
     }
-}
-
-fn release_slot(slot: u32) {
-    if slot < MAX_SLOTS as u32 {
-        SLOT_BITS.fetch_and(!(1u32 << slot), Ordering::Release);
-    }
-}
-
-/// 映射槽位使用数（诊断用）。
-/// Number of mapping slots handed out.
-pub fn slots_used() -> usize {
-    (SLOT_BITS.load(Ordering::Acquire) & slot_mask()).count_ones() as usize
-}
-
-/// 映射槽位空闲数（诊断与守恒检查用）。
-/// Number of free mapping slots.
-pub fn slots_free() -> usize {
-    MAX_SLOTS - slots_used()
-}
-
-/// 预先建立窗口所需的下级页表：映射并立即取消映射一个临时页。
-///
-/// 这样后续真实映射只在已存在的页表中填写叶项，不再消耗页帧；调用者在页帧基线测量之前执行一次即可。
-/// Pre-establishes the page tables of the reserved window so later mappings allocate no frames.
-pub fn prepare_window() -> Result<(), MmioError> {
-    let (window_base, window_len) = arch::mmio_window().ok_or(MmioError::Unsupported)?;
-    if window_len < FRAME_SIZE {
+    let end = cursor
+        .checked_add(required_bytes)
+        .ok_or(MmioError::OutOfWindow)?;
+    if end > state.active_len {
         return Err(MmioError::OutOfWindow);
     }
-    let page = VirtPage::from_start(window_base).ok_or(MmioError::OutOfWindow)?;
-    let frame = mm::frame::allocate().map_err(|_| MmioError::MapFailed)?;
+    let page_va = base.checked_add(cursor).ok_or(MmioError::OutOfWindow)?;
+    state.allocations.push(Allocation {
+        offset: cursor,
+        pages: required_bytes / FRAME_SIZE,
+    });
+    state
+        .allocations
+        .sort_unstable_by_key(|allocation| allocation.offset);
+    Ok((cursor, page_va))
+}
+
+fn release_window_range(offset: u64, _pages: u64) {
+    let mut state = STATE.lock();
+    if let Some(index) = state
+        .allocations
+        .iter()
+        .position(|allocation| allocation.offset == offset)
+    {
+        state.allocations.remove(index);
+    }
+}
+
+/// Number of currently mapped MMIO regions.
+pub fn mapped_regions() -> usize {
+    STATE.lock().allocations.len()
+}
+
+/// Remaining bytes in the admitted MMIO window, including fragmentation.
+pub fn free_bytes() -> u64 {
+    let state = STATE.lock();
+    let used = state
+        .allocations
+        .iter()
+        .map(|allocation| allocation.pages.saturating_mul(FRAME_SIZE))
+        .sum::<u64>();
+    state.active_len.saturating_sub(used)
+}
+
+/// Admitted active window length.
+pub fn active_window_bytes() -> u64 {
+    STATE.lock().active_len
+}
+
+/// Pre-establish page tables for a runtime-budgeted portion of the reserved
+/// MMIO span. The active window scales with currently free frames instead of a
+/// fixed device or slot capacity.
+pub fn prepare_window() -> Result<(), MmioError> {
+    *PREPARED.call_once(prepare_window_inner)
+}
+
+fn prepare_window_inner() -> Result<(), MmioError> {
+    let (window_base, span) = arch::mmio_window().ok_or(MmioError::Unsupported)?;
+    if window_base % FRAME_SIZE != 0 || span < PAGE_TABLE_BLOCK_BYTES {
+        return Err(MmioError::OutOfWindow);
+    }
+    let max_blocks = span / PAGE_TABLE_BLOCK_BYTES;
+    let budget_blocks = (mm::frame::free_frames() / PAGE_TABLE_FRAME_BUDGET_DIVISOR) as u64;
+    let blocks = max_blocks.min(budget_blocks);
+    if blocks == 0 {
+        return Err(MmioError::OutOfWindow);
+    }
+
     let flags = MapFlags::WRITE | MapFlags::GLOBAL | MapFlags::NO_CACHE;
-    if mm::map::map(page, frame, flags).is_err() {
-        let _ = mm::frame::deallocate(frame);
-        return Err(MmioError::MapFailed);
+    for block in 0..blocks {
+        let va = window_base
+            .checked_add(block * PAGE_TABLE_BLOCK_BYTES)
+            .ok_or(MmioError::OutOfWindow)?;
+        let page = VirtPage::from_start(va).ok_or(MmioError::OutOfWindow)?;
+        let frame = mm::frame::allocate().map_err(|_| MmioError::MapFailed)?;
+        if mm::map::map(page, frame, flags).is_err() {
+            let _ = mm::frame::deallocate(frame);
+            return Err(MmioError::MapFailed);
+        }
+        let unmapped = mm::map::unmap(page);
+        let freed = mm::frame::deallocate(frame);
+        if !matches!((unmapped, freed), (Ok(mapped), Ok(())) if mapped == frame) {
+            return Err(MmioError::MapFailed);
+        }
     }
-    let unmapped = mm::map::unmap(page);
-    let freed = mm::frame::deallocate(frame);
-    match (unmapped, freed) {
-        (Ok(mapped), Ok(())) if mapped == frame => Ok(()),
-        _ => Err(MmioError::MapFailed),
-    }
+
+    let active_len = blocks
+        .checked_mul(PAGE_TABLE_BLOCK_BYTES)
+        .ok_or(MmioError::OutOfWindow)?;
+    let mut state = STATE.lock();
+    state.base = window_base;
+    state.span = span;
+    state.active_len = active_len;
+    Ok(())
 }

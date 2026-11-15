@@ -169,26 +169,26 @@ fn mmio_rollback_test() -> bool {
         return false;
     };
     drop(warm);
-    let slots = crate::mmio::slots_used();
+    let slots = crate::mmio::mapped_regions();
     let frames = mm::frame::free_frames();
     MMIO_MAP.arm(0, 1).unwrap();
     let zero = matches!(Mapping::map(bar, 0, 8192), Err(MmioError::MapFailed))
-        && crate::mmio::slots_used() == slots;
+        && crate::mmio::mapped_regions() == slots;
     let nth = MMIO_MAP.arm(0, 2).unwrap();
     let rollback = nth == 2
         && matches!(Mapping::map(bar, 0, 8192), Err(MmioError::MapFailed))
-        && crate::mmio::slots_used() == slots;
+        && crate::mmio::mapped_regions() == slots;
     MMIO_MAP.arm(0, 2).unwrap();
     IPI_TIMEOUT.arm(0, 1).unwrap();
     let timeout = matches!(Mapping::map(bar, 0, 8192), Err(MmioError::MapFailed));
     MMIO_MAP.disarm();
     IPI_TIMEOUT.disarm();
-    let quarantined = crate::mmio::slots_used() == slots + 1;
+    let quarantined = crate::mmio::mapped_regions() == slots + 1;
     let normal = match Mapping::map(bar, 0, 4096) {
         Ok(m) => {
-            let allocated = crate::mmio::slots_used() == slots + 2;
+            let allocated = crate::mmio::mapped_regions() == slots + 2;
             drop(m);
-            allocated && crate::mmio::slots_used() == slots + 1
+            allocated && crate::mmio::mapped_regions() == slots + 1
         }
         Err(_) => false,
     };

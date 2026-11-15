@@ -137,7 +137,9 @@ impl Platform for LoongArch64 {
     }
 
     fn mmio_window() -> Option<(u64, u64)> {
-        Some((0x0000_5000_0000_0000, 2 * 1024 * 1024))
+        // Reserved high-half span. The generic MMIO allocator derives its
+        // active, page-table-backed window from actual free-frame policy.
+        Some((0x0000_5000_0000_0000, 16 * 1024 * 1024 * 1024))
     }
 
     unsafe fn active_mapper(phys_offset: u64) -> Self::Mapper {
