@@ -32,6 +32,8 @@ static SIGNAL: &[u8] = include_bytes!(env!("JSR_UBUNTU_SIGNAL"));
 static SIGRETURN_XSTATE: &[u8] = include_bytes!(env!("JSR_UBUNTU_SIGRETURN_XSTATE"));
 #[cfg(feature = "compat-xstate-matrix-verify")]
 static XSTATE_MATRIX: &[u8] = include_bytes!(env!("JSR_UBUNTU_XSTATE_MATRIX"));
+#[cfg(feature = "compat-xstate-matrix-verify")]
+static XSTATE_FALLBACK: &[u8] = include_bytes!(env!("JSR_UBUNTU_XSTATE_FALLBACK"));
 static INTERPRETER: &[u8] = include_bytes!(env!("JSR_UBUNTU_LD_LINUX"));
 static FAILED: AtomicU32 = AtomicU32::new(0);
 
@@ -642,36 +644,72 @@ pub fn run() {
 
     #[cfg(feature = "compat-xstate-matrix-verify")]
     let xstate_matrix_result = {
-        let matrix_argv: [&[u8]; 1] = [b"/usr/bin/jasper-xstate-matrix"];
-        // The first process grows the kernel heap while creating five Linux
-        // threads. Run one unmeasured warmup so the measured run proves that
-        // scheduler/XSAVE churn itself returns every frame and heap byte.
-        let online = sched::online_cpus();
-        kprintln!(
-            "[JSR-COMPAT-XSTATE-MATRIX] scheduler_online={:#x}",
-            u64::from(online.bits())
-        );
-        let _ = run_program_on(
-            "ubuntu-dynamic-xstate-matrix-warmup",
-            XSTATE_MATRIX,
+        if arch::x86_64::xstate::mask() == 0 {
+            kprintln!("[JSR-COMPAT-XSTATE-MATRIX] skipped=no_xsave");
+            None
+        } else {
+            let matrix_argv: [&[u8]; 1] = [b"/usr/bin/jasper-xstate-matrix"];
+            // The first process grows the kernel heap while creating five Linux
+            // threads. Run one unmeasured warmup so the measured run proves that
+            // scheduler/XSAVE churn itself returns every frame and heap byte.
+            let online = sched::online_cpus();
+            kprintln!(
+                "[JSR-COMPAT-XSTATE-MATRIX] scheduler_online={:#x}",
+                u64::from(online.bits())
+            );
+            let _ = run_program_on(
+                "ubuntu-dynamic-xstate-matrix-warmup",
+                XSTATE_MATRIX,
+                INTERPRETER,
+                &matrix_argv,
+                free_frames(),
+                false,
+                online,
+            );
+            let matrix_baseline = free_frames();
+            let result = run_program_on(
+                "ubuntu-dynamic-xstate-matrix",
+                XSTATE_MATRIX,
+                INTERPRETER,
+                &matrix_argv,
+                matrix_baseline,
+                true,
+                online,
+            );
+            kprintln!(
+                "[JSR-COMPAT-XSTATE-MATRIX] fixture=ubuntu-x86_64 executable=xstate-matrix mapped={} entry=interpreter true interpreter_syscalls={} syscall_delta={} exit_zero={} resources={} failed={}",
+                result.mapped,
+                result.interpreter_entered,
+                result.syscalls,
+                result.exited_zero,
+                result.resources,
+                failed()
+            );
+            Some(result)
+        }
+    };
+
+    #[cfg(feature = "compat-xstate-matrix-verify")]
+    let xstate_fallback_result = {
+        let fallback_argv: [&[u8]; 1] = [b"/usr/bin/jasper-xstate-fallback"];
+        let _ = run_program(
+            "ubuntu-dynamic-xstate-fallback-warmup",
+            XSTATE_FALLBACK,
             INTERPRETER,
-            &matrix_argv,
+            &fallback_argv,
             free_frames(),
             false,
-            online,
         );
-        let matrix_baseline = free_frames();
-        let result = run_program_on(
-            "ubuntu-dynamic-xstate-matrix",
-            XSTATE_MATRIX,
+        let result = run_program(
+            "ubuntu-dynamic-xstate-fallback",
+            XSTATE_FALLBACK,
             INTERPRETER,
-            &matrix_argv,
-            matrix_baseline,
+            &fallback_argv,
+            free_frames(),
             true,
-            online,
         );
         kprintln!(
-            "[JSR-COMPAT-XSTATE-MATRIX] fixture=ubuntu-x86_64 executable=xstate-matrix mapped={} entry=interpreter true interpreter_syscalls={} syscall_delta={} exit_zero={} resources={} failed={}",
+            "[JSR-COMPAT-XSTATE-FALLBACK] fixture=ubuntu-x86_64 executable=xstate-fallback mapped={} entry=interpreter true interpreter_syscalls={} syscall_delta={} exit_zero={} resources={} failed={}",
             result.mapped,
             result.interpreter_entered,
             result.syscalls,
@@ -719,7 +757,19 @@ pub fn run() {
         && {
             #[cfg(feature = "compat-xstate-matrix-verify")]
             {
-                xstate_matrix_result.resources && xstate_matrix_result.exited_zero
+                xstate_matrix_result
+                    .as_ref()
+                    .is_none_or(|result| result.resources && result.exited_zero)
+            }
+            #[cfg(not(feature = "compat-xstate-matrix-verify"))]
+            {
+                true
+            }
+        }
+        && {
+            #[cfg(feature = "compat-xstate-matrix-verify")]
+            {
+                xstate_fallback_result.resources && xstate_fallback_result.exited_zero
             }
             #[cfg(not(feature = "compat-xstate-matrix-verify"))]
             {

@@ -22,7 +22,11 @@ fi
 gcc -O2 -mavx -pthread -fcf-protection=none -fno-stack-protector \
   verification/fixtures/linux/xstate_threads.c \
   -o "$TARGET/xstate-matrix" >"$OUT/fixture-build.log" 2>&1
+gcc -O2 -msse2 -mno-avx -pthread -fcf-protection=none -fno-stack-protector \
+  verification/fixtures/linux/xstate_fallback.c \
+  -o "$TARGET/xstate-fallback" >>"$OUT/fixture-build.log" 2>&1
 export JSR_UBUNTU_XSTATE_MATRIX="$TARGET/xstate-matrix"
+export JSR_UBUNTU_XSTATE_FALLBACK="$TARGET/xstate-fallback"
 
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release \
   --target x86_64-unknown-none -p jasper-kernel \
@@ -56,5 +60,27 @@ for cpus in $CPU_LIST; do
   ! grep -aqE '^\[JSR-(PANIC|COMPAT-DYNAMIC-FAIL|LINUX-ABI-FAIL)\]|panicked at|KERNEL PANIC' \
     "$serial"
 done
+
+set +e
+nice -n 10 taskset -c 0 timeout "$LIMIT" qemu-system-x86_64 \
+  -accel tcg \
+  -machine q35 \
+  -cpu qemu64 \
+  -m 512M \
+  -smp 1 \
+  -drive format=raw,file="$OUT/kernel.img",snapshot=on \
+  -serial "file:$OUT/serial-fallback.log" \
+  -display none -monitor none -no-reboot \
+  -device isa-debug-exit,iobase=0xf4,iosize=0x04
+rc=$?
+set -e
+printf '%s\n' "$rc" >"$OUT/qemu-fallback.rc"
+[ "$rc" -eq 33 ]
+grep -aq '^\[JSR-COMPAT-XSTATE-MATRIX\] skipped=no_xsave' "$OUT/serial-fallback.log"
+grep -aq '^jasper-xstate-fallback-ok workers=4 yields=512' "$OUT/serial-fallback.log"
+grep -aq '^\[JSR-COMPAT-XSTATE-FALLBACK\] .*exit_zero=true .*resources=true failed=0' \
+  "$OUT/serial-fallback.log"
+! grep -aqE '^\[JSR-(PANIC|COMPAT-DYNAMIC-FAIL|LINUX-ABI-FAIL)\]|panicked at|KERNEL PANIC' \
+  "$OUT/serial-fallback.log"
 
 echo "compat-xstate-matrix: PASS cpus=[$CPU_LIST] evidence=$OUT"

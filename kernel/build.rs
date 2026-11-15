@@ -465,41 +465,45 @@ fn configure_dynamic_libc_fixtures() {
         println!("cargo:rustc-env={variable}={}", path.display());
     }
     if std::env::var_os("CARGO_FEATURE_COMPAT_XSTATE_MATRIX_VERIFY").is_some() {
-        let variable = "JSR_UBUNTU_XSTATE_MATRIX";
-        let path = std::env::var_os(variable)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
+        for (variable, description) in [
+            ("JSR_UBUNTU_XSTATE_MATRIX", "YMM matrix"),
+            ("JSR_UBUNTU_XSTATE_FALLBACK", "XMM fallback"),
+        ] {
+            let path = std::env::var_os(variable)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "compat-xstate-matrix-verify 需要 {variable} 指向已编译的 {description} fixture"
+                    )
+                });
+            println!("cargo:rerun-if-env-changed={variable}");
+            println!("cargo:rerun-if-changed={}", path.display());
+            let bytes = std::fs::read(&path).unwrap_or_else(|error| {
                 panic!(
-                    "compat-xstate-matrix-verify 需要 {variable} 指向已编译的 YMM matrix fixture"
+                    "{description} fixture 无法读取：{}（{error}）",
+                    path.display()
                 )
             });
-        println!("cargo:rerun-if-env-changed={variable}");
-        println!("cargo:rerun-if-changed={}", path.display());
-        let bytes = std::fs::read(&path).unwrap_or_else(|error| {
-            panic!(
-                "YMM matrix fixture 无法读取：{}（{error}）",
-                path.display()
-            )
-        });
-        assert_eq!(&bytes[..4], b"\x7fELF", "YMM matrix fixture 不是 ELF");
-        assert_eq!(bytes[4], 2, "YMM matrix fixture 必须是 ELF64");
-        assert_eq!(bytes[5], 1, "YMM matrix fixture 必须是小端");
-        assert_eq!(
-            fixture_u16(&bytes, 18),
-            Some(62),
-            "YMM matrix fixture 必须是 x86_64"
-        );
-        assert_eq!(
-            fixture_u16(&bytes, 16),
-            Some(3),
-            "YMM matrix fixture 必须是 ET_DYN"
-        );
-        assert_eq!(
-            dynamic_interpreter(&bytes),
-            Some(b"/lib64/ld-linux-x86-64.so.2".as_slice()),
-            "YMM matrix fixture 必须声明未修改的 ld-linux"
-        );
-        println!("cargo:rustc-env={variable}={}", path.display());
+            assert_eq!(&bytes[..4], b"\x7fELF", "{description} fixture 不是 ELF");
+            assert_eq!(bytes[4], 2, "{description} fixture 必须是 ELF64");
+            assert_eq!(bytes[5], 1, "{description} fixture 必须是小端");
+            assert_eq!(
+                fixture_u16(&bytes, 18),
+                Some(62),
+                "{description} fixture 必须是 x86_64"
+            );
+            assert_eq!(
+                fixture_u16(&bytes, 16),
+                Some(3),
+                "{description} fixture 必须是 ET_DYN"
+            );
+            assert_eq!(
+                dynamic_interpreter(&bytes),
+                Some(b"/lib64/ld-linux-x86-64.so.2".as_slice()),
+                "{description} fixture 必须声明未修改的 ld-linux"
+            );
+            println!("cargo:rustc-env={variable}={}", path.display());
+        }
     }
 }
 
