@@ -72,11 +72,20 @@ struct Runtime {
 
 static DISPLAY: IrqSpinLock<Option<Runtime>> = IrqSpinLock::ranked(crate::lockorder::DISPLAY, None);
 
+struct Prepared {
+    base: usize,
+    len: usize,
+    surface: SurfaceSpec,
+}
+
+static PREPARED: IrqSpinLock<Option<Prepared>> =
+    IrqSpinLock::ranked(crate::lockorder::DISPLAY, None);
+
 /// Bind and immediately paint one boot frame from the firmware framebuffer.
 ///
 /// 绑定固件帧缓冲并立即绘制一帧启动画面。
 #[cfg(target_arch = "x86_64")]
-pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
+pub fn prepare(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
     let info = framebuffer.info();
     let layout = match info.pixel_format {
         PixelFormat::Rgb => PixelLayout::Rgb,
@@ -100,6 +109,20 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
     if required > info.byte_len as u64 {
         return Err(DisplayInputError::InvalidSurface);
     }
+    let buffer = framebuffer.into_buffer();
+    *PREPARED.lock() = Some(Prepared {
+        base: buffer.as_mut_ptr() as usize,
+        len: buffer.len(),
+        surface,
+    });
+    Ok(())
+}
+
+/// Start the native display runtime after the kernel heap is available.
+pub fn start() -> Result<(), DisplayInputError> {
+    let prepared = PREPARED.lock().take().ok_or(DisplayInputError::Unsupported)?;
+    let surface = prepared.surface;
+    let required = surface.validate()?;
     #[cfg(target_arch = "x86_64")]
     let keyboard = crate::arch::x86_64::keyboard::init();
     #[cfg(not(target_arch = "x86_64"))]
@@ -118,7 +141,7 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
     let overlay_key = compositor
         .create(LayerSpec {
             surface: OVERLAY_SURFACE,
-            x: width.saturating_sub(24) as i32,
+            x: surface.width.saturating_sub(24) as i32,
             y: 22,
             z_order: 10,
             visible: true,
@@ -128,7 +151,7 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
     let accent_key = compositor
         .create(LayerSpec {
             surface: ACCENT_SURFACE,
-            x: width.saturating_sub(32) as i32,
+            x: surface.width.saturating_sub(32) as i32,
             y: 22,
             z_order: 20,
             visible: true,
@@ -161,13 +184,12 @@ pub fn init(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
     if overlay_region_len > OVERLAY_REGION_BYTES {
         return Err(DisplayInputError::InvalidSurface);
     }
-    let buffer = framebuffer.into_buffer();
     let frame_len = usize::try_from(required).map_err(|_| DisplayInputError::InvalidSurface)?;
-    if buffer.len() < frame_len {
+    if prepared.len < frame_len {
         return Err(DisplayInputError::InvalidSurface);
     }
     let mut runtime = Runtime {
-        base: buffer.as_mut_ptr() as usize,
+        base: prepared.base,
         len: frame_len,
         surface,
         session,

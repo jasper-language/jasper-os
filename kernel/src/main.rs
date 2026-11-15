@@ -40,7 +40,7 @@ mod bios {
         jasper_kernel::arch::bm1_init(info.framebuffer.take());
         #[cfg(not(feature = "bm1-vm"))]
         if let Some(framebuffer) = info.framebuffer.take() {
-            let _ = jasper_kernel::display::init(framebuffer);
+            let _ = jasper_kernel::display::prepare(framebuffer);
         }
         let mut spec = BootSpec::new();
         for r in info.memory_regions.iter() {

@@ -238,9 +238,14 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         }),
         // 内核堆（Box/Vec/String 可用，按需增长）。首批映射失败时启动停止。
         Stage::Heap => stage(ctx, s, |_| {
-            mm::heap::init()
-                .ok()
-                .and_then(|_| crate::terminal::init().then_some(()))
+            mm::heap::init().ok()?;
+            if !crate::terminal::init() {
+                return None;
+            }
+            if crate::display::start().is_err() {
+                kprintln!("[JSR-DISPLAY] runtime=unsupported");
+            }
+            Some(())
         }),
         // 堆就绪：校验启动期容量记录与内存预算。对象表、实时表和任务表由模块激活安装，
         // 这样阶段只保留容量验证这一真实内存顺序约束。
