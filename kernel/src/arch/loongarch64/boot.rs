@@ -1,24 +1,26 @@
 //! LoongArch64 引导适配层：`_start`、BSS、启动栈、早期串口、直接映射窗口与分页。
 //!
-//! QEMU `virt` 以物理地址 0x0020_0000 从 ELF 入口直接启动。内存大小在 OEM
-//! 固件路径成熟前使用 QEMU 显式约定的 128 MiB；真实板卡需提供固件启动协议和
-//! 内存/FDT 位置后才能替换这一段。
+//! QEMU `virt` 以物理地址 0x0020_0000 从 ELF 入口直接启动。平台固定字段由
+//! [`super::qemu_virt`] 显式隔离；实际 RAM、保留区和 CPU 拓扑均来自校验后的 DTB。
 
 use core::arch::global_asm;
 
+use kernel_core::fdt::Fdt;
 use kernel_core::frame::{PhysRegion, RegionKind};
 
 use super::{cpu, mmu, uart};
 use crate::boot::{self, BootSpec};
 
 const BOOT_STACK_BYTES: usize = 64 * 1024;
-const QEMU_RAM_BYTES: u64 = 128 * 1024 * 1024;
-
 #[repr(C, align(16))]
 struct BootStack([u8; BOOT_STACK_BYTES]);
 
 #[no_mangle]
 static mut JSR_BOOT_STACK: BootStack = BootStack([0; BOOT_STACK_BYTES]);
+#[no_mangle]
+static mut JSR_LOONGARCH_BOOT_EFI_BOOT: u64 = 0;
+#[no_mangle]
+static mut JSR_LOONGARCH_BOOT_SYSTEM_TABLE: u64 = 0;
 
 global_asm!(
     r#"
@@ -39,6 +41,10 @@ _start:
     addi.d $t0, $t0, 8
     b     1b
 2:
+    la.local $t0, JSR_LOONGARCH_BOOT_EFI_BOOT
+    st.d  $a0, $t0, 0
+    la.local $t0, JSR_LOONGARCH_BOOT_SYSTEM_TABLE
+    st.d  $a2, $t0, 0
     la.local $sp, JSR_BOOT_STACK
     li.d  $t0, {stack_bytes}
     add.d $sp, $sp, $t0
@@ -58,9 +64,18 @@ extern "C" fn jsr_loongarch64_boot() -> ! {
     crate::console::write_str(
         "[JSR-ARCH] loongarch64 entry=physical console=uart16550 qemu=virt\n",
     );
+    // SAFETY: written once by `_start` before Rust runs and before MMU enable.
+    let efi_boot = unsafe { core::ptr::read_volatile(&raw const JSR_LOONGARCH_BOOT_EFI_BOOT) };
+    // SAFETY: written once by `_start` before Rust runs and before MMU enable.
+    let system_table =
+        unsafe { core::ptr::read_volatile(&raw const JSR_LOONGARCH_BOOT_SYSTEM_TABLE) };
+    let fdt_discovery = super::smp::discover_fdt(efi_boot != 0, system_table);
     crate::console::_print(format_args!(
         "[JSR-SMP-FDT] source={}\n",
-        super::smp::discover_fdt()
+        match fdt_discovery {
+            Ok(_) => "qemu-fdt-cpu-map",
+            Err(reason) => reason,
+        }
     ));
     crate::console::_print(format_args!(
         "[JSR-CPUCFG] id={} timer_hz={}\n",
@@ -83,24 +98,88 @@ extern "C" fn jsr_loongarch64_boot() -> ! {
         mmu::PHYS_OFFSET
     ));
 
+    let firmware_fdt = match fdt_discovery {
+        Ok(fdt) => fdt,
+        Err(_) => super::testdev::stop(35),
+    };
+    let Some(fdt_pointer) = mmu::PHYS_OFFSET
+        .checked_add(firmware_fdt.physical)
+        .filter(|pointer| *pointer != 0)
+    else {
+        crate::console::write_str("[JSR-DTB] reject=direct-map-overflow\n");
+        super::testdev::stop(35);
+    };
+    // SAFETY: the DTB was validated before MMU enable and the coherent direct
+    // map exposes the same firmware bytes after enable.
+    let fdt_bytes =
+        unsafe { core::slice::from_raw_parts(fdt_pointer as *const u8, firmware_fdt.length) };
+    let Ok(fdt) = Fdt::parse(fdt_bytes) else {
+        crate::console::write_str("[JSR-DTB] reject=system.boot.error.fdt_bad_structure\n");
+        super::testdev::stop(35);
+    };
+    if let Err(error) = fdt.validate_strict() {
+        crate::console::_print(format_args!("[JSR-DTB] reject={}\n", error.name()));
+        super::testdev::stop(35);
+    }
+
     let (image_start, image_end) = mmu::image_range();
     let mut spec = BootSpec::new();
-    // QEMU's direct boot metadata, command line and DTB occupy the first 2 MiB.
+    // QEMU's direct-boot ABI data, command line and EFI System Table precede
+    // the ELF. Reserve the complete prefix through the discovered image start;
+    // the DTB below supplies actual RAM and any additional firmware exclusions.
     spec.push_region(PhysRegion {
         start: 0,
         end: image_start,
         kind: RegionKind::Reserved,
     });
     spec.push_region(PhysRegion {
-        start: 0,
-        end: QEMU_RAM_BYTES,
-        kind: RegionKind::Usable,
-    });
-    spec.push_region(PhysRegion {
         start: image_start,
         end: image_end,
         kind: RegionKind::Reserved,
     });
+    let mut range_overflow = false;
+    fdt.for_each_reserved(|start, size| {
+        let Some(end) = start.checked_add(size) else {
+            range_overflow = true;
+            return;
+        };
+        spec.push_region(PhysRegion {
+            start,
+            end,
+            kind: RegionKind::Reserved,
+        });
+    });
+    let mut memory_found = false;
+    let memory_walked = fdt.for_each_memory(|start, size| {
+        if size != 0 {
+            let Some(end) = start.checked_add(size) else {
+                range_overflow = true;
+                return;
+            };
+            memory_found = true;
+            spec.push_region(PhysRegion {
+                start,
+                end,
+                kind: RegionKind::Usable,
+            });
+        }
+    });
+    if memory_walked.is_err() {
+        crate::console::write_str("[JSR-DTB] reject=memory-map-malformed\n");
+        super::testdev::stop(35);
+    }
+    if range_overflow {
+        crate::console::write_str("[JSR-DTB] reject=memory-map-overflow\n");
+        super::testdev::stop(35);
+    }
+    if !memory_found {
+        crate::console::write_str("[JSR-DTB] reject=memory-map-empty\n");
+        super::testdev::stop(35);
+    }
+    if !spec.has_complete_regions() {
+        crate::console::write_str("[JSR-DTB] reject=memory-map-truncated\n");
+        super::testdev::stop(35);
+    }
     spec.phys_offset = Some(mmu::PHYS_OFFSET);
     crate::kmain::start(boot::install(spec))
 }

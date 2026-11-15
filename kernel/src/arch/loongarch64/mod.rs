@@ -11,6 +11,7 @@ mod cpu;
 mod mmu;
 mod pci;
 mod paging;
+mod qemu_virt;
 mod smp;
 mod space;
 mod testdev;

@@ -10,12 +10,12 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use kernel_core::fdt::Fdt;
 use kernel_core::smp::{CpuSet, IpiKind, SmpError, Topology, MAX_CPUS};
 
-const FDT_PA: u64 = 0x0010_0000;
-const IOCSR_IPI_STATUS: u64 = 0x1000;
-const IOCSR_IPI_EN: u64 = 0x1004;
-const IOCSR_IPI_SEND: u64 = 0x1040;
-const IOCSR_IPI_CLEAR: u64 = 0x100c;
-const IOCSR_MBUF_SEND: u64 = 0x1048;
+use super::qemu_virt::{
+    EFI_CONFIG_TABLE_BUDGET, EFI_CONFIG_TABLE_ENTRY_BYTES, EFI_DEVICE_TREE_GUID,
+    EFI_SYSTEM_TABLE_CONFIG_TABLES, EFI_SYSTEM_TABLE_NR_TABLES, EFI_SYSTEM_TABLE_SIGNATURE,
+    FDT_LIMIT, IOCSR_IPI_CLEAR, IOCSR_IPI_EN, IOCSR_IPI_SEND, IOCSR_IPI_STATUS, IOCSR_MBUF_SEND,
+    MACHINE_COMPATIBLE,
+};
 
 // IPI_SEND carries a vector number in bits 0..4; the receiving STATUS register
 // records the corresponding bit.
@@ -94,38 +94,120 @@ unsafe fn iocsr_write32(value: u32, address: u64) {
     );
 }
 
+#[derive(Clone, Copy)]
+pub struct FirmwareFdt {
+    pub physical: u64,
+    pub length: usize,
+}
+
 /// Parse the firmware DTB before paging is enabled and retain its CPU topology.
-pub fn discover_fdt() -> &'static str {
-    // SAFETY: QEMU places the DTB at FDT_BASE in RAM. The first eight bytes
-    // declare the total length, which is validated by the shared parser.
-    let first8 = unsafe { core::ptr::read_volatile(FDT_PA as *const [u8; 8]) };
-    let Some(total) = kernel_core::fdt::total_size(&first8) else {
-        return "qemu-fdt-missing";
-    };
-    if total > 1024 * 1024 {
-        return "qemu-fdt-too-large";
+pub fn discover_fdt(efi_boot: bool, system_table: u64) -> Result<FirmwareFdt, &'static str> {
+    if !efi_boot {
+        return Err("boot-efi-table-not-provided");
     }
-    // SAFETY: QEMU reserves one MiB for direct-boot metadata and the DTB.
-    let bytes = unsafe { core::slice::from_raw_parts(FDT_PA as *const u8, total) };
-    let Ok(fdt) = Fdt::parse(bytes) else {
-        return "qemu-fdt-invalid";
+    let fdt_physical = firmware_fdt_physical(system_table)?;
+    // SAFETY: the physical direct-boot mode makes the trusted firmware pointer
+    // readable. Header length is capped before constructing the parser view.
+    let first8 = unsafe { core::ptr::read_volatile(fdt_physical as *const [u8; 8]) };
+    let Some(total) = kernel_core::fdt::total_size(&first8) else {
+        return Err("qemu-fdt-missing");
     };
+    if total > FDT_LIMIT {
+        return Err("qemu-fdt-too-large");
+    }
+    // SAFETY: the first eight bytes declared an in-budget blob at the firmware
+    // supplied physical address. Strict validation happens before use.
+    let bytes = unsafe { core::slice::from_raw_parts(fdt_physical as *const u8, total) };
+    let Ok(fdt) = Fdt::parse(bytes) else {
+        return Err("qemu-fdt-invalid");
+    };
+    let root_matches = fdt
+        .find_named("")
+        .ok()
+        .flatten()
+        .is_some_and(|root| root.is_compatible(MACHINE_COMPATIBLE));
+    if !root_matches {
+        return Err("qemu-platform-unverified");
+    }
     let Ok(cpus) = fdt.cpu_topology(0, |hw| (hw <= u32::MAX as u64).then_some(hw as u32)) else {
-        return "qemu-fdt-cpu-invalid";
+        return Err("qemu-fdt-cpu-invalid");
     };
     if !cpus.boot_listed {
-        return "qemu-fdt-boot-cpu-missing";
+        return Err("qemu-fdt-boot-cpu-missing");
     }
     let topology = cpus.topology;
     CPU_COUNT.store(topology.count().min(MAX_CPUS) as u32, Ordering::Release);
     for index in 0..topology.count().min(MAX_CPUS) {
         HW_IDS[index].store(topology.hw_id(index).unwrap_or(0), Ordering::Release);
     }
-    "qemu-fdt-cpu-map"
+    Ok(FirmwareFdt {
+        physical: fdt_physical,
+        length: total,
+    })
+}
+
+fn firmware_fdt_physical(system_table: u64) -> Result<u64, &'static str> {
+    unsafe fn read_u64(physical: u64) -> Option<u64> {
+        if physical == 0 || physical % core::mem::align_of::<u64>() as u64 != 0 {
+            return None;
+        }
+        // SAFETY: callers pass addresses from the trusted direct-boot ABI while
+        // physical addressing is active. Every computed pointer is nonzero.
+        Some(core::ptr::read_volatile(physical as *const u64))
+    }
+
+    // SAFETY: this is the direct-boot ABI pointer captured from `$a2`.
+    if unsafe { read_u64(system_table) } != Some(EFI_SYSTEM_TABLE_SIGNATURE) {
+        return Err("boot-system-table-invalid");
+    }
+    let count_address = system_table
+        .checked_add(EFI_SYSTEM_TABLE_NR_TABLES)
+        .ok_or("boot-system-table-overflow")?;
+    let count = unsafe { read_u64(count_address) }.ok_or("boot-system-table-invalid")?;
+    if count == 0 {
+        return Err("boot-config-table-empty");
+    }
+    if count > EFI_CONFIG_TABLE_BUDGET {
+        return Err("boot-config-table-budget");
+    }
+    let tables_address = system_table
+        .checked_add(EFI_SYSTEM_TABLE_CONFIG_TABLES)
+        .ok_or("boot-system-table-overflow")?;
+    let tables = unsafe { read_u64(tables_address) }
+        .filter(|address| *address != 0)
+        .ok_or("boot-config-table-missing")?;
+
+    for index in 0..count {
+        let entry = tables
+            .checked_add(
+                index
+                    .checked_mul(EFI_CONFIG_TABLE_ENTRY_BYTES)
+                    .ok_or("boot-config-table-overflow")?,
+            )
+            .ok_or("boot-config-table-overflow")?;
+        let mut guid = [0u8; 16];
+        for (offset, byte) in guid.iter_mut().enumerate() {
+            let byte_address = entry
+                .checked_add(offset as u64)
+                .ok_or("boot-config-table-overflow")?;
+            // SAFETY: the ABI supplies one bounded configuration-table array.
+            *byte = unsafe { core::ptr::read_volatile(byte_address as *const u8) };
+        }
+        if guid == EFI_DEVICE_TREE_GUID {
+            let pointer_address = entry.checked_add(16).ok_or("boot-config-table-overflow")?;
+            return unsafe { read_u64(pointer_address) }
+                .filter(|address| *address != 0)
+                .ok_or("boot-fdt-address-invalid");
+        }
+    }
+    Err("boot-fdt-not-provided")
 }
 
 pub fn init_boot() -> super::CpuDiscovery {
-    super::CpuDiscovery { topology: topology(), source: "qemu-fdt-cpu-map" }
+    super::CpuDiscovery {
+        topology: topology(),
+        source: "qemu-fdt-cpu-map",
+    }
 }
 
 fn topology() -> Topology {
