@@ -40,6 +40,7 @@ const ICMP_ECHO_REPLY: u8 = 0;
 pub enum NetError {
     HeaderTooShort,
     FrameTooLarge,
+    RxQueueFull,
     UnsupportedFlags,
     GsoUnsupported,
     TruncatedHeaders,
@@ -262,7 +263,7 @@ impl VirtioNetBackend {
 
     fn enqueue(&mut self, frame: RxFrame) -> Result<(), NetError> {
         if self.rx_len == RX_QUEUE_CAPACITY {
-            return Err(NetError::FrameTooLarge);
+            return Err(NetError::RxQueueFull);
         }
         let index = (self.rx_head + self.rx_len) % RX_QUEUE_CAPACITY;
         self.rx[index] = frame;
@@ -550,6 +551,19 @@ mod tests {
         backend.reset();
         assert_eq!(backend.reset_generation(), 2);
         assert!(backend.pop_rx().is_none());
+    }
+
+    #[test]
+    fn rx_queue_exhaustion_is_distinct_from_oversized_frames() {
+        let mut backend = VirtioNetBackend::new([2, 0, 0, 0, 0, 1], [10, 0, 2, 1]);
+        for _ in 0..RX_QUEUE_CAPACITY {
+            assert_eq!(backend.transmit(&arp_request()), Ok(TransmitOutcome::ArpReply));
+        }
+        assert_eq!(
+            backend.transmit(&arp_request()),
+            Err(NetError::RxQueueFull)
+        );
+        assert_ne!(NetError::RxQueueFull, NetError::FrameTooLarge);
     }
 
     fn udp_frame(payload: &[u8]) -> [u8; 46] {
