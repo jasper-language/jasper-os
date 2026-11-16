@@ -51,7 +51,7 @@ manifest 或执行路径的参数。
 
 ```text
 cargo test --locked -p jasper-lifecycle-staging
-28 passed; 0 failed
+29 passed; 0 failed
 ```
 
 新增测试覆盖：
@@ -62,7 +62,9 @@ cargo test --locked -p jasper-lifecycle-staging
 - unhealthy trial 是唯一进入 rollback 的路径；
 - 模拟 control 已提交、journal 落后的崩溃后，recovery 修复到 Committed；
 - recovery 后的新 generation 使旧命令失效；
-- terminal staging 必须先归档再清理。
+- 在线/离线来源通过同一 service 信任和暂存路径；
+- terminal staging 必须先归档再清理；
+- 归档已发布但清理中断时，同一 archive root 可以幂等续作。
 
 ## 仍未完成
 
