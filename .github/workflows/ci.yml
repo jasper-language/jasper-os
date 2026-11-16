@@ -79,6 +79,12 @@ jobs:
           key: host-${{ env.RUST_NIGHTLY }}-${{ hashFiles('Cargo.lock') }}
       - name: kernel-core 宿主测试（64 位） / kernel-core host tests
         run: cargo test -p kernel-core
+      - name: 兼容层核心单元测试 / compatibility core unit tests
+        run: |
+          CARGO_BUILD_JOBS=2 cargo test -p jasper-compat-core \
+            -p jasper-compat-loader \
+            -p jasper-compat-packages \
+            -p jasper-compat-graphics
       - name: jaso 格式与打包测试 / jaso tests
         run: cargo test -p jaso --features pack
       - name: kernel-core 单元测试（32 位 i686、AArch64、RISC-V64） / cross-ISA unit tests
