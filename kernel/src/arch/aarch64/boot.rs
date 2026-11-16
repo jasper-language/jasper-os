@@ -94,7 +94,8 @@ fn pixel6a_reset_now() -> ! {
     feature = "pixel6a-full-probe",
     feature = "pixel6a-gic-init-probe",
     feature = "pixel6a-before-kmain-probe",
-    feature = "pixel6a-smp-probe"
+    feature = "pixel6a-smp-probe",
+    feature = "pixel6a-runtime-verify"
 ))]
 pub(crate) fn pixel6a_power_off() -> ! {
     unsafe {

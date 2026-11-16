@@ -92,6 +92,12 @@ jobs:
               RUSTFLAGS="-C link-self-contained=yes -C target-feature=+crt-static" \
               CARGO_TARGET_DIR=target/isa-test cargo test -p kernel-core --target "$t"
           done
+      - name: Pixel 6a 物理运行计划可构建 / Pixel 6a runtime plan build
+        run: |
+          CARGO_BUILD_JOBS=2 cargo build --locked --release \
+            --target aarch64-unknown-none-softfloat \
+            -p jasper-kernel --no-default-features \
+            --features pixel6a-runtime-verify
 
   accept:
     name: accept (x86_64 + AArch64 + RISC-V64 QEMU)

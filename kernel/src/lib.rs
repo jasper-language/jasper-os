@@ -26,13 +26,17 @@
 extern crate alloc;
 
 /// 构建期选择启动计划：`production` 只有阶段和等待，其余构建走验收清单（issue #7）。
-#[cfg(not(feature = "production"))]
+#[cfg(feature = "pixel6a-runtime-verify")]
+pub mod pixel6a_runtime;
+#[cfg(feature = "pixel6a-runtime-verify")]
+pub use pixel6a_runtime as plan;
+#[cfg(all(not(feature = "production"), not(feature = "pixel6a-runtime-verify")))]
 pub mod acceptance;
-#[cfg(not(feature = "production"))]
+#[cfg(all(not(feature = "production"), not(feature = "pixel6a-runtime-verify")))]
 pub use acceptance as plan;
-#[cfg(feature = "production")]
+#[cfg(all(feature = "production", not(feature = "pixel6a-runtime-verify")))]
 pub mod production;
-#[cfg(feature = "production")]
+#[cfg(all(feature = "production", not(feature = "pixel6a-runtime-verify")))]
 pub use production as plan;
 
 pub mod appid_demo;
