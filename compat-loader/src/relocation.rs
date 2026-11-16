@@ -889,9 +889,38 @@ mod tests {
 
     #[test]
     fn real_bin_true_relocations_use_real_libc_definitions() {
-        let main_bytes = fs::read("/bin/true").expect("/bin/true fixture");
+        let candidates = [
+            "/bin/bash",
+            "/usr/bin/printf",
+            "/usr/bin/getconf",
+            "/bin/true",
+        ];
+        let (fixture, main_bytes, main_plan) = candidates
+            .iter()
+            .find_map(|path| {
+                let bytes = fs::read(path).ok()?;
+                let plan = parse(&bytes).ok()?;
+                let has_relative = plan
+                    .relocations
+                    .iter()
+                    .any(|relocation| relocation.kind == RelocationKind::Relative);
+                let has_start_main = plan.relocations.iter().any(|relocation| {
+                    relocation.kind == RelocationKind::GlobDat
+                        && relocation.symbol.as_deref() == Some("__libc_start_main")
+                });
+                let has_progname_copy = plan.relocations.iter().any(|relocation| {
+                    relocation.kind == RelocationKind::Copy
+                        && relocation.symbol.as_deref() == Some("__progname")
+                });
+                let has_weak_undefined = plan.relocations.iter().any(|relocation| {
+                    relocation.symbol_binding == Some(SymbolBinding::Weak)
+                        && !relocation.symbol_defined
+                });
+                (has_relative && has_start_main && has_progname_copy && has_weak_undefined)
+                    .then_some((*path, bytes, plan))
+            })
+            .unwrap_or_else(|| panic!("no real relocation fixture among {candidates:?}"));
         let libc_bytes = fs::read("/lib/x86_64-linux-gnu/libc.so.6").expect("libc fixture");
-        let main_plan = parse(&main_bytes).unwrap();
         let libc_plan = parse(&libc_bytes).unwrap();
         let main_layout = ImageLayout::new(&main_plan, 0x400000, 4096).unwrap();
         let libc_layout = ImageLayout::new(&libc_plan, 0x7000_0000_0000, 4096).unwrap();
@@ -985,7 +1014,10 @@ mod tests {
         assert_eq!(memory.read_u64(main_layout.load_bias + weak.offset), 0);
 
         let lifecycle = read_lifecycle_callbacks(&mut memory, &main_layout).unwrap();
-        assert_eq!(lifecycle.init_array.len(), 1);
+        assert!(
+            !lifecycle.init_array.is_empty(),
+            "{fixture} has no lifecycle initializer"
+        );
         assert!(main_layout
             .segments
             .iter()
