@@ -36,6 +36,10 @@ const STAGES: &[Step] = &[
 
 pub const PLAN: &[&[Step]] = &[STAGES];
 
+pub fn stop(status: ExitStatus) -> ! {
+    arch::exit_emulator(status)
+}
+
 fn finish(ctx: &mut BootCtx) {
     let smp = ctx.smp.as_ref();
     let smp_ok =
