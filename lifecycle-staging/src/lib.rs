@@ -250,6 +250,65 @@ impl UpdateCoordinator {
         Ok(Self { machine })
     }
 
+    /// Recover the coordinator using both the transaction journal and boot control.
+    ///
+    /// A crash after the durable boot-control commit but before the transaction
+    /// journal update is repaired only when the control candidate digest exactly
+    /// matches this transaction.
+    pub fn recover_with_control(
+        staging_root: &Path,
+        manifest_sha256: [u8; 32],
+        control: &FileControlStore,
+    ) -> Result<Self, CoordinatorError> {
+        let record = load_transaction_record(staging_root).map_err(CoordinatorError::Staging)?;
+        if record.manifest_sha256() != manifest_sha256 {
+            return Err(CoordinatorError::Transaction(
+                TransactionError::InvalidDigest,
+            ));
+        }
+        let mut machine = UpdateMachine::idle();
+        machine
+            .apply(UpdateEvent::Discover)
+            .map_err(CoordinatorError::Transition)?;
+        machine
+            .apply(UpdateEvent::Verify)
+            .map_err(CoordinatorError::Transition)?;
+        machine
+            .apply(UpdateEvent::Prepare)
+            .map_err(CoordinatorError::Transition)?;
+        match record.stage() {
+            UpdateStage::Prepared => {
+                if control
+                    .current()
+                    .candidate()
+                    .is_some_and(|(_, candidate)| candidate.digest() == manifest_sha256)
+                {
+                    machine
+                        .apply(UpdateEvent::Commit)
+                        .map_err(CoordinatorError::Transition)?;
+                    let mut committed = record;
+                    committed
+                        .apply(UpdateEvent::Commit)
+                        .map_err(CoordinatorError::Transaction)?;
+                    persist_transaction_record(staging_root, committed)
+                        .map_err(CoordinatorError::Staging)?;
+                }
+            }
+            UpdateStage::Committed => {
+                machine
+                    .apply(UpdateEvent::Commit)
+                    .map_err(CoordinatorError::Transition)?;
+            }
+            actual => {
+                return Err(CoordinatorError::InconsistentStage {
+                    expected: UpdateStage::Prepared,
+                    actual,
+                })
+            }
+        }
+        Ok(Self { machine })
+    }
+
     /// Cancel a prepared update before durable commit and remove its staging tree.
     pub fn cancel_prepared(&mut self, staging_root: &Path) -> Result<(), CoordinatorError> {
         let mut next = self.machine;
@@ -299,6 +358,12 @@ impl UpdateCoordinator {
         control
             .commit_next(next)
             .map_err(CoordinatorError::ControlStore)?;
+        let mut record = prepared.record;
+        record
+            .apply(UpdateEvent::Commit)
+            .map_err(CoordinatorError::Transaction)?;
+        persist_transaction_record(&prepared.staging.root, record)
+            .map_err(CoordinatorError::Staging)?;
         self.machine = machine;
         Ok(next)
     }
@@ -607,6 +672,41 @@ pub fn load_prepared_transaction(
         return Err(StagingError::Transaction(TransactionError::InvalidState));
     }
     Ok(record)
+}
+
+/// Recover the newest transaction record without requiring a specific phase.
+pub fn load_transaction_record(staging_root: &Path) -> Result<TransactionRecord, StagingError> {
+    let first = read_optional_file(&staging_root.join(TRANSACTION_COPIES[0]))?;
+    let second = read_optional_file(&staging_root.join(TRANSACTION_COPIES[1]))?;
+    recover(first.as_deref(), second.as_deref()).map_err(StagingError::Transaction)
+}
+
+/// Atomically replace journal copies with one validated transaction record.
+pub fn persist_transaction_record(
+    staging_root: &Path,
+    record: TransactionRecord,
+) -> Result<(), StagingError> {
+    let bytes = record.encode();
+    for name in TRANSACTION_COPIES {
+        let target = staging_root.join(name);
+        let temporary = staging_root.join(format!(".{name}.tmp-{}", now_nanos()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|source| io_error("create transaction journal", &temporary, source))?;
+        if let Err(source) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+            drop(file);
+            let _ = fs::remove_file(&temporary);
+            return Err(io_error("write transaction journal", &temporary, source));
+        }
+        drop(file);
+        if let Err(source) = fs::rename(&temporary, &target) {
+            let _ = fs::remove_file(&temporary);
+            return Err(io_error("replace transaction journal", &target, source));
+        }
+    }
+    sync_directory(staging_root)
 }
 
 /// 按实际文件系统块大小检查暂存预算；`metadata_headroom` 由协调器显式提供。
@@ -1293,6 +1393,24 @@ mod tests {
         assert_eq!(
             FileControlStore::open(&control_root).unwrap().current(),
             committed
+        );
+        assert_eq!(
+            load_transaction_record(&staging_root).unwrap().stage(),
+            UpdateStage::Committed
+        );
+
+        // Simulate a crash after control commit but before journal replacement.
+        persist_transaction_record(&staging_root, prepared.record).unwrap();
+        let repaired = UpdateCoordinator::recover_with_control(
+            &staging_root,
+            prepared.manifest.manifest.manifest_sha256,
+            &control,
+        )
+        .unwrap();
+        assert_eq!(repaired.stage(), UpdateStage::Committed);
+        assert_eq!(
+            load_transaction_record(&staging_root).unwrap().stage(),
+            UpdateStage::Committed
         );
     }
 
