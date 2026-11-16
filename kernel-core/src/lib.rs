@@ -88,6 +88,7 @@ pub mod capacity;
 pub mod capability;
 pub mod config;
 pub mod device;
+pub mod driver_host;
 pub mod display_input;
 pub mod display_compositor;
 pub mod deadline;
