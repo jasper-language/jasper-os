@@ -26,17 +26,17 @@
 extern crate alloc;
 
 /// 构建期选择启动计划：`production` 只有阶段和等待，其余构建走验收清单（issue #7）。
-#[cfg(feature = "pixel6a-runtime-verify")]
+#[cfg(feature = "pixel6a-runtime-verify")] // JASPER-HARDCODE-REVIEW: issue=33 source=build-only-physical-runtime-plan reason=selects-pixel6a-physical-test-plan
 pub mod pixel6a_runtime;
-#[cfg(feature = "pixel6a-runtime-verify")]
+#[cfg(feature = "pixel6a-runtime-verify")] // JASPER-HARDCODE-REVIEW: issue=33 source=build-only-physical-runtime-plan reason=selects-pixel6a-physical-test-plan
 pub use pixel6a_runtime as plan;
-#[cfg(all(not(feature = "production"), not(feature = "pixel6a-runtime-verify")))]
+#[cfg(all(not(feature = "production"), not(feature = "pixel6a-runtime-verify")))] // JASPER-HARDCODE-REVIEW: issue=33 source=build-only-physical-runtime-plan reason=default-plan-excludes-pixel6a-test-plan
 pub mod acceptance;
-#[cfg(all(not(feature = "production"), not(feature = "pixel6a-runtime-verify")))]
+#[cfg(all(not(feature = "production"), not(feature = "pixel6a-runtime-verify")))] // JASPER-HARDCODE-REVIEW: issue=33 source=build-only-physical-runtime-plan reason=default-plan-excludes-pixel6a-test-plan
 pub use acceptance as plan;
-#[cfg(all(feature = "production", not(feature = "pixel6a-runtime-verify")))]
+#[cfg(all(feature = "production", not(feature = "pixel6a-runtime-verify")))] // JASPER-HARDCODE-REVIEW: issue=33 source=build-only-physical-runtime-plan reason=production-plan-excludes-pixel6a-test-plan
 pub mod production;
-#[cfg(all(feature = "production", not(feature = "pixel6a-runtime-verify")))]
+#[cfg(all(feature = "production", not(feature = "pixel6a-runtime-verify")))] // JASPER-HARDCODE-REVIEW: issue=33 source=build-only-physical-runtime-plan reason=production-plan-excludes-pixel6a-test-plan
 pub use production as plan;
 
 pub mod appid_demo;

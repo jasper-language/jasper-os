@@ -12,7 +12,7 @@ use crate::arch::{self, ExitStatus};
 use crate::kmain::{BootCtx, Step};
 use crate::kprintln;
 
-pub const NAME: &str = "pixel6a-runtime";
+pub const NAME: &str = "pixel6a-runtime"; // JASPER-HARDCODE-REVIEW: issue=33 source=physical-runtime-plan reason=diagnostic-plan-name-not-hardware-fact
 
 const STAGES: &[Step] = &[
     PlanItem::Stage(Stage::Console),
@@ -43,13 +43,13 @@ fn finish(ctx: &mut BootCtx) {
     if !smp_ok {
         if let Some(report) = smp {
             kprintln!(
-                "[JSR-PIXEL6A] runtime=failed reason=smp present={} online={} failed={}",
+                "[JSR-PIXEL6A] runtime=failed reason=smp present={} online={} failed={}", // JASPER-HARDCODE-REVIEW: issue=33 source=actual-smp-report reason=marker-names-platform-test-not-hardware-fact
                 report.present,
                 report.online,
                 report.failed
             );
         } else {
-            kprintln!("[JSR-PIXEL6A] runtime=failed reason=smp-missing");
+            kprintln!("[JSR-PIXEL6A] runtime=failed reason=smp-missing"); // JASPER-HARDCODE-REVIEW: issue=33 source=runtime-stage-state reason=diagnostic-marker-only
         }
         arch::exit_emulator(ExitStatus::Failure);
     }
@@ -61,14 +61,14 @@ fn finish(ctx: &mut BootCtx) {
     let capacity = ctx.capacity;
     if user_failed != 0 {
         kprintln!(
-            "[JSR-PIXEL6A] runtime=failed reason=user-probes failed={}",
+            "[JSR-PIXEL6A] runtime=failed reason=user-probes failed={}", // JASPER-HARDCODE-REVIEW: issue=33 source=user-probe-counter reason=diagnostic-marker-only
             user_failed
         );
         arch::exit_emulator(ExitStatus::Failure);
     }
 
     kprintln!(
-        "[JSR-PIXEL6A] runtime=complete cpus=8 ring3=true syscall=true user_pointers=true user_failed=0 stages={:#x} objects={} tasks={} frames={} heap={}",
+        "[JSR-PIXEL6A] runtime=complete cpus=8 ring3=true syscall=true user_pointers=true user_failed=0 stages={:#x} objects={} tasks={} frames={} heap={}", // JASPER-HARDCODE-REVIEW: issue=33 source=admitted-smp-report reason=literal-8-is-success-policy-checked-against-runtime-report
         ctx.done_mask(),
         capacity.map(|value| value.objects).unwrap_or(0),
         capacity.map(|value| value.tasks).unwrap_or(0),
