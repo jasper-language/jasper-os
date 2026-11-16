@@ -655,14 +655,18 @@ pub mod device {
         }
         let online = sched::online_cpus();
         let cands = set.intersect(online);
-        let mut r = ROUTING.lock();
-        let target = r.target[line]
-            .filter(|&c| cands.contains(c))
-            .or_else(|| cands.iter().next())
-            .ok_or(IrqError::Offline)?;
-        if r.target[line] != Some(target) {
+        let (target, reroute) = {
+            let r = ROUTING.lock();
+            let target = r.target[line]
+                .filter(|&c| cands.contains(c))
+                .or_else(|| cands.iter().next())
+                .ok_or(IrqError::Offline)?;
+            (target, r.target[line] != Some(target))
+        };
+        if reroute {
             arch::device_irq_route(line, target)?;
         }
+        let mut r = ROUTING.lock();
         r.allowed[line] = set;
         r.target[line] = Some(target);
         Ok(target)
@@ -681,14 +685,14 @@ pub mod device {
     /// Enable or disable a routed line.
     pub fn set_enabled(line: usize, on: bool) -> Result<(), IrqError> {
         check_line(line)?;
-        let mut r = ROUTING.lock();
-        if on && r.target[line].is_none() {
-            return Err(IrqError::Offline);
+        {
+            let mut r = ROUTING.lock();
+            if on && r.target[line].is_none() {
+                return Err(IrqError::Offline);
+            }
+            r.enabled[line] = on;
         }
-        if on {
-            r.enabled[line] = true;
-        } else {
-            r.enabled[line] = false;
+        if !on {
             let _ = arch::device_irq_self_trigger(line, false);
         }
         arch::device_irq_set_masked(line, !on);
@@ -716,8 +720,11 @@ pub mod device {
     /// Turn the device's continuous self-trigger on or off.
     pub fn set_self_trigger(line: usize, on: bool) -> Result<(), IrqError> {
         check_line(line)?;
-        if on && !ROUTING.lock().enabled[line] {
-            return Err(IrqError::Offline);
+        if on {
+            let enabled = ROUTING.lock().enabled[line];
+            if !enabled {
+                return Err(IrqError::Offline);
+            }
         }
         arch::device_irq_self_trigger(line, on)
     }
@@ -890,9 +897,9 @@ pub mod device {
             }
         }
         if !released_lines.is_empty() {
-            let enabled = ROUTING.lock();
             for &line in &released_lines {
-                if matches!(enabled.enabled.get(line), Some(true)) {
+                let enabled = ROUTING.lock().enabled.get(line).copied().unwrap_or(false);
+                if enabled {
                     arch::device_irq_set_masked(line, false);
                 }
             }
@@ -937,27 +944,34 @@ pub mod device {
         let mut out = Vec::new();
         out.try_reserve_exact(n).map_err(|_| IrqError::NoLine)?;
         out.resize(n, 0);
-        let mut r = ROUTING.lock();
-        for line in 0..n {
-            if r.enabled[line] {
-                let storage = LINES
-                    .get()
-                    .and_then(Option::as_ref)
-                    .ok_or(IrqError::NoLine)?;
-                lines.push(LineLoad {
-                    allowed: r.allowed[line],
-                    current: r.target[line],
-                    load: storage.window[line].swap(0, Ordering::Relaxed),
-                });
-                idx.push(line);
+        {
+            let r = ROUTING.lock();
+            for line in 0..n {
+                if r.enabled[line] {
+                    let storage = LINES
+                        .get()
+                        .and_then(Option::as_ref)
+                        .ok_or(IrqError::NoLine)?;
+                    lines.push(LineLoad {
+                        allowed: r.allowed[line],
+                        current: r.target[line],
+                        load: storage.window[line].swap(0, Ordering::Relaxed),
+                    });
+                    idx.push(line);
+                }
             }
         }
         out.truncate(lines.len());
         policy.assign(&lines, online, &[0; MAX_CPUS], &mut out)?;
+        let mut r = ROUTING.lock();
         let mut moved = 0;
         for i in 0..lines.len() {
             let line = idx[i];
-            if r.target[line] != Some(out[i]) && arch::device_irq_route(line, out[i]).is_ok() {
+            if r.enabled[line]
+                && r.allowed[line].contains(out[i])
+                && r.target[line] != Some(out[i])
+                && arch::device_irq_route(line, out[i]).is_ok()
+            {
                 r.target[line] = Some(out[i]);
                 moved += 1;
             }

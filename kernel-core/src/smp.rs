@@ -499,6 +499,14 @@ impl<'a> ShootdownBoards<'a> {
     pub fn is_idle(&self) -> bool {
         self.boards.iter().all(ShootdownBoard::is_idle)
     }
+
+    /// Number of initiator boards with a request currently in flight.
+    pub fn in_flight(&self) -> usize {
+        self.boards
+            .iter()
+            .filter(|board| !board.is_idle())
+            .count()
+    }
 }
 
 /// 公告板受锁保护的全部状态（一把锁，持锁期间不取其他锁）。

@@ -16,6 +16,7 @@ static FAILED: AtomicU32 = AtomicU32::new(0);
 static CHECKS: AtomicU32 = AtomicU32::new(0);
 static PEX6_READY: AtomicU32 = AtomicU32::new(0);
 static PEX6_GO: AtomicU32 = AtomicU32::new(0);
+static PEX6_POSTED: AtomicU32 = AtomicU32::new(0);
 static PEX6_DONE: AtomicU32 = AtomicU32::new(0);
 static PEX6_FAILED: AtomicU32 = AtomicU32::new(0);
 
@@ -134,8 +135,27 @@ fn parallel_shootdown_worker() {
     while PEX6_GO.load(Ordering::Acquire) == 0 {
         core::hint::spin_loop();
     }
-    let initiators = super::online_set().without(0);
-    if super::tlb_shootdown_on(initiators, TLB_VA, 1).is_err() {
+    let mut target = kernel_core::smp::CpuSet::EMPTY;
+    target.insert(0);
+    let me = arch::cpu_index();
+    let targets = target.intersect(super::online_set()).without(me);
+    let posted = super::admitted_shootdown_boards().is_some_and(|boards| {
+        match boards.begin(me, targets, TLB_VA, 1) {
+            Ok(generation) => {
+                for cpu in targets.iter() {
+                    if arch::send_ipi(cpu, IpiKind::TlbShootdown).is_err() {
+                        boards.abandon(me, generation);
+                        return false;
+                    }
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    });
+    if posted {
+        PEX6_POSTED.fetch_add(1, Ordering::AcqRel);
+    } else {
         PEX6_FAILED.fetch_add(1, Ordering::AcqRel);
     }
     PEX6_DONE.fetch_add(1, Ordering::AcqRel);
@@ -152,6 +172,7 @@ fn parallel_shootdown(online: usize) {
     super::reset_shootdown_stats();
     PEX6_READY.store(0, Ordering::Release);
     PEX6_GO.store(0, Ordering::Release);
+    PEX6_POSTED.store(0, Ordering::Release);
     PEX6_DONE.store(0, Ordering::Release);
     PEX6_FAILED.store(0, Ordering::Release);
     let mut spawned = 0usize;
@@ -177,17 +198,29 @@ fn parallel_shootdown(online: usize) {
     if all_ready {
         PEX6_GO.store(1, Ordering::Release);
     }
-    sched::run();
+    let (all_posted, peak) = arch::without_irq(|| {
+        let posted = all_ready
+            && spin_until(|| {
+                PEX6_POSTED.load(Ordering::Acquire) as usize == online - 1
+            });
+        let peak = super::admitted_shootdown_boards()
+            .map_or(0, |boards| boards.in_flight());
+        (posted, peak)
+    });
+    let all_completed = all_posted
+        && spin_until(|| {
+            super::service_shootdown(0);
+            super::shootdown_idle()
+        });
     let completed = PEX6_DONE.load(Ordering::Acquire) as usize;
     let request_failures = PEX6_FAILED.load(Ordering::Acquire);
-    let stats = super::shootdown_stats();
-    let parallel = stats.peak > 1;
+    let parallel = peak > 1;
     check(
         spawned == online - 1
-            && all_ready
+            && all_completed
             && completed == online - 1
             && request_failures == 0
-            && stats.requests >= (online - 1) as u32
+            && PEX6_POSTED.load(Ordering::Acquire) as usize == online - 1
             && parallel
             && super::shootdown_idle(),
         "并行 TLB 击落未全部完成、未观察到并发或公告板未清空",
@@ -198,8 +231,8 @@ fn parallel_shootdown(online: usize) {
         spawned,
         completed,
         request_failures,
-        stats.requests,
-        stats.peak,
+        PEX6_POSTED.load(Ordering::Acquire),
+        peak,
         parallel,
         super::shootdown_idle()
     );
