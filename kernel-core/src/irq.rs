@@ -400,6 +400,19 @@ impl CoreQuota {
         &self.released_lines
     }
 
+    /// Move the released-line list out so callbacks can run after the quota
+    /// guard is dropped without allocating in an interrupt-context lock nest.
+    pub fn take_released_lines(&mut self) -> Vec<usize> {
+        core::mem::take(&mut self.released_lines)
+    }
+
+    /// Return emptied storage to the quota after all callbacks completed.
+    pub fn restore_released_lines(&mut self, mut lines: Vec<usize>) {
+        debug_assert!(lines.is_empty());
+        lines.clear();
+        self.released_lines = lines;
+    }
+
     /// 当前被节流的 MSI 槽位集合。
     /// MSI slots currently throttled on this processor.
     pub const fn msi_throttled(&self) -> SlotSet {

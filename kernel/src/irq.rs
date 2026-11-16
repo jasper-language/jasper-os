@@ -831,24 +831,28 @@ pub mod device {
     /// 并对被节流的 MSI 槽位调用其解除屏蔽动作（槽位已解除登记的跳过）。
     pub(super) fn on_cpu_tick() {
         let cpu = arch::cpu_index();
-        let mut quota = QUOTAS[cpu].lock();
-        let Released { msi } = quota.on_tick(arch::cycles());
-        if !msi.is_empty() {
-            for slot in msi.iter() {
-                if let Some((ops, ctx)) = msi_mask_ops(cpu, slot) {
-                    (ops.unmask)(cpu, slot as u8, ctx);
+        let (msi, mut released_lines) = {
+            let mut quota = QUOTAS[cpu].lock();
+            let Released { msi } = quota.on_tick(arch::cycles());
+            (msi, quota.take_released_lines())
+        };
+        for slot in msi.iter() {
+            if let Some((ops, ctx)) = msi_mask_ops(cpu, slot) {
+                (ops.unmask)(cpu, slot as u8, ctx);
+            }
+        }
+        if !released_lines.is_empty() {
+            let enabled = ROUTING.lock();
+            for &line in &released_lines {
+                if matches!(enabled.enabled.get(line), Some(true)) {
+                    arch::device_irq_set_masked(line, false);
                 }
             }
         }
-        if quota.released_lines().is_empty() {
-            return;
-        }
-        let enabled = ROUTING.lock();
-        for &line in quota.released_lines() {
-            if matches!(enabled.enabled.get(line), Some(true)) {
-                arch::device_irq_set_masked(line, false);
-            }
-        }
+        released_lines.clear();
+        QUOTAS[cpu]
+            .lock()
+            .restore_released_lines(released_lines);
     }
 
     /// 本处理器是否还需要周期 tick 来补充设备中断预算（本 tick 处理过设备中断或有被节流的线）。
