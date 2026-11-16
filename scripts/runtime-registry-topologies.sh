@@ -85,7 +85,7 @@ if ! flock -w 900 9; then
     exit 75
 fi
 
-printf 'memory_mib\timage_sha256\tworkloads\tmembers\ttasks\tsandboxes\timages\tlayers\tvolumes\tbudget\n' \
+printf 'memory_mib\timage_sha256\tworkloads\tmembers\ttasks\tsandboxes\timages\tlayers\tvolumes\tbudget\tmemory_cap_capacity\tmemory_cap_budget\tprocess_slots\n' \
     >"$OUT/topologies.tsv"
 
 for memory_mib in $MEMORY_MIB; do
@@ -127,10 +127,12 @@ for memory_mib in $MEMORY_MIB; do
     grep -aqE '^\[JSR-WORKLOAD\] capacity workloads=[1-9][0-9]* members=[1-9][0-9]* tasks=[1-9][0-9]* budget=[1-9][0-9]* dynamic=true$' "$serial"
     grep -aqE '^\[JSR-SANDBOX\] capacity sandboxes=[1-9][0-9]* workloads=[1-9][0-9]* budget=[1-9][0-9]* dynamic=true$' "$serial"
     grep -aqE '^\[JSR-SANDBOX-STORAGE\] capacity images=[1-9][0-9]* layers=[1-9][0-9]* volumes=[1-9][0-9]* sandboxes=[1-9][0-9]* budget=[1-9][0-9]* dynamic=true$' "$serial"
+    grep -aqE '^\[JSR-PROC\] event=system\.process\.created id=0x[0-9a-f]+ name=runtime-registry-process memory_cap_capacity=[1-9][0-9]* memory_cap_budget=[1-9][0-9]* process_slots=[1-9][0-9]* dynamic=true$' "$serial"
 
     workload_line=$(grep -aE '^\[JSR-WORKLOAD\] capacity ' "$serial" | head -1)
     sandbox_line=$(grep -aE '^\[JSR-SANDBOX\] capacity ' "$serial" | head -1)
     storage_line=$(grep -aE '^\[JSR-SANDBOX-STORAGE\] capacity ' "$serial" | head -1)
+    process_line=$(grep -aE '^\[JSR-PROC\] event=system\.process\.created .*name=runtime-registry-process ' "$serial" | head -1)
 
     field() {
         local name="$1"
@@ -156,24 +158,33 @@ for memory_mib in $MEMORY_MIB; do
     layers=$(field layers "$storage_line")
     volumes=$(field volumes "$storage_line")
     storage_budget=$(field budget "$storage_line")
+    memory_cap_capacity=$(field memory_cap_capacity "$process_line")
+    memory_cap_budget=$(field memory_cap_budget "$process_line")
+    process_slots=$(field process_slots "$process_line")
     [ "$workload_budget" = "$storage_budget" ]
+    [ "$memory_cap_budget" = "$workload_budget" ]
 
     image_sha=$(sha256sum "$IMAGE" | awk '{ print $1 }')
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$memory_mib" "$image_sha" "$workloads" "$members" "$tasks" \
         "$sandboxes" "$images" "$layers" "$volumes" "$workload_budget" \
+        "$memory_cap_capacity" "$memory_cap_budget" "$process_slots" \
         >>"$OUT/topologies.tsv"
 done
 
 awk -F '\t' '
     NR == 2 {
         first_budget = $10
-        first_facts = $3 FS $4 FS $5 FS $6 FS $7 FS $8 FS $9
+        first_memory_cap = $11
+        first_facts = $3 FS $4 FS $5 FS $6 FS $7 FS $8 FS $9 FS $11 FS $12 FS $13
     }
     NR > 2 && $10 != first_budget {
         distinct_budget = 1
     }
-    NR > 2 && ($3 FS $4 FS $5 FS $6 FS $7 FS $8 FS $9) != first_facts {
+    NR > 2 && $11 != first_memory_cap {
+        distinct_memory_cap = 1
+    }
+    NR > 2 && ($3 FS $4 FS $5 FS $6 FS $7 FS $8 FS $9 FS $11 FS $12 FS $13) != first_facts {
         distinct_facts = 1
     }
     END {
@@ -187,6 +198,10 @@ awk -F '\t' '
         }
         if (!distinct_facts) {
             print "runtime-registry: registry capacities did not change; the policy ceiling was not exercised by any topology" > "/dev/stderr"
+            exit 1
+        }
+        if (!distinct_memory_cap) {
+            print "runtime-registry: memory capability capacity did not change across topologies" > "/dev/stderr"
             exit 1
         }
     }

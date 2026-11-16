@@ -276,6 +276,17 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
             if !sandbox_storage::init_registry(sandbox_capacity) {
                 return None;
             }
+            #[cfg(feature = "runtime-registry-topology-verify")]
+            {
+                let pid = proc::create(
+                    "runtime-registry-process",
+                    crate::syscall::SyscallSet::EMPTY,
+                )
+                .ok()?;
+                if !proc::exit_idle(pid, 0) || proc::reap(pid).is_none() {
+                    return None;
+                }
+            }
             ctx.capacity = Some(cap);
             Some(())
         }),
