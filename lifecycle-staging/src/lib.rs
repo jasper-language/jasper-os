@@ -27,7 +27,7 @@ use jasper_lifecycle_model::manifest_cbor::{
     ArtifactKind, VerifiedArtifact, VerifiedCborManifest, MAX_MANIFEST_CBOR_BYTES,
 };
 use jasper_lifecycle_model::transaction::{recover, TransactionError, TransactionRecord};
-use jasper_lifecycle_model::update::UpdateStage;
+use jasper_lifecycle_model::update::{TransitionError, UpdateEvent, UpdateMachine, UpdateStage};
 use sha2::{Digest, Sha256};
 
 const MANIFEST_FILE: &str = "manifest.cbor";
@@ -104,6 +104,154 @@ pub struct PreparedUpdate {
     pub staging: StagingReceipt,
     /// 持久 Prepared 交易记录。Durable Prepared transaction record.
     pub record: TransactionRecord,
+}
+
+/// 更新协调器在持久提交前持有的单一状态机。
+///
+/// Coordinator state machine before the durable slot switch. Staging completion
+/// is recorded as `Prepared`; it is not a commit or activation claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UpdateCoordinator {
+    machine: UpdateMachine,
+}
+
+/// Prepared update plus the coordinator state that produced it.
+#[derive(Debug)]
+pub struct CoordinatedPreparedUpdate {
+    /// Coordinator at `Prepared`.
+    pub coordinator: UpdateCoordinator,
+    /// Verified, authorized and durably staged update.
+    pub update: PreparedUpdate,
+}
+
+/// Coordinator failure.
+#[derive(Debug)]
+pub enum CoordinatorError {
+    /// The update state machine rejected the transition.
+    Transition(TransitionError),
+    /// Staging, authorization or dependency preflight failed.
+    Staging(StagingError),
+    /// Prepared transaction recovery failed or does not match the machine.
+    Transaction(TransactionError),
+    /// Recovered transaction and coordinator phase disagree.
+    InconsistentStage {
+        /// Required coordinator phase.
+        expected: UpdateStage,
+        /// Actual recovered phase.
+        actual: UpdateStage,
+    },
+}
+
+impl fmt::Display for CoordinatorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transition(error) => write!(formatter, "update transition failed: {error:?}"),
+            Self::Staging(error) => write!(formatter, "{error}"),
+            Self::Transaction(error) => write!(formatter, "prepared transaction failed: {error:?}"),
+            Self::InconsistentStage { expected, actual } => write!(
+                formatter,
+                "coordinator stage mismatch: expected {expected:?}, got {actual:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CoordinatorError {}
+
+impl UpdateCoordinator {
+    /// Create an idle coordinator.
+    pub const fn idle() -> Self {
+        Self {
+            machine: UpdateMachine::idle(),
+        }
+    }
+
+    /// Current authoritative update phase.
+    pub const fn stage(self) -> UpdateStage {
+        self.machine.stage()
+    }
+
+    /// Authorize, preflight and durably stage a verified manifest.
+    ///
+    /// The coordinator publishes `Prepared` only after every staging side effect
+    /// succeeds. A failure leaves the previous coordinator phase unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare(
+        &mut self,
+        manifest: VerifiedCborManifest,
+        manifest_bytes: &[u8],
+        grant: LocalInstallGrant,
+        now: u64,
+        installed_dependencies: &[String],
+        sources: &[ArtifactSource<'_>],
+        staging_root: &Path,
+        metadata_headroom: u64,
+    ) -> Result<PreparedUpdate, CoordinatorError> {
+        let mut next = self.machine;
+        next.apply(UpdateEvent::Discover)
+            .map_err(CoordinatorError::Transition)?;
+        next.apply(UpdateEvent::Verify)
+            .map_err(CoordinatorError::Transition)?;
+        next.apply(UpdateEvent::Prepare)
+            .map_err(CoordinatorError::Transition)?;
+        let update = prepare_update(
+            manifest,
+            manifest_bytes,
+            grant,
+            now,
+            installed_dependencies,
+            sources,
+            staging_root,
+            metadata_headroom,
+        )
+        .map_err(CoordinatorError::Staging)?;
+        if update.record.stage() != next.stage() {
+            return Err(CoordinatorError::InconsistentStage {
+                expected: next.stage(),
+                actual: update.record.stage(),
+            });
+        }
+        self.machine = next;
+        Ok(update)
+    }
+
+    /// Recover a coordinator from a durable Prepared transaction.
+    pub fn recover_prepared(
+        staging_root: &Path,
+        manifest_sha256: [u8; 32],
+    ) -> Result<Self, CoordinatorError> {
+        let record = load_prepared_transaction(staging_root, manifest_sha256)
+            .map_err(CoordinatorError::Staging)?;
+        let mut machine = UpdateMachine::idle();
+        machine
+            .apply(UpdateEvent::Discover)
+            .map_err(CoordinatorError::Transition)?;
+        machine
+            .apply(UpdateEvent::Verify)
+            .map_err(CoordinatorError::Transition)?;
+        machine
+            .apply(UpdateEvent::Prepare)
+            .map_err(CoordinatorError::Transition)?;
+        if record.stage() != machine.stage() {
+            return Err(CoordinatorError::InconsistentStage {
+                expected: machine.stage(),
+                actual: record.stage(),
+            });
+        }
+        Ok(Self { machine })
+    }
+
+    /// Cancel a prepared update before durable commit and remove its staging tree.
+    pub fn cancel_prepared(&mut self, staging_root: &Path) -> Result<(), CoordinatorError> {
+        let mut next = self.machine;
+        next.apply(UpdateEvent::Cancel)
+            .map_err(CoordinatorError::Transition)?;
+        fs::remove_dir_all(staging_root).map_err(|source| {
+            CoordinatorError::Staging(io_error("cancel prepared staging", staging_root, source))
+        })?;
+        self.machine = next;
+        Ok(())
+    }
 }
 
 /// 暂存失败原因。
@@ -994,6 +1142,56 @@ mod tests {
             fs::read(staging_root.join(ARTIFACT_DIR).join("kernel")).unwrap(),
             bytes
         );
+    }
+
+    #[test]
+    fn coordinator_prepares_recovers_and_cancels_before_commit() {
+        let temp = TestDir::new("coordinator");
+        let manifest_bytes = b"signed-coordinator-manifest";
+        let bytes = b"kernel-image";
+        let source_path = temp.path().join("kernel.source");
+        fs::write(&source_path, bytes).unwrap();
+        let mut manifest = manifest(
+            manifest_bytes,
+            vec![artifact(ArtifactKind::Kernel, "kernel", bytes)],
+        );
+        manifest.dependencies = vec![String::from("jasper.base")];
+        let grant = LocalInstallGrant {
+            locally_authenticated: true,
+            purpose: 1,
+            manifest_sha256: manifest.manifest.manifest_sha256,
+            profile: manifest.manifest.target_profile,
+            expires_at: 10,
+        };
+        let staging_root = temp.path().join("coordinator-staging");
+        let mut coordinator = UpdateCoordinator::idle();
+        let prepared = coordinator
+            .prepare(
+                manifest,
+                manifest_bytes,
+                grant,
+                9,
+                &[String::from("jasper.base")],
+                &[ArtifactSource {
+                    name: "kernel",
+                    path: &source_path,
+                }],
+                &staging_root,
+                4096,
+            )
+            .unwrap();
+        assert_eq!(coordinator.stage(), UpdateStage::Prepared);
+        assert_eq!(prepared.record.stage(), UpdateStage::Prepared);
+
+        let mut recovered = UpdateCoordinator::recover_prepared(
+            &staging_root,
+            prepared.manifest.manifest.manifest_sha256,
+        )
+        .unwrap();
+        assert_eq!(recovered, coordinator);
+        recovered.cancel_prepared(&staging_root).unwrap();
+        assert_eq!(recovered.stage(), UpdateStage::Aborted);
+        assert!(!staging_root.exists());
     }
 
     #[test]
