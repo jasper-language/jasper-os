@@ -6998,11 +6998,12 @@ fn create_process(
         }
     };
     kprintln!(
-        "[JSR-PROC] event=system.process.created id={:#x} name={} memory_cap_capacity={} memory_cap_budget={} process_slots={} dynamic=true",
+        "[JSR-PROC] event=system.process.created id={:#x} name={} memory_cap_capacity={} memory_cap_metadata_budget={} memory_budget={} process_slots={} dynamic=true",
         id.raw(),
         name,
         capability_plan.per_process,
         capability_plan.metadata_budget,
+        memory_budget,
         process_slots
     );
     Ok(id)

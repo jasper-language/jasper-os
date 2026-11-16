@@ -17,18 +17,29 @@ CPUS="${RUNTIME_REGISTRY_CPUS:-4-7}"
 SMP="${RUNTIME_REGISTRY_SMP:-1}"
 ACCEL="${RUNTIME_REGISTRY_ACCEL:-kvm}"
 CPU_MODEL="${RUNTIME_REGISTRY_CPU:-host}"
+ALLOW_VBOX="${RUNTIME_REGISTRY_ALLOW_VBOX:-0}"
+MIN_DISK_KIB="${RUNTIME_REGISTRY_MIN_DISK_KIB:-12582912}"
 
 mkdir -p "$OUT" "$TARGET"
 
 runtime_active() {
     local comm
+    local qemu=false
+    local vbox=false
     for comm in /proc/[0-9]*/comm; do
         [ -r "$comm" ] || continue
         IFS= read -r name <"$comm" 2>/dev/null || continue
         case "$name" in
-            qemu-system*|VBoxHeadless) return 0 ;;
+            qemu-system*) qemu=true ;;
+            VBoxHeadless) vbox=true ;;
         esac
     done
+    if [ "$vbox" = true ] && [ "$ACCEL" = tcg ] && [ "$ALLOW_VBOX" = 1 ]; then
+        vbox=false
+    fi
+    if [ "$qemu" = true ] || [ "$vbox" = true ]; then
+        return 0
+    fi
     return 1
 }
 
@@ -43,8 +54,8 @@ available_kib=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
     exit 75
 }
 disk_kib=$(df -Pk "$OUT" | awk 'NR == 2 { print $4 }')
-[ "${disk_kib:-0}" -ge 12582912 ] || {
-    echo "runtime-registry: less than 12 GiB workspace space available" >&2
+[ "${disk_kib:-0}" -ge "$MIN_DISK_KIB" ] || {
+    echo "runtime-registry: workspace below configured disk floor ($MIN_DISK_KIB KiB)" >&2
     exit 75
 }
 load1=$(awk '{ print $1 }' /proc/loadavg)
@@ -67,6 +78,10 @@ case "$ACCEL" in
         ;;
 esac
 
+if [ "$ACCEL" = tcg ] && [ "$CPU_MODEL" = host ]; then
+    CPU_MODEL=max
+fi
+
 env -u CARGO_TARGET_DIR "$ROOT/scripts/guarded-cargo.sh" \
     build --locked --release --target-dir "$TARGET" -p xtask \
     >"$OUT/xtask-build.log" 2>&1
@@ -85,7 +100,7 @@ if ! flock -w 900 9; then
     exit 75
 fi
 
-printf 'memory_mib\timage_sha256\tworkloads\tmembers\ttasks\tsandboxes\timages\tlayers\tvolumes\tbudget\tmemory_cap_capacity\tmemory_cap_budget\tprocess_slots\n' \
+printf 'memory_mib\timage_sha256\tworkloads\tmembers\ttasks\tsandboxes\timages\tlayers\tvolumes\tbudget\tmemory_cap_capacity\tmemory_cap_metadata_budget\tmemory_budget\tprocess_slots\n' \
     >"$OUT/topologies.tsv"
 
 for memory_mib in $MEMORY_MIB; do
@@ -124,10 +139,10 @@ for memory_mib in $MEMORY_MIB; do
     esac
     grep -aqE '^\[JSR-EXIT\] (success|timing-only)' "$serial"
     ! grep -aqE '^\[JSR-(PANIC|.*-FAIL)\]|KERNEL PANIC|panicked at' "$serial"
-    grep -aqE '^\[JSR-WORKLOAD\] capacity workloads=[1-9][0-9]* members=[1-9][0-9]* tasks=[1-9][0-9]* budget=[1-9][0-9]* dynamic=true$' "$serial"
-    grep -aqE '^\[JSR-SANDBOX\] capacity sandboxes=[1-9][0-9]* workloads=[1-9][0-9]* budget=[1-9][0-9]* dynamic=true$' "$serial"
-    grep -aqE '^\[JSR-SANDBOX-STORAGE\] capacity images=[1-9][0-9]* layers=[1-9][0-9]* volumes=[1-9][0-9]* sandboxes=[1-9][0-9]* budget=[1-9][0-9]* dynamic=true$' "$serial"
-    grep -aqE '^\[JSR-PROC\] event=system\.process\.created id=0x[0-9a-f]+ name=runtime-registry-process memory_cap_capacity=[1-9][0-9]* memory_cap_budget=[1-9][0-9]* process_slots=[1-9][0-9]* dynamic=true$' "$serial"
+    grep -aqE '^\[JSR-WORKLOAD\] capacity workloads=[1-9][0-9]* members=[1-9][0-9]* tasks=[1-9][0-9]* budget=[1-9][0-9]* dynamic=true' "$serial"
+    grep -aqE '^\[JSR-SANDBOX\] capacity sandboxes=[1-9][0-9]* workloads=[1-9][0-9]* budget=[1-9][0-9]* dynamic=true' "$serial"
+    grep -aqE '^\[JSR-SANDBOX-STORAGE\] capacity images=[1-9][0-9]* layers=[1-9][0-9]* volumes=[1-9][0-9]* sandboxes=[1-9][0-9]* budget=[1-9][0-9]* dynamic=true' "$serial"
+    grep -aqE '^\[JSR-PROC\] event=system\.process\.created id=0x[0-9a-f]+ name=runtime-registry-process memory_cap_capacity=[1-9][0-9]* memory_cap_metadata_budget=[1-9][0-9]* memory_budget=[1-9][0-9]* process_slots=[1-9][0-9]* dynamic=true' "$serial"
 
     workload_line=$(grep -aE '^\[JSR-WORKLOAD\] capacity ' "$serial" | head -1)
     sandbox_line=$(grep -aE '^\[JSR-SANDBOX\] capacity ' "$serial" | head -1)
@@ -159,16 +174,17 @@ for memory_mib in $MEMORY_MIB; do
     volumes=$(field volumes "$storage_line")
     storage_budget=$(field budget "$storage_line")
     memory_cap_capacity=$(field memory_cap_capacity "$process_line")
-    memory_cap_budget=$(field memory_cap_budget "$process_line")
+    memory_cap_metadata_budget=$(field memory_cap_metadata_budget "$process_line")
+    memory_budget=$(field memory_budget "$process_line")
     process_slots=$(field process_slots "$process_line")
     [ "$workload_budget" = "$storage_budget" ]
-    [ "$memory_cap_budget" = "$workload_budget" ]
+    [ "$memory_budget" = "$workload_budget" ]
 
     image_sha=$(sha256sum "$IMAGE" | awk '{ print $1 }')
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$memory_mib" "$image_sha" "$workloads" "$members" "$tasks" \
         "$sandboxes" "$images" "$layers" "$volumes" "$workload_budget" \
-        "$memory_cap_capacity" "$memory_cap_budget" "$process_slots" \
+        "$memory_cap_capacity" "$memory_cap_metadata_budget" "$memory_budget" "$process_slots" \
         >>"$OUT/topologies.tsv"
 done
 
@@ -176,7 +192,7 @@ awk -F '\t' '
     NR == 2 {
         first_budget = $10
         first_memory_cap = $11
-        first_facts = $3 FS $4 FS $5 FS $6 FS $7 FS $8 FS $9 FS $11 FS $12 FS $13
+        first_facts = $3 FS $4 FS $5 FS $6 FS $7 FS $8 FS $9 FS $11 FS $12 FS $13 FS $14
     }
     NR > 2 && $10 != first_budget {
         distinct_budget = 1
@@ -184,7 +200,7 @@ awk -F '\t' '
     NR > 2 && $11 != first_memory_cap {
         distinct_memory_cap = 1
     }
-    NR > 2 && ($3 FS $4 FS $5 FS $6 FS $7 FS $8 FS $9 FS $11 FS $12 FS $13) != first_facts {
+    NR > 2 && ($3 FS $4 FS $5 FS $6 FS $7 FS $8 FS $9 FS $11 FS $12 FS $13 FS $14) != first_facts {
         distinct_facts = 1
     }
     END {

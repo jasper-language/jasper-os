@@ -276,17 +276,6 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
             if !sandbox_storage::init_registry(sandbox_capacity) {
                 return None;
             }
-            #[cfg(feature = "runtime-registry-topology-verify")]
-            {
-                let pid = proc::create(
-                    "runtime-registry-process",
-                    crate::syscall::SyscallSet::EMPTY,
-                )
-                .ok()?;
-                if !proc::exit_idle(pid, 0) || proc::reap(pid).is_none() {
-                    return None;
-                }
-            }
             ctx.capacity = Some(cap);
             Some(())
         }),
@@ -330,7 +319,20 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         }),
         // 内核地址空间：准备失败时不能创建任何独立地址空间。
         Stage::Space => stage(ctx, s, |_| match mm::space::init() {
-            Ok(_) => Some(()),
+            Ok(_) => {
+                #[cfg(feature = "runtime-registry-topology-verify")]
+                {
+                    let pid = proc::create(
+                        "runtime-registry-process",
+                        crate::syscall::SyscallSet::EMPTY,
+                    )
+                    .ok()?;
+                    if !proc::exit_idle(pid, 0) || proc::reap(pid).is_none() {
+                        return None;
+                    }
+                }
+                Some(())
+            }
             Err(e) => {
                 kprintln!("[JSR-SPACE] kernel space not ready: {:?}", e);
                 None

@@ -964,10 +964,16 @@ mod dedicated {
     pub const PLAN: &[&[Step]] = &[&[
         st(Stage::Console),
         st(Stage::Platform),
+        st(Stage::Timer),
         st(Stage::Frames),
         st(Stage::KernelMap),
         st(Stage::Heap),
         st(Stage::Capacity),
+        st(Stage::Devices),
+        st(Stage::Profile),
+        st(Stage::Assembly),
+        st(Stage::SchedMode),
+        st(Stage::Space),
         PlanItem::Finish(finish),
     ]];
 }
