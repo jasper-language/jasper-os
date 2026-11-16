@@ -447,6 +447,28 @@ impl UpdateCoordinator {
         self.machine = machine;
         Ok(())
     }
+
+    /// Finalize a health-confirmed update without deleting its audit journal.
+    pub fn finalize_confirmed(&mut self, staging_root: &Path) -> Result<(), CoordinatorError> {
+        if self.stage() != UpdateStage::Confirmed {
+            return Err(CoordinatorError::InconsistentStage {
+                expected: UpdateStage::Confirmed,
+                actual: self.stage(),
+            });
+        }
+        let mut machine = self.machine;
+        machine
+            .apply(UpdateEvent::Finalize)
+            .map_err(CoordinatorError::Transition)?;
+        let mut record =
+            load_transaction_record(staging_root).map_err(CoordinatorError::Staging)?;
+        record
+            .apply(UpdateEvent::Finalize)
+            .map_err(CoordinatorError::Transaction)?;
+        persist_transaction_record(staging_root, record).map_err(CoordinatorError::Staging)?;
+        self.machine = machine;
+        Ok(())
+    }
 }
 
 /// 暂存失败原因。
@@ -1573,6 +1595,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fully_repaired.stage(), UpdateStage::Confirmed);
+        let mut completed = fully_repaired;
+        completed.finalize_confirmed(&staging_root).unwrap();
+        assert_eq!(completed.stage(), UpdateStage::Complete);
+        assert_eq!(
+            load_transaction_record(&staging_root).unwrap().stage(),
+            UpdateStage::Complete
+        );
     }
 
     #[test]
