@@ -330,6 +330,16 @@ impl VirtioPci {
         self.setup_queue_inner(queue, None)
     }
 
+    /// Read one device queue's advertised maximum size without enabling it.
+    pub fn device_queue_size(&self, queue_index: u16) -> Option<u16> {
+        // SAFETY: both registers are inside the mapped common configuration window.
+        unsafe {
+            self.common.write16(COMMON_QUEUE_SELECT, queue_index);
+            let size = self.common.read16(COMMON_QUEUE_SIZE);
+            (size != 0xFFFF).then_some(size)
+        }
+    }
+
     fn setup_queue_inner(
         &self,
         queue: &mut Queue,

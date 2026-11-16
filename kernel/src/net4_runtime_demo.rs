@@ -14,14 +14,15 @@ use kernel_core::net4_runtime::{
 };
 use kernel_core::net4_service::{WireGuardEmit, WireGuardReceive, WireGuardService};
 use kernel_core::virtio_net::{
-    NetPolicy, TransmitOutcome, VirtioNetBackend, VirtioNetFacts, FEATURE_MAC, FEATURE_MTU,
-    FEATURE_STATUS,
+    NetCapacity, NetPolicy, TransmitOutcome, VirtioNetBackend, VirtioNetFacts, FEATURE_MAC,
+    FEATURE_MTU, FEATURE_STATUS,
 };
 use kernel_core::wireguard::{testing::DeterministicRng, Config, Now, StaticSecret};
 
-use crate::kprintln;
+use crate::{kprintln, pci, sched, virtio};
 
 static FAILED: AtomicU32 = AtomicU32::new(0);
+const FEATURE_MQ: u32 = 1 << 22;
 
 pub fn failed() -> u32 {
     FAILED.load(Ordering::Relaxed)
@@ -34,7 +35,88 @@ fn check(ok: bool, stage: &'static str) {
     }
 }
 
-fn udp_frame(payload: &[u8]) -> [u8; 46] {
+struct DiscoveredTopology {
+    facts: VirtioNetFacts,
+    policy: NetPolicy,
+    queue_pairs: u16,
+}
+
+fn config_u16(device: &virtio::VirtioPci, offset: u64) -> Option<u16> {
+    let low = u16::from(device.read_device_config8(offset)?);
+    let high = u16::from(device.read_device_config8(offset + 1)?);
+    Some(low | high << 8)
+}
+
+fn discover_topology() -> Result<DiscoveredTopology, &'static str> {
+    let device = pci::table()
+        .devices()
+        .find(|device| {
+            device.header.vendor == virtio::VIRTIO_VENDOR
+                && virtio::is_net_device(device.header.device)
+        })
+        .ok_or("missing_virtio_net")?;
+    let transport = virtio::VirtioPci::new(device).map_err(|_| "transport")?;
+    transport.reset().map_err(|_| "reset")?;
+    let features = transport.device_features(0);
+    let negotiated = features & (FEATURE_MAC | FEATURE_MTU | FEATURE_STATUS);
+    transport
+        .negotiate_features(negotiated)
+        .map_err(|_| "negotiate")?;
+    let mtu = config_u16(&transport, 10).ok_or("mtu_config")?;
+    let queue_pairs = if features & FEATURE_MQ != 0 {
+        config_u16(&transport, 8).ok_or("mq_config")?
+    } else {
+        1
+    };
+    let device_queue_size = transport.device_queue_size(0).ok_or("queue_size")?;
+    let mut queue = virtio::Queue::new().map_err(|_| "queue")?;
+    transport
+        .setup_queue_polling(&mut queue)
+        .map_err(|_| "setup_queue")?;
+    let driver_queue_size = queue.size();
+    let facts = VirtioNetFacts::discover(features, Some(mtu), device_queue_size, true)
+        .map_err(|_| "facts")?;
+
+    let max_frame_bytes = usize::from(mtu).saturating_add(14);
+    let memory_budget = usize::try_from(crate::mm::heap::limit() / 64).unwrap_or(0);
+    let tasks = sched::capacity().max(1);
+    let per_socket = max_frame_bytes.saturating_mul(4).max(1);
+    let udp_sockets = tasks.min((memory_budget / per_socket).max(1));
+    let per_datagram = max_frame_bytes.saturating_mul(udp_sockets).max(1);
+    let udp_queue_depth = usize::from(device_queue_size)
+        .min((memory_budget / per_datagram).max(1))
+        .max(1);
+    let policy = NetPolicy {
+        max_frame_bytes,
+        rx_queue_limit: usize::from(device_queue_size),
+        rx_bytes_budget: max_frame_bytes.saturating_mul(usize::from(device_queue_size)),
+        udp_sockets,
+        udp_queue_depth,
+    };
+    let capacity = NetCapacity::admit(facts, policy).map_err(|_| "capacity")?;
+    let _ = transport.reset();
+    drop(queue);
+    kprintln!(
+        "[JSR-NET-TOPOLOGY] bdf=0x{:06x} mtu={} queue_pairs={} device_queue={} driver_queue={} features=0x{:08x} max_frame={} udp_sockets={} udp_queue={} max_datagram={} source=hardware",
+        kernel_core::device::pack_bdf(device.bdf),
+        facts.mtu,
+        queue_pairs,
+        facts.queue_size,
+        driver_queue_size,
+        facts.features,
+        capacity.max_frame_bytes,
+        capacity.udp.max_sockets,
+        capacity.udp.queue_depth,
+        capacity.udp.max_datagram_bytes
+    );
+    Ok(DiscoveredTopology {
+        facts,
+        policy,
+        queue_pairs,
+    })
+}
+
+fn udp_frame(destination_port: u16, payload: &[u8]) -> [u8; 46] {
     let mut frame = [0u8; 46];
     frame[..6].copy_from_slice(&[2, 0, 0, 0, 0, 1]);
     frame[6..12].copy_from_slice(&[2, 0, 0, 0, 0, 2]);
@@ -52,7 +134,7 @@ fn udp_frame(payload: &[u8]) -> [u8; 46] {
     ip[10..12].copy_from_slice(&ip_sum.to_be_bytes());
     let udp = &mut ip[20..];
     udp[0..2].copy_from_slice(&49152u16.to_be_bytes());
-    udp[2..4].copy_from_slice(&4433u16.to_be_bytes());
+    udp[2..4].copy_from_slice(&destination_port.to_be_bytes());
     udp[4..6].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
     udp[8..].copy_from_slice(payload);
     let udp_sum = kernel_core::net1b::ipv4_transport_checksum(
@@ -164,40 +246,36 @@ fn verify_wireguard_service() -> bool {
 
 pub fn run() {
     let before = crate::baseline::baseline();
-    let Ok(facts) = VirtioNetFacts::discover(
-        FEATURE_MAC | FEATURE_MTU | FEATURE_STATUS,
-        Some(1500),
-        16,
-        true,
-    ) else {
-        check(false, "net_facts");
+    let Ok(topology) = discover_topology() else {
+        check(false, "net_topology");
         return;
     };
     let Ok(mut backend) = VirtioNetBackend::admit(
         [2, 0, 0, 0, 0, 1],
         [10, 0, 2, 1],
-        facts,
-        NetPolicy {
-            max_frame_bytes: 4096,
-            rx_queue_limit: 8,
-            rx_bytes_budget: 64 * 1024,
-            udp_sockets: 2,
-            udp_queue_depth: 4,
-        },
+        topology.facts,
+        topology.policy,
     ) else {
         check(false, "net_admission");
         return;
     };
-    let first_handle = backend.enable_udp_service(4433);
-    check(first_handle.is_ok(), "bind");
-    let second_handle = backend.enable_udp_service(4434);
-    check(second_handle.is_ok(), "bind_second");
+    let socket_count = backend.capacity().udp.max_sockets;
+    let mut handles = alloc::vec::Vec::new();
+    for index in 0..socket_count {
+        let Ok(handle) = backend.enable_udp_service(4400 + index as u16) else {
+            check(false, "bind");
+            break;
+        };
+        handles.push(handle);
+    }
+    check(handles.len() == socket_count, "socket_budget");
     check(
-        backend.enable_udp_service(4435) == Err(UdpRuntimeError::Capacity),
+        backend.enable_udp_service(4000) == Err(UdpRuntimeError::Capacity),
         "service_budget",
     );
+    let first_handle = handles.first().copied();
 
-    let request = udp_frame(b"quic");
+    let request = udp_frame(4400, b"quic");
     check(
         backend.transmit(&request) == Ok(TransmitOutcome::UdpEchoReply),
         "receive",
@@ -215,7 +293,7 @@ pub fn run() {
         };
         ip.source == [10, 0, 2, 1]
             && ip.destination == [10, 0, 2, 15]
-            && udp.source_port == 4433
+            && udp.source_port == 4400
             && udp.destination_port == 49152
             && udp.payload == b"quic"
     });
@@ -260,7 +338,7 @@ pub fn run() {
     let hosted_wireguard = verify_wireguard_service();
     check(hosted_wireguard, "hosted_wireguard");
 
-    let mut malformed = udp_frame(b"quic");
+    let mut malformed = udp_frame(4400, b"quic");
     malformed[40] ^= 0xff;
     check(
         backend.transmit(&malformed) == Err(kernel_core::virtio_net::NetError::MalformedChecksum),
@@ -271,7 +349,7 @@ pub fn run() {
     let old_generation = first_handle.map(|handle| handle.generation()).unwrap_or(0);
     backend.reset();
     check(backend.udp_stats().active_sockets == 0, "reset_revoke");
-    let replacement = backend.enable_udp_service(4433);
+    let replacement = backend.enable_udp_service(4400);
     check(
         replacement.is_ok_and(|handle| handle.generation() > old_generation),
         "generation",
@@ -292,5 +370,12 @@ pub fn run() {
         capacity.udp.max_datagram_bytes,
         resources,
         failed()
+    );
+    kprintln!(
+        "[JSR-NET4-TOPOLOGY] mtu={} queue_pairs={} device_queue={} advertised_rx_queue={} source=hardware",
+        capacity.mtu,
+        topology.queue_pairs,
+        topology.facts.queue_size,
+        capacity.rx_queue_depth
     );
 }

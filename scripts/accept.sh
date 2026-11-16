@@ -420,7 +420,7 @@ boot_qemu() {
     echo "  $name：撞时限且未进内核，重跑一次"
   done
 }
-VIRTIO_ARGS=(-device virtio-rng-pci -device virtio-net-pci,netdev=n0 -netdev user,id=n0 \
+VIRTIO_ARGS=(-device virtio-rng-pci -device virtio-net-pci,netdev=n0,host_mtu=1500,mq=on,vectors=10,rx_queue_size=256 -netdev user,id=n0 \
   -device virtio-blk-pci,drive=d1 -drive if=none,id=d1,file="$BLANK",format=raw,discard=unmap)
 if [ "$BUILD_RC" -eq 0 ]; then
   echo "== QEMU 真实启动 =="
@@ -2950,9 +2950,10 @@ check_net3() {
 }
 
 check_net4runtime() {
-  if has '^\[JSR-NET4-RUNTIME\] wire=true udp=true socket=true quota=true generation=true echo=true service=true wireguard=true reset=true resources=true failed=0' \
+  if has '^\[JSR-NET4-RUNTIME\] wire=true udp=true socket=true quota=true generation=true echo=true service=true wireguard=true reset=true .*resources=true failed=0' \
+     && has '^\[JSR-NET4-TOPOLOGY\] mtu=[1-9][0-9]* queue_pairs=[1-9][0-9]* device_queue=[1-9][0-9]* advertised_rx_queue=[1-9][0-9]* source=hardware' \
      && ! has '^\[JSR-NET4-RUNTIME-FAIL\]'; then
-    record NET-4-RUNTIME PASS "真实 QEMU 中以太网/IPv4/UDP 帧经过 virtio-net、Jasper socket、配额、世代和回送路径；成熟 WireGuard 服务在 Jasper UDP runtime 上完成握手、加密传输与关闭回收"
+    record NET-4-RUNTIME PASS "真实 QEMU 中 virtio-net 的 MTU、设备队列深度与 feature 协商结果进入容量准入；以太网/IPv4/UDP 帧经过 Jasper socket、配额、世代和回送路径，WireGuard 服务完成握手、传输与回收"
   else
     record NET-4-RUNTIME FAIL "缺少真实 UDP 帧、socket 生命周期、mature WireGuard 服务路径或资源回收证据"
   fi
