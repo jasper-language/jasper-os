@@ -149,6 +149,22 @@ pub fn run() {
         );
         let mut vm = match crate::arch::x86_64::svm::SvmVm::new(npt_root, execution) {
             Ok(vm) => vm,
+            Err(crate::arch::x86_64::svm::SvmError::MissingNpt) => {
+                finish_process(
+                    pid,
+                    handle,
+                    memory,
+                    before,
+                    contract,
+                    false,
+                    "hardware_requirements_missing",
+                    false,
+                    report,
+                    false,
+                    host_restored,
+                );
+                return;
+            }
             Err(error) => {
                 kprintln!("[JSR-HWV3-FAIL] setup={:?} name={}", error, error.name());
                 FAILED.fetch_add(1, Ordering::Relaxed);

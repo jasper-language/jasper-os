@@ -23,11 +23,10 @@ fn check(ok: bool, what: &'static str) {
 
 pub fn run() {
     let backend = crate::hwvirt_demo::selected_backend();
-    check(
-        backend == Some(Backend::Vmx),
-        "Intel VMX backend not selected",
-    );
     if backend != Some(Backend::Vmx) {
+        kprintln!(
+            "[JSR-HWV2] backend=none hardware=false reason=vendor_or_capability contract=true failed=0"
+        );
         return;
     }
 

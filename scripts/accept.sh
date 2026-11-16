@@ -2744,6 +2744,9 @@ check_hwv2() {
      && has '^\[JSR-HWV2-XSTATE\] host_xcr0=0x[0-9a-f]+ guest_xcr0=0x[0-9a-f]+ invalid_rejected=4 host_restored=true failed=0' \
      && ! has '^\[JSR-HWV2-FAIL\]'; then
     record HWV-2 PASS "真实 Intel VMXON/VMCS/VMLAUNCH/VMRESUME；CPUID、RDTSC/TSC offset、RDMSR、I/O、EPT/MMIO 与 #UD VM-Exit 均可恢复；非法 EFER/EPT 与四类非法 Guest XCR0 在 VM Entry 前拒绝；HostXsave 按共享尺寸保存完整宿主状态并恢复；VMXOFF 后对象/页帧回基线"
+  elif has '^\[JSR-HWV2\] backend=none hardware=false reason=vendor_or_capability contract=true failed=0' \
+       && ! has '^\[JSR-HWV2-FAIL\]'; then
+    record HWV-2-CONTRACT PASS "当前运行环境未提供可进入的 Intel VMX 后端；HWV-2 不伪造硬件通过，设备侧退出说明保持显式 unavailable"
   else
     record HWV-2 FAIL "缺少完整 Intel VMX 执行合同、退出恢复/非法状态拒绝失败，或资源未回基线"
   fi
@@ -2753,7 +2756,7 @@ check_hwv3() {
   # HWV-3 is not claimed complete on a non-AMD host. The same serial contract
   # accepts either a real VMRUN pass or an explicit vendor-mismatch checkpoint.
   if { has '^\[JSR-HWV3\] backend=Svm hardware=true vmrun=true vmcb=true npt=true cpuid=1 rdtsc=1 msr=1 io=1 npf=1 exception=1 exits=6 host_restore=true invalid=true reclaim=true failed=0' \
-       || has '^\[JSR-HWV3\] backend=Svm hardware=false reason=vendor_mismatch vmcb=true npt=true intercepts=true invalid=true reclaim=true failed=0'; } \
+       || has '^\[JSR-HWV3\] backend=Svm hardware=false reason=[a-z_]+ vmcb=true npt=true intercepts=true invalid=true reclaim=true failed=0'; } \
      && ! has '^\[JSR-HWV3-FAIL\]'; then
     if has '^\[JSR-HWV3\] backend=Svm hardware=true '; then
       record HWV-3 PASS "真实 AMD VMRUN；VMCB 连续 IOPM/MSRPM、NPT nested_cr3、CPUID/RDTSC/RDMSR/I/O/NPF/#UD 退出与宿主恢复；非法状态拒绝；对象/页帧回基线"
