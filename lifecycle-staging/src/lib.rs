@@ -21,6 +21,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use jasper_lifecycle_model::boot::{BootControlError, Candidate, ControlBlock, Slot};
 use jasper_lifecycle_model::manifest::{authorize_install, LocalInstallGrant, ManifestError};
@@ -1007,6 +1008,12 @@ fn io_error(operation: &'static str, path: &Path, source: io::Error) -> StagingE
         path: path.to_path_buf(),
         source,
     }
+}
+
+fn now_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos())
 }
 
 #[cfg(test)]
