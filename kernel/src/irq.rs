@@ -295,8 +295,10 @@ pub fn msi_bind(cpu: usize, vector: u8, handler: Option<MsiHandler>) -> Result<(
     if vector as usize >= MSI_SLOTS {
         return Err(MsiError::OutOfRange);
     }
-    MSI_HANDLERS[cpu][vector as usize]
-        .store(handler.map(|h| h as usize).unwrap_or(0), Ordering::Release);
+    MSI_HANDLERS[cpu][vector as usize].store(
+        handler.map_or(0, |handler| handler as usize),
+        Ordering::Release,
+    );
     Ok(())
 }
 
@@ -355,8 +357,7 @@ pub fn msi_count(cpu: usize, vector: u8) -> u32 {
 pub fn msi_spurious(cpu: usize) -> u32 {
     MSI_SPURIOUS
         .get(cpu)
-        .map(|c| c.load(Ordering::Relaxed))
-        .unwrap_or(0)
+        .map_or(0, |count| count.load(Ordering::Relaxed))
 }
 
 /// 清零伪 MSI 计数，以及**没有登记处理函数**的槽位的 MSI 计数。

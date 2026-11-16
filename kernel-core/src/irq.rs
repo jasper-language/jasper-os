@@ -85,7 +85,7 @@ pub struct QuotaParams {
 impl QuotaParams {
     /// 默认：四分之一的处理器时间、每 tick 至多 64 次。
     /// Default: a quarter of each tick, at most 64 interrupts per tick.
-    pub const DEFAULT: QuotaParams = QuotaParams {
+    pub const DEFAULT: QuotaParams = QuotaParams { // JASPER-HARDCODE-REVIEW: issue=33 source=irq-policy reason=explicit-safety-policy-not-hardware-capacity
         permille: 250,
         max_per_tick: 64,
     };
@@ -500,7 +500,7 @@ pub struct Spread {
 impl Spread {
     /// 默认迟滞：该线负载的四分之一。
     /// Default hysteresis: a quarter of the line's own load.
-    pub const DEFAULT: Spread = Spread {
+    pub const DEFAULT: Spread = Spread { // JASPER-HARDCODE-REVIEW: issue=33 source=scheduling-policy reason=hysteresis-is-explicit-runtime-policy
         hysteresis_permille: 250,
     };
 }
@@ -578,7 +578,7 @@ impl AffinityPolicy for Keep {
                 .current
                 .filter(|&c| cands.contains(c))
                 .or_else(|| cands.iter().next())
-                .unwrap_or(0);
+                .ok_or(IrqError::Offline)?;
         }
         Ok(())
     }
