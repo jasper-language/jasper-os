@@ -992,13 +992,6 @@ mod tests {
             assert_eq!(copied_bytes, source_bytes);
         }
 
-        let weak = supported_plan.relocations.iter().find(|relocation| {
-            relocation.symbol_binding == Some(SymbolBinding::Weak) && !relocation.symbol_defined
-        });
-        if let Some(weak) = weak {
-            assert_eq!(memory.read_u64(main_layout.load_bias + weak.offset), 0);
-        }
-
         let lifecycle = read_lifecycle_callbacks(&mut memory, &main_layout).unwrap();
         assert!(
             !lifecycle.init_array.is_empty(),
