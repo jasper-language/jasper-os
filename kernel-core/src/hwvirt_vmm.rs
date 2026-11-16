@@ -15,8 +15,23 @@ pub const VMM_ABI_BYTES: usize = 48;
 pub const VM_EXIT_RECORD_BYTES: usize = 40;
 /// User-visible control-page magic shared by acceptance and the service.
 pub const VMM_CONTROL_MAGIC: u64 = 0x4857_5635_564d_4d31;
-/// A fixed-size exit mailbox has eight slots in ABI version 1.
-pub const VMM_EXIT_SLOTS: usize = 8;
+/// Versioned VMM control-page byte length.
+pub const VMM_CONTROL_BYTES: usize = 4096;
+/// Byte offset of the first VM-exit record in the control page.
+pub const VMM_EXIT_RECORDS_OFFSET: usize = 64;
+
+/// Number of exit records that fit after the versioned control header.
+pub const fn exit_slots_for_control_bytes(bytes: usize) -> Option<u16> {
+    let Some(records) = bytes.checked_sub(VMM_EXIT_RECORDS_OFFSET) else {
+        return None;
+    };
+    let slots = records / VM_EXIT_RECORD_BYTES;
+    if slots == 0 || slots > u16::MAX as usize {
+        None
+    } else {
+        Some(slots as u16)
+    }
+}
 
 /// Service capabilities advertised by the VMM ABI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,6 +111,7 @@ impl VmmAbi {
         if generation == 0 || max_vms == 0 || max_vcpus == 0 || max_guest_pages == 0 {
             return None;
         }
+        let exit_slots = exit_slots_for_control_bytes(VMM_CONTROL_BYTES)?;
         Some(Self {
             version: VMM_ABI_VERSION,
             bytes: VMM_ABI_BYTES as u16,
@@ -108,7 +124,7 @@ impl VmmAbi {
             max_vcpus,
             max_guest_pages,
             exit_record_bytes: VM_EXIT_RECORD_BYTES as u16,
-            exit_slots: VMM_EXIT_SLOTS as u16,
+            exit_slots,
             abi_version: crate::abi_version::NATIVE.packed() as u32,
             reserved1: 0,
             reserved: [0; 8],
@@ -176,7 +192,7 @@ impl VmmAbi {
             && self.max_vcpus != 0
             && self.max_guest_pages != 0
             && self.exit_record_bytes as usize == VM_EXIT_RECORD_BYTES
-            && self.exit_slots as usize == VMM_EXIT_SLOTS
+            && Some(self.exit_slots) == exit_slots_for_control_bytes(VMM_CONTROL_BYTES)
             && self.abi_version != 0
             && self.reserved1 == 0
             && self.reserved == [0; 8]
@@ -486,8 +502,14 @@ mod tests {
     fn service_abi_roundtrip_and_fail_closed_validation() {
         let abi = VmmAbi::new(Backend::Vmx, 7, 2, 8, 16384).unwrap();
         let raw = abi.encode();
+        let exit_slots = u16::from_le_bytes([raw[30], raw[31]]);
+        assert_eq!(exit_slots, 100);
+        assert!(exit_slots as usize > 8);
         assert_eq!(VmmAbi::decode(&raw), Some(abi));
         assert!(abi.validate());
+        let mut too_small = raw;
+        too_small[30..32].copy_from_slice(&8u16.to_le_bytes());
+        assert!(VmmAbi::decode(&too_small).is_none());
         let mut unknown = raw;
         unknown[12..20].copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(VmmAbi::decode(&unknown).is_none());

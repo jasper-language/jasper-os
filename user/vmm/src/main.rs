@@ -10,7 +10,7 @@ use core::arch::asm;
 
 use kernel_core::hwvirt_vmm::{
     VmExitRecord, VmmAbi, VMM_ABI_BYTES, VMM_ABI_VERSION, VMM_CONTROL_MAGIC,
-    VM_EXIT_RECORD_BYTES,
+    VMM_EXIT_RECORDS_OFFSET, VM_EXIT_RECORD_BYTES,
 };
 use kernel_core::ring_abi::{Cqe, EnterArgs};
 
@@ -32,7 +32,7 @@ const RING_HANDLE_WORD: u64 = 4;
 const GENERATION_WORD: u64 = 5;
 const STATUS_WORD: u64 = 6;
 const EXIT_COUNT_WORD: u64 = 7;
-const RECORDS_OFFSET: u64 = 64;
+const RECORDS_OFFSET: u64 = VMM_EXIT_RECORDS_OFFSET as u64;
 const START_OFFSET: u64 = 320;
 const START_MAGIC: u64 = 0x5354_4152_5400_0000;
 const STATUS_OK: u64 = 0x4857_5635_4f4b;

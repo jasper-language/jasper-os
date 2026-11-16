@@ -8,7 +8,7 @@ use kernel_core::hwvirt::Backend;
 use kernel_core::hwvirt_vcpu::{GuestPermissions, VcpuState};
 use kernel_core::hwvirt_vmm::{
     ServiceLifecycle, ServiceState, VmExitEvent, VmExitRecord, VMM_ABI_VERSION, VMM_CONTROL_MAGIC,
-    VM_EXIT_RECORD_BYTES,
+    VMM_EXIT_RECORDS_OFFSET, VM_EXIT_RECORD_BYTES,
 };
 use kernel_core::object::{HandleId, ObjectType};
 use kernel_core::objtable::ObjId;
@@ -28,7 +28,7 @@ const STACK_PAGES: u64 = 4;
 const GENERATION_WORD: u64 = 5;
 const STATUS_WORD: u64 = 6;
 const EXIT_COUNT_WORD: u64 = 7;
-const RECORDS_OFFSET: u64 = 64;
+const RECORDS_OFFSET: u64 = VMM_EXIT_RECORDS_OFFSET as u64;
 const START_OFFSET: u64 = 320;
 const START_MAGIC: u64 = 0x5354_4152_5400_0000;
 const STATUS_OK: u64 = 0x4857_5635_4f4b;
@@ -385,9 +385,9 @@ fn run_dispatch(service: &ServiceProcess, generation: u32) -> bool {
     };
     let final_state = vm.guest_state();
     let lifecycle = vcpu::finish_run_for(service.pid, cpu, final_state).is_ok();
+    let guest_marker = read_gpa(service.pid, cpu, 0x7000);
     let shutdown = vm.shutdown().is_ok();
     drop(vm);
-    let guest_marker = read_gpa(service.pid, cpu, 0x7000);
     let _ = proc::close_handle_for(service.pid, cpu);
     let _ = proc::close_handle_for(service.pid, memory);
     kobj::run_cleanup(usize::MAX);
