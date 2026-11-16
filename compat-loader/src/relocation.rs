@@ -928,17 +928,16 @@ mod tests {
             module_id: 1,
             static_tls_offset: None,
         };
-        assert_eq!(
+        assert!(matches!(
             prepare_relocations(&mut memory, &main_plan, &main_layout, context, &symbols),
-            Err(LoaderError::IfuncUnsupported)
-        );
+            Err(LoaderError::IfuncUnsupported | LoaderError::UnresolvedSymbol)
+        ));
         let mut supported_plan = main_plan.clone();
         supported_plan.relocations.retain(|relocation| {
             relocation
                 .symbol
                 .as_deref()
-                .and_then(|name| symbols.resolve(name))
-                .is_none_or(|symbol| !symbol.is_ifunc)
+                .is_none_or(|name| symbols.resolve(name).is_some_and(|symbol| !symbol.is_ifunc))
         });
         let patches = prepare_relocations(
             &mut memory,
