@@ -898,6 +898,7 @@ pub mod device {
         }
         if !released_lines.is_empty() {
             for &line in &released_lines {
+                // JASPER-HARDCODE-REVIEW: issue=33 source=released-request-runtime-state reason=line-missing-from-current-table-is-not-enabled
                 let enabled = ROUTING.lock().enabled.get(line).copied().unwrap_or(false);
                 if enabled {
                     arch::device_irq_set_masked(line, false);
