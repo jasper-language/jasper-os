@@ -259,6 +259,28 @@ impl<'a> Fdt<'a> {
             true
         })
     }
+
+    /// Visit every valid `reg` tuple on every node.
+    ///
+    /// Boot code uses this after parsing the FDT to derive the physical
+    /// windows that must remain reachable through the linear map. The FDT is
+    /// untrusted, so malformed tuples are skipped by [`Node::reg`]; callers
+    /// still apply overflow, policy and address-width checks.
+    ///
+    /// 遍历所有节点上的每个合法 `reg` 区间。启动代码用它推导必须在
+    /// 线性映射中保留的硬件窗口；坏元组被跳过，调用者仍须做溢出、策略与
+    /// 地址宽度校验。
+    pub fn for_each_reg(&self, mut f: impl FnMut(u64, u64)) -> Result<(), FdtError> {
+        self.walk(|n| {
+            let mut index = 0;
+            while let Some((base, size)) = n.reg(index) {
+                f(base, size);
+                index += 1;
+            }
+            true
+        })
+    }
+
     /// 枚举全部 `device_type = "cpu"` 的节点，得到处理器拓扑（引导处理器在下标 0）。
     /// 每个节点 `reg` 的第一个地址是硬件标识（AArch64 为亲和性值、RISC-V 为 hart 号），经 `hw_id_of` 换算；
     /// 换算失败（标识超出平台能表示的范围）计入 `dropped`，`status` 存在且不是 `okay` / `ok` 的计入 `disabled`。
@@ -931,6 +953,17 @@ mod tests {
         let mut mem = Vec::new();
         fdt.for_each_memory(|b, s| mem.push((b, s))).unwrap();
         assert_eq!(mem, vec![(0x4000_0000, 0x1000_0000)]);
+        let mut regs = Vec::new();
+        fdt.for_each_reg(|b, s| regs.push((b, s))).unwrap();
+        assert_eq!(
+            regs,
+            vec![
+                (0x4000_0000, 0x1000_0000),
+                (0x0900_0000, 0x1000),
+                (0x0800_0000, 0x1_0000),
+                (0x0801_0000, 0x1_0000),
+            ]
+        );
         let uart = fdt.find_compatible("arm,pl011").unwrap().expect("找到串口");
         assert_eq!(uart.reg(0), Some((0x0900_0000, 0x1000)));
         assert_eq!(uart.reg(1), None, "只有一项 reg");

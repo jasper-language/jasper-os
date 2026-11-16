@@ -7,7 +7,8 @@
 //! # 地址布局（Sv39 低半区，顶级表 256 项、每项 1 GiB）
 //! * 内核映像所在的那一项：**恒等映射**（虚拟地址 = 物理地址），按段设置权限的 4 KiB 页；
 //! * 顶级第 64..128 项：**全物理内存映射**，偏移 [`PHYS_OFFSET`]，每项一个 1 GiB 大页（可读写、不可执行、全局）；
-//!   早期覆盖 0..4 GiB（含设备区与内存起点），之后随设备树报告的内存扩展，至多 64 GiB；
+//!   早期只覆盖内核映像与启动 DTB 所在 GiB，解析设备树后按 FDT 的全部 `reg`
+//!   窗口与实际 RAM 终点扩展，至多 64 GiB；
 //! * 顶级第 32..64 项：每个地址空间私有的用户窗口（见 `space.rs`）；
 //! * 顶级第 128..256 项：之后新增的内核虚拟区（堆等），启动时一次性预分配、所有地址空间共享。
 //!
@@ -75,8 +76,8 @@ const PHYS_FIRST: usize = 64;
 const PHYS_LAST: usize = 128;
 /// 内核映像的恒等映射必须落在私有窗口之下的顶级表项内（与其余区域不重叠）。
 const IDENTITY_LIMIT: usize = USER_FIRST;
-/// 早期就映射的物理地址范围（GiB）：覆盖设备区与内存起点，设备树读出前即可访问。
-const EARLY_PHYS_GIB: usize = 4;
+/// 引导期线性映射必须保留到的物理终点。
+static mut BOOT_LINEAR_REQUIRED_END: u64 = 0;
 /// 内核映像恒等映射可用的末级表数（每张 2 MiB；与链接脚本中的映像大小上限一致）。
 const IMAGE_L2_TABLES: usize = 16;
 const GIB: u64 = 1 << 30;
@@ -111,7 +112,12 @@ fn phys_gigapage(g: usize) -> u64 {
 ///
 /// # Safety
 /// 只能在启用地址转换之前、没有其他执行流时调用一次。
-pub unsafe fn build_boot_tables(start: u64, end: u64, page_entry: impl Fn(u64) -> u64) -> bool {
+pub unsafe fn build_boot_tables(
+    start: u64,
+    end: u64,
+    dtb: u64,
+    page_entry: impl Fn(u64) -> u64,
+) -> bool {
     if start % MIB2 != 0
         || end <= start
         || (start / GIB) != ((end - 1) / GIB)
@@ -140,20 +146,38 @@ pub unsafe fn build_boot_tables(start: u64, end: u64, page_entry: impl Fn(u64) -
     }
     root.add((start >> 30) as usize).write_volatile(table_entry(id_l1 as u64));
 
-    // 全物理内存映射：早期范围
-    let mut g = 0;
-    while g < EARLY_PHYS_GIB {
+    // Bootstrap linear map: only the kernel image and the firmware DTB need
+    // to be reachable before the trusted memory/device graph is parsed.
+    // 引导期线性映射只覆盖内核映像与固件 DTB；其余窗口由 FDT 事实推导。
+    let dtb_gib = dtb / GIB;
+    if dtb == 0 || dtb_gib as usize >= PHYS_LAST - PHYS_FIRST {
+        return false;
+    }
+    BOOT_LINEAR_REQUIRED_END = ((dtb_gib + 1) * GIB).max(end);
+    for g in [(start / GIB) as usize, dtb_gib as usize] {
         root.add(PHYS_FIRST + g).write_volatile(phys_gigapage(g));
-        g += 1;
     }
     true
+}
+
+/// Physical end that the bootstrap linear map must retain once the complete
+/// FDT graph is known.
+///
+/// 完整 FDT 图建立后仍须保留的引导期线性映射物理终点。
+pub fn boot_linear_required_end() -> u64 {
+    // SAFETY: written once by the single boot flow before paging is enabled,
+    // then read-only during the rest of boot.
+    unsafe { BOOT_LINEAR_REQUIRED_END }
 }
 
 /// 让全物理内存映射覆盖到物理地址 `end`（不含）；已覆盖的部分不变。返回实际覆盖到的地址：
 /// 至少是早期映射的范围，至多 64 GiB（超出部分不映射）。
 /// Extend the linear physical map to cover `[0, end)`; returns the covered end.
 pub fn cover_phys(end: u64) -> u64 {
-    let gib = end.div_ceil(GIB).clamp(EARLY_PHYS_GIB as u64, (PHYS_LAST - PHYS_FIRST) as u64) as usize;
+    let gib = end
+        .max(boot_linear_required_end())
+        .div_ceil(GIB)
+        .min((PHYS_LAST - PHYS_FIRST) as u64) as usize;
     let root = addr_of_mut!(ROOT) as *mut u64;
     for g in 0..gib {
         // SAFETY：ROOT 是本模块的启动顶级表，经恒等映射访问；只写全物理内存映射范围内的空项。

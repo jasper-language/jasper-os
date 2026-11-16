@@ -89,21 +89,39 @@ fn hart_id(reg: u64) -> Option<u32> {
     u32::try_from(reg).ok()
 }
 
-/// 由设备树记录处理器拓扑（引导适配层调用一次；不发出固件调用）。设备树与本机不符时只记录引导处理器并写明原因。
-pub fn configure(fdt: &Fdt<'_>, boot_hart: u32) {
-    let found = match fdt.cpu_topology(boot_hart, hart_id) {
-        Err(e) => (Topology::boot_only(boot_hart), e.name()),
-        Ok(c) if !c.boot_listed => (Topology::boot_only(boot_hart), "system.firmware.error.boot_cpu_unlisted"),
-        Ok(c) if c.topology.count() > 1 => (c.topology, "fdt.cpus"),
-        Ok(c) => (c.topology, "boot_only"),
-    };
-    FIRMWARE.call_once(|| found);
+/// Defer CPU-inventory allocation until the heap stage. The boot adapter only
+/// retains the already validated FDT and boot hart here.
+///
+/// 启动适配层在 Heap 之前调用本函数，因此只保存已校验的 FDT 与引导 hart；
+/// 真正需要分配动态 CPU inventory 的解析推迟到 [`init_boot`]。
+static FIRMWARE_FDT: Once<(Fdt<'static>, u32)> = Once::new();
+
+/// Record the validated FDT and boot hart without allocating.
+pub fn configure(fdt: Fdt<'static>, boot_hart: u32) {
+    FIRMWARE_FDT.call_once(|| (fdt, boot_hart));
 }
 
 /// 引导处理器：确认固件实现了 HSM 与 IPI 扩展、打开本处理器的软件中断，返回拓扑。缺少扩展时只报告引导处理器。
 pub fn init_boot(boot_hart: u32) -> CpuDiscovery {
     cpu::enable_sources(cpu::SIE_SSIE);
-    let (topology, source) = FIRMWARE.get().cloned().unwrap_or((Topology::boot_only(boot_hart), "boot_only")); // JASPER-HARDCODE-REVIEW: issue=33 source=boot-handshake reason=boot-hart-identity-is-an-architectural-fact-and-admission-fails-closed
+    let found = FIRMWARE_FDT
+        .get()
+        .map(|(fdt, configured_hart)| {
+            let hart = *configured_hart;
+            match fdt.cpu_topology(hart, hart_id) {
+                Err(error) => (Topology::boot_only(hart), error.name()),
+                Ok(cpus) if !cpus.boot_listed => (
+                    Topology::boot_only(hart),
+                    "system.firmware.error.boot_cpu_unlisted",
+                ),
+                Ok(cpus) if cpus.topology.count() > 1 => (cpus.topology, "fdt.cpus"),
+                Ok(cpus) => (cpus.topology, "boot_only"),
+            }
+        })
+        .unwrap_or((Topology::boot_only(boot_hart), "boot_only"));
+    let (topology, source) = FIRMWARE
+        .call_once(|| found)
+        .clone(); // JASPER-HARDCODE-REVIEW: issue=33 source=boot-handshake reason=boot-hart-identity-is-an-architectural-fact-and-admission-fails-closed
     if topology.count() > 1 {
         if !fw::has_extension(sbi::EID_HSM) {
             return CpuDiscovery { topology: Topology::boot_only(boot_hart), source: "system.firmware.sbi.error.no_hsm" };

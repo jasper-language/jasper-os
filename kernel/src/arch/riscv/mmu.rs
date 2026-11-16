@@ -8,7 +8,9 @@ use super::cpu::{self, read_csr, write_csr};
 use super::mode;
 use super::paging::pte;
 
-pub use super::mode::{cover_phys, root_phys, PHYS_HOLE, PHYS_OFFSET};
+pub use super::mode::{
+    boot_linear_required_end, cover_phys, root_phys, PHYS_HOLE, PHYS_OFFSET,
+};
 
 extern "C" {
     static __kernel_start: u8;
@@ -44,11 +46,13 @@ fn kernel_page(phys: u64, text_end: u64, rodata_end: u64) -> u64 {
 ///
 /// # Safety
 /// 只能在启用地址转换之前、没有其他执行流时调用一次。
-pub unsafe fn build_boot_tables() -> bool {
+pub unsafe fn build_boot_tables(dtb: u64) -> bool {
     let (start, end) = image_range();
     let text_end = core::ptr::addr_of!(__text_end) as usize as u64;
     let rodata_end = core::ptr::addr_of!(__rodata_end) as usize as u64;
-    mode::build_boot_tables(start, end, |page| kernel_page(page, text_end, rodata_end))
+    mode::build_boot_tables(start, end, dtb, |page| {
+        kernel_page(page, text_end, rodata_end)
+    })
 }
 
 /// 设置本处理器的监管态状态位：关中断、关闭浮点单元、禁止监管态访问用户页（SUM = 0）、用户态只可读 `time` 计数器。

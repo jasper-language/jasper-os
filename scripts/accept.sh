@@ -1909,8 +1909,10 @@ check_isa2a() { # RISC-V64 移植第一阶段：与 AArch64 第一阶段同一�
   if [ "$RV64_BAD" -eq 0 ] && grep -qE '^\[JSR-BOOT\] jasper-os rust kernel [0-9.]+ riscv64' "$SERIAL_RV64" \
      && grep -q '^\[JSR-VEC\] ok' "$SERIAL_RV64" \
      && grep -qE '^\[JSR-PLIC\] ok source=([0-9]+) claimed=\1 completed=true drained=true' "$SERIAL_RV64" \
+     && grep -qE '^\[JSR-MMAP\] source=fdt ram_end=0x[0-9a-f]+ graph_end=0x[0-9a-f]+ covered=0x[0-9a-f]+ complete=true' "$SERIAL_RV64" \
+     && grep -qE '^\[JSR-IRQ\] topology source=smp_ready discovered=[1-9][0-9]* admitted=[1-9][0-9]* rejected=0 .*dynamic=true complete=true' "$SERIAL_RV64" \
      && exit_ok "$SERIAL_RV64" && qemu_ok "$QRC_RV64"; then
-    record ISA2a PASS "RISC-V64（QEMU virt + OpenSBI，Sv39，QEMU=$QRC_RV64）：$RV64_N 项内核侧检查全部通过（启动/陷入/SBI 时钟/PLIC 认领完成/调度/抢占/机制/页帧/映射/堆/地址空间/用户态/ecall/用户指针/进程/句柄/回滚/优先级继承）"
+    record ISA2a PASS "RISC-V64（QEMU virt + OpenSBI，Sv39，QEMU=$QRC_RV64）：$RV64_N 项内核侧检查全部通过（FDT 物理图完整映射/动态中断准入/启动/陷入/SBI 时钟/PLIC 认领完成/调度/抢占/机制/页帧/映射/堆/地址空间/用户态/ecall/用户指针/进程/句柄/回滚/优先级继承）"
   else
     record ISA2a FAIL "RISC-V64：$RV64_N 项中 $RV64_BAD 项失败，或缺少横幅 / 陷入入口 / PLIC 自检标记、未成功退出（见 serial-riscv64.log）"
   fi

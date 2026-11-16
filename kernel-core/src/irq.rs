@@ -267,6 +267,25 @@ impl CoreQuota {
         Ok(())
     }
 
+    /// Install already allocated throttle inventory without acquiring the heap
+    /// allocator. Callers that invoke this while another ranked lock is held
+    /// must allocate both vectors before taking that lock.
+    ///
+    /// 安装已分配的节流账目，不在本锁内进入堆分配器。调用者若同时持有其他
+    /// 级别锁，必须先在锁外完成两个向量分配。
+    pub fn adopt_lines(
+        &mut self,
+        throttled: Vec<u64>,
+        released_lines: Vec<usize>,
+    ) -> Result<(), IrqError> {
+        if !self.throttled.is_empty() || !self.released_lines.is_empty() {
+            return Err(IrqError::NoLine);
+        }
+        self.throttled = throttled;
+        self.released_lines = released_lines;
+        Ok(())
+    }
+
     pub fn line_capacity(&self) -> usize {
         self.throttled.len().saturating_mul(64)
     }

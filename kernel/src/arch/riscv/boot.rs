@@ -128,7 +128,7 @@ fn plic_context(node: &Node<'_>, intc: u32) -> Option<u32> {
 }
 
 /// 由设备树配置串口、中断控制器、计数器频率与测试设备；缺少任一必需设备返回其名字。
-fn configure_devices(fdt: &Fdt<'_>, hart: u64) -> Result<(), &'static str> {
+fn configure_devices(fdt: &Fdt<'static>, hart: u64) -> Result<(), &'static str> {
     let uart_node = fdt.find_compatible("ns16550a").ok().flatten().ok_or("ns16550a")?;
     let (uart_pa, _) = uart_node.reg(0).ok_or("ns16550a reg")?;
     let uart_irq = uart_node.cell("interrupts", 0).ok_or("ns16550a interrupts")?;
@@ -147,7 +147,7 @@ fn configure_devices(fdt: &Fdt<'_>, hart: u64) -> Result<(), &'static str> {
     plic::set_base(mmu::PHYS_OFFSET + plic_pa, context);
 
     // 处理器拓扑（只记录，启动其他处理器在内核主流程里经 Platform 契约进行）
-    smp::configure(fdt, hart as u32);
+    smp::configure(*fdt, hart as u32);
     // 其他处理器的监管态上下文（找不到的处理器不能作为设备中断的目标）
     for index in 1..kernel_core::smp::MAX_CPUS {
         let Some(h) = smp::hart_of(index) else { break };
@@ -197,21 +197,15 @@ extern "C" fn jsr_riscv_boot(hart: usize, dtb: usize) -> ! {
     BOOT_HART.store(hart as u32, core::sync::atomic::Ordering::Relaxed);
     // SAFETY：此刻地址转换关闭且只有本执行流；建表只做按表项宽度对齐的写。
     unsafe {
-        if !mmu::build_boot_tables() {
+        if !mmu::build_boot_tables(dtb) {
             testdev::exit(EXIT_FAILURE);
         }
         mmu::enable();
     }
-    let early_end = mmu::cover_phys(0);
+    let early_end = mmu::boot_linear_required_end();
     let Some((dtb_pa, fdt)) = find_fdt(dtb, early_end) else {
         testdev::exit(EXIT_FAILURE)
     };
-    if let Err(missing) = configure_devices(&fdt, hart) {
-        // 串口可能已就绪（缺的是别的设备）：尽量说明原因再退出
-        uart::init();
-        crate::console::_print(format_args!("[JSR-BOOT] device tree lacks {}\n", missing));
-        testdev::exit(EXIT_FAILURE);
-    }
 
     let mut spec = BootSpec::new();
     let mut ram_end = 0u64;
@@ -219,7 +213,32 @@ extern "C" fn jsr_riscv_boot(hart: usize, dtb: usize) -> ! {
         let end = base.saturating_add(size);
         ram_end = ram_end.max(end);
     });
-    let covered = mmu::cover_phys(ram_end);
+    let mut graph_end = ram_end
+        .max(dtb_pa.saturating_add(fdt.size() as u64))
+        .max(mmu::image_range().1);
+    let regs = fdt.for_each_reg(|base, size| {
+        graph_end = graph_end.max(base.saturating_add(size));
+    });
+    if walked.is_err() || regs.is_err() || ram_end == 0 {
+        testdev::exit(EXIT_FAILURE);
+    }
+    let covered = mmu::cover_phys(graph_end);
+    if covered < graph_end {
+        testdev::exit(EXIT_FAILURE);
+    }
+    if let Err(missing) = configure_devices(&fdt, hart) {
+        // 串口可能已就绪（缺的是别的设备）：尽量说明原因再退出
+        uart::init();
+        crate::console::_print(format_args!("[JSR-BOOT] device tree lacks {}\n", missing));
+        testdev::exit(EXIT_FAILURE);
+    }
+    crate::console::_print(format_args!(
+        "[JSR-MMAP] source=fdt ram_end={:#x} graph_end={:#x} covered={:#x} complete={}\n",
+        ram_end,
+        graph_end,
+        covered,
+        covered >= graph_end
+    ));
     // 保留：内核映像、设备树本身、设备树声明的固件保留区（分配器按「保留优先」处理重叠）
     let (img_start, img_end) = mmu::image_range();
     spec.push_region(PhysRegion { start: img_start, end: img_end, kind: RegionKind::Reserved });
@@ -248,7 +267,7 @@ extern "C" fn jsr_riscv_boot(hart: usize, dtb: usize) -> ! {
             kind: RegionKind::Usable,
         });
     });
-    if walked.is_err() || memory_walked.is_err() || ram_end == 0 {
+    if memory_walked.is_err() {
         uart::init();
         crate::console::write_str("[JSR-BOOT] device tree has no usable memory\n");
         testdev::exit(EXIT_FAILURE);

@@ -412,19 +412,20 @@ pub mod device {
             }
         }
 
-        fn initialize(&mut self, lines: usize) -> bool {
+        fn initialize(
+            &mut self,
+            allowed: Vec<CpuSet>,
+            target: Vec<Option<usize>>,
+            enabled: Vec<bool>,
+        ) -> bool {
             if self.initialized {
-                return self.allowed.len() == lines;
+                return self.allowed.len() == allowed.len()
+                    && self.target.len() == allowed.len()
+                    && self.enabled.len() == allowed.len();
             }
-            if self.allowed.try_reserve_exact(lines).is_err()
-                || self.target.try_reserve_exact(lines).is_err()
-                || self.enabled.try_reserve_exact(lines).is_err()
-            {
-                return false;
-            }
-            self.allowed.resize(lines, CpuSet::EMPTY);
-            self.target.resize(lines, None);
-            self.enabled.resize(lines, false);
+            self.allowed = allowed;
+            self.target = target;
+            self.enabled = enabled;
             self.initialized = true;
             true
         }
@@ -473,7 +474,28 @@ pub mod device {
     }
 
     fn reserve_lines(lines: usize) -> bool {
-        if !ROUTING.lock().initialize(lines) {
+        // Prepare every allocation before acquiring the routing lock. Heap
+        // allocation has a lower lock rank than IRQ routing and must never
+        // occur while this guard is held.
+        // 先完成全部堆分配，再取路由锁；堆锁级别低于 IRQ 路由，持锁分配会
+        // 触发真实的锁序失败。
+        let mut allowed = Vec::new();
+        let mut target = Vec::new();
+        let mut enabled = Vec::new();
+        if allowed.try_reserve_exact(lines).is_err()
+            || target.try_reserve_exact(lines).is_err()
+            || enabled.try_reserve_exact(lines).is_err()
+        {
+            return false;
+        }
+        allowed.resize(lines, CpuSet::EMPTY);
+        target.resize(lines, None);
+        enabled.resize(lines, false);
+        let initialized = {
+            let mut routing = ROUTING.lock();
+            routing.initialize(allowed, target, enabled)
+        };
+        if !initialized {
             return false;
         }
         let storage = LINES.call_once(|| {
@@ -508,7 +530,20 @@ pub mod device {
             return false;
         }
         for quota in QUOTAS.iter() {
-            if quota.lock().configure_lines(lines).is_err() {
+            let words = lines.saturating_add(63) / 64;
+            let mut throttled = Vec::new();
+            let mut released = Vec::new();
+            if throttled.try_reserve_exact(words).is_err()
+                || released.try_reserve_exact(lines).is_err()
+            {
+                return false;
+            }
+            throttled.resize(words, 0);
+            if quota
+                .lock()
+                .adopt_lines(throttled, released)
+                .is_err()
+            {
                 return false;
             }
         }
@@ -561,10 +596,18 @@ pub mod device {
 
     /// Number of admitted device lines in runtime storage.
     pub fn line_count() -> usize {
-        TOPOLOGY.get().map_or_else(
-            || admit_topology("line_table_access").admitted,
-            |topology| topology.admitted,
-        )
+        if let Some(topology) = TOPOLOGY.get() {
+            return topology.admitted;
+        }
+        // Discovery-only callers may run before the heap exists, for example
+        // while the terminal/display runtime is being initialized. Report the
+        // platform inventory without permanently admitting a zero-byte table;
+        // the SMP-ready stage performs the real admission after the heap is
+        // available.
+        //
+        // 终端的早期发现可能在堆初始化前查询线数。这里只报告平台库存，
+        // 不把“尚未有堆”永久写入准入结果；SMP-ready 阶段再做真实准入。
+        arch::device_irq_count()
     }
 
     /// 中断线的规范名。

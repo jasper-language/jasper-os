@@ -127,7 +127,12 @@ fn megapage(phys: u64) -> u32 {
 ///
 /// # Safety
 /// 只能在启用地址转换之前、没有其他执行流时调用一次。
-pub unsafe fn build_boot_tables(start: u64, end: u64, page_entry: impl Fn(u64) -> u64) -> bool {
+pub unsafe fn build_boot_tables(
+    start: u64,
+    end: u64,
+    _dtb: u64,
+    page_entry: impl Fn(u64) -> u64,
+) -> bool {
     if start % MIB4 != 0
         || end <= start
         || end - start > IMAGE_L1_TABLES as u64 * MIB4
@@ -166,6 +171,11 @@ pub unsafe fn build_boot_tables(start: u64, end: u64, page_entry: impl Fn(u64) -
 /// 恒为 3 GiB；其中 [`PHYS_HOLE`] 不可访问，调用者须把它与上限之外的内存一并标为保留。
 /// Covered end of the linear map; fixed at 3 GiB on Sv32 (minus [`PHYS_HOLE`]).
 pub fn cover_phys(_end: u64) -> u64 {
+    COVERED_END
+}
+
+/// Sv32 在引导期已一次建立完整的 3 GiB 线性映射。
+pub fn boot_linear_required_end() -> u64 {
     COVERED_END
 }
 
