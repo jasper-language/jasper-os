@@ -32,22 +32,23 @@
 //!   取消可取消的请求、丢弃未消费的完成记录；不可中止的请求继续到自然结束。
 //!
 //! # 锁区间
-//! 状态机、后端表、等待登记和完成发布由对象表锁串行化。持锁区间只执行固定容量内的查表、
+//! 状态机、后端表、等待登记和完成发布由对象表锁串行化。持锁区间只执行运行时容量内的查表、
 //! 引用计数、状态迁移、有界扫描/复制，以及按规定顺序获取的更低层调度器/页帧/映射锁；不得让出任务、
 //! 写控制台或重入对象表。`enter` 在登记等待后先释放对象表，再让出处理器；每轮恢复后重新解析句柄。
 //! Backend processing is bounded under the object-table lock and never blocks or re-enters that lock.
 
 use alloc::boxed::Box;
-use alloc::vec;
 use alloc::vec::Vec;
 
-use kernel_core::async_ring::{AsyncRing, CancelError, Cancelled, Exec, SubmitError, Submission, Terminal};
+use kernel_core::async_ring::{CancelError, Cancelled, Exec, SubmitError, Submission, Terminal};
+use kernel_core::async_ring_runtime::RuntimeAsyncRing;
 use kernel_core::deadline::{Deadline, DeadlineHeap, ABSENT};
 use kernel_core::object::{HandleId, ObjectType, Rights};
 use kernel_core::objtable::ObjId;
 use kernel_core::ring_backend::{self, Kind, Route};
 use kernel_core::ring_abi::{Cqe, EnterArgs, EnterUntilArgs, MsgDesc, Sqe, CQE_SIZE, ENTER_ARGS_SIZE, ENTER_UNTIL_SIZE, SQE_SIZE};
-use kernel_core::timer_event::{OwnerBudget, Request, TimerId, TimerTable, Urgency};
+use kernel_core::timer_event::{OwnerBudget, Request, RuntimeTimerTable, TimerId, Urgency};
+use spin::Once;
 
 use crate::ipc::{self, Delivery, RecvTarget};
 use crate::kobj::{self, KObject, Table};
@@ -57,25 +58,47 @@ use crate::proc::{self, ProcError};
 use crate::syscall::table::*;
 use crate::syscall::{err, SyscallSet};
 use crate::sched;
-use crate::config;
 
-/// 完成队列容量 C 的上限（取自配置档；创建时可指定 1..=C）。
-pub const CQ_CAPACITY: usize = config::ACTIVE.ring.cq_capacity;
-/// 每个 Ring 的请求控制块容量。
-pub const BLOCKS_PER_RING: usize = config::ACTIVE.ring.blocks_per_ring;
-/// 单次 `enter` 最多带入的提交数。
-pub const SQ_BATCH: usize = config::ACTIVE.ring.sq_batch;
-/// 每进程 Ring 数上限。
-pub const MAX_RINGS_PER_PROCESS: u32 = config::ACTIVE.ring.max_rings_per_process;
-/// 每进程跨所有 Ring 的在飞请求（尚未销毁的控制块）上限。
-pub const MAX_IN_FLIGHT_PER_PROCESS: u32 = config::ACTIVE.ring.max_in_flight_per_process;
+static RING_LIMITS: Once<kernel_core::config::RingQuotaPlan> = Once::new();
+
+/// Derive per-process ring and in-flight quotas from admitted process/task and object facts.
+/// 从已准入任务/对象容量推导每进程 Ring 与在飞请求配额。
+pub fn init_runtime(tasks: usize, objects: usize) -> bool {
+    let Some(limits) = kernel_core::config::plan_ring_quotas(tasks, objects) else {
+        crate::kprintln!(
+            "[JSR-RING] reject=runtime_quota tasks={tasks} objects={objects}"
+        );
+        return false;
+    };
+    let installed = RING_LIMITS.call_once(|| limits);
+    if *installed != limits {
+        crate::kprintln!(
+            "[JSR-RING] reject=runtime_quota_duplicate rings={} in_flight={}",
+            installed.max_rings_per_process,
+            installed.max_in_flight_per_process
+        );
+        return false;
+    }
+    crate::kprintln!(
+        "[JSR-RING] capacity rings={} in_flight={} tasks={} objects={} dynamic=true",
+        limits.max_rings_per_process,
+        limits.max_in_flight_per_process,
+        tasks,
+        objects
+    );
+    true
+}
+
+pub fn runtime_limits() -> Option<kernel_core::config::RingQuotaPlan> {
+    RING_LIMITS.get().copied()
+}
 /// Ring 期限身份表的所有者键；每张表只由一个 Ring 使用。
 const WAIT_TIMER_OWNER: u32 = 0;
 /// Ring 句柄的权限：提交（WRITE）、收取（WAIT）、取消（CONTROL）、进程内复制（DUPLICATE）；**永不带 TRANSFER**。
 /// 取自对象类型登记表（唯一定义处）。
 pub const RING_RIGHTS: Rights = kernel_core::kobj_type::Kind::Ring.contract().rights;
 
-type StateMachine = AsyncRing<CQ_CAPACITY, BLOCKS_PER_RING>;
+type StateMachine = RuntimeAsyncRing;
 
 /// 可经 Ring 提交的操作及其后端（唯一登记点）。编译期断言良构：编号非零且互不相同、每个后端至少一条路由。
 /// The single registration point of ring-submittable operations; checked well formed at compile time.
@@ -144,7 +167,7 @@ struct BackendEntry {
     authority: Option<proc::HandleAuthority>,
 }
 
-/// TimerTable 槽位到运行集合的固定容量索引。
+/// TimerTable 槽位到运行集合的运行时容量索引。
 #[derive(Clone, Copy)]
 struct WaitRunning {
     request: u64,
@@ -250,14 +273,14 @@ pub struct RingObj {
     event_waiters: Vec<kernel_core::event_wait::Key>,
     /// 每个执行中 `Wait` 请求自己的纳秒身份与预算。
     /// Per-request nanosecond identities and budget for running Wait backends.
-    wait_timers: TimerTable<BLOCKS_PER_RING>,
+    wait_timers: RuntimeTimerTable,
     wait_budget: OwnerBudget,
-    /// 到期 Wait 的固定容量索引；节点只在装填、撤销和到期时访问。
+    /// 到期 Wait 的运行时容量索引；节点只在装填、撤销和到期时访问。
     wait_heap: DeadlineHeap,
-    wait_entries: [Deadline; BLOCKS_PER_RING],
-    wait_positions: [usize; BLOCKS_PER_RING],
+    wait_entries: Vec<Deadline>,
+    wait_positions: Vec<usize>,
     /// TimerTable 槽位 → Ring 请求 ID 与运行表下标，使到期无需遍历运行集合。
-    wait_running: [Option<WaitRunning>; BLOCKS_PER_RING],
+    wait_running: Vec<Option<WaitRunning>>,
     /// 诊断：已检查的运行集合项数；新实现不得随普通收尾增长。
     wait_scan_slots: u64,
     /// 诊断：Wait 期限堆写/弹出次数。
@@ -830,25 +853,47 @@ fn result_of(t: Terminal) -> i64 {
 
 // ———————————————————————— 创建 ————————————————————————
 
+fn runtime_vec<T: Clone>(length: usize, value: T) -> Option<Vec<T>> {
+    let mut values = Vec::new();
+    values.try_reserve_exact(length).ok()?;
+    values.resize(length, value);
+    Some(values)
+}
+
 /// 为进程 `pid` 创建容量为 `capacity` 的 Ring，返回句柄。全有或全无：容量非法、Ring 数超额、
 /// 句柄表已满或进程已退出时不创建对象、不改配额。
 pub fn create_for(pid: ObjId, capacity: u64) -> Result<HandleId, i64> {
-    if capacity == 0 || capacity > CQ_CAPACITY as u64 {
+    if capacity == 0 {
         return Err(err(SYSTEM_ERROR_INVALID_ARGUMENT));
     }
     let workload_entries =
         u32::try_from(capacity).map_err(|_| err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
-    let sm = StateMachine::new(capacity as usize).ok_or(err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
+    let capacity = capacity as usize;
+    let sm = StateMachine::new(capacity, capacity)
+        .ok_or(err(SYSTEM_ERROR_QUOTA_EXCEEDED))?;
+    let wait_timers =
+        RuntimeTimerTable::new(capacity).ok_or(err(SYSTEM_ERROR_QUOTA_EXCEEDED))?;
+    let wait_entries =
+        runtime_vec(capacity, Deadline::EMPTY).ok_or(err(SYSTEM_ERROR_QUOTA_EXCEEDED))?;
+    let wait_positions =
+        runtime_vec(capacity, ABSENT).ok_or(err(SYSTEM_ERROR_QUOTA_EXCEEDED))?;
+    let wait_running =
+        runtime_vec(capacity, None).ok_or(err(SYSTEM_ERROR_QUOTA_EXCEEDED))?;
+    let limits = runtime_limits().ok_or(err(SYSTEM_ERROR_QUOTA_EXCEEDED))?;
     kobj::with(|t| {
         proc::syscalls_in(t, pid).map_err(perr)?;
         if proc::ring_quota_in(t, pid).and_then(|q|
-            kernel_core::quota::reserve_u32(q.rings, 1, MAX_RINGS_PER_PROCESS)).is_none() {
+            kernel_core::quota::reserve_u32(q.rings, 1, limits.max_rings_per_process)).is_none() {
             return Err(err(SYSTEM_ERROR_QUOTA_EXCEEDED));
         }
         let workload_charge = match proc::workload_key_in(t, pid) {
             Some(workload) => {
-                crate::workload::reserve_ring_entries(workload, workload_entries)
-                    .map_err(|_| err(SYSTEM_ERROR_QUOTA_EXCEEDED))?;
+                if crate::workload::reserve_ring_entries(workload, workload_entries).is_err() {
+                    if let Some(q) = proc::ring_quota_in(t, pid) {
+                        q.rings = q.rings.saturating_sub(1);
+                    }
+                    return Err(err(SYSTEM_ERROR_QUOTA_EXCEEDED));
+                }
                 Some((workload, workload_entries))
             }
             None => None,
@@ -864,12 +909,12 @@ pub fn create_for(pid: ObjId, capacity: u64) -> Result<HandleId, i64> {
             started_backends_released: 0,
             backends_in_call: 0,
             event_waiters: Vec::new(),
-            wait_timers: TimerTable::new(),
-            wait_budget: OwnerBudget::new(BLOCKS_PER_RING as u32),
+            wait_timers,
+            wait_budget: OwnerBudget::new(workload_entries),
             wait_heap: DeadlineHeap::new(),
-            wait_entries: [Deadline::EMPTY; BLOCKS_PER_RING],
-            wait_positions: [ABSENT; BLOCKS_PER_RING],
-            wait_running: [None; BLOCKS_PER_RING],
+            wait_entries,
+            wait_positions,
+            wait_running,
             wait_scan_slots: 0,
             wait_heap_ops: 0,
             pinned: false,
@@ -879,6 +924,9 @@ pub fn create_for(pid: ObjId, capacity: u64) -> Result<HandleId, i64> {
             Err(error) => {
                 if let Some((workload, entries)) = workload_charge {
                     crate::workload::release_ring_entries(workload, entries);
+                }
+                if let Some(q) = proc::ring_quota_in(t, pid) {
+                    q.rings = q.rings.saturating_sub(1);
                 }
                 return Err(perr(error));
             }
@@ -1095,7 +1143,10 @@ fn submit_in(t: &mut Table, pid: ObjId, ring: ObjId, op: u32, user_tag: u64, wor
         Some(q) => q.in_flight,
         None => return reject(t, work, err(SYSTEM_ERROR_RIGHTS_DENIED)),
     };
-    if kernel_core::quota::reserve_u32(quota, 1, MAX_IN_FLIGHT_PER_PROCESS).is_none() {
+    let Some(limits) = runtime_limits() else {
+        return reject(t, work, err(SYSTEM_ERROR_QUOTA_EXCEEDED));
+    };
+    if kernel_core::quota::reserve_u32(quota, 1, limits.max_in_flight_per_process).is_none() {
         return reject(t, work, err(SYSTEM_ERROR_QUOTA_EXCEEDED));
     }
     let deadline = match work {
@@ -1457,7 +1508,20 @@ pub fn sys_enter_until(h: u64, args_ptr: u64) -> i64 {
 
 /// 提交和收取只保留一份实现；输出错误优先于deadline结果，防止静默丢失提交信息。
 fn enter_args_for(pid: ObjId, h: HandleId, args_ptr: u64, args: EnterArgs, deadline: Option<u64>) -> i64 {
-    if args.reserved != 0 || args.sq_count as usize > SQ_BATCH || args.cq_max as usize > CQ_CAPACITY {
+    if args.reserved != 0 {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    }
+    let ring_capacity = match kobj::with(|t| {
+        let ring = proc::resolve_in(t, pid, h, ObjectType::Ring, Rights::WRITE.union(Rights::WAIT))
+            .map_err(perr)?;
+        ring_mut(t, ring)
+            .map(|ring| ring.sm.blocks_capacity())
+            .ok_or(err(SYSTEM_HANDLE_ERROR_INVALID))
+    }) {
+        Ok(capacity) => capacity,
+        Err(error) => return error,
+    };
+    if args.sq_count as usize > ring_capacity {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     }
     // 输出字段先清零：同时确认参数块可写（之后的提交不会因为无法回写结果而「做了却不报告」）
@@ -1465,14 +1529,33 @@ fn enter_args_for(pid: ObjId, h: HandleId, args_ptr: u64, args: EnterArgs, deadl
     if let Err(e) = copy_to_user(args_ptr + out_off as u64, &[0u8; 16][..out_len], out_len) {
         return user_err(e);
     }
-    let mut sq = vec![0u8; args.sq_count as usize * SQE_SIZE];
-    if let Err(e) = copy_from_user(&mut sq, args.sq_ptr, SQ_BATCH * SQE_SIZE) {
+    let sq_bytes = args
+        .sq_count
+        .checked_mul(SQE_SIZE as u32)
+        .ok_or(err(SYSTEM_ERROR_INVALID_ARGUMENT))
+        .and_then(|bytes| usize::try_from(bytes).map_err(|_| err(SYSTEM_ERROR_INVALID_ARGUMENT)));
+    let Ok(sq_bytes) = sq_bytes else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let Some(mut sq) = runtime_vec(sq_bytes, 0u8) else {
+        return err(SYSTEM_ERROR_QUOTA_EXCEEDED);
+    };
+    if let Err(e) = copy_from_user(&mut sq, args.sq_ptr, sq_bytes) {
         return user_err(e);
     }
     // 请求 ID 输出数组同样先确认可写（被接受的提交一定能把 ID 交回用户，用户才能取消它）
-    let mut ids = vec![0u8; args.sq_count as usize * 8];
+    let Some(ids_bytes) = args
+        .sq_count
+        .checked_mul(8)
+        .and_then(|bytes| usize::try_from(bytes).ok())
+    else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let Some(mut ids) = runtime_vec(ids_bytes, 0u8) else {
+        return err(SYSTEM_ERROR_QUOTA_EXCEEDED);
+    };
     if args.id_ptr != 0 {
-        if let Err(e) = copy_to_user(args.id_ptr, &ids, SQ_BATCH * 8) {
+        if let Err(e) = copy_to_user(args.id_ptr, &ids, ids.len()) {
             return user_err(e);
         }
     }
@@ -1504,7 +1587,8 @@ fn enter_args_for(pid: ObjId, h: HandleId, args_ptr: u64, args: EnterArgs, deadl
         }
     }
     if args.id_ptr != 0 && submitted > 0 {
-        if let Err(e) = copy_to_user(args.id_ptr, &ids[..submitted as usize * 8], SQ_BATCH * 8) {
+        let written = submitted as usize * 8;
+        if let Err(e) = copy_to_user(args.id_ptr, &ids[..written], written) {
             return user_err(e);
         }
     }
@@ -1520,7 +1604,13 @@ fn enter_args_for(pid: ObjId, h: HandleId, args_ptr: u64, args: EnterArgs, deadl
         let r = ring_mut(t, ring).ok_or(err(SYSTEM_HANDLE_ERROR_INVALID))?;
         let n = (args.cq_max as usize).min(r.sm.ready());
         if n > 0 {
-            let mut out = vec![0u8; n * CQE_SIZE];
+            let out_len = n
+                .checked_mul(CQE_SIZE)
+                .ok_or(err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
+            let mut out = Vec::new();
+            out.try_reserve_exact(out_len)
+                .map_err(|_| err(SYSTEM_ERROR_QUOTA_EXCEEDED))?;
+            out.resize(out_len, 0u8);
             for i in 0..n {
                 let c = r.sm.peek(i).ok_or(err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
                 let cqe = Cqe { request_id: c.request_id, user_tag: c.user_tag, op: c.op, reserved: 0, result: result_of(c.terminal) };
@@ -1528,7 +1618,7 @@ fn enter_args_for(pid: ObjId, h: HandleId, args_ptr: u64, args: EnterArgs, deadl
             }
             // 已在对象表锁内：用持锁版本（复制成功才消费完成记录，二者必须在同一把锁里）。
             // 先结束对环的借用再复制，复制成功后重新取环消费——三步都在这一把锁内，期间完成记录不会变化。
-            crate::mm::user::copy_to_user_in(t, pid, args.cq_ptr, &out, CQ_CAPACITY * CQE_SIZE).map_err(user_err)?;
+            crate::mm::user::copy_to_user_in(t, pid, args.cq_ptr, &out, out.len()).map_err(user_err)?;
             ring_mut(t, ring).ok_or(err(SYSTEM_HANDLE_ERROR_INVALID))?.sm.consume(n);
             reaped = n as u32;
         }

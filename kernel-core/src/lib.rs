@@ -82,6 +82,8 @@ pub mod bench;
 pub mod block;
 pub mod boot_stage;
 pub mod async_ring;
+#[cfg(feature = "runtime-registries")]
+pub mod async_ring_runtime;
 pub mod capacity;
 pub mod capability;
 pub mod config;

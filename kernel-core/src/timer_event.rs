@@ -23,8 +23,13 @@
 //!   Per-owner capacity budget; task timers and general timers use separate
 //!   instances so neither class can exhaust the other.
 //!
-//! 调用方负责串行化（每张表一把锁）；本模块不分配内存。
-//! Callers serialize access (one lock per table); nothing here allocates.
+//! 调用方负责串行化（每张表一把锁）。固定 `TimerTable<N>` 不分配；
+//! runtime-registry 构建另提供一次性准入分配的 `RuntimeTimerTable`。
+//! Callers serialize access (one lock per table). The fixed table is
+//! allocation-free; runtime-registry builds provide an admitted-capacity table.
+
+#[cfg(feature = "runtime-registries")]
+use alloc::vec::Vec;
 
 /// 请求的时间容差。 / Timing tolerance of a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -380,6 +385,187 @@ impl<const N: usize> TimerTable<N> {
     }
 }
 
+/// Runtime-capacity timer identity table used by allocation-backed kernel
+/// services. Allocation happens once during construction and is failure-atomic.
+/// 分配器后备内核服务使用的运行时容量定时身份表；构造期一次分配，失败原子。
+#[cfg(feature = "runtime-registries")]
+#[derive(Clone, Debug)]
+pub struct RuntimeTimerTable {
+    entries: Vec<Entry>,
+    free: Vec<u32>,
+    free_len: usize,
+    live: usize,
+    armed: usize,
+}
+
+#[cfg(feature = "runtime-registries")]
+impl RuntimeTimerTable {
+    pub fn new(capacity: usize) -> Option<Self> {
+        if capacity == 0 || capacity > u32::MAX as usize {
+            return None;
+        }
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(capacity).ok()?;
+        entries.resize(
+            capacity,
+            Entry {
+                generation: 0,
+                owner: 0,
+                state: State::Free,
+            },
+        );
+        let mut free = Vec::new();
+        free.try_reserve_exact(capacity).ok()?;
+        for slot in (0..capacity).rev() {
+            free.push(slot as u32);
+        }
+        Some(Self {
+            entries,
+            free,
+            free_len: capacity,
+            live: 0,
+            armed: 0,
+        })
+    }
+
+    pub fn live(&self) -> usize {
+        self.live
+    }
+
+    pub fn armed(&self) -> usize {
+        self.armed
+    }
+
+    pub fn create(&mut self, owner: u32, budget: &mut OwnerBudget) -> Result<TimerId, Error> {
+        if self.free_len == 0 {
+            return Err(Error::Full);
+        }
+        budget.charge()?;
+        self.free_len -= 1;
+        let slot = self.free[self.free_len];
+        let entry = &mut self.entries[slot as usize];
+        entry.generation += 1;
+        entry.owner = owner;
+        entry.state = State::Idle;
+        self.live += 1;
+        Ok(TimerId {
+            slot,
+            generation: entry.generation,
+        })
+    }
+
+    fn live_entry(&mut self, id: TimerId, owner: u32) -> Result<&mut Entry, Error> {
+        let entry = self
+            .entries
+            .get_mut(id.slot as usize)
+            .ok_or(Error::Stale)?;
+        if entry.generation != id.generation
+            || !matches!(entry.state, State::Idle | State::Armed(_))
+        {
+            return Err(Error::Stale);
+        }
+        if entry.owner != owner {
+            return Err(Error::NotOwner);
+        }
+        Ok(entry)
+    }
+
+    pub fn arm(
+        &mut self,
+        id: TimerId,
+        owner: u32,
+        request: Request,
+    ) -> Result<Option<Request>, Error> {
+        let entry = self.live_entry(id, owner)?;
+        let old = match entry.state {
+            State::Armed(request) => Some(request),
+            _ => None,
+        };
+        entry.state = State::Armed(request);
+        if old.is_none() {
+            self.armed += 1;
+        }
+        Ok(old)
+    }
+
+    pub fn cancel(&mut self, id: TimerId, owner: u32) -> Result<Cancelled, Error> {
+        let entry = self.live_entry(id, owner)?;
+        match entry.state {
+            State::Armed(request) => {
+                entry.state = State::Idle;
+                self.armed -= 1;
+                Ok(Cancelled::Disarmed(request))
+            }
+            _ => Ok(Cancelled::NotArmed),
+        }
+    }
+
+    pub fn close(
+        &mut self,
+        id: TimerId,
+        owner: u32,
+        budget: &mut OwnerBudget,
+    ) -> Result<Option<Request>, Error> {
+        let entry = self.live_entry(id, owner)?;
+        let old = match entry.state {
+            State::Armed(request) => Some(request),
+            _ => None,
+        };
+        let retire = entry.generation == u64::MAX;
+        entry.state = if retire { State::Retired } else { State::Free };
+        if old.is_some() {
+            self.armed -= 1;
+        }
+        self.live -= 1;
+        budget.release();
+        if !retire {
+            self.free[self.free_len] = id.slot;
+            self.free_len += 1;
+        }
+        Ok(old)
+    }
+
+    pub fn expire(&mut self, id: TimerId, now: u64) -> Result<Option<Fired>, Error> {
+        let Some(entry) = self.entries.get_mut(id.slot as usize) else {
+            return Ok(None);
+        };
+        if entry.generation != id.generation {
+            return Ok(None);
+        }
+        let State::Armed(request) = entry.state else {
+            return Ok(None);
+        };
+        if request.at > now {
+            return Ok(None);
+        }
+        if request.period_ns == 0 {
+            entry.state = State::Idle;
+            self.armed -= 1;
+            return Ok(Some(Fired {
+                owner: entry.owner,
+                at: request.at,
+                next: None,
+            }));
+        }
+        let next =
+            next_boundary(now, request.at, request.period_ns).ok_or(Error::Overflow)?;
+        entry.state = State::Armed(Request { at: next, ..request });
+        Ok(Some(Fired {
+            owner: entry.owner,
+            at: request.at,
+            next: Some(next),
+        }))
+    }
+
+    pub fn armed_request(&self, id: TimerId) -> Option<Request> {
+        let entry = self.entries.get(id.slot as usize)?;
+        match entry.state {
+            State::Armed(request) if entry.generation == id.generation => Some(request),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(kani)]
 mod proofs {
     use super::*;
@@ -529,5 +715,23 @@ mod tests {
         t.arm(id, 0, Request { at: u64::MAX - 1, urgency: Urgency::Precise, period_ns: 2 }).unwrap();
         assert_eq!(t.expire(id, u64::MAX), Err(Error::Overflow));
         assert!(t.armed_request(id).is_some());
+    }
+
+    #[cfg(feature = "runtime-registries")]
+    #[test]
+    fn runtime_timer_inventory_grows_past_previous_ring_envelope() {
+        let mut table = RuntimeTimerTable::new(128).unwrap();
+        let mut budget = OwnerBudget::new(128);
+        let mut ids = Vec::new();
+        for _ in 0..128 {
+            ids.push(table.create(7, &mut budget).unwrap());
+        }
+        assert_eq!((table.live(), budget.used()), (128, 128));
+        assert_eq!(table.create(7, &mut budget), Err(Error::Full));
+        for id in ids {
+            table.close(id, 7, &mut budget).unwrap();
+        }
+        assert_eq!((table.live(), budget.used()), (0, 0));
+        assert!(RuntimeTimerTable::new(0).is_none());
     }
 }

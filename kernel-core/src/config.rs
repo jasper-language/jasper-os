@@ -86,22 +86,6 @@ pub struct ObjectParams {
     pub handles_per_process: usize,
 }
 
-/// 异步环参数。
-/// Async-ring parameters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RingParams {
-    /// 完成队列容量上限（创建时可指定 1..=该值）。
-    pub cq_capacity: usize,
-    /// 每个环的请求控制块容量。
-    pub blocks_per_ring: usize,
-    /// 单次进入最多带入的提交数。
-    pub sq_batch: usize,
-    /// 每进程环数上限。
-    pub max_rings_per_process: u32,
-    /// 每进程跨所有环的在飞请求上限。
-    pub max_in_flight_per_process: u32,
-}
-
 /// IPC 配额参数（单条消息上限属于用户态契约，不在此处）。
 /// IPC quota parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +142,26 @@ pub fn plan_ipc_quotas(
         max_queue_bytes: queue,
         max_process_bytes: process,
         max_total_bytes: total,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RingQuotaPlan {
+    pub max_rings_per_process: u32,
+    pub max_in_flight_per_process: u32,
+}
+
+/// Derive ring quotas from the admitted task and object tables. A request
+/// cannot outnumber admitted objects, and one process cannot own more rings
+/// than the system can schedule.
+/// 从已准入任务表/对象表推导 Ring 配额；进程不能拥有多于可调度任务数的环，
+/// 在飞请求也不能多于已准入对象数。
+pub fn plan_ring_quotas(tasks: usize, objects: usize) -> Option<RingQuotaPlan> {
+    let max_rings_per_process = u32::try_from(tasks).ok()?;
+    let max_in_flight_per_process = u32::try_from(objects).ok()?;
+    (max_rings_per_process > 0 && max_in_flight_per_process > 0).then_some(RingQuotaPlan {
+        max_rings_per_process,
+        max_in_flight_per_process,
     })
 }
 
@@ -286,8 +290,6 @@ pub struct KernelConfig {
     pub memory: MemoryParams,
     /// 对象与句柄。
     pub objects: ObjectParams,
-    /// 异步环。
-    pub ring: RingParams,
     /// IPC 配额。
     pub ipc: IpcParams,
     /// 诊断。
@@ -364,13 +366,6 @@ impl KernelConfig {
             max_objects: 1024,
             handles_per_process: 64,
         },
-        ring: RingParams {
-            cq_capacity: 64,
-            blocks_per_ring: 64,
-            sq_batch: 64,
-            max_rings_per_process: 8,
-            max_in_flight_per_process: 256,
-        },
         ipc: IpcParams {
             max_endpoints_per_process: 64,
             max_queue_bytes: 1024 * 1024,
@@ -424,13 +419,6 @@ impl KernelConfig {
         objects: ObjectParams {
             max_objects: 512,
             handles_per_process: 64,
-        },
-        ring: RingParams {
-            cq_capacity: 64,
-            blocks_per_ring: 64,
-            sq_batch: 64,
-            max_rings_per_process: 8,
-            max_in_flight_per_process: 128,
         },
         ipc: IpcParams {
             max_endpoints_per_process: 32,
@@ -544,21 +532,6 @@ impl KernelConfig {
             "max_objects"
         );
 
-        let r = &self.ring;
-        require!(
-            r.cq_capacity >= 1 && r.blocks_per_ring >= r.cq_capacity,
-            "blocks_per_ring"
-        );
-        require!(
-            r.sq_batch >= 1 && r.sq_batch <= r.blocks_per_ring,
-            "sq_batch"
-        );
-        require!(r.max_rings_per_process >= 1, "max_rings_per_process");
-        require!(
-            r.max_in_flight_per_process as usize >= r.blocks_per_ring,
-            "max_in_flight_per_process"
-        );
-
         let p = &self.ipc;
         require!(
             p.max_endpoints_per_process >= 1,
@@ -620,17 +593,6 @@ impl KernelConfig {
         f(
             "handles_per_process",
             self.objects.handles_per_process as u64,
-        );
-        f("cq_capacity", self.ring.cq_capacity as u64);
-        f("blocks_per_ring", self.ring.blocks_per_ring as u64);
-        f("sq_batch", self.ring.sq_batch as u64);
-        f(
-            "max_rings_per_process",
-            self.ring.max_rings_per_process as u64,
-        );
-        f(
-            "max_in_flight_per_process",
-            self.ring.max_in_flight_per_process as u64,
         );
         f(
             "max_endpoints_per_process",
@@ -700,10 +662,6 @@ mod tests {
         assert_eq!(
             (s.objects.max_objects, s.objects.handles_per_process),
             (1024, 64)
-        );
-        assert_eq!(
-            (s.ring.cq_capacity, s.ring.max_in_flight_per_process),
-            (64, 256)
         );
         assert_eq!(s.ipc.max_total_bytes, 16 << 20);
     }
@@ -807,14 +765,6 @@ mod tests {
         rejects("max_vm_guest_frames", |c| c.memory.max_vm_guest_frames = 0);
         rejects("max_map_pages", |c| c.memory.max_map_pages = 0);
         rejects("max_objects", |c| c.objects.max_objects = 10);
-        rejects("blocks_per_ring", |c| c.ring.blocks_per_ring = 32);
-        rejects("sq_batch", |c| c.ring.sq_batch = 0);
-        rejects("max_rings_per_process", |c| {
-            c.ring.max_rings_per_process = 0
-        });
-        rejects("max_in_flight_per_process", |c| {
-            c.ring.max_in_flight_per_process = 10
-        });
         rejects("max_endpoints_per_process", |c| {
             c.ipc.max_endpoints_per_process = 0
         });
@@ -853,5 +803,19 @@ mod tests {
         assert!(low_hz.quantum.iter().sum::<u32>() <= small.quantum.iter().sum::<u32>());
         assert_eq!(plan_qos_params(policy, 0, 64), None);
         assert_eq!(plan_qos_params(policy, 1_000, 0), None);
+    }
+
+    #[test]
+    fn ring_quotas_follow_admitted_tables() {
+        assert_eq!(
+            plan_ring_quotas(64, 1024),
+            Some(RingQuotaPlan {
+                max_rings_per_process: 64, // JASPER-HARDCODE-REVIEW: issue=33 source=test-fixture reason=expected-derived-value
+                max_in_flight_per_process: 1024, // JASPER-HARDCODE-REVIEW: issue=33 source=test-fixture reason=expected-derived-value
+            })
+        );
+        assert!(plan_ring_quotas(128, 4096).unwrap().max_rings_per_process > 64);
+        assert_eq!(plan_ring_quotas(0, 1), None);
+        assert_eq!(plan_ring_quotas(1, 0), None);
     }
 }

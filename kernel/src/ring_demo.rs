@@ -28,7 +28,7 @@ use kernel_core::ring_abi::Sqe;
 use crate::kobj;
 use crate::mm::frame;
 use crate::proc::{self, ProcError, ProcState, ResourceQuota};
-use crate::ring::{self, BLOCKS_PER_RING, MAX_IN_FLIGHT_PER_PROCESS, MAX_RINGS_PER_PROCESS};
+use crate::ring;
 use crate::syscall::{err, table as abi, SyscallSet};
 use crate::{arch, kprintln, sched};
 
@@ -196,12 +196,12 @@ fn wait_timer_identity() {
     let armed = ring::view(rid).is_some_and(|v|
         v.wait_timer_live == 1
             && v.wait_timer_armed == 1
-            && v.wait_timer_budget == (1, BLOCKS_PER_RING as u32));
+            && v.wait_timer_budget == (1, 4));
     let cancelled = request.map(|id| ring::cancel_for(pid, h, id)).unwrap_or(!0) == 0;
     let returned = ring::view(rid).is_some_and(|v|
         v.wait_timer_live == 0
             && v.wait_timer_armed == 0
-            && v.wait_timer_budget == (0, BLOCKS_PER_RING as u32));
+            && v.wait_timer_budget == (0, 4));
     check(armed && cancelled && returned, "Ring Wait 身份未独立建立或取消后未归还预算");
     kprintln!("[JSR-RING] wait_timer per_request=true armed={} cancelled={} returned={}",
         armed, cancelled, returned);
@@ -433,33 +433,47 @@ fn transfer_denied() {
 
 /// 配额：每进程 Ring 数与跨 Ring 的在飞请求数；超额原子失败；回收后归还。
 fn quotas() {
+    let Some(limits) = ring::runtime_limits() else {
+        check(false, "运行时 Ring 配额未初始化");
+        return;
+    };
     let Ok(pid) = proc::create("ring-quota", SyscallSet::EMPTY) else {
         check(false, "进程创建失败");
         return;
     };
-    let mut handles = [None; MAX_RINGS_PER_PROCESS as usize];
-    for slot in handles.iter_mut() {
-        *slot = ring::create_for(pid, 64).ok();
+    let mut handles = Vec::new();
+    while handles.len() < limits.max_rings_per_process as usize {
+        handles.push(ring::create_for(pid, 64).ok());
     }
     let all_created = handles.iter().all(|h| h.is_some());
-    let ninth = ring::create_for(pid, 64);
-    let rings_ok = all_created && ninth == Err(err(abi::SYSTEM_ERROR_QUOTA_EXCEEDED));
-    // 在飞上限：前 4 个 Ring 各排队 64 个请求 = 256
+    let over_ring = ring::create_for(pid, 64);
+    let rings_ok = all_created && over_ring == Err(err(abi::SYSTEM_ERROR_QUOTA_EXCEEDED));
+    // 在飞上限：跨 Ring 填满运行时对象容量，再验证下一条原子拒绝。
     let mut accepted = 0u32;
-    for h in handles.iter().take(4).flatten() {
+    for h in handles.iter().flatten() {
         for _ in 0..64 {
+            if accepted == limits.max_in_flight_per_process {
+                break;
+            }
             if ring::submit_manual(pid, *h, 0, None, None).is_ok() {
                 accepted += 1;
             }
         }
+        if accepted == limits.max_in_flight_per_process {
+            break;
+        }
     }
     let before = proc::ring_quota(pid);
-    let over = handles[4].map(|h| ring::submit_manual(pid, h, 0, None, None));
+    let over = handles
+        .last()
+        .copied()
+        .flatten()
+        .map(|h| ring::submit_manual(pid, h, 0, None, None));
     let after = proc::ring_quota(pid);
-    let inflight_ok = accepted == MAX_IN_FLIGHT_PER_PROCESS
+    let inflight_ok = accepted == limits.max_in_flight_per_process
         && over == Some(Err(err(abi::SYSTEM_ERROR_QUOTA_EXCEEDED)))
         && before == after
-        && after == Some(ResourceQuota { rings: MAX_RINGS_PER_PROCESS, in_flight: MAX_IN_FLIGHT_PER_PROCESS, endpoints: 0, ipc_bytes: 0 });
+        && after == Some(ResourceQuota { rings: limits.max_rings_per_process, in_flight: limits.max_in_flight_per_process, endpoints: 0, ipc_bytes: 0 });
     check(rings_ok, "Ring 数配额不正确");
     check(inflight_ok, "在飞请求配额不正确或超额时改动了记账");
     // 进程退出 ⇒ 全部 Ring closing ⇒ 排队请求全部取消销毁 ⇒ Ring 销毁 ⇒ 配额归还
@@ -468,9 +482,9 @@ fn quotas() {
     let returned = proc::ring_quota(pid) == Some(ResourceQuota::default());
     check(returned, "进程退出后配额未归还");
     kprintln!(
-        "[JSR-RING] quota rings={} ninth={:?} in_flight={} over={:?} unchanged_on_reject={} returned={}",
+        "[JSR-RING] quota rings={} over_ring={:?} in_flight={} over={:?} unchanged_on_reject={} returned={}",
         handles.iter().filter(|h| h.is_some()).count(),
-        ninth.err(),
+        over_ring.err(),
         accepted,
         over.and_then(|r| r.err()),
         before == after,
