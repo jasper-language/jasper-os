@@ -912,6 +912,8 @@ dependencies = [
 name = "jasper-lifecycle-staging"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
+ "ed25519-dalek",
  "fatfs",
  "gpt 4.1.0",
  "jasper-lifecycle-model",

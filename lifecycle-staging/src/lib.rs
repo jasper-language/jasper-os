@@ -1,12 +1,13 @@
 //! LC-2 更新工件的已验签、持久化暂存边界。
 //! Verified durable artifact-staging boundary for LC-2 updates.
 //!
-//! 本 crate 只把已经验签的清单和本地制品复制到新的暂存目录，逐项校验大小与
-//! SHA-256，刷新文件和目录后再次读回验证。它不下载、不激活、不修改启动槽，也不
-//! 替代 Update Coordinator 的交易状态机。
-//! This crate copies an already verified manifest and local artifacts into a fresh staging
-//! directory, verifies size and SHA-256, flushes and reads them back. It does not download,
-//! activate, modify boot slots or replace the Update Coordinator state machine.
+//! 本 crate 通过统一的在线/离线来源接口获取清单与工件，在清单签名、信任和
+//! 反回滚验证通过后才请求工件；两种传输随后进入同一暂存、事务和启动控制路径。
+//! 它不把 URL 或来源身份当作信任根，也不把暂存当作激活成功。
+//! This crate acquires manifests and artifacts through one online/offline source
+//! interface, authenticates the manifest before requesting declared artifacts, and
+//! sends both transports through the same staging, transaction and boot-control path.
+//! Transport identity is never a trust root, and staging is never activation success.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -14,6 +15,7 @@
 pub mod control;
 pub mod gpt_layout;
 pub mod p0_control;
+pub mod source;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -26,7 +28,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use jasper_lifecycle_model::boot::{
     BootControlError, BootDecision, BootReason, Candidate, ControlBlock, Slot, SlotState,
 };
-use jasper_lifecycle_model::manifest::{authorize_install, LocalInstallGrant, ManifestError};
+use jasper_lifecycle_model::manifest::{
+    authorize_install, LocalInstallGrant, ManifestError, TrustPolicy, UpdateTarget,
+};
 use jasper_lifecycle_model::manifest_cbor::{
     ArtifactKind, VerifiedArtifact, VerifiedCborManifest, MAX_MANIFEST_CBOR_BYTES,
 };
@@ -35,6 +39,7 @@ use jasper_lifecycle_model::update::{TransitionError, UpdateEvent, UpdateMachine
 use sha2::{Digest, Sha256};
 
 use crate::control::{ControlStoreError, FileControlStore};
+use crate::source::{materialize_verified, MaterializedUpdate, SourceError, UpdateBundleSource};
 
 const MANIFEST_FILE: &str = "manifest.cbor";
 const ARTIFACT_DIR: &str = "artifacts";
@@ -148,6 +153,8 @@ pub enum CoordinatorError {
     Transition(TransitionError),
     /// Staging, authorization or dependency preflight failed.
     Staging(StagingError),
+    /// The online or offline update source failed verification or acquisition.
+    Source(SourceError),
     /// Prepared transaction recovery failed or does not match the machine.
     Transaction(TransactionError),
     /// The candidate cannot be admitted into boot control.
@@ -170,6 +177,7 @@ impl fmt::Display for CoordinatorError {
         match self {
             Self::Transition(error) => write!(formatter, "update transition failed: {error:?}"),
             Self::Staging(error) => write!(formatter, "{error}"),
+            Self::Source(error) => write!(formatter, "update source failed: {error}"),
             Self::Transaction(error) => write!(formatter, "prepared transaction failed: {error:?}"),
             Self::Control(error) => write!(formatter, "boot-control admission failed: {error:?}"),
             Self::ControlStore(error) => write!(formatter, "boot-control commit failed: {error}"),
@@ -227,6 +235,62 @@ impl UpdateCoordinator {
             now,
             installed_dependencies,
             sources,
+            staging_root,
+            metadata_headroom,
+        )
+        .map_err(CoordinatorError::Staging)?;
+        if update.record.stage() != next.stage() {
+            return Err(CoordinatorError::InconsistentStage {
+                expected: next.stage(),
+                actual: update.record.stage(),
+            });
+        }
+        self.machine = next;
+        Ok(update)
+    }
+
+    /// Acquire, authenticate, materialize and stage one online or offline bundle.
+    ///
+    /// Both transports enter this method through [`UpdateBundleSource`]. Manifest
+    /// trust is verified before declared artifacts are fetched, and the normal
+    /// staging path remains the only authority for dependency, capacity, digest,
+    /// journal and cleanup effects.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_from_source<S: UpdateBundleSource + ?Sized>(
+        &mut self,
+        policy: TrustPolicy<'_>,
+        target: UpdateTarget,
+        source: &S,
+        grant: LocalInstallGrant,
+        now: u64,
+        installed_dependencies: &[String],
+        staging_root: &Path,
+        metadata_headroom: u64,
+    ) -> Result<PreparedUpdate, CoordinatorError> {
+        let mut next = self.machine;
+        next.apply(UpdateEvent::Discover)
+            .map_err(CoordinatorError::Transition)?;
+        let spool_name = format!(".source-{}", uuid::Uuid::new_v4());
+        let spool = staging_root
+            .parent()
+            .ok_or(CoordinatorError::Source(SourceError::InvalidSpoolPath(
+                staging_root.to_path_buf(),
+            )))?
+            .join(spool_name);
+        let materialized: MaterializedUpdate = materialize_verified(source, policy, target, &spool)
+            .map_err(CoordinatorError::Source)?;
+        next.apply(UpdateEvent::Verify)
+            .map_err(CoordinatorError::Transition)?;
+        next.apply(UpdateEvent::Prepare)
+            .map_err(CoordinatorError::Transition)?;
+        let sources = materialized.artifact_sources();
+        let update = prepare_update(
+            materialized.manifest.clone(),
+            &materialized.manifest_bytes,
+            grant,
+            now,
+            installed_dependencies,
+            &sources,
             staging_root,
             metadata_headroom,
         )
@@ -1300,10 +1364,16 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use ciborium::value::Value;
+    use ed25519_dalek::{Signer, SigningKey};
     use jasper_lifecycle_model::boot::SlotState;
-    use jasper_lifecycle_model::manifest::VerifiedManifest;
-    use jasper_lifecycle_model::manifest_cbor::Channel;
+    use jasper_lifecycle_model::manifest::{
+        VerifiedManifest, MANIFEST_SCHEMA_VERSION, SIGNATURE_DOMAIN,
+    };
+    use jasper_lifecycle_model::manifest_cbor::{Channel, MAX_MANIFEST_CBOR_BYTES};
     use sha2::{Digest, Sha256};
+
+    use crate::source::{DirectoryBundle, UpdateBundleSource};
 
     use super::*;
 
@@ -1365,6 +1435,237 @@ mod tests {
             artifact_bytes: artifacts.iter().map(|artifact| artifact.size).sum(),
             artifacts,
         }
+    }
+
+    fn signed_cbor_bundle(artifact_bytes: &[u8]) -> (Vec<u8>, [u8; 64], [u8; 32]) {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let signer = key.verifying_key().to_bytes();
+        let profile = [0x42; 32];
+        let artifact_digest: [u8; 32] = Sha256::digest(artifact_bytes).into();
+        let byte_array = |bytes: &[u8]| {
+            Value::Array(
+                bytes
+                    .iter()
+                    .map(|byte| Value::Integer(u64::from(*byte).into()))
+                    .collect(),
+            )
+        };
+        let artifact = Value::Map(vec![
+            (Value::Text("kind".into()), Value::Text("kernel".into())),
+            (Value::Text("name".into()), Value::Text("kernel".into())),
+            (
+                Value::Text("size".into()),
+                Value::Integer((artifact_bytes.len() as u64).into()),
+            ),
+            (Value::Text("sha256".into()), byte_array(&artifact_digest)),
+        ]);
+        let wire = Value::Map(vec![
+            (
+                Value::Text("schema_version".into()),
+                Value::Integer(u64::from(MANIFEST_SCHEMA_VERSION).into()),
+            ),
+            (Value::Text("channel".into()), Value::Text("stable".into())),
+            (
+                Value::Text("release_sequence".into()),
+                Value::Integer(9u64.into()),
+            ),
+            (
+                Value::Text("security_epoch".into()),
+                Value::Integer(4u64.into()),
+            ),
+            (
+                Value::Text("created_at".into()),
+                Value::Integer(100u64.into()),
+            ),
+            (
+                Value::Text("expires_at".into()),
+                Value::Integer(200u64.into()),
+            ),
+            (
+                Value::Text("target_abi_min".into()),
+                Value::Integer(3u16.into()),
+            ),
+            (
+                Value::Text("target_abi_max".into()),
+                Value::Integer(3u16.into()),
+            ),
+            (
+                Value::Text("data_schema_min".into()),
+                Value::Integer(1u32.into()),
+            ),
+            (
+                Value::Text("data_schema_max".into()),
+                Value::Integer(2u32.into()),
+            ),
+            (
+                Value::Text("migration_reversible".into()),
+                Value::Bool(true),
+            ),
+            (Value::Text("rollback_allowed".into()), Value::Bool(true)),
+            (Value::Text("target_profile".into()), byte_array(&profile)),
+            (Value::Text("signer".into()), byte_array(&signer)),
+            (Value::Text("dependencies".into()), Value::Array(Vec::new())),
+            (
+                Value::Text("artifacts".into()),
+                Value::Array(vec![artifact]),
+            ),
+        ]);
+        let mut manifest_bytes = Vec::new();
+        ciborium::ser::into_writer(&wire, &mut manifest_bytes).unwrap();
+        assert!(manifest_bytes.len() <= MAX_MANIFEST_CBOR_BYTES);
+        let mut message = Vec::new();
+        message.extend_from_slice(SIGNATURE_DOMAIN);
+        message.extend_from_slice(&MANIFEST_SCHEMA_VERSION.to_le_bytes());
+        message.extend_from_slice(&9u64.to_le_bytes());
+        message.extend_from_slice(&4u64.to_le_bytes());
+        message.extend_from_slice(&profile);
+        message.extend_from_slice(&(manifest_bytes.len() as u64).to_le_bytes());
+        message.extend_from_slice(&manifest_bytes);
+        let signature = key.sign(&message).to_bytes();
+        (manifest_bytes, signature, signer)
+    }
+
+    struct MemoryBundle {
+        manifest: Vec<u8>,
+        signature: [u8; 64],
+        artifact: Vec<u8>,
+    }
+
+    impl UpdateBundleSource for MemoryBundle {
+        fn read_manifest(&self) -> Result<Vec<u8>, crate::source::SourceError> {
+            Ok(self.manifest.clone())
+        }
+
+        fn read_signature(&self) -> Result<[u8; 64], crate::source::SourceError> {
+            Ok(self.signature)
+        }
+
+        fn copy_artifact(
+            &self,
+            name: &str,
+            destination: &Path,
+            max_bytes: u64,
+        ) -> Result<(), crate::source::SourceError> {
+            if name != "kernel" || self.artifact.len() as u64 != max_bytes {
+                return Err(crate::source::SourceError::InvalidArtifactName);
+            }
+            fs::write(destination, &self.artifact).map_err(|source| {
+                crate::source::SourceError::Io {
+                    operation: "write in-memory artifact",
+                    path: destination.to_path_buf(),
+                    source,
+                }
+            })
+        }
+    }
+
+    #[test]
+    fn online_and_offline_sources_share_authentication_and_staging() {
+        let temp = TestDir::new("source-parity");
+        let artifact_bytes = b"identical-kernel-bytes";
+        let (manifest_bytes, signature, signer) = signed_cbor_bundle(artifact_bytes);
+        let profile = [0x42; 32];
+
+        let offline_root = temp.path().join("offline-bundle");
+        fs::create_dir_all(offline_root.join(crate::source::SOURCE_ARTIFACT_DIR)).unwrap();
+        fs::write(
+            offline_root.join(crate::source::SOURCE_MANIFEST_FILE),
+            &manifest_bytes,
+        )
+        .unwrap();
+        fs::write(
+            offline_root.join(crate::source::SOURCE_SIGNATURE_FILE),
+            signature,
+        )
+        .unwrap();
+        fs::write(
+            offline_root
+                .join(crate::source::SOURCE_ARTIFACT_DIR)
+                .join("kernel"),
+            artifact_bytes,
+        )
+        .unwrap();
+
+        let trusted = [signer];
+        let revoked = [[0u8; 32]];
+        let policy = TrustPolicy {
+            trusted_keys: &trusted,
+            revoked_keys: &revoked,
+            minimum_security_epoch: 3,
+        };
+        let target = UpdateTarget {
+            rollback_floor: 8,
+            profile,
+        };
+        let manifest_sha256: [u8; 32] = Sha256::digest(&manifest_bytes).into();
+        let grant = LocalInstallGrant {
+            locally_authenticated: true,
+            purpose: 1,
+            manifest_sha256,
+            profile,
+            expires_at: 200,
+        };
+
+        let offline_staging = temp.path().join("offline-staging");
+        let mut offline = UpdateCoordinator::idle();
+        let offline_update = offline
+            .prepare_from_source(
+                policy,
+                target,
+                &DirectoryBundle::new(&offline_root),
+                grant,
+                150,
+                &[],
+                &offline_staging,
+                4096,
+            )
+            .unwrap();
+
+        let memory = MemoryBundle {
+            manifest: manifest_bytes.clone(),
+            signature,
+            artifact: artifact_bytes.to_vec(),
+        };
+        let online_staging = temp.path().join("online-staging");
+        let mut online = UpdateCoordinator::idle();
+        let online_update = online
+            .prepare_from_source(
+                policy,
+                target,
+                &memory,
+                grant,
+                150,
+                &[],
+                &online_staging,
+                4096,
+            )
+            .unwrap();
+
+        assert_eq!(offline.stage(), UpdateStage::Prepared);
+        assert_eq!(online.stage(), UpdateStage::Prepared);
+        assert_eq!(
+            offline_update.manifest, online_update.manifest,
+            "offline and online transports must authenticate the same manifest"
+        );
+        assert_eq!(
+            offline_update.manifest.manifest.manifest_sha256,
+            manifest_sha256
+        );
+        assert_eq!(
+            fs::read(offline_staging.join(ARTIFACT_DIR).join("kernel")).unwrap(),
+            artifact_bytes
+        );
+        assert_eq!(
+            fs::read(online_staging.join(ARTIFACT_DIR).join("kernel")).unwrap(),
+            artifact_bytes
+        );
+        assert!(
+            fs::read_dir(temp.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().starts_with(".source-")),
+            "source spools must be removed after staging completes"
+        );
     }
 
     #[test]
