@@ -23,7 +23,9 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use jasper_lifecycle_model::boot::{BootControlError, Candidate, ControlBlock, Slot};
+use jasper_lifecycle_model::boot::{
+    BootControlError, BootDecision, BootReason, Candidate, ControlBlock, Slot, SlotState,
+};
 use jasper_lifecycle_model::manifest::{authorize_install, LocalInstallGrant, ManifestError};
 use jasper_lifecycle_model::manifest_cbor::{
     ArtifactKind, VerifiedArtifact, VerifiedCborManifest, MAX_MANIFEST_CBOR_BYTES,
@@ -141,6 +143,8 @@ pub enum CoordinatorError {
     Control(BootControlError),
     /// The dual-copy boot-control commit failed.
     ControlStore(ControlStoreError),
+    /// No candidate trial is available for the current transaction.
+    TrialUnavailable,
     /// Recovered transaction and coordinator phase disagree.
     InconsistentStage {
         /// Required coordinator phase.
@@ -158,6 +162,7 @@ impl fmt::Display for CoordinatorError {
             Self::Transaction(error) => write!(formatter, "prepared transaction failed: {error:?}"),
             Self::Control(error) => write!(formatter, "boot-control admission failed: {error:?}"),
             Self::ControlStore(error) => write!(formatter, "boot-control commit failed: {error}"),
+            Self::TrialUnavailable => write!(formatter, "candidate trial is unavailable"),
             Self::InconsistentStage { expected, actual } => write!(
                 formatter,
                 "coordinator stage mismatch: expected {expected:?}, got {actual:?}"
@@ -267,45 +272,48 @@ impl UpdateCoordinator {
                 TransactionError::InvalidDigest,
             ));
         }
+        let current = control.current();
+        let candidate = current
+            .candidate()
+            .filter(|(_, candidate)| candidate.digest() == manifest_sha256);
+        let confirmed = [Slot::A, Slot::B].into_iter().any(|slot| {
+            let record = current.slot(slot);
+            record.digest() == manifest_sha256 && record.state() == SlotState::Confirmed
+        });
+        let failed = [Slot::A, Slot::B].into_iter().any(|slot| {
+            let record = current.slot(slot);
+            record.digest() == manifest_sha256 && record.state() == SlotState::Failed
+        });
+        let record_stage = record.stage();
+        let mut target = record_stage;
+        if failed && update_stage_rank(record_stage) < update_stage_rank(UpdateStage::Rollback) {
+            target = UpdateStage::Rollback;
+        } else if confirmed
+            && update_stage_rank(record_stage) < update_stage_rank(UpdateStage::Confirmed)
+        {
+            target = UpdateStage::Confirmed;
+        } else if let Some((_, candidate)) = candidate {
+            if candidate.attempts() > 0
+                && update_stage_rank(record_stage) < update_stage_rank(UpdateStage::Trial)
+            {
+                target = UpdateStage::Trial;
+            } else if update_stage_rank(record_stage) < update_stage_rank(UpdateStage::Committed) {
+                target = UpdateStage::Committed;
+            }
+        }
         let mut machine = UpdateMachine::idle();
-        machine
-            .apply(UpdateEvent::Discover)
-            .map_err(CoordinatorError::Transition)?;
-        machine
-            .apply(UpdateEvent::Verify)
-            .map_err(CoordinatorError::Transition)?;
-        machine
-            .apply(UpdateEvent::Prepare)
-            .map_err(CoordinatorError::Transition)?;
-        match record.stage() {
-            UpdateStage::Prepared => {
-                if control
-                    .current()
-                    .candidate()
-                    .is_some_and(|(_, candidate)| candidate.digest() == manifest_sha256)
-                {
-                    machine
-                        .apply(UpdateEvent::Commit)
-                        .map_err(CoordinatorError::Transition)?;
-                    let mut committed = record;
-                    committed
-                        .apply(UpdateEvent::Commit)
-                        .map_err(CoordinatorError::Transaction)?;
-                    persist_transaction_record(staging_root, committed)
-                        .map_err(CoordinatorError::Staging)?;
-                }
+        advance_update_machine(&mut machine, record_stage).map_err(CoordinatorError::Transition)?;
+        let upgrade =
+            advance_update_machine(&mut machine, target).map_err(CoordinatorError::Transition)?;
+        if !upgrade.is_empty() {
+            let mut repaired = record;
+            for event in upgrade {
+                repaired
+                    .apply(event)
+                    .map_err(CoordinatorError::Transaction)?;
             }
-            UpdateStage::Committed => {
-                machine
-                    .apply(UpdateEvent::Commit)
-                    .map_err(CoordinatorError::Transition)?;
-            }
-            actual => {
-                return Err(CoordinatorError::InconsistentStage {
-                    expected: UpdateStage::Prepared,
-                    actual,
-                })
-            }
+            persist_transaction_record(staging_root, repaired)
+                .map_err(CoordinatorError::Staging)?;
         }
         Ok(Self { machine })
     }
@@ -367,6 +375,77 @@ impl UpdateCoordinator {
             .map_err(CoordinatorError::Staging)?;
         self.machine = machine;
         Ok(next)
+    }
+
+    /// Persist the next candidate boot attempt and enter `Trial`.
+    pub fn begin_trial(
+        &mut self,
+        control: &mut FileControlStore,
+        staging_root: &Path,
+    ) -> Result<BootDecision, CoordinatorError> {
+        if self.stage() != UpdateStage::Committed {
+            return Err(CoordinatorError::InconsistentStage {
+                expected: UpdateStage::Committed,
+                actual: self.stage(),
+            });
+        }
+        let mut next = control.current();
+        let decision = next.prepare_boot().map_err(CoordinatorError::Control)?;
+        if decision.reason != BootReason::CandidateTrial {
+            return Err(CoordinatorError::TrialUnavailable);
+        }
+        let mut machine = self.machine;
+        machine
+            .apply(UpdateEvent::BeginTrial)
+            .map_err(CoordinatorError::Transition)?;
+        control
+            .commit_next(next)
+            .map_err(CoordinatorError::ControlStore)?;
+        let mut record =
+            load_transaction_record(staging_root).map_err(CoordinatorError::Staging)?;
+        record
+            .apply(UpdateEvent::BeginTrial)
+            .map_err(CoordinatorError::Transaction)?;
+        persist_transaction_record(staging_root, record).map_err(CoordinatorError::Staging)?;
+        self.machine = machine;
+        Ok(decision)
+    }
+
+    /// Persist candidate health and advance to `Confirmed` or `Rollback`.
+    pub fn report_candidate_health(
+        &mut self,
+        control: &mut FileControlStore,
+        staging_root: &Path,
+        healthy: bool,
+    ) -> Result<(), CoordinatorError> {
+        if self.stage() != UpdateStage::Trial {
+            return Err(CoordinatorError::InconsistentStage {
+                expected: UpdateStage::Trial,
+                actual: self.stage(),
+            });
+        }
+        let Some((slot, _)) = control.current().candidate() else {
+            return Err(CoordinatorError::TrialUnavailable);
+        };
+        let mut next = control.current();
+        next.report_health(slot, healthy)
+            .map_err(CoordinatorError::Control)?;
+        let event = if healthy {
+            UpdateEvent::ConfirmHealth
+        } else {
+            UpdateEvent::FailHealth
+        };
+        let mut machine = self.machine;
+        machine.apply(event).map_err(CoordinatorError::Transition)?;
+        control
+            .commit_next(next)
+            .map_err(CoordinatorError::ControlStore)?;
+        let mut record =
+            load_transaction_record(staging_root).map_err(CoordinatorError::Staging)?;
+        record.apply(event).map_err(CoordinatorError::Transaction)?;
+        persist_transaction_record(staging_root, record).map_err(CoordinatorError::Staging)?;
+        self.machine = machine;
+        Ok(())
     }
 }
 
@@ -1016,6 +1095,57 @@ fn now_nanos() -> u128 {
         .map_or(0, |duration| duration.as_nanos())
 }
 
+fn update_stage_rank(stage: UpdateStage) -> u8 {
+    match stage {
+        UpdateStage::Idle => 0,
+        UpdateStage::Discovered => 1,
+        UpdateStage::Verified => 2,
+        UpdateStage::Prepared => 3,
+        UpdateStage::Committed => 4,
+        UpdateStage::Trial => 5,
+        UpdateStage::Confirmed => 6,
+        UpdateStage::Complete => 7,
+        UpdateStage::Aborted => 8,
+        UpdateStage::Rollback => 9,
+        UpdateStage::RolledBack => 10,
+    }
+}
+
+fn advance_update_machine(
+    machine: &mut UpdateMachine,
+    target: UpdateStage,
+) -> Result<Vec<UpdateEvent>, TransitionError> {
+    let mut events = Vec::new();
+    while machine.stage() != target {
+        let event = match machine.stage() {
+            UpdateStage::Idle if target == UpdateStage::Aborted => UpdateEvent::Cancel,
+            UpdateStage::Idle => UpdateEvent::Discover,
+            UpdateStage::Discovered if target == UpdateStage::Aborted => UpdateEvent::Cancel,
+            UpdateStage::Discovered => UpdateEvent::Verify,
+            UpdateStage::Verified if target == UpdateStage::Aborted => UpdateEvent::Cancel,
+            UpdateStage::Verified => UpdateEvent::Prepare,
+            UpdateStage::Prepared if target == UpdateStage::Aborted => UpdateEvent::Cancel,
+            UpdateStage::Prepared => UpdateEvent::Commit,
+            UpdateStage::Committed => UpdateEvent::BeginTrial,
+            UpdateStage::Trial if target == UpdateStage::Rollback => UpdateEvent::FailHealth,
+            UpdateStage::Trial => UpdateEvent::ConfirmHealth,
+            UpdateStage::Confirmed => UpdateEvent::Finalize,
+            UpdateStage::Rollback => UpdateEvent::FinishRollback,
+            current => {
+                return Err(TransitionError::InvalidPhase {
+                    current,
+                    event: UpdateEvent::Commit,
+                })
+            }
+        };
+        match machine.apply(event) {
+            Ok(_) => events.push(event),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(events)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1408,7 +1538,7 @@ mod tests {
 
         // Simulate a crash after control commit but before journal replacement.
         persist_transaction_record(&staging_root, prepared.record).unwrap();
-        let repaired = UpdateCoordinator::recover_with_control(
+        let mut repaired = UpdateCoordinator::recover_with_control(
             &staging_root,
             prepared.manifest.manifest.manifest_sha256,
             &control,
@@ -1419,6 +1549,30 @@ mod tests {
             load_transaction_record(&staging_root).unwrap().stage(),
             UpdateStage::Committed
         );
+
+        let decision = repaired.begin_trial(&mut control, &staging_root).unwrap();
+        assert_eq!(decision.reason, BootReason::CandidateTrial);
+        assert_eq!(decision.attempt, 1);
+        let mut coordinator = UpdateCoordinator::recover_with_control(
+            &staging_root,
+            prepared.manifest.manifest.manifest_sha256,
+            &control,
+        )
+        .unwrap();
+        coordinator
+            .report_candidate_health(&mut control, &staging_root, true)
+            .unwrap();
+        assert_eq!(coordinator.stage(), UpdateStage::Confirmed);
+        assert_eq!(control.current().active_slot(), Slot::B);
+
+        persist_transaction_record(&staging_root, prepared.record).unwrap();
+        let fully_repaired = UpdateCoordinator::recover_with_control(
+            &staging_root,
+            prepared.manifest.manifest.manifest_sha256,
+            &control,
+        )
+        .unwrap();
+        assert_eq!(fully_repaired.stage(), UpdateStage::Confirmed);
     }
 
     #[test]
