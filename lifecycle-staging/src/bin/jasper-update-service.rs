@@ -64,8 +64,31 @@ fn run(args: Vec<String>) -> Result<(), String> {
             );
             Ok(())
         }
+        [command, control_root, staging_root, digest, archive_root] if command == "cleanup" => {
+            let digest = parse_digest(digest)?;
+            let mut service =
+                UpdateService::open(control_root).map_err(|error| error.to_string())?;
+            let status = service
+                .recover(Path::new(staging_root), digest)
+                .map_err(|error| error.to_string())?;
+            let stage = status
+                .stage
+                .ok_or_else(|| "recovery did not publish a stage".to_string())?;
+            let archive = service
+                .archive_and_cleanup(status.generation, Path::new(archive_root))
+                .map_err(|error| error.to_string())?;
+            println!(
+                "stage={stage:?} generation={} archive={} manifest={} transaction={}",
+                status.generation,
+                archive.root.display(),
+                encode_digest(archive.manifest_sha256),
+                archive.record.generation()
+            );
+            Ok(())
+        }
         _ => Err("usage: jasper-update-service status <control-root> | \
-             recover <control-root> <staging-root> <manifest-sha256-hex>"
+             recover <control-root> <staging-root> <manifest-sha256-hex> | \
+             cleanup <control-root> <staging-root> <manifest-sha256-hex> <archive-root>"
             .into()),
     }
 }
