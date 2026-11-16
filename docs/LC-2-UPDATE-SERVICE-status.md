@@ -22,11 +22,16 @@
 - `archive_and_cleanup`：只接受 `Complete`/`RolledBack`，先完成逐字节归档，
   再清理 staging；
 - `status`：返回 service generation、coordinator 阶段、manifest digest、
-  staging root、活动槽、候选槽和 control transaction id。
+  staging root、活动槽、候选槽、control transaction id 和
+  `recovery_required`。
 
 每次 prepare/recovery 都发布一个新的单调 generation。所有后续变更新命令必须
 携带该 generation；旧 generation、阶段错位、重复活动事务和不存在的活动事务
 均失败关闭，且不改变原有 coordinator 或控制记录。
+
+如果 commit、trial、健康、finalize 或 rollback 在 control/journal 边界附近失败，
+服务把当前事务标记为 `recovery_required`。此时普通命令继续拒绝；只有使用同一
+staging root 和 manifest digest 的 recovery 能重建权威阶段，错配目标明确拒绝。
 
 `UpdateService` 没有 URL、账号、Profile、逻辑目录或本地路径授权能力。在线/离线
 来源仍只是传输方式，设备上的签名信任和 `LocalInstallGrant` 仍是准入事实源。

@@ -1309,6 +1309,7 @@ struct ServiceUpdate {
     prepared: Option<PreparedUpdate>,
     staging_root: PathBuf,
     manifest_sha256: [u8; 32],
+    recovery_required: bool,
 }
 
 /// Stable service-level status for one update operation.
@@ -1328,6 +1329,8 @@ pub struct ServiceStatus {
     pub candidate_slot: Option<Slot>,
     /// Current control transaction id.
     pub transaction_id: u64,
+    /// A mutating operation may have crossed a durable control/journal boundary.
+    pub recovery_required: bool,
 }
 
 /// Service lifecycle error.
@@ -1353,6 +1356,8 @@ pub enum ServiceError {
     },
     /// The prepared transaction value is no longer available.
     PreparedUnavailable,
+    /// Recovery arguments do not match the active faulted transaction.
+    RecoveryTargetMismatch,
     /// Underlying coordinator operation failed.
     Coordinator(CoordinatorError),
     /// Terminal transaction archiving failed.
@@ -1371,6 +1376,9 @@ impl fmt::Display for ServiceError {
                 write!(formatter, "wrong update stage: expected {expected:?}, got {actual:?}")
             }
             Self::PreparedUnavailable => write!(formatter, "prepared transaction is unavailable"),
+            Self::RecoveryTargetMismatch => {
+                write!(formatter, "recovery target does not match the active transaction")
+            }
             Self::Coordinator(error) => write!(formatter, "{error}"),
             Self::Staging(error) => write!(formatter, "{error}"),
         }
@@ -1438,6 +1446,7 @@ impl UpdateService {
                 active_slot: current.active_slot(),
                 candidate_slot,
                 transaction_id: current.transaction_id(),
+                recovery_required: active.recovery_required,
             },
             None => ServiceStatus {
                 generation: self.next_generation.saturating_sub(1),
@@ -1447,6 +1456,7 @@ impl UpdateService {
                 active_slot: current.active_slot(),
                 candidate_slot,
                 transaction_id: current.transaction_id(),
+                recovery_required: false,
             },
         }
     }
@@ -1532,9 +1542,14 @@ impl UpdateService {
             .prepared
             .as_ref()
             .ok_or(ServiceError::PreparedUnavailable)?;
-        active
-            .coordinator
-            .commit_prepared(prepared, &mut self.control, slot, transaction_id)?;
+        if let Err(error) =
+            active
+                .coordinator
+                .commit_prepared(prepared, &mut self.control, slot, transaction_id)
+        {
+            active.recovery_required = true;
+            return Err(ServiceError::Coordinator(error));
+        }
         active.prepared = None;
         Ok(self.status())
     }
@@ -1543,10 +1558,16 @@ impl UpdateService {
     pub fn begin_trial(&mut self, generation: u64) -> Result<BootDecision, ServiceError> {
         let active = Self::require_generation(&mut self.active, generation)?;
         Self::require_stage(active, UpdateStage::Committed)?;
-        active
+        let decision = active
             .coordinator
-            .begin_trial(&mut self.control, &active.staging_root)
-            .map_err(ServiceError::Coordinator)
+            .begin_trial(&mut self.control, &active.staging_root);
+        match decision {
+            Ok(decision) => Ok(decision),
+            Err(error) => {
+                active.recovery_required = true;
+                Err(ServiceError::Coordinator(error))
+            }
+        }
     }
 
     /// Record candidate health and advance to Confirmed or Rollback.
@@ -1557,9 +1578,13 @@ impl UpdateService {
     ) -> Result<ServiceStatus, ServiceError> {
         let active = Self::require_generation(&mut self.active, generation)?;
         Self::require_stage(active, UpdateStage::Trial)?;
-        active
+        if let Err(error) = active
             .coordinator
-            .report_candidate_health(&mut self.control, &active.staging_root, healthy)?;
+            .report_candidate_health(&mut self.control, &active.staging_root, healthy)
+        {
+            active.recovery_required = true;
+            return Err(ServiceError::Coordinator(error));
+        }
         Ok(self.status())
     }
 
@@ -1567,9 +1592,10 @@ impl UpdateService {
     pub fn finalize_confirmed(&mut self, generation: u64) -> Result<ServiceStatus, ServiceError> {
         let active = Self::require_generation(&mut self.active, generation)?;
         Self::require_stage(active, UpdateStage::Confirmed)?;
-        active
-            .coordinator
-            .finalize_confirmed(&active.staging_root)?;
+        if let Err(error) = active.coordinator.finalize_confirmed(&active.staging_root) {
+            active.recovery_required = true;
+            return Err(ServiceError::Coordinator(error));
+        }
         Ok(self.status())
     }
 
@@ -1577,10 +1603,16 @@ impl UpdateService {
     pub fn finish_rollback(&mut self, generation: u64) -> Result<Slot, ServiceError> {
         let active = Self::require_generation(&mut self.active, generation)?;
         Self::require_stage(active, UpdateStage::Rollback)?;
-        active
+        match active
             .coordinator
             .finish_rollback(&mut self.control, &active.staging_root)
-            .map_err(ServiceError::Coordinator)
+        {
+            Ok(slot) => Ok(slot),
+            Err(error) => {
+                active.recovery_required = true;
+                Err(ServiceError::Coordinator(error))
+            }
+        }
     }
 
     /// Cancel a prepared update before commit.
@@ -1600,8 +1632,15 @@ impl UpdateService {
         staging_root: &Path,
         manifest_sha256: [u8; 32],
     ) -> Result<ServiceStatus, ServiceError> {
-        self.require_idle()?;
         let generation = self.peek_generation()?;
+        if let Some(active) = self.active.as_ref() {
+            if !active.recovery_required {
+                return Err(ServiceError::Busy);
+            }
+            if active.staging_root != staging_root || active.manifest_sha256 != manifest_sha256 {
+                return Err(ServiceError::RecoveryTargetMismatch);
+            }
+        }
         let coordinator =
             UpdateCoordinator::recover_with_control(staging_root, manifest_sha256, &self.control)?;
         self.publish_recovered(generation, coordinator, staging_root, manifest_sha256)?;
@@ -1687,6 +1726,7 @@ impl UpdateService {
             prepared: Some(prepared),
             staging_root: staging_root.to_path_buf(),
             manifest_sha256,
+            recovery_required: false,
         });
         self.next_generation = generation + 1;
         Ok(())
@@ -1705,6 +1745,7 @@ impl UpdateService {
             prepared: None,
             staging_root: staging_root.to_path_buf(),
             manifest_sha256,
+            recovery_required: false,
         });
         self.next_generation = generation + 1;
         Ok(())
@@ -2723,6 +2764,11 @@ mod tests {
 
         // Simulate a crash after control commit but before the transaction journal update.
         persist_transaction_record(&staging_root, prepared_record).unwrap();
+        service.active.as_mut().unwrap().recovery_required = true;
+        assert!(matches!(
+            service.recover(&staging_root, [0x55; 32]),
+            Err(ServiceError::RecoveryTargetMismatch)
+        ));
         drop(service);
 
         let mut recovered = UpdateService::open(&control_root).unwrap();
