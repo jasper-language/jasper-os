@@ -20,7 +20,7 @@
 - `cancel_prepared`：只在 durable commit 前允许；
 - `recover`：同时读取交易 journal 与双副本 boot control，修复崩溃窗口；
 - `archive_and_cleanup`：只接受 `Complete`/`RolledBack`，先完成逐字节归档，
-  再清理 staging；
+  再清理 staging；如果归档已发布而清理中断，可用同一 archive root 幂等续作；
 - `status`：返回 service generation、coordinator 阶段、manifest digest、
   staging root、活动槽、候选槽、control transaction id 和
   `recovery_required`。

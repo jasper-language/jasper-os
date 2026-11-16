@@ -975,6 +975,28 @@ pub fn archive_completed_transaction(
     })
 }
 
+/// Reopen an already-published terminal transaction archive.
+pub fn load_archived_transaction(
+    archive_root: &Path,
+) -> Result<ArchivedTransaction, StagingError> {
+    let record = load_transaction_record(archive_root)?;
+    if !matches!(
+        record.stage(),
+        UpdateStage::Complete | UpdateStage::RolledBack
+    ) {
+        return Err(StagingError::NotTerminal(record.stage()));
+    }
+    let manifest = read_file(&archive_root.join(MANIFEST_FILE))?;
+    if Sha256::digest(&manifest).as_slice() != record.manifest_sha256() {
+        return Err(StagingError::ArchiveMismatch);
+    }
+    Ok(ArchivedTransaction {
+        root: archive_root.to_path_buf(),
+        manifest_sha256: record.manifest_sha256(),
+        record,
+    })
+}
+
 /// Remove staging only after the terminal journal is archived byte-for-byte.
 pub fn cleanup_staged_transaction(
     staging_root: &Path,
@@ -1663,9 +1685,30 @@ impl UpdateService {
                 })
             }
         }
-        let archive =
-            archive_completed_transaction(&active.staging_root, archive_root)
-                .map_err(ServiceError::Staging)?;
+        let archive = match fs::symlink_metadata(archive_root) {
+            Ok(metadata) if metadata.is_dir() => {
+                load_archived_transaction(archive_root).map_err(ServiceError::Staging)?
+            }
+            Ok(_) => {
+                return Err(ServiceError::Staging(StagingError::AlreadyExists(
+                    archive_root.to_path_buf(),
+                )))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                archive_completed_transaction(&active.staging_root, archive_root)
+                    .map_err(ServiceError::Staging)?
+            }
+            Err(source) => {
+                return Err(ServiceError::Staging(io_error(
+                    "inspect transaction archive",
+                    archive_root,
+                    source,
+                )))
+            }
+        };
+        if archive.manifest_sha256 != active.manifest_sha256 {
+            return Err(ServiceError::Staging(StagingError::ArchiveMismatch));
+        }
         cleanup_staged_transaction(&active.staging_root, &archive)
             .map_err(ServiceError::Staging)?;
         self.active = None;
@@ -2746,6 +2789,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(archive.record.stage(), UpdateStage::RolledBack);
+    }
+
+    #[test]
+    fn service_cleanup_reopens_an_archive_published_before_cleanup_retry() {
+        let temp = TestDir::new("service-archive-retry");
+        let (mut service, generation, staging_root) =
+            prepared_service(&temp, "archive-retry");
+        service.commit(generation, Slot::B, 2).unwrap();
+        service.begin_trial(generation).unwrap();
+        service.report_health(generation, true).unwrap();
+        service.finalize_confirmed(generation).unwrap();
+
+        let archive_root = temp.path().join("archive-retry-audit");
+        let published =
+            archive_completed_transaction(&staging_root, &archive_root).unwrap();
+        assert_eq!(published.record.stage(), UpdateStage::Complete);
+
+        let reopened = service
+            .archive_and_cleanup(generation, &archive_root)
+            .unwrap();
+        assert_eq!(reopened, published);
+        assert!(!staging_root.exists());
+        assert_eq!(service.status().stage, None);
     }
 
     #[test]
