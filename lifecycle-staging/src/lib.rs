@@ -1544,22 +1544,22 @@ mod tests {
         let bytes = b"kernel-image";
         let source_path = temp.path().join("kernel.source");
         fs::write(&source_path, bytes).unwrap();
-        let manifest = manifest(
+        let verified_manifest = manifest(
             manifest_bytes,
             vec![artifact(ArtifactKind::Kernel, "kernel", bytes)],
         );
         let grant = LocalInstallGrant {
             locally_authenticated: true,
             purpose: 1,
-            manifest_sha256: manifest.manifest.manifest_sha256,
-            profile: manifest.manifest.target_profile,
+            manifest_sha256: verified_manifest.manifest.manifest_sha256,
+            profile: verified_manifest.manifest.target_profile,
             expires_at: 10,
         };
         let staging_root = temp.path().join("commit-staging");
         let mut coordinator = UpdateCoordinator::idle();
         let prepared = coordinator
             .prepare(
-                manifest,
+                verified_manifest,
                 manifest_bytes,
                 grant,
                 9,
